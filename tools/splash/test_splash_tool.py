@@ -72,7 +72,8 @@ class Codec(unittest.TestCase):
         rgb = bytes((i * 37 + 11) & 255 for i in range(w * h * 3))
         with tempfile.TemporaryDirectory() as d:
             p = os.path.join(d, "f.png")
-            open(p, "wb").write(filtered_png(w, h, rgb))
+            with open(p, "wb") as f:
+                f.write(filtered_png(w, h, rgb))
             _, _, rgba = st.read_png(p)
             self.assertEqual(bytes(rgba[0::4] + rgba[1::4]), bytes(rgb[0::3] + rgb[1::3]))
             self.assertEqual(bytes(rgba[2::4]), bytes(rgb[2::3]))
@@ -85,6 +86,106 @@ class Codec(unittest.TestCase):
             st.main(["decode", "--input", binf, "--output", back])
             self.assertEqual(os.path.getsize(binf), 4096000)
             self.assertEqual(st.read_png(back)[2], px)
+
+    def test_rotate_bin_180(self):
+        px = pattern()
+        data = st.encode_bin(W, H, px)
+        rot = st.rotate_bin_180(data)
+        self.assertEqual(len(rot), 4096000)
+        # Double rotation identity
+        self.assertEqual(st.rotate_bin_180(rot), data)
+        # Check geometric coordinates in 800x1280 portrait buffer:
+        # pixel (x, y) should move to (799 - x, 1279 - y)
+        pw, ph = 800, 1280
+        for px_x, px_y in ((0, 0), (799, 1279), (100, 200), (799, 0), (0, 1279)):
+            src_o = (px_y * pw + px_x) * 4
+            dst_o = ((ph - 1 - px_y) * pw + (pw - 1 - px_x)) * 4
+            self.assertEqual(rot[dst_o:dst_o + 4], data[src_o:src_o + 4])
+        # Equivalence: rotate 180 in landscape RGBA before encode_bin
+        # matches rotate_bin_180 on the encoded bin
+        px_rot180 = bytearray(W * H * 4)
+        for y in range(H):
+            for x in range(W):
+                src_o = (y * W + x) * 4
+                dst_o = ((H - 1 - y) * W + (W - 1 - x)) * 4
+                px_rot180[dst_o:dst_o + 4] = px[src_o:src_o + 4]
+        self.assertEqual(st.encode_bin(W, H, px_rot180), rot)
+        # Bad size
+        with self.assertRaises(ValueError):
+            st.rotate_bin_180(b"\0" * 100)
+
+    def test_cli_rot180_and_prime4_hardware_parity(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, "splash.png")
+            bin_std = os.path.join(d, "splash.bin")
+            bin_rot = os.path.join(d, "splash-rot180.bin")
+            bin_rot2 = os.path.join(d, "splash-rot2.bin")
+            png_dec_std = os.path.join(d, "dec_std.png")
+            png_dec_rot = os.path.join(d, "dec_rot.png")
+
+            px = pattern()
+            st.write_png(src, W, H, px)
+
+            # Test render with --bin and --bin-rot180
+            st.main(["render", "--preset", "enginex", "--stock", src, "--version", "5.3.0.4",
+                     "--png", src, "--bin", bin_std, "--bin-rot180", bin_rot])
+            self.assertEqual(os.path.getsize(bin_std), 4096000)
+            self.assertEqual(os.path.getsize(bin_rot), 4096000)
+            with open(bin_std, "rb") as f1, open(bin_rot, "rb") as f2:
+                data_std = f1.read()
+                data_rot = f2.read()
+            self.assertEqual(data_rot, st.rotate_bin_180(data_std))
+
+            # Test rotate180 command
+            st.main(["rotate180", "--input", bin_std, "--output", bin_rot2])
+            with open(bin_rot2, "rb") as f3:
+                self.assertEqual(f3.read(), data_rot)
+
+            # Test decode with --rotate 180
+            st.main(["decode", "--input", bin_rot, "--rotate", "180", "--output", png_dec_rot])
+            st.main(["decode", "--input", bin_std, "--output", png_dec_std])
+            with open(png_dec_std, "rb") as f1, open(png_dec_rot, "rb") as f2:
+                self.assertEqual(f1.read(), f2.read())
+
+            # Test encode with --rotate 180
+            enc_rot = os.path.join(d, "enc_rot.bin")
+            st.main(["encode", "--input", src, "--rotate", "180", "--output", enc_rot])
+            with open(enc_rot, "rb") as f:
+                self.assertEqual(f.read(), st.rotate_bin_180(st.encode_bin(*st.read_png(src))))
+
+            # Test render --stock-rotate 180 from both .bin and .png stocks
+            _, _, stock_rgba = fake_stock(10)
+            stock_png = os.path.join(d, "stock.png")
+            stock_rot_png = os.path.join(d, "stock_rot180.png")
+            stock_bin = os.path.join(d, "stock.bin")
+            stock_rot_bin = os.path.join(d, "stock_rot180.bin")
+            st.write_png(stock_png, W, H, stock_rgba)
+            st.main(["encode", "--input", stock_png, "--output", stock_bin])
+            st.main(["encode", "--input", stock_png, "--rotate", "180", "--output", stock_rot_bin])
+            st.main(["decode", "--input", stock_rot_bin, "--output", stock_rot_png])
+            out_std = os.path.join(d, "out_std.bin")
+            out_from_bin = os.path.join(d, "out_from_rot_bin.bin")
+            out_from_png = os.path.join(d, "out_from_rot_png.bin")
+            st.main(["render", "--preset", "enginex", "--stock", stock_bin, "--version", "5.3.0.4", "--bin", out_std])
+            st.main(["render", "--preset", "enginex", "--stock", stock_rot_bin, "--stock-rotate", "180", "--version", "5.3.0.4", "--bin", out_from_bin])
+            st.main(["render", "--preset", "enginex", "--stock", stock_rot_png, "--stock-rotate", "180", "--version", "5.3.0.4", "--bin", out_from_png])
+            with open(out_std, "rb") as f0, open(out_from_bin, "rb") as f1, open(out_from_png, "rb") as f2:
+                expected = f0.read()
+                self.assertEqual(f1.read(), expected)
+                self.assertEqual(f2.read(), expected)
+
+    def test_stock_firmware_prime4_sc5000_splash_relationship(self):
+        fw_p4 = os.path.join("/root/build/sc5000-lab/fw-5.3.0/PRIME4-5.3.0-Update.img")
+        fw_sc = os.path.join("/root/build/sc5000-lab/fw-5.3.0/SC5000-5.3.0-Update.img")
+        if not (os.path.isfile(fw_p4) and os.path.isfile(fw_sc)):
+            self.skipTest("stock firmware lab images not present")
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../az01-packer"))
+        import az01_packer
+        with open(fw_sc, "rb") as f:
+            sc_splash = az01_packer.Image(f.read()).payload("splash")
+        with open(fw_p4, "rb") as f:
+            p4_splash = az01_packer.Image(f.read()).payload("splash")
+        self.assertEqual(st.rotate_bin_180(sc_splash), p4_splash)
 
 
 class Presets(unittest.TestCase):

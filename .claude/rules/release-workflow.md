@@ -99,7 +99,7 @@ REMOTE_BUILD_HOST=Oracle-Batam-arm remote-build --name sc5000-release-<短说明
 
 - 三个镜像组各抽一个，`python3 tools/az01-packer/az01_packer.py unpack <img> --output <新目录>` 要输出 `"verified": true`。
 - 在解包出的 `rootfs.ext2` 里用 `debugfs -R "cat <路径>"` 核对：`/etc/sc5000/version.txt` 是 `<VERSION>`，本次修改的文件确实在镜像里。
-- **开机画面（必做）**：`python3 -I tools/splash/splash_tool.py decode --input <解包目录>/splash.payload --output /tmp/splash.png`，打开看右下角版本号是 `<VERSION>`（一代镜像）；二代镜像核对界面包里的 `img/SplashScreen.png` 也是 `<VERSION>`。
+- **开机画面（必做）**：`python3 -I tools/splash/splash_tool.py decode --input <解包目录>/splash.payload --output /tmp/splash.png`，打开看右下角版本号是 `<VERSION>`（一代镜像；若抽查 PRIME 4 / PRIME 2 / MIXSTREAM PRO 镜像，其 LCD 物理面板倒装 180 度，加 `--rotate 180` 查看正向预览，#226）；二代镜像核对界面包里的 `img/SplashScreen.png` 也是 `<VERSION>`。
 - 同一组的机型 sha256 应相同：
 
 | 镜像组 | 机型（前缀，板号） |

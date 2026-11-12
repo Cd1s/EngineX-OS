@@ -7,15 +7,17 @@ The firmware splash partitions hold a raw 800x1280 portrait BGRA8888 framebuffer
 (4,096,000 bytes). The 1280x800 landscape picture is rotated 90 degrees
 counter-clockwise into it: x_rot = y_src, y_rot = 1279 - x_src.
 
-  splash_tool.py render --preset enginex --stock stock-splash.png --png out.png --bin splash.bin
+  splash_tool.py render --preset enginex --stock stock-splash.png --png out.png --bin splash.bin --bin-rot180 splash-rot180.bin
   splash_tool.py render --preset enginex-recovery --stock stock-recoverysplash.png --bin recoverysplash.bin
-  splash_tool.py encode --input picture.png --output splash.bin
-  splash_tool.py decode --input splash.bin --output picture.png
+  splash_tool.py rotate180 --input splash.bin --output splash-rot180.bin
+  splash_tool.py encode --input picture.png --output splash.bin [--rotate 180]
+  splash_tool.py decode --input splash.bin --output picture.png [--rotate 180]
 
 --stock takes the official picture (PNG, or the raw splash .bin) because the
 engine icon, "engine" lettering and version digits are lifted from it rather than redrawn.
 """
 import argparse
+import array
 import math
 import os
 import struct
@@ -131,6 +133,22 @@ def decode_bin(data):
     return rgba
 
 
+def rotate_bin_180(data):
+    """Rotate an 800x1280 portrait BGRA8888 framebuffer 180 degrees (#226).
+
+    PRIME 4 (JC11), PRIME 2 (JC16) and MIXSTREAM PRO (NH08) mount their LCD
+    panels physically rotated 180 degrees relative to SC5000 / SC6000 / PRIME GO.
+    Reversing the sequence of 32-bit (BGRA) pixels rotates the 2D framebuffer 180°.
+    """
+    if len(data) != BIN_SIZE:
+        raise ValueError(f"splash bin must be {BIN_SIZE} bytes, got {len(data)}")
+    arr = array.array("I")
+    assert arr.itemsize == 4
+    arr.frombytes(data)
+    arr.reverse()
+    return arr.tobytes()
+
+
 def _read(path):
     with open(path, "rb") as f:
         return f.read()
@@ -141,10 +159,20 @@ def _write(path, data):
         f.write(data)
 
 
-def load_image(path):
+def load_image(path, rotate=0):
     if path.endswith(".bin"):
-        return W, H, decode_bin(_read(path))
-    return read_png(path)
+        data = _read(path)
+        if rotate == 180:
+            data = rotate_bin_180(data)
+        return W, H, decode_bin(data)
+    w, h, rgba = read_png(path)
+    if rotate == 180:
+        arr = array.array("I")
+        assert arr.itemsize == 4
+        arr.frombytes(rgba)
+        arr.reverse()
+        return w, h, bytearray(arr.tobytes())
+    return w, h, rgba
 
 
 # ---------------------------------------------------------------- drawing
@@ -250,30 +278,53 @@ def main(argv=None):
     r = sub.add_parser("render", help="generate a preset splash")
     r.add_argument("--preset", choices=sorted(PRESETS), required=True)
     r.add_argument("--stock", required=True, help="official splash of the same kind (PNG or raw .bin)")
+    r.add_argument("--stock-rotate", type=int, choices=[0, 180], default=0,
+                   help="rotate stock before lifting glyphs (default: 0; use 180 if stock is from PRIME 4/2 or Mixstream Pro)")
     r.add_argument("--version", required=True, help="bottom-right version text (splash only; '' hides it)")
     r.add_argument("--png", action="append", default=[], help="PNG preview path (repeatable)")
     r.add_argument("--bin", action="append", default=[], help="raw BGRA framebuffer path (repeatable)")
+    r.add_argument("--bin-rot180", action="append", default=[],
+                   help="180-deg rotated raw BGRA framebuffer path for inverted panel models (PRIME 4 / PRIME 2 / MIXSTREAM PRO)")
     for name in ("encode", "decode"):
         p = sub.add_parser(name, help=f"{name} PNG {'->' if name == 'encode' else '<-'} splash .bin")
         p.add_argument("--input", required=True)
         p.add_argument("--output", required=True)
+        p.add_argument("--rotate", type=int, choices=[0, 180], default=0,
+                       help="rotation angle (0 or 180 deg, default: 0)")
+    p_rot = sub.add_parser("rotate180", help="rotate 800x1280 raw splash .bin 180 degrees")
+    p_rot.add_argument("--input", required=True)
+    p_rot.add_argument("--output", required=True)
     args = ap.parse_args(argv)
 
     if args.cmd == "render":
-        stock = load_image(args.stock)
+        stock = load_image(args.stock, rotate=args.stock_rotate)
         if stock[:2] != (W, H):
             ap.error(f"--stock must be {W}x{H}")
         canvas = PRESETS[args.preset](stock, args.version)
         for p in args.png:
             write_png(p, W, H, canvas)
-        for p in args.bin:
-            _write(p, encode_bin(W, H, canvas))
-        if not args.png and not args.bin:
-            ap.error("give --png and/or --bin")
+        if args.bin or args.bin_rot180:
+            bin_data = encode_bin(W, H, canvas)
+            for p in args.bin:
+                _write(p, bin_data)
+            if args.bin_rot180:
+                bin_rot = rotate_bin_180(bin_data)
+                for p in args.bin_rot180:
+                    _write(p, bin_rot)
+        if not args.png and not args.bin and not args.bin_rot180:
+            ap.error("give --png, --bin and/or --bin-rot180")
     elif args.cmd == "encode":
-        _write(args.output, encode_bin(*read_png(args.input)))
-    else:
-        write_png(args.output, W, H, decode_bin(_read(args.input)))
+        raw = encode_bin(*read_png(args.input))
+        if args.rotate == 180:
+            raw = rotate_bin_180(raw)
+        _write(args.output, raw)
+    elif args.cmd == "decode":
+        data = _read(args.input)
+        if args.rotate == 180:
+            data = rotate_bin_180(data)
+        write_png(args.output, W, H, decode_bin(data))
+    elif args.cmd == "rotate180":
+        _write(args.output, rotate_bin_180(_read(args.input)))
     return 0
 
 

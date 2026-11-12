@@ -415,6 +415,21 @@ inner() {
     local R=$W/new interp f
     check "image: /etc/sc5000/version.txt is $NEWV" grep -qx "$NEWV" "$R/etc/sc5000/version.txt"
     check "image: /etc/sc5000/release-tag is $RELTAG" grep -qx "$RELTAG" "$R/etc/sc5000/release-tag"
+    local splash_rot=0
+    case $PRODUCT in JC11|JC16|NH08) splash_rot=180 ;; esac
+    python3 -I "$REPO/tools/splash/splash_tool.py" decode \
+        --input "$W/new-img/splash.payload" --rotate "$splash_rot" --output "$W/new-splash.png"
+    check "image: splash.payload orientation matches $PRODUCT (rotate=$splash_rot, #226)" \
+        python3 -I - "$REPO/tools/splash" "$W/new-splash.png" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+import splash_tool
+w, h, rgba = splash_tool.read_png(sys.argv[2])
+assert (w, h) == (splash_tool.W, splash_tool.H), (w, h)
+br = max(rgba[(y * w + x) * 4 + c] for y in range(720, 780) for x in range(1050, 1265) for c in range(3))
+tl = max(rgba[(y * w + x) * 4 + c] for y in range(0, 200) for x in range(0, 300) for c in range(3))
+assert br > 60 and tl <= 20, f"unexpected splash orientation: bottom-right max={br}, top-left max={tl}"
+PY
     if python3 -I "$REPO/tools/az01-packer/rootfs_audit.py" "$R" --overlay "$REPO/rootfs-overlay" \
         $(for c in $SUITE_CMDS; do printf -- '--require-cmd %s ' "$c"; done) > "$W/audit.txt" 2>&1
     then pass "image: unit/command/tool audit ($(tail -1 "$W/audit.txt"))"
