@@ -227,3 +227,59 @@ func TestProxyClassifiesCloudflare530AndStartupTimeoutAsUnavailable(t *testing.T
 		t.Fatalf("Proxy startup timeout err=%v, want ErrUnavailable", err)
 	}
 }
+
+func setDrainBoundForTest(t *testing.T, d time.Duration) {
+	t.Helper()
+	prev := uploadDrainRead
+	uploadDrainRead = d
+	t.Cleanup(func() { uploadDrainRead = prev })
+}
+
+func TestPostDoneDrainReadIsBoundedWhenWorkerStalls(t *testing.T) {
+	// Even after action=done, a stalled worker + half-open client must not hold
+	// Backend.Slot forever on an infinite read deadline.
+	worker := []string{"/bin/sh", "-c", `
+printf 'session=FFFFFFFFFFFFFFFF\n\n'
+while IFS= read -r l; do
+  [ "$l" = "action=done" ] && break
+done
+exec sleep 60
+`}
+	b := &Backend{Secret: secret, Worker: worker, Slot: make(chan struct{}, 1)}
+	s := httptest.NewServer(b)
+	defer s.Close()
+
+	// Temporarily tighten the post-done drain bound via uploadIdleRead / hook:
+	prevIdle := uploadIdleRead
+	uploadIdleRead = 50 * time.Millisecond
+	t.Cleanup(func() { uploadIdleRead = prevIdle })
+	setDrainBoundForTest(t, 120*time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	in, send := io.Pipe()
+	defer send.Close()
+	go func() { <-ctx.Done(); send.CloseWithError(ctx.Err()) }()
+
+	done := make(chan error, 1)
+	go func() { done <- Proxy(ctx, s.URL, secret, in, io.Discard) }()
+
+	blk := append([]byte("numChannels=1\nsampleRate=44100\nmaxBlockSize=4\n\naction=block\nnumSamples=4\n\n"), make([]byte, 4*4)...)
+	send.Write(append(blk, []byte("action=done\n\n")...))
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected stalled worker after action=done to fail within drain bound")
+		}
+	case <-time.After(700 * time.Millisecond):
+		t.Fatal("post-done session had no upper bound and held the render slot")
+	}
+	until := time.Now().Add(time.Second)
+	for len(b.Slot) != 0 && time.Now().Before(until) {
+		time.Sleep(time.Millisecond)
+	}
+	if len(b.Slot) != 0 {
+		t.Fatal("render slot was not released after post-done drain timeout")
+	}
+}

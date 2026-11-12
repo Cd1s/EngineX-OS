@@ -35,7 +35,10 @@ const (
 	stemsIdleWrite  = 30 * time.Second
 )
 
-var stemsIdleRead = 120 * time.Second
+var (
+	stemsIdleRead  = 120 * time.Second
+	stemsDrainRead = 10 * time.Minute
+)
 
 type stemsProxy struct {
 	target    *url.URL // base URL of sc5000-stemsd, no trailing slash
@@ -256,7 +259,7 @@ func (p *stemsProxy) engine(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(200)
 	_ = rc.Flush()
 
-	_, copyErr := io.Copy(&stemsFlushWriter{w: w, rc: rc}, resp.Body)
+	_, copyErr := io.Copy(&stemsFlushWriter{w: w, rc: rc, body: body}, resp.Body)
 	status := resp.Trailer.Get(stemsStatusTrailer)
 	if copyErr != nil || status == "" {
 		status = "failed"
@@ -289,7 +292,7 @@ func (b *stemsBody) Read(p []byte) (int, error) {
 		return 0, io.ErrClosedPipe
 	}
 	if b.uploadDone || b.eof {
-		_ = b.rc.SetReadDeadline(time.Time{})
+		_ = b.rc.SetReadDeadline(time.Now().Add(stemsDrainRead))
 	} else {
 		_ = b.rc.SetReadDeadline(time.Now().Add(stemsIdleRead))
 	}
@@ -298,7 +301,7 @@ func (b *stemsBody) Read(p []byte) (int, error) {
 	doneNow := n > 0 && b.tracker.Feed(p[:n])
 	if err == io.EOF || doneNow {
 		// The upload is complete and the server now watches the connection
-		// for a hang-up; that watch must not time out while stems still flow.
+		// for a hang-up under a bounded drain window refreshed by writes.
 		b.mu.Lock()
 		if err == io.EOF {
 			b.eof = true
@@ -307,11 +310,22 @@ func (b *stemsBody) Read(p []byte) (int, error) {
 			b.uploadDone = true
 		}
 		if !b.stopped {
-			_ = b.rc.SetReadDeadline(time.Time{})
+			_ = b.rc.SetReadDeadline(time.Now().Add(stemsDrainRead))
 		}
 		b.mu.Unlock()
 	}
 	return n, err
+}
+
+func (b *stemsBody) touchDrain() {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if (b.uploadDone || b.eof) && !b.stopped {
+		_ = b.rc.SetReadDeadline(time.Now().Add(stemsDrainRead))
+	}
 }
 
 // Close is called by the transport once it stops sending the upload.
@@ -335,12 +349,14 @@ func (b *stemsBody) finish() {
 }
 
 type stemsFlushWriter struct {
-	w  http.ResponseWriter
-	rc *http.ResponseController
+	w    http.ResponseWriter
+	rc   *http.ResponseController
+	body *stemsBody
 }
 
 func (f *stemsFlushWriter) Write(p []byte) (int, error) {
 	_ = f.rc.SetWriteDeadline(time.Now().Add(stemsIdleWrite))
+	f.body.touchDrain()
 	n, err := f.w.Write(p)
 	if err == nil {
 		err = f.rc.Flush()
