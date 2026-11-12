@@ -219,12 +219,25 @@ func qCompress(raw []byte) ([]byte, error) {
 // format. Reserved/unknown fields are zero. The trackData enum and RGB channel
 // interpretation remain inferences; see docs/stream-sync.md for device gates.
 func PerformanceBlobs(r *Result) (track, overview, beats []byte, err error) {
+	var top [3]byte
+	for _, p := range r.Overview {
+		top[0] = max(top[0], p.LowValue)
+		top[1] = max(top[1], p.MidValue)
+		top[2] = max(top[2], p.HighValue)
+	}
+	peaks := [3]float64{0.68, 0.40, 0.18}
+	scale := [3]float64{0.0066, 0.0035, 0.0016}
+	for c := range peaks {
+		if top[c] > 0 {
+			peaks[c] = min(1.0, float64(top[c])*scale[c])
+		}
+	}
 	var t, o, b bytes.Buffer
 	binary.Write(&t, binary.BigEndian, float64(r.SampleRate))
 	binary.Write(&t, binary.BigEndian, uint64(r.TotalSamples))
 	binary.Write(&t, binary.BigEndian, uint32(r.Key.EngineID))
-	for i := 0; i < 3; i++ {
-		binary.Write(&t, binary.BigEndian, float64(0))
+	for _, pk := range peaks {
+		binary.Write(&t, binary.BigEndian, pk)
 	}
 	binary.Write(&o, binary.BigEndian, uint64(OverviewEntries))
 	binary.Write(&o, binary.BigEndian, uint64(len(r.Overview)))
@@ -232,7 +245,7 @@ func PerformanceBlobs(r *Result) (track, overview, beats []byte, err error) {
 	for _, p := range r.Overview {
 		o.Write([]byte{p.LowValue, p.MidValue, p.HighValue})
 	}
-	o.Write([]byte{0, 0, 0})
+	o.Write(top[:])
 	binary.Write(&b, binary.BigEndian, float64(r.SampleRate))
 	binary.Write(&b, binary.BigEndian, float64(r.TotalSamples))
 	b.WriteByte(1)

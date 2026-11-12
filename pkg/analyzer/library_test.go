@@ -162,6 +162,33 @@ func TestEngine504AtomicImport(t *testing.T) {
 		t.Fatal("off-volume path accepted")
 	}
 }
+
+func TestPerformanceBlobsWritesNonZeroBandPeaksAndTrailer(t *testing.T) {
+	song := testaudio.Song(6)
+	a, err := DecodeWAV(bytes.NewReader(testaudio.WAV(song)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := Analyze(a, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	track, overview, _, err := PerformanceBlobs(res)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := uncompress(t, track)
+	ov := uncompress(t, overview)
+	if len(tr) != 44 || len(ov) != 3099 {
+		t.Fatalf("unexpected blob sizes: tr=%d ov=%d", len(tr), len(ov))
+	}
+	if bytes.Equal(tr[20:44], make([]byte, 24)) {
+		t.Fatal("trackData low/mid/high peaks are all zero")
+	}
+	if bytes.Equal(ov[len(ov)-3:], []byte{0, 0, 0}) {
+		t.Fatal("overviewWaveFormData 3-byte band-max trailer is all zero")
+	}
+}
 func TestLibraryRejectsUnknownSchemaAndOffVolume(t *testing.T) {
 	p, _, db := testlibrary.Create(t)
 	db.Exec("UPDATE Information SET schemaVersionPatch=99")
