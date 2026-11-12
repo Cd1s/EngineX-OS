@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -121,14 +122,25 @@ func exportCandidates(r *compat.Resolver, mount string) ([]exportCandidate, erro
 		return []exportCandidate{*pdb}, nil
 	case pdb == nil:
 		return oneLib, nil
-	case pdb.mtime.Sub(oneLib[0].mtime) > exportNewerMargin:
-		return append([]exportCandidate{*pdb}, oneLib...), nil
-	default:
+	case oneLib[0].mtime.Sub(pdb.mtime) > exportNewerMargin:
+		// rekordbox 7 with Device Library unticked leaves an old export.pdb behind.
 		return append(oneLib, *pdb), nil
+	default:
+		// Written by the same export (or export.pdb is newer): export.pdb first,
+		// as before, so imported drives keep their Rekordbox IDs and stamps.
+		return append([]exportCandidate{*pdb}, oneLib...), nil
 	}
 }
 
+// exportReads counts reads of a drive's own export (each may decrypt a OneLibrary).
+var exportReads atomic.Int64
+
+// afterExportRead runs after each export read; tests use it to stretch the read.
+var afterExportRead = func() {}
+
 func readExport(ctx context.Context, mount string) (*rekordbox.Library, error) {
+	exportReads.Add(1)
+	defer afterExportRead()
 	r, e := compat.NewResolver(mount)
 	if e != nil {
 		return nil, e
@@ -203,6 +215,19 @@ func writable(mount string) bool {
 }
 
 func Convert(ctx context.Context, mount string, opts enginedb.Options) (enginedb.Result, error) {
+	return convert(ctx, mount, opts, nil, 0)
+}
+
+// preread is a library ConvertAtMount has already read (and, for OneLibrary,
+// decrypted), so the same mount does not read it twice.
+type preread struct {
+	l          *rekordbox.Library
+	stagedOnly bool
+}
+
+// convert is Convert with an optional preread library. budget > 0 sets the
+// file-reading deadline once the library has been read.
+func convert(ctx context.Context, mount string, opts enginedb.Options, pre *preread, budget time.Duration) (enginedb.Result, error) {
 	r, e := compat.NewResolver(mount)
 	if e != nil {
 		return enginedb.Result{}, e
@@ -222,12 +247,21 @@ func Convert(ctx context.Context, mount string, opts enginedb.Options) (enginedb
 	if e != nil {
 		return enginedb.Result{}, e
 	}
-	l, stagedOnly, e := readLibrary(ctx, mount)
-	if errors.Is(e, os.ErrNotExist) {
-		return enginedb.Result{Bypassed: true}, nil
+	var l *rekordbox.Library
+	var stagedOnly bool
+	if pre != nil {
+		l, stagedOnly = pre.l, pre.stagedOnly
+	} else {
+		l, stagedOnly, e = readLibrary(ctx, mount)
+		if errors.Is(e, os.ErrNotExist) {
+			return enginedb.Result{Bypassed: true}, nil
+		}
+		if e != nil {
+			return enginedb.Result{}, e
+		}
 	}
-	if e != nil {
-		return enginedb.Result{}, e
+	if budget > 0 {
+		opts.Deadline = time.Now().Add(budget)
 	}
 	opts.StagedOnly = stagedOnly
 	Reconcile(r, l)
@@ -280,11 +314,12 @@ const (
 	// Past this, a first import cannot finish while the mount waits: reading every
 	// file took 8 minutes for 6000 tracks on a USB stick.
 	fastImportTracks = 500
-	// The edisksd hook kills rb-bridge 20 s after the mount, which rolled back the
-	// whole import, playlists included (#48). Stop reading files after this; the
-	// rest of the tracks finish on later mounts.
-	mountReadBudget = 8 * time.Second
 )
+
+// The edisksd hook kills rb-bridge 20 s after the mount, which rolled back the
+// whole import, playlists included (#48). Stop reading files after this; the
+// rest of the tracks finish on later mounts. A variable only for tests.
+var mountReadBudget = 8 * time.Second
 
 // ConvertAtMount is Convert for when a volume is mounted, while Engine is waiting
 // for it. An export unchanged since the last import is skipped at once. A large
@@ -293,8 +328,11 @@ const (
 // Otherwise files are read for mountReadBudget at most, and the export counts as
 // imported only once no track was left without its cues.
 func ConvertAtMount(ctx context.Context, mount string, opts enginedb.Options, full bool) (enginedb.Result, error) {
+	// The file-reading budget starts once the library is read: decrypting a
+	// OneLibrary must not use up the time meant for cues and waveforms.
+	var budget time.Duration
 	if !full && opts.Deadline.IsZero() {
-		opts.Deadline = time.Now().Add(mountReadBudget)
+		budget = mountReadBudget
 	}
 	r, err := compat.NewResolver(mount)
 	if err != nil {
@@ -314,7 +352,7 @@ func ConvertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 	} else {
 		staged := strings.TrimSpace(stagedStamp(mount))
 		if staged == "" {
-			return Convert(ctx, mount, opts)
+			return convert(ctx, mount, opts, nil, budget)
 		}
 		stamp = stampVersion + " " + staged
 	}
@@ -326,6 +364,7 @@ func ConvertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 		return enginedb.Result{Bypassed: true}, nil
 	}
 	var result enginedb.Result
+	var pre *preread
 	// GL-011: Always use fast tmpfs delta import at mount when a library exceeds
 	// fastImportTracks, even if .rb-bridge-state.db already exists from an earlier mount.
 	if !full && !opts.SmartMatch {
@@ -335,6 +374,11 @@ func ConvertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 				cleanEmptyEngineLibrary(dir)
 			}
 			return result, err
+		}
+		pre = &preread{l, stagedOnly}
+		if budget > 0 {
+			opts.Deadline = time.Now().Add(budget)
+			budget = 0
 		}
 		opts.StagedOnly = stagedOnly
 		if len(l.Tracks) > fastImportTracks {
@@ -362,7 +406,7 @@ func ConvertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 			return result, err
 		}
 	}
-	result, err = Convert(ctx, mount, opts)
+	result, err = convert(ctx, mount, opts, pre, budget)
 	if err == nil && result.Deferred > 0 {
 		log.Printf("rb-bridge: %d tracks imported without cues; the next mount reads them", result.Deferred)
 	} else if err == nil && !result.Bypassed {
@@ -379,7 +423,19 @@ func cleanEmptyEngineLibrary(dir string) {
 			os.Remove(filepath.Join(dir, name))
 		}
 	}
-	os.Remove(filepath.Join(dir, ".rb-bridge.lock"))
+	// The lock file belongs to a running rb-bridge while it is locked: removing
+	// it would let a third one lock a fresh file and run beside it.
+	lock := filepath.Join(dir, ".rb-bridge.lock")
+	if f, err := os.OpenFile(lock, os.O_RDWR|syscall.O_NOFOLLOW, 0); err == nil {
+		busy := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil
+		if !busy {
+			os.Remove(lock)
+		}
+		f.Close()
+		if busy {
+			return
+		}
+	}
 	os.Remove(dir)
 	os.Remove(filepath.Dir(dir))
 }

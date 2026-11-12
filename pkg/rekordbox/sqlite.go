@@ -95,8 +95,12 @@ func ReadSQLite(ctx context.Context, path string, adapter SQLiteAdapter) (*Libra
 
 type sqlRecord map[string]string
 
+// Built once: a Replacer per call allocated a lookup table for every column
+// name of every row (GBs of garbage for a 20000-track cue table).
+var nameSeparators = strings.NewReplacer("_", "", "-", "", " ", "")
+
 func normalized(s string) string {
-	return strings.ToLower(strings.NewReplacer("_", "", "-", "", " ", "").Replace(s))
+	return strings.ToLower(nameSeparators.Replace(s))
 }
 func (r sqlRecord) get(names ...string) string {
 	for _, n := range names {
@@ -266,6 +270,66 @@ func readSQLRows(ctx context.Context, db *sql.DB, table string) ([]sqlRecord, er
 	return out, rows.Err()
 }
 
+// cueColumns are the cue table columns parseSQLiteCue and the cue import use.
+var cueColumns = []string{"content_id", "cue_id", "id", "kind", "inUsec", "in_usec", "outUsec", "out_usec", "inMsec", "in_msec", "outMsec", "out_msec",
+	"isActiveLoop", "is_active_loop", "active_loop", "beatLoopNumerator", "beat_loop_numerator", "beatLoopDenominator", "beat_loop_denominator",
+	"cueComment", "cue_comment", "comment", "colorTableIndex", "color_table_index"}
+
+// eachSQLRow streams the wanted columns of table through fn, one reused record
+// at a time. Loading every cue as a map of all its columns took 375 MB on armhf
+// for 20000 tracks with 8 cues each (r2 review).
+func eachSQLRow(ctx context.Context, db *sql.DB, table string, wanted []string, fn func(sqlRecord)) error {
+	want := map[string]bool{}
+	for _, w := range wanted {
+		want[normalized(w)] = true
+	}
+	quote := func(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }
+	info, err := db.QueryContext(ctx, `SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return err
+	}
+	var cols, keys []string
+	for info.Next() {
+		var name string
+		if err = info.Scan(&name); err != nil {
+			info.Close()
+			return err
+		}
+		if want[normalized(name)] {
+			cols, keys = append(cols, quote(name)), append(keys, normalized(name))
+		}
+	}
+	err = info.Err()
+	info.Close()
+	if err != nil || len(cols) == 0 {
+		return err
+	}
+	rows, err := db.QueryContext(ctx, `SELECT `+strings.Join(cols, ",")+` FROM `+quote(table))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	values := make([]sql.RawBytes, len(cols))
+	ptrs := make([]any, len(cols))
+	for i := range ptrs {
+		ptrs[i] = &values[i]
+	}
+	r := sqlRecord{}
+	for rows.Next() {
+		if err = rows.Scan(ptrs...); err != nil {
+			return err
+		}
+		clear(r)
+		for i, v := range values {
+			if v != nil {
+				r[keys[i]] = string(v)
+			}
+		}
+		fn(r)
+	}
+	return rows.Err()
+}
+
 func (OneLibraryAdapter) Read(ctx context.Context, db *sql.DB) (*Library, error) {
 	rows, e := db.QueryContext(ctx, `SELECT name FROM sqlite_master WHERE type='table'`)
 	if e != nil {
@@ -362,28 +426,35 @@ func (OneLibraryAdapter) Read(ctx context.Context, db *sql.DB) (*Library, error)
 		normalizeParsedAudioMetadata(&t)
 		l.Tracks = append(l.Tracks, t)
 	}
-	cues, e := load("cue", "djmdCue")
-	if e != nil {
-		return nil, e
+	cueTable := ""
+	for _, n := range []string{"cue", "djmdCue"} {
+		if t := tables[normalized(n)]; t != "" {
+			cueTable = t
+			break
+		}
 	}
-	if len(cues) > 0 {
+	if cueTable != "" {
 		type indexedCue struct {
 			id  int64
 			seq int
 			cue Cue
 		}
 		byContent := map[uint32][]indexedCue{}
-		for idx, r := range cues {
+		idx := -1
+		if e = eachSQLRow(ctx, db, cueTable, cueColumns, func(r sqlRecord) {
+			idx++
 			cid := r.num("content_id")
 			if cid == 0 {
-				continue
+				return
 			}
 			c, ok := parseSQLiteCue(r)
 			if !ok {
-				continue
+				return
 			}
 			cueID, _ := r.sint("cue_id", "id")
 			byContent[cid] = append(byContent[cid], indexedCue{id: cueID, seq: idx, cue: c})
+		}); e != nil {
+			return nil, e
 		}
 		for i := range l.Tracks {
 			items := byContent[l.Tracks[i].ID]

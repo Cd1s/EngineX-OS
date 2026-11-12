@@ -86,12 +86,17 @@ func entry(order, track, list uint32) []byte {
 }
 
 func PDB() []byte {
+	return PDBNamed([5]string{UnicodeName, "two.flac", "three.wav", "four.wav", "five.wav"}, "同名")
+}
+
+// PDBNamed is PDB with other track titles/file names and another name for
+// the first leaf playlist (Folder/Nested/<name>).
+func PDBNamed(names [5]string, list string) []byte {
 	type table struct {
 		typ  uint32
 		rows [][]byte
 	}
 	ts := []table{{0, nil}, {2, nil}, {5, nil}, {7, nil}, {8, nil}, {16, [][]byte{[]byte("opaque column definition")}}}
-	names := []string{UnicodeName, "two.flac", "three.wav", "four.wav", "five.wav"}
 	keys := []string{"8A", "9A", "8B", "11A", "8A"}
 	bpms := []uint32{12000, 12400, 11800, 12100, 12401}
 	for i, n := range names {
@@ -105,7 +110,7 @@ func PDB() []byte {
 	le.PutUint32(b[4:], 1)
 	b[9] = 10
 	ts[1].rows = [][]byte{append(b, str("Artist")...)}
-	ts[3].rows = [][]byte{playlist(10, 0, 1, "Folder", true), playlist(11, 10, 1, "Nested", true), playlist(12, 11, 1, "同名", false), playlist(13, 0, 2, "Other", true), playlist(14, 13, 1, "同名", false)}
+	ts[3].rows = [][]byte{playlist(10, 0, 1, "Folder", true), playlist(11, 10, 1, "Nested", true), playlist(12, 11, 1, list, false), playlist(13, 0, 2, "Other", true), playlist(14, 13, 1, "同名", false)}
 	// Input row order intentionally differs from playlist sequence order.
 	ts[4].rows = [][]byte{entry(2, 2, 12), entry(1, 1, 12), entry(1, 3, 14), entry(2, 4, 14)}
 	// Add a non-data page at the start of the Track chain.
