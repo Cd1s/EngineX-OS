@@ -194,8 +194,8 @@ func RememberPeerHint(hostOrAddr string) {
 	peerHints = append(peerHints, append(net.IP(nil), ip...))
 }
 
-func localLANIPv4s() []net.IP {
-	var out []net.IP
+func localLANIPv4Nets() []*net.IPNet {
+	var out []*net.IPNet
 	ifs, _ := net.Interfaces()
 	for _, i := range ifs {
 		if i.Flags&net.FlagUp == 0 || i.Flags&net.FlagLoopback != 0 {
@@ -204,9 +204,18 @@ func localLANIPv4s() []net.IP {
 		addrs, _ := i.Addrs()
 		for _, a := range addrs {
 			if n, ok := a.(*net.IPNet); ok && n.IP.To4() != nil && lanIP(n.IP) {
-				out = append(out, n.IP.To4())
+				out = append(out, &net.IPNet{IP: n.IP.To4(), Mask: n.Mask})
 			}
 		}
+	}
+	return out
+}
+
+func localLANIPv4s() []net.IP {
+	nets := localLANIPv4Nets()
+	out := make([]net.IP, len(nets))
+	for i, n := range nets {
+		out[i] = n.IP
 	}
 	return out
 }
@@ -304,42 +313,60 @@ func discoverLANServers(ctx context.Context, timeout time.Duration, accept func(
 	if err != nil {
 		return err
 	}
-	conns := []*net.UDPConn{primary}
-	for _, ifIP := range localLANIPv4s() {
-		if len(conns) >= 8 {
+	type probeSock struct {
+		conn *net.UDPConn
+		net  *net.IPNet // nil on primary wildcard socket
+	}
+	socks := []probeSock{{conn: primary}}
+	for _, ifNet := range localLANIPv4Nets() {
+		if len(socks) >= 8 {
 			break
 		}
-		if c, e := net.ListenUDP("udp4", &net.UDPAddr{IP: ifIP, Port: 0}); e == nil {
-			conns = append(conns, c)
+		if c, e := net.ListenUDP("udp4", &net.UDPAddr{IP: ifNet.IP, Port: 0}); e == nil {
+			socks = append(socks, probeSock{conn: c, net: ifNet})
 		}
 	}
 	closeAll := func() {
-		for _, c := range conns {
-			c.Close()
+		for _, s := range socks {
+			s.conn.Close()
 		}
 	}
 	defer closeAll()
 	deadline := time.Now().Add(timeout)
-	for _, c := range conns {
-		c.SetDeadline(deadline)
+	for _, s := range socks {
+		s.conn.SetDeadline(deadline)
 	}
 	defer context.AfterFunc(ctx, func() {
 		now := time.Now()
-		for _, c := range conns {
-			c.SetDeadline(now)
+		for _, s := range socks {
+			s.conn.SetDeadline(now)
 		}
 	})()
+
+	canSendOn := func(s probeSock, dst *net.UDPAddr) bool {
+		if dst == nil {
+			return false
+		}
+		if s.net == nil {
+			return true
+		}
+		return dst.IP.Equal(net.IPv4bcast) || dst.IP.IsMulticast() || s.net.Contains(dst.IP)
+	}
 
 	query := append([]byte{0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0}, mdnsQuestion()...)
 	dTargets := discoverTargets()
 	mTargets := mdnsTargets()
 	sendProbes := func() {
-		for _, c := range conns {
+		for _, s := range socks {
 			for _, t := range dTargets {
-				c.WriteToUDP([]byte(discoverProbe), t)
+				if canSendOn(s, t) {
+					s.conn.WriteToUDP([]byte(discoverProbe), t)
+				}
 			}
 			for _, t := range mTargets {
-				c.WriteToUDP(query, t)
+				if canSendOn(s, t) {
+					s.conn.WriteToUDP(query, t)
+				}
 			}
 		}
 	}
@@ -371,9 +398,9 @@ func discoverLANServers(ctx context.Context, timeout time.Duration, accept func(
 		from *net.UDPAddr
 	}
 	pktCh := make(chan rxPkt, 16)
-	errCh := make(chan error, len(conns))
+	errCh := make(chan error, len(socks))
 	var wg sync.WaitGroup
-	for _, c := range conns {
+	for _, s := range socks {
 		wg.Add(1)
 		go func(conn *net.UDPConn) {
 			defer wg.Done()
@@ -392,7 +419,7 @@ func discoverLANServers(ctx context.Context, timeout time.Duration, accept func(
 					return
 				}
 			}
-		}(c)
+		}(s.conn)
 	}
 	doneCh := make(chan struct{})
 	go func() {
