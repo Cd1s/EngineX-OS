@@ -6,7 +6,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 
 ---
 
-## Regression Table (58 Rows)
+## Regression Table (59 Rows)
 
 | # | Behaviour that must keep working | Issue / commit that fixed it | How it is checked (automated test name, or exact real-deck / sandbox step) | Release gate / deck acceptance / recording coverage |
 | --- | --- | --- | --- | --- |
@@ -68,6 +68,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 | 56 | **Idle deck discovers a zero-config LAN Stems worker (`enginex-stemsd`) without blocking `/v1/sc5000/ui` or churning `X-UI-Digest` (`BH2-A9-1`)**: `relayStatusView` schedules a throttled background `stems.ProbeLAN` probe when no online cloud relay is active, writes `stems-lan.json` only on real online/offline/endpoint transitions, and waits cleanly on `Server.Close()` | `BH2-A9-1` | `pkg/webui::TestUIStatusDiscoversIdleLANStemsRenderer`, `internal/stems::TestProbeLANDiscoversIdleWorkerAndRechecksCachedEndpoint`; real-deck check: start `enginex-stemsd` on a PC on the same LAN/Wi-Fi while the deck sits idle and verify `Settings → About / Update` and `Profile → Library` show `High-quality stems: <host> (htdemucs)` within a few seconds | Release workflow Step 2 Go suites; real-deck LAN Stems idle pairing check |
 | 57 | **`stems-processor` falls back to LAN GPU worker and on-deck `LocalRender` on HTTP `401`/`403`/`404`/`5xx` relay responses while Engine's stdin is still replayable (`BH2-A9-3`)** | `BH2-A9-3` | `internal/stemsproc::TestRelayAuthOrStatusFailureFallsBackToLANAndLocal` | Release workflow Step 2 (`go test -race ./internal/stemsproc/...`) |
 | 58 | **`stems` `validEndpoint` accepts `.local`, `.lan`, `localhost`, and unqualified LAN HTTP hostnames while rejecting plain-HTTP public domains (`BH2-A9-4`)** | `BH2-A9-4` | `internal/stems::TestResolveClientAcceptsMDNSAndLANHostnames`, `TestResolveClientRejects` | Release workflow Step 2 (`go test -race ./internal/stems/...`) |
+| 59 | **`DiscoverLANServer` reads up to 4 KiB UDP/mDNS responses without >1024-byte truncation or oversize-datagram abort (`BH2-A9-5`)** | `BH2-A9-5` | `internal/stems::TestDiscoverLANServerHandlesMTU1500MDNSResponse` | Release workflow Step 2 (`go test -race ./internal/stems/...`) |
 
 ---
 
