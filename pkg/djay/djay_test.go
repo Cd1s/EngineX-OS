@@ -582,9 +582,9 @@ func TestDjayMixedExplicitAndUnlabeledLoopUnitColumns(t *testing.T) {
 	for _, stmt := range []string{
 		`CREATE TABLE tracks (id INTEGER PRIMARY KEY, title TEXT, path TEXT, duration INTEGER)`,
 		`CREATE TABLE loops (track_id INTEGER, slot INTEGER, start_ms REAL, length REAL, label TEXT)`,
-		// Track is 180 s; start_ms is explicitly in ms (12000 ms = 12 s) while unlabeled length is in whole seconds (8 s = 8000 ms).
+		// Track is 180 s; start_ms is explicitly in ms (12000 ms) while unlabeled length is in seconds (8 s and 30.5 s).
 		`INSERT INTO tracks VALUES (1, 'MixedLoopUnits', 'Music/Track.mp3', 180)`,
-		`INSERT INTO loops VALUES (1, 0, 12000, 8, '8s Loop')`,
+		`INSERT INTO loops VALUES (1, 0, 12000, 8, '8s Loop'), (1, 1, 12000, 30.5, '30.5s Loop')`,
 	} {
 		if _, err := db.Exec(stmt); err != nil {
 			t.Fatal(err)
@@ -597,7 +597,7 @@ func TestDjayMixedExplicitAndUnlabeledLoopUnitColumns(t *testing.T) {
 		t.Fatalf("Discover: libs=%v err=%v", libs, err)
 	}
 	loops := libs[0].Tracks[0].Loops
-	if len(loops) != 1 || loops[0].StartMS != 12000 || loops[0].LengthMS != 8000 {
-		t.Fatalf("mixed loop columns misread: got %+v, want StartMS=12000 LengthMS=8000", loops)
+	if len(loops) != 2 || loops[0].StartMS != 12000 || loops[0].LengthMS != 8000 || loops[1].StartMS != 12000 || loops[1].LengthMS != 30500 {
+		t.Fatalf("mixed loop columns misread: got %+v, want [12000/8000, 12000/30500]", loops)
 	}
 }
