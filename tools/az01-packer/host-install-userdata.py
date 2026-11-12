@@ -79,6 +79,45 @@ def generate_debugfs_script(files_to_write, dirs_to_create, links=(), removes=()
     return '\n'.join(lines) + '\n'
 
 
+def _sha256(path):
+    h = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for block in iter(lambda: f.read(1 << 20), b''):
+            h.update(block)
+    return h.hexdigest()
+
+
+# debugfs noise of a normal run: the banner, rm of a file that is not there yet, mkdir of a dir that is.
+_BENIGN = re.compile(r'^debugfs \d|File not found by ext2_lookup|already exists|^\s*$')
+
+
+def read_back(img, files, links, tmp):
+    """BH-G2-3: debugfs exits 0 when a write failed, so compare every installed file with its source
+    (SHA-256 and mode) and every link with its target; return what is wrong."""
+    out = tmp / 'readback'
+    out.mkdir()
+    script = tmp / 'readback.txt'
+    lines = []
+    for i, (_, target, _) in enumerate(files):
+        lines.append(f'dump -p "/{str(target).replace(os.sep, "/").strip("/")}" "{out / str(i)}"\n')
+    script.write_text(''.join(lines))
+    subprocess.run(['debugfs', '-f', str(script), str(img)], capture_output=True, text=True)
+    bad = []
+    for i, (src, target, mode) in enumerate(files):
+        got = out / str(i)
+        if not got.is_file():
+            bad.append(f'/{target} is missing')
+        elif _sha256(got) != _sha256(src):
+            bad.append(f'/{target} differs from the bundle ({got.stat().st_size} of {Path(src).stat().st_size} bytes)')
+        elif got.stat().st_mode & 0o7777 != mode & 0o7777:
+            bad.append(f'/{target} has mode {got.stat().st_mode & 0o7777:04o}, not {mode & 0o7777:04o}')
+    for path, target in links:
+        st = subprocess.run(['debugfs', '-R', f'stat {path}', str(img)], capture_output=True, text=True).stdout
+        if 'Type: symlink' not in st or f'dest: "{target}"' not in st:
+            bad.append(f'{path} is not a link to {target}')
+    return bad
+
+
 def inject(img_path, bundle_tar, check=True, ssh_key=None):
     img = Path(img_path)
     bundle = Path(bundle_tar)
@@ -224,8 +263,11 @@ def inject(img_path, bundle_tar, check=True, ssh_key=None):
         script_file = tmp / 'debugfs_script.txt'
         script_file.write_text(script)
 
-        subprocess.run(['debugfs', '-w', '-f', str(script_file), str(img)],
-                       capture_output=True, text=True)
+        wr = subprocess.run(['debugfs', '-w', '-f', str(script_file), str(img)],
+                            capture_output=True, text=True)
+        notes = [ln for ln in (wr.stdout + wr.stderr).splitlines() if not _BENIGN.search(ln)]
+        if wr.returncode != 0:
+            fail(f'debugfs failed with code {wr.returncode} on {img}:\n' + '\n'.join(notes[-20:]))
         # debugfs exits 0 even when a write failed (full image, bad path): read back.
         for rel in (f'{root}/version.txt', f'{root}/bundle/bin/sc5000-suite', f'{root}/gen2-unlocked'):
             st = subprocess.run(['debugfs', '-R', f'stat /{rel}', str(img)], capture_output=True, text=True).stdout
@@ -242,6 +284,12 @@ def inject(img_path, bundle_tar, check=True, ssh_key=None):
                                   capture_output=True, text=True)
             if fsck.returncode not in (0, 1, 2):
                 fail(f'e2fsck failed with code {fsck.returncode}:\n{fsck.stdout}\n{fsck.stderr}')
+        # After e2fsck, which may have dropped a damaged file: only a complete image is flashed.
+        bad = read_back(img, files, links, tmp)
+        if bad:
+            fail(f'{img} is incomplete after writing (image full?): ' + '; '.join(bad[:10]) +
+                 (f' (+{len(bad) - 10} more)' if len(bad) > 10 else '') +
+                 ('\ndebugfs said:\n' + '\n'.join(notes[-20:]) if notes else ''))
 
         return {'status': 'ok', 'version': version, 'files_injected': len(files)}
 

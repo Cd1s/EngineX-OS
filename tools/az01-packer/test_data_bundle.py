@@ -8,6 +8,7 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -485,6 +486,44 @@ class DataBundleTest(unittest.TestCase):
         stat = lambda rel: subprocess.run(['debugfs', '-R', f'stat {rel}', str(img)], capture_output=True, text=True).stdout
         self.assertIn('Type: regular', stat('/sc5000-custom/version.txt'))
         self.assertNotIn('Type:', stat('/enginex'))
+
+    def test_host_install_fails_when_a_write_did_not_land(self):
+        """BH-G2-3: debugfs exits 0 when a write fails and the readback only looked at three files,
+        so an image without (or with a cut) UI hook was reported ok and flashed."""
+        for tool in ('debugfs', 'mkfs.ext4'):
+            if subprocess.run(['which', tool], capture_output=True).returncode != 0:
+                self.skipTest(f'{tool} not installed on this host')
+        r = self.build()
+        hspec = importlib.util.spec_from_file_location('host_install_userdata', HERE / 'host-install-userdata.py')
+        hmod = importlib.util.module_from_spec(hspec)
+        hspec.loader.exec_module(hmod)
+        short = self.tmp / 'short.so'
+        short.write_bytes(b'\x7fELF')
+        shims = self.tmp / 'debugfs-shim'
+        shims.mkdir()
+        # Only the batch write is altered: the UI hook's write reads another source, as when the
+        # image fills up or a path is wrong; every other command runs on the real debugfs.
+        (shims / 'debugfs').write_text(r'''#!/bin/sh
+if [ "$1" = -w ] && [ "$2" = -f ]; then
+    sed -i "s|^write \"[^\"]*/libengine-ui-hook.so\"|write \"$HOOK_SRC\"|" "$3"
+fi
+exec REAL "$@"
+'''.replace('REAL', shutil.which('debugfs')))
+        (shims / 'debugfs').chmod(0o755)
+        for name, src in (('missing', '/nonexistent/libengine-ui-hook.so'), ('truncated', str(short))):
+            with self.subTest(name):
+                img = self.tmp / f'{name}.img'
+                subprocess.run(['dd', 'if=/dev/zero', f'of={img}', 'bs=1M', 'count=32'], check=True, capture_output=True)
+                subprocess.run(['mkfs.ext4', '-F', str(img)], check=True, capture_output=True)
+                env = {'PATH': f"{shims}:{os.environ['PATH']}", 'HOOK_SRC': src}
+                with mock.patch.dict(os.environ, env):
+                    with self.assertRaises(SystemExit) as cm:
+                        hmod.inject(img, r['bundle'])
+                self.assertIn('libengine-ui-hook.so', str(cm.exception))
+        img = self.tmp / 'good.img'  # unaltered: every file and the compat link read back
+        subprocess.run(['dd', 'if=/dev/zero', f'of={img}', 'bs=1M', 'count=32'], check=True, capture_output=True)
+        subprocess.run(['mkfs.ext4', '-F', str(img)], check=True, capture_output=True)
+        self.assertEqual(hmod.inject(img, r['bundle'])['status'], 'ok')
 
     def migrate(self, legacy_files, new_files=None):
         """Run the bundle's install.sh with /data pointed at a scratch dir."""
