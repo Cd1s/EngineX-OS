@@ -731,3 +731,36 @@ func TestNewerModVersion(t *testing.T) {
 		}
 	}
 }
+
+func TestIsModEnabledWithoutScanningMedia(t *testing.T) {
+	base := t.TempDir()
+	uiDir := filepath.Join(base, "ui")
+	modDir := filepath.Join(base, "mods", "dmx-studio")
+	if err := os.MkdirAll(modDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(modDir, "mod.json"), []byte(`{"id":"dmx-studio","version":"1.2.0","script":"start.sh"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(modDir, "start.sh"), []byte("exit 0"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Missing mediaRoot must not break or block IsModEnabled.
+	mgr := NewManager(filepath.Join(base, "nonexistent-media"), uiDir)
+	mgr.runScript = func(Mod, string) error { return nil }
+	if mgr.IsModEnabled("dmx-studio") {
+		t.Fatal("disabled mod must report false")
+	}
+	if err := mgr.SetModEnabled("dmx-studio", true); err != nil {
+		t.Fatal(err)
+	}
+	if !mgr.IsModEnabled("dmx-studio") {
+		t.Fatal("enabled mod must report true")
+	}
+	if err := mgr.QuarantineAll(); err != nil {
+		t.Fatal(err)
+	}
+	if mgr.IsModEnabled("dmx-studio") {
+		t.Fatal("quarantined mod must report false")
+	}
+}

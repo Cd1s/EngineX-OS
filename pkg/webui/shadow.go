@@ -277,9 +277,13 @@ type shadowState struct {
 	cdj           map[byte]cdjSeen // per CDJ player number: its last edges and jumps
 	own           []deckState
 	ownMaster     bool
-	ownAt         time.Time            // the newest post or alive ping
-	ownExport     prolink.ExportDeck   // what the newest post told the Pro DJ Link export
-	ownPostAt     int64                // the QML's clock on the newest post
+	ownAt         time.Time          // the newest post or alive ping
+	ownExport     prolink.ExportDeck // what the newest post told the Pro DJ Link export
+	ownPostAt     int64              // the QML's clock on the newest post
+	clockDecks    []deckState        // #209: lightweight local deck clock feed when 4-deck shadow is off
+	clockAt       time.Time
+	clockPostAt   int64
+	clockPolled   time.Time
 	peers         map[string]time.Time // EngineX players heard on the beacon
 	peerDecks     map[int]peerDeck
 	peerLocal     map[string]peerLocalFile // by TrackNetworkPath
@@ -577,6 +581,24 @@ func (s *Server) decksAlive(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func deckEffectiveBPM(d deckState) float64 {
+	if d.CurrentBPM > 0 {
+		return d.CurrentBPM
+	}
+	if d.BPM > 0 {
+		return d.BPM * (1 + d.Pitch/100)
+	}
+	return 0
+}
+
+func wrapBarBeat(b float64) float64 {
+	b = math.Mod(b, 4.0)
+	if b < 0 {
+		b += 4.0
+	}
+	return b
+}
+
 // ownForPeer is this player's decks for the other one, positions carried to
 // now (its clock means nothing there). Called with sh.mu held.
 func (sh *shadowState) ownForPeer(now time.Time) []deckState {
@@ -587,15 +609,201 @@ func (sh *shadowState) ownForPeer(now time.Time) []deckState {
 			d.Stale = now.Sub(sh.ownAt) >= 2*time.Second
 			if d.Playing {
 				// The QML posts only on a change and pings in between: carry the
-				// position on while it is alive, at most 2 s past its last word.
+				// position and beat phase on while it is alive, at most 2 s past its last word.
 				until := min(now.UnixMilli(), sh.ownAt.UnixMilli()+2000)
-				d.PositionMS += float64(max(int64(0), until-d.At)) * (1 + d.Pitch/100)
+				dtMS := max(int64(0), until-d.At)
+				d.PositionMS += float64(dtMS) * (1 + d.Pitch/100)
+				if tempo := deckEffectiveBPM(d); tempo > 0 && d.Beat >= 0 {
+					d.Beat = wrapBarBeat(d.Beat + float64(dtMS)/1000.0*tempo/60.0)
+				}
 			}
 			d.At, d.Sent = 0, now.UnixMilli()
 			out = append(out, d)
 		}
 	}
 	return out
+}
+
+type clockDeck struct {
+	Deck       int     `json:"deck"`
+	Source     string  `json:"source"`
+	SourceID   string  `json:"sourceId,omitempty"`
+	Master     bool    `json:"master,omitempty"`
+	Lead       bool    `json:"lead,omitempty"`
+	Playing    bool    `json:"playing"`
+	Cue        bool    `json:"cue,omitempty"`
+	BPM        float64 `json:"bpm,omitempty"`
+	CurrentBPM float64 `json:"currentBpm,omitempty"`
+	Pitch      float64 `json:"pitch,omitempty"`
+	Beat       float64 `json:"beat"`
+	PositionMS float64 `json:"positionMs,omitempty"`
+	At         int64   `json:"at"`
+}
+
+// deckClockPost takes lightweight local deck beat samples from Engine's UI pack
+// when 4-deck shadow mode is off (#209). Memory only; never starts shadow beacons.
+func (s *Server) deckClockPost(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 32<<10))
+	if err != nil {
+		fail(w, 400, err)
+		return
+	}
+	var decks []deckState
+	if err := json.Unmarshal(body, &decks); err != nil {
+		var env struct {
+			Decks []deckState `json:"decks"`
+		}
+		if e2 := json.Unmarshal(body, &env); e2 != nil {
+			fail(w, 400, err)
+			return
+		}
+		decks = env.Decks
+	}
+	now := time.Now()
+	nowMS := now.UnixMilli()
+	var postAt int64
+	clean := decks[:0]
+	for _, d := range decks {
+		if d.Deck < 1 || d.Deck > 4 {
+			continue
+		}
+		if d.At > nowMS || d.At < nowMS-2000 {
+			d.At = nowMS
+		}
+		postAt = max(postAt, d.At)
+		clean = append(clean, d)
+	}
+	sh := s.shadow
+	sh.mu.Lock()
+	if postAt > nowMS || (postAt != 0 && postAt < sh.clockPostAt && sh.clockPostAt <= nowMS) {
+		sh.mu.Unlock()
+		respond(w, map[string]any{"ok": true})
+		return
+	}
+	sh.clockPostAt = postAt
+	sh.clockDecks = clean
+	sh.clockAt = now
+	sh.mu.Unlock()
+	respond(w, map[string]any{"ok": true})
+}
+
+func carriedClockDeck(d deckState, source, sourceID string, lastSeen time.Time, now time.Time) clockDeck {
+	pos := d.PositionMS
+	beat := d.Beat
+	at := d.At
+	if at <= 0 {
+		at = lastSeen.UnixMilli()
+	}
+	if d.Playing {
+		until := min(now.UnixMilli(), lastSeen.UnixMilli()+2000)
+		dtMS := max(int64(0), until-at)
+		rate := 1 + d.Pitch/100
+		if d.Pitch == 0 && d.BPM > 0 && d.CurrentBPM > 0 {
+			rate = d.CurrentBPM / d.BPM
+		}
+		pos += float64(dtMS) * rate
+		if tempo := deckEffectiveBPM(d); tempo > 0 && beat >= 0 {
+			beat = wrapBarBeat(beat + float64(dtMS)/1000.0*tempo/60.0)
+		}
+	}
+	master := d.Master != nil && *d.Master
+	lead := d.Lead != nil && *d.Lead
+	return clockDeck{
+		Deck:       d.Deck,
+		Source:     source,
+		SourceID:   sourceID,
+		Master:     master,
+		Lead:       lead,
+		Playing:    d.Playing || d.Cue,
+		Cue:        d.Cue,
+		BPM:        d.BPM,
+		CurrentBPM: d.CurrentBPM,
+		Pitch:      d.Pitch,
+		Beat:       beat,
+		PositionMS: pos,
+		At:         now.UnixMilli(),
+	}
+}
+
+// deckClockGet exposes the current local, peer, and Pro DJ Link deck beat state
+// over loopback for Mods such as dmx-studio (#209), without starting shadow beacons.
+func (s *Server) deckClockGet(w http.ResponseWriter, r *http.Request) {
+	devices := s.mergedDevices()
+	now := time.Now()
+	nowMS := now.UnixMilli()
+	sh := s.shadow
+	sh.mu.Lock()
+	sh.clockPolled = now
+	var out []clockDeck
+	switch {
+	case len(sh.own) > 0 && now.Sub(sh.ownAt) < 2*time.Second:
+		for _, d := range sh.own {
+			out = append(out, carriedClockDeck(d, "local", fmt.Sprintf("local:%d", d.Deck), sh.ownAt, now))
+		}
+	case len(sh.clockDecks) > 0 && now.Sub(sh.clockAt) < 2*time.Second:
+		for _, d := range sh.clockDecks {
+			out = append(out, carriedClockDeck(d, "local", fmt.Sprintf("local:%d", d.Deck), sh.clockAt, now))
+		}
+	}
+	var peerKeys []int
+	for slot := range sh.peerDecks {
+		peerKeys = append(peerKeys, slot)
+	}
+	slices.Sort(peerKeys)
+	for _, slot := range peerKeys {
+		p := sh.peerDecks[slot]
+		if p.Stale || now.Sub(p.at) >= 2*time.Second {
+			continue
+		}
+		srcID := p.ip
+		if p.Link != "" {
+			srcID = p.Link
+		}
+		d := p.deckState
+		d.At = p.at.UnixMilli()
+		out = append(out, carriedClockDeck(d, "peer", fmt.Sprintf("peer:%s:%d", srcID, d.Deck), p.at, now))
+	}
+	sh.mu.Unlock()
+
+	for _, dev := range devices {
+		if dev.Number < 1 || dev.Number > 4 || strings.HasPrefix(dev.Name, "EngineX") || now.Sub(dev.LastSeen) >= 2*time.Second {
+			continue
+		}
+		tempo := dev.EffectiveBPM
+		if tempo <= 0 && dev.BPM > 0 {
+			tempo = dev.BPM * (1 + dev.Pitch/100)
+		}
+		if tempo <= 0 {
+			continue
+		}
+		beat := dev.BeatPhase
+		if dev.BeatInBar >= 1 && dev.BeatInBar <= 4 {
+			beat = float64(dev.BeatInBar-1) + dev.BeatPhase
+		}
+		cue := dev.PlayState1 == cdjCuePlay
+		playing := dev.Playing || cue
+		if playing {
+			beat = wrapBarBeat(beat + now.Sub(dev.LastSeen).Seconds()*tempo/60.0)
+		} else {
+			beat = wrapBarBeat(beat)
+		}
+		out = append(out, clockDeck{
+			Deck:       int(dev.Number),
+			Source:     "prolink",
+			SourceID:   fmt.Sprintf("prolink:%d", dev.Number),
+			Master:     dev.Master,
+			Lead:       dev.Master,
+			Playing:    playing,
+			Cue:        cue,
+			BPM:        dev.BPM,
+			CurrentBPM: tempo,
+			Pitch:      dev.Pitch,
+			Beat:       beat,
+			PositionMS: float64(dev.PlayPositionMS),
+			At:         nowMS,
+		})
+	}
+	respond(w, map[string]any{"clockApi": true, "now": nowMS, "decks": out})
 }
 
 // shadowPush sends this player's decks to the other EngineX players at once
