@@ -406,7 +406,7 @@ func readSQLiteLibrary(mountRoot, dbPath string) (*Library, error) {
 	if cueTable != "" {
 		cueCols, cueTypes := getCols(cueTable)
 		cTrackIdCol := findCol(cueCols, "track_id", "media_item_id", "media_item_uuid", "track_uuid", "item_id")
-		cSlotCol := findCol(cueCols, "slot", "index", "cue_index", "hot_cue", "number")
+		cSlotCol := findCol(cueCols, "slot", "index", "index_num", "cue_index", "hot_cue", "number")
 		cPosCol = findCol(cueCols, "position_ms", "time_ms", "timestamp_ms", "position", "time_sec", "time", "position_sec")
 		cuePosType = colTypeOf(cueTypes, cPosCol)
 		cLabelCol := findCol(cueCols, "label", "name", "title")
@@ -469,7 +469,7 @@ func readSQLiteLibrary(mountRoot, dbPath string) (*Library, error) {
 	if loopTable != "" {
 		loopCols, loopTypes := getCols(loopTable)
 		lTrackIdCol := findCol(loopCols, "track_id", "media_item_id", "media_item_uuid", "track_uuid", "item_id")
-		lSlotCol := findCol(loopCols, "slot", "index", "loop_index", "number")
+		lSlotCol := findCol(loopCols, "slot", "index", "index_num", "loop_index", "number")
 		lStartCol = findCol(loopCols, "start_ms", "start_time", "start_time_ms", "start_sec", "start")
 		lLenCol = findCol(loopCols, "length_ms", "length_time", "duration_ms", "length_sec", "length")
 		loopStartType = colTypeOf(loopTypes, lStartCol)
@@ -927,32 +927,37 @@ func resolveTrackPath(mountRoot, rawPath string) (string, string, bool) {
 		return "", "", false
 	}
 
+	var rawVariants []string
 	if strings.HasPrefix(rawPath, "file://") {
-		if u, err := url.Parse(rawPath); err == nil {
-			rawPath = u.Path
-			if unescaped, err := url.PathUnescape(rawPath); err == nil {
-				rawPath = unescaped
-			}
-		} else {
-			rawPath = strings.TrimPrefix(rawPath, "file://")
+		rest := strings.TrimPrefix(rawPath, "file://")
+		if strings.HasPrefix(strings.ToLower(rest), "localhost/") {
+			rest = rest[len("localhost"):]
 		}
+		if unescaped, err := url.PathUnescape(rest); err == nil {
+			rawVariants = append(rawVariants, unescaped)
+		}
+		if len(rawVariants) == 0 || rawVariants[0] != rest {
+			rawVariants = append(rawVariants, rest)
+		}
+	} else {
+		rawVariants = []string{rawPath}
 	}
 
-	rawPath = filepath.Clean(filepath.FromSlash(rawPath))
 	mountClean := filepath.Clean(mountRoot)
 
 	var candidates []string
-
-	if filepath.IsAbs(rawPath) {
-		candidates = append(candidates, rawPath)
-
-		parts := strings.Split(filepath.ToSlash(rawPath), "/")
-		if len(parts) >= 3 && (parts[1] == "Volumes" || parts[1] == "media" || parts[1] == "mnt") {
-			relFromDrive := strings.Join(parts[3:], "/")
-			candidates = append(candidates, filepath.Join(mountClean, filepath.FromSlash(relFromDrive)))
+	for _, variant := range rawVariants {
+		cleaned := filepath.Clean(filepath.FromSlash(variant))
+		if filepath.IsAbs(cleaned) {
+			candidates = append(candidates, cleaned)
+			parts := strings.Split(filepath.ToSlash(cleaned), "/")
+			if len(parts) >= 3 && (parts[1] == "Volumes" || parts[1] == "media" || parts[1] == "mnt") {
+				relFromDrive := strings.Join(parts[3:], "/")
+				candidates = append(candidates, filepath.Join(mountClean, filepath.FromSlash(relFromDrive)))
+			}
+		} else {
+			candidates = append(candidates, filepath.Join(mountClean, cleaned))
 		}
-	} else {
-		candidates = append(candidates, filepath.Join(mountClean, rawPath))
 	}
 
 	evalMount, err := filepath.EvalSymlinks(mountClean)
