@@ -13,6 +13,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
 )
 
 // Rekordbox OneLibrary SQLCipher 4 passphrase from pyrekordbox/onelibrary/database.py (deobfuscate(BLOB)).
@@ -28,8 +32,9 @@ const (
 	sqlcipherFastKDFIter  = 2
 	sqlcipherHMACSaltMask = 0x3a
 
-	// MaxSQLCipherBytes bounds decrypted export size to 512 MiB.
-	MaxSQLCipherBytes = 512 << 20
+	// MaxSQLCipherBytes bounds the export that is decrypted. A 20000-track
+	// OneLibrary is far below it; the plaintext copy needs the same space on /data.
+	MaxSQLCipherBytes = 256 << 20
 
 	sqliteHeaderMagic = "SQLite format 3\x00"
 )
@@ -168,6 +173,64 @@ func DecryptSQLCipher4(ctx context.Context, r io.Reader, size int64, w io.Writer
 	return nil
 }
 
+// The plaintext copy goes to the EngineX state directory on /data (eMMC), not
+// to /tmp, which is a RAM tmpfs on the decks (SC5000: 1 GB of 2 GB RAM).
+// Hosts without /data/enginex (development, tests) use the system temp dir.
+var oneLibraryTempDir = func() string {
+	if st, err := os.Stat("/data/enginex"); err == nil && st.IsDir() {
+		return "/data/enginex/tmp"
+	}
+	return os.TempDir()
+}
+
+// freeBytes reports the space available to us on the filesystem of dir.
+var freeBytes = func(dir string) (uint64, error) {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(dir, &st); err != nil {
+		return 0, err
+	}
+	return st.Bavail * uint64(st.Bsize), nil
+}
+
+const (
+	oneLibraryTempPrefix = "rb-onelibrary-"
+	oneLibraryTempSlack  = 64 << 20
+)
+
+// prepareOneLibraryTempDir creates dir 0700 (never through a symlink) and
+// removes plaintext copies left by an rb-bridge that is gone: the mount hook
+// SIGKILLs it when the budget runs out, so its deferred remove never ran. The
+// owner's PID is in the name; a file of a live process is left alone.
+func prepareOneLibraryTempDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	st, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	if !st.IsDir() {
+		return fmt.Errorf("sqlcipher: temporary directory %s is not a directory", dir)
+	}
+	if sys, ok := st.Sys().(*syscall.Stat_t); ok && int(sys.Uid) != os.Geteuid() {
+		return fmt.Errorf("sqlcipher: temporary directory %s is not ours", dir)
+	}
+	if st.Mode().Perm()&0o077 != 0 {
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return err
+		}
+	}
+	matches, _ := filepath.Glob(filepath.Join(dir, oneLibraryTempPrefix+"*.db"))
+	for _, m := range matches {
+		rest := strings.TrimPrefix(filepath.Base(m), oneLibraryTempPrefix)
+		pid, err := strconv.Atoi(rest[:max(strings.IndexByte(rest, '-'), 0)])
+		if err == nil && pid > 0 && pid != os.Getpid() && syscall.Kill(pid, 0) == syscall.ESRCH {
+			os.Remove(m)
+		}
+	}
+	return nil
+}
+
 func decryptSQLCipher4ToTemp(ctx context.Context, srcPath string, passphrase []byte) (string, error) {
 	src, err := os.Open(srcPath)
 	if err != nil {
@@ -183,7 +246,21 @@ func decryptSQLCipher4ToTemp(ctx context.Context, srcPath string, passphrase []b
 		return "", fmt.Errorf("sqlcipher: non-regular database file %s", srcPath)
 	}
 
-	tmp, err := os.CreateTemp("", "rb-onelibrary-*.db")
+	if st.Size() > MaxSQLCipherBytes {
+		return "", fmt.Errorf("sqlcipher: database size %d exceeds %d-byte limit", st.Size(), MaxSQLCipherBytes)
+	}
+	dir := oneLibraryTempDir()
+	if err := prepareOneLibraryTempDir(dir); err != nil {
+		return "", err
+	}
+	free, err := freeBytes(dir)
+	if err != nil {
+		return "", err
+	}
+	if need := uint64(2*st.Size() + oneLibraryTempSlack); free < need {
+		return "", fmt.Errorf("sqlcipher: %d bytes free in %s, %d needed to decrypt the export", free, dir, need)
+	}
+	tmp, err := os.CreateTemp(dir, fmt.Sprintf("%s%d-*.db", oneLibraryTempPrefix, os.Getpid()))
 	if err != nil {
 		return "", err
 	}
