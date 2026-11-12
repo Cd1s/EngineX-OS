@@ -423,7 +423,19 @@ func cleanEmptyEngineLibrary(dir string) {
 			os.Remove(filepath.Join(dir, name))
 		}
 	}
-	os.Remove(filepath.Join(dir, ".rb-bridge.lock"))
+	// The lock file belongs to a running rb-bridge while it is locked: removing
+	// it would let a third one lock a fresh file and run beside it.
+	lock := filepath.Join(dir, ".rb-bridge.lock")
+	if f, err := os.OpenFile(lock, os.O_RDWR|syscall.O_NOFOLLOW, 0); err == nil {
+		busy := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil
+		if !busy {
+			os.Remove(lock)
+		}
+		f.Close()
+		if busy {
+			return
+		}
+	}
 	os.Remove(dir)
 	os.Remove(filepath.Dir(dir))
 }
