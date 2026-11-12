@@ -413,12 +413,49 @@ static void test_two_sticks_at_once(const char *root) {
     test_post_reserve=saved_reserve;
     puts("REAL PRIVATE NAMESPACE #182: two rekordbox sticks inserted together, the second one's cut-short or used-up window is not remembered as a too-large library and it converts on its next insert: PASS");
 }
+static unsigned count_entries(const char *path) {
+    DIR *d=opendir(path);if(!d)return 0;unsigned n=0;struct dirent *e;
+    while((e=readdir(d)))if(e->d_name[0]!='.')n++;
+    closedir(d);return n;
+}
+// #182 review: a read-only HFS+ stick with both an Engine Library and a
+// rekordbox export had its Engine database read and hashed from the stick twice,
+// the second time for the visible mount inside the few seconds kept for it. When
+// that ran out the deck got the bare read-only volume and the conversion was not
+// shown. The visible mount now takes the library the private conversion used.
+// The bridge changes the stick's database behind the mount: a second read would
+// find other content and present a fresh, unconverted copy of it.
+static void test_hfs_visible_mount_reuses_the_converted_library(const char *root) {
+    assert(!mount(NULL,"/",NULL,MS_REC|MS_PRIVATE,NULL));
+    char data[PATH_MAX],disk[PATH_MAX],db[PATH_MAX],target[PATH_MAX],p[PATH_MAX],cache[PATH_MAX],script[PATH_MAX*3];
+    join(data,root,"reuse-data");join(p,data,"enginex");assert(!make_dirs(p));
+    join(test_library,p,"hfs-libraries");test_legacy_library[0]=0;join(cache,test_library,"uuid-hfs-stick");
+    join(disk,root,"reuse-hfs");join(p,disk,".PIONEER/rekordbox");assert(!make_dirs(p));
+    join(p,disk,"Engine Library/Database2");assert(!make_dirs(p));join(db,p,"m.db");write_file(db,"made on the Mac");
+    join(test_rb_bridge,root,"reuse-bridge");
+    snprintf(script,sizeof script,"#!/bin/sh\necho \"read again $(date +%%s%%N)\" > '%s'\n: > \"$2/Engine Library/bridged\"\n",db);
+    write_file(test_rb_bridge,script);assert(!chmod(test_rb_bridge,0700));
+    join(target,MEDIA_ROOT,"REUSE");assert(!make_dirs(target));
+    snprintf(test_disk,sizeof test_disk,"%s",disk);test_disk_ro=1;snprintf(test_hfs_target,sizeof test_hfs_target,"%s",target);
+    struct libmnt_context c={.target=target,.source="/dev/sdw1"};
+    assert(!mnt_context_mount(&c)&&c.status==1);
+    join(p,target,"Engine Library/bridged");assert(!access(p,F_OK)); // the converted library is the one shown
+    join(p,target,"Engine Library/Database2/m.db");expect_file(p,"made on the Mac");
+    assert(count_entries(cache)==1);
+    assert(!unmount_dispatch(&c,real_unmount));
+    // The hand-over ends with the mount: a database changed since is seeded anew.
+    c.status=0;assert(!mnt_context_mount(&c)&&c.status==1);
+    join(p,target,"Engine Library/bridged");assert(!access(p,F_OK));
+    assert(count_entries(cache)==2);
+    assert(!unmount_dispatch(&c,real_unmount));test_hfs_target[0]=0;test_disk_ro=0;
+    puts("REAL PRIVATE NAMESPACE #182: a read-only HFS+ stick with an Engine Library and a rekordbox export is shown the library its private conversion used, without a second read of the stick's database: PASS");
+}
 int main(int argc,char **argv) {
     char root[]="/tmp/sc5000-edisks-tests-XXXXXX";assert(mkdtemp(root));
     join(test_media,root,"media");join(test_library,root,"libraries");join(test_runtime,root,"runtime");
     join(test_legacy_library,root,"legacy-libraries");
     assert(!make_dirs(test_media));test_paths_and_copy(root);test_compat_symlink_root(root);test_time();
-    if(argc>1&&!strcmp(argv[1],"--mounts")){test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);test_library_is_walked_once(root);test_two_sticks_at_once(root);}
+    if(argc>1&&!strcmp(argv[1],"--mounts")){test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);test_library_is_walked_once(root);test_two_sticks_at_once(root);test_hfs_visible_mount_reuses_the_converted_library(root);}
     // Mount tests have removed all namespace mounts before deleting fixtures.
     int tmp=open("/tmp",O_RDONLY|O_DIRECTORY);assert(tmp>=0);remove_tree(tmp,strrchr(root,'/')+1);close(tmp);
     puts("edisksd-hook: all requested tests passed");return 0;

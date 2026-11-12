@@ -261,6 +261,16 @@ static void remove_tree(int parent,const char *name) {
     }
     closedir(d);unlinkat(parent,name,AT_REMOVEDIR);
 }
+// The private conversion's library goes to the visible mount that follows it
+// under the same view_lock: seeded_as is what seed_library last resolved (sent
+// up by the pre-mount child), seeded_hint what the visible mount may reuse. The
+// stick's Engine database is then not read from the stick a second time inside
+// POST_RESERVE_MS; it was hashed and its tree checked a moment ago on this very
+// mount, and the view hides it. The cached library is still checked.
+static char seeded_as[32],seeded_hint[32];
+static int seeded_ok(const char *name) {
+    return !strncmp(name,"library-",8)&&strlen(name)==24&&strspn(name+8,"0123456789abcdef")==16;
+}
 static int seed_library(const char *target,const char *identity,char library[PATH_MAX],int64_t deadline) {
     char native[PATH_MAX],root[PATH_MAX],stage[PATH_MAX],cache[PATH_MAX];struct stat st;
     if(path_join(native,sizeof native,target,"Engine Library")||safe_path(native,1)||
@@ -268,8 +278,10 @@ static int seed_library(const char *target,const char *identity,char library[PAT
     struct stat cache_stat;
     if(lstat(cache,&cache_stat)||cache_stat.st_uid!=geteuid()||(cache_stat.st_mode&077)){errno=EACCES;return -1;}
     if(path_join(root,sizeof root,cache,identity)||make_dirs(root))return -1;
-    uint64_t signature=0;int src=-1;
-    if(!lstat(native,&st)) {
+    uint64_t signature=0;int src=-1,reuse=0;
+    if(seeded_ok(seeded_hint)){char prior[PATH_MAX];reuse=!path_join(prior,sizeof prior,root,seeded_hint)&&!lstat(prior,&st)&&S_ISDIR(st.st_mode);}
+    if(reuse){}
+    else if(!lstat(native,&st)) {
         if(!S_ISDIR(st.st_mode)){errno=ENOTDIR;return -1;}
         src=open(native,O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);if(src<0)return -1;
         if(copy_tree(src,-1,deadline,0)){close(src);return -1;} // validate reused native trees too
@@ -298,13 +310,16 @@ static int seed_library(const char *target,const char *identity,char library[PAT
             if(n<0){close(src);return -1;}
         }
     } else if(errno!=ENOENT)return -1;
-    char name[80];snprintf(name,sizeof name,"library-%016llx",(unsigned long long)signature);
+    char name[sizeof seeded_as];snprintf(name,sizeof name,"library-%016llx",(unsigned long long)signature);
+    if(reuse)snprintf(name,sizeof name,"%s",seeded_hint);
     if(path_join(library,PATH_MAX,root,name)){if(src>=0)close(src);return -1;}
     if(!lstat(library,&st)) {
         if(src>=0)close(src);
         if(safe_path(library,0)||!S_ISDIR(st.st_mode)){errno=ELOOP;return -1;}
         int fd=open(library,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);if(fd<0)return -1;
-        int rc=copy_tree(fd,-1,deadline,0);close(fd);return rc;
+        int rc=copy_tree(fd,-1,deadline,0);close(fd);
+        if(!rc)snprintf(seeded_as,sizeof seeded_as,"%s",name);
+        return rc;
     }
     if(errno!=ENOENT){if(src>=0)close(src);return -1;}
     if(snprintf(stage,sizeof stage,"%s/.seed-XXXXXX",root)>=(int)sizeof stage){if(src>=0)close(src);errno=ENAMETOOLONG;return -1;}
@@ -317,6 +332,7 @@ static int seed_library(const char *target,const char *identity,char library[PAT
     if(!rc)rc=rename(stage,library);
     if(!rc){int parent=open(root,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);if(parent<0)rc=-1;else{rc=fsync(parent);close(parent);}}
     if(rc){int saved=errno;int parent=open(root,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);if(parent>=0){remove_tree(parent,strrchr(stage,'/')+1);close(parent);}errno=saved;}
+    else snprintf(seeded_as,sizeof seeded_as,"%s",name);
     return rc;
 }
 static int bind_checked(const char *source,const char *target,unsigned long flags) {
@@ -537,8 +553,10 @@ static int premount(struct libmnt_context *ctx,int (*real)(struct libmnt_context
     // Two sticks inserted together: the second one's wait used its window up. It is
     // mounted as it is and converted on its next insert, never after Engine sees it.
     if(budget(deadline)){note("no time left to convert before the mount on",target,0);return 2;}
-    pid_t pid=fork();if(pid<0)return 0;
+    int up[2]={-1,-1};if(pipe2(up,O_CLOEXEC|O_NONBLOCK))up[0]=up[1]=-1;
+    pid_t pid=fork();if(pid<0){close(up[0]);close(up[1]);return 0;}
     if(!pid) {
+        seeded_as[0]=0;
         // Nothing mounted here reaches edisksd's (and Engine's) namespace.
         if(unshare(CLONE_NEWNS)||mount(NULL,"/",NULL,MS_REC|MS_PRIVATE,NULL))_exit(0);
         if(real(ctx)||mnt_context_get_status(ctx)!=1)_exit(0);
@@ -551,23 +569,32 @@ static int premount(struct libmnt_context *ctx,int (*real)(struct libmnt_context
         if(known){note("rekordbox library too large to convert at mount, skipped on",target,0);r=2;}
         else r=after_mount(ctx,MOUNT_PRE,deadline);
         if(r&TIMED_OUT&&whole_window&&!slow_marker(target,marker)){int fd=open(marker,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);if(fd>=0)close(fd);}
+        if(*seeded_as&&write(up[1],seeded_as,strlen(seeded_as))<0){} // best effort: without it the visible mount seeds again
         umount2(target,UMOUNT_NOFOLLOW); // the namespace ending would also drop it
         _exit(r&CONVERTED?1:r?2:0);
     }
+    close(up[1]);int result;
     for(;;) {
         int status;pid_t r=waitpid(pid,&status,WNOHANG);
-        if(r==pid)return WIFEXITED(status)?WEXITSTATUS(status):0;
-        if(r<0&&errno!=EINTR)return 0;
-        if(now_ms()>=deadline+1000){kill(pid,SIGKILL);while(waitpid(pid,&status,0)<0&&errno==EINTR){}return 2;}
+        if(r==pid) {
+            result=WIFEXITED(status)?WEXITSTATUS(status):0;
+            ssize_t n=read(up[0],seeded_hint,sizeof seeded_hint-1);seeded_hint[n>0?n:0]=0;
+            break;
+        }
+        if(r<0&&errno!=EINTR){result=0;break;}
+        if(now_ms()>=deadline+1000){kill(pid,SIGKILL);while(waitpid(pid,&status,0)<0&&errno==EINTR){}result=2;break;}
         usleep(20000);
     }
+    close(up[0]);return result;
 }
 static int hooked_mount(struct libmnt_context *ctx,int (*real)(struct libmnt_context *)) {
     int64_t start=now_ms(),deadline=deadline_from(start);
     pthread_mutex_lock(&view_lock);
+    seeded_hint[0]=0;
     int pre=premount(ctx,real,deadline-POST_RESERVE_MS,now_ms()-start<LOCK_WAIT_SLACK_MS);
     int rc=real(ctx),saved=errno;
     if(!rc&&mnt_context_get_status(ctx)==1){after_mount(ctx,pre?MOUNT_POST:MOUNT_FULL,deadline);errno=saved;}
+    seeded_hint[0]=0;
     pthread_mutex_unlock(&view_lock);return rc;
 }
 #ifndef REAL_MNT_CONTEXT_MOUNT
