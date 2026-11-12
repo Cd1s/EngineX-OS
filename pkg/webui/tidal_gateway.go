@@ -416,11 +416,23 @@ func tidalNumericID(name string) uint32 { return crc32.ChecksumIEEE([]byte(name)
 
 func isTidal(p string) bool { return strings.HasPrefix(p, "/v1/") || strings.HasPrefix(p, "/au/") }
 
+// relayedFromOutside reports a request a tunnel on the deck carried in from elsewhere: it
+// arrives from loopback, but with headers the tunnel's edge always adds and a caller cannot
+// remove. Engine and the deck's own tools never send them.
+func relayedFromOutside(r *http.Request) bool {
+	for _, h := range []string{"Cf-Connecting-Ip", "Cf-Ray", "Cdn-Loop", "Tailscale-User-Login"} {
+		if _, ok := r.Header[h]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 // ServeHTTP folds the "/au//" and "/v1//" joins produced by the patched base
 // URLs. The gateway has no console login, so only the deck itself may use it.
 func (g *tidalGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if ip := net.ParseIP(host); err != nil || ip == nil || !ip.IsLoopback() {
+	if ip := net.ParseIP(host); err != nil || ip == nil || !ip.IsLoopback() || relayedFromOutside(r) {
 		fail(w, 403, errors.New("the streaming gateway is local to the deck"))
 		return
 	}

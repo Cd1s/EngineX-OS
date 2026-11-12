@@ -188,7 +188,7 @@ func TestTailscaleLoginServeAndStop(t *testing.T) {
 	if left, _ := filepath.Glob(filepath.Join(s.tailscaleRoot(), ".authkey-*")); len(left) != 0 {
 		t.Fatalf("temporary key file left behind: %v", left)
 	}
-	if !f.has("serve reset") || !f.has("serve --bg --tcp=22 tcp://127.0.0.1:22") || !f.has("serve --bg --tcp=8080 tcp://127.0.0.1:8080") {
+	if !f.has("serve reset") || !f.has("serve --bg --tcp=22 tcp://127.0.0.1:22") || !f.has("serve --bg --tcp=8080 tcp://"+ForwardAddr) {
 		cmds, _ := f.snapshot()
 		t.Fatalf("forwards wrong: %v", cmds)
 	}
