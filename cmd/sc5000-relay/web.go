@@ -504,7 +504,7 @@ func (s *server) handleConfigPost(w http.ResponseWriter, r *http.Request) {
 	}
 	if np := v.Get("newPassword"); np != "" {
 		cur := v.Get("currentPassword")
-		if !s.cfg.checkPassword(cur) && !s.decks.checkAccessCode(cur) {
+		if !s.cfg.checkPassword(cur) {
 			fail(403, "当前密码不正确")
 			return
 		}
