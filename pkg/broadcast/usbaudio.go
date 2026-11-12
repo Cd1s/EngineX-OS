@@ -3,9 +3,11 @@ package broadcast
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -71,9 +73,12 @@ func DetectUSBDACs(asoundCardsPath string) ([]USBDAC, error) {
 		}
 		combined := strings.ToLower(currID + " " + currRawName + " " + currDesc)
 
-		// Exclude built-in soundcards
-		excludeKeywords := []string{
-			"rockchip", "az01", "wm8960", "sndhdmi", "hdmi", "loopback", "uac2gadget", "uac2_gadget",
+		// A card driven by snd-usb-audio is a USB DAC whatever its name says: a USB-C dock or
+		// interface may call itself "HDMI" (BH-GF3-6). The keywords keep out the built-in cards.
+		usbDriver := strings.HasPrefix(strings.ToLower(currRawName), "usb-audio")
+		excludeKeywords := []string{"loopback", "uac2gadget", "uac2_gadget"}
+		if !usbDriver {
+			excludeKeywords = append(excludeKeywords, "rockchip", "az01", "wm8960", "sndhdmi", "hdmi")
 		}
 		for _, kw := range excludeKeywords {
 			if strings.Contains(combined, kw) {
@@ -188,7 +193,12 @@ func (m *USBAudioManager) DetectDACs() ([]USBDAC, error) {
 	return DetectUSBDACs(m.cardsPath)
 }
 
-// Apply validates configuration, writes to disk, and invokes /usr/sbin/sc5000-usb-audio.
+// ErrInvalidUSBAudioConfig marks a configuration Apply refuses (the caller's mistake, not the deck's).
+var ErrInvalidUSBAudioConfig = errors.New("invalid USB audio configuration")
+
+// Apply validates configuration, writes to disk, and invokes /usr/sbin/sc5000-usb-audio. It reports a
+// configuration that could not be saved or a helper run that failed (BH-GF3-6: both were dropped and
+// the Web UI showed success); every step is still attempted.
 func (m *USBAudioManager) Apply(cfg USBAudioConfig) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -198,14 +208,14 @@ func (m *USBAudioManager) Apply(cfg USBAudioConfig) error {
 		cfg.HostDACMode = "default"
 	}
 	if cfg.HostDACMode != "default" && cfg.HostDACMode != "external" {
-		return fmt.Errorf("invalid hostDacMode: %q (must be 'default' or 'external')", cfg.HostDACMode)
+		return fmt.Errorf("%w: hostDacMode %q (must be 'default' or 'external')", ErrInvalidUSBAudioConfig, cfg.HostDACMode)
 	}
 
 	if cfg.SampleRate == 0 {
 		cfg.SampleRate = 48000
 	}
 	if cfg.SampleRate != 44100 && cfg.SampleRate != 48000 && cfg.SampleRate != 96000 {
-		return fmt.Errorf("invalid sampleRate: %d (must be 44100, 48000, or 96000)", cfg.SampleRate)
+		return fmt.Errorf("%w: sampleRate %d (must be 44100, 48000, or 96000)", ErrInvalidUSBAudioConfig, cfg.SampleRate)
 	}
 
 	cfg.HostDACCard = strings.TrimSpace(cfg.HostDACCard)
@@ -215,18 +225,28 @@ func (m *USBAudioManager) Apply(cfg USBAudioConfig) error {
 
 	m.cfg = cfg
 
+	var errs []error
 	if m.configPath != "" {
-		if data, err := json.MarshalIndent(cfg, "", "  "); err == nil {
-			_ = os.WriteFile(m.configPath, data, 0600)
+		data, err := json.MarshalIndent(cfg, "", "  ")
+		if err == nil {
+			err = os.WriteFile(m.configPath, data, 0600)
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("saving the USB audio settings: %w", err))
+		}
+	}
+	run := func(args ...string) {
+		if out, err := exec.Command(m.scriptPath, args...).CombinedOutput(); err != nil {
+			errs = append(errs, fmt.Errorf("%s %s: %w: %s", filepath.Base(m.scriptPath), strings.Join(args, " "), err, strings.TrimSpace(string(out))))
 		}
 	}
 
 	// Invoke script if present and executable
 	if st, err := os.Stat(m.scriptPath); err == nil && st.Mode()&0111 != 0 {
 		if cfg.GadgetUAC2 {
-			_ = exec.Command(m.scriptPath, "enable-uac2").Run()
+			run("enable-uac2", strconv.Itoa(cfg.SampleRate)) // the rate the gadget offers the computer
 		} else {
-			_ = exec.Command(m.scriptPath, "disable-uac2").Run()
+			run("disable-uac2")
 		}
 
 		if cfg.HostDACMode == "external" {
@@ -237,12 +257,12 @@ func (m *USBAudioManager) Apply(cfg USBAudioConfig) error {
 				}
 			}
 			if target != "" && target != "auto" {
-				_ = exec.Command(m.scriptPath, "route-dac", target).Run()
+				run("route-dac", target)
 			}
 		} else {
-			_ = exec.Command(m.scriptPath, "route-dac", "default").Run()
+			run("route-dac", "default")
 		}
 	}
 
-	return nil
+	return errors.Join(errs...)
 }

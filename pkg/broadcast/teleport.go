@@ -95,7 +95,10 @@ func ParseTeleportFrame(data []byte) (*TeleportFrame, error) {
 	fmtCode := binary.BigEndian.Uint16(data[10:12])
 	ts := binary.BigEndian.Uint64(data[12:20])
 	dataLen := binary.BigEndian.Uint32(data[20:24])
-	if len(data) < 24+int(dataLen) {
+	// Unsigned: on 32-bit armhf 24+int(dataLen) wrapped negative for a length
+	// >= 0x7fffffe8 from the network, passed the check and the slice below
+	// panicked, ending stream-sync (BH-GF2-18, BH-GF3-1).
+	if uint64(dataLen) > uint64(len(data)-24) {
 		return nil, errors.New("truncated Teleport payload")
 	}
 	return &TeleportFrame{
@@ -105,7 +108,7 @@ func ParseTeleportFrame(data []byte) (*TeleportFrame, error) {
 		Format:     fmtCode,
 		Timestamp:  ts,
 		DataLen:    dataLen,
-		Payload:    data[24 : 24+dataLen],
+		Payload:    data[24 : 24+int(dataLen)],
 	}, nil
 }
 

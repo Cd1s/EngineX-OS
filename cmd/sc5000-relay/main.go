@@ -63,7 +63,7 @@ func main() {
 	stateDir := flag.String("state", defaultRelayStateDir(), "state directory (config.json, sessions)")
 	stemsTarget := flag.String("stems-target", envOrDefault("ENGINEX_RELAY_STEMS_TARGET", "http://127.0.0.1:6596"), "local enginex-stemsd base URL (/v1/engine is appended)")
 	stemsToken := flag.String("stems-token-file", envOrDefault("ENGINEX_RELAY_STEMS_TOKEN_FILE", defaultStemsTokenFile()), "enginex-stemsd internal token; missing file sends none")
-	proxies := flag.String("trusted-proxies", envOrDefault("ENGINEX_RELAY_TRUSTED_PROXIES", ""), "comma-separated proxy IPs/CIDRs whose X-Forwarded-For is trusted; empty trusts all private, loopback and tailnet peers")
+	proxies := flag.String("trusted-proxies", envOrDefault("ENGINEX_RELAY_TRUSTED_PROXIES", ""), "comma-separated proxy IPs/CIDRs whose X-Forwarded-For is trusted; empty trusts loopback peers only")
 	flag.Parse()
 	if strings.Contains(*public, "relay.example.com") {
 		log.Fatal("-public must be this relay's real public URL or 'auto' (relay.example.com is a placeholder)")

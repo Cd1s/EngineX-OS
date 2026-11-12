@@ -747,3 +747,108 @@ func TestLiveMP3DropsAListenerThatStoppedReading(t *testing.T) {
 		t.Fatalf("encoder process %s outlived its listener", strings.TrimSpace(string(pid)))
 	}
 }
+
+// Real deck, r3: a network outage of more than ~10 s to a /live.wav listener
+// made the deck close it at its 10 s write deadline; the FIN was lost in the
+// outage, so OBS stayed ESTABLISHED with no data and played silence until the
+// source was restarted. A 15 s stall must be ridden out: the stream resumes,
+// frame-aligned, with the backlog still bounded by the listener's trim.
+func TestLiveWAVSurvivesA15SecondStall(t *testing.T) {
+	if testing.Short() {
+		t.Skip("15 s stall")
+	}
+	t.Parallel()
+	s, dir := newTestServer(t)
+	enableLiveWithPCM(t, s, dir)
+	srv := httptest.NewServer(s)
+	defer srv.Close()
+	conn, _ := openLive(t, srv.URL, "format=pcm&buffer=300")
+	defer conn.Close()
+	if got := readFor(t, conn, 200*time.Millisecond); len(got) == 0 {
+		t.Fatal("no audio before the stall")
+	}
+	time.Sleep(15 * time.Second) // the outage: nothing read
+	backlog := readFor(t, conn, 150*time.Millisecond)
+	if limit := 96000 + 2*16384 + 64<<10 + 150*192 + 100*192; len(backlog) > limit {
+		t.Fatalf("backlog after a 15 s stall: %d bytes (%.0f ms), want <= %d", len(backlog), float64(len(backlog))/192, limit)
+	}
+	more := readFor(t, conn, 500*time.Millisecond)
+	if len(more) < 50*192 {
+		t.Fatalf("stream did not resume after a 15 s stall: %d bytes in 500 ms (backlog %d)", len(more), len(backlog))
+	}
+	all := append(backlog, more...)
+	for i := 0; i+4 <= len(all)&^3; i += 4 {
+		if !bytes.Equal(all[i:i+4], []byte{1, 2, 3, 4}) {
+			t.Fatalf("frame %d after the stall is misaligned: %v", i/4, all[i:i+4])
+		}
+	}
+}
+
+// The hijacked /live.wav connection probes an idle peer every 5 s after 15 s
+// (4 probes), so a listener that went away for good is noticed in about 35 s;
+// Go's listener default was 15 s, 15 s, 9 probes (about 2.5 min).
+func TestLiveWAVConnectionHasKeepAlive(t *testing.T) {
+	s, dir := newTestServer(t)
+	enableLiveWithPCM(t, s, dir)
+	srv := httptest.NewUnstartedServer(s)
+	conns := make(chan net.Conn, 4)
+	srv.Config.ConnState = func(c net.Conn, st http.ConnState) {
+		if st == http.StateNew {
+			conns <- c
+		}
+	}
+	srv.Start()
+	defer srv.Close()
+	conn, _ := openLive(t, srv.URL, "format=pcm")
+	defer conn.Close()
+	readFor(t, conn, 100*time.Millisecond)
+	tc, ok := (<-conns).(*net.TCPConn)
+	if !ok {
+		t.Fatal("not a TCP connection")
+	}
+	raw, err := tc.SyscallConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var on, idle, intvl, cnt int
+	raw.Control(func(fd uintptr) {
+		on, _ = syscall.GetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_KEEPALIVE)
+		idle, _ = syscall.GetsockoptInt(int(fd), syscall.IPPROTO_TCP, syscall.TCP_KEEPIDLE)
+		intvl, _ = syscall.GetsockoptInt(int(fd), syscall.IPPROTO_TCP, syscall.TCP_KEEPINTVL)
+		cnt, _ = syscall.GetsockoptInt(int(fd), syscall.IPPROTO_TCP, syscall.TCP_KEEPCNT)
+	})
+	if on != 1 || idle != 15 || intvl != 5 || cnt != 4 {
+		t.Fatalf("keepalive on=%d idle=%d intvl=%d cnt=%d, want 1/15/5/4", on, idle, intvl, cnt)
+	}
+}
+
+// deadlineWriter is a ResponseWriter that cannot be hijacked (HTTP/2) and
+// records the write deadlines set through http.ResponseController.
+type deadlineWriter struct {
+	*httptest.ResponseRecorder
+	deadlines []time.Time
+}
+
+func (d *deadlineWriter) SetWriteDeadline(t time.Time) error {
+	d.deadlines = append(d.deadlines, t)
+	return nil
+}
+
+// The non-hijack fallback kept the server's two-minute WriteTimeout for the
+// whole stream (r3 review); it sets a per-write deadline like the hijacked path.
+func TestLiveWAVFallbackSetsAPerWriteDeadline(t *testing.T) {
+	w := &deadlineWriter{ResponseRecorder: httptest.NewRecorder()}
+	write, done := liveWriter(w)
+	defer done()
+	for i := 0; i < 2; i++ {
+		if err := write([]byte{1, 2, 3, 4}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(w.deadlines) != 2 {
+		t.Fatalf("deadlines set: %d, want one per write", len(w.deadlines))
+	}
+	if d := time.Until(w.deadlines[1]); d < 50*time.Second || d > 61*time.Second {
+		t.Fatalf("write deadline %v ahead, want the 60 s stall timeout", d)
+	}
+}

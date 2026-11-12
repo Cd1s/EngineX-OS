@@ -56,6 +56,9 @@ var (
 	engineQuitReasonPath   = "/tmp/engine-quit-reason"
 	allowUpdateFromURL     = isDeckDataDir
 	quitEngineForUpdate    = func() error {
+		if err := guardHostCommand("pkill"); err != nil {
+			return err
+		}
 		return exec.Command("pkill", "-TERM", "-f", "^/usr/Engine/Engine( |$)").Run()
 	}
 )
@@ -289,7 +292,11 @@ func (s *Server) applyOnlineUpdate(downloadURL string) {
 		_ = os.WriteFile(staged+".url", []byte(downloadURL+"\n"), 0o644)
 	}
 	s.setUpdateProgress(0.97, "", false)
-	cmd := exec.Command("/usr/sbin/az01-update", "--file", staged)
+	if err := guardHostCommand(az01UpdateBin); err != nil {
+		s.setUpdateProgress(0, err.Error(), true)
+		return
+	}
+	cmd := exec.Command(az01UpdateBin, "--file", staged)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		msg := strings.TrimSpace(string(out))
 		if msg == "" {
@@ -298,8 +305,20 @@ func (s *Server) applyOnlineUpdate(downloadURL string) {
 		s.setUpdateProgress(0, "az01-update: "+msg, true)
 		return
 	}
+	// az01-update restarts the deck once it has installed the image, so the
+	// deck shows "installing" until then. If the deck is still up after the
+	// grace period nothing will restart it: release the state, or every later
+	// try was refused as "updating" until a power cycle (BH-GC2-4).
 	s.setUpdateProgress(1.0, "", false)
+	time.AfterFunc(updateRebootGrace, func() {
+		s.setUpdateProgress(0, "az01-update finished but the deck did not restart; try again", true)
+	})
 }
+
+var (
+	az01UpdateBin     = "/usr/sbin/az01-update"
+	updateRebootGrace = 3 * time.Minute
+)
 
 // tryApplyGen2Image handles a 2nd-generation *-Update.img (128-byte ENGINEX_DATA_BUNDLE_IMG_V1
 // header + Data-Bundle.tar.gz) when the background download fallback ran instead of Engine's
@@ -644,7 +663,9 @@ func (s *Server) installDataBundleReader(r io.Reader, work string) {
 		// stream-sync does not terminate the activation script along with stream-sync's cgroup.
 		script := `sleep 2; pkill -f '[s]c5000-suite (stream-sync|rb-bridge|sc5000-deemixd)'; sleep 1; exec sh ` + customDir + `/bundle/boot-activate.sh`
 		launched := false
-		if _, err := exec.LookPath("systemd-run"); err == nil {
+		if guardHostCommand("systemd-run") != nil {
+			log.Printf("stream-sync: %v", guardHostCommand("systemd-run"))
+		} else if _, err := exec.LookPath("systemd-run"); err == nil {
 			// systemd-run submits the transient unit to PID 1 and returns immediately.
 			if out, err := exec.Command("systemd-run", "--description=EngineX OTA Activation", "sh", "-c", script).CombinedOutput(); err == nil {
 				launched = true

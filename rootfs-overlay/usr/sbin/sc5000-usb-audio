@@ -4,11 +4,12 @@ set -eu
 # sc5000-usb-audio: EngineX OS USB-A DAC and USB-B UAC2 Gadget management
 # Subcommands:
 #   status       - show detected USB DACs and UAC2 gadget status
-#   enable-uac2  - configure and bind USB-B UAC2 gadget via ConfigFS
+#   enable-uac2  - configure and bind USB-B UAC2 gadget via ConfigFS [44100|48000|96000]
 #   disable-uac2 - unbind and remove UAC2 gadget
 #   route-dac    - route audio to USB DAC (<hw:X,0> or 'stop'/'default')
 
-CONFIGFS_MNT="/sys/kernel/config"
+CONFIGFS_MNT="${SC5000_CONFIGFS:-/sys/kernel/config}"
+UDC_CLASS="${SC5000_UDC_CLASS:-/sys/class/udc}"
 GADGET_DIR="$CONFIGFS_MNT/usb_gadget/enginex_uac2"
 PIDFILE="${SC5000_USB_AUDIO_PIDFILE:-/run/sc5000-usb-audio.pid}"
 CARDS_FILE="/proc/asound/cards"
@@ -96,6 +97,9 @@ cmd_status() {
 }
 
 cmd_enable_uac2() {
+    # The sample rate chosen in the Web Console (BH-GF3-6: always 48000 before).
+    rate=${1:-48000}
+    case $rate in 44100|48000|96000) ;; *) echo "unsupported sample rate: $rate" >&2; return 1 ;; esac
     ensure_configfs
     if command -v modprobe >/dev/null 2>&1; then
         modprobe libcomposite 2>/dev/null || :
@@ -120,15 +124,19 @@ cmd_enable_uac2() {
 
         mkdir -p "$GADGET_DIR/functions/uac2.usb0" 2>/dev/null || :
         echo 3 > "$GADGET_DIR/functions/uac2.usb0/c_chmask" 2>/dev/null || :
-        echo 48000 > "$GADGET_DIR/functions/uac2.usb0/c_srate" 2>/dev/null || :
+        echo "$rate" > "$GADGET_DIR/functions/uac2.usb0/c_srate" 2>/dev/null || :
         echo 3 > "$GADGET_DIR/functions/uac2.usb0/c_ssize" 2>/dev/null || :
 
         ln -s "$GADGET_DIR/functions/uac2.usb0" "$GADGET_DIR/configs/c.1/" 2>/dev/null || :
+    elif [ "$(cat "$GADGET_DIR/functions/uac2.usb0/c_srate" 2>/dev/null)" != "$rate" ]; then
+        # A bound function's attributes cannot change: unbind, set the rate, bind again below.
+        echo "" > "$GADGET_DIR/UDC" 2>/dev/null || :
+        echo "$rate" > "$GADGET_DIR/functions/uac2.usb0/c_srate" 2>/dev/null || :
     fi
 
     # Bind UDC
-    if [ -d /sys/class/udc ]; then
-        for udc in /sys/class/udc/*; do
+    if [ -d "$UDC_CLASS" ]; then
+        for udc in "$UDC_CLASS"/*; do
             if [ -e "$udc" ]; then
                 udc_name=${udc##*/}
                 echo "$udc_name" > "$GADGET_DIR/UDC" 2>/dev/null || :
@@ -187,7 +195,8 @@ case "${1:-status}" in
         cmd_status
         ;;
     enable-uac2)
-        cmd_enable_uac2
+        shift
+        cmd_enable_uac2 "${1:-}"
         ;;
     disable-uac2)
         cmd_disable_uac2
@@ -197,7 +206,7 @@ case "${1:-status}" in
         cmd_route_dac "${1:-}"
         ;;
     *)
-        echo "Usage: $0 {status|enable-uac2|disable-uac2|route-dac <hw:X,0>}" >&2
+        echo "Usage: $0 {status|enable-uac2 [rate]|disable-uac2|route-dac <hw:X,0>}" >&2
         exit 1
         ;;
 esac
