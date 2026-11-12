@@ -31,6 +31,11 @@ static int64_t test_post_reserve=18500;
 // Free space kept on the cache filesystem: none, except in the test that sets it.
 static uint64_t test_cache_reserve;
 #define HFS_CACHE_RESERVE test_cache_reserve
+#include <errno.h>
+#include <sys/stat.h>
+static char test_eio_path[PATH_MAX];
+static int test_lstat(const char *path,struct stat *st){if(*test_eio_path&&!strcmp(path,test_eio_path)){errno=EIO;return -1;}return lstat(path,st);}
+#define LSTAT test_lstat
 #include "edisksd_hook.c"
 #include <assert.h>
 #include <ftw.h>
@@ -680,12 +685,56 @@ static void test_heal_before_visible(const char *root) {
     unlink(log);unsetenv("EDISKSD_TEST_PID");
     puts("REAL PRIVATE NAMESPACE BH-F52-1: an Engine stick's database is healed once in the private pre-mount (FAT and read-only HFS+), never after the visible mount, a stick without one not at all, a too-slow heal skipped on the next insert: PASS");
 }
+// BH-O55-3: a stick without a view is ejected at once while another stick is
+// being converted; the conversion holds view_lock for up to its whole budget.
+static void test_eject_while_another_stick_converts(const char *root) {
+    assert(!mount(NULL,"/",NULL,MS_REC|MS_PRIVATE,NULL));
+    char plain[PATH_MAX],tp[PATH_MAX],rb[PATH_MAX],tr[PATH_MAX],p[PATH_MAX];
+    join(plain,root,"eject-plain");join(p,plain,"Music");assert(!make_dirs(p));
+    join(tp,MEDIA_ROOT,"EJECT-PLAIN");assert(!make_dirs(tp));
+    join(rb,root,"eject-rekordbox");join(p,rb,"PIONEER/rekordbox");assert(!make_dirs(p));
+    join(tr,MEDIA_ROOT,"EJECT-RB");assert(!make_dirs(tr));
+    join(test_rb_bridge,root,"eject-bridge");
+    write_file(test_rb_bridge,"#!/bin/sh\nsleep 2.5\nmkdir -p \"$2/Engine Library/Database2\" && echo converted > \"$2/Engine Library/Database2/m.db\"\n");
+    assert(!chmod(test_rb_bridge,0700));
+    int64_t saved_reserve=test_post_reserve;test_post_reserve=16000;test_disk_ro=0;
+    struct libmnt_context c={.target=tp,.source="/dev/sdr1",.disk=plain};
+    unsigned views=count_views();
+    assert(!mnt_context_mount(&c)&&c.status==1&&count_mounts(tp)==1&&count_views()==views);
+    struct insert ir={.c={.target=tr,.source="/dev/sds1",.disk=rb}};pthread_t t;
+    assert(!pthread_create(&t,NULL,insert_thread,&ir));usleep(500000);
+    int64_t t0=now_ms();
+    assert(!unmount_dispatch(&c,real_unmount)&&count_mounts(tp)==0);
+    int64_t took=now_ms()-t0;
+    printf("eject of a plain stick took %lld ms while another stick converted\n",(long long)took);
+    assert(took<1000);
+    assert(pthread_tryjoin_np(t,NULL)==EBUSY); // the other stick is still being converted
+    assert(!pthread_join(t,NULL)&&!ir.rc&&ir.c.status==1);
+    join(p,tr,"Engine Library/Database2/m.db");expect_file(p,"converted\n");
+    assert(!umount2(tr,UMOUNT_NOFOLLOW));test_post_reserve=saved_reserve;
+    puts("REAL PRIVATE NAMESPACE BH-O55-3: a stick without a view is ejected at once while another stick is being converted: PASS");
+}
+// BH-O55-5: a stick pulled without Eject answers EIO inside; its eject is the
+// stock umount, not a refusal that keeps the dead mount until a reboot.
+static void test_eject_of_a_pulled_stick(const char *root) {
+    assert(!mount(NULL,"/",NULL,MS_REC|MS_PRIVATE,NULL));
+    char plain[PATH_MAX],tp[PATH_MAX],p[PATH_MAX];
+    join(plain,root,"pulled");join(p,plain,"Music");assert(!make_dirs(p));
+    join(tp,MEDIA_ROOT,"PULLED");assert(!make_dirs(tp));test_disk_ro=0;
+    struct libmnt_context c={.target=tp,.source="/dev/sdt1",.disk=plain};
+    assert(!mnt_context_mount(&c)&&c.status==1&&count_mounts(tp)==1);
+    join(test_eio_path,tp,"Engine Library");unsigned calls=real_calls;
+    int rc=unmount_dispatch(&c,real_unmount);test_eio_path[0]=0;
+    if(rc)assert(!umount2(tp,UMOUNT_NOFOLLOW)); // leave no mount behind before failing
+    assert(!rc&&real_calls==calls+1&&count_mounts(tp)==0);
+    puts("REAL PRIVATE NAMESPACE BH-O55-5: a stick whose library answers EIO (pulled without Eject) is still unmounted: PASS");
+}
 int main(int argc,char **argv) {
     char root[]="/tmp/sc5000-edisks-tests-XXXXXX";assert(mkdtemp(root));
     join(test_media,root,"media");join(test_library,root,"libraries");join(test_runtime,root,"runtime");
     join(test_legacy_library,root,"legacy-libraries");join(test_utab,root,"utab");assert(!make_dirs(test_utab));
     assert(!make_dirs(test_media));test_paths_and_copy(root);test_compat_symlink_root(root);test_time();test_slow_marker_follows_every_export_file(root);test_monitor_sees_plain_device_mount(root);
-    if(argc>1&&!strcmp(argv[1],"--mounts")){test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);test_library_is_walked_once(root);test_two_sticks_at_once(root);test_hfs_visible_mount_reuses_the_converted_library(root);test_private_mount_leaves_nothing_behind(root);test_hfs_view_copies_only_metadata(root);test_heal_before_visible(root);}
+    if(argc>1&&!strcmp(argv[1],"--mounts")){test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);test_library_is_walked_once(root);test_two_sticks_at_once(root);test_hfs_visible_mount_reuses_the_converted_library(root);test_private_mount_leaves_nothing_behind(root);test_hfs_view_copies_only_metadata(root);test_heal_before_visible(root);test_eject_while_another_stick_converts(root);test_eject_of_a_pulled_stick(root);}
     // Mount tests have removed all namespace mounts before deleting fixtures.
     int tmp=open("/tmp",O_RDONLY|O_DIRECTORY);assert(tmp>=0);remove_tree(tmp,strrchr(root,'/')+1);close(tmp);
     puts("edisksd-hook: all requested tests passed");return 0;

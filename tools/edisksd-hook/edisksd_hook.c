@@ -41,6 +41,9 @@
 #ifndef UTAB_DIR
 #define UTAB_DIR "/run/mount"
 #endif
+#ifndef LSTAT
+#define LSTAT lstat // the tests give it the I/O error of a stick pulled without Eject
+#endif
 #define HFSPLUS_MAGIC 0x482b
 #define HOOK_BUDGET_MS INT64_C(20000)
 #define MAX_VIEW_ENTRIES 4096
@@ -100,7 +103,7 @@ static int safe_path(const char *path, int missing_final) {
         const char *part=strrchr(copy,'/'); part=part?part+1:copy;
         if (!*part || !strcmp(part,".") || !strcmp(part,"..")) {errno=EINVAL;return -1;}
         struct stat st;
-        if (lstat(copy,&st)) { if (!saved && missing_final && errno==ENOENT) return 0; return -1; }
+        if (LSTAT(copy,&st)) { if (!saved && missing_final && errno==ENOENT) return 0; return -1; }
         if (S_ISLNK(st.st_mode)) {errno=ELOOP;return -1;}
         if (saved && !S_ISDIR(st.st_mode)) {errno=ENOTDIR;return -1;}
         *p=saved; if (!saved) return 0;
@@ -954,8 +957,17 @@ static int unmount_dispatch(struct libmnt_context *ctx,int (*real)(struct libmnt
     const char *target=mnt_context_get_target(ctx);
     if(!volume(target))return real(ctx);
     char lib[PATH_MAX];
-    if(safe_path(target,0)||path_join(lib,sizeof lib,target,"Engine Library")||safe_path(lib,1))return -errno;
-    pthread_mutex_lock(&view_lock);in_hook=1;pthread_mutex_lock(&post_lock);struct owned_view *v=load_view(target);
+    if(safe_path(target,0)||path_join(lib,sizeof lib,target,"Engine Library"))return -errno;
+    // A symlinked library is refused. Any other error is the stick's, e.g. EIO once it was
+    // pulled without Eject: that must not keep the dead mount until a reboot (BH-O55-5).
+    if(safe_path(lib,1)&&errno==ELOOP)return -ELOOP;
+    // Only this target's own mount makes its view record, under view_lock. Without one it
+    // is the stock umount and does not wait for view_lock, which another stick's
+    // conversion holds for up to its whole budget (BH-O55-3).
+    struct owned_view *v=load_view(target);
+    if(!v){in_hook=1;int rc=real(ctx),saved=errno;in_hook=0;errno=saved;return rc;}
+    free(v);
+    pthread_mutex_lock(&view_lock);in_hook=1;pthread_mutex_lock(&post_lock);v=load_view(target);
     int rc=v?unmount_view(ctx,v,real):real(ctx);int saved=errno;free(v);
     pthread_mutex_unlock(&post_lock);in_hook=0;pthread_mutex_unlock(&view_lock);errno=saved;return rc;
 }
