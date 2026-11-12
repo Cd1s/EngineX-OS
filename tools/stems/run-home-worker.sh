@@ -58,10 +58,17 @@ if [ -z "$relay_bin" ]; then
   fi
 fi
 
+token_file=""
 if [ "$with_tunnel" = "1" ]; then
+  mkdir -p "$home_dir"
+  token_file="$home_dir/stems-token"
+  if [ ! -s "$token_file" ]; then
+    (umask 077 && "$py" -c 'import secrets; print(secrets.token_hex(16))' > "$token_file")
+  fi
+  chmod 600 "$token_file"
   if [ -n "$relay_bin" ] && [ -x "$relay_bin" ]; then
     echo "EngineX OS: starting enginex-relay with domain-free Cloudflare Quick Tunnel (-public auto)..." >&2
-    "$relay_bin" -public auto -stems-target http://127.0.0.1:17890 -state "$home_dir/relay-state" &
+    "$relay_bin" -public auto -stems-target http://127.0.0.1:17890 -stems-token-file "$token_file" -state "$home_dir/relay-state" &
     tunnel_pid=$!
     trap 'kill "$tunnel_pid" 2>/dev/null || true' EXIT INT TERM
   else
@@ -83,15 +90,17 @@ if [ "$with_tunnel" = "1" ]; then
     fi
     if [ -x "$cf_bin" ]; then
       echo "EngineX OS: starting Cloudflare Quick Tunnel for enginex-stemsd (http://127.0.0.1:17890)..." >&2
+      echo "EngineX OS: tunnel bearer token stored in $token_file (set this as your deck Relay Password; LAN decks stay zero-config)" >&2
       "$cf_bin" tunnel --no-autoupdate --url http://127.0.0.1:17890 &
       tunnel_pid=$!
       trap 'kill "$tunnel_pid" 2>/dev/null || true' EXIT INT TERM
     else
       echo "EngineX OS: install cloudflared or enginex-relay to use --with-tunnel on this platform" >&2
+      exit 1
     fi
   fi
 else
   echo "EngineX OS: LAN Stems worker starting (tip: pass --with-tunnel to also launch a domain-free Cloudflare Quick Tunnel)" >&2
 fi
 
-exec "$bin" -listen 0.0.0.0:17890 -token-file "" -python "$py" -worker "$here/worker.py" -backend "$backend" -sessions 2
+exec "$bin" -listen 0.0.0.0:17890 -token-file "$token_file" -python "$py" -worker "$here/worker.py" -backend "$backend" -sessions 2

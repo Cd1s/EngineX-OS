@@ -1,6 +1,9 @@
 import io
+import os
 from pathlib import Path
+import subprocess
 import sys
+import tempfile
 import unittest
 from unittest import mock
 import numpy as np
@@ -159,5 +162,42 @@ class WorkerTests(unittest.TestCase):
              mock.patch.object(worker.ctypes, 'windll', fake_windll, create=True), \
              mock.patch.object(worker.select, 'select', side_effect=win_select):
             self.assertTrue(Input(FakePipe()).waiting())
+
+    def test_run_home_worker_tunnel_requires_token_file(self):
+        # --with-tunnel without enginex-relay must never launch enginex-stemsd with
+        # an empty -token-file behind a loopback Quick Tunnel proxy (BH-GF2-14).
+        script = Path(__file__).with_name('run-home-worker.sh')
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            home = root / 'home'
+            venv_bin = home / 'venv' / 'bin'
+            venv_bin.mkdir(parents=True)
+            os.symlink(sys.executable, venv_bin / 'python3')
+
+            bin_dir = root / 'bin'
+            bin_dir.mkdir()
+            args_file = root / 'stemsd_args.txt'
+            stemsd = bin_dir / 'enginex-stemsd'
+            stemsd.write_text(f'#!/bin/sh\nprintf "%s\\n" "$@" > "{args_file}"\n')
+            stemsd.chmod(0o755)
+            cf = bin_dir / 'cloudflared'
+            cf.write_text('#!/bin/sh\nsleep 1\n')
+            cf.chmod(0o755)
+
+            env = dict(os.environ)
+            env['ENGINEX_STEMS_HOME'] = str(home)
+            env['ENGINEX_STEMSD'] = str(stemsd)
+            env['ENGINEX_RELAY'] = ''
+            env['SC5000_RELAY'] = ''
+            env['PATH'] = f"{bin_dir}:/usr/bin:/bin"
+
+            res = subprocess.run(['/bin/sh', str(script), '--with-tunnel', 'hpss'],
+                                 env=env, capture_output=True, text=True, timeout=10)
+            self.assertEqual(res.returncode, 0, res.stderr)
+            argv = args_file.read_text().splitlines()
+            idx = argv.index('-token-file')
+            tok_path = argv[idx + 1]
+            self.assertNotEqual(tok_path, '', 'run-home-worker.sh --with-tunnel passed empty -token-file')
+            self.assertGreaterEqual(len(Path(tok_path).read_text().strip()), 24)
 
 if __name__=='__main__':unittest.main()
