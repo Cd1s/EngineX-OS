@@ -140,10 +140,17 @@ func (s *server) finishSoundCloud(ctx context.Context, sess session, token, code
 	return doneOK(s.sessions.complete(token, "soundcloud", nil, func(x *session) { x.SoundCloud = info }))
 }
 
+func (s *server) soundCloudRedirect() string {
+	if pub := s.publicURL(); pub != "" {
+		return pub + "/oauth/soundcloud/callback"
+	}
+	return soundCloudLoopback
+}
+
 func (s *server) soundCloudPageData(sess session, token, message string) pageData {
 	d := pageData{Title: "连接 SoundCloud", Token: token, Done: sess.Status == "done", Error: message}
 	if id := s.cfg.get().SoundCloudClientID; id != "" {
-		d.AuthLoopback = soundCloudAuthorize(id, s.public+"/oauth/soundcloud/callback", token, sess.Verifier)
+		d.AuthLoopback = soundCloudAuthorize(id, s.soundCloudRedirect(), token, sess.Verifier)
 	}
 	return d
 }
@@ -163,7 +170,7 @@ func (s *server) handleSoundCloudCallback(w http.ResponseWriter, r *http.Request
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
-	if err := s.finishSoundCloud(ctx, sess, token, q.Get("code"), s.public+"/oauth/soundcloud/callback"); err != nil {
+	if err := s.finishSoundCloud(ctx, sess, token, q.Get("code"), s.soundCloudRedirect()); err != nil {
 		renderPage(w, 400, "soundcloudPage", s.soundCloudPageData(sess, token, err.Error()))
 		return
 	}

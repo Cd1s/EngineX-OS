@@ -103,7 +103,11 @@ func main() {
 		browser:     newDeezerBrowser("http://127.0.0.1:9222"),
 		stems:       newStemsProxy(target, *stemsToken),
 	}
-	s.spotify = newSpotifyAuth(filepath.Join(*stateDir, "spotify-https-ok.json"), s.public+"/oauth/spotify/callback")
+	initialSpotifyRedirect := ""
+	if initialPublic != "" {
+		initialSpotifyRedirect = initialPublic + "/oauth/spotify/callback"
+	}
+	s.spotify = newSpotifyAuth(filepath.Join(*stateDir, "spotify-https-ok.json"), initialSpotifyRedirect)
 
 	tunnelCtx, tunnelCancel := context.WithCancel(context.Background())
 	defer tunnelCancel()

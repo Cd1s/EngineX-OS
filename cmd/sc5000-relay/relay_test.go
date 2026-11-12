@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -691,5 +692,68 @@ func TestSpotifyBuiltinRelayFallbackRequestsStreaming(t *testing.T) {
 	}
 	if spotifyClientRedirect(testSpotifyClientID, spotifyLoopbackURI) != spotifyLoopbackURI {
 		t.Fatal("custom app redirect changed")
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestQuickTunnelConcurrentPublicURLAndSpotifyRedirectNoRace(t *testing.T) {
+	s := newTestServer(t)
+	if err := s.cfg.update(func(c *config) { c.SoundCloudClientID = "sc-app-id" }); err != nil {
+		t.Fatal(err)
+	}
+	s.setPublicURL("")
+
+	s.spotify.hc = &http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			redir := r.URL.Query().Get("redirect_uri")
+			body := "login"
+			if redir != "https://tun1.trycloudflare.com/oauth/spotify/callback" {
+				body = "INVALID_CLIENT: Invalid redirect URI"
+			}
+			return &http.Response{
+				StatusCode: 200,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(body)),
+			}, nil
+		}),
+	}
+	// Pre-tunnel probe before Quick Tunnel assigns an https URL.
+	if s.spotify.useHTTPS(context.Background(), testSpotifyClientID) {
+		t.Fatal("useHTTPS returned true before Quick Tunnel started")
+	}
+	pre := s.soundCloudPageData(session{Verifier: "v0123456789012345678901234567890123456789012"}, "tok1", "")
+
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 40; i++ {
+			s.setPublicURL("https://tun1.trycloudflare.com")
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 40; i++ {
+			_ = s.soundCloudPageData(session{Verifier: "v0123456789012345678901234567890123456789012"}, "tok1", "")
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 10; i++ {
+			_ = s.spotify.useHTTPS(context.Background(), testSpotifyClientID)
+		}
+	}()
+	wg.Wait()
+
+	preU, err := url.Parse(pre.AuthLoopback)
+	if err != nil || preU.Query().Get("redirect_uri") != soundCloudLoopback {
+		t.Fatalf("pre-tunnel SoundCloud redirect_uri = %q, want %q", preU.Query().Get("redirect_uri"), soundCloudLoopback)
+	}
+	if !s.spotify.useHTTPS(context.Background(), testSpotifyClientID) {
+		t.Fatal("stale pre-tunnel negative probe poisoned useHTTPS after Quick Tunnel started")
 	}
 }
