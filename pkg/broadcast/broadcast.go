@@ -246,9 +246,10 @@ func (b *Broadcaster) Status() Status {
 
 	// The LAN stream counts as streaming while it has a socket, and says why when it has none.
 	lanUp, lastError := false, b.lastError
-	lanErr := b.lanErr
+	lanErr, sent := b.lanErr, b.bytesSent.Load()
 	if b.lanStreamer != nil {
 		lanUp, lanErr = b.lanStreamer.Connected(), b.lanStreamer.Err()
+		sent += b.lanStreamer.BytesSent() // BH2-A3-10: only the external server's bytes were counted
 	}
 	if lanErr != "" {
 		if lastError != "" {
@@ -268,7 +269,7 @@ func (b *Broadcaster) Status() Status {
 		Bitrate:      b.cfg.Bitrate,
 		StreamName:   b.cfg.StreamName,
 		CurrentTrack: b.currentTrack,
-		BytesSent:    b.bytesSent.Load(),
+		BytesSent:    sent,
 		Listeners:    b.hub.count(),
 		ConnectedAt:  b.connectedAt,
 		LastError:    lastError,

@@ -340,3 +340,30 @@ func TestLANStreamStartsWhenTheNetworkComesUp(t *testing.T) {
 		t.Fatalf("stream is up: lastError=%q", st.LastError)
 	}
 }
+
+// BH2-A3-10: the sent-bytes figure of the status stayed 0 for a LAN-only stream.
+func TestLANStreamCountsSentBytes(t *testing.T) {
+	ln, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	pcm := filepath.Join(t.TempDir(), "live.pcm")
+	if err := os.WriteFile(pcm, bytes.Repeat([]byte{1, 2, 3, 4}, 1152), 0644); err != nil {
+		t.Fatal(err)
+	}
+	b := New(newTestGuard())
+	defer b.Close()
+	if err := b.Configure(Config{Enabled: true, LANMode: "rtp", LANTarget: ln.LocalAddr().String(), InputPath: pcm}); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 8192)
+	_ = ln.SetReadDeadline(time.Now().Add(3 * time.Second))
+	n, _, err := ln.ReadFrom(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sent := b.Status().BytesSent; sent < int64(n) {
+		t.Fatalf("a %d-byte packet arrived and the status counts %d bytes sent", n, sent)
+	}
+}

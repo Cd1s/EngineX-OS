@@ -6,7 +6,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 
 ---
 
-## Regression Table (62 Rows)
+## Regression Table (63 Rows)
 
 | # | Behaviour that must keep working | Issue / commit that fixed it | How it is checked (automated test name, or exact real-deck / sandbox step) | Release gate / deck acceptance / recording coverage |
 | --- | --- | --- | --- | --- |
@@ -72,6 +72,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 | 60 | **An Engine stick with a `PIONEER` folder but no rekordbox export is still healed when it is inserted** (bug hunt 2, BH2-A1-7: the mount hook took any `PIONEER`/`.PIONEER` folder for a rekordbox export, e.g. the settings folder a CDJ or mixer leaves on a stick, or the `export.pdb` EngineX writes itself for CDJ link; such an Engine stick went to rb-bridge, which had nothing to convert, and the mount-time heal was skipped on every insert) | BH2-A1-7 | `tools/edisksd-hook/test_edisksd_hook.c` `test_only_an_export_makes_a_rekordbox_stick` (settings-only folder, empty `rekordbox`, EngineX-generated `export.pdb` with fresh and stale stamp, OneLibrary files, hidden folder, other spellings) and the `--mounts` run of `test_guardian_from_the_data_bundle` with a settings folder; the #182/#103 conversion tests stay green with real export files | Release workflow Step 2 C hook tests (`unshare -m ... --mounts`) |
 | 61 | **A rekordbox stick already found too large to convert at mount is not waited for again in another USB port** (bug hunt 2, BH2-A1-2: the "too large, skip until re-exported" record was keyed by `statvfs.f_fsid`, on FAT32/exFAT/HFS+ the device number; the same stick in another port or behind another stick got a new device number and held the mount for the whole conversion budget, about 17 s, once more) | BH2-A1-2 | `tools/edisksd-hook/test_edisksd_hook.c --mounts` `test_slow_marker_survives_another_port` (one export under two filesystem ids gives one record; a new export a new one); `test_slow_marker_follows_every_export_file` unchanged | Release workflow Step 2 C hook tests (`unshare -m ... --mounts`) |
 | 62 | **The LAN audio stream (RTP / Teleport) starts by itself once the network is up, and says why when it cannot send** (bug hunt 2, BH2-A3-6: a deck that boots with Live Stream on opened the UDP socket before it had an address; the "network is unreachable" error was dropped and never retried, and a LAN target that does not resolve was dropped the same way, while `/api/broadcast` kept saying `streaming: true` with an empty `lastError`) | BH2-A3-6 | `pkg/broadcast::TestLANStreamBadTargetIsReported` (reason in `lastError`, next to an external server error, gone when LAN streaming is off; not `streaming` when neither stream is up) and `TestLANStreamStartsWhenTheNetworkComesUp` (no socket, then audio within a retry); `TestLANModeBroadcaster`, `TestLANStreamer*` unchanged | Release workflow Step 2 Go suites |
+| 63 | **The sent-bytes figure of the Live Stream status counts the LAN stream** (bug hunt 2, BH2-A3-10: `bytesSent` in `/api/broadcast` counted only what went to an external Icecast/Shoutcast server and stayed 0 for an RTP / Teleport stream) | BH2-A3-10 | `pkg/broadcast::TestLANStreamCountsSentBytes` | Release workflow Step 2 Go suites |
 
 ---
 
