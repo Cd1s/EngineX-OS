@@ -64,3 +64,92 @@ func TestImportedStampIgnoresSkeleton(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+func TestHasPopulatedLibrary(t *testing.T) {
+	mount := filepath.Join(t.TempDir(), "RB7 STICK")
+	dbDir := filepath.Join(mount, "Engine Library", "Database2")
+	if err := os.MkdirAll(dbDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if HasPopulatedLibrary("") || HasPopulatedLibrary("relative/path") {
+		t.Fatal("invalid mount path should be false")
+	}
+	if HasPopulatedLibrary(mount) {
+		t.Fatal("missing m.db should be false")
+	}
+
+	mdb := filepath.Join(dbDir, "m.db")
+	if err := os.WriteFile(mdb, []byte("corrupt non-sqlite"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if HasPopulatedLibrary(mount) {
+		t.Fatal("unreadable m.db must be false for UI selection")
+	}
+	if err := os.Remove(mdb); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := sql.Open("sqlite", mdb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`
+		CREATE TABLE Information(id INTEGER PRIMARY KEY, uuid TEXT);
+		CREATE TABLE Track(id INTEGER PRIMARY KEY, path TEXT);
+		INSERT INTO Information(id, uuid) VALUES(1, 'e7a89052-6441-43bb-9c6d-e3bed7011d00');
+	`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if HasPopulatedLibrary(mount) {
+		db.Close()
+		t.Fatal("stock Engine 0-track skeleton m.db must return false")
+	}
+
+	// Track row present but Information.uuid empty -> still invalid (GL-010).
+	if _, err = db.Exec(`UPDATE Information SET uuid=''; INSERT INTO Track(id, path) VALUES(1, '../MUSIC/a.wav')`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if HasPopulatedLibrary(mount) {
+		db.Close()
+		t.Fatal("empty Information.uuid must return false")
+	}
+
+	// Valid Information.uuid + Track row -> populated library.
+	if _, err = db.Exec(`UPDATE Information SET uuid='e7a89052-6441-43bb-9c6d-e3bed7011d00'`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	db.Close()
+	if !HasPopulatedLibrary(mount) {
+		t.Fatal("populated m.db should return true")
+	}
+
+	// Read-only directory and read-only m.db (e.g. HFS+ or ro media) still read cleanly.
+	if err := os.Chmod(mdb, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dbDir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(dbDir, 0o755)
+		_ = os.Chmod(mdb, 0o644)
+	})
+	if !HasPopulatedLibrary(mount) {
+		t.Fatal("read-only populated m.db should return true")
+	}
+
+	// Symlinked Engine Library must be rejected.
+	symMount := filepath.Join(t.TempDir(), "SYM")
+	if err := os.MkdirAll(symMount, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(mount, "Engine Library"), filepath.Join(symMount, "Engine Library")); err != nil {
+		t.Fatal(err)
+	}
+	if HasPopulatedLibrary(symMount) {
+		t.Fatal("symlinked Engine Library must return false")
+	}
+}

@@ -4744,6 +4744,8 @@ class OneLibraryNoChooseDbTest(unittest.TestCase):
             patched = bp.patch(patched, old, new, rel)
         self.assertNotIn("prompts.post", patched)
         self.assertNotIn("Choose your Database", patched)
+        self.assertNotIn("onDeviceAdded", patched)
+        self.assertIn("/v1/sc5000/library-status?path=", patched)
 
         qrc = LAB / "5.3.0" / "qrc"
         if qrc.is_dir():
@@ -4760,11 +4762,14 @@ class OneLibraryNoChooseDbTest(unittest.TestCase):
                     qml = p.read_text(encoding="utf-8")
                     self.assertNotIn("prompts.post", qml, f"{lang} pack still posts Choose your Database prompt")
                     self.assertNotIn("Choose your Database", qml, f"{lang} pack still has Choose your Database title")
+                    self.assertNotIn("onDeviceAdded", qml, f"{lang} pack still carries dead onDeviceAdded handler")
                     for expected in (
-                        "function scHasEngineLibrary(devicePath)",
+                        "function scHasRegisteredDatabaseUuid(devicePath)",
+                        "function scFinishSelection(devicePath, seq, useEngineLibrary)",
+                        "function scExpirePendingRequests(nowMs)",
+                        "/v1/sc5000/library-status?path=",
                         "controller.chooseEngineLibrary(devicePath)",
                         "controller.chooseOneLibrary(devicePath)",
-                        "function onDeviceAdded(path)",
                     ):
                         self.assertIn(expected, qml)
                     patched = qml
@@ -4775,15 +4780,19 @@ class OneLibraryNoChooseDbTest(unittest.TestCase):
 
         if shutil.which("node"):
             has_fn = re.search(
-                r"function scHasEngineLibrary\(devicePath\)\s*\{.*?\n    \}",
+                r"function scHasRegisteredDatabaseUuid\(devicePath\)\s*\{.*?\n    \}",
+                patched, re.S,
+            )
+            fin_fn = re.search(
+                r"function scFinishSelection\(devicePath, seq, useEngineLibrary\)\s*\{.*?\n    \}",
+                patched, re.S,
+            )
+            exp_fn = re.search(
+                r"function scExpirePendingRequests\(nowMs\)\s*\{.*?\n    \}",
                 patched, re.S,
             )
             sel_fn = re.search(
                 r"function onSelectionRequested\(devicePath\)\s*\{.*?\n        \}",
-                patched, re.S,
-            )
-            add_fn = re.search(
-                r"function onDeviceAdded\(path\)\s*\{.*?\n        \}",
                 patched, re.S,
             )
             rem_fn = re.search(
@@ -4791,14 +4800,53 @@ class OneLibraryNoChooseDbTest(unittest.TestCase):
                 patched, re.S,
             )
             self.assertIsNotNone(has_fn)
+            self.assertIsNotNone(fin_fn)
+            self.assertIsNotNone(exp_fn)
             self.assertIsNotNone(sel_fn)
-            self.assertIsNotNone(add_fn)
             self.assertIsNotNone(rem_fn)
             js_code = f"""
 const assert = require("assert").strict;
+let nowMs = 10000;
+Date.now = () => nowMs;
 const uuids = {{}};
+const server = {{}};
 const calls = [];
 const dropped = [];
+let heldXhr = null;
+const scRequestWatchdog = {{
+    running: false,
+    start() {{ this.running = true; }},
+    stop() {{ this.running = false; }},
+}};
+class XMLHttpRequest {{
+    constructor() {{ this.readyState = 0; this.status = 0; this.responseText = ""; this.aborted = false; }}
+    open(method, url) {{ this.method = method; this.url = url; this.readyState = 1; }}
+    send() {{
+        const u = new URL(this.url);
+        assert.equal(u.pathname, "/v1/sc5000/library-status");
+        const p = u.searchParams.get("path");
+        const entry = server[p];
+        if (entry === "hold") {{
+            heldXhr = this;
+            return;
+        }}
+        if (!entry) {{
+            this.status = 500;
+            this.responseText = "error";
+        }} else {{
+            this.status = entry.status;
+            this.responseText = entry.body;
+        }}
+        this.readyState = 4;
+        if (this.onreadystatechange) this.onreadystatechange();
+    }}
+    abort() {{
+        this.aborted = true;
+        this.status = 0;
+        this.readyState = 4;
+        if (this.onreadystatechange) this.onreadystatechange();
+    }}
+}}
 const Planck = {{
     librarianController: {{
         devicesController: {{
@@ -4821,53 +4869,69 @@ const PlanckGUI = {{
 }};
 const messageBox = {{
     pendingDevicePath: "",
-    scOneLibraryFallbackPaths: {{}},
-    {has_fn.group(0).replace("function scHasEngineLibrary", "scHasEngineLibrary")},
+    scNextRequestSeq: 0,
+    scPendingRequests: {{}},
+    {has_fn.group(0).replace("function scHasRegisteredDatabaseUuid", "scHasRegisteredDatabaseUuid")},
+    {fin_fn.group(0).replace("function scFinishSelection", "scFinishSelection")},
+    {exp_fn.group(0).replace("function scExpirePendingRequests", "scExpirePendingRequests")},
 }};
 {sel_fn.group(0)}
-{add_fn.group(0)}
 {rem_fn.group(0)}
 
-// 1. Stick already converted by rb-bridge (Engine Library/Database2/m.db present).
+// 1. Stick converted by rb-bridge (UUID registered + gateway reports converted=true).
 uuids["/media/RB_READY"] = "8d4f2c10-1234-4a5b-8c9d-0123456789ab";
+server["/media/RB_READY"] = {{ status: 200, body: JSON.stringify({{ converted: true }}) }};
 onSelectionRequested("/media/RB_READY");
 assert.deepEqual(calls, [["engine", "/media/RB_READY"]]);
+assert.equal(scRequestWatchdog.running, false);
 
-// 2. Large stick where only PIONEER/rekordbox/exportLibrary.db exists at mount time.
+// 2. Writable Rekordbox 7 stick whose pre-mount conversion missed budget:
+//    stock Engine creates an empty ~156 KB skeleton m.db so getDatabaseUuid IS non-empty,
+//    while gateway reports converted=false -> MUST pick OneLibrary, never empty Engine Library!
 calls.length = 0;
-uuids["/media/RB_BIG"] = "";
-onSelectionRequested("/media/RB_BIG");
-assert.deepEqual(calls, [["one", "/media/RB_BIG"]]);
-assert.equal(messageBox.scOneLibraryFallbackPaths["/media/RB_BIG"], true);
+uuids["/media/RB7_SKELETON"] = "e7a89052-6441-43bb-9c6d-e3bed7011d00";
+server["/media/RB7_SKELETON"] = {{ status: 200, body: JSON.stringify({{ converted: false }}) }};
+onSelectionRequested("/media/RB7_SKELETON");
+assert.deepEqual(calls, [["one", "/media/RB7_SKELETON"]]);
 
-// 2b. Null QUuid string also counts as absent Engine Library.
+// 3. Read-only HFS+ stick without writable view (UUID empty) -> immediate OneLibrary without HTTP.
 calls.length = 0;
-uuids["/media/RB_NULL_UUID"] = "{{00000000-0000-0000-0000-000000000000}}";
-onSelectionRequested("/media/RB_NULL_UUID");
-assert.deepEqual(calls, [["one", "/media/RB_NULL_UUID"]]);
+uuids["/media/HFS_RO"] = "";
+onSelectionRequested("/media/HFS_RO");
+assert.deepEqual(calls, [["one", "/media/HFS_RO"]]);
 
-// 3. Re-mount / re-read after background rb-bridge conversion finishes (#182):
-//    deviceRemoved clears fallback state, and next selectionRequested picks Engine Library.
+// 4. Gateway error / malformed JSON / timeout -> fall back to OneLibrary.
 calls.length = 0;
-onDeviceRemoved("/media/RB_BIG", "");
-assert.equal(Boolean(messageBox.scOneLibraryFallbackPaths["/media/RB_BIG"]), false);
-uuids["/media/RB_BIG"] = "a1b2c3d4-1111-2222-3333-444455556666";
-onSelectionRequested("/media/RB_BIG");
-assert.deepEqual(calls, [["engine", "/media/RB_BIG"]]);
+uuids["/media/RB_UNKNOWN"] = "11111111-2222-4333-8444-555555555555";
+server["/media/RB_UNKNOWN"] = {{ status: 502, body: "bad gateway" }};
+onSelectionRequested("/media/RB_UNKNOWN");
+assert.deepEqual(calls, [["one", "/media/RB_UNKNOWN"]]);
 
-// 4. In-place deviceAdded refresh after fallback without selectionRequested re-firing.
 calls.length = 0;
-uuids["/media/RB_INPLACE"] = "";
-onSelectionRequested("/media/RB_INPLACE");
-assert.deepEqual(calls, [["one", "/media/RB_INPLACE"]]);
-calls.length = 0;
-uuids["/media/RB_INPLACE"] = "f0e1d2c3-aaaa-bbbb-cccc-ddddeeeeffff";
-onDeviceAdded("/media/RB_INPLACE");
-assert.deepEqual(calls, [["engine", "/media/RB_INPLACE"]]);
-// Idempotent: later deviceAdded does not re-trigger once promoted.
-calls.length = 0;
-onDeviceAdded("/media/RB_INPLACE");
+uuids["/media/RB_HUNG"] = "22222222-3333-4444-8555-666666666666";
+server["/media/RB_HUNG"] = "hold";
+onSelectionRequested("/media/RB_HUNG");
 assert.deepEqual(calls, []);
+assert.equal(scRequestWatchdog.running, true);
+nowMs += 1600;
+messageBox.scExpirePendingRequests(nowMs);
+assert.deepEqual(calls, [["one", "/media/RB_HUNG"]]);
+assert.equal(heldXhr.aborted, true);
+assert.equal(scRequestWatchdog.running, false);
+
+// 5. Device removed while request is in flight cancels selection cleanly;
+//    later re-mount with converted tracks picks Engine Library on next selectionRequested.
+calls.length = 0;
+heldXhr = null;
+uuids["/media/RB7_SKELETON"] = "e7a89052-6441-43bb-9c6d-e3bed7011d00";
+server["/media/RB7_SKELETON"] = "hold";
+onSelectionRequested("/media/RB7_SKELETON");
+onDeviceRemoved("/media/RB7_SKELETON", "e7a89052-6441-43bb-9c6d-e3bed7011d00");
+assert.equal(heldXhr.aborted, true);
+assert.deepEqual(calls, []);
+server["/media/RB7_SKELETON"] = {{ status: 200, body: JSON.stringify({{ converted: true }}) }};
+onSelectionRequested("/media/RB7_SKELETON");
+assert.deepEqual(calls, [["engine", "/media/RB7_SKELETON"]]);
 """
             proc = subprocess.run(["node", "-e", js_code], capture_output=True, text=True)
             self.assertEqual(proc.returncode, 0, proc.stderr)
