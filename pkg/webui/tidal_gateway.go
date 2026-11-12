@@ -64,7 +64,13 @@ func sourceFailedTitle(provider string, err error) string {
 	case 403:
 		return label + ": account not allowed (403) / 账号未获授权"
 	case 429:
-		return label + ": too many requests (429) / 请稍后再试"
+		// A limit the provider already waited on and that still holds (#227).
+		var limited *providers.RateLimited
+		if errors.As(err, &limited) && limited.RetryAfter > time.Minute {
+			m := int(math.Ceil(limited.RetryAfter.Minutes()))
+			return fmt.Sprintf("%s: busy, try again in %d min / 繁忙，请 %d 分钟后再试", label, m, m)
+		}
+		return label + ": busy, try again in a minute / 繁忙，请一分钟后再试"
 	}
 	return fmt.Sprintf("%s: failed to load (HTTP %d) / 加载失败", label, int(st))
 }
