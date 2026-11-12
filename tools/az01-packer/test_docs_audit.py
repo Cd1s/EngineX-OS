@@ -93,6 +93,12 @@ class DocsAuditBH2A10Test(unittest.TestCase):
         self.assertIn("fastboot is not installed", manual)
         self.assertNotIn("处于原厂未解锁状态，需要 fastboot 但没找到", manual)
 
+    def test_release_notes_draft_uses_top_level_layout_tab_bh2_a10_2(self):
+        notes = (REPO_ROOT / "docs/release-notes-5.3.0.4-draft.md").read_text(encoding="utf-8")
+        self.assertNotIn("Control Center → Layout", notes)
+        self.assertIn("`Layout → ENGINEX VIEW PRESET → Linked View`", notes)
+
+
 
 
 
