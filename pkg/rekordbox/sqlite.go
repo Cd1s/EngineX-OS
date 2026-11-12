@@ -231,49 +231,47 @@ func parseSQLiteCue(r sqlRecord) (Cue, bool) {
 	return c, true
 }
 
-func readSQLRows(ctx context.Context, db *sql.DB, table string) ([]sqlRecord, error) {
-	rows, e := db.QueryContext(ctx, `SELECT * FROM "`+strings.ReplaceAll(table, `"`, `""`)+`"`)
-	if e != nil {
-		return nil, e
-	}
-	defer rows.Close()
-	cols, e := rows.Columns()
-	if e != nil {
-		return nil, e
-	}
-	normCols := make([]string, len(cols))
-	for i, c := range cols {
-		normCols[i] = normalized(c)
-	}
-	out := make([]sqlRecord, 0)
-	for rows.Next() {
-		values := make([]any, len(cols))
-		ptrs := make([]any, len(cols))
-		for i := range ptrs {
-			ptrs[i] = &values[i]
-		}
-		if e = rows.Scan(ptrs...); e != nil {
-			return nil, e
-		}
-		r := sqlRecord{}
-		for i, v := range values {
-			switch v := v.(type) {
-			case nil:
-			case []byte:
-				r[normCols[i]] = string(v)
-			default:
-				r[normCols[i]] = fmt.Sprint(v)
-			}
-		}
-		out = append(out, r)
-	}
-	return out, rows.Err()
-}
+var (
+	// cueColumns are the cue table columns parseSQLiteCue and the cue import use.
+	cueColumns = []string{"content_id", "cue_id", "id", "kind", "inUsec", "in_usec", "outUsec", "out_usec", "inMsec", "in_msec", "outMsec", "out_msec",
+		"isActiveLoop", "is_active_loop", "active_loop", "beatLoopNumerator", "beat_loop_numerator", "beatLoopDenominator", "beat_loop_denominator",
+		"cueComment", "cue_comment", "comment", "colorTableIndex", "color_table_index"}
 
-// cueColumns are the cue table columns parseSQLiteCue and the cue import use.
-var cueColumns = []string{"content_id", "cue_id", "id", "kind", "inUsec", "in_usec", "outUsec", "out_usec", "inMsec", "in_msec", "outMsec", "out_msec",
-	"isActiveLoop", "is_active_loop", "active_loop", "beatLoopNumerator", "beat_loop_numerator", "beatLoopDenominator", "beat_loop_denominator",
-	"cueComment", "cue_comment", "comment", "colorTableIndex", "color_table_index"}
+	contentColumns = []string{
+		"id", "content_id", "track_id",
+		"file_path", "path", "location", "file_name", "file_name_l", "filename", "folder_path",
+		"bpmx100", "bpm", "tempo",
+		"key_name", "key_id", "key",
+		"image_id", "artwork_id", "image_path",
+		"file_size",
+		"analysisDataFilePath", "analysis_data_path", "analyze_path", "analysis_path",
+		"title", "name",
+		"artist_id_artist", "artist_id", "artist",
+		"artist_id_composer", "composer_id",
+		"artist_id_remixer", "remixer_id",
+		"album_id", "album",
+		"genre_id", "label_id",
+		"length", "duration",
+		"samplingRate", "sample_rate",
+		"bit_depth", "bit_rate", "bitrate",
+		"release_year", "year", "rating",
+		"djComment", "commnt", "comment",
+	}
+
+	playlistColumns = []string{
+		"id", "playlist_id", "playlist_id_parent", "parent_id",
+		"sequenceNo", "seq", "sort_order",
+		"name", "title",
+		"attribute", "is_folder", "is_smart", "intelligent",
+		"smart_list", "rules",
+	}
+
+	playlistContentColumns = []string{
+		"playlist_id",
+		"sequenceNo", "track_no", "seq", "entry_index", "position",
+		"content_id", "track_id",
+	}
+)
 
 // eachSQLRow streams the wanted columns of table through fn, one reused record
 // at a time. Loading every cue as a map of all its columns took 375 MB on armhf
@@ -349,24 +347,24 @@ func (OneLibraryAdapter) Read(ctx context.Context, db *sql.DB) (*Library, error)
 	if e != nil {
 		return nil, e
 	}
-	load := func(names ...string) ([]sqlRecord, error) {
+	findTable := func(names ...string) string {
 		for _, n := range names {
 			if t := tables[normalized(n)]; t != "" {
-				return readSQLRows(ctx, db, t)
+				return t
 			}
 		}
-		return nil, nil
+		return ""
 	}
 	l := &Library{Artwork: map[uint32]string{}, Keys: map[uint32]string{}}
 	lookups := map[string]map[uint32]string{}
 	for _, kind := range []string{"artist", "album", "genre", "label", "key", "artwork", "image"} {
-		rs, e := load(kind, "djmd"+kind)
-		if e != nil {
-			return nil, e
-		}
 		m := map[uint32]string{}
-		for _, r := range rs {
-			m[r.num("id", kind+"_id")] = r.get("name", "scale_name", "title", "path", "file_path")
+		if tbl := findTable(kind, "djmd"+kind); tbl != "" {
+			if e := eachSQLRow(ctx, db, tbl, []string{"id", kind + "_id", "name", "scale_name", "title", "path", "file_path"}, func(r sqlRecord) {
+				m[r.num("id", kind+"_id")] = r.get("name", "scale_name", "title", "path", "file_path")
+			}); e != nil {
+				return nil, e
+			}
 		}
 		lookups[kind] = m
 	}
@@ -375,14 +373,11 @@ func (OneLibraryAdapter) Read(ctx context.Context, db *sql.DB) (*Library, error)
 	if len(l.Artwork) == 0 {
 		l.Artwork = lookups["image"]
 	}
-	tracks, e := load("content", "djmdContent", "track", "tracks")
-	if e != nil {
-		return nil, e
-	}
-	if tracks == nil {
+	contentTable := findTable("content", "djmdContent", "track", "tracks")
+	if contentTable == "" {
 		return nil, fmt.Errorf("unsupported schema: missing content table")
 	}
-	for _, r := range tracks {
+	if e := eachSQLRow(ctx, db, contentTable, contentColumns, func(r sqlRecord) {
 		path := r.get("file_path", "path", "location")
 		if filename := r.get("file_name", "file_name_l", "filename"); path == "" && filename != "" {
 			if folder := r.get("folder_path"); folder != "" {
@@ -425,14 +420,10 @@ func (OneLibraryAdapter) Read(ctx context.Context, db *sql.DB) (*Library, error)
 		}
 		normalizeParsedAudioMetadata(&t)
 		l.Tracks = append(l.Tracks, t)
+	}); e != nil {
+		return nil, e
 	}
-	cueTable := ""
-	for _, n := range []string{"cue", "djmdCue"} {
-		if t := tables[normalized(n)]; t != "" {
-			cueTable = t
-			break
-		}
-	}
+	cueTable := findTable("cue", "djmdCue")
 	if cueTable != "" {
 		type indexedCue struct {
 			id  int64
@@ -477,17 +468,13 @@ func (OneLibraryAdapter) Read(ctx context.Context, db *sql.DB) (*Library, error)
 	for i := range l.Tracks {
 		l.Tracks[i].RecordHash = RecordHash(l.Tracks[i])
 	}
-	ps, e := load("playlist", "djmdPlaylist")
-	if e != nil {
-		return nil, e
-	}
-	for _, r := range ps {
-		attr := r.num("attribute")
-		l.Playlists = append(l.Playlists, Playlist{ID: r.num("id", "playlist_id"), ParentID: r.num("playlist_id_parent", "parent_id"), SortOrder: r.num("sequenceNo", "seq", "sort_order"), Name: r.get("name", "title"), Folder: r.num("is_folder") != 0 || attr == 1, Intelligent: r.num("is_smart", "intelligent") != 0 || attr == 4, Rules: r.get("smart_list", "rules")})
-	}
-	es, e := load("playlist_content", "djmdSongPlaylist", "playlist_entry", "playlist_entries")
-	if e != nil {
-		return nil, e
+	if plTable := findTable("playlist", "djmdPlaylist"); plTable != "" {
+		if e := eachSQLRow(ctx, db, plTable, playlistColumns, func(r sqlRecord) {
+			attr := r.num("attribute")
+			l.Playlists = append(l.Playlists, Playlist{ID: r.num("id", "playlist_id"), ParentID: r.num("playlist_id_parent", "parent_id"), SortOrder: r.num("sequenceNo", "seq", "sort_order"), Name: r.get("name", "title"), Folder: r.num("is_folder") != 0 || attr == 1, Intelligent: r.num("is_smart", "intelligent") != 0 || attr == 4, Rules: r.get("smart_list", "rules")})
+		}); e != nil {
+			return nil, e
+		}
 	}
 	// Sort by source sequence before materializing intelligent and ordinary lists.
 	byID := map[uint32]int{}
@@ -496,12 +483,16 @@ func (OneLibraryAdapter) Read(ctx context.Context, db *sql.DB) (*Library, error)
 	}
 	type entry struct{ seq, id uint32 }
 	grouped := map[uint32][]entry{}
-	for _, r := range es {
-		id := r.num("playlist_id")
-		if _, ok := byID[id]; !ok { // orphan left by a deleted playlist
-			continue
+	if pcTable := findTable("playlist_content", "djmdSongPlaylist", "playlist_entry", "playlist_entries"); pcTable != "" {
+		if e := eachSQLRow(ctx, db, pcTable, playlistContentColumns, func(r sqlRecord) {
+			id := r.num("playlist_id")
+			if _, ok := byID[id]; !ok { // orphan left by a deleted playlist
+				return
+			}
+			grouped[id] = append(grouped[id], entry{r.num("sequenceNo", "track_no", "seq", "entry_index", "position"), r.num("content_id", "track_id")})
+		}); e != nil {
+			return nil, e
 		}
-		grouped[id] = append(grouped[id], entry{r.num("sequenceNo", "track_no", "seq", "entry_index", "position"), r.num("content_id", "track_id")})
 	}
 	knownTracks := make(map[uint32]bool, len(l.Tracks))
 	for _, tr := range l.Tracks {
