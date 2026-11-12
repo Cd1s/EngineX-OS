@@ -2183,7 +2183,9 @@ static int thread_class(const char *name) {
         "sentry", "CrashHandler"};
     for (size_t i = 0; i < sizeof background / sizeof *background; i++)
         if (!strncmp(name, background[i], strlen(background[i]))) return 2;
-    return !strncmp(name, "QQuickPixmapRea", 15) || !strncmp(name, "FileInfoThread", 14);
+    // Folder scanning must leave CPU time for playback on the same drive.
+    if (!strncmp(name, "FileInfoThread", 14)) return 3;
+    return !strncmp(name, "QQuickPixmapRea", 15);
 }
 
 static int guard_affinity(pthread_t thread, int kind) {
@@ -2217,6 +2219,11 @@ static void guard_named_thread(pthread_t thread, const char *name) {
     struct sched_param param = {.sched_priority = 0};
     if (kind == 2) pthread_setschedparam(thread, SCHED_OTHER, &param);
     guard_affinity(thread, kind);
+    // Qt has one global pixmap reader: keep artwork at the caller's priority.
+    if (kind == 1) {
+        errno = saved_errno;
+        return;
+    }
     if (pthread_equal(thread, pthread_self())) {
         lower_io_nice((pid_t)syscall(SYS_gettid), 10, kind == 2);
     } else {
@@ -2633,7 +2640,7 @@ static sqlite_exec_fn sqlite_exec_original;
 
 static void tune_database(int rc, const char *filename, void **db) {
     if (rc || !db || !*db || (filename && !strcmp(filename, ":memory:"))) return;
-    sqlite_exec_original(*db, "PRAGMA synchronous = NORMAL; PRAGMA temp_store = MEMORY; PRAGMA cache_size = -8000;",
+    sqlite_exec_original(*db, "PRAGMA busy_timeout = 5000; PRAGMA synchronous = NORMAL; PRAGMA temp_store = MEMORY; PRAGMA cache_size = -8000;",
                          NULL, NULL, NULL);
 }
 

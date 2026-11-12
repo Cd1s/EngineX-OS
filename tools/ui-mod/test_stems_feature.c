@@ -669,6 +669,7 @@ static void test_sqlite(void) {
     unlink(path);
     assert(v2_fn(path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, "unix") == SQLITE_OK);
     assert(exec_count == 1);
+    assert(pragma(db, "PRAGMA busy_timeout") == 5000);
     assert(pragma(db, "PRAGMA synchronous") == 1);
     assert(pragma(db, "PRAGMA temp_store") == 2);
     assert(pragma(db, "PRAGMA cache_size") == -8000);
@@ -678,6 +679,7 @@ static void test_sqlite(void) {
     assert(pragma(db, "SELECT v FROM t") == 42);
     assert(sqlite3_close(db) == SQLITE_OK);
     assert(v2_fn(path, &db, SQLITE_OPEN_READONLY, NULL) == SQLITE_OK && exec_count == 3);
+    assert(pragma(db, "PRAGMA busy_timeout") == 5000);
     assert(pragma(db, "PRAGMA cache_size") == -8000);
     assert(sqlite3_close(db) == SQLITE_OK);
     unlink(path);
@@ -769,12 +771,16 @@ static void *named_worker(void *unused) {
     return NULL;
 }
 
-static void *foreign_named_worker(void *fd) {
+struct foreign_thread_case { int fd, kind, nice; long io; };
+
+static void *foreign_named_worker(void *arg) {
+    const struct foreign_thread_case *test = arg;
     char c;
-    assert(read(*(int *)fd, &c, 1) == 1);
+    assert(read(test->fd, &c, 1) == 1);
     cpu_set_t cpus; assert(!pthread_getaffinity_np(pthread_self(), sizeof cpus, &cpus));
     assert(CPU_ISSET(0, &cpus) && !CPU_ISSET(1, &cpus) && !CPU_ISSET(2, &cpus));
-    assert(getpriority(PRIO_PROCESS, 0) == 10);
+    assert(getpriority(PRIO_PROCESS, 0) == (test->kind == 1 ? test->nice : 10));
+    assert(syscall(SYS_ioprio_get, 1, 0) == (test->kind == 2 ? ((2 << 13) | 7) : test->io));
     return NULL;
 }
 
@@ -782,6 +788,8 @@ struct qt_thread_case { const char *name; int time64, kind; };
 
 static void *qt_named_worker(void *arg) {
     const struct qt_thread_case *test = arg;
+    int before = getpriority(PRIO_PROCESS, 0);
+    long io_before = syscall(SYS_ioprio_get, 1, 0);
     int (*name_fn)(int, ...) = test->time64 ? hook_prctl_time64 : hook_prctl;
     assert(!name_fn(PR_SET_NAME, (unsigned long)test->name));
     char name[16];
@@ -794,12 +802,14 @@ static void *qt_named_worker(void *arg) {
     assert(!pthread_getschedparam(pthread_self(), &policy, &actual));
     assert(policy == SCHED_OTHER);
     assert(actual.sched_priority == 0);
-    assert(getpriority(PRIO_PROCESS, 0) == 10);
+    assert(getpriority(PRIO_PROCESS, 0) == (test->kind == 1 ? before : 10));
     cpu_set_t wanted = engine_cpus, got, cpu1;
     CPU_CLR(1, &wanted); // EMain
     CPU_CLR(2, &wanted); // SceneGraph
     if (test->kind == 2) {
         assert(syscall(SYS_ioprio_get, 1, 0) == ((2 << 13) | 7));
+    } else {
+        assert(syscall(SYS_ioprio_get, 1, 0) == io_before);
     }
     assert(!pthread_getaffinity_np(pthread_self(), sizeof got, &got));
     assert(CPU_EQUAL(&got, &wanted));
@@ -826,16 +836,20 @@ static void test_threads(void) {
     assert(!pthread_create(&thread, NULL, named_worker, NULL));
     assert(!pthread_join(thread, NULL));
     assert(getpriority(PRIO_PROCESS, 0) == before);
-    int fds[2]; assert(!pipe(fds));
-    assert(!pthread_create(&thread, NULL, foreign_named_worker, &fds[0]));
-    assert(!pthread_setname_np(thread, "QQuickPixmapRea"));
-    assert(getpriority(PRIO_PROCESS, 0) == before);
-    assert(write(fds[1], "x", 1) == 1);
-    assert(!pthread_join(thread, NULL));
-    close(fds[0]); close(fds[1]);
+    const char *foreign_names[] = {"QQuickPixmapRea", "Analysis Queue", "FileInfoThread"};
+    for (int kind = 1; kind <= 3; kind++) {
+        int fds[2]; assert(!pipe(fds));
+        struct foreign_thread_case test = {fds[0], kind, before, syscall(SYS_ioprio_get, 1, 0)};
+        assert(!pthread_create(&thread, NULL, foreign_named_worker, &test));
+        assert(!pthread_setname_np(thread, foreign_names[kind - 1]));
+        assert(getpriority(PRIO_PROCESS, 0) == before);
+        assert(write(fds[1], "x", 1) == 1);
+        assert(!pthread_join(thread, NULL));
+        close(fds[0]); close(fds[1]);
+    }
     const struct qt_thread_case cases[] = {
         {"Analysis Queue ", 0, 2}, {"Dropbox", 1, 2},
-        {"QQuickPixmapRea", 0, 1}, {"FileInfoThread", 1, 1},
+        {"QQuickPixmapRea", 0, 1}, {"FileInfoThread", 1, 3},
     };
     for (size_t i = 0; i < sizeof cases / sizeof *cases; i++) {
         assert(!pthread_create(&thread, NULL, qt_named_worker, (void *)&cases[i]));
@@ -847,6 +861,7 @@ static void test_threads(void) {
     assert(hook_prctl_time64(PR_GET_DUMPABLE, 0UL, 0UL, 0UL, 0UL) >= 0);
     assert(thread_class("AudioOut") == 0 && thread_class("AudioRenderer") == 0);
     assert(thread_class("QQuickPixmapRea") == 1 && thread_class("Freeze Checker") == 0);
+    assert(thread_class("FileInfoThread") == 3);
     hook_test_engine = 0;
     struct sched_param normal = {.sched_priority = 0};
     assert(!pthread_setschedparam(pthread_self(), SCHED_OTHER, &normal));

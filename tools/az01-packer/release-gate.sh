@@ -252,6 +252,7 @@ SH
         check "new: render probe ran without errors" bash -c "! grep -aq 'SCPROBE error|' '$log'"
         check "new: boot splash unlocked and dismissed (#140)" grep -aqF 'SCPROBE splash|0|1|' "$log"
         check "new: Source Demo Tracks and Sampler Content connect without freeze" grep -aqF 'SCPROBE demosource|1|1|' "$log"
+        check "new: TrackList artwork has a synchronous placeholder" grep -aqF 'SCPROBE trackart|1|1|' "$log"
         label=$(grep -ao 'SCPROBE entry|[^|]*|Deezer|1|' "$log" | head -1 | cut -d'|' -f2) || :
         check "new: Settings -> Services -> Streaming shows the pack's Deezer row" test -n "$label"
         check "new: Streaming shows SoundCloud once (stock row hidden)" test "$(grep -acF "SCPROBE entry|$label|SoundCloud|1|" "$log")" -eq 1
@@ -328,6 +329,7 @@ SH
         check "boot2: stock Engine Lighting defaults off on toggleable hardware" grep -aq 'SCPROBE lighting|1|0|\|SCPROBE lighting|0|1|' "$log"
         check "boot2: boot splash unlocked and dismissed (#140)" grep -aqF 'SCPROBE splash|0|1|' "$log"
         check "boot2: Source Demo Tracks and Sampler Content connect without freeze" grep -aqF 'SCPROBE demosource|1|1|' "$log"
+        check "boot2: TrackList artwork has a synchronous placeholder" grep -aqF 'SCPROBE trackart|1|1|' "$log"
         label=$(grep -ao 'SCPROBE entry|[^|]*|Deezer|1|' "$log" | head -1 | cut -d'|' -f2) || :
         check "boot2: Settings -> Services -> Streaming shows the pack's Deezer row" test -n "$label"
         check "boot2: About shows EngineX OS $NEWV" grep -aqF "SCPROBE version|EngineX OS $NEWV " "$log"
