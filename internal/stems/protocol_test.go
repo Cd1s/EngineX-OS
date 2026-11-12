@@ -237,3 +237,33 @@ func TestSessionRejectsBadStreams(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestStrayBlankLinesIgnoredInProtocolPipelineAndLocal(t *testing.T) {
+	// Stray blank lines before init (#38) and between headers must not abort
+	// Session, Proxy/pipeline/unpackWriter, or LocalRender, while an unbounded
+	// flood of newlines still trips maxHeader.
+	_, backend := protocolBackend(t, "")
+	in := bytes.NewBufferString("\n\r\nversion=1.6.0\nnumChannels=2\nsampleRate=44100\nmaxBlockSize=256\n\n\naction=block\nnumSamples=256\n\n")
+	in.Write(make([]byte, 256*2*4))
+	in.WriteString("\r\n\naction=done\n\n\n")
+	var got bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := Proxy(ctx, backend.URL, secret, in, &got); err != nil {
+		t.Fatalf("Proxy with stray blank lines: %v", err)
+	}
+
+	localIn := bytes.NewBufferString("\n\r\nnumChannels=2\nsampleRate=44100\nmaxBlockSize=64\n\n\naction=block\nnumSamples=64\n\n")
+	localIn.Write(make([]byte, 64*2*4))
+	localIn.WriteString("\naction=done\n\n\n")
+	var localOut bytes.Buffer
+	if err := LocalRender(localIn, &localOut); err != nil {
+		t.Fatalf("LocalRender with stray blank lines: %v", err)
+	}
+
+	flood := &Session{}
+	flood.FeedIn(bytes.Repeat([]byte("\n"), maxHeader+2))
+	if flood.Err() == nil {
+		t.Fatal("unbounded blank-line flood did not trip maxHeader")
+	}
+}
