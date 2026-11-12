@@ -8,7 +8,7 @@ Custom system rebuilt on the official Engine OS 5.3.0+ base for all 16 Denon DJ,
 
 ### New
 
-- **#215 — Unified `*-Update.img` for All 8 Second-Generation Models & One-Click Unlock in `EngineX-Installer`**: All 16 standalone models now ship unified `<PREFIX>-5.3.0.4-EngineX-OS-<Model>-Update.img` release packages (`*-Data-Bundle.tar.gz` is retired from public releases). On a stock 2nd-gen unit (`SC LIVE 4`, `SC LIVE 2`, `PRIME 4+`, `PRIME GO+`, `Mixstream Pro+`, `Mixstream Pro Go`, `PRIME 4 G2`, `Rane SYSTEM ONE`), connect over USB in `Firmware Update Mode` and run **`EngineX-Installer`** once — it automatically performs **`[1/2] One-Click Unlock`** of the `.img` update chain and **`[2/2] Flashes *-Update.img`** into `/data/enginex` without modifying the read-only stock system partition. Once unlocked (existing 2nd-gen EngineX installs unlock automatically on boot), every subsequent update installs straight from a `FAT32` / `exFAT` USB stick or one-tap on-screen OTA (**`Settings → About / Update → Update`**) just like 1st-gen units, with no computer needed, and survives Factory Reset.
+- **#215 — Unified `*-Update.img` for All 8 Second-Generation Models & One-Click Unlock in `EngineX-Installer`**: All 16 standalone models now ship unified `<PREFIX>-5.3.0.4-EngineX-OS-<Model>-Update.img` release packages (with `*-Data-Bundle.tar.gz` also published alongside them in `5.3.0.4` / `5.3.0.5` so older `5.3.0.2` / `5.3.0.3` Gen-2 decks one-tap OTA upgrade seamlessly on screen). On a stock 2nd-gen unit (`SC LIVE 4`, `SC LIVE 2`, `PRIME 4+`, `PRIME GO+`, `Mixstream Pro+`, `Mixstream Pro Go`, `PRIME 4 G2`, `Rane SYSTEM ONE`), connect over USB in `Firmware Update Mode` and run **`EngineX-Installer`** once — it automatically performs **`[1/2] One-Click Unlock`** of the `.img` update chain and **`[2/2] Flashes *-Update.img`** into `/data/enginex` without modifying the read-only stock system partition. Once unlocked (existing 2nd-gen EngineX installs unlock automatically on boot), every subsequent update installs straight from a `FAT32` / `exFAT` USB stick or one-tap on-screen OTA (**`Settings → About / Update → Update`**) just like 1st-gen units, with no computer needed, and survives Factory Reset.
 - **#210 — Native Spotify Audio & Zero-Config Login**: Spotify Premium tracks play straight from Spotify as 320 kbps Ogg Vorbis (or 160 / 96 kbps when unavailable), with BPM, key, and waveforms imported into the Engine library and no fallback to any other streaming service. Sign in by picking **`EngineX OS`** in Spotify Connect on the same Wi-Fi / LAN, or scan the on-screen QR code to approve on Spotify's official device page — no Developer App or Client ID setup required (legacy Web API tokens need one fresh pairing or QR scan).
 - **#201 — `Linked View` Selector & `Paired Player` 2-Deck View (`SC5000 / SC6000`)**: `Control Center → Layout → ENGINEX VIEW PRESET → Linked View` offers `Stock` / `Paired Player` / `4 Decks` on standalone players and `Stock` / `4 Decks` on 4-deck all-in-one consoles, replacing the separate switches so returning to `Stock` is always one step away (with a hint under `Stock` reminding standalone-player DJs that `Shift + Layer` or `Layout → PERFORMANCE LAYOUT → Deck Layout` switches single and dual layer views). `Paired Player` shows two full-height lanes on two linked `SC5000 / SC6000` players: this player's active `Layer A / B` on top and the partner player's active layer below as a live shadow lane that follows the partner's `Layer` button (`No paired player` when unlinked; requires `4-Deck Role` `Auto`, `1+3`, `2+4`, `1`, or `2`). Switching between `Stock` and the linked views restarts Engine once; switching between `Paired Player` and `4 Decks` is live with no restart.
 - **#49 — `Shadow Deck Mode` (`Auto` / `All Engine Mode` / `All CDJ Mode`) with Live Switching**: In 4-deck and Paired Player views, `Layout → ENGINEX VIEW PRESET → Shadow Deck Mode` defaults to `Auto`: copyable tracks from another EngineX deck or a CDJ's USB/SD drive load locally (muted) and render with Engine's own waveform, beat grid, overview, `Slip` timeline, `Auto Loop`, `Key Offset`, `Stems` icon, green `Sync` `BPM`, and `LEAD` badge, showing track info and a progress ring while copying. Uncopyable CDJ sources (streaming, rekordbox Link, CD, or 2nd USB) automatically display CDJ waveforms with a one-line status reason and stock-matching deck headers. Switching `Shadow Deck Mode` takes effect live without restarting Engine or interrupting local playback.
@@ -49,7 +49,7 @@ Custom system rebuilt on the official Engine OS 5.3.0+ base for all 16 Denon DJ,
 
 ### Changed & removed
 
-- **Public `*-Data-Bundle.tar.gz` release assets retired (`#215`)**: Every release now ships 4 `EngineX-Installer` archives + 16 `*-Update.img` files (8 Gen-1 + 8 Gen-2) = 20 artifacts plus `SHA256SUMS.txt`. `EngineX-Installer` retains local `.tar.gz` compatibility when `--bundle` is passed explicitly.
+- **Phased Gen-2 `*-Update.img` unification (`#215`, 28 release artifacts)**: `5.3.0.4` publishes all 16 `*-Update.img` files (8 Gen-1 + 8 Gen-2), 8 legacy-OTA `*-Data-Bundle.tar.gz` archives, and 4 `EngineX-Installer` archives (`28` artifacts + `SHA256SUMS.txt`). `EngineX-Installer` and unlocked Gen-2 decks use `*-Update.img` by default, while `*-Data-Bundle.tar.gz` stays in `5.3.0.4` and `5.3.0.5` so older `5.3.0.2` / `5.3.0.3` Gen-2 decks can one-tap OTA upgrade on screen before `*-Data-Bundle.tar.gz` is retired in `5.3.0.6+`.
 - **Pioneer-style (PX) effects removed from standalone players (`SC5000 / SC5000M / SC6000 / SC6000M`)**: `Color FX Style` and the `PX Delay` rows are hidden under `Profile → Playback` on standalone players and any previously saved value acts as `Off`; all-in-one consoles keep them.
 - **`Auto-Analyze Drives` row removed**: Removed the non-functional `Auto-Analyze Drives` entry from `Profile → Library` and the `:8080` web console.
 - **Jog wheel & `Browse` / zoom controls back to stock (`#147`, `#157`)**: Restored stock `Shift + Vinyl`, Beat Grid Edit jog touch, and `Browse` encoder zoom steps and hold actions.
@@ -73,8 +73,58 @@ Custom system rebuilt on the official Engine OS 5.3.0+ base for all 16 Denon DJ,
 
 ### How to update
 
-- **Already running EngineX OS (`5.3.0.3`, `5.3.0.2`, `5.3.0.1.x`, or `5.0.4.2`) — all 16 1st-gen & 2nd-gen models**: Connect the deck to Wi-Fi or Ethernet, open **`Settings → About / Update`**, and tap **`Update`** on screen (or on any 1st-gen / unlocked 2nd-gen unit, copy your model's `*-Update.img` unrenamed to the root of a `FAT32` / `exFAT` USB stick and choose **`Settings → About / Update → Firmware Update Mode → Options → USB/SD`**). Both 1st-gen and 2nd-gen units download, verify, and install their `5.3.0.4` `*-Update.img` while preserving your library, streaming accounts, saved layout views, and Mods.
+- **Already running EngineX OS (`5.3.0.3`, `5.3.0.2`, `5.3.0.1.x`, or `5.0.4.2`) — all 16 1st-gen & 2nd-gen models**: Connect the deck to Wi-Fi or Ethernet, open **`Settings → About / Update`**, and tap **`Update`** on screen (1st-gen models and unlocked `5.3.0.3` 32-bit 2nd-gen models upgrade via `*-Update.img`; `5.3.0.2` and locked-`5.3.0.3` 2nd-gen models automatically pick up the `*-Data-Bundle.tar.gz` included in this release and unlock `.img` updates on boot, while preserving your library, streaming accounts, saved layout views, and Mods). *(Note: if your 2nd-gen deck is on `5.3.0.3` `PRIME 4 G2` / `SYSTEM ONE` with `gen2-unlocked` set, or already installed the earlier same-day `5.3.0.4` `b536671` build, run `EngineX-Installer-5.3.0.4-*` once over LAN SSH or USB to activate the `#215` `.img` update chain.)*
 - **First-time install on 1st-gen (`SC5000 / SC5000M / SC6000 / SC6000M / PRIME 4 / PRIME 2 / PRIME GO / Mixstream Pro`)**: Download your model's `*-Update.img` below, place it unrenamed in the root of a `FAT32` or `exFAT` USB drive, plug it into the deck, and open **`Settings → About / Update → Firmware Update Mode → Options → USB/SD`**.
 - **First-time install on a stock 2nd-gen unit (`SC LIVE 4 / SC LIVE 2 / PRIME 4+ / PRIME GO+ / Mixstream Pro+ / Mixstream Pro Go / PRIME 4 G2 / Rane SYSTEM ONE`)**: Update to official **Engine OS 5.3.0** first, download `EngineX-Installer-5.3.0.4-*` for your platform, extract the archive, and run the command-line launcher (`Install-EngineX.bat` on Windows, `Install-EngineX.command` on macOS, or `./install-enginex.sh` on Linux) with the deck in **`Firmware Update Mode`** over USB (or over LAN / Wi-Fi if root SSH is already open). It automatically runs **`[1/2] One-Click Unlock`** of the `.img` update chain and **`[2/2] Flashes *-Update.img`** (writing a fresh 2nd-gen `/data` image over USB erases internal `/data` storage — back up first and unplug USB/SD drives; on Windows 2nd-gen USB installs, forward the USB device into WSL 2 with `usbipd-win` and run the Linux installer as root via `wsl -u root`; for `PRIME 4 G2` and `SYSTEM ONE`, power-cycle the deck after USB writing finishes). Once unlocked, every future update works directly from a USB stick or on-screen OTA with no computer needed!
 
-<!-- SHA256 TABLE -->
+---
+
+### SHA-256 Checksums (28 Release Artifacts)
+
+#### One-Click Installer (`EngineX-Installer`)
+
+| Platform | File | SHA-256 |
+| --- | --- | --- |
+| Windows 10/11 x64 | `EngineX-Installer-5.3.0.4-windows-amd64.zip` | `23f5d4d5f490a5f171a5598c3f99dc299e75dfcced4d79863b8a33b4ed352335` |
+| macOS Apple Silicon (M1–M4) | `EngineX-Installer-5.3.0.4-macos-arm64.zip` | `e61ad596830bd5eb5fe4622102734dbdd78cbcd57f9c4a296f7bb5087f589c11` |
+| macOS Intel | `EngineX-Installer-5.3.0.4-macos-amd64.zip` | `d55e882d81db16bf0d516dd4f5a337b54d20141a3bbf1eace47203570d17ba67` |
+| Linux x86_64 | `EngineX-Installer-5.3.0.4-linux-amd64.tar.gz` | `460d21cb7deabae5551a695c812f6d09833c5f6409f886dfbd8f6b919118e179` |
+
+#### First-Generation Firmware Images (`*-Update.img`)
+
+| Model | Board | File | SHA-256 |
+| --- | --- | --- | --- |
+| Denon DJ SC5000 Prime | JP07 | `SC5000-5.3.0.4-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img` | `c419f1c3c361e89a91f5654bf5a04c7c4c8f481638d34c6837e4844194f84ab0` |
+| Denon DJ SC5000M Prime | JP08 | `SC5000M-5.3.0.4-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img` | `c419f1c3c361e89a91f5654bf5a04c7c4c8f481638d34c6837e4844194f84ab0` |
+| Denon DJ PRIME GO | JP11 | `PRIMEGO-5.3.0.4-EngineX-OS-Denon-PRIME-GO-JP11-Update.img` | `c419f1c3c361e89a91f5654bf5a04c7c4c8f481638d34c6837e4844194f84ab0` |
+| Denon DJ SC6000 Prime | JP13 | `SC6000-5.3.0.4-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img` | `72d37d70708ad9438687ae7d945fe210c4e3aba1154e478d309c933b6e846e52` |
+| Denon DJ SC6000M Prime | JP14 | `SC6000M-5.3.0.4-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img` | `72d37d70708ad9438687ae7d945fe210c4e3aba1154e478d309c933b6e846e52` |
+| Denon DJ PRIME 4 | JC11 | `PRIME4-5.3.0.4-EngineX-OS-Denon-PRIME-4-JC11-Update.img` | `677ecab3daa07473571b013e3c4c2fbaac09ae3d83c77a1cefc4a26753c19304` |
+| Denon DJ PRIME 2 | JC16 | `PRIME2-5.3.0.4-EngineX-OS-Denon-PRIME-2-JC16-Update.img` | `677ecab3daa07473571b013e3c4c2fbaac09ae3d83c77a1cefc4a26753c19304` |
+| Numark Mixstream Pro | NH08 | `MIXSTREAMPRO-5.3.0.4-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img` | `677ecab3daa07473571b013e3c4c2fbaac09ae3d83c77a1cefc4a26753c19304` |
+
+#### Second-Generation Unified Update Images (`*-Update.img`, Primary)
+
+| Model | Board | File | SHA-256 |
+| --- | --- | --- | --- |
+| Denon DJ SC LIVE 4 | JP21 | `SCLIVE4-5.3.0.4-EngineX-OS-Denon-SC-LIVE-4-JP21-Update.img` | `335d8500a0736d4ea213f260026bf650e217ac0f59116453dd395e2a0a737ecf` |
+| Denon DJ SC LIVE 2 | JP20 | `SCLIVE2-5.3.0.4-EngineX-OS-Denon-SC-LIVE-2-JP20-Update.img` | `f79472cbda94026bcb116ce11ed5fd49d4152fdd7f5620730be5c32b8c8b74ed` |
+| Denon DJ PRIME 4+ | JC11S | `PRIME4PLUS-5.3.0.4-EngineX-OS-Denon-PRIME-4-Plus-JC11S-Update.img` | `ffa1f9963f8d4b653452eea04f01787538d983db9a6426ebdc7ce35371b4e778` |
+| Denon DJ PRIME GO+ | JP11S | `PRIMEGOPLUS-5.3.0.4-EngineX-OS-Denon-PRIME-GO-Plus-JP11S-Update.img` | `734b8084db617a986c2f588fa24531e4691d9af5cf0076a15819749c2dedce10` |
+| Numark Mixstream Pro+ | NH08S | `MIXSTREAMPROPLUS-5.3.0.4-EngineX-OS-Numark-Mixstream-Pro-Plus-NH08S-Update.img` | `4c9d631daca15d9d424e91fc227c04cb1e82bb5f03c8d9316bfd4cdade9503d5` |
+| Numark Mixstream Pro Go | NH10 | `MIXSTREAMPROGO-5.3.0.4-EngineX-OS-Numark-Mixstream-Pro-Go-NH10-Update.img` | `e73a3c70f07417bad5891b5733d2198aadf518af809144e76546af508d5c8deb` |
+| Denon DJ PRIME 4 G2 | JP24 | `PRIME4G2-5.3.0.4-EngineX-OS-Denon-PRIME-4-G2-JP24-Update.img` | `109bdf49afa994eab2d4ccf4e7954ec05aa60104a25ada0266206d8abb0e4727` |
+| Rane SYSTEM ONE | RMZ2 | `SYSTEMONE-5.3.0.4-EngineX-OS-Rane-SYSTEM-ONE-RMZ2-Update.img` | `6c35cfba82b540dfdaa46dd1307f70f1ed987fe47a2c4ef52547004ef7a77153` |
+
+#### Second-Generation Legacy OTA Data Bundles (`*-Data-Bundle.tar.gz`, for `5.3.0.2` / `5.3.0.3` OTA Compatibility)
+
+| Model | Board | File | SHA-256 |
+| --- | --- | --- | --- |
+| Denon DJ SC LIVE 4 | JP21 | `SCLIVE4-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `b6564992bce3803748386f89cc5e69a4dc010427e08ffa5d0423f228c05558c8` |
+| Denon DJ SC LIVE 2 | JP20 | `SCLIVE2-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `a65a873fdd30f72eecea36f32798ff1ce3d1ba9f492bb7e743b66549514b3f86` |
+| Denon DJ PRIME 4+ | JC11S | `PRIME4PLUS-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `5a3b867a88a8c8f5a666586dc13f0bd53ffb9a8c6410f356c8db5b2b06dfbbed` |
+| Denon DJ PRIME GO+ | JP11S | `PRIMEGOPLUS-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `1d5cb3a0cc2e70401d49f11136deae9996b8f9ef1667d5fc1ad7fdf9643b70a4` |
+| Numark Mixstream Pro+ | NH08S | `MIXSTREAMPROPLUS-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `e7b6e78ab371c8bb95d6d5a47705ce7cf47f6bfb66c76eeff74855b6fb0bc3f1` |
+| Numark Mixstream Pro Go | NH10 | `MIXSTREAMPROGO-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `e8d0753977492a2aef42d00466fb6ff785284a88fec3291764013d1cf365959e` |
+| Denon DJ PRIME 4 G2 | JP24 | `PRIME4G2-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `fa575784a7cc30819853de322c8f4e581263135b9d86d39caf1fc7575b318467` |
+| Rane SYSTEM ONE | RMZ2 | `SYSTEMONE-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `cb140f4e8204c54315713f3edad6d2152cde64d3cf9abe2d12ad99e74a10e90d` |

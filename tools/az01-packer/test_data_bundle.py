@@ -613,10 +613,36 @@ class DataBundleTest(unittest.TestCase):
         self.assertEqual(stage.read_text(), rewritten)
         self.host_commands.write_text('')
 
-    def test_release_scripts_emit_16_update_imgs_and_20_line_sha256sums(self):
+        # 4. Leading 'exec ' before updaters is preserved; missing /usr/sbin/az01-update emits a diagnostic warning.
+        exec_script = (
+            '#!/bin/sh\n'
+            '\t/usr/Engine/Engine -d0\n'
+            '\t\texec /usr/sbin/az01-update --file "$UPDATE_FILE"\n'
+            '\t\texec /usr/bin/planck-remote-screen --update "$UPDATE_FILE"\n'
+        )
+        engine_script.write_text(exec_script)
+        res = subprocess.run(['sh', str(ba_reloc)], env=env, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn(f'\t\texec env LD_PRELOAD="{lib_hook}" /usr/sbin/az01-update --file "$UPDATE_FILE"\n', stage.read_text())
+        self.assertIn(f'\t\texec env LD_PRELOAD="{lib_hook}" /usr/bin/planck-remote-screen --update "$UPDATE_FILE"\n', stage.read_text())
+        self.host_commands.write_text('')
+
+        logger_shim = self.tmp / 'logger-bin'
+        logger_shim.mkdir()
+        (logger_shim / 'logger').write_text('#!/bin/sh\nexit 0\n')
+        (logger_shim / 'logger').chmod(0o755)
+        engine_script.write_text('#!/bin/sh\n\t/usr/Engine/Engine -d0\n')
+        res = subprocess.run(['sh', str(ba_reloc)],
+                             env={**env, 'PATH': f"{logger_shim}:{env['PATH']}"},
+                             capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn('/usr/sbin/az01-update preload hook missing', res.stderr)
+        self.host_commands.write_text('')
+
+    def test_release_scripts_emit_28_artifacts_and_sha256sums(self):
         rel_sh = (HERE / 'build-release.sh').read_text()
-        self.assertNotIn('-Data-Bundle.tar.gz"', rel_sh)
-        self.assertIn('sha256sum *-Update.img > SHA256SUMS.txt', rel_sh)
+        self.assertIn('-Data-Bundle.tar.gz"', rel_sh)
+        self.assertIn('sha256sum *-Update.img *-Data-Bundle.tar.gz > SHA256SUMS.txt', rel_sh)
 
         out_dir = self.tmp / 'release-out'
         out_dir.mkdir()
@@ -633,7 +659,8 @@ class DataBundleTest(unittest.TestCase):
         for pfx, model in gen1:
             (out_dir / f'{pfx}-5.3.0.4-EngineX-OS-{model}-Update.img').write_bytes(f'gen1-{pfx}'.encode())
         for pfx, model in bdb.MODEL_NAMES.items():
-            (out_dir / f'{pfx}-5.3.0.4-EngineX-OS-{model}-Update.img').write_bytes(f'gen2-{pfx}'.encode())
+            (out_dir / f'{pfx}-5.3.0.4-EngineX-OS-{model}-Update.img').write_bytes(f'gen2-img-{pfx}'.encode())
+            (out_dir / f'{pfx}-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz').write_bytes(f'gen2-bundle-{pfx}'.encode())
 
         fake_bin = self.tmp / 'fake-go-bin'
         fake_bin.mkdir()
@@ -648,10 +675,11 @@ class DataBundleTest(unittest.TestCase):
         res = subprocess.run(['sh', str(HERE / 'build-installer.sh'), '5.3.0.4', str(out_dir)],
                              env=env, capture_output=True, text=True)
         self.assertEqual(res.returncode, 0, res.stderr)
-        self.assertEqual(list(out_dir.glob('*-Data-Bundle.tar.gz')), [])
         self.assertEqual(len(list(out_dir.glob('*-Update.img'))), 16)
+        self.assertEqual(len(list(out_dir.glob('*-Data-Bundle.tar.gz'))), 8)
+        self.assertEqual(len(list(out_dir.glob('EngineX-Installer-5.3.0.4-*'))), 4)
         lines = (out_dir / 'SHA256SUMS.txt').read_text().splitlines()
-        self.assertEqual(len(lines), 20, lines)
+        self.assertEqual(len(lines), 28, lines)
         for line in lines:
             digest, fname = line.split('  ')
             self.assertEqual(hashlib.sha256((out_dir / fname).read_bytes()).hexdigest(), digest, fname)

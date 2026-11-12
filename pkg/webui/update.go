@@ -392,6 +392,13 @@ func (s *Server) checkRelease(ctx context.Context, repo string) updateStatus {
 			}
 			return ""
 		}
+		// Phased Gen-2 *-Update.img migration (#215):
+		//   - 5.3.0.4 (current): Releases publish both *-Update.img and *-Data-Bundle.tar.gz (28 artifacts);
+		//     checkRelease prefers -Update.img when not gen2-locked and falls back to -Data-Bundle.tar.gz.
+		//   - 5.3.0.5 (bridge): Releases still include *-Data-Bundle.tar.gz one final time so 5.3.0.2/5.3.0.3/early-5.3.0.4
+		//     decks can OTA upgrade to 5.3.0.5, while 5.3.0.5's own checkRelease switches to -Update.img ONLY.
+		//   - 5.3.0.6+ (final): Retire *-Data-Bundle.tar.gz from build-release.sh and GitHub Releases; all 16 models
+		//     use *-Update.img exclusively for USB, OTA, and EngineX-Installer.
 		if dataBundleBoards[prefix] {
 			if !s.isGen2Locked() {
 				v.DownloadURL = find("-Update.img")
@@ -501,12 +508,19 @@ func (s *Server) customDir() string {
 	return bundleCustomDir
 }
 
-// isGen2Unlocked: the *-Update.img path is open (set by the bundle's install.sh or the console, #119).
+// isGen2Unlocked reports whether the *-Update.img upgrade path is open (#119, #215):
+// true whenever gen2-locked is absent and either customDir is the deck's /data runtime dir
+// or gen2-unlocked exists, keeping GET /v1/sc5000/unlock-gen2 consistent with checkRelease.
 func (s *Server) isGen2Unlocked() bool {
+	if s.isGen2Locked() {
+		return false
+	}
 	dir := s.customDir()
-	_, errU := os.Stat(filepath.Join(dir, "gen2-unlocked"))
-	_, errL := os.Stat(filepath.Join(dir, "gen2-locked"))
-	return errU == nil && errL != nil
+	if isDeckDataDir(dir) {
+		return true
+	}
+	_, err := os.Stat(filepath.Join(dir, "gen2-unlocked"))
+	return err == nil
 }
 
 // isGen2Locked reports whether the *-Update.img path was explicitly disabled via gen2-locked (#215).

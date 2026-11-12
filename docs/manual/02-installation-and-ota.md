@@ -21,11 +21,11 @@
 
 ## 1. 先看自己的机器属于哪一类 / Which group is your deck / 先確認機型類別
 
-**简体中文**：EngineX OS 一共支持 16 款机型，分两代，**现已全部统一使用单文件 `*-Update.img` 升级包**（旧版 `*-Data-Bundle.tar.gz` 已从公开 Release 退役，`#215`）。不同机型的 `*-Update.img` **不能混用**。
+**简体中文**：EngineX OS 一共支持 16 款机型，分两代，**现已全部统一使用单文件 `*-Update.img` 升级包作为主安装与升级格式**（`5.3.0.4`/`5.3.0.5` Release 中同时保留 `*-Data-Bundle.tar.gz` 兼容包供旧版 `5.3.0.2`/`5.3.0.3` 二代机屏幕一键 OTA 过渡，`#215`）。不同机型的 `*-Update.img` **不能混用**。
 
-**English**: EngineX OS supports 16 units in two generations, **all now unified on per-model `*-Update.img` packages** (`*-Data-Bundle.tar.gz` is retired from public releases, `#215`). Model files **must not be mixed**.
+**English**: EngineX OS supports 16 units in two generations, **all now unified on per-model `*-Update.img` packages** (`*-Data-Bundle.tar.gz` is also included alongside `*-Update.img` in `5.3.0.4`/`5.3.0.5` Releases so older `5.3.0.2`/`5.3.0.3` Gen-2 decks can one-tap OTA upgrade on screen, `#215`). Model files **must not be mixed**.
 
-**繁體中文**：EngineX OS 共支援 16 款機型，分兩代，**現已全部統一使用單檔案 `*-Update.img` 升級包**（舊版 `*-Data-Bundle.tar.gz` 已自公開 Release 退役，`#215`）。不同機型的 `*-Update.img` **不可混用**。
+**繁體中文**：EngineX OS 共支援 16 款機型，分兩代，**現已全部統一使用單檔案 `*-Update.img` 升級包作為主安裝與升級格式**（`5.3.0.4`/`5.3.0.5` Release 中同時保留 `*-Data-Bundle.tar.gz` 相容包供舊版 `5.3.0.2`/`5.3.0.3` 二代機螢幕一鍵 OTA 過渡，`#215`）。不同機型的 `*-Update.img` **不可混用**。
 
 | 代 / Gen | 机型 / Models / 機型 | 板号 / Board | 发布产物 / Release file / 發佈檔案 | 可用方法 / Methods / 可用方法 |
 | :-- | :-- | :-- | :-- | :-- |

@@ -94,14 +94,14 @@ done
 for m in SCLIVE4 SCLIVE2 PRIME4PLUS PRIMEGOPLUS MIXSTREAMPROPLUS MIXSTREAMPROGO; do
     python3 tools/az01-packer/build-data-bundle.py "$VERSION" --prefix "$m" --suite "$WORK/sc5000-suite" \
         --hook "$WORK/hooks32/libengine-ui-hook.so" --ui-packs "$WORK/packs.tar.gz" --out "$WORK/bundle-$m" >/dev/null
-    cp "$WORK/bundle-$m/$m-$VERSION-EngineX-OS-"*-Update.img "$OUT/"
+    cp "$WORK/bundle-$m/$m-$VERSION-EngineX-OS-Data-Bundle.tar.gz" "$WORK/bundle-$m/$m-$VERSION-EngineX-OS-"*-Update.img "$OUT/"
 done
 for m in PRIME4G2 SYSTEMONE; do
     python3 tools/az01-packer/build-data-bundle.py "$VERSION" --prefix "$m" --suite "$WORK/sc5000-suite-arm64" \
         --hook "$WORK/hooks64/libengine-ui-hook.so" --ui-packs "$WORK/packs.tar.gz" --out "$WORK/bundle-$m" >/dev/null
-    cp "$WORK/bundle-$m/$m-$VERSION-EngineX-OS-"*-Update.img "$OUT/"
+    cp "$WORK/bundle-$m/$m-$VERSION-EngineX-OS-Data-Bundle.tar.gz" "$WORK/bundle-$m/$m-$VERSION-EngineX-OS-"*-Update.img "$OUT/"
 done
 
 cd "$OUT"
-sha256sum *-Update.img > SHA256SUMS.txt
+sha256sum *-Update.img *-Data-Bundle.tar.gz > SHA256SUMS.txt
 ls -l

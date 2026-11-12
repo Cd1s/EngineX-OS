@@ -247,7 +247,7 @@ Second-generation units (**SC LIVE 4, SC LIVE 2, PRIME 4+, PRIME GO+, Mixstream 
 
 ### Option 2: One-Click On-Deck Update (Already Running EngineX OS)
 - Connect your deck to Wi-Fi or Ethernet and open **Settings → About / Update**;
-- Tap **Update** on the touchscreen — all 16 first- and second-generation models download, verify, and install their `5.3.0.4` `*-Update.img` directly while keeping your library, logins, saved views, and Mods.
+- Tap **Update** on the touchscreen — all 16 first- and second-generation models download, verify, and install `5.3.0.4` directly while keeping your library, logins, saved views, and Mods (`*-Data-Bundle.tar.gz` is also included in the GitHub Release alongside `*-Update.img` so older `5.3.0.2` / `5.3.0.3` 2nd-gen decks one-tap OTA upgrade seamlessly on screen and automatically unlock `.img` updates on boot).
 
 ### Optional: High-Quality Neural Stems on Your Computer
 On-deck separation uses a fast lightweight split. For studio-grade neural Stems (`htdemucs` on GPU, Apple Silicon MPS, or CPU), unzip `EngineX-Installer` on a Mac or PC on the same Wi-Fi / LAN and run one command in a terminal (append `hpss` if you want lightweight mode without PyTorch). Your deck discovers the computer automatically with no IP or password setup and displays `High-quality stems: <host> (htdemucs)` under **Profile → Library** and **Settings → About / Update**:
