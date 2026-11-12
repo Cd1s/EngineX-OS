@@ -6,7 +6,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 
 ---
 
-## Regression Table (57 Rows)
+## Regression Table (58 Rows)
 
 | # | Behaviour that must keep working | Issue / commit that fixed it | How it is checked (automated test name, or exact real-deck / sandbox step) | Release gate / deck acceptance / recording coverage |
 | --- | --- | --- | --- | --- |
@@ -67,6 +67,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 | 55 | **Stems relay fallback to LAN / local HPSS is never poisoned by `probeRelayStems` (`BH-GF2-5`)**: `probeRelayStems` marks relay cache entries (`Relay: true`) and `FindLAN` / `lanHealth` require both a LAN address and `"protocol": "engine-5.0.4"` (rejecting `sc5000-relay`'s unauthenticated `/healthz`), so an unreachable/busy relay falls through to a real home `enginex-stemsd` or `LocalRender` instead of failing with `401` | `BH-GF2-5` (`#222`) | `internal/stems::TestFindLANDoesNotUseRelayHealthzOrCachedRelay`, `TestFindLANDiscoversCachesAndFallsBack`; `pkg/webui::TestProbeRelayStemsAnswersAndCaches` | Release workflow Step 2 Go suites |
 | 56 | **Windows home Stems worker (`worker.py` via `run-home-worker.ps1`) never crashes with `[WinError 10038]` on stdin pipes (`BH-GF2-6`)**: `Input.waiting()` uses `PeekNamedPipe` on Windows pipes and falls back cleanly to single-block reads when `select.select` raises `OSError` | `BH-GF2-6` (`#222`) | `tools/stems/test_worker.py::WorkerTests.test_windows_pipe_select_oserror_does_not_crash` | Release workflow Step 2 (`python3 -m unittest discover -s tools/stems`) |
 | 57 | **Spotify OAuth token refresh never holds `Spotify.mu` across network I/O, prefers `RefreshToken` before native credentials, retries once on HTTP `401`, and drains the `liked` goroutine on playlist errors (`BH-GF1-8`)** | `BH-GF1-8` (`#222`) | `pkg/providers::TestSpotifyAuthorizationRefreshLockAnd401Retry`, `TestSpotifyTokenRefreshAndPKCE` | Release workflow Step 2 Go suites |
+| 58 | **Expired or revoked logins on NetEase (`code=301/302`), Beatport, Spotify, and SoundCloud always unwrap to `providers.StatusError(401)` so the streaming menu displays the re-login hint (`BH-GF1-18`)** | `BH-GF1-18` (`#222`) | `pkg/providers::TestExpiredOrRevokedLoginsSurfaceStatusError401` | Release workflow Step 2 Go suites |
 
 ---
 

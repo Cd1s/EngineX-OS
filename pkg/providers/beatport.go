@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -229,7 +230,7 @@ func (b *Beatport) access(ctx context.Context, stale string) (string, error) {
 	defer b.mu.Unlock()
 	b.load()
 	if b.tok.Access == "" {
-		return "", errors.New("beatport: not logged in")
+		return "", fmt.Errorf("beatport: not logged in: %w", StatusError(401))
 	}
 	refused := stale != "" && stale == b.tok.Access
 	expiring := !b.tok.Expiry.IsZero() && time.Now().Add(beatportTokenMargin).After(b.tok.Expiry)
@@ -237,8 +238,8 @@ func (b *Beatport) access(ctx context.Context, stale string) (string, error) {
 		return b.tok.Access, nil
 	}
 	if b.tok.Refresh == "" {
-		if refused {
-			return "", errors.New("beatport: login expired")
+		if refused || (!b.tok.Expiry.IsZero() && time.Now().After(b.tok.Expiry)) {
+			return "", fmt.Errorf("beatport: login expired: %w", StatusError(401))
 		}
 		return b.tok.Access, nil
 	}
@@ -247,7 +248,11 @@ func (b *Beatport) access(ctx context.Context, stale string) (string, error) {
 		if !refused && time.Now().Before(b.tok.Expiry) {
 			return b.tok.Access, nil // still valid; the next request tries again
 		}
-		return "", errors.New("beatport: login expired")
+		var st StatusError
+		if errors.As(err, &st) && (st == 400 || st == 401) {
+			return "", fmt.Errorf("beatport: login expired: %w", StatusError(401))
+		}
+		return "", err
 	}
 	if t.Refresh == "" {
 		t.Refresh = b.tok.Refresh

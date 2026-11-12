@@ -110,6 +110,9 @@ func (n *Netease) get(ctx context.Context, path string, q url.Values, out any) e
 		return err
 	}
 	if code, ok := r["code"].(float64); ok && code != 200 && code != 800 && code != 801 && code != 802 && code != 803 {
+		if int(code) == 301 || int(code) == 302 {
+			return fmt.Errorf("netease: login expired (code %d): %w", int(code), StatusError(401))
+		}
 		return fmt.Errorf("netease: API rejected request (code %v)", code)
 	}
 	return remarshal(r, out)
@@ -184,7 +187,7 @@ func (n *Netease) Playlists(ctx context.Context) ([]Playlist, error) {
 	uid := n.UserID
 	n.mu.Unlock()
 	if uid == 0 {
-		return nil, errors.New("netease: login required")
+		return nil, fmt.Errorf("netease: login required: %w", StatusError(401))
 	}
 	var all []Playlist
 	// Saved albums and radios appear after the playlists. If they cannot be read,
