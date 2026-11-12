@@ -2339,6 +2339,82 @@ assert.equal(value().toFixed(2),'130.18');
 """)
 
     @unittest.skipUnless(shutil.which("node"), "node needed for the display-state behavioral checks")
+    def test_bpm_info_and_bpm_item_update_with_pitch_fader_before_waveform_analyzed(self):
+        # Issue #231: Rekordbox / unanalyzed track loaded on deck (e.g. 125 BPM).
+        # While the waveform is loading, SongAnalyzed is false. When the user moves the
+        # pitch fader (SpeedState) to meet Deck 2 (127 BPM), the displayed BPM must update
+        # in real time rather than staying frozen until the waveform finishes loading.
+        qrc = LAB / "5.3.0" / "qrc"
+        if not qrc.is_dir():
+            self.skipTest(f"{qrc} not found (run on the build host)")
+        with tempfile.TemporaryDirectory(prefix="ui-header-bpm-test-") as tmp:
+            packs = Path(tmp) / "packs"
+            result = subprocess.run(["python3", str(BUILD_PACKS), "--qrc", str(qrc), "--out", str(packs)],
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            composite = "Skins/EngineOS/UI/CompositeControls/"
+            info = (packs / "en" / composite / "Deck/DeckItem/BpmInfo.qml").read_text()
+            self.assertIn("SpeedState", info)
+            self.assertIn("MetaDataBPM", info)
+            # Test BpmInfo.qml scBpm2 behavior via node
+            script = r"""
+            const assert = require('assert');
+            function makeBpmInfo(isAnalyzed, currentBpm, pitchArg, metaBpmStr, bpmText, bpmFractionalText) {
+                const bpmInfoView = { bpmText: bpmText, bpmFractionalText: bpmFractionalText };
+                const scBpm = { translator: { unnormalized: currentBpm } };
+                const scAnalyzed = { translator: { state: isAnalyzed } };
+                const scSpeed = { translator: { unnormalized: pitchArg } };
+                const scMetaBpm = { translator: { string: metaBpmStr } };
+                """ + re.search(r"readonly property var scBpm2: \{(.*?)\n\s+\}", info, re.S).group(1) + r"""
+            }
+            // 1. Empty deck: bpmFractionalText is empty, returns null (falls back to stock "-" / "")
+            assert.strictEqual(makeBpmInfo(false, 0, 0, "", "-", ""), null);
+            // 2. Track loaded with no BPM metadata and unanalyzed: returns null
+            assert.strictEqual(makeBpmInfo(false, 0, 1.6, "", "-", ""), null);
+            // 3. Track loaded at 125 BPM, waveform loading (isAnalyzed: false), pitch at 0% -> 125.00
+            assert.deepStrictEqual(makeBpmInfo(false, 125.0, 0, "125.0", "125", ".0"), ["125", "00"]);
+            // 4. Issue #231: Deck 1 moved from 125 to meet 127 (+1.60% pitch) while waveform loading
+            assert.deepStrictEqual(makeBpmInfo(false, 125.0, 1.6, "125.0", "125", ".0"), ["127", "00"]);
+            // 5. Further pitch change (+3.20% pitch) -> 129.00
+            assert.deepStrictEqual(makeBpmInfo(false, 125.0, 3.2, "125.0", "125", ".0"), ["129", "00"]);
+            // 6. Negative pitch change (-4.00% pitch) -> 120.00
+            assert.deepStrictEqual(makeBpmInfo(false, 125.0, -4.0, "125.0", "125", ".0"), ["120", "00"]);
+            // 7. Sync state: Engine cur already differs from base (e.g. 130.00), uses cur directly without double-pitching
+            assert.deepStrictEqual(makeBpmInfo(false, 130.0, 1.6, "125.0", "125", ".0"), ["130", "00"]);
+            // 8. Analyzed track: uses exact current BPM
+            assert.deepStrictEqual(makeBpmInfo(true, 127.0, 1.6, "125.0", "127", ".0"), ["127", "00"]);
+            console.log("BpmInfo tests passed");
+            """
+            output = subprocess.check_output(["node", "-e", script], text=True)
+            self.assertIn("BpmInfo tests passed", output)
+
+            # Test Bpm.qml currentBPMSplit behavior via node
+            bpm_qml = (packs / "en" / "Skins/Embedded/Items/Bpm.qml").read_text()
+            self.assertIn("SpeedState", bpm_qml)
+            bpm_script = r"""
+            const assert = require('assert');
+            function makeBpm(songAnalyzed, bpmValue, pitchValue, metaDataBpm) {
+                const bpm = { decimalPlaces: 1 };
+                const scPitch = pitchValue;
+                const hasMetaDataBpm = !!metaDataBpm;
+                """ + re.search(r"readonly property var currentBPMSplit: \{(.*?)\n    \}", bpm_qml, re.S).group(1) + r"""
+            }
+            // 1. Unanalyzed without metadata: returns [] (length 0, currentBPMSplitValid is false, displays "-")
+            assert.deepStrictEqual(makeBpm(false, 0, 0, ""), []);
+            // 2. Unanalyzed at 0% pitch: preserves stock split(".")
+            assert.deepStrictEqual(makeBpm(false, 125.0, 0, "125.0"), ["125", "0"]);
+            assert.deepStrictEqual(makeBpm(false, 128.0, 0, "128"), ["128"]);
+            // 3. Issue #231: Unanalyzed moved +1.60% pitch -> 127.0
+            assert.deepStrictEqual(makeBpm(false, 125.0, 1.6, "125.0"), ["127", "0"]);
+            assert.deepStrictEqual(makeBpm(false, 128.0, 1.5625, "128"), ["130", "0"]);
+            // 4. Analyzed -> 127.0
+            assert.deepStrictEqual(makeBpm(true, 127.0, 1.6, "125.0"), ["127", "0"]);
+            console.log("Bpm.qml tests passed");
+            """
+            output2 = subprocess.check_output(["node", "-e", bpm_script], text=True)
+            self.assertIn("Bpm.qml tests passed", output2)
+
+    @unittest.skipUnless(shutil.which("node"), "node needed for the display-state behavioral checks")
     def test_sender_posts_exact_tempo_changes_at_the_same_rounded_pitch(self):
         self.js(r"""
 let current=130.17,bodies=[],pings=0;
