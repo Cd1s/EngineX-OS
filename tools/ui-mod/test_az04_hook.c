@@ -2,6 +2,7 @@
 //   gcc -O2 -o test_az04_hook test_az04_hook.c -ldl -lpthread && ./test_az04_hook <AZ04 rootfs>/usr/Engine/Engine
 #define ENGINE_UI_HOOK_TEST
 int hook_test_engine;
+int snd_seq_close(void *) __attribute__((weak)); // absent from a hook without the BH2-A2-11 fix
 static char stems_bundle_file[4096], stems_bin_file[4096];
 #define STEMS_BUNDLE_PROCESSOR stems_bundle_file
 #define STEMS_BUNDLE_BIN_PROCESSOR stems_bin_file
@@ -233,8 +234,9 @@ static void test_offline_analyzer(const char *filename) {
 // Pad LED Brightness: SysEx RGB is scaled after gamma and replayed when the level changes; single-colour NoteOn passes through untouched.
 static uchar sent[64][SEQ_EV_SIZE], sent_sx[64][16];
 static int nsent;
+static void *last_handle;
 static int fake_direct(void *h, void *ev) {
-    (void)h;
+    last_handle = h;
     memcpy(sent[nsent], ev, SEQ_EV_SIZE);
     struct sc_seq_ext x; memcpy(&x, (uchar *)ev + 16, sizeof x);
     if (sent[nsent][0] == SEQ_SYSEX) memcpy(sent_sx[nsent], x.ptr, x.len);
@@ -319,8 +321,25 @@ static void test_led(void) {
     int before = nsent;
     led_replay(100);
     assert(nsent == before + 1 && sent_sx[before][11] == 127);
+    // BH2-A2-11: Engine closes the handle the cached LED was sent on; a brightness change
+    // must not replay through it. Another handle's LED is still replayed, and a new
+    // LED event on a new handle brings the pad back.
+    uchar msg2[15] = {0xF0, 0, 0x02, 0x0B, 0, 0, 0x03, 0, 0x05, 3, 9, 90, 0, 0, 0xF7}, ev2[SEQ_EV_SIZE] = {SEQ_SYSEX, 0x04};
+    struct sc_seq_ext x2 = {15, msg2};
+    memcpy(ev2 + 16, &x2, sizeof x2);
+    snd_seq_event_output_direct((void *)2, ev2);
+    int (*volatile seq_close)(void *) = snd_seq_close; // the hook's; no libasound behind it here
+    if (seq_close) seq_close((void *)1);
+    last_handle = NULL;
+    before = nsent;
+    led_replay(60);
+    assert(nsent == before + 1 && last_handle == (void *)2 && sent_sx[before][9] == 3); // only the open handle's pad
+    snd_seq_event_output_direct((void *)5, ev); // Engine's new port lights the pad again
+    before = nsent;
+    led_replay(100);
+    assert(nsent == before + 2);
     hook_test_engine = 0;
-    puts("pad LED brightness: scale after gamma, replay from cache: PASS");
+    puts("pad LED brightness: scale after gamma, replay from cache, nothing replayed on a closed handle: PASS");
 }
 
 static void test_stems_processor_fallback(void) {
