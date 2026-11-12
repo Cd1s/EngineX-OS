@@ -210,24 +210,26 @@ func (p *pipeline) Write(b []byte) (int, error) {
 	e := p.down.feed(b, func(f map[string]string) (int64, error) {
 		v, ok := f["returnFrames"]
 		if !ok {
-			p.write(p.down.raw)
 			if c, has := f["numReturnChannels"]; has {
 				n, err := strconv.Atoi(c)
-				if err != nil || n <= 0 || n > 64 || n%4 != 0 {
+				if err != nil || n <= 0 || n > 64 || n%4 != 0 || p.eng.Channels <= 0 || n != 4*p.eng.Channels {
 					return 0, fmt.Errorf("stems pipeline: bad numReturnChannels %q", c)
 				}
+				p.write(p.down.raw)
 				p.nplanes, p.planes = n, make([][]byte, n)
 				for ; p.owed > 0; p.owed-- {
 					p.reply(p.maxBlock)
 				}
+				return 0, nil
 			}
+			p.write(p.down.raw)
 			return 0, nil
 		}
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 0 || p.nplanes == 0 || !(p.started || p.done) {
 			return 0, fmt.Errorf("stems pipeline: unexpected returnFrames %q", v)
 		}
-		if p.packed && n > 0 && (len(p.input) == 0 || n > len(p.input[0])/4) {
+		if p.packed && n > 0 && (len(p.input) != p.nplanes/4 || n > len(p.input[0])/4) {
 			return 0, fmt.Errorf("stems pipeline: %d frames returned beyond the input", n)
 		}
 		p.replies++

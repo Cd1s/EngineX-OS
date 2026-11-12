@@ -254,3 +254,19 @@ func TestPipelineRejectsMissingNumChannelsWithoutPanic(t *testing.T) {
 		t.Fatal("expected error on missing numChannels, got nil")
 	}
 }
+
+func TestPipelineRejectsMismatchedNumReturnChannels(t *testing.T) {
+	p := newPipeline(io.Discard)
+	if _, err := p.fromEngine([]byte("numChannels=2\nsampleRate=44100\nmaxBlockSize=4\n\n")); err != nil {
+		t.Fatal(err)
+	}
+	block := append([]byte("action=block\nnumSamples=1\n\n"), make([]byte, 2*4)...)
+	if _, err := p.fromEngine(block); err != nil {
+		t.Fatal(err)
+	}
+	// 12 return channels for 2 input channels previously passed n%4==0 and panicked queue().
+	_, err := p.Write(append([]byte("numReturnChannels=12\n\nreturnFrames=1\n\n"), make([]byte, 18)...))
+	if err == nil {
+		t.Fatal("expected error on numReturnChannels=12 for 2-channel input")
+	}
+}
