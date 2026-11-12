@@ -402,4 +402,3 @@ func TestFindLANRetriesLostWiFiBroadcastAndUsesMDNSARecord(t *testing.T) {
 		t.Fatalf("unexpected unicast peer targets from ARP + RememberPeerHint: %+v", gotIPs)
 	}
 }
-

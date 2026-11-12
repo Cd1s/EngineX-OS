@@ -235,7 +235,7 @@ func PeekMP3StartOffset(br *bufio.Reader) int {
 		}
 	}
 	if frames == 0 && headerFilesize == 0 {
-		return 0
+		return lameSkip
 	}
 	return f.spf + lameSkip
 }

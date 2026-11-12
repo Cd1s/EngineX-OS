@@ -1,6 +1,7 @@
 package audioheader
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/binary"
 	"path/filepath"
@@ -186,5 +187,29 @@ func TestReadMP3SyntheticVersionsEncodersAndEdgeCases(t *testing.T) {
 		if _, err := ReadMP3(bytes.NewReader(bad), int64(len(bad))); err == nil {
 			t.Fatalf("accepted invalid MP3 input of len %d", len(bad))
 		}
+	}
+}
+
+func TestPeekMP3StartOffsetMatchesReadMP3OnZeroFlagLAMETag(t *testing.T) {
+	f0, side := buildMPEGFrame(1, 0, 9, 0, 0)
+	p := 4 + side
+	copy(f0[p:p+4], "Xing")
+	binary.BigEndian.PutUint32(f0[p+4:p+8], 0) // neither FRAMES nor BYTES flag set
+	p += 8
+	copy(f0[p:p+9], "LAME3.100")
+	v := uint32(576)<<12 | 576
+	f0[p+21] = byte(v >> 16)
+	f0[p+22] = byte(v >> 8)
+	f0[p+23] = byte(v)
+	f1, _ := buildMPEGFrame(1, 0, 9, 0, 0)
+	stream := append(f0, f1...)
+
+	info, err := ReadMP3(bytes.NewReader(stream), int64(len(stream)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	peeked := PeekMP3StartOffset(bufio.NewReader(bytes.NewReader(stream)))
+	if peeked != info.StartOffsetSamples || peeked != 576+529 {
+		t.Fatalf("PeekMP3StartOffset = %d, ReadMP3 = %d, want %d", peeked, info.StartOffsetSamples, 576+529)
 	}
 }

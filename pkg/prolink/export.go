@@ -967,9 +967,9 @@ func (r *exportRun) statusPacket() []byte {
 	b := linkPacket(0x0a, 0x11c, 11)
 	b[0x20], b[0x21], b[0x24], b[0x26] = 4, r.player, r.player, 1
 	binary.BigEndian.PutUint16(b[0x22:], uint16(len(b)-0x24))
-	b[0x6a], b[0x6b], b[0x6f], b[0x73] = 4, 4, 0, 4             // USB mounted, no SD
-	b[0x75] = 1                                                 // LINK available while the exported USB is mounted
-	binary.BigEndian.PutUint16(b[0x90:], 0x7fff)                // no loaded track / meaningful master BPM
+	b[0x6a], b[0x6b], b[0x6f], b[0x73] = 4, 4, 0, 4 // USB mounted, no SD
+	b[0x75] = 1                                     // LINK available while the exported USB is mounted
+	binary.BigEndian.PutUint16(b[0x90:], 0x7fff)    // no loaded track / meaningful master BPM
 	fw := "3.30"
 	if r.peerFirmware > fw {
 		fw = r.peerFirmware
