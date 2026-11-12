@@ -16,6 +16,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sched.h>
+#include <sys/mman.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
@@ -515,6 +516,66 @@ static const char *rb_bridge_path(void) {
 enum { MOUNT_PRE=1, MOUNT_POST=2, MOUNT_FULL=3 };
 #define CONVERTED 1
 #define TIMED_OUT 4
+// edisksd's monitor thread reads /proc/self/mountinfo while the mount runs on
+// another thread. It announced the bare read-only HFS+ mount ~120 ms before the
+// view covered it; Engine then saw no Engine library, chose OneLibrary, and its
+// migration failed EROFS, leaving the stick "Updating" with no playlists (r2).
+// So the monitor waits until the visible mount (and its view) is in place, and
+// each view is shown to it as the plain device mount it stands for.
+static pthread_mutex_t post_lock=PTHREAD_MUTEX_INITIALIZER;
+static __thread int in_hook,holding_post;
+static void release_post(void){if(holding_post){holding_post=0;pthread_mutex_unlock(&post_lock);}}
+static int starts_dir(const char *s,const char *dir,size_t n){return !strncmp(s,dir,n)&&s[n]=='/';}
+// A memfd with filename's mountinfo lines minus RUN_ROOT helper mounts, the view
+// overlays (tmpfs "sc5000-hfs-view") and everything mounted inside one; the
+// device mount underneath stays. -1: nothing to hide, or parse the file as is.
+static int hide_views(const char *filename) {
+    FILE *f=fopen(filename,"re");if(!f)return -1;
+    size_t cap=65536,len=0;char *buf=malloc(cap+1);
+    for(;buf;){size_t n=fread(buf+len,1,cap-len,f);len+=n;if(len<cap)break;char *b=realloc(buf,cap*2+1);if(!b){free(buf);buf=NULL;break;}buf=b;cap*=2;}
+    int bad=ferror(f);fclose(f);if(!buf||bad){free(buf);return -1;}
+    buf[len]=0;
+    char run[PATH_MAX];int runlen=snprintf(run,sizeof run,"%s",RUN_ROOT);
+    const char *views[64];size_t vlen[64];unsigned nv=0;int hidden=0;
+    for(int pass=0;pass<2;pass++) {
+        int fd=-1;
+        if(pass){if(!hidden){free(buf);return -1;}fd=memfd_create("mountinfo",MFD_CLOEXEC);if(fd<0){free(buf);return -1;}}
+        for(char *line=buf;*line;) {
+            char *end=strchr(line,'\n');size_t ll=end?(size_t)(end-line+1):strlen(line);
+            // fields: id parent maj:min root mountpoint ... " - " fstype source
+            const char *mp=line;for(int i=0;i<4&&mp;i++){mp=memchr(mp,' ',ll-(size_t)(mp-line));if(mp)mp++;}
+            const char *mpe=mp?memchr(mp,' ',ll-(size_t)(mp-line)):NULL;
+            char *sep=NULL;if(mpe){char c=line[ll-1];line[ll-1]=0;sep=strstr(mpe," - ");line[ll-1]=c;}
+            int hide=0;
+            if(mpe&&sep) {
+                size_t ml=(size_t)(mpe-mp);
+                int overlay=!strncmp(sep+3,"tmpfs sc5000-hfs-view ",22);
+                int helper=ml>(size_t)runlen&&starts_dir(mp,run,(size_t)runlen);
+                if(!pass&&overlay&&!helper&&nv<64){views[nv]=mp;vlen[nv++]=ml;}
+                hide=helper||overlay;
+                for(unsigned i=0;i<nv&&!hide;i++)hide=ml>vlen[i]&&starts_dir(mp,views[i],vlen[i]);
+            }
+            if(!pass)hidden|=hide;
+            else if(!hide) {
+                for(size_t off=0;off<ll;){ssize_t w=write(fd,line+off,ll-off);if(w<0&&errno==EINTR)continue;if(w<=0){close(fd);free(buf);return -1;}off+=(size_t)w;}
+            }
+            line+=ll;
+        }
+        if(pass){free(buf);return fd;}
+    }
+    free(buf);return -1;
+}
+struct libmnt_table;
+int mnt_table_parse_file(struct libmnt_table *tb,const char *filename) {
+    int (*real)(struct libmnt_table *,const char *)=(int (*)(struct libmnt_table *,const char *))dlsym(RTLD_NEXT,"mnt_table_parse_file");
+    if(!real)return -ENOSYS;
+    if(in_hook||!filename||strcmp(filename,"/proc/self/mountinfo"))return real(tb,filename); // libmount inside our own mount/umount
+    pthread_mutex_lock(&post_lock);
+    int fd=hide_views(filename),rc;
+    if(fd<0)rc=real(tb,filename);
+    else{char p[64];snprintf(p,sizeof p,"/proc/self/fd/%d",fd);rc=real(tb,p);close(fd);}
+    pthread_mutex_unlock(&post_lock);return rc;
+}
 static int after_mount(struct libmnt_context *ctx,int mode,int64_t deadline) {
     const char *target=mnt_context_get_target(ctx);
     if(!volume(target)||safe_path(target,0))return 0;
@@ -536,6 +597,7 @@ static int after_mount(struct libmnt_context *ctx,int mode,int64_t deadline) {
         char identity[80];
         if(VOLUME_IDENTITY(mnt_context_get_source(ctx),identity)||prepare_view(target,identity,deadline)){note("HFS view unavailable on",target,errno);return 0;}
     }
+    release_post(); // the visible tree is final; a bridge or guardian run below must not hold edisksd's monitor
     int done=0;
     if(pioneer&&mode!=MOUNT_POST){const char *rb=RB_BRIDGE_PATH();char *const a[]={(char *)rb,"--mount-path",(char *)target,NULL};if(!run(a,deadline))done=CONVERTED;else{if(errno==ETIMEDOUT)done=TIMED_OUT;note("bridge failed on",target,errno);}}
     if(hfs_ro&&mode==MOUNT_PRE) { // the persistent library stays; the private view goes
@@ -628,9 +690,12 @@ static int hooked_mount(struct libmnt_context *ctx,int (*real)(struct libmnt_con
     int64_t start=now_ms(),deadline=deadline_from(start);
     pthread_mutex_lock(&view_lock);
     seeded_hint[0]=0;
+    in_hook=1;
     int pre=premount(ctx,real,deadline-POST_RESERVE_MS,now_ms()-start<LOCK_WAIT_SLACK_MS);
+    pthread_mutex_lock(&post_lock);holding_post=1; // after_mount releases it once the visible tree is final
     int rc=real(ctx),saved=errno;
     if(!rc&&mnt_context_get_status(ctx)==1){after_mount(ctx,pre?MOUNT_POST:MOUNT_FULL,deadline);errno=saved;}
+    release_post();in_hook=0;
     seeded_hint[0]=0;
     pthread_mutex_unlock(&view_lock);return rc;
 }
@@ -681,8 +746,9 @@ static int unmount_dispatch(struct libmnt_context *ctx,int (*real)(struct libmnt
     if(!volume(target))return real(ctx);
     char lib[PATH_MAX];
     if(safe_path(target,0)||path_join(lib,sizeof lib,target,"Engine Library")||safe_path(lib,1))return -errno;
-    pthread_mutex_lock(&view_lock);struct owned_view *v=load_view(target);
-    int rc=v?unmount_view(ctx,v,real):real(ctx);int saved=errno;free(v);pthread_mutex_unlock(&view_lock);errno=saved;return rc;
+    pthread_mutex_lock(&view_lock);in_hook=1;pthread_mutex_lock(&post_lock);struct owned_view *v=load_view(target);
+    int rc=v?unmount_view(ctx,v,real):real(ctx);int saved=errno;free(v);
+    pthread_mutex_unlock(&post_lock);in_hook=0;pthread_mutex_unlock(&view_lock);errno=saved;return rc;
 }
 
 int mnt_context_umount(struct libmnt_context *ctx) {

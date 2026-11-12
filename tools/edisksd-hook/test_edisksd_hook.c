@@ -503,11 +503,43 @@ static void test_private_mount_leaves_nothing_behind(const char *root) {
     assert(count_views()==views_before);
     puts("REAL PRIVATE NAMESPACE #182: the private pre-mount leaves no utab record, and a killed one no view directory, in the caller's namespace: PASS");
 }
+// r2 left deck: edisksd announced the bare read-only HFS+ mount before the view
+// covered it, Engine chose OneLibrary and its migration failed EROFS. The
+// monitor's mountinfo must show a view as the plain device mount, nothing else.
+static void test_monitor_sees_plain_device_mount(const char *root) {
+    char path[PATH_MAX],line[4096],out[16384];join(path,root,"mountinfo");
+    FILE *f=fopen(path,"w");assert(f);
+    fprintf(f,"25 1 0:21 / /run rw,nosuid,nodev shared:5 - tmpfs tmpfs rw,mode=755\n");
+    fprintf(f,"78 33 8:1 / /media/vivi rw,nosuid,nodev,noexec,relatime,nosymfollow shared:239 - hfsplus /dev/sda1 ro,umask=22\n");
+    fprintf(f,"79 33 8:17 / /media/vivid rw,relatime shared:240 - vfat /dev/sdb1 rw\n");
+    fprintf(f,"260 25 0:21 /x/view-M8w87C %s/view-M8w87C rw,nosuid,nodev - tmpfs tmpfs rw,mode=755\n",test_runtime);
+    fprintf(f,"268 260 8:1 / %s/view-M8w87C/backing rw,nosuid - hfsplus /dev/sda1 ro,umask=22\n",test_runtime);
+    fprintf(f,"269 260 0:46 / %s/view-M8w87C/view ro,nosuid - tmpfs sc5000-hfs-view ro,size=16384k,mode=755\n",test_runtime);
+    fprintf(f,"274 269 8:1 /.PIONEER %s/view-M8w87C/view/.PIONEER rw,nosuid - hfsplus /dev/sda1 ro,umask=22\n",test_runtime);
+    fprintf(f,"303 269 179:39 /enginex/hfs-libraries/u/library-0 %s/view-M8w87C/view/Engine\\040Library rw,relatime shared:43 - ext4 /dev/mmcblk0p7 rw\n",test_runtime);
+    fprintf(f,"304 78 0:46 / /media/vivi ro,nosuid,nodev,noexec,relatime shared:272 - tmpfs sc5000-hfs-view ro,size=16384k,mode=755\n");
+    fprintf(f,"309 304 8:1 /.PIONEER /media/vivi/.PIONEER rw,nosuid shared:277 - hfsplus /dev/sda1 ro,umask=22\n");
+    fprintf(f,"311 304 179:39 /enginex/hfs-libraries/u/library-0 /media/vivi/Engine\\040Library rw,relatime shared:43 - ext4 /dev/mmcblk0p7 rw\n");
+    fclose(f);
+    int fd=hide_views(path);assert(fd>=0);
+    ssize_t n=pread(fd,out,sizeof out-1,0);assert(n>0);out[n]=0;close(fd);
+    assert(strstr(out,"78 33 8:1 / /media/vivi rw"));   // the device mount Engine expects
+    assert(strstr(out,"79 33 8:17 / /media/vivid "));    // a sibling whose name extends the target is kept
+    assert(strstr(out,"25 1 0:21 / /run "));
+    assert(!strstr(out,"sc5000-hfs-view")&&!strstr(out,"view-M8w87C")&&!strstr(out,"/media/vivi/"));
+    assert(!strstr(out,"mmcblk0p7"));                   // /data never appears as the stick's library mount
+    int lines=0;for(char *p=out;*p;p++)lines+=*p=='\n';assert(lines==3);
+    // Nothing to hide: the monitor parses the kernel's file itself.
+    f=fopen(path,"w");assert(f);fprintf(f,"78 33 8:1 / /media/vivi rw - hfsplus /dev/sda1 ro\n");fclose(f);
+    assert(hide_views(path)==-1);
+    (void)line;
+    puts("r2 HFS view: edisksd's monitor sees only the plain device mount, never the bare mount before the view: PASS");
+}
 int main(int argc,char **argv) {
     char root[]="/tmp/sc5000-edisks-tests-XXXXXX";assert(mkdtemp(root));
     join(test_media,root,"media");join(test_library,root,"libraries");join(test_runtime,root,"runtime");
     join(test_legacy_library,root,"legacy-libraries");join(test_utab,root,"utab");assert(!make_dirs(test_utab));
-    assert(!make_dirs(test_media));test_paths_and_copy(root);test_compat_symlink_root(root);test_time();test_slow_marker_follows_every_export_file(root);
+    assert(!make_dirs(test_media));test_paths_and_copy(root);test_compat_symlink_root(root);test_time();test_slow_marker_follows_every_export_file(root);test_monitor_sees_plain_device_mount(root);
     if(argc>1&&!strcmp(argv[1],"--mounts")){test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);test_library_is_walked_once(root);test_two_sticks_at_once(root);test_hfs_visible_mount_reuses_the_converted_library(root);test_private_mount_leaves_nothing_behind(root);}
     // Mount tests have removed all namespace mounts before deleting fixtures.
     int tmp=open("/tmp",O_RDONLY|O_DIRECTORY);assert(tmp>=0);remove_tree(tmp,strrchr(root,'/')+1);close(tmp);
