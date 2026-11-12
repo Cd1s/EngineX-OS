@@ -26,6 +26,7 @@ static uint32_t device(void *host, void *context, int ic, const float *const *in
 
 int main(void) {
     unlink(SC_TAP_PATH);
+    live_tap.fd = -1; /* as live_tap_drain does */
     dsp_originals[DSP_MASTER] = (void *)device;
     static float b[4][480];
     float *out[4] = {b[0], b[1], b[2], b[3]};
