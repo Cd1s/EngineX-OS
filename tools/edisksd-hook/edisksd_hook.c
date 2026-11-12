@@ -659,11 +659,14 @@ static int after_mount(struct libmnt_context *ctx,int mode,int64_t deadline) {
 }
 // A library too large to convert inside the budget would hold every later
 // insert of the same export for the whole budget and still end unconverted.
-// Remember it until reboot, keyed by the filesystem and the export files.
+// Remember it until reboot, keyed by the size of the volume and the export files.
+// Not by f_fsid: on FAT, exFAT and HFS+ that is the device number, which follows
+// the port and the insert order, so the same stick in the other port waited the
+// whole budget again (BH2-A1-2).
 static int slow_marker(const char *target,char out[PATH_MAX]) {
     struct statvfs v;if(statvfs(target,&v))return -1;
     uint64_t h=UINT64_C(14695981039346656037);
-    h=hash_bytes(h,&v.f_fsid,sizeof v.f_fsid);h=hash_bytes(h,&v.f_blocks,sizeof v.f_blocks);
+    h=hash_bytes(h,&v.f_blocks,sizeof v.f_blocks);
     // Every export file rb-bridge may convert from (pkg/bridge).
     const char *files[]={"PIONEER/rekordbox/export.pdb",".PIONEER/rekordbox/export.pdb","PIONEER/rekordbox/exportLibrary.db",".PIONEER/rekordbox/exportLibrary.db",
                          "PIONEER/rekordbox/exportOneLibrary.db",".PIONEER/rekordbox/exportOneLibrary.db"};
