@@ -677,3 +677,73 @@ func TestLANHostPrefersWired(t *testing.T) {
 		t.Fatalf("no address: %s, want the name", got)
 	}
 }
+
+// smallSendBuffer gives every accepted connection a small kernel send buffer, so a
+// listener that stops reading blocks the handler's Write within a second of audio.
+type smallSendBuffer struct{ net.Listener }
+
+func (l smallSendBuffer) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if tc, ok := c.(*net.TCPConn); ok {
+		_ = tc.SetWriteBuffer(8 << 10)
+	}
+	return c, err
+}
+
+// BH2-A3-2: /live.mp3 had no write deadline at all. A listener that went away
+// without closing kept its handler, encoder process and hub subscription until
+// TCP gave up (about fifteen minutes).
+func TestLiveMP3DropsAListenerThatStoppedReading(t *testing.T) {
+	old := liveMP3Stall
+	liveMP3Stall = 300 * time.Millisecond
+	t.Cleanup(func() { liveMP3Stall = old })
+	s, dir := newTestServer(t)
+	enableLiveWithPCM(t, s, dir)
+	bin := t.TempDir()
+	pidFile := filepath.Join(t.TempDir(), "encoder.pid")
+	if err := os.WriteFile(filepath.Join(bin, "lame"), []byte("#!/bin/sh\necho $$ > '"+pidFile+"'\nexec cat\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+":/bin:/usr/bin")
+	srv := httptest.NewUnstartedServer(s)
+	srv.Listener = smallSendBuffer{srv.Listener}
+	srv.Start()
+	defer srv.Close()
+
+	u, _ := url.Parse(srv.URL)
+	d := net.Dialer{Control: func(_, _ string, rc syscall.RawConn) error {
+		return rc.Control(func(fd uintptr) {
+			_ = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, syscall.TCP_MAXSEG, 1448)
+			_ = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_RCVBUF, 32<<10)
+		})
+	}}
+	conn, err := d.Dial("tcp", u.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := fmt.Fprintf(conn, "GET /live.mp3 HTTP/1.1\r\nHost: x\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	// The stream is flowing: status line and some audio. Then the listener reads no more.
+	if got := readFor(t, conn, 500*time.Millisecond); !bytes.HasPrefix(got, []byte("HTTP/1.1 200")) || len(got) < 4096 {
+		t.Fatalf("no stream before the stall: %d bytes %q", len(got), got[:min(len(got), 40)])
+	}
+	if n := s.broadcaster().Status().Listeners; n != 1 {
+		t.Fatalf("listeners while streaming = %d, want 1", n)
+	}
+	pid, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for s.broadcaster().Status().Listeners != 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("the listener stopped reading 5 s ago and still holds its place (stall limit %v)", liveMP3Stall)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if _, err := os.Stat("/proc/" + strings.TrimSpace(string(pid))); err == nil {
+		t.Fatalf("encoder process %s outlived its listener", strings.TrimSpace(string(pid)))
+	}
+}

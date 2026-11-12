@@ -496,6 +496,13 @@ func mp3Encoder(bitrate int) *exec.Cmd {
 	return nil
 }
 
+// liveMP3Stall is how long one write to a /live.mp3 listener may block. The
+// server-wide WriteTimeout is off for a live stream, and nothing took its place
+// (BH2-A3-2): a listener that vanished without closing (Wi-Fi gone, laptop
+// asleep) held the handler in Write until TCP gave up, about fifteen minutes,
+// and its encoder process and hub subscription with it.
+var liveMP3Stall = 60 * time.Second
+
 // liveMP3 streams the deck's live mix as MP3 through an external encoder.
 func (s *Server) liveMP3(w http.ResponseWriter, r *http.Request) {
 	cmd := mp3Encoder(s.broadcaster().Status().Bitrate)
@@ -543,10 +550,12 @@ func (s *Server) liveMP3(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	fl, _ := w.(http.Flusher)
+	rc := http.NewResponseController(w)
 	buf := make([]byte, 4096)
 	for {
 		n, err := out.Read(buf)
 		if n > 0 {
+			_ = rc.SetWriteDeadline(time.Now().Add(liveMP3Stall))
 			if _, werr := w.Write(buf[:n]); werr != nil {
 				return
 			}
