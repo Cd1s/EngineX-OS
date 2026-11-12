@@ -601,3 +601,23 @@ func TestDecodeOggVorbisTickerAndReaderErrors(t *testing.T) {
 type oggErrorReader struct{ err error }
 
 func (r oggErrorReader) Read([]byte) (int, error) { return 0, r.err }
+
+func TestDecodeMP3AndDecodeFileRecoverMalformedMP3(t *testing.T) {
+	// Minimized 78-byte malformed MPEG-2 Layer III bitstream that triggers an
+	// index-out-of-range panic inside go-mp3's getScaleFactorsMpeg2, plus a
+	// panicking reader to verify DecodeFile/DecodeFLAC/DecodeWAV recover cleanly.
+	malformed, err := base64.StdEncoding.DecodeString("//IwAAAAAAAAAAAAAAAAAAAAADGsAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a, err := DecodeMP3(bytes.NewReader(malformed)); err == nil || a != nil {
+		t.Fatalf("DecodeMP3 accepted malformed MP3: a=%v err=%v", a, err)
+	}
+	path := filepath.Join(t.TempDir(), "corrupt.mp3")
+	if err := os.WriteFile(path, malformed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if a, err := DecodeFile(path); err == nil || a != nil {
+		t.Fatalf("DecodeFile accepted malformed MP3: a=%v err=%v", a, err)
+	}
+}
