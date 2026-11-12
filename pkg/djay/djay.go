@@ -517,9 +517,13 @@ func readSQLiteLibrary(mountRoot, dbPath string) (*Library, error) {
 		}
 	}
 
+	var sharedLoopEnds []float64
+	if colUnit(lStartCol) == "" && colUnit(lLenCol) == "" {
+		sharedLoopEnds = endVals
+	}
 	cueEv := subTrackEvidence(cPosCol, cueTrackIDs, cueVals, nil)
-	startEv := subTrackEvidence(lStartCol, loopTrackIDs, startVals, endVals)
-	lenEv := subTrackEvidence(lLenCol, loopTrackIDs, lenVals, endVals)
+	startEv := subTrackEvidence(lStartCol, loopTrackIDs, startVals, sharedLoopEnds)
+	lenEv := subTrackEvidence(lLenCol, loopTrackIDs, lenVals, sharedLoopEnds)
 
 	unlabeledSubMS := (colUnit(cPosCol) == "" && cueEv == "ms") ||
 		(colUnit(lStartCol) == "" && startEv == "ms") ||
