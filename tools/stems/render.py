@@ -5,6 +5,7 @@ Also used to verify the ARM executable under qemu without running Engine.
 Credentials are inherited as a file path; never passed on the command line.
 """
 import argparse
+import ctypes
 import json
 import os
 from pathlib import Path
@@ -19,13 +20,42 @@ from worker import header_write
 NATIVE_NAMES = ('vocals', 'bass', 'drums', 'melody')
 
 
+def _wait_pipe_ready(pipe, timeout):
+    fd = pipe.fileno()
+    if os.name == 'nt':
+        try:
+            import msvcrt
+            handle = msvcrt.get_osfhandle(fd)
+            avail = ctypes.c_ulong(0)
+            deadline = time.monotonic() + timeout
+            while True:
+                ok = ctypes.windll.kernel32.PeekNamedPipe(
+                    ctypes.c_void_p(handle), None, 0, None, ctypes.byref(avail), None
+                )
+                if not ok or avail.value > 0:
+                    return
+                if time.monotonic() >= deadline:
+                    raise TimeoutError('remote renderer stalled')
+                time.sleep(min(0.005, max(0.0, deadline - time.monotonic())))
+        except TimeoutError:
+            raise
+        except (ImportError, AttributeError, OSError, ValueError):
+            return
+    try:
+        if not select.select([pipe], [], [], timeout)[0]:
+            raise TimeoutError('remote renderer stalled')
+    except TimeoutError:
+        raise
+    except OSError:
+        return
+
+
 class DeadlineReader:
     def __init__(self, pipe, timeout=30):
         self.pipe, self.buf, self.timeout = pipe, bytearray(), timeout
 
     def _fill(self):
-        if not select.select([self.pipe], [], [], self.timeout)[0]:
-            raise TimeoutError('remote renderer stalled')
+        _wait_pipe_ready(self.pipe, self.timeout)
         chunk = os.read(self.pipe.fileno(), 65536)
         if not chunk:
             raise EOFError('remote child closed its output')
