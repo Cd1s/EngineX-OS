@@ -33,6 +33,52 @@ APPLETS = ('stream-sync', 'rb-bridge', 'sc5000-deemixd', 'stems-processor', 'eng
 
 WRAPPER = '#!/bin/sh\nexec "$(dirname "$0")/sc5000-suite" {} "$@"\n'
 
+SWAP_UNDO = r"""# BH-G2-4: install.sh moves every part it replaces (and copies of the version markers and the
+# ALSA file) into $dest/.install-old, and renames that to .install-done once everything is in
+# place. An .install-old that is still there means an install failed or lost power half-way:
+# put that generation back. Older installers parked a part as <part>.replaced and deleted it on
+# the next run; a part that is missing gets it back instead.
+swap_undo() {
+    # A stage an interrupted install left: a whole bundle copy taking room on /data.
+    for su_stage in "$dest"/.bundle.*; do
+        [ ! -d "$su_stage" ] || [ -L "$su_stage" ] || rm -rf "$su_stage"
+    done
+    su_old="$dest/.install-old"
+    su_have=0
+    [ ! -d "$su_old" ] || [ -L "$su_old" ] || su_have=1
+    for su_part in bundle ui/packs ui/icons; do
+        if [ "$su_have" = 1 ] && [ -e "$su_old/$su_part" ]; then
+            rm -rf "$dest/$su_part.undo"
+            [ ! -e "$dest/$su_part" ] || mv "$dest/$su_part" "$dest/$su_part.undo"
+            mv "$su_old/$su_part" "$dest/$su_part"
+        elif [ "$su_have" = 1 ] && [ -e "$su_old/$su_part.absent" ]; then
+            rm -rf "$dest/$su_part"
+        elif [ ! -e "$dest/$su_part" ] && [ -d "$dest/$su_part.replaced" ] && [ ! -L "$dest/$su_part.replaced" ]; then
+            mv "$dest/$su_part.replaced" "$dest/$su_part"
+        fi
+        rm -rf "$dest/$su_part.undo" "$dest/$su_part.replaced"
+    done
+    if [ "$su_have" = 1 ]; then
+        for su_f in version.txt ui/.pack-version ui/.pack-id gen2-unlocked; do
+            if [ -f "$su_old/files/$su_f" ]; then
+                cp -p "$su_old/files/$su_f" "$dest/$su_f"
+            elif [ -e "$su_old/files/$su_f.absent" ]; then
+                rm -f "$dest/$su_f"
+            fi
+        done
+        if [ -f "$su_old/alsa-path" ]; then
+            su_alsa=$(cat "$su_old/alsa-path")
+            if [ -f "$su_old/files/alsa.conf" ]; then
+                cp -p "$su_old/files/alsa.conf" "$su_alsa"
+            elif [ -e "$su_old/files/alsa.absent" ]; then
+                rm -f "$su_alsa"
+            fi
+        fi
+        rm -rf "$su_old"
+    fi
+    rm -rf "$dest/.install-done"
+}"""
+
 BOOT_ACTIVATE = r'''#!/bin/sh
 # One-shot boot activator for SC LIVE 4 (inmusic,jp21) and read-only root decks (#61).
 set -eu
@@ -43,6 +89,15 @@ bundle_dir="$dest/bundle"
 bin_dir="$bundle_dir/bin"
 lib_hook="$bundle_dir/lib/libengine-ui-hook.so"
 lib_edisksd_hook="$bundle_dir/lib/libedisksd-hook.so"
+
+@SWAP_UNDO@
+# The boot run (no arguments; --restore-tz runs on every Engine start and may overlap an
+# install): a swap that lost power is undone, and the generation put back activates itself.
+if [ "$#" = 0 ] && [ -d "$dest/.install-old" ] && [ ! -L "$dest/.install-old" ]; then
+    swap_undo
+    [ ! -f "$bundle_dir/boot-activate.sh" ] || exec sh "$bundle_dir/boot-activate.sh"
+    exit 0
+fi
 
 check_gen2_tz_newer() {
     tz_file="$dest/state/timezone"
@@ -501,7 +556,7 @@ ALSA_CONF = r'''hook_func.sc5000_alsa_boot_hook {
 
 INSTALL = r'''#!/bin/sh
 # Installs this bundle under /data/enginex (/data/sc5000-custom stays as a symlink). Checks SHA256SUMS first and
-# replaces each part in one rename, so a failed install leaves the old one.
+# keeps the previous generation until every part is in place, so a failed or interrupted install leaves the old one.
 set -eu
 # <MODEL>-<VERSION>-EngineX-OS-<Name>-Update.img (128-byte header + this bundle's .tar.gz): check the SHA-256
 # in the header, unpack the payload and run its own install.sh.
@@ -557,12 +612,14 @@ case " $boards" in *" inmusic,"*)
             { echo "bundle is for $(cat model), this deck is ${deck:-not a second-generation model}" >&2; exit 1; }
     fi ;;
 esac
-for path in "$dest" "$dest/bundle" "$dest/ui" "$dest/ui/packs" "$dest/ui/icons"; do
+for path in "$dest" "$dest/bundle" "$dest/ui" "$dest/ui/packs" "$dest/ui/icons" "$dest/.install-old" "$dest/.install-done"; do
     [ ! -L "$path" ] || { echo "refusing symlink: $path" >&2; exit 1; }
 done
 mkdir -p "$dest/ui"
 chmod 700 "$dest"
 umask 022
+@SWAP_UNDO@
+swap_undo
 stage=$(mktemp -d "$dest/.bundle.XXXXXX")
 trap 'rm -rf "$stage"' 0
 mkdir "$stage/bundle" "$stage/ui"
@@ -571,19 +628,27 @@ cp -R bin lib SHA256SUMS version.txt alsa-dir boot-activate.sh 99-sc5000-custom.
 [ ! -f model ] || cp model "$stage/bundle/"
 tar -C "$stage/ui" -xf ui-packs.tar
 [ -d "$stage/ui/packs" ] || { echo "ui-packs.tar has no packs/" >&2; exit 1; }
-rm -rf "$dest/bundle.replaced"
-[ ! -e "$dest/bundle" ] || mv "$dest/bundle" "$dest/bundle.replaced"
-mv "$stage/bundle" "$dest/bundle"
-rm -rf "$dest/bundle.replaced"
-for name in packs icons; do
-    [ -d "$stage/ui/$name" ] || continue
-    rm -rf "$dest/ui/$name.replaced"
-    [ ! -e "$dest/ui/$name" ] || mv "$dest/ui/$name" "$dest/ui/$name.replaced"
-    mv "$stage/ui/$name" "$dest/ui/$name"
-    rm -rf "$dest/ui/$name.replaced"
+# Keep the whole previous generation until the commit below; any failure before it puts it back.
+trap 'swap_undo; rm -rf "$stage"' 0
+old="$dest/.install-old"
+mkdir -p "$old/ui" "$old/files/ui"
+for f in version.txt ui/.pack-version ui/.pack-id gen2-unlocked; do
+    if [ -f "$dest/$f" ]; then cp -p "$dest/$f" "$old/files/$f"; else : > "$old/files/$f.absent"; fi
+done
+printf '%s\n' "$alsa_dest/99-sc5000-custom.conf" > "$old/alsa-path"
+if [ -f "$alsa_dest/99-sc5000-custom.conf" ]; then
+    cp -p "$alsa_dest/99-sc5000-custom.conf" "$old/files/alsa.conf"
+else
+    : > "$old/files/alsa.absent"
+fi
+for part in bundle ui/packs ui/icons; do
+    [ -d "$stage/$part" ] || continue
+    if [ -e "$dest/$part" ]; then mv "$dest/$part" "$old/$part"; else : > "$old/$part.absent"; fi
+    mv "$stage/$part" "$dest/$part"
 done
 mkdir -p "$alsa_dest"
-cp 99-sc5000-custom.conf "$alsa_dest/99-sc5000-custom.conf"
+cp 99-sc5000-custom.conf "$alsa_dest/.99-sc5000-custom.conf.new"
+mv "$alsa_dest/.99-sc5000-custom.conf.new" "$alsa_dest/99-sc5000-custom.conf"
 # Same-version repairs preserve fallback. A newly installed version gets one try.
 if [ "$(cat "$dest/ui/.pack-version" 2>/dev/null)" != "$(cat version.txt)" ]; then
     rm -f "$dest/ui/safe-mode" "$dest/ui/mods-quarantined" "$dest/ui/boot-count" "$dest/ui/boot-token" "$dest/ui/boot-ready" \
@@ -597,6 +662,9 @@ sha256sum < ui-packs.tar | cut -d' ' -f1 > "$dest/ui/.pack-id"
 cp version.txt "$dest/version.txt"
 # Opens the *-Update.img upgrade path (screen OTA / USB stick); gen2-locked still wins.
 printf '1\n' > "$dest/gen2-unlocked"
+mv "$old" "$dest/.install-done"  # commit: from here the new generation stays
+trap 'rm -rf "$stage"' 0
+rm -rf "$dest/.install-done"
 echo "EngineX OS $(cat version.txt) installed in $dest"
 '''
 
@@ -828,10 +896,10 @@ def build(version, suite, hook, ui_packs, out, prefix='SCLIVE4', edisksd_hook=No
     # re-release): stream-sync compares a release's tag with it, see installedRelease.
     files['release-tag'] = (f'{release_tag}\n'.encode(), 0o644)
     ntp_dropin = (Path(__file__).resolve().parents[2] / 'rootfs-overlay/etc/systemd/timesyncd.conf.d/10-enginex-ntp.conf').read_text()
-    files['boot-activate.sh'] = (BOOT_ACTIVATE.replace('@MIGRATE_IF_DEFAULT@', MIGRATE_IF_DEFAULT).replace('@TIMESYNCD_DROPIN@', ntp_dropin).encode(), 0o755)
+    files['boot-activate.sh'] = (BOOT_ACTIVATE.replace('@SWAP_UNDO@', SWAP_UNDO).replace('@MIGRATE_IF_DEFAULT@', MIGRATE_IF_DEFAULT).replace('@TIMESYNCD_DROPIN@', ntp_dropin).encode(), 0o755)
     files['99-sc5000-custom.conf'] = (ALSA_CONF.encode(), 0o644)
     files['alsa-dir'] = (f'{alsa_dir(prefix)}\n'.encode(), 0o644)
-    files['install.sh'] = (INSTALL.replace('@MIGRATE_IF_DEFAULT@', MIGRATE_IF_DEFAULT).encode(), 0o755)
+    files['install.sh'] = (INSTALL.replace('@SWAP_UNDO@', SWAP_UNDO).replace('@MIGRATE_IF_DEFAULT@', MIGRATE_IF_DEFAULT).encode(), 0o755)
     files['uninstall.sh'] = (UNINSTALL.replace('@MIGRATE_IF_DEFAULT@', MIGRATE_IF_DEFAULT).encode(), 0o755)
     top = f'{prefix}-{version}-EngineX-OS-Data-Bundle'
     files['README-INSTALL.txt'] = (README_INSTALL.format(version=version, model=MODELS[prefix], top=top, alsa=alsa_dir(prefix),
