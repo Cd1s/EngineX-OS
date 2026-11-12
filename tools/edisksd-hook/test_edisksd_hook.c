@@ -16,6 +16,12 @@ static const char *test_rb_bridge_path(void){return test_rb_bridge;}
 #define HFS_READONLY test_hfs_readonly
 #define VOLUME_IDENTITY test_volume_identity
 #define RB_BRIDGE_PATH test_rb_bridge_path
+// The "real" libmount mount: a bind of test_disk onto the target.
+struct libmnt_context;
+static int test_real_mount(struct libmnt_context *c);
+#define REAL_MNT_CONTEXT_MOUNT() test_real_mount
+// Leaves 1.5 s of the 20 s budget for the private conversion.
+#define POST_RESERVE_MS INT64_C(18500)
 #include "edisksd_hook.c"
 #include <assert.h>
 struct libmnt_context { const char *target,*source; int status,fail; };
@@ -23,6 +29,12 @@ const char *mnt_context_get_target(struct libmnt_context *c){return c->target;}
 const char *mnt_context_get_source(struct libmnt_context *c){return c->source;}
 int mnt_context_get_status(struct libmnt_context *c){return c->status;}
 int mnt_context_set_syscall_status(struct libmnt_context *c,int status){c->status=status;return 0;}
+static char test_disk[PATH_MAX];static int test_disk_ro;
+static int test_real_mount(struct libmnt_context *c) {
+    if(mount(test_disk,c->target,NULL,MS_BIND,NULL))return -errno;
+    if(test_disk_ro&&mount(NULL,c->target,NULL,MS_BIND|MS_REMOUNT|MS_RDONLY,NULL))return -errno;
+    c->status=1;return 0;
+}
 static unsigned real_calls;
 static int real_unmount(struct libmnt_context *c) {
     real_calls++;
@@ -199,7 +211,7 @@ static void test_hfs_mount_runs_bridge(const char *root) {
     join(target,MEDIA_ROOT,"vivi");mount_ro(disk,target);uint64_t raw_id=mount_id(target);
     snprintf(test_hfs_target,sizeof test_hfs_target,"%s",target);
     struct libmnt_context c={.target=target,.source="/dev/sdz1",.status=1};
-    after_mount(&c);
+    after_mount(&c,MOUNT_FULL,deadline_from(now_ms()));
     assert(mount_id(target)!=raw_id); // the writable view is in place
     char expect[PATH_MAX+32];snprintf(expect,sizeof expect,"--mount-path %s\n",target);expect_file(log,expect);
     join(p,target,"Engine Library/bridged");assert(!access(p,F_OK));
@@ -208,12 +220,84 @@ static void test_hfs_mount_runs_bridge(const char *root) {
     assert(!unmount_dispatch(&c,real_unmount));test_hfs_target[0]=0;
     puts("REAL PRIVATE NAMESPACE #103: read-only HFS+ .PIONEER stick with the sc5000-custom compat link gets its view and rb-bridge: PASS");
 }
+static unsigned count_mounts(const char *target) {
+    FILE *f=fopen("/proc/self/mountinfo","r");assert(f);char line[4096];unsigned n=0;size_t len=strlen(target);
+    while(fgets(line,sizeof line,f)){char *p=strchr(line,' ');for(int i=0;p&&i<3;i++)p=strchr(p+1,' ');if(p&&!strncmp(p+1,target,len)&&(p[1+len]==' '||p[1+len]=='/'))n++;}
+    fclose(f);return n;
+}
+static unsigned count_views(void) {
+    DIR *d=opendir(test_runtime);if(!d)return 0;unsigned n=0;struct dirent *e;
+    while((e=readdir(d)))if(!strncmp(e->d_name,"view-",5))n++;
+    closedir(d);return n;
+}
+// #182: Engine hears of a mount from edisksd's mountinfo monitor while the hook
+// is still running, so a stick converted after the visible mount showed up as a
+// plain folder drive. The conversion must be complete before that mount exists.
+static void test_first_insert_converted_before_visible(const char *root) {
+    assert(!mount(NULL,"/",NULL,MS_REC|MS_PRIVATE,NULL));
+    char data[PATH_MAX],disk[PATH_MAX],target[PATH_MAX],p[PATH_MAX],log[PATH_MAX],pid[32],script[PATH_MAX*3];
+    join(data,root,"first-data");join(p,data,"enginex");assert(!make_dirs(p));
+    join(test_library,p,"hfs-libraries");test_legacy_library[0]=0;
+    join(log,root,"first-bridge.log");join(test_rb_bridge,root,"first-bridge");
+    snprintf(pid,sizeof pid,"%d",(int)getpid());assert(!setenv("EDISKSD_TEST_PID",pid,1));
+    // Records whether the volume is visible in the caller's (edisksd's) namespace, then converts.
+    snprintf(script,sizeof script,"#!/bin/sh\nif grep -q \" $2 \" /proc/$EDISKSD_TEST_PID/mountinfo; then v=visible; else v=private; fi\n"
+             "echo \"$v $*\" >> '%s'\nmkdir -p \"$2/Engine Library/Database2\" && echo converted > \"$2/Engine Library/Database2/m.db\"\n",log);
+    write_file(test_rb_bridge,script);assert(!chmod(test_rb_bridge,0700));
+    char expect[PATH_MAX+64];
+    // FAT-style writable stick: the database lands on the stick before Engine can see it.
+    join(disk,root,"first-fat");join(p,disk,"PIONEER/rekordbox");assert(!make_dirs(p));
+    join(target,MEDIA_ROOT,"FIRST");assert(!make_dirs(target));
+    snprintf(test_disk,sizeof test_disk,"%s",disk);test_disk_ro=0;
+    struct libmnt_context c={.target=target,.source="/dev/sdy1"};
+    assert(!mnt_context_mount(&c)&&c.status==1);
+    snprintf(expect,sizeof expect,"private --mount-path %s\n",target);expect_file(log,expect); // ran once, unseen
+    join(p,target,"Engine Library/Database2/m.db");expect_file(p,"converted\n");
+    assert(count_mounts(target)==1); // the private mount never leaked
+    assert(!umount2(target,UMOUNT_NOFOLLOW));unlink(log);
+    // A stick without an export is mounted once, untouched.
+    char plain[PATH_MAX];join(plain,root,"first-plain");join(p,plain,"Music");assert(!make_dirs(p));
+    snprintf(test_disk,sizeof test_disk,"%s",plain);c.status=0;
+    assert(!mnt_context_mount(&c)&&c.status==1);assert(access(log,F_OK)==-1);
+    join(p,plain,"Engine Library");assert(access(p,F_OK)==-1);assert(!umount2(target,UMOUNT_NOFOLLOW));
+    // Read-only HFS+ with a hidden .PIONEER: the converted library is in the view at once.
+    char hfs[PATH_MAX];join(hfs,root,"first-hfs");join(p,hfs,".PIONEER/rekordbox");assert(!make_dirs(p));
+    snprintf(test_disk,sizeof test_disk,"%s",hfs);test_disk_ro=1;snprintf(test_hfs_target,sizeof test_hfs_target,"%s",target);c.status=0;
+    unsigned views_before=count_views();
+    assert(!mnt_context_mount(&c)&&c.status==1);
+    expect_file(log,expect);
+    join(p,target,"Engine Library/Database2/m.db");expect_file(p,"converted\n");
+    join(p,hfs,"Engine Library");assert(access(p,F_OK)==-1); // nothing written to the stick
+    assert(count_views()==views_before+1); // the private namespace's view record was cleaned up
+    assert(!unmount_dispatch(&c,real_unmount));test_hfs_target[0]=0;unlink(log);
+    // A conversion that fails is not run a second time after the visible mount.
+    snprintf(script,sizeof script,"#!/bin/sh\necho \"$*\" >> '%s'\nexit 1\n",log);write_file(test_rb_bridge,script);
+    snprintf(test_disk,sizeof test_disk,"%s",disk);test_disk_ro=0;join(p,disk,"Engine Library/Database2/m.db");assert(!unlink(p));c.status=0;
+    assert(!mnt_context_mount(&c)&&c.status==1);
+    snprintf(expect,sizeof expect,"--mount-path %s\n",target);expect_file(log,expect);
+    assert(!umount2(target,UMOUNT_NOFOLLOW));unlink(log);
+    // A library too large for the budget: killed once, then skipped until the export changes.
+    snprintf(script,sizeof script,"#!/bin/sh\necho \"$*\" >> '%s'\nsleep 5\n",log);write_file(test_rb_bridge,script);
+    join(p,disk,"PIONEER/rekordbox/export.pdb");write_file(p,"big library");
+    for(int i=0;i<2;i++) {
+        int64_t t0=now_ms();c.status=0;assert(!mnt_context_mount(&c)&&c.status==1);
+        int64_t took=now_ms()-t0;assert(took<(i?1000:3500)); // never the whole budget again
+        expect_file(log,expect);join(p,target,"Engine Library/Database2/m.db");assert(access(p,F_OK)==-1);
+        assert(!umount2(target,UMOUNT_NOFOLLOW));
+    }
+    join(p,disk,"PIONEER/rekordbox/export.pdb");write_file(p,"re-exported library");
+    struct timespec later[2]={{.tv_sec=2000000000},{.tv_sec=2000000000}};assert(!utimensat(AT_FDCWD,p,later,0));
+    c.status=0;assert(!mnt_context_mount(&c)&&c.status==1);assert(!umount2(target,UMOUNT_NOFOLLOW));
+    char twice[PATH_MAX*2+8];snprintf(twice,sizeof twice,"%s%s",expect,expect);expect_file(log,twice); // a new export is tried again
+    unsetenv("EDISKSD_TEST_PID");
+    puts("REAL PRIVATE NAMESPACE #182: rekordbox sticks (FAT and read-only HFS+) are converted before the visible mount, plain sticks mounted once, failed conversion not repeated, too-large library skipped until re-exported: PASS");
+}
 int main(int argc,char **argv) {
     char root[]="/tmp/sc5000-edisks-tests-XXXXXX";assert(mkdtemp(root));
     join(test_media,root,"media");join(test_library,root,"libraries");join(test_runtime,root,"runtime");
     join(test_legacy_library,root,"legacy-libraries");
     assert(!make_dirs(test_media));test_paths_and_copy(root);test_compat_symlink_root(root);test_time();
-    if(argc>1&&!strcmp(argv[1],"--mounts")){test_mounts(root);test_hfs_mount_runs_bridge(root);}
+    if(argc>1&&!strcmp(argv[1],"--mounts")){test_mounts(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);}
     // Mount tests have removed all namespace mounts before deleting fixtures.
     int tmp=open("/tmp",O_RDONLY|O_DIRECTORY);assert(tmp>=0);remove_tree(tmp,strrchr(root,'/')+1);close(tmp);
     puts("edisksd-hook: all requested tests passed");return 0;

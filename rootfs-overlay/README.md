@@ -16,7 +16,11 @@ logs the result. It does not write databases.
 
 `edisksd` runs with `/etc/sc5000/libedisksd-hook.so` preloaded (source and
 `build.sh` in `tools/edisksd-hook`). edisksd answers Engine's Mount call only
-after `mnt_context_mount()` returns, so the hook finishes within that call:
+after `mnt_context_mount()` returns, but its mount-table monitor announces the
+mountpoint (`Mountpoints` changed) as soon as the kernel mount exists, while the
+hook is still running (#182). So the hook first mounts the volume in a private
+mount namespace of a forked child and does the work below there; only then does
+it make the real mount, which Engine sees with the library already in place:
 
 1. read-only HFS+ with `PIONEER/` or `.PIONEER/` gets a writable view on
    `<mount>/Engine Library`, kept in `/data/enginex/hfs-libraries/<volume id>`
@@ -24,8 +28,10 @@ after `mnt_context_mount()` returns, so the hook finishes within that call:
 2. `rb-bridge --mount-path <mount>` converts the export;
 3. `engine-guardian --heal-mount <mount> --data-only` repairs table data.
 
-The steps share a 20 s budget. An unfinished import is killed and rolled back,
-so a library too large to convert in that time stays unconverted.
+The steps share a 20 s budget (3 s of it kept for the real mount). An unfinished
+import is killed and rolled back, so a library too large to convert in that time
+stays unconverted; that export is then not tried again until it changes or the
+player restarts, so later inserts are not held for the whole budget.
 
 Nothing may write these databases once Engine has attached. Concurrent writers
 produced `SQLITE_CORRUPT` and index damage on real media, and Engine then deleted
