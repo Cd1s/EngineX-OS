@@ -135,6 +135,39 @@ func (m *Manager) StartEnabled() {
 	}
 }
 
+// A manifest is a small JSON file; discovery reads at most this much of one, and looks at no more
+// than maxModCandidates directories per mods folder.
+const (
+	maxManifestBytes  = 64 << 10
+	maxModCandidates  = 256
+	errManifestTooBig = "manifest larger than 64 KiB"
+)
+
+// readManifestFile reads a manifest only if it is a regular file (not a link, device or pipe) of at
+// most maxManifestBytes. O_NONBLOCK keeps the open itself from waiting on anything but a file.
+func readManifestFile(path string) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !st.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s: not a regular file", filepath.Base(path))
+	}
+	if st.Size() > maxManifestBytes {
+		return nil, errors.New(errManifestTooBig)
+	}
+	data, err := io.ReadAll(io.LimitReader(f, maxManifestBytes+1))
+	if err == nil && len(data) > maxManifestBytes {
+		return nil, errors.New(errManifestTooBig)
+	}
+	return data, err
+}
+
 // NewManager creates a mod manager operating on the given media and UI directories.
 func NewManager(mediaRoot, uiDir string) *Manager {
 	return &Manager{
@@ -408,6 +441,9 @@ func (m *Manager) discoverLocked() ([]Mod, error) {
 
 	for _, source := range sources {
 		for _, candidate := range source.paths {
+			if st, err := os.Lstat(candidate); err != nil || !st.IsDir() {
+				continue // also a mods folder that is a link
+			}
 			modEntries, err := os.ReadDir(candidate)
 			if err != nil {
 				continue
@@ -416,19 +452,22 @@ func (m *Manager) discoverLocked() ([]Mod, error) {
 				return strings.Compare(a.Name(), b.Name())
 			})
 
+			if len(modEntries) > maxModCandidates {
+				modEntries = modEntries[:maxModCandidates]
+			}
 			for _, me := range modEntries {
 				if source.drive == "internal" && strings.HasPrefix(me.Name(), ".install-") {
 					continue
 				}
 				modDir := filepath.Join(candidate, me.Name())
-				st, err := os.Stat(modDir)
+				st, err := os.Lstat(modDir)
 				if err != nil || !st.IsDir() {
 					continue
 				}
 
-				data, err := os.ReadFile(filepath.Join(modDir, "manifest.json"))
+				data, err := readManifestFile(filepath.Join(modDir, "manifest.json"))
 				if os.IsNotExist(err) {
-					data, err = os.ReadFile(filepath.Join(modDir, "mod.json"))
+					data, err = readManifestFile(filepath.Join(modDir, "mod.json"))
 				}
 				if err != nil {
 					continue
