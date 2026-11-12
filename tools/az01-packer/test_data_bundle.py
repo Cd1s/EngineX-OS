@@ -525,6 +525,77 @@ exec REAL "$@"
         subprocess.run(['mkfs.ext4', '-F', str(img)], check=True, capture_output=True)
         self.assertEqual(hmod.inject(img, r['bundle'])['status'], 'ok')
 
+    def install_ab(self, mv_on_packs):
+        """Install version A, then version B with an mv that does `mv_on_packs` (shell) when B's staged
+        ui/packs is moved into place, i.e. after B's bundle is already active (BH-G2-4)."""
+        dest, alsa = self.tmp / 'gen', self.tmp / 'gen-alsa'
+
+        def unpack(result):  # extract() names the default version's directory
+            shutil.rmtree(self.tmp / 'x', ignore_errors=True)
+            self.extract(result)
+            return next((self.tmp / 'x').iterdir())
+        self.sh(unpack(self.build('a')) / 'install.sh', dest, alsa_dest=alsa)
+        b = self.build('b', version='5.3.0.2', ui_packs=self.ui_tar({'packs/a/Main.qml': b'Item { B }'}, 'b.tar.gz'))
+        shims = self.tmp / 'mv-shim'
+        shims.mkdir(exist_ok=True)
+        (shims / 'mv').write_text(
+            '#!/bin/sh\n'
+            f'case "$1" in */.bundle.*/ui/packs) {mv_on_packs} ;; esac\n'
+            f'exec {shutil.which("mv")} "$@"\n')
+        (shims / 'mv').chmod(0o755)
+        env = {**self.env, 'SC5000_CUSTOM': str(dest), 'SC5000_ALSA_OVERLAY': str(alsa),
+               'PATH': f"{shims}:{self.env['PATH']}"}
+        src = unpack(b)
+        self.assertIn('5.3.0.2', src.name)
+        res = subprocess.run(['sh', str(src / 'install.sh')], env=env, capture_output=True, text=True)
+        return dest, alsa, res
+
+    def assert_generation_a(self, dest, alsa):
+        self.assertEqual((dest / 'bundle/version.txt').read_text(), '5.3.0.1.1\n')
+        self.assertEqual((dest / 'ui/packs/a/Main.qml').read_bytes(), b'Item {}')
+        self.assertEqual((dest / 'ui/icons/x.svg').read_bytes(), b'<svg/>')
+        self.assertEqual((dest / 'ui/.pack-version').read_text(), '5.3.0.1.1\n')
+        self.assertEqual((dest / 'version.txt').read_text(), '5.3.0.1.1\n')
+        self.assertEqual((dest / 'gen2-unlocked').read_text(), '1\n')
+        self.assertTrue((alsa / '99-sc5000-custom.conf').is_file())
+        left = sorted(str(p.relative_to(dest)) for p in dest.rglob('*')
+                      if p.name.startswith(('.install-', '.bundle.')) or p.name.endswith(('.replaced', '.undo')))
+        self.assertEqual(left, [])
+
+    def test_install_failure_keeps_the_previous_generation(self):
+        """BH-G2-4: install.sh deleted the old bundle before the UI packs were in place, so a failure
+        after that left B's bundle with no packs (A's parked in packs.replaced) and A's markers."""
+        dest, alsa, res = self.install_ab('echo "mv: cannot move" >&2; exit 1')
+        self.assertNotEqual(res.returncode, 0)
+        self.assert_generation_a(dest, alsa)
+
+    def test_boot_undoes_an_install_cut_off_half_way(self):
+        """BH-G2-4: a power cut between swapping the bundle and the UI packs; the next boot puts the
+        previous generation back and runs its activator instead of starting a half-installed B."""
+        dest, alsa, res = self.install_ab('kill -9 $PPID; exit 1')
+        self.assertNotEqual(res.returncode, 0)
+        self.assertEqual((dest / 'bundle/version.txt').read_text(), '5.3.0.2\n')  # cut off half-way
+        self.assertFalse((dest / 'ui/packs').exists())
+        # The generation that comes back records that its own activator ran; the /run paths of the
+        # activator that finds the half-done install stay in this test's scratch dir.
+        mark = self.tmp / 'activated'
+        for a in (dest / '.install-old/bundle/boot-activate.sh',):
+            if a.exists():
+                a.write_text(f'#!/bin/sh\necho "$0" > {mark}\n')
+        run_dir = self.tmp / 'run'
+        (run_dir / 'systemd/system').mkdir(parents=True)
+        b_activate = dest / 'bundle/boot-activate.sh'
+        b_activate.write_text(b_activate.read_text().replace('/run/', f'{run_dir}/'))
+        env = {**self.env, 'SC5000_CUSTOM': str(dest), 'SC5000_ALSA_OVERLAY': str(alsa),
+               'SC5000_PID1_COMM': str(self.pid1_systemd()),
+               'SC5000_STREAMING_ACCOUNTS': str(self.tmp / 'StreamingAccounts.json'),
+               'SC5000_PRODUCT_CODE_FILE': str(self.tmp / 'product-code'),
+               'SC5000_TIMESYNC_LIB_DIR': str(self.tmp / 'no-lib')}
+        res = subprocess.run(['sh', str(b_activate)], env=env, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assert_generation_a(dest, alsa)
+        self.assertEqual(mark.read_text().strip(), str(dest / 'bundle/boot-activate.sh'))
+
     def migrate(self, legacy_files, new_files=None):
         """Run the bundle's install.sh with /data pointed at a scratch dir."""
         src = self.extract(self.build())
