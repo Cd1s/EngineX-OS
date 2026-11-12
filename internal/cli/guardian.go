@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/dbhealer"
+	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 	"github.com/Cd1s/EngineX-OS/pkg/webui"
 )
 
@@ -90,10 +92,20 @@ func Guardian(args []string, out, errOut io.Writer) int {
 			r.Mount, r.CheckedAt = m, time.Now().UTC()
 			r.ReserveFixed, err = dbhealer.NormalizeDatabase2(filepath.Join(m, "Engine Library", "Database2"))
 			r.Healthy = err == nil
-		case *dataOnly:
-			r, err = dbhealer.HealMountDataOnly(m, *sessions)
 		default:
-			r, err = dbhealer.HealMount(m, *sessions)
+			// Edits the Web Console queued while Engine had this library open
+			// (Relocate, Hot Cues): this runs from the mount hook before Engine
+			// opens it again.
+			if n, perr := enginedb.ApplyPending(context.Background(), m); perr != nil {
+				fmt.Fprintln(errOut, "engine-guardian: queued library edits not applied:", perr)
+			} else if n > 0 {
+				fmt.Fprintf(errOut, "engine-guardian: applied %d queued library edits\n", n)
+			}
+			if *dataOnly {
+				r, err = dbhealer.HealMountDataOnly(m, *sessions)
+			} else {
+				r, err = dbhealer.HealMount(m, *sessions)
+			}
 		}
 		if err == nil && !*status {
 			if progressErr := webui.RecordBootDatabaseProgress(*uiDir); progressErr != nil {
