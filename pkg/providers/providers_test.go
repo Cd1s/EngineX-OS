@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"math/big"
 	"net/http"
@@ -416,8 +417,6 @@ func TestSpotifyAuthorizationRefreshLockAnd401Retry(t *testing.T) {
 		case "/me/playlists":
 			w.WriteHeader(http.StatusInternalServerError)
 		case "/me/tracks":
-			likedInFlight.Add(1)
-			defer likedInFlight.Add(-1)
 			select {
 			case <-r.Context().Done():
 			case <-time.After(120 * time.Millisecond):
@@ -436,6 +435,13 @@ func TestSpotifyAuthorizationRefreshLockAnd401Retry(t *testing.T) {
 	sp.AccountsURL = srv.URL
 	sp.ClientID = "public-client"
 	sp.TokenPath = filepath.Join(t.TempDir(), "token.json")
+	sp.HTTP = &http.Client{Transport: spotifyProtocolRoundTrip(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/me/tracks" {
+			likedInFlight.Add(1)
+			defer likedInFlight.Add(-1)
+		}
+		return http.DefaultTransport.RoundTrip(r)
+	})}
 	sp.Token = Token{
 		AccessToken:  "expired-tok",
 		RefreshToken: "refresh-tok",
@@ -492,5 +498,13 @@ func TestSpotifyAuthorizationRefreshLockAnd401Retry(t *testing.T) {
 	}
 	if inFlight := likedInFlight.Load(); inFlight != 0 {
 		t.Fatalf("apiPlaylists leaked liked goroutine (inFlight=%d)", inFlight)
+	}
+
+	// 5: With stored credentials and a token lacking RefreshToken, authorization uses native login5 bearer.
+	sp.mu.Lock()
+	sp.Token = Token{AccessToken: "connect-no-refresh", Expiry: time.Now().Add(time.Hour)}
+	sp.mu.Unlock()
+	if _, err := sp.Search(context.Background(), "techno"); !errors.Is(err, io.ErrUnexpectedEOF) || nativeCalls.Load() == 0 {
+		t.Fatalf("refreshless token bypassed stored login5 bearer: err=%v nativeCalls=%d", err, nativeCalls.Load())
 	}
 }

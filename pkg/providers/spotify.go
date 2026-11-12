@@ -209,7 +209,7 @@ func (s *Spotify) authorization(ctx context.Context) (http.Header, error) {
 	s.mu.Lock()
 	tok, clientID := s.Token, s.ClientID
 	s.mu.Unlock()
-	if tok.AccessToken != "" && !tokenExpired(tok) {
+	if tok.AccessToken != "" && !tokenExpired(tok) && (tok.RefreshToken != "" || !s.HasStoredCredentials()) {
 		return http.Header{"Authorization": {"Bearer " + tok.AccessToken}}, nil
 	}
 
@@ -217,7 +217,7 @@ func (s *Spotify) authorization(ctx context.Context) (http.Header, error) {
 	s.mu.Lock()
 	tok, clientID = s.Token, s.ClientID
 	s.mu.Unlock()
-	if tok.AccessToken != "" && !tokenExpired(tok) {
+	if tok.AccessToken != "" && !tokenExpired(tok) && (tok.RefreshToken != "" || !s.HasStoredCredentials()) {
 		s.refreshMu.Unlock()
 		return http.Header{"Authorization": {"Bearer " + tok.AccessToken}}, nil
 	}
@@ -260,7 +260,7 @@ func (s *Spotify) refreshAfter401(ctx context.Context, failedAuth string) (http.
 	s.mu.Lock()
 	tok, clientID := s.Token, s.ClientID
 	s.mu.Unlock()
-	if tok.AccessToken != "" && !tokenExpired(tok) && "Bearer "+tok.AccessToken != failedAuth {
+	if tok.AccessToken != "" && !tokenExpired(tok) && (tok.RefreshToken != "" || !s.HasStoredCredentials()) && "Bearer "+tok.AccessToken != failedAuth {
 		s.refreshMu.Unlock()
 		return http.Header{"Authorization": {"Bearer " + tok.AccessToken}}, nil
 	}
