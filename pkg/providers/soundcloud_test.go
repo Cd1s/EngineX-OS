@@ -434,3 +434,43 @@ func TestSoundCloudWebBrowserTokenQueriesMeForPrivatePlaylists(t *testing.T) {
 		t.Fatalf("Tracks(likes) missed /me likes: likes=%+v err=%v paths=%v", likes, err, paths)
 	}
 }
+
+func TestSoundCloudWebMe404FallbackAndErrorSurfacing(t *testing.T) {
+	mode := "404-fallback"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if mode == "auth-error" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		switch r.URL.Path {
+		case "/me/playlists", "/me/playlist_likes":
+			w.WriteHeader(http.StatusNotFound)
+		case "/users/42/playlists":
+			io.WriteString(w, `{"collection":[{"id":201,"title":"Fallback Set","track_count":4}]}`)
+		case "/users/42/playlist_likes":
+			io.WriteString(w, `{"collection":[{"playlist":{"id":202,"title":"Saved Set","track_count":2}}]}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	scWebMu.Lock()
+	scWebIDs[srv.URL] = "0123456789abcdef0123456789abcdef"
+	scWebMu.Unlock()
+	t.Cleanup(func() {
+		scWebMu.Lock()
+		delete(scWebIDs, srv.URL)
+		scWebMu.Unlock()
+	})
+
+	sc := &SoundCloud{WebURL: srv.URL, SiteURL: srv.URL, Token: "browser-token", UserID: 42}
+	lists, err := sc.Playlists(context.Background())
+	if err != nil || len(lists) != 3 || lists[1].Title != "Fallback Set" || lists[2].Title != "【收藏】Saved Set" {
+		t.Fatalf("404 /me fallback failed: lists=%+v err=%v", lists, err)
+	}
+
+	mode = "auth-error"
+	if lists, err = sc.Playlists(context.Background()); err == nil {
+		t.Fatalf("Playlists swallowed 401 error: lists=%+v", lists)
+	}
+}

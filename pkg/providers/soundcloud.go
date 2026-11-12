@@ -600,21 +600,21 @@ func (p *scPlaylist) UnmarshalJSON(b []byte) error {
 	return json.Unmarshal(b, (*plain)(p))
 }
 
-func (s *SoundCloud) playlistPages(ctx context.Context, address, prefix string, out []Playlist) []Playlist {
+func (s *SoundCloud) playlistPages(ctx context.Context, address, prefix string, out []Playlist) ([]Playlist, error) {
 	for address != "" && len(out) < soundCloudListLimit {
 		var r struct {
 			Collection []scPlaylist `json:"collection"`
 			Next       string       `json:"next_href"`
 		}
-		if s.get(ctx, address, &r) != nil {
-			return out // what was already read is still worth showing
+		if err := s.get(ctx, address, &r); err != nil {
+			return out, err
 		}
 		for _, p := range r.Collection {
 			out = append(out, Playlist{strconv.FormatInt(p.ID, 10), prefix + p.Title, p.TrackCount})
 		}
 		address = s.nextPage(r.Next)
 	}
-	return out
+	return out, nil
 }
 
 // library is where the account's own lists live. A user's token also reaches private
@@ -637,8 +637,29 @@ func (s *SoundCloud) Playlists(ctx context.Context) ([]Playlist, error) {
 	}
 	q := func() url.Values { return url.Values{"limit": {"100"}, "show_tracks": {"false"}} }
 	out := []Playlist{{ID: soundCloudLikesID, Title: "Liked Tracks & Sets（我点赞的音乐）"}}
-	out = s.playlistPages(ctx, s.list(root+"/playlists", q()), "", out)
-	return s.playlistPages(ctx, s.list(root+s.path("/likes/playlists", "/playlist_likes"), q()), "【收藏】", out), nil
+	out, err = s.playlistPages(ctx, s.list(root+"/playlists", q()), "", out)
+	var st StatusError
+	if errors.As(err, &st) && st == 404 && s.web() && root == "/me" && s.UserID != 0 {
+		root = "/users/" + strconv.FormatInt(s.UserID, 10)
+		out, err = s.playlistPages(ctx, s.list(root+"/playlists", q()), "", out)
+	}
+	if err != nil {
+		return nil, err
+	}
+	likesPath := s.path("/likes/playlists", "/playlist_likes")
+	var likeErr error
+	out, likeErr = s.playlistPages(ctx, s.list(root+likesPath, q()), "【收藏】", out)
+	if errors.As(likeErr, &st) && st == 404 && s.web() && root == "/me" && s.UserID != 0 {
+		out, likeErr = s.playlistPages(ctx, s.list("/users/"+strconv.FormatInt(s.UserID, 10)+likesPath, q()), "【收藏】", out)
+	}
+	if likeErr != nil {
+		var lst StatusError
+		if errors.As(likeErr, &lst) && lst == 404 {
+			return out, nil
+		}
+		return nil, likeErr
+	}
+	return out, nil
 }
 
 func (s *SoundCloud) trackPages(ctx context.Context, address string) ([]Track, error) {
