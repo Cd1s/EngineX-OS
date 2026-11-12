@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -164,14 +165,15 @@ func readSQLiteLibrary(mountRoot, dbPath string) (*Library, error) {
 		return nil, fmt.Errorf("no tracks table found in %s", dbPath)
 	}
 
-	getCols := func(tbl string) map[string]string {
+	getCols := func(tbl string) (map[string]string, map[string]string) {
 		cols := make(map[string]string)
+		types := make(map[string]string)
 		if tbl == "" {
-			return cols
+			return cols, types
 		}
 		cRows, err := db.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%s)", quoteIdent(tbl)))
 		if err != nil {
-			return cols
+			return cols, types
 		}
 		defer cRows.Close()
 		for cRows.Next() {
@@ -180,10 +182,12 @@ func readSQLiteLibrary(mountRoot, dbPath string) (*Library, error) {
 			var notnull, pk int
 			var dflt sql.NullString
 			if err := cRows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err == nil {
-				cols[strings.ToLower(name)] = name
+				low := strings.ToLower(name)
+				cols[low] = name
+				types[low] = strings.ToUpper(ctype)
 			}
 		}
-		return cols
+		return cols, types
 	}
 
 	findCol := func(cols map[string]string, candidates ...string) string {
@@ -195,6 +199,21 @@ func readSQLiteLibrary(mountRoot, dbPath string) (*Library, error) {
 		return ""
 	}
 
+	colUnit := func(quotedCol string) string {
+		raw := strings.ToLower(strings.Trim(quotedCol, `"`))
+		if strings.HasSuffix(raw, "_ms") || raw == "ms" || strings.Contains(raw, "_ms_") {
+			return "ms"
+		}
+		if strings.HasSuffix(raw, "_sec") || strings.HasSuffix(raw, "_seconds") || raw == "sec" || raw == "seconds" || strings.Contains(raw, "_sec_") {
+			return "sec"
+		}
+		return ""
+	}
+
+	colTypeOf := func(types map[string]string, quotedCol string) string {
+		return types[strings.ToLower(strings.Trim(quotedCol, `"`))]
+	}
+
 	colOrLit := func(col, lit string) string {
 		if col != "" {
 			return col
@@ -202,7 +221,7 @@ func readSQLiteLibrary(mountRoot, dbPath string) (*Library, error) {
 		return lit
 	}
 
-	trCols := getCols(trackTable)
+	trCols, trTypes := getCols(trackTable)
 	idCol := findCol(trCols, "id", "rowid", "uuid", "track_id")
 	if idCol == "" {
 		idCol = `"rowid"`
@@ -213,8 +232,8 @@ func readSQLiteLibrary(mountRoot, dbPath string) (*Library, error) {
 	albumCol := findCol(trCols, "album", "album_name")
 	bpmCol := findCol(trCols, "bpm", "bpm_analyzed", "tempo")
 	keyCol := findCol(trCols, "key", "initial_key", "musical_key", "tonality")
-	durCol := findCol(trCols, "duration", "duration_sec", "length", "time")
-	offsetCol := findCol(trCols, "beatgrid_offset", "beat_grid_offset", "first_beat_sec", "first_beat_offset", "grid_offset", "offset")
+	durCol := findCol(trCols, "duration_sec", "duration_ms", "duration", "length_sec", "length_ms", "length", "time")
+	offsetCol := findCol(trCols, "beatgrid_offset_sec", "beatgrid_offset_ms", "beatgrid_offset", "beat_grid_offset", "first_beat_sec", "first_beat_ms", "first_beat_offset", "grid_offset", "offset")
 
 	trQuery := fmt.Sprintf("SELECT %s, %s, %s, %s, %s, %s, %s, %s, %s FROM %s",
 		idCol,
@@ -237,6 +256,8 @@ func readSQLiteLibrary(mountRoot, dbPath string) (*Library, error) {
 
 	tracksByID := make(map[string]*Track)
 	var allTracks []Track
+	var posDurs []float64
+	durHasFrac := false
 
 	for tRows.Next() {
 		var idVal any
@@ -263,14 +284,11 @@ func readSQLiteLibrary(mountRoot, dbPath string) (*Library, error) {
 			title = strings.TrimSuffix(filepath.Base(absPath), filepath.Ext(absPath))
 		}
 
-		durationSec := durVal.Float64
-		if durationSec > 1000 {
-			durationSec /= 1000.0
-		}
-
-		offsetSec := offsetVal.Float64
-		if offsetSec > 100 {
-			offsetSec /= 1000.0
+		if durVal.Float64 > 0 {
+			posDurs = append(posDurs, durVal.Float64)
+			if math.Abs(durVal.Float64-math.Trunc(durVal.Float64)) > 1e-6 && durVal.Float64 < 21600 {
+				durHasFrac = true
+			}
 		}
 
 		t := &Track{
@@ -280,8 +298,8 @@ func readSQLiteLibrary(mountRoot, dbPath string) (*Library, error) {
 			Album:          albumVal.String,
 			Key:            keyVal.String,
 			BPM:            bpmVal.Float64,
-			DurationSec:    durationSec,
-			BeatGridOffset: offsetSec,
+			DurationSec:    durVal.Float64,
+			BeatGridOffset: offsetVal.Float64,
 			RelativePath:   relPath,
 			AbsPath:        absPath,
 		}
@@ -290,10 +308,94 @@ func readSQLiteLibrary(mountRoot, dbPath string) (*Library, error) {
 	}
 	tRows.Close()
 
+	// Determine table-wide track duration & grid-offset units rather than per-row arbitrary thresholds.
+	durIsMS := false
+	switch colUnit(durCol) {
+	case "ms":
+		durIsMS = true
+	case "sec":
+		durIsMS = false
+	default:
+		if len(posDurs) > 0 {
+			sorted := append([]float64(nil), posDurs...)
+			sort.Float64s(sorted)
+			median := sorted[len(sorted)/2]
+			isIntCol := strings.Contains(colTypeOf(trTypes, durCol), "INT")
+			if median > 21600 || (isIntCol && !durHasFrac && sorted[len(sorted)-1] >= 10000) {
+				durIsMS = true
+			}
+		}
+	}
+	if durIsMS {
+		for i := range allTracks {
+			allTracks[i].DurationSec /= 1000.0
+			if tr := tracksByID[allTracks[i].ID]; tr != nil {
+				tr.DurationSec = allTracks[i].DurationSec
+			}
+		}
+	}
+
+	offsetIsMS := false
+	switch colUnit(offsetCol) {
+	case "ms":
+		offsetIsMS = true
+	case "sec":
+		offsetIsMS = false
+	default:
+		for i := range allTracks {
+			if allTracks[i].DurationSec > 0 && math.Abs(allTracks[i].BeatGridOffset) > allTracks[i].DurationSec {
+				offsetIsMS = true
+				break
+			}
+		}
+		if !offsetIsMS && durIsMS && strings.Contains(colTypeOf(trTypes, offsetCol), "INT") {
+			offsetIsMS = true
+		}
+	}
+	if offsetIsMS {
+		for i := range allTracks {
+			allTracks[i].BeatGridOffset /= 1000.0
+			if tr := tracksByID[allTracks[i].ID]; tr != nil {
+				tr.BeatGridOffset = allTracks[i].BeatGridOffset
+			}
+		}
+	}
+
+	// chooseSubTrackScale returns 1000.0 if a cue/loop table column stores seconds, else 1.0 (ms).
+	chooseSubTrackScale := func(quotedCol string, trackIDs []string, vals []float64) float64 {
+		switch colUnit(quotedCol) {
+		case "sec":
+			return 1000.0
+		case "ms":
+			return 1.0
+		}
+		hasNonZero, hasFrac := false, false
+		for i, v := range vals {
+			av := math.Abs(v)
+			if av == 0 {
+				continue
+			}
+			hasNonZero = true
+			if av >= 1000 {
+				return 1.0
+			}
+			if tr, ok := tracksByID[trackIDs[i]]; ok && tr.DurationSec > 0 && av > tr.DurationSec {
+				return 1.0
+			}
+			if math.Abs(av-math.Trunc(av)) > 1e-6 {
+				hasFrac = true
+			}
+		}
+		if hasNonZero && hasFrac {
+			return 1000.0
+		}
+		return 1.0
+	}
+
 	// Parse Cues
 	cuesByTrack := make(map[string][]CuePoint)
 	if cueTable != "" {
-		cueCols := getCols(cueTable)
+		cueCols, _ := getCols(cueTable)
 		cTrackIdCol := findCol(cueCols, "track_id", "media_item_id", "media_item_uuid", "track_uuid", "item_id")
 		cSlotCol := findCol(cueCols, "slot", "index", "cue_index", "hot_cue", "number")
 		cPosCol := findCol(cueCols, "position_ms", "time_ms", "timestamp_ms", "position", "time_sec", "time", "position_sec")
@@ -315,6 +417,16 @@ func readSQLiteLibrary(mountRoot, dbPath string) (*Library, error) {
 			cRows, err := db.QueryContext(ctx, cueQuery)
 			if err == nil {
 				defer cRows.Close()
+				type rawCue struct {
+					trID  string
+					slot  int
+					pos   float64
+					label string
+					color string
+				}
+				var rawCues []rawCue
+				var cueTrackIDs []string
+				var cueVals []float64
 				for cRows.Next() {
 					var trIDVal, slotVal any
 					var posVal sql.NullFloat64
@@ -323,32 +435,28 @@ func readSQLiteLibrary(mountRoot, dbPath string) (*Library, error) {
 
 					if err := cRows.Scan(&trIDVal, &slotVal, &posVal, &labelVal, &colorVal); err == nil {
 						trID := fmt.Sprintf("%v", trIDVal)
-						pos := posVal.Float64
-
-						isSecCol := strings.Contains(strings.ToLower(cPosCol), "sec")
-						isMsCol := strings.Contains(strings.ToLower(cPosCol), "ms")
-						posMS := pos
-						if isSecCol {
-							posMS = pos * 1000.0
-						} else if !isMsCol && pos < 1000 {
-							if tr, ok := tracksByID[trID]; ok && tr.DurationSec > 0 && pos <= tr.DurationSec {
-								posMS = pos * 1000.0
-							}
-						}
-
 						slot, _ := strconv.Atoi(fmt.Sprintf("%v", slotVal))
-						colorHex := parseColorHex(colorVal)
-
-						cp := CuePoint{
-							Index:      slot,
-							PositionMS: posMS,
-							Label:      labelVal.String,
-							ColorHex:   colorHex,
-						}
-						cuesByTrack[trID] = append(cuesByTrack[trID], cp)
+						rawCues = append(rawCues, rawCue{
+							trID:  trID,
+							slot:  slot,
+							pos:   posVal.Float64,
+							label: labelVal.String,
+							color: parseColorHex(colorVal),
+						})
+						cueTrackIDs = append(cueTrackIDs, trID)
+						cueVals = append(cueVals, posVal.Float64)
 					}
 				}
 				cRows.Close()
+				posScale := chooseSubTrackScale(cPosCol, cueTrackIDs, cueVals)
+				for _, rc := range rawCues {
+					cuesByTrack[rc.trID] = append(cuesByTrack[rc.trID], CuePoint{
+						Index:      rc.slot,
+						PositionMS: rc.pos * posScale,
+						Label:      rc.label,
+						ColorHex:   rc.color,
+					})
+				}
 			}
 		}
 	}
@@ -356,7 +464,7 @@ func readSQLiteLibrary(mountRoot, dbPath string) (*Library, error) {
 	// Parse Loops
 	loopsByTrack := make(map[string][]SavedLoop)
 	if loopTable != "" {
-		loopCols := getCols(loopTable)
+		loopCols, _ := getCols(loopTable)
 		lTrackIdCol := findCol(loopCols, "track_id", "media_item_id", "media_item_uuid", "track_uuid", "item_id")
 		lSlotCol := findCol(loopCols, "slot", "index", "loop_index", "number")
 		lStartCol := findCol(loopCols, "start_ms", "start_time", "start_time_ms", "start_sec", "start")
@@ -378,6 +486,16 @@ func readSQLiteLibrary(mountRoot, dbPath string) (*Library, error) {
 			lRows, err := db.QueryContext(ctx, loopQuery)
 			if err == nil {
 				defer lRows.Close()
+				type rawLoop struct {
+					trID   string
+					slot   int
+					start  float64
+					length float64
+					label  string
+				}
+				var rawLoops []rawLoop
+				var loopTrackIDs []string
+				var startVals, lenVals []float64
 				for lRows.Next() {
 					var trIDVal, slotVal any
 					var startVal, lenVal sql.NullFloat64
@@ -385,42 +503,30 @@ func readSQLiteLibrary(mountRoot, dbPath string) (*Library, error) {
 
 					if err := lRows.Scan(&trIDVal, &slotVal, &startVal, &lenVal, &labelVal); err == nil {
 						trID := fmt.Sprintf("%v", trIDVal)
-						start := startVal.Float64
-						length := lenVal.Float64
-
-						isSecStart := strings.Contains(strings.ToLower(lStartCol), "sec")
-						isMsStart := strings.Contains(strings.ToLower(lStartCol), "ms")
-						startMS := start
-						if isSecStart {
-							startMS = start * 1000.0
-						} else if !isMsStart && start < 1000 {
-							if tr, ok := tracksByID[trID]; ok && tr.DurationSec > 0 && start <= tr.DurationSec {
-								startMS = start * 1000.0
-							}
-						}
-
-						isSecLen := strings.Contains(strings.ToLower(lLenCol), "sec")
-						isMsLen := strings.Contains(strings.ToLower(lLenCol), "ms")
-						lenMS := length
-						if isSecLen {
-							lenMS = length * 1000.0
-						} else if !isMsLen && length < 1000 {
-							if tr, ok := tracksByID[trID]; ok && tr.DurationSec > 0 && length <= tr.DurationSec {
-								lenMS = length * 1000.0
-							}
-						}
-
 						slot, _ := strconv.Atoi(fmt.Sprintf("%v", slotVal))
-						sl := SavedLoop{
-							Index:    slot,
-							StartMS:  startMS,
-							LengthMS: lenMS,
-							Label:    labelVal.String,
-						}
-						loopsByTrack[trID] = append(loopsByTrack[trID], sl)
+						rawLoops = append(rawLoops, rawLoop{
+							trID:   trID,
+							slot:   slot,
+							start:  startVal.Float64,
+							length: lenVal.Float64,
+							label:  labelVal.String,
+						})
+						loopTrackIDs = append(loopTrackIDs, trID)
+						startVals = append(startVals, startVal.Float64)
+						lenVals = append(lenVals, lenVal.Float64)
 					}
 				}
 				lRows.Close()
+				startScale := chooseSubTrackScale(lStartCol, loopTrackIDs, startVals)
+				lenScale := chooseSubTrackScale(lLenCol, loopTrackIDs, lenVals)
+				for _, rl := range rawLoops {
+					loopsByTrack[rl.trID] = append(loopsByTrack[rl.trID], SavedLoop{
+						Index:    rl.slot,
+						StartMS:  rl.start * startScale,
+						LengthMS: rl.length * lenScale,
+						Label:    rl.label,
+					})
+				}
 			}
 		}
 	}
@@ -447,7 +553,7 @@ func readSQLiteLibrary(mountRoot, dbPath string) (*Library, error) {
 	// Parse Playlists
 	var playlists []Playlist
 	if playlistTable != "" {
-		plCols := getCols(playlistTable)
+		plCols, _ := getCols(playlistTable)
 		plIdCol := findCol(plCols, "id", "rowid", "uuid", "list_id")
 		if plIdCol == "" {
 			plIdCol = `"rowid"`
@@ -478,7 +584,7 @@ func readSQLiteLibrary(mountRoot, dbPath string) (*Library, error) {
 
 	// Parse Playlist Items
 	if playlistItemTable != "" && len(playlists) > 0 {
-		itemCols := getCols(playlistItemTable)
+		itemCols, _ := getCols(playlistItemTable)
 		pIdCol := findCol(itemCols, "playlist_id", "list_id", "media_item_list_id")
 		tIdCol := findCol(itemCols, "track_id", "media_item_id", "item_id")
 		orderCol := findCol(itemCols, "position", "sort_order", "item_order", "rank", "index", "id", "rowid")

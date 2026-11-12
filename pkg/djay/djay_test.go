@@ -421,3 +421,47 @@ func TestParseExtDjayLabelsWithCommasAndColons(t *testing.T) {
 		t.Fatalf("loops: %+v", loops)
 	}
 }
+
+func TestDjayLongMixDurationLargeGridOffsetAndSubSecondMsCueLoop(t *testing.T) {
+	mount := t.TempDir()
+	createDummyAudio(t, filepath.Join(mount, "Music", "Mix.mp3"))
+	u := url.URL{Scheme: "file", Path: filepath.ToSlash(filepath.Join(mount, "djay_music_library.db"))}
+	db, err := sql.Open("sqlite", u.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, q := range []string{
+		`CREATE TABLE tracks (id INTEGER PRIMARY KEY, title TEXT, path TEXT, duration REAL, beatgrid_offset REAL)`,
+		`CREATE TABLE cues (track_id INTEGER, slot INTEGER, position REAL, label TEXT)`,
+		`CREATE TABLE loops (track_id INTEGER, slot INTEGER, start REAL, length REAL, label TEXT)`,
+		// 20-minute DJ mix (1200.0 s) with ambient intro first beat at 105.0 s:
+		`INSERT INTO tracks VALUES (1, 'Mix', 'Music/Mix.mp3', 1200.0, 105.0)`,
+		// Cues and loops stored in ms in unlabeled position/start/length columns, including <1000 ms:
+		`INSERT INTO cues VALUES (1, 0, 250.0, 'Early'), (1, 1, 45000.0, 'Drop')`,
+		`INSERT INTO loops VALUES (1, 0, 250.0, 500.0, 'HalfSecLoop')`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.Close()
+
+	libs, err := Discover(mount)
+	if err != nil || len(libs) != 1 || len(libs[0].Tracks) != 1 {
+		t.Fatalf("Discover: %v %+v", err, libs)
+	}
+	tr := libs[0].Tracks[0]
+	if tr.DurationSec != 1200.0 {
+		t.Fatalf("DurationSec = %.3f, want 1200.0", tr.DurationSec)
+	}
+	if tr.BeatGridOffset != 105.0 {
+		t.Fatalf("BeatGridOffset = %.3f, want 105.0", tr.BeatGridOffset)
+	}
+	if len(tr.Cues) != 2 || tr.Cues[0].PositionMS != 250.0 || tr.Cues[1].PositionMS != 45000.0 {
+		t.Fatalf("Cues corrupted: %+v", tr.Cues)
+	}
+	if len(tr.Loops) != 1 || tr.Loops[0].StartMS != 250.0 || tr.Loops[0].LengthMS != 500.0 {
+		t.Fatalf("Loops corrupted: %+v", tr.Loops)
+	}
+}
