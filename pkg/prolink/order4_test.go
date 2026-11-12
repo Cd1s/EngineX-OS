@@ -515,7 +515,3 @@ func TestExportRebindPlayingStatusHandoffFirmwareAndDBServerMetadata(t *testing.
 		t.Fatalf("DBServer 0x2002 truncated float metadata: dur=%d (want 240) bpm=%d (want 12800)", gotDur, gotBPM)
 	}
 }
-
-
-
-
