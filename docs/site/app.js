@@ -63,12 +63,12 @@
     const cards = (xs) => xs.map((f) => `<a class="card" href="${f.href}">${f.tag ? `<em>${T(f.tag)}</em>` : ""}<b>${T(f.t)}</b><span>${T(f.d)}</span><i aria-hidden="true">→</i></a>`).join("");
     $("#home").innerHTML = `<div class="home">
       <section class="h-hero">
-        <a class="badge" href="${GH}/releases/tag/v${D.version}" target="_blank" rel="noopener">${T(H.badge)}</a>
-        <h1>EngineX OS <span class="h-ver">${D.version}</span></h1>
+        <a class="badge" href="${GH}/releases/tag/${D.tag || "v" + D.version}" target="_blank" rel="noopener">${T(H.badge)}</a>
+        <h1>EngineX OS <span class="h-ver">${D.label || D.version}</span></h1>
         <p class="h-lead">${T(H.title)}</p>
         <p class="h-sub">${T(H.sub)}</p>
         <div class="ctas"><a class="btn pri" href="#start">${T(H.cta.docs)}</a><a class="btn" href="#start-downloads">${T(H.cta.dl)}</a><a class="btn" href="#mods">${T(H.cta.mods)}</a><a class="btn ghost" href="${GH}" target="_blank" rel="noopener">${T(H.cta.gh)}</a></div>
-        <figure class="h-visual"><img src="${esc(H.shot.name ? `assets/screenshots/${SHOT_DIR[lang]}/${H.shot.name.replace(/^zh:/, "")}` : (typeof H.shot.src === "string" ? H.shot.src : H.shot.src[lang]))}" alt="EngineX OS ${D.version}" width="1280" height="800"><figcaption>${T(H.shot.cap)}</figcaption></figure>
+        <figure class="h-visual"><img src="${esc(H.shot.name ? `assets/screenshots/${SHOT_DIR[lang]}/${H.shot.name.replace(/^zh:/, "")}` : (typeof H.shot.src === "string" ? H.shot.src : H.shot.src[lang]))}" alt="EngineX OS ${D.label || D.version}" width="1280" height="800"><figcaption>${T(H.shot.cap)}</figcaption></figure>
       </section>
       <div class="h-stats">${H.stats.map(([n, l, d]) => `<div><b>${n}</b><span>${T(l)}</span><small>${T(d)}</small></div>`).join("")}</div>
       <section class="h-sec">${head(H.featT, H.featP)}<div class="h-grid">${cards(H.features)}</div></section>
@@ -107,7 +107,7 @@
     document.documentElement.lang = { s: "zh-CN", t: "zh-TW", e: "en" }[lang];
     $("#q").placeholder = u.search;
     $("#lang").value = lang;
-    $("#ver").textContent = "v" + D.version;
+    $("#ver").textContent = "v" + (D.label || D.version);
     const tabLinks = `<a href="#" data-tab="home">${u.tHome}</a><a href="#start" data-tab="docs">${u.tDocs}</a><a href="#start-downloads" data-tab="dl">${u.tDl}</a><a href="#mods" data-tab="mods">${u.tMods}</a>`;
     $("#nav").innerHTML = `<div class="nav-tabs">${tabLinks}</div>` +
       D.sections.map((s) => `<div class="grp" data-s="${s.id}"><a href="#${s.id}">${T(s.nav || s.title)}</a><div class="sub">${heads(s).map((b) => `<a href="#${hid(s, b)}" data-h="${hid(s, b)}">${T(b.nav || b.x)}</a>`).join("")}</div></div>`).join("");
