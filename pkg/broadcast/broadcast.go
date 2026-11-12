@@ -383,7 +383,9 @@ func parseServerTarget(raw string) (scheme, hostPort string, err error) {
 
 	host, port, splitErr := net.SplitHostPort(s)
 	if splitErr != nil {
-		host = s
+		// No port. An IPv6 literal comes in brackets, which JoinHostPort adds itself
+		// (BH2-A3-12: "[2001:db8::1]" became "[[2001:db8::1]]:8000" and never connected).
+		host = strings.TrimSuffix(strings.TrimPrefix(s, "["), "]")
 		port = "8000"
 	}
 	return scheme, net.JoinHostPort(host, port), nil
