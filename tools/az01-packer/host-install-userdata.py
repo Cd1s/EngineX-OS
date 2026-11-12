@@ -225,10 +225,16 @@ def inject(img_path, bundle_tar, check=True, ssh_key=None):
         subprocess.run(['debugfs', '-w', '-f', str(script_file), str(img)],
                        capture_output=True, text=True)
         # debugfs exits 0 even when a write failed (full image, bad path): read back.
-        for rel in (f'{root}/version.txt', f'{root}/bundle/bin/sc5000-suite'):
+        for rel in (f'{root}/version.txt', f'{root}/bundle/bin/sc5000-suite', f'{root}/gen2-unlocked'):
             st = subprocess.run(['debugfs', '-R', f'stat /{rel}', str(img)], capture_output=True, text=True).stdout
             if 'Type: regular' not in st:
                 fail(f'/{rel} is not in {img} after writing (image full?)')
+        unlocked_val = subprocess.run(['debugfs', '-R', f'cat /{root}/gen2-unlocked', str(img)], capture_output=True, text=True).stdout
+        if unlocked_val != '1\n':
+            fail(f'/{root}/gen2-unlocked did not read back as 1 in {img}')
+        locked_st = subprocess.run(['debugfs', '-R', f'stat /{root}/gen2-locked', str(img)], capture_output=True, text=True).stdout
+        if 'Type:' in locked_st:
+            fail(f'/{root}/gen2-locked still present in {img} after unlock')
         if check:
             fsck = subprocess.run(['e2fsck', '-f', '-y', str(img)],
                                   capture_output=True, text=True)

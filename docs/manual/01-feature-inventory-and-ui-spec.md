@@ -20,7 +20,7 @@
 
 ## 1. 支持的 16 款机型
 
-识别方式：开机读 `/sys/firmware/devicetree/base/compatible`，`pkg/webui/update.go` 的表映射到前缀；碟机屏幕上的"检查更新"据此选对应 `.img` 或数据包。
+识别方式：开机读 `/sys/firmware/devicetree/base/compatible`，`pkg/webui/update.go` 的表映射到前缀；碟机屏幕上的"检查更新"据此匹配对应机型的 `*-Update.img`。
 
 ### 1.1 一代机（8 款，`.img` U 盘刷机，3 个镜像组）
 
@@ -39,13 +39,13 @@
 - "独立播放机"（`playerBoards`：SC5000/5000M/6000/6000M）没有通道推子：4 碟布局只对它们开放。Echo Out（Upfader Echo Out）按最新定稿对它们**也生效**——暂停切歌时释放 2.2 秒回声尾音（旧版本曾对独立播放机隐藏该开关，以发布版为准）。
 - 官方底包 5.3.0（打包用）；原厂 4.3.x、5.0.x 都能直接刷。
 
-### 1.2 二代机（8 款，`/data` 数据包 `Data-Bundle.tar.gz`，Beta）
+### 1.2 二代机（8 款，一键解锁后统一 `*-Update.img`，#119 / #215）
 
-二代机没有硬件 eFuse 熔断锁死，原厂升级程序（`az01-update` / `az0x-splash`）在写入前用软件校验 `AZ0x` 固件签名（`denon-1` / `rane-1` 公钥）；原厂状态下刷入改过的 `.img` 或一代机的 `.img` 会在 `Verifying` 阶段直接被软件拒签退回，不会写入闪存、不会变砖。EngineX 首次安装在 `<DATA>`，不动系统分区，后续版本可直接在屏幕在线 OTA 升级。**首次安装请用对应二代型号的数据包或 EngineX-Installer。**
+二代机没有硬件 eFuse 熔断锁死，原厂升级程序（`az01-update` / `az0x-splash`）在写入前用软件校验 `AZ0x` 固件签名（`denon-1` / `rane-1` 公钥）；原厂未解锁状态下直接刷入改过的 `.img` 或一代机的 `.img` 会在 `Verifying` 阶段直接被软件拒签退回，不会写入闪存、不会变砖。EngineX 现为全系 8 款二代机统一提供 `<前缀>-<版本>-EngineX-OS-<品牌型号>-Update.img`（128 字节 `ENGINEX_DATA_BUNDLE_IMG_V1` SHA-256 头部 + `<DATA>` 升级包；`5.3.0.4`/`5.3.0.5` Release 中同时附带 `*-Data-Bundle.tar.gz` 供旧版 `5.3.0.2`/`5.3.0.3` 二代机屏幕一键 OTA 过渡），只写 `<DATA>`、不动只读系统分区。**首次安装请运行一次 `EngineX-Installer`（自动执行 `[1/2]` 一键解锁 `.img` 升级链 + `[2/2]` 刷入 `*-Update.img`），解锁后所有后续版本均可免电脑直接用 U 盘或屏幕在线 OTA 刷入对应 `*-Update.img`。**
 
-| 机型 | 前缀 | 板号 / compatible | Engine 架构 | 安装方式 |
+| 机型 | 前缀 | 板号 / compatible | Engine 架构 | 安装与升级方式 |
 |---|---|---|---|---|
-| Denon DJ SC LIVE 4 | `SCLIVE4` | JP21 / `inmusic,jp21` | armhf（基准 Engine） | EngineX-Installer（SSH 或 USB Fastboot）、手动 `install.sh`、host-install-fastboot |
+| Denon DJ SC LIVE 4 | `SCLIVE4` | JP21 / `inmusic,jp21` | armhf（基准 Engine） | 首次 `EngineX-Installer` 一键解锁刷入；后续 U 盘直刷或屏幕 OTA `*-Update.img` |
 | Denon DJ SC LIVE 2 | `SCLIVE2` | JP20 | armhf | 同上 |
 | Denon DJ PRIME 4+ | `PRIME4PLUS` | JC11S | armhf | 同上 |
 | Denon DJ PRIME GO+ | `PRIMEGOPLUS` | JP11S | armhf | 同上 |
@@ -54,14 +54,14 @@
 | Denon DJ PRIME 4 G2 | `PRIME4G2` | JP24 | **aarch64**（AZ04，64 位 Engine） | 同上 |
 | Rane SYSTEM ONE | `SYSTEMONE` | RMZ2 | **aarch64**（AZ04） | 同上 |
 
-- 前置条件：先升到官方 Engine OS 5.3.0。首次装好后，后续版本在碟机屏幕 设置 → 关于 / 更新 → 更新 一键完成（下载 `Data-Bundle`、校验 `SHA256SUMS`、替换文件、重启服务，#86）。
+- 前置条件：先升到官方 Engine OS 5.3.0。首次经 `EngineX-Installer` 解锁装好后，后续版本既可把对应 `*-Update.img` 拷入 FAT32/exFAT U 盘插机直刷，也可在碟机屏幕 设置 → 关于 / 更新 → 更新 一键完成（下载 `*-Update.img`、校验 128 字节头 SHA-256 与包内 `SHA256SUMS`、更新 `<DATA>` 并重启服务，#119 / #215）。
 - 卸载：`sh <DATA>/bundle/uninstall.sh && reboot`。
 - **AZ04（PRIME 4 G2 / SYSTEM ONE）能力**（`build-data-bundle.py` 的 `AZ04_NOTE`，README 同，#149）：UI 包、流媒体网关（Deezer、SoundCloud、Beatport）和各服务之外，已带 16 处 Engine 补丁（含原厂 Apple Music 解锁）、14 处 DSP 防护、0dB 软限幅、自动增益、Echo Out、SQLite 调优和 64 位 `OfflineAnalyzer` 的 `.perf` 直注；4 碟解锁仅限单机播放器；Stems 保持官方原样；沙箱里没看到实际界面（需要 OP-TEE），待实机核实。
 - 6 款 armhf 二代机共用 SC LIVE 4 的 Engine 构建（同 BuildID），功能面与一代机基本一致，但没有实机验证（README 明说）。
 
-### 1.3 EngineX-Installer（`cmd/enginex-installer`，#88/#89）
+### 1.3 EngineX-Installer（`cmd/enginex-installer`，#88/#89/#215）
 
-一键自动发现安装，平台包：Windows x64、macOS arm64、macOS x64、Linux x64。两种模式：A 碟机在局域网且 SSH 开放（经 StageLinQ UDP 51337 或 EngineX Web 界面发现）→ 通过 SSH 推数据包；B 碟机在 Fastboot（USB）→ 生成 `/data` 镜像并刷写（会清空 `/data`，需 `--userdata-backup` 才保留）。一代机的 rootfs 刷写是实验功能。
+一键自动发现、解锁并刷入 `*-Update.img`，平台包：Windows x64、macOS arm64、macOS x64、Linux x64。三种模式：A 碟机在局域网且 SSH 开放（经 StageLinQ UDP 51337、EAAS 或 EngineX Web 界面发现）→ 校验 `*-Update.img` 128 字节头 SHA-256 后通过 SSH 解锁并更新 `<DATA>`（保留全部音乐与曲库）；B 碟机在 Fastboot（USB）→ 生成含 `gen2-unlocked` 的 `/data` 镜像并刷写（默认新建会清空内置 `/data`，传入 `--userdata-backup` 可保留）；C 无 Fastboot 的 AZ04 机型在 `1cc5:2027` Firmware Update Mode → 生成 64 MiB `/data` 镜像通过 USB 刷入。一代机的 rootfs 刷写是实验功能。
 
 ## 2. 碟机屏幕上的开关入口
 
@@ -127,7 +127,7 @@
 ### 2.6 设置 → 关于 / 更新
 
 - 版本行：`EngineX OS <版本> (github.com/<仓库>)`，下面两行 **Web Console `http://<IP>:8080`** 和 **Access Code `<访问码>`**（#79）。
-- 更新页：模型改成 GitHub Release；"有新版本：EngineX OS x.y.z"、"已是最新"、"无法连接 GitHub"、"未找到发布版本"；点更新弹确认，一代机拉起原厂刷机进度条，二代机走 Data-Bundle。仍保留原厂的 USB/SD 扫描（固件更新模式）。
+- 更新页：模型改成 GitHub Release；"有新版本：EngineX OS x.y.z"、"已是最新"、"无法连接 GitHub"、"未找到发布版本"；点更新弹确认，一代机与已解锁二代机统一匹配各自型号的 `*-Update.img` 在线升级，并保留原厂的 USB/SD 扫描（固件更新模式）。
 - 原厂条目被改：`Send Anonymous Usage Statistics` 切换不再触发 Engine 重启（`Analytics.qml` 补丁）；原厂"有新固件"弹窗被抑制；`Sync Time` 在任一碟播放时禁用（RA002，避免调时钟扰动音频）。
 
 ### 2.7 控制中心磁贴
@@ -248,7 +248,7 @@
 | 登录中继 | `enginex-relay`（可选自建）：让手机走移动数据登录，Deezer 网页内登录，Stems 公网入口 |
 | 直播推流 | Shoutcast / Icecast |
 | 曲库维护 | `dbhealer` 修复 PerformanceData、历史记录；`enginedb` 重定位、智能匹配（Camelot 兼容调性）、`analyzer` 纯 Go 分析 BPM / 拍线 / 调性 / RGB 波形 |
-| 在线升级 | 一代机下载 `.img`，校验 AZ01 头尾，调用原厂 `az01-update --net`；二代机下载 `Data-Bundle` 并就地替换，64 MiB 下载上限、128 MiB 解包上限、只接受普通文件 |
+| 在线升级 | 一代机下载 `*-Update.img`，校验 AZ01 头尾，调用原厂 `az01-update --net`；二代机下载带 128 字节 `ENGINEX_DATA_BUNDLE_IMG_V1` 头的 `*-Update.img`（未挂载预加载更新器链路或无 `planck-remote-screen` 的 AZ04 机型由 Go 校验载荷 SHA-256 与 `SHA256SUMS` 后就地替换 `<DATA>`，64 MiB 下载上限、128 MiB 解包上限、只接受普通文件） |
 | 发版门禁 | `release-gate.sh`（上一版在线升级 → 新版开机全功能验收），不属于运行时功能 |
 
 APFS 备注：README 写"Mac 的 APFS 插上直读"。仓库里 `kernel-modules/` 会构建 `apfs.ko`，但 `rootfs-overlay/etc/modules-load.d/sc5000-filesystems.conf` 只列了 `hfsplus` 和 `overlay`；`docs/RB-BRIDGE.md` 也说"APFS 驱动在本工具范围外"。**APFS 是否真能直读，待实机核实**。

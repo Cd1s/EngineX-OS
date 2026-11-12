@@ -215,12 +215,16 @@ if [ -x "$bin_dir/engine-ui-guard" ] && [ -f /usr/Engine/Scripts/engine ]; then
     script_stage=$(mktemp /run/sc5000-engine-script.XXXXXX)
     sed -E \
         -e "s|^([[:space:]]*)/usr/Engine/Engine([[:space:]])|\\1$bin_dir/engine-ui-guard launch /usr/Engine/Engine\\2|" \
-        -e "s|^([[:space:]]*)/usr/sbin/az01-update([[:space:]].*)?\$|\\1env LD_PRELOAD=\"$lib_hook\" /usr/sbin/az01-update\\2|" \
-        -e "s|^([[:space:]]*)az01-update([[:space:]]+--erase-data([[:space:]].*)?)\$|\\1env LD_PRELOAD=\"$lib_hook\" /usr/sbin/az01-update\\2|" \
-        -e "s|^([[:space:]]*)/usr/bin/planck-remote-screen([[:space:]].*)?\$|\\1env LD_PRELOAD=\"$lib_hook\" /usr/bin/planck-remote-screen\\2|" \
+        -e "s|^([[:space:]]*(exec[[:space:]]+)?)/usr/sbin/az01-update([[:space:]].*)?\$|\\1env LD_PRELOAD=\"$lib_hook\" /usr/sbin/az01-update\\3|" \
+        -e "s|^([[:space:]]*(exec[[:space:]]+)?)az01-update([[:space:]]+--erase-data([[:space:]].*)?)\$|\\1env LD_PRELOAD=\"$lib_hook\" /usr/sbin/az01-update\\3|" \
+        -e "s|^([[:space:]]*(exec[[:space:]]+)?)/usr/bin/planck-remote-screen([[:space:]].*)?\$|\\1env LD_PRELOAD=\"$lib_hook\" /usr/bin/planck-remote-screen\\3|" \
         /usr/Engine/Scripts/engine > "$script_stage"
     chmod 755 "$script_stage"
     if grep -Fq "$bin_dir/engine-ui-guard launch /usr/Engine/Engine" "$script_stage"; then
+        if ! grep -Fq "LD_PRELOAD=\"$lib_hook\" /usr/sbin/az01-update" "$script_stage"; then
+            echo "boot-activate: warning: /usr/sbin/az01-update preload hook missing in /usr/Engine/Scripts/engine" >&2
+            ! command -v logger >/dev/null 2>&1 || logger -p user.warning -t enginex-boot-activate "az01-update preload hook missing in /usr/Engine/Scripts/engine" 2>/dev/null || :
+        fi
         if cmp -s "$script_stage" /usr/Engine/Scripts/engine; then
             rm -f "$script_stage"
         else

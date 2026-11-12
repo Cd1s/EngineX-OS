@@ -13,7 +13,7 @@
 | 文件 | 要改的地方 |
 | --- | --- |
 | `rootfs-overlay/etc/sc5000/version.txt` | 整个文件内容就是 `<VERSION>` |
-| `README.md`、`README.zh-CN.md`、`README.zh-TW.md` | 第 3 行 hero 图的 `alt="EngineX OS <VERSION>"`；简介里的 `**EngineX OS <VERSION>**`；性能对比表表头里的 `` `EngineX OS <VERSION>` ``；本版本新特性与使用教程章节；「如何安装与升级」里 4 个平台 `EngineX-Installer-<VERSION>`、8 款一代机 `*-Update.img` 与 8 款二代机 `*-Update.img` 的文件名和下载链接（共 20 条，三份 README 同步更新；`*-Data-Bundle.tar.gz` 已从公开发布退役，#215） |
+| `README.md`、`README.zh-CN.md`、`README.zh-TW.md` | 第 3 行 hero 图的 `alt="EngineX OS <VERSION>"`；简介里的 `**EngineX OS <VERSION>**`；性能对比表表头里的 `` `EngineX OS <VERSION>` ``；本版本新特性与使用教程章节；「如何安装与升级」里 4 个平台 `EngineX-Installer-<VERSION>`、8 款一代机 `*-Update.img` 与 8 款二代机主下载 `*-Update.img` 的文件名和下载链接（共 20 条主直链，三份 README 同步更新；`5.3.0.4` / `5.3.0.5` Release 资产中同时保留 8 个 `*-Data-Bundle.tar.gz` 供旧版二代机屏幕 OTA 平滑过渡，`5.3.0.6+` 起彻底退役，#215） |
 | `docs/index.html`、`docs/site/{content.js,app.js,style.css}` | 官网 `https://enginexdj.com`（独立全屏首页 `Home` + 三栏使用文档 `Docs`）：更新三语 `version: "<VERSION>"`、新功能章节与刷机/使用教程、全部 20 条下载链接（4 个安装器 + 16 个 `*-Update.img`：8 款一代 + 8 款二代），并递增 `docs/index.html`（及 `docs/site/content.js` 如有）里的静态资源缓存参数 `?v=N` |
 | `docs/site/assets/shots/*.png`、`docs/assets/screenshots/{zh-CN,zh-TW,en}/*.png` | 凡涉及界面、菜单、控制中心磁贴或版本号变更，必须在编译机上基于 `<VERSION>` 底包通过 `QT_QPA_PLATFORM=eglfs`（`/dev/dri/card0` `virtio-gpu` + Mesa OpenGL，避免 `offscreen` 下 `ColoredImage` 图标空白）重新渲染三语实测截图并同步替换官网与 README 截图（实机硬件专属截图如 `07-bluetooth-audio.png` 保持不变） |
 | `docs/assets/hero-banner*.svg` | 三张 banner 现在不写版本号。大版本换视觉或 banner 里出现版本号时才改，三语一起改 |
@@ -62,7 +62,12 @@ JC11S fixture 是独立的官方 PRIME4PLUS rootfs，不能用 SC LIVE 4 或 PRI
 
 涉及 Factory Reset、`az01-update --erase-data`、空白 `/data` 首次启动的改动，只在编译机的 `unshare -m` + chroot 沙箱里用解包出的 rootfs 测，**绝不在实机触发**。
 
-## 3. 提交与构建（16 款机型 + 4 平台一键安装器，共 20 个产物）
+## 3. 提交与构建（16 款机型 `*-Update.img` + 8 款二代兼容 `*-Data-Bundle.tar.gz` + 4 平台一键安装器，共 28 个产物）
+
+> **二代机分阶段统一迁移规则（#215，维护者确认）**：
+> - **`5.3.0.4`（当前版本）**：同时发布 8 款二代 `*-Update.img` 与 8 款二代 `*-Data-Bundle.tar.gz`（共 **28 个产物**：16 个 `*-Update.img` + 8 个 `*-Data-Bundle.tar.gz` + 4 个 `EngineX-Installer`，连同 `SHA256SUMS.txt` 共上传 29 个文件）。`5.3.0.4` 的 `pkg/webui/update.go` 同时识别两者（优先 `-Update.img`，回退 `-Data-Bundle.tar.gz`），`EngineX-Installer` 默认执行 `[1/2] 一键解锁` + `[2/2] 刷入 *-Update.img`（仍兼容 `.tar.gz`），而仍运行 `5.3.0.2` / 未解锁 `5.3.0.3` 的二代机也能直接通过 Release 中的 `*-Data-Bundle.tar.gz` 在屏幕上无感一键 OTA 升级并自动获得 `.img` 解锁。
+> - **`5.3.0.5`（下一版过渡桥接版本）**：Release 资产最后一次同时保留 `*-Data-Bundle.tar.gz`（供 `5.3.0.2` / `5.3.0.3` / 早期 `5.3.0.4` 二代机一键 OTA 升到 `5.3.0.5`），但 **`5.3.0.5` 自身的 `pkg/webui/update.go` 将切换为仅检测 `*-Update.img`**。
+> - **`5.3.0.6+`（最终完全统一状态）**：从 `build-release.sh` 与 GitHub Release 中彻底退役 `*-Data-Bundle.tar.gz`，全系 16 款机型在 U 盘、屏幕 OTA 与 `EngineX-Installer` 中统一仅使用 `*-Update.img`（届时恢复为 20 个产物）。
 
 1. 改动先提交并推送到 `origin/main`，构建必须对应一个已推送的提交。
 2. 用干净目录构建（`remote-build` 同步不会删除远端已删除的文件，旧目录会带上残留）：
@@ -73,16 +78,14 @@ REMOTE_BUILD_HOST=<build host> remote-build --name sc5000-release-<短说明> --
    OUT=/var/tmp/sc5000-release-<VERSION>
    rm -rf "$OUT"
    sh tools/az01-packer/build-release.sh <VERSION> /root/build/sc5000-lab/fw-5.3.0 none /root/build/sc5000-lab/sbin/fsck.hfsplus "$OUT"
-   sh tools/az01-packer/build-installer.sh <VERSION> "$OUT"
-   # Unified 20 public release artifacts (#215): all 16 *-Update.img (8 Gen-1 + 8 Gen-2) + 4 EngineX-Installer-* (no *-Data-Bundle.tar.gz uploaded)
-   (cd "$OUT" && rm -f *-Data-Bundle.tar.gz && sha256sum *-Update.img EngineX-Installer-<VERSION>-* > SHA256SUMS.txt)'
+   sh tools/az01-packer/build-installer.sh <VERSION> "$OUT"'
 ```
 
 `build-release.sh` 抽 qrc 时用 `qemu-arm -L <rootfs>` 跑 Engine 的静态初始化，编译机装了不带 binfmt 的 `qemu-user`（`--no-install-recommends`）。不要装 `qemu-user-binfmt`：注册了 `qemu-arm` 的 binfmt 会盖过原生执行，门禁会退回软模拟。
 
 第 3 个参数在公开发布时**必须是 `none`**：公开镜像不能内置任何人的 SSH 公钥（#46）。只有维护者自用的私有镜像才传公钥文件，且私有镜像不能上传到 Release。
 
-输出目录必须不存在、且不在任何 git 工作区里。产出 **8 个一代 `*-Update.img`、8 个二代 `*-Update.img`、4 个平台 `EngineX-Installer-<VERSION>-*` 以及汇总 20 个产物的 `SHA256SUMS.txt`**（共 21 个文件；`*-Data-Bundle.tar.gz` 不再上传到公开 Release，#215）。
+输出目录必须不存在、且不在任何 git 工作区里。`5.3.0.4` / `5.3.0.5` 产出 **8 个一代 `*-Update.img`、8 个二代 `*-Update.img`、8 个二代兼容 `*-Data-Bundle.tar.gz`、4 个平台 `EngineX-Installer-<VERSION>-*` 以及汇总全部 28 个产物的 `SHA256SUMS.txt`**（共 29 个上传文件）。
 
 ## 4. 校验镜像
 
@@ -134,20 +137,20 @@ bash tools/az01-packer/release-gate.sh \
 
 ## 5. Tag 与 GitHub Release
 
-在编译机上直接上传全部 21 个文件（那边 `gh` 已登录 `Cd1s`，不用把 1.3 GB 拉回本机）：
+在编译机上直接上传全部 29 个文件（28 个产物 + `SHA256SUMS.txt`；那边 `gh` 已登录 `Cd1s`，不用把镜像拉回本机）：
 
 ```sh
-# 资产清单以 SHA256SUMS.txt 为准（20 个：16 个 *-Update.img + 4 个 EngineX-Installer-*，不含已退役的 *-Data-Bundle.tar.gz）
+# 资产清单以 SHA256SUMS.txt 为准（5.3.0.4 / 5.3.0.5 共 28 个：16 个 *-Update.img + 8 个 *-Data-Bundle.tar.gz + 4 个 EngineX-Installer-*）
 # 新版本
 gh release create v<VERSION> --repo Cd1s/EngineX-OS --title "EngineX OS <VERSION>" \
   --notes-file notes.md --target <提交> --latest \
   $(awk '{print $2}' SHA256SUMS.txt) SHA256SUMS.txt
-# 同一版本修复重发
+# 同一版本修复重发（注意：--clobber 只覆盖同名文件；5.3.0.6+ 退役 *-Data-Bundle.tar.gz 时若覆盖旧同版本需用 gh release delete-asset 清理残留资产）
 gh release upload v<VERSION> --repo Cd1s/EngineX-OS \
   $(awk '{print $2}' SHA256SUMS.txt) SHA256SUMS.txt --clobber
 ```
 
-- Release Notes 必须包含完整的 **20 个产物 SHA-256 对照表**（8 款一代 `*-Update.img`、8 款二代 `*-Update.img`、4 平台 `EngineX-Installer`），每次重发都要换成新值。
+- Release Notes 必须包含完整的 **28 个产物 SHA-256 对照表**（8 款一代 `*-Update.img`、8 款二代 `*-Update.img`、8 款二代过渡兼容 `*-Data-Bundle.tar.gz`、4 平台 `EngineX-Installer`；`5.3.0.6+` 退役 `.tar.gz` 后为 20 个），每次重发都要换成新值。
 - tag 指向记录这次发布的提交：`git tag -f v<VERSION> <提交> && git push -f origin v<VERSION>`（同一版本重发时移动 tag）。
 - 新版本要设为 `--latest`，README 与官网 `enginexdj.com` 的 `releases/latest/download/...` 链接才会指向它。
 
@@ -157,9 +160,9 @@ gh release upload v<VERSION> --repo Cd1s/EngineX-OS \
 gh release view v<VERSION> --repo Cd1s/EngineX-OS --json assets -q '.assets[] | "\(.digest) \(.name)"'
 ```
 
-- 每个资产的 digest 与 `SHA256SUMS.txt`、Release Notes 表格、`docs/ISSUE-FIXES-<VERSION>.md` 完全一致（共 21 个资产）。
+- 每个资产的 digest 与 `SHA256SUMS.txt`、Release Notes 表格、`docs/ISSUE-FIXES-<VERSION>.md` 完全一致（`5.3.0.4` / `5.3.0.5` 共 29 个资产）。
 - 新版本时，抽查 README 与官网 `enginexdj.com` 里的下载链接：`curl -sIL <链接> | grep -i "^HTTP"` 最终是 200。
-- 在 `docs/ISSUE-FIXES-<VERSION>.md` 记录：日期、范围、原因、验证、构建提交、全部 20 个产物 sha256、门禁结果、回滚点（上一次构建的提交）、实机影响。
+- 在 `docs/ISSUE-FIXES-<VERSION>.md` 记录：日期、范围、原因、验证、构建提交、全部 28 个产物 sha256、门禁结果、回滚点（上一次构建的提交）、实机影响。
 - 在本次发布解决或包含的所有关联 GitHub Issues 下逐条留言告知 `v<VERSION>` 已发布、修复点摘要与下载/升级方式。
 
 ## 7. 隐私与版权

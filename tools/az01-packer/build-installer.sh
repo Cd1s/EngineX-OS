@@ -62,11 +62,10 @@ EOF
 done
 (
 	cd "$OUT"
-	set -- *-Update.img
-	if [ -e "$1" ]; then
-		sha256sum *-Update.img EngineX-Installer-"$V"-* > SHA256SUMS.txt
-	else
-		sha256sum EngineX-Installer-"$V"-* > SHA256SUMS.txt
-	fi
+	set --
+	for f in *-Update.img *-Data-Bundle.tar.gz EngineX-Installer-"$V"-*; do
+		[ -e "$f" ] && set -- "$@" "$f"
+	done
+	sha256sum "$@" > SHA256SUMS.txt
 )
 ls -l "$OUT"/EngineX-Installer-"$V"-*

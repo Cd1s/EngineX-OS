@@ -761,7 +761,7 @@ func downloadLimit(ctx context.Context, o *options, url, wantSHA, dest string, l
 	}
 	if got := hex.EncodeToString(h.Sum(nil)); wantSHA == "" {
 		o.say("Release 没有提供 SHA-256，只校验包内 SHA256SUMS。", "The release gives no SHA-256; only the bundle's own SHA256SUMS is checked.")
-	} else if got != wantSHA {
+	} else if !strings.EqualFold(got, wantSHA) {
 		return fmt.Errorf("download SHA-256 mismatch: got %s, release says %s", got, wantSHA)
 	}
 	return os.Rename(part, dest)
@@ -1679,9 +1679,11 @@ func modeB(ctx context.Context, o *options) error {
 		return fmt.Errorf("fastboot reboot: %w\n%s", err, out)
 	}
 	if boardCode(board) == "jc11s" {
-		o.say("USB 写入完成；重启后的激活尚未验证。请在 Settings → About 确认显示 EngineX OS，并检查 EngineX 页面。若仍为原厂 5.3.0，请保留日志并报告 #169；不要重复清空 data 或恢复出厂。",
-			"USB write complete; activation after reboot is not verified. Confirm EngineX OS in Settings → About and open the EngineX page. If it still shows stock 5.3.0, keep this log and report #169; do not repeatedly erase data or factory-reset.")
-		sayGen2Unlocked(o, b, m.Prefix)
+		imgPattern := fmt.Sprintf("%s-%s-EngineX-OS-*-Update.img", m.Prefix, b.Version)
+		o.say(
+			fmt.Sprintf("USB 写入完成（已写入 gen2-unlocked 解锁标记）；重启后的激活尚未验证。请在 Settings → About 确认显示 EngineX OS 并检查 EngineX 页面：激活成功后，今后升级无需电脑，可直接通过 U 盘或 Settings -> About / Update 刷入 %s。若仍为原厂 5.3.0，请保留日志并报告 #169；不要重复清空 data 或恢复出厂。", imgPattern),
+			fmt.Sprintf("USB write complete; activation after reboot is not verified. Confirm EngineX OS in Settings → About and open the EngineX page: once active, future updates can flash %s directly from a USB drive or on-deck Settings -> About / Update without a computer. If it still shows stock 5.3.0, keep this log and report #169; do not repeatedly erase data or factory-reset.", imgPattern),
+		)
 		return nil
 	}
 	o.say(fmt.Sprintf("完成：EngineX OS %s 已刷入 %s，碟机正在重启，首次启动后自动激活。", b.Version, m.Name),
