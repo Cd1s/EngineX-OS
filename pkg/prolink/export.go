@@ -159,7 +159,8 @@ func (r *exportRun) beatLoop() {
 	}
 }
 
-// SetDeck updates the status packets. Losing master ends a handoff we granted.
+// SetDeck updates the status packets. Losing master ends a handoff we granted,
+// and the next deck to take master claims it again.
 func (e *Exporter) SetDeck(d ExportDeck) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -168,7 +169,7 @@ func (e *Exporter) SetDeck(d ExportDeck) {
 		e.run.mu.Lock()
 		e.run.deck = d
 		if !d.Master {
-			e.run.handoff = 0
+			e.run.handoff, e.run.yielded = 0, false
 		}
 		e.run.mu.Unlock()
 	}
@@ -198,15 +199,29 @@ func (e *Exporter) RequestMaster(ip net.IP) error {
 	if r.player == 0 {
 		return errors.New("prolink: no player number yet")
 	}
+	// The master answers (0x27) and names us in its status; until then, for a
+	// second at most, our status does not claim master: two masters at once are
+	// what a handoff is there to avoid. No answer for half a second: ask again
+	// (heardLocked), the request is one UDP packet.
+	now := time.Now()
+	r.yielded, r.asked, r.claimAt, r.askUntil = false, now, now.Add(masterWait), now.Add(masterAsk)
 	r.sendLocked(r.beatConn(), r.handoffPacket(0x26, 0x28), &net.UDPAddr{IP: ip, Port: 50001})
 	return nil
 }
 
-// handoffPacket is a master handoff request (0x26) or response (0x27, yes).
+const (
+	masterWait  = time.Second            // our status claims master this long after asking for it at the latest
+	masterAsk   = 3 * time.Second        // how long an unanswered request is repeated
+	masterAgain = 500 * time.Millisecond // between two requests
+)
+
+// handoffPacket is a master handoff request (0x26) or response (0x27, yes), as
+// CDJ-2000nexus players send them (dysentery's Sync-Master capture): the
+// request's length field is 4, the response's 8.
 func (r *exportRun) handoffPacket(kind byte, length int) []byte {
 	b := linkPacket(kind, length, 11)
 	b[0x21], b[0x27] = r.player, r.player
-	binary.BigEndian.PutUint16(b[0x22:], 8) // as Beat Link sends both
+	binary.BigEndian.PutUint16(b[0x22:], uint16(length-0x24))
 	if kind == 0x27 {
 		b[0x2b] = 1
 	}
@@ -319,33 +334,41 @@ type exportRun struct {
 	beat              *net.UDPConn // nil without Observe or when the port is taken
 	deck              ExportDeck
 	handoff           byte // the player we agreed to hand master to
-	ip                net.IP
-	mac               net.HardwareAddr
-	announce          *net.UDPAddr
-	media             *net.UDPAddr
-	lib               *rekordbox.Library
-	pdb               string
-	pdbInfo           os.FileInfo
-	capacity, free    uint64
-	mu                sync.Mutex
-	peers             map[string]exportPeer
-	player            byte
-	probed            bool
-	mounted           bool
-	first             bool
-	statusCounter     uint32
-	firmware          string    // the newest firmware a player on the link reported, "" before any
-	announced         time.Time // since when the status loop has a player number
-	floodUntil        time.Time
-	observe           func(Device)
-	observer          *Discovery
-	updates           chan Device
-	cancel            context.CancelFunc
-	mediaCache        *MediaCache
-	network           *net.IPNet
-	done              chan struct{}
-	wake              chan struct{}
-	wg                sync.WaitGroup
+	// Tempo master on the link (#217). yielded: that player took it, so our
+	// status no longer claims it though Engine's own deck still leads our decks.
+	// asked, claimAt, askUntil: see RequestMaster. syncN is our sync counter
+	// (status bytes 84-87), syncMax the largest another player reported.
+	yielded                  bool
+	wasMaster                bool
+	asked, claimAt, askUntil time.Time
+	syncN, syncMax           uint32
+	ip                       net.IP
+	mac                      net.HardwareAddr
+	announce                 *net.UDPAddr
+	media                    *net.UDPAddr
+	lib                      *rekordbox.Library
+	pdb                      string
+	pdbInfo                  os.FileInfo
+	capacity, free           uint64
+	mu                       sync.Mutex
+	peers                    map[string]exportPeer
+	player                   byte
+	probed                   bool
+	mounted                  bool
+	first                    bool
+	statusCounter            uint32
+	firmware                 string    // the newest firmware a player on the link reported, "" before any
+	announced                time.Time // since when the status loop has a player number
+	floodUntil               time.Time
+	observe                  func(Device)
+	observer                 *Discovery
+	updates                  chan Device
+	cancel                   context.CancelFunc
+	mediaCache               *MediaCache
+	network                  *net.IPNet
+	done                     chan struct{}
+	wake                     chan struct{}
+	wg                       sync.WaitGroup
 }
 
 // MountedExports does no polling and accepts read-only mounts too. Exporting
@@ -792,16 +815,31 @@ func (r *exportRun) heardLocked(ip net.IP, b []byte) {
 	if len(b) < 0x80 || b[10] != 0x0a {
 		return
 	}
-	fw := b[0x7c:0x80]
-	for i, c := range fw {
-		if digit := c >= '0' && c <= '9'; i == 1 && c != '.' || i != 1 && !digit {
-			return
-		}
-	}
-	if string(fw) > r.firmware {
+	if fw := b[0x7c:0x80]; fw[1] == '.' && digit(fw[0]) && digit(fw[2]) && digit(fw[3]) && string(fw) > r.firmware {
 		r.firmware = string(fw)
 	}
+	if len(b) < 0xa0 {
+		return
+	}
+	r.syncMax = max(r.syncMax, binary.BigEndian.Uint32(b[0x84:]))
+	if b[0x89]&0x20 == 0 || r.player == 0 {
+		return
+	}
+	// Another player's status says it is tempo master.
+	switch number, to := b[0x21], b[0x9f]; {
+	case to == r.player:
+		r.yielded, r.claimAt = false, time.Time{} // it hands master to us: claim it now
+	case r.handoff != 0 && number == r.handoff:
+		r.yielded, r.handoff = true, 0 // the player we agreed to has taken it
+	case r.deck.Master && !r.yielded && r.handoff == 0 && !bytes.HasPrefix(b[11:], []byte("EngineX")):
+		if now := time.Now(); now.Before(r.askUntil) && now.Sub(r.asked) >= masterAgain {
+			r.asked = now
+			r.sendLocked(r.beatConn(), r.handoffPacket(0x26, 0x28), &net.UDPAddr{IP: ip, Port: 50001})
+		}
+	}
 }
+
+func digit(c byte) bool { return c >= '0' && c <= '9' }
 
 // receiveBeats passes CDJ-3000 absolute position packets straight to Observe:
 // at 30 ms they filled the status queue and status packets (play/pause) were
@@ -813,6 +851,14 @@ func (r *exportRun) receiveBeats() {
 		n, addr, err := r.beat.ReadFromUDP(b)
 		if err != nil {
 			return
+		}
+		if n >= 0x2c && string(b[:10]) == magic && b[10] == 0x27 && b[0x2b] == 1 && r.network.Contains(addr.IP) {
+			r.mu.Lock()
+			if time.Now().Before(r.askUntil) { // an answer to our request
+				r.yielded, r.claimAt = false, time.Time{} // the master agreed: claim it now
+			}
+			r.mu.Unlock()
+			continue
 		}
 		if n >= 0x28 && string(b[:10]) == magic && b[10] == 0x26 && r.network.Contains(addr.IP) {
 			// Another player asks for master: agree, and name it in our status
@@ -981,12 +1027,27 @@ func (r *exportRun) statusPacket() []byte {
 	}
 	binary.BigEndian.PutUint16(b[0x92:], 0xffff)
 	binary.BigEndian.PutUint32(b[0xa0:], 0xffffffff)
+	// Tempo master on the link: Engine's deck leads, we have not handed master to
+	// a player, and one we asked for it has had its time to answer.
+	master := r.deck.Master && !r.yielded && !time.Now().Before(r.claimAt)
+	if r.wasMaster && !master {
+		r.syncN = max(r.syncN, r.syncMax) + 1 // as a player does when it gives master up
+	}
+	if r.wasMaster = master; !master {
+		r.handoff = 0 // nothing to hand over
+	}
+	binary.BigEndian.PutUint32(b[0x84:], max(r.syncN, 1))
 	if d := r.deck; d.Master || d.Playing {
+		// The play mode bytes (P1, P2, P3, the activity flag) as players and Beat
+		// Link's virtual CDJ send them; ours said "no track loaded" next to the play flag.
+		b[0x7b], b[0x9d] = 5, 1
 		if d.Playing {
 			b[0x89] |= 0x40
+			b[0x27], b[0x7b], b[0x8b], b[0x9d] = 1, 3, 0x7a, 9
 		}
-		if d.Master {
+		if master {
 			b[0x89] |= 0x20
+			b[0x9e] = 1 // Mm: a master's status has it next to the flag (Sync-Master capture)
 		}
 		if d.BPM > 0 {
 			binary.BigEndian.PutUint16(b[0x90:], 0x8000)
@@ -997,7 +1058,7 @@ func (r *exportRun) statusPacket() []byte {
 			binary.BigEndian.PutUint32(b[0x98:], uint32(math.Round(0x100000*f)))
 		}
 	}
-	if r.handoff != 0 {
+	if r.handoff != 0 && master {
 		b[0x9f] = r.handoff
 	}
 	if beat, _, ok := r.deck.beatAt(time.Now()); ok {
