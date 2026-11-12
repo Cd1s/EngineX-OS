@@ -103,7 +103,13 @@ func PruneHistoryDB(path string, maxSessions int) error {
 		if _, err = tx.Exec("CREATE TEMP TABLE guardian_keep_history(id INTEGER PRIMARY KEY)"); err != nil {
 			return err
 		}
-		if _, err = tx.Exec("INSERT INTO guardian_keep_history SELECT "+id+" FROM Historylist ORDER BY "+ordering+" LIMIT ?", maxSessions); err != nil {
+		// The newest visible sessions: one the DJ deleted on the deck (isDeleted)
+		// must not take a visible one's place (BH-GC1-13); deleted ones go.
+		visible := ""
+		if softDeleted := selectColumn(sessions, "isDeleted"); softDeleted != "" {
+			visible = " WHERE COALESCE(" + softDeleted + ",0)=0"
+		}
+		if _, err = tx.Exec("INSERT INTO guardian_keep_history SELECT "+id+" FROM Historylist"+visible+" ORDER BY "+ordering+" LIMIT ?", maxSessions); err != nil {
 			return err
 		}
 		execDelete := func(q string) error {
