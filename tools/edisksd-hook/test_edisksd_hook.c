@@ -746,12 +746,30 @@ static void test_heal_marker_survives_another_port(const char *root) {
     for(int i=0;i<2;i++)assert(!umount2(mnt[i],UMOUNT_NOFOLLOW));
     puts("REAL PRIVATE NAMESPACE BH2-A1-2: the too-large-to-heal record of a stick is found again under another device number, and not for another database: PASS");
 }
+// BH2-A1-6: the view's record keeps "Engine Library/<name>" in NAME_MAX bytes. One
+// entry with a longer (valid) name refused the HFS+ view of the whole stick.
+static void test_hfs_view_with_a_long_entry_name(const char *root) {
+    assert(!mount(NULL,"/",NULL,MS_REC|MS_PRIVATE,NULL));
+    char disk[PATH_MAX],target[PATH_MAX],p[PATH_MAX],longname[NAME_MAX+1];
+    memset(longname,'n',250);longname[250]=0;
+    join(disk,root,"long-name-hfs");join(p,disk,"Engine Library/Database2");assert(!make_dirs(p));
+    join(p,disk,"Engine Library/Database2/m.db");write_file(p,"engine dj export");
+    join(p,disk,"Engine Library/Music");assert(!make_dirs(p));join(p,disk,"Engine Library/Music/song.mp3");write_file(p,"audio");
+    char lib[PATH_MAX];join(lib,disk,"Engine Library");join(p,lib,longname);write_file(p,"pc file with a long name");
+    join(target,MEDIA_ROOT,"LONG-NAME-HFS");mount_ro(disk,target);
+    seeded_hint[0]=0;assert(!prepare_view(target,"uuid-long-name",deadline_from(now_ms())));
+    join(p,target,"Engine Library/Music/song.mp3");expect_file(p,"audio");
+    join(p,target,"Engine Library/Database2/m.db");expect_file(p,"engine dj export");
+    join(lib,target,"Engine Library");join(p,lib,longname);assert(access(p,F_OK)==-1&&errno==ENOENT);
+    struct libmnt_context c={.target=target};assert(!unmount_dispatch(&c,real_unmount));
+    puts("REAL PRIVATE NAMESPACE BH2-A1-6: an Engine Library entry whose name does not fit the view record is left out, the stick's view is up: PASS");
+}
 int main(int argc,char **argv) {
     char root[]="/tmp/sc5000-edisks-tests-XXXXXX";assert(mkdtemp(root));
     join(test_media,root,"media");join(test_library,root,"libraries");join(test_runtime,root,"runtime");
     join(test_legacy_library,root,"legacy-libraries");join(test_utab,root,"utab");assert(!make_dirs(test_utab));
     assert(!make_dirs(test_media));test_paths_and_copy(root);test_compat_symlink_root(root);test_time();test_slow_marker_follows_every_export_file(root);test_monitor_sees_plain_device_mount(root);
-    if(argc>1&&!strcmp(argv[1],"--mounts")){test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);test_library_is_walked_once(root);test_two_sticks_at_once(root);test_hfs_visible_mount_reuses_the_converted_library(root);test_private_mount_leaves_nothing_behind(root);test_hfs_view_copies_only_metadata(root);test_heal_before_visible(root);test_eject_while_another_stick_converts(root);test_eject_of_a_pulled_stick(root);test_heal_marker_survives_another_port(root);}
+    if(argc>1&&!strcmp(argv[1],"--mounts")){test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);test_library_is_walked_once(root);test_two_sticks_at_once(root);test_hfs_visible_mount_reuses_the_converted_library(root);test_private_mount_leaves_nothing_behind(root);test_hfs_view_copies_only_metadata(root);test_heal_before_visible(root);test_eject_while_another_stick_converts(root);test_eject_of_a_pulled_stick(root);test_heal_marker_survives_another_port(root);test_hfs_view_with_a_long_entry_name(root);}
     // Mount tests have removed all namespace mounts before deleting fixtures.
     int tmp=open("/tmp",O_RDONLY|O_DIRECTORY);assert(tmp>=0);remove_tree(tmp,strrchr(root,'/')+1);close(tmp);
     puts("edisksd-hook: all requested tests passed");return 0;

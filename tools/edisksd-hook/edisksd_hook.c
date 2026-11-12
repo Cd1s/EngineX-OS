@@ -542,7 +542,9 @@ static int bind_native(struct owned_view *v,const char *backing,const char *libr
         if(budget(deadline)||path_join(source,sizeof source,native,e->d_name)||lstat(source,&st)){rc=-1;break;}
         if(S_ISLNK(st.st_mode)||(!S_ISDIR(st.st_mode)&&!S_ISREG(st.st_mode))){errno=ELOOP;rc=-1;break;}
         if(S_ISDIR(st.st_mode)&&!strcmp(e->d_name,"Database2"))continue;
-        if(snprintf(name,sizeof name,NESTED "%s",e->d_name)>=(int)sizeof name){errno=ENAMETOOLONG;rc=-1;break;}
+        // The view's record keeps "Engine Library/<name>" in NAME_MAX bytes: an entry
+        // with a longer name is left out of the view, not the whole stick (BH2-A1-6).
+        if(snprintf(name,sizeof name,NESTED "%s",e->d_name)>=(int)sizeof name){note("name too long for the HFS view, left out:",e->d_name,ENAMETOOLONG);continue;}
         if(v->count==MAX_VIEW_ENTRIES){errno=E2BIG;rc=-1;break;}
         if(snprintf(dest,sizeof dest,"%s/view/%s",v->anchor,name)>=(int)sizeof dest){errno=ENAMETOOLONG;rc=-1;break;}
         if(stand_in(lib,e->d_name,S_ISDIR(st.st_mode))||bind_checked(source,dest,MS_BIND|MS_REC)){rc=-1;break;}
