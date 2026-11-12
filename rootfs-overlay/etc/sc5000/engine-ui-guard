@@ -9,6 +9,11 @@ guardian=${SC5000_ENGINE_GUARDIAN:-/usr/local/bin/engine-guardian}
 limit=${SC5000_BOOT_TIMEOUT:-180}
 window=${SC5000_BOOT_CRASH_WINDOW:-300}
 failures=${SC5000_BOOT_CRASH_LIMIT:-3}
+# Set by this boot's first `pre` (/run is empty at every boot). A stop without it is an instance
+# that never started under the guard: on second-generation decks the stock Engine every boot starts
+# with, which boot-activate restarts into the hooked one. Its clean stop must not wipe the previous
+# boot's crash and power-cut evidence before `pre` reads it (BH-F52-4).
+pre_mark=${SC5000_GUARD_PRE_MARK:-/run/sc5000-engine-guard.pre}
 case $limit in ''|*[!0-9]*|0) limit=180 ;; esac
 case $window in ''|*[!0-9]*|0) window=300 ;; esac
 case $failures in ''|*[!0-9]*|0) failures=3 ;; esac
@@ -161,6 +166,7 @@ watch)
     ;;
 pre)
     mkdir -p "$UI"
+    : > "$pre_mark" 2>/dev/null || :
     # Only a start that follows a crash (the stop hook left last-crash) counts towards
     # safe-mode; a clean start resets the streak, never a persistent fallback.
     # A boot-token still here means the last start never reached its healthy timer and
@@ -370,15 +376,17 @@ post)
     if [ ! -e "$UI/safe-mode" ] && [ ! -s "$UI/boot-token" ]; then begin_attempt; fi
     ;;
 stop)
-    rm -f "$UI/running-sentinel"
-    # systemd sets SERVICE_RESULT=success for a requested stop/restart; a crash
-    # (exit-code, signal, core-dump, timeout) keeps counting towards safe-mode.
-    if [ "${SERVICE_RESULT:-success}" = success ]; then
-        rm -f "$UI/boot-count" "$UI/boot-token" "$UI/boot-ready" "$UI/last-crash" "$UI/boot-failures" "$UI/boot-window"
-    else
-        mkdir -p "$UI"
-        [ -s "$UI/boot-count" ] || echo 1 > "$UI/boot-count"
-        : > "$UI/last-crash"
+    if [ -e "$pre_mark" ]; then
+        rm -f "$UI/running-sentinel"
+        # systemd sets SERVICE_RESULT=success for a requested stop/restart; a crash
+        # (exit-code, signal, core-dump, timeout) keeps counting towards safe-mode.
+        if [ "${SERVICE_RESULT:-success}" = success ]; then
+            rm -f "$UI/boot-count" "$UI/boot-token" "$UI/boot-ready" "$UI/last-crash" "$UI/boot-failures" "$UI/boot-window"
+        else
+            mkdir -p "$UI"
+            [ -s "$UI/boot-count" ] || echo 1 > "$UI/boot-count"
+            : > "$UI/last-crash"
+        fi
     fi
     # The stock script exits 0 after these quit reasons, so Restart=on-failure never
     # brings Engine back and the deck hangs on "Shutting down...". FactoryReset only
