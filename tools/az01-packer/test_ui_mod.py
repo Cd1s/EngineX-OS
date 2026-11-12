@@ -18,6 +18,194 @@ spec.loader.exec_module(bp)
 SRC = BUILD_PACKS.read_text()
 
 
+class TrackListArtworkPlaceholderAndReaderPriorityTest(unittest.TestCase):
+    def test_built_track_art_keeps_native_source_and_synchronous_fallback(self):
+        for version, skin in (("5.0.4", "EmbeddedCommon"), ("5.3.0", "Embedded")):
+            qrc = LAB / version / "qrc"
+            with self.subTest(version=version):
+                if not qrc.is_dir():
+                    self.skipTest(f"{qrc} not found (run on the build host)")
+                with tempfile.TemporaryDirectory(prefix="track-art-test-") as tmp:
+                    out = Path(tmp) / "packs"
+                    result = subprocess.run(["python3", str(BUILD_PACKS), "--qrc", str(qrc), "--out", str(out)],
+                                            capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    with tarfile.open(out.with_suffix(".tar.gz")) as archive:
+                        for lang in ("en", "zh-Hans", "zh-Hant"):
+                            with self.subTest(lang=lang):
+                                path = f"packs/{lang}/Skins/{skin}/Views/BrowseView/Components/Components/AlbumArt.qml"
+                                source = archive.extractfile(path).read().decode()
+                                child = re.search(r'Image\s*\{\s*objectName: "albumArt_placeholder"(.*?)\n    \}', source, re.S)
+                                self.assertIsNotNone(child, path)
+                                placeholder = "AlbumArtPlaceholder.png" if version == "5.3.0" else "UIKit.1/UIKit/Icons/PlaceHolder.png"
+                                self.assertTrue((qrc / placeholder).is_file())
+                                self.assertIn(f'source: "qrc:/{placeholder}"', child[1])
+                                self.assertIn("anchors.fill: parent", child[1])
+                                self.assertIn("visible: !!parent && parent.status !== Image.Ready && String(parent.source) !== \"\"", child[1])
+                                self.assertNotIn("asynchronous: true", child[1])
+                                # Native SD and Remote Library tracks must retain image://planck.
+                                line = next(line for line in source.splitlines() if "source: row.streamingProviderName" in line)
+                                script = "const assert=require('node:assert/strict'); const row={streamingProviderName:'',modelData:{albumArt:'image://planck/track?size=100',song:'Song'}};\n"
+                                script += "assert.equal((" + line.strip().removeprefix("source: ") + "), row.modelData.albumArt);"
+                                checked = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+                                self.assertEqual(checked.returncode, 0, checked.stderr)
+
+    def test_sqlite_busy_timeout_before_schema_pragmas(self):
+        source = (REPO / "tools/ui-mod/engine_ui_hook.c").read_text()
+        tune = source.split("static void tune_database(", 1)[1].split("\n}", 1)[0]
+        sql = "".join(re.findall(r'"(PRAGMA [^"]*)"', tune))
+        self.assertTrue(sql.startswith("PRAGMA busy_timeout = 5000;"))
+        self.assertLess(sql.index("busy_timeout"), sql.index("synchronous"))
+        self.assertLess(sql.index("busy_timeout"), sql.index("cache_size"))
+
+    def test_only_background_workers_are_demoted(self):
+        source = (REPO / "tools/ui-mod/engine_ui_hook.c").read_text()
+        classes = source.split("static int thread_class(", 1)[1].split("\n}", 1)[0]
+        self.assertIn('if (!strncmp(name, "FileInfoThread", 14)) return 3;', classes)
+        self.assertIn('return !strncmp(name, "QQuickPixmapRea", 15);', classes)
+        self.assertIn('return 2;', classes)
+        guard = source.split("static void guard_named_thread(", 1)[1].split("\n}", 1)[0]
+        self.assertIn("if (kind == 2) pthread_setschedparam(thread, SCHED_OTHER, &param);", guard)
+        # Only the global pixmap reader returns before either demotion path.
+        self.assertRegex(guard, r"guard_affinity\(thread, kind\);\s*(?://[^\n]*\n\s*)*if \(kind == 1\) \{\s*errno = saved_errno;\s*return;\s*\}")
+        self.assertEqual(guard.count("lower_io_nice("), 2)
+        self.assertEqual(guard.count("10, kind == 2"), 2)
+
+    def test_release_gate_checks_live_tracklist_art_on_both_boots(self):
+        probe = (REPO / "tools/az01-packer/gate-ui-probe.qml").read_text()
+        gate = (REPO / "tools/az01-packer/release-gate.sh").read_text()
+        self.assertIn("SCPROBE trackart|", probe)
+        self.assertIn('"albumArt_tracklist"', probe)
+        self.assertIn('"albumArt_placeholder"', probe)
+        for stage in ("new", "boot2"):
+            self.assertRegex(gate, rf'check "{stage}: [^\n]+grep -aqF \'SCPROBE trackart\|1\|1\|\'')
+        self.assertNotRegex(probe, r"for\s*\(const\s+[^)]*\s+of\s+[^)]*\.children\)")
+        for line in gate.splitlines():
+            if "no QML load errors" in line:
+                self.assertNotIn("ReferenceError|TypeError|", line)
+        # Execute the actual probe with delayed attachment and device selection.
+        script = r'''
+const assert = require('node:assert/strict'), vm = require('node:vm');
+const source = require('node:fs').readFileSync(0, 'utf8');
+function scenario(initialDrive, connectDemo = true, renderArt = true) {
+    let now = 0, due = 3000, pending = null, deviceSwitch = null, opens = 0;
+    const connected = initialDrive ? [{rowName: 'SDCARD'}] : [];
+    let selected = connected[0] || null;
+    const props = {}, messages = [], roots = [];
+    const stale = {objectName: 'Browser_TrackList', visible: false, children: []};
+    const trackList = {objectName: 'Browser_TrackList', visible: true, children: []};
+    const windowRoot = {children: [stale, trackList]};
+    const probe = {phase: 1, demoConnected: false, samplerConnected: false, demoWait: 0,
+        artWait: 0, artSelected: false, artOpened: false, artRoot: stale,
+        artFallbackWalked: false, Window: {window: {contentItem: windowRoot}}};
+    const devices = {selectedDeviceCraylistRootModelIndex: 'initial-root'};
+    const model = {index: i => ({connectedIndex: i})};
+    const bsc = {connectedSourceModel: () => model,
+        select: index => {
+            assert.equal(index.connectedIndex, initialDrive ? 1 : 0);
+            selected = connected[index.connectedIndex];
+            deviceSwitch = 'demo-root'; // The selected device root changes next tick.
+        }, detach: () => {}};
+    const sourceView = {visible: false, expanded: false,
+        onQuickSourceButtonClicked() {this.visible = true;},
+        onExpandButtonClicked() {this.expanded = true;}, close() {this.visible = false;}};
+    const context = vm.createContext({probe, Set, Image: {Ready: 1},
+        console: {warn: s => messages.push(s)}, CollectionNameCraylist: 'Craylist',
+        PlanckGUI: {views: {sourceScreenView: sourceView}},
+        Planck: {getProperty: key => props[key] ||= {translator: {}},
+            librarianController: {browserSourceControllerPtr: () => bsc, devicesController: devices,
+                craylistController: {select: index => {
+                    opens++;
+                    assert.equal(selected?.isDemo, true, 'Demo must be selected');
+                    assert.equal(index, 'demo-root', 'device selection must settle before opening');
+                    assert.equal(props['/Client/Librarian/Collections'].translator.string, 'Craylist');
+                }}}},
+        scConnSources: {get count() {return connected.length;}, itemAt: i => connected[i]},
+        selectAvailableMatch: re => {pending = {at: now, isDemo: re.test('Demo'),
+            isSampler: re.test('Sample')}; return true;},
+        restart: () => {due = now + 3000;}, running: true});
+    vm.runInContext(source.slice(source.indexOf('    function kids('), source.indexOf('    function report()')), context);
+    const walk = context.walk;
+    context.walk = (root, seen, visitor) => {
+        if (seen.size === 0) {roots.push(root); now += root === windowRoot ? 35000 : 20;}
+        walk(root, seen, visitor);
+    };
+    const start = source.indexOf('        onTriggered: {') + '        onTriggered: {'.length;
+    const end = source.lastIndexOf('\n        }\n    }\n}');
+    vm.runInContext('function tick() {' + source.slice(start, end) + '\n}', context);
+    function advance() {
+        now = Math.max(now, due);
+        if (deviceSwitch) {devices.selectedDeviceCraylistRootModelIndex = deviceSwitch; deviceSwitch = null;}
+        if (pending && now - pending.at >= 500 && (connectDemo || !pending.isDemo)) {
+            connected.push(pending); pending = null;
+        }
+        due = now + 3000;
+        context.tick();
+    }
+    context.tick();
+    assert.equal(probe.phase, 2);
+    assert.ok(due - pending.at >= 3000, 'Demo needs a fresh interval after a slow scan');
+    if (connectDemo) {
+        advance();
+        assert.equal(probe.artSelected, true);
+        assert.equal(probe.artOpened, false);
+        assert.equal(opens, 0);
+        assert.equal(devices.selectedDeviceCraylistRootModelIndex, 'initial-root');
+        assert.equal(due - now, 3000);
+        advance();
+        assert.equal(probe.artOpened, true);
+        assert.equal(opens, 1);
+        roots.length = 0;
+        advance(); // An empty cached TrackList must fall back once to the live tree.
+        assert.equal(probe.phase, 2);
+        assert.equal(probe.artRoot, trackList);
+        assert.equal(roots.filter(root => root === windowRoot).length, 1);
+        assert.equal(due - now, 3000);
+        if (renderArt) {
+            // Model Qt 5.12's non-iterable QQmlListProperty, including Image.children.
+            const child = {objectName: 'albumArt_placeholder', source: 'qrc:/AlbumArtPlaceholder.png',
+                asynchronous: false, status: 1, visible: true};
+            trackList.children = {0: {objectName: 'albumArt_tracklist', visible: true, width: 64,
+                source: 'image://planck/demo', status: 0, children: {0: child, length: 1}}, length: 1};
+            advance();
+        } else {
+            for (let i = 1; i < 6; ++i) {
+                assert.equal(probe.phase, 2);
+                advance();
+            }
+            assert.equal(probe.artWait, 6);
+        }
+        assert.equal(probe.phase, 3);
+        assert.equal(roots.filter(root => root === windowRoot).length, 1);
+        assert.ok(due - pending.at >= 3000, 'Sampler needs a fresh interval');
+    } else {
+        for (let i = 0; i < 6; ++i) advance();
+        assert.equal(probe.phase, 3);
+        assert.equal(opens, 0, 'missing Demo must never open an unrelated drive');
+        assert.equal(probe.artSelected, false);
+    }
+    advance();
+    assert.ok(messages.includes(renderArt && connectDemo ? 'SCPROBE trackart|1|1|' : 'SCPROBE trackart|0|0|'));
+    assert.equal(messages.filter(s => s.startsWith('SCPROBE trackart|')).length, 1);
+    assert.ok(messages.includes(`SCPROBE demosource|${connectDemo ? 1 : 0}|1|`));
+    assert.ok(messages.includes('SCPROBE done|'));
+    assert.ok(!messages.some(s => s.startsWith('SCPROBE error|')), messages.join('\n'));
+    assert.equal(context.running, false);
+    // Even with no cached/live view, six retries get only one whole-window walk.
+    probe.artRoot = null; probe.artFallbackWalked = false; probe.artWait = 0;
+    windowRoot.children = []; roots.length = 0;
+    for (let i = 0; i < 6; ++i) context.reportTrackArt();
+    assert.equal(roots.filter(root => root === windowRoot).length, 1);
+}
+scenario(false);
+scenario(true); // Populated initial drive: Demo is connected index 1.
+scenario(true, true, false); // Six artwork retries time out into Sample.
+scenario(true, false); // Demo never connects; no Collection is opened.
+'''
+        checked = subprocess.run(["node", "-e", script], input=probe, capture_output=True, text=True)
+        self.assertEqual(checked.returncode, 0, checked.stderr)
+
+
 class UiModSourceTest(unittest.TestCase):
     def test_boot_ready_waits_for_main_splash_and_never_blocks_gui(self):
         self.assertIn('!scBootSplash.active && planckQuickView.isMainScreen', bp.BOOT_READY)
