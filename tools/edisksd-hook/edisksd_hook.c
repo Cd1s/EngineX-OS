@@ -676,6 +676,18 @@ static const char *rb_bridge_path(void) {
 enum { MOUNT_PRE=1, MOUNT_POST=2, MOUNT_FULL=3 };
 #define CONVERTED 1
 #define TIMED_OUT 4
+#define HEALED 8
+#ifndef GUARDIAN_PATH
+#define GUARDIAN_PATH "/usr/local/bin/engine-guardian"
+#endif
+// An Engine stick (no rekordbox export): its database is repaired by
+// engine-guardian. BH-F52-1: that ran after the visible mount, a second writer
+// on m.db/hm.db while Engine opened them. It now runs in the private pre-mount,
+// like the conversion; the visible mount never runs it.
+static int has_engine_db(const char *target) {
+    char db[PATH_MAX];
+    return !path_join(db,sizeof db,target,"Engine Library/Database2/m.db")&&!safe_path(db,0);
+}
 // edisksd's monitor thread reads /proc/self/mountinfo while the mount runs on
 // another thread. It announced the bare read-only HFS+ mount ~120 ms before the
 // view covered it; Engine then saw no Engine library, chose OneLibrary, and its
@@ -739,35 +751,36 @@ int mnt_table_parse_file(struct libmnt_table *tb,const char *filename) {
 static int after_mount(struct libmnt_context *ctx,int mode,int64_t deadline) {
     const char *target=mnt_context_get_target(ctx);
     if(!volume(target)||safe_path(target,0))return 0;
-    int pioneer=has_export(target);char lib[PATH_MAX];
+    int pioneer=has_export(target),heal=!pioneer&&mode==MOUNT_PRE&&has_engine_db(target);char lib[PATH_MAX];
     if(path_join(lib,sizeof lib,target,"Engine Library")||safe_path(lib,1)) {note("unsafe library path rejected on",target,errno);return 0;}
     struct stat existing;
     int hfs_ro=HFS_READONLY(target);
-    if(!pioneer&&mode==MOUNT_PRE)return 0; // nothing to convert: the visible mount does the rest
+    if(!pioneer&&!heal&&mode==MOUNT_PRE)return 0; // nothing to convert or heal: the visible mount does the rest
     // The walk guards the tool run on the library below; after the private
-    // conversion (MOUNT_POST on a rekordbox stick) none follows, so it is skipped.
+    // conversion or heal (MOUNT_POST) none follows, so it is skipped.
     // An HFS+ view is validated by prepare_view.
-    if(!hfs_ro&&!(pioneer&&mode==MOUNT_POST)&&!lstat(lib,&existing)) {
+    if(!hfs_ro&&mode!=MOUNT_POST&&!lstat(lib,&existing)) {
         int fd=open(lib,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
         if(fd<0)return 0;
         int unsafe=copy_tree(fd,-1,deadline,0,NULL);close(fd);
         if(unsafe){note("unsafe library contents rejected on",target,errno);return 0;}
     }
-    if(hfs_ro&&(pioneer||mode!=MOUNT_PRE)) {
+    if(hfs_ro&&(pioneer||heal||mode!=MOUNT_PRE)) {
         char identity[80];
         if(VOLUME_IDENTITY(mnt_context_get_source(ctx),identity)||prepare_view(target,identity,deadline)){note("HFS view unavailable on",target,errno);return 0;}
     }
     release_post(); // the visible tree is final; a bridge or guardian run below must not hold edisksd's monitor
     int done=0;
     if(pioneer&&mode!=MOUNT_POST){const char *rb=RB_BRIDGE_PATH();char *const a[]={(char *)rb,"--mount-path",(char *)target,NULL};if(!run(a,deadline))done=CONVERTED;else{if(errno==ETIMEDOUT)done=TIMED_OUT;note("bridge failed on",target,errno);}}
+    if(heal) {
+        char *const a[]={GUARDIAN_PATH,"--heal-mount",(char *)target,"--data-only",NULL};
+        if(run(a,deadline)){if(errno==ETIMEDOUT)done=TIMED_OUT;note("guardian failed on",target,errno);}
+        done|=HEALED;
+    }
     if(hfs_ro&&mode==MOUNT_PRE) { // the persistent library stays; the private view goes
         struct owned_view *v=load_view(target);if(v){umount2(target,MNT_DETACH|UMOUNT_NOFOLLOW);cleanup_view(v);free(v);}
     }
-    char db[PATH_MAX];
-    if(mode!=MOUNT_PRE&&!pioneer&&!path_join(db,sizeof db,lib,"Database2/m.db")&&!safe_path(db,0)) {
-        char *const a[]={"/usr/local/bin/engine-guardian","--heal-mount",(char *)target,"--data-only",NULL};if(run(a,deadline))note("guardian failed on",target,errno);
-    }
-    return pioneer?done|2:0;
+    return pioneer?done|2:done;
 }
 // A library too large to convert inside the budget would hold every later
 // insert of the same export for the whole budget and still end unconverted.
@@ -788,6 +801,18 @@ static int slow_marker(const char *target,char out[PATH_MAX]) {
     if(snprintf(out,PATH_MAX,"%s/slow-%016llx",RUN_ROOT,(unsigned long long)h)>=PATH_MAX){errno=ENAMETOOLONG;return -1;}
     return 0;
 }
+// The same for a database too large to heal inside the budget, keyed by the
+// filesystem and the size of m.db.
+static int heal_marker(const char *target,char out[PATH_MAX]) {
+    struct statvfs v;if(statvfs(target,&v))return -1;
+    uint64_t h=UINT64_C(14695981039346656037);
+    h=hash_bytes(h,&v.f_fsid,sizeof v.f_fsid);h=hash_bytes(h,&v.f_blocks,sizeof v.f_blocks);
+    // Sizes only: Engine and a killed heal both touch m.db's time on every use.
+    char p[PATH_MAX];struct stat st;
+    if(!path_join(p,sizeof p,target,"Engine Library/Database2/m.db")&&!lstat(p,&st)){int64_t size=(int64_t)st.st_size;h=hash_bytes(h,&size,sizeof size);}
+    if(snprintf(out,PATH_MAX,"%s/slowheal-%016llx",RUN_ROOT,(unsigned long long)h)>=PATH_MAX){errno=ENAMETOOLONG;return -1;}
+    return 0;
+}
 // Time kept for the visible mount, the HFS view and the reply to Engine.
 #ifndef POST_RESERVE_MS
 #define POST_RESERVE_MS INT64_C(3000)
@@ -795,10 +820,11 @@ static int slow_marker(const char *target,char out[PATH_MAX]) {
 // A mount that waited longer than this for view_lock (another stick was being
 // converted) did not get its whole conversion window.
 #define LOCK_WAIT_SLACK_MS INT64_C(1000)
-// Mount the volume in a private namespace and convert it there. Returns 1 when
-// the stick held a rekordbox export and rb-bridge finished, 2 when it held one
-// but the conversion did not finish (or is known not to) or no time was left to
-// look, 0 when it held none or this failed. whole_window: the budget was not cut
+// Mount the volume in a private namespace and convert (or heal) it there.
+// Returns 1 when the stick held a rekordbox export and rb-bridge finished, 2
+// when it held one but the conversion did not finish (or is known not to) or no
+// time was left to look, 3 when it held an Engine database and the heal ran (or
+// is known to be too slow), 0 when it held neither or this failed. whole_window: the budget was not cut
 // short by the wait for view_lock, so running out of it says the library is too
 // large; only then is the stick remembered as such.
 static int premount(struct libmnt_context *ctx,int (*real)(struct libmnt_context *),int64_t deadline,int whole_window) {
@@ -822,8 +848,18 @@ static int premount(struct libmnt_context *ctx,int (*real)(struct libmnt_context
         // A stick without a rekordbox export costs one look at its root directory:
         // no statvfs (a FAT32 free-space scan) and no library walk, both of which
         // the visible mount would repeat on a cold cache inside the same budget.
-        if(!has_export(target)){umount2(target,UMOUNT_NOFOLLOW);_exit(0);}
+        int pioneer=has_export(target);
+        if(!pioneer&&!has_engine_db(target)){umount2(target,UMOUNT_NOFOLLOW);_exit(0);}
         char marker[PATH_MAX];int known=0,r=0;
+        if(!pioneer) {
+            if(!secure_runtime()&&!heal_marker(target,marker))known=!access(marker,F_OK);
+            if(known)note("Engine library too large to heal at mount, skipped on",target,0);
+            else r=after_mount(ctx,MOUNT_PRE,deadline);
+            if(r&TIMED_OUT&&whole_window&&!heal_marker(target,marker)){int fd=open(marker,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);if(fd>=0)close(fd);}
+            if(*seeded_as&&write(up[1],seeded_as,strlen(seeded_as))<0){}
+            umount2(target,UMOUNT_NOFOLLOW);
+            _exit(3); // whatever happened, the heal is not repeated after the visible mount
+        }
         if(!secure_runtime()&&!slow_marker(target,marker))known=!access(marker,F_OK);
         if(known){note("rekordbox library too large to convert at mount, skipped on",target,0);r=2;}
         else r=after_mount(ctx,MOUNT_PRE,deadline);

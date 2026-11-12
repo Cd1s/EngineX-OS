@@ -30,7 +30,11 @@ it make the real mount, which Engine sees with the library already in place:
    stick. Two generations per stick are kept, and a seed leaves 512 MiB free on
    `/data` (unused libraries of other sticks go first, least recently used);
 2. `rb-bridge --mount-path <mount>` converts the export;
-3. `engine-guardian --heal-mount <mount> --data-only` repairs table data.
+3. `engine-guardian --heal-mount <mount> --data-only` repairs table data of a
+   stick with `Engine Library/Database2/m.db` and no export. It runs only here,
+   never after the real mount, where it would be a second writer on a database
+   Engine is opening; a heal that runs out of its window is skipped on later
+   inserts until reboot or until `m.db` changes size.
 
 The steps share a 20 s budget (3 s of it kept for the real mount). An unfinished
 import is killed and rolled back, so a library too large to convert in that time
