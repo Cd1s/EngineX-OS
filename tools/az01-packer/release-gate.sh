@@ -343,14 +343,14 @@ SH
         curl -sf http://127.0.0.1:6595/healthz > "$W/boot2-deemixd.json" || :
         check "boot2: sc5000-deemixd /healthz" json "$W/boot2-deemixd.json" "j.get('ok') is True"
     fi
-    if [ "$name" = new ]; then
+    if [ "$name" != old ]; then
         # This image must not be offered the release it was built for (a same-version
         # re-release has the tag v<version>-rN, which is newer than <version> alone).
         # Another repository name is another cache entry; the mock answers it with that release.
         echo 'github_repo=Cd1s/EngineX-OS-installed' >> "$W/data/sc5000-custom/ui/settings.conf"
-        curl -sf http://127.0.0.1:8080/v1/sc5000/update > "$W/new-update-installed.json" || :
+        curl -sf http://127.0.0.1:8080/v1/sc5000/update > "$W/$name-update-installed.json" || :
         sed -i '/^github_repo=Cd1s\/EngineX-OS-installed$/d' "$W/data/sc5000-custom/ui/settings.conf"
-        check "new: the installed release $RELTAG is not offered again" json "$W/new-update-installed.json" \
+        check "$name: the installed release $RELTAG is not offered again" json "$W/$name-update-installed.json" \
             "j.get('currentVersion') == '$NEWV' and j.get('latestVersion') == '$RELTAG' and j.get('updateAvailable') is False"
     fi
     # The online update, exactly as Settings -> Update does it.
