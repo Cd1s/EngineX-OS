@@ -7,8 +7,9 @@
 - **同一版本修复重发**（维护者默认做法：版本号固定，例如一直是 5.0.4.1）：不改版本号，跳过第 1 步，第 5 步用 `--clobber` 覆盖同一个 Release，再把 tag 移到新提交。
 - **同一版本、要让已刷该版本的碟机收到的修复重发（`-rN` tag）**：`--clobber` 覆盖同一个 Release 时 tag 不变，已经刷了 `<VERSION>` 的碟机检测不到更新。需要它们收到时：
   - 版本号、产物文件名、`version.txt` 和关于页都保持 `<VERSION>`，不执行第 1 步；
-  - 新建 Release，tag 为 `v<VERSION>-rN`（N 从 2 开始，每次重发加 1），标题仍是 `EngineX OS <VERSION>`，设为 `--latest`。碟机按 tag 里的数字逐段比较，段数多者更新，所以 `<VERSION>` 及更早版本的碟机都会收到；
-  - 构建时加 `RELEASE_TAG=v<VERSION>-rN`（第 3 步命令前）。`build-release.sh` 把它写进镜像的 `/etc/sc5000/release-tag` 和二代数据包的 `release-tag`，装上这次构建的碟机用它和 Release 的 tag 比较，不会反复提示同一个重发；不设时默认 `v<VERSION>`；
+  - 新建 Release，tag 为 `v<VERSION>-rN`（N 从 2 开始，每次重发加 1），标题 `EngineX OS <VERSION> rN`，`--target` 为这次构建的提交，设为 `--latest`，上传 `SHA256SUMS.txt` 列出的全部产物和 `SHA256SUMS.txt`。碟机读 `releases/latest`，按 tag 里的数字逐段比较，段数多者更新，所以 `<VERSION>` 及更早版本的碟机都会收到；
+  - 原来的 `v<VERSION>` Release 保留，tag 不移动：新 Release 建好之后，用 `gh release upload v<VERSION> ... --clobber` 把同名文件换成这次构建的产物，在它的说明开头写明「文件已于 <日期> 换成 <VERSION> rN 的构建，见 `v<VERSION>-rN`」并换上新的 SHA-256 表。它不能再是 Latest：改说明时带 `gh release edit v<VERSION> --latest=false`，最后用 `gh api repos/Cd1s/EngineX-OS/releases/latest -q .tag_name` 确认输出是 `v<VERSION>-rN`；
+  - 构建时把 `RELEASE_TAG=v<VERSION>-rN` 写在第 3 步 `remote-build` 单引号里的远端脚本内，紧贴 `build-release.sh`：`RELEASE_TAG=v<VERSION>-rN sh tools/az01-packer/build-release.sh ...`。写在 `remote-build` 命令前面不会传到编译机，产物会不报错地写成默认的 `v<VERSION>`。`build-release.sh` 把它写进镜像的 `/etc/sc5000/release-tag` 和二代数据包的 `release-tag`，装上这次构建的碟机用它和 Release 的 tag 比较，不会反复提示同一个重发；不设时默认 `v<VERSION>`；
   - 门禁的旧镜像用同一版本的上一次构建（`release-<VERSION>/`），并加 `GATE_RELEASE_TAG=v<VERSION>-rN`：门禁会验证旧构建收到这个 tag、新镜像不再被提示同一个 tag、以及下一个版本仍会被提示；
   - `-rN` 和热修复的第五段（`<VERSION>.1`）占用同一段数字，同一个 `<VERSION>` 只用其中一种。
 - **新版本**：只有维护者明确要求才升版本号。按全部步骤做，新建 `v<VERSION>` tag 与 Release。
