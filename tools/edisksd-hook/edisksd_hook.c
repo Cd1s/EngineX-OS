@@ -507,6 +507,19 @@ static const char *rb_bridge_path(void) {
 }
 #define RB_BRIDGE_PATH rb_bridge_path
 #endif
+// engine-guardian the same way: a second-generation deck keeps the vendor's
+// rootfs and has the tools only in the data bundle (BH2-A1-1: the hook asked
+// for /usr/local/bin alone, so no stick was ever healed at mount there).
+#ifndef GUARDIAN_SYSTEM
+#define GUARDIAN_SYSTEM "/usr/local/bin/engine-guardian"
+#endif
+#ifndef GUARDIAN_BUNDLE
+#define GUARDIAN_BUNDLE "/data/enginex/bundle/bin/engine-guardian"
+#endif
+#ifndef GUARDIAN_PATH
+static const char *guardian_path(void) { return access(GUARDIAN_SYSTEM,X_OK)?GUARDIAN_BUNDLE:GUARDIAN_SYSTEM; }
+#define GUARDIAN_PATH guardian_path()
+#endif
 // What after_mount does on a volume. Engine learns of a mount from edisksd's
 // mountinfo monitor (update_mountinfo -> filesystem_mounted -> Mountpoints
 // PropertiesChanged) while edisksd's mount thread is still inside this call, so
@@ -605,7 +618,7 @@ static int after_mount(struct libmnt_context *ctx,int mode,int64_t deadline) {
     }
     char db[PATH_MAX];
     if(mode!=MOUNT_PRE&&!pioneer&&!path_join(db,sizeof db,lib,"Database2/m.db")&&!safe_path(db,0)) {
-        char *const a[]={"/usr/local/bin/engine-guardian","--heal-mount",(char *)target,"--data-only",NULL};if(run(a,deadline))note("guardian failed on",target,errno);
+        char *const a[]={(char *)GUARDIAN_PATH,"--heal-mount",(char *)target,"--data-only",NULL};if(run(a,deadline))note("guardian failed on",target,errno);
     }
     return pioneer?done|2:0;
 }
