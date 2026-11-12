@@ -16,7 +16,7 @@
 |---|---|
 | Web 控制台地址 `http://<碟机IP>:8080/ui` | 地址是 **`http://<碟机IP>:8080/`**（`pkg/webui/server.go` 的 `GET /`）。`/v1/sc5000/ui` 是碟机本机调用的设置接口，不是网页 |
 | Web 入口代码在 `pkg/webui/ui_page.go` | 没有这个文件。页面是 **`pkg/webui/index.html`**（嵌入二进制），登录页是 `server.go` 里的 `consoleLoginPage` |
-| Web 控制台有"一键在线 OTA 更新"和"日志诊断" | **都没有**。OTA 只在碟机屏幕（设置 → 关于 / 更新）上，走本机回环接口 `/v1/sc5000/update?apply=1`；`/api/update` 在控制台里只读且需登录，页面没有调用它。全仓没有日志查看页 |
+| Web 控制台有"一键在线 OTA 更新"和"日志诊断" | **一键在线 OTA 执行只在碟机屏幕上**（设置 → 关于 / 更新，走本机回环接口 `/v1/sc5000/update?apply=1`；控制台 `/api/update` 仅只读查询）。**日志诊断已在 5.3.0.4 提供**：控制台提供 `详细日志（Verbose logging）` 开关、自动脱敏的 `下载日志`（`/api/logs` → `enginex-logs.txt`）与启动异常报告下载（`/api/boot-report`） |
 
 ## 1. 支持的 16 款机型
 
