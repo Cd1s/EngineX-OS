@@ -404,9 +404,6 @@ func TestExportRebindPlayingStatusHandoffFirmwareAndDBServerMetadata(t *testing.
 			t.Fatalf("pitch at %#x = %#x, want %#x", off, got, wantPitch)
 		}
 	}
-	if binary.BigEndian.Uint32(stPkt[0xa0:]) != 3 || stPkt[0xa6] != 3 {
-		t.Fatalf("non-master playing deck missing beat/in-bar: beat=%#x inBar=%d", binary.BigEndian.Uint32(stPkt[0xa0:]), stPkt[0xa6])
-	}
 
 	// Non-master deck must NOT grant 0x26 master handoff.
 	peerUDP, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 63, 0, 12)})

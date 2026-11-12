@@ -141,10 +141,11 @@ const (
 )
 
 type uiSettings struct {
-	Version     string  `json:"version,omitempty"`
-	Quality     string  `json:"quality"`
-	NeteaseMode string  `json:"neteaseMode"`
-	Playhead    float64 `json:"playhead"`
+	EngineLighting bool    `json:"engineLighting"` // Stock lighting switch; opt in, saved independently of Engine shutdown.
+	Version        string  `json:"version,omitempty"`
+	Quality        string  `json:"quality"`
+	NeteaseMode    string  `json:"neteaseMode"`
+	Playhead       float64 `json:"playhead"`
 	// AutoAnalyze retains the user's preference (#55). The UI pack currently
 	// fails closed: no automatic analysis until a bounded native adapter is verified.
 	AutoAnalyze bool `json:"autoAnalyze"`
@@ -317,6 +318,8 @@ func (s *Server) loadUI() uiSettings {
 			continue
 		}
 		switch key {
+		case "engine_lighting":
+			v.EngineLighting = val == "1" || strings.EqualFold(val, "true")
 		case "lang":
 			if slices.Contains(uiLanguages, val) {
 				v.Language = val
@@ -504,6 +507,9 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 		return err
 	}
 	text := "lang=" + v.Language + "\nwaveform=" + v.Waveform + "\nsources=" + strings.Join(v.Sources, ",") + "\nknown=" + strings.Join(uiServices, ",") + "\nscope=" + v.Scope + "\nquality=" + v.Quality + "\nnetease_mode=" + v.NeteaseMode + "\nplayhead=" + strconv.FormatFloat(v.Playhead, 'f', -1, 64) + "\n"
+	if v.EngineLighting {
+		text += "engine_lighting=1\n"
+	}
 	if v.FourDeckWaveform {
 		text += "four_deck_waveform=1\n"
 		if v.PairedView {
@@ -776,6 +782,19 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		s.uiMu.Unlock()
 		fail(w, 400, errors.New("invalid setting"))
 		return
+	}
+	if q.Has("engineLighting") || q.Has("engine_lighting") {
+		param := q.Get("engineLighting")
+		if !q.Has("engineLighting") {
+			param = q.Get("engine_lighting")
+		}
+		b, ok := parseBoolParam(param)
+		if !ok {
+			s.uiMu.Unlock()
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+		v.EngineLighting = b
 	}
 	if q.Has("shadowMode") {
 		v.ShadowMode = q.Get("shadowMode")

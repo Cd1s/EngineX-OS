@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"slices"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -325,13 +326,28 @@ func TestLargeMountIncrementalSyncAddsNewTracksAndPlaylists_GL011(t *testing.T) 
 	if _, e = db.Exec(`INSERT INTO playlist VALUES(2,0,'Added Set',0,2,'');INSERT INTO playlist_content VALUES(2,506,1),(2,507,2),(2,508,3);`); e != nil {
 		t.Fatal(e)
 	}
-	// A real mount budget (more than the deck's, for -race on a busy host): the
-	// new tracks and playlist land at once; the 505 tracks of the first mount,
-	// imported from the export alone, are read now or on the next mounts.
-	budget := func() enginedb.Options { return enginedb.Options{Deadline: time.Now().Add(15 * time.Second)} }
+	// A mount whose read budget runs out inside the library. The fake clock
+	// advances on every reading, so where the deadline falls depends only on
+	// the work done, not on the host's load (the wall-clock version flaked
+	// under -race on a busy build host).
+	budget := func() enginedb.Options {
+		c := &fakeClock{t: time.Unix(1_700_000_000, 0), step: time.Millisecond}
+		return enginedb.Options{Now: c.Now, Deadline: c.t.Add(400 * time.Millisecond)}
+	}
 	r2, e := bridge.ConvertAtMount(context.Background(), root, budget(), false)
-	if e != nil || r2.Added != 3 || r2.Updated == 0 || r2.Updated+r2.Deferred != 505 || !r2.PlaylistsChanged {
+	// The new tracks and playlist land at once. Of the 505 tracks the first
+	// mount imported from the export alone, some are read now (Updated) and
+	// the rest stay as they are until a later mount (Unchanged). Deferred
+	// counts every track left without its files, the new ones included when
+	// the deadline came before them, so it lies between those 505-Updated and
+	// 3 more.
+	if e != nil || r2.Added != 3 || !r2.PlaylistsChanged || r2.Updated == 0 || r2.Unchanged == 0 ||
+		r2.Updated+r2.Unchanged != 505 || r2.Deferred < r2.Unchanged || r2.Deferred > r2.Unchanged+3 {
 		t.Fatalf("second mount incremental delta: %+v %v", r2, e)
+	}
+	engine := dbOpen(t, root)
+	if n := scalar[int](t, engine, `SELECT count(*) FROM PlaylistEntity e JOIN Playlist p ON p.id=e.listId WHERE p.title='Added Set'`); n != 3 {
+		t.Fatalf("new playlist has %d tracks", n)
 	}
 	for mount := 3; r2.Deferred > 0; mount++ {
 		if mount > 10 {
@@ -341,4 +357,24 @@ func TestLargeMountIncrementalSyncAddsNewTracksAndPlaylists_GL011(t *testing.T) 
 			t.Fatalf("mount %d: %+v %v", mount, r2, e)
 		}
 	}
+	if n := scalar[int](t, engine, `SELECT count(*) FROM bridge.BridgeState WHERE fingerprint LIKE 'fast:%'`); n != 0 {
+		t.Fatalf("%d tracks still without their files", n)
+	}
+	if r2, e = bridge.ConvertAtMount(context.Background(), root, budget(), false); e != nil || !r2.Bypassed {
+		t.Fatalf("complete import not recorded: %+v %v", r2, e)
+	}
+}
+
+// fakeClock advances by step on every reading.
+type fakeClock struct {
+	mu   sync.Mutex
+	t    time.Time
+	step time.Duration
+}
+
+func (c *fakeClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = c.t.Add(c.step)
+	return c.t
 }

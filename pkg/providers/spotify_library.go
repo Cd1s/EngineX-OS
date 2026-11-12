@@ -25,9 +25,12 @@ type spotifyNativeLibrary interface {
 
 type spotifyBatchedMetadataFunc func(context.Context, *extpb.BatchedEntityRequest) (*extpb.BatchedExtensionResponse, error)
 
+// The Web API refuses some logins that the protocol session still serves: 401
+// and 403, and 429 for a login made with the built-in desktop client (the QR
+// code), which Spotify limits on the Web API however little it asks (#227).
 func (s *Spotify) nativeLibraryFallback(err error) bool {
 	var status StatusError
-	return err != nil && errors.As(err, &status) && (status == 401 || status == 403) && s.HasStoredCredentials()
+	return err != nil && errors.As(err, &status) && (status == 401 || status == 403 || status == 429) && s.HasStoredCredentials()
 }
 func (s *Spotify) nativePlaylists(ctx context.Context) (out []Playlist, err error) {
 	err = s.withNative(ctx, func(n spotifyNative) error {
