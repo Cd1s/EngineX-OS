@@ -828,9 +828,11 @@ func (r *exportRun) heardLocked(ip net.IP, b []byte) {
 	// Another player's status says it is tempo master.
 	switch number, to := b[0x21], b[0x9f]; {
 	case to == r.player:
-		r.yielded, r.claimAt = false, time.Time{} // it hands master to us: claim it now
+		// It hands master to us: claim it now. The request is settled, so a late
+		// or repeated answer to it changes nothing any more.
+		r.yielded, r.claimAt, r.askUntil = false, time.Time{}, time.Time{}
 	case r.handoff != 0 && number == r.handoff:
-		r.yielded, r.handoff = true, 0 // the player we agreed to has taken it
+		r.yielded, r.handoff, r.askUntil = true, 0, time.Time{} // the player we agreed to has taken it
 	case r.deck.Master && !r.yielded && r.handoff == 0 && !bytes.HasPrefix(b[11:], []byte("EngineX")):
 		if now := time.Now(); now.Before(r.askUntil) && now.Sub(r.asked) >= masterAgain {
 			r.asked = now
@@ -854,19 +856,21 @@ func (r *exportRun) receiveBeats() {
 		}
 		if n >= 0x2c && string(b[:10]) == magic && b[10] == 0x27 && b[0x2b] == 1 && r.network.Contains(addr.IP) {
 			r.mu.Lock()
-			if time.Now().Before(r.askUntil) { // an answer to our request
-				r.yielded, r.claimAt = false, time.Time{} // the master agreed: claim it now
+			if time.Now().Before(r.askUntil) { // an answer to our request, once
+				r.yielded, r.claimAt, r.askUntil = false, time.Time{}, time.Time{} // the master agreed: claim it now
 			}
 			r.mu.Unlock()
 			continue
 		}
 		if n >= 0x28 && string(b[:10]) == magic && b[10] == 0x26 && r.network.Contains(addr.IP) {
-			// Another player asks for master: agree, and name it in our status
-			// until Engine moves master to its shadow deck (SetDeck).
+			// Another player asks the master for it. While we are the master: agree,
+			// and name it in our status until it has taken it (heardLocked) or Engine
+			// moves master to its shadow deck (SetDeck). Our own request, if one was
+			// still open, is over.
 			r.mu.Lock()
-			if r.player != 0 {
+			if asker := b[0x21]; r.player != 0 && r.masterLocked(time.Now()) && asker >= 1 && asker <= 6 && asker != r.player {
 				r.sendLocked(r.beat, r.handoffPacket(0x27, 0x2c), &net.UDPAddr{IP: addr.IP, Port: 50001})
-				r.handoff = b[0x21]
+				r.handoff, r.askUntil = asker, time.Time{}
 			}
 			r.mu.Unlock()
 			continue
@@ -1027,9 +1031,7 @@ func (r *exportRun) statusPacket() []byte {
 	}
 	binary.BigEndian.PutUint16(b[0x92:], 0xffff)
 	binary.BigEndian.PutUint32(b[0xa0:], 0xffffffff)
-	// Tempo master on the link: Engine's deck leads, we have not handed master to
-	// a player, and one we asked for it has had its time to answer.
-	master := r.deck.Master && !r.yielded && !time.Now().Before(r.claimAt)
+	master := r.masterLocked(time.Now())
 	if r.wasMaster && !master {
 		r.syncN = max(r.syncN, r.syncMax) + 1 // as a player does when it gives master up
 	}
@@ -1067,6 +1069,13 @@ func (r *exportRun) statusPacket() []byte {
 	r.statusCounter++
 	binary.BigEndian.PutUint32(b[0xc8:], r.statusCounter)
 	return b
+}
+
+// masterLocked: we are tempo master on the link. Engine's deck leads, we have
+// not handed master to a player, and one we asked for it has had its time to
+// answer. Caller holds r.mu.
+func (r *exportRun) masterLocked(now time.Time) bool {
+	return r.deck.Master && !r.yielded && !now.Before(r.claimAt)
 }
 
 // peerIPsLocked lists the players seen in the last 10 s (at most 6). For
