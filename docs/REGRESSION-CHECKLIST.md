@@ -6,7 +6,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 
 ---
 
-## Regression Table (60 Rows)
+## Regression Table (61 Rows)
 
 | # | Behaviour that must keep working | Issue / commit that fixed it | How it is checked (automated test name, or exact real-deck / sandbox step) | Release gate / deck acceptance / recording coverage |
 | --- | --- | --- | --- | --- |
@@ -70,6 +70,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 | 58 | **A Hot Cue placed before sample zero keeps a visible color** (bug hunt 2, BH2-A1-12: the heal of transparent Hot Cue colors skipped every pad with a negative position, but only exactly `-1` is an unset pad; stock Engine stores Hot Cues in the AAC/MP3 pre-roll, e.g. `-1024`, and such a pad stayed invisible) | BH2-A1-12 | `pkg/dbhealer::TestHealQuickCuesHealsPreRollHotCue` (pre-roll, in-track, unset, opaque and colorless pads) | Release workflow Step 2 Go suites |
 | 59 | **Second-generation deck: an Engine stick is healed when it is inserted** (bug hunt 2, BH2-A1-1: the mount hook ran `engine-guardian` from `/usr/local/bin` only; the eight second-generation models keep the vendor rootfs and have the tool only in `/data/enginex/bundle/bin`, so the mount-time heal never ran there and every insert logged `guardian failed`) | BH2-A1-1 | `tools/edisksd-hook/test_edisksd_hook.c --mounts` `test_guardian_from_the_data_bundle` (bundle only, then rootfs preferred); the hook tests no longer run a host `engine-guardian`. Real second-generation deck: insert an Engine stick, `journalctl -u edisksd` shows no `guardian failed` | Release workflow Step 2 C hook tests (`unshare -m ... --mounts`) |
 | 60 | **An Engine stick with a `PIONEER` folder but no rekordbox export is still healed when it is inserted** (bug hunt 2, BH2-A1-7: the mount hook took any `PIONEER`/`.PIONEER` folder for a rekordbox export, e.g. the settings folder a CDJ or mixer leaves on a stick, or the `export.pdb` EngineX writes itself for CDJ link; such an Engine stick went to rb-bridge, which had nothing to convert, and the mount-time heal was skipped on every insert) | BH2-A1-7 | `tools/edisksd-hook/test_edisksd_hook.c` `test_only_an_export_makes_a_rekordbox_stick` (settings-only folder, empty `rekordbox`, EngineX-generated `export.pdb` with fresh and stale stamp, OneLibrary files, hidden folder, other spellings) and the `--mounts` run of `test_guardian_from_the_data_bundle` with a settings folder; the #182/#103 conversion tests stay green with real export files | Release workflow Step 2 C hook tests (`unshare -m ... --mounts`) |
+| 61 | **A rekordbox stick already found too large to convert at mount is not waited for again in another USB port** (bug hunt 2, BH2-A1-2: the "too large, skip until re-exported" record was keyed by `statvfs.f_fsid`, on FAT32/exFAT/HFS+ the device number; the same stick in another port or behind another stick got a new device number and held the mount for the whole conversion budget, about 17 s, once more) | BH2-A1-2 | `tools/edisksd-hook/test_edisksd_hook.c --mounts` `test_slow_marker_survives_another_port` (one export under two filesystem ids gives one record; a new export a new one); `test_slow_marker_follows_every_export_file` unchanged | Release workflow Step 2 C hook tests (`unshare -m ... --mounts`) |
 
 ---
 

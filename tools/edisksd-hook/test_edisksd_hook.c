@@ -568,6 +568,24 @@ static void test_guardian_from_the_data_bundle(const char *root) {
     test_guardian_system[0]=test_guardian_bundle[0]=0;
     puts("REAL PRIVATE NAMESPACE BH2-A1-1: an Engine stick is healed by the data bundle's engine-guardian where the rootfs has none, by the rootfs's where it has; BH2-A1-7: also with a player's settings folder on it: PASS");
 }
+// BH2-A1-2: the "too large" record was keyed by f_fsid, on FAT/exFAT/HFS+ the
+// device number. Two mounts of one export under different filesystem ids stand
+// for one stick in two ports (sda1, then sdb1).
+static void test_slow_marker_survives_another_port(const char *root) {
+    char mnt[2][PATH_MAX],marker[2][PATH_MAX],other[PATH_MAX],p[PATH_MAX];struct statvfs v[2];
+    struct timespec exported[2]={{.tv_sec=1700000000,.tv_nsec=120000000},{.tv_sec=1700000000,.tv_nsec=120000000}};
+    for(int i=0;i<2;i++) {
+        join(mnt[i],root,i?"port-b":"port-a");assert(!make_dirs(mnt[i]));
+        assert(!mount("stick",mnt[i],"tmpfs",0,"size=1m,mode=0700"));
+        join(p,mnt[i],"PIONEER/rekordbox");assert(!make_dirs(p));join(p,mnt[i],"PIONEER/rekordbox/export.pdb");write_file(p,"big library");
+        assert(!utimensat(AT_FDCWD,p,exported,0));assert(!statvfs(mnt[i],&v[i]));assert(!slow_marker(mnt[i],marker[i]));
+    }
+    assert(memcmp(&v[0].f_fsid,&v[1].f_fsid,sizeof v[0].f_fsid)&&v[0].f_blocks==v[1].f_blocks); // what a second port looks like
+    assert(!strcmp(marker[0],marker[1]));
+    write_file(p,"exported again");assert(!slow_marker(mnt[1],other));assert(strcmp(marker[0],other)); // a new export is still looked at
+    for(int i=0;i<2;i++)assert(!umount2(mnt[i],UMOUNT_NOFOLLOW));
+    puts("REAL PRIVATE NAMESPACE BH2-A1-2: the too-large record of a stick is found again under another device number, and not after a new export: PASS");
+}
 static void test_monitor_sees_plain_device_mount(const char *root) {
     char path[PATH_MAX],line[4096],out[16384];join(path,root,"mountinfo");
     FILE *f=fopen(path,"w");assert(f);
@@ -602,7 +620,7 @@ int main(int argc,char **argv) {
     join(test_media,root,"media");join(test_library,root,"libraries");join(test_runtime,root,"runtime");
     join(test_legacy_library,root,"legacy-libraries");join(test_utab,root,"utab");assert(!make_dirs(test_utab));
     assert(!make_dirs(test_media));test_paths_and_copy(root);test_compat_symlink_root(root);test_time();test_slow_marker_follows_every_export_file(root);test_only_an_export_makes_a_rekordbox_stick(root);test_monitor_sees_plain_device_mount(root);
-    if(argc>1&&!strcmp(argv[1],"--mounts")){test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);test_library_is_walked_once(root);test_two_sticks_at_once(root);test_hfs_visible_mount_reuses_the_converted_library(root);test_private_mount_leaves_nothing_behind(root);test_guardian_from_the_data_bundle(root);}
+    if(argc>1&&!strcmp(argv[1],"--mounts")){test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);test_library_is_walked_once(root);test_two_sticks_at_once(root);test_hfs_visible_mount_reuses_the_converted_library(root);test_private_mount_leaves_nothing_behind(root);test_guardian_from_the_data_bundle(root);test_slow_marker_survives_another_port(root);}
     // Mount tests have removed all namespace mounts before deleting fixtures.
     int tmp=open("/tmp",O_RDONLY|O_DIRECTORY);assert(tmp>=0);remove_tree(tmp,strrchr(root,'/')+1);close(tmp);
     puts("edisksd-hook: all requested tests passed");return 0;
