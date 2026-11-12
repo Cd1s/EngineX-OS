@@ -8,10 +8,13 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"os"
 	"os/exec"
@@ -66,6 +69,10 @@ type Mod struct {
 type ModState struct {
 	Enabled     bool `json:"enabled"`
 	Quarantined bool `json:"quarantined"`
+	// For a mod on a removable drive: the drive and the content it was enabled with. It stays
+	// enabled only while both still match; anything else needs enabling again.
+	Source string `json:"source,omitempty"`
+	Digest string `json:"digest,omitempty"`
 }
 
 // State persists the mod states to mods-state.json.
@@ -166,6 +173,101 @@ func readManifestFile(path string) ([]byte, error) {
 		return nil, errors.New(errManifestTooBig)
 	}
 	return data, err
+}
+
+// maxModDigestBytes bounds the content hashed for a mod on a removable drive; a larger one is
+// installed through the console instead.
+const maxModDigestBytes = 256 << 20
+
+// modDigest hashes a mod folder's complete content: every path, its type and its bytes, links
+// by their target, without following them. Cached per folder until a file's size, time or
+// inode changes.
+func modDigest(dir string) (string, error) {
+	type file struct {
+		rel  string
+		info fs.FileInfo
+	}
+	var files []file
+	var total int64
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(dir, path)
+		files = append(files, file{rel, info})
+		if info.Mode().IsRegular() {
+			if total += info.Size(); total > maxModDigestBytes {
+				return fmt.Errorf("content larger than %d MiB", maxModDigestBytes>>20)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	sig := sha256.New()
+	for _, f := range files {
+		var ino uint64
+		if st, ok := f.info.Sys().(*syscall.Stat_t); ok {
+			ino = st.Ino
+		}
+		fmt.Fprintf(sig, "%q %v %d %d %d\n", f.rel, f.info.Mode(), f.info.Size(), f.info.ModTime().UnixNano(), ino)
+	}
+	key := hex.EncodeToString(sig.Sum(nil))
+	digestCacheMu.Lock()
+	if c, ok := digestCache[dir]; ok && c.sig == key {
+		digestCacheMu.Unlock()
+		return c.digest, nil
+	}
+	digestCacheMu.Unlock()
+	h := sha256.New()
+	for _, f := range files {
+		fmt.Fprintf(h, "%q %v\n", f.rel, f.info.Mode().Type())
+		switch {
+		case f.info.Mode().IsRegular():
+			fh, err := os.OpenFile(filepath.Join(dir, f.rel), os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+			if err != nil {
+				return "", err
+			}
+			n, err := io.Copy(h, io.LimitReader(fh, f.info.Size()+1))
+			fh.Close()
+			if err != nil {
+				return "", err
+			}
+			fmt.Fprintf(h, "%d\n", n)
+		case f.info.Mode()&fs.ModeSymlink != 0:
+			target, err := os.Readlink(filepath.Join(dir, f.rel))
+			if err != nil {
+				return "", err
+			}
+			fmt.Fprintf(h, "%q\n", target)
+		}
+	}
+	d := hex.EncodeToString(h.Sum(nil))
+	digestCacheMu.Lock()
+	digestCache[dir] = digestEntry{key, d}
+	digestCacheMu.Unlock()
+	return d, nil
+}
+
+type digestEntry struct{ sig, digest string }
+
+var (
+	digestCacheMu sync.Mutex
+	digestCache   = map[string]digestEntry{}
+)
+
+// approvedContent: the removable mod in dir is the one enabled, from the same drive.
+func approvedContent(ms ModState, drive, dir string) bool {
+	if ms.Digest == "" || ms.Source != drive {
+		return false
+	}
+	d, err := modDigest(dir)
+	return err == nil && d == ms.Digest
 }
 
 // NewManager creates a mod manager operating on the given media and UI directories.
@@ -497,6 +599,9 @@ func (m *Manager) discoverLocked() ([]Mod, error) {
 				}
 
 				modState := state.Mods[manifest.ID]
+				if modState.Enabled && source.drive != "internal" && !approvedContent(modState, source.drive, modDir) {
+					modState.Enabled = false
+				}
 				mod := Mod{
 					Category:    manifest.Category,
 					Homepage:    manifest.Homepage,
@@ -904,6 +1009,7 @@ func (m *Manager) SetModEnabled(id string, enabled bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	var enabledFrom struct{ drive, digest string }
 	state := m.loadStateLocked()
 	{
 		modsList, err := m.discoverLocked()
@@ -923,8 +1029,19 @@ func (m *Manager) SetModEnabled(id string, enabled bool) error {
 		if enabled && !found.Valid {
 			return fmt.Errorf("cannot enable invalid mod %q: %s", id, found.Error)
 		}
+		enabledFrom.drive = found.Drive
+		if enabled && found.Drive != "internal" {
+			// The content approved now, before any of its scripts runs.
+			d, err := modDigest(found.Dir)
+			if err != nil {
+				return fmt.Errorf("cannot enable mod %q from %s: %w", id, found.Drive, err)
+			}
+			enabledFrom.digest = d
+		}
 		prev := state.Mods[id]
-		if found.Valid && (prev.Enabled != enabled || (enabled && prev.Quarantined)) {
+		// found.Enabled is what discovery accepted: a removable mod whose content changed since it
+		// was enabled is off, and its scripts are not run to stop it either.
+		if found.Valid && (found.Enabled != enabled || (enabled && prev.Quarantined)) {
 			action := "stop"
 			if enabled {
 				action = "start"
@@ -941,6 +1058,10 @@ func (m *Manager) SetModEnabled(id string, enabled bool) error {
 	modState := state.Mods[id]
 	modState.Enabled = enabled
 	modState.Quarantined = false // an explicit user choice lifts a per-mod quarantine
+	modState.Source, modState.Digest = "", ""
+	if enabled && enabledFrom.drive != "internal" {
+		modState.Source, modState.Digest = enabledFrom.drive, enabledFrom.digest
+	}
 	state.Mods[id] = modState
 
 	if err := m.saveStateLocked(state); err != nil {
