@@ -742,6 +742,19 @@ static const char *rb_bridge_path(void) {
 }
 #define RB_BRIDGE_PATH rb_bridge_path
 #endif
+// engine-guardian the same way: a second-generation deck keeps the vendor's
+// rootfs and has the tools only in the data bundle (BH2-A1-1: the hook asked
+// for /usr/local/bin alone, so no stick was ever healed at mount there).
+#ifndef GUARDIAN_SYSTEM
+#define GUARDIAN_SYSTEM "/usr/local/bin/engine-guardian"
+#endif
+#ifndef GUARDIAN_BUNDLE
+#define GUARDIAN_BUNDLE "/data/enginex/bundle/bin/engine-guardian"
+#endif
+#ifndef GUARDIAN_PATH
+static const char *guardian_path(void) { return access(GUARDIAN_SYSTEM,X_OK)?GUARDIAN_BUNDLE:GUARDIAN_SYSTEM; }
+#define GUARDIAN_PATH guardian_path()
+#endif
 // What after_mount does on a volume. Engine learns of a mount from edisksd's
 // mountinfo monitor (update_mountinfo -> filesystem_mounted -> Mountpoints
 // PropertiesChanged) while edisksd's mount thread is still inside this call, so
@@ -752,9 +765,6 @@ enum { MOUNT_PRE=1, MOUNT_POST=2, MOUNT_FULL=3 };
 #define CONVERTED 1
 #define TIMED_OUT 4
 #define HEALED 8
-#ifndef GUARDIAN_PATH
-#define GUARDIAN_PATH "/usr/local/bin/engine-guardian"
-#endif
 // An Engine stick (no rekordbox export): its database is repaired by
 // engine-guardian. BH-F52-1: that ran after the visible mount, a second writer
 // on m.db/hm.db while Engine opened them. It now runs in the private pre-mount,
@@ -848,7 +858,7 @@ static int after_mount(struct libmnt_context *ctx,int mode,int64_t deadline) {
     int done=0;
     if(pioneer&&mode!=MOUNT_POST){const char *rb=RB_BRIDGE_PATH();char *const a[]={(char *)rb,"--mount-path",(char *)target,NULL};if(!run(a,deadline))done=CONVERTED;else{if(errno==ETIMEDOUT)done=TIMED_OUT;note("bridge failed on",target,errno);}}
     if(heal) {
-        char *const a[]={GUARDIAN_PATH,"--heal-mount",(char *)target,"--data-only",NULL};
+        char *const a[]={(char *)GUARDIAN_PATH,"--heal-mount",(char *)target,"--data-only",NULL};
         if(run(a,deadline)){if(errno==ETIMEDOUT)done=TIMED_OUT;note("guardian failed on",target,errno);}
         done|=HEALED;
     }
