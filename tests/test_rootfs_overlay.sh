@@ -183,6 +183,25 @@ expect_fail sh "$STORAGE" add /dev/sdz1x
 run_storage --discover
 ok 'internal eMMC, malformed devices and coldplug discovery are handled safely'
 
+# BH-GC2-5: --discover also matched the whole disk of a partitioned stick (sda next
+# to sda1) and waited the full SC5000_MOUNT_WAIT for edisksd to mount it, which it
+# never does, holding the storage lock. A stick without partitions is still waited for.
+fixture
+device sda1 exfat
+mkdir -p "$SC5000_SYS_ROOT/class/block/sda/sda1"
+printf '/dev/sda1|exfat|%s/STICK|rw,nosuid\n' "$SC5000_MEDIA_ROOT" > "$MOCK_ROOT/mounts"
+start=$(date +%s)
+SC5000_MOUNT_WAIT=3 run_storage --discover
+[[ $(( $(date +%s) - start )) -lt 2 ]] || fail 'discover waited for a partitioned whole disk'
+has 'ready: /dev/sda1' "$MOCK_ROOT/output"
+lacks 'not mounted by edisksd: /dev/sda' "$MOCK_ROOT/output"
+mkdir -p "$SC5000_SYS_ROOT/class/block/sdb"
+start=$(date +%s)
+SC5000_MOUNT_WAIT=1 run_storage add /dev/sdb
+[[ $(( $(date +%s) - start )) -ge 1 ]] || fail 'a whole disk without partitions must still be waited for'
+has 'not mounted by edisksd: /dev/sdb' "$MOCK_ROOT/output"
+ok 'coldplug discovery skips partitioned whole disks at once; a superfloppy stick is still waited for'
+
 fixture
 mkdir -p "$SC5000_PROC_ROOT/sys/"{vm,fs}
 for knob in vm/swappiness vm/vfs_cache_pressure vm/dirty_background_ratio vm/dirty_ratio fs/file-max; do
