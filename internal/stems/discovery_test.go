@@ -165,3 +165,45 @@ func TestProxyUnreachable(t *testing.T) {
 		t.Fatalf("%v, %d bytes left", err, in.Len())
 	}
 }
+
+func TestDiscoverLANServerHandlesMTU1500MDNSResponse(t *testing.T) {
+	pc, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pc.Close()
+
+	go func() {
+		buf := make([]byte, 1500)
+		_, from, err := pc.ReadFrom(buf)
+		if err != nil {
+			return
+		}
+		// Build a valid ~1350-byte mDNS response (typical multi-record Avahi/Bonjour packet <= 1500 MTU).
+		pkt := mdnsAnswer(1, true, Beacon{Service: beaconService, Version: 2, Port: 18765, Backend: "htdemucs", Hostname: "studio-gpu"}, net.IPv4(127, 0, 0, 1))
+		pad := []byte(strings.Repeat("a", 1100))
+		// Append one additional TXT record (increase ARCOUNT at pkt[10:12] from 0 to 1) so total packet > 1024 bytes.
+		pkt[11] = 1
+		pkt = append(pkt, appendName(nil, "extra", "local")...)
+		pkt = append(pkt, 0, typeTXT, 0, 1, 0, 0, 0, 120)
+		var rdata []byte
+		for len(pad) > 0 {
+			chunk := pad[:min(200, len(pad))]
+			pad = pad[len(chunk):]
+			rdata = append(append(rdata, byte(len(chunk))), chunk...)
+		}
+		pkt = append(pkt, byte(len(rdata)>>8), byte(len(rdata)))
+		pkt = append(pkt, rdata...)
+		pc.WriteTo(pkt, from)
+	}()
+
+	oldDisc, oldMDNS := discoverTargets, mdnsTargets
+	discoverTargets = func() []*net.UDPAddr { return nil }
+	mdnsTargets = func() []*net.UDPAddr { return []*net.UDPAddr{pc.LocalAddr().(*net.UDPAddr)} }
+	t.Cleanup(func() { discoverTargets, mdnsTargets = oldDisc, oldMDNS })
+
+	endpoint, got, err := DiscoverLANServer(context.Background(), 300*time.Millisecond)
+	if err != nil || endpoint != "http://127.0.0.1:18765" || got.Backend != "htdemucs" || got.Hostname != "studio-gpu" {
+		t.Fatalf("DiscoverLANServer >1024B mDNS = (%q, %+v, %v)", endpoint, got, err)
+	}
+}

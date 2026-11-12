@@ -9,6 +9,7 @@ package stems
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -126,7 +127,8 @@ func DiscoverLANServer(ctx context.Context, timeout time.Duration) (string, Beac
 		return "", Beacon{}, err
 	}
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(timeout))
+	deadline := time.Now().Add(timeout)
+	conn.SetDeadline(deadline)
 	defer context.AfterFunc(ctx, func() { conn.SetDeadline(time.Now()) })()
 	for _, t := range discoverTargets() {
 		conn.WriteToUDP([]byte(discoverProbe), t)
@@ -135,11 +137,15 @@ func DiscoverLANServer(ctx context.Context, timeout time.Duration) (string, Beac
 	for _, t := range mdnsTargets() {
 		conn.WriteToUDP(query, t)
 	}
-	buf := make([]byte, 1024)
+	buf := make([]byte, 4096)
 	for {
 		n, from, err := conn.ReadFromUDP(buf)
 		if err != nil {
-			return "", Beacon{}, err
+			var ne net.Error
+			if ctx.Err() != nil || time.Now().After(deadline) || (errors.As(err, &ne) && ne.Timeout()) {
+				return "", Beacon{}, err
+			}
+			continue
 		}
 		var b Beacon
 		if json.Unmarshal(buf[:n], &b) != nil {
