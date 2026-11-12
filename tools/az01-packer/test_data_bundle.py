@@ -156,6 +156,20 @@ class DataBundleTest(unittest.TestCase):
         self.assertEqual((dest / 'gen2-unlocked').read_text(), '1\n')
         self.assertEqual((dest / 'version.txt').read_text(), '5.3.0.1.1\n')
         self.assertEqual([p.name for p in dest.glob('.img-install.*')], [])  # scratch dir removed
+        # BH2-A7-8: what an install that lost power left behind goes with the next install;
+        # a link of that name is not followed.
+        stale = dest / '.img-install.AbCdEf'
+        (stale / 'SCLIVE4-old/bin').mkdir(parents=True)
+        (stale / 'SCLIVE4-old/bin/sc5000-suite').write_bytes(b'x' * 4096)
+        keep = self.tmp / 'not-ours'
+        keep.mkdir()
+        (keep / 'file').write_text('stays')
+        (dest / '.img-install.link').symlink_to(keep)
+        out = run(img)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(sorted(p.name for p in dest.glob('.img-install.*')), ['.img-install.link'])
+        self.assertEqual((keep / 'file').read_text(), 'stays')
+        (dest / '.img-install.link').unlink()
         # a flipped byte in the payload and a truncated image install nothing
         shutil.rmtree(dest)
         bad = self.tmp / 'bad.img'

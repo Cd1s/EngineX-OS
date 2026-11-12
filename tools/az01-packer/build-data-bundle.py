@@ -490,8 +490,14 @@ if [ "$#" -gt 0 ] && [ -f "$1" ] && [ "$(dd if="$1" bs=27 count=1 2>/dev/null)" 
     got=$(tail -c +129 "$1" | sha256sum | cut -d' ' -f1)
     [ -n "$want" ] && [ "$want" = "$got" ] || { echo "image damaged: SHA-256 mismatch" >&2; exit 1; }
     mkdir -p "${SC5000_CUSTOM:-/data/enginex}"
+    # BH2-A7-8: an install that lost power or was killed never ran its exit trap and
+    # left its unpacked copy of the bundle here, tens of megabytes of /data each time.
+    for stale in "${SC5000_CUSTOM:-/data/enginex}"/.img-install.*; do
+        [ ! -d "$stale" ] || [ -L "$stale" ] || rm -rf "$stale"
+    done
     work=$(mktemp -d "${SC5000_CUSTOM:-/data/enginex}/.img-install.XXXXXX")
     trap 'rm -rf "$work"' 0
+    trap 'exit 1' HUP INT TERM # a signal ends through the exit trap
     tail -c +129 "$1" | tar -xzf - -C "$work"
     sh "$work"/*/install.sh
     exit 0
