@@ -140,3 +140,37 @@ func TestOneLibraryAdapterStreamsProjectedColumnsWithoutMaterializingUnusedBlobs
 	}
 }
 
+func TestValidateDisambiguatesPromotedOrphanPlaylists(t *testing.T) {
+	for _, orphanFirst := range []bool{false, true} {
+		pls := []Playlist{
+			{ID: 1, ParentID: 0, Name: "Favorites", Tracks: []uint32{1}},
+			{ID: 2, ParentID: 999, Name: "Favorites", Tracks: []uint32{1}},
+		}
+		if orphanFirst {
+			pls[0], pls[1] = pls[1], pls[0]
+		}
+		l := &Library{
+			Tracks:    []Track{{ID: 1, Path: "/Contents/test.mp3", BPM: 120, Duration: 180}},
+			Playlists: pls,
+		}
+		if err := l.Validate(); err != nil {
+			t.Fatalf("orphanFirst=%v Validate failed: %v", orphanFirst, err)
+		}
+		if l.Playlists[0].ParentID != 0 || l.Playlists[1].ParentID != 0 {
+			t.Fatalf("orphanFirst=%v expected both at root, got %+v", orphanFirst, l.Playlists)
+		}
+		if l.Playlists[0].Name == l.Playlists[1].Name {
+			t.Fatalf("orphanFirst=%v promoted orphan collided with root playlist name: %+v", orphanFirst, l.Playlists)
+		}
+		// Original root playlist (ID 1) keeps "Favorites"; promoted orphan (ID 2) gets "Favorites (2)".
+		byID := map[uint32]string{}
+		for _, p := range l.Playlists {
+			byID[p.ID] = p.Name
+		}
+		if byID[1] != "Favorites" || byID[2] != "Favorites (2)" {
+			t.Fatalf("orphanFirst=%v unexpected disambiguated names: %+v", orphanFirst, byID)
+		}
+	}
+}
+
+

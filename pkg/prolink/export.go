@@ -238,7 +238,9 @@ func (e *Exporter) SetEnabled(on bool) error {
 	if err != nil {
 		return err
 	}
+	r.mu.Lock()
 	r.deck = e.deck
+	r.mu.Unlock()
 	e.run = r
 	return nil
 }
@@ -664,6 +666,7 @@ func (r *exportRun) chooseLocked(now time.Time) {
 			}
 		}
 	}
+	r.first = len(r.peers) == 0
 	old := r.player
 	r.player = 0
 	if !r.probed || !r.mounted || now.Before(r.floodUntil) {
@@ -836,9 +839,10 @@ func (r *exportRun) announceLoop(probe time.Duration) {
 		case <-r.done:
 			return
 		case <-timer.C:
+			st, err := os.Stat(r.pdb)
 			r.mu.Lock()
 			r.probed = true
-			r.first = len(r.peers) == 0
+			r.mounted = err == nil && os.SameFile(r.pdbInfo, st) && r.pdbInfo.ModTime().Equal(st.ModTime()) && r.pdbInfo.Size() == st.Size()
 			r.chooseLocked(time.Now())
 			r.mu.Unlock()
 		case <-statusTicker.C:
@@ -869,6 +873,7 @@ func (r *exportRun) announceLoop(probe time.Duration) {
 			r.sendLocked(r.status, r.mediaPacket(), r.media)
 		}
 		r.mu.Unlock()
+		r.sendStatus()
 	}
 }
 func linkPacket(kind byte, length, nameOffset int) []byte {

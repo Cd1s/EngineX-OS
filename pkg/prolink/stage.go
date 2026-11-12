@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -83,6 +84,19 @@ func Stage(ctx context.Context, c *NFSClient, export, dst string, max int64) (in
 		return 0, err
 	}
 	copied, used := 0, int64(0)
+	localPDB := filepath.Clean(filepath.Join(dst, pdbPath))
+	_ = filepath.WalkDir(dst, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !d.Type().IsRegular() {
+			return nil
+		}
+		if filepath.Clean(p) == localPDB || strings.HasPrefix(d.Name(), ".fetch-") {
+			return nil
+		}
+		if info, ierr := d.Info(); ierr == nil {
+			used += info.Size()
+		}
+		return nil
+	})
 	full := errors.New("full")
 	tw := &throttled{ctx: ctx, start: time.Now()}
 	fetch := func(remote string, limit uint32) error {
