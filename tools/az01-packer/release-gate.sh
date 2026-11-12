@@ -251,6 +251,7 @@ SH
             wait_for "$ENGINE_START" bash -c 'test -s "$1/boot-ready" && cmp -s "$1/boot-token" "$1/boot-ready" && test ! -e "$1/safe-mode"' sh "$ui"
         check "new: render probe ran without errors" bash -c "! grep -aq 'SCPROBE error|' '$log'"
         check "new: boot splash unlocked and dismissed (#140)" grep -aqF 'SCPROBE splash|0|1|' "$log"
+        check "new: Source Demo Tracks and Sampler Content connect without freeze" grep -aqF 'SCPROBE demosource|1|1|' "$log"
         label=$(grep -ao 'SCPROBE entry|[^|]*|Deezer|1|' "$log" | head -1 | cut -d'|' -f2) || :
         check "new: Settings -> Services -> Streaming shows the pack's Deezer row" test -n "$label"
         check "new: Streaming shows SoundCloud once (stock row hidden)" test "$(grep -acF "SCPROBE entry|$label|SoundCloud|1|" "$log")" -eq 1
@@ -276,7 +277,7 @@ SH
             test "$(grep -ac 'engine-ui-hook: applied 0x' "$log")" -eq "$EXPECT_APPLIED"
         check "new: $EXPECT_DSP DSP guards installed" grep -aq "engine-ui-hook: $EXPECT_DSP DSP guards/transitions installed" "$log"
         check "new: SQLite hooks installed" grep -aq 'engine-ui-hook: SQLite open/open_v2 hooks installed' "$log"
-        check "new: no QML load errors" bash -c "! grep -aE 'Type [A-Za-z_][A-Za-z0-9_]* unavailable|PropertyChanges does not support creating|state-specific objects|is not a type|is not installed|Cannot assign to non-existent|Expected token|Syntax error|QQmlComponent: Component is not ready|failed to load component' '$log'"
+        check "new: no QML load errors" bash -c "! grep -aE 'Type [A-Za-z_][A-Za-z0-9_]* unavailable|PropertyChanges does not support creating|state-specific objects|is not a type|is not installed|Cannot assign to non-existent|Expected token|Syntax error|QQmlComponent: Component is not ready|failed to load component|possible QQuickItem::polish\\(\\)|called polish\\(\\) inside updatePolish' '$log'"
         check "new: no Engine crash" bash -c "! grep -aE 'Crash with|Unknown exit code' '$log'"
         for v in "${!pid[@]}"; do check "new: $v still running after ${ENGINE_SECONDS}s" kill -0 "${pid[$v]}"; done
         # Fields 41/19 are policy/nice: fair background work must retain progress.
@@ -324,6 +325,7 @@ SH
         check "boot2: UI hook replaced all $want pack files + the gate probe (got ${files:-0})" test "${files:-0}" -ge $((want + 1)) -a "$want" -gt 0
         check "boot2: render probe ran without errors" bash -c "! grep -aq 'SCPROBE error|' '$log'"
         check "boot2: boot splash unlocked and dismissed (#140)" grep -aqF 'SCPROBE splash|0|1|' "$log"
+        check "boot2: Source Demo Tracks and Sampler Content connect without freeze" grep -aqF 'SCPROBE demosource|1|1|' "$log"
         label=$(grep -ao 'SCPROBE entry|[^|]*|Deezer|1|' "$log" | head -1 | cut -d'|' -f2) || :
         check "boot2: Settings -> Services -> Streaming shows the pack's Deezer row" test -n "$label"
         check "boot2: About shows EngineX OS $NEWV" grep -aqF "SCPROBE version|EngineX OS $NEWV " "$log"
@@ -332,7 +334,7 @@ SH
             test "$(grep -ac 'engine-ui-hook: applied 0x' "$log")" -eq "$EXPECT_APPLIED"
         check "boot2: $EXPECT_DSP DSP guards installed" grep -aq "engine-ui-hook: $EXPECT_DSP DSP guards/transitions installed" "$log"
         check "boot2: SQLite hooks installed" grep -aq 'engine-ui-hook: SQLite open/open_v2 hooks installed' "$log"
-        check "boot2: no QML load errors" bash -c "! grep -aE 'Type [A-Za-z_][A-Za-z0-9_]* unavailable|PropertyChanges does not support creating|state-specific objects|is not a type|is not installed|Cannot assign to non-existent|Expected token|Syntax error|QQmlComponent: Component is not ready|failed to load component' '$log'"
+        check "boot2: no QML load errors" bash -c "! grep -aE 'Type [A-Za-z_][A-Za-z0-9_]* unavailable|PropertyChanges does not support creating|state-specific objects|is not a type|is not installed|Cannot assign to non-existent|Expected token|Syntax error|QQmlComponent: Component is not ready|failed to load component|possible QQuickItem::polish\\(\\)|called polish\\(\\) inside updatePolish' '$log'"
         check "boot2: no Engine crash" bash -c "! grep -aE 'Crash with|Unknown exit code' '$log'"
         for v in "${!pid[@]}"; do check "boot2: $v still running after ${BOOT2_SECONDS}s" kill -0 "${pid[$v]}"; done
         check "boot2: UI-ready cleared the crash count (#140)" \

@@ -102,6 +102,31 @@ class UiModSourceTest(unittest.TestCase):
         self.assertIn("case $PRODUCT in JP07|JP08|JP13|JP14) applied=20 ;; *) applied=28 ;; esac", gate)
         self.assertIn("powercut-truncated.qmlc", gate)
 
+    def test_connected_source_disables_listview_sections_to_prevent_demo_polish_loop(self):
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            edits = bp.edits(False)
+            cs_patches = edits["Skins/Embedded/Views/BrowserSource/ConnectedSource.qml"]
+            stock_cs = (Path("/root/build/sc5000-lab/5.3.0/qrc/Skins/Embedded/Views/BrowserSource/ConnectedSource.qml").read_text()
+                        if Path("/root/build/sc5000-lab/5.3.0/qrc/Skins/Embedded/Views/BrowserSource/ConnectedSource.qml").is_file()
+                        else "ListView {\n    currentIndex: -1\n    delegate: ConnectedSourceDelegate {\n        height: 108\n        leftPadding: 8\n    }\n    section.property: \"typeText\"\n}\n")
+            patched = stock_cs
+            for old, new in cs_patches:
+                patched = bp.patch(patched, old, new, "ConnectedSource.qml")
+            self.assertIn('section.property: ""', patched)
+            self.assertNotIn('section.property: "typeText"', patched)
+            avail = edits["Skins/Embedded/Views/BrowserSource/AvailableSource.qml"]
+            self.assertNotIn("Demo", avail)
+            self.assertNotIn("Sampler", avail)
+        finally:
+            bp.ROOT = old_root
+        probe = (BUILD_PACKS.parent.parent / "az01-packer/gate-ui-probe.qml").read_text()
+        gate = (BUILD_PACKS.parent.parent / "az01-packer/release-gate.sh").read_text()
+        self.assertIn("SCPROBE demosource|", probe)
+        self.assertIn("SCPROBE demosource|1|1|", gate)
+        self.assertIn("polish", gate)
+
     def test_shadow_layer_uses_stock_owner_outside_layouts(self):
         for source, owner in (("RowLayout {\n    id: deckInfo\n}\n", "deckInfo"),
                               ("Item {\n    width: 800\n}\n", "scStockShadowHost")):
