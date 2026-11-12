@@ -251,15 +251,20 @@ func extractMP3Artwork(f io.ReadSeeker) ([]byte, error) {
 		return id3v22Artwork(tagData)
 	}
 
+	// Every length below is a 32-bit claim of the file: compared in int64, so that on the
+	// first-generation decks' 32-bit build (int is 32 bits) none can wrap past a bound.
 	offset := 0
 	if flags&0x40 != 0 {
+		var extSize int64
 		if ver == 4 && len(tagData) >= 4 {
-			extSize := int(tagData[0]&0x7F)<<21 | int(tagData[1]&0x7F)<<14 | int(tagData[2]&0x7F)<<7 | int(tagData[3]&0x7F)
-			offset = extSize
+			extSize = int64(tagData[0]&0x7F)<<21 | int64(tagData[1]&0x7F)<<14 | int64(tagData[2]&0x7F)<<7 | int64(tagData[3]&0x7F)
 		} else if ver == 3 && len(tagData) >= 4 {
-			extSize := int(binary.BigEndian.Uint32(tagData[:4]))
-			offset = 4 + extSize
+			extSize = 4 + int64(binary.BigEndian.Uint32(tagData[:4]))
 		}
+		if extSize > int64(len(tagData)) {
+			return nil, ErrNoArtwork
+		}
+		offset = int(extSize)
 	}
 
 	for offset+10 <= len(tagData) {
@@ -267,15 +272,16 @@ func extractMP3Artwork(f io.ReadSeeker) ([]byte, error) {
 			break
 		}
 		frameID := string(tagData[offset : offset+4])
-		var frameSize int
+		var size int64
 		if ver == 4 {
-			frameSize = int(tagData[offset+4]&0x7F)<<21 | int(tagData[offset+5]&0x7F)<<14 | int(tagData[offset+6]&0x7F)<<7 | int(tagData[offset+7]&0x7F)
+			size = int64(tagData[offset+4]&0x7F)<<21 | int64(tagData[offset+5]&0x7F)<<14 | int64(tagData[offset+6]&0x7F)<<7 | int64(tagData[offset+7]&0x7F)
 		} else {
-			frameSize = int(binary.BigEndian.Uint32(tagData[offset+4 : offset+8]))
+			size = int64(binary.BigEndian.Uint32(tagData[offset+4 : offset+8]))
 		}
-		if frameSize <= 0 || offset+10+frameSize > len(tagData) {
+		if size <= 0 || size > int64(len(tagData)-offset-10) {
 			break
 		}
+		frameSize := int(size)
 		frameBody := tagData[offset+10 : offset+10+frameSize]
 		if frameID == "APIC" {
 			if idx := findImageOffset(frameBody); idx >= 0 {
@@ -325,19 +331,27 @@ func extractFLACArtwork(f io.ReadSeeker) ([]byte, error) {
 		blockLen := int(hdr[1])<<16 | int(hdr[2])<<8 | int(hdr[3])
 
 		if blockType == 6 {
-			data := make([]byte, blockLen)
+			// The block header's length is a claim too: no more than the file holds.
+			left, err := remaining(f)
+			if err != nil {
+				return nil, err
+			}
+			if int64(blockLen) > left {
+				return nil, ErrNoArtwork
+			}
+			data := make([]byte, min(int64(blockLen), maxArtworkBytes))
 			if _, err := io.ReadFull(f, data); err != nil {
 				return nil, err
 			}
-			if len(data) >= 32 {
-				mimeLen := int(binary.BigEndian.Uint32(data[4:8]))
-				if 8+mimeLen+4 <= len(data) {
-					descLen := int(binary.BigEndian.Uint32(data[8+mimeLen : 8+mimeLen+4]))
+			if n := int64(len(data)); n >= 32 {
+				mimeLen := int64(binary.BigEndian.Uint32(data[4:8]))
+				if 8+mimeLen+4 <= n {
+					descLen := int64(binary.BigEndian.Uint32(data[8+mimeLen : 8+mimeLen+4]))
 					dataOffset := 8 + mimeLen + 4 + descLen + 16
-					if dataOffset+4 <= len(data) {
-						imgLen := int(binary.BigEndian.Uint32(data[dataOffset : dataOffset+4]))
+					if dataOffset+4 <= n {
+						imgLen := int64(binary.BigEndian.Uint32(data[dataOffset : dataOffset+4]))
 						imgStart := dataOffset + 4
-						if imgStart+imgLen <= len(data) {
+						if imgStart+imgLen <= n {
 							return validateImage(data[imgStart : imgStart+imgLen])
 						}
 					}
@@ -392,7 +406,7 @@ func parseMP4Atoms(f io.ReadSeeker, start, length int64) ([]byte, error) {
 		} else if atomSize == 0 {
 			atomSize = (start + length) - curr
 		}
-		if atomSize < headerLen || curr+atomSize > start+length {
+		if atomSize < headerLen || atomSize > start+length-curr { // a 64-bit size must not wrap curr
 			break
 		}
 
