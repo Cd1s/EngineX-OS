@@ -109,6 +109,7 @@ type Broadcaster struct {
 	hub hub
 
 	lanStreamer *LANStreamer
+	lanErr      string // why there is no lanStreamer although LAN streaming is on
 
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -243,9 +244,21 @@ func (b *Broadcaster) Status() Status {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	// The LAN stream counts as streaming while it has a socket, and says why when it has none.
+	lanUp, lastError := false, b.lastError
+	lanErr := b.lanErr
+	if b.lanStreamer != nil {
+		lanUp, lanErr = b.lanStreamer.Connected(), b.lanStreamer.Err()
+	}
+	if lanErr != "" {
+		if lastError != "" {
+			lastError += "; "
+		}
+		lastError += "LAN stream: " + lanErr
+	}
 	return Status{
 		Enabled:      b.cfg.Enabled,
-		Streaming:    b.streaming || (b.capturing && (b.cfg.ServerURL == "" || (b.cfg.LANMode != "" && b.cfg.LANMode != "off"))),
+		Streaming:    b.streaming || (b.capturing && (b.cfg.ServerURL == "" || lanUp)),
 		Protocol:     b.cfg.Protocol,
 		ServerURL:    b.cfg.ServerURL,
 		Mountpoint:   b.cfg.Mountpoint,
@@ -258,7 +271,7 @@ func (b *Broadcaster) Status() Status {
 		BytesSent:    b.bytesSent.Load(),
 		Listeners:    b.hub.count(),
 		ConnectedAt:  b.connectedAt,
-		LastError:    b.lastError,
+		LastError:    lastError,
 		LANMode:      b.cfg.LANMode,
 		LANTarget:    b.cfg.LANTarget,
 		DriftPPM:     float64(b.driftPPB.Load()) / 1000,
@@ -287,10 +300,16 @@ func (b *Broadcaster) startLocked() {
 			SampleRate: 48000,
 			Channels:   2,
 		})
-		if err == nil {
+		// BH2-A3-6: both errors were dropped, and Status said "streaming" with no
+		// error while nothing was sent. A target that does not resolve is reported;
+		// a socket that cannot be opened yet is reported and retried by Push.
+		if err != nil {
+			b.lanErr = err.Error()
+		} else {
 			b.lanStreamer = streamer
-			_ = streamer.Start()
-			b.streaming = true
+			if streamer.Start() == nil {
+				b.streaming = true
+			}
 		}
 	}
 
@@ -317,6 +336,7 @@ func (b *Broadcaster) stopLocked() {
 		_ = b.lanStreamer.Close()
 		b.lanStreamer = nil
 	}
+	b.lanErr = ""
 	b.streaming = false
 	b.connectedAt = ""
 	b.hub.closeAll()
