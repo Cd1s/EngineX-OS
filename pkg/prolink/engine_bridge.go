@@ -184,7 +184,11 @@ func SyncEngineToPioneerExport(root string) error {
 		if engineColumn(db, "PerformanceData", "beatData") {
 			beatHeaderColumn = "substr((SELECT beatData FROM PerformanceData WHERE trackId=Track.id),1,2097153)"
 		}
-		trackRows, err := db.Query(`SELECT id, COALESCE(title, ''), COALESCE(artist, ''), COALESCE(bpm, 0), COALESCE(bpmAnalyzed, 0), COALESCE(length, 0), COALESCE(path, ''), COALESCE(filename, ''), ` + keyColumn + `, ` + artColumn + `, ` + bytesColumn + `, ` + beatHeaderColumn + ` FROM Track ORDER BY id`)
+		whereClause := ` WHERE TRIM(COALESCE(path, '')) != ''`
+		if engineColumn(db, "Track", "streamingSource") {
+			whereClause += ` AND COALESCE(streamingSource, '') = ''`
+		}
+		trackRows, err := db.Query(`SELECT id, COALESCE(title, ''), COALESCE(artist, ''), COALESCE(bpm, 0), COALESCE(bpmAnalyzed, 0), COALESCE(length, 0), COALESCE(path, ''), COALESCE(filename, ''), ` + keyColumn + `, ` + artColumn + `, ` + bytesColumn + `, ` + beatHeaderColumn + ` FROM Track` + whereClause + ` ORDER BY id`)
 		if err != nil {
 			return fmt.Errorf("query engine tracks: %w", err)
 		}
@@ -209,9 +213,16 @@ func SyncEngineToPioneerExport(root string) error {
 			if err := trackRows.Scan(&id, &title, &artist, &bpmInt, &bpmAnalyzed, &length, &rawPath, &filename, &key, &artID, &fileSize, &beatHeader); err != nil {
 				return fmt.Errorf("scan engine track: %w", err)
 			}
-			if id == 0 {
+			if id == 0 || strings.TrimSpace(rawPath) == "" {
 				continue
 			}
+			cleanRoot := filepath.Clean(root)
+			absAudio := filepath.Clean(filepath.Join(cleanRoot, "Engine Library", filepath.FromSlash(rawPath)))
+			relToRoot, relErr := filepath.Rel(cleanRoot, absAudio)
+			if relErr != nil || relToRoot == "." || !filepath.IsLocal(relToRoot) {
+				continue
+			}
+			cleanPath := "/" + filepath.ToSlash(relToRoot)
 			seenEngineIDs[id] = true
 			if title == "" {
 				if filename != "" {
@@ -230,16 +241,6 @@ func SyncEngineToPioneerExport(root string) error {
 			if length < 0 {
 				length = 0
 			}
-
-			cleanPath := rawPath
-			for strings.HasPrefix(cleanPath, "../") {
-				cleanPath = strings.TrimPrefix(cleanPath, "../")
-			}
-			for strings.HasPrefix(cleanPath, "./") {
-				cleanPath = strings.TrimPrefix(cleanPath, "./")
-			}
-			cleanPath = filepath.Clean(cleanPath)
-			cleanPath = "/" + strings.TrimPrefix(filepath.ToSlash(cleanPath), "/")
 
 			newID := id
 			if mapped := trackIDMap[id]; mapped != 0 {

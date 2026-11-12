@@ -771,6 +771,30 @@ func TestEngineBridgeDoesNotInventUnknownDuration(t *testing.T) {
 	}
 }
 
+func TestEngineBridgePackedPathsTraversalAndStreamingRows(t *testing.T) {
+	bridgeNoStreams(t)
+	_, root, db := testlibrary.Create(t)
+	// Packed Engine Desktop Sync Manager track lives under <root>/Engine Library/Music/...
+	testfixture.Write(t, root, "Engine Library/Music/Artist/Packed.wav", bytes.Repeat([]byte{0}, 1024))
+	bridgeExec(t, db, `INSERT INTO Track(id,title,artist,path,filename,length) VALUES(1,'Packed','Artist','Music/Artist/Packed.wav','Packed.wav',180)`)
+	// Mid-path .. traversal escaping root must be skipped, not probed outside root.
+	bridgeExec(t, db, `INSERT INTO Track(id,title,artist,path,filename,length) VALUES(2,'Escape','Bad','sub/../../../outside.wav','outside.wav',180)`)
+	// Streaming rows (empty/NULL path or non-empty streamingSource) must not export as "/.".
+	bridgeExec(t, db, `INSERT INTO Track(id,title,artist,path,filename,streamingSource,length) VALUES(3,'Tidal Song','DJ',NULL,'','tidal',200)`)
+	bridgeExec(t, db, `INSERT INTO Track(id,title,artist,path,filename,length) VALUES(4,'Empty Path','DJ','','',200)`)
+
+	if err := prolink.SyncEngineToPioneerExport(root); err != nil {
+		t.Fatal(err)
+	}
+	lib := bridgeReadLibrary(t, root)
+	if len(lib.Tracks) != 1 {
+		t.Fatalf("expected only packed local track exported, got %d: %+v", len(lib.Tracks), lib.Tracks)
+	}
+	if lib.Tracks[0].Path != "/Engine Library/Music/Artist/Packed.wav" || lib.Tracks[0].FileSize != 1024 {
+		t.Fatalf("packed track misresolved: %+v", lib.Tracks[0])
+	}
+}
+
 // Completion is independent of the caller and never requires another OFF/ON.
 func bridgeWaitExportComplete(t *testing.T, root string) {
 	t.Helper()
