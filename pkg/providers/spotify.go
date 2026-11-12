@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"os"
@@ -196,6 +197,14 @@ func (s *Spotify) nativeBearer(ctx context.Context) (http.Header, error) {
 	return http.Header{"Authorization": {"Bearer " + token}}, nil
 }
 
+func oauthRefreshErr(err error) error {
+	var st StatusError
+	if errors.As(err, &st) && (st == 400 || st == 401) {
+		return fmt.Errorf("spotify: expired token; login required: %w", StatusError(401))
+	}
+	return err
+}
+
 func (s *Spotify) authorization(ctx context.Context) (http.Header, error) {
 	s.mu.Lock()
 	tok, clientID := s.Token, s.ClientID
@@ -233,7 +242,7 @@ func (s *Spotify) authorization(ctx context.Context) (http.Header, error) {
 		if s.HasStoredCredentials() {
 			return s.nativeBearer(ctx)
 		}
-		return nil, err
+		return nil, oauthRefreshErr(err)
 	}
 	s.refreshMu.Unlock()
 
@@ -241,9 +250,9 @@ func (s *Spotify) authorization(ctx context.Context) (http.Header, error) {
 		return s.nativeBearer(ctx)
 	}
 	if tokenExpired(tok) {
-		return nil, errors.New("spotify: expired token; login required")
+		return nil, fmt.Errorf("spotify: expired token; login required: %w", StatusError(401))
 	}
-	return nil, errors.New("spotify: login required")
+	return nil, fmt.Errorf("spotify: login required: %w", StatusError(401))
 }
 
 func (s *Spotify) refreshAfter401(ctx context.Context, failedAuth string) (http.Header, error) {
@@ -276,7 +285,7 @@ func (s *Spotify) refreshAfter401(ctx context.Context, failedAuth string) (http.
 		if s.HasStoredCredentials() {
 			return s.nativeBearer(ctx)
 		}
-		return nil, err
+		return nil, oauthRefreshErr(err)
 	}
 	s.refreshMu.Unlock()
 	if s.HasStoredCredentials() {

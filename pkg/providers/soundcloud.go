@@ -12,6 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -81,6 +82,10 @@ func (a *SoundCloudAuth) Token(ctx context.Context, id, secret string) (string, 
 		err = a.post(ctx, form, id, secret, &r)
 	}
 	if err != nil {
+		var st StatusError
+		if errors.As(err, &st) && (st == 400 || st == 401) {
+			return "", fmt.Errorf("soundcloud: invalid credentials: %w", StatusError(401))
+		}
 		return "", err
 	}
 	a.saved.ClientID, a.saved.Access, a.saved.Refresh, a.saved.Expiry = id, r.Access, r.Refresh, r.expiry()
@@ -177,7 +182,7 @@ func (a *SoundCloudAuth) UserToken(ctx context.Context, id, secret string) (stri
 	}
 	if a.saved.UserRefresh == "" {
 		a.dropUser()
-		return "", errors.New("soundcloud: login expired")
+		return "", fmt.Errorf("soundcloud: login expired: %w", StatusError(401))
 	}
 	var r soundCloudTokenResponse
 	form := url.Values{"grant_type": {"refresh_token"}, "refresh_token": {a.saved.UserRefresh}}
@@ -187,6 +192,7 @@ func (a *SoundCloudAuth) UserToken(ctx context.Context, id, secret string) (stri
 		var st StatusError
 		if errors.As(err, &st) && (st == 400 || st == 401) {
 			a.dropUser()
+			return "", fmt.Errorf("soundcloud: login expired: %w", StatusError(401))
 		}
 		return "", err
 	}
@@ -442,8 +448,8 @@ func (s *SoundCloud) headers(ctx context.Context) (http.Header, error) {
 	default:
 		return nil, errors.New("soundcloud: not connected")
 	}
-	if err != nil && appKeys && !s.Auth.HasUser() {
-		// The account login expired for good: carry on as without one.
+	if err != nil && appKeys && !s.Auth.HasUser() && (s.Token != "" || s.UserID != 0) {
+		// The account login expired for good: carry on as without one when a pasted token or public UserID exists.
 		if token, err = s.Token, nil; token == "" {
 			token, err = s.Auth.Token(ctx, s.ClientID, s.Secret)
 		}
@@ -455,15 +461,36 @@ func (s *SoundCloud) headers(ctx context.Context) (http.Header, error) {
 	return h, nil
 }
 
+func (a *SoundCloudAuth) invalidateUser(stale string) {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.load()
+	if stale != "" && a.saved.UserAccess == stale {
+		a.saved.UserExpiry = time.Time{}
+	}
+}
+
 func (s *SoundCloud) get(ctx context.Context, address string, out any) error {
 	if s.web() {
 		return s.webGet(ctx, address, out)
 	}
+	hadUser := s.Auth != nil && s.Auth.HasUser()
 	h, err := s.headers(ctx)
 	if err != nil {
 		return err
 	}
-	return JSON(ctx, s.HTTP, "GET", address, nil, h, out)
+	err = JSON(ctx, s.HTTP, "GET", address, nil, h, out)
+	var st StatusError
+	if hadUser && errors.As(err, &st) && st == 401 && s.ClientID != "" && s.Secret != "" {
+		s.Auth.invalidateUser(strings.TrimPrefix(h.Get("Authorization"), "OAuth "))
+		if h2, rerr := s.headers(ctx); rerr == nil {
+			return JSON(ctx, s.HTTP, "GET", address, nil, h2, out)
+		}
+	}
+	return err
 }
 
 func (s *SoundCloud) list(path string, q url.Values) string {
