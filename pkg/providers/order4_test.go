@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -186,4 +188,83 @@ func TestProvidersSurfacePage2AndFallbackMaskedAuthErrors(t *testing.T) {
 	if _, err := sc.Tracks(ctx, "55"); !errors.Is(err, StatusError(502)) {
 		t.Fatalf("SoundCloud.Tracks dropped page 2 HTTP 502: err=%v", err)
 	}
+}
+
+func TestBPMStoreCancelledContextDoesNotAdvanceSpotifyNextAndConfigNoRace(t *testing.T) {
+	var searches atomic.Int32
+	spSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		searches.Add(1)
+		io.WriteString(w, `{"tracks":{"items":[{"id":"sp1","name":"Song","duration_ms":200000,"external_ids":{"isrc":"USAAA2600001"},"artists":[{"name":"Artist"}]}]}}`)
+	}))
+	defer spSrv.Close()
+
+	sp := &Spotify{
+		BaseURL: spSrv.URL,
+		Token:   Token{AccessToken: "ok", Expiry: time.Now().Add(time.Hour)},
+	}
+	cfgPath := filepath.Join(t.TempDir(), "bpm-config.json")
+	store := &BPMStore{
+		Path:       filepath.Join(t.TempDir(), "bpm.json"),
+		ConfigPath: cfgPath,
+		Spotify:    func() *Spotify { return sp },
+	}
+
+	// 25 already-cancelled calls must not push spotifyNext 50 seconds into the future.
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for i := 0; i < 25; i++ {
+		_ = store.spotifySearch(cancelledCtx, Track{Title: "Song", Artist: "Artist"})
+	}
+	if searches.Load() != 0 {
+		t.Fatalf("cancelled context still queried Spotify %d times", searches.Load())
+	}
+
+	liveCtx, liveCancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer liveCancel()
+	got := store.spotifySearch(liveCtx, Track{Title: "Song", Artist: "Artist"})
+	if len(got) != 1 || searches.Load() != 1 {
+		t.Fatalf("live spotifySearch starved behind cancelled contexts: got=%v searches=%d", got, searches.Load())
+	}
+
+	// Mid-wait context cancellations during the 2s pacing gap must not stack extra delays onto spotifyNext.
+	for i := 0; i < 10; i++ {
+		shortCtx, shortCancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+		_ = store.spotifySearch(shortCtx, Track{Title: "Song", Artist: "Artist"})
+		shortCancel()
+	}
+	store.mu.Lock()
+	remaining := time.Until(store.spotifyNext)
+	store.mu.Unlock()
+	if remaining > spotifyLookupGap+250*time.Millisecond {
+		t.Fatalf("mid-wait cancelled calls pushed spotifyNext to +%v", remaining)
+	}
+
+	// Concurrent Config / SaveConfig / UpdateConfig calls must serialize cleanly without race or partial file reads.
+	var wg sync.WaitGroup
+	for g := 0; g < 8; g++ {
+		wg.Add(2)
+		go func(i int) {
+			defer wg.Done()
+			for j := 0; j < 20; j++ {
+				if err := store.UpdateConfig(func(c *BPMConfig) {
+					c.SoundCloudClientID = fmt.Sprintf("cid-%d-%d", i, j)
+					c.GetSongBPMKey = "gsb-key"
+				}); err != nil {
+					t.Errorf("UpdateConfig: %v", err)
+					return
+				}
+			}
+		}(g)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 20; j++ {
+				cfg := store.Config()
+				if cfg.SoundCloudClientID != "" && cfg.GetSongBPMKey != "gsb-key" {
+					t.Errorf("torn BPMConfig read: %+v", cfg)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
 }
