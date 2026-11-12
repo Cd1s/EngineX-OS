@@ -213,6 +213,35 @@ func TestPerformanceBlobsWritesNonZeroBandPeaksAndTrailer(t *testing.T) {
 	if lowPeak < 0.25 || lowPeak > 0.42 || midPeak > 0.05 || highPeak > 0.01 {
 		t.Fatalf("trackData band peaks derived from stretched overview instead of measured peaks: low=%.4f mid=%.4f high=%.4f", lowPeak, midPeak, highPeak)
 	}
+
+	// Analysing the same full-band song at volumes 1.0, 0.25, and 0.05 must produce three distinct decreasing peak triples.
+	var triples [3][3]float64
+	for vi, vol := range []float32{1.0, 0.25, 0.05} {
+		scaled := make([]float32, len(a.Samples))
+		for i, s := range a.Samples {
+			scaled[i] = s * vol
+		}
+		vr, err := Analyze(&Audio{SampleRate: testaudio.Rate, Channels: 1, Samples: scaled}, Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		vt, _, _, err := PerformanceBlobs(vr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		vRaw := uncompress(t, vt)
+		if len(vRaw) != 68 {
+			t.Fatalf("vol %v trackData len=%d, want 68", vol, len(vRaw))
+		}
+		for c := 0; c < 3; c++ {
+			triples[vi][c] = math.Float64frombits(binary.BigEndian.Uint64(vRaw[20+8*c:]))
+		}
+	}
+	for c := 0; c < 3; c++ {
+		if !(triples[0][c] > triples[1][c] && triples[1][c] > triples[2][c] && triples[2][c] > 0) {
+			t.Fatalf("band %d peaks did not follow audio volume (1.0 / 0.25 / 0.05): %v", c, [3]float64{triples[0][c], triples[1][c], triples[2][c]})
+		}
+	}
 }
 func TestLibraryRejectsUnknownSchemaAndOffVolume(t *testing.T) {
 	p, _, db := testlibrary.Create(t)
