@@ -56,7 +56,7 @@ func newPipeline(out io.Writer) *pipeline {
 	p.up.data = func(b []byte) {
 		if !p.packed {
 			p.upOut = append(p.upOut, b...)
-		} else if p.in = append(p.in, b...); len(p.in) == p.inWant {
+		} else if p.in = append(p.in, b...); len(p.in) == p.inWant && len(p.input) > 0 {
 			for c, n := 0, len(p.in)/len(p.input); c < len(p.input); c++ {
 				p.input[c] = append(p.input[c], p.in[c*n:(c+1)*n]...)
 			}
@@ -158,7 +158,7 @@ func (p *pipeline) fromEngine(b []byte) ([]byte, error) {
 		p.upOut = append(p.upOut, p.up.raw...)
 		if p.maxBlock == 0 {
 			n, err := strconv.Atoi(f["maxBlockSize"])
-			if err != nil || n <= 0 {
+			if err != nil || n <= 0 || p.eng.Channels <= 0 {
 				return 0, fmt.Errorf("stems pipeline: bad init %v", f)
 			}
 			p.maxBlock = n
@@ -166,6 +166,9 @@ func (p *pipeline) fromEngine(b []byte) ([]byte, error) {
 		}
 		switch f["action"] {
 		case "block":
+			if p.eng.Channels <= 0 {
+				return 0, fmt.Errorf("stems pipeline: missing input channels")
+			}
 			n, err := count(f, "numSamples", int64(p.maxBlock))
 			if err != nil {
 				return 0, err
@@ -185,6 +188,9 @@ func (p *pipeline) fromEngine(b []byte) ([]byte, error) {
 		}
 		return 0, nil
 	})
+	if e == nil {
+		e = p.eng.Err()
+	}
 	if e == nil && p.awaiting && p.up.skip == 0 {
 		p.awaiting = false
 		if p.nplanes == 0 {
@@ -221,7 +227,7 @@ func (p *pipeline) Write(b []byte) (int, error) {
 		if err != nil || n < 0 || p.nplanes == 0 || !(p.started || p.done) {
 			return 0, fmt.Errorf("stems pipeline: unexpected returnFrames %q", v)
 		}
-		if p.packed && n > 0 && (p.input == nil || n > len(p.input[0])/4) {
+		if p.packed && n > 0 && (len(p.input) == 0 || n > len(p.input[0])/4) {
 			return 0, fmt.Errorf("stems pipeline: %d frames returned beyond the input", n)
 		}
 		p.replies++
