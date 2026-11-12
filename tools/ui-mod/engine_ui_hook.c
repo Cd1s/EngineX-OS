@@ -170,7 +170,13 @@ struct sc_seq_ext { uint32_t len; void *ptr; } __attribute__((packed)); // ALSA'
 static int led_pct = 100;
 static pthread_mutex_t led_mu = PTHREAD_MUTEX_INITIALIZER;
 static struct led_slot { uchar len; uchar raw[15]; uchar ev[SEQ_EV_SIZE]; void *handle; } led_slots[16][128];
-static void *seq_direct_cache, *seq_drain_cache;
+static void *seq_direct_cache;
+// A snd_seq_t is not thread-safe and Engine's own sends do not take led_mu, so the cached LEDs are
+// resent on Engine's thread, inside its next snd_seq_event_output_direct on the same handle, never
+// from the poll thread (BH-O55-4). led_gen counts brightness changes; each handle remembers the last
+// one it replayed.
+static unsigned led_gen;
+static struct { void *handle; unsigned gen; } led_seen[8];
 
 // RGB LED SysEx? On match fills ch/idx and the offset of the 3 RGB bytes. Screen SysEx (0B/7C) never matches.
 static int led_sysex(const uchar *b, uint32_t len, int *ch, int *idx, int *rgb) {
@@ -217,10 +223,44 @@ static void led_scaled_sysex(const uchar *raw, uint32_t len, int rgb, int pct, u
     }
 }
 
+// Caller holds led_mu, on Engine's thread: resend handle's cached RGB LEDs at the current level.
+static void led_replay_locked(int (*real)(void *, void *), void *handle, int pct) {
+    for (int c = 0; c < 16; c++)
+        for (int i = 0; i < 128; i++) {
+            struct led_slot *s = &led_slots[c][i];
+            int ch, idx, rgb;
+            if (!s->len || s->handle != handle || !led_sysex(s->raw, s->len, &ch, &idx, &rgb)) continue;
+            uchar scaled[16], copy[SEQ_EV_SIZE] __attribute__((aligned(8)));
+            struct sc_seq_ext ext = {s->len, scaled};
+            led_scaled_sysex(s->raw, s->len, rgb, pct, scaled);
+            memcpy(copy, s->ev, SEQ_EV_SIZE);
+            memcpy(copy + 16, &ext, sizeof ext);
+            real(handle, copy);
+        }
+}
+
+// A brightness change this handle has not replayed yet: replay it now, before Engine's own event.
+static void led_catch_up(int (*real)(void *, void *), void *handle) {
+    unsigned gen = __atomic_load_n(&led_gen, __ATOMIC_ACQUIRE);
+    if (!gen) return;
+    pthread_mutex_lock(&led_mu);
+    int k = 0, free_k = -1;
+    for (; k < 8 && led_seen[k].handle != handle; k++)
+        if (!led_seen[k].handle && free_k < 0) free_k = k;
+    if (k == 8) k = free_k;
+    if (k >= 0 && led_seen[k].gen != gen) {
+        led_seen[k].handle = handle;
+        led_seen[k].gen = gen;
+        led_replay_locked(real, handle, __atomic_load_n(&led_pct, __ATOMIC_RELAXED));
+    }
+    pthread_mutex_unlock(&led_mu);
+}
+
 int snd_seq_event_output_direct(void *handle, void *ev) {
     int (*real)(void *, void *) = next_symbol(&seq_direct_cache, "snd_seq_event_output_direct");
     if (!real) return -ENOSYS;
     if (!ev || !is_engine()) return real(handle, ev);
+    led_catch_up(real, handle);
     uchar *e = ev;
     if (e[0] == SEQ_SYSEX && (e[1] & 0x0c) == 0x04) {
         struct sc_seq_ext ext;
@@ -247,31 +287,13 @@ int snd_seq_event_output_direct(void *handle, void *ev) {
     return real(handle, ev);
 }
 
-// led_brightness= changed: resend cached RGB SysEx LEDs so the deck dims/brightens at once.
+// led_brightness= changed (poll thread): publish the level; Engine's thread resends the cached RGB
+// SysEx LEDs with its next controller event on each handle (led_catch_up), so the deck dims or
+// brightens without this thread ever writing to Engine's sequencer handle.
 static void led_replay(int pct) {
-    int (*direct)(void *, void *) = next_symbol(&seq_direct_cache, "snd_seq_event_output_direct");
-    int (*drain)(void *) = next_symbol(&seq_drain_cache, "snd_seq_drain_output");
-    if (!direct) return;
-    void *handles[8] = {0};
-    int nh = 0;
     pthread_mutex_lock(&led_mu);
     __atomic_store_n(&led_pct, pct, __ATOMIC_RELAXED);
-    for (int c = 0; c < 16; c++)
-        for (int i = 0; i < 128; i++) {
-            struct led_slot *s = &led_slots[c][i];
-            int ch, idx, rgb;
-            if (!s->len || !s->handle || !led_sysex(s->raw, s->len, &ch, &idx, &rgb)) continue;
-            uchar scaled[16], copy[SEQ_EV_SIZE] __attribute__((aligned(8)));
-            struct sc_seq_ext ext = {s->len, scaled};
-            led_scaled_sysex(s->raw, s->len, rgb, pct, scaled);
-            memcpy(copy, s->ev, SEQ_EV_SIZE);
-            memcpy(copy + 16, &ext, sizeof ext);
-            direct(s->handle, copy);
-            int k = 0;
-            while (k < nh && handles[k] != s->handle) k++;
-            if (k == nh && nh < 8) handles[nh++] = s->handle;
-        }
-    if (drain) for (int k = 0; k < nh; k++) drain(handles[k]);
+    __atomic_store_n(&led_gen, led_gen + 1 ? led_gen + 1 : 1, __ATOMIC_RELEASE);
     pthread_mutex_unlock(&led_mu);
 }
 

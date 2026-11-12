@@ -237,8 +237,10 @@ static void test_offline_analyzer(const char *filename) {
 // Pad LED Brightness: SysEx RGB is scaled after gamma and replayed when the level changes; single-colour NoteOn passes through untouched.
 static uchar sent[64][SEQ_EV_SIZE], sent_sx[64][16];
 static int nsent;
+static pthread_t sent_by[64];
 static int fake_direct(void *h, void *ev) {
     (void)h;
+    sent_by[nsent] = pthread_self();
     memcpy(sent[nsent], ev, SEQ_EV_SIZE);
     struct sc_seq_ext x; memcpy(&x, (uchar *)ev + 16, sizeof x);
     if (sent[nsent][0] == SEQ_SYSEX) memcpy(sent_sx[nsent], x.ptr, x.len);
@@ -259,8 +261,12 @@ static void test_led(void) {
     uchar note[SEQ_EV_SIZE] = {6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 100};
     snd_seq_event_output_direct((void *)1, note);
     assert(sent[1][18] == 100);
-    led_replay(20); // resends only the cached RGB SysEx, dimmed; NoteOn is never cached or altered
-    assert(nsent == 3 && sent_sx[2][11] == 4 && sent_sx[2][12] == 0 && sent_sx[2][13] == 2 && msg[11] == 127);
+    led_replay(20); // only publishes the level: nothing is sent from the settings thread (BH-O55-4)
+    assert(nsent == 2);
+    // Engine's next event on that handle first resends only the cached RGB SysEx, dimmed; NoteOn is never cached or altered
+    snd_seq_event_output_direct((void *)1, note);
+    assert(nsent == 4 && sent_sx[2][11] == 4 && sent_sx[2][12] == 0 && sent_sx[2][13] == 2 && msg[11] == 127);
+    assert(sent[3][0] == 6 && sent[3][18] == 100);
     // a dim hot cue (gamma'd 30/10/0) and unselected mode key / dim pad (1/2/0) stay visible (never 0) and keep hue; off (0/0/0) stays 0
     uchar out[16], cue[15] = {0xF0, 0, 0x02, 0x0B, 0, 0, 0x03, 0, 0x05, 0, 0, 30, 10, 0, 0xF7};
     uchar dim_pad[15] = {0xF0, 0, 0x02, 0x0B, 0, 0, 0x03, 0, 0x05, 0, 0, 1, 2, 0, 0xF7};
@@ -322,9 +328,39 @@ static void test_led(void) {
     }
     int before = nsent;
     led_replay(100);
-    assert(nsent == before + 1 && sent_sx[before][11] == 127);
+    assert(nsent == before);
+    snd_seq_event_output_direct((void *)1, note);
+    assert(nsent == before + 2 && sent_sx[before][11] == 127);
     hook_test_engine = 0;
     puts("pad LED brightness: scale after gamma, replay from cache: PASS");
+}
+
+// BH-O55-4: a snd_seq_t is not thread-safe. A brightness change on the settings poll thread must never
+// write to Engine's sequencer handle; the replay goes out on Engine's thread with its next event.
+static void *change_brightness(void *arg) { led_replay(*(int *)arg); return NULL; }
+static void test_led_replay_on_engine_thread(void) {
+    uchar msg[15] = {0xF0, 0, 0x02, 0x0B, 0, 0, 0x03, 0, 0x05, 1, 9, 127, 127, 127, 0xF7};
+    uchar ev[SEQ_EV_SIZE] = {SEQ_SYSEX, 0x04}, note[SEQ_EV_SIZE] = {6};
+    struct sc_seq_ext x = {15, msg};
+    memcpy(ev + 16, &x, sizeof x);
+    seq_direct_cache = fake_direct;
+    hook_test_engine = 1;
+    nsent = 0;
+    snd_seq_event_output_direct((void *)2, ev);
+    int pct = 40;
+    pthread_t poll;
+    assert(!pthread_create(&poll, NULL, change_brightness, &pct) && !pthread_join(poll, NULL));
+    assert(nsent == 1); // nothing sent from the poll thread
+    snd_seq_event_output_direct((void *)2, note);
+    assert(nsent == 3 && sent_sx[1][11] == 12 && sent[2][0] == 6);
+    for (int i = 0; i < nsent; i++) assert(pthread_equal(sent_by[i], pthread_self()));
+    snd_seq_event_output_direct((void *)2, note); // replayed once per change
+    assert(nsent == 4);
+    pct = 100;
+    assert(!pthread_create(&poll, NULL, change_brightness, &pct) && !pthread_join(poll, NULL));
+    hook_test_engine = 0;
+    seq_direct_cache = NULL;
+    puts("pad LED brightness: a change is replayed on Engine's thread with its next event, never from the poll thread (BH-O55-4): PASS");
 }
 
 static void test_stems_processor_fallback(void) {
@@ -438,6 +474,7 @@ int main(int argc, char **argv) {
     test_resources();
     test_collision();
     test_led();
+    test_led_replay_on_engine_thread();
     test_stems_processor_fallback();
     for (int i = 1; i < argc; i++) { test_engine(argv[i]); test_rec_stream(argv[i]); test_sqlite(argv[i]); test_dsp(argv[i]); }
     const char *oa = getenv("AZ04_OFFLINE_ANALYZER");
