@@ -76,6 +76,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 | 64 | **`run-home-worker.sh` and `run-home-worker.ps1` with `backend=auto` attempt `demucs` installation into `~/.enginex-stems/venv` before probing `worker.py` while falling back cleanly to `hpss` if unavailable (`BH2-A9-12`)** | `BH2-A9-12` | `tools/stems/test_bh2_a9.py::BH2A9Tests.test_run_home_worker_auto_attempts_demucs_install` | Release workflow Step 2 (`python3 -m unittest discover -s tools/stems`) |
 | 65 | **`tools/stems/render.py` `DeadlineReader` polls Windows pipes via `PeekNamedPipe` instead of Winsock `select.select` (`[WinError 10038]`) while enforcing stall timeouts (`BH2-A9-13`)** | `BH2-A9-13` | `tools/stems/test_bh2_a9.py::BH2A9Tests.test_render_deadline_reader_windows_pipe_and_timeout` | Release workflow Step 2 (`python3 -m unittest discover -s tools/stems`) |
 | 66 | **`webui.stemmedPath` filters by `sameTrack` before calling `stat()` outside `stemsMu`, avoiding hundreds of SD/USB `stat()` syscalls per track check (`BH2-A9-14`)** | `BH2-A9-14` | `pkg/webui::TestStemmedPathStatsOnlyMatchingTrack` | Release workflow Step 2 (`go test -race ./pkg/webui/...`) |
+| 67 | **`sc5000-relay` `POST /api/config` `newPassword` requires the current relay password (`checkPassword`) (`BH2-A8-1`)** | `BH2-A8-1` | `cmd/sc5000-relay::TestPasswordChangeRequiresRelayPassword` | Release workflow Step 2 (`go test -race ./cmd/sc5000-relay/...`) |
 
 ---
 
