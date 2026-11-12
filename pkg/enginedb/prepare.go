@@ -26,13 +26,27 @@ type preparedTrack struct {
 	uninspected bool
 	// broken is why the track's analysis or artwork could not be found (#53).
 	broken error
+	// late tracks came after the preparation cut-off: not stat'ed or opened,
+	// imported as Fast imports them and left for the next import.
+	late bool
 }
+
+// Seams for slow-media tests: the audio file stat and MP3 header read.
+var (
+	statFile    = os.Stat
+	audioHeader = compat.AudioHeader
+)
 
 // prepareTracks stats and fingerprints every track. A track whose Engine path is
 // in done keeps that fingerprint unread, so the import leaves it unchanged.
-func prepareTracks(ctx context.Context, res *compat.Resolver, l *rekordbox.Library, deadline time.Time, done map[string]string) ([]preparedTrack, error) {
+// Past cutoff (zero: none) the tracks left are not stat'ed or opened but marked
+// late, after at least one track has been prepared: on a slow stick the stats
+// and MP3 header reads of thousands of tracks used up the whole mount budget,
+// and Sync then deferred every track on every mount (r3 review).
+func prepareTracks(ctx context.Context, res *compat.Resolver, l *rekordbox.Library, cutoff time.Time, done map[string]string) ([]preparedTrack, error) {
 	prepared := make([]preparedTrack, 0, len(l.Tracks))
 	paths := map[string]uint32{}
+	ready := 0
 	for _, t := range l.Tracks {
 		if e := ctx.Err(); e != nil {
 			return nil, e
@@ -49,8 +63,13 @@ func prepareTracks(ctx context.Context, res *compat.Resolver, l *rekordbox.Libra
 			prepared = append(prepared, preparedTrack{track: t, rel: rel, hash: fp, info: exportFileInfo{size: t.FileSize}})
 			continue
 		}
+		if ready > 0 && !cutoff.IsZero() && time.Now().After(cutoff) {
+			prepared = append(prepared, preparedTrack{track: t, rel: rel, hash: "fast:" + t.RecordHash, info: exportFileInfo{size: t.FileSize}, late: true})
+			continue
+		}
+		ready++
 		full := res.FullPath(rel)
-		st, e := os.Stat(full)
+		st, e := statFile(full)
 		if e != nil {
 			return nil, e
 		}
@@ -68,9 +87,9 @@ func prepareTracks(ctx context.Context, res *compat.Resolver, l *rekordbox.Libra
 			uninspected bool
 		)
 		if strings.EqualFold(path.Ext(rel), ".mp3") {
-			if !deadline.IsZero() && time.Now().After(deadline) {
+			if !cutoff.IsZero() && time.Now().After(cutoff) && ready > 1 {
 				uninspected = true
-			} else if info, err := compat.AudioHeader(full); err == nil {
+			} else if info, err := audioHeader(full); err == nil {
 				fp.MP3Offset = info.OffsetClass
 				audio = &info
 			} else {
