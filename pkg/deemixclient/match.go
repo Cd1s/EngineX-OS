@@ -20,6 +20,11 @@ var ErrNoMatch = errors.New("deemix: no unambiguous recording within 2 seconds")
 var brackets = regexp.MustCompile(`\([^)]*\)|\[[^]]*\]|（[^）]*）|【[^】]*】`)
 var versions = regexp.MustCompile(`(?i)\b(club|radio|extended|original|remix|mix|edit|live|acoustic|instrumental|dub|remaster|remastered|sped|slowed)\b`)
 
+// "Original Mix" is how many stores name the default studio version of a track.
+var originalMix = regexp.MustCompile(`(?i)\boriginal\s+(mix|version)\b|[(\[（【]\s*original\s*[)\]）】]`)
+var remasterTag = regexp.MustCompile(`(?i)\bremaster(ed)?\b`)
+var alternateRecording = regexp.MustCompile(`(?i)\b(live|acoustic|instrumental|dub|remix|sped|slowed)\b`)
+
 func words(s string) string {
 	var b strings.Builder
 	for _, r := range strings.ToLower(s) {
@@ -61,9 +66,49 @@ func CleanTitle(s string) string {
 	return clean
 }
 func version(s string) string {
+	s = originalMix.ReplaceAllString(s, " ")
 	v := versions.FindAllString(strings.ToLower(s), -1)
 	sort.Strings(v)
 	return strings.Join(v, " ")
+}
+
+func isrcVersionTokens(s string) map[string]bool {
+	s = remasterTag.ReplaceAllString(s, " ")
+	out := map[string]bool{}
+	for _, tok := range strings.Fields(version(s)) {
+		out[tok] = true
+	}
+	return out
+}
+
+func isrcVersionCompatible(a, b string) bool {
+	ta, tb := isrcVersionTokens(a), isrcVersionTokens(b)
+	aSubB, bSubA := true, true
+	for k := range ta {
+		if !tb[k] {
+			aSubB = false
+			if alternateRecording.MatchString(k) {
+				return false
+			}
+		}
+	}
+	for k := range tb {
+		if !ta[k] {
+			bSubA = false
+			if alternateRecording.MatchString(k) {
+				return false
+			}
+		}
+	}
+	if aSubB && bSubA {
+		return true
+	}
+	// Do not conflate an explicit "(Original Mix)" with a different named mix ("Club Mix"),
+	// even if a distributor mis-assigned the same ISRC.
+	if (aSubB && originalMix.MatchString(a)) || (bSubA && originalMix.MatchString(b)) {
+		return false
+	}
+	return aSubB || bSubA
 }
 func isrc(s string) string { return strings.ToUpper(strings.NewReplacer("-", "", " ", "").Replace(s)) }
 func artist(s string) string {
@@ -108,7 +153,7 @@ func Match(source providers.Track, candidates []providers.Track) (providers.Trac
 		}
 		seen[c.ID] = true
 		if source.ISRC != "" && c.ISRC != "" && isrc(source.ISRC) == isrc(c.ISRC) {
-			if (source.DurationMS == 0 || c.DurationMS == 0 || durationOK(source.DurationMS, c.DurationMS)) && version(source.Title) == version(c.Title) {
+			if (source.DurationMS == 0 || c.DurationMS == 0 || durationOK(source.DurationMS, c.DurationMS)) && isrcVersionCompatible(source.Title, c.Title) {
 				exact = append(exact, c)
 			}
 			continue
@@ -116,7 +161,7 @@ func Match(source providers.Track, candidates []providers.Track) (providers.Trac
 		if source.ISRC != "" && c.ISRC != "" {
 			continue
 		}
-		if CleanTitle(source.Title) != "" && artistIdentity(source) != "" && durationOK(source.DurationMS, c.DurationMS) && CleanTitle(source.Title) == CleanTitle(c.Title) && artistIdentity(source) == artistIdentity(c) && version(source.Title) == version(c.Title) {
+		if SearchTitle(source.Title) != "" && artistIdentity(source) != "" && durationOK(source.DurationMS, c.DurationMS) && SearchTitle(source.Title) == SearchTitle(c.Title) && artistIdentity(source) == artistIdentity(c) && version(source.Title) == version(c.Title) {
 			fallback = append(fallback, c)
 		}
 	}
@@ -130,12 +175,12 @@ func Match(source providers.Track, candidates []providers.Track) (providers.Trac
 	return providers.Track{}, ErrNoMatch
 }
 
-// "Original Mix" is how many stores name the only version of a track.
-var originalMix = regexp.MustCompile(`\boriginal( mix)?\b`)
-
 // SearchTitle is the title with "Original Mix" removed, for cross-catalog lookups.
 func SearchTitle(title string) string {
-	return strings.Join(strings.Fields(originalMix.ReplaceAllString(CleanTitle(title), " ")), " ")
+	if s := CleanTitle(originalMix.ReplaceAllString(title, " ")); s != "" {
+		return s
+	}
+	return CleanTitle(title)
 }
 
 func artistSet(t providers.Track) map[string]bool {
@@ -197,7 +242,8 @@ func Resolve(ctx context.Context, c Catalog, source providers.Track) (providers.
 			}
 		}
 	}
-	if CleanTitle(source.Title) == "" || artistIdentity(source) == "" {
+	searchTitle := SearchTitle(source.Title)
+	if searchTitle == "" || artistIdentity(source) == "" {
 		return providers.Track{}, ErrNoMatch
 	}
 	primary := source.Artist
@@ -206,12 +252,12 @@ func Resolve(ctx context.Context, c Catalog, source providers.Track) (providers.
 	} else {
 		primary = strings.TrimSpace(strings.Split(primary, ",")[0])
 	}
-	tracks, err := c.Search(ctx, fmt.Sprintf("artist:%q track:%q", primary, CleanTitle(source.Title)))
+	tracks, err := c.Search(ctx, fmt.Sprintf("artist:%q track:%q", primary, searchTitle))
 	if err == nil && len(tracks) == 0 {
 		// Deezer's field search can come back empty for tracks its plain search
 		// finds (2026-11: even "Daft Punk" "One More Time"). Match below still
 		// requires the same title, version, artist and duration.
-		tracks, err = c.Search(ctx, primary+" "+CleanTitle(source.Title))
+		tracks, err = c.Search(ctx, primary+" "+searchTitle)
 	}
 	if err != nil {
 		return providers.Track{}, err
@@ -222,7 +268,7 @@ func Resolve(ctx context.Context, c Catalog, source providers.Track) (providers.
 		ByID(context.Context, string) (providers.Track, error)
 	}); ok && strings.Contains(artistIdentity(source), "|") {
 		for i, t := range tracks {
-			if durationOK(source.DurationMS, t.DurationMS) && CleanTitle(source.Title) == CleanTitle(t.Title) && version(source.Title) == version(t.Title) {
+			if durationOK(source.DurationMS, t.DurationMS) && SearchTitle(t.Title) == searchTitle && version(source.Title) == version(t.Title) {
 				if detailed, e := full.ByID(ctx, t.ID); e == nil {
 					tracks[i] = detailed
 				}
