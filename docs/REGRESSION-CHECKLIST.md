@@ -6,7 +6,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 
 ---
 
-## Regression Table (73 Rows)
+## Regression Table (74 Rows)
 
 | # | Behaviour that must keep working | Issue / commit that fixed it | How it is checked (automated test name, or exact real-deck / sandbox step) | Release gate / deck acceptance / recording coverage |
 | --- | --- | --- | --- | --- |
@@ -83,6 +83,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 | 71 | **Second-generation deck: an update that lost power does not leave its unpacked copy on `/data`** (bug hunt 2, BH2-A7-8: `install.sh <image>` unpacks the bundle into `/data/enginex/.img-install.XXXXXX` and removes it in an exit trap; after a power cut or a kill the trap never ran and the directory, tens of megabytes, stayed for good, one more per interrupted update) | BH2-A7-8 | `tools/az01-packer/test_data_bundle.py::test_gen2_img_wraps_the_bundle_and_installs_with_unlock` (a stale `.img-install.*` directory is gone after the next image install; a link of that name is not followed) | Release workflow Step 2 packer unit tests |
 | 72 | **The installer's start-up guide lists the second-generation models it installs to** (bug hunt 2, BH2-A7-21: the guide named the RANE PERFORMER, a controller without Engine OS that the tool cannot install to, and left out PRIME GO+ and PRIME 4 G2, which it can) | BH2-A7-21 | `cmd/enginex-installer::TestNoDeckPrintsFirstGenGuide` (the six names covering the eight boards of `gen2Boards`, no PERFORMER) | Release workflow Step 2 Go suites |
 | 73 | **Signing a streaming account out in the Web Console holds after a restart** (bug hunt 2, BH2-A5-7: "Log out" removed the saved login only for Spotify; Deezer, SoundCloud, Beatport, NetEase and Apple Music kept theirs in the state directory, so the account was signed in again after the next restart of the deck. SoundCloud keeps the deck's app client ID and secret, which are settings) | BH2-A5-7 | `pkg/webui::TestSigningAnOwnerOutRemovesTheSavedLogin` (five services; a guest session leaves the owner's login alone). Real deck: sign in to Deezer, log out in the console, reboot, the source asks for a login | Release workflow Step 2 Go suites |
+| 74 | **The Spotify device sign-in page on the phone shows its "open" link as a button** (bug hunt 2, BH2-A5-18: the link used a CSS class the phone pages do not have and showed as plain underlined text) | BH2-A5-18 | `pkg/webui::TestSpotifyDevicePageLinkIsAStyledButton` | Release workflow Step 2 Go suites |
 
 ---
 
