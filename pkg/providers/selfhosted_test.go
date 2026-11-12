@@ -544,3 +544,66 @@ func TestSelfHostedPlex(t *testing.T) {
 		t.Fatalf("unexpected downloaded data: %s", string(data2))
 	}
 }
+
+func TestSelfHostedSubsonicErrorNotSavedAndWebDAVRelativeBase(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. Subsonic HTTP 200 JSON/XML errors must not be saved as .mp3 files.
+	subSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/rest/download.view":
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			fmt.Fprint(w, `{"subsonic-response":{"status":"failed","error":{"code":70,"message":"Data not found"}}}`)
+		case "/rest/stream.view":
+			w.Header().Set("Content-Type", "text/xml")
+			fmt.Fprint(w, `<subsonic-response status="failed"><error code="70" message="Stream not found"/></subsonic-response>`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer subSrv.Close()
+
+	sub := NewSelfHostedProvider(NASConfig{
+		Protocol: "subsonic",
+		URL:      subSrv.URL,
+		Username: "dj",
+		Password: "pw",
+		Enabled:  true,
+	}, subSrv.Client())
+	destDir := t.TempDir()
+	if gotPath, err := sub.DownloadTrack(ctx, "999", destDir); err == nil {
+		t.Fatalf("Subsonic DownloadTrack saved error payload to %s without error", gotPath)
+	}
+	if entries, _ := os.ReadDir(destDir); len(entries) != 0 {
+		t.Fatalf("Subsonic DownloadTrack left bogus files: %v", entries)
+	}
+
+	// 2. WebDAV base URL without trailing slash must preserve base path on relative IDs.
+	var requested []string
+	davSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requested = append(requested, r.Method+" "+r.URL.Path)
+		switch {
+		case r.Method == "PROPFIND" && r.URL.Path == "/music/sub":
+			w.Header().Set("Content-Type", "application/xml")
+			w.WriteHeader(207)
+			fmt.Fprint(w, `<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"><d:response><d:href>/music/sub/song.flac</d:href><d:propstat><d:prop><d:displayname>song.flac</d:displayname></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>`)
+		case r.Method == "GET" && r.URL.Path == "/music/sub/song.flac":
+			w.Write([]byte("FLAC-DATA"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer davSrv.Close()
+
+	dav := NewSelfHostedProvider(NASConfig{
+		Protocol: "webdav",
+		URL:      davSrv.URL + "/music", // no trailing slash
+		Enabled:  true,
+	}, davSrv.Client())
+	if _, err := dav.PlaylistTracks(ctx, "sub"); err != nil {
+		t.Fatalf("WebDAV PlaylistTracks relative failed: %v (requested=%v)", err, requested)
+	}
+	if _, err := dav.DownloadTrack(ctx, "sub/song.flac", t.TempDir()); err != nil {
+		t.Fatalf("WebDAV DownloadTrack relative failed: %v (requested=%v)", err, requested)
+	}
+}

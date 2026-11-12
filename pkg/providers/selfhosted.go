@@ -306,6 +306,39 @@ func (p *SelfHostedProvider) subsonicSearch(ctx context.Context, query string) (
 	return out, nil
 }
 
+func checkSubsonicMediaError(resp *http.Response) error {
+	ct := strings.ToLower(resp.Header.Get("Content-Type"))
+	if semi := strings.IndexByte(ct, ';'); semi >= 0 {
+		ct = ct[:semi]
+	}
+	ct = strings.TrimSpace(ct)
+	isJSON := ct == "application/json" || ct == "text/json" || strings.HasSuffix(ct, "+json")
+	isXML := ct == "application/xml" || ct == "text/xml" || strings.HasSuffix(ct, "+xml")
+	if !isJSON && !isXML {
+		return nil
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if isJSON {
+		var sr subsonicResponse
+		if json.Unmarshal(body, &sr) == nil && sr.SubsonicResponse.Error != nil {
+			return fmt.Errorf("subsonic error: %s (code %d)", sr.SubsonicResponse.Error.Message, sr.SubsonicResponse.Error.Code)
+		}
+	}
+	if isXML {
+		var xr struct {
+			Status string `xml:"status,attr"`
+			Error  *struct {
+				Code    int    `xml:"code,attr"`
+				Message string `xml:"message,attr"`
+			} `xml:"error"`
+		}
+		if xml.Unmarshal(body, &xr) == nil && xr.Error != nil {
+			return fmt.Errorf("subsonic error: %s (code %d)", xr.Error.Message, xr.Error.Code)
+		}
+	}
+	return fmt.Errorf("subsonic: unexpected %s response instead of audio", ct)
+}
+
 func (p *SelfHostedProvider) subsonicDownloadTrack(ctx context.Context, trackID, destDir string) (string, error) {
 	// First try /rest/download.view?id=<id>
 	params := p.subsonicAuthParams()
@@ -317,7 +350,11 @@ func (p *SelfHostedProvider) subsonicDownloadTrack(ctx context.Context, trackID,
 		return "", err
 	}
 	resp, err := p.httpClient().Do(req)
-	if err != nil || (resp != nil && resp.StatusCode != http.StatusOK) {
+	var dlErr error
+	if err == nil && resp != nil && resp.StatusCode == http.StatusOK {
+		dlErr = checkSubsonicMediaError(resp)
+	}
+	if err != nil || resp == nil || resp.StatusCode != http.StatusOK || dlErr != nil {
 		if resp != nil {
 			resp.Body.Close()
 		}
@@ -337,6 +374,10 @@ func (p *SelfHostedProvider) subsonicDownloadTrack(ctx context.Context, trackID,
 		if resp.StatusCode != http.StatusOK {
 			resp.Body.Close()
 			return "", fmt.Errorf("subsonic: stream HTTP %d", resp.StatusCode)
+		}
+		if err := checkSubsonicMediaError(resp); err != nil {
+			resp.Body.Close()
+			return "", err
 		}
 	}
 	defer resp.Body.Close()
@@ -555,14 +596,24 @@ func (p *SelfHostedProvider) cacheWebDAVTrack(t Track) {
 	p.webdavCache[t.ID] = t
 }
 
+func resolveWebDAVURL(baseRaw, ref string) (*url.URL, error) {
+	u, err := url.Parse(baseRaw)
+	if err != nil {
+		return nil, err
+	}
+	if !strings.HasSuffix(u.Path, "/") {
+		u.Path += "/"
+	}
+	if u.RawPath != "" && !strings.HasSuffix(u.RawPath, "/") {
+		u.RawPath += "/"
+	}
+	return u.Parse(ref)
+}
+
 func (p *SelfHostedProvider) webdavPlaylistTracks(ctx context.Context, playlistID string) ([]Track, error) {
 	targetURL := p.cfg.URL
 	if playlistID != "" && playlistID != "root" {
-		u, err := url.Parse(p.cfg.URL)
-		if err != nil {
-			return nil, err
-		}
-		subU, err := u.Parse(playlistID)
+		subU, err := resolveWebDAVURL(p.cfg.URL, playlistID)
 		if err != nil {
 			return nil, err
 		}
@@ -630,11 +681,7 @@ func (p *SelfHostedProvider) webdavSearch(ctx context.Context, query string) ([]
 }
 
 func (p *SelfHostedProvider) webdavDownloadTrack(ctx context.Context, trackID, destDir string) (string, error) {
-	u, err := url.Parse(p.cfg.URL)
-	if err != nil {
-		return "", err
-	}
-	targetU, err := u.Parse(trackID)
+	targetU, err := resolveWebDAVURL(p.cfg.URL, trackID)
 	if err != nil {
 		return "", err
 	}
