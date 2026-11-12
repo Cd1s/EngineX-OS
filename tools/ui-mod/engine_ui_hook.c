@@ -41,7 +41,7 @@
 #ifndef SC_TAP_PATH
 #define SC_TAP_PATH "/tmp/sc5000-broadcast.pcm" // pkg/broadcast DefaultInputPath
 #endif
-static struct sc_tap live_tap = {.fd = -1}; // #50, every Engine build
+static struct sc_tap live_tap; // #50, every Engine build; .bss (512 KiB ring), fd set by live_tap_drain
 #if !defined(__aarch64__)
 #include "pioneer_fx.h"
 #include "fx_selector.h"
@@ -416,6 +416,7 @@ static void *live_tap_drain(void *arg) {
     sigemptyset(&pipe_set);
     sigaddset(&pipe_set, SIGPIPE);
     pthread_sigmask(SIG_BLOCK, &pipe_set, NULL);
+    live_tap.fd = -1; // zero-initialised in .bss; only this thread uses fd
     for (;;) {
         sc_tap_drain_once(&live_tap, SC_TAP_PATH);
         usleep(live_tap.fd < 0 ? 500000 : 10000);
