@@ -72,7 +72,7 @@
 | 位置 | 内容 |
 |---|---|
 | 设置 → 设备（Device） | 16 项 EngineX 条目，平铺在原厂条目里，插在 `Player #` 之前（`DeviceTabContent.qml` 补丁） |
-| 设置 → 混音台（Mixer） | Upfader Echo Out，插在 Crossfader 校准之前 |
+| 设置 → 混音台（Mixer） | Fader Echo（推子回音 / 推桿回音），仅带混音台机型显示（`root.scHasMixer`） |
 | 设置 → 服务 → 流媒体（Services → Streaming） | 7 个流媒体服务开关；原厂 TIDAL / SoundCloud / Beatport LINK 行被隐藏 |
 | 设置 → 关于 / 更新（About / Update） | 版本行（含 Web 控制台地址与访问码）；更新页改查 GitHub |
 | 控制中心（Control Center）磁贴 | Waveform Style、Echo Out（带混音台机型）、Smart Sync |
@@ -109,7 +109,7 @@
 
 | 条目 | 来源 | 说明 |
 |---|---|---|
-| Upfader Echo Out | EngineX | 与设备页同一开关；补丁**没有 `visible: !root.scPlayer`**，独立播放机上若有混音台页会显示一个无意义的开关，待实机核实 |
+| Fader Echo / 推子回音 / 推桿回音 | EngineX | 仅在带混音台的一体机显示（`visible: root.scHasMixer`，独立播放机不显示）；与控制中心磁贴及 `配置 → 播放 → 回声淡出` 同步 |
 | Master Limiter / 原厂主输出限幅 (dB) | 原厂，EngineX 放开 | PRIME GO、Mixstream Pro 原厂隐藏，补丁让 `Config.audio.hasLimiter` 的板子显示；关 / 0–18 dB。与第 8 项并存 |
 
 ### 2.4 设置 → 服务 → 流媒体
