@@ -160,6 +160,48 @@ func SyncEngineToPioneerExport(root string) error {
 			trackMap[t.ID] = true
 		}
 	}
+	claimedPlaylistIDs := make(map[uint32]bool)
+	activeSiblingNames := map[string]bool{
+		fmt.Sprintf("0/%s", StreamFolder): true,
+	}
+	uniqueSiblingName := func(parentID uint32, base string) string {
+		k := fmt.Sprintf("%d/%s", parentID, base)
+		if !activeSiblingNames[k] {
+			activeSiblingNames[k] = true
+			return base
+		}
+		for count := 2; ; count++ {
+			cand := fmt.Sprintf("%s (%d)", base, count)
+			ck := fmt.Sprintf("%d/%s", parentID, cand)
+			if !activeSiblingNames[ck] {
+				activeSiblingNames[ck] = true
+				return cand
+			}
+		}
+	}
+	allocPlaylistID := func(preferred, parentID uint32, name string, wantFolder bool) uint32 {
+		k := fmt.Sprintf("%d/%s", parentID, name)
+		var id uint32
+		if old, ok := existingPlaylistNames[k]; ok && old.Folder == wantFolder && !claimedPlaylistIDs[old.ID] {
+			id = old.ID
+		} else if preferred != 0 && !usedPlaylistIDs[preferred] && !claimedPlaylistIDs[preferred] {
+			id = preferred
+		} else {
+			for {
+				maxPlaylistID++
+				if !usedPlaylistIDs[maxPlaylistID] && !claimedPlaylistIDs[maxPlaylistID] {
+					id = maxPlaylistID
+					break
+				}
+			}
+		}
+		if id > maxPlaylistID {
+			maxPlaylistID = id
+		}
+		usedPlaylistIDs[id] = true
+		claimedPlaylistIDs[id] = true
+		return id
+	}
 	var newTracks []rekordbox.Track
 	var newPlaylists []rekordbox.Playlist
 
@@ -341,8 +383,6 @@ func SyncEngineToPioneerExport(root string) error {
 			parent uint32
 		}
 		var rawPlaylists []rawPlaylist
-		parentCounts := make(map[uint32]int)
-
 		for playlistRows.Next() {
 			var id, parent uint32
 			var name string
@@ -353,9 +393,60 @@ func SyncEngineToPioneerExport(root string) error {
 				continue
 			}
 			rawPlaylists = append(rawPlaylists, rawPlaylist{id: id, name: name, parent: parent})
-			if parent != 0 {
-				parentCounts[parent]++
+		}
+
+		rawIdx := make(map[uint32]int, len(rawPlaylists))
+		for i, rp := range rawPlaylists {
+			rawIdx[rp.id] = i
+		}
+		for i := range rawPlaylists {
+			p := rawPlaylists[i].parent
+			if p == 0 {
+				continue
 			}
+			if _, ok := rawIdx[p]; !ok || p == rawPlaylists[i].id {
+				rawPlaylists[i].parent = 0
+				continue
+			}
+			seen := map[uint32]bool{rawPlaylists[i].id: true}
+			for cur := p; cur != 0; {
+				if seen[cur] {
+					rawPlaylists[i].parent = 0
+					break
+				}
+				seen[cur] = true
+				idx, ok := rawIdx[cur]
+				if !ok {
+					break
+				}
+				cur = rawPlaylists[idx].parent
+			}
+		}
+
+		parentCounts := make(map[uint32]int)
+		for _, rp := range rawPlaylists {
+			if rp.parent != 0 {
+				parentCounts[rp.parent]++
+			}
+		}
+
+		orderedPlaylists := make([]rawPlaylist, 0, len(rawPlaylists))
+		visited := make([]bool, len(rawPlaylists))
+		var visitPlaylist func(int)
+		visitPlaylist = func(i int) {
+			if visited[i] {
+				return
+			}
+			visited[i] = true
+			if p := rawPlaylists[i].parent; p != 0 {
+				if pIdx, ok := rawIdx[p]; ok {
+					visitPlaylist(pIdx)
+				}
+			}
+			orderedPlaylists = append(orderedPlaylists, rawPlaylists[i])
+		}
+		for i := range rawPlaylists {
+			visitPlaylist(i)
 		}
 
 		entitiesByList := make(map[uint32][]uint32)
@@ -384,34 +475,20 @@ func SyncEngineToPioneerExport(root string) error {
 
 		playlistIDMap := make(map[uint32]uint32)
 
-		for _, rp := range rawPlaylists {
-			name := rp.name
-			if name == "" {
-				name = fmt.Sprintf("Playlist %d", rp.id)
+		for _, rp := range orderedPlaylists {
+			baseName := rp.name
+			if baseName == "" {
+				baseName = fmt.Sprintf("Playlist %d", rp.id)
 			}
 			parentID := uint32(0)
 			if rp.parent != 0 {
 				parentID = playlistIDMap[rp.parent]
 			}
-			k := fmt.Sprintf("%d/%s", parentID, name)
-			if existing, ok := existingPlaylistNames[k]; ok {
-				playlistIDMap[rp.id] = existing.ID
-			}
-
-			newPID := rp.id
-			if mapped := playlistIDMap[rp.id]; mapped != 0 {
-				newPID = mapped
-			} else if newPID == 0 || usedPlaylistIDs[newPID] {
-				maxPlaylistID++
-				newPID = maxPlaylistID
-			}
-			if newPID > maxPlaylistID {
-				maxPlaylistID = newPID
-			}
-			usedPlaylistIDs[newPID] = true
+			name := uniqueSiblingName(parentID, baseName)
+			isFolder := parentCounts[rp.id] > 0
+			newPID := allocPlaylistID(rp.id, parentID, name, isFolder)
 			playlistIDMap[rp.id] = newPID
 
-			isFolder := parentCounts[rp.id] > 0
 			var memberTracks []uint32
 			if !isFolder {
 				memberTracks = entitiesByList[rp.id]
@@ -425,7 +502,21 @@ func SyncEngineToPioneerExport(root string) error {
 				Tracks:   memberTracks,
 			}
 			newPlaylists = append(newPlaylists, pl)
-			existingPlaylistNames[k] = pl
+			existingPlaylistNames[fmt.Sprintf("%d/%s", parentID, name)] = pl
+
+			if isFolder && len(entitiesByList[rp.id]) > 0 {
+				leafName := uniqueSiblingName(newPID, baseName)
+				leafID := allocPlaylistID(0, newPID, leafName, false)
+				leaf := rekordbox.Playlist{
+					ID:       leafID,
+					ParentID: newPID,
+					Name:     leafName,
+					Folder:   false,
+					Tracks:   entitiesByList[rp.id],
+				}
+				newPlaylists = append(newPlaylists, leaf)
+				existingPlaylistNames[fmt.Sprintf("%d/%s", newPID, leafName)] = leaf
+			}
 		}
 	}
 
@@ -460,15 +551,8 @@ func SyncEngineToPioneerExport(root string) error {
 			all = append(all, id)
 			byPlatform[st.platform] = append(byPlatform[st.platform], id)
 		}
-		streamPlaylistID := func(parent uint32, name string) uint32 {
-			if old, ok := existingPlaylistNames[fmt.Sprintf("%d/%s", parent, name)]; ok {
-				return old.ID
-			}
-			maxPlaylistID++
-			return maxPlaylistID
-		}
-		folder := streamPlaylistID(0, StreamFolder)
-		allID := streamPlaylistID(folder, "All Streaming")
+		folder := allocPlaylistID(0, 0, StreamFolder, true)
+		allID := allocPlaylistID(0, folder, "All Streaming", false)
 		newPlaylists = append(newPlaylists, rekordbox.Playlist{ID: folder, Name: StreamFolder, Folder: true}, rekordbox.Playlist{ID: allID, ParentID: folder, Name: "All Streaming", Tracks: all})
 		platforms := make([]string, 0, len(byPlatform))
 		for p := range byPlatform {
@@ -476,7 +560,7 @@ func SyncEngineToPioneerExport(root string) error {
 		}
 		sort.Strings(platforms)
 		for _, p := range platforms {
-			id := streamPlaylistID(folder, p)
+			id := allocPlaylistID(0, folder, p, false)
 			newPlaylists = append(newPlaylists, rekordbox.Playlist{ID: id, ParentID: folder, Name: p, Tracks: byPlatform[p]})
 		}
 	}

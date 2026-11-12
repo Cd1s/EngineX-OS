@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/internal/testfixture"
+	"github.com/Cd1s/EngineX-OS/internal/testlibrary"
+	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
 
 func TestStageCountsExistingFilesTowardBudget(t *testing.T) {
@@ -153,4 +155,115 @@ func TestEngineBridgeClampsNegativePreRollCuesAndLoops(t *testing.T) {
 		t.Fatalf("expected clamped LeadLoop and preserved Chorus loop, got: %+v", merged)
 	}
 }
+
+func TestEngineBridgePreservesChildBeforeParentDuplicateNamesAndFolderTracks(t *testing.T) {
+	origStreamDirs := StreamDirs
+	t.Cleanup(func() { StreamDirs = origStreamDirs })
+	streamDir := t.TempDir()
+	StreamDirs = []string{streamDir}
+	if err := os.WriteFile(filepath.Join(streamDir, "deezer_1.wav"), testfixture.WAV(true), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, root, db := testlibrary.Create(t)
+	for id := 1; id <= 4; id++ {
+		rel := filepath.Join("Music", string(rune('a'+id-1))+".wav")
+		testfixture.Write(t, root, rel, testfixture.WAV(true))
+		if _, err := db.Exec(`INSERT INTO Track(id,title,artist,path,filename,length) VALUES(?,?, 'Artist', ?, ?, 4)`,
+			id, "Track "+string(rune('0'+id)), "../"+filepath.ToSlash(rel), filepath.Base(rel)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// 1) Child playlist ID=2 ("Moved Into Later Folder") has parent ID=10 ("2026 Club"), where child.id < parent.id,
+	//    AND parent ID=10 ALSO holds direct track 1 in Engine!
+	// 2) Two root playlists share the title "Favorites" (IDs 3 and 4) with distinct tracks 2 and 3.
+	// 3) User also has a root playlist named "EngineX Streaming" (ID 5) with track 4 while StreamDirs is non-empty.
+	for _, stmt := range []string{
+		`INSERT INTO Playlist(id,title,parentListId) VALUES (2,'Moved Into Later Folder',10)`,
+		`INSERT INTO Playlist(id,title,parentListId) VALUES (3,'Favorites',0)`,
+		`INSERT INTO Playlist(id,title,parentListId) VALUES (4,'Favorites',999)`,
+		`INSERT INTO Playlist(id,title,parentListId) VALUES (5,'EngineX Streaming',0)`,
+		`INSERT INTO Playlist(id,title,parentListId) VALUES (10,'2026 Club',0)`,
+		`INSERT INTO PlaylistEntity(id,listId,trackId,nextEntityId) VALUES (1,10,1,0)`,
+		`INSERT INTO PlaylistEntity(id,listId,trackId,nextEntityId) VALUES (2,2,2,0)`,
+		`INSERT INTO PlaylistEntity(id,listId,trackId,nextEntityId) VALUES (3,3,2,0)`,
+		`INSERT INTO PlaylistEntity(id,listId,trackId,nextEntityId) VALUES (4,4,3,0)`,
+		`INSERT INTO PlaylistEntity(id,listId,trackId,nextEntityId) VALUES (5,5,4,0)`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.Close()
+
+	if err := SyncEngineToPioneerExport(root); err != nil {
+		t.Fatalf("SyncEngineToPioneerExport: %v", err)
+	}
+	lib, err := rekordbox.ReadPDB(filepath.Join(root, "PIONEER", "rekordbox", "export.pdb"))
+	if err != nil {
+		t.Fatalf("ReadPDB: %v", err)
+	}
+
+	byID := map[uint32]rekordbox.Playlist{}
+	var clubFolderID uint32
+	for _, p := range lib.Playlists {
+		byID[p.ID] = p
+		if p.ParentID == 0 && p.Folder && p.Name == "2026 Club" {
+			clubFolderID = p.ID
+		}
+	}
+	if clubFolderID == 0 {
+		t.Fatalf("missing root folder '2026 Club': %+v", lib.Playlists)
+	}
+
+	var movedUnderClub, directClubTracks bool
+	var fav1, fav2, userStreamLeaf bool
+	for _, p := range lib.Playlists {
+		if p.Name == "Moved Into Later Folder" && p.ParentID == clubFolderID && len(p.Tracks) == 1 {
+			movedUnderClub = true
+		}
+		if p.ParentID == clubFolderID && !p.Folder && p.Name == "2026 Club" && len(p.Tracks) == 1 && p.Tracks[0] == 1 {
+			directClubTracks = true
+		}
+		if p.ParentID == 0 && !p.Folder && p.Name == "Favorites" && len(p.Tracks) == 1 && p.Tracks[0] == 2 {
+			fav1 = true
+		}
+		if p.ParentID == 0 && !p.Folder && p.Name == "Favorites (2)" && len(p.Tracks) == 1 && p.Tracks[0] == 3 {
+			fav2 = true
+		}
+		if p.ParentID == 0 && !p.Folder && p.Name == "EngineX Streaming (2)" && len(p.Tracks) == 1 && p.Tracks[0] == 4 {
+			userStreamLeaf = true
+		}
+	}
+	if !movedUnderClub {
+		t.Fatalf("child playlist (id=2 < parent=10) was flattened instead of nested under '2026 Club': %+v", lib.Playlists)
+	}
+	if !directClubTracks {
+		t.Fatalf("tracks directly on Engine parent playlist '2026 Club' were dropped: %+v", lib.Playlists)
+	}
+	if !fav1 || !fav2 {
+		t.Fatalf("duplicate root 'Favorites' playlists overwrote each other instead of disambiguating: %+v", lib.Playlists)
+	}
+	if !userStreamLeaf {
+		t.Fatalf("user playlist named 'EngineX Streaming' collided with StreamFolder: %+v", lib.Playlists)
+	}
+
+	// Re-syncing after an m.db touch must preserve the exact playlist structure and IDs.
+	future := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(filepath.Join(root, "Engine Library", "Database2", "m.db"), future, future); err != nil {
+		t.Fatal(err)
+	}
+	if err := SyncEngineToPioneerExport(root); err != nil {
+		t.Fatalf("second SyncEngineToPioneerExport: %v", err)
+	}
+	lib2, err := rekordbox.ReadPDB(filepath.Join(root, "PIONEER", "rekordbox", "export.pdb"))
+	if err != nil {
+		t.Fatalf("second ReadPDB: %v", err)
+	}
+	if len(lib2.Playlists) != len(lib.Playlists) {
+		t.Fatalf("re-sync changed playlist count: got %d, want %d (%+v)", len(lib2.Playlists), len(lib.Playlists), lib2.Playlists)
+	}
+}
+
 
