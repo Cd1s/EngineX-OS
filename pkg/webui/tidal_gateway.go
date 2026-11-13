@@ -416,6 +416,17 @@ func tidalNumericID(name string) uint32 { return crc32.ChecksumIEEE([]byte(name)
 
 func isTidal(p string) bool { return strings.HasPrefix(p, "/v1/") || strings.HasPrefix(p, "/au/") }
 
+// canonicalV1 maps /v1/enginex/..., the deck API under the product's name, onto the
+// /v1/sc5000/... routes. Both prefixes reach the same handlers behind the same rules (the
+// loopback check above runs first); /v1/sc5000/ stays for good, since older installers, UI
+// packs and users' scripts call it. One mapping here, not a second copy of each route.
+func canonicalV1(p string) string {
+	if rest, ok := strings.CutPrefix(p, "/v1/enginex"); ok && (rest == "" || rest[0] == '/') {
+		return "/v1/sc5000" + rest
+	}
+	return p
+}
+
 // relayedFromOutside reports a request a tunnel on the deck carried in from elsewhere: it
 // arrives from loopback, but with headers the tunnel's edge always adds and a caller cannot
 // remove. Engine and the deck's own tools never send them.
@@ -436,7 +447,7 @@ func (g *tidalGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(w, 403, errors.New("the streaming gateway is local to the deck"))
 		return
 	}
-	clean := path.Clean(r.URL.Path)
+	clean := canonicalV1(path.Clean(r.URL.Path))
 	if !isTidal(clean + "/") {
 		http.NotFound(w, r)
 		return
