@@ -149,19 +149,23 @@ set -eu
 ENGINEX_CUSTOM=${ENGINEX_CUSTOM:-${SC5000_CUSTOM:-}}
 ENGINEX_ALSA_OVERLAY=${ENGINEX_ALSA_OVERLAY:-${SC5000_ALSA_OVERLAY:-}}
 
-# The boot run (no arguments) first puts back a downgrade to an older release that a power cut
-# interrupted before its commit (#234, internal/leave), before the layout below is touched. It
-# can start from /data/sc5000-custom: the hook's fallback while /data/enginex is being handed back.
-# When that fails, nothing below runs: no migration, no activation. The deck keeps the generation
-# it has, Engine runs stock, and the journal in /data/.enginex-leave stays for the next boot.
-if [ "$#" = 0 ] && { [ -z "${ENGINEX_CUSTOM:-}" ] || [ -n "${ENGINEX_LEAVE_ROOT:-}" ]; }; then
+# The suite holds a blocking leave lock through this script's migration and activation. Its boot
+# run first puts back an interrupted downgrade; Engine-start calls only take the lock. The child
+# marker avoids entering the suite twice. A failure runs nothing below and preserves the journal.
+if [ "${ENGINEX_LEAVE_LOCKED:-}" != 1 ] && { [ -z "$ENGINEX_CUSTOM" ] || [ "$ENGINEX_CUSTOM" = /data/enginex ] ||
+    [ "$ENGINEX_CUSTOM" = /data/sc5000-custom ] || [ -n "${ENGINEX_LEAVE_ROOT:-}" ]; }; then
     leave_suite="$(dirname "$0")/bin/enginex-suite"
-    if [ -x "$leave_suite" ] && ! leave_out=$("$leave_suite" leave recover 2>&1); then
-        echo "boot-activate: putting back an interrupted downgrade failed, EngineX OS stays off this boot: $leave_out" >&2
-        ! command -v logger >/dev/null 2>&1 ||
-            logger -p user.err -t enginex-boot-activate "putting back an interrupted downgrade failed, EngineX OS stays off this boot: $leave_out"
+    if [ ! -x "$leave_suite" ]; then
+        echo "boot-activate: missing leave suite, EngineX OS stays off this boot" >&2
         exit 1
     fi
+    if ! leave_out=$("$leave_suite" leave activate "$0" "$@" 2>&1); then
+        echo "boot-activate: guarded activation failed, EngineX OS stays off this boot: $leave_out" >&2
+        ! command -v logger >/dev/null 2>&1 ||
+            logger -p user.err -t enginex-boot-activate "guarded activation failed, EngineX OS stays off this boot: $leave_out"
+        exit 1
+    fi
+    exit 0
 fi
 @MIGRATE_IF_DEFAULT@
 dest="${ENGINEX_CUSTOM:-/data/enginex}"
@@ -178,6 +182,9 @@ if [ "$#" = 0 ] && [ -d "$dest/.install-old" ] && [ ! -L "$dest/.install-old" ];
     [ ! -f "$bundle_dir/boot-activate.sh" ] || exec sh "$bundle_dir/boot-activate.sh"
     exit 0
 fi
+# The guard belongs to this invocation; daemons it starts must take their own lock later.
+leave_pid=${ENGINEX_LEAVE_PID:-}
+unset ENGINEX_LEAVE_LOCKED ENGINEX_LEAVE_PID
 
 check_gen2_tz_newer() {
     tz_file="$dest/state/timezone"
@@ -669,7 +676,14 @@ else
     if [ -n "$ssh_start" ] && ! pgrep -x sshd >/dev/null 2>&1; then
         mkdir -p /var/run/sshd && "$sshd_bin" -p "$ssh_port" || :
     fi
-    pkill -x enginex-suite 2>/dev/null || :
+    if [ -n "$leave_pid" ]; then
+        # The activation owner is a suite too; keep its lock alive through this fallback.
+        for suite_pid in $(pgrep -x enginex-suite 2>/dev/null); do
+            [ "$suite_pid" = "$leave_pid" ] || kill "$suite_pid" 2>/dev/null || :
+        done
+    else
+        pkill -x enginex-suite 2>/dev/null || :
+    fi
     pkill -x sc5000-suite 2>/dev/null || : # the suite's name before 5.3.0.5 (#234)
     [ -x "$bin_dir/stream-sync" ] && "$bin_dir/stream-sync" --listen :8080 --cpu 3 >/dev/null 2>&1 &
     [ -x "$bin_dir/rb-bridge" ] && "$bin_dir/rb-bridge" --prolink >/dev/null 2>&1 &

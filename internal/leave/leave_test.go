@@ -16,6 +16,11 @@ import (
 	"testing"
 )
 
+func testExists(p string) bool {
+	_, err := os.Lstat(p)
+	return err == nil
+}
+
 // A deck on 5.3.0.5 (the migrated layout of #103) with settings, keys and downloads.
 func newDeck(t *testing.T) (Deck, string) {
 	t.Helper()
@@ -165,11 +170,11 @@ func TestLeaveInstallsGenuine5302AndHandsBackItsLayout(t *testing.T) {
 		}
 	}
 	for _, p := range []string{"gen2-unlocked", "ui/safe-mode", "bundle/" + markerName, "ui/packs/" + markerName, "bundle/release-tag"} {
-		if exists(filepath.Join(old, p)) {
+		if testExists(filepath.Join(old, p)) {
 			t.Errorf("%s is left", p)
 		}
 	}
-	if exists(filepath.Join(root, "data", journalName)) || exists(filepath.Join(root, "data/AppDataUser/AIR Music Technology/Engine/.cache/qml")) {
+	if testExists(filepath.Join(root, "data", journalName)) || testExists(filepath.Join(root, "data/AppDataUser/AIR Music Technology/Engine/.cache/qml")) {
 		t.Error("journal or the stale QML cache is left")
 	}
 	// The release's own scripts run on what it got: install.sh again, then its uninstall.sh.
@@ -243,10 +248,10 @@ func TestLeaveCutAtEveryStepLeavesOneWholeRelease(t *testing.T) {
 				cutAt(t, d, legacyBundle(t, version), step)
 				hook := read(t, filepath.Join(root, "data/sc5000-custom/bundle/lib/libengine-ui-hook.so"))
 				boot := filepath.Join(root, "data/enginex/bundle/boot-activate.sh")
-				if !exists(boot) {
+				if !testExists(boot) {
 					boot = filepath.Join(root, "data/sc5000-custom/bundle/boot-activate.sh") // the hook's fallback
 				}
-				if !exists(boot) {
+				if !testExists(boot) {
 					t.Fatalf("no boot-activate.sh the hook can start")
 				}
 				if step == "committed" {
@@ -269,7 +274,7 @@ func TestLeaveCutAtEveryStepLeavesOneWholeRelease(t *testing.T) {
 				if dd := diff(before, after); dd != "" {
 					t.Fatalf("not put back:\n%s", dd)
 				}
-				if exists(filepath.Join(root, "data", journalName)) {
+				if testExists(filepath.Join(root, "data", journalName)) {
 					t.Fatal("journal left")
 				}
 			})
@@ -290,7 +295,7 @@ func TestLeaveRecoverAfterTheCommitOnlyClears(t *testing.T) {
 	delete(before, "enginex/bundle/"+markerName)
 	delete(before, "enginex/ui/packs/"+markerName)
 	delete(before, "enginex/ui/icons/"+markerName)
-	if dd := diff(before, after); dd != "" || exists(filepath.Join(root, "data", journalName)) {
+	if dd := diff(before, after); dd != "" || testExists(filepath.Join(root, "data", journalName)) {
 		t.Fatalf("recover after the commit changed:\n%s", dd)
 	}
 }
@@ -304,7 +309,7 @@ func TestLeaveRefusesWithoutAtomicExchange(t *testing.T) {
 	if err := d.Install(legacyBundle(t, "5.3.0.2")); !errors.Is(err, ErrNoExchange) {
 		t.Fatalf("err = %v, want ErrNoExchange", err)
 	}
-	if dd := diff(before, snapshot(t, root)); dd != "" || exists(filepath.Join(root, "data", journalName)) {
+	if dd := diff(before, snapshot(t, root)); dd != "" || testExists(filepath.Join(root, "data", journalName)) {
 		t.Fatalf("changed:\n%s", dd)
 	}
 }
@@ -318,7 +323,7 @@ func TestLeaveFailedOlderInstallChangesNothing(t *testing.T) {
 	if err := d.Install(target); err == nil {
 		t.Fatal("a damaged bundle installed")
 	}
-	if dd := diff(before, snapshot(t, root)); dd != "" || exists(filepath.Join(root, "data", journalName)) {
+	if dd := diff(before, snapshot(t, root)); dd != "" || testExists(filepath.Join(root, "data", journalName)) {
 		t.Fatalf("changed:\n%s", dd)
 	}
 }
@@ -341,7 +346,7 @@ func TestLeaveErrorDuringTheCommitPutsBack(t *testing.T) {
 	}
 	after := snapshot(t, root)
 	delete(after, "enginex/ui/safe-mode")
-	if dd := diff(before, after); dd != "" || exists(filepath.Join(root, "data", journalName)) {
+	if dd := diff(before, after); dd != "" || testExists(filepath.Join(root, "data", journalName)) {
 		t.Fatalf("not put back:\n%s", dd)
 	}
 }
@@ -440,7 +445,7 @@ func (l *swapLog) install(t *testing.T) {
 	syncPath = func(p string) error {
 		if l.pending[p] {
 			delete(l.pending, p)
-			if len(l.pending) == 0 && !exists(l.journal) {
+			if len(l.pending) == 0 && !testExists(l.journal) {
 				l.problems = append(l.problems, "synced only after the journal was removed: "+p)
 			}
 		}
@@ -479,7 +484,7 @@ func TestLeaveSwapsAreDurableBeforeTheNextStepAndCleanup(t *testing.T) {
 	dataSynced := false
 	inner := syncPath
 	syncPath = func(p string) error {
-		if p == filepath.Join(root, "data") && exists(filepath.Join(l.journal, "stage")) && !exists(filepath.Join(l.journal, "id")) {
+		if p == filepath.Join(root, "data") && testExists(filepath.Join(l.journal, "stage")) && !testExists(filepath.Join(l.journal, "id")) {
 			dataSynced = true
 		}
 		return inner(p)
@@ -550,7 +555,7 @@ func TestLeaveFailedSyncAfterTheCommitKeepsTheJournalAndTheParkedBundle(t *testi
 			}
 			parked := filepath.Join(journal, "stage/root/bundle/lib/libengine-ui-hook.so")
 			for i := 0; i < 2; i++ {
-				if !exists(parked) || read(t, parked) != "hook 5.3.0.5" {
+				if !testExists(parked) || read(t, parked) != "hook 5.3.0.5" {
 					t.Fatalf("the parked bundle of this release is gone (try %d)", i)
 				}
 				if i == 0 {
@@ -566,7 +571,7 @@ func TestLeaveFailedSyncAfterTheCommitKeepsTheJournalAndTheParkedBundle(t *testi
 			if err := d.Recover(); err != nil {
 				t.Fatal(err)
 			}
-			if exists(journal) || read(t, filepath.Join(root, "data/enginex/bundle/lib/libengine-ui-hook.so")) != "hook 5.3.0.3" {
+			if testExists(journal) || read(t, filepath.Join(root, "data/enginex/bundle/lib/libengine-ui-hook.so")) != "hook 5.3.0.3" {
 				t.Fatal("not finished once the sync worked")
 			}
 		})
@@ -584,8 +589,8 @@ func TestLeaveRollbackRetryDoesNotSkipAFailedSync(t *testing.T) {
 	cutAt(t, d, legacyBundle(t, "5.3.0.2"), "bundle")
 	fault := injectSyncFault(t, "/data/sc5000-custom", filepath.Join(root, "data"))
 	for i := 0; i < 2; i++ {
-		if err := d.Recover(); !errors.Is(err, syscall.EIO) || !exists(journal) {
-			t.Fatalf("recover %d while /data does not sync: err %v, journal kept %v", i, err, exists(journal))
+		if err := d.Recover(); !errors.Is(err, syscall.EIO) || !testExists(journal) {
+			t.Fatalf("recover %d while /data does not sync: err %v, journal kept %v", i, err, testExists(journal))
 		}
 	}
 	fault.armed = false
@@ -594,7 +599,7 @@ func TestLeaveRollbackRetryDoesNotSkipAFailedSync(t *testing.T) {
 	}
 	after := snapshot(t, root)
 	delete(after, "enginex/ui/safe-mode")
-	if dd := diff(before, after); dd != "" || exists(journal) {
+	if dd := diff(before, after); dd != "" || testExists(journal) {
 		t.Fatalf("not put back:\n%s", dd)
 	}
 }
@@ -626,12 +631,12 @@ func TestLeaveFailedLookupIsNotAMissingDirectory(t *testing.T) {
 		if err := d.Recover(); err == nil {
 			t.Fatalf("recover with lookup %d of the live directory failing: no error", from)
 		}
-		if !exists(filepath.Join(journal, "stage/root/bundle/lib/libengine-ui-hook.so")) {
+		if !testExists(filepath.Join(journal, "stage/root/bundle/lib/libengine-ui-hook.so")) {
 			t.Fatalf("the journal or the parked bundle is gone (lookup %d failing)", from)
 		}
 	}
 	lstat, fault.armed = os.Lstat, false
-	if err := d.Recover(); err != nil || exists(journal) {
+	if err := d.Recover(); err != nil || testExists(journal) {
 		t.Fatalf("not finished once the faults are gone: %v", err)
 	}
 }
@@ -669,7 +674,7 @@ func TestLeaveFailedJournalLookupStopsRecoverAndInstall(t *testing.T) {
 	if err := d.Recover(); err != nil {
 		t.Fatal(err)
 	}
-	if got := read(t, filepath.Join(root, "data/enginex/ui/packs/en/Deck.qml")); got != "5.3.0.5 pack" || exists(journal) {
-		t.Fatalf("not put back: live packs %q, journal kept %v", got, exists(journal))
+	if got := read(t, filepath.Join(root, "data/enginex/ui/packs/en/Deck.qml")); got != "5.3.0.5 pack" || testExists(journal) {
+		t.Fatalf("not put back: live packs %q, journal kept %v", got, testExists(journal))
 	}
 }
