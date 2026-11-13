@@ -299,29 +299,6 @@ type darwinBackend struct {
 	attachments map[DeviceID]darwinAttachment
 }
 
-func orderedDarwinAttachments(devices map[uint64]*darwinAttachment) []*darwinAttachment {
-	result := make([]*darwinAttachment, 0, len(devices))
-	for _, device := range devices {
-		result = append(result, device)
-	}
-	sort.Slice(result, func(i, j int) bool {
-		if result[i].info.Location != result[j].info.Location {
-			return result[i].info.Location < result[j].info.Location
-		}
-		return result[i].registryID < result[j].registryID
-	})
-	for _, device := range result {
-		sort.Slice(device.info.Interfaces, func(i, j int) bool {
-			a, b := device.info.Interfaces[i], device.info.Interfaces[j]
-			if a.Number != b.Number {
-				return a.Number < b.Number
-			}
-			return a.Alternate < b.Alternate
-		})
-	}
-	return result
-}
-
 func NewBackend() (Backend, error) {
 	a, err := loadDarwin()
 	if err != nil {
@@ -406,7 +383,19 @@ func (b *darwinBackend) Enumerate(ctx context.Context) ([]DeviceInfo, error) {
 	defer b.mu.Unlock()
 	b.attachments = map[DeviceID]darwinAttachment{}
 	var result []DeviceInfo
-	for _, d := range orderedDarwinAttachments(devices) {
+	ids := make([]uint64, 0, len(devices))
+	for id := range devices {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool {
+		a, c := devices[ids[i]], devices[ids[j]]
+		if a.info.Location != c.info.Location {
+			return a.info.Location < c.info.Location
+		}
+		return ids[i] < ids[j]
+	})
+	for _, id := range ids {
+		d := devices[id]
 		d.info.ID = nextID()
 		b.attachments[d.info.ID] = *d
 		result = append(result, cloneInfo(d.info))

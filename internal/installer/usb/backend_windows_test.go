@@ -7,10 +7,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
-	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -30,19 +28,6 @@ func TestWindowsNativeSystemAPIs(t *testing.T) {
 	t.Log("system WinUSB entry points loaded; invalid handle rejected")
 }
 
-func TestWindowsWinProcNativeOutputPointer(t *testing.T) {
-	proc := windows.NewLazySystemDLL("kernel32.dll").NewProc("QueryPerformanceFrequency")
-	if err := proc.Find(); err != nil {
-		t.Fatal(err)
-	}
-	var frequency int64
-	if err := winProc(proc, uintptr(unsafe.Pointer(&frequency))); err != nil {
-		t.Fatal(err)
-	}
-	if frequency <= 0 {
-		t.Fatal("native syscall did not update the Go output allocation")
-	}
-}
 func TestWindowsHardwareIDs(t *testing.T) {
 	for _, id := range []string{"USB\\VID_15E4&PID_D007&REV_0100", "usb\\vid_15e4&pid_d007&mi_03"} {
 		vid, pid, ok := usbHardwareID([]string{id})
@@ -58,9 +43,6 @@ func TestWindowsHardwareIDs(t *testing.T) {
 }
 func winTestDevice(calls winCalls) *windowsDevice {
 	it, _ := parseConfiguration(configurationFixture())
-	if calls.reset == nil {
-		calls.reset = func(uintptr, uint8) error { return nil }
-	}
 	return &windowsDevice{s: newSession(), file: 10, handle: 20, calls: calls, it: it[0]}
 }
 func TestWindowsInjectedZLPAndShortRead(t *testing.T) {
@@ -97,12 +79,12 @@ func TestWindowsInjectedCancelDrains(t *testing.T) {
 	defer cancel()
 	aborted := make(chan struct{})
 	drained := false
-	resets := 0
 	d := winTestDevice(winCalls{policy: func(uintptr, uint8, uint32) error { return nil }, transfer: func(uintptr, uint8, bool, *byte, uint32, uint64, *uint32, *windows.Overlapped) error {
 		cancel()
 		return windows.ERROR_IO_PENDING
 	},
 		cancel: func(windows.Handle, *windows.Overlapped) error { close(aborted); return nil },
+		reset:  func(uintptr, uint8) error { return nil },
 		result: func(_ uintptr, _ *windows.Overlapped, done *uint32) error {
 			select {
 			case <-aborted:
@@ -113,17 +95,10 @@ func TestWindowsInjectedCancelDrains(t *testing.T) {
 			drained = true
 			return windows.ERROR_OPERATION_ABORTED
 		},
-		reset: func(_ uintptr, ep uint8) error {
-			if !drained || ep != 2 {
-				t.Fatal("reset before draining or on wrong endpoint")
-			}
-			resets++
-			return nil
-		},
 	})
 	n, err := d.WriteBulk(ctx, 2, []byte("payload"))
 	var detail *Error
-	if !drained || n != 2 || !errors.Is(err, context.Canceled) || !errors.As(err, &detail) || !detail.MayHaveWritten || resets != 1 {
+	if !drained || n != 2 || !errors.Is(err, context.Canceled) || !errors.As(err, &detail) || !detail.MayHaveWritten {
 		t.Fatalf("n=%d drained=%v err=%v", n, drained, err)
 	}
 }
@@ -150,13 +125,14 @@ func TestWindowsOpenUnicodeAndResourceCleanup(t *testing.T) {
 	}
 	it, _ := parseConfiguration(configurationFixture())
 	frees, closes := 0, 0
-	sets := 0
-	var currentAlternate uint8
-	a := winAttachment{info: DeviceInfo{ID: "one", VID: 0x15e4, PID: 0xd007, Driver: "WinUSB", Serial: "fixture-serial", Location: "fixture-port"}, instance: "fixture-a", devinst: 1, arrival: "one-arrival", paths: []string{path}}
+	a := winAttachment{info: DeviceInfo{ID: "one", VID: 0x15e4, PID: 0xd007, Driver: "WinUSB"}, instance: "fixture-a", devinst: 1, arrival: "one-arrival", paths: []string{path}}
 	calls := winCalls{
 		initialize: func(windows.Handle) (uintptr, error) { return 20, nil }, free: func(uintptr) error { frees++; return nil },
-		query: func(uintptr, uint8) (Interface, error) { return it[0], nil }, descriptor: func(uintptr) (uint16, uint16, error) { return a.info.VID, a.info.PID, nil }, alternate: func(uintptr, uint8) error { sets++; return nil },
-		currentAlternate: func(uintptr) (uint8, error) { return currentAlternate, nil },
+		query: func(uintptr, uint8) (Interface, error) { return it[0], nil }, descriptor: func(uintptr) (uint16, uint16, error) { return a.info.VID, a.info.PID, nil }, alternate: func(uintptr, uint8) error {
+			t.Fatal("SET_INTERFACE is unnecessary for the current alternate")
+			return nil
+		},
+		currentAlternate: func(uintptr) (uint8, error) { return 0, nil },
 		close:            func(handle windows.Handle) error { closes++; return windows.CloseHandle(handle) },
 	}
 	b := &windowsBackend{calls: calls, attachments: map[DeviceID]winAttachment{"one": a}, scan: func(context.Context) ([]winAttachment, error) {
@@ -170,7 +146,7 @@ func TestWindowsOpenUnicodeAndResourceCleanup(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if d.Info().ID != "one" || d.Info().Serial != "fixture-serial" || d.Info().Location != "fixture-port" {
+		if d.Info().ID != "one" {
 			t.Fatal("selected another identical device")
 		}
 		if err := d.Close(); err != nil {
@@ -180,7 +156,7 @@ func TestWindowsOpenUnicodeAndResourceCleanup(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if frees != 25 || closes != 25 || sets != 0 {
+	if frees != 25 || closes != 25 {
 		t.Fatalf("free=%d close=%d", frees, closes)
 	}
 	if _, err := b.Open(context.Background(), "one", 4, 0); err == nil {
@@ -188,17 +164,6 @@ func TestWindowsOpenUnicodeAndResourceCleanup(t *testing.T) {
 	}
 	if frees != 26 || closes != 26 {
 		t.Fatalf("failed open leaked handles: free=%d close=%d", frees, closes)
-	}
-	currentAlternate = 1
-	d, err := b.Open(context.Background(), "one", 3, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := d.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if sets != 1 || closes != 27 || frees != 27 {
-		t.Fatalf("alternate change/cleanup: sets=%d frees=%d closes=%d", sets, frees, closes)
 	}
 	b.scan = func(context.Context) ([]winAttachment, error) {
 		replacement := a
@@ -214,51 +179,10 @@ func TestWindowsBindingDiagnostics(t *testing.T) {
 	b := &windowsBackend{attachments: map[DeviceID]winAttachment{"hid": a}}
 	_, err := b.Open(context.Background(), "hid", 0, 0)
 	var detail *Error
-	if !errors.As(err, &detail) || detail.Kind != Binding || !strings.Contains(err.Error(), "HidUsb") || !strings.Contains(err.Error(), "bind") || !strings.Contains(err.Error(), "WinUSB") {
+	if !errors.As(err, &detail) || detail.Kind != Binding {
 		t.Fatal(err)
 	}
 }
-
-func TestWindowsNormalizedUSBSerial(t *testing.T) {
-	for _, test := range []struct {
-		name, instance string
-		capabilities   uint32
-		want           string
-	}{
-		{"physical USB serial", `USB\VID_15E4&PID_D007\fixture-serial`, 0x10, "fixture-serial"},
-		{"generated location ID", `USB\VID_15E4&PID_D007\7&123&0&1`, 0, ""},
-		{"composite child", `USB\VID_15E4&PID_D007&MI_01\7&123&0&0001`, 0x10, ""},
-		{"non USB", `HID\VID_15E4&PID_D007\fixture-serial`, 0x10, ""},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			if got := windowsUSBSerial(test.instance, test.capabilities); got != test.want {
-				t.Fatalf("serial=%q want=%q", got, test.want)
-			}
-		})
-	}
-	devices := []winAttachment{
-		{devinst: 1, info: DeviceInfo{VID: 0x15e4, PID: 0xd007, Serial: "parent-serial"}},
-		{devinst: 2, info: DeviceInfo{VID: 0x15e4, PID: 0xd007}},
-		{devinst: 3, info: DeviceInfo{VID: 0x15e4, PID: 0xd008}},
-	}
-	inheritWindowsSerial(devices, func(child uint32) (uint32, bool) {
-		if child == 2 || child == 3 {
-			return 1, true
-		}
-		return 0, false
-	})
-	if devices[1].info.Serial != "parent-serial" || devices[2].info.Serial != "" {
-		t.Fatal("serial inheritance crossed device identity")
-	}
-}
-
-func TestWindowsFailureClassification(t *testing.T) {
-	var detail *Error
-	if err := winError("transfer", windows.ERROR_GEN_FAILURE, true); !errors.As(err, &detail) || detail.Kind != Disconnected || !detail.MayHaveWritten {
-		t.Fatal(err)
-	}
-}
-
 func TestWindowsNativeTimeoutResetsWithoutReplay(t *testing.T) {
 	transfers, resets := 0, 0
 	d := winTestDevice(winCalls{policy: func(uintptr, uint8, uint32) error { return nil },

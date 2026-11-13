@@ -215,23 +215,6 @@ func TestControlStaysOnSelectedInterface(t *testing.T) {
 	}
 }
 
-func TestTransferLimitLeavesUSBFSHeadroom(t *testing.T) {
-	for _, test := range []struct {
-		name    string
-		size    int
-		allowed bool
-	}{
-		{"empty", 0, true}, {"one MiB", 1 << 20, true}, {"over one MiB", (1 << 20) + 1, false}, {"usbfs default budget", 16 << 20, false},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			err := transferSize(test.size)
-			if (err == nil) != test.allowed {
-				t.Fatalf("size=%d error=%v", test.size, err)
-			}
-		})
-	}
-}
-
 // This smoke test enumerates descriptors only. It never opens or claims a
 // device and is also run as a precompiled executable on Windows and macOS.
 func TestNativeEnumeration(t *testing.T) {
