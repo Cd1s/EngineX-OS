@@ -216,203 +216,42 @@ func TestIcecastStreaming(t *testing.T) {
 	}
 }
 
-func TestShoutcastStreaming(t *testing.T) {
+// SHOUTcast servers take MP3 or AAC, never WAV. A saved Shoutcast target used to be
+// connected to, sent RIFF/PCM and retried for ever; it is not pushed to now, Status
+// says what to do, and the local stream (/live.wav) keeps flowing.
+func TestShoutcastTargetIsNotPushed(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("failed to listen: %v", err)
+		t.Fatal(err)
 	}
 	defer ln.Close()
-
-	var (
-		passwordReceived string
-		icyReceived      []string
-		mu               sync.Mutex
-		done             = make(chan struct{})
-	)
-
+	connected := make(chan struct{}, 1)
 	go func() {
-		conn, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		defer conn.Close()
-
-		reader := bufio.NewReader(conn)
-		pwd, err := reader.ReadString('\n')
-		if err != nil {
-			return
-		}
-		mu.Lock()
-		passwordReceived = strings.TrimSpace(pwd)
-		mu.Unlock()
-
-		// Reply with OK2
-		_, _ = io.WriteString(conn, "OK2\r\n")
-
-		// Read ICY headers
-		for {
-			line, err := reader.ReadString('\n')
-			if err != nil {
-				return
-			}
-			mu.Lock()
-			icyReceived = append(icyReceived, strings.TrimSpace(line))
-			mu.Unlock()
-			if strings.TrimSpace(line) == "" {
-				break
-			}
-		}
-
-		// Read audio data
-		buf, total := make([]byte, 1024), 0
-		for {
-			n, err := reader.Read(buf)
-			if err != nil {
-				return
-			}
-			if total == 0 && (n < 12 || string(buf[:4]) != "RIFF" || string(buf[8:12]) != "WAVE") {
-				return // the stream must open with the WAV header
-			}
-			total += n
-			if total >= 44+2*4608 {
-				select {
-				case <-done:
-				default:
-					close(done)
-				}
-			}
+		if conn, err := ln.Accept(); err == nil {
+			connected <- struct{}{}
+			conn.Close()
 		}
 	}()
 
 	b := New(newTestGuard())
 	defer b.Close()
-
-	cfg := Config{
-		Enabled:    true,
-		Protocol:   "shoutcast",
-		ServerURL:  ln.Addr().String(), // test raw host:port format without scheme
-		Password:   "shoutpwd",
-		StreamName: "Club Radio",
+	if err := b.Configure(Config{Enabled: true, Protocol: "shoutcast", ServerURL: ln.Addr().String(), Password: "shoutpwd"}); err != nil {
+		t.Fatal(err)
 	}
-
-	if err := b.Configure(cfg); err != nil {
-		t.Fatalf("failed to configure shoutcast: %v", err)
-	}
-
+	pcm, cancel := b.Subscribe()
+	defer cancel()
 	select {
-	case <-done:
-	case <-time.After(3 * time.Second):
-		t.Fatal("timeout waiting for Shoutcast stream frames")
+	case <-pcm:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the local stream does not flow")
 	}
-
-	mu.Lock()
-	pwd := passwordReceived
-	icyText := strings.Join(icyReceived, "\n")
-	mu.Unlock()
-
-	if pwd != "shoutpwd" {
-		t.Errorf("expected password 'shoutpwd', got %q", pwd)
+	select {
+	case <-connected:
+		t.Fatal("pushed to a Shoutcast server")
+	case <-time.After(500 * time.Millisecond):
 	}
-	if !strings.Contains(icyText, "icy-name:Club Radio") {
-		t.Errorf("missing icy-name header in:\n%s", icyText)
-	}
-	if !strings.Contains(icyText, "icy-br:1536") {
-		t.Errorf("missing icy-br:1536 header in:\n%s", icyText)
-	}
-
-	st := b.Status()
-	if !st.Streaming {
-		t.Errorf("expected Streaming to be true")
-	}
-	if st.BytesSent <= 0 {
-		t.Errorf("expected BytesSent > 0, got %d", st.BytesSent)
-	}
-}
-
-func TestIcecastHandshakeReject(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen error: %v", err)
-	}
-	defer ln.Close()
-
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			reader := bufio.NewReader(conn)
-			for {
-				line, err := reader.ReadString('\n')
-				if err != nil || strings.TrimSpace(line) == "" {
-					break
-				}
-			}
-			_, _ = io.WriteString(conn, "HTTP/1.0 401 Unauthorized\r\n\r\n")
-			conn.Close()
-		}
-	}()
-
-	b := New(newTestGuard())
-	defer b.Close()
-
-	cfg := Config{
-		Enabled:   true,
-		Protocol:  "icecast",
-		ServerURL: "http://" + ln.Addr().String(),
-	}
-
-	_ = b.Configure(cfg)
-	// Wait a moment for connection attempt
-	time.Sleep(200 * time.Millisecond)
-
-	st := b.Status()
-	if st.Streaming {
-		t.Errorf("should not be streaming when rejected")
-	}
-	if !strings.Contains(st.LastError, "401") && !strings.Contains(st.LastError, "rejected") {
-		t.Errorf("expected reject error in LastError, got: %s", st.LastError)
-	}
-}
-
-func TestShoutcastHandshakeReject(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen error: %v", err)
-	}
-	defer ln.Close()
-
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			_, _ = io.WriteString(conn, "invalid password\r\n")
-			conn.Close()
-		}
-	}()
-
-	b := New(newTestGuard())
-	defer b.Close()
-
-	cfg := Config{
-		Enabled:   true,
-		Protocol:  "shoutcast",
-		ServerURL: ln.Addr().String(),
-		Password:  "wrong",
-	}
-
-	_ = b.Configure(cfg)
-	time.Sleep(200 * time.Millisecond)
-
-	st := b.Status()
-	if st.Streaming {
-		t.Errorf("should not be streaming when rejected")
-	}
-	if !strings.Contains(st.LastError, "authentication failed") {
-		t.Errorf("expected authentication failed in LastError, got: %s", st.LastError)
+	if st := b.Status(); st.Streaming || !strings.Contains(st.LastError, "Shoutcast is not supported") || !strings.Contains(st.LastError, "Icecast") {
+		t.Errorf("status %+v, want not streaming and a Shoutcast-not-supported error", st)
 	}
 }
 

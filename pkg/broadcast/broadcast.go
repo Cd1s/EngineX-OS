@@ -43,6 +43,10 @@ const SampleRate = 48000
 // only output: no deck image ships an MP3 or Ogg encoder.
 const wavKbps = SampleRate * 16 * 2 / 1000
 
+// shoutcastUnsupported is why a saved Shoutcast target is not pushed to: SHOUTcast
+// servers take MP3 or AAC, never WAV. The local /live.wav stream is not affected.
+const shoutcastUnsupported = "Shoutcast is not supported: its servers take only MP3/AAC, not WAV. Save an Icecast server as the target; /live.wav still works"
+
 // Config specifies live stream parameters.
 type Config struct {
 	Enabled    bool   `json:"enabled"`
@@ -71,7 +75,7 @@ type Status struct {
 	StreamName   string `json:"streamName"`
 	CurrentTrack string `json:"currentTrack"`
 	BytesSent    int64  `json:"bytesSent"`
-	Listeners    int    `json:"listeners"` // clients on the local /live.mp3 and /live.wav fan-out
+	Listeners    int    `json:"listeners"` // clients on the local /live.wav fan-out
 	ConnectedAt  string `json:"connectedAt,omitempty"`
 	LastError    string `json:"lastError,omitempty"`
 	LANMode      string `json:"lanMode,omitempty"`
@@ -244,6 +248,9 @@ func (b *Broadcaster) Status() Status {
 	// hid the reason behind "connected".
 	lanOn := b.cfg.LANMode != "" && b.cfg.LANMode != "off"
 	lanUp, lastError := false, b.lastError
+	if b.cfg.ServerURL != "" && b.cfg.Protocol == "shoutcast" {
+		lastError = shoutcastUnsupported
+	}
 	lanErr, sent := b.lanErr, b.bytesSent.Load()
 	if b.lanStreamer != nil {
 		lanUp, lanErr = b.lanStreamer.Connected(), b.lanStreamer.Err()
@@ -414,7 +421,8 @@ func (b *Broadcaster) workerLoop(ctx context.Context, _ *resourceguard.Throttle)
 	}()
 
 	feed := make(chan []byte, 80) // about 0.8 s of ~10 ms chunks, as 32 was with 24 ms ones
-	if cfg.ServerURL != "" {
+	// A Shoutcast target is not pushed to; Status says why.
+	if cfg.ServerURL != "" && cfg.Protocol != "shoutcast" {
 		b.wg.Add(1)
 		go func() {
 			defer b.wg.Done()
