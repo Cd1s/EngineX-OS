@@ -64,6 +64,9 @@ func pageBatch[T any](ctx context.Context, slots chan struct{}, start, end int, 
 // Missing totals retain the sequential next-page behavior. maxPages preserves
 // each provider's existing cap, including when an upstream supplies a bad total.
 func collectPages[T any](ctx context.Context, slots chan struct{}, size, maxPages int, fetch func(int) (listPage[T], error)) ([]T, error) {
+	if size <= 0 {
+		return nil, errors.New("provider: invalid page size")
+	}
 	var out []T
 	knownEnd := 0
 	for start := 0; start < maxPages; {
