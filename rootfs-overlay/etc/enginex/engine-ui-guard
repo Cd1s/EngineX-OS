@@ -13,7 +13,7 @@ failures=${SC5000_BOOT_CRASH_LIMIT:-3}
 # that never started under the guard: on second-generation decks the stock Engine every boot starts
 # with, which boot-activate restarts into the hooked one. Its clean stop must not wipe the previous
 # boot's crash and power-cut evidence before `pre` reads it (BH-F52-4).
-pre_mark=${SC5000_GUARD_PRE_MARK:-/run/sc5000-engine-guard.pre}
+pre_mark=${SC5000_GUARD_PRE_MARK:-/run/enginex-engine-guard.pre}
 case $limit in ''|*[!0-9]*|0) limit=180 ;; esac
 case $window in ''|*[!0-9]*|0) window=300 ;; esac
 case $failures in ''|*[!0-9]*|0) failures=3 ;; esac
@@ -36,7 +36,7 @@ quarantine() {
     fi
     # A fallback during this boot must also undo our earlier assignment binds.
     assign=${SC5000_ASSIGNMENT_DIR:-/usr/Engine/AssignmentFiles/PresetAssignmentFiles}
-    patched=${SC5000_ASSIGNMENT_PATCHED:-/run/sc5000-assignments}
+    patched=${SC5000_ASSIGNMENT_PATCHED:-/run/enginex-assignments}
     for f in "$assign"/JP0[78]/*Assignments.qml "$assign"/JP1[34]/*Assignments.qml; do
         [ -f "$patched/${f##*/}" ] || continue
         ! mountpoint -q "$f" || umount "$f" || :
@@ -377,7 +377,7 @@ pre|settings)
     # ties the motor and the platter's layer to decks 1 and 2, so on 2+4 the platter never
     # turned and its touch reached deck 1, and on 1+3 deck 3 had neither.
     assign=${SC5000_ASSIGNMENT_DIR:-/usr/Engine/AssignmentFiles/PresetAssignmentFiles}
-    patched=${SC5000_ASSIGNMENT_PATCHED:-/run/sc5000-assignments}
+    patched=${SC5000_ASSIGNMENT_PATCHED:-/run/enginex-assignments}
     on=; ! grep -qx 'four_deck_waveform=1' "$UI/settings.conf" 2>/dev/null || on=1
     if [ -n "$on" ]; then
         state_dir=${SC5000_STATE_DIR:-/data/AppDataUser/AIR Music Technology/Engine/State}

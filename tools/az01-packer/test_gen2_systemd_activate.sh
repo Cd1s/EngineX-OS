@@ -149,13 +149,13 @@ sub("Wants=enginex-stream-sync.service enginex-rb-bridge.service enginex-sc5000-
 sub("engine-ui-guard service /usr/Engine/Scripts/runengine",
     f"engine-ui-guard service {tmp}/mock-runengine.sh {tmp} {tmp}/new-activator-wrapper.sh")
 sub("/usr/Engine/Scripts/engine", f"{tmp}/no-vendor-engine-script")
-sub("ExecStartPre=/bin/mkdir -p -m 0700 /tmp/sc5000-engine-home\n",
+sub("ExecStartPre=/bin/mkdir -p -m 0700 /tmp/enginex-engine-home\n",
     f"Environment=SC5000_CUSTOM={tmp}/data/enginex SC5000_CONFIG_DIR={tmp}/data/.config SC5000_ZONEINFO_DIR={tmp}/zoneinfo SC5000_PRODUCT_CODE_FILE={tmp}/product-code SC5000_TZ_NEWER_MARKER={tmp}/tz-newer\n")
 sub("EnvironmentFile=-/data/sc5000-custom/ui-scale.env\n", "")
 sub("$bundle_dir/boot-activate.sh --restore-tz", f"{dst} --restore-tz")
 sub("/run/systemd/timesyncd.conf.d/10-enginex-ntp.conf", f"{tmp}/ntp.conf")
 sub("/run/systemd/timesyncd.conf.d", f"{tmp}/ntp.d")
-sub("/run/sc5000", f"{tmp}/run-sc5000")
+sub("/run/enginex", f"{tmp}/run-enginex")
 sub("accounts=/data/StreamingAccounts.json", f"accounts={tmp}/data/StreamingAccounts.json")
 sub("[ -d /data ]", f"[ -d {tmp}/data ]")
 sub("systemctl restart --no-block enginex-stream-sync.service enginex-rb-bridge.service enginex-sc5000-deemixd.service engine-guardian.service || :", ":")

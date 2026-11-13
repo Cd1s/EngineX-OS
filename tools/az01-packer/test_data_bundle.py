@@ -92,11 +92,11 @@ class DataBundleTest(unittest.TestCase):
         self.assertTrue((src / 'boot-activate.sh').stat().st_mode & 0o100)
         self.assertIn('Environment="QT_LOGGING_CONF=/data/logging.ini"',
                       (src / 'boot-activate.sh').read_text())
-        self.assertIn('Environment=HOME=/tmp/sc5000-engine-home MESA_SHADER_CACHE_MAX_SIZE=32M',
+        self.assertIn('Environment=HOME=/tmp/enginex-engine-home MESA_SHADER_CACHE_MAX_SIZE=32M',
                       (src / 'boot-activate.sh').read_text())
         self.assertIn('Environment=QML_DISABLE_DISK_CACHE=1',
                       (src / 'boot-activate.sh').read_text())
-        self.assertIn('ExecStartPre=/bin/mkdir -p -m 0700 /tmp/sc5000-engine-home',
+        self.assertIn('ExecStartPre=/bin/mkdir -p -m 0700 /tmp/enginex-engine-home',
                       (src / 'boot-activate.sh').read_text())
         self.assertIn('EnvironmentFile=-/data/sc5000-custom/ui-scale.env',
                       (src / 'boot-activate.sh').read_text())
@@ -764,7 +764,7 @@ exec REAL "$@"
         ba_relocated = self.tmp / 'boot-activate-reloc.sh'
         ba_relocated.write_text(ba_text.replace('/run/', str(run_dir) + '/'))
         ba_relocated.chmod(0o755)
-        marker = run_dir / 'sc5000-tz-newer'
+        marker = run_dir / 'enginex-tz-newer'
         lib_dir = root / 'system/var/overlay/lib'
         env = dict(self.env,
                    SC5000_CUSTOM=str(dest),
@@ -976,7 +976,7 @@ exec REAL "$@"
         self.assertFalse((dest / 'gen2-unlocked').exists())
         self.host_commands.write_text('')
 
-        stage = run_dir / 'sc5000-engine-script'
+        stage = run_dir / 'enginex-engine-script'
         rewritten = stage.read_text()
         lib_hook = f'{dest}/bundle/lib/libengine-ui-hook.so'
         self.assertIn(f'\t{dest}/bundle/bin/engine-ui-guard launch /usr/Engine/Engine -d0', rewritten)

@@ -244,7 +244,7 @@ convert_mounted() {
 # and the DJ cannot load a track in the stock UI that the restart then takes away (BH-F52-6).
 # Once per boot; a later restart finds the sticks converted by the hook at their mount.
 if [ "${1:-}" = "--convert-mounted" ]; then
-    mark=${SC5000_CONVERT_MARK:-/run/sc5000-boot-converted}
+    mark=${SC5000_CONVERT_MARK:-/run/enginex-boot-converted}
     [ ! -e "$mark" ] || exit 0
     : > "$mark" 2>/dev/null || :
     convert_mounted
@@ -255,7 +255,7 @@ fi
 # the hooked Engine starts, so Engine.conf is updated without stopping our own cgroup.
 if [ "${1:-}" = "--restore-tz" ]; then
     force_newer=0
-    tz_marker=${SC5000_TZ_NEWER_MARKER:-/run/sc5000-tz-newer}
+    tz_marker=${SC5000_TZ_NEWER_MARKER:-/run/enginex-tz-newer}
     if [ -e "$tz_marker" ]; then
         force_newer=1
         rm -f "$tz_marker" 2>/dev/null || :
@@ -284,10 +284,10 @@ Environment="SC5000_ENGINE_GUARDIAN=$bin_dir/engine-guardian"
 ExecStart=
 ExecStart=$bin_dir/engine-ui-guard service /usr/Engine/Scripts/runengine
 Environment="QT_LOGGING_CONF=/data/logging.ini"
-Environment=HOME=/tmp/sc5000-engine-home MESA_SHADER_CACHE_MAX_SIZE=32M
+Environment=HOME=/tmp/enginex-engine-home MESA_SHADER_CACHE_MAX_SIZE=32M
 Environment=QML_DISABLE_DISK_CACHE=1
 EnvironmentFile=-/data/sc5000-custom/ui-scale.env
-ExecStartPre=/bin/mkdir -p -m 0700 /tmp/sc5000-engine-home
+ExecStartPre=/bin/mkdir -p -m 0700 /tmp/enginex-engine-home
 ExecStartPre=-$bundle_dir/boot-activate.sh --restore-tz
 ExecStartPre=-$bin_dir/engine-ui-guard pre
 ExecStartPre=-$bundle_dir/boot-activate.sh --convert-mounted
@@ -302,7 +302,7 @@ EOF
 # The stock script also forces Gigabit Ethernet down to 100 Mbps on every Engine
 # start; first-generation images set 1000 (debloat patch), so do these (BH-GC2-6).
 if [ -x "$bin_dir/engine-ui-guard" ] && [ -f /usr/Engine/Scripts/engine ]; then
-    script_stage=$(mktemp /run/sc5000-engine-script.XXXXXX)
+    script_stage=$(mktemp /run/enginex-engine-script.XXXXXX)
     sed -E \
         -e "s|^([[:space:]]*)/usr/Engine/Engine([[:space:]])|\\1$bin_dir/engine-ui-guard launch /usr/Engine/Engine\\2|" \
         -e "s|^([[:space:]]*(exec[[:space:]]+)?)/usr/sbin/az01-update([[:space:]].*)?\$|\\1env LD_PRELOAD=\"$lib_hook\" /usr/sbin/az01-update\\3|" \
@@ -319,8 +319,8 @@ if [ -x "$bin_dir/engine-ui-guard" ] && [ -f /usr/Engine/Scripts/engine ]; then
         if cmp -s "$script_stage" /usr/Engine/Scripts/engine; then
             rm -f "$script_stage"
         else
-            mv "$script_stage" /run/sc5000-engine-script
-            mount --bind /run/sc5000-engine-script /usr/Engine/Scripts/engine
+            mv "$script_stage" /run/enginex-engine-script
+            mount --bind /run/enginex-engine-script /usr/Engine/Scripts/engine
         fi
     else
         rm -f "$script_stage"
@@ -407,11 +407,11 @@ if [ -f "$ts_file" ] && [ ! -L "$ts_file" ]; then
 fi
 
 if [ -f "$bundle_dir/version.txt" ]; then
-    mkdir -p /run/sc5000
+    mkdir -p /run/enginex
     if [ ! -f /etc/sc5000/version.txt ] || ! cmp -s "$bundle_dir/version.txt" /etc/sc5000/version.txt; then
-        cp "$bundle_dir/version.txt" /run/sc5000/version.txt
+        cp "$bundle_dir/version.txt" /run/enginex/version.txt
         if [ -f /etc/sc5000/version.txt ]; then
-            mount --bind /run/sc5000/version.txt /etc/sc5000/version.txt 2>/dev/null || :
+            mount --bind /run/enginex/version.txt /etc/sc5000/version.txt 2>/dev/null || :
         fi
     fi
 fi
@@ -531,7 +531,7 @@ fi
 if [ ! -e "$dest/ui/safe-mode" ] && grep -qx 'four_deck_waveform=1' "$dest/ui/settings.conf" 2>/dev/null; then
     role=$(sed -n 's/^four_deck_role=//p' "$dest/ui/settings.conf" 2>/dev/null | tail -n 1)
     case $role in 12|13|24|34|1|2) ;; *) role=12 ;; esac
-    mkdir -p /run/sc5000-assignments && echo "$role" > /run/sc5000-assignments/role
+    mkdir -p /run/enginex-assignments && echo "$role" > /run/enginex-assignments/role
 fi
 
 # Sticks mounted before this ran never went through the edisksd hook.
@@ -544,7 +544,7 @@ if [ "$(cat "${SC5000_PID1_COMM:-/proc/1/comm}" 2>/dev/null)" = systemd ] && sys
     [ "$timesyncd_changed" = 0 ] || systemctl restart --no-block systemd-timesyncd.service || :
     # The sticks present at boot are converted by the hooked Engine's ExecStartPre (BH-F52-6).
     if check_gen2_tz_newer; then
-        : > "${SC5000_TZ_NEWER_MARKER:-/run/sc5000-tz-newer}" 2>/dev/null || :
+        : > "${SC5000_TZ_NEWER_MARKER:-/run/enginex-tz-newer}" 2>/dev/null || :
     fi
     if [ ! -e "$dest/ui/safe-mode" ]; then
         systemctl restart --no-block engine.service || systemctl restart engine.service || :
@@ -754,9 +754,9 @@ if [ -n "$accounts" ] && grep -q 'accessToken[^,}]*enginex' "$accounts" 2>/dev/n
             printf "%s%s", head, tail
         }' "$accounts" > "$accounts.tmp" && mv "$accounts.tmp" "$accounts" || rm -f "$accounts.tmp"
 fi
-if [ -z "${SC5000_CUSTOM:-}" ] && [ -e /run/sc5000-engine-script ]; then
+if [ -z "${SC5000_CUSTOM:-}" ] && [ -e /run/enginex-engine-script ]; then
     ! mountpoint -q /usr/Engine/Scripts/engine || umount /usr/Engine/Scripts/engine || :
-    rm -f /run/sc5000-engine-script
+    rm -f /run/enginex-engine-script
 fi
 rm -rf "$dest/bundle"
 if [ -z "${SC5000_CUSTOM:-}" ]; then
@@ -767,7 +767,7 @@ if [ -z "${SC5000_CUSTOM:-}" ]; then
         done
         systemctl stop engine-guardian.service 2>/dev/null || :
         rm -f /run/systemd/system/engine-guardian.service
-        rm -f /run/systemd/system/engine.service.d/99-sc5000.conf /run/systemd/system/edisksd.service.d/99-sc5000.conf /run/systemd/timesyncd.conf.d/10-enginex-ntp.conf /run/sc5000-tz-newer
+        rm -f /run/systemd/system/engine.service.d/99-sc5000.conf /run/systemd/system/edisksd.service.d/99-sc5000.conf /run/systemd/timesyncd.conf.d/10-enginex-ntp.conf /run/enginex-tz-newer
         systemctl daemon-reload 2>/dev/null || :
         systemctl restart --no-block edisksd.service systemd-timesyncd.service 2>/dev/null || :
     fi
@@ -778,7 +778,7 @@ if [ -z "${SC5000_CUSTOM:-}" ]; then
           /run/systemd/system/enginex-sc5000-deemixd.service \
           /run/systemd/system/engine.service.d/99-sc5000.conf \
           /run/systemd/system/edisksd.service.d/99-sc5000.conf \
-          /run/systemd/timesyncd.conf.d/10-enginex-ntp.conf /run/sc5000-tz-newer
+          /run/systemd/timesyncd.conf.d/10-enginex-ntp.conf /run/enginex-tz-newer
 fi
 # Bytecode is disposable and must not outlive the resource pack that produced it.
 rm -rf "$dest/ui/qml-cache"

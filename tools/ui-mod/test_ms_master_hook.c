@@ -95,7 +95,7 @@ static void test_hidden_means_off(void) {
     if (unshare(CLONE_NEWNS) == 0 && mount("none", "/", NULL, MS_REC | MS_PRIVATE, NULL) == 0) {
         mkdir("/data", 0755);
         assert(mount("tmpfs", "/data", "tmpfs", 0, NULL) == 0);
-        mkdir("/data/sc5000-custom", 0755);
+        mkdir("/data/enginex", 0755);
         mkdir(UI_ROOT, 0755);
         snprintf(conf_path, sizeof conf_path, "%s/settings.conf", UI_ROOT);
     } else {

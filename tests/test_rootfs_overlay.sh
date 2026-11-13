@@ -731,7 +731,7 @@ unset GUARD_LOG SC5000_ASSIGNMENT_DIR SC5000_ASSIGNMENT_PATCHED SC5000_PLANCK_ST
 has 'ExecStopPost=-/etc/enginex/engine-ui-guard stop' "$ROOT/rootfs-overlay/etc/systemd/system/engine.service.d/override.conf"
 has 'ExecStopPost=-/etc/enginex/engine-ui-guard stop' "$debloat_root/etc/systemd/system/engine.service.d/override.conf"
 for conf in "$ROOT/rootfs-overlay/etc/systemd/system/engine.service.d/override.conf" "$debloat_root/etc/systemd/system/engine.service.d/override.conf"; do
-    has 'Environment=HOME=/tmp/sc5000-engine-home' "$conf"
+    has 'Environment=HOME=/tmp/enginex-engine-home' "$conf"
     has "command -v connmanctl >/dev/null || exit 0" "$conf"
 done
 has 'SC5000_BOOT_TIMEOUT:-180' "$GUARD"
@@ -838,7 +838,7 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$routed" 2>/dev/null || break; /bin/s
 ! kill -0 "$routed" 2>/dev/null || usb_fail 'route-dac stop left its own alsaloop running'
 kill "$bystander" 2>/dev/null || :
 wait "$bystander" "$routed" 2>/dev/null || :
-has 'PIDFILE="${SC5000_USB_AUDIO_PIDFILE:-/run/sc5000-usb-audio.pid}"' "$USB_AUDIO"
+has 'PIDFILE="${SC5000_USB_AUDIO_PIDFILE:-/run/enginex-usb-audio.pid}"' "$USB_AUDIO"
 ok 'USB DAC routing: only its own alsaloop is stopped, a reused PID is left alone, PID file under /run'
 
 cmp -s "$ROOT/rootfs-overlay/etc/enginex/libengine-ui-hook.so" "$ROOT/rootfs-overlay/usr/local/lib/enginex/libengine-ui-hook.so" ||

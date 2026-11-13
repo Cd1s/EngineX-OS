@@ -180,9 +180,9 @@ SH
         check "$name: sc5000-storage-mount --discover" in_root $(unit_exec sc5000-storage-discover.service)
     fi
     # engine.service: ExecStartPre (guard), runengine's environment, the stock engine script.
-    mkdir -p -m 0700 "$R/tmp/sc5000-engine-home"
+    mkdir -p -m 0700 "$R/tmp/enginex-engine-home"
     local ui=$W/data/sc5000-custom/ui want=0
-    local engine_env=(HOME=/tmp/sc5000-engine-home MESA_SHADER_CACHE_MAX_SIZE=32M QML_DISABLE_DISK_CACHE=1
+    local engine_env=(HOME=/tmp/enginex-engine-home MESA_SHADER_CACHE_MAX_SIZE=32M QML_DISABLE_DISK_CACHE=1
         LD_PRELOAD=/etc/sc5000/libengine-ui-hook.so QT_QPA_PLATFORM=offscreen MALLOC_ARENA_MAX=1 LD_LIBRARY_PATH=/usr/qt/lib)
     if [ "$name" = new ]; then
         # The 5.3.0.1 deck kept the stock UI (2026-11-05): Engine 5.3.0 once ran without the
@@ -209,7 +209,7 @@ SH
         want=$(find "$ui/packs/$LANG_PACK" -type f ! -name QmlWarnings.qml | wc -l)
     fi
     # The shipped guard chooses the preload for every new-release Engine attempt.
-    [ "$name" = old ] || engine_env=(HOME=/tmp/sc5000-engine-home MESA_SHADER_CACHE_MAX_SIZE=32M QML_DISABLE_DISK_CACHE=1
+    [ "$name" = old ] || engine_env=(HOME=/tmp/enginex-engine-home MESA_SHADER_CACHE_MAX_SIZE=32M QML_DISABLE_DISK_CACHE=1
         QT_QPA_PLATFORM=offscreen MALLOC_ARENA_MAX=1 LD_LIBRARY_PATH=/usr/qt/lib)
     in_root /etc/sc5000/engine-ui-guard pre >> "$W/$name-boot.log" 2>&1 || :
     if [ "$name" = new ]; then
@@ -487,7 +487,7 @@ else
 fi
 for t in python3 openssl curl unshare chroot ip readelf realpath systemd-analyze setpriv; do command -v $t >/dev/null || { echo "missing $t" >&2; exit 2; }; done
 OLD_IMG=$(realpath "$1"); NEW_IMG=$(realpath "$2"); NEWV=$3
-W=$(realpath -m "${4:-$(mktemp -d /var/tmp/sc5000-gate.XXXXXX)}")
+W=$(realpath -m "${4:-$(mktemp -d /var/tmp/enginex-gate.XXXXXX)}")
 [ ! -e "$W/results.txt" ] || { echo "$W was used before; give a new work dir" >&2; exit 2; }
 NEW_NAME=$(basename "$NEW_IMG"); OLD_NAME=$(basename "$OLD_IMG")
 [[ $NEW_NAME =~ ^([A-Z0-9]+)-$NEWV-EngineX-OS-(.*)-([A-Z]{2}[0-9]{2})-Update\.img$ ]] || { echo "unexpected new image name $NEW_NAME" >&2; exit 2; }

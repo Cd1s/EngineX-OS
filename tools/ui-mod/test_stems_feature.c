@@ -668,7 +668,7 @@ static void test_sqlite(void) {
     sqlite_open_v2_fn v2_fn = (void *)(image + build->sqlite_open_v2);
     void *db = NULL;
     char path[128];
-    snprintf(path, sizeof path, "/tmp/sc5000-hook-test-%ld.db", (long)getpid());
+    snprintf(path, sizeof path, "/tmp/enginex-hook-test-%ld.db", (long)getpid());
     unlink(path);
     assert(v2_fn(path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, "unix") == SQLITE_OK);
     assert(exec_count == 1);
@@ -709,10 +709,10 @@ static void test_sqlite(void) {
 
 static void test_files(void) {
     char path[PATH_MAX], target[PATH_MAX], mapped[PATH_MAX];
-    snprintf(path, sizeof path, "/tmp/sc5000-hook-%ld/CrashReportDB/report.lock", (long)getpid());
+    snprintf(path, sizeof path, "/tmp/enginex-hook-%ld/CrashReportDB/report.lock", (long)getpid());
     hook_test_engine = 1;
     const char *p = volatile_path(AT_FDCWD, path, mapped);
-    assert(p == mapped && strstr(p, "/tmp/sc5000-engine-volatile-") == p);
+    assert(p == mapped && strstr(p, "/tmp/enginex-engine-volatile-") == p);
     strcpy(target, mapped);
     assert(volatile_path(AT_FDCWD, target, mapped) == target);
     int (*openers[])(const char *, int, ...) = {hook_open, hook_open64};
@@ -731,9 +731,9 @@ static void test_files(void) {
     assert(dirfd >= 0);
     // An analytics directory used as dirfd must retain filename/flags/mode.
     char analytics[PATH_MAX];
-    snprintf(analytics, sizeof analytics, "/tmp/sc5000-hook-%ld/analytics", (long)getpid());
+    snprintf(analytics, sizeof analytics, "/tmp/enginex-hook-%ld/analytics", (long)getpid());
     mkdir(path, 0700); // Missing original parents are intentional; do not create them.
-    char root[128]; snprintf(root, sizeof root, "/tmp/sc5000-hook-%ld", (long)getpid());
+    char root[128]; snprintf(root, sizeof root, "/tmp/enginex-hook-%ld", (long)getpid());
     assert(!mkdir(root, 0700) || errno == EEXIST);
     assert(!mkdir(analytics, 0700));
     int ad = open(analytics, O_RDONLY | O_DIRECTORY);
@@ -1373,9 +1373,9 @@ static void test_alsa_boot_hook(void) {
     assert(dst == NULL);
 
     g_hook_initialized = 0;
-    system("mkdir -p /run 2>/dev/null; touch /run/sc5000-alsa-reexec.once");
+    system("mkdir -p /run 2>/dev/null; touch /run/enginex-alsa-reexec.once");
     assert(sc5000_alsa_boot_hook(NULL, NULL, &dst, NULL) == 0);
-    unlink("/run/sc5000-alsa-reexec.once");
+    unlink("/run/enginex-alsa-reexec.once");
 
     g_hook_initialized = 1;
     hook_test_engine = 0;

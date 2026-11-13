@@ -31,7 +31,7 @@ const (
 	DefaultUsername   = "source"
 	DefaultFormat     = "wav"
 	DefaultStreamName = "EngineX OS Live Mix"
-	DefaultInputPath  = "/tmp/sc5000-broadcast.pcm"
+	DefaultInputPath  = "/tmp/enginex-broadcast.pcm"
 )
 
 // SampleRate is the rate of the PCM feed: the Engine hook (#50) resamples the
@@ -56,7 +56,7 @@ type Config struct {
 	Password   string `json:"password,omitempty"`  // omitted in JSON output
 	Format     string `json:"format"`              // always "wav": old settings that say mp3 or ogg load as wav
 	StreamName string `json:"streamName"`          // default "EngineX OS Live Mix"
-	InputPath  string `json:"inputPath,omitempty"` // optional PCM file/FIFO path (default "/tmp/sc5000-broadcast.pcm")
+	InputPath  string `json:"inputPath,omitempty"` // optional PCM file/FIFO path (default "/tmp/enginex-broadcast.pcm")
 	LANMode    string `json:"lanMode,omitempty"`   // "off" (default), "rtp", "teleport"
 	LANTarget  string `json:"lanTarget,omitempty"` // e.g. "239.255.0.1:5004" or "192.168.1.50:9998"
 }

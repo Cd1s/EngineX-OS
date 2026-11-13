@@ -2518,7 +2518,7 @@ SERVICES_MAIN = """
 		const speed = Math.max(0, Math.min(1, 0.5 + pitch / (2 * range)))
 		if (Math.abs(pSpeed.value - speed) * 2 * range > 0.002) pSpeed.value = speed
 	}
-	// Debug telemetry (debug_telemetry=1 or /tmp/sc5000-debug, told by GET /shadow):
+	// Debug telemetry (debug_telemetry=1 or /tmp/enginex-debug, told by GET /shadow):
 	// the receiver's decisions, posted in batches to Go's ring and log.
 	property bool scShadowDebug: false
 	property var scShadowDbgBuf: []
