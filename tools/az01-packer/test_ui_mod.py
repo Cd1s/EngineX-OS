@@ -1074,6 +1074,7 @@ Object.assign(globalThis, {
     scShadowPostRequest: null, scShadowPollRequest: null, scShadowResponseVersion: "", scShadowPostPending: false,
     scShadowLinkId: '', scShadowLinkAt: -Infinity, scShadowTextAt: {},
     scShadowSent: [], scShadowFullAt: 0, scShadowPostFull: true, scShadowLive: {seen: 0},
+    scShadowScratchDelay: 60, scShadowScratchTimer: {running: false, start() {this.running=true}, stop() {this.running=false}, tick() {}},
     scShadowTickTimer: {interval: 40}, scShadowBusyAt: 0, scShadowRoleDirty: true,
     scGcLoadSeq: 0, scGcRuns: 0, scGcLastMs: 0, scGcProps: null,
     scGcState: {armed: true, quietSince: 0, lastRun: -Infinity, loadSig: 0, loadSeq: 0, loadAt: 0, followAt: 0},
@@ -1095,6 +1096,10 @@ globalThis.XMLHttpRequest = class {
     }
 };
 """
+        timer = re.search(r'id: scShadowScratchTimer\n.*?onTriggered: \{(.*?)\n\t\t\}\n\t\}', bp.SERVICES_MAIN, re.S)
+        if timer:
+            delay = re.search(r'scShadowScratchDelay: (\d+)', bp.SERVICES_MAIN).group(1)
+            setup += "\nscShadowScratchDelay=" + delay + "; scShadowScratchTimer.tick=function(){" + timer.group(1) + "};\n"
         res = subprocess.run(["node", "-e", setup + "\n".join(functions) + "\n" + body], capture_output=True, text=True)
         self.assertEqual(res.returncode, 0, res.stderr)
 
@@ -5462,20 +5467,21 @@ globalThis.scTr=path=>({
     get value(){return path.endsWith('/SampleRate')?48000:0},
     get unnormalized(){return path.endsWith('/TrackPosition')?pos:path.endsWith('/TrackLength')?48000*400:path.endsWith('BPM')?128:0},
     get state(){return path.endsWith('/SongLoaded')||(path.endsWith('/PlayState')&&playing)||(path.endsWith('/ExternalScratchWheelTouch')&&touch)},
-    get string(){return path.endsWith('/TrackUri')?'file:///a.mp3':''}, color:'#ffffff'});
+    get string(){return path.endsWith('/TrackUri')?'file:///a.mp3':path.endsWith('/SyncMode')?'On':''}, color:'#ffffff'});
 for(let i=0;i<30;i++){now+=80;pos+=80*48;scShadowTick();}
 assert.equal(scShadowTickTimer.interval,80);
-const before=bodies.length;
+const before=bodies.length, jumps=scShadowPrev[1].jumps;
 touch=true;
-for(let i=0;i<6;i++){
+for(let i=0;i<30;i++){
     now+=scShadowTickTimer.interval;
-    pos-=15*48; // backward baby scratch: 15 ms per tick (below 180 ms jump threshold)
+    pos-=87.5*48; // 3.5x backward scratch for over 500 ms with Sync on
     scShadowTick();
 }
 assert.equal(scShadowTickTimer.interval,25,'sender drops to 25 ms (40 Hz) during scratch');
-assert(bodies.length>before+4,'scratch movements posted immediately without envelope lag: '+(bodies.length-before));
+assert(bodies.length>before+28,'scratch movements posted immediately without envelope lag: '+(bodies.length-before));
 const last=bodies[bodies.length-1][0];
 assert.equal(last.scratch,true);
+assert.equal(last.jumps,jumps,'long scratch became a Sync hold jump');
 assert.equal(Math.round(last.positionMs),Math.round(pos/48),'raw position published without 0.2*0.2 smoothing');
 // Release platter: scratch clears cleanly.
 touch=false; now+=25; pos+=25*48; scShadowTick();
@@ -5514,11 +5520,12 @@ assert.equal(seeks,0);
 for(let i=1;i<=5;i++){
     now+=25;
     scShadowApplyAll([{deck:2,path:'/data/enginex/shadow-v3/peer-1/a.flac',id:'1',playing:true,scratch:true,link:'{l}',positionMs:11500-i*40,at:now,pitch:0,bpm:128,currentBpm:128,jumps:0,seq:++seq}],false);
+    scShadowScratchTimer.tick();
 }
 assert.equal(P('/Engine/Deck2/ExternalScratchWheelTouch').state,true,'shadow platter touch must be engaged');
 assert.equal(seeks,0,'normal scratch must not flush decoder with SetSongPosition');
 assert(wheelMoves.length>=4 && wheelMoves.every(v=>v<0),'backward wheel moves sent');
-assert(Math.abs(posMs-11300)<35,'shadow position tracked backward scratch closely: '+posMs);
+assert(Math.abs(posMs-(11300+60*1.6))<35,'shadow position follows the 60 ms delayed scratch: '+posMs);
 // Release platter: touch clears cleanly.
 now+=25;
 scShadowApplyAll([{deck:2,path:'/data/enginex/shadow-v3/peer-1/a.flac',id:'1',playing:true,scratch:false,link:'{l}',positionMs:11325,at:now,pitch:0,bpm:128,currentBpm:128,jumps:0,seq:++seq}],false);
