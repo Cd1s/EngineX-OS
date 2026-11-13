@@ -695,17 +695,17 @@
             "<li>PRIME 4 G2 / SYSTEM ONE data partition size (<a href=\"https://github.com/Cd1s/EngineX-OS/issues/244\" target=\"_blank\" rel=\"noopener\">#244</a>).</li></ul>"),
           L("**U 盘与曲库**：<ul>" +
             "<li>读取 U 盘期间在屏幕显示“正在准备”提示（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/230\" target=\"_blank\" rel=\"noopener\">#230</a>）；</li>" +
-            "<li>修复 exFAT U 盘上的 rekordbox 歌单读取并加快认盘速度（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/253\" target=\"_blank\" rel=\"noopener\">#253</a>）；</li>" +
+            "<li>加快大型 rekordbox U 盘的认盘速度（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/253\" target=\"_blank\" rel=\"noopener\">#253</a>）；</li>" +
             "<li>改进大容量 rekordbox U 盘与 MP3 节拍网格处理（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/233\" target=\"_blank\" rel=\"noopener\">#233</a>）；</li>" +
             "<li>为仍带有旧版滞后拍线的 MP3 曲目重新分析节拍网格（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/246\" target=\"_blank\" rel=\"noopener\">#246</a>）。</li></ul>",
             "**隨身碟與曲庫**：<ul>" +
             "<li>讀取隨身碟期間於螢幕顯示「準備中」提示（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/230\" target=\"_blank\" rel=\"noopener\">#230</a>）；</li>" +
-            "<li>修復 exFAT 隨身碟上的 rekordbox 歌單讀取並加快辨識速度（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/253\" target=\"_blank\" rel=\"noopener\">#253</a>）；</li>" +
+            "<li>加快大型 rekordbox 隨身碟的辨識速度（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/253\" target=\"_blank\" rel=\"noopener\">#253</a>）；</li>" +
             "<li>改進大容量 rekordbox 隨身碟與 MP3 節拍網格處理（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/233\" target=\"_blank\" rel=\"noopener\">#233</a>）；</li>" +
             "<li>為仍帶有舊版滯後拍線的 MP3 曲目重新分析節拍網格（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/246\" target=\"_blank\" rel=\"noopener\">#246</a>）。</li></ul>",
             "**USB and libraries**:<ul>" +
             "<li>Show a “preparing” notice while a stick is being read (<a href=\"https://github.com/Cd1s/EngineX-OS/issues/230\" target=\"_blank\" rel=\"noopener\">#230</a>);</li>" +
-            "<li>rekordbox playlists on exFAT sticks and faster stick recognition (<a href=\"https://github.com/Cd1s/EngineX-OS/issues/253\" target=\"_blank\" rel=\"noopener\">#253</a>);</li>" +
+            "<li>Faster recognition of large rekordbox sticks (<a href=\"https://github.com/Cd1s/EngineX-OS/issues/253\" target=\"_blank\" rel=\"noopener\">#253</a>);</li>" +
             "<li>Large rekordbox sticks and MP3 beat grids (<a href=\"https://github.com/Cd1s/EngineX-OS/issues/233\" target=\"_blank\" rel=\"noopener\">#233</a>);</li>" +
             "<li>Re-analyse MP3s that still carry the old late beat grid (<a href=\"https://github.com/Cd1s/EngineX-OS/issues/246\" target=\"_blank\" rel=\"noopener\">#246</a>).</li></ul>"),
           L("**显示与操控**：<ul>" +
