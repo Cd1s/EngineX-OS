@@ -700,13 +700,16 @@
             "<li>PRIME 4 G2 / SYSTEM ONE data partition size (<a href=\"https://github.com/Cd1s/EngineX-OS/issues/244\" target=\"_blank\" rel=\"noopener\">#244</a>).</li></ul>"),
           L("**U 盘与曲库**：<ul>" +
             "<li>加快大型 rekordbox U 盘的认盘速度（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/253\" target=\"_blank\" rel=\"noopener\">#253</a>）；</li>" +
-            "<li>为仍带有旧版滞后拍线的 MP3 曲目重新分析节拍网格（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/246\" target=\"_blank\" rel=\"noopener\">#246</a>）。</li></ul>",
+            "<li>为仍带有旧版滞后拍线的 MP3 曲目重新分析节拍网格（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/246\" target=\"_blank\" rel=\"noopener\">#246</a>）；</li>" +
+            "<li>SC LIVE 4 浏览 Engine DJ Desktop 远程曲库（Remote Library）时，曲目列表显示封面（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/223\" target=\"_blank\" rel=\"noopener\">#223</a>）。</li></ul>",
             "**隨身碟與曲庫**：<ul>" +
             "<li>加快大型 rekordbox 隨身碟的辨識速度（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/253\" target=\"_blank\" rel=\"noopener\">#253</a>）；</li>" +
-            "<li>為仍帶有舊版滯後拍線的 MP3 曲目重新分析節拍網格（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/246\" target=\"_blank\" rel=\"noopener\">#246</a>）。</li></ul>",
+            "<li>為仍帶有舊版滯後拍線的 MP3 曲目重新分析節拍網格（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/246\" target=\"_blank\" rel=\"noopener\">#246</a>）；</li>" +
+            "<li>SC LIVE 4 瀏覽 Engine DJ Desktop 遠端曲庫（Remote Library）時，曲目清單顯示封面（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/223\" target=\"_blank\" rel=\"noopener\">#223</a>）。</li></ul>",
             "**USB and libraries**:<ul>" +
             "<li>Faster recognition of large rekordbox sticks (<a href=\"https://github.com/Cd1s/EngineX-OS/issues/253\" target=\"_blank\" rel=\"noopener\">#253</a>);</li>" +
-            "<li>Re-analyse MP3s that still carry the old late beat grid (<a href=\"https://github.com/Cd1s/EngineX-OS/issues/246\" target=\"_blank\" rel=\"noopener\">#246</a>).</li></ul>"),
+            "<li>Re-analyse MP3s that still carry the old late beat grid (<a href=\"https://github.com/Cd1s/EngineX-OS/issues/246\" target=\"_blank\" rel=\"noopener\">#246</a>);</li>" +
+            "<li>Show covers in the SC LIVE 4 track list when browsing an Engine DJ Desktop Remote Library (<a href=\"https://github.com/Cd1s/EngineX-OS/issues/223\" target=\"_blank\" rel=\"noopener\">#223</a>).</li></ul>"),
           L("**显示与操控**：<ul>" +
             "<li>支持从另一台碟机复制全部设置（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/205\" target=\"_blank\" rel=\"noopener\">#205</a>）；</li>" +
             "<li>节拍同步的 DMX 灯光控制（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/209\" target=\"_blank\" rel=\"noopener\">#209</a>）。</li></ul>",
