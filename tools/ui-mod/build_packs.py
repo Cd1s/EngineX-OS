@@ -4513,11 +4513,13 @@ SYNC_TILE = """
 		}
 """
 
-# CDJ-3000 3-Band palette (blue lows, gold mids, white highs): played,
-# fading and past shades of each band.
-BAND_COLORS = {"Low": "#4a78ff", "Mid": "#f0b400", "High": "#ffffff"}
-BAND_FADE = {"Low": "#3a62dd", "Mid": "#d89e00", "High": "#f0f4ff"}
-BAND_PAST = {"Low": "#24408f", "Mid": "#906c00", "High": "#999999"}
+# rekordbox / CDJ-3000 3-Band palette, taken from a rekordbox 6 screenshot: blue
+# lows, orange mids, white highs, and brown mids where the lows cover them. Engine
+# fades each band from its main colour to its fade colour as that band gets quieter,
+# so a brown mid fade draws the same picture. Past: the played part of the overview.
+BAND_COLORS = {"Low": "#0055e2", "Mid": "#ffa500", "High": "#ffffff"}
+BAND_FADE = {"Low": "#0055e2", "Mid": "#b46a06", "High": "#f0f4ff"}
+BAND_PAST = {"Low": "#00307f", "Mid": "#996300", "High": "#999999"}
 # rekordbox's saturated RGB primaries, in place of Engine's muted ones.
 RGB_COLORS = {"Low": "#ff1428", "Mid": "#00e632", "High": "#0078ff"}
 RGB_PAST = {"Low": "#7f0a14", "Mid": "#007319", "High": "#003c80"}

@@ -6251,5 +6251,29 @@ for (const available of [false,true]) {
                     self.assertIn("showAddAccountDialog(tp)", main)
 
 
+class ThreeBandPaletteTest(unittest.TestCase):
+    """3-Band is rekordbox's blue / orange / white, with brown quiet mids; Denon and RGB keep theirs."""
+
+    def test_three_band_colours_and_untouched_denon_and_rgb(self):
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            patches = bp.edits(False)
+        finally:
+            bp.ROOT = old_root
+        common = "Skins/Embedded/Views/Common/"
+        wave = [new for _, new in patches[common + "Waveform/Waveform.qml"]]
+        overview = [new for _, new in patches[common + "WaveformOverview/WaveformOverview.qml"]]
+        for band, rgb, rgb_past, main, fade, past in (
+                ("Low", "#ff1428", "#7f0a14", "#0055e2", "#0055e2", "#00307f"),
+                ("Mid", "#00e632", "#007319", "#ffa500", "#b46a06", "#996300"),
+                ("High", "#0078ff", "#003c80", "#ffffff", "#f0f4ff", "#999999")):
+            with self.subTest(band=band):
+                self.assertIn(f'color{band}Color: (root.scWave === "3band" ? "{main}" : Style.waveform{band}Color)', wave)
+                self.assertIn(f'rgbMode ? "{rgb}" : (root.scWave === "3band" ? "{fade}" : Style.waveform{band}FadeColor)', wave)
+                self.assertIn(f'rgbMode ? "{rgb}" : (root.scWave === "3band" ? "{main}" : Style.waveform{band}Color)', overview)
+                self.assertIn(f'elapsed{band}Color: rgbMode ? "{rgb_past}" : (root.scWave === "3band" ? "{past}" : Style.waveform{band}PastColor)', overview)
+
+
 if __name__ == "__main__":
     unittest.main()
