@@ -327,6 +327,8 @@ func ReconcileContext(ctx context.Context, r *compat.Resolver, l *rekordbox.Libr
 
 const (
 	stampName = ".rb-bridge-stamp"
+	// overviewName marks a library whose overviews FillOverviewMaxima has completed.
+	overviewName = ".rb-bridge-overview"
 	// pendingName holds the stamp of an export whose import left tracks without
 	// their files read; the next mount of the same export resumes it.
 	pendingName  = ".rb-bridge-pending"
@@ -400,7 +402,6 @@ func convertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 		stamp = stampVersion + " " + staged
 	}
 	dir := filepath.Join(mount, "Engine Library", "Database2")
-	raw, vouched := enginedb.OverviewVouch(dir) // before this mount writes anything
 	oldStamp := readMark(dir, stampName)
 	opts.LegacyOffsets = oldStamp != "" && !strings.HasPrefix(oldStamp, stampVersion+" ")
 	resume := false
@@ -414,7 +415,7 @@ func convertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 					deadline = time.Now().Add(mountReadBudget)
 				}
 				_, _ = enginedb.MigrateArtworkBefore(ctx, mount, deadline)
-				completeOverviews(ctx, mount, dir, raw, vouched)
+				completeOverviews(ctx, mount, dir)
 			}
 			return enginedb.Result{Bypassed: true}, nil
 		}
@@ -454,7 +455,6 @@ func convertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 			if err != nil {
 				cleanEmptyEngineLibrary(dir)
 			} else {
-				completeOverviews(ctx, mount, dir, nil, true) // a library this build has just written
 				writeMark(dir, pendingName, stamp)
 				log.Printf("rb-bridge: %d tracks imported without cues; the next mounts read them", len(l.Tracks))
 			}
@@ -474,16 +474,13 @@ func convertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 			result, err = stagedImport(ctx, dir, l, opts, r)
 			if err != nil {
 				cleanEmptyEngineLibrary(dir)
-				return result, err
-			}
-			completeOverviews(ctx, mount, dir, nil, true) // a library this build has just written
-			if result.Deferred > 0 {
+			} else if result.Deferred > 0 {
 				writeMark(dir, pendingName, stamp)
 				log.Printf("rb-bridge: %d tracks imported without cues; the next mount reads them", result.Deferred)
 			} else {
 				writeStamp(dir, stamp)
 			}
-			return result, nil
+			return result, err
 		}
 	}
 	// The same export as a mount that left tracks without their files: read
@@ -491,7 +488,7 @@ func convertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 	opts.Resume = resume || (!full && !opts.SmartMatch && readMark(dir, pendingName) == stamp)
 	result, err = convert(ctx, mount, opts, pre, budget)
 	if err == nil && !result.Bypassed {
-		completeOverviews(ctx, mount, dir, raw, vouched) // the tracks this import had no reason to read again
+		completeOverviews(ctx, mount, dir) // the tracks this import had no reason to read again
 	}
 	if err == nil && result.Deferred > 0 {
 		writeMark(dir, pendingName, stamp)
@@ -504,20 +501,10 @@ func convertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 }
 
 // completeOverviews gives the overviews an earlier build imported the scale Engine
-// expects and vouches for the library's overviews, which the deck's overview asks
-// stream-sync about. vouched: they were vouched for before this mount wrote anything, so
-// only this build has written since and nothing needs a scan. Any other import, an earlier
-// build's on another deck too, ends the vouch (enginedb.OverviewVouch), and the next
-// mount scans again.
-func completeOverviews(ctx context.Context, mount, dir string, raw []string, vouched bool) {
-	if !vouched {
-		var err error
-		if raw, err = enginedb.FillOverviewMaxima(ctx, mount); err != nil {
-			return
-		}
-	}
-	if err := enginedb.VouchOverviews(dir, raw); err != nil {
-		log.Printf("rb-bridge: the overviews are not vouched for: %v", err)
+// expects, once per library.
+func completeOverviews(ctx context.Context, mount, dir string) {
+	if readMark(dir, overviewName) == "" && enginedb.FillOverviewMaxima(ctx, mount) == nil {
+		writeMark(dir, overviewName, "1")
 	}
 }
 

@@ -5908,114 +5908,26 @@ class EngineLightingDefaultOffAndPersistTest(unittest.TestCase):
 class OverviewFullButterflyScaleTest(unittest.TestCase):
     """#233: mirrored Full peaks fit even the smallest stacked overview lane.
 
-    A track whose overview Engine scales keeps the stock geometry (nothing of ours scales,
-    clips or moves the native view), so its peaks fit every lane exactly as on stock;
-    rb-bridge gives Engine the band maxima it scales by (pkg/enginedb
-    TestOverviewEndsWithBandMaxima). A rekordbox track keeps the geometry r5 gave every
-    one of them until stream-sync vouches for its scale, so one whose overview rb-bridge
-    could not complete is never drawn smaller than on r5; Full is never stretched."""
+    The deck overview keeps its stock geometry (nothing of ours scales, clips or moves the
+    native view), so peaks fit every lane exactly as on stock; rb-bridge gives Engine the
+    band maxima it scales by instead (pkg/enginedb TestOverviewEndsWithBandMaxima)."""
 
-    def check_overview(self, main, overview):
-        self.assertNotIn("scOverviewScale", main)
-        margin = re.search(r"bottomMargin: ([^\n]+)", overview)
-        clip = re.search(r'objectName: "Deck_WaveformOverview_ViewContainer"\s*clip: ([^\n]+)', overview)
-        transform = re.search(r"transform: Scale \{ origin.y: ([^;]+); yScale: ([^\n]+?) \}", overview)
-        asked = re.search(r"onScTrackChanged: \{\n(.*?)\n\t\t\t\}\n", overview, re.S)
-        for found in (margin, clip, transform, asked):
-            self.assertIsNotNone(found)
-        self.assertIn("property bool scRaw: false", overview)
-        self.assertIn("readonly property var scTrack: trackData", overview)
-        js = "const assert = require('assert/strict');\n"
-        js += ("const geometry = (overview, WaveformOverviewView) => ({margin: (" + margin.group(1) + "), clip: (" + clip.group(1)
-               + "), origin: (" + transform.group(1) + "), scale: (" + transform.group(2) + ")});\n")
-        js += "const asked = new Function('overview', 'XMLHttpRequest', 'with (overview) {' + " + json.dumps(asked.group(1)) + " + '}');\n"
-        js += r"""
-// Stock lane heights: full player, StackedMiniDeckLayout / Player_Mini,
-// 5.0.4 passive WaveformOverviews, and four-deck Console_Mini.
-// Check symbolic test values and the native JP13 enum (Full preference 1 maps to Butterfly 0).
-for (const WaveformOverviewView of [{Praline: 0, Butterfly: 1}, {Praline: 1, Butterfly: 0}]) {
-    for (const height of [86, 46, 44, 30]) {
-        for (const rgbMode of [false, true]) {
-            for (const displayType of [0, 1]) {
-                const full = displayType === WaveformOverviewView.Butterfly;
-                const stock = geometry({height, rgbMode, displayType, scRaw: false}, WaveformOverviewView);
-                assert.deepEqual({margin: stock.margin, clip: stock.clip, scale: stock.scale}, {margin: 7, clip: false, scale: 1});
-                const got = geometry({height, rgbMode, displayType, scRaw: true}, WaveformOverviewView);
-                const context = JSON.stringify({height, rgbMode, displayType, got});
-                const mappedTop = got.origin + (0 - got.origin) * got.scale;
-                const mappedBottom = got.origin + (height - got.origin) * got.scale;
-                // What r5 (73c5fa9) gave every rekordbox track.
-                assert.deepEqual({margin: got.margin, clip: got.clip}, {margin: 0, clip: true}, context);
-                assert.equal(got.scale, full ? 1 : rgbMode ? 1.3 : 2.2, 'yScale: ' + context);
-                assert.equal(mappedBottom, height, 'the stretch leaves the bottom where it is: ' + context);
-                if (full) assert.ok(mappedTop >= 0, 'Full top peak clipped: ' + context);
-            }
-        }
-    }
-}
-// Which tracks are asked about, and what the answer does. Review of a2cfaa3: a rekordbox
-// track had the stock geometry until the answer came, and for good when none came.
-const requests = [];
-class XMLHttpRequest { open(method, url) { this.method = method; this.url = url } send() { requests.push(this) } }
-const answer = (x, status) => { x.readyState = 4; x.status = status; x.onreadystatechange() };
-const overview = {scRaw: true, scTrack: null};
-const load = track => { overview.scTrack = track; asked(overview, XMLHttpRequest) };
-for (const track of [null, {}, {path: null}, {path: ''}, {path: '/media/USB/Music/track.flac'}, {path: '/media/USB/NotContents/track.mp3'},
-                     {path: '/data/downloads/tidal/track.flac'}]) {
-    overview.scRaw = true;
-    load(track);
-    assert.equal(overview.scRaw, false, 'not a rekordbox stick: ' + JSON.stringify(track));
-    assert.equal(requests.length, 0, 'nothing to ask for ' + JSON.stringify(track));
-}
-const path = '/media/USB 1/Contents/Artist & Co/track #1.mp3';
-for (const [status, raw] of [[200, false], [404, true], [0, true], [500, true], [null, true]]) {
-    overview.scRaw = false;
-    load({path});
-    assert.equal(overview.scRaw, true, 'r5 geometry from the moment the track is loaded');
-    const x = requests.pop();
-    assert.equal(requests.length, 0);
-    assert.equal(x.method, 'GET');
-    assert.equal(x.url, 'http://127.0.0.1:8080/v1/sc5000/overview-scale?path=' + encodeURIComponent(path));
-    // No answer yet, for as long as it takes: headers, a body on its way, nothing at all.
-    for (const state of [1, 2, 3]) { x.readyState = state; x.status = state > 1 ? 200 : 0; x.onreadystatechange(); }
-    assert.equal(overview.scRaw, true, 'r5 geometry while the request is pending');
-    if (status !== null) answer(x, status);
-    assert.equal(overview.scRaw, raw, 'status ' + status);
-}
-// An answer for a track that is no longer loaded changes nothing.
-load({path});
-const late = requests.pop();
-load({path: '/media/USB 1/Contents/other.mp3'});
-answer(late, 200);
-assert.equal(overview.scRaw, true, 'vouched for another track');
-answer(requests.pop(), 200);
-assert.equal(overview.scRaw, false);
-load({path});
-assert.equal(overview.scRaw, true, 'the next rekordbox track starts from r5 geometry');
-load({path: '/media/USB 1/Engine Library/Music/track.flac'});
-assert.equal(overview.scRaw, false, 'and any other track from stock');
-"""
-        result = subprocess.run([shutil.which("node"), "-e", js], capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-
-    @unittest.skipUnless(shutil.which("node"), "node needed for the overview scale behavioral checks")
-    def test_patched_overview_is_stock_unless_the_track_has_no_scale(self):
+    def test_patches_leave_the_native_overview_geometry_alone(self):
         old_root = bp.ROOT
         try:
             for version, root in (("5.0.4", "Skins/EmbeddedCommon/"), ("5.3.0", "Skins/Embedded/")):
                 with self.subTest(version=version):
                     bp.ROOT = root
                     patches = bp.edits(False)
-                    # Minimal stock anchors also exercise the patch without lab fixtures in CI.
                     main = "\n".join(new for _, new in patches[root + "EmbeddedMain.qml"])
-                    overview = "\n".join(bp.patch(old, old, new, root + "Views/Common/WaveformOverview/WaveformOverview.qml")
-                                         for old, new in patches[root + "Views/Common/WaveformOverview/WaveformOverview.qml"])
-                    self.check_overview(main, overview)
+                    overview = "\n".join(new for _, new in patches[root + "Views/Common/WaveformOverview/WaveformOverview.qml"])
+                    self.assertNotIn("scOverviewScale", main)
+                    for ours in ("transform", "clip:", "bottomMargin"):
+                        self.assertNotIn(ours, overview)
         finally:
             bp.ROOT = old_root
 
-    @unittest.skipUnless(shutil.which("node"), "node needed for the overview scale behavioral checks")
-    def test_built_packs_are_stock_unless_the_track_has_no_scale(self):
+    def test_built_packs_keep_the_stock_overview_geometry(self):
         built = 0
         for version, root in (("5.0.4", "Skins/EmbeddedCommon/"), ("5.3.0", "Skins/Embedded/")):
             qrc = LAB / version / "qrc"
@@ -6029,9 +5941,13 @@ assert.equal(overview.scRaw, false, 'and any other track from stock');
                     for language in ("en", "zh-Hans", "zh-Hant"):
                         with self.subTest(language=language):
                             base = packs / language / root
+                            self.assertNotIn("scOverviewScale", (base / "EmbeddedMain.qml").read_text())
                             overview = (base / "Views/Common/WaveformOverview/WaveformOverview.qml").read_text()
                             # The shadow layer appended to this file has its own strip and transform.
-                            self.check_overview((base / "EmbeddedMain.qml").read_text(), overview.split("EngineX_Shadow_", 1)[0])
+                            native = overview.split("EngineX_Shadow_", 1)[0]
+                            self.assertIn("bottomMargin: 7", native)
+                            self.assertNotIn("transform:", native)
+                            self.assertNotRegex(native, r'objectName: "Deck_WaveformOverview_ViewContainer"\s*clip: true')
         if not built:
             self.skipTest(f"{LAB} QRC fixtures not found")
 

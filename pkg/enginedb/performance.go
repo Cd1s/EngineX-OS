@@ -170,41 +170,36 @@ func TrackDataPeaks(track, overview []byte) []byte {
 
 // FillOverviewMaxima completes the overviews an earlier build imported: they end in a
 // zero triple where Engine expects each band's maximum, the value it scales that band by.
-// It returns the tracks (Track.path) whose overview it had to leave without them.
-func FillOverviewMaxima(ctx context.Context, mount string) ([]string, error) {
+func FillOverviewMaxima(ctx context.Context, mount string) error {
 	dbPath := filepath.Join(mount, "Engine Library", "Database2", "m.db")
 	if err := safeFile(dbPath); err != nil {
-		return nil, err
+		return err
 	}
 	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: dbPath}).String()+"?_pragma=busy_timeout(5000)")
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer db.Close()
 	db.SetMaxOpenConns(1)
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer tx.Rollback()
 	rows, err := tx.QueryContext(ctx, `SELECT trackId, overviewWaveFormData FROM PerformanceData WHERE thirdPartySourceId=1`)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer rows.Close()
 	fixed := map[int64][]byte{}
-	var left []int64
 	for rows.Next() {
 		var id int64
 		var blob []byte
 		if err := rows.Scan(&id, &blob); err != nil {
-			return nil, err
+			return err
 		}
 		raw, err := QUncompress(blob, 8<<20)
 		if err != nil || len(raw) < 27 || len(raw)%3 != 0 {
-			if len(blob) > 0 { // none at all: Engine builds its own when the track is loaded
-				left = append(left, id)
-			}
 			continue
 		}
 		top := raw[len(raw)-3:]
@@ -214,33 +209,24 @@ func FillOverviewMaxima(ctx context.Context, mount string) ([]string, error) {
 		for i, v := range raw[24 : len(raw)-3] {
 			top[i%3] = max(top[i%3], v)
 		}
-		if top[0]|top[1]|top[2] == 0 {
-			left = append(left, id)
-		} else if fixed[id], err = QCompress(raw); err != nil {
-			return nil, err
+		if top[0]|top[1]|top[2] != 0 {
+			if fixed[id], err = QCompress(raw); err != nil {
+				return err
+			}
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return err
 	}
 	if err := rows.Close(); err != nil {
-		return nil, err
+		return err
 	}
 	for id, blob := range fixed {
 		if _, err := tx.ExecContext(ctx, `UPDATE PerformanceData SET overviewWaveFormData=? WHERE trackId=?`, blob, id); err != nil {
-			return nil, err
+			return err
 		}
 	}
-	var paths []string
-	for _, id := range left {
-		var path string
-		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(path,'') FROM Track WHERE id=?`, id).Scan(&path); err == nil {
-			paths = append(paths, path)
-		} else if err != sql.ErrNoRows {
-			return nil, err
-		}
-	}
-	return paths, tx.Commit()
+	return tx.Commit()
 }
 
 func EncodePerformance(t rekordbox.Track, a *rekordbox.Analysis) (Performance, error) {
