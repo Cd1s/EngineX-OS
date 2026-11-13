@@ -24,6 +24,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -101,16 +102,18 @@ type playlistSearcher interface {
 	SearchPlaylists(context.Context, string) ([]providers.Playlist, error)
 }
 type tidalGateway struct {
-	browse   *browseCache
-	searches *searchCache
-	s        *Server
-	catalog  *providers.Deezer
-	mux      *http.ServeMux
-	mu       sync.Mutex
-	ids      map[string]int64
-	tracks   map[int64]trackRef
-	lists    map[string]playlistRef
-	next     int64
+	authMu    sync.Mutex
+	refreshMu sync.Mutex // serializes rotating-token grants, including Engine requests
+	browse    *browseCache
+	searches  *searchCache
+	s         *Server
+	catalog   *providers.Deezer
+	mux       *http.ServeMux
+	mu        sync.Mutex
+	ids       map[string]int64
+	tracks    map[int64]trackRef
+	lists     map[string]playlistRef
+	next      int64
 
 	// Artwork for list rows, by what the row knows: title and artist.
 	artURLs  map[string]string
@@ -260,6 +263,7 @@ func evict[K comparable](seen map[K]int64, limit int, drop func(K)) {
 func newTidalGateway(s *Server) *tidalGateway {
 	g := &tidalGateway{browse: newBrowseCache(s.cfg.StateDir), artURLs: map[string]string{}, artCache: map[string][]byte{}, s: s, catalog: &providers.Deezer{BaseURL: s.cfg.DeezerURL, HTTP: s.cfg.HTTP}, mux: http.NewServeMux(), ids: map[string]int64{}, tracks: map[int64]trackRef{}, lists: map[string]playlistRef{}, trackSeen: map[int64]int64{}, listSeen: map[string]int64{}}
 	g.searches = newSearchCache()
+	g.seedFromStreamingAccounts()
 	g.loadTracks()
 	g.mux.HandleFunc("POST /au/oauth2/device_authorization", g.deviceAuthorization)
 	g.mux.HandleFunc("POST /au/oauth2/token", g.token)
@@ -390,8 +394,30 @@ func (g *tidalGateway) proxyToTidal(w http.ResponseWriter, r *http.Request, clea
 			out.Out.URL.Path, out.Out.URL.RawPath = upstream, ""
 			out.Out.Host = base.Host
 		},
+		ModifyResponse: func(resp *http.Response) error {
+			if strings.HasSuffix(clean, "/oauth2/token") {
+				return g.tokenResponse(resp, r.Form.Get("refresh_token"), r.Form.Get("client_id"))
+			}
+			// Retry an expired bearer once. Token grants use the original form
+			// path above, preserving Engine's refresh-token error response.
+			if resp.StatusCode == http.StatusUnauthorized && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+				a, err := g.refreshRealAuth(r.Context(), strings.TrimPrefix(resp.Request.Header.Get("Authorization"), "Bearer "))
+				if err != nil {
+					return nil
+				}
+				retry := resp.Request.Clone(r.Context())
+				retry.Header.Set("Authorization", "Bearer "+a.AccessToken)
+				next, err := http.DefaultTransport.RoundTrip(retry)
+				if err != nil {
+					return errors.New("could not retry TIDAL request")
+				}
+				resp.Body.Close()
+				*resp = *next
+			}
+			return nil
+		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			log.Printf("stream-sync: TIDAL unreachable: %v", err)
+			log.Print("stream-sync: TIDAL upstream request failed")
 			fail(w, 502, errors.New("could not reach TIDAL"))
 		},
 	}
@@ -458,9 +484,33 @@ func (g *tidalGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if g.s.scope() == "tidal" && !strings.HasPrefix(clean, "/v1/sc5000/") && !strings.HasPrefix(clean, "/v1/stream/") {
-		g.proxyToTidal(w, r, clean)
-		return
+	if !strings.HasPrefix(clean, "/v1/sc5000/") && !strings.HasPrefix(clean, "/v1/stream/") {
+		// Clone before changing headers or form bodies used by Engine.
+		r = r.Clone(r.Context())
+		form, err := g.captureAuth(r, clean)
+		if err != nil {
+			fail(w, 500, err)
+			return
+		}
+		g.s.uiMu.Lock()
+		v := g.s.loadUI()
+		g.s.uiMu.Unlock()
+		if v.Scope == "tidal" && slices.Contains(v.Sources, "tidal") {
+			// Only real TIDAL grants rotate tokens. Keep synthetic logins independent.
+			if r.Method == http.MethodPost && strings.HasSuffix(clean, "/oauth2/token") {
+				g.refreshMu.Lock()
+				defer g.refreshMu.Unlock()
+				ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+				defer cancel()
+				r = r.WithContext(ctx)
+			}
+			if !g.prepareRealAuth(w, r, clean, form) {
+				return
+			}
+			r.Form = form
+			g.proxyToTidal(w, r, clean)
+			return
+		}
 	}
 	u := *r.URL
 	u.Path, u.RawPath = clean, ""

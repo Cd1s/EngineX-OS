@@ -313,6 +313,15 @@ pre)
     # Real TIDAL (scope=tidal) keeps the stock login.
     accounts=${SC5000_STREAMING_ACCOUNTS:-/data/StreamingAccounts.json}
     export T='"TIDAL": "{\"provider\":\"TIDAL\",\"providerType\":\"TIDAL\",\"accessToken\":\"enginex\",\"refreshToken\":\"enginex\"}"'
+    # #224: an old settings file may retain scope=tidal after TIDAL is disabled.
+    sources=$(sed -n 's/^sources=//p' "$UI/settings.conf" 2>/dev/null | tail -n 1)
+    if grep -q '^sources=' "$UI/settings.conf" 2>/dev/null; then
+        case ",$sources," in
+            *,tidal,*) ;;
+            *) sed '/^scope=tidal$/d' "$UI/settings.conf" > "$UI/settings.conf.tmp" &&
+                mv "$UI/settings.conf.tmp" "$UI/settings.conf" ;;
+        esac
+    fi
     if ! grep -qx 'scope=tidal' "$UI/settings.conf" 2>/dev/null; then
         if grep -Eq '"TIDAL"[[:space:]]*:' "$accounts" 2>/dev/null && ! grep -E '"TIDAL"[[:space:]]*:' "$accounts" 2>/dev/null | grep -q 'accessToken'; then
             awk '{

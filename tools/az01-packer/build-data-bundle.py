@@ -267,6 +267,7 @@ mkdir -p /run/systemd/system/engine.service.d
 cat <<EOF > /run/systemd/system/engine.service.d/99-sc5000.conf
 [Unit]
 Wants=enginex-stream-sync.service enginex-rb-bridge.service enginex-sc5000-deemixd.service engine-guardian.service
+After=enginex-stream-sync.service
 
 [Service]
 UnsetEnvironment=LD_PRELOAD
