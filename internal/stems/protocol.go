@@ -65,6 +65,10 @@ func (s *stream) feed(p []byte, header func(map[string]string) (int64, error)) e
 		}
 		line := strings.TrimRight(string(s.line), "\r\n")
 		s.line = s.line[:0]
+		if line == "" && len(s.fields) == 0 {
+			s.raw = s.raw[:0]
+			continue
+		}
 		if s.fields == nil {
 			s.fields = map[string]string{}
 		}

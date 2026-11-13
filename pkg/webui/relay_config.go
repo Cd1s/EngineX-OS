@@ -8,8 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"net"
 	"net/http"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -21,6 +21,8 @@ import (
 	"github.com/Cd1s/EngineX-OS/internal/stems"
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
 )
+
+var lanStemsProbe = stems.ProbeLAN
 
 type relayConfig struct {
 	RelayURL string `json:"relayUrl,omitempty"`
@@ -159,10 +161,14 @@ func (s *Server) refreshRelayStatus() {
 	saved := s.savedLANStems()
 	if st := s.probeRelayStems(relay, password, saved); st != nil {
 		s.storeRelaySeen(gen, st)
-		saved = st
-	}
-	if st := s.probeLANStems(saved); st != nil { // #224: LAN discovery, at most once per 30 s
-		s.storeRelaySeen(gen, st)
+	} else if relay == "" || password == "" || saved == nil || !saved.Online {
+		// The LAN renderer (#224 pairing, BH2-A9-1): at most once per 30 s, never the
+		// configured relay, and stems-lan.json is written only when its state changes.
+		lanSaved := saved
+		if lanSaved != nil && relay != "" && strings.TrimRight(strings.TrimSpace(lanSaved.Endpoint), "/") == strings.TrimRight(strings.TrimSpace(relay), "/") {
+			lanSaved = nil
+		}
+		s.scheduleLANStemsProbe(lanSaved)
 	}
 }
 
@@ -205,38 +211,97 @@ func (s *Server) kickRelayRefresh(oldRelay, relay string) {
 	}
 }
 
-const relayProbeEvery = 30 * time.Second
-
-var (
-	relayProbeMu sync.Mutex
-	relayProbed  = map[string]time.Time{} // by state dir: when the relay was last asked
-	lanProbeMu   sync.Mutex
-	lanProbed    = map[string]time.Time{} // by state dir: when LAN discovery was last run
+const (
+	relayProbeEvery = 30 * time.Second
+	lanProbeTimeout = 1200 * time.Millisecond
 )
 
-func (s *Server) probeLANStems(saved *stems.LANState) *stems.LANState {
-	if s.cfg.StateDir == "" {
-		return nil
+var (
+	relayProbeMu     sync.Mutex
+	relayProbed      = map[string]time.Time{} // by state dir: when the relay was last asked
+	lanProbeEvery    = relayProbeEvery
+	lanProbed        = map[string]time.Time{}
+	lanProbeInFlight = map[string]bool{}
+)
+
+// scheduleLANStemsProbe asynchronously discovers or re-checks a zero-config LAN
+// Stems renderer without blocking Engine QML's 3-second /v1/sc5000/ui poll
+// (BH2-A9-1). It writes stems-lan.json only on a real state transition, keeping
+// X-UI-Digest stable across steady-state polls.
+func (s *Server) scheduleLANStemsProbe(saved *stems.LANState) {
+	dir := s.cfg.StateDir
+	if dir == "" {
+		return
 	}
-	if saved != nil && saved.Online && time.Since(saved.Checked) < relayProbeEvery {
-		return nil
+	probe := lanStemsProbe
+	if probe == nil {
+		return
 	}
-	lanProbeMu.Lock()
-	defer lanProbeMu.Unlock()
-	if time.Since(lanProbed[s.cfg.StateDir]) < relayProbeEvery {
-		return nil
+	select {
+	case <-s.closed:
+		return
+	default:
 	}
-	lanProbed[s.cfg.StateDir] = time.Now()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+
+	relayProbeMu.Lock()
+	if lanProbeInFlight[dir] || time.Since(lanProbed[dir]) < lanProbeEvery {
+		relayProbeMu.Unlock()
+		return
+	}
+	lanProbeInFlight[dir] = true
+	lanProbed[dir] = time.Now()
+	relayProbeMu.Unlock()
+
+	var prev *stems.LANState
+	if saved != nil {
+		cp := *saved
+		prev = &cp
+	}
+
+	s.lanProbeWG.Add(1)
 	go func() {
+		defer s.lanProbeWG.Done()
+		defer func() {
+			relayProbeMu.Lock()
+			delete(lanProbeInFlight, dir)
+			relayProbeMu.Unlock()
+		}()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 3*lanProbeTimeout)
+		defer cancel()
+		stop := make(chan struct{})
+		defer close(stop)
+		go func() {
+			select {
+			case <-s.closed:
+				cancel()
+			case <-stop:
+			}
+		}()
+
+		got, ok := probe(ctx, prev, lanProbeTimeout)
 		select {
 		case <-s.closed:
-			cancel()
-		case <-ctx.Done():
+			return
+		default:
+		}
+
+		path := filepath.Join(dir, stems.LANStateName)
+		if ok {
+			got.Online = true
+			got.Checked = time.Now().UTC()
+			if prev == nil || !prev.Online || prev.Endpoint != got.Endpoint || prev.Hostname != got.Hostname || prev.Backend != got.Backend {
+				_ = providers.SaveJSON(path, &got)
+			}
+			return
+		}
+		if prev != nil && prev.Online {
+			off := *prev
+			off.Online = false
+			off.Checked = time.Now().UTC()
+			_ = providers.SaveJSON(path, &off)
 		}
 	}()
-	return stems.ProbeLANState(ctx, filepath.Join(s.cfg.StateDir, stems.LANStateName), 200*time.Millisecond)
 }
 
 // probeRelayStems asks the cloud relay whether its Stems renderer is up, for a deck
@@ -300,17 +365,10 @@ func lanRenderer(endpoint string) bool {
 	return ip != nil && (ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || (ip.To4() != nil && ip.To4()[0] == 100 && ip.To4()[1]&0xC0 == 64))
 }
 
-// validRelayURL refuses to send the password in the clear across the internet.
+// validRelayURL refuses to send the password in the clear across the internet,
+// sharing the exact rule with stems.ValidEndpoint.
 func validRelayURL(raw string) bool {
-	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" || u.User != nil {
-		return false
-	}
-	if u.Scheme == "https" {
-		return true
-	}
-	ip := net.ParseIP(u.Hostname())
-	return u.Scheme == "http" && ip != nil && (ip.IsLoopback() || ip.IsPrivate())
+	return stems.ValidEndpoint(raw)
 }
 
 // updateRelayConfig changes the fields given; an empty password clears it.

@@ -37,7 +37,7 @@ if (-not (Test-Path $py)) {
 }
 & $py -c 'import numpy, scipy' 2>$null
 if ($LASTEXITCODE) { Invoke-Checked $py -m pip install -q numpy scipy }
-if ($Backend -in 'demucs', 'htdemucs') {
+if ($Backend -in 'auto', 'demucs', 'htdemucs') {
     $hasNvidia = [bool](Get-Command nvidia-smi.exe -ErrorAction SilentlyContinue) -or (Test-Path (Join-Path $env:SystemRoot 'System32\nvidia-smi.exe'))
     & $py -c 'import demucs' 2>$null
     if ($LASTEXITCODE) {
@@ -48,7 +48,11 @@ if ($Backend -in 'demucs', 'htdemucs') {
                 & $py -m pip install -q torch torchaudio --index-url https://download.pytorch.org/whl/cu124 2>$null
             }
         }
-        Invoke-Checked $py -m pip install -q demucs
+        if ($Backend -eq 'auto') {
+            & $py -m pip install -q demucs # best effort: auto falls back to hpss
+        } else {
+            Invoke-Checked $py -m pip install -q demucs
+        }
     }
 }
 $worker = Join-Path $here 'worker.py'

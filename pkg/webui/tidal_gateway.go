@@ -1502,9 +1502,11 @@ func (g *tidalGateway) streamTarget(r *http.Request, id int64, ref trackRef) (ad
 			codec, ext = "mp3", "mp3"
 		case ".ogg":
 			codec, ext = "vorbis", "ogg"
-		case ".mp4":
+		case ".mp4", ".m4a", ".aac":
 			// Engine saves this codec as .mp4, which its AAC reader opens.
 			codec, ext = "mp4a.40.2", "mp4"
+		case ".wav":
+			codec, ext = "wav", "wav"
 		}
 	}
 	host := r.Host
@@ -1523,7 +1525,7 @@ func (g *tidalGateway) knownCodec(w http.ResponseWriter, r *http.Request, ref tr
 	}
 	// These providers deliver mp3/mp4/ogg whatever the quality setting, so the real suffix is only known after the download.
 	switch ref.track.Provider {
-	case "soundcloud", "spotify", "beatport":
+	case "soundcloud", "spotify", "beatport", "webdav", "subsonic", "plex":
 	default:
 		if !j.Lossy() {
 			return true
@@ -1590,7 +1592,14 @@ func (g *tidalGateway) stemsSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The row joins the Stems list of the service it was stemmed from.
-	if err = g.s.addStemmed(g.s.scope(), stemmedTrack{ref.track, ref.session, ref.guest, p}); err != nil {
+	stemsScope := ref.track.Provider
+	if v := g.sessionByID(ref.session); v != nil && v.Provider != "" {
+		stemsScope = v.Provider
+	}
+	if stemsScope == "" {
+		stemsScope = g.s.scope()
+	}
+	if err = g.s.addStemmed(stemsScope, stemmedTrack{ref.track, ref.session, ref.guest, p}); err != nil {
 		fail(w, 500, err)
 		return
 	}
@@ -1626,7 +1635,7 @@ func (g *tidalGateway) stemsTrackID(w http.ResponseWriter, r *http.Request) {
 // the CPU3 analysis/import job is queued by Jobs.Fetch and runs afterwards.
 func (g *tidalGateway) stream(w http.ResponseWriter, r *http.Request) {
 	file := r.PathValue("file")
-	raw := strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(file, ".flac"), ".mp3"), ".mp4"), ".ogg")
+	raw := strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(file, ".flac"), ".mp3"), ".mp4"), ".ogg"), ".wav")
 	if raw == file {
 		http.NotFound(w, r)
 		return
@@ -1667,6 +1676,8 @@ func (g *tidalGateway) stream(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "audio/mpeg")
 	} else if strings.HasSuffix(strings.ToLower(p), ".ogg") {
 		w.Header().Set("Content-Type", "audio/ogg")
+	} else if strings.HasSuffix(strings.ToLower(p), ".wav") {
+		w.Header().Set("Content-Type", "audio/wav")
 	}
 	// Engine's stm.db row exists by now; it may still be settling, so retry a few times.
 	go func() {

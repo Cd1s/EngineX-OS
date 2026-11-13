@@ -5,12 +5,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/Cd1s/EngineX-OS/pkg/deemixclient"
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
 )
 
@@ -216,5 +219,115 @@ func TestNASTestAndPlaylists(t *testing.T) {
 	dPls, dProv := s.nasPlaylists(context.Background())
 	if dPls != nil || dProv != nil {
 		t.Fatalf("expected nil, nil when disabled, got pls=%+v, prov=%+v", dPls, dProv)
+	}
+}
+
+func TestNASConfigAndProbeRejectLoopbackAndLinkLocal(t *testing.T) {
+	orig := nasAllowLoopback
+	nasAllowLoopback = false
+	t.Cleanup(func() { nasAllowLoopback = orig })
+
+	s, _ := newTestServerWithUIDir(t)
+	for _, target := range []string{
+		"http://127.0.0.1:6595",
+		"http://localhost:8080",
+		"http://[::1]:6596",
+		"http://0.0.0.0:8080",
+		"http://169.254.169.254/latest/meta-data",
+	} {
+		body := fmt.Sprintf(`{"protocol":"webdav","url":%q,"enabled":true}`, target)
+		reqSave := httptest.NewRequest(http.MethodPost, "/v1/sc5000/nas", bytes.NewReader([]byte(body)))
+		wSave := httptest.NewRecorder()
+		s.handleNASConfig(wSave, reqSave)
+		if wSave.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 saving %s, got %d: %s", target, wSave.Code, wSave.Body.String())
+		}
+
+		reqTest := httptest.NewRequest(http.MethodPost, "/v1/sc5000/nas/test", bytes.NewReader([]byte(body)))
+		wTest := httptest.NewRecorder()
+		s.handleNASTest(wTest, reqTest)
+		if wTest.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 testing %s, got %d: %s", target, wTest.Code, wTest.Body.String())
+		}
+	}
+}
+
+func TestOmniSourceNASPlaylistsBrowseAndStream(t *testing.T) {
+	mp3Bytes := testMP3(120)
+	nasSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/rest/getPlaylists.view":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"subsonic-response":{"status":"ok","playlists":{"playlist":[{"id":"pl-42","name":"Club Crate","songCount":1}]}}}`)
+		case "/rest/getPlaylist.view":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"subsonic-response":{"status":"ok","playlist":{"id":"pl-42","name":"Club Crate","entry":[{"id":"tr-99","title":"Warehouse Dub","artist":"DJ Test","album":"NAS Vol 1","duration":210,"suffix":"mp3"}]}}}`)
+		case "/rest/download.view":
+			w.Header().Set("Content-Type", "audio/mpeg")
+			w.Write(mp3Bytes)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer nasSrv.Close()
+
+	uiDir, stateDir, dlDir := t.TempDir(), t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(uiDir, "settings.conf"), []byte("scope=spotify\nomni_source=1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	jobs := NewJobs(Pipeline{
+		Catalog: noCatalog{},
+		Deemix:  &deemixclient.Client{DownloadDir: dlDir, AllowLossy: true},
+	})
+	t.Cleanup(jobs.Close)
+
+	s := New(Config{AccessToken: "code", UIDir: uiDir, StateDir: stateDir}, jobs)
+	t.Cleanup(s.Close)
+	s.sessions["sp-owner"] = &Session{ID: "sp-owner", Provider: "spotify", Ready: true, p: &browseTestProvider{}}
+
+	cfgBody := fmt.Sprintf(`{"protocol":"subsonic","url":%q,"username":"dj","password":"pw","enabled":true}`, nasSrv.URL)
+	wCfg := httptest.NewRecorder()
+	s.handleNASConfig(wCfg, httptest.NewRequest(http.MethodPost, "/v1/sc5000/nas", strings.NewReader(cfgBody)))
+	if wCfg.Code != http.StatusOK {
+		t.Fatalf("save NAS config failed (%d): %s", wCfg.Code, wCfg.Body.String())
+	}
+
+	gw := httptest.NewServer(s)
+	defer gw.Close()
+
+	var lists struct {
+		Items []map[string]any `json:"items"`
+	}
+	tidalGet(t, gw.URL, "/v1/users/1/playlists?limit=50&offset=0", 200, &lists)
+	var nasUUID string
+	for _, it := range lists.Items {
+		if it["title"] == "[NAS] Club Crate" {
+			nasUUID, _ = it["uuid"].(string)
+		}
+	}
+	if nasUUID == "" {
+		t.Fatalf("expected [NAS] Club Crate in OmniSource playlists, got %+v", lists.Items)
+	}
+
+	var tracks struct {
+		Items []map[string]any `json:"items"`
+	}
+	tidalGet(t, gw.URL, "/v1/playlists/"+nasUUID+"/tracks?limit=50&offset=0", 200, &tracks)
+	if len(tracks.Items) != 1 || tracks.Items[0]["title"] != "Warehouse Dub" {
+		t.Fatalf("unexpected NAS playlist tracks: %+v", tracks.Items)
+	}
+	trackID := int64(tracks.Items[0]["id"].(float64))
+
+	var pb map[string]any
+	tidalGet(t, gw.URL, fmt.Sprintf("/v1/tracks/%d/playbackinfopostpaywall?audioquality=LOSSLESS&playbackmode=STREAM&assetpresentation=FULL", trackID), 200, &pb)
+
+	resp, err := http.Get(fmt.Sprintf("%s/v1/stream/%d.mp3", gw.URL, trackID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	gotAudio, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 || !bytes.Equal(gotAudio, mp3Bytes) {
+		t.Fatalf("NAS stream status=%d len=%d want=%d body=%q", resp.StatusCode, len(gotAudio), len(mp3Bytes), string(gotAudio[:min(len(gotAudio), 120)]))
 	}
 }

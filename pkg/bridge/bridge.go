@@ -441,7 +441,10 @@ func convertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 			result, err = stagedImport(ctx, mount, dir, l, opts)
 			if err != nil {
 				cleanEmptyEngineLibrary(dir)
-			} else if result.Deferred == 0 {
+			} else if result.Deferred > 0 {
+				writeMark(dir, pendingName, stamp)
+				log.Printf("rb-bridge: %d tracks imported without cues; the next mount reads them", result.Deferred)
+			} else {
 				writeStamp(dir, stamp)
 			}
 			return result, err

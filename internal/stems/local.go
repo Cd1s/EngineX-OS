@@ -55,6 +55,9 @@ func readHeader(r *bufio.Reader) (map[string]string, error) {
 			return nil, errors.New("stems: truncated header")
 		}
 		if line = strings.TrimRight(line, "\r\n"); line == "" {
+			if len(f) == 0 {
+				continue
+			}
 			return f, nil
 		}
 		k, v, ok := strings.Cut(line, "=")

@@ -411,7 +411,11 @@ func (m *aacWriter) finish() error {
 	config := append([]byte{0x05, byte(len(m.config))}, m.config...)
 	decoder := append(append([]byte{0x04, byte(13 + len(config)), 0x40, 0x15, 0, 0, 0}, u32s(0, 0)...), config...)
 	es := append(append([]byte{0x03, byte(3 + len(decoder) + 3), 0, 1, 0}, decoder...), 0x06, 0x01, 0x02)
-	mp4a := mp4Box("mp4a", make([]byte, 6), u16s(1), make([]byte, 8), u16s(channels, 16, 0, 0), u32s(m.rate<<16), mp4Box("esds", u32s(0), es))
+	sampleRate16 := uint32(0)
+	if m.rate <= 0xffff {
+		sampleRate16 = m.rate << 16
+	}
+	mp4a := mp4Box("mp4a", make([]byte, 6), u16s(1), make([]byte, 8), u16s(channels, 16, 0, 0), u32s(sampleRate16), mp4Box("esds", u32s(0), es))
 	stsz := mp4Box("stsz", u32s(0, 0, n), u32s(m.sizes...))
 	stbl := mp4Box("stbl",
 		mp4Box("stsd", u32s(0, 1), mp4a),

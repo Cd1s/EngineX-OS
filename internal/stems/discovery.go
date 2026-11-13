@@ -9,6 +9,7 @@ package stems
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -421,12 +422,23 @@ func discoverLANServers(ctx context.Context, timeout time.Duration, accept func(
 		wg.Add(1)
 		go func(conn *net.UDPConn) {
 			defer wg.Done()
-			buf := make([]byte, 1500)
+			buf := make([]byte, 4096) // BH2-A9-5: TXT-heavy mDNS answers run past 1500 bytes
 			for {
 				n, from, rerr := conn.ReadFromUDP(buf)
 				if rerr != nil {
-					errCh <- rerr
-					return
+					// BH2-A9-5: an oversized or ICMP-refused datagram is not the end of
+					// discovery; only the deadline, a closed socket or ctx are.
+					var ne net.Error
+					if ctx.Err() != nil || errors.Is(rerr, net.ErrClosed) || (errors.As(rerr, &ne) && ne.Timeout()) {
+						errCh <- rerr
+						return
+					}
+					select {
+					case <-retryStop:
+						return
+					default:
+					}
+					continue
 				}
 				pkt := make([]byte, n)
 				copy(pkt, buf[:n])
@@ -535,6 +547,7 @@ func ProbeLANState(ctx context.Context, statePath string, timeout time.Duration)
 
 // lanHealth checks a renderer that needs no credential and has a free slot.
 func lanHealth(ctx context.Context, endpoint string, timeout time.Duration) (LANState, bool) {
+	endpoint = strings.TrimRight(strings.TrimSpace(endpoint), "/") // BH2-A9-6
 	if !lanEndpoint(endpoint) {
 		return LANState{}, false
 	}

@@ -111,18 +111,46 @@ func readRelayConfig(path string) (relay, password string, err error) {
 	return relay, strings.TrimSpace(v.Password), nil
 }
 
-// validEndpoint keeps the password off the clear-text internet, matching the
-// deck console's rule for the relay address (plus tailnet CGNAT addresses).
-func validEndpoint(raw string) bool {
+// ValidEndpoint keeps credentials off the clear-text internet, shared by both
+// stems.ResolveClient / ProbeLAN and the deck console's relay URL check.
+func ValidEndpoint(raw string) bool {
 	u, err := url.Parse(raw)
 	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return false
 	}
-	if u.Scheme == "https" {
-		return true
+	host := u.Hostname()
+	ipHost, zone, hasZone := strings.Cut(host, "%")
+	if hasZone && zone == "" {
+		return false
 	}
-	ip := net.ParseIP(u.Hostname())
-	return u.Scheme == "http" && ip != nil && (ip.IsLoopback() || ip.IsPrivate() || cgnat.Contains(ip))
+	if u.Scheme == "https" {
+		if strings.Contains(host, ":") {
+			ip := net.ParseIP(ipHost)
+			return ip != nil && (!hasZone || ip.To4() == nil)
+		}
+		return !hasZone
+	}
+	if u.Scheme != "http" {
+		return false
+	}
+	if ip := net.ParseIP(ipHost); ip != nil {
+		if hasZone && ip.To4() != nil {
+			return false
+		}
+		return lanIP(ip)
+	}
+	if hasZone || strings.Contains(host, ":") {
+		return false
+	}
+	lh := strings.ToLower(strings.TrimSuffix(host, "."))
+	if lh == "" || strings.HasPrefix(lh, ".") || strings.Contains(lh, "..") {
+		return false
+	}
+	return !strings.Contains(lh, ".") || strings.HasSuffix(lh, ".local") || strings.HasSuffix(lh, ".lan")
+}
+
+func validEndpoint(raw string) bool {
+	return ValidEndpoint(raw)
 }
 
 var cgnat = &net.IPNet{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)}
