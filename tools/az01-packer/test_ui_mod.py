@@ -2064,7 +2064,7 @@ now += 30000; scViewCheck(now); assert.equal(snaps, 3, 'a missed signal is caugh
 
     def test_sender_tick_rate_follows_activity(self):
         self.js(r"""
-let bodies=[], pings=0, pos=0, playing=false, cue=false, wakes=[];
+let bodies=[], pings=0, pos=0, playing=false, cue=false, wakes=[]; const heard={};
 globalThis.XMLHttpRequest=class {
     constructor(){this.readyState=0;}
     open(m,url){this.url=url;this.readyState=1;}
@@ -2072,17 +2072,19 @@ globalThis.XMLHttpRequest=class {
 };
 globalThis.scShadowPoll=()=>{};
 scFourDeckRole='1';
-const sig=()=>({connect(f){wakes.push(f)}});
+const sig=path=>({connect(f){wakes.push(f);const k=path.split('/').pop();heard[k]=(heard[k]||0)+1}});
 globalThis.scTr=path=>({
     get value(){return path.endsWith('/SampleRate')?48000:0},
     get unnormalized(){return path.endsWith('/TrackPosition')?pos:path.endsWith('BPM')?120:0},
     get state(){return path.endsWith('/SongLoaded')||(path.endsWith('/PlayState')&&playing)||(path.endsWith('/CueLEDState')&&cue)},
-    get string(){return path.endsWith('/TrackUri')?'file:///a.mp3':''}, color:'#ffffff', stateChanged: sig()});
+    get string(){return path.endsWith('/TrackUri')?'file:///a.mp3':''}, color:'#ffffff', stateChanged: sig(path)});
 // The timer fires at whatever interval the sender asked for.
 const run=ms=>{const end=now+ms;while(now<end){const dt=scShadowTickTimer.interval;now+=dt;if(playing||cue)pos+=dt*48;scShadowTick();}};
 run(400);
 run(3000); assert.equal(scShadowTickTimer.interval,200,'resting decks sample at 5 Hz');
-assert.equal(wakes.length,8); // PlayState and CueLEDState per deck (own deck 1 first)
+// Each of the four decks wakes the sender on a play press, a CUE press and a hand on the platter (two touch
+// signals since the fast-spin fix: a resting deck learnt of a scratch 200 ms late), once each; own deck 1 first.
+assert.deepEqual(heard,{PlayState:4,CueLEDState:4,ExternalScratchWheelTouch:4,PlatterUserAction:4});
 playing=true; wakes[0](); assert.equal(scShadowTickTimer.interval,40,'a play press wakes the sender at once');
 const n=bodies.length; run(40); assert.equal(bodies.length,n+1); assert.equal(bodies[n][0].playing,true);
 run(2500); assert.equal(scShadowTickTimer.interval,80,'steady playback samples at 12.5 Hz');
@@ -2094,6 +2096,7 @@ run(2500); assert.equal(scShadowTickTimer.interval,200);
 cue=true; wakes[1](); run(1000); assert.equal(scShadowTickTimer.interval,40); // CUE preview: moving with PlayState false
 run(3000); assert.equal(scShadowTickTimer.interval,40,'a held CUE preview keeps 25 Hz');
 cue=false; run(2500); assert.equal(scShadowTickTimer.interval,200);
+assert.equal(wakes.length,16,'a signal was connected again');
 """)
 
     def test_safe_gc_only_when_nothing_plays(self):

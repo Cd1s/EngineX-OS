@@ -2277,9 +2277,10 @@ SERVICES_MAIN = """
 	// mirror arrives once a period, which the frames only see to 16 ms: its speed is the travel
 	// over the period itself. The report only trims what the ticks did not do, once the deck is
 	// slow enough for it to tell.
-	// A whip of the platter runs past 20x. Up to the jog's 50x it is motion like any other: the
-	// seek is for what is further than that (2 s), a cue under the hand. (At 500 ms it took every
-	// sample past 14x for a jump: the copy stood, and went by 4 seeks a second.)
+	// A whip of the platter runs past 20x. Up to 60x over the time a sample spans (a stalled frame
+	// misses one) it is motion like any other, the jog's: the seek is for a cue under the hand and
+	// a copy 2 s off. (At 500 ms a sample it took every sample past 14x for a jump: the copy stood,
+	// and went by 4 seeks a second.)
 	Timer {
 		id: scShadowScratchTimer
 		interval: 16; repeat: true
@@ -2296,18 +2297,24 @@ SERVICES_MAIN = """
 				const src = live ? raw / at.sampleRate * 1000 : at.scratchPush, seen = live ? now : at.scratchPushAt
 				if (!at.scratchSeen) {
 					at.scratchX = posMs; at.scratchRem = 0; at.scratchPeriod = 35; at.scratchPace = 0; at.scratchFrame = now
-					at.scratchRaw = at.scratchSrc = src; at.scratchVel = at.scratchWas = 0; at.scratchSpan = 0; at.scratchSeen = seen
+					at.scratchRaw = at.scratchSrc = src; at.scratchVel = at.scratchWas = 0; at.scratchSpan = 0; at.scratchSeen = seen; at.scratchLive = live
+				} else if (live !== at.scratchLive) {
+					// The other source tells another time (our own update is 40-80 ms older than the mirror): its
+					// sample is no travel since the last one, which read as a stroke back. The deck rests where it
+					// is until the next one tells the speed.
+					at.scratchSrc = at.scratchX; at.scratchVel = at.scratchSpan = 0
+					at.scratchRaw = src; at.scratchSeen = seen; at.scratchLive = live
 				} else if (src !== at.scratchRaw) {
 					const gap = seen - at.scratchSeen
 					if (live && gap >= 20 && gap <= 60) at.scratchPeriod += (gap - at.scratchPeriod) * 0.05
-					// After a rest the travel is one sample's; a cue or needle drop under the hand is no speed.
+					// After a rest the travel is one sample's; a cue or needle drop under the hand (faster than 60x) is no speed.
 					const span = !at.scratchSpan ? at.scratchPeriod : live ? Math.max(1, Math.round(gap / at.scratchPeriod)) * at.scratchPeriod : Math.max(20, Math.min(60, gap))
-					at.scratchSpan = Math.abs(src - at.scratchRaw) > 2000 ? 0 : span
+					at.scratchSpan = Math.abs(src - at.scratchRaw) > span * 60 ? 0 : span
 					at.scratchVel = at.scratchSpan ? (src - at.scratchRaw) / span : 0
 					at.scratchRaw = at.scratchSrc = src; at.scratchSeen = seen
-				} else if (at.scratchVel && now - at.scratchSeen > at.scratchSpan * 1.5) {
-					// It rests, where that line took the deck. Stopped dead from a whip that is far past the source:
-					// all but 60 ms of it (what a scratch at 3.5x leaves) is given back.
+				} else if (at.scratchVel && (now - at.scratchSeen > at.scratchSpan * 1.5 || Math.abs(at.scratchVel) * (now - at.scratchSeen - at.scratchSpan) > 60)) {
+					// It rests where that line took the deck: half a sample past the newest one, and 60 ms of track
+					// at most (what a scratch at 3.5x runs on; a whip stopped dead ran on 350 ms and came back).
 					at.scratchSrc += Math.max(-60, Math.min(60, at.scratchVel * at.scratchSpan * 0.5)); at.scratchVel = at.scratchSpan = 0
 				}
 				const vel = at.scratchVel, dt = Math.max(1, Math.min(50, now - at.scratchFrame))
@@ -2315,8 +2322,9 @@ SERVICES_MAIN = """
 				const target = at.scratchSrc + vel * (Math.min(now - at.scratchSeen, at.scratchSpan * 1.5) - at.scratchSpan)
 				at.drift = target - posMs
 				if (root.scShadowDebug) root.scShadowDbg({deck: d, act: "scratch-frame", posMs: posMs, target: target, drift: at.drift, link: live})
-				if (Math.abs(target - at.scratchX) > 2000) {
+				if (Math.abs(target - at.scratchX) > 2000 + Math.abs(vel) * 100) {
 					// Too far for the jog (a jump, or a deck that was not on the source): one seek, 4 a second at most.
+					// A frame late in a whip is a sample of the source's own speed behind: that is not far.
 					if (now - at.seekAt >= 250) { root.scShadowSeek(d, at, target); at.scratchX = target; at.scratchRem = 0 }
 					continue
 				}
@@ -2327,9 +2335,10 @@ SERVICES_MAIN = """
 				if (step * vel < 0) step = 0
 				step = Math.max(-800, Math.min(800, step)) // no frame sends more than the jog was measured at
 				at.scratchX += step
-				// The report is up to 80 ms old: it says what the ticks did only once the deck has been slow for a while.
+				// The report is up to 80 ms old, and knows nothing of this frame's ticks or the last one's: it says
+				// what the ticks did only once the deck has been slow for a while.
 				at.scratchPace = Math.max(Math.abs(step) / dt, at.scratchPace * 0.9)
-				const slip = posMs - at.scratchX, tol = 3 + at.scratchPace * 80
+				const slip = posMs - at.scratchX, tol = 3 + at.scratchPace * 100
 				// For a frame or two after a seek the report is still where the deck was before it (measured).
 				if (Math.abs(slip) > tol && now - at.seekAt > 100) step = Math.max(-800, Math.min(800, step - (slip - (slip > 0 ? tol : -tol)) * 0.15))
 				const ticks = Math.round(step * 20 + at.scratchRem)
