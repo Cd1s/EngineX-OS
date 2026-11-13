@@ -116,6 +116,8 @@ type Server struct {
 	authMu         sync.Mutex
 	authFails      map[string]*authStrike // wrong access codes per client network
 	consoles       consoleSessions        // console sign-ins; the cookie carries one of these, not the code
+	relayRefresh   relayRefresher         // status probes, off the request path (BH-GC2-12)
+	relaySeen      lanStemsSeen           // their last answer, when stems-lan.json could not keep it
 }
 
 func New(cfg Config, jobs *Jobs) *Server {
