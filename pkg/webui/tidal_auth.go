@@ -4,9 +4,11 @@ package webui
 // Engine may replace that account with local tokens when another source opens.
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -64,9 +66,29 @@ func (g *tidalGateway) clearRealAuth() error {
 	return err
 }
 func (g *tidalGateway) saveRealAuth(in tidalAuth) error {
+	return g.updateRealAuth(in, false)
+}
+
+// Captured Engine requests may fill missing credentials, but cannot overwrite a
+// rotated token. Make that decision under authMu together with the disk update.
+func (g *tidalGateway) updateRealAuth(in tidalAuth, fillOnly bool) error {
 	g.authMu.Lock()
 	defer g.authMu.Unlock()
 	a := g.readAuth()
+	if fillOnly {
+		if !isSyntheticTidalToken(a.AccessToken) {
+			in.AccessToken = ""
+		}
+		if !isSyntheticTidalToken(a.RefreshToken) {
+			in.RefreshToken = ""
+		}
+		if a.ClientID != "" {
+			in.ClientID = ""
+		}
+		if isSyntheticTidalToken(in.AccessToken) && isSyntheticTidalToken(in.RefreshToken) && in.ClientID == "" {
+			return nil
+		}
+	}
 	if !isSyntheticTidalToken(in.AccessToken) {
 		a.AccessToken = in.AccessToken
 	}
@@ -136,7 +158,7 @@ func (g *tidalGateway) captureAuth(r *http.Request, clean string) (url.Values, e
 		a.AccessToken = strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))
 	}
 	if !isSyntheticTidalToken(a.AccessToken) || !isSyntheticTidalToken(a.RefreshToken) {
-		if err := g.saveRealAuth(a); err != nil {
+		if err := g.updateRealAuth(a, true); err != nil {
 			return nil, errors.New("could not save TIDAL login")
 		}
 	}
@@ -155,7 +177,7 @@ func (g *tidalGateway) prepareRealAuth(w http.ResponseWriter, r *http.Request, c
 		return true
 	}
 	if strings.HasSuffix(clean, "/oauth2/token") {
-		if form.Get("grant_type") == "refresh_token" && isSyntheticTidalToken(form.Get("refresh_token")) {
+		if form.Get("grant_type") == "refresh_token" {
 			a := g.realAuth()
 			if isSyntheticTidalToken(a.RefreshToken) {
 				tidalNotLoggedIn(w)
@@ -186,7 +208,7 @@ func (g *tidalGateway) prepareRealAuth(w http.ResponseWriter, r *http.Request, c
 			a := g.realAuth()
 			if isSyntheticTidalToken(a.AccessToken) {
 				var err error
-				a, err = g.refreshRealAuth(r, a)
+				a, err = g.refreshRealAuth(r.Context(), a.AccessToken)
 				if err != nil {
 					tidalNotLoggedIn(w)
 					return false
@@ -229,7 +251,13 @@ func (g *tidalGateway) tokenResponse(resp *http.Response, refresh, clientID stri
 	return nil
 }
 
-func (g *tidalGateway) refreshRealAuth(r *http.Request, a tidalAuth) (tidalAuth, error) {
+func (g *tidalGateway) refreshRealAuth(ctx context.Context, failedAccessToken string) (tidalAuth, error) {
+	g.refreshMu.Lock()
+	defer g.refreshMu.Unlock()
+	a := g.realAuth()
+	if !isSyntheticTidalToken(a.AccessToken) && a.AccessToken != failedAccessToken {
+		return a, nil // another request already rotated the failed credentials
+	}
 	if isSyntheticTidalToken(a.RefreshToken) {
 		return tidalAuth{}, errors.New("no TIDAL refresh token")
 	}
@@ -241,7 +269,7 @@ func (g *tidalGateway) refreshRealAuth(r *http.Request, a tidalAuth) (tidalAuth,
 	if a.ClientID != "" {
 		form.Set("client_id", a.ClientID)
 	}
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, strings.TrimRight(base, "/")+"/v1/oauth2/token", strings.NewReader(form.Encode()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(base, "/")+"/v1/oauth2/token", strings.NewReader(form.Encode()))
 	if err != nil {
 		return tidalAuth{}, err
 	}
@@ -263,4 +291,92 @@ func (g *tidalGateway) refreshRealAuth(r *http.Request, a tidalAuth) (tidalAuth,
 		return tidalAuth{}, errors.New("no TIDAL access token")
 	}
 	return a, nil
+}
+
+// Engine 5.3.0 writes a provider-name map whose values are encoded JSON strings.
+// Also accept an object value from older account writers. Never modify this file:
+// Engine owns it and may store an opaque Profile/SSO session there.
+func (g *tidalGateway) streamingTidalAccount() map[string]json.RawMessage {
+	p := g.s.cfg.StreamingAccountsPath
+	st, err := os.Lstat(p)
+	if err != nil || !st.Mode().IsRegular() || st.Size() > 1<<20 {
+		return nil
+	}
+	f, err := os.Open(p)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	opened, err := f.Stat()
+	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(st, opened) {
+		return nil
+	}
+	b, err := io.ReadAll(io.LimitReader(f, 1<<20))
+	if err != nil {
+		return nil
+	}
+	latest, err := f.Stat()
+	if err != nil || latest.Size() > 1<<20 {
+		return nil
+	}
+	var accounts map[string]json.RawMessage
+	if json.Unmarshal(b, &accounts) != nil {
+		return nil
+	}
+	raw := accounts["TIDAL"]
+	var encoded string
+	if json.Unmarshal(raw, &encoded) == nil {
+		raw = json.RawMessage(encoded)
+	}
+	var account map[string]json.RawMessage
+	if json.Unmarshal(raw, &account) != nil {
+		return nil
+	}
+	return account
+}
+
+func (g *tidalGateway) seedFromStreamingAccounts() {
+	// Only seed a missing store; existing credentials are authoritative.
+	if _, err := os.Lstat(g.authPath()); !errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	account := g.streamingTidalAccount()
+	b, _ := json.Marshal(account)
+	var a tidalAuth
+	if json.Unmarshal(b, &a) != nil {
+		return
+	}
+	if !isSyntheticTidalToken(a.AccessToken) || !isSyntheticTidalToken(a.RefreshToken) {
+		if err := g.saveRealAuth(a); err != nil {
+			// Do not include account contents or tokens in diagnostics.
+			log.Print("stream-sync: could not seed TIDAL login from Engine account")
+		}
+	}
+}
+
+func (g *tidalGateway) hasSyntheticStreamingAccount() bool {
+	account := g.streamingTidalAccount()
+	found := false
+	for key, raw := range account {
+		var value string
+		switch key {
+		case "accessToken", "refreshToken":
+			if json.Unmarshal(raw, &value) != nil || !isSyntheticTidalToken(value) {
+				return false
+			}
+			found = found || strings.TrimSpace(value) != ""
+		case "provider", "providerType":
+			if json.Unmarshal(raw, &value) != nil || value != "TIDAL" {
+				return false
+			}
+		default:
+			// Extra Profile/SSO data is not evidence of a disposable placeholder.
+			return false
+		}
+	}
+	return found
+}
+
+func (g *tidalGateway) isSyntheticAccountOnly() bool {
+	return !g.hasRealAuth() && g.hasSyntheticStreamingAccount()
 }

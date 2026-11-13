@@ -102,17 +102,18 @@ type playlistSearcher interface {
 	SearchPlaylists(context.Context, string) ([]providers.Playlist, error)
 }
 type tidalGateway struct {
-	authMu   sync.Mutex
-	browse   *browseCache
-	searches *searchCache
-	s        *Server
-	catalog  *providers.Deezer
-	mux      *http.ServeMux
-	mu       sync.Mutex
-	ids      map[string]int64
-	tracks   map[int64]trackRef
-	lists    map[string]playlistRef
-	next     int64
+	authMu    sync.Mutex
+	refreshMu sync.Mutex // serializes rotating-token grants, including Engine requests
+	browse    *browseCache
+	searches  *searchCache
+	s         *Server
+	catalog   *providers.Deezer
+	mux       *http.ServeMux
+	mu        sync.Mutex
+	ids       map[string]int64
+	tracks    map[int64]trackRef
+	lists     map[string]playlistRef
+	next      int64
 
 	// Artwork for list rows, by what the row knows: title and artist.
 	artURLs  map[string]string
@@ -262,6 +263,7 @@ func evict[K comparable](seen map[K]int64, limit int, drop func(K)) {
 func newTidalGateway(s *Server) *tidalGateway {
 	g := &tidalGateway{browse: newBrowseCache(s.cfg.StateDir), artURLs: map[string]string{}, artCache: map[string][]byte{}, s: s, catalog: &providers.Deezer{BaseURL: s.cfg.DeezerURL, HTTP: s.cfg.HTTP}, mux: http.NewServeMux(), ids: map[string]int64{}, tracks: map[int64]trackRef{}, lists: map[string]playlistRef{}, trackSeen: map[int64]int64{}, listSeen: map[string]int64{}}
 	g.searches = newSearchCache()
+	g.seedFromStreamingAccounts()
 	g.loadTracks()
 	g.mux.HandleFunc("POST /au/oauth2/device_authorization", g.deviceAuthorization)
 	g.mux.HandleFunc("POST /au/oauth2/token", g.token)
@@ -392,7 +394,7 @@ func (g *tidalGateway) proxyToTidal(w http.ResponseWriter, r *http.Request, clea
 			// Retry an expired bearer once. Token grants use the original form
 			// path above, preserving Engine's refresh-token error response.
 			if resp.StatusCode == http.StatusUnauthorized && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
-				a, err := g.refreshRealAuth(r, g.realAuth())
+				a, err := g.refreshRealAuth(r.Context(), strings.TrimPrefix(resp.Request.Header.Get("Authorization"), "Bearer "))
 				if err != nil {
 					return nil
 				}
@@ -464,6 +466,14 @@ func (g *tidalGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		v := g.s.loadUI()
 		g.s.uiMu.Unlock()
 		if v.Scope == "tidal" && slices.Contains(v.Sources, "tidal") {
+			// Only real TIDAL grants rotate tokens. Keep synthetic logins independent.
+			if r.Method == http.MethodPost && strings.HasSuffix(clean, "/oauth2/token") {
+				g.refreshMu.Lock()
+				defer g.refreshMu.Unlock()
+				ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+				defer cancel()
+				r = r.WithContext(ctx)
+			}
 			if !g.prepareRealAuth(w, r, clean, form) {
 				return
 			}

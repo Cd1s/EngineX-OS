@@ -5105,6 +5105,97 @@ class EngineLightingDefaultOffAndPersistTest(unittest.TestCase):
 
 
 class PrimeGoTidalQRTest(unittest.TestCase):
+    @staticmethod
+    def function(qml, name):
+        start = qml.index("function " + name + "(")
+        brace = qml.index("{", start)
+        depth = 1
+        end = brace + 1
+        while depth:
+            depth += (qml[end] == "{") - (qml[end] == "}")
+            end += 1
+        return qml[start:end]
+
+    def run_js(self, script):
+        self.assertIsNotNone(shutil.which("node"), "node required for #224 behavioral regressions")
+        result = subprocess.run(["node", "-e", "const assert=require('node:assert/strict');\n" + script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_scopen_only_logs_out_confirmed_synthetic_530_sessions(self):
+        with tempfile.TemporaryDirectory(prefix="issue224-open-") as tmp:
+            for version, skin in (("5.3.0", "Embedded"), ("5.0.4", "EmbeddedCommon")):
+                out = Path(tmp) / version
+                result = subprocess.run(["python3", str(BUILD_PACKS), "--qrc", str(LAB / version / "qrc"), "--out", str(out)], capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                for lang in ("en", "zh-Hans", "zh-Hant"):
+                    with self.subTest(version=version, lang=lang):
+                        qml = (out / lang / "Skins" / skin / "EmbeddedMain.qml").read_text()
+                        functions = self.function(qml, "scOpen")
+                        for name in ("scTidalProvider", "scGatewayLogin"):
+                            if "function " + name + "(" in qml:
+                                functions += "\n" + self.function(qml, name)
+                        if version == "5.0.4":
+                            self.assertNotIn("logoutOfProvider", functions)
+                            self.assertNotIn("showAddAccountDialog", qml)
+                            self.assertNotIn("loginToService", functions)
+                        self.run_js("""
+let logouts = 0;
+let tp = {loggedIn:true};
+globalThis.root = globalThis;
+globalThis.Planck = {librarianController:{
+    streamingInterfaceController:{logoutOfProvider(p) { assert.equal(p,tp); logouts++; }},
+    streamingPlaylistsController:{invalidateUI() {}}
+}};
+Object.assign(globalThis, {
+    scSources:['tidal','spotify'], scLoggedIn:['spotify'],
+    scProviders:{count:1,objectAt() {return {tidalProvider:tp};}},
+    scEnsureTidal() {}, scCall(q, done) { done(); },
+    scSelectTidal() {return true;}, scEnterTimer:{start() {}},
+    scLoginBegin() {throw Error('unexpected login');}
+});
+""" + functions + "\nconst v53=" + json.dumps(version == "5.3.0") + ";\n" + """
+for (const loaded of [false,true]) for (const loggedIn of [false,true]) for (const synthetic of [false,true]) {
+    scUiLoaded=loaded; scTidalLoggedIn=loggedIn; scTidalSynthetic=synthetic;
+    logouts=0; scOpen('tidal');
+    assert.equal(logouts, Number(v53 && loaded && !loggedIn && synthetic),
+        JSON.stringify({loaded,loggedIn,synthetic}));
+}
+if (v53) {
+    tp=null; scUiLoaded=true; scTidalLoggedIn=false; scTidalSynthetic=false;
+    scOpen('tidal');
+    assert.equal(typeof scTidalLoginPending, 'boolean');
+    assert.equal(scTidalLoginPending, false);
+}
+""")
+
+    def test_source_enter_preserves_visible_stock_services(self):
+        hidden = re.search(r'visible: (\[[^\n]+?\])\.indexOf\(model.name\) < 0', bp.AVAILABLE_SOURCE)
+        self.assertIsNotNone(hidden)
+        hidden_names = json.loads(hidden[1])
+        self.assertEqual(hidden_names, ["TIDAL", "Tidal", "SoundCloud", "Beatport LINK"])
+        self.run_js("""
+let name='', enters=0, opens=0;
+const model={index(i) {return i;},data() {return name;}};
+const nav={availableSourceIndex:0,connectedSourceIndex:0,enter() {enters++;}};
+const controller={navigation() {return nav;}};
+const root={scSourceNameRole:257,scScope:'spotify',scSources:['spotify'],scOpen() {opens++;}};
+const Planck={librarianController:{browserSourceControllerPtr() {return {
+    availableSourceModel() {return model;},connectedSourceModel() {return model;}
+};}}};
+""" + self.function(bp.SOURCE_ENTER, "scSourceEnter") + "\nconst hiddenNames=" + json.dumps(hidden_names) + ";\n" + """
+for (const available of [false,true]) {
+    nav.availableSourceIndex=available ? 0 : -1;
+    for (const visible of ['Beatport','BEATPORT','Beatsource','Amazon Music','Dropbox','USB 1','SD Card','SoundCloud GO+']) {
+        name=visible; enters=0; opens=0; scSourceEnter();
+        assert.equal(enters,1,visible); assert.equal(opens,0,visible);
+    }
+    for (const hidden of hiddenNames) {
+        name=hidden; enters=0; opens=0; scSourceEnter();
+        assert.equal(enters,0,hidden); assert.equal(opens,1,hidden);
+    }
+}
+""")
+
     def test_generated_530_packs_guard_profile_pairing_and_encoder(self):
         with tempfile.TemporaryDirectory(prefix="issue224-") as tmp:
             out = Path(tmp) / "packs"
@@ -5128,11 +5219,13 @@ class PrimeGoTidalQRTest(unittest.TestCase):
                     self.assertIn("Keys.onReturnPressed: scSourceEnter()", source)
                     self.assertIn("Keys.onEnterPressed: scSourceEnter()", source)
                     self.assertIn("root.scSourceNameRole", source)
-                    self.assertIn('"SOUNDCLOUD"', source)
-                    self.assertIn('"BEATPORT"', source)
+                    self.assertIn('["TIDAL", "Tidal", "SoundCloud", "Beatport LINK"]', source)
+                    self.assertIn('"Beatport LINK"', source)
                     main = (base / "EmbeddedMain.qml").read_text()
                     self.assertIn('scSources.indexOf("tidal") < 0 ||', main)
                     self.assertIn("scTidalLoggedIn = !!v.tidalLoggedIn", main)
+                    self.assertIn("property bool scTidalSynthetic: false", main)
+                    self.assertIn("scTidalSynthetic = !!v.tidalSynthetic", main)
                     self.assertIn("function scTidalProvider()", main)
                     self.assertIn("tp.loginToService(", main)
                     self.assertIn('refreshToken: "enginex"', main)

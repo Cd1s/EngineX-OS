@@ -387,6 +387,67 @@ def patch(text: str, old: str, new: str, path: str) -> str:
     return text[:m.start()] + new + text[m.end():]
 
 
+# The Profile/SSO provider APIs belong only to the 5.3.0 UI base (#224).
+TIDAL_OPEN_530 = """	function scTidalProvider() {
+		for (let i = 0; i < scProviders.count; i++) {
+			const watcher = scProviders.objectAt(i)
+			if (watcher && watcher.tidalProvider) return watcher.tidalProvider
+		}
+		return null
+	}
+	function scGatewayLogin(tp) {
+		if (tp && !tp.loggedIn) tp.loginToService(
+			JSON.stringify({provider: tp.name, accessToken: "enginex", refreshToken: "enginex"}),
+			1, "userInterfaceLogin")
+	}
+	function scOpen(id) {
+		if (id === "tidal" && scSources.indexOf("tidal") < 0) return
+		scAskedAt = Date.now()
+		scScope = id // before Engine's TIDAL client can raise a prompt; scApply confirms it
+		scEnsureTidal()
+		scCall("scope=" + id, function() {
+			const tp = scTidalProvider()
+			scTidalLoginPending = !!(id === "tidal" && scUiLoaded && !root.scTidalLoggedIn && (root.scTidalSynthetic || (tp && !tp.loggedIn)))
+			if (id !== "tidal" || root.scTidalLoggedIn) scGatewayLogin(tp)
+			else if (scUiLoaded && root.scTidalSynthetic && tp && tp.loggedIn) Planck.librarianController.streamingInterfaceController.logoutOfProvider(tp)
+			Planck.librarianController.streamingPlaylistsController.invalidateUI()
+			scSelectPending = !scTidalLoginPending && !scSelectTidal()
+			scEnterTries = 8
+			scEnterTimer.start()
+			if (id !== "tidal" && scLoggedIn.indexOf(id) < 0) scLoginBegin(id)
+		})
+	}
+"""
+TIDAL_OPEN_504 = """
+	function scOpen(id) {
+		scAskedAt = Date.now()
+		scScope = id // before Engine's TIDAL client can raise a prompt; scApply confirms it
+		scEnsureTidal()
+		scCall("scope=" + id, function() {
+			Planck.librarianController.streamingPlaylistsController.invalidateUI()
+			scSelectPending = !scSelectTidal()
+			scEnterTries = 8
+			scEnterTimer.start()
+			if (id !== "tidal" && scLoggedIn.indexOf(id) < 0) scLoginBegin(id)
+		})
+	}
+"""
+TIDAL_SELECT_530 = """		const tp = scTidalProvider()
+		if ((scScope !== "tidal" || scTidalLoggedIn) && tp && !tp.loggedIn) return false
+"""
+TIDAL_PAIRING_530 = """			// logoutOfProvider finishes asynchronously. Wait before selecting the
+			// same carrier again, then request its stock login even if current.
+			if (scTidalLoginPending) {
+				const tp = scTidalProvider()
+				if (tp && !tp.loggedIn) {
+					scTidalLoginPending = false
+					scSelectTidal()
+					Planck.librarianController.streamingInterfaceController.showAddAccountDialog(tp)
+				}
+				return
+			}
+"""
+
 SERVICES_MAIN = """
     property var scLightingBackend: null
     Item {
@@ -2586,6 +2647,7 @@ SERVICES_MAIN = """
 	property var scSources: ["tidal", "netease", "spotify", "deezer", "soundcloud", "beatport", "applemusic"]
 	property var scLoggedIn: []
 	property bool scTidalLoggedIn: false
+	property bool scTidalSynthetic: false
 	property string scScope: ""
 	readonly property var scServices: [
 		{ id: "tidal", name: "TIDAL" },
@@ -2968,6 +3030,7 @@ SERVICES_MAIN = """
 		if (!scSameItems(scSources, v.sources)) scSources = v.sources
 		if (!scSameItems(scLoggedIn, v.loggedIn)) scLoggedIn = v.loggedIn
 		scTidalLoggedIn = !!v.tidalLoggedIn
+		scTidalSynthetic = !!v.tidalSynthetic
 		scScope = v.scope
 		scBroadcastOn = !!v.broadcastEnabled
 		const prevUpfaderEcho = scUpfaderEcho
@@ -3133,35 +3196,7 @@ SERVICES_MAIN = """
 		scCall("sources=" + list.join(","))
 	}
 	// Every service is backed by Engine's TIDAL provider; the gateway follows the scope.
-	function scTidalProvider() {
-		for (let i = 0; i < scProviders.count; i++) {
-			const watcher = scProviders.objectAt(i)
-			if (watcher && watcher.tidalProvider) return watcher.tidalProvider
-		}
-		return null
-	}
-	function scGatewayLogin(tp) {
-		if (tp && !tp.loggedIn) tp.loginToService(
-			JSON.stringify({provider: tp.name, accessToken: "enginex", refreshToken: "enginex"}),
-			1, "userInterfaceLogin")
-	}
-	function scOpen(id) {
-		if (id === "tidal" && scSources.indexOf("tidal") < 0) return
-		scAskedAt = Date.now()
-		scScope = id // before Engine's TIDAL client can raise a prompt; scApply confirms it
-		scEnsureTidal()
-		scCall("scope=" + id, function() {
-			const tp = scTidalProvider()
-			scTidalLoginPending = id === "tidal" && !root.scTidalLoggedIn
-			if (id !== "tidal" || root.scTidalLoggedIn) scGatewayLogin(tp)
-			else if (tp && tp.loggedIn) Planck.librarianController.streamingInterfaceController.logoutOfProvider(tp)
-			Planck.librarianController.streamingPlaylistsController.invalidateUI()
-			scSelectPending = !scTidalLoginPending && !scSelectTidal()
-			scEnterTries = 8
-			scEnterTimer.start()
-			if (id !== "tidal" && scLoggedIn.indexOf(id) < 0) scLoginBegin(id)
-		})
-	}
+@TIDAL_OPEN@
 	// Engine's own login and pairing prompts for that provider belong to a tap on a
 	// service in the source list. Engine also raises them by itself, for instance
 	// after a restart with TIDAL last shown or for a track from an old TIDAL login,
@@ -3226,12 +3261,11 @@ SERVICES_MAIN = """
 	// The playlists are one level down; open them so a source never looks empty.
 	property int scEnterTries: 0
 	property bool scSelectPending: false
-	property bool scTidalLoginPending: false
+@TIDAL_LOGIN_PENDING@
 	// The row may not exist yet right after the provider is re-enabled, and a
 	// delegate can be recycled, so find it in the model rather than the view.
 	function scSelectTidal() {
-		const tp = scTidalProvider()
-		if ((scScope !== "tidal" || scTidalLoggedIn) && tp && !tp.loggedIn) return false
+@TIDAL_SELECT@
 		const sources = Planck.librarianController.browserSourceControllerPtr()
 		const model = sources.model()
 		for (let i = 0; i < model.rowCount(); i++) {
@@ -3265,17 +3299,7 @@ SERVICES_MAIN = """
 		id: scEnterTimer
 		interval: 300; repeat: true
 		onTriggered: {
-			// logoutOfProvider finishes asynchronously. Wait before selecting the
-			// same carrier again, then request its stock login even if current.
-			if (scTidalLoginPending) {
-				const tp = scTidalProvider()
-				if (tp && !tp.loggedIn) {
-					scTidalLoginPending = false
-					scSelectTidal()
-					Planck.librarianController.streamingInterfaceController.showAddAccountDialog(tp)
-				}
-				return
-			}
+@TIDAL_PAIRING@
 			if (scSelectPending) scSelectPending = !scSelectTidal()
 			const row = scFindMyPlaylists(uiContainer)
 			if (row) row.clicked(null)
@@ -3531,8 +3555,8 @@ SOURCE_ENTER = """
         const available = nav.availableSourceIndex >= 0
         const model = available ? sources.availableSourceModel() : sources.connectedSourceModel()
         const row = available ? nav.availableSourceIndex : nav.connectedSourceIndex
-        const name = row >= 0 ? String(model.data(model.index(row, 0), root.scSourceNameRole)).toUpperCase() : ""
-        if (["TIDAL", "SOUNDCLOUD", "BEATPORT", "BEATPORT LINK"].indexOf(name) >= 0) {
+        const name = row >= 0 ? String(model.data(model.index(row, 0), root.scSourceNameRole)).trim() : ""
+        if (["TIDAL", "Tidal", "SoundCloud", "Beatport LINK"].indexOf(name) >= 0) {
             if (root.scScope && root.scSources.indexOf(root.scScope) >= 0) root.scOpen(root.scScope)
             return
         }
@@ -5482,7 +5506,12 @@ def edits(dev: bool):
          "			visible: waveformOverview.songLoaded && !waveformOverview.isRemoteDeck\n"),
     ]
     main = DEV_HARNESS if dev else ""
-    services = (SERVICES_MAIN + FX_CONTROLLER).replace("@ICONS@", "Skins/UIKit/Icons" if v53() else "UIKit.1/UIKit/Icons").replace("@RGB_SCALE@", str(OVERVIEW_Y_SCALE_RGB)).replace("@BANDS_SCALE@", str(OVERVIEW_Y_SCALE_BANDS)) + (SMART_SYNC_MAIN if v53() else "")
+    services_main = (SERVICES_MAIN
+                     .replace("@TIDAL_OPEN@", TIDAL_OPEN_530 if v53() else TIDAL_OPEN_504)
+                     .replace("@TIDAL_SELECT@", TIDAL_SELECT_530 if v53() else "")
+                     .replace("@TIDAL_PAIRING@", TIDAL_PAIRING_530 if v53() else "")
+                     .replace("@TIDAL_LOGIN_PENDING@", "\tproperty bool scTidalLoginPending: false" if v53() else ""))
+    services = (services_main + FX_CONTROLLER).replace("@ICONS@", "Skins/UIKit/Icons" if v53() else "UIKit.1/UIKit/Icons").replace("@RGB_SCALE@", str(OVERVIEW_Y_SCALE_RGB)).replace("@BANDS_SCALE@", str(OVERVIEW_Y_SCALE_BANDS)) + (SMART_SYNC_MAIN if v53() else "")
     out = PatchDict({
         # The file name shadows the native SoundSwitch context object.
         prefs + "Entries/SoundSwitch.qml": [(
