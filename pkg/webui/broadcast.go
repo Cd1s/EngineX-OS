@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -125,6 +124,7 @@ type broadcastPostInput struct {
 	Mountpoint *string `json:"mountpoint"`
 	Username   *string `json:"username"`
 	Password   *string `json:"password"`
+	// Older clients still send these; the stream is always WAV, so they are ignored.
 	Format     *string `json:"format"`
 	Bitrate    *int    `json:"bitrate"`
 	StreamName *string `json:"streamName"`
@@ -194,12 +194,6 @@ func (s *Server) broadcastPost(w http.ResponseWriter, r *http.Request) {
 			}
 			if in.Username != nil {
 				cfg.Username = *in.Username
-			}
-			if in.Format != nil {
-				cfg.Format = *in.Format
-			}
-			if in.Bitrate != nil {
-				cfg.Bitrate = *in.Bitrate
 			}
 			if in.StreamName != nil {
 				cfg.StreamName = *in.StreamName
@@ -289,8 +283,9 @@ func (s *Server) RegisterBroadcastRoutes() {
 	s.mux.HandleFunc("GET /v1/sc5000/usb-audio", s.handleUSBAudio)
 	s.mux.HandleFunc("POST /v1/sc5000/usb-audio", s.handleUSBAudio)
 	// Public on purpose (like the phone pages): OBS/VLC/browsers open these without a console cookie.
-	s.mux.HandleFunc("GET /live.mp3", s.liveMP3)
+	s.mux.Handle("GET /live.mp3", http.RedirectHandler("/live.wav", http.StatusFound)) // the MP3 output is retired
 	s.mux.HandleFunc("GET /live.wav", s.liveWAV)
+	s.mux.HandleFunc("GET /live-header.wav", liveHeader)
 }
 
 // handleUSBAudio handles GET and POST requests for /v1/sc5000/usb-audio and /api/usb-audio.
@@ -385,21 +380,6 @@ func (s *Server) handleUSBAudio(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// liveSubscribe starts a local listener, or answers 503 when Live Stream is off.
-func (s *Server) liveSubscribe(w http.ResponseWriter, contentType string) (<-chan []byte, func(), bool) {
-	b := s.broadcaster()
-	st := b.Status()
-	if !st.Enabled {
-		http.Error(w, "Live Stream is off: set Live Stream to ON in the deck control centre", http.StatusServiceUnavailable)
-		return nil, nil, false
-	}
-	// The server-wide WriteTimeout would cut a live stream after two minutes.
-	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
-	liveHeaders(w.Header(), contentType, st)
-	ch, cancel := b.Subscribe()
-	return ch, cancel, true
-}
-
 func liveHeaders(h http.Header, contentType string, st broadcast.Status) {
 	h.Set("Content-Type", contentType)
 	h.Set("Cache-Control", "no-cache")
@@ -479,6 +459,15 @@ func (s *Server) liveWAV(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// liveHeader serves the 44-byte streaming WAV header that /live.wav starts with. The
+// Icecast push sends it once per source connection, so a listener who joins later gets
+// bare PCM; set as the mount's <intro> on the Icecast server, this file gives every
+// listener the header.
+func liveHeader(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "audio/wav")
+	_, _ = w.Write(broadcast.WAVHeader())
+}
+
 // liveWriter takes over the connection to cap its send buffer, sending the status
 // and headers itself (a close-delimited body, as Icecast-style players expect). Where
 // that is not possible it streams through w as before.
@@ -520,90 +509,4 @@ func liveWriter(w http.ResponseWriter) (write func([]byte) error, done func()) {
 		_, err := conn.Write(p)
 		return err
 	}, func() { _ = conn.Close() }
-}
-
-// mp3Encoder finds an external encoder that reads s16le 48 kHz stereo on stdin and writes MP3 to stdout.
-// shortcut: no MP3 encoder is built into the binary; use lame/ffmpeg when the deck has one, upgrade to a pure-Go encoder if it never does.
-func mp3Encoder(bitrate int) *exec.Cmd {
-	br := strconv.Itoa(bitrate)
-	if p, err := exec.LookPath("lame"); err == nil {
-		return exec.Command(p, "-r", "-s", "48", "--signed", "--little-endian", "--bitwidth", "16", "-m", "s", "-b", br, "--silent", "-", "-")
-	}
-	if p, err := exec.LookPath("ffmpeg"); err == nil {
-		return exec.Command(p, "-loglevel", "quiet", "-fflags", "+nobuffer", "-f", "s16le", "-ar", "48000", "-ac", "2", "-i", "pipe:0", "-f", "mp3", "-b:a", br+"k", "-flush_packets", "1", "pipe:1")
-	}
-	return nil
-}
-
-// liveMP3Stall is how long one write to a /live.mp3 listener may block. The
-// server-wide WriteTimeout is off for a live stream, and nothing took its place
-// (BH2-A3-2): a listener that vanished without closing (Wi-Fi gone, laptop
-// asleep) held the handler in Write until TCP gave up, about fifteen minutes,
-// and its encoder process and hub subscription with it.
-var liveMP3Stall = 60 * time.Second
-
-// liveMP3 streams the deck's live mix as MP3 through an external encoder.
-func (s *Server) liveMP3(w http.ResponseWriter, r *http.Request) {
-	cmd := mp3Encoder(s.broadcaster().Status().Bitrate)
-	if cmd == nil {
-		http.Error(w, "no MP3 encoder (lame or ffmpeg) on this deck: use /live.wav", http.StatusServiceUnavailable)
-		return
-	}
-	ch, cancel, ok := s.liveSubscribe(w, "audio/mpeg")
-	if !ok {
-		return
-	}
-	defer cancel()
-
-	in, err := cmd.StdinPipe()
-	if err != nil {
-		http.Error(w, "encoder start failed", http.StatusInternalServerError)
-		return
-	}
-	out, err := cmd.StdoutPipe()
-	if err != nil {
-		http.Error(w, "encoder start failed", http.StatusInternalServerError)
-		return
-	}
-	if err := cmd.Start(); err != nil {
-		http.Error(w, "encoder start failed", http.StatusInternalServerError)
-		return
-	}
-	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
-
-	go func() {
-		defer in.Close()
-		for {
-			select {
-			case <-r.Context().Done():
-				return
-			case pcm, open := <-ch:
-				if !open {
-					return
-				}
-				if _, err := in.Write(pcm); err != nil {
-					return
-				}
-			}
-		}
-	}()
-
-	fl, _ := w.(http.Flusher)
-	rc := http.NewResponseController(w)
-	buf := make([]byte, 4096)
-	for {
-		n, err := out.Read(buf)
-		if n > 0 {
-			_ = rc.SetWriteDeadline(time.Now().Add(liveMP3Stall))
-			if _, werr := w.Write(buf[:n]); werr != nil {
-				return
-			}
-			if fl != nil {
-				fl.Flush()
-			}
-		}
-		if err != nil {
-			return
-		}
-	}
 }
