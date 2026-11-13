@@ -666,25 +666,26 @@ func (s *SoundCloud) Playlists(ctx context.Context) ([]Playlist, error) {
 	out := []Playlist{{ID: soundCloudLikesID, Title: "Liked Tracks & Sets（我点赞的音乐）"}}
 	out, err = s.playlistPages(ctx, s.list(root+"/playlists", q()), "", out)
 	var st StatusError
-	if errors.As(err, &st) && st == 404 && s.web() && root == "/me" && s.UserID != 0 {
+	if len(out) == 1 && errors.As(err, &st) && st == 404 && s.web() && root == "/me" && s.UserID != 0 {
 		root = "/users/" + strconv.FormatInt(s.UserID, 10)
 		out, err = s.playlistPages(ctx, s.list(root+"/playlists", q()), "", out)
 	}
 	if err != nil {
-		return nil, err
+		return out, err
 	}
 	likesPath := s.path("/likes/playlists", "/playlist_likes")
+	beforeLikes := len(out)
 	var likeErr error
 	out, likeErr = s.playlistPages(ctx, s.list(root+likesPath, q()), "【收藏】", out)
-	if errors.As(likeErr, &st) && st == 404 && s.web() && root == "/me" && s.UserID != 0 {
+	if len(out) == beforeLikes && errors.As(likeErr, &st) && st == 404 && s.web() && root == "/me" && s.UserID != 0 {
 		out, likeErr = s.playlistPages(ctx, s.list("/users/"+strconv.FormatInt(s.UserID, 10)+likesPath, q()), "【收藏】", out)
 	}
 	if likeErr != nil {
 		var lst StatusError
-		if errors.As(likeErr, &lst) && lst == 404 {
+		if len(out) == beforeLikes && errors.As(likeErr, &lst) && lst == 404 {
 			return out, nil
 		}
-		return nil, likeErr
+		return out, likeErr
 	}
 	return out, nil
 }
@@ -697,7 +698,7 @@ func (s *SoundCloud) trackPages(ctx context.Context, address string) ([]Track, e
 			Next       string    `json:"next_href"`
 		}
 		if err := s.get(ctx, address, &r); err != nil {
-			return nil, err
+			return out, err
 		}
 		for _, t := range r.Collection {
 			if t.ID != 0 && t.Access != "blocked" && t.Policy != "BLOCK" {
@@ -719,14 +720,14 @@ func (s *SoundCloud) Tracks(ctx context.Context, id string) ([]Track, error) {
 		address := func() string { return s.list(root+s.path("/likes/tracks", "/track_likes"), q) }
 		out, err := s.trackPages(ctx, address())
 		var st StatusError
-		if errors.As(err, &st) && st == 400 {
+		if len(out) == 0 && errors.As(err, &st) && st == 400 {
 			q.Del("access") // some accounts' likes refuse the filter
 			out, err = s.trackPages(ctx, address())
 		}
-		if errors.As(err, &st) && st == 404 && s.web() && root == "/me" && s.UserID != 0 {
+		if len(out) == 0 && errors.As(err, &st) && st == 404 && s.web() && root == "/me" && s.UserID != 0 {
 			out, err = s.trackPages(ctx, s.list("/users/"+strconv.FormatInt(s.UserID, 10)+"/track_likes", q))
 		}
-		if errors.As(err, &st) && (st == 400 || st == 401 || st == 403) && !s.web() && s.UserID != 0 {
+		if len(out) == 0 && errors.As(err, &st) && (st == 400 || st == 401 || st == 403) && !s.web() && s.UserID != 0 {
 			// The login or app token is refused: a public profile's likes still read.
 			w := &SoundCloud{
 				BaseURL:  s.BaseURL,
@@ -767,25 +768,36 @@ func (s *SoundCloud) webPlaylistTracks(ctx context.Context, id string) ([]Track,
 			missing = append(missing, strconv.FormatInt(t.ID, 10))
 		}
 	}
-	got, err := collectBatches(ctx, soundcloudPages, (len(missing)+49)/50, func(batch int) ([]scTrack, error) {
+	// A successful batch may omit unavailable IDs; only a failed batch ends
+	// the prefix, including any pre-expanded tracks after that boundary.
+	complete := make([]bool, (len(missing)+49)/50)
+	got, err := collectBatches(ctx, soundcloudPages, len(complete), func(batch int) ([]scTrack, error) {
 		start := batch * 50
 		var tracks []scTrack
 		err := s.get(ctx, s.base()+"/tracks?"+url.Values{"ids": {strings.Join(missing[start:min(start+50, len(missing))], ",")}}.Encode(), &tracks)
+		complete[batch] = err == nil
 		return tracks, err
 	})
-	if err != nil {
-		return nil, err
+	stopID := ""
+	for batch, complete := range complete {
+		if !complete {
+			stopID = missing[batch*50]
+			break
+		}
 	}
 	for _, t := range got {
 		full[t.ID] = t
 	}
 	var out []Track
 	for _, ref := range list.Tracks {
+		if err != nil && strconv.FormatInt(ref.ID, 10) == stopID {
+			break
+		}
 		if t, ok := full[ref.ID]; ok && t.Policy != "BLOCK" && len(out) < soundCloudListLimit {
 			out = append(out, t.track())
 		}
 	}
-	return out, nil
+	return out, err
 }
 
 func (s *SoundCloud) Search(ctx context.Context, query string) ([]Track, error) {

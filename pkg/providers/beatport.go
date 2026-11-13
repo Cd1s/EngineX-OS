@@ -316,13 +316,13 @@ func beatportPages[T any](ctx context.Context, b *Beatport, path string, q url.V
 		err := b.get(ctx, path, query, &r)
 		return listPage[T]{items: r.Results, more: r.Next != nil && *r.Next != "" && len(r.Results) > 0, total: r.Count}, err
 	})
-	if err != nil && !errors.Is(err, errPageLimit) {
-		return err
-	}
 	for _, v := range items {
 		add(v)
 	}
-	return nil
+	if errors.Is(err, errPageLimit) {
+		return nil
+	}
+	return err
 }
 
 type bpImage struct {
@@ -400,15 +400,12 @@ func (b *Beatport) Playlists(ctx context.Context) ([]Playlist, error) {
 		out = append(out, Playlist{strconv.FormatInt(p.ID, 10), p.Name, p.Count})
 	})
 	if mine != nil {
-		return nil, mine
+		return out, mine
 	}
 	charts := beatportPages(ctx, b, "/catalog/charts/", url.Values{"order_by": {"-publish_date"}}, 30, 30, func(p bpList) {
 		out = append(out, Playlist{beatportChartPrefix + strconv.FormatInt(p.ID, 10), "【榜单】" + p.Name, p.Count})
 	})
-	if charts != nil && len(out) == 0 {
-		return nil, charts
-	}
-	return out, nil
+	return out, charts
 }
 
 func validBeatportID(id string) bool {
@@ -438,7 +435,7 @@ func (b *Beatport) Tracks(ctx context.Context, id string) ([]Track, error) {
 	}
 	out, err := b.trackPages(ctx, "/my/playlists/"+id+"/tracks/")
 	var status StatusError
-	if errors.As(err, &status) && status == http.StatusNotFound {
+	if len(out) == 0 && errors.As(err, &status) && status == http.StatusNotFound {
 		// A playlist found by search belongs to Beatport's editors, not the account.
 		return b.trackPages(ctx, "/catalog/playlists/"+id+"/tracks/")
 	}

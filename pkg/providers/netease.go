@@ -194,23 +194,30 @@ func (n *Netease) Playlists(ctx context.Context) ([]Playlist, error) {
 	// the playlists are still worth showing.
 	var albums []Album
 	var radios []Playlist
+	var albumErr, radioErr error
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		albums, _ = n.FavoriteAlbums(ctx)
+		albums, albumErr = n.FavoriteAlbums(ctx)
 	}()
 	go func() {
 		defer wg.Done()
-		radios, _ = n.favoriteRadios(ctx)
+		radios, radioErr = n.favoriteRadios(ctx)
 	}()
 	defer wg.Wait()
-	withSaved := func() []Playlist {
+	withSaved := func() ([]Playlist, error) {
 		wg.Wait()
 		for _, a := range albums {
 			all = append(all, Playlist{albumPrefix + strconv.FormatInt(a.ID, 10), "【专辑】" + a.Name, a.Size})
 		}
-		return append(all, radios...)
+		if albumErr != nil && len(albums) > 0 {
+			return all, albumErr
+		}
+		if len(radios) > 0 {
+			return append(all, radios...), radioErr
+		}
+		return all, nil
 	}
 	for offset := 0; offset < 100000; offset += 100 {
 		var r struct {
@@ -222,16 +229,16 @@ func (n *Netease) Playlists(ctx context.Context) ([]Playlist, error) {
 			More bool
 		}
 		if err := n.get(ctx, "/user/playlist", url.Values{"uid": {strconv.FormatInt(uid, 10)}, "limit": {"100"}, "offset": {strconv.Itoa(offset)}}, &r); err != nil {
-			return nil, err
+			return all, err
 		}
 		for _, p := range r.Playlist {
 			all = append(all, Playlist{strconv.FormatInt(p.ID, 10), p.Name, p.TrackCount})
 		}
 		if !r.More {
-			return withSaved(), nil
+			return withSaved()
 		}
 	}
-	return nil, errors.New("netease: pagination limit")
+	return all, errors.New("netease: pagination limit")
 }
 
 // Album is an album the account has saved.
@@ -257,7 +264,7 @@ func (n *Netease) FavoriteAlbums(ctx context.Context) ([]Album, error) {
 			HasMore bool
 		}
 		if err := n.get(ctx, "/album/sublist", url.Values{"limit": {"100"}, "offset": {strconv.Itoa(offset)}}, &r); err != nil {
-			return nil, err
+			return all, err
 		}
 		all = append(all, r.Data...)
 		if !r.HasMore {
@@ -279,7 +286,7 @@ func (n *Netease) favoriteRadios(ctx context.Context) ([]Playlist, error) {
 			HasMore bool
 		}
 		if err := n.get(ctx, "/dj/sublist", url.Values{"limit": {"100"}, "offset": {strconv.Itoa(offset)}}, &r); err != nil {
-			return nil, err
+			return all, err
 		}
 		for _, v := range r.DJRadios {
 			all = append(all, Playlist{radioPrefix + strconv.FormatInt(v.ID, 10), "【电台】" + v.Name, v.ProgramCount})
@@ -326,7 +333,7 @@ func (n *Netease) radioTracks(ctx context.Context, id string) ([]Track, error) {
 			More bool
 		}
 		if err := n.get(ctx, "/dj/program", url.Values{"id": {id}, "limit": {"100"}, "offset": {strconv.Itoa(offset)}}, &r); err != nil {
-			return nil, err
+			return all, err
 		}
 		for _, p := range r.Programs {
 			if p.MainSong.ID == 0 {
@@ -383,10 +390,7 @@ func (n *Netease) Tracks(ctx context.Context, id string) ([]Track, error) {
 		}
 		return out, nil
 	})
-	if err != nil {
-		return nil, err
-	}
-	return all, nil
+	return all, err
 }
 
 func (n *Netease) Search(ctx context.Context, query string) ([]Track, error) {
@@ -406,19 +410,24 @@ var ErrNoFullAudio = errors.New("netease: no full-length audio for this account"
 
 // AudioURL returns the address NetEase gives this account for a track at the best
 // quality on offer, starting at 320k MP3 unless lossless is wanted. Previews never
-// count: a DJ must not load 30 seconds of a song.
-func (n *Netease) AudioURL(ctx context.Context, id string, lossless bool) (string, error) {
+// count: a DJ must not load 30 seconds of a song. When lossy audio is forbidden,
+// a lossless request never tries the MP3 levels.
+func (n *Netease) AudioURL(ctx context.Context, id string, lossless, allowLossy bool) (string, error) {
 	if _, err := strconv.ParseUint(id, 10, 64); err != nil {
 		return "", errors.New("netease: invalid track ID")
 	}
-	levels := []string{"exhigh", "standard"}
+	var levels []string
 	if lossless {
-		levels = append([]string{"lossless"}, levels...)
+		levels = append(levels, "lossless")
+	}
+	if !lossless || allowLossy {
+		levels = append(levels, "exhigh", "standard")
 	}
 	for _, level := range levels {
 		var r struct {
 			Data []struct {
 				URL   string          `json:"url"`
+				Type  string          `json:"type"`
 				Trial json.RawMessage `json:"freeTrialInfo"`
 			} `json:"data"`
 		}
@@ -426,6 +435,9 @@ func (n *Netease) AudioURL(ctx context.Context, id string, lossless bool) (strin
 			return "", err
 		}
 		for _, v := range r.Data {
+			if lossless && !allowLossy && !strings.EqualFold(v.Type, "flac") {
+				continue
+			}
 			if v.URL != "" && (len(v.Trial) == 0 || string(v.Trial) == "null") {
 				return v.URL, nil
 			}

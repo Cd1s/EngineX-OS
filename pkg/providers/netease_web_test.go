@@ -122,11 +122,11 @@ func TestNeteaseAudioSkipsPreviews(t *testing.T) {
 	}))
 	defer srv.Close()
 	n := &Netease{WebURL: srv.URL, Cookie: "MUSIC_U=x", UserID: 1}
-	got, err := n.AudioURL(context.Background(), "7", true)
+	got, err := n.AudioURL(context.Background(), "7", true, true)
 	if err != nil || got != "https://cdn/full" || len(levels) != 3 {
 		t.Fatalf("%q %v %d", got, err, len(levels))
 	}
-	if _, err := n.AudioURL(context.Background(), "1,2", true); err == nil {
+	if _, err := n.AudioURL(context.Background(), "1,2", true, true); err == nil {
 		t.Fatal("bad ID accepted")
 	}
 }
@@ -137,7 +137,7 @@ func TestNeteaseAudioReportsPreviewOnlyTracks(t *testing.T) {
 	}))
 	defer srv.Close()
 	n := &Netease{WebURL: srv.URL, Cookie: "MUSIC_U=x", UserID: 1}
-	if _, err := n.AudioURL(context.Background(), "7", true); !errors.Is(err, ErrNoFullAudio) {
+	if _, err := n.AudioURL(context.Background(), "7", true, true); !errors.Is(err, ErrNoFullAudio) {
 		t.Fatal(err)
 	}
 }
@@ -454,7 +454,7 @@ func TestNeteaseSkipsLosslessWhenMP3IsWanted(t *testing.T) {
 	}))
 	defer srv.Close()
 	n := &Netease{WebURL: srv.URL, Cookie: "c", UserID: 1}
-	if _, err := n.AudioURL(context.Background(), "7", false); err != nil || calls != 1 {
+	if _, err := n.AudioURL(context.Background(), "7", false, true); err != nil || calls != 1 {
 		t.Fatal(err, calls)
 	}
 }

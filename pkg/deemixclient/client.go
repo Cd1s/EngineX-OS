@@ -90,6 +90,9 @@ func (c *Client) request() (bitrate int, quality string) {
 // Lossless reports whether the next download should try for FLAC first.
 func (c *Client) Lossless() bool { return !c.wantsMP3() }
 
+// LossyAllowed reports whether lossy audio is permitted for the next download.
+func (c *Client) LossyAllowed() bool { return c.lossyAllowed() }
+
 func UnixHTTP(socket string) *http.Client {
 	return &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, "unix", socket)
