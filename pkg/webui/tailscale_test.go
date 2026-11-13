@@ -17,16 +17,16 @@ import (
 )
 
 type tsFake struct {
-	mu      sync.Mutex
-	cmds    []string
-	active  bool
-	state   string
-	authURL string
-	keyFile string
-	forwards map[string]string
+	mu          sync.Mutex
+	cmds        []string
+	active      bool
+	state       string
+	authURL     string
+	keyFile     string
+	forwards    map[string]string
 	flakyStatus bool
 	statusCalls int
-	serveError string
+	serveError  string
 }
 
 func (f *tsFake) run(_ context.Context, name string, args ...string) ([]byte, error) {
@@ -293,7 +293,7 @@ func TestTailscaleLoginServeAndStop(t *testing.T) {
 	if left, _ := filepath.Glob(filepath.Join(s.tailscaleRoot(), ".authkey-*")); len(left) != 0 {
 		t.Fatalf("temporary key file left behind: %v", left)
 	}
-	if !f.has("serve reset") || !f.has("serve --bg --tcp=22 tcp://127.0.0.1:22") || !f.has("serve --bg --tcp=8080 tcp://"+ForwardAddr) {
+	if f.has("serve reset") || !f.has("serve --bg --tcp=22 tcp://127.0.0.1:22") || !f.has("serve --bg --tcp=8080 tcp://"+ForwardAddr) {
 		cmds, _ := f.snapshot()
 		t.Fatalf("forwards wrong: %v", cmds)
 	}
