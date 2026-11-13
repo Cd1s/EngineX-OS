@@ -4,6 +4,16 @@ import (
 	"fmt"
 	"runtime"
 	"strings"
+	"unicode/utf8"
+
+	"golang.org/x/text/unicode/norm"
+)
+
+const (
+	// MaxArchivePathLen is the maximum allowed byte length of an archive path.
+	MaxArchivePathLen = 4096
+	// MaxArchiveSegmentLen is the maximum allowed byte length of a single path component.
+	MaxArchiveSegmentLen = 255
 )
 
 // ValidateHostPathOS validates a host OS filesystem path using the current runtime's OS rules.
@@ -18,45 +28,89 @@ func ValidateHostPath(path string, isWindows bool) error {
 	if path == "" {
 		return fmt.Errorf("%w: empty host path", ErrUnsafePath)
 	}
-	for i := 0; i < len(path); i++ {
-		c := path[i]
-		if c < 32 || c == 127 || c == '"' {
+	if !utf8.ValidString(path) {
+		return fmt.Errorf("%w: invalid UTF-8 in host path", ErrUnsafePath)
+	}
+	for _, r := range path {
+		if isUnsafeControlOrBidi(r) || r == '"' {
 			return fmt.Errorf("%w: unsafe character in host path", ErrUnsafePath)
 		}
-		if !isWindows && c == '\\' {
+		if !isWindows && r == '\\' {
 			return fmt.Errorf("%w: backslash in POSIX host path", ErrUnsafePath)
 		}
 	}
 	return nil
 }
 
-func isASCIIAlpha(c byte) bool {
-	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+func isUnsafeControlOrBidi(r rune) bool {
+	if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+		return true
+	}
+	switch {
+	case r >= 0x202a && r <= 0x202e: // LRE, RLE, PDF, LRO, RLO
+		return true
+	case r >= 0x2066 && r <= 0x2069: // LRI, RLI, FSI, PDI
+		return true
+	case r == 0x200e || r == 0x200f || r == 0x061c: // LRM, RLM, ALM
+		return true
+	}
+	return false
 }
 
-// CleanArchivePath validates and returns a canonical relative POSIX archive path.
-// It rejects empty paths, absolute paths, UNC paths, Windows drive-letter paths,
-// backslashes, control characters, traversal segments ("." / ".."), empty segments ("//"),
+func isWindowsReservedName(seg string) bool {
+	stem := seg
+	if dot := strings.IndexByte(seg, '.'); dot >= 0 {
+		stem = seg[:dot]
+	}
+	if len(stem) < 3 || len(stem) > 4 {
+		return false
+	}
+	var buf [4]byte
+	for i := 0; i < len(stem); i++ {
+		c := stem[i]
+		if c >= 'a' && c <= 'z' {
+			c -= 'a' - 'A'
+		}
+		buf[i] = c
+	}
+	switch string(buf[:len(stem)]) {
+	case "CON", "PRN", "AUX", "NUL":
+		return true
+	case "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9":
+		return true
+	case "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9":
+		return true
+	}
+	return false
+}
+
+// CleanArchivePath validates and returns a canonical relative POSIX archive path without
+// allocating heap buffers on rejected paths.
+// It rejects empty paths, paths >4096 bytes, segments >255 bytes, invalid UTF-8,
+// C0/DEL/C1/bidi controls, backslashes, colons (Windows drives and NTFS ADS),
+// leading slashes (absolute/UNC paths), traversal segments ("." / ".."), empty segments ("//"),
+// trailing dots/spaces on segments, Windows reserved device names (CON, PRN, AUX, NUL, COM1-9, LPT1-9),
 // and trailing slashes (unless isDir is true, in which case one trailing slash is stripped).
-// A single leading "./" prefix is stripped only when followed by a valid relative path.
 func CleanArchivePath(raw string, isDir bool) (string, error) {
 	if raw == "" {
 		return "", fmt.Errorf("%w: empty archive path", ErrUnsafePath)
 	}
-	for i := 0; i < len(raw); i++ {
-		c := raw[i]
-		if c < 32 || c == 127 {
-			return "", fmt.Errorf("%w: control character in archive path %q", ErrUnsafePath, raw)
+	if len(raw) > MaxArchivePathLen {
+		return "", fmt.Errorf("%w: archive path length %d exceeds %d", ErrUnsafePath, len(raw), MaxArchivePathLen)
+	}
+	if !utf8.ValidString(raw) {
+		return "", fmt.Errorf("%w: invalid UTF-8 in archive path", ErrUnsafePath)
+	}
+	for _, r := range raw {
+		if isUnsafeControlOrBidi(r) {
+			return "", fmt.Errorf("%w: unsafe control or bidi character in archive path", ErrUnsafePath)
 		}
-		if c == '\\' {
-			return "", fmt.Errorf("%w: backslash in archive path %q", ErrUnsafePath, raw)
+		if r == '\\' || r == ':' {
+			return "", fmt.Errorf("%w: forbidden character %q in archive path", ErrUnsafePath, r)
 		}
 	}
-	if strings.HasPrefix(raw, "/") {
-		return "", fmt.Errorf("%w: absolute or UNC path %q", ErrUnsafePath, raw)
-	}
-	if len(raw) >= 2 && isASCIIAlpha(raw[0]) && raw[1] == ':' {
-		return "", fmt.Errorf("%w: Windows drive path %q", ErrUnsafePath, raw)
+	if raw[0] == '/' {
+		return "", fmt.Errorf("%w: absolute or UNC archive path", ErrUnsafePath)
 	}
 	if isDir && (raw == "." || raw == "./") {
 		return ".", nil
@@ -65,17 +119,37 @@ func CleanArchivePath(raw string, isDir bool) (string, error) {
 	if isDir {
 		s = strings.TrimSuffix(s, "/")
 	}
-	if s == "" || strings.HasSuffix(s, "/") {
-		return "", fmt.Errorf("%w: invalid or trailing-slash archive path %q", ErrUnsafePath, raw)
+	if s == "" || s[len(s)-1] == '/' {
+		return "", fmt.Errorf("%w: invalid or trailing-slash archive path", ErrUnsafePath)
 	}
-	parts := strings.Split(s, "/")
-	for _, seg := range parts {
+
+	// Scan segments in place without allocating a slice.
+	start := 0
+	for i := 0; i <= len(s); i++ {
+		if i < len(s) && s[i] != '/' {
+			continue
+		}
+		seg := s[start:i]
 		if seg == "" || seg == "." || seg == ".." {
-			return "", fmt.Errorf("%w: non-canonical or traversal segment in %q", ErrUnsafePath, raw)
+			return "", fmt.Errorf("%w: non-canonical or traversal segment in archive path", ErrUnsafePath)
 		}
-		if len(seg) >= 2 && isASCIIAlpha(seg[0]) && seg[1] == ':' {
-			return "", fmt.Errorf("%w: drive-like segment in %q", ErrUnsafePath, raw)
+		if len(seg) > MaxArchiveSegmentLen {
+			return "", fmt.Errorf("%w: archive path segment length %d exceeds %d", ErrUnsafePath, len(seg), MaxArchiveSegmentLen)
 		}
+		last := seg[len(seg)-1]
+		if last == '.' || last == ' ' {
+			return "", fmt.Errorf("%w: trailing dot or space in archive path segment", ErrUnsafePath)
+		}
+		if isWindowsReservedName(seg) {
+			return "", fmt.Errorf("%w: Windows reserved device name in archive path", ErrUnsafePath)
+		}
+		start = i + 1
 	}
 	return s, nil
+}
+
+// foldArchivePath returns the NFC-normalized, case-folded collision key for a cleaned
+// archive path to detect case-insensitive and NFC/NFD duplicates on macOS/Windows hosts.
+func foldArchivePath(cleaned string) string {
+	return strings.ToLower(norm.NFC.String(cleaned))
 }

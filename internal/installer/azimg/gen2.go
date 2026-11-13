@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"regexp"
@@ -25,6 +26,7 @@ var (
 	topRE     = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 	versionRE = regexp.MustCompile(`^\d+(\.\d+){2,4}$`)
 	hex64RE   = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
+	relTagRE  = regexp.MustCompile(`^v\d+(\.\d+){2,4}(-r[1-9]\d?)?$`)
 )
 
 func openGen2Image(ctx context.Context, r io.ReaderAt, size int64, limits Limits, sniff []byte) (*Image, error) {
@@ -226,12 +228,13 @@ func (b *Bundle) UIDirs() []string { return append([]string(nil), b.uiDirs...) }
 func (b *Bundle) CompressedSize() int64 { return b.im.payloadSize }
 
 // OpenTarGz returns a streaming reader over the inner .tar.gz payload, verifying the
-// wrapper SHA-256 on EOF when opened from an ENGINEX_DATA_BUNDLE_IMG_V1 container.
+// wrapper SHA-256 immediately when CompressedSize bytes have been read (when opened
+// from an ENGINEX_DATA_BUNDLE_IMG_V1 container).
 func (b *Bundle) OpenTarGz(ctx context.Context) (io.ReadCloser, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	sr := io.NewSectionReader(b.im.r, b.im.payloadOffset, b.im.payloadSize)
+	sr := &ctxReader{ctx: ctx, r: io.NewSectionReader(b.im.r, b.im.payloadOffset, b.im.payloadSize)}
 	if !b.im.hasHeaderSHA {
 		return io.NopCloser(sr), nil
 	}
@@ -244,7 +247,7 @@ func (b *Bundle) OpenTarGz(ctx context.Context) (io.ReadCloser, error) {
 }
 
 // Bundle validates and parses the Gen-2 Data-Bundle (.tar.gz and nested ui-packs.tar).
-// Results are cached on im after successful validation.
+// It is safe for concurrent use; results are cached on im after successful validation.
 func (im *Image) Bundle(ctx context.Context) (*Bundle, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -252,6 +255,8 @@ func (im *Image) Bundle(ctx context.Context) (*Bundle, error) {
 	if im.format != FormatGen2Image && im.format != FormatGen2Bundle {
 		return nil, fmt.Errorf("%w: Bundle() requires a Gen-2 image or bundle", ErrUnsupported)
 	}
+	im.bundleMu.Lock()
+	defer im.bundleMu.Unlock()
 	if im.bundle != nil {
 		return im.bundle, nil
 	}
@@ -264,6 +269,49 @@ func (im *Image) Bundle(ctx context.Context) (*Bundle, error) {
 	return b, nil
 }
 
+// boundedCountReader counts every uncompressed byte read (including PAX/USTAR headers and
+// trailing blocks) against MaxExpandedSize and checks ctx cancellation.
+type boundedCountReader struct {
+	ctx   context.Context
+	r     io.Reader
+	n     int64
+	limit int64
+}
+
+func (c *boundedCountReader) Read(p []byte) (int, error) {
+	if c.ctx != nil {
+		if err := c.ctx.Err(); err != nil {
+			return 0, err
+		}
+	}
+	rem := c.limit - c.n
+	if rem < 0 {
+		return 0, fmt.Errorf("%w: uncompressed archive stream exceeds %d byte budget", ErrLimitExceeded, c.limit)
+	}
+	readBuf := p
+	if int64(len(readBuf)) > rem+1 {
+		readBuf = readBuf[:rem+1]
+	}
+	n, err := c.r.Read(readBuf)
+	c.n += int64(n)
+	if c.n > c.limit {
+		return n, fmt.Errorf("%w: uncompressed archive stream exceeds %d byte budget", ErrLimitExceeded, c.limit)
+	}
+	return n, err
+}
+
+type ctxReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (c *ctxReader) Read(p []byte) (int, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return c.r.Read(p)
+}
+
 func parseGen2Bundle(ctx context.Context, im *Image) (*Bundle, error) {
 	sr := io.NewSectionReader(im.r, im.payloadOffset, im.payloadSize)
 	br := bufio.NewReaderSize(sr, 32<<10)
@@ -274,15 +322,17 @@ func parseGen2Bundle(ctx context.Context, im *Image) (*Bundle, error) {
 	gz.Multistream(false)
 	defer gz.Close()
 
-	tr := tar.NewReader(gz)
+	// Charge every inflated byte (including PAX extended headers and tar padding) against MaxExpandedSize.
+	gzOut := &boundedCountReader{ctx: ctx, r: gz, limit: im.limits.MaxExpandedSize}
+	tr := tar.NewReader(gzOut)
 	b := &Bundle{
 		im:         im,
 		uiTarIndex: -1,
 	}
 
-	seen := make(map[string]bool)
+	seenFolded := make(map[string]bool)
 	metaFiles := make(map[string][]byte)
-	var totalExpanded int64
+	var uiExpanded int64
 	var totalEntries int
 
 	for {
@@ -294,6 +344,9 @@ func parseGen2Bundle(ctx context.Context, im *Image) (*Bundle, error) {
 			break
 		}
 		if err != nil {
+			if errors.Is(err, ErrLimitExceeded) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return nil, err
+			}
 			return nil, fmt.Errorf("%w: reading tar archive: %v", ErrCorrupt, err)
 		}
 
@@ -315,13 +368,18 @@ func parseGen2Bundle(ctx context.Context, im *Image) (*Bundle, error) {
 		if cleaned == "." {
 			return nil, fmt.Errorf("%w: bundle root cannot be %q", ErrUnsafePath, h.Name)
 		}
-		if seen[cleaned] {
+		folded := foldArchivePath(cleaned)
+		if seenFolded[folded] {
 			return nil, fmt.Errorf("%w: duplicate archive path %q", ErrCorrupt, cleaned)
 		}
-		seen[cleaned] = true
+		seenFolded[folded] = true
 
 		if b.top == "" {
-			b.top = strings.SplitN(cleaned, "/", 2)[0]
+			if slash := strings.IndexByte(cleaned, '/'); slash >= 0 {
+				b.top = cleaned[:slash]
+			} else {
+				b.top = cleaned
+			}
 			if !topRE.MatchString(b.top) {
 				return nil, fmt.Errorf("%w: unsafe top directory %q", ErrUnsafePath, b.top)
 			}
@@ -347,7 +405,7 @@ func parseGen2Bundle(ctx context.Context, im *Image) (*Bundle, error) {
 		if h.Size < 0 || h.Size > im.limits.MaxMemberSize {
 			return nil, fmt.Errorf("%w: member %q size %d exceeds limit %d", ErrLimitExceeded, rel, h.Size, im.limits.MaxMemberSize)
 		}
-		if totalExpanded+h.Size > im.limits.MaxExpandedSize {
+		if gzOut.n+uiExpanded+h.Size > im.limits.MaxExpandedSize {
 			return nil, fmt.Errorf("%w: expanded bundle size exceeds %d byte budget", ErrLimitExceeded, im.limits.MaxExpandedSize)
 		}
 
@@ -358,14 +416,14 @@ func parseGen2Bundle(ctx context.Context, im *Image) (*Bundle, error) {
 		case "ui-packs.tar":
 			b.hasUIPacks = true
 			b.uiTarIndex = len(b.entries)
-			lr := io.LimitReader(tr, h.Size+1)
+			lr := io.LimitReader(&ctxReader{ctx: ctx, r: tr}, h.Size+1)
 			tee := io.TeeReader(lr, hash)
-			uiN, uiExpanded, uiEntriesCount, err := parseNestedUIPacksTar(ctx, tee, h.Size, im.limits, totalExpanded, totalEntries, b)
+			uiN, newUIExpanded, uiEntriesCount, err := parseNestedUIPacksTar(ctx, tee, h.Size, im.limits, gzOut, uiExpanded, totalEntries, b)
 			if err != nil {
 				return nil, err
 			}
 			n = uiN
-			totalExpanded = uiExpanded + n
+			uiExpanded = newUIExpanded
 			totalEntries = uiEntriesCount
 		case "SHA256SUMS", "version.txt", "model", "release-tag", "alsa-dir":
 			maxMeta := int64(64 << 10)
@@ -377,25 +435,29 @@ func parseGen2Bundle(ctx context.Context, im *Image) (*Bundle, error) {
 			}
 			var buf bytes.Buffer
 			buf.Grow(int(h.Size))
-			n, err = io.Copy(io.MultiWriter(hash, &buf), io.LimitReader(tr, h.Size+1))
+			n, err = io.Copy(io.MultiWriter(hash, &buf), io.LimitReader(&ctxReader{ctx: ctx, r: tr}, h.Size+1))
 			if err != nil {
+				if errors.Is(err, ErrLimitExceeded) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					return nil, err
+				}
 				return nil, fmt.Errorf("%w: reading %q: %v", ErrCorrupt, rel, err)
 			}
-			totalExpanded += n
 			metaFiles[rel] = buf.Bytes()
 		default:
-			n, err = io.Copy(hash, io.LimitReader(tr, h.Size+1))
+			n, err = io.Copy(hash, io.LimitReader(&ctxReader{ctx: ctx, r: tr}, h.Size+1))
 			if err != nil {
+				if errors.Is(err, ErrLimitExceeded) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					return nil, err
+				}
 				return nil, fmt.Errorf("%w: reading %q: %v", ErrCorrupt, rel, err)
 			}
-			totalExpanded += n
 		}
 
 		if n != h.Size {
 			return nil, fmt.Errorf("%w: member %q size mismatch (got %d, header says %d)", ErrCorrupt, rel, n, h.Size)
 		}
-		if totalExpanded > im.limits.MaxExpandedSize {
-			return nil, fmt.Errorf("%w: total expanded size %d exceeds %d limit", ErrLimitExceeded, totalExpanded, im.limits.MaxExpandedSize)
+		if gzOut.n+uiExpanded > im.limits.MaxExpandedSize {
+			return nil, fmt.Errorf("%w: total expanded size %d exceeds %d limit", ErrLimitExceeded, gzOut.n+uiExpanded, im.limits.MaxExpandedSize)
 		}
 
 		var sum [32]byte
@@ -405,15 +467,15 @@ func parseGen2Bundle(ctx context.Context, im *Image) (*Bundle, error) {
 		}
 		b.entries = append(b.entries, archiveMemberMeta{
 			Path:   rel,
-			Mode:   uint32(h.Mode) & 0o7777,
+			Mode:   uint32(h.Mode) & 0o777,
 			Size:   n,
 			SHA256: sum,
 			Index:  len(b.entries),
 		})
 	}
 
-	// Drain tar EOF blocks so gzip verifies CRC32/ISIZE, bounded to prevent decompression bombs.
-	if err := drainBoundedGzipEOF(gz, im.limits.MaxExpandedSize-totalExpanded+(64<<10)); err != nil {
+	// Drain tar EOF blocks through gzOut so gzip verifies CRC32/ISIZE within MaxExpandedSize.
+	if err := drainBoundedGzipEOF(gzOut, im.limits.MaxExpandedSize-gzOut.n-uiExpanded); err != nil {
 		return nil, err
 	}
 	if _, err := br.ReadByte(); err != io.EOF {
@@ -426,12 +488,15 @@ func parseGen2Bundle(ctx context.Context, im *Image) (*Bundle, error) {
 	return b, nil
 }
 
-func drainBoundedGzipEOF(gz *gzip.Reader, remainingBudget int64) error {
+func drainBoundedGzipEOF(r io.Reader, remainingBudget int64) error {
 	if remainingBudget < 0 {
 		remainingBudget = 0
 	}
-	n, err := io.Copy(io.Discard, io.LimitReader(gz, remainingBudget+1))
+	n, err := io.Copy(io.Discard, io.LimitReader(r, remainingBudget+1))
 	if err != nil {
+		if errors.Is(err, ErrLimitExceeded) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
 		return fmt.Errorf("%w: gzip trailer check failed: %v", ErrCorrupt, err)
 	}
 	if n > remainingBudget {
@@ -445,50 +510,55 @@ func parseNestedUIPacksTar(
 	r io.Reader,
 	tarSize int64,
 	limits Limits,
-	expandedSoFar int64,
+	gzOut *boundedCountReader,
+	uiExpandedSoFar int64,
 	entriesSoFar int,
 	b *Bundle,
-) (tarRead int64, newExpanded int64, newEntries int, err error) {
+) (tarRead int64, newUIExpanded int64, newEntries int, err error) {
 	cr := &countingSHA1Reader{r: r}
 	tr := tar.NewReader(cr)
-	seen := make(map[string]bool)
+	seenFolded := make(map[string]bool)
 	hasPacks := false
-	expanded := expandedSoFar
+	uiExpanded := uiExpandedSoFar
 	entries := entriesSoFar
 
 	for {
 		if err := ctx.Err(); err != nil {
-			return cr.n, expanded, entries, err
+			return cr.n, uiExpanded, entries, err
 		}
 		h, err := tr.Next()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			return cr.n, expanded, entries, fmt.Errorf("%w: reading nested ui-packs.tar: %v", ErrCorrupt, err)
+			if errors.Is(err, ErrLimitExceeded) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return cr.n, uiExpanded, entries, err
+			}
+			return cr.n, uiExpanded, entries, fmt.Errorf("%w: reading nested ui-packs.tar: %v", ErrCorrupt, err)
 		}
 		entries++
 		if entries > limits.MaxArchiveEntries {
-			return cr.n, expanded, entries, fmt.Errorf("%w: archive entry count exceeds %d (ui-packs.tar)", ErrLimitExceeded, limits.MaxArchiveEntries)
+			return cr.n, uiExpanded, entries, fmt.Errorf("%w: archive entry count exceeds %d (ui-packs.tar)", ErrLimitExceeded, limits.MaxArchiveEntries)
 		}
 
 		isDir := h.Typeflag == tar.TypeDir
 		isReg := h.Typeflag == tar.TypeReg || h.Typeflag == tar.TypeRegA
 		if !isDir && !isReg {
-			return cr.n, expanded, entries, fmt.Errorf("%w: unsupported nested ui-packs.tar entry type %q for %q", ErrUnsafePath, h.Typeflag, h.Name)
+			return cr.n, uiExpanded, entries, fmt.Errorf("%w: unsupported nested ui-packs.tar entry type %q for %q", ErrUnsafePath, h.Typeflag, h.Name)
 		}
 
 		cleaned, err := CleanArchivePath(h.Name, isDir)
 		if err != nil {
-			return cr.n, expanded, entries, err
+			return cr.n, uiExpanded, entries, err
 		}
 		if cleaned == "." {
 			continue
 		}
-		if seen[cleaned] {
-			return cr.n, expanded, entries, fmt.Errorf("%w: duplicate nested ui-packs.tar path %q", ErrCorrupt, cleaned)
+		folded := foldArchivePath(cleaned)
+		if seenFolded[folded] {
+			return cr.n, uiExpanded, entries, fmt.Errorf("%w: duplicate nested ui-packs.tar path %q", ErrCorrupt, cleaned)
 		}
-		seen[cleaned] = true
+		seenFolded[folded] = true
 
 		if cleaned == "packs" || strings.HasPrefix(cleaned, "packs/") {
 			hasPacks = true
@@ -500,26 +570,29 @@ func parseNestedUIPacksTar(
 		}
 
 		if h.Size < 0 || h.Size > limits.MaxMemberSize {
-			return cr.n, expanded, entries, fmt.Errorf("%w: nested UI member %q size %d exceeds limit", ErrLimitExceeded, cleaned, h.Size)
+			return cr.n, uiExpanded, entries, fmt.Errorf("%w: nested UI member %q size %d exceeds limit", ErrLimitExceeded, cleaned, h.Size)
 		}
-		if expanded+tarSize+h.Size > limits.MaxExpandedSize {
-			return cr.n, expanded, entries, fmt.Errorf("%w: combined bundle + UI expanded size exceeds %d budget", ErrLimitExceeded, limits.MaxExpandedSize)
+		if gzOut.n+uiExpanded+h.Size > limits.MaxExpandedSize {
+			return cr.n, uiExpanded, entries, fmt.Errorf("%w: combined bundle + UI expanded size exceeds %d budget", ErrLimitExceeded, limits.MaxExpandedSize)
 		}
 		hash := sha256.New()
-		n, err := io.Copy(hash, io.LimitReader(tr, h.Size+1))
+		n, err := io.Copy(hash, io.LimitReader(&ctxReader{ctx: ctx, r: tr}, h.Size+1))
 		if err != nil {
-			return cr.n, expanded, entries, fmt.Errorf("%w: reading nested UI member %q: %v", ErrCorrupt, cleaned, err)
+			if errors.Is(err, ErrLimitExceeded) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return cr.n, uiExpanded, entries, err
+			}
+			return cr.n, uiExpanded, entries, fmt.Errorf("%w: reading nested UI member %q: %v", ErrCorrupt, cleaned, err)
 		}
 		if n != h.Size {
-			return cr.n, expanded, entries, fmt.Errorf("%w: nested UI member %q size mismatch", ErrCorrupt, cleaned)
+			return cr.n, uiExpanded, entries, fmt.Errorf("%w: nested UI member %q size mismatch", ErrCorrupt, cleaned)
 		}
-		expanded += n
+		uiExpanded += n
 
 		var sum [32]byte
 		copy(sum[:], hash.Sum(nil))
 		b.uiEntries = append(b.uiEntries, archiveMemberMeta{
 			Path:   cleaned,
-			Mode:   uint32(h.Mode) & 0o7777,
+			Mode:   uint32(h.Mode) & 0o777,
 			Size:   n,
 			SHA256: sum,
 			Index:  len(b.uiEntries),
@@ -527,20 +600,27 @@ func parseNestedUIPacksTar(
 	}
 
 	if !hasPacks {
-		return cr.n, expanded, entries, fmt.Errorf("%w: ui-packs.tar has no packs/ directory", ErrCorrupt)
+		return cr.n, uiExpanded, entries, fmt.Errorf("%w: ui-packs.tar has no packs/ directory", ErrCorrupt)
 	}
 	// Drain trailing tar zero-blocks so the outer SHA-256 covers the complete ui-packs.tar.
 	rem := tarSize - cr.n
 	if rem < 0 {
-		return cr.n, expanded, entries, fmt.Errorf("%w: ui-packs.tar exceeded declared tar size", ErrCorrupt)
+		return cr.n, uiExpanded, entries, fmt.Errorf("%w: ui-packs.tar exceeded declared tar size", ErrCorrupt)
 	}
 	if _, err := io.Copy(io.Discard, io.LimitReader(cr, rem+1)); err != nil {
-		return cr.n, expanded, entries, fmt.Errorf("%w: draining ui-packs.tar trailer: %v", ErrCorrupt, err)
+		return cr.n, uiExpanded, entries, fmt.Errorf("%w: draining ui-packs.tar trailer: %v", ErrCorrupt, err)
 	}
 	if cr.n != tarSize {
-		return cr.n, expanded, entries, fmt.Errorf("%w: ui-packs.tar read %d of %d bytes", ErrCorrupt, cr.n, tarSize)
+		return cr.n, uiExpanded, entries, fmt.Errorf("%w: ui-packs.tar read %d of %d bytes", ErrCorrupt, cr.n, tarSize)
 	}
-	return cr.n, expanded, entries, nil
+	return cr.n, uiExpanded, entries, nil
+}
+
+func trimTrailingNewline(b []byte) string {
+	s := string(b)
+	s = strings.TrimSuffix(s, "\n")
+	s = strings.TrimSuffix(s, "\r")
+	return s
 }
 
 func verifyBundleManifestAndMeta(b *Bundle, im *Image, meta map[string][]byte) error {
@@ -555,9 +635,10 @@ func verifyBundleManifestAndMeta(b *Bundle, im *Image, meta map[string][]byte) e
 	}
 
 	listed := make(map[string]bool)
+	listedFolded := make(map[string]bool)
 	for _, line := range strings.Split(string(rawSums), "\n") {
-		line = strings.TrimRight(line, "\r")
-		if strings.TrimSpace(line) == "" {
+		line = strings.TrimSuffix(line, "\r")
+		if line == "" {
 			continue
 		}
 		if len(line) < 66 || !hex64RE.MatchString(line[:64]) || (line[64] != ' ' && line[64] != '\t') {
@@ -569,10 +650,12 @@ func verifyBundleManifestAndMeta(b *Bundle, im *Image, meta map[string][]byte) e
 		if err != nil {
 			return fmt.Errorf("%w: unsafe path in SHA256SUMS: %v", ErrUnsafePath, err)
 		}
-		if listed[rel] {
+		folded := foldArchivePath(rel)
+		if listed[rel] || listedFolded[folded] {
 			return fmt.Errorf("%w: duplicate entry %q in SHA256SUMS", ErrCorrupt, rel)
 		}
 		listed[rel] = true
+		listedFolded[folded] = true
 
 		ent, exists := byRel[rel]
 		if !exists {
@@ -598,7 +681,7 @@ func verifyBundleManifestAndMeta(b *Bundle, im *Image, meta map[string][]byte) e
 	if !hasVer {
 		return fmt.Errorf("%w: version.txt missing from bundle", ErrCorrupt)
 	}
-	b.version = strings.TrimSpace(string(verBytes))
+	b.version = trimTrailingNewline(verBytes)
 	if !versionRE.MatchString(b.version) {
 		return fmt.Errorf("%w: invalid version.txt value %q", ErrCorrupt, b.version)
 	}
@@ -606,21 +689,9 @@ func verifyBundleManifestAndMeta(b *Bundle, im *Image, meta map[string][]byte) e
 		return fmt.Errorf("%w: version.txt (%q) does not match header version (%q)", ErrCorrupt, b.version, im.headerVersion)
 	}
 
-	if tagBytes, ok := meta["release-tag"]; ok {
-		b.releaseTag = strings.TrimSpace(string(tagBytes))
-	}
-
-	if alsaBytes, ok := meta["alsa-dir"]; ok {
-		alsaClean, err := CleanArchivePath(strings.TrimSpace(string(alsaBytes)), false)
-		if err != nil {
-			return fmt.Errorf("%w: unsafe alsa-dir: %v", ErrUnsafePath, err)
-		}
-		b.alsaDir = alsaClean
-	}
-
 	var prefix string
 	if modelBytes, ok := meta["model"]; ok {
-		prefix = strings.TrimSpace(string(modelBytes))
+		prefix = trimTrailingNewline(modelBytes)
 		m, ok := LookupGen2Prefix(prefix)
 		if !ok || prefix != m.Prefix {
 			return fmt.Errorf("%w: invalid bundle model %q", ErrModelMismatch, prefix)
@@ -643,6 +714,26 @@ func verifyBundleManifestAndMeta(b *Bundle, im *Image, meta map[string][]byte) e
 
 	if !strings.HasPrefix(b.top, b.model.Prefix+"-") {
 		return fmt.Errorf("%w: bundle top directory %q does not match model %q", ErrModelMismatch, b.top, b.model.Prefix)
+	}
+
+	if tagBytes, ok := meta["release-tag"]; ok {
+		tag := trimTrailingNewline(tagBytes)
+		if !relTagRE.MatchString(tag) || (tag != "v"+b.version && !strings.HasPrefix(tag, "v"+b.version+"-r")) {
+			return fmt.Errorf("%w: invalid release-tag %q for version %q", ErrCorrupt, tag, b.version)
+		}
+		b.releaseTag = tag
+	}
+
+	if alsaBytes, ok := meta["alsa-dir"]; ok {
+		alsaVal := trimTrailingNewline(alsaBytes)
+		wantALSA := "system/var/overlay/lib/alsa/conf.d"
+		if b.model.AZ04 {
+			wantALSA = "system/var-lib/alsa/conf.d"
+		}
+		if alsaVal != wantALSA {
+			return fmt.Errorf("%w: invalid alsa-dir %q for %s (want %q)", ErrCorrupt, alsaVal, b.model.Prefix, wantALSA)
+		}
+		b.alsaDir = alsaVal
 	}
 	return nil
 }
@@ -911,14 +1002,15 @@ func (cc *cursorCloser) Read(p []byte) (int, error) { return cc.c.tr.Read(p) }
 func (cc *cursorCloser) Close() error               { cc.c.close(); return nil }
 
 type verifyingReader struct {
-	r       io.Reader
-	size    int64
-	readN   int64
-	want    [32]byte
-	hash    hashWriter
-	done    bool
-	closed  bool
-	onClose func() error
+	r         io.Reader
+	size      int64
+	readN     int64
+	want      [32]byte
+	hash      hashWriter
+	done      bool
+	verifyErr error
+	closed    bool
+	onClose   func() error
 }
 
 type hashWriter interface {
@@ -927,20 +1019,31 @@ type hashWriter interface {
 }
 
 func (v *verifyingReader) Read(p []byte) (int, error) {
+	if v.verifyErr != nil {
+		return 0, v.verifyErr
+	}
 	n, err := v.r.Read(p)
 	if n > 0 {
 		v.hash.Write(p[:n])
 		v.readN += int64(n)
 	}
-	if err == io.EOF && !v.done {
+	// Verify immediately as soon as size bytes have been read (so exact-size ReadFull /
+	// CopyN never return tampered bytes with nil err), as well as on early EOF.
+	if (v.readN == v.size || err == io.EOF) && !v.done {
 		v.done = true
 		if v.readN != v.size {
-			return n, fmt.Errorf("%w: truncated stream (%d of %d bytes)", ErrCorrupt, v.readN, v.size)
+			clear(p[:n])
+			v.verifyErr = fmt.Errorf("%w: truncated stream (%d of %d bytes)", ErrCorrupt, v.readN, v.size)
+			return 0, v.verifyErr
 		}
 		var got [32]byte
 		copy(got[:], v.hash.Sum(nil))
 		if got != v.want {
-			return n, fmt.Errorf("%w: entry SHA-256 mismatch during read", ErrDigestMismatch)
+			// Return 0 bytes so io.ReadAtLeast / io.ReadFull (which clears err when n >= min)
+			// never drops ErrDigestMismatch or exposes tampered data.
+			clear(p[:n])
+			v.verifyErr = fmt.Errorf("%w: entry SHA-256 mismatch during read", ErrDigestMismatch)
+			return 0, v.verifyErr
 		}
 	}
 	return n, err
