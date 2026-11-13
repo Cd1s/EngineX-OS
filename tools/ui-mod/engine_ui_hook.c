@@ -1847,12 +1847,13 @@ static const struct engine_build engine_builds[] = {
      0x8a1eac, 0x2c8e808, 0x21b8b98, 0x8a2218, 0xe51b3340,
      0x2b9bee8, 0x1d7289c, 0x1d47324, 0x1d7e2bc, 0x1d46a6c,
      {"\xf4\x42\x6d\xe1\xf8\x60\xcd\xe1", "\xf4\x42\x6d\xe1\x20\xe0\x8d\xe5", ""}, 0x52c},
+    // feature_object 0x2d0eb78 is StemsPreRenderedPlayback (stored into 0x2d180c8 at 0x360d68, read by PlanckScriptRoot::hasStemsPreRenderedPlayback at 0x9d7808).
     {"5.3.0-sclive4", "\xb9\x46\xc3\xb8\xd9\x9d\x32\x99\x8c\x81\x97\xd5\xdc\x90\x5a\x6b\xdd\xaa\x5d\x2f",
      {0xe774fc, 0xe77528, 0xe775d8, 0xe77604, 0xe77630, 0xe77554, 0xe775ac, 0x17597bc, 0x179b090,
       0x179af04, 0x175a1b8, 0xdeacec, 0xd31818, 0xd31844, 0xd31870, 0xf27698, 0x172e668, 0xf2a410, 0xf2b9b0, 0xf27218, 0xc7cb2c},
      edits_sclive, sizeof edits_sclive / sizeof *edits_sclive,
      0x159f4a8, 0x159f594, 0x159f590, {0xe3, 0x254, 0x256, 0x2a6, 0x2b9},
-     0x89cd64, 0x2c28744, 0x222cc8d, 0x89d0d0, 0xe51b3338,
+     0x89cd64, 0x2d0eb78, 0x222cc8d, 0x89d0d0, 0xe51b3338,
      0x2c1bea4, 0x1ddf11c, 0x1db3ba4, 0x1deab3c, 0x1db32ec,
      {"\xf4\x42\x6d\xe1\xf8\x60\xcd\xe1", "\xf4\x42\x6d\xe1\x20\xe0\x8d\xe5", ""}, 0x52c},
 };
