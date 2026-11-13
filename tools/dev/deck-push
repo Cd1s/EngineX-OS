@@ -14,7 +14,7 @@ one), restarts only the affected service and prints a PASS/FAIL smoke check.
   deck-push smoke <deck>
   deck-push backups [<deck>]
 
-Every command that changes a deck needs the caller to hold that deck's lock.
+Every command that contacts a deck (except lease status) needs the caller to hold that deck's lock.
 Owner: --owner, else $DECK_PUSH_OWNER, else $PASEO_AGENT_ID.
 Decks: tools/dev/decks.ini (git-ignored, see decks.ini.example) or $DECK_PUSH_CONFIG.
 """
@@ -29,6 +29,8 @@ import os
 import re
 import shlex
 import shutil
+import signal
+import socket
 import subprocess
 import sys
 import tarfile
@@ -54,13 +56,12 @@ DEFAULTS = {
     "state_dir": "/var/lib/enginex-dev",
     "qrc": "/root/build/sc5000-lab/5.3.0/qrc",
     "work_dir": "/var/tmp",
-    "expect_applied": "19",
+    "expect_applied": "20",
     "daemons": " ".join(GO_DAEMONS),
     "api_url": "http://127.0.0.1:8080/v1/sc5000/ui",
     "smoke_timeout": "180",
     "settle": "15",
 }
-MAX_TTL = 12 * 3600
 EXIT_FAIL, EXIT_USAGE, EXIT_REFUSED, EXIT_ERROR = 1, 2, 3, 4
 
 
@@ -98,8 +99,8 @@ def parse_ttl(text):
     if not m:
         raise ValueError(f"bad ttl {text!r} (e.g. 90m, 2h)")
     seconds = int(m.group(1)) * {"s": 1, "m": 60, "h": 3600, "": 60}[m.group(2)]
-    if not 0 < seconds <= MAX_TTL:
-        raise ValueError(f"ttl must be between 1 s and {MAX_TTL // 3600} h")
+    if seconds <= 0:
+        raise ValueError("ttl must be positive")
     return seconds
 
 
@@ -169,6 +170,10 @@ def resolve_owner(a, env=None):
 class Deck:
     def __init__(self, name, sec):
         self.name = name
+        self.transport = sec.get("transport", "ssh").strip()
+        if self.transport not in ("ssh", "ssm"):
+            raise ValueError("transport must be ssh or ssm")
+        self.owner = None
         self.ssh = sec.get("ssh", "").strip()
         if not self.ssh:
             raise ValueError(f"[{name}]: ssh = <destination> is required")
@@ -181,20 +186,36 @@ class Deck:
 
     def agent(self, args, stdin=None, stdout=subprocess.PIPE, timeout=600):
         """Run deck-agent.sh on the deck (the script travels as the argument of sh -c)."""
+        if not args[0].startswith("lock-"):
+            if not self.owner:
+                raise Refused("deck command needs deck-lock acquire and a valid owner")
+            args = ["--locked", self.owner, *args]
         remote = "sh -c " + shlex.quote(AGENT.read_text()) + " deck-agent " + " ".join(shlex.quote(a) for a in args)
         cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", *self.ssh_options, self.ssh, remote]
+        if self.transport == "ssm":
+            cmd = ["sshctl", "run", self.ssh, "--stdin" if stdin is not None else "--no-stdin",
+                   "--argv", "sh", "-c", AGENT.read_text(), "deck-agent", *args]
         r = subprocess.run(cmd, stdin=stdin if stdin is not None else subprocess.DEVNULL, stdout=stdout,
                            stderr=subprocess.PIPE, timeout=timeout)
+        if args[0] == "--locked" and args[2] == "exec":
+            if r.stderr:
+                sys.stderr.write(r.stderr.decode(errors="replace"))
+            return r.returncode
         if r.returncode != 0:
+            if r.returncode == EXIT_REFUSED:
+                raise Refused(f"{self.name}: " + r.stderr.decode(errors="replace").strip())
             err = r.stderr.decode(errors="replace").strip().splitlines()
             raise Failed(f"{self.name}: deck-agent {args[0]} failed ({r.returncode}): " + " | ".join(err[-5:]))
         return r.stdout.decode(errors="replace") if stdout is subprocess.PIPE else ""
+
+    def command(self, argv):
+        return self.agent(["exec", *argv], stdout=None, timeout=None)
 
 
 class Config:
     def __init__(self, path=None, env=None):
         env = os.environ if env is None else env
-        self.path = Path(path or env.get("DECK_PUSH_CONFIG") or HERE / "decks.ini")
+        self.path = Path(path or env.get("DECK_PUSH_CONFIG") or (HERE / "decks.ini" if (HERE / "decks.ini").is_file() else Path.home() / ".config/enginex-dev/decks.ini"))
         cp = configparser.ConfigParser(defaults=DEFAULTS, interpolation=None)
         if self.path.is_file():
             cp.read(self.path)
@@ -237,52 +258,123 @@ def write_atomic(path, text):
 
 
 class LockStore:
-    """One owner per deck, with purpose and expiry. An expired lock is free."""
+    """Leases live on the decks; state_dir is never an authority for ownership."""
 
-    def __init__(self, state):
-        self.dir = Path(state) / "locks"
+    def __init__(self, cfg):
+        self.cfg = cfg
 
-    def _file(self, deck):
-        return self.dir / f"{deck}.json"
-
-    def read(self, deck):
-        try:
-            return json.loads(self._file(deck).read_text())
-        except (FileNotFoundError, ValueError):
+    def read(self, name):
+        record = dict(facts(self.cfg.deck(name).agent(["lock-status"])))
+        if "owner" not in record:
             return None
+        for k in ("acquired", "expires", "ttl"):
+            record[k] = int(record[k])
+        return record
 
-    def holder(self, deck, now=None):
-        lock = self.read(deck)
-        if lock and lock["expires"] > (time.time() if now is None else now):
-            return lock
-        return None
+    def holder(self, name):
+        cur = self.read(name)
+        return cur if cur and cur.get("live") == "yes" else None
 
-    def acquire(self, deck, owner, purpose, ttl, now=None):
-        now = time.time() if now is None else now
-        with flocked(self.dir / ".mutex"):
-            cur = self.holder(deck, now)
-            if cur and cur["owner"] != owner:
-                raise Refused(f"{deck} is locked by {cur['owner']} until {stamp(cur['expires'])}: {cur['purpose']}")
-            lock = {"deck": deck, "owner": owner, "purpose": purpose,
-                    "acquired": cur["acquired"] if cur else now, "expires": now + ttl}
-            write_atomic(self._file(deck), json.dumps(lock) + "\n")
-            return lock
+    def acquire(self, name, owner, purpose, ttl):
+        record = dict(facts(self.cfg.deck(name).agent(
+            ["lock-acquire", owner, socket.gethostname(), purpose, str(ttl)])))
+        for k in ("acquired", "expires", "ttl"):
+            record[k] = int(record[k])
+        return record
 
-    def release(self, deck, owner, now=None):
-        with flocked(self.dir / ".mutex"):
-            cur = self.holder(deck, now)
-            if cur and cur["owner"] != owner:
-                raise Refused(f"{deck} is locked by {cur['owner']}, not {owner}")
-            self._file(deck).unlink(missing_ok=True)
-            return cur is not None
-
-    def require(self, deck, owner, now=None):
-        cur = self.holder(deck, now)
+    def release(self, name, owner):
+        cur = self.read(name)
         if not cur:
-            raise Refused(f"{deck} is not locked; run: deck-push lock {deck} --purpose '...'")
+            return False
         if cur["owner"] != owner:
-            raise Refused(f"{deck} is locked by {cur['owner']} until {stamp(cur['expires'])}: {cur['purpose']}")
+            raise Refused(f"{name} is locked by {cur['owner']}")
+        self.cfg.deck(name).agent(["lock-release", owner])
+        return True
+
+    def require(self, name, owner):
+        deck = self.cfg.deck(name)
+        cur = dict(facts(deck.agent(["lock-require", owner])))
+        deck.owner = owner
         return cur
+
+
+def ordered_decks(names):
+    # The same order applies even when the caller supplies right before left.
+    return sorted(set(names), key=lambda n: (0 if n == "left" else 1 if n == "right" else 2, n))
+
+
+def acquire_many(locks, names, owner, purpose, ttl, wait=False):
+    while True:
+        acquired = []
+        try:
+            for name in ordered_decks(names):
+                before = locks.holder(name)
+                # Record the granted lock before processing an interruption.
+                previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
+                try:
+                    locks.acquire(name, owner, purpose, ttl)
+                    # A nested wrapper borrows an already held lease.
+                    acquired.append((name, bool(before and before["owner"] == owner)))
+                finally:
+                    signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+            return acquired
+        except BaseException as error:
+            for name, borrowed in reversed(acquired):
+                if not borrowed:
+                    locks.release(name, owner)
+            if not wait or not isinstance(error, Refused):
+                raise
+            time.sleep(0.25)
+
+
+def release_many(locks, acquired, owner):
+    for name, borrowed in reversed(acquired):
+        if not borrowed:
+            locks.release(name, owner)
+
+
+def run_leased(a, cfg, owner):
+    locks = LockStore(cfg)
+    names = ordered_decks(a.decks)
+    if a.ssh and len(names) != 1:
+        raise ValueError("--ssh needs exactly one deck")
+    acquired = acquire_many(locks, names, owner, a.purpose, a.ttl, a.wait)
+    proc = None
+    old_handlers = {}
+    def interrupted(signum, _frame):
+        raise KeyboardInterrupt
+    try:
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            old_handlers[sig] = signal.signal(sig, interrupted)
+        command = a.command
+        if a.ssh:
+            deck = cfg.deck(names[0])
+            locks.require(names[0], owner)
+            return deck.command(command)
+        proc = subprocess.Popen(command, start_new_session=True,
+                                env={**os.environ, "DECK_PUSH_OWNER": owner})
+        interval = max(0.1, min(a.ttl / 3, 30))
+        while True:
+            try:
+                return proc.wait(timeout=interval)
+            except subprocess.TimeoutExpired:
+                for name, _borrowed in acquired:
+                    try:
+                        cfg.deck(name).agent(["lock-renew", owner])
+                    except Refused:
+                        cur = locks.read(name)
+                        if not (cur and cur["owner"] == owner and
+                                (cur.get("live") == "yes" or cur.get("busy") == "yes")):
+                            raise
+    finally:
+        if proc and proc.poll() is None:
+            os.killpg(proc.pid, signal.SIGTERM)
+            proc.wait()
+        try:
+            release_many(locks, acquired, owner)
+        finally:
+            for sig, handler in old_handlers.items():
+                signal.signal(sig, handler)
 
 
 def stamp(t):
@@ -524,7 +616,7 @@ def cmd_push(a, cfg):
     deck = cfg.deck(a.deck)
     owner = resolve_owner(a)
     names, services = component_plan(a.component)
-    locks = LockStore(cfg.state)
+    locks = LockStore(cfg)
     if not a.dry_run:
         locks.require(deck.name, owner)
     cfg.work_dir.mkdir(parents=True, exist_ok=True)
@@ -563,8 +655,7 @@ def push(a, cfg, deck, owner, names, services, work):
     manifest = {"deck": deck.name, "component": a.component, "owner": owner, "pushed": stamp(time.time()),
                 "digests": digests, "services": services, "sandbox": sandbox, **info}
     if a.dry_run:
-        holder = LockStore(cfg.state).holder(deck.name)
-        print(f"lock: {'held by ' + holder['owner'] if holder else 'free (a real push needs it)'}")
+        print("lock: unchecked (dry run never contacts the deck)")
         print(f"plan: back up {', '.join(names)}; bind-mount from /run/enginex-dev; restart {', '.join(services)}; smoke")
         print("dry run: the deck was not contacted")
         return 0
@@ -589,8 +680,17 @@ def push(a, cfg, deck, owner, names, services, work):
              "replaced": {n: {"path": targets[n], "sha256": shown[n]} for n in names},
              "pushed": digests, "dev_mounted_before": devmounts, "deck_version": fact(pre, "version")}
     (bdir / "meta.json").write_text(json.dumps(entry, indent=1, sort_keys=True) + "\n")
+    # A local copy alone is insufficient when the build host is cleaned.
+    archive = subprocess.run(["agent-backup", "put", str(bdir / "targets.tar"),
+                              "--label", f"deck-push-{deck.name}-before-{a.component}"],
+                             capture_output=True, text=True, check=True)
+    saved = json.loads(archive.stdout)
+    if not saved.get("id"):
+        raise Failed("backup vault did not return an id; deck untouched")
+    entry["backup_id"] = saved["id"]
+    (bdir / "meta.json").write_text(json.dumps(entry, indent=1, sort_keys=True) + "\n")
     backups.record(entry)
-    print(f"backup: {bdir} ({count} entries)")
+    print(f"backup: {bdir} ({count} entries), vault {saved['id']}")
     with open(work / "upload.tar", "rb") as f:
         for line in deck.agent(["apply"], stdin=f).splitlines():
             print(f"deck: {line}")
@@ -605,7 +705,7 @@ def push(a, cfg, deck, owner, names, services, work):
 def cmd_rollback(a, cfg):
     deck = cfg.deck(a.deck)
     owner = resolve_owner(a)
-    LockStore(cfg.state).require(deck.name, owner)
+    LockStore(cfg).require(deck.name, owner)
     with flocked(cfg.state / "locks" / f"{deck.name}.op", blocking=False):
         pre = facts(deck.agent(["preflight"]))
         t0 = int(fact(pre, "now"))
@@ -630,31 +730,31 @@ def cmd_rollback(a, cfg):
 
 def cmd_lock(a, cfg):
     deck = cfg.deck(a.deck)
-    lock = LockStore(cfg.state).acquire(deck.name, resolve_owner(a), a.purpose, a.ttl)
+    lock = LockStore(cfg).acquire(deck.name, resolve_owner(a), a.purpose, a.ttl)
     print(f"locked {deck.name} for {lock['owner']} until {stamp(lock['expires'])}: {lock['purpose']}")
     return 0
 
 
 def cmd_unlock(a, cfg):
     deck = cfg.deck(a.deck)
-    held = LockStore(cfg.state).release(deck.name, resolve_owner(a))
+    held = LockStore(cfg).release(deck.name, resolve_owner(a))
     print(f"unlocked {deck.name}" if held else f"{deck.name} was not locked")
     return 0
 
 
 def cmd_status(a, cfg):
-    locks = LockStore(cfg.state)
+    locks = LockStore(cfg)
     names = [cfg.deck(a.deck).name] if a.deck else sorted(cfg.decks)
-    now = time.time()
     for n in names:
         lock = locks.read(n)
-        if lock and lock["expires"] > now:
+        if lock and lock.get("live") == "yes":
             print(f"{n}: locked by {lock['owner']} until {stamp(lock['expires'])}: {lock['purpose']}")
         elif lock:
             print(f"{n}: free (lock of {lock['owner']} expired {stamp(lock['expires'])})")
         else:
             print(f"{n}: free")
     if a.deck:
+        LockStore(cfg).require(a.deck, resolve_owner(a))
         try:
             pre = facts(cfg.deck(a.deck).agent(["preflight"]))
         except (Failed, subprocess.TimeoutExpired) as e:
@@ -672,6 +772,7 @@ def cmd_status(a, cfg):
 
 def cmd_smoke(a, cfg):
     deck = cfg.deck(a.deck)
+    LockStore(cfg).require(deck.name, resolve_owner(a))
     pre = facts(deck.agent(["preflight"]))
     expect = {}
     if fact(pre, "manifest"):
@@ -702,8 +803,106 @@ def main(argv=None):
     except ValueError as e:
         print(f"deck-push: {e}", file=sys.stderr)
         return EXIT_USAGE
-    except (Failed, subprocess.TimeoutExpired, subprocess.CalledProcessError) as e:
+    except (Failed, OSError, subprocess.TimeoutExpired, subprocess.CalledProcessError) as e:
         print(f"deck-push: error: {e}", file=sys.stderr)
+        return EXIT_ERROR
+
+
+def lock_main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    command = []
+    if "--" in argv:
+        i = argv.index("--")
+        argv, command = argv[:i], argv[i + 1:]
+    ap = argparse.ArgumentParser(prog="deck-lock")
+    ap.add_argument("action", choices=("acquire", "release", "status", "run"))
+    ap.add_argument("decks", nargs="*")
+    ap.add_argument("--purpose")
+    ap.add_argument("--ttl", default="1h")
+    ap.add_argument("--wait", action="store_true")
+    ap.add_argument("--ssh", action="store_true", help="run command on the single named deck")
+    ap.add_argument("--owner")
+    a = ap.parse_args(argv)
+    def interrupted(signum, _frame):
+        raise KeyboardInterrupt
+    previous_term = signal.signal(signal.SIGTERM, interrupted)
+    try:
+        cfg = Config()
+        explicit_decks = bool(a.decks)
+        if a.action in ("acquire", "run") and not explicit_decks:
+            raise ValueError("give at least one deck")
+        a.decks = a.decks or ordered_decks(cfg.decks)
+        if not a.decks:
+            raise ValueError("no decks configured")
+        for name in a.decks:
+            cfg.deck(name)
+        locks = LockStore(cfg)
+        if a.action == "status":
+            for name in ordered_decks(a.decks):
+                cur = locks.read(name)
+                print(f"{name}: " + (f"{'locked' if cur['live'] == 'yes' else 'expired'} owner={cur['owner']} host={cur['host']} "
+                      f"until={stamp(cur['expires'])} purpose={cur['purpose']} busy={cur.get('busy', 'no')}" if cur else "free"))
+            return 0
+        owner = resolve_owner(a)
+        if a.action == "release":
+            for name in reversed(ordered_decks(a.decks)):
+                cur = locks.read(name)
+                if not explicit_decks and cur and cur["owner"] != owner:
+                    continue
+                locks.release(name, owner)
+                print(f"released {name}")
+            return 0
+        a.purpose = " ".join((a.purpose or "").split())
+        if not 0 < len(a.purpose) <= 200:
+            raise ValueError("--purpose must be 1-200 characters")
+        a.ttl = parse_ttl(a.ttl)
+        if a.action == "run":
+            if not command:
+                raise ValueError("run needs -- <command...>")
+            a.command = command
+            return run_leased(a, cfg, owner)
+        acquire_many(locks, a.decks, owner, a.purpose, a.ttl, a.wait)
+        for name in ordered_decks(a.decks):
+            print(f"locked {name} for {owner}")
+        return 0
+    except KeyboardInterrupt:
+        return 130
+    except Refused as e:
+        print(f"deck-lock: refused: {e}", file=sys.stderr)
+        return EXIT_REFUSED
+    except ValueError as e:
+        print(f"deck-lock: {e}", file=sys.stderr)
+        return EXIT_USAGE
+    except (Failed, OSError, subprocess.SubprocessError) as e:
+        print(f"deck-lock: {e}", file=sys.stderr)
+        return EXIT_ERROR
+    finally:
+        signal.signal(signal.SIGTERM, previous_term)
+
+
+def deck_main():
+    argv = sys.argv[1:]
+    ap = argparse.ArgumentParser(prog="deck")
+    ap.add_argument("deck")
+    ap.add_argument("--owner")
+    if "--" in argv:
+        split = argv.index("--")
+        a = ap.parse_args(argv[:split])
+        a.command = argv[split + 1:]
+    else:
+        ap.add_argument("command", nargs=argparse.REMAINDER)
+        a = ap.parse_args(argv)
+    if not a.command:
+        ap.error("give a command (literal argv; use sh -c explicitly for shell syntax)")
+    try:
+        cfg = Config()
+        LockStore(cfg).require(a.deck, resolve_owner(a))
+        return cfg.deck(a.deck).command(a.command)
+    except Refused as e:
+        print(f"deck: refused: {e}", file=sys.stderr)
+        return EXIT_REFUSED
+    except (Failed, ValueError, OSError, subprocess.SubprocessError) as e:
+        print(f"deck: {e}", file=sys.stderr)
         return EXIT_ERROR
 
 

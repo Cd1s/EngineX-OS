@@ -5,14 +5,113 @@
 # Every replaced file is a bind mount from tmpfs (/run/enginex-dev), so the files
 # underneath stay untouched and a reboot puts them back. `rollback` unmounts
 # without a reboot. Only the names in target() can be replaced; nothing else is
-# written outside /run/enginex-dev. This script never starts a Factory Reset,
-# never runs az01-update and never reboots.
+# written outside /run/enginex-dev and /run/enginex-dev-lock. This script never
+# starts a Factory Reset, runs az01-update or reboots.
 set -eu
 STATE=/run/enginex-dev
 IN=$STATE/incoming
 export LC_ALL=C
 
 die() { echo "deck-agent: $*" >&2; exit 1; }
+
+# This directory is shared by every host. Keep it after release: removing a
+# directory that another process is using as a mutex creates an ABA race.
+LOCK=/run/enginex-dev-lock
+refuse() { echo "deck-agent: $*" >&2; exit 3; }
+field() { sed -n "s/^$1 //p" "$LOCK/owner" 2>/dev/null || :; }
+lock_guard() {
+    mkdir -p "$LOCK"
+    # A child command can arrive during its wrapper's brief lease renewal.
+    attempt=0
+    until mkdir "$LOCK/.mutex" 2>/dev/null; do
+        [ "$attempt" -lt 10 ] || refuse 'deck operation busy (or interrupted; reboot clears the mutex)'
+        attempt=$((attempt + 1))
+        sleep 0.05
+    done
+    trap 'rmdir "$LOCK/.mutex"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+}
+lock_live() {
+    expires=$(field expires)
+    [ -n "$expires" ] && [ "$expires" -gt "$(date +%s)" ]
+}
+lock_require() {
+    lock_live || refuse 'deck is not locked (or lease expired); use deck-lock acquire'
+    [ "$(field owner)" = "$1" ] || refuse "deck is locked by $(field owner)"
+}
+lock_write() {
+    # owner host purpose ttl. All values arrive as quoted literal argv.
+    owner=$1 host=$2 purpose=$3 ttl=$4
+    now=$(date +%s)
+    acquired=$(field acquired) started_at=$(field started)
+    [ -n "$acquired" ] || acquired=$now
+    [ -n "$started_at" ] || started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    {
+        printf 'owner %s\nhost %s\npurpose %s\n' "$owner" "$host" "$purpose"
+        printf 'acquired %s\nstarted %s\n' "$acquired" "$started_at"
+        printf 'expires %s\nttl %s\n' "$((now + ttl))" "$ttl"
+    } > "$LOCK/.owner.$$"
+    mv "$LOCK/.owner.$$" "$LOCK/owner"
+}
+lock_finish() {
+    # A command pins the lease while it runs, then gives its caller a full TTL.
+    lock_write "$(field owner)" "$(field host)" "$(field purpose)" "$(field ttl)"
+    rmdir "$LOCK/.mutex"
+}
+
+case ${1:-} in
+lock-status)
+    # Truly read-only, including on a freshly booted deck.
+    if [ -f "$LOCK/owner" ]; then
+        cat "$LOCK/owner"
+        if lock_live; then echo 'live yes'; else echo 'live no'; fi
+    fi
+    [ ! -d "$LOCK/.mutex" ] || echo 'busy yes'
+    exit 0 ;;
+lock-acquire)
+    shift
+    lock_guard
+    if lock_live; then
+        [ "$(field owner)" = "$1" ] || refuse "deck is locked by $(field owner): $(field purpose)"
+    else
+        rm -f "$LOCK/owner"
+    fi
+    lock_write "$1" "$2" "$3" "$4"
+    cat "$LOCK/owner"
+    echo 'live yes'
+    exit 0 ;;
+lock-renew)
+    shift
+    lock_guard
+    lock_require "$1"
+    lock_write "$1" "$(field host)" "$(field purpose)" "$(field ttl)"
+    exit 0 ;;
+lock-release)
+    shift
+    lock_guard
+    [ -f "$LOCK/owner" ] || exit 0
+    if [ "$(field owner)" != "$1" ]; then
+        refuse 'lease belongs to another agent'
+    fi
+    rm -f "$LOCK/owner"
+    exit 0 ;;
+lock-require)
+    shift
+    lock_guard
+    lock_require "$1"
+    cat "$LOCK/owner"
+    echo 'live yes'
+    exit 0 ;;
+--locked)
+    shift
+    lock_guard
+    lock_require "$1"
+    trap lock_finish EXIT
+    shift ;;
+digest) ;; # Local digest parity test; does not operate a deck.
+*) refuse 'every deck command requires a lease' ;;
+esac
 
 # <name> -> its path on the deck, resolved through the compatibility links
 # (/data/sc5000-custom -> /data/enginex, /etc/enginex -> /etc/sc5000).
@@ -89,6 +188,10 @@ restart() {
 cmd=${1:-}
 [ $# -eq 0 ] || shift
 case $cmd in
+exec)
+    # Keep the mutex until the child ends, even if its lease expires meanwhile.
+    "$@"
+    ;;
 digest)
     digest "$1"
     ;;
@@ -180,7 +283,7 @@ smoke)
         printf '%s\n' "$log" | grep -m1 'engine-ui-hook: Engine ' | sed 's/^/engine_line /' || :
         printf '%s\n' "$log" | grep 'packs/[A-Za-z-]*: [0-9]* files' | tail -1 | sed 's/^/packs_line /' || :
         # The release gate's QML load error patterns (tools/az01-packer/release-gate.sh).
-        q='Type [A-Za-z_][A-Za-z0-9_]* unavailable|PropertyChanges does not support creating|state-specific objects|is not a type|is not installed|Cannot assign to non-existent|Expected token|Syntax error|QQmlComponent: Component is not ready|failed to load component'
+        q='Type [A-Za-z_][A-Za-z0-9_]* unavailable|PropertyChanges does not support creating|state-specific objects|is not a type|is not installed|Cannot assign to non-existent|Expected token|Syntax error|QQmlComponent: Component is not ready|failed to load component|possible QQuickItem::polish\(\)|called polish\(\) inside updatePolish'
         echo "qml_errors $(printf '%s\n' "$log" | grep -cE "$q" || :)"
         printf '%s\n' "$log" | grep -E "$q" | head -3 | sed 's/^/qml_error /' || :
         echo "crashes $(printf '%s\n' "$log" | grep -cE 'Crash with|Unknown exit code' || :)"

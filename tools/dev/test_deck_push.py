@@ -10,6 +10,9 @@ import importlib.machinery
 import importlib.util
 import io
 import json
+import configparser
+import time
+import signal
 import multiprocessing
 import os
 import shutil
@@ -64,16 +67,17 @@ class ArgParsing(unittest.TestCase):
         self.assertEqual(dp.parse_args(["backups", "deck-b"]).deck, "deck-b")
         self.assertEqual(dp.parse_args(["unlock", "deck-a"]).action, "unlock")
         self.bad(["lock", "deck-a"])                          # purpose is required
-        self.bad(["lock", "deck-a", "--purpose", "x", "--ttl", "13h"])
+        self.bad(["lock", "deck-a", "--purpose", "x", "--ttl", "0"])
         self.bad(["lock", "deck-a", "--purpose", "x" * 201])
         self.bad(["unlock"])
         self.bad(["smoke"])
 
     def test_ttl(self):
         self.assertEqual(dp.parse_ttl("2h"), 7200)
+        self.assertEqual(dp.parse_ttl("24h"), 86400)
         self.assertEqual(dp.parse_ttl("30"), 1800)
         self.assertEqual(dp.parse_ttl("45s"), 45)
-        for bad in ("0", "1d", "-5m", "h", "13h"):
+        for bad in ("0", "1d", "-5m", "h"):
             with self.assertRaises(ValueError):
                 dp.parse_ttl(bad)
 
@@ -106,9 +110,9 @@ class ArgParsing(unittest.TestCase):
 class Configs(unittest.TestCase):
     def test_example(self):
         cfg = dp.Config(HERE / "decks.ini.example", env={})
-        self.assertEqual(sorted(cfg.decks), ["deck-a", "deck-b"])
-        a, b = cfg.decks["deck-a"], cfg.decks["deck-b"]
-        self.assertEqual((a.expect_applied, b.expect_applied), (19, 19))
+        self.assertEqual(sorted(cfg.decks), ["left", "right"])
+        a, b = cfg.decks["left"], cfg.decks["right"]
+        self.assertEqual((a.expect_applied, b.expect_applied), (20, 20))
         self.assertEqual(b.daemons, ["stream-sync", "sc5000-deemixd", "rb-bridge"])
         self.assertEqual(a.ssh_options, ["-o", "ServerAliveInterval=10"])
         self.assertEqual(cfg.state, Path("/var/lib/enginex-dev"))
@@ -125,6 +129,24 @@ class Configs(unittest.TestCase):
             with self.assertRaises(ValueError):
                 dp.Config(p, env={})                         # ssh destination missing
 
+    def test_ssm_uses_literal_argv_and_explicit_stdin(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ini = Path(tmp, "decks.ini")
+            ini.write_text("[left]\ntransport = ssm\nssh = local-alias\n")
+            deck = dp.Config(ini, env={}).deck("left")
+            result = subprocess.CompletedProcess([], 0, stdout=b"", stderr=b"")
+            with unittest.mock.patch.object(dp.subprocess, "run", return_value=result) as run:
+                deck.agent(["lock-status"])
+                argv = run.call_args.args[0]
+                self.assertEqual(argv[:5], ["sshctl", "run", "local-alias", "--no-stdin", "--argv"])
+                self.assertEqual(argv[-1], "lock-status")
+                deck.owner = "owner"
+                source = io.BytesIO(b"upload")
+                deck.agent(["apply"], stdin=source)
+                self.assertIn("--stdin", run.call_args.args[0])
+                self.assertEqual(run.call_args.kwargs["stdin"], source)
+                self.assertEqual(run.call_args.args[0][-3:], ["--locked", "owner", "apply"])
+
     def test_unknown_deck(self):
         cfg = dp.Config(HERE / "decks.ini.example", env={})
         with self.assertRaises(dp.Refused):
@@ -132,73 +154,21 @@ class Configs(unittest.TestCase):
 
 
 
-def _race(state, owner, q):
-    try:
-        dp.LockStore(state).acquire("deck-a", owner, "race", 600)
-        q.put(owner)
-    except dp.Refused:
-        pass
 
-
-class Locks(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.mkdtemp()
-        self.locks = dp.LockStore(self.tmp)
-
-    def tearDown(self):
-        shutil.rmtree(self.tmp)
-
-    def test_one_owner(self):
-        lock = self.locks.acquire("deck-a", "alice", "MASTER tests", 600, now=1000)
-        self.assertEqual((lock["owner"], lock["expires"]), ("alice", 1600))
-        with self.assertRaises(dp.Refused):
-            self.locks.acquire("deck-a", "bob", "ui", 600, now=1100)
-        with self.assertRaises(dp.Refused):
-            self.locks.release("deck-a", "bob", now=1100)
-        with self.assertRaises(dp.Refused):
-            self.locks.require("deck-a", "bob", now=1100)
-        self.assertEqual(self.locks.require("deck-a", "alice", now=1100)["purpose"], "MASTER tests")
-        # Another deck is independent.
-        self.locks.acquire("deck-b", "bob", "ui", 600, now=1100)
-
-    def test_renew_keeps_acquired(self):
-        self.locks.acquire("deck-a", "alice", "one", 600, now=1000)
-        lock = self.locks.acquire("deck-a", "alice", "two", 600, now=1500)
-        self.assertEqual((lock["acquired"], lock["expires"], lock["purpose"]), (1000, 2100, "two"))
-
-    def test_expiry_frees(self):
-        self.locks.acquire("deck-a", "alice", "one", 600, now=1000)
-        self.assertIsNone(self.locks.holder("deck-a", now=1600))
-        with self.assertRaises(dp.Refused):
-            self.locks.require("deck-a", "alice", now=1600)   # an expired lock does not allow a push
-        self.assertEqual(self.locks.acquire("deck-a", "bob", "two", 600, now=1601)["owner"], "bob")
-
-    def test_release(self):
-        self.assertFalse(self.locks.release("deck-a", "alice"))
-        self.locks.acquire("deck-a", "alice", "one", 600)
-        self.assertTrue(self.locks.release("deck-a", "alice"))
-        with self.assertRaises(dp.Refused):
-            self.locks.require("deck-a", "alice")
-
-    def test_race(self):
-        q = multiprocessing.Queue()
-        ps = [multiprocessing.Process(target=_race, args=(self.tmp, f"agent{i}", q)) for i in range(8)]
-        for p in ps:
-            p.start()
-        for p in ps:
-            p.join()
-        winners = []
-        while not q.empty():
-            winners.append(q.get())
-        self.assertEqual(len(winners), 1)
-        self.assertEqual(self.locks.holder("deck-a")["owner"], winners[0])
-
-    def test_op_lock_is_exclusive(self):
-        p = Path(self.tmp, "x.op")
-        with dp.flocked(p, blocking=False):
-            with self.assertRaises(dp.Refused):
-                with dp.flocked(p, blocking=False):
-                    pass
+class AcquireInterruption(unittest.TestCase):
+    def test_signal_after_remote_grant_releases_the_lock(self):
+        locks = unittest.mock.Mock()
+        locks.holder.return_value = None
+        locks.acquire.side_effect = lambda *args: os.kill(os.getpid(), signal.SIGTERM)
+        def interrupted(_signum, _frame):
+            raise KeyboardInterrupt
+        previous = signal.signal(signal.SIGTERM, interrupted)
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                dp.acquire_many(locks, ["left"], "alice", "interrupt grant", 600)
+            locks.release.assert_called_once_with("left", "alice")
+        finally:
+            signal.signal(signal.SIGTERM, previous)
 
 
 class Digests(unittest.TestCase):
@@ -266,7 +236,7 @@ GOOD = """now 1000
 emain 812
 emain_started 990
 hook_mapped yes
-applied 19
+applied 20
 engine_line engine-ui-hook: Engine 5.3.0
 packs_line engine-ui-hook: /data/sc5000-custom/ui/packs/zh-Hans: 61 files
 qml_errors 0
@@ -284,7 +254,7 @@ digest ui-packs aaaa mounted
 
 class Smoke(unittest.TestCase):
     def setUp(self):
-        self.deck = dp.Config(HERE / "decks.ini.example", env={}).decks["deck-a"]
+        self.deck = dp.Config(HERE / "decks.ini.example", env={}).decks["left"]
         self.expect = {"digests": {"ui-packs": ("aaaa", "mounted")}, "commit": "c0ffee", "restarted_after": 985}
 
     def judge(self, text, **expect):
@@ -301,7 +271,7 @@ class Smoke(unittest.TestCase):
         return sorted(k for k, ok in self.judge(text, **expect).items() if not ok)
 
     def test_failures(self):
-        self.assertEqual(self.failing(GOOD.replace("applied 19", "applied 18")), ["UI hook loaded, 19 edits applied"])
+        self.assertEqual(self.failing(GOOD.replace("applied 20", "applied 18")), ["UI hook loaded, 20 edits applied"])
         self.assertEqual(self.failing(GOOD.replace("qml_errors 0", "qml_errors 2")), ["no QML load errors or crashes in the journal"])
         self.assertEqual(self.failing(GOOD.replace("crashes 0", "crashes 1")), ["no QML load errors or crashes in the journal"])
         self.assertEqual(self.failing(GOOD.replace("rb-bridge active", "rb-bridge failed")), ["our daemons alive"])
@@ -346,7 +316,7 @@ class FakeDeck(unittest.TestCase):
         (cls.pre / "ui/packs/en/Skins/Embedded/Extra.qml").write_text("Item {}\n")
         (cls.pre / "ui/icons").mkdir()
         (cls.pre / "ui/icons/pushed.svg").write_text("<svg/>\n")
-        (cls.pre / "libengine-ui-hook.so").write_text("pushed hook FAKE_APPLIED=19\n")
+        (cls.pre / "libengine-ui-hook.so").write_text("pushed hook FAKE_APPLIED=20\n")
         (cls.pre / "libedisksd-hook.so").write_text("pushed edisksd hook\n")
         shutil.copy2(HERE / "fake-deck/sc5000-suite", cls.pre / "sc5000-suite")
         with open(cls.pre / "sc5000-suite", "a") as f:
@@ -360,7 +330,7 @@ class FakeDeck(unittest.TestCase):
         shutil.rmtree(cls.dir, ignore_errors=True)
 
     def run_dp(self, *args, owner="agent-a"):
-        env = {**os.environ, "DECK_PUSH_CONFIG": self.ini, "DECK_PUSH_OWNER": owner}
+        env = {**os.environ, "DECK_PUSH_CONFIG": self.ini, "DECK_PUSH_OWNER": owner, "PATH": str(self.deckdir / "test-bin") + os.pathsep + os.environ["PATH"]}
         env.pop("PASEO_AGENT_ID", None)
         r = subprocess.run([sys.executable, str(HERE / "deck-push"), *args], env=env, capture_output=True, text=True, timeout=300)
         return r.returncode, r.stdout + r.stderr
@@ -411,7 +381,7 @@ class FakeDeck(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertIn("RESULT PASS fake", out)
         # The deck shows the pushed file; the file underneath (its flash) is untouched.
-        self.assertEqual(self.deck_sh("cat /etc/sc5000/libengine-ui-hook.so"), "pushed hook FAKE_APPLIED=19\n")
+        self.assertEqual(self.deck_sh("cat /etc/sc5000/libengine-ui-hook.so"), "pushed hook FAKE_APPLIED=20\n")
         self.assertEqual(self.snapshot(), before)
         # Backup on the build host, indexed, holding exactly what the deck showed before.
         state = Path(dp.Config(self.ini, env={}).state)
@@ -421,7 +391,7 @@ class FakeDeck(unittest.TestCase):
             self.assertEqual(t.extractfile("etc/sc5000/libengine-ui-hook.so").read(), orig)
         # A second push over the first: rollback still brings back the original, not push one.
         (self.dir / "pre2").mkdir(exist_ok=True)
-        (self.dir / "pre2/libengine-ui-hook.so").write_text("second hook FAKE_APPLIED=19\n")
+        (self.dir / "pre2/libengine-ui-hook.so").write_text("second hook FAKE_APPLIED=20\n")
         rc, out = self.run_dp("fake", "hook", "--from", str(self.dir / "pre2"))
         self.assertEqual(rc, 0, out)
         self.assertIn("already dev-mounted: hook", out)
@@ -463,11 +433,34 @@ class FakeDeck(unittest.TestCase):
         (bad / "libengine-ui-hook.so").write_text("hook with an edit missing FAKE_APPLIED=18\n")
         rc, out = self.run_dp("fake", "hook", "--from", str(bad))
         self.assertEqual(rc, 1, out)
-        self.assertIn("FAIL UI hook loaded, 19 edits applied: 18 'applied' lines", out)
+        self.assertIn("FAIL UI hook loaded, 20 edits applied: 18 'applied' lines", out)
         rc, out = self.run_dp("fake", "--rollback")
         self.assertEqual(rc, 0, out)
         self.assertEqual(out.count("back to its original"), 3, out)
         self.assertIn("RESULT PASS fake", out)
+
+    def test_polish_errors_fail_smoke(self):
+        bad = self.dir / "bad-polish"
+        shutil.copytree(self.pre / "ui", bad / "ui", dirs_exist_ok=True)
+        (bad / "ui/packs/en/Polish.qml").write_text("// FAKE_POLISH_ERROR\n")
+        rc, out = self.run_dp("fake", "ui", "--from", str(bad), "--no-sandbox", "sandbox polish error")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("1 QML errors", out)
+
+    def test_backup_failure_never_applies(self):
+        failed_bin = self.dir / "failed-backup"
+        failed_bin.mkdir(exist_ok=True)
+        backup = failed_bin / "agent-backup"
+        backup.write_text("#!/bin/sh\nexit 1\n")
+        backup.chmod(0o755)
+        env = {**os.environ, "DECK_PUSH_CONFIG": self.ini, "DECK_PUSH_OWNER": "agent-a",
+               "PATH": str(failed_bin) + os.pathsep + os.environ["PATH"]}
+        before = self.snapshot()
+        r = subprocess.run([sys.executable, str(HERE / "deck-push"), "fake", "hook", "--from", str(self.pre)],
+                           env=env, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 4, r.stdout + r.stderr)
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(self.deck_sh("test -e /run/enginex-dev && echo mounted || echo absent").strip(), "absent")
 
     def test_go_restarts_only_its_daemon(self):
         emain = self.deck_sh("cat /run/fake-systemd/engine.service.pid")
@@ -492,6 +485,7 @@ class FakeDeck(unittest.TestCase):
         self.assertNotEqual(int((self.deckdir / "unshare.pid").read_text()), old)
         self.assertEqual(self.deck_sh("sha256sum < /etc/sc5000/libengine-ui-hook.so").split()[0],
                          dp.digest(self.persist / "etc-sc5000/libengine-ui-hook.so"))
+        self.run_dp("lock", "fake", "--purpose", "reacquire after reboot")
         rc, out = self.run_dp("smoke", "fake")
         self.assertEqual(rc, 0, out)
         self.assertNotIn("digest", out)
@@ -506,7 +500,195 @@ class FakeDeck(unittest.TestCase):
                            env=env, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("dry run: the deck was not contacted", r.stdout)
-        self.assertIn("lock: free", r.stdout)
+        self.assertIn("lock: unchecked", r.stdout)
+
+
+@unittest.skipUnless(_can_fake(), "needs root, unshare and sshd (the build host)")
+class DeckLockTests(unittest.TestCase):
+    """Two isolated decks, independent client state, actual SSH and concurrent agents."""
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = Path(tempfile.mkdtemp(prefix="deck-lock-test.", dir="/var/tmp"))
+        cls.dirs = [cls.tmp / n for n in ("left", "right")]
+        cls.ini = cls.tmp / "decks.ini"
+        cp = configparser.ConfigParser()
+        try:
+            for d in cls.dirs:
+                r = subprocess.run(["bash", str(HERE / "fake-deck.sh"), "up", str(d), d.name],
+                                   check=True, capture_output=True, text=True)
+                cp.read(r.stdout.strip().splitlines()[-1])
+            with cls.ini.open("w") as f:
+                cp.write(f)
+        except BaseException:
+            cls.tearDownClass()
+            raise
+
+    @classmethod
+    def tearDownClass(cls):
+        for d in cls.dirs:
+            subprocess.run(["bash", str(HERE / "fake-deck.sh"), "down", str(d)], capture_output=True)
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def env(self, owner):
+        return {**os.environ, "DECK_PUSH_OWNER": owner, "DECK_PUSH_CONFIG": str(self.ini),
+                "DECK_PUSH_STATE": str(self.tmp / (owner + "-state"))}
+
+    def start(self, *args, owner="alice", tool="deck-lock"):
+        return subprocess.Popen([sys.executable, str(HERE / tool), *args], env=self.env(owner),
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+    def call(self, *args, owner="alice", tool="deck-lock", want=0):
+        p = self.start(*args, owner=owner, tool=tool)
+        out = p.communicate(timeout=30)[0]
+        self.assertEqual(p.returncode, want, out)
+        return out
+
+    def setUp(self):
+        for name in ("left", "right"):
+            cfg = dp.Config(self.ini, env={})
+            cur = dp.LockStore(cfg).read(name)
+            if cur:
+                dp.LockStore(cfg).release(name, cur["owner"])
+
+    def test_two_fake_decks_independent_and_cross_host_exclusion(self):
+        self.call("acquire", "left", "--purpose", "left UI")
+        self.call("acquire", "right", "--purpose", "right sync", owner="bob")
+        out = self.call("acquire", "left", "--purpose", "collision", owner="bob", want=3)
+        self.assertIn("locked by alice", out)
+        self.call("left", "--", "true", tool="deck", owner="bob", want=3)
+        self.call("release", "left", owner="bob", want=3)
+        left = self.start("left", "--", "sleep", "1", tool="deck")
+        self.call("right", "--", "true", tool="deck", owner="bob")
+        self.assertIsNone(left.poll(), "right should run while left is still occupied")
+        self.assertEqual(left.communicate(timeout=15)[0], "")
+        self.assertEqual(left.returncode, 0)
+        self.call("left", "--", "printf", "%s", "a 'quoted' $literal", tool="deck")
+        out = self.call("status")
+        self.assertIn("owner=alice", out)
+        self.assertIn("owner=bob", out)
+        self.call("left", "hook", "--from", str(self.tmp), tool="deck-push", owner="bob", want=3)
+        self.call("smoke", "left", tool="deck-push", owner="bob", want=3)
+
+    def test_race_one_winner(self):
+        ps = [self.start("acquire", "left", "--purpose", "race", owner=f"agent{i}") for i in range(8)]
+        results = [(p, p.communicate(timeout=30)[0]) for p in ps]
+        self.assertEqual(sum(p.returncode == 0 for p, out in results), 1, results)
+        self.assertTrue(all(p.returncode in (0, 3) for p, out in results), results)
+
+    def test_left_first_and_failure_releases_left(self):
+        self.assertEqual(dp.ordered_decks(["right", "left", "right"]), ["left", "right"])
+        self.call("acquire", "right", "--purpose", "busy", owner="bob")
+        self.call("acquire", "right", "left", "--purpose", "pair", want=3)
+        self.assertIn("left: free", self.call("status", "left"))
+        # A pre-existing lease is borrowed and kept when the second fails.
+        self.call("acquire", "left", "--purpose", "existing")
+        self.call("acquire", "right", "left", "--purpose", "pair", want=3)
+        self.assertIn("owner=alice", self.call("status", "left"))
+
+    def test_expiry_reacquire_and_previous_owner_refused(self):
+        self.call("acquire", "left", "--purpose", "stale", "--ttl", "1s")
+        cfg = dp.Config(self.ini, env={})
+        dp.LockStore(cfg).require("left", "alice")
+        time.sleep(1.2)
+        self.call("left", "--", "true", tool="deck", want=3)
+        self.call("acquire", "left", "--purpose", "new", owner="bob")
+        with self.assertRaises(dp.Refused):
+            cfg.deck("left").agent(["preflight"])
+        with self.assertRaises(dp.Refused):
+            dp.LockStore(cfg).release("left", "alice")
+
+    def test_renew_keeps_start_and_release_without_names_keeps_other_owner(self):
+        self.call("acquire", "left", "--purpose", "first")
+        cfg = dp.Config(self.ini, env={})
+        first = dp.LockStore(cfg).read("left")
+        self.call("acquire", "left", "--purpose", "renewed")
+        second = dp.LockStore(cfg).read("left")
+        self.assertEqual((first["acquired"], first["started"]),
+                         (second["acquired"], second["started"]))
+        self.call("acquire", "right", "--purpose", "other", owner="bob")
+        self.call("release")
+        self.assertIn("left: free", self.call("status"))
+        self.assertIn("owner=bob", self.call("status"))
+
+    def test_pair_waiter_opposite_argument_order_and_cleanup(self):
+        self.call("acquire", "right", "--purpose", "busy", owner="bob")
+        p = self.start("run", "right", "left", "--purpose", "pair", "--wait", "--", "true")
+        time.sleep(0.6)
+        self.call("release", "right", owner="bob")
+        out = p.communicate(timeout=30)[0]
+        self.assertEqual(p.returncode, 0, out)
+        self.assertIn("left: free", self.call("status"))
+        self.assertIn("right: free", self.call("status"))
+
+    def test_wrapper_renews_borrows_and_cleans_up_failures(self):
+        self.call("run", "left", "--ttl", "2s", "--purpose", "renew", "--", "sleep", "3")
+        self.assertIn("left: free", self.call("status", "left"))
+        self.call("run", "left", "--purpose", "exit", "--", "sh", "-c", "exit 7", want=7)
+        self.assertIn("left: free", self.call("status", "left"))
+        self.call("acquire", "left", "--purpose", "outer")
+        self.call("run", "left", "--purpose", "nested", "--ssh", "--", "true")
+        self.assertIn("owner=alice", self.call("status", "left"))
+        self.call("left", "--", "sh", "-c", "exit 8", tool="deck", want=8)
+
+    def test_signal_terminates_child_and_releases_pair(self):
+        marker = self.tmp / "child.pid"
+        p = self.start("run", "right", "left", "--purpose", "interrupt", "--", "sh", "-c",
+                       'echo $$ > "$1"; exec sleep 30', "sh", str(marker))
+        limit = time.monotonic() + 15
+        while not marker.exists() and time.monotonic() < limit:
+            time.sleep(0.1)
+        self.assertTrue(marker.exists())
+        pid = int(marker.read_text())
+        p.send_signal(signal.SIGTERM)
+        out = p.communicate(timeout=15)[0]
+        self.assertEqual(p.returncode, 130, out)
+        self.assertFalse(Path(f"/proc/{pid}").exists())
+        self.assertIn("left: free", self.call("status"))
+        self.assertIn("right: free", self.call("status"))
+
+    def test_local_wrapper_with_busy_remote_child_renews_after_command(self):
+        self.call("run", "left", "--ttl", "2s", "--purpose", "remote child", "--",
+                  sys.executable, str(HERE / "deck"), "left", "--", "sleep", "3")
+        self.assertIn("left: free", self.call("status", "left"))
+
+    def test_repeated_child_commands_share_the_renewal_mutex(self):
+        command = [sys.executable, str(HERE / "deck"), "left", "--", "true"]
+        script = "import subprocess; " + f"[subprocess.run({command!r}, check=True) for _ in range(30)]"
+        self.call("run", "left", "--ttl", "2s", "--purpose", "commands during renewal", "--",
+                  sys.executable, "-c", script)
+        self.assertIn("left: free", self.call("status", "left"))
+
+    def test_signal_while_waiting_does_not_keep_left(self):
+        self.call("acquire", "right", "--purpose", "busy", owner="bob")
+        p = self.start("acquire", "left", "right", "--purpose", "wait", "--wait")
+        time.sleep(0.8)
+        p.send_signal(signal.SIGTERM)
+        out = p.communicate(timeout=15)[0]
+        self.assertEqual(p.returncode, 130, out)
+        self.assertIn("left: free", self.call("status", "left"))
+        self.assertIn("owner=bob", self.call("status", "right"))
+
+    def test_remote_command_pins_expired_lease(self):
+        self.call("acquire", "left", "--purpose", "long remote", "--ttl", "2s")
+        p = self.start("left", "--", "sleep", "3", tool="deck")
+        time.sleep(2.2)
+        self.call("acquire", "left", "--purpose", "steal", owner="bob", want=3)
+        out = p.communicate(timeout=15)[0]
+        self.assertEqual(p.returncode, 0, out)
+        self.call("left", "--", "true", tool="deck")
+
+    def test_reboot_clears_lease_and_requires_reacquire(self):
+        self.call("acquire", "left", "--purpose", "before reboot")
+        subprocess.run(["bash", str(HERE / "fake-deck.sh"), "reboot", str(self.dirs[0])],
+                       check=True, capture_output=True)
+        cp = configparser.ConfigParser()
+        for d in self.dirs:
+            cp.read(d / "decks.ini")
+        with self.ini.open("w") as f:
+            cp.write(f)
+        self.call("left", "--", "true", tool="deck", want=3)
+        self.assertIn("left: free", self.call("status", "left"))
+        self.call("acquire", "left", "--purpose", "after reboot", owner="bob")
 
 
 _sl = importlib.machinery.SourceFileLoader("ui_sheet", str(HERE / "ui-sheet"))
@@ -519,7 +701,7 @@ class UiSheet(unittest.TestCase):
     def test_dry_run_plan(self):
         out = io.StringIO()
         with unittest.mock.patch("sys.stdout", out):
-            self.assertEqual(ui_sheet.main(["--dry-run", "--views", "4deck,settings-about"]), 0)
+            self.assertEqual(ui_sheet.main(["--dry-run", "--base", "HEAD", "--views", "4deck,settings-about"]), 0)
         text = out.getvalue()
         self.assertIn("shadow-twin.sh shot before-4deck A --ui 4deck", text)
         self.assertIn("shadow-twin.sh deploy --local --packs --hook --suite", text)

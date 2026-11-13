@@ -23,7 +23,6 @@ inner() { # runs as pid 1 of the new namespaces
     mount -t proc proc "$R/proc"
     mount --rbind /dev "$R/dev"
     mount -t tmpfs tmpfs "$R/run"
-    mount -t tmpfs tmpfs "$R/tmp"
     mkdir -p "$R/data" "$R/etc/sc5000"
     mount --bind "$D/persist/data" "$R/data"
     mount --bind "$D/persist/etc-sc5000" "$R/etc/sc5000"
@@ -56,7 +55,8 @@ while True:
 }
 
 start() {
-    local D=$1 pid
+    local D=$1 pid name
+    name=$(cat "$D/name")
     mkdir -p "$D/t" "$D/root"
     unshare -m -n -p -f --kill-child "$0" --inner "$D" > "$D/inner.log" 2>&1 &
     echo $! > "$D/unshare.pid"
@@ -71,13 +71,19 @@ start() {
 state_dir = $D/state
 work_dir = $D/work
 
-[fake]
+[$name]
 ssh = root@fake-deck
 ssh_options = -F /dev/null -i $D/client_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o "ProxyCommand=nsenter -t $pid -m -n -p -r -w /usr/sbin/sshd -i -f /etc/fake-deck/sshd_config"
 smoke_timeout = 30
 settle = 1
 INI
-    mkdir -p "$D/state" "$D/work"
+    mkdir -p "$D/state" "$D/work" "$D/test-bin"
+    # No external backup service is contacted by sandbox tests.
+    cat > "$D/test-bin/agent-backup" <<'BACKUP'
+#!/bin/sh
+printf '%s\n' '{"id":"sandbox-backup"}'
+BACKUP
+    chmod 755 "$D/test-bin/agent-backup"
     # Wait for its stream-sync and Engine like a booting deck.
     for _ in $(seq 50); do
         nsenter -t "$pid" -m -n -p -r -w sh -c 'wget -q -O /dev/null http://127.0.0.1:8080/v1/sc5000/ui 2>/dev/null || curl -sf -o /dev/null http://127.0.0.1:8080/v1/sc5000/ui' && break
@@ -101,10 +107,13 @@ case ${1:-} in
 --inner) inner "$2" ;;
 up)
     D=$(realpath -m "${2:?dir}")
+    name=${3:-fake}
+    [[ $name =~ ^[a-z][a-z0-9_-]*$ ]] || exit 2
     [ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 2; }
     [ ! -e "$D" ] || { echo "$D exists" >&2; exit 2; }
     mkdir -p "$D/persist/data/enginex/ui/packs/en/Skins/Embedded" "$D/persist/data/enginex/ui/icons" \
         "$D/persist/data/enginex/bin" "$D/persist/etc-sc5000"
+    echo "$name" > "$D/name"
     ln -s enginex "$D/persist/data/sc5000-custom"
     echo 'import QtQuick 2.15 // original pack' > "$D/persist/data/enginex/ui/packs/en/Skins/Embedded/EmbeddedMain.qml"
     echo '<svg/>' > "$D/persist/data/enginex/ui/icons/original.svg"

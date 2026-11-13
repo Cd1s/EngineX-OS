@@ -9,8 +9,8 @@
 1. 单测：第 2 节里与改动有关的部分。
 2. 沙箱截图：`tools/dev/ui-sheet` 在 twin 沙箱（`tools/shadow-twin`）里渲染改动前后的界面，拼成一张对比图并按 UI 包摘要登记。没有对比图的 UI 包，`deck-push ... ui` 会拒绝推送。
 3. `tools/dev/quick-gate --group SC5000`：只构建一个镜像组，跑门禁的快速子集，即静态审计、新版开机、渲染节点探针、hook 补丁数、无 QML 错误，几分钟跑完。
-4. `tools/dev/deck-push lock <deck> --purpose "..."` 加锁，然后 `tools/dev/deck-push <deck> ui|hook|edisksd|go:<daemon>|all`。它只构建这一个组件，先把要替换的文件备份到编译机（带索引），再从 `/run` bind-mount 新文件（重启即回滚，`--rollback` 不用重启），只重启受影响的服务，最后自动做 smoke 检查。
-5. smoke PASS 后提交，再 `deck-push <deck> --rollback`、`deck-push unlock <deck>`。
+4. `tools/dev/deck-lock acquire <deck> --purpose "..."` 加锁，然后 `tools/dev/deck-push <deck> ui|hook|edisksd|go:<daemon>|all`。它只构建这一个组件，先把要替换的文件备份到编译机（带索引），再从 `/run` bind-mount 新文件（重启即回滚，`--rollback` 不用重启），只重启受影响的服务，最后自动做 smoke 检查。
+5. smoke PASS 后提交，再 `deck-push <deck> --rollback`、`deck-lock release <deck>`。
 
 碟机地址只写在 git 忽略的 `tools/dev/decks.ini` 里（模板 `tools/dev/decks.ini.example`），不进仓库。别人持有某台碟机的锁时 `deck-push` 会拒绝，不要绕过。用法见 `tools/dev/README.md`。
 

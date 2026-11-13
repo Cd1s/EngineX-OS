@@ -1,0 +1,9 @@
+#!/usr/bin/env python3
+"""Run one literal command on a deck whose lease belongs to this agent."""
+import runpy
+import sys
+from pathlib import Path
+
+api = runpy.run_path(str(Path(__file__).with_name("deck-push")))
+if __name__ == "__main__":
+    sys.exit(api["deck_main"]())

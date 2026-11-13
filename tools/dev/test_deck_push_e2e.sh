@@ -11,6 +11,7 @@ W=$(mktemp -d /var/tmp/deck-push-e2e.XXXXXX)
 trap 'bash "$HERE/fake-deck.sh" down "$W/deck" >/dev/null 2>&1 || :; rm -rf "$W"' EXIT
 export DECK_PUSH_CONFIG DECK_PUSH_OWNER=deck-push-e2e
 DECK_PUSH_CONFIG=$(bash "$HERE/fake-deck.sh" up "$W/deck" | tail -1)
+export PATH="$W/deck/test-bin:$PATH"
 dp() { python3 "$HERE/deck-push" "$@"; }
 n=0
 step() { # <name> <expected rc> <command...>
@@ -38,6 +39,7 @@ print(subprocess.run(["ssh", *shlex.split(d["ssh_options"]), d["ssh"], "sha256su
 PY
 )
 if [ "$now" = "$orig" ]; then echo "E2E PASS reboot restored the original hook ($orig)"; else echo "E2E FAIL reboot left $now, want $orig"; exit 1; fi
+step reacquire-after-reboot 0 dp lock fake --purpose "after sandbox reboot"
 step smoke-after-reboot 0 dp smoke fake
 step unlock 0 dp unlock fake
 step backups 0 dp backups fake
