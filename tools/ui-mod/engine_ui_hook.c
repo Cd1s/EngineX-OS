@@ -148,6 +148,7 @@ int snd_pcm_sw_params(void *pcm, void *params) {
 // #58: the toggle is master_limiter=1 in settings.conf, polled once a second
 // off the audio thread; the limiter itself runs in hook_master_output.
 static int lim_enabled, gain_enabled; // gain_enabled: #64 auto_gain=1
+static int bt_out_pair = -1;
 static int echo_enabled;              // #104 upfader_echo=1: Echo Out on the master bus
 static int echo_player_bypass;        // standalone players hide Echo Out and Color FX Style; stored values behave as Off
 static unsigned pfx_time_ms;          // #162: zero OFF, otherwise 10..4000
@@ -382,7 +383,7 @@ static void *lim_poll(void *arg) {
         }
         had_settings = have_settings;
         if (have_settings) previous = st;
-        int on = 0, gain = 0, echo = 0, pioneer_fx = 0, led = 100;
+        int on = 0, gain = 0, echo = 0, pioneer_fx = 0, led = 100, btout = -1;
         struct sc_ms_config timing = {500, 0};
         FILE *f = fopen(four_deck_settings, "r");
         if (f) {
@@ -393,6 +394,7 @@ static void *lim_poll(void *arg) {
                 if (!strncmp(line, "master_limiter=1", 16)) on = 1;
                 else if (!strncmp(line, "auto_gain=1", 11)) gain = 1;
                 else if (!strncmp(line, "upfader_echo=1", 14)) echo = 1;
+                else if (!strncmp(line, "bt_out=", 7)) btout = atoi(line + 7);
                 else if (!strncmp(line, "led_brightness=", 15)) {
                     int n = atoi(line + 15);
                     if (n >= 10 && n <= 100) led = n;
@@ -421,6 +423,7 @@ static void *lim_poll(void *arg) {
         __atomic_store_n(&echo_player_bypass, player_bypass, __ATOMIC_RELAXED);
         __atomic_store_n(&lim_enabled, on, __ATOMIC_RELAXED);
         __atomic_store_n(&gain_enabled, gain, __ATOMIC_RELAXED);
+        __atomic_store_n(&bt_out_pair, btout, __ATOMIC_RELAXED);
         __atomic_store_n(&echo_enabled, player_bypass ? 0 : echo, __ATOMIC_RELAXED);
         __atomic_store_n(&pioneer_fx_mode, player_bypass ? 0 : pioneer_fx, __ATOMIC_RELAXED);
         __atomic_store_n(&pfx_time_ms, timing.enabled ? timing.ms : 0, __ATOMIC_RELEASE);
@@ -901,6 +904,11 @@ static struct sc_master_pioneer_fx master_pfx[MASTER_PFX_PAIRS];
 static float four_deck_pad[8][FOUR_DECK_PAD_FRAMES];
 static int four_deck_pad_on;
 static signed char four_deck_route[2] = {0, 1}; // deck (0-3) on RCA A and RCA B, -1 silent
+// Bluetooth output: Engine's own A2DP source (BluetoothSignalSender, on once Config.audio.hasBluetoothOutput
+// is set) is called every block with a pair nobody fills. bt_out= in settings.conf picks the pair of this
+// callback that replaces it: an output pair, or in the 4-deck layout a deck's pad pair. -1 keeps Engine's feed.
+static float bt_buf[2][FOUR_DECK_PAD_FRAMES];
+static int bt_frames;
 static uint32_t hook_master_output(void *host, void *context, int in_channels, const float *const *in,
                                    int out_channels, float *const *out, int frames) {
     audio_callback_fn orig = (audio_callback_fn)dsp_originals[DSP_MASTER];
@@ -959,6 +967,24 @@ static uint32_t hook_master_output(void *host, void *context, int in_channels, c
     // #50 Live Stream: the first pair as it goes to the DAC; one relaxed load when nobody listens.
     if (out && frames > 0 && out_channels > 0)
         sc_tap_push(&live_tap, out[0], out_channels > 1 ? out[1] : NULL, (uint32_t)frames);
+    // hook_bt_send runs inside the next output callback, on this thread: it sees the block kept here.
+    // Calls without outputs (a player also calls this with 0 channels) must not drop it.
+    if (out && out_channels > 0) {
+        bt_frames = 0;
+        int pair = __atomic_load_n(&bt_out_pair, __ATOMIC_RELAXED);
+        if (pair >= 0 && frames > 0 && frames <= FOUR_DECK_PAD_FRAMES) {
+            float *const *src = four_deck_pad_on && out_channels == 4 ? NULL : out;
+            const float *l = src ? (pair * 2 < out_channels ? src[pair * 2] : NULL) : four_deck_pad[pair * 2 % 8];
+            const float *r = src ? (pair * 2 + 1 < out_channels ? src[pair * 2 + 1] : l) : four_deck_pad[pair * 2 % 8 + 1];
+            if (l) { // the sender's float -> s16 conversion wraps instead of clipping: the DAC path clips, so do it here
+                for (int i = 0; i < frames; i++) {
+                    bt_buf[0][i] = l[i] > 1.0f ? 1.0f : l[i] < -1.0f ? -1.0f : l[i];
+                    bt_buf[1][i] = r[i] > 1.0f ? 1.0f : r[i] < -1.0f ? -1.0f : r[i];
+                }
+                bt_frames = frames;
+            }
+        }
+    }
     return rc;
 }
 
@@ -1093,6 +1119,29 @@ static int install_px_scope(uintptr_t base, size_t page, const char *version) {
     return 1;
 }
 #endif
+
+// BluetoothSignalSender::audio(this, float *const in[2], int frames): Engine calls it every block from the
+// audio thread; the stereo pair it passes is silence. Hand it bt_buf (the pair bt_out= selected) instead.
+static const struct { const char *build; uint32_t site; } bt_send_sites[] = {{"5.3.0", 0xf56034}, {"5.3.0-sclive4", 0xf629b0}};
+static void (*bt_send_orig)(void *, const float *const *, int);
+static void hook_bt_send(void *self, const float *const *in, int frames) {
+    const float *pair[2] = {bt_buf[0], bt_buf[1]};
+    bt_send_orig(self, bt_frames == frames ? pair : in, frames);
+}
+
+static void install_bt_send(uintptr_t base, size_t page) {
+    for (unsigned i = 0; i < sizeof bt_send_sites / sizeof *bt_send_sites; i++) {
+        if (strcmp(build->name, bt_send_sites[i].build)) continue;
+        uintptr_t entry = base + bt_send_sites[i].site;
+        static const uint32_t prefix[] = {0xe16d42f4, 0xe1a04001}; // strd r4,[sp,#-36]!; mov r4,r1
+        if (memcmp((const void *)entry, prefix, sizeof prefix)) return;
+        uint32_t code[] = {prefix[0], prefix[1], 0xe51ff004, (uint32_t)(entry + 8)};
+        bt_send_orig = rx_code(code, sizeof code, page);
+        uint32_t jump[] = {0xe51ff004, (uint32_t)(uintptr_t)hook_bt_send};
+        patch_bytes(entry, jump, sizeof jump, page);
+        fprintf(stderr, "engine-ui-hook: Bluetooth output sender hooked\n");
+    }
+}
 
 static int install_dsp_hooks(uintptr_t base, size_t page) {
     // edit_engine has already verified the main ELF BuildID. Treat these hooks
@@ -1550,6 +1599,8 @@ A32_ONLY static void prepare_config(uintptr_t base, size_t page) {
         0xe320f000, // strbne r2, [r0, #0x19c] (hasNoiseSweep)
         0xe320f000, // strbne r2, [r0, #0x19d] (hasFilterRoll)
         0xe320f000, // strbne r2, [r0, #0x4cd] (hasSweepFxSelectionPopup)
+        0xe3a02001, // mov r2, #1
+        0xe5c02003, // Config.audio.hasBluetoothOutput: Engine's own A2DP source
         0xe59f2004, // replay the two displaced literal loads
         0xe59f3004,
         0xe59ff004,
@@ -1559,6 +1610,7 @@ A32_ONLY static void prepare_config(uintptr_t base, size_t page) {
     };
     const unsigned at[] = {1, 2, 3, 4, 8};
     for (unsigned i = 0; i < 5; i++) code[at[i]] = (code[at[i]] & ~0xfffu) | build->config_field[i];
+    if (!strcmp(build->name, "5.0.4")) code[24] = code[25] = 0xe320f000; // sender is a 5.3.0 feature
     if (!strcmp(build->name, "5.3.0"))
         code[5] = 0xe5c022a7;
     if (build->config_zoom == 0x52c) {
@@ -1972,6 +2024,7 @@ __attribute__((constructor)) static void edit_engine(void) {
     install_sqlite_hooks(base, page);
     if (install_dsp_hooks(base, page)) {
 #if !defined(__aarch64__)
+        install_bt_send(base, page);
         fx_selector_supported = install_px_scope(base, page, build->name);
 #endif
         __atomic_store_n(&echo_player_bypass, player_board(), __ATOMIC_RELAXED);
