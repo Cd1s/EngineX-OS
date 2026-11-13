@@ -504,6 +504,17 @@ func (im *Image) ExtractRootfs(ctx context.Context, w io.Writer) (int64, error) 
 	return outBytes, nil
 }
 
+type countingSHA1Reader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingSHA1Reader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
+}
+
 func newXZCheck(id byte) hash.Hash {
 	switch id {
 	case 0x01:
