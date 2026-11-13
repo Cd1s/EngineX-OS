@@ -116,6 +116,24 @@ func wifiTwinRoutes(routes string) (add, del [][]string) {
 	return add, del
 }
 
+// arpConf is where the kernel keeps each interface's ARP settings.
+const arpConf = "/proc/sys/net/ipv4/conf"
+
+// ownARPAddress makes eth0 and wlan0 ask for a neighbour's address with their own
+// (arp_announce 2; stock is 0, the address of the packet that waits). With the cable first,
+// a packet from Wi-Fi's address to the subnet leaves by the cable, and its ARP request said
+// there that Wi-Fi's address is the sender. The router then sent that address's traffic to
+// the cable, where a socket bound to wlan0 never gets it: Engine's Wi-Fi online check is
+// one, it timed out and Engine disconnected Wi-Fi.
+func ownARPAddress(conf string) error {
+	for _, dev := range []string{"eth0", "wlan0"} {
+		if err := os.WriteFile(filepath.Join(conf, dev, "arp_announce"), []byte("2"), 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // GuardRoutes keeps two things right until ctx ends, whenever connman sets them up again:
 // no gateway-less default route on eth0 (the cable keeps its link-local address, so Link
 // and direct connections are unaffected), and the cable before Wi-Fi where both reach the
@@ -128,34 +146,47 @@ func GuardRoutes(ctx context.Context) {
 	tick := time.NewTicker(5 * time.Second)
 	defer tick.Stop()
 	for {
-		if out, err := exec.CommandContext(ctx, "ip", "route", "show").Output(); err == nil {
-			if target, ok := strayEthernetDefault(string(out)); ok {
-				if err := exec.CommandContext(ctx, "ip", "route", "del", target, "dev", "eth0", "scope", "link").Run(); err != nil {
-					log.Printf("stream-sync: could not remove the stray eth0 route: %v", err)
-				} else {
-					log.Printf("stream-sync: removed a default route on eth0 that took traffic from Wi-Fi")
-				}
-			}
-			add, del := wifiTwinRoutes(string(out))
-			for i := range del {
-				// Its own route first: Wi-Fi is never left without one.
-				if add[i] != nil {
-					if err := exec.CommandContext(ctx, "ip", add[i]...).Run(); err != nil {
-						log.Printf("stream-sync: could not put the cable before Wi-Fi on %s: %v", del[i][2], err)
-						continue
-					}
-				}
-				if err := exec.CommandContext(ctx, "ip", del[i]...).Run(); err != nil {
-					log.Printf("stream-sync: could not put the cable before Wi-Fi on %s: %v", del[i][2], err)
-				} else {
-					log.Printf("stream-sync: %s is on the cable and on Wi-Fi: the cable goes first", del[i][2])
-				}
-			}
-		}
+		guardRoutesOnce(ctx, arpConf)
 		select {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
+		}
+	}
+}
+
+func guardRoutesOnce(ctx context.Context, conf string) {
+	out, err := exec.CommandContext(ctx, "ip", "route", "show").Output()
+	if err != nil {
+		return
+	}
+	if target, ok := strayEthernetDefault(string(out)); ok {
+		if err := exec.CommandContext(ctx, "ip", "route", "del", target, "dev", "eth0", "scope", "link").Run(); err != nil {
+			log.Printf("stream-sync: could not remove the stray eth0 route: %v", err)
+		} else {
+			log.Printf("stream-sync: removed a default route on eth0 that took traffic from Wi-Fi")
+		}
+	}
+	add, del := wifiTwinRoutes(string(out))
+	if len(del) > 0 {
+		// Before the cable goes first, never after: see ownARPAddress.
+		if err := ownARPAddress(conf); err != nil {
+			log.Printf("stream-sync: the cable does not go before Wi-Fi: %v", err)
+			return
+		}
+	}
+	for i := range del {
+		// Its own route first: Wi-Fi is never left without one.
+		if add[i] != nil {
+			if err := exec.CommandContext(ctx, "ip", add[i]...).Run(); err != nil {
+				log.Printf("stream-sync: could not put the cable before Wi-Fi on %s: %v", del[i][2], err)
+				continue
+			}
+		}
+		if err := exec.CommandContext(ctx, "ip", del[i]...).Run(); err != nil {
+			log.Printf("stream-sync: could not put the cable before Wi-Fi on %s: %v", del[i][2], err)
+		} else {
+			log.Printf("stream-sync: %s is on the cable and on Wi-Fi: the cable goes first", del[i][2])
 		}
 	}
 }

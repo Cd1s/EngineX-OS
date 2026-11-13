@@ -889,6 +889,63 @@ func TestCableGoesBeforeWiFiOnTheSameSubnet(t *testing.T) {
 	}
 }
 
+// Real decks, two SC5000 behind a Wi-Fi repeater by cable and on the router by Wi-Fi, the
+// kit of d7a2158: in two boots of two where the cable's address came 3 s after Wi-Fi's,
+// Engine logged "online check failed Timeout was reached" 10 s after the cable went first
+// and disconnected Wi-Fi. A packet from Wi-Fi's address that left by the cable had asked
+// for its neighbour with Wi-Fi's address; one such packet made a request bound to wlan0
+// time out, and none did once both interfaces asked with their own address.
+func TestCableBeforeWiFiAsksWithItsOwnAddress(t *testing.T) {
+	dir := t.TempDir()
+	conf, table, calls := filepath.Join(dir, "conf"), filepath.Join(dir, "table"), filepath.Join(dir, "calls")
+	for _, dev := range []string{"eth0", "wlan0", "lo"} {
+		os.MkdirAll(filepath.Join(conf, dev), 0o755)
+		os.WriteFile(filepath.Join(conf, dev, "arp_announce"), []byte("0\n"), 0o644)
+	}
+	announce := func(dev string) string {
+		b, _ := os.ReadFile(filepath.Join(conf, dev, "arp_announce"))
+		return strings.TrimSpace(string(b))
+	}
+	// ip: prints the table, and records every change with what the two interfaces ask with at that moment.
+	script := "#!/bin/sh\nif [ \"$2\" = show ]; then cat '" + table + "'; exit; fi\n" +
+		"echo \"$* | $(cat '" + conf + "/eth0/arp_announce') $(cat '" + conf + "/wlan0/arp_announce' 2>/dev/null)\" >> '" + calls + "'\n"
+	if err := os.WriteFile(filepath.Join(dir, "ip"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := guardHostCommand("ip"); err != nil {
+		t.Fatal(err)
+	}
+	const gateway = "default via 192.168.1.6 dev wlan0 \n"
+	const wifi = "192.168.1.0/24 dev wlan0 scope link  src 192.168.1.187 \n"
+	const cable = "192.168.1.0/24 dev eth0 scope link  src 192.168.1.238 \n"
+
+	os.WriteFile(table, []byte(gateway+wifi+"192.168.1.6 dev wlan0 scope link \n"), 0o644)
+	guardRoutesOnce(context.Background(), conf)
+	if b, _ := os.ReadFile(calls); len(b) != 0 || announce("eth0") != "0" || announce("wlan0") != "0" {
+		t.Fatalf("Wi-Fi alone is not left as it is: %q %s %s", b, announce("eth0"), announce("wlan0"))
+	}
+
+	os.WriteFile(table, []byte(gateway+wifi+cable), 0o644)
+	guardRoutesOnce(context.Background(), conf)
+	b, _ := os.ReadFile(calls)
+	if want := "route add 192.168.1.0/24 dev wlan0 scope link src 192.168.1.187 metric 600 | 2 2\n" +
+		"route del 192.168.1.0/24 dev wlan0 scope link src 192.168.1.187 metric 0 | 2 2\n"; string(b) != want {
+		t.Fatalf("the cable went first while an interface still asked with the other's address:\n%s", b)
+	}
+	if announce("lo") != "0" {
+		t.Fatal("an interface that shares no subnet was changed")
+	}
+
+	// No setting, no cable first: Wi-Fi keeps working as it did before the route change.
+	os.Remove(calls)
+	os.RemoveAll(filepath.Join(conf, "wlan0"))
+	guardRoutesOnce(context.Background(), conf)
+	if b, _ := os.ReadFile(calls); len(b) != 0 {
+		t.Fatalf("the cable went first without the setting:\n%s", b)
+	}
+}
+
 func TestProviderTracksCarryCovers(t *testing.T) {
 	deezer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, `{"data":[{"id":1,"title":"S","artist":{"name":"A"},"album":{"title":"L","cover_big":"https://cdn/big.jpg"}}]}`)
