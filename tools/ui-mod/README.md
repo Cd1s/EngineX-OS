@@ -217,6 +217,31 @@ differ in the second word and are checked per build with the rest of the group.
 Tests: `test_master_limiter()` in `test_dsp_smooth.c`, and the ARM mock in
 `test_stems_feature.c`.
 
+## Bluetooth speaker output (`bt_out=`, 5.3.0.5)
+
+Every 5.3.0 Engine already contains a complete A2DP source: a BluezQt `/MediaEndpoint/Source/Sbc`, an `sbc_encode`
+thread and `BluetoothSignalSender::audio(this, float *const in[2], int frames)`, switched on by
+`Config.audio.hasBluetoothOutput` (`prepare_config` sets it, byte 3 of the audio block) and fed silence (a player
+feeds it its deck 1 pair). We add nothing but a feed. `hook_master_output` keeps the pair `bt_out=<n>` selects
+(outputs `2n`, `2n+1`; default 0; clipped to +-1, because the sender's float to s16 wraps), and `hook_bt_send`
+hands it to the sender in calls of at most 512 frames. The sender is called inside the next master callback, on its
+thread, once per block, so the kept block is one block old and needs no lock. Players also call the master
+callback with 0 channels; those calls must not drop the kept block. Sender entry per build: Gen-1 5.3.0
+`0xf56034`, Gen-2 armhf `0xf629b0`, AZ04 `0x102eb20` (the table's `bt_send`; 5.0.4 has none).
+
+The sender does not resample and sends the data at the rate it arrives, while the SBC stream has the rate BlueZ
+negotiated with the speaker: Engine picks 44.1 kHz whenever the speaker offers it (48 kHz only if that is all it
+offers), and a Gen-1 player renders at 96 kHz. The hook reads the stream rate from the `sbc_t` Engine passes to
+`sbc_encode` (interposed) and the render rate from `snd_pcm_hw_params` (interposed, keyed by channel count), halves
+a render of 88.2 kHz or more with an 11-tap half-band, and a Catmull-Rom interpolation brings the result to the
+stream rate, the position carried across blocks. Without it a 48 kHz feed on a 44.1 kHz stream runs 8.8 % ahead
+and fills the speaker's buffer.
+
+Which pair carries what is per model: players pair 0 and 1 are their two decks, a PRIME 4's 10 channels are Main,
+Booth, Headphones (Cue), Zone and a spare, PRIME 2 and Mixstream Pro Main and Headphones; `pkg/webui/bluetooth.go`
+names only these. Tests: `test_bt_out.c` (no Engine needed); sandbox runs with a fake A2DP speaker are in
+`docs/REGRESSION-CHECKLIST.md` row 185.
+
 ## ALSA clock and official updater boundary
 
 The official image contradicts the original RA002 assumption: `0x165bcd0`

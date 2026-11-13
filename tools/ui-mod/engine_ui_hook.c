@@ -148,7 +148,7 @@ int snd_pcm_sw_params(void *pcm, void *params) {
 // #58: the toggle is master_limiter=1 in settings.conf, polled once a second
 // off the audio thread; the limiter itself runs in hook_master_output.
 static int lim_enabled, gain_enabled; // gain_enabled: #64 auto_gain=1
-static int bt_out_pair = -1;
+static int bt_out_pair;               // bt_out=: output pair sent to Bluetooth (default 0, the first); negative: Engine's feed
 static int echo_enabled;              // #104 upfader_echo=1: Echo Out on the master bus
 static int echo_player_bypass;        // standalone players hide Echo Out and Color FX Style; stored values behave as Off
 static unsigned pfx_time_ms;          // #162: zero OFF, otherwise 10..4000
@@ -383,7 +383,7 @@ static void *lim_poll(void *arg) {
         }
         had_settings = have_settings;
         if (have_settings) previous = st;
-        int on = 0, gain = 0, echo = 0, pioneer_fx = 0, led = 100, btout = -1;
+        int on = 0, gain = 0, echo = 0, pioneer_fx = 0, led = 100, btout = 0;
         struct sc_ms_config timing = {500, 0};
         FILE *f = fopen(four_deck_settings, "r");
         if (f) {
@@ -527,6 +527,8 @@ struct engine_build {
     // #77 Config.ui.waveform.maximumZoomSecs (int): 30 on players, 10 on all-in-ones.
     // The QML map reads it at config+0x45c+96 (5.0.4) / +0x4c8+100 (5.3.0).
     uint16_t config_zoom;
+    // BluetoothSignalSender::audio (Engine's own A2DP source); 0: no sender in this build.
+    uint32_t bt_send;
 };
 static const struct engine_build *build;
 
@@ -904,11 +906,93 @@ static struct sc_master_pioneer_fx master_pfx[MASTER_PFX_PAIRS];
 static float four_deck_pad[8][FOUR_DECK_PAD_FRAMES];
 static int four_deck_pad_on;
 static signed char four_deck_route[2] = {0, 1}; // deck (0-3) on RCA A and RCA B, -1 silent
-// Bluetooth output: Engine's own A2DP source (BluetoothSignalSender, on once Config.audio.hasBluetoothOutput
-// is set) is called every block with a pair nobody fills. bt_out= in settings.conf picks the pair of this
-// callback that replaces it: an output pair, or in the 4-deck layout a deck's pad pair. -1 keeps Engine's feed.
-static float bt_buf[2][FOUR_DECK_PAD_FRAMES];
-static int bt_frames;
+// Bluetooth output: Engine's own A2DP source (BluetoothSignalSender, switched on by
+// Config.audio.hasBluetoothOutput) is called every block, inside the master callback and on its
+// thread, with a pair nobody fills. bt_out=<pair> in settings.conf picks the output pair that
+// replaces it (default 0; negative: Engine's feed). The sender does not resample: the SBC stream has the rate BlueZ
+// negotiated (44.1 kHz when the speaker offers both; sbc_encode below reports it) while a Gen-1
+// render is 96 kHz. So a render of 88.2 kHz or more is halved by an 11-tap half-band, then a
+// Catmull-Rom interpolation brings it to the stream rate. The sender converts float to s16 without
+// clipping: the pair is clipped here.
+#define BT_BLOCK 4096 // longest render block carried
+static float bt_buf[2][BT_BLOCK + BT_BLOCK / 8]; // at the stream rate; 44.1 -> 48 kHz adds 9%
+static int bt_frames = -1, bt_count; // frames of the callback that kept bt_buf (-1: none), and the stream frames in it
+#define BT_HIST 10
+static float bt_x[2][BT_HIST + BT_BLOCK]; // render-rate input behind the last BT_HIST samples
+static float bt_y[2][3 + BT_BLOCK];       // half-band output (or the render) behind its last 3 samples
+static int bt_phase;                      // 0 or 1: input samples to skip before the next half-band output
+static int bt_ip = -2;                    // position of the next stream frame in bt_y, relative to the block
+static unsigned bt_rem;                   // its fraction, in 1/stream-rate input samples
+static unsigned render_rate[16];          // playback rate by channel count: the callback only sees the count
+static unsigned stream_rate;              // SBC rate of the A2DP stream, 0 until the first encode
+
+int snd_pcm_hw_params(void *pcm, void *params) {
+    static void *real_cache, *stream_cache, *rate_cache, *channels_cache;
+    int (*real)(void *, void *) = next_symbol(&real_cache, "snd_pcm_hw_params");
+    int (*stream)(void *) = next_symbol(&stream_cache, "snd_pcm_stream");
+    int (*rate)(const void *, unsigned *, int *) = next_symbol(&rate_cache, "snd_pcm_hw_params_get_rate");
+    int (*channels)(const void *, unsigned *) = next_symbol(&channels_cache, "snd_pcm_hw_params_get_channels");
+    if (!real) return -ENOSYS;
+    int rc = real(pcm, params), dir;
+    unsigned hz, ch;
+    if (rc >= 0 && is_engine() && stream && rate && channels && stream(pcm) == 0 && !rate(params, &hz, &dir) && !channels(params, &ch) && ch < 16 &&
+        hz != __atomic_exchange_n(&render_rate[ch], hz, __ATOMIC_RELAXED))
+        fprintf(stderr, "engine-ui-hook: playback %u ch at %u Hz\n", ch, hz);
+    return rc;
+}
+
+// libsbc's sbc_t starts with `unsigned long flags; uint8_t frequency;` (0..3 = 16, 32, 44.1, 48 kHz).
+static void bt_stream_rate(const void *sbc) {
+    static const unsigned hz[4] = {16000, 32000, 44100, 48000};
+    unsigned f = ((const uint8_t *)sbc)[sizeof(unsigned long)], rate = f < 4 ? hz[f] : 0;
+    if (rate != __atomic_exchange_n(&stream_rate, rate, __ATOMIC_RELAXED))
+        fprintf(stderr, "engine-ui-hook: Bluetooth stream %u Hz\n", rate);
+}
+
+ssize_t sbc_encode(void *sbc, const void *input, size_t input_len, void *output, size_t output_len, ssize_t *written) {
+    static void *real_cache;
+    ssize_t (*real)(void *, const void *, size_t, void *, size_t, ssize_t *) = next_symbol(&real_cache, "sbc_encode");
+    if (!real) return -ENOSYS;
+    if (sbc && is_engine()) bt_stream_rate(sbc);
+    return real(sbc, input, input_len, output, output_len, written);
+}
+
+// Halves bt_x (the previous block's last BT_HIST samples, then n new ones) into bt_y: y = x/2 centred on every
+// second sample, taps +-1, +-3, +-5. bt_phase carries an odd split across blocks. Returns the outputs.
+static int bt_halve(int n) {
+    static const float c1 = 0.2918f, c3 = -0.0441f, c5 = 0.0023f;
+    int count = 0, p = BT_HIST / 2 + bt_phase;
+    for (; p + BT_HIST / 2 < BT_HIST + n; p += 2, count++)
+        for (int c = 0; c < 2; c++) {
+            const float *x = bt_x[c];
+            bt_y[c][3 + count] = 0.5f * x[p] + c1 * (x[p - 1] + x[p + 1]) + c3 * (x[p - 3] + x[p + 3]) + c5 * (x[p - 5] + x[p + 5]);
+        }
+    bt_phase = p - n - BT_HIST / 2;
+    for (int c = 0; c < 2; c++) memmove(bt_x[c], bt_x[c] + n, BT_HIST * sizeof(float));
+    return count;
+}
+
+// Catmull-Rom from the m frames in bt_y (at in_rate) to bt_buf at the stream rate; the position and its fraction
+// carry across blocks, so the result does not depend on how the render was cut. Equal rates copy, two frames late.
+static int bt_resample(int m, unsigned in_rate, unsigned rate) {
+    int count = 0, ip = bt_ip;
+    unsigned rem = bt_rem % rate;
+    for (; ip < m - 2 && count < BT_BLOCK + BT_BLOCK / 8; count++) {
+        float t = (float)rem / (float)rate;
+        for (int c = 0; c < 2; c++) {
+            const float *y = bt_y[c] + 3 + ip;
+            bt_buf[c][count] = y[0] + 0.5f * t * (y[1] - y[-1] + t * (2 * y[-1] - 5 * y[0] + 4 * y[1] - y[2] + t * (3 * (y[0] - y[1]) + y[2] - y[-1])));
+        }
+        rem += in_rate;
+        ip += (int)(rem / rate);
+        rem %= rate;
+    }
+    bt_ip = ip - m < -2 ? -2 : ip - m;
+    bt_rem = rem;
+    for (int c = 0; c < 2; c++) memmove(bt_y[c], bt_y[c] + m, 3 * sizeof(float));
+    return count;
+}
+
 static uint32_t hook_master_output(void *host, void *context, int in_channels, const float *const *in,
                                    int out_channels, float *const *out, int frames) {
     audio_callback_fn orig = (audio_callback_fn)dsp_originals[DSP_MASTER];
@@ -967,25 +1051,40 @@ static uint32_t hook_master_output(void *host, void *context, int in_channels, c
     // #50 Live Stream: the first pair as it goes to the DAC; one relaxed load when nobody listens.
     if (out && frames > 0 && out_channels > 0)
         sc_tap_push(&live_tap, out[0], out_channels > 1 ? out[1] : NULL, (uint32_t)frames);
-    // hook_bt_send runs inside the next output callback, on this thread: it sees the block kept here.
-    // Calls without outputs (a player also calls this with 0 channels) must not drop it.
+    // hook_bt_send runs inside the next output callback: it sees the block kept here. Calls
+    // without outputs (a player also makes those) must not drop it.
     if (out && out_channels > 0) {
-        bt_frames = 0;
+        bt_frames = -1;
         int pair = __atomic_load_n(&bt_out_pair, __ATOMIC_RELAXED);
-        if (pair >= 0 && frames > 0 && frames <= FOUR_DECK_PAD_FRAMES) {
-            float *const *src = four_deck_pad_on && out_channels == 4 ? NULL : out;
-            const float *l = src ? (pair * 2 < out_channels ? src[pair * 2] : NULL) : four_deck_pad[pair * 2 % 8];
-            const float *r = src ? (pair * 2 + 1 < out_channels ? src[pair * 2 + 1] : l) : four_deck_pad[pair * 2 % 8 + 1];
-            if (l) { // the sender's float -> s16 conversion wraps instead of clipping: the DAC path clips, so do it here
-                for (int i = 0; i < frames; i++) {
-                    bt_buf[0][i] = l[i] > 1.0f ? 1.0f : l[i] < -1.0f ? -1.0f : l[i];
-                    bt_buf[1][i] = r[i] > 1.0f ? 1.0f : r[i] < -1.0f ? -1.0f : r[i];
-                }
-                bt_frames = frames;
+        if (pair >= 0 && pair * 2 + 1 < out_channels && frames > 0 && frames <= BT_BLOCK) {
+            unsigned render = __atomic_load_n(&render_rate[out_channels & 15], __ATOMIC_RELAXED);
+            unsigned rate = __atomic_load_n(&stream_rate, __ATOMIC_RELAXED);
+            if (!rate) rate = 48000;
+            int halve = render >= 88200;
+            for (int c = 0; c < 2; c++) {
+                const float *src = out[pair * 2 + c];
+                float *dst = halve ? bt_x[c] + BT_HIST : bt_y[c] + 3;
+                for (int i = 0; i < frames; i++) dst[i] = src[i] > 1.0f ? 1.0f : src[i] < -1.0f ? -1.0f : src[i];
             }
+            int m = halve ? bt_halve(frames) : frames;
+            bt_count = bt_resample(m, !render ? rate : halve ? render / 2 : render, rate);
+            bt_frames = frames;
         }
     }
     return rc;
+}
+
+// BluetoothSignalSender::audio(this, float *const in[2], int frames); it takes at most 512 frames a call.
+static void (*bt_send_orig)(void *, const float *const *, int);
+static void hook_bt_send(void *self, const float *const *in, int frames) {
+    if (bt_frames != frames) {
+        bt_send_orig(self, in, frames);
+        return;
+    }
+    for (int i = 0; i < bt_count; i += 512) {
+        const float *pair[2] = {bt_buf[0] + i, bt_buf[1] + i};
+        bt_send_orig(self, pair, bt_count - i < 512 ? bt_count - i : 512);
+    }
 }
 
 static int dsp_buffers_overlap(const float *a, const float *b, uint32_t frames) {
@@ -1119,29 +1218,6 @@ static int install_px_scope(uintptr_t base, size_t page, const char *version) {
     return 1;
 }
 #endif
-
-// BluetoothSignalSender::audio(this, float *const in[2], int frames): Engine calls it every block from the
-// audio thread; the stereo pair it passes is silence. Hand it bt_buf (the pair bt_out= selected) instead.
-static const struct { const char *build; uint32_t site; } bt_send_sites[] = {{"5.3.0", 0xf56034}, {"5.3.0-sclive4", 0xf629b0}};
-static void (*bt_send_orig)(void *, const float *const *, int);
-static void hook_bt_send(void *self, const float *const *in, int frames) {
-    const float *pair[2] = {bt_buf[0], bt_buf[1]};
-    bt_send_orig(self, bt_frames == frames ? pair : in, frames);
-}
-
-static void install_bt_send(uintptr_t base, size_t page) {
-    for (unsigned i = 0; i < sizeof bt_send_sites / sizeof *bt_send_sites; i++) {
-        if (strcmp(build->name, bt_send_sites[i].build)) continue;
-        uintptr_t entry = base + bt_send_sites[i].site;
-        static const uint32_t prefix[] = {0xe16d42f4, 0xe1a04001}; // strd r4,[sp,#-36]!; mov r4,r1
-        if (memcmp((const void *)entry, prefix, sizeof prefix)) return;
-        uint32_t code[] = {prefix[0], prefix[1], 0xe51ff004, (uint32_t)(entry + 8)};
-        bt_send_orig = rx_code(code, sizeof code, page);
-        uint32_t jump[] = {0xe51ff004, (uint32_t)(uintptr_t)hook_bt_send};
-        patch_bytes(entry, jump, sizeof jump, page);
-        fprintf(stderr, "engine-ui-hook: Bluetooth output sender hooked\n");
-    }
-}
 
 static int install_dsp_hooks(uintptr_t base, size_t page) {
     // edit_engine has already verified the main ELF BuildID. Treat these hooks
@@ -1610,7 +1686,7 @@ A32_ONLY static void prepare_config(uintptr_t base, size_t page) {
     };
     const unsigned at[] = {1, 2, 3, 4, 8};
     for (unsigned i = 0; i < 5; i++) code[at[i]] = (code[at[i]] & ~0xfffu) | build->config_field[i];
-    if (!strcmp(build->name, "5.0.4")) code[24] = code[25] = 0xe320f000; // sender is a 5.3.0 feature
+    if (!build->bt_send) code[24] = code[25] = 0xe320f000;
     if (!strcmp(build->name, "5.3.0"))
         code[5] = 0xe5c022a7;
     if (build->config_zoom == 0x52c) {
@@ -1741,7 +1817,8 @@ static const struct engine_build engine_builds[] = {
      // prologue has no PC-relative instruction, so it is copied as is.
      .sqlite_api = 0x2db6b68, .sqlite_exec = 0x1bb2f48, .sqlite_open = 0x1b8b7a0,
      .sqlite_open_v2 = 0x1bbd5c0, .sqlite_opendb = 0x1b8b060,
-     .sqlite_prefix = {"", "\x3f\x23\x03\xd5\xff\x43\x02\xd1\xfd\x7b\x03\xa9\xfd\xc3\x00\x91", ""}},
+     .sqlite_prefix = {"", "\x3f\x23\x03\xd5\xff\x43\x02\xd1\xfd\x7b\x03\xa9\xfd\xc3\x00\x91", ""},
+     .bt_send = 0x102eb20},
 };
 #else
 static const struct engine_edit edits_504[] = {
@@ -1890,7 +1967,7 @@ static const struct engine_build engine_builds[] = {
      0xf6303c, 0xf63124, 0xf63120, {0xdb, 0x24c, 0x24e, 0x276, 0x289},
      0x842644, 0x29bc83c, 0x258e185, 0x8429b0, 0xe51b3340,
      0x29980a4, 0x1c91f74, 0x1cba858, 0x1cba874, 0,
-     {"\xf4\x42\x6d\xe1\x02\x50\xa0\xe1", "\x04\xb0\x2d\xe5\x00\x30\xa0\xe3", "\x04\xb0\x2d\xe5\x00\xb0\x8d\xe2"}, 0x4bc},
+     {"\xf4\x42\x6d\xe1\x02\x50\xa0\xe1", "\x04\xb0\x2d\xe5\x00\x30\xa0\xe3", "\x04\xb0\x2d\xe5\x00\xb0\x8d\xe2"}, 0x4bc, 0},
     {"5.3.0", "\xbe\x53\x7e\x90\x81\x21\xe7\x61\x64\xdd\xbb\xf9\x73\x0d\x47\x2b\xa0\xb8\xf9\xd4",
      {0xe6a090, 0xe6a0bc, 0xe6a16c, 0xe6a198, 0xe6a1c4, 0xe6a0e8, 0xe6a140, 0x170e714, 0x1710c00,
       0x1710a74, 0x170f110, 0xdde87c, 0xd265cc, 0xd265f8, 0xd26624, 0xf1afa4, 0x16b38e0, 0xf1dd20, 0xf1ede4, 0xf1ab24, 0xc77934},
@@ -1898,7 +1975,7 @@ static const struct engine_build engine_builds[] = {
      0x1537148, 0x1537234, 0x1537230, {0xe3, 0x254, 0x256, 0x2a6, 0x2b9},
      0x8a1eac, 0x2c8e808, 0x21b8b98, 0x8a2218, 0xe51b3340,
      0x2b9bee8, 0x1d7289c, 0x1d47324, 0x1d7e2bc, 0x1d46a6c,
-     {"\xf4\x42\x6d\xe1\xf8\x60\xcd\xe1", "\xf4\x42\x6d\xe1\x20\xe0\x8d\xe5", ""}, 0x52c},
+     {"\xf4\x42\x6d\xe1\xf8\x60\xcd\xe1", "\xf4\x42\x6d\xe1\x20\xe0\x8d\xe5", ""}, 0x52c, 0xf56034},
     // feature_object 0x2d0eb78 is StemsPreRenderedPlayback (stored into 0x2d180c8 at 0x360d68, read by PlanckScriptRoot::hasStemsPreRenderedPlayback at 0x9d7808).
     {"5.3.0-sclive4", "\xb9\x46\xc3\xb8\xd9\x9d\x32\x99\x8c\x81\x97\xd5\xdc\x90\x5a\x6b\xdd\xaa\x5d\x2f",
      {0xe774fc, 0xe77528, 0xe775d8, 0xe77604, 0xe77630, 0xe77554, 0xe775ac, 0x17597bc, 0x179b090,
@@ -1907,7 +1984,7 @@ static const struct engine_build engine_builds[] = {
      0x159f4a8, 0x159f594, 0x159f590, {0xe3, 0x254, 0x256, 0x2a6, 0x2b9},
      0x89cd64, 0x2d0eb78, 0x222cc8d, 0x89d0d0, 0xe51b3338,
      0x2c1bea4, 0x1ddf11c, 0x1db3ba4, 0x1deab3c, 0x1db32ec,
-     {"\xf4\x42\x6d\xe1\xf8\x60\xcd\xe1", "\xf4\x42\x6d\xe1\x20\xe0\x8d\xe5", ""}, 0x52c},
+     {"\xf4\x42\x6d\xe1\xf8\x60\xcd\xe1", "\xf4\x42\x6d\xe1\x20\xe0\x8d\xe5", ""}, 0x52c, 0xf629b0},
 };
 #endif
 
@@ -1950,6 +2027,7 @@ static int edit_state(uintptr_t base, const struct engine_edit *e) {
 }
 
 static void install_sqlite_hooks(uintptr_t base, size_t page);
+static void install_bt_send(uintptr_t base, size_t page);
 
 static void apply_engine_edits(uintptr_t base, size_t page) {
     // A group is applied only if every site of it is stock or already patched.
@@ -2023,8 +2101,8 @@ __attribute__((constructor)) static void edit_engine(void) {
     apply_engine_edits(base, page);
     install_sqlite_hooks(base, page);
     if (install_dsp_hooks(base, page)) {
-#if !defined(__aarch64__)
         install_bt_send(base, page);
+#if !defined(__aarch64__)
         fx_selector_supported = install_px_scope(base, page, build->name);
 #endif
         __atomic_store_n(&echo_player_bypass, player_board(), __ATOMIC_RELAXED);
@@ -2836,6 +2914,20 @@ A32_ONLY static void install_sqlite_hooks(uintptr_t base, size_t page) {
     fprintf(stderr, "engine-ui-hook: SQLite open/open_v2 hooks installed\n");
 }
 #endif
+
+// The sender's prologue: its first instructions do not depend on the PC, so the trampoline copies them.
+static void install_bt_send(uintptr_t base, size_t page) {
+#if defined(__aarch64__)
+    static const uint32_t prefix[] = {0xd503233f, 0xd10203ff, 0xa9037bfd, 0x9100c3fd}; // paciasp; sub sp,sp,#0x80; stp x29,x30,[sp,#48]; add x29,sp,#48
+#else
+    static const uint32_t prefix[] = {0xe16d42f4, 0xe1a04001}; // strd r4,[sp,#-36]!; mov r4,r1
+#endif
+    uintptr_t entry = base + build->bt_send;
+    if (!build->bt_send || memcmp((const void *)entry, prefix, sizeof prefix)) return;
+    bt_send_orig = function_trampoline(entry, page);
+    redirect_function(entry, hook_bt_send, page);
+    fprintf(stderr, "engine-ui-hook: Bluetooth output sender hooked\n");
+}
 
 static const char *volatile_path(int dirfd, const char *path, char out[PATH_MAX]) {
     if (!path || !is_engine()) return path;

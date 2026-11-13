@@ -195,6 +195,7 @@ type uiSettings struct {
 	CueCountdown      bool   `json:"cueCountdown"`
 	BpmDecimals       int    `json:"bpmDecimals"`
 	SyncGuardPct      int    `json:"syncGuardPct"`
+	BtOut             int    `json:"btOut"` // output pair Bluetooth audio out sends (bt_out=, engine_ui_hook.c; 0 = Master / Layer A), named per model in bluetooth.go
 	SwapLoopOrder     bool   `json:"swapLoopOrder"`
 	LedBrightness     int    `json:"ledBrightness"`
 	// UIScale enlarges or shrinks Engine's whole interface; it takes effect at the next
@@ -430,6 +431,10 @@ func (s *Server) loadUI() uiSettings {
 			} else if val == "1" || strings.EqualFold(val, "true") {
 				v.TracklistWaveform = true
 			}
+		case "bt_out":
+			if n, err := strconv.Atoi(val); err == nil && n >= 0 && n < 5 {
+				v.BtOut = n
+			}
 		case "sync_guard_pct":
 			if n, err := strconv.Atoi(val); err == nil && slices.Contains(uiSyncGuardPcts, n) {
 				v.SyncGuardPct = n
@@ -582,6 +587,9 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	}
 	if !v.TracklistWaveform {
 		text += "tracklist_waveform=0\n"
+	}
+	if v.BtOut > 0 && v.BtOut < 5 {
+		text += "bt_out=" + strconv.Itoa(v.BtOut) + "\n"
 	}
 	if v.SyncGuardPct != 0 {
 		text += "sync_guard_pct=" + strconv.Itoa(v.SyncGuardPct) + "\n"

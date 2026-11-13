@@ -38,7 +38,7 @@ func TestConsoleIsFullyTrilingual(t *testing.T) {
 			used[m[1]] = true
 		}
 	}
-	for _, key := range []string{"jQueued", "jMatching", "jDownloading", "jAnalyzing", "jImporting", "jDone", "jError", "kInternal", "kHd", "kSd", "kUsb", "kDrive"} {
+	for _, key := range []string{"jQueued", "jMatching", "jDownloading", "jAnalyzing", "jImporting", "jDone", "jError", "kInternal", "kHd", "kSd", "kUsb", "kDrive", "btMaster", "btBooth", "btHeadphones", "btZone", "btLayerA", "btLayerB"} {
 		used[key] = true // looked up through a map, not a literal t('...')
 	}
 	if len(used) < 60 {

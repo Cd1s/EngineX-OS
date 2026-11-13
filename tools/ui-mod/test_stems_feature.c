@@ -1024,6 +1024,12 @@ static void test_patch_files(const char *filename) {
         image[e->offset] ^= 0xff;
         assert(edit_state((uintptr_t)image, e) == 0);
     }
+    // Engine's A2DP sender is where install_bt_send looks for it (5.0.4 has none)
+    assert(!!build->bt_send == !!strcmp(build->name, "5.0.4"));
+    if (build->bt_send) {
+        static const uint32_t sender_prologue[] = {0xe16d42f4, 0xe1a04001}; // strd r4,[sp,#-36]!; mov r4,r1
+        assert((size_t)size >= build->bt_send + sizeof sender_prologue && !memcmp(image + build->bt_send, sender_prologue, sizeof sender_prologue));
+    }
     if (!strcmp(build->name, "5.0.4")) assert(build->edit_count == 16);
     if (!strcmp(build->name, "5.3.0")) {
         assert(build->edit_count == 29);

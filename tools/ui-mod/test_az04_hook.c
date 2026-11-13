@@ -251,6 +251,29 @@ static void test_dsp(const char *filename) {
 }
 
 // The OfflineAnalyzer .perf replay hook: the build identifier and the entry's prologue.
+// install_bt_send on the real image: Engine's A2DP sender (BluetoothSignalSender::audio) goes to hook_bt_send, the
+// displaced prologue continues after it, and a changed prologue is left alone.
+static void test_bt_send(const char *filename) {
+    size_t len, page = (size_t)sysconf(_SC_PAGESIZE);
+    uchar *image = map_image(filename, &len);
+    uintptr_t base = (uintptr_t)image;
+    select_build(&engine_builds[0]);
+    assert(build->bt_send == 0x102eb20);
+    uchar entry[16];
+    memcpy(entry, image + build->bt_send, 16);
+    image[build->bt_send] ^= 1;
+    bt_send_orig = NULL;
+    install_bt_send(base, page);
+    assert(!bt_send_orig && !memcmp(image + build->bt_send + 1, entry + 1, 15));
+    image[build->bt_send] ^= 1;
+    install_bt_send(base, page);
+    const uint32_t *at = (const uint32_t *)(image + build->bt_send), *tramp = (const uint32_t *)bt_send_orig;
+    assert(bt_send_orig && at[0] == 0x58000050 && at[1] == 0xd61f0200 && quad(&at[2]) == (uint64_t)(uintptr_t)hook_bt_send);
+    assert(!memcmp(tramp, entry, 16) && tramp[4] == 0x58000050 && tramp[5] == 0xd61f0200 && quad(&tramp[6]) == base + build->bt_send + 16);
+    munmap(image, len);
+    puts("AZ04 Bluetooth sender hook: redirect + trampoline built, changed prologue refused: PASS");
+}
+
 static void test_offline_analyzer(const char *filename) {
     size_t len;
     uchar *image = map_image(filename, &len);
@@ -501,7 +524,7 @@ int main(int argc, char **argv) {
     test_led();
     test_led_replay_on_engine_thread();
     test_stems_processor_fallback();
-    for (int i = 1; i < argc; i++) { test_engine(argv[i]); test_rec_stream(argv[i]); test_sqlite(argv[i]); test_dsp(argv[i]); }
+    for (int i = 1; i < argc; i++) { test_engine(argv[i]); test_rec_stream(argv[i]); test_sqlite(argv[i]); test_dsp(argv[i]); test_bt_send(argv[i]); }
     const char *oa = getenv("AZ04_OFFLINE_ANALYZER");
     if (oa) test_offline_analyzer(oa);
     return 0;
