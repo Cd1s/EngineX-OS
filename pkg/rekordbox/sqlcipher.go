@@ -176,15 +176,17 @@ func DecryptSQLCipher4(ctx context.Context, r io.Reader, size int64, w io.Writer
 
 // The plaintext copy goes to the EngineX state directory on /data (eMMC), not
 // to /tmp, which is a RAM tmpfs on the decks (SC5000: 1 GB of 2 GB RAM).
-// Tests and hosts without /data/enginex always use the system temp dir so
-// running go test never writes to a build host's /data/enginex/tmp.
+// Tests and hosts without /data/enginex use a private directory under the
+// system temp dir so running go test never writes to a build host's
+// /data/enginex/tmp. Never the temp dir itself: prepareOneLibraryTempDir
+// chmods its directory to 0700, which turned a root build host's /tmp to 0700.
 func selectOneLibraryTempDir(dataRoot string, inTest bool) string {
 	if !inTest {
 		if st, err := os.Stat(dataRoot); err == nil && st.IsDir() {
 			return filepath.Join(dataRoot, "tmp")
 		}
 	}
-	return os.TempDir()
+	return filepath.Join(os.TempDir(), fmt.Sprintf("enginex-onelibrary-%d", os.Geteuid()))
 }
 
 var oneLibraryTempDir = func() string {

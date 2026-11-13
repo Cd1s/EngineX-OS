@@ -79,7 +79,7 @@ func encryptSQLCipher4ForTest(t *testing.T, plain []byte, passphrase []byte) []b
 
 func listTempOneLibraryFiles(t *testing.T) map[string]bool {
 	t.Helper()
-	matches, err := filepath.Glob(filepath.Join(os.TempDir(), "rb-onelibrary-*.db"))
+	matches, err := filepath.Glob(filepath.Join(oneLibraryTempDir(), "rb-onelibrary-*.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
