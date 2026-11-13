@@ -170,47 +170,6 @@ func winError(op string, err error, written bool) error {
 	return fault(op, kind, written, err)
 }
 
-// Windows normalizes a physical USB serial into the unique PnP instance ID.
-// Generated location IDs and composite-interface instance tails are not serials.
-func windowsUSBSerial(instance string, capabilities uint32) string {
-	const uniqueID = 0x10 // CM_DEVCAP_UNIQUEID
-	parts := strings.Split(instance, "\\")
-	if capabilities&uniqueID == 0 || len(parts) != 3 || !strings.EqualFold(parts[0], "USB") || strings.Contains(strings.ToUpper(parts[1]), "&MI_") {
-		return ""
-	}
-	return parts[2]
-}
-
-func inheritWindowsSerial(attachments []winAttachment, parentOf func(uint32) (uint32, bool)) {
-	byInstance := make(map[uint32]winAttachment, len(attachments))
-	for _, device := range attachments {
-		byInstance[device.devinst] = device
-	}
-	for i := range attachments {
-		device := &attachments[i]
-		if device.info.Serial != "" {
-			continue
-		}
-		current := device.devinst
-		for depth := 0; depth < 8; depth++ {
-			parent, ok := parentOf(current)
-			if !ok || parent == current {
-				break
-			}
-			current = parent
-			if candidate, ok := byInstance[parent]; ok {
-				if candidate.info.VID != device.info.VID || candidate.info.PID != device.info.PID {
-					break
-				}
-				if candidate.info.Serial != "" {
-					device.info.Serial = candidate.info.Serial
-					break
-				}
-			}
-		}
-	}
-}
-
 type winAttachment struct {
 	info     DeviceInfo
 	instance string
@@ -218,6 +177,7 @@ type winAttachment struct {
 	arrival  string
 	paths    []string
 }
+
 type windowsBackend struct {
 	mu          sync.Mutex
 	attachments map[DeviceID]winAttachment
@@ -393,6 +353,12 @@ func scanWindows(ctx context.Context) ([]winAttachment, error) {
 		service, _ := property(device, windows.SPDRP_SERVICE).(string)
 		product, _ := property(device, windows.SPDRP_DEVICEDESC).(string)
 		capabilities, _ := property(device, windows.SPDRP_CAPABILITIES).(uint32)
+		serial := ""
+		parts := strings.Split(instance, "\\")
+		// CM_DEVCAP_UNIQUEID distinguishes USB serials from generated IDs.
+		if capabilities&0x10 != 0 && len(parts) == 3 && !strings.Contains(strings.ToUpper(parts[1]), "&MI_") {
+			serial = parts[2]
+		}
 		location, _ := property(device, windows.SPDRP_LOCATION_INFORMATION).(string)
 		if locations, ok := property(device, windows.SPDRP_LOCATION_PATHS).([]string); ok && len(locations) > 0 {
 			location = locations[0]
@@ -402,14 +368,24 @@ func scanWindows(ctx context.Context) ([]winAttachment, error) {
 			return nil, fault("enumerate interface paths", System, false, err)
 		}
 		arrival := winArrival(set, device)
-		result = append(result, winAttachment{info: DeviceInfo{VID: vid, PID: pid, Product: product, Driver: service, Location: location, Serial: windowsUSBSerial(instance, capabilities)}, instance: instance, devinst: uint32(device.DevInst), arrival: arrival, paths: paths})
+		result = append(result, winAttachment{info: DeviceInfo{VID: vid, PID: pid, Product: product, Driver: service, Location: location, Serial: serial}, instance: instance, devinst: uint32(device.DevInst), arrival: arrival, paths: paths})
 	}
 	parentProc := cfgmgrDLL.NewProc("CM_Get_Parent")
-	inheritWindowsSerial(result, func(child uint32) (uint32, bool) {
+	physical := make(map[uint32]DeviceInfo, len(result))
+	for _, device := range result {
+		physical[device.devinst] = device.info
+	}
+	for i := range result {
+		device := &result[i]
+		if device.info.Serial != "" {
+			continue
+		}
 		var parent uint32
-		status, _, _ := parentProc.Call(uintptr(unsafe.Pointer(&parent)), uintptr(child), 0)
-		return parent, status == 0
-	})
+		status, _, _ := parentProc.Call(uintptr(unsafe.Pointer(&parent)), uintptr(device.devinst), 0)
+		if candidate, ok := physical[parent]; status == 0 && ok && candidate.VID == device.info.VID && candidate.PID == device.info.PID {
+			device.info.Serial = candidate.Serial
+		}
+	}
 	return result, nil
 }
 

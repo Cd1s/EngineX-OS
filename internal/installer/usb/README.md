@@ -35,7 +35,7 @@ visible without active interfaces and Open reports Unsupported with its path.
 Invalid descriptors are still rejected when opening a selected attachment.
 
 `Location` identifies the host port/topology for selecting identical devices.
-Darwin sorts attachments by location and registry ID, then sorts interfaces.
+Darwin sorts attachments by location and registry ID.
 Windows fills `Serial` from a unique physical USB PnP instance ID, or the
 matching physical USB parent of a composite interface; Windows normalizes this
 value. Generated location IDs are not reported as serials. Optional metadata

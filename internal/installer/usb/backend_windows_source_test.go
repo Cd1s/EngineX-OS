@@ -6,7 +6,6 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"os"
 	"testing"
 )
 
@@ -14,18 +13,7 @@ import (
 // escape contract in the checkout, then compile/vet the Windows target too.
 // Native WIN runs prebuilt binaries and does not receive source files.
 func TestWindowsProcPointerEscapeContract(t *testing.T) {
-	var source []byte
-	var err error
-	for _, path := range []string{"backend_windows.go", "internal/installer/usb/backend_windows.go"} {
-		source, err = os.ReadFile(path)
-		if err == nil {
-			break
-		}
-	}
-	if err != nil {
-		t.Fatal(err)
-	}
-	file, err := parser.ParseFile(token.NewFileSet(), "backend_windows.go", source, parser.ParseComments)
+	file, err := parser.ParseFile(token.NewFileSet(), "backend_windows.go", nil, parser.ParseComments)
 	if err != nil {
 		t.Fatal(err)
 	}

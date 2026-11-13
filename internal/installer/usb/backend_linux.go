@@ -49,8 +49,6 @@ type linuxBackend struct {
 	sysroot, devroot string
 	attachments      map[DeviceID]linuxAttachment
 	calls            linuxCalls
-	// Enumeration seam for transient sysfs failures; Open always re-reads sysfs.
-	scanAttachment func(string) (linuxAttachment, error)
 }
 
 func NewBackend() (Backend, error) {
@@ -91,31 +89,14 @@ func readSmall(path string, limit int) ([]byte, error) {
 }
 
 func sysNumber(path string, bits int) (uint64, error) {
-	return sysAttributeNumber(path, bits, false)
-}
-
-func sysAttributeNumber(path string, bits int, emptyZero bool) (uint64, error) {
 	b, err := readSmall(path, 32)
 	if err != nil {
 		return 0, err
 	}
-	value := strings.TrimSpace(string(b))
-	if value == "" && emptyZero {
-		return 0, nil
-	}
-	number, err := strconv.ParseUint(value, 10, bits)
-	if err != nil {
-		return 0, fmt.Errorf("parse %s: %w", path, err)
-	}
-	return number, nil
+	return strconv.ParseUint(strings.TrimSpace(string(b)), 10, bits)
 }
 
-func (b *linuxBackend) attachment(path string) (attachment linuxAttachment, err error) {
-	defer func() {
-		if err != nil {
-			err = fmt.Errorf("device %s: %w", path, err)
-		}
-	}()
+func (b *linuxBackend) attachment(path string) (linuxAttachment, error) {
 	desc, err := readSmall(filepath.Join(path, "descriptors"), 65535)
 	if err != nil {
 		return linuxAttachment{}, err
@@ -132,7 +113,15 @@ func (b *linuxBackend) attachment(path string) (attachment linuxAttachment, err 
 		return linuxAttachment{}, err
 	}
 	// usb_actconfig_show emits an empty attribute before configuration.
-	active, err := sysAttributeNumber(filepath.Join(path, "bConfigurationValue"), 8, true)
+	value, err := readSmall(filepath.Join(path, "bConfigurationValue"), 32)
+	if err != nil {
+		return linuxAttachment{}, err
+	}
+	configuration := strings.TrimSpace(string(value))
+	if configuration == "" {
+		configuration = "0"
+	}
+	active, err := strconv.ParseUint(configuration, 10, 8)
 	if err != nil {
 		return linuxAttachment{}, err
 	}
@@ -196,11 +185,7 @@ func (b *linuxBackend) Enumerate(ctx context.Context) ([]DeviceInfo, error) {
 		if _, err := os.Stat(filepath.Join(path, "idVendor")); errors.Is(err, os.ErrNotExist) {
 			continue
 		}
-		inspect := b.attachment
-		if b.scanAttachment != nil {
-			inspect = b.scanAttachment
-		}
-		a, err := inspect(path)
+		a, err := b.attachment(path)
 		if err != nil {
 			// Malformed, unreadable or just-unplugged unrelated devices must
 			// not hide a usable deck. Open revalidates the selected attachment.
@@ -267,7 +252,7 @@ func (b *linuxBackend) Open(ctx context.Context, id DeviceID, number, alt uint8)
 			alternates++
 		}
 	}
-	if alternates > 1 || alt != 0 {
+	if alternates > 1 {
 		settings := [2]uint32{uint32(number), uint32(alt)}
 		if err = b.calls.ioctl(fd, 0x80085504, unsafe.Pointer(&settings)); err != nil {
 			releaseErr := b.calls.ioctl(fd, 0x80045510, unsafe.Pointer(&claim))
