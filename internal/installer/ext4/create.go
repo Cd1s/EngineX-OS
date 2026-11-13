@@ -81,7 +81,7 @@ func mkfs(dev writableDevice, p mkfsParams) (*fsys, error) {
 	for range 3 {
 		groups = (blocks + bpg - 1) / bpg
 		gdtBlocks = (groups + descPerBlock - 1) / descPerBlock
-		ipg = (blocks * bs / inodeRatio + groups - 1) / groups
+		ipg = (blocks*bs/inodeRatio + groups - 1) / groups
 		ipg = (ipg + ipb - 1) / ipb * ipb
 		ipg = max(ipg, ipb*2)
 		ipg = min(ipg, bs*8, (bpg-gdtBlocks-3)/2*ipb)
