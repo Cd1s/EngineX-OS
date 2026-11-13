@@ -266,7 +266,7 @@ func TestShoutcastStreaming(t *testing.T) {
 		// Read audio data
 		buf, total := make([]byte, 1024), 0
 		for {
-			n, err := conn.Read(buf)
+			n, err := reader.Read(buf)
 			if err != nil {
 				return
 			}
@@ -615,8 +615,7 @@ func TestInputPathPCM(t *testing.T) {
 		_, _ = io.WriteString(conn, "HTTP/1.0 200 OK\r\n\r\n")
 
 		frame := make([]byte, 1024)
-		n, err := conn.Read(frame)
-		if err == nil && n >= 68 {
+		if _, err := io.ReadAtLeast(conn, frame, 68); err == nil { // the 44-byte WAV header may arrive alone
 			close(done)
 		}
 	}()
