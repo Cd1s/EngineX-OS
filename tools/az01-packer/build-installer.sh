@@ -68,5 +68,7 @@ done
 		[ -e "$f" ] && set -- "$@" "$f"
 	done
 	sha256sum "$@" > SHA256SUMS.txt
+	# This is the list that is published and signed (sign-release.sh, #239); an older signature is for older bytes.
+	rm -f SHA256SUMS.txt.sig
 )
 ls -l "$OUT"/EngineX-Installer-"$V"-*

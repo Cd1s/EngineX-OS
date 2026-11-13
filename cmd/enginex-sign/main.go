@@ -6,6 +6,10 @@ package main
 
 import (
 	"crypto/ed25519"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -23,13 +27,18 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) er
 	fs := flag.NewFlagSet("enginex-sign", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var inPath, outPath, pubPath string
-	var verify bool
+	var verify, listKeys, allowUntrusted bool
 	fs.StringVar(&inPath, "in", "", "path to SHA256SUMS.txt")
 	fs.StringVar(&outPath, "out", "", "signature path (default <in>.sig)")
 	fs.BoolVar(&verify, "verify", false, "verify <in> against <out> instead of signing")
 	fs.StringVar(&pubPath, "pubkey", "", "optional PKIX PEM public key file for --verify")
+	fs.BoolVar(&listKeys, "list-keys", false, "print the trusted public keys embedded in this build and exit (fails when there are none)")
+	fs.BoolVar(&allowUntrusted, "allow-untrusted", false, "sign with a key that is not embedded in this build (release-gate throwaway keys only)")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if listKeys {
+		return printTrustedKeys(stdout)
 	}
 	if inPath == "" {
 		if fs.NArg() == 1 {
@@ -91,6 +100,12 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) er
 	if err != nil {
 		return err
 	}
+	// A release signed with a key the decks do not trust would be refused by every one of them.
+	if !allowUntrusted {
+		if err := requireTrusted(priv); err != nil {
+			return err
+		}
+	}
 	sigData, err := releasesig.Sign(priv, sumsData)
 	if err != nil {
 		return err
@@ -99,6 +114,46 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) er
 		return err
 	}
 	fmt.Fprintf(stdout, "signed %s -> %s\n", inPath, outPath)
+	return nil
+}
+
+// requireTrusted fails unless the public half of priv is one of the keys embedded in this build.
+func requireTrusted(priv ed25519.PrivateKey) error {
+	keys, err := releasesig.TrustedPublicKeys()
+	if err != nil {
+		return err
+	}
+	if len(keys) == 0 {
+		return errors.New("no trusted release public key is embedded (internal/releasesig/keys.go): decks would refuse this release")
+	}
+	pub, _ := priv.Public().(ed25519.PublicKey)
+	for _, k := range keys {
+		if k.Equal(pub) {
+			return nil
+		}
+	}
+	return errors.New("the release key is not among the embedded trusted public keys (internal/releasesig/keys.go): decks would refuse this release")
+}
+
+// printTrustedKeys lists the embedded keys as "<index> <fingerprint> <base64 SPKI>": the
+// fingerprint is the first 16 hex digits of the SHA-256 of the raw key, the last field is the
+// single base64 line of the PEM body, which is how the key appears inside the built binaries.
+func printTrustedKeys(w io.Writer) error {
+	keys, err := releasesig.TrustedPublicKeys()
+	if err != nil {
+		return err
+	}
+	if len(keys) == 0 {
+		return errors.New("no trusted release public key is embedded (internal/releasesig/keys.go)")
+	}
+	for i, k := range keys {
+		der, err := x509.MarshalPKIXPublicKey(k)
+		if err != nil {
+			return err
+		}
+		sum := sha256.Sum256(k)
+		fmt.Fprintf(w, "%d %s %s\n", i, hex.EncodeToString(sum[:8]), base64.StdEncoding.EncodeToString(der))
+	}
 	return nil
 }
 

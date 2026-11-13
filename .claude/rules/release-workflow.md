@@ -86,14 +86,24 @@ REMOTE_BUILD_HOST=<build host> remote-build --name sc5000-release-<短说明> --
    OUT=/var/tmp/sc5000-release-<VERSION>
    rm -rf "$OUT"
    sh tools/az01-packer/build-release.sh <VERSION> /root/build/sc5000-lab/fw-5.3.0 none /root/build/sc5000-lab/sbin/fsck.hfsplus "$OUT"
-   sh tools/az01-packer/build-installer.sh <VERSION> "$OUT"'
+   sh tools/az01-packer/build-installer.sh <VERSION> "$OUT"
+   ENGINEX_RELEASE_KEY=/root/.config/enginex/release.key sh tools/az01-packer/sign-release.sh "$OUT"'
 ```
+
+**签名（#239，5.3.0.5 起）**：每个 Release 的 `SHA256SUMS.txt` 都用发布密钥（Ed25519）签名，签名文件是 `SHA256SUMS.txt.sig`（对 `SHA256SUMS.txt` 原字节的签名，64 字节的标准 base64 加换行）。
+
+- 签名一定是最后一步：`build-installer.sh` 会重写 `SHA256SUMS.txt`（加入 4 个安装器），所以 `sign-release.sh` 必须在它之后跑；它会先 `sha256sum -c` 校验清单、确认每个产物都在清单里、拒绝仓库里没有内置公钥的密钥、签名后再用内置公钥验一遍。
+- 私钥只在编译机上，root 专用（`0600`，PKCS#8 PEM，生成命令 `umask 077 && openssl genpkey -algorithm ed25519 -out /root/.config/enginex/release.key`）；工具从环境变量 `ENGINEX_RELEASE_KEY` 读路径，从不打印密钥内容；不写进仓库、聊天、日志。agent 不接触私钥。
+- 公钥（`openssl pkey -in <私钥> -pubout`）写在 `internal/releasesig/keys.go` 的 `TrustedPublicKeysPEM` 列表里，构建进碟机和安装器。**没有内置公钥时 `build-release.sh`（公开发布，第 3 个参数 `none`）直接停止，门禁也会失败**：否则每台碟机都会拒绝这个版本。
+- 换密钥（轮换）：第 N 版把新旧两个公钥都放进列表，仍用旧密钥签名；旧密钥签名的版本能装上新列表的碟机后，第 N+1 版起改用新密钥签名，再从列表去掉旧公钥。密钥泄漏时：立即发一个带新公钥的新版本（见 `SECURITY.md`），并在 Release Notes 说明升级办法。
+- 过渡：5.3.0.4 及更早的碟机不验签，照旧安装；Release 里多出的 `SHA256SUMS.txt`、`SHA256SUMS.txt.sig` 不影响它们（门禁的旧版本阶段验证这一点）。5.3.0.5 及以后的碟机和安装器要求签名有效。
+- 5.3.0.5 起屏幕在线更新不再把下载地址交给原厂更新器（`UpdateFromUrl`）：碟机自己下载、按已验签清单核对 SHA-256 后再应用（一代机 `az01-update --file`，二代机数据包安装）。原因：原厂更新器自己重新下载文件，只检查镜像里自带的完整性字段，签名绑不到真正刷入的字节。
 
 `build-release.sh` 抽 qrc 时用 `qemu-arm -L <rootfs>` 跑 Engine 的静态初始化，编译机装了不带 binfmt 的 `qemu-user`（`--no-install-recommends`）。不要装 `qemu-user-binfmt`：注册了 `qemu-arm` 的 binfmt 会盖过原生执行，门禁会退回软模拟。
 
 第 3 个参数在公开发布时**必须是 `none`**：公开镜像不能内置任何人的 SSH 公钥（#46）。只有维护者自用的私有镜像才传公钥文件，且私有镜像不能上传到 Release。
 
-输出目录必须不存在、且不在任何 git 工作区里。`5.3.0.4` / `5.3.0.5` 产出 **8 个一代 `*-Update.img`、8 个二代 `*-Update.img`、8 个二代兼容 `*-Data-Bundle.tar.gz`、4 个平台 `EngineX-Installer-<VERSION>-*` 以及汇总全部 28 个产物的 `SHA256SUMS.txt`**（共 29 个上传文件）。
+输出目录必须不存在、且不在任何 git 工作区里。`5.3.0.4` / `5.3.0.5` 产出 **8 个一代 `*-Update.img`、8 个二代 `*-Update.img`、8 个二代兼容 `*-Data-Bundle.tar.gz`、4 个平台 `EngineX-Installer-<VERSION>-*`、汇总全部 28 个产物的 `SHA256SUMS.txt`，以及它的签名 `SHA256SUMS.txt.sig`**（共 30 个上传文件）。
 
 ## 4. 校验镜像
 
@@ -136,6 +146,7 @@ bash tools/az01-packer/release-gate.sh \
 | 静态审计 | 新 rootfs 里所有自定义 unit 的 `Requires/BindsTo/Wants/After/Slice` 目标、`Exec*` 与 `EnvironmentFile`、脚本解释器和脚本里的绝对路径工具、suite 直接调用的工具（`exec.Command`）是否真实存在；`command -v` 可选工具缺失记为 WARN（例如 `iw` 缺失时，关闭 Wi-Fi 省电的分支从不执行）；宿主 systemd 再用 `systemd-analyze verify --root` 把所有自定义 unit 和带 drop-in 的官方 unit 解析一遍（5.3.0.1 第一次构建时它报出了 `Unit var.mount not found`），输出必须为空；overlay 里每个动态 ELF 跑 `ld.so --list`；engine 脚本不再强制 100 Mbps；所有 Engine 脚本过 `sh -n` |
 | 上一版在线升级 | 旧 rootfs + 空 `/data`：etc-reset → prepare → stream-sync + Engine（带 UI hook）；本地 TLS GitHub mock 发布新版；`/v1/sc5000/update` 发现新版 → `?apply=1` → Engine 以 `UpdateFromUrl` 退出 → 官方 engine 脚本 → `az01-update --net` 下载并校验新镜像，并进入 Applying；作为对照，翻转一个字节的镜像必须在 Verifying 阶段被拒绝 |
 | 新版开机 | 同一个 `/data` 换成新 rootfs：etc-reset → prepare（检查版本号、UI 包、SSH host key 保留）→ `sc5000-debloat --apply-runtime` → `sc5000-perf-tune` → `sshd -t` → safe-mode 下先跑一次原厂 Engine，在 `/data` 留下原厂 QML 缓存（复现 5.3.0.1 实机故障）→ stream-sync / deemixd / rb-bridge / engine-guardian / storage-discover / edisksd + hook → Engine + UI hook |
+| 签名（#239） | 镜像里的 `sc5000-suite` 内嵌了仓库里的发布公钥（门禁在沙箱的二进制副本里把它换成一次性公钥，其余字节不变，所以测的是真实发布的二进制）；`build-release.sh` 后的清单由 `enginex-sign` 用一次性私钥签名，模拟发布的 Release 带 `SHA256SUMS.txt` 和 `.sig`：上一版（不验签）照旧装得上带签名文件的 Release；新版下一次在线更新验签通过、下载并按签名清单核对后进入 `az01-update --file`；无签名、他人签名、签名后改过的清单、镜像被改一个字节这四种发布各自被拒绝，屏幕给出对应提示，`az01-update` 一次也没被调用 |
 | 新版功能 | QML 替换数等于 UI 包文件数 + 1（门禁探针）；探针 `tools/az01-packer/gate-ui-probe.qml`（只在沙箱里替换原厂 `QmlWarnings.qml`，不进镜像）读取 Engine 实际渲染的节点：Settings → Services → Streaming 显示包里的 Deezer、SoundCloud 和 Beatport 各一行、原厂 Tidal 隐藏，About 显示 `EngineX OS <VERSION>`，控制中心有波形磁贴；Engine 补丁 16 处（TidalAPI 网关、Stems 等），21 个 DSP guard（含 Flanger 补偿 #54、主输出软限幅 #58），SQLite hook 已装，无 QML 加载错误、无崩溃，各守护进程存活；`/v1/sc5000/ui`、`POST /au/oauth2/token`、deemixd `/healthz` 正常；stems-probe 与 `stems-processor` 完成握手和分轨；rb-bridge 转换 Rekordbox 导出；fsck.hfsplus 可执行；下一次在线升级（mock 发布 `<VERSION>` 末位 +1）同样走通 |
 
 - 预期值随底包变：`GATE_EXPECT_APPLIED`（默认：独立播放器 20、一体机 28，后者多 8 处 #206 录音补丁）、`GATE_EXPECT_DSP`（默认 21）、`GATE_LANG`（默认 `zh-Hans`）。一代 5.3.0 的常驻 hook 站点表增加到 20 项，因此同步更新补丁数默认值。只有底包或 hook 站点表变了才改，并写进变更记录。
@@ -146,17 +157,17 @@ bash tools/az01-packer/release-gate.sh \
 
 ## 5. Tag 与 GitHub Release
 
-在编译机上直接上传全部 29 个文件（28 个产物 + `SHA256SUMS.txt`；那边 `gh` 已登录 `Cd1s`，不用把镜像拉回本机）：
+在编译机上直接上传全部 30 个文件（28 个产物 + `SHA256SUMS.txt` + `SHA256SUMS.txt.sig`；那边 `gh` 已登录 `Cd1s`，不用把镜像拉回本机）：
 
 ```sh
 # 资产清单以 SHA256SUMS.txt 为准（5.3.0.4 / 5.3.0.5 共 28 个：16 个 *-Update.img + 8 个 *-Data-Bundle.tar.gz + 4 个 EngineX-Installer-*）
 # 新版本
 gh release create v<VERSION> --repo Cd1s/EngineX-OS --title "EngineX OS <VERSION>" \
   --notes-file notes.md --target <提交> --latest \
-  $(awk '{print $2}' SHA256SUMS.txt) SHA256SUMS.txt
+  $(awk '{print $2}' SHA256SUMS.txt) SHA256SUMS.txt SHA256SUMS.txt.sig
 # 同一版本修复重发（注意：--clobber 只覆盖同名文件；5.3.0.6+ 退役 *-Data-Bundle.tar.gz 时若覆盖旧同版本需用 gh release delete-asset 清理残留资产）
 gh release upload v<VERSION> --repo Cd1s/EngineX-OS \
-  $(awk '{print $2}' SHA256SUMS.txt) SHA256SUMS.txt --clobber
+  $(awk '{print $2}' SHA256SUMS.txt) SHA256SUMS.txt SHA256SUMS.txt.sig --clobber
 ```
 
 - Release Notes 必须包含完整的 **28 个产物 SHA-256 对照表**（8 款一代 `*-Update.img`、8 款二代 `*-Update.img`、8 款二代过渡兼容 `*-Data-Bundle.tar.gz`、4 平台 `EngineX-Installer`；`5.3.0.6+` 退役 `.tar.gz` 后为 20 个），每次重发都要换成新值。
@@ -169,7 +180,8 @@ gh release upload v<VERSION> --repo Cd1s/EngineX-OS \
 gh release view v<VERSION> --repo Cd1s/EngineX-OS --json assets -q '.assets[] | "\(.digest) \(.name)"'
 ```
 
-- 每个资产的 digest 与 `SHA256SUMS.txt`、Release Notes 表格、`docs/ISSUE-FIXES-<VERSION>.md` 完全一致（`5.3.0.4` / `5.3.0.5` 共 29 个资产）。
+- 上传后在别处下载 `SHA256SUMS.txt` 和 `.sig`，用 `go run ./cmd/enginex-sign --verify SHA256SUMS.txt` 验一遍（`5.3.0.5` 起）。
+- 每个资产的 digest 与 `SHA256SUMS.txt`、Release Notes 表格、`docs/ISSUE-FIXES-<VERSION>.md` 完全一致（`5.3.0.4` 共 29 个资产；`5.3.0.5` 起 30 个，多出 `SHA256SUMS.txt.sig`）。
 - 新版本时，抽查 README 与官网 `enginexdj.com` 里的下载链接：`curl -sIL <链接> | grep -i "^HTTP"` 最终是 200。
 - 在 `docs/ISSUE-FIXES-<VERSION>.md` 记录：日期、范围、原因、验证、构建提交、全部 28 个产物 sha256、门禁结果、回滚点（上一次构建的提交）、实机影响。
 - 在本次发布解决或包含的所有关联 GitHub Issues 下逐条留言告知 `v<VERSION>` 已发布、修复点摘要与下载/升级方式。
