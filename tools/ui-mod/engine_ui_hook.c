@@ -3354,7 +3354,12 @@ int sc5000_alsa_boot_hook(void *root, void *config, void **dst, void *private_da
             if (devnull > 2) close(devnull);
         }
         unsetenv("LD_PRELOAD");
-        char *const argv[] = {"/bin/sh", "/data/enginex/bundle/boot-activate.sh", NULL};
+        // The ALSA file loaded this hook through /data/sc5000-custom: its boot-activate.sh is
+        // reachable there too while /data/enginex is a dangling link, for the moment a downgrade
+        // to a release before 5.3.0.3 hands the directory back (#234, internal/leave).
+        const char *activate = "/data/enginex/bundle/boot-activate.sh";
+        if (access(activate, R_OK) != 0) activate = "/data/sc5000-custom/bundle/boot-activate.sh";
+        char *const argv[] = {"/bin/sh", (char *)activate, NULL};
         execv("/bin/sh", argv);
         _exit(1);
     }
@@ -3637,17 +3642,18 @@ int az01_apply_image(const char *path, int flags) {
             snprintf(custom_dir, sizeof custom_dir, "%s/enginex", test_root);
             snprintf(leave, sizeof leave, "%s/run/enginex/leave.sh", test_root);
         }
-        // Unpacked next to the install (the /tmp tmpfs is small) and installed by the bundle's own
-        // install.sh, so an older install.sh that does not know "install.sh <img>" is not needed.
-        // Then, whatever release it was, this release's leave step (#234) takes its own units out
-        // of /run before the reboot below: an older release then never runs next to them, and a
-        // newer one starts clean. Only after a good install: a failed one leaves this release as it is.
+        // Unpacked next to the install (the /tmp tmpfs is small), so an older install.sh that does
+        // not know "install.sh <img>" is not needed. This release's leave step (#234) puts the
+        // bundle in: a newer one by its own install.sh in place, an older one through a stage and
+        // atomic swaps that survive a power cut (internal/leave). Then it takes this release's units
+        // out of /run before the reboot below. A failed install leaves this release as it is.
+        // Without the step (a release before 5.3.0.5 runs this hook) the bundle installs in place.
         static const char script[] =
             "set -e; d=\"${2:-" ENGINEX_DATA_DIR "}\"; "
             "[ -z \"$2\" ] || export ENGINEX_CUSTOM=\"$d\" ENGINEX_ALSA_OVERLAY=\"$d/alsa-conf.d\" SC5000_CUSTOM=\"$d\" SC5000_ALSA_OVERLAY=\"$d/alsa-conf.d\"; "
             "mkdir -p \"$d\"; w=$(mktemp -d \"$d/.ota-img.XXXXXX\"); trap 'rm -rf \"$w\"' 0; "
-            "tail -c +129 \"$1\" | tar -xzf - -C \"$w\"; sh \"$w\"/*/install.sh; "
-            "[ ! -f \"$3\" ] || sh \"$3\" --no-reboot || :";
+            "tail -c +129 \"$1\" | tar -xzf - -C \"$w\"; t=$(echo \"$w\"/*); "
+            "if [ -f \"$3\" ]; then sh \"$3\" --install \"$t\" --no-reboot; else sh \"$t\"/install.sh; fi";
         char *const argv[] = {"sh", "-c", (char *)script, "sh", (char *)path, custom_dir, leave, NULL};
         if (run_wait("/bin/sh", argv) != 0) return -1;
         if (flags & 1) unlink(path);

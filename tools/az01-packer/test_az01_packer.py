@@ -402,6 +402,39 @@ class FilesystemTests(unittest.TestCase):
         aside = list(new.glob('legacy-sc5000-custom.*'))
         self.assertEqual([(a/'settings.conf').read_text() for a in aside], ['older'])
 
+    def test_234_prepare_takes_back_the_layout_a_downgrade_to_5302_handed_back(self):
+        # #234 review R1: a downgrade to 5.3.0.2 hands the real /data/sc5000-custom back and leaves
+        # /data/enginex as the link to it (or, cut half-way, a link to itself). The next upgrade
+        # moves it forward again; before, prepare refused the /data/enginex link and SSH and the
+        # UI packs stayed off.
+        seed, data = self.root/'seed', self.root/'data'
+        seed.mkdir()
+        old, new = data/'sc5000-custom', data/'enginex'
+        own = self.key.with_suffix('.pub').read_bytes()
+        for link in ('sc5000-custom', 'enginex'):
+            for template in (az.ETC_RESET, az.PREPARE):
+                shutil.rmtree(data, ignore_errors=True)
+                (old/'Stream').mkdir(parents=True)
+                (old/'Stream/song.flac').write_text('x')
+                (old/'authorized_keys').write_bytes(own)
+                new.symlink_to(link)
+                script = template.replace(b'/data', str(data).encode()).replace(
+                    b'/usr/share/enginex', str(seed).encode())
+                p = subprocess.run(['sh', '-s'], input=script, capture_output=True)
+                self.assertEqual(p.returncode, 0, (link, p.stderr))
+                self.assertTrue(new.is_dir() and not new.is_symlink(), link)
+                self.assertTrue(old.is_symlink() and os.readlink(old) == 'enginex', link)
+                self.assertEqual((new/'Stream/song.flac').read_text(), 'x')
+        # A link anywhere else is not EngineX's: prepare still refuses it.
+        shutil.rmtree(data)
+        old.mkdir(parents=True)
+        (data/'elsewhere').mkdir()
+        new.symlink_to('elsewhere')
+        script = az.PREPARE.replace(b'/data', str(data).encode()).replace(b'/usr/share/enginex', str(seed).encode())
+        p = subprocess.run(['sh', '-s'], input=script, capture_output=True)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertTrue(new.is_symlink() and old.is_dir())
+
     def test_etc_reset_drops_stale_434_overlay_once(self):
         data = self.root/'data'
         upper = data/'system/etc/overlay'

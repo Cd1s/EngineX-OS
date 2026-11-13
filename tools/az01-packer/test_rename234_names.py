@@ -24,7 +24,7 @@ SHIPPED = [
     'tools/az01-packer/host-install-userdata.py', 'tools/az01-packer/rootfs_audit.py',
 ]
 NOT_SHIPPED = ['*_test.go', '*/test_*', '*.md', '*.so', '*.png', '*.jpg', '*.ttf', '*.gz', '*.bin',
-               '*/__pycache__/*']
+               '*/__pycache__/*', '*/testdata/*']
 
 ANY = ['*']
 BUNDLE = ['tools/az01-packer/build-data-bundle.py']

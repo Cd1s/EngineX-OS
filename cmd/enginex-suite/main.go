@@ -14,6 +14,7 @@ import (
 
 	"github.com/Cd1s/EngineX-OS/internal/cli"
 	"github.com/Cd1s/EngineX-OS/internal/deemixd"
+	"github.com/Cd1s/EngineX-OS/internal/leave"
 	"github.com/Cd1s/EngineX-OS/internal/stemsproc"
 )
 
@@ -35,13 +36,15 @@ func main() {
 		os.Exit(cli.Guardian(args, os.Stdout, os.Stderr))
 	case "stems-processor":
 		os.Exit(stemsproc.Main(args))
+	case "leave":
+		os.Exit(leave.Main(args, os.Stdout, os.Stderr))
 	case "enginex-deemixd":
 		if err = deemixd.Main(args); err != nil && !errors.Is(err, flag.ErrHelp) {
 			log.Print(err)
 			os.Exit(1)
 		}
 	default:
-		fmt.Fprintf(os.Stderr, "usage: enginex-suite {rb-bridge|stream-sync|engine-guardian|stems-processor|enginex-deemixd} [args...]\n")
+		fmt.Fprintf(os.Stderr, "usage: enginex-suite {rb-bridge|stream-sync|engine-guardian|stems-processor|enginex-deemixd|leave} [args...]\n")
 		os.Exit(2)
 	}
 }
