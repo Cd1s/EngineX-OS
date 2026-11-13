@@ -107,10 +107,10 @@ func SkipID3(r *bufio.Reader) error {
 	}
 }
 
-// skipID3Seeker skips zero or more consecutive validated ID3v2 tags (plus
+// SkipID3Seeker skips zero or more consecutive validated ID3v2 tags (plus
 // bounded post-tag NUL padding) at the start of r using Seek so large embedded
 // pictures are never read into memory.
-func skipID3Seeker(r io.ReadSeeker, fileSize int64) (int64, error) {
+func SkipID3Seeker(r io.ReadSeeker, fileSize int64) (int64, error) {
 	if _, err := r.Seek(0, io.SeekStart); err != nil {
 		return 0, err
 	}

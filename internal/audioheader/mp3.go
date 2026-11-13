@@ -49,11 +49,13 @@ type MP3Info struct {
 	SampleRate         int
 	Channels           int
 	Bitrate            int // kbps
+	Samples            uint64
+	Duration           float64
 	MPEGVersion        int // 1, 2, or 25 (MPEG 2.5)
 	Layer              int // 1, 2, or 3
 	SamplesPerFrame    int
 	HasXing            bool
-	Tag                string // "Xing", "Info", or ""
+	Tag                string // "Xing", "Info", "VBRI", or ""
 	Encoder            string // 9-byte LAME extension encoder field (trimmed of trailing NULs)
 	LAMEApplied        bool   // true when Encoder starts with "LAME", "Lavf", or "Lavc"
 	EncoderDelay       int    // 12-bit start_pad
@@ -248,7 +250,7 @@ func ReadMP3(r io.ReadSeeker, size int64) (MP3Info, error) {
 	if size < 4 {
 		return MP3Info{}, errors.New("mp3: file too short")
 	}
-	off, err := skipID3Seeker(r, size)
+	off, err := SkipID3Seeker(r, size)
 	if err != nil {
 		return MP3Info{}, err
 	}
@@ -262,6 +264,7 @@ func ReadMP3(r io.ReadSeeker, size int64) (MP3Info, error) {
 		xingSkip int
 		lameSkip int
 		vbrKbps  int
+		frames   uint32
 	)
 
 	// Match FFmpeg's mp3_read_header -> mp3_parse_vbr_tags at exact post-ID3 offset.
@@ -276,75 +279,93 @@ func ReadMP3(r io.ReadSeeker, size int64) (MP3Info, error) {
 			return MP3Info{}, err
 		}
 		p := 4 + f.sideInfo
-		if p+8 <= len(frame) {
+		if p+8 <= len(frame) && (string(frame[p:p+4]) == "Xing" || string(frame[p:p+4]) == "Info") {
 			tag := string(frame[p : p+4])
 			isCBR := tag == "Info"
-			if tag == "Xing" || isCBR {
-				flags := binary.BigEndian.Uint32(frame[p+4 : p+8])
-				p += 8
-				var frames, headerFilesize uint32
-				fieldsOK := true
-				if flags&0x01 != 0 {
-					if p+4 <= len(frame) {
-						frames = binary.BigEndian.Uint32(frame[p : p+4])
-						p += 4
-					} else {
-						fieldsOK = false
-					}
+			flags := binary.BigEndian.Uint32(frame[p+4 : p+8])
+			p += 8
+			var headerFilesize uint32
+			fieldsOK := true
+			if flags&0x01 != 0 {
+				if p+4 <= len(frame) {
+					frames = binary.BigEndian.Uint32(frame[p : p+4])
+					p += 4
+				} else {
+					fieldsOK = false
 				}
-				if fieldsOK && flags&0x02 != 0 {
-					if p+4 <= len(frame) {
-						headerFilesize = binary.BigEndian.Uint32(frame[p : p+4])
-						p += 4
-					} else {
-						fieldsOK = false
-					}
+			}
+			if fieldsOK && flags&0x02 != 0 {
+				if p+4 <= len(frame) {
+					headerFilesize = binary.BigEndian.Uint32(frame[p : p+4])
+					p += 4
+				} else {
+					fieldsOK = false
 				}
-				fsize := uint64(size - off)
-				if fsize > 0 && headerFilesize > 0 {
-					lo := min(fsize, uint64(headerFilesize))
-					delta := max(fsize, uint64(headerFilesize)) - lo
-					if fsize > uint64(headerFilesize) && delta > lo>>4 {
-						frames = 0
-					}
+			}
+			fsize := uint64(size - off)
+			if fsize > 0 && headerFilesize > 0 {
+				lo := min(fsize, uint64(headerFilesize))
+				delta := max(fsize, uint64(headerFilesize)) - lo
+				if fsize > uint64(headerFilesize) && delta > lo>>4 {
+					frames = 0
 				}
-				if fieldsOK && flags&0x04 != 0 {
-					if p+100 <= len(frame) {
-						p += 100
-					} else {
-						fieldsOK = false
-					}
+			}
+			if fieldsOK && flags&0x04 != 0 {
+				if p+100 <= len(frame) {
+					p += 100
+				} else {
+					fieldsOK = false
 				}
-				if fieldsOK && flags&0x08 != 0 {
-					if p+4 <= len(frame) {
-						p += 4
-					} else {
-						fieldsOK = false
-					}
+			}
+			if fieldsOK && flags&0x08 != 0 {
+				if p+4 <= len(frame) {
+					p += 4
+				} else {
+					fieldsOK = false
 				}
-				if fieldsOK && p+24 <= len(frame) {
-					ver := frame[p : p+9]
-					info.Encoder = strings.TrimRight(string(ver), "\x00")
-					prefix := string(ver[:4])
-					if prefix == "LAME" || prefix == "Lavf" || prefix == "Lavc" {
-						v := uint32(frame[p+21])<<16 | uint32(frame[p+22])<<8 | uint32(frame[p+23])
-						info.EncoderDelay = int(v >> 12)
-						info.EndPadding = int(v & 0xfff)
-						info.LAMEApplied = true
-						lameSkip = info.EncoderDelay + lameDecoderPad
-					}
+			}
+			if fieldsOK && p+24 <= len(frame) {
+				ver := frame[p : p+9]
+				info.Encoder = strings.TrimRight(string(ver), "\x00")
+				prefix := string(ver[:4])
+				if prefix == "LAME" || prefix == "Lavf" || prefix == "Lavc" {
+					v := uint32(frame[p+21])<<16 | uint32(frame[p+22])<<8 | uint32(frame[p+23])
+					info.EncoderDelay = int(v >> 12)
+					info.EndPadding = int(v & 0xfff)
+					info.LAMEApplied = true
+					lameSkip = info.EncoderDelay + lameDecoderPad
 				}
-				if frames != 0 || headerFilesize != 0 {
-					info.HasXing = true
-					info.Tag = tag
-					vbrFrame = f
-					xingSkip = f.spf
-					off += int64(f.frameSize)
-					if !isCBR && headerFilesize != 0 && frames != 0 {
+			}
+			if frames != 0 || headerFilesize != 0 {
+				info.HasXing = true
+				info.Tag = tag
+				vbrFrame = f
+				xingSkip = f.spf
+				off += int64(f.frameSize)
+				if !isCBR && frames != 0 {
+					audioBytes := uint64(headerFilesize)
+					if audioBytes == 0 && size > off {
+						audioBytes = uint64(size - off)
+					}
+					if audioBytes > 0 {
 						denom := uint64(frames) * uint64(f.spf) * 1000
-						vbrKbps = int((uint64(headerFilesize)*8*uint64(f.sampleRate) + denom/2) / denom)
+						vbrKbps = int((audioBytes*8*uint64(f.sampleRate) + denom/2) / denom)
 					}
 				}
+			}
+		} else if len(frame) >= 36+26 && string(frame[36:40]) == "VBRI" {
+			info.Tag = "VBRI"
+			vbrFrame = f
+			vbriBytes := binary.BigEndian.Uint32(frame[46:50])
+			frames = binary.BigEndian.Uint32(frame[50:54])
+			off += int64(f.frameSize)
+			audioBytes := uint64(vbriBytes)
+			if audioBytes == 0 && size > off {
+				audioBytes = uint64(size - off)
+			}
+			if frames != 0 && audioBytes > 0 {
+				denom := uint64(frames) * uint64(f.spf) * 1000
+				vbrKbps = int((audioBytes*8*uint64(f.sampleRate) + denom/2) / denom)
 			}
 		}
 	}
@@ -353,8 +374,8 @@ func ReadMP3(r io.ReadSeeker, size int64) (MP3Info, error) {
 		return MP3Info{}, err
 	}
 	rem := size - off
-	if rem == 0 && info.HasXing {
-		return finalizeMP3Info(info, vbrFrame, vbrKbps, xingSkip, lameSkip), nil
+	if rem == 0 && (info.HasXing || info.Tag == "VBRI") {
+		return finalizeMP3Info(info, vbrFrame, vbrKbps, xingSkip, lameSkip, frames, size), nil
 	}
 	winLen := int(min(rem, int64(mp3ScanWindow+mpaMaxFrameSize+4)))
 	if winLen < 4 {
@@ -374,20 +395,20 @@ func ReadMP3(r io.ReadSeeker, size int64) (MP3Info, error) {
 		next := i + f1.frameSize
 		if next+4 <= len(win) {
 			if i == 0 && off+int64(next)+128 == size && string(win[next:next+3]) == "TAG" {
-				return finalizeMP3Info(info, f1, vbrKbps, xingSkip, lameSkip), nil
+				return finalizeMP3Info(info, f1, vbrKbps, xingSkip, lameSkip, frames, size), nil
 			}
 			h2 := binary.BigEndian.Uint32(win[next : next+4])
 			if _, ok2 := decodeMPEGHeader(h2); ok2 && (h1&mp3Mask) == (h2&mp3Mask) {
-				return finalizeMP3Info(info, f1, vbrKbps, xingSkip, lameSkip), nil
+				return finalizeMP3Info(info, f1, vbrKbps, xingSkip, lameSkip, frames, size), nil
 			}
 		} else if i == 0 && off+int64(next) == size {
-			return finalizeMP3Info(info, f1, vbrKbps, xingSkip, lameSkip), nil
+			return finalizeMP3Info(info, f1, vbrKbps, xingSkip, lameSkip, frames, size), nil
 		}
 	}
 	return MP3Info{}, errors.New("mp3: failed to find valid MPEG audio frames")
 }
 
-func finalizeMP3Info(info MP3Info, audio mpegHeader, vbrKbps, xingSkip, lameSkip int) MP3Info {
+func finalizeMP3Info(info MP3Info, audio mpegHeader, vbrKbps, xingSkip, lameSkip int, frames uint32, size int64) MP3Info {
 	info.SampleRate = audio.sampleRate
 	info.Channels = audio.channels
 	info.Bitrate = audio.bitrate
@@ -397,6 +418,14 @@ func finalizeMP3Info(info MP3Info, audio mpegHeader, vbrKbps, xingSkip, lameSkip
 	info.MPEGVersion = audio.version
 	info.Layer = audio.layer
 	info.SamplesPerFrame = audio.spf
+	if frames > 0 && audio.sampleRate > 0 {
+		if (size > 0 && uint64(frames) > uint64(size)) || uint64(frames)*uint64(audio.spf)/uint64(audio.sampleRate) > 1e7 {
+			frames = 0
+		} else {
+			info.Samples = uint64(frames) * uint64(audio.spf)
+			info.Duration = float64(info.Samples) / float64(audio.sampleRate)
+		}
+	}
 	info.StartOffsetSamples = xingSkip + lameSkip
 	if info.StartOffsetSamples > 0 {
 		if info.LAMEApplied {
