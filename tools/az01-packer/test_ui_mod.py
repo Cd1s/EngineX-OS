@@ -5442,6 +5442,104 @@ assert.equal(lookups, beforeLookups);
             self.assertEqual(res.returncode, 0, res.stderr)
 
 
+@unittest.skipUnless(shutil.which("node"), "node needed for the shadow-deck scratch checks")
+class ShadowScratchTest(unittest.TestCase):
+    """#240: scratching posts at 40 Hz without envelope lag and tracks smoothly on Engine & display shadow decks."""
+    js = ShadowDisplayTest.js
+    layer_js = ShadowDisplayTest.layer_js
+
+    def test_sender_bypasses_envelope_and_posts_40hz_while_scratching(self):
+        self.js(r"""
+let bodies=[], pos=10000*48, playing=true, touch=false;
+globalThis.XMLHttpRequest=class {
+    constructor(){this.readyState=0;}
+    open(m,url){this.url=url;this.readyState=1;}
+    send(body){if(!this.url.endsWith('/alive'))bodies.push(JSON.parse(body));this.readyState=4;this.status=200;}
+};
+globalThis.scShadowPoll=()=>{};
+scFourDeckRole='1';
+globalThis.scTr=path=>({
+    get value(){return path.endsWith('/SampleRate')?48000:0},
+    get unnormalized(){return path.endsWith('/TrackPosition')?pos:path.endsWith('/TrackLength')?48000*400:path.endsWith('BPM')?128:0},
+    get state(){return path.endsWith('/SongLoaded')||(path.endsWith('/PlayState')&&playing)||(path.endsWith('/ExternalScratchWheelTouch')&&touch)},
+    get string(){return path.endsWith('/TrackUri')?'file:///a.mp3':''}, color:'#ffffff'});
+for(let i=0;i<30;i++){now+=80;pos+=80*48;scShadowTick();}
+assert.equal(scShadowTickTimer.interval,80);
+const before=bodies.length;
+touch=true;
+for(let i=0;i<6;i++){
+    now+=scShadowTickTimer.interval;
+    pos-=15*48; // backward baby scratch: 15 ms per tick (below 180 ms jump threshold)
+    scShadowTick();
+}
+assert.equal(scShadowTickTimer.interval,25,'sender drops to 25 ms (40 Hz) during scratch');
+assert(bodies.length>before+4,'scratch movements posted immediately without envelope lag: '+(bodies.length-before));
+const last=bodies[bodies.length-1][0];
+assert.equal(last.scratch,true);
+assert.equal(Math.round(last.positionMs),Math.round(pos/48),'raw position published without 0.2*0.2 smoothing');
+// Release platter: scratch clears cleanly.
+touch=false; now+=25; pos+=25*48; scShadowTick();
+assert.equal(bodies[bodies.length-1][0].scratch,false);
+""")
+
+    def test_receiver_engine_tracks_scratch_with_wheel_without_seeks(self):
+        self.js(r"""
+const props=new Map();
+let posMs=10000, seeks=0, wheelMoves=[];
+globalThis.scShadowBent=null;
+globalThis.scShadowBendTimer={interval:0,running:false,stop(){this.running=false},restart(){this.running=true}};
+const P=path=>{
+    let p=props.get(path);
+    if(p)return p;
+    p={_s:path.endsWith('/SongLoaded')||path.endsWith('/PlayState'),_v:path.endsWith('/SampleRate')?48000:0,
+       string:path.endsWith('/SpeedRange')?'8':path.endsWith('/SyncMode')?'Off':'',
+       entries:['4','8','10','20','50','100'],index:1,
+       get state(){return this._s},set state(v){this._s=v},
+       get value(){return this._v},set value(v){this._v=v;if(path.endsWith('/SetSongPosition')){posMs=v*400000;seeks++}},
+       get unnormalized(){return path.endsWith('/TrackLength')?48000*400:path.endsWith('/TrackPosition')?posMs*48:0},
+       incValue(t){wheelMoves.push(t);posMs+=t/23.5},
+       decValue(t){wheelMoves.push(-t);posMs-=t/23.5}};
+    props.set(path,p);
+    return p;
+};
+globalThis.scTr=P;
+let seq=0;
+// Prime deck on steady play and let loadUntil (1200 ms) settle so scShadowHolds marks the deck ready.
+scShadowApplyAll([{deck:2,path:'/data/enginex/shadow-v3/peer-1/a.flac',id:'1',playing:true,link:'{l}',positionMs:10000,at:now,pitch:0,bpm:128,currentBpm:128,jumps:0,seq:++seq}],false);
+now+=1500; posMs=11500;
+scShadowApplyAll([{deck:2,path:'/data/enginex/shadow-v3/peer-1/a.flac',id:'1',playing:true,link:'{l}',positionMs:11500,at:now,pitch:0,bpm:128,currentBpm:128,jumps:0,seq:++seq}],false);
+assert.equal(scShadowAt[2].ready,true);
+assert.equal(seeks,0);
+// Scratch backward by -40 ms per tick: must engage ExternalScratchWheelTouch + Move with 0 SetSongPosition flushes.
+for(let i=1;i<=5;i++){
+    now+=25;
+    scShadowApplyAll([{deck:2,path:'/data/enginex/shadow-v3/peer-1/a.flac',id:'1',playing:true,scratch:true,link:'{l}',positionMs:11500-i*40,at:now,pitch:0,bpm:128,currentBpm:128,jumps:0,seq:++seq}],false);
+}
+assert.equal(P('/Engine/Deck2/ExternalScratchWheelTouch').state,true,'shadow platter touch must be engaged');
+assert.equal(seeks,0,'normal scratch must not flush decoder with SetSongPosition');
+assert(wheelMoves.length>=4 && wheelMoves.every(v=>v<0),'backward wheel moves sent');
+assert(Math.abs(posMs-11300)<35,'shadow position tracked backward scratch closely: '+posMs);
+// Release platter: touch clears cleanly.
+now+=25;
+scShadowApplyAll([{deck:2,path:'/data/enginex/shadow-v3/peer-1/a.flac',id:'1',playing:true,scratch:false,link:'{l}',positionMs:11325,at:now,pitch:0,bpm:128,currentBpm:128,jumps:0,seq:++seq}],false);
+assert.equal(P('/Engine/Deck2/ExternalScratchWheelTouch').state,false,'shadow platter touch must release');
+""")
+
+    def test_receiver_display_layer_scrubs_backwards_without_animator_lag(self):
+        self.js(ShadowNudgeTest.RECEIVER + self.layer_js() + r"""
+scope.sample=sample(10000); scope.refreshSample();
+assert.equal(scroll.running,true);
+now+=25; scope.sample=sample(9900,{scratch:true}); scope.refreshSample();
+assert.equal(scroll.running,false,'animator stopped during scratch');
+near(scMoving.x,scope.contentX(9900));
+now+=25; scope.sample=sample(9800,{scratch:true}); scope.refreshSample();
+near(scMoving.x,scope.contentX(9800));
+// Release resumes Animator cleanly.
+now+=25; scope.sample=sample(9825,{scratch:false}); scope.refreshSample();
+assert.equal(scroll.running,true);
+""")
+
+
 class OneLibraryNoChooseDbTest(unittest.TestCase):
     STOCK_TAIL = (
         "Item {\n"
