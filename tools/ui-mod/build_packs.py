@@ -5837,7 +5837,42 @@ def edits(dev: bool):
             # "History" is also compared in Historylist.qml, so translate() leaves it alone everywhere.
             ('						"History"\n', '						root.scT("History")\n'),
         ],
+        v + "BrowseView/Components/BreadcrumbView/BreadcrumbView.qml": [(
+            "		numberOfEntries: breadcrumbView.rowCount\n",
+            "		numberOfEntries: contentContainer.stackView.currentItem && contentContainer.stackView.currentItem.scVisibleRows !== undefined ? contentContainer.stackView.currentItem.scVisibleRows : breadcrumbView.rowCount\n",
+        )],
         v + "BrowseView/Components/BreadcrumbView/BreadcrumbStackView.qml": [
+            ("			property string name\n			property string path\n",
+             "			property string name\n"
+             "			property string path\n"
+             "			property int scModelRev: 0\n"
+             "			Connections {\n"
+             "				target: contentView.model\n"
+             "				ignoreUnknownSignals: true\n"
+             "				function onDataChanged() { contentView.scModelRev++ }\n"
+             "				function onRowsInserted() { contentView.scModelRev++ }\n"
+             "				function onRowsRemoved() { contentView.scModelRev++ }\n"
+             "				function onModelReset() { contentView.scModelRev++ }\n"
+             "			}\n"
+             "			readonly property int scVisibleRows: {\n"
+             "				void contentView.scModelRev\n"
+             "				if (!breadcrumbView.isStreamingContent || root.scScope === \"tidal\" || contentView.StackView.index !== 0 || !contentView.model) return contentView.rowCount\n"
+             "				const hidden = root.scScope === \"netease\" ? [\"Featured\", \"Genres\", \"Moods\", \"TIDAL Rising\"] : [\"My Collection\", \"Featured\", \"Genres\", \"Moods\", \"TIDAL Rising\"]\n"
+             "				const roles = contentView.model.roles ? contentView.model.roles() : null\n"
+             "				const dispRole = roles && roles.display !== undefined ? roles.display : 0\n"
+             "				let n = contentView.rowCount\n"
+             "				while (n > 0) {\n"
+             "					const entryLabel = String(contentView.model.data(contentView.model.index(n - 1, 0), dispRole) || \"\")\n"
+             "					if (hidden.indexOf(entryLabel) < 0) break\n"
+             "					n--\n"
+             "				}\n"
+             "				return n\n"
+             "			}\n"
+             "			onScVisibleRowsChanged: if (scVisibleRows > 0 && currentRowIndex >= scVisibleRows) currentRowIndex = scVisibleRows - 1\n"),
+            ("					breadcrumbView.keyPressedForSelection()\n					currentRowIndex = rowCount\n",
+             "					breadcrumbView.keyPressedForSelection()\n					currentRowIndex = Math.max(0, scVisibleRows - 1)\n"),
+            ("					breadcrumbView.keyPressedForSelection()\n					currentRowIndex++\n",
+             "					breadcrumbView.keyPressedForSelection()\n					if (currentRowIndex + 1 < scVisibleRows) currentRowIndex++\n"),
             ('				objectName: "Browser_Collection_StackView_ViewDelegate"\n',
              '				objectName: "Browser_Collection_StackView_ViewDelegate"\n'
              '				readonly property bool scHidden: breadcrumbView.isStreamingContent && root.scScope !== "tidal" && contentView.StackView.index === 0 && !!modelData && (root.scScope === "netease" ? ["Featured", "Genres", "Moods", "TIDAL Rising"] : ["My Collection", "Featured", "Genres", "Moods", "TIDAL Rising"]).indexOf(modelData.display) >= 0\n'
