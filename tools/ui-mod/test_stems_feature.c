@@ -455,7 +455,7 @@ __attribute__((naked)) static void invoke_stub(void *feature __attribute__((unus
 
 static void test_stems(void) {
     size_t page = (size_t)sysconf(_SC_PAGESIZE);
-    char *image = mmap(NULL, 0x2d00000, PROT_READ | PROT_WRITE,
+    char *image = mmap(NULL, 0x2d20000, PROT_READ | PROT_WRITE,
                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     assert(image != MAP_FAILED);
     int is_sclive = build->feature_displaced == 0xe51b3338;
@@ -496,7 +496,7 @@ static void test_stems(void) {
     assert(other[1] == false_ptr);
     assert(out[0] == 17 && out[1] == 23 && out[2] == 29 && out[3] == false_ptr);
     puts("ARM Stems binding, other-feature isolation and register replay: PASS");
-    munmap(image, 0x2d00000);
+    munmap(image, 0x2d20000);
 }
 
 __attribute__((naked)) static void invoke_config(void *config __attribute__((unused)),
@@ -1090,6 +1090,59 @@ static void test_patch_files(const char *filename) {
     } else {
         assert(!memcmp(image + build->sqlite_open, build->sqlite_prefix[1], 8));
         assert(!memcmp(image + build->sqlite_open_v2, build->sqlite_prefix[2], 8));
+    }
+    // #256: verify build->feature_object points to a real Feature object whose vtable[0]
+    // is Feature::isEnabled(), and on 5.3.0-sclive4 matches the StemsPreRenderedPlayback
+    // global read by PlanckScriptRoot::hasStemsPreRenderedPlayback().
+    const ElfW(Phdr) *feat_seg = NULL;
+    size_t feat_off = 0;
+    for (unsigned i = 0; i < info.dlpi_phnum; i++) {
+        const ElfW(Phdr) *p = &info.dlpi_phdr[i];
+        if (p->p_type != PT_LOAD || build->feature_object < p->p_vaddr ||
+            build->feature_object + 16 > p->p_vaddr + p->p_filesz) continue;
+        feat_seg = p;
+        feat_off = p->p_offset + build->feature_object - p->p_vaddr;
+        break;
+    }
+    assert(feat_seg && (feat_seg->p_flags & PF_W) && feat_off + 16 <= (size_t)size);
+    uint32_t feat_words[4];
+    memcpy(feat_words, image + feat_off, sizeof feat_words);
+    assert(feat_words[1] == 0);
+    assert(feat_words[2] == feat_words[0] + 0x10 && feat_words[3] == feat_words[0] + 0x1c);
+    uint32_t vt0 = 0;
+    for (unsigned i = 0; i < info.dlpi_phnum; i++) {
+        const ElfW(Phdr) *p = &info.dlpi_phdr[i];
+        if (p->p_type != PT_LOAD || feat_words[0] < p->p_vaddr ||
+            feat_words[0] + 4 > p->p_vaddr + p->p_filesz) continue;
+        size_t off = p->p_offset + feat_words[0] - p->p_vaddr;
+        assert(off + 4 <= (size_t)size);
+        memcpy(&vt0, image + off, 4);
+        break;
+    }
+    assert(vt0 != 0);
+    const ElfW(Phdr) *fn_seg = NULL;
+    size_t fn_off = 0;
+    for (unsigned i = 0; i < info.dlpi_phnum; i++) {
+        const ElfW(Phdr) *p = &info.dlpi_phdr[i];
+        if (p->p_type != PT_LOAD || vt0 < p->p_vaddr ||
+            vt0 + 16 > p->p_vaddr + p->p_filesz) continue;
+        fn_seg = p;
+        fn_off = p->p_offset + vt0 - p->p_vaddr;
+        break;
+    }
+    assert(fn_seg && (fn_seg->p_flags & PF_X) && fn_off + 16 <= (size_t)size);
+    uint32_t fn[4];
+    memcpy(fn, image + fn_off, sizeof fn);
+    assert(fn[0] == 0xe5903004 && fn[1] == 0xe52db004 && fn[2] == 0xe28db000 && fn[3] == 0xe5d30000);
+    if (!strcmp(build->name, "5.3.0-sclive4")) {
+        uint32_t base_off, init_add, init_off, planck_off;
+        memcpy(&base_off, image + 0x360dc4, 4);
+        memcpy(&init_add, image + 0x360d3c, 4);
+        memcpy(&init_off, image + 0x360e1c, 4);
+        memcpy(&planck_off, image + 0x9d7b50, 4);
+        assert(init_add == 0xe2844f46); // add r4, r4, #0x118 -> 0x2d0eb78
+        assert(0x360b54u + 8u + base_off + 0x118u == build->feature_object);
+        assert(0x360d64u + 8u + init_off == 0x9d7808u + 8u + planck_off);
     }
     free(image);
     printf("Stock/patched/mismatched edit classification: %s PASS\n", filename);

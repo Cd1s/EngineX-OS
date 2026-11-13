@@ -56,7 +56,7 @@ python3 -m unittest discover -s tools/az01-packer
 python3 -m unittest discover -s tools/stems
 # C 单测：编译命令写在各文件头部
 #   tools/ui-mod/test_dsp_smooth.c（另跑 ASan/UBSan 与 TSan 各一次）
-#   tools/ui-mod/test_stems_feature.c（arm-linux-gnueabihf-gcc 编译，Batam 上原生运行；参数给两个底包的 Engine）
+#   tools/ui-mod/test_stems_feature.c（arm-linux-gnueabihf-gcc 编译，Batam 上原生运行；参数给 5.0.4、5.3.0 与 5.3.0-sclive4 三个底包的 Engine）
 #   tools/edisksd-hook/test_edisksd_hook.c（--mounts 只在 unshare -m 里跑）
 #   tools/ui-mod/test_az04_hook.c（AZ04 64 位 hook：Batam 原生 gcc 编译，参数给 AZ04 的 Engine）
 ```
