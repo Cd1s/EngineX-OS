@@ -1,0 +1,14 @@
+[Unit]
+Description=EngineX RK3288 dynamic clocks and IRQ affinity
+After=local-fs.target
+Conflicts=irqbalance.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/default/enginex-perf
+ExecStart=/usr/local/bin/enginex-perf-tune
+CPUAffinity=3
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

@@ -1,19 +1,19 @@
 [Unit]
-Description=SC5000 storage worker for %I
+Description=EngineX storage worker for %I
 BindsTo=dev-%i.device
-Wants=sc5000-storage-discover.service
-After=dev-%i.device sc5000-storage-discover.service
+Wants=enginex-storage-discover.service
+After=dev-%i.device enginex-storage-discover.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-EnvironmentFile=-/etc/default/sc5000-storage
-ExecStart=/usr/local/bin/sc5000-storage-mount add /dev/%I
+EnvironmentFile=-/etc/default/enginex-storage
+ExecStart=/usr/local/bin/enginex-storage-mount add /dev/%I
 TimeoutStartSec=10min
 TimeoutStopSec=30
 CPUAffinity=3
 CPUWeight=10
 IOWeight=10
-Slice=sc5000-background.slice
+Slice=enginex-background.slice
 # The worker reads edisksd mounts in the host namespace. Do not add PrivateMounts,
 # ProtectSystem or other options that implicitly create a mount namespace.

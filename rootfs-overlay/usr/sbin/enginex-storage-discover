@@ -3,7 +3,7 @@
 set -eu
 
 MEDIA_ROOT=${SC5000_MEDIA_ROOT:-/media}
-log() { printf 'sc5000-storage-discover: %s\n' "$*" >&2; }
+log() { printf 'enginex-storage-discover: %s\n' "$*" >&2; }
 
 check_drive() {
     drive=$1

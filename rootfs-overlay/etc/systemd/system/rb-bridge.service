@@ -1,13 +1,13 @@
 [Unit]
-Description=SC5000 Rekordbox Zero-Scan & Pro DJ Link Bridge
-# Not before sc5000-custom-prepare: it renames /data/sc5000-custom to /data/enginex
-# and leaves a symlink, and the suite writes there (sc5000-suite-exec: bin/) (#103).
-Wants=sc5000-custom-prepare.service
-After=local-fs.target network.target data.mount sc5000-custom-prepare.service
+Description=EngineX Rekordbox Zero-Scan & Pro DJ Link Bridge
+# Not before enginex-prepare: it renames /data/sc5000-custom to /data/enginex
+# and leaves a symlink, and the suite writes there (enginex-suite-exec: bin/) (#103).
+Wants=enginex-prepare.service
+After=local-fs.target network.target data.mount enginex-prepare.service
 
 [Service]
 Type=simple
-Slice=sc5000-background.slice
+Slice=enginex-background.slice
 CPUAffinity=3
 Nice=19
 IOSchedulingClass=idle

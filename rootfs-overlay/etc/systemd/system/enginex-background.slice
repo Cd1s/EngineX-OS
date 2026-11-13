@@ -1,5 +1,5 @@
 [Unit]
-Description=SC5000 background work on CPU3
+Description=EngineX background work on CPU3
 
 [Slice]
 AllowedCPUs=3

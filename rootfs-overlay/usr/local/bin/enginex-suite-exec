@@ -4,15 +4,15 @@
 set -eu
 APPLET="$1"
 shift
-SHARE=${SC5000_SUITE_SHARE:-/usr/share/sc5000-custom}
-TARGET_DIR=${SC5000_SUITE_DIR:-/data/sc5000-custom/bin}
+SHARE=${SC5000_SUITE_SHARE:-/usr/share/enginex}
+TARGET_DIR=${SC5000_SUITE_DIR:-/data/enginex/bin}
 if ! mkdir -p "$TARGET_DIR" 2>/dev/null || [ ! -w "$TARGET_DIR" ]; then
     TARGET_DIR="/tmp/sc5000-custom-bin"
     mkdir -p "$TARGET_DIR"
 fi
-BIN="$TARGET_DIR/sc5000-suite"
-ARCHIVE="$SHARE/sc5000-suite.xz"
-[ -f "$ARCHIVE" ] || ARCHIVE="$SHARE/sc5000-suite.gz"
+BIN="$TARGET_DIR/enginex-suite"
+ARCHIVE="$SHARE/enginex-suite.xz"
+[ -f "$ARCHIVE" ] || ARCHIVE="$SHARE/enginex-suite.gz"
 decompress() {
     case $1 in
         *.gz) gzip -dc "$1" ;;
@@ -37,8 +37,11 @@ if stale; then
     fi
     # Earlier releases leaked one empty temporary per failed start and left
     # standalone binaries and hand-made backups that this suite replaces (#44).
-    rm -f "$TARGET_DIR"/sc5000-suite.*.tmp "$TARGET_DIR"/*.pre-* "$TARGET_DIR"/*.prev \
-        "$TARGET_DIR"/*.o55prev "$TARGET_DIR/sc5000-deemixd" "$TARGET_DIR/stems-processor"
+    # Releases before 5.3.0.5 unpacked the same suite as sc5000-suite (#234).
+    rm -f "$TARGET_DIR"/enginex-suite.*.tmp "$TARGET_DIR"/*.pre-* "$TARGET_DIR"/*.prev \
+        "$TARGET_DIR"/*.o55prev "$TARGET_DIR/enginex-deemixd" "$TARGET_DIR/stems-processor" \
+        "$TARGET_DIR/sc5000-suite" "$TARGET_DIR/sc5000-suite.id" "$TARGET_DIR"/sc5000-suite.*.tmp \
+        "$TARGET_DIR/sc5000-deemixd"
     # The service must not keep holding the unpack lock.
     exec 9>&-
 fi

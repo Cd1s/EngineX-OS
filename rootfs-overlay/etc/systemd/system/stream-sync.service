@@ -1,10 +1,10 @@
 [Unit]
-Description=SC5000 On-Device Stream Sync & CPU3 Audio Analyzer Console
-After=local-fs.target network.target data.mount sc5000-deemixd.service
+Description=EngineX On-Device Stream Sync & CPU3 Audio Analyzer Console
+After=local-fs.target network.target data.mount enginex-deemixd.service
 
 [Service]
 Type=simple
-Slice=sc5000-background.slice
+Slice=enginex-background.slice
 CPUAffinity=3
 Nice=19
 IOSchedulingClass=idle

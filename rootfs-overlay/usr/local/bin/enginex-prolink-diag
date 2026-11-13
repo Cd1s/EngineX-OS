@@ -1,0 +1,105 @@
+#!/bin/sh
+# Pro DJ Link self-check for the PRIME 4 / SC <-> CDJ-3000 beta (#59, #63).
+# Read-only: it reads /sys, /proc and stream-sync's diag report, and binds
+# nothing. Prints [PASS]/[WARN]/[FAIL] lines; exit 1 when anything FAILs.
+# POSIX sh: the stock rootfs has BusyBox ash and no bash.
+SYS=${SC5000_SYS_ROOT:-/sys}
+PROC=${SC5000_PROC_ROOT:-/proc}
+API=${SC5000_DIAG_URL:-http://127.0.0.1:8080/v1/sc5000/prolink/diag}
+WAIT=${SC5000_DIAG_WAIT:-5}
+fails=0
+row() {
+    [ "$1" = FAIL ] && fails=$((fails + 1))
+    printf '[%s] %-28s %s\n' "$1" "$2" "$3"
+}
+
+echo "== EngineX OS Pro DJ Link self-check =="
+echo "version: $(cat /etc/enginex/version.txt 2>/dev/null || echo unknown)"
+echo
+
+echo "-- Network links"
+up=0
+for dev in "$SYS"/class/net/eth* "$SYS"/class/net/usb* "$SYS"/class/net/wlan*; do
+    [ -e "$dev" ] || continue
+    name=${dev##*/}
+    state=$(cat "$dev/operstate" 2>/dev/null)
+    speed=$(cat "$dev/speed" 2>/dev/null)
+    case $state in
+    up)
+        up=$((up + 1))
+        case $name in
+        eth*)
+            case $speed in
+            ''|-1) row WARN "$name link" "up, speed unknown" ;;
+            10) row WARN "$name link" "up at 10 Mb/s: replace the cable" ;;
+            *) row PASS "$name link" "up at $speed Mb/s" ;;
+            esac ;;
+        *) row PASS "$name link" "up" ;;
+        esac ;;
+    *) row WARN "$name link" "${state:-unknown}" ;;
+    esac
+done
+[ "$up" -gt 0 ] || row FAIL "network" "no interface is up: plug the LAN cable into the deck's LINK port"
+
+echo
+echo "-- Services"
+for unit in rb-bridge stream-sync; do
+    st=$(systemctl is-active "$unit.service" 2>/dev/null)
+    if [ "$st" = active ]; then row PASS "$unit" active; else row FAIL "$unit" "${st:-unknown}: systemctl restart $unit"; fi
+done
+
+echo
+echo "-- Storage (USB / SD / SATA)"
+drives=0
+while read -r src target _; do
+    case $src in /dev/sd*|/dev/mmcblk*) ;; *) continue ;; esac
+    case $target in /media/*|/run/media/*) ;; *) continue ;; esac
+    target=$(printf '%s' "$target" | sed 's/\\040/ /g') # /proc/mounts writes a space as \040
+    drives=$((drives + 1))
+    if [ -f "$target/PIONEER/rekordbox/export.pdb" ]; then
+        row PASS "${target##*/}" "$src: PIONEER/rekordbox/export.pdb present"
+    elif [ -f "$target/Engine Library/Database2/m.db" ]; then
+        row PASS "${target##*/}" "$src: Engine library (the CDJ export is generated from it)"
+    else
+        row WARN "${target##*/}" "$src: neither PIONEER/rekordbox/export.pdb nor an Engine library"
+    fi
+done < "$PROC/mounts"
+[ "$drives" -gt 0 ] || row WARN "storage" "no USB/SD/SATA drive mounted: the CDJ export needs one"
+
+echo
+echo "-- Pro DJ Link heartbeat (${WAIT} s)"
+sleep "$WAIT"
+json=$(curl -fsS -m 10 "$API" 2>/dev/null)
+if [ -z "$json" ]; then
+    row FAIL "stream-sync API" "no answer from $API"
+else
+    peers=$(printf '%s' "$json" | grep -o '"number":[0-9]*,"name":"[^"]*","address":"[^"]*","ageSec":[0-9.]*')
+    if [ -z "$peers" ]; then
+        row WARN "heartbeat" "no CDJ/DJM packets on UDP 50000-50002"
+    else
+        printf '%s\n' "$peers" | while IFS= read -r p; do
+            n=${p#*\"number\":}; n=${n%%,*}
+            nm=${p#*\"name\":\"}; nm=${nm%%\"*}
+            ad=${p#*\"address\":\"}; ad=${ad%%\"*}
+            age=${p##*\"ageSec\":}
+            if awk "BEGIN{exit !($age <= $WAIT)}"; then
+                echo "[PASS] player $n $nm  $ad: last packet ${age} s ago"
+            else
+                echo "[WARN] player $n $nm  $ad: silent for ${age} s"
+            fi
+        done
+    fi
+    echo
+    echo "-- stream-sync report (ports, NFS/RPC probes, peers)"
+    report=$(curl -fsS -m 10 "$API?format=text" 2>/dev/null)
+    printf '%s\n' "$report"
+    n=$(printf '%s\n' "$report" | grep -c '^| FAIL |')
+    fails=$((fails + n))
+fi
+
+echo
+if [ "$fails" -gt 0 ]; then
+    echo "RESULT: $fails FAIL"
+    exit 1
+fi
+echo "RESULT: no FAIL"

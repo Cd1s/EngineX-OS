@@ -1,0 +1,20 @@
+[Unit]
+Description=EngineX Deezer Download Queue (127.0.0.1:6595)
+# Not before enginex-prepare: it renames /data/sc5000-custom to /data/enginex
+# and leaves a symlink, and the suite writes there (enginex-suite-exec: bin/) (#103).
+Wants=enginex-prepare.service
+After=local-fs.target network.target data.mount enginex-prepare.service
+
+[Service]
+Type=simple
+Slice=enginex-background.slice
+CPUAffinity=3
+Nice=19
+IOSchedulingClass=idle
+ExecStart=/usr/local/bin/enginex-deemixd -state-dir /data/enginex/state
+# No -download-dir: the daemon prefers the SD cache when it is mounted, else /data/enginex/Stream.
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
