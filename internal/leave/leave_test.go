@@ -635,3 +635,41 @@ func TestLeaveFailedLookupIsNotAMissingDirectory(t *testing.T) {
 		t.Fatalf("not finished once the faults are gone: %v", err)
 	}
 }
+
+// #234 review round 6 (R2): an I/O error on the first lookup of the journal is not "no journal".
+// A 5.3.0.3 downgrade cut before its bundle leaves the live UI on 5.3.0.3 and this release's packs
+// parked in the journal. Then neither Recover nor a new install (here of a damaged 5.3.0.2 bundle)
+// may go on as if there were none: before, the failed install removed the journal and with it the
+// only copy of this release's packs. Both return the error; the next recovery puts the deck back.
+func TestLeaveFailedJournalLookupStopsRecoverAndInstall(t *testing.T) {
+	d, root := newDeck(t)
+	journal := filepath.Join(root, "data", journalName)
+	cutAt(t, d, legacyBundle(t, "5.3.0.3"), "bundle")
+	parked := filepath.Join(journal, "stage/root/ui/packs/en/Deck.qml")
+	damaged := legacyBundle(t, "5.3.0.2")
+	write(t, filepath.Join(damaged, "lib/libengine-ui-hook.so"), "damaged")
+	defer func(l func(string) (os.FileInfo, error)) { lstat = l }(lstat)
+	for _, run := range []func() error{d.Recover, func() error { return d.Install(damaged) }} {
+		failed := false
+		lstat = func(p string) (os.FileInfo, error) {
+			if p == journal && !failed {
+				failed = true
+				return nil, syscall.EIO
+			}
+			return os.Lstat(p)
+		}
+		if err := run(); !errors.Is(err, syscall.EIO) {
+			t.Fatalf("with the journal lookup failing: %v, want EIO", err)
+		}
+		if read(t, parked) != "5.3.0.5 pack" {
+			t.Fatal("this release's parked packs are gone")
+		}
+	}
+	lstat = os.Lstat
+	if err := d.Recover(); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(t, filepath.Join(root, "data/enginex/ui/packs/en/Deck.qml")); got != "5.3.0.5 pack" || exists(journal) {
+		t.Fatalf("not put back: live packs %q, journal kept %v", got, exists(journal))
+	}
+}
