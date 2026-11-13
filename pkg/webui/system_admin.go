@@ -92,19 +92,19 @@ var sshRunDropInPath = "/run/systemd/system/sshd.service.d/51-port.conf"
 // Conflicts=sshd.service, PasswordAuthentication no, keys in /data/enginex. Starting
 // the stock sshd there stopped it (BH-GC2-9). Second-generation decks keep the stock
 // sshd.service and its read-only /etc.
-const gen1SSHUnit = "sc5000-custom-sshd"
+const gen1SSHUnit = "enginex-sshd"
 
-var gen1SSHDropInPath = "/etc/systemd/system/sc5000-custom-sshd.service.d/51-port.conf"
+var gen1SSHDropInPath = "/etc/systemd/system/enginex-sshd.service.d/51-port.conf"
 
 // gen1SSHRunDropInPath: first-generation 5.3.0 roots are mounted read-only too (no etc.mount),
 // so the port drop-in goes to /run there; RestoreSSH writes it again on every boot.
-var gen1SSHRunDropInPath = "/run/systemd/system/sc5000-custom-sshd.service.d/51-port.conf"
+var gen1SSHRunDropInPath = "/run/systemd/system/enginex-sshd.service.d/51-port.conf"
 
 // writeGen1SSHPort writes the first-generation unit's port drop-in: /etc where it is
 // writable, /run otherwise (review of 03cf399: EROFS was ignored, the port silently not set).
 func writeGen1SSHPort(port int) error {
 	// -p overrides the Port of EngineX's own sshd_config.
-	dropIn := fmt.Sprintf("[Service]\nExecStart=\nExecStart=/usr/sbin/sshd -D -e -f /usr/share/sc5000-custom/sshd_config -p %d\n", port)
+	dropIn := fmt.Sprintf("[Service]\nExecStart=\nExecStart=/usr/sbin/sshd -D -e -f /usr/share/enginex/sshd_config -p %d\n", port)
 	if os.MkdirAll(filepath.Dir(gen1SSHDropInPath), 0o755) == nil && os.WriteFile(gen1SSHDropInPath, []byte(dropIn), 0o644) == nil {
 		return nil
 	}

@@ -32,7 +32,7 @@ var (
 	// cloudflaredSearchPaths lists candidate locations checked before PATH.
 	cloudflaredSearchPaths = []string{
 		"/data/enginex/bin/cloudflared",
-		"/data/sc5000-custom/bin/cloudflared",
+		"/data/enginex/bin/cloudflared",
 		"/usr/local/bin/cloudflared",
 	}
 
@@ -148,7 +148,7 @@ func (m *TunnelManager) InstallPath() string {
 		return cloudflaredInstallPath
 	}
 	if m.stateDir == "" || strings.HasPrefix(m.stateDir, "/data/") {
-		return "/data/sc5000-custom/bin/cloudflared"
+		return "/data/enginex/bin/cloudflared"
 	}
 	return filepath.Join(m.stateDir, "bin", "cloudflared")
 }

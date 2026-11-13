@@ -228,7 +228,7 @@ func TestBluetoothRunnerInjectionAndMocking(t *testing.T) {
 				return []byte("Powered: yes\nDiscoverable: yes\nPairable: yes\n"), nil
 			}
 		}
-		if name == "sc5000-bt-helper" {
+		if name == "enginex-bt-helper" {
 			return []byte("ok"), nil
 		}
 		return nil, nil
@@ -274,13 +274,13 @@ func TestBluetoothRunnerInjectionAndMocking(t *testing.T) {
 	cmds := strings.Join(commandsRun, " | ")
 	mu.Unlock()
 
-	if !strings.Contains(cmds, "sc5000-bt-helper stabilize") {
+	if !strings.Contains(cmds, "enginex-bt-helper stabilize") {
 		t.Errorf("stabilize command was not called: %s", cmds)
 	}
-	if !strings.Contains(cmds, "sc5000-bt-helper set-mode source") {
+	if !strings.Contains(cmds, "enginex-bt-helper set-mode source") {
 		t.Errorf("set-mode command was not called: %s", cmds)
 	}
-	if !strings.Contains(cmds, "sc5000-bt-helper connect 11:22:33:44:55:66") {
+	if !strings.Contains(cmds, "enginex-bt-helper connect 11:22:33:44:55:66") {
 		t.Errorf("connect command was not called: %s", cmds)
 	}
 }

@@ -74,10 +74,10 @@ type BluetoothRunner func(ctx context.Context, name string, args ...string) ([]b
 
 var defaultBluetoothRunner BluetoothRunner = func(ctx context.Context, name string, args ...string) ([]byte, error) {
 	cmdName := name
-	if cmdName == "sc5000-bt-helper" {
-		if _, err := exec.LookPath("sc5000-bt-helper"); err != nil {
-			if _, err := os.Stat("/usr/sbin/sc5000-bt-helper"); err == nil {
-				cmdName = "/usr/sbin/sc5000-bt-helper"
+	if cmdName == "enginex-bt-helper" {
+		if _, err := exec.LookPath("enginex-bt-helper"); err != nil {
+			if _, err := os.Stat("/usr/sbin/enginex-bt-helper"); err == nil {
+				cmdName = "/usr/sbin/enginex-bt-helper"
 			}
 		}
 	}
@@ -377,18 +377,18 @@ func (s *Server) bluetoothPost(w http.ResponseWriter, r *http.Request) {
 
 	// Trigger stabilize if requested
 	if req.Stabilize != nil && *req.Stabilize {
-		_, _ = runner(r.Context(), "sc5000-bt-helper", "stabilize")
+		_, _ = runner(r.Context(), "enginex-bt-helper", "stabilize")
 	}
 
 	// If mode changed or provided, run helper
 	if req.Mode != nil {
-		_, _ = runner(r.Context(), "sc5000-bt-helper", "set-mode", cfg.Mode)
+		_, _ = runner(r.Context(), "enginex-bt-helper", "set-mode", cfg.Mode)
 	}
 
 	// Connect to MAC if specified
 	if req.MAC != nil {
 		mac := strings.TrimSpace(*req.MAC)
-		_, _ = runner(r.Context(), "sc5000-bt-helper", "connect", mac)
+		_, _ = runner(r.Context(), "enginex-bt-helper", "connect", mac)
 	}
 
 	// Persist configuration

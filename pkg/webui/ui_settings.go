@@ -231,7 +231,7 @@ var fourDeckRolePath = "/run/sc5000-assignments/role"
 // which leaves a black band under EGLFS. A package var so tests can point it at a temp dir.
 var (
 	uiScaleMu      sync.Mutex
-	uiScaleEnvPath = "/data/sc5000-custom/ui-scale.env"
+	uiScaleEnvPath = "/data/enginex/ui-scale.env"
 )
 
 // writeUIScaleEnv records the scale chosen in Settings -> Device, and drops the file again at 100% so the unit keeps Denon's stock size. It sits

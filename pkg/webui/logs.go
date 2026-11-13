@@ -101,7 +101,7 @@ func redactLog(message, accessCode string) string {
 // logged under edisksd.service.
 var (
 	logEngineUnits  = []string{"engine.service", "stream-sync.service", "enginex-stream-sync.service"}
-	logStorageUnits = []string{"edisksd.service", "rb-bridge.service", "enginex-rb-bridge.service", "sc5000-storage@*.service"}
+	logStorageUnits = []string{"edisksd.service", "rb-bridge.service", "enginex-rb-bridge.service", "enginex-storage@*.service"}
 )
 
 const (

@@ -160,7 +160,7 @@ func TestTailscaleLoginServeAndStop(t *testing.T) {
 	if code != http.StatusOK || !v.Running || v.State != "NeedsLogin" || v.AuthURL != "https://hs.example/register/abc" {
 		t.Fatalf("login URL flow: %d %s", code, out)
 	}
-	if !f.has("systemd-run --unit=sc5000-tailscaled") || !f.has("--tun=userspace-networking") || !f.has("--login-server=https://hs.example ") && !f.has("--login-server=https://hs.example") {
+	if !f.has("systemd-run --unit=enginex-tailscaled") || !f.has("--tun=userspace-networking") || !f.has("--login-server=https://hs.example ") && !f.has("--login-server=https://hs.example") {
 		cmds, _ := f.snapshot()
 		t.Fatalf("daemon/up flags wrong: %v", cmds)
 	}
@@ -195,7 +195,7 @@ func TestTailscaleLoginServeAndStop(t *testing.T) {
 
 	// Off stops the daemon but keeps the login state and settings.
 	code, v, _ = tsPost(t, s, `{"enabled":false}`)
-	if code != http.StatusOK || v.Running || v.Enabled || !f.has("systemctl stop sc5000-tailscaled") {
+	if code != http.StatusOK || v.Running || v.Enabled || !f.has("systemctl stop enginex-tailscaled") {
 		t.Fatalf("disable: %d %+v", code, v)
 	}
 	if v.LoginServer != "https://hs.example" || !v.Forward.SSH {

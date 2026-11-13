@@ -265,7 +265,7 @@ func TestLogDownloadKeepsStorageUnitsBesideVerboseEngine(t *testing.T) {
 	var b []byte
 	b = append(b, unitLogEntry("edisksd.service", "edisksd-hook: writable HFS library ready on /media/STICK")...)
 	b = append(b, unitLogEntry("edisksd.service", `{"Added":1200,"Bypassed":false}`)...)
-	b = append(b, unitLogEntry("sc5000-storage@sda1.service", "sc5000-storage: ready: /dev/sda1 at /media/STICK")...)
+	b = append(b, unitLogEntry("enginex-storage@sda1.service", "enginex-storage: ready: /dev/sda1 at /media/STICK")...)
 	b = append(b, unitLogEntry("rb-bridge.service", "rb-bridge: listening for Pro DJ Link")...)
 	b = append(b, unitLogEntry("sshd.service", "Accepted publickey")...)
 	if err := os.WriteFile(storage, b, 0o600); err != nil {
@@ -290,7 +290,7 @@ func TestLogDownloadKeepsStorageUnitsBesideVerboseEngine(t *testing.T) {
 	if w.Code != 200 || len(body) > logDownloadLimit || !strings.HasSuffix(body, logTruncated) {
 		t.Fatalf("status=%d bytes=%d", w.Code, len(body))
 	}
-	for _, want := range []string{"edisksd.service: edisksd-hook: writable HFS library ready", `edisksd.service: {"Added":1200`, "sc5000-storage@sda1.service: sc5000-storage: ready", "rb-bridge.service: rb-bridge: listening", "engine.service: verbose"} {
+	for _, want := range []string{"edisksd.service: edisksd-hook: writable HFS library ready", `edisksd.service: {"Added":1200`, "enginex-storage@sda1.service: enginex-storage: ready", "rb-bridge.service: rb-bridge: listening", "engine.service: verbose"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("download lacks %q", want)
 		}

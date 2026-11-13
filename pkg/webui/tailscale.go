@@ -33,7 +33,7 @@ import (
 
 const (
 	tailscaleVersion = "1.104.5"
-	tailscaleUnit    = "sc5000-tailscaled"
+	tailscaleUnit    = "enginex-tailscaled"
 	tailscaleSocket  = "/run/sc5000-tailscaled.sock"
 	tailscaleWebPort = 8080 // stream-sync console
 )
@@ -157,7 +157,7 @@ func (s *Server) tailscaleStart(ctx context.Context) error {
 	run := getSystemRunner()
 	_, _ = run(ctx, "systemctl", "reset-failed", tailscaleUnit)
 	// A transient unit works on both the image and the read-only-root /data bundle decks.
-	out, err := run(ctx, "systemd-run", "--unit="+tailscaleUnit, "--slice=sc5000-background.slice",
+	out, err := run(ctx, "systemd-run", "--unit="+tailscaleUnit, "--slice=enginex-background.slice",
 		"--property=Nice=19", "--property=MemoryMax=128M", "--property=Restart=on-failure",
 		"--setenv=GOMEMLIMIT=64MiB", s.tailscaleBin(),
 		"--tun=userspace-networking", "--statedir="+filepath.Join(s.tailscaleRoot(), "state"),
