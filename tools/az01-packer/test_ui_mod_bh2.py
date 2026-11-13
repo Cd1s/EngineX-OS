@@ -27,6 +27,18 @@ class UiModBH2Test(unittest.TestCase):
             joined = "\n".join(new for _old, new in edits[key])
             self.assertIn("root.scQuiet() || root.scUnasked(provider)", joined)
 
+    def test_composite_artist_song_has_skip_keys_for_primego_mixstream_bh2_a6_3(self):
+        bp = load_build_packs()
+        bp.ROOT = "Skins/Embedded/"
+        edits = bp.edits(False)
+        key = "Skins/EngineOS/UI/CompositeControls/Deck/DeckItem/ArtistSong.qml"
+        joined = "\n".join(new for _old, new in edits[key])
+        self.assertIn("id: scSkipKeys", joined)
+        self.assertIn("scNoSkipKeys", joined)
+        self.assertIn("PreviousTrack", joined)
+        self.assertIn("NextTrack", joined)
+        self.assertIn("eventPoint.position.x >= scSkipKeys.x", joined)
+
 
 if __name__ == "__main__":
     unittest.main()
