@@ -308,12 +308,12 @@ func TestRefusedBackupsLeaveNoOutput(t *testing.T) {
 		data []byte
 		want error
 	}{
-		"needs_recovery": {mutate(func(sb []byte) { le.PutUint32(sb[sbFeatureIncompat:], le.Uint32(sb[sbFeatureIncompat:])|incompatRecover) }), ErrDirty},
+		"needs_recovery": {mutate(func(sb []byte) { setFlag(sb, sbFeatureIncompat, incompatRecover) }), ErrDirty},
 		"not_clean":      {mutate(func(sb []byte) { le.PutUint16(sb[sbState:], 0) }), ErrDirty},
 		"errors":         {mutate(func(sb []byte) { le.PutUint16(sb[sbState:], 3) }), ErrDirty},
-		"inline_data":    {mutate(func(sb []byte) { le.PutUint32(sb[sbFeatureIncompat:], le.Uint32(sb[sbFeatureIncompat:])|0x8000) }), ErrUnsupported},
-		"quota":          {mutate(func(sb []byte) { le.PutUint32(sb[sbFeatureROCompat:], le.Uint32(sb[sbFeatureROCompat:])|0x100) }), ErrUnsupported},
-		"bad_csum":       {func() []byte { b := append([]byte(nil), good...); b[superblockOffset+sbVolumeName] ^= 1; return b }(), ErrCorrupt},
+		"inline_data":    {mutate(func(sb []byte) { setFlag(sb, sbFeatureIncompat, 0x8000) }), ErrUnsupported},
+		"quota":          {mutate(func(sb []byte) { setFlag(sb, sbFeatureROCompat, 0x100) }), ErrUnsupported},
+		"bad_csum":       {flipByte(good, superblockOffset+sbVolumeName), ErrCorrupt},
 		"not_ext4":       {make([]byte, 1<<20), ErrNotExt4},
 		"truncated":      {good[:32<<20], ErrCorrupt},
 	}
@@ -350,4 +350,12 @@ func TestEntryMismatchFails(t *testing.T) {
 	if err := img.Apply(context.Background(), ChangeSet{Files: []Entry{e}}); err == nil {
 		t.Fatal("Apply accepted a longer stream")
 	}
+}
+
+func setFlag(sb []byte, off int, bit uint32) { le.PutUint32(sb[off:], le.Uint32(sb[off:])|bit) }
+
+func flipByte(b []byte, off int) []byte {
+	c := append([]byte(nil), b...)
+	c[off] ^= 1
+	return c
 }

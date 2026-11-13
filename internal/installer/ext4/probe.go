@@ -49,7 +49,7 @@ var featureNames = []struct {
 func (f *fsys) profile() *Profile {
 	p := &Profile{BlockSize: int(f.bs), Blocks: f.blocksCount, FreeBlocks: f.sbFreeBlocks(), Inodes: f.inodesCount,
 		FreeInodes: f.sbFreeInodes(), InodeSize: f.inodeSize, Groups: f.groups,
-		Label: strings.TrimRight(string(f.sb[sbVolumeName:sbVolumeName+16]), "\x00"),
+		Label:  strings.TrimRight(string(f.sb[sbVolumeName:sbVolumeName+16]), "\x00"),
 		Compat: f.compat(), Incompat: f.incompat(), ROCompat: f.roCompat(), HasJournal: f.compat()&compatHasJournal != 0}
 	copy(p.UUID[:], f.sb[sbUUID:sbUUID+16])
 	sets := [3]uint32{p.Compat, p.Incompat, p.ROCompat}

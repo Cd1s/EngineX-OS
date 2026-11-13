@@ -316,12 +316,16 @@ func (f *fsys) gdSet(g int, lo, hi int, width int, v uint64) {
 	f.dirtyGD[g] = true
 }
 
-func (f *fsys) blockBitmapBlock(g int) uint64 { return f.gdGet(g, gdBlockBitmapLo, gdBlockBitmapHi, 32) }
-func (f *fsys) inodeBitmapBlock(g int) uint64 { return f.gdGet(g, gdInodeBitmapLo, gdInodeBitmapHi, 32) }
-func (f *fsys) inodeTableBlock(g int) uint64  { return f.gdGet(g, gdInodeTableLo, gdInodeTableHi, 32) }
-func (f *fsys) gdFreeBlocks(g int) uint64     { return f.gdGet(g, gdFreeBlocksLo, gdFreeBlocksHi, 16) }
-func (f *fsys) gdFreeInodes(g int) uint64     { return f.gdGet(g, gdFreeInodesLo, gdFreeInodesHi, 16) }
-func (f *fsys) gdUsedDirs(g int) uint64       { return f.gdGet(g, gdUsedDirsLo, gdUsedDirsHi, 16) }
+func (f *fsys) blockBitmapBlock(g int) uint64 {
+	return f.gdGet(g, gdBlockBitmapLo, gdBlockBitmapHi, 32)
+}
+func (f *fsys) inodeBitmapBlock(g int) uint64 {
+	return f.gdGet(g, gdInodeBitmapLo, gdInodeBitmapHi, 32)
+}
+func (f *fsys) inodeTableBlock(g int) uint64 { return f.gdGet(g, gdInodeTableLo, gdInodeTableHi, 32) }
+func (f *fsys) gdFreeBlocks(g int) uint64    { return f.gdGet(g, gdFreeBlocksLo, gdFreeBlocksHi, 16) }
+func (f *fsys) gdFreeInodes(g int) uint64    { return f.gdGet(g, gdFreeInodesLo, gdFreeInodesHi, 16) }
+func (f *fsys) gdUsedDirs(g int) uint64      { return f.gdGet(g, gdUsedDirsLo, gdUsedDirsHi, 16) }
 func (f *fsys) gdItableUnused(g int) uint64 {
 	return f.gdGet(g, gdItableUnusedLo, gdItableUnusedHi, 16)
 }
