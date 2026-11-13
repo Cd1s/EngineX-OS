@@ -179,6 +179,7 @@ func (f *fsys) verifyDxBlock(dir *inode, blk []byte, off int) error {
 	tail := off + limit*8
 	c := crc32c(f.inodeSeed(dir.num, dir.generation()), blk[:off+count*8])
 	c = crc32c(c, blk[tail:tail+4])
+	c = crc32c(c, []byte{0, 0, 0, 0}) // dt_checksum itself, as zero
 	if got := le.Uint32(blk[tail+4:]); got != c {
 		return corruptf("directory inode %d: htree node checksum %#x, computed %#x", dir.num, got, c)
 	}
