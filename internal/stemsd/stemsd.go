@@ -42,13 +42,7 @@ func Main() {
 	flag.Parse()
 	set := map[string]bool{}
 	flag.Visit(func(f *flag.Flag) { set[f.Name] = true })
-	if !set["listen"] && !set["token-file"] {
-		if _, e := os.Stat(*token); e != nil {
-			// Zero-config home PC: serve the LAN without a credential, with discovery.
-			*listen, *token = "0.0.0.0:18765", ""
-			fmt.Fprintln(os.Stderr, "enginex-stemsd: no token file and no flags: zero-config Home LAN mode on :18765 (no auth, UDP discovery beacon on)")
-		}
-	}
+	*listen, *token = resolveListenAndToken(*listen, *token, set, os.Stderr)
 	secret := ""
 	if *token != "" {
 		s, e := stems.Secret(*token)
@@ -129,6 +123,22 @@ func resolveWorkerWithLog(python, worker, backend string, log io.Writer) (string
 	// An older worker.py has no --backend: it only does hpss, so run it as before.
 	fmt.Fprintf(log, "warning: worker backend %q: %v; assuming hpss\n", backend, cmp.Or(e, fmt.Errorf("answered %q", name)))
 	return "hpss", []string{python, "-u", worker}
+}
+
+func resolveListenAndToken(listen, token string, set map[string]bool, errOut io.Writer) (string, string) {
+	if !set["listen"] {
+		if token == "" {
+			listen = "0.0.0.0:18765"
+			fmt.Fprintln(errOut, "enginex-stemsd: empty -token-file without -listen: zero-config Home LAN mode on :18765 (no auth, UDP discovery beacon on)")
+		} else if !set["token-file"] {
+			if _, e := os.Stat(token); e != nil {
+				// Zero-config home PC: serve the LAN without a credential, with discovery.
+				listen, token = "0.0.0.0:18765", ""
+				fmt.Fprintln(errOut, "enginex-stemsd: no token file and no flags: zero-config Home LAN mode on :18765 (no auth, UDP discovery beacon on)")
+			}
+		}
+	}
+	return listen, token
 }
 
 // defaultToken prefers the EngineX token paths and falls back to the legacy one.

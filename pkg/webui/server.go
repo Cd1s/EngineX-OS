@@ -94,6 +94,7 @@ type Server struct {
 	prolinkExport *prolink.Exporter
 	closed        chan struct{}
 	closeOnce     sync.Once
+	lanProbeWG    sync.WaitGroup
 
 	updateMu    sync.Mutex
 	updateCache updateStatus
@@ -303,6 +304,7 @@ func New(cfg Config, jobs *Jobs) *Server {
 		jobs.soundcloud = s.ownerSoundCloud
 		jobs.beatport = s.ownerBeatport
 		jobs.spotify = s.ownerSpotify
+		jobs.selfHosted = s.ownerSelfHosted
 		jobs.bpm = cfg.BPM
 		if jobs.p.Deemix != nil {
 			jobs.p.Deemix.PreferMP3 = func() bool { return s.quality() == quality320k }
@@ -345,6 +347,7 @@ func (s *Server) tryExport() {
 // Close releases optional network exports, including active dbserver clients.
 func (s *Server) Close() {
 	s.closeOnce.Do(func() { close(s.closed) })
+	s.lanProbeWG.Wait()
 	s.mu.Lock()
 	var closers []interface{ Close() }
 	for _, v := range s.sessions {

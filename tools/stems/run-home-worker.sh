@@ -43,6 +43,7 @@ py=$venv/bin/python3
 "$py" -c 'import numpy, scipy' 2>/dev/null || "$py" -m pip install -q numpy scipy
 case $backend in
   demucs|htdemucs) "$py" -c 'import demucs' 2>/dev/null || "$py" -m pip install -q demucs ;;
+  auto) "$py" -c 'import demucs' 2>/dev/null || "$py" -m pip install -q demucs || echo "EngineX OS: demucs unavailable for auto backend; falling back to hpss" >&2 ;;
 esac
 if [ "$("$py" "$here/worker.py" --backend "$backend" --print-backend)" = htdemucs ]; then
   # Fetch the model weights now, not during a deck's first session.

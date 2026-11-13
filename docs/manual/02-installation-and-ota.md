@@ -163,9 +163,9 @@ Deck powered on, same router as the computer, and root SSH is available (or Engi
 - 如果 SSH 能连上但**认证失败**，程序会停下并提示用 `--key` 或 `--password`，不会继续。
   If SSH connects but **authentication fails**, it stops and tells you to use `--key` or `--password`.
   若 SSH 可連上但**認證失敗**，程式會停止並提示改用 `--key` 或 `--password`。
-- 电脑与碟机不在同一个 /24 网段（如访客 Wi-Fi 隔离、不同 VLAN）时可能找不到，请接到同一个路由器。
-  Decks on a different /24 subnet (guest Wi-Fi isolation, VLANs) may not be found; join the same router.
-  電腦與碟機不在同一 /24 網段（訪客 Wi-Fi 隔離、不同 VLAN）時可能找不到，請連到同一台路由器。
+- 电脑与碟机不在同一个 /24 网段（如访客 Wi-Fi 隔离、不同 VLAN），或本机防火墙拦截了局域网发现广播（UDP `51337` StageLinQ 与 UDP `11224` EAAS，例如 `ufw` / `firewalld` / Windows Defender）时可能找不到碟机；请接到同一个路由器并放行入站 UDP `51337`、`11224`（例如 `sudo ufw allow 51337/udp && sudo ufw allow 11224/udp`，或 `sudo firewall-cmd --add-port=51337/udp --add-port=11224/udp`）。
+  Decks on a different /24 subnet (guest Wi-Fi isolation, VLANs) or blocked by a host firewall dropping UDP `51337` (StageLinQ) and UDP `11224` (EAAS) broadcasts (`ufw`, `firewalld`, Windows Defender) may not be found; join the same router and allow inbound UDP `51337` and `11224`.
+  電腦與碟機不在同一 /24 網段（訪客 Wi-Fi 隔離、不同 VLAN），或本機防火牆攔截了區域網路探索廣播（UDP `51337` StageLinQ 與 UDP `11224` EAAS，如 `ufw` / `firewalld` / Windows Defender）時可能找不到碟機；請連到同一台路由器並放行入站 UDP `51337`、`11224`。
 
 ### 2.5 模式 B：USB 线 + Fastboot / Mode B: USB cable + Fastboot / 模式 B：USB 線 + Fastboot
 
@@ -255,7 +255,7 @@ Deck powered on, same router as the computer, and root SSH is available (or Engi
 
 | 项目 / Item / 項目 | 说明 / Detail / 說明 |
 | :-- | :-- |
-| `fastboot` | Android platform-tools，需在 PATH 中 / must be in PATH / 須在 PATH 中 |
+| `fastboot` | Android platform-tools，需在 PATH 中（Debian/Ubuntu：`sudo apt install fastboot`；Fedora：`sudo dnf install android-tools`；Arch/CachyOS：`sudo pacman -S android-tools`；macOS：`brew install --cask android-platform-tools`）/ must be in PATH (`apt install fastboot` / `dnf install android-tools` / `pacman -S android-tools` / `brew install --cask android-platform-tools`) / 須在 PATH 中（`apt install fastboot` / `dnf install android-tools` / `pacman -S android-tools` / `brew install --cask android-platform-tools`） |
 | Python 3 | 注入 `/data` 镜像用 / injects the `/data` image / 用於注入 `/data` 映像 |
 | e2fsprogs | `debugfs`、`mke2fs`（新建镜像时）/ (and `mke2fs` for a new image) / （新建映像時需 `mke2fs`） |
 | Windows | 请在 **WSL** 中用 Linux 包，并通过 `usbipd` 直通 USB；WSL 中须安装 `fastboot`、`python3` 与 `e2fsprogs`，并以 `wsl -u root` 运行（避免直通 USB 节点权限不足）/ use the Linux package in **WSL** with USB forwarded via `usbipd`; install `fastboot`, `python3`, and `e2fsprogs` in WSL, and run as root via `wsl -u root` (usbipd device nodes require root) / 請在 **WSL** 中使用 Linux 版，並透過 `usbipd` 直通 USB；WSL 中須安裝 `fastboot`、`python3` 與 `e2fsprogs`，並以 `wsl -u root` 執行（避免直通 USB 節點權限不足） |
@@ -442,7 +442,7 @@ You can do the same from the web console at `http://<deck IP>:8080` on the same 
 - EN: On a SmartScreen warning choose "More info → Run anyway". If antivirus blocks it, whitelist the extracted folder.
 - 繁：遇到 SmartScreen 警告時點「更多資訊 → 仍要執行」；若被防毒攔截，請將解壓縮資料夾加入白名單。
 
-**Linux**：`chmod +x install-enginex.sh`，必要时用 `sudo` 以便访问 USB / use `sudo` if USB access is needed / 必要時用 `sudo` 以便存取 USB。
+**Linux**：先安装系统 `fastboot` 包（如 `sudo apt install fastboot`、`sudo dnf install android-tools` 或 `sudo pacman -S android-tools`）与 `e2fsprogs`，再运行 `chmod +x install-enginex.sh`；USB Fastboot 线刷请用 `sudo ./install-enginex.sh`（或按安装器提示为 USB 厂商 ID `15e4` / `1cc5` / `2207` / `18d1` 配置 `udev` 规则）以便访问 USB / install `fastboot` (`apt install fastboot` / `dnf install android-tools` / `pacman -S android-tools`) and `e2fsprogs` first, then run `chmod +x install-enginex.sh` and use `sudo` (or add a `udev` rule for vendor IDs `15e4` / `1cc5` / `2207` / `18d1`) if USB access is needed / 先安裝系統 `fastboot` 套件（如 `apt install fastboot`、`dnf install android-tools` 或 `pacman -S android-tools`）與 `e2fsprogs`，再執行 `chmod +x install-enginex.sh`，USB 線刷時請加 `sudo`（或依提示設定 `udev` 規則）以便存取 USB。
 
 ### 5.2 Windows 的 Fastboot 驱动 / Fastboot driver on Windows / Windows 的 Fastboot 驅動
 
@@ -454,9 +454,9 @@ You can do the same from the web console at `http://<deck IP>:8080` on the same 
 
 | 提示 / Message / 訊息 | 原因与处理 / Cause & fix / 原因與處理 |
 | :-- | :-- |
-| `没有发现碟机` / `no deck found` | 碟机没开机、不在同一 /24 网段，或是未解锁原厂机。开机并接同一路由器；或进入 Firmware Update Mode 后接 USB（模式 B）。/ Power on, join the same router, or boot into Firmware Update Mode and use USB (Mode B). / 開機並連到同一路由器，或進入 Firmware Update Mode 後接 USB（模式 B）。 |
+| `没有发现碟机` / `no deck found` | 碟机没开机、不在同一 /24 网段、本机防火墙拦截了 UDP `51337` / `11224`，或是未解锁原厂机。开机并接同一路由器、放行防火墙 UDP `51337` 与 `11224`；或进入 Firmware Update Mode 后接 USB（模式 B，Linux 请确认已安装 `fastboot` / `android-tools`）。/ Power on, join the same router and allow UDP `51337` & `11224` in the host firewall, or boot into Firmware Update Mode and use USB (Mode B; ensure `fastboot` / `android-tools` is installed on Linux). / 開機並連到同一路由器、放行防火牆 UDP `51337` 與 `11224`，或進入 Firmware Update Mode 後接 USB（模式 B，Linux 請確認已安裝 `fastboot` / `android-tools`）。 |
 | `SSH 登录失败 / SSH login failed` | SSH 可达但认证失败。用 `--key` 或 `--password`。/ Use `--key` or `--password`. / 改用 `--key` 或 `--password`。 |
-| `处于原厂未解锁状态，需要 fastboot 但没找到` | PATH 里没有 `fastboot`。安装 Android platform-tools。/ Install Android platform-tools. / 安裝 Android platform-tools。 |
+| `没有找到 fastboot 程序` / `fastboot is not installed` | PATH 里没有 `fastboot`。安装 Android platform-tools（Linux：`apt install fastboot` / `dnf install android-tools` / `pacman -S android-tools`）。/ Install Android platform-tools (`apt install fastboot` / `dnf install android-tools` / `pacman -S android-tools` on Linux). / 安裝 Android platform-tools（Linux：`apt install fastboot` / `dnf install android-tools` / `pacman -S android-tools`）。 |
 | `等待 USB Fastboot 超时` / `timed out waiting for fastboot` | 10 分钟内没看到设备。换 USB 线/端口，确认碟机在 Firmware Update Mode。/ Change cable/port, confirm Firmware Update Mode. / 更換 USB 線/連接埠，確認碟機處於 Firmware Update Mode。 |
 | `未知型号 … 不刷写` / `unknown board, nothing flashed` | 板号不在支持表里，安装器拒绝刷写，属保护行为。/ Protective refusal; the board is not supported. / 板號不在支援表中，安裝器拒絕刷寫，屬保護行為。 |
 | `wrong model refused` | `--image` / `--bundle` 的文件名前缀与碟机型号不符。换对应型号的 `*-Update.img`。/ The `--image` / `--bundle` prefix does not match the deck. / `--image` / `--bundle` 檔名前綴與機型不符。 |

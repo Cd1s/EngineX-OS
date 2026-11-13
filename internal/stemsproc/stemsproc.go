@@ -14,6 +14,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -33,9 +34,6 @@ func Main(args []string) int {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	findLAN := func(ctx context.Context) (string, bool) {
-		return stems.FindLAN(ctx, stems.DefaultLANState, 350*time.Millisecond)
-	}
 	local := func(in io.Reader, out io.Writer) error {
 		// Split on the deck, never at the audio's expense.
 		if _, err := resourceguard.New(resourceguard.DefaultConfig()).ApplyToProcess(0); err != nil {
@@ -43,11 +41,23 @@ func Main(args []string) int {
 		}
 		return stems.LocalRender(in, out)
 	}
-	if err = run(ctx, client, findLAN, local, os.Stdin, os.Stdout); err != nil {
+	if err = run(ctx, client, defaultFindLAN, local, os.Stdin, os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
 	return 0
+}
+
+// lanDiscoveryTimeout accommodates 802.11 Wi-Fi DTIM multicast buffering and
+// TCP/HTTP handshake jitter on Wi-Fi-only decks such as PRIME GO and Mixstream Pro Go.
+const lanDiscoveryTimeout = 1200 * time.Millisecond
+
+func defaultFindLAN(ctx context.Context) (string, bool) {
+	return findLANAt(ctx, stems.DefaultLANState)
+}
+
+func findLANAt(ctx context.Context, statePath string) (string, bool) {
+	return stems.FindLAN(ctx, statePath, lanDiscoveryTimeout)
 }
 
 // run tries the configured renderer, then a LAN renderer, then local. It moves
@@ -59,7 +69,13 @@ func run(ctx context.Context, client stems.Client, findLAN func(context.Context)
 	src := newStdinMux(in)
 	next := func(err error, v *view) bool {
 		v.abandon()
-		return errors.Is(err, stems.ErrUnreachable) || (errors.Is(err, stems.ErrUnavailable) && v.replayable())
+		if errors.Is(err, stems.ErrUnreachable) {
+			return true
+		}
+		if err == nil || !v.replayable() {
+			return false
+		}
+		return errors.Is(err, stems.ErrUnavailable) || strings.HasPrefix(err.Error(), "backend status ") || err.Error() == "backend protocol mismatch"
 	}
 	if client.Endpoint != "" {
 		v := src.view()

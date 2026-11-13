@@ -15,6 +15,7 @@ import (
 	"net/http/cookiejar"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"time"
@@ -232,10 +233,12 @@ func (s *Session) fetchDecrypt(ctx context.Context, srcURL, sngID, dst string) e
 	if resp.StatusCode != 200 {
 		return fmt.Errorf("deezer cdn: HTTP %d", resp.StatusCode)
 	}
-	f, err := os.Create(dst)
+	f, err := os.CreateTemp(filepath.Dir(dst), ".part-*")
 	if err != nil {
 		return err
 	}
+	tmp := f.Name()
+	defer os.Remove(tmp)
 	defer f.Close()
 	cw := &countWriter{w: f}
 	if err := decryptStripe(transportReader{resp.Body}, cw, blowfishKey(sngID)); err != nil {
@@ -247,7 +250,10 @@ func (s *Session) fetchDecrypt(ctx context.Context, srcURL, sngID, dst string) e
 	if err := f.Sync(); err != nil {
 		return err
 	}
-	return f.Close()
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, dst)
 }
 
 // decryptStripe undoes Deezer's BF_CBC_STRIPE: every third 2048-byte chunk

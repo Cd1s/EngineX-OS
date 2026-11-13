@@ -106,3 +106,33 @@ func TestResolveClientDirectOverride(t *testing.T) {
 		t.Error("short token accepted")
 	}
 }
+
+func TestResolveClientAcceptsMDNSAndLANHostnames(t *testing.T) {
+	for _, good := range []string{
+		"http://studio-mac.local:18765",
+		"http://deck-worker.lan:18765",
+		"http://localhost:6596",
+		"http://renderbox:18765",
+	} {
+		c, err := ResolveClient(envOf(map[string]string{"SC5000_STEMS_URL": good, "SC5000_STEMS_TOKEN": "tok"}))
+		if err != nil || c.Endpoint != good {
+			t.Fatalf("ResolveClient(%q) = (%+v, %v), want accepted", good, c, err)
+		}
+	}
+	for _, bad := range []string{
+		"http://.local:18765",
+		"http://.lan:18765",
+		"http://relay.example:18765",
+		"http://[2001:db8::1%25eth0]:18765",
+		"http://[2606:4700:4700::1111%25eth0]:18765",
+		"http://192.168.1.5%25eth0:18765",
+		"http://[fe80::1%25]:18765",
+	} {
+		if _, err := ResolveClient(envOf(map[string]string{"SC5000_STEMS_URL": bad, "SC5000_STEMS_TOKEN": "tok"})); err == nil {
+			t.Fatalf("ResolveClient(%q) accepted non-LAN HTTP host", bad)
+		}
+	}
+	if _, err := ResolveClient(envOf(map[string]string{"SC5000_STEMS_URL": "http://[fe80::1%25eth0]:18765", "SC5000_STEMS_TOKEN": "tok"})); err != nil {
+		t.Fatalf("link-local zoned IPv6 rejected: %v", err)
+	}
+}

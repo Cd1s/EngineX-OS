@@ -1,6 +1,6 @@
 # EngineX OS 全功能盘点与 UI 开关入口规范（Issue #102 · 第 1 部分）
 
-- 盘点基线：`main` @ `b5a4ba8`（版本 5.3.0.2）。扫描范围：`cmd/`、`internal/`、`pkg/`、`tools/ui-mod/`、`tools/az01-packer/`、`tools/stems/`、`tools/edisksd-hook/`、`rootfs-overlay/`、各 README。
+- 初版盘点基线：`main` @ `b5a4ba8`（版本 5.3.0.2）；第 1–4 节已同步更新至 **5.3.0.4 r3** 实际 QML 菜单布局与代码实现（第 5–6 节保留 5.3.0.2 当时的 UI 审查历史记录备查）。扫描范围：`cmd/`、`internal/`、`pkg/`、`tools/ui-mod/`、`tools/az01-packer/`、`tools/stems/`、`tools/edisksd-hook/`、`rootfs-overlay/`、各 README。
 - 本文只读扫描，没有改任何代码。所有"改动补丁建议"都在第 6 节，由对应文件的负责人落地。
 - 证据写法：`文件:行/符号`。"待实机核实"表示只在代码里看到，没有实机证据。
 
@@ -67,50 +67,64 @@
 
 ### 2.1 入口位置总览
 
-屏幕上 EngineX 的东西分布在 6 处，没有统一的"EngineX"分组：
+屏幕上 EngineX 的条目按原厂 `Control Center`、`Layout`、`Profile`、`Settings` 与 `Source` 分页就近归位（`tools/ui-mod/build_packs.py`）：
 
 | 位置 | 内容 |
 |---|---|
-| 设置 → 设备（Device） | 16 项 EngineX 条目，平铺在原厂条目里，插在 `Player #` 之前（`DeviceTabContent.qml` 补丁） |
-| 设置 → 混音台（Mixer） | Fader Echo（推子回音 / 推桿回音），仅带混音台机型显示（`root.scHasMixer`） |
-| 设置 → 服务 → 流媒体（Services → Streaming） | 7 个流媒体服务开关；原厂 TIDAL / SoundCloud / Beatport LINK 行被隐藏 |
-| 设置 → 关于 / 更新（About / Update） | 版本行（含 Web 控制台地址与访问码）；更新页改查 GitHub |
-| 控制中心（Control Center）磁贴 | Waveform Style、Fader Echo（推子回音 / 推桿回音，仅带混音台机型）、Smart Sync |
-| 音源页（Source）与曲库 | 每个流媒体服务一行 + "扫码登录 / 切换账号"；流媒体曲目左滑 Stems |
+| `Settings → Device`（设置 → 设备） | `Language`、`Pad LED Brightness`、`Power → Turn Off`（插在 `Player #` 之前，`DeviceTabContent.qml`） |
+| `Settings → Mixer`（设置 → 混音台） | `Fader Echo`（插在 `Calibrate Crossfader` 之前）与放开的原厂 `Master Limiter` |
+| `Settings → Services`（设置 → 服务） | `Streaming` 7 个流媒体服务开关（隐藏原厂 TIDAL / SoundCloud / Beatport LINK 行）、`Streaming Quality`、`NetEase Download`、`Live Stream`、`Pro DJ Link Library`、`Pro DJ Link Export to CDJ (Beta)` |
+| `Settings → About / Update`（设置 → 关于 / 更新） | 版本行（含 Web 控制台地址与 8 位访问码 `XXXX-XXXX`）；在线更新改查 GitHub Releases |
+| `Profile → Display`（配置 → 显示） | `Waveform Style`（`Denon` / `RGB` / `3-Band`） |
+| `Profile → Playback`（配置 → 播放） | `Master Soft Clipper`、`Auto-Gain (0 dB Normalize)`、`Echo Out`、`Stems EQ Mode`、`Color FX Style`、`PX Delay Time Mode`、`PX Delay Time (ms)`，并放开 `Censor Button Behavior` 下的 `Silent Cue` |
+| `Profile → Cues/Loops`（配置 → Cue / Loop） | 放开原厂 `Link Beat Jump / Loop Size Controls`（`Smart Loops` 保持原厂自带） |
+| `Profile → Safety`（配置 → 安全） | `Sync Guard Tolerance`（`Off` / `10%` / `15%` / `20%`） |
+| `Profile → Library`（配置 → 曲库） | `Stems List`（armhf 机型放开并附局域网分轨状态提示）、`OmniSource (Drives in Streaming)`、`Tracklist Waveform` |
+| `Layout → ENGINEX VIEW PRESET`（布局 → ENGINEX 视图预设） | `View 1–5` 视图预设与 `Save View`；下方 `ENGINEX VIEW PRESET` 分组含 `Cue Countdown`、`UI Scale`、`Dual-Column Browser`、`Beat Jump Pad Bank`、`Swap Loop / Beat Jump`、`Linked View`、`4-Deck Role`、`Shadow Deck Mode` |
+| `Control Center`（控制中心）磁贴 | `Waveform Style`、`Fader Echo`（无原厂推子回音磁贴且带混音台的一体机显示，独立播放机隐藏）、`Smart Sync`（`Live Stream` 已移至 `Settings → Services`） |
+| `Source`（来源）与曲库 | 每个启用流媒体服务一行 + 右侧 `Scan to log in` / `Switch account`；曲目滑动触发 `Stems` 分轨 |
 
-> 任务书提到的 Layout Manager、Utility 页：仓库没有往这两处加任何 EngineX 条目，只有 `i18n.tsv` 收录了原厂文案（`Layout`、`Control Center` 等标签页名）。下表不含它们。
-
-### 2.2 设置 → 设备：EngineX 条目（按屏幕实际顺序）
+### 2.2 各菜单页 EngineX 条目明细（5.3.0.4）
 
 `<DATA>/ui/settings.conf` 简称 conf。接口 `POST /v1/sc5000/ui?<参数>`（别名 `/v1/enginex/ui`）仅接受本机回环调用，Web 控制台用 `POST /api/ui`，参数相同。默认值是"conf 里没有这个键"时的取值。
 
-| # | 英文 / 简中 / 繁中 | 作用 | 默认 | 接口参数 | conf 键 | 备注 |
-|---|---|---|---|---|---|---|
-| 1 | Power → Turn Off / 电源 → 关机 / 電源 → 關機 | 调用原厂关机确认框（#78） | — | — | — | 按钮，不是开关。仅 5.3.0 |
-| 2 | Language / 语言 / 語言 | 界面语言 | `en` | `lang=en\|zh-Hans\|zh-Hant`（加 `restart=1`） | `lang` | 切换要重启 Engine，播放中断，屏幕有确认框 |
-| 3 | Waveform Style / 波形样式 / 波形樣式 | 波形配色 Denon / RGB / 3-Band | `denon` | `waveform=denon\|rgb\|3band` | `waveform` | 控制中心有同名磁贴 |
-| 4 | Streaming Quality / 流媒体音质 / 串流音質 | 下载音质 Lossless / 320kbps | `flac` | `quality=flac\|320k` | `quality` | 下一次下载起生效 |
-| 5 | NetEase Download / 网易云下载方式 / 網易雲下載方式 | 官方直下 / Deemix 优先 | `official` | `neteaseMode=official\|deemix` | `netease_mode` | Deemix 优先用来省网易云月度下载额度 |
-| 6 | （已在 5.3.0.4 移除）Jog Light Mode / 转盘灯效 | 已移除，转盘灯环恢复原厂行为并跟随 `打击垫亮度` | — | — | — | `test_ui_mod.py` 锁定已清理 |
-| 7 | （已在 5.3.0.4 移除）Auto-Analyze Drives (Unavailable) | 无效占位行已在 5.3.0.4 移除；未分析曲目在加载上盘时分析 | — | — | — | `test_ui_mod.py` 锁定已清理 |
-| 8 | Master Soft Clipper / 0dB 防破音软限幅 / 0dB 防破音軟限幅 | 主输出软限幅，峰值压到 -0.1 dBFS 以下 | 关 | `masterLimiter=0\|1` | `master_limiter` | 钩子每秒轮询，立即生效；#58。AZ04 已移植（#149） |
-| 9 | Auto-Gain (0 dB Normalize) / 自动增益（0 dB 归一化） / 自動增益（0 dB 正規化） | 把偏小的歌平滑提到接近 0 dBFS，最多 +9 dB，低于 -42 dBFS 的静音不提 | 关 | `autoGain=0\|1` | `auto_gain` | 开启后总会过软限幅；#64。AZ04 已移植（#149） |
-| 10 | OmniSource (Drives in Streaming) / OmniSource（在流媒体中显示 U 盘/SD） | U 盘 / SD 的歌单和曲目显示在流媒体浏览器里 | 关 | `omniSource=0\|1` | `omni_source` | #62 |
-| 11 | Pro DJ Link Library / Pro DJ Link 曲库 / Pro DJ Link 曲庫 | 读取局域网内 CDJ 上 rekordbox U 盘的曲库 | 关 | `prolinkShare=0\|1` | `prolink_share` | 测试版；#59 |
-| 12 | Pro DJ Link Export to CDJ (Beta) | 把本机 U 盘共享给 CDJ 浏览 | 关 | `prolinkExport=0\|1` | `prolink_export` | 实验功能；**简繁中文没有译文**（见 4.1）；状态 `prolinkExportActive` 只读 |
-| 13 | Layout → ENGINEX VIEW PRESET → Linked View / 布局 → ENGINEX 视图预设 → 联机视图 / 佈局 → ENGINEX 視圖預設 → 聯機視圖 | 切换原厂视图（`Stock`）、双机配对视图（`Paired Player`，仅独立播放机）与四轨联机视图（`4 Decks`） | `Stock` | `fourDeckWaveform=0\|1`、`pairedView=0\|1`（`Stock` 进出联机布局走 `scRestartCall`） | `four_deck_waveform`、`paired_view` | 在独立播放机（SC5000/SC6000 系列）及四通道一体机 `JC11`、`JC11S`、`JP21`、`JP24` 显示（`root.scCanFourDeck`）；#49、#201 |
-| 14 | Layout → ENGINEX VIEW PRESET → 4-Deck Role / 四轨角色 / 四軌角色 | 本机负责哪两台：自动、1+3、2+4、1+2、3+4、1、2 | `auto` | `fourDeckRole=auto\|13\|24\|12\|34\|1\|2` | `four_deck_role` | 仅当 `Linked View` 开启时显示（`scCanFourDeck && scFourDeckOn`）；切换重启 Engine。自动按 Engine 的 Player # 奇偶取 13 / 24 |
-| 15 | Live Stream / 直播推流 | 碟机数字内录主输出：电脑免配置直连 `http://<碟机IP>:8080/live.mp3`、`/live.wav`（OBS 媒体源 / VLC / 浏览器）；或向 Shoutcast / Icecast 推流（CPU3 空闲核后台推送并同步歌名） | 关 | `broadcast=0\|1` | 不在 conf，落在 `<DATA>/state/broadcast-config.json` | 直连地址不需任何配置；推流的服务器地址、挂载点和密码在 Web 控制台 `http://<碟机IP>:8080` 的 Live Stream 卡片填。直连地址随下一次发版上线 |
-| 16 | Echo Out / 回声淡出 / 回聲淡出 | 仅带通道推子的一体机可用（独立播放机隐藏并直通），在 96 kHz 音频链上于快速拉下推子时释放平滑衰减回声尾音 | 关 | `upfaderEcho=0\|1` | `upfader_echo` | 控制中心磁贴、`配置 → 播放 → 回声淡出` 与 `设置 → 混音台 → 推子回音` 同步 |
-| 17 | UI Scale / 界面缩放 / 介面縮放 | 整体缩放 Engine 界面（110%、105%、100%、95%、90%、85%、80%、75%），既可放大照顾视力，亦可缩小以容纳更多内容 | `100` | `uiScale=110\|105\|100\|95\|90\|85\|80\|75`（屏幕走 `scCall` 即时生效） | `ui_scale` | 界面 live 缩放，经 `<DATA>/ui-scale.env` 记录 `SC5000_UI_SCALE`（drop-in `engine.service.d/70-ui-scale.conf`）；选回 100% 时删掉 env 文件恢复原厂尺寸；#117、#153 |
-| 18 | Tracklist Waveform / 曲目列表波形 / 曲目列表波形 | 在展开曲库时显示曲目缩略波形；关闭后曲目标题与艺人名横向完整延展占满留白空间 | 开 | `tracklistWaveform=0\|1` | `tracklist_waveform` | #153 |
+| # | 所属菜单页 | 英文 / 简中 / 繁中 | 作用 | 默认 | 接口参数 | conf 键 | 备注 |
+|---|---|---|---|---|---|---|---|
+| 1 | `Settings → Device` | `Language` / 语言 / 語言 | 界面语言（`English` / `简体中文` / `繁體中文`） | `en` | `lang=en\|zh-Hans\|zh-Hant` | `lang` | 切换提示确认后重启 Engine |
+| 2 | `Settings → Device` | `Pad LED Brightness` / 打击垫亮度 / 打擊墊亮度 | 调节 RGB 打击垫、模式键与转盘灯环亮度（`100%`–`20%`），单色键保持原厂亮度 | `100` | `ledBrightness=100\|80\|60\|40\|20` | `led_brightness` | #85 |
+| 3 | `Settings → Device` | `Power` → `Turn Off` / 电源 → 关机 / 電源 → 關機 | 调用原厂关机确认框与录音/曲库保护流程（#78） | — | — | — | 按钮，仅 5.3.0 |
+| 4 | `Settings → Services` | `Streaming Quality` / 流媒体音质 / 串流音質 | 下载音质 `Lossless` / `320kbps` | `flac` | `quality=flac\|320k` | `quality` | 下一次下载起生效 |
+| 5 | `Settings → Services` | `NetEase Download` / 网易云下载方式 / 網易雲下載方式 | `Official`（官方直下）/ `Deemix First`（Deemix 优先） | `official` | `neteaseMode=official\|deemix` | `netease_mode` | 节省网易云月度下载额度 |
+| 6 | `Settings → Services` | `Live Stream` / 直播推流 / 直播推流 | 主输出数字内录：免配置直连 `http://<碟机IP>:8080/live.wav`、`/live.mp3`，或推送至 Icecast / Shoutcast | 关 | `broadcast=0\|1` | `<DATA>/state/broadcast-config.json` | 推流服务器参数在 Web 控制台填写 |
+| 7 | `Settings → Services` | `Pro DJ Link Library` / Pro DJ Link 曲库 / Pro DJ Link 曲庫 | 读取局域网内 CDJ 上 rekordbox U 盘的曲库 | 关 | `prolinkShare=0\|1` | `prolink_share` | #59 |
+| 8 | `Settings → Services` | `Pro DJ Link Export to CDJ (Beta)` / Pro DJ Link 导出至 CDJ（测试版） / Pro DJ Link 匯出至 CDJ（測試版） | 把本机 U 盘与已缓存流媒体共享给 CDJ 浏览 | 关 | `prolinkExport=0\|1` | `prolink_export` | 状态 `prolinkExportActive` 只读 |
+| 9 | `Profile → Display` | `Waveform Style` / 波形样式 / 波形樣式 | 波形配色 `Denon` / `RGB` / `3-Band` | `denon` | `waveform=denon\|rgb\|3band` | `waveform` | 与控制中心 `Waveform Style` 磁贴双向同步 |
+| 10 | `Profile → Playback` | `Master Soft Clipper` / 0dB 防破音软限幅 / 0dB 防破音軟限幅 | 主输出软限幅，峰值压到 -0.1 dBFS 以下 | 关 | `masterLimiter=0\|1` | `master_limiter` | 立即生效；#58、#149 |
+| 11 | `Profile → Playback` | `Auto-Gain (0 dB Normalize)` / 自动增益（0 dB 归一化） / 自動增益（0 dB 正規化） | 偏小曲目平滑提至接近 0 dBFS（最多 +9 dB，低于 -42 dBFS 静音不提） | 关 | `autoGain=0\|1` | `auto_gain` | 开启后总会过软限幅；#64、#149 |
+| 12 | `Profile → Playback` | `Echo Out` / 回声淡出 / 回聲淡出 | 带混音台机型推子切歌时释放回声尾音（与 `Settings → Mixer → Fader Echo` 及控制中心磁贴同步） | 关 | `upfaderEcho=0\|1` | `upfader_echo` | `visible: root.scHasMixer` |
+| 13 | `Profile → Playback` | `Stems EQ Mode` / 分轨 EQ 模式 / 分軌 EQ 模式 | 通道 EQ 旋钮切换控制分轨音量 | 关 | `stemsEqMode=0\|1` | `stems_eq_mode` | `visible: root.scHasStemsEq` |
+| 14 | `Profile → Playback` | `Color FX Style` / 先锋风格效果 (Color FX) / 先鋒風格效果 (Color FX) | `Off` / `Spiral` / `Pitch Echo` / `Slip Roll` / `Dub Echo` / `Space` | `off` | `pioneerFx=off\|spiral\|...` | `pioneer_fx` | 独立播放机隐藏并直通（#88） |
+| 15 | `Profile → Playback` | `PX Delay Time Mode` & `PX Delay Time (ms)` | 先锋延迟效果（`Spiral` / `Pitch Echo` / `Dub Echo`）拍值或自由毫秒模式（`10`–`4000 ms`） | `beats` / `500` | `fxTimeMode=beats\|ms`、`fxTimeMs=...` | `fx_time_mode`、`fx_time_ms` | `visible: root.scHasPxDelay`（#162） |
+| 16 | `Profile → Safety` | `Sync Guard Tolerance` / 同步保护容差 / 同步保護容差 | 限制大跨度速度同步幅度（`Off` / `10%` / `15%` / `20%`） | `0` | `syncGuardPct=0\|10\|15\|20` | `sync_guard_pct` | — |
+| 17 | `Profile → Library` | `OmniSource (Drives in Streaming)` / OmniSource（在流媒体中显示 U 盘/SD） / OmniSource（在串流中顯示 USB/SD） | U 盘 / SD、自建服务器与 djay 曲库统一显示在流媒体浏览器 | 关 | `omniSource=0\|1` | `omni_source` | #62、#112 |
+| 18 | `Profile → Library` | `Tracklist Waveform` / 曲目列表波形 / 曲目列表波形 | 曲库列表显示曲目缩略波形；关闭后标题与艺人横向延展 | 开 | `tracklistWaveform=0\|1` | `tracklist_waveform` | #153 |
+| 19 | `Layout → ENGINEX VIEW PRESET` | `Cue Countdown` / 热标拍数倒数 / 熱標拍數倒數 | 碟机头部显示下一热标小节.拍数倒数胶囊 | 关 | `cueCountdown=0\|1` | `cue_countdown` | 随 View 1–5 保存（#151） |
+| 20 | `Layout → ENGINEX VIEW PRESET` | `UI Scale` / 界面缩放 / 介面縮放 | 整体缩放界面（`110%`–`75%`），即时生效并记录 `<DATA>/ui-scale.env` | `100` | `uiScale=110\|105\|100\|95\|90\|85\|80\|75` | `ui_scale` | #117、#153 |
+| 21 | `Layout → ENGINEX VIEW PRESET` | `Dual-Column Browser` / 双栏浏览 / 雙欄瀏覽 | 曲库左歌单树、右曲目双栏同屏浏览 | 关 | `browserDualColumn=0\|1` | `browser_dual_column` | — |
+| 22 | `Layout → ENGINEX VIEW PRESET` | `Beat Jump Pad Bank` / 节拍跳跃打击垫 / 節拍跳躍打擊墊 | Mixstream 系列解锁独立节拍跳跃打击垫页 | 关 | `beatJumpPads=0\|1` | `beat_jump_pads` | `visible: root.scIsMixstream`（#135） |
+| 23 | `Layout → ENGINEX VIEW PRESET` | `Swap Loop / Beat Jump` / 互换循环 / 节拍跳跃 / 互換循環 / 節拍跳躍 | 带 AutoLoop 旋钮机型互换直接转动与 `Shift + 转动` 行为 | 关 | `swapLoopOrder=0\|1` | `swap_loop_order` | `visible: root.scHasAutoLoopKnob`（#135） |
+| 24 | `Layout → ENGINEX VIEW PRESET` | `Linked View` / 联机视图 / 聯機視圖 | 独立播放机切换 `Stock` / `Paired Player` / `4 Decks`，四通道一体机切换 `Stock` / `4 Decks` | `Stock` | `fourDeckWaveform=0\|1`、`pairedView=0\|1` | `four_deck_waveform`、`paired_view` | `Stock` 与另两项互切重启 Engine；`Paired Player` ↔ `4 Decks` 免重启（#49、#201） |
+| 25 | `Layout → ENGINEX VIEW PRESET` | `4-Deck Role` / 四轨角色 / 四軌角色 | 本机负责轨道：`Auto`、`1+3`、`2+4`、`1+2`、`3+4`、`1`、`2` | `auto` | `fourDeckRole=auto\|13\|24\|12\|34\|1\|2` | `four_deck_role` | 开启联机视图时显示，切换重启 Engine |
+| 26 | `Layout → ENGINEX VIEW PRESET` | `Shadow Deck Mode` / 影子轨模式 / 影子軌模式 | 切换 `Auto`、`All Engine Mode`、`All CDJ Mode` | `auto` | `shadowMode=auto\|engine\|cdj` | `shadow_mode` | 实时切换无需重启 Engine（#201） |
+
+> 历史移除说明：旧版 `5.3.0.2` 曾在设备页放置的 `Jog Light Mode`（转盘灯效）与 `Auto-Analyze Drives (Unavailable)`（插盘自动分析占位开关）已在 `5.3.0.4` 从 QML 界面彻底移除。
 
 ### 2.3 设置 → 混音台
 
 | 条目 | 来源 | 说明 |
 |---|---|---|
-| Fader Echo / 推子回音 / 推桿回音 | EngineX | 仅在带混音台的一体机显示（`visible: root.scHasMixer`，独立播放机不显示）；与控制中心磁贴及 `配置 → 播放 → 回声淡出` 同步 |
-| Master Limiter / 原厂主输出限幅 (dB) | 原厂，EngineX 放开 | PRIME GO、Mixstream Pro 原厂隐藏，补丁让 `Config.audio.hasLimiter` 的板子显示；关 / 0–18 dB。与第 8 项并存 |
+| `Fader Echo` / 推子回音 / 推桿回音 | EngineX | 插在 `Calibrate Crossfader` 之前，可选 `Off` / `All Faders` / `Upfader Only`；带 `visible: root.scHasMixer` 守卫（独立播放机隐藏并直通），与 `Profile → Playback → Echo Out` 及控制中心磁贴同步 |
+| Master Limiter / 原厂主输出限幅 (dB) | 原厂，EngineX 放开 | PRIME GO、Mixstream Pro 原厂隐藏，补丁让 `Config.audio.hasLimiter` 的板子显示；关 / 0–18 dB。与 `Master Soft Clipper` 并存 |
 
 ### 2.4 设置 → 服务 → 流媒体
 
@@ -135,18 +149,19 @@
 
 | 磁贴 | 说明 | 键 |
 |---|---|---|
-| Waveform Style（DENON / RGB / 3BAND） | CDJ-3000 风格三段选择，点一下立即切换，无需重启 | `waveform` |
-| Fader Echo / 推子回音 / 推桿回音（OFF / ON） | 仅带混音台机型显示（`root.scHasMixer`）；`直播推流`（`Live Stream`）已移至 `设置 → 服务` | `upfader_echo` |
-| Smart Sync（Bar / Beat / Tempo，仅 5.3.0） | 写的是 Engine 自己的 `/Client/Preferences/Profile/Application/SyncMode`，**不在 conf**；另有常驻逻辑：开 Sync 后 BPM 跨度超出变速范围就把 Pitch Range 升档，最高 ±100%，只升不降 | Engine 偏好 |
+| `Waveform Style`（`DENON` / `RGB` / `3BAND`） | CDJ-3000 风格三段选择，点一下立即切换，无需重启（与 `Profile → Display → Waveform Style` 双向同步） | `waveform` |
+| `Fader Echo`（`OFF` / `ALL` / `UPFADER`） | 无原厂推子回音磁贴且无硬件 Fader FX 按键的带混音台一体机显示；带原厂 Transition FX 的一体机保留原厂 `Fader Echo` 磁贴；独立播放机隐藏。`Live Stream` 已移至 `Settings → Services` | `upfader_echo` |
+| `Smart Sync`（`BAR` / `BEAT` / `TEMPO`，仅 5.3.0） | 写的是 Engine 自己的 `/Client/Preferences/Profile/Application/SyncMode`，**不在 conf**；另有半速/倍速谐波扩程逻辑：开 Sync 后 BPM 跨度超出当前变速范围时自动拓宽 `Pitch Range`，关 Sync 后恢复 | Engine 偏好 |
 
-### 2.8 其他"无入口"的行为开关（原厂条目被补丁改变或放开）
+### 2.8 其他"无独立入口"的原厂解锁项（原厂条目被补丁改变或放开）
 
 | 行为 | 位置 | 说明 |
 |---|---|---|
-| Silent Cue（静音 Cue） | 配置 → 播放 → Censor 键行为（Profile → Playback → Censor Button Behavior） | 原厂按板子标志隐藏；补丁在 `/Engine/Deck1/SilentCue` 存在时放开 |
-| 波形缩远到 30 秒（#77） | 设置 → 设备 → 旋钮行为 = Waveform Zoom | 一体机原厂 10 秒，钩子写 `Config.ui.waveform.maximumZoomSecs`=30 |
-| Stems List 开关 | 曲库设置 | 强制可见 |
-| "导入 rekordbox 库"提示 | — | 一律走 Ignore；由 rb-bridge 在挂载时转换 |
+| `Silent Cue`（静音 Cue） | `Profile → Playback → Censor Button Behavior`（配置 → 播放 → Censor 键行为） | 原厂按板子标志隐藏；补丁在 `/Engine/Deck1/SilentCue` 存在时放开 |
+| `Link Beat Jump / Loop Size Controls` | `Profile → Cues/Loops`（配置 → Cue / Loop） | 补丁将 `active: Config.audio.deck.beatJump.canLinkToAutoLoop` 放开为 `active: true`；`Smart Loops` 为原厂自带条目（未改） |
+| 波形缩远到 30 秒（#77） | `Settings → Device → Encoder Behavior = Waveform Zoom` | 一体机原厂 10 秒，钩子写 `Config.ui.waveform.maximumZoomSecs`=30 |
+| `Stems List` 开关 | `Profile → Library`（配置 → 曲库） | armhf 全机型强制可见（AZ04 保持原厂） |
+| "导入 rekordbox 库"与 `"Choose your Database"` 提示 | — | 自动判断有效 `m.db` 或回退 OneLibrary，不再弹选择框；Rekordbox 盘由 `rb-bridge` 在挂载时转换 |
 | "未安全弹出""不支持的存储设备""Load drive profile?""曲目过长"提示 | — | 去掉或自动选否（#48 等） |
 
 ### 2.9 conf 里有、屏幕和 Web 都没有入口的键

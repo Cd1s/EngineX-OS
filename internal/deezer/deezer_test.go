@@ -223,3 +223,17 @@ func TestDownloadTrackUsesFallbackWhenPrimaryTrackTokenEmpty(t *testing.T) {
 		t.Fatal("fallback track decrypted payload mismatch")
 	}
 }
+
+func TestTruncatedCDNLeavesNoDestinationFile(t *testing.T) {
+	dir := t.TempDir()
+	dst := filepath.Join(dir, "3135556.flac")
+	s := &Session{hc: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("short")), ContentLength: 100, Header: make(http.Header)}, nil
+	})}}
+	if err := s.fetchDecrypt(context.Background(), "https://cdn.deezer.com/audio", "3135556", dst); err == nil {
+		t.Fatal("truncated response accepted")
+	}
+	if _, err := os.Stat(dst); !os.IsNotExist(err) {
+		t.Fatalf("truncated fetchDecrypt left corrupt destination file on disk: %v", err)
+	}
+}

@@ -760,3 +760,42 @@ func TestQuickTunnelConcurrentPublicURLAndSpotifyRedirectNoRace(t *testing.T) {
 		t.Fatal("stale pre-tunnel negative probe poisoned useHTTPS after Quick Tunnel started")
 	}
 }
+
+func TestPasswordChangeRequiresRelayPassword(t *testing.T) {
+	s := newTestServer(t)
+	h := s.routes()
+
+	if err := s.cfg.setPassword("relay-owner-pass-1234"); err != nil {
+		t.Fatal(err)
+	}
+	s.decks.upsert(deckInfo{ID: "192.168.1.224", LANIP: "192.168.1.224", AccessCode: "ABCD-1234"})
+
+	lw := do(h, "POST", "/login", "password=ABCD-1234", map[string]string{"Content-Type": "application/x-www-form-urlencoded"})
+	if lw.Code != 303 || len(lw.Result().Cookies()) == 0 {
+		t.Fatalf("deck code login status = %d", lw.Code)
+	}
+	cookie := lw.Result().Cookies()[0]
+
+	w := do(h, "POST", "/api/config",
+		"currentPassword=ABCD-1234&newPassword=changed-pass-5678",
+		map[string]string{
+			"Content-Type": "application/x-www-form-urlencoded",
+			"Cookie":       cookie.Name + "=" + cookie.Value,
+		})
+	if w.Code != 403 {
+		t.Fatalf("expected 403 when currentPassword is deck code, got %d: %s", w.Code, w.Body.String())
+	}
+	if !s.cfg.checkPassword("relay-owner-pass-1234") {
+		t.Fatal("relay password changed without current relay password")
+	}
+
+	wOK := do(h, "POST", "/api/config",
+		"currentPassword=relay-owner-pass-1234&newPassword=changed-pass-5678",
+		map[string]string{
+			"Content-Type":      "application/x-www-form-urlencoded",
+			"X-Deemix-Password": "relay-owner-pass-1234",
+		})
+	if wOK.Code != 200 || !s.cfg.checkPassword("changed-pass-5678") {
+		t.Fatalf("valid relay password change failed: %d %s", wOK.Code, wOK.Body.String())
+	}
+}

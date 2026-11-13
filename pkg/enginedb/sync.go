@@ -53,10 +53,10 @@ type Options struct {
 	// Fast imports only what the export itself holds, opening no audio, analysis
 	// or artwork file. Tracks already imported are left as they are. Engine
 	// analyses a track without performance data when it is loaded.
-	Fast bool
+	Fast bool `json:"-"`
 	// DatabaseDir builds the database elsewhere, such as on tmpfs, instead of in
 	// the mount's Engine Library.
-	DatabaseDir string
+	DatabaseDir string `json:"-"`
 	// Deadline stops reading audio and analysis files once it has passed. The
 	// tracks left are imported as Fast imports them and counted in Deferred, so
 	// the playlists still land while the mount waits (#48).
