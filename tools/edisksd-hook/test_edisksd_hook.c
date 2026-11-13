@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <string.h>
 static char test_media[PATH_MAX],test_library[PATH_MAX],test_legacy_library[PATH_MAX],test_runtime[PATH_MAX],test_utab[PATH_MAX];
+static char test_prepare_state[PATH_MAX];
+#define PREPARE_STATE_PATH test_prepare_state
 #define MEDIA_ROOT test_media
 #define LIB_ROOT test_library
 #define LEGACY_LIB_ROOT test_legacy_library
@@ -12,7 +14,8 @@ static char test_media[PATH_MAX],test_library[PATH_MAX],test_legacy_library[PATH
 // after_mount seams: a bind mount is neither HFS+ nor a block device.
 static char test_hfs_target[PATH_MAX],test_rb_bridge[PATH_MAX];
 static int test_hfs_readonly(const char *target){return *test_hfs_target&&!strcmp(target,test_hfs_target);}
-static int test_volume_identity(const char *source,char out[80]){(void)source;snprintf(out,80,"uuid-hfs-stick");return 0;}
+static void observe_prepare_view(void);
+static int test_volume_identity(const char *source,char out[80]){(void)source;observe_prepare_view();snprintf(out,80,"uuid-hfs-stick");return 0;}
 static int test_bridge_hangs;
 static const char *test_rb_bridge_path(void);
 #define HFS_READONLY test_hfs_readonly
@@ -48,7 +51,11 @@ int mnt_context_get_status(struct libmnt_context *c){return c->status;}
 int mnt_context_set_syscall_status(struct libmnt_context *c,int status){c->status=status;return 0;}
 static const char *test_rb_bridge_path(void){while(test_bridge_hangs)pause();return test_rb_bridge;}
 static char test_disk[PATH_MAX];static int test_disk_ro;
+// Set around a plain empty stick's mount: the flag must stay unpublished while it runs.
+static int observing_not_preparing;
+static void expect_not_preparing(void);
 static int test_real_mount(struct libmnt_context *c) {
+    if(observing_not_preparing)expect_not_preparing();
     if(mount(c->disk?c->disk:test_disk,c->target,NULL,MS_BIND,NULL))return -errno;
     // As libmount does for a mount with a userspace option: a line in <UTAB_DIR>/utab.
     char utab[PATH_MAX+8];snprintf(utab,sizeof utab,"%s/utab",test_utab);
@@ -894,12 +901,75 @@ static void test_guardian_from_the_data_bundle(const char *root) {
     test_guardian_system[0]=test_guardian_bundle[0]=0;
     puts("REAL PRIVATE NAMESPACE BH2-A1-1: an Engine stick is healed by the data bundle's engine-guardian where the rootfs has none, by the rootfs's where it has: PASS");
 }
+
+// Observe the state at the HFS prepare_view boundary, before any view work.
+static int observing_prepare_view;
+static unsigned observed_prepare_views;
+static void observe_prepare_view(void) {
+    if(!observing_prepare_view)return;
+    struct stat st;assert(!lstat(test_prepare_state,&st));
+    assert(S_ISREG(st.st_mode)&&(st.st_mode&0777)==0644);observed_prepare_views++;
+}
+static void expect_not_preparing(void) {
+    struct stat st;errno=0;assert(lstat(test_prepare_state,&st)==-1&&errno==ENOENT);
+}
+static void test_prepare_state_lifecycle(const char *root) {
+    char disk[PATH_MAX],target[PATH_MAX],p[PATH_MAX],marker[PATH_MAX],script[PATH_MAX*6];
+    join(disk,root,"prep-rb");join(p,disk,"PIONEER/rekordbox");assert(!make_dirs(p));
+    join(target,MEDIA_ROOT,"PREPARING");assert(!make_dirs(target));
+    join(marker,root,"prep-observed");join(test_rb_bridge,root,"prep-bridge");
+    // The subprocess observes the real public file, including type, mode and contents.
+    snprintf(script,sizeof script,"#!/bin/sh\n[ -f '%s' ] && [ ! -L '%s' ] && [ \"$(stat -c %%a '%s')\" = 644 ] && [ \"$(cat '%s')\" = 1 ] || exit 9\necho ready > '%s'\nexit 0\n",
+             test_prepare_state,test_prepare_state,test_prepare_state,test_prepare_state,marker);
+    write_file(test_rb_bridge,script);assert(!chmod(test_rb_bridge,0700));
+    snprintf(test_disk,sizeof test_disk,"%s",disk);test_disk_ro=0;
+    struct libmnt_context c={.target=target,.source="/dev/preparing"};
+    assert(!hooked_mount(&c,test_real_mount));expect_file(marker,"ready\n");expect_not_preparing();
+    assert(!umount2(target,UMOUNT_NOFOLLOW));assert(!unlink(marker));
+
+    // A guardian error still clears state before returning to edisksd.
+    join(disk,root,"prep-engine");join(p,disk,"Engine Library/Database2");assert(!make_dirs(p));
+    join(p,disk,"Engine Library/Database2/m.db");write_file(p,"native\n");
+    join(test_guardian_system,root,"prep-guardian");
+    char *exit_line=strstr(script,"exit 0");assert(exit_line);memcpy(exit_line,"exit 1",6);
+    write_file(test_guardian_system,script);assert(!chmod(test_guardian_system,0700));
+    snprintf(test_disk,sizeof test_disk,"%s",disk);c.status=0;
+    assert(!hooked_mount(&c,test_real_mount));expect_file(marker,"ready\n");expect_not_preparing();
+    assert(!umount2(target,UMOUNT_NOFOLLOW));assert(!unlink(marker));test_guardian_system[0]=0;
+
+    // A hanging bridge records state before sleeping; a timeout must kill it and clear state.
+    join(disk,root,"prep-timeout");join(p,disk,"PIONEER/rekordbox");assert(!make_dirs(p));
+    snprintf(test_disk,sizeof test_disk,"%s",disk);
+    snprintf(exit_line,(size_t)(script+sizeof script-exit_line),"echo $$ > '%s.pid'\nexec sleep 10\n",marker);write_file(test_rb_bridge,script);
+    int64_t start=now_ms();c.status=0;assert(!hooked_mount(&c,test_real_mount));
+    assert(now_ms()-start>=1000&&now_ms()-start<3500);
+    expect_file(marker,"ready\n");expect_not_preparing();
+    assert(snprintf(p,sizeof p,"%s.pid",marker)<(int)sizeof p);
+    FILE *pf=fopen(p,"r");long killed;assert(pf&&fscanf(pf,"%ld",&killed)==1);fclose(pf);
+    errno=0;assert(kill((pid_t)killed,0)==-1&&errno==ESRCH);assert(!unlink(p));
+    assert(!slow_marker(target,p));assert(!access(p,F_OK));assert(!unlink(p)); // created only for ETIMEDOUT
+    assert(!umount2(target,UMOUNT_NOFOLLOW));assert(!unlink(marker));
+
+    // HFS without export or DB prepares a writable view on the visible mount.
+    join(disk,root,"prep-hfs-empty");assert(!make_dirs(disk));
+    snprintf(test_disk,sizeof test_disk,"%s",disk);test_disk_ro=1;
+    snprintf(test_hfs_target,sizeof test_hfs_target,"%s",target);observing_prepare_view=1;
+    unsigned before=observed_prepare_views;c.status=0;assert(!hooked_mount(&c,test_real_mount));
+    assert(observed_prepare_views>before);expect_not_preparing();observing_prepare_view=0;
+    assert(!unmount_dispatch(&c,real_unmount));test_hfs_target[0]=0;test_disk_ro=0;
+    // A plain empty stick does not publish the flag even while the real mount runs.
+    observing_not_preparing=1;c.status=0;assert(!hooked_mount(&c,test_real_mount));observing_not_preparing=0;expect_not_preparing();
+    assert(!umount2(target,UMOUNT_NOFOLLOW));
+    puts("USB preparing: conversion, failed heal, SIGKILL timeout, empty HFS view and empty stick: PASS");
+}
+
 int main(int argc,char **argv) {
     char root[]="/tmp/sc5000-edisks-tests-XXXXXX";assert(mkdtemp(root));
+    join(test_prepare_state,root,"run/enginex-usb-preparing");char prep_run[PATH_MAX];join(prep_run,root,"run");assert(!make_dirs(prep_run));
     join(test_media,root,"media");join(test_library,root,"libraries");join(test_runtime,root,"runtime");
     join(test_legacy_library,root,"legacy-libraries");join(test_utab,root,"utab");assert(!make_dirs(test_utab));
     assert(!make_dirs(test_media));test_paths_and_copy(root);test_compat_symlink_root(root);test_time();test_slow_marker_follows_every_export_file(root);test_monitor_sees_plain_device_mount(root);
-    if(argc>1&&!strcmp(argv[1],"--mounts")){test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);test_library_is_walked_once(root);test_two_sticks_at_once(root);test_hfs_visible_mount_reuses_the_converted_library(root);test_private_mount_leaves_nothing_behind(root);test_hfs_view_copies_only_metadata(root);test_heal_before_visible(root);test_eject_while_another_stick_converts(root);test_eject_of_a_pulled_stick(root);test_heal_marker_survives_another_port(root);test_hfs_view_with_a_long_entry_name(root);test_hfs_view_artwork_is_writable(root);test_seed_keeps_its_own_previous_generation(root);test_view_binds_stay_out_of_a_shared_data(root);test_guardian_from_the_data_bundle(root);}
+    if(argc>1&&!strcmp(argv[1],"--mounts")){test_prepare_state_lifecycle(root);test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);test_library_is_walked_once(root);test_two_sticks_at_once(root);test_hfs_visible_mount_reuses_the_converted_library(root);test_private_mount_leaves_nothing_behind(root);test_hfs_view_copies_only_metadata(root);test_heal_before_visible(root);test_eject_while_another_stick_converts(root);test_eject_of_a_pulled_stick(root);test_heal_marker_survives_another_port(root);test_hfs_view_with_a_long_entry_name(root);test_hfs_view_artwork_is_writable(root);test_seed_keeps_its_own_previous_generation(root);test_view_binds_stay_out_of_a_shared_data(root);test_guardian_from_the_data_bundle(root);}
     // Mount tests have removed all namespace mounts before deleting fixtures.
     int tmp=open("/tmp",O_RDONLY|O_DIRECTORY);assert(tmp>=0);remove_tree(tmp,strrchr(root,'/')+1);close(tmp);
     puts("edisksd-hook: all requested tests passed");return 0;
