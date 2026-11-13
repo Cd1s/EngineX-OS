@@ -229,7 +229,7 @@ func TestPlanRejectsParentChildConflicts(t *testing.T) {
 		"file-and-dir-below": {Files: []Entry{memEntry("a", 0o644, []byte("x"))}, Directories: []string{"a/b"}},
 		"file-and-file-below": {Files: []Entry{memEntry("a", 0o644, []byte("x")),
 			memEntry("a/b", 0o644, []byte("y"))}},
-		"link-and-file-below": {Links: map[string]string{"l": "x"}, Files: []Entry{memEntry("l/f", 0o644, []byte("y"))}},
+		"link-and-file-below":   {Links: map[string]string{"l": "x"}, Files: []Entry{memEntry("l/f", 0o644, []byte("y"))}},
 		"remove-and-file-below": {Remove: []string{"d"}, Files: []Entry{memEntry("d/f", 0o644, []byte("y"))}},
 	}
 	for name, cs := range cases {
