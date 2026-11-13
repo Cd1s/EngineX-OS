@@ -34,6 +34,10 @@ type winCalls struct {
 	close      func(windows.Handle) error
 }
 
+// winProc forwards live Go addresses through uintptr arguments. The directive
+// keeps their allocations alive and off a movable caller stack until return.
+//
+//go:uintptrescapes
 func winProc(proc *windows.LazyProc, args ...uintptr) error {
 	ok, _, err := proc.Call(args...)
 	if ok != 0 {
