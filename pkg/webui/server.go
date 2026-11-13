@@ -142,7 +142,7 @@ func New(cfg Config, jobs *Jobs) *Server {
 	}
 	s := &Server{cfg: cfg, jobs: jobs, sessions: map[string]*Session{}, pending: map[string]pending{}, mux: http.NewServeMux(), ownerDeleted: map[string]bool{}, logins: map[string]*loginFlow{}, authFails: map[string]*authStrike{}}
 	s.shadow = newShadowState()
-	if cfg.StateDir == "/data/sc5000-custom/state" { // on the deck, not in tests
+	if isDeckStateDir(cfg.StateDir) { // on the deck, not in tests
 		go ensureSpotifyConnectService("/etc/avahi/services")
 	}
 	exportCfg := cfg.ProlinkExport
@@ -182,7 +182,7 @@ func New(cfg Config, jobs *Jobs) *Server {
 	}
 	s.prolinkExport = prolink.NewExporter(exportCfg)
 	s.closed = make(chan struct{})
-	if cfg.StateDir == "/data/sc5000-custom/state" { // on the deck, not in tests
+	if isDeckStateDir(cfg.StateDir) { // on the deck, not in tests
 		go serveSpotifyConnectMDNS(s.closed)
 	}
 	go s.retryExport(10 * time.Second)
@@ -392,10 +392,16 @@ func (s *Server) Close() {
 	s.closeBroadcast()
 }
 
+// isDeckStateDir reports whether dir is the deck's own state dir (not a test's): the default,
+// or the same dir through the /data/sc5000-custom compat link an older unit passes (#234).
+func isDeckStateDir(dir string) bool {
+	return dir == "/data/enginex/state" || dir == "/data/sc5000-custom/state"
+}
+
 // DefaultStateDir keeps logins on the deck's writable partition; its home is read-only.
 func DefaultStateDir(home string) string {
-	if _, err := os.Stat("/data/sc5000-custom"); err == nil {
-		return "/data/sc5000-custom/state"
+	if _, err := os.Stat("/data/enginex"); err == nil {
+		return "/data/enginex/state"
 	}
 	return filepath.Join(home, ".config/stream-sync")
 }
