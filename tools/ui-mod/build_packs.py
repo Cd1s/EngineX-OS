@@ -2888,6 +2888,8 @@ SERVICES_MAIN = """
 		}
 		x.send()
 	}
+	property bool scUsbPreparing: false
+	Timer { interval: 1000; repeat: true; running: root.scUsbPreparing; onTriggered: root.scCall() }
 	property var scUiPoll: null
 	property real scUiPollAt: 0
 	property string scUiDigest: ""
@@ -2902,6 +2904,7 @@ SERVICES_MAIN = """
 		scUiDigest = digest; scUiAppliedAt = now
 	}
 	function scApply(v) {
+		scUsbPreparing = !!v.usbPreparing
 		if (v.fxSelectorAvailable !== undefined) {
 			scFxMasterBypassed = !!v.fxSelectorAvailable
 			scFxSelectorAvailable = scFxMasterBypassed && (Config.audio.fx.hasDJFx || Config.audio.fx.hasNHFx)
@@ -2909,8 +2912,8 @@ SERVICES_MAIN = """
 		scEnsureTidal()
 		if (v.version) scVersion = v.version
 		if (v.buildTag !== undefined) scBuildTag = String(v.buildTag || "")
-		scLang = v.language
-		scWave = v.waveform
+		if (v.language) scLang = v.language
+		if (v.waveform) scWave = v.waveform
 		scQuality = v.quality || "flac"
 		scNeteaseMode = v.neteaseMode || "official"
 		scUpdateRepo = v.githubRepo || scUpdateRepo
@@ -2931,9 +2934,9 @@ SERVICES_MAIN = """
 		scFourDeckRoleSetting = v.fourDeckRole || "auto"
 		scShadowMode = v.shadowMode || "auto"
 		scKeepPlayhead(v.playhead || 0)
-		if (!scSameItems(scSources, v.sources)) scSources = v.sources
-		if (!scSameItems(scLoggedIn, v.loggedIn)) scLoggedIn = v.loggedIn
-		scScope = v.scope
+		if (v.sources && !scSameItems(scSources, v.sources)) scSources = v.sources
+		if (v.loggedIn && !scSameItems(scLoggedIn, v.loggedIn)) scLoggedIn = v.loggedIn
+		if (v.scope) scScope = v.scope
 		scBroadcastOn = !!v.broadcastEnabled
 		const prevUpfaderEcho = scUpfaderEcho
 		scUpfaderEcho = !!v.upfaderEcho
@@ -3367,6 +3370,33 @@ SERVICES_MAIN = """
 	}
 """
 
+USB_PREPARING_BANNER = """
+		// Like stock RetryingHint.qml: passive feedback. Modal prompts.post would
+		// steal live playback controls and focus (#142).
+		Rectangle {
+			objectName: "EngineX_UsbPreparingBanner"
+			enabled: false
+			visible: root.scUsbPreparing
+			z: 900
+			anchors.horizontalCenter: parent.horizontalCenter
+			y: 16
+			height: 46
+			width: scUsbPreparingLabel.implicitWidth + 36
+			radius: 8
+			color: Style.surface03Color
+			border.width: 1
+			border.color: Style.active01Color
+			Text {
+				id: scUsbPreparingLabel
+				anchors.centerIn: parent
+				text: root.scT("Preparing USB…")
+				color: Style.font02Color
+				font.pixelSize: 22
+				font.family: root.robotoMediumFontLoader.name
+			}
+		}
+"""
+
 LOGIN_DIALOG = """
 		Rectangle {
 			anchors.fill: parent
@@ -3463,6 +3493,22 @@ SOURCE_FOOTER = """
 	property var scTidalRow: null
 	footer: Column {
 		width: connectedSource.width
+		Rectangle {
+			objectName: "EngineX_UsbPreparingRow"
+			visible: root.scUsbPreparing
+			width: connectedSource.width
+			height: root.scUsbPreparing ? 108 : 0
+			enabled: false
+			radius: 16
+			color: Style.surface02Color
+			Text {
+				x: connectedSource.delegateLeftPadding + 80
+				anchors.verticalCenter: parent.verticalCenter
+				text: root.scT("Preparing USB…")
+				color: Style.font02Color
+				font: Style.fontH1
+			}
+		}
 		Repeater {
 			model: root.scServices.filter(s => root.scSources.indexOf(s.id) >= 0)
 			MouseArea {
@@ -5421,7 +5467,7 @@ def edits(dev: bool):
             # the same way about the same centre, or its top bar sits above the screen.
             ("		Overlay.overlay.anchors.fill = uiContainer\n",
              "		Overlay.overlay.anchors.fill = uiContainer\n		Overlay.overlay.scale = Qt.binding(function() { return uiContainer.scale })\n"),
-            ("		id: uiContainer\n", "		id: uiContainer\n" + LOGIN_DIALOG),
+            ("		id: uiContainer\n", "		id: uiContainer\n" + LOGIN_DIALOG + USB_PREPARING_BANNER),
             # UI Scale: QT_SCALE_FACTOR leaves a black band under EGLFS (nativeScreenSize and
             # defaultScreenSize drift apart), so scale uiContainer itself: it is centred in its
             # parent and scales about its centre, so width*scale stays the screen size and
