@@ -9,6 +9,8 @@ import (
 
 // The optional BPM service keys can be replaced but are never read back out.
 
+var testBPMConfigPostHook func()
+
 func (s *Server) bpmConfigGet(w http.ResponseWriter, r *http.Request) {
 	var v providers.BPMConfig
 	if s.cfg.BPM != nil {
@@ -27,6 +29,9 @@ func (s *Server) bpmConfigPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	err := s.cfg.BPM.UpdateConfig(func(v *providers.BPMConfig) {
+		if testBPMConfigPostHook != nil {
+			testBPMConfigPostHook()
+		}
 		if in.SoundCloudClientID != "" {
 			v.SoundCloudClientID = in.SoundCloudClientID
 		}

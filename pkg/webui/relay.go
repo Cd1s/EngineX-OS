@@ -187,6 +187,8 @@ func (s *Server) loggedInServices() []string {
 	return out
 }
 
+var testRelayPullHook func()
+
 // pullBPMConfig copies keys set on the relay. A key the relay does not have is left
 // alone, so one entered on this deck's own console survives.
 func (s *Server) pullBPMConfig(ctx context.Context) error {
@@ -225,10 +227,27 @@ func (s *Server) pullRelayConfig(ctx context.Context) error {
 	if s.cfg.BPM == nil {
 		return nil
 	}
-	if r.Config == (providers.BPMConfig{}) {
+	v := s.cfg.BPM.Config()
+	next := v
+	if r.Config.SoundCloudClientID != "" {
+		next.SoundCloudClientID = r.Config.SoundCloudClientID
+	}
+	if r.Config.SoundCloudSecret != "" {
+		next.SoundCloudSecret = r.Config.SoundCloudSecret
+	}
+	if r.Config.SoundCloudToken != "" {
+		next.SoundCloudToken = r.Config.SoundCloudToken
+	}
+	if r.Config.GetSongBPMKey != "" {
+		next.GetSongBPMKey = r.Config.GetSongBPMKey
+	}
+	if next == v {
 		return nil
 	}
 	return s.cfg.BPM.UpdateConfig(func(v *providers.BPMConfig) {
+		if testRelayPullHook != nil {
+			testRelayPullHook()
+		}
 		if r.Config.SoundCloudClientID != "" {
 			v.SoundCloudClientID = r.Config.SoundCloudClientID
 		}

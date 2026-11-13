@@ -11,81 +11,182 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
 )
 
-// TestBPMStoreLostUpdateReproduction demonstrates how read-then-write (Config() followed
-// by SaveConfig()) causes lost updates when two updates interleave, whereas UpdateConfig
-// preserves all concurrent modifications atomically under store.mu.
-func TestBPMStoreLostUpdateReproduction(t *testing.T) {
-	dir := t.TempDir()
-	cfgPath := filepath.Join(dir, "bpm-config.json")
-	store := &providers.BPMStore{
-		Path:       filepath.Join(dir, "bpm.json"),
+// TestRealEntryPointsLostUpdateInterleaving_PostPaused drives the real write entry points
+// (bpmConfigPost and pullBPMConfig) with controlled interleaving where bpmConfigPost is paused
+// after reading the config while pullBPMConfig writes. On unpatched read-then-write code,
+// bpmConfigPost overwrites and loses the relay credentials every time.
+func TestRealEntryPointsLostUpdateInterleaving_PostPaused(t *testing.T) {
+	state := t.TempDir()
+	bpm := &providers.BPMStore{
+		Path:       filepath.Join(state, "bpm.json"),
+		ConfigPath: filepath.Join(state, "bpm-config.json"),
+	}
+	relaySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"ok":true,"config":{"soundcloudClientId":"relay-client-id","soundcloudClientSecret":"relay-secret"}}`)
+	}))
+	defer relaySrv.Close()
+
+	ui := New(Config{
+		AccessToken: "test-token",
+		UIDir:       t.TempDir(),
+		StateDir:    state,
+		RelayURL:    relaySrv.URL,
+		BPM:         bpm,
+	}, nil)
+	ui.updateRelayConfig(nil, ptr("pw"))
+
+	writer1Paused := make(chan struct{})
+	resumeWriter1 := make(chan struct{})
+
+	testBPMConfigPostHook = func() {
+		select {
+		case writer1Paused <- struct{}{}:
+			<-resumeWriter1
+		default:
+		}
+	}
+	t.Cleanup(func() {
+		testBPMConfigPostHook = nil
+	})
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		req := httptest.NewRequest("POST", "/api/bpm", strings.NewReader(`{"getSongBpmKey":"user-key"}`))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		ui.bpmConfigPost(w, req)
+	}()
+
+	select {
+	case <-writer1Paused:
+	case <-time.After(2 * time.Second):
+		t.Fatal("writer 1 did not reach hook")
+	}
+
+	writer2Done := make(chan error, 1)
+	go func() {
+		writer2Done <- ui.pullBPMConfig(context.Background())
+	}()
+
+	select {
+	case err := <-writer2Done:
+		if err != nil {
+			t.Fatalf("writer 2 failed: %v", err)
+		}
+		close(resumeWriter1)
+		wg.Wait()
+	case <-time.After(30 * time.Millisecond):
+		close(resumeWriter1)
+		wg.Wait()
+		if err := <-writer2Done; err != nil {
+			t.Fatalf("writer 2 failed: %v", err)
+		}
+	}
+
+	cfg := bpm.Config()
+	if cfg.SoundCloudClientID != "relay-client-id" || cfg.GetSongBPMKey != "user-key" {
+		t.Fatalf("lost update: got %+v, want soundcloudClientId=%q getSongBpmKey=%q",
+			cfg, "relay-client-id", "user-key")
+	}
+}
+
+// TestRealEntryPointsLostUpdateInterleaving_RelayPaused drives the real write entry points
+// where pullRelayConfig is paused after reading config while bpmConfigPost writes. On unpatched
+// read-then-write code, pullRelayConfig overwrites and loses the user's updated key every time.
+func TestRealEntryPointsLostUpdateInterleaving_RelayPaused(t *testing.T) {
+	state := t.TempDir()
+	cfgPath := filepath.Join(state, "bpm-config.json")
+	bpm := &providers.BPMStore{
+		Path:       filepath.Join(state, "bpm.json"),
 		ConfigPath: cfgPath,
 	}
-
-	// 1. Reproduce the lost-update defect with read-then-write (the old pattern in #247).
-	// Writer A and Writer B both read the initial empty configuration.
-	snapA := store.Config()
-	snapB := store.Config()
-
-	// Writer A sets SoundCloudClientID and saves.
-	snapA.SoundCloudClientID = "client-A"
-	if err := store.SaveConfig(snapA); err != nil {
-		t.Fatalf("SaveConfig snapA: %v", err)
+	if err := bpm.SaveConfig(providers.BPMConfig{GetSongBPMKey: "initial-key"}); err != nil {
+		t.Fatal(err)
 	}
 
-	// Writer B sets GetSongBPMKey and saves its stale snapshot.
-	snapB.GetSongBPMKey = "key-B"
-	if err := store.SaveConfig(snapB); err != nil {
-		t.Fatalf("SaveConfig snapB: %v", err)
-	}
+	relaySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"ok":true,"config":{"soundcloudClientId":"relay-client-id","soundcloudClientSecret":"relay-secret"}}`)
+	}))
+	defer relaySrv.Close()
 
-	// Because snapB was read before snapA was saved, snapB overwrote SoundCloudClientID back to "".
-	lostCfg := store.Config()
-	if lostCfg.SoundCloudClientID != "" {
-		t.Fatalf("expected SoundCloudClientID to be lost in read-then-write, got: %q", lostCfg.SoundCloudClientID)
-	}
-	if lostCfg.GetSongBPMKey != "key-B" {
-		t.Fatalf("expected GetSongBPMKey to be key-B, got: %q", lostCfg.GetSongBPMKey)
-	}
+	ui := New(Config{
+		AccessToken: "test-token",
+		UIDir:       t.TempDir(),
+		StateDir:    state,
+		RelayURL:    relaySrv.URL,
+		BPM:         bpm,
+	}, nil)
+	ui.updateRelayConfig(nil, ptr("pw"))
 
-	// 2. Demonstrate that UpdateConfig atomically preserves both updates.
-	_ = os.Remove(cfgPath)
+	relayPaused := make(chan struct{})
+	resumeRelay := make(chan struct{})
+
+	testRelayPullHook = func() {
+		select {
+		case relayPaused <- struct{}{}:
+			<-resumeRelay
+		default:
+		}
+	}
+	t.Cleanup(func() {
+		testRelayPullHook = nil
+	})
+
 	var wg sync.WaitGroup
-	wg.Add(2)
-
+	wg.Add(1)
+	var relayErr error
 	go func() {
 		defer wg.Done()
-		err := store.UpdateConfig(func(c *providers.BPMConfig) {
-			c.SoundCloudClientID = "client-atomic"
-		})
-		if err != nil {
-			t.Errorf("UpdateConfig writer 1: %v", err)
-		}
+		relayErr = ui.pullBPMConfig(context.Background())
 	}()
 
-	go func() {
-		defer wg.Done()
-		err := store.UpdateConfig(func(c *providers.BPMConfig) {
-			c.GetSongBPMKey = "key-atomic"
-		})
-		if err != nil {
-			t.Errorf("UpdateConfig writer 2: %v", err)
-		}
-	}()
-
-	wg.Wait()
-
-	saved := store.Config()
-	if saved.SoundCloudClientID != "client-atomic" {
-		t.Fatalf("expected SoundCloudClientID client-atomic, got: %q", saved.SoundCloudClientID)
+	select {
+	case <-relayPaused:
+	case <-time.After(2 * time.Second):
+		t.Fatal("relay poll did not reach hook")
 	}
-	if saved.GetSongBPMKey != "key-atomic" {
-		t.Fatalf("expected GetSongBPMKey key-atomic, got: %q", saved.GetSongBPMKey)
+
+	postDone := make(chan int, 1)
+	go func() {
+		req := httptest.NewRequest("POST", "/api/bpm", strings.NewReader(`{"getSongBpmKey":"updated-user-key"}`))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		ui.bpmConfigPost(w, req)
+		postDone <- w.Code
+	}()
+
+	select {
+	case code := <-postDone:
+		if code != http.StatusOK {
+			t.Fatalf("POST returned %d", code)
+		}
+		close(resumeRelay)
+		wg.Wait()
+	case <-time.After(30 * time.Millisecond):
+		close(resumeRelay)
+		wg.Wait()
+		if code := <-postDone; code != http.StatusOK {
+			t.Fatalf("POST returned %d", code)
+		}
+	}
+
+	if relayErr != nil {
+		t.Fatalf("relay error: %v", relayErr)
+	}
+
+	cfg := bpm.Config()
+	if cfg.SoundCloudClientID != "relay-client-id" || cfg.GetSongBPMKey != "updated-user-key" {
+		t.Fatalf("lost update: got %+v, want soundcloudClientId=%q getSongBpmKey=%q",
+			cfg, "relay-client-id", "updated-user-key")
 	}
 }
 
@@ -406,5 +507,53 @@ func TestPullRelayConfigEmptyDoesNotWipeLocal(t *testing.T) {
 	cfg := bpm.Config()
 	if cfg.GetSongBPMKey != "local-bpm-key" || cfg.SoundCloudClientID != "local-cid" {
 		t.Fatalf("expected local keys to be preserved, got: %+v", cfg)
+	}
+}
+
+// TestPullRelayConfigReadOnlyDirNoOp proves that unchanged relay poll does not rewrite disk.
+func TestPullRelayConfigReadOnlyDirNoOp(t *testing.T) {
+	cfgDir := t.TempDir()
+	if err := syscall.Mount("tmpfs", cfgDir, "tmpfs", 0, ""); err != nil {
+		t.Skipf("mounting tmpfs not permitted: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = syscall.Unmount(cfgDir, syscall.MNT_DETACH)
+	})
+
+	cfgPath := filepath.Join(cfgDir, "bpm-config.json")
+	initialCfg := providers.BPMConfig{
+		SoundCloudClientID: "existing-client",
+		SoundCloudSecret:   "existing-secret",
+	}
+	data, _ := json.Marshal(initialCfg)
+	if err := os.WriteFile(cfgPath, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := syscall.Mount("", cfgDir, "", uintptr(syscall.MS_REMOUNT|syscall.MS_RDONLY), ""); err != nil {
+		t.Fatalf("remount ro failed: %v", err)
+	}
+
+	relaySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"ok":true,"config":{"soundcloudClientId":"existing-client","soundcloudClientSecret":"existing-secret"}}`)
+	}))
+	defer relaySrv.Close()
+
+	bpm := &providers.BPMStore{
+		Path:       filepath.Join(cfgDir, "bpm.json"),
+		ConfigPath: cfgPath,
+	}
+	ui := New(Config{
+		AccessToken: "test-token",
+		UIDir:       t.TempDir(),
+		StateDir:    t.TempDir(),
+		RelayURL:    relaySrv.URL,
+		BPM:         bpm,
+	}, nil)
+	ui.updateRelayConfig(nil, ptr("pw"))
+
+	err := ui.pullBPMConfig(context.Background())
+	if err != nil {
+		t.Fatalf("expected no-op skip on unchanged relay config in read-only dir, got error: %v", err)
 	}
 }
