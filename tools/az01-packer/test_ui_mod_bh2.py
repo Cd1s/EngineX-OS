@@ -104,6 +104,22 @@ assert.deepStrictEqual(opened, ["spotify"]);
         res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
         self.assertEqual(res.returncode, 0, res.stderr)
 
+    def test_breadcrumb_stack_view_bounds_encoder_above_hidden_rows_bh2_a6_6(self):
+        bp = load_build_packs()
+        for root in ("Skins/Embedded/", "Skins/EmbeddedCommon/"):
+            bp.ROOT = root
+            edits = bp.edits(False)
+            stack_key = root + "Views/BrowseView/Components/BreadcrumbView/BreadcrumbStackView.qml"
+            stack_joined = "\n".join(new for _old, new in edits[stack_key])
+            self.assertIn("readonly property int scVisibleRows:", stack_joined)
+            self.assertIn("if (currentRowIndex + 1 < scVisibleRows) currentRowIndex++", stack_joined)
+            self.assertIn("currentRowIndex = Math.max(0, scVisibleRows - 1)", stack_joined)
+
+            view_key = root + "Views/BrowseView/Components/BreadcrumbView/BreadcrumbView.qml"
+            self.assertIn(view_key, edits)
+            view_joined = "\n".join(new for _old, new in edits[view_key])
+            self.assertIn("contentContainer.stackView.currentItem.scVisibleRows", view_joined)
+
 
 if __name__ == "__main__":
     unittest.main()
