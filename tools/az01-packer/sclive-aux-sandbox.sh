@@ -58,15 +58,15 @@ mount -t tmpfs tmpfs "$R/proc/irq"
 mkdir -p "$R/proc/irq/41"
 printf 'f\n' > "$R/proc/irq/41/smp_affinity"
 printf '0-3\n' > "$R/proc/irq/41/smp_affinity_list"
-mkdir -p "$R/etc/sc5000" "$R/tmp/home" "$R/tmp/qrc-dump" "$R/run/dbus" "$R/data/sc5000-custom/ui/packs"
-cp "${X171_HOOK:-$REPO/rootfs-overlay/etc/enginex/libengine-ui-hook.so}" "$R/etc/sc5000/libengine-ui-hook.so"
+mkdir -p "$R/etc/enginex" "$R/tmp/home" "$R/tmp/qrc-dump" "$R/run/dbus" "$R/data/enginex/ui/packs"
+cp "${X171_HOOK:-$REPO/rootfs-overlay/etc/enginex/libengine-ui-hook.so}" "$R/etc/enginex/libengine-ui-hook.so"
 cp "$W/qrc_dump.so" "$W/hardware-fixture.so" "$R/tmp/"
-cp -a "$W/packs/$lang" "$R/data/sc5000-custom/ui/packs/"
-mkdir -p "$R/data/sc5000-custom/ui/packs/$lang/Skins/Common/Items"
-cp "$REPO/tools/az01-packer/sclive-aux-probe.qml" "$R/data/sc5000-custom/ui/packs/$lang/Skins/Common/Items/QmlWarnings.qml"
-printf 'lang=%s\n' "$lang" > "$R/data/sc5000-custom/ui/settings.conf"
+cp -a "$W/packs/$lang" "$R/data/enginex/ui/packs/"
+mkdir -p "$R/data/enginex/ui/packs/$lang/Skins/Common/Items"
+cp "$REPO/tools/az01-packer/sclive-aux-probe.qml" "$R/data/enginex/ui/packs/$lang/Skins/Common/Items/QmlWarnings.qml"
+printf 'lang=%s\n' "$lang" > "$R/data/enginex/ui/settings.conf"
 if [ "${X171_LIVE_AUDIO:-0}" = 1 ]; then
-    python3 - "$R/data/sc5000-custom/ui/packs/$lang/Skins/Common/Items/QmlWarnings.qml" <<'PY'
+    python3 - "$R/data/enginex/ui/packs/$lang/Skins/Common/Items/QmlWarnings.qml" <<'PY'
 from pathlib import Path
 import sys
 p = Path(sys.argv[1]); text = p.read_text()
@@ -86,7 +86,7 @@ rc=0
 trace=()
 if [ "${X171_STRACE:-0}" = 1 ]; then trace=(strace -f -o "$W/trace-$lang.log" -e trace=file,process,connect,sendto,write); fi
 "${trace[@]}" timeout --kill-after=5s 25s chroot "$R" /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/tmp/home LD_LIBRARY_PATH=/usr/qt/lib \
-    LD_PRELOAD=/tmp/qrc_dump.so:/tmp/hardware-fixture.so:/etc/sc5000/libengine-ui-hook.so QRC_DUMP_DIR=/tmp/qrc-dump QT_QPA_PLATFORM=offscreen \
+    LD_PRELOAD=/tmp/qrc_dump.so:/tmp/hardware-fixture.so:/etc/enginex/libengine-ui-hook.so QRC_DUMP_DIR=/tmp/qrc-dump QT_QPA_PLATFORM=offscreen \
     QML_DISABLE_DISK_CACHE=1 MALLOC_ARENA_MAX=1 X171_ALSA_NULL="${X171_LIVE_AUDIO:-0}" /usr/Engine/Engine "${X171_ENGINE_ARG:--d0}" > "$W/engine-$lang.log" 2>&1 || rc=$?
 printf 'X171 ENGINE_EXIT|%s|\n' "$rc" >> "$W/engine-$lang.log"
 case "$rc" in 0|124|137) ;; *) echo "Engine failed: $rc" >&2; exit 1 ;; esac

@@ -53,9 +53,9 @@ CAPPY
     cp "$W/ca.crt" "$W/etc-merged/ssl/certs/Sandbox_GeoIP_Test_CA.pem"
     ln -sfn Sandbox_GeoIP_Test_CA.pem "$W/etc-merged/ssl/certs/$(openssl x509 -subject_hash -noout -in "$W/ca.crt").0"
     cat "$W/ca.crt" >> "$W/etc-merged/ssl/certs/ca-certificates.crt"
-    cp "$W/sc5000-suite" "$DATA/enginex/bin/sc5000-suite"
-    chmod 0755 "$DATA/enginex/bin/sc5000-suite"
-    ln -sfn sc5000-suite "$DATA/enginex/bin/stream-sync"
+    cp "$W/enginex-suite" "$DATA/enginex/bin/enginex-suite"
+    chmod 0755 "$DATA/enginex/bin/enginex-suite"
+    ln -sfn enginex-suite "$DATA/enginex/bin/stream-sync"
 
     mount --bind "$W/etc-merged" "$R/etc"
     mount --bind "$DATA" "$R/data"
@@ -152,7 +152,7 @@ HOSTS
     fi
     echo "PASS 0: control confirmed stock Google-only timesyncd fails when Google NTP is unreachable and starts at $STOCK_CLK (< build $BUILD_EPOCH)"
 
-    # --- Phase 1a: Install drop-in + run sc5000-custom-etc-reset -> verify drop-in survival + build-time clock floor + daemon monotonic advance ---
+    # --- Phase 1a: Install drop-in + run enginex-etc-reset -> verify drop-in survival + build-time clock floor + daemon monotonic advance ---
     mkdir -p "$R/etc/systemd/timesyncd.conf.d"
     cp "$REPO/rootfs-overlay/etc/systemd/timesyncd.conf.d/10-enginex-ntp.conf" "$R/etc/systemd/timesyncd.conf.d/10-enginex-ntp.conf"
     mkdir -p "$DATA/system/etc/overlay/systemd/timesyncd.conf.d"
@@ -167,14 +167,14 @@ HOSTS
     # Verify etc-reset did NOT create or seed /var/lib/systemd/timesync/clock
     [ ! -e "$DATA/system/var/overlay/lib/systemd/timesync/clock" ]
 
-    # Verify sc5000-timesync-seed skips missing lib_dir without creating it, then seeds /var/lib/systemd/timesync/clock
+    # Verify enginex-timesync-seed skips missing lib_dir without creating it, then seeds /var/lib/systemd/timesync/clock
     ENGINEX_TIMESYNC_LIB_DIR=/tmp/nonexistent-var-lib chroot "$R" /bin/sh -s < "$REPO/rootfs-overlay/usr/libexec/enginex-timesync-seed"
     [ ! -e "$R/tmp/nonexistent-var-lib" ]
     chroot "$R" /bin/sh -s < "$REPO/rootfs-overlay/usr/libexec/enginex-timesync-seed"
 
     FLOOR_MTIME=$(stat -c %Y "$DATA/system/var/overlay/lib/systemd/timesync/clock")
     [ "$FLOOR_MTIME" -eq "$BUILD_EPOCH" ] || {
-        echo "FAIL: sc5000-timesync-seed seeded clock mtime=$FLOOR_MTIME, expected BUILD_EPOCH=$BUILD_EPOCH" >&2
+        echo "FAIL: enginex-timesync-seed seeded clock mtime=$FLOOR_MTIME, expected BUILD_EPOCH=$BUILD_EPOCH" >&2
         exit 1
     }
 
@@ -250,7 +250,7 @@ HOSTS
     chroot "$R" /usr/bin/env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
         HOME=/tmp/enginex-engine-home MESA_SHADER_CACHE_MAX_SIZE=32M QML_DISABLE_DISK_CACHE=1 \
         QT_QPA_PLATFORM=offscreen MALLOC_ARENA_MAX=1 LD_LIBRARY_PATH=/usr/qt/lib \
-        VCLOCK_FILE=/run/vclock/state LD_PRELOAD=/run/vclock/vclock_shim.so:/etc/sc5000/libengine-ui-hook.so \
+        VCLOCK_FILE=/run/vclock/state LD_PRELOAD=/run/vclock/vclock_shim.so:/etc/enginex/libengine-ui-hook.so \
         /usr/Engine/Engine -d0 > "$W/engine-boot1.log" 2>&1 &
     ENG1_PID=$!
 
@@ -278,7 +278,7 @@ HOSTS
         if [ "$(cat "$DATA/enginex/state/timezone" 2>/dev/null || :)" = "Asia/Shanghai" ]; then
             # Immediate hard power cut (SIGKILL) right after the zone change!
             kill -9 "$ENG1_PID" "$TS_PID" "$SS_PID" 2>/dev/null || :
-            chroot "$R" /bin/sh -c 'kill -9 $(pidof Engine systemd-timesyncd stream-sync sc5000-suite dbus-daemon) 2>/dev/null || :' || :
+            chroot "$R" /bin/sh -c 'kill -9 $(pidof Engine systemd-timesyncd stream-sync enginex-suite dbus-daemon) 2>/dev/null || :' || :
             MANUAL_OK=1
             break
         fi
@@ -325,9 +325,9 @@ HOSTS
     fi
     echo "PASS 2a: after simulated power cycle with no network, clock restored to $BOOT2_CLK (>= $TARGET_EPOCH, never regressed to build date $BUILD_EPOCH)"
 
-    # 2b. Run sc5000-custom-prepare before Engine starts -> restores [TimeDateSettings] TZEnvVar=Asia/Shanghai into Engine.conf!
+    # 2b. Run enginex-prepare before Engine starts -> restores [TimeDateSettings] TZEnvVar=Asia/Shanghai into Engine.conf!
     chroot "$R" /bin/sh -s < "$W/prepare.sh"
-    [ -f "$QCONF" ] || { echo "FAIL: sc5000-custom-prepare did not create $QCONF" >&2; exit 1; }
+    [ -f "$QCONF" ] || { echo "FAIL: enginex-prepare did not create $QCONF" >&2; exit 1; }
     grep -Fqx "[TimeDateSettings]" "$QCONF"
     grep -Fqx "TZEnvVar=Asia/Shanghai" "$QCONF"
 
@@ -338,7 +338,7 @@ HOSTS
     chroot "$R" /usr/bin/env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
         HOME=/tmp/enginex-engine-home MESA_SHADER_CACHE_MAX_SIZE=32M QML_DISABLE_DISK_CACHE=1 \
         QT_QPA_PLATFORM=offscreen MALLOC_ARENA_MAX=1 LD_LIBRARY_PATH=/usr/qt/lib \
-        VCLOCK_FILE=/run/vclock/state LD_PRELOAD=/run/vclock/vclock_shim.so:/etc/sc5000/libengine-ui-hook.so \
+        VCLOCK_FILE=/run/vclock/state LD_PRELOAD=/run/vclock/vclock_shim.so:/etc/enginex/libengine-ui-hook.so \
         /usr/Engine/Engine -d0 > "$W/engine-boot2.log" 2>&1 &
     ENG2_PID=$!
     for _ in $(seq 1 300); do
@@ -347,7 +347,7 @@ HOSTS
         sleep 0.2
     done
     kill -9 "$ENG2_PID" "$SS_PID" 2>/dev/null || :
-    chroot "$R" /bin/sh -c 'kill -9 $(pidof Engine stream-sync sc5000-suite dbus-daemon) 2>/dev/null || :' || :
+    chroot "$R" /bin/sh -c 'kill -9 $(pidof Engine stream-sync enginex-suite dbus-daemon) 2>/dev/null || :' || :
     wait "$ENG2_PID" 2>/dev/null || :
     wait "$SS_PID" 2>/dev/null || :
     SS_PID=
@@ -471,7 +471,7 @@ else
 fi
 python3 -I "$REPO/tools/ui-mod/build_packs.py" --qrc "$QRC_DIR" --out "$W/packs" >/dev/null
 
-(cd "$REPO" && GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -o "$W/sc5000-suite" ./cmd/enginex-suite)
+(cd "$REPO" && GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -o "$W/enginex-suite" ./cmd/enginex-suite)
 
 python3 -I - "$REPO" "$W" << 'PY'
 import importlib.util, pathlib, sys
