@@ -752,6 +752,39 @@ has 'onSystemTimeZoneSetSucceeded' "$ROOT/tools/ui-mod/build_packs.py"
 has 'watchPersistentClock' "$ROOT/internal/cli/streamsync.go"
 ok "timesyncd drop-in, etc-reset survival, Gen1/Gen2 parity and TZ/clock persistence unit checks"
 
+# BH2-A3-9: route-dac stops the alsaloop it started and nothing else; the recorded
+# PID may long belong to another process (alsaloop ends when the DAC is unplugged).
+USB_AUDIO=$ROOT/rootfs-overlay/usr/sbin/sc5000-usb-audio
+usb_pid=$TMP/usb-audio.pid
+mkdir -p "$TMP/usb-audio"
+# Two idle processes, one of them named alsaloop; both end by themselves within a minute.
+for helper in alsaloop bystander; do
+    printf '#!/bin/sh\ni=0\nwhile [ $i -lt 60 ]; do /bin/sleep 1; i=$((i + 1)); done\n' > "$TMP/usb-audio/$helper"
+    chmod +x "$TMP/usb-audio/$helper"
+done
+"$TMP/usb-audio/bystander" > /dev/null 2>&1 < /dev/null & bystander=$!
+"$TMP/usb-audio/alsaloop" > /dev/null 2>&1 < /dev/null & routed=$!
+usb_fail() { kill "$bystander" "$routed" 2>/dev/null || :; fail "$@"; }
+usb_audio() { SC5000_USB_AUDIO_PIDFILE=$usb_pid sh "$USB_AUDIO" "$@" > "$TMP/usb-audio/out" 2>&1 || usb_fail "sc5000-usb-audio $* failed"; }
+for _ in 1 2 3 4 5 6 7 8 9 10; do [[ $(cat "/proc/$routed/comm" 2>/dev/null) == alsaloop ]] && break; /bin/sleep 0.1; done
+echo "$bystander" > "$usb_pid"
+usb_audio status
+grep -Fq 'DAC Routing: inactive (stale PID)' "$TMP/usb-audio/out" || usb_fail 'status takes another process for its alsaloop'
+echo "$bystander" > "$usb_pid"
+usb_audio route-dac stop
+kill -0 "$bystander" 2>/dev/null || usb_fail 'route-dac stop ended a process that is not its alsaloop'
+[[ ! -e $usb_pid ]] || usb_fail 'route-dac stop kept a stale PID file'
+echo "$routed" > "$usb_pid"
+usb_audio status
+grep -Fq "DAC Routing: active (PID $routed)" "$TMP/usb-audio/out" || usb_fail 'status does not see its own alsaloop'
+usb_audio route-dac stop
+for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$routed" 2>/dev/null || break; /bin/sleep 0.1; done
+! kill -0 "$routed" 2>/dev/null || usb_fail 'route-dac stop left its own alsaloop running'
+kill "$bystander" 2>/dev/null || :
+wait "$bystander" "$routed" 2>/dev/null || :
+has 'PIDFILE="${SC5000_USB_AUDIO_PIDFILE:-/run/sc5000-usb-audio.pid}"' "$USB_AUDIO"
+ok 'USB DAC routing: only its own alsaloop is stopped, a reused PID is left alone, PID file under /run'
+
 cmp -s "$ROOT/rootfs-overlay/etc/sc5000/libengine-ui-hook.so" "$ROOT/rootfs-overlay/usr/local/lib/sc5000/libengine-ui-hook.so" ||
     fail 'both libengine-ui-hook.so copies in rootfs-overlay must match'
 if command -v arm-linux-gnueabihf-gcc >/dev/null 2>&1 && command -v arm-linux-gnueabihf-strip >/dev/null 2>&1 && command -v arm-linux-gnueabihf-readelf >/dev/null 2>&1; then

@@ -126,6 +126,23 @@ func (b *Beatport) SetToken(t BeatportToken) error {
 	return SaveJSON(b.Path, t)
 }
 
+// Forget drops the login, in memory and on disk.
+func (b *Beatport) Forget() error {
+	if b == nil {
+		return nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.loaded, b.tok = true, BeatportToken{}
+	if b.Path == "" {
+		return nil
+	}
+	if err := os.Remove(b.Path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 func (b *Beatport) header(token string) http.Header {
 	h := http.Header{"Accept": {"application/json"}, "User-Agent": {beatportUserAgent}}
 	if token != "" {

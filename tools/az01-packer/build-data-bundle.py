@@ -579,8 +579,14 @@ if [ "$#" -gt 0 ] && [ -f "$1" ] && [ "$(dd if="$1" bs=27 count=1 2>/dev/null)" 
     got=$(tail -c +129 "$1" | sha256sum | cut -d' ' -f1)
     [ -n "$want" ] && [ "$want" = "$got" ] || { echo "image damaged: SHA-256 mismatch" >&2; exit 1; }
     mkdir -p "${SC5000_CUSTOM:-/data/enginex}"
+    # BH2-A7-8: an install that lost power or was killed never ran its exit trap and
+    # left its unpacked copy of the bundle here, tens of megabytes of /data each time.
+    for stale in "${SC5000_CUSTOM:-/data/enginex}"/.img-install.*; do
+        [ ! -d "$stale" ] || [ -L "$stale" ] || rm -rf "$stale"
+    done
     work=$(mktemp -d "${SC5000_CUSTOM:-/data/enginex}/.img-install.XXXXXX")
     trap 'rm -rf "$work"' 0
+    trap 'exit 1' HUP INT TERM # a signal ends through the exit trap
     tail -c +129 "$1" | tar -xzf - -C "$work"
     sh "$work"/*/install.sh
     exit 0
@@ -713,6 +719,32 @@ fi
 rm -f "$dest/gen2-unlocked"
 rm -f "$alsa_dest/99-sc5000-custom.conf"
 rmdir "$alsa_dest" 2>/dev/null || :
+# BH2-A7-11: the installer's /data image carries the ALSA file in both places a model may
+# read it from (host-install-userdata.py); the one this model does not use stayed behind.
+alsa_base=${alsa_dest%/"$alsa_rel"}
+if [ "$alsa_base" != "$alsa_dest" ]; then
+    for d in system/var/overlay/lib/alsa/conf.d system/var-lib/alsa/conf.d; do
+        rm -f "$alsa_base/$d/99-sc5000-custom.conf"
+        rmdir "$alsa_base/$d" 2>/dev/null || :
+    done
+fi
+# BH2-A7-11: boot-activate.sh gives Engine a stand-in TIDAL account (#56) that only works
+# with EngineX. Left behind, stock Engine shows TIDAL as signed in and every request
+# fails until the user signs out. A real TIDAL sign-in (any other token) stays.
+accounts=${SC5000_STREAMING_ACCOUNTS:-}
+[ -n "$accounts" ] || [ -n "${SC5000_CUSTOM:-}" ] || accounts=/data/StreamingAccounts.json
+if [ -n "$accounts" ] && grep -q 'accessToken[^,}]*enginex' "$accounts" 2>/dev/null; then
+    awk '{ s = s $0 "\n" }
+        END {
+            if (!match(s, /"TIDAL"[ \t]*:[ \t]*"[{][^}]*accessToken[^,}]*enginex[^}]*[}]"/)) { printf "%s", s; exit }
+            head = substr(s, 1, RSTART - 1); tail = substr(s, RSTART + RLENGTH)
+            if (match(tail, /^[ \t\n]*,/)) tail = substr(tail, RLENGTH + 1) # the next entry keeps its place
+            else sub(/,[ \t\n]*$/, "", head)                               # it was the last one
+            sub(/[ \t]+$/, "", head)
+            if (head ~ /\n$/ && tail ~ /^[ \t]*\n/) sub(/^[ \t]*\n/, "", tail)
+            printf "%s%s", head, tail
+        }' "$accounts" > "$accounts.tmp" && mv "$accounts.tmp" "$accounts" || rm -f "$accounts.tmp"
+fi
 if [ -z "${SC5000_CUSTOM:-}" ] && [ -e /run/sc5000-engine-script ]; then
     ! mountpoint -q /usr/Engine/Scripts/engine || umount /usr/Engine/Scripts/engine || :
     rm -f /run/sc5000-engine-script

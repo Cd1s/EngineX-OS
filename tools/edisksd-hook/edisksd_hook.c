@@ -709,11 +709,46 @@ static void drop_orphans(void) {
 
 static struct owned_view *load_view(const char *target) { return find_view(target,NULL); }
 
+// A rekordbox stick is one rb-bridge has something to convert from (pkg/bridge
+// exportCandidates): exportLibrary.db, exportOneLibrary.db or export.pdb under
+// PIONEER/rekordbox, plain or hidden, names matched as the stick's filesystem and
+// rb-bridge's resolver do, without regard to case. BH2-A1-7: any PIONEER folder
+// counted, so an Engine stick that had only a player's settings in it, or the
+// export.pdb EngineX itself writes for CDJ link (pkg/prolink GeneratedExport,
+// which rb-bridge leaves alone), was taken for a rekordbox stick and never healed.
+static int generated_export(int rekordbox,const struct stat *pdb) {
+    char want[64],got[64];
+    snprintf(want,sizeof want,"%lld:%lld",(long long)pdb->st_size,(long long)pdb->st_mtim.tv_sec*1000000000LL+pdb->st_mtim.tv_nsec);
+    int fd=openat(rekordbox,".enginex-generated",O_RDONLY|O_NOFOLLOW|O_CLOEXEC);if(fd<0)return 0;
+    ssize_t n=read(fd,got,sizeof got-1);close(fd);
+    return n>0&&(size_t)n==strlen(want)&&!memcmp(got,want,(size_t)n);
+}
+static DIR *open_dir_at(int dir,const char *name) {
+    int fd=openat(dir,name,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);if(fd<0)return NULL;
+    DIR *d=fdopendir(fd);if(!d)close(fd);
+    return d;
+}
+static int export_in(DIR *pioneer,int hidden) {
+    int found=0;struct dirent *e,*f;
+    while(!found&&(e=readdir(pioneer))) {
+        if(strcasecmp(e->d_name,"rekordbox"))continue;
+        DIR *rb=open_dir_at(dirfd(pioneer),e->d_name);if(!rb)continue;
+        while(!found&&(f=readdir(rb))) {
+            int pdb=!strcasecmp(f->d_name,"export.pdb");struct stat st;
+            if(!pdb&&strcasecmp(f->d_name,"exportLibrary.db")&&strcasecmp(f->d_name,"exportOneLibrary.db"))continue;
+            if(fstatat(dirfd(rb),f->d_name,&st,AT_SYMLINK_NOFOLLOW)||!S_ISREG(st.st_mode))continue;
+            found=!pdb||hidden||!generated_export(dirfd(rb),&st); // EngineX writes its own only into PIONEER
+        }
+        closedir(rb);
+    }
+    return found;
+}
 static int has_export(const char *target) {
     if(safe_path(target,0))return 0;
     DIR *d=opendir(target);if(!d)return 0;int found=0;struct dirent *e;
     while(!found&&(e=readdir(d)))if(!strcasecmp(e->d_name,"PIONEER")||!strcasecmp(e->d_name,".PIONEER")) {
-        struct stat st;found=!fstatat(dirfd(d),e->d_name,&st,AT_SYMLINK_NOFOLLOW)&&S_ISDIR(st.st_mode);
+        DIR *pioneer=open_dir_at(dirfd(d),e->d_name);if(!pioneer)continue;
+        found=export_in(pioneer,e->d_name[0]=='.');closedir(pioneer);
     }
     closedir(d);return found;
 }
@@ -869,11 +904,14 @@ static int after_mount(struct libmnt_context *ctx,int mode,int64_t deadline) {
 }
 // A library too large to convert inside the budget would hold every later
 // insert of the same export for the whole budget and still end unconverted.
-// Remember it until reboot, keyed by the filesystem and the export files.
+// Remember it until reboot, keyed by the size of the volume and the export files.
+// Not by f_fsid: on FAT, exFAT and HFS+ that is the device number, which follows
+// the port and the insert order, so the same stick in the other port waited the
+// whole budget again (BH2-A1-2).
 static int slow_marker(const char *target,char out[PATH_MAX]) {
     struct statvfs v;if(statvfs(target,&v))return -1;
     uint64_t h=UINT64_C(14695981039346656037);
-    h=hash_bytes(h,&v.f_fsid,sizeof v.f_fsid);h=hash_bytes(h,&v.f_blocks,sizeof v.f_blocks);
+    h=hash_bytes(h,&v.f_blocks,sizeof v.f_blocks);
     // Every export file rb-bridge may convert from (pkg/bridge).
     const char *files[]={"PIONEER/rekordbox/export.pdb",".PIONEER/rekordbox/export.pdb","PIONEER/rekordbox/exportLibrary.db",".PIONEER/rekordbox/exportLibrary.db",
                          "PIONEER/rekordbox/exportOneLibrary.db",".PIONEER/rekordbox/exportOneLibrary.db"};

@@ -846,6 +846,12 @@ func (s *Server) deleteSession(w http.ResponseWriter, r *http.Request) {
 		} else if p, ok := session.p.(interface{ Close() }); ok {
 			p.Close()
 		}
+		if !session.Guest {
+			if err := s.forgetOwner(session.Provider); err != nil {
+				fail(w, 500, err)
+				return
+			}
+		}
 	}
 	respond(w, map[string]bool{"ok": true})
 }

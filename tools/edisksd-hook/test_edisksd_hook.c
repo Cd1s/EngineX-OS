@@ -181,6 +181,34 @@ static void test_slow_marker_follows_every_export_file(const char *root) {
     }
     puts("slow-library record changes with export.pdb, exportLibrary.db and exportOneLibrary.db, plain and hidden: PASS");
 }
+// BH2-A1-7: any PIONEER folder made a stick a rekordbox stick, which is converted
+// and not healed. Only an export rb-bridge converts from does.
+static void test_only_an_export_makes_a_rekordbox_stick(const char *root) {
+    char stick[PATH_MAX],p[PATH_MAX],pdb[PATH_MAX],marker[PATH_MAX],stamp[64];struct stat st;
+    join(stick,root,"export-or-not");join(p,stick,"Engine Library/Database2");assert(!make_dirs(p));
+    assert(!has_export(stick));
+    join(p,stick,"PIONEER");assert(!make_dirs(p));join(p,stick,"PIONEER/MYSETTING.DAT");write_file(p,"player settings");
+    assert(!has_export(stick)); // what a CDJ or a mixer leaves on any stick
+    join(p,stick,"PIONEER/rekordbox");assert(!make_dirs(p));join(p,stick,"PIONEER/rekordbox/export.pdb");assert(!make_dirs(p));
+    assert(!has_export(stick)); // no export file
+    assert(!rmdir(p));join(pdb,stick,"PIONEER/rekordbox/export.pdb");write_file(pdb,"written by EngineX for CDJ link");
+    assert(has_export(stick));
+    // The export EngineX wrote itself (pkg/prolink GeneratedExport): rb-bridge does not convert from it.
+    assert(!lstat(pdb,&st));snprintf(stamp,sizeof stamp,"%lld:%lld",(long long)st.st_size,(long long)st.st_mtim.tv_sec*1000000000LL+st.st_mtim.tv_nsec);
+    join(marker,stick,"PIONEER/rekordbox/.enginex-generated");write_file(marker,stamp);
+    assert(!has_export(stick));
+    join(p,stick,"PIONEER/rekordbox/exportOneLibrary.db");write_file(p,"rekordbox 7");assert(has_export(stick));assert(!unlink(p));
+    assert(!has_export(stick));
+    write_file(pdb,"exported again from rekordbox, the stamp is stale");assert(has_export(stick));
+    // Hidden folder and other spellings, as on FAT/exFAT/HFS+ and in rb-bridge's resolver.
+    for(unsigned i=0;i<3;i++) {
+        const char *dirs[]={".PIONEER/rekordbox","pioneer/Rekordbox",".Pioneer/REKORDBOX"},*files[]={"exportLibrary.db","EXPORT.PDB","ExportOneLibrary.DB"};
+        char other[PATH_MAX],name[32];snprintf(name,sizeof name,"export-spelling-%u",i);join(other,root,name);
+        join(p,other,dirs[i]);assert(!make_dirs(p));assert(!has_export(other));
+        char file[PATH_MAX];join(file,p,files[i]);write_file(file,"export");assert(has_export(other));
+    }
+    puts("BH2-A1-7: a rekordbox stick is one with exportLibrary.db, exportOneLibrary.db or a rekordbox export.pdb (plain, hidden, any case); a bare PIONEER folder or EngineX's own CDJ-link export is not: PASS");
+}
 static void test_time(void) {
     struct timespec t={.tv_sec=2147483,.tv_nsec=0};int64_t before=timespec_ms(&t),deadline=deadline_from(before);
     t.tv_nsec=100000000;assert(timespec_ms(&t)<deadline&&deadline==INT64_C(2147503000));
@@ -273,7 +301,7 @@ static void test_hfs_mount_runs_bridge(const char *root) {
     join(data,root,"deck-data");join(enginex,data,"enginex");assert(!make_dirs(enginex));
     join(legacy,data,"sc5000-custom");assert(!symlink("enginex",legacy));
     join(test_library,legacy,"hfs-libraries");test_legacy_library[0]=0;
-    join(disk,root,"hfs-disk");assert(!make_dirs(disk));join(p,disk,".PIONEER/rekordbox");assert(!make_dirs(p));
+    join(disk,root,"hfs-disk");assert(!make_dirs(disk));join(p,disk,".PIONEER/rekordbox");assert(!make_dirs(p));join(p,disk,".PIONEER/rekordbox/export.pdb");write_file(p,"library");
     join(p,disk,".PIONEER/rekordbox/exportLibrary.db");write_file(p,"rekordbox 7");
     join(log,root,"rb-bridge.log");join(test_rb_bridge,root,"rb-bridge");
     char script[PATH_MAX*2];snprintf(script,sizeof script,"#!/bin/sh\necho \"$*\" > '%s'\n: > \"$2/Engine Library/bridged\"\n",log);
@@ -317,7 +345,7 @@ static void test_first_insert_converted_before_visible(const char *root) {
     write_file(test_rb_bridge,script);assert(!chmod(test_rb_bridge,0700));
     char expect[PATH_MAX+64];
     // FAT-style writable stick: the database lands on the stick before Engine can see it.
-    join(disk,root,"first-fat");join(p,disk,"PIONEER/rekordbox");assert(!make_dirs(p));
+    join(disk,root,"first-fat");join(p,disk,"PIONEER/rekordbox");assert(!make_dirs(p));join(p,disk,"PIONEER/rekordbox/export.pdb");write_file(p,"library");
     join(target,MEDIA_ROOT,"FIRST");assert(!make_dirs(target));
     snprintf(test_disk,sizeof test_disk,"%s",disk);test_disk_ro=0;
     struct libmnt_context c={.target=target,.source="/dev/sdy1"};
@@ -332,7 +360,7 @@ static void test_first_insert_converted_before_visible(const char *root) {
     assert(!mnt_context_mount(&c)&&c.status==1);assert(access(log,F_OK)==-1);
     join(p,plain,"Engine Library");assert(access(p,F_OK)==-1);assert(!umount2(target,UMOUNT_NOFOLLOW));
     // Read-only HFS+ with a hidden .PIONEER: the converted library is in the view at once.
-    char hfs[PATH_MAX];join(hfs,root,"first-hfs");join(p,hfs,".PIONEER/rekordbox");assert(!make_dirs(p));
+    char hfs[PATH_MAX];join(hfs,root,"first-hfs");join(p,hfs,".PIONEER/rekordbox");assert(!make_dirs(p));join(p,hfs,".PIONEER/rekordbox/export.pdb");write_file(p,"library");
     snprintf(test_disk,sizeof test_disk,"%s",hfs);test_disk_ro=1;snprintf(test_hfs_target,sizeof test_hfs_target,"%s",target);c.status=0;
     unsigned views_before=count_views();
     assert(!mnt_context_mount(&c)&&c.status==1);
@@ -398,7 +426,7 @@ static void test_library_is_walked_once(const char *root) {
     assert(count_mounts(target)==1);assert(!umount2(target,UMOUNT_NOFOLLOW));
     snprintf(test_runtime,sizeof test_runtime,"%s",saved_runtime);
     // A rekordbox stick: converted privately, then mounted without another walk.
-    join(disk,root,"once-rekordbox");join(p,disk,"PIONEER/rekordbox");assert(!make_dirs(p));
+    join(disk,root,"once-rekordbox");join(p,disk,"PIONEER/rekordbox");assert(!make_dirs(p));join(p,disk,"PIONEER/rekordbox/export.pdb");write_file(p,"library");
     join(test_rb_bridge,root,"once-bridge");
     snprintf(script,sizeof script,"#!/bin/sh\nmkdir -p \"$2/Engine Library/Database2\" && echo converted > \"$2/Engine Library/Database2/m.db\" && ln -s / \"$2/Engine Library/link\"\n");
     write_file(test_rb_bridge,script);assert(!chmod(test_rb_bridge,0700));
@@ -420,8 +448,8 @@ static void *insert_thread(void *arg){struct insert *i=arg;i->rc=mnt_context_mou
 static void test_two_sticks_at_once(const char *root) {
     assert(!mount(NULL,"/",NULL,MS_REC|MS_PRIVATE,NULL));
     char a[PATH_MAX],b[PATH_MAX],ta[PATH_MAX],tb[PATH_MAX],p[PATH_MAX],log[PATH_MAX],script[PATH_MAX*2];
-    join(a,root,"pair-a");join(p,a,"PIONEER/rekordbox");assert(!make_dirs(p));
-    join(b,root,"pair-b");join(p,b,"PIONEER/rekordbox");assert(!make_dirs(p));
+    join(a,root,"pair-a");join(p,a,"PIONEER/rekordbox");assert(!make_dirs(p));join(p,a,"PIONEER/rekordbox/export.pdb");write_file(p,"library");
+    join(b,root,"pair-b");join(p,b,"PIONEER/rekordbox");assert(!make_dirs(p));join(p,b,"PIONEER/rekordbox/export.pdb");write_file(p,"library");
     join(p,b,"PIONEER/rekordbox/export.pdb");write_file(p,"the second stick");
     join(ta,MEDIA_ROOT,"PAIR-A");assert(!make_dirs(ta));join(tb,MEDIA_ROOT,"PAIR-B");assert(!make_dirs(tb));
     join(log,root,"pair-bridge.log");join(test_rb_bridge,root,"pair-bridge");
@@ -470,7 +498,7 @@ static void test_hfs_visible_mount_reuses_the_converted_library(const char *root
     char data[PATH_MAX],disk[PATH_MAX],db[PATH_MAX],target[PATH_MAX],p[PATH_MAX],cache[PATH_MAX],script[PATH_MAX*3];
     join(data,root,"reuse-data");join(p,data,"enginex");assert(!make_dirs(p));
     join(test_library,p,"hfs-libraries");test_legacy_library[0]=0;join(cache,test_library,"uuid-hfs-stick");
-    join(disk,root,"reuse-hfs");join(p,disk,".PIONEER/rekordbox");assert(!make_dirs(p));
+    join(disk,root,"reuse-hfs");join(p,disk,".PIONEER/rekordbox");assert(!make_dirs(p));join(p,disk,".PIONEER/rekordbox/export.pdb");write_file(p,"library");
     join(p,disk,"Engine Library/Database2");assert(!make_dirs(p));join(db,p,"m.db");write_file(db,"made on the Mac");
     join(test_rb_bridge,root,"reuse-bridge");
     snprintf(script,sizeof script,"#!/bin/sh\necho \"read again $(date +%%s%%N)\" > '%s'\n: > \"$2/Engine Library/bridged\"\n",db);
@@ -499,7 +527,7 @@ static void test_private_mount_leaves_nothing_behind(const char *root) {
     char data[PATH_MAX],disk[PATH_MAX],target[PATH_MAX],p[PATH_MAX],utab[PATH_MAX],line[PATH_MAX+8];
     join(data,root,"clean-data");join(p,data,"enginex");assert(!make_dirs(p));
     join(test_library,p,"hfs-libraries");test_legacy_library[0]=0;
-    join(disk,root,"clean-stick");join(p,disk,".PIONEER/rekordbox");assert(!make_dirs(p));
+    join(disk,root,"clean-stick");join(p,disk,".PIONEER/rekordbox");assert(!make_dirs(p));join(p,disk,".PIONEER/rekordbox/export.pdb");write_file(p,"library");
     join(test_rb_bridge,root,"clean-bridge");write_file(test_rb_bridge,"#!/bin/sh\nexit 0\n");assert(!chmod(test_rb_bridge,0700));
     join(target,MEDIA_ROOT,"CLEAN");assert(!make_dirs(target));join(utab,test_utab,"utab");unlink(utab);
     snprintf(test_disk,sizeof test_disk,"%s",disk);test_disk_ro=0;
@@ -515,6 +543,54 @@ static void test_private_mount_leaves_nothing_behind(const char *root) {
     assert(!unmount_dispatch(&c,real_unmount));test_hfs_target[0]=0;test_disk_ro=0;
     assert(count_views()==views_before);
     puts("REAL PRIVATE NAMESPACE #182: the private pre-mount leaves no utab record, and a killed one no view directory, in the caller's namespace: PASS");
+}
+// BH2-A1-1: a second-generation deck keeps the vendor's rootfs and has
+// engine-guardian only in the data bundle; the hook asked for /usr/local/bin
+// alone, so an Engine stick was never healed at mount on those decks.
+static void test_guardian_from_the_data_bundle(const char *root) {
+    assert(!mount(NULL,"/",NULL,MS_REC|MS_PRIVATE,NULL));
+    char disk[PATH_MAX],target[PATH_MAX],p[PATH_MAX],log[PATH_MAX],script[PATH_MAX*2],want[PATH_MAX*2];
+    join(disk,root,"heal-native");join(p,disk,"Engine Library/Database2");assert(!make_dirs(p));
+    join(p,disk,"Engine Library/Database2/m.db");write_file(p,"native library");
+    join(target,MEDIA_ROOT,"HEAL");assert(!make_dirs(target));join(log,root,"heal.log");
+    join(test_guardian_system,root,"heal-system-guardian");join(test_guardian_bundle,root,"heal-bundle-guardian");
+    snprintf(script,sizeof script,"#!/bin/sh\necho \"bundle $*\" >> '%s'\n",log);write_file(test_guardian_bundle,script);assert(!chmod(test_guardian_bundle,0700));
+    for(int rootfs=0;rootfs<2;rootfs++) { // the bundle's alone, then next to the rootfs's own, which is preferred
+        if(rootfs){snprintf(script,sizeof script,"#!/bin/sh\necho \"system $*\" >> '%s'\n",log);write_file(test_guardian_system,script);assert(!chmod(test_guardian_system,0700));}
+        snprintf(test_disk,sizeof test_disk,"%s",disk);test_disk_ro=0;
+        struct libmnt_context c={.target=target,.source="/dev/sdx1"};
+        assert(!mnt_context_mount(&c)&&c.status==1);
+        snprintf(want,sizeof want,"%s --heal-mount %s --data-only\n",rootfs?"system":"bundle",target);
+        expect_file(log,want);assert(!unlink(log));
+        assert(!umount2(target,UMOUNT_NOFOLLOW));
+    }
+    // BH2-A1-7: the same stick after a player left its settings folder on it is still healed, not converted.
+    join(p,disk,"PIONEER");assert(!make_dirs(p));join(p,disk,"PIONEER/MYSETTING.DAT");write_file(p,"player settings");
+    join(test_rb_bridge,root,"heal-bridge");snprintf(script,sizeof script,"#!/bin/sh\necho \"bridge $*\" >> '%s'\n",log);write_file(test_rb_bridge,script);assert(!chmod(test_rb_bridge,0700));
+    struct libmnt_context settings={.target=target,.source="/dev/sdx1"};
+    assert(!mnt_context_mount(&settings)&&settings.status==1);
+    snprintf(want,sizeof want,"system --heal-mount %s --data-only\n",target);expect_file(log,want);
+    assert(!umount2(target,UMOUNT_NOFOLLOW));
+    test_guardian_system[0]=test_guardian_bundle[0]=0;
+    puts("REAL PRIVATE NAMESPACE BH2-A1-1: an Engine stick is healed by the data bundle's engine-guardian where the rootfs has none, by the rootfs's where it has; BH2-A1-7: also with a player's settings folder on it: PASS");
+}
+// BH2-A1-2: the "too large" record was keyed by f_fsid, on FAT/exFAT/HFS+ the
+// device number. Two mounts of one export under different filesystem ids stand
+// for one stick in two ports (sda1, then sdb1).
+static void test_slow_marker_survives_another_port(const char *root) {
+    char mnt[2][PATH_MAX],marker[2][PATH_MAX],other[PATH_MAX],p[PATH_MAX];struct statvfs v[2];
+    struct timespec exported[2]={{.tv_sec=1700000000,.tv_nsec=120000000},{.tv_sec=1700000000,.tv_nsec=120000000}};
+    for(int i=0;i<2;i++) {
+        join(mnt[i],root,i?"port-b":"port-a");assert(!make_dirs(mnt[i]));
+        assert(!mount("stick",mnt[i],"tmpfs",0,"size=1m,mode=0700"));
+        join(p,mnt[i],"PIONEER/rekordbox");assert(!make_dirs(p));join(p,mnt[i],"PIONEER/rekordbox/export.pdb");write_file(p,"big library");
+        assert(!utimensat(AT_FDCWD,p,exported,0));assert(!statvfs(mnt[i],&v[i]));assert(!slow_marker(mnt[i],marker[i]));
+    }
+    assert(memcmp(&v[0].f_fsid,&v[1].f_fsid,sizeof v[0].f_fsid)&&v[0].f_blocks==v[1].f_blocks); // what a second port looks like
+    assert(!strcmp(marker[0],marker[1]));
+    write_file(p,"exported again");assert(!slow_marker(mnt[1],other));assert(strcmp(marker[0],other)); // a new export is still looked at
+    for(int i=0;i<2;i++)assert(!umount2(mnt[i],UMOUNT_NOFOLLOW));
+    puts("REAL PRIVATE NAMESPACE BH2-A1-2: the too-large record of a stick is found again under another device number, and not after a new export: PASS");
 }
 // r2 left deck: edisksd announced the bare read-only HFS+ mount before the view
 // covered it, Engine chose OneLibrary and its migration failed EROFS. The
@@ -694,7 +770,7 @@ static void test_eject_while_another_stick_converts(const char *root) {
     char plain[PATH_MAX],tp[PATH_MAX],rb[PATH_MAX],tr[PATH_MAX],p[PATH_MAX];
     join(plain,root,"eject-plain");join(p,plain,"Music");assert(!make_dirs(p));
     join(tp,MEDIA_ROOT,"EJECT-PLAIN");assert(!make_dirs(tp));
-    join(rb,root,"eject-rekordbox");join(p,rb,"PIONEER/rekordbox");assert(!make_dirs(p));
+    join(rb,root,"eject-rekordbox");join(p,rb,"PIONEER/rekordbox");assert(!make_dirs(p));join(p,rb,"PIONEER/rekordbox/export.pdb");write_file(p,"library");
     join(tr,MEDIA_ROOT,"EJECT-RB");assert(!make_dirs(tr));
     join(test_rb_bridge,root,"eject-bridge");
     write_file(test_rb_bridge,"#!/bin/sh\nsleep 2.5\nmkdir -p \"$2/Engine Library/Database2\" && echo converted > \"$2/Engine Library/Database2/m.db\"\n");
@@ -871,35 +947,12 @@ static void test_view_binds_stay_out_of_a_shared_data(const char *root) {
     assert(!umount2(data,MNT_DETACH));snprintf(test_library,sizeof test_library,"%s",saved_lib);
     puts("REAL PRIVATE NAMESPACE review bdbbda4: the HFS+ view's binds stay out of a shared /data: PASS");
 }
-// BH2-A1-1: a second-generation deck keeps the vendor's rootfs and has
-// engine-guardian only in the data bundle; the hook asked for /usr/local/bin
-// alone, so an Engine stick was never healed at mount on those decks.
-static void test_guardian_from_the_data_bundle(const char *root) {
-    assert(!mount(NULL,"/",NULL,MS_REC|MS_PRIVATE,NULL));
-    char disk[PATH_MAX],target[PATH_MAX],p[PATH_MAX],log[PATH_MAX],script[PATH_MAX*2],want[PATH_MAX*2];
-    join(disk,root,"heal-native");join(p,disk,"Engine Library/Database2");assert(!make_dirs(p));
-    join(p,disk,"Engine Library/Database2/m.db");write_file(p,"native library");
-    join(target,MEDIA_ROOT,"HEAL");assert(!make_dirs(target));join(log,root,"heal.log");
-    join(test_guardian_system,root,"heal-system-guardian");join(test_guardian_bundle,root,"heal-bundle-guardian");
-    snprintf(script,sizeof script,"#!/bin/sh\necho \"bundle $*\" >> '%s'\n",log);write_file(test_guardian_bundle,script);assert(!chmod(test_guardian_bundle,0700));
-    for(int rootfs=0;rootfs<2;rootfs++) { // the bundle's alone, then next to the rootfs's own, which is preferred
-        if(rootfs){snprintf(script,sizeof script,"#!/bin/sh\necho \"system $*\" >> '%s'\n",log);write_file(test_guardian_system,script);assert(!chmod(test_guardian_system,0700));}
-        snprintf(test_disk,sizeof test_disk,"%s",disk);test_disk_ro=0;
-        struct libmnt_context c={.target=target,.source="/dev/sdx1"};
-        assert(!mnt_context_mount(&c)&&c.status==1);
-        snprintf(want,sizeof want,"%s --heal-mount %s --data-only\n",rootfs?"system":"bundle",target);
-        expect_file(log,want);assert(!unlink(log));
-        assert(!umount2(target,UMOUNT_NOFOLLOW));
-    }
-    test_guardian_system[0]=test_guardian_bundle[0]=0;
-    puts("REAL PRIVATE NAMESPACE BH2-A1-1: an Engine stick is healed by the data bundle's engine-guardian where the rootfs has none, by the rootfs's where it has: PASS");
-}
 int main(int argc,char **argv) {
     char root[]="/tmp/sc5000-edisks-tests-XXXXXX";assert(mkdtemp(root));
     join(test_media,root,"media");join(test_library,root,"libraries");join(test_runtime,root,"runtime");
     join(test_legacy_library,root,"legacy-libraries");join(test_utab,root,"utab");assert(!make_dirs(test_utab));
-    assert(!make_dirs(test_media));test_paths_and_copy(root);test_compat_symlink_root(root);test_time();test_slow_marker_follows_every_export_file(root);test_monitor_sees_plain_device_mount(root);
-    if(argc>1&&!strcmp(argv[1],"--mounts")){test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);test_library_is_walked_once(root);test_two_sticks_at_once(root);test_hfs_visible_mount_reuses_the_converted_library(root);test_private_mount_leaves_nothing_behind(root);test_hfs_view_copies_only_metadata(root);test_heal_before_visible(root);test_eject_while_another_stick_converts(root);test_eject_of_a_pulled_stick(root);test_heal_marker_survives_another_port(root);test_hfs_view_with_a_long_entry_name(root);test_hfs_view_artwork_is_writable(root);test_seed_keeps_its_own_previous_generation(root);test_view_binds_stay_out_of_a_shared_data(root);test_guardian_from_the_data_bundle(root);}
+    assert(!make_dirs(test_media));test_paths_and_copy(root);test_compat_symlink_root(root);test_time();test_slow_marker_follows_every_export_file(root);test_only_an_export_makes_a_rekordbox_stick(root);test_monitor_sees_plain_device_mount(root);
+    if(argc>1&&!strcmp(argv[1],"--mounts")){test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);test_library_is_walked_once(root);test_two_sticks_at_once(root);test_hfs_visible_mount_reuses_the_converted_library(root);test_private_mount_leaves_nothing_behind(root);test_hfs_view_copies_only_metadata(root);test_heal_before_visible(root);test_eject_while_another_stick_converts(root);test_eject_of_a_pulled_stick(root);test_heal_marker_survives_another_port(root);test_hfs_view_with_a_long_entry_name(root);test_hfs_view_artwork_is_writable(root);test_seed_keeps_its_own_previous_generation(root);test_view_binds_stay_out_of_a_shared_data(root);test_guardian_from_the_data_bundle(root);test_slow_marker_survives_another_port(root);}
     // Mount tests have removed all namespace mounts before deleting fixtures.
     int tmp=open("/tmp",O_RDONLY|O_DIRECTORY);assert(tmp>=0);remove_tree(tmp,strrchr(root,'/')+1);close(tmp);
     puts("edisksd-hook: all requested tests passed");return 0;

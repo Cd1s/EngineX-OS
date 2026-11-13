@@ -661,6 +661,27 @@ class FilesystemTests(unittest.TestCase):
                 az.ExtFS(unpacked/'rootfs.ext2').cmd('ls /')
         self.assertEqual((unpacked/'rootfs.ext2').read_bytes(), self.disk.read_bytes())
 
+    def test_cli_unpack_accepts_a_windows_path(self):
+        # BH2-A7-1: enginex-installer unpacks into %TEMP%\\enginex-rootfs-N\\unpacked on Windows;
+        # the backslash, the separator there, was refused as an unsafe character in every path.
+        original = self.root/'windows.img'
+        original.write_bytes(fixture(lzma.compress(self.disk.read_bytes())))
+        # On this host the same characters are one directory name.
+        parent = self.root/'C:\\Users\\dj\\AppData\\Local\\Temp\\enginex-rootfs-1'
+        parent.mkdir()
+        with unittest.mock.patch.object(az, '_WINDOWS', True, create=True):
+            self.assertEqual(az.main(['unpack', str(original), '--output', str(parent/'unpacked')]), 0)
+            self.assertEqual((parent/'unpacked'/'rootfs.ext2').read_bytes(), self.disk.read_bytes())
+            # Still refused there: what would end the quoted argument of a debugfs command.
+            for bad in ('with"quote', 'with\nnewline'):
+                with self.assertRaisesRegex(az.SafetyError, 'unsafe host output path'):
+                    az.new_output(self.root/bad)
+        # Where the backslash is a file-name character it stays refused.
+        with self.assertRaisesRegex(az.SafetyError, 'unsafe host output path'):
+            az.new_output(parent/'unpacked-again')
+        with self.assertRaisesRegex(az.SafetyError, 'unsafe host image path'):
+            az.ExtFS(parent/'unpacked'/'rootfs.ext2')
+
     def test_cli_repack_with_splash_and_recoverysplash(self):
         original = self.root/'orig_splash.img'
         original.write_bytes(fixture(lzma.compress(self.disk.read_bytes())))

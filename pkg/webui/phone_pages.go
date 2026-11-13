@@ -225,5 +225,5 @@ func spotifyPhonePage(lang int, action, authorize string) string {
 }
 
 func spotifyDevicePhonePage(lang int, verificationURL, code string) string {
-	return phoneHeading(lang, "spotify") + `<p>` + tr(lang, "spDeviceHint") + `</p><p><b>` + html.EscapeString(code) + `</b></p><a class="button" href="` + html.EscapeString(verificationURL) + `">` + tr(lang, "spOpen") + `</a>`
+	return phoneHeading(lang, "spotify") + `<p>` + tr(lang, "spDeviceHint") + `</p><p><b>` + html.EscapeString(code) + `</b></p><a class="b" href="` + html.EscapeString(verificationURL) + `">` + tr(lang, "spOpen") + `</a>`
 }
