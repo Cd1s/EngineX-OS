@@ -46,7 +46,13 @@ type checker struct {
 	used     []byte // computed block usage, one bit per block
 	inUse    map[uint32]*inodeInfo
 	xattrRef map[uint64]uint32
+	dupes    int  // blocks claimed twice
+	aborted  bool // too many conflicts: stop instead of walking on
 }
+
+// maxDupes bounds the work spent on a filesystem whose blocks are shared:
+// once this many conflicts are found the check stops; it has already failed.
+const maxDupes = 100
 
 type inodeInfo struct {
 	links  uint16
@@ -72,9 +78,19 @@ func (c *checker) claim(b uint64, what string) {
 	}
 	if testBit(c.used, b) {
 		c.addf("block %d is claimed twice (again by %s)", b, what)
+		if c.dupes++; c.dupes >= maxDupes {
+			c.aborted = true
+		}
 		return
 	}
 	setBit(c.used, b)
+}
+
+// claimRange claims n blocks from b, stopping once the check is aborted.
+func (c *checker) claimRange(b, n uint64, what string) {
+	for i := uint64(0); i < n && !c.aborted; i++ {
+		c.claim(b+i, what)
+	}
 }
 
 func (c *checker) run(ctx context.Context) error {
@@ -92,12 +108,13 @@ func (c *checker) run(ctx context.Context) error {
 		c.claim(f.blockBitmapBlock(g), fmt.Sprintf("group %d block bitmap", g))
 		c.claim(f.inodeBitmapBlock(g), fmt.Sprintf("group %d inode bitmap", g))
 		it := f.inodeTableBlock(g)
-		for i := uint64(0); i < f.itableBlocks(); i++ {
-			c.claim(it+i, fmt.Sprintf("group %d inode table", g))
-		}
+		c.claimRange(it, f.itableBlocks(), fmt.Sprintf("group %d inode table", g))
 	}
 
-	// Pass 1: inodes.
+	// Pass 1: inodes. A mapping walk stops at the first block that fixed
+	// metadata or an earlier inode already owns.
+	f.metaClaimed = func(b uint64) bool { return b < f.blocksCount && testBit(c.used, b) }
+	defer func() { f.metaClaimed = nil }()
 	orphanFile := uint32(0)
 	if f.compat()&compatOrphanFile != 0 {
 		orphanFile = le.Uint32(f.sb[sbOrphanFileInum:])
@@ -122,7 +139,7 @@ func (c *checker) run(ctx context.Context) error {
 				limit = 0
 			}
 		}
-		for idx := uint64(0); idx < uint64(f.inodesPerGroup); idx++ {
+		for idx := uint64(0); idx < uint64(f.inodesPerGroup) && !c.aborted; idx++ {
 			num := uint32(g)*f.inodesPerGroup + uint32(idx) + 1
 			marked := testBit(ibm, idx)
 			if idx >= limit {
@@ -138,6 +155,14 @@ func (c *checker) run(ctx context.Context) error {
 			}
 			c.inode(in, marked, orphanFile)
 		}
+	}
+
+	f.metaClaimed = nil
+	if c.dupes > 0 || c.aborted {
+		// Shared blocks: the later passes would re-walk shared structures
+		// and add nothing to an already failed check.
+		c.addf("%d blocks are claimed more than once; directory and bitmap checks skipped", c.dupes)
+		return nil
 	}
 
 	// Pass 2-4: directories, reachability, link counts.
@@ -216,9 +241,7 @@ func (c *checker) inode(in *inode, marked bool, orphanFile uint32) {
 				return
 			}
 			for _, e := range exts {
-				for i := uint64(0); i < uint64(e.length); i++ {
-					c.claim(e.phys+i, fmt.Sprintf("reserved inode %d", num))
-				}
+				c.claimRange(e.phys, uint64(e.length), fmt.Sprintf("reserved inode %d", num))
 			}
 			for _, b := range meta {
 				c.claim(b, fmt.Sprintf("reserved inode %d", num))
@@ -256,10 +279,9 @@ func (c *checker) inode(in *inode, marked bool, orphanFile uint32) {
 	}
 	var nblocks uint64
 	var lastInit uint64
+	what := fmt.Sprintf("inode %d", num)
 	for _, e := range exts {
-		for i := uint64(0); i < uint64(e.length); i++ {
-			c.claim(e.phys+i, fmt.Sprintf("inode %d", num))
-		}
+		c.claimRange(e.phys, uint64(e.length), what)
 		nblocks += uint64(e.length)
 		if !e.uninit {
 			lastInit = max(lastInit, uint64(e.logical)+uint64(e.length))
@@ -408,7 +430,7 @@ func (c *checker) bitmaps() {
 			continue
 		}
 		var ifree, dirs uint64
-		for idx := uint64(0); idx < uint64(f.inodesPerGroup); idx++ {
+		for idx := uint64(0); idx < uint64(f.inodesPerGroup) && !c.aborted; idx++ {
 			num := uint32(g)*f.inodesPerGroup + uint32(idx) + 1
 			info := c.inUse[num]
 			calc := info != nil || num < f.firstIno

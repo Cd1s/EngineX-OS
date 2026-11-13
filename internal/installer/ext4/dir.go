@@ -59,18 +59,19 @@ func (f *fsys) readDir(dir *inode) ([]dirBlock, error) {
 	if !dir.isDir() {
 		return nil, fmt.Errorf("ext4: inode %d is not a directory", dir.num)
 	}
-	exts, _, err := f.fileMap(dir)
-	if err != nil {
-		return nil, err
-	}
+	// A directory is read whole: check its size before mapping it, so a
+	// hostile size cannot force a huge walk or allocation. 128 MiB holds well
+	// over a million entries.
 	nblocks := dir.size() / uint64(f.bs)
 	if dir.size()%uint64(f.bs) != 0 || nblocks == 0 {
 		return nil, corruptf("directory inode %d has size %d", dir.num, dir.size())
 	}
-	// A directory is read whole; bound it so a hostile size cannot force a
-	// huge allocation. 128 MiB holds well over a million entries.
 	if dir.size() > maxDirBytes {
 		return nil, fmt.Errorf("%w: directory inode %d is %d bytes", ErrUnsupported, dir.num, dir.size())
+	}
+	exts, _, err := f.fileMap(dir)
+	if err != nil {
+		return nil, err
 	}
 	blocks := make([]dirBlock, 0, nblocks)
 	next := uint64(0)
@@ -419,7 +420,16 @@ func (f *fsys) appendBlock(in *inode, data []byte) error {
 	if err != nil {
 		return err
 	}
-	sectors := in.blocks512(f) + uint64(f.bs/512)*uint64(1+len(newMeta)-len(meta))
+	// The old tree blocks were freed and the new ones allocated: i_blocks
+	// loses the first and gains the second plus the appended block.
+	spb := uint64(f.bs / 512)
+	sectors := in.blocks512(f)
+	if old := uint64(len(meta)) * spb; sectors >= old {
+		sectors -= old
+	} else {
+		return corruptf("inode %d records %d sectors but its tree alone has %d", in.num, sectors, old)
+	}
+	sectors += (1 + uint64(len(newMeta))) * spb
 	if err := in.setBlocks512(f, sectors); err != nil {
 		return err
 	}

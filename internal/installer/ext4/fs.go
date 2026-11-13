@@ -50,6 +50,11 @@ type fsys struct {
 	dirtyIB      map[int]bool
 	dirtyGD      map[int]bool
 	dirtySB      bool
+
+	// metaClaimed, when set by the checker, reports blocks already owned by
+	// fixed metadata or another inode, so a mapping walk stops at the first
+	// shared block instead of re-walking someone else's tree.
+	metaClaimed func(uint64) bool
 }
 
 func (f *fsys) compat() uint32   { return le.Uint32(f.sb[sbFeatureCompat:]) }
