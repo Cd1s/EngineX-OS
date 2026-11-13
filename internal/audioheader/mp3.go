@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"strings"
 )
@@ -16,6 +17,7 @@ const (
 	mp3Mask         = 0xfffe0ccf
 	mp3ScanWindow   = 64 * 1024
 	mpaMaxFrameSize = 2884
+	maxMP3Kbps      = 640
 	lameDecoderPad  = 528 + 1 // FFmpeg libavformat/mp3dec.c: start_pad + 528 + 1
 )
 
@@ -347,25 +349,30 @@ func ReadMP3(r io.ReadSeeker, size int64) (MP3Info, error) {
 					if audioBytes == 0 && size > off {
 						audioBytes = uint64(size - off)
 					}
-					if audioBytes > 0 {
-						denom := uint64(frames) * uint64(f.spf) * 1000
-						vbrKbps = int((audioBytes*8*uint64(f.sampleRate) + denom/2) / denom)
-					}
+					vbrKbps = computeVBRKbps(audioBytes, frames, f.spf, f.sampleRate)
 				}
 			}
 		} else if len(frame) >= 36+26 && string(frame[36:40]) == "VBRI" {
-			info.Tag = "VBRI"
-			vbrFrame = f
-			vbriBytes := binary.BigEndian.Uint32(frame[46:50])
-			frames = binary.BigEndian.Uint32(frame[50:54])
-			off += int64(f.frameSize)
-			audioBytes := uint64(vbriBytes)
-			if audioBytes == 0 && size > off {
-				audioBytes = uint64(size - off)
+			version := binary.BigEndian.Uint16(frame[40:42])
+			vbriBytes := uint64(binary.BigEndian.Uint32(frame[46:50]))
+			vbriFrames := uint64(binary.BigEndian.Uint32(frame[50:54]))
+			minFrame := uint64(minMPEGFrameSize(f.lsf, f.layer, f.sampleRate))
+			actualAudioSize := uint64(0)
+			if size > off {
+				actualAudioSize = uint64(size - off)
 			}
-			if frames != 0 && audioBytes > 0 {
-				denom := uint64(frames) * uint64(f.spf) * 1000
-				vbrKbps = int((audioBytes*8*uint64(f.sampleRate) + denom/2) / denom)
+			maxFrames := actualAudioSize / minFrame
+			if version == 1 &&
+				actualAudioSize >= uint64(f.frameSize) &&
+				vbriFrames > 0 && vbriFrames <= maxFrames &&
+				vbriBytes > 0 && vbriBytes <= actualAudioSize &&
+				vbriBytes >= vbriFrames*minFrame &&
+				uint64(vbriFrames)*uint64(f.spf)/uint64(f.sampleRate) <= 1e7 {
+				info.Tag = "VBRI"
+				vbrFrame = f
+				frames = uint32(vbriFrames)
+				off += int64(f.frameSize)
+				vbrKbps = computeVBRKbps(vbriBytes, frames, f.spf, f.sampleRate)
 			}
 		}
 	}
@@ -408,6 +415,41 @@ func ReadMP3(r io.ReadSeeker, size int64) (MP3Info, error) {
 	return MP3Info{}, errors.New("mp3: failed to find valid MPEG audio frames")
 }
 
+func minMPEGFrameSize(lsf, layer, sampleRate int) int {
+	if layer < 1 || layer > 3 || lsf < 0 || lsf > 1 || sampleRate <= 0 {
+		return 24
+	}
+	minBitrate := mpaBitrateTab[lsf][layer-1][1]
+	minSize := (minBitrate * 144000) / (sampleRate << lsf)
+	if minSize < 24 {
+		return 24
+	}
+	return minSize
+}
+
+func computeVBRKbps(audioBytes uint64, frames uint32, spf, sampleRate int) int {
+	if frames == 0 || spf <= 0 || sampleRate <= 0 || audioBytes == 0 {
+		return 0
+	}
+	minBytes := uint64(frames) * 24
+	maxBytes := uint64(frames) * mpaMaxFrameSize
+	if audioBytes < minBytes || audioBytes > maxBytes {
+		return 0
+	}
+	denom := uint64(frames) * uint64(spf) * 1000
+	if denom == 0 {
+		return 0
+	}
+	if audioBytes > (math.MaxUint64-denom/2)/(8*uint64(sampleRate)) {
+		return 0
+	}
+	kbps := (audioBytes*8*uint64(sampleRate) + denom/2) / denom
+	if kbps < 1 || kbps > maxMP3Kbps {
+		return 0
+	}
+	return int(kbps)
+}
+
 func finalizeMP3Info(info MP3Info, audio mpegHeader, vbrKbps, xingSkip, lameSkip int, frames uint32, size int64) MP3Info {
 	info.SampleRate = audio.sampleRate
 	info.Channels = audio.channels
@@ -419,7 +461,8 @@ func finalizeMP3Info(info MP3Info, audio mpegHeader, vbrKbps, xingSkip, lameSkip
 	info.Layer = audio.layer
 	info.SamplesPerFrame = audio.spf
 	if frames > 0 && audio.sampleRate > 0 {
-		if (size > 0 && uint64(frames) > uint64(size)) || uint64(frames)*uint64(audio.spf)/uint64(audio.sampleRate) > 1e7 {
+		minFrame := uint64(minMPEGFrameSize(audio.lsf, audio.layer, audio.sampleRate))
+		if (size > 0 && uint64(frames) > uint64(size)/minFrame) || uint64(frames)*uint64(audio.spf)/uint64(audio.sampleRate) > 1e7 {
 			frames = 0
 		} else {
 			info.Samples = uint64(frames) * uint64(audio.spf)

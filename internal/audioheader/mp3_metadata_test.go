@@ -3,6 +3,7 @@ package audioheader
 import (
 	"bytes"
 	"encoding/binary"
+	"io"
 	"path/filepath"
 	"testing"
 )
@@ -118,5 +119,98 @@ func TestReadMP3MalformedFramesRemainBounded(t *testing.T) {
 	// Start offset remains preserved
 	if got.StartOffsetSamples != 1152 {
 		t.Errorf("StartOffsetSamples = %d, want 1152", got.StartOffsetSamples)
+	}
+}
+
+type sparseReader struct {
+	data []byte
+	pos  int64
+	size int64
+}
+
+func (s *sparseReader) Read(p []byte) (int, error) {
+	if s.pos >= int64(len(s.data)) {
+		if s.pos >= s.size {
+			return 0, io.EOF
+		}
+		toRead := int(min(int64(len(p)), s.size-s.pos))
+		for i := 0; i < toRead; i++ {
+			p[i] = 0
+		}
+		s.pos += int64(toRead)
+		return toRead, nil
+	}
+	n := copy(p, s.data[s.pos:])
+	s.pos += int64(n)
+	return n, nil
+}
+
+func (s *sparseReader) Seek(offset int64, whence int) (int64, error) {
+	switch whence {
+	case io.SeekStart:
+		s.pos = offset
+	case io.SeekCurrent:
+		s.pos += offset
+	case io.SeekEnd:
+		s.pos = s.size + offset
+	}
+	return s.pos, nil
+}
+
+func TestReadMP3VBRI1251ByteFileAnd1000FramesRejected(t *testing.T) {
+	// A 1251-byte file (3 MPEG-1 frames of 417 bytes) with VBRI claiming 1000 frames and huge bytes.
+	vbri0, _ := buildMPEGFrame(1, 0, 9, 0, 0) // 44100 Hz, 128 kbps, frame size 417 bytes
+	copy(vbri0[36:40], "VBRI")
+	binary.BigEndian.PutUint16(vbri0[40:42], 1) // version 1
+	binary.BigEndian.PutUint16(vbri0[42:44], 1152)
+	binary.BigEndian.PutUint32(vbri0[46:50], 0x7fffffff) // claims ~2 GB in 1251 byte file
+	binary.BigEndian.PutUint32(vbri0[50:54], 1000)       // claims 1000 frames (~26.1 s)
+	f1, _ := buildMPEGFrame(1, 0, 9, 0, 0)
+	f2, _ := buildMPEGFrame(1, 0, 9, 0, 0)
+	stream := append(append(vbri0, f1...), f2...) // exactly 1251 bytes
+
+	got, err := ReadMP3(bytes.NewReader(stream), int64(len(stream)))
+	if err != nil {
+		t.Fatalf("ReadMP3: %v", err)
+	}
+	// The invalid VBRI tag must be rejected, treated like an absent tag.
+	if got.Tag == "VBRI" {
+		t.Errorf("expected VBRI tag to be rejected, got Tag = %q", got.Tag)
+	}
+	if got.Samples != 0 {
+		t.Errorf("got.Samples = %d, want 0", got.Samples)
+	}
+	if got.Duration != 0 {
+		t.Errorf("got.Duration = %f, want 0", got.Duration)
+	}
+	if got.Bitrate != 128 {
+		t.Errorf("got.Bitrate = %d, want 128 (fallback to audio frame bitrate)", got.Bitrate)
+	}
+}
+
+func TestReadMP3Sparse64GiBFileBitrateSameOnARMAndAMD(t *testing.T) {
+	// Build a 4-frame MPEG-1 44100 Hz Xing stream with FRAMES only (no BYTES flag).
+	f0, side := buildMPEGFrame(1, 0, 9, 0, 0)
+	p := 4 + side
+	copy(f0[p:p+4], "Xing")
+	binary.BigEndian.PutUint32(f0[p+4:p+8], 0x01) // FRAMES only
+	binary.BigEndian.PutUint32(f0[p+8:p+12], 4)    // 4 frames
+	f1, _ := buildMPEGFrame(1, 0, 9, 0, 0)
+	f2, _ := buildMPEGFrame(1, 0, 9, 0, 0)
+	f3, _ := buildMPEGFrame(1, 0, 9, 0, 0)
+	stream := append(append(append(f0, f1...), f2...), f3...)
+
+	// Pass a 64 GiB sparse file size stub.
+	const sparseSize = int64(64 << 30) // 64 GiB
+	stub := &sparseReader{data: stream, size: sparseSize}
+
+	got, err := ReadMP3(stub, sparseSize)
+	if err != nil {
+		t.Fatalf("ReadMP3: %v", err)
+	}
+	// The 64 GiB size is incompatible with a 4-frame count (exceeds frames * maxFrameSize).
+	// Bitrate must not overflow or differ between ARM (32-bit int) and AMD (64-bit int).
+	if got.Bitrate != 128 {
+		t.Errorf("got.Bitrate = %d, want 128 (fallback to audio frame bitrate)", got.Bitrate)
 	}
 }
