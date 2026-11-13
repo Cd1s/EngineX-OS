@@ -41,7 +41,7 @@ func StreamSync(args []string) error {
 		home = "/root"
 	}
 	listen := fs.String("listen", ":8080", "touch/LAN HTTP listener")
-	public := fs.String("public-url", "http://sc5000.lan:8080", "public console URL")
+	public := fs.String("public-url", "http://enginex.lan:8080", "public console URL")
 	dbPath := fs.String("database", analyzer.DefaultDatabase, "existing Engine 5.0.4 m.db (back up before use)")
 	downloads := fs.String("downloads", defaultDownloads, "Deemix output root on the same SD volume")
 	base := fs.String("deemix-url", deemixdURL, "local REST bridge URL")

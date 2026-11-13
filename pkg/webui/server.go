@@ -427,9 +427,10 @@ func LoadAccessToken(dir string) (token string, created bool, err error) {
 	return token, true, nil
 }
 
-// qrTarget keeps an explicitly configured public URL; the built-in sc5000.lan default is not one.
+// qrTarget keeps an explicitly configured public URL; the built-in enginex.lan default is not
+// one, nor sc5000.lan, the default before 5.3.0.5 a saved setting may still hold (#234).
 func (s *Server) qrTarget(r *http.Request) string {
-	if u := s.cfg.PublicURL; u != "" && !strings.Contains(u, "sc5000.lan") {
+	if u := s.cfg.PublicURL; u != "" && !strings.Contains(u, "enginex.lan") && !strings.Contains(u, "sc5000.lan") {
 		return u
 	}
 	return consoleURL(r)
@@ -447,14 +448,15 @@ func (s *Server) consoleQR(w http.ResponseWriter, r *http.Request) {
 
 // consoleURL is the console address a phone on the same network can open: the host
 // this browser reached the console by, unless that only works on this machine. Most
-// routers do not resolve sc5000.lan, so a QR code pointing there opened a blank page (#218).
+// routers do not resolve sc5000.lan (enginex.lan since 5.3.0.5), so a QR code pointing there
+// opened a blank page (#218).
 func consoleURL(r *http.Request) string {
 	name, _, err := net.SplitHostPort(r.Host)
 	if err != nil {
 		name = r.Host
 	}
 	host := strings.Trim(name, "[]")
-	if ip := net.ParseIP(host); host == "" || host == "localhost" || host == "sc5000.lan" || (ip != nil && ip.IsLoopback()) {
+	if ip := net.ParseIP(host); host == "" || host == "localhost" || host == "enginex.lan" || host == "sc5000.lan" || (ip != nil && ip.IsLoopback()) {
 		return "http://" + lanHost() + ":8080"
 	}
 	proto, _, _ := strings.Cut(r.Header.Get("X-Forwarded-Proto"), ",")

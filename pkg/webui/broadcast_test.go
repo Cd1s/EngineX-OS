@@ -667,7 +667,7 @@ func TestLANHostPrefersWired(t *testing.T) {
 	if got := pickLANHost([]lanAddr{{"wlan0", "10.0.0.7", false}}); got != "10.0.0.7" {
 		t.Fatalf("no link reported: %s, want the only address", got)
 	}
-	if got := pickLANHost(nil); got != "sc5000.lan" {
+	if got := pickLANHost(nil); got != "enginex.lan" {
 		t.Fatalf("no address: %s, want the name", got)
 	}
 }

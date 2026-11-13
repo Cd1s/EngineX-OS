@@ -118,7 +118,7 @@ func TestTidalGatewayLoginAndHint(t *testing.T) {
 			t.Fatal(err)
 		}
 		resp.Body.Close()
-		if got := titles(); len(got) != 1 || !strings.Contains(got[0], lanHost()+":8080") || strings.Contains(got[0], "sc5000.lan") {
+		if got := titles(); len(got) != 1 || !strings.Contains(got[0], lanHost()+":8080") || strings.Contains(got[0], "enginex.lan") {
 			t.Fatalf("%s titles=%q", scope, got)
 		}
 	}

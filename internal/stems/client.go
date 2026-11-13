@@ -16,7 +16,7 @@ import (
 
 const (
 	// DefaultRelayURL is empty: operators configure their own self-hosted relay
-	// in deemix-config.json (via http://sc5000.lan:8080) or ENGINEX_STEMS_URL.
+	// in deemix-config.json (via http://enginex.lan:8080) or ENGINEX_STEMS_URL.
 	DefaultRelayURL = ""
 	// DefaultRelayConfig is stream-sync's relay settings file on the deck.
 	DefaultRelayConfig = "/data/enginex/state/deemix-config.json"
