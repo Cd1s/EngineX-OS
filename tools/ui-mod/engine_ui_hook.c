@@ -3632,16 +3632,23 @@ int az01_apply_image(const char *path, int flags) {
         fprintf(stderr, "engine-ui-hook: intercepted az01_apply_image with an EngineX data bundle image (%s)\n", path);
         const char *test_root = getenv("ENGINEX_TEST_DATA_ROOT");
         int testing = test_root && *test_root;
-        char custom_dir[PATH_MAX] = "";
-        if (testing) snprintf(custom_dir, sizeof custom_dir, "%s/enginex", test_root);
+        char custom_dir[PATH_MAX] = "", leave[PATH_MAX] = "/run/enginex/leave.sh";
+        if (testing) {
+            snprintf(custom_dir, sizeof custom_dir, "%s/enginex", test_root);
+            snprintf(leave, sizeof leave, "%s/run/enginex/leave.sh", test_root);
+        }
         // Unpacked next to the install (the /tmp tmpfs is small) and installed by the bundle's own
         // install.sh, so an older install.sh that does not know "install.sh <img>" is not needed.
+        // Then, whatever release it was, this release's leave step (#234) takes its own units out
+        // of /run before the reboot below: an older release then never runs next to them, and a
+        // newer one starts clean. Only after a good install: a failed one leaves this release as it is.
         static const char script[] =
             "set -e; d=\"${2:-" ENGINEX_DATA_DIR "}\"; "
             "[ -z \"$2\" ] || export ENGINEX_CUSTOM=\"$d\" ENGINEX_ALSA_OVERLAY=\"$d/alsa-conf.d\" SC5000_CUSTOM=\"$d\" SC5000_ALSA_OVERLAY=\"$d/alsa-conf.d\"; "
             "mkdir -p \"$d\"; w=$(mktemp -d \"$d/.ota-img.XXXXXX\"); trap 'rm -rf \"$w\"' 0; "
-            "tail -c +129 \"$1\" | tar -xzf - -C \"$w\"; sh \"$w\"/*/install.sh";
-        char *const argv[] = {"sh", "-c", (char *)script, "sh", (char *)path, custom_dir, NULL};
+            "tail -c +129 \"$1\" | tar -xzf - -C \"$w\"; sh \"$w\"/*/install.sh; "
+            "[ ! -f \"$3\" ] || sh \"$3\" --no-reboot || :";
+        char *const argv[] = {"sh", "-c", (char *)script, "sh", (char *)path, custom_dir, leave, NULL};
         if (run_wait("/bin/sh", argv) != 0) return -1;
         if (flags & 1) unlink(path);
         if (!testing) enginex_reboot();

@@ -145,22 +145,28 @@ def sub(old, new):
 sub("/run/systemd/system/engine.service.d", "@DROPIN@")
 sub("/run/systemd/system/", f"{tmp}/units/")
 sub("@DROPIN@", dropin_dir)
-sub("Wants=enginex-stream-sync.service enginex-rb-bridge.service enginex-sc5000-deemixd.service engine-guardian.service\n", "")
+sub("Wants=enginex-stream-sync.service enginex-rb-bridge.service enginex-deemixd.service engine-guardian.service\n", "")
 sub("engine-ui-guard service /usr/Engine/Scripts/runengine",
     f"engine-ui-guard service {tmp}/mock-runengine.sh {tmp} {tmp}/new-activator-wrapper.sh")
 sub("/usr/Engine/Scripts/engine", f"{tmp}/no-vendor-engine-script")
 sub("ExecStartPre=/bin/mkdir -p -m 0700 /tmp/enginex-engine-home\n",
     f"Environment=ENGINEX_CUSTOM={tmp}/data/enginex ENGINEX_CONFIG_DIR={tmp}/data/.config ENGINEX_ZONEINFO_DIR={tmp}/zoneinfo ENGINEX_PRODUCT_CODE_FILE={tmp}/product-code ENGINEX_TZ_NEWER_MARKER={tmp}/tz-newer\n")
-sub("EnvironmentFile=-/data/sc5000-custom/ui-scale.env\n", "")
+sub("EnvironmentFile=-/data/enginex/ui-scale.env\n", "")
+# #234: the cleanup of an older release's /run names stops a host unit and removes host /run
+# files; it is covered by test_data_bundle.py with stand-ins, never here.
+sub("\nleave_old_names\n", "\n: # leave_old_names: test_data_bundle.py covers it\n")
+# The leave step is only written (to the work dir below), never run here; its reboot line goes.
+sub('[ -z "$reboot" ] || { sync; systemctl reboot || reboot; }', ":")
 sub("$bundle_dir/boot-activate.sh --restore-tz", f"{dst} --restore-tz")
 sub("/run/systemd/timesyncd.conf.d/10-enginex-ntp.conf", f"{tmp}/ntp.conf")
 sub("/run/systemd/timesyncd.conf.d", f"{tmp}/ntp.d")
 sub("/run/enginex", f"{tmp}/run-enginex")
 sub("accounts=/data/StreamingAccounts.json", f"accounts={tmp}/data/StreamingAccounts.json")
 sub("[ -d /data ]", f"[ -d {tmp}/data ]")
-sub("systemctl restart --no-block enginex-stream-sync.service enginex-rb-bridge.service enginex-sc5000-deemixd.service engine-guardian.service || :", ":")
+sub("systemctl restart --no-block enginex-stream-sync.service enginex-rb-bridge.service enginex-deemixd.service engine-guardian.service || :", ":")
 sub('[ "$timesyncd_changed" = 0 ] || systemctl restart --no-block systemd-timesyncd.service || :', ":")
-sub("pkill -x sc5000-suite 2>/dev/null || :", ":")
+sub("pkill -x enginex-suite 2>/dev/null || :", ":")
+sub("pkill -x sc5000-suite 2>/dev/null || : # the suite's name before 5.3.0.5 (#234)", ":")
 sub("engine.service", unit)
 # What may still reach the host's systemd: the reload, the restart of our unit, and two
 # branches this fixture never enters (no SSH key and no edisksd hook in the bundle).

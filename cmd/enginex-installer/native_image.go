@@ -17,6 +17,7 @@ import (
 
 type bundleInfo struct {
 	Path, Top, Version string
+	Tag string
 	TarGz              []byte
 	bundle             *azimg.Bundle
 }
@@ -45,7 +46,7 @@ func readBundle(ctx context.Context, path string) (*bundleInfo, error) {
 	if im.Format() == azimg.FormatGen2Image {
 		payload = raw[gen2ImgHeader:]
 	}
-	return &bundleInfo{Path: path, Top: b.Top(), Version: b.Version(), TarGz: payload, bundle: b}, nil
+	return &bundleInfo{Path: path, Top: b.Top(), Version: b.Version(), Tag: b.ReleaseTag(), TarGz: payload, bundle: b}, nil
 }
 
 // buildImage prepares a private output; the caller removes its directory after use.
