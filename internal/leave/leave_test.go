@@ -147,7 +147,7 @@ func diff(a, b map[string]string) string {
 func TestLeaveInstallsGenuine5302AndHandsBackItsLayout(t *testing.T) {
 	d, root := newDeck(t)
 	target := legacyBundle(t, "5.3.0.2")
-	if older, err := d.Older(target); err != nil || !older {
+	if older, _, err := d.Older(target); err != nil || !older {
 		t.Fatalf("5.3.0.2 under 5.3.0.5: older=%v err=%v", older, err)
 	}
 	if err := d.Install(target); err != nil {

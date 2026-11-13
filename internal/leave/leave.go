@@ -116,21 +116,21 @@ func (d Deck) live() (string, error) {
 	return "", errors.New("no EngineX OS data directory in /data")
 }
 
-// Older reports whether the bundle unpacked in target is an older release than the installed one.
-func (d Deck) Older(target string) (bool, error) {
+// Older reports whether target is older than the installed release, and its version.
+func (d Deck) Older(target string) (bool, string, error) {
 	live, err := d.live()
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 	var versions [4]string
 	for i, p := range []string{filepath.Join(live, "version.txt"), filepath.Join(live, "bundle/release-tag"),
 		filepath.Join(target, "version.txt"), filepath.Join(target, "release-tag")} {
 		versions[i], err = readLine(p)
 		if err != nil {
-			return false, err
+			return false, "", err
 		}
 	}
-	return release.Older(versions[0], versions[1], versions[2], versions[3]), nil
+	return release.Older(versions[0], versions[1], versions[2], versions[3]), versions[2], nil
 }
 
 func writeSync(p string, b []byte) error {
@@ -152,11 +152,7 @@ func writeSync(p string, b []byte) error {
 	if err != nil {
 		return errors.Join(err, missingOK(remove(tmp)))
 	}
-	return syncDir(filepath.Dir(p))
-}
-
-func syncDir(p string) error {
-	return syncPath(p)
+	return syncPath(filepath.Dir(p))
 }
 
 // syncExisting syncs the paths that are there: a journal half removed has no stage. Only a path
@@ -214,7 +210,7 @@ func relink(p, target string) error {
 	if err := os.Rename(tmp, p); err != nil {
 		return errors.Join(err, missingOK(remove(tmp)))
 	}
-	return syncDir(filepath.Dir(p))
+	return syncPath(filepath.Dir(p))
 }
 
 // syncPath makes one file's contents or one directory's entries durable; tests record it.
@@ -292,6 +288,10 @@ func (d Deck) Install(target string) error {
 	if err != nil {
 		return err
 	}
+	return d.install(target, targetVersion)
+}
+
+func (d Deck) install(target, targetVersion string) error {
 	unlock, err := d.lock(true)
 	if err != nil {
 		return err
@@ -371,16 +371,13 @@ func (d Deck) Install(target string) error {
 			return fail(err)
 		}
 	}
-	if legacy && live == d.data("enginex") {
+	layout := legacy && live == d.data("enginex")
+	if layout {
 		if err := writeSync(filepath.Join(journal, "layout"), nil); err != nil {
 			return fail(err)
 		}
 	}
 	// Read the complete commit state before publishing the id or changing live files.
-	layout, err := exists(filepath.Join(journal, "layout"))
-	if err != nil {
-		return fail(err)
-	}
 	linkPresent := false
 	if layout {
 		linkPresent, err = exists(d.data("sc5000-custom"))
@@ -531,6 +528,7 @@ func withoutDest(env []string) []string {
 // only clears what is left. boot-activate.sh runs it at every boot, before anything else. An
 // install that is running right now is left alone.
 func (d Deck) Recover() error {
+	// With no journal, skip opening a lock file; recover checks again while holding the lock.
 	if ok, err := realDir(d.data(journalName)); err != nil || !ok {
 		return err
 	}
@@ -786,12 +784,7 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		return 0
 	case len(args) == 2 && args[0] == "install":
 		target := args[1]
-		version, err := readLine(filepath.Join(target, "version.txt"))
-		if err != nil {
-			fmt.Fprintln(stderr, "leave:", err)
-			return 1
-		}
-		older, err := d.Older(target)
+		older, version, err := d.Older(target)
 		if err != nil {
 			fmt.Fprintln(stderr, "leave:", err)
 			return 1
@@ -805,7 +798,7 @@ func Main(args []string, stdout, stderr io.Writer) int {
 			}
 			return 0
 		}
-		if err := d.Install(target); err != nil {
+		if err := d.install(target, version); err != nil {
 			fmt.Fprintln(stderr, "leave:", err)
 			return 1
 		}
