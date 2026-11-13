@@ -493,7 +493,7 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 			}
 		}
 		fast := opts.Fast
-		if !fast && (preparedTrack.late || (previous != hash && past() && (read > 0 || !inTime))) {
+		if !fast && (preparedTrack.late || (previous != hash && past() && (read > 0 || (!inTime && !opts.Resume)))) {
 			// A "fast:" fingerprint makes the next full import read this track.
 			fast, files, art, hash = true, nil, nil, "fast:"+t.RecordHash
 			// A completed v2 row keeps its fingerprint and deck edits on re-export.

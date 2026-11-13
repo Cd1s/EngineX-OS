@@ -3,6 +3,7 @@ package compat
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -16,9 +17,11 @@ import (
 )
 
 type Resolver struct {
-	root string
-	mu   sync.Mutex
-	dirs map[string]map[string][]string
+	root     string
+	mu       sync.Mutex
+	dirs     map[string]map[string][]string
+	resolved map[string]string
+	missing  map[string]bool
 }
 
 func NewResolver(root string) (*Resolver, error) {
@@ -30,7 +33,12 @@ func NewResolver(root string) (*Resolver, error) {
 	if e != nil {
 		return nil, e
 	}
-	return &Resolver{root: r, dirs: map[string]map[string][]string{}}, nil
+	return &Resolver{
+		root:     r,
+		dirs:     map[string]map[string][]string{},
+		resolved: map[string]string{},
+		missing:  map[string]bool{},
+	}, nil
 }
 
 func canonical(s string) string { return norm.NFC.String(cases.Fold().String(norm.NFC.String(s))) }
@@ -63,12 +71,28 @@ func (r *Resolver) Resolve(s string) (string, error) {
 // ResolveContext checks cancellation between directory lookups. Individual
 // filesystem calls cannot be interrupted, but a canceled import stops walking.
 func (r *Resolver) ResolveContext(ctx context.Context, s string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	rel, e := CleanRelative(s)
 	if e != nil {
 		return "", e
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if cached, ok := r.resolved[rel]; ok {
+		st, err := os.Lstat(filepath.Join(r.root, cached))
+		if err == nil && st.Mode()&os.ModeSymlink == 0 {
+			return cached, nil
+		}
+		delete(r.resolved, rel)
+	}
+	if r.missing[rel] {
+		return "", fmt.Errorf("resolve %q: %w", s, fs.ErrNotExist)
+	}
 	cur := ""
 	for _, component := range strings.Split(rel, "/") {
 		if err := ctx.Err(); err != nil {
@@ -111,6 +135,7 @@ func (r *Resolver) ResolveContext(ctx context.Context, s string) (string, error)
 			}
 		}
 		if len(matches) == 0 {
+			r.missing[rel] = true
 			return "", fmt.Errorf("resolve %q: %w", s, fs.ErrNotExist)
 		}
 		if len(matches) != 1 {
@@ -119,13 +144,18 @@ func (r *Resolver) ResolveContext(ctx context.Context, s string) (string, error)
 		cur = filepath.Join(cur, matches[0])
 		st, err := os.Lstat(filepath.Join(r.root, cur))
 		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				r.missing[rel] = true
+			}
 			return "", err
 		}
 		if st.Mode()&os.ModeSymlink != 0 {
 			return "", fmt.Errorf("symlink refused: %s", cur)
 		}
 	}
-	return filepath.ToSlash(cur), nil
+	out := filepath.ToSlash(cur)
+	r.resolved[rel] = out
+	return out, nil
 }
 
 func (r *Resolver) FullPath(rel string) string { return filepath.Join(r.root, filepath.FromSlash(rel)) }
