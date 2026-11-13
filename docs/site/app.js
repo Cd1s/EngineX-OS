@@ -81,7 +81,7 @@
   function setView(v, sub) {
     document.body.dataset.view = v;
     if (v !== "mods") $$("dialog[open]").forEach((d) => d.close());
-    document.title = v === "home" ? "EngineX OS" : v === "mods" ? UI[lang].tMods + " · EngineX OS" : UI[lang].heroT;
+    document.title = v === "home" ? "EngineX OS — Custom OS for Denon DJ, Numark & Rane Standalone Units" : v === "mods" ? UI[lang].tMods + " · EngineX OS" : UI[lang].heroT + " · EngineX OS";
     if (v === "mods" && window.EXMods) window.EXMods.render(lang, sub);
     const h = location.hash;
     const activeTab = v === "home" ? "home" : v === "mods" ? "mods" : h.startsWith("#start-downloads") ? "dl" : "docs";
