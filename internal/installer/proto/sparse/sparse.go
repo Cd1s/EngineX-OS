@@ -653,6 +653,7 @@ func scanRawToSpecs(src io.ReaderAt, size int64, blkSize uint32, padLast bool) (
 		bufCap = blk
 	}
 	buf := make([]byte, bufCap)
+	zeroBlock := make([]byte, blk)
 
 	var specs []chunkSpec
 	var off int64
@@ -676,7 +677,14 @@ func scanRawToSpecs(src io.ReaderAt, size int64, blkSize uint32, padLast bool) (
 			if srcOff+srcLen > size {
 				srcLen = size - srcOff
 			}
-			if pattern, ok := uniform4BytePattern(blockBytes); ok {
+			var pattern [4]byte
+			uniform := false
+			if bytes.Equal(blockBytes, zeroBlock) {
+				uniform = true
+			} else {
+				pattern, uniform = uniform4BytePattern(blockBytes)
+			}
+			if uniform {
 				if n := len(specs); n > 0 && specs[n-1].typ == ChunkTypeFill && specs[n-1].fill == pattern {
 					specs[n-1].blocks++
 				} else {
@@ -711,6 +719,16 @@ func uniform4BytePattern(b []byte) ([4]byte, bool) {
 		return pat, false
 	}
 	copy(pat[:], b[:4])
+	if len(b) >= 8 && len(b)%8 == 0 {
+		p32 := binary.LittleEndian.Uint32(pat[:])
+		p64 := uint64(p32) | (uint64(p32) << 32)
+		for i := 0; i < len(b); i += 8 {
+			if binary.LittleEndian.Uint64(b[i:i+8]) != p64 {
+				return pat, false
+			}
+		}
+		return pat, true
+	}
 	for i := 4; i < len(b); i += 4 {
 		if b[i] != pat[0] || b[i+1] != pat[1] || b[i+2] != pat[2] || b[i+3] != pat[3] {
 			return pat, false
