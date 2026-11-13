@@ -3,12 +3,53 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>EngineX OS</title>
-<meta name="description" content="EngineX OS: enhanced system and user guide for 16 Denon DJ / Numark / Rane standalone units · 使用文档 · 使用文件">
+<title>EngineX OS — Custom OS for Denon DJ, Numark & Rane Standalone Units</title>
+<meta name="description" content="EngineX OS is an open-source custom system on Engine OS 5.3.0+ for 16 Denon DJ, Numark and Rane standalone units (SC5000, SC6000, PRIME 4/4+/G2, PRIME GO/GO+, SC LIVE 4/2, Mixstream Pro, SYSTEM ONE): real-time 4-part Stems, native Spotify/Deezer/SoundCloud/Beatport streaming, 4-deck waveforms, Rekordbox 7 USB import, Mod Hub and 21 DSP audio guards.">
+<meta name="keywords" content="EngineX OS, Engine OS custom firmware, Denon DJ SC5000, SC6000, PRIME 4, PRIME 4+, PRIME 4 G2, PRIME GO, SC LIVE 4, Numark Mixstream Pro, Rane SYSTEM ONE, standalone Stems, Spotify DJ, Rekordbox 7 Engine DJ, DJ Mod Hub">
+<meta name="robots" content="index,follow,max-image-preview:large">
+<meta name="theme-color" content="#00e5a3">
 <link rel="canonical" href="https://enginexdj.com/">
+<link rel="alternate" hreflang="x-default" href="https://enginexdj.com/">
+<link rel="alternate" hreflang="en" href="https://enginexdj.com/?lang=e">
+<link rel="alternate" hreflang="zh-CN" href="https://enginexdj.com/?lang=s">
+<link rel="alternate" hreflang="zh-TW" href="https://enginexdj.com/?lang=t">
+<link rel="icon" type="image/svg+xml" href="site/favicon.svg">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="EngineX OS">
+<meta property="og:title" content="EngineX OS — Custom OS for 16 Denon DJ, Numark & Rane Standalone Units">
+<meta property="og:description" content="Real-time 4-part Stems, native Spotify/Deezer/SoundCloud/Beatport streaming, 4-deck waveforms, Rekordbox 7 USB bridge, 21 audio guards and open-source Mod Hub for 16 standalone DJ units.">
+<meta property="og:url" content="https://enginexdj.com/">
+<meta property="og:image" content="https://enginexdj.com/assets/screenshots/en/12-4deck-shadow.png">
+<meta property="og:image:width" content="1280">
+<meta property="og:image:height" content="800">
+<meta property="og:image:alt" content="EngineX OS 4-deck waveforms and standalone DJ interface">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="EngineX OS — Custom OS for Denon DJ, Numark & Rane">
+<meta name="twitter:description" content="Open-source custom Engine OS 5.3.0+ with 4-part Stems, native Spotify streaming, Rekordbox 7 import and Mod Hub for 16 standalone DJ devices.">
+<meta name="twitter:image" content="https://enginexdj.com/assets/screenshots/en/12-4deck-shadow.png">
 <meta name="color-scheme" content="light dark">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "EngineX OS",
+  "operatingSystem": "Embedded Linux (Engine OS 5.3.0+)",
+  "applicationCategory": "MultimediaApplication",
+  "softwareVersion": "5.3.0.4",
+  "url": "https://enginexdj.com/",
+  "downloadUrl": "https://github.com/Cd1s/EngineX-OS/releases/latest",
+  "license": "https://opensource.org/licenses/MIT",
+  "screenshot": "https://enginexdj.com/assets/screenshots/en/12-4deck-shadow.png",
+  "description": "Open-source custom system built on Engine OS 5.3.0+ for 16 Denon DJ, Numark and Rane standalone DJ units with real-time 4-part Stems, native streaming, 4-deck waveforms, Rekordbox USB bridge and Mod Hub.",
+  "offers": {
+    "@type": "Offer",
+    "price": "0",
+    "priceCurrency": "USD"
+  }
+}
+</script>
 <script>/* 先定主题再出样式，避免闪烁 */document.documentElement.dataset.theme=localStorage.getItem("enginex-docs-theme")||(matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light")</script>
-<link rel="stylesheet" href="site/style.css?v=33">
+<link rel="stylesheet" href="site/style.css?v=34">
 </head>
 <body>
 <header class="top">
@@ -38,9 +79,20 @@
   <aside class="toc" id="toc"></aside>
 </div>
 <div id="lb"><img alt=""></div>
-<noscript><p style="padding:80px 20px">This documentation needs JavaScript. See README.md on GitHub.</p></noscript>
-<script src="site/content.js?v=33"></script>
-<script src="site/mods.js?v=33"></script>
-<script src="site/app.js?v=33"></script>
+<noscript>
+  <main style="max-width:900px;margin:40px auto;padding:0 20px;font-family:system-ui,sans-serif;line-height:1.6">
+    <h1>EngineX OS — Custom System for 16 Denon DJ, Numark &amp; Rane Standalone Units</h1>
+    <p>EngineX OS is an open-source custom system built on official Engine OS 5.3.0+ with real-time 4-part Stems, native Spotify / Deezer / SoundCloud / Beatport streaming, 4-deck synced waveforms, Rekordbox 7 / OneLibrary USB import, 21 DSP audio guards, and an open-source Mod Hub.</p>
+    <h2>Supported Standalone DJ Units (16 Models)</h2>
+    <ul>
+      <li>Gen 1 (direct USB *-Update.img): Denon DJ SC5000 Prime, SC5000M Prime, SC6000 Prime, SC6000M Prime, PRIME 4, PRIME 2, PRIME GO, Numark Mixstream Pro</li>
+      <li>Gen 2 (one-click EngineX-Installer + *-Update.img / OTA): Denon DJ SC LIVE 4, SC LIVE 2, PRIME 4+, PRIME GO+, Numark Mixstream Pro+, Mixstream Pro Go, Denon DJ PRIME 4 G2, Rane SYSTEM ONE</li>
+    </ul>
+    <p><a href="https://github.com/Cd1s/EngineX-OS">GitHub Repository</a> · <a href="https://github.com/Cd1s/EngineX-OS/releases/latest">Latest Downloads</a> · <a href="https://github.com/Cd1s/EngineX-OS/issues">Issues &amp; Mod Hub</a></p>
+  </main>
+</noscript>
+<script src="site/content.js?v=34"></script>
+<script src="site/mods.js?v=34"></script>
+<script src="site/app.js?v=34"></script>
 </body>
 </html>
