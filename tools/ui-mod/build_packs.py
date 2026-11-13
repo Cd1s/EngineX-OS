@@ -507,13 +507,6 @@ SERVICES_MAIN = """
 		function onEnabledChanged() {
 			if (!root.scUiLoaded || !root.scHasMixer || !root.scTransitionFxView) return
 			const on = !!root.scTransitionFxView.enabled
-			if (on) {
-				const v = root.scTransitionFxView
-				if (v.triggerSource === 0 && v.triggerSourceOptions && v.triggerSourceOptions.length > 1) {
-					const idx = v.triggerSourceOptions.length > 2 ? 2 : v.triggerSourceOptions.length - 1
-					v.setTriggerSource(String(v.triggerSourceOptions[idx]))
-				}
-			}
 			if (on !== root.scUpfaderEcho) {
 				root.scUpfaderEcho = on
 				root.scCall("upfaderEcho=" + (on ? "1" : "0"))
@@ -3136,10 +3129,8 @@ SERVICES_MAIN = """
 		const prevUpfaderEcho = scUpfaderEcho
 		scUpfaderEcho = !!v.upfaderEcho
 		if (scHasMixer && scTransitionFxView && (!scUiLoaded || scUpfaderEcho !== prevUpfaderEcho)) {
-			if (!!scTransitionFxView.enabled !== scUpfaderEcho) {
-				if (typeof scSetTransitionFx === "function") scSetTransitionFx(scTransitionFxView, scUpfaderEcho, false)
-				else scTransitionFxView.enabled = scUpfaderEcho
-			}
+			if (!!scTransitionFxView.enabled !== scUpfaderEcho)
+				scTransitionFxView.enabled = scUpfaderEcho
 		}
 		if (typeof v === "string") scParseSettingsConf(v)
 		else if (v) {

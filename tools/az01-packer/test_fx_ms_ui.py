@@ -112,7 +112,7 @@ assert.equal(scFxTimeMode,'beats'); assert.equal(scFxTimeMs,500);
         stems_handler = re.search(r"onScStemsEqModeChanged:\s*\{([\s\S]*?)\n\t\}", bp.SERVICES_MAIN).group(1)
         has_stems_m = re.search(r"onScHasStemsEqChanged:\s*\{([\s\S]*?)\n\t\}", bp.SERVICES_MAIN)
         has_stems_handler = has_stems_m.group(1) if has_stems_m else ""
-        helpers = "\n".join(function(bp.SERVICES_MAIN, n) for n in ("scFxMsInteger", "scFxMsApply", "scParseSettingsConf", "scSyncStemsEqChannel", "scWatchStemsEq", "scApply"))
+        helpers = "\n".join(function(bp.SERVICES_MAIN, n) for n in ("scFxMsInteger", "scFxMsApply", "scParseSettingsConf", "scSyncStemsEqChannel", "scWatchStemsEq", "scApply", "scSetTransitionFx", "onEnabledChanged"))
         prop_defs = "\n".join(
             f"Object.defineProperty(root, {k!r}, {{get() {{ return ({v}); }}, configurable: true}});"
             for k, v in props.items()
@@ -126,7 +126,10 @@ const assert = require('assert');
 globalThis.root = globalThis;
 globalThis.Config = {{device: {{name: 'JP07', isPlayer: true}}, audio: {{hasStemsLevel: true, fx: {{hasDJFx: false, hasNHFx: false}}}}}};
 const stripModes = {{1: {{index: 0}}, 2: {{index: 0}}, 3: {{index: 0}}, 4: {{index: 0}}}};
-const transitionFx = {{enabled: false}};
+const transitionFx = {{enabled: false, triggerSource: 0,
+    triggerSourceOptions: ['Crossfader', 'ChannelFaders', 'Both'],
+    setTriggerSource(value) {{ this.triggerSource = this.triggerSourceOptions.indexOf(value); }}
+}};
 globalThis.PlanckGUI = {{views: {{transitionFx}}}};
 globalThis.Planck = {{getProperty: () => ({{translator: null}})}};
 root.scTr = p => {{
@@ -263,6 +266,30 @@ for (const [board, hasStems] of [['JC16', true], ['JP11', true], ['NH08', true],
     assert.equal(visible['PX Delay Time Mode'](), true, board + ' PX Delay shown on dub_echo');
     assert.equal(visible['PX Delay Time (ms)'](), true, board + ' PX Delay ms shown on dub_echo');
 }}
+
+// #258: stock UI and WebUI enabled linkage preserve every saved trigger source.
+const echoCalls = [];
+root.scCall = q => echoCalls.push(q);
+for (const source of [0, 1, 2]) {{
+    resetUnit('JC16');
+    transitionFx.triggerSource = source;
+    scApply({{upfaderEcho: true}});
+    assert.equal(transitionFx.enabled, true);
+    assert.equal(transitionFx.triggerSource, source, 'WebUI keeps trigger source');
+    for (const enabled of [false, true]) {{
+        transitionFx.enabled = enabled;
+        onEnabledChanged();
+        assert.equal(scUpfaderEcho, enabled);
+        assert.equal(transitionFx.triggerSource, source, 'stock UI keeps trigger source');
+        const count = echoCalls.length;
+        onEnabledChanged();
+        assert.equal(echoCalls.length, count, 'unchanged enabled state does not write');
+    }}
+    scApply({{upfaderEcho: false}});
+    assert.equal(transitionFx.enabled, false);
+    assert.equal(transitionFx.triggerSource, source);
+}}
+assert.deepEqual(echoCalls, Array(3).fill(['upfaderEcho=0', 'upfaderEcho=1']).flat());
 
 // 3. PRIME 4 (JC11, Engine 5.3.0) with native FX selector:
 resetUnit('JC11', {{isPlayer: false, hasStemsLevel: true, hasDJFx: true}});
