@@ -25,7 +25,8 @@
 #     (no verification) still installs a release that carries the signature files; the
 #     new image installs a correctly signed one (download, verify, az01-update --file)
 #     and refuses (in boot2, the phase that runs the new image's online update) an unsigned one, one signed by another key, one whose list was edited
-#     after signing, and one whose image differs from the signed SHA-256;
+#     after signing, one whose image differs from the signed SHA-256, and a genuine signed
+#     list of one revision shown under the tag of another (the list names its release tag);
 #  4. second boot after power cut on the same /data and internal Engine library
 #     (boot 2, #140): verifies running-sentinel dirty QML cache purge without false
 #     safe-mode, persisted settings/SSH key/library, full boot splash dismissal +
@@ -66,16 +67,17 @@ unit_exec() { # ExecStart of a unit as the image ships it (last one wins)
 # found by its base64 body (exactly once per embedded key, else this fails: the image has no key,
 # or not the one the checkout lists), every other byte stays as shipped. sc5000-suite-exec unpacks
 # the same archive on first start and keeps the result while the archive's hash is unchanged.
-patch_release_key() {
+patch_release_key() { # [lenient]: every listed key (new image) / at least one of them (previous release)
     local bin=$W/data/sc5000-custom/bin archive=$R/usr/share/sc5000-custom/sc5000-suite.xz
     [ -s "$archive" ] || { echo "no $archive"; return 1; }
     mkdir -p "$bin"
     xz -dc "$archive" > "$bin/sc5000-suite.swap" || return 1
-    python3 -I - "$bin/sc5000-suite.swap" "$W/signing/embedded.txt" "$SIGN_BODY" <<'PY' || return 1
+    python3 -I - "$bin/sc5000-suite.swap" "$W/signing/embedded.txt" "$SIGN_BODY" "${1:-strict}" <<'PY' || return 1
 import sys
-path, listing, new = sys.argv[1:4]
+path, listing, new, mode = sys.argv[1:5]
 data = open(path, 'rb').read()
 new = new.encode()
+swapped = 0
 for line in open(listing):
     if not line.strip():
         continue
@@ -83,14 +85,26 @@ for line in open(listing):
     if len(body) != len(new):
         sys.exit('key body lengths differ')
     n = data.count(body)
+    if n == 0 and mode == 'lenient':
+        continue  # a key this older release does not carry (a rotation added it later)
     if n != 1:
         sys.exit('the embedded release key is in the binary %d times, want 1' % n)
     data = data.replace(body, new)
+    swapped += 1
+if not swapped:
+    sys.exit('none of the listed release keys is in the binary')
 open(path, 'wb').write(data)
 PY
     chmod 755 "$bin/sc5000-suite.swap"
     mv -f "$bin/sc5000-suite.swap" "$bin/sc5000-suite"
     sha256sum < "$archive" | cut -d' ' -f1 > "$bin/sc5000-suite.id"
+}
+
+# Does the previous release verify update signatures (5.3.0.5 and later)? Then its own updater is
+# the one the gate drives, with the sandbox key; otherwise it is the stock updater (UpdateFromUrl).
+# The asset name of the signature is in the binaries that verify it, and in no older one.
+old_verifies_signatures() {
+    xz -dc "$R/usr/share/sc5000-custom/sc5000-suite.xz" 2>/dev/null | grep -aq 'SHA256SUMS.txt.sig'
 }
 
 # A deck refuses an update that does not verify: say why, install nothing (#239).
@@ -114,6 +128,7 @@ refusal() { # <suffix of the mock repo / release> <message the deck shows>
 phase() {
     local name=$1 R=$W/$1 v
     [ "$name" != boot2 ] || R=$W/new
+    local legacy_ota=0
     mount --make-rprivate /
     for d in tmp run dev sys media; do mount -t tmpfs tmpfs "$R/$d"; done
     if [ -d "$R/var/volatile" ]; then
@@ -212,7 +227,16 @@ SH
     printf 'f\n' > "$R/proc/irq/41/smp_affinity"
     printf '0-3\n' > "$R/proc/irq/41/smp_affinity_list"
 
-    [ "$name" = old ] || check "$name: the suite carries the release key (swapped for the throwaway key in this sandbox)" patch_release_key
+    legacy_ota=0  # the previous release hands the URL to the stock updater (no signature check)
+    if [ "$name" != old ]; then
+        check "$name: the suite carries the release key (swapped for the throwaway key in this sandbox)" patch_release_key
+    elif old_verifies_signatures; then
+        note "old: the previous release verifies update signatures: its signed updater is driven, with the sandbox key"
+        check "old: the suite carries a release key (swapped for the throwaway key in this sandbox)" patch_release_key lenient
+    else
+        legacy_ota=1
+        note "old: the previous release predates signed updates: it hands the URL to the stock updater"
+    fi
     mkdir -p "$R/run/dbus"
     chroot "$R" /usr/bin/dbus-daemon --system --fork --nopidfile >> "$W/$name-boot.log" 2>&1 || chroot "$R" /usr/bin/dbus-daemon --system --fork
     declare -A pid
@@ -432,6 +456,7 @@ SH
         refusal badsig 'update refused: the release signature is not valid'
         refusal edited 'update refused: the release signature is not valid'
         refusal tampered 'update refused: the file does not match the signed checksum'
+        refusal r3 'update refused: the signature is for a different release'
         rm -f "$W/mock/corrupt-Update.img"
         curl -sf http://127.0.0.1:8080/v1/sc5000/update > "$W/$name-update.json" || :
         check "$name: after the refusals the signed $tag is offered again" json "$W/$name-update.json" \
@@ -440,7 +465,7 @@ SH
     : > "$R/tmp/gate-shim.log"
     : > "$R/tmp/gate-az01.log"
     curl -sf "http://127.0.0.1:8080/v1/sc5000/update?apply=1" > "$W/$name-apply.json" || :
-    if [ "$name" = old ]; then
+    if [ "$legacy_ota" = 1 ]; then
         check "$name: Engine quit with UpdateFromUrl" wait_for 120 grep -aq "Starting update from url: https://github.com/Cd1s/EngineX-OS/releases/download/$tag/" "$W/$name-engine.log"
         check "$name: the engine script handed the URL to the updater" wait_for 60 grep -qF "SHIM /usr/bin/planck-remote-screen --update https://github.com/Cd1s/EngineX-OS/releases/download/$tag/$asset" "$R/tmp/gate-shim.log"
         # libaz01-prog only starts "Applying" after the image verified; flashing itself
@@ -451,6 +476,7 @@ SH
     else
         # From 5.3.0.5 the deck verifies the signature, downloads the file itself, compares its
         # SHA-256 with the signed list and only then runs az01-update on the staged copy (#239).
+        # The previous release takes this path too once it is a 5.3.0.5 or later.
         check "$name: the signed update was verified, downloaded and handed to az01-update --file" \
             wait_for "$UPDATE_TIMEOUT" grep -qF "SHIM az01-update --file /data/az01-update.img" "$R/tmp/gate-shim.log"
         check "$name: the engine was not told to quit for the stock updater (no UpdateFromUrl)" \
@@ -625,16 +651,19 @@ fi
 IMG_SHA=$(sha256sum "$NEW_IMG" | cut -d' ' -f1)
 export SIGN_BODY IMG_SHA
 asset_json() { printf '{"name":"%s","browser_download_url":"https://github.com/Cd1s/EngineX-OS/releases/download/%s/%s"}' "$2" "$1" "$2"; }
-release() { # <file> <tag> <asset name> <image file> [unsigned|<key file>] [edit]: GitHub's releases/latest answer
-    local d=$W/mock/assets/$2 assets key=${5:-$W/signing/release.key}
+release() { # <file> <tag> <asset name> <image file> [unsigned|<key file>] [edit] [<tag the list is for>]: GitHub's releases/latest answer
+    local d=$W/mock/assets/$2 assets key=${5:-$W/signing/release.key} listtag=${7:-$2}
     mkdir -p "$d"
     ln -sf "$4" "$d/$3"
     assets=$(asset_json "$2" "$3")
     if [ "$key" != unsigned ]; then
-        printf '%s  %s\n' "$IMG_SHA" "$3" > "$d/SHA256SUMS.txt"
+        # The list names the files and, like a real release's, its own tag (RELEASE-TAG.txt).
+        printf '%s\n' "$listtag" > "$d/RELEASE-TAG.txt"
+        { printf '%s  %s\n' "$IMG_SHA" "$3"; printf '%s  RELEASE-TAG.txt\n' "$(sha256sum < "$d/RELEASE-TAG.txt" | cut -d' ' -f1)"; } > "$d/SHA256SUMS.txt"
+        printf '%s\n' "$2" > "$d/RELEASE-TAG.txt"
         ENGINEX_RELEASE_KEY=$key "$W/bin/enginex-sign" --allow-untrusted "$d/SHA256SUMS.txt" > /dev/null
         [ "${6:-}" != edit ] || printf '%s  %s\n' "$(printf x | sha256sum | cut -d' ' -f1)" extra-file.bin >> "$d/SHA256SUMS.txt"
-        assets="$assets,$(asset_json "$2" SHA256SUMS.txt),$(asset_json "$2" SHA256SUMS.txt.sig)"
+        assets="$assets,$(asset_json "$2" SHA256SUMS.txt),$(asset_json "$2" SHA256SUMS.txt.sig),$(asset_json "$2" RELEASE-TAG.txt)"
     fi
     printf '{"tag_name":"%s","html_url":"https://github.com/Cd1s/EngineX-OS/releases/tag/%s","assets":[%s]}\n' "$2" "$2" "$assets" > "$1"
 }
@@ -653,6 +682,8 @@ release "$W/mock/release-unsigned.json" "v$NEXTV-unsigned" "$NEXT_NAME" "$NEW_IM
 release "$W/mock/release-badsig.json" "v$NEXTV-badsig" "$NEXT_NAME" "$NEW_IMG" "$W/signing/other.key"
 release "$W/mock/release-edited.json" "v$NEXTV-edited" "$NEXT_NAME" "$NEW_IMG" "$W/signing/release.key" edit
 release "$W/mock/release-tampered.json" "v$NEXTV-tampered" "$NEXT_NAME" "$W/mock/corrupt-Update.img"
+# A genuine, correctly signed list of revision r1 shown under the tag of r3 (the file names are the same).
+release "$W/mock/release-r3.json" "v$NEXTV-r3" "$NEXT_NAME" "$NEW_IMG" "$W/signing/release.key" signed "v$NEXTV-r1"
 cat > "$W/mock/server.py" <<'PY'
 import http.server, os, re, ssl, sys
 root = sys.argv[1]

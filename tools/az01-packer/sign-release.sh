@@ -10,19 +10,15 @@ set -eu
 OUT=$(cd "${1:?release output directory}" && pwd)
 : "${ENGINEX_RELEASE_KEY:?set ENGINEX_RELEASE_KEY to the release key file (public releases are signed, #239)}"
 cd "$(dirname "$0")/../.."
-[ -f "$OUT/SHA256SUMS.txt" ] || { echo "$OUT/SHA256SUMS.txt is missing" >&2; exit 2; }
+# The list must describe the files that are about to be uploaded, all of them, and nothing else.
+sh tools/az01-packer/check-release-manifest.sh "$OUT"
 W=$(mktemp -d)
 trap 'rm -rf "$W"' EXIT
 CGO_ENABLED=0 go build -trimpath -o "$W/enginex-sign" ./cmd/enginex-sign
-# The list must describe the files that are about to be uploaded, all of them.
-(cd "$OUT" && sha256sum -c --quiet SHA256SUMS.txt)
-for f in "$OUT"/*-Update.img "$OUT"/*-Data-Bundle.tar.gz "$OUT"/EngineX-Installer-*; do
-    [ -e "$f" ] || continue
-    grep -qF "  $(basename "$f")" "$OUT/SHA256SUMS.txt" || { echo "$(basename "$f") is not in SHA256SUMS.txt" >&2; exit 1; }
-done
+TAG=$(cat "$OUT/RELEASE-TAG.txt")
 rm -f "$OUT/SHA256SUMS.txt.sig"
 # Refuses a key that is not embedded in this checkout: decks would reject the release.
 "$W/enginex-sign" "$OUT/SHA256SUMS.txt"
-# What a deck does: verify with the embedded keys only.
-"$W/enginex-sign" --verify "$OUT/SHA256SUMS.txt"
+# What a deck does: verify with the embedded keys only, and for the release tag it will be shown under.
+"$W/enginex-sign" --verify --tag "$TAG" "$OUT/SHA256SUMS.txt"
 ls -l "$OUT/SHA256SUMS.txt" "$OUT/SHA256SUMS.txt.sig"

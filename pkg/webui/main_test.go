@@ -26,6 +26,8 @@ func TestMain(m *testing.M) {
 	sshPersistKeyDir = at("data", "enginex-absent")
 	deviceCompatiblePath = at("sys", "compatible-absent")
 	fourDeckRolePath = at("run", "sc5000-assignments", "role")
+	// The update keeps updateReserve free for Engine; the tests run on whatever disk the host has.
+	freeBytes = func(string) (int64, bool) { return 1 << 40, true }
 	code := m.Run()
 	os.RemoveAll(dir)
 	os.Exit(code)

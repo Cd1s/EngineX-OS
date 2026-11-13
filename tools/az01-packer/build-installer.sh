@@ -64,7 +64,7 @@ done
 (
 	cd "$OUT"
 	set --
-	for f in *-Update.img *-Data-Bundle.tar.gz EngineX-Installer-"$V"-*; do
+	for f in *-Update.img *-Data-Bundle.tar.gz EngineX-Installer-"$V"-* RELEASE-TAG.txt; do
 		[ -e "$f" ] && set -- "$@" "$f"
 	done
 	sha256sum "$@" > SHA256SUMS.txt

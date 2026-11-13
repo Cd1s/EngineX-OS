@@ -26,12 +26,13 @@ const keyEnvVar = "ENGINEX_RELEASE_KEY"
 func run(args []string, getenv func(string) string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("enginex-sign", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	var inPath, outPath, pubPath string
+	var inPath, outPath, pubPath, tag string
 	var verify, listKeys, allowUntrusted bool
 	fs.StringVar(&inPath, "in", "", "path to SHA256SUMS.txt")
 	fs.StringVar(&outPath, "out", "", "signature path (default <in>.sig)")
 	fs.BoolVar(&verify, "verify", false, "verify <in> against <out> instead of signing")
 	fs.StringVar(&pubPath, "pubkey", "", "optional PKIX PEM public key file for --verify")
+	fs.StringVar(&tag, "tag", "", "with --verify: also check that the list is the one of this release tag (e.g. v5.3.0.5-r2)")
 	fs.BoolVar(&listKeys, "list-keys", false, "print the trusted public keys embedded in this build and exit (fails when there are none)")
 	fs.BoolVar(&allowUntrusted, "allow-untrusted", false, "sign with a key that is not embedded in this build (release-gate throwaway keys only)")
 	if err := fs.Parse(args); err != nil {
@@ -88,10 +89,19 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) er
 		if err := releasesig.VerifySignature(sumsData, sigData, keys); err != nil {
 			return err
 		}
+		if tag != "" {
+			if err := releasesig.VerifyTag(sumsData, tag); err != nil {
+				return fmt.Errorf("%s is not the list of release %s: %w", filepath.Base(inPath), tag, err)
+			}
+		}
 		fmt.Fprintf(stdout, "verified %s against %s\n", outPath, inPath)
 		return nil
 	}
 
+	// Release file names carry no -rN revision: the tag entry is what ties this list to one release.
+	if _, err := releasesig.LookupSHA256(sumsData, releasesig.TagEntryName); err != nil {
+		return fmt.Errorf("%s has no %s entry: a list that does not name its release tag would verify for any tag", filepath.Base(inPath), releasesig.TagEntryName)
+	}
 	keyPath := strings.TrimSpace(getenv(keyEnvVar))
 	if keyPath == "" {
 		return fmt.Errorf("%s environment variable is not set", keyEnvVar)

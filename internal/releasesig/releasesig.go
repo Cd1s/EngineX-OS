@@ -5,8 +5,10 @@ package releasesig
 
 import (
 	"crypto/ed25519"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -20,6 +22,9 @@ const (
 	// SigAssetName is the base64-encoded Ed25519 signature over the exact bytes of SumsAssetName.
 	SigAssetName = "SHA256SUMS.txt.sig"
 
+	// TagEntryName is the manifest entry that binds the release tag (see TagDigest).
+	TagEntryName = "RELEASE-TAG.txt"
+
 	// MaxSumsSize bounds SHA256SUMS.txt downloads (28 artifacts is ~3.5 KiB).
 	MaxSumsSize = 1 << 20
 	// MaxSigSize bounds SHA256SUMS.txt.sig downloads (base64 of 64 bytes is ~89 bytes).
@@ -31,7 +36,34 @@ var (
 	ErrNoTrustedKeys = errors.New("no trusted release public keys configured")
 	// ErrInvalidSignature indicates the signature is malformed or failed Ed25519 verification.
 	ErrInvalidSignature = errors.New("release signature verification failed")
+	// ErrTagMismatch indicates the signed list is not the one of the release that is being installed:
+	// it carries no tag entry, or the entry is for another tag (a genuine older release shown under a newer tag).
+	ErrTagMismatch = errors.New("the signed list belongs to another release")
 )
+
+// TagDigest is the SHA-256 (lowercase hex) that the signed manifest lists for TagEntryName in the
+// release called tag: the hash of the tag and a newline, which is exactly the content of the
+// RELEASE-TAG.txt file the release build writes. A deck knows the tag it is offered, so it checks
+// the entry without downloading the file; the build host's sha256sum -c checks it against the file.
+// Release file names carry the version but not the "-rN" revision, so this entry is what ties a
+// genuine manifest and its files to one release tag.
+func TagDigest(tag string) string {
+	sum := sha256.Sum256([]byte(tag + "\n"))
+	return hex.EncodeToString(sum[:])
+}
+
+// VerifyTag checks that the signed list sumsData carries the tag entry of the release tag.
+// The list's signature must have been verified first.
+func VerifyTag(sumsData []byte, tag string) error {
+	if tag == "" || len(tag) > 128 || strings.ContainsAny(tag, "\r\n\x00") {
+		return ErrTagMismatch
+	}
+	digest, err := LookupSHA256(sumsData, TagEntryName)
+	if err != nil || digest != TagDigest(tag) {
+		return ErrTagMismatch
+	}
+	return nil
+}
 
 // ParsePublicKeysPEM parses a list of PKIX ("BEGIN PUBLIC KEY") PEM-encoded Ed25519 public keys.
 func ParsePublicKeysPEM(pems []string) ([]ed25519.PublicKey, error) {

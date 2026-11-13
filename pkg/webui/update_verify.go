@@ -10,7 +10,6 @@ import (
 	"net/url"
 	"os"
 	"path"
-	"regexp"
 	"strings"
 	"time"
 
@@ -30,19 +29,18 @@ import (
 // file on its own and only checks the image's own integrity fields, which a modified image
 // carries too. The messages below are what the deck shows; each has a line in i18n.tsv.
 const (
-	msgUpdateUnsigned   = "update refused: this release is not signed"
-	msgUpdateBadSig     = "update refused: the release signature is not valid"
-	msgUpdateNoKey      = "update refused: this build has no trusted release key"
-	msgUpdateNotListed  = "update refused: the file is not in the signed checksum list"
-	msgUpdateMismatch   = "update refused: the file does not match the signed checksum"
-	msgUpdateOlder      = "update refused: the file is older than the installed version"
-	msgUpdateDownload   = "update download failed"
-	signedFetchTimeout  = 2 * time.Minute
-	updateMaxDownload   = 2 << 30 // the largest *-Update.img the deck downloads
-	updateImgVersionPat = `^[A-Za-z0-9]+-([0-9][0-9.]*)-EngineX-OS-`
+	msgUpdateUnsigned  = "update refused: this release is not signed"
+	msgUpdateBadSig    = "update refused: the release signature is not valid"
+	msgUpdateNoKey     = "update refused: this build has no trusted release key"
+	msgUpdateNotListed = "update refused: the file is not in the signed checksum list"
+	msgUpdateMismatch  = "update refused: the file does not match the signed checksum"
+	msgUpdateOlder     = "update refused: this release is not newer than the installed one"
+	msgUpdateWrongTag  = "update refused: the signature is for a different release"
+	msgUpdateNoSpace   = "update refused: not enough free space on the deck"
+	msgUpdateDownload  = "update download failed"
+	signedFetchTimeout = 2 * time.Minute
+	updateMaxDownload  = 2 << 30 // the largest *-Update.img the deck downloads
 )
-
-var updateImgVersionRE = regexp.MustCompile(updateImgVersionPat)
 
 // releaseTrustedKeys returns the release keys this build trusts; tests replace it with a key
 // of their own. The production list is embedded in internal/releasesig/keys.go.
@@ -93,10 +91,17 @@ func (s *Server) getSmall(ctx context.Context, rawURL string, limit int64) (data
 	return data, false, nil
 }
 
-// signedAssetDigest verifies the signature of the release that downloadURL belongs to and
-// returns the signed SHA-256 (lowercase hex) of that file. On failure the second result is the
-// message to show on the deck. Nothing is installed or written before this returns "".
-func (s *Server) signedAssetDigest(downloadURL string) (digest, msg string) {
+// signedAssetDigest verifies the signature of the release that downloadURL belongs to, checks
+// that the signed list is the one of the release tag the deck was offered and that this release is
+// newer than the installed one, and returns the signed SHA-256 (lowercase hex) of the file. On
+// failure the second result is the message to show on the deck. Nothing is installed or written
+// before this returns "".
+//
+// The tag comes from the release page, which anyone who can serve it controls, and the file names
+// carry the version but not the -rN revision: so the signed list carries a tag entry
+// (releasesig.TagDigest) and the tag compared with the installed release is the one it proves. A
+// genuine older revision shown under a newer tag fails here, not at the file name.
+func (s *Server) signedAssetDigest(downloadURL, tag string) (digest, msg string) {
 	sumsURL, err := siblingURL(downloadURL, releasesig.SumsAssetName)
 	if err != nil {
 		return "", msgUpdateDownload
@@ -125,18 +130,18 @@ func (s *Server) signedAssetDigest(downloadURL string) (digest, msg string) {
 	if err := releasesig.VerifySignature(sums, sig, keys); err != nil {
 		return "", msgUpdateBadSig
 	}
+	if err := releasesig.VerifyTag(sums, tag); err != nil {
+		return "", msgUpdateWrongTag
+	}
 	u, err := url.Parse(downloadURL)
 	if err != nil {
 		return "", msgUpdateDownload
 	}
-	name := path.Base(u.Path)
-	digest, err = releasesig.LookupSHA256(sums, name)
+	digest, err = releasesig.LookupSHA256(sums, path.Base(u.Path))
 	if err != nil {
 		return "", msgUpdateNotListed
 	}
-	// A signed sums file of an older release, replayed under a newer tag, must not roll the
-	// deck back: the file name carries the version and it is covered by the signature.
-	if m := updateImgVersionRE.FindStringSubmatch(name); m != nil && newerVersion(s.installedVersion(), m[1]) {
+	if !newerVersion(tag, s.installedRelease()) {
 		return "", msgUpdateOlder
 	}
 	return digest, ""
@@ -160,4 +165,40 @@ func sha256OfFile(p string) (string, error) {
 func hasDigest(p, want string) bool {
 	got, err := sha256OfFile(p)
 	return err == nil && strings.EqualFold(got, want)
+}
+
+// Free space on the deck's data volume (#239 review). Engine and the web service keep writing to
+// /data (libraries, databases, caches, settings) while an update is downloaded; a download that
+// fills the volume makes those writes fail with ENOSPC. So a download is started only when the
+// file and, for the second generation, the unpacked bundle fit with updateReserve to spare, and it
+// is cut off at that budget even if the server sends more than it declared.
+const (
+	updateReserveDefault = 256 << 20
+)
+
+var (
+	updateReserve int64 = updateReserveDefault
+	// freeBytes reports the free bytes of the volume of dir (false when unknown); tests replace it.
+	freeBytes = func(dir string) (int64, bool) {
+		free, _, _, err := freeSpace(dir)
+		return free, err == nil
+	}
+)
+
+// downloadBudget returns how many bytes a download into dir may take, or the refusal message.
+// declared is the Content-Length (<= 0 when unknown), extra what the install needs on top of the
+// download (the unpacked bundle), max the largest file the update accepts at all.
+func downloadBudget(dir string, declared, extra, max int64) (limit int64, msg string) {
+	free, ok := freeBytes(dir)
+	if !ok {
+		return max, ""
+	}
+	avail := free - updateReserve - extra
+	if avail <= 0 || declared > avail {
+		return 0, msgUpdateNoSpace
+	}
+	if avail < max {
+		return avail, ""
+	}
+	return max, ""
 }

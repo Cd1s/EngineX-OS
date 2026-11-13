@@ -135,6 +135,10 @@ for m in PRIME4G2 SYSTEMONE; do
 done
 
 cd "$OUT"
-sha256sum *-Update.img *-Data-Bundle.tar.gz > SHA256SUMS.txt
+# RELEASE-TAG.txt is the release tag and a newline. Release file names carry the version but not the
+# -rN revision, so the signed list names the tag through this file: a deck checks the hash of the tag
+# it is offered against it and refuses a genuine older revision shown under a newer tag (#239).
+printf '%s\n' "$TAG" > RELEASE-TAG.txt
+sha256sum *-Update.img *-Data-Bundle.tar.gz RELEASE-TAG.txt > SHA256SUMS.txt
 # Not signed yet: build-installer.sh adds the installers to this list, then sign-release.sh signs it (#239).
 ls -l

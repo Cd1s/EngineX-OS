@@ -194,8 +194,12 @@ func bundleDeckWith(t *testing.T, compatible string, assets func(base string) st
 	gh := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/repos/Cd1s/EngineX-OS/releases/latest":
-			fmt.Fprintf(w, `{"tag_name":"v5.3.0.3","html_url":"https://x/r","assets":[%s]}`, assets(base))
+			fmt.Fprintf(w, `{"tag_name":%q,"html_url":"https://x/r","assets":[%s]}`, fault.apiTag(), assets(base))
 		case strings.HasSuffix(r.URL.Path, ".tar.gz") || strings.HasSuffix(r.URL.Path, "-Update.img"):
+			if fault.serve != nil {
+				fault.serve(w, r, fault.served(bundle))
+				return
+			}
 			w.Write(fault.served(bundle))
 		case strings.HasSuffix(r.URL.Path, "/"+releasesig.SumsAssetName) && !fault.unsigned:
 			sums, _ := fault.signed(assetNames(assets(base)), bundle)
@@ -212,7 +216,11 @@ func bundleDeckWith(t *testing.T, compatible string, assets func(base string) st
 	state := t.TempDir()
 	custom := filepath.Join(state, "sc5000-custom")
 	os.MkdirAll(custom, 0o700)
-	os.WriteFile(filepath.Join(custom, "version.txt"), []byte("5.3.0.2\n"), 0o644)
+	os.WriteFile(filepath.Join(custom, "version.txt"), []byte(fault.installedVersion()+"\n"), 0o644)
+	if fault.installTag != "" { // a bundle install carries the release tag it came from
+		os.MkdirAll(filepath.Join(custom, "bundle"), 0o700)
+		os.WriteFile(filepath.Join(custom, "bundle", releaseTagName), []byte(fault.installTag+"\n"), 0o644)
+	}
 	cf := filepath.Join(state, "compatible")
 	os.WriteFile(cf, []byte(compatible+"\x00"), 0o644)
 	t.Cleanup(func(old string) func() { return func() { deviceCompatiblePath = old } }(deviceCompatiblePath))
@@ -679,7 +687,7 @@ func TestGen2EndToEndReReleaseApplyAndCustomDirResolution(t *testing.T) {
 					w.Write(r3Tar)
 				case "/dl/" + releasesig.SumsAssetName, "/dl/" + releasesig.SigAssetName:
 					// The release is signed (#239): both of its files are listed.
-					sums := []byte(fmt.Sprintf("%x  %s\n%x  %s\n", sha256.Sum256(r3Img), r3ImgName, sha256.Sum256(r3Tar), r3TarName))
+					sums := []byte(fmt.Sprintf("%x  %s\n%x  %s\n%s  %s\n", sha256.Sum256(r3Img), r3ImgName, sha256.Sum256(r3Tar), r3TarName, releasesig.TagDigest(curTag), releasesig.TagEntryName))
 					if strings.HasSuffix(r.URL.Path, ".sig") {
 						sums, _ = releasesig.Sign(testReleasePriv, sums)
 					}
