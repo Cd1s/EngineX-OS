@@ -7109,6 +7109,11 @@ def legacy_qml_fixes():
             "		if(!visible && service.provider && !service.provider.loggedIn) {\n",
             "		if(!visible && service.provider && !service.provider.loggedIn && controller.selectedProvider === service.provider) {\n",
         ), ("function onShowPairingDialog(provider) {\n", "function onShowPairingDialog(provider) {\n				if (root.scQuiet()) return\n")],
+        v + "Streaming/StreamingConnectedAccountsDialog.qml": [(
+            "function onShowConnectedAccountsDialog(provider, qrCode, displayUrl) {\n",
+            "function onShowConnectedAccountsDialog(provider, qrCode, displayUrl) {\n"
+            "				if (root.scQuiet() || root.scUnasked(provider)) return\n",
+        )],
         # RA001: leaving the Load Playlist menu left the deck picker open.
         v + "SelectPlaylistDeckMenu/SelectPlaylistDeckMenuLayoutBase.qml": [(
             '	pShow: Planck.getProperty("/GUI/ShowSelectPlaylistDeckMenu")\n',
