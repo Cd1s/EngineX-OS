@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Cd1s/EngineX-OS/pkg/compat"
 	"github.com/Cd1s/EngineX-OS/pkg/prolink"
 )
 
@@ -23,13 +25,16 @@ const (
 )
 
 // stager copies Pioneer players' libraries onto a local drive (#59), at most
-// once per player slot every stageEvery and one copy at a time. The drive's
+// once per host/slot every stageEvery and one copy at a time. The drive's
 // next mount imports them (bridge.ReadLibrary).
 type stager struct {
 	mu      sync.Mutex
+	copyMu  sync.Mutex
 	last    map[string]time.Time
-	running bool
+	running map[string]bool
 	mounts  func() []string
+	statfs  func(string, *syscall.Statfs_t) error
+	copy    func(context.Context, *prolink.NFSClient, string, string, int64) (int, error)
 }
 
 func (s *stager) observe(ctx context.Context, d prolink.Device) {
@@ -38,33 +43,67 @@ func (s *stager) observe(ctx context.Context, d prolink.Device) {
 		return
 	}
 	s.mu.Lock()
-	key := fmt.Sprintf("%s/%d", d.Address, d.Number)
-	if s.running || time.Since(s.last[key]) < stageEvery {
-		s.mu.Unlock()
+	if s.running == nil {
+		s.running = map[string]bool{}
+	}
+	var slots []byte
+	for _, slot := range []byte{3, 2} {
+		key := fmt.Sprintf("%s/%d", host.String(), slot)
+		if s.running[key] || time.Since(s.last[key]) < stageEvery {
+			continue
+		}
+		s.last[key], s.running[key] = time.Now(), true
+		slots = append(slots, slot)
+	}
+	s.mu.Unlock()
+	if len(slots) == 0 {
 		return
 	}
-	s.last[key], s.running = time.Now(), true
-	s.mu.Unlock()
+	statfs, copy := s.statfs, s.copy
+	if statfs == nil {
+		statfs = syscall.Statfs
+	}
+	if copy == nil {
+		copy = prolink.Stage
+	}
 	go func() {
-		defer func() { s.mu.Lock(); s.running = false; s.mu.Unlock() }()
+		s.copyMu.Lock()
+		defer s.copyMu.Unlock()
+		defer func() {
+			s.mu.Lock()
+			for _, slot := range slots {
+				key := fmt.Sprintf("%s/%d", host.String(), slot)
+				s.last[key] = time.Now()
+				delete(s.running, key)
+			}
+			s.mu.Unlock()
+		}()
 		mounts := s.mounts()
 		if len(mounts) == 0 {
 			return
 		}
-		for _, slot := range []byte{3, 2} {
+		for _, slot := range slots {
 			export, _ := prolink.SlotExport(slot)
 			name := stageName(d.Name, d.Number, slot)
-			dst := filepath.Join(mounts[0], prolink.StagedDir, name)
-			var fs syscall.Statfs_t
-			if syscall.Statfs(mounts[0], &fs) != nil {
-				return
+			var dst string
+			var budget int64
+			// ST_RDONLY is 1 on Linux; syscall has no named constant.
+			for _, mount := range mounts {
+				var fs syscall.Statfs_t
+				if statfs(mount, &fs) != nil || fs.Flags&1 != 0 {
+					continue
+				}
+				budget = min(int64(fs.Bavail)*int64(fs.Bsize)-stageReserve, stageMax)
+				if budget > 0 {
+					dst = filepath.Join(mount, prolink.StagedDir, name)
+					break
+				}
 			}
-			budget := min(int64(fs.Bavail)*int64(fs.Bsize)-stageReserve, stageMax)
-			if budget <= 0 {
-				log.Printf("rb-bridge: no room on %s to copy %s", mounts[0], name)
-				return
+			if dst == "" {
+				log.Printf("rb-bridge: no room to copy %s", name)
+				continue
 			}
-			n, err := prolink.Stage(ctx, &prolink.NFSClient{IP: host}, export, dst, budget)
+			n, err := copy(ctx, &prolink.NFSClient{IP: host}, export, dst, budget)
 			if err == nil {
 				log.Printf("rb-bridge: copied %d files of %s to %s; it shows after the drive is mounted again", n, name, dst)
 			}
@@ -104,16 +143,22 @@ func localExports() []string {
 		return nil
 	}
 	defer f.Close()
+	return localExportsFrom(f)
+}
+
+func localExportsFrom(r io.Reader) []string {
 	var out []string
-	sc := bufio.NewScanner(f)
+	sc := bufio.NewScanner(r)
 	for sc.Scan() {
 		fields := strings.Fields(sc.Text())
 		if len(fields) < 4 || !strings.HasPrefix(fields[1], "/media/") || !strings.Contains(","+fields[3]+",", ",rw,") {
 			continue
 		}
 		mount := strings.ReplaceAll(fields[1], `\040`, " ")
-		if _, err := os.Stat(filepath.Join(mount, "PIONEER", "rekordbox", "export.pdb")); err == nil {
-			out = append(out, mount)
+		if r, err := compat.NewResolver(mount); err == nil {
+			if _, err := r.Resolve("PIONEER/rekordbox/export.pdb"); err == nil {
+				out = append(out, mount)
+			}
 		}
 	}
 	return out
