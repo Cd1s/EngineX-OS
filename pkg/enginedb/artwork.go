@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/compat"
 )
@@ -51,13 +52,60 @@ func putArtwork(dir string, sum, data []byte) error {
 // migrateArtwork turns earlier builds' TEXT hashes into BLOB hashes plus an
 // Artwork file. A row whose file cannot be written keeps its TEXT hash, so
 // the next run retries it.
-func migrateArtwork(ctx context.Context, tx *sql.Tx, dir string) (migrated int, err error) {
+func migrateArtwork(ctx context.Context, tx *sql.Tx, dir string, deadline time.Time, now func() time.Time) (migrated int, err error) {
+	past := func() bool { return !deadline.IsZero() && !now().Before(deadline) }
+	if past() {
+		return 0, nil
+	}
+	// Index existing regular files once, instead of an Lstat per cover. Read
+	// bounded batches so cancellation or a mount's read budget stops the scan.
+	f, err := os.Open(dir)
+	if err != nil {
+		if ctx.Err() != nil {
+			return 0, ctx.Err()
+		}
+		log.Printf("rb-bridge: artwork directory scan skipped: %v", err)
+		return 0, nil
+	}
+	defer f.Close()
+	exists := map[string]bool{}
+	for {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		if past() {
+			return 0, nil
+		}
+		entries, e := f.ReadDir(128)
+		for _, ent := range entries {
+			if ent.Type().IsRegular() {
+				exists[ent.Name()] = true
+			}
+		}
+		if e == io.EOF {
+			break
+		}
+		if e != nil {
+			if ctx.Err() != nil {
+				return 0, ctx.Err()
+			}
+			log.Printf("rb-bridge: artwork directory scan skipped: %v", e)
+			return 0, nil
+		}
+	}
 	var last int64
 	for {
+		if err := ctx.Err(); err != nil {
+			return migrated, err
+		}
+		if past() {
+			return migrated, nil
+		}
 		var id int64
 		var raw any
-		var data []byte
-		e := tx.QueryRowContext(ctx, `SELECT id,hash,albumArt FROM AlbumArt WHERE id>? AND albumArt IS NOT NULL ORDER BY id LIMIT 1`, last).Scan(&id, &raw, &data)
+		// Read metadata first: already migrated covers must not load every
+		// albumArt BLOB again on every Sync or stamp-bypassed mount.
+		e := tx.QueryRowContext(ctx, `SELECT id,hash FROM AlbumArt WHERE id>? AND albumArt IS NOT NULL ORDER BY id LIMIT 1`, last).Scan(&id, &raw)
 		if e == sql.ErrNoRows {
 			return migrated, nil
 		}
@@ -65,6 +113,16 @@ func migrateArtwork(ctx context.Context, tx *sql.Tx, dir string) (migrated int, 
 			return migrated, e
 		}
 		last = id
+		if b, ok := raw.([]byte); ok && len(b) == 20 && exists[base64.RawURLEncoding.EncodeToString(b)+".jpg"] {
+			continue
+		}
+		if past() {
+			return migrated, nil
+		}
+		var data []byte
+		if e = tx.QueryRowContext(ctx, `SELECT albumArt FROM AlbumArt WHERE id=?`, id).Scan(&data); e != nil {
+			return migrated, e
+		}
 		var sum []byte
 		if b, ok := raw.([]byte); ok && len(b) == 20 {
 			sum = b
@@ -77,6 +135,7 @@ func migrateArtwork(ctx context.Context, tx *sql.Tx, dir string) (migrated int, 
 			log.Printf("rb-bridge: artwork %d left as is: %v", id, e)
 			continue
 		}
+		exists[base64.RawURLEncoding.EncodeToString(sum)+".jpg"] = true
 		if b, ok := raw.([]byte); ok && bytes.Equal(b, sum) {
 			continue
 		}
@@ -90,6 +149,12 @@ func migrateArtwork(ctx context.Context, tx *sql.Tx, dir string) (migrated int, 
 // MigrateArtwork upgrades the library under mount in place. Engine must not
 // have m.db open: bridge only ever writes it before Engine attaches the volume.
 func MigrateArtwork(ctx context.Context, mount string) (int, error) {
+	return MigrateArtworkBefore(ctx, mount, time.Time{})
+}
+
+// MigrateArtworkBefore upgrades covers until deadline, committing progress for
+// the next mount. A zero deadline allows a complete explicit migration.
+func MigrateArtworkBefore(ctx context.Context, mount string, deadline time.Time) (int, error) {
 	dir, err := compat.SafeOutputDir(mount, artworkDir)
 	if err != nil {
 		return 0, err
@@ -105,7 +170,7 @@ func MigrateArtwork(ctx context.Context, mount string) (int, error) {
 		return 0, err
 	}
 	defer tx.Rollback()
-	n, err := migrateArtwork(ctx, tx, dir)
+	n, err := migrateArtwork(ctx, tx, dir, deadline, time.Now)
 	if err != nil {
 		return 0, err
 	}
