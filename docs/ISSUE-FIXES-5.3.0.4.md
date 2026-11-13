@@ -1,4 +1,4 @@
-# EngineX OS 5.3.0.4 发版与 Issue 修复记录（2026-11-11 发布；r2、r3 于 2026-11-12 重发）
+# EngineX OS 5.3.0.4 发版与 Issue 修复记录（2026-11-11 发布；r2、r3 于 2026-11-12，r4 于 2026-11-13 重发）
 
 - **日期**：`2026-11-12`
 - **状态**：已合入 `#210` Spotify `go-librespot` 原生音频解密与零配置双登录（`59e0ec6`）、`#201` 联机视图 `Linked View` 与双碟机配对 2 轨视图（`136ad1b` / `61e4ed5`）及 `#215` 二代机全系 8 款统一 `*-Update.img` + `EngineX-Installer` 一键解锁（`5.3.0.4` / `5.3.0.5` 同时保留 8 个 `*-Data-Bundle.tar.gz` 兼容包，共 28 个发布产物），连同此前全部计划项（`issue176-sclive4-stems` `77c4c9f`、`issue177-sclive4-perf` `66ff35b`、`realdeck-5304-fixes` `ebb985e` / `322839d`、防回归核验表 `REGRESSION-CHECKLIST.md`、紧凑顶栏第 2 行 `header-row2-compact` `207dc55` / `3460bb1`、`#162` `9fa0cff`、一代首次启动 Stems 弹窗抑制 `gen1-stems-prompt` `1cfc6bb`、`#202 / #203` `3649be7`、翻译补全 `323cb15` / `f48150f` / `240b22d` / `i18n-settings-full` `34ed7d4`、播放与效果设置收口 `fx-settings-declutter` `c2d9d74`、`MASTER` 灯恢复原厂暗亮值 `1` 及原厂转盘行为 `led-157-stock` `7f753c2`、影子 `Sync` 相位对齐 `shadow-sync-snap` `4ce7bef`、中国大陆与全球 NTP 同步及断电时区持久化 `time-sync-cn` `d0de27c`、`#140` 断电二次启动与启动屏门禁 `b82197b`、双机沙箱进程作用域隔离 `twin-scoped-kill` `73a060c`、启动安全网 `boot-safety-net` `f047653`、`#178` Rekordbox MP3 编码延迟偏移修正 `caee928`、独立播放机 `Sampler Output` / 原厂 `LinkBeatJumpLoopSize` 解锁 / 移除失效 `Auto-Analyze` 行 `ui-link-autoanalyze` `4a907ee`、`#208` 官方 Mod 静态 Go 运行时 `mods-go-runtime` `71ca3df`、三语菜单路径与文档对齐 `docs-audit-5304` `a31caee`、`#206` 一体机流媒体曲目双向录音 `issue206-stream-record` `f468406`、电脑端 LAN Stems 默认 `htdemucs` / 机上 HQ 提示 / 安装包内置 worker `stems-hq-hint` `aa895e5`）
@@ -320,3 +320,36 @@ ea9baf492f35dda012919ce3469f83776f69b6e4d9ade2abec873bb7c48d379c  EngineX-Instal
 - **编译机事故（与产物无关）**：发版过程中编译机 sshd 被改到 2222 端口，原因是 11-08 一个旧版 webui 单元测试把 `-p 2222` 写进了宿主机 `/etc/systemd/system/sshd.service.d/51-port.conf`，今晚有进程在宿主机上执行了 `systemctl restart sshd` 使其生效；已备份后删除该文件、恢复 22 端口。测试隔离的修复（测试中禁止真实系统命令、非碟机环境不动 sshd）进 5.3.0.5。
 - **回滚点**：r2 构建（`d88890b`，tag `v5.3.0.4-r2`）；首轮 `5.3.0.4`（`61e4ed5`）。`v5.3.0.4` Release 上的文件已换成 r3 构建，退回 r2 时用 `v5.3.0.4-r2` Release 上保留的 r2 文件。
 - **实机影响**：已刷 `5.3.0.4`（首轮或 r2）、`5.3.0.3` 及更早版本的碟机在 `设置 → 关于 / 更新` 收到 r3，装完版本号仍为 `5.3.0.4`；直播推流默认缓冲从 300 ms 改为 120 ms（为有线网络调校），Wi-Fi 收听需加 `?buffer=300` 或更大；Source 列表各分组之间原有的 4 像素间隔不再显示。
+
+## 8. `5.3.0.4 r4` 同版本修复重发（2026-11-13）
+
+- **范围**：在 r3（`612f03e`）基础上合入经过异族复核的修复，是 5.3.0.5 之前的最后一个版本：
+  - #217 CDJ-3000 联机：不再提示旧固件；CDJ 暂停时影子碟不跳；与先锋播放器交接 MASTER；
+  - `Engine 灯光` 默认关闭，用户的选择会保留；
+  - #227 Spotify 限流：按 `Retry-After` 等待，改走协议会话读取歌单；
+  - #226 PRIME 4 组开机画面方向；
+  - #218 二代机不再重复提示同一更新，安装器复用同名旧包的问题；
+  - #223 SC LIVE 4 封面读取线程优先级与占位图；
+  - #224 PRIME GO 二号碟 Stems 滑动入口，局域网 GPU 分轨自动配对；
+  - #231 未分析完成时 BPM 跟随推子；
+  - #233 双层波形「完整」样式不再被截断；
+  - BH-GC2-12 界面轮询不再等网络；
+  - `/v1/enginex` 接口别名与 5.3.0.5 改名的兼容层（#234）；
+  - #222 系统层（`agent/5305-sys`）、库层（`agent/5305-lib`）以及第二轮 bug hunt（`agent/5305-bh2-sys`、`agent/5305-bh2-lib`）的修复。
+- **不在 r4（转入 5.3.0.5）**：
+  - #224 PRIME GO 的 TIDAL 扫码：复核风险高，可能登出真实 TIDAL 用户；
+  - #230 插盘时的「准备中」提示；
+  - #233 的大 RB 盘识别与 MP3 网格；
+  - BH2-A4-15 结尾 Cue / 循环钳制，撤回，因为它让 #178 测试变红；
+  - 第二轮 bug hunt 的 A6；
+  - #234 全面改名，回退由新版本自己处理，二代机 ALSA 启动文件名在 5.3.0.5 保持不变；
+  - #235–#252 中其余规划项。
+- **复核**：每个分支都由与实现者不同的模型家族复核，「先修」项修好后由同一复核者再核一次；未通过的提交撤回或不合入。逐条结论保存在本次发布记录之外的复核报告里。
+- **集成测试**（`agent/r4-integration`，编译机沙箱，`/data` 为私有 tmpfs）：
+  - Go：`gofmt -l .` 为空，`go vet ./...` 与 ARM vet 通过；`go test -race ./...` 仅 `TestTidalGatewayLoginAndHint` 失败（需要局域网地址，属环境问题）。
+  - `bash tests/test_rootfs_overlay.sh` 27 项通过，包括 hook 二进制逐字节比对。
+  - Python：`tools/az01-packer` 304 项、`tools/stems` 14 项、`tools/splash` 8 项、`test_ui_mod.py` 174 项通过。
+  - `test_sclive4_bootstrap.sh`：`SCLIVE4`、`PRIME4PLUS`（官方 JC11S rootfs）与 `AZ04=1` 通过。
+  - C 测试：`test_dsp_smooth` 普通、ASan/UBSan、TSan 三种都通过；`test_stems_feature`（5.0.4 与 5.3.0 Engine）、`test_az04_hook`、`test_edisksd_hook`（含 `--mounts`）通过。
+- **构建与门禁**：构建后填写。
+- **回滚点**：r3 构建（`612f03e`，tag `v5.3.0.4-r3`）。

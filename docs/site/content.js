@@ -5,8 +5,8 @@
 (function () {
   const L = (s, t, e) => ({ s, t, e });
   const V = "5.3.0.4";
-  const VL = "5.3.0.4 r3"; // shown to users; file names keep V
-  const TAG = "v5.3.0.4-r3";
+  const VL = "5.3.0.4 r4"; // shown to users; file names keep V
+  const TAG = "v5.3.0.4-r4";
   const BASE = "https://github.com/Cd1s/EngineX-OS/releases/latest/download/";
 
   // 全系 16 款机型（8 款一代机 + 8 款二代机）统一发布 *-Update.img
@@ -142,9 +142,9 @@
       nav: L("5.3.0.4 更新内容", "5.3.0.4 更新內容", "What's new in 5.3.0.4"),
       blocks: [
         { k: "note", x: L(
-          "5.3.0.4（r3）重发更新：修复 Mac 格式（HFS+）U 盘没有歌单、弹出卡住；超过 500 首的 rekordbox 曲库补齐 Cue、循环与节拍网格；卷标带 # 的 U 盘曲库被清空；在 Source 里点 Demo Tracks 或 Sampler Content 卡死；二代机 Stems 无法使用；直播推流没有声音；控制台二维码打不开；开机画面版本号。`Engine 灯光` 默认关闭，开启或关闭后的选择会在重启、断电后保留。已安装 5.3.0.4 的碟机可直接在屏幕收到在线更新，版本号仍为 5.3.0.4。",
-          "5.3.0.4（r3）重發更新：修復 Mac 格式（HFS+）隨身碟沒有歌單、退出卡住；超過 500 首的 rekordbox 曲庫補齊 Cue、循環與節拍網格；磁碟標籤帶 # 的隨身碟曲庫被清空；在 Source 裡點 Demo Tracks 或 Sampler Content 當機；二代機 Stems 無法使用；直播推流沒有聲音；控制台 QR Code 打不開；開機畫面版本號。`Engine 燈光` 預設關閉，開啟或關閉後的選擇會在重新啟動、斷電後保留。已安裝 5.3.0.4 的碟機可直接在螢幕收到線上升級，版本號維持 5.3.0.4。",
-          "5.3.0.4 (r3) re-release: fixes Mac-formatted (HFS+) USB sticks showing no playlists or hanging on eject; rekordbox libraries over 500 tracks now get their cues, loops and beat grids; sticks whose volume label contains # no longer have their library wiped; tapping Demo Tracks or Sampler Content in Source no longer freezes the deck; Stems on 2nd-gen units; live streaming with no sound; the console QR code; the boot screen version. `Engine Lighting` defaults off and remembers your On or Off choice across restarts and power cuts. Decks already on 5.3.0.4 get it as an on-screen update; the version stays 5.3.0.4.") },
+          "5.3.0.4（r4）重发更新，也是 5.3.0.5 之前的最后一个版本：CDJ-3000 联机不再提示旧固件，CDJ 暂停时波形不再跳动，与先锋播放器之间可以交接 MASTER；扫码登录 Spotify 后不再提示 Too Many Requests；PRIME 4、PRIME 2、Mixstream Pro 开机画面不再上下颠倒；二代机装好后不再反复提示同一更新；SC LIVE 4 曲目列表不再出现封面黑块；PRIME GO 二号碟也有 Stems 滑动入口，并能在局域网里自动找到电脑 GPU 分轨；NAS 歌单可以在 OmniSource 里打开和播放；直播推流断网 60 秒内恢复后继续播放；另外修复 #222 总清单里的一百多项问题（U 盘与 HFS+、Rekordbox、安装器与二代机安装、网页控制台安全等）。`Engine 灯光` 默认关闭，开启或关闭后的选择会在重启、断电后保留。已安装 5.3.0.4 的碟机可直接在屏幕收到在线更新，版本号仍为 5.3.0.4；仍是首轮 5.3.0.4 的 PRIME 4 G2 与 SYSTEM ONE 请用电脑重新运行一次 EngineX-Installer。",
+          "5.3.0.4（r4）重發更新，也是 5.3.0.5 之前的最後一個版本：CDJ-3000 聯機不再提示舊韌體，CDJ 暫停時波形不再跳動，與先鋒播放器之間可以交接 MASTER；掃碼登入 Spotify 後不再提示 Too Many Requests；PRIME 4、PRIME 2、Mixstream Pro 開機畫面不再上下顛倒；二代機安裝後不再反覆提示同一更新；SC LIVE 4 曲目列表不再出現封面黑塊；PRIME GO 二號碟也有 Stems 滑動入口，並能在區域網路中自動找到電腦 GPU 分軌；NAS 歌單可以在 OmniSource 裡開啟和播放；直播推流斷網 60 秒內恢復後繼續播放；另外修復 #222 總清單中的一百多項問題（隨身碟與 HFS+、Rekordbox、安裝器與二代機安裝、網頁主控台安全等）。`Engine 燈光` 預設關閉，開啟或關閉後的選擇會在重新啟動、斷電後保留。已安裝 5.3.0.4 的碟機可直接在螢幕收到線上升級，版本號維持 5.3.0.4；仍是首輪 5.3.0.4 的 PRIME 4 G2 與 SYSTEM ONE 請用電腦重新執行一次 EngineX-Installer。",
+          "5.3.0.4 (r4) re-release, the last build before 5.3.0.5: a linked CDJ-3000 no longer reports older firmware, a paused CDJ's waveform holds still, and MASTER hands over between Pioneer players and EngineX decks; Spotify no longer shows \"Too Many Requests\" after a QR login; the PRIME 4, PRIME 2 and Mixstream Pro boot screen is no longer upside down; 2nd-gen units stop re-offering the update they already run; SC LIVE 4 track lists no longer show black squares instead of album art; PRIME GO gets the Stems swipe on deck 2 too and finds a computer GPU stems worker on the LAN by itself; NAS playlists open and play in OmniSource; the live stream resumes after a network outage of up to 60 seconds; plus more than a hundred fixes from the #222 list (USB and HFS+ sticks, rekordbox, the installer and 2nd-gen installs, web console security). `Engine Lighting` defaults off and remembers your On or Off choice across restarts and power cuts. Decks already on 5.3.0.4 get it as an on-screen update; the version stays 5.3.0.4. A PRIME 4 G2 or SYSTEM ONE still on the first 5.3.0.4 build should run EngineX-Installer once from a computer.") },
         { k: "h", id: "whatsnew-5304",
           x: L('<span id="whatsnew-5304"></span><span id="start-whatsnew-5304"></span>5.3.0.4 新功能',
                '<span id="whatsnew-5304"></span><span id="start-whatsnew-5304"></span>5.3.0.4 新功能',
