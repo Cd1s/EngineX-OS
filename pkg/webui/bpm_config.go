@@ -26,20 +26,21 @@ func (s *Server) bpmConfigPost(w http.ResponseWriter, r *http.Request) {
 		fail(w, 503, errors.New("BPM lookup is off"))
 		return
 	}
-	v := s.cfg.BPM.Config()
-	if in.SoundCloudClientID != "" {
-		v.SoundCloudClientID = in.SoundCloudClientID
-	}
-	if in.SoundCloudSecret != "" {
-		v.SoundCloudSecret = in.SoundCloudSecret
-	}
-	if in.SoundCloudToken != "" {
-		v.SoundCloudToken = in.SoundCloudToken
-	}
-	if in.GetSongBPMKey != "" {
-		v.GetSongBPMKey = in.GetSongBPMKey
-	}
-	if err := s.cfg.BPM.SaveConfig(v); err != nil {
+	err := s.cfg.BPM.UpdateConfig(func(v *providers.BPMConfig) {
+		if in.SoundCloudClientID != "" {
+			v.SoundCloudClientID = in.SoundCloudClientID
+		}
+		if in.SoundCloudSecret != "" {
+			v.SoundCloudSecret = in.SoundCloudSecret
+		}
+		if in.SoundCloudToken != "" {
+			v.SoundCloudToken = in.SoundCloudToken
+		}
+		if in.GetSongBPMKey != "" {
+			v.GetSongBPMKey = in.GetSongBPMKey
+		}
+	})
+	if err != nil {
 		fail(w, 500, errors.New("could not save the BPM settings"))
 		return
 	}

@@ -225,22 +225,21 @@ func (s *Server) pullRelayConfig(ctx context.Context) error {
 	if s.cfg.BPM == nil {
 		return nil
 	}
-	v := s.cfg.BPM.Config()
-	next := v
-	if r.Config.SoundCloudClientID != "" {
-		next.SoundCloudClientID = r.Config.SoundCloudClientID
-	}
-	if r.Config.SoundCloudSecret != "" {
-		next.SoundCloudSecret = r.Config.SoundCloudSecret
-	}
-	if r.Config.SoundCloudToken != "" {
-		next.SoundCloudToken = r.Config.SoundCloudToken
-	}
-	if r.Config.GetSongBPMKey != "" {
-		next.GetSongBPMKey = r.Config.GetSongBPMKey
-	}
-	if next == v {
+	if r.Config == (providers.BPMConfig{}) {
 		return nil
 	}
-	return s.cfg.BPM.SaveConfig(next)
+	return s.cfg.BPM.UpdateConfig(func(v *providers.BPMConfig) {
+		if r.Config.SoundCloudClientID != "" {
+			v.SoundCloudClientID = r.Config.SoundCloudClientID
+		}
+		if r.Config.SoundCloudSecret != "" {
+			v.SoundCloudSecret = r.Config.SoundCloudSecret
+		}
+		if r.Config.SoundCloudToken != "" {
+			v.SoundCloudToken = r.Config.SoundCloudToken
+		}
+		if r.Config.GetSongBPMKey != "" {
+			v.GetSongBPMKey = r.Config.GetSongBPMKey
+		}
+	})
 }
