@@ -928,6 +928,43 @@ exec REAL "$@"
         self.assertTrue((run_dir / 'systemd/system/engine.service.d/99-enginex.conf').exists())
         self.host_commands.write_text('')  # the boot run's systemctl calls went to the safe-bin stand-in
 
+    def test_234_fallback_restarts_only_suite_service_applets(self):
+        # The owner and a waiter both run "leave activate"; neither is a service to restart.
+        commands = {
+            101: ['enginex-suite', 'leave', 'activate', 'boot-activate.sh'],
+            102: ['enginex-suite', 'leave', 'activate', 'boot-activate.sh'],
+            103: ['enginex-suite', 'leave', 'install', 'stream-sync'],
+            104: ['/data/EngineX copy/enginex-suite', 'stream-sync', '--listen', ':8080'],
+            105: ['enginex-suite', 'rb-bridge', '--prolink'],
+            106: ['enginex-suite', 'enginex-deemixd', '-state-dir', '/data/enginex/state'],
+            107: ['sc5000-suite', 'sc5000-deemixd'],
+            108: ['enginex-suite', 'engine-guardian'],
+            109: ['enginex-suite', 'stems-processor'],
+            110: ['enginex-suite'],
+            111: [],
+            112: ['sc5000-suite', 'leave', 'activate', 'boot-activate.sh'],
+        }
+        proc = self.tmp / 'proc'
+        for pid, argv in commands.items():
+            (proc / str(pid)).mkdir(parents=True)
+            (proc / str(pid) / 'cmdline').write_bytes(b'\0'.join(a.encode() for a in argv))
+        killed = self.tmp / 'killed'
+        killed.touch()
+        fallback = bdb.BOOT_ACTIVATE.rsplit('\nelse\n', 1)[1].rsplit('\nfi\n', 1)[0]
+        fallback = fallback.replace('/proc/', str(proc) + '/')
+        script = '''set -eu
+restore_gen2_timezone() { :; }
+convert_mounted() { :; }
+pgrep() { printf '%s\\n' $TEST_PIDS; }
+kill() { printf '%s\\n' "$1" >> "$KILLED"; }
+pkill() { printf 'pkill %s\\n' "$*" >> "$KILLED"; }
+''' + fallback
+        env = dict(self.env, ssh_start='', leave_pid='101', bin_dir=str(self.tmp / 'no-bin'),
+                   TEST_PIDS=' '.join(map(str, commands)) + ' 113', KILLED=str(killed))
+        res = subprocess.run(['sh', '-c', script], env=env, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(killed.read_text().splitlines(), ['104', '105', '106', '107'])
+
     def test_234_explicit_data_paths_share_the_activation_lock(self):
         suite = self.tmp / 'bin/enginex-suite'
         suite.parent.mkdir()

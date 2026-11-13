@@ -165,8 +165,7 @@ sub("accounts=/data/StreamingAccounts.json", f"accounts={tmp}/data/StreamingAcco
 sub("[ -d /data ]", f"[ -d {tmp}/data ]")
 sub("systemctl restart --no-block enginex-stream-sync.service enginex-rb-bridge.service enginex-deemixd.service engine-guardian.service || :", ":")
 sub('[ "$timesyncd_changed" = 0 ] || systemctl restart --no-block systemd-timesyncd.service || :', ":")
-sub("pkill -x enginex-suite 2>/dev/null || :", ":")
-sub("pkill -x sc5000-suite 2>/dev/null || : # the suite's name before 5.3.0.5 (#234)", ":")
+sub("pgrep -x 'enginex-suite|sc5000-suite' 2>/dev/null", ":")
 sub("engine.service", unit)
 # What may still reach the host's systemd: the reload, the restart of our unit, and two
 # branches this fixture never enters (no SSH key and no edisksd hook in the bundle).
