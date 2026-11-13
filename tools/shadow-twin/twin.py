@@ -711,7 +711,7 @@ def start_services(side: str, src_dir: Path | None = None) -> None:
     (sdir / "tmp/ui-eval.js").write_text("noop\nvoid 0;\n")
     (sdir / "tmp/engine_runguard.lock").unlink(missing_ok=True)
 
-    # Run engine-ui-guard pre (writes /run/sc5000-assignments/role, StreamingAccounts.json, etc.)
+    # Run engine-ui-guard pre (writes /run/enginex-assignments/role, StreamingAccounts.json, etc.)
     subprocess.run(ns_chroot_cmd(side, "/etc/sc5000/engine-ui-guard pre"), check=True)
 
     # Start stream-sync (--deemixd="" avoids spawning deemixd; --disable-guard avoids SCHED_IDLE starvation under software GL)

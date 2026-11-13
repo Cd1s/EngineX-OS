@@ -34,7 +34,7 @@ const (
 	DefaultFormat     = "mp3"
 	DefaultBitrate    = 192
 	DefaultStreamName = "EngineX OS Live Mix"
-	DefaultInputPath  = "/tmp/sc5000-broadcast.pcm"
+	DefaultInputPath  = "/tmp/enginex-broadcast.pcm"
 )
 
 // No deck image ships an MP3 or Ogg encoder (no lame, no ffmpeg binary; the stock
@@ -60,7 +60,7 @@ type Config struct {
 	Format     string `json:"format"`              // "mp3" (default), "ogg", "wav"
 	Bitrate    int    `json:"bitrate"`             // 128, 192 (default), 256, 320
 	StreamName string `json:"streamName"`          // default "EngineX OS Live Mix"
-	InputPath  string `json:"inputPath,omitempty"` // optional PCM file/FIFO path (default "/tmp/sc5000-broadcast.pcm")
+	InputPath  string `json:"inputPath,omitempty"` // optional PCM file/FIFO path (default "/tmp/enginex-broadcast.pcm")
 	LANMode    string `json:"lanMode,omitempty"`   // "off" (default), "rtp", "teleport"
 	LANTarget  string `json:"lanTarget,omitempty"` // e.g. "239.255.0.1:5004" or "192.168.1.50:9998"
 }

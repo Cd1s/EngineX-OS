@@ -179,7 +179,7 @@ for i in \$(seq 1 30); do
     sleep 0.1
 done
 
-test -f '$TARGET/run/sc5000-alsa-reexec.once'
+test -f '$TARGET/run/enginex-alsa-reexec.once'
 grep -q 'SC5000_UI_HOOK=/data/enginex/bundle/lib/libengine-ui-hook.so' \
     '$TARGET/run/systemd/system/engine.service.d/99-sc5000.conf'
 grep -q 'UnsetEnvironment=LD_PRELOAD' '$TARGET/run/systemd/system/engine.service.d/99-sc5000.conf'
@@ -195,11 +195,11 @@ chroot '$TARGET' /bin/sh /data/enginex/bundle/boot-activate.sh >/dev/null 2>&1
 test -s '$TARGET/usr/Engine/Scripts/engine'
 test \"\$before\" = \"\$(sha256sum '$TARGET/usr/Engine/Scripts/engine' | cut -d' ' -f1)\"
 test \"\$(cat '$TARGET/data/enginex/gen2-unlocked' | tr -d '\r\n')\" = '1'
-grep -q 'Environment=HOME=/tmp/sc5000-engine-home MESA_SHADER_CACHE_MAX_SIZE=32M' \
+grep -q 'Environment=HOME=/tmp/enginex-engine-home MESA_SHADER_CACHE_MAX_SIZE=32M' \
     '$TARGET/run/systemd/system/engine.service.d/99-sc5000.conf'
 grep -q 'Environment=QML_DISABLE_DISK_CACHE=1' \
     '$TARGET/run/systemd/system/engine.service.d/99-sc5000.conf'
-grep -q 'ExecStartPre=/bin/mkdir -p -m 0700 /tmp/sc5000-engine-home' \
+grep -q 'ExecStartPre=/bin/mkdir -p -m 0700 /tmp/enginex-engine-home' \
     '$TARGET/run/systemd/system/engine.service.d/99-sc5000.conf'
 grep -q 'EnvironmentFile=-/data/sc5000-custom/ui-scale.env' \
     '$TARGET/run/systemd/system/engine.service.d/99-sc5000.conf'
@@ -238,11 +238,11 @@ mount --bind /dev '$TARGET/dev'
 mount -t proc proc '$TARGET/proc'
 mount -t sysfs sysfs '$TARGET/sys'
 
-mkdir -p -m 0700 '$TARGET/tmp/sc5000-engine-home'
+mkdir -p -m 0700 '$TARGET/tmp/enginex-engine-home'
 
 # Launch real SC LIVE 4 Engine with LD_PRELOAD
 timeout 8 chroot '$TARGET' /usr/bin/env -i \
-    HOME=/tmp/sc5000-engine-home \
+    HOME=/tmp/enginex-engine-home \
     LD_PRELOAD=/data/sc5000-custom/bundle/lib/libengine-ui-hook.so \
     QT_QPA_PLATFORM=offscreen \
     LD_LIBRARY_PATH=/usr/qt/lib \

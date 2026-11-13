@@ -39,7 +39,7 @@
 #include "pioneer_ms.h"
 #include "live_tap.h"
 #ifndef SC_TAP_PATH
-#define SC_TAP_PATH "/tmp/sc5000-broadcast.pcm" // pkg/broadcast DefaultInputPath
+#define SC_TAP_PATH "/tmp/enginex-broadcast.pcm" // pkg/broadcast DefaultInputPath
 #endif
 static struct sc_tap live_tap; // #50, every Engine build; .bss (512 KiB ring), fd set by live_tap_drain
 #if !defined(__aarch64__)
@@ -54,7 +54,7 @@ static struct sc_tap live_tap; // #50, every Engine build; .bss (512 KiB ring), 
 #define A32_ONLY
 #endif
 
-#define UI_ROOT "/data/sc5000-custom/ui"
+#define UI_ROOT "/data/enginex/ui"
 #define FLAG_COMPRESSED 0x01
 #define FLAG_DIRECTORY 0x02
 #define FLAG_ZSTD 0x04
@@ -1458,7 +1458,7 @@ static int four_deck_layout(void) {
 // four_deck_role: the decks this player plays on RCA A / RCA B: 13, 24, 12, or a
 // single deck 1 / 2 with RCA B silent. auto (default) is what engine-ui-guard resolved
 // from the Engine player number before this start; it also maps the hardware.
-static const char *four_deck_resolved = "/run/sc5000-assignments/role";
+static const char *four_deck_resolved = "/run/enginex-assignments/role";
 static void read_role(const char *path, const char *key, char *role, size_t size) {
     FILE *f = fopen(path, "r");
     if (!f) return;
@@ -2305,8 +2305,8 @@ static const uint32_t oa_process_prefix[2] = {0xe16d42f4, 0xe1cd60f8}; // strd r
 #define OA_LOADER_MS 1500
 #endif
 #ifndef OA_LOG
-#define OA_LOG "/var/log/sc5000-uimod-oa.log"
-#define OA_SHADOW "/data/sc5000-custom/shadow-v3" // pkg/webui shadowDir()
+#define OA_LOG "/var/log/enginex-uimod-oa.log"
+#define OA_SHADOW "/data/enginex/shadow-v3" // pkg/webui shadowDir()
 #define OA_ENGINE_COPIES "/data/inMusicTempFiles/"
 #endif
 enum { OA_FINISHED = 0, OA_STARTED = 1, OA_DONE = 2, OA_STOPPED = 5, OA_PROGRESS_SIG = 6, OA_TRACK = 8, OA_BEATS = 9,
@@ -2812,7 +2812,7 @@ static const char *volatile_path(int dirfd, const char *path, char out[PATH_MAX]
         errno = EINVAL; return NULL;
     }
     char root[80];
-    snprintf(root, sizeof root, "/tmp/sc5000-engine-volatile-%u", (unsigned)geteuid());
+    snprintf(root, sizeof root, "/tmp/enginex-engine-volatile-%u", (unsigned)geteuid());
     if (!strncmp(full, root, strlen(root)) && full[strlen(root)] == '/') return path;
     if (mkdir(root, 0700) && errno != EEXIST) return NULL;
     struct stat st;
@@ -3010,9 +3010,9 @@ int sc5000_alsa_boot_hook(void *root, void *config, void **dst, void *private_da
     if (dst) *dst = NULL;
     if (g_hook_initialized) return 0;
     if (!is_engine()) return 0;
-    if (access("/run/sc5000-alsa-reexec.once", F_OK) == 0) return 0;
+    if (access("/run/enginex-alsa-reexec.once", F_OK) == 0) return 0;
 
-    int fd = open("/run/sc5000-alsa-reexec.once", O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    int fd = open("/run/enginex-alsa-reexec.once", O_CREAT | O_WRONLY | O_TRUNC, 0644);
     if (fd >= 0) close(fd);
 
     fprintf(stderr, "engine-ui-hook: ALSA one-shot boot hook triggered; activating EngineX OS\n");
@@ -3027,7 +3027,7 @@ int sc5000_alsa_boot_hook(void *root, void *config, void **dst, void *private_da
             if (devnull > 2) close(devnull);
         }
         unsetenv("LD_PRELOAD");
-        char *const argv[] = {"/bin/sh", "/data/sc5000-custom/bundle/boot-activate.sh", NULL};
+        char *const argv[] = {"/bin/sh", "/data/enginex/bundle/boot-activate.sh", NULL};
         execv("/bin/sh", argv);
         _exit(1);
     }
@@ -3386,8 +3386,8 @@ int az01_erase_data_partition(void) {
     snprintf(probe_inst, sizeof probe_inst, "%s/enginex/bundle/install.sh", root);
     if (getenv("SC5000_TEST_PASSTHROUGH_ERASE") ||
         (access(probe_boot, F_OK) != 0 && access(probe_inst, F_OK) != 0) ||
-        access("/usr/share/sc5000-custom/sc5000-suite.xz", F_OK) == 0) {
-        // 1st-gen: EngineX lives in the rootfs and sc5000-custom-prepare restores it after the stock erase.
+        access("/usr/share/enginex/enginex-suite.xz", F_OK) == 0) {
+        // 1st-gen: EngineX lives in the rootfs and enginex-prepare restores it after the stock erase.
         static void *orig_fn = NULL;
         int (*fn)(void) = next_symbol(&orig_fn, "az01_erase_data_partition");
         return fn ? fn() : -1;

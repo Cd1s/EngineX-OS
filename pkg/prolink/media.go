@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	DefaultMediaCacheDir = "/tmp/sc5000-prolink-media"
+	DefaultMediaCacheDir = "/tmp/enginex-prolink-media"
 	pdbPath              = "PIONEER/rekordbox/export.pdb"
 	dotPDBPath           = ".PIONEER/rekordbox/export.pdb"
 	maxPDB               = 64 << 20

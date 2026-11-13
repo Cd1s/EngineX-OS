@@ -1385,7 +1385,7 @@ func (s *Server) shadowGet(w http.ResponseWriter, r *http.Request) {
 	v := s.loadUI()
 	s.uiMu.Unlock()
 	role := s.activeRole(v)
-	debug := s.shadow.dbg.set(v.DebugTelemetry || fileExists(shadowDebugFlag))
+	debug := s.shadow.dbg.set(v.DebugTelemetry || shadowDebugFlagged())
 	query := r.URL.Query()
 	seen, seenErr := strconv.ParseUint(query.Get("ver"), 10, 64)
 	out := []deckState{}

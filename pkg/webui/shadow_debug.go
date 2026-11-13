@@ -1,7 +1,7 @@
 package webui
 
 // Shadow deck debug telemetry: with debug_telemetry=1 in settings.conf, or the
-// file /tmp/sc5000-debug, every own post, every peer update and every decision
+// file /tmp/enginex-debug, every own post, every peer update and every decision
 // the receiving QML takes (POST /v1/sc5000/debug/shadow) is one JSON line in
 // shadowDebugLog and in a ring that GET /v1/sc5000/debug/shadow serves with the
 // live state. Off by default: release images never write it.
@@ -18,10 +18,16 @@ import (
 	"time"
 )
 
-const shadowDebugFlag = "/tmp/sc5000-debug"
+// shadowDebugFlags turn the telemetry on by hand; /tmp/sc5000-debug is the name before
+// 5.3.0.5 (#234), still accepted in 5.3.0.5 and 5.3.0.6.
+var shadowDebugFlags = [...]string{"/tmp/enginex-debug", "/tmp/sc5000-debug"}
+
+func shadowDebugFlagged() bool { return anyFileExists(shadowDebugFlags[:]) }
+
+func anyFileExists(paths []string) bool { return slices.ContainsFunc(paths, fileExists) }
 
 // /tmp is RAM on the deck: one rotated .1 caps the log at 2 MB.
-var shadowDebugLog, shadowDebugMax = "/tmp/sc5000-shadow-debug.log", int64(1 << 20)
+var shadowDebugLog, shadowDebugMax = "/tmp/enginex-shadow-debug.log", int64(1 << 20)
 
 type shadowDebug struct {
 	on   atomic.Bool

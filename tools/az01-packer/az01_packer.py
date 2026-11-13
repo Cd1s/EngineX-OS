@@ -756,7 +756,7 @@ AuthenticationMethods publickey
 PubkeyAuthentication yes
 UsePAM no
 AllowUsers root
-PidFile /run/sc5000-custom-sshd.pid
+PidFile /run/enginex-sshd.pid
 Subsystem sftp /usr/libexec/sftp-server
 '''
 
