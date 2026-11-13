@@ -177,7 +177,7 @@ func populate(t *testing.T, img string, legacyDir bool) map[string][32]byte {
 	file := func(path string, data []byte) {
 		host := filepath.Join(dir, fmt.Sprintf("f%d", len(sentinels)))
 		os.WriteFile(host, data, 0o644)
-		w("write %s %s", host, path)
+		w("write %q %q", host, path)
 		sentinels[path] = sha256.Sum256(data)
 	}
 	for _, d := range []string{"/Music", "/Engine Library", "/system", "/system/var", "/system/var/overlay",
@@ -188,10 +188,10 @@ func populate(t *testing.T, img string, legacyDir bool) map[string][32]byte {
 	file("/Music/track one.flac", pattern(700<<10, 1))
 	file("/Engine Library/m.db", pattern(90<<10, 2))
 	file("/downloads/cached.bin", pattern(5000, 3))
-	w("ea_set /Music/track\\ one.flac user.enginex sentinel")
-	w("ln /Music/track\\ one.flac /Music/hardlink.flac")
-	w("sif /Music/track\\ one.flac links_count 2")
-	w("symlink /Music/latest /Music/track\\ one.flac")
+	w(`ea_set "/Music/track one.flac" user.enginex sentinel`)
+	w(`ln "/Music/track one.flac" /Music/hardlink.flac`)
+	w(`sif "/Music/track one.flac" links_count 2`)
+	w(`symlink /Music/latest "/Music/track one.flac"`)
 	for i := 0; i < 400; i++ { // > 1 block: e2fsck -D indexes it
 		file(fmt.Sprintf("/system/var-lib/alsa/conf.d/%03d-user-%s.conf", i, strings.Repeat("x", 20)), []byte(fmt.Sprintf("# %d\n", i)))
 	}
@@ -304,7 +304,7 @@ func testInjectBackup(t *testing.T, backup string, sentinels map[string][32]byte
 			t.Errorf("sentinel %s changed: %v", p, err)
 		}
 	}
-	if !strings.Contains(debugfs(t, out, "ea_get /Music/track\\ one.flac user.enginex"), "sentinel") {
+	if !strings.Contains(debugfs(t, out, `ea_get "/Music/track one.flac" user.enginex`), "sentinel") {
 		t.Error("xattr lost")
 	}
 	if !strings.Contains(debugfs(t, out, "stat /Music/hardlink.flac"), "Links: 2") {
@@ -377,15 +377,16 @@ func TestOracleStockDeckTools(t *testing.T) {
 	needTools(t, "debugfs", "e2fsck")
 	loader, fsckArgs, env := stockTool(t, "sbin/fsck.ext4")
 	_, mkfsArgs, _ := stockTool(t, "sbin/mkfs.ext4")
+	// The deck runs "fsck.ext4 -y" at every boot (az0x-data-mkfs). Exit 0
+	// means nothing needed fixing; -fy always rewrites the superblock's
+	// check time, so bytes are not compared.
 	deckFsck := func(p string) {
 		t.Helper()
-		before := fileHash(t, p)
-		out, code := run(t, env, loader, append(append([]string{}, fsckArgs...), "-fy", p)...)
-		if code != 0 {
-			t.Fatalf("deck fsck.ext4 -fy exited %d:\n%s", code, out)
-		}
-		if fileHash(t, p) != before {
-			t.Fatalf("deck fsck.ext4 changed the image:\n%s", out)
+		for _, mode := range []string{"-fn", "-fy"} {
+			out, code := run(t, env, loader, append(append([]string{}, fsckArgs...), mode, p)...)
+			if code != 0 {
+				t.Fatalf("deck fsck.ext4 %s exited %d:\n%s", mode, code, out)
+			}
 		}
 	}
 	img, p := newImage(t, 512<<20, "az01-data")
