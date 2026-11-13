@@ -21,17 +21,18 @@ var winusbDLL = windows.NewLazySystemDLL("winusb.dll")
 var cfgmgrDLL = windows.NewLazySystemDLL("cfgmgr32.dll")
 
 type winCalls struct {
-	initialize func(windows.Handle) (uintptr, error)
-	free       func(uintptr) error
-	query      func(uintptr, uint8) (Interface, error)
-	alternate  func(uintptr, uint8) error
-	descriptor func(uintptr) (uint16, uint16, error)
-	policy     func(uintptr, uint8, uint32) error
-	transfer   func(uintptr, uint8, bool, *byte, uint32, uint64, *uint32, *windows.Overlapped) error
-	result     func(uintptr, *windows.Overlapped, *uint32) error
-	cancel     func(windows.Handle, *windows.Overlapped) error
-	reset      func(uintptr, uint8) error
-	close      func(windows.Handle) error
+	initialize       func(windows.Handle) (uintptr, error)
+	free             func(uintptr) error
+	query            func(uintptr, uint8) (Interface, error)
+	alternate        func(uintptr, uint8) error
+	currentAlternate func(uintptr) (uint8, error)
+	descriptor       func(uintptr) (uint16, uint16, error)
+	policy           func(uintptr, uint8, uint32) error
+	transfer         func(uintptr, uint8, bool, *byte, uint32, uint64, *uint32, *windows.Overlapped) error
+	result           func(uintptr, *windows.Overlapped, *uint32) error
+	cancel           func(windows.Handle, *windows.Overlapped) error
+	reset            func(uintptr, uint8) error
+	close            func(windows.Handle) error
 }
 
 // winProc forwards live Go addresses through uintptr arguments. The directive
@@ -53,7 +54,7 @@ func nativeWinCalls() (winCalls, error) {
 	if err := winusbDLL.Load(); err != nil {
 		return winCalls{}, fault("load WinUSB", Binding, false, err)
 	}
-	names := []string{"WinUsb_Initialize", "WinUsb_Free", "WinUsb_QueryInterfaceSettings", "WinUsb_QueryPipe", "WinUsb_SetCurrentAlternateSetting", "WinUsb_GetDescriptor", "WinUsb_SetPipePolicy", "WinUsb_ReadPipe", "WinUsb_WritePipe", "WinUsb_ControlTransfer", "WinUsb_GetOverlappedResult", "WinUsb_ResetPipe"}
+	names := []string{"WinUsb_Initialize", "WinUsb_Free", "WinUsb_QueryInterfaceSettings", "WinUsb_QueryPipe", "WinUsb_SetCurrentAlternateSetting", "WinUsb_GetCurrentAlternateSetting", "WinUsb_GetDescriptor", "WinUsb_SetPipePolicy", "WinUsb_ReadPipe", "WinUsb_WritePipe", "WinUsb_ControlTransfer", "WinUsb_GetOverlappedResult", "WinUsb_ResetPipe"}
 	p := map[string]*windows.LazyProc{}
 	for _, name := range names {
 		proc := winusbDLL.NewProc(name)
@@ -71,6 +72,11 @@ func nativeWinCalls() (winCalls, error) {
 		free: func(handle uintptr) error { return winProc(p["WinUsb_Free"], handle) },
 		alternate: func(handle uintptr, alt uint8) error {
 			return winProc(p["WinUsb_SetCurrentAlternateSetting"], handle, uintptr(alt))
+		},
+		currentAlternate: func(handle uintptr) (uint8, error) {
+			var value uint8
+			err := winProc(p["WinUsb_GetCurrentAlternateSetting"], handle, uintptr(unsafe.Pointer(&value)))
+			return value, err
 		},
 		query: func(handle uintptr, alt uint8) (Interface, error) {
 			var descriptor [9]byte
@@ -152,7 +158,7 @@ func winError(op string, err error, written bool) error {
 		kind = Permission
 	case errors.Is(err, windows.ERROR_SHARING_VIOLATION), errors.Is(err, windows.ERROR_BUSY):
 		kind = Busy
-	case errors.Is(err, windows.ERROR_FILE_NOT_FOUND), errors.Is(err, windows.ERROR_DEVICE_NOT_CONNECTED), errors.Is(err, windows.ERROR_INVALID_HANDLE):
+	case errors.Is(err, windows.ERROR_FILE_NOT_FOUND), errors.Is(err, windows.ERROR_DEVICE_NOT_CONNECTED), errors.Is(err, windows.ERROR_INVALID_HANDLE), errors.Is(err, windows.ERROR_GEN_FAILURE):
 		kind = Disconnected
 	case errors.Is(err, windows.ERROR_SEM_TIMEOUT), errors.Is(err, windows.ERROR_TIMEOUT):
 		kind = Timeout
@@ -162,6 +168,47 @@ func winError(op string, err error, written bool) error {
 		kind = Binding
 	}
 	return fault(op, kind, written, err)
+}
+
+// Windows normalizes a physical USB serial into the unique PnP instance ID.
+// Generated location IDs and composite-interface instance tails are not serials.
+func windowsUSBSerial(instance string, capabilities uint32) string {
+	const uniqueID = 0x10 // CM_DEVCAP_UNIQUEID
+	parts := strings.Split(instance, "\\")
+	if capabilities&uniqueID == 0 || len(parts) != 3 || !strings.EqualFold(parts[0], "USB") || strings.Contains(strings.ToUpper(parts[1]), "&MI_") {
+		return ""
+	}
+	return parts[2]
+}
+
+func inheritWindowsSerial(attachments []winAttachment, parentOf func(uint32) (uint32, bool)) {
+	byInstance := make(map[uint32]winAttachment, len(attachments))
+	for _, device := range attachments {
+		byInstance[device.devinst] = device
+	}
+	for i := range attachments {
+		device := &attachments[i]
+		if device.info.Serial != "" {
+			continue
+		}
+		current := device.devinst
+		for depth := 0; depth < 8; depth++ {
+			parent, ok := parentOf(current)
+			if !ok || parent == current {
+				break
+			}
+			current = parent
+			if candidate, ok := byInstance[parent]; ok {
+				if candidate.info.VID != device.info.VID || candidate.info.PID != device.info.PID {
+					break
+				}
+				if candidate.info.Serial != "" {
+					device.info.Serial = candidate.info.Serial
+					break
+				}
+			}
+		}
+	}
 }
 
 type winAttachment struct {
@@ -345,13 +392,24 @@ func scanWindows(ctx context.Context) ([]winAttachment, error) {
 		}
 		service, _ := property(device, windows.SPDRP_SERVICE).(string)
 		product, _ := property(device, windows.SPDRP_DEVICEDESC).(string)
+		capabilities, _ := property(device, windows.SPDRP_CAPABILITIES).(uint32)
+		location, _ := property(device, windows.SPDRP_LOCATION_INFORMATION).(string)
+		if locations, ok := property(device, windows.SPDRP_LOCATION_PATHS).([]string); ok && len(locations) > 0 {
+			location = locations[0]
+		}
 		paths, err := winInterfaces(registeredGUIDs(set, device), instance)
 		if err != nil {
 			return nil, fault("enumerate interface paths", System, false, err)
 		}
 		arrival := winArrival(set, device)
-		result = append(result, winAttachment{info: DeviceInfo{VID: vid, PID: pid, Product: product, Driver: service}, instance: instance, devinst: uint32(device.DevInst), arrival: arrival, paths: paths})
+		result = append(result, winAttachment{info: DeviceInfo{VID: vid, PID: pid, Product: product, Driver: service, Location: location, Serial: windowsUSBSerial(instance, capabilities)}, instance: instance, devinst: uint32(device.DevInst), arrival: arrival, paths: paths})
 	}
+	parentProc := cfgmgrDLL.NewProc("CM_Get_Parent")
+	inheritWindowsSerial(result, func(child uint32) (uint32, bool) {
+		var parent uint32
+		status, _, _ := parentProc.Call(uintptr(unsafe.Pointer(&parent)), uintptr(child), 0)
+		return parent, status == 0
+	})
 	return result, nil
 }
 
@@ -399,7 +457,11 @@ func (b *windowsBackend) Open(ctx context.Context, id DeviceID, number, alt uint
 		return nil, fault("open", Disconnected, false, errors.New("unknown or stale enumeration identity"))
 	}
 	if !strings.EqualFold(a.info.Driver, "WinUSB") {
-		return nil, fault("open", Binding, false, errors.New("selected device is not bound to the in-box WinUSB driver"))
+		driver := a.info.Driver
+		if driver == "" {
+			driver = "none"
+		}
+		return nil, fault("open", Binding, false, fmt.Errorf("current driver is %q; bind the selected update interface to the in-box WinUSB driver", driver))
 	}
 	if len(a.paths) == 0 {
 		return nil, fault("open", Binding, false, errors.New("no registered WinUSB interface path"))
@@ -451,9 +513,16 @@ func (b *windowsBackend) Open(ctx context.Context, id DeviceID, number, alt uint
 			cleanup(err)
 			return nil, errors.Join(failures...)
 		}
-		if err := b.calls.alternate(handle, alt); err != nil {
-			cleanup(winError("set alternate", err, false))
+		current, err := b.calls.currentAlternate(handle)
+		if err != nil {
+			cleanup(winError("get current alternate", err, false))
 			continue
+		}
+		if current != alt {
+			if err := b.calls.alternate(handle, alt); err != nil {
+				cleanup(winError("set alternate", err, false))
+				continue
+			}
 		}
 		a.info.Interfaces = []Interface{it}
 		return &windowsDevice{s: newSession(), file: file, handle: handle, calls: b.calls, info: a.info, it: it}, nil
@@ -471,7 +540,7 @@ type windowsDevice struct {
 }
 
 func (d *windowsDevice) Info() DeviceInfo { return cloneInfo(d.info) }
-func (d *windowsDevice) exchange(parent context.Context, ep uint8, data []byte, control bool, setup uint64, write bool) (int, error) {
+func (d *windowsDevice) exchange(parent context.Context, ep uint8, data []byte, control bool, setup uint64, write bool) (count int, transferErr error) {
 	if err := transferSize(len(data)); err != nil {
 		return 0, err
 	}
@@ -504,6 +573,11 @@ func (d *windowsDevice) exchange(parent context.Context, ep uint8, data []byte, 
 	pin.Pin(&done)
 	defer pin.Unpin()
 	err = d.calls.transfer(d.handle, ep, control, buffer, uint32(len(data)), setup, &done, overlap)
+	defer func() {
+		if !control && pipeNeedsReset(transferErr) {
+			transferErr = errors.Join(transferErr, winError("reset pipe after transfer", d.calls.reset(d.handle, ep), false))
+		}
+	}()
 	if errors.Is(err, windows.ERROR_IO_PENDING) {
 		cancelFinished := make(chan struct{})
 		var cancelError error

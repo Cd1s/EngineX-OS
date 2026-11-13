@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"sort"
 	"sync"
 	"time"
 	"unsafe"
@@ -114,7 +115,7 @@ func darwinError(op string, status int32, written bool) error {
 		kind = Permission
 	case 0xe00002c5, 0xe00002d5:
 		kind = Busy
-	case 0xe00002c0, 0xe00002cd, 0xe00002d8:
+	case 0xe00002c0, 0xe00002d7, 0xe00002d9, 0xe00002eb, 0xe00002ed:
 		kind = Disconnected
 	case 0xe00002d6, 0xe0004051:
 		kind = Timeout
@@ -298,6 +299,29 @@ type darwinBackend struct {
 	attachments map[DeviceID]darwinAttachment
 }
 
+func orderedDarwinAttachments(devices map[uint64]*darwinAttachment) []*darwinAttachment {
+	result := make([]*darwinAttachment, 0, len(devices))
+	for _, device := range devices {
+		result = append(result, device)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].info.Location != result[j].info.Location {
+			return result[i].info.Location < result[j].info.Location
+		}
+		return result[i].registryID < result[j].registryID
+	})
+	for _, device := range result {
+		sort.Slice(device.info.Interfaces, func(i, j int) bool {
+			a, b := device.info.Interfaces[i], device.info.Interfaces[j]
+			if a.Number != b.Number {
+				return a.Number < b.Number
+			}
+			return a.Alternate < b.Alternate
+		})
+	}
+	return result
+}
+
 func NewBackend() (Backend, error) {
 	a, err := loadDarwin()
 	if err != nil {
@@ -323,7 +347,11 @@ func (b *darwinBackend) Enumerate(ctx context.Context) ([]DeviceInfo, error) {
 			if !vok || !pok || vid > 65535 || pid > 65535 {
 				return nil
 			}
-			devices[id] = &darwinAttachment{registryID: id, interfaces: map[uint8]uint64{}, info: DeviceInfo{VID: uint16(vid), PID: uint16(pid), Product: a.text(service, "USB Product Name"), Serial: a.text(service, "USB Serial Number")}}
+			location := ""
+			if value, ok := a.number(service, "locationID"); ok {
+				location = fmt.Sprintf("0x%08x", value)
+			}
+			devices[id] = &darwinAttachment{registryID: id, interfaces: map[uint8]uint64{}, info: DeviceInfo{VID: uint16(vid), PID: uint16(pid), Product: a.text(service, "USB Product Name"), Serial: a.text(service, "USB Serial Number"), Location: location}}
 			return nil
 		})
 		if err != nil {
@@ -378,7 +406,7 @@ func (b *darwinBackend) Enumerate(ctx context.Context) ([]DeviceInfo, error) {
 	defer b.mu.Unlock()
 	b.attachments = map[DeviceID]darwinAttachment{}
 	var result []DeviceInfo
-	for _, d := range devices {
+	for _, d := range orderedDarwinAttachments(devices) {
 		d.info.ID = nextID()
 		b.attachments[d.info.ID] = *d
 		result = append(result, cloneInfo(d.info))
@@ -458,10 +486,16 @@ func (b *darwinBackend) Open(ctx context.Context, id DeviceID, number, alternate
 			retErr = errors.Join(retErr, darwinError("close failed interface", comSimple(iface, 9), false))
 		}
 	}()
-	var setAlternate func(*darwinCOM, uint8) int32
-	purego.RegisterFunc(&setAlternate, iface.Table[22])
-	if err := darwinError("set alternate", setAlternate(iface, alternate), false); err != nil {
+	current, err := comByte(iface, 18)
+	if err != nil {
 		return nil, err
+	}
+	if current != alternate {
+		var setAlternate func(*darwinCOM, uint8) int32
+		purego.RegisterFunc(&setAlternate, iface.Table[22])
+		if err := darwinError("set alternate", setAlternate(iface, alternate), false); err != nil {
+			return nil, err
+		}
 	}
 	it, pipes, err := darwinPipeInfo(iface)
 	if err != nil {
@@ -574,7 +608,7 @@ func (d *darwinDevice) call(ctx context.Context, pipe uint8, write bool, native 
 	return n, darwinError("transfer", status, write)
 }
 
-func (d *darwinDevice) bulk(parent context.Context, ep uint8, data []byte, in bool) (int, error) {
+func (d *darwinDevice) bulk(parent context.Context, ep uint8, data []byte, in bool) (count int, transferErr error) {
 	if err := bulkEndpoint(d.it, ep, in); err != nil {
 		return 0, err
 	}
@@ -598,6 +632,11 @@ func (d *darwinDevice) bulk(parent context.Context, ep uint8, data []byte, in bo
 	pin.Pin(buffer)
 	defer pin.Unpin()
 	pipe := d.pipes[ep]
+	defer func() {
+		if pipeNeedsReset(transferErr) {
+			transferErr = errors.Join(transferErr, d.resetPipe(pipe, "reset pipe after transfer"))
+		}
+	}()
 	size := uint32(len(data))
 	ms := timeoutMS(ctx)
 	if in {
@@ -666,6 +705,12 @@ func (d *darwinDevice) Control(parent context.Context, typ, request uint8, value
 	}
 	return n, err
 }
+
+func (d *darwinDevice) resetPipe(pipe uint8, op string) error {
+	var clear func(*darwinCOM, uint8) int32
+	purego.RegisterFunc(&clear, d.object.Table[30])
+	return darwinError(op, clear(d.object, pipe), false)
+}
 func (d *darwinDevice) ClearHalt(parent context.Context, ep uint8) error {
 	if err := bulkEndpoint(d.it, ep, ep&0x80 != 0); err != nil {
 		return err
@@ -678,9 +723,7 @@ func (d *darwinDevice) ClearHalt(parent context.Context, ep uint8) error {
 	if err := ctx.Err(); err != nil {
 		return fault("clear halt", Cancelled, false, err)
 	}
-	var clear func(*darwinCOM, uint8) int32
-	purego.RegisterFunc(&clear, d.object.Table[30])
-	return darwinError("clear halt", clear(d.object, d.pipes[ep]), false)
+	return d.resetPipe(d.pipes[ep], "clear halt")
 }
 func (d *darwinDevice) Close() error {
 	return d.s.close(func() error {

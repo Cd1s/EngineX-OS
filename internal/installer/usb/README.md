@@ -29,6 +29,18 @@ caller must know which interface it intends to open, then use `Device.Info()`
 for the verified interface and endpoints. A generic USB path or `Driver` text
 alone never establishes a working WinUSB binding.
 
+Linux skips individual devices whose descriptors cannot be read or parsed,
+including devices unplugged during enumeration. An unconfigured device stays
+visible without active interfaces and Open reports Unsupported with its path.
+Invalid descriptors are still rejected when opening a selected attachment.
+
+`Location` identifies the host port/topology for selecting identical devices.
+Darwin sorts attachments by location and registry ID, then sorts interfaces.
+Windows fills `Serial` from a unique physical USB PnP instance ID, or the
+matching physical USB parent of a composite interface; Windows normalizes this
+value. Generated location IDs are not reported as serials. Optional metadata
+can be empty. Neither location nor serial substitutes for attachment validation.
+
 After Open, `Info().Interfaces` contains the claimed interface and endpoints.
 Returned descriptor slices are copies. Each call validates endpoint ownership,
 bulk transfer type and direction. Interface/endpoint control recipients cannot
@@ -40,7 +52,8 @@ to Open rather than protocol control traffic.
 Each `WriteBulk` is one OS transfer, including `nil`/empty-buffer writes. The
 Windows backend disables implicit short-packet termination so packet-aligned
 payloads do not acquire an extra ZLP. The protocol layer owns chunking and any
-explicit final ZLP. Individual bulk calls are limited to 16 MiB; control data
+explicit final ZLP. Individual bulk calls are limited to 1 MiB, leaving space
+below usbfs' default shared memory budget for URB overhead; control data
 is limited to 65535 bytes. Short results are returned without replay, and the
 caller must validate them.
 
@@ -55,6 +68,16 @@ error closes the usbfs handle before unpinning. Windows pins overlapped I/O
 and its buffers, uses `CancelIoEx`, joins the cancellation callback and drains
 `WinUsb_GetOverlappedResult`. Darwin pins native buffers until synchronous
 IOKit methods return and joins its AbortPipe watcher before releasing COM.
+
+After a bulk timeout or cancellation, the backend clears/resets that pipe
+after draining native I/O and before releasing the session lock. Recovery
+errors are joined to the original error, and write uncertainty is preserved;
+the payload is never replayed. No caller ClearHalt call is needed for this
+bulk recovery. Other protocol/stall errors can require explicit ClearHalt if
+the protocol permits reusing the session. After a control timeout/cancellation,
+close and reopen the session before another control operation: ClearHalt
+targets bulk endpoints, not the shared default control pipe. Resetting a pipe
+does not establish protocol state or prove that a partition write failed.
 
 Errors preserve native/context causes through `Unwrap()`. `Kind` distinguishes
 permission, binding, busy, disconnection, timeout, cancellation, protocol and
