@@ -23,6 +23,8 @@ type dirBlock struct {
 	dx      bool // htree root or interior node: no ordinary entries past '.'/'..'
 }
 
+const maxDirBytes = 128 << 20
+
 const dxRootLimitOff = 0x20
 const dxNodeLimitOff = 0x08
 
@@ -62,8 +64,13 @@ func (f *fsys) readDir(dir *inode) ([]dirBlock, error) {
 		return nil, err
 	}
 	nblocks := dir.size() / uint64(f.bs)
-	if dir.size()%uint64(f.bs) != 0 || nblocks == 0 || nblocks > 1<<22 {
+	if dir.size()%uint64(f.bs) != 0 || nblocks == 0 {
 		return nil, corruptf("directory inode %d has size %d", dir.num, dir.size())
+	}
+	// A directory is read whole; bound it so a hostile size cannot force a
+	// huge allocation. 128 MiB holds well over a million entries.
+	if dir.size() > maxDirBytes {
+		return nil, fmt.Errorf("%w: directory inode %d is %d bytes", ErrUnsupported, dir.num, dir.size())
 	}
 	blocks := make([]dirBlock, 0, nblocks)
 	next := uint64(0)

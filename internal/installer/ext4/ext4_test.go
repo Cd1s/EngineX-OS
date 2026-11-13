@@ -359,3 +359,45 @@ func flipByte(b []byte, off int) []byte {
 	c[off] ^= 1
 	return c
 }
+
+func TestJournalWithTransactionsIsRefused(t *testing.T) {
+	img, p := newImage(t, 64<<20, "data")
+	j, err := img.fs.readInode(journalIno)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exts, _, _ := img.fs.fileMap(j)
+	img.Close()
+	data, _ := os.ReadFile(p)
+	be.PutUint32(data[int64(exts[0].phys)*4096+0x1C:], 1) // s_start: a log to replay
+	dst := filepath.Join(t.TempDir(), "out.img")
+	if _, err := OpenCopy(context.Background(), bytesSource(data), dst); !errors.Is(err, ErrDirty) {
+		t.Fatalf("OpenCopy = %v, want ErrDirty", err)
+	}
+	if _, err := os.Stat(dst); !os.IsNotExist(err) {
+		t.Fatal("output exists after refusal")
+	}
+}
+
+func TestEncryptedDirectoryIsNeverModified(t *testing.T) {
+	img, _ := newImage(t, 64<<20, "data")
+	if err := img.Apply(context.Background(), ChangeSet{Directories: []string{"downloads"}}); err != nil {
+		t.Fatal(err)
+	}
+	in, _ := img.fs.lstat("downloads")
+	in.setFlags(in.flags() | flagEncrypt)
+	if err := img.fs.writeInode(in); err != nil {
+		t.Fatal(err)
+	}
+	for _, cs := range []ChangeSet{
+		{Files: []Entry{memEntry("downloads/x", 0o644, []byte("x"))}},
+		{Directories: []string{"downloads/sub"}},
+		{Remove: []string{"downloads/old"}},
+		{Links: map[string]string{"downloads/l": "x"}},
+	} {
+		if err := img.Apply(context.Background(), cs); !errors.Is(err, ErrUnsupported) {
+			t.Errorf("Apply %+v = %v, want ErrUnsupported", cs, err)
+		}
+	}
+	mustCheck(t, img)
+}
