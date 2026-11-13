@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"io"
 	"math"
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -510,5 +513,92 @@ func TestExportRebindPlayingStatusHandoffFirmwareAndDBServerMetadata(t *testing.
 	}
 	if gotDur != 240 || gotBPM != 12800 {
 		t.Fatalf("DBServer 0x2002 truncated float metadata: dur=%d (want 240) bpm=%d (want 12800)", gotDur, gotBPM)
+	}
+}
+
+func TestDBServerConcurrentListenAndMenuMRUEviction(t *testing.T) {
+	lib := &rekordbox.Library{
+		Tracks: []rekordbox.Track{
+			{ID: 1, Path: "/Music/a.mp3", Title: "Alpha", Artist: "Art A", BPM: 124, Duration: 200},
+			{ID: 2, Path: "/Music/b.mp3", Title: "Beta", Artist: "Art B", BPM: 128, Duration: 210},
+		},
+	}
+	dbs := &DBServer{Library: lib, Number: func() byte { return 4 }}
+	defer dbs.Close()
+
+	// 1. Concurrent Listen calls under -race: exactly one wins, others fail cleanly without races.
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	var wins atomic.Int32
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if err := dbs.Listen("127.0.0.1:0"); err == nil {
+				wins.Add(1)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	if got := wins.Load(); got != 1 {
+		t.Fatalf("concurrent DBServer.Listen winners = %d, want 1", got)
+	}
+
+	// 2. Menu MRU eviction: re-querying slot 1 refreshes its MRU position so a 5th
+	// menu slot evicts LRU slot 2 instead of slot 1.
+	c, err := net.Dial("tcp4", dbs.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+	if _, err := c.Write([]byte{0x11, 0, 0, 0, 1}); err != nil {
+		t.Fatal(err)
+	}
+	var hello [5]byte
+	if _, err := io.ReadFull(c, hello[:]); err != nil || hello != [5]byte{0x11, 0, 0, 0, 1} {
+		t.Fatalf("greeting: %x %v", hello, err)
+	}
+	_, _ = c.Write(dbRequest(1, 0, 1))
+	if m := dbResponse(t, c); m.kind != 0x4000 || len(m.args) != 2 || m.args[1].n != 4 {
+		t.Fatalf("setup: %+v", m)
+	}
+
+	menuKey := func(slot uint32) uint32 { return 0x01000301 | (slot << 16) }
+	tx := uint32(10)
+	queryAllTracks := func(slot uint32) {
+		t.Helper()
+		tx++
+		_, _ = c.Write(dbRequest(tx, 0x1004, menuKey(slot), 0))
+		if m := dbResponse(t, c); m.kind != 0x4000 || len(m.args) < 2 || m.args[1].n != 2 {
+			t.Fatalf("slot %d 0x1004 query reply = %+v", slot, m)
+		}
+	}
+
+	for _, slot := range []uint32{1, 2, 3, 4} {
+		queryAllTracks(slot)
+	}
+	// Repeat slot 1 to promote it to MRU ([2, 3, 4, 1]), then open slot 5 -> evicts slot 2 ([3, 4, 1, 5]).
+	queryAllTracks(1)
+	queryAllTracks(5)
+
+	tx++
+	_, _ = c.Write(dbRequest(tx, 0x3000, menuKey(1), 0, 2, 0, 2, 0))
+	if h := dbResponse(t, c); h.kind != 0x4001 {
+		t.Fatalf("MRU-refreshed slot 1 was evicted: got kind %#x, want 0x4001", h.kind)
+	}
+	it1 := dbResponse(t, c)
+	it2 := dbResponse(t, c)
+	tail := dbResponse(t, c)
+	if it1.kind != 0x4101 || it2.kind != 0x4101 || tail.kind != 0x4201 || it1.args[3].text() != "Alpha" || it2.args[3].text() != "Beta" {
+		t.Fatalf("unexpected render items for slot 1: %+v %+v %+v", it1, it2, tail)
+	}
+
+	tx++
+	_, _ = c.Write(dbRequest(tx, 0x3000, menuKey(2), 0, 2, 0, 2, 0))
+	if evicted := dbResponse(t, c); evicted.kind != 0x4003 {
+		t.Fatalf("LRU slot 2 was not evicted: got kind %#x, want 0x4003", evicted.kind)
 	}
 }
