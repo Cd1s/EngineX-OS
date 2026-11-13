@@ -66,6 +66,8 @@ ALLOW = [
     (['tools/edisksd-hook/*'], r'sc5000-hfs-views?\b|/run/sc5000-hfs-views',
      'views the hook of an older release mounted stay hidden after an in-place update'),
     (['pkg/webui/shadow_debug.go'], r'/tmp/sc5000-debug', 'debug flag file of older releases'),
+    (['pkg/broadcast/broadcast.go'], r'/tmp/sc5000-broadcast\.pcm',
+     'the hook feed of releases before 5.3.0.5: a saved configuration naming it reads this release\'s'),
     (PACKER, r'sc5000(?:/stems-runtime-prepare)?\b|sc5000-custom-\*?|dnsmasq\.d/sc5000-telemetry\.conf'
      r"|'sc5000'|\bsc5000\b",
      'etc-reset removes upper-layer copies under the old names; the audit knows them'),
