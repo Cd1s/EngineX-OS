@@ -1298,3 +1298,156 @@ func TestTidalRefreshOnlyStoreWithSyntheticBearer(t *testing.T) {
 		t.Errorf("refresh must happen once: HTTP %d, calls=%d", resp.StatusCode, calls.Load())
 	}
 }
+
+// Engine stores each provider's credential JSON as a string in its account map.
+func TestTidalSeedsRealAuthFromStreamingAccountsOnUpgrade(t *testing.T) {
+	for _, tc := range []struct {
+		name, account       string
+		loggedIn, synthetic bool
+	}{
+		{"real", `{"provider":"TIDAL","providerType":"TIDAL","accessToken":"upgrade-access","refreshToken":"upgrade-refresh","userId":42,"countryCode":"DE"}`, true, false},
+		{"opaque", `encrypted-sso-session`, false, false},
+		{"synthetic", `{"provider":"TIDAL","accessToken":"enginex","refreshToken":"enginex"}`, false, true},
+		{"mixed", `{"provider":"TIDAL","accessToken":"enginex","sso":"opaque-real-session"}`, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			accounts := filepath.Join(t.TempDir(), "StreamingAccounts.json")
+			data, _ := json.Marshal(map[string]string{"TIDAL": tc.account})
+			if err := os.WriteFile(accounts, data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("Authorization") != "Bearer upgrade-access" {
+					t.Error("seeded real bearer not used")
+				}
+				io.WriteString(w, `{"userId":42}`)
+			}))
+			defer up.Close()
+			cfg := Config{AccessToken: "code", UIDir: t.TempDir(), StateDir: dir, TidalAPIURL: up.URL, StreamingAccountsPath: accounts}
+			srv := httptest.NewServer(New(cfg, nil))
+			defer srv.Close()
+			var status map[string]any
+			tidalGet(t, srv.URL, "/v1/sc5000/ui", 200, &status)
+			if status["tidalLoggedIn"] != tc.loggedIn || status["tidalSynthetic"] != tc.synthetic {
+				t.Errorf("login=%v synthetic=%v; want %v/%v", status["tidalLoggedIn"], status["tidalSynthetic"], tc.loggedIn, tc.synthetic)
+			}
+			if tc.loggedIn {
+				p := filepath.Join(dir, "tidal-auth.json")
+				st, err := os.Stat(p)
+				if err != nil {
+					t.Fatal("real auth was not seeded")
+				}
+				if st.Mode().Perm() != 0600 {
+					t.Errorf("seed permissions %o", st.Mode().Perm())
+				}
+				var saved tidalAuth
+				b, _ := os.ReadFile(p)
+				if json.Unmarshal(b, &saved) != nil || saved.AccessToken != "upgrade-access" || saved.RefreshToken != "upgrade-refresh" {
+					t.Error("real auth not preserved")
+				}
+				uiPost(t, srv.URL, "scope=tidal")
+				tidalGet(t, srv.URL, "/v1/sessions", 200, nil)
+			}
+			if after, err := os.ReadFile(accounts); err != nil || !bytes.Equal(data, after) {
+				t.Error("Engine account file was modified")
+			}
+		})
+	}
+}
+
+func TestTidalConcurrent401RefreshesOnce(t *testing.T) {
+	var refreshes, expired atomic.Int32
+	allExpired := make(chan struct{})
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/v1/oauth2/token" {
+			r.ParseForm()
+			n := refreshes.Add(1)
+			time.Sleep(30 * time.Millisecond)
+			if n != 1 || r.Form.Get("refresh_token") != "old-refresh" {
+				w.WriteHeader(400)
+				io.WriteString(w, `{"error":"invalid_grant"}`)
+				return
+			}
+			io.WriteString(w, `{"access_token":"new-access","refresh_token":"new-refresh"}`)
+			return
+		}
+		if r.Header.Get("Authorization") == "Bearer old-access" {
+			if expired.Add(1) == 8 {
+				close(allExpired)
+			}
+			select {
+			case <-allExpired:
+			case <-r.Context().Done():
+				return
+			}
+			w.WriteHeader(401)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer new-access" {
+			t.Error("unexpected retry bearer")
+		}
+		io.WriteString(w, `{"userId":42}`)
+	}))
+	defer up.Close()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "tidal-auth.json"), []byte(`{"accessToken":"old-access","refreshToken":"old-refresh"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(New(Config{AccessToken: "code", UIDir: t.TempDir(), StateDir: dir, TidalAPIURL: up.URL, TidalAuthURL: up.URL}, nil))
+	defer srv.Close()
+	uiPost(t, srv.URL, "scope=tidal")
+	results := make(chan int, 8)
+	for i := 0; i < 8; i++ {
+		go func() {
+			client := &http.Client{Timeout: 5 * time.Second}
+			r, _ := http.NewRequest("GET", srv.URL+"/v1/sessions", nil)
+			r.Header.Set("Authorization", "Bearer sc5000-token")
+			resp, err := client.Do(r)
+			if err != nil {
+				results <- 0
+				return
+			}
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			results <- resp.StatusCode
+		}()
+	}
+	for i := 0; i < 8; i++ {
+		if code := <-results; code != 200 {
+			t.Errorf("concurrent request HTTP %d", code)
+		}
+	}
+	if refreshes.Load() != 1 {
+		t.Errorf("refresh calls=%d, want 1", refreshes.Load())
+	}
+	var saved tidalAuth
+	b, _ := os.ReadFile(filepath.Join(dir, "tidal-auth.json"))
+	if json.Unmarshal(b, &saved) != nil || saved.RefreshToken != "new-refresh" {
+		t.Error("rotated refresh token lost")
+	}
+}
+
+func TestTidalCapturesMissingRefreshWithoutReplacingStoredAccess(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "tidal-auth.json"), []byte(`{"accessToken":"stored-real-access"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(New(Config{AccessToken: "code", UIDir: t.TempDir(), StateDir: dir}, nil))
+	defer srv.Close()
+	uiPost(t, srv.URL, "scope=spotify")
+	r, _ := http.NewRequest("POST", srv.URL+"/au//oauth2/token", strings.NewReader("grant_type=refresh_token&refresh_token=engine-real-refresh"))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	r.Header.Set("Authorization", "Bearer old-engine-access")
+	resp, err := http.DefaultClient.Do(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	var saved tidalAuth
+	b, _ := os.ReadFile(filepath.Join(dir, "tidal-auth.json"))
+	if json.Unmarshal(b, &saved) != nil || saved.AccessToken != "stored-real-access" || saved.RefreshToken != "engine-real-refresh" {
+		t.Error("missing real refresh was not captured, or stored bearer was replaced")
+	}
+}

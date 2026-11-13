@@ -1067,7 +1067,7 @@ func TestEngineLightingDefaultOffAndPersistence(t *testing.T) {
 // #224: disabling TIDAL must remove the stale upstream routing choice, on disk
 // and in responses, whether the setting came from this UI or an older version.
 func TestTidalDisabledClearsScope(t *testing.T) {
-	for _, query := range []string{"toggle=tidal", "sources=spotify,netease"} {
+	for _, query := range []string{"sources=spotify,netease", "sources="} {
 		t.Run(query, func(t *testing.T) {
 			dir := t.TempDir()
 			s := New(Config{AccessToken: "code", UIDir: dir, StateDir: t.TempDir()}, nil)
@@ -1094,5 +1094,15 @@ func TestTidalDisabledClearsScope(t *testing.T) {
 				t.Errorf("legacy scope = %v", status["scope"])
 			}
 		})
+	}
+}
+
+func TestUIUpdateIgnoresRemovedToggleParameter(t *testing.T) {
+	srv := httptest.NewServer(New(Config{AccessToken: "code", UIDir: t.TempDir(), StateDir: t.TempDir()}, nil))
+	defer srv.Close()
+	uiPost(t, srv.URL, "sources=tidal,spotify&scope=tidal")
+	code, v := uiPost(t, srv.URL, "toggle=tidal")
+	if code != 200 || v.Scope != "tidal" || !slices.Contains(v.Sources, "tidal") {
+		t.Error("removed toggle parameter still changes sources")
 	}
 }

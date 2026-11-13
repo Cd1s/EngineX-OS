@@ -170,6 +170,7 @@ type uiSettings struct {
 	SafeMode         bool     `json:"safeMode"`
 	LoggedIn         []string `json:"loggedIn"`
 	TidalLoggedIn    bool     `json:"tidalLoggedIn"`
+	TidalSynthetic   bool     `json:"tidalSynthetic"`
 	FourDeckWaveform bool     `json:"fourDeckWaveform"`
 	FourDeckRole     string   `json:"fourDeckRole"`
 	ShadowMode       string   `json:"shadowMode"` // which path draws a shadow deck: auto = Engine loads every source whose file this player can have and stock components draw it (EngineX peer; CDJ playing from USB or SD), a CDJ without such a file goes to the display renderer, engine = Engine loads every source, cdj = display renderer for every source
@@ -696,6 +697,7 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	s.uiMu.Unlock()
 	v.TidalLoggedIn = s.tidal != nil && s.tidal.hasRealAuth()
+	v.TidalSynthetic = s.tidal != nil && s.tidal.isSyntheticAccountOnly()
 	v.BroadcastEnabled = s.BroadcastEnabled()
 	if ver := s.installedVersion(); ver != "" && ver != "dev" {
 		v.Version = ver
@@ -1064,19 +1066,6 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		v.Sources = list
-	}
-	if q.Has("toggle") {
-		id := q.Get("toggle")
-		if !slices.Contains(uiServices, id) {
-			s.uiMu.Unlock()
-			fail(w, 400, errors.New("unknown source"))
-			return
-		}
-		if slices.Contains(v.Sources, id) {
-			v.Sources = slices.DeleteFunc(v.Sources, func(name string) bool { return name == id })
-		} else {
-			v.Sources = append(v.Sources, id)
-		}
 	}
 	// Relay settings are written only once every field is known to be valid (#9).
 	if q.Has("relayUrl") || q.Has("deemixPassword") {
