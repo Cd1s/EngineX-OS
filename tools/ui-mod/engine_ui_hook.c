@@ -150,12 +150,14 @@ int snd_pcm_sw_params(void *pcm, void *params) {
 static int lim_enabled, gain_enabled; // gain_enabled: #64 auto_gain=1
 static int echo_enabled;              // #104 upfader_echo=1: Echo Out on the master bus
 static int echo_player_bypass;        // standalone players hide Echo Out and Color FX Style; stored values behave as Off
+static int echo_master_bypass;        // #258 JC11 PRIME 4 has native per-channel Transition FX; bypass master-bus echo
 static unsigned pfx_time_ms;          // #162: zero OFF, otherwise 10..4000
 static struct sc_pfx_ms master_ms[4];
 static int pioneer_fx_mode;           // #88 Pioneer FX emulations
 static const char *four_deck_settings = UI_ROOT "/settings.conf";
 static const char *product_code_path = "/sys/firmware/devicetree/base/inmusic,product-code";
 static int player_board(void);
+static int prime4_board(void);
 
 // Pad LED Brightness: Engine sends every controller LED through snd_seq_event_output_direct
 // (RGB LEDs as 14/15-byte SysEx, single-colour keys as NoteOn). Scale the RGB SysEx PWM bytes
@@ -418,10 +420,12 @@ static void *lim_poll(void *arg) {
 #endif
         }
         int player_bypass = player_board();
+        int prime4_bypass = prime4_board();
         __atomic_store_n(&echo_player_bypass, player_bypass, __ATOMIC_RELAXED);
+        __atomic_store_n(&echo_master_bypass, prime4_bypass, __ATOMIC_RELAXED);
         __atomic_store_n(&lim_enabled, on, __ATOMIC_RELAXED);
         __atomic_store_n(&gain_enabled, gain, __ATOMIC_RELAXED);
-        __atomic_store_n(&echo_enabled, player_bypass ? 0 : echo, __ATOMIC_RELAXED);
+        __atomic_store_n(&echo_enabled, (player_bypass || prime4_bypass) ? 0 : echo, __ATOMIC_RELAXED);
         __atomic_store_n(&pioneer_fx_mode, player_bypass ? 0 : pioneer_fx, __ATOMIC_RELAXED);
         __atomic_store_n(&pfx_time_ms, timing.enabled ? timing.ms : 0, __ATOMIC_RELEASE);
         if (led != __atomic_load_n(&led_pct, __ATOMIC_RELAXED)) led_replay(led);
@@ -919,8 +923,9 @@ static uint32_t hook_master_output(void *host, void *context, int in_channels, c
         rc = orig(host, context, in_channels, in, out_channels, out, frames);
     }
     // #104 Echo Out rings the master output out after music stops; before the limiter.
+    // #258 JC11 PRIME 4 has native per-channel beat-synced Transition FX; bypass legacy master echo.
     if (out && frames > 0) {
-        int echo = __atomic_load_n(&echo_player_bypass, __ATOMIC_RELAXED) ? 0 : __atomic_load_n(&echo_enabled, __ATOMIC_RELAXED);
+        int echo = (__atomic_load_n(&echo_player_bypass, __ATOMIC_RELAXED) || __atomic_load_n(&echo_master_bypass, __ATOMIC_RELAXED)) ? 0 : __atomic_load_n(&echo_enabled, __ATOMIC_RELAXED);
         for (int ch = 0; ch < out_channels && ch / 2 < MASTER_ECHO_PAIRS; ch += 2)
             if (out[ch]) sc_echo_planar(&master_echo[ch / 2], out[ch], ch + 1 < out_channels ? out[ch + 1] : NULL, (unsigned)frames, echo);
     }
@@ -1442,6 +1447,16 @@ static int player_board(void) {
         fclose(f);
     }
     return !strncmp(code, "JP07", 4) || !strncmp(code, "JP08", 4) || !strncmp(code, "JP13", 4) || !strncmp(code, "JP14", 4);
+}
+// #258: PRIME 4 (JC11, JC11S) has native beat-synced per-channel Transition FX in Engine.
+static int prime4_board(void) {
+    char code[8] = "";
+    FILE *f = fopen(product_code_path, "r");
+    if (f) {
+        if (!fgets(code, sizeof code, f)) code[0] = 0;
+        fclose(f);
+    }
+    return !strncmp(code, "JC11", 4);
 }
 static int four_deck_layout(void) {
     int v = 0;
@@ -1975,6 +1990,7 @@ __attribute__((constructor)) static void edit_engine(void) {
         fx_selector_supported = install_px_scope(base, page, build->name);
 #endif
         __atomic_store_n(&echo_player_bypass, player_board(), __ATOMIC_RELAXED);
+        __atomic_store_n(&echo_master_bypass, prime4_board(), __ATOMIC_RELAXED);
         lim_start_poll();
     }
 }

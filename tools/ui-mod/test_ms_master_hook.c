@@ -122,6 +122,14 @@ static void test_hidden_means_off(void) {
     usleep(180000);
     assert(run_echo_tail() > 0.05f);
 
+    // #258: JC11 PRIME 4 has native per-channel Transition FX in Engine, so legacy master echo is bypassed.
+    write_file(board_path, "JC11\n");
+    write_file(conf_path, "upfader_echo=1\npioneer_fx=off\nfx_time_mode=ms\nfx_time_ms=250\n");
+    usleep(180000);
+    assert(run_echo_tail() == 0.0f);
+    write_file(board_path, "JC16\n");
+    usleep(180000);
+
     // 2. Hidden PX Delay Time Mode / (ms) when Color FX Style is Off or Space behaves as Off while keeping 250 ms stored.
     write_file(conf_path, "pioneer_fx=off\nfx_time_mode=ms\nfx_time_ms=250\n");
     usleep(180000);
