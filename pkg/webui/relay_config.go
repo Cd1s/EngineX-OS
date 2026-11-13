@@ -92,6 +92,34 @@ type relayRefresher struct {
 	once    sync.Once
 	kick    chan struct{}
 	running atomic.Bool
+	mu      sync.Mutex
+	cancel  context.CancelFunc // the probe in flight
+	gen     uint64             // bumped by a settings change: an older probe's answer is dropped
+}
+
+// relayProbeContext is a probe's context: 1.5 s at most, cancelled by a settings change
+// (kickRelayRefresh) and by Close. gen is the settings generation it probes for.
+func (s *Server) relayProbeContext() (ctx context.Context, gen uint64, done func()) {
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	rr := &s.relayRefresh
+	rr.mu.Lock()
+	rr.cancel, gen = cancel, rr.gen
+	rr.mu.Unlock()
+	go func() {
+		select {
+		case <-s.closed:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, gen, cancel
+}
+
+// relayGen reports whether gen is still the current settings generation.
+func (s *Server) relayGen(gen uint64) bool {
+	s.relayRefresh.mu.Lock()
+	defer s.relayRefresh.mu.Unlock()
+	return s.relayRefresh.gen == gen
 }
 
 func (s *Server) startRelayRefresh() {
@@ -124,20 +152,47 @@ func (s *Server) relayRefreshLoop() {
 // refreshRelayStatus runs every network probe behind relayStatusView, each with its own
 // once-per-30-s limit. Another probe joins with one more line here.
 func (s *Server) refreshRelayStatus() {
+	s.relayRefresh.mu.Lock()
+	gen := s.relayRefresh.gen
+	s.relayRefresh.mu.Unlock()
 	relay, password := s.relaySettings()
 	saved := s.savedLANStems()
 	if st := s.probeRelayStems(relay, password, saved); st != nil {
+		s.storeRelaySeen(gen, st)
+	}
+}
+
+// storeRelaySeen keeps st unless the settings changed since gen.
+func (s *Server) storeRelaySeen(gen uint64, st *stems.LANState) {
+	s.relayRefresh.mu.Lock()
+	defer s.relayRefresh.mu.Unlock()
+	if s.relayRefresh.gen == gen {
 		s.relaySeen.Store(st)
 	}
 }
 
 // kickRelayRefresh probes again now, not after the rest of the 30 s: the settings changed.
-// It does not start the refresher: that waits for the first status request.
-func (s *Server) kickRelayRefresh() {
+// The probe in flight is cancelled and nothing it found is kept; what was found for the
+// previous relay (oldRelay) is dropped. It does not start the refresher: that waits for
+// the first status request.
+func (s *Server) kickRelayRefresh(oldRelay, relay string) {
+	rr := &s.relayRefresh
+	rr.mu.Lock()
+	rr.gen++
+	if rr.cancel != nil {
+		rr.cancel()
+	}
+	s.relaySeen.Store(nil)
+	rr.mu.Unlock()
+	if oldRelay != relay {
+		if saved := s.savedLANStems(); saved != nil && saved.Endpoint == oldRelay && oldRelay != "" {
+			os.Remove(filepath.Join(s.cfg.StateDir, stems.LANStateName))
+		}
+	}
 	relayProbeMu.Lock()
 	delete(relayProbed, s.cfg.StateDir)
 	relayProbeMu.Unlock()
-	if !s.relayRefresh.running.Load() {
+	if !rr.running.Load() {
 		return
 	}
 	select {
@@ -161,16 +216,21 @@ func (s *Server) probeRelayStems(relay, password string, saved *stems.LANState) 
 	if relay == "" || password == "" || !validRelayURL(relay) {
 		return nil
 	}
-	if saved != nil && saved.Online && time.Since(saved.Checked) < relayProbeEvery {
+	// A fresh answer of this relay, or of the home renderer stems-processor found (FindLAN
+	// keeps its choice in the same file), needs no probe. One of another relay does.
+	if saved != nil && saved.Online && time.Since(saved.Checked) < relayProbeEvery && (saved.Endpoint == relay || lanRenderer(saved.Endpoint)) {
 		return nil
 	}
+	// The lock guards the once-per-30-s bookkeeping only, never the request: a settings
+	// change during a hung probe must not wait for it.
 	relayProbeMu.Lock()
-	defer relayProbeMu.Unlock()
 	if time.Since(relayProbed[s.cfg.StateDir]) < relayProbeEvery {
+		relayProbeMu.Unlock()
 		return nil
 	}
 	relayProbed[s.cfg.StateDir] = time.Now()
-	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	relayProbeMu.Unlock()
+	ctx, gen, cancel := s.relayProbeContext()
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, "GET", strings.TrimRight(relay, "/")+"/healthz/stems", nil)
 	if err != nil {
@@ -192,8 +252,21 @@ func (s *Server) probeRelayStems(relay, password string, saved *stems.LANState) 
 		return nil
 	}
 	st := &stems.LANState{Endpoint: relay, Hostname: h.Device, Backend: h.Backend, Online: !h.Busy, Checked: time.Now().UTC()}
+	if !s.relayGen(gen) { // the settings changed while it was asked
+		return nil
+	}
 	providers.SaveJSON(filepath.Join(s.cfg.StateDir, stems.LANStateName), st) // best effort: the answer is returned anyway
 	return st
+}
+
+// lanRenderer: an endpoint on the local network (a home renderer), as discovery finds them.
+func lanRenderer(endpoint string) bool {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(u.Hostname())
+	return ip != nil && (ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || (ip.To4() != nil && ip.To4()[0] == 100 && ip.To4()[1]&0xC0 == 64))
 }
 
 // validRelayURL refuses to send the password in the clear across the internet.
@@ -221,6 +294,7 @@ func (s *Server) updateRelayConfig(relay, password *string) error {
 // that host (#8).
 func (s *Server) updateRelayConfigLocked(relay, password *string) error {
 	v := s.loadRelayConfig()
+	old := v.RelayURL
 	if relay != nil {
 		if relayHost(*relay) != relayHost(v.RelayURL) {
 			v.Password = ""
@@ -233,7 +307,7 @@ func (s *Server) updateRelayConfigLocked(relay, password *string) error {
 	if err := providers.SaveJSON(s.relayConfigPath(), v); err != nil {
 		return err
 	}
-	s.kickRelayRefresh()
+	s.kickRelayRefresh(old, v.RelayURL)
 	return nil
 }
 
