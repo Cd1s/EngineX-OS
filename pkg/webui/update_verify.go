@@ -141,7 +141,7 @@ func (s *Server) signedAssetDigest(downloadURL, tag string) (digest, msg string)
 	if err != nil {
 		return "", msgUpdateNotListed
 	}
-	if !newerVersion(tag, s.installedRelease()) {
+	if !releasesig.NewerVersion(tag, s.installedRelease()) {
 		return "", msgUpdateOlder
 	}
 	return digest, ""
@@ -170,7 +170,8 @@ func hasDigest(p, want string) bool {
 // Free space on the deck's data volume (#239 review). Engine and the web service keep writing to
 // /data (libraries, databases, caches, settings) while an update is downloaded; a download that
 // fills the volume makes those writes fail with ENOSPC. So a download is started only when the
-// file and, for the second generation, the unpacked bundle fit with updateReserve to spare, and it
+// file and, for the second generation, the unpacked bundle and the install's staged copy fit with
+// updateReserve to spare, and it
 // is cut off at that budget even if the server sends more than it declared.
 const (
 	updateReserveDefault = 256 << 20
@@ -187,7 +188,7 @@ var (
 
 // downloadBudget returns how many bytes a download into dir may take, or the refusal message.
 // declared is the Content-Length (<= 0 when unknown), extra what the install needs on top of the
-// download (the unpacked bundle), max the largest file the update accepts at all.
+// download (the unpacked bundle and the install's staged copy), max the largest file the update accepts at all.
 func downloadBudget(dir string, declared, extra, max int64) (limit int64, msg string) {
 	free, ok := freeBytes(dir)
 	if !ok {

@@ -67,25 +67,6 @@ func TestUpdateChecksTheConfiguredGitHubRepo(t *testing.T) {
 	}
 }
 
-func TestNewerVersion(t *testing.T) {
-	for _, c := range []struct {
-		latest, current string
-		want            bool
-	}{
-		{"v2", "v1", true},
-		{"v1", "v1", false},
-		{"v1", "v2", false}, // rollback / lower latest
-		{"v5.0.4-custom.10", "v5.0.4-custom.9", true},
-		{"v5.0.4-custom.1", "v5.0.4", true},
-		{"v5.0.4", "dev", false}, // unknown current version
-		{"", "v1", false},
-	} {
-		if got := newerVersion(c.latest, c.current); got != c.want {
-			t.Errorf("newerVersion(%q, %q) = %v", c.latest, c.current, got)
-		}
-	}
-}
-
 func TestImagePrefix(t *testing.T) {
 	for in, want := range map[string]string{
 		"inmusic,jp07\x00rockchip,rk3288":  "SC5000",

@@ -136,6 +136,11 @@ func sha(t *testing.T, path string) string {
 
 // releaseServer is a TLS GitHub: releases/latest plus the bundle download.
 func releaseServer(t *testing.T, b bundleFile, digest string, downloads *int) *httptest.Server {
+	return releaseServerTag(t, b, digest, downloads, "v"+b.Version)
+}
+
+// releaseServerTag is releaseServer for a release called tag.
+func releaseServerTag(t *testing.T, b bundleFile, digest string, downloads *int, tag string) *httptest.Server {
 	t.Helper()
 	var srv *httptest.Server
 	mux := http.NewServeMux()
@@ -144,7 +149,7 @@ func releaseServer(t *testing.T, b bundleFile, digest string, downloads *int) *h
 		digest = "sha256:" + sha(t, b.Path)
 	}
 	mux.HandleFunc("/repos/Cd1s/EngineX-OS/releases/latest", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{"tag_name": "v" + b.Version, "assets": []map[string]string{
+		json.NewEncoder(w).Encode(map[string]any{"tag_name": tag, "assets": []map[string]string{
 			{"name": "SC5000-" + b.Version + "-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img", "browser_download_url": srv.URL + "/dl/img", "digest": "sha256:00"},
 			{"name": name, "browser_download_url": srv.URL + "/dl/" + name, "digest": digest},
 		}})
@@ -2707,7 +2712,7 @@ func TestGen2LocalBundleFallbackOnGitHubHTTPErrorsAndProxy(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The package was downloaded by an earlier run, which kept its signed list beside it (#239).
-	writeSidecars(t, workWithPkg, map[string]string{imgName: sha(t, pkg.ImagePath)}, testReleasePriv)
+	writeSidecars(t, workWithPkg, map[string]string{imgName: sha(t, pkg.ImagePath)}, testReleasePriv, "v5.3.0.4-r3")
 	o0 := testOpts(t)
 	d := startSSHDeck(t, o0.SSHPort, "inmusic,jp24\x00inmusic,az04\x00")
 

@@ -40,6 +40,7 @@ type signFault struct {
 	edit       bool   // a line added to the list after it was signed
 	signedTag  string // the signed list is for this release tag, not the one the page shows
 	noTagEntry bool   // the signed list does not name its release tag
+	tag        string // the release tag the page shows (oneFileRelease; default v5.3.0.5)
 }
 
 func sumsOf(files map[string]string) []byte {
@@ -154,7 +155,11 @@ func oneFileRelease(t *testing.T, name string, content []byte, f signFault, file
 			w.Write(content)
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]any{"tag_name": "v5.3.0.5", "assets": []map[string]string{
+		tag := f.tag
+		if tag == "" {
+			tag = "v5.3.0.5"
+		}
+		json.NewEncoder(w).Encode(map[string]any{"tag_name": tag, "assets": []map[string]string{
 			{"name": name, "browser_download_url": srv.URL + "/dl/" + name, "digest": ghDigest}}})
 	})
 	srv = signedTLSWith(t, h, files, f)
@@ -314,14 +319,14 @@ func TestVerifyLocal(t *testing.T) {
 }
 
 // writeSidecars keeps a signed list beside a package, as the installer does after a download.
-func writeSidecars(t *testing.T, dir string, files map[string]string, key ed25519.PrivateKey) {
+func writeSidecars(t *testing.T, dir string, files map[string]string, key ed25519.PrivateKey, tag string) {
 	t.Helper()
-	sums := taggedSums(files, "v5.3.0.4-r3")
+	sums := taggedSums(files, tag)
 	sig, err := releasesig.Sign(key, sums)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := rememberSums(dir, sums, sig); err != nil {
+	if err := rememberSums(dir, sums, sig, tag); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -340,21 +345,29 @@ func TestAutomaticReuseOfACachedPackageNeedsItsSignedList(t *testing.T) {
 		setup func(t *testing.T, dir string)
 		want  string // "" = the cached package is used
 	}{
-		{"signed list kept at the download", func(t *testing.T, dir string) { writeSidecars(t, dir, good, testReleasePriv) }, ""},
+		{"signed list kept at the download", func(t *testing.T, dir string) { writeSidecars(t, dir, good, testReleasePriv, "v5.3.0.4-r3") }, ""},
 		{"nothing kept with it", func(t *testing.T, dir string) {}, "no verified signed list"},
 		{"an unsigned SHA256SUMS.txt (a build folder)", func(t *testing.T, dir string) {
 			os.WriteFile(filepath.Join(dir, sumsFile), sumsOf(good), 0o644)
 		}, "no verified signed list"},
 		{"a list without its signature", func(t *testing.T, dir string) {
-			writeSidecars(t, dir, good, testReleasePriv)
+			writeSidecars(t, dir, good, testReleasePriv, "v5.3.0.4-r3")
 			os.Remove(filepath.Join(dir, sigFile))
 		}, "no verified signed list"},
-		{"a list signed by another key", func(t *testing.T, dir string) { writeSidecars(t, dir, good, other) }, "invalid signature"},
+		{"a list signed by another key", func(t *testing.T, dir string) { writeSidecars(t, dir, good, other, "v5.3.0.4-r3") }, "invalid signature"},
+		{"a kept tag that is not the one in the list", func(t *testing.T, dir string) {
+			writeSidecars(t, dir, good, testReleasePriv, "v5.3.0.4-r3")
+			os.WriteFile(filepath.Join(dir, releasesig.TagEntryName), []byte("v5.3.0.4-r9\n"), 0o644)
+		}, "release tag kept"},
+		{"no tag kept", func(t *testing.T, dir string) {
+			writeSidecars(t, dir, good, testReleasePriv, "v5.3.0.4-r3")
+			os.Remove(filepath.Join(dir, releasesig.TagEntryName))
+		}, "no verified signed list"},
 		{"a list that does not name the file", func(t *testing.T, dir string) {
-			writeSidecars(t, dir, map[string]string{"another.img": hexSHA(content)}, testReleasePriv)
+			writeSidecars(t, dir, map[string]string{"another.img": hexSHA(content)}, testReleasePriv, "v5.3.0.4-r3")
 		}, "signed checksum list"},
 		{"a list with another hash (a re-release under the same name)", func(t *testing.T, dir string) {
-			writeSidecars(t, dir, map[string]string{name: hexSHA([]byte("r2 bytes"))}, testReleasePriv)
+			writeSidecars(t, dir, map[string]string{name: hexSHA([]byte("r2 bytes"))}, testReleasePriv, "v5.3.0.4-r3")
 		}, "does not match the signed SHA-256"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -393,18 +406,140 @@ func TestKeepSumsSaysWhenItCannotKeepTheList(t *testing.T) {
 	o := testOpts(t)
 	var out strings.Builder
 	o.Out = &out
-	keepSums(o, filepath.Join(t.TempDir(), "no-such-dir"), []byte("a"), []byte("b"))
+	keepSums(o, filepath.Join(t.TempDir(), "no-such-dir"), []byte("a"), []byte("b"), "v1")
 	if !strings.Contains(out.String(), "will not be reused") {
 		t.Fatalf("no warning: %q", out.String())
 	}
 	dir := t.TempDir()
-	if err := rememberSums(dir, []byte("a"), []byte("b")); err != nil {
+	if err := rememberSums(dir, []byte("a"), []byte("b"), "v1"); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := os.ReadFile(filepath.Join(dir, sumsFile)); string(got) != "a" {
 		t.Fatalf("sums = %q", got)
 	}
-	if entries, _ := os.ReadDir(dir); len(entries) != 2 {
+	if got, _ := os.ReadFile(filepath.Join(dir, releasesig.TagEntryName)); string(got) != "v1\n" {
+		t.Fatalf("tag = %q", got)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 3 {
 		t.Fatalf("temporary files left: %v", entries)
 	}
+}
+
+// A genuine, correctly signed older release replayed by whoever serves the release page must not
+// take a deck back (review of #239: the installer put r1 on a deck that ran r2). Same release
+// again is a repair and a newer one an update. A file the user names is theirs to choose.
+func TestInstallerDoesNotGoBackToAnOlderRelease(t *testing.T) {
+	need(t, "python3", "unshare")
+	const installed = "v5.3.0.5-r2"
+	prepare := func(t *testing.T, o *options) *sshDeck {
+		deck := startSSHDeck(t, o.SSHPort, "inmusic,jc11s\x00nxp,imx8mm\x00")
+		custom := filepath.Join(deck.Data, "enginex")
+		os.MkdirAll(filepath.Join(custom, "bundle"), 0o755)
+		os.WriteFile(filepath.Join(custom, "version.txt"), []byte("5.3.0.5\n"), 0o644)
+		os.WriteFile(filepath.Join(custom, "bundle", "release-tag"), []byte(installed+"\n"), 0o644)
+		announceFrom(t, "127.0.0.1", freeUDPFrom(o), airD("prime4plus-lab", "DISCOVERER_HOWDY_", "JC11S", "2.3.4", 1))
+		return deck
+	}
+	installedTag := func(deck *sshDeck) string {
+		b, _ := os.ReadFile(filepath.Join(deck.Data, "enginex", "bundle", "release-tag"))
+		return strings.TrimSpace(string(b))
+	}
+	notInstalled := func(t *testing.T, deck *sshDeck) {
+		t.Helper()
+		if cmds := strings.Join(deck.Commands(), "\n"); strings.Contains(cmds, "install.sh") || strings.Contains(cmds, "tar -xzf -") {
+			t.Errorf("an install ran:\n%s", cmds)
+		}
+		if got := installedTag(deck); got != installed {
+			t.Errorf("the deck's release changed to %s", got)
+		}
+	}
+	for _, c := range []struct{ name, version, tag, refused string }{
+		{"an older revision", "5.3.0.5", "v5.3.0.5-r1", "refusing to go back"},
+		{"the plain release of the same version", "5.3.0.5", "v5.3.0.5", "refusing to go back"},
+		{"an older version", "5.3.0.4", "v5.3.0.4", "refusing to go back"},
+		{"the release it already runs", "5.3.0.5", "v5.3.0.5-r2", ""},
+		{"a newer revision", "5.3.0.5", "v5.3.0.5-r3", ""},
+		{"a newer version", "5.3.0.6", "v5.3.0.6", ""},
+	} {
+		t.Run("online/"+c.name, func(t *testing.T) {
+			b := buildBundle(t, "PRIME4PLUS", c.version, c.tag)
+			o := testOpts(t)
+			useRelease(o, releaseServerTag(t, b, "", nil, c.tag))
+			deck := prepare(t, o)
+			err := run(ctxT(t), o)
+			if c.refused == "" {
+				if err != nil {
+					t.Fatalf("%v\n%s", err, o.Out)
+				}
+				if got := installedTag(deck); got != c.tag {
+					t.Fatalf("the deck runs %s, want %s", got, c.tag)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), c.refused) {
+				t.Fatalf("err = %v, want one containing %q", err, c.refused)
+			}
+			notInstalled(t, deck)
+		})
+	}
+	t.Run("a file the user names is installed", func(t *testing.T) {
+		b := buildBundle(t, "PRIME4PLUS", "5.3.0.5", "v5.3.0.5-r1")
+		o := testOpts(t)
+		o.Bundle = b.ImagePath
+		useRelease(o, offlineRelease(t))
+		deck := prepare(t, o)
+		if err := run(ctxT(t), o); err != nil {
+			t.Fatalf("%v\n%s", err, o.Out)
+		}
+		if got := installedTag(deck); got != "v5.3.0.5-r1" {
+			t.Fatalf("the deck runs %s", got)
+		}
+	})
+	// GitHub cannot be read and the older package is in the work folder with its signed list.
+	for _, c := range []struct{ name, tag, refused string }{
+		{"offline/an older revision from the cache", "v5.3.0.5-r1", "refusing to go back"},
+		{"offline/a newer revision from the cache", "v5.3.0.5-r3", ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			b := buildBundle(t, "PRIME4PLUS", "5.3.0.5", c.tag)
+			o := testOpts(t)
+			srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "down", http.StatusServiceUnavailable) }))
+			t.Cleanup(srv.Close)
+			useRelease(o, srv)
+			name := filepath.Base(b.ImagePath)
+			if err := copyFile(b.ImagePath, filepath.Join(o.WorkDir, name)); err != nil {
+				t.Fatal(err)
+			}
+			writeSidecars(t, o.WorkDir, map[string]string{name: sha(t, b.ImagePath)}, testReleasePriv, c.tag)
+			deck := prepare(t, o)
+			err := run(ctxT(t), o)
+			if c.refused == "" {
+				if err != nil {
+					t.Fatalf("%v\n%s", err, o.Out)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), c.refused) {
+				t.Fatalf("err = %v, want one containing %q", err, c.refused)
+			}
+			notInstalled(t, deck)
+		})
+	}
+	t.Run("first generation", func(t *testing.T) {
+		const name = "SC5000-5.3.0.5-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img"
+		o := testOpts(t)
+		useRelease(o, oneFileRelease(t, name, []byte("AZ01 older revision"), signFault{tag: "v5.3.0.5-r1"}, nil, ""))
+		sd := startSSHDeck(t, o.SSHPort, "inmusic,jp07\x00")
+		custom := filepath.Join(sd.Data, "enginex")
+		os.MkdirAll(filepath.Join(custom, "bundle"), 0o755)
+		os.WriteFile(filepath.Join(custom, "version.txt"), []byte("5.3.0.5\n"), 0o644)
+		os.WriteFile(filepath.Join(custom, "bundle", "release-tag"), []byte(installed+"\n"), 0o644)
+		err := modeA(ctxT(t), o, deck{IP: "127.0.0.1"})
+		if err == nil || !strings.Contains(err.Error(), "refusing to go back") {
+			t.Fatalf("err = %v", err)
+		}
+		if strings.Contains(strings.Join(sd.Commands(), "\n"), "az01-update --file") {
+			t.Error("the older image was written")
+		}
+	})
 }

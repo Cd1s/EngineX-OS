@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Cd1s/EngineX-OS/internal/releasesig"
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
 )
 
@@ -41,6 +42,10 @@ const (
 	gen2ImgMagic        = "ENGINEX_DATA_BUNDLE_IMG_V1\n"
 	gen2ImgHeader       = 128
 )
+
+// bundleInstallPeak is what a second-generation install needs on top of the download: the
+// extracted bundle and, beside it, the copy install.sh stages before it swaps the parts in.
+const bundleInstallPeak = 2 * bundleMaxUnpack
 
 var (
 	versionFile = "/data/sc5000-custom/version.txt"
@@ -190,10 +195,10 @@ func (s *Server) applyOnlineUpdate(downloadURL, tag string) {
 			s.setUpdateProgress(0, "update download failed", true)
 			return
 		}
-		// Second-generation images carry a bundle that is unpacked next to the download.
+		// Second-generation images carry a bundle that is unpacked and staged next to the download.
 		var unpack int64
 		if dataBundleBoards[imagePrefix(deviceCompatible())] {
-			unpack = bundleMaxUnpack
+			unpack = bundleInstallPeak
 		}
 		limit, nospace := downloadBudget(filepath.Dir(staged), resp.ContentLength, unpack, updateMaxDownload)
 		if nospace != "" {
@@ -353,7 +358,7 @@ func (s *Server) installedVersion() string {
 	// The newest installed runtime or flashed image release (#13, #218); a later release
 	// keeps its image version in /etc/enginex (rename compatibility).
 	for _, p := range []string{filepath.Join(s.customDir(), "version.txt"), versionFile, filepath.Join(newImageDir, "version.txt"), imageVersionFile} {
-		if v := currentVersion(p); v != "dev" && (current == "dev" || newerVersion(v, current)) {
+		if v := currentVersion(p); v != "dev" && (current == "dev" || releasesig.NewerVersion(v, current)) {
 			current = v
 		}
 	}
@@ -370,36 +375,17 @@ var imageReleaseTagFile = "/etc/sc5000/" + releaseTagName
 var newImageDir = "/etc/enginex"
 
 // installedRelease is what a release tag is compared with: the tag baked into the
-// installed image or bundle, else the installed version. A same-version re-release
-// (v5.3.0.4-r2) is newer than version 5.3.0.4 and must not be offered to itself.
-// A tag of another version (a bundle downgraded by hand) is ignored.
+// installed image or bundle, else the installed version (releasesig.InstalledRelease).
 func (s *Server) installedRelease() string {
-	current := s.installedVersion()
-	release := current
 	candidates := []string{filepath.Join(newImageDir, releaseTagName), imageReleaseTagFile, filepath.Join(s.customDir(), "bundle", releaseTagName)}
 	if s.cfg.VersionFile == "" {
 		candidates = append(candidates, filepath.Join(bundleCustomDir, "bundle", releaseTagName))
 	}
-	for _, f := range candidates {
-		if tag := currentVersion(f); tagOfVersion(tag, current) && newerVersion(tag, release) {
-			release = tag
-		}
+	tags := make([]string, len(candidates))
+	for i, f := range candidates {
+		tags[i] = currentVersion(f)
 	}
-	return release
-}
-
-// tagOfVersion reports whether tag starts with the numbers of version.
-func tagOfVersion(tag, version string) bool {
-	t, v := versionNumberRE.FindAllString(tag, -1), versionNumberRE.FindAllString(version, -1)
-	if len(v) == 0 || len(t) < len(v) {
-		return false
-	}
-	for i := range v {
-		if strings.TrimLeft(t[i], "0") != strings.TrimLeft(v[i], "0") {
-			return false
-		}
-	}
-	return true
+	return releasesig.InstalledRelease(s.installedVersion(), tags)
 }
 
 func (s *Server) checkRelease(ctx context.Context, repo string) updateStatus {
@@ -430,7 +416,7 @@ func (s *Server) checkRelease(ctx context.Context, repo string) updateStatus {
 		return v
 	}
 	v.Latest, v.URL = rel.Tag, rel.URL
-	v.UpdateAvailable = newerVersion(rel.Tag, s.installedRelease())
+	v.UpdateAvailable = releasesig.NewerVersion(rel.Tag, s.installedRelease())
 	if prefix := imagePrefix(deviceCompatible()); prefix != "" {
 		// Engine's own scan expects <PREFIX>-<version>-...Update.img. The second generation
 		// takes the /data bundle (#86); once unlocked (#119) it prefers the bundle-carrying
@@ -524,28 +510,6 @@ func imagePrefix(compatible []string) string {
 		}
 	}
 	return ""
-}
-
-var versionNumberRE = regexp.MustCompile(`\d+`)
-
-// newerVersion compares the numbers in two tags in order, so v5.0.4-custom.10 is
-// newer than v5.0.4-custom.9 and an older tag is never offered. A current
-// version without numbers ("dev", no version.txt) is unknown: never claim an update.
-func newerVersion(latest, current string) bool {
-	l, c := versionNumberRE.FindAllString(latest, -1), versionNumberRE.FindAllString(current, -1)
-	if len(l) == 0 || len(c) == 0 {
-		return false
-	}
-	for i := 0; i < len(l) && i < len(c); i++ {
-		a, b := strings.TrimLeft(l[i], "0"), strings.TrimLeft(c[i], "0")
-		if len(a) != len(b) {
-			return len(a) > len(b)
-		}
-		if a != b {
-			return a > b
-		}
-	}
-	return len(l) > len(c)
 }
 
 // customDir is where the deck keeps EngineX's /data install (/data/enginex, or the dir of the test VersionFile).
@@ -718,8 +682,8 @@ func (s *Server) downloadBundle(url, dest, want string) string {
 	if resp.StatusCode != http.StatusOK {
 		return "update download failed"
 	}
-	// The unpacked bundle needs room next to the download.
-	limit, nospace := downloadBudget(filepath.Dir(dest), resp.ContentLength, bundleMaxUnpack, bundleMaxDown)
+	// The unpacked bundle and the install's staged copy need room next to the download.
+	limit, nospace := downloadBudget(filepath.Dir(dest), resp.ContentLength, bundleInstallPeak, bundleMaxDown)
 	if nospace != "" {
 		return nospace
 	}
