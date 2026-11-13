@@ -514,10 +514,12 @@ func (c *Client) execDataIn(ctx context.Context, opcode, cbLen uint8, cdbArgs []
 	data := make([]byte, wantLen)
 	got := 0
 	for got < int(wantLen) {
+		windowSize := min(len(data)-got, proto.MaxBulkTransferSize)
+		window := data[got : got+windowSize]
 		tctx, cancel := context.WithTimeout(ctx, c.dataTimeout)
-		n, rerr := c.dev.ReadBulk(tctx, c.eps.In, data[got:])
+		n, rerr := c.dev.ReadBulk(tctx, c.eps.In, window)
 		cancel()
-		if n < 0 || n > len(data[got:]) {
+		if n < 0 || n > len(window) {
 			return nil, fmt.Errorf("rockchip opcode 0x%02x data-in: invalid ReadBulk count %d", opcode, n)
 		}
 		got += n

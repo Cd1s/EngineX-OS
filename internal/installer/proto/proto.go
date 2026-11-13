@@ -13,6 +13,10 @@ import (
 	"io"
 )
 
+// MaxBulkTransferSize is the native USB limit for a single bulk transfer.
+// Protocol clients own chunking and zero-length packet decisions.
+const MaxBulkTransferSize = 1 << 20
+
 // Progress reports byte transfer progress for a flashing or readback phase.
 type Progress struct {
 	Phase string
