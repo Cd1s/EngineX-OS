@@ -1922,7 +1922,7 @@ SERVICES_MAIN = """
 		if ((!e.link || !root.scPlayer) && e.master && !at.master) at.wantMaster = now + 5000
 		if (!e.master || (e.link && root.scPlayer)) at.wantMaster = 0
 		at.master = !!e.master
-		const sr = g("/Track/SampleRate").value, len = g("/Track/TrackLength").unnormalized
+		const sr = at.sampleRate || (at.sampleRate = g("/Track/SampleRate").value), len = g("/Track/TrackLength").unnormalized
 		if (!(sr > 0 && len > 0)) return
 		const syncEdge = !!e.sync && at.sourceSync === false
 		const tempoStep = at.sourceRate !== undefined && Math.abs(at.rate - at.sourceRate) > 2e-4
@@ -2035,19 +2035,25 @@ SERVICES_MAIN = """
 			if (!at.scratch) {
 				at.scratchEnable = en ? !!en.state : undefined
 				at.scratchTouch = tc ? !!tc.state : undefined
+				if (!at.scratchSamples) at.scratchSamples = [0, 0, 0, 0, 0, 0, 0, 0]
+				at.scratchHead = 0; at.scratchCount = 0
+				at.scratchPosition = g("/Track/TrackPosition"); at.scratchMove = mv
+				at.scratchSet = g("/Track/SetSongPosition"); at.scratchLength = len / sr * 1000
+				at.scratchEnd = at.scratchLength - root.scShadowEndGap()
 			}
 			if (en && !en.state) en.state = true
 			if (tc && !tc.state) tc.state = true
 			at.scratch = true
-			if (Math.abs(drift) > 150) {
-				if (now - at.seekAt >= 250) seek(target)
-			} else if (Math.abs(drift) > 6 && mv) {
-				const ticks = Math.min(2500, Math.round(Math.abs(drift) * (e.playing ? 15 : 35)))
-				if (ticks >= 15) {
-					if (drift > 0) mv.incValue(ticks, 0, 0, false, true, 0)
-					else mv.decValue(ticks, 0, 0, false, true, 0)
-				}
+			if (e.jumps !== at.jumps) { at.scratchJump = true; at.scratchCount = 0 }
+			if (!e.seq || e.seq !== at.scratchSeq) {
+				const samples = at.scratchSamples, t = e.at || now
+				let i = at.scratchHead, last = (i + 3) & 3
+				if (at.scratchCount && t <= samples[last * 2]) i = last
+				else { at.scratchHead = (i + 1) & 3; at.scratchCount = Math.min(4, at.scratchCount + 1) }
+				samples[i * 2] = t; samples[i * 2 + 1] = e.positionMs; at.scratchSeq = e.seq
 			}
+			at.scratchScale = e.playing ? 15 : 35
+			scShadowScratchTimer.start()
 			at.jumps = e.jumps
 			return dbg("scratch")
 		}
@@ -2262,6 +2268,42 @@ SERVICES_MAIN = """
 		b.p.state = false
 		b.at.env = undefined
 	}
+	readonly property int scShadowScratchDelay: 60
+	Timer {
+		id: scShadowScratchTimer
+		interval: 16; repeat: true
+		onTriggered: {
+			const now = Date.now(), playAt = now - root.scShadowScratchDelay
+			for (let d = 1; d <= 4; d++) {
+				const at = root.scShadowAt[d]
+				if (!at || !at.scratch) continue
+				const samples = at.scratchSamples
+				let lo = (at.scratchHead - at.scratchCount + 4) & 3, target = samples[lo * 2 + 1], velocity = 0
+				for (let n = 1; n < at.scratchCount; n++) {
+					const hi = (lo + 1) & 3, t0 = samples[lo * 2], t1 = samples[hi * 2]
+					velocity = (samples[hi * 2 + 1] - samples[lo * 2 + 1]) / (t1 - t0)
+					if (playAt < t1) { target = samples[lo * 2 + 1] + Math.max(0, playAt - t0) * velocity; break }
+					target = samples[hi * 2 + 1] + Math.min(root.scShadowScratchDelay, playAt - t1) * velocity
+					lo = hi
+				}
+				const posMs = at.scratchPosition.unnormalized / at.sampleRate * 1000, drift = target - posMs
+				at.drift = drift
+				if ((at.scratchJump || Math.abs(drift) > 1000) && now - at.seekAt >= 250) {
+					at.scratchSet.value = Math.max(0, Math.min(target, at.scratchEnd)) / at.scratchLength
+					at.seekAt = now; at.landing = undefined; at.env = undefined; at.scratchJump = false
+				} else if (at.scratchMove) {
+					// Two frames of source travel let fast scratches catch up without a decoder seek.
+					const cap = Math.max(15, Math.ceil(Math.abs(velocity) * 32 * at.scratchScale))
+					const ticks = Math.min(cap, Math.round(Math.abs(drift) * at.scratchScale))
+					if (ticks >= 15) {
+						if (drift > 0) at.scratchMove.incValue(ticks, 0, 0, false, true, 0)
+						else at.scratchMove.decValue(ticks, 0, 0, false, true, 0)
+					}
+				}
+				if (root.scShadowDebug) root.scShadowDbg({deck: d, act: "scratch-frame", posMs: posMs, target: target, drift: drift})
+			}
+		}
+	}
 	function scShadowScratchRelease(d, at) {
 		if (!at || !at.scratch) return
 		const tc = root.scTr("/Engine/Deck" + d + "/ExternalScratchWheelTouch")
@@ -2269,6 +2311,10 @@ SERVICES_MAIN = """
 		if (tc && at.scratchTouch !== undefined && !!tc.state !== at.scratchTouch) tc.state = at.scratchTouch
 		if (en && at.scratchEnable !== undefined && !!en.state !== at.scratchEnable) en.state = at.scratchEnable
 		at.scratch = false; at.scratchTouch = undefined; at.scratchEnable = undefined
+		at.scratchCount = 0; at.scratchSeq = undefined; at.scratchJump = false
+		let active = false
+		for (let n = 1; n <= 4; n++) if (scShadowAt[n] && scShadowAt[n].scratch) active = true
+		if (!active) scShadowScratchTimer.stop()
 		at.env = undefined; at.fine = undefined; at.over = 0; at.wide = false
 	}
 	// Asks Engine for the source's track on shadow deck d. Engine answers nothing,
