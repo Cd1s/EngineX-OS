@@ -5624,7 +5624,7 @@ assert.equal(scLanStemsLine({{online: true, hostname: 'studio-mac', backend: 'hp
     def test_build_installer_bundles_stems_service_and_trilingual_readme(self):
         import os, zipfile
         readme = (REPO / "tools/stems/README.md").read_text(encoding="utf-8")
-        for marker in ("## English", "## 简体中文", "## 繁體中文", "run-home-worker.sh", "run-home-worker.ps1"):
+        for marker in ("## English", "## 简体中文", "## 繁體中文", "run-home-worker.command", "run-home-worker.sh", "run-home-worker.ps1"):
             self.assertIn(marker, readme)
         with tempfile.TemporaryDirectory(prefix="installer-pkg-test-") as tmp:
             tdir = Path(tmp)
@@ -5663,6 +5663,10 @@ assert.equal(scLanStemsLine({{online: true, hostname: 'studio-mac', backend: 'hp
                         self.assertIn(req, znames)
                     sh_mode = (zf.getinfo("stems/run-home-worker.sh").external_attr >> 16) & 0o777
                     self.assertEqual(sh_mode & 0o111, 0o111)
+                    if "macos" in zname:
+                        self.assertIn("stems/run-home-worker.command", znames)
+                        cmd_mode = (zf.getinfo("stems/run-home-worker.command").external_attr >> 16) & 0o777
+                        self.assertEqual(cmd_mode & 0o111, 0o111)
 
     def test_deck_clock_feed_for_dmx_without_panel(self):
         m = bp.SERVICES_MAIN

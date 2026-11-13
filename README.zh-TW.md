@@ -250,9 +250,9 @@
 - 點擊螢幕上的 **「更新」** 按鈕——全系 16 款一代與二代機型皆會自動下載、校驗並安裝 `5.3.0.4`，完整保留曲庫、串流帳號、預設視圖與已裝 Mod（GitHub Release 中同時保留 `*-Data-Bundle.tar.gz` 相容包，讓舊版 `5.3.0.2` / `5.3.0.3` 二代機也能直接於螢幕上一鍵 OTA 升級並在開機後自動解鎖 `.img` 直刷）。
 
 ### 選配：用電腦開啟高音質 `htdemucs` AI 分軌
-播放機本機分軌為輕量快速模式。如需高音質神經網路分軌（預設自動啟用 `htdemucs`，支援顯示卡 / Apple Silicon MPS / CPU），在與播放機同一 Wi-Fi / 區域網路的電腦上解壓 `EngineX-Installer` 並執行一行指令（末尾加 `hpss` 可切換免 PyTorch 輕量模式）。播放機會自動探索電腦（不必輸入 IP 或密碼），並於 **設定檔 → 曲庫** 與 **設定 → 關於 / 更新** 顯示 `高音質分軌：<主機名> (htdemucs)`：
+播放機本機分軌為輕量快速模式。如需高音質神經網路分軌（預設自動啟用 `htdemucs`，支援顯示卡 / Apple Silicon MPS / CPU），在與播放機同一 Wi-Fi / 區域網路的電腦上解壓 `EngineX-Installer` 後，macOS 可直接雙擊 `stems/run-home-worker.command`，或於終端機執行一行指令（末尾加 `hpss` 可切換免 PyTorch 輕量模式）。播放機會自動探索電腦（不必輸入 IP 或密碼），並於 **設定檔 → 曲庫** 與 **設定 → 關於 / 更新** 顯示 `高音質分軌：<主機名> (htdemucs)`：
 ```sh
-# macOS / Linux（於解壓後的 EngineX-Installer 目錄內）
+# macOS（雙擊 stems/run-home-worker.command，或於終端機執行）/ Linux
 ./stems/run-home-worker.sh
 
 # Windows PowerShell（於解壓後的 EngineX-Installer 目錄內）
