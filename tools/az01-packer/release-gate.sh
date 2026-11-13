@@ -104,7 +104,9 @@ PY
 # the one the gate drives, with the sandbox key; otherwise it is the stock updater (UpdateFromUrl).
 # The asset name of the signature is in the binaries that verify it, and in no older one.
 old_verifies_signatures() {
-    xz -dc "$R/usr/share/sc5000-custom/sc5000-suite.xz" 2>/dev/null | grep -aq 'SHA256SUMS.txt.sig'
+    # grep -c reads all of the input: with -q it would stop at the first match, xz would get SIGPIPE and
+    # pipefail would report the pipeline as failed.
+    xz -dc "$R/usr/share/sc5000-custom/sc5000-suite.xz" 2>/dev/null | grep -ac 'SHA256SUMS.txt.sig' > /dev/null
 }
 
 # A deck refuses an update that does not verify: say why, install nothing (#239).
