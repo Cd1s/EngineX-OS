@@ -3049,6 +3049,34 @@ SERVICES_MAIN = """
 		function onTimeZoneSelect() { root.scTimeZonePickerUsed = true }
 		function onSystemTimeZoneSetSucceeded() { root.scOnTimeZoneChanged() }
 	}
+	// 5.3.0.5 Bluetooth speaker output: which output pair a connected speaker gets (GET/POST /v1/sc5000/bluetooth, loopback).
+	// The names are the API's; the panel shows them as the deck names its outputs.
+	property var scBtLayers: []
+	property string scBtLayer: ""
+	function scBtLabel(name) { return name === "Master" ? "Main" : name }
+	function scBtLabels(names) { return names.map(scBtLabel) }
+	function scBtReply(x) {
+		if (x.readyState !== 4 || x.status !== 200) return
+		const r = JSON.parse(x.responseText)
+		scBtLayers = r.layers || []
+		scBtLayer = r.assignLayer || ""
+	}
+	function scBtLoad() {
+		const x = new XMLHttpRequest()
+		x.open("GET", "http://127.0.0.1:8080/v1/sc5000/bluetooth")
+		x.onreadystatechange = function() { scBtReply(x) }
+		x.send()
+	}
+	function scBtSet(name) {
+		const x = new XMLHttpRequest()
+		x.open("POST", "http://127.0.0.1:8080/v1/sc5000/bluetooth?assignLayer=" + encodeURIComponent(name))
+		x.onreadystatechange = function() {
+			if (x.readyState !== 4) return
+			if (x.status === 200) scBtReply(x)
+			else scBtLoad()
+		}
+		x.send()
+	}
 	function scCall(query, done) {
 		if (!query && !done) {
 			if (!scUiPoll) {
@@ -3927,6 +3955,39 @@ Grid {
 	}
 }
 """
+
+# Bluetooth panel (5.3.0): "Output Source" under "Assign Input to", for the speaker the panel's own Available Devices
+# list pairs and connects. Only models that offer more than one output (Layer A/B, Main/Booth/Headphones/Zone).
+BLUETOOTH_OUT_ENTRY = """            PrefsConditionalEntry {
+                active: Config.audio.hasBluetoothOutput && root.scBtLayers.length > 1
+                sourceComponent: ListEntry {
+                    implicitHeight: 72
+                    text: "Output Source"
+                    objectName: "Bluetooth_OutputSource"
+                    textColor: Style.font02Color
+                    values: root.scBtLabels(root.scBtLayers)
+                    currentValue: root.scBtLabel(root.scBtLayer)
+                    onSelected: index => {
+                        root.scBtSet(root.scBtLayers[index])
+                    }
+                    entryWidth: narrow
+                        ? PrefsComponentSizes.ListEntryButton.Smaller
+                        : PrefsComponentSizes.ListEntryButton.Default
+                }
+            }
+"""
+BLUETOOTH_SELECT = [
+    ("    navigation: controller.navigation\n",
+     "    navigation: controller.navigation\n"
+     "    Connections {\n"
+     "        target: dialog.controller\n"
+     "        function onVisibleChanged() { if (dialog.controller.visible) root.scBtLoad() }\n"
+     "    }\n"
+     "    Component.onCompleted: root.scBtLoad()\n"),
+    ('            PrefsSliderEntry {\n                text: "Bluetooth Device Volume"\n',
+     BLUETOOTH_OUT_ENTRY + '            PrefsSliderEntry {\n                text: "Bluetooth Device Volume"\n'),
+]
+
 
 STREAM_SWITCHES = """
 	Repeater {
@@ -5981,6 +6042,7 @@ def edits(dev: bool):
 \t\t\t},
 \t\t\t""" + ("CrossfaderCalibration {}" if v53() else "CrossfaderCalibration { }")),
         ],
+        **({v + "Bluetooth/BluetoothSelect.qml": BLUETOOTH_SELECT} if v53() else {}),
         prefs + "Entries/StreamingServices.qml": [
             ("		visible: !isCloudService && !isEaasService\n", '		visible: !isCloudService && !isEaasService && ["TIDAL", "Tidal", "SoundCloud", "Beatport LINK"].indexOf(provider.name) < 0\n'),
             ('import "Base"\n', 'import QtQuick.Layouts 1.12\nimport "Base"\n'),

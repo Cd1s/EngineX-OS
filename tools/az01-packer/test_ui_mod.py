@@ -2189,6 +2189,81 @@ class UiModBuildTest(unittest.TestCase):
                                 wave = pack.extractfile(f"packs/{lang}/Skins/Embedded/Views/Common/{component}/{component}.qml").read().decode()
                                 self.assertIn(f'objectName: "EngineX_Shadow_{name}"', wave)
 
+    BT_PRELUDE = """
+const assert = require('node:assert/strict');
+const calls = [];
+let layers = ["Master", "Booth", "Headphones", "Zone"], layer = "Master";
+class XMLHttpRequest {
+  open(method, url) { this.method = method; this.url = url }
+  send() {
+    calls.push(this.method + " " + this.url);
+    this.status = 200;
+    if (this.method === "POST") {
+      const name = decodeURIComponent(new URL(this.url).searchParams.get("assignLayer"));
+      if (!layers.includes(name)) this.status = 400; else layer = name;
+    }
+    this.responseText = JSON.stringify({assignLayer: layer, layers});
+    this.readyState = 4; this.onreadystatechange();
+  }
+}
+const root = {scBtLayers: [], scBtLayer: ""};
+"""
+    BT_CHECKS = """
+scBtLoad();
+assert.deepEqual(root.scBtLayers, layers); assert.equal(root.scBtLayer, "Master");
+assert.deepEqual(scBtLabels(root.scBtLayers), ["Main", "Booth", "Headphones", "Zone"]);
+scBtSet("Headphones");
+assert.equal(root.scBtLayer, "Headphones");
+assert.equal(calls.at(-1), "POST http://127.0.0.1:8080/v1/sc5000/bluetooth?assignLayer=Headphones");
+layers = ["Layer A", "Layer B"]; layer = "Layer A"; scBtLoad();
+scBtSet("Layer B");
+assert.equal(root.scBtLayer, "Layer B");
+assert.equal(calls.at(-1), "POST http://127.0.0.1:8080/v1/sc5000/bluetooth?assignLayer=Layer%20B");
+scBtSet("Zone"); /* refused with 400: the panel asks again and shows what the deck says */
+assert.equal(root.scBtLayer, "Layer B");
+assert.equal(calls.at(-1), "GET http://127.0.0.1:8080/v1/sc5000/bluetooth");
+console.log("PASS");
+"""
+
+    def test_bluetooth_panel_output_source(self):
+        # 5.3.0.5: the stock Bluetooth panel (which scans, lists, pairs and connects speakers itself) gets an "Output Source"
+        # row under "Assign Input to", fed by /v1/sc5000/bluetooth through the root's scBt* helpers.
+        qrc = LAB / "5.3.0" / "qrc"
+        if not qrc.is_dir():
+            self.skipTest(f"{qrc} not found (run on the build host)")
+        with tempfile.TemporaryDirectory(prefix="ui-bt-test-") as tmp:
+            res = subprocess.run(["python3", str(BUILD_PACKS), "--qrc", str(qrc), "--out", str(Path(tmp) / "packs")],
+                                 capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0, res.stderr)
+            for lang, title in (("en", "Output Source"), ("zh-Hans", "输出来源"), ("zh-Hant", "輸出來源")):
+                panel = (Path(tmp) / "packs" / lang / "Skins/Embedded/Views/Bluetooth/BluetoothSelect.qml").read_text(encoding="utf-8")
+                self.assertIn('objectName: "Bluetooth_OutputSource"', panel)
+                self.assertIn("active: Config.audio.hasBluetoothOutput && root.scBtLayers.length > 1", panel)
+                self.assertIn("root.scBtSet(root.scBtLayers[index])", panel)
+                self.assertIn("function onVisibleChanged() { if (dialog.controller.visible) root.scBtLoad() }", panel)
+                self.assertRegex(panel, r'text: .*"Output Source"|text: .*"%s"' % title)
+                main = (Path(tmp) / "packs" / lang / "Skins/Embedded/EmbeddedMain.qml").read_text(encoding="utf-8")
+                dictionaries = json.loads(re.search(r"readonly property var scDicts: \((.+)\)", main).group(1))
+                self.assertEqual(json.loads(dictionaries[lang])["Output Source"], title)
+                # after "Assign Input to", before the volume slider; the stock entries and the list that pairs and connects stay
+                self.assertLess(panel.index("Bluetooth_Routing_SubTitleComponent"), panel.index("Bluetooth_OutputSource"))
+                self.assertLess(panel.index("Bluetooth_OutputSource"), panel.index("Bluetooth_Volume"))
+                self.assertIn("dialog.controller.setChannel(values[index])", panel)
+                self.assertIn("dialog.controller.entryClicked(identifier)", panel)
+                if lang != "en":
+                    continue
+                helpers = re.search(r"\tproperty var scBtLayers: \[\]\n(.*?\n)\tfunction scCall\(", main, re.S)
+                self.assertIsNotNone(helpers)
+                # Run the generated helpers against a stand-in for the gateway that answers like the Go handler.
+                body = re.sub(r"^\tproperty [^\n]*\n", "", helpers.group(1), flags=re.M)
+                body = re.sub(r"^\t", "", body, flags=re.M).replace("scBtLayers = ", "root.scBtLayers = ").replace("scBtLayer = ", "root.scBtLayer = ")
+                node = shutil.which("node")
+                if not node:
+                    self.skipTest("node not found")
+                run = subprocess.run([node, "-e", self.BT_PRELUDE + body + self.BT_CHECKS], capture_output=True, text=True)
+                self.assertEqual(run.returncode, 0, run.stderr + run.stdout)
+                self.assertIn("PASS", run.stdout)
+
     def test_build_530(self):
         qrc = LAB / "5.3.0" / "qrc"
         if not qrc.is_dir():
