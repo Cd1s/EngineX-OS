@@ -425,6 +425,27 @@ func TestUpdateKeepsFreeSpaceForTheDeck(t *testing.T) {
 		}
 		nothingInstalled(t, bundle, custom, "", "5.3.0.2")
 	})
+	// install.sh copies bin/lib and unpacks the UI packs into a staging directory while the extracted
+	// bundle is still there (review of #239: the reserve fell to 185 MiB), so both copies are budgeted.
+	for _, k := range updateKinds(t)[1:] {
+		t.Run(k.name+": the install's staged copy is counted", func(t *testing.T) {
+			setSpace(t, 30*MiB+bundleInstallPeak, 30*MiB) // exactly the reserve and the two copies: nothing for the download
+			s, custom := bundleDeck(t, k.compatible, k.assets, k.content)
+			getUpdate(s, "")
+			getUpdate(s, "?apply=1")
+			if v := waitUpdate(t, s); v.Error != msgUpdateNoSpace {
+				t.Fatalf("got %+v, want %q", v, msgUpdateNoSpace)
+			}
+			nothingInstalled(t, k, custom, "", "5.3.0.2")
+			setSpace(t, 30*MiB+bundleInstallPeak+8*MiB, 30*MiB) // room for the download as well
+			s, _ = bundleDeck(t, k.compatible, k.assets, k.content)
+			getUpdate(s, "")
+			getUpdate(s, "?apply=1")
+			if v := waitUpdate(t, s); v.Error != "" {
+				t.Fatalf("with room it was refused: %+v", v)
+			}
+		})
+	}
 	t.Run("a server that sends more than room is cut off at the budget", func(t *testing.T) {
 		const room = 30 * MiB
 		setSpace(t, room+20*MiB, 20*MiB)

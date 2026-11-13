@@ -100,6 +100,9 @@ type options struct {
 	ListUSB                       func(context.Context) string // host USB devices, one "vid:pid name" per line
 	fbVID                         string                       // "-i" vendor id fastboot needs to see the deck
 	hinted                        map[string]bool
+	// release is the tag the signed list of the package fetched from GitHub (or kept from such a
+	// download) proves; empty for a file the user named. modeA checks it against the deck.
+	release string
 	// USBFlash writes img in mode C (1cc5:2027) with the bundle's host-install-usbupdate.py.
 	USBFlash func(ctx context.Context, o *options, script []byte, img string) error
 }
@@ -672,9 +675,11 @@ func fetchBundle(ctx context.Context, o *options, prefix, dir string) (string, e
 		if ctx.Err() == nil {
 			if local := localBundle(dir, prefix); local != "" {
 				// Found by the installer, not named by the user: it must carry the signed list kept at its download.
-				if err := verifyCached(local); err != nil {
+				tag, err := verifyCached(local)
+				if err != nil {
 					return "", err
 				}
+				o.release = tag
 				o.say("无法读取 GitHub 最新版本，使用已有的 "+filepath.Base(local),
 					"Cannot check the latest GitHub release; using the package already here: "+filepath.Base(local))
 				return local, nil
@@ -710,14 +715,16 @@ func fetchBundle(ctx context.Context, o *options, prefix, dir string) (string, e
 	if got, err := fileSHA256(dest); err == nil && strings.EqualFold(got, wantSHA) {
 		o.say("使用已有的 "+filepath.Base(dest)+" ("+rel.Tag+")",
 			"Using the package already here: "+filepath.Base(dest)+" ("+rel.Tag+")")
-		keepSums(o, dir, sums, sig)
+		keepSums(o, dir, sums, sig, rel.Tag)
+		o.release = rel.Tag
 		return dest, nil
 	}
 	o.say("下载 "+name+" ("+rel.Tag+")", "Downloading "+name)
 	if err := download(ctx, o, url, wantSHA, dest); err != nil {
 		return "", err
 	}
-	keepSums(o, dir, sums, sig)
+	keepSums(o, dir, sums, sig, rel.Tag)
+	o.release = rel.Tag
 	return dest, nil
 }
 
@@ -726,6 +733,7 @@ func fetchBundle(ctx context.Context, o *options, prefix, dir string) (string, e
 // be this model's EngineX AZ01 image), else the latest release's (BH-G2-7: both Gen-1 paths always
 // downloaded, so an offline install failed and an online one could flash another build).
 func gen1Image(ctx context.Context, o *options, prefix string) (string, error) {
+	o.release = ""
 	if o.Bundle == "" {
 		return fetchImage(ctx, o, prefix)
 	}
@@ -771,7 +779,8 @@ func fetchImage(ctx context.Context, o *options, prefix string) (string, error) 
 		if err := downloadLimit(ctx, o, a.URL, digest, path, 2<<30); err != nil {
 			return "", err
 		}
-		keepSums(o, o.WorkDir, sums, sig)
+		keepSums(o, o.WorkDir, sums, sig, rel.Tag)
+		o.release = rel.Tag
 		return path, nil
 	}
 	return "", fmt.Errorf("release %s has no %s update image", rel.Tag, prefix)
@@ -836,6 +845,7 @@ func downloadLimit(ctx context.Context, o *options, url, wantSHA, dest string, l
 // in the work dir only when its SHA-256 matches the latest asset (or when the latest release cannot
 // be read due to network/HTTP/proxy errors) (#215, #218).
 func obtainBundle(ctx context.Context, o *options, prefix string) (*bundleInfo, error) {
+	o.release = ""
 	path := o.Bundle
 	if path != "" {
 		if !strings.HasPrefix(filepath.Base(path), prefix+"-") {
@@ -1087,6 +1097,9 @@ func modeA(ctx context.Context, o *options, d deck) error {
 		if err != nil {
 			return err
 		}
+		if err := refuseOlder(ctx, o, cl, label); err != nil {
+			return err
+		}
 		if err := confirm(o, "将更新一代机 "+m.Name+"，请确认已备份数据。", "Update "+m.Name+"; confirm you have backed up your data."); err != nil {
 			return err
 		}
@@ -1116,6 +1129,9 @@ func modeA(ctx context.Context, o *options, d deck) error {
 		"Found "+label+", "+m.Name+"; installing online, your music and library stay.")
 	b, err := obtainBundle(ctx, o, m.Prefix)
 	if err != nil {
+		return err
+	}
+	if err := refuseOlder(ctx, o, cl, label); err != nil {
 		return err
 	}
 	sayGen2Steps(o, filepath.Base(b.Path))

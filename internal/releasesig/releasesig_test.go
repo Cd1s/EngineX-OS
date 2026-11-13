@@ -210,3 +210,59 @@ func TestTagBinding(t *testing.T) {
 		t.Fatalf("TagDigest = %s", got)
 	}
 }
+
+func TestNewerVersion(t *testing.T) {
+	for _, c := range []struct {
+		latest, current string
+		want            bool
+	}{
+		{"v2", "v1", true},
+		{"v1", "v1", false},
+		{"v1", "v2", false}, // rollback / lower latest
+		{"v5.0.4-custom.10", "v5.0.4-custom.9", true},
+		{"v5.0.4-custom.1", "v5.0.4", true},
+		{"v5.0.4", "dev", false}, // unknown current version
+		{"", "v1", false},
+	} {
+		if got := NewerVersion(c.latest, c.current); got != c.want {
+			t.Errorf("NewerVersion(%q, %q) = %v", c.latest, c.current, got)
+		}
+	}
+}
+
+// The deck and the installer decide "older" with the same functions: the release a deck runs is the
+// newest tag of its installed version, else the version.
+func TestInstalledRelease(t *testing.T) {
+	for _, c := range []struct {
+		name, version string
+		tags          []string
+		want          string
+	}{
+		{"no tag", "5.3.0.5", nil, "5.3.0.5"},
+		{"a re-release", "5.3.0.5", []string{"v5.3.0.5-r2"}, "v5.3.0.5-r2"},
+		{"the newest of several", "5.3.0.5", []string{"v5.3.0.5-r2", "v5.3.0.5-r10", "v5.3.0.5"}, "v5.3.0.5-r10"},
+		{"a tag left by another version is ignored", "5.3.0.4", []string{"v5.3.0.5-r2"}, "5.3.0.4"},
+		{"not a tag at all", "5.3.0.5", []string{"dev", ""}, "5.3.0.5"},
+	} {
+		if got := InstalledRelease(c.version, c.tags); got != c.want {
+			t.Errorf("%s: InstalledRelease = %q, want %q", c.name, got, c.want)
+		}
+	}
+	// What the installer refuses: a release older than the one the deck runs; the same one is allowed.
+	for _, c := range []struct {
+		installed, offered string
+		older              bool
+	}{
+		{"v5.3.0.5-r2", "v5.3.0.5-r1", true},
+		{"v5.3.0.5-r2", "v5.3.0.5", true},
+		{"v5.3.0.5-r2", "v5.3.0.4", true},
+		{"v5.3.0.5-r2", "v5.3.0.5-r2", false},
+		{"v5.3.0.5-r2", "v5.3.0.5-r3", false},
+		{"v5.3.0.5-r2", "v5.3.0.6", false},
+		{"dev", "v5.3.0.5", false}, // nothing known about the deck: not a reason to refuse
+	} {
+		if got := NewerVersion(c.installed, c.offered); got != c.older {
+			t.Errorf("NewerVersion(%q, %q) = %v, want %v", c.installed, c.offered, got, c.older)
+		}
+	}
+}

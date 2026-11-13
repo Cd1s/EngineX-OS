@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"golang.org/x/crypto/ssh"
+
 	"github.com/Cd1s/EngineX-OS/internal/releasesig"
 )
 
@@ -113,14 +115,15 @@ func signedDigest(sums []byte, name, githubDigest string) (string, error) {
 	return digest, nil
 }
 
-// rememberSums keeps the verified sums and signature in dir, atomically, so that an offline run
-// can check the package it falls back to (verifyCached). A failure is returned: without the pair
-// the cached package cannot be reused later, which fails closed.
-func rememberSums(dir string, sums, sig []byte) error {
+// rememberSums keeps the verified sums, signature and release tag in dir, atomically, so that an
+// offline run can check the package it falls back to (verifyCached). The tag file is checked
+// against the signed list when it is read, so it can not name another release. A failure is
+// returned: without them the cached package cannot be reused later, which fails closed.
+func rememberSums(dir string, sums, sig []byte, tag string) error {
 	for _, f := range []struct {
 		name string
 		data []byte
-	}{{sumsFile, sums}, {sigFile, sig}} {
+	}{{sumsFile, sums}, {sigFile, sig}, {releasesig.TagEntryName, []byte(tag + "\n")}} {
 		tmp, err := os.CreateTemp(dir, ".sums-*")
 		if err != nil {
 			return err
@@ -143,8 +146,8 @@ func rememberSums(dir string, sums, sig []byte) error {
 
 // keepSums calls rememberSums and says so when it cannot: the install goes on (it was verified),
 // but the next offline run will not reuse this package.
-func keepSums(o *options, dir string, sums, sig []byte) {
-	if err := rememberSums(dir, sums, sig); err != nil {
+func keepSums(o *options, dir string, sums, sig []byte, tag string) {
+	if err := rememberSums(dir, sums, sig, tag); err != nil {
 		o.say("警告：无法保存已验证的签名清单（"+err.Error()+"），下次离线时不会复用这个下载的包",
 			"Warning: could not keep the verified signed list ("+err.Error()+"); this download will not be reused when GitHub cannot be reached")
 	}
@@ -154,31 +157,77 @@ func keepSums(o *options, dir string, sums, sig []byte) {
 // user naming it, when GitHub cannot be read. It is not the user's own build: it must come with
 // the signed list that was kept when it was downloaded, the signature must verify, and the list
 // must give the file's hash. Anything less is refused; the warn-only path of verifyLocal is for
-// files the user passes with --image or --bundle.
-func verifyCached(path string) error {
+// files the user passes with --image or --bundle. It returns the release tag the list proves, for
+// the same older-release check a fresh download gets.
+func verifyCached(path string) (tag string, err error) {
 	dir, base := filepath.Dir(path), filepath.Base(path)
 	sums, serr := os.ReadFile(filepath.Join(dir, sumsFile))
 	sig, gerr := os.ReadFile(filepath.Join(dir, sigFile))
-	if serr != nil || gerr != nil {
-		return fmt.Errorf("无法读取 GitHub，而本地的 %s 没有已验证的签名清单，拒绝使用 / GitHub cannot be read and the local %s has no verified signed list kept with it; nothing flashed", base, base)
+	kept, terr := os.ReadFile(filepath.Join(dir, releasesig.TagEntryName))
+	if serr != nil || gerr != nil || terr != nil {
+		return "", fmt.Errorf("无法读取 GitHub，而本地的 %s 没有已验证的签名清单，拒绝使用 / GitHub cannot be read and the local %s has no verified signed list kept with it; nothing flashed", base, base)
 	}
 	keys, err := trustedKeys()
 	if err != nil {
-		return err
+		return "", err
 	}
 	if err := releasesig.VerifySignature(sums, sig, keys); err != nil {
-		return fmt.Errorf("本地 %s 的签名清单签名无效，拒绝使用 / the signed list kept with %s has an invalid signature; nothing flashed", base, base)
+		return "", fmt.Errorf("本地 %s 的签名清单签名无效，拒绝使用 / the signed list kept with %s has an invalid signature; nothing flashed", base, base)
+	}
+	tag = strings.TrimSpace(string(kept))
+	if err := releasesig.VerifyTag(sums, tag); err != nil {
+		return "", fmt.Errorf("本地保存的发布标签与签名清单不符，拒绝使用 / the release tag kept with %s is not the one in the signed list; nothing flashed", base)
 	}
 	want, err := signedDigest(sums, base, "")
 	if err != nil {
-		return err
+		return "", err
 	}
 	got, err := fileSHA256(path)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if !strings.EqualFold(got, want) {
-		return fmt.Errorf("本地 %s 与保存的签名清单里的 SHA-256 不符，拒绝使用 / %s does not match the signed SHA-256 kept with it; nothing flashed", base, base)
+		return "", fmt.Errorf("本地 %s 与保存的签名清单里的 SHA-256 不符，拒绝使用 / %s does not match the signed SHA-256 kept with it; nothing flashed", base, base)
+	}
+	return tag, nil
+}
+
+// installedReleaseCmd prints what the deck says it runs, from the files its own update check reads
+// (pkg/webui installedVersion and installedRelease): "V <version>" for each version file, "T <tag>"
+// for each release-tag file.
+const installedReleaseCmd = `for f in ` + customDirSh + `/version.txt /data/sc5000-custom/version.txt /etc/enginex/version.txt /etc/sc5000/version.txt; do ` +
+	`[ -r "$f" ] && printf 'V %s\n' "$(cat "$f")"; done; ` +
+	`for f in /etc/enginex/release-tag /etc/sc5000/release-tag ` + customDirSh + `/bundle/release-tag /data/sc5000-custom/bundle/release-tag; do ` +
+	`[ -r "$f" ] && printf 'T %s\n' "$(cat "$f")"; done; :`
+
+// refuseOlder stops an install of a package fetched from a release (o.release is the tag its signed
+// list proves) when the deck already runs a newer one: a genuine older release replayed by whoever
+// serves the release page must not take a deck back. Same release is allowed (a repair). A file the
+// user names with --image or --bundle has no o.release and is theirs to choose.
+func refuseOlder(ctx context.Context, o *options, cl *ssh.Client, label string) error {
+	if o.release == "" {
+		return nil
+	}
+	out, err := sshRead(ctx, cl, installedReleaseCmd)
+	if err != nil {
+		return fmt.Errorf("%s: cannot read the installed release: %w", label, err)
+	}
+	version := "dev"
+	var tags []string
+	for _, line := range strings.Split(out, "\n") {
+		kind, val, _ := strings.Cut(strings.TrimSpace(line), " ")
+		switch val = strings.TrimSpace(val); kind {
+		case "V":
+			if val != "" && (version == "dev" || releasesig.NewerVersion(val, version)) {
+				version = val
+			}
+		case "T":
+			tags = append(tags, val)
+		}
+	}
+	if installed := releasesig.InstalledRelease(version, tags); releasesig.NewerVersion(installed, o.release) {
+		return fmt.Errorf("%s 已经是 %s，比要安装的 %s 新，拒绝回退（要回退请用 --image 或 --bundle 指定旧文件）/ %s already runs %s, newer than %s; refusing to go back (to do that on purpose, name the older file with --image or --bundle)",
+			label, installed, o.release, label, installed, o.release)
 	}
 	return nil
 }
