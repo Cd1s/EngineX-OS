@@ -224,8 +224,8 @@ thread and `BluetoothSignalSender::audio(this, float *const in[2], int frames)`,
 `Config.audio.hasBluetoothOutput` (`prepare_config` sets it, byte 3 of the audio block) and fed silence (a player
 feeds it its deck 1 pair). We add nothing but a feed. Engine calls the sender inside the master callback, on its
 thread, before the callback's output exists; so `hook_master_output` keeps the pair `bt_out=<n>` selects (outputs
-`2n`, `2n+1`; default 0, which is Master or a player's Layer A, not "off"; a pair the output does not have, or a
-negative one, is pair 0) after the callback, and `hook_bt_send`, in the next callback, takes everything kept and hands
+`2n`, `2n+1`; default 0, which is Master or a player's Layer A, not "off"; a pair the output does not have is pair 0,
+and `lim_poll` never stores a negative one) after the callback, and `hook_bt_send`, in the next callback, takes everything kept and hands
 it to the sender in calls of at most 512 frames. What waits is a FIFO of stream-rate frames, so one block's length need
 not match the next one's, and a block goes once. Calls without outputs (a player makes them too) add and take nothing.
 Sender entry per build: Gen-1 5.3.0 `0xf56034`, Gen-2 armhf `0xf629b0`, AZ04 `0x102eb20` (the table's `bt_send`;
@@ -237,16 +237,23 @@ goes to the sender as it always did. A build without the sender hook never captu
 
 The sender does not resample and sends the data at the rate it arrives, while the SBC stream has the rate BlueZ
 negotiated with the speaker: Engine picks 44.1 kHz whenever the speaker offers it (48 kHz only if that is all it
-offers), and a Gen-1 player renders at 96 kHz. The hook reads the stream rate from the `sbc_t` Engine passes to
-`sbc_encode` (interposed) and the render rate from `snd_pcm_hw_params` (interposed, keyed by channel count), halves
-a render of 88.2 kHz or more with an 11-tap half-band, runs a 29-tap low-pass (Kaiser 4.0, 20.5 kHz at 48 kHz: flat
+offers). The hook reads the stream rate from the `sbc_t` Engine passes to `sbc_encode` (interposed; a frequency libsbc
+does not have is not a heartbeat, so the rate is never 0 while a speaker listens) and **measures the master callback's
+own rate**: its frames over the monotonic clock in half-second windows, snapped to 44.1 / 48 / 88.2 / 96 kHz, and a new
+value has to come twice in a row, so one stalled callback changes nothing. It runs on every callback, listening or not
+(one clock read), so the first speaker is heard from its first block; until the first answer (a second after Engine
+starts) nothing is sent, not a guess: a 96 kHz callback taken for 48 kHz doubled the supply and left a second of queue. It must not trust the ALSA device: on a real SC5000 the callback is 225 frames 213
+times a second, which is a 48 kHz render, while ALSA is opened at 96 kHz; reading 96 kHz made the first version halve
+48 kHz data and send half of what the encoder needs (about 22 kHz of audio into a 44.1 kHz stream: the choppy sound
+the first deck test heard). It halves a render of 88.2 kHz or more with an 11-tap half-band, runs a 29-tap low-pass (Kaiser 4.0, 20.5 kHz at 48 kHz: flat
 to 18 kHz, -23 dB at 22.05 kHz, -58 dB from 23 kHz) when the stream rate is below that, and a Catmull-Rom interpolation
 brings the result to the stream rate, the position carried across blocks. Without the low-pass a 23 kHz tone came out
 at 21.1 kHz with 27 % of its level from a 48 kHz render and 15 % from 96 kHz; now it is under 0.1 %. Without the
 resampling a 48 kHz feed on a 44.1 kHz stream runs 8.8 % ahead and fills the speaker's buffer.
 
 The sender converts float to s16 with a wrap, and the filters overshoot a full-scale signal (1.08 and 1.15 on a square
-wave): the input is saturated to +-1 (a NaN is silence) and every frame is saturated again as the last step. A new source
+wave), so every frame is saturated to +-1 as the last step (a NaN is silence). The filters are FIR: a NaN or an
+overshoot in the input leaves them within 43 frames, and nothing needs saturating before them. A new source
 (pair), render rate or stream rate restarts the filters with their history set to the new block's first frame and fades
 the next 128 frames in from the last frame produced, so a switch or a speaker that connects does not click.
 
@@ -254,8 +261,12 @@ Which pair carries what is per model: players pair 0 and 1 are their two decks, 
 Booth, Headphones (Cue), Zone and a spare, PRIME 2 and Mixstream Pro Main and Headphones; `pkg/webui/bluetooth.go`
 names only these and rewrites a saved pair its model has no name for. A single channel of an all-in-one is not on any
 output (the mixer's per-channel buffers are not visible to a hook site): it reaches the speaker through Headphones (Cue).
-Tests: `test_bt_out.c` (no Engine needed; its `clip`, `blocks`, `rate` and `source` tests also build against the first
-version of the feature with `-DBT_OUT_OLD`, where they fail); sandbox runs with a fake A2DP speaker are in
+Tests: `test_bt_out.c` (no Engine needed, on a simulated clock: every render rate measured within 1.2 s with the clock
+reading off by 300 us, a stalled window ignored, `deck` = 225-frame callbacks at 48 kHz must make 44100 stream frames a
+second; its `clip`, `blocks`, `rate` and `source` tests also build against the first version of the feature with
+`-DBT_OUT_OLD` (6e62523) and `deck` against the ALSA-probe version with `-DBT_OUT_FB` (fb33354), where they fail;
+`test_bt_out realtime`, opt-in and a quarter of a minute, runs the callback and a speaker's encoder on two threads on the wall
+clock at 48 / 96 / 44.1 kHz: the rate is found by itself, the encoder does not starve, the queue stays at a few callbacks); sandbox runs with a fake A2DP speaker are in
 `docs/REGRESSION-CHECKLIST.md` row 185.
 
 ## ALSA clock and official updater boundary

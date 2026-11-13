@@ -3,8 +3,9 @@
  * exactly that to BluetoothSignalSender::audio, which otherwise gets silence. With nobody listening nothing runs.
  * arm-linux-gnueabihf-gcc -O2 -mthumb -march=armv7-a -mfpu=neon -mfloat-abi=hard tools/ui-mod/test_bt_out.c -ldl -lpthread -lm -o /tmp/test_bt_out
  * Also native aarch64: gcc -O2 tools/ui-mod/test_bt_out.c -ldl -lpthread -lm. No Engine or rootfs needed.
- * The tests below the "regressions" line are written for the first version of this feature too (-DBT_OUT_OLD, with that
- * version's engine_ui_hook.c, and the test name as the argument): clip, blocks, rate and source must fail there. */
+ * The tests below the "regressions" line are written for the first versions of this feature too (-DBT_OUT_OLD with
+ * 6e62523's engine_ui_hook.c for clip, blocks, rate and source; -DBT_OUT_FB with fb33354's for deck; the test name as the argument):
+ * each must fail there. The callbacks run on a simulated clock (the hook measures their rate on it). */
 #define ENGINE_UI_HOOK_TEST
 int hook_test_engine;
 #include "engine_ui_hook.c"
@@ -17,6 +18,14 @@ int hook_test_engine;
 static float level = 1.0f, tone, tone_r, device_rate;
 static int wave, nested = 1;
 static unsigned long long played;
+static double sim_t, sim_noise, sim_stall; /* ns on the callbacks' clock; noise +-ns on each reading; a one-off stall */
+#if !defined(BT_OUT_OLD) && !defined(BT_OUT_FB)
+static unsigned long long sim_clock(void) {
+    static unsigned x = 1;
+    x = x * 1664525u + 1013904223u;
+    return (unsigned long long)(sim_t + sim_noise * ((double)(x >> 8) / 8388608.0 - 1.0) + 2e6);
+}
+#endif
 
 static const float *engine_feed[2];
 static float silence[2][4096];
@@ -25,6 +34,8 @@ static int stock_calls;
 /* The original master callback; Engine calls the sender inside it, before its output exists. */
 static uint32_t device(void *host, void *context, int ic, const float *const *in, int oc, float *const *out, int frames) {
     (void)host; (void)context; (void)ic; (void)in;
+    sim_t += (double)frames * 1e9 / (double)device_rate + sim_stall;
+    sim_stall = 0;
     if (nested) hook_bt_send(NULL, engine_feed, frames);
     for (int c = 0; c < oc; c++)
         for (int i = 0; i < frames; i++) {
@@ -40,8 +51,10 @@ static uint32_t device(void *host, void *context, int ic, const float *const *in
     return (uint32_t)oc;
 }
 
+static int rt_queue; /* the speaker's queue in the real-time test: frames the sender gave it and its encoder has not taken */
 static float got[2][24576];
-static int got_n, longest_call;
+static int got_n, longest_call, collect = 1; /* collect: keep the samples; otherwise only count them */
+static long long delivered; /* stream frames the sender was given */
 static void sender(void *self, const float *const *in, int frames) {
     (void)self;
     if (in == engine_feed) {
@@ -49,6 +62,9 @@ static void sender(void *self, const float *const *in, int frames) {
         return;
     }
     if (frames > longest_call) longest_call = frames;
+    delivered += frames;
+    __atomic_add_fetch(&rt_queue, frames, __ATOMIC_RELAXED);
+    if (!collect) return;
     assert(got_n + frames <= (int)(sizeof got[0] / sizeof got[0][0]));
     for (int c = 0; c < 2; c++) memcpy(got[c] + got_n, in[c], (size_t)frames * sizeof(float));
     got_n += frames;
@@ -96,9 +112,14 @@ static void fresh(void) {
 
 /* A render at render_hz sent to a stream at stream_hz (0: none yet), from a clean start. */
 static void reset(unsigned render_hz, unsigned stream_hz) {
-    got_n = 0; played = 0; longest_call = 0; stock_calls = 0; wave = 0; tone = tone_r = 0; level = 1.0f; listening = 1; nested = 1;
-    render_rate[4] = render_rate[10] = render_hz;
+    got_n = 0; delivered = 0; collect = 1; played = 0; longest_call = 0; stock_calls = 0; wave = 0; tone = tone_r = 0; level = 1.0f; listening = 1; nested = 1;
     device_rate = (float)render_hz;
+    sim_t = sim_noise = sim_stall = 0;
+#if defined(BT_OUT_OLD) || defined(BT_OUT_FB)
+    render_rate[4] = render_rate[10] = render_hz;
+#else
+    bt_render = render_hz;
+#endif
     bt_out_pair = 0;
     set_stream(stream_hz);
     fresh();
@@ -134,18 +155,6 @@ static double max_step(const float *x, int from, int to) {
 }
 
 #ifndef BT_OUT_OLD
-/* Stand-ins for libasound, which the hook finds with dlsym(RTLD_NEXT). */
-static int dir_of_pcm, rc_of_real;
-static unsigned hz_of, ch_of;
-static int fake_real(void *pcm, void *params) { (void)pcm; (void)params; return rc_of_real; }
-static int fake_stream(void *pcm) { (void)pcm; return dir_of_pcm; }
-static int fake_rate(const void *params, unsigned *hz, int *dir) { (void)params; *hz = hz_of; *dir = 0; return 0; }
-static int fake_channels(const void *params, unsigned *ch) { (void)params; *ch = ch_of; return 0; }
-static void *fake_next(const char *name) {
-    return !strcmp(name, "snd_pcm_hw_params") ? (void *)fake_real : !strcmp(name, "snd_pcm_stream") ? (void *)fake_stream
-         : !strcmp(name, "snd_pcm_hw_params_get_rate") ? (void *)fake_rate : !strcmp(name, "snd_pcm_hw_params_get_channels") ? (void *)fake_channels : NULL;
-}
-
 /* The sum of everything the pipeline keeps: it does not move while nobody listens. */
 static double bt_sum(void) {
     double s = bt_pend;
@@ -179,6 +188,9 @@ static void test_clip(void) {
     for (int i = 0; i < 4; i++) block(4, 480);
     drain();
     for (int i = 0; i < got_n; i++) assert(isfinite(got[0][i]) && isfinite(got[1][i]) && fabsf(got[0][i]) <= 1.0f);
+    /* and does not stay: the last bad frame (400) is out of every filter 43 frames later, the rest is the steady 0.1 */
+    assert(got_n > 600);
+    for (int i = 260; i < got_n; i++) assert(fabsf(got[0][i] - 0.1f) < 0.002f && fabsf(got[1][i] - 0.1f) < 0.002f);
 }
 
 /* Engine calls the sender inside the callback, so the block it takes was kept by the callback before, whatever
@@ -245,11 +257,93 @@ static void test_source(void) {
     assert(max_step(got[0], at - 20, got_n) < 0.003); /* 0.1 over 128 frames is 0.0008 a frame */
 }
 
+/* The shape of a Gen-1 player: the callback is 225 frames 213 times a second (48 kHz) while ALSA, which the first version
+ * read the render rate from, says 96 kHz. A second of it must make a second of the stream (44.1 kHz), the same tone. */
+static void test_deck(void) {
+    reset(48000, 44100);
+#if defined(BT_OUT_OLD) || defined(BT_OUT_FB)
+    render_rate[4] = 96000;
+#else
+    bt_render = 0; /* not measured yet */
+#endif
+    tone = 1000;
+    collect = 0;
+    for (int i = 0; i < 213 * 3; i++) block(4, 225);
+    long long before = delivered;
+    for (int i = 0; i < 213; i++) block(4, 225);
+    drain();
+    assert(llabs((delivered - before) - 44100) < 441); /* a second, within 1 % */
+    collect = 1;
+    got_n = 0;
+    for (int i = 0; i < 53; i++) block(4, 225);
+    drain();
+    tone = 0;
+    assert(fabs(amplitude(got[0], got_n, 1000, 44100) - 0.5) < 0.01 && amplitude(got[0], got_n, 2000, 44100) < 0.01);
+}
+
+#if !defined(BT_OUT_OLD) && !defined(BT_OUT_FB)
+/* Real time, on the wall clock (opt-in, a few seconds: `test_bt_out realtime`): Engine's master callback of `frames` frames at
+ * `hz` on this thread, and the speaker's encoder on another, taking 128 frames at the 44.1 kHz stream rate and calling
+ * sbc_encode each time. The hook finds the callback's rate by itself, the encoder does not starve and the queue does not grow. */
+static int rt_count;
+static unsigned rt_periods, rt_starved;
+static volatile int rt_stop;
+static void add_ns(struct timespec *t, long long ns) {
+    long long n = t->tv_nsec + ns;
+    t->tv_sec += (time_t)(n / 1000000000ll);
+    t->tv_nsec = (long)(n % 1000000000ll);
+}
+static void *rt_encoder(void *arg) {
+    (void)arg;
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    while (!rt_stop) {
+        add_ns(&t, 128ll * 1000000000ll / 44100);
+        clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, NULL);
+        sbc_encode(sbc_fake, NULL, 0, NULL, 0, NULL);
+        int have = __atomic_load_n(&rt_queue, __ATOMIC_RELAXED), counting = __atomic_load_n(&rt_count, __ATOMIC_RELAXED);
+        if (counting) rt_periods++;
+        if (have >= 128) __atomic_sub_fetch(&rt_queue, 128, __ATOMIC_RELAXED);
+        else if (counting) rt_starved++;
+    }
+    return NULL;
+}
+static void test_realtime(unsigned hz, int frames) {
+    reset(hz, 44100);
+    bt_render = 0; /* not measured yet */
+    collect = 0;
+    rt_queue = 0; rt_count = 0; rt_periods = rt_starved = 0; rt_stop = 0;
+    hook_test_clock = NULL;
+    pthread_t th;
+    assert(pthread_create(&th, NULL, rt_encoder, NULL) == 0);
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    long long period = (long long)frames * 1000000000ll / hz;
+    for (long i = 0; i * period < 5500000000ll; i++) {
+        if (i * period >= 2000000000ll) __atomic_store_n(&rt_count, 1, __ATOMIC_RELAXED); /* after the rate is found */
+        add_ns(&t, period);
+        clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, NULL);
+        assert(hook_master_output(NULL, NULL, 0, NULL, 4, out, frames) == 4);
+    }
+    rt_stop = 1;
+    pthread_join(th, NULL);
+    hook_test_clock = sim_clock;
+    int queued = __atomic_load_n(&rt_queue, __ATOMIC_RELAXED);
+    fprintf(stderr, "realtime %u Hz x %d: bt_render %u, encoder periods %u starved %u, queue %d, delivered %lld\n", hz, frames, bt_render, rt_periods, rt_starved, queued, delivered);
+    assert(bt_render == hz);
+    assert(rt_periods > 1000 && rt_starved * 50 < rt_periods); /* under 2 % */
+    assert(queued < 3 * 4096);
+}
+#endif
+
 int main(int argc, char **argv) {
     const char *only = argc > 1 ? argv[1] : NULL;
     for (int c = 0; c < 10; c++) out[c] = b[c];
     engine_feed[0] = silence[0]; engine_feed[1] = silence[1];
     hook_test_engine = 1;
+#if !defined(BT_OUT_OLD) && !defined(BT_OUT_FB)
+    hook_test_clock = sim_clock;
+#endif
     dsp_originals[DSP_MASTER] = (void *)device;
     bt_send_orig = sender;
 
@@ -258,11 +352,15 @@ int main(int argc, char **argv) {
         else if (!strcmp(only, "blocks")) test_blocks();
         else if (!strcmp(only, "rate")) test_rate();
         else if (!strcmp(only, "source")) test_source();
+        else if (!strcmp(only, "deck")) test_deck();
+#if !defined(BT_OUT_OLD) && !defined(BT_OUT_FB)
+        else if (!strcmp(only, "realtime")) { test_realtime(48000, 225); test_realtime(96000, 450); test_realtime(44100, 225); }
+#endif
         else return 2;
         printf("bt out %s: PASS\n", only);
         return 0;
     }
-#ifdef BT_OUT_OLD
+#if defined(BT_OUT_OLD) || defined(BT_OUT_FB)
     return 2;
 #else
     /* The stream's sample rate is the encoder's, read from the sbc_t Engine passes to sbc_encode: frequency 2 is 44.1 kHz,
@@ -273,30 +371,13 @@ int main(int argc, char **argv) {
         unsigned counted = bt_encodes;
         stream_rate = 1;
         sbc_encode(sbc, NULL, 0, NULL, 0, NULL);
-        assert(bt_encodes == counted + 1);
-        assert(stream_rate == (f == 2 ? 44100u : f == 3 ? 48000u : f == 0 ? 16000u : f == 1 ? 32000u : 0u));
+        assert(bt_encodes == counted + (f == 4 ? 0 : 1)); /* a rate libsbc does not have is not a heartbeat */
+        assert(stream_rate == (f == 2 ? 44100u : f == 3 ? 48000u : f == 0 ? 16000u : f == 1 ? 32000u : 1u));
         hook_test_engine = 0;
         stream_rate = 1;
         sbc_encode(sbc, NULL, 0, NULL, 0, NULL);
-        assert(bt_encodes == counted + 1 && stream_rate == 1); /* not Engine: untouched */
+        assert(bt_encodes == counted + (f == 4 ? 0 : 1) && stream_rate == 1); /* not Engine: untouched */
         hook_test_engine = 1;
-    }
-
-    /* The render rate is the playback PCM's, by channel count, read from the hw_params Engine configures. */
-    {
-        hook_test_next = fake_next;
-        for (int i = 0; i < 16; i++) render_rate[i] = 0;
-        hz_of = 96000; ch_of = 4; dir_of_pcm = 0; rc_of_real = 0;
-        assert(snd_pcm_hw_params(NULL, NULL) == 0 && render_rate[4] == 96000);
-        hz_of = 48000; ch_of = 2; dir_of_pcm = 1; /* a capture stream */
-        assert(snd_pcm_hw_params(NULL, NULL) == 0 && render_rate[2] == 0);
-        dir_of_pcm = 0; rc_of_real = -22; /* a configuration that failed */
-        assert(snd_pcm_hw_params(NULL, NULL) == -22 && render_rate[2] == 0);
-        rc_of_real = 0; hook_test_engine = 0; /* not Engine */
-        assert(snd_pcm_hw_params(NULL, NULL) == 0 && render_rate[2] == 0);
-        hook_test_engine = 1; ch_of = 10; hz_of = 44100;
-        assert(snd_pcm_hw_params(NULL, NULL) == 0 && render_rate[10] == 44100 && render_rate[4] == 96000);
-        hook_test_next = NULL;
     }
 
     /* Nobody listening (no encoder call): Engine's own feed goes through, and nothing is processed or kept. */
@@ -324,30 +405,39 @@ int main(int argc, char **argv) {
     block(4, 450);
     assert(stock_calls == 1 && bt_pend == 0);
 
-    /* An output pair of the device, as it is (render and stream rate unknown or equal): the default is the first pair,
+    /* An output pair of the device, as it is (render and stream rate equal): the default is the first pair,
      * not off. Players are 4 channels, a PRIME 4 has 10. A copy comes two frames late, and the sender's call of the
      * next callback takes it. */
     for (int channels = 4; channels <= 10; channels += 6)
         for (int pair = 0; pair < channels / 2; pair++) {
-            reset(0, 0);
+            reset(48000, 48000);
             bt_out_pair = pair;
             for (int i = 0; i < 2; i++) block(channels, 480);
             drain();
             assert(stock_calls == 0 && got_n == 960 && got[0][959] == 0.1f * (float)(pair + 1) && got[1][959] == -0.1f * (float)(pair + 1));
         }
 
-    /* A pair the output does not have, or a negative one, is the first pair. */
-    for (int pair = 2; pair >= -1; pair -= 3) {
-        reset(0, 0);
-        bt_out_pair = pair;
-        for (int i = 0; i < 2; i++) block(4, 480);
-        drain();
-        assert(stock_calls == 0 && got_n == 960 && got[0][959] == 0.1f && got[1][959] == -0.1f);
-    }
+    /* A pair the output does not have is the first pair (lim_poll never stores a negative one). */
+    reset(48000, 48000);
+    bt_out_pair = 2;
+    for (int i = 0; i < 2; i++) block(4, 480);
+    drain();
+    assert(stock_calls == 0 && got_n == 960 && got[0][959] == 0.1f && got[1][959] == -0.1f);
+
+    /* A stream whose rate libsbc does not have is no speaker: Engine's own feed goes through. */
+    reset(48000, 48000);
+    set_stream(0);
+    for (int i = 0; i < BT_IDLE + 8; i++) block(4, 450);
+    assert(stock_calls == BT_IDLE + 8 && bt_pend == 0 && bt_rate == 0);
+
+    /* The longest block at the highest ratio (44.1 kHz render to a 48 kHz stream) fits and leaves the position in range. */
+    reset(44100, 48000);
+    block(4, BT_BLOCK);
+    assert(bt_ip >= -2 && bt_pend > BT_BLOCK && bt_pend < BT_OUT);
 
     /* A call without outputs (a player makes them too) between the kept block and the sender changes nothing: the block
      * goes once, whoever's sender call takes it. */
-    reset(0, 0);
+    reset(48000, 48000);
     bt_out_pair = 1;
     block(4, 480);
     unsigned kept_rate = bt_rate;
@@ -359,7 +449,7 @@ int main(int argc, char **argv) {
     assert(got_n == 960 && got[0][959] == 0.2f && got[1][959] == -0.2f && stock_calls == 0);
 
     /* The sender wraps what is past full scale: whatever the pair carries is clipped to +-1. */
-    reset(0, 0);
+    reset(48000, 48000);
     level = 20.0f;
     for (int i = 0; i < 2; i++) block(4, 480);
     drain();
@@ -430,7 +520,65 @@ int main(int argc, char **argv) {
     drain();
     assert(got[0][0] == 0.0f && max_step(got[0], 0, got_n) < 0.1f / BT_FADE * 1.5f);
 
+    /* The callback's rate is measured on the wall clock from its own frames, whatever the device says: every rate Engine uses,
+     * in 225 and 450 frame blocks, with the clock reading a little off each time. It settles within two windows (1 s),
+     * from the 48 kHz it starts at, and a stream second is then 44100 frames. */
+    for (unsigned r = 0; r < 4; r++)
+        for (int blk = 225; blk <= 450; blk += 225) {
+            static const unsigned real[] = {44100, 48000, 88200, 96000};
+            reset(real[r], 44100);
+            bt_render = 0;
+            sim_noise = 300e3;
+            tone = 1000;
+            collect = 0;
+            int settle = 0, calls = (int)(real[r] / (unsigned)blk) * 3;
+            for (int i = 0; i < calls; i++) {
+                block(4, blk);
+                if (!settle && bt_render) settle = i;
+            }
+            drain();
+            assert(bt_render == real[r] && settle * blk * 1e9 / real[r] < 1.2e9);
+            long long before = delivered;
+            for (int i = 0; i < (int)(real[r] / (unsigned)blk); i++) block(4, blk);
+            drain();
+            tone = 0;
+            assert(llabs((delivered - before) - 44100) < 441);
+        }
+    /* A callback that stalls, once, in a window (44 ms: 48 kHz reads as 44.1 kHz) changes nothing. */
+    reset(48000, 44100);
+    bt_render = 0;
+    collect = 0;
+    for (int i = 0; i < 213 * 6; i++) {
+        if (i == 213 * 2 + 107) sim_stall = 44e6;
+        block(4, 225);
+        if (i > 213 * 2) assert(bt_render == 48000);
+    }
+    /* A stalled window, a window that fits no rate, and another stalled window are not "twice in a row" either. */
+    static const double stalls[3] = {44e6, 400e6, 44e6};
+    for (int w = 0; w < 3; w++) {
+        while (bt_m_ns) block(4, 225); /* to the end of the window under way */
+        for (int i = 0; i < 20; i++) block(4, 225);
+        sim_stall = stalls[w];
+        block(4, 225);
+        while (bt_m_ns) block(4, 225);
+        assert(bt_render == 48000);
+    }
+    /* The rate is found whether or not a speaker listens (the first one is then heard from its first block), nothing is kept
+     * for nobody, and until it is known a speaker that does listen gets nothing, not a guess. */
+    reset(96000, 44100);
+    bt_render = 0;
+    listening = 0;
+    for (int i = 0; i < 213 * 3; i++) block(4, 450);
+    assert(bt_render == 96000 && bt_pend == 0 && bt_rate == 0);
+    reset(96000, 44100);
+    bt_render = 0;
+    block(4, 450);
+    assert(bt_pend == 0 && bt_rate == 0 && stock_calls == 0);
+    drain();
+    assert(got_n == 0);
+
     /* regressions, above */
+    test_deck();
     test_clip();
     test_blocks();
     test_rate();
