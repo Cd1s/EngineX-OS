@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/Cd1s/EngineX-OS/internal/installer/proto"
 	"github.com/Cd1s/EngineX-OS/internal/installer/proto/azupdate"
@@ -16,6 +17,7 @@ type updateSession struct {
 	device usb.Device
 	eps    proto.Endpoints
 	fb     *fastboot.Client
+	az     *azupdate.Client
 	board  string
 }
 
@@ -54,7 +56,10 @@ func tryUSB(ctx context.Context, o *options, board string) (found bool, err erro
 		}
 		interfaces := info.Interfaces
 		if len(interfaces) == 0 {
-			// WinUSB learns the descriptor on Open; these update modes use interface 0.
+			if !strings.EqualFold(info.Driver, "WinUSB") {
+				continue
+			}
+			// WinUSB reports descriptors on Open; verify interface 0 there.
 			interfaces = []usb.Interface{{}}
 		}
 		for _, it := range interfaces {
@@ -102,10 +107,11 @@ func tryUSB(ctx context.Context, o *options, board string) (found bool, err erro
 			}
 		}
 	}
-	if err := s.eps.Validate(); err != nil {
-		return false, err
-	}
 	if c.az {
+		s.az, err = azupdate.New(dev, s.eps)
+		if err != nil {
+			return false, err
+		}
 		return true, modeAZ(ctx, o, s, board, usbLine(dev.Info()))
 	}
 	s.fb, err = fastboot.New(dev, s.eps, fastboot.WithOnInfo(func(info string) { fmt.Fprintln(o.Out, info) }))
@@ -181,10 +187,6 @@ func usbFlash(ctx context.Context, o *options, s *updateSession, path string) er
 	if err != nil {
 		return err
 	}
-	client, err := azupdate.New(s.device, s.eps)
-	if err != nil {
-		return err
-	}
-	_, err = client.WriteData(ctx, proto.Image{Data: f, Size: st.Size()}, transferProgress(o))
+	_, err = s.az.WriteData(ctx, proto.Image{Data: f, Size: st.Size()}, transferProgress(o))
 	return err
 }

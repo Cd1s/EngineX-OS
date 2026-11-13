@@ -579,6 +579,7 @@ func classifyFail(cmd, msg string) error {
 	lower := strings.ToLower(msg)
 	var kind error
 	if strings.Contains(lower, "variable not implemented") ||
+		strings.Contains(lower, "getvar variable not found") ||
 		strings.Contains(lower, "unknown variable") ||
 		strings.Contains(lower, "not supported") {
 		kind = ErrUnsupportedVar

@@ -989,7 +989,9 @@ func modeA(ctx context.Context, o *options, d deck) error {
 	}
 	o.say(fmt.Sprintf("完成：%s 已安装 EngineX OS %s，Engine 正在重启。", label, b.Version),
 		fmt.Sprintf("Done: EngineX OS %s installed on %s; Engine is restarting.", b.Version, label))
-	sayGen2Unlocked(o, b, m.Prefix)
+	if marker, err := sshRead(ctx, cl, "cat "+customDirSh+"/gen2-unlocked"); err == nil && strings.TrimSpace(marker) == "1" {
+		sayGen2Unlocked(o, b, m.Prefix)
+	}
 	return nil
 }
 
@@ -1060,7 +1062,7 @@ func usbDeck(ctx context.Context, o *options, ids map[string]string) (board, lin
 func isDeckUSB(line string) bool {
 	lower := strings.ToLower(line)
 	id := vidPID.FindString(lower)
-	return IsRockchipUSBLoader(lower) || gen2USB[id] != "" || id == "2207:0006" || id == "18d1:4ee0" ||
+	return IsRockchipUSBLoader(lower) || gen1USB[id] != "" || gen2USB[id] != "" || id == "2207:0006" || id == "18d1:4ee0" ||
 		strings.Contains(lower, "inmusic") || strings.Contains(lower, "prime 4") || strings.Contains(lower, "sc live") || strings.Contains(lower, "mixstream")
 }
 

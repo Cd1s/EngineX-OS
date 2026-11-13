@@ -863,7 +863,10 @@ func TestModeBFreshImageFlashedToData(t *testing.T) {
 	fb.Bin.enumerate = func() []usb.DeviceInfo {
 		info := fb.Bin.info
 		info.Interfaces = nil
-		return []usb.DeviceInfo{info}
+		info.Driver = "WinUSB"
+		parent := info
+		parent.ID, parent.Driver = "physical-parent", "usbccgp"
+		return []usb.DeviceInfo{parent, info}
 	}
 	o := modeBOpts(t, fb, b)
 	if err := run(ctxT(t), o); err != nil {
@@ -950,7 +953,6 @@ func TestNativeReadbackRefusesUnverifiableActivation(t *testing.T) {
 	for _, path := range []string{
 		"enginex/version.txt", "enginex/bundle/version.txt",
 		"enginex/bundle/boot-activate.sh", "enginex/bundle/lib/libengine-ui-hook.so",
-		"sc5000-custom/bundle/boot-activate.sh", "sc5000-custom/bundle/lib/libengine-ui-hook.so",
 		"system/var/overlay/lib/alsa/conf.d/99-sc5000-custom.conf",
 	} {
 		t.Run(path, func(t *testing.T) {
@@ -969,14 +971,13 @@ func TestNativeReadbackRefusesUnverifiableActivation(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			actual := strings.Replace(path, "sc5000-custom/", "enginex/", 1)
-			if err := fs.Apply(ctx, ext4.ChangeSet{Files: []ext4.Entry{imageBytes(actual, []byte("stale"), 0o644)}}); err != nil {
+			if err := fs.Apply(ctx, ext4.ChangeSet{Files: []ext4.Entry{imageBytes(path, []byte("stale"), 0o644)}}); err != nil {
 				t.Fatal(err)
 			}
 			if err := fs.Close(); err != nil {
 				t.Fatal(err)
 			}
-			if err := ext4.VerifyFile(ctx, out, changes); err == nil || !strings.Contains(err.Error(), actual) {
+			if err := ext4.VerifyFile(ctx, out, changes); err == nil || !strings.Contains(err.Error(), path) {
 				t.Fatalf("readback %s: %v", path, err)
 			}
 		})
@@ -1432,6 +1433,9 @@ func logShim(t *testing.T, body string) (string, string) {
 // #129: old fastboot builds only list whitelisted vendors; try inMusic 0x15e4, then Rockchip 0x2207, and keep what worked.
 
 func TestNativeUSBNoPermissionsHint(t *testing.T) {
+	oldOS := goos
+	goos = "linux"
+	t.Cleanup(func() { goos = oldOS })
 	t.Cleanup(func() { geteuid = os.Geteuid })
 	for _, uid := range []int{1000, 0} {
 		geteuid = func() int { return uid }
