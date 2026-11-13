@@ -42,9 +42,6 @@ import (
 const (
 	bundleSuffix    = "-EngineX-OS-Data-Bundle.tar.gz"
 	bundleMaxDown   = 64 << 20  // compressed, as the deck's own updater allows
-	bundleMaxUnpack = 256 << 20 // all files together
-	gen2ImgPrefix   = "ENGINEX_DATA_BUNDLE"
-	gen2ImgMagic    = "ENGINEX_DATA_BUNDLE_IMG_V1\n"
 	gen2ImgHeader   = 128
 	compatCmd       = "cat /sys/firmware/devicetree/base/compatible"
 	// install.sh's own default; the variable is only set by tests.
@@ -1294,7 +1291,6 @@ func sayGen2Steps(o *options, filename string) {
 
 // sayGen2Unlocked tells the user that the 2nd-generation deck is unlocked and flashed (#119, #215).
 func sayGen2Unlocked(o *options, b *bundleInfo, prefix string) {
-
 	imgPattern := fmt.Sprintf("%s-%s-EngineX-OS-*-Update.img", prefix, b.Version)
 	o.say(
 		fmt.Sprintf("碟机已完成一键解锁与刷入：今后升级无需电脑，可直接把 %s 拷入 U 盘插上碟机升级，或在碟机屏幕点击 Settings -> About / Update 在线更新；恢复出厂设置不会丢失 EngineX OS。", imgPattern),
@@ -1378,16 +1374,6 @@ const (
 var azNames = []struct{ name, board string }{
 	{"system one", "rmz2"}, {"prime 4 g2", "jp24"}, {"prime 4+", "jc11s"}, {"prime 4 plus", "jc11s"},
 	{"sc live 4", "jp21"}, {"sc live 2", "jp20"}, {"prime go+", "jp11s"}, {"mixstream pro+", "nh08s"}, {"mixstream pro go", "nh10"},
-}
-
-// azUSB returns the host USB line of a deck in 1cc5:2027 Firmware Update Mode (az0x-splash usbupdate), or "".
-func azUSB(ctx context.Context, o *options) string {
-	for _, l := range strings.Split(o.ListUSB(ctx), "\n") {
-		if l = strings.TrimSpace(l); strings.Contains(strings.ToLower(l), azID) {
-			return l
-		}
-	}
-	return ""
 }
 
 // azModel: the board seen on the LAN (if an AZ04 deck without fastboot), else the --bundle file name, else the USB product name.

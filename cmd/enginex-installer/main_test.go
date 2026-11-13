@@ -1422,16 +1422,6 @@ func TestBoardCodeJC11SVariants(t *testing.T) {
 	}
 }
 
-func logShim(t *testing.T, body string) (string, string) {
-	t.Helper()
-	dir := t.TempDir()
-	bin := filepath.Join(dir, "fastboot")
-	os.WriteFile(bin, []byte("#!/bin/sh\necho \"$*\" >> \""+dir+"/calls.log\"\n"+body), 0o755)
-	return bin, filepath.Join(dir, "calls.log")
-}
-
-// #129: old fastboot builds only list whitelisted vendors; try inMusic 0x15e4, then Rockchip 0x2207, and keep what worked.
-
 func TestNativeUSBNoPermissionsHint(t *testing.T) {
 	oldOS := goos
 	goos = "linux"
@@ -1460,6 +1450,9 @@ func TestNativeUSBNoPermissionsHint(t *testing.T) {
 }
 
 func TestUSBDeckWithoutExternalToolsWaitsForUpdateMode(t *testing.T) {
+	oldUID := geteuid
+	geteuid = func() int { return 0 }
+	t.Cleanup(func() { geteuid = oldUID })
 	o := testOpts(t)
 	o.WaitUSB = time.Millisecond
 	o.ListUSB = func(context.Context) string { return "15e4:d007 Denon DJ PRIME 4 Plus\n" }
@@ -1471,6 +1464,7 @@ func TestUSBDeckWithoutExternalToolsWaitsForUpdateMode(t *testing.T) {
 	if !strings.Contains(out, "15e4:d007") || strings.Contains(out, "install fastboot") {
 		t.Fatal(out)
 	}
+	if strings.Contains(out, "sudo") { t.Errorf("root was told to use sudo: %s", out) }
 }
 
 func TestUSBDeckWaitsForFirmwareUpdateMode(t *testing.T) {
@@ -1698,7 +1692,6 @@ func TestModeBStreamsFlashProgressAndSize(t *testing.T) {
 	}
 }
 
-// #129: verify fbLive delivers stdout/stderr chunks before the process finishes.
 func TestNativeProgressStreamsBeforeFlashCompletes(t *testing.T) {
 	b := buildBundle(t, "PRIME4PLUS", "5.3.0.5")
 	fb := newFastboot(t, "JC11S", true)
@@ -1878,8 +1871,7 @@ func TestUSBUpdateModeRefusals(t *testing.T) {
 	}
 }
 
-// The real flasher runs from the bundle under python3 -E and reports why it cannot write.
-
+// #164: an installed deck asks for an access code (403); only its Stream Sync login page identifies it.
 func TestIsDeckUIRecognisesTheLoginPage(t *testing.T) {
 	login := `<!doctype html><title>Stream Sync</title><h1>Stream Sync</h1>`
 	cases := []struct {
@@ -2194,7 +2186,7 @@ func TestGen2UpdateImgEndToEndAllModes(t *testing.T) {
 			t.Fatalf("Mode B flashed corrupted Update.img: %v", f)
 		}
 
-		// Valid *-Update.img (no .tar.gz in release) builds, verifies JC11S activation, and flashes.
+		// Valid *-Update.img builds, verifies the prepared image, and flashes.
 		fb := newFastboot(t, "JC11S", true)
 		o := testOpts(t)
 		o.USB = fb.Bin

@@ -15,7 +15,6 @@ import (
 
 type updateSession struct {
 	device usb.Device
-	eps    proto.Endpoints
 	fb     *fastboot.Client
 	az     *azupdate.Client
 	board  string
@@ -86,6 +85,7 @@ func tryUSB(ctx context.Context, o *options, board string) (found bool, err erro
 	}
 	defer func() { err = errors.Join(err, dev.Close()) }()
 	s := &updateSession{device: dev}
+	var eps proto.Endpoints
 	for _, it := range dev.Info().Interfaces {
 		if it.Number != c.it.Number || it.Alternate != c.it.Alternate || !updateInterface(it, c.az) {
 			continue
@@ -95,26 +95,26 @@ func tryUSB(ctx context.Context, o *options, board string) (found bool, err erro
 				continue
 			}
 			if ep.Address&0x80 != 0 {
-				if s.eps.In != 0 {
+				if eps.In != 0 {
 					return false, errors.New("ambiguous update bulk IN endpoint")
 				}
-				s.eps.In = ep.Address
+				eps.In = ep.Address
 			} else {
-				if s.eps.Out != 0 {
+				if eps.Out != 0 {
 					return false, errors.New("ambiguous update bulk OUT endpoint")
 				}
-				s.eps.Out, s.eps.MaxPacketSize = ep.Address, ep.MaxPacketSize
+				eps.Out, eps.MaxPacketSize = ep.Address, ep.MaxPacketSize
 			}
 		}
 	}
 	if c.az {
-		s.az, err = azupdate.New(dev, s.eps)
+		s.az, err = azupdate.New(dev, eps)
 		if err != nil {
 			return false, err
 		}
 		return true, modeAZ(ctx, o, s, board, usbLine(dev.Info()))
 	}
-	s.fb, err = fastboot.New(dev, s.eps, fastboot.WithOnInfo(func(info string) { fmt.Fprintln(o.Out, info) }))
+	s.fb, err = fastboot.New(dev, eps, fastboot.WithOnInfo(func(info string) { fmt.Fprintln(o.Out, info) }))
 	if err != nil {
 		return false, err
 	}
@@ -127,14 +127,6 @@ func tryUSB(ctx context.Context, o *options, board string) (found bool, err erro
 		product = fallback.Code
 	}
 	s.board = boardCode(product)
-	id := fmt.Sprintf("%04x:%04x", c.info.VID, c.info.PID)
-	expected := gen1USB[id]
-	if expected == "" {
-		expected = gen2USB[id]
-	}
-	if expected != "" && expected != s.board {
-		return true, fmt.Errorf("USB identity %s and fastboot product %q disagree; nothing flashed", id, product)
-	}
 	if _, _, known := lookupBoard(board); known && boardCode(board) != s.board {
 		return true, errors.New("LAN board and selected USB deck disagree; nothing flashed")
 	}
