@@ -125,6 +125,7 @@ type broadcastPostInput struct {
 	Mountpoint *string `json:"mountpoint"`
 	Username   *string `json:"username"`
 	Password   *string `json:"password"`
+	// Older clients still send these; the stream is always WAV, so they are ignored.
 	Format     *string `json:"format"`
 	Bitrate    *int    `json:"bitrate"`
 	StreamName *string `json:"streamName"`
@@ -194,12 +195,6 @@ func (s *Server) broadcastPost(w http.ResponseWriter, r *http.Request) {
 			}
 			if in.Username != nil {
 				cfg.Username = *in.Username
-			}
-			if in.Format != nil {
-				cfg.Format = *in.Format
-			}
-			if in.Bitrate != nil {
-				cfg.Bitrate = *in.Bitrate
 			}
 			if in.StreamName != nil {
 				cfg.StreamName = *in.StreamName
@@ -542,9 +537,12 @@ func mp3Encoder(bitrate int) *exec.Cmd {
 // and its encoder process and hub subscription with it.
 var liveMP3Stall = 60 * time.Second
 
+// liveMP3Kbps is the bitrate of /live.mp3, which only works where lame or ffmpeg is installed.
+const liveMP3Kbps = 192
+
 // liveMP3 streams the deck's live mix as MP3 through an external encoder.
 func (s *Server) liveMP3(w http.ResponseWriter, r *http.Request) {
-	cmd := mp3Encoder(s.broadcaster().Status().Bitrate)
+	cmd := mp3Encoder(liveMP3Kbps)
 	if cmd == nil {
 		http.Error(w, "no MP3 encoder (lame or ffmpeg) on this deck: use /live.wav", http.StatusServiceUnavailable)
 		return

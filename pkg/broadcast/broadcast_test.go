@@ -46,11 +46,8 @@ func TestConfigNormalizationAndDefaults(t *testing.T) {
 	if st.Username != "source" {
 		t.Errorf("expected default username source, got %s", st.Username)
 	}
-	if st.Format != "mp3" {
-		t.Errorf("expected default format mp3, got %s", st.Format)
-	}
-	if st.Bitrate != 192 {
-		t.Errorf("expected default bitrate 192, got %d", st.Bitrate)
+	if st.Format != "wav" {
+		t.Errorf("expected default format wav, got %s", st.Format)
 	}
 	if st.StreamName != "EngineX OS Live Mix" {
 		t.Errorf("expected default streamName, got %s", st.StreamName)
@@ -60,8 +57,6 @@ func TestConfigNormalizationAndDefaults(t *testing.T) {
 	cfg2 := Config{
 		Mountpoint: "teststream",
 		Protocol:   "ICECAST",
-		Format:     "MP3",
-		Bitrate:    320,
 	}
 	if err := b.Configure(cfg2); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -73,22 +68,10 @@ func TestConfigNormalizationAndDefaults(t *testing.T) {
 	if st2.Protocol != "icecast" {
 		t.Errorf("expected lowercase icecast, got %s", st2.Protocol)
 	}
-	if st2.Format != "mp3" {
-		t.Errorf("expected lowercase mp3, got %s", st2.Format)
-	}
-	if st2.Bitrate != 320 {
-		t.Errorf("expected bitrate 320, got %d", st2.Bitrate)
-	}
 
 	// Validation errors
 	if err := b.Configure(Config{Protocol: "unknown"}); err == nil {
 		t.Error("expected error for unknown protocol")
-	}
-	if err := b.Configure(Config{Format: "flac"}); err == nil {
-		t.Error("expected error for unaccepted format flac")
-	}
-	if err := b.Configure(Config{Bitrate: 96}); err == nil {
-		t.Error("expected error for unaccepted bitrate 96")
 	}
 }
 
@@ -122,7 +105,6 @@ func TestIcecastStreaming(t *testing.T) {
 
 	var (
 		handshakeHeaders []string
-		framesReceived   int
 		mu               sync.Mutex
 		done             = make(chan struct{})
 	)
@@ -152,23 +134,22 @@ func TestIcecastStreaming(t *testing.T) {
 		_, _ = io.WriteString(conn, "HTTP/1.0 200 OK\r\n\r\n")
 
 		// Read audio frames
-		buf := make([]byte, 1024)
+		buf, total := make([]byte, 1024), 0
 		for {
 			n, err := conn.Read(buf)
 			if err != nil {
 				return
 			}
-			if n >= 4 && buf[0] == 0xFF && buf[1] == 0xFB {
-				mu.Lock()
-				framesReceived++
-				if framesReceived >= 2 {
-					select {
-					case <-done:
-					default:
-						close(done)
-					}
+			if total == 0 && (n < 12 || string(buf[:4]) != "RIFF" || string(buf[8:12]) != "WAVE") {
+				return // the stream must open with the WAV header
+			}
+			total += n
+			if total >= 44+2*4608 {
+				select {
+				case <-done:
+				default:
+					close(done)
 				}
-				mu.Unlock()
 			}
 		}
 	}()
@@ -180,11 +161,9 @@ func TestIcecastStreaming(t *testing.T) {
 		Enabled:    true,
 		Protocol:   "icecast",
 		ServerURL:  "http://" + ln.Addr().String(),
-		Mountpoint: "/stream.mp3",
+		Mountpoint: "/stream.wav",
 		Username:   "source",
 		Password:   "hackme",
-		Format:     "mp3",
-		Bitrate:    192,
 		StreamName: "Live Set",
 	}
 
@@ -213,14 +192,14 @@ func TestIcecastStreaming(t *testing.T) {
 	headersText := strings.Join(handshakeHeaders, "\n")
 	mu.Unlock()
 
-	if !strings.Contains(headersText, "SOURCE /stream.mp3 HTTP/1.0") {
+	if !strings.Contains(headersText, "SOURCE /stream.wav HTTP/1.0") {
 		t.Errorf("missing SOURCE line in handshake:\n%s", headersText)
 	}
 	expectedAuth := base64.StdEncoding.EncodeToString([]byte("source:hackme"))
 	if !strings.Contains(headersText, "Authorization: Basic "+expectedAuth) {
 		t.Errorf("missing expected Authorization header in handshake:\n%s", headersText)
 	}
-	if !strings.Contains(headersText, "Content-Type: audio/mpeg") {
+	if !strings.Contains(headersText, "Content-Type: audio/wav") {
 		t.Errorf("missing Content-Type header in handshake:\n%s", headersText)
 	}
 	if !strings.Contains(headersText, "Ice-Name: Live Set") {
@@ -247,7 +226,6 @@ func TestShoutcastStreaming(t *testing.T) {
 	var (
 		passwordReceived string
 		icyReceived      []string
-		framesReceived   int
 		mu               sync.Mutex
 		done             = make(chan struct{})
 	)
@@ -286,23 +264,22 @@ func TestShoutcastStreaming(t *testing.T) {
 		}
 
 		// Read audio data
-		buf := make([]byte, 1024)
+		buf, total := make([]byte, 1024), 0
 		for {
 			n, err := conn.Read(buf)
 			if err != nil {
 				return
 			}
-			if n >= 4 && buf[0] == 0xFF && buf[1] == 0xFB {
-				mu.Lock()
-				framesReceived++
-				if framesReceived >= 2 {
-					select {
-					case <-done:
-					default:
-						close(done)
-					}
+			if total == 0 && (n < 12 || string(buf[:4]) != "RIFF" || string(buf[8:12]) != "WAVE") {
+				return // the stream must open with the WAV header
+			}
+			total += n
+			if total >= 44+2*4608 {
+				select {
+				case <-done:
+				default:
+					close(done)
 				}
-				mu.Unlock()
 			}
 		}
 	}()
@@ -315,7 +292,6 @@ func TestShoutcastStreaming(t *testing.T) {
 		Protocol:   "shoutcast",
 		ServerURL:  ln.Addr().String(), // test raw host:port format without scheme
 		Password:   "shoutpwd",
-		Bitrate:    256,
 		StreamName: "Club Radio",
 	}
 
@@ -340,8 +316,8 @@ func TestShoutcastStreaming(t *testing.T) {
 	if !strings.Contains(icyText, "icy-name:Club Radio") {
 		t.Errorf("missing icy-name header in:\n%s", icyText)
 	}
-	if !strings.Contains(icyText, "icy-br:256") {
-		t.Errorf("missing icy-br:256 header in:\n%s", icyText)
+	if !strings.Contains(icyText, "icy-br:1536") {
+		t.Errorf("missing icy-br:1536 header in:\n%s", icyText)
 	}
 
 	st := b.Status()
@@ -550,7 +526,7 @@ func TestUpdateMetadataShoutcast(t *testing.T) {
 	}
 }
 
-func TestWAVAndOggStreaming(t *testing.T) {
+func TestWAVStreaming(t *testing.T) {
 	// Test WAV container header and framing
 	lnWAV, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -601,46 +577,6 @@ func TestWAVAndOggStreaming(t *testing.T) {
 	case <-doneWAV:
 	case <-time.After(3 * time.Second):
 		t.Fatal("timeout waiting for WAV stream header")
-	}
-
-	// Ogg: no Vorbis/Opus encoder on any deck. The old code sent an "OggS" page that
-	// wrapped raw PCM bytes (undecodable); now nothing is sent and the status says why.
-	lnOgg, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen error: %v", err)
-	}
-	defer lnOgg.Close()
-	oggConnected := make(chan struct{}, 1)
-	go func() {
-		if conn, err := lnOgg.Accept(); err == nil {
-			oggConnected <- struct{}{}
-			conn.Close()
-		}
-	}()
-
-	bOgg := New(newTestGuard())
-	defer bOgg.Close()
-
-	cfgOgg := Config{
-		Enabled:   true,
-		Protocol:  "icecast",
-		Format:    "ogg",
-		ServerURL: "http://" + lnOgg.Addr().String(),
-	}
-	if err := bOgg.Configure(cfgOgg); err != nil {
-		t.Fatalf("failed to configure ogg: %v", err)
-	}
-	deadline := time.Now().Add(3 * time.Second)
-	for bOgg.Status().LastError == "" && time.Now().Before(deadline) {
-		time.Sleep(20 * time.Millisecond)
-	}
-	if st := bOgg.Status(); !strings.Contains(st.LastError, "Ogg") || st.Streaming {
-		t.Fatalf("ogg: status %+v, want a clear Ogg encoder error", st)
-	}
-	select {
-	case <-oggConnected:
-		t.Fatal("ogg: connected to the server without an encoder")
-	case <-time.After(200 * time.Millisecond):
 	}
 }
 

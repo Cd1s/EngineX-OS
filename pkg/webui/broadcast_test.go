@@ -104,8 +104,8 @@ func TestBroadcastPostConfigAndPasswordHandling(t *testing.T) {
 	if !st.PasswordSet {
 		t.Errorf("expected passwordSet=true")
 	}
-	if st.Bitrate != 320 {
-		t.Errorf("expected bitrate=320, got %d", st.Bitrate)
+	if st.Format != "wav" { // the old client's "mp3"
+		t.Errorf("expected format=wav, got %s", st.Format)
 	}
 	if st.StreamName != "Main Stage" {
 		t.Errorf("expected streamName='Main Stage', got %s", st.StreamName)

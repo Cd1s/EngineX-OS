@@ -47,7 +47,7 @@ func TestShoutcastHandshakeAcceptsV1AndV2(t *testing.T) {
 			}()
 			b := New(newTestGuard())
 			defer b.Close()
-			err := b.handshakeShoutcast(client, Config{Protocol: "shoutcast", Password: "pw", StreamName: "deck", Bitrate: 128, Format: "mp3"})
+			err := b.handshakeShoutcast(client, Config{Protocol: "shoutcast", Password: "pw", StreamName: "deck"})
 			if c.ok {
 				if err != nil {
 					t.Fatalf("handshake refused %q: %v", c.reply, err)
