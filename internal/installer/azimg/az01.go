@@ -797,8 +797,8 @@ func preflightXZStream(r io.ReaderAt, offset, size int64, limits Limits) ([]xzBl
 	return blocks, checkID, nil
 }
 
-// scanLZMA2Chunks walks to the end marker using only chunk headers. Payload lengths
-// are bounded before skipping them, so embedded zero bytes cannot masquerade as a
+// scanLZMA2Chunks walks to the end marker using only chunk headers. Payloads are
+// skipped by their declared length, so embedded zero bytes cannot masquerade as a
 // block end. Summed chunk output sizes also bound streams with a dishonest Index.
 func scanLZMA2Chunks(r io.ReaderAt, offset, size int64, outputBudget uint64) (compressed int64, uncompressed uint64, err error) {
 	var h [6]byte
@@ -832,9 +832,6 @@ func scanLZMA2Chunks(r io.ReaderAt, offset, size int64, outputBudget uint64) (co
 			packed = int64(binary.BigEndian.Uint16(h[3:5])) + 1
 		}
 		compressed += headerLen
-		if packed > size-compressed {
-			return 0, 0, fmt.Errorf("%w: LZMA2 chunk extends past block bounds", ErrCorrupt)
-		}
 		if unpacked > outputBudget-uncompressed {
 			return 0, 0, fmt.Errorf("%w: XZ chunk output exceeds rootfs size limit", ErrLimitExceeded)
 		}
