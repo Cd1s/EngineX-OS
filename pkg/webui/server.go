@@ -58,6 +58,8 @@ type Config struct {
 	GitHubURL, VersionFile                                                string // tests; defaults are api.github.com and versionFile
 	// UIDir holds the deck UI settings; empty means the on-device default.
 	UIDir string
+	// USBPreparingPath is the mount hook runtime flag; empty uses /run.
+	USBPreparingPath string
 	// FXSelectorReadyFile overrides the tmpfs heartbeat path in sandbox tests.
 	FXSelectorReadyFile string
 	// ZoneinfoDir overrides /usr/share/zoneinfo in tests.

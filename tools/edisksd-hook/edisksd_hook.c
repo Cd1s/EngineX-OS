@@ -18,6 +18,7 @@
 #include <sched.h>
 #include <sys/mman.h>
 #include <sys/mount.h>
+#include <sys/random.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <sys/sysmacros.h>
@@ -31,6 +32,9 @@
 #endif
 #ifndef LEGACY_LIB_ROOT
 #define LEGACY_LIB_ROOT "/data/sc5000-custom/hfs-libraries"
+#endif
+#ifndef PREPARE_STATE_PATH
+#define PREPARE_STATE_PATH "/run/enginex-usb-preparing"
 #endif
 #ifndef RUN_ROOT
 #define RUN_ROOT "/run/sc5000-hfs-views"
@@ -108,6 +112,37 @@ static int safe_path(const char *path, int missing_final) {
         if (saved && !S_ISDIR(st.st_mode)) {errno=ENOTDIR;return -1;}
         *p=saved; if (!saved) return 0;
     }
+}
+// Status only: atomic publication on /run, with no durability work on the mount path.
+static void set_preparing(const char *target) {
+    if(!volume(target))return;
+    int saved=errno;
+    char parent[PATH_MAX],tmp[PATH_MAX];
+    if(snprintf(parent,sizeof parent,"%s",PREPARE_STATE_PATH)>=(int)sizeof parent)goto out;
+    char *slash=strrchr(parent,'/');if(!slash||slash==parent)goto out;
+    *slash=0;
+    struct stat st;
+    if(safe_path(parent,0)||lstat(parent,&st)||!S_ISDIR(st.st_mode))goto out;
+    if(path_join(tmp,sizeof tmp,parent,".enginex-usb-prep.XXXXXX"))goto out;
+    static const char alphabet[]="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    for(int attempt=0;attempt<8;attempt++) {
+        unsigned char random[6];
+        if(getrandom(random,sizeof random,GRND_NONBLOCK)!=(ssize_t)sizeof random)break;
+        char *suffix=tmp+strlen(tmp)-6;
+        for(unsigned i=0;i<6;i++)suffix[i]=alphabet[random[i]%(sizeof alphabet-1)];
+        int fd=open(tmp,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);
+        if(fd<0){if(errno==EEXIST)continue;break;}
+        int ok=write(fd,"1\n",2)==2&&!fchmod(fd,0644);
+        if(close(fd))ok=0;
+        if(ok)rename(tmp,PREPARE_STATE_PATH);
+        unlink(tmp);
+        break;
+    }
+out:
+    errno=saved;
+}
+static void clear_preparing(void) {
+    int saved=errno;unlink(PREPARE_STATE_PATH);errno=saved;
 }
 static int make_dirs(const char *path) {
     char copy[PATH_MAX];
@@ -876,6 +911,7 @@ static int after_mount(struct libmnt_context *ctx,int mode,int64_t deadline) {
     struct stat existing;
     int hfs_ro=HFS_READONLY(target);
     if(!pioneer&&!heal&&mode==MOUNT_PRE)return 0; // nothing to convert or heal: the visible mount does the rest
+    if(hfs_ro||(pioneer&&mode!=MOUNT_POST)||heal)set_preparing(target);
     // The walk guards the tool run on the library below; after the private
     // conversion or heal (MOUNT_POST) none follows, so it is skipped.
     // An HFS+ view is validated by prepare_view.
@@ -1015,7 +1051,7 @@ static int hooked_mount(struct libmnt_context *ctx,int (*real)(struct libmnt_con
     pthread_mutex_lock(&post_lock);holding_post=1; // after_mount releases it once the visible tree is final
     int rc=real(ctx),saved=errno;
     if(!rc&&mnt_context_get_status(ctx)==1){after_mount(ctx,pre?MOUNT_POST:MOUNT_FULL,deadline);errno=saved;}
-    release_post();in_hook=0;
+    release_post();clear_preparing();in_hook=0;
     seeded_hint[0]=0;
     pthread_mutex_unlock(&view_lock);return rc;
 }

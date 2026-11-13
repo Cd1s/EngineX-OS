@@ -2,6 +2,7 @@
 package compat
 
 import (
+	"context"
 	"fmt"
 	"io/fs"
 	"os"
@@ -56,6 +57,12 @@ func CleanRelative(s string) (string, error) {
 // Resolve builds a per-directory case/NFC index lazily. It reads directory
 // entries, never audio data or the whole USB directory tree, and refuses symlinks.
 func (r *Resolver) Resolve(s string) (string, error) {
+	return r.ResolveContext(context.Background(), s)
+}
+
+// ResolveContext checks cancellation between directory lookups. Individual
+// filesystem calls cannot be interrupted, but a canceled import stops walking.
+func (r *Resolver) ResolveContext(ctx context.Context, s string) (string, error) {
 	rel, e := CleanRelative(s)
 	if e != nil {
 		return "", e
@@ -64,6 +71,9 @@ func (r *Resolver) Resolve(s string) (string, error) {
 	defer r.mu.Unlock()
 	cur := ""
 	for _, component := range strings.Split(rel, "/") {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		// Always consult directory entries: case/normalization-insensitive lookup
 		// may succeed for a spelling that is not the name stored on the volume.
 		idx, ok := r.dirs[cur]
