@@ -1063,3 +1063,36 @@ func TestEngineLightingDefaultOffAndPersistence(t *testing.T) {
 		t.Errorf("lighting caused %d Engine restarts", restarts)
 	}
 }
+
+// #224: disabling TIDAL must remove the stale upstream routing choice, on disk
+// and in responses, whether the setting came from this UI or an older version.
+func TestTidalDisabledClearsScope(t *testing.T) {
+	for _, query := range []string{"toggle=tidal", "sources=spotify,netease"} {
+		t.Run(query, func(t *testing.T) {
+			dir := t.TempDir()
+			s := New(Config{AccessToken: "code", UIDir: dir, StateDir: t.TempDir()}, nil)
+			srv := httptest.NewServer(s)
+			defer srv.Close()
+			uiPost(t, srv.URL, "scope=tidal")
+			code, v := uiPost(t, srv.URL, query)
+			if code != 200 || v.Scope != "" {
+				t.Errorf("disabled scope = %q, HTTP %d", v.Scope, code)
+			}
+			b, err := os.ReadFile(filepath.Join(dir, "settings.conf"))
+			if err != nil || strings.Contains(string(b), "scope=tidal") {
+				t.Errorf("stale scope persisted: %v", err)
+			}
+			var status map[string]any
+			tidalGet(t, srv.URL, "/v1/sc5000/ui", 200, &status)
+			if status["scope"] != "" {
+				t.Errorf("GET stale scope = %v", status["scope"])
+			}
+			// A settings file written before this fix must also read safely.
+			os.WriteFile(filepath.Join(dir, "settings.conf"), []byte("scope=tidal\nsources=spotify,netease\n"), 0600)
+			tidalGet(t, srv.URL, "/v1/sc5000/ui", 200, &status)
+			if status["scope"] != "" {
+				t.Errorf("legacy scope = %v", status["scope"])
+			}
+		})
+	}
+}

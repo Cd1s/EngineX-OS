@@ -5102,5 +5102,43 @@ class EngineLightingDefaultOffAndPersistTest(unittest.TestCase):
         self.assertNotIn('engineLighting=', bp.SERVICES_ENTRIES)
 
 
+
+
+class PrimeGoTidalQRTest(unittest.TestCase):
+    def test_generated_530_packs_guard_profile_pairing_and_encoder(self):
+        with tempfile.TemporaryDirectory(prefix="issue224-") as tmp:
+            out = Path(tmp) / "packs"
+            res = subprocess.run(["python3", str(BUILD_PACKS), "--qrc", str(LAB / "5.3.0/qrc"), "--out", str(out)], capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0, res.stderr)
+            for lang in ("en", "zh-Hans", "zh-Hant"):
+                with self.subTest(lang=lang):
+                    base = out / lang / "Skins/Embedded"
+                    profile = (base / "Views/Profiles/ProfilesLogin.qml").read_text()
+                    self.assertIn("ProfilesLoginController.StreamingProviderPairing", profile)
+                    self.assertIn('root.scQuiet() || root.scScope !== "tidal"', profile)
+                    self.assertIn("Qt.callLater", profile)
+                    self.assertIn("controller.showDialog = false", profile)
+                    self.assertNotIn("restorePreviouslySelectedSource", profile)
+                    self.assertNotIn("cancelPairing()", profile)
+                    pairing = (base / "Views/Profiles/ProfilesStreamingProviderPairingContent.qml").read_text()
+                    self.assertIn('root.scScope === "tidal"', pairing)
+                    self.assertIn("!root.scQuiet()", pairing)
+                    self.assertIn("supportLegacyPairing", pairing)
+                    source = (base / "Views/BrowserSource/SourceScreen.qml").read_text()
+                    self.assertIn("Keys.onReturnPressed: scSourceEnter()", source)
+                    self.assertIn("Keys.onEnterPressed: scSourceEnter()", source)
+                    self.assertIn("root.scSourceNameRole", source)
+                    self.assertIn('"SOUNDCLOUD"', source)
+                    self.assertIn('"BEATPORT"', source)
+                    main = (base / "EmbeddedMain.qml").read_text()
+                    self.assertIn('scSources.indexOf("tidal") < 0 ||', main)
+                    self.assertIn("scTidalLoggedIn = !!v.tidalLoggedIn", main)
+                    self.assertIn("function scTidalProvider()", main)
+                    self.assertIn("tp.loginToService(", main)
+                    self.assertIn('refreshToken: "enginex"', main)
+                    self.assertIn("logoutOfProvider(tp)", main)
+                    self.assertIn("showAddAccountDialog(tp)", main)
+
+
 if __name__ == "__main__":
     unittest.main()

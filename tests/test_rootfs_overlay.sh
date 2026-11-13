@@ -464,6 +464,13 @@ cp "$SC5000_STREAMING_ACCOUNTS" "$TMP/accounts.before"; sh "$GUARD" pre
 cmp -s "$TMP/accounts.before" "$SC5000_STREAMING_ACCOUNTS" || fail 'guard must leave an existing TIDAL entry alone'
 rm "$SC5000_STREAMING_ACCOUNTS"; mkdir -p "$SC5000_UI_DIR"; echo scope=tidal > "$SC5000_UI_DIR/settings.conf"
 sh "$GUARD" pre; [[ ! -e $SC5000_STREAMING_ACCOUNTS ]] || fail 'guard must not touch accounts while TIDAL is selected'
+# #224: disabled TIDAL cannot retain stale upstream routing across boot.
+printf 'scope=tidal\nsources=spotify,netease\n' > "$SC5000_UI_DIR/settings.conf"
+sh "$GUARD" pre
+! grep -qx 'scope=tidal' "$SC5000_UI_DIR/settings.conf" || fail 'disabled TIDAL retained stale scope'
+[[ $(tidal_entry) == 1 ]] || fail 'disabled TIDAL must seed the gateway account'
+has 'Wants=stream-sync.service' "$ROOT/rootfs-overlay/etc/systemd/system/engine.service.d/60-ui-hook.conf"
+has 'After=stream-sync.service' "$ROOT/rootfs-overlay/etc/systemd/system/engine.service.d/60-ui-hook.conf"
 rm -rf "$SC5000_UI_DIR"
 for _ in 1 2 3; do SERVICE_RESULT=success sh "$GUARD" stop; sh "$GUARD" pre; done
 [[ ! -e $SC5000_UI_DIR/safe-mode && $(cat "$SC5000_UI_DIR/boot-count") == 1 ]] || fail 'clean restarts must not reach safe-mode'

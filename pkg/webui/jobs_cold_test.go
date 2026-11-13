@@ -126,7 +126,12 @@ func TestColdTidalPassthroughLatency300ms(t *testing.T) {
 	for run := 0; run < 2; run++ {
 		for _, path := range []string{"/v1/users/1/playlists?limit=10&offset=0", "/v1/playlists/fixture/items?limit=10&offset=0"} {
 			start := time.Now()
-			res, err := http.Get(srv.URL + path)
+			req, err := http.NewRequest("GET", srv.URL+path, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Authorization", "Bearer fixture-real-tidal-access")
+			res, err := http.DefaultClient.Do(req)
 			if err != nil {
 				t.Fatal(err)
 			}

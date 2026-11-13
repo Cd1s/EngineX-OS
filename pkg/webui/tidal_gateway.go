@@ -24,6 +24,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -101,6 +102,7 @@ type playlistSearcher interface {
 	SearchPlaylists(context.Context, string) ([]providers.Playlist, error)
 }
 type tidalGateway struct {
+	authMu   sync.Mutex
 	browse   *browseCache
 	searches *searchCache
 	s        *Server
@@ -383,8 +385,30 @@ func (g *tidalGateway) proxyToTidal(w http.ResponseWriter, r *http.Request, clea
 			out.Out.URL.Path, out.Out.URL.RawPath = upstream, ""
 			out.Out.Host = base.Host
 		},
+		ModifyResponse: func(resp *http.Response) error {
+			if strings.HasSuffix(clean, "/oauth2/token") {
+				return g.tokenResponse(resp, r.Form.Get("refresh_token"), r.Form.Get("client_id"))
+			}
+			// Retry an expired bearer once. Token grants use the original form
+			// path above, preserving Engine's refresh-token error response.
+			if resp.StatusCode == http.StatusUnauthorized && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+				a, err := g.refreshRealAuth(r, g.realAuth())
+				if err != nil {
+					return nil
+				}
+				retry := resp.Request.Clone(r.Context())
+				retry.Header.Set("Authorization", "Bearer "+a.AccessToken)
+				next, err := http.DefaultTransport.RoundTrip(retry)
+				if err != nil {
+					return errors.New("could not retry TIDAL request")
+				}
+				resp.Body.Close()
+				*resp = *next
+			}
+			return nil
+		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			log.Printf("stream-sync: TIDAL unreachable: %v", err)
+			log.Print("stream-sync: TIDAL upstream request failed")
 			fail(w, 502, errors.New("could not reach TIDAL"))
 		},
 	}
@@ -428,9 +452,25 @@ func (g *tidalGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if g.s.scope() == "tidal" && !strings.HasPrefix(clean, "/v1/sc5000/") && !strings.HasPrefix(clean, "/v1/stream/") {
-		g.proxyToTidal(w, r, clean)
-		return
+	if !strings.HasPrefix(clean, "/v1/sc5000/") && !strings.HasPrefix(clean, "/v1/stream/") {
+		// Clone before changing headers or form bodies used by Engine.
+		r = r.Clone(r.Context())
+		form, err := g.captureAuth(r, clean)
+		if err != nil {
+			fail(w, 500, err)
+			return
+		}
+		g.s.uiMu.Lock()
+		v := g.s.loadUI()
+		g.s.uiMu.Unlock()
+		if v.Scope == "tidal" && slices.Contains(v.Sources, "tidal") {
+			if !g.prepareRealAuth(w, r, clean, form) {
+				return
+			}
+			r.Form = form
+			g.proxyToTidal(w, r, clean)
+			return
+		}
 	}
 	u := *r.URL
 	u.Path, u.RawPath = clean, ""
