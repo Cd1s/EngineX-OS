@@ -4515,11 +4515,30 @@ RGB_COLORS = {"Low": "#ff1428", "Mid": "#00e632", "High": "#0078ff"}
 RGB_PAST = {"Low": "#7f0a14", "Mid": "#007319", "High": "#003c80"}
 
 
-# Vertical stretch of the Half overview strip a shadow deck draws from stream-sync's
-# tile. RGB draws each column at full amplitude; Denon and 3-Band stack the bands as
-# separate, lower layers and need more.
+# Vertical stretch of a Half overview Engine does not scale: the strip a shadow deck
+# draws from stream-sync's tile, and OVERVIEW_RAW below. RGB draws each column at full
+# amplitude; Denon and 3-Band stack the bands as separate, lower layers and need more.
 OVERVIEW_Y_SCALE_RGB = 1.3
 OVERVIEW_Y_SCALE_BANDS = 2.2
+# A rekordbox track an earlier build imported has an overview without the band maxima
+# Engine scales by, a third of the height. rb-bridge completes it when the stick is
+# inserted, but not in a library it cannot write, on a stick that stayed in, or after a
+# failed scan. Such a track is drawn as r5 drew every rekordbox track: Half stretched from
+# the bottom and clipped, no gap below. Full is never stretched (#233). Every other track,
+# and this one once stream-sync vouches for its scale, keeps the stock geometry.
+OVERVIEW_RAW = """			property bool scRaw: false
+			readonly property var scTrack: trackData
+			onScTrackChanged: {
+				scRaw = false
+				const path = scTrack && scTrack.path ? String(scTrack.path) : ""
+				if (!/(^|\\/)Contents\\//.test(path)) return
+				const track = scTrack, x = new XMLHttpRequest()
+				x.onreadystatechange = function() { if (x.readyState === 4 && overview.scTrack === track) overview.scRaw = x.status !== 200 }
+				x.open("GET", "http://127.0.0.1:8080/v1/sc5000/overview-scale?path=" + encodeURIComponent(path))
+				x.send()
+			}
+			transform: Scale { origin.y: overview.height; yScale: overview.scRaw && overview.displayType !== WaveformOverviewView.Butterfly ? (overview.rgbMode ? %s : %s) : 1 }
+""" % (OVERVIEW_Y_SCALE_RGB, OVERVIEW_Y_SCALE_BANDS)
 
 
 def three_band(style_name, band, colors=BAND_COLORS):
@@ -5779,6 +5798,11 @@ def edits(dev: bool):
          "    readonly property bool isSlipModeActive: scSlip > 0 || (!isRemoteDeck && pSlipActive && pSlipActive.translator\n        ? pSlipActive.translator.value\n        : false)\n"),
         ("    readonly property int slipModePosition: isSlipModeActive && pSlipModePosition",
          "    readonly property int slipModePosition: scSlip > 0 ? scSlip : isSlipModeActive && pSlipModePosition"),
+        ("				bottomMargin: 7\n", "				bottomMargin: overview.scRaw ? 0 : 7\n"),
+        ("		objectName: \"Deck_WaveformOverview_ViewContainer\"\n",
+         "		objectName: \"Deck_WaveformOverview_ViewContainer\"\n		clip: overview.scRaw\n"),
+        ("			visible: waveformOverview.songLoaded && !waveformOverview.isRemoteDeck\n",
+         OVERVIEW_RAW + "			visible: waveformOverview.songLoaded && !waveformOverview.isRemoteDeck\n"),
     ]
     main = DEV_HARNESS if dev else ""
     services_main = (SERVICES_MAIN
