@@ -601,9 +601,9 @@ func preflightXZStream(r io.ReaderAt, offset, size int64, limits Limits) error {
 	// a merged record can hide a later block's dictionary allocation from preflight.
 	type blockInfo struct {
 		headerSize, unpadded         int64
-		uncompressed                uint64
+		uncompressed                 uint64
 		declaredComp, declaredUncomp uint64
-		flags                       byte
+		flags                        byte
 	}
 	var blocks []blockInfo
 	var measuredUncompressed uint64
