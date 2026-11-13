@@ -7,8 +7,8 @@
  * thread consumes it. Include it from a single translation unit (the hook);
  * a second one would get its own, unconnected state.
  */
-#ifndef SC5000_DSP_SMOOTH_H
-#define SC5000_DSP_SMOOTH_H
+#ifndef ENGINEX_DSP_SMOOTH_H
+#define ENGINEX_DSP_SMOOTH_H
 
 #include <stdint.h>
 #include <stddef.h>

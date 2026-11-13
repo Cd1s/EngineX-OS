@@ -113,9 +113,9 @@ func (s *Server) ProlinkStatePath() string {
 }
 
 // liveProlinkStatePath is where rb-bridge --prolink keeps the live CDJ/DJM state
-// (its --state-file default, SC5000_PROLINK_STATE in its unit).
+// (its --state-file default, ENGINEX_PROLINK_STATE in its unit).
 func liveProlinkStatePath() string {
-	if env := os.Getenv("SC5000_PROLINK_STATE"); env != "" {
+	if env := os.Getenv("ENGINEX_PROLINK_STATE"); env != "" {
 		return env
 	}
 	return "/tmp/enginex-prolink.json"

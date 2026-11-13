@@ -7,9 +7,9 @@
 # POSIX sh: the stock rootfs has BusyBox ash and no bash.
 set -eu
 umask 022
-SYS=${SC5000_SYS_ROOT:-/sys}
-RUN=${SC5000_RUN_ROOT:-/run/enginex-storage}
-WAIT=${SC5000_MOUNT_WAIT:-30}
+SYS=${ENGINEX_SYS_ROOT:-/sys}
+RUN=${ENGINEX_RUN_ROOT:-/run/enginex-storage}
+WAIT=${ENGINEX_MOUNT_WAIT:-30}
 log() { printf 'enginex-storage: %s\n' "$*" >&2; }
 die() { log "$*"; exit 1; }
 mkdir -p "$RUN"

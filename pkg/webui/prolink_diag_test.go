@@ -48,7 +48,7 @@ func TestProlinkDiag(t *testing.T) {
 	t.Cleanup(func() { procNetDir = "/proc/net" })
 	srv := New(Config{StateDir: t.TempDir(), UIDir: ui, AccessToken: "secret-access-code"}, nil)
 	defer srv.Close()
-	t.Setenv("SC5000_PROLINK_STATE", filepath.Join(t.TempDir(), "none.json"))
+	t.Setenv("ENGINEX_PROLINK_STATE", filepath.Join(t.TempDir(), "none.json"))
 	prolinkMu.Lock()
 	postedDevices[srv] = map[string]prolink.Device{"3": {Number: 3, Name: "CDJ-3000", Address: "192.0.2.33", LastSeen: time.Now(), EffectiveBPM: 128, Playing: true, Master: true}}
 	prolinkMu.Unlock()

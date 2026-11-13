@@ -116,7 +116,7 @@ func bundleInstallScript(t *testing.T) []byte {
 		t.Fatal("INSTALL not found in build-data-bundle.py")
 	}
 	// The packer expands @MIGRATE_IF_DEFAULT@ into the /data migration; the test deck is not
-	// a real /data (SC5000_CUSTOM is set), so there is nothing to migrate.
+	// a real /data (ENGINEX_CUSTOM is set), so there is nothing to migrate.
 	script := bytes.ReplaceAll(m[1], []byte("@MIGRATE_IF_DEFAULT@"), []byte(":"))
 	// @SWAP_UNDO@ is the real rollback of an interrupted install (BH-G2-4).
 	undo := regexp.MustCompile(`(?s)\nSWAP_UNDO = r"""(.*?)"""`).FindSubmatch(src)
@@ -728,7 +728,7 @@ func TestGen2EndToEndReReleaseApplyAndCustomDirResolution(t *testing.T) {
 				t.Fatal(err)
 			}
 			cmd := exec.Command("sh", filepath.Join(top, "install.sh"))
-			cmd.Env = append(os.Environ(), "SC5000_CUSTOM="+bundleCustomDir, "SC5000_ALSA_OVERLAY="+filepath.Join(root, "alsa"))
+			cmd.Env = append(os.Environ(), "ENGINEX_CUSTOM="+bundleCustomDir, "ENGINEX_ALSA_OVERLAY="+filepath.Join(root, "alsa"))
 			if out, err := cmd.CombinedOutput(); err != nil {
 				t.Fatalf("seed install: %v\n%s", err, out)
 			}
@@ -804,7 +804,7 @@ func TestGen2EndToEndReReleaseApplyAndCustomDirResolution(t *testing.T) {
 			t.Fatal(err)
 		}
 		cmd := exec.Command("sh", filepath.Join(top, "install.sh"))
-		cmd.Env = append(os.Environ(), "SC5000_CUSTOM="+bundleCustomDir, "SC5000_ALSA_OVERLAY="+filepath.Join(root, "alsa"))
+		cmd.Env = append(os.Environ(), "ENGINEX_CUSTOM="+bundleCustomDir, "ENGINEX_ALSA_OVERLAY="+filepath.Join(root, "alsa"))
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("install r3: %v\n%s", err, out)
 		}

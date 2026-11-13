@@ -25,8 +25,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from az01_packer import MIGRATE  # one migration snippet for the image and the bundle
 
-# SC5000_CUSTOM is only set by tests: then dest is not the deck's /data, nothing to migrate.
-MIGRATE_IF_DEFAULT = 'if [ -z "${SC5000_CUSTOM:-}" ]; then\n' + MIGRATE + '\nfi'
+# ENGINEX_CUSTOM is only set by tests: then dest is not the deck's /data, nothing to migrate.
+MIGRATE_IF_DEFAULT = 'if [ -z "${ENGINEX_CUSTOM:-}" ]; then\n' + MIGRATE + '\nfi'
 
 VERSION_RE = re.compile(r'^\d+(\.\d+){2,4}$')  # same range as az01_packer.py
 APPLETS = ('stream-sync', 'rb-bridge', 'sc5000-deemixd', 'stems-processor', 'engine-guardian')
@@ -82,9 +82,13 @@ swap_undo() {
 BOOT_ACTIVATE = r'''#!/bin/sh
 # One-shot boot activator for SC LIVE 4 (inmusic,jp21) and read-only root decks (#61).
 set -eu
+# Releases before 5.3.0.5 name these SC5000_CUSTOM and SC5000_ALSA_OVERLAY (#234): their updater,
+# installer and USB hook still set those when they run this release's scripts.
+ENGINEX_CUSTOM=${ENGINEX_CUSTOM:-${SC5000_CUSTOM:-}}
+ENGINEX_ALSA_OVERLAY=${ENGINEX_ALSA_OVERLAY:-${SC5000_ALSA_OVERLAY:-}}
 
 @MIGRATE_IF_DEFAULT@
-dest="${SC5000_CUSTOM:-/data/enginex}"
+dest="${ENGINEX_CUSTOM:-/data/enginex}"
 bundle_dir="$dest/bundle"
 bin_dir="$bundle_dir/bin"
 lib_hook="$bundle_dir/lib/libengine-ui-hook.so"
@@ -102,7 +106,7 @@ fi
 check_gen2_tz_newer() {
     tz_file="$dest/state/timezone"
     [ -f "$tz_file" ] || return 1
-    cfg_root=${SC5000_CONFIG_DIR:-"$(dirname "$dest")/.config"}
+    cfg_root=${ENGINEX_CONFIG_DIR:-"$(dirname "$dest")/.config"}
     for d in "$cfg_root"/*.user.settings; do
         [ -d "$d" ] || continue
         conf="$d/AIR Music Technology/Engine.conf"
@@ -118,7 +122,7 @@ restore_gen2_timezone() {
     tz_file="$dest/state/timezone"
     [ ! -L "$dest/state" ] && [ ! -L "$tz_file" ] && [ -f "$tz_file" ] || return 0
     tz=$(awk '{gsub(/\r/, ""); gsub(/^[[:space:]]+|[[:space:]]+$/, ""); gsub(/ /, "_"); print; exit}' "$tz_file")
-    zdir=${SC5000_ZONEINFO_DIR:-/usr/share/zoneinfo}
+    zdir=${ENGINEX_ZONEINFO_DIR:-/usr/share/zoneinfo}
     if [ "$tz" = UTC ]; then
         [ -f "$zdir/UTC" ] || return 0
     else
@@ -136,7 +140,7 @@ restore_gen2_timezone() {
         IFS=$old_ifs
         [ -f "$zdir/$tz" ] || return 0
     fi
-    cfg_root=${SC5000_CONFIG_DIR:-"$(dirname "$dest")/.config"}
+    cfg_root=${ENGINEX_CONFIG_DIR:-"$(dirname "$dest")/.config"}
     [ ! -L "$cfg_root" ] || return 0
     read_conf_tz() {
         [ -f "$1" ] || return 0
@@ -209,7 +213,7 @@ restore_gen2_timezone() {
         write_conf "$d"
     done
     if [ "$found" = 0 ]; then
-        pfile=${SC5000_PRODUCT_CODE_FILE:-/sys/firmware/devicetree/base/inmusic,product-code}
+        pfile=${ENGINEX_PRODUCT_CODE_FILE:-/sys/firmware/devicetree/base/inmusic,product-code}
         if [ -f "$pfile" ]; then
             prod=$(tr -d '\000\r\n ' < "$pfile" | tr '[:upper:]' '[:lower:]')
             case $prod in
@@ -224,7 +228,7 @@ restore_gen2_timezone() {
 convert_mounted() {
     [ ! -e "$dest/ui/safe-mode" ] || return 0
     [ -x "$bin_dir/rb-bridge" ] || return 0
-    for m in "${SC5000_MEDIA_ROOT:-/media}"/*; do
+    for m in "${ENGINEX_MEDIA_ROOT:-/media}"/*; do
         if [ -d "$m/PIONEER" ] || [ -d "$m/.PIONEER" ]; then
             "$bin_dir/rb-bridge" --mount-path "$m" >/dev/null 2>&1 || :
         fi
@@ -236,7 +240,7 @@ convert_mounted() {
 # and the DJ cannot load a track in the stock UI that the restart then takes away (BH-F52-6).
 # Once per boot; a later restart finds the sticks converted by the hook at their mount.
 if [ "${1:-}" = "--convert-mounted" ]; then
-    mark=${SC5000_CONVERT_MARK:-/run/enginex-boot-converted}
+    mark=${ENGINEX_CONVERT_MARK:-/run/enginex-boot-converted}
     [ ! -e "$mark" ] || exit 0
     : > "$mark" 2>/dev/null || :
     convert_mounted
@@ -247,7 +251,7 @@ fi
 # the hooked Engine starts, so Engine.conf is updated without stopping our own cgroup.
 if [ "${1:-}" = "--restore-tz" ]; then
     force_newer=0
-    tz_marker=${SC5000_TZ_NEWER_MARKER:-/run/enginex-tz-newer}
+    tz_marker=${ENGINEX_TZ_NEWER_MARKER:-/run/enginex-tz-newer}
     if [ -e "$tz_marker" ]; then
         force_newer=1
         rm -f "$tz_marker" 2>/dev/null || :
@@ -270,8 +274,8 @@ Wants=enginex-stream-sync.service enginex-rb-bridge.service enginex-sc5000-deemi
 
 [Service]
 UnsetEnvironment=LD_PRELOAD
-Environment="SC5000_UI_HOOK=$lib_hook"
-Environment="SC5000_ENGINE_GUARDIAN=$bin_dir/engine-guardian"
+Environment="ENGINEX_UI_HOOK=$lib_hook"
+Environment="ENGINEX_ENGINE_GUARDIAN=$bin_dir/engine-guardian"
 ExecStart=
 ExecStart=$bin_dir/engine-ui-guard service /usr/Engine/Scripts/runengine
 Environment="QT_LOGGING_CONF=/data/logging.ini"
@@ -326,7 +330,7 @@ Before=engine.service
 
 [Service]
 ExecStart=$bin_dir/engine-ui-guard watch
-Environment="SC5000_ENGINE_GUARDIAN=$bin_dir/engine-guardian"
+Environment="ENGINEX_ENGINE_GUARDIAN=$bin_dir/engine-guardian"
 Restart=on-failure
 RestartSec=1
 Nice=10
@@ -366,11 +370,11 @@ if [ -d /run/systemd ]; then
     fi
 fi
 
-ts_file=${SC5000_TIMESTAMP_FILE:-/etc/timestamp}
+ts_file=${ENGINEX_TIMESTAMP_FILE:-/etc/timestamp}
 if [ -f "$ts_file" ] && [ ! -L "$ts_file" ]; then
     data_root=$(dirname "$dest")
-    if [ -n "${SC5000_TIMESYNC_LIB_DIR:-}" ]; then
-        lib_dir=$SC5000_TIMESYNC_LIB_DIR
+    if [ -n "${ENGINEX_TIMESYNC_LIB_DIR:-}" ]; then
+        lib_dir=$ENGINEX_TIMESYNC_LIB_DIR
     elif [ -d "$data_root/system/var-lib" ]; then
         lib_dir="$data_root/system/var-lib"
     elif [ -d "$data_root/system/var/overlay/lib" ]; then
@@ -467,12 +471,12 @@ fi
 # host-install-userdata.py --ssh-key (#116). The root fs is read-only on these decks, so when the
 # copy fails the key is bind-mounted over the stock /root/.ssh/authorized_keys.
 ssh_key=
-sshd_bin=${SC5000_SSHD:-/usr/sbin/sshd}
+sshd_bin=${ENGINEX_SSHD:-/usr/sbin/sshd}
 if [ -s "$dest/authorized_keys" ] && [ -x "$sshd_bin" ]; then
     ssh_key=1
     chown 0:0 "$dest/authorized_keys" 2>/dev/null || :
     chmod 600 "$dest/authorized_keys"
-    root_ssh=${SC5000_ROOT_SSH_DIR:-/root/.ssh} # tests: never the build host's own keys
+    root_ssh=${ENGINEX_ROOT_SSH_DIR:-/root/.ssh} # tests: never the build host's own keys
     if ! cmp -s "$dest/authorized_keys" "$root_ssh/authorized_keys" 2>/dev/null; then
         { mkdir -p -m 700 "$root_ssh" && cp "$dest/authorized_keys" "$root_ssh/authorized_keys" && chmod 600 "$root_ssh/authorized_keys"; } 2>/dev/null ||
             mount --bind "$dest/authorized_keys" "$root_ssh/authorized_keys" 2>/dev/null || :
@@ -496,7 +500,7 @@ fi
 
 # Seed /data/StreamingAccounts.json with a stored-credential TIDAL entry (#56, #159)
 # so Engine 5.3.0 logs in to the local gateway at boot instead of waiting for Profile SSO.
-accounts=${SC5000_STREAMING_ACCOUNTS:-/data/StreamingAccounts.json}
+accounts=${ENGINEX_STREAMING_ACCOUNTS:-/data/StreamingAccounts.json}
 if [ ! -e "$dest/ui/safe-mode" ] && [ -d "${accounts%/*}" ] && ! grep -qx 'scope=tidal' "$dest/ui/settings.conf" 2>/dev/null; then
     export T='"TIDAL": "{\"provider\":\"TIDAL\",\"providerType\":\"TIDAL\",\"accessToken\":\"enginex\",\"refreshToken\":\"enginex\"}"'
     if grep -Eq '"TIDAL"[[:space:]]*:' "$accounts" 2>/dev/null && ! grep -E '"TIDAL"[[:space:]]*:' "$accounts" 2>/dev/null | grep -q 'accessToken'; then
@@ -527,7 +531,7 @@ fi
 
 # Sticks mounted before this ran never went through the edisksd hook.
 # In a chroot systemctl only prints "Running in chroot, ignoring" and exits 0, so require systemd as PID 1.
-if [ "$(cat "${SC5000_PID1_COMM:-/proc/1/comm}" 2>/dev/null)" = systemd ] && systemctl daemon-reload >/dev/null 2>&1; then
+if [ "$(cat "${ENGINEX_PID1_COMM:-/proc/1/comm}" 2>/dev/null)" = systemd ] && systemctl daemon-reload >/dev/null 2>&1; then
     systemctl restart --no-block enginex-stream-sync.service enginex-rb-bridge.service enginex-sc5000-deemixd.service engine-guardian.service || :
     [ -z "$ssh_start" ] || systemctl start --no-block sshd.service || :
     # Blocking, so edisksd is up again before the hooked start converts what is in /media.
@@ -535,7 +539,7 @@ if [ "$(cat "${SC5000_PID1_COMM:-/proc/1/comm}" 2>/dev/null)" = systemd ] && sys
     [ "$timesyncd_changed" = 0 ] || systemctl restart --no-block systemd-timesyncd.service || :
     # The sticks present at boot are converted by the hooked Engine's ExecStartPre (BH-F52-6).
     if check_gen2_tz_newer; then
-        : > "${SC5000_TZ_NEWER_MARKER:-/run/enginex-tz-newer}" 2>/dev/null || :
+        : > "${ENGINEX_TZ_NEWER_MARKER:-/run/enginex-tz-newer}" 2>/dev/null || :
     fi
     if [ ! -e "$dest/ui/safe-mode" ]; then
         systemctl restart --no-block engine.service || systemctl restart engine.service || :
@@ -572,19 +576,23 @@ INSTALL = r'''#!/bin/sh
 # Installs this bundle under /data/enginex (/data/sc5000-custom stays as a symlink). Checks SHA256SUMS first and
 # keeps the previous generation until every part is in place, so a failed or interrupted install leaves the old one.
 set -eu
+# Releases before 5.3.0.5 name these SC5000_CUSTOM and SC5000_ALSA_OVERLAY (#234): their updater,
+# installer and USB hook still set those when they run this release's scripts.
+ENGINEX_CUSTOM=${ENGINEX_CUSTOM:-${SC5000_CUSTOM:-}}
+ENGINEX_ALSA_OVERLAY=${ENGINEX_ALSA_OVERLAY:-${SC5000_ALSA_OVERLAY:-}}
 # <MODEL>-<VERSION>-EngineX-OS-<Name>-Update.img (128-byte header + this bundle's .tar.gz): check the SHA-256
 # in the header, unpack the payload and run its own install.sh.
 if [ "$#" -gt 0 ] && [ -f "$1" ] && [ "$(dd if="$1" bs=27 count=1 2>/dev/null)" = ENGINEX_DATA_BUNDLE_IMG_V1 ]; then
     want=$(dd if="$1" bs=128 count=1 2>/dev/null | tr -d '\000' | sed -n 2p)
     got=$(tail -c +129 "$1" | sha256sum | cut -d' ' -f1)
     [ -n "$want" ] && [ "$want" = "$got" ] || { echo "image damaged: SHA-256 mismatch" >&2; exit 1; }
-    mkdir -p "${SC5000_CUSTOM:-/data/enginex}"
+    mkdir -p "${ENGINEX_CUSTOM:-/data/enginex}"
     # BH2-A7-8: an install that lost power or was killed never ran its exit trap and
     # left its unpacked copy of the bundle here, tens of megabytes of /data each time.
-    for stale in "${SC5000_CUSTOM:-/data/enginex}"/.img-install.*; do
+    for stale in "${ENGINEX_CUSTOM:-/data/enginex}"/.img-install.*; do
         [ ! -d "$stale" ] || [ -L "$stale" ] || rm -rf "$stale"
     done
-    work=$(mktemp -d "${SC5000_CUSTOM:-/data/enginex}/.img-install.XXXXXX")
+    work=$(mktemp -d "${ENGINEX_CUSTOM:-/data/enginex}/.img-install.XXXXXX")
     trap 'rm -rf "$work"' 0
     trap 'exit 1' HUP INT TERM # a signal ends through the exit trap
     tail -c +129 "$1" | tar -xzf - -C "$work"
@@ -593,14 +601,14 @@ if [ "$#" -gt 0 ] && [ -f "$1" ] && [ "$(dd if="$1" bs=27 count=1 2>/dev/null)" 
 fi
 src=$(cd "$(dirname "$0")" && pwd)
 @MIGRATE_IF_DEFAULT@
-dest=${SC5000_CUSTOM:-/data/enginex}
+dest=${ENGINEX_CUSTOM:-/data/enginex}
 if [ -L "$dest" ]; then
     dest=$(readlink -f "$dest" 2>/dev/null || readlink "$dest")
 fi
 # Where /var/lib lives on /data differs by firmware: see alsa-dir.
 alsa_rel=$(cat "$src/alsa-dir")
-if [ -n "${SC5000_ALSA_OVERLAY:-}" ]; then
-    alsa_dest="$SC5000_ALSA_OVERLAY"
+if [ -n "${ENGINEX_ALSA_OVERLAY:-}" ]; then
+    alsa_dest="$ENGINEX_ALSA_OVERLAY"
 elif [ "$dest" != "/data/enginex" ] && [ ! -d "/data" ]; then
     alsa_dest="$(dirname "$dest")/$alsa_rel"
 else
@@ -610,12 +618,12 @@ cd "$src"
 sha256sum -c SHA256SUMS >/dev/null || { echo "bundle damaged: SHA256SUMS mismatch" >&2; exit 1; }
 # BH-G2-1: on a deck, only a bundle built for its CPU (the ELF machine of its own Engine, not
 # uname: a 64-bit kernel can run the armhf userland) and, when the bundle names one, its model.
-compat=${SC5000_COMPATIBLE:-/sys/firmware/devicetree/base/compatible}
+compat=${ENGINEX_COMPATIBLE:-/sys/firmware/devicetree/base/compatible}
 boards=$(tr '\000' ' ' 2>/dev/null < "$compat") || boards=
 case " $boards" in *" inmusic,"*)
     # e_machine's low byte, octal; od -b and sed: the deck's BusyBox od has no -A/-t.
     elf_machine() { dd if="$1" bs=1 skip=18 count=1 2>/dev/null | od -b | sed -n '1s/^[0-9]* *//p' | tr -d ' '; }
-    want_cpu=$(elf_machine "${SC5000_SYSTEM_ELF:-/usr/Engine/Engine}")
+    want_cpu=$(elf_machine "${ENGINEX_SYSTEM_ELF:-/usr/Engine/Engine}")
     got_cpu=$(elf_machine bin/sc5000-suite)
     [ -n "$want_cpu" ] && [ "$got_cpu" = "$want_cpu" ] ||
         { echo "bundle is for another CPU (ELF machine ${got_cpu:-?}, this deck ${want_cpu:-?})" >&2; exit 1; }
@@ -674,7 +682,7 @@ if [ "$(cat "$dest/ui/.pack-version" 2>/dev/null)" != "$(cat version.txt)" ]; th
     rm -f "$dest/ui/safe-mode" "$dest/ui/mods-quarantined" "$dest/ui/boot-count" "$dest/ui/boot-token" "$dest/ui/boot-ready" \
         "$dest/ui/last-crash" "$dest/ui/boot-failures" "$dest/ui/boot-window" "$dest/ui/boot-progress" "$dest/ui/boot-stage" "$dest/ui/boot-report-latest"
 fi
-if [ -z "${SC5000_CUSTOM:-}" ]; then
+if [ -z "${ENGINEX_CUSTOM:-}" ]; then
     rm -rf "/data/AppDataUser/AIR Music Technology/Engine/.cache/qml"
 fi
 cp version.txt "$dest/ui/.pack-version"
@@ -692,15 +700,19 @@ UNINSTALL = r'''#!/bin/sh
 # Removes only what install.sh put in /data/enginex. SSH keys, settings,
 # caches and downloads stay; UI packs stay if something else replaced them.
 set -eu
+# Releases before 5.3.0.5 name these SC5000_CUSTOM and SC5000_ALSA_OVERLAY (#234): their updater,
+# installer and USB hook still set those when they run this release's scripts.
+ENGINEX_CUSTOM=${ENGINEX_CUSTOM:-${SC5000_CUSTOM:-}}
+ENGINEX_ALSA_OVERLAY=${ENGINEX_ALSA_OVERLAY:-${SC5000_ALSA_OVERLAY:-}}
 @MIGRATE_IF_DEFAULT@
-dest=${SC5000_CUSTOM:-/data/enginex}
+dest=${ENGINEX_CUSTOM:-/data/enginex}
 if [ -L "$dest" ]; then
     dest=$(readlink -f "$dest" 2>/dev/null || readlink "$dest")
 fi
 # Bundles before 5.3.0.2's AZ04 support had no alsa-dir; they all used the overlay path.
 alsa_rel=$(cat "$dest/bundle/alsa-dir" 2>/dev/null || echo system/var/overlay/lib/alsa/conf.d)
-if [ -n "${SC5000_ALSA_OVERLAY:-}" ]; then
-    alsa_dest="$SC5000_ALSA_OVERLAY"
+if [ -n "${ENGINEX_ALSA_OVERLAY:-}" ]; then
+    alsa_dest="$ENGINEX_ALSA_OVERLAY"
 elif [ "$dest" != "/data/enginex" ] && [ ! -d "/data" ]; then
     alsa_dest="$(dirname "$dest")/$alsa_rel"
 else
@@ -731,8 +743,8 @@ fi
 # BH2-A7-11: boot-activate.sh gives Engine a stand-in TIDAL account (#56) that only works
 # with EngineX. Left behind, stock Engine shows TIDAL as signed in and every request
 # fails until the user signs out. A real TIDAL sign-in (any other token) stays.
-accounts=${SC5000_STREAMING_ACCOUNTS:-}
-[ -n "$accounts" ] || [ -n "${SC5000_CUSTOM:-}" ] || accounts=/data/StreamingAccounts.json
+accounts=${ENGINEX_STREAMING_ACCOUNTS:-}
+[ -n "$accounts" ] || [ -n "${ENGINEX_CUSTOM:-}" ] || accounts=/data/StreamingAccounts.json
 if [ -n "$accounts" ] && grep -q 'accessToken[^,}]*enginex' "$accounts" 2>/dev/null; then
     awk '{ s = s $0 "\n" }
         END {
@@ -745,12 +757,12 @@ if [ -n "$accounts" ] && grep -q 'accessToken[^,}]*enginex' "$accounts" 2>/dev/n
             printf "%s%s", head, tail
         }' "$accounts" > "$accounts.tmp" && mv "$accounts.tmp" "$accounts" || rm -f "$accounts.tmp"
 fi
-if [ -z "${SC5000_CUSTOM:-}" ] && [ -e /run/enginex-engine-script ]; then
+if [ -z "${ENGINEX_CUSTOM:-}" ] && [ -e /run/enginex-engine-script ]; then
     ! mountpoint -q /usr/Engine/Scripts/engine || umount /usr/Engine/Scripts/engine || :
     rm -f /run/enginex-engine-script
 fi
 rm -rf "$dest/bundle"
-if [ -z "${SC5000_CUSTOM:-}" ]; then
+if [ -z "${ENGINEX_CUSTOM:-}" ]; then
     if command -v systemctl >/dev/null 2>&1 && systemctl is-active basic.target >/dev/null 2>&1; then
         for applet in stream-sync rb-bridge sc5000-deemixd; do
             systemctl stop "enginex-$applet.service" 2>/dev/null || :

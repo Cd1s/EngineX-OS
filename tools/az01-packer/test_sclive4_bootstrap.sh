@@ -180,7 +180,7 @@ for i in \$(seq 1 30); do
 done
 
 test -f '$TARGET/run/enginex-alsa-reexec.once'
-grep -q 'SC5000_UI_HOOK=/data/enginex/bundle/lib/libengine-ui-hook.so' \
+grep -q 'ENGINEX_UI_HOOK=/data/enginex/bundle/lib/libengine-ui-hook.so' \
     '$TARGET/run/systemd/system/engine.service.d/99-sc5000.conf'
 grep -q 'UnsetEnvironment=LD_PRELOAD' '$TARGET/run/systemd/system/engine.service.d/99-sc5000.conf'
 grep -q 'engine-ui-guard launch /usr/Engine/Engine' '$TARGET/usr/Engine/Scripts/engine'

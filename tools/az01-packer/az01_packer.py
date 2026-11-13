@@ -530,8 +530,8 @@ fi
 # A firmware update rewrites / but never /data: install the image's UI packs
 # once per release, before Engine starts (engine.service orders after this unit).
 install_ui() {
-    archive=${SC5000_UI_ARCHIVE:-/usr/share/enginex/ui-packs.tar.xz}
-    ui=${SC5000_UI_DIR:-/data/enginex/ui}
+    archive=${ENGINEX_UI_ARCHIVE:-/usr/share/enginex/ui-packs.tar.xz}
+    ui=${ENGINEX_UI_DIR:-/data/enginex/ui}
     [ -f "$archive" ] || return 0
     version=$(cat /etc/enginex/version.txt 2>/dev/null || echo unknown)
     # Releases keep their version (5.0.4.1) across rebuilds: also key on the archive.
@@ -567,16 +567,16 @@ install_ui() {
             "$ui/last-crash" "$ui/boot-failures" "$ui/boot-window" "$ui/boot-progress" "$ui/boot-stage" "$ui/boot-report-latest"
     fi
     # A .qmlc cached from the old packs must not be read against the new ones.
-    rm -rf "${SC5000_ENGINE_DATA_DIR:-/data/AppDataUser/AIR Music Technology/Engine}/.cache/qml"
+    rm -rf "${ENGINEX_ENGINE_DATA_DIR:-/data/AppDataUser/AIR Music Technology/Engine}/.cache/qml"
     printf '%s\n' "$version" > "$ui/.pack-version"
     printf '%s\n' "$id" > "$ui/.pack-id"
-    printf '%s\n' "$version" > "${SC5000_VERSION_FILE:-/data/enginex/version.txt}"
+    printf '%s\n' "$version" > "${ENGINEX_VERSION_FILE:-/data/enginex/version.txt}"
 }
 
 # Restore the last saved time zone into Engine.conf before Engine starts, without
 # overwriting a newer non-UTC TZEnvVar that Engine flushed on a clean shutdown.
 valid_tz() {
-    zdir=${SC5000_ZONEINFO_DIR:-/usr/share/zoneinfo}
+    zdir=${ENGINEX_ZONEINFO_DIR:-/usr/share/zoneinfo}
     if [ "$1" = UTC ]; then
         [ -f "$zdir/UTC" ]
         return $?
@@ -672,12 +672,12 @@ write_engine_tz() {
 }
 
 restore_timezone() {
-    tz_file=${SC5000_TZ_STATE_FILE:-/data/enginex/state/timezone}
+    tz_file=${ENGINEX_TZ_STATE_FILE:-/data/enginex/state/timezone}
     [ ! -L /data/enginex/state ] && [ ! -L "$tz_file" ] || { echo "Refusing timezone symlink: $tz_file" >&2; return 1; }
     [ -f "$tz_file" ] || return 0
     tz=$(awk '{gsub(/\\r/, ""); gsub(/^[[:space:]]+|[[:space:]]+$/, ""); gsub(/ /, "_"); print; exit}' "$tz_file")
     valid_tz "$tz" || return 0
-    cfg_root=${SC5000_CONFIG_DIR:-/data/.config}
+    cfg_root=${ENGINEX_CONFIG_DIR:-/data/.config}
     [ ! -L "$cfg_root" ] || { echo "Refusing .config symlink: $cfg_root" >&2; return 1; }
     found=0
     for d in "$cfg_root"/*.user.settings; do
@@ -686,7 +686,7 @@ restore_timezone() {
         write_engine_tz "$d" "$tz" "$tz_file"
     done
     if [ "$found" = 0 ]; then
-        pfile=${SC5000_PRODUCT_CODE_FILE:-/sys/firmware/devicetree/base/inmusic,product-code}
+        pfile=${ENGINEX_PRODUCT_CODE_FILE:-/sys/firmware/devicetree/base/inmusic,product-code}
         if [ -f "$pfile" ]; then
             prod=$(tr -d '\\000\\r\\n ' < "$pfile" | tr '[:upper:]' '[:lower:]')
             case $prod in

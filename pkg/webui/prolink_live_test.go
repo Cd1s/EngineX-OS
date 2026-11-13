@@ -38,7 +38,7 @@ func deck1Title(t *testing.T, s *Server) string {
 // never saw rb-bridge's live CDJ state again.
 func TestProlinkLiveStateSurvivesAPost(t *testing.T) {
 	live := filepath.Join(t.TempDir(), "enginex-prolink.json")
-	t.Setenv("SC5000_PROLINK_STATE", live)
+	t.Setenv("ENGINEX_PROLINK_STATE", live)
 	stateDir := t.TempDir()
 	s := New(Config{StateDir: stateDir, UIDir: t.TempDir()}, nil)
 	writeLiveProlink(t, live, "Track A", 128)
@@ -68,7 +68,7 @@ func TestProlinkLiveStateSurvivesAPost(t *testing.T) {
 // over its live state for good: later live titles, BPM and play state never showed again.
 func TestProlinkPostForALiveDeckDoesNotFreezeIt(t *testing.T) {
 	live := filepath.Join(t.TempDir(), "enginex-prolink.json")
-	t.Setenv("SC5000_PROLINK_STATE", live)
+	t.Setenv("ENGINEX_PROLINK_STATE", live)
 	s := New(Config{StateDir: t.TempDir(), UIDir: t.TempDir()}, nil)
 	writeLiveProlink(t, live, "Track A", 128)
 	body, _ := json.Marshal(prolink.Device{Number: 1, Name: "CDJ-3000", Title: "Posted", BPM: 99, LastSeen: time.Now()})

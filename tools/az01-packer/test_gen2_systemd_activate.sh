@@ -122,7 +122,7 @@ cat > "$DEST/bundle/bin/engine-ui-guard" << EOF
 #!/bin/sh
 [ "\${1:-}" = service ] || exit 0
 shift
-[ "\${SC5000_UI_HOOK:-}" != "$DEST/bundle/lib/libengine-ui-hook.so" ] || export ENGINEX_TEST_HOOKED=1
+[ "\${ENGINEX_UI_HOOK:-}" != "$DEST/bundle/lib/libengine-ui-hook.so" ] || export ENGINEX_TEST_HOOKED=1
 exec "\$@"
 EOF
 chmod 0755 "$DEST/bundle/bin/engine-ui-guard"
@@ -150,7 +150,7 @@ sub("engine-ui-guard service /usr/Engine/Scripts/runengine",
     f"engine-ui-guard service {tmp}/mock-runengine.sh {tmp} {tmp}/new-activator-wrapper.sh")
 sub("/usr/Engine/Scripts/engine", f"{tmp}/no-vendor-engine-script")
 sub("ExecStartPre=/bin/mkdir -p -m 0700 /tmp/enginex-engine-home\n",
-    f"Environment=SC5000_CUSTOM={tmp}/data/enginex SC5000_CONFIG_DIR={tmp}/data/.config SC5000_ZONEINFO_DIR={tmp}/zoneinfo SC5000_PRODUCT_CODE_FILE={tmp}/product-code SC5000_TZ_NEWER_MARKER={tmp}/tz-newer\n")
+    f"Environment=ENGINEX_CUSTOM={tmp}/data/enginex ENGINEX_CONFIG_DIR={tmp}/data/.config ENGINEX_ZONEINFO_DIR={tmp}/zoneinfo ENGINEX_PRODUCT_CODE_FILE={tmp}/product-code ENGINEX_TZ_NEWER_MARKER={tmp}/tz-newer\n")
 sub("EnvironmentFile=-/data/sc5000-custom/ui-scale.env\n", "")
 sub("$bundle_dir/boot-activate.sh --restore-tz", f"{dst} --restore-tz")
 sub("/run/systemd/timesyncd.conf.d/10-enginex-ntp.conf", f"{tmp}/ntp.conf")
@@ -179,12 +179,12 @@ chmod 0755 "$TMP/isolated-boot-activate.sh"
 cat > "$TMP/new-activator-wrapper.sh" << EOF
 #!/bin/sh
 sleep 0.2
-export SC5000_CUSTOM="$DEST"
-export SC5000_CONFIG_DIR="$TMP/data/.config"
-export SC5000_ZONEINFO_DIR="$TMP/zoneinfo"
-export SC5000_PRODUCT_CODE_FILE="$TMP/product-code"
-export SC5000_TZ_NEWER_MARKER="$TMP/tz-newer"
-export SC5000_TIMESYNC_LIB_DIR="$TMP/missing-var-lib"
+export ENGINEX_CUSTOM="$DEST"
+export ENGINEX_CONFIG_DIR="$TMP/data/.config"
+export ENGINEX_ZONEINFO_DIR="$TMP/zoneinfo"
+export ENGINEX_PRODUCT_CODE_FILE="$TMP/product-code"
+export ENGINEX_TZ_NEWER_MARKER="$TMP/tz-newer"
+export ENGINEX_TIMESYNC_LIB_DIR="$TMP/missing-var-lib"
 exec "$TMP/isolated-boot-activate.sh"
 EOF
 chmod 0755 "$TMP/new-activator-wrapper.sh"

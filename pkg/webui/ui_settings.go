@@ -226,7 +226,8 @@ var uiFourDeckRoles = []string{"auto", "13", "24", "12", "34", "1", "2"}
 // fourDeckRolePath is where engine-ui-guard leaves the role it applied.
 var fourDeckRolePath = "/run/enginex-assignments/role"
 
-// uiScaleEnvPath records the scale as SC5000_UI_SCALE for Engine's unit (the
+// uiScaleEnvPath records the scale as ENGINEX_UI_SCALE, and as SC5000_UI_SCALE for a release
+// before 5.3.0.5 after a downgrade (#234), for Engine's unit (the
 // engine.service.d/70-ui-scale.conf drop-in). It is deliberately not QT_SCALE_FACTOR,
 // which leaves a black band under EGLFS. A package var so tests can point it at a temp dir.
 var (
@@ -250,7 +251,8 @@ func writeUIScaleEnv(pct int) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	text := "SC5000_UI_SCALE=" + strconv.FormatFloat(float64(pct)/100, 'f', -1, 64) + "\n"
+	scale := strconv.FormatFloat(float64(pct)/100, 'f', -1, 64)
+	text := "ENGINEX_UI_SCALE=" + scale + "\nSC5000_UI_SCALE=" + scale + "\n"
 	tmp, err := os.CreateTemp(dir, ".ui-scale-*")
 	if err != nil {
 		return err

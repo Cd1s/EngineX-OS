@@ -150,7 +150,7 @@ class DataBundleTest(unittest.TestCase):
             self.assertIn(prefix, bdb.MODEL_NAMES)
         dest = self.tmp / 'data/enginex'
         alsa = self.tmp / 'data/system/var/overlay/lib/alsa/conf.d'
-        env = {**self.env, 'SC5000_CUSTOM': str(dest), 'SC5000_ALSA_OVERLAY': str(alsa)}
+        env = {**self.env, 'ENGINEX_CUSTOM': str(dest), 'ENGINEX_ALSA_OVERLAY': str(alsa)}
         # install.sh <img>, run from a copy of the bundle's own install.sh
         src = self.extract(r)
         run = lambda p: subprocess.run(['sh', str(src / 'install.sh'), str(p)], env=env, capture_output=True, text=True)
@@ -269,11 +269,31 @@ class DataBundleTest(unittest.TestCase):
                 self.build(**kw)
 
     def sh(self, script, dest, alsa_dest=None, check=True):
-        env = {**self.env, 'SC5000_CUSTOM': str(dest)}
+        env = {**self.env, 'ENGINEX_CUSTOM': str(dest)}
         if alsa_dest:
-            env['SC5000_ALSA_OVERLAY'] = str(alsa_dest)
+            env['ENGINEX_ALSA_OVERLAY'] = str(alsa_dest)
         return subprocess.run(['sh', str(script)], env=env,
                               capture_output=True, text=True, check=check)
+
+    def test_234_scripts_take_the_env_names_of_older_updaters(self):
+        """#234: the updater, installer and USB hook of a release before 5.3.0.5 run this bundle's
+        scripts with SC5000_CUSTOM / SC5000_ALSA_OVERLAY only; the new names win when both are set."""
+        src = self.extract(self.build())
+        dest, alsa = self.tmp / 'old-env/enginex', self.tmp / 'old-env-alsa'
+        old = {**self.env, 'SC5000_CUSTOM': str(dest), 'SC5000_ALSA_OVERLAY': str(alsa)}
+        res = subprocess.run(['sh', str(src / 'install.sh')], env=old, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual((dest / 'version.txt').read_text(), '5.3.0.1.1\n')
+        self.assertTrue((alsa / '99-sc5000-custom.conf').is_file())
+        self.assertFalse((self.tmp / 'data').exists())  # never the default /data of a deck
+        res = subprocess.run(['sh', str(dest / 'bundle/uninstall.sh')], env=old, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertFalse((alsa / '99-sc5000-custom.conf').exists())
+        both = {**old, 'ENGINEX_CUSTOM': str(self.tmp / 'new-env'), 'ENGINEX_ALSA_OVERLAY': str(self.tmp / 'new-env-alsa')}
+        res = subprocess.run(['sh', str(src / 'install.sh')], env=both, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertTrue((self.tmp / 'new-env/version.txt').is_file() and (self.tmp / 'new-env-alsa/99-sc5000-custom.conf').is_file())
+        self.assertFalse((dest / 'bundle').exists())
 
     def test_install_refuses_a_bundle_for_another_cpu_or_model(self):
         """BH-G2-1: install.sh checked only SHA256SUMS, so an intact SYSTEM ONE (arm64) bundle
@@ -293,14 +313,14 @@ class DataBundleTest(unittest.TestCase):
         od.write_text('#!/bin/sh\nfor a; do case $a in -b) ;; -*) echo "od: invalid option $a" >&2; exit 1 ;; esac; done\n'
                       f'exec {shutil.which("od")} "$@"\n')
         od.chmod(0o755)
-        deck = {'SC5000_COMPATIBLE': str(compat), 'SC5000_SYSTEM_ELF': str(engine),
+        deck = {'ENGINEX_COMPATIBLE': str(compat), 'ENGINEX_SYSTEM_ELF': str(engine),
                 'PATH': f"{shims}:{self.env.get('PATH', os.environ['PATH'])}"}
 
         def install(result, name):
             shutil.rmtree(self.tmp / 'x', ignore_errors=True)
             self.extract(result)
             src = next((self.tmp / 'x').iterdir())  # <PREFIX>-<VERSION>-EngineX-OS-Data-Bundle
-            env = {**self.env, **deck, 'SC5000_CUSTOM': str(self.tmp / name), 'SC5000_ALSA_OVERLAY': str(self.tmp / (name + '-alsa'))}
+            env = {**self.env, **deck, 'ENGINEX_CUSTOM': str(self.tmp / name), 'ENGINEX_ALSA_OVERLAY': str(self.tmp / (name + '-alsa'))}
             return subprocess.run(['sh', str(src / 'install.sh')], env=env, capture_output=True, text=True)
 
         res = install(self.build(out='sys1', prefix='SYSTEMONE', suite=aarch64, hook=hook64), 'd1')
@@ -432,8 +452,8 @@ class DataBundleTest(unittest.TestCase):
                 shutil.copy(used / '99-sc5000-custom.conf', unused / '99-sc5000-custom.conf')
                 accounts = root / 'StreamingAccounts.json'
                 accounts.write_text(text)
-                env = {**self.env, 'SC5000_CUSTOM': str(dest), 'SC5000_ALSA_OVERLAY': str(used),
-                       'SC5000_STREAMING_ACCOUNTS': str(accounts)}
+                env = {**self.env, 'ENGINEX_CUSTOM': str(dest), 'ENGINEX_ALSA_OVERLAY': str(used),
+                       'ENGINEX_STREAMING_ACCOUNTS': str(accounts)}
                 subprocess.run(['sh', str(dest / 'bundle/uninstall.sh')], env=env, capture_output=True, text=True, check=True)
                 left = json.loads(accounts.read_text())
                 self.assertEqual(set(left), set(want), accounts.read_text())
@@ -605,7 +625,7 @@ exec REAL "$@"
             f'case "$1" in */.bundle.*/ui/packs) {mv_on_packs} ;; esac\n'
             f'exec {shutil.which("mv")} "$@"\n')
         (shims / 'mv').chmod(0o755)
-        env = {**self.env, 'SC5000_CUSTOM': str(dest), 'SC5000_ALSA_OVERLAY': str(alsa),
+        env = {**self.env, 'ENGINEX_CUSTOM': str(dest), 'ENGINEX_ALSA_OVERLAY': str(alsa),
                'PATH': f"{shims}:{self.env['PATH']}"}
         src = unpack(b)
         self.assertIn('5.3.0.2', src.name)
@@ -648,11 +668,11 @@ exec REAL "$@"
         (run_dir / 'systemd/system').mkdir(parents=True)
         b_activate = dest / 'bundle/boot-activate.sh'
         b_activate.write_text(b_activate.read_text().replace('/run/', f'{run_dir}/'))
-        env = {**self.env, 'SC5000_CUSTOM': str(dest), 'SC5000_ALSA_OVERLAY': str(alsa),
-               'SC5000_PID1_COMM': str(self.pid1_systemd()),
-               'SC5000_STREAMING_ACCOUNTS': str(self.tmp / 'StreamingAccounts.json'),
-               'SC5000_PRODUCT_CODE_FILE': str(self.tmp / 'product-code'),
-               'SC5000_TIMESYNC_LIB_DIR': str(self.tmp / 'no-lib')}
+        env = {**self.env, 'ENGINEX_CUSTOM': str(dest), 'ENGINEX_ALSA_OVERLAY': str(alsa),
+               'ENGINEX_PID1_COMM': str(self.pid1_systemd()),
+               'ENGINEX_STREAMING_ACCOUNTS': str(self.tmp / 'StreamingAccounts.json'),
+               'ENGINEX_PRODUCT_CODE_FILE': str(self.tmp / 'product-code'),
+               'ENGINEX_TIMESYNC_LIB_DIR': str(self.tmp / 'no-lib')}
         res = subprocess.run(['sh', str(b_activate)], env=env, capture_output=True, text=True)
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assert_generation_a(dest, alsa)
@@ -743,16 +763,16 @@ exec REAL "$@"
         marker = run_dir / 'enginex-tz-newer'
         lib_dir = root / 'system/var/overlay/lib'
         env = dict(self.env,
-                   SC5000_CUSTOM=str(dest),
-                   SC5000_TIMESTAMP_FILE=str(ts),
-                   SC5000_TIMESYNC_LIB_DIR=str(lib_dir),
-                   SC5000_CONFIG_DIR=str(root / '.config'),
-                   SC5000_ZONEINFO_DIR=str(zdir),
-                   SC5000_PRODUCT_CODE_FILE=str(pcode),
-                   SC5000_TZ_NEWER_MARKER=str(marker),
+                   ENGINEX_CUSTOM=str(dest),
+                   ENGINEX_TIMESTAMP_FILE=str(ts),
+                   ENGINEX_TIMESYNC_LIB_DIR=str(lib_dir),
+                   ENGINEX_CONFIG_DIR=str(root / '.config'),
+                   ENGINEX_ZONEINFO_DIR=str(zdir),
+                   ENGINEX_PRODUCT_CODE_FILE=str(pcode),
+                   ENGINEX_TZ_NEWER_MARKER=str(marker),
                    # The host's PID 1 and /data stay out of it (a sandbox has neither).
-                   SC5000_PID1_COMM=str(self.pid1_systemd()),
-                   SC5000_STREAMING_ACCOUNTS=str(self.tmp / 'StreamingAccounts.json'))
+                   ENGINEX_PID1_COMM=str(self.pid1_systemd()),
+                   ENGINEX_STREAMING_ACCOUNTS=str(self.tmp / 'StreamingAccounts.json'))
 
         # 1. Missing lib_dir must NOT be created; ExecStartPre (--restore-tz) writes America/New_York.
         res = subprocess.run(['sh', str(ba_relocated)], env=env, capture_output=True)
@@ -819,15 +839,15 @@ exec REAL "$@"
         run_dir = self.tmp / 'run-convert'
         ba = self.tmp / 'boot-activate-convert.sh'
         ba.write_text((src / 'boot-activate.sh').read_text().replace('/run/', str(run_dir) + '/'))
-        env = dict(self.env, SC5000_CUSTOM=str(dest), SC5000_MEDIA_ROOT=str(media),
-                   SC5000_CONVERT_MARK=str(run_dir / 'boot-converted'),
-                   SC5000_PID1_COMM=str(self.pid1_systemd()),
-                   SC5000_ROOT_SSH_DIR=str(root / 'root-ssh'),
-                   SC5000_STREAMING_ACCOUNTS=str(root / 'StreamingAccounts.json'),
-                   SC5000_CONFIG_DIR=str(root / '.config'),
-                   SC5000_TIMESYNC_LIB_DIR=str(root / 'timesync'),
-                   SC5000_PRODUCT_CODE_FILE=str(self.tmp / 'no-product-code'),
-                   SC5000_TZ_NEWER_MARKER=str(run_dir / 'tz-newer'))
+        env = dict(self.env, ENGINEX_CUSTOM=str(dest), ENGINEX_MEDIA_ROOT=str(media),
+                   ENGINEX_CONVERT_MARK=str(run_dir / 'boot-converted'),
+                   ENGINEX_PID1_COMM=str(self.pid1_systemd()),
+                   ENGINEX_ROOT_SSH_DIR=str(root / 'root-ssh'),
+                   ENGINEX_STREAMING_ACCOUNTS=str(root / 'StreamingAccounts.json'),
+                   ENGINEX_CONFIG_DIR=str(root / '.config'),
+                   ENGINEX_TIMESYNC_LIB_DIR=str(root / 'timesync'),
+                   ENGINEX_PRODUCT_CODE_FILE=str(self.tmp / 'no-product-code'),
+                   ENGINEX_TZ_NEWER_MARKER=str(run_dir / 'tz-newer'))
         res = subprocess.run(['sh', str(ba)], env=env, capture_output=True, text=True)
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertIn('restart --no-block engine.service', self.host_commands.read_text())
@@ -857,14 +877,14 @@ exec REAL "$@"
         sshd = self.tmp / 'fake-sshd'
         sshd.write_text('#!/bin/sh\nexit 0\n')
         sshd.chmod(0o755)
-        env = dict(self.env, SC5000_CUSTOM=str(dest), SC5000_SSHD=str(sshd),
-                   SC5000_PID1_COMM=str(self.pid1_systemd()),
-                   SC5000_ROOT_SSH_DIR=str(root / 'root-ssh'),
-                   SC5000_STREAMING_ACCOUNTS=str(root / 'StreamingAccounts.json'),
-                   SC5000_CONFIG_DIR=str(root / '.config'),
-                   SC5000_TIMESYNC_LIB_DIR=str(root / 'timesync'),
-                   SC5000_PRODUCT_CODE_FILE=str(self.tmp / 'no-product-code'),
-                   SC5000_TZ_NEWER_MARKER=str(run_dir / 'tz-newer'))
+        env = dict(self.env, ENGINEX_CUSTOM=str(dest), ENGINEX_SSHD=str(sshd),
+                   ENGINEX_PID1_COMM=str(self.pid1_systemd()),
+                   ENGINEX_ROOT_SSH_DIR=str(root / 'root-ssh'),
+                   ENGINEX_STREAMING_ACCOUNTS=str(root / 'StreamingAccounts.json'),
+                   ENGINEX_CONFIG_DIR=str(root / '.config'),
+                   ENGINEX_TIMESYNC_LIB_DIR=str(root / 'timesync'),
+                   ENGINEX_PRODUCT_CODE_FILE=str(self.tmp / 'no-product-code'),
+                   ENGINEX_TZ_NEWER_MARKER=str(run_dir / 'tz-newer'))
         dropin = run_dir / 'systemd/system/sshd.service.d/51-port.conf'
         cfg = dest / 'state/ssh-config.json'
         key = dest / 'authorized_keys'
@@ -932,9 +952,9 @@ exec REAL "$@"
         )
         ba_reloc.chmod(0o755)
         env = dict(self.env,
-                   SC5000_CUSTOM=str(dest),
-                   SC5000_TIMESTAMP_FILE=str(self.tmp / 'no-ts'),
-                   SC5000_CONFIG_DIR=str(root / '.config'))
+                   ENGINEX_CUSTOM=str(dest),
+                   ENGINEX_TIMESTAMP_FILE=str(self.tmp / 'no-ts'),
+                   ENGINEX_CONFIG_DIR=str(root / '.config'))
 
         # 1. Explicit gen2-locked must prevent boot-activate.sh from creating gen2-unlocked.
         (dest / 'gen2-locked').write_text('1\n')

@@ -2,14 +2,14 @@
 # Best effort and repeatable: unavailable/read-only knobs never block playback.
 # POSIX sh: the stock Engine OS rootfs has BusyBox ash and no bash.
 set -u
-boot_ui=${SC5000_UI_DIR:-${SC5000_PRIMARY_UI_DIR:-/data/enginex/ui}}
-legacy_ui=${SC5000_LEGACY_UI_DIR:-/data/sc5000-custom/ui}
+boot_ui=${ENGINEX_UI_DIR:-${ENGINEX_PRIMARY_UI_DIR:-/data/enginex/ui}}
+legacy_ui=${ENGINEX_LEGACY_UI_DIR:-/data/sc5000-custom/ui}
 [ -d "$boot_ui" ] || [ ! -d "$legacy_ui" ] || boot_ui=$legacy_ui
 [ ! -e "$boot_ui/safe-mode" ] || exit 0
-SYS=${SC5000_SYS_ROOT:-/sys}
-PROC=${SC5000_PROC_ROOT:-/proc}
-AUDIO_IRQ=${SC5000_AUDIO_IRQ_PATTERN:-ffb20000|snd|alsa|i2s|spdif|audio}
-GPU_IRQ=${SC5000_GPU_IRQ_PATTERN:-ffa30000|panfrost|vop|hdmi}
+SYS=${ENGINEX_SYS_ROOT:-/sys}
+PROC=${ENGINEX_PROC_ROOT:-/proc}
+AUDIO_IRQ=${ENGINEX_AUDIO_IRQ_PATTERN:-ffb20000|snd|alsa|i2s|spdif|audio}
+GPU_IRQ=${ENGINEX_GPU_IRQ_PATTERN:-ffa30000|panfrost|vop|hdmi}
 export LC_ALL=C
 log() { printf 'enginex-perf: %s\n' "$*" >&2; }
 # Case-insensitive extended-regex match of $1 against pattern $2.
@@ -206,8 +206,8 @@ engine_threads
 # Engine starts most threads 10-20 s after its start; engine-ui-guard post runs
 # this inside engine.service, so the worker is stopped with Engine. Keep sweeping
 # late network/job threads too, rather than leaving them on an inherited GUI core.
-delays=${SC5000_THREAD_DELAYS-20 40}
-interval=${SC5000_THREAD_INTERVAL-30}
+delays=${ENGINEX_THREAD_DELAYS-20 40}
+interval=${ENGINEX_THREAD_INTERVAL-30}
 case $interval in ''|*[!0-9]*) interval= ;; esac
 if [ -n "$interval" ] && ! [ "$interval" -gt 0 ] 2>/dev/null; then interval=; fi
 if [ -n "$delays" ]; then
