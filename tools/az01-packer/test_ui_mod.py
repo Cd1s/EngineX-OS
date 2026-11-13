@@ -180,12 +180,80 @@ class TrackListArtworkPlaceholderAndReaderPriorityTest(unittest.TestCase):
                                 self.assertTrue((qrc / placeholder).is_file())
                                 self.assertIn(f'source: "qrc:/{placeholder}"', child[1])
                                 self.assertIn("anchors.fill: parent", child[1])
-                                self.assertIn("visible: !!parent && parent.status !== Image.Ready && String(parent.source) !== \"\"", child[1])
+                                self.assertIn("visible: !!parent && parent.status !== Image.Ready && !(typeof row !== \"undefined\" && row && (row.isButton || row.isLabel || row.isPlaylist))", child[1])
                                 self.assertNotIn("asynchronous: true", child[1])
-                                # Native SD and Remote Library tracks must retain image://planck.
-                                line = next(line for line in source.splitlines() if "source: row.streamingProviderName" in line)
-                                script = "const assert=require('node:assert/strict'); const row={streamingProviderName:'',modelData:{albumArt:'image://planck/track?size=100',song:'Song'}};\n"
-                                script += "assert.equal((" + line.strip().removeprefix("source: ") + "), row.modelData.albumArt);"
+                                # Verify placeholder visibility logic:
+                                # When parent is not Ready (null/loading/error), placeholder is visible unless row is button/label.
+                                vis_line = next(l for l in child[1].splitlines() if "visible: !!parent" in l)
+                                vis_expr = vis_line.strip().removeprefix("visible: ")
+                                vis_script = f"""
+const assert = require('node:assert/strict');
+const Image = {{ Null: 0, Ready: 1, Loading: 2, Error: 3 }};
+const checkVis = (parent, row) => ({vis_expr});
+
+// No-art Remote Library track: parent.status is 0 (Image.Null) -> placeholder is visible!
+assert.equal(checkVis({{ status: Image.Null }}, {{ isButton: false, isLabel: false, isPlaylist: false }}), true);
+
+// Loading Remote Library track: parent.status is 2 (Image.Loading) -> placeholder is visible!
+assert.equal(checkVis({{ status: Image.Loading }}, {{ isButton: false, isLabel: false, isPlaylist: false }}), true);
+
+// Error loading artwork: parent.status is 3 (Image.Error) -> placeholder is visible!
+assert.equal(checkVis({{ status: Image.Error }}, {{ isButton: false, isLabel: false, isPlaylist: false }}), true);
+
+// Loaded Remote Library track: parent.status is 1 (Image.Ready) -> placeholder is hidden!
+assert.equal(checkVis({{ status: Image.Ready }}, {{ isButton: false, isLabel: false, isPlaylist: false }}), false);
+
+// Button / Label / Playlist header row in HybridMode: placeholder is hidden!
+assert.equal(checkVis({{ status: Image.Null }}, {{ isButton: true, isLabel: false, isPlaylist: false }}), false);
+assert.equal(checkVis({{ status: Image.Null }}, {{ isButton: false, isLabel: true, isPlaylist: false }}), false);
+assert.equal(checkVis({{ status: Image.Null }}, {{ isButton: false, isLabel: false, isPlaylist: true }}), false);
+"""
+                                checked_vis = subprocess.run(["node", "-e", vis_script], capture_output=True, text=True)
+                                self.assertEqual(checked_vis.returncode, 0, checked_vis.stderr)
+                                # Native SD and Remote Library tracks must retain image://planck,
+                                # while custom streaming services without cover fall back to the gateway.
+                                line = next(line for line in source.splitlines() if line.strip().startswith("source: ") and "albumArt" in line)
+                                expr = line.strip().removeprefix("source: ")
+                                script = f"""
+const assert = require('node:assert/strict');
+const root = {{ scScope: 'deezer', scPlainTitle: s => s }};
+const expr = (row) => ({expr});
+
+// SD card track with cover
+assert.equal(expr({{ streamingProviderName: '', modelData: {{ albumArt: 'image://planck/track?size=100', song: 'Song' }} }}), 'image://planck/track?size=100');
+
+// SD card track without cover
+assert.equal(expr({{ streamingProviderName: '', modelData: {{ albumArt: '', song: 'Song' }} }}), '');
+
+// Remote Library (EaaS) track with cover
+assert.equal(expr({{ streamingProviderName: 'Eaas', modelData: {{ albumArt: 'image://planck/remote?size=100', song: 'Song' }} }}), 'image://planck/remote?size=100');
+
+// Remote Library (EaaS) track without cover
+assert.equal(expr({{ streamingProviderName: 'Eaas', modelData: {{ albumArt: '', song: 'Song' }} }}), '');
+
+// Custom streaming service track without cover (by provider name)
+assert.equal(expr({{ streamingProviderName: 'TIDAL', modelData: {{ albumArt: '', song: 'Song', artist: 'Artist' }} }}), 'http://127.0.0.1:8080/v1/sc5000/art?song=Song&artist=Artist');
+
+// Custom streaming service track without cover (by URI only)
+assert.equal(expr({{ streamingProviderName: '', modelData: {{ albumArt: '', song: 'Song', artist: 'Artist', uri: 'streaming://TIDAL/Track/1' }} }}), 'http://127.0.0.1:8080/v1/sc5000/art?song=Song&artist=Artist');
+
+// Custom streaming service track with placeholder image://streaming/
+assert.equal(expr({{ streamingProviderName: 'TIDAL', modelData: {{ albumArt: 'image://streaming/', song: 'Song', artist: 'Artist', uri: 'streaming://TIDAL/Track/1' }} }}), 'http://127.0.0.1:8080/v1/sc5000/art?song=Song&artist=Artist');
+
+// Native Dropbox track retains cover
+assert.equal(expr({{ streamingProviderName: 'Dropbox', modelData: {{ albumArt: 'image://planck/db?size=100', song: 'DB' }} }}), 'image://planck/db?size=100');
+
+// Native Beatport track retains cover
+assert.equal(expr({{ streamingProviderName: 'Beatport', modelData: {{ albumArt: 'https://geo-media.beatport.com/art.jpg', song: 'BP' }} }}), 'https://geo-media.beatport.com/art.jpg');
+
+// Null modelData and empty modelData do not throw and evaluate to empty string
+assert.equal(expr({{ streamingProviderName: 'Eaas', modelData: null }}), '');
+assert.equal(expr({{ streamingProviderName: 'TIDAL', modelData: {{}} }}), '');
+
+// Official TIDAL scope retains official albumArt
+root.scScope = 'tidal';
+assert.equal(expr({{ streamingProviderName: 'TIDAL', modelData: {{ albumArt: 'https://resources.tidal.com/art.jpg', song: 'Song', uri: 'streaming://TIDAL/Track/1' }} }}), 'https://resources.tidal.com/art.jpg');
+"""
                                 checked = subprocess.run(["node", "-e", script], capture_output=True, text=True)
                                 self.assertEqual(checked.returncode, 0, checked.stderr)
 
