@@ -391,6 +391,7 @@ func localSubnets() []string {
 
 // isDeckUI is true when host is EngineX's web UI: /v1/sc5000/ui answers with a JSON object, or
 // (403/401 when the console asks for its access code) the login page on / is the Stream Sync one (#164).
+// It keeps the /v1/sc5000/ prefix on purpose: every release answers it, /v1/enginex/ only newer ones.
 func isDeckUI(c *http.Client, host string, port int) bool {
 	resp, err := c.Get(fmt.Sprintf("http://%s:%d/v1/sc5000/ui", host, port))
 	if err != nil {
