@@ -1,11 +1,7 @@
 package ext4
 
-import (
-	"fmt"
-)
-
-// ErrNoSpace means the filesystem cannot hold the requested change. It is
-// returned by the capacity preflight before anything is written.
+// errNoSpaceInternal is returned when an allocation fails mid-change; the
+// preflight normally prevents that.
 var errNoSpaceInternal = ErrNoSpace
 
 // allocRun finds up to want free blocks starting at the first free block at
