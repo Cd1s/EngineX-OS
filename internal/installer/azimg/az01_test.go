@@ -7,6 +7,7 @@ import (
 	"errors"
 	"hash/crc32"
 	"io"
+	"slices"
 	"testing"
 
 	"github.com/Cd1s/EngineX-OS/internal/installer/azimg"
@@ -346,6 +347,32 @@ func TestAZ01XZNonzeroPaddingRejected(t *testing.T) {
 	for name, bad := range map[string][]byte{"header": headerPad, "block": blockPad} {
 		if n, err := extractXZ(t, bad, io.Discard); !errors.Is(err, azimg.ErrCorrupt) || n != 0 {
 			t.Errorf("nonzero %s padding: n=%d err=%v; want preflight ErrCorrupt", name, n, err)
+		}
+	}
+}
+
+// Decoding no longer re-reads the Index and footer, so preflight alone rejects them.
+func TestAZ01XZIndexAndFooterIntegrity(t *testing.T) {
+	stream := buildMultiBlockXZ([]byte{0})
+	n := len(stream)
+	for name, off := range map[string]int{"index-crc": n - 13, "footer-crc": n - 12, "footer-magic": n - 1} {
+		bad := append([]byte(nil), stream...)
+		bad[off] ^= 1
+		if _, err := extractXZ(t, bad, io.Discard); !errors.Is(err, azimg.ErrCorrupt) {
+			t.Errorf("%s: err=%v; want ErrCorrupt", name, err)
+		}
+	}
+}
+
+func TestAZ01XZBlockCountCaps(t *testing.T) {
+	one := buildMultiBlockXZ([]byte{0})
+	indexStart := len(one) - 12 - (int(binary.LittleEndian.Uint32(one[len(one)-8:]))+1)*4
+	tooManyRecords := rewriteXZIndex(t, one, func(r []xzTestRecord) []xzTestRecord { return slices.Repeat(r, 65537) })
+	// 65537 real blocks behind the original one-record Index.
+	tooManyBlocks := slices.Concat(one[:12], bytes.Repeat(one[12:indexStart], 65537), one[indexStart:])
+	for name, stream := range map[string][]byte{"index-records": tooManyRecords, "real-blocks": tooManyBlocks} {
+		if _, err := extractXZ(t, stream, io.Discard); !errors.Is(err, azimg.ErrLimitExceeded) {
+			t.Errorf("%s: err=%v; want ErrLimitExceeded", name, err)
 		}
 	}
 }
