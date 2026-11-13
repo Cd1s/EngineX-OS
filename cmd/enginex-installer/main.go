@@ -35,6 +35,7 @@ import (
 	"time"
 	"unicode/utf16"
 
+	xrelease "github.com/Cd1s/EngineX-OS/internal/release"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -508,6 +509,7 @@ func discover(ctx context.Context, o *options) []deck {
 
 type bundleInfo struct {
 	Path, Top, Version string
+	Tag                string // release-tag, in bundles since 5.3.0.4
 	HeaderPrefix       string // model prefix in the 128-byte V1 header when Path is *-Update.img
 	IsImage            bool
 	TarGz              []byte // verified inner Data-Bundle.tar.gz payload
@@ -618,7 +620,7 @@ func readBundle(path string) (*bundleInfo, error) {
 		hash := sha256.New()
 		var keep bytes.Buffer
 		w := io.Writer(hash)
-		if rel == "SHA256SUMS" || rel == "version.txt" || rel == "host-install-userdata.py" || rel == "host-install-usbupdate.py" {
+		if rel == "SHA256SUMS" || rel == "version.txt" || rel == "release-tag" || rel == "host-install-userdata.py" || rel == "host-install-usbupdate.py" {
 			w = io.MultiWriter(hash, &keep)
 		}
 		n, err := io.Copy(w, tr)
@@ -631,6 +633,8 @@ func readBundle(path string) (*bundleInfo, error) {
 			listed = keep.Bytes()
 		case "version.txt":
 			version = keep.Bytes()
+		case "release-tag":
+			b.Tag = strings.TrimSpace(keep.String())
 		case "host-install-userdata.py":
 			b.HostScript = keep.Bytes()
 		case "host-install-usbupdate.py":
@@ -996,6 +1000,17 @@ func sshRead(ctx context.Context, c *ssh.Client, cmd string) (string, error) {
 	return sshRun(ctx, c, cmd, nil)
 }
 
+// installedReleaseCmd prints the deck's installed version and, on a second line, its release tag.
+const installedReleaseCmd = `d=` + customDirSh + `; [ -f "$d/version.txt" ] || d=$(dirname "$d")/sc5000-custom; ` +
+	`cat "$d/version.txt" 2>/dev/null | head -n 1; cat "$d/bundle/release-tag" 2>/dev/null | head -n 1; :`
+
+// leaveCmd runs the leave step of the installed release (5.3.0.5 and later write it to /run at
+// every boot, #234) after an older bundle was installed: it takes that release's units out of
+// /run and reboots. Detached, so the reboot does not cut this SSH session short; a deck without
+// the step just reboots, and the older release starts clean.
+const leaveCmd = `leave=${ENGINEX_LEAVE_SH:-/run/enginex/leave.sh}; ` +
+	`nohup sh -c 'sleep 1; if [ -f "$0" ]; then exec sh "$0"; fi; sync; systemctl reboot || reboot' "$leave" </dev/null >/dev/null 2>&1 &`
+
 // installCmd unpacks the streamed tarball in the deck's temp dir, runs install.sh, and marks gen2-unlocked (#215).
 func installCmd(top string) string {
 	return fmt.Sprintf(`set -e; cd "${TMPDIR:-/tmp}"; trap 'rm -rf %[1]s' EXIT; rm -rf %[1]s; tar -xzf -; sh %[1]s/install.sh; printf '1\n' > %[2]s/gen2-unlocked; rm -f %[2]s/gen2-locked`, top, customDirSh)
@@ -1095,6 +1110,12 @@ func modeA(ctx context.Context, o *options, d deck) error {
 	if err != nil {
 		return err
 	}
+	// #234: decided before anything is written. An older release than the installed one is
+	// installed, but this release's leave step and a reboot follow, never the older
+	// boot-activate.sh in place over this release's units.
+	installed, _ := sshRead(ctx, cl, installedReleaseCmd)
+	iv, it, _ := strings.Cut(installed, "\n")
+	older := xrelease.Older(iv, it, b.Version, b.Tag)
 	sayGen2Steps(o, filepath.Base(b.Path))
 	if out, err := sshRun(ctx, cl, installCmd(b.Top), bytes.NewReader(b.TarGz)); err != nil {
 		return fmt.Errorf("%s: install failed: %w\n%s", label, err, out)
@@ -1102,6 +1123,14 @@ func modeA(ctx context.Context, o *options, d deck) error {
 	got, err := sshRead(ctx, cl, "cat "+customDirSh+"/version.txt")
 	if err != nil || strings.TrimSpace(got) != b.Version {
 		return fmt.Errorf("%s: installed version reads back as %q, expected %s", label, strings.TrimSpace(got), b.Version)
+	}
+	if older {
+		if out, err := sshRun(ctx, cl, leaveCmd, nil); err != nil {
+			return fmt.Errorf("%s: leave step failed: %w\n%s", label, err, out)
+		}
+		o.say(fmt.Sprintf("完成：%s 已安装较旧的 EngineX OS %s，碟机正在重启。", label, b.Version),
+			fmt.Sprintf("Done: the older EngineX OS %s is installed on %s; the deck is rebooting.", b.Version, label))
+		return nil
 	}
 	if out, err := sshRun(ctx, cl, `sh `+customDirSh+`/bundle/boot-activate.sh`, nil); err != nil {
 		return fmt.Errorf("%s: activation failed: %w\n%s", label, err, out)

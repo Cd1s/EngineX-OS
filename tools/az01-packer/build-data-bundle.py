@@ -9,7 +9,7 @@ take an EngineX OS .img; they install this tarball under /data/enginex:
 
 Run on the build host after build-release.sh's suite and UI-pack steps:
 
-    build-data-bundle.py <version> --suite sc5000-suite --hook libengine-ui-hook.so \
+    build-data-bundle.py <version> --suite enginex-suite --hook libengine-ui-hook.so \
         --ui-packs packs.tar.gz --out <new dir>
 """
 import argparse
@@ -29,9 +29,9 @@ from az01_packer import MIGRATE  # one migration snippet for the image and the b
 MIGRATE_IF_DEFAULT = 'if [ -z "${ENGINEX_CUSTOM:-}" ]; then\n' + MIGRATE + '\nfi'
 
 VERSION_RE = re.compile(r'^\d+(\.\d+){2,4}$')  # same range as az01_packer.py
-APPLETS = ('stream-sync', 'rb-bridge', 'sc5000-deemixd', 'stems-processor', 'engine-guardian')
+APPLETS = ('stream-sync', 'rb-bridge', 'enginex-deemixd', 'stems-processor', 'engine-guardian')
 
-WRAPPER = '#!/bin/sh\nexec "$(dirname "$0")/sc5000-suite" {} "$@"\n'
+WRAPPER = '#!/bin/sh\nexec "$(dirname "$0")/enginex-suite" {} "$@"\n'
 
 SWAP_UNDO = r"""# BH-G2-4: install.sh moves every part it replaces (and copies of the version markers and the
 # ALSA file) into $dest/.install-old, and renames that to .install-done once everything is in
@@ -78,6 +78,55 @@ swap_undo() {
     fi
     rm -rf "$dest/.install-done"
 }"""
+
+LEAVE_SH = r'''#!/bin/sh
+# The downgrade "leave" step of EngineX OS 5.3.0.5 and later (#234), written by boot-activate.sh
+# to /run/enginex/leave.sh at every boot, outside /data, so an older bundle's install.sh cannot
+# replace it. The screen updater, the USB az01-update hook and EngineX-Installer run it after an
+# OLDER bundle was installed, instead of that bundle's boot-activate.sh: it takes this release's
+# own enginex-named units and drop-ins out of /run, so nothing of it runs next to the older
+# release, and reboots (--no-reboot: the caller reboots). The older release starts clean at the
+# next boot; an older boot-activate.sh never runs over this release's units.
+# Touches only EngineX names: /run/systemd/system/enginex-*.service, the 99-enginex.conf drop-ins,
+# the patched Engine script it bound, and the first-generation suite cache in /data/enginex/bin.
+# A directory on the way that is a symlink (to /data/Music, say) is left alone, never followed.
+set -u
+root=${ENGINEX_LEAVE_ROOT:-} # tests: a stand-in for /
+reboot=1
+[ "${1:-}" != --no-reboot ] || reboot=
+real_dir() { # every level of $1 below $root is a real directory, not a symlink
+    rd_p=$root
+    rd_rest=${1#/}
+    while [ -n "$rd_rest" ]; do
+        rd_p="$rd_p/${rd_rest%%/*}"
+        case $rd_rest in */*) rd_rest=${rd_rest#*/} ;; *) rd_rest= ;; esac
+        [ -d "$rd_p" ] && [ ! -L "$rd_p" ] || return 1
+    done
+}
+units=/run/systemd/system
+if real_dir "$units"; then
+    for u in "$root$units"/enginex-*.service; do
+        [ -f "$u" ] || [ -L "$u" ] || continue
+        rm -f "$u"
+    done
+    for d in engine.service.d edisksd.service.d; do
+        ! real_dir "$units/$d" || rm -f "$root$units/$d/99-enginex.conf"
+    done
+fi
+if [ -z "$root" ] && grep -q ' /enginex-engine-script /usr/Engine/Scripts/engine ' /proc/self/mountinfo 2>/dev/null; then
+    umount /usr/Engine/Scripts/engine 2>/dev/null || :
+fi
+! real_dir /run || rm -f "$root/run/enginex-engine-script"
+! real_dir /data/enginex/bin || rm -f "$root/data/enginex/bin/enginex-suite" "$root/data/enginex/bin/enginex-suite.id"
+[ -z "$root" ] || exit 0
+if [ "$(cat /proc/1/comm 2>/dev/null)" = systemd ]; then
+    systemctl daemon-reload 2>/dev/null || :
+    [ -z "$reboot" ] || { sync; systemctl reboot || reboot; }
+elif [ -n "$reboot" ]; then
+    sync; reboot
+fi
+exit 0
+'''
 
 BOOT_ACTIVATE = r'''#!/bin/sh
 # One-shot boot activator for SC LIVE 4 (inmusic,jp21) and read-only root decks (#61).
@@ -272,13 +321,51 @@ if [ -d "$dest" ] && [ ! -L "$dest/gen2-unlocked" ]; then
     [ -e "$dest/gen2-locked" ] || [ -e "$dest/gen2-unlocked" ] || printf '1\n' > "$dest/gen2-unlocked" 2>/dev/null || :
 fi
 
+# Names of releases before 5.3.0.5 (#234). Their updater ends its daemons by name and runs this
+# script in place, and their installer runs it over SSH: their /run units, drop-ins and runtime
+# files are still loaded. Take them out first, so every daemon runs once, under its new name.
+# Permanent: an update can come from any older release.
+leave_old_names() {
+    lo_units=/run/systemd/system
+    [ -d "$lo_units" ] && [ ! -L "$lo_units" ] || return 0
+    if [ -f "$lo_units/enginex-sc5000-deemixd.service" ] || [ -L "$lo_units/enginex-sc5000-deemixd.service" ]; then
+        if [ "$(cat "${ENGINEX_PID1_COMM:-/proc/1/comm}" 2>/dev/null)" = systemd ]; then
+            systemctl stop enginex-sc5000-deemixd.service 2>/dev/null || :
+            systemctl reset-failed enginex-sc5000-deemixd.service 2>/dev/null || :
+        fi
+        rm -f "$lo_units/enginex-sc5000-deemixd.service"
+    fi
+    for lo_d in engine.service.d edisksd.service.d; do
+        [ -d "$lo_units/$lo_d" ] && [ ! -L "$lo_units/$lo_d" ] || continue
+        rm -f "$lo_units/$lo_d/99-sc5000.conf"
+    done
+    if grep -q ' /sc5000-engine-script /usr/Engine/Scripts/engine ' /proc/self/mountinfo 2>/dev/null; then
+        umount /usr/Engine/Scripts/engine 2>/dev/null || :
+    fi
+    [ ! -e /run/sc5000-boot-converted ] || : > /run/enginex-boot-converted 2>/dev/null || :
+    [ ! -e /run/sc5000-tz-newer ] || : > /run/enginex-tz-newer 2>/dev/null || :
+    rm -f /run/sc5000-engine-script /run/sc5000-boot-converted /run/sc5000-tz-newer
+    [ -L /run/sc5000-assignments ] || rm -rf /run/sc5000-assignments
+    [ -L /run/sc5000 ] || rm -rf /run/sc5000
+}
+leave_old_names
+
+# The leave step an older bundle's install is followed by (see leave.sh).
+if [ -d /run ] && [ ! -L /run/enginex ]; then
+    mkdir -p /run/enginex
+    cat <<'LEAVE_EOF' > /run/enginex/leave.sh.new
+@LEAVE_SH@LEAVE_EOF
+    chmod 755 /run/enginex/leave.sh.new
+    mv -f /run/enginex/leave.sh.new /run/enginex/leave.sh
+fi
+
 mkdir -p /run/systemd/system/engine.service.d
 
 # No KillMode=process: engine.service is Type=forking with the Scripts/engine shell as main PID, so it would
 # leave the hook-less /usr/Engine/Engine running and nobody to run poweroff (#116). The daemons have their own units.
-cat <<EOF > /run/systemd/system/engine.service.d/99-sc5000.conf
+cat <<EOF > /run/systemd/system/engine.service.d/99-enginex.conf
 [Unit]
-Wants=enginex-stream-sync.service enginex-rb-bridge.service enginex-sc5000-deemixd.service engine-guardian.service
+Wants=enginex-stream-sync.service enginex-rb-bridge.service enginex-deemixd.service engine-guardian.service
 After=enginex-stream-sync.service
 
 [Service]
@@ -290,7 +377,7 @@ ExecStart=$bin_dir/engine-ui-guard service /usr/Engine/Scripts/runengine
 Environment="QT_LOGGING_CONF=/data/logging.ini"
 Environment=HOME=/tmp/enginex-engine-home MESA_SHADER_CACHE_MAX_SIZE=32M
 Environment=QML_DISABLE_DISK_CACHE=1
-EnvironmentFile=-/data/sc5000-custom/ui-scale.env
+EnvironmentFile=-/data/enginex/ui-scale.env
 ExecStartPre=/bin/mkdir -p -m 0700 /tmp/enginex-engine-home
 ExecStartPre=-$bundle_dir/boot-activate.sh --restore-tz
 ExecStartPre=-$bin_dir/engine-ui-guard pre
@@ -350,7 +437,7 @@ EOF
 # Converts a rekordbox stick inside the mount, before Engine sees it (as on the 1st-gen images).
 edisksd_changed=0
 if [ -f "$lib_edisksd_hook" ]; then
-    dropin=/run/systemd/system/edisksd.service.d/99-sc5000.conf
+    dropin=/run/systemd/system/edisksd.service.d/99-enginex.conf
     mkdir -p /run/systemd/system/edisksd.service.d
     cat <<EOF > "$dropin.new"
 [Service]
@@ -412,10 +499,13 @@ fi
 
 if [ -f "$bundle_dir/version.txt" ]; then
     mkdir -p /run/enginex
-    if [ ! -f /etc/sc5000/version.txt ] || ! cmp -s "$bundle_dir/version.txt" /etc/sc5000/version.txt; then
+    # A root that carries an image version (/etc/enginex, /etc/sc5000 before 5.3.0.5) shows this one.
+    image_version=/etc/enginex/version.txt
+    [ -f "$image_version" ] || image_version=/etc/sc5000/version.txt
+    if [ ! -f "$image_version" ] || ! cmp -s "$bundle_dir/version.txt" "$image_version"; then
         cp "$bundle_dir/version.txt" /run/enginex/version.txt
-        if [ -f /etc/sc5000/version.txt ]; then
-            mount --bind /run/enginex/version.txt /etc/sc5000/version.txt 2>/dev/null || :
+        if [ -f "$image_version" ]; then
+            mount --bind /run/enginex/version.txt "$image_version" 2>/dev/null || :
         fi
     fi
 fi
@@ -424,7 +514,7 @@ if [ -x "$bin_dir/stream-sync" ]; then
     cat <<EOF > /run/systemd/system/enginex-stream-sync.service
 [Unit]
 Description=EngineX Stream Sync & Audio Analyzer Console
-After=network.target enginex-sc5000-deemixd.service
+After=network.target enginex-deemixd.service
 
 [Service]
 Type=simple
@@ -458,15 +548,15 @@ WantedBy=multi-user.target
 EOF
 fi
 
-if [ -x "$bin_dir/sc5000-deemixd" ]; then
-    cat <<EOF > /run/systemd/system/enginex-sc5000-deemixd.service
+if [ -x "$bin_dir/enginex-deemixd" ]; then
+    cat <<EOF > /run/systemd/system/enginex-deemixd.service
 [Unit]
 Description=EngineX Deezer Download Queue
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=$bin_dir/sc5000-deemixd -state-dir $dest/state
+ExecStart=$bin_dir/enginex-deemixd -state-dir $dest/state
 Restart=always
 RestartSec=3
 Nice=19
@@ -541,7 +631,7 @@ fi
 # Sticks mounted before this ran never went through the edisksd hook.
 # In a chroot systemctl only prints "Running in chroot, ignoring" and exits 0, so require systemd as PID 1.
 if [ "$(cat "${ENGINEX_PID1_COMM:-/proc/1/comm}" 2>/dev/null)" = systemd ] && systemctl daemon-reload >/dev/null 2>&1; then
-    systemctl restart --no-block enginex-stream-sync.service enginex-rb-bridge.service enginex-sc5000-deemixd.service engine-guardian.service || :
+    systemctl restart --no-block enginex-stream-sync.service enginex-rb-bridge.service enginex-deemixd.service engine-guardian.service || :
     [ -z "$ssh_start" ] || systemctl start --no-block sshd.service || :
     # Blocking, so edisksd is up again before the hooked start converts what is in /media.
     [ "$edisksd_changed" = 0 ] || systemctl restart edisksd.service || :
@@ -561,12 +651,15 @@ else
     if [ -n "$ssh_start" ] && ! pgrep -x sshd >/dev/null 2>&1; then
         mkdir -p /var/run/sshd && "$sshd_bin" -p "$ssh_port" || :
     fi
-    pkill -x sc5000-suite 2>/dev/null || :
+    pkill -x enginex-suite 2>/dev/null || :
+    pkill -x sc5000-suite 2>/dev/null || : # the suite's name before 5.3.0.5 (#234)
     [ -x "$bin_dir/stream-sync" ] && "$bin_dir/stream-sync" --listen :8080 --cpu 3 >/dev/null 2>&1 &
     [ -x "$bin_dir/rb-bridge" ] && "$bin_dir/rb-bridge" --prolink >/dev/null 2>&1 &
-    [ -x "$bin_dir/sc5000-deemixd" ] && "$bin_dir/sc5000-deemixd" -state-dir "$dest/state" >/dev/null 2>&1 &
+    [ -x "$bin_dir/enginex-deemixd" ] && "$bin_dir/enginex-deemixd" -state-dir "$dest/state" >/dev/null 2>&1 &
 fi
 '''
+
+BOOT_ACTIVATE = BOOT_ACTIVATE.replace('@LEAVE_SH@', LEAVE_SH)
 
 ALSA_CONF = r'''hook_func.sc5000_alsa_boot_hook {
 	lib "/data/sc5000-custom/bundle/lib/libengine-ui-hook.so"
@@ -633,7 +726,7 @@ case " $boards" in *" inmusic,"*)
     # e_machine's low byte, octal; od -b and sed: the deck's BusyBox od has no -A/-t.
     elf_machine() { dd if="$1" bs=1 skip=18 count=1 2>/dev/null | od -b | sed -n '1s/^[0-9]* *//p' | tr -d ' '; }
     want_cpu=$(elf_machine "${ENGINEX_SYSTEM_ELF:-/usr/Engine/Engine}")
-    got_cpu=$(elf_machine bin/sc5000-suite)
+    got_cpu=$(elf_machine bin/enginex-suite)
     [ -n "$want_cpu" ] && [ "$got_cpu" = "$want_cpu" ] ||
         { echo "bundle is for another CPU (ELF machine ${got_cpu:-?}, this deck ${want_cpu:-?})" >&2; exit 1; }
     if [ -f model ]; then
@@ -773,21 +866,28 @@ fi
 rm -rf "$dest/bundle"
 if [ -z "${ENGINEX_CUSTOM:-}" ]; then
     if command -v systemctl >/dev/null 2>&1 && systemctl is-active basic.target >/dev/null 2>&1; then
-        for applet in stream-sync rb-bridge sc5000-deemixd; do
+        # sc5000-deemixd: the unit's name before 5.3.0.5 (#234), still loaded until a reboot after an update.
+        for applet in stream-sync rb-bridge deemixd sc5000-deemixd; do
             systemctl stop "enginex-$applet.service" 2>/dev/null || :
             rm -f "/run/systemd/system/enginex-$applet.service"
         done
         systemctl stop engine-guardian.service 2>/dev/null || :
         rm -f /run/systemd/system/engine-guardian.service
-        rm -f /run/systemd/system/engine.service.d/99-sc5000.conf /run/systemd/system/edisksd.service.d/99-sc5000.conf /run/systemd/timesyncd.conf.d/10-enginex-ntp.conf /run/enginex-tz-newer
+        rm -f /run/systemd/system/engine.service.d/99-enginex.conf /run/systemd/system/edisksd.service.d/99-enginex.conf \
+              /run/systemd/system/engine.service.d/99-sc5000.conf /run/systemd/system/edisksd.service.d/99-sc5000.conf \
+              /run/systemd/timesyncd.conf.d/10-enginex-ntp.conf /run/enginex-tz-newer /run/enginex/leave.sh
         systemctl daemon-reload 2>/dev/null || :
         systemctl restart --no-block edisksd.service systemd-timesyncd.service 2>/dev/null || :
     fi
+    pkill -x enginex-suite 2>/dev/null || :
     pkill -x sc5000-suite 2>/dev/null || :
     rm -f /run/systemd/system/enginex-stream-sync.service \
           /run/systemd/system/engine-guardian.service \
           /run/systemd/system/enginex-rb-bridge.service \
+          /run/systemd/system/enginex-deemixd.service \
           /run/systemd/system/enginex-sc5000-deemixd.service \
+          /run/systemd/system/engine.service.d/99-enginex.conf \
+          /run/systemd/system/edisksd.service.d/99-enginex.conf \
           /run/systemd/system/engine.service.d/99-sc5000.conf \
           /run/systemd/system/edisksd.service.d/99-sc5000.conf \
           /run/systemd/timesyncd.conf.d/10-enginex-ntp.conf /run/enginex-tz-newer
@@ -948,7 +1048,7 @@ def build(version, suite, hook, ui_packs, out, prefix='SCLIVE4', edisksd_hook=No
     machine = EM_AARCH64 if prefix in AZ04 else EM_ARM
     if edisksd_hook is None and (Path(hook).parent / 'libedisksd-hook.so').is_file():
         edisksd_hook = Path(hook).parent / 'libedisksd-hook.so'
-    parts = [(suite, 'bin/sc5000-suite'), (hook, 'lib/libengine-ui-hook.so')]
+    parts = [(suite, 'bin/enginex-suite'), (hook, 'lib/libengine-ui-hook.so')]
     if edisksd_hook:
         parts.append((edisksd_hook, 'lib/libedisksd-hook.so'))
     for path, name in parts:
@@ -1015,7 +1115,7 @@ def build(version, suite, hook, ui_packs, out, prefix='SCLIVE4', edisksd_hook=No
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     p.add_argument('version')
-    p.add_argument('--suite', required=True, type=Path, help='static sc5000-suite (ARMv7, arm64 for AZ04)')
+    p.add_argument('--suite', required=True, type=Path, help='static enginex-suite (ARMv7, arm64 for AZ04)')
     p.add_argument('--hook', required=True, type=Path, help='libengine-ui-hook.so')
     p.add_argument('--edisksd-hook', type=Path, help='libedisksd-hook.so (default: next to --hook, if present)')
     p.add_argument('--ui-packs', required=True, type=Path, help='build_packs.py packs.tar(.gz)')

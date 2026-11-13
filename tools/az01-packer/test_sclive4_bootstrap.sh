@@ -48,7 +48,7 @@ echo "[1/5] Building components and packaging data bundle..."
 BUILD_TAG=$(python3 "$REPO/tools/ui-mod/build_packs.py" --print-build-tag)
 if [ "$AZ04" = 1 ]; then
     HOOK="$REPO/out/aarch64/libengine-ui-hook.so"
-    SUITE="$REPO/out/aarch64/sc5000-suite"
+    SUITE="$REPO/out/aarch64/enginex-suite"
     mkdir -p "$REPO/out/aarch64"
     (cd "$REPO/tools/ui-mod" && CROSS= OUT="$HOOK" sh build.sh)
     (cd "$REPO/tools/edisksd-hook" && CROSS= OUT="$REPO/out/aarch64/libedisksd-hook.so" sh build.sh)
@@ -74,11 +74,11 @@ else
     (cd "$REPO/tools/ui-mod" && sh build.sh)
     (cd "$REPO/tools/edisksd-hook" && sh build.sh)
     HOOK="$REPO/rootfs-overlay/etc/enginex/libengine-ui-hook.so"
-    SUITE="$REPO/out/sc5000-suite"
+    SUITE="$REPO/out/enginex-suite"
 fi
 
 if [ ! -f "$SUITE" ]; then
-    echo "Building sc5000-suite..."
+    echo "Building enginex-suite..."
     (cd "$REPO" && . /etc/profile.d/buildtools.sh && \
      GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X 'github.com/Cd1s/EngineX-OS/pkg/webui.BuildTag=$BUILD_TAG'" -o "$SUITE" ./cmd/enginex-suite)
 fi
@@ -173,7 +173,7 @@ chroot '$TARGET' /tmp/Engine / > '$TMP/stage1.log' 2>&1 || true
 
 # Wait briefly for background boot-activate.sh
 for i in \$(seq 1 30); do
-    if [ -f '$TARGET/run/systemd/system/enginex-sc5000-deemixd.service' ]; then
+    if [ -f '$TARGET/run/systemd/system/enginex-deemixd.service' ]; then
         break
     fi
     sleep 0.1
@@ -181,13 +181,13 @@ done
 
 test -f '$TARGET/run/enginex-alsa-reexec.once'
 grep -q 'ENGINEX_UI_HOOK=/data/enginex/bundle/lib/libengine-ui-hook.so' \
-    '$TARGET/run/systemd/system/engine.service.d/99-sc5000.conf'
-grep -q 'UnsetEnvironment=LD_PRELOAD' '$TARGET/run/systemd/system/engine.service.d/99-sc5000.conf'
+    '$TARGET/run/systemd/system/engine.service.d/99-enginex.conf'
+grep -q 'UnsetEnvironment=LD_PRELOAD' '$TARGET/run/systemd/system/engine.service.d/99-enginex.conf'
 grep -q 'engine-ui-guard launch /usr/Engine/Engine' '$TARGET/usr/Engine/Scripts/engine'
 grep -Fq 'env LD_PRELOAD=\"/data/enginex/bundle/lib/libengine-ui-hook.so\" /usr/sbin/az01-update --file' '$TARGET/usr/Engine/Scripts/engine'
 grep -Fq 'env LD_PRELOAD=\"/data/enginex/bundle/lib/libengine-ui-hook.so\" /usr/bin/planck-remote-screen --update' '$TARGET/usr/Engine/Scripts/engine'
 grep -Fq 'env LD_PRELOAD=\"/data/enginex/bundle/lib/libengine-ui-hook.so\" /usr/sbin/az01-update --erase-data' '$TARGET/usr/Engine/Scripts/engine'
-grep -q 'engine-ui-guard service /usr/Engine/Scripts/runengine' '$TARGET/run/systemd/system/engine.service.d/99-sc5000.conf'
+grep -q 'engine-ui-guard service /usr/Engine/Scripts/runengine' '$TARGET/run/systemd/system/engine.service.d/99-enginex.conf'
 # Repeated activation in one boot must not truncate its own bound input, and restores gen2-unlocked if absent.
 rm -f '$TARGET/data/enginex/gen2-unlocked'
 before=\$(sha256sum '$TARGET/usr/Engine/Scripts/engine' | cut -d' ' -f1)
@@ -196,24 +196,24 @@ test -s '$TARGET/usr/Engine/Scripts/engine'
 test \"\$before\" = \"\$(sha256sum '$TARGET/usr/Engine/Scripts/engine' | cut -d' ' -f1)\"
 test \"\$(cat '$TARGET/data/enginex/gen2-unlocked' | tr -d '\r\n')\" = '1'
 grep -q 'Environment=HOME=/tmp/enginex-engine-home MESA_SHADER_CACHE_MAX_SIZE=32M' \
-    '$TARGET/run/systemd/system/engine.service.d/99-sc5000.conf'
+    '$TARGET/run/systemd/system/engine.service.d/99-enginex.conf'
 grep -q 'Environment=QML_DISABLE_DISK_CACHE=1' \
-    '$TARGET/run/systemd/system/engine.service.d/99-sc5000.conf'
+    '$TARGET/run/systemd/system/engine.service.d/99-enginex.conf'
 grep -q 'ExecStartPre=/bin/mkdir -p -m 0700 /tmp/enginex-engine-home' \
-    '$TARGET/run/systemd/system/engine.service.d/99-sc5000.conf'
-grep -q 'EnvironmentFile=-/data/sc5000-custom/ui-scale.env' \
-    '$TARGET/run/systemd/system/engine.service.d/99-sc5000.conf'
+    '$TARGET/run/systemd/system/engine.service.d/99-enginex.conf'
+grep -q 'EnvironmentFile=-/data/enginex/ui-scale.env' \
+    '$TARGET/run/systemd/system/engine.service.d/99-enginex.conf'
 grep -q 'Wants=enginex-stream-sync.service' \
-    '$TARGET/run/systemd/system/engine.service.d/99-sc5000.conf'
+    '$TARGET/run/systemd/system/engine.service.d/99-enginex.conf'
 test -f '$TARGET/run/systemd/system/enginex-stream-sync.service'
 grep -q 'ExecStart=/data/enginex/bundle/bin/stream-sync' \
     '$TARGET/run/systemd/system/enginex-stream-sync.service'
 test -f '$TARGET/run/systemd/system/enginex-rb-bridge.service'
 # rekordbox sticks are converted inside the mount, as on the 1st-gen images.
-grep -q 'LD_PRELOAD=/data/enginex/bundle/lib/libedisksd-hook.so' '$TARGET/run/systemd/system/edisksd.service.d/99-sc5000.conf'
-test -f '$TARGET/run/systemd/system/enginex-sc5000-deemixd.service'
+grep -q 'LD_PRELOAD=/data/enginex/bundle/lib/libedisksd-hook.so' '$TARGET/run/systemd/system/edisksd.service.d/99-enginex.conf'
+test -f '$TARGET/run/systemd/system/enginex-deemixd.service'
 # #116: KillMode=process left the hook-less Engine running after the restart.
-if grep -q KillMode '$TARGET/run/systemd/system/engine.service.d/99-sc5000.conf'; then exit 1; fi
+if grep -q KillMode '$TARGET/run/systemd/system/engine.service.d/99-enginex.conf'; then exit 1; fi
 # --ssh-key: the read-only stock authorized_keys is replaced by a bind mount, and sshd starts.
 for i in \$(seq 1 50); do
     chroot '$TARGET' pgrep -x sshd >/dev/null 2>&1 && break
@@ -288,13 +288,13 @@ test -L '$TARGET/data/sc5000-custom'
 chroot '$TARGET' /bin/sh /data/enginex/bundle/boot-activate.sh >/dev/null 2>&1 || true
 test -f '$TARGET/run/systemd/system/enginex-stream-sync.service'
 test -f '$TARGET/run/systemd/system/enginex-rb-bridge.service'
-test -f '$TARGET/run/systemd/system/enginex-sc5000-deemixd.service'
-test -f '$TARGET/run/systemd/system/engine.service.d/99-sc5000.conf'
+test -f '$TARGET/run/systemd/system/enginex-deemixd.service'
+test -f '$TARGET/run/systemd/system/engine.service.d/99-enginex.conf'
 for i in \$(seq 1 20); do
-    chroot '$TARGET' pgrep -x sc5000-suite >/dev/null 2>&1 && break
+    chroot '$TARGET' pgrep -x enginex-suite >/dev/null 2>&1 && break
     sleep 0.1
 done
-chroot '$TARGET' pgrep -x sc5000-suite >/dev/null 2>&1
+chroot '$TARGET' pgrep -x enginex-suite >/dev/null 2>&1
 
 chroot '$TARGET' /bin/sh /data/enginex/bundle/uninstall.sh >/dev/null
 
@@ -303,14 +303,14 @@ test ! -d '$TARGET/data/enginex/bundle'
 test -f '$TARGET/data/Music/user_track.flac'
 test ! -f '$TARGET/run/systemd/system/enginex-stream-sync.service'
 test ! -f '$TARGET/run/systemd/system/enginex-rb-bridge.service'
-test ! -f '$TARGET/run/systemd/system/enginex-sc5000-deemixd.service'
-test ! -f '$TARGET/run/systemd/system/engine.service.d/99-sc5000.conf'
-test ! -f '$TARGET/run/systemd/system/edisksd.service.d/99-sc5000.conf'
+test ! -f '$TARGET/run/systemd/system/enginex-deemixd.service'
+test ! -f '$TARGET/run/systemd/system/engine.service.d/99-enginex.conf'
+test ! -f '$TARGET/run/systemd/system/edisksd.service.d/99-enginex.conf'
 for i in \$(seq 1 20); do
-    chroot '$TARGET' pgrep -x sc5000-suite >/dev/null 2>&1 || break
+    chroot '$TARGET' pgrep -x enginex-suite >/dev/null 2>&1 || break
     sleep 0.1
 done
-if chroot '$TARGET' pgrep -x sc5000-suite >/dev/null 2>&1; then exit 1; fi
+if chroot '$TARGET' pgrep -x enginex-suite >/dev/null 2>&1; then exit 1; fi
 "
 echo "  Method B on-device install & uninstall: PASS"
 

@@ -1,6 +1,9 @@
 package webui
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -124,5 +127,74 @@ func TestRename234EveryRouteUnderBothPrefixes(t *testing.T) {
 	}
 	if canonicalV1("/v1/sc5000") != "/v1/enginex" || canonicalV1("/v1/enginex/ui") != "/v1/enginex/ui" {
 		t.Error("prefix itself or the new prefix mapped wrongly")
+	}
+}
+
+// rename234Bundle is a minimal Data-Bundle.tar.gz whose install.sh only records its version.
+func rename234Bundle(t *testing.T, version, tag string) []byte {
+	t.Helper()
+	files := map[string]string{
+		"install.sh":  "#!/bin/sh\nset -eu\ncp \"$(dirname \"$0\")/version.txt\" \"$ENGINEX_CUSTOM/version.txt\"\n",
+		"version.txt": version + "\n",
+		"SHA256SUMS":  "", // checked by install.sh, which this fake one skips
+	}
+	if tag != "" {
+		files[releaseTagName] = tag + "\n"
+	}
+	var b bytes.Buffer
+	gz := gzip.NewWriter(&b)
+	tw := tar.NewWriter(gz)
+	top := "SCLIVE4-" + version + "-EngineX-OS-Data-Bundle"
+	tw.WriteHeader(&tar.Header{Name: top + "/", Typeflag: tar.TypeDir, Mode: 0o755})
+	for n, c := range files {
+		tw.WriteHeader(&tar.Header{Name: top + "/" + n, Mode: 0o755, Size: int64(len(c)), Typeflag: tar.TypeReg})
+		tw.Write([]byte(c))
+	}
+	tw.Close()
+	gz.Close()
+	return b.Bytes()
+}
+
+// #234: a bundle of an older release than the installed one (a downgrade by upload) is installed,
+// but never activated in place: this release's leave step takes its units out of /run and
+// reboots. A newer one is activated in place as before, after the daemons under either suite
+// name have ended.
+func TestRename234OlderBundleLeavesAndRebootsInsteadOfActivating(t *testing.T) {
+	defer func(a func(string) bool, l func(string) bool) { activatesOnDeck, launchActivation = a, l }(activatesOnDeck, launchActivation)
+	var scripts []string
+	activatesOnDeck = func(string) bool { return true }
+	launchActivation = func(script string) bool { scripts = append(scripts, script); return true }
+	for _, c := range []struct {
+		version, tag string
+		older        bool
+	}{
+		{"5.3.0.4", "v5.3.0.4-r5", true},
+		{"5.3.0.5", "v5.3.0.5-r1", true},
+		{"5.3.0.5", "v5.3.0.5-r2", false},
+		{"5.3.0.6", "", false},
+	} {
+		custom := filepath.Join(t.TempDir(), "enginex")
+		os.MkdirAll(filepath.Join(custom, "bundle"), 0o700)
+		os.WriteFile(filepath.Join(custom, "version.txt"), []byte("5.3.0.5\n"), 0o644)
+		os.WriteFile(filepath.Join(custom, "bundle", releaseTagName), []byte("v5.3.0.5-r2\n"), 0o644)
+		s := New(Config{AccessToken: "c", UIDir: t.TempDir(), StateDir: t.TempDir(), VersionFile: filepath.Join(custom, "version.txt")}, nil)
+		scripts = nil
+		s.applyDataBundleFromReader(bytes.NewReader(rename234Bundle(t, c.version, c.tag)))
+		s.Close()
+		if b, _ := os.ReadFile(filepath.Join(custom, "version.txt")); strings.TrimSpace(string(b)) != c.version {
+			t.Fatalf("%s %s: not installed (%q, %+v)", c.version, c.tag, b, s.updateCache)
+		}
+		if len(scripts) != 1 {
+			t.Fatalf("%s %s: %d activations", c.version, c.tag, len(scripts))
+		}
+		leaves := strings.Contains(scripts[0], "exec sh /run/enginex/leave.sh") && strings.Contains(scripts[0], "systemctl reboot")
+		activates := strings.Contains(scripts[0], "/bundle/boot-activate.sh")
+		if c.older && (!leaves || activates) {
+			t.Errorf("older %s %s: %q, want the leave step and a reboot, no boot-activate.sh", c.version, c.tag, scripts[0])
+		}
+		if !c.older && (leaves || !activates || !strings.Contains(scripts[0], "[e]nginex-suite (stream-sync|rb-bridge|enginex-deemixd)") ||
+			!strings.Contains(scripts[0], "[s]c5000-suite (stream-sync|rb-bridge|sc5000-deemixd)")) {
+			t.Errorf("newer %s %s: %q, want boot-activate.sh after ending both suite names", c.version, c.tag, scripts[0])
+		}
 	}
 }
