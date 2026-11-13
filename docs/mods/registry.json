@@ -239,7 +239,7 @@
     },
     {
       "id": "minimal-club-mode",
-      "version": "1.2.0",
+      "version": "1.2.1",
       "category": "system",
       "issueNumber": 136,
       "author": "EngineX Official",
@@ -275,8 +275,8 @@
         }
       ],
       "official": true,
-      "downloadUrl": "mods/packages/minimal-club-mode-1.2.0.tar.gz",
-      "sha256": "39b5514ec7b77744d0d389daf26bf2cdab623cfabef2ca8a78b59bc1f0486257",
+      "downloadUrl": "mods/packages/minimal-club-mode-1.2.1.tar.gz",
+      "sha256": "6966d813abba306ee6615b8473d123caeb7d0f67c2e1acd71542e85762856ddf",
       "size": 3428379,
       "models": "All 16 Models",
       "hardwareValidation": "not-tested",

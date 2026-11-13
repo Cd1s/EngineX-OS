@@ -64,7 +64,7 @@ MODS = [
          summary=tri("八格音源管理、重命名、清空与 Loop 切片导出。", "八格音源管理、重新命名、清空與 Loop 切片匯出。", "Eight-slot sample management, rename, clear and loop-slice export."),
          description=tri("可视化管理独立八格采样库，导入 WAV、重命名、清空并按采样点精确切片；其他格式使用已安装的 ffmpeg。导出后在原生浏览器加载到打击垫。固件暂未暴露原生打击垫直接绑定接口，本 Mod 不声称自动绑定或播放。", "視覺化管理獨立八格取樣庫，匯入 WAV、重新命名、清空並依取樣點精確切片；其他格式使用已安裝的 ffmpeg。匯出後在原生瀏覽器載入至打擊墊。韌體尚未公開原生打擊墊直接綁定介面，本 Mod 不宣稱自動綁定或播放。", "Manage an independent eight-slot sample bank: import WAV, rename, clear and slice precisely by sample offsets; other formats use an existing ffmpeg. Load exported files into the native pads through the browser. Firmware has no exposed direct native-pad binding API; this Mod does not claim automatic binding or playback."),
          initialComments=[comment("tribalwalker-sketch", "One control - a Control Center row, or a long-press on an empty sampler pad", 120), comment("Djpd66", "dedicated UI tab for managing the sampler", 137)]),
-    dict(id="minimal-club-mode", version="1.2.0", category="system", issueNumber=136,
+    dict(id="minimal-club-mode", version="1.2.1", category="system", issueNumber=136,
          author="EngineX Official", tags=["Club", "USB", "SD", "Pro DJ Link", "Offline"],
          name=tri("纯粹俱乐部演出模式", "純粹俱樂部演出模式", "Minimal Club Mode"),
          summary=tri("暂停可选后台服务，优先本地 USB/SD 与 Pro DJ Link 演出。", "暫停選用背景服務，優先本機 USB/SD 與 Pro DJ Link 演出。", "Pause optional background services for local USB/SD and Pro DJ Link performance."),
