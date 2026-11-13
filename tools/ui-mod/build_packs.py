@@ -6679,6 +6679,8 @@ def edits(dev: bool):
             ("    required property AutoLoopViewInterface view\n",
              "    required property AutoLoopViewInterface view\n    property int deckIndex: 0\n"
              "    readonly property bool scLoop: view.loopEnableState || " + head("deckIndex", "loop") + "\n"),
+            ("    readonly property bool showText: Config.device.hasAutoLoop || view.loopEnableState\n",
+             "    readonly property bool showText: Config.device.hasAutoLoop || scLoop\n"),
             ("        color: view.loopEnableState ? Style.active01Color : Style.icon01Color\n", "        color: scLoop ? Style.active01Color : Style.icon01Color\n"),
             ("        color: view.loopEnableState ? Style.active01Color : Style.font01Color\n", "        color: scLoop ? Style.active01Color : Style.font01Color\n"),
         ])
