@@ -43,7 +43,8 @@ func TestSignAndVerifyTool(t *testing.T) {
 	dir := t.TempDir()
 	pubPath, privPath := writeTestKeys(t, dir)
 	sumsPath := filepath.Join(dir, "SHA256SUMS.txt")
-	sumsContent := strings.Repeat("0", 64) + "  SC5000-5.3.0.5-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img\n"
+	sumsContent := strings.Repeat("0", 64) + "  SC5000-5.3.0.5-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img\n" +
+		releasesig.TagDigest("v5.3.0.5-r2") + "  " + releasesig.TagEntryName + "\n"
 	if err := os.WriteFile(sumsPath, []byte(sumsContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -91,6 +92,14 @@ func TestSignAndVerifyTool(t *testing.T) {
 		t.Fatal("--verify accepted a signature of a key that is not embedded")
 	}
 
+	// The list is bound to its release tag: the right tag verifies, a relabelled one does not.
+	if err := run([]string{"--verify", "--pubkey", pubPath, "--tag", "v5.3.0.5-r2", sumsPath}, getenv, &out, &errBuf); err != nil {
+		t.Fatalf("verify with the list's own tag failed: %v", err)
+	}
+	if err := run([]string{"--verify", "--pubkey", pubPath, "--tag", "v5.3.0.5-r3", sumsPath}, getenv, &out, &errBuf); err == nil {
+		t.Fatal("--verify accepted the list of r2 as the list of r3")
+	}
+
 	// Tampered SHA256SUMS.txt fails --verify.
 	if err := os.WriteFile(sumsPath, []byte(strings.Replace(sumsContent, "0", "1", 1)), 0o644); err != nil {
 		t.Fatal(err)
@@ -116,3 +125,25 @@ func TestListKeysFailsWithoutEmbeddedKey(t *testing.T) {
 }
 
 func releasesigTrusted() ([]ed25519.PublicKey, error) { return releasesig.TrustedPublicKeys() }
+
+func TestSigningRefusesAListWithoutItsReleaseTag(t *testing.T) {
+	dir := t.TempDir()
+	_, privPath := writeTestKeys(t, dir)
+	sumsPath := filepath.Join(dir, "SHA256SUMS.txt")
+	if err := os.WriteFile(sumsPath, []byte(strings.Repeat("0", 64)+"  SC5000-5.3.0.5-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out, errBuf bytes.Buffer
+	getenv := func(k string) string {
+		if k == keyEnvVar {
+			return privPath
+		}
+		return ""
+	}
+	if err := run([]string{"--allow-untrusted", sumsPath}, getenv, &out, &errBuf); err == nil || !strings.Contains(err.Error(), releasesig.TagEntryName) {
+		t.Fatalf("err = %v, want a refusal naming %s", err, releasesig.TagEntryName)
+	}
+	if _, err := os.Stat(sumsPath + ".sig"); err == nil {
+		t.Fatal("a signature was written for a list without a tag entry")
+	}
+}

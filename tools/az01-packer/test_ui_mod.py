@@ -744,7 +744,7 @@ assert.strictEqual(vfx.enabled, false);
         (scT(v.error)); each needs a Chinese line, and a failed update raises a warning prompt."""
         go = (REPO / "pkg/webui/update_verify.go").read_text(encoding="utf-8")
         msgs = re.findall(r'^\s*msgUpdate\w+\s*=\s*"([^"]+)"', go, re.M)
-        self.assertGreaterEqual(len(msgs), 7, msgs)
+        self.assertGreaterEqual(len(msgs), 9, msgs)
         msgs.append("update download too large")  # update.go: a file over the size limit
         rows = {l.split("\t")[0]: l.split("\t")[1:] for l in (REPO / "tools/ui-mod/i18n.tsv").read_text(encoding="utf-8").splitlines() if l and not l.startswith("#")}
         for m in msgs + ["Update Failed"]:

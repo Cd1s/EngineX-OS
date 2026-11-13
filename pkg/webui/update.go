@@ -95,7 +95,7 @@ func (s *Server) update(w http.ResponseWriter, r *http.Request) {
 			s.updateCache.Updating = true
 			s.updateCache.Progress = 0.05
 			s.updateCache.Error = ""
-			go s.applyOnlineUpdate(s.updateCache.DownloadURL)
+			go s.applyOnlineUpdate(s.updateCache.DownloadURL, s.updateCache.Latest)
 		}
 	}
 	respond(w, s.updateCache)
@@ -143,12 +143,13 @@ func hasMatchingStagedImage(path, downloadURL, want string) bool {
 	return hasValidAZ01Image(path) && hasDigest(path, want)
 }
 
-// applyOnlineUpdate installs the update at downloadURL (#239). It first verifies the release
-// signature and takes the file's signed SHA-256 from it, then downloads the file itself and
-// checks that digest before anything is applied. Engine's own updater is not handed the URL:
+// applyOnlineUpdate installs the update at downloadURL of the release tag (#239). It first
+// verifies the release signature, that it is the signature of this tag and that the tag is newer
+// than the installed release, and takes the file's signed SHA-256 from it, then downloads the file
+// itself within the free-space budget and checks that digest before anything is applied. Engine's own updater is not handed the URL:
 // it would download the file again, unchecked.
-func (s *Server) applyOnlineUpdate(downloadURL string) {
-	want, msg := s.signedAssetDigest(downloadURL)
+func (s *Server) applyOnlineUpdate(downloadURL, tag string) {
+	want, msg := s.signedAssetDigest(downloadURL, tag)
 	if msg != "" {
 		s.setUpdateProgress(0, msg, true)
 		return
@@ -167,6 +168,7 @@ func (s *Server) applyOnlineUpdate(downloadURL string) {
 		part := staged + ".part"
 		_ = os.Remove(part)
 		_ = os.Remove(staged + ".url")
+		_ = os.Remove(staged) // not this release's image: it only holds space the download may need
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 		req, err := http.NewRequestWithContext(ctx, "GET", downloadURL, nil)
 		if err != nil {
@@ -188,6 +190,18 @@ func (s *Server) applyOnlineUpdate(downloadURL string) {
 			s.setUpdateProgress(0, "update download failed", true)
 			return
 		}
+		// Second-generation images carry a bundle that is unpacked next to the download.
+		var unpack int64
+		if dataBundleBoards[imagePrefix(deviceCompatible())] {
+			unpack = bundleMaxUnpack
+		}
+		limit, nospace := downloadBudget(filepath.Dir(staged), resp.ContentLength, unpack, updateMaxDownload)
+		if nospace != "" {
+			resp.Body.Close()
+			cancel()
+			s.setUpdateProgress(0, nospace, true)
+			return
+		}
 		out, err := os.OpenFile(part, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
 		if err != nil {
 			resp.Body.Close()
@@ -203,12 +217,16 @@ func (s *Server) applyOnlineUpdate(downloadURL string) {
 			n, rerr := resp.Body.Read(buf)
 			if n > 0 {
 				written += int64(n)
-				if written > updateMaxDownload {
+				if written > limit {
 					out.Close()
 					resp.Body.Close()
 					cancel()
 					_ = os.Remove(part)
-					s.setUpdateProgress(0, "update download too large", true)
+					tooBig := "update download too large"
+					if limit < updateMaxDownload {
+						tooBig = msgUpdateNoSpace // more than the room left for it
+					}
+					s.setUpdateProgress(0, tooBig, true)
 					return
 				}
 				sum.Write(buf[:n])
@@ -700,6 +718,11 @@ func (s *Server) downloadBundle(url, dest, want string) string {
 	if resp.StatusCode != http.StatusOK {
 		return "update download failed"
 	}
+	// The unpacked bundle needs room next to the download.
+	limit, nospace := downloadBudget(filepath.Dir(dest), resp.ContentLength, bundleMaxUnpack, bundleMaxDown)
+	if nospace != "" {
+		return nospace
+	}
 	out, err := os.OpenFile(dest, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
 		return "disk write failed"
@@ -712,7 +735,10 @@ func (s *Server) downloadBundle(url, dest, want string) string {
 		n, rerr := resp.Body.Read(buf)
 		if n > 0 {
 			written += int64(n)
-			if written > bundleMaxDown {
+			if written > limit {
+				if limit < bundleMaxDown {
+					return msgUpdateNoSpace
+				}
 				return "update download too large"
 			}
 			sum.Write(buf[:n])

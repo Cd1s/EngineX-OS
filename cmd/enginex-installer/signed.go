@@ -93,6 +93,10 @@ func signedSums(ctx context.Context, o *options, rel *release) (sums, sig []byte
 	if err := releasesig.VerifySignature(sums, sig, keys); err != nil {
 		return nil, nil, fmt.Errorf("release %s 的签名无效，拒绝刷写 / the signature of release %s is not valid; nothing flashed", rel.Tag, rel.Tag)
 	}
+	// File names carry no -rN revision: the signed tag entry ties the list to the release it is shown under.
+	if err := releasesig.VerifyTag(sums, rel.Tag); err != nil {
+		return nil, nil, fmt.Errorf("签名清单不属于 release %s（可能是另一个版本被换了标签），拒绝刷写 / the signed list is not the one of release %s (another release under this tag?); nothing flashed", rel.Tag, rel.Tag)
+	}
 	return sums, sig, nil
 }
 
@@ -109,14 +113,77 @@ func signedDigest(sums []byte, name, githubDigest string) (string, error) {
 	return digest, nil
 }
 
-// rememberSums keeps the verified sums and signature in dir (best effort) for offline runs.
-func rememberSums(dir string, sums, sig []byte) {
-	_ = os.WriteFile(filepath.Join(dir, sumsFile), sums, 0o644)
-	_ = os.WriteFile(filepath.Join(dir, sigFile), sig, 0o644)
+// rememberSums keeps the verified sums and signature in dir, atomically, so that an offline run
+// can check the package it falls back to (verifyCached). A failure is returned: without the pair
+// the cached package cannot be reused later, which fails closed.
+func rememberSums(dir string, sums, sig []byte) error {
+	for _, f := range []struct {
+		name string
+		data []byte
+	}{{sumsFile, sums}, {sigFile, sig}} {
+		tmp, err := os.CreateTemp(dir, ".sums-*")
+		if err != nil {
+			return err
+		}
+		_, werr := tmp.Write(f.data)
+		cerr := tmp.Close()
+		if werr == nil && cerr == nil {
+			werr = os.Rename(tmp.Name(), filepath.Join(dir, f.name))
+		}
+		if werr != nil || cerr != nil {
+			os.Remove(tmp.Name())
+			if werr != nil {
+				return werr
+			}
+			return cerr
+		}
+	}
+	return nil
 }
 
-// verifyLocal checks a package that was not downloaded in this run (--bundle, --image, or the
-// copy kept from an earlier run when GitHub cannot be read). When SHA256SUMS.txt and its
+// keepSums calls rememberSums and says so when it cannot: the install goes on (it was verified),
+// but the next offline run will not reuse this package.
+func keepSums(o *options, dir string, sums, sig []byte) {
+	if err := rememberSums(dir, sums, sig); err != nil {
+		o.say("警告：无法保存已验证的签名清单（"+err.Error()+"），下次离线时不会复用这个下载的包",
+			"Warning: could not keep the verified signed list ("+err.Error()+"); this download will not be reused when GitHub cannot be reached")
+	}
+}
+
+// verifyCached is for a package that was downloaded earlier and is picked up again without the
+// user naming it, when GitHub cannot be read. It is not the user's own build: it must come with
+// the signed list that was kept when it was downloaded, the signature must verify, and the list
+// must give the file's hash. Anything less is refused; the warn-only path of verifyLocal is for
+// files the user passes with --image or --bundle.
+func verifyCached(path string) error {
+	dir, base := filepath.Dir(path), filepath.Base(path)
+	sums, serr := os.ReadFile(filepath.Join(dir, sumsFile))
+	sig, gerr := os.ReadFile(filepath.Join(dir, sigFile))
+	if serr != nil || gerr != nil {
+		return fmt.Errorf("无法读取 GitHub，而本地的 %s 没有已验证的签名清单，拒绝使用 / GitHub cannot be read and the local %s has no verified signed list kept with it; nothing flashed", base, base)
+	}
+	keys, err := trustedKeys()
+	if err != nil {
+		return err
+	}
+	if err := releasesig.VerifySignature(sums, sig, keys); err != nil {
+		return fmt.Errorf("本地 %s 的签名清单签名无效，拒绝使用 / the signed list kept with %s has an invalid signature; nothing flashed", base, base)
+	}
+	want, err := signedDigest(sums, base, "")
+	if err != nil {
+		return err
+	}
+	got, err := fileSHA256(path)
+	if err != nil {
+		return err
+	}
+	if !strings.EqualFold(got, want) {
+		return fmt.Errorf("本地 %s 与保存的签名清单里的 SHA-256 不符，拒绝使用 / %s does not match the signed SHA-256 kept with it; nothing flashed", base, base)
+	}
+	return nil
+}
+
+// verifyLocal checks a file the user passed with --image or --bundle. When SHA256SUMS.txt and its
 // signature sit next to it, as in a folder of release downloads, the file must be in the signed
 // list with its hash; a bad signature or a different hash is refused. A file without a signed
 // list beside it is the user's own build (a build folder has an unsigned SHA256SUMS.txt too): it

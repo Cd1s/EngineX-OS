@@ -20,8 +20,15 @@ package releasesig
 //	`,
 //	}
 //
+// Keys in use: the EngineX OS release key (generated on the release build host, 2026-11-13).
+//
 // With the list empty a build trusts nothing: every update is refused, and
 // build-release.sh, sign-release.sh and the release gate stop. Keep the retiring
 // key and the new key in this slice across the transition release(s) to rotate
 // keys cleanly (see SECURITY.md and .claude/rules/release-workflow.md).
-var TrustedPublicKeysPEM = []string{}
+var TrustedPublicKeysPEM = []string{
+	`-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAkVGt4Q1qVUQV5/PW5Il8lxuTjMIpW+RaNBt3RSJWJk0=
+-----END PUBLIC KEY-----
+`,
+}

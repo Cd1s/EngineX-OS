@@ -671,7 +671,8 @@ func fetchBundle(ctx context.Context, o *options, prefix, dir string) (string, e
 	if err != nil {
 		if ctx.Err() == nil {
 			if local := localBundle(dir, prefix); local != "" {
-				if err := verifyLocal(o, local); err != nil {
+				// Found by the installer, not named by the user: it must carry the signed list kept at its download.
+				if err := verifyCached(local); err != nil {
 					return "", err
 				}
 				o.say("无法读取 GitHub 最新版本，使用已有的 "+filepath.Base(local),
@@ -709,14 +710,14 @@ func fetchBundle(ctx context.Context, o *options, prefix, dir string) (string, e
 	if got, err := fileSHA256(dest); err == nil && strings.EqualFold(got, wantSHA) {
 		o.say("使用已有的 "+filepath.Base(dest)+" ("+rel.Tag+")",
 			"Using the package already here: "+filepath.Base(dest)+" ("+rel.Tag+")")
-		rememberSums(dir, sums, sig)
+		keepSums(o, dir, sums, sig)
 		return dest, nil
 	}
 	o.say("下载 "+name+" ("+rel.Tag+")", "Downloading "+name)
 	if err := download(ctx, o, url, wantSHA, dest); err != nil {
 		return "", err
 	}
-	rememberSums(dir, sums, sig)
+	keepSums(o, dir, sums, sig)
 	return dest, nil
 }
 
@@ -770,7 +771,7 @@ func fetchImage(ctx context.Context, o *options, prefix string) (string, error) 
 		if err := downloadLimit(ctx, o, a.URL, digest, path, 2<<30); err != nil {
 			return "", err
 		}
-		rememberSums(o.WorkDir, sums, sig)
+		keepSums(o, o.WorkDir, sums, sig)
 		return path, nil
 	}
 	return "", fmt.Errorf("release %s has no %s update image", rel.Tag, prefix)

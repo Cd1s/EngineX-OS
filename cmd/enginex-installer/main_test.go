@@ -2706,6 +2706,8 @@ func TestGen2LocalBundleFallbackOnGitHubHTTPErrorsAndProxy(t *testing.T) {
 	if err := copyFile(pkg.ImagePath, filepath.Join(workWithPkg, imgName)); err != nil {
 		t.Fatal(err)
 	}
+	// The package was downloaded by an earlier run, which kept its signed list beside it (#239).
+	writeSidecars(t, workWithPkg, map[string]string{imgName: sha(t, pkg.ImagePath)}, testReleasePriv)
 	o0 := testOpts(t)
 	d := startSSHDeck(t, o0.SSHPort, "inmusic,jp24\x00inmusic,az04\x00")
 

@@ -162,3 +162,51 @@ func TestEmbeddedTrustedPublicKeysValid(t *testing.T) {
 		t.Fatalf("embedded TrustedPublicKeysPEM invalid: %v", err)
 	}
 }
+
+func TestEmbeddedReleaseKeyIsTheMaintainersKey(t *testing.T) {
+	keys, err := TrustedPublicKeys()
+	if err != nil || len(keys) != 1 {
+		t.Fatalf("embedded keys = %d, %v; want the one release key", len(keys), err)
+	}
+	der, err := x509.MarshalPKIXPublicKey(keys[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := base64.StdEncoding.EncodeToString(der); got != "MCowBQYDK2VwAyEAkVGt4Q1qVUQV5/PW5Il8lxuTjMIpW+RaNBt3RSJWJk0=" {
+		t.Fatalf("embedded key is %s", got)
+	}
+	// The key is found in built binaries by its one base64 line (release-gate.sh): keep the PEM in that shape.
+	if !strings.Contains(TrustedPublicKeysPEM[0], "\nMCowBQYDK2VwAyEAkVGt4Q1qVUQV5/PW5Il8lxuTjMIpW+RaNBt3RSJWJk0=\n") {
+		t.Fatal("the embedded PEM does not carry the key as one base64 line")
+	}
+}
+
+// The file names of a release carry the version but not the -rN revision; the tag entry is what
+// binds a genuine signed list to one release tag (a genuine r1 shown as r3 must not verify).
+func TestTagBinding(t *testing.T) {
+	list := func(tag string) []byte {
+		return []byte(strings.Repeat("a", 64) + "  SC5000-5.3.0.5-EngineX-OS-x-Update.img\n" + TagDigest(tag) + "  " + TagEntryName + "\n")
+	}
+	if err := VerifyTag(list("v5.3.0.5-r2"), "v5.3.0.5-r2"); err != nil {
+		t.Fatalf("the signed tag was refused: %v", err)
+	}
+	for _, c := range []struct {
+		name, tag string
+		sums      []byte
+	}{
+		{"r1 shown as r3", "v5.3.0.5-r3", list("v5.3.0.5-r1")},
+		{"r2 shown as the plain release", "v5.3.0.5", list("v5.3.0.5-r2")},
+		{"no tag entry", "v5.3.0.5", []byte(strings.Repeat("a", 64) + "  SC5000-5.3.0.5-EngineX-OS-x-Update.img\n")},
+		{"empty tag", "", list("")},
+		{"tag with a line break", "v5.3.0.5\nx", list("v5.3.0.5\nx")},
+	} {
+		if err := VerifyTag(c.sums, c.tag); !errors.Is(err, ErrTagMismatch) {
+			t.Errorf("%s: err = %v, want ErrTagMismatch", c.name, err)
+		}
+	}
+	// The entry is the hash of the RELEASE-TAG.txt file the build writes: the tag and a newline
+	// (printf 'v5.3.0.5\n' | sha256sum).
+	if got := TagDigest("v5.3.0.5"); got != "369bd4c0f3141cf1d1d0bee66890a06ffad4d8636971f5d303c240395948352e" {
+		t.Fatalf("TagDigest = %s", got)
+	}
+}

@@ -36,7 +36,7 @@ func TestOnlineUpdateWithoutRebootReleasesTheState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sums := []byte(fmt.Sprintf("%s  %s\n", digest, name))
+	sums := []byte(fmt.Sprintf("%s  %s\n%s  %s\n", digest, name, releasesig.TagDigest("v5.3.0.5"), releasesig.TagEntryName))
 	sig, err := releasesig.Sign(testReleasePriv, sums)
 	if err != nil {
 		t.Fatal(err)
@@ -67,7 +67,7 @@ func TestOnlineUpdateWithoutRebootReleasesTheState(t *testing.T) {
 	s.updateMu.Lock()
 	s.updateCache.Updating = true
 	s.updateMu.Unlock()
-	s.applyOnlineUpdate(url)
+	s.applyOnlineUpdate(url, "v5.3.0.5")
 	state := func() updateStatus {
 		s.updateMu.Lock()
 		defer s.updateMu.Unlock()
