@@ -16,10 +16,14 @@ import (
 func dropBundleFile(t *testing.T, src, member string) string {
 	t.Helper()
 	f, err := os.Open(src)
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer f.Close()
 	gz, err := gzip.NewReader(f)
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer gz.Close()
 	var out bytes.Buffer
 	zw := gzip.NewWriter(&out)
@@ -27,26 +31,46 @@ func dropBundleFile(t *testing.T, src, member string) string {
 	tr := tar.NewReader(gz)
 	for {
 		h, err := tr.Next()
-		if err == io.EOF { break }
-		if err != nil { t.Fatal(err) }
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
 		data, err := io.ReadAll(tr)
-		if err != nil { t.Fatal(err) }
-		if strings.HasSuffix(h.Name, "/"+member) { continue }
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.HasSuffix(h.Name, "/"+member) {
+			continue
+		}
 		if strings.HasSuffix(h.Name, "/SHA256SUMS") {
 			var keep []string
 			for _, line := range strings.Split(string(data), "\n") {
-				if !strings.HasSuffix(line, "  "+member) { keep = append(keep, line) }
+				if !strings.HasSuffix(line, "  "+member) {
+					keep = append(keep, line)
+				}
 			}
 			data = []byte(strings.Join(keep, "\n"))
 			h.Size = int64(len(data))
 		}
-		if err := tw.WriteHeader(h); err != nil { t.Fatal(err) }
-		if _, err := tw.Write(data); err != nil { t.Fatal(err) }
+		if err := tw.WriteHeader(h); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write(data); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if err := tw.Close(); err != nil { t.Fatal(err) }
-	if err := zw.Close(); err != nil { t.Fatal(err) }
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
 	dest := filepath.Join(t.TempDir(), filepath.Base(src))
-	if err := os.WriteFile(dest, out.Bytes(), 0o600); err != nil { t.Fatal(err) }
+	if err := os.WriteFile(dest, out.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	return dest
 }
 
@@ -58,8 +82,12 @@ func TestNativeImageRequiresCompleteBundle(t *testing.T) {
 			o := testOpts(t)
 			o.USB, o.Bundle = fb.Bin, dropBundleFile(t, bundle.Path, member)
 			err := run(ctxT(t), o)
-			if err == nil || !strings.Contains(err.Error(), member) || !strings.HasSuffix(err.Error(), "nothing flashed") { t.Fatalf("missing %s: %v", member, err) }
-			if flashed := fb.Flashed(); len(flashed) != 0 { t.Fatalf("flashed incomplete bundle: %v", flashed) }
+			if err == nil || !strings.Contains(err.Error(), member) || !strings.HasSuffix(err.Error(), "nothing flashed") {
+				t.Fatalf("missing %s: %v", member, err)
+			}
+			if flashed := fb.Flashed(); len(flashed) != 0 {
+				t.Fatalf("flashed incomplete bundle: %v", flashed)
+			}
 		})
 	}
 }
@@ -69,7 +97,9 @@ func TestNativeImageRefusesConflictingLegacyDirectory(t *testing.T) {
 	ctx := ctxT(t)
 	backup := filepath.Join(t.TempDir(), "backup.img")
 	fs, err := ext4.Create(ctx, backup, ext4.CreateOptions{Size: 64 << 20, Label: "az01-data"})
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer fs.Close()
 	if err := fs.Apply(ctx, ext4.ChangeSet{
 		Directories: []string{"enginex", "sc5000-custom"},
@@ -77,28 +107,44 @@ func TestNativeImageRefusesConflictingLegacyDirectory(t *testing.T) {
 			imageBytes("sc5000-custom/bundle/boot-activate.sh", []byte("stale"), 0o755),
 			imageBytes("sc5000-custom/bundle/lib/libengine-ui-hook.so", []byte("stale"), 0o755),
 		},
-	}); err != nil { t.Fatal(err) }
-	if err := fs.Close(); err != nil { t.Fatal(err) }
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.Close(); err != nil {
+		t.Fatal(err)
+	}
 	fb := newFastboot(t, "JC11S", true)
 	o := testOpts(t)
 	o.USB, o.Bundle, o.Backup = fb.Bin, bundle.Path, backup
 	err = run(ctx, o)
-	if err == nil || !strings.Contains(err.Error(), "legacy /sc5000-custom") || !strings.HasSuffix(err.Error(), "nothing flashed") { t.Fatalf("conflicting directories: %v", err) }
-	if flashed := fb.Flashed(); len(flashed) != 0 { t.Fatalf("flashed with stale legacy hook: %v", flashed) }
+	if err == nil || !strings.Contains(err.Error(), "legacy /sc5000-custom") || !strings.HasSuffix(err.Error(), "nothing flashed") {
+		t.Fatalf("conflicting directories: %v", err)
+	}
+	if flashed := fb.Flashed(); len(flashed) != 0 {
+		t.Fatalf("flashed with stale legacy hook: %v", flashed)
+	}
 }
 
 func TestNativeImageRefusesOversizedBackup(t *testing.T) {
 	bundle := buildBundle(t, "SCLIVE4", "5.3.0.5")
 	backup := filepath.Join(t.TempDir(), "backup.img")
 	fs, err := ext4.Create(ctxT(t), backup, ext4.CreateOptions{Size: 128 << 20, Label: "az01-data"})
-	if err != nil { t.Fatal(err) }
-	if err := fs.Close(); err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.Close(); err != nil {
+		t.Fatal(err)
+	}
 	fb := newFastboot(t, "jp21", true)
 	o := testOpts(t)
 	o.USB, o.Bundle, o.Backup = fb.Bin, bundle.Path, backup
 	err = run(ctxT(t), o)
-	if err == nil || !strings.Contains(err.Error(), "backup exceeds the verified data partition") { t.Fatalf("oversized backup: %v", err) }
-	if flashed := fb.Flashed(); len(flashed) != 0 { t.Fatalf("flashed oversized backup: %v", flashed) }
+	if err == nil || !strings.Contains(err.Error(), "backup exceeds the verified data partition") {
+		t.Fatalf("oversized backup: %v", err)
+	}
+	if flashed := fb.Flashed(); len(flashed) != 0 {
+		t.Fatalf("flashed oversized backup: %v", flashed)
+	}
 }
 
 func TestNativeImageWithoutHostTools(t *testing.T) {

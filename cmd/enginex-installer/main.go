@@ -40,10 +40,10 @@ import (
 )
 
 const (
-	bundleSuffix    = "-EngineX-OS-Data-Bundle.tar.gz"
-	bundleMaxDown   = 64 << 20  // compressed, as the deck's own updater allows
-	gen2ImgHeader   = 128
-	compatCmd       = "cat /sys/firmware/devicetree/base/compatible"
+	bundleSuffix  = "-EngineX-OS-Data-Bundle.tar.gz"
+	bundleMaxDown = 64 << 20 // compressed, as the deck's own updater allows
+	gen2ImgHeader = 128
+	compatCmd     = "cat /sys/firmware/devicetree/base/compatible"
 	// install.sh's own default; the variable is only set by tests.
 	customDirSh = `"${SC5000_CUSTOM:-/data/enginex}"`
 )
