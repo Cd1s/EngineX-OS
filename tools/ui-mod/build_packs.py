@@ -6685,6 +6685,8 @@ def edits(dev: bool):
             ("        color: view.loopEnableState ? Style.active01Color : Style.font01Color\n", "        color: scLoop ? Style.active01Color : Style.font01Color\n"),
         ])
         scaled[ROOT + "Views/MainView/Components/JP07SyncIndicator.qml"] = [
+            ("    readonly property bool displayPhaseMeter: controller.enabled\n",
+             "    readonly property bool displayPhaseMeter: !!controller && controller.enabled\n"),
             ("    property bool isMaster: pDeckIsMaster.translator && pDeckIsMaster.translator.state\n",
              "    property bool isMaster: " + head("deckIndex", "master", "pDeckIsMaster.translator && pDeckIsMaster.translator.state") + "\n")]
         scaled[bj + "Deck/DeckItem/BpmInfo.qml"] = [

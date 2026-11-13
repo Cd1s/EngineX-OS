@@ -137,6 +137,14 @@ assert.deepStrictEqual(opened, ["spotify"]);
         joined = "\n".join(new for _old, new in edits[key])
         self.assertIn("readonly property bool showText: Config.device.hasAutoLoop || scLoop", joined)
 
+    def test_jp07_sync_indicator_guards_null_controller_bh2_a6_11(self):
+        bp = load_build_packs()
+        bp.ROOT = "Skins/Embedded/"
+        edits = bp.edits(False)
+        key = "Skins/Embedded/Views/MainView/Components/JP07SyncIndicator.qml"
+        joined = "\n".join(new for _old, new in edits[key])
+        self.assertIn("readonly property bool displayPhaseMeter: !!controller && controller.enabled", joined)
+
 
 if __name__ == "__main__":
     unittest.main()
