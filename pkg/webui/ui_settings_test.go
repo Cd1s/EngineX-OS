@@ -501,7 +501,7 @@ func TestUIScale(t *testing.T) {
 	if code, v := uiPost(t, srv.URL, "uiScale=75"); code != 200 || v.UIScale != 75 {
 		t.Fatalf("scale 75: %d %d", code, v.UIScale)
 	}
-	if b, _ := os.ReadFile(uiScaleEnvPath); string(b) != "SC5000_UI_SCALE=0.75\n" {
+	if b, _ := os.ReadFile(uiScaleEnvPath); string(b) != "ENGINEX_UI_SCALE=0.75\nSC5000_UI_SCALE=0.75\n" {
 		t.Fatalf("env file: %q", b)
 	}
 	if c, _ := os.ReadFile(filepath.Join(dir, "settings.conf")); !strings.Contains(string(c), "ui_scale=75\n") {
@@ -510,7 +510,7 @@ func TestUIScale(t *testing.T) {
 	if code, v := uiPost(t, srv.URL, "uiScale=105"); code != 200 || v.UIScale != 105 {
 		t.Fatalf("scale 105: %d %d", code, v.UIScale)
 	}
-	if b, _ := os.ReadFile(uiScaleEnvPath); string(b) != "SC5000_UI_SCALE=1.05\n" {
+	if b, _ := os.ReadFile(uiScaleEnvPath); string(b) != "ENGINEX_UI_SCALE=1.05\nSC5000_UI_SCALE=1.05\n" {
 		t.Fatalf("env file: %q", b)
 	}
 	if c, _ := os.ReadFile(filepath.Join(dir, "settings.conf")); !strings.Contains(string(c), "ui_scale=105\n") {
@@ -519,7 +519,7 @@ func TestUIScale(t *testing.T) {
 	if code, v := uiPost(t, srv.URL, "uiScale=110"); code != 200 || v.UIScale != 110 {
 		t.Fatalf("scale 110: %d %d", code, v.UIScale)
 	}
-	if b, _ := os.ReadFile(uiScaleEnvPath); string(b) != "SC5000_UI_SCALE=1.1\n" {
+	if b, _ := os.ReadFile(uiScaleEnvPath); string(b) != "ENGINEX_UI_SCALE=1.1\nSC5000_UI_SCALE=1.1\n" {
 		t.Fatalf("env file: %q", b)
 	}
 	if c, _ := os.ReadFile(filepath.Join(dir, "settings.conf")); !strings.Contains(string(c), "ui_scale=110\n") {

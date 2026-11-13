@@ -145,12 +145,12 @@ wait_for() { local end=$((SECONDS + $1)); shift; until "$@"; do [ "$SECONDS" -lt
 wait_for 20 curl -sf -o /dev/null http://127.0.0.1:8080/boot-status
 timeout=45; hook=/etc/sc5000/libengine-ui-hook.so
 if [ "$2" = hang ]; then timeout=2; hook=/run/gate/hang.so:$hook; fi
-in_root SC5000_BOOT_TIMEOUT=$timeout SC5000_BOOT_POLL_INTERVAL=.1 /etc/sc5000/engine-ui-guard watch > "$C/guardian.log" 2>&1 &
+in_root ENGINEX_BOOT_TIMEOUT=$timeout ENGINEX_BOOT_POLL_INTERVAL=.1 /etc/sc5000/engine-ui-guard watch > "$C/guardian.log" 2>&1 &
 watcher=$!
 start=$SECONDS
 chroot "$R" /usr/bin/env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     HOME=/tmp/home QT_QPA_PLATFORM=offscreen LD_LIBRARY_PATH=/usr/qt/lib MALLOC_ARENA_MAX=1 \
-    SC5000_UI_HOOK=$hook /etc/sc5000/engine-ui-guard launch /usr/Engine/Engine -d0 > "$C/engine.log" 2>&1 &
+    ENGINEX_UI_HOOK=$hook /etc/sc5000/engine-ui-guard launch /usr/Engine/Engine -d0 > "$C/engine.log" 2>&1 &
 engine=$!
 if [ "$2" = hang ]; then
     wait_for 8 test -e "$R/tmp/fallback-restart"

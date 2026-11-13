@@ -18,14 +18,14 @@ func TestProlinkStatePath(t *testing.T) {
 	srv := New(Config{StateDir: stateDir}, nil)
 
 	// 1. Initially no prolink.json exists and no env set -> returns /tmp/enginex-prolink.json
-	t.Setenv("SC5000_PROLINK_STATE", "")
+	t.Setenv("ENGINEX_PROLINK_STATE", "")
 	if p := srv.ProlinkStatePath(); p != "/tmp/enginex-prolink.json" {
 		t.Errorf("got %q, want /tmp/enginex-prolink.json", p)
 	}
 
-	// 2. SC5000_PROLINK_STATE env set and no file in StateDir -> returns env value
+	// 2. ENGINEX_PROLINK_STATE env set and no file in StateDir -> returns env value
 	custom := filepath.Join(stateDir, "custom-env.json")
-	t.Setenv("SC5000_PROLINK_STATE", custom)
+	t.Setenv("ENGINEX_PROLINK_STATE", custom)
 	if p := srv.ProlinkStatePath(); p != custom {
 		t.Errorf("got %q, want %q", p, custom)
 	}
@@ -237,7 +237,7 @@ func TestProlinkStateFileMerging(t *testing.T) {
 
 // #59: the media share toggle is routed on the gateway and shared with the UI settings.
 func TestProlinkShareToggle(t *testing.T) {
-	t.Setenv("SC5000_PROLINK_STATE", filepath.Join(t.TempDir(), "none.json"))
+	t.Setenv("ENGINEX_PROLINK_STATE", filepath.Join(t.TempDir(), "none.json"))
 	ui := New(Config{AccessToken: "c", UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
 	srv := httptest.NewServer(ui)
 	defer srv.Close()

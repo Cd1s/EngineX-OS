@@ -1,8 +1,8 @@
 # systemd EnvironmentFile syntax, not shell. No external disk is formatted.
 # Optional override when multiple removable MMC slots exist:
-# SC5000_FRONT_SD_DEVICE=mmcblk1
-SC5000_INTERNAL_CACHE=/var/cache/enginex
+# ENGINEX_FRONT_SD_DEVICE=mmcblk1
+ENGINEX_INTERNAL_CACHE=/var/cache/enginex
 # Executable adapter for the stock Engine mount notification protocol:
-SC5000_STORAGE_NOTIFY=/usr/local/libexec/enginex-storage-notify
-SC5000_ENGINE_GUARDIAN=/usr/local/bin/engine-guardian
-SC5000_GUARDIAN_TIMEOUT=10s
+ENGINEX_STORAGE_NOTIFY=/usr/local/libexec/enginex-storage-notify
+ENGINEX_ENGINE_GUARDIAN=/usr/local/bin/engine-guardian
+ENGINEX_GUARDIAN_TIMEOUT=10s

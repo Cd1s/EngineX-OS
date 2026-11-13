@@ -10,8 +10,8 @@ export LC_ALL=C
 
 SELF=$(realpath "$0")
 REPO=$(cd "$(dirname "$SELF")/../.." && pwd)
-LAB=${SC5000_LAB_DIR:-/root/build/sc5000-lab}
-IMG=${SC5000_530_IMAGE:-$LAB/fw-5.3.0/SC5000-5.3.0-Update.img}
+LAB=${ENGINEX_LAB_DIR:-/root/build/sc5000-lab}
+IMG=${ENGINEX_530_IMAGE:-$LAB/fw-5.3.0/SC5000-5.3.0-Update.img}
 TARGET_EPOCH=1805112000 # 2027-03-15T12:00:00Z (> host clock & > 2026-10-30 build date)
 BUILD_EPOCH=1793360489  # 2026-10-30T11:41:29Z (/etc/timestamp in SC5000 5.3.0)
 
@@ -168,7 +168,7 @@ HOSTS
     [ ! -e "$DATA/system/var/overlay/lib/systemd/timesync/clock" ]
 
     # Verify sc5000-timesync-seed skips missing lib_dir without creating it, then seeds /var/lib/systemd/timesync/clock
-    SC5000_TIMESYNC_LIB_DIR=/tmp/nonexistent-var-lib chroot "$R" /bin/sh -s < "$REPO/rootfs-overlay/usr/libexec/enginex-timesync-seed"
+    ENGINEX_TIMESYNC_LIB_DIR=/tmp/nonexistent-var-lib chroot "$R" /bin/sh -s < "$REPO/rootfs-overlay/usr/libexec/enginex-timesync-seed"
     [ ! -e "$R/tmp/nonexistent-var-lib" ]
     chroot "$R" /bin/sh -s < "$REPO/rootfs-overlay/usr/libexec/enginex-timesync-seed"
 

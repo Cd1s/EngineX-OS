@@ -8,10 +8,10 @@ set -eu
 #   disable-uac2 - unbind and remove UAC2 gadget
 #   route-dac    - route audio to USB DAC (<hw:X,0> or 'stop'/'default')
 
-CONFIGFS_MNT="${SC5000_CONFIGFS:-/sys/kernel/config}"
-UDC_CLASS="${SC5000_UDC_CLASS:-/sys/class/udc}"
+CONFIGFS_MNT="${ENGINEX_CONFIGFS:-/sys/kernel/config}"
+UDC_CLASS="${ENGINEX_UDC_CLASS:-/sys/class/udc}"
 GADGET_DIR="$CONFIGFS_MNT/usb_gadget/enginex_uac2"
-PIDFILE="${SC5000_USB_AUDIO_PIDFILE:-/run/enginex-usb-audio.pid}"
+PIDFILE="${ENGINEX_USB_AUDIO_PIDFILE:-/run/enginex-usb-audio.pid}"
 CARDS_FILE="/proc/asound/cards"
 
 ensure_configfs() {

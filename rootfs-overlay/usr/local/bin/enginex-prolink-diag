@@ -3,10 +3,10 @@
 # Read-only: it reads /sys, /proc and stream-sync's diag report, and binds
 # nothing. Prints [PASS]/[WARN]/[FAIL] lines; exit 1 when anything FAILs.
 # POSIX sh: the stock rootfs has BusyBox ash and no bash.
-SYS=${SC5000_SYS_ROOT:-/sys}
-PROC=${SC5000_PROC_ROOT:-/proc}
-API=${SC5000_DIAG_URL:-http://127.0.0.1:8080/v1/sc5000/prolink/diag}
-WAIT=${SC5000_DIAG_WAIT:-5}
+SYS=${ENGINEX_SYS_ROOT:-/sys}
+PROC=${ENGINEX_PROC_ROOT:-/proc}
+API=${ENGINEX_DIAG_URL:-http://127.0.0.1:8080/v1/sc5000/prolink/diag}
+WAIT=${ENGINEX_DIAG_WAIT:-5}
 fails=0
 row() {
     [ "$1" = FAIL ] && fails=$((fails + 1))

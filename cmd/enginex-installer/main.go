@@ -45,7 +45,7 @@ const (
 	gen2ImgHeader = 128
 	compatCmd     = "cat /sys/firmware/devicetree/base/compatible"
 	// install.sh's own default; the variable is only set by tests.
-	customDirSh = `"${SC5000_CUSTOM:-/data/enginex}"`
+	customDirSh = `"${ENGINEX_CUSTOM:-${SC5000_CUSTOM:-/data/enginex}}"`
 )
 
 var installerVersion = "dev" // set by build-installer.sh
