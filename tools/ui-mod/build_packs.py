@@ -622,7 +622,7 @@ SERVICES_MAIN = """
 		// Unchanged replies keep a sample alive: carry it on until 3 s after the last one.
 		const alive = Math.max(s.at, scShadowLive.seen) + scShadowExpiryMs
 		const elapsed = s.stale ? 0 : Math.max(0, Math.min(now, alive) - s.at)
-		const pos = Math.max(0, s.positionMs + (s.playing ? elapsed * scShadowRate(s) : 0))
+		const pos = Math.max(0, s.positionMs + (s.playing && !s.scratch ? elapsed * scShadowRate(s) : 0))
 		return s.meta && s.meta.durationMs > 0 ? Math.min(s.meta.durationMs, pos) : pos
 	}
 	// Binary searches keep the source grid and #151 independent of Engine's empty slots.
@@ -802,7 +802,7 @@ SERVICES_MAIN = """
 	// by the displays) instead of re-running every shadow binding per reply.
 	function scShadowSameSample(s, key, e) {
 		if (s.key !== key || s.name !== (e.name || "") || s.title !== (e.title || "") || s.artist !== (e.artist || "") || s.keyName !== (e.keyName || "") ||
-			s.playing !== !!e.playing || s.stale !== !!e.stale || s.metadataOnly !== !!e.metadataOnly || s.lineIn !== !!e.lineIn || s.pitch !== (Number(e.pitch) || 0) ||
+			s.playing !== !!e.playing || s.scratch !== !!e.scratch || s.stale !== !!e.stale || s.metadataOnly !== !!e.metadataOnly || s.lineIn !== !!e.lineIn || s.pitch !== (Number(e.pitch) || 0) ||
 			s.cuePos !== (typeof e.cuePos === "number" ? e.cuePos : undefined) || s.master !== !!e.master ||
 			s.lead !== (e.lead !== undefined && e.lead !== null ? !!e.lead : !!e.master) || s.sync !== !!e.sync || s.keylock !== !!e.keylock ||
 			s.bpm !== (Number(e.bpm) || 0) || s.currentBpm !== (Number(e.currentBpm) || 0) || s.range !== (Number(e.range) || 0) ||
@@ -834,9 +834,9 @@ SERVICES_MAIN = """
 				// Same picture: a paused deck at the same spot, or a playing one within
 				// 12 ms of its line (the scroll keeps running within 12 ms too).
 				// Refresh the anchor in place well before the 3 s expiry.
-				const drift = old.playing ? old.positionMs + (at - old.at) * scShadowRate(old) - pos : old.positionMs - pos
-				if (Math.abs(drift) <= (old.playing ? 12 : 0)) {
-					old.positionMs = pos; old.at = at; old.rate = Number(e.rate) || 0; old.beat = Number(e.beat) || 0
+				const drift = (old.playing && !old.scratch) ? old.positionMs + (at - old.at) * scShadowRate(old) - pos : old.positionMs - pos
+				if (Math.abs(drift) <= ((old.playing && !old.scratch) ? 12 : 0)) {
+					old.positionMs = pos; old.at = at; old.rate = Number(e.rate) || 0; old.beat = Number(e.beat) || 0; old.scratch = !!e.scratch
 					continue
 				}
 			}
@@ -844,8 +844,9 @@ SERVICES_MAIN = """
 			// live switch to All CDJ Mode: start over, or the lane keeps the stretched overview for good.
 			const fromCover = !!old && old.engine && !e.engine
 			if (fromCover) { delete scShadowDisplayRequests[d]; delete scShadowDisplayText[d] }
+			const sameBase = !!(old && old.key && key && old.key.split("-")[0] === key.split("-")[0])
 			const sample = {key: key, name: e.name || "", title: e.title || "", artist: e.artist || "", keyName: e.keyName || "",
-				playing: !!e.playing, stale: !!e.stale, metadataOnly: !!e.metadataOnly, positionMs: pos, at: at,
+				playing: !!e.playing, scratch: !!e.scratch, stale: !!e.stale, metadataOnly: !!e.metadataOnly, positionMs: pos, at: at,
 				pitch: Number(e.pitch) || 0, rate: Number(e.rate) || 0, lineIn: isLine,
 				cuePos: typeof e.cuePos === "number" ? e.cuePos : undefined, master: !!e.master,
 				lead: e.lead !== undefined && e.lead !== null ? !!e.lead : !!e.master, sync: !!e.sync, keylock: !!e.keylock,
@@ -853,7 +854,7 @@ SERVICES_MAIN = """
 				jumps: Number(e.jumps) || 0,
 				progress: Number(e.progress) || 0, error: e.error || "", engine: !!e.engine, copying: !!e.copying, durationMs: Number(e.durationMs) || 0,
 				fallback: e.fallback || "",
-				meta: old && old.key === key && !fromCover ? old.meta : null,
+				meta: old && !fromCover && (old.key === key || sameBase) ? old.meta : null,
 				liveCues: Array.isArray(e.cues) ? (same ? old.liveCues : e.cues) : old && old.key === key ? old.liveCues : null}
 			if (!next) next = Object.assign({}, scShadowDisplay)
 			next[d] = sample
@@ -1382,7 +1383,8 @@ SERVICES_MAIN = """
 			["trackName", "/Track/TrackName"], ["artist", "/Track/ArtistName"], ["length", "/Track/TrackLength"],
 			["range", "/SpeedRange"], ["keylock", "/Track/KeyLock"], ["currentKey", "/Track/CurrentKey"],
 			["loop", "/Track/LoopEnableState"], ["keyOffset", "/Track/KeyOffset"], ["stemmed", "/Track/Stemmed"],
-			["slip", "/Track/SlipModeActive"], ["slipPosition", "/Track/SlipModePosition"], ["requestMaster", "/RequestMaster"]])
+			["slip", "/Track/SlipModeActive"], ["slipPosition", "/Track/SlipModePosition"], ["requestMaster", "/RequestMaster"],
+			["scratchTouch", "/ExternalScratchWheelTouch"], ["scratchEnable", "/ExternalScratchWheelScratchEnable"]])
 			p[pair[0]] = root.scTr(prefix + pair[1]) || scShadowEmptyObject
 		p.cues = []
 		for (let i = 1; i <= 8; i++) {
@@ -1453,59 +1455,79 @@ SERVICES_MAIN = """
 			} else s.syncBias = p ? p.syncBias || 0 : 0
 			if (p) {
 				const run = p.playing ? (now - p.at) * (1 + p.pitch / 100) : 0, expect = p.posMs + run
-				// A late tick (GC, a busy GUI thread) can run before Engine's queued position
-				// update and read the position of before the stall (zs15-b: 340 ms behind,
-				// counted as a jump back and a jump forward, each a seek on the peer).
-				// Nothing is known then: the deck is where its speed puts it.
-				// A delayed stream can keep advancing. Once it fell outside the
-				// measured native Sync pull (up to ~27%, plus one audio block),
-				// keep carrying it until it catches up or a normal tick resumes.
-				const block = 35 * (1 + s.pitch / 100)
-				s.lateGuard = syncMoving && now - p.at > 150 && s.rawPos <
-					(p.lateGuard ? expect - block : p.rawPos + run - block - run * 0.3)
-				if (now - p.at > 150 && s.ps && p.ps && s.net === p.net && !p.phaseHold &&
-					!(syncMoving && freshRaw && !s.lateGuard)) s.posMs = expect
-				// Sync phase steps can be smaller than 180 ms. Audio-block jitter is
-				// measured in wall time, so allow it to grow with the deck's rate.
-				const phaseMs = 40 * Math.max(1, 1 + s.pitch / 100)
-				const jumpMs = s.sync && p.playing ? phaseMs : (p.playing ? 180 : 5)
-				const delta = s.posMs - expect
-				const phaseFresh = s.posMs - p.phasePos > (now - p.at) * (1 + s.pitch / 100) * 0.25
-				const movingPhase = syncMoving && freshRaw && !s.lateGuard && isFinite(p.phase) &&
-					delta * p.phase > 0 && Math.abs(delta - p.phase) > phaseMs
-				// A large constant deficit under consecutive late callbacks can
-				// still be an advancing queued stream. A ramp changes that deficit;
-				// a standalone step waits for the next normal callback, as before.
-				const latePhase = syncMoving && now - p.at > 150 && Math.abs(delta) > phaseMs + block && !movingPhase
-				s.phase = undefined
-				s.phasePos = s.posMs
-				// A held platter is not an indefinitely stale GUI read. After
-				// 500 ms use its real position once, then keep the normal jog line
-				// until playback advances again; never seek on every held tick.
-				s.phaseHold = s.sync && s.ps && p.ps && s.net === p.net && !freshRaw &&
-					(p.phaseHold || now - s.rawStillAt >= 500)
-				if (s.phaseHold) s.posMs = s.rawPos
-				if (s.phaseHold) { if (!p.phaseHold) s.jumps++ }
-				else if (s.playing === p.playing && s.net === p.net && Math.abs(delta) > jumpMs) {
-					// A short GUI stall can also leave one stale audio block. Carry
-					// the old line until a small Sync step persists on the next tick;
-					// its queued recovery then never becomes a backward/forward seek.
-					if (s.sync && p.playing && (Math.abs(delta) <= 180 || (isFinite(p.phase) && !phaseFresh)) &&
-						!movingPhase && (latePhase || !isFinite(p.phase) || Math.abs(delta - p.phase) > phaseMs || !phaseFresh)) {
-						s.phase = delta; s.phaseAt = isFinite(p.phase) ? p.phaseAt : now; s.posMs = expect
-					} else s.jumps++
+				const speed = 1 + s.pitch / 100
+				const expectedMove = (now - p.at) * speed
+				const actualMove = s.rawPos - p.rawPos
+				const touchActive = (g.scratchTouch && g.scratchTouch.value > 0)
+				const scratchMotion = s.ps && p.ps && !s.sync && s.net === p.net && (
+					actualMove < -35 ||
+					(isFinite(s.rawStillAt) && now - s.rawStillAt >= 200)
+				)
+				s.scratching = s.ps && !s.sync && (touchActive || scratchMotion)
+				if (s.scratching) {
+					s.posMs = s.rawPos
+					if (!p.scratching) s.jumps++
+					edge = true
+					busy = true
+				} else {
+					// A late tick (GC, a busy GUI thread) can run before Engine's queued position
+					// update and read the position of before the stall (zs15-b: 340 ms behind,
+					// counted as a jump back and a jump forward, each a seek on the peer).
+					// Nothing is known then: the deck is where its speed puts it.
+					// A delayed stream can keep advancing. Once it fell outside the
+					// measured native Sync pull (up to ~27%, plus one audio block),
+					// keep carrying it until it catches up or a normal tick resumes.
+					const block = 35 * (1 + s.pitch / 100)
+					s.lateGuard = syncMoving && now - p.at > 150 && s.rawPos <
+						(p.lateGuard ? expect - block : p.rawPos + run - block - run * 0.3)
+					if (now - p.at > 150 && s.ps && p.ps && s.net === p.net && !p.phaseHold &&
+						!(syncMoving && freshRaw && !s.lateGuard)) s.posMs = expect
+					// Sync phase steps can be smaller than 180 ms. Audio-block jitter is
+					// measured in wall time, so allow it to grow with the deck's rate.
+					const phaseMs = 40 * Math.max(1, 1 + s.pitch / 100)
+					const jumpMs = s.sync && p.playing ? phaseMs : (p.playing ? 180 : 5)
+					const delta = s.posMs - expect
+					const phaseFresh = s.posMs - p.phasePos > (now - p.at) * (1 + s.pitch / 100) * 0.25
+					const movingPhase = syncMoving && freshRaw && !s.lateGuard && isFinite(p.phase) &&
+						delta * p.phase > 0 && Math.abs(delta - p.phase) > phaseMs
+					// A large constant deficit under consecutive late callbacks can
+					// still be an advancing queued stream. A ramp changes that deficit;
+					// a standalone step waits for the next normal callback, as before.
+					const latePhase = syncMoving && now - p.at > 150 && Math.abs(delta) > phaseMs + block && !movingPhase
+					s.phase = undefined
+					s.phasePos = s.posMs
+					// A held platter is not an indefinitely stale GUI read. After
+					// 500 ms use its real position once, then keep the normal jog line
+					// until playback advances again; never seek on every held tick.
+					s.phaseHold = s.sync && s.ps && p.ps && s.net === p.net && !freshRaw &&
+						(p.phaseHold || now - s.rawStillAt >= 500)
+					if (s.phaseHold) s.posMs = s.rawPos
+					if (s.phaseHold) { if (!p.phaseHold) s.jumps++ }
+					else if (s.playing === p.playing && s.net === p.net && Math.abs(delta) > jumpMs) {
+						// A short GUI stall can also leave one stale audio block. Carry
+						// the old line until a small Sync step persists on the next tick;
+						// its queued recovery then never becomes a backward/forward seek.
+						if (s.sync && p.playing && (Math.abs(delta) <= 180 || (isFinite(p.phase) && !phaseFresh)) &&
+							!movingPhase && (latePhase || !isFinite(p.phase) || Math.abs(delta - p.phase) > phaseMs || !phaseFresh)) {
+							s.phase = delta; s.phaseAt = isFinite(p.phase) ? p.phaseAt : now; s.posMs = expect
+						} else s.jumps++
+					}
 				}
 				if (s.jumps !== p.jumps || s.playing !== p.playing || s.net !== p.net || Math.abs(s.pitch - p.pitch) > 0.02 || s.master !== p.master || s.sync !== p.sync || s.range !== p.range || s.keylock !== p.keylock) edge = true
+				if (s.scratching !== (p.scratching || false)) edge = true
 				if (!s.ps && s.posMs !== p.posMs) busy = true // scrub, seek or CUE preview while paused
 			}
-			if (s.cue) busy = true
+			if (s.cue || s.scratching) busy = true
 			if (s.ps) moving = true
 			// Engine moves TrackPosition in audio blocks: at 25 Hz a playing deck's raw
 			// position is up to ~35 ms of track time behind (high pitch). With the speed
 			// known, the upper envelope of position - speed * time is the newest block:
 			// post that line (noise of a few ms), decaying 0.5 ms/s to follow pitch rounding.
 			const speed = 1 + s.pitch / 100, raw = s.posMs - speed * now
-			if (s.phaseHold) s.env = s.avg = raw
+			if (s.scratching) {
+				s.env = s.avg = raw
+				s.lineMs = s.posMs
+			} else if (s.phaseHold) s.env = s.avg = raw
 			else if (syncMoving) {
 				// Native Sync pulls phase by changing the transport's instantaneous
 				// speed for up to ~1.6 s. The nominal-pitch envelope would conceal
@@ -1524,12 +1546,12 @@ SERVICES_MAIN = """
 				const slow = p.env - s.avg - 25 * speed
 				s.env = Math.max(raw, p.env - (slow > 0 ? slow * 0.2 : 0.0005 * (now - p.at)))
 			} else s.env = s.avg = raw
-			s.lineMs = s.ps ? s.env + speed * now : s.posMs
+			s.lineMs = s.ps && !s.scratching ? s.env + speed * now : s.posMs
 			// A jog nudge moves the line off the one the peer carries on: post it at once,
 			// not at the next heartbeat (25 Hz for 2 s, so the peer follows the nudge).
 			const sent = scShadowSent[n]
 			if (s.ps && sent && sent.playing && sent.deck === d && sent.net === s.net && sent.pitch === s.pitch && sent.jumps === s.jumps &&
-				Math.abs(s.lineMs - sent.positionMs - (now - sent.at) * speed) > 15) edge = true
+				(s.scratching || sent.scratch !== s.scratching || Math.abs(s.lineMs - sent.positionMs - (now - sent.at) * speed) > 15)) edge = true
 			scShadowPrev[d] = s
 			scShadowSampleSpare[d] = p || {}
 		}
@@ -1614,7 +1636,7 @@ SERVICES_MAIN = """
 			const fresh = o.net !== s.net || !(now - (scShadowTextAt[d] || 0) < 2000) || o.keyOffset !== shift
 			o.deck = d; o.net = s.net; o.cues = s.net ? cc.cues : null; o.cuePos = s.net ? g.cuePosition.value : undefined
 			o.masterPress = scMasterPresses(d, g.requestMaster)
-			o.playing = s.playing; o.cue = s.cue; o.link = link; o.positionMs = s.lineMs; o.at = s.at; o.jumps = s.jumps
+			o.playing = s.playing; o.scratch = !!s.scratching; o.cue = s.cue; o.link = link; o.positionMs = s.lineMs; o.at = s.at; o.jumps = s.jumps
 			o.pitch = s.pitch; o.master = s.master || d === lead; o.lead = s.master; o.bpm = s.bpm; o.currentBpm = s.currentBpm
 			o.sync = s.sync; o.beat = g.beat.unnormalized || 0
 			o.active = d === scShadowActiveDeck // on this unit's active layer (#201)
@@ -1640,11 +1662,11 @@ SERVICES_MAIN = """
 			// The peer carries the position on from the last full post at its pitch;
 			// o.positionMs is the filtered line (scShadowTick), so a real slip only.
 			let onLine = false
-			if (sent.deck === d && sent.net === o.net && sent.playing === o.playing && sent.pitch === o.pitch && sent.jumps === o.jumps) {
-				const expect = sent.positionMs + (o.playing ? (o.at - sent.at) * (1 + o.pitch / 100) : 0)
-				onLine = Math.abs(o.positionMs - expect) <= (o.playing ? 15 : 0.5)
+			if (sent.deck === d && sent.net === o.net && sent.playing === o.playing && sent.scratch === o.scratch && sent.pitch === o.pitch && sent.jumps === o.jumps) {
+				const expect = sent.positionMs + ((o.playing && !o.scratch) ? (o.at - sent.at) * (1 + o.pitch / 100) : 0)
+				onLine = Math.abs(o.positionMs - expect) <= ((o.playing && !o.scratch) ? 15 : 0.5)
 			}
-			if (!onLine || sent.cue !== o.cue || sent.master !== o.master || sent.masterPress !== o.masterPress || sent.lead !== o.lead || sent.sync !== o.sync || sent.cuePos !== o.cuePos ||
+			if (!onLine || sent.scratch !== o.scratch || sent.cue !== o.cue || sent.master !== o.master || sent.masterPress !== o.masterPress || sent.lead !== o.lead || sent.sync !== o.sync || sent.cuePos !== o.cuePos ||
 				sent.title !== o.title || sent.artist !== o.artist || sent.keyName !== o.keyName || sent.durationMs !== o.durationMs || sent.link !== o.link || sent.bpm !== o.bpm || sent.currentBpm !== o.currentBpm || sent.range !== o.range || sent.keylock !== o.keylock || sent.cuesRev !== cc.rev || sent.active !== o.active ||
 				sent.loop !== o.loop || sent.keyOffset !== o.keyOffset || sent.stems !== o.stems || sent.slip !== o.slip) edge = true // slip's timeline runs on: in full at every heartbeat while it is active
 		}
@@ -1658,7 +1680,7 @@ SERVICES_MAIN = """
 		}
 		for (let n = 0; n < own.length; n++) {
 			const o = own[n], sent = scShadowSent[n]
-			sent.deck = o.deck; sent.net = o.net; sent.playing = o.playing; sent.cue = o.cue; sent.jumps = o.jumps; sent.pitch = o.pitch
+			sent.deck = o.deck; sent.net = o.net; sent.playing = o.playing; sent.scratch = o.scratch; sent.cue = o.cue; sent.jumps = o.jumps; sent.pitch = o.pitch
 			sent.master = o.master; sent.masterPress = o.masterPress; sent.lead = o.lead; sent.sync = o.sync; sent.cuePos = o.cuePos; sent.title = o.title; sent.artist = o.artist; sent.keyName = o.keyName; sent.durationMs = o.durationMs
 			sent.link = o.link; sent.bpm = o.bpm; sent.currentBpm = o.currentBpm; sent.range = o.range; sent.keylock = o.keylock; sent.loop = o.loop; sent.keyOffset = o.keyOffset; sent.stems = o.stems; sent.slip = o.slip; sent.cuesRev = scShadowCueCache[o.deck].rev; sent.positionMs = o.positionMs; sent.at = o.at; sent.active = o.active
 		}
@@ -4559,6 +4581,15 @@ SHADOW_LAYER = r"""
             const st = !!s && (s.stale || now - Math.max(s.at, root.scShadowLive.seen) >= root.scShadowExpiryMs)
             if (st !== stale) stale = st
             if (!wave) return
+            if (s && s.scratch) {
+                if (scroll.running || scrollSpeed > 0) {
+                    scroll.stop()
+                    scrollSpeed = 0
+                }
+                const x = contentX(pos)
+                if (scMoving.x !== x) scMoving.x = x
+                return
+            }
             const end = metaDuration(meta)
             const speed = live && visible && s && s.playing && !st && pos < end ? root.scShadowRate(s) : 0
             if (speed > 0) {
