@@ -95,7 +95,7 @@
 | 3 | `Settings → Device` | `Power` → `Turn Off` / 电源 → 关机 / 電源 → 關機 | 调用原厂关机确认框与录音/曲库保护流程（#78） | — | — | — | 按钮，仅 5.3.0 |
 | 4 | `Settings → Services` | `Streaming Quality` / 流媒体音质 / 串流音質 | 下载音质 `Lossless` / `320kbps` | `flac` | `quality=flac\|320k` | `quality` | 下一次下载起生效 |
 | 5 | `Settings → Services` | `NetEase Download` / 网易云下载方式 / 網易雲下載方式 | `Official`（官方直下）/ `Deemix First`（Deemix 优先） | `official` | `neteaseMode=official\|deemix` | `netease_mode` | 节省网易云月度下载额度 |
-| 6 | `Settings → Services` | `Live Stream` / 直播推流 / 直播推流 | 主输出数字内录：免配置直连 `http://<碟机IP>:8080/live.wav`、`/live.mp3`，或推送至 Icecast / Shoutcast | 关 | `broadcast=0\|1` | `<DATA>/state/broadcast-config.json` | 推流服务器参数在 Web 控制台填写 |
+| 6 | `Settings → Services` | `Live Stream` / 直播推流 / 直播推流 | 主输出数字内录，固定为 WAV（PCM 16 位 · 48 kHz · 立体声，约 1536 kbps）：免配置直连 `http://<碟机IP>:8080/live.wav`，或把同一路流推送到自己的 Icecast 服务器（可选转发） | 关 | `broadcast=0\|1` | `<DATA>/state/broadcast-config.json` | 推流服务器参数在 Web 控制台填写 |
 | 7 | `Settings → Services` | `Pro DJ Link Library` / Pro DJ Link 曲库 / Pro DJ Link 曲庫 | 读取局域网内 CDJ 上 rekordbox U 盘的曲库 | 关 | `prolinkShare=0\|1` | `prolink_share` | #59 |
 | 8 | `Settings → Services` | `Pro DJ Link Export to CDJ (Beta)` / Pro DJ Link 导出至 CDJ（测试版） / Pro DJ Link 匯出至 CDJ（測試版） | 把本机 U 盘与已缓存流媒体共享给 CDJ 浏览 | 关 | `prolinkExport=0\|1` | `prolink_export` | 状态 `prolinkExportActive` 只读 |
 | 9 | `Profile → Display` | `Waveform Style` / 波形样式 / 波形樣式 | 波形配色 `Denon` / `RGB` / `3-Band` | `denon` | `waveform=denon\|rgb\|3band` | `waveform` | 与控制中心 `Waveform Style` 磁贴双向同步 |
@@ -194,7 +194,7 @@
 | 丢失曲目重定位（#74） | "扫描丢失曲目"（只预览）、"一键修复路径"（先备份 `m.db` 再改）、结果列表 | 同盘内被移动或改名的文件，按文件名+大小 → 忽略大小写 → 清理后的文件名匹配；修复后在碟机上弹出该盘再重新插入（碟机正在使用该盘时，改写排队到下次插入、Engine 打开曲库之前） |
 | 碟机显示与音频 | 流媒体音质、碟机界面语言、波形样式、原厂 4 碟布局（开关）、4 碟分工、拉杆回音、软限幅、自动增益、OmniSource、插盘自动分析、Pro DJ Link 曲库、Pro DJ Link 共享（实验性）共 12 项 | 与屏幕设置同一份 conf。4 碟项和回音项按 `player` 显示 / 隐藏；切 4 碟、切语言会先确认再重启 Engine |
 | 下载与分析 | 任务列表 + 最新曲目 RGB 波形画布 | 下载、分析进度 |
-| 直播推流（折叠） | 服务器、挂载点、协议（Icecast / Shoutcast）、格式（MP3 / OGG-Opus / WAV）、码率（128–320）、密码；保存、开始 / 停止 | 屏幕上只有开关，参数全在这里 |
+| 直播推流（折叠） | 服务器、挂载点、用户名、密码；固定格式说明（WAV · PCM 16 位 · 48 kHz · 立体声 ≈ 1536 kbps）、直连 `/live.wav` 与 Icecast 转发的关系、Icecast 的 `live-header.wav` intro 提示；保存、开始 / 停止 | 屏幕上只有开关，参数全在这里 |
 | 云端登录服务（折叠） | 中继地址、新密码 | 让移动数据的手机也能登录；`enginex-relay` 自建 |
 | BPM 数据来源（可选，折叠） | SoundCloud Client ID / Secret / oauth_token、GetSongBPM Key | 给没有 BPM 的曲目补预览 |
 | 手机扫码打开控制台（折叠） | 二维码 | 同局域网手机打开 |
@@ -261,7 +261,7 @@
 | Stems | 三级：云中继 → 局域网电脑（`enginex-stemsd`，UDP 17891 自动发现，`tools/stems/run-home-worker.*`）→ 碟机本机分轨（比播放快 1.4 倍）；碟机上 `stems-processor` 代替原厂子进程 |
 | 流媒体网关 | 本机伪装 TIDAL，覆盖网易云、Spotify、Deezer、SoundCloud、Beatport、Apple Music；Apple Music 由 Engine 5.3.0 自带音源播放（EngineX 只负责解锁），网关不再匹配 Deezer 或网易云；Beatport 按订阅档位取 FLAC / 256k AAC / 128k AAC；播放过的曲目缓存在 `/data`，再次加载免下载 |
 | 登录中继 | `enginex-relay`（可选自建）：让手机走移动数据登录，Deezer 网页内登录，Stems 公网入口 |
-| 直播推流 | Shoutcast / Icecast |
+| 直播推流 | WAV 直连 `/live.wav`；可选推送到 Icecast（不支持 Shoutcast） |
 | 曲库维护 | `dbhealer` 修复 PerformanceData、历史记录；`enginedb` 重定位、智能匹配（Camelot 兼容调性）、`analyzer` 纯 Go 分析 BPM / 拍线 / 调性 / RGB 波形 |
 | 在线升级 | 一代机下载 `*-Update.img`，校验 AZ01 头尾，调用原厂 `az01-update --net`；二代机下载带 128 字节 `ENGINEX_DATA_BUNDLE_IMG_V1` 头的 `*-Update.img`（未挂载预加载更新器链路或无 `planck-remote-screen` 的 AZ04 机型由 Go 校验载荷 SHA-256 与 `SHA256SUMS` 后就地替换 `<DATA>`，64 MiB 下载上限、128 MiB 解包上限、只接受普通文件） |
 | 发版门禁 | `release-gate.sh`（上一版在线升级 → 新版开机全功能验收），不属于运行时功能 |

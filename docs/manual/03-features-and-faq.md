@@ -425,12 +425,9 @@ CDJ 不通过 Pro DJ Link 报告 Hot Cue。跟另一台 EngineX 碟机时有。
 **37. 开了 Live Stream: ON，电脑上怎么收听 / 直播？**
 先在碟机 `设置 → 服务 → 直播推流`（`Settings → Services → Live Stream`）设为 **`开`**（**`On`**），再选一种用法（地址里的 `<碟机IP>` 换成碟机的局域网 IP）：
 
-- **用法一：电脑免配置直连（最简单）。** 电脑不用装任何服务端软件，在 **OBS**（添加「媒体源」→ 取消勾选「本地文件」→ 填地址）、**VLC** 或**浏览器**里打开：
-  - MP3 直播流：`http://<碟机IP>:8080/live.mp3`
-  - WAV 无损流：`http://<碟机IP>:8080/live.wav`
-
-  直接收到碟机数字内录的主输出声音，外置声卡和录音线都省了。
-- **用法二：推送到外部 Icecast / Shoutcast 服务器。** 在电脑浏览器打开 `http://<碟机IP>:8080` 的 Web 控制台，在 Live Stream 卡片填入外部 Icecast 服务器地址、挂载点和密码。碟机在空闲的 CPU3 核上后台自动推流，并实时同步当前播放的歌名。
+- **用法一：电脑免配置直连（最简单）。** 电脑不用装任何服务端软件，在 **OBS**（添加「媒体源」→ 取消勾选「本地文件」→ 填地址）、**VLC** 或**浏览器**里打开 WAV 无损流 `http://<碟机IP>:8080/live.wav`（PCM 16 位 · 48 kHz · 立体声，约 1536 kbps）。直接收到碟机数字内录的主输出声音，外置声卡和录音线都省了。
+- **用法二：推送到外部 Icecast 服务器（可选转发）。** 用法一不需要任何服务器；只有想把同一路 WAV 流转给自己运行的 Icecast 服务器时才用它。在电脑浏览器打开 `http://<碟机IP>:8080` 的 Web 控制台，在 Live Stream 卡片填入 Icecast 服务器地址、挂载点和密码。推送格式固定为 WAV，没有 MP3 或码率选项；Shoutcast 服务器只收 MP3 / AAC，不能使用。碟机在空闲的 CPU3 核上后台自动推流，并实时同步当前播放的歌名。
+  - **中途加入的听众需要设置 intro：** Icecast 只在推流开头收到一次 WAV 文件头，之后加入的听众收到的是没有文件头的裸 PCM，播放器会误判编码。把 `http://<碟机IP>:8080/live-header.wav`（44 字节）下载到 Icecast 的 web 根目录（例如 `/usr/share/icecast2/web/`），再在 `icecast.xml` 里给该挂载点加上 `<mount type="normal"><mount-name>/live</mount-name><intro>/live-header.wav</intro></mount>`（`mount-name` 填控制台里的挂载点），重启 Icecast（已在 Icecast 2.4.4 上验证）。
 
 **37a. 电脑刷机工具看不到 PRIME GO / SC5000 / 其他一代机？（`#104`）**
 
