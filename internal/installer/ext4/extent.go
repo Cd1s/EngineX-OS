@@ -116,7 +116,10 @@ func (f *fsys) walkExtents(st *mapState, node []byte, wantMax int, wantDepth int
 	entries := int(le.Uint16(node[2:]))
 	max := int(le.Uint16(node[4:]))
 	depth := int(le.Uint16(node[6:]))
-	if max > wantMax || max == 0 || entries > max || depth > 5 || (wantDepth >= 0 && depth != wantDepth) {
+	// As the kernel's ext4_ext_check: an index node, and any node below the
+	// root, must hold at least one entry.
+	if max > wantMax || max == 0 || entries > max || depth > 5 || (wantDepth >= 0 && depth != wantDepth) ||
+		entries == 0 && (depth > 0 || wantDepth >= 0) {
 		return corruptf("inode %d: bad extent header (entries %d max %d depth %d)", in.num, entries, max, depth)
 	}
 	prev := int64(-1)
@@ -255,46 +258,6 @@ func (f *fsys) walkIndirect(st *mapState) error {
 		span *= per
 	}
 	return nil
-}
-
-// firstBlock resolves logical block 0 with a bounded number of reads,
-// without mapping the whole inode (used for the journal superblock).
-func (f *fsys) firstBlock(in *inode) (uint64, error) {
-	if in.flags()&flagExtents == 0 {
-		p := uint64(le.Uint32(in.iblock()))
-		if p < f.firstDataBlock || p >= f.blocksCount {
-			return 0, corruptf("inode %d: first block pointer %d out of range", in.num, p)
-		}
-		return p, nil
-	}
-	node := in.iblock()
-	wantMax := 4
-	for level := 0; level <= 5; level++ {
-		if le.Uint16(node[0:]) != extentMagic {
-			return 0, corruptf("inode %d: bad extent header magic", in.num)
-		}
-		entries, max, depth := int(le.Uint16(node[2:])), int(le.Uint16(node[4:])), int(le.Uint16(node[6:]))
-		if entries == 0 || max > wantMax || entries > max || depth > 5 || le.Uint32(node[12:]) != 0 {
-			return 0, corruptf("inode %d: no extent for block 0", in.num)
-		}
-		if depth == 0 {
-			phys := uint64(le.Uint16(node[12+6:]))<<32 | uint64(le.Uint32(node[12+8:]))
-			if phys < f.firstDataBlock || phys >= f.blocksCount {
-				return 0, corruptf("inode %d: extent at block %d out of range", in.num, phys)
-			}
-			return phys, nil
-		}
-		child := uint64(le.Uint16(node[12+8:]))<<32 | uint64(le.Uint32(node[12+4:]))
-		blk, err := f.readBlock(child)
-		if err != nil {
-			return 0, err
-		}
-		if err := f.verifyExtentBlock(in, blk); err != nil {
-			return 0, err
-		}
-		node, wantMax = blk, int((f.bs-12)/12)
-	}
-	return 0, corruptf("inode %d: extent tree too deep", in.num)
 }
 
 // writeExtentTree stores exts as the inode's extent tree, allocating tree
