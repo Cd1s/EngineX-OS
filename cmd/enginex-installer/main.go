@@ -72,7 +72,6 @@ type options struct {
 	// release is the tag the signed list of the package fetched from GitHub (or kept from such a
 	// download) proves; empty for a file the user named. modeA checks it against the deck.
 	release string
-
 }
 
 func (o *options) defaults() {
@@ -940,6 +939,17 @@ func modeA(ctx context.Context, o *options, d deck) error {
 			return err
 		}
 		defer f.Close()
+		st, err := f.Stat()
+		if err != nil {
+			return err
+		}
+		image, err := azimg.Open(ctx, f, st.Size(), azimg.Limits{})
+		if err != nil {
+			return err
+		}
+		if image.Format() != azimg.FormatAZ01 || !image.SupportsBoard(code) {
+			return errors.New("AZ01 image does not support this deck; nothing installed")
+		}
 		h := sha256.New()
 		if _, err := io.Copy(h, f); err != nil {
 			return err
@@ -987,7 +997,7 @@ func modeA(ctx context.Context, o *options, d deck) error {
 
 var (
 	geteuid = os.Geteuid
-	goos = runtime.GOOS
+	goos    = runtime.GOOS
 )
 
 func formatBytes(b int64) string {
@@ -1131,36 +1141,31 @@ func parseIOReg(out string) string {
 	return b.String()
 }
 
-// diagnoseUSB explains why fastboot sees nothing when the deck is on the USB bus anyway.
+// diagnoseUSB distinguishes a connected deck from an available update protocol.
 func diagnoseUSB(ctx context.Context, o *options) {
 	var hits []string
-	for _, l := range strings.Split(o.ListUSB(ctx), "\n") {
-		if isDeckUSB(l) {
-			hits = append(hits, strings.TrimSpace(l))
+	for _, line := range strings.Split(o.ListUSB(ctx), "\n") {
+		if isDeckUSB(line) {
+			hits = append(hits, strings.TrimSpace(line))
 		}
 	}
 	if len(hits) == 0 {
 		return
 	}
 	dev := strings.Join(hits, "; ")
-	if IsRockchipUSBLoader(dev) {
-		o.hint("usb", "碟机在 USB 上（"+dev+"），但处于 Rockchip Loader（rkdeveloptool）模式而不是 fastboot：请重启碟机，改用 Settings → Update 里的 Firmware Update Mode。",
-			"The deck is on USB ("+dev+") in the Rockchip Loader (rkdeveloptool) mode, not fastboot: reboot it and pick Firmware Update Mode under Settings → Update.")
+	if IsRockchipUSBLoader(dev) || strings.Contains(dev, "2207:0006") {
+		o.hint("usb", "USB 恢复模式（"+dev+"）暂不支持写入，请重启并选择 Firmware Update Mode。",
+			"Rockchip Loader/recovery mode ("+dev+") writes are disabled. Reboot and select Firmware Update Mode.")
 		return
 	}
-	// USB enumeration does not prove the fastboot protocol is available (#129, #164).
-	zh, en := "碟机已通过 USB 连接（"+dev+"），但 fastboot 还看不到它（USB 识别不代表 fastboot 协议可用）。如果碟机屏幕还在主界面，请点 Settings → Update → Firmware Update Mode (Reboot)，USB 线保持连接；",
-		"The deck is on USB ("+dev+") but fastboot cannot see it yet (USB enumeration does not prove fastboot is available). If the deck still shows its main screen, tap Settings → Update → Firmware Update Mode (Reboot) and keep the cable in;"
-	switch {
-	case goos == "windows":
-		zh += "如果已处于 Firmware Update Mode，请检查 fastboot 与驱动设置：原生 Windows 下 Google fastboot 要求设备注册 Android 设备接口 GUID（{F72FE0D4-CBCB-407D-8814-9ED673D0DD6B}）。在设备管理器中选择更新接口安装「Android Device / Android Bootloader Interface」驱动，或使用 Zadig（https://zadig.akeo.ie）选择对应的碟机更新接口（如 Denon DJ SC LIVE 4 Update 或 Numark MIXSTREAM PRO PLUS），勾选编辑接口 GUID 设为上述值安装 WinUSB。更推荐在 WSL 中运行 Linux 安装包并用 usbipd-win 直通 USB（WSL 下安装 fastboot 与 e2fsprogs，且须以 root 身份运行如 wsl -u root，避免 usbipd 设备节点权限不足导致 fastboot 识别为空）。"
-		en += " if it already shows Firmware Update Mode, check fastboot and driver configuration: native Windows Google fastboot requires the device to expose the Android device interface GUID ({F72FE0D4-CBCB-407D-8814-9ED673D0DD6B}). In Device Manager, install the 'Android Device / Android Bootloader Interface' driver for the update interface, or use Zadig (https://zadig.akeo.ie) to select the deck update interface (e.g. Denon DJ SC LIVE 4 Update or Numark MIXSTREAM PRO PLUS) and configure the device interface GUID to that value. Alternatively, running the Linux package in WSL with usbipd-win is recommended (install fastboot and e2fsprogs in WSL, and run as root via 'wsl -u root' to ensure usbipd-forwarded USB device nodes are accessible to fastboot)."
-	case goos == "linux" && geteuid() != 0:
-		zh += "如果碟机屏幕已经处于 Firmware Update Mode，请用 sudo 运行本工具，或添加 udev 规则：\n  " + udevHint
-		en += " if it already shows Firmware Update Mode, run this tool with sudo or add a udev rule:\n  " + udevHint
-	default:
-		zh += "如果碟机屏幕已经处于 Firmware Update Mode，请检查电脑上的 fastboot 是否能用（fastboot devices）。"
-		en += " if it already shows Firmware Update Mode, check that fastboot works on this computer (fastboot devices)."
+	zh, en := "碟机已连接（"+dev+"），但更新协议尚不可用。请在碟机上选择 Firmware Update Mode，保持 USB 连接。",
+		"The deck is connected ("+dev+") but the update protocol is not available. Select Firmware Update Mode on the deck and keep USB connected."
+	if goos == "windows" {
+		zh += "更新接口需要绑定系统内置的 WinUSB 驱动；本工具不会更改驱动。"
+		en += " The update interface must use the in-box WinUSB driver; this tool does not change drivers."
+	} else if goos == "linux" && geteuid() != 0 {
+		zh += "若提示权限不足，请用 sudo 运行本工具。"
+		en += " For a permission error, run this tool with sudo."
 	}
 	o.hint("usb", zh, en)
 }
@@ -1252,19 +1257,6 @@ func jc11sDataPartition(ctx context.Context, client *fastboot.Client) (int64, er
 	return size, nil
 }
 
-// activationFiles maps the bundle files that start EngineX at boot to the paths
-// they must have in the data image.
-func activationFiles(root string) map[string][]string {
-	want := map[string][]string{
-		"boot-activate.sh":         {root + "/bundle/boot-activate.sh", "/sc5000-custom/bundle/boot-activate.sh"},
-		"lib/libengine-ui-hook.so": {root + "/bundle/lib/libengine-ui-hook.so", "/sc5000-custom/bundle/lib/libengine-ui-hook.so"},
-	}
-	for _, name := range alsaConfNames {
-		want[name] = []string{"/system/var/overlay/lib/alsa/conf.d/" + name}
-	}
-	return want
-}
-
 // sshPublicKey is the .pub of --key, else of the first ~/.ssh/id_* that has one; "" when there is none.
 func sshPublicKey(o *options) string {
 	if o.Key != "" {
@@ -1280,14 +1272,6 @@ func sshPublicKey(o *options) string {
 		}
 	}
 	return ""
-}
-
-func mustTemp() string {
-	d, err := os.MkdirTemp("", "enginex-installer-")
-	if err != nil {
-		panic(err)
-	}
-	return d
 }
 
 func fileExists(p string) bool { _, err := os.Stat(p); return err == nil }
@@ -1440,7 +1424,7 @@ func modeBGen1(ctx context.Context, o *options, session *updateSession, m model)
 	if err != nil {
 		return err
 	}
-	err = image.ExtractRootfs(ctx, out)
+	_, err = image.ExtractRootfs(ctx, out)
 	if cerr := out.Close(); err == nil {
 		err = cerr
 	}
