@@ -3461,9 +3461,144 @@ LOGIN_DIALOG = """
 
 SOURCE_FOOTER = """
 	property var scTidalRow: null
+	property string scFocusKind: ""
+	property int scFocusRow: -1
+	property string scFocusService: ""
+	readonly property QObjProperty pScSourceIndex: Planck.getProperty("/Qml/ControlFocus/ScSourceIndex")
+	readonly property QObjProperty pScSourceSelect: Planck.getProperty("/Qml/ControlFocus/ScSourceSelect")
+	function scHiddenSourceName(name) {
+		return ["TIDAL", "Tidal", "SoundCloud", "Beatport", "Beatport LINK"].indexOf(String(name || "")) >= 0
+	}
+	function scFindAvailableSource() {
+		let p = connectedSource.parent
+		while (p && p.objectName !== "SourceScreenContentColumn" && p.parent) p = p.parent
+		if (!p) return null
+		function walk(n) {
+			if (!n) return null
+			if (n.objectName === "AvailableSource") return n
+			const ch = n.children || []
+			for (let i = 0; i < ch.length; i++) {
+				const hit = walk(ch[i])
+				if (hit) return hit
+			}
+			return null
+		}
+		return walk(p)
+	}
+	function scEnsureVisible(item) {
+		if (!item) return
+		let p = connectedSource.parent
+		while (p && typeof p.ensureItemVisible !== "function") p = p.parent
+		if (p) p.ensureItemVisible(item)
+	}
+	function scEntries() {
+		const list = []
+		const sources = Planck.librarianController.browserSourceControllerPtr()
+		const cm = sources.connectedSourceModel()
+		for (let i = 0; cm && i < cm.rowCount(); i++) {
+			const nm = cm.data(cm.index(i, 0), root.scSourceNameRole)
+			if (!scHiddenSourceName(nm)) list.push({ kind: "conn", row: i, id: "" })
+		}
+		const svcs = root.scServices.filter(s => root.scSources.indexOf(s.id) >= 0)
+		for (let i = 0; i < svcs.length; i++) {
+			list.push({ kind: "footer", row: i, id: svcs[i].id })
+		}
+		if (connectedSource.expanded) {
+			const am = sources.availableSourceModel()
+			for (let i = 0; am && i < am.rowCount(); i++) {
+				const nm = am.data(am.index(i, 0), root.scSourceNameRole)
+				if (!scHiddenSourceName(nm)) list.push({ kind: "avail", row: i, id: "" })
+			}
+		}
+		return list
+	}
+	function scSyncAvailFocus() {
+		const avail = scFindAvailableSource()
+		if (avail) avail.scFocusRow = scFocusKind === "avail" ? scFocusRow : -1
+	}
+	function scStep(dir) {
+		const list = scEntries()
+		if (!list.length) return
+		let cur = -1
+		for (let i = 0; i < list.length; i++) {
+			if (list[i].kind === scFocusKind && (scFocusKind === "footer" ? list[i].id === scFocusService : list[i].row === scFocusRow)) {
+				cur = i
+				break
+			}
+		}
+		const next = cur < 0 ? (dir < 0 ? list.length - 1 : 0) : Math.max(0, Math.min(list.length - 1, cur + (dir < 0 ? -1 : 1)))
+		const e = list[next]
+		scFocusKind = e.kind
+		scFocusRow = e.row
+		scFocusService = e.id
+		scSyncAvailFocus()
+		if (e.kind === "conn") scEnsureVisible(connectedSource.itemAtIndex ? connectedSource.itemAtIndex(e.row) : null)
+		else if (e.kind === "footer") scEnsureVisible(scFooterRepeater.itemAt(e.row))
+	}
+	function scActivate() {
+		if (!scFocusKind) scStep(1)
+		const sources = Planck.librarianController.browserSourceControllerPtr()
+		if (scFocusKind === "footer" && scFocusService) {
+			root.scOpen(scFocusService)
+			return
+		}
+		if (scFocusKind === "conn" && scFocusRow >= 0) {
+			const cm = sources.connectedSourceModel()
+			if (cm && scFocusRow < cm.rowCount()) sources.select(cm.index(scFocusRow, 0))
+			return
+		}
+		if (scFocusKind === "avail" && scFocusRow >= 0) {
+			const am = sources.availableSourceModel()
+			if (am && scFocusRow < am.rowCount()) sources.select(am.index(scFocusRow, 0))
+			return
+		}
+	}
+	Connections {
+		target: PlanckGUI.views.sourceScreenView
+		function onVisibleChanged() {
+			if (!PlanckGUI.views.sourceScreenView.visible) {
+				connectedSource.scFocusKind = ""
+				connectedSource.scFocusRow = -1
+				connectedSource.scFocusService = ""
+				connectedSource.scSyncAvailFocus()
+			} else if (connectedSource.scTidalRow && connectedSource.scTidalRow.isCurrent && root.scScope && root.scSources.indexOf(root.scScope) >= 0) {
+				connectedSource.scFocusKind = "footer"
+				connectedSource.scFocusService = root.scScope
+				connectedSource.scFocusRow = -1
+				connectedSource.scSyncAvailFocus()
+			}
+		}
+	}
+	Keys.onUpPressed: scStep(-1)
+	Keys.onDownPressed: scStep(1)
+	Keys.onReturnPressed: scActivate()
+	Keys.onEnterPressed: scActivate()
+	Connections {
+		target: connectedSource.pScSourceIndex ? connectedSource.pScSourceIndex.translator : null
+		function onStateChanged() {
+			if (!PlanckGUI.views.sourceScreenView.visible || root.messageBoxOpen) return
+			const v = connectedSource.pScSourceIndex.translator.value
+			if (v !== 0) connectedSource.scStep(v < 0 ? -1 : 1)
+		}
+	}
+	Connections {
+		property int prevCount: 0
+		target: connectedSource.pScSourceSelect ? connectedSource.pScSourceSelect.translator : null
+		function onStateChanged() {
+			const tr = connectedSource.pScSourceSelect.translator
+			if (!tr || !tr.state) return
+			const c = tr.stateTrueCount
+			if (prevCount !== c) {
+				prevCount = c
+				tr.state = false
+				if (PlanckGUI.views.sourceScreenView.visible && !root.messageBoxOpen) connectedSource.scActivate()
+			}
+		}
+	}
 	footer: Column {
 		width: connectedSource.width
 		Repeater {
+			id: scFooterRepeater
 			model: root.scServices.filter(s => root.scSources.indexOf(s.id) >= 0)
 			MouseArea {
 				width: connectedSource.width
@@ -3472,7 +3607,7 @@ SOURCE_FOOTER = """
 				Rectangle {
 					anchors.fill: parent
 					radius: 16
-					color: parent.pressed ? Style.focus02Color : Style.surface02Color
+					color: (connectedSource.scFocusKind === "footer" && connectedSource.scFocusService === modelData.id) || parent.pressed ? Style.focus02Color : Style.surface02Color
 					border.color: Style.icon02Color
 					border.width: connectedSource.scTidalRow && connectedSource.scTidalRow.isCurrent && root.scScope === modelData.id ? 2 : 0
 				}
@@ -3524,7 +3659,9 @@ Grid {
 	readonly property real contentHeight: implicitHeight
 	property bool interactive: false
 	property int currentIndex: -1
-	readonly property Item currentItem: currentIndex >= 0 && currentIndex < scRepeater.count ? scRepeater.itemAt(currentIndex) : null
+	property int scFocusRow: -1
+	readonly property int scEffectiveRow: scFocusRow >= 0 ? scFocusRow : currentIndex
+	readonly property Item currentItem: scEffectiveRow >= 0 && scEffectiveRow < scRepeater.count ? scRepeater.itemAt(scEffectiveRow) : null
 
 	columns: columnCount
 	Repeater {
@@ -5566,11 +5703,15 @@ def edits(dev: bool):
         v + "BrowseView/Components/BreadcrumbView/BreadcrumbViewHeader.qml": [
             ("text: breadcrumbViewHeader.title\n", 'text: ["My Playlists", "My Collection"].indexOf(breadcrumbViewHeader.title) >= 0 ? root.scT(breadcrumbViewHeader.title) : breadcrumbViewHeader.title\n'),
         ],
+        v + "BrowserSource/ConnectedSourceDelegate.qml": [(
+            "	readonly property bool isSelected: ListView.isCurrentItem || pressed\n",
+            '	readonly property bool isSelected: (ListView.view.scFocusKind ? (ListView.view.scFocusKind === "conn" && ListView.view.scFocusRow === model.index) : ListView.isCurrentItem) || pressed\n',
+        )],
         # Services switched off in Settings > Streaming stay hidden here, as stock ones do.
         v + "BrowserSource/AvailableSource.qml": AVAILABLE_SOURCE,
         v + "BrowserSource/AvailableSourceDelegate.qml": [
             ("GridView.view.model.index(model.index, 0)", "Planck.librarianController.browserSourceControllerPtr().availableSourceModel().index(model.index, 0)"),
-            ("GridView.isCurrentItem || cellContent.pressed", "availableSource.currentIndex === model.index || cellContent.pressed"),
+            ("GridView.isCurrentItem || cellContent.pressed", "(availableSource.scFocusRow >= 0 ? availableSource.scFocusRow === model.index : availableSource.currentIndex === model.index) || cellContent.pressed"),
         ],
         # #142: Suppress non-interactive background Wi-Fi and network modal pop-ups
         # ("Wi-Fi Login Error: Failed to connect / Lost connection") that disrupt live gigs
@@ -7019,9 +7160,22 @@ def legacy_qml_fixes():
         # CF008: Back/Forward on the Source screen fired an action nothing handles
         # there; /GUI/CloseDialogs is what SourceScreen.qml listens to. Arrow keys
         # and Enter/Escape drive it like the encoder.
+        ROOT + "StateNodes/" + ("EmbeddedControlFocusNode.qml" if v53() else "EmbeddedCommonControlFocusNode.qml"): [(
+            "BasicControlFocusNode {\n",
+            "BasicControlFocusNode {\n"
+            "	StateProperty {\n"
+            '		name: "ScSourceIndex"\n'
+            "		translatorType: 7\n"
+            "	}\n"
+            "	StateProperty {\n"
+            '		name: "ScSourceSelect"\n'
+            "		translatorType: 3\n"
+            "		Component.onCompleted: translator.state = false\n"
+            "	}\n",
+        )],
         ROOT + "StateNodes/States/SourceScreenState.qml": [(
-            '		back: "/Qml/CloseCurrentDialog"\n		forward: "/Qml/CloseCurrentDialog"\n',
-            '		back: "/GUI/CloseDialogs"\n		forward: "/GUI/CloseDialogs"\n',
+            '		index: "/GUI/Views/BrowserSource/Index"\n		action: "/GUI/Views/BrowserSource/Select"\n		back: "/Qml/CloseCurrentDialog"\n		forward: "/Qml/CloseCurrentDialog"\n',
+            '		index: "/Qml/ControlFocus/ScSourceIndex"\n		action: "/Qml/ControlFocus/ScSourceSelect"\n		back: "/GUI/CloseDialogs"\n		forward: "/GUI/CloseDialogs"\n',
         )],
         v + "BrowserSource/SourceScreen.qml": [(
             "	readonly property alias expandTransitionRunning: expandTransition.running\n",
