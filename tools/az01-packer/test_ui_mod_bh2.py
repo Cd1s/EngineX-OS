@@ -145,6 +145,30 @@ assert.deepStrictEqual(opened, ["spotify"]);
         joined = "\n".join(new for _old, new in edits[key])
         self.assertIn("readonly property bool displayPhaseMeter: !!controller && controller.enabled", joined)
 
+    def test_other_updates_hidden_to_prevent_stock_reflash_bh2_a6_12(self):
+        bp = load_build_packs()
+        for root in ("Skins/Embedded/", "Skins/EmbeddedCommon/"):
+            bp.ROOT = root
+            edits = bp.edits(False)
+            key = root + "Views/ControlCenter/Tabs/Preferences/Entries/OtherUpdates.qml"
+            self.assertTrue(key in edits, key)
+            joined = "\n".join(new for _old, new in edits[key])
+            self.assertIn("visible: false", joined)
+            self.assertIn("model: []", joined)
+
+        for ver in ("5.0.4", "5.3.0"):
+            qrc = LAB / ver / "qrc"
+            if not qrc.is_dir():
+                continue
+            with tempfile.TemporaryDirectory(prefix=f"ui-bh2-{ver}-") as tmp:
+                out = Path(tmp) / "packs"
+                res = subprocess.run(
+                    ["python3", str(BUILD_PACKS), "--qrc", str(qrc), "--out", str(out)],
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(res.returncode, 0, f"{ver}: {res.stderr}")
+
 
 if __name__ == "__main__":
     unittest.main()

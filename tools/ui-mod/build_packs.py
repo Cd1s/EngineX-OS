@@ -5608,6 +5608,11 @@ def edits(dev: bool):
             ("            PlanckGUI.views.updaterController.checkForUpdates()\n",
              "            PlanckGUI.views.updaterController.checkForUpdates()\n            root.scCheckUpdate()\n"),
         ],
+        prefs + "Entries/OtherUpdates.qml": [
+            ("model: PlanckGUI.views.updaterController.preReleaseVersionsModel\n",
+             "visible: false\n\tmodel: []\n"),
+            ("PlanckGUI.views.updaterController.checkForUpdates()\n", "return\n"),
+        ],
         # RA002: stepping the clock while a deck plays disturbs the audio output.
         prefs + "Entries/Time.qml": [(
             '		text: "Sync Time"\n',
