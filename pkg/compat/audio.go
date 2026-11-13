@@ -3,7 +3,6 @@ package compat
 import (
 	"encoding/binary"
 	"fmt"
-	"io"
 	"math"
 	"os"
 	"strings"
@@ -32,20 +31,31 @@ func AudioHeader(path string) (AudioInfo, error) {
 	if e != nil {
 		return AudioInfo{}, e
 	}
+	baseOff, e := audioheader.SkipID3Seeker(f, st.Size())
+	if e != nil {
+		return AudioInfo{}, e
+	}
+	if st.Size()-baseOff < 12 {
+		lower := strings.ToLower(path)
+		if strings.HasSuffix(lower, ".wav") || strings.HasSuffix(lower, ".wave") || strings.HasSuffix(lower, ".flac") || strings.HasSuffix(lower, ".aif") || strings.HasSuffix(lower, ".aiff") || strings.HasSuffix(lower, ".aifc") {
+			return AudioInfo{}, fmt.Errorf("invalid WAV/FLAC/AIFF magic")
+		}
+		if strings.HasSuffix(lower, ".mp3") {
+			return AudioInfo{}, fmt.Errorf("mp3: file too short")
+		}
+		return AudioInfo{}, nil
+	}
 	var b [12]byte
-	if _, e = io.ReadFull(f, b[:]); e != nil {
+	if _, e = f.ReadAt(b[:], baseOff); e != nil {
 		return AudioInfo{}, e
 	}
 	switch {
 	case string(b[:4]) == "fLaC":
-		if _, e = f.Seek(4, 0); e != nil {
-			return AudioInfo{}, e
-		}
-		return flacHeader(f, st.Size())
-	case (string(b[:4]) == "RIFF" || string(b[:4]) == "RF64") && string(b[8:]) == "WAVE":
-		return wavHeader(f, st.Size())
-	case string(b[:4]) == "FORM" && (string(b[8:]) == "AIFF" || string(b[8:]) == "AIFC"):
-		return aiffHeader(f, st.Size(), string(b[8:]) == "AIFC")
+		return flacHeader(f, baseOff, st.Size())
+	case (string(b[:4]) == "RIFF" || string(b[:4]) == "RF64") && string(b[8:12]) == "WAVE":
+		return wavHeader(f, baseOff, st.Size())
+	case string(b[:4]) == "FORM" && (string(b[8:12]) == "AIFF" || string(b[8:12]) == "AIFC"):
+		return aiffHeader(f, baseOff, st.Size(), string(b[8:12]) == "AIFC")
 	default:
 		lower := strings.ToLower(path)
 		if strings.HasSuffix(lower, ".wav") || strings.HasSuffix(lower, ".wave") || strings.HasSuffix(lower, ".flac") || strings.HasSuffix(lower, ".aif") || strings.HasSuffix(lower, ".aiff") || strings.HasSuffix(lower, ".aifc") {
@@ -60,6 +70,8 @@ func AudioHeader(path string) (AudioInfo, error) {
 				SampleRate:         mp3.SampleRate,
 				Channels:           mp3.Channels,
 				Bitrate:            mp3.Bitrate,
+				Samples:            mp3.Samples,
+				Duration:           mp3.Duration,
 				Format:             "mp3",
 				StartOffsetSamples: mp3.StartOffsetSamples,
 				OffsetClass:        mp3.OffsetClass,
@@ -84,9 +96,9 @@ func extended80(b []byte) float64 {
 	return math.Ldexp(float64(mant), exp-16383-63)
 }
 
-func aiffHeader(f *os.File, size int64, aifc bool) (AudioInfo, error) {
+func aiffHeader(f *os.File, baseOff, size int64, aifc bool) (AudioInfo, error) {
 	a := AudioInfo{Format: "aiff"}
-	off := int64(12)
+	off := baseOff + 12
 	gotComm, gotSSND := false, false
 	var frames, ssndData uint64
 	compressedCodec := false
@@ -163,11 +175,11 @@ func aiffHeader(f *os.File, size int64, aifc bool) (AudioInfo, error) {
 	return a, nil
 }
 
-func wavHeader(f *os.File, size int64) (AudioInfo, error) {
+func wavHeader(f *os.File, baseOff, size int64) (AudioInfo, error) {
 	a := AudioInfo{Format: "wav"}
 	var data uint64
 	var rfData uint64
-	off := int64(12)
+	off := baseOff + 12
 	gotFmt, gotData := false, false
 	var blockAlign uint64
 	for off+8 <= size {
@@ -237,9 +249,9 @@ func wavHeader(f *os.File, size int64) (AudioInfo, error) {
 	return a, nil
 }
 
-func flacHeader(f *os.File, size int64) (AudioInfo, error) {
+func flacHeader(f *os.File, baseOff, size int64) (AudioInfo, error) {
 	a := AudioInfo{Format: "flac"}
-	off := int64(4)
+	off := baseOff + 4
 	found := false
 	for off+4 <= size {
 		var h [4]byte
