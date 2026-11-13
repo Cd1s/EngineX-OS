@@ -54,7 +54,7 @@ func WriteBootReport(uiDir, mediaRoot string) error {
 		mounts:    func() ([]byte, error) { return os.ReadFile("/proc/self/mountinfo") },
 		removable: removableBootDevice,
 		model:     imagePrefix(deviceCompatible()),
-		engineX:   bootVersion(filepath.Join(filepath.Dir(uiDir), "version.txt"), imageVersionFile),
+		engineX:   bootVersion(filepath.Join(filepath.Dir(uiDir), "version.txt"), filepath.Join(newImageDir, "version.txt"), imageVersionFile),
 		stock:     bootStockVersion("/usr/Engine/Engine"),
 		now:       time.Now,
 	}

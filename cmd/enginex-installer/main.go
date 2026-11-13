@@ -1583,11 +1583,7 @@ func verifyJC11SImage(ctx context.Context, img string, b *bundleInfo, size int64
 		return err
 	}
 	defer gz.Close()
-	want := map[string][]string{
-		"boot-activate.sh":         {root + "/bundle/boot-activate.sh", "/sc5000-custom/bundle/boot-activate.sh"},
-		"lib/libengine-ui-hook.so": {root + "/bundle/lib/libengine-ui-hook.so", "/sc5000-custom/bundle/lib/libengine-ui-hook.so"},
-		"99-sc5000-custom.conf":    {"/system/var/overlay/lib/alsa/conf.d/99-sc5000-custom.conf"},
-	}
+	want := activationFiles(root)
 	tr := tar.NewReader(gz)
 	for {
 		h, err := tr.Next()
@@ -1616,11 +1612,35 @@ func verifyJC11SImage(ctx context.Context, img string, b *bundleInfo, size int64
 			}
 		}
 		delete(want, rel)
+		for _, name := range alsaConfNames { // one ALSA file, under either name
+			if rel == name {
+				for _, other := range alsaConfNames {
+					delete(want, other)
+				}
+			}
+		}
 	}
 	if len(want) != 0 {
 		return errors.New("JC11S: bundle lacks activation files; download a current PRIME4PLUS data bundle, nothing flashed")
 	}
 	return nil
+}
+
+// alsaConfNames are the names of the ALSA file that starts EngineX at boot: this
+// release's, and the one a release after 5.3.0.4 gives it. A bundle has one of them.
+var alsaConfNames = []string{"99-sc5000-custom.conf", "99-enginex.conf"}
+
+// activationFiles maps the bundle files that start EngineX at boot to the paths
+// they must have in the data image.
+func activationFiles(root string) map[string][]string {
+	want := map[string][]string{
+		"boot-activate.sh":         {root + "/bundle/boot-activate.sh", "/sc5000-custom/bundle/boot-activate.sh"},
+		"lib/libengine-ui-hook.so": {root + "/bundle/lib/libengine-ui-hook.so", "/sc5000-custom/bundle/lib/libengine-ui-hook.so"},
+	}
+	for _, name := range alsaConfNames {
+		want[name] = []string{"/system/var/overlay/lib/alsa/conf.d/" + name}
+	}
+	return want
 }
 
 func python() string {
