@@ -65,6 +65,13 @@ names() { # <rootfs>
     fi
 }
 
+# The deck's data directory after prepare ran: /data/enginex since 5.3.0.3 (#103), the real
+# /data/sc5000-custom on an older previous release (#234 review R5). Not the rootfs names above:
+# a 5.3.0.2 or older baseline has not migrated it, and the new boot moves it over.
+data_dir() {
+    if [ -d "$W/data/enginex" ] && [ ! -L "$W/data/enginex" ]; then echo "$W/data/enginex"; else echo "$W/data/sc5000-custom"; fi
+}
+
 # --- phase: one boot of one rootfs, PID 1 of its own pid + mount namespace ---
 phase() {
     local name=$1 R=$W/$1 v
@@ -132,9 +139,11 @@ SH
     in_root $N_LIBEXEC-etc-reset > "$W/$name-boot.log" 2>&1 || fail "$name: etc-reset"
     if in_root $N_LIBEXEC-prepare >> "$W/$name-boot.log" 2>&1; then pass "$name: prepare"
     else fail "$name: prepare"; fi
+    local D
+    D=$(data_dir)
     if [ "$name" = old ]; then
-        printf 'lang=%s\n' "$LANG_PACK" > "$W/data/enginex/ui/settings.conf"
-        check "old: version $OLDV installed" grep -qx "$OLDV" "$W/data/enginex/version.txt"
+        printf 'lang=%s\n' "$LANG_PACK" > "$D/ui/settings.conf"
+        check "old: version $OLDV installed" grep -qx "$OLDV" "$D/version.txt"
     elif [ "$name" = new ]; then
         check "new: version.txt is $NEWV" grep -qx "$NEWV" "$W/data/enginex/version.txt"
         check "new: .pack-version is $NEWV" grep -qx "$NEWV" "$W/data/enginex/ui/.pack-version"
@@ -193,7 +202,7 @@ SH
     fi
     # engine.service: ExecStartPre (guard), runengine's environment, the stock engine script.
     mkdir -p -m 0700 "$R/tmp/enginex-engine-home"
-    local ui=$W/data/enginex/ui want=0
+    local ui=$D/ui want=0
     local engine_env=(HOME=/tmp/enginex-engine-home MESA_SHADER_CACHE_MAX_SIZE=32M QML_DISABLE_DISK_CACHE=1
         LD_PRELOAD=$N_ETC/libengine-ui-hook.so QT_QPA_PLATFORM=offscreen MALLOC_ARENA_MAX=1 LD_LIBRARY_PATH=/usr/qt/lib)
     if [ "$name" = new ]; then
@@ -412,7 +421,7 @@ SH
     fi
     cp "$R/tmp/gate-shim.log" "$W/$name-shim.log" 2>/dev/null || :
     cp "$R/tmp/gate-az01.log" "$W/$name-az01.log" 2>/dev/null || :
-    [ "$name" != old ] || cp "$W/data/enginex/ssh_host_ed25519_key.pub" "$W/old-hostkey.pub"
+    [ "$name" != old ] || cp "$D/ssh_host_ed25519_key.pub" "$W/old-hostkey.pub"
     # The update ramdisk consumes the staged image; the next boot never sees it.
     rm -f "$W/data/az01-update.img" "$W/data/az01-update.img.url"
 }
