@@ -39,12 +39,24 @@ These keep their sc5000 names, because every installed deck loads Engine through
   hook, EngineX-Installer) needs nothing by hand. The updater ends the suite under both names;
   `boot-activate.sh` takes the old `/run` units, drop-ins, the old engine-script bind and
   `/run/sc5000-*` out before it writes the new ones, so each daemon runs once.
-- **Downgrade** to an older image or bundle: `boot-activate.sh` writes `/run/enginex/leave.sh` at
-  each boot. Screen OTA and EngineX-Installer run it instead of activating an older bundle in
-  place (older = lower version, or the same version with an older release tag); the USB hook runs
-  it with `--no-reboot` after installing and then reboots. It removes only this release's
-  `enginex-*` units, `99-enginex.conf` drop-ins and runtime files, never follows a symlinked
-  directory, and reboots. The older release then starts clean. Older releases are not changed.
+- **Downgrade** of a second-generation deck to an older bundle (screen OTA, the USB hook,
+  EngineX-Installer): the older release's own `install.sh` never runs over `/data`. It fills a
+  stage in `/data/.enginex-leave`, and this release moves the result in with atomic swaps
+  (`renameat2` `RENAME_EXCHANGE`): UI packs and icons, version files, the bundle last
+  (`internal/leave`). A power cut before the bundle swap is put back by this release's
+  `boot-activate.sh` at the next boot; after it the older release is whole. A release before
+  5.3.0.3 also gets its layout back: the real `/data/sc5000-custom`, `/data/enginex` the link
+  (its installer and prepare refuse the link). A deck that cannot swap atomically, or a damaged
+  bundle, is refused with nothing changed. Then the leave step (`/run/enginex/leave.sh`) removes
+  this release's `enginex-*` units, `99-enginex.conf` drop-ins and runtime files, never following
+  a symlinked directory, and reboots. Older releases are not changed.
+- **Downgrade** of a first-generation deck flashes an older image in Firmware Update Mode, where
+  nothing of this release runs. 5.3.0.3 and later boot on the current layout. Before flashing
+  5.3.0.2 or older, run `enginex-suite-exec leave layout` over SSH: it hands
+  `/data/sc5000-custom` back the same way, without installing anything. Booting 5.3.0.5 again
+  instead moves it forward again (prepare's migration).
+- The next upgrade from a handed-back layout moves it forward again: the migration takes
+  `/data/enginex` back from a link to `sc5000-custom` (or, cut half-way, to itself).
 
 ## Where sc5000 is left
 
@@ -58,6 +70,7 @@ These keep their sc5000 names, because every installed deck loads Engine through
 - Dead legacy: `/media/sc5000-sd-cache` (unused since `8856176`, still read).
 - Lab paths on the build hosts (`/root/build/sc5000-lab`), the Denon model name `SC5000` and
   official image names (`SC5000-<version>-Update.img`).
-- Tests, which use old names on purpose to prove the compat paths.
+- Tests, which use old names on purpose to prove the compat paths, and the published 5.3.0.2 and
+  5.3.0.3 installer scripts they run unchanged (`internal/leave/testdata`).
 - History documents (`docs/ISSUE-FIXES-*`, `docs/REGRESSION-5.3.0.3-to-5.3.0.4.md`,
   `docs/re-report/`, dated reports and release notes): they describe the system as it was.
