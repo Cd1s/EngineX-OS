@@ -9,7 +9,7 @@ import (
 
 func TestNativeImageWithoutHostTools(t *testing.T) {
 	bundle := buildBundle(t, "PRIME4PLUS", "5.3.0.5")
-	b, err := readBundle(bundle.Path)
+	b, err := readBundle(ctxT(t), bundle.Path)
 	if err != nil {
 		t.Fatal(err)
 	}
