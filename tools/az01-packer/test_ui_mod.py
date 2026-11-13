@@ -182,10 +182,14 @@ class TrackListArtworkPlaceholderAndReaderPriorityTest(unittest.TestCase):
                                 self.assertIn("anchors.fill: parent", child[1])
                                 self.assertIn("visible: !!parent && parent.status !== Image.Ready && String(parent.source) !== \"\"", child[1])
                                 self.assertNotIn("asynchronous: true", child[1])
-                                # Native SD and Remote Library tracks must retain image://planck.
-                                line = next(line for line in source.splitlines() if "source: row.streamingProviderName" in line)
-                                script = "const assert=require('node:assert/strict'); const row={streamingProviderName:'',modelData:{albumArt:'image://planck/track?size=100',song:'Song'}};\n"
-                                script += "assert.equal((" + line.strip().removeprefix("source: ") + "), row.modelData.albumArt);"
+                                # Native SD and Remote Library tracks must retain image://planck. SD rows
+                                # have no provider label; Remote Library (Eaas) and Dropbox rows have one.
+                                # Gateway rows, which Engine has no art for, still ask the gateway.
+                                line = next(line for line in source.splitlines() if "/v1/sc5000/art" in line)
+                                script = "const assert=require('node:assert/strict'); const root={scScope:'deezer',scPlainTitle:s=>s};\n"
+                                script += "const art=(streamingProviderName,albumArt)=>{const row={streamingProviderName,modelData:{albumArt,song:'Song',artist:'A'}}; return " + line.strip().removeprefix("source: ") + "};\n"
+                                script += "for (const p of ['', 'Eaas', 'Dropbox']) assert.equal(art(p, 'image://planck/7?size=100'), 'image://planck/7?size=100');\n"
+                                script += "for (const a of ['', 'image://streaming/']) assert.equal(art('Deezer', a), 'http://127.0.0.1:8080/v1/sc5000/art?song=Song&artist=A');"
                                 checked = subprocess.run(["node", "-e", script], capture_output=True, text=True)
                                 self.assertEqual(checked.returncode, 0, checked.stderr)
 
