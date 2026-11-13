@@ -278,21 +278,31 @@ static void apply_with(const char *dir, const char *install, int want) {
 }
 static void test_apply_runs_the_leave_step(void) {
     char dir[] = "/tmp/gen2-leave-XXXXXX", cmd[PATH_MAX];
+    const char *inst = "#!/bin/sh\nprintf '5.3.0.4\\n' > \"$ENGINEX_CUSTOM/applied-version.txt\"\n";
     assert(mkdtemp(dir));
     board(dir, "inmusic,jp21");
     setenv("ENGINEX_TEST_DATA_ROOT", dir, 1);
-    put(dir, "run/enginex/leave.sh", "printf '%s\\n' \"$*\" > \"$(dirname \"$0\")/left\"\n");
-    apply_with(dir, "#!/bin/sh\nexit 1\n", -1);
-    assert(!exists(dir, "run/enginex/left"));
-    apply_with(dir, "#!/bin/sh\nprintf '5.3.0.4\\n' > \"$ENGINEX_CUSTOM/applied-version.txt\"\n", 0);
-    assert(exists(dir, "enginex/applied-version.txt") && exists(dir, "run/enginex/left"));
+    // A release before 5.3.0.5 has no leave step: the bundle's own install.sh, in place.
+    apply_with(dir, inst, 0);
+    assert(exists(dir, "enginex/applied-version.txt"));
+    snprintf(cmd, sizeof cmd, "rm -f %s/enginex/applied-version.txt", dir);
+    assert(system(cmd) == 0);
+    // The step gets the unpacked bundle and puts it in (an older one through its stage, #234
+    // review); the hook does not run install.sh itself, and the caller reboots.
+    put(dir, "run/enginex/leave.sh",
+        "[ \"$1\" = --install ] && [ -f \"$2/install.sh\" ] && printf '%s\\n' \"$3\" > \"$(dirname \"$0\")/left\"\n");
+    apply_with(dir, inst, 0);
+    assert(!exists(dir, "enginex/applied-version.txt") && exists(dir, "run/enginex/left"));
     FILE *f = fopen(strcat(strcpy(cmd, dir), "/run/enginex/left"), "r");
     char args[64] = {0};
     assert(f && fgets(args, sizeof args, f) && !fclose(f) && !strcmp(args, "--no-reboot\n"));
+    // A step that fails (a bad bundle, a deck that cannot swap atomically) fails the apply.
+    put(dir, "run/enginex/leave.sh", "exit 1\n");
+    apply_with(dir, inst, -1);
     unsetenv("ENGINEX_TEST_DATA_ROOT");
     snprintf(cmd, sizeof cmd, "rm -rf %s", dir);
     assert(system(cmd) == 0);
-    puts("#234: a good USB image install runs this release's leave step (--no-reboot), a failed one does not: PASS");
+    puts("#234: a USB image install goes through this release's leave step (--install, --no-reboot), in place without one, and fails with it: PASS");
 }
 
 int main(void) {

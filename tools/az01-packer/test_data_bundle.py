@@ -876,6 +876,51 @@ exec REAL "$@"
         self.assertNotIn('enginex-sc5000-deemixd', self.host_commands.read_text())
         self.host_commands.write_text('')
 
+    def test_234_leave_step_installs_the_bundle_through_the_suite_first(self):
+        """#234 review R1/R2: leave.sh --install hands the unpacked bundle to this release's suite (an
+        older one goes in through a stage and atomic swaps, internal/leave) before anything else;
+        when that fails this release keeps its units and nothing reboots."""
+        root = self.tmp / 'leave-install'
+        unit = root / 'run/systemd/system/enginex-deemixd.service'
+        unit.parent.mkdir(parents=True)
+        unit.write_text('unit')
+        calls = self.tmp / 'suite.calls'
+        suite = self.tmp / 'fake-suite'
+        leave = self.tmp / 'leave.sh'
+        leave.write_text(bdb.LEAVE_SH)
+        env = {**self.env, 'ENGINEX_LEAVE_ROOT': str(root), 'ENGINEX_LEAVE_SUITE': str(suite)}
+        for code in (1, 0):
+            suite.write_text(f'#!/bin/sh\necho "$*" >> {calls}\nexit {code}\n')
+            suite.chmod(0o755)
+            res = subprocess.run(['sh', str(leave), '--install', '/data/.enginex-leave.incoming/b', '--no-reboot'],
+                                 env=env, capture_output=True, text=True)
+            self.assertEqual(res.returncode, code, res.stderr)
+            self.assertEqual(unit.exists(), code == 1)
+        self.assertEqual(calls.read_text().splitlines(), ['leave install /data/.enginex-leave.incoming/b'] * 2)
+
+    def test_234_only_the_boot_run_puts_back_an_interrupted_downgrade(self):
+        """#234 review R2: boot-activate.sh's boot run first asks the suite to put back a downgrade a
+        power cut interrupted (leave recover), from the directory it was started from (the hook's
+        fallback is /data/sc5000-custom/bundle); its runs on every Engine start never do."""
+        src = self.extract(self.build())
+        dest = self.tmp / 'recover' / 'enginex'
+        (dest / 'bundle/bin').mkdir(parents=True)
+        calls = self.tmp / 'recover.calls'
+        suite = dest / 'bundle/bin/enginex-suite'
+        suite.write_text(f'#!/bin/sh\necho "$*" >> {calls}\n')
+        suite.chmod(0o755)
+        run_dir = self.tmp / 'run-recover'
+        ba = dest / 'bundle/boot-activate.sh'
+        ba.write_text((src / 'boot-activate.sh').read_text().replace('/run/', str(run_dir) + '/'))
+        env = dict(self.env, ENGINEX_CUSTOM=str(dest), ENGINEX_LEAVE_ROOT=str(self.tmp / 'recover'),
+                   ENGINEX_PID1_COMM=str(self.pid1_systemd()), ENGINEX_CONFIG_DIR=str(self.tmp / 'recover/.config'),
+                   ENGINEX_TIMESTAMP_FILE=str(self.tmp / 'no-ts'), ENGINEX_PRODUCT_CODE_FILE=str(self.tmp / 'no-product-code'))
+        subprocess.run(['sh', str(ba), '--restore-tz'], env=env, capture_output=True, text=True)
+        self.assertFalse(calls.exists())
+        subprocess.run(['sh', str(ba)], env=env, capture_output=True, text=True)
+        self.assertEqual(calls.read_text().splitlines()[:1], ['leave recover'])
+        self.host_commands.write_text('')  # the boot run's systemctl calls went to the safe-bin stand-in
+
     def test_234_leave_step_removes_only_this_releases_units(self):
         """#234: the leave step before an older release is applied removes this release's enginex units,
         its 99-enginex.conf drop-ins, the bound Engine script and the suite cache, nothing else, and

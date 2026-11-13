@@ -92,8 +92,21 @@ LEAVE_SH = r'''#!/bin/sh
 # A directory on the way that is a symlink (to /data/Music, say) is left alone, never followed.
 set -u
 root=${ENGINEX_LEAVE_ROOT:-} # tests: a stand-in for /
-reboot=1
-[ "${1:-}" != --no-reboot ] || reboot=
+reboot=1 target=
+while [ "$#" -gt 0 ]; do
+    case $1 in
+    --no-reboot) reboot= ;;
+    --install) target=${2:?--install needs the unpacked bundle}; shift ;;
+    esac
+    shift
+done
+# --install <unpacked bundle>: that bundle goes in first. An older release's install.sh only fills
+# a stage, and this release's suite moves it in with atomic swaps, the bundle last; a power cut is
+# put back by this release's boot-activate.sh (internal/leave). A newer one installs in place.
+# A failure leaves this release as it is, units and all.
+if [ -n "$target" ]; then
+    "${ENGINEX_LEAVE_SUITE:-/data/enginex/bundle/bin/enginex-suite}" leave install "$target" || exit 1
+fi
 real_dir() { # every level of $1 below $root is a real directory, not a symlink
     rd_p=$root
     rd_rest=${1#/}
@@ -136,6 +149,13 @@ set -eu
 ENGINEX_CUSTOM=${ENGINEX_CUSTOM:-${SC5000_CUSTOM:-}}
 ENGINEX_ALSA_OVERLAY=${ENGINEX_ALSA_OVERLAY:-${SC5000_ALSA_OVERLAY:-}}
 
+# The boot run (no arguments) first puts back a downgrade to an older release that a power cut
+# interrupted before its commit (#234, internal/leave), before the layout below is touched. It
+# can start from /data/sc5000-custom: the hook's fallback while /data/enginex is being handed back.
+if [ "$#" = 0 ] && { [ -z "${ENGINEX_CUSTOM:-}" ] || [ -n "${ENGINEX_LEAVE_ROOT:-}" ]; }; then
+    leave_suite="$(dirname "$0")/bin/enginex-suite"
+    [ ! -x "$leave_suite" ] || "$leave_suite" leave recover || :
+fi
 @MIGRATE_IF_DEFAULT@
 dest="${ENGINEX_CUSTOM:-/data/enginex}"
 bundle_dir="$dest/bundle"

@@ -1005,11 +1005,24 @@ const installedReleaseCmd = `d=` + customDirSh + `; [ -f "$d/version.txt" ] || d
 	`cat "$d/version.txt" 2>/dev/null | head -n 1; cat "$d/bundle/release-tag" 2>/dev/null | head -n 1; :`
 
 // leaveCmd runs the leave step of the installed release (5.3.0.5 and later write it to /run at
-// every boot, #234) after an older bundle was installed: it takes that release's units out of
-// /run and reboots. Detached, so the reboot does not cut this SSH session short; a deck without
-// the step just reboots, and the older release starts clean.
+// every boot, #234) once more after an older bundle went in (leaveInstallCmd): it reboots.
+// Detached, so the reboot does not cut this SSH session short; a deck without the step just
+// reboots, and the older release starts clean.
 const leaveCmd = `leave=${ENGINEX_LEAVE_SH:-/run/enginex/leave.sh}; ` +
 	`nohup sh -c 'sleep 1; if [ -f "$0" ]; then exec sh "$0"; fi; sync; systemctl reboot || reboot' "$leave" </dev/null >/dev/null 2>&1 &`
+
+// leaveInstallCmd installs an OLDER release (#234): the streamed tarball is unpacked next to /data's
+// EngineX directory and handed to the installed release's leave step, which runs the older
+// install.sh into a stage only and moves the result in with atomic swaps that survive a power
+// cut (internal/leave), and takes its own units out of /run. Synchronous, so a refusal (a deck
+// that cannot swap atomically, a damaged bundle) reaches the user; the reboot follows apart.
+// A deck without the step (a release before 5.3.0.5 is installed) installs in place.
+func leaveInstallCmd(top string) string {
+	return fmt.Sprintf(`set -e; leave=${ENGINEX_LEAVE_SH:-/run/enginex/leave.sh}; d=%[2]s; in=$(dirname "$d")/.enginex-leave.incoming; `+
+		`rm -rf "$in"; mkdir -p "$in"; trap 'rm -rf "$in"' EXIT; cd "$in"; tar -xzf -; `+
+		`if [ -f "$leave" ]; then sh "$leave" --install "$in/%[1]s" --no-reboot; else sh "$in/%[1]s/install.sh"; fi; `+
+		`printf '1\n' > "$d/gen2-unlocked"; rm -f "$d/gen2-locked"`, top, customDirSh)
+}
 
 // installCmd unpacks the streamed tarball in the deck's temp dir, runs install.sh, and marks gen2-unlocked (#215).
 func installCmd(top string) string {
@@ -1117,7 +1130,11 @@ func modeA(ctx context.Context, o *options, d deck) error {
 	iv, it, _ := strings.Cut(installed, "\n")
 	older := xrelease.Older(iv, it, b.Version, b.Tag)
 	sayGen2Steps(o, filepath.Base(b.Path))
-	if out, err := sshRun(ctx, cl, installCmd(b.Top), bytes.NewReader(b.TarGz)); err != nil {
+	install := installCmd(b.Top)
+	if older {
+		install = leaveInstallCmd(b.Top)
+	}
+	if out, err := sshRun(ctx, cl, install, bytes.NewReader(b.TarGz)); err != nil {
 		return fmt.Errorf("%s: install failed: %w\n%s", label, err, out)
 	}
 	got, err := sshRead(ctx, cl, "cat "+customDirSh+"/version.txt")
