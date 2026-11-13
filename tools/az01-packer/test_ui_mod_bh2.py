@@ -74,8 +74,9 @@ class UiModBH2Test(unittest.TestCase):
 const assert = require("assert");
 let scFocusKind = "", scFocusRow = -1, scFocusService = "";
 let opened = [], selectedConn = [];
-const connectedSource = { expanded: false, parent: null, itemAtIndex: () => null };
-const scFooterRepeater = { itemAt: () => null };
+// The footer repeater is reachable only through the footer item (QML component scope).
+let footerRows = [];
+const connectedSource = { expanded: false, parent: null, itemAtIndex: () => null, footerItem: { scRepeater: { itemAt: r => { footerRows.push(r); return null } } } };
 const root = {
   scSourceNameRole: 257,
   scServices: [{ id: "tidal", name: "TIDAL" }, { id: "spotify", name: "Spotify" }, { id: "deezer", name: "Deezer" }],
@@ -96,6 +97,7 @@ assert.strictEqual(scFocusRow, 2); // turning up clamps at first visible row, ne
 scStep(1);
 assert.strictEqual(scFocusKind, "footer");
 assert.strictEqual(scFocusService, "tidal");
+assert.deepStrictEqual(footerRows, [0]); // scrolled into view through the footer item
 scStep(1);
 assert.strictEqual(scFocusService, "spotify");
 scActivate();
