@@ -12,7 +12,7 @@
 
 **[核心功能](#features)** · **[下載與安裝](#install)** · **[實機畫面](#gallery)** · **[效能對比](#benchmarks)** · **[讚賞支持](#sponsor)**
 
-📖 **線上使用文件**：<https://enginexdj.com>
+📖 **線上使用文件**：<https://enginexdj.com> · 🗺️ **路線圖**：<https://enginexdj.com/#roadmap>
 
 </div>
 

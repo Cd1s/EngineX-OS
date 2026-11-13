@@ -662,7 +662,137 @@
       ],
     },
 
-    /* ───────────── 8 FAQ ───────────── */
+    /* ───────────── 8 路线图 ───────────── */
+    {
+      id: "roadmap",
+      title: L("路线图", "路線圖", "Roadmap"),
+      nav: L("路线图", "路線圖", "Roadmap"),
+      blocks: [
+        { k: "note", x: L(
+          "碟机演出的稳定性永远排在第一位。以下条目按当前优先级排列，不设发布日期，具体安排也可能随实测调整；每一项都附有对应的 GitHub Issue 链接，你在那里的留言与投票会直接影响先后顺序。",
+          "碟機演出的穩定性永遠排在第一位。以下項目依目前優先順序排列，不設發佈日期，具體安排也可能隨實測調整；每一項皆附有對應的 GitHub Issue 連結，你在那裡的留言與投票會直接影響先後順序。",
+          "Stability of the deck comes first. Items below are listed in priority order with no fixed dates, and plans can change. Every item links to its GitHub issue, and comments and votes there shape the order.") },
+
+        { k: "h", id: "next", x: L("下一版本：5.3.0.5", "下一版本：5.3.0.5", "Next: 5.3.0.5"), nav: L("下一版：5.3.0.5", "下一版：5.3.0.5", "Next: 5.3.0.5") },
+        { k: "ul", x: [
+          L("**稳定性（核心重点）**：<ul>" +
+            "<li>在真实碟机上统计音频断音（xrun）并显示计数（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/235\" target=\"_blank\" rel=\"noopener\">#235</a>）；</li>" +
+            "<li>确保后台任务绝不与 Engine 音频争抢资源（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/236\" target=\"_blank\" rel=\"noopener\">#236</a>）；</li>" +
+            "<li>审查运行在 Engine 音频回调内的全部代码（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/237\" target=\"_blank\" rel=\"noopener\">#237</a>）；</li>" +
+            "<li>如实标注本机 `Stems` 分轨音质定位，并引导使用高音质分轨模式（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/238\" target=\"_blank\" rel=\"noopener\">#238</a>）；</li>" +
+            "<li>处理 PRIME 4 G2 / SYSTEM ONE 的数据分区容量配置（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/244\" target=\"_blank\" rel=\"noopener\">#244</a>）。</li></ul>",
+            "**穩定性（核心重點）**：<ul>" +
+            "<li>在實體碟機上統計音訊斷音（xrun）並顯示計數（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/235\" target=\"_blank\" rel=\"noopener\">#235</a>）；</li>" +
+            "<li>確保背景作業絕不與 Engine 音訊爭搶資源（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/236\" target=\"_blank\" rel=\"noopener\">#236</a>）；</li>" +
+            "<li>審查執行於 Engine 音訊回呼內的全部程式碼（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/237\" target=\"_blank\" rel=\"noopener\">#237</a>）；</li>" +
+            "<li>如實標示本機 `Stems` 分軌音質定位，並建議使用高音質分軌模式（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/238\" target=\"_blank\" rel=\"noopener\">#238</a>）；</li>" +
+            "<li>處理 PRIME 4 G2 / SYSTEM ONE 的資料分割區容量配置（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/244\" target=\"_blank\" rel=\"noopener\">#244</a>）。</li></ul>",
+            "**Stability (the main focus)**:<ul>" +
+            "<li>Measure audio dropouts (xruns) on real decks and show the count (<a href=\"https://github.com/Cd1s/EngineX-OS/issues/235\" target=\"_blank\" rel=\"noopener\">#235</a>);</li>" +
+            "<li>Ensure background work never competes with Engine's audio (<a href=\"https://github.com/Cd1s/EngineX-OS/issues/236\" target=\"_blank\" rel=\"noopener\">#236</a>);</li>" +
+            "<li>Audit the code that runs inside Engine's audio callback (<a href=\"https://github.com/Cd1s/EngineX-OS/issues/237\" target=\"_blank\" rel=\"noopener\">#237</a>);</li>" +
+            "<li>Label on-deck `Stems` honestly and recommend the high-quality mode (<a href=\"https://github.com/Cd1s/EngineX-OS/issues/238\" target=\"_blank\" rel=\"noopener\">#238</a>);</li>" +
+            "<li>PRIME 4 G2 / SYSTEM ONE data partition size (<a href=\"https://github.com/Cd1s/EngineX-OS/issues/244\" target=\"_blank\" rel=\"noopener\">#244</a>).</li></ul>"),
+          L("**U 盘与曲库**：<ul>" +
+            "<li>读取 U 盘期间在屏幕显示“正在准备”提示（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/230\" target=\"_blank\" rel=\"noopener\">#230</a>）；</li>" +
+            "<li>修复 exFAT U 盘上的 rekordbox 歌单读取并加快认盘速度（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/253\" target=\"_blank\" rel=\"noopener\">#253</a>）；</li>" +
+            "<li>改进大容量 rekordbox U 盘与 MP3 节拍网格处理（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/233\" target=\"_blank\" rel=\"noopener\">#233</a>）；</li>" +
+            "<li>为仍带有旧版滞后拍线的 MP3 曲目重新分析节拍网格（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/246\" target=\"_blank\" rel=\"noopener\">#246</a>）。</li></ul>",
+            "**隨身碟與曲庫**：<ul>" +
+            "<li>讀取隨身碟期間於螢幕顯示「準備中」提示（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/230\" target=\"_blank\" rel=\"noopener\">#230</a>）；</li>" +
+            "<li>修復 exFAT 隨身碟上的 rekordbox 歌單讀取並加快辨識速度（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/253\" target=\"_blank\" rel=\"noopener\">#253</a>）；</li>" +
+            "<li>改進大容量 rekordbox 隨身碟與 MP3 節拍網格處理（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/233\" target=\"_blank\" rel=\"noopener\">#233</a>）；</li>" +
+            "<li>為仍帶有舊版滯後拍線的 MP3 曲目重新分析節拍網格（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/246\" target=\"_blank\" rel=\"noopener\">#246</a>）。</li></ul>",
+            "**USB and libraries**:<ul>" +
+            "<li>Show a “preparing” notice while a stick is being read (<a href=\"https://github.com/Cd1s/EngineX-OS/issues/230\" target=\"_blank\" rel=\"noopener\">#230</a>);</li>" +
+            "<li>rekordbox playlists on exFAT sticks and faster stick recognition (<a href=\"https://github.com/Cd1s/EngineX-OS/issues/253\" target=\"_blank\" rel=\"noopener\">#253</a>);</li>" +
+            "<li>Large rekordbox sticks and MP3 beat grids (<a href=\"https://github.com/Cd1s/EngineX-OS/issues/233\" target=\"_blank\" rel=\"noopener\">#233</a>);</li>" +
+            "<li>Re-analyse MP3s that still carry the old late beat grid (<a href=\"https://github.com/Cd1s/EngineX-OS/issues/246\" target=\"_blank\" rel=\"noopener\">#246</a>).</li></ul>"),
+          L("**显示与操控**：<ul>" +
+            "<li>支持将碟机 BPM 切换为 1 位或 2 位小数显示（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/229\" target=\"_blank\" rel=\"noopener\">#229</a>）；</li>" +
+            "<li>解决 `双碟机配对` / 影子轨下搓碟时对端波形滞后的问题（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/240\" target=\"_blank\" rel=\"noopener\">#240</a>）；</li>" +
+            "<li>支持从另一台碟机复制全部设置（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/205\" target=\"_blank\" rel=\"noopener\">#205</a>）；</li>" +
+            "<li>节拍同步的 DMX 灯光控制（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/209\" target=\"_blank\" rel=\"noopener\">#209</a>）。</li></ul>",
+            "**顯示與操控**：<ul>" +
+            "<li>支援將碟機 BPM 切換為 1 位或 2 位小數顯示（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/229\" target=\"_blank\" rel=\"noopener\">#229</a>）；</li>" +
+            "<li>解決 `雙碟機配對` / 影子軌下刷碟時對端波形延遲的問題（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/240\" target=\"_blank\" rel=\"noopener\">#240</a>）；</li>" +
+            "<li>支援從另一台碟機複製全部設定（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/205\" target=\"_blank\" rel=\"noopener\">#205</a>）；</li>" +
+            "<li>節拍同步的 DMX 燈光控制（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/209\" target=\"_blank\" rel=\"noopener\">#209</a>）。</li></ul>",
+            "**Display and controls**:<ul>" +
+            "<li>BPM display with 1 or 2 decimals (<a href=\"https://github.com/Cd1s/EngineX-OS/issues/229\" target=\"_blank\" rel=\"noopener\">#229</a>);</li>" +
+            "<li>Fix the opposite waveform lagging while scratching on `Paired Player` and shadow decks (<a href=\"https://github.com/Cd1s/EngineX-OS/issues/240\" target=\"_blank\" rel=\"noopener\">#240</a>);</li>" +
+            "<li>Copy all settings from another deck (<a href=\"https://github.com/Cd1s/EngineX-OS/issues/205\" target=\"_blank\" rel=\"noopener\">#205</a>);</li>" +
+            "<li>Beat-synced DMX lighting (<a href=\"https://github.com/Cd1s/EngineX-OS/issues/209\" target=\"_blank\" rel=\"noopener\">#209</a>).</li></ul>"),
+          L("**流媒体**：<ul>" +
+            "<li>PRIME GO 上的 TIDAL 二维码扫码登录（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/224\" target=\"_blank\" rel=\"noopener\">#224</a>）；</li>" +
+            "<li>单页请求失败不再隐藏整个流媒体列表（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/248\" target=\"_blank\" rel=\"noopener\">#248</a>）；</li>" +
+            "<li>修改 `直播推流` 设置时不再断开当前听众连接（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/245\" target=\"_blank\" rel=\"noopener\">#245</a>）。</li></ul>",
+            "**串流**：<ul>" +
+            "<li>PRIME GO 上的 TIDAL QR Code 掃碼登入（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/224\" target=\"_blank\" rel=\"noopener\">#224</a>）；</li>" +
+            "<li>單頁請求失敗不再隱藏整個串流清單（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/248\" target=\"_blank\" rel=\"noopener\">#248</a>）；</li>" +
+            "<li>修改 `直播推流` 設定時不再中斷目前聽眾連線（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/245\" target=\"_blank\" rel=\"noopener\">#245</a>）。</li></ul>",
+            "**Streaming**:<ul>" +
+            "<li>TIDAL QR login on PRIME GO (<a href=\"https://github.com/Cd1s/EngineX-OS/issues/224\" target=\"_blank\" rel=\"noopener\">#224</a>);</li>" +
+            "<li>One failed page no longer hides a streaming list (<a href=\"https://github.com/Cd1s/EngineX-OS/issues/248\" target=\"_blank\" rel=\"noopener\">#248</a>);</li>" +
+            "<li>Changing a `Live Stream` setting no longer drops listeners (<a href=\"https://github.com/Cd1s/EngineX-OS/issues/245\" target=\"_blank\" rel=\"noopener\">#245</a>).</li></ul>"),
+          L("**安全**：发布包签名校验与安全披露政策（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/239\" target=\"_blank\" rel=\"noopener\">#239</a>），以及网页控制台 HTTPS 访问（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/242\" target=\"_blank\" rel=\"noopener\">#242</a>）。",
+            "**安全**：發佈包簽章驗證與資安通報政策（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/239\" target=\"_blank\" rel=\"noopener\">#239</a>），以及網頁主控台 HTTPS 連線（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/242\" target=\"_blank\" rel=\"noopener\">#242</a>）。",
+            "**Security**: signed releases and a security policy (<a href=\"https://github.com/Cd1s/EngineX-OS/issues/239\" target=\"_blank\" rel=\"noopener\">#239</a>), plus web console over HTTPS (<a href=\"https://github.com/Cd1s/EngineX-OS/issues/242\" target=\"_blank\" rel=\"noopener\">#242</a>)."),
+          L("**底层整理**：内部 `sc5000` 命名统一改为 `enginex`，旧路径与旧接口继续保持可用（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/234\" target=\"_blank\" rel=\"noopener\">#234</a>）。",
+            "**底層整理**：內部 `sc5000` 命名統一改為 `enginex`，舊路徑與舊 API 繼續保持可用（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/234\" target=\"_blank\" rel=\"noopener\">#234</a>）。",
+            "**Under the hood**: internal `sc5000` names become `enginex`, while old paths and APIs keep working (<a href=\"https://github.com/Cd1s/EngineX-OS/issues/234\" target=\"_blank\" rel=\"noopener\">#234</a>)."),
+          L("**升级包格式**：`5.3.0.5` 是最后一个同时提供 <code>&#42;-Data-Bundle.tar.gz</code> 的版本；从 `5.3.0.6` 起，全系机型统一仅通过 <code>&#42;-Update.img</code> 升级。",
+            "**升級包格式**：`5.3.0.5` 是最後一個同時提供 <code>&#42;-Data-Bundle.tar.gz</code> 的版本；自 `5.3.0.6` 起，全系機型統一僅透過 <code>&#42;-Update.img</code> 升級。",
+            "**Release format**: `5.3.0.5` is the last release that also ships <code>&#42;-Data-Bundle.tar.gz</code>. From `5.3.0.6`, every model updates only with <code>&#42;-Update.img</code>."),
+        ] },
+
+        { k: "h", id: "directions", x: L("下一阶段重点方向", "下一階段重點方向", "Next big directions"), nav: L("下一阶段重点", "下一階段重點", "Next big directions") },
+        { k: "ul", x: [
+          L("**小型 USB MIDI 控制器接管 3/4 轨或另一层 `Layer`**：用一台便携 USB MIDI 控制器操控一体机的第 3/4 轨或独立碟机的另一层 `Layer`（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/254\" target=\"_blank\" rel=\"noopener\">#254</a>）。",
+            "**小型 USB MIDI 控制器接管 3/4 軌或另一層 `Layer`**：以一台輕便的 USB MIDI 控制器操控一體機的第 3/4 軌或獨立碟機的另一層 `Layer`（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/254\" target=\"_blank\" rel=\"noopener\">#254</a>）。",
+            "**Compact USB MIDI controller for decks 3/4 or the other layer**: a small USB MIDI controller takes over decks 3/4 or a player's other `Layer` (<a href=\"https://github.com/Cd1s/EngineX-OS/issues/254\" target=\"_blank\" rel=\"noopener\">#254</a>)."),
+          L("**天龙与先锋同台混演**：完善 Denon 与 Pioneer 同台联机配合（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/198\" target=\"_blank\" rel=\"noopener\">#198</a>、<a href=\"https://github.com/Cd1s/EngineX-OS/issues/63\" target=\"_blank\" rel=\"noopener\">#63</a>；CDJ-3000 现场实测 <a href=\"https://github.com/Cd1s/EngineX-OS/issues/217\" target=\"_blank\" rel=\"noopener\">#217</a>）。",
+            "**天龍與先鋒同台混演**：完善 Denon 與 Pioneer 同台聯機配合（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/198\" target=\"_blank\" rel=\"noopener\">#198</a>、<a href=\"https://github.com/Cd1s/EngineX-OS/issues/63\" target=\"_blank\" rel=\"noopener\">#63</a>；CDJ-3000 現場實測 <a href=\"https://github.com/Cd1s/EngineX-OS/issues/217\" target=\"_blank\" rel=\"noopener\">#217</a>）。",
+            "**Denon and Pioneer in the same booth**: deeper cross-brand booth integration (<a href=\"https://github.com/Cd1s/EngineX-OS/issues/198\" target=\"_blank\" rel=\"noopener\">#198</a>, <a href=\"https://github.com/Cd1s/EngineX-OS/issues/63\" target=\"_blank\" rel=\"noopener\">#63</a>; CDJ-3000 field test <a href=\"https://github.com/Cd1s/EngineX-OS/issues/217\" target=\"_blank\" rel=\"noopener\">#217</a>)."),
+          L("**Mod 插件生态**：持续建设 <a href=\"#mods\">`enginexdj.com/#mods`</a> Mod 社区与第三方社区插件（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/170\" target=\"_blank\" rel=\"noopener\">#170</a>、<a href=\"https://github.com/Cd1s/EngineX-OS/issues/219\" target=\"_blank\" rel=\"noopener\">#219</a>、<a href=\"https://github.com/Cd1s/EngineX-OS/issues/221\" target=\"_blank\" rel=\"noopener\">#221</a>）。",
+            "**Mod 外掛生態**：持續建設 <a href=\"#mods\">`enginexdj.com/#mods`</a> Mod 社群與第三方社群外掛（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/170\" target=\"_blank\" rel=\"noopener\">#170</a>、<a href=\"https://github.com/Cd1s/EngineX-OS/issues/219\" target=\"_blank\" rel=\"noopener\">#219</a>、<a href=\"https://github.com/Cd1s/EngineX-OS/issues/221\" target=\"_blank\" rel=\"noopener\">#221</a>）。",
+            "**The Mod ecosystem**: Mod Hub at <a href=\"#mods\">`enginexdj.com/#mods`</a> and community mods (<a href=\"https://github.com/Cd1s/EngineX-OS/issues/170\" target=\"_blank\" rel=\"noopener\">#170</a>, <a href=\"https://github.com/Cd1s/EngineX-OS/issues/219\" target=\"_blank\" rel=\"noopener\">#219</a>, <a href=\"https://github.com/Cd1s/EngineX-OS/issues/221\" target=\"_blank\" rel=\"noopener\">#221</a>)."),
+          L("**Instant Stems（边播边拆）**：在播放过程中实时完成分轨（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/197\" target=\"_blank\" rel=\"noopener\">#197</a>）。",
+            "**Instant Stems（邊播邊拆）**：於播放過程中即時完成分軌（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/197\" target=\"_blank\" rel=\"noopener\">#197</a>）。",
+            "**Instant Stems**: separate while playing (<a href=\"https://github.com/Cd1s/EngineX-OS/issues/197\" target=\"_blank\" rel=\"noopener\">#197</a>)."),
+          L("**一键直播与录制 Set 自动歌单**：一键开启直播推流，并为录制的 Set 自动生成分曲歌单（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/199\" target=\"_blank\" rel=\"noopener\">#199</a>）。",
+            "**一鍵直播與錄製 Set 自動歌單**：一鍵開啟直播推流，並為錄製的 Set 自動產生曲目歌單（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/199\" target=\"_blank\" rel=\"noopener\">#199</a>）。",
+            "**One-tap live streaming with an automatic tracklist**: start live streaming in one tap and generate an automatic tracklist of the recorded set (<a href=\"https://github.com/Cd1s/EngineX-OS/issues/199\" target=\"_blank\" rel=\"noopener\">#199</a>)."),
+          L("**先锋风格 Flanger**：还原先锋混音台扫频听感的 Flanger 效果（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/195\" target=\"_blank\" rel=\"noopener\">#195</a>）。",
+            "**先鋒風格 Flanger**：還原先鋒混音器掃頻聽感的 Flanger 效果（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/195\" target=\"_blank\" rel=\"noopener\">#195</a>）。",
+            "**Pioneer-style Flanger**: a Pioneer-voiced Flanger effect (<a href=\"https://github.com/Cd1s/EngineX-OS/issues/195\" target=\"_blank\" rel=\"noopener\">#195</a>)."),
+          L("**Beat FX 毫秒时间调节**：支持按毫秒（ms）设定原厂 `Beat FX` 时间（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/162\" target=\"_blank\" rel=\"noopener\">#162</a>）。",
+            "**Beat FX 毫秒時間調整**：支援以毫秒（ms）設定原廠 `Beat FX` 時間（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/162\" target=\"_blank\" rel=\"noopener\">#162</a>）。",
+            "**Beat FX time in milliseconds**: set `Beat FX` timing in milliseconds (<a href=\"https://github.com/Cd1s/EngineX-OS/issues/162\" target=\"_blank\" rel=\"noopener\">#162</a>)."),
+        ] },
+
+        { k: "h", id: "considering", x: L("社区提议与评估中（不作承诺）", "社群提議與評估中（不作承諾）", "Requested and under consideration (no promise)"), nav: L("社区提议与评估", "社群提議與評估", "Under consideration") },
+        { k: "ul", x: [
+          L("**练习视图**：隐藏波形、在屏幕保留歌单列表，方便练习盲听对拍（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/212\" target=\"_blank\" rel=\"noopener\">#212</a>）。",
+            "**練習視圖**：隱藏波形、將歌單清單保留在螢幕上，方便練習耳聽對拍（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/212\" target=\"_blank\" rel=\"noopener\">#212</a>）。",
+            "**Practice view**: hide waveforms and keep the playlist on screen (<a href=\"https://github.com/Cd1s/EngineX-OS/issues/212\" target=\"_blank\" rel=\"noopener\">#212</a>)."),
+          L("**互换碟机通道输入**：通过软件切换碟机输入对应关系（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/213\" target=\"_blank\" rel=\"noopener\">#213</a>）。",
+            "**互換碟機通道輸入**：透過軟體切換碟機輸入對應關係（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/213\" target=\"_blank\" rel=\"noopener\">#213</a>）。",
+            "**Swap deck inputs**: swap deck inputs in software (<a href=\"https://github.com/Cd1s/EngineX-OS/issues/213\" target=\"_blank\" rel=\"noopener\">#213</a>)."),
+          L("**SC5000 连接 Serato 时的流动波形**：评估在 SC5000 上显示 Serato 滚动波形的可行性（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/204\" target=\"_blank\" rel=\"noopener\">#204</a>）。",
+            "**SC5000 連接 Serato 時的捲動波形**：評估於 SC5000 上顯示 Serato 動態波形的可行性（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/204\" target=\"_blank\" rel=\"noopener\">#204</a>）。",
+            "**Moving waveforms from Serato on SC5000**: explore scrolling waveforms from Serato on SC5000 (<a href=\"https://github.com/Cd1s/EngineX-OS/issues/204\" target=\"_blank\" rel=\"noopener\">#204</a>)."),
+          L("**排查高频滚降问题**：实测并排查反馈的高频衰减现象（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/172\" target=\"_blank\" rel=\"noopener\">#172</a>）。",
+            "**排查高頻滾降問題**：實測並排查回報的高頻衰減現象（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/172\" target=\"_blank\" rel=\"noopener\">#172</a>）。",
+            "**Investigate the high-frequency roll-off**: measure and investigate reported high-frequency roll-off (<a href=\"https://github.com/Cd1s/EngineX-OS/issues/172\" target=\"_blank\" rel=\"noopener\">#172</a>)."),
+          L("**`Infinite Reverb` 衰减时间调节**：评估调整 `Infinite Reverb` 尾音衰减时间的可行性（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/207\" target=\"_blank\" rel=\"noopener\">#207</a>）。",
+            "**`Infinite Reverb` 衰減時間調整**：評估調整 `Infinite Reverb` 尾音衰減時間的可行性（<a href=\"https://github.com/Cd1s/EngineX-OS/issues/207\" target=\"_blank\" rel=\"noopener\">#207</a>）。",
+            "**`Infinite Reverb` decay time**: explore adjustable decay time for `Infinite Reverb` (<a href=\"https://github.com/Cd1s/EngineX-OS/issues/207\" target=\"_blank\" rel=\"noopener\">#207</a>)."),
+        ] },
+      ],
+    },
+
+    /* ───────────── 9 FAQ ───────────── */
     {
       id: "faq",
       title: L("常见问题与故障排查", "常見問題與故障排除", "FAQ & troubleshooting"),
