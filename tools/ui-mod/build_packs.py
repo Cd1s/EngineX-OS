@@ -5981,42 +5981,31 @@ def edits(dev: bool):
         # left/right layer deck. Only "Deck N" actions; Prepare List etc. stay stock.
         for side, right in (("left", "false"), ("right", "true")):
             a = side + "Actions"
-            if side == "left":
-                out[ROOT + f"Views/BrowseView/Components/Components/Swipe{side.title()}Item.qml"] = [
-                    (f"    readonly property list<string> actionLabels: {a}.map(action => action.display.label)\n",
-                     '    readonly property bool scStem: !(typeof root !== "undefined" && root && root.scIsAZ04) && !!(row.isStreamingTrack || row.streamingProviderName || String(row.modelData && row.modelData.uri || "").startsWith("streaming://TIDAL/Track/") || (row.modelData && row.modelData.trackId > 0)) && !leftActions.some(action => /stem/i.test(String(action.display && action.display.label || "")))\n'
-                     f"    readonly property int scDeck: root.scSwipeDeck({right})\n"
-                     "    function scLabel(s) { return scDeck > 0 ? String(s).replace(/\\d+/, scDeck) : s }\n"
-                     f"    readonly property list<string> actionLabels: {a}.map(action => /^stems?$/i.test(String(action.display && action.display.label || \"\")) ? root.scT(\"Stems\") : scLabel(action.display.label)).concat(scStem ? [root.scT(\"Stems\")] : [])\n"),
-                    (f"    readonly property list<string> actionCommitMessages: {a}.map(action => action.display.commitMessage)\n",
-                     f"    readonly property list<string> actionCommitMessages: {a}.map(action => /^stems?$/i.test(String(action.display && action.display.label || \"\")) ? root.scT(\"Stems\") : scLabel(action.display.commitMessage)).concat(scStem ? [root.scT(\"Stems\")] : [])\n"),
-                    (f"    readonly property list<color> actionColors: {a}.map(action => action.display.color)\n",
-                     f"    readonly property list<color> actionColors: {a}.map(action => action.display.color).concat(scStem ? [Style.systemBlue01Color] : [])\n"),
-                    (f"        {a}[actionIndex].trigger(row.index)\n",
-                     "        if (actionIndex >= leftActions.length || /stem/i.test(String(leftActions[actionIndex].display && leftActions[actionIndex].display.label || \"\"))) {\n"
-                     "            // streamed rows go through the gateway; local USB/SD tracks are rendered by Engine itself (also via the stock Stem entry)\n"
-                     "            if (!root.scStemStream(row.modelData.trackId)) Planck.librarianController.stemsQueueManager.startRenderTracks(String(row.modelData.trackId))\n"
-                     f"        }} else if (scDeck > 0 && /\\d/.test({a}[actionIndex].display.label)) {{\n"
-                     "            trackList.pCurrentIndex.translator.unnormalized = row.index\n"
-                     "            Planck.getProperty(\"/Client/Librarian/LoadToDeck%1\".arg(scDeck)).translator.state = true\n"
-                     f"        }} else {a}[actionIndex].trigger(row.index)\n"),
-                    ("    textSwipeInvalid: ((readyToCommit", "    textSwipeInvalid: scDeck > 0 ? \"\" : ((readyToCommit"),
-                ]
-            else:
-                out[ROOT + f"Views/BrowseView/Components/Components/Swipe{side.title()}Item.qml"] = [
-                    (f"    readonly property list<string> actionLabels: {a}.map(action => action.display.label)\n",
-                     f"    readonly property int scDeck: root.scSwipeDeck({right})\n"
-                     "    function scLabel(s) { return scDeck > 0 ? String(s).replace(/\\d+/, scDeck) : s }\n"
-                     f"    readonly property list<string> actionLabels: {a}.map(action => scLabel(action.display.label))\n"),
-                    (f"    readonly property list<string> actionCommitMessages: {a}.map(action => action.display.commitMessage)\n",
-                     f"    readonly property list<string> actionCommitMessages: {a}.map(action => scLabel(action.display.commitMessage))\n"),
-                    (f"        {a}[actionIndex].trigger(row.index)\n",
-                     f"        if (scDeck > 0 && /\\d/.test({a}[actionIndex].display.label)) {{\n"
-                     "            trackList.pCurrentIndex.translator.unnormalized = row.index\n"
-                     "            Planck.getProperty(\"/Client/Librarian/LoadToDeck%1\".arg(scDeck)).translator.state = true\n"
-                     f"        }} else {a}[actionIndex].trigger(row.index)\n"),
-                    ("    textSwipeInvalid: ((readyToCommit", "    textSwipeInvalid: scDeck > 0 ? \"\" : ((readyToCommit"),
-                ]
+            # #224: share the left-action template with Deck 2, including Stems-list exclusion.
+            swipe_edits = [
+                (f"    readonly property list<string> actionLabels: {a}.map(action => action.display.label)\n",
+                 '    readonly property bool scStem: !(typeof root !== "undefined" && root && root.scIsAZ04) && !(typeof trackList !== "undefined" && trackList && trackList.isStemsList) && !!(row.isStreamingTrack || row.streamingProviderName || String(row.modelData && row.modelData.uri || "").startsWith("streaming://TIDAL/Track/") || (row.modelData && row.modelData.trackId > 0)) && !leftActions.some(action => /stem/i.test(String(action.display && action.display.label || "")))\n'
+                 f"    readonly property int scDeck: root.scSwipeDeck({right})\n"
+                 "    function scLabel(s) { return scDeck > 0 ? String(s).replace(/\\d+/, scDeck) : s }\n"
+                 f"    readonly property list<string> actionLabels: {a}.map(action => /^stems?$/i.test(String(action.display && action.display.label || \"\")) ? root.scT(\"Stems\") : scLabel(action.display.label)).concat(scStem ? [root.scT(\"Stems\")] : [])\n"),
+                (f"    readonly property list<string> actionCommitMessages: {a}.map(action => action.display.commitMessage)\n",
+                 f"    readonly property list<string> actionCommitMessages: {a}.map(action => /^stems?$/i.test(String(action.display && action.display.label || \"\")) ? root.scT(\"Stems\") : scLabel(action.display.commitMessage)).concat(scStem ? [root.scT(\"Stems\")] : [])\n"),
+                (f"    readonly property list<color> actionColors: {a}.map(action => action.display.color)\n",
+                 f"    readonly property list<color> actionColors: {a}.map(action => action.display.color).concat(scStem ? [Style.systemBlue01Color] : [])\n"),
+                (f"        {a}[actionIndex].trigger(row.index)\n",
+                 "        if (actionIndex >= leftActions.length || /stem/i.test(String(leftActions[actionIndex].display && leftActions[actionIndex].display.label || \"\"))) {\n"
+                 "            // streamed rows go through the gateway; local USB/SD tracks are rendered by Engine itself (also via the stock Stem entry)\n"
+                 "            if (!root.scStemStream(row.modelData.trackId)) Planck.librarianController.stemsQueueManager.startRenderTracks(String(row.modelData.trackId))\n"
+                 f"        }} else if (scDeck > 0 && /\\d/.test({a}[actionIndex].display.label)) {{\n"
+                 "            trackList.pCurrentIndex.translator.unnormalized = row.index\n"
+                 "            Planck.getProperty(\"/Client/Librarian/LoadToDeck%1\".arg(scDeck)).translator.state = true\n"
+                 f"        }} else {a}[actionIndex].trigger(row.index)\n"),
+                ("    textSwipeInvalid: ((readyToCommit", "    textSwipeInvalid: scDeck > 0 ? \"\" : ((readyToCommit"),
+            ]
+            out[ROOT + f"Views/BrowseView/Components/Components/Swipe{side.title()}Item.qml"] = [
+                (old.replace("leftActions", a), new.replace("leftActions", a))
+                for old, new in swipe_edits
+            ]
     if v53():
         # #171 uses the stock Mixer Menu -> Channels -> Input selectors. Its
         # C++ labels need the same live dictionary as the QML literals.
