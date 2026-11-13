@@ -162,26 +162,6 @@ func WithChunkSize(n int) Option {
 	}
 }
 
-func WithPartitions(parts []string) Option {
-	return func(c *Client) {
-		var allowed []string
-		for _, p := range parts {
-			if p == "data" || p == "userdata" {
-				allowed = append(allowed, p)
-			}
-		}
-		if len(allowed) > 0 {
-			c.partitions = allowed
-		}
-	}
-}
-
-func WithInitialSeq(seq uint32) Option {
-	return func(c *Client) {
-		c.initialSeq = seq
-	}
-}
-
 // Client speaks the AZ0O/AZ0I USB update protocol over a claimed bulk interface.
 type Client struct {
 	dev           proto.BulkDevice
@@ -192,7 +172,26 @@ type Client struct {
 	statusTimeout time.Duration
 	chunkSize     int
 	partitions    []string
+	partitionsSet bool
 	initialSeq    uint32
+}
+
+func WithPartitions(parts []string) Option {
+	return func(c *Client) {
+		c.partitionsSet = true
+		c.partitions = nil
+		for _, p := range parts {
+			if p == "data" || p == "userdata" {
+				c.partitions = append(c.partitions, p)
+			}
+		}
+	}
+}
+
+func WithInitialSeq(seq uint32) Option {
+	return func(c *Client) {
+		c.initialSeq = seq
+	}
 }
 
 // New constructs an azupdate Client bound to an open USB device and endpoint pair.
@@ -218,6 +217,9 @@ func New(dev proto.BulkDevice, eps proto.Endpoints, opts ...Option) (*Client, er
 		if opt != nil {
 			opt(c)
 		}
+	}
+	if len(c.partitions) == 0 {
+		return nil, errors.New("azupdate: no allowlisted partitions (data, userdata) configured")
 	}
 	return c, nil
 }

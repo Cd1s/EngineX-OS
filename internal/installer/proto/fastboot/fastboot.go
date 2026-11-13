@@ -470,6 +470,7 @@ func (c *Client) simpleCommand(ctx context.Context, cmd string, timeout time.Dur
 	if err != nil {
 		var pe *ProtocolError
 		if mutating && !errors.As(err, &pe) {
+			c.dirty = true
 			return "", proto.MarkOutcomeUnknown("fastboot "+cmd, err)
 		}
 		return "", err
