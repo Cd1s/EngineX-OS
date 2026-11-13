@@ -2502,6 +2502,8 @@ SERVICES_MAIN = """
 					scUpdateModel.setProperty(0, "isEnabled", !v.updating)
 					scUpdateModel.setProperty(0, "downloadProgress", prog)
 				}
+			} else if (!v.updating) {
+				scUpdateModel.clear()
 			}
 		}
 		x.send()

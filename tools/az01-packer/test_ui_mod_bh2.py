@@ -39,6 +39,11 @@ class UiModBH2Test(unittest.TestCase):
         self.assertIn("NextTrack", joined)
         self.assertIn("eventPoint.position.x >= scSkipKeys.x", joined)
 
+    def test_update_model_clears_when_up_to_date_bh2_a6_4(self):
+        bp = load_build_packs()
+        block = bp.SERVICES_MAIN.split("if (v.updateAvailable && v.downloadUrl)", 1)[1].split("x.send()", 1)[0]
+        self.assertIn("scUpdateModel.clear()", block)
+
 
 if __name__ == "__main__":
     unittest.main()
