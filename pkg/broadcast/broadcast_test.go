@@ -1009,3 +1009,23 @@ func TestParseServerTargetIPv6WithoutPort(t *testing.T) {
 		}
 	}
 }
+
+// #234 review R4: a configuration saved before 5.3.0.5 may name the hook's feed under its old
+// name; the hook of this release writes only the new one. The built-in feed is this release's
+// under either name, and any other path is kept as the user set it.
+func TestRename234BuiltinInputUnderTheOldNameIsThisReleasesFeed(t *testing.T) {
+	for in, want := range map[string]string{
+		"/tmp/sc5000-broadcast.pcm":  DefaultInputPath,
+		" /tmp/sc5000-broadcast.pcm": DefaultInputPath,
+		"":                           DefaultInputPath,
+		"/tmp/my-mix.pcm":            "/tmp/my-mix.pcm",
+	} {
+		cfg := Config{InputPath: in}
+		if err := normalizeConfig(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.InputPath != want {
+			t.Errorf("%q -> %q, want %q", in, cfg.InputPath, want)
+		}
+	}
+}

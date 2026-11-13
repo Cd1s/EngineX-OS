@@ -32,7 +32,17 @@ const (
 	DefaultFormat     = "wav"
 	DefaultStreamName = "EngineX OS Live Mix"
 	DefaultInputPath  = "/tmp/enginex-broadcast.pcm"
+	// legacyInputPath is where the Engine hook wrote the feed before 5.3.0.5 (#234).
+	legacyInputPath = "/tmp/sc5000-broadcast.pcm"
 )
+
+// BuiltinInput reports whether path is the Engine hook's feed under this release's name or an
+// earlier one (#234 review R4). It is never saved: each release reads it under its own name, so
+// a configuration saved on one side of 5.3.0.5 is not silent on the other.
+func BuiltinInput(path string) bool {
+	path = strings.TrimSpace(path)
+	return path == DefaultInputPath || path == legacyInputPath
+}
 
 // SampleRate is the rate of the PCM feed: the Engine hook (#50) resamples the
 // master bus to 48 kHz s16le stereo, matching X-Audio-Format and the LAN path.
@@ -184,7 +194,7 @@ func normalizeConfig(cfg *Config) error {
 	}
 
 	cfg.InputPath = strings.TrimSpace(cfg.InputPath)
-	if cfg.InputPath == "" {
+	if cfg.InputPath == "" || BuiltinInput(cfg.InputPath) {
 		cfg.InputPath = DefaultInputPath
 	}
 
