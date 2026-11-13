@@ -13,7 +13,7 @@ import (
 // frames than the system clock asks for, and every receiver's backlog grew by
 // about 84 ms a minute. The pacer makes the published stream follow
 // CLOCK_MONOTONIC instead: SampleRate frames per second, whatever the audio clock
-// does. It is the one place every output (local listeners, Icecast/Shoutcast, LAN)
+// does. It is the one place every output (local listeners, Icecast, LAN)
 // gets its PCM from.
 //
 //   - driftTracker measures the feed against the clock. Reads are only ever late,

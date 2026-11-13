@@ -14,7 +14,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -62,6 +61,10 @@ type Config struct {
 	LANTarget  string `json:"lanTarget,omitempty"` // e.g. "239.255.0.1:5004" or "192.168.1.50:9998"
 }
 
+// pushes reports whether the WAV stream is sent to an external server. A Shoutcast
+// target is kept from old settings but not pushed to: its servers take MP3/AAC, not WAV.
+func (c Config) pushes() bool { return c.ServerURL != "" && c.Protocol != "shoutcast" }
+
 // Status captures real-time state of the broadcaster without revealing secrets.
 type Status struct {
 	Enabled      bool   `json:"enabled"`
@@ -86,7 +89,7 @@ type Status struct {
 	DriftPPM float64 `json:"driftPpm,omitempty"`
 }
 
-// Broadcaster manages background audio streaming to Icecast/Shoutcast on CPU3.
+// Broadcaster manages background audio streaming to Icecast on CPU3.
 type Broadcaster struct {
 	ctl          sync.Mutex // serializes Configure/SetEnabled/Close; stopLocked drops mu while waiting
 	mu           sync.Mutex
@@ -137,7 +140,7 @@ func New(guard *resourceguard.Guard) *Broadcaster {
 }
 
 // oneLine drops control characters. Mount point, login and stream name are
-// written as they are onto lines of the Icecast/Shoutcast handshake, so each has
+// written as they are onto lines of the Icecast handshake, so each has
 // to stay on its line: a pasted value that brought a line break along cut the
 // handshake in two (BH2-A3-7).
 func oneLine(s string) string {
@@ -404,7 +407,7 @@ const captureTick = 1152 * time.Second / SampleRate
 
 // workerLoop reads the PCM feed as it arrives, puts it on the system clock (see
 // pacer), fans it out to local listeners and, when a ServerURL is set, feeds the
-// external Icecast/Shoutcast pusher. It is paced by the feed itself, so the guard's
+// external Icecast pusher. It is paced by the feed itself, so the guard's
 // cooperative throttle is not used here: its sleeps would only add jitter.
 func (b *Broadcaster) workerLoop(ctx context.Context, _ *resourceguard.Throttle) {
 	b.mu.Lock()
@@ -424,8 +427,7 @@ func (b *Broadcaster) workerLoop(ctx context.Context, _ *resourceguard.Throttle)
 	}()
 
 	feed := make(chan []byte, 80) // about 0.8 s of ~10 ms chunks, as 32 was with 24 ms ones
-	// A Shoutcast target is not pushed to; Status says why.
-	if cfg.ServerURL != "" && cfg.Protocol != "shoutcast" {
+	if cfg.pushes() {
 		b.wg.Add(1)
 		go func() {
 			defer b.wg.Done()
@@ -556,7 +558,7 @@ func (p *pcmReader) readFor(wait time.Duration) []byte {
 	return buf[:whole]
 }
 
-// pushLoop keeps the external Icecast/Shoutcast connection alive, reconnecting with
+// pushLoop keeps the external Icecast connection alive, reconnecting with
 // exponential backoff (1s..30s) so a wrong password is not retried every second.
 func (b *Broadcaster) pushLoop(ctx context.Context, cfg Config, feed <-chan []byte) {
 	const maxDelay = 30 * time.Second
@@ -629,12 +631,7 @@ func (b *Broadcaster) streamOnce(ctx context.Context, cfg Config, feed <-chan []
 
 	// Perform server handshake under a deadline: a silent server must not hang us.
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
-	if cfg.Protocol == "shoutcast" {
-		err = b.handshakeShoutcast(conn, cfg)
-	} else {
-		err = b.handshakeIcecast(conn, cfg)
-	}
-	if err != nil {
+	if err = b.handshakeIcecast(conn, cfg); err != nil {
 		return false, err
 	}
 	_ = conn.SetDeadline(time.Time{})
@@ -729,59 +726,6 @@ func (b *Broadcaster) handshakeIcecast(conn net.Conn, cfg Config) error {
 	return nil
 }
 
-// shoutcastLogin returns the DNAS source login line: a numeric Username is a
-// DNAS v2 stream ID ("password:#id"); anything else (incl. "source") is v1, password only.
-func shoutcastLogin(cfg Config) string {
-	if id := shoutcastStreamID(cfg); id > 0 {
-		return fmt.Sprintf("%s:#%d", cfg.Password, id)
-	}
-	return cfg.Password
-}
-
-// shoutcastStreamID returns the DNAS v2 stream ID from Username ("1" or "#1"), or 0 for v1.
-func shoutcastStreamID(cfg Config) int {
-	id, err := strconv.Atoi(strings.TrimPrefix(strings.TrimSpace(cfg.Username), "#"))
-	if err != nil || id <= 0 {
-		return 0
-	}
-	return id
-}
-
-// handshakeShoutcast performs the password & ICY handshake with Shoutcast v1/v2.
-func (b *Broadcaster) handshakeShoutcast(conn net.Conn, cfg Config) error {
-	if _, err := fmt.Fprintf(conn, "%s\r\n", shoutcastLogin(cfg)); err != nil {
-		return fmt.Errorf("shoutcast sending password failed: %w", err)
-	}
-
-	buf := make([]byte, 512)
-	n, err := conn.Read(buf)
-	if err != nil {
-		return fmt.Errorf("shoutcast reading handshake failed: %w", err)
-	}
-
-	respStr := string(buf[:n])
-	// A Shoutcast v2 (and Icecast's v1 compatibility) answers "OK2", a Shoutcast v1 server "OK"
-	// (BH-GF4-7); anything else, e.g. "invalid password", is a refusal.
-	first, _, _ := strings.Cut(strings.TrimLeft(respStr, "\r\n"), "\n")
-	if first = strings.TrimSpace(first); first != "OK" && !strings.HasPrefix(first, "OK2") {
-		return fmt.Errorf("shoutcast authentication failed: %s", strings.TrimSpace(respStr))
-	}
-
-	icyHeaders := fmt.Sprintf(
-		"icy-name:%s\r\n"+
-			"icy-pub:0\r\n"+
-			"icy-br:%d\r\n"+
-			"content-type:audio/wav\r\n"+
-			"\r\n",
-		cfg.StreamName, wavKbps,
-	)
-
-	if _, err := io.WriteString(conn, icyHeaders); err != nil {
-		return fmt.Errorf("shoutcast sending icy headers failed: %w", err)
-	}
-	return nil
-}
-
 // nextWAVFrame returns the captured PCM, or 1152 samples of silence.
 func nextWAVFrame(pcm []byte) []byte {
 	if len(pcm) > 0 {
@@ -790,7 +734,7 @@ func nextWAVFrame(pcm []byte) []byte {
 	return make([]byte, 1152*4) // 1152 samples * 2 channels * 2 bytes/sample
 }
 
-// UpdateMetadata pushes track metadata changes to the Icecast/Shoutcast server.
+// UpdateMetadata pushes track metadata changes to the Icecast server.
 func (b *Broadcaster) UpdateMetadata(artist, title string) error {
 	b.mu.Lock()
 	artist = strings.TrimSpace(artist)
@@ -809,7 +753,7 @@ func (b *Broadcaster) UpdateMetadata(artist, title string) error {
 	cfg := b.cfg
 	b.mu.Unlock()
 
-	if cfg.ServerURL == "" {
+	if !cfg.pushes() {
 		return nil
 	}
 
@@ -821,18 +765,8 @@ func (b *Broadcaster) UpdateMetadata(artist, title string) error {
 		return err
 	}
 
-	var metaURL string
-	if cfg.Protocol == "shoutcast" {
-		metaURL = fmt.Sprintf("%s://%s/admin.cgi?mode=updinfo&pass=%s&song=%s",
-			scheme, hostPort, url.QueryEscape(cfg.Password), url.QueryEscape(song))
-		if id := shoutcastStreamID(cfg); id > 0 {
-			metaURL += fmt.Sprintf("&sid=%d", id) // DNAS v2 multi-stream
-		}
-	} else {
-		metaURL = fmt.Sprintf("%s://%s/admin/metadata?mode=updinfo&mount=%s&song=%s",
-			scheme, hostPort, url.QueryEscape(cfg.Mountpoint), url.QueryEscape(song))
-	}
-
+	metaURL := fmt.Sprintf("%s://%s/admin/metadata?mode=updinfo&mount=%s&song=%s",
+		scheme, hostPort, url.QueryEscape(cfg.Mountpoint), url.QueryEscape(song))
 	req, err := http.NewRequest("GET", metaURL, nil)
 	if err != nil {
 		b.mu.Lock()
@@ -841,9 +775,7 @@ func (b *Broadcaster) UpdateMetadata(artist, title string) error {
 		return err
 	}
 
-	if cfg.Protocol == "icecast" {
-		req.SetBasicAuth(cfg.Username, cfg.Password)
-	}
+	req.SetBasicAuth(cfg.Username, cfg.Password)
 	req.Header.Set("User-Agent", "EngineX-OS-Broadcaster")
 
 	client := b.httpClient

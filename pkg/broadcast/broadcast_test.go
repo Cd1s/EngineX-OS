@@ -337,31 +337,27 @@ func TestUpdateMetadataIcecast(t *testing.T) {
 	}
 }
 
-func TestUpdateMetadataShoutcast(t *testing.T) {
-	var lastPath string
+// A saved Shoutcast target is not pushed to, so its track titles are not sent either
+// (the deck used to call the server's admin.cgi).
+func TestUpdateMetadataSkipsAShoutcastTarget(t *testing.T) {
+	hits := make(chan string, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		lastPath = r.URL.RequestURI()
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprintln(w, "OK")
+		hits <- r.URL.Path
 	}))
 	defer server.Close()
-
 	b := New(newTestGuard())
 	defer b.Close()
-
-	b.cfg = Config{
-		Protocol:  "shoutcast",
-		ServerURL: server.URL,
-		Password:  "mypass",
+	b.cfg = Config{Protocol: "shoutcast", ServerURL: server.URL, Password: "mypass"}
+	if err := b.UpdateMetadata("Kraftwerk", "Autobahn"); err != nil {
+		t.Fatalf("UpdateMetadata: %v", err)
 	}
-
-	err := b.UpdateMetadata("Kraftwerk", "Autobahn")
-	if err != nil {
-		t.Fatalf("UpdateMetadata failed: %v", err)
+	select {
+	case path := <-hits:
+		t.Fatalf("the Shoutcast server got a request for %s", path)
+	default:
 	}
-
-	if !strings.Contains(lastPath, "/admin.cgi?mode=updinfo&pass=mypass&song=Kraftwerk+-+Autobahn") {
-		t.Errorf("unexpected shoutcast query URL: %s", lastPath)
+	if got := b.Status().CurrentTrack; got != "Kraftwerk - Autobahn" {
+		t.Errorf("current track = %q, want it kept for the local status", got)
 	}
 }
 
@@ -487,7 +483,7 @@ func TestUpdateMetadataLastErrorDoesNotLeakPassword(t *testing.T) {
 	secretPassword := "superSecretPassword123!@#"
 	// Unreachable port
 	b.cfg = Config{
-		Protocol:  "shoutcast",
+		Protocol:  "icecast",
 		ServerURL: "http://127.0.0.1:59999",
 		Password:  secretPassword,
 	}
@@ -504,9 +500,6 @@ func TestUpdateMetadataLastErrorDoesNotLeakPassword(t *testing.T) {
 	escaped := url.QueryEscape(secretPassword)
 	if strings.Contains(st.LastError, escaped) {
 		t.Fatalf("Status().LastError leaked escaped password: %s", st.LastError)
-	}
-	if !strings.Contains(st.LastError, "***") {
-		t.Fatalf("expected '***' in sanitized LastError, got: %s", st.LastError)
 	}
 }
 
@@ -656,16 +649,6 @@ func TestLANModeBroadcaster(t *testing.T) {
 	}
 	if b.Status().LANMode != "off" {
 		t.Errorf("expected lanMode 'off'")
-	}
-}
-
-func TestShoutcastLoginUsesStreamID(t *testing.T) {
-	for _, c := range []struct{ user, want string }{
-		{"source", "pw"}, {"", "pw"}, {"admin", "pw"}, {"2", "pw:#2"}, {"#1", "pw:#1"}, {" #3 ", "pw:#3"},
-	} {
-		if got := shoutcastLogin(Config{Username: c.user, Password: "pw"}); got != c.want {
-			t.Errorf("user %q: got %q want %q", c.user, got, c.want)
-		}
 	}
 }
 
@@ -896,9 +879,8 @@ collect:
 // BH2-A3-7: mount point, login and stream name go onto the lines of the server
 // handshake as they are; each must stay on its own line.
 func TestStreamSettingsStayOnTheirHandshakeLine(t *testing.T) {
-	handshake := func(protocol string, cfg Config) string {
+	handshake := func(cfg Config) string {
 		t.Helper()
-		cfg.Protocol = protocol
 		if err := normalizeConfig(&cfg); err != nil {
 			t.Fatal(err)
 		}
@@ -909,11 +891,6 @@ func TestStreamSettingsStayOnTheirHandshakeLine(t *testing.T) {
 			defer server.Close()
 			r := bufio.NewReader(server)
 			var all string
-			if protocol == "shoutcast" { // the login line, then the answer, then the headers
-				line, _ := r.ReadString('\n')
-				all = line
-				_, _ = io.WriteString(server, "OK2\r\n")
-			}
 			for {
 				line, err := r.ReadString('\n')
 				all += line
@@ -922,38 +899,27 @@ func TestStreamSettingsStayOnTheirHandshakeLine(t *testing.T) {
 				}
 			}
 			got <- all
-			if protocol == "icecast" { // Shoutcast waits for no answer to its headers
-				_, _ = io.WriteString(server, "HTTP/1.0 200 OK\r\n\r\n")
-			}
+			_, _ = io.WriteString(server, "HTTP/1.0 200 OK\r\n\r\n")
 		}()
 		b := New(newTestGuard())
 		defer b.Close()
 		_ = deck.SetDeadline(time.Now().Add(3 * time.Second))
 		_ = server.SetDeadline(time.Now().Add(3 * time.Second))
-		var err error
-		if protocol == "shoutcast" {
-			err = b.handshakeShoutcast(deck, cfg)
-		} else {
-			err = b.handshakeIcecast(deck, cfg)
-		}
-		if err != nil {
-			t.Fatalf("%s handshake: %v", protocol, err)
+		if err := b.handshakeIcecast(deck, cfg); err != nil {
+			t.Fatalf("handshake: %v", err)
 		}
 		select {
 		case all := <-got:
 			return all
 		case <-time.After(3 * time.Second):
-			t.Fatalf("%s: the server never saw the end of the handshake", protocol)
+			t.Fatal("the server never saw the end of the handshake")
 			return ""
 		}
 	}
 	plain := Config{Mountpoint: "/live", Username: "source", Password: "pw", StreamName: "Friday Night Mix"}
 	pasted := Config{Mountpoint: "/li\r\nve", Username: "sou\nrce", Password: "pw\r\n", StreamName: "Friday\r\n Night\x00 Mix\n"}
-	for _, protocol := range []string{"icecast", "shoutcast"} {
-		want, got := handshake(protocol, plain), handshake(protocol, pasted)
-		if got != want {
-			t.Errorf("%s: settings pasted with line breaks changed the handshake:\n got %q\nwant %q", protocol, got, want)
-		}
+	if want, got := handshake(plain), handshake(pasted); got != want {
+		t.Errorf("settings pasted with line breaks changed the handshake:\n got %q\nwant %q", got, want)
 	}
 }
 
