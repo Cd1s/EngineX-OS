@@ -82,7 +82,7 @@ func TestTidalGatewayLoginAndHint(t *testing.T) {
 		}
 		data, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		if resp.StatusCode != 200 || !(bytes.Contains(data, []byte(`"deviceCode":"sc5000-local"`)) || bytes.Contains(data, []byte(`"access_token":"sc5000-token"`))) {
+		if resp.StatusCode != 200 || !(bytes.Contains(data, []byte(`"deviceCode":"enginex-local"`)) || bytes.Contains(data, []byte(`"access_token":"enginex-token"`))) {
 			t.Fatalf("%s: %d %s", path, resp.StatusCode, data)
 		}
 	}

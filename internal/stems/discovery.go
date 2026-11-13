@@ -30,7 +30,7 @@ const (
 	// LANStateName is the file, next to deemix-config.json, where
 	// stems-processor records the home renderer it last checked.
 	LANStateName    = "stems-lan.json"
-	DefaultLANState = "/data/sc5000-custom/state/" + LANStateName
+	DefaultLANState = "/data/enginex/state/" + LANStateName
 )
 
 // Beacon is a renderer's answer to a discovery probe.

@@ -37,7 +37,7 @@ func deck1Title(t *testing.T, s *Server) string {
 // from then on (across restarts too) the server read only that frozen file and
 // never saw rb-bridge's live CDJ state again.
 func TestProlinkLiveStateSurvivesAPost(t *testing.T) {
-	live := filepath.Join(t.TempDir(), "sc5000-prolink.json")
+	live := filepath.Join(t.TempDir(), "enginex-prolink.json")
 	t.Setenv("SC5000_PROLINK_STATE", live)
 	stateDir := t.TempDir()
 	s := New(Config{StateDir: stateDir, UIDir: t.TempDir()}, nil)
@@ -67,7 +67,7 @@ func TestProlinkLiveStateSurvivesAPost(t *testing.T) {
 // Review of 9d7c4ce: a POST for the deck rb-bridge also reports (the same player number) was laid
 // over its live state for good: later live titles, BPM and play state never showed again.
 func TestProlinkPostForALiveDeckDoesNotFreezeIt(t *testing.T) {
-	live := filepath.Join(t.TempDir(), "sc5000-prolink.json")
+	live := filepath.Join(t.TempDir(), "enginex-prolink.json")
 	t.Setenv("SC5000_PROLINK_STATE", live)
 	s := New(Config{StateDir: t.TempDir(), UIDir: t.TempDir()}, nil)
 	writeLiveProlink(t, live, "Track A", 128)

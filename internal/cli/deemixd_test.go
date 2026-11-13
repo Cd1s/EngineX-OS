@@ -11,7 +11,7 @@ import (
 )
 
 // TestHelperDeemixd is the child the supervisor starts: it listens like
-// sc5000-deemixd until asked to exit.
+// enginex-deemixd until asked to exit.
 func TestHelperDeemixd(t *testing.T) {
 	addr := os.Getenv("CLI_HELPER_ADDR")
 	if addr == "" {

@@ -17,8 +17,9 @@ import (
 
 // Services never include engine, rb-bridge, network, audio, Pro DJ Link or the
 // WebUI host. stream-sync also hosts control/bridge functionality, so pausing it
-// is unsafe. 1st-gen / 2nd-gen unit names.
-var Services = []string{"sc5000-deemixd.service", "enginex-sc5000-deemixd.service"}
+// is unsafe. The deemixd unit of 5.3.0.5 and later on both generations, then the 1st-gen /
+// 2nd-gen names of earlier releases (#234): a mod runs on any release.
+var Services = []string{"enginex-deemixd.service", "sc5000-deemixd.service", "enginex-sc5000-deemixd.service"}
 
 // Systemctl runs systemctl; tests replace it.
 var Systemctl = func(args ...string) (stdout, stderr string, code int) {

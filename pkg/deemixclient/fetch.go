@@ -518,7 +518,7 @@ func (c *Client) Trim(keep ...string) {
 		return
 	}
 	// keep may be symlink-resolved (SafePath) while DownloadDir is not: on a deck without SD
-	// it is /data/sc5000-custom/Stream, a link to /data/enginex since #103. Compare both resolved.
+	// it may be /data/sc5000-custom/Stream, a link to /data/enginex since #103. Compare both resolved.
 	dir := resolvedDir(c.DownloadDir)
 	hardProtected := openFilesInDir(dir)
 	if hardProtected == nil {

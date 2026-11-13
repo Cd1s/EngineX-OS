@@ -68,7 +68,7 @@ func TestSSHStoppedIsNotReportedRunning(t *testing.T) {
 }
 
 // BH-GC2-9: first-generation EngineX images run the key-only
-// sc5000-custom-sshd.service (Conflicts=sshd.service, PasswordAuthentication
+// enginex-sshd.service (Conflicts=sshd.service, PasswordAuthentication
 // no). The console restarted the stock sshd, which stopped that unit, wrote
 // the port for the wrong unit, and "set" a password that could never log in.
 // A key upload alone never started SSH.
@@ -81,11 +81,11 @@ func TestSSHGen1ManagesEngineXsKeyOnlyUnit(t *testing.T) {
 	if w := sshCall(s, http.MethodPost, `{"enabled":true,"port":2222}`); w.Code != http.StatusOK {
 		t.Fatalf("%d %s", w.Code, w.Body.String())
 	}
-	if !u.ran("systemctl restart sc5000-custom-sshd") || u.ran("systemctl restart sshd") || u.ran("systemctl unmask sshd") {
+	if !u.ran("systemctl restart enginex-sshd") || u.ran("systemctl restart sshd") || u.ran("systemctl unmask sshd") {
 		t.Fatalf("wrong unit: %q", u.cmds)
 	}
 	b, err := os.ReadFile(gen1SSHDropInPath)
-	if err != nil || !strings.Contains(string(b), "-f /usr/share/sc5000-custom/sshd_config -p 2222") {
+	if err != nil || !strings.Contains(string(b), "-f /usr/share/enginex/sshd_config -p 2222") {
 		t.Fatalf("gen-1 port drop-in: %v %q", err, b)
 	}
 	if _, err := os.Stat(sshPortDropInPath); !os.IsNotExist(err) {
@@ -98,7 +98,7 @@ func TestSSHGen1ManagesEngineXsKeyOnlyUnit(t *testing.T) {
 	if w := sshCall(s, http.MethodPost, `{"authorizedKey":"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEngineXTestKey test"}`); w.Code != http.StatusOK {
 		t.Fatalf("%d %s", w.Code, w.Body.String())
 	}
-	if !u.ran("systemctl start sc5000-custom-sshd") {
+	if !u.ran("systemctl start enginex-sshd") {
 		t.Fatalf("key upload did not start SSH: %q", u.cmds)
 	}
 	if _, err := os.Stat(filepath.Join(s.cfg.StateDir, "authorized_keys")); err != nil {

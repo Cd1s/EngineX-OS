@@ -95,7 +95,7 @@ func TestModsTailscaleLifecycle(t *testing.T) {
 			t.Fatalf("%s: %d %s", body, w.Code, w.Body.String())
 		}
 	}
-	if s.tailscaleInstalled() || s.loadTailscaleConfig().Enabled || !fake.has("systemd-run --unit=sc5000-tailscaled") || !fake.has("systemctl stop sc5000-tailscaled") {
+	if s.tailscaleInstalled() || s.loadTailscaleConfig().Enabled || !fake.has("systemd-run --unit=enginex-tailscaled") || !fake.has("systemctl stop enginex-tailscaled") {
 		t.Fatal("tailscale lifecycle did not complete")
 	}
 }

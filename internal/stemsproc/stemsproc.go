@@ -4,7 +4,7 @@
 // for logins (see internal/stems.ResolveClient for the override variables).
 // With no relay set up, or one it cannot reach, it looks for sc5000-stemsd
 // on a computer in the same LAN (stems.FindLAN); failing that the deck
-// splits stems itself (stems.LocalRender). sc5000-suite runs Main.
+// splits stems itself (stems.LocalRender). enginex-suite runs Main.
 package stemsproc
 
 import (

@@ -1,5 +1,5 @@
 // Package cli holds the command lines of rb-bridge, engine-guardian and
-// stream-sync. The standalone commands and the sc5000-suite multi-call binary
+// stream-sync. The standalone commands and the enginex-suite multi-call binary
 // that the player runs share them, so the two cannot drift apart.
 package cli
 
@@ -50,7 +50,7 @@ func RBBridge(args []string, stdout io.Writer) error {
 	stateFile := fs.String("state-file", defaultStateFile, "path to write Pro DJ Link snapshot state JSON")
 	anlzRoot := fs.String("anlz-root", "/media", "root directory to scan for Rekordbox ANLZ analysis files")
 	mediaCache := fs.String("media-cache", prolink.SharedMediaCacheDir(), "where tracks read from Pioneer players over the network are kept (#59)")
-	uiSettings := fs.String("ui-settings", "/data/sc5000-custom/ui/settings.conf", "deck settings; prolink_share=1 enables reading players' media")
+	uiSettings := fs.String("ui-settings", "/data/enginex/ui/settings.conf", "deck settings; prolink_share=1 enables reading players' media")
 	watch := fs.Bool("watch", false, "retired; exits at once")
 	fs.String("watch-roots", "", "retired")
 	fs.Duration("poll-interval", 0, "retired")

@@ -19,7 +19,7 @@ const (
 	// in deemix-config.json (via http://sc5000.lan:8080) or SC5000_STEMS_URL.
 	DefaultRelayURL = ""
 	// DefaultRelayConfig is stream-sync's relay settings file on the deck.
-	DefaultRelayConfig = "/data/sc5000-custom/state/deemix-config.json"
+	DefaultRelayConfig = "/data/enginex/state/deemix-config.json"
 	// DefaultTokenFile holds the renderer's internal token for direct mode.
 	DefaultTokenFile = "/etc/sc5000-stems/token"
 )
@@ -41,7 +41,7 @@ type Client struct {
 //     SC5000_STEMS_TOKEN, else the token file (SC5000_STEMS_TOKEN_FILE,
 //     default /etc/sc5000-stems/token).
 //  2. Otherwise the relay from deemix-config.json (SC5000_STEMS_CONFIG,
-//     default /data/sc5000-custom/state/deemix-config.json): relayUrl and the
+//     default /data/enginex/state/deemix-config.json): relayUrl and the
 //     console password deemixPassword. SC5000_STEMS_TOKEN overrides the
 //     password.
 func ResolveClient(getenv func(string) string) (Client, error) {
@@ -87,7 +87,7 @@ func ResolveClient(getenv func(string) string) (Client, error) {
 	return Client{relay, password, path}, nil
 }
 
-// readRelayConfig reads the fields stream-sync and sc5000-deemixd share.
+// readRelayConfig reads the fields stream-sync and enginex-deemixd share.
 func readRelayConfig(path string) (relay, password string, err error) {
 	b, err := os.ReadFile(path)
 	if err != nil {

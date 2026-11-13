@@ -34,7 +34,7 @@ var bootReportMu sync.Mutex
 var bootRenameNoReplace = unix.Renameat2
 
 // Fixed sources only: never capture arbitrary files, environment or command lines.
-var bootReportUnits = []string{"engine.service", "engine-guardian.service", "stream-sync.service", "enginex-stream-sync.service", "rb-bridge.service", "enginex-rb-bridge.service", "sc5000-deemixd.service", "enginex-sc5000-deemixd.service", "sc5000-custom-prepare.service", "sc5000-custom-etc-reset.service", "sc5000-debloat.service", "sc5000-perf-tune.service", "sc5000-storage-discover.service"}
+var bootReportUnits = []string{"engine.service", "engine-guardian.service", "stream-sync.service", "enginex-stream-sync.service", "rb-bridge.service", "enginex-rb-bridge.service", "enginex-deemixd.service", "enginex-prepare.service", "enginex-etc-reset.service", "enginex-debloat.service", "enginex-perf-tune.service", "enginex-storage-discover.service"}
 
 type bootReportInputs struct {
 	run                   func(context.Context, string, ...string) ([]byte, error)
