@@ -16,7 +16,6 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -26,28 +25,32 @@ type linuxCalls struct {
 	open  func(string, int, uint32) (int, error)
 	ioctl func(int, uintptr, unsafe.Pointer) error
 	close func(int) error
+	poll  func([]unix.PollFd, int) (int, error)
 }
 
 func nativeLinuxCalls() linuxCalls {
-	return linuxCalls{unix.Open, func(fd int, req uintptr, arg unsafe.Pointer) error {
+	return linuxCalls{open: unix.Open, ioctl: func(fd int, req uintptr, arg unsafe.Pointer) error {
 		_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), req, uintptr(arg))
 		runtime.KeepAlive(arg)
 		if errno != 0 {
 			return errno
 		}
 		return nil
-	}, unix.Close}
+	}, close: unix.Close, poll: unix.Poll}
 }
 
 type linuxAttachment struct {
 	info                    DeviceInfo
 	path, node, fingerprint string
+	configuration           uint8
 }
 type linuxBackend struct {
 	mu               sync.Mutex
 	sysroot, devroot string
 	attachments      map[DeviceID]linuxAttachment
 	calls            linuxCalls
+	// Enumeration seam for transient sysfs failures; Open always re-reads sysfs.
+	scanAttachment func(string) (linuxAttachment, error)
 }
 
 func NewBackend() (Backend, error) {
@@ -88,14 +91,31 @@ func readSmall(path string, limit int) ([]byte, error) {
 }
 
 func sysNumber(path string, bits int) (uint64, error) {
+	return sysAttributeNumber(path, bits, false)
+}
+
+func sysAttributeNumber(path string, bits int, emptyZero bool) (uint64, error) {
 	b, err := readSmall(path, 32)
 	if err != nil {
 		return 0, err
 	}
-	return strconv.ParseUint(strings.TrimSpace(string(b)), 10, bits)
+	value := strings.TrimSpace(string(b))
+	if value == "" && emptyZero {
+		return 0, nil
+	}
+	number, err := strconv.ParseUint(value, 10, bits)
+	if err != nil {
+		return 0, fmt.Errorf("parse %s: %w", path, err)
+	}
+	return number, nil
 }
 
-func (b *linuxBackend) attachment(path string) (linuxAttachment, error) {
+func (b *linuxBackend) attachment(path string) (attachment linuxAttachment, err error) {
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("device %s: %w", path, err)
+		}
+	}()
 	desc, err := readSmall(filepath.Join(path, "descriptors"), 65535)
 	if err != nil {
 		return linuxAttachment{}, err
@@ -111,11 +131,12 @@ func (b *linuxBackend) attachment(path string) (linuxAttachment, error) {
 	if err != nil {
 		return linuxAttachment{}, err
 	}
-	active, err := sysNumber(filepath.Join(path, "bConfigurationValue"), 8)
+	// usb_actconfig_show emits an empty attribute before configuration.
+	active, err := sysAttributeNumber(filepath.Join(path, "bConfigurationValue"), 8, true)
 	if err != nil {
 		return linuxAttachment{}, err
 	}
-	info := DeviceInfo{VID: binary.LittleEndian.Uint16(desc[8:10]), PID: binary.LittleEndian.Uint16(desc[10:12])}
+	info := DeviceInfo{VID: binary.LittleEndian.Uint16(desc[8:10]), PID: binary.LittleEndian.Uint16(desc[10:12]), Location: filepath.Base(path)}
 	found := false
 	for offset := 18; offset < len(desc); {
 		if len(desc)-offset < 9 {
@@ -152,7 +173,7 @@ func (b *linuxBackend) attachment(path string) (linuxAttachment, error) {
 	}
 	stat := st.Sys().(*syscall.Stat_t)
 	stamp := fmt.Sprintf("%d:%d:%v:%x:%d:%d:%d", stat.Dev, stat.Ino, stat.Ctim, sha256.Sum256(desc), bus, addr, active)
-	return linuxAttachment{info: info, path: path, node: filepath.Join(b.devroot, fmt.Sprintf("%03d/%03d", bus, addr)), fingerprint: stamp}, nil
+	return linuxAttachment{info: info, path: path, node: filepath.Join(b.devroot, fmt.Sprintf("%03d/%03d", bus, addr)), fingerprint: stamp, configuration: uint8(active)}, nil
 }
 
 func (b *linuxBackend) Enumerate(ctx context.Context) ([]DeviceInfo, error) {
@@ -175,12 +196,15 @@ func (b *linuxBackend) Enumerate(ctx context.Context) ([]DeviceInfo, error) {
 		if _, err := os.Stat(filepath.Join(path, "idVendor")); errors.Is(err, os.ErrNotExist) {
 			continue
 		}
-		a, err := b.attachment(path)
-		if errors.Is(err, os.ErrNotExist) {
-			continue
+		inspect := b.attachment
+		if b.scanAttachment != nil {
+			inspect = b.scanAttachment
 		}
+		a, err := inspect(path)
 		if err != nil {
-			return nil, linuxError("enumerate descriptors", err, false)
+			// Malformed, unreadable or just-unplugged unrelated devices must
+			// not hide a usable deck. Open revalidates the selected attachment.
+			continue
 		}
 		a.info.ID = nextID()
 		next[a.info.ID] = a
@@ -190,7 +214,7 @@ func (b *linuxBackend) Enumerate(ctx context.Context) ([]DeviceInfo, error) {
 	return result, nil
 }
 
-func (b *linuxBackend) Open(ctx context.Context, id DeviceID, number, alt uint8) (Device, error) {
+func (b *linuxBackend) Open(ctx context.Context, id DeviceID, number, alt uint8) (result Device, retErr error) {
 	if err := ctx.Err(); err != nil {
 		return nil, fault("open", Cancelled, false, err)
 	}
@@ -199,6 +223,14 @@ func (b *linuxBackend) Open(ctx context.Context, id DeviceID, number, alt uint8)
 	b.mu.Unlock()
 	if !ok {
 		return nil, fault("open", Disconnected, false, errors.New("unknown or stale enumeration identity"))
+	}
+	defer func() {
+		if retErr != nil {
+			retErr = fmt.Errorf("device %s: %w", a.path, retErr)
+		}
+	}()
+	if a.configuration == 0 {
+		return nil, fault("open", Unsupported, false, errors.New("device is unconfigured (no active USB configuration)"))
 	}
 	it, err := selected(a.info, number, alt)
 	if err != nil {
@@ -229,10 +261,18 @@ func (b *linuxBackend) Open(ctx context.Context, id DeviceID, number, alt uint8)
 	if err = b.calls.ioctl(fd, 0x8004550f, unsafe.Pointer(&claim)); err != nil {
 		return cleanup(linuxError("claim interface", err, false))
 	}
-	settings := [2]uint32{uint32(number), uint32(alt)}
-	if err = b.calls.ioctl(fd, 0x80085504, unsafe.Pointer(&settings)); err != nil {
-		releaseErr := b.calls.ioctl(fd, 0x80045510, unsafe.Pointer(&claim))
-		return cleanup(errors.Join(linuxError("set alternate", err, false), linuxError("release interface", releaseErr, false)))
+	alternates := 0
+	for _, candidate := range a.info.Interfaces {
+		if candidate.Number == number {
+			alternates++
+		}
+	}
+	if alternates > 1 || alt != 0 {
+		settings := [2]uint32{uint32(number), uint32(alt)}
+		if err = b.calls.ioctl(fd, 0x80085504, unsafe.Pointer(&settings)); err != nil {
+			releaseErr := b.calls.ioctl(fd, 0x80045510, unsafe.Pointer(&claim))
+			return cleanup(errors.Join(linuxError("set alternate", err, false), linuxError("release interface", releaseErr, false)))
+		}
 	}
 	a.info.Interfaces = []Interface{it}
 	return &linuxDevice{s: newSession(), fd: fd, calls: b.calls, info: a.info, it: it}, nil
@@ -258,7 +298,7 @@ type linuxDevice struct {
 
 func (d *linuxDevice) Info() DeviceInfo { return cloneInfo(d.info) }
 
-func (d *linuxDevice) exchange(parent context.Context, ep uint8, data []byte, control, write bool) (int, error) {
+func (d *linuxDevice) exchange(parent context.Context, ep uint8, data []byte, control, write bool) (count int, transferErr error) {
 	if err := transferSize(len(data)); err != nil {
 		return 0, err
 	}
@@ -287,9 +327,13 @@ func (d *linuxDevice) exchange(parent context.Context, ep uint8, data []byte, co
 	if err := d.calls.ioctl(d.fd, 0x8038550a, unsafe.Pointer(urb)); err != nil {
 		return 0, linuxError("submit transfer", err, false)
 	}
+	defer func() {
+		if !control && d.fd >= 0 && pipeNeedsReset(transferErr) {
+			endpoint := uint32(ep)
+			transferErr = errors.Join(transferErr, linuxError("reset pipe after transfer", d.calls.ioctl(d.fd, 0x80045515, unsafe.Pointer(&endpoint)), false))
+		}
+	}()
 	// usbfs retains both URB and data until reap or close. Never return early.
-	ticker := time.NewTicker(time.Millisecond)
-	defer ticker.Stop()
 	var cancelled error
 	for {
 		var completed *linuxURB
@@ -319,18 +363,35 @@ func (d *linuxDevice) exchange(parent context.Context, ep uint8, data []byte, co
 			closeErr := d.abortHandle()
 			return 0, errors.Join(linuxError("reap transfer", err, write), closeErr)
 		}
-		if cancelled != nil {
-			<-ticker.C
-			continue
-		}
-		select {
-		case <-ctx.Done():
+		if cancelled == nil && ctx.Err() != nil {
 			cancelled = ctx.Err()
 			if e := d.calls.ioctl(d.fd, 0x550b, unsafe.Pointer(urb)); e != nil && !errors.Is(e, unix.EINVAL) {
 				closeErr := d.abortHandle()
 				return 0, errors.Join(fault("cancel transfer", Cancelled, write, cancelled), linuxError("discard transfer", e, write), closeErr)
 			}
-		case <-ticker.C:
+			continue
+		}
+		// usbfs signals completed URBs through POLLOUT. The bounded wait
+		// observes caller/Close cancellation without a 1ms wakeup loop.
+		wait := 50
+		if cancelled == nil {
+			wait = min(wait, int(timeoutMS(ctx)))
+		}
+		fds := []unix.PollFd{{Fd: int32(d.fd), Events: unix.POLLOUT | unix.POLLERR | unix.POLLHUP}}
+		_, pollErr := d.calls.poll(fds, wait)
+		if errors.Is(pollErr, unix.EINTR) {
+			continue
+		}
+		if pollErr != nil || fds[0].Revents&unix.POLLNVAL != 0 {
+			if pollErr == nil {
+				pollErr = unix.EBADF
+			}
+			closeErr := d.abortHandle()
+			return 0, errors.Join(linuxError("wait for transfer", pollErr, write), fault("transfer", Cancelled, write, cancelled), closeErr)
+		}
+		if fds[0].Revents&unix.POLLHUP != 0 {
+			closeErr := d.abortHandle()
+			return 0, errors.Join(linuxError("wait for transfer", unix.ENODEV, write), fault("transfer", Cancelled, write, cancelled), closeErr)
 		}
 	}
 }

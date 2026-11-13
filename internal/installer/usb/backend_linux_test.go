@@ -25,6 +25,12 @@ func TestLinuxURBLayout(t *testing.T) {
 
 func linuxTestDevice(calls linuxCalls) *linuxDevice {
 	it, _ := parseConfiguration(configurationFixture())
+	if calls.poll == nil {
+		calls.poll = func(_ []unix.PollFd, ms int) (int, error) {
+			time.Sleep(time.Duration(ms) * time.Millisecond)
+			return 0, nil
+		}
+	}
 	return &linuxDevice{s: newSession(), fd: 10, calls: calls, it: it[0]}
 }
 func TestLinuxOneTransferIncludingZLP(t *testing.T) {
@@ -182,6 +188,7 @@ func TestLinuxCancelDrainsBeforeReturning(t *testing.T) {
 	var active *linuxURB
 	discarded := false
 	reaped := false
+	reset := false
 	ctx, cancel := context.WithCancel(context.Background())
 	d := linuxTestDevice(linuxCalls{ioctl: func(_ int, req uintptr, arg unsafe.Pointer) error {
 		switch req {
@@ -200,13 +207,19 @@ func TestLinuxCancelDrainsBeforeReturning(t *testing.T) {
 			active.Status = -int32(unix.ENOENT)
 			*(**linuxURB)(arg) = active
 			return nil
+		case 0x80045515:
+			if !reaped {
+				t.Fatal("reset pipe before draining")
+			}
+			reset = true
+			return nil
 		}
 		t.Fatal("unexpected ioctl")
 		return nil
 	}})
 	_, err := d.WriteBulk(ctx, 2, []byte("not safe to replay"))
 	var detail *Error
-	if !errors.Is(err, context.Canceled) || !errors.As(err, &detail) || !detail.MayHaveWritten || !reaped {
+	if !errors.Is(err, context.Canceled) || !errors.As(err, &detail) || !detail.MayHaveWritten || !reaped || !reset {
 		t.Fatalf("err=%v reaped=%v", err, reaped)
 	}
 }

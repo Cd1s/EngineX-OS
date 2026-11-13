@@ -28,7 +28,9 @@ type DeviceInfo struct {
 	ID              DeviceID
 	VID, PID        uint16
 	Serial, Product string
-	Interfaces      []Interface
+	// Location identifies the host port/topology and is diagnostic only.
+	Location   string
+	Interfaces []Interface
 	// Driver is diagnostic only. Its presence does not prove a usable binding.
 	Driver string
 }
@@ -153,7 +155,7 @@ func bulkEndpoint(it Interface, address uint8, in bool) error {
 	return fault("bulk", Protocol, false, errors.New("bulk endpoint does not belong to the claimed interface"))
 }
 
-const transferLimit = 16 << 20
+const transferLimit = 1 << 20
 const defaultTimeout = 30 * time.Second
 
 // session owns cancellation and the serialized native handle. The native call
@@ -224,9 +226,17 @@ func timeoutMS(ctx context.Context) uint32 {
 
 func transferSize(n int) error {
 	if n > transferLimit {
-		return fault("transfer", Protocol, false, errors.New("transfer exceeds 16 MiB limit"))
+		return fault("transfer", Protocol, false, errors.New("transfer exceeds 1 MiB limit"))
 	}
 	return nil
+}
+
+func pipeNeedsReset(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var detail *Error
+	return errors.As(err, &detail) && (detail.Kind == Timeout || detail.Kind == Cancelled)
 }
 
 func controlRequest(it Interface, typ, request uint8, index uint16, length int) error {
