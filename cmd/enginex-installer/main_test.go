@@ -33,7 +33,6 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
-	"github.com/Cd1s/EngineX-OS/internal/installer/azimg"
 	"github.com/Cd1s/EngineX-OS/internal/installer/ext4"
 	"github.com/Cd1s/EngineX-OS/internal/installer/usb"
 )
@@ -937,49 +936,29 @@ func TestModeBJC11SRefusesUnverifiedPartition(t *testing.T) {
 }
 
 func TestNativeReadbackRefusesUnverifiableActivation(t *testing.T) {
+	need(t, "debugfs")
 	bundle := buildBundle(t, "PRIME4PLUS", "5.3.0.5")
-	o := testOpts(t)
-	o.defaults()
-	ctx := ctxT(t)
-	b, err := readBundle(ctx, bundle.Path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	original, _, err := buildImage(ctx, o, b, 64<<20, "original.img", "az01-data")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(filepath.Dir(original))
+	originalVerify := verifyImage
+	t.Cleanup(func() { verifyImage = originalVerify })
 	for _, path := range []string{
 		"enginex/version.txt", "enginex/bundle/version.txt",
 		"enginex/bundle/boot-activate.sh", "enginex/bundle/lib/libengine-ui-hook.so",
+		"sc5000-custom/bundle/boot-activate.sh", "sc5000-custom/bundle/lib/libengine-ui-hook.so",
 		"system/var/overlay/lib/alsa/conf.d/99-sc5000-custom.conf",
 	} {
 		t.Run(path, func(t *testing.T) {
-			source, closer, err := ext4.OpenFileSource(original)
-			if err != nil {
-				t.Fatal(err)
+			verifyImage = func(ctx context.Context, image string, changes ext4.ChangeSet) error {
+				sh(t, "debugfs", "-w", "-R", "rm /"+path, image)
+				return originalVerify(ctx, image, changes)
 			}
-			defer closer.Close()
-			out := filepath.Join(t.TempDir(), "stale.img")
-			fs, err := ext4.OpenCopy(ctx, source, out)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer fs.Close()
-			changes, err := imageChanges(ctx, o, b, fs)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := fs.Apply(ctx, ext4.ChangeSet{Files: []ext4.Entry{imageBytes(path, []byte("stale"), 0o644)}}); err != nil {
-				t.Fatal(err)
-			}
-			if err := fs.Close(); err != nil {
-				t.Fatal(err)
-			}
-			if err := ext4.VerifyFile(ctx, out, changes); err == nil || !strings.Contains(err.Error(), path) {
+			fb := newFastboot(t, "JC11S", true)
+			o := testOpts(t)
+			o.USB, o.Bundle = fb.Bin, bundle.Path
+			err := run(ctxT(t), o)
+			if err == nil || !strings.Contains(err.Error(), "image readback") || !strings.HasSuffix(err.Error(), "nothing flashed") {
 				t.Fatalf("readback %s: %v", path, err)
 			}
+			if flashed := fb.Flashed(); len(flashed) != 0 { t.Fatalf("flashed after readback failure: %v", flashed) }
 		})
 	}
 }
@@ -1871,7 +1850,8 @@ func TestUSBUpdateModeRefusals(t *testing.T) {
 	}
 }
 
-// #164: an installed deck asks for an access code (403); only its Stream Sync login page identifies it.
+// #164: an installed deck asks for its access code (403 on /v1/sc5000/ui) and must still be recognised;
+// a bare 403 from some other web server must not be.
 func TestIsDeckUIRecognisesTheLoginPage(t *testing.T) {
 	login := `<!doctype html><title>Stream Sync</title><h1>Stream Sync</h1>`
 	cases := []struct {
@@ -1973,16 +1953,6 @@ func corruptGen2ImagePayload(t *testing.T, imgPath string) string {
 }
 
 func TestImageFlagAliasAndUnwrapGen2ImageOrBundle(t *testing.T) {
-	unwrapGen2ImageOrBundle := func(raw []byte) ([]byte, error) {
-		im, err := azimg.Open(ctxT(t), bytes.NewReader(raw), int64(len(raw)), azimg.Limits{})
-		if err != nil {
-			return nil, err
-		}
-		if im.Format() == azimg.FormatGen2Image {
-			return raw[gen2ImgHeader:], nil
-		}
-		return raw, nil
-	}
 	need(t, "python3")
 	for _, args := range [][]string{
 		{"-image", "SCLIVE4-5.3.0.4-EngineX-OS-Denon-SC-LIVE-4-JP21-Update.img"},
@@ -2014,18 +1984,18 @@ func TestImageFlagAliasAndUnwrapGen2ImageOrBundle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := unwrapGen2ImageOrBundle(imgBytes)
-	if err != nil || !bytes.Equal(got, tarBytes) {
-		t.Fatalf("unwrapGen2ImageOrBundle(valid .img) err=%v, equal=%v", err, bytes.Equal(got, tarBytes))
-	}
-	gotTar, err := unwrapGen2ImageOrBundle(tarBytes)
-	if err != nil || !bytes.Equal(gotTar, tarBytes) {
-		t.Fatalf("unwrapGen2ImageOrBundle(.tar.gz) err=%v", err)
-	}
+	got, err := readBundle(ctxT(t), b.ImagePath)
+	if err != nil { t.Fatal(err) }
+	if !bytes.Equal(got.TarGz, tarBytes) { t.Fatal("readBundle changed the verified image payload") }
+	gotTar, err := readBundle(ctxT(t), b.Path)
+	if err != nil { t.Fatal(err) }
+	if !bytes.Equal(gotTar.TarGz, tarBytes) { t.Fatal("readBundle changed the legacy bundle payload") }
 
 	flipped := append([]byte(nil), imgBytes...)
 	flipped[len(flipped)-1] ^= 1
-	if _, err := unwrapGen2ImageOrBundle(flipped); err == nil || !strings.Contains(err.Error(), "SHA-256") {
+	flippedPath := filepath.Join(t.TempDir(), "flipped.img")
+	if err := os.WriteFile(flippedPath, flipped, 0o600); err != nil { t.Fatal(err) }
+	if _, err := readBundle(ctxT(t), flippedPath); err == nil || !strings.Contains(err.Error(), "SHA-256") {
 		t.Errorf("flipped payload accepted: %v", err)
 	}
 	for name, bad := range map[string][]byte{
@@ -2035,7 +2005,9 @@ func TestImageFlagAliasAndUnwrapGen2ImageOrBundle(t *testing.T) {
 		"legacy no v1":      append([]byte("ENGINEX_DATA_BUNDLE_OLD\n"), make([]byte, 200)...),
 		"az01 gen1":         append([]byte("AZ01"), make([]byte, 200)...),
 	} {
-		if _, err := unwrapGen2ImageOrBundle(bad); err == nil {
+		badPath := filepath.Join(t.TempDir(), "bad.img")
+		if err := os.WriteFile(badPath, bad, 0o600); err != nil { t.Fatal(err) }
+		if _, err := readBundle(ctxT(t), badPath); err == nil {
 			t.Errorf("%s accepted without error", name)
 		}
 	}

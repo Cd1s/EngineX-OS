@@ -100,6 +100,37 @@ func TestGen1RefusesASelectedImageForAnotherDeck(t *testing.T) {
 	}
 }
 
+func TestGen1RefusesWrongContainer(t *testing.T) {
+	gen2 := buildBundle(t, "SCLIVE4", "5.3.0.5")
+	gen2Bytes, err := os.ReadFile(gen2.ImagePath)
+	if err != nil { t.Fatal(err) }
+	for _, route := range []string{"ssh", "usb"} {
+		for _, tc := range []struct { name string; data []byte }{
+			{"model", gen1Container(t, "SC6000", []byte("rootfs"))},
+			{"format", gen2Bytes},
+		} {
+			t.Run(route+"/"+tc.name, func(t *testing.T) {
+				o := testOpts(t)
+				o.defaults()
+				useRelease(o, oneFileRelease(t, "SC5000-5.3.0.5-EngineX-OS-Test-Update.img", tc.data, signFault{}, nil, ""))
+				if route == "ssh" {
+					d := startSSHDeck(t, o.SSHPort, "inmusic,jp07\x00")
+					err = modeA(ctxT(t), o, deck{IP: "127.0.0.1"})
+					if strings.Contains(strings.Join(d.Commands(), "\n"), "az01-update --file") { t.Fatal("sent an incompatible image") }
+				} else {
+					fb := newFastboot(t, "jp07", true)
+					o.USB = fb.Bin
+					err = run(ctxT(t), o)
+					for _, call := range fb.Calls() {
+						if strings.HasPrefix(call, "oem ") || strings.HasPrefix(call, "flash ") || call == "reboot" { t.Fatalf("mutated a deck for an incompatible container: %s", call) }
+					}
+				}
+				if err == nil || !strings.Contains(err.Error(), "AZ01 image does not support this deck") { t.Fatalf("%s: %v", tc.name, err) }
+			})
+		}
+	}
+}
+
 // gen1Container is an AZ01 image with a real XZ rootfs and partition digests.
 func gen1Container(t *testing.T, prefix string, rootfs []byte) []byte {
 	t.Helper()

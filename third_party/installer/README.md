@@ -22,4 +22,3 @@ Both licenses permit redistribution with this project's MIT-licensed code;
 their own terms and attribution requirements still apply. Preserve these
 license files in the installer archives when the native packages are integrated.
 The XZ command-line program and its code are not part of the installer.
-
