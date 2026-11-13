@@ -53,7 +53,7 @@ if [ "$AZ04" = 1 ]; then
     (cd "$REPO/tools/ui-mod" && CROSS= OUT="$HOOK" sh build.sh)
     (cd "$REPO/tools/edisksd-hook" && CROSS= OUT="$REPO/out/aarch64/libedisksd-hook.so" sh build.sh)
     (cd "$REPO" && . /etc/profile.d/buildtools.sh && \
-     GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X 'github.com/Cd1s/EngineX-OS/pkg/webui.BuildTag=$BUILD_TAG'" -o "$SUITE" ./cmd/sc5000-suite)
+     GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X 'github.com/Cd1s/EngineX-OS/pkg/webui.BuildTag=$BUILD_TAG'" -o "$SUITE" ./cmd/enginex-suite)
     # Stage 1 stand-in for the stock Engine: loads alsa.conf (and so conf.d) and opens a PCM, as Engine does.
     PROBE="$TMP/alsa-probe"
     printf '%s\n' '#include <dlfcn.h>' \
@@ -73,14 +73,14 @@ else
     PROBE=/root/build/sc5000-lab/sclive4-rea61-followup/stock-alsa-probe
     (cd "$REPO/tools/ui-mod" && sh build.sh)
     (cd "$REPO/tools/edisksd-hook" && sh build.sh)
-    HOOK="$REPO/rootfs-overlay/etc/sc5000/libengine-ui-hook.so"
+    HOOK="$REPO/rootfs-overlay/etc/enginex/libengine-ui-hook.so"
     SUITE="$REPO/out/sc5000-suite"
 fi
 
 if [ ! -f "$SUITE" ]; then
     echo "Building sc5000-suite..."
     (cd "$REPO" && . /etc/profile.d/buildtools.sh && \
-     GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X 'github.com/Cd1s/EngineX-OS/pkg/webui.BuildTag=$BUILD_TAG'" -o "$SUITE" ./cmd/sc5000-suite)
+     GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X 'github.com/Cd1s/EngineX-OS/pkg/webui.BuildTag=$BUILD_TAG'" -o "$SUITE" ./cmd/enginex-suite)
 fi
 
 mkdir -p "$TMP/packs_raw" "$TMP/ui_bundle/packs"

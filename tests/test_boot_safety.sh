@@ -2,7 +2,7 @@
 # Boot state machine with fake Engine/systemd; no host service or media changes.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-GUARD=${BOOT_GUARD_TEST_TARGET:-$ROOT/rootfs-overlay/etc/sc5000/engine-ui-guard}
+GUARD=${BOOT_GUARD_TEST_TARGET:-$ROOT/rootfs-overlay/etc/enginex/engine-ui-guard}
 W=$(mktemp -d "$ROOT/tests/.tmp.boot-safety.XXXXXX")
 pids=()
 cleanup() { for p in "${pids[@]}"; do kill "$p" 2>/dev/null || :; done; wait 2>/dev/null || :; rm -rf "$W"; }

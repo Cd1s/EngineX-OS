@@ -168,9 +168,9 @@ HOSTS
     [ ! -e "$DATA/system/var/overlay/lib/systemd/timesync/clock" ]
 
     # Verify sc5000-timesync-seed skips missing lib_dir without creating it, then seeds /var/lib/systemd/timesync/clock
-    SC5000_TIMESYNC_LIB_DIR=/tmp/nonexistent-var-lib chroot "$R" /bin/sh -s < "$REPO/rootfs-overlay/usr/libexec/sc5000-timesync-seed"
+    SC5000_TIMESYNC_LIB_DIR=/tmp/nonexistent-var-lib chroot "$R" /bin/sh -s < "$REPO/rootfs-overlay/usr/libexec/enginex-timesync-seed"
     [ ! -e "$R/tmp/nonexistent-var-lib" ]
-    chroot "$R" /bin/sh -s < "$REPO/rootfs-overlay/usr/libexec/sc5000-timesync-seed"
+    chroot "$R" /bin/sh -s < "$REPO/rootfs-overlay/usr/libexec/enginex-timesync-seed"
 
     FLOOR_MTIME=$(stat -c %Y "$DATA/system/var/overlay/lib/systemd/timesync/clock")
     [ "$FLOOR_MTIME" -eq "$BUILD_EPOCH" ] || {
@@ -471,7 +471,7 @@ else
 fi
 python3 -I "$REPO/tools/ui-mod/build_packs.py" --qrc "$QRC_DIR" --out "$W/packs" >/dev/null
 
-(cd "$REPO" && GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -o "$W/sc5000-suite" ./cmd/sc5000-suite)
+(cd "$REPO" && GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -o "$W/sc5000-suite" ./cmd/enginex-suite)
 
 python3 -I - "$REPO" "$W" << 'PY'
 import importlib.util, pathlib, sys

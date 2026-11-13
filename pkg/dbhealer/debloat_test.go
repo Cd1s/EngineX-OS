@@ -29,7 +29,7 @@ func read(t *testing.T, root, path string) string {
 	return string(blob)
 }
 func TestDebloatScriptCompleteOfflineAndIdempotent(t *testing.T) {
-	script, err := filepath.Abs("../../rootfs-overlay/usr/local/bin/sc5000-debloat")
+	script, err := filepath.Abs("../../rootfs-overlay/usr/local/bin/enginex-debloat")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,12 +71,12 @@ func TestDebloatScriptCompleteOfflineAndIdempotent(t *testing.T) {
 		t.Fatalf("cleanup: %q %v", target, err)
 	}
 	conf := read(t, root, "etc/systemd/system/engine.service.d/override.conf")
-	for _, line := range []string{"LimitCORE=0", "ExecStopPost=\n", "exec /usr/Engine/Scripts/cleanup-JP07.sh'", "ExecStopPost=-/etc/sc5000/engine-ui-guard stop", "Environment=HOME=/tmp/sc5000-engine-home", "Environment=QML_DISABLE_DISK_CACHE=1", "ExecStartPre=/etc/sc5000/engine-ui-guard runtime"} {
+	for _, line := range []string{"LimitCORE=0", "ExecStopPost=\n", "exec /usr/Engine/Scripts/cleanup-JP07.sh'", "ExecStopPost=-/etc/enginex/engine-ui-guard stop", "Environment=HOME=/tmp/sc5000-engine-home", "Environment=QML_DISABLE_DISK_CACHE=1", "ExecStartPre=/etc/enginex/engine-ui-guard runtime"} {
 		if !strings.Contains(conf, line) {
 			t.Fatal(conf)
 		}
 	}
-	if !strings.Contains(read(t, root, "etc/systemd/journald.conf.d/sc5000.conf"), "RuntimeMaxUse=16M") {
+	if !strings.Contains(read(t, root, "etc/systemd/journald.conf.d/enginex.conf"), "RuntimeMaxUse=16M") {
 		t.Fatal("journal unlimited")
 	}
 	hosts := read(t, root, "etc/hosts")
@@ -85,7 +85,7 @@ func TestDebloatScriptCompleteOfflineAndIdempotent(t *testing.T) {
 			t.Fatal(hosts)
 		}
 	}
-	if strings.Contains(hosts, "0.0.0.0 inmusicbrands.com\n") || strings.Contains(read(t, root, "etc/dnsmasq.d/sc5000-telemetry.conf"), "/inmusicbrands.com/") {
+	if strings.Contains(hosts, "0.0.0.0 inmusicbrands.com\n") || strings.Contains(read(t, root, "etc/dnsmasq.d/enginex-telemetry.conf"), "/inmusicbrands.com/") {
 		t.Fatal("connman online check domain blocked")
 	}
 	// Engine shows a Wi-Fi "!" unless connman's stock online check reaches ONLINE.
@@ -127,27 +127,27 @@ func TestDebloatScriptCompleteOfflineAndIdempotent(t *testing.T) {
 }
 func TestOverlayUnitsAndRuntimePolicy(t *testing.T) {
 	root := "../../rootfs-overlay"
-	script := read(t, root, "usr/local/bin/sc5000-debloat")
+	script := read(t, root, "usr/local/bin/enginex-debloat")
 	for _, text := range []string{"iw dev wlan0 set power_save off", "az01-ethernet-speed 1000 || az01-ethernet-speed 100", "chrt -f -p 99", "ffb20000:0 ffa30000:1 ehci_hcd:2 ff540000:2 eth0:2"} {
 		if !strings.Contains(script, text) {
 			t.Fatal(text)
 		}
 	}
-	unit := read(t, root, "etc/systemd/system/sc5000-debloat.service")
+	unit := read(t, root, "etc/systemd/system/enginex-debloat.service")
 	if !strings.Contains(unit, "After=engine.service") {
 		t.Fatal("vendor affinity would win")
 	}
 	guardian := read(t, root, "etc/systemd/system/engine-guardian.service")
 	// The retired database watch is now the boot watchdog. It must get a fair
 	// CPU slice even while ordinary background work saturates the service core.
-	for _, text := range []string{"CPUAffinity=3", "CPUSchedulingPolicy=other", "Nice=10", "IOSchedulingClass=best-effort", "LimitCORE=0", "ExecStart=/etc/sc5000/engine-ui-guard watch"} {
+	for _, text := range []string{"CPUAffinity=3", "CPUSchedulingPolicy=other", "Nice=10", "IOSchedulingClass=best-effort", "LimitCORE=0", "ExecStart=/etc/enginex/engine-ui-guard watch"} {
 		if !strings.Contains(guardian, text) {
 			t.Fatal(text)
 		}
 	}
-	target, err := os.Readlink(filepath.Join(root, "etc/systemd/system/multi-user.target.wants/sc5000-debloat.service"))
-	if err != nil || target != "../sc5000-debloat.service" {
-		t.Fatalf("sc5000-debloat %q %v", target, err)
+	target, err := os.Readlink(filepath.Join(root, "etc/systemd/system/multi-user.target.wants/enginex-debloat.service"))
+	if err != nil || target != "../enginex-debloat.service" {
+		t.Fatalf("enginex-debloat %q %v", target, err)
 	}
 	// Database repair must still never run alongside Engine. Only the shell
 	// boot watchdog is enabled, and its reporting branch has no heal operation.
@@ -155,7 +155,7 @@ func TestOverlayUnitsAndRuntimePolicy(t *testing.T) {
 	if err != nil || target != "../engine-guardian.service" || strings.Contains(guardian, "--heal-mount") || strings.Contains(guardian, "--watch") {
 		t.Fatalf("boot guardian must not enable database repair: %q %v", target, err)
 	}
-	if out, err := exec.Command("bash", "-n", filepath.Join(root, "usr/local/bin/sc5000-debloat")).CombinedOutput(); err != nil {
+	if out, err := exec.Command("bash", "-n", filepath.Join(root, "usr/local/bin/enginex-debloat")).CombinedOutput(); err != nil {
 		t.Fatalf("%s %v", out, err)
 	}
 }
@@ -163,7 +163,7 @@ func TestOverlayUnitsAndRuntimePolicy(t *testing.T) {
 func TestDebloatRuntimeIRQWiFiAndEthernetFallback(t *testing.T) {
 	// Execute the production runtime block with /proc redirected into a fixture
 	// and hardware commands replaced by logging stubs. Never touch host IRQs.
-	script := read(t, "../../rootfs-overlay", "usr/local/bin/sc5000-debloat")
+	script := read(t, "../../rootfs-overlay", "usr/local/bin/enginex-debloat")
 	start := strings.LastIndex(script, "if [ \"$runtime\" = 1 ]; then")
 	if start < 0 {
 		t.Fatal("runtime block missing")

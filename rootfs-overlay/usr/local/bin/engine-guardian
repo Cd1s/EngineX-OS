@@ -1,2 +1,2 @@
 #!/bin/sh
-exec /usr/local/bin/sc5000-suite-exec engine-guardian "$@"
+exec /usr/local/bin/enginex-suite-exec engine-guardian "$@"

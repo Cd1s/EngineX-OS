@@ -1,0 +1,8 @@
+# edisksd owns mounting. This only starts the post-mount bridge worker; it never
+# runs long commands from udev and never mounts on its own.
+SUBSYSTEM!="block", GOTO="enginex_storage_end"
+ACTION!="add|change", GOTO="enginex_storage_end"
+KERNEL!="sd*[0-9]|mmcblk[0-9]p[0-9]*", GOTO="enginex_storage_end"
+IMPORT{builtin}="blkid"
+ENV{ID_FS_TYPE}=="hfsplus|vfat|exfat|ntfs|ext4|f2fs", TAG+="systemd", ENV{SYSTEMD_WANTS}+="enginex-storage@%k.service"
+LABEL="enginex_storage_end"

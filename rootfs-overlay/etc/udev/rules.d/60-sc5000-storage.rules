@@ -1,8 +1,0 @@
-# edisksd owns mounting. This only starts the post-mount bridge worker; it never
-# runs long commands from udev and never mounts on its own.
-SUBSYSTEM!="block", GOTO="sc5000_storage_end"
-ACTION!="add|change", GOTO="sc5000_storage_end"
-KERNEL!="sd*[0-9]|mmcblk[0-9]p[0-9]*", GOTO="sc5000_storage_end"
-IMPORT{builtin}="blkid"
-ENV{ID_FS_TYPE}=="hfsplus|vfat|exfat|ntfs|ext4|f2fs", TAG+="systemd", ENV{SYSTEMD_WANTS}+="sc5000-storage@%k.service"
-LABEL="sc5000_storage_end"
