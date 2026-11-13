@@ -502,3 +502,99 @@ func TestLeaveSwapsAreDurableBeforeTheNextStepAndCleanup(t *testing.T) {
 	}
 	l.check(t, "rollback")
 }
+
+// syncFault fails the sync of one directory with EIO, persistently, once an exchange whose source
+// ends in after has happened: a disk that stops writing.
+type syncFault struct {
+	armed bool
+	fails int
+}
+
+func injectSyncFault(t *testing.T, after, path string) *syncFault {
+	t.Helper()
+	f := &syncFault{}
+	realSync, realExchange := syncPath, Exchange
+	t.Cleanup(func() { syncPath, Exchange = realSync, realExchange })
+	Exchange = func(a, b string) error {
+		err := realExchange(a, b)
+		if err == nil && strings.HasSuffix(a, after) {
+			f.armed = true
+		}
+		return err
+	}
+	syncPath = func(p string) error {
+		if f.armed && p == path {
+			f.fails++
+			return syscall.EIO
+		}
+		return realSync(p)
+	}
+	return f
+}
+
+// #234 review round 4 (R2): when the sync after the bundle exchange fails (the stage's directory,
+// or the live one), cleanup must not run: the journal and this release's parked bundle stay, also
+// through a retry while the fault lasts, and the next boot's leave recover finishes once it syncs.
+func TestLeaveFailedSyncAfterTheCommitKeepsTheJournalAndTheParkedBundle(t *testing.T) {
+	for _, side := range []string{"stage", "live"} {
+		t.Run(side, func(t *testing.T) {
+			d, root := newDeck(t)
+			journal := filepath.Join(root, "data", journalName)
+			dir := filepath.Join(journal, "stage/root")
+			if side == "live" {
+				dir = filepath.Join(root, "data/enginex")
+			}
+			fault := injectSyncFault(t, "/stage/root/bundle", dir)
+			if err := d.Install(legacyBundle(t, "5.3.0.3")); !errors.Is(err, syscall.EIO) {
+				t.Fatalf("install: %v, want EIO", err)
+			}
+			parked := filepath.Join(journal, "stage/root/bundle/lib/libengine-ui-hook.so")
+			for i := 0; i < 2; i++ {
+				if !exists(parked) || read(t, parked) != "hook 5.3.0.5" {
+					t.Fatalf("the parked bundle of this release is gone (try %d)", i)
+				}
+				if i == 0 {
+					if err := d.Recover(); !errors.Is(err, syscall.EIO) {
+						t.Fatalf("recover while the fault lasts: %v, want EIO", err)
+					}
+				}
+			}
+			if fault.fails < 3 {
+				t.Fatalf("the failed sync was tried %d times: once more before every cleanup expected", fault.fails)
+			}
+			fault.armed = false
+			if err := d.Recover(); err != nil {
+				t.Fatal(err)
+			}
+			if exists(journal) || read(t, filepath.Join(root, "data/enginex/bundle/lib/libengine-ui-hook.so")) != "hook 5.3.0.3" {
+				t.Fatal("not finished once the sync worked")
+			}
+		})
+	}
+}
+
+// #234 review round 4 (R2): a rollback whose /data sync failed after the layout went back is
+// retried at the next boot; the retry finds the layout already back and must still sync /data
+// before it removes the journal, and fail as long as that sync fails.
+func TestLeaveRollbackRetryDoesNotSkipAFailedSync(t *testing.T) {
+	d, root := newDeck(t)
+	before := snapshot(t, root)
+	delete(before, "enginex/ui/safe-mode")
+	journal := filepath.Join(root, "data", journalName)
+	cutAt(t, d, legacyBundle(t, "5.3.0.2"), "bundle")
+	fault := injectSyncFault(t, "/data/sc5000-custom", filepath.Join(root, "data"))
+	for i := 0; i < 2; i++ {
+		if err := d.Recover(); !errors.Is(err, syscall.EIO) || !exists(journal) {
+			t.Fatalf("recover %d while /data does not sync: err %v, journal kept %v", i, err, exists(journal))
+		}
+	}
+	fault.armed = false
+	if err := d.Recover(); err != nil {
+		t.Fatal(err)
+	}
+	after := snapshot(t, root)
+	delete(after, "enginex/ui/safe-mode")
+	if dd := diff(before, after); dd != "" || exists(journal) {
+		t.Fatalf("not put back:\n%s", dd)
+	}
+}
