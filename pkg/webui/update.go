@@ -369,9 +369,11 @@ func (s *Server) installedVersion() string {
 		return currentVersion(s.cfg.VersionFile)
 	}
 	current := "dev"
-	for _, p := range []string{filepath.Join(s.customDir(), "version.txt"), versionFile, imageVersionFile} {
+	// The newest installed runtime or flashed image release (#13, #218); a later release
+	// keeps its image version in /etc/enginex (rename compatibility).
+	for _, p := range []string{filepath.Join(s.customDir(), "version.txt"), versionFile, filepath.Join(newImageDir, "version.txt"), imageVersionFile} {
 		if v := currentVersion(p); v != "dev" && (current == "dev" || newerVersion(v, current)) {
-			current = v // pick the newest installed runtime or flashed image release (#13, #218)
+			current = v
 		}
 	}
 	return current
@@ -380,6 +382,12 @@ func (s *Server) installedVersion() string {
 // imageReleaseTagFile is the first-generation image's release tag.
 var imageReleaseTagFile = "/etc/sc5000/" + releaseTagName
 
+// newImageDir is where releases after 5.3.0.4 keep version.txt and release-tag
+// (they say enginex where this one says sc5000). This release writes neither, but
+// it is the one that updates to them and the one users roll back to, so it reads
+// the new directory first wherever it reads the old one.
+var newImageDir = "/etc/enginex"
+
 // installedRelease is what a release tag is compared with: the tag baked into the
 // installed image or bundle, else the installed version. A same-version re-release
 // (v5.3.0.4-r2) is newer than version 5.3.0.4 and must not be offered to itself.
@@ -387,7 +395,7 @@ var imageReleaseTagFile = "/etc/sc5000/" + releaseTagName
 func (s *Server) installedRelease() string {
 	current := s.installedVersion()
 	release := current
-	candidates := []string{imageReleaseTagFile, filepath.Join(s.customDir(), "bundle", releaseTagName)}
+	candidates := []string{filepath.Join(newImageDir, releaseTagName), imageReleaseTagFile, filepath.Join(s.customDir(), "bundle", releaseTagName)}
 	if s.cfg.VersionFile == "" {
 		candidates = append(candidates, filepath.Join(bundleCustomDir, "bundle", releaseTagName))
 	}
@@ -659,9 +667,11 @@ func (s *Server) installDataBundleReader(r io.Reader, work string) {
 	cmd := exec.Command("sh", filepath.Join(top, "install.sh"))
 	cmd.Env = os.Environ()
 	if !isDeckDataDir(customDir) { // sandbox / test: no /data to write the runtime dir or ALSA file to
+		// Both names: the install.sh of a later release reads ENGINEX_*.
+		alsa := filepath.Join(customDir, "alsa-conf.d")
 		cmd.Env = append(cmd.Env,
-			"SC5000_CUSTOM="+customDir,
-			"SC5000_ALSA_OVERLAY="+filepath.Join(customDir, "alsa-conf.d"),
+			"SC5000_CUSTOM="+customDir, "ENGINEX_CUSTOM="+customDir,
+			"SC5000_ALSA_OVERLAY="+alsa, "ENGINEX_ALSA_OVERLAY="+alsa,
 		)
 	}
 	if out, err := cmd.CombinedOutput(); err != nil {
