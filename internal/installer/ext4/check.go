@@ -329,7 +329,9 @@ func (c *checker) directories(ctx context.Context) {
 		names := map[string]bool{}
 		for _, e := range ents[2:] {
 			name := string(e.name)
-			if name == "." || name == ".." || strings.ContainsAny(name, "/\x00") || name == "" {
+			// Encrypted names are ciphertext and may hold any byte.
+			if name == "." || name == ".." || name == "" ||
+				in.flags()&flagEncrypt == 0 && strings.ContainsAny(name, "/\x00") {
 				c.addf("directory inode %d has an invalid name %q", num, name)
 				continue
 			}

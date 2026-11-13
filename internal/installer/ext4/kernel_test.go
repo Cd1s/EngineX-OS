@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -319,5 +318,4 @@ func TestKernelWrittenBackup(t *testing.T) {
 	}
 	defer ro.Close()
 	mustCheck(t, ro)
-	_ = exec.Command
 }
