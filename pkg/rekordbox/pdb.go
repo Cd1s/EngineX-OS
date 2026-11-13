@@ -30,6 +30,10 @@ func normalizeParsedAudioMetadata(t *Track) {
 // ParsePDB reads DeviceSQL pages through ReaderAt, keeping memory proportional to
 // metadata rather than the on-disk database (which may contain deleted pages).
 func ParsePDB(r io.ReaderAt, size int64) (*Library, error) {
+	const maxPDBBytes = 512 << 20
+	if size <= 0 || size > maxPDBBytes {
+		return nil, fmt.Errorf("rekordbox: invalid pdb size %d", size)
+	}
 	h := make([]byte, 28)
 	if _, err := r.ReadAt(h, 0); err != nil {
 		return nil, fmt.Errorf("pdb header: %w", err)
@@ -49,16 +53,16 @@ func ParsePDB(r io.ReaderAt, size int64) (*Library, error) {
 		data []byte
 	}
 	var rows []row
+	seen := map[uint32]bool{}
+	p := make([]byte, ps)
 	for ti := 0; ti < nt; ti++ {
 		t := tables[ti*16:]
 		typ, first, last := le.Uint32(t), le.Uint32(t[8:]), le.Uint32(t[12:])
-		seen := map[uint32]bool{}
 		for n := first; n != 0; {
 			if seen[n] || int64(n) >= size/int64(ps) {
 				return nil, fmt.Errorf("pdb: invalid/cyclic page %d", n)
 			}
 			seen[n] = true
-			p := make([]byte, ps)
 			if _, err := r.ReadAt(p, int64(n)*int64(ps)); err != nil {
 				return nil, err
 			}
@@ -167,7 +171,7 @@ func ParsePDB(r io.ReaderAt, size int64) (*Library, error) {
 			}
 			name, err = readDeviceSQLString(b, off)
 		case 16:
-			l.Columns = append(l.Columns, append([]byte(nil), b...))
+			l.Columns = append(l.Columns, b)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("pdb lookup %d: %w", r.typ, err)

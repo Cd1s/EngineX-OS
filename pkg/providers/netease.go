@@ -110,6 +110,9 @@ func (n *Netease) get(ctx context.Context, path string, q url.Values, out any) e
 		return err
 	}
 	if code, ok := r["code"].(float64); ok && code != 200 && code != 800 && code != 801 && code != 802 && code != 803 {
+		if int(code) == 301 || int(code) == 302 {
+			return fmt.Errorf("netease: login expired (code %d): %w", int(code), StatusError(401))
+		}
 		return fmt.Errorf("netease: API rejected request (code %v)", code)
 	}
 	return remarshal(r, out)
@@ -148,25 +151,30 @@ func (n *Netease) PollQR(ctx context.Context, key string) (int, error) {
 		if r.Cookie == "" {
 			return 0, errors.New("netease: login returned no cookie")
 		}
-		n.mu.Lock()
-		n.Cookie = r.Cookie
-		n.mu.Unlock()
+		probe := &Netease{BaseURL: n.BaseURL, WebURL: n.WebURL, HTTP: n.HTTP, Cookie: r.Cookie}
 		var status struct {
 			Data struct {
-				Profile struct {
+				Profile *struct {
 					UserID int64 `json:"userId"`
-				}
+				} `json:"profile"`
 			}
 		}
-		if err := n.get(ctx, "/login/status", nil, &status); err != nil {
+		if err := probe.get(ctx, "/login/status", nil, &status); err != nil {
 			return 0, err
 		}
+		if status.Data.Profile == nil || status.Data.Profile.UserID <= 0 {
+			return 0, errors.New("netease: login returned no user profile")
+		}
+		uid := status.Data.Profile.UserID
 		n.mu.Lock()
-		n.UserID = status.Data.Profile.UserID
 		err := SaveJSON(n.CookiePath, struct {
 			Cookie string
 			UserID int64
-		}{n.Cookie, n.UserID})
+		}{r.Cookie, uid})
+		if err == nil {
+			n.Cookie = r.Cookie
+			n.UserID = uid
+		}
 		n.mu.Unlock()
 		if err != nil {
 			return 0, err
@@ -179,7 +187,7 @@ func (n *Netease) Playlists(ctx context.Context) ([]Playlist, error) {
 	uid := n.UserID
 	n.mu.Unlock()
 	if uid == 0 {
-		return nil, errors.New("netease: login required")
+		return nil, fmt.Errorf("netease: login required: %w", StatusError(401))
 	}
 	var all []Playlist
 	// Saved albums and radios appear after the playlists. If they cannot be read,
@@ -318,9 +326,6 @@ func (n *Netease) radioTracks(ctx context.Context, id string) ([]Track, error) {
 			More bool
 		}
 		if err := n.get(ctx, "/dj/program", url.Values{"id": {id}, "limit": {"100"}, "offset": {strconv.Itoa(offset)}}, &r); err != nil {
-			if len(all) > 0 {
-				return all, nil
-			}
 			return nil, err
 		}
 		for _, p := range r.Programs {

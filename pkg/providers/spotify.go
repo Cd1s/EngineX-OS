@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"os"
@@ -41,6 +42,7 @@ type Spotify struct {
 	LinksPath, EmbedURL                       string // public playlist links (spotify_links.go)
 	AudioKey                                  []byte
 	HTTP                                      *http.Client
+	refreshMu                                 sync.Mutex
 	mu                                        sync.Mutex
 	Token                                     Token
 }
@@ -157,58 +159,147 @@ func (s *Spotify) SetToken(t Token) error {
 	s.Token = t
 	return nil
 }
-func (s *Spotify) tokenRequest(ctx context.Context, v url.Values) error {
-	v.Set("client_id", s.ClientID)
+func tokenExpired(t Token) bool {
+	return !t.Expiry.IsZero() && time.Now().Add(30*time.Second).After(t.Expiry)
+}
+
+func (s *Spotify) doTokenRequest(ctx context.Context, clientID string, prev Token, v url.Values) (Token, error) {
+	v.Set("client_id", clientID)
 	var t Token
 	if err := JSON(ctx, s.HTTP, "POST", s.accounts()+"/api/token", strings.NewReader(v.Encode()), http.Header{"Content-Type": {"application/x-www-form-urlencoded"}}, &t); err != nil {
-		return err
+		return Token{}, err
 	}
 	if t.AccessToken == "" {
-		return errors.New("spotify: token response missing access token")
+		return Token{}, errors.New("spotify: token response missing access token")
 	}
 	if t.RefreshToken == "" {
-		t.RefreshToken = s.Token.RefreshToken
+		t.RefreshToken = prev.RefreshToken
 	}
 	if t.Scope == "" {
-		t.Scope = s.Token.Scope
+		t.Scope = prev.Scope
 	}
 	if t.Username == "" {
-		t.Username = s.Token.Username
+		t.Username = prev.Username
 	}
 	if t.ExpiresIn <= 0 {
 		t.ExpiresIn = 3600
 	}
 	t.Expiry = time.Now().Add(time.Duration(t.ExpiresIn) * time.Second)
-	t.ClientID = s.ClientID
-	s.Token = t
-	return SaveJSON(s.TokenPath, t)
+	t.ClientID = clientID
+	return t, nil
 }
+
+func (s *Spotify) nativeBearer(ctx context.Context) (http.Header, error) {
+	var token string
+	err := s.withNative(ctx, func(n spotifyNative) (err error) { token, err = n.Bearer(ctx); return err })
+	if err != nil {
+		return nil, err
+	}
+	return http.Header{"Authorization": {"Bearer " + token}}, nil
+}
+
+func oauthRefreshErr(err error) error {
+	var st StatusError
+	if errors.As(err, &st) && (st == 400 || st == 401) {
+		return fmt.Errorf("spotify: expired token; login required: %w", StatusError(401))
+	}
+	return err
+}
+
 func (s *Spotify) authorization(ctx context.Context) (http.Header, error) {
 	s.mu.Lock()
-	expired := !s.Token.Expiry.IsZero() && time.Now().Add(30*time.Second).After(s.Token.Expiry)
-	useNative := s.HasStoredCredentials() && (s.Token.AccessToken == "" || expired || s.Token.RefreshToken == "")
-	if useNative {
-		s.mu.Unlock()
-		var token string
-		err := s.withNative(ctx, func(n spotifyNative) (err error) { token, err = n.Bearer(ctx); return err })
+	tok, clientID := s.Token, s.ClientID
+	s.mu.Unlock()
+	if tok.AccessToken != "" && !tokenExpired(tok) && (tok.RefreshToken != "" || !s.HasStoredCredentials()) {
+		return http.Header{"Authorization": {"Bearer " + tok.AccessToken}}, nil
+	}
+
+	s.refreshMu.Lock()
+	s.mu.Lock()
+	tok, clientID = s.Token, s.ClientID
+	s.mu.Unlock()
+	if tok.AccessToken != "" && !tokenExpired(tok) && (tok.RefreshToken != "" || !s.HasStoredCredentials()) {
+		s.refreshMu.Unlock()
+		return http.Header{"Authorization": {"Bearer " + tok.AccessToken}}, nil
+	}
+	if tok.RefreshToken != "" && clientID != "" {
+		refreshed, err := s.doTokenRequest(ctx, clientID, tok, url.Values{"grant_type": {"refresh_token"}, "refresh_token": {tok.RefreshToken}})
+		if err == nil {
+			saveErr := SaveJSON(s.TokenPath, refreshed)
+			s.mu.Lock()
+			if s.Token.AccessToken == tok.AccessToken {
+				s.Token = refreshed
+			} else {
+				refreshed = s.Token
+			}
+			s.mu.Unlock()
+			s.refreshMu.Unlock()
+			if saveErr != nil {
+				return nil, saveErr
+			}
+			return http.Header{"Authorization": {"Bearer " + refreshed.AccessToken}}, nil
+		}
+		s.refreshMu.Unlock()
+		if s.HasStoredCredentials() {
+			return s.nativeBearer(ctx)
+		}
+		return nil, oauthRefreshErr(err)
+	}
+	s.refreshMu.Unlock()
+
+	if s.HasStoredCredentials() {
+		return s.nativeBearer(ctx)
+	}
+	if tokenExpired(tok) {
+		return nil, fmt.Errorf("spotify: expired token; login required: %w", StatusError(401))
+	}
+	return nil, fmt.Errorf("spotify: login required: %w", StatusError(401))
+}
+
+func (s *Spotify) refreshAfter401(ctx context.Context, failedAuth string) (http.Header, error) {
+	s.refreshMu.Lock()
+	s.mu.Lock()
+	tok, clientID := s.Token, s.ClientID
+	s.mu.Unlock()
+	if tok.AccessToken != "" && !tokenExpired(tok) && (tok.RefreshToken != "" || !s.HasStoredCredentials()) && "Bearer "+tok.AccessToken != failedAuth {
+		s.refreshMu.Unlock()
+		return http.Header{"Authorization": {"Bearer " + tok.AccessToken}}, nil
+	}
+	if tok.RefreshToken != "" && clientID != "" {
+		refreshed, err := s.doTokenRequest(ctx, clientID, tok, url.Values{"grant_type": {"refresh_token"}, "refresh_token": {tok.RefreshToken}})
+		if err == nil {
+			saveErr := SaveJSON(s.TokenPath, refreshed)
+			s.mu.Lock()
+			if s.Token.AccessToken == tok.AccessToken {
+				s.Token = refreshed
+			} else {
+				refreshed = s.Token
+			}
+			s.mu.Unlock()
+			s.refreshMu.Unlock()
+			if saveErr != nil {
+				return nil, saveErr
+			}
+			return http.Header{"Authorization": {"Bearer " + refreshed.AccessToken}}, nil
+		}
+		s.refreshMu.Unlock()
+		if s.HasStoredCredentials() {
+			return s.nativeBearer(ctx)
+		}
+		return nil, oauthRefreshErr(err)
+	}
+	s.refreshMu.Unlock()
+	if s.HasStoredCredentials() {
+		h, err := s.nativeBearer(ctx)
 		if err != nil {
 			return nil, err
 		}
-		return http.Header{"Authorization": {"Bearer " + token}}, nil
-	}
-	defer s.mu.Unlock()
-	if expired {
-		if s.Token.RefreshToken == "" || s.ClientID == "" {
-			return nil, errors.New("spotify: expired token; login required")
+		if h.Get("Authorization") == failedAuth {
+			return nil, StatusError(401)
 		}
-		if err := s.tokenRequest(ctx, url.Values{"grant_type": {"refresh_token"}, "refresh_token": {s.Token.RefreshToken}}); err != nil {
-			return nil, err
-		}
+		return h, nil
 	}
-	if s.Token.AccessToken == "" {
-		return nil, errors.New("spotify: login required")
-	}
-	return http.Header{"Authorization": {"Bearer " + s.Token.AccessToken}}, nil
+	return nil, StatusError(401)
 }
 
 // BeginPKCE returns an authorization URL and a private verifier. The caller
@@ -223,16 +314,30 @@ func (s *Spotify) BeginPKCE(state, redirect string) (authURL, verifier string) {
 }
 func (s *Spotify) CompletePKCE(ctx context.Context, code, verifier, redirect string) error {
 	s.nativeMu.Lock()
+	closed := s.nativeClosed
+	s.nativeMu.Unlock()
+	if closed {
+		return errors.New("spotify: session closed")
+	}
+	s.mu.Lock()
+	prev, clientID := s.Token, s.ClientID
+	s.mu.Unlock()
+	refreshed, err := s.doTokenRequest(ctx, clientID, prev, url.Values{"grant_type": {"authorization_code"}, "code": {code}, "code_verifier": {verifier}, "redirect_uri": {redirect}})
+	if err != nil {
+		return err
+	}
+	s.nativeMu.Lock()
 	if s.nativeClosed {
 		s.nativeMu.Unlock()
 		return errors.New("spotify: session closed")
 	}
 	s.mu.Lock()
-	err := s.tokenRequest(ctx, url.Values{"grant_type": {"authorization_code"}, "code": {code}, "code_verifier": {verifier}, "redirect_uri": {redirect}})
+	s.Token = refreshed
+	saveErr := SaveJSON(s.TokenPath, refreshed)
 	s.mu.Unlock()
 	s.nativeMu.Unlock()
-	if err != nil {
-		return err
+	if saveErr != nil {
+		return saveErr
 	}
 	return s.ExchangeOAuthCredentials(ctx)
 }
@@ -241,7 +346,14 @@ func (s *Spotify) getOnce(ctx context.Context, path string, out any) error {
 	if err != nil {
 		return err
 	}
-	return JSON(ctx, s.HTTP, "GET", s.base()+path, nil, h, out)
+	err = JSON(ctx, s.HTTP, "GET", s.base()+path, nil, h, out)
+	var st StatusError
+	if errors.As(err, &st) && st == 401 {
+		if h2, rerr := s.refreshAfter401(ctx, h.Get("Authorization")); rerr == nil {
+			return JSON(ctx, s.HTTP, "GET", s.base()+path, nil, h2, out)
+		}
+	}
+	return err
 }
 
 func endpointMissing(err error) bool {
@@ -261,20 +373,22 @@ func (s *Spotify) Playlists(ctx context.Context) ([]Playlist, error) {
 	if s.nativeLibraryFallback(err) {
 		all, err = s.nativePlaylists(ctx)
 	}
-	if err != nil && len(linked) > 0 {
-		return linked, nil
+	if err != nil {
+		return nil, err
 	}
-	return append(linked, all...), err
+	return append(linked, all...), nil
 }
 
 func (s *Spotify) apiPlaylists(ctx context.Context) ([]Playlist, error) {
 	// An older login may lack the library scope; its playlists still work.
+	likedCtx, cancelLiked := context.WithCancel(ctx)
+	defer cancelLiked()
 	liked := make(chan Playlist, 1)
 	go func() {
 		var r struct {
 			Total int `json:"total"`
 		}
-		if s.get(ctx, "/me/tracks?limit=1&offset=0", &r) == nil {
+		if s.get(likedCtx, "/me/tracks?limit=1&offset=0", &r) == nil {
 			liked <- Playlist{SpotifyLikedID, "已點讚的歌曲 (Liked Songs)", r.Total}
 		}
 		close(liked)
@@ -302,6 +416,8 @@ func (s *Spotify) apiPlaylists(ctx context.Context) ([]Playlist, error) {
 		return out, err
 	})
 	if err != nil {
+		cancelLiked()
+		<-liked
 		return nil, err
 	}
 	if p, ok := <-liked; ok {

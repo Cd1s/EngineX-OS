@@ -242,3 +242,152 @@ func TestPackedUploadRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+func TestPipelineRejectsMissingNumChannelsWithoutPanic(t *testing.T) {
+	p := newPipeline(io.Discard)
+	_, err := p.fromEngine([]byte("maxBlockSize=1\n\naction=block\nnumSamples=0\n\n"))
+	if err == nil {
+		// Even if fromEngine had accepted it, Write must never panic on empty p.input.
+		_, err = p.Write([]byte("numReturnChannels=8\n\nreturnFrames=1\n\n"))
+	}
+	if err == nil {
+		t.Fatal("expected error on missing numChannels, got nil")
+	}
+}
+
+func TestPipelineRejectsMismatchedNumReturnChannels(t *testing.T) {
+	p := newPipeline(io.Discard)
+	if _, err := p.fromEngine([]byte("numChannels=2\nsampleRate=44100\nmaxBlockSize=4\n\n")); err != nil {
+		t.Fatal(err)
+	}
+	block := append([]byte("action=block\nnumSamples=1\n\n"), make([]byte, 2*4)...)
+	if _, err := p.fromEngine(block); err != nil {
+		t.Fatal(err)
+	}
+	// 12 return channels for 2 input channels previously passed n%4==0 and panicked queue().
+	_, err := p.Write(append([]byte("numReturnChannels=12\n\nreturnFrames=1\n\n"), make([]byte, 18)...))
+	if err == nil {
+		t.Fatal("expected error on numReturnChannels=12 for 2-channel input")
+	}
+}
+
+func TestPipelineCoalescedBlocksAndBlockPlusDone(t *testing.T) {
+	t.Run("coalesced_blocks_each_get_reply", func(t *testing.T) {
+		var out bytes.Buffer
+		p := newPipeline(&out)
+		p.unpacked()
+		p.Write([]byte("session=x\n\n"))
+		p.fromEngine([]byte("numChannels=1\nsampleRate=44100\nmaxBlockSize=4\n\n"))
+		p.Write([]byte("numReturnChannels=4\n\n"))
+		greeting := out.Len()
+
+		blk := append([]byte("action=block\nnumSamples=2\n\n"), make([]byte, 2*4)...)
+		twoBlocks := append(append([]byte{}, blk...), blk...)
+		if _, err := p.fromEngine(twoBlocks); err != nil {
+			t.Fatal(err)
+		}
+		_, replies, _ := engineReplies(t, out.Bytes()[greeting:], 4, 4)
+		if replies != 2 {
+			t.Fatalf("coalesced 2 blocks got %d replies, want 2", replies)
+		}
+	})
+
+	t.Run("block_plus_done_no_premature_zero_during_drain", func(t *testing.T) {
+		var out bytes.Buffer
+		p := newPipeline(&out)
+		p.unpacked()
+		p.Write([]byte("session=x\n\n"))
+		p.fromEngine([]byte("numChannels=1\nsampleRate=44100\nmaxBlockSize=4\n\n"))
+		p.Write([]byte("numReturnChannels=4\n\n"))
+		greeting := out.Len()
+
+		blk := append([]byte("action=block\nnumSamples=4\n\n"), make([]byte, 4*4)...)
+		// Send blocks 1 and 2; renderer answers both with 3 frames each (6 frames queued > maxBlock=4).
+		p.fromEngine(blk)
+		p.fromEngine(blk)
+		p.Write(append([]byte("returnFrames=3\n\n"), bytes.Repeat([]byte{1}, 3*4*4)...))
+		p.Write(append([]byte("returnFrames=3\n\n"), bytes.Repeat([]byte{1}, 3*4*4)...))
+
+		// Final block 3 and action=done arrive in the same read while 6 frames are queued.
+		if _, err := p.fromEngine(append(append([]byte{}, blk...), []byte("action=done\n\n")...)); err != nil {
+			t.Fatal(err)
+		}
+		// Renderer answers block 3 + drain (6 frames) and closes with returnFrames=0.
+		p.Write(append([]byte("returnFrames=6\n\n"), bytes.Repeat([]byte{1}, 6*4*4)...))
+		p.Write([]byte("returnFrames=0\n\n"))
+		if err := p.Complete(); err != nil {
+			t.Fatal(err)
+		}
+
+		// Parse individual reply frame counts in order:
+		// 3 block replies (0, 0, 4), then non-zero drain replies (2, 4, 2), then ONE closing 0.
+		var counts []int
+		s := stream{}
+		if err := s.feed(out.Bytes()[greeting:], func(f map[string]string) (int64, error) {
+			v, err := count(f, "returnFrames", 4)
+			counts = append(counts, int(v))
+			return v * 4 * 4, err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		// After the 3 block replies, the drain loop stops at the FIRST 0; all 12 frames must precede it.
+		if len(counts) < 4 {
+			t.Fatalf("too few replies: %v", counts)
+		}
+		seenFrames := counts[0] + counts[1] + counts[2]
+		drainZeros := 0
+		for _, c := range counts[3:] {
+			if c == 0 {
+				drainZeros++
+				break
+			}
+			seenFrames += c
+		}
+		if seenFrames != 12 || counts[len(counts)-1] != 0 {
+			t.Fatalf("Engine drain truncated at %d/12 frames (reply counts=%v)", seenFrames, counts)
+		}
+		totalDrainZeros := 0
+		for _, c := range counts[3:] {
+			if c == 0 {
+				totalDrainZeros++
+			}
+		}
+		if totalDrainZeros != 1 || drainZeros != 1 {
+			t.Fatalf("expected exactly 1 zero reply after block replies, got counts=%v", counts)
+		}
+	})
+}
+
+func TestPipelineCompleteReportsRecordedPipelineError(t *testing.T) {
+	p := newPipeline(io.Discard)
+	if _, err := p.fromEngine([]byte("numChannels=2\nsampleRate=44100\nmaxBlockSize=4\n\naction=block\nnumSamples=0\n\naction=done\n\n")); err != nil {
+		t.Fatal(err)
+	}
+	p.unpacked()
+	p.Write([]byte("numReturnChannels=8\n\nreturnFrames=0\n\nreturnFrames=0\n\n"))
+	err := p.Complete()
+	if err == nil || !bytes.Contains([]byte(err.Error()), []byte("cannot unpack")) {
+		t.Fatalf("Complete masked p.err: got %v", err)
+	}
+}
+
+func TestPackAndPipelineRejectHugeReturnFramesWithout32BitOverflow(t *testing.T) {
+	pw := newPackWriter(io.Discard)
+	if _, err := pw.Write([]byte("numReturnChannels=8\n\nreturnFrames=134217729\n\n")); err == nil {
+		t.Fatalf("packWriter accepted returnFrames=134217729 (want=%d)", pw.want)
+	}
+	p := newPipeline(io.Discard)
+	p.unpacked()
+	p.fromEngine([]byte("numChannels=2\nsampleRate=44100\nmaxBlockSize=4\n\naction=block\nnumSamples=0\n\n"))
+	if _, err := p.Write([]byte("numReturnChannels=8\n\nreturnFrames=134217729\n\n")); err == nil {
+		t.Fatalf("pipeline.Write accepted returnFrames=134217729 (want=%d)", p.want)
+	}
+}
+
+func TestSessionFeedOutRejectsNonMultipleOf4ReturnChannels(t *testing.T) {
+	s := &Session{Packed: true}
+	s.FeedOut([]byte("numReturnChannels=6\n\n"))
+	if err := s.Err(); err == nil {
+		t.Fatal("Session.FeedOut accepted numReturnChannels=6")
+	}
+}

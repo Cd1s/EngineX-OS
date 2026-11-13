@@ -19,6 +19,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -34,6 +35,8 @@ const Protocol = "engine-5.0.4"
 const FramingHeader = "X-Stems-Framing"
 
 const maxFrame = 1 << 20
+
+var startupTimeout = 30 * time.Second
 
 // ErrUnreachable: Proxy could not connect and read nothing from Engine, so
 // the caller may still serve the session another way.
@@ -64,6 +67,7 @@ func Proxy(ctx context.Context, endpoint, secret string, in io.Reader, out io.Wr
 	if e != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil {
 		return errors.New("invalid backend URL")
 	}
+	callerCtx := ctx
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	sess := &Session{}
@@ -86,9 +90,13 @@ func Proxy(ctx context.Context, endpoint, secret string, in io.Reader, out io.Wr
 			return nil, err
 		}
 		return &idleConn{Conn: c}, nil
-	}, Proxy: nil, ForceAttemptHTTP2: false, ResponseHeaderTimeout: 30 * time.Second, DisableCompression: true}
+	}, Proxy: nil, ForceAttemptHTTP2: false, ResponseHeaderTimeout: startupTimeout, DisableCompression: true}
 	defer tr.CloseIdleConnections()
-	startup := time.AfterFunc(30*time.Second, cancel)
+	var startupFired atomic.Bool
+	startup := time.AfterFunc(startupTimeout, func() {
+		startupFired.Store(true)
+		cancel()
+	})
 	resp, e := tr.RoundTrip(req)
 	startup.Stop()
 	if e != nil {
@@ -96,13 +104,16 @@ func Proxy(ctx context.Context, endpoint, secret string, in io.Reader, out io.Wr
 		if op := (*net.OpError)(nil); errors.As(e, &op) && op.Op == "dial" {
 			return fmt.Errorf("%w: %v", ErrUnreachable, e)
 		}
+		var ne net.Error
+		if callerCtx.Err() == nil && (startupFired.Load() || (errors.As(e, &ne) && ne.Timeout())) {
+			return fmt.Errorf("%w: %v", ErrUnavailable, e)
+		}
 		return fmt.Errorf("backend connection: %w", e)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		switch resp.StatusCode {
-		case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
-			// Busy renderer or relay without one: nothing reached Engine yet (#41).
+		if resp.StatusCode == http.StatusBadGateway || resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusGatewayTimeout || (resp.StatusCode >= 520 && resp.StatusCode <= 530) {
+			// Busy renderer, relay without one, or offline Cloudflare tunnel: nothing reached Engine yet (#41, BH-GF2-7).
 			return fmt.Errorf("%w: backend status %d", ErrUnavailable, resp.StatusCode)
 		}
 		return fmt.Errorf("backend status %d", resp.StatusCode)
@@ -212,7 +223,7 @@ func (f frameWriter) Write(p []byte) (int, error) {
 type idleConn struct{ net.Conn }
 
 func (c *idleConn) Read(p []byte) (int, error) {
-	c.SetReadDeadline(time.Now().Add(120 * time.Second))
+	c.SetReadDeadline(time.Now().Add(10 * time.Minute))
 	return c.Conn.Read(p)
 }
 func (c *idleConn) Write(p []byte) (int, error) {
@@ -220,11 +231,18 @@ func (c *idleConn) Write(p []byte) (int, error) {
 	return c.Conn.Write(p)
 }
 
+var (
+	uploadIdleRead  = 120 * time.Second
+	uploadDrainRead = 10 * time.Minute
+)
+
 type idleBody struct {
-	r       io.Reader
-	c       *http.ResponseController
-	mu      sync.Mutex
-	stopped bool
+	r          io.Reader
+	c          *http.ResponseController
+	tracker    UploadTracker
+	mu         sync.Mutex
+	uploadDone bool
+	stopped    bool
 }
 
 func (b *idleBody) Read(p []byte) (int, error) {
@@ -233,9 +251,33 @@ func (b *idleBody) Read(p []byte) (int, error) {
 		b.mu.Unlock()
 		return 0, io.ErrClosedPipe
 	}
-	b.c.SetReadDeadline(time.Now().Add(120 * time.Second))
+	if b.uploadDone {
+		b.c.SetReadDeadline(time.Now().Add(uploadDrainRead))
+	} else {
+		b.c.SetReadDeadline(time.Now().Add(uploadIdleRead))
+	}
 	b.mu.Unlock()
-	return b.r.Read(p)
+	n, err := b.r.Read(p)
+	if n > 0 && b.tracker.Feed(p[:n]) {
+		b.mu.Lock()
+		b.uploadDone = true
+		if !b.stopped {
+			b.c.SetReadDeadline(time.Now().Add(uploadDrainRead))
+		}
+		b.mu.Unlock()
+	}
+	return n, err
+}
+
+func (b *idleBody) touchDrain() {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.uploadDone && !b.stopped {
+		b.c.SetReadDeadline(time.Now().Add(uploadDrainRead))
+	}
 }
 
 func (b *idleBody) stop() {
@@ -255,11 +297,13 @@ type Backend struct {
 	Name   string // separator reported by /healthz: hpss (default) or htdemucs
 }
 type flushWriter struct {
-	w http.ResponseWriter
+	w    http.ResponseWriter
+	body *idleBody
 }
 
 func (f *flushWriter) Write(p []byte) (int, error) {
 	http.NewResponseController(f.w).SetWriteDeadline(time.Now().Add(30 * time.Second))
+	f.body.touchDrain()
 	n, e := f.w.Write(p)
 	if e == nil {
 		e = http.NewResponseController(f.w).Flush()
@@ -346,7 +390,7 @@ func (b *Backend) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	http.NewResponseController(w).Flush()
 	// A body error must terminate the worker; a normal EOF is how Engine ends a session.
 	done := make(chan error, 1)
-	body := &idleBody{r: r.Body, c: http.NewResponseController(w)}
+	body := &idleBody{r: r.Body, c: http.NewResponseController(w), tracker: UploadTracker{Packed: framing == "2"}}
 	go func() {
 		var dst io.Writer = stdin
 		if framing == "2" {
@@ -359,7 +403,7 @@ func (b *Backend) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		done <- err
 	}()
-	var dst io.Writer = &flushWriter{w: w}
+	var dst io.Writer = &flushWriter{w: w, body: body}
 	if framed {
 		dst = frameWriter{dst}
 	}

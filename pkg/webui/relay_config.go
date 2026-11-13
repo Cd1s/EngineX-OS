@@ -60,11 +60,14 @@ func (s *Server) relayStatusView() relayConfigStatus {
 	v := relayConfigStatus{RelayURL: relay, PasswordSet: password != ""}
 	if b, err := os.ReadFile(filepath.Join(s.cfg.StateDir, stems.LANStateName)); err == nil {
 		v.LANStems = new(stems.LANState)
-		if json.Unmarshal(b, v.LANStems) != nil {
+		if json.Unmarshal(b, v.LANStems) != nil || (v.LANStems.Endpoint == "" && !v.LANStems.Online) {
 			v.LANStems = nil
 		}
 	}
 	if st := s.probeRelayStems(relay, password, v.LANStems); st != nil {
+		v.LANStems = st
+	}
+	if st := s.probeLANStems(v.LANStems); st != nil {
 		v.LANStems = st
 	}
 	return v
@@ -75,7 +78,34 @@ const relayProbeEvery = 30 * time.Second
 var (
 	relayProbeMu sync.Mutex
 	relayProbed  = map[string]time.Time{} // by state dir: when the relay was last asked
+	lanProbeMu   sync.Mutex
+	lanProbed    = map[string]time.Time{} // by state dir: when LAN discovery was last run
 )
+
+func (s *Server) probeLANStems(saved *stems.LANState) *stems.LANState {
+	if s.cfg.StateDir == "" {
+		return nil
+	}
+	if saved != nil && saved.Online && time.Since(saved.Checked) < relayProbeEvery {
+		return nil
+	}
+	lanProbeMu.Lock()
+	defer lanProbeMu.Unlock()
+	if time.Since(lanProbed[s.cfg.StateDir]) < relayProbeEvery {
+		return nil
+	}
+	lanProbed[s.cfg.StateDir] = time.Now()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		select {
+		case <-s.closed:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return stems.ProbeLANState(ctx, filepath.Join(s.cfg.StateDir, stems.LANStateName), 200*time.Millisecond)
+}
 
 // probeRelayStems asks the cloud relay whether its Stems renderer is up, for a deck
 // whose stems-lan.json is missing, offline or older than 30 s (nothing else keeps it
@@ -115,7 +145,7 @@ func (s *Server) probeRelayStems(relay, password string, saved *stems.LANState) 
 	if resp.StatusCode != 200 || json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&h) != nil || !h.OK {
 		return nil
 	}
-	st := &stems.LANState{Endpoint: relay, Hostname: h.Device, Backend: h.Backend, Online: !h.Busy, Checked: time.Now().UTC()}
+	st := &stems.LANState{Endpoint: relay, Hostname: h.Device, Backend: h.Backend, Online: !h.Busy, Relay: true, Checked: time.Now().UTC()}
 	providers.SaveJSON(filepath.Join(s.cfg.StateDir, stems.LANStateName), st) // best effort: the answer is returned anyway
 	return st
 }
@@ -166,6 +196,7 @@ func relayHost(raw string) string {
 }
 
 func (s *Server) relayConfigGet(w http.ResponseWriter, r *http.Request) {
+	stems.RememberPeerHint(r.RemoteAddr)
 	respond(w, s.relayStatusView())
 }
 

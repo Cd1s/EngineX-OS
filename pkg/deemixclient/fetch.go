@@ -34,6 +34,32 @@ var defaultMedia = func() *http.Client {
 	return &http.Client{Transport: t}
 }()
 
+var chmodFile = os.Chmod
+
+func chmodPerm(path string, mode os.FileMode) error {
+	err := chmodFile(path, mode)
+	if err == nil || errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.ENOTSUP) || errors.Is(err, syscall.EOPNOTSUPP) || errors.Is(err, syscall.ENOSYS) {
+		return nil
+	}
+	return err
+}
+
+// removeOtherFormats keeps only keep among name's audio extensions so Cached always finds the latest download.
+func (c *Client) removeOtherFormats(name, keep string) {
+	for _, ext := range []string{".flac", ".mp3", ".mp4", ".ogg"} {
+		other := filepath.Join(c.DownloadDir, name+ext)
+		if other == keep {
+			continue
+		}
+		if os.Remove(other) == nil {
+			canon := canonicalCachePath(other)
+			c.mu.Lock()
+			delete(c.lastUsed, canon)
+			c.mu.Unlock()
+		}
+	}
+}
+
 func (c *Client) media() *http.Client {
 	if c.Media != nil {
 		return c.Media
@@ -54,6 +80,14 @@ func (c *Client) accept(path string) (*Download, error) {
 
 // Cached returns an earlier Save under name, so a restart does not fetch it again.
 func (c *Client) Cached(name string) *Download {
+	dl := c.cachedLookup(name)
+	if dl != nil {
+		c.rememberActive(dl.Path)
+	}
+	return dl
+}
+
+func (c *Client) cachedLookup(name string) *Download {
 	if strings.HasPrefix(name, "spotify-") {
 		return c.cachedOgg(name)
 	}
@@ -132,12 +166,14 @@ func (c *Client) SaveParts(ctx context.Context, name, ext string, urls []string)
 		dl = &Download{Quality: q}
 	}
 	dl.Path = filepath.Join(c.DownloadDir, name+"."+ext)
-	if err = os.Chmod(f.Name(), 0o644); err != nil {
+	if err = chmodPerm(f.Name(), 0o644); err != nil {
 		return nil, err
 	}
 	if err = os.Rename(f.Name(), dl.Path); err != nil {
 		return nil, err
 	}
+	c.removeOtherFormats(name, dl.Path)
+	c.rememberActive(dl.Path)
 	c.Trim(dl.Path)
 	return dl, nil
 }
@@ -278,12 +314,15 @@ func (c *Client) fetchSplit(ctx context.Context, f io.Writer, address string) er
 	if _, err := fmt.Sscanf(resp.Header.Get("Content-Range"), "bytes %d-%d/%d", &from, &to, &total); err != nil || from != 0 || to < 0 || to >= total || total > maxMediaBytes {
 		return errors.New("audio: unexpected byte range")
 	}
-	first, err := io.ReadAll(io.LimitReader(resp.Body, splitBytes+1))
-	if err != nil || int64(len(first)) != to+1 {
+	n, err := io.Copy(f, io.LimitReader(resp.Body, to+2))
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return errors.New("audio: transfer interrupted")
 	}
-	if _, err := f.Write(first); err != nil {
-		return err
+	if n != to+1 {
+		return errors.New("audio: transfer interrupted")
 	}
 	var parts []part
 	for at := to + 1; at < total; at += splitBytes {
@@ -323,18 +362,14 @@ func (c *Client) SaveSplit(ctx context.Context, name, address string) (*Download
 		return nil, err
 	}
 	final := filepath.Join(c.DownloadDir, name+"."+q.Format)
-	if err = os.Chmod(path, 0o644); err != nil {
+	if err = chmodPerm(path, 0o644); err != nil {
 		return nil, err
 	}
 	if err = os.Rename(path, final); err != nil {
 		return nil, err
 	}
-	// Only one of name's formats is kept, so Cached finds the one just saved.
-	for _, ext := range []string{".flac", ".mp3", ".mp4"} {
-		if other := filepath.Join(c.DownloadDir, name+ext); other != final {
-			os.Remove(other)
-		}
-	}
+	c.removeOtherFormats(name, final)
+	c.rememberActive(final)
 	c.Trim(final)
 	return &Download{Path: final, Quality: q}, nil
 }
@@ -391,13 +426,15 @@ func (c *Client) Save(ctx context.Context, name, address string) (*Download, err
 		return nil, err
 	}
 	final := filepath.Join(c.DownloadDir, name+"."+dl.Quality.Format)
-	if err = os.Chmod(f.Name(), 0o644); err != nil {
+	if err = chmodPerm(f.Name(), 0o644); err != nil {
 		return nil, err
 	}
 	if err = os.Rename(f.Name(), final); err != nil {
 		return nil, err
 	}
 	dl.Path = final
+	c.removeOtherFormats(name, final)
+	c.rememberActive(final)
 	c.Trim(final)
 	return dl, nil
 }
@@ -412,9 +449,60 @@ func resolvedDir(dir string) string {
 	return filepath.Clean(dir)
 }
 
+func canonicalCachePath(path string) string {
+	if path == "" {
+		return ""
+	}
+	return filepath.Join(resolvedDir(filepath.Dir(path)), filepath.Base(path))
+}
+
+func (c *Client) rememberActive(path string) {
+	canon := canonicalCachePath(path)
+	if canon == "" {
+		return
+	}
+	now := time.Now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.lastUsed == nil {
+		c.lastUsed = make(map[string]time.Time)
+	}
+	c.lastUsed[canon] = now
+	if len(c.lastUsed) > maxTrackedLRU {
+		var oldestKey string
+		var oldestTime time.Time
+		for k, t := range c.lastUsed {
+			if oldestKey == "" || t.Before(oldestTime) {
+				oldestKey, oldestTime = k, t
+			}
+		}
+		delete(c.lastUsed, oldestKey)
+	}
+}
+
+func openFilesInDir(dir string) map[string]bool {
+	fds, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		return nil
+	}
+	prefix := dir + string(filepath.Separator)
+	var out map[string]bool
+	for _, fd := range fds {
+		target, err := os.Readlink(filepath.Join("/proc/self/fd", fd.Name()))
+		if err != nil || !strings.HasPrefix(target, prefix) {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]bool)
+		}
+		out[target] = true
+	}
+	return out
+}
+
 // Trim removes the least recently used downloads while they exceed MaxCache or
-// the volume has less than MinFree left, never the one just saved.
-func (c *Client) Trim(keep string) {
+// the volume has less than MinFree left, never evicting open or kept files.
+func (c *Client) Trim(keep ...string) {
 	if c.MaxCache <= 0 {
 		return
 	}
@@ -432,13 +520,28 @@ func (c *Client) Trim(keep string) {
 	// keep may be symlink-resolved (SafePath) while DownloadDir is not: on a deck without SD
 	// it is /data/sc5000-custom/Stream, a link to /data/enginex since #103. Compare both resolved.
 	dir := resolvedDir(c.DownloadDir)
-	if keep != "" {
-		keep = filepath.Join(resolvedDir(filepath.Dir(keep)), filepath.Base(keep))
+	hardProtected := openFilesInDir(dir)
+	if hardProtected == nil {
+		hardProtected = make(map[string]bool)
 	}
+	for _, k := range keep {
+		if canon := canonicalCachePath(k); canon != "" {
+			hardProtected[canon] = true
+		}
+	}
+
+	c.mu.Lock()
+	usedSnapshot := make(map[string]time.Time, len(c.lastUsed))
+	for k, t := range c.lastUsed {
+		usedSnapshot[k] = t
+	}
+	c.mu.Unlock()
+
 	type file struct {
-		path string
-		size int64
-		mod  time.Time
+		path  string
+		canon string
+		size  int64
+		used  time.Time
 	}
 	var files []file
 	var total int64
@@ -448,18 +551,26 @@ func (c *Client) Trim(keep string) {
 			continue
 		}
 		total += info.Size()
+		canon := filepath.Join(dir, e.Name())
 		path := filepath.Join(c.DownloadDir, e.Name())
-		if evictable.MatchString(e.Name()) && filepath.Join(dir, e.Name()) != keep {
-			files = append(files, file{path, info.Size(), info.ModTime()})
+		if evictable.MatchString(e.Name()) && !hardProtected[canon] {
+			used := info.ModTime()
+			if t := usedSnapshot[canon]; t.After(used) {
+				used = t
+			}
+			files = append(files, file{path, canon, info.Size(), used})
 		}
 	}
-	sort.Slice(files, func(i, j int) bool { return files[i].mod.Before(files[j].mod) })
+	sort.Slice(files, func(i, j int) bool { return files[i].used.Before(files[j].used) })
 	for _, f := range files {
 		if total <= c.MaxCache && !short() {
 			return
 		}
 		if os.Remove(f.path) == nil {
 			total -= f.size
+			c.mu.Lock()
+			delete(c.lastUsed, f.canon)
+			c.mu.Unlock()
 		}
 	}
 }

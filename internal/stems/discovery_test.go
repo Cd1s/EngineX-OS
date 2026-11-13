@@ -6,11 +6,13 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -163,5 +165,313 @@ func TestProxyUnreachable(t *testing.T) {
 	err := Proxy(context.Background(), "http://"+addr, "", in, io.Discard)
 	if !errors.Is(err, ErrUnreachable) || in.Len() != len("numChannels=2\n\n") {
 		t.Fatalf("%v, %d bytes left", err, in.Len())
+	}
+}
+
+// A cloud relay cached in stems-lan.json (or answering generic {"ok":true} on
+// /healthz while requiring Bearer auth on /v1/engine) must never be chosen by
+// FindLAN as a passwordless home renderer (BH-GF2-5).
+func TestFindLANDoesNotUseRelayHealthzOrCachedRelay(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	old, oldMDNS := discoverTargets, mdnsTargets
+	discoverTargets = func() []*net.UDPAddr { return nil }
+	mdnsTargets = func() []*net.UDPAddr { return nil }
+	t.Cleanup(func() { discoverTargets, mdnsTargets = old, oldMDNS })
+
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"ok":true}`))
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer secret" {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer relay.Close()
+
+	dir := t.TempDir()
+	state := filepath.Join(dir, LANStateName)
+	// Simulate pre-5.3.0.5 stems-lan.json written by probeRelayStems (no Relay flag).
+	raw, _ := json.Marshal(LANState{
+		Endpoint: relay.URL,
+		Hostname: "relay-worker",
+		Backend:  "htdemucs",
+		Online:   true,
+		Checked:  time.Now().UTC(),
+	})
+	if err := os.WriteFile(state, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if endpoint, ok := FindLAN(ctx, state, 150*time.Millisecond); ok {
+		err := Proxy(ctx, endpoint, "", strings.NewReader("numChannels=2\nsampleRate=44100\nmaxBlockSize=4\n\naction=done\n\n"), io.Discard)
+		t.Fatalf("FindLAN chose relay %q as passwordless LAN renderer (Proxy err=%v)", endpoint, err)
+	}
+
+	// Relay:true cached by probeRelayStems is preserved when no LAN renderer answers,
+	// and falls through cleanly to a real LAN enginex-stemsd when one announces.
+	raw, _ = json.Marshal(LANState{
+		Endpoint: relay.URL,
+		Hostname: "relay-worker",
+		Backend:  "htdemucs",
+		Online:   true,
+		Relay:    true,
+		Checked:  time.Now().UTC(),
+	})
+	if err := os.WriteFile(state, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if endpoint, ok := FindLAN(ctx, state, 100*time.Millisecond); ok || endpoint != "" {
+		t.Fatalf("FindLAN with Relay:true and no LAN server = (%q, %v)", endpoint, ok)
+	}
+	if st := readLANState(t, state); !st.Relay || !st.Online || st.Endpoint != relay.URL {
+		t.Fatalf("Relay:true state was clobbered: %+v", st)
+	}
+
+	lanSrv := httptest.NewServer(&Backend{Slot: make(chan struct{}, 1), Name: "htdemucs"})
+	defer lanSrv.Close()
+	port, _ := strconv.Atoi(lanSrv.URL[strings.LastIndex(lanSrv.URL, ":")+1:])
+	announceOnLoopback(t, ctx, port)
+	if endpoint, ok := FindLAN(ctx, state, 250*time.Millisecond); !ok || endpoint != lanSrv.URL {
+		t.Fatalf("FindLAN did not discover real LAN server behind cached relay: (%q, %v), want %q", endpoint, ok, lanSrv.URL)
+	}
+}
+
+func TestFindLANSkipsBusyResponderForIdlePeer(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	busyBackend := &Backend{Slot: make(chan struct{}, 1), Name: "htdemucs"}
+	busyBackend.Slot <- struct{}{}
+	busySrv := httptest.NewServer(busyBackend)
+	defer busySrv.Close()
+	busyPort, _ := strconv.Atoi(busySrv.URL[strings.LastIndex(busySrv.URL, ":")+1:])
+
+	idleBackend := &Backend{Slot: make(chan struct{}, 1), Name: "htdemucs"}
+	idleSrv := httptest.NewServer(idleBackend)
+	defer idleSrv.Close()
+	idlePort, _ := strconv.Atoi(idleSrv.URL[strings.LastIndex(idleSrv.URL, ":")+1:])
+
+	pcBusy, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go Announce(ctx, pcBusy, Beacon{Port: busyPort, Backend: "htdemucs", Hostname: "busy-pc"})
+
+	pcIdle, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		defer pcIdle.Close()
+		buf := make([]byte, 1500)
+		n, from, err := pcIdle.ReadFrom(buf)
+		if err != nil || string(buf[:n]) != discoverProbe {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+		reply, _ := json.Marshal(Beacon{Service: beaconService, Version: 2, Port: idlePort, Backend: "htdemucs", Hostname: "idle-pc"})
+		pcIdle.WriteTo(reply, from)
+	}()
+
+	old, oldMDNS := discoverTargets, mdnsTargets
+	discoverTargets = func() []*net.UDPAddr {
+		return []*net.UDPAddr{pcBusy.LocalAddr().(*net.UDPAddr), pcIdle.LocalAddr().(*net.UDPAddr)}
+	}
+	mdnsTargets = func() []*net.UDPAddr { return nil }
+	t.Cleanup(func() { discoverTargets, mdnsTargets = old, oldMDNS })
+
+	state := filepath.Join(t.TempDir(), LANStateName)
+	endpoint, ok := FindLAN(ctx, state, 300*time.Millisecond)
+	if !ok || endpoint != idleSrv.URL {
+		t.Fatalf("FindLAN = (%q, %v), want (%q, true)", endpoint, ok, idleSrv.URL)
+	}
+}
+
+func TestFindLANRetriesLostWiFiBroadcastAndUsesMDNSARecord(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	lanBackend := &Backend{Slot: make(chan struct{}, 1), Name: "htdemucs"}
+	lanSrv := httptest.NewServer(lanBackend) // bound on 127.0.0.1:<port>
+	defer lanSrv.Close()
+	port, _ := strconv.Atoi(lanSrv.URL[strings.LastIndex(lanSrv.URL, ":")+1:])
+
+	// 1. Simulate 802.11 Wi-Fi dropping the initial broadcast probe frame; the retry must pair.
+	pcLossy, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pcLossy.Close()
+	go func() {
+		buf := make([]byte, 1500)
+		seenProbes := 0
+		for {
+			n, from, err := pcLossy.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			if string(buf[:n]) == discoverProbe {
+				seenProbes++
+				if seenProbes == 1 {
+					continue // first Wi-Fi broadcast frame lost
+				}
+				reply, _ := json.Marshal(Beacon{Service: beaconService, Version: 2, Port: port, Backend: "htdemucs", Hostname: "gpu-pc"})
+				pcLossy.WriteTo(reply, from)
+				return
+			}
+		}
+	}()
+
+	old, oldMDNS := discoverTargets, mdnsTargets
+	discoverTargets = func() []*net.UDPAddr { return []*net.UDPAddr{pcLossy.LocalAddr().(*net.UDPAddr)} }
+	mdnsTargets = func() []*net.UDPAddr { return nil }
+	t.Cleanup(func() { discoverTargets, mdnsTargets = old, oldMDNS })
+
+	state1 := filepath.Join(t.TempDir(), LANStateName)
+	if endpoint, ok := FindLAN(ctx, state1, 300*time.Millisecond); !ok || endpoint != lanSrv.URL {
+		t.Fatalf("FindLAN after single lost Wi-Fi broadcast = (%q, %v), want (%q, true)", endpoint, ok, lanSrv.URL)
+	}
+
+	// 2. mDNS A-record validation:
+	// (a) A packet from 127.0.0.2 advertising loopback 127.0.0.1 or an off-subnet private IP
+	// must NOT make the deck probe that A-record IP; it falls back to pkt.from.IP (127.0.0.2).
+	var victimHits atomic.Int32
+	victimSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		victimHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"ok":true,"busy":false,"backend":"htdemucs","protocol":"engine-5.0.4"}`))
+	}))
+	defer victimSrv.Close()
+	victimPort, _ := strconv.Atoi(victimSrv.URL[strings.LastIndex(victimSrv.URL, ":")+1:])
+
+	var spoofOffSubnet atomic.Bool
+	pcSpoof, err := net.ListenPacket("udp4", "127.0.0.2:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pcSpoof.Close()
+	go func() {
+		buf := make([]byte, 1500)
+		for {
+			n, from, err := pcSpoof.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			if id, ok := mdnsQuery(buf[:n]); ok {
+				spoofIP := net.IPv4(127, 0, 0, 1)
+				spoofPort := victimPort
+				if spoofOffSubnet.Load() {
+					spoofIP = net.IPv4(10, 254, 254, 9)
+					spoofPort = 17890
+				}
+				ans := mdnsAnswer(id, true, Beacon{Port: spoofPort, Backend: "htdemucs", Hostname: "spoof-pc", Version: 2}, spoofIP)
+				pcSpoof.WriteTo(ans, from)
+			}
+		}
+	}()
+
+	discoverTargets = func() []*net.UDPAddr { return nil }
+	mdnsTargets = func() []*net.UDPAddr { return []*net.UDPAddr{pcSpoof.LocalAddr().(*net.UDPAddr)} }
+
+	state2 := filepath.Join(t.TempDir(), LANStateName)
+	if endpoint, ok := FindLAN(ctx, state2, 120*time.Millisecond); ok || victimHits.Load() != 0 {
+		t.Fatalf("spoofed loopback mDNS A record probed 127.0.0.1: endpoint=%q ok=%v victimHits=%d", endpoint, ok, victimHits.Load())
+	}
+	spoofOffSubnet.Store(true)
+	var seenEndpoint string
+	_ = discoverLANServers(ctx, 120*time.Millisecond, func(ep string, _ Beacon) bool {
+		seenEndpoint = ep
+		return true
+	})
+	if seenEndpoint != "http://127.0.0.2:17890" {
+		t.Fatalf("off-subnet mDNS A record endpoint = %q, want fallback to packet source http://127.0.0.2:17890", seenEndpoint)
+	}
+	_, sub50, _ := net.ParseCIDR("192.168.50.0/24")
+	if !validMDNSRecordIP(net.IPv4(10, 20, 30, 40), net.IPv4(10, 20, 30, 40), nil) ||
+		!validMDNSRecordIP(net.IPv4(192, 168, 50, 9), net.IPv4(192, 168, 1, 1), []*net.IPNet{sub50}) ||
+		validMDNSRecordIP(net.IPv4(127, 0, 0, 1), net.IPv4(127, 0, 0, 1), []*net.IPNet{sub50}) ||
+		validMDNSRecordIP(net.IPv4(10, 99, 0, 5), net.IPv4(192, 168, 50, 1), []*net.IPNet{sub50}) {
+		t.Fatal("validMDNSRecordIP accepted loopback/off-subnet IP or rejected matching/local-subnet IP")
+	}
+
+	// (b) When the mDNS A record falls inside localLANIPv4Nets() (non-loopback local subnet),
+	// a reflected packet from 127.0.0.2 resolves to that local-subnet listener IP.
+	if nets := localLANIPv4Nets(); len(nets) > 0 {
+		ln, err := net.Listen("tcp4", net.JoinHostPort(nets[0].IP.String(), "0"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer ln.Close()
+		srvReal := &http.Server{Handler: &Backend{Slot: make(chan struct{}, 1), Name: "htdemucs"}}
+		defer srvReal.Close()
+		go srvReal.Serve(ln)
+		realPort := ln.Addr().(*net.TCPAddr).Port
+		wantRealURL := "http://" + net.JoinHostPort(nets[0].IP.String(), strconv.Itoa(realPort))
+
+		pcReflector, err := net.ListenPacket("udp4", "127.0.0.2:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer pcReflector.Close()
+		go func() {
+			buf := make([]byte, 1500)
+			for {
+				n, from, err := pcReflector.ReadFrom(buf)
+				if err != nil {
+					return
+				}
+				if id, ok := mdnsQuery(buf[:n]); ok {
+					ans := mdnsAnswer(id, true, Beacon{Port: realPort, Backend: "htdemucs", Hostname: "gpu-pc", Version: 2}, nets[0].IP)
+					pcReflector.WriteTo(ans, from)
+					return
+				}
+			}
+		}()
+		mdnsTargets = func() []*net.UDPAddr { return []*net.UDPAddr{pcReflector.LocalAddr().(*net.UDPAddr)} }
+		state2b := filepath.Join(t.TempDir(), LANStateName)
+		if endpoint, ok := FindLAN(ctx, state2b, 300*time.Millisecond); !ok || endpoint != wantRealURL {
+			t.Fatalf("FindLAN via local-subnet mDNS A record = (%q, %v), want (%q, true)", endpoint, ok, wantRealURL)
+		}
+	}
+
+	// 3. ProbeLANState (called by deck UI / Web Console when idle) pairs immediately and writes stems-lan.json.
+	announceOnLoopback(t, ctx, port)
+	state3 := filepath.Join(t.TempDir(), LANStateName)
+	st := ProbeLANState(ctx, state3, 250*time.Millisecond)
+	if st == nil || !st.Online || st.Endpoint != lanSrv.URL || st.Backend != "htdemucs" {
+		t.Fatalf("ProbeLANState failed to pair idle deck: %+v", st)
+	}
+
+	// 4. ARP table + RememberPeerHint build unicast DiscoveryPort targets for AP-isolated Wi-Fi.
+	arpFile := filepath.Join(t.TempDir(), "arp")
+	arpContent := "IP address       HW type     Flags       HW address            Mask     Device\n" +
+		"192.168.88.42    0x1         0x2         aa:bb:cc:dd:ee:ff     *        wlan0\n" +
+		"192.168.88.99    0x1         0x0         00:00:00:00:00:00     *        wlan0\n"
+	if err := os.WriteFile(arpFile, []byte(arpContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	origARP := arpTablePath
+	arpTablePath = arpFile
+	t.Cleanup(func() {
+		arpTablePath = origARP
+		peerHintsMu.Lock()
+		peerHints = nil
+		peerHintsMu.Unlock()
+	})
+	RememberPeerHint("192.168.88.55:54321")
+	uTargets := unicastPeerTargets()
+	gotIPs := map[string]bool{}
+	for _, ut := range uTargets {
+		if ut.Port == DiscoveryPort {
+			gotIPs[ut.IP.String()] = true
+		}
+	}
+	if !gotIPs["192.168.88.42"] || !gotIPs["192.168.88.55"] || gotIPs["192.168.88.99"] {
+		t.Fatalf("unexpected unicast peer targets from ARP + RememberPeerHint: %+v", gotIPs)
 	}
 }

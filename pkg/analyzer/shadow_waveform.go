@@ -340,26 +340,78 @@ func (r *shadowMP3Frames) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-func (r *shadowMP3Frames) frame() error {
-	prefix, err := r.r.Peek(3)
-	if err != nil {
-		if err == io.EOF && len(prefix) != 0 {
-			return io.ErrUnexpectedEOF
-		}
-		return err
-	}
-	if string(prefix) == "TAG" { // Optional trailing ID3v1, exactly 128 bytes.
-		var tag [128]byte
-		if _, err := io.ReadFull(r.r, tag[:]); err != nil {
-			return err
-		}
-		if _, err := r.r.Peek(1); err != io.EOF {
-			if err != nil {
-				return err
+func skipShadowMP3Trailers(r *bufio.Reader) (bool, error) {
+	seen := false
+	for count := 0; count < 4; count++ {
+		prefix, err := r.Peek(3)
+		if err != nil {
+			if err == io.EOF && len(prefix) == 0 {
+				return seen, io.EOF
 			}
-			return errors.New("analyzer: shadow MP3: data after ID3v1")
+			if err == io.EOF {
+				return true, io.ErrUnexpectedEOF
+			}
+			return true, err
 		}
-		return io.EOF
+		switch string(prefix) {
+		case "TAG": // Optional trailing ID3v1, exactly 128 bytes.
+			var tag [128]byte
+			if _, err := io.ReadFull(r, tag[:]); err != nil {
+				return true, err
+			}
+			seen = true
+		case "APE": // Optional trailing APEv1/APEv2 tag (MP3Gain, foobar2000, etc.).
+			peek8, _ := r.Peek(8)
+			if string(peek8) != "APETAGEX" {
+				if seen {
+					return true, errors.New("analyzer: shadow MP3: data after metadata footer")
+				}
+				return false, nil
+			}
+			var ape [32]byte
+			if _, err := io.ReadFull(r, ape[:]); err != nil {
+				return true, err
+			}
+			ver := binary.LittleEndian.Uint32(ape[8:12])
+			tagSize := int64(binary.LittleEndian.Uint32(ape[12:16]))
+			flags := binary.LittleEndian.Uint32(ape[20:24])
+			if (ver != 1000 && ver != 2000) || tagSize > 16<<20 {
+				return true, errors.New("analyzer: shadow MP3: invalid APE tag header")
+			}
+			var rem int64
+			if flags&(1<<29) != 0 {
+				if flags&(1<<30) == 0 && tagSize < 32 {
+					return true, errors.New("analyzer: shadow MP3: invalid APE tag size")
+				}
+				rem = tagSize
+			} else if tagSize != 32 {
+				return true, errors.New("analyzer: shadow MP3: invalid APE footer size")
+			}
+			if rem > 0 {
+				if _, err := io.CopyN(io.Discard, r, rem); err != nil {
+					return true, err
+				}
+			}
+			seen = true
+		default:
+			if seen {
+				return true, errors.New("analyzer: shadow MP3: data after ID3v1")
+			}
+			return false, nil
+		}
+	}
+	if _, err := r.Peek(1); err != io.EOF {
+		if err != nil {
+			return true, err
+		}
+		return true, errors.New("analyzer: shadow MP3: too many metadata footers")
+	}
+	return true, io.EOF
+}
+
+func (r *shadowMP3Frames) frame() error {
+	if handled, err := skipShadowMP3Trailers(r.r); handled || err != nil {
+		return err
 	}
 	if _, err := io.ReadFull(r.r, r.buf[:4]); err != nil {
 		return err
@@ -405,6 +457,7 @@ func (r *shadowMP3Frames) frame() error {
 }
 
 func shadowEnvelopeMP3(r *bufio.Reader, peaks [3]float64, ticker Ticker) (*ShadowEnvelope, error) {
+	startTrim := int64(audioheader.PeekMP3StartOffset(r))
 	frames := &shadowMP3Frames{r: r}
 	dec, err := mp3.NewDecoder(frames)
 	if frames.terminal != nil && frames.terminal != io.EOF {
@@ -421,6 +474,7 @@ func shadowEnvelopeMP3(r *bufio.Reader, peaks [3]float64, ticker Ticker) (*Shado
 		return nil, errors.New("analyzer: shadow MP3: decoder rate differs from frame header")
 	}
 	var buf [4 * shadowEnvelopeChunk]byte // Decoder output is always stereo s16le.
+	var trimmed int64
 	for {
 		if err := e.tick(); err != nil {
 			return nil, err
@@ -433,6 +487,10 @@ func shadowEnvelopeMP3(r *bufio.Reader, peaks [3]float64, ticker Ticker) (*Shado
 			return nil, errors.New("analyzer: shadow MP3: truncated PCM frame")
 		}
 		for i := 0; i < n; i += 4 {
+			if trimmed < startTrim {
+				trimmed++
+				continue
+			}
 			l := int16(binary.LittleEndian.Uint16(buf[i:]))
 			rr := int16(binary.LittleEndian.Uint16(buf[i+2:]))
 			if err := e.add((float64(l) + float64(rr)) / 65536); err != nil {
@@ -446,7 +504,7 @@ func shadowEnvelopeMP3(r *bufio.Reader, peaks [3]float64, ticker Ticker) (*Shado
 			return nil, fmt.Errorf("analyzer: shadow MP3: %w", err)
 		}
 	}
-	if e.samples != frames.samples || frames.off != frames.n {
+	if e.samples+trimmed != frames.samples || frames.off != frames.n {
 		return nil, errors.New("analyzer: shadow MP3: incomplete decoded frame")
 	}
 	return e.finish()

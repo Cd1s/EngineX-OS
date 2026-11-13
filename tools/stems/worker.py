@@ -12,6 +12,7 @@ chunks; melody is the remainder there too, so the wire protocol is unchanged.
 """
 import importlib.util
 import argparse
+import ctypes
 import io
 import os
 import select
@@ -29,6 +30,24 @@ MAX_BLOCK = 65536
 MAX_RATE = 192000
 BATCH = 64  # blocks separated together when they are already waiting
 HISTORY = 17
+
+
+def _fd_waiting(fd):
+    if os.name == 'nt':
+        try:
+            import msvcrt
+            handle = msvcrt.get_osfhandle(fd)
+            avail = ctypes.c_ulong(0)
+            if ctypes.windll.kernel32.PeekNamedPipe(
+                ctypes.c_void_p(handle), None, 0, None, ctypes.byref(avail), None
+            ):
+                return avail.value > 0
+        except (ImportError, AttributeError, OSError, ValueError):
+            pass
+    try:
+        return bool(select.select([fd], [], [], 0)[0])
+    except (OSError, ValueError):
+        return False
 
 
 class Input:
@@ -52,7 +71,7 @@ class Input:
     def waiting(self):
         if self.pos < len(self.buf) or self.fd is None:
             return True
-        return bool(select.select([self.fd], [], [], 0)[0])
+        return _fd_waiting(self.fd)
 
     def readline(self, limit):
         while True:

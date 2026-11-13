@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -419,5 +420,184 @@ func TestParseExtDjayLabelsWithCommasAndColons(t *testing.T) {
 	}
 	if len(loops) != 1 || loops[0].Label != "A:B" {
 		t.Fatalf("loops: %+v", loops)
+	}
+}
+
+func TestDjayLongMixDurationLargeGridOffsetAndSubSecondMsCueLoop(t *testing.T) {
+	mount := t.TempDir()
+	createDummyAudio(t, filepath.Join(mount, "Music", "Mix.mp3"))
+	u := url.URL{Scheme: "file", Path: filepath.ToSlash(filepath.Join(mount, "djay_music_library.db"))}
+	db, err := sql.Open("sqlite", u.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, q := range []string{
+		`CREATE TABLE tracks (id INTEGER PRIMARY KEY, title TEXT, path TEXT, duration REAL, beatgrid_offset REAL)`,
+		`CREATE TABLE cues (track_id INTEGER, slot INTEGER, position REAL, label TEXT)`,
+		`CREATE TABLE loops (track_id INTEGER, slot INTEGER, start REAL, length REAL, label TEXT)`,
+		// 20-minute DJ mix (1200.0 s) with ambient intro first beat at 105.0 s:
+		`INSERT INTO tracks VALUES (1, 'Mix', 'Music/Mix.mp3', 1200.0, 105.0)`,
+		// Cues and loops stored in ms in unlabeled position/start/length columns, including <1000 ms:
+		`INSERT INTO cues VALUES (1, 0, 250.0, 'Early'), (1, 1, 45000.0, 'Drop')`,
+		`INSERT INTO loops VALUES (1, 0, 250.0, 500.0, 'HalfSecLoop')`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.Close()
+
+	libs, err := Discover(mount)
+	if err != nil || len(libs) != 1 || len(libs[0].Tracks) != 1 {
+		t.Fatalf("Discover: %v %+v", err, libs)
+	}
+	tr := libs[0].Tracks[0]
+	if tr.DurationSec != 1200.0 {
+		t.Fatalf("DurationSec = %.3f, want 1200.0", tr.DurationSec)
+	}
+	if tr.BeatGridOffset != 105.0 {
+		t.Fatalf("BeatGridOffset = %.3f, want 105.0", tr.BeatGridOffset)
+	}
+	if len(tr.Cues) != 2 || tr.Cues[0].PositionMS != 250.0 || tr.Cues[1].PositionMS != 45000.0 {
+		t.Fatalf("Cues corrupted: %+v", tr.Cues)
+	}
+	if len(tr.Loops) != 1 || tr.Loops[0].StartMS != 250.0 || tr.Loops[0].LengthMS != 500.0 {
+		t.Fatalf("Loops corrupted: %+v", tr.Loops)
+	}
+}
+
+func TestDjayIntegerSecondsWithThreeHourMixAndWholeSecondCues(t *testing.T) {
+	mount := t.TempDir()
+	createDummyAudio(t, filepath.Join(mount, "Music", "Short.mp3"))
+	createDummyAudio(t, filepath.Join(mount, "Music", "LongSet.mp3"))
+	u := url.URL{Scheme: "file", Path: filepath.ToSlash(filepath.Join(mount, "djay_music_library.db"))}
+	db, err := sql.Open("sqlite", u.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, q := range []string{
+		`CREATE TABLE tracks (id INTEGER PRIMARY KEY, title TEXT, path TEXT, duration INTEGER, beatgrid_offset INTEGER)`,
+		`CREATE TABLE cues (track_id INTEGER, slot INTEGER, position REAL, label TEXT)`,
+		`CREATE TABLE loops (track_id INTEGER, slot INTEGER, start REAL, length REAL, label TEXT)`,
+		// Integer-seconds library containing normal tracks plus a 3-hour (10800 s) recorded set:
+		`INSERT INTO tracks VALUES (1, 'Club Cut', 'Music/Short.mp3', 215, 1)`,
+		`INSERT INTO tracks VALUES (2, '3h Set', 'Music/LongSet.mp3', 10800, 2)`,
+		// Whole-second cue/loop positions without _sec/_ms suffix: 12 s must become 12000 ms, not 12 ms.
+		`INSERT INTO cues VALUES (1, 0, 12, 'Intro'), (1, 1, 64, 'Drop')`,
+		`INSERT INTO loops VALUES (1, 0, 12, 8, '8s Loop')`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.Close()
+
+	libs, err := Discover(mount)
+	if err != nil || len(libs) != 1 || len(libs[0].Tracks) != 2 {
+		t.Fatalf("Discover: %v %+v", err, libs)
+	}
+	var short, longSet *Track
+	for i := range libs[0].Tracks {
+		switch libs[0].Tracks[i].ID {
+		case "1":
+			short = &libs[0].Tracks[i]
+		case "2":
+			longSet = &libs[0].Tracks[i]
+		}
+	}
+	if short == nil || short.DurationSec != 215 || short.BeatGridOffset != 1 {
+		t.Fatalf("short track corrupted by integer 10800s mix: %+v", short)
+	}
+	if longSet == nil || longSet.DurationSec != 10800 || longSet.BeatGridOffset != 2 {
+		t.Fatalf("long set corrupted: %+v", longSet)
+	}
+	if len(short.Cues) != 2 || short.Cues[0].PositionMS != 12000 || short.Cues[1].PositionMS != 64000 {
+		t.Fatalf("whole-second cues became ms instead of s*1000: %+v", short.Cues)
+	}
+	if len(short.Loops) != 1 || short.Loops[0].StartMS != 12000 || short.Loops[0].LengthMS != 8000 {
+		t.Fatalf("whole-second loops became ms instead of s*1000: %+v", short.Loops)
+	}
+}
+
+func TestDjayPathHashPercentAndIndexNum(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"plain.mp3", "Track #1.mp3", "100%20Pure.mp3"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("audio"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	u := url.URL{Scheme: "file", Path: filepath.ToSlash(filepath.Join(dir, "djay_music_library.db"))}
+	db, err := sql.Open("sqlite", u.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE tracks (id TEXT PRIMARY KEY, title TEXT, path TEXT, duration REAL)`,
+		`CREATE TABLE cues (track_id TEXT, index_num INTEGER, position_ms REAL, label TEXT, color TEXT)`,
+		`CREATE TABLE loops (track_id TEXT, index_num INTEGER, start_ms REAL, length_ms REAL, label TEXT)`,
+		`INSERT INTO tracks VALUES ('1', 'Plain', 'file://` + filepath.ToSlash(filepath.Join(dir, "plain.mp3")) + `', 180)`,
+		`INSERT INTO tracks VALUES ('2', 'Hash', 'file://` + strings.ReplaceAll(filepath.ToSlash(filepath.Join(dir, "Track #1.mp3")), " ", "%20") + `', 180)`,
+		`INSERT INTO tracks VALUES ('3', 'LiteralPct', 'file://` + filepath.ToSlash(filepath.Join(dir, "100%20Pure.mp3")) + `', 180)`,
+		`INSERT INTO cues VALUES ('1', 2, 1000, 'Drop', '#ff0000'), ('1', 5, 4000, 'Outro', '#00ff00')`,
+		`INSERT INTO loops VALUES ('1', 3, 2000, 1000, 'Loop3')`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.Close()
+
+	libs, err := Discover(dir)
+	if err != nil || len(libs) != 1 {
+		t.Fatalf("Discover: libs=%v err=%v", libs, err)
+	}
+	lib := libs[0]
+	if len(lib.Tracks) != 3 {
+		t.Fatalf("Discovered %d of 3 tracks: %+v", len(lib.Tracks), lib.Tracks)
+	}
+	var plain *Track
+	for i := range lib.Tracks {
+		if lib.Tracks[i].Title == "Plain" {
+			plain = &lib.Tracks[i]
+		}
+	}
+	if plain == nil || len(plain.Cues) != 2 || plain.Cues[0].Index != 2 || plain.Cues[1].Index != 5 {
+		t.Fatalf("index_num cue slots lost: %+v", plain)
+	}
+	if len(plain.Loops) != 1 || plain.Loops[0].Index != 3 {
+		t.Fatalf("index_num loop slot lost: %+v", plain.Loops)
+	}
+}
+
+func TestDjayMixedExplicitAndUnlabeledLoopUnitColumns(t *testing.T) {
+	dir := t.TempDir()
+	createDummyAudio(t, filepath.Join(dir, "Music", "Track.mp3"))
+	u := url.URL{Scheme: "file", Path: filepath.ToSlash(filepath.Join(dir, "djay_music_library.db"))}
+	db, err := sql.Open("sqlite", u.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE tracks (id INTEGER PRIMARY KEY, title TEXT, path TEXT, duration INTEGER)`,
+		`CREATE TABLE loops (track_id INTEGER, slot INTEGER, start_ms REAL, length REAL, label TEXT)`,
+		// Track is 180 s; start_ms is explicitly in ms (12000 ms) while unlabeled length is in seconds (8 s and 30.5 s).
+		`INSERT INTO tracks VALUES (1, 'MixedLoopUnits', 'Music/Track.mp3', 180)`,
+		`INSERT INTO loops VALUES (1, 0, 12000, 8, '8s Loop'), (1, 1, 12000, 30.5, '30.5s Loop')`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.Close()
+
+	libs, err := Discover(dir)
+	if err != nil || len(libs) != 1 || len(libs[0].Tracks) != 1 {
+		t.Fatalf("Discover: libs=%v err=%v", libs, err)
+	}
+	loops := libs[0].Tracks[0].Loops
+	if len(loops) != 2 || loops[0].StartMS != 12000 || loops[0].LengthMS != 8000 || loops[1].StartMS != 12000 || loops[1].LengthMS != 30500 {
+		t.Fatalf("mixed loop columns misread: got %+v, want [12000/8000, 12000/30500]", loops)
 	}
 }

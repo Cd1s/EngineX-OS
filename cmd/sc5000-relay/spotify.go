@@ -131,11 +131,17 @@ func (a *spotifyAuth) useHTTPS(ctx context.Context, clientID string) bool {
 		return false
 	}
 	a.mu.Lock()
-	if a.learned[a.learnedKey(clientID)] {
+	redirect := a.httpsRedirect
+	if !strings.HasPrefix(redirect, "https://") {
+		a.mu.Unlock()
+		return false
+	}
+	key := a.learnedKey(clientID)
+	if a.learned[key] {
 		a.mu.Unlock()
 		return true
 	}
-	if p, ok := a.probes[clientID]; ok && time.Since(p.at) < spotifyProbeCacheTTL {
+	if p, ok := a.probes[key]; ok && time.Since(p.at) < spotifyProbeCacheTTL {
 		a.mu.Unlock()
 		return p.https
 	}
@@ -143,7 +149,7 @@ func (a *spotifyAuth) useHTTPS(ctx context.Context, clientID string) bool {
 
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
-	ours, err1 := a.rejects(ctx, clientID, a.httpsRedirect)
+	ours, err1 := a.rejects(ctx, clientID, redirect)
 	control, err2 := a.rejects(ctx, clientID, spotifyProbeControl)
 	// Conclusive only when Spotify demonstrably rejects an unregistered URI
 	// but not ours; otherwise fall back to the loopback paste flow.
@@ -152,7 +158,7 @@ func (a *spotifyAuth) useHTTPS(ctx context.Context, clientID string) bool {
 		log.Printf("spotify probe: %v %v", err1, err2)
 	}
 	a.mu.Lock()
-	a.probes[clientID] = probeResult{https: https, at: time.Now()}
+	a.probes[key] = probeResult{https: https, at: time.Now()}
 	a.mu.Unlock()
 	return https
 }

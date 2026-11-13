@@ -197,6 +197,62 @@ func TestSaveSplitConvertsA24BitAIFFFromAHostWithoutRanges(t *testing.T) {
 	}
 }
 
+func TestPCMToFLAC24BitAndHighResidualNo32BitOverflow(t *testing.T) {
+	dir := t.TempDir()
+	// 24-bit stereo WAV and 24-bit AIFF: on 32-bit armhf, mewkiz/flac's int bit-cost
+	// accumulator overflowed negative at k=0 and inflated a 90 KB clip to >20 GiB.
+	s24 := pcmSamples(8192, 2, 24)
+	rawWAV := wavFile(s24, 24, 48000)
+	wavPath := filepath.Join(dir, "in24.wav")
+	if err := os.WriteFile(wavPath, rawWAV, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	flacWAV, err := pcmToFLAC(wavPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stWAV, err := os.Stat(flacWAV)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stWAV.Size() >= int64(len(rawWAV)) {
+		t.Fatalf("24-bit WAV FLAC size %d >= raw WAV %d", stWAV.Size(), len(rawWAV))
+	}
+	if rate, bits, got := flacSamples(t, flacWAV); rate != 48000 || bits != 24 || !equalSamples(got, s24) {
+		t.Fatalf("24-bit WAV roundtrip mismatch (%d Hz, %d-bit)", rate, bits)
+	}
+
+	// Full-scale alternating 16-bit block whose order-4 residuals exceed 262,144 per sample
+	// (4096 * 524280 > math.MaxInt32 at k=0), verifying verbatim fallback never inflates.
+	alt16 := [][]int32{make([]int32, 4096)}
+	for i := range alt16[0] {
+		if i%2 == 0 {
+			alt16[0][i] = 32767
+		} else {
+			alt16[0][i] = -32768
+		}
+	}
+	rawAlt := wavFile(alt16, 16, 44100)
+	altPath := filepath.Join(dir, "alt16.wav")
+	if err := os.WriteFile(altPath, rawAlt, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	flacAlt, err := pcmToFLAC(altPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stAlt, err := os.Stat(flacAlt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stAlt.Size() > int64(len(rawAlt))+1024 {
+		t.Fatalf("high-residual 16-bit FLAC inflated to %d bytes (raw %d)", stAlt.Size(), len(rawAlt))
+	}
+	if rate, bits, got := flacSamples(t, flacAlt); rate != 44100 || bits != 16 || !equalSamples(got, alt16) {
+		t.Fatalf("16-bit alternating roundtrip mismatch (%d Hz, %d-bit)", rate, bits)
+	}
+}
+
 func TestSaveSplitKeepsAnMP3AndRefusesOtherFiles(t *testing.T) {
 	frames := mp3Frames(14, 8000) // about 8 MB
 	srv, _, most := serve(t, frames, true)

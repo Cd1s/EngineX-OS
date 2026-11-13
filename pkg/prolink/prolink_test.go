@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"math"
 	"net"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -655,5 +657,60 @@ func TestTrackMetadataIsPerHost(t *testing.T) {
 	}
 	if got := status("192.168.50.249").Title; got != "Song on 192.168.50.249" {
 		t.Fatalf("other host kept stale metadata: %q", got)
+	}
+}
+
+func TestDiscoveryDoesNotWalkMediaSubdirsOrPoisonTrack1AndCoalesces(t *testing.T) {
+	fakeMedia := t.TempDir()
+	// Place an unrelated USB export under <fakeMedia>/UnrelatedUSB/PIONEER/USBANLZ/...
+	// With --anlz-root=/media, a remote CDJ playing TrackID=1 must NOT walk /media
+	// or attach UnrelatedUSB's ANLZ0000.DAT beatgrid/waveform.
+	testfixture.Write(t, fakeMedia, "UnrelatedUSB/PIONEER/USBANLZ/P099/00ABCDEF/ANLZ0000.DAT", testfixture.DAT())
+	testfixture.Write(t, fakeMedia, "UnrelatedUSB/PIONEER/USBANLZ/P099/00ABCDEF/ANLZ0000.EXT", testfixture.EXT())
+
+	d := prolink.NewDiscovery()
+	d.SetANLZRoot(fakeMedia)
+	obs := d.Observe(prolink.Device{
+		Address:      "192.168.1.50",
+		Number:       1,
+		PacketType:   0x0a,
+		TrackID:      1,
+		SourcePlayer: 1,
+		SourceSlot:   3,
+		BPM:          120.0,
+	})
+	if len(obs.Beats) != 0 || len(obs.Waveform) != 0 {
+		t.Fatalf("Observe walked /media and poisoned TrackID=1 with unrelated local ANLZ: beats=%d wf=%d", len(obs.Beats), len(obs.Waveform))
+	}
+
+	// Concurrent Observe calls for the same uncached track must coalesce into one resolve.
+	d2 := prolink.NewDiscovery()
+	var calls atomic.Int32
+	d2.SetResolver(func(dev prolink.Device) (*rekordbox.Analysis, string, string) {
+		calls.Add(1)
+		time.Sleep(30 * time.Millisecond)
+		return nil, "Coalesced Song", "DJ"
+	})
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			got := d2.Observe(prolink.Device{
+				Address:      "192.168.1.60",
+				Number:       2,
+				PacketType:   0x0a,
+				TrackID:      77,
+				SourcePlayer: 2,
+				SourceSlot:   3,
+			})
+			if got.Title != "Coalesced Song" {
+				t.Errorf("Title = %q, want Coalesced Song", got.Title)
+			}
+		}()
+	}
+	wg.Wait()
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("concurrent Observe triggered %d resolves, want 1", n)
 	}
 }

@@ -105,3 +105,19 @@ func TestOneLibraryPlaintextCopyGoesToDataAndIsSwept(t *testing.T) {
 		t.Fatalf("file written despite the space check: %v", entries)
 	}
 }
+
+func TestOneLibraryTempDirNeverUsesHostDataInTests(t *testing.T) {
+	if got := oneLibraryTempDir(); strings.HasPrefix(got, "/data/") {
+		t.Fatalf("oneLibraryTempDir() returned host %q during go test; must use os.TempDir()", got)
+	}
+	fakeData := filepath.Join(t.TempDir(), "enginex")
+	if err := os.MkdirAll(fakeData, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := selectOneLibraryTempDir(fakeData, true); got == filepath.Join(fakeData, "tmp") {
+		t.Fatalf("selectOneLibraryTempDir(inTest=true) used %q instead of os.TempDir()", got)
+	}
+	if got := selectOneLibraryTempDir(fakeData, false); got != filepath.Join(fakeData, "tmp") {
+		t.Fatalf("selectOneLibraryTempDir(inTest=false) = %q, want %q", got, filepath.Join(fakeData, "tmp"))
+	}
+}

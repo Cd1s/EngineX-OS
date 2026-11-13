@@ -47,7 +47,11 @@ func (s *server) setPublicURL(raw string) {
 	}
 	if s.spotify != nil {
 		s.spotify.mu.Lock()
-		s.spotify.httpsRedirect = u + "/oauth/spotify/callback"
+		if u != "" {
+			s.spotify.httpsRedirect = u + "/oauth/spotify/callback"
+		} else {
+			s.spotify.httpsRedirect = ""
+		}
 		s.spotify.mu.Unlock()
 	}
 	s.publicMu.Unlock()

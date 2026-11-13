@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -330,5 +331,146 @@ func TestSoundCloudHasGoPlus(t *testing.T) {
 		if hits != 1 {
 			t.Fatalf("%s: /me asked %d times, want 1 (cached)", product, hits)
 		}
+	}
+}
+
+func TestSoundCloudLikesFallbackConcurrentWithHasGoPlusNoRace(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/me":
+			io.WriteString(w, `{"id":42,"consumer_subscription":{"product":{"id":"high_tier"}}}`)
+		case "/me/likes/tracks":
+			w.WriteHeader(http.StatusForbidden)
+		case "/users/42/track_likes":
+			io.WriteString(w, `{"collection":[{"id":7,"title":"Public Like","access":"playable","duration":180000}]}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	scWebMu.Lock()
+	scWebIDs[srv.URL] = "0123456789abcdef0123456789abcdef"
+	scWebMu.Unlock()
+	t.Cleanup(func() {
+		scWebMu.Lock()
+		delete(scWebIDs, srv.URL)
+		scWebMu.Unlock()
+	})
+
+	sc := &SoundCloud{
+		BaseURL:  srv.URL,
+		WebURL:   srv.URL,
+		SiteURL:  srv.URL,
+		ClientID: "cid",
+		Secret:   "sec",
+		Token:    "user-tok",
+		UserID:   42,
+	}
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 20; i++ {
+			scGoPlusMu.Lock()
+			sc.goPlusAt = time.Time{}
+			scGoPlusMu.Unlock()
+			_ = sc.HasGoPlus(context.Background())
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 20; i++ {
+			tracks, err := sc.Tracks(context.Background(), soundCloudLikesID)
+			if err != nil || len(tracks) != 1 {
+				t.Errorf("Tracks(likes) = %v, %v", tracks, err)
+				return
+			}
+		}
+	}()
+	wg.Wait()
+}
+
+func TestSoundCloudWebBrowserTokenQueriesMeForPrivatePlaylists(t *testing.T) {
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		if r.Header.Get("Authorization") != "OAuth browser-token" {
+			t.Errorf("missing browser token on %s", r.URL.Path)
+		}
+		switch r.URL.Path {
+		case "/me":
+			io.WriteString(w, `{"id":42,"username":"dj"}`)
+		case "/me/playlists":
+			io.WriteString(w, `{"collection":[{"id":101,"title":"Secret Set","track_count":5}]}`)
+		case "/me/playlist_likes":
+			io.WriteString(w, `{"collection":[]}`)
+		case "/me/track_likes":
+			io.WriteString(w, `{"collection":[{"id":7,"title":"Private Like","policy":"ALLOW","duration":180000}]}`)
+		default:
+			// /users/42/playlists omits private playlists in web mode.
+			io.WriteString(w, `{"collection":[]}`)
+		}
+	}))
+	defer srv.Close()
+	scWebMu.Lock()
+	scWebIDs[srv.URL] = "0123456789abcdef0123456789abcdef"
+	scWebMu.Unlock()
+	t.Cleanup(func() {
+		scWebMu.Lock()
+		delete(scWebIDs, srv.URL)
+		scWebMu.Unlock()
+	})
+
+	sc := &SoundCloud{WebURL: srv.URL, SiteURL: srv.URL, Token: "browser-token"}
+	if err := sc.Identify(context.Background()); err != nil || sc.UserID != 42 {
+		t.Fatalf("Identify: %v uid=%d", err, sc.UserID)
+	}
+	lists, err := sc.Playlists(context.Background())
+	if err != nil || len(lists) != 2 || lists[1].Title != "Secret Set" {
+		t.Fatalf("Playlists missed private set: lists=%+v err=%v paths=%v", lists, err, paths)
+	}
+	likes, err := sc.Tracks(context.Background(), soundCloudLikesID)
+	if err != nil || len(likes) != 1 || likes[0].Title != "Private Like" {
+		t.Fatalf("Tracks(likes) missed /me likes: likes=%+v err=%v paths=%v", likes, err, paths)
+	}
+}
+
+func TestSoundCloudWebMe404FallbackAndErrorSurfacing(t *testing.T) {
+	mode := "404-fallback"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if mode == "auth-error" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		switch r.URL.Path {
+		case "/me/playlists", "/me/playlist_likes":
+			w.WriteHeader(http.StatusNotFound)
+		case "/users/42/playlists":
+			io.WriteString(w, `{"collection":[{"id":201,"title":"Fallback Set","track_count":4}]}`)
+		case "/users/42/playlist_likes":
+			io.WriteString(w, `{"collection":[{"playlist":{"id":202,"title":"Saved Set","track_count":2}}]}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	scWebMu.Lock()
+	scWebIDs[srv.URL] = "0123456789abcdef0123456789abcdef"
+	scWebMu.Unlock()
+	t.Cleanup(func() {
+		scWebMu.Lock()
+		delete(scWebIDs, srv.URL)
+		scWebMu.Unlock()
+	})
+
+	sc := &SoundCloud{WebURL: srv.URL, SiteURL: srv.URL, Token: "browser-token", UserID: 42}
+	lists, err := sc.Playlists(context.Background())
+	if err != nil || len(lists) != 3 || lists[1].Title != "Fallback Set" || lists[2].Title != "【收藏】Saved Set" {
+		t.Fatalf("404 /me fallback failed: lists=%+v err=%v", lists, err)
+	}
+
+	mode = "auth-error"
+	if lists, err = sc.Playlists(context.Background()); err == nil {
+		t.Fatalf("Playlists swallowed 401 error: lists=%+v", lists)
 	}
 }
