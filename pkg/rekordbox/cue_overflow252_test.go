@@ -217,4 +217,28 @@ func TestCueOverflow252(t *testing.T) {
 			t.Fatalf("unexpected palette color on normal loop: %+v", loopCue)
 		}
 	})
+
+	t.Run("MaxUint32TimeMSLoopBumpBoundary", func(t *testing.T) {
+		// When inUsec is MaxUint32 ms (4294967295000 us) and outUsec rounds to the same ms (4294967295001 us),
+		// bumping timeMS + 1 would overflow uint32 to 0, causing EndMS < TimeMS and failing Library.Validate().
+		// In this case, the unrepresentable loop must be dropped while preserving the cue (Loop=false).
+		rec := newTestRecord(map[string]string{
+			"kind":    "1",
+			"inUsec":  "4294967295000",
+			"outUsec": "4294967295001",
+		})
+		cue, ok := parseSQLiteCue(rec)
+		if !ok {
+			t.Fatalf("parseSQLiteCue rejected cue with MaxUint32 TimeMS")
+		}
+		if cue.TimeMS != math.MaxUint32 {
+			t.Fatalf("TimeMS = %d, want %d", cue.TimeMS, uint32(math.MaxUint32))
+		}
+		if cue.Loop {
+			t.Fatalf("Loop = true with unrepresentable EndMS (got EndMS=%d, want Loop=false)", cue.EndMS)
+		}
+		if cue.EndMS != 0 {
+			t.Fatalf("EndMS = %d, want 0", cue.EndMS)
+		}
+	})
 }
