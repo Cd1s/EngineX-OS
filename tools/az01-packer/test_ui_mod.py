@@ -18,6 +18,147 @@ spec.loader.exec_module(bp)
 SRC = BUILD_PACKS.read_text()
 
 
+class PrimeGoSwipeStemsTest(unittest.TestCase):
+    """#224: both JP11 swipe menus offer Stems without changing full-swipe load."""
+
+    def test_swipe_edits_cover_both_sides_without_lab(self):
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            edits = bp.edits(False)
+            for side in ("left", "right"):
+                with self.subTest(side=side):
+                    path = bp.ROOT + f"Views/BrowseView/Components/Components/Swipe{side.title()}Item.qml"
+                    self.assertIn(path, edits)
+                    replacements = "".join(new for _, new in edits[path])
+                    self.assertIn("readonly property bool scStem:", replacements)
+                    self.assertIn("trackList.isStemsList", replacements)
+                    self.assertIn(f"!{side}Actions.some(", replacements)
+                    self.assertIn(f"actionIndex >= {side}Actions.length", replacements)
+                    self.assertIn('.concat(scStem ? [root.scT("Stems")] : [])', replacements)
+        finally:
+            bp.ROOT = old_root
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required for #224")
+    def test_both_swipes_offer_stems_except_in_stems_collection_or_on_az04(self):
+        for version in ("5.0.4", "5.3.0"):
+            qrc = LAB / version / "qrc"
+            if not qrc.is_dir():
+                if version == "5.0.4":
+                    continue
+                self.skipTest(f"{qrc} not found (run on the build host)")
+            with tempfile.TemporaryDirectory() as tmp:
+                out = Path(tmp) / "packs"
+                built = subprocess.run(
+                    ["python3", str(BUILD_PACKS), "--qrc", str(qrc),
+                     "--out", str(out)], capture_output=True, text=True)
+                self.assertEqual(built.returncode, 0, built.stderr)
+                # The shared Swipe{Left,Right}Item edits are inside if v53().
+                # Still build all legacy languages to catch patch-table regressions.
+                if version == "5.0.4":
+                    continue
+                for lang in ("en", "zh-Hans", "zh-Hant"):
+                    for side, deck in (("left", 1), ("right", 2)):
+                        with self.subTest(version=version, lang=lang, side=side):
+                            qml = (out / lang / "Skins/Embedded/Views/BrowseView/Components/Components"
+                                   / f"Swipe{side.title()}Item.qml").read_text()
+                            self.assertIn("readonly property bool scStem:", qml)
+                            self.assertIn("root.scIsAZ04", qml)
+                            self.assertIn('!(typeof trackList !== "undefined" && trackList && trackList.isStemsList)', qml)
+                            self.assertIn(f"!{side}Actions.some(", qml)
+                            self.assertIn('.concat(scStem ? [root.scT("Stems")] : [])', qml)
+                            self.assertIn(".concat(scStem ? [Style.systemBlue01Color] : [])", qml)
+                            self.assertIn("root.scStemStream(row.modelData.trackId)", qml)
+                            self.assertIn("startRenderTracks(String(row.modelData.trackId))", qml)
+                            self.assertIn('textSwipeInvalid: scDeck > 0 ? "" :', qml)
+                            expressions = {
+                                name: re.search(r"readonly property [^\n]+? " + name + r": (.*)", qml).group(1)
+                                for name in ("scStem", "actionLabels", "actionCommitMessages", "actionColors")
+                            }
+                            label_fn = re.search(r"function scLabel\(s\) \{[^\n]+", qml).group(0)
+                            commit = qml.split("onCommit: (actionIndex, viaButton) => {", 1)[1]
+                            commit = commit.split(f"swiped{side.title()}(", 1)[0]
+                            script = r"""
+const assert = require('assert');
+String.prototype.arg = function(n) { return this.replace('%1', n); };
+const expr = EXPRESSIONS;
+function run(opts = {}) {
+    const calls = [], writes = {};
+    const row = {index: 7, modelData: {trackId: opts.streaming ? 99 : 42},
+                 isStreamingTrack: !!opts.streaming, streamingProviderName: ''};
+    const trackList = {isStemsList: !!opts.stemsList,
+                       pCurrentIndex: {translator: {unnormalized: -1}}};
+    const root = {scIsAZ04: !!opts.az04, scT: s => s,
+                  scStemStream: id => {calls.push(['stream', id]); return !!opts.streaming;}};
+    const Style = {systemBlue01Color: 'blue'};
+    const actions = (opts.labels || STOCK).map((label, i) => ({
+        display: {label, commitMessage: label, color: 'stock' + i},
+        trigger: index => calls.push(['stock', i, index])
+    }));
+    const ACTIONS = actions;
+    const scDeck = opts.deck || 0;
+    LABEL_FUNCTION
+    const scStem = eval(expr.scStem);
+    const labels = eval(expr.actionLabels);
+    const messages = eval(expr.actionCommitMessages);
+    const actionCommitMessages = messages;
+    const colors = eval(expr.actionColors);
+    const Planck = {
+        librarianController: {stemsQueueManager: {
+            startRenderTracks: id => calls.push(['render', id])}},
+        getProperty: path => ({translator: new Proxy({}, {
+            set: (o, key, value) => {writes[path] = value; return true;}})})
+    };
+    let textCommitValid;
+    if (opts.commit !== undefined) {
+        const actionIndex = opts.commit;
+        COMMIT_BODY
+    }
+    return {labels, messages, colors, calls, writes,
+            current: trackList.pCurrentIndex.translator.unnormalized};
+}
+const stock = STOCK;
+for (const streaming of [false, true]) {
+    const r = run({streaming, commit: 2});
+    assert.deepStrictEqual(r.labels, [...stock, 'Stems']);
+    assert.deepStrictEqual(r.messages, [...stock, 'Stems']);
+    assert.deepStrictEqual(r.colors, ['stock0', 'stock1', 'blue']);
+    assert.deepStrictEqual(r.calls, streaming ? [['stream', 99]] :
+                                               [['stream', 42], ['render', '42']]);
+}
+for (const opts of [{stemsList: true}, {az04: true}]) {
+    const r = run(opts);
+    assert.deepStrictEqual(r.labels, stock);
+    assert.deepStrictEqual(r.colors, ['stock0', 'stock1']);
+}
+for (const label of ['Stems', 'Remove Stems']) {
+    const labels = [...stock, label];
+    for (const stemsList of [false, true]) {
+        assert.deepStrictEqual(run({labels, stemsList}).labels, labels);
+    }
+}
+assert.deepStrictEqual(run({commit: 0}).calls, [['stock', 0, 7]]);
+assert.deepStrictEqual(run({commit: 1}).calls, [['stock', 1, 7]]);
+assert.deepStrictEqual(run({deck: 3, commit: 2}).calls, [['stream', 42], ['render', '42']]);
+const routed = run({deck: 3, commit: 0});
+assert.deepStrictEqual(routed.labels, ['Deck 3', stock[1], 'Stems']);
+assert.deepStrictEqual(routed.calls, []);
+assert.deepStrictEqual(routed.writes, {'/Client/Librarian/LoadToDeck3': true});
+assert.strictEqual(routed.current, 7);
+"""
+                            stock = [f"Deck {deck}", "Prepare" if side == "left" else "Load"]
+                            for key, value in (
+                                ("EXPRESSIONS", json.dumps(expressions)),
+                                ("STOCK", json.dumps(stock)),
+                                ("ACTIONS", side + "Actions"),
+                                ("LABEL_FUNCTION", label_fn),
+                                ("COMMIT_BODY", commit),
+                            ):
+                                script = script.replace(key, value)
+                            checked = subprocess.run(["node"], input=script, capture_output=True, text=True)
+                            self.assertEqual(checked.returncode, 0, checked.stderr)
+
+
 class UiModSourceTest(unittest.TestCase):
     def test_boot_ready_waits_for_main_splash_and_never_blocks_gui(self):
         self.assertIn('!scBootSplash.active && planckQuickView.isMainScreen', bp.BOOT_READY)
