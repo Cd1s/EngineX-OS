@@ -1063,3 +1063,47 @@ func TestEngineLightingDefaultOffAndPersistence(t *testing.T) {
 		t.Errorf("lighting caused %d Engine restarts", restarts)
 	}
 }
+
+func TestUISettingsBpmDecimals(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Config{AccessToken: "code", UIDir: dir, StateDir: t.TempDir()}
+	srv := httptest.NewServer(New(cfg, nil))
+	defer srv.Close()
+
+	if code, v := uiPost(t, srv.URL, ""); code != 200 || v.BpmDecimals != 2 {
+		t.Fatalf("unexpected default BpmDecimals: code=%d got=%d", code, v.BpmDecimals)
+	}
+
+	if code, v := uiPost(t, srv.URL, "bpmDecimals=1"); code != 200 || v.BpmDecimals != 1 {
+		t.Fatalf("bpmDecimals=1 failed: code=%d got=%d", code, v.BpmDecimals)
+	}
+	confBytes, err := os.ReadFile(filepath.Join(dir, "settings.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(splitLines(confBytes), "bpm_decimals=1") {
+		t.Fatalf("settings.conf missing bpm_decimals=1:\n%s", string(confBytes))
+	}
+
+	srv2 := httptest.NewServer(New(cfg, nil))
+	defer srv2.Close()
+	if code, v := uiPost(t, srv2.URL, ""); code != 200 || v.BpmDecimals != 1 {
+		t.Fatalf("reloaded BpmDecimals mismatch: code=%d got=%d", code, v.BpmDecimals)
+	}
+
+	for _, bad := range []string{"bpmDecimals=0", "bpmDecimals=3", "bpmDecimals=-1", "bpmDecimals=abc", "bpmDecimals=1.5", "bpm_decimals=9"} {
+		if code, _ := uiPost(t, srv.URL, bad); code != 400 {
+			t.Errorf("expected 400 for %s, got %d", bad, code)
+		}
+	}
+
+	if code, v := uiPost(t, srv.URL, "bpmDecimals=2"); code != 200 || v.BpmDecimals != 2 {
+		t.Fatalf("reset bpmDecimals=2 failed: code=%d got=%d", code, v.BpmDecimals)
+	}
+	confBytes, _ = os.ReadFile(filepath.Join(dir, "settings.conf"))
+	for _, line := range splitLines(confBytes) {
+		if strings.HasPrefix(line, "bpm_decimals=") {
+			t.Errorf("settings.conf should omit default bpm_decimals=2, got %q", line)
+		}
+	}
+}

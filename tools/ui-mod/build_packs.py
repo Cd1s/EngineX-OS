@@ -2430,6 +2430,7 @@ SERVICES_MAIN = """
 	property bool scDualColumn: false
 	property bool scTracklistWaveform: true
 	property bool scCueCountdown: true
+	property int scBpmDecimals: 2
 	property int scSyncGuardPct: 0
 	property bool scSwapLoopOrder: false
 	property int scLedBrightness: 100
@@ -2978,6 +2979,8 @@ SERVICES_MAIN = """
 		else if (v) {
 			if (v.cueCountdown !== undefined) scCueCountdown = !!v.cueCountdown
 			else if (v.cue_countdown !== undefined) scCueCountdown = v.cue_countdown !== "0" && v.cue_countdown !== 0 && v.cue_countdown !== false
+			if (v.bpmDecimals !== undefined) scBpmDecimals = parseInt(v.bpmDecimals) === 1 ? 1 : 2
+			else if (v.bpm_decimals !== undefined) scBpmDecimals = parseInt(v.bpm_decimals) === 1 ? 1 : 2
 			if (v.browserDualColumn !== undefined) scDualColumn = !!v.browserDualColumn
 			else if (v.browser_dual_column !== undefined) scDualColumn = v.browser_dual_column === "1" || v.browser_dual_column === 1 || v.browser_dual_column === true
 			if (v.tracklistWaveform !== undefined) scTracklistWaveform = !!v.tracklistWaveform
@@ -3058,6 +3061,7 @@ SERVICES_MAIN = """
 	function scParseSettingsConf(text) {
 		let fxMode = "beats", fxMs = 500
 		scCueCountdown = true // default on: only an explicit cue_countdown=0 turns it off
+		scBpmDecimals = 2
 		scTracklistWaveform = true
 		for (const line of (text || "").split("\\n")) {
 			const eq = line.indexOf("=")
@@ -3067,6 +3071,7 @@ SERVICES_MAIN = """
 			if (key === "browser_dual_column") root.scDualColumn = val === "1"
 			else if (key === "tracklist_waveform") root.scTracklistWaveform = val !== "0" && val !== "false"
 			else if (key === "cue_countdown") root.scCueCountdown = val !== "0"
+			else if (key === "bpm_decimals") root.scBpmDecimals = val === "1" ? 1 : 2
 			else if (key === "sync_guard_pct") root.scSyncGuardPct = parseInt(val) || 0
 			else if (key === "swap_loop_order") root.scSwapLoopOrder = val === "1"
 			else if (key === "led_brightness") root.scLedBrightness = parseInt(val) || 100
@@ -3638,6 +3643,16 @@ SERVICES_ENTRIES = QUALITY_ENTRY + """
 			values: ["Off", "On"]
 			currentValue: values[root.scProlinkExport ? 1 : 0]
 			onSelected: function(index) { root.scCall("prolinkExport=" + index) }
+		},
+"""
+
+# User Profile -> Display: deck BPM decimal places (#229).
+DISPLAY_ENTRIES = """
+		EntryBase.ListEntry {
+			text: "BPM Decimals"
+			values: ["1", "2"]
+			currentValue: String(root.scBpmDecimals === 1 ? 1 : 2)
+			onSelected: function(index) { root.scCall("bpmDecimals=" + values[index]) }
 		},
 """
 
@@ -4991,7 +5006,7 @@ SHADOW_LAYER = r"""
                                             deckLoaded: scHeader.loaded
                                             songAnalyzed: bpmValue > 0
                                             externalBpm: true
-                                            decimalPlaces: 2
+                                            decimalPlaces: typeof root !== "undefined" && root && root.scBpmDecimals === 1 ? 1 : 2
                                             bpmValue: {
                                                 const s = scDisplay.sample, m = scDisplay.meta
                                                 return s ? s.currentBpm || (s.bpm || (m && m.bpm) || 0) * (1 + (s.pitch || 0) / 100) : 0
@@ -5573,7 +5588,9 @@ def edits(dev: bool):
         **{prefs + ("" if v53() else "TabContents/") + f"{name}TabContent.qml": [
             (f'import "{"" if v53() else "../"}Entries"\n', f'import QtQuick.Layouts 1.12\nimport "{"" if v53() else "../"}Entries"\nimport "{"" if v53() else "../"}Entries/Base" as EntryBase\nimport Planck 1.0\n'),
             (f"{last} {{}}", f"{last} {{}}," + entries.rstrip().rstrip(",")),
-        ] for name, last, entries in [
+        ] for name, last, entries in ([
+            ("Display", "TrackOverviewStyle", DISPLAY_ENTRIES),
+        ] if v53() else []) + [
             ("Services", "SpotifyEnable" if v53() else "CloudServices", SERVICES_ENTRIES),
             ("Playback", "KeySyncMode", PLAYBACK_ENTRIES),
             ("Safety", "KeyAdjust", SAFETY_ENTRIES),
@@ -6585,6 +6602,7 @@ def edits(dev: bool):
              '    readonly property var scSpeed: deckIndex > 0 ? Planck.getProperty("/Engine/Deck%1/SpeedState".arg(deckIndex)) : null\n'
              '    readonly property var scMetaBpm: deckIndex > 0 ? Planck.getProperty("/Engine/Deck%1/Track/MetaDataBPM".arg(deckIndex)) : null\n'
              "    readonly property var scBpm2: {\n"
+             '        const dec = typeof root !== "undefined" && root && root.scBpmDecimals === 1 ? 1 : 2\n'
              '        const loaded = scDeckData && typeof scDeckData.songLoaded === "boolean"\n'
              "            ? scDeckData.songLoaded\n"
              '            : (scLoaded && scLoaded.translator && typeof scLoaded.translator.state === "boolean"\n'
@@ -6593,7 +6611,7 @@ def edits(dev: bool):
              "        if (!bpmInfoView || !loaded) return null\n"
              "        if (scAnalyzed && scAnalyzed.translator && scAnalyzed.translator.state\n"
              "            && scBpm && scBpm.translator && scBpm.translator.unnormalized > 0)\n"
-             '            return scBpm.translator.unnormalized.toFixed(2).split(".")\n'
+             '            return dec === 1 ? null : scBpm.translator.unnormalized.toFixed(2).split(".")\n'
              "        const orig = scOrigBpm && scOrigBpm.translator ? scOrigBpm.translator.unnormalized : 0\n"
              "        const cur = scBpm && scBpm.translator ? scBpm.translator.unnormalized : 0\n"
              '        const pitch = scDeckData && typeof scDeckData.speedState === "number"\n'
@@ -6607,18 +6625,22 @@ def edits(dev: bool):
              '        const meta = metaRaw ? (parseFloat(metaRaw.replace(",", ".")) || 0) : 0\n'
              '        const textRaw = bpmInfoView.bpmText && bpmInfoView.bpmText !== "-" ? (bpmInfoView.bpmText + (bpmInfoView.bpmFractionalText || "")).trim() : ""\n'
              '        const textVal = textRaw ? (parseFloat(textRaw.replace(",", ".")) || 0) : 0\n'
-             "        if (orig > 0) {\n"
-             "            const live = cur > 0 && Math.abs(cur - orig) >= 0.001 ? cur : orig * (1 + pitch / 100)\n"
-             '            return Math.max(0, live).toFixed(2).split(".")\n'
-             "        }\n"
              "        const metaTol = !/[.,]/.test(metaRaw) ? 0.5001 : (/^[+-]?\\d+[.,]\\d$/.test(metaRaw) ? 0.0501 : 0.001)\n"
+             "        const synced = orig > 0\n"
+             "            ? (cur > 0 && Math.abs(cur - orig) >= 0.001)\n"
+             "            : (cur > 0 && meta > 0 && Math.abs(cur - meta) > metaTol)\n"
+             "        if (dec === 1 && pitch === 0 && !synced) return null\n"
+             "        if (orig > 0) {\n"
+             "            const live = synced ? cur : orig * (1 + pitch / 100)\n"
+             '            return Math.max(0, live).toFixed(dec).split(".")\n'
+             "        }\n"
              "        if (cur > 0 && meta > 0) {\n"
-             "            const live = Math.abs(cur - meta) <= metaTol ? cur * (1 + pitch / 100) : cur\n"
-             '            return Math.max(0, live).toFixed(2).split(".")\n'
+             "            const live = synced ? cur : cur * (1 + pitch / 100)\n"
+             '            return Math.max(0, live).toFixed(dec).split(".")\n'
              "        }\n"
              "        const base = (cur > 0 ? cur : 0) || (meta > 0 ? meta : 0) || (textVal > 0 ? textVal : 0)\n"
              "        if (base <= 0) return null\n"
-             '        return Math.max(0, base * (1 + pitch / 100)).toFixed(2).split(".")\n'
+             '        return Math.max(0, base * (1 + pitch / 100)).toFixed(dec).split(".")\n'
              "    }\n"),
             ("                text: bpmInfoView && bpmInfoView.bpmText\n",
              "                text: bpmInfo.scBpm2 ? bpmInfo.scBpm2[0] : bpmInfoView && bpmInfoView.bpmText\n"),
