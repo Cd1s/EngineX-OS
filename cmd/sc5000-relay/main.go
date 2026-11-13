@@ -286,7 +286,7 @@ func (s *server) handleSessionPoll(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, s.sessions.poll(token, s.cfg.get().SpotifyClientID, trusted))
 }
 
-const audioGoneMessage = "audio download runs directly on SC5000; relay-host is credential relay only"
+const audioGoneMessage = "audio download runs directly on SC5000; this relay only transfers credentials"
 
 func audioGone(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusGone, map[string]string{"error": audioGoneMessage})

@@ -6,6 +6,7 @@ Run only after PM has released the performance-test reservation.
 """
 
 import argparse
+import os
 import re
 import shlex
 import subprocess
@@ -21,6 +22,9 @@ def main():
     args = parser.parse_args()
     if not 1 <= args.repeat <= 5 or not 0 <= args.observe_seconds <= 35:
         parser.error("repeat must be 1..5; observe-seconds must be 0..35")
+    host = os.environ.get("BUILD_HOST")
+    if not host:
+        parser.error("set BUILD_HOST to the ssm alias of the build host that runs `deck`")
     if args.observe_seconds:
         # No names or file contents are printed. Aggregates can contain unrelated
         # playback; isolate the deck and record the LOAD/ready times separately.
@@ -66,7 +70,7 @@ done
     remote = "deck " + args.deck + " " + shlex.quote("sh -c " + shlex.quote(script))
     try:
         result = subprocess.run(
-            ["sshctl", "run", "the build host", "--no-stdin",
+            ["sshctl", "run", host, "--no-stdin",
              "--argv", "sh", "-c", remote],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False,
             timeout=60 * 60,

@@ -1,5 +1,5 @@
 #!/bin/bash
-# the build host, native armhf, isolated official SCLIVE4 rootfs; never connects to a deck.
+# Build host, native armhf, isolated official SCLIVE4 rootfs; never connects to a deck.
 set -euo pipefail
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 W=$(realpath -m "${1:?new private sandbox directory required}")

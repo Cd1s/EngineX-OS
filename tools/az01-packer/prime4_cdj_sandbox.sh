@@ -1,5 +1,5 @@
 #!/bin/bash
-# the build host only. Private JC11 rootfs, native armhf; no hardware or shared lab writes.
+# Build host only. Private JC11 rootfs, native armhf; no hardware or shared lab writes.
 set -euo pipefail
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 W=$REPO/out/prime4-cdj-sandbox

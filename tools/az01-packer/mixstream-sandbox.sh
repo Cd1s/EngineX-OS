@@ -1,14 +1,14 @@
 #!/bin/bash
 # Native armhf Engine on the build host, private copies of the actual NH08 / NH10 rootfs.
 # Run after tools/ui-mod/build.sh. No qemu, host services or deck connections.
-# bash tools/az01-packer/mixstream-sandbox.sh /root/workspace/sc5000-m1-20261109
+# bash tools/az01-packer/mixstream-sandbox.sh <new-private-dir>
 # Optional gen-2 boot: X166_BOARDS="NH08 NH10" bash tools/az01-packer/mixstream-sandbox.sh <new-dir>
 set -euo pipefail
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 W=$(realpath -m "${1:?private sandbox directory required}")
 LAB=/root/build/sc5000-lab
 if [ "${2:-}" != --inner ]; then
-    [ "$(uname -m)" = aarch64 ] || { echo 'the build host native ARM host required' >&2; exit 1; }
+    [ "$(uname -m)" = aarch64 ] || { echo 'native ARM build host (aarch64) required' >&2; exit 1; }
     [ ! -e "$W" ] || { echo "refusing existing sandbox $W" >&2; exit 1; }
     mkdir -p "$W"
     python3 "$REPO/tools/az01-packer/az01_packer.py" unpack "$LAB/fw-5.3.0/MIXSTREAMPRO-5.3.0-Update.img" --output "$W/NH08-image" > "$W/unpack.log"
