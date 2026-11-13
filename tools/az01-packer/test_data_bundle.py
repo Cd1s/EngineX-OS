@@ -945,6 +945,29 @@ exec REAL "$@"
         self.assertEqual(calls.read_text().splitlines()[:1], ['leave recover'])
         self.host_commands.write_text('')  # the boot run's systemctl calls went to the safe-bin stand-in
 
+    def test_234_a_failed_recovery_stops_the_boot_run_before_activation(self):
+        """#234 review round 3: when putting back an interrupted downgrade fails, the boot run stops
+        there and says why: no migration, no Engine drop-in, no unit started. The deck keeps the
+        generation it has and the journal stays for the next boot."""
+        src = self.extract(self.build())
+        dest = self.tmp / 'recover-fails' / 'enginex'
+        (dest / 'bundle/bin').mkdir(parents=True)
+        suite = dest / 'bundle/bin/enginex-suite'
+        suite.write_text('#!/bin/sh\necho "leave: recover: input/output error" >&2\nexit 17\n')
+        suite.chmod(0o755)
+        run_dir = self.tmp / 'run-recover-fails'
+        ba = dest / 'bundle/boot-activate.sh'
+        ba.write_text((src / 'boot-activate.sh').read_text().replace('/run/', str(run_dir) + '/'))
+        env = dict(self.env, ENGINEX_CUSTOM=str(dest), ENGINEX_LEAVE_ROOT=str(self.tmp / 'recover-fails'),
+                   ENGINEX_PID1_COMM=str(self.pid1_systemd()), ENGINEX_CONFIG_DIR=str(self.tmp / 'recover-fails/.config'),
+                   ENGINEX_TIMESTAMP_FILE=str(self.tmp / 'no-ts'), ENGINEX_PRODUCT_CODE_FILE=str(self.tmp / 'no-product-code'))
+        res = subprocess.run(['sh', str(ba)], env=env, capture_output=True, text=True)
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn('input/output error', res.stderr)
+        self.assertFalse((run_dir / 'systemd/system/engine.service.d/99-enginex.conf').exists())
+        self.assertFalse(run_dir.exists() and any(run_dir.rglob('*.service')))
+        self.assertEqual(self.host_commands.read_text(), '')
+
     def test_234_leave_step_removes_only_this_releases_units(self):
         """#234: the leave step before an older release is applied removes this release's enginex units,
         its 99-enginex.conf drop-ins, the bound Engine script and the suite cache, nothing else, and
