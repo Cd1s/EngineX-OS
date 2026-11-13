@@ -566,7 +566,7 @@ class UiModSourceTest(unittest.TestCase):
         self.assertNotIn("JOG_TILE", SRC)
         self.assertIn("WAVE_TILE", SRC)  # Control Center Waveform Style tile restored
         self.assertNotIn("WaveformStyle { }", bp.VIEW_ENTRIES)  # View preset does not duplicate Display -> WaveformStyle
-        self.assertNotIn("DisplayTabContent.qml", SRC)  # stock Preferences -> Display WaveformStyle {} stays untouched
+        self.assertIn("BPM Decimals", bp.DISPLAY_ENTRIES)  # Preferences -> Display adds BPM Decimals while keeping stock WaveformStyle {}
         self.assertIn('root.scWave = seg.waveId; root.scCall("waveform=" + seg.waveId)', bp.WAVE_TILE)
         rows = [l.split("\t") for l in (REPO / "tools/ui-mod/i18n.tsv").read_text(encoding="utf-8").splitlines() if l and not l.startswith("#")]
         keys = [r[0] for r in rows]
@@ -689,10 +689,13 @@ assert.strictEqual(vfx.enabled, false);
                 self.assertEqual(r1.returncode, 0, r1.stderr)
                 em_dev = (dev_out / "en/Skins/Embedded/EmbeddedMain.qml").read_text()
                 self.assertIn('readonly property string scPackBuildTag: "sbx 085a437"', em_dev)
-                # Stock Preferences -> Display DisplayTabContent.qml stays un-overridden;
+                # Preferences -> Display keeps stock WaveformStyle {} untouched and adds BPM Decimals;
                 # ControlCenter TransitionFxEnable.qml keeps stock active condition (only i18n text).
                 disp = (dev_out / "en/Skins/Embedded/Views/ControlCenter/Tabs/Preferences/DisplayTabContent.qml")
-                self.assertFalse(disp.exists())
+                self.assertTrue(disp.exists())
+                disp_txt = disp.read_text()
+                self.assertIn("WaveformStyle {}", disp_txt)
+                self.assertIn('"BPM Decimals"', disp_txt)
                 tfe = (dev_out / "en/Skins/Embedded/Views/ControlCenter/Tabs/ControlCenter/Entries/TransitionFxEnable.qml")
                 self.assertTrue(tfe.exists())
                 tfe_txt = tfe.read_text()
@@ -2843,6 +2846,201 @@ assert.equal(value().toFixed(2),'130.18');
             self.assertIn("Bpm.qml tests passed", output2)
 
     @unittest.skipUnless(shutil.which("node"), "node needed for the display-state behavioral checks")
+    def test_bpm_decimals_display_setting_and_formatting(self):
+        # Issue #229: Settings -> Display -> BPM Decimals ("1" / "2", default "2") in all 3 languages,
+        # persisted via /v1/sc5000/ui + settings.conf, driving ONLY the places that show 2 decimals on
+        # 5.3.0.4 (BpmInfo.qml / scBpm2 and the shadow / Paired Player header in DeckTrackData &
+        # DeckPerformanceData), keeping stock-default Bpm instances unchanged on both 5.3.0 and 5.0.4,
+        # and matching stock formatting (including metadata BPM "128" -> "128") when set to "1".
+        qrc530 = LAB / "5.3.0" / "qrc"
+        qrc504 = LAB / "5.0.4" / "qrc"
+        if not qrc530.is_dir():
+            self.skipTest(f"{qrc530} not found")
+        with tempfile.TemporaryDirectory(prefix="ui-bpm-decimals-") as tmp:
+            packs = Path(tmp) / "packs530"
+            res = subprocess.run(["python3", str(BUILD_PACKS), "--qrc", str(qrc530), "--out", str(packs)],
+                                 capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0, res.stderr)
+
+            expected_labels = {
+                "en": "BPM Decimals",
+                "zh-Hans": "BPM 小数位数",
+                "zh-Hant": "BPM 小數位數",
+            }
+            composite = "Skins/EngineOS/UI/CompositeControls/"
+            for lang, label in expected_labels.items():
+                disp_path = packs / lang / "Skins/Embedded/Views/ControlCenter/Tabs/Preferences/DisplayTabContent.qml"
+                self.assertTrue(disp_path.is_file(), lang)
+                disp = disp_path.read_text(encoding="utf-8")
+                self.assertIn("TimeFormat {}", disp)
+                self.assertIn("TrackTitle {}", disp)
+                self.assertIn("WaveformStyle {}", disp)
+                self.assertIn(f'Math.scI18n.t("{label}") : "{label}"', disp)
+                self.assertIn('values: ["1", "2"]', disp)
+                self.assertIn('root.scCall("bpmDecimals=" + values[index])', disp)
+                # Stock-default Bpm instances on 5.3.0 stay unchanged (decimalPlaces: 1, DeckInfo untouched)
+                bpm_lang = (packs / lang / "Skins/Embedded/Items/Bpm.qml").read_text(encoding="utf-8")
+                self.assertIn("property int decimalPlaces: 1\n", bpm_lang)
+                self.assertNotIn("scBpmDecimals", bpm_lang)
+                self.assertFalse((packs / lang / "Skins/Embedded/Views/DeckInfo/DeckInfo.qml").exists())
+                # Shadow / Paired Player Bpm instances in DeckTrackData & DeckPerformanceData follow scBpmDecimals
+                for rel in (
+                    "DeckTrackData/GroupedMiniDeckTrackDataContent.qml",
+                    "DeckTrackData/GroupedMainDeckTrackDataContent.qml",
+                    "DeckTrackData/SplitMiniDeckTrackDataContent.qml",
+                    "DeckTrackData/SplitMainDeckTrackDataContent.qml",
+                    "DeckPerformanceData/DeckPerformanceDataContent.qml",
+                    "DeckPerformanceData/PortraitDeckPerformanceDataContent.qml",
+                ):
+                    txt = (packs / lang / composite / rel).read_text(encoding="utf-8")
+                    self.assertIn('decimalPlaces: typeof root !== "undefined" && root && root.scBpmDecimals === 1 ? 1 : 2', txt, rel)
+
+            if qrc504.is_dir():
+                packs504 = Path(tmp) / "packs504"
+                res504 = subprocess.run(["python3", str(BUILD_PACKS), "--qrc", str(qrc504), "--out", str(packs504)],
+                                        capture_output=True, text=True)
+                self.assertEqual(res504.returncode, 0, res504.stderr)
+                for lang in expected_labels:
+                    # No 5.0.4 pack diff in Items/Bpm.qml and no dead DisplayTabContent row on 5.0.4
+                    self.assertFalse((packs504 / lang / "Skins/EmbeddedCommon/Items/Bpm.qml").exists(), lang)
+                    self.assertFalse(
+                        (packs504 / lang / "Skins/EmbeddedCommon/Views/ControlCenter/Tabs/Preferences/TabContents/DisplayTabContent.qml").exists(),
+                        lang,
+                    )
+
+            info = (packs / "en" / composite / "Deck/DeckItem/BpmInfo.qml").read_text(encoding="utf-8")
+            bpm_qml = (packs / "en/Skins/Embedded/Items/Bpm.qml").read_text(encoding="utf-8")
+            main_qml = (packs / "en/Skins/Embedded/EmbeddedMain.qml").read_text(encoding="utf-8")
+            self.assertIn("property int scBpmDecimals: 2", main_qml)
+            self.assertIn('decimalPlaces: typeof root !== "undefined" && root && root.scBpmDecimals === 1 ? 1 : 2', bp.SHADOW_LAYER)
+
+            m_info = re.search(r"readonly property var scBpm2: \{(.*?)\n    \}", info, re.S)
+            m_shadow_dec = re.search(r"id: scShadowBpm.*?decimalPlaces: ([^\n]+)", bp.SHADOW_LAYER, re.S)
+            m_bpm_dec = re.search(r"property int decimalPlaces: ([^\n]+)", bpm_qml)
+            m_split = re.search(r"readonly property var currentBPMSplit: \{(.*?)\n    \}", bpm_qml, re.S)
+            m_parse = re.search(r"(function scParseSettingsConf\(text\) \{.*?\n\t\})", main_qml, re.S)
+            self.assertIsNotNone(m_info)
+            self.assertIsNotNone(m_shadow_dec)
+            self.assertIsNotNone(m_bpm_dec)
+            self.assertIsNotNone(m_split)
+            self.assertIsNotNone(m_parse)
+
+            js = r"""
+            const assert = require('assert');
+            const root = { scBpmDecimals: 2, scDualColumn: false, scTracklistWaveform: true, scCueCountdown: true,
+                           scSyncGuardPct: 0, scSwapLoopOrder: false, scLedBrightness: 100, scUIScale: 100,
+                           scStemsEqMode: false, scBeatJumpPads: false, scPioneerFx: "off" };
+            let scCueCountdown = true, scBpmDecimals = 2, scTracklistWaveform = true;
+            function scFxMsInteger(v) { return 500; }
+            function scFxMsApply() {}
+            """ + m_parse.group(1) + r"""
+            scParseSettingsConf("bpm_decimals=1\n");
+            assert.strictEqual(root.scBpmDecimals, 1);
+            scParseSettingsConf("");
+            root.scBpmDecimals = scBpmDecimals;
+            assert.strictEqual(root.scBpmDecimals, 2);
+
+            // Mirror stock C++ BpmInfoView (1-decimal when analyzed; metaDataBpm.split('.') when unanalyzed)
+            function stockBpmInfoView(isAnalyzed, currentBpm, metaBpmStr, isLoaded = true) {
+                if (!isLoaded) return { bpmText: "-", bpmFractionalText: "" };
+                if (isAnalyzed && currentBpm > 0) {
+                    const parts = currentBpm.toFixed(1).split(".");
+                    return { bpmText: parts[0], bpmFractionalText: "." + parts[1] };
+                }
+                if (metaBpmStr) {
+                    const parts = metaBpmStr.split(".");
+                    return { bpmText: parts[0], bpmFractionalText: parts.length > 1 ? "." + parts[1] : "" };
+                }
+                return { bpmText: "-", bpmFractionalText: "" };
+            }
+
+            function renderBpmInfo(decimals, isAnalyzed, currentBpm, pitchArg, metaBpmStr, opts = {}) {
+                const root = decimals === undefined ? undefined : { scBpmDecimals: decimals };
+                const isLoaded = opts.loaded !== undefined ? opts.loaded : true;
+                const origBpm = opts.origBpm !== undefined ? opts.origBpm : 0;
+                const bpmInfoView = opts.view || stockBpmInfoView(isAnalyzed, currentBpm, metaBpmStr, isLoaded);
+                const scDeckData = { songLoaded: isLoaded, speedState: pitchArg };
+                const scLoaded = { translator: { state: isLoaded } };
+                const scOrigBpm = { translator: { unnormalized: origBpm } };
+                const scBpm = { translator: { unnormalized: currentBpm } };
+                const scAnalyzed = { translator: { state: isAnalyzed } };
+                const scSpeed = { translator: { string: (pitchArg >= 0 ? "+" : "") + pitchArg.toFixed(1) + "%" } };
+                const scMetaBpm = { translator: { string: metaBpmStr } };
+                const scBpm2 = (() => { """ + m_info.group(1) + r""" })();
+                const integral = scBpm2 ? scBpm2[0] : (bpmInfoView && bpmInfoView.bpmText);
+                const frac = scBpm2 ? "." + scBpm2[1] : (bpmInfoView && bpmInfoView.bpmFractionalText);
+                return { scBpm2, text: (integral || "") + (frac || "") };
+            }
+
+            function evalStockDefaultBpm(decimals, songAnalyzed, bpmValue) {
+                const root = decimals === undefined ? undefined : { scBpmDecimals: decimals };
+                const decimalPlaces = (""" + m_bpm_dec.group(1) + r""");
+                const bpm = { decimalPlaces };
+                const externalBpm = false;
+                const scPitch = 0;
+                const scOrigBpm = { translator: { unnormalized: bpmValue } };
+                const metaDataBpm = "";
+                const hasMetaDataBpm = false;
+                const split = (() => { """ + m_split.group(1) + r""" })();
+                return { decimalPlaces, split };
+            }
+
+            function evalShadowBpm(decimals, bpmValue) {
+                const root = decimals === undefined ? undefined : { scBpmDecimals: decimals };
+                const decimalPlaces = (""" + m_shadow_dec.group(1) + r""");
+                const bpm = { decimalPlaces };
+                const songAnalyzed = bpmValue > 0;
+                const externalBpm = true;
+                const scPitch = 0;
+                const scOrigBpm = { translator: { unnormalized: 0 } };
+                const metaDataBpm = "";
+                const hasMetaDataBpm = false;
+                const split = (() => { """ + m_split.group(1) + r""" })();
+                return { decimalPlaces, text: split.length === 2 ? split[0] + "." + split[1].padEnd(decimalPlaces, "0") : "-" };
+            }
+
+            // Stock-default Bpm instances keep decimalPlaces: 1 regardless of scBpmDecimals (1 or 2)
+            assert.deepStrictEqual(evalStockDefaultBpm(2, true, 128.36), { decimalPlaces: 1, split: ["128", "4"] });
+            assert.deepStrictEqual(evalStockDefaultBpm(1, true, 128.36), { decimalPlaces: 1, split: ["128", "4"] });
+
+            // "2" (and default) keeps the current 5.3.0.4 2-decimal look across header and shadow
+            assert.strictEqual(renderBpmInfo(undefined, true, 128.0, 0, "128.0", { origBpm: 128.0 }).text, "128.00");
+            assert.strictEqual(renderBpmInfo(2, true, 128.36, 0, "128.4", { origBpm: 128.36 }).text, "128.36");
+            assert.strictEqual(renderBpmInfo(2, false, 128.0, 0, "128", { origBpm: 128.0 }).text, "128.00");
+            assert.strictEqual(renderBpmInfo(2, false, 128.36, 0, "128.4", { origBpm: 128.36 }).text, "128.36");
+            assert.strictEqual(renderBpmInfo(2, false, 128.36, 1.6, "128.4", { origBpm: 128.36 }).text, "130.41");
+            assert.deepStrictEqual(evalShadowBpm(2, 130.17), { decimalPlaces: 2, text: "130.17" });
+
+            // "1" equals stock exactly, including the metadata BPM path (integer "128" stays "128", not "128.0";
+            // decimal "125.0", "128.4", and "128.36" match stock metaDataBpm.split('.'))
+            assert.strictEqual(renderBpmInfo(1, false, 0, 0, "", { loaded: false }).text, "-");
+            assert.strictEqual(renderBpmInfo(1, false, 0, 0, "", { loaded: true }).text, "-");
+            assert.deepStrictEqual(renderBpmInfo(1, false, 128.0, 0, "128", { origBpm: 128.0 }), { scBpm2: null, text: "128" });
+            assert.deepStrictEqual(renderBpmInfo(1, false, 0, 0, "128"), { scBpm2: null, text: "128" });
+            assert.deepStrictEqual(renderBpmInfo(1, false, 125.0, 0, "125.0", { origBpm: 125.0 }), { scBpm2: null, text: "125.0" });
+            assert.deepStrictEqual(renderBpmInfo(1, false, 128.36, 0, "128.4", { origBpm: 128.36 }), { scBpm2: null, text: "128.4" });
+            assert.deepStrictEqual(renderBpmInfo(1, false, 128.36, 0, "128.36", { origBpm: 128.36 }), { scBpm2: null, text: "128.36" });
+            assert.deepStrictEqual(renderBpmInfo(1, true, 128.0, 0, "128", { origBpm: 128.0 }), { scBpm2: null, text: "128.0" });
+            assert.deepStrictEqual(renderBpmInfo(1, true, 128.36, 0, "128.4", { origBpm: 128.36 }), { scBpm2: null, text: "128.4" });
+
+            // #231 live pitch while unanalyzed also respects "1" when pitched or synced
+            assert.strictEqual(renderBpmInfo(1, false, 128.0, 1.5625, "128", { origBpm: 128.0 }).text, "130.0");
+            assert.strictEqual(renderBpmInfo(1, false, 128.36, 1.6, "128.4", { origBpm: 128.36 }).text, "130.4");
+            assert.strictEqual(
+                renderBpmInfo(1, false, 128.36, 1.6, "128.4", { origBpm: 128.36 }).text,
+                renderBpmInfo(1, true, 128.36 * 1.016, 1.6, "128.4", { origBpm: 128.36 }).text
+            );
+            assert.strictEqual(renderBpmInfo(1, false, 130.0, 0, "125.0", { origBpm: 125.0 }).text, "130.0");
+
+            // Shadow / Paired Player header follows "1" -> 1 decimal (and "-" when empty)
+            assert.deepStrictEqual(evalShadowBpm(1, 130.17), { decimalPlaces: 1, text: "130.2" });
+            assert.deepStrictEqual(evalShadowBpm(1, 0), { decimalPlaces: 1, text: "-" });
+            console.log("BPM decimals test passed");
+            """
+            out = subprocess.check_output(["node", "-e", js], text=True)
+            self.assertIn("BPM decimals test passed", out)
+
+    @unittest.skipUnless(shutil.which("node"), "node needed for the display-state behavioral checks")
     def test_sender_posts_exact_tempo_changes_at_the_same_rounded_pitch(self):
         self.js(r"""
 let current=130.17,bodies=[],pings=0;
@@ -4672,6 +4870,8 @@ class I18nTranslateRegressionTest(unittest.TestCase):
         "English": "self-named English language option",
         "3-Band": "waveform style name; the maintainer keeps it English (never 三频段)",
         "Tri-Band": "waveform style name; the maintainer keeps it English (never 三频段)",
+        "1": "numeric BPM decimal option",
+        "2": "numeric BPM decimal option",
     }
 
     DISPLAY_TAB_STRINGS = (
@@ -4686,6 +4886,7 @@ class I18nTranslateRegressionTest(unittest.TestCase):
         "RGB Waveform Creation",
         "RGB Waveforms and Track Overviews will be built when loading to deck.",
         "Track Overview Style", "Half", "Full",
+        "BPM Decimals", "1", "2",
     )
 
     MIXER_TAB_STRINGS = (

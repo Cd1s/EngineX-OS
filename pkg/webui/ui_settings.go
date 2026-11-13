@@ -190,6 +190,7 @@ type uiSettings struct {
 	BrowserDualColumn bool   `json:"browserDualColumn"`
 	TracklistWaveform bool   `json:"tracklistWaveform"`
 	CueCountdown      bool   `json:"cueCountdown"`
+	BpmDecimals       int    `json:"bpmDecimals"`
 	SyncGuardPct      int    `json:"syncGuardPct"`
 	SwapLoopOrder     bool   `json:"swapLoopOrder"`
 	LedBrightness     int    `json:"ledBrightness"`
@@ -307,7 +308,7 @@ func (s *Server) loadUI() uiSettings {
 	known, saved, shadowModeSet := uiServicesBeforeKnown, false, false
 	v := uiSettings{
 		Language: "en", Waveform: "denon", Sources: slices.Clone(uiServices), Scope: "deezer", Quality: qualityFLAC, NeteaseMode: neteaseOfficial, GitHubRepo: defaultGitHubRepo, FourDeckWaveform: false, FourDeckRole: "auto", ShadowMode: "auto", ProlinkWaveform: true,
-		TracklistWaveform: true, CueCountdown: true,
+		TracklistWaveform: true, CueCountdown: true, BpmDecimals: 2,
 		StreamSortRole: "default", StreamSortOrder: "asc", LedBrightness: 100, PioneerFx: "off", UIScale: 100,
 		FxTimeMode: "beats", FxTimeMs: 500,
 	}
@@ -412,6 +413,12 @@ func (s *Server) loadUI() uiSettings {
 			}
 		case "cue_countdown":
 			v.CueCountdown = val != "0" && !strings.EqualFold(val, "false")
+		case "bpm_decimals":
+			if val == "1" {
+				v.BpmDecimals = 1
+			} else if val == "2" {
+				v.BpmDecimals = 2
+			}
 		case "browser_dual_column":
 			v.BrowserDualColumn = val == "1" || strings.EqualFold(val, "true")
 		case "tracklist_waveform":
@@ -560,6 +567,9 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	}
 	if !v.CueCountdown {
 		text += "cue_countdown=0\n"
+	}
+	if v.BpmDecimals == 1 {
+		text += "bpm_decimals=1\n"
 	}
 	if v.BrowserDualColumn {
 		text += "browser_dual_column=1\n"
@@ -859,6 +869,19 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		v.CueCountdown = b
+	}
+	if q.Has("bpmDecimals") || q.Has("bpm_decimals") {
+		param := q.Get("bpmDecimals")
+		if !q.Has("bpmDecimals") {
+			param = q.Get("bpm_decimals")
+		}
+		n, err := strconv.Atoi(strings.TrimSpace(param))
+		if err != nil || (n != 1 && n != 2) {
+			s.uiMu.Unlock()
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+		v.BpmDecimals = n
 	}
 	if q.Has("browserDualColumn") {
 		b, ok := parseBoolParam(q.Get("browserDualColumn"))
