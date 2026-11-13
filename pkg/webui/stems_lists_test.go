@@ -94,4 +94,30 @@ func TestStemsSourceRecordsUnderTrackProviderNotCurrentBrowserScope(t *testing.T
 	if bad := s.stemmed("deezer"); len(bad) != 0 {
 		t.Fatalf("deezer Stems list polluted by spotify track: %+v", bad)
 	}
+
+	// Session provider takes precedence when an authenticated session owns the trackRef.
+	nePath := filepath.Join(dlDir, "spotify-sp456.ogg")
+	if err := os.WriteFile(nePath, []byte("OggS-fake-vorbis"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	s.sessions["ne-sess"] = &Session{ID: "ne-sess", Provider: "netease", Ready: true}
+	s.mu.Unlock()
+	neTid := s.tidal.addTrack(trackRef{
+		track:   providers.Track{ID: "sp456", Title: "NetEase Session Song", Artist: "DJ", Provider: "spotify"},
+		session: "ne-sess",
+	})
+	req2 := httptest.NewRequest(http.MethodGet, "/v1/sc5000/stems/source?id="+strconv.FormatInt(neTid, 10), nil)
+	req2.RemoteAddr = "127.0.0.1:41000"
+	w2 := httptest.NewRecorder()
+	s.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("session stemsSource status=%d body=%s", w2.Code, w2.Body.String())
+	}
+	if got := s.stemmed("netease"); len(got) != 1 || got[0].Track.ID != "sp456" {
+		t.Fatalf("expected session track in netease Stems list, got %+v (deezer=%+v)", got, s.stemmed("deezer"))
+	}
+	if bad := s.stemmed("deezer"); len(bad) != 0 {
+		t.Fatalf("deezer Stems list polluted by netease session track: %+v", bad)
+	}
 }
