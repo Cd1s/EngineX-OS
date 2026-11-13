@@ -370,13 +370,10 @@ func (s *Spotify) Playlists(ctx context.Context) ([]Playlist, error) {
 		return linked, nil
 	}
 	all, err := s.apiPlaylists(ctx)
-	if s.nativeLibraryFallback(err) {
+	if len(all) == 0 && s.nativeLibraryFallback(err) {
 		all, err = s.nativePlaylists(ctx)
 	}
-	if err != nil {
-		return nil, err
-	}
-	return append(linked, all...), nil
+	return append(linked, all...), err
 }
 
 func (s *Spotify) apiPlaylists(ctx context.Context) ([]Playlist, error) {
@@ -418,7 +415,7 @@ func (s *Spotify) apiPlaylists(ctx context.Context) ([]Playlist, error) {
 	if err != nil {
 		cancelLiked()
 		<-liked
-		return nil, err
+		return all, err
 	}
 	if p, ok := <-liked; ok {
 		all = append([]Playlist{p}, all...)
@@ -461,10 +458,7 @@ func (s *Spotify) trackPages(ctx context.Context, path string, size int, fallbac
 		}
 		return out, err
 	})
-	if err != nil {
-		return nil, err
-	}
-	return all, nil
+	return all, err
 }
 func (s *Spotify) likedTracks(ctx context.Context) ([]Track, error) {
 	return s.trackPages(ctx, "/me/tracks", 50, false)
@@ -480,7 +474,7 @@ func (s *Spotify) Tracks(ctx context.Context, id string) ([]Track, error) {
 	} else {
 		tracks, err = s.trackPages(ctx, "/playlists/"+url.PathEscape(id)+"/items", 100, true)
 	}
-	if s.nativeLibraryFallback(err) {
+	if len(tracks) == 0 && s.nativeLibraryFallback(err) {
 		return s.nativeTracks(ctx, id)
 	}
 	return tracks, err
