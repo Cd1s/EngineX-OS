@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -63,8 +64,11 @@ func (d Deck) data(p ...string) string {
 	return filepath.Join(append([]string{d.Root, "/data"}, p...)...)
 }
 
+// lstat looks a path up without following it; tests make it fail.
+var lstat = os.Lstat
+
 func realDir(p string) bool {
-	st, err := os.Lstat(p)
+	st, err := lstat(p)
 	return err == nil && st.IsDir()
 }
 
@@ -126,15 +130,20 @@ func syncDir(p string) error {
 	return syncPath(p)
 }
 
-// realDirs keeps the paths that are real directories (a journal half removed has no stage).
-func realDirs(paths ...string) []string {
-	var out []string
+// syncExisting syncs the paths that are there: a journal half removed has no stage. Only a path
+// that is not there is left out; a lookup that fails otherwise is an error, as a failed sync is.
+func syncExisting(paths ...string) error {
 	for _, p := range paths {
-		if realDir(p) {
-			out = append(out, p)
+		if _, err := lstat(p); errors.Is(err, fs.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return err
+		}
+		if err := syncPath(p); err != nil {
+			return err
 		}
 	}
-	return out
+	return nil
 }
 
 // syncDirs makes the renames and exchanges just done in these directories durable, before the
@@ -455,19 +464,17 @@ func (d Deck) recover() error {
 	id := readLine(filepath.Join(journal, "id"))
 	stage := filepath.Join(journal, "stage/root")
 	live, err := d.live()
-	if id == "" || err != nil {
-		// Not prepared yet: nothing was changed.
-		if err == nil {
-			d.finish(live)
-		} else {
-			os.RemoveAll(journal)
-		}
+	if err != nil {
+		return err // a data directory not found (or not readable) removes nothing
+	}
+	if id == "" {
+		d.finish(live) // not prepared yet: nothing was changed
 		return nil
 	}
 	if !hasMarker(filepath.Join(stage, "bundle"), id) {
 		// Committed: the older bundle is live. Its exchange is made durable first, again if that
 		// sync failed before, and only then go the journal and this release's parked bundle.
-		if err := syncDirs(realDirs(live, stage)...); err != nil {
+		if err := syncExisting(live, stage); err != nil {
 			return err
 		}
 		d.finish(live)
@@ -502,7 +509,7 @@ func (d Deck) recover() error {
 	}
 	// The barriers again, whether or not this run swapped anything: a retry after a failed sync
 	// finds the parts already back and must not skip their sync before cleanup.
-	if err := syncDirs(realDirs(filepath.Join(live, "ui"), filepath.Join(stage, "ui"))...); err != nil {
+	if err := syncExisting(filepath.Join(live, "ui"), filepath.Join(stage, "ui")); err != nil {
 		return err
 	}
 	enginex, link := d.data("enginex"), d.data("sc5000-custom")
