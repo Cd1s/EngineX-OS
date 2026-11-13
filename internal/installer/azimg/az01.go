@@ -596,12 +596,21 @@ func preflightXZStream(r io.ReaderAt, offset, size int64, limits Limits) error {
 		}
 	}
 
-	// Walk every block using the verified Index offsets so later blocks cannot bypass dictionary caps.
+	// The Index has a CRC, but an attacker can recompute it. Discover actual block
+	// boundaries from LZMA2 chunk headers before trusting any Index record. Otherwise
+	// a merged record can hide a later block's dictionary allocation from preflight.
+	type blockInfo struct {
+		headerSize, unpadded         int64
+		uncompressed                uint64
+		declaredComp, declaredUncomp uint64
+		flags                       byte
+	}
+	var blocks []blockInfo
+	var measuredUncompressed uint64
 	pos := int64(12)
-	for _, rec := range records {
-		paddedBlock := ((rec.unpadded + 3) / 4) * 4
-		if paddedBlock > indexStart-pos {
-			return fmt.Errorf("%w: XZ block extends past index start", ErrCorrupt)
+	for pos < indexStart {
+		if len(blocks) >= maxPreflightBlocks {
+			return fmt.Errorf("%w: XZ actual block count exceeds %d limit", ErrLimitExceeded, maxPreflightBlocks)
 		}
 		var b0 [1]byte
 		if _, err := io.ReadFull(io.NewSectionReader(r, offset+pos, 1), b0[:]); err != nil {
@@ -611,7 +620,7 @@ func preflightXZStream(r io.ReaderAt, offset, size int64, limits Limits) error {
 			return fmt.Errorf("%w: unexpected index indicator inside XZ block", ErrCorrupt)
 		}
 		bhLen := (int64(b0[0]) + 1) * 4
-		if bhLen < 8 || bhLen > 1024 || bhLen > rec.unpadded {
+		if bhLen < 8 || bhLen > 1024 || bhLen+checkLen >= indexStart-pos {
 			return fmt.Errorf("%w: invalid XZ block header length %d", ErrCorrupt, bhLen)
 		}
 		bh := make([]byte, bhLen)
@@ -626,15 +635,14 @@ func preflightXZStream(r io.ReaderAt, offset, size int64, limits Limits) error {
 			return fmt.Errorf("%w: reserved XZ block flags 0x%02x", ErrCorrupt, flags)
 		}
 		numFilters := int(flags&0x03) + 1
+		block := blockInfo{headerSize: bhLen, flags: flags}
 		p := 2
 		if flags&0x40 != 0 {
 			compSize, n := readUvarintSlice(bh[p : bhLen-4])
 			if n <= 0 {
 				return fmt.Errorf("%w: invalid XZ block compressed size", ErrCorrupt)
 			}
-			if compSize == 0 || compSize > uint64(rec.unpadded-bhLen-checkLen) || uint64(bhLen)+compSize+uint64(checkLen) != uint64(rec.unpadded) {
-				return fmt.Errorf("%w: XZ block compressed size mismatch against index", ErrCorrupt)
-			}
+			block.declaredComp = compSize
 			p += n
 		}
 		if flags&0x80 != 0 {
@@ -645,9 +653,7 @@ func preflightXZStream(r io.ReaderAt, offset, size int64, limits Limits) error {
 			if v > uint64(limits.MaxRootfsSize) {
 				return fmt.Errorf("%w: XZ block uncompressed size %d exceeds %d limit", ErrLimitExceeded, v, limits.MaxRootfsSize)
 			}
-			if v != rec.uncompressed {
-				return fmt.Errorf("%w: XZ block uncompressed size mismatch against index", ErrCorrupt)
-			}
+			block.declaredUncomp = v
 			p += n
 		}
 		for i := 0; i < numFilters; i++ {
@@ -663,6 +669,11 @@ func preflightXZStream(r io.ReaderAt, offset, size int64, limits Limits) error {
 			p += n
 			props := bh[p : p+int(propLen)]
 			p += int(propLen)
+			// ulikunitz/xz supports only a single LZMA2 filter. Its chunk lengths
+			// describe the bytes on disk; no compressed payload is decoded here.
+			if numFilters != 1 || fid != 0x21 {
+				return fmt.Errorf("%w: unsupported XZ filter chain", ErrCorrupt)
+			}
 			if fid == 0x21 {
 				if len(props) != 1 || props[0] > 40 {
 					return fmt.Errorf("%w: invalid LZMA2 dictionary property", ErrCorrupt)
@@ -678,12 +689,112 @@ func preflightXZStream(r io.ReaderAt, offset, size int64, limits Limits) error {
 				}
 			}
 		}
-		pos += paddedBlock
+		for _, b := range bh[p : bhLen-4] {
+			if b != 0 {
+				return fmt.Errorf("%w: nonzero XZ block header padding", ErrCorrupt)
+			}
+		}
+		compSize, uncompSize, err := scanLZMA2Chunks(r, offset+pos+bhLen, indexStart-pos-bhLen-checkLen, uint64(limits.MaxRootfsSize)-measuredUncompressed)
+		if err != nil {
+			return err
+		}
+		block.uncompressed = uncompSize
+		block.unpadded = bhLen + compSize + checkLen
+		measuredUncompressed += uncompSize
+		padLen := (4 - block.unpadded%4) % 4
+		if block.unpadded+padLen > indexStart-pos {
+			return fmt.Errorf("%w: XZ block extends past index start", ErrCorrupt)
+		}
+		var padding [3]byte
+		if _, err := r.ReadAt(padding[:padLen], offset+pos+bhLen+compSize); err != nil {
+			return fmt.Errorf("%w: reading XZ block padding: %v", ErrCorrupt, err)
+		}
+		for _, b := range padding[:padLen] {
+			if b != 0 {
+				return fmt.Errorf("%w: nonzero XZ block padding", ErrCorrupt)
+			}
+		}
+		blocks = append(blocks, block)
+		pos += block.unpadded + padLen
+	}
+
+	// Cross-check optional header sizes and every measured block against the Index.
+	// Retain the aggregate span check: fewer Index records must not omit real blocks.
+	pos = 12
+	for i, rec := range records {
+		if i >= len(blocks) {
+			return fmt.Errorf("%w: XZ index contains more blocks than the stream", ErrCorrupt)
+		}
+		block := blocks[i]
+		bhLen := block.headerSize
+		if block.flags&0x40 != 0 {
+			compSize := block.declaredComp
+			if compSize == 0 || compSize > uint64(rec.unpadded-bhLen-checkLen) || uint64(bhLen)+compSize+uint64(checkLen) != uint64(rec.unpadded) {
+				return fmt.Errorf("%w: XZ block compressed size mismatch against index", ErrCorrupt)
+			}
+		}
+		if block.flags&0x80 != 0 {
+			v := block.declaredUncomp
+			if v != rec.uncompressed {
+				return fmt.Errorf("%w: XZ block uncompressed size mismatch against index", ErrCorrupt)
+			}
+		}
+		if block.unpadded != rec.unpadded || block.uncompressed != rec.uncompressed {
+			return fmt.Errorf("%w: XZ index does not match actual block sizes", ErrCorrupt)
+		}
+		pos += ((rec.unpadded + 3) / 4) * 4
 	}
 	if pos != indexStart {
 		return fmt.Errorf("%w: XZ block span (%d) does not match index start (%d)", ErrCorrupt, pos, indexStart)
 	}
 	return nil
+}
+
+// scanLZMA2Chunks walks to the end marker using only chunk headers. Payload lengths
+// are bounded before skipping them, so embedded zero bytes cannot masquerade as a
+// block end. Summed chunk output sizes also bound streams with a dishonest Index.
+func scanLZMA2Chunks(r io.ReaderAt, offset, size int64, outputBudget uint64) (compressed int64, uncompressed uint64, err error) {
+	var h [6]byte
+	for compressed < size {
+		if _, err := r.ReadAt(h[:1], offset+compressed); err != nil {
+			return 0, 0, fmt.Errorf("%w: reading LZMA2 control byte: %v", ErrCorrupt, err)
+		}
+		control := h[0]
+		if control == 0 {
+			return compressed + 1, uncompressed, nil
+		}
+		headerLen := int64(3)
+		if control >= 0x80 {
+			headerLen = 5
+			if control >= 0xc0 {
+				headerLen = 6
+			}
+		} else if control != 1 && control != 2 {
+			return 0, 0, fmt.Errorf("%w: invalid LZMA2 control byte 0x%02x", ErrCorrupt, control)
+		}
+		if headerLen > size-compressed {
+			return 0, 0, fmt.Errorf("%w: truncated LZMA2 chunk header", ErrCorrupt)
+		}
+		if _, err := r.ReadAt(h[1:headerLen], offset+compressed+1); err != nil {
+			return 0, 0, fmt.Errorf("%w: reading LZMA2 chunk header: %v", ErrCorrupt, err)
+		}
+		unpacked := uint64(binary.BigEndian.Uint16(h[1:3])) + 1
+		packed := int64(unpacked)
+		if control >= 0x80 {
+			unpacked += uint64(control&0x1f) << 16
+			packed = int64(binary.BigEndian.Uint16(h[3:5])) + 1
+		}
+		compressed += headerLen
+		if packed > size-compressed {
+			return 0, 0, fmt.Errorf("%w: LZMA2 chunk extends past block bounds", ErrCorrupt)
+		}
+		if unpacked > outputBudget-uncompressed {
+			return 0, 0, fmt.Errorf("%w: XZ chunk output exceeds rootfs size limit", ErrLimitExceeded)
+		}
+		uncompressed += unpacked
+		compressed += packed
+	}
+	return 0, 0, fmt.Errorf("%w: missing LZMA2 end marker", ErrCorrupt)
 }
 
 func readUvarintSlice(b []byte) (uint64, int) {

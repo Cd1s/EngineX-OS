@@ -17,6 +17,7 @@ import (
 	"go/token"
 	"hash/crc32"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -164,6 +165,10 @@ func xzUvarint(v uint64) []byte {
 // buildMultiBlockXZ builds a valid multi-block XZ stream (CRC32 check) with unsized block
 // headers (as xz -T1 writes them) and the given LZMA2 dictionary property byte per block.
 func buildMultiBlockXZ(dictProps []byte) []byte {
+	return buildMultiBlockXZWithFlags(dictProps, 0)
+}
+
+func buildMultiBlockXZWithFlags(dictProps []byte, firstFlags byte) []byte {
 	var b bytes.Buffer
 	b.Write([]byte{0xfd, '7', 'z', 'X', 'Z', 0})
 	flags := []byte{0x00, 0x01}
@@ -172,8 +177,23 @@ func buildMultiBlockXZ(dictProps []byte) []byte {
 	type rec struct{ unpadded, uncompressed uint64 }
 	var recs []rec
 	data := []byte("hello")
-	for _, d := range dictProps {
-		bh := []byte{0x02, 0x00, 0x21, 0x01, d, 0x00, 0x00, 0x00}
+	for i, d := range dictProps {
+		blockFlags := byte(0)
+		if i == 0 {
+			blockFlags = firstFlags
+		}
+		bh := []byte{0, blockFlags}
+		if blockFlags&0x40 != 0 {
+			bh = append(bh, byte(len(data)+4))
+		}
+		if blockFlags&0x80 != 0 {
+			bh = append(bh, byte(len(data)))
+		}
+		bh = append(bh, 0x21, 0x01, d)
+		for len(bh)%4 != 0 {
+			bh = append(bh, 0)
+		}
+		bh[0] = byte(len(bh) / 4)
 		b.Write(bh)
 		_ = binary.Write(&b, binary.LittleEndian, crc32.ChecksumIEEE(bh))
 		chunk := append([]byte{0x01, 0x00, byte(len(data) - 1)}, data...)
@@ -181,7 +201,7 @@ func buildMultiBlockXZ(dictProps []byte) []byte {
 		b.Write(chunk)
 		b.Write(make([]byte, (4-len(chunk)%4)%4))
 		_ = binary.Write(&b, binary.LittleEndian, crc32.ChecksumIEEE(data))
-		recs = append(recs, rec{uint64(12 + len(chunk) + 4), uint64(len(data))})
+		recs = append(recs, rec{uint64(len(bh) + 4 + len(chunk) + 4), uint64(len(data))})
 	}
 	idx := []byte{0x00}
 	idx = append(idx, xzUvarint(uint64(len(recs)))...)
@@ -449,8 +469,8 @@ func TestAZ01HostileXZStreams(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := imSized.ExtractRootfs(ctx, io.Discard); !errors.Is(err, azimg.ErrCorrupt) {
-		t.Fatalf("mismatched block compSize err = %v, want ErrCorrupt", err)
+	if n, err := imSized.ExtractRootfs(ctx, io.Discard); !errors.Is(err, azimg.ErrCorrupt) || n != 0 {
+		t.Fatalf("mismatched block compSize n=%d err = %v, want preflight ErrCorrupt", n, err)
 	}
 
 	// Also test SHA256 XZ integrity check is accepted.
@@ -1259,6 +1279,49 @@ func TestModelTablesMatchInstallerMain(t *testing.T) {
 	if len(gen1Main) != 8 || len(gen2Main) != 8 {
 		t.Fatalf("unexpected board counts in main.go: gen1=%d gen2=%d", len(gen1Main), len(gen2Main))
 	}
+	t.Run("boardAliases", func(t *testing.T) {
+		extractAliases := func(path string) map[string]string {
+			t.Helper()
+			f, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			aliases := make(map[string]string)
+			ast.Inspect(f, func(n ast.Node) bool {
+				v, ok := n.(*ast.ValueSpec)
+				if !ok || len(v.Names) != 1 || v.Names[0].Name != "boardAliases" {
+					return true
+				}
+				for _, elt := range v.Values[0].(*ast.CompositeLit).Elts {
+					kv := elt.(*ast.KeyValueExpr)
+					key, err := strconv.Unquote(kv.Key.(*ast.BasicLit).Value)
+					if err != nil {
+						t.Fatal(err)
+					}
+					val, err := strconv.Unquote(kv.Value.(*ast.BasicLit).Value)
+					if err != nil {
+						t.Fatal(err)
+					}
+					aliases[key] = val
+				}
+				return false
+			})
+			if len(aliases) == 0 {
+				t.Fatalf("no boardAliases in %s", path)
+			}
+			return aliases
+		}
+		want, got := extractAliases(mainPath), extractAliases("models.go")
+		if !maps.Equal(got, want) {
+			t.Fatalf("boardAliases drift: azimg=%v main=%v", got, want)
+		}
+		for alias, board := range want {
+			m, ok := azimg.LookupModel(alias)
+			if !ok || m.Board != board {
+				t.Errorf("LookupModel(%q) = %+v, %v; want board %s", alias, m, ok, board)
+			}
+		}
+	})
 
 	for board, spec := range gen1Main {
 		mCompat, ok := azimg.LookupGen1Compatible("inmusic," + board)
