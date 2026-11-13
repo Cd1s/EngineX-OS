@@ -129,6 +129,14 @@ assert.deepStrictEqual(opened, ["spotify"]);
             joined = "\n".join(new for _old, new in edits[key])
             self.assertIn("Component.onDestruction: if (connectedSource.scTidalRow === this) connectedSource.scTidalRow = null", joined)
 
+    def test_autoloop_show_text_uses_sc_loop_bh2_a6_10(self):
+        bp = load_build_packs()
+        bp.ROOT = "Skins/Embedded/"
+        edits = bp.edits(False)
+        key = "Skins/EngineOS/UI/CompositeControls/Deck/DeckItem/AutoLoop.qml"
+        joined = "\n".join(new for _old, new in edits[key])
+        self.assertIn("readonly property bool showText: Config.device.hasAutoLoop || scLoop", joined)
+
 
 if __name__ == "__main__":
     unittest.main()
