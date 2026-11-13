@@ -24,3 +24,22 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           command: pages deploy docs --project-name=enginex-os --branch=main
+
+      - name: Notify IndexNow search engines
+        continue-on-error: true
+        run: |
+          curl -fsS -X POST "https://api.indexnow.org/indexnow" \
+            -H "Content-Type: application/json; charset=utf-8" \
+            -d '{
+              "host": "enginexdj.com",
+              "key": "8f4e9c2b1a7d4e6f9c3b5a8d2e1f4a7c",
+              "keyLocation": "https://enginexdj.com/8f4e9c2b1a7d4e6f9c3b5a8d2e1f4a7c.txt",
+              "urlList": [
+                "https://enginexdj.com/",
+                "https://enginexdj.com/?lang=e",
+                "https://enginexdj.com/?lang=s",
+                "https://enginexdj.com/?lang=t",
+                "https://enginexdj.com/llms.txt",
+                "https://enginexdj.com/llms-full.txt"
+              ]
+            }'

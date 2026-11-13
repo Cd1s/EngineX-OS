@@ -1,0 +1,16 @@
+{
+  "name": "EngineX OS",
+  "short_name": "EngineX OS",
+  "description": "Custom OS & User Guide for 16 Denon DJ, Numark & Rane Standalone Units",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0b1014",
+  "theme_color": "#00e5a3",
+  "icons": [
+    {
+      "src": "/site/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}

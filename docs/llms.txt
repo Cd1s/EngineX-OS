@@ -1,0 +1,20 @@
+# EngineX OS
+
+> Open-source custom operating system built on official Engine OS 5.3.0+ for 16 Denon DJ, Numark, and Rane standalone DJ units.
+
+- Website & Trilingual Guide (EN / 简体中文 / 繁體中文): https://enginexdj.com/
+- GitHub Repository: https://github.com/Cd1s/EngineX-OS
+- Latest Releases & Downloads: https://github.com/Cd1s/EngineX-OS/releases/latest
+- Open-Source Mod Hub: https://enginexdj.com/#mods
+- Full Technical Overview for AI Crawlers: https://enginexdj.com/llms-full.txt
+
+## Key Capabilities
+
+- **Supported Hardware (16 Standalone Units)**:
+  - **Gen 1 (`*-Update.img` via USB/web)**: Denon DJ SC5000 Prime, SC5000M Prime, SC6000 Prime, SC6000M Prime, PRIME 4, PRIME 2, PRIME GO, Numark Mixstream Pro.
+  - **Gen 2 (One-click `EngineX-Installer` unlock + `*-Update.img` / Wi-Fi OTA)**: Denon DJ SC LIVE 4, SC LIVE 2, PRIME 4+, PRIME GO+, Numark Mixstream Pro+, Mixstream Pro Go, Denon DJ PRIME 4 G2, Rane SYSTEM ONE.
+- **Native Streaming**: Pure-Go Spotify audio decryption (Spotify Connect + QR Device Auth), Deezer (Hi-Fi FLAC/MP3), SoundCloud (Go+ HQ), Beatport / Beatsource, TIDAL.
+- **Real-Time 4-Part Stems**: On-deck Vocals, Drums, Bass, and Melody separation.
+- **4-Deck Waveforms & Pro DJ Link**: Synced 4-deck stacked waveforms and Pioneer CDJ-3000 / Pro DJ Link interoperability.
+- **Rekordbox 7 / OneLibrary Plug & Play**: Automatic USB import (`rb-bridge`) supporting Rekordbox 6 `export.pdb`, Rekordbox 7 SQLCipher 4 `exportLibrary.db`, hot cues, memory cues, beat grids, waveforms, and artwork.
+- **Audio Guards & Mod Hub**: 21 DSP audio guards + modular zero-overhead Mod Hub (`dmx-studio`, `tailscale-remote`, `jog-logo-studio`, `sampler-pad-studio`, `midi-controller-mapper`).

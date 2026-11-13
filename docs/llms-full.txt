@@ -1,0 +1,47 @@
+# EngineX OS — Full Documentation Index
+
+Website: https://enginexdj.com/
+Source & Releases: https://github.com/Cd1s/EngineX-OS
+
+## What is EngineX OS?
+
+EngineX OS (current series: 5.3.0.4) is an MIT-licensed custom firmware and software enhancement layer built on official Engine OS 5.3.0+ for Denon DJ, Numark, and Rane standalone DJ players and all-in-one controllers. It preserves the stock Engine interface and hardware controls while adding major features requested by standalone DJs.
+
+## All 16 Supported Models
+
+### First Generation (Direct `*-Update.img` USB Flash)
+1. Denon DJ SC5000 Prime (`JP07`)
+2. Denon DJ SC5000M Prime (`JP08`)
+3. Denon DJ SC6000 Prime (`JP13`)
+4. Denon DJ SC6000M Prime (`JP14`)
+5. Denon DJ PRIME 4 (`JC11`)
+6. Denon DJ PRIME 2 (`JC16`)
+7. Denon DJ PRIME GO (`JP11`)
+8. Numark Mixstream Pro (`NH08`)
+
+### Second Generation (One-Click `EngineX-Installer` + `*-Update.img` / Screen OTA)
+9. Denon DJ SC LIVE 4 (`JP21`)
+10. Denon DJ SC LIVE 2 (`JP20`)
+11. Denon DJ PRIME 4+ (`JC11S`)
+12. Denon DJ PRIME GO+ (`JP11S`)
+13. Numark Mixstream Pro+ (`NH08S`)
+14. Numark Mixstream Pro Go (`NH10`)
+15. Denon DJ PRIME 4 G2 (`JP24`)
+16. Rane SYSTEM ONE (`RMZ2`)
+
+## Installation Summary
+
+- **Gen 1**: Download the matching `*-Update.img` from https://github.com/Cd1s/EngineX-OS/releases/latest, place it on a FAT32/exFAT USB drive, and trigger firmware update from Settings -> About / Update -> Reboot.
+- **Gen 2**: Run `EngineX-Installer` (Windows, macOS Apple Silicon/Intel, Linux) once with the unit connected in Computer/Update mode. It performs `[1/2] One-Click Unlock` and `[2/2] Flash *-Update.img`. Future updates work straight from USB or deck Wi-Fi (`Settings -> About / Update`).
+- **Revert to Stock**: Completely reversible by flashing any official Engine OS `.img` update from Denon DJ / Numark / Rane.
+
+## Core Features
+
+1. **Native Spotify Audio (No Laptop Required)**: Integrated pure-Go `go-librespot` stream decryption with zero-config Spotify Connect LAN pairing and official QR Device Authorization.
+2. **Deezer, SoundCloud, Beatport & TIDAL**: Direct standalone browsing, caching, BPM/key analysis, and streaming with strict per-provider cache isolation.
+3. **Standalone 4-Part Stems**: On-deck Vocals, Drums, Bass, and Instruments separation with Stem FX & Stem Level workflows.
+4. **4-Deck Waveforms & Shadow Deck**: Simultaneous stacked waveforms across standalone players and controllers.
+5. **Rekordbox 6 & 7 Plug-and-Play (`rb-bridge`)**: Converts Pioneer Rekordbox USB exports (`export.pdb` and Rekordbox 7 Device Library Plus `exportLibrary.db` / `ANLZ`) into Engine Library format on mount, preserving playlists, hot cues, memory cues, beat grids, and album art without modifying source Rekordbox files.
+6. **Pro DJ Link Interoperability**: Sync and track sharing with Pioneer CDJ-3000 and Pro DJ Link networks.
+7. **21 DSP Audio Protection Guards**: Prevents clipping, flanger volume spikes, and master output distortion.
+8. **Open-Source Mod Hub (`https://enginexdj.com/#mods`)**: Optional zero-RAM-when-disabled extensions including multi-universe DMX512 (`dmx-studio`), Tailscale remote access (`tailscale-remote`), jog wheel logos (`jog-logo-studio`), sampler pads (`sampler-pad-studio`), and USB MIDI controller mapping (`midi-controller-mapper`).
