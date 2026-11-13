@@ -277,6 +277,17 @@ GitHub unreachable	无法连接 GitHub	無法連線 GitHub
 New release available:	有新版本：	有新版本：
 Up to date	已是最新	已是最新
 no release found (no releases yet, or the repository is private)	未找到发布版本（仓库还没有发布，或是私有仓库）	未找到發佈版本（倉庫尚無發佈，或為私有倉庫）
+Update Failed	更新失败	更新失敗
+update download failed	更新下载失败	更新下載失敗
+update download too large	更新文件过大	更新檔案過大
+update refused: this release is not signed	已拒绝更新：此版本没有签名	已拒絕更新：此版本沒有簽章
+update refused: the release signature is not valid	已拒绝更新：版本签名无效	已拒絕更新：版本簽章無效
+update refused: this build has no trusted release key	已拒绝更新：此固件没有内置可信发布密钥	已拒絕更新：此韌體沒有內建可信發佈金鑰
+update refused: the file is not in the signed checksum list	已拒绝更新：文件不在已签名的校验清单中	已拒絕更新：檔案不在已簽章的校驗清單中
+update refused: the file does not match the signed checksum	已拒绝更新：文件与已签名的校验值不符	已拒絕更新：檔案與已簽章的校驗值不符
+update refused: this release is not newer than the installed one	已拒绝更新：此版本不比已安装的版本新	已拒絕更新：此版本不比已安裝的版本新
+update refused: the signature is for a different release	已拒绝更新：签名属于另一个发布版本	已拒絕更新：簽章屬於另一個發佈版本
+update refused: not enough free space on the deck	已拒绝更新：碟机剩余空间不足	已拒絕更新：碟機剩餘空間不足
 # Preferences: Device and About / Update pages
 Send Anonymous Usage Statistics	发送匿名使用统计	傳送匿名使用統計
 Debug Information	调试信息	除錯資訊
