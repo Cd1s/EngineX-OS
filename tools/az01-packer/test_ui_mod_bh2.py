@@ -120,6 +120,15 @@ assert.deepStrictEqual(opened, ["spotify"]);
             view_joined = "\n".join(new for _old, new in edits[view_key])
             self.assertIn("contentContainer.stackView.currentItem.scVisibleRows", view_joined)
 
+    def test_connected_source_clears_sc_tidal_row_on_destruction_bh2_a6_7(self):
+        bp = load_build_packs()
+        for root in ("Skins/Embedded/", "Skins/EmbeddedCommon/"):
+            bp.ROOT = root
+            edits = bp.edits(False)
+            key = root + "Views/BrowserSource/ConnectedSource.qml"
+            joined = "\n".join(new for _old, new in edits[key])
+            self.assertIn("Component.onDestruction: if (connectedSource.scTidalRow === this) connectedSource.scTidalRow = null", joined)
+
 
 if __name__ == "__main__":
     unittest.main()
