@@ -6458,6 +6458,36 @@ def edits(dev: bool):
              "        providerName: artistSong.trackSource\n        respectHideTitleArtist: true\n"),
             ("            visible: artistSong.artistVisible && !artistSong.onlyFileName && artistSong.artistTextString.length > 0\n",
              "            visible: artistSong.artistVisible && !artistSong.onlyFileName && !displayText.hideTitleArtist && artistSong.artistTextString.length > 0\n"),
+            ("    TapHandler {\n        id: tapHandler\n        enabled: false\n        onTapped: {\n",
+             "    readonly property bool scNoSkipKeys: [\"JP11\", \"JP11S\", \"NH08\", \"NH08S\", \"NH10\"].indexOf(Config.device.name) >= 0\n"
+             "    readonly property QObjProperty pScPlay: deckIndex > 0 ? Planck.getProperty(`/Engine/Deck${deckIndex}/PlayState`) : null\n"
+             "    readonly property bool scPlaying: !!(pScPlay && pScPlay.translator && pScPlay.translator.state)\n"
+             "    Row {\n"
+             "        id: scSkipKeys\n"
+             "        visible: artistSong.scNoSkipKeys && artistSong.deckIndex > 0 && !(artistSong.scHead && artistSong.scHead.title)\n"
+             "        Layout.fillHeight: true\n"
+             "        Layout.alignment: Qt.AlignVCenter\n"
+             "        opacity: artistSong.scPlaying ? 0.3 : 1\n"
+             "        Repeater {\n"
+             "            model: [{g: \"\\u2039\", n: \"PreviousTrack\"}, {g: \"\\u203a\", n: \"NextTrack\"}]\n"
+             "            Item {\n"
+             "                width: 40; height: Math.max(32, scSkipKeys.height)\n"
+             "                Text { anchors.centerIn: parent; text: modelData.g; color: artistSong.songTextColor; font.pixelSize: 36 }\n"
+             "                MouseArea {\n"
+             "                    anchors.fill: parent\n"
+             "                    onClicked: {\n"
+             "                        if (artistSong.scPlaying || artistSong.deckIndex <= 0) return\n"
+             "                        const t = Planck.getProperty(`/Engine/Deck${artistSong.deckIndex}/Track/${modelData.n}`)\n"
+             "                        if (t && t.translator) t.translator.state = true\n"
+             "                    }\n"
+             "                }\n"
+             "            }\n"
+             "        }\n"
+             "    }\n"
+             "    TapHandler {\n        id: tapHandler\n        enabled: false\n        onTapped: eventPoint => {\n"
+             "            if (scSkipKeys.visible && eventPoint.position.x >= scSkipKeys.x) {\n"
+             "                return\n"
+             "            }\n"),
         ]
         scaled[bj + "KeyEditor/KeyInfo.qml"] = [
             ('    readonly property string currentKey: keyEditorController ? keyEditorController.getViewModel().currentKey : ""\n',
