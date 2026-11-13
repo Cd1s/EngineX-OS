@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
@@ -25,8 +26,11 @@ func TestOverviewEndsWithBandMaxima(t *testing.T) {
 	}
 }
 
-func TestFillOverviewMaximaOnlyCompletesImportedZeroTrailers(t *testing.T) {
-	mount := t.TempDir()
+// overviewLibrary is a volume whose library has only the table of overviews, and an
+// overview of two bins that ends in trailer.
+func overviewLibrary(t *testing.T) (mount string, db *sql.DB, overview func(trailer ...byte) []byte) {
+	t.Helper()
+	mount = t.TempDir()
 	dir := filepath.Join(mount, "Engine Library", "Database2")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
@@ -35,24 +39,28 @@ func TestFillOverviewMaximaOnlyCompletesImportedZeroTrailers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	t.Cleanup(func() { db.Close() })
 	if _, err := db.Exec(`CREATE TABLE PerformanceData (trackId INTEGER PRIMARY KEY, overviewWaveFormData BLOB, thirdPartySourceId INTEGER)`); err != nil {
 		t.Fatal(err)
 	}
-	overview := func(trailer ...byte) []byte {
-		raw := append(make([]byte, 24), 10, 200, 3, 60, 20, 90) // two bins
+	return mount, db, func(trailer ...byte) []byte {
+		raw := append(make([]byte, 24), 10, 200, 3, 60, 20, 90)
 		blob, err := QCompress(append(raw, trailer...))
 		if err != nil {
 			t.Fatal(err)
 		}
 		return blob
 	}
+}
+
+func TestFillOverviewMaximaOnlyCompletesImportedZeroTrailers(t *testing.T) {
+	mount, db, overview := overviewLibrary(t)
 	old, done := overview(0, 0, 0), overview(9, 9, 9)
 	if _, err := db.Exec(`INSERT INTO PerformanceData VALUES (1,?,1),(2,?,1),(3,?,NULL),(4,x'00',1)`, old, done, old); err != nil {
 		t.Fatal(err)
 	}
-	if err := FillOverviewMaxima(context.Background(), mount); err != nil {
-		t.Fatal(err)
+	if through, err := FillOverviewMaxima(context.Background(), mount, time.Time{}); err != nil || !through {
+		t.Fatal(through, err)
 	}
 	get := func(id int) (blob []byte) {
 		if err := db.QueryRow(`SELECT overviewWaveFormData FROM PerformanceData WHERE trackId=?`, id).Scan(&blob); err != nil {
@@ -65,5 +73,39 @@ func TestFillOverviewMaximaOnlyCompletesImportedZeroTrailers(t *testing.T) {
 	}
 	if !bytes.Equal(get(2), done) || !bytes.Equal(get(3), old) || !bytes.Equal(get(4), []byte{0}) {
 		t.Fatal("a completed, native or unreadable overview was rewritten")
+	}
+}
+
+// The mount hook kills rb-bridge when the mount's time is up, and remembers the stick as
+// too slow until the next boot. The backfill was one transaction with no end in time: on
+// a library too large for the mount it was rolled back whole, at every boot. It commits a
+// batch at a time and stops at the deadline, and the next mount goes on from there.
+func TestFillOverviewMaximaKeepsWhatItCompletedBeforeTheDeadline(t *testing.T) {
+	saved := overviewBatch
+	overviewBatch = 2
+	defer func() { overviewBatch = saved }()
+	mount, db, overview := overviewLibrary(t)
+	old := overview(0, 0, 0)
+	if _, err := db.Exec(`INSERT INTO PerformanceData VALUES (1,?1,1),(2,?1,1),(3,?1,1),(4,?1,1),(5,?1,1)`, old); err != nil {
+		t.Fatal(err)
+	}
+	left := func() (n int) {
+		t.Helper()
+		if err := db.QueryRow(`SELECT count(*) FROM PerformanceData WHERE overviewWaveFormData=?`, old).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	deadline := time.Unix(1000, 0)
+	if through, err := fillOverviewMaxima(context.Background(), mount, deadline, func() time.Time { return deadline }); err != nil || through || left() != 5 {
+		t.Fatal("past the deadline:", through, err, left())
+	}
+	looks := 0
+	clock := func() time.Time { looks++; return deadline.Add(time.Duration(looks-2) * time.Second) } // time for one batch
+	if through, err := fillOverviewMaxima(context.Background(), mount, deadline, clock); err != nil || through || left() != 3 {
+		t.Fatal("one batch before the deadline:", through, err, left())
+	}
+	if through, err := FillOverviewMaxima(context.Background(), mount, time.Time{}); err != nil || !through || left() != 0 {
+		t.Fatal("the next mount:", through, err, left())
 	}
 }

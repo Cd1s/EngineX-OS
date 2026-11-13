@@ -275,11 +275,11 @@ func TestExtractANLZ(t *testing.T) {
 			{
 				Tag:        "PWV7",
 				EntryBytes: 3,
-				// 3 entries: each is [mid, high, low] -> [Low, Mid, High]
+				// 3 entries, each [low, mid, high] as Engine has them (pwv7_order_test.go)
 				Data: []byte{
-					10, 20, 30, // mid=10, high=20, low=30 -> [30, 10, 20]
-					40, 50, 60, // mid=40, high=50, low=60 -> [60, 40, 50]
-					70, 80, 90, // mid=70, high=80, low=90 -> [90, 70, 80]
+					10, 20, 30,
+					40, 50, 60,
+					70, 80, 90,
 				},
 			},
 		},
@@ -294,11 +294,11 @@ func TestExtractANLZ(t *testing.T) {
 	if len(wf) != 3 {
 		t.Fatalf("got %d waveform columns, want 3", len(wf))
 	}
-	if wf[0] != [3]byte{30, 10, 20} {
-		t.Errorf("col 0: got %v, want [30, 10, 20]", wf[0])
+	if wf[0] != [3]byte{10, 20, 30} {
+		t.Errorf("col 0: got %v, want [10, 20, 30]", wf[0])
 	}
-	if wf[1] != [3]byte{60, 40, 50} {
-		t.Errorf("col 1: got %v, want [60, 40, 50]", wf[1])
+	if wf[1] != [3]byte{40, 50, 60} {
+		t.Errorf("col 1: got %v, want [40, 50, 60]", wf[1])
 	}
 
 	// 3. Downsampling > 512 beats limits to 512, keeping durationMS of last beat

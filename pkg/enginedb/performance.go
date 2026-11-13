@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"slices"
+	"time"
 	"unicode/utf8"
 
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
@@ -168,36 +169,62 @@ func TrackDataPeaks(track, overview []byte) []byte {
 	return out
 }
 
+// overviewBatch is how many overviews FillOverviewMaxima reads and commits at a time. A
+// variable only for tests.
+var overviewBatch = 256
+
 // FillOverviewMaxima completes the overviews an earlier build imported: they end in a
 // zero triple where Engine expects each band's maximum, the value it scales that band by.
-func FillOverviewMaxima(ctx context.Context, mount string) error {
+// It commits a batch at a time and stops at deadline (zero: none): the mount hook kills
+// rb-bridge when its time is up, and what one mount completed must not be lost to the
+// next. done reports that it has been through every overview.
+func FillOverviewMaxima(ctx context.Context, mount string, deadline time.Time) (done bool, err error) {
+	return fillOverviewMaxima(ctx, mount, deadline, time.Now)
+}
+
+func fillOverviewMaxima(ctx context.Context, mount string, deadline time.Time, now func() time.Time) (bool, error) {
 	dbPath := filepath.Join(mount, "Engine Library", "Database2", "m.db")
 	if err := safeFile(dbPath); err != nil {
-		return err
+		return false, err
 	}
 	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: dbPath}).String()+"?_pragma=busy_timeout(5000)")
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer db.Close()
 	db.SetMaxOpenConns(1)
+	for after := int64(math.MinInt64); ; {
+		if !deadline.IsZero() && !now().Before(deadline) {
+			return false, nil
+		}
+		n, last, err := fillOverviewBatch(ctx, db, after)
+		if err != nil || n < overviewBatch {
+			return err == nil, err
+		}
+		after = last
+	}
+}
+
+// fillOverviewBatch completes the next overviewBatch imported overviews past the track
+// after, and returns how many it read and the last track among them.
+func fillOverviewBatch(ctx context.Context, db *sql.DB, after int64) (n int, last int64, err error) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return 0, 0, err
 	}
 	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, `SELECT trackId, overviewWaveFormData FROM PerformanceData WHERE thirdPartySourceId=1`)
+	rows, err := tx.QueryContext(ctx, `SELECT trackId, overviewWaveFormData FROM PerformanceData WHERE thirdPartySourceId=1 AND trackId>? ORDER BY trackId LIMIT ?`, after, overviewBatch)
 	if err != nil {
-		return err
+		return 0, 0, err
 	}
 	defer rows.Close()
 	fixed := map[int64][]byte{}
 	for rows.Next() {
-		var id int64
 		var blob []byte
-		if err := rows.Scan(&id, &blob); err != nil {
-			return err
+		if err := rows.Scan(&last, &blob); err != nil {
+			return 0, 0, err
 		}
+		n++
 		raw, err := QUncompress(blob, 8<<20)
 		if err != nil || len(raw) < 27 || len(raw)%3 != 0 {
 			continue
@@ -210,23 +237,23 @@ func FillOverviewMaxima(ctx context.Context, mount string) error {
 			top[i%3] = max(top[i%3], v)
 		}
 		if top[0]|top[1]|top[2] != 0 {
-			if fixed[id], err = QCompress(raw); err != nil {
-				return err
+			if fixed[last], err = QCompress(raw); err != nil {
+				return 0, 0, err
 			}
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return err
+		return 0, 0, err
 	}
 	if err := rows.Close(); err != nil {
-		return err
+		return 0, 0, err
 	}
 	for id, blob := range fixed {
 		if _, err := tx.ExecContext(ctx, `UPDATE PerformanceData SET overviewWaveFormData=? WHERE trackId=?`, blob, id); err != nil {
-			return err
+			return 0, 0, err
 		}
 	}
-	return tx.Commit()
+	return n, last, tx.Commit()
 }
 
 func EncodePerformance(t rekordbox.Track, a *rekordbox.Analysis) (Performance, error) {
@@ -328,7 +355,7 @@ func EncodePerformance(t rekordbox.Track, a *rekordbox.Analysis) (Performance, e
 			}
 			var peak [3]byte
 			for j := lo; j < hi && j < n; j++ {
-				v := waveRGB(*wave, int(j))
+				v := WaveRGB(*wave, int(j))
 				for c := 0; c < 3; c++ {
 					peak[c] = max(peak[c], v[c])
 					top[c] = max(top[c], v[c])
@@ -476,7 +503,10 @@ func cueColor(c rekordbox.Cue) [4]byte {
 	return [4]byte{255, 0, 255, 0}
 }
 
-func waveRGB(w rekordbox.Waveform, i int) [3]byte {
+// WaveRGB is entry i of a rekordbox waveform as Engine's low, mid, high. PWV7 holds its
+// bytes in that order (TestPWV7BandsAreLowMidHighOnRekordboxDemoTracks), not the mid,
+// high, low of Deep Symmetry's ANLZ documentation.
+func WaveRGB(w rekordbox.Waveform, i int) [3]byte {
 	offset := uint64(i) * uint64(w.EntryBytes)
 	if i < 0 || w.EntryBytes == 0 || offset >= uint64(len(w.Data)) || uint64(w.EntryBytes) > uint64(len(w.Data))-offset {
 		return [3]byte{}

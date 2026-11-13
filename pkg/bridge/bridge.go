@@ -4,8 +4,10 @@ package bridge
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/url"
 	"os"
@@ -327,7 +329,8 @@ func ReconcileContext(ctx context.Context, r *compat.Resolver, l *rekordbox.Libr
 
 const (
 	stampName = ".rb-bridge-stamp"
-	// overviewName marks a library whose overviews FillOverviewMaxima has completed.
+	// overviewName marks a library whose overviews FillOverviewMaxima has completed,
+	// with the generation of its imports (importGeneration).
 	overviewName = ".rb-bridge-overview"
 	// pendingName holds the stamp of an export whose import left tracks without
 	// their files read; the next mount of the same export resumes it.
@@ -402,6 +405,7 @@ func convertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 		stamp = stampVersion + " " + staged
 	}
 	dir := filepath.Join(mount, "Engine Library", "Database2")
+	completed := overviewsCompleted(dir) // before this mount writes anything
 	oldStamp := readMark(dir, stampName)
 	opts.LegacyOffsets = oldStamp != "" && !strings.HasPrefix(oldStamp, stampVersion+" ")
 	resume := false
@@ -415,10 +419,7 @@ func convertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 					deadline = time.Now().Add(mountReadBudget)
 				}
 				_, _ = enginedb.MigrateArtworkBefore(ctx, mount, deadline)
-				// ...and, once, the overview scale earlier builds left out.
-				if readMark(dir, overviewName) == "" && enginedb.FillOverviewMaxima(ctx, mount) == nil {
-					writeMark(dir, overviewName, "1")
-				}
+				completeOverviews(ctx, mount, dir, completed, deadline)
 			}
 			return enginedb.Result{Bypassed: true}, nil
 		}
@@ -490,6 +491,9 @@ func convertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 	// only those, the others are known to be imported with theirs.
 	opts.Resume = resume || (!full && !opts.SmartMatch && readMark(dir, pendingName) == stamp)
 	result, err = convert(ctx, mount, opts, pre, budget)
+	if err == nil && !result.Bypassed {
+		completeOverviews(ctx, mount, dir, completed, opts.Deadline) // the tracks this import had no reason to read again
+	}
 	if err == nil && result.Deferred > 0 {
 		writeMark(dir, pendingName, stamp)
 		log.Printf("rb-bridge: %d tracks imported without cues; the next mount reads them", result.Deferred)
@@ -498,6 +502,52 @@ func convertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 		os.Remove(filepath.Join(dir, pendingName))
 	}
 	return result, err
+}
+
+// completeOverviews gives the overviews an earlier build imported the scale Engine
+// expects, in the time until deadline; the next mount goes on from there. A library it
+// has been through is marked and not read again until another import. completed: it was
+// marked before this mount wrote anything, so only this build has written since.
+func completeOverviews(ctx context.Context, mount, dir string, completed bool, deadline time.Time) {
+	if !completed {
+		if done, err := enginedb.FillOverviewMaxima(ctx, mount, deadline); err != nil || !done {
+			if err != nil {
+				log.Printf("rb-bridge: overviews not completed: %v", err)
+			}
+			return
+		}
+	}
+	if g := importGeneration(dir); g != "" && readMark(dir, overviewName) != g {
+		writeMark(dir, overviewName, g)
+	}
+}
+
+func overviewsCompleted(dir string) bool {
+	g := importGeneration(dir)
+	return g != "" && readMark(dir, overviewName) == g
+}
+
+// importGeneration changes with every import, an earlier build's on another deck too,
+// and that build leaves overviews without band maxima: each import writes rb-bridge's own
+// database, and with a rollback journal SQLite counts every committed write in the file's
+// header. In WAL mode a commit need not touch the header, and beside a journal the header
+// is that of a write cut short: then there is no generation, and the library is read
+// again at every mount.
+func importGeneration(dir string) string {
+	state := filepath.Join(dir, stateName)
+	f, err := os.Open(state)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	header := make([]byte, 100)
+	if _, err := io.ReadFull(f, header); err != nil || header[18] != 1 || header[19] != 1 { // the file format versions: 2 is WAL
+		return ""
+	}
+	if _, err := os.Lstat(state + "-journal"); err == nil {
+		return ""
+	}
+	return hex.EncodeToString(header)
 }
 
 func cleanEmptyEngineLibrary(dir string) {

@@ -71,7 +71,7 @@ func DisplayWaveFromRekordbox(a *rekordbox.Analysis, sampleRate float64) *Displa
 	n := len(best.Data) / int(best.EntryBytes)
 	w := &DisplayWave{Bands: make([]byte, n*3), SamplesPerBin: sampleRate / 150}
 	for i := 0; i < n; i++ {
-		v := waveRGB(*best, i)
+		v := WaveRGB(*best, i)
 		copy(w.Bands[i*3:], v[:])
 	}
 	return w

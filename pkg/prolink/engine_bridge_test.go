@@ -516,7 +516,7 @@ func TestEngineBridgeNativePerformance(t *testing.T) {
 	if w5.Tag != "PWV5" || w5.EntryBytes != 2 || len(w5.Data) != 600*2 || w7.Tag != "PWV7" || len(w7.Data) != 600*3 {
 		t.Fatalf("waveform timeline: %+v / %d", w5, len(w7.Data))
 	}
-	if !bytes.Equal(w7.Data[:3], []byte{20, 30, 10}) || !bytes.Equal(w7.Data[len(w7.Data)-3:], []byte{50, 60, 40}) {
+	if !bytes.Equal(w7.Data[:3], []byte{10, 20, 30}) || !bytes.Equal(w7.Data[len(w7.Data)-3:], []byte{40, 50, 60}) {
 		t.Fatal("PWV7 bands/variation lost")
 	}
 	if binary.BigEndian.Uint16(w5.Data) != uint16(7<<13|7<<10|5<<7|2<<2) || binary.BigEndian.Uint16(w5.Data[len(w5.Data)-2:]) != uint16(7<<13|5<<10|3<<7|8<<2) {
