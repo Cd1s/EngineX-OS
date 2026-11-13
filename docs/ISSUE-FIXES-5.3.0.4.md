@@ -392,3 +392,57 @@ d48d3b8fe8096e19024fb9b07fe1b7a239483185c2e07160614f0b7524818998  EngineX-Instal
 
 - **回滚点**：r3 构建（`612f03e`，tag `v5.3.0.4-r3`，Release 上保留 r3 文件）。
 - **实机影响**：已刷 `5.3.0.4`（首轮、r2、r3）及更早版本的碟机在 `设置 → 关于 / 更新` 收到 r4，装完版本号仍为 `5.3.0.4`；`Engine 灯光` 默认改为关闭；仍是首轮 5.3.0.4 的 PRIME 4 G2 / SYSTEM ONE 需从电脑跑一次 `EngineX-Installer`。
+
+## 9. `5.3.0.4 r5` 同版本修复重发（2026-11-13）
+
+- **范围**：在 r4（`ff355be`）基础上，构建提交 `73c5fa9`：
+  - #256 SC LIVE 4 Stems：SC LIVE 4 所用 Engine 的 `StemsPreRenderedPlayback` 地址改正（`0x2c28744` → `0x2d0eb78`），再按 `HOT CUE` 两次能进入 Stems 打击垫；`Stems EQ Mode` 打开时，加载有 Stems 的曲目后 EQ 立即控制分轨（`c17e292`）；
+  - #229 `Display → BPM Decimals`；#230 插盘「准备中」提示；#233 大 rekordbox 盘与旧 MP3 网格；#224 PRIME GO 的 TIDAL 扫码只在选 TIDAL 时出现，token 刷新不因调用方取消而中断（`d05bc9c`）；
+  - #240 影子碟：CDJ 暂停、短 loop / Loop Roll 不再被当成搓碟；搓碟中换曲会松开 Touch 并恢复原来的 `ScratchEnable`；临时副本按内容指纹区分，分析结果按文件标识缓存，位置更新不再每次打开曲库；重新加载复用已分析的波形，网格 / Cue 修改在重载后显示；接收端缓存回到 4 条，源端 16 条且有 32 MiB 上限（`agent/r5-shadow-fixes`，实现 GPT-6.1，复核 Gemini 3.8 Flash）；
+  - Tailscale：状态查询失败不再清掉已生效的转发，只在有多余端口时 reset（`08ff2e8`、`4c0e135`、`37b63fc`，复核 Sonnet 5.5）；
+  - 测试竞态：`TestLANProbeBudgetSurvivesStuckCacheAndSkipsConfiguredRelay` 改为原子读写（`b8ad6f6`，只改测试）。
+- **实机验证**：
+  - #240：两台 SC5000（role 13 / 24）热部署 `73c5fa9` 的 suite 与界面包（bind mount），维护者实测搓碟跟随良好、重新加载不再重新计算波形；大幅搓碟仍略卡，平滑跟随在 `agent/shadow-smooth` 继续做，不在 r5。
+  - Tailscale：一台 SC5000 用临时 ephemeral key 接入 tailnet，模拟控制台打开 10 分钟（每 3 秒查询一次，两次冻结 tailscaled 20 秒）：查询 200 次、`serve reset` 0 次、转发配置 20 次抽查不变，经 tailnet 转发的 SSH 会话 120 次心跳全部收到；测完已退出、删除并恢复 r4 suite。
+  - #256：沙箱内用真实 SC LIVE 4 Engine 验证；实物 SC LIVE 4 的结果尚未回传。
+- **集成测试**（编译机沙箱，`/data` 为私有 tmpfs）：gofmt 无输出、vet 通过；`pkg/webui`、`pkg/prolink`、`pkg/analyzer` 的 race 测试全部通过；`tools/az01-packer` 340 项（1 项因宿主有 `/data` 跳过）、rootfs 检查 27 项通过；影子修复的回归探针在 `ffb226a` 上 10 项 Go、9 项 JS 失败，在 `73c5fa9` 上通过。
+- **构建**：`73c5fa9`，`RELEASE_TAG=v5.3.0.4-r5`，`build-release.sh` 421 秒、`build-installer.sh` 13 秒；`SHA256SUMS.txt` 28 行，`sha256sum -c` 通过。
+- **第 4 步镜像抽查**：三组一代镜像 `"verified": true`，`version.txt` = `5.3.0.4`，`release-tag` = `v5.3.0.4-r5`；同组机型 SHA-256 相同；三组开机画面按原厂方向解码正立。镜像里的 `/root/.ssh/authorized_keys` 与官方 5.3.0 底包、r4 逐字节相同（原厂 cert-authority 条目），不含我们的公钥。
+- **第 4b 步三组发版门禁（旧镜像 = r4 构建；`GATE_RELEASE_TAG=v5.3.0.4-r5`）**：SC5000（JP07）**148 PASS / 0 FAIL / 5 INFO**，368 秒；SC6000（JP13）**148 PASS / 0 FAIL / 5 INFO**，362 秒；PRIME 4（JC11）**148 PASS / 0 FAIL / 5 INFO**，440 秒。
+- **无回归检查**：清单（184 行）的自动化项由上述测试与门禁覆盖；`[NO AUTOMATED TEST]` 实机项中，本轮只实机复核了影子碟搓碟与波形复用，跨机 `MASTER` 互切、原厂 `LOAD` 流媒体播放、按键灯未在本轮实机复核（影子修复未改 `MASTER` / Sync 代码，复核确认）。
+- **发布**：`v5.3.0.4-r5`（tag 移到 `73c5fa9`，Latest），29 个资产的 digest 与 `SHA256SUMS.txt` 一致；`v5.3.0.4` 的同名文件换成本次构建并在说明开头注明；`v5.3.0.4-r4` 说明开头注明已被 r5 取代，并去掉「5.3.0.5 之前最后一个版本」的说法；`releases/latest/download/...` 抽查 200。r5 第一次构建（`763f46e`）上架后被撤回成草稿（0 下载），本次覆盖同一 tag。
+- **产物 SHA-256**：
+
+```text
+2ca97aedc21860a7663b75226197e1180527521fc17e71ef8f10ff9c310244f1  MIXSTREAMPRO-5.3.0.4-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img
+4309e51241c7979b74d54505d9371b94506fe4d13053ac9b78f730603443d784  MIXSTREAMPROGO-5.3.0.4-EngineX-OS-Numark-Mixstream-Pro-Go-NH10-Update.img
+cd2d646d932d3b04cbfd2759c29968f713606b6f968c3d01df5478fe1bd08ac6  MIXSTREAMPROPLUS-5.3.0.4-EngineX-OS-Numark-Mixstream-Pro-Plus-NH08S-Update.img
+2ca97aedc21860a7663b75226197e1180527521fc17e71ef8f10ff9c310244f1  PRIME2-5.3.0.4-EngineX-OS-Denon-PRIME-2-JC16-Update.img
+2ca97aedc21860a7663b75226197e1180527521fc17e71ef8f10ff9c310244f1  PRIME4-5.3.0.4-EngineX-OS-Denon-PRIME-4-JC11-Update.img
+26aed129a43685bcde47462e7af8cf2bafb0c9da50f5340a8dce3d95fd174315  PRIME4G2-5.3.0.4-EngineX-OS-Denon-PRIME-4-G2-JP24-Update.img
+580cb2529cbb8a3b4a61822668220367d0d8646898ba2bccf3194eb8f37be04a  PRIME4PLUS-5.3.0.4-EngineX-OS-Denon-PRIME-4-Plus-JC11S-Update.img
+64fdd05316db42c683f2f123f6f28ce82b7191356356294a97af2d6b8be8ee2a  PRIMEGO-5.3.0.4-EngineX-OS-Denon-PRIME-GO-JP11-Update.img
+79d549f13133f8cc7b59adafcb249ee73a7d7aa28c85a5c171635c5aef76e9ad  PRIMEGOPLUS-5.3.0.4-EngineX-OS-Denon-PRIME-GO-Plus-JP11S-Update.img
+64fdd05316db42c683f2f123f6f28ce82b7191356356294a97af2d6b8be8ee2a  SC5000-5.3.0.4-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img
+64fdd05316db42c683f2f123f6f28ce82b7191356356294a97af2d6b8be8ee2a  SC5000M-5.3.0.4-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img
+c7f8fbed57b3427ce9452db957dbad6bd5fdf352f4f7e3912af167c5b0bfc7fd  SC6000-5.3.0.4-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img
+c7f8fbed57b3427ce9452db957dbad6bd5fdf352f4f7e3912af167c5b0bfc7fd  SC6000M-5.3.0.4-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img
+b06095ae2ec6f889261a942389637f40ecd28eb95c0bc56486e0f3d75dba7b8e  SCLIVE2-5.3.0.4-EngineX-OS-Denon-SC-LIVE-2-JP20-Update.img
+4fd9e1f58e3e77727bc0df676b2cf826fd4789f1b620317bcb56a806e86578a8  SCLIVE4-5.3.0.4-EngineX-OS-Denon-SC-LIVE-4-JP21-Update.img
+7fc69abe7583c567455bab894c6b1cb3ad206fef809e42924a34295fb4b03178  SYSTEMONE-5.3.0.4-EngineX-OS-Rane-SYSTEM-ONE-RMZ2-Update.img
+962efaf038fc4b50a29c0570fbc6df258baaa51f1f1fee6435ae6c7ae7c070c3  MIXSTREAMPROGO-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz
+1f4e73fa43d4de9d32fadb85f727cd41cd5edb218bbd81355c6f1103a141131a  MIXSTREAMPROPLUS-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz
+ec7988ca784e4a68711b80ea0a2c21026faa1c8b1e5a8bbe4642e55287978663  PRIME4G2-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz
+250985bfe8c734e84400ae6329ff08144a7460b2e51cab8893feaa668f3bd80a  PRIME4PLUS-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz
+ce0a9e0f4ac3e8c821402bf456aee0335e87b7904b23a318a9177dbb71b4ece3  PRIMEGOPLUS-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz
+14c0e7a63b3323de6fa6b06081fd78432f862c8d7f7b4f549861fe527850d07a  SCLIVE2-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz
+d2e6e8581c7d9011472c39abd602ef47a1048887431fec9a5e138cc481d25e2e  SCLIVE4-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz
+bd8b242c1901ff0bd1331ddbfd5f43497879d4857da5769ba6fb88ae9133d3e2  SYSTEMONE-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz
+48546494294b195b4334472d89c286b37ab837785ceeb33bc93b0e797f1d5a2e  EngineX-Installer-5.3.0.4-linux-amd64.tar.gz
+32395740b360e856ebb9f164989d6997278789c116971c624cee7b512e933d36  EngineX-Installer-5.3.0.4-macos-amd64.zip
+a63aaf5fde56dedd218db41773af262649f8d7260ef7d23eaee483b165d6cdb4  EngineX-Installer-5.3.0.4-macos-arm64.zip
+6da348bd0737c4c9faa73e1a66d4d83e857393f4dbc64427067b18dfb466249e  EngineX-Installer-5.3.0.4-windows-amd64.zip
+```
+
+- **回滚点**：r4 构建（`ff355be`，tag `v5.3.0.4-r4`，Release 上保留 r4 文件）。
+- **实机影响**：已刷 `5.3.0.4`（首轮、r2–r4）及更早版本的碟机在 `设置 → 关于 / 更新` 收到 r5，装完版本号仍为 `5.3.0.4`；仍是首轮 5.3.0.4 的 PRIME 4 G2 / SYSTEM ONE 需从电脑运行一次 `EngineX-Installer`。
