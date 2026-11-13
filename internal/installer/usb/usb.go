@@ -80,6 +80,14 @@ func fault(op string, kind Kind, written bool, err error) error {
 	if err == nil {
 		return nil
 	}
+	var cause *Error
+	if errors.As(err, &cause) {
+		if kind == System {
+			kind = cause.Kind
+		}
+		written = written || cause.MayHaveWritten
+	}
+	written = written || uncertainWrite(err)
 	if errors.Is(err, context.DeadlineExceeded) {
 		kind = Timeout
 	}
@@ -87,6 +95,30 @@ func fault(op string, kind Kind, written bool, err error) error {
 		kind = Cancelled
 	}
 	return &Error{Op: op, Kind: kind, MayHaveWritten: written, Err: err}
+}
+
+// Inspect every branch: errors.As alone stops at the first typed error in an
+// errors.Join tree and could hide uncertainty from a later write operation.
+func uncertainWrite(err error) bool {
+	pending := []error{err}
+	for len(pending) > 0 {
+		index := len(pending) - 1
+		current := pending[index]
+		pending = pending[:index]
+		if current == nil {
+			continue
+		}
+		if detail, ok := current.(*Error); ok && detail.MayHaveWritten {
+			return true
+		}
+		switch wrapped := current.(type) {
+		case interface{ Unwrap() []error }:
+			pending = append(pending, wrapped.Unwrap()...)
+		case interface{ Unwrap() error }:
+			pending = append(pending, wrapped.Unwrap())
+		}
+	}
+	return false
 }
 
 func cloneInfo(d DeviceInfo) DeviceInfo {

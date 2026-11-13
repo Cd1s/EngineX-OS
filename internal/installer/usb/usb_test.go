@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -160,6 +161,33 @@ func TestErrorWriteUncertainty(t *testing.T) {
 	var detail *Error
 	if !errors.Is(err, context.DeadlineExceeded) || !errors.As(err, &detail) || detail.Kind != Timeout || !detail.MayHaveWritten {
 		t.Fatal(err)
+	}
+}
+
+func TestErrorWrappingPreservesClassification(t *testing.T) {
+	cause := errors.New("invalid native descriptor")
+	inner := fault("descriptors", Protocol, true, cause)
+	outer := fault("enumerate", System, false, fmt.Errorf("descriptor context: %w", inner))
+	var detail *Error
+	if !errors.As(outer, &detail) || detail.Kind != Protocol || !detail.MayHaveWritten || !errors.Is(outer, cause) || !errors.Is(outer, inner) {
+		t.Fatalf("typed cause hidden by wrapper: %v", outer)
+	}
+}
+
+func TestJoinedErrorsPreserveEveryWriteUncertainty(t *testing.T) {
+	safeCause := errors.New("discovery failed")
+	writeCause := errors.New("write completion unknown")
+	safe := fault("enumerate", Permission, false, safeCause)
+	uncertain := fault("write", Protocol, true, writeCause)
+	joined := errors.Join(fmt.Errorf("first branch: %w", safe), fmt.Errorf("second branch: %w", errors.Join(errors.New("other failure"), uncertain)))
+	outer := fault("outer", System, false, joined)
+	var detail *Error
+	if !errors.As(outer, &detail) || detail.Kind != Permission || !detail.MayHaveWritten || !errors.Is(outer, safeCause) || !errors.Is(outer, writeCause) {
+		t.Fatalf("joined write uncertainty lost: %v", outer)
+	}
+	timed := fault("outer", System, false, errors.Join(safe, errors.Join(context.DeadlineExceeded, uncertain)))
+	if !errors.As(timed, &detail) || detail.Kind != Timeout || !detail.MayHaveWritten || !errors.Is(timed, context.DeadlineExceeded) {
+		t.Fatalf("joined context cause lost: %v", timed)
 	}
 }
 
