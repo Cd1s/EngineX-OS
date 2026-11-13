@@ -130,6 +130,16 @@ func syncDir(p string) error {
 	return syncPath(p)
 }
 
+// journalExists: only a journal that is not there means nothing to recover. A lookup that fails
+// otherwise is an error, so neither activation nor a new install goes past a journal unseen.
+func journalExists(p string) (bool, error) {
+	st, err := lstat(p)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	return err == nil && st.IsDir(), err
+}
+
 // syncExisting syncs the paths that are there: a journal half removed has no stage. Only a path
 // that is not there is left out; a lookup that fails otherwise is an error, as a failed sync is.
 func syncExisting(paths ...string) error {
@@ -445,8 +455,8 @@ func withoutDest(env []string) []string {
 // only clears what is left. boot-activate.sh runs it at every boot, before anything else. An
 // install that is running right now is left alone.
 func (d Deck) Recover() error {
-	if !realDir(d.data(journalName)) {
-		return nil
+	if ok, err := journalExists(d.data(journalName)); !ok {
+		return err
 	}
 	unlock, ok := d.lock(false)
 	if !ok {
@@ -458,8 +468,8 @@ func (d Deck) Recover() error {
 
 func (d Deck) recover() error {
 	journal := d.data(journalName)
-	if !realDir(journal) {
-		return nil
+	if ok, err := journalExists(journal); !ok {
+		return err
 	}
 	id := readLine(filepath.Join(journal, "id"))
 	stage := filepath.Join(journal, "stage/root")
