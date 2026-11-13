@@ -81,7 +81,7 @@ Item {
     }
     function checkWire(unit) {
         const x = new XMLHttpRequest()
-        x.open("GET", "file:///data/sc5000-custom/ui/fx-selector.request", false); x.send()
+        x.open("GET", "file:///data/enginex/ui/fx-selector.request", false); x.send()
         const fields = x.responseText.trim().split(/\s+/)
         const values = unit === 1 ? capturedOne : capturedTwo
         check(fields.length === 6 && values.indexOf(Number(fields[3])) >= 0 && values.indexOf(Number(fields[4])) >= 0, "unit" + unit + "-Mix-wire-bits")

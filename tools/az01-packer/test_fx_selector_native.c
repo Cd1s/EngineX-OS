@@ -93,13 +93,13 @@ static void rate(struct owner *o, unsigned index) {
     ((event_fn)(base + 0xe6a114))(o->rate, e);
 }
 static int command(unsigned unit, unsigned mode, unsigned *a, unsigned *b) {
-    FILE *f = fopen("/data/sc5000-custom/ui/fx-selector.request", "r");
+    FILE *f = fopen("/data/enginex/ui/fx-selector.request", "r");
     unsigned u, m; unsigned long long seq, expires;
     int n = f ? fscanf(f, "%u %u %llu %u %u %llu", &u, &m, &seq, a, b, &expires) : 0;
     if (f) fclose(f);
     if (n != 6 || u != unit || m != mode) return 0;
     unsigned au, am, aa, ab, reused; unsigned long long as, ae;
-    f = fopen("/data/sc5000-custom/ui/fx-selector.ack", "r");
+    f = fopen("/data/enginex/ui/fx-selector.ack", "r");
     n = f ? fscanf(f, "%u %u %llu %u %u %llu %u", &au, &am, &as, &aa, &ab, &ae, &reused) : 0;
     if (f) fclose(f);
     return n == 7 && ae == expires && au == u && am == m && as == seq && aa == *a && ab == *b;
