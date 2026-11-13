@@ -334,7 +334,29 @@ var mountReadBudget = 8 * time.Second
 func ConvertAtMount(ctx context.Context, mount string, opts enginedb.Options, full bool) (enginedb.Result, error) {
 	r, err := convertAtMount(ctx, mount, opts, full)
 	applyPendingAtMount(ctx, mount)
+	fixMP3GridsAtMount(ctx, mount, opts.Deadline, full)
 	return r, err
+}
+
+func fixMP3GridsAtMount(ctx context.Context, mount string, deadline time.Time, full bool) {
+	if ctx.Err() != nil || !writable(mount) {
+		return
+	}
+	var budget time.Duration
+	if !deadline.IsZero() {
+		rem := time.Until(deadline)
+		if rem <= 0 {
+			return
+		}
+		budget = min(4*time.Second, max(time.Second, rem/2))
+	} else if !full {
+		budget = 4 * time.Second
+	}
+	if r, err := enginedb.FixMP3Grids(ctx, mount, enginedb.MP3GridOptions{Budget: budget}); err != nil {
+		log.Printf("rb-bridge: mp3 grid fix not finished: %v", err)
+	} else if r.Corrected > 0 || r.Skipped > 0 {
+		log.Printf("rb-bridge: mp3 grid fix: corrected=%d unchanged=%d skipped=%d interrupted=%v", r.Corrected, r.Unchanged, r.Skipped, r.Interrupted)
+	}
 }
 
 // applyPendingAtMount applies the library edits the Web Console queued while Engine had the
