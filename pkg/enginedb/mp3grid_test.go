@@ -610,8 +610,12 @@ func TestFixMP3GridsMissingAudioAndInterruptedResume(t *testing.T) {
 		t.Fatalf("expected Corrected=2 Skipped=2 Interrupted=false, got %+v", rep2)
 	}
 	stampBytes, err := os.ReadFile(stampPath)
-	if err != nil || !strings.Contains(string(stampBytes), "skipped=2") {
-		t.Fatalf("expected stamp recording skipped=2, got %q err=%v", stampBytes, err)
+	if err != nil || !strings.Contains(string(stampBytes), "corrected=3") || !strings.Contains(string(stampBytes), "skipped=2") {
+		t.Fatalf("expected stamp recording corrected=3 skipped=2, got %q err=%v", stampBytes, err)
+	}
+	cursorPath := filepath.Join(filepath.Dir(dbPath), MP3GridCursorFile)
+	if _, err := os.Stat(cursorPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cursor file must be removed after completion: %v", err)
 	}
 
 	ro, err := sql.Open("sqlite", dbPath)
@@ -636,6 +640,79 @@ func TestFixMP3GridsMissingAudioAndInterruptedResume(t *testing.T) {
 	rep3, err := FixMP3Grids(context.Background(), root, MP3GridOptions{})
 	if err != nil || !rep3.Bypassed || rep3.Corrected != 0 || rep3.Skipped != 0 {
 		t.Fatalf("third run should bypass: %+v err=%v", rep3, err)
+	}
+}
+
+func TestFixMP3GridsInterruptedResumeAdvancesPastUnchangedAndSkipped(t *testing.T) {
+	dbPath, root, db := testlibrary.Create(t)
+	defer db.Close()
+
+	for i := int64(1); i <= 4; i++ {
+		rel := "Music/Stream/vbri-" + string(rune('0'+i)) + ".mp3"
+		writeVBRIFixture(t, root, rel)
+		td := makeTrackDataBlob(t, 48000, 480000, 1, [3]float64{0.6, 0.3, 0.1}, false)
+		ov := makeOverviewBlob(t, 480000)
+		bt := makeAnalyzerBeatBlob(t, 48000, 480000, 1000.0, 481000.0, 16)
+		insertAnalyzerTrack(t, db, i, "../"+rel, "mp3", "[192k] MP3 48000 Hz; FLAC unavailable", 0, td, ov, bt, nil, nil)
+	}
+	tdMiss := makeTrackDataBlob(t, 44100, 441000, 1, [3]float64{0.68, 0.40, 0.18}, false)
+	ovMiss := makeOverviewBlob(t, 441000)
+	btMiss := makeAnalyzerBeatBlob(t, 44100, 441000, 5000.0, 445000.0, 20)
+	insertAnalyzerTrack(t, db, 5, "../Music/Stream/missing-5.mp3", "mp3", "[320k] MP3 44100 Hz; FLAC unavailable", 0, tdMiss, ovMiss, btMiss, nil, nil)
+
+	copyAudioFixture(t, root, "Music/Stream/lame-6.mp3", "01-lame-cbr-info-44100.mp3")
+	insertAnalyzerTrack(t, db, 6, "../Music/Stream/lame-6.mp3", "mp3", "[320k] MP3 44100 Hz; FLAC unavailable", 0, tdMiss, ovMiss, btMiss, nil, nil)
+	db.Close()
+
+	base := time.Unix(1700000000, 0)
+	limitedNow := func(allowChecks int) func() time.Time {
+		calls := 0
+		return func() time.Time {
+			calls++
+			if calls > allowChecks {
+				return base.Add(time.Minute)
+			}
+			return base
+		}
+	}
+
+	// Run 1: handles VBRI 1..2, then interrupts before 3 -> cursor saved at 2.
+	rep1, err := FixMP3Grids(context.Background(), root, MP3GridOptions{Budget: 10 * time.Second, BatchSize: 2, Now: limitedNow(4)})
+	if err != nil || !rep1.Interrupted || rep1.Unchanged != 2 || rep1.Corrected != 0 {
+		t.Fatalf("run 1: %+v err=%v", rep1, err)
+	}
+	// Run 2: resumes at >2, handles VBRI 3..4, interrupts before 5 -> cursor advances to 4.
+	rep2, err := FixMP3Grids(context.Background(), root, MP3GridOptions{Budget: 10 * time.Second, BatchSize: 2, Now: limitedNow(4)})
+	if err != nil || !rep2.Interrupted || rep2.Unchanged != 2 || rep2.Corrected != 0 {
+		t.Fatalf("run 2: %+v err=%v", rep2, err)
+	}
+	// Run 3: resumes at >4, skips missing 5, corrects LAME 6, writes stamp, drops cursor.
+	rep3, err := FixMP3Grids(context.Background(), root, MP3GridOptions{BatchSize: 2})
+	if err != nil || rep3.Interrupted || rep3.Skipped != 1 || rep3.Corrected != 1 {
+		t.Fatalf("run 3: %+v err=%v", rep3, err)
+	}
+
+	stampPath := filepath.Join(filepath.Dir(dbPath), MP3GridStampFile)
+	stampBytes, err := os.ReadFile(stampPath)
+	if err != nil || !strings.Contains(string(stampBytes), "candidates=6 corrected=1 unchanged=4 skipped=1") {
+		t.Fatalf("unexpected stamp: %q err=%v", stampBytes, err)
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(dbPath), MP3GridCursorFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cursor file left behind: %v", err)
+	}
+
+	ro, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ro.Close()
+	var bt6 []byte
+	if err := ro.QueryRow(`SELECT beatData FROM PerformanceData WHERE trackId=6`).Scan(&bt6); err != nil {
+		t.Fatal(err)
+	}
+	def6, _ := readBeatPositions(t, bt6)
+	if math.Abs(def6[0]-(5000.0-2257)) > 1e-6 {
+		t.Fatalf("track 6 beat0=%v, want %v", def6[0], 5000.0-2257)
 	}
 }
 
