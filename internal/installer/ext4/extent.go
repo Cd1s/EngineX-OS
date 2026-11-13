@@ -14,10 +14,64 @@ type extent struct {
 
 func (e extent) end() uint64 { return e.phys + uint64(e.length) }
 
+// Mapping bounds. A backup is untrusted: mapping one inode must stay
+// linear in the image size whatever its metadata says.
+const (
+	maxFileExtents  = 1 << 22  // far beyond any real file's fragmentation
+	maxJournalBlock = 10240000 // e2fsprogs' largest journal
+)
+
+// mapState collects one inode's mapping and enforces the bounds: no mapping
+// block may appear twice, the inode may not map more blocks than the
+// filesystem has, and an indirect map may not reach past i_size.
+type mapState struct {
+	in     *inode
+	exts   []extent
+	meta   []uint64
+	seen   map[uint64]bool
+	mapped uint64
+	limit  uint64 // indirect maps: logical blocks allowed by i_size
+}
+
+func (f *fsys) visitMeta(st *mapState, b uint64) error {
+	if b < f.firstDataBlock || b >= f.blocksCount {
+		return corruptf("inode %d: mapping block %d out of range", st.in.num, b)
+	}
+	if st.seen[b] {
+		return corruptf("inode %d: mapping block %d is used twice", st.in.num, b)
+	}
+	if f.metaClaimed != nil && f.metaClaimed(b) {
+		return corruptf("inode %d: mapping block %d already belongs to other metadata", st.in.num, b)
+	}
+	st.seen[b] = true
+	st.meta = append(st.meta, b)
+	return nil
+}
+
+func (f *fsys) addExtent(st *mapState, e extent, merge bool) error {
+	st.mapped += uint64(e.length)
+	if st.mapped > f.blocksCount {
+		return corruptf("inode %d maps more blocks than the filesystem has", st.in.num)
+	}
+	if n := len(st.exts); merge && n > 0 {
+		last := &st.exts[n-1]
+		if !last.uninit && uint64(last.logical)+uint64(last.length) == uint64(e.logical) &&
+			last.end() == e.phys && last.length+e.length <= maxInitExtent {
+			last.length += e.length
+			return nil
+		}
+	}
+	if len(st.exts) >= maxFileExtents {
+		return fmt.Errorf("%w: inode %d has more than %d extents", ErrUnsupported, st.in.num, maxFileExtents)
+	}
+	st.exts = append(st.exts, e)
+	return nil
+}
+
 // fileMap returns the data extents of an inode and the metadata blocks of its
 // mapping (extent tree nodes or indirect blocks). It validates every pointer
 // and, with metadata_csum, every extent block checksum.
-func (f *fsys) fileMap(in *inode) (exts []extent, meta []uint64, err error) {
+func (f *fsys) fileMap(in *inode) ([]extent, []uint64, error) {
 	if in.flags()&flagInlineData != 0 {
 		return nil, nil, fmt.Errorf("%w: inode %d has inline data", ErrUnsupported, in.num)
 	}
@@ -28,12 +82,17 @@ func (f *fsys) fileMap(in *inode) (exts []extent, meta []uint64, err error) {
 	if mode == sIFCHR || mode == sIFBLK || mode == sIFIFO || mode == sIFSOCK {
 		return nil, nil, nil
 	}
+	st := &mapState{in: in, seen: map[uint64]bool{}}
+	var err error
 	if in.flags()&flagExtents != 0 {
-		err = f.walkExtents(in, in.iblock(), 4, -1, 0, ^uint32(0), &exts, &meta)
-		return exts, meta, err
+		err = f.walkExtents(st, in.iblock(), 4, -1, 0, ^uint32(0))
+	} else {
+		err = f.walkIndirect(st)
 	}
-	err = f.walkIndirect(in, &exts, &meta)
-	return exts, meta, err
+	if err != nil {
+		return nil, nil, err
+	}
+	return st.exts, st.meta, nil
 }
 
 func (f *fsys) isFastSymlink(in *inode) bool {
@@ -49,8 +108,8 @@ func (f *fsys) xattrSectors(in *inode) uint64 {
 	return 0
 }
 
-func (f *fsys) walkExtents(in *inode, node []byte, wantMax int, wantDepth int, lo uint32, hi uint32,
-	exts *[]extent, meta *[]uint64) error {
+func (f *fsys) walkExtents(st *mapState, node []byte, wantMax int, wantDepth int, lo uint32, hi uint32) error {
+	in := st.in
 	if le.Uint16(node[0:]) != extentMagic {
 		return corruptf("inode %d: bad extent header magic", in.num)
 	}
@@ -83,12 +142,14 @@ func (f *fsys) walkExtents(in *inode, node []byte, wantMax int, wantDepth int, l
 				return corruptf("inode %d: extent overlaps the next index", in.num)
 			}
 			prev = int64(first) + int64(n) - 1
-			*exts = append(*exts, extent{logical: first, phys: phys, length: n, uninit: un})
+			if err := f.addExtent(st, extent{logical: first, phys: phys, length: n, uninit: un}, false); err != nil {
+				return err
+			}
 			continue
 		}
 		child := uint64(le.Uint16(e[8:]))<<32 | uint64(le.Uint32(e[4:]))
-		if child < f.firstDataBlock || child >= f.blocksCount {
-			return corruptf("inode %d: extent index points at block %d", in.num, child)
+		if err := f.visitMeta(st, child); err != nil {
+			return err
 		}
 		nextHi := hi
 		if i+1 < entries {
@@ -98,12 +159,10 @@ func (f *fsys) walkExtents(in *inode, node []byte, wantMax int, wantDepth int, l
 		if err != nil {
 			return err
 		}
-		maxBlk := int((f.bs - 12) / 12)
 		if err := f.verifyExtentBlock(in, blk); err != nil {
 			return err
 		}
-		*meta = append(*meta, child)
-		if err := f.walkExtents(in, blk, maxBlk, depth-1, first, nextHi, exts, meta); err != nil {
+		if err := f.walkExtents(st, blk, int((f.bs-12)/12), depth-1, first, nextHi); err != nil {
 			return err
 		}
 	}
@@ -127,32 +186,32 @@ func (f *fsys) verifyExtentBlock(in *inode, blk []byte) error {
 	return nil
 }
 
-func (f *fsys) walkIndirect(in *inode, exts *[]extent, meta *[]uint64) error {
-	per := uint64(f.bs / 4)
+// walkIndirect maps a classic block-mapped inode. Nothing may sit past
+// i_size (block-mapped files cannot preallocate), so the work is bounded by
+// the inode's size, and every indirect block may be used once only: a
+// triple-indirect block whose entries repeat cannot fan out.
+func (f *fsys) walkIndirect(st *mapState) error {
+	in := st.in
+	bs := uint64(f.bs)
+	per := bs / 4
+	st.limit = min((in.size()+bs-1)/bs, 12+per+per*per+per*per*per)
 	add := func(lblk uint64, phys uint64) error {
+		if lblk >= st.limit {
+			return corruptf("inode %d maps logical block %d past its size %d", in.num, lblk, in.size())
+		}
 		if phys < f.firstDataBlock || phys >= f.blocksCount {
 			return corruptf("inode %d: block pointer %d out of range", in.num, phys)
 		}
-		if lblk >= 1<<32 {
-			return corruptf("inode %d: logical block %d too large", in.num, lblk)
-		}
-		n := len(*exts)
-		if n > 0 {
-			last := &(*exts)[n-1]
-			if uint64(last.logical)+uint64(last.length) == lblk && last.end() == phys && last.length < maxInitExtent {
-				last.length++
-				return nil
-			}
-		}
-		*exts = append(*exts, extent{logical: uint32(lblk), phys: phys, length: 1})
-		return nil
+		return f.addExtent(st, extent{logical: uint32(lblk), phys: phys, length: 1}, true)
 	}
 	var walk func(blk uint64, level int, base uint64) error
 	walk = func(blk uint64, level int, base uint64) error {
-		if blk < f.firstDataBlock || blk >= f.blocksCount {
-			return corruptf("inode %d: indirect block %d out of range", in.num, blk)
+		if base >= st.limit {
+			return corruptf("inode %d maps logical block %d past its size %d", in.num, base, in.size())
 		}
-		*meta = append(*meta, blk)
+		if err := f.visitMeta(st, blk); err != nil {
+			return err
+		}
 		data, err := f.readBlock(blk)
 		if err != nil {
 			return err
@@ -196,6 +255,46 @@ func (f *fsys) walkIndirect(in *inode, exts *[]extent, meta *[]uint64) error {
 		span *= per
 	}
 	return nil
+}
+
+// firstBlock resolves logical block 0 with a bounded number of reads,
+// without mapping the whole inode (used for the journal superblock).
+func (f *fsys) firstBlock(in *inode) (uint64, error) {
+	if in.flags()&flagExtents == 0 {
+		p := uint64(le.Uint32(in.iblock()))
+		if p < f.firstDataBlock || p >= f.blocksCount {
+			return 0, corruptf("inode %d: first block pointer %d out of range", in.num, p)
+		}
+		return p, nil
+	}
+	node := in.iblock()
+	wantMax := 4
+	for level := 0; level <= 5; level++ {
+		if le.Uint16(node[0:]) != extentMagic {
+			return 0, corruptf("inode %d: bad extent header magic", in.num)
+		}
+		entries, max, depth := int(le.Uint16(node[2:])), int(le.Uint16(node[4:])), int(le.Uint16(node[6:]))
+		if entries == 0 || max > wantMax || entries > max || depth > 5 || le.Uint32(node[12:]) != 0 {
+			return 0, corruptf("inode %d: no extent for block 0", in.num)
+		}
+		if depth == 0 {
+			phys := uint64(le.Uint16(node[12+6:]))<<32 | uint64(le.Uint32(node[12+8:]))
+			if phys < f.firstDataBlock || phys >= f.blocksCount {
+				return 0, corruptf("inode %d: extent at block %d out of range", in.num, phys)
+			}
+			return phys, nil
+		}
+		child := uint64(le.Uint16(node[12+8:]))<<32 | uint64(le.Uint32(node[12+4:]))
+		blk, err := f.readBlock(child)
+		if err != nil {
+			return 0, err
+		}
+		if err := f.verifyExtentBlock(in, blk); err != nil {
+			return 0, err
+		}
+		node, wantMax = blk, int((f.bs-12)/12)
+	}
+	return 0, corruptf("inode %d: extent tree too deep", in.num)
 }
 
 // writeExtentTree stores exts as the inode's extent tree, allocating tree
@@ -282,17 +381,18 @@ func (f *fsys) readAll(in *inode, limit uint64) ([]byte, error) {
 	if in.isSymlink() && f.isFastSymlink(in) {
 		return append([]byte(nil), in.iblock()[:size]...), nil
 	}
+	exts, _, err := f.fileMap(in)
+	if err != nil {
+		return nil, err
+	}
 	buf := make([]byte, size)
-	err := f.readRange(in, buf, 0)
+	err = f.readRange(in, exts, buf, 0)
 	return buf, err
 }
 
-// readRange fills buf with file bytes starting at off; holes read as zeros.
-func (f *fsys) readRange(in *inode, buf []byte, off uint64) error {
-	exts, _, err := f.fileMap(in)
-	if err != nil {
-		return err
-	}
+// readRange fills buf with file bytes starting at off from a mapping made
+// by fileMap; holes and unwritten extents read as zeros.
+func (f *fsys) readRange(in *inode, exts []extent, buf []byte, off uint64) error {
 	clear(buf)
 	end := off + uint64(len(buf))
 	bs := uint64(f.bs)

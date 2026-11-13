@@ -405,6 +405,17 @@ func (cs ChangeSet) plan() (*plan, error) {
 		}
 		p.links = append(p.links, linkOp{parts, cs.Links[k]})
 	}
+	// A path cannot be a file, link or removal and also lie under one in
+	// the same change ("a" as a file and "a/b"): Apply would fail halfway.
+	for k := range seen {
+		parts := strings.Split(k, "/")
+		for i := 1; i < len(parts); i++ {
+			prefix := strings.Join(parts[:i], "/")
+			if kind, ok := seen[prefix]; ok && kind != "dir" {
+				return nil, fmt.Errorf("%w: /%s is listed as a %s and /%s lies under it", ErrUnsafePath, prefix, kind, k)
+			}
+		}
+	}
 	return p, nil
 }
 
@@ -596,11 +607,15 @@ func (e *VerifyError) Error() string {
 
 func (f *fsys) hashFile(in *inode) ([32]byte, error) {
 	h := sha256.New()
+	exts, _, err := f.fileMap(in)
+	if err != nil {
+		return [32]byte{}, err
+	}
 	buf := make([]byte, 1<<20)
 	size := in.size()
 	for off := uint64(0); off < size; off += uint64(len(buf)) {
 		n := min(uint64(len(buf)), size-off)
-		if err := f.readRange(in, buf[:n], off); err != nil {
+		if err := f.readRange(in, exts, buf[:n], off); err != nil {
 			return [32]byte{}, err
 		}
 		h.Write(buf[:n])

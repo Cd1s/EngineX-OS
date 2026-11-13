@@ -163,7 +163,8 @@ func (f *fsys) createFile(parent *inode, name string, perm uint16, size int64, s
 		return fmt.Errorf("%w: directory inode %d is encrypted or case-folded", ErrUnsupported, parent.num)
 	}
 	if size < 0 || size >= 1<<31 && f.roCompat()&roCompatLargeFile == 0 {
-		return fmt.Errorf("ext4: %s: size %d not supported here", name, size)
+		// The preflight refuses this first; this guards direct callers.
+		return fmt.Errorf("%w: %s: %d bytes without large_file", ErrUnsupported, name, size)
 	}
 	ino, err := f.allocInode(f.inodeGroup(parent.num), false)
 	if err != nil {
@@ -212,9 +213,6 @@ func (f *fsys) createFile(parent *inode, name string, perm uint16, size int64, s
 	in.setLinks(1)
 	if err := in.setBlocks512(f, (nblocks+uint64(len(meta)))*uint64(f.bs/512)); err != nil {
 		return err
-	}
-	if size >= 1<<31 && f.roCompat()&roCompatLargeFile == 0 {
-		return fmt.Errorf("ext4: large file without large_file feature")
 	}
 	if err := f.writeInode(in); err != nil {
 		return err

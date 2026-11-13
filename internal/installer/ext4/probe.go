@@ -129,14 +129,16 @@ func (f *fsys) checkClean() error {
 	if err != nil {
 		return err
 	}
-	exts, _, err := f.fileMap(j)
+	// Only the journal superblock is needed here: resolve block 0 without
+	// mapping the journal, whose size is checked first.
+	if j.size() == 0 || j.size()%uint64(f.bs) != 0 || j.size()/uint64(f.bs) > min(f.blocksCount, maxJournalBlock) {
+		return corruptf("journal inode has size %d", j.size())
+	}
+	first, err := f.firstBlock(j)
 	if err != nil {
 		return err
 	}
-	if len(exts) == 0 || exts[0].logical != 0 {
-		return corruptf("journal inode has no first block")
-	}
-	jsb, err := f.readBlock(exts[0].phys)
+	jsb, err := f.readBlock(first)
 	if err != nil {
 		return err
 	}
