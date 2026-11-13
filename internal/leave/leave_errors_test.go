@@ -1,6 +1,7 @@
 package leave
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -70,6 +71,14 @@ func auditFault(kind, path string, when int) *int {
 				return "", syscall.EIO
 			}
 			return real(p)
+		}
+	case "open":
+		real := openFile
+		openFile = func(p string, flag int, mode os.FileMode) (*os.File, error) {
+			if fail(p) {
+				return nil, syscall.EIO
+			}
+			return real(p, flag, mode)
 		}
 	case "remove":
 		real := remove
@@ -165,7 +174,7 @@ func TestLeaveIOInstallDecisionMatrix(t *testing.T) {
 		{name: "capture-current-version-read", kind: "read", relative: "live/version.txt", when: 1, cut: true},
 		{name: "staged-packs-before-exchange-stat", relative: "stage/root/ui/packs", when: 2},
 		{name: "staged-version-read", kind: "read", relative: "stage/root/version.txt", when: 2},
-		{name: "commit-layout-record-stat", relative: "layout", when: 1, legacy: true},
+		{name: "layout-record-open", kind: "open", relative: "layout.enginex-leave.tmp", when: 1, legacy: true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			auditReset(t)
@@ -270,13 +279,38 @@ func TestLeaveIOVersionReadErrorCannotSelectInPlaceInstall(t *testing.T) {
 	d, _ := newDeck(t)
 	target := legacyBundle(t, "5.3.0.3")
 	hits := auditFault("read", filepath.Join(target, "version.txt"), 1)
-	older, err := d.Older(target)
+	older, _, err := d.Older(target)
 	t.Logf("read-errors=%d older=%v error=%v", *hits, older, err)
 	if *hits != 1 {
 		t.Fatal("fault was not exercised")
 	}
 	if err == nil {
 		t.Fatal("version read error selects Main's in-place installer branch")
+	}
+}
+
+func TestLeaveMainReadsTargetVersionOnce(t *testing.T) {
+	auditReset(t)
+	_, root := newDeck(t)
+	t.Setenv("ENGINEX_LEAVE_ROOT", root)
+	target := legacyBundle(t, "5.3.0.2")
+	realRead := readFile
+	reads := 0
+	readFile = func(p string) ([]byte, error) {
+		if p == filepath.Join(target, "version.txt") {
+			reads++
+			if reads > 1 {
+				return nil, syscall.EIO
+			}
+		}
+		return realRead(p)
+	}
+	var out, stderr bytes.Buffer
+	if code := Main([]string{"install", target}, &out, &stderr); code != 0 || reads != 1 {
+		t.Fatalf("install: code=%d version reads=%d stderr=%s", code, reads, &stderr)
+	}
+	if !strings.Contains(out.String(), "EngineX OS 5.3.0.2 installed") {
+		t.Fatalf("installed version missing from output: %s", &out)
 	}
 }
 
