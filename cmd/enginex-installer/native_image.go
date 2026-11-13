@@ -108,7 +108,7 @@ func imageChanges(ctx context.Context, o *options, b *bundleInfo, fs *ext4.Image
 	}
 	cs := ext4.ChangeSet{
 		Directories: []string{root + "/bundle/bin", root + "/bundle/lib", root + "/ui"},
-		Links: links, Remove: []string{root + "/gen2-locked"},
+		Links:       links, Remove: []string{root + "/gen2-locked"},
 	}
 	add := func(e azimg.Entry, path string, mode uint32) {
 		cs.Files = append(cs.Files, ext4.Entry{Path: path, Mode: mode, Size: e.Size, SHA256: e.SHA256, Open: e.Open})

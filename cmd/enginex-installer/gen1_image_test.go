@@ -2,6 +2,11 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha1"
+	"encoding/binary"
+	"fmt"
+
+	"github.com/ulikunitz/xz"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,7 +21,11 @@ import (
 func localGen1Image(t *testing.T, name, content string) string {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), name)
-	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+	data := []byte(content)
+	if strings.HasPrefix(content, "AZ01 ") {
+		data = gen1Container(t, strings.SplitN(name, "-", 2)[0], data)
+	}
+	if err := os.WriteFile(p, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return p
@@ -42,7 +51,8 @@ func TestGen1SSHInstallsTheSelectedImage(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(filepath.Join(d.Data, "az01-update.img"))
-	if err != nil || string(got) != "AZ01 build A" {
+	want, _ := os.ReadFile(o.Bundle)
+	if err != nil || !bytes.Equal(got, want) {
 		t.Fatalf("deck got %q (%v), want the selected image", got, err)
 	}
 }
@@ -51,21 +61,14 @@ func TestGen1FastbootInstallsTheSelectedImageOffline(t *testing.T) {
 	o := testOpts(t)
 	o.defaults()
 	fb := newFastboot(t, "jp07", true)
-	o.Fastboot = fb.Bin
+	o.USB = fb.Bin
 	useRelease(o, offlineRelease(t))
 	o.Bundle = localGen1Image(t, "SC5000-5.3.0.1-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img", "AZ01 build A")
-	seen := filepath.Join(t.TempDir(), "unpacked-from")
-	o.Packer = filepath.Join(t.TempDir(), "packer.py")
-	if err := os.WriteFile(o.Packer, []byte("import pathlib,sys\n"+
-		"pathlib.Path("+pyQuote(seen)+").write_text(sys.argv[sys.argv.index('unpack')+1])\n"+
-		"p=pathlib.Path(sys.argv[sys.argv.index('--output')+1]); p.mkdir(); (p/'rootfs.ext2').write_bytes(b'rootfs')\n"), 0o600); err != nil {
+	if err := run(ctxT(t), o); err != nil {
 		t.Fatal(err)
 	}
-	if err := modeB(ctxT(t), o); err != nil {
-		t.Fatal(err)
-	}
-	if got, _ := os.ReadFile(seen); string(got) != o.Bundle {
-		t.Fatalf("unpacked %q, want the selected %q", got, o.Bundle)
+	if got, _ := os.ReadFile(filepath.Join(fb.Dir, "flashed-rootfs.img")); string(got) != "AZ01 build A" {
+		t.Fatalf("flashed %q, want the selected rootfs", got)
 	}
 	if !strings.Contains(strings.Join(fb.Calls(), "\n"), "flash rootfs ") {
 		t.Fatalf("rootfs not flashed: %v", fb.Calls())
@@ -98,15 +101,69 @@ func TestGen1RefusesASelectedImageForAnotherDeck(t *testing.T) {
 	}
 }
 
-func pyQuote(s string) string {
-	var b bytes.Buffer
-	b.WriteByte('\'')
-	for _, r := range s {
-		if r == '\'' || r == '\\' {
-			b.WriteByte('\\')
-		}
-		b.WriteRune(r)
+// gen1Container is an AZ01 image with a real XZ rootfs and partition digests.
+func gen1Container(t *testing.T, prefix string, rootfs []byte) []byte {
+	t.Helper()
+	var compressed bytes.Buffer
+	xw, err := xz.NewWriter(&compressed)
+	if err != nil {
+		t.Fatal(err)
 	}
-	b.WriteByte('\'')
-	return b.String()
+	if _, err := xw.Write(rootfs); err != nil {
+		t.Fatal(err)
+	}
+	if err := xw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	str := func(out *bytes.Buffer, text string) {
+		binary.Write(out, binary.LittleEndian, uint32(len(text)))
+		out.WriteString(text)
+		out.WriteByte(0)
+		out.Write(make([]byte, (4-(len(text)+1)%4)%4))
+	}
+	board := ""
+	for code, m := range gen1Boards {
+		if m.Prefix == prefix {
+			board = code
+		}
+	}
+	if board == "" {
+		t.Fatal(fmt.Sprintf("unknown fixture prefix %s", prefix))
+	}
+	var header bytes.Buffer
+	str(&header, "test-build")
+	binary.Write(&header, binary.LittleEndian, uint32(1))
+	str(&header, "inmusic,"+board)
+	binary.Write(&header, binary.LittleEndian, uint32(1))
+	binary.Write(&header, binary.LittleEndian, uint32(0x15e4d006))
+	str(&header, "native installer fixture")
+	var out bytes.Buffer
+	out.WriteString("AZ01")
+	binary.Write(&out, binary.LittleEndian, uint32(1))
+	binary.Write(&out, binary.LittleEndian, uint32(12+header.Len()))
+	out.Write(header.Bytes())
+	for _, part := range []struct {
+		tag, name, compression string
+		data                   []byte
+	}{
+		{"PARTP", "splash", "none", []byte("S")},
+		{"PARTX", "recoverysplash", "none", []byte("R")},
+		{"PARTL", "rootfs", "xz", compressed.Bytes()},
+	} {
+		out.WriteString(part.tag)
+		out.Write([]byte{0, 0, 0})
+		binary.Write(&out, binary.LittleEndian, uint64(len(part.data)))
+		str(&out, part.name)
+		str(&out, part.compression)
+		binary.Write(&out, binary.LittleEndian, uint32(1))
+		str(&out, "sha1")
+		binary.Write(&out, binary.LittleEndian, uint32(20))
+		sum := sha1.Sum(part.data)
+		out.Write(sum[:])
+		out.Write(part.data)
+	}
+	out.Write([]byte{'E', 'O', 'F', 0})
+	binary.Write(&out, binary.LittleEndian, uint32(16))
+	binary.Write(&out, binary.LittleEndian, uint64(0))
+	return out.Bytes()
 }

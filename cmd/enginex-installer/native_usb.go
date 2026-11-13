@@ -68,11 +68,15 @@ func tryUSB(ctx context.Context, o *options, board string) (found bool, err erro
 		return false, nil
 	}
 	if len(candidates) != 1 {
-		return false, errors.New("multiple deck update interfaces found; connect only the deck to install")
+		return true, errors.New("multiple deck update interfaces found; connect only the deck to install")
 	}
 	c := candidates[0]
 	dev, err := o.USB.Open(ctx, c.info.ID, c.it.Number, c.it.Alternate)
 	if err != nil {
+		var detail *usb.Error
+		if errors.As(err, &detail) && detail.Kind == usb.Permission && goos == "linux" && geteuid() != 0 {
+			o.hint("permission", "没有 USB 访问权限，请用 sudo 运行本工具。", "USB access denied; run this tool with sudo.")
+		}
 		return false, err
 	}
 	defer func() { err = errors.Join(err, dev.Close()) }()
@@ -117,6 +121,17 @@ func tryUSB(ctx context.Context, o *options, board string) (found bool, err erro
 		product = fallback.Code
 	}
 	s.board = boardCode(product)
+	id := fmt.Sprintf("%04x:%04x", c.info.VID, c.info.PID)
+	expected := gen1USB[id]
+	if expected == "" {
+		expected = gen2USB[id]
+	}
+	if expected != "" && expected != s.board {
+		return true, fmt.Errorf("USB identity %s and fastboot product %q disagree; nothing flashed", id, product)
+	}
+	if _, _, known := lookupBoard(board); known && boardCode(board) != s.board {
+		return true, errors.New("LAN board and selected USB deck disagree; nothing flashed")
+	}
 	return true, modeB(ctx, o, s)
 }
 

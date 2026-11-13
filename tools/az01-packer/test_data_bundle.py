@@ -1066,6 +1066,9 @@ exec REAL "$@"
                              env=env, capture_output=True, text=True)
         self.assertEqual(res.returncode, 0, res.stderr)
         args = ['--uninstall', '--image', 'my deck.img']
+        retained = ('az01_packer.py', 'host-install-userdata.py', 'host-install-fastboot.sh',
+                    'host-install-usbupdate.py', 'third_party/installer/GO-LICENSE',
+                    'third_party/installer/xz/LICENSE', 'third_party/installer/purego/LICENSE')
         for t in ('linux-amd64', 'macos-arm64'):
             with self.subTest(t):
                 d = self.tmp / f'unpacked-{t}'
@@ -1081,12 +1084,16 @@ exec REAL "$@"
                         (d / f).chmod(0o755)  # extractall drops the mode bits the zip keeps
                     launcher = d / 'Install-EngineX.command'
                 log = self.tmp / f'args-{t}'
+                for member in retained:
+                    self.assertTrue((d / member).is_file(), member)
                 res = subprocess.run(['sh', str(launcher), *args], env={**env, 'ARGS_LOG': str(log)},
                                      input='\n', capture_output=True, text=True)
                 self.assertEqual(res.returncode, 0, res.stderr)
                 self.assertEqual(log.read_text().splitlines(), args)
         with zipfile.ZipFile(out_dir / 'EngineX-Installer-5.3.0.4-windows-amd64.zip') as z:
             bat = z.read('Install-EngineX.bat').decode()
+            for member in retained:
+                self.assertIn(member, z.namelist())
         self.assertIn('\r\nenginex-installer.exe %*\r\n', bat)
 
 if __name__ == '__main__':
