@@ -39,7 +39,7 @@ func TestReadMP3VBRWithoutBytesFlagDerivesBitrate(t *testing.T) {
 	p := 4 + side
 	copy(f0[p:p+4], "Xing")
 	binary.BigEndian.PutUint32(f0[p+4:p+8], 0x01) // FRAMES only
-	binary.BigEndian.PutUint32(f0[p+8:p+12], 4)    // 4 frames
+	binary.BigEndian.PutUint32(f0[p+8:p+12], 4)   // 4 frames
 	f1, _ := buildMPEGFrame(1, 0, 9, 0, 0)
 	f2, _ := buildMPEGFrame(1, 0, 9, 0, 0)
 	f3, _ := buildMPEGFrame(1, 0, 9, 0, 0)
@@ -68,10 +68,10 @@ func TestReadMP3VBRIDurationSamplesAndBitrate(t *testing.T) {
 	// VBRI header at offset 36 in stereo MPEG-1 48000 Hz frame.
 	vbri0, _ := buildMPEGFrame(1, 1, 11, 0, 0) // 48000 Hz, 160 kbps, frame size 480 bytes
 	copy(vbri0[36:40], "VBRI")
-	binary.BigEndian.PutUint16(vbri0[40:42], 1)                   // version 1
-	binary.BigEndian.PutUint16(vbri0[42:44], 1152)                // delay field (ignored by FFmpeg)
+	binary.BigEndian.PutUint16(vbri0[40:42], 1)                    // version 1
+	binary.BigEndian.PutUint16(vbri0[42:44], 1152)                 // delay field (ignored by FFmpeg)
 	binary.BigEndian.PutUint32(vbri0[46:50], uint32(len(vbri0)*3)) // bytes (3 frames total)
-	binary.BigEndian.PutUint32(vbri0[50:54], 3)                   // 3 frames
+	binary.BigEndian.PutUint32(vbri0[50:54], 3)                    // 3 frames
 	vbri1, _ := buildMPEGFrame(1, 1, 11, 0, 0)
 	vbri2, _ := buildMPEGFrame(1, 1, 11, 0, 0)
 	stream := append(append(vbri0, vbri1...), vbri2...)
@@ -194,7 +194,7 @@ func TestReadMP3Sparse64GiBFileBitrateSameOnARMAndAMD(t *testing.T) {
 	p := 4 + side
 	copy(f0[p:p+4], "Xing")
 	binary.BigEndian.PutUint32(f0[p+4:p+8], 0x01) // FRAMES only
-	binary.BigEndian.PutUint32(f0[p+8:p+12], 4)    // 4 frames
+	binary.BigEndian.PutUint32(f0[p+8:p+12], 4)   // 4 frames
 	f1, _ := buildMPEGFrame(1, 0, 9, 0, 0)
 	f2, _ := buildMPEGFrame(1, 0, 9, 0, 0)
 	f3, _ := buildMPEGFrame(1, 0, 9, 0, 0)
