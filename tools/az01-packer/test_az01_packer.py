@@ -435,6 +435,30 @@ class FilesystemTests(unittest.TestCase):
         self.assertNotEqual(p.returncode, 0)
         self.assertTrue(new.is_symlink() and old.is_dir())
 
+    def test_234_release_gate_reads_an_old_release_where_its_prepare_left_the_data(self):
+        # #234 review R5: a 5.3.0.2 baseline keeps its data in the real /data/sc5000-custom; the old
+        # phase wrote its language setting and read its version and host key in /data/enginex.
+        gate = (Path(__file__).resolve().parent / 'release-gate.sh').read_text()
+        func = re.search(r'^data_dir\(\) \{.*?^\}', gate, re.M | re.S)
+        self.assertIsNotNone(func, 'release-gate.sh has no data_dir()')
+        for layout, want in (('5.3.0.2', 'sc5000-custom'), ('5.3.0.3', 'enginex')):
+            w = self.root / f'gate-{layout}'
+            shutil.rmtree(w, ignore_errors=True)
+            if layout == '5.3.0.2':
+                (w/'data/sc5000-custom').mkdir(parents=True)
+            else:
+                (w/'data/enginex').mkdir(parents=True)
+                (w/'data/sc5000-custom').symlink_to('enginex')
+            out = subprocess.run(['bash', '-c', func.group(0) + '\ndata_dir'], env={**os.environ, 'W': str(w)},
+                                 capture_output=True, text=True)
+            self.assertEqual(out.stdout.strip(), str(w/'data'/want), layout)
+        # The old phase's setting, version and host key, and the phase's UI dir, go through it.
+        phase = gate[gate.index('\nphase() {'):gate.index('\ninner() {')]
+        for use in ('D=$(data_dir)', 'printf \'lang=%s\\n\' "$LANG_PACK" > "$D/ui/settings.conf"',
+                    'grep -qx "$OLDV" "$D/version.txt"', 'cp "$D/ssh_host_ed25519_key.pub" "$W/old-hostkey.pub"',
+                    'local ui=$D/ui'):
+            self.assertIn(use, phase)
+
     def test_etc_reset_drops_stale_434_overlay_once(self):
         data = self.root/'data'
         upper = data/'system/etc/overlay'
