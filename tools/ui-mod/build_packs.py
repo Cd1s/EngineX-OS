@@ -5718,6 +5718,17 @@ def edits(dev: bool):
             'source: row.streamingProviderName && root.scScope !== "tidal" && row.modelData.song'
             ' ? "http://127.0.0.1:8080/v1/sc5000/art?song=" + encodeURIComponent(root.scPlainTitle(row.modelData.song)) + "&artist=" + encodeURIComponent(row.modelData.artist || "")'
             ' : (row.modelData.albumArt ? row.modelData.albumArt : "")',
+        ), (
+            "asynchronous: true\n",
+            "asynchronous: true\n"
+            "    Image {\n"
+            '        objectName: "albumArt_placeholder"\n'
+            "        anchors.fill: parent\n"
+            '        source: "qrc:/' + ("AlbumArtPlaceholder.png" if v53() else "UIKit.1/UIKit/Icons/PlaceHolder.png") + '"\n'
+            "        fillMode: Image.PreserveAspectCrop\n"
+            "        smooth: true\n"
+            '        visible: !!parent && parent.status !== Image.Ready && String(parent.source) !== ""\n'
+            "    }\n",
         )],
         v + "BrowseView/Components/Components/" + ("BrowseViewBpm.qml" if v53() else "Bpm.qml"): [('text: row.modelData.bpm || ""', 'text: row.modelData.bpm || root.scPreview(row.modelData.providerName)[1]')],
         v + "BrowseView/Components/Components/Key.qml": [('text: row.modelData.key || ""', 'text: row.modelData.key || root.scPreview(row.modelData.providerName)[2] || ""')],
