@@ -47,9 +47,10 @@ var tailscaleGOARCH = runtime.GOARCH
 var (
 	tailscaleMu sync.Mutex
 	// tailscaleServed: the forwards were applied since the daemon last left "Running".
-	tailscaleServed atomic.Bool
-	tailscaleHost   = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$`)
-	tailscaleKey    = regexp.MustCompile(`^[A-Za-z0-9_-]{8,256}$`)
+	tailscaleServed     atomic.Bool
+	tailscaleServeError atomic.Value // string, shared with status polls during a POST
+	tailscaleHost       = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$`)
+	tailscaleKey        = regexp.MustCompile(`^[A-Za-z0-9_-]{8,256}$`)
 )
 
 type TailscaleForward struct {
@@ -77,6 +78,7 @@ type TailscaleStatusView struct {
 	DeviceName  string           `json:"deviceName,omitempty"`
 	IPs         []string         `json:"ips,omitempty"`
 	Forward     TailscaleForward `json:"forward"`
+	ServeError  string           `json:"serveError,omitempty"`
 }
 
 type tailscalePost struct {
@@ -170,10 +172,11 @@ func (s *Server) tailscaleStart(ctx context.Context) error {
 
 func (s *Server) tailscaleStop(ctx context.Context) {
 	tailscaleServed.Store(false)
+	tailscaleServeError.Store("")
 	_, _ = getSystemRunner()(ctx, "systemctl", "stop", tailscaleUnit)
 }
 
-// tailscaleStatus asks the running daemon; a failed query means "not running".
+// tailscaleStatus distinguishes an unavailable status from a confirmed backend state.
 func (s *Server) tailscaleStatus(ctx context.Context) (tailscaleStatusJSON, bool) {
 	var st tailscaleStatusJSON
 	out, err := s.tailscaleCmd(ctx, "status", "--json")
@@ -197,6 +200,7 @@ func (s *Server) tailscaleView(ctx context.Context) TailscaleStatusView {
 			v.DeviceName, v.IPs = st.Self.HostName, st.Self.TailscaleIPs
 		}
 	}
+	v.ServeError, _ = tailscaleServeError.Load().(string)
 	return v
 }
 
@@ -204,11 +208,13 @@ func (s *Server) tailscaleView(ctx context.Context) TailscaleStatusView {
 // they work without a reboot. The status poll drives it; a POST in flight serves itself.
 func (s *Server) tailscaleAutoServe(ctx context.Context, v TailscaleStatusView) {
 	if v.State != "Running" {
-		tailscaleServed.Store(false)
+		if v.Running { // A failed status query does not mean the backend stopped.
+			tailscaleServed.Store(false)
+		}
 		return
 	}
 	cfg := s.loadTailscaleConfig()
-	if !cfg.Enabled || !(cfg.Forward.SSH || cfg.Forward.WebUI) || tailscaleServed.Load() || !tailscaleMu.TryLock() {
+	if !cfg.Enabled || tailscaleServed.Load() || !tailscaleMu.TryLock() {
 		return
 	}
 	defer tailscaleMu.Unlock()
@@ -228,10 +234,26 @@ func validLoginServer(raw string) error {
 	return nil
 }
 
-// tailscaleServe replaces the forwards with exactly the ticked services.
-func (s *Server) tailscaleServe(ctx context.Context, cfg TailscaleConfig) {
-	tailscaleServed.Store(true)
-	_, _ = s.tailscaleCmd(ctx, "serve", "reset")
+// tailscaleServe reconciles the persistent forwards with the ticked services.
+func (s *Server) tailscaleServe(ctx context.Context, cfg TailscaleConfig) (err error) {
+	defer func() {
+		message := ""
+		if err != nil {
+			message = err.Error()
+		}
+		tailscaleServeError.Store(message)
+		tailscaleServed.Store(err == nil)
+	}()
+	var current struct {
+		TCP map[string]struct{ TCPForward string }
+	}
+	out, err := s.tailscaleCmd(ctx, "serve", "status", "--json")
+	if err != nil {
+		return fmt.Errorf("tailscale serve status: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	if err := json.Unmarshal(out, &current); err != nil {
+		return fmt.Errorf("tailscale serve status: %w", err)
+	}
 	ports := []int{}
 	if cfg.Forward.SSH {
 		ports = append(ports, s.loadSSHConfig().Port)
@@ -239,13 +261,32 @@ func (s *Server) tailscaleServe(ctx context.Context, cfg TailscaleConfig) {
 	if cfg.Forward.WebUI {
 		ports = append(ports, tailscaleWebPort)
 	}
+	wanted := make(map[string]string, len(ports))
 	for _, p := range ports {
 		n, target := strconv.Itoa(p), "127.0.0.1:"+strconv.Itoa(p)
 		if p == tailscaleWebPort {
 			target = ForwardAddr // the console without the deck-local gateway
 		}
-		_, _ = s.tailscaleCmd(ctx, "serve", "--bg", "--tcp="+n, "tcp://"+target)
+		wanted[n] = target
 	}
+	for port := range current.TCP {
+		if _, keep := wanted[port]; !keep {
+			if out, err := s.tailscaleCmd(ctx, "serve", "reset"); err != nil {
+				return fmt.Errorf("tailscale serve reset: %v: %s", err, strings.TrimSpace(string(out)))
+			}
+			current.TCP = nil
+			break
+		}
+	}
+	for port, target := range wanted {
+		if current.TCP[port].TCPForward == target {
+			continue
+		}
+		if out, err := s.tailscaleCmd(ctx, "serve", "--bg", "--tcp="+port, "tcp://"+target); err != nil {
+			return fmt.Errorf("tailscale serve TCP %s: %v: %s", port, err, strings.TrimSpace(string(out)))
+		}
+	}
+	return nil
 }
 
 func (s *Server) tailscaleInstall(ctx context.Context) error {
@@ -346,6 +387,7 @@ func (s *Server) handleTailscale(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		v := s.tailscaleView(r.Context())
 		s.tailscaleAutoServe(r.Context(), v)
+		v.ServeError, _ = tailscaleServeError.Load().(string)
 		respond(w, v)
 	case http.MethodPost:
 		s.handleTailscalePost(w, r)
@@ -391,6 +433,9 @@ func (s *Server) handleTailscalePost(w http.ResponseWriter, r *http.Request) {
 		cfg.Hostname = *in.Hostname
 	}
 	if in.Forward != nil {
+		if cfg.Forward != *in.Forward {
+			tailscaleServed.Store(false)
+		}
 		cfg.Forward = *in.Forward
 	}
 
