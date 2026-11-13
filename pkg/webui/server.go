@@ -69,6 +69,8 @@ type Config struct {
 	RelayURL string
 	// TidalAPIURL and TidalAuthURL override TIDAL's servers in tests.
 	TidalAPIURL, TidalAuthURL string
+	// StreamingAccountsPath is Engine's read-only account map for upgrade migration.
+	StreamingAccountsPath string
 	// BPM looks up tempo and key for browsed tracks; nil turns that off.
 	BPM *providers.BPMStore
 	// MediaRoot is where drives mount for OmniSource (#62); empty means /media.
@@ -124,6 +126,13 @@ type Server struct {
 }
 
 func New(cfg Config, jobs *Jobs) *Server {
+	if cfg.StreamingAccountsPath == "" {
+		if cfg.StateDir != "" && !strings.HasPrefix(filepath.Clean(cfg.StateDir), "/data/") && filepath.Clean(cfg.StateDir) != "/data" {
+			cfg.StreamingAccountsPath = filepath.Join(cfg.StateDir, "StreamingAccounts.json")
+		} else {
+			cfg.StreamingAccountsPath = "/data/StreamingAccounts.json"
+		}
+	}
 	if cfg.AccessToken == "" {
 		cfg.AccessToken = GenerateAccessCode()
 	}
