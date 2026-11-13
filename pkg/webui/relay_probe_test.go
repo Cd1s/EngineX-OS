@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -179,10 +180,11 @@ func TestLANProbeBudgetSurvivesStuckCacheAndSkipsConfiguredRelay(t *testing.T) {
 	}))
 	defer busyRelay.Close()
 
-	var passedLast *stems.LANState
+	// The probe runs on a background goroutine; atomic keeps -race quiet.
+	var passedLast atomic.Pointer[stems.LANState]
 	called := make(chan struct{}, 4)
 	lanStemsProbe = func(ctx context.Context, last *stems.LANState, step time.Duration) (stems.LANState, bool) {
-		passedLast = last
+		passedLast.Store(last)
 		if last != nil && last.Endpoint != "" {
 			st, ok := stems.ProbeLAN(ctx, last, step)
 			called <- struct{}{}
@@ -207,8 +209,8 @@ func TestLANProbeBudgetSurvivesStuckCacheAndSkipsConfiguredRelay(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("background LAN probe was not triggered when cloud relay was busy")
 	}
-	if passedLast != nil && strings.TrimRight(passedLast.Endpoint, "/") == strings.TrimRight(busyRelay.URL, "/") {
-		t.Errorf("configured relay endpoint %q was passed to ProbeLAN", passedLast.Endpoint)
+	if pl := passedLast.Load(); pl != nil && strings.TrimRight(pl.Endpoint, "/") == strings.TrimRight(busyRelay.URL, "/") {
+		t.Errorf("configured relay endpoint %q was passed to ProbeLAN", pl.Endpoint)
 	}
 	time.Sleep(25 * time.Millisecond)
 	body2 := poll(s2)
