@@ -813,6 +813,9 @@ func writePlaylists(ctx context.Context, q *stmtCache, l *rekordbox.Library, opt
 		}
 		owned += predicate
 	}
+	if e := reparentNativeChildren(ctx, q, owned); e != nil {
+		return e
+	}
 	// Refuse to cascade-delete an Engine-created child of a rebuilt folder.
 	var n int
 	if e := q.QueryRowContext(ctx, `SELECT count(*) FROM Playlist WHERE parentListId IN (`+owned+`) AND id NOT IN (SELECT listId FROM BridgePlaylist)`).Scan(&n); e != nil {
