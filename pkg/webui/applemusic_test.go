@@ -53,7 +53,7 @@ func TestAppleMusicPhoneLinkLoginAndBrowse(t *testing.T) {
 	srv := httptest.NewServer(ui)
 	defer srv.Close()
 
-	resp, err := http.Post(srv.URL+"/v1/sc5000/login?provider=applemusic", "", nil)
+	resp, err := http.Post(srv.URL+"/v1/enginex/login?provider=applemusic", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +76,7 @@ func TestAppleMusicPhoneLinkLoginAndBrowse(t *testing.T) {
 	if body := postForm(t, page, url.Values{"links": {"Copy Link: https://music.apple.com/cn/playlist/%E6%B4%BE%E5%AF%B9/pl.club?l=en"}}); !strings.Contains(body, "Connected") {
 		t.Fatalf("phone page: %s", body)
 	}
-	if !strings.Contains(string(tidalGet(t, srv.URL, "/v1/sc5000/login?provider=applemusic", 200, nil)), `"status":"done"`) {
+	if !strings.Contains(string(tidalGet(t, srv.URL, "/v1/enginex/login?provider=applemusic", 200, nil)), `"status":"done"`) {
 		t.Fatal("deck login not done")
 	}
 	info, err := os.Stat(filepath.Join(state, "applemusic-owner.json"))
@@ -93,7 +93,7 @@ func TestAppleMusicPhoneLinkLoginAndBrowse(t *testing.T) {
 		t.Fatalf("saved %s", b)
 	}
 
-	if resp, err = http.Post(srv.URL+"/v1/sc5000/ui?scope=applemusic", "", nil); err != nil {
+	if resp, err = http.Post(srv.URL+"/v1/enginex/ui?scope=applemusic", "", nil); err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
@@ -153,7 +153,7 @@ func TestAppleMusicStorefrontNormalizationAndMixedLinks(t *testing.T) {
 		srv := httptest.NewServer(ui)
 		defer srv.Close()
 
-		resp, err := http.Post(srv.URL+"/v1/sc5000/login?provider=applemusic", "", nil)
+		resp, err := http.Post(srv.URL+"/v1/enginex/login?provider=applemusic", "", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -193,7 +193,7 @@ func TestAppleMusicStorefrontNormalizationAndMixedLinks(t *testing.T) {
 		srv := httptest.NewServer(ui)
 		defer srv.Close()
 
-		resp, err := http.Post(srv.URL+"/v1/sc5000/login?provider=applemusic", "", nil)
+		resp, err := http.Post(srv.URL+"/v1/enginex/login?provider=applemusic", "", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -232,7 +232,7 @@ func TestAppleMusicStorefrontNormalizationAndMixedLinks(t *testing.T) {
 		srv := httptest.NewServer(ui)
 		defer srv.Close()
 
-		resp, err := http.Post(srv.URL+"/v1/sc5000/login?provider=applemusic", "", nil)
+		resp, err := http.Post(srv.URL+"/v1/enginex/login?provider=applemusic", "", nil)
 		if err != nil {
 			t.Fatal(err)
 		}

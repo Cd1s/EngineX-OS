@@ -54,7 +54,7 @@ func (s *Server) activePackDir() string {
 	return ""
 }
 
-// handleMods handles GET and POST requests for /v1/sc5000/mods.
+// handleMods handles GET and POST requests for /v1/enginex/mods.
 func (s *Server) handleMods(w http.ResponseWriter, r *http.Request) {
 	mgr := s.modsManager()
 	switch r.Method {

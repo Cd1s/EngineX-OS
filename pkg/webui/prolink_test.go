@@ -44,7 +44,7 @@ func TestProlinkGetEmpty(t *testing.T) {
 	stateDir := t.TempDir()
 	srv := New(Config{StateDir: stateDir}, nil)
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/sc5000/prolink", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/enginex/prolink", nil)
 	rec := httptest.NewRecorder()
 	srv.prolinkGet(rec, req)
 
@@ -87,7 +87,7 @@ func TestProlinkPostSingleDeviceAndGet(t *testing.T) {
 	}
 	body, _ := json.Marshal(dev)
 
-	postReq := httptest.NewRequest(http.MethodPost, "/v1/sc5000/prolink", bytes.NewReader(body))
+	postReq := httptest.NewRequest(http.MethodPost, "/v1/enginex/prolink", bytes.NewReader(body))
 	postRec := httptest.NewRecorder()
 	srv.prolinkPost(postRec, postReq)
 
@@ -124,7 +124,7 @@ func TestProlinkPostSingleDeviceAndGet(t *testing.T) {
 	}
 
 	// Test GET endpoint returns the same snapshot
-	getReq := httptest.NewRequest(http.MethodGet, "/v1/sc5000/prolink", nil)
+	getReq := httptest.NewRequest(http.MethodGet, "/v1/enginex/prolink", nil)
 	getRec := httptest.NewRecorder()
 	srv.prolinkGet(getRec, getReq)
 
@@ -158,7 +158,7 @@ func TestProlinkPostDeviceListAndDecksMapping(t *testing.T) {
 	}
 	body, _ := json.Marshal(payload)
 
-	postReq := httptest.NewRequest(http.MethodPost, "/v1/sc5000/prolink", bytes.NewReader(body))
+	postReq := httptest.NewRequest(http.MethodPost, "/v1/enginex/prolink", bytes.NewReader(body))
 	postRec := httptest.NewRecorder()
 	srv.prolinkPost(postRec, postReq)
 
@@ -209,7 +209,7 @@ func TestProlinkStateFileMerging(t *testing.T) {
 		LastSeen: time.Now(),
 	}
 	body, _ := json.Marshal(update)
-	postReq := httptest.NewRequest(http.MethodPost, "/v1/sc5000/prolink", bytes.NewReader(body))
+	postReq := httptest.NewRequest(http.MethodPost, "/v1/enginex/prolink", bytes.NewReader(body))
 	postRec := httptest.NewRecorder()
 	srv.prolinkPost(postRec, postReq)
 
@@ -242,7 +242,7 @@ func TestProlinkShareToggle(t *testing.T) {
 	srv := httptest.NewServer(ui)
 	defer srv.Close()
 	get := func(method, query string) (int, prolinkResponse) {
-		req, _ := http.NewRequest(method, srv.URL+"/v1/sc5000/prolink"+query, nil)
+		req, _ := http.NewRequest(method, srv.URL+"/v1/enginex/prolink"+query, nil)
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatal(err)

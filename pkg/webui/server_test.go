@@ -232,12 +232,12 @@ func TestLANCannotDriveTheDeck(t *testing.T) {
 		method, target string
 		want           int
 	}{
-		{"POST", "/v1/sc5000/ui?restart=1", 403},
-		{"POST", "/v1/sc5000/ui?waveform=rgb&lang=en", 403},
-		{"GET", "/v1/sc5000/update?apply=1", 403},
-		{"POST", "/v1/sc5000/login?provider=spotify", 403},
-		{"POST", "/v1/sc5000/relay", 403},
-		{"GET", "/v1/sc5000/stems/source", 403},
+		{"POST", "/v1/enginex/ui?restart=1", 403},
+		{"POST", "/v1/enginex/ui?waveform=rgb&lang=en", 403},
+		{"GET", "/v1/enginex/update?apply=1", 403},
+		{"POST", "/v1/enginex/login?provider=spotify", 403},
+		{"POST", "/v1/enginex/relay", 403},
+		{"GET", "/v1/enginex/stems/source", 403},
 		{"GET", "/v1/tracks/1", 403},
 		{"GET", "/v1/users/1/playlists", 403},
 		{"GET", "/v1/search?query=x", 403},
@@ -262,7 +262,7 @@ func TestLANCannotDriveTheDeck(t *testing.T) {
 	}
 	// "/./v1/..." is not a gateway path: the console mux only redirects it.
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("POST", "/./v1/sc5000/ui?restart=1", nil)
+	r := httptest.NewRequest("POST", "/./v1/enginex/ui?restart=1", nil)
 	r.RemoteAddr = "192.168.1.23:50000"
 	ui.ServeHTTP(w, r)
 	if w.Code < 300 || w.Code >= 500 {

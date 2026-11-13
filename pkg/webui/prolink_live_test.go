@@ -25,7 +25,7 @@ func writeLiveProlink(t *testing.T, path, title string, bpm float64) {
 func deck1Title(t *testing.T, s *Server) string {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	s.prolinkGet(rec, httptest.NewRequest(http.MethodGet, "/v1/sc5000/prolink", nil))
+	s.prolinkGet(rec, httptest.NewRequest(http.MethodGet, "/v1/enginex/prolink", nil))
 	var resp prolinkResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
@@ -33,7 +33,7 @@ func deck1Title(t *testing.T, s *Server) string {
 	return resp.Decks["1"].Title
 }
 
-// BH-GC2-8: one POST to /v1/sc5000/prolink wrote <StateDir>/prolink.json, and
+// BH-GC2-8: one POST to /v1/enginex/prolink wrote <StateDir>/prolink.json, and
 // from then on (across restarts too) the server read only that frozen file and
 // never saw rb-bridge's live CDJ state again.
 func TestProlinkLiveStateSurvivesAPost(t *testing.T) {
@@ -47,7 +47,7 @@ func TestProlinkLiveStateSurvivesAPost(t *testing.T) {
 	}
 	body, _ := json.Marshal(prolink.Device{Number: 2, Name: "CDJ-2000NXS2", Title: "Posted", LastSeen: time.Now()})
 	rec := httptest.NewRecorder()
-	s.prolinkPost(rec, httptest.NewRequest(http.MethodPost, "/v1/sc5000/prolink", bytes.NewReader(body)))
+	s.prolinkPost(rec, httptest.NewRequest(http.MethodPost, "/v1/enginex/prolink", bytes.NewReader(body)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("post: %d", rec.Code)
 	}
@@ -73,7 +73,7 @@ func TestProlinkPostForALiveDeckDoesNotFreezeIt(t *testing.T) {
 	writeLiveProlink(t, live, "Track A", 128)
 	body, _ := json.Marshal(prolink.Device{Number: 1, Name: "CDJ-3000", Title: "Posted", BPM: 99, LastSeen: time.Now()})
 	rec := httptest.NewRecorder()
-	s.prolinkPost(rec, httptest.NewRequest(http.MethodPost, "/v1/sc5000/prolink", bytes.NewReader(body)))
+	s.prolinkPost(rec, httptest.NewRequest(http.MethodPost, "/v1/enginex/prolink", bytes.NewReader(body)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("post: %d", rec.Code)
 	}
@@ -83,7 +83,7 @@ func TestProlinkPostForALiveDeckDoesNotFreezeIt(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 	writeLiveProlink(t, live, "Track B", 140)
 	rec = httptest.NewRecorder()
-	s.prolinkGet(rec, httptest.NewRequest(http.MethodGet, "/v1/sc5000/prolink", nil))
+	s.prolinkGet(rec, httptest.NewRequest(http.MethodGet, "/v1/enginex/prolink", nil))
 	var resp prolinkResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)

@@ -924,7 +924,7 @@ func (m *Manager) IsSafeModeQuarantined() bool {
 }
 
 // IsModEnabled reports whether id is enabled and not quarantined without taking
-// managerMu or scanning media drives. Safe for concurrent reads from /v1/sc5000/ui
+// managerMu or scanning media drives. Safe for concurrent reads from /v1/enginex/ui
 // because saveStateLocked writes mods-state.json atomically via temp file + rename.
 func (m *Manager) IsModEnabled(id string) bool {
 	if m == nil || id == "" {

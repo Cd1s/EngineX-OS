@@ -45,7 +45,7 @@ func TestUpdateChecksTheConfiguredGitHubRepo(t *testing.T) {
 	s := New(Config{AccessToken: "c", UIDir: ui, StateDir: state, GitHubURL: gh.URL, VersionFile: version}, nil)
 	get := func() updateStatus {
 		w := httptest.NewRecorder()
-		s.update(w, httptest.NewRequest("GET", "/v1/sc5000/update", nil))
+		s.update(w, httptest.NewRequest("GET", "/v1/enginex/update", nil))
 		var v updateStatus
 		json.Unmarshal(w.Body.Bytes(), &v)
 		return v
@@ -212,7 +212,7 @@ func bundleDeckWith(t *testing.T, compatible string, assets func(base string) st
 
 func getUpdate(s *Server, q string) updateStatus {
 	w := httptest.NewRecorder()
-	s.update(w, httptest.NewRequest("GET", "/v1/sc5000/update"+q, nil))
+	s.update(w, httptest.NewRequest("GET", "/v1/enginex/update"+q, nil))
 	var v updateStatus
 	json.Unmarshal(w.Body.Bytes(), &v)
 	return v
@@ -277,7 +277,7 @@ func TestUpdatePicksGen2ImgWhenUnlocked(t *testing.T) {
 func TestUnlockGen2Endpoint(t *testing.T) {
 	call := func(s *Server, method string) map[string]any {
 		w := httptest.NewRecorder()
-		s.handleUnlockGen2(w, httptest.NewRequest(method, "/v1/sc5000/unlock-gen2", nil))
+		s.handleUnlockGen2(w, httptest.NewRequest(method, "/v1/enginex/unlock-gen2", nil))
 		var v map[string]any
 		json.Unmarshal(w.Body.Bytes(), &v)
 		v["status"] = w.Code
@@ -373,7 +373,7 @@ func TestUpdateAppliesTheDataBundle(t *testing.T) {
 		if !s.tryApplyGen2Image(lockedPart) || s.updateCache.Error != "gen2 .img update is locked" {
 			t.Fatalf("tryApplyGen2Image did not block gen2-locked: %+v", s.updateCache)
 		}
-		s.handleUnlockGen2(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/sc5000/unlock-gen2", nil))
+		s.handleUnlockGen2(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/enginex/unlock-gen2", nil))
 		if v := getUpdate(s, ""); !strings.HasSuffix(v.DownloadURL, "/dl/"+imgName) {
 			t.Fatalf("after unlock: %+v", v)
 		}

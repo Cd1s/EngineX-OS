@@ -726,7 +726,7 @@ def start_services(side: str, src_dir: Path | None = None) -> None:
     cfg = SIDE_CFG[side]
     for _ in range(50):
         r = subprocess.run(
-            ["ip", "netns", "exec", cfg["netns"], "curl", "-sf", "http://127.0.0.1:8080/v1/sc5000/ui"],
+            ["ip", "netns", "exec", cfg["netns"], "curl", "-sf", "http://127.0.0.1:8080/v1/enginex/ui"],
             capture_output=True,
         )
         if r.returncode == 0:
@@ -1105,7 +1105,7 @@ def cmd_load(args) -> None:
             cfg = SIDE_CFG[s]
             sd = cfg["shadow_deck"]
             r = subprocess.run(
-                ["ip", "netns", "exec", cfg["netns"], "curl", "-sf", "http://127.0.0.1:8080/v1/sc5000/shadow"],
+                ["ip", "netns", "exec", cfg["netns"], "curl", "-sf", "http://127.0.0.1:8080/v1/enginex/shadow"],
                 capture_output=True,
                 text=True,
             )
@@ -1688,7 +1688,7 @@ def cmd_status(args) -> None:
                     k, v = line.split("=", 1)
                     aclk[k] = v
         sh_resp = subprocess.run(
-            ["ip", "netns", "exec", cfg["netns"], "curl", "-sf", "http://127.0.0.1:8080/v1/sc5000/shadow"],
+            ["ip", "netns", "exec", cfg["netns"], "curl", "-sf", "http://127.0.0.1:8080/v1/enginex/shadow"],
             capture_output=True,
             text=True,
         )

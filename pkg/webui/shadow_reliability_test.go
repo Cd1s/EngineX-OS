@@ -23,7 +23,7 @@ func TestShadowPostsRecoverAfterClockRollback(t *testing.T) {
 	t.Cleanup(s.Close)
 	s.shadow.ownPostAt = time.Now().Add(time.Minute).UnixMilli()
 	for position := 1; position <= 2; position++ {
-		s.decksPost(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/sc5000/decks",
+		s.decksPost(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/enginex/decks",
 			strings.NewReader(fmt.Sprintf(`[{"deck":1,"positionMs":%d,"at":%d}]`, position, time.Now().UnixMilli()))))
 		s.shadow.mu.Lock()
 		own := append([]deckState(nil), s.shadow.own...)

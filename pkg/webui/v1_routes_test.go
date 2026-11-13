@@ -46,7 +46,7 @@ func TestEveryV1RouteReachesTheGateway(t *testing.T) {
 
 func TestGen2UnlockStatusThroughServeHTTP(t *testing.T) {
 	s := New(Config{AccessToken: "t", MediaRoot: t.TempDir(), UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
-	for _, path := range []string{"/v1/sc5000/unlock-gen2", "/v1/sc5000/tailscale"} {
+	for _, path := range []string{"/v1/enginex/unlock-gen2", "/v1/enginex/tailscale"} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		req.RemoteAddr = "127.0.0.1:43210"
 		rec := httptest.NewRecorder()

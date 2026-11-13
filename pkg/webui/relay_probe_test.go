@@ -94,12 +94,12 @@ func TestUIStatusDiscoversIdleLANStemsRenderer(t *testing.T) {
 	defer s.Close()
 
 	pollUI := func() *httptest.ResponseRecorder {
-		req := httptest.NewRequest(http.MethodGet, "/v1/sc5000/ui", nil)
+		req := httptest.NewRequest(http.MethodGet, "/v1/enginex/ui", nil)
 		req.RemoteAddr = "127.0.0.1:42000"
 		w := httptest.NewRecorder()
 		s.ServeHTTP(w, req)
 		if w.Code != http.StatusOK {
-			t.Fatalf("GET /v1/sc5000/ui status=%d body=%s", w.Code, w.Body.String())
+			t.Fatalf("GET /v1/enginex/ui status=%d body=%s", w.Code, w.Body.String())
 		}
 		return w
 	}
@@ -118,7 +118,7 @@ func TestUIStatusDiscoversIdleLANStemsRenderer(t *testing.T) {
 		time.Sleep(15 * time.Millisecond)
 	}
 	if !strings.Contains(body, `"hostname":"studio-pc"`) || !strings.Contains(body, `"online":true`) {
-		t.Fatalf("idle /v1/sc5000/ui never discovered LAN Stems worker: %s", body)
+		t.Fatalf("idle /v1/enginex/ui never discovered LAN Stems worker: %s", body)
 	}
 
 	// Digest stays stable across polls while the discovered worker stays unchanged.
@@ -159,7 +159,7 @@ func TestLANProbeBudgetSurvivesStuckCacheAndSkipsConfiguredRelay(t *testing.T) {
 	})
 
 	poll := func(srv *Server) string {
-		req := httptest.NewRequest(http.MethodGet, "/v1/sc5000/ui", nil)
+		req := httptest.NewRequest(http.MethodGet, "/v1/enginex/ui", nil)
 		req.RemoteAddr = "127.0.0.1:42000"
 		w := httptest.NewRecorder()
 		srv.ServeHTTP(w, req)
