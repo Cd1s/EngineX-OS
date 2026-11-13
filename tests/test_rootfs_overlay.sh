@@ -646,6 +646,11 @@ role_case() { # <four_deck_role or ""> <resolved role> <group in the name bindin
     [[ $(cat "$TMP/assign-patched/role") == "$2" ]] || fail "role '$1' resolved to $(cat "$TMP/assign-patched/role"), want $2"
     [[ $(grep -c '^mount --bind' "$GUARD_LOG") == 1 ]] || fail "role '$1': want exactly one bind"
     grep -A2 '^        id: deckConfig$' "$j" | grep -q "name: Config.device.isPlayer ? \"\" : $3" || fail "role '$1': name binding"
+    # #263: the motorized platter (stock Motorized.qml: decks 1 and 2) is told the decks of this role, layer A first;
+    # a property of deckConfig, so the file still loads with stock QML (safe-mode keeps the bind).
+    case $2 in 24|2) decks='[2, 4]' ;; 12) decks='[1, 2]' ;; 34) decks='[3, 4]' ;; *) decks='[1, 3]' ;; esac
+    grep -A4 '^        id: deckConfig$' "$j" | grep -qxF "        readonly property var scDecks: (Config.device.isPlayer ? [1, 2] : $decks)" || fail "role '$1': the platter's decks, want $decks"
+    lacks '    decks:' "$j"
     case $4 in
     stock) has '    Layer {' "$j"; lacks 'ValueNoteAssignment' "$j" ;;
     own) lacks '    Layer {' "$j"; has 'path: "/GUI/Decks/DeckLeft/Layer"' "$j"; has 'note: 11' "$j"; has 'import Planck 1.0' "$j" ;;
