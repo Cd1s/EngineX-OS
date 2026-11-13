@@ -155,7 +155,7 @@ PY
         PATH=/usr/bin:/bin:/usr/sbin:/sbin \
         HOME=/tmp/home \
         LD_LIBRARY_PATH=/usr/lib:/usr/qt/lib \
-        LD_PRELOAD=/etc/sc5000/libengine-ui-hook.so \
+        LD_PRELOAD=/etc/enginex/libengine-ui-hook.so \
         QT_QPA_PLATFORM=eglfs \
         QT_QPA_EGLFS_INTEGRATION=eglfs_kms \
         LIBGL_ALWAYS_SOFTWARE=1 \
@@ -190,7 +190,9 @@ python3 "$REPO/tools/az01-packer/az01_packer.py" unpack "$IMG" --output "$W/imag
 IMG_EXT2=$W/image/rootfs.ext2
 [ -f "$IMG_EXT2" ] || { echo "Error: unpacked rootfs.ext2 not found" >&2; exit 1; }
 
-CURR_VERSION=$(debugfs -R "cat /etc/sc5000/version.txt" "$IMG_EXT2" 2>/dev/null | grep -E '^[0-9]' | head -1)
+# /etc/enginex since 5.3.0.5 (#234); older images keep it in /etc/sc5000.
+CURR_VERSION=$(debugfs -R "cat /etc/enginex/version.txt" "$IMG_EXT2" 2>/dev/null | grep -E '^[0-9]' | head -1)
+[ -n "$CURR_VERSION" ] || CURR_VERSION=$(debugfs -R "cat /etc/sc5000/version.txt" "$IMG_EXT2" 2>/dev/null | grep -E '^[0-9]' | head -1)
 echo "Detected current version in image: $CURR_VERSION (mock next: $NEXTV)"
 
 echo "==> Building language packs..."

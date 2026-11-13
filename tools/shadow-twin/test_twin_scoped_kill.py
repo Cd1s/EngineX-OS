@@ -74,9 +74,10 @@ class TestTwinScopedKill(unittest.TestCase):
                     os.link(cand_dir / "base/image/rootfs.ext2", work / "base/image/rootfs.ext2")
                 except OSError:
                     pass
-            if (cand_dir / "bin/sc5000-suite").is_file() and not (work / "bin/sc5000-suite").is_file():
-                (work / "bin").mkdir(parents=True, exist_ok=True)
-                shutil.copy2(cand_dir / "bin/sc5000-suite", work / "bin/sc5000-suite")
+            for suite in ("bin/enginex-suite", "bin/sc5000-suite"):  # caches from before #234: old name
+                if (cand_dir / suite).is_file() and not (work / "bin/enginex-suite").is_file():
+                    (work / "bin").mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(cand_dir / suite, work / "bin/enginex-suite")
             if (cand_dir / "bin/alsa-null-fixture.so").is_file() and not (work / "bin/alsa-null-fixture.so").is_file():
                 (work / "bin").mkdir(parents=True, exist_ok=True)
                 shutil.copy2(cand_dir / "bin/alsa-null-fixture.so", work / "bin/alsa-null-fixture.so")
@@ -121,7 +122,7 @@ class TestTwinScopedKill(unittest.TestCase):
                 f"[{label}] Twin B/{side}: Engine is NOT running in namespace! ps aux:\n{proc_table}",
             )
             self.assertTrue(
-                any(x in proc_table for x in ("stream-sync", "shadow-twin-sync", "sc5000-suite")),
+                any(x in proc_table for x in ("stream-sync", "shadow-twin-sync", "enginex-suite")),
                 f"[{label}] Twin B/{side}: stream-sync is NOT running in namespace! ps aux:\n{proc_table}",
             )
 

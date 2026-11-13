@@ -46,16 +46,16 @@ mount -t tmpfs tmpfs "$R/proc/irq"
 mkdir -p "$R/proc/irq/41"
 printf 'f\n' > "$R/proc/irq/41/smp_affinity"
 printf '0-3\n' > "$R/proc/irq/41/smp_affinity_list"
-mkdir -p "$R/etc/sc5000" "$R/tmp/home" "$R/run/dbus" "$R/data/sc5000-custom/ui/packs"
+mkdir -p "$R/etc/enginex" "$R/tmp/home" "$R/run/dbus" "$R/data/enginex/ui/packs"
 mkdir -p "$R/tmp/fx-qml-imports"
 cp -a /root/build/sc5000-lab/5.3.0/qrc/airAssignments/InputAssignment /root/build/sc5000-lab/5.3.0/qrc/airAssignments/OutputAssignment "$R/tmp/fx-qml-imports/"
-cp "${FX_HOOK:-$REPO/rootfs-overlay/etc/enginex/libengine-ui-hook.so}" "$R/etc/sc5000/libengine-ui-hook.so"
+cp "${FX_HOOK:-$REPO/rootfs-overlay/etc/enginex/libengine-ui-hook.so}" "$R/etc/enginex/libengine-ui-hook.so"
 cp "$W/libfx-native-test.so" "$R/tmp/libfx-native-test.so"
-cp -a "$W/packs/en" "$R/data/sc5000-custom/ui/packs/"
-mkdir -p "$R/data/sc5000-custom/ui/packs/en/Skins/Common/Items"
-cp "$REPO/tools/az01-packer/fx-selector-probe.qml" "$R/data/sc5000-custom/ui/packs/en/Skins/Common/Items/QmlWarnings.qml"
+cp -a "$W/packs/en" "$R/data/enginex/ui/packs/"
+mkdir -p "$R/data/enginex/ui/packs/en/Skins/Common/Items"
+cp "$REPO/tools/az01-packer/fx-selector-probe.qml" "$R/data/enginex/ui/packs/en/Skins/Common/Items/QmlWarnings.qml"
 if [ "${FX_CONFIG_ONLY:-0}" = 1 ]; then
-    cat > "$R/data/sc5000-custom/ui/packs/en/Skins/Common/Items/QmlWarnings.qml" <<'QML'
+    cat > "$R/data/enginex/ui/packs/en/Skins/Common/Items/QmlWarnings.qml" <<'QML'
 import QtQuick 2.12
 Item {
     Component.onCompleted: console.warn("FXCONFIG product=" + Config.device.name + " hasDJFx=" + Config.audio.fx.hasDJFx + " hasNHFx=" + Config.audio.fx.hasNHFx)
@@ -63,14 +63,14 @@ Item {
 }
 QML
 fi
-printf 'lang=en\npioneer_fx=spiral\n' > "$R/data/sc5000-custom/ui/settings.conf"
+printf 'lang=en\npioneer_fx=spiral\n' > "$R/data/enginex/ui/settings.conf"
 chroot "$R" /usr/bin/dbus-daemon --system --fork --nopidfile > "$W/dbus.log" 2>&1 || true
 if [ "${FX_READY_READONLY:-0}" = 1 ]; then mount -o remount,ro "$R/run"; fi
-"$W/ui-server" "$R/data/sc5000-custom/ui" "$R/tmp/fx-state" > "$W/http.log" 2>&1 &
+"$W/ui-server" "$R/data/enginex/ui" "$R/tmp/fx-state" > "$W/http.log" 2>&1 &
 server=$!
 trap 'kill "$server" 2>/dev/null || true' EXIT
-preload=/etc/sc5000/libengine-ui-hook.so:/tmp/libfx-native-test.so
-if [ "${FX_CONFIG_ONLY:-0}" = 1 ]; then preload=/etc/sc5000/libengine-ui-hook.so; fi
+preload=/etc/enginex/libengine-ui-hook.so:/tmp/libfx-native-test.so
+if [ "${FX_CONFIG_ONLY:-0}" = 1 ]; then preload=/etc/enginex/libengine-ui-hook.so; fi
 set +e
 timeout --kill-after=5s 40s chroot "$R" /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/tmp/home LD_LIBRARY_PATH=/usr/qt/lib \
     LD_PRELOAD="$preload" QT_QPA_PLATFORM=offscreen \
@@ -85,12 +85,12 @@ case "$engine_rc" in 0|124|137) ;; *) echo "Engine exited $engine_rc" >&2; exit 
 grep -a -m 40 -E 'FXCONFIG|FXPROBE|FXNATIVE|engine-ui-hook: PX' "$W/engine.log" | cut -c1-200 | head -n 40
 if [ "$PRODUCT" = JC11 ] && [ "${FX_READY_READONLY:-0}" != 1 ]; then
     grep -aq "PX product=JC11 master-bypass=1 installed" "$W/engine.log"
-    ! grep -q '^pioneer_fx=' "$R/data/sc5000-custom/ui/settings.conf"
+    ! grep -q '^pioneer_fx=' "$R/data/enginex/ui/settings.conf"
     echo "FXCONFIG legacy-master-bypass-and-migration|PASS"
 else
     ! grep -aq "PX product=$PRODUCT" "$W/engine.log"
     test ! -e "$R/run/enginex-fx-selector.ready"
-    grep -q '^pioneer_fx=spiral$' "$R/data/sc5000-custom/ui/settings.conf"
+    grep -q '^pioneer_fx=spiral$' "$R/data/enginex/ui/settings.conf"
     echo "FXCONFIG $PRODUCT-legacy-preserved|PASS"
 fi
 if [ "${FX_CONFIG_ONLY:-0}" = 1 ]; then

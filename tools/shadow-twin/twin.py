@@ -352,16 +352,19 @@ def ensure_base_artifacts(
         print(f"==> Building libengine-ui-hook.so ({ver_info['line']} @ {ver_info['commit']})...", flush=True)
         sh(f'cd "{src_dir}" && sh tools/ui-mod/build.sh')
 
-    suite_bin = WORK / "bin/sc5000-suite"
+    suite_bin = WORK / "bin/enginex-suite"
     if not suite_bin.is_file():
-        default_suite = Path("/var/tmp/shadow-twin/bin/sc5000-suite")
+        # A shared cache from before 5.3.0.5 (#234) holds the suite under its old name.
+        default_suite = Path("/var/tmp/shadow-twin/bin/enginex-suite")
+        if not default_suite.is_file():
+            default_suite = Path("/var/tmp/shadow-twin/bin/sc5000-suite")
         if default_suite.is_file() and not commit_changed:
             try:
                 shutil.copy2(default_suite, suite_bin)
             except Exception:
                 pass
     if build_suite or commit_changed or not suite_bin.is_file():
-        print(f"==> Building sc5000-suite (armhf) ({ver_info['line']} @ {ver_info['commit']})...", flush=True)
+        print(f"==> Building enginex-suite (armhf) ({ver_info['line']} @ {ver_info['commit']})...", flush=True)
         sh(f'cd "{src_dir}" && GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -o "{suite_bin}" ./cmd/enginex-suite')
 
     packs_dir = WORK / "packs"
@@ -432,7 +435,7 @@ def write_instance_configs(side: str, mode: str, src_dir: Path, ver_info: dict) 
     (sdir / "tmp").mkdir(parents=True, exist_ok=True)
     (sdir / "run").mkdir(parents=True, exist_ok=True)
 
-    sc_link = sdir / "data/sc5000-custom"
+    sc_link = sdir / "data/sc5000-custom"  # the compat link a deck carries (#234)
     if not sc_link.exists() and not sc_link.is_symlink():
         sc_link.symlink_to("enginex")
 
@@ -657,7 +660,7 @@ def start_services(side: str, src_dir: Path | None = None) -> None:
         ns_chroot_cmd(
             side,
             "pkill -TERM -f '^/usr/Engine/Engine' 2>/dev/null || true; "
-            "pkill -TERM -f '/tmp/stream-sync|shadow-twin-sync|sc5000-suite' 2>/dev/null || true",
+            "pkill -TERM -f '/tmp/stream-sync|shadow-twin-sync|enginex-suite|sc5000-suite' 2>/dev/null || true",
         ),
         check=False,
     )
@@ -675,7 +678,7 @@ def start_services(side: str, src_dir: Path | None = None) -> None:
         ns_chroot_cmd(
             side,
             "pkill -KILL -f '^/usr/Engine/Engine' 2>/dev/null || true; "
-            "pkill -KILL -f '/tmp/stream-sync|shadow-twin-sync|sc5000-suite' 2>/dev/null || true",
+            "pkill -KILL -f '/tmp/stream-sync|shadow-twin-sync|enginex-suite|sc5000-suite' 2>/dev/null || true",
         ),
         check=False,
     )
@@ -685,26 +688,26 @@ def start_services(side: str, src_dir: Path | None = None) -> None:
     shutil.rmtree(sdir / "data/AppDataUser", ignore_errors=True)
     shutil.rmtree(sdir / "data/.config", ignore_errors=True)
     shutil.rmtree(sdir / "data/inMusicTempFiles", ignore_errors=True)
-    shutil.rmtree(sdir / "data/sc5000-custom/shadow", ignore_errors=True)
+    shutil.rmtree(sdir / "data/enginex/shadow", ignore_errors=True)
     (sdir / "data/AppDataUser/AIR Music Technology/Engine/State").mkdir(parents=True, exist_ok=True)
     (sdir / "data/inMusicTempFiles").mkdir(parents=True, exist_ok=True)
 
-    # Sync /etc/sc5000 overlay files (libengine-ui-hook.so, engine-ui-guard, etc.) into the live chroot
+    # Sync /etc/enginex overlay files (libengine-ui-hook.so, engine-ui-guard, etc.) into the live chroot
     if src_dir is not None and (src_dir / "rootfs-overlay/etc/enginex").is_dir():
         for f in (src_dir / "rootfs-overlay/etc/enginex").iterdir():
             if f.is_file():
                 dst = sdir / "tmp" / f.name
                 shutil.copy2(f, dst)
                 subprocess.run(
-                    ns_chroot_cmd(side, f"cp -f /tmp/{f.name} /etc/sc5000/{f.name} && chmod 755 /etc/sc5000/{f.name}"),
+                    ns_chroot_cmd(side, f"cp -f /tmp/{f.name} /etc/enginex/{f.name} && chmod 755 /etc/enginex/{f.name}"),
                     check=False,
                 )
                 dst.unlink(missing_ok=True)
 
-    # Install latest sc5000-suite (as shadow-twin-sync + stream-sync symlink) and alsa-null-fixture.so
+    # Install latest enginex-suite (as shadow-twin-sync + stream-sync symlink) and alsa-null-fixture.so
     for f in ("shadow-twin-sync", "stream-sync", "alsa-null-fixture.so", "alsa-clock.txt"):
         (sdir / "tmp" / f).unlink(missing_ok=True)
-    shutil.copy2(WORK / "bin/sc5000-suite", sdir / "tmp/shadow-twin-sync")
+    shutil.copy2(WORK / "bin/enginex-suite", sdir / "tmp/shadow-twin-sync")
     (sdir / "tmp/stream-sync").symlink_to("shadow-twin-sync")
     shutil.copy2(WORK / "bin/alsa-null-fixture.so", sdir / "tmp/alsa-null-fixture.so")
     (sdir / "tmp/home").mkdir(parents=True, exist_ok=True)
@@ -712,7 +715,7 @@ def start_services(side: str, src_dir: Path | None = None) -> None:
     (sdir / "tmp/engine_runguard.lock").unlink(missing_ok=True)
 
     # Run engine-ui-guard pre (writes /run/enginex-assignments/role, StreamingAccounts.json, etc.)
-    subprocess.run(ns_chroot_cmd(side, "/etc/sc5000/engine-ui-guard pre"), check=True)
+    subprocess.run(ns_chroot_cmd(side, "/etc/enginex/engine-ui-guard pre"), check=True)
 
     # Start stream-sync (--deemixd="" avoids spawning deemixd; --disable-guard avoids SCHED_IDLE starvation under software GL)
     sync_log = open(sdir / "logs/stream-sync.log", "w")
@@ -740,7 +743,7 @@ def start_services(side: str, src_dir: Path | None = None) -> None:
         "exec /usr/bin/env "
         "HOME=/tmp/home "
         "LD_LIBRARY_PATH=/usr/lib/arm-linux-gnueabihf:/usr/lib:/usr/qt/lib "
-        "LD_PRELOAD=/tmp/alsa-null-fixture.so:/etc/sc5000/libengine-ui-hook.so "
+        "LD_PRELOAD=/tmp/alsa-null-fixture.so:/etc/enginex/libengine-ui-hook.so "
         "SBX_CARD=JP07 SBX_OUT=4 SBX_IN=2 SBX_CLOCK_HZ=48000 SBX_HEADLESS_VSYNC=1 "
         "QT_QPA_PLATFORM=eglfs "
         "QT_QPA_EGLFS_INTEGRATION=eglfs_kms "
@@ -1757,7 +1760,7 @@ def main() -> None:
     p_dep = sub.add_parser("deploy", help="Rebuild and hot-redeploy suite and/or UI packs into running sandbox")
     p_dep.add_argument("--ref", default=None, help="Optional git ref to build from")
     p_dep.add_argument("--local", action="store_true", help="Build from current repo working tree")
-    p_dep.add_argument("--suite", action="store_true", help="Rebuild sc5000-suite")
+    p_dep.add_argument("--suite", action="store_true", help="Rebuild enginex-suite")
     p_dep.add_argument("--packs", action="store_true", help="Rebuild UI packs")
     p_dep.add_argument("--hook", action="store_true", help="Rebuild libengine-ui-hook.so")
     p_dep.add_argument("--mode", choices=("display", "engine", "auto"), default=None, help="Optionally switch shadow mode")

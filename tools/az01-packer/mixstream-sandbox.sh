@@ -57,13 +57,13 @@ mount -t tmpfs tmpfs "$R/proc/irq"
 mkdir -p "$R/proc/irq/41"
 printf 'f\n' > "$R/proc/irq/41/smp_affinity"
 printf '0-3\n' > "$R/proc/irq/41/smp_affinity_list"
-mkdir -p "$R/etc/sc5000" "$R/tmp/home" "$R/tmp/qrc-dump" "$R/run/dbus" "$R/data/sc5000-custom/ui/packs"
-cp "${X166_HOOK:-$REPO/rootfs-overlay/etc/enginex/libengine-ui-hook.so}" "$R/etc/sc5000/libengine-ui-hook.so"
+mkdir -p "$R/etc/enginex" "$R/tmp/home" "$R/tmp/qrc-dump" "$R/run/dbus" "$R/data/enginex/ui/packs"
+cp "${X166_HOOK:-$REPO/rootfs-overlay/etc/enginex/libengine-ui-hook.so}" "$R/etc/enginex/libengine-ui-hook.so"
 cp "$W/qrc_dump.so" "$R/tmp/"
-cp -a "$W/packs/en" "$R/data/sc5000-custom/ui/packs/"
-mkdir -p "$R/data/sc5000-custom/ui/packs/en/Skins/Common/Items"
-cp "$REPO/tools/az01-packer/mixstream-probe.qml" "$R/data/sc5000-custom/ui/packs/en/Skins/Common/Items/QmlWarnings.qml"
-printf 'lang=en\n' > "$R/data/sc5000-custom/ui/settings.conf"
+cp -a "$W/packs/en" "$R/data/enginex/ui/packs/"
+mkdir -p "$R/data/enginex/ui/packs/en/Skins/Common/Items"
+cp "$REPO/tools/az01-packer/mixstream-probe.qml" "$R/data/enginex/ui/packs/en/Skins/Common/Items/QmlWarnings.qml"
+printf 'lang=en\n' > "$R/data/enginex/ui/settings.conf"
 chroot "$R" /usr/bin/dbus-daemon --system --fork --nopidfile > "$W/$board-dbus.log" 2>&1 || true
 python3 "$REPO/tools/az01-packer/mixstream-collection-probe.py" "$R" "${X166_COLLECTION:-full}" > "$W/$board-collection.log" 2>&1 &
 collection_pid=$!
@@ -71,7 +71,7 @@ trace=()
 if [ "${X166_STRACE:-0}" = 1 ]; then trace=(strace -f -o "$W/$board-strace.log" -e trace=file,process); fi
 engine_rc=0
 "${trace[@]}" timeout --kill-after=5s 40s chroot "$R" /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/tmp/home LD_LIBRARY_PATH=/usr/qt/lib \
-    LD_PRELOAD=/tmp/qrc_dump.so:/etc/sc5000/libengine-ui-hook.so QRC_DUMP_DIR=/tmp/qrc-dump QT_QPA_PLATFORM=offscreen \
+    LD_PRELOAD=/tmp/qrc_dump.so:/etc/enginex/libengine-ui-hook.so QRC_DUMP_DIR=/tmp/qrc-dump QT_QPA_PLATFORM=offscreen \
     QML_DISABLE_DISK_CACHE=1 MALLOC_ARENA_MAX=1 /usr/Engine/Engine -d0 > "$W/$board-engine.log" 2>&1 || engine_rc=$?
 echo "X166 ENGINE_EXIT|$engine_rc|" >> "$W/$board-engine.log"
 if [ -f "$R/tmp/engine-quit-reason" ]; then cp "$R/tmp/engine-quit-reason" "$W/$board-quit-reason"; fi

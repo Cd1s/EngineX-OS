@@ -113,10 +113,10 @@ done
 mkdir -p "$R/proc/sys/net/core" "$R/proc/sys/net/ipv4" "$R/proc/sys/vm" "$R/proc/sys/fs"
 for k in net/core/rmem_max net/core/wmem_max net/ipv4/tcp_rmem net/ipv4/tcp_wmem vm/swappiness fs/file-max; do echo 0 > "$R/proc/sys/$k"; done
 in_root() { chroot "$R" /usr/bin/env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin "$@"; }
-in_root /usr/libexec/sc5000-custom-etc-reset > "$C/prepare.log" 2>&1
-in_root /usr/libexec/sc5000-custom-prepare >> "$C/prepare.log" 2>&1
+in_root /usr/libexec/enginex-etc-reset > "$C/prepare.log" 2>&1
+in_root /usr/libexec/enginex-prepare >> "$C/prepare.log" 2>&1
 printf 'lang=en\n' > "$C/data/enginex/ui/settings.conf"
-in_root /etc/sc5000/engine-ui-guard pre >> "$C/prepare.log" 2>&1
+in_root /etc/enginex/engine-ui-guard pre >> "$C/prepare.log" 2>&1
 umount "$R/proc"
 mount -t proc proc "$R/proc"
 printf '           CPU0\n 41:        100     GICv2  32 Level     ttyS0\n' > "$R/run/gate/interrupts"
@@ -143,14 +143,14 @@ in_root /usr/local/bin/stream-sync --listen :8080 --cpu 3 --deemixd '' --relay-u
 stream=$!
 wait_for() { local end=$((SECONDS + $1)); shift; until "$@"; do [ "$SECONDS" -lt "$end" ] || return 1; sleep .1; done; }
 wait_for 20 curl -sf -o /dev/null http://127.0.0.1:8080/boot-status
-timeout=45; hook=/etc/sc5000/libengine-ui-hook.so
+timeout=45; hook=/etc/enginex/libengine-ui-hook.so
 if [ "$2" = hang ]; then timeout=2; hook=/run/gate/hang.so:$hook; fi
-in_root ENGINEX_BOOT_TIMEOUT=$timeout ENGINEX_BOOT_POLL_INTERVAL=.1 /etc/sc5000/engine-ui-guard watch > "$C/guardian.log" 2>&1 &
+in_root ENGINEX_BOOT_TIMEOUT=$timeout ENGINEX_BOOT_POLL_INTERVAL=.1 /etc/enginex/engine-ui-guard watch > "$C/guardian.log" 2>&1 &
 watcher=$!
 start=$SECONDS
 chroot "$R" /usr/bin/env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     HOME=/tmp/home QT_QPA_PLATFORM=offscreen LD_LIBRARY_PATH=/usr/qt/lib MALLOC_ARENA_MAX=1 \
-    ENGINEX_UI_HOOK=$hook /etc/sc5000/engine-ui-guard launch /usr/Engine/Engine -d0 > "$C/engine.log" 2>&1 &
+    ENGINEX_UI_HOOK=$hook /etc/enginex/engine-ui-guard launch /usr/Engine/Engine -d0 > "$C/engine.log" 2>&1 &
 engine=$!
 if [ "$2" = hang ]; then
     wait_for 8 test -e "$R/tmp/fallback-restart"
@@ -159,10 +159,10 @@ if [ "$2" = hang ]; then
     kill -KILL "$engine" 2>/dev/null || :
     wait "$engine" 2>/dev/null || :
     rm -f "$R/tmp/engine_runguard.lock"
-    in_root /etc/sc5000/engine-ui-guard pre >> "$C/prepare.log" 2>&1
+    in_root /etc/enginex/engine-ui-guard pre >> "$C/prepare.log" 2>&1
     chroot "$R" /usr/bin/env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
         HOME=/tmp/home QT_QPA_PLATFORM=offscreen LD_LIBRARY_PATH=/usr/qt/lib MALLOC_ARENA_MAX=1 \
-        /etc/sc5000/engine-ui-guard launch /usr/Engine/Engine -d0 > "$C/stock-engine.log" 2>&1 &
+        /etc/enginex/engine-ui-guard launch /usr/Engine/Engine -d0 > "$C/stock-engine.log" 2>&1 &
     engine=$!
     elapsed=$((SECONDS - start))
     [ "$elapsed" -le 10 ]
