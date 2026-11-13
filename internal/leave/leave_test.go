@@ -598,3 +598,40 @@ func TestLeaveRollbackRetryDoesNotSkipAFailedSync(t *testing.T) {
 		t.Fatalf("not put back:\n%s", dd)
 	}
 }
+
+// #234 review round 5 (R2): a lookup that fails with an I/O error is not a missing directory.
+// After the sync of the committed bundle's live directory failed (and keeps failing), recovery
+// cannot look that directory up: right before its sync (the reviewer's injection), or at all.
+// Either way it returns an error and keeps the journal and the parked bundle; once the faults are
+// gone it finishes.
+func TestLeaveFailedLookupIsNotAMissingDirectory(t *testing.T) {
+	d, root := newDeck(t)
+	journal := filepath.Join(root, "data", journalName)
+	live := filepath.Join(root, "data/enginex")
+	fault := injectSyncFault(t, "/stage/root/bundle", live)
+	if err := d.Install(legacyBundle(t, "5.3.0.3")); !errors.Is(err, syscall.EIO) {
+		t.Fatalf("install: %v, want EIO", err)
+	}
+	defer func(l func(string) (os.FileInfo, error)) { lstat = l }(lstat)
+	for _, from := range []int{2, 1} { // fail the live directory's lookups from this one on
+		n := 0
+		lstat = func(p string) (os.FileInfo, error) {
+			if p == live {
+				if n++; n >= from {
+					return nil, syscall.EIO
+				}
+			}
+			return os.Lstat(p)
+		}
+		if err := d.Recover(); err == nil {
+			t.Fatalf("recover with lookup %d of the live directory failing: no error", from)
+		}
+		if !exists(filepath.Join(journal, "stage/root/bundle/lib/libengine-ui-hook.so")) {
+			t.Fatalf("the journal or the parked bundle is gone (lookup %d failing)", from)
+		}
+	}
+	lstat, fault.armed = os.Lstat, false
+	if err := d.Recover(); err != nil || exists(journal) {
+		t.Fatalf("not finished once the faults are gone: %v", err)
+	}
+}
