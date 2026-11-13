@@ -378,6 +378,7 @@ func TestShadowDisplayDetailProgress(t *testing.T) {
 	s.shadow.mu.Unlock()
 	get := func(a *shadowDisplayAsset) (string, deckState) {
 		t.Helper()
+		a.Key = "a"
 		s.shadow.display.mu.Lock()
 		s.shadow.display.entries = map[string]*shadowDisplayEntry{id: {asset: a, at: time.Now(), retry: time.Now().Add(time.Hour)}}
 		s.shadow.display.mu.Unlock()
@@ -417,7 +418,7 @@ func TestShadowSourceHeadAndProgress(t *testing.T) {
 	if len(c.entries) != 0 || c.running {
 		t.Fatalf("the head was queued: %+v", c.entries)
 	}
-	e := &shadowSourceEntry{asset: &shadowDisplayAsset{Title: "T", DetailPending: true}, path: "/p", key: "k"}
+	e := &shadowSourceEntry{asset: &shadowDisplayAsset{Key: "k", Title: "T", DetailPending: true}, path: "/p", key: "k", req: "k"}
 	c.entries["k"] = e
 	if a, err := s.sourceDisplayAsset(t.Context(), "/p", "k", false); err != nil || a != e.asset {
 		t.Fatalf("before the worker starts: %+v %v", a, err)

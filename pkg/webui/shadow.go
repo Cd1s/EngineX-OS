@@ -61,7 +61,7 @@ type deckState struct {
 	Title        string  `json:"title,omitempty"` // a streaming track's real title (QML or stm.db): the copy is named after it
 	Artist       string  `json:"artist,omitempty"`
 	KeyName      string  `json:"keyName,omitempty"`      // the key as the source's header writes it ("-": none); the shadow header shows it, not the copy's own analysis
-	ID           string  `json:"id,omitempty"`           // Engine mode, what the source has loaded: its Key (a copy), its Net (this player's own file), a CDJ's slot and track id. The QML loads again when it changes
+	ID           string  `json:"id,omitempty"`           // what the source has loaded (also the display metadata revision): its Key (a copy), its Net (this player's own file), a CDJ's slot and track id. The QML loads again when it changes
 	DurationMS   float64 `json:"durationMs,omitempty"`   // the track's length on the source: tells the QML whether Engine holds this track or another
 	Loading      bool    `json:"loading,omitempty"`      // shadow deck: the peer has a track whose audio is still being fetched
 	Progress     float64 `json:"progress,omitempty"`     // while loading, 0..1: how much of the copy (Engine mode) or of the source's detail waveform is done. Absent: not known, the QML shows a ring that turns
@@ -356,7 +356,9 @@ type shadowState struct {
 	peerTaken           map[string]time.Time   // when takePeer last accepted an update per peer (as peerSeq)
 	peerClock           map[string]peerClock   // per peer (as peerSeq)
 	dbg                 shadowDebug
-	metaOnlyPoll        bool // the newest compose had a CDJ deck, including cached display assets: 120 ms polls
+	metaOnlyPoll        bool       // the newest compose had a CDJ deck, including cached display assets: 120 ms polls
+	resolveMu           sync.Mutex // cold file resolution, independent of the live position lock
+	resolved            [5]shadowResolvedFile
 	display             shadowDisplayCache
 	sourceDisplay       shadowSourceCache
 	lines               []int // Line/Phono mixer channel inputs on all-in-one consoles
@@ -530,30 +532,18 @@ func resolveInMusicTempPath(ctx context.Context, orig string, size int64, dataRo
 		if _, err := os.Stat(mdb); err != nil {
 			continue
 		}
-		db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: mdb}).String()+"?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(500)")
+		rel, err := dbPathByFilename(ctx, mdb, orig, size)
 		if err != nil {
+			if !errors.Is(err, sql.ErrNoRows) {
+				return ""
+			}
 			continue
 		}
-		rows, err := db.QueryContext(ctx, `SELECT path FROM Track WHERE filename = ? LIMIT 8`, orig)
-		if err == nil {
-			for rows.Next() {
-				var rel string
-				if rows.Scan(&rel) != nil || rel == "" {
-					continue
-				}
-				cand := filepath.Join(lib, filepath.FromSlash(rel))
-				if st, err := os.Stat(cand); err == nil && st.Mode().IsRegular() && st.Size() == size {
-					if match != "" && match != cand {
-						rows.Close()
-						db.Close()
-						return ""
-					}
-					match = cand
-				}
-			}
-			rows.Close()
+		cand := filepath.Join(lib, filepath.FromSlash(rel))
+		if match != "" && match != cand {
+			return ""
 		}
-		db.Close()
+		match = cand
 	}
 	return match
 }
@@ -600,18 +590,7 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 				if n := displayFileName(d.Artist, d.Title, d.Ext); n != "" {
 					d.Name = n // Engine shows a tagless streaming cache file by its name
 				}
-				if orig, ok := inMusicTempOrig(f, s.shadow.dataRoot); ok {
-					if realPath := resolveInMusicTempPath(r.Context(), orig, st.Size(), s.shadow.dataRoot); realPath != "" {
-						if rst, err := os.Stat(realPath); err == nil && rst.Mode().IsRegular() {
-							d.Key = fmt.Sprintf("%x", fnvSum(fmt.Sprintf("%s %d %d", realPath, rst.Size(), rst.ModTime().UnixNano())))
-						}
-					}
-					if d.Key == "" {
-						d.Key = fmt.Sprintf("%x", fnvSum(fmt.Sprintf("temp:%s %d", orig, st.Size())))
-					}
-				} else {
-					d.Key = fmt.Sprintf("%x", fnvSum(fmt.Sprintf("%s %d %d", f, st.Size(), st.ModTime().UnixNano())))
-				}
+				d.Key = s.shadow.resolvedTrackKey(r.Context(), d.Deck, f, st)
 			}
 		}
 		s.shadow.mu.Lock()
@@ -1302,46 +1281,13 @@ func libraryPerf(ctx context.Context, f, dataRoot, mediaRoot string) ([]byte, er
 		}
 	}
 	if orig, ok := inMusicTempOrig(f, dataRoot); ok {
-		for _, name := range []string{"m.db", "stm.db"} {
-			if perf, err2 := dbPerfByFilename(ctx, filepath.Join(lib, "Database2", name), orig); err2 == nil {
-				return perf, nil
+		if st, statErr := os.Stat(f); statErr == nil {
+			if real := resolveInMusicTempPath(ctx, orig, st.Size(), dataRoot); real != "" {
+				return libraryPerf(ctx, real, dataRoot, mediaRoot)
 			}
 		}
 	}
 	return nil, err
-}
-
-func dbPerfByFilename(ctx context.Context, mdb, filename string) ([]byte, error) {
-	if _, err := os.Stat(mdb); err != nil {
-		return nil, err
-	}
-	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: mdb}).String()+"?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(500)")
-	if err != nil {
-		return nil, err
-	}
-	defer db.Close()
-	rows, err := db.QueryContext(ctx, `SELECT coalesce(t.bpmAnalyzed, t.bpm), p.trackData, p.beatData, p.overviewWaveFormData
-		FROM Track t JOIN PerformanceData p ON p.trackId = t.id WHERE t.filename = ? AND length(p.trackData)>4 AND length(p.beatData)>4 AND length(p.overviewWaveFormData)>4 LIMIT 2`, filename)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var bpm sql.NullFloat64
-	var track, beats, overview []byte
-	count := 0
-	for rows.Next() {
-		count++
-		if count > 1 {
-			return nil, fmt.Errorf("perf: ambiguous filename")
-		}
-		if err := rows.Scan(&bpm, &track, &beats, &overview); err != nil {
-			return nil, err
-		}
-	}
-	if count != 1 {
-		return nil, sql.ErrNoRows
-	}
-	return perfFromBlobs(bpm.Float64, track, beats, overview)
 }
 
 func dbPerf(ctx context.Context, mdb, rel string) ([]byte, error) {
@@ -1469,7 +1415,9 @@ func (sh *shadowState) observeAt(d prolink.Device, now time.Time) {
 		expect := c.line + float64(now.Sub(c.at).Microseconds())/1000*c.rate
 		late := expect - ms
 		moving := !jump && !c.at.IsZero() && ms > c.ms
-		scratch := !jump && !c.at.IsZero() && (ms < c.ms-1 || (c.still >= 1 && c.still < cdjStill))
+		// Equal positions are a pause or a delayed GUI update, never a scratch.
+		// Once status is known, a paused CDJ cannot engage the shadow platter.
+		scratch := !jump && !c.at.IsZero() && (c.playing || !c.fine) && ms <= c.ms-cdjStillMS
 		if scratch != c.scratch || (scratch && math.Abs(ms-c.ms) >= 5) {
 			edge = true
 		}
@@ -1490,6 +1438,10 @@ func (sh *shadowState) observeAt(d prolink.Device, now time.Time) {
 		edge = playing != c.playing || d.TrackID != c.track
 		if d.TrackID != c.track {
 			delete(sh.precise, d.Number) // the other track's position
+		}
+		if !playing || d.TrackID != c.track {
+			edge = edge || c.scratch
+			c.scratch = false
 		}
 		c.playing, c.track = playing, d.TrackID
 		c.pitch, c.fine = d.Pitch, true
