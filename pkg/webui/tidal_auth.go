@@ -269,7 +269,10 @@ func (g *tidalGateway) refreshRealAuth(ctx context.Context, failedAccessToken st
 	if a.ClientID != "" {
 		form.Set("client_id", a.ClientID)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(base, "/")+"/v1/oauth2/token", strings.NewReader(form.Encode()))
+	// Not cancelled with the caller: once TIDAL has the request it rotates the pair and the
+	// old refresh token is dead, so the answer must be stored even if Engine gave up waiting.
+	// The client's own timeout still bounds it.
+	req, err := http.NewRequestWithContext(context.WithoutCancel(ctx), http.MethodPost, strings.TrimRight(base, "/")+"/v1/oauth2/token", strings.NewReader(form.Encode()))
 	if err != nil {
 		return tidalAuth{}, err
 	}
