@@ -215,6 +215,9 @@ func FillOverviewMaxima(ctx context.Context, mount string) error {
 			}
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
 	if err := rows.Close(); err != nil {
 		return err
 	}
