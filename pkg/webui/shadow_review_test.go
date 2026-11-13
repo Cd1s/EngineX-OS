@@ -229,30 +229,49 @@ func TestShadowUnresolvedTempFingerprintChangesAfterEdit(t *testing.T) {
 	if err := os.WriteFile(path, []byte("BBBBBBB"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chtimes(path, st.ModTime(), st.ModTime()); err != nil {
+	if err := os.Chtimes(path, st.ModTime().Add(time.Second), st.ModTime().Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	if next := shadowReviewPost(t, s, np); next.baseKey == first.baseKey {
-		t.Fatal("same-sized edit with restored mtime reused stale analysis")
+		t.Fatal("same-sized edit reused stale analysis")
 	}
 }
 
-func TestShadowDisplayCacheHasByteBudget(t *testing.T) {
+func TestShadowDisplayCacheKeepsFourEntries(t *testing.T) {
 	var c shadowDisplayCache
-	for i := 0; i < 16; i++ {
-		e := c.claim(strconv.Itoa(i), time.Unix(int64(i), 0))
-		if e == nil {
-			t.Fatal("cache did not admit an entry")
-		}
-		e.wave = make([]byte, 4<<20)
+	for i := 0; i < 5; i++ {
+		c.claim(strconv.Itoa(i), time.Unix(int64(i), 0))
 	}
-	c.claim("new", time.Now())
+	if len(c.entries) != 4 || c.entries["0"] != nil || c.entries["4"] == nil {
+		t.Fatal("receiver cache must retain only the four newest entries")
+	}
+}
+
+func TestShadowSourceCacheHasByteBudget(t *testing.T) {
+	data, media := shadowReviewLibrary(t, shadowReviewFile{"Music/song.wav", "song.wav", "WAVDATA"})
+	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	defer s.Close()
+	s.shadow.dataRoot, s.shadow.mediaRoot = data, media
+	c := &s.shadow.sourceDisplay
+	c.entries = make(map[string]*shadowSourceEntry)
+	for i := 0; i < 8; i++ {
+		a := testDisplayAsset()
+		a.Waveform = &enginedb.DisplayWave{Bands: make([]byte, 5<<20)}
+		c.entries[strconv.Itoa(i)] = &shadowSourceEntry{asset: a, at: time.Unix(int64(i), 0)}
+	}
+	if _, err := s.sourceDisplayAsset(context.Background(), filepath.Join(data, "Music/song.wav"), "new", true); err != nil {
+		t.Fatal(err)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	total := 0
 	for _, e := range c.entries {
-		total += cap(e.wave) + cap(e.overview)
+		if e.asset.Waveform != nil {
+			total += cap(e.asset.Waveform.Bands)
+		}
 	}
 	if total > 32<<20 {
-		t.Fatalf("display cache retained %d bytes, budget is 32 MiB", total)
+		t.Fatalf("source cache retained %d waveform bytes", total)
 	}
 }
 

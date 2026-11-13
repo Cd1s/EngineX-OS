@@ -283,10 +283,10 @@ func TestShadowDisplayReusesWaveformAcrossReloads(t *testing.T) {
 		t.Fatalf("reload did not reuse cached waveform: err=%v a=%+v", err, a2)
 	}
 
-	// Display receiver cache identity stays stable across reload keys and deck moves on the same peer.
+	// A new load refreshes receiver metadata; the source envelope above remains cached.
 	p1 := peerDeck{deckState: deckState{Deck: 1, Key: k1, Link: "{peer}"}, ip: "192.0.2.1"}
-	p2 := peerDeck{deckState: deckState{Deck: 3, Key: k2, Link: "{peer}"}, ip: "192.0.2.1"}
-	if displayPeerID(p1) != displayPeerID(p2) || displayTrackKey(p1) != displayTrackKey(p2) {
-		t.Fatalf("display peer identity changed across reload: %q vs %q", displayPeerID(p1), displayPeerID(p2))
+	p2 := peerDeck{deckState: deckState{Deck: 1, Key: k2, Link: "{peer}"}, ip: "192.0.2.1"}
+	if displayPeerID(p1) == displayPeerID(p2) || displayTrackKey(p1) == displayTrackKey(p2) {
+		t.Fatalf("display metadata identity did not change on reload: %q vs %q", displayPeerID(p1), displayPeerID(p2))
 	}
 }

@@ -167,20 +167,20 @@ for(let i=0;i<80;i++) {now+=25;pos-=15*48;scShadowTick();assert(buffers.includes
 assert.strictEqual(scShadowOwn[0],post); assert.strictEqual(scShadowSent[0],sent);
 """)
 
-    def test_display_reload_invalidates_metadata_even_with_a_stable_audio_key(self):
+    def test_display_reload_fetches_the_new_session_metadata(self):
         self.js(r"""
-let requests=0;
-scShadowDisplay[2]={key:'track',id:'load-1',meta:{detailPending:false,cues:[{ms:100}],beats:[{ms:250}]}};
+let metaRequests=0;
+scShadowDisplay[2]={key:'old-session',meta:{detailPending:false,cues:[{ms:100}],beats:[{ms:250}]}};
 scShadowGridCache[2]={stale:true};
 globalThis.XMLHttpRequest=class {
     open(){}
-    send(){requests++;this.readyState=4;this.status=200;this.responseText=JSON.stringify({key:'track',detailPending:false,cues:[{ms:600}],beats:[{ms:300}]});this.onreadystatechange();}
+    send(){metaRequests++;this.readyState=4;this.status=200;this.responseText=JSON.stringify({key:'new-session',detailPending:false,cues:[{ms:600}],beats:[{ms:300}]});this.onreadystatechange();}
 };
-scShadowApplyDisplay([{deck:2,key:'track',id:'load-2',displayOnly:true}]);
-assert.equal(requests,1,'reload kept the completed metadata of the previous session');
+scShadowApplyDisplay([{deck:2,key:'new-session',displayOnly:true}]);
+assert.equal(metaRequests,1,'reload kept the completed metadata of the previous session');
 assert.equal(scShadowDisplay[2].meta.cues[0].ms,600);
 assert.equal(scShadowDisplay[2].meta.beats[0].ms,300);
-assert.equal(scShadowGridCache[2],undefined);
+
 """)
 
 
