@@ -171,8 +171,8 @@ chmod +x '$TARGET/tmp/Engine'
 
 chroot '$TARGET' /tmp/Engine / > '$TMP/stage1.log' 2>&1 || true
 
-# Wait briefly for background boot-activate.sh
-for i in \$(seq 1 30); do
+# Allow up to 15 seconds for background boot-activate.sh under build-host load.
+for i in \$(seq 1 150); do
     if [ -f '$TARGET/run/systemd/system/enginex-deemixd.service' ]; then
         break
     fi
