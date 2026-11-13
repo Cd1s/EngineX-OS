@@ -75,7 +75,7 @@ func (c *shadowDisplayCache) claim(id string, now time.Time) *shadowDisplayEntry
 	if e := c.entries[id]; e != nil {
 		return e
 	}
-	if len(c.entries) >= 4 {
+	if len(c.entries) >= 16 {
 		oldest := ""
 		for k, e := range c.entries {
 			if !e.busy && (oldest == "" || e.at.Before(c.entries[oldest].at)) {
@@ -97,7 +97,7 @@ func displayPeerID(p peerDeck) string {
 	if id == "" {
 		id = p.ip
 	}
-	return fmt.Sprintf("peer:%s:%d:%s", id, p.Deck, p.Key)
+	return fmt.Sprintf("peer:%s:%s", id, stableTrackKey(p.Key))
 }
 
 // localPeerTrack covers a peer that plays a track from this deck's drive over
@@ -213,7 +213,7 @@ func (s *Server) shadowComposeDisplay(role string, now time.Time, lines ...[]int
 		d.Deck, d.Key = deck, displayTrackKey(p)
 		d.LineIn = false
 		d.Stale = p.Stale || now.Sub(p.at) >= 2*time.Second
-		if d.Playing {
+		if d.Playing && !p.Scratch {
 			if !p.Stale {
 				d.PositionMS, d.Rate = p.carried(min(2*time.Second, max(0, now.Sub(p.at))))
 			}
@@ -288,6 +288,7 @@ func (s *Server) shadowDisplayCDJs(free []int, lineIn bool, now time.Time, only 
 		}
 		sh.mu.Lock()
 		d.PositionMS, d.Playing = sh.cdjPlayhead(dev, d.Playing, d.Pitch, now)
+		d.Scratch = sh.cdj[dev.Number].scratch
 		sh.mu.Unlock()
 		out = append(out, d)
 	}
@@ -862,7 +863,47 @@ func libraryDisplay(ctx context.Context, f, dataRoot, mediaRoot string) (*shadow
 			return a, nil
 		}
 	}
+	if orig, ok := inMusicTempOrig(f, dataRoot); ok {
+		for _, name := range []string{"m.db", "stm.db"} {
+			if a, err2 := dbDisplayByFilename(ctx, filepath.Join(lib, "Database2", name), orig); err2 == nil {
+				return a, nil
+			}
+		}
+	}
 	return nil, err
+}
+
+func dbDisplayByFilename(ctx context.Context, file, filename string) (*shadowDisplayAsset, error) {
+	if _, err := os.Stat(file); err != nil {
+		return nil, err
+	}
+	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: file}).String()+"?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(500)")
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	rows, err := db.QueryContext(ctx, `SELECT path FROM Track WHERE filename = ? LIMIT 2`, filename)
+	if err != nil {
+		return nil, err
+	}
+	var rel string
+	count := 0
+	for rows.Next() {
+		count++
+		if count > 1 {
+			rows.Close()
+			return nil, fmt.Errorf("display: ambiguous filename")
+		}
+		if err := rows.Scan(&rel); err != nil {
+			rows.Close()
+			return nil, err
+		}
+	}
+	rows.Close()
+	if count != 1 || rel == "" {
+		return nil, sql.ErrNoRows
+	}
+	return dbDisplay(ctx, file, rel)
 }
 
 func bridgeDisplayWave(ctx context.Context, file, rel string, id int64, rate, durationMS float64) *enginedb.DisplayWave {

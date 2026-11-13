@@ -561,7 +561,7 @@ SERVICES_MAIN = """
 		// Unchanged replies keep a sample alive: carry it on until 3 s after the last one.
 		const alive = Math.max(s.at, scShadowLive.seen) + scShadowExpiryMs
 		const elapsed = s.stale ? 0 : Math.max(0, Math.min(now, alive) - s.at)
-		const pos = Math.max(0, s.positionMs + (s.playing ? elapsed * scShadowRate(s) : 0))
+		const pos = Math.max(0, s.positionMs + (s.playing && !s.scratch ? elapsed * scShadowRate(s) : 0))
 		return s.meta && s.meta.durationMs > 0 ? Math.min(s.meta.durationMs, pos) : pos
 	}
 	// Binary searches keep the source grid and #151 independent of Engine's empty slots.
@@ -741,7 +741,7 @@ SERVICES_MAIN = """
 	// by the displays) instead of re-running every shadow binding per reply.
 	function scShadowSameSample(s, key, e) {
 		if (s.key !== key || s.name !== (e.name || "") || s.title !== (e.title || "") || s.artist !== (e.artist || "") || s.keyName !== (e.keyName || "") ||
-			s.playing !== !!e.playing || s.stale !== !!e.stale || s.metadataOnly !== !!e.metadataOnly || s.lineIn !== !!e.lineIn || s.pitch !== (Number(e.pitch) || 0) ||
+			s.playing !== !!e.playing || s.scratch !== !!e.scratch || s.stale !== !!e.stale || s.metadataOnly !== !!e.metadataOnly || s.lineIn !== !!e.lineIn || s.pitch !== (Number(e.pitch) || 0) ||
 			s.cuePos !== (typeof e.cuePos === "number" ? e.cuePos : undefined) || s.master !== !!e.master ||
 			s.lead !== (e.lead !== undefined && e.lead !== null ? !!e.lead : !!e.master) || s.sync !== !!e.sync || s.keylock !== !!e.keylock ||
 			s.bpm !== (Number(e.bpm) || 0) || s.currentBpm !== (Number(e.currentBpm) || 0) || s.range !== (Number(e.range) || 0) ||
@@ -773,8 +773,8 @@ SERVICES_MAIN = """
 				// Same picture: a paused deck at the same spot, or a playing one within
 				// 12 ms of its line (the scroll keeps running within 12 ms too).
 				// Refresh the anchor in place well before the 3 s expiry.
-				const drift = old.playing ? old.positionMs + (at - old.at) * scShadowRate(old) - pos : old.positionMs - pos
-				if (Math.abs(drift) <= (old.playing ? 12 : 0)) {
+				const drift = old.playing && !old.scratch ? old.positionMs + (at - old.at) * scShadowRate(old) - pos : old.positionMs - pos
+				if (Math.abs(drift) <= (old.playing ? (old.scratch ? 4 : 12) : 0)) {
 					old.positionMs = pos; old.at = at; old.rate = Number(e.rate) || 0; old.beat = Number(e.beat) || 0
 					continue
 				}
@@ -784,7 +784,7 @@ SERVICES_MAIN = """
 			const fromCover = !!old && old.engine && !e.engine
 			if (fromCover) { delete scShadowDisplayRequests[d]; delete scShadowDisplayText[d] }
 			const sample = {key: key, name: e.name || "", title: e.title || "", artist: e.artist || "", keyName: e.keyName || "",
-				playing: !!e.playing, stale: !!e.stale, metadataOnly: !!e.metadataOnly, positionMs: pos, at: at,
+				playing: !!e.playing, scratch: !!e.scratch, stale: !!e.stale, metadataOnly: !!e.metadataOnly, positionMs: pos, at: at,
 				pitch: Number(e.pitch) || 0, rate: Number(e.rate) || 0, lineIn: isLine,
 				cuePos: typeof e.cuePos === "number" ? e.cuePos : undefined, master: !!e.master,
 				lead: e.lead !== undefined && e.lead !== null ? !!e.lead : !!e.master, sync: !!e.sync, keylock: !!e.keylock,
@@ -1321,7 +1321,8 @@ SERVICES_MAIN = """
 			["trackName", "/Track/TrackName"], ["artist", "/Track/ArtistName"], ["length", "/Track/TrackLength"],
 			["range", "/SpeedRange"], ["keylock", "/Track/KeyLock"], ["currentKey", "/Track/CurrentKey"],
 			["loop", "/Track/LoopEnableState"], ["keyOffset", "/Track/KeyOffset"], ["stemmed", "/Track/Stemmed"],
-			["slip", "/Track/SlipModeActive"], ["slipPosition", "/Track/SlipModePosition"], ["requestMaster", "/RequestMaster"]])
+			["slip", "/Track/SlipModeActive"], ["slipPosition", "/Track/SlipModePosition"], ["requestMaster", "/RequestMaster"],
+			["touch", "/ExternalScratchWheelTouch"], ["platterTouch", "/PlatterUserAction"]])
 			p[pair[0]] = root.scTr(prefix + pair[1]) || scShadowEmptyObject
 		p.cues = []
 		for (let i = 1; i <= 8; i++) {
@@ -1347,7 +1348,7 @@ SERVICES_MAIN = """
 			scShadowOwn.length = scShadowMine.length
 		}
 		const mine = scShadowMine
-		let edge = scShadowPostPending, busy = false, moving = false
+		let edge = scShadowPostPending, busy = false, moving = false, anyScratch = false
 		for (let n = 0; n < mine.length; n++) {
 			const d = mine[n], g = scShadowProperties(d), p = scShadowPrev[d]
 			const s = scShadowSampleSpare[d] || {}
@@ -1369,9 +1370,18 @@ SERVICES_MAIN = """
 			s.loaded = !!g.loaded.state
 			if (p && p.loaded === s.loaded && now - p.netAt < 500) { s.net = p.net; s.netAt = p.netAt }
 			else { s.net = s.loaded ? g.uri.string || g.net.string || "" : ""; s.netAt = now }
-			s.cue = !s.ps && !!g.cueLED.state && !!p && s.net === p.net && (s.posMs > p.posMs + 0.5 || p.cue)
+			const touch = !!(g.touch.state || g.platterTouch.state)
+			s.cue = !s.ps && !touch && !!g.cueLED.state && !!p && s.net === p.net && (s.posMs > p.posMs + 0.5 || p.cue)
 			s.playing = s.ps || s.cue
 			s.master = !!g.master.state
+			s.rawStillTicks = p && p.ps && s.net === p.net && now - p.at <= 150 && s.rawPos <= p.rawPos + 0.5 ? (p.rawStillTicks || 0) + 1 : 0
+			s.rawBackTicks = p && p.ps && s.net === p.net && now - p.at <= 150 && s.rawPos < p.rawPos - 1 ? (p.rawBackTicks || 0) + 1 : 0
+			s.pausedMoveTicks = p && !s.ps && !p.ps && s.net === p.net && !s.cue && now - p.at <= 150 && Math.abs(s.rawPos - p.rawPos) > 1 ? (p.pausedMoveTicks || 0) + 1 : 0
+			const jumpThreshold = s.sync && p && p.playing ? 40 * Math.max(1, 1 + s.pitch / 100) : (p && p.playing ? 180 : 5)
+			const rawDelta = p ? Math.abs(s.rawPos - (p.posMs + (p.playing ? (now - p.at) * (1 + p.pitch / 100) : 0))) : 0
+			const motionScratch = p && s.net === p.net && now - p.at <= 150 && rawDelta <= jumpThreshold && (s.ps ? (p.ps && (s.rawPos < p.rawPos - 45 || s.rawBackTicks >= 2 || s.rawStillTicks >= 2)) : (s.pausedMoveTicks >= 2))
+			s.scratch = s.loaded && (touch || !!motionScratch)
+			if (p && s.scratch !== !!p.scratch) edge = true
 			if (p && p.bpm === ob && p.currentBpm === cb && now - p.syncAt < 200) { s.sync = p.sync; s.syncAt = p.syncAt; s.range = p.range; s.rangeIndex = p.rangeIndex; s.keylock = p.keylock }
 			else {
 				s.sync = (g.sync.string || "Off") !== "Off"; s.syncAt = now; s.keylock = !!g.keylock.state
@@ -1391,7 +1401,7 @@ SERVICES_MAIN = """
 				s.syncBias = Math.max(0, Math.min(35 * (1 + s.pitch / 100), bias))
 			} else s.syncBias = p ? p.syncBias || 0 : 0
 			if (p) {
-				const run = p.playing ? (now - p.at) * (1 + p.pitch / 100) : 0, expect = p.posMs + run
+				const run = p.playing && !p.scratch ? (now - p.at) * (1 + p.pitch / 100) : 0, expect = p.posMs + run
 				// A late tick (GC, a busy GUI thread) can run before Engine's queued position
 				// update and read the position of before the stall (zs15-b: 340 ms behind,
 				// counted as a jump back and a jump forward, each a seek on the peer).
@@ -1402,7 +1412,7 @@ SERVICES_MAIN = """
 				const block = 35 * (1 + s.pitch / 100)
 				s.lateGuard = syncMoving && now - p.at > 150 && s.rawPos <
 					(p.lateGuard ? expect - block : p.rawPos + run - block - run * 0.3)
-				if (now - p.at > 150 && s.ps && p.ps && s.net === p.net && !p.phaseHold &&
+				if (now - p.at > 150 && s.ps && p.ps && s.net === p.net && !p.phaseHold && !touch &&
 					!(syncMoving && freshRaw && !s.lateGuard)) s.posMs = expect
 				// Sync phase steps can be smaller than 180 ms. Audio-block jitter is
 				// measured in wall time, so allow it to grow with the deck's rate.
@@ -1425,7 +1435,7 @@ SERVICES_MAIN = """
 					(p.phaseHold || now - s.rawStillAt >= 500)
 				if (s.phaseHold) s.posMs = s.rawPos
 				if (s.phaseHold) { if (!p.phaseHold) s.jumps++ }
-				else if (s.playing === p.playing && s.net === p.net && Math.abs(delta) > jumpMs) {
+				else if (!s.scratch && s.playing === p.playing && s.net === p.net && Math.abs(delta) > jumpMs) {
 					// A short GUI stall can also leave one stale audio block. Carry
 					// the old line until a small Sync step persists on the next tick;
 					// its queued recovery then never becomes a backward/forward seek.
@@ -1433,18 +1443,21 @@ SERVICES_MAIN = """
 						!movingPhase && (latePhase || !isFinite(p.phase) || Math.abs(delta - p.phase) > phaseMs || !phaseFresh)) {
 						s.phase = delta; s.phaseAt = isFinite(p.phase) ? p.phaseAt : now; s.posMs = expect
 					} else s.jumps++
+				} else if (s.scratch && p.scratch && s.net === p.net && Math.abs(s.rawPos - p.rawPos) > 500) {
+					s.jumps++
 				}
 				if (s.jumps !== p.jumps || s.playing !== p.playing || s.net !== p.net || Math.abs(s.pitch - p.pitch) > 0.02 || s.master !== p.master || s.sync !== p.sync || s.range !== p.range || s.keylock !== p.keylock) edge = true
 				if (!s.ps && s.posMs !== p.posMs) busy = true // scrub, seek or CUE preview while paused
 			}
 			if (s.cue) busy = true
 			if (s.ps) moving = true
+			if (s.scratch) anyScratch = true
 			// Engine moves TrackPosition in audio blocks: at 25 Hz a playing deck's raw
 			// position is up to ~35 ms of track time behind (high pitch). With the speed
 			// known, the upper envelope of position - speed * time is the newest block:
 			// post that line (noise of a few ms), decaying 0.5 ms/s to follow pitch rounding.
 			const speed = 1 + s.pitch / 100, raw = s.posMs - speed * now
-			if (s.phaseHold) s.env = s.avg = raw
+			if (s.phaseHold || s.scratch) s.env = s.avg = raw
 			else if (syncMoving) {
 				// Native Sync pulls phase by changing the transport's instantaneous
 				// speed for up to ~1.6 s. The nominal-pitch envelope would conceal
@@ -1467,8 +1480,10 @@ SERVICES_MAIN = """
 			// A jog nudge moves the line off the one the peer carries on: post it at once,
 			// not at the next heartbeat (25 Hz for 2 s, so the peer follows the nudge).
 			const sent = scShadowSent[n]
-			if (s.ps && sent && sent.playing && sent.deck === d && sent.net === s.net && sent.pitch === s.pitch && sent.jumps === s.jumps &&
+			if (s.ps && !s.scratch && sent && sent.playing && !sent.scratch && sent.deck === d && sent.net === s.net && sent.pitch === s.pitch && sent.jumps === s.jumps &&
 				Math.abs(s.lineMs - sent.positionMs - (now - sent.at) * speed) > 15) edge = true
+			if ((s.scratch || (sent && sent.scratch)) && sent && sent.deck === d && sent.net === s.net &&
+				(s.scratch !== !!sent.scratch || Math.abs(s.lineMs - sent.positionMs) > 6)) edge = true
 			scShadowPrev[d] = s
 			scShadowSampleSpare[d] = p || {}
 		}
@@ -1486,8 +1501,8 @@ SERVICES_MAIN = """
 		// margin for a busy GUI thread. Each post and the peer's reply are JS strings
 		// that drive V4's GC trigger (250 ms here meant a GC every ~75-150 s of play).
 		if (edge || now - scShadowPostAt >= 500) scShadowPost(mine, now, edge)
-		if (edge || busy) scShadowBusyAt = now
-		const rate = now - scShadowBusyAt < 2000 ? 40 : moving ? 80 : 200
+		if (edge || busy || anyScratch) scShadowBusyAt = now
+		const rate = anyScratch ? 25 : now - scShadowBusyAt < 2000 ? 40 : moving ? 80 : 200
 		if (scShadowTickTimer.interval !== rate) scShadowTickTimer.interval = rate
 		if (scShadowDebug) scShadowDbgFlush(now)
 	}
@@ -1553,7 +1568,7 @@ SERVICES_MAIN = """
 			const fresh = o.net !== s.net || !(now - (scShadowTextAt[d] || 0) < 2000) || o.keyOffset !== shift
 			o.deck = d; o.net = s.net; o.cues = s.net ? cc.cues : null; o.cuePos = s.net ? g.cuePosition.value : undefined
 			o.masterPress = scMasterPresses(d, g.requestMaster)
-			o.playing = s.playing; o.cue = s.cue; o.link = link; o.positionMs = s.lineMs; o.at = s.at; o.jumps = s.jumps
+			o.playing = s.playing; o.cue = s.cue; o.scratch = !!s.scratch; o.link = link; o.positionMs = s.lineMs; o.at = s.at; o.jumps = s.jumps
 			o.pitch = s.pitch; o.master = s.master || d === lead; o.lead = s.master; o.bpm = s.bpm; o.currentBpm = s.currentBpm
 			o.sync = s.sync; o.beat = g.beat.unnormalized || 0
 			o.active = d === scShadowActiveDeck // on this unit's active layer (#201)
@@ -1579,9 +1594,13 @@ SERVICES_MAIN = """
 			// The peer carries the position on from the last full post at its pitch;
 			// o.positionMs is the filtered line (scShadowTick), so a real slip only.
 			let onLine = false
-			if (sent.deck === d && sent.net === o.net && sent.playing === o.playing && sent.pitch === o.pitch && sent.jumps === o.jumps) {
-				const expect = sent.positionMs + (o.playing ? (o.at - sent.at) * (1 + o.pitch / 100) : 0)
-				onLine = Math.abs(o.positionMs - expect) <= (o.playing ? 15 : 0.5)
+			if (sent.deck === d && sent.net === o.net && sent.playing === o.playing && !!sent.scratch === o.scratch && sent.pitch === o.pitch && sent.jumps === o.jumps) {
+				if (o.scratch) {
+					onLine = Math.abs(o.positionMs - sent.positionMs) <= 6
+				} else {
+					const expect = sent.positionMs + (o.playing ? (o.at - sent.at) * (1 + o.pitch / 100) : 0)
+					onLine = Math.abs(o.positionMs - expect) <= (o.playing ? 15 : 0.5)
+				}
 			}
 			if (!onLine || sent.cue !== o.cue || sent.master !== o.master || sent.masterPress !== o.masterPress || sent.lead !== o.lead || sent.sync !== o.sync || sent.cuePos !== o.cuePos ||
 				sent.title !== o.title || sent.artist !== o.artist || sent.keyName !== o.keyName || sent.durationMs !== o.durationMs || sent.link !== o.link || sent.bpm !== o.bpm || sent.currentBpm !== o.currentBpm || sent.range !== o.range || sent.keylock !== o.keylock || sent.cuesRev !== cc.rev || sent.active !== o.active ||
@@ -1597,7 +1616,7 @@ SERVICES_MAIN = """
 		}
 		for (let n = 0; n < own.length; n++) {
 			const o = own[n], sent = scShadowSent[n]
-			sent.deck = o.deck; sent.net = o.net; sent.playing = o.playing; sent.cue = o.cue; sent.jumps = o.jumps; sent.pitch = o.pitch
+			sent.deck = o.deck; sent.net = o.net; sent.playing = o.playing; sent.cue = o.cue; sent.scratch = o.scratch; sent.jumps = o.jumps; sent.pitch = o.pitch
 			sent.master = o.master; sent.masterPress = o.masterPress; sent.lead = o.lead; sent.sync = o.sync; sent.cuePos = o.cuePos; sent.title = o.title; sent.artist = o.artist; sent.keyName = o.keyName; sent.durationMs = o.durationMs
 			sent.link = o.link; sent.bpm = o.bpm; sent.currentBpm = o.currentBpm; sent.range = o.range; sent.keylock = o.keylock; sent.loop = o.loop; sent.keyOffset = o.keyOffset; sent.stems = o.stems; sent.slip = o.slip; sent.cuesRev = scShadowCueCache[o.deck].rev; sent.positionMs = o.positionMs; sent.at = o.at; sent.active = o.active
 		}
@@ -1641,7 +1660,11 @@ SERVICES_MAIN = """
 							root.scShadowDebug = !!r.debug
 							root.scShadowApplyAll(r.decks || root.scShadowEmptyArray, r.displayOnly !== false)
 							root.scShadowIdle = r.displayOnly === false && x.getResponseHeader("X-Shadow-Idle") === "1"
+							const updated = r.ver !== undefined && r.ver !== root.scShadowVer
+							const scratching = (r.decks || root.scShadowEmptyArray).some(d => !!d.scratch)
 							wait = !r.role ? 500 : r.ver === undefined ? 120 : 60
+							if (r.ver !== undefined && (updated || scratching)) wait = 1
+							else if (r.ver === undefined && scratching) wait = 15
 							if (r.ver !== undefined) root.scShadowVer = r.ver
 						}
 					}
@@ -1770,6 +1793,9 @@ SERVICES_MAIN = """
 		if ((scShadowDisplayOnly || ((scShadowEngineMask >> d) & 1) === 0) && !(scShadowAt[d] && scShadowAt[d].path)) return
 		const at = scShadowAt[d] || (scShadowAt[d] = {path: ""})
 		at.landing = undefined
+		const pTouch = root.scTr("/Engine/Deck" + d + "/ExternalScratchWheelTouch")
+		if (pTouch && pTouch.state) pTouch.state = false
+		at.scratch = false
 		// On an all-in-one console (#160), leave Decks 3/4 alone unless a shadow peer loaded them.
 		if (!root.scPlayer && !at.path) return
 		const pPlay = root.scTr("/Engine/Deck" + d + "/Play")
@@ -1818,10 +1844,10 @@ SERVICES_MAIN = """
 		const local = !!g("/PlayState").state
 		// Heartbeats can keep the same sequence. The landing observer still
 		// needs their liveness and carried source line on every delivery.
-		at.sourceTarget = e.positionMs + (e.playing && e.at ? Math.max(0, now - e.at) * at.rate : 0)
+		at.sourceTarget = e.positionMs + (e.playing && !e.scratch && e.at ? Math.max(0, now - e.at) * at.rate : 0)
 		at.sourceAt = now; at.sourcePlaying = !!e.playing && !e.stale
 		if (!at.sourcePlaying || !e.sync || !e.link || !root.scPlayer || at.nativeSync || (e.sync && e.pitch > 100)) at.landing = undefined
-		if (e.seq && e.seq === at.lastSeq && e.playing === local && !at.wantMaster && !at.check && !at.nativeSync) return
+		if (e.seq && e.seq === at.lastSeq && e.playing === local && !at.wantMaster && !at.check && !at.nativeSync && !e.scratch && !at.scratch) return
 		at.lastSeq = e.seq
 		const wasPreview = at.preview
 		at.preview = !!e.cue
@@ -1842,7 +1868,7 @@ SERVICES_MAIN = """
 		const seek = ms => root.scShadowSeek(d, at, ms)
 		// e.at is when Go extrapolated e.positionMs; this runs later on a busy GUI
 		// thread, so carry the target to now before comparing.
-		const target = e.positionMs + (e.playing && e.at ? Math.max(0, now - e.at) * scShadowRate(e) : 0)
+		const target = e.positionMs + (e.playing && !e.scratch && e.at ? Math.max(0, now - e.at) * scShadowRate(e) : 0)
 		const posMs = g("/Track/TrackPosition").unnormalized / sr * 1000
 		const drift = target - posMs // > 0: behind
 		const meanReady = at.env !== undefined && now - at.envT0 >= 300
@@ -1938,6 +1964,36 @@ SERVICES_MAIN = """
 		if ((!e.link || !root.scPlayer || at.nativeSync) && wantSync !== synced && now >= (at.syncAt || 0)) {
 			scPress("/Engine/Deck" + d + (wantSync ? "/Sync" : "/UnSync"))
 			at.syncAt = now + 800
+		}
+		if (e.scratch) {
+			at.landing = undefined; at.phaseUntil = 0; at.env = undefined; at.fine = undefined; at.over = 0; at.wide = false
+			if (scShadowBent && scShadowBent.at === at) scShadowBendEnd()
+			const en = g("/ExternalScratchWheelScratchEnable"), tc = g("/ExternalScratchWheelTouch"), mv = g("/ExternalScratchWheelMove")
+			if (en && !en.state) en.state = true
+			if (tc && !tc.state) tc.state = true
+			at.scratch = true
+			if (Math.abs(drift) > 150) {
+				if (now - at.seekAt >= 80) seek(target)
+			} else if (Math.abs(drift) > 6 && mv) {
+				const ticks = Math.min(2500, Math.round(Math.abs(drift) * (e.playing ? 15 : 35)))
+				if (ticks >= 15) {
+					if (drift > 0) mv.incValue(ticks, 0, 0, false, true, 0)
+					else mv.decValue(ticks, 0, 0, false, true, 0)
+				}
+			}
+			at.jumps = e.jumps
+			return dbg("scratch")
+		}
+		if (at.scratch) {
+			at.scratch = false
+			const tc = g("/ExternalScratchWheelTouch")
+			if (tc && tc.state) tc.state = false
+			at.env = undefined; at.fine = undefined; at.over = 0; at.wide = false
+			if (Math.abs(drift) > 35 && now - at.seekAt >= 80) {
+				seek(target)
+				at.jumps = e.jumps
+				return dbg("scratch-end")
+			}
 		}
 		if (!e.playing) {
 			at.landing = undefined; at.phaseUntil = 0
@@ -4263,7 +4319,7 @@ SHADOW_LAYER = r"""
             if (st !== stale) stale = st
             if (!wave) return
             const end = metaDuration(meta)
-            const speed = live && visible && s && s.playing && !st && pos < end ? root.scShadowRate(s) : 0
+            const speed = live && visible && s && s.playing && !s.scratch && !st && pos < end ? root.scShadowRate(s) : 0
             if (speed > 0) {
                 let from = pos, v = speed
                 if (scroll.running && scrollSpeed > 0 && s.key === scrollKey && s.jumps === scrollJumps) {
@@ -4285,7 +4341,10 @@ SHADOW_LAYER = r"""
                 scroll.start()
             } else {
                 const x = contentX(pos)
-                if (scrollSpeed > 0 || scroll.running) {
+                if (s && s.scratch) {
+                    if (scroll.running) scroll.stop()
+                    if (scMoving.x !== x) scMoving.x = x
+                } else if (scrollSpeed > 0 || scroll.running) {
                     // A stopped Animator has written its own value back: settle with a
                     // 1 ms run to x, so the scene ends at x too (CUE released on its spot).
                     scroll.stop()
