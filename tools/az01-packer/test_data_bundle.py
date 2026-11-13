@@ -924,14 +924,19 @@ exec REAL "$@"
 
     def test_234_only_the_boot_run_puts_back_an_interrupted_downgrade(self):
         """#234 review R2: boot-activate.sh's boot run first asks the suite to put back a downgrade a
-        power cut interrupted (leave recover), from the directory it was started from (the hook's
-        fallback is /data/sc5000-custom/bundle); its runs on every Engine start never do."""
+        power cut interrupted, from the directory it was started from (the hook's fallback is
+        /data/sc5000-custom/bundle); every call delegates to the blocking activation guard, but
+        Engine-start calls do not run recovery."""
         src = self.extract(self.build())
         dest = self.tmp / 'recover' / 'enginex'
         (dest / 'bundle/bin').mkdir(parents=True)
         calls = self.tmp / 'recover.calls'
+        recovered = self.tmp / 'recovered'
         suite = dest / 'bundle/bin/enginex-suite'
-        suite.write_text(f'#!/bin/sh\necho "$*" >> {calls}\n')
+        suite.write_text(f'#!/bin/sh\necho "$*" >> {calls}\n'
+                         '[ "$1 $2" = "leave activate" ] || exit 19\n'
+                         f'[ "$#" != 3 ] || touch {recovered}\n'
+                         'shift 2\nENGINEX_LEAVE_LOCKED=1 exec sh "$@"\n')
         suite.chmod(0o755)
         run_dir = self.tmp / 'run-recover'
         ba = dest / 'bundle/boot-activate.sh'
@@ -940,10 +945,30 @@ exec REAL "$@"
                    ENGINEX_PID1_COMM=str(self.pid1_systemd()), ENGINEX_CONFIG_DIR=str(self.tmp / 'recover/.config'),
                    ENGINEX_TIMESTAMP_FILE=str(self.tmp / 'no-ts'), ENGINEX_PRODUCT_CODE_FILE=str(self.tmp / 'no-product-code'))
         subprocess.run(['sh', str(ba), '--restore-tz'], env=env, capture_output=True, text=True)
-        self.assertFalse(calls.exists())
+        self.assertFalse(recovered.exists())
         subprocess.run(['sh', str(ba)], env=env, capture_output=True, text=True)
-        self.assertEqual(calls.read_text().splitlines()[:1], ['leave recover'])
+        self.assertEqual(calls.read_text().splitlines(), [f'leave activate {ba} --restore-tz', f'leave activate {ba}'])
+        self.assertTrue(recovered.exists())
+        self.assertTrue((run_dir / 'systemd/system/engine.service.d/99-enginex.conf').exists())
         self.host_commands.write_text('')  # the boot run's systemctl calls went to the safe-bin stand-in
+
+    def test_234_explicit_data_paths_share_the_activation_lock(self):
+        suite = self.tmp / 'bin/enginex-suite'
+        suite.parent.mkdir()
+        calls = self.tmp / 'activation.calls'
+        suite.write_text(f'#!/bin/sh\necho "$1 $2" >> {calls}\n')
+        suite.chmod(0o755)
+        ba = self.tmp / 'boot-activate.sh'
+        # Stop before any migration even when the guard is broken.
+        ba.write_text(bdb.BOOT_ACTIVATE.split('@MIGRATE_IF_DEFAULT@', 1)[0] + 'exit 29\n')
+        for variable, dest in [('ENGINEX_CUSTOM', '/data/enginex'),
+                               ('SC5000_CUSTOM', '/data/sc5000-custom')]:
+            with self.subTest(variable=variable):
+                calls.unlink(missing_ok=True)
+                res = subprocess.run(['sh', str(ba)], env={**self.env, variable: dest},
+                                     capture_output=True, text=True)
+                self.assertEqual(res.returncode, 0, res.stderr)
+                self.assertEqual(calls.read_text().strip(), 'leave activate')
 
     def test_234_a_failed_recovery_stops_the_boot_run_before_activation(self):
         """#234 review round 3: when putting back an interrupted downgrade fails, the boot run stops
