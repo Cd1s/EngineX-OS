@@ -169,6 +169,7 @@ type uiSettings struct {
 	GitHubRepo       string   `json:"githubRepo"`
 	SafeMode         bool     `json:"safeMode"`
 	LoggedIn         []string `json:"loggedIn"`
+	TidalLoggedIn    bool     `json:"tidalLoggedIn"`
 	FourDeckWaveform bool     `json:"fourDeckWaveform"`
 	FourDeckRole     string   `json:"fourDeckRole"`
 	ShadowMode       string   `json:"shadowMode"` // which path draws a shadow deck: auto = Engine loads every source whose file this player can have and stock components draw it (EngineX peer; CDJ playing from USB or SD), a CDJ without such a file goes to the display renderer, engine = Engine loads every source, cdj = display renderer for every source
@@ -333,7 +334,7 @@ func (s *Server) loadUI() uiSettings {
 				v.GitHubRepo = val
 			}
 		case "scope":
-			if slices.Contains(uiServices, val) {
+			if val == "" || slices.Contains(uiServices, val) {
 				v.Scope = val
 			}
 		case "quality":
@@ -464,6 +465,9 @@ func (s *Server) loadUI() uiSettings {
 	}
 	if !v.FourDeckWaveform {
 		v.PairedView = false // #201: the paired view is a view of the 4-deck layout; a stray key alone is not it
+	}
+	if v.Scope == "tidal" && !slices.Contains(v.Sources, "tidal") {
+		v.Scope = ""
 	}
 	v.SafeMode = bootMarker(s.uiDir(), "safe-mode")
 	return v
@@ -691,6 +695,7 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 		v.PioneerFx = "off"
 	}
 	s.uiMu.Unlock()
+	v.TidalLoggedIn = s.tidal != nil && s.tidal.hasRealAuth()
 	v.BroadcastEnabled = s.BroadcastEnabled()
 	if ver := s.installedVersion(); ver != "" && ver != "dev" {
 		v.Version = ver
@@ -1060,6 +1065,19 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 		v.Sources = list
 	}
+	if q.Has("toggle") {
+		id := q.Get("toggle")
+		if !slices.Contains(uiServices, id) {
+			s.uiMu.Unlock()
+			fail(w, 400, errors.New("unknown source"))
+			return
+		}
+		if slices.Contains(v.Sources, id) {
+			v.Sources = slices.DeleteFunc(v.Sources, func(name string) bool { return name == id })
+		} else {
+			v.Sources = append(v.Sources, id)
+		}
+	}
 	// Relay settings are written only once every field is known to be valid (#9).
 	if q.Has("relayUrl") || q.Has("deemixPassword") {
 		var relay, password *string
@@ -1082,6 +1100,9 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 			fail(w, 500, errors.New("could not save logging configuration"))
 			return
 		}
+	}
+	if v.Scope == "tidal" && !slices.Contains(v.Sources, "tidal") {
+		v.Scope = ""
 	}
 	err := s.saveUI(v, q.Has("prolinkExport"))
 	if err != nil && q.Has("verboseLog") {

@@ -2585,6 +2585,7 @@ SERVICES_MAIN = """
 	}
 	property var scSources: ["tidal", "netease", "spotify", "deezer", "soundcloud", "beatport", "applemusic"]
 	property var scLoggedIn: []
+	property bool scTidalLoggedIn: false
 	property string scScope: ""
 	readonly property var scServices: [
 		{ id: "tidal", name: "TIDAL" },
@@ -2966,6 +2967,7 @@ SERVICES_MAIN = """
 		scKeepPlayhead(v.playhead || 0)
 		if (!scSameItems(scSources, v.sources)) scSources = v.sources
 		if (!scSameItems(scLoggedIn, v.loggedIn)) scLoggedIn = v.loggedIn
+		scTidalLoggedIn = !!v.tidalLoggedIn
 		scScope = v.scope
 		scBroadcastOn = !!v.broadcastEnabled
 		const prevUpfaderEcho = scUpfaderEcho
@@ -3131,13 +3133,30 @@ SERVICES_MAIN = """
 		scCall("sources=" + list.join(","))
 	}
 	// Every service is backed by Engine's TIDAL provider; the gateway follows the scope.
+	function scTidalProvider() {
+		for (let i = 0; i < scProviders.count; i++) {
+			const watcher = scProviders.objectAt(i)
+			if (watcher && watcher.tidalProvider) return watcher.tidalProvider
+		}
+		return null
+	}
+	function scGatewayLogin(tp) {
+		if (tp && !tp.loggedIn) tp.loginToService(
+			JSON.stringify({provider: tp.name, accessToken: "enginex", refreshToken: "enginex"}),
+			1, "userInterfaceLogin")
+	}
 	function scOpen(id) {
+		if (id === "tidal" && scSources.indexOf("tidal") < 0) return
 		scAskedAt = Date.now()
 		scScope = id // before Engine's TIDAL client can raise a prompt; scApply confirms it
 		scEnsureTidal()
 		scCall("scope=" + id, function() {
+			const tp = scTidalProvider()
+			scTidalLoginPending = id === "tidal" && !root.scTidalLoggedIn
+			if (id !== "tidal" || root.scTidalLoggedIn) scGatewayLogin(tp)
+			else if (tp && tp.loggedIn) Planck.librarianController.streamingInterfaceController.logoutOfProvider(tp)
 			Planck.librarianController.streamingPlaylistsController.invalidateUI()
-			scSelectPending = !scSelectTidal()
+			scSelectPending = !scTidalLoginPending && !scSelectTidal()
 			scEnterTries = 8
 			scEnterTimer.start()
 			if (id !== "tidal" && scLoggedIn.indexOf(id) < 0) scLoginBegin(id)
@@ -3152,7 +3171,7 @@ SERVICES_MAIN = """
 	// The local gateway logs Engine's TIDAL client in at once for every other service,
 	// so its login, pairing and "Connecting to" boxes would only flash up with the
 	// TIDAL name. They stay closed unless TIDAL itself is open.
-	function scQuiet() { return scScope !== "" && scScope !== "tidal" }
+	function scQuiet() { return scSources.indexOf("tidal") < 0 || (scScope !== "" && scScope !== "tidal") }
 	function scUnasked(provider) {
 		if (Date.now() - scAskedAt < 120000) return false
 		const c = Planck.librarianController.streamingInterfaceController
@@ -3207,9 +3226,12 @@ SERVICES_MAIN = """
 	// The playlists are one level down; open them so a source never looks empty.
 	property int scEnterTries: 0
 	property bool scSelectPending: false
+	property bool scTidalLoginPending: false
 	// The row may not exist yet right after the provider is re-enabled, and a
 	// delegate can be recycled, so find it in the model rather than the view.
 	function scSelectTidal() {
+		const tp = scTidalProvider()
+		if ((scScope !== "tidal" || scTidalLoggedIn) && tp && !tp.loggedIn) return false
 		const sources = Planck.librarianController.browserSourceControllerPtr()
 		const model = sources.model()
 		for (let i = 0; i < model.rowCount(); i++) {
@@ -3243,6 +3265,17 @@ SERVICES_MAIN = """
 		id: scEnterTimer
 		interval: 300; repeat: true
 		onTriggered: {
+			// logoutOfProvider finishes asynchronously. Wait before selecting the
+			// same carrier again, then request its stock login even if current.
+			if (scTidalLoginPending) {
+				const tp = scTidalProvider()
+				if (tp && !tp.loggedIn) {
+					scTidalLoginPending = false
+					scSelectTidal()
+					Planck.librarianController.streamingInterfaceController.showAddAccountDialog(tp)
+				}
+				return
+			}
 			if (scSelectPending) scSelectPending = !scSelectTidal()
 			const row = scFindMyPlaylists(uiContainer)
 			if (row) row.clicked(null)
@@ -3388,6 +3421,7 @@ SERVICES_MAIN = """
 		id: scProviders
 		model: Planck.librarianController.streamingInterfaceController.providerModel
 		delegate: QtObject {
+			readonly property var tidalProvider: String(provider.name).toUpperCase() === "TIDAL" ? provider : null
 			function ensure() { if (["TIDAL", "Tidal"].indexOf(provider.name) >= 0 && !provider.integrated) provider.integrated = true }
 			readonly property Connections watcher: Connections {
 				target: provider
@@ -3488,6 +3522,22 @@ LOGIN_DIALOG = """
 				}
 			}
 		}
+"""
+
+SOURCE_ENTER = """
+    function scSourceEnter() {
+        const nav = controller.navigation()
+        const sources = Planck.librarianController.browserSourceControllerPtr()
+        const available = nav.availableSourceIndex >= 0
+        const model = available ? sources.availableSourceModel() : sources.connectedSourceModel()
+        const row = available ? nav.availableSourceIndex : nav.connectedSourceIndex
+        const name = row >= 0 ? String(model.data(model.index(row, 0), root.scSourceNameRole)).toUpperCase() : ""
+        if (["TIDAL", "SOUNDCLOUD", "BEATPORT", "BEATPORT LINK"].indexOf(name) >= 0) {
+            if (root.scScope && root.scSources.indexOf(root.scScope) >= 0) root.scOpen(root.scScope)
+            return
+        }
+        nav.enter()
+    }
 """
 
 SOURCE_FOOTER = """
@@ -6994,6 +7044,30 @@ def edits(dev: bool):
         assert not isinstance(out.get(rel), str), rel  # a whole-file replacement already owns it
         out.setdefault(rel, []).extend(fixes)
     if v53():
+        out.setdefault(v + "Profiles/ProfilesLogin.qml", []).extend([
+            ('    shown: controller.showDialog\n', """    readonly property bool scSuppressTidalPairing:
+        controller.selectedView === ProfilesLoginController.StreamingProviderPairing &&
+        String(controller.streamingProvider && controller.streamingProvider.name || "").toUpperCase() === "TIDAL" &&
+        (root.scQuiet() || root.scScope !== "tidal")
+    shown: controller.showDialog && !scSuppressTidalPairing
+    function scDismissTidalPairing() {
+        if (scSuppressTidalPairing && controller.showDialog) Qt.callLater(function() {
+            // Do not cancel pairing or restore the previous source: this TIDAL
+            // browser is the carrier for the selected EngineX service (#224).
+            if (profilesLoginDialog.scSuppressTidalPairing) controller.showDialog = false
+        })
+    }
+    onScSuppressTidalPairingChanged: scDismissTidalPairing()
+    Connections {
+        target: profilesLoginDialog.controller
+        function onShowDialogChanged() { profilesLoginDialog.scDismissTidalPairing() }
+    }
+"""),
+        ])
+        out.setdefault(v + "Profiles/ProfilesStreamingProviderPairingContent.qml", []).extend([
+            ('visible: profilesLoginContent.provider && profilesLoginContent.provider.supportLegacyPairing',
+             'visible: profilesLoginContent.provider && (profilesLoginContent.provider.supportLegacyPairing || (String(provider.name).toUpperCase() === "TIDAL" && !root.scQuiet() && root.scScope === "tidal"))'),
+        ])
         out.setdefault(ROOT + "Views/MainView/Fx/DJFxSpinner.qml", []).extend([
             ('                objectName: "DJFx_Beats_Decrease_Button"', '                objectName: "DJFx_Beats_Decrease_Button"\n                text: spinner.scMsActive ? "−" : ""'),
             ('                objectName: "DJFx_Beats_Increase_Button"', '                objectName: "DJFx_Beats_Increase_Button"\n                text: spinner.scMsActive ? "+" : ""'),
@@ -7055,9 +7129,9 @@ def legacy_qml_fixes():
             "	Keys.enabled: sourceScreen.visible && !root.messageBoxOpen\n"
             "	Keys.onUpPressed: controller.navigation().decrementIndex()\n"
             "	Keys.onDownPressed: controller.navigation().incrementIndex()\n"
-            "	Keys.onReturnPressed: controller.navigation().enter()\n"
-            "	Keys.onEnterPressed: controller.navigation().enter()\n"
-            "	Keys.onEscapePressed: controller.close()\n",
+            "	Keys.onReturnPressed: scSourceEnter()\n"
+            "	Keys.onEnterPressed: scSourceEnter()\n"
+            "	Keys.onEscapePressed: controller.close()\n" + SOURCE_ENTER,
         )],
         # CF009 / CF010 / H143: after a view switch or Instant Double the track list
         # and breadcrumb stack grabbed focus mid-transition and the encoder lost it.
