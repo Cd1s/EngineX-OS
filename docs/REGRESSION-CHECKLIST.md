@@ -6,7 +6,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 
 ---
 
-## Regression Table (95 Rows)
+## Regression Table (96 Rows)
 
 | # | Behaviour that must keep working | Issue / commit that fixed it | How it is checked (automated test name, or exact real-deck / sandbox step) | Release gate / deck acceptance / recording coverage |
 | --- | --- | --- | --- | --- |
@@ -105,6 +105,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 | 93 | **Malformed cover tags never crash or over-allocate, on 32-bit decks too** (review of `0196b77`, BH-GC1-14: a FLAC picture block's 24-bit length was allocated before checking the file, so an 8-byte file allocated 16 MiB on each of two passes; on the first-generation 32-bit build the 32-bit lengths of an ID3v2.3 extended header or frame and of a FLAC picture's MIME type, description and image wrapped negative, passed the bounds checks and panicked rb-bridge or stream-sync with 32-40-byte files): a FLAC picture block is read only when the file holds it; every 32-bit length is compared in 64 bits; an MP4 64-bit atom size cannot wrap the atom position | review of `0196b77` | `pkg/enginedb` (`TestTruncatedFLACPictureBlockAllocatesOnlyTheFile`, `TestMalformedArtworkLengthsAreRefusedWithoutPanic`, also under `GOARCH=arm GOARM=7`) | Cover art / first-generation decks |
 | 94 | **`GET /v1/sc5000/ui` never waits on the network** (5.3.0.4 bug hunt BH-GC2-12: Engine's QML polls it every 3 s on the GUI thread, and with a Stems relay configured it probed the relay inside the request, up to 1.5 s for one that did not answer, stalling the deck's UI): the relay probe runs in the background, when the status is first asked for, every 30 s, and at once after the relay settings change; the handler shows what it last found (`stems-lan.json`), so `X-UI-Digest` changes only when that does | BH-GC2-12 (`#222`) | `pkg/webui/relay_background_test.go` (`TestUIStatusNeverWaitsOnTheRelay`: a relay that accepts and never answers; every poll under 50 ms; digest stable; a later answer shows after a settings change) | Engine UI responsiveness |
 | 95 | **The deck API answers under `/v1/enginex/` as well as `/v1/sc5000/`** (naming: the product's name as the canonical prefix): one mapping in the gateway sends `/v1/enginex/...` to the `/v1/sc5000/...` routes after the loopback and tunnel checks, so both reach the same handlers and rules; `/v1/sc5000/` stays for older installers, UI packs and scripts; the installer keeps asking `/v1/sc5000/ui`, which every release answers | naming (5.3.0.5) | `pkg/webui/v1_enginex_prefix_test.go` (`TestEngineXPrefixReachesTheSameRoutes`, `TestEngineXPrefixKeepsTheLocalOnlyRules`) | Deck API |
+| 96 | **A Pro DJ Link deck that was also posted to the console keeps its live state** (review of `9d7c4ce`, BH-GC2-8: a device posted to `/v1/sc5000/prolink` was laid over rb-bridge's live state unconditionally, so one POST for a deck rb-bridge also sees froze its title, BPM and play state and, 10 s later, showed it offline until `stream-sync` restarted): a posted report competes by `LastSeen` like the live and saved ones, and one older than a minute is dropped | review of `9d7c4ce` | `pkg/webui/prolink_live_test.go` (`TestProlinkPostForALiveDeckDoesNotFreezeIt`) | Pro DJ Link |
 
 ---
 

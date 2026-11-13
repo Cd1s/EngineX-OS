@@ -120,6 +120,10 @@ func liveProlinkStatePath() string {
 	return "/tmp/sc5000-prolink.json"
 }
 
+// postedDeviceTTL: a posted report older than this no longer stands for a deck (prolink.
+// BuildSnapshot shows a deck only within 10 s of its LastSeen).
+const postedDeviceTTL = time.Minute
+
 // mergedDevices: rb-bridge's live state, the snapshot of posted devices kept in
 // <StateDir>/prolink.json, then the devices posted to this server. The file in
 // StateDir used to replace the live state for good once anything was posted,
@@ -150,13 +154,23 @@ func (s *Server) mergedDevices() []prolink.Device {
 			}
 		}
 	}
+	// A posted device competes like the files do: the newer report wins. It used to be laid
+	// over the live state unconditionally, so one POST for a deck rb-bridge also sees froze its
+	// title, BPM and play state and, 10 s later, its LastSeen made it offline (review of 9d7c4ce).
+	// A posted report no newer source has replaced is dropped once a deck counts as gone.
 	prolinkMu.Lock()
 	if posted := postedDevices[s]; posted != nil {
 		for k, d := range posted {
-			if existing, ok := devMap[k]; ok {
+			if time.Since(d.LastSeen) > postedDeviceTTL {
+				delete(posted, k)
+				continue
+			}
+			if existing, ok := devMap[k]; !ok {
+				devMap[k] = d
+			} else if d.LastSeen.After(existing.LastSeen) {
 				devMap[k] = mergeDevice(existing, d)
 			} else {
-				devMap[k] = d
+				devMap[k] = mergeDevice(d, existing)
 			}
 		}
 	}

@@ -63,3 +63,32 @@ func TestProlinkLiveStateSurvivesAPost(t *testing.T) {
 		t.Fatalf("live state after a restart: %q, want Track C", got)
 	}
 }
+
+// Review of 9d7c4ce: a POST for the deck rb-bridge also reports (the same player number) was laid
+// over its live state for good: later live titles, BPM and play state never showed again.
+func TestProlinkPostForALiveDeckDoesNotFreezeIt(t *testing.T) {
+	live := filepath.Join(t.TempDir(), "sc5000-prolink.json")
+	t.Setenv("SC5000_PROLINK_STATE", live)
+	s := New(Config{StateDir: t.TempDir(), UIDir: t.TempDir()}, nil)
+	writeLiveProlink(t, live, "Track A", 128)
+	body, _ := json.Marshal(prolink.Device{Number: 1, Name: "CDJ-3000", Title: "Posted", BPM: 99, LastSeen: time.Now()})
+	rec := httptest.NewRecorder()
+	s.prolinkPost(rec, httptest.NewRequest(http.MethodPost, "/v1/sc5000/prolink", bytes.NewReader(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("post: %d", rec.Code)
+	}
+	if got := deck1Title(t, s); got != "Posted" {
+		t.Fatalf("the newer posted report: %q", got)
+	}
+	time.Sleep(10 * time.Millisecond)
+	writeLiveProlink(t, live, "Track B", 140)
+	rec = httptest.NewRecorder()
+	s.prolinkGet(rec, httptest.NewRequest(http.MethodGet, "/v1/sc5000/prolink", nil))
+	var resp prolinkResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if d := resp.Decks["1"]; d.Title != "Track B" || d.BPM != 140 {
+		t.Fatalf("live state after a post for the same deck: %q at %v BPM, want Track B at 140", d.Title, d.BPM)
+	}
+}
