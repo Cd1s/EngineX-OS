@@ -12,7 +12,6 @@
 package leave
 
 import (
-	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -64,29 +63,53 @@ func (d Deck) data(p ...string) string {
 	return filepath.Join(append([]string{d.Root, "/data"}, p...)...)
 }
 
-// lstat looks a path up without following it; tests make it fail.
-var lstat = os.Lstat
+// Filesystem calls are replaced by the error-path tests.
+var (
+	lstat     = os.Lstat
+	readFile  = os.ReadFile
+	readlink  = os.Readlink
+	openFile  = os.OpenFile
+	flock     = unix.Flock
+	remove    = os.Remove
+	removeAll = os.RemoveAll
+)
 
-func realDir(p string) bool {
+// missingOK is used only where absence is a defined state; every other error stops the phase.
+func missingOK(err error) error {
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
+func realDir(p string) (bool, error) {
 	st, err := lstat(p)
-	return err == nil && st.IsDir()
+	if err != nil {
+		return false, missingOK(err)
+	}
+	return st.IsDir(), nil
 }
 
-func exists(p string) bool {
-	_, err := os.Lstat(p)
-	return err == nil
+func exists(p string) (bool, error) {
+	_, err := lstat(p)
+	return err == nil, missingOK(err)
 }
 
-func readLine(p string) string {
-	b, _ := os.ReadFile(p)
+func readLine(p string) (string, error) {
+	b, err := readFile(p)
+	if err != nil {
+		return "", missingOK(err)
+	}
 	line, _, _ := strings.Cut(string(b), "\n")
-	return strings.TrimSpace(line)
+	return strings.TrimSpace(line), nil
 }
 
 // live is the real data directory: /data/enginex since #103, /data/sc5000-custom before.
 func (d Deck) live() (string, error) {
 	for _, n := range []string{"enginex", "sc5000-custom"} {
-		if realDir(d.data(n)) {
+		if ok, err := realDir(d.data(n)); err != nil {
+			return "", err
+		} else if ok {
 			return d.data(n), nil
 		}
 	}
@@ -99,13 +122,20 @@ func (d Deck) Older(target string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return release.Older(readLine(filepath.Join(live, "version.txt")), readLine(filepath.Join(live, "bundle/release-tag")),
-		readLine(filepath.Join(target, "version.txt")), readLine(filepath.Join(target, "release-tag"))), nil
+	var versions [4]string
+	for i, p := range []string{filepath.Join(live, "version.txt"), filepath.Join(live, "bundle/release-tag"),
+		filepath.Join(target, "version.txt"), filepath.Join(target, "release-tag")} {
+		versions[i], err = readLine(p)
+		if err != nil {
+			return false, err
+		}
+	}
+	return release.Older(versions[0], versions[1], versions[2], versions[3]), nil
 }
 
 func writeSync(p string, b []byte) error {
 	tmp := p + ".enginex-leave.tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	f, err := openFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
 		return err
 	}
@@ -120,8 +150,7 @@ func writeSync(p string, b []byte) error {
 		err = os.Rename(tmp, p)
 	}
 	if err != nil {
-		os.Remove(tmp)
-		return err
+		return errors.Join(err, missingOK(remove(tmp)))
 	}
 	return syncDir(filepath.Dir(p))
 }
@@ -130,24 +159,14 @@ func syncDir(p string) error {
 	return syncPath(p)
 }
 
-// journalExists: only a journal that is not there means nothing to recover. A lookup that fails
-// otherwise is an error, so neither activation nor a new install goes past a journal unseen.
-func journalExists(p string) (bool, error) {
-	st, err := lstat(p)
-	if errors.Is(err, fs.ErrNotExist) {
-		return false, nil
-	}
-	return err == nil && st.IsDir(), err
-}
-
 // syncExisting syncs the paths that are there: a journal half removed has no stage. Only a path
 // that is not there is left out; a lookup that fails otherwise is an error, as a failed sync is.
 func syncExisting(paths ...string) error {
 	for _, p := range paths {
-		if _, err := lstat(p); errors.Is(err, fs.ErrNotExist) {
-			continue
-		} else if err != nil {
+		if ok, err := exists(p); err != nil {
 			return err
+		} else if !ok {
+			continue
 		}
 		if err := syncPath(p); err != nil {
 			return err
@@ -167,24 +186,33 @@ func syncDirs(dirs ...string) error {
 	return nil
 }
 
-func copyFile(src, dst string) error {
-	b, err := os.ReadFile(src)
-	if err != nil {
-		return err
+// readFiles collects version metadata before a phase replaces or removes anything.
+func readFiles(dir string) (map[string][]byte, error) {
+	out := make(map[string][]byte)
+	for _, f := range files {
+		b, err := readFile(filepath.Join(dir, f))
+		if err != nil {
+			if err := missingOK(err); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		out[f] = b
 	}
-	return writeSync(dst, b)
+	return out, nil
 }
 
 // relink points the symlink at p to target, atomically.
 func relink(p, target string) error {
 	tmp := p + ".enginex-leave.lnk"
-	os.Remove(tmp)
+	if err := missingOK(remove(tmp)); err != nil {
+		return err
+	}
 	if err := os.Symlink(target, tmp); err != nil {
 		return err
 	}
 	if err := os.Rename(tmp, p); err != nil {
-		os.Remove(tmp)
-		return err
+		return errors.Join(err, missingOK(remove(tmp)))
 	}
 	return syncDir(filepath.Dir(p))
 }
@@ -213,8 +241,12 @@ func syncTree(root string) error {
 	})
 }
 
-func hasMarker(dir, id string) bool {
-	return id != "" && readLine(filepath.Join(dir, markerName)) == id
+func hasMarker(dir, id string) (bool, error) {
+	if id == "" {
+		return false, nil
+	}
+	marker, err := readLine(filepath.Join(dir, markerName))
+	return marker == id, err
 }
 
 // probe makes sure Exchange works here before anything is touched.
@@ -226,12 +258,12 @@ func probe(dir string) error {
 	if err := os.Mkdir(b, 0o700); err != nil {
 		return err
 	}
-	defer os.RemoveAll(a)
-	defer os.RemoveAll(b)
 	if err := Exchange(a, b); err != nil {
 		return ErrNoExchange
 	}
-	if !realDir(a) {
+	if ok, err := realDir(a); err != nil {
+		return err
+	} else if !ok {
 		return ErrNoExchange
 	}
 	return nil
@@ -239,28 +271,32 @@ func probe(dir string) error {
 
 // lock serializes Install and Recover across processes (the boot run of boot-activate.sh may
 // meet an install EngineX-Installer started); the kernel drops it with the process.
-func (d Deck) lock(wait bool) (func(), bool) {
-	f, err := os.OpenFile(d.data(journalName+".lock"), os.O_CREATE|os.O_RDWR, 0o600)
+func (d Deck) lock(wait bool) (func(), error) {
+	f, err := openFile(d.data(journalName+".lock"), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		return func() {}, true // no /data to lock: nothing to protect either
+		return nil, err
 	}
 	how := unix.LOCK_EX
 	if !wait {
 		how |= unix.LOCK_NB
 	}
-	if unix.Flock(int(f.Fd()), how) != nil {
-		f.Close()
-		return nil, false
+	if err := flock(int(f.Fd()), how); err != nil {
+		return nil, errors.Join(err, f.Close())
 	}
-	return func() { f.Close() }, true
+	return func() { f.Close() }, nil
 }
 
 // Install installs the older release unpacked in target (its install.sh, version.txt and parts).
 func (d Deck) Install(target string) error {
-	unlock, _ := d.lock(true)
-	if unlock != nil {
-		defer unlock()
+	targetVersion, err := readLine(filepath.Join(target, "version.txt"))
+	if err != nil {
+		return err
 	}
+	unlock, err := d.lock(true)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if err := d.recover(); err != nil { // an earlier attempt a cut interrupted goes first
 		return err
 	}
@@ -268,15 +304,13 @@ func (d Deck) Install(target string) error {
 	if err != nil {
 		return err
 	}
-	targetVersion := readLine(filepath.Join(target, "version.txt"))
 	legacy := release.Newer(firstEnginexLayout, targetVersion)
 	journal := d.data(journalName)
 	if err := os.MkdirAll(journal, 0o700); err != nil {
 		return err
 	}
 	fail := func(err error) error {
-		os.RemoveAll(journal)
-		return err
+		return errors.Join(err, removeAll(journal))
 	}
 	if err := probe(journal); err != nil {
 		return fail(err)
@@ -295,7 +329,15 @@ func (d Deck) Install(target string) error {
 	if err := cmd.Run(); err != nil {
 		return fail(fmt.Errorf("the older release's install.sh failed: %w", err))
 	}
-	if !exists(filepath.Join(stage, "bundle/boot-activate.sh")) || readLine(filepath.Join(stage, "version.txt")) != targetVersion {
+	boot, err := exists(filepath.Join(stage, "bundle/boot-activate.sh"))
+	if err != nil {
+		return fail(err)
+	}
+	stageVersion, err := readLine(filepath.Join(stage, "version.txt"))
+	if err != nil {
+		return fail(err)
+	}
+	if !boot || stageVersion != targetVersion {
 		return fail(errors.New("the older release's install.sh left no whole bundle"))
 	}
 	id := make([]byte, 8)
@@ -304,7 +346,9 @@ func (d Deck) Install(target string) error {
 	}
 	ids := hex.EncodeToString(id)
 	for _, p := range append([]string{"bundle"}, uiParts...) {
-		if realDir(filepath.Join(stage, p)) {
+		if ok, err := realDir(filepath.Join(stage, p)); err != nil {
+			return fail(err)
+		} else if ok {
 			if err := writeSync(filepath.Join(stage, p, markerName), []byte(ids+"\n")); err != nil {
 				return fail(err)
 			}
@@ -314,9 +358,13 @@ func (d Deck) Install(target string) error {
 	if err := os.MkdirAll(filepath.Join(old, "ui"), 0o700); err != nil {
 		return fail(err)
 	}
+	oldFiles, err := readFiles(live)
+	if err != nil {
+		return fail(err)
+	}
 	for _, f := range files {
-		if src := filepath.Join(live, f); exists(src) {
-			if err := copyFile(src, filepath.Join(old, f)); err != nil {
+		if b, ok := oldFiles[f]; ok {
+			if err := writeSync(filepath.Join(old, f), b); err != nil {
 				return fail(err)
 			}
 		} else if err := writeSync(filepath.Join(old, f+".absent"), nil); err != nil {
@@ -327,6 +375,34 @@ func (d Deck) Install(target string) error {
 		if err := writeSync(filepath.Join(journal, "layout"), nil); err != nil {
 			return fail(err)
 		}
+	}
+	// Read the complete commit state before publishing the id or changing live files.
+	layout, err := exists(filepath.Join(journal, "layout"))
+	if err != nil {
+		return fail(err)
+	}
+	linkPresent := false
+	if layout {
+		linkPresent, err = exists(d.data("sc5000-custom"))
+		if err != nil {
+			return fail(err)
+		}
+	}
+	parts := make(map[string]bool)
+	for _, p := range uiParts {
+		if ok, err := realDir(filepath.Join(stage, p)); err != nil {
+			return fail(err)
+		} else if !ok {
+			continue
+		}
+		parts[p], err = exists(filepath.Join(live, p))
+		if err != nil {
+			return fail(err)
+		}
+	}
+	newFiles, err := readFiles(stage)
+	if err != nil {
+		return fail(err)
 	}
 	// The staged payload, the backups and their directories reach the disk before the id, and
 	// so before the first swap (#234 review round 2).
@@ -340,38 +416,34 @@ func (d Deck) Install(target string) error {
 	if err := writeSync(filepath.Join(journal, "id"), []byte(ids+"\n")); err != nil {
 		return fail(err)
 	}
-	if err := d.commit(journal, stage, live); err != nil {
-		if rerr := d.recover(); rerr != nil {
-			return fmt.Errorf("%w (and putting this release back: %v)", err, rerr)
-		}
+	putBack := func(err error) error {
+		return errors.Join(err, d.recover())
+	}
+	// 2. What install.sh does to /data itself, in either direction harmless.
+	if err := removeAll(d.data("AppDataUser/AIR Music Technology/Engine/.cache/qml")); err != nil {
 		return err
 	}
-	return nil
-}
-
-// commit moves the staged parts in; the bundle goes last.
-func (d Deck) commit(journal, stage, live string) error {
-	// 2. What install.sh does to /data itself, in either direction harmless.
-	os.RemoveAll(d.data("AppDataUser/AIR Music Technology/Engine/.cache/qml"))
 	for _, f := range []string{"safe-mode", "mods-quarantined", "boot-count", "boot-token", "boot-ready", "last-crash",
 		"boot-failures", "boot-window", "boot-progress", "boot-stage", "boot-report-latest"} {
-		os.Remove(filepath.Join(live, "ui", f))
+		if err := missingOK(remove(filepath.Join(live, "ui", f))); err != nil {
+			return err
+		}
 	}
 
 	// 3. Before 5.3.0.3 the data directory is the real /data/sc5000-custom (#103).
-	if exists(filepath.Join(journal, "layout")) {
+	if layout {
 		crash("layout")
 		link := d.data("sc5000-custom")
-		if !exists(link) {
+		if !linkPresent {
 			if err := os.Symlink("enginex", link); err != nil {
 				return err
 			}
 		}
 		if err := Exchange(d.data("enginex"), link); err != nil {
-			return err
+			return putBack(err)
 		}
 		if err := syncDirs(d.data()); err != nil {
-			return err
+			return putBack(err)
 		}
 		crash("layout-exchanged")
 		if err := relink(d.data("enginex"), "sc5000-custom"); err != nil {
@@ -386,56 +458,60 @@ func (d Deck) commit(journal, stage, live string) error {
 	}
 	for _, p := range uiParts {
 		src, dst := filepath.Join(stage, p), filepath.Join(live, p)
-		if !realDir(src) {
+		present, staged := parts[p]
+		if !staged {
 			continue
 		}
 		crash(p)
-		if exists(dst) {
+		if present {
 			if err := Exchange(src, dst); err != nil {
-				return err
+				return putBack(err)
 			}
 		} else {
 			if err := writeSync(filepath.Join(journal, "absent-"+filepath.Base(p)), nil); err != nil {
 				return err
 			}
 			if err := os.Rename(src, dst); err != nil {
-				return err
+				return putBack(err)
 			}
 		}
 		if err := syncDirs(filepath.Dir(src), filepath.Dir(dst)); err != nil {
-			return err
+			return putBack(err)
 		}
 	}
 	crash("files")
 	for _, f := range files {
-		if src := filepath.Join(stage, f); exists(src) {
-			if err := copyFile(src, filepath.Join(live, f)); err != nil {
+		if b, ok := newFiles[f]; ok {
+			if err := writeSync(filepath.Join(live, f), b); err != nil {
 				return err
 			}
 		} else {
-			os.Remove(filepath.Join(live, f))
+			if err := missingOK(remove(filepath.Join(live, f))); err != nil {
+				return err
+			}
 		}
 	}
 
 	// 5. The commit: from this exchange on the older release is the deck's.
 	crash("bundle")
 	if err := Exchange(filepath.Join(stage, "bundle"), filepath.Join(live, "bundle")); err != nil {
-		return err
+		return putBack(err)
 	}
 	if err := syncDirs(stage, live); err != nil { // durable before finish removes this release's bundle
-		return err
+		return putBack(err)
 	}
 	crash("committed")
-	d.finish(live)
-	return nil
+	return d.finish(live)
 }
 
 // finish drops the markers and the journal (with this release's parts) after a commit.
-func (d Deck) finish(live string) {
+func (d Deck) finish(live string) error {
 	for _, p := range append([]string{"bundle"}, uiParts...) {
-		os.Remove(filepath.Join(live, p, markerName))
+		if err := missingOK(remove(filepath.Join(live, p, markerName))); err != nil {
+			return err
+		}
 	}
-	os.RemoveAll(d.data(journalName))
+	return removeAll(d.data(journalName))
 }
 
 func withoutDest(env []string) []string {
@@ -455,58 +531,146 @@ func withoutDest(env []string) []string {
 // only clears what is left. boot-activate.sh runs it at every boot, before anything else. An
 // install that is running right now is left alone.
 func (d Deck) Recover() error {
-	if ok, err := journalExists(d.data(journalName)); !ok {
+	if ok, err := realDir(d.data(journalName)); err != nil || !ok {
 		return err
 	}
-	unlock, ok := d.lock(false)
-	if !ok {
+	unlock, err := d.lock(false)
+	if errors.Is(err, unix.EWOULDBLOCK) {
 		return nil
+	}
+	if err != nil {
+		return err
 	}
 	defer unlock()
 	return d.recover()
 }
 
-func (d Deck) recover() error {
-	journal := d.data(journalName)
-	if ok, err := journalExists(journal); !ok {
+// activate holds the same lock through the shell's migration, not just through recovery.
+func (d Deck) activate(args []string) error {
+	unlock, err := d.lock(true)
+	if err != nil {
 		return err
 	}
-	id := readLine(filepath.Join(journal, "id"))
+	defer unlock()
+	if len(args) == 1 { // only the boot run puts back an interrupted downgrade
+		if err := d.recover(); err != nil {
+			return err
+		}
+	}
+	cmd := exec.Command("sh", args...)
+	cmd.Env = append(os.Environ(), "ENGINEX_LEAVE_LOCKED=1", fmt.Sprintf("ENGINEX_LEAVE_PID=%d", os.Getpid()))
+	cmd.Stdout, cmd.Stderr = d.Stdout, d.Stderr
+	return cmd.Run()
+}
+
+func (d Deck) recover() error {
+	journal := d.data(journalName)
+	if ok, err := realDir(journal); err != nil || !ok {
+		return err
+	}
+	id, err := readLine(filepath.Join(journal, "id"))
+	if err != nil {
+		return err
+	}
 	stage := filepath.Join(journal, "stage/root")
 	live, err := d.live()
 	if err != nil {
 		return err // a data directory not found (or not readable) removes nothing
 	}
 	if id == "" {
-		d.finish(live) // not prepared yet: nothing was changed
-		return nil
+		return d.finish(live) // not prepared yet: nothing was changed
 	}
-	if !hasMarker(filepath.Join(stage, "bundle"), id) {
+	staged, err := hasMarker(filepath.Join(stage, "bundle"), id)
+	if err != nil {
+		return err
+	}
+	if !staged {
 		// Committed: the older bundle is live. Its exchange is made durable first, again if that
 		// sync failed before, and only then go the journal and this release's parked bundle.
 		if err := syncExisting(live, stage); err != nil {
 			return err
 		}
-		d.finish(live)
-		return nil
+		return d.finish(live)
 	}
-	// The older bundle never went in: every other part goes back.
+	// Read all rollback decisions and contents before replacing or removing anything.
 	old := filepath.Join(journal, "old")
+	oldFiles, err := readFiles(old)
+	if err != nil {
+		return err
+	}
+	absent := make(map[string]bool)
 	for _, f := range files {
-		if src := filepath.Join(old, f); exists(src) {
-			if err := copyFile(src, filepath.Join(live, f)); err != nil {
+		if _, ok := oldFiles[f]; ok {
+			continue
+		}
+		absent[f], err = exists(filepath.Join(old, f+".absent"))
+		if err != nil {
+			return err
+		}
+	}
+	parts := make(map[string]bool)
+	for _, p := range uiParts {
+		if swapped, err := hasMarker(filepath.Join(live, p), id); err != nil {
+			return err
+		} else if !swapped {
+			continue
+		}
+		parts[p], err = exists(filepath.Join(journal, "absent-"+filepath.Base(p)))
+		if err != nil {
+			return err
+		}
+	}
+	parents := []string{live}
+	for _, p := range []string{filepath.Join(live, "ui"), filepath.Join(stage, "ui")} {
+		if ok, err := exists(p); err != nil {
+			return err
+		} else if ok {
+			parents = append(parents, p)
+		}
+	}
+	layout, err := exists(filepath.Join(journal, "layout"))
+	if err != nil {
+		return err
+	}
+	enginex, link := d.data("enginex"), d.data("sc5000-custom")
+	reverse, enginePresent := false, false
+	var linkTarget string
+	if layout {
+		reverse, err = realDir(link)
+		if err != nil {
+			return err
+		}
+		if reverse {
+			linkTarget, err = readlink(enginex)
+			if err := missingOK(err); err != nil {
 				return err
 			}
-		} else if exists(src + ".absent") {
-			os.Remove(filepath.Join(live, f))
+			enginePresent, err = exists(enginex)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	// The older bundle never went in: put the recorded generation back, then clean up.
+	for _, f := range files {
+		if b, ok := oldFiles[f]; ok {
+			if err := writeSync(filepath.Join(live, f), b); err != nil {
+				return err
+			}
+		} else if absent[f] {
+			if err := missingOK(remove(filepath.Join(live, f))); err != nil {
+				return err
+			}
 		}
 	}
 	for _, p := range uiParts {
-		dst := filepath.Join(live, p)
-		if !hasMarker(dst, id) {
+		wasAbsent, swapped := parts[p]
+		if !swapped {
 			continue
 		}
-		if exists(filepath.Join(journal, "absent-"+filepath.Base(p))) {
+		dst := filepath.Join(live, p)
+		if wasAbsent {
 			if err := os.Rename(dst, filepath.Join(stage, p)); err != nil {
 				return err
 			}
@@ -519,18 +683,17 @@ func (d Deck) recover() error {
 	}
 	// The barriers again, whether or not this run swapped anything: a retry after a failed sync
 	// finds the parts already back and must not skip their sync before cleanup.
-	if err := syncExisting(filepath.Join(live, "ui"), filepath.Join(stage, "ui")); err != nil {
+	if err := syncDirs(parents...); err != nil {
 		return err
 	}
-	enginex, link := d.data("enginex"), d.data("sc5000-custom")
-	if exists(filepath.Join(journal, "layout")) && realDir(link) {
-		if t, err := os.Readlink(enginex); err == nil && t != "enginex" {
+	if reverse {
+		if enginePresent && linkTarget != "enginex" {
 			// Fully handed back: make it the state right after the exchange, then undo that.
 			if err := relink(enginex, "enginex"); err != nil {
 				return err
 			}
 		}
-		if exists(enginex) {
+		if enginePresent {
 			if err := Exchange(link, enginex); err != nil {
 				return err
 			}
@@ -543,12 +706,12 @@ func (d Deck) recover() error {
 			}
 		}
 	}
-	if exists(filepath.Join(journal, "layout")) {
+	if layout {
 		if err := syncDirs(d.data()); err != nil { // also when an earlier run did the exchange back
 			return err
 		}
 	}
-	return os.RemoveAll(journal)
+	return removeAll(journal)
 }
 
 // Handback gives the data directory the layout of releases before 5.3.0.3 (the real
@@ -558,26 +721,39 @@ func (d Deck) recover() error {
 // Booting this release again instead takes it back (prepare's migration, #234). Each step is
 // atomic; cut half-way, /data/enginex is a link to itself, and either release takes that too.
 func (d Deck) Handback() error {
-	unlock, _ := d.lock(true)
-	if unlock != nil {
-		defer unlock()
+	unlock, err := d.lock(true)
+	if err != nil {
+		return err
 	}
+	defer unlock()
 	if err := d.recover(); err != nil {
 		return err
 	}
 	enginex, link := d.data("enginex"), d.data("sc5000-custom")
-	if realDir(link) {
+	if ok, err := realDir(link); err != nil {
+		return err
+	} else if ok {
 		return nil // already the old layout
 	}
-	if !realDir(enginex) {
+	if ok, err := realDir(enginex); err != nil {
+		return err
+	} else if !ok {
 		return errors.New("no /data/enginex to hand back")
 	}
-	if !exists(link) {
+	if ok, err := exists(link); err != nil {
+		return err
+	} else if !ok {
 		if err := os.Symlink("enginex", link); err != nil {
 			return err
 		}
-	} else if t, err := os.Readlink(link); err != nil || t != "enginex" {
-		return fmt.Errorf("/data/sc5000-custom is not EngineX's link (%q), left alone", t)
+	} else {
+		target, err := readlink(link)
+		if err != nil {
+			return err
+		}
+		if target != "enginex" {
+			return fmt.Errorf("/data/sc5000-custom is not EngineX's link (%q), left alone", target)
+		}
 	}
 	if err := Exchange(enginex, link); err != nil {
 		return ErrNoExchange
@@ -589,6 +765,12 @@ func (d Deck) Handback() error {
 func Main(args []string, stdout, stderr io.Writer) int {
 	d := Deck{Root: os.Getenv("ENGINEX_LEAVE_ROOT"), Stdout: stdout, Stderr: stderr}
 	switch {
+	case len(args) >= 2 && args[0] == "activate": // internal boot-activate.sh entry
+		if err := d.activate(args[1:]); err != nil {
+			fmt.Fprintln(stderr, "leave: activate:", err)
+			return 1
+		}
+		return 0
 	case len(args) == 1 && args[0] == "recover":
 		if err := d.Recover(); err != nil {
 			fmt.Fprintln(stderr, "leave: recover:", err)
@@ -604,6 +786,11 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		return 0
 	case len(args) == 2 && args[0] == "install":
 		target := args[1]
+		version, err := readLine(filepath.Join(target, "version.txt"))
+		if err != nil {
+			fmt.Fprintln(stderr, "leave:", err)
+			return 1
+		}
 		older, err := d.Older(target)
 		if err != nil {
 			fmt.Fprintln(stderr, "leave:", err)
@@ -622,9 +809,7 @@ func Main(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, "leave:", err)
 			return 1
 		}
-		var b bytes.Buffer
-		fmt.Fprintf(&b, "EngineX OS %s installed; the deck restarts into it\n", readLine(filepath.Join(target, "version.txt")))
-		stdout.Write(b.Bytes())
+		fmt.Fprintf(stdout, "EngineX OS %s installed; the deck restarts into it\n", version)
 		return 0
 	}
 	fmt.Fprintln(stderr, "usage: enginex-suite leave {install <unpacked bundle>|recover|layout}")
