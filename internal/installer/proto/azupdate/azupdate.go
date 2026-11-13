@@ -164,8 +164,14 @@ func WithChunkSize(n int) Option {
 
 func WithPartitions(parts []string) Option {
 	return func(c *Client) {
-		if len(parts) > 0 {
-			c.partitions = append([]string(nil), parts...)
+		var allowed []string
+		for _, p := range parts {
+			if p == "data" || p == "userdata" {
+				allowed = append(allowed, p)
+			}
+		}
+		if len(allowed) > 0 {
+			c.partitions = allowed
 		}
 	}
 }
@@ -287,7 +293,7 @@ func (c *Client) WriteData(ctx context.Context, img proto.Image, progress proto.
 		return "", proto.MarkOutcomeUnknown("azupdate final status", err)
 	}
 	if finalReply.Status != StatusWritten {
-		return "", &RefusedError{Partition: activePart, Status: finalReply.Status, Phase: "confirm"}
+		return "", proto.MarkOutcomeUnknown("azupdate confirm "+activePart, &RefusedError{Partition: activePart, Status: finalReply.Status, Phase: "confirm"})
 	}
 	return activePart, nil
 }
@@ -318,6 +324,9 @@ func (c *Client) readReply(ctx context.Context, expectedSeq uint32, timeout time
 	n, err := c.dev.ReadBulk(tctx, c.eps.In, buf)
 	if err != nil {
 		return Reply{}, err
+	}
+	if n < 0 || n > len(buf) {
+		return Reply{}, fmt.Errorf("azupdate: invalid ReadBulk count %d", n)
 	}
 	return ParseReply(buf[:n], CmdWritePart, expectedSeq)
 }

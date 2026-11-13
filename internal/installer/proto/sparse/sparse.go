@@ -35,7 +35,7 @@ const (
 
 	maxHeaderSize   uint16 = 4096
 	maxBlockSize    uint32 = 64 << 20
-	maxTotalChunks  uint32 = 16 << 20
+	maxTotalChunks  uint32 = 1 << 20
 	scanBufferBytes int64  = 1 << 20
 )
 
@@ -209,6 +209,9 @@ func ParseChunks(src io.ReaderAt, size int64) (Header, []ParsedChunk, error) {
 			TotalBytes: ctotal,
 			DataOffset: dataOff,
 			LogicalBlk: logicalBlk,
+		}
+		if ctype != ChunkTypeCRC32 && uint64(cblocks) > uint64(h.TotalBlocks)-logicalBlk {
+			return Header{}, nil, fmt.Errorf("sparse: chunk %d exceeds header TotalBlocks (%d + %d > %d)", i, logicalBlk, cblocks, h.TotalBlocks)
 		}
 		switch ctype {
 		case ChunkTypeRaw:
@@ -643,7 +646,7 @@ func scanRawToSpecs(src io.ReaderAt, size int64, blkSize uint32, padLast bool) (
 	if rem != 0 && !padLast {
 		return nil, 0, fmt.Errorf("%w: size %d not divisible by block size %d", ErrUnalignedSize, size, blkSize)
 	}
-	totalBlocks := uint64((size + blk - 1) / blk)
+	totalBlocks := uint64((size-1)/blk + 1)
 	if totalBlocks > uint64(^uint32(0)) {
 		return nil, 0, fmt.Errorf("sparse: block count %d overflows uint32", totalBlocks)
 	}
@@ -852,6 +855,11 @@ func buildPieces(src io.ReaderAt, blkSize uint32, specs []chunkSpec, totalBlocks
 				if uint64(maxBlks) < take {
 					take = uint64(maxBlks)
 				}
+				// Single chunk total_sz in the 12-byte chunk header is uint32.
+				maxChunkBlks := uint64(int64(^uint32(0))-int64(ChunkHeaderSize)) / uint64(blkSize)
+				if take > maxChunkBlks {
+					take = maxChunkBlks
+				}
 				takeBytes := int64(take) * int64(blkSize)
 				takeSrcBytes := takeBytes
 				if takeSrcBytes > remSrcBytes {
@@ -899,6 +907,8 @@ func buildPieces(src io.ReaderAt, blkSize uint32, specs []chunkSpec, totalBlocks
 	pieces := make([]*Piece, 0, len(drafts))
 	scratch := make([]byte, minUint32(blkSize, 64<<10))
 	zeroBuf := make([]byte, minUint32(blkSize, 64<<10))
+	var prefixZeroCRC uint32
+	var prefixZeroBlocks uint64
 
 	for idx, d := range drafts {
 		endBlk := d.startBlock + d.writtenBlocks
@@ -906,7 +916,11 @@ func buildPieces(src io.ReaderAt, blkSize uint32, specs []chunkSpec, totalBlocks
 			return nil, fmt.Errorf("sparse: piece %d end block %d overflows uint32", idx, endBlk)
 		}
 		if includeCRC {
-			crc, err := computePieceCRC(src, blkSize, d.chunks, scratch, zeroBuf)
+			if d.startBlock > prefixZeroBlocks {
+				prefixZeroCRC = crcUpdateZeroes(prefixZeroCRC, (d.startBlock-prefixZeroBlocks)*uint64(blkSize), zeroBuf)
+				prefixZeroBlocks = d.startBlock
+			}
+			crc, err := computePieceCRC(src, blkSize, d.chunks, prefixZeroCRC, d.startBlock, scratch, zeroBuf)
 			if err != nil {
 				return nil, err
 			}
@@ -948,12 +962,18 @@ func buildPieces(src io.ReaderAt, blkSize uint32, specs []chunkSpec, totalBlocks
 	return pieces, nil
 }
 
-func computePieceCRC(src io.ReaderAt, blkSize uint32, chunks []pieceChunk, scratch, zeroBuf []byte) (uint32, error) {
+func computePieceCRC(src io.ReaderAt, blkSize uint32, chunks []pieceChunk, prefixZeroCRC uint32, prefixZeroBlocks uint64, scratch, zeroBuf []byte) (uint32, error) {
 	var crc uint32
-	for _, c := range chunks {
+	usedPrefix := false
+	for i, c := range chunks {
 		switch c.typ {
 		case ChunkTypeDontCare:
-			crc = crcUpdateZeroes(crc, uint64(c.blocks)*uint64(blkSize), zeroBuf)
+			if i == 0 && !usedPrefix && uint64(c.blocks) == prefixZeroBlocks && prefixZeroBlocks > 0 {
+				crc = prefixZeroCRC
+				usedPrefix = true
+			} else {
+				crc = crcUpdateZeroes(crc, uint64(c.blocks)*uint64(blkSize), zeroBuf)
+			}
 		case ChunkTypeFill:
 			crc = crcUpdatePattern(crc, c.fill, uint64(c.blocks)*uint64(blkSize), scratch)
 		case ChunkTypeRaw:
@@ -1116,5 +1136,3 @@ func ReconstructPieces(dst io.WriterAt, pieces []*Piece) error {
 	}
 	return nil
 }
-
-var _ = bytes.Compare // keep bytes available if needed

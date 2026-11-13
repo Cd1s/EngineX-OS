@@ -124,25 +124,40 @@ func (d *fakeRockUSBDevice) WriteBulk(ctx context.Context, ep uint8, data []byte
 	}
 
 	switch opcode {
-	case rockchip.OpReadChipInfo:
+	case 0x1B: // rkdeveloptool READ_CHIP_INFO (16 bytes)
+		if binary.LittleEndian.Uint32(data[8:12]) != 16 || data[12] != 0x80 || data[14] != 6 {
+			return 0, errors.New("unexpected READ_CHIP_INFO CBW fields")
+		}
 		d.inQueue = append(d.inQueue, append([]byte(nil), d.chipInfo[:]...))
 		sendCSW(0, 0)
-	case rockchip.OpReadCapability:
+	case 0xAA: // rkdeveloptool READ_CAPABILITY (8 bytes)
+		if binary.LittleEndian.Uint32(data[8:12]) != 8 || data[12] != 0x80 || data[14] != 6 {
+			return 0, errors.New("unexpected READ_CAPABILITY CBW fields")
+		}
 		d.inQueue = append(d.inQueue, append([]byte(nil), d.capability[:]...))
 		sendCSW(0, 0)
-	case rockchip.OpTestUnitReady:
+	case 0x00: // rkdeveloptool TEST_UNIT_READY
+		if binary.LittleEndian.Uint32(data[8:12]) != 0 || data[14] != 6 {
+			return 0, errors.New("unexpected TEST_UNIT_READY CBW fields")
+		}
 		if d.maskrom {
 			sendCSW(1, 0)
 		} else {
 			sendCSW(0, 0)
 		}
-	case rockchip.OpReadFlashID:
+	case 0x01: // rkdeveloptool READ_FLASH_ID (5 bytes)
+		if binary.LittleEndian.Uint32(data[8:12]) != 5 || data[12] != 0x80 || data[14] != 6 {
+			return 0, errors.New("unexpected READ_FLASH_ID CBW fields")
+		}
 		d.inQueue = append(d.inQueue, append([]byte(nil), d.flashID[:]...))
 		sendCSW(0, 0)
-	case rockchip.OpReadFlashInfo:
+	case 0x1A: // rkdeveloptool READ_FLASH_INFO (11 bytes)
+		if binary.LittleEndian.Uint32(data[8:12]) != 11 || data[12] != 0x80 || data[14] != 6 {
+			return 0, errors.New("unexpected READ_FLASH_INFO CBW fields")
+		}
 		d.inQueue = append(d.inQueue, append([]byte(nil), d.flashInfo[:]...))
 		sendCSW(0, 0)
-	case rockchip.OpReadLBA:
+	case 0x14: // rkdeveloptool READ_LBA (big-endian LBA/sectors)
 		lba := binary.BigEndian.Uint32(data[17:21])
 		cnt := binary.BigEndian.Uint16(data[22:24])
 		start := int(lba) * rockchip.SectorSize
@@ -342,6 +357,39 @@ func TestGPTCorruptionAndWrapperFailures(t *testing.T) {
 	// 6. Out-of-bounds LastUsableLBA vs disk capacity.
 	if _, err := rockchip.ParseGPTHeader(disk[rockchip.SectorSize:2*rockchip.SectorSize], 100); !errors.Is(err, rockchip.ErrInvalidGPT) {
 		t.Fatalf("expected ErrInvalidGPT for out-of-bounds disk sectors, got %v", err)
+	}
+
+	// 7. Near-2^64 PartitionEntryLBA wraparound must be rejected.
+	wrapDisk := append([]byte(nil), disk...)
+	wrapHdr := wrapDisk[rockchip.SectorSize : 2*rockchip.SectorSize]
+	binary.LittleEndian.PutUint64(wrapHdr[72:80], ^uint64(0)-1) // wraps +32 -> 30 < FirstUsableLBA
+	clear(wrapHdr[16:20])
+	binary.LittleEndian.PutUint32(wrapHdr[16:20], crc32.ChecksumIEEE(wrapHdr[:92]))
+	if _, err := rockchip.ParseGPTHeader(wrapHdr, 2048); !errors.Is(err, rockchip.ErrInvalidGPT) {
+		t.Fatalf("expected ErrInvalidGPT on PartitionEntryLBA wraparound, got %v", err)
+	}
+
+	// 8. Golden CBW encoding verification against rkdeveloptool RKComm.h / RKComm.cpp.
+	cbwChip, err := rockchip.EncodeCBW(1, 16, 0x80, rockchip.OpReadChipInfo, 6, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantChip := [31]byte{
+		0x55, 0x53, 0x42, 0x43, // "USBC" LE
+		0x01, 0x00, 0x00, 0x00, // tag = 1
+		0x10, 0x00, 0x00, 0x00, // transfer = 16
+		0x80, 0x00, 0x06, // flags=IN, lun=0, cblen=6
+		0x1B, // READ_CHIP_INFO
+	}
+	if cbwChip != wantChip {
+		t.Fatalf("READ_CHIP_INFO CBW mismatch:\ngot:  %x\nwant: %x", cbwChip, wantChip)
+	}
+	cbwCap, err := rockchip.EncodeCBW(2, 8, 0x80, rockchip.OpReadCapability, 6, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cbwCap[15] != 0xAA {
+		t.Fatalf("READ_CAPABILITY opcode = 0x%02x, want 0xAA", cbwCap[15])
 	}
 }
 

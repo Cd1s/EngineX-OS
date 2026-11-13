@@ -298,9 +298,6 @@ func TestLargeLogicalImageOver4GiB(t *testing.T) {
 		2 << 30:           island(0x22),
 		(4 << 30) + 65536: island(0x33),
 	}
-	// Sparse scan over 4.25 GiB would take a couple seconds if scanning every block;
-	// verify large BlockSize (e.g. 64 KiB) or 4 KiB? 4.25 GiB / 1 MiB = 4352 iterations,
-	// fast (~0.2s) even with 4 KiB blocks!
 	r := &syntheticLargeReader{size: totalSize, blkSize: blkSize, islands: islands}
 	const cap512MiB = 0x20000000
 	iter, err := sparse.NewResparse(r, totalSize, sparse.ResparseOptions{
@@ -438,5 +435,21 @@ func TestParseRejectsCorruptAndTruncatedInputs(t *testing.T) {
 		BlockSize:     4096,
 	}); !errors.Is(err, sparse.ErrLimitTooSmall) {
 		t.Fatalf("expected ErrLimitTooSmall, got %v", err)
+	}
+
+	// Hostile chunk claiming cblocks=0xFFFFFFFF with TotalBlocks=1 must fail
+	// immediately before attempting any CRC calculation.
+	var hostile bytes.Buffer
+	hHdr := sparse.MarshalHeader(sparse.Header{
+		MajorVersion: sparse.MajorVersion,
+		BlockSize:    64 << 20,
+		TotalBlocks:  1,
+		TotalChunks:  1,
+	})
+	hChk := sparse.MarshalChunkHeader(sparse.ChunkTypeDontCare, 0xFFFFFFFF, uint32(sparse.ChunkHeaderSize))
+	hostile.Write(hHdr[:])
+	hostile.Write(hChk[:])
+	if _, _, err := sparse.ParseChunks(bytes.NewReader(hostile.Bytes()), int64(hostile.Len())); err == nil {
+		t.Fatal("expected immediate error on cblocks > TotalBlocks")
 	}
 }
