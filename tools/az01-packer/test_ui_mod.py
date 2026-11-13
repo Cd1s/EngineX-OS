@@ -1051,7 +1051,7 @@ class ShadowDisplayTest(unittest.TestCase):
                  "scShadowProperties", "scShadowTick", "scShadowPost", "scShadowPoll", "scShadowPollIdle", "scShadowDisplayFetch", "scShadowSameSample", "scShadowApplyDisplay", "scShadowCovers", "scShadowBusy", "scShadowApplyAll", "scNextCueInfo", "scNextCueCompute", "scCueTickFor",
                  "scShadowApply", "scShadowEmpty", "scShadowScratchRelease", "scShadowSpeed", "scShadowCues", "scShadowBeat",
                  "scShadowLoad", "scShadowWrong", "scShadowHolds", "scShadowEndGap", "scShadowEnd",
-                 "scShadowSeek", "scShadowLink", "scShadowLinkEdge", "scPress", "scGcCheck", "scShadowWake", "scShadowAnyPlaying",
+                 "scShadowSeek", "scShadowMirror", "scShadowLink", "scShadowLinkEdge", "scPress", "scGcCheck", "scShadowWake", "scShadowAnyPlaying",
                  "scShadowLine", "scShadowLandingSeek", "scShadowLandingTick", "scShadowBend", "scShadowBendEnd", "scShadowMasterBack", "scPressWrite", "scMasterPresses",
                  "scLayerPath", "scPairedLanes", "scPairedFollow", "scShadowHeldBy", "scShadowEngineHeld")
         functions = []
@@ -1078,7 +1078,7 @@ Object.assign(globalThis, {
     scShadowPostRequest: null, scShadowPollRequest: null, scShadowResponseVersion: "", scShadowPostPending: false,
     scShadowLinkId: '', scShadowLinkAt: -Infinity, scShadowTextAt: {},
     scShadowSent: [], scShadowFullAt: 0, scShadowPostFull: true, scShadowLive: {seen: 0},
-    scShadowScratchDelay: 60, scShadowScratchTimer: {running: false, start() {this.running=true}, stop() {this.running=false}, tick() {}},
+    scShadowScratchTimer: {running: false, start() {this.running=true}, stop() {this.running=false}, tick() {}},
     scShadowTickTimer: {interval: 40}, scShadowBusyAt: 0, scShadowRoleDirty: true,
     scGcLoadSeq: 0, scGcRuns: 0, scGcLastMs: 0, scGcProps: null,
     scGcState: {armed: true, quietSince: 0, lastRun: -Infinity, loadSig: 0, loadSeq: 0, loadAt: 0, followAt: 0},
@@ -1102,8 +1102,7 @@ globalThis.XMLHttpRequest = class {
 """
         timer = re.search(r'id: scShadowScratchTimer\n.*?onTriggered: \{(.*?)\n\t\t\}\n\t\}', bp.SERVICES_MAIN, re.S)
         if timer:
-            delay = re.search(r'scShadowScratchDelay: (\d+)', bp.SERVICES_MAIN).group(1)
-            setup += "\nscShadowScratchDelay=" + delay + "; scShadowScratchTimer.tick=function(){" + timer.group(1) + "};\n"
+            setup += "\nscShadowScratchTimer.tick=function(){" + timer.group(1) + "};\n"
         res = subprocess.run(["node", "-e", setup + "\n".join(functions) + "\n" + body], capture_output=True, text=True)
         self.assertEqual(res.returncode, 0, res.stderr)
 
@@ -5501,14 +5500,15 @@ globalThis.scShadowBendTimer={interval:0,running:false,stop(){this.running=false
 const P=path=>{
     let p=props.get(path);
     if(p)return p;
-    p={_s:path.endsWith('/SongLoaded')||path.endsWith('/PlayState'),_v:path.endsWith('/SampleRate')?48000:0,
+    // Stock's position mirror reads -1 until its stream runs; the jog moves the deck 1 ms per 20 ticks (measured on a JP07).
+    p={_s:path.endsWith('/SongLoaded')||path.endsWith('/PlayState'),_v:path.endsWith('/SampleRate')?48000:path.includes('/PositionInSamples')?-1:0,
        string:path.endsWith('/SpeedRange')?'8':path.endsWith('/SyncMode')?'Off':'',
        entries:['4','8','10','20','50','100'],index:1,
        get state(){return this._s},set state(v){this._s=v},
        get value(){return this._v},set value(v){this._v=v;if(path.endsWith('/SetSongPosition')){posMs=v*400000;seeks++}},
        get unnormalized(){return path.endsWith('/TrackLength')?48000*400:path.endsWith('/TrackPosition')?posMs*48:0},
-       incValue(t){wheelMoves.push(t);posMs+=t/23.5},
-       decValue(t){wheelMoves.push(-t);posMs-=t/23.5}};
+       incValue(t){wheelMoves.push(t);posMs+=t/20},
+       decValue(t){wheelMoves.push(-t);posMs-=t/20}};
     props.set(path,p);
     return p;
 };
@@ -5529,7 +5529,7 @@ for(let i=1;i<=5;i++){
 assert.equal(P('/Engine/Deck2/ExternalScratchWheelTouch').state,true,'shadow platter touch must be engaged');
 assert.equal(seeks,0,'normal scratch must not flush decoder with SetSongPosition');
 assert(wheelMoves.length>=4 && wheelMoves.every(v=>v<0),'backward wheel moves sent');
-assert(Math.abs(posMs-(11300+60*1.6))<35,'shadow position follows the 60 ms delayed scratch: '+posMs);
+assert(Math.abs(posMs-(11300+25*1.6))<15,'shadow position follows the scratch one update (25 ms) behind: '+posMs);
 // Release platter: touch clears cleanly.
 now+=25;
 scShadowApplyAll([{deck:2,path:'/data/enginex/shadow-v3/peer-1/a.flac',id:'1',playing:true,scratch:false,link:'{l}',positionMs:11325,at:now,pitch:0,bpm:128,currentBpm:128,jumps:0,seq:++seq}],false);

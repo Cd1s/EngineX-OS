@@ -767,6 +767,9 @@ func TestShadowComposeMarksLoadingAndUnloads(t *testing.T) {
 	if !got[3].Loading || got[3].Path != "" || got[4].Loading || got[4].Path != "" {
 		t.Fatalf("compose: %+v", out)
 	}
+	if got[3].Src != 0 || got[4].Src != 0 {
+		t.Fatalf("a deck in its own slot needs no src: %+v", out)
+	}
 	// #160: an overlapping peer deck (e.g. an SC5000 on Deck 1 while a PRIME 4 owns
 	// Decks 1+2) is placed onto the next free shadow deck (Deck 3).
 	s.shadow.mu.Lock()
@@ -778,6 +781,10 @@ func TestShadowComposeMarksLoadingAndUnloads(t *testing.T) {
 	if len(out) != 1 || out[0].Deck != 3 || !out[0].Loading || !out[0].Playing {
 		t.Fatalf("overlapping peer deck on 12 role: %+v, want shadow deck 3", out)
 	}
+	// The QML reads stock's position mirror by the source's own deck number.
+	if out[0].Src != 1 {
+		t.Fatalf("overlapping peer deck: src %d, want the source's deck 1", out[0].Src)
+	}
 	// Two SC5000 players both playing on their own Deck 1 map to shadow Decks 3 and 4.
 	s.shadow.mu.Lock()
 	s.shadow.peerDecks = map[int]peerDeck{}
@@ -785,8 +792,8 @@ func TestShadowComposeMarksLoadingAndUnloads(t *testing.T) {
 	s.shadow.takePeer("192.0.2.9", []deckState{{Deck: 1, Seq: 1, Key: "k2", Ext: ".flac", Name: "p2.flac", Playing: true}}, now)
 	s.shadow.mu.Unlock()
 	out = s.shadowComposeLegacy("12", now)
-	if len(out) != 2 || out[0].Deck != 3 || out[1].Deck != 4 {
-		t.Fatalf("two peers on Deck 1 with 12 role: %+v, want shadow decks 3 and 4", out)
+	if len(out) != 2 || out[0].Deck != 3 || out[1].Deck != 4 || out[0].Src != 1 || out[1].Src != 1 {
+		t.Fatalf("two peers on Deck 1 with 12 role: %+v, want shadow decks 3 and 4, both from deck 1", out)
 	}
 }
 
