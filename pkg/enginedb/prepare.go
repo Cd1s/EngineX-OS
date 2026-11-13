@@ -43,10 +43,10 @@ var (
 // late, after at least one track has been prepared: on a slow stick the stats
 // and MP3 header reads of thousands of tracks used up the whole mount budget,
 // and Sync then deferred every track on every mount (r3 review).
-func prepareTracks(ctx context.Context, res *compat.Resolver, l *rekordbox.Library, cutoff time.Time, done map[string]string) ([]preparedTrack, error) {
+func prepareTracks(ctx context.Context, res *compat.Resolver, l *rekordbox.Library, cutoff time.Time, now func() time.Time, done map[string]string) ([]preparedTrack, error) {
 	prepared := make([]preparedTrack, 0, len(l.Tracks))
 	paths := map[string]uint32{}
-	ready := 0
+	ready, late := 0, false
 	for _, t := range l.Tracks {
 		if e := ctx.Err(); e != nil {
 			return nil, e
@@ -64,7 +64,7 @@ func prepareTracks(ctx context.Context, res *compat.Resolver, l *rekordbox.Libra
 				continue
 			}
 		}
-		rel, e := res.Resolve(t.Path)
+		rel, e := res.ResolveContext(ctx, t.Path)
 		if e != nil {
 			return nil, fmt.Errorf("track %d: %w", t.ID, e)
 		}
@@ -76,12 +76,13 @@ func prepareTracks(ctx context.Context, res *compat.Resolver, l *rekordbox.Libra
 			prepared = append(prepared, preparedTrack{track: t, rel: rel, hash: fp, info: exportFileInfo{size: t.FileSize}})
 			continue
 		}
-		if ready > 0 && !cutoff.IsZero() && time.Now().After(cutoff) {
+		// Once past the cut-off, every track left is late: no clock reading per track.
+		if late = late || ready > 0 && !cutoff.IsZero() && now().After(cutoff); late {
 			prepared = append(prepared, preparedTrack{track: t, rel: rel, hash: "fast:" + t.RecordHash, info: exportFileInfo{size: t.FileSize}, late: true})
 			continue
 		}
 		ready++
-		p, e := prepareOne(res, t, rel, cutoff, ready > 1)
+		p, e := prepareOne(res, t, rel, cutoff, now, ready > 1)
 		if e != nil {
 			return nil, e
 		}
@@ -92,7 +93,7 @@ func prepareTracks(ctx context.Context, res *compat.Resolver, l *rekordbox.Libra
 
 // prepareOne stats and fingerprints one track. Past cutoff, when mayDefer, an
 // MP3 is left uninspected instead of its header being read.
-func prepareOne(res *compat.Resolver, t rekordbox.Track, rel string, cutoff time.Time, mayDefer bool) (preparedTrack, error) {
+func prepareOne(res *compat.Resolver, t rekordbox.Track, rel string, cutoff time.Time, now func() time.Time, mayDefer bool) (preparedTrack, error) {
 	full := res.FullPath(rel)
 	st, e := statFile(full)
 	if e != nil {
@@ -112,7 +113,7 @@ func prepareOne(res *compat.Resolver, t rekordbox.Track, rel string, cutoff time
 		uninspected bool
 	)
 	if strings.EqualFold(path.Ext(rel), ".mp3") {
-		if mayDefer && !cutoff.IsZero() && time.Now().After(cutoff) {
+		if mayDefer && !cutoff.IsZero() && now().After(cutoff) {
 			uninspected = true
 		} else if info, err := audioHeader(full); err == nil {
 			fp.MP3Offset = info.OffsetClass
@@ -142,15 +143,18 @@ func (f exportFileInfo) ModTime() time.Time { return time.Time{} }
 // from directory entries, as in a full import (#6). A path that cannot be
 // resolved (missing file) keeps the export spelling; one that tries to leave
 // the volume is dropped.
-func prepareFast(res *compat.Resolver, l *rekordbox.Library) []preparedTrack {
+func prepareFast(ctx context.Context, res *compat.Resolver, l *rekordbox.Library) ([]preparedTrack, error) {
 	prepared := make([]preparedTrack, 0, len(l.Tracks))
 	paths := map[string]bool{}
 	for _, t := range l.Tracks {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		rel := strings.TrimLeft(path.Clean("/"+t.Path), "/")
 		if rel == "" || t.Path == "" || strings.HasPrefix(rel, "PIONEER/") || strings.HasPrefix(rel, ".PIONEER/") {
 			continue
 		}
-		if resolved, e := res.Resolve(t.Path); e == nil {
+		if resolved, e := res.ResolveContext(ctx, t.Path); e == nil {
 			rel = resolved
 		}
 		if paths[rel] {
@@ -159,7 +163,7 @@ func prepareFast(res *compat.Resolver, l *rekordbox.Library) []preparedTrack {
 		paths[rel] = true
 		prepared = append(prepared, preparedTrack{track: t, rel: rel, hash: "fast:" + t.RecordHash, info: exportFileInfo{size: t.FileSize}})
 	}
-	return prepared
+	return prepared, ctx.Err()
 }
 
 // Stage every moved owned row first, so even two source tracks swapping paths
