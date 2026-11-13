@@ -184,8 +184,9 @@ for(let t=1;t<=2000;t++) {
             assert(Math.abs(posMs-before)>0.1,'idle scratch frame between source updates at '+t);
             assert(Math.abs(posMs-before)<=speed*16*1.6+1,'large per-frame jog burst at '+t);
             frames++;
-            maxError=Math.max(maxError,Math.abs(posMs-expected));
         }
+        // Every frame, the turns too: the frame that sees a turn must not set off the new way at full speed.
+        maxError=Math.max(maxError,Math.abs(posMs-expected));
     }
     previousFramePos=posMs;
 }
@@ -344,6 +345,208 @@ assert.equal(scShadowAt[2].scratchMirror,null);
 assert(posMs<11500-100,'the deck did not follow our own update: '+posMs);
 now+=25; scShadowApplyAll([],false); now+=400; scShadowApplyAll([],false);
 assert.deepEqual(mirrorWrites,[]);
+""")
+
+    def test_fast_accelerating_spin_is_carried_by_the_jog(self):
+        # The maintainer's "很快很快的加速转…一卡一卡". Measured on two JP07: a whip of the platter passes 20x
+        # within 60 ms. Taking every mirror sample more than 500 ms on (14x) for a jump, the copy stood still
+        # and went by seeks, 4 a second; the jog itself is exact to 50x.
+        self.js(RX + r"""
+const start=now, beforeSeeks=seeks;
+const speed=t=>24*(t<60?t/60:t<160?1:t<220?(220-t)/60:0);   // 0 -> 24x in 60 ms, held 100 ms, down in 60 ms
+let src=11300, stood=0, frames=0, most=0, last=posMs;
+for(let t=1;t<=600;t++) {
+    now=start+t; src+=speed(t);
+    if(t%35===0) P(MIRROR).value=src*48;
+    if(t%25===0) scShadowApplyAll([E({scratch:true,positionMs:src,at:now})],false);
+    if(t%16!==0) continue;
+    const mark=wheelMoves.length;
+    frameOnly=true; scShadowScratchTimer.tick(); frameOnly=false;
+    most=Math.max(most,...wheelMoves.slice(mark).map(Math.abs));
+    if(t>90&&t<230) { frames++; if(Math.abs(posMs-last)<1) stood++; }
+    last=posMs;
+}
+assert(frames>=8,'insufficient coverage');
+assert.equal(seeks,beforeSeeks,'a fast spin was followed by seeks');
+assert.equal(stood,0,'the copy stood still on '+stood+' of '+frames+' frames of the spin');
+assert(most>4000&&most<=16000,'jog ticks a frame outside the measured range: '+most);
+assert(Math.abs(posMs-src)<40,'the copy did not come to rest on the source: '+(posMs-src));
+""")
+
+    def test_whip_stopped_dead_settles_by_the_source(self):
+        # The line runs half a sample past the newest one before the deck rests: 350 ms at 20x. A scratch at
+        # 3.5x leaves 60 ms and no move back (test_interpolated_...); a whip gives back what is more than that.
+        self.js(RX + r"""
+const start=now, beforeSeeks=seeks; let src=11300, high=-Infinity;
+for(let t=1;t<=900;t++) {
+    now=start+t; if(t<=300) src+=20;
+    if(t%35===0) P(MIRROR).value=src*48;
+    if(t%25===0) scShadowApplyAll([E({scratch:true,positionMs:src,at:now})],false);
+    if(t%16===0) scShadowScratchTimer.tick();
+    high=Math.max(high,posMs);
+}
+assert.equal(seeks,beforeSeeks);
+assert(high-src<=20*35*0.5+5,'the copy ran more than half a sample past the stop: '+(high-src));
+assert(posMs-src>=0&&posMs-src<=65,'the copy did not settle by the source: '+(posMs-src));
+""")
+
+    def test_no_frame_sends_more_than_the_jog_was_measured_at(self):
+        # 16000 ticks a frame (800 ms, 50x) is as far as the jog was measured on a JP07 (19.8-20.3 ticks a ms).
+        self.js(RX + r"""
+const start=now, mark=wheelMoves.length;
+const speed=t=>t<300?40:t<400?40*(400-t)/100:0;     // 40x, then down to a stop
+let src=11300;
+for(let t=1;t<=700;t++) {
+    now=start+t; src+=speed(t);
+    if(t%35===0) P(MIRROR).value=src*48;
+    if(t%25===0) scShadowApplyAll([E({scratch:true,positionMs:src,at:now})],false);
+    if(t%16===0&&(t<150||t>190)) scShadowScratchTimer.tick();   // and the GUI thread stalls for 50 ms
+}
+assert.equal(Math.max(...wheelMoves.slice(mark).map(Math.abs)),16000,'the frames were not held to the measured range');
+assert(Math.abs(posMs-src)<40,'what the cap held back was not made up: '+(posMs-src));
+""")
+
+    def test_report_of_before_a_seek_is_not_taken_for_a_slip(self):
+        # Measured: for 20 ms after a seek TrackPosition still reads where the deck was. The trim took that
+        # for a slip and pushed the deck 15 % of the seek past its target (+290 ms after 1.9 s), then crept back.
+        self.js(RX + self.PLANT + r"""
+const start=now, beforeSeeks=seeks; let high=-Infinity;
+for(let t=1;t<=800;t++) {
+    now=start+t; stepPlant(t);
+    const src=t<200?11300:16300;                  // a cue 5 s on, under the hand
+    if(t%35===0) P(MIRROR).value=src*48;
+    if(t%25===0) scShadowApplyAll([E({scratch:true,positionMs:src,at:now})],false);
+    if(t%16===0) { const before=posMs; scShadowScratchTimer.tick(); pending+=posMs-before; posMs=before; }   // frame(), with a seek's reads allowed
+    high=Math.max(high,truePos);
+}
+assert.equal(seeks,beforeSeeks+1,'a jump of 5 s is one seek');
+assert(high<=16300+5,'the deck was pushed '+(high-16300).toFixed(0)+' ms past the seek');
+assert(Math.abs(truePos-16300)<5,'the deck is not on the source: '+(truePos-16300));
+""")
+
+    def test_stock_mirror_goes_off_when_the_player_leaves_during_a_replacement_load(self):
+        # The slot's state is new from the moment the source loads another track: who the mirror is on for must outlive it.
+        self.js(RX + r"""
+assert.equal(P(MIRROR_ON).state,true);
+now+=25; scShadowApplyAll([E({id:'replacement',path:'/data/enginex/shadow-v3/peer-1/b.flac',scratch:true})],false);
+assert.equal(P('/Engine/Deck2/ExternalScratchWheelTouch').state,false);
+now+=25; scShadowApplyAll([],false);              // the player goes before the new copy is held
+now+=400; scShadowApplyAll([],false);
+assert.equal(scShadowAt[2],undefined,'precondition: the slot was given up');
+assert.equal(P(MIRROR_ON).state,false,'the mirror of a player that left was left on');
+""")
+
+    def test_stock_mirror_is_shared_by_two_slots_and_follows_a_slot_to_another_player(self):
+        self.js(RX + r"""
+const four=o=>E(Object.assign({deck:4,id:'four',path:'/data/enginex/shadow-v3/peer-1/four.flac',scratch:false},o));
+const OTHER='/Engine/BeatInfoSenderControl/{m}/Enabled';
+now+=25; scShadowApplyAll([E({scratch:false}),four({})],false);
+now+=1500; scShadowApplyAll([E({scratch:false}),four({})],false);
+// One of the player's two decks goes: the other still needs the mirror.
+now+=25; scShadowApplyAll([four({})],false); now+=400; scShadowApplyAll([four({})],false);
+assert.equal(scShadowAt[2],undefined,'precondition: Deck 2 was unloaded');
+assert.equal(P(MIRROR_ON).state,true,'unloading one slot switched off the mirror another slot uses');
+// The slot gets another player's track: that player's mirror goes on, the first one's off.
+now+=25; scShadowApplyAll([four({id:'other',path:'/data/enginex/shadow-v3/peer-2/x.flac',link:'{m}'})],false);
+now+=1500; scShadowApplyAll([four({id:'other',path:'/data/enginex/shadow-v3/peer-2/x.flac',link:'{m}'})],false);
+assert.equal(P(OTHER).state,true,'the new player\'s mirror was not switched on');
+assert.equal(P(MIRROR_ON).state,false,'the mirror of the player the slot left stayed on');
+now+=25; scShadowApplyAll([],false); now+=400; scShadowApplyAll([],false);
+assert.equal(P(OTHER).state,false);
+""")
+
+    def test_unusable_mirror_sample_leaves_our_own_update_and_no_trace(self):
+        # One NaN was taken for a sample: speed and position became NaN and the copy never moved again.
+        for bad in ("NaN", "Infinity", "-48000", "undefined", "null"):
+            with self.subTest(bad=bad):
+                self.js(RX + "const bad=" + bad + r""";
+const beforeSeeks=seeks;
+P(MIRROR)._v=bad; now+=16; scShadowScratchTimer.tick();
+const start=now, mark=posMs;
+for(let t=1;t<=700;t++) {
+    now=start+t;
+    if(t%35===0) P(MIRROR)._v=t>300&&t<400?bad:(11300+2*t)*48;      // and three more in the middle of the stroke
+    if(t%25===0) scShadowApplyAll([E({scratch:true,positionMs:11300+2*t,at:now})],false);
+    if(t%16===0) scShadowScratchTimer.tick();
+}
+assert(Number.isFinite(scShadowAt[2].scratchX)&&Number.isFinite(scShadowAt[2].scratchVel),'an unusable sample stayed in the follower');
+assert(Math.abs(posMs-(11300+2*(700-50)))<60,'the copy is not on the source again: '+(posMs-12600));
+assert.equal(seeks,beforeSeeks);
+""")
+
+    def test_failing_mirror_read_does_not_stop_the_frame(self):
+        self.js(RX + r"""
+scShadowAt[2].scratchMirror={get value(){throw Error('mirror unavailable')}};
+const start=now, mark=posMs;
+for(let t=1;t<=400;t++) {
+    now=start+t;
+    if(t%25===0) scShadowApplyAll([E({scratch:true,positionMs:11300+2*t,at:now})],false);
+    if(t%16===0) assert.doesNotThrow(()=>scShadowScratchTimer.tick(),'the mirror read stopped the frame');
+}
+assert(posMs>mark+500,'our own update did not carry the scratch: '+(posMs-mark));
+""")
+
+    def test_tiny_late_sample_cannot_reverse_a_forward_glide(self):
+        self.js(RX + r"""
+const start=now; let src=11300;
+for(let t=1;t<=900;t++) {
+    now=start+t;
+    if(t%35===0) {
+        if(t<=490) {src=11300+2*t;P(MIRROR).value=src*48;}
+        else if(t>=641) {src=12280+0.02*(t-490);P(MIRROR).value=src*48;}
+    }
+    if(t%25===0) scShadowApplyAll([E({scratch:true,positionMs:src,at:now})],false);
+    if(t%16===0) {
+        const before=wheelMoves.length; scShadowScratchTimer.tick();
+        if(t>=491) assert(wheelMoves.slice(before).every(v=>v>=0),'a late forward sample turned the jog back');
+    }
+}
+""")
+
+    def test_missed_jog_is_made_up_once_the_deck_is_slow(self):
+        # A deck that does only 80 % of the ticks: the report tells once the motion stops.
+        rx = RX.replace('posMs+=t/20', 'posMs+=t/20*0.8').replace('posMs-=t/20', 'posMs-=t/20*0.8')
+        self.js(rx + r"""
+const start=now;
+for(let t=1;t<=3600;t++) {
+    now=start+t;
+    if(t%25===0) scShadowApplyAll([E({scratch:true,positionMs:t<=600?11300+0.8*t:11780,at:now})],false);
+    if(t%16===0) scShadowScratchTimer.tick();
+}
+assert(Math.abs(posMs-11790)<5,'the lost jog was not made up at rest: '+posMs);
+""")
+
+    def test_paused_release_inside_35_ms_still_lands_after_an_earlier_landing_check(self):
+        self.js(RX + r"""
+now+=25; scShadowApplyAll([E({scratch:false,positionMs:posMs,at:now})],false);
+P('/Engine/Deck2/PlayState').state=false;
+now+=100; scShadowApplyAll([E({playing:false,positionMs:posMs+50,at:now})],false);
+const rest=posMs;
+posMs-=20;                                          // a landing error uses up the one check
+now+=100; scShadowApplyAll([E({playing:false,positionMs:rest,at:now})],false);
+assert.equal(scShadowAt[2].check,0,'precondition: the earlier landing check is done');
+const before=seeks;
+for(let i=1;i<=8;i++) { now+=25; scShadowApplyAll([E({playing:false,scratch:true,positionMs:rest-(i<5?i:8-i)*40,at:now})],false); scShadowScratchTimer.tick(); }
+assert(Math.abs(posMs-rest)>10&&Math.abs(posMs-rest)<=35,'precondition: release drift '+(posMs-rest));
+now+=45; scShadowApplyAll([E({playing:false,scratch:false,positionMs:rest,at:now})],false);
+assert.equal(seeks,before+1,'the paused release inside 35 ms did not land on the source');
+assert(Math.abs(posMs-rest)<1);
+""")
+
+    def test_sender_samples_at_once_when_the_platter_is_touched(self):
+        # A resting deck is sampled 5 times a second: measured, the other player learnt of a scratch 130-270 ms late,
+        # and a fast one was by then too far for the jog.
+        sender = SENDER.replace("let pos=10000*48, playing=true,", "const woke={}; let pos=10000*48, playing=false,") \
+                       .replace("globalThis.scTr=path=>({", "globalThis.scTr=path=>({stateChanged:{connect(f){(woke[path]=woke[path]||[]).push(f)}},")
+        self.js(sender + r"""
+for(let i=0;i<20;i++){now+=200;scShadowTick();}
+assert.equal(scShadowTickTimer.interval,200,'precondition: a resting deck is sampled 5 times a second');
+for(const name of ['ExternalScratchWheelTouch','PlatterUserAction']) {
+    scShadowTickTimer.interval=200;
+    assert(woke['/Engine/Deck1/'+name],'no touch signal is listened to: '+name);
+    woke['/Engine/Deck1/'+name].forEach(f=>f());
+    assert.equal(scShadowTickTimer.interval,40,'a hand on the platter did not wake the sampling: '+name);
+}
 """)
 
     def test_sender_reuses_sampling_buffers_at_40hz(self):
