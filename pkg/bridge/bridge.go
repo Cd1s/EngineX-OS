@@ -415,10 +415,7 @@ func convertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 					deadline = time.Now().Add(mountReadBudget)
 				}
 				_, _ = enginedb.MigrateArtworkBefore(ctx, mount, deadline)
-				// ...and, once, the overview scale earlier builds left out.
-				if readMark(dir, overviewName) == "" && enginedb.FillOverviewMaxima(ctx, mount) == nil {
-					writeMark(dir, overviewName, "1")
-				}
+				completeOverviews(ctx, mount, dir)
 			}
 			return enginedb.Result{Bypassed: true}, nil
 		}
@@ -490,6 +487,9 @@ func convertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 	// only those, the others are known to be imported with theirs.
 	opts.Resume = resume || (!full && !opts.SmartMatch && readMark(dir, pendingName) == stamp)
 	result, err = convert(ctx, mount, opts, pre, budget)
+	if err == nil && !result.Bypassed {
+		completeOverviews(ctx, mount, dir) // the tracks this import had no reason to read again
+	}
 	if err == nil && result.Deferred > 0 {
 		writeMark(dir, pendingName, stamp)
 		log.Printf("rb-bridge: %d tracks imported without cues; the next mount reads them", result.Deferred)
@@ -498,6 +498,14 @@ func convertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 		os.Remove(filepath.Join(dir, pendingName))
 	}
 	return result, err
+}
+
+// completeOverviews gives the overviews an earlier build imported the scale Engine
+// expects, once per library.
+func completeOverviews(ctx context.Context, mount, dir string) {
+	if readMark(dir, overviewName) == "" && enginedb.FillOverviewMaxima(ctx, mount) == nil {
+		writeMark(dir, overviewName, "1")
+	}
 }
 
 func cleanEmptyEngineLibrary(dir string) {
