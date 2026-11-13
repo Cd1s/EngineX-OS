@@ -255,6 +255,53 @@ func TestShoutcastTargetIsNotPushed(t *testing.T) {
 	}
 }
 
+func TestIcecastHandshakeReject(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen error: %v", err)
+	}
+	defer ln.Close()
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			reader := bufio.NewReader(conn)
+			for {
+				line, err := reader.ReadString('\n')
+				if err != nil || strings.TrimSpace(line) == "" {
+					break
+				}
+			}
+			_, _ = io.WriteString(conn, "HTTP/1.0 401 Unauthorized\r\n\r\n")
+			conn.Close()
+		}
+	}()
+
+	b := New(newTestGuard())
+	defer b.Close()
+
+	cfg := Config{
+		Enabled:   true,
+		Protocol:  "icecast",
+		ServerURL: "http://" + ln.Addr().String(),
+	}
+
+	_ = b.Configure(cfg)
+	// Wait a moment for connection attempt
+	time.Sleep(200 * time.Millisecond)
+
+	st := b.Status()
+	if st.Streaming {
+		t.Errorf("should not be streaming when rejected")
+	}
+	if !strings.Contains(st.LastError, "401") && !strings.Contains(st.LastError, "rejected") {
+		t.Errorf("expected reject error in LastError, got: %s", st.LastError)
+	}
+}
+
 func TestUpdateMetadataIcecast(t *testing.T) {
 	var (
 		lastPath  string
@@ -500,6 +547,29 @@ func TestUpdateMetadataLastErrorDoesNotLeakPassword(t *testing.T) {
 	escaped := url.QueryEscape(secretPassword)
 	if strings.Contains(st.LastError, escaped) {
 		t.Fatalf("Status().LastError leaked escaped password: %s", st.LastError)
+	}
+}
+
+// The Shoutcast "not supported" text is added to an error that is already there, not put
+// in its place, and the password stays out of the combined text.
+func TestShoutcastNoticeIsAppendedToTheLastError(t *testing.T) {
+	b := New(newTestGuard())
+	defer b.Close()
+
+	secretPassword := "superSecretPassword123!@#"
+	b.cfg = Config{Protocol: "icecast", ServerURL: "http://127.0.0.1:59999", Password: secretPassword}
+	if err := b.UpdateMetadata("Artist", "Track"); err == nil {
+		t.Fatal("expected error updating metadata against unreachable URL")
+	}
+	before := b.Status().LastError
+	b.cfg.Protocol = "shoutcast" // the same target, saved as Shoutcast
+
+	got := b.Status().LastError
+	if !strings.HasPrefix(got, before+"; ") || !strings.Contains(got, "Shoutcast is not supported") {
+		t.Errorf("LastError = %q, want %q followed by the Shoutcast notice", got, before)
+	}
+	if strings.Contains(got, secretPassword) || strings.Contains(got, url.QueryEscape(secretPassword)) {
+		t.Errorf("LastError leaked the password: %s", got)
 	}
 }
 
