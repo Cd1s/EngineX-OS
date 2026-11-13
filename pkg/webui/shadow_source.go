@@ -35,15 +35,6 @@ type shadowSourceCache struct {
 	running bool
 }
 
-func sameSourcePath(a, b, dataRoot string) bool {
-	if a == b {
-		return true
-	}
-	oa, oka := inMusicTempOrig(a, dataRoot)
-	ob, okb := inMusicTempOrig(b, dataRoot)
-	return oka && okb && oa == ob
-}
-
 // sourceDisplayAsset is the display data of one of this player's tracks. With
 // detail it queues the detail waveform; without (Engine mode's cover) it is
 // read from the library as it is, and neither queued nor kept.
@@ -54,7 +45,7 @@ func (s *Server) sourceDisplayAsset(ctx context.Context, path, key string, detai
 	if c.entries == nil {
 		c.entries = map[string]*shadowSourceEntry{}
 	}
-	if e := c.entries[stableKey]; e != nil && sameSourcePath(e.path, path, s.shadow.dataRoot) && e.req == key {
+	if e := c.entries[stableKey]; e != nil && e.req == key {
 		e.at = time.Now()
 		a := e.asset
 		if size := e.size.Load(); a.DetailPending && size > 0 {
@@ -75,7 +66,7 @@ func (s *Server) sourceDisplayAsset(ctx context.Context, path, key string, detai
 	a.Key, a.Version = key, 1
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if e := c.entries[stableKey]; e != nil && sameSourcePath(e.path, path, s.shadow.dataRoot) {
+	if e := c.entries[stableKey]; e != nil {
 		if e.asset.Waveform != nil && (a.Waveform == nil || e.asset.DetailSource == "source-envelope") {
 			a.Waveform, a.DetailSource = e.asset.Waveform, e.asset.DetailSource
 			a.Detail = true
@@ -236,5 +227,20 @@ func (s *Server) shadowSourceWorker() {
 		}
 		c.mu.Unlock()
 		s.shadow.dbg.event("source-envelope", map[string]any{"ok": copyAsset.Detail, "key": job.key})
+	}
+}
+
+// Keep expensive source envelopes across reloads, bounded by count and payload bytes.
+func (c *shadowSourceCache) trim(keep string) bool {
+	for {
+		size, oldest := 0, ""
+		for key, e := range c.entries {
+			size += cap(e.asset.Artwork) + cap(e.asset.Overview.Bands) + cap(e.asset.Beats)*16
+			if e.asset.Waveform != nil { size += cap(e.asset.Waveform.Bands) }
+			if key != keep && !e.queued && !e.working && (oldest == "" || e.at.Before(c.entries[oldest].at)) { oldest = key }
+		}
+		if len(c.entries) <= 16 && size <= 32<<20 { return true }
+		if oldest == "" { return false }
+		delete(c.entries, oldest)
 	}
 }
