@@ -5,6 +5,11 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"net"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -250,6 +255,268 @@ func TestLANStreamerValidation(t *testing.T) {
 		t.Errorf("unexpected Push error: %v", err)
 	}
 	_ = s.Close()
+}
+
+// BH2-A3-6: a LAN target that cannot be used was dropped without a word: Status
+// said "streaming" with no error and nothing was ever sent.
+func TestLANStreamBadTargetIsReported(t *testing.T) {
+	b := New(newTestGuard())
+	defer b.Close()
+	cfg := Config{Enabled: true, LANMode: "rtp", LANTarget: "studio-pc", InputPath: filepath.Join(t.TempDir(), "none")}
+	if err := b.Configure(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if st := b.Status(); !strings.Contains(st.LastError, "LAN stream") || !strings.Contains(st.LastError, "studio-pc") {
+		t.Fatalf("a LAN target without a port: lastError=%q, want the reason", st.LastError)
+	}
+	// With an external server that is not there either, neither stream is up and both say why.
+	cfg.ServerURL, cfg.Password = "127.0.0.1:1", "pw"
+	if err := b.Configure(cfg); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for !strings.Contains(b.Status().LastError, "127.0.0.1:1") && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if st := b.Status(); st.Streaming || !strings.Contains(st.LastError, "127.0.0.1:1") || !strings.Contains(st.LastError, "studio-pc") {
+		t.Fatalf("no server and no LAN target: streaming=%v lastError=%q, want not streaming and both reasons", st.Streaming, st.LastError)
+	}
+	// Switched off, the stale reason goes.
+	cfg.ServerURL, cfg.LANMode = "", "off"
+	if err := b.Configure(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if st := b.Status(); strings.Contains(st.LastError, "LAN stream") {
+		t.Fatalf("LAN streaming off: lastError=%q", st.LastError)
+	}
+}
+
+// BH2-A3-6: a deck that boots with Live Stream on opens the LAN socket before the
+// network is up; that failed with "network is unreachable" and was never tried again.
+func TestLANStreamStartsWhenTheNetworkComesUp(t *testing.T) {
+	ln, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	var down atomic.Bool
+	down.Store(true)
+	realDial, realRetry := dialUDP, lanRetryEvery
+	t.Cleanup(func() { dialUDP, lanRetryEvery = realDial, realRetry })
+	dialUDP = func(target *net.UDPAddr) (net.Conn, error) {
+		if down.Load() {
+			return nil, &net.OpError{Op: "dial", Net: "udp", Addr: target, Err: syscall.ENETUNREACH}
+		}
+		return realDial(target)
+	}
+	lanRetryEvery = 20 * time.Millisecond
+
+	pcm := filepath.Join(t.TempDir(), "live.pcm")
+	if err := os.WriteFile(pcm, bytes.Repeat([]byte{1, 2, 3, 4}, 1152), 0644); err != nil {
+		t.Fatal(err)
+	}
+	b := New(newTestGuard())
+	t.Cleanup(b.Close) // before the dialer is put back
+	if err := b.Configure(Config{Enabled: true, LANMode: "rtp", LANTarget: ln.LocalAddr().String(), InputPath: pcm}); err != nil {
+		t.Fatal(err)
+	}
+	if st := b.Status(); !strings.Contains(st.LastError, "network is unreachable") {
+		t.Fatalf("network down: lastError=%q, want the reason", st.LastError)
+	}
+	buf := make([]byte, 8192)
+	_ = ln.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+	if n, _, err := ln.ReadFrom(buf); err == nil {
+		t.Fatalf("got %d bytes while the network is down", n)
+	}
+	down.Store(false)
+	_ = ln.SetReadDeadline(time.Now().Add(3 * time.Second))
+	n, _, err := ln.ReadFrom(buf)
+	if err != nil {
+		t.Fatalf("the network is up and no audio arrives: %v", err)
+	}
+	if pkt, err := ParseRTPPacket(buf[:n]); err != nil || len(pkt.Payload) == 0 {
+		t.Fatalf("not an RTP audio packet: %v", err)
+	}
+	if st := b.Status(); strings.Contains(st.LastError, "LAN stream") {
+		t.Fatalf("stream is up: lastError=%q", st.LastError)
+	}
+}
+
+// BH2-A3-6: with only the LAN stream on, Status said "streaming" as soon as the
+// capture loop ran, whether or not a LAN socket existed, and the console showed
+// "connected" instead of the reason.
+func TestLANOnlyStreamIsNotStreamingWithoutASocket(t *testing.T) {
+	capturing := func(b *Broadcaster) {
+		t.Helper()
+		for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+			b.mu.Lock()
+			on := b.capturing
+			b.mu.Unlock()
+			if on {
+				return
+			}
+		}
+		t.Fatal("the capture loop did not start")
+	}
+	pcm := filepath.Join(t.TempDir(), "live.pcm")
+	if err := os.WriteFile(pcm, bytes.Repeat([]byte{1, 2, 3, 4}, 1152), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A target that does not resolve, and LAN streaming on without a target.
+	for target, reason := range map[string]string{"studio-pc": "studio-pc", "": "no target"} {
+		b := New(newTestGuard())
+		if err := b.Configure(Config{Enabled: true, LANMode: "rtp", LANTarget: target, InputPath: pcm}); err != nil {
+			t.Fatal(err)
+		}
+		capturing(b)
+		if st := b.Status(); st.Streaming || !strings.Contains(st.LastError, reason) {
+			t.Errorf("LAN target %q: streaming=%v lastError=%q, want not streaming and the reason", target, st.Streaming, st.LastError)
+		}
+		// Without LAN streaming the deck's own stream is all there is, and it is up.
+		if err := b.Configure(Config{Enabled: true, LANMode: "off", InputPath: pcm}); err != nil {
+			t.Fatal(err)
+		}
+		capturing(b)
+		if st := b.Status(); !st.Streaming || st.LastError != "" {
+			t.Errorf("LAN streaming off: streaming=%v lastError=%q, want the local stream up", st.Streaming, st.LastError)
+		}
+		b.Close()
+	}
+
+	// A deck that boots before it has a route: not streaming until the socket opens.
+	ln, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	var down atomic.Bool
+	down.Store(true)
+	realDial, realRetry := dialUDP, lanRetryEvery
+	t.Cleanup(func() { dialUDP, lanRetryEvery = realDial, realRetry })
+	dialUDP = func(target *net.UDPAddr) (net.Conn, error) {
+		if down.Load() {
+			return nil, &net.OpError{Op: "dial", Net: "udp", Addr: target, Err: syscall.ENETUNREACH}
+		}
+		return realDial(target)
+	}
+	lanRetryEvery = 20 * time.Millisecond
+	b := New(newTestGuard())
+	t.Cleanup(b.Close) // before the dialer is put back
+	if err := b.Configure(Config{Enabled: true, LANMode: "rtp", LANTarget: ln.LocalAddr().String(), InputPath: pcm}); err != nil {
+		t.Fatal(err)
+	}
+	capturing(b)
+	if st := b.Status(); st.Streaming || !strings.Contains(st.LastError, "network is unreachable") {
+		t.Fatalf("no route yet: streaming=%v lastError=%q, want not streaming and the reason", st.Streaming, st.LastError)
+	}
+	down.Store(false)
+	deadline := time.Now().Add(3 * time.Second)
+	for !b.Status().Streaming && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if st := b.Status(); !st.Streaming || st.LastError != "" {
+		t.Fatalf("the socket is open: streaming=%v lastError=%q", st.Streaming, st.LastError)
+	}
+
+	// An external server that refuses does not take the LAN stream's state with it.
+	if err := b.Configure(Config{Enabled: true, LANMode: "rtp", LANTarget: ln.LocalAddr().String(), InputPath: pcm, ServerURL: "127.0.0.1:1", Password: "pw"}); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(3 * time.Second)
+	for !strings.Contains(b.Status().LastError, "127.0.0.1:1") && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if st := b.Status(); !st.Streaming || !strings.Contains(st.LastError, "127.0.0.1:1") {
+		t.Fatalf("LAN up, server refused: streaming=%v lastError=%q, want streaming and the server's reason", st.Streaming, st.LastError)
+	}
+}
+
+// BH2-A3-10: the sent-bytes figure of the status stayed 0 for a LAN-only stream.
+func TestLANStreamCountsSentBytes(t *testing.T) {
+	ln, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	pcm := filepath.Join(t.TempDir(), "live.pcm")
+	if err := os.WriteFile(pcm, bytes.Repeat([]byte{1, 2, 3, 4}, 1152), 0644); err != nil {
+		t.Fatal(err)
+	}
+	b := New(newTestGuard())
+	defer b.Close()
+	if err := b.Configure(Config{Enabled: true, LANMode: "rtp", LANTarget: ln.LocalAddr().String(), InputPath: pcm}); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 8192)
+	_ = ln.SetReadDeadline(time.Now().Add(3 * time.Second))
+	n, _, err := ln.ReadFrom(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sent := b.Status().BytesSent; sent < int64(n) {
+		t.Fatalf("a %d-byte packet arrived and the status counts %d bytes sent", n, sent)
+	}
+}
+
+// BH2-A3-4: a Teleport frame was one datagram however much audio it carried: 9 KB
+// from one pass of the capture loop, far above the MTU.
+func TestLANStreamerTeleportChunksUnderMTU(t *testing.T) {
+	ln, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	// A beacon interval beyond the test: only audio frames arrive after the first beacon.
+	streamer, err := NewLANStreamer(LANConfig{Mode: "teleport", Target: ln.LocalAddr().String(), SampleRate: 48000, Channels: 2, BeaconInterval: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := streamer.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer streamer.Close()
+
+	// Two passes of the capture loop: 2304 frames (9216 B), then 240.
+	first := make([]byte, 2304*4)
+	for i := range first {
+		first[i] = byte(i / 4)
+	}
+	if err := streamer.Push(first); err != nil {
+		t.Fatal(err)
+	}
+	if err := streamer.Push(make([]byte, 240*4)); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 65536)
+	var got []byte
+	var next uint64
+	for frames := 0; next < 2304+240; {
+		_ = ln.SetReadDeadline(time.Now().Add(2 * time.Second))
+		n, _, err := ln.ReadFrom(buf)
+		if err != nil {
+			t.Fatalf("after %d frames (%d samples): %v", frames, next, err)
+		}
+		if n > 0 && buf[0] == '{' {
+			continue // the beacon
+		}
+		if n > 1472 {
+			t.Fatalf("a %d-byte datagram does not fit a 1500-byte MTU", n)
+		}
+		f, err := ParseTeleportFrame(buf[:n])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if f.Timestamp != next || int(f.DataLen) != len(f.Payload) || len(f.Payload)%4 != 0 {
+			t.Fatalf("frame %d: timestamp %d (want %d), dataLen %d, payload %d", frames, f.Timestamp, next, f.DataLen, len(f.Payload))
+		}
+		next += uint64(len(f.Payload) / 4)
+		got = append(got, f.Payload...)
+		frames++
+	}
+	if !bytes.Equal(got[:len(first)], first) || len(got) != len(first)+240*4 {
+		t.Fatalf("the audio of the frames is not what was pushed (%d bytes)", len(got))
+	}
 }
 
 // BH-GF2-18 / BH-GF3-1: on 32-bit armhf a Teleport length >= 0x7fffffe8 wrapped

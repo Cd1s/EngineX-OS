@@ -230,6 +230,14 @@ func rebuildPlain(src, dst string) error {
 		return err
 	}
 	if hasSeq > 0 {
+		// SQLite makes sqlite_sequence with the first AUTOINCREMENT table and keeps it
+		// when the last one is dropped: the old file can have it and the new one not.
+		// Its rows then name no table, so there is nothing to carry over (BH2-A1-5).
+		if err = tx.QueryRow("SELECT count(*) FROM main.sqlite_master WHERE name='sqlite_sequence'").Scan(&hasSeq); err != nil {
+			return err
+		}
+	}
+	if hasSeq > 0 {
 		if _, err = tx.Exec("DELETE FROM main.sqlite_sequence"); err != nil {
 			return err
 		}

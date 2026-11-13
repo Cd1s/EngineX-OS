@@ -810,6 +810,7 @@ func (s *Server) handleMountsDelete(w http.ResponseWriter, r *http.Request) {
 			ID   string `json:"id"`
 			Name string `json:"name"`
 		}
+		r.Body = http.MaxBytesReader(w, r.Body, jsonBodyLimit)
 		_ = json.NewDecoder(r.Body).Decode(&in)
 		id = in.ID
 		if id == "" {

@@ -21,6 +21,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/Cd1s/EngineX-OS/pkg/resourceguard"
 )
@@ -109,6 +110,7 @@ type Broadcaster struct {
 	hub hub
 
 	lanStreamer *LANStreamer
+	lanErr      string // why there is no lanStreamer although LAN streaming is on
 
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -139,8 +141,22 @@ func New(guard *resourceguard.Guard) *Broadcaster {
 	}
 }
 
+// oneLine drops control characters. Mount point, login and stream name are
+// written as they are onto lines of the Icecast/Shoutcast handshake, so each has
+// to stay on its line: a pasted value that brought a line break along cut the
+// handshake in two (BH2-A3-7).
+func oneLine(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, s)
+}
+
 // normalizeConfig validates and applies defaults to a Config.
 func normalizeConfig(cfg *Config) error {
+	cfg.Mountpoint, cfg.Username, cfg.Password, cfg.StreamName = oneLine(cfg.Mountpoint), oneLine(cfg.Username), oneLine(cfg.Password), oneLine(cfg.StreamName)
 	cfg.Protocol = strings.ToLower(strings.TrimSpace(cfg.Protocol))
 	if cfg.Protocol == "" {
 		cfg.Protocol = DefaultProtocol
@@ -243,9 +259,27 @@ func (b *Broadcaster) Status() Status {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	// The LAN stream counts as streaming while it has a socket, and says why when it
+	// has none. Capture alone (the deck's own /live stream) counts only when nothing
+	// is meant to be sent anywhere: with LAN streaming on it said "streaming" while
+	// the target did not resolve or the network was not up yet, and the console
+	// hid the reason behind "connected".
+	lanOn := b.cfg.LANMode != "" && b.cfg.LANMode != "off"
+	lanUp, lastError := false, b.lastError
+	lanErr, sent := b.lanErr, b.bytesSent.Load()
+	if b.lanStreamer != nil {
+		lanUp, lanErr = b.lanStreamer.Connected(), b.lanStreamer.Err()
+		sent += b.lanStreamer.BytesSent() // BH2-A3-10: only the external server's bytes were counted
+	}
+	if lanErr != "" {
+		if lastError != "" {
+			lastError += "; "
+		}
+		lastError += "LAN stream: " + lanErr
+	}
 	return Status{
 		Enabled:      b.cfg.Enabled,
-		Streaming:    b.streaming || (b.capturing && (b.cfg.ServerURL == "" || (b.cfg.LANMode != "" && b.cfg.LANMode != "off"))),
+		Streaming:    b.streaming || lanUp || (b.capturing && b.cfg.ServerURL == "" && !lanOn),
 		Protocol:     b.cfg.Protocol,
 		ServerURL:    b.cfg.ServerURL,
 		Mountpoint:   b.cfg.Mountpoint,
@@ -255,10 +289,10 @@ func (b *Broadcaster) Status() Status {
 		Bitrate:      b.cfg.Bitrate,
 		StreamName:   b.cfg.StreamName,
 		CurrentTrack: b.currentTrack,
-		BytesSent:    b.bytesSent.Load(),
+		BytesSent:    sent,
 		Listeners:    b.hub.count(),
 		ConnectedAt:  b.connectedAt,
-		LastError:    b.lastError,
+		LastError:    lastError,
 		LANMode:      b.cfg.LANMode,
 		LANTarget:    b.cfg.LANTarget,
 		DriftPPM:     float64(b.driftPPB.Load()) / 1000,
@@ -281,17 +315,24 @@ func (b *Broadcaster) startLocked() {
 	b.cancel = cancel
 	b.wg.Add(1)
 
-	if b.cfg.LANMode != "" && b.cfg.LANMode != "off" && b.cfg.LANTarget != "" {
+	if b.cfg.LANMode != "" && b.cfg.LANMode != "off" && b.cfg.LANTarget == "" {
+		b.lanErr = "no target set" // on, and nowhere to send: say so instead of "connecting"
+	} else if b.cfg.LANMode != "" && b.cfg.LANMode != "off" {
 		streamer, err := NewLANStreamer(LANConfig{
 			Mode:       b.cfg.LANMode,
 			Target:     b.cfg.LANTarget,
 			SampleRate: 48000,
 			Channels:   2,
 		})
-		if err == nil {
+		// BH2-A3-6: both errors were dropped, and Status said "streaming" with no
+		// error while nothing was sent. A target that does not resolve is reported;
+		// a socket that cannot be opened yet is reported and retried by Push.
+		// b.streaming is the external server only; the LAN socket is asked in Status.
+		if err != nil {
+			b.lanErr = err.Error()
+		} else {
 			b.lanStreamer = streamer
-			_ = streamer.Start()
-			b.streaming = true
+			_ = streamer.Start() // the reason is kept in streamer.Err()
 		}
 	}
 
@@ -318,6 +359,7 @@ func (b *Broadcaster) stopLocked() {
 		_ = b.lanStreamer.Close()
 		b.lanStreamer = nil
 	}
+	b.lanErr = ""
 	b.streaming = false
 	b.connectedAt = ""
 	b.hub.closeAll()
@@ -348,7 +390,9 @@ func parseServerTarget(raw string) (scheme, hostPort string, err error) {
 
 	host, port, splitErr := net.SplitHostPort(s)
 	if splitErr != nil {
-		host = s
+		// No port. An IPv6 literal comes in brackets, which JoinHostPort adds itself
+		// (BH2-A3-12: "[2001:db8::1]" became "[[2001:db8::1]]:8000" and never connected).
+		host = strings.TrimSuffix(strings.TrimPrefix(s, "["), "]")
 		port = "8000"
 	}
 	return scheme, net.JoinHostPort(host, port), nil

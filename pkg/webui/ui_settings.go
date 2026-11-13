@@ -760,6 +760,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Body != nil && strings.Contains(r.Header.Get("Content-Type"), "application/json") {
 		var body map[string]any
+		r.Body = http.MaxBytesReader(w, r.Body, jsonBodyLimit)
 		if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
 			for k, v := range body {
 				if !q.Has(k) {

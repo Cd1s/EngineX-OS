@@ -19,7 +19,10 @@ echo "Connecting to the device in fastboot mode..."
 fastboot devices
 
 PART=userdata
-if fastboot getvar partition-size:data 2>&1 | grep -Eq 'partition-size:data:[[:space:]]*(0x[0-9a-fA-F]+|[0-9]+)'; then
+# "data" only when it has a size, as enginex-installer decides it (dataPartition). BH2-A7-12:
+# any answer with a number counted, also the 0 of a bootloader that has no such partition.
+size=$(fastboot getvar partition-size:data 2>&1 | grep -Eo 'partition-size:data:[[:space:]]*(0x[0-9a-fA-F]+|[0-9]+)' | head -n 1 | sed 's/.*:[[:space:]]*//')
+if [ -n "$size" ] && [ "$((size))" -gt 0 ]; then
     PART=data
 fi
 
