@@ -5586,8 +5586,9 @@ def edits(dev: bool):
         **{prefs + ("" if v53() else "TabContents/") + f"{name}TabContent.qml": [
             (f'import "{"" if v53() else "../"}Entries"\n', f'import QtQuick.Layouts 1.12\nimport "{"" if v53() else "../"}Entries"\nimport "{"" if v53() else "../"}Entries/Base" as EntryBase\nimport Planck 1.0\n'),
             (f"{last} {{}}", f"{last} {{}}," + entries.rstrip().rstrip(",")),
-        ] for name, last, entries in [
-            ("Display", "TrackOverviewStyle" if v53() else "WaveformStyle", DISPLAY_ENTRIES),
+        ] for name, last, entries in ([
+            ("Display", "TrackOverviewStyle", DISPLAY_ENTRIES),
+        ] if v53() else []) + [
             ("Services", "SpotifyEnable" if v53() else "CloudServices", SERVICES_ENTRIES),
             ("Playback", "KeySyncMode", PLAYBACK_ENTRIES),
             ("Safety", "KeyAdjust", SAFETY_ENTRIES),
@@ -5895,15 +5896,6 @@ def edits(dev: bool):
             ("				  leftActions[actionIndex].trigger(row.index)\n",
              "				  if (actionIndex < leftActions.length) leftActions[actionIndex].trigger(row.index)\n"
              "				  else root.scStemStream(row.modelData.trackId)\n"),
-        ]
-        out[ROOT + "Items/Bpm.qml"] = [
-            ("\tproperty int decimalPlaces: 1\n",
-             '\tproperty int decimalPlaces: typeof root !== "undefined" && root && root.scBpmDecimals === 1 ? 1 : 2\n'),
-            ("\t\telse if(hasMetaDataBpm) {\n\t\t\tmetaDataBpm.split('.')\n\t\t}\n\t\telse {\n\t\t\t\"\"\n\t\t}\n",
-             "\t\telse if(hasMetaDataBpm) {\n"
-             '\t\t\tconst m = parseFloat(metaDataBpm.replace(",", ".")) || 0\n'
-             '\t\t\tm > 0 ? m.toFixed(bpm.decimalPlaces).split(".") : []\n'
-             "\t\t}\n\t\telse {\n\t\t\t[]\n\t\t}\n"),
         ]
     out[prefs + ("" if v53() else "TabContents/") + "LibraryTabContent.qml"].append((
         "StemsList {}," if v53() else "StemsList { },",
@@ -6514,8 +6506,6 @@ def edits(dev: bool):
                 ("        rightPadding: 14\n" if item == "BeatJump" else "")))
         # The shadow header feeds the stock formatter its own tempo; stock users keep stock defaults.
         scaled[ROOT + "Items/Bpm.qml"] = [
-            ("    property int decimalPlaces: 1\n",
-             '    property int decimalPlaces: typeof root !== "undefined" && root && root.scBpmDecimals === 1 ? 1 : 2\n'),
             ("    property alias fractionColor: fractionText.color\n",
              "    property alias fractionColor: fractionText.color\n    readonly property real displayWidth: implicitWidth + fractionText.implicitWidth\n"
              "    property bool externalBpm: false\n"
@@ -6619,7 +6609,7 @@ def edits(dev: bool):
              "        if (!bpmInfoView || !loaded) return null\n"
              "        if (scAnalyzed && scAnalyzed.translator && scAnalyzed.translator.state\n"
              "            && scBpm && scBpm.translator && scBpm.translator.unnormalized > 0)\n"
-             '            return (dec === 1 ? scBpm.translator.unnormalized.toFixed(1) : scBpm.translator.unnormalized.toFixed(2)).split(".")\n'
+             '            return dec === 1 ? null : scBpm.translator.unnormalized.toFixed(2).split(".")\n'
              "        const orig = scOrigBpm && scOrigBpm.translator ? scOrigBpm.translator.unnormalized : 0\n"
              "        const cur = scBpm && scBpm.translator ? scBpm.translator.unnormalized : 0\n"
              '        const pitch = scDeckData && typeof scDeckData.speedState === "number"\n'
@@ -6633,13 +6623,17 @@ def edits(dev: bool):
              '        const meta = metaRaw ? (parseFloat(metaRaw.replace(",", ".")) || 0) : 0\n'
              '        const textRaw = bpmInfoView.bpmText && bpmInfoView.bpmText !== "-" ? (bpmInfoView.bpmText + (bpmInfoView.bpmFractionalText || "")).trim() : ""\n'
              '        const textVal = textRaw ? (parseFloat(textRaw.replace(",", ".")) || 0) : 0\n'
+             "        const metaTol = !/[.,]/.test(metaRaw) ? 0.5001 : (/^[+-]?\\d+[.,]\\d$/.test(metaRaw) ? 0.0501 : 0.001)\n"
+             "        const synced = orig > 0\n"
+             "            ? (cur > 0 && Math.abs(cur - orig) >= 0.001)\n"
+             "            : (cur > 0 && meta > 0 && Math.abs(cur - meta) > metaTol)\n"
+             "        if (dec === 1 && pitch === 0 && !synced) return null\n"
              "        if (orig > 0) {\n"
-             "            const live = cur > 0 && Math.abs(cur - orig) >= 0.001 ? cur : orig * (1 + pitch / 100)\n"
+             "            const live = synced ? cur : orig * (1 + pitch / 100)\n"
              '            return Math.max(0, live).toFixed(dec).split(".")\n'
              "        }\n"
-             "        const metaTol = !/[.,]/.test(metaRaw) ? 0.5001 : (/^[+-]?\\d+[.,]\\d$/.test(metaRaw) ? 0.0501 : 0.001)\n"
              "        if (cur > 0 && meta > 0) {\n"
-             "            const live = Math.abs(cur - meta) <= metaTol ? cur * (1 + pitch / 100) : cur\n"
+             "            const live = synced ? cur : cur * (1 + pitch / 100)\n"
              '            return Math.max(0, live).toFixed(dec).split(".")\n'
              "        }\n"
              "        const base = (cur > 0 ? cur : 0) || (meta > 0 ? meta : 0) || (textVal > 0 ? textVal : 0)\n"
