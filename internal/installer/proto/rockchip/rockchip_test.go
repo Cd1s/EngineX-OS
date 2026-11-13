@@ -176,6 +176,9 @@ func (d *fakeRockUSBDevice) WriteBulk(ctx context.Context, ep uint8, data []byte
 }
 
 func (d *fakeRockUSBDevice) ReadBulk(ctx context.Context, ep uint8, buf []byte) (int, error) {
+	if len(buf) > 1<<20 {
+		return 0, errors.New("USB read exceeds 1 MiB")
+	}
 	if ep != 0x81 {
 		return 0, errors.New("wrong IN ep")
 	}
@@ -226,20 +229,21 @@ func TestProbeDistinguishesMaskROMFromLoaderAndRejectsWrongVID(t *testing.T) {
 }
 
 func TestReadLayoutGPTValidationAndAllowlistWriteGate(t *testing.T) {
-	disk := buildValidGPTDisk(2048, []gptPartSpec{
+	const readbackSize = 3<<20 + 123
+	disk := buildValidGPTDisk(16384, []gptPartSpec{
 		{name: "uboot", startLBA: 100, endLBA: 199},
 		{name: "boot", startLBA: 200, endLBA: 399},
-		{name: "rootfs", startLBA: 400, endLBA: 899},
-		{name: "data", startLBA: 900, endLBA: 1499},
+		{name: "rootfs", startLBA: 400, endLBA: 8591},
+		{name: "data", startLBA: 9000, endLBA: 14999},
 	})
 	// Fill rootfs with deterministic test pattern for readback check.
 	rootfsOff := 400 * rockchip.SectorSize
-	for i := 0; i < 4096+123; i++ {
+	for i := 0; i < readbackSize; i++ {
 		disk[rootfsOff+i] = byte(i*13 + 7)
 	}
 
 	dev := newFakeRockLoader(disk)
-	cl, _ := rockchip.New(dev, proto.Endpoints{In: 0x81, Out: 0x01}, rockchip.WithMaxReadSectors(4))
+	cl, _ := rockchip.New(dev, proto.Endpoints{In: 0x81, Out: 0x01}, rockchip.WithMaxReadSectors(4096))
 	probe, err := cl.Probe(context.Background(), rockchip.VID, rockchip.PIDRK3588)
 	if err != nil {
 		t.Fatal(err)
@@ -260,19 +264,19 @@ func TestReadLayoutGPTValidationAndAllowlistWriteGate(t *testing.T) {
 	}
 
 	// Oversized image for rootfs refused.
-	tooBig := int64(500*rockchip.SectorSize + 1)
+	tooBig := int64(8192*rockchip.SectorSize + 1)
 	if _, err := rockchip.PrepareVerifiedTarget(probe, layout, "rootfs", tooBig); err == nil {
 		t.Fatal("expected size-exceeded error for rootfs")
 	}
 
 	// Valid allowlisted target.
-	target, err := rockchip.PrepareVerifiedTarget(probe, layout, "rootfs", 4096+123)
+	target, err := rockchip.PrepareVerifiedTarget(probe, layout, "rootfs", readbackSize)
 	if err != nil {
 		t.Fatalf("PrepareVerifiedTarget(rootfs): %v", err)
 	}
 
 	// Readback matches disk bytes (including non-sector-aligned length).
-	rbBuf := make([]byte, 4096+123)
+	rbBuf := make([]byte, readbackSize)
 	var gotProgress proto.Progress
 	if err := cl.Readback(context.Background(), target, &memWriterAt{buf: rbBuf}, int64(len(rbBuf)), func(p proto.Progress) {
 		gotProgress = p
