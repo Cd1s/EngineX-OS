@@ -67,6 +67,10 @@ type Options struct {
 	// read. A large library otherwise spent its whole read budget re-checking
 	// thousands of finished tracks on every mount (BH-GC1-2).
 	Resume bool `json:"-"`
+	// LegacyOffsets is set when upgrading a library whose existing .rb-bridge-stamp
+	// predates v2 MP3 offset alignment. Deferred existing rows must stay pending
+	// until their legacy performance has been realigned on a later mount.
+	LegacyOffsets bool `json:"-"`
 	// Now is the clock Deadline is checked against; nil means time.Now. Tests
 	// use it to put the deadline inside a library whatever the host's load.
 	Now func() time.Time `json:"-"`
@@ -492,7 +496,10 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 		if !fast && (preparedTrack.late || (previous != hash && past() && (read > 0 || !inTime))) {
 			// A "fast:" fingerprint makes the next full import read this track.
 			fast, files, art, hash = true, nil, nil, "fast:"+t.RecordHash
-			result.Deferred++
+			// A completed v2 row keeps its fingerprint and deck edits on re-export.
+			if opts.LegacyOffsets || id == 0 || previous == "" || strings.HasPrefix(previous, "fast:") {
+				result.Deferred++
+			}
 		} else if !fast && previous != hash {
 			read++
 		}
@@ -532,12 +539,22 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 				result.Updated++
 				continue
 			}
+			// Preserve performance until this row can be read, but keep legacy
+			// offsets pending so finishedFingerprints cannot skip them on Resume.
+			if opts.LegacyOffsets && !opts.Fast && previous != hash {
+				if _, e := q.ExecContext(ctx, `UPDATE BridgeState SET fingerprint=? WHERE trackId=?`, hash, id); e != nil {
+					return result, e
+				}
+			}
 			result.Unchanged++
 			continue
 		}
 		if previous == hash {
-			if preparedTrack.uninspected && existing {
+			if opts.LegacyOffsets && preparedTrack.uninspected && existing {
 				result.Deferred++
+				if _, e := q.ExecContext(ctx, `UPDATE BridgeState SET fingerprint=? WHERE trackId=?`, "fast:"+t.RecordHash, id); e != nil {
+					return result, e
+				}
 			}
 			if t.BPM == 0 {
 				effectiveTracks[i].BPM = storedBPM
@@ -546,10 +563,15 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 			continue
 		}
 		if preparedTrack.uninspected && existing && previous != "" && !strings.HasPrefix(previous, "fast:") {
+			if opts.LegacyOffsets {
+				if _, e := q.ExecContext(ctx, `UPDATE BridgeState SET fingerprint=? WHERE trackId=?`, "fast:"+t.RecordHash, id); e != nil {
+					return result, e
+				}
+				result.Deferred++
+			}
 			if t.BPM == 0 {
 				effectiveTracks[i].BPM = storedBPM
 			}
-			result.Deferred++
 			result.Unchanged++
 			continue
 		}
