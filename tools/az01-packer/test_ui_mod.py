@@ -739,6 +739,23 @@ assert.strictEqual(vfx.enabled, false);
         self.assertIn('root.scFourDeckRole.split("").map(c => parseInt(c))', bp.SERVICES_MAIN)
         self.assertEqual(SRC.count("root.decks && root.decks.length ? root.decks : [1, 2]"), 1)  # only inside scDeckList
 
+    def test_update_refusal_messages_are_translated(self):
+        """#239: the deck shows the fixed refusal messages of pkg/webui/update_verify.go on its screen
+        (scT(v.error)); each needs a Chinese line, and a failed update raises a warning prompt."""
+        go = (REPO / "pkg/webui/update_verify.go").read_text(encoding="utf-8")
+        msgs = re.findall(r'^\s*msgUpdate\w+\s*=\s*"([^"]+)"', go, re.M)
+        self.assertGreaterEqual(len(msgs), 9, msgs)
+        msgs.append("update download too large")  # update.go: a file over the size limit
+        rows = {l.split("\t")[0]: l.split("\t")[1:] for l in (REPO / "tools/ui-mod/i18n.tsv").read_text(encoding="utf-8").splitlines() if l and not l.startswith("#")}
+        for m in msgs + ["Update Failed"]:
+            self.assertIn(m, rows, f"missing translation in tools/ui-mod/i18n.tsv: {m!r}")
+            for lang, val in zip(("zh-Hans", "zh-Hant"), rows[m]):
+                self.assertTrue(val.strip() and val != m, f"{m} ({lang}) is not translated")
+        self.assertIn("function scUpdateFailed(err)", bp.SERVICES_MAIN)
+        self.assertIn("type: Prompt.Warning", bp.SERVICES_MAIN)
+        # The reboot notice also arrives as an error text, with progress 1: it is not a failure.
+        self.assertIn("v.error && !(v.progress >= 1)) scUpdateFailed(v.error)", bp.SERVICES_MAIN)
+
     def test_i18n_has_stem(self):
         rows = [l.split("\t") for l in (REPO / "tools/ui-mod/i18n.tsv").read_text().splitlines()]
         self.assertIn(["Stem", "分轨 Stems", "分軌 Stems"], rows)

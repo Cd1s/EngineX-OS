@@ -100,6 +100,9 @@ type options struct {
 	ListUSB                       func(context.Context) string // host USB devices, one "vid:pid name" per line
 	fbVID                         string                       // "-i" vendor id fastboot needs to see the deck
 	hinted                        map[string]bool
+	// release is the tag the signed list of the package fetched from GitHub (or kept from such a
+	// download) proves; empty for a file the user named. modeA checks it against the deck.
+	release string
 	// USBFlash writes img in mode C (1cc5:2027) with the bundle's host-install-usbupdate.py.
 	USBFlash func(ctx context.Context, o *options, script []byte, img string) error
 }
@@ -671,6 +674,12 @@ func fetchBundle(ctx context.Context, o *options, prefix, dir string) (string, e
 	if err != nil {
 		if ctx.Err() == nil {
 			if local := localBundle(dir, prefix); local != "" {
+				// Found by the installer, not named by the user: it must carry the signed list kept at its download.
+				tag, err := verifyCached(local)
+				if err != nil {
+					return "", err
+				}
+				o.release = tag
 				o.say("无法读取 GitHub 最新版本，使用已有的 "+filepath.Base(local),
 					"Cannot check the latest GitHub release; using the package already here: "+filepath.Base(local))
 				return local, nil
@@ -693,27 +702,38 @@ func fetchBundle(ctx context.Context, o *options, prefix, dir string) (string, e
 	if !ok {
 		return "", fmt.Errorf("release %s has no %s-*-EngineX-OS-*-Update.img or %s-*%s", rel.Tag, prefix, prefix, bundleSuffix)
 	}
+	// The release's signed SHA256SUMS.txt is the root of trust (#239): GitHub's digest only has to agree.
+	sums, sig, err := signedSums(ctx, o, &rel)
+	if err != nil {
+		return "", err
+	}
+	wantSHA, err := signedDigest(sums, name, digest)
+	if err != nil {
+		return "", err
+	}
 	dest := filepath.Join(dir, filepath.Base(name))
-	wantSHA := strings.TrimPrefix(digest, "sha256:")
-	if strings.HasPrefix(digest, "sha256:") && len(wantSHA) == 64 {
-		if got, err := fileSHA256(dest); err == nil && strings.EqualFold(got, wantSHA) {
-			o.say("使用已有的 "+filepath.Base(dest)+" ("+rel.Tag+")",
-				"Using the package already here: "+filepath.Base(dest)+" ("+rel.Tag+")")
-			return dest, nil
-		}
+	if got, err := fileSHA256(dest); err == nil && strings.EqualFold(got, wantSHA) {
+		o.say("使用已有的 "+filepath.Base(dest)+" ("+rel.Tag+")",
+			"Using the package already here: "+filepath.Base(dest)+" ("+rel.Tag+")")
+		keepSums(o, dir, sums, sig, rel.Tag)
+		o.release = rel.Tag
+		return dest, nil
 	}
 	o.say("下载 "+name+" ("+rel.Tag+")", "Downloading "+name)
 	if err := download(ctx, o, url, wantSHA, dest); err != nil {
 		return "", err
 	}
+	keepSums(o, dir, sums, sig, rel.Tag)
+	o.release = rel.Tag
 	return dest, nil
 }
 
-// fetchImage requires a release-provided digest before handling firmware.
+// fetchImage flashes only a file whose SHA-256 is in the release's signed SHA256SUMS.txt (#239).
 // gen1Image is the first-generation *-Update.img to install: the one --image/--bundle names (it must
 // be this model's EngineX AZ01 image), else the latest release's (BH-G2-7: both Gen-1 paths always
 // downloaded, so an offline install failed and an online one could flash another build).
 func gen1Image(ctx context.Context, o *options, prefix string) (string, error) {
+	o.release = ""
 	if o.Bundle == "" {
 		return fetchImage(ctx, o, prefix)
 	}
@@ -731,6 +751,9 @@ func gen1Image(ctx context.Context, o *options, prefix string) (string, error) {
 	if _, err := io.ReadFull(f, magic[:]); err != nil || string(magic[:]) != "AZ01" {
 		return "", fmt.Errorf("%s 不是一代机的 AZ01 固件镜像，没有刷写任何东西 / %s is not a first-generation AZ01 firmware image; nothing flashed", base, base)
 	}
+	if err := verifyLocal(o, o.Bundle); err != nil {
+		return "", err
+	}
 	o.say("使用指定的镜像 "+base, "Using the selected image "+base)
 	return o.Bundle, nil
 }
@@ -744,14 +767,20 @@ func fetchImage(ctx context.Context, o *options, prefix string) (string, error) 
 		if !strings.HasPrefix(a.Name, prefix+"-") || !strings.Contains(a.Name, "-EngineX-OS-") || !strings.HasSuffix(a.Name, "-Update.img") || !strings.HasPrefix(a.URL, "https://") {
 			continue
 		}
-		digest := strings.TrimPrefix(a.Digest, "sha256:")
-		if !strings.HasPrefix(a.Digest, "sha256:") || len(digest) != 64 {
-			return "", errors.New("release image has no SHA-256 digest")
+		sums, sig, err := signedSums(ctx, o, &rel)
+		if err != nil {
+			return "", err
+		}
+		digest, err := signedDigest(sums, a.Name, a.Digest)
+		if err != nil {
+			return "", err
 		}
 		path := filepath.Join(o.WorkDir, filepath.Base(a.Name))
 		if err := downloadLimit(ctx, o, a.URL, digest, path, 2<<30); err != nil {
 			return "", err
 		}
+		keepSums(o, o.WorkDir, sums, sig, rel.Tag)
+		o.release = rel.Tag
 		return path, nil
 	}
 	return "", fmt.Errorf("release %s has no %s update image", rel.Tag, prefix)
@@ -816,10 +845,14 @@ func downloadLimit(ctx context.Context, o *options, url, wantSHA, dest string, l
 // in the work dir only when its SHA-256 matches the latest asset (or when the latest release cannot
 // be read due to network/HTTP/proxy errors) (#215, #218).
 func obtainBundle(ctx context.Context, o *options, prefix string) (*bundleInfo, error) {
+	o.release = ""
 	path := o.Bundle
 	if path != "" {
 		if !strings.HasPrefix(filepath.Base(path), prefix+"-") {
 			return nil, fmt.Errorf("%s is not a %s image/bundle: wrong model refused", filepath.Base(path), prefix)
+		}
+		if err := verifyLocal(o, path); err != nil {
+			return nil, err
 		}
 	} else {
 		var err error
@@ -1064,6 +1097,9 @@ func modeA(ctx context.Context, o *options, d deck) error {
 		if err != nil {
 			return err
 		}
+		if err := refuseOlder(ctx, o, cl, label); err != nil {
+			return err
+		}
 		if err := confirm(o, "将更新一代机 "+m.Name+"，请确认已备份数据。", "Update "+m.Name+"; confirm you have backed up your data."); err != nil {
 			return err
 		}
@@ -1093,6 +1129,9 @@ func modeA(ctx context.Context, o *options, d deck) error {
 		"Found "+label+", "+m.Name+"; installing online, your music and library stay.")
 	b, err := obtainBundle(ctx, o, m.Prefix)
 	if err != nil {
+		return err
+	}
+	if err := refuseOlder(ctx, o, cl, label); err != nil {
 		return err
 	}
 	sayGen2Steps(o, filepath.Base(b.Path))

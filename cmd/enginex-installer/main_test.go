@@ -136,6 +136,11 @@ func sha(t *testing.T, path string) string {
 
 // releaseServer is a TLS GitHub: releases/latest plus the bundle download.
 func releaseServer(t *testing.T, b bundleFile, digest string, downloads *int) *httptest.Server {
+	return releaseServerTag(t, b, digest, downloads, "v"+b.Version)
+}
+
+// releaseServerTag is releaseServer for a release called tag.
+func releaseServerTag(t *testing.T, b bundleFile, digest string, downloads *int, tag string) *httptest.Server {
 	t.Helper()
 	var srv *httptest.Server
 	mux := http.NewServeMux()
@@ -144,7 +149,7 @@ func releaseServer(t *testing.T, b bundleFile, digest string, downloads *int) *h
 		digest = "sha256:" + sha(t, b.Path)
 	}
 	mux.HandleFunc("/repos/Cd1s/EngineX-OS/releases/latest", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{"tag_name": "v" + b.Version, "assets": []map[string]string{
+		json.NewEncoder(w).Encode(map[string]any{"tag_name": tag, "assets": []map[string]string{
 			{"name": "SC5000-" + b.Version + "-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img", "browser_download_url": srv.URL + "/dl/img", "digest": "sha256:00"},
 			{"name": name, "browser_download_url": srv.URL + "/dl/" + name, "digest": digest},
 		}})
@@ -155,8 +160,7 @@ func releaseServer(t *testing.T, b bundleFile, digest string, downloads *int) *h
 		}
 		http.ServeFile(w, r, b.Path)
 	})
-	srv = httptest.NewTLSServer(mux)
-	t.Cleanup(srv.Close)
+	srv = signedTLS(t, mux, map[string]string{name: sha(t, b.Path)})
 	return srv
 }
 
@@ -1083,14 +1087,13 @@ func imageRelease(t *testing.T, prefix string) (*httptest.Server, []byte) {
 	content := []byte("test firmware image")
 	digest := sha256.Sum256(content)
 	var srv *httptest.Server
-	srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv = signedTLS(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/img" {
 			_, _ = w.Write(content)
 			return
 		}
 		json.NewEncoder(w).Encode(map[string]any{"tag_name": "v5.3.0.2", "assets": []map[string]string{{"name": prefix + "-5.3.0.2-EngineX-OS-test-Update.img", "browser_download_url": srv.URL + "/img", "digest": "sha256:" + hex.EncodeToString(digest[:])}}})
-	}))
-	t.Cleanup(srv.Close)
+	}), map[string]string{prefix + "-5.3.0.2-EngineX-OS-test-Update.img": hex.EncodeToString(digest[:])})
 	return srv, content
 }
 
@@ -2267,8 +2270,11 @@ func gen2ImageReleaseServer(t *testing.T, imgPath string, alsoBundlePath string,
 			http.NotFound(w, r)
 		}
 	})
-	srv = httptest.NewTLSServer(mux)
-	t.Cleanup(srv.Close)
+	files := map[string]string{imgName: sha(t, imgPath)}
+	if alsoBundlePath != "" {
+		files[filepath.Base(alsoBundlePath)] = sha(t, alsoBundlePath)
+	}
+	srv = signedTLS(t, mux, files)
 	return srv
 }
 
@@ -2362,7 +2368,7 @@ func TestFetchBundlePrefersGen2UpdateImgForAllPrefixes(t *testing.T) {
 
 			// 1. Release with ONLY *-Update.img (no .tar.gz)
 			var srvOnlyImg *httptest.Server
-			srvOnlyImg = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			srvOnlyImg = signedTLS(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == "/dl/"+imgName {
 					w.Write(imgPayload)
 					return
@@ -2375,8 +2381,7 @@ func TestFetchBundlePrefersGen2UpdateImgForAllPrefixes(t *testing.T) {
 						"digest":               "sha256:" + hex.EncodeToString(imgSum[:]),
 					}},
 				})
-			}))
-			defer srvOnlyImg.Close()
+			}), map[string]string{imgName: hex.EncodeToString(imgSum[:])})
 
 			o1 := testOpts(t)
 			o1.defaults()
@@ -2388,7 +2393,7 @@ func TestFetchBundlePrefersGen2UpdateImgForAllPrefixes(t *testing.T) {
 
 			// 2. Release with BOTH .tar.gz (listed first) and *-Update.img (listed second) -> still picks *-Update.img
 			var srvBoth *httptest.Server
-			srvBoth = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			srvBoth = signedTLS(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
 				case "/dl/" + imgName:
 					w.Write(imgPayload)
@@ -2403,8 +2408,7 @@ func TestFetchBundlePrefersGen2UpdateImgForAllPrefixes(t *testing.T) {
 						},
 					})
 				}
-			}))
-			defer srvBoth.Close()
+			}), map[string]string{bundleName: hex.EncodeToString(bundleSum[:]), imgName: hex.EncodeToString(imgSum[:])})
 
 			o2 := testOpts(t)
 			o2.defaults()
@@ -2597,7 +2601,7 @@ func TestGen2SameVersionReReleaseReplacesStaleWorkDirPackage(t *testing.T) {
 
 	downloads := 0
 	var srv *httptest.Server
-	srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv = signedTLS(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/repos/Cd1s/EngineX-OS/releases/latest":
 			json.NewEncoder(w).Encode(map[string]any{
@@ -2614,7 +2618,7 @@ func TestGen2SameVersionReReleaseReplacesStaleWorkDirPackage(t *testing.T) {
 		default:
 			http.NotFound(w, r)
 		}
-	}))
+	}), map[string]string{imgName: sha(t, r3Pkg.ImagePath)})
 	defer srv.Close()
 
 	o := testOpts(t)
@@ -2707,6 +2711,8 @@ func TestGen2LocalBundleFallbackOnGitHubHTTPErrorsAndProxy(t *testing.T) {
 	if err := copyFile(pkg.ImagePath, filepath.Join(workWithPkg, imgName)); err != nil {
 		t.Fatal(err)
 	}
+	// The package was downloaded by an earlier run, which kept its signed list beside it (#239).
+	writeSidecars(t, workWithPkg, map[string]string{imgName: sha(t, pkg.ImagePath)}, testReleasePriv, "v5.3.0.4-r3")
 	o0 := testOpts(t)
 	d := startSSHDeck(t, o0.SSHPort, "inmusic,jp24\x00inmusic,az04\x00")
 

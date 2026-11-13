@@ -64,9 +64,11 @@ done
 (
 	cd "$OUT"
 	set --
-	for f in *-Update.img *-Data-Bundle.tar.gz EngineX-Installer-"$V"-*; do
+	for f in *-Update.img *-Data-Bundle.tar.gz EngineX-Installer-"$V"-* RELEASE-TAG.txt; do
 		[ -e "$f" ] && set -- "$@" "$f"
 	done
 	sha256sum "$@" > SHA256SUMS.txt
+	# This is the list that is published and signed (sign-release.sh, #239); an older signature is for older bytes.
+	rm -f SHA256SUMS.txt.sig
 )
 ls -l "$OUT"/EngineX-Installer-"$V"-*

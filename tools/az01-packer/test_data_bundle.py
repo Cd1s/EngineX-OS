@@ -1004,7 +1004,8 @@ exec REAL "$@"
     def test_release_scripts_emit_28_artifacts_and_sha256sums(self):
         rel_sh = (HERE / 'build-release.sh').read_text()
         self.assertIn('-Data-Bundle.tar.gz"', rel_sh)
-        self.assertIn('sha256sum *-Update.img *-Data-Bundle.tar.gz > SHA256SUMS.txt', rel_sh)
+        # RELEASE-TAG.txt (#239) is listed too: it is how the signed list names its release tag.
+        self.assertIn('sha256sum *-Update.img *-Data-Bundle.tar.gz RELEASE-TAG.txt > SHA256SUMS.txt', rel_sh)
 
         out_dir = self.tmp / 'release-out'
         out_dir.mkdir()
@@ -1023,6 +1024,7 @@ exec REAL "$@"
         for pfx, model in bdb.MODEL_NAMES.items():
             (out_dir / f'{pfx}-5.3.0.4-EngineX-OS-{model}-Update.img').write_bytes(f'gen2-img-{pfx}'.encode())
             (out_dir / f'{pfx}-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz').write_bytes(f'gen2-bundle-{pfx}'.encode())
+        (out_dir / 'RELEASE-TAG.txt').write_text('v5.3.0.4\n')
 
         fake_bin = self.tmp / 'fake-go-bin'
         fake_bin.mkdir()
@@ -1041,7 +1043,8 @@ exec REAL "$@"
         self.assertEqual(len(list(out_dir.glob('*-Data-Bundle.tar.gz'))), 8)
         self.assertEqual(len(list(out_dir.glob('EngineX-Installer-5.3.0.4-*'))), 4)
         lines = (out_dir / 'SHA256SUMS.txt').read_text().splitlines()
-        self.assertEqual(len(lines), 28, lines)
+        self.assertEqual(len(lines), 29, lines)  # the 28 artifacts and RELEASE-TAG.txt
+        self.assertIn('RELEASE-TAG.txt', [line.split('  ')[1] for line in lines])
         for line in lines:
             digest, fname = line.split('  ')
             self.assertEqual(hashlib.sha256((out_dir / fname).read_bytes()).hexdigest(), digest, fname)
