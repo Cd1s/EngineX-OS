@@ -668,7 +668,7 @@ func preflightXZStream(r io.ReaderAt, offset, size int64, limits Limits) ([]xzBl
 			return nil, 0, fmt.Errorf("%w: unexpected index indicator inside XZ block", ErrCorrupt)
 		}
 		bhLen := (int64(b0[0]) + 1) * 4
-		if bhLen < 8 || bhLen > 1024 || bhLen+checkLen >= indexStart-pos {
+		if bhLen+checkLen >= indexStart-pos {
 			return nil, 0, fmt.Errorf("%w: invalid XZ block header length %d", ErrCorrupt, bhLen)
 		}
 		bh := make([]byte, bhLen)
@@ -704,38 +704,36 @@ func preflightXZStream(r io.ReaderAt, offset, size int64, limits Limits) ([]xzBl
 			block.declaredUncomp = v
 			p += n
 		}
-		for i := 0; i < numFilters; i++ {
-			fid, n := readUvarintSlice(bh[p : bhLen-4])
-			if n <= 0 {
-				return nil, 0, fmt.Errorf("%w: invalid XZ filter id", ErrCorrupt)
-			}
-			p += n
-			propLen, n := readUvarintSlice(bh[p : bhLen-4])
-			if n <= 0 || propLen > uint64(int(bhLen)-4-p-n) {
-				return nil, 0, fmt.Errorf("%w: invalid XZ filter property size", ErrCorrupt)
-			}
-			p += n
-			props := bh[p : p+int(propLen)]
-			p += int(propLen)
-			// Only a single LZMA2 filter is decoded. Its chunk lengths describe
-			// the bytes on disk; no compressed payload is decoded here.
-			if numFilters != 1 || fid != 0x21 {
-				return nil, 0, fmt.Errorf("%w: unsupported XZ filter chain", ErrCorrupt)
-			}
-			if len(props) != 1 || props[0] > 40 {
-				return nil, 0, fmt.Errorf("%w: invalid LZMA2 dictionary property", ErrCorrupt)
-			}
-			var dictCap uint64
-			if props[0] == 40 {
-				dictCap = 0xffffffff
-			} else {
-				dictCap = (uint64(2) | uint64(props[0]&1)) << (props[0]/2 + 11)
-			}
-			if dictCap > uint64(limits.MaxXZDictSize) || dictCap > limits.MaxXZMemory {
-				return nil, 0, fmt.Errorf("%w: XZ LZMA2 dictionary %d bytes exceeds %d limit", ErrLimitExceeded, dictCap, min(uint64(limits.MaxXZDictSize), limits.MaxXZMemory))
-			}
-			block.dictCap = int(dictCap)
+		fid, n := readUvarintSlice(bh[p : bhLen-4])
+		if n <= 0 {
+			return nil, 0, fmt.Errorf("%w: invalid XZ filter id", ErrCorrupt)
 		}
+		p += n
+		propLen, n := readUvarintSlice(bh[p : bhLen-4])
+		if n <= 0 || propLen > uint64(int(bhLen)-4-p-n) {
+			return nil, 0, fmt.Errorf("%w: invalid XZ filter property size", ErrCorrupt)
+		}
+		p += n
+		props := bh[p : p+int(propLen)]
+		p += int(propLen)
+		// Only a single LZMA2 filter is decoded. Its chunk lengths describe
+		// the bytes on disk; no compressed payload is decoded here.
+		if numFilters != 1 || fid != 0x21 {
+			return nil, 0, fmt.Errorf("%w: unsupported XZ filter chain", ErrCorrupt)
+		}
+		if len(props) != 1 || props[0] > 40 {
+			return nil, 0, fmt.Errorf("%w: invalid LZMA2 dictionary property", ErrCorrupt)
+		}
+		var dictCap uint64
+		if props[0] == 40 {
+			dictCap = 0xffffffff
+		} else {
+			dictCap = (uint64(2) | uint64(props[0]&1)) << (props[0]/2 + 11)
+		}
+		if dictCap > uint64(limits.MaxXZDictSize) || dictCap > limits.MaxXZMemory {
+			return nil, 0, fmt.Errorf("%w: XZ LZMA2 dictionary %d bytes exceeds %d limit", ErrLimitExceeded, dictCap, min(uint64(limits.MaxXZDictSize), limits.MaxXZMemory))
+		}
+		block.dictCap = int(dictCap)
 		for _, b := range bh[p : bhLen-4] {
 			if b != 0 {
 				return nil, 0, fmt.Errorf("%w: nonzero XZ block header padding", ErrCorrupt)
@@ -766,12 +764,10 @@ func preflightXZStream(r io.ReaderAt, offset, size int64, limits Limits) ([]xzBl
 	}
 
 	// Cross-check optional header sizes and every measured block against the Index.
-	// Retain the aggregate span check: fewer Index records must not omit real blocks.
-	pos = 12
+	if len(records) != len(blocks) {
+		return nil, 0, fmt.Errorf("%w: XZ index lists %d blocks, stream has %d", ErrCorrupt, len(records), len(blocks))
+	}
 	for i, rec := range records {
-		if i >= len(blocks) {
-			return nil, 0, fmt.Errorf("%w: XZ index contains more blocks than the stream", ErrCorrupt)
-		}
 		block := blocks[i]
 		bhLen := block.headerSize
 		if block.flags&0x40 != 0 {
@@ -789,10 +785,6 @@ func preflightXZStream(r io.ReaderAt, offset, size int64, limits Limits) ([]xzBl
 		if block.unpadded != rec.unpadded || block.uncompressed != rec.uncompressed {
 			return nil, 0, fmt.Errorf("%w: XZ index does not match actual block sizes", ErrCorrupt)
 		}
-		pos += ((rec.unpadded + 3) / 4) * 4
-	}
-	if pos != indexStart {
-		return nil, 0, fmt.Errorf("%w: XZ block span (%d) does not match index start (%d)", ErrCorrupt, pos, indexStart)
 	}
 	return blocks, checkID, nil
 }
