@@ -112,7 +112,7 @@ assert.equal(scFxTimeMode,'beats'); assert.equal(scFxTimeMs,500);
         stems_handler = re.search(r"onScStemsEqModeChanged:\s*\{([\s\S]*?)\n\t\}", bp.SERVICES_MAIN).group(1)
         has_stems_m = re.search(r"onScHasStemsEqChanged:\s*\{([\s\S]*?)\n\t\}", bp.SERVICES_MAIN)
         has_stems_handler = has_stems_m.group(1) if has_stems_m else ""
-        helpers = "\n".join(function(bp.SERVICES_MAIN, n) for n in ("scFxMsInteger", "scFxMsApply", "scParseSettingsConf", "scApply"))
+        helpers = "\n".join(function(bp.SERVICES_MAIN, n) for n in ("scFxMsInteger", "scFxMsApply", "scParseSettingsConf", "scSyncStemsEqChannel", "scWatchStemsEq", "scApply"))
         prop_defs = "\n".join(
             f"Object.defineProperty(root, {k!r}, {{get() {{ return ({v}); }}, configurable: true}});"
             for k, v in props.items()
@@ -137,12 +137,13 @@ root.scEnsureTidal = () => {{}};
 root.scKeepPlayhead = () => {{}};
 root.scSameItems = () => true;
 root.scMidiInitBridge = () => {{}};
+root.scHookTimeZonePicker = () => {{}};
 root.scProbeCueClocks = () => {{}};
 root.scT = s => s;
 Object.assign(root, {{
     scPlayer: false, scUiLoaded: false, scFxMsWanted: -1,
     scMasterLimiter: false, scAutoGain: false, scUpfaderEcho: false,
-    scStemsEqApplied: false, scBeatJumpPads: false,
+    scStemsEqApplied: false, scStemsEqWatched: false, scBeatJumpPads: false,
     scPioneerFx: 'off', scFxTimeMode: 'beats', scFxTimeMs: 500,
     scFxSelectorAvailable: false, scFxMasterBypassed: false,
     scVersion: '', scBuildTag: '', scLang: 'en', scWave: 'denon', scQuality: 'flac',
@@ -284,6 +285,161 @@ scApply({{player: true, fxSelectorAvailable: true, pioneerFx: 'spiral', fxTimeMo
 assert.equal(visible['Color FX Style'](), false);
 assert.equal(visible['PX Delay Time Mode'](), false);
 assert.equal(visible['PX Delay Time (ms)'](), false);
+"""
+        result = subprocess.run(["node", "-e", script], text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_stems_eq_mode_applies_when_stemmed_track_loads(self):
+        props = {}
+        for line in bp.SERVICES_MAIN.splitlines():
+            m = re.match(r"\s*readonly property \w+ (sc\w+):\s*(.+)$", line)
+            if m and m.group(1) in ("scBoard", "scIsPlayerBoard", "scHasMixer", "scHasStemsEq", "scTransitionFxView"):
+                props[m.group(1)] = m.group(2).strip()
+        stems_handler = re.search(r"onScStemsEqModeChanged:\s*\{([\s\S]*?)\n\t\}", bp.SERVICES_MAIN).group(1)
+        helpers = "\n".join(function(bp.SERVICES_MAIN, n) for n in ("scFxMsInteger", "scFxMsApply", "scParseSettingsConf", "scSyncStemsEqChannel", "scWatchStemsEq", "scApply"))
+        prop_defs = "\n".join(
+            f"Object.defineProperty(root, {k!r}, {{get() {{ return ({v}); }}, configurable: true}});"
+            for k, v in props.items()
+        )
+        script = f"""
+const assert = require('assert');
+globalThis.root = globalThis;
+globalThis.Config = {{device: {{name: 'JP21', isPlayer: false}}, audio: {{hasStemsLevel: true, fx: {{hasDJFx: false, hasNHFx: false}}}}}};
+globalThis.PlanckGUI = {{views: {{transitionFx: {{enabled: false}}}}}};
+globalThis.Planck = {{getProperty: () => ({{translator: null}})}};
+function makeSig() {{
+    const listeners = [];
+    return {{
+        connect(fn) {{ listeners.push(fn); }},
+        emit() {{ for (const fn of listeners) fn(); }},
+        get count() {{ return listeners.length; }},
+    }};
+}}
+const stemmed = {{1: {{state: false, stateChanged: makeSig()}}, 2: {{state: false, stateChanged: makeSig()}}, 3: {{state: false, stateChanged: makeSig()}}, 4: {{state: false, stateChanged: makeSig()}}}};
+const songLoaded = {{1: {{state: false, stateChanged: makeSig()}}, 2: {{state: false, stateChanged: makeSig()}}, 3: {{state: false, stateChanged: makeSig()}}, 4: {{state: false, stateChanged: makeSig()}}}};
+// Simulates Engine ChannelStripControl::ModeAccessFilter: rejects Mode=1 when Track/Stemmed is false.
+const stripModes = {{}};
+for (let ch = 1; ch <= 4; ch++) {{
+    let idx = 0;
+    stripModes[ch] = {{
+        writes: 0,
+        get index() {{ return idx; }},
+        set index(v) {{ this.writes++; if (v === 1 && !stemmed[ch].state) return; idx = v; }},
+    }};
+}}
+root.scTr = p => {{
+    let m = /^\\/Engine\\/Mixer\\/Channel(\\d)\\/ChannelStrip\\/Mode$/.exec(p);
+    if (m) return stripModes[Number(m[1])];
+    m = /^\\/Engine\\/Deck(\\d)\\/Track\\/Stemmed$/.exec(p);
+    if (m) return stemmed[Number(m[1])];
+    m = /^\\/Engine\\/Deck(\\d)\\/Track\\/SongLoaded$/.exec(p);
+    if (m) return songLoaded[Number(m[1])];
+    return null;
+}};
+root.scEnsureTidal = () => {{}};
+root.scKeepPlayhead = () => {{}};
+root.scSameItems = () => true;
+root.scMidiInitBridge = () => {{}};
+root.scHookTimeZonePicker = () => {{}};
+root.scProbeCueClocks = () => {{}};
+root.scT = s => s;
+Object.assign(root, {{
+    scPlayer: false, scUiLoaded: false, scFxMsWanted: -1,
+    scMasterLimiter: false, scAutoGain: false, scUpfaderEcho: false,
+    scStemsEqApplied: false, scStemsEqWatched: false, scBeatJumpPads: false,
+    scPioneerFx: 'off', scFxTimeMode: 'beats', scFxTimeMs: 500,
+    scFxSelectorAvailable: false, scFxMasterBypassed: false,
+    scVersion: '', scBuildTag: '', scLang: 'en', scWave: 'denon', scQuality: 'flac',
+    scNeteaseMode: 'official', scUpdateRepo: '', scAccessCode: '', scConsoleUrl: '',
+    scLanStems: '', scAutoAnalyze: false, scOmniSource: false, scProlinkShare: false,
+    scProlinkExport: false, scFourDeckRole: '', scFourDeckOn: false,
+    scFourDeckRoleSetting: 'auto', scShadowMode: 'auto', scSources: [], scLoggedIn: [],
+    scScope: 'deezer', scBroadcastOn: false, scCueCountdown: true, scDualColumn: false,
+    scTracklistWaveform: true, scSyncGuardPct: 0, scSwapLoopOrder: false,
+    scLedBrightness: 100, scUIScale: 100,
+    scLastGoodTimeZone: '', scPendingTimeZone: '', scRestoringTimeZone: false,
+}});
+let stemsEqVal = false;
+Object.defineProperty(root, 'scStemsEqMode', {{
+    get() {{ return stemsEqVal; }},
+    set(v) {{
+        const next = !!v;
+        if (next === stemsEqVal) return;
+        stemsEqVal = next;
+        {stems_handler}
+    }}
+}});
+{prop_defs}
+{helpers}
+
+// Boot with Stems EQ Mode = On before any track is loaded (Engine rejects Mode=1 on empty decks).
+scApply({{stemsEqMode: true}});
+assert.equal(stripModes[1].index, 0);
+
+// Loading a stemmed track on Deck 1 must automatically switch Channel 1 to Stems mode (1).
+stemmed[1].state = true;
+stemmed[1].stateChanged.emit();
+songLoaded[1].state = true;
+songLoaded[1].stateChanged.emit();
+assert.equal(stripModes[1].index, 1, 'Channel 1 switches to Stems when stemmed track loads');
+assert.equal(stripModes[2].index, 0, 'Empty Channel 2 stays EQ');
+
+// Manual Shift+Cue toggle to EQ while the same track remains loaded is preserved.
+stripModes[1].index = 0;
+assert.equal(stripModes[1].index, 0);
+
+// Loading another stemmed track re-applies Stems EQ Mode = On.
+songLoaded[1].state = false;
+songLoaded[1].stateChanged.emit();
+songLoaded[1].state = true;
+songLoaded[1].stateChanged.emit();
+assert.equal(stripModes[1].index, 1);
+
+// SongLoaded firing BEFORE Stemmed (Deck 3): Stemmed.stateChanged alone must switch to Stems.
+songLoaded[3].state = true;
+songLoaded[3].stateChanged.emit();
+assert.equal(stripModes[3].index, 0);
+stemmed[3].state = true;
+stemmed[3].stateChanged.emit();
+assert.equal(stripModes[3].index, 1, 'Stemmed after SongLoaded switches Channel 3 to Stems');
+
+// Repeated scApply polls must not duplicate listeners or override manual Shift+Cue EQ toggle.
+stripModes[1].index = 0;
+const writesBefore = stripModes[1].writes;
+for (let i = 0; i < 5; i++) scApply({{stemsEqMode: true}});
+assert.equal(stemmed[1].stateChanged.count, 1, 'single Stemmed listener per deck');
+assert.equal(songLoaded[1].stateChanged.count, 1, 'single SongLoaded listener per deck');
+assert.equal(stripModes[1].index, 0, 'repeated scApply preserves manual Shift+Cue');
+assert.equal(stripModes[1].writes, writesBefore);
+
+// Turning Stems EQ Mode Off resets Channel 1 and does not re-enable on subsequent loads.
+scApply({{stemsEqMode: false}});
+assert.equal(stripModes[1].index, 0);
+stemmed[2].state = true;
+stemmed[2].stateChanged.emit();
+assert.equal(stripModes[2].index, 0);
+
+// #176: board without Stems EQ (e.g. JP24 hasStemsLevel=false) never writes ChannelStrip/Mode=1.
+Config.device.name = 'JP24';
+Config.audio.hasStemsLevel = false;
+stemmed[4].state = true;
+stripModes[4].index = 0;
+const w4 = stripModes[4].writes;
+scApply({{stemsEqMode: true}});
+stemmed[4].stateChanged.emit();
+songLoaded[4].state = true;
+songLoaded[4].stateChanged.emit();
+assert.equal(stripModes[4].index, 0, '#176 JP24 stays EQ');
+assert.equal(stripModes[4].writes, w4);
+
+// Initial sync on first UI load when a stemmed track is already loaded on Deck 4.
+Config.device.name = 'JP21';
+Config.audio.hasStemsLevel = true;
+scUiLoaded = false;
+scStemsEqWatched = false;
+scStemsEqApplied = false;
+scApply({{stemsEqMode: true}});
+assert.equal(stripModes[4].index, 1, 'initial sync applies Stems on already-loaded Deck 4');
 """
         result = subprocess.run(["node", "-e", script], text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)

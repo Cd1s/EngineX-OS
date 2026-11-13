@@ -2498,6 +2498,26 @@ SERVICES_MAIN = """
 	property int scUIScale: 100
 	property bool scStemsEqMode: false
 	property bool scStemsEqApplied: false
+	property bool scStemsEqWatched: false
+	function scSyncStemsEqChannel(ch) {
+		if (!scHasStemsEq || !scStemsEqMode) return
+		const st = root.scTr("/Engine/Deck" + ch + "/Track/Stemmed")
+		if (!st || !st.state) return
+		const m = root.scTr("/Engine/Mixer/Channel" + ch + "/ChannelStrip/Mode")
+		if (m && m.index !== 1) m.index = 1
+	}
+	function scWatchStemsEq() {
+		if (scStemsEqWatched) return
+		scStemsEqWatched = true
+		for (let ch = 1; ch <= 4; ch++) {
+			const c = ch
+			const st = root.scTr("/Engine/Deck" + c + "/Track/Stemmed")
+			if (st && st.stateChanged) st.stateChanged.connect(() => root.scSyncStemsEqChannel(c))
+			const ld = root.scTr("/Engine/Deck" + c + "/Track/SongLoaded")
+			if (ld && ld.stateChanged) ld.stateChanged.connect(() => { if (ld.state) root.scSyncStemsEqChannel(c) })
+			root.scSyncStemsEqChannel(c)
+		}
+	}
 	onScHasStemsEqChanged: {
 		if (!scHasStemsEq && scStemsEqApplied) {
 			scStemsEqApplied = false
@@ -3088,6 +3108,7 @@ SERVICES_MAIN = """
 		const wasUiLoaded = scUiLoaded
 		scUiLoaded = true
 		if (!wasUiLoaded) {
+			scWatchStemsEq()
 			scMidiInitBridge()
 			scHookTimeZonePicker()
 			if (typeof Planck !== "undefined" && Planck && Planck.timeDateController) {
