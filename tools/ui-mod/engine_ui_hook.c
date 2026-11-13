@@ -1183,6 +1183,24 @@ static uint32_t hook_master_output(void *host, void *context, int in_channels, c
     return rc;
 }
 
+// Engine's sender converts a block to s16 and copies it into a ring (1024 frames) in runs. Its loop restarts the source at
+// the head of the block for the second run, after the ring's end: a block that wraps repeats its own head there, 0 to 206
+// frames in every 1024 (a 43 Hz crackle, worst on bass). Every build has it (armhf 0xf56034 / 0xf629b0, AZ04 0x102eb20), so
+// a call never takes more than fits before the ring's end. The ring size and write index are fields of the sender object.
+#if defined(__aarch64__)
+#define BT_RING_SIZE 0x40
+#define BT_RING_WR 0x48
+#else
+#define BT_RING_SIZE 0x2c
+#define BT_RING_WR 0x34
+#endif
+static int bt_ring_room(const void *self) {
+    if (!self) return 0;
+    unsigned size = *(const volatile unsigned *)((const char *)self + BT_RING_SIZE);
+    unsigned wr = *(const volatile unsigned *)((const char *)self + BT_RING_WR);
+    return size >= 64 && size <= 65536 && wr < size ? (int)(size - wr) : 0; // 0: not a ring we know, no split
+}
+
 // BluetoothSignalSender::audio(this, float *const in[2], int frames); it takes at most 512 frames a call. With a speaker
 // listening it gets what the callbacks kept (nothing yet: nothing), otherwise Engine's own feed.
 static void hook_bt_send(void *self, const float *const *in, int frames) {
@@ -1190,9 +1208,12 @@ static void hook_bt_send(void *self, const float *const *in, int frames) {
         bt_send_orig(self, in, frames);
         return;
     }
-    for (int i = 0; i < bt_pend; i += 512) {
+    for (int i = 0; i < bt_pend;) {
+        int n = bt_pend - i < 512 ? bt_pend - i : 512, room = bt_ring_room(self);
+        if (room && n > room) n = room;
         const float *pair[2] = {bt_buf[0] + i, bt_buf[1] + i};
-        bt_send_orig(self, pair, bt_pend - i < 512 ? bt_pend - i : 512);
+        bt_send_orig(self, pair, n);
+        i += n;
     }
     bt_pend = 0;
 }

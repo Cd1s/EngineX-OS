@@ -257,11 +257,22 @@ overshoot in the input leaves them within 43 frames, and nothing needs saturatin
 (pair), render rate or stream rate restarts the filters with their history set to the new block's first frame and fades
 the next 128 frames in from the last frame produced, so a switch or a speaker that connects does not click.
 
+Engine's sender has a bug of its own that the hook has to work around. It converts a block to s16 and copies it into a
+1024-frame ring in runs, and its loop restarts the source at the head of the block for the run after the ring's end (`mov r1,
+r8` / `mov x1, x22` inside the loop; armhf `0xf56034` and `0xf629b0`, AZ04 `0x102eb20`). A block that wraps repeats its own
+head there: 0 to 206 frames in every 1024, 43 times a second, a crackle that is worst on bass. It was found on a real SC5000 by
+recording the PCM handed to `sbc_encode`: replaying the ring with the bug over what the hook had sent reproduced 100.00 % of
+140 000 frames sample for sample (the plain stream matched 90 %). `hook_bt_send` therefore never hands over more than fits before
+the ring's end (`bt_ring_room`: the ring size and write index are fields of the sender object, +0x2c and +0x34 on armhf, +0x40 and
++0x48 on AZ04), so the wrapping branch is never taken; an object whose fields are not plausible is left alone.
+
 Which pair carries what is per model: players pair 0 and 1 are their two decks, a PRIME 4's 10 channels are Main,
 Booth, Headphones (Cue), Zone and a spare, PRIME 2 and Mixstream Pro Main and Headphones; `pkg/webui/bluetooth.go`
 names only these and rewrites a saved pair its model has no name for. A single channel of an all-in-one is not on any
 output (the mixer's per-channel buffers are not visible to a hook site): it reaches the speaker through Headphones (Cue).
-Tests: `test_bt_out.c` (no Engine needed, on a simulated clock: every render rate measured within 1.2 s with the clock
+Tests: `test_bt_out.c` (no Engine needed; `ring` models the sender's 1024-frame ring with its wrap bug and requires what the
+encoder reads to equal what was sent, in four block / rate / start-position cases, and fails on 8a57316 (compile with
+`-DBT_OUT_NORING`); on a simulated clock: every render rate measured within 1.2 s with the clock
 reading off by 300 us, a stalled window ignored, `deck` = 225-frame callbacks at 48 kHz must make 44100 stream frames a
 second; its `clip`, `blocks`, `rate` and `source` tests also build against the first version of the feature with
 `-DBT_OUT_OLD` (6e62523) and `deck` against the ALSA-probe version with `-DBT_OUT_FB` (fb33354), where they fail;

@@ -28,6 +28,7 @@ static unsigned long long sim_clock(void) {
 #endif
 
 static const float *engine_feed[2];
+static void *test_self; /* the sender object the hook is handed; NULL unless a test models the ring */
 static float silence[2][4096];
 static int stock_calls;
 
@@ -36,7 +37,7 @@ static uint32_t device(void *host, void *context, int ic, const float *const *in
     (void)host; (void)context; (void)ic; (void)in;
     sim_t += (double)frames * 1e9 / (double)device_rate + sim_stall;
     sim_stall = 0;
-    if (nested) hook_bt_send(NULL, engine_feed, frames);
+    if (nested) hook_bt_send(test_self, engine_feed, frames);
     for (int c = 0; c < oc; c++)
         for (int i = 0; i < frames; i++) {
             unsigned long long t = played + (unsigned long long)i;
@@ -55,10 +56,46 @@ static int rt_queue; /* the speaker's queue in the real-time test: frames the se
 static float got[2][24576];
 static int got_n, longest_call, collect = 1; /* collect: keep the samples; otherwise only count them */
 static long long delivered; /* stream frames the sender was given */
+/* Engine's sender, as the disassembly shows it (armhf BluetoothSignalSender::audio 0xf56034 / 0xf629b0, AZ04 0x102eb20): the ring
+ * size and the write index are fields of the object, and the copy loop restarts its source at the head of the block for the
+ * run after the ring's end (`mov r1, r8` / `mov x1, x22` inside the loop). The encoder then reads the ring in order. */
+#if defined(__aarch64__)
+enum { RING_SIZE_AT = 0x40, RING_WR_AT = 0x48 };
+#else
+enum { RING_SIZE_AT = 0x2c, RING_WR_AT = 0x34 };
+#endif
+enum { RING = 1024, STREAM_MAX = 262144 };
+static unsigned char ring_self[0x80];
+static float ring_buf[2][RING], ring_sent[2][STREAM_MAX], ring_read[2][STREAM_MAX];
+static unsigned ring_rd;
+static int ring_sent_n, ring_read_n;
+static void ring_sender(const float *const *in, int frames) {
+    unsigned wr, size = RING;
+    memcpy(&wr, ring_self + RING_WR_AT, sizeof wr);
+    for (int c = 0; c < 2; c++) memcpy(ring_sent[c] + ring_sent_n, in[c], (size_t)frames * sizeof(float));
+    ring_sent_n += frames;
+    for (unsigned left = (unsigned)frames; left;) {
+        unsigned n = size - wr < left ? size - wr : left;
+        for (int c = 0; c < 2; c++) memcpy(ring_buf[c] + wr, in[c], n * sizeof(float)); /* the bug: in[c], not in[c] + done */
+        wr += n;
+        if (wr >= size) wr = 0;
+        left -= n;
+    }
+    memcpy(ring_self + RING_WR_AT, &wr, sizeof wr);
+    while (ring_rd != wr) {
+        for (int c = 0; c < 2; c++) ring_read[c][ring_read_n] = ring_buf[c][ring_rd];
+        ring_read_n++;
+        ring_rd = (ring_rd + 1) % size;
+    }
+}
+
 static void sender(void *self, const float *const *in, int frames) {
-    (void)self;
     if (in == engine_feed) {
         stock_calls++; /* Engine's own feed: counted, not collected */
+        return;
+    }
+    if (self && self == ring_self) {
+        ring_sender(in, frames);
         return;
     }
     if (frames > longest_call) longest_call = frames;
@@ -95,7 +132,7 @@ static void block0(int frames) {
 
 /* The sender call Engine makes inside the next callback: it takes the last block. */
 static void drain(void) {
-    hook_bt_send(NULL, engine_feed, last_frames);
+    hook_bt_send(test_self, engine_feed, last_frames);
 #ifdef BT_OUT_OLD
     bt_frames = -1; /* that version did not consume the block it sent */
 #endif
@@ -257,6 +294,46 @@ static void test_source(void) {
     assert(max_step(got[0], at - 20, got_n) < 0.003); /* 0.1 over 128 frames is 0.0008 a frame */
 }
 
+/* Engine's sender copies into a 1024-frame ring, and a block that wraps past its end gets the head of the block again for the
+ * part after the end. Blocks of 206 or 207 frames (225 at 48 kHz to 44.1 kHz) wrap three times in four laps, so the stream the
+ * encoder reads must still be exactly the stream that was sent: the hook never hands over more than fits before the end. */
+static void ring_case(unsigned render, unsigned stream, int block_frames, int blocks, unsigned wr0) {
+    reset(render, stream);
+    memset(ring_self, 0, sizeof ring_self);
+    unsigned size = RING;
+    memcpy(ring_self + RING_SIZE_AT, &size, sizeof size);
+    memcpy(ring_self + RING_WR_AT, &wr0, sizeof wr0);
+    ring_rd = wr0; ring_sent_n = ring_read_n = 0;
+    test_self = ring_self;
+    collect = 0;
+    tone = 1000; tone_r = 3000;
+    for (int i = 0; i < blocks; i++) block(4, block_frames);
+    drain();
+    test_self = NULL;
+    assert(ring_sent_n > 50 * RING && ring_sent_n < STREAM_MAX && ring_read_n == ring_sent_n);
+    for (int c = 0; c < 2; c++) assert(!memcmp(ring_read[c], ring_sent[c], (size_t)ring_sent_n * sizeof(float)));
+}
+static void test_ring(void) {
+#ifndef BT_OUT_NORING /* -DBT_OUT_NORING: the same test against a hook without bt_ring_room (8a57316 and before) */
+    /* an object that is not a ring is left alone: no split, whatever the other fields say */
+    unsigned char obj[0x80];
+    static const unsigned sizes[] = {0, 1, 63, 64, 1024, 65536, 65537, 0xffffffffu}, wrs[] = {0, 5, 1023, 1024, 70000};
+    for (unsigned a = 0; a < sizeof sizes / sizeof *sizes; a++)
+        for (unsigned b = 0; b < sizeof wrs / sizeof *wrs; b++) {
+            memset(obj, 0, sizeof obj);
+            memcpy(obj + RING_SIZE_AT, &sizes[a], sizeof sizes[a]);
+            memcpy(obj + RING_WR_AT, &wrs[b], sizeof wrs[b]);
+            int known = sizes[a] >= 64 && sizes[a] <= 65536 && wrs[b] < sizes[a];
+            assert(bt_ring_room(obj) == (known ? (int)(sizes[a] - wrs[b]) : 0));
+        }
+    assert(bt_ring_room(NULL) == 0);
+#endif
+    ring_case(48000, 44100, 225, 600, 479);   /* a Gen-1 deck */
+    ring_case(96000, 44100, 450, 300, 0);
+    ring_case(48000, 48000, 4000, 40, 1000);  /* long blocks come in pieces of up to 512 */
+    ring_case(48000, 44100, 225, 600, 1023);
+}
+
 /* The shape of a Gen-1 player: the callback is 225 frames 213 times a second (48 kHz) while ALSA, which the first version
  * read the render rate from, says 96 kHz. A second of it must make a second of the stream (44.1 kHz), the same tone. */
 static void test_deck(void) {
@@ -353,6 +430,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(only, "rate")) test_rate();
         else if (!strcmp(only, "source")) test_source();
         else if (!strcmp(only, "deck")) test_deck();
+        else if (!strcmp(only, "ring")) test_ring();
 #if !defined(BT_OUT_OLD) && !defined(BT_OUT_FB)
         else if (!strcmp(only, "realtime")) { test_realtime(48000, 225); test_realtime(96000, 450); test_realtime(44100, 225); }
 #endif
@@ -578,6 +656,7 @@ int main(int argc, char **argv) {
     assert(got_n == 0);
 
     /* regressions, above */
+    test_ring();
     test_deck();
     test_clip();
     test_blocks();
