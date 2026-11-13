@@ -525,6 +525,7 @@ static void test_config(void) {
         if (!strcmp(build->name, "5.3.0"))
             expected[0x2a7] = 1; // gen1 5.3.0 only: hasStemsProcessorFactoryInstalled
         if (build->config_zoom == 0x52c) expected[0x54] = 1; // #152: Config.audio.hasStemsLevel
+        if (strcmp(build->name, "5.0.4")) expected[3] = 1; // Config.audio.hasBluetoothOutput: Engine's own A2DP source
         if (build->config_zoom == 0x52c && config[0x12e])
             expected[0xe1] = expected[0x19c] = expected[0x19d] = expected[0x4cd] = 1; // #166; retain hasNHFx
         if (build->config_zoom) *(uint32_t *)(expected + build->config_zoom) = 30; // #77
@@ -1022,6 +1023,12 @@ static void test_patch_files(const char *filename) {
         assert(edit_state((uintptr_t)image, e) == 2);
         image[e->offset] ^= 0xff;
         assert(edit_state((uintptr_t)image, e) == 0);
+    }
+    // Engine's A2DP sender is where install_bt_send looks for it (5.0.4 has none)
+    assert(!!build->bt_send == !!strcmp(build->name, "5.0.4"));
+    if (build->bt_send) {
+        static const uint32_t sender_prologue[] = {0xe16d42f4, 0xe1a04001}; // strd r4,[sp,#-36]!; mov r4,r1
+        assert((size_t)size >= build->bt_send + sizeof sender_prologue && !memcmp(image + build->bt_send, sender_prologue, sizeof sender_prologue));
     }
     if (!strcmp(build->name, "5.0.4")) assert(build->edit_count == 16);
     if (!strcmp(build->name, "5.3.0")) {
