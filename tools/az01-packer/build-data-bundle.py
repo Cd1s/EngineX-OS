@@ -152,9 +152,16 @@ ENGINEX_ALSA_OVERLAY=${ENGINEX_ALSA_OVERLAY:-${SC5000_ALSA_OVERLAY:-}}
 # The boot run (no arguments) first puts back a downgrade to an older release that a power cut
 # interrupted before its commit (#234, internal/leave), before the layout below is touched. It
 # can start from /data/sc5000-custom: the hook's fallback while /data/enginex is being handed back.
+# When that fails, nothing below runs: no migration, no activation. The deck keeps the generation
+# it has, Engine runs stock, and the journal in /data/.enginex-leave stays for the next boot.
 if [ "$#" = 0 ] && { [ -z "${ENGINEX_CUSTOM:-}" ] || [ -n "${ENGINEX_LEAVE_ROOT:-}" ]; }; then
     leave_suite="$(dirname "$0")/bin/enginex-suite"
-    [ ! -x "$leave_suite" ] || "$leave_suite" leave recover || :
+    if [ -x "$leave_suite" ] && ! leave_out=$("$leave_suite" leave recover 2>&1); then
+        echo "boot-activate: putting back an interrupted downgrade failed, EngineX OS stays off this boot: $leave_out" >&2
+        ! command -v logger >/dev/null 2>&1 ||
+            logger -p user.err -t enginex-boot-activate "putting back an interrupted downgrade failed, EngineX OS stays off this boot: $leave_out"
+        exit 1
+    fi
 fi
 @MIGRATE_IF_DEFAULT@
 dest="${ENGINEX_CUSTOM:-/data/enginex}"
