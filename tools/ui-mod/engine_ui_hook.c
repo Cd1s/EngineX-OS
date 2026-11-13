@@ -75,7 +75,13 @@ static void initialize_engine_cpus(void) {
     }
 }
 
+#ifdef ENGINE_UI_HOOK_TEST
+void *(*hook_test_next)(const char *name); // tests: stand-ins for the libraries Engine links
+#endif
 static void *next_symbol(void **cache, const char *name) {
+#ifdef ENGINE_UI_HOOK_TEST
+    if (hook_test_next) return hook_test_next(name);
+#endif
     void *fn = __atomic_load_n(cache, __ATOMIC_ACQUIRE);
     if (!fn) {
         fn = dlsym(RTLD_NEXT, name);
@@ -148,7 +154,7 @@ int snd_pcm_sw_params(void *pcm, void *params) {
 // #58: the toggle is master_limiter=1 in settings.conf, polled once a second
 // off the audio thread; the limiter itself runs in hook_master_output.
 static int lim_enabled, gain_enabled; // gain_enabled: #64 auto_gain=1
-static int bt_out_pair;               // bt_out=: output pair sent to Bluetooth (default 0, the first); negative: Engine's feed
+static int bt_out_pair;               // bt_out=: output pair sent to Bluetooth (default 0, the first)
 static int echo_enabled;              // #104 upfader_echo=1: Echo Out on the master bus
 static int echo_player_bypass;        // standalone players hide Echo Out and Color FX Style; stored values behave as Off
 static unsigned pfx_time_ms;          // #162: zero OFF, otherwise 10..4000
@@ -394,7 +400,10 @@ static void *lim_poll(void *arg) {
                 if (!strncmp(line, "master_limiter=1", 16)) on = 1;
                 else if (!strncmp(line, "auto_gain=1", 11)) gain = 1;
                 else if (!strncmp(line, "upfader_echo=1", 14)) echo = 1;
-                else if (!strncmp(line, "bt_out=", 7)) btout = atoi(line + 7);
+                else if (!strncmp(line, "bt_out=", 7)) {
+                    int n = atoi(line + 7);
+                    btout = n > 0 ? n : 0;
+                }
                 else if (!strncmp(line, "led_brightness=", 15)) {
                     int n = atoi(line + 15);
                     if (n >= 10 && n <= 100) led = n;
@@ -906,25 +915,41 @@ static struct sc_master_pioneer_fx master_pfx[MASTER_PFX_PAIRS];
 static float four_deck_pad[8][FOUR_DECK_PAD_FRAMES];
 static int four_deck_pad_on;
 static signed char four_deck_route[2] = {0, 1}; // deck (0-3) on RCA A and RCA B, -1 silent
-// Bluetooth output: Engine's own A2DP source (BluetoothSignalSender, switched on by
-// Config.audio.hasBluetoothOutput) is called every block, inside the master callback and on its
-// thread, with a pair nobody fills. bt_out=<pair> in settings.conf picks the output pair that
-// replaces it (default 0; negative: Engine's feed). The sender does not resample: the SBC stream has the rate BlueZ
-// negotiated (44.1 kHz when the speaker offers both; sbc_encode below reports it) while a Gen-1
-// render is 96 kHz. So a render of 88.2 kHz or more is halved by an 11-tap half-band, then a
-// Catmull-Rom interpolation brings it to the stream rate. The sender converts float to s16 without
-// clipping: the pair is clipped here.
-#define BT_BLOCK 4096 // longest render block carried
-static float bt_buf[2][BT_BLOCK + BT_BLOCK / 8]; // at the stream rate; 44.1 -> 48 kHz adds 9%
-static int bt_frames = -1, bt_count; // frames of the callback that kept bt_buf (-1: none), and the stream frames in it
-#define BT_HIST 10
-static float bt_x[2][BT_HIST + BT_BLOCK]; // render-rate input behind the last BT_HIST samples
-static float bt_y[2][3 + BT_BLOCK];       // half-band output (or the render) behind its last 3 samples
-static int bt_phase;                      // 0 or 1: input samples to skip before the next half-band output
-static int bt_ip = -2;                    // position of the next stream frame in bt_y, relative to the block
-static unsigned bt_rem;                   // its fraction, in 1/stream-rate input samples
-static unsigned render_rate[16];          // playback rate by channel count: the callback only sees the count
-static unsigned stream_rate;              // SBC rate of the A2DP stream, 0 until the first encode
+// Bluetooth output: Engine's own A2DP source (BluetoothSignalSender, switched on by Config.audio.hasBluetoothOutput) is
+// called inside the master callback, on its thread, once per block, with a pair nobody fills. bt_out=<pair> in
+// settings.conf picks the output pair that replaces it (default 0: Master, or a player's Layer A; there is no off).
+// Nothing runs unless the encoder does: sbc_encode counts its calls, and with no speaker connected Engine's own feed
+// goes through as it always did. The callback appends its block to bt_buf; the sender, called inside the next
+// callback, takes whatever is there, so one block's length need not match the next one's.
+// The sender does not resample: the SBC stream has the rate BlueZ negotiated (44.1 kHz when the speaker offers both;
+// sbc_encode reports it) while a Gen-1 render is 96 kHz. A render of 88.2 kHz or more is halved by an 11-tap
+// half-band, a 29-tap low-pass at 20.5 kHz keeps what a lower stream rate cannot carry from folding down, and a
+// Catmull-Rom interpolation brings the result to the stream rate. Every frame is saturated last: the sender converts
+// float to s16 without clipping, and the filters overshoot. A new source, render rate or stream rate restarts the
+// filters and fades in from the last frame handed over.
+#define BT_BLOCK 4096                    // longest render block carried
+#define BT_OUT (BT_BLOCK + BT_BLOCK / 8) // its frames at the stream rate; 44.1 -> 48 kHz adds 9%
+#define BT_HIST 10                       // half-band: taps +-5 around a sample
+#define BT_TAPS 29                       // low-pass
+#define BT_FADE 128                      // frames a new source, rate or speaker takes to come in
+#define BT_IDLE 64                       // master callbacks without an encoder call: nobody listens
+static void (*bt_send_orig)(void *, const float *const *, int);
+static float bt_buf[2][2 * BT_OUT];            // stream-rate frames the sender has not taken yet,
+static int bt_pend;                            // and how many
+static float bt_x[2][BT_HIST + BT_BLOCK];      // render-rate input behind the last BT_HIST samples
+static float bt_h[2][BT_TAPS - 1 + BT_BLOCK];  // half-band output (or the render) behind its last BT_TAPS-1 samples
+static float bt_y[2][3 + BT_BLOCK];            // low-passed, behind its last 3
+static int bt_phase;                           // 0 or 1: input samples to skip before the next half-band output
+static int bt_ip = -2;                         // position of the next stream frame in bt_y, relative to the block
+static unsigned bt_rem;                        // its fraction, in 1/stream-rate input samples
+static int bt_pair = -1;                       // the pair, input rate and stream rate that state belongs to
+static unsigned bt_in, bt_rate;
+static float bt_last[2], bt_from[2];           // the last frame produced; the one a fade-in starts from
+static int bt_fade;                            // fade-in frames left
+static unsigned bt_encodes, bt_seen;           // sbc_encode calls (encoder thread); the count at the last callback
+static int bt_idle = BT_IDLE;                  // callbacks since the encoder last ran; BT_IDLE: nobody listens
+static unsigned render_rate[16];               // playback rate by channel count: the callback only sees the count
+static unsigned stream_rate;                   // SBC rate of the A2DP stream, 0 until the first encode
 
 int snd_pcm_hw_params(void *pcm, void *params) {
     static void *real_cache, *stream_cache, *rate_cache, *channels_cache;
@@ -942,22 +967,46 @@ int snd_pcm_hw_params(void *pcm, void *params) {
 }
 
 // libsbc's sbc_t starts with `unsigned long flags; uint8_t frequency;` (0..3 = 16, 32, 44.1, 48 kHz).
-static void bt_stream_rate(const void *sbc) {
+static void bt_encoded(const void *sbc) {
     static const unsigned hz[4] = {16000, 32000, 44100, 48000};
     unsigned f = ((const uint8_t *)sbc)[sizeof(unsigned long)], rate = f < 4 ? hz[f] : 0;
     if (rate != __atomic_exchange_n(&stream_rate, rate, __ATOMIC_RELAXED))
         fprintf(stderr, "engine-ui-hook: Bluetooth stream %u Hz\n", rate);
+    __atomic_add_fetch(&bt_encodes, 1, __ATOMIC_RELAXED);
 }
 
 ssize_t sbc_encode(void *sbc, const void *input, size_t input_len, void *output, size_t output_len, ssize_t *written) {
     static void *real_cache;
+    if (sbc && is_engine()) bt_encoded(sbc);
     ssize_t (*real)(void *, const void *, size_t, void *, size_t, ssize_t *) = next_symbol(&real_cache, "sbc_encode");
     if (!real) return -ENOSYS;
-    if (sbc && is_engine()) bt_stream_rate(sbc);
     return real(sbc, input, input_len, output, output_len, written);
 }
 
-// Halves bt_x (the previous block's last BT_HIST samples, then n new ones) into bt_y: y = x/2 centred on every
+// Saturates to +-1 (the sender wraps what is past full scale); anything that is not a number is silence.
+static float bt_sat(float v) { return v > 1.0f ? 1.0f : v < -1.0f ? -1.0f : v == v ? v : 0.0f; }
+
+// Another source, render rate or stream rate: the filters start as if the new block's first frame had always been
+// there, and the next frames come in from the last one produced.
+static void bt_reset(int pair, unsigned in, unsigned rate, int halve) {
+    for (int c = 0; c < 2; c++) {
+        float x0 = halve ? bt_x[c][BT_HIST] : bt_h[c][BT_TAPS - 1];
+        for (int i = 0; i < BT_HIST; i++) bt_x[c][i] = x0;
+        for (int i = 0; i < BT_TAPS - 1; i++) bt_h[c][i] = x0;
+        for (int i = 0; i < 3; i++) bt_y[c][i] = x0;
+        bt_from[c] = bt_last[c];
+    }
+    bt_phase = 0; bt_ip = -2; bt_rem = 0; bt_fade = BT_FADE;
+    bt_pair = pair; bt_in = in; bt_rate = rate;
+}
+
+// Nobody listens: drop what waits, and start the next speaker from silence.
+static void bt_off(void) {
+    bt_pend = 0; bt_rate = 0;
+    bt_last[0] = bt_last[1] = 0.0f;
+}
+
+// Halves bt_x (the previous block's last BT_HIST samples, then n new ones) into bt_h: y = x/2 centred on every
 // second sample, taps +-1, +-3, +-5. bt_phase carries an odd split across blocks. Returns the outputs.
 static int bt_halve(int n) {
     static const float c1 = 0.2918f, c3 = -0.0441f, c5 = 0.0023f;
@@ -965,23 +1014,47 @@ static int bt_halve(int n) {
     for (; p + BT_HIST / 2 < BT_HIST + n; p += 2, count++)
         for (int c = 0; c < 2; c++) {
             const float *x = bt_x[c];
-            bt_y[c][3 + count] = 0.5f * x[p] + c1 * (x[p - 1] + x[p + 1]) + c3 * (x[p - 3] + x[p + 3]) + c5 * (x[p - 5] + x[p + 5]);
+            bt_h[c][BT_TAPS - 1 + count] = 0.5f * x[p] + c1 * (x[p - 1] + x[p + 1]) + c3 * (x[p - 3] + x[p + 3]) + c5 * (x[p - 5] + x[p + 5]);
         }
     bt_phase = p - n - BT_HIST / 2;
-    for (int c = 0; c < 2; c++) memmove(bt_x[c], bt_x[c] + n, BT_HIST * sizeof(float));
+    for (int c = 0; c < 2; c++)
+        for (int i = 0; i < BT_HIST; i++) bt_x[c][i] = bt_x[c][n + i];
     return count;
 }
 
-// Catmull-Rom from the m frames in bt_y (at in_rate) to bt_buf at the stream rate; the position and its fraction
-// carry across blocks, so the result does not depend on how the render was cut. Equal rates copy, two frames late.
-static int bt_resample(int m, unsigned in_rate, unsigned rate) {
+// The m frames in bt_h into bt_y: through the low-pass (a stream below the input rate), or as they are.
+static void bt_lowpass(int m, int lowpass) {
+    // Kaiser 4.0, cutoff 20.5 kHz at 48 kHz: flat to 18 kHz, -3.4 dB at 20 kHz, -23 dB at 22.05 kHz, -58 dB from 23 kHz.
+    static const float h[BT_TAPS / 2 + 1] = {-0.00026274f, -0.00113703f, 0.00394938f, -0.00782638f, 0.01161028f, -0.01338495f, 0.01083794f,
+                                              -0.00188502f, -0.01460163f, 0.03819024f, -0.06663593f, 0.09611627f, -0.12194986f, 0.13963411f, 0.85469065f};
+    for (int c = 0; c < 2; c++) {
+        float *s = bt_h[c], *y = bt_y[c] + 3;
+        for (int k = 0; k < m; k++) {
+            if (lowpass) {
+                float a = h[BT_TAPS / 2] * s[k + BT_TAPS / 2];
+                for (int j = 0; j < BT_TAPS / 2; j++) a += h[j] * (s[k + j] + s[k + BT_TAPS - 1 - j]);
+                y[k] = a;
+            } else {
+                y[k] = s[k + BT_TAPS - 1];
+            }
+        }
+        for (int i = 0; i < BT_TAPS - 1; i++) s[i] = s[m + i];
+    }
+}
+
+// Catmull-Rom from the m frames in bt_y (at in_rate) to the end of bt_buf at the stream rate; the position and its
+// fraction carry across blocks, so the result does not depend on how the render was cut. Equal rates copy, two frames late.
+static void bt_resample(int m, unsigned in_rate, unsigned rate) {
     int count = 0, ip = bt_ip;
-    unsigned rem = bt_rem % rate;
-    for (; ip < m - 2 && count < BT_BLOCK + BT_BLOCK / 8; count++) {
-        float t = (float)rem / (float)rate;
+    unsigned rem = bt_rem;
+    for (; ip < m - 2 && count < BT_OUT; count++) {
+        float t = (float)rem / (float)rate, w = 1.0f;
+        if (bt_fade) w = 1.0f - (float)bt_fade-- / (float)BT_FADE;
         for (int c = 0; c < 2; c++) {
             const float *y = bt_y[c] + 3 + ip;
-            bt_buf[c][count] = y[0] + 0.5f * t * (y[1] - y[-1] + t * (2 * y[-1] - 5 * y[0] + 4 * y[1] - y[2] + t * (3 * (y[0] - y[1]) + y[2] - y[-1])));
+            float v = y[0] + 0.5f * t * (y[1] - y[-1] + t * (2 * y[-1] - 5 * y[0] + 4 * y[1] - y[2] + t * (3 * (y[0] - y[1]) + y[2] - y[-1])));
+            if (w < 1.0f) v = bt_from[c] + (v - bt_from[c]) * w;
+            bt_buf[c][bt_pend + count] = bt_sat(v);
         }
         rem += in_rate;
         ip += (int)(rem / rate);
@@ -989,14 +1062,46 @@ static int bt_resample(int m, unsigned in_rate, unsigned rate) {
     }
     bt_ip = ip - m < -2 ? -2 : ip - m;
     bt_rem = rem;
-    for (int c = 0; c < 2; c++) memmove(bt_y[c], bt_y[c] + m, 3 * sizeof(float));
-    return count;
+    for (int c = 0; c < 2; c++) {
+        for (int i = 0; i < 3; i++) bt_y[c][i] = bt_y[c][m + i];
+        if (count) bt_last[c] = bt_buf[c][bt_pend + count - 1];
+    }
+    bt_pend += count;
+}
+
+// After the master callback: the pair bt_out= picks, brought to the stream rate and appended to bt_buf.
+static void bt_capture(int channels, float *const *out, int frames) {
+    int pair = __atomic_load_n(&bt_out_pair, __ATOMIC_RELAXED);
+    if (pair < 0 || pair * 2 + 1 >= channels) pair = 0; // a pair this output does not have: the first
+    if (channels < 2 || frames <= 0 || frames > BT_BLOCK || !out[pair * 2] || !out[pair * 2 + 1]) {
+        bt_rate = 0; // a block is missing: start over, with a fade, at the next one
+        return;
+    }
+    unsigned render = __atomic_load_n(&render_rate[channels & 15], __ATOMIC_RELAXED);
+    unsigned rate = __atomic_load_n(&stream_rate, __ATOMIC_RELAXED);
+    if (!rate) rate = 48000;
+    int halve = render >= 88200;
+    unsigned in = !render ? rate : halve ? render / 2 : render;
+    if (bt_pend > BT_OUT) bt_pend = 0; // the sender is not taking them: never grow
+    for (int c = 0; c < 2; c++) {
+        const float *src = out[pair * 2 + c];
+        float *dst = halve ? bt_x[c] + BT_HIST : bt_h[c] + BT_TAPS - 1;
+        for (int i = 0; i < frames; i++) dst[i] = bt_sat(src[i]);
+    }
+    if (pair != bt_pair || in != bt_in || rate != bt_rate) bt_reset(pair, in, rate, halve);
+    int m = halve ? bt_halve(frames) : frames;
+    bt_lowpass(m, in > rate);
+    bt_resample(m, in, rate);
 }
 
 static uint32_t hook_master_output(void *host, void *context, int in_channels, const float *const *in,
                                    int out_channels, float *const *out, int frames) {
     audio_callback_fn orig = (audio_callback_fn)dsp_originals[DSP_MASTER];
     uint32_t rc;
+    unsigned encodes = __atomic_load_n(&bt_encodes, __ATOMIC_RELAXED);
+    bt_idle = encodes != bt_seen ? 0 : bt_idle < BT_IDLE ? bt_idle + 1 : BT_IDLE;
+    bt_seen = encodes;
+    if (bt_idle == BT_IDLE) bt_off();
     if (four_deck_pad_on && out_channels == 4 && out && frames > 0 && frames <= FOUR_DECK_PAD_FRAMES) {
         float *padded[8];
         for (int ch = 0; ch < 8; ch++) padded[ch] = four_deck_pad[ch];
@@ -1051,40 +1156,24 @@ static uint32_t hook_master_output(void *host, void *context, int in_channels, c
     // #50 Live Stream: the first pair as it goes to the DAC; one relaxed load when nobody listens.
     if (out && frames > 0 && out_channels > 0)
         sc_tap_push(&live_tap, out[0], out_channels > 1 ? out[1] : NULL, (uint32_t)frames);
-    // hook_bt_send runs inside the next output callback: it sees the block kept here. Calls
-    // without outputs (a player also makes those) must not drop it.
-    if (out && out_channels > 0) {
-        bt_frames = -1;
-        int pair = __atomic_load_n(&bt_out_pair, __ATOMIC_RELAXED);
-        if (pair >= 0 && pair * 2 + 1 < out_channels && frames > 0 && frames <= BT_BLOCK) {
-            unsigned render = __atomic_load_n(&render_rate[out_channels & 15], __ATOMIC_RELAXED);
-            unsigned rate = __atomic_load_n(&stream_rate, __ATOMIC_RELAXED);
-            if (!rate) rate = 48000;
-            int halve = render >= 88200;
-            for (int c = 0; c < 2; c++) {
-                const float *src = out[pair * 2 + c];
-                float *dst = halve ? bt_x[c] + BT_HIST : bt_y[c] + 3;
-                for (int i = 0; i < frames; i++) dst[i] = src[i] > 1.0f ? 1.0f : src[i] < -1.0f ? -1.0f : src[i];
-            }
-            int m = halve ? bt_halve(frames) : frames;
-            bt_count = bt_resample(m, !render ? rate : halve ? render / 2 : render, rate);
-            bt_frames = frames;
-        }
-    }
+    // hook_bt_send runs inside the next callback and takes this block with the ones waiting. Calls without outputs (a
+    // player also makes those) add nothing and take nothing away.
+    if (out && out_channels > 0 && bt_send_orig && bt_idle < BT_IDLE) bt_capture(out_channels, out, frames);
     return rc;
 }
 
-// BluetoothSignalSender::audio(this, float *const in[2], int frames); it takes at most 512 frames a call.
-static void (*bt_send_orig)(void *, const float *const *, int);
+// BluetoothSignalSender::audio(this, float *const in[2], int frames); it takes at most 512 frames a call. With a speaker
+// listening it gets what the callbacks kept (nothing yet: nothing), otherwise Engine's own feed.
 static void hook_bt_send(void *self, const float *const *in, int frames) {
-    if (bt_frames != frames) {
+    if (bt_idle == BT_IDLE) {
         bt_send_orig(self, in, frames);
         return;
     }
-    for (int i = 0; i < bt_count; i += 512) {
+    for (int i = 0; i < bt_pend; i += 512) {
         const float *pair[2] = {bt_buf[0] + i, bt_buf[1] + i};
-        bt_send_orig(self, pair, bt_count - i < 512 ? bt_count - i : 512);
+        bt_send_orig(self, pair, bt_pend - i < 512 ? bt_pend - i : 512);
     }
+    bt_pend = 0;
 }
 
 static int dsp_buffers_overlap(const float *a, const float *b, uint32_t frames) {

@@ -228,6 +228,7 @@ static void test_image(const char *path, int sclive) {
         for (unsigned i = 0; i < 5; i++) expected[build->config_field[i]] = i == 4 ? 0 : 1;
         if (!strcmp(build->name, "5.3.0")) expected[0x2a7] = 1; // gen1 5.3.0 only: hasStemsProcessorFactoryInstalled
         expected[0x54] = 1;
+        if (build->bt_send) expected[3] = 1; // Config.audio.hasBluetoothOutput: Engine's own A2DP source (5.3.0.5)
         uint32_t zoom = 30; memcpy(expected + build->config_zoom, &zoom, 4);
         if (enabled) expected[0x26] = expected[0x4d1] = 1;
         ((void (*)(void *))(uintptr_t)config_jump[1])(config);

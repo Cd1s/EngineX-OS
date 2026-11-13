@@ -55,6 +55,10 @@ func (s *Server) handleBluetooth(w http.ResponseWriter, r *http.Request) {
 	}
 	s.uiMu.Lock()
 	v := s.loadUI()
+	save := v.BtOut >= len(layers) // a pair this model has no name for (a hand-edited file): the hook would still send it
+	if save {
+		v.BtOut = 0
+	}
 	if req.AssignLayer != nil {
 		i := slices.Index(layers, strings.TrimSpace(*req.AssignLayer))
 		if i < 0 {
@@ -62,7 +66,9 @@ func (s *Server) handleBluetooth(w http.ResponseWriter, r *http.Request) {
 			fail(w, http.StatusBadRequest, errors.New("invalid assignLayer: must be "+strings.Join(layers, ", ")))
 			return
 		}
-		v.BtOut = i
+		v.BtOut, save = i, true
+	}
+	if save {
 		if err := s.saveUI(v); err != nil {
 			s.uiMu.Unlock()
 			fail(w, http.StatusInternalServerError, err)
@@ -70,8 +76,5 @@ func (s *Server) handleBluetooth(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.uiMu.Unlock()
-	if v.BtOut >= len(layers) { // a pair this model has no name for (hand-edited file, or another model's)
-		v.BtOut = 0
-	}
 	respond(w, bluetoothStatus{AssignLayer: layers[v.BtOut], Layers: layers})
 }

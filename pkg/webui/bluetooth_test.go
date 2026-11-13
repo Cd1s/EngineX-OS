@@ -139,17 +139,32 @@ func TestBluetoothRefusesWhatTheModelDoesNotHave(t *testing.T) {
 	}
 }
 
-// The setting is read back only within the pairs an output has; anything else is the first pair.
+// The setting is read back only within the pairs a model offers; anything else is the first pair, in the file the hook
+// reads as well as in the answer: a pair this model has no name for is removed from settings.conf (the hook would send
+// it), and a value the hook cannot use anyway (negative, not a number) never reaches Go.
 func TestBluetoothIgnoresABadSavedPair(t *testing.T) {
 	asDeck(t, "inmusic,jc16") // PRIME 2: two layers
-	for _, saved := range []string{"bt_out=9\n", "bt_out=-1\n", "bt_out=x\n", "bt_out=3\n"} {
+	for _, c := range []struct {
+		saved  string
+		healed bool
+	}{{"bt_out=9\n", false}, {"bt_out=-1\n", false}, {"bt_out=x\n", false}, {"bt_out=3\n", true}, {"bt_out=2\nled_brightness=50\n", true}} {
 		dir := t.TempDir()
-		if err := os.WriteFile(filepath.Join(dir, "settings.conf"), []byte(saved), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, "settings.conf"), []byte(c.saved), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		s := New(Config{UIDir: dir, StateDir: t.TempDir()}, nil)
 		if code, st := bluetoothCall(t, s, "GET", "/v1/sc5000/bluetooth", ""); code != 200 || st.AssignLayer != "Master" {
-			t.Errorf("%q: %d %+v, want Master", saved, code, st)
+			t.Errorf("%q: %d %+v, want Master", c.saved, code, st)
+		}
+		conf := settingsConf(t, dir)
+		if c.healed && strings.Contains(conf, "bt_out") {
+			t.Errorf("%q: the pair this model does not have is still in settings.conf: %q", c.saved, conf)
+		}
+		if c.healed && strings.Contains(c.saved, "led_brightness=50") && !strings.Contains(conf, "led_brightness=50") {
+			t.Errorf("%q: another setting was lost: %q", c.saved, conf)
+		}
+		if !c.healed && conf != c.saved {
+			t.Errorf("%q: a GET changed settings.conf to %q", c.saved, conf)
 		}
 	}
 }

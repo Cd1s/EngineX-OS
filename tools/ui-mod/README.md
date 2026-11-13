@@ -222,24 +222,40 @@ Tests: `test_master_limiter()` in `test_dsp_smooth.c`, and the ARM mock in
 Every 5.3.0 Engine already contains a complete A2DP source: a BluezQt `/MediaEndpoint/Source/Sbc`, an `sbc_encode`
 thread and `BluetoothSignalSender::audio(this, float *const in[2], int frames)`, switched on by
 `Config.audio.hasBluetoothOutput` (`prepare_config` sets it, byte 3 of the audio block) and fed silence (a player
-feeds it its deck 1 pair). We add nothing but a feed. `hook_master_output` keeps the pair `bt_out=<n>` selects
-(outputs `2n`, `2n+1`; default 0; clipped to +-1, because the sender's float to s16 wraps), and `hook_bt_send`
-hands it to the sender in calls of at most 512 frames. The sender is called inside the next master callback, on its
-thread, once per block, so the kept block is one block old and needs no lock. Players also call the master
-callback with 0 channels; those calls must not drop the kept block. Sender entry per build: Gen-1 5.3.0
-`0xf56034`, Gen-2 armhf `0xf629b0`, AZ04 `0x102eb20` (the table's `bt_send`; 5.0.4 has none).
+feeds it its deck 1 pair). We add nothing but a feed. Engine calls the sender inside the master callback, on its
+thread, before the callback's output exists; so `hook_master_output` keeps the pair `bt_out=<n>` selects (outputs
+`2n`, `2n+1`; default 0, which is Master or a player's Layer A, not "off"; a pair the output does not have, or a
+negative one, is pair 0) after the callback, and `hook_bt_send`, in the next callback, takes everything kept and hands
+it to the sender in calls of at most 512 frames. What waits is a FIFO of stream-rate frames, so one block's length need
+not match the next one's, and a block goes once. Calls without outputs (a player makes them too) add and take nothing.
+Sender entry per build: Gen-1 5.3.0 `0xf56034`, Gen-2 armhf `0xf629b0`, AZ04 `0x102eb20` (the table's `bt_send`;
+5.0.4 has none).
+
+Nothing runs unless a speaker listens. The `sbc_encode` interposer counts the encoder's calls; a master callback that
+sees `BT_IDLE` (64) callbacks go by without one treats the speaker as gone: it drops what waits and Engine's own feed
+goes to the sender as it always did. A build without the sender hook never captures.
 
 The sender does not resample and sends the data at the rate it arrives, while the SBC stream has the rate BlueZ
 negotiated with the speaker: Engine picks 44.1 kHz whenever the speaker offers it (48 kHz only if that is all it
 offers), and a Gen-1 player renders at 96 kHz. The hook reads the stream rate from the `sbc_t` Engine passes to
 `sbc_encode` (interposed) and the render rate from `snd_pcm_hw_params` (interposed, keyed by channel count), halves
-a render of 88.2 kHz or more with an 11-tap half-band, and a Catmull-Rom interpolation brings the result to the
-stream rate, the position carried across blocks. Without it a 48 kHz feed on a 44.1 kHz stream runs 8.8 % ahead
-and fills the speaker's buffer.
+a render of 88.2 kHz or more with an 11-tap half-band, runs a 29-tap low-pass (Kaiser 4.0, 20.5 kHz at 48 kHz: flat
+to 18 kHz, -23 dB at 22.05 kHz, -58 dB from 23 kHz) when the stream rate is below that, and a Catmull-Rom interpolation
+brings the result to the stream rate, the position carried across blocks. Without the low-pass a 23 kHz tone came out
+at 21.1 kHz with 27 % of its level from a 48 kHz render and 15 % from 96 kHz; now it is under 0.1 %. Without the
+resampling a 48 kHz feed on a 44.1 kHz stream runs 8.8 % ahead and fills the speaker's buffer.
+
+The sender converts float to s16 with a wrap, and the filters overshoot a full-scale signal (1.08 and 1.15 on a square
+wave): the input is saturated to +-1 (a NaN is silence) and every frame is saturated again as the last step. A new source
+(pair), render rate or stream rate restarts the filters with their history set to the new block's first frame and fades
+the next 128 frames in from the last frame produced, so a switch or a speaker that connects does not click.
 
 Which pair carries what is per model: players pair 0 and 1 are their two decks, a PRIME 4's 10 channels are Main,
 Booth, Headphones (Cue), Zone and a spare, PRIME 2 and Mixstream Pro Main and Headphones; `pkg/webui/bluetooth.go`
-names only these. Tests: `test_bt_out.c` (no Engine needed); sandbox runs with a fake A2DP speaker are in
+names only these and rewrites a saved pair its model has no name for. A single channel of an all-in-one is not on any
+output (the mixer's per-channel buffers are not visible to a hook site): it reaches the speaker through Headphones (Cue).
+Tests: `test_bt_out.c` (no Engine needed; its `clip`, `blocks`, `rate` and `source` tests also build against the first
+version of the feature with `-DBT_OUT_OLD`, where they fail); sandbox runs with a fake A2DP speaker are in
 `docs/REGRESSION-CHECKLIST.md` row 185.
 
 ## ALSA clock and official updater boundary
