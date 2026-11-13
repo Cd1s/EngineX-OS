@@ -5996,5 +5996,31 @@ assert.deepEqual(Array.from(state.scLoggedIn), []);
         self.assertEqual(result.returncode, 0, result.stderr)
 
 
+class SourceScreenBrowseQmlScopeTest(unittest.TestCase):
+    """Review of 085457c (BH2-A6-5): ConnectedSource.qml imports QtQuick, Planck and
+    EngineOS.UI.Style only, so a QObjProperty-typed property (StateMap 1.0) made the whole
+    UI fail to load; and scFooterRepeater is declared inside the footer component, out of
+    reach of ListView-level functions, so the footer is reached through an alias."""
+
+    def test_connected_source_types_and_footer_scope(self):
+        for root in ("Skins/Embedded/", "Skins/EmbeddedCommon/"):
+            with self.subTest(root=root):
+                spec = importlib.util.spec_from_file_location("build_packs_a6", BUILD_PACKS)
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                mod.ROOT = root
+                key = root + "Views/BrowserSource/ConnectedSource.qml"
+                joined = "\n".join(new for _old, new in mod.edits(False)[key])
+                if "import StateMap" not in joined:
+                    self.assertNotIn("QObjProperty", joined)
+                self.assertIn("readonly property var pScSourceIndex:", joined)
+                self.assertIn("readonly property var pScSourceSelect:", joined)
+                self.assertIn("property alias scRepeater: scFooterRepeater", joined)
+                self.assertIn("connectedSource.footerItem.scRepeater.itemAt(e.row)", joined)
+                # The footer's id is used only inside the footer component itself.
+                outside = joined.split("\tfooter: Column {", 1)[0]
+                self.assertNotIn("scFooterRepeater", outside)
+
+
 if __name__ == "__main__":
     unittest.main()

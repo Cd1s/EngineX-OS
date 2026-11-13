@@ -3534,8 +3534,8 @@ SOURCE_FOOTER = """
 	property string scFocusKind: ""
 	property int scFocusRow: -1
 	property string scFocusService: ""
-	readonly property QObjProperty pScSourceIndex: Planck.getProperty("/Qml/ControlFocus/ScSourceIndex")
-	readonly property QObjProperty pScSourceSelect: Planck.getProperty("/Qml/ControlFocus/ScSourceSelect")
+	readonly property var pScSourceIndex: Planck.getProperty("/Qml/ControlFocus/ScSourceIndex")
+	readonly property var pScSourceSelect: Planck.getProperty("/Qml/ControlFocus/ScSourceSelect")
 	function scHiddenSourceName(name) {
 		return ["TIDAL", "Tidal", "SoundCloud", "Beatport", "Beatport LINK"].indexOf(String(name || "")) >= 0
 	}
@@ -3603,7 +3603,7 @@ SOURCE_FOOTER = """
 		scFocusService = e.id
 		scSyncAvailFocus()
 		if (e.kind === "conn") scEnsureVisible(connectedSource.itemAtIndex ? connectedSource.itemAtIndex(e.row) : null)
-		else if (e.kind === "footer") scEnsureVisible(scFooterRepeater.itemAt(e.row))
+		else if (e.kind === "footer") scEnsureVisible(connectedSource.footerItem ? connectedSource.footerItem.scRepeater.itemAt(e.row) : null)
 	}
 	function scActivate() {
 		if (!scFocusKind) scStep(1)
@@ -3666,6 +3666,8 @@ SOURCE_FOOTER = """
 		}
 	}
 	footer: Column {
+		// The repeater lives in the footer component: ListView-level code reaches it through this alias.
+		property alias scRepeater: scFooterRepeater
 		width: connectedSource.width
 		Rectangle {
 			objectName: "EngineX_UsbPreparingRow"
