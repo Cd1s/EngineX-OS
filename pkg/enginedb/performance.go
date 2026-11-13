@@ -320,13 +320,6 @@ func EncodePerformance(t rekordbox.Track, a *rekordbox.Analysis) (Performance, e
 	byTime := func(a, b rekordbox.Cue) int { return cmp.Compare(a.TimeMS, b.TimeMS) }
 	slices.SortStableFunc(memory, byTime)
 	slices.SortStableFunc(memoryLoops, byTime)
-	clampSamplePos := func(v float64) float64 {
-		v = max(0, v)
-		if samples > 0 {
-			v = min(samples, v)
-		}
-		return v
-	}
 	var q bytes.Buffer
 	put(&q, big, uint64(8))
 	writeCue := func(c *rekordbox.Cue) {
@@ -337,7 +330,7 @@ func EncodePerformance(t rekordbox.Track, a *rekordbox.Analysis) (Performance, e
 			return
 		}
 		label(&q, c.Name)
-		put(&q, big, clampSamplePos(float64(c.TimeMS)*float64(sr)/1000-offset))
+		put(&q, big, max(0, float64(c.TimeMS)*float64(sr)/1000-offset))
 		color := cueColor(*c)
 		q.Write(color[:])
 	}
@@ -346,7 +339,7 @@ func EncodePerformance(t rekordbox.Track, a *rekordbox.Analysis) (Performance, e
 	}
 	main := float64(-1)
 	if len(memory) > 0 {
-		main = clampSamplePos(float64(memory[0].TimeMS)*float64(sr)/1000 - offset)
+		main = max(0, float64(memory[0].TimeMS)*float64(sr)/1000-offset)
 	}
 	put(&q, big, main)
 	q.WriteByte(0)
@@ -366,25 +359,12 @@ func EncodePerformance(t rekordbox.Track, a *rekordbox.Analysis) (Performance, e
 			loops.Write(make([]byte, 6))
 			return
 		}
-		start := clampSamplePos(float64(c.TimeMS)*float64(sr)/1000 - offset)
-		end := clampSamplePos(float64(c.EndMS)*float64(sr)/1000 - offset)
-		if c.EndMS > c.TimeMS && end <= start {
-			span := max(1, float64(c.EndMS-c.TimeMS)*float64(sr)/1000)
-			if samples > 0 {
-				end = samples
-				start = max(0, end-min(samples, span))
-			} else {
-				end = start + span
-			}
-		}
-		if end <= start {
-			label(&loops, "")
-			put(&loops, little, float64(-1))
-			put(&loops, little, float64(-1))
-			loops.Write(make([]byte, 6))
-			return
-		}
 		label(&loops, c.Name)
+		start := max(0, float64(c.TimeMS)*float64(sr)/1000-offset)
+		end := max(0, float64(c.EndMS)*float64(sr)/1000-offset)
+		if c.EndMS > c.TimeMS && end <= start {
+			end = min(samples, start+max(1, float64(c.EndMS-c.TimeMS)*float64(sr)/1000))
+		}
 		put(&loops, little, start)
 		put(&loops, little, end)
 		loops.Write([]byte{1, 1})
