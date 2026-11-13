@@ -6232,9 +6232,68 @@ class ThreeBandPaletteTest(unittest.TestCase):
                 ("High", "#0078ff", "#003c80", "#ffffff", "#f0f4ff", "#999999")):
             with self.subTest(band=band):
                 self.assertIn(f'color{band}Color: (root.scWave === "3band" ? "{main}" : Style.waveform{band}Color)', wave)
-                self.assertIn(f'rgbMode ? "{rgb}" : (root.scWave === "3band" ? "{fade}" : Style.waveform{band}FadeColor)', wave)
-                self.assertIn(f'rgbMode ? "{rgb}" : (root.scWave === "3band" ? "{main}" : Style.waveform{band}Color)', overview)
-                self.assertIn(f'elapsed{band}Color: rgbMode ? "{rgb_past}" : (root.scWave === "3band" ? "{past}" : Style.waveform{band}PastColor)', overview)
+                prgb, prgb_past = bp.PRGB_COLORS[band], bp.PRGB_PAST[band]
+                self.assertIn(f'rgbMode ? (root.scWave === "prgb" ? "{prgb}" : "{rgb}") : (root.scWave === "3band" ? "{fade}" : Style.waveform{band}FadeColor)', wave)
+                self.assertIn(f'rgbMode ? (root.scWave === "prgb" ? "{prgb}" : "{rgb}") : (root.scWave === "3band" ? "{main}" : Style.waveform{band}Color)', overview)
+                self.assertIn(f'elapsed{band}Color: rgbMode ? (root.scWave === "prgb" ? "{prgb_past}" : "{rgb_past}") : (root.scWave === "3band" ? "{past}" : Style.waveform{band}PastColor)', overview)
+
+
+class PRGBStyleTest(unittest.TestCase):
+    """PRGB (experiment) is a fourth waveform style: Engine's RGB shader with the colours that
+    bring it closest to rekordbox's RGB waveform. Denon, RGB and 3-Band draw as before."""
+
+    def patches(self):
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            return bp.edits(False)
+        finally:
+            bp.ROOT = old_root
+
+    def test_prgb_is_offered_next_to_the_other_styles(self):
+        self.assertIn('readonly property var ids: ["denon", "rgb", "3band", "prgb"]\n\tvalues: ["Denon", "RGB", "3-Band", "PRGB"]', bp.WAVEFORM_ENTRY)
+        self.assertIn('readonly property var ids: ["denon", "rgb", "3band", "prgb"]', bp.WAVE_TILE)
+        self.assertIn('model: ["DENON", "RGB", "3BAND", "PRGB"]', bp.WAVE_TILE)
+        self.assertIn("width: (scWaveTile.width - 24) / 4", bp.WAVE_TILE)
+        settings = (REPO / "pkg/webui/ui_settings.go").read_text()
+        self.assertIn('uiWaveforms    = []string{"denon", "rgb", "3band", "prgb"}', settings)
+
+    @unittest.skipUnless(shutil.which("node"), "Node evaluates the patched colour bindings")
+    def test_each_style_draws_with_its_own_colours(self):
+        patches = self.patches()
+        common = "Skins/Embedded/Views/Common/"
+        wave = [new for _, new in patches[common + "Waveform/Waveform.qml"]]
+        overview = [new for _, new in patches[common + "WaveformOverview/WaveformOverview.qml"]]
+        cases = {}
+        for band in ("Low", "Mid", "High"):
+            # the binding of the band's colour in the detail view, in the overview, and of its played part
+            cases[band] = [next(n for n in wave if n.startswith("rgbMode ? ") and f"waveform{band}FadeColor" in n),
+                           next(n for n in overview if n.startswith("rgbMode ? ") and f"waveform{band}Color" in n),
+                           next(n for n in overview if n.startswith(f"elapsed{band}Color: ")).split(": ", 1)[1]]
+        script = "const Style = new Proxy({}, {get: (_, k) => 'Style.' + String(k)}); const out = {};\n"
+        script += "for (const [band, exprs] of Object.entries(%s)) for (const [wave, rgbMode] of [['denon', false], ['rgb', true], ['3band', false], ['prgb', true]]) {\n" % json.dumps(cases)
+        script += "  const root = {scWave: wave}; out[band + ' ' + wave] = exprs.map(e => eval(e)) }\nprocess.stdout.write(JSON.stringify(out))"
+        checked = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(checked.returncode, 0, checked.stderr)
+        got = json.loads(checked.stdout)
+        for band, rgb, rgb_past, main, fade, past in (
+                ("Low", "#ff1428", "#7f0a14", "#0055e2", "#0055e2", "#00307f"),
+                ("Mid", "#00e632", "#007319", "#ffa500", "#b46a06", "#996300"),
+                ("High", "#0078ff", "#003c80", "#ffffff", "#f0f4ff", "#999999")):
+            with self.subTest(band=band):
+                self.assertEqual(got[f"{band} denon"], [f"Style.waveform{band}FadeColor", f"Style.waveform{band}Color", f"Style.waveform{band}PastColor"])
+                self.assertEqual(got[f"{band} rgb"], [rgb, rgb, rgb_past])
+                self.assertEqual(got[f"{band} 3band"], [fade, main, past])
+                self.assertEqual(got[f"{band} prgb"], [bp.PRGB_COLORS[band], bp.PRGB_COLORS[band], bp.PRGB_PAST[band]])
+        self.assertEqual(bp.PRGB_COLORS, {"Low": "#ff0000", "Mid": "#00b172", "High": "#0d00bd"})
+
+    def test_prgb_runs_engines_rgb_shader(self):
+        main = SRC
+        self.assertIn('readonly property bool scWaveRgb: scWave === "rgb" || scWave === "prgb"', main)
+        self.assertIn('const rgbShader = v.waveform === "rgb" || v.waveform === "prgb"', main)
+        self.assertIn("p.translator.index = rgbShader ? 1 : 0", main)
+        self.assertIn('if ((id === "rgb" || id === "prgb") && !scWaveRgb) {', main)
+        self.assertIn("owner.waveformStyleProperty.translator.index === 1 : root.scWaveRgb)", main)
 
 
 if __name__ == "__main__":

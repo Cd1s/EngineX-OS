@@ -112,7 +112,7 @@ const defaultUIDir = "/data/enginex/ui"
 
 var (
 	uiLanguages    = []string{"en", "zh-Hans", "zh-Hant"}
-	uiWaveforms    = []string{"denon", "rgb", "3band"}
+	uiWaveforms    = []string{"denon", "rgb", "3band", "prgb"}
 	uiServices     = []string{"tidal", "netease", "spotify", "deezer", "soundcloud", "beatport", "applemusic"}
 	uiQualities    = []string{qualityFLAC, quality320k}
 	uiNeteaseModes = []string{neteaseOfficial, neteaseDeemix}

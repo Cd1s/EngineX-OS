@@ -471,6 +471,8 @@ SERVICES_MAIN = """
 	property string scVersion: ""
 	property string scLang: "@LANG@"
 	property string scWave: "denon"
+	// RGB and PRGB are both drawn by Engine's RGB shader; PRGB hands it rekordbox's look.
+	readonly property bool scWaveRgb: scWave === "rgb" || scWave === "prgb"
 	property string scQuality: "flac"
 	property string scNeteaseMode: "official"
 	property bool scMasterLimiter: false // #58, applied by engine_ui_hook.c
@@ -3167,8 +3169,9 @@ SERVICES_MAIN = """
 			}
 		}
 		const p = Planck.getProperty("/Client/Preferences/Profile/Application/WaveformStyle")
-		if (p.translator && (p.translator.index == 1) !== (v.waveform === "rgb"))
-			p.translator.index = v.waveform === "rgb" ? 1 : 0
+		const rgbShader = v.waveform === "rgb" || v.waveform === "prgb"
+		if (p.translator && (p.translator.index == 1) !== rgbShader)
+			p.translator.index = rgbShader ? 1 : 0
 		if (v && v.timezone && !scIsBadTimeZone(String(v.timezone))) {
 			if (scLastGoodTimeZone === "") scLastGoodTimeZone = String(v.timezone)
 		}
@@ -3269,7 +3272,7 @@ SERVICES_MAIN = """
 	}
 	// Settings and the Control Center selector both switch the palette here.
 	function scSetWave(id) {
-		if (id === "rgb" && scWave !== "rgb") {
+		if ((id === "rgb" || id === "prgb") && !scWaveRgb) {
 			PlanckGUI.views.prompts.post({
 				type: Prompt.Default,
 				title: "RGB Waveform Creation",
@@ -3937,8 +3940,8 @@ import Planck 1.0
 import "Base"
 ListEntry {
 	text: "Waveform Style"
-	readonly property var ids: ["denon", "rgb", "3band"]
-	values: ["Denon", "RGB", "3-Band"]
+	readonly property var ids: ["denon", "rgb", "3band", "prgb"]
+	values: ["Denon", "RGB", "3-Band", "PRGB"]
 	currentValue: values[Math.max(0, ids.indexOf(root.scWave))]
 	onSelected: function(index) { root.scSetWave(ids[index]) }
 }
@@ -4239,13 +4242,13 @@ LANGUAGE_ENTRY = """
 """
 
 # Control Center: the CDJ-3000 "WAVEFORM COLOR" control, in a stock-size tile
-# (#45): a title over three joined segments, each with a colour swatch and a
+# (#45): a title over joined segments, one a style, each with a colour swatch and a
 # name; the selected one is filled cyan. A tap switches at once, no RGB prompt.
 WAVE_TILE = """
 		Rectangle {
 			id: scWaveTile
 			objectName: "ControlCenter_WaveformStyle"
-			readonly property var ids: ["denon", "rgb", "3band"]
+			readonly property var ids: ["denon", "rgb", "3band", "prgb"]
 			readonly property string current: ids.indexOf(root.scWave) >= 0 ? root.scWave : "denon"
 			width: 256
 			height: 104
@@ -4262,13 +4265,13 @@ WAVE_TILE = """
 				x: 12
 				y: 36
 				Repeater {
-					model: ["DENON", "RGB", "3BAND"]
+					model: ["DENON", "RGB", "3BAND", "PRGB"]
 					Rectangle {
 						id: seg
 						readonly property string waveId: scWaveTile.ids[index]
 						readonly property bool selected: scWaveTile.current === waveId
 						objectName: "ControlCenter_WaveformStyle_" + waveId
-						width: (scWaveTile.width - 24) / 3
+						width: (scWaveTile.width - 24) / 4
 						height: 56
 						color: selected ? "#00c3e3" : segTap.pressed ? "#6a6a6a" : "#4a4a4a"
 						border {
@@ -4286,7 +4289,14 @@ WAVE_TILE = """
 								width: 1
 								color: "#202020"
 							}
-							gradient: seg.waveId === "rgb" ? rainbow : null
+							gradient: seg.waveId === "rgb" ? rainbow : seg.waveId === "prgb" ? rekordboxRgb : null
+							Gradient {
+								id: rekordboxRgb
+								orientation: Gradient.Horizontal
+								GradientStop { position: 0.0; color: "#ff0000" }
+								GradientStop { position: 0.5; color: "#ff5ac8" }
+								GradientStop { position: 1.0; color: "#2d28ff" }
+							}
 							Gradient {
 								id: rainbow
 								orientation: Gradient.Horizontal
@@ -4513,6 +4523,13 @@ BAND_PAST = {"Low": "#00307f", "Mid": "#996300", "High": "#999999"}
 # rekordbox's saturated RGB primaries, in place of Engine's muted ones.
 RGB_COLORS = {"Low": "#ff1428", "Mid": "#00e632", "High": "#0078ff"}
 RGB_PAST = {"Low": "#7f0a14", "Mid": "#007319", "High": "#003c80"}
+# PRGB (experiment): the colours with which Engine's RGB shader comes closest to
+# rekordbox's RGB waveform on the same track. Fitted on rekordbox's own analysis of its
+# demo tracks: its three bands (PWV7, what a rekordbox track's overview holds) through
+# Shader/WaveForm/WaveFormFBORGB.ps against its colour waveform (PWV5). Where the lows
+# lead rekordbox draws pure red; RGB's green and light blue made that yellow and cyan.
+PRGB_COLORS = {"Low": "#ff0000", "Mid": "#00b172", "High": "#0d00bd"}
+PRGB_PAST = {"Low": "#7f0000", "Mid": "#005839", "High": "#06005e"}
 
 
 # Vertical stretch of the Half overview strip a shadow deck draws from stream-sync's
@@ -4524,6 +4541,12 @@ OVERVIEW_Y_SCALE_BANDS = 2.2
 
 def three_band(style_name, band, colors=BAND_COLORS):
     return f'(root.scWave === "3band" ? "{colors[band]}" : Style.{style_name})'
+
+
+def rgb_band(band, past=False):
+    """The colour Engine's RGB shader mixes a band in with: RGB's, or PRGB's."""
+    rgb, prgb = (RGB_PAST, PRGB_PAST) if past else (RGB_COLORS, PRGB_COLORS)
+    return f'(root.scWave === "prgb" ? "{prgb[band]}" : "{rgb[band]}")'
 
 
 def v53():
@@ -4712,7 +4735,7 @@ SHADOW_LAYER = r"""
         readonly property int busyState: live && wave ? root.scShadowBusy(sample, meta, detailed) : 0
         // While the detail is still coming, the scrolling lane shows only grid + playhead; a stretched overview there looks like the whole song (user report 11-10).
         readonly property string imageUrl: !meta ? "" : (overview ? meta.overviewUrl || meta.waveformUrl : detailed ? meta.waveformUrl || meta.overviewUrl : meta.detailPending ? "" : meta.overviewUrl || meta.waveformUrl) || ""
-        readonly property bool rgb: graphical && (wave && typeof owner.waveformStyleProperty !== "undefined" && owner.waveformStyleProperty.translator ? owner.waveformStyleProperty.translator.index === 1 : root.scWave === "rgb")
+        readonly property bool rgb: graphical && (wave && typeof owner.waveformStyleProperty !== "undefined" && owner.waveformStyleProperty.translator ? owner.waveformStyleProperty.translator.index === 1 : root.scWaveRgb)
         @PALETTE@
         property string paletteQuery: ""
         property string pastPaletteQuery: ""
@@ -5662,7 +5685,7 @@ def shadow_layer(text: str, kind: str, ring: bool = False) -> str:
     for band, prop in (("Low", "lowColor"), ("Mid", "midColor"), ("High", "highColor")):
         stock = f"waveform{band}{'Fade' if kind == 'waveform' else ''}Color"
         colors = BAND_FADE if kind == "waveform" else BAND_COLORS
-        fallback = f'(rgb ? "{RGB_COLORS[band]}" : {three_band(stock, band, colors)})'
+        fallback = f'(rgb ? {rgb_band(band)} : {three_band(stock, band, colors)})'
         # 3-band lanes take the stock main colours. height*Color is the Fade set there
         # (45-60 % alpha): drawn alone, the whole lane looked greyed out and translucent.
         value = f'(!rgb && typeof owner.color{band}Color !== "undefined" ? owner.color{band}Color : typeof owner.height{band}Color !== "undefined" ? owner.height{band}Color : {fallback})' if kind == "waveform" else fallback
@@ -5768,10 +5791,10 @@ class PatchDict(dict):
 def edits(dev: bool):
     v = ROOT + "Views/"
     prefs = v + "ControlCenter/Tabs/Preferences/"
-    wave = [(f"rgbMode ? Style.waveformRGB{b}Color : Style.waveform{b}FadeColor", f'rgbMode ? "{RGB_COLORS[b]}" : ' + three_band(f"waveform{b}FadeColor", b, BAND_FADE)) for b in BAND_COLORS]
+    wave = [(f"rgbMode ? Style.waveformRGB{b}Color : Style.waveform{b}FadeColor", f"rgbMode ? {rgb_band(b)} : " + three_band(f"waveform{b}FadeColor", b, BAND_FADE)) for b in BAND_COLORS]
     wave += [(f"color{b}Color: Style.waveform{b}Color", f"color{b}Color: {three_band(f'waveform{b}Color', b)}") for b in BAND_COLORS]
-    overview = [(f"rgbMode ? Style.waveformRGB{b}Color : Style.waveform{b}Color", f'rgbMode ? "{RGB_COLORS[b]}" : ' + three_band(f"waveform{b}Color", b)) for b in BAND_COLORS]
-    overview += [(f"elapsed{b}Color: Style.waveform{b}PastColor", f'elapsed{b}Color: rgbMode ? "{RGB_PAST[b]}" : ' + three_band(f"waveform{b}PastColor", b, BAND_PAST)) for b in BAND_COLORS]
+    overview = [(f"rgbMode ? Style.waveformRGB{b}Color : Style.waveform{b}Color", f"rgbMode ? {rgb_band(b)} : " + three_band(f"waveform{b}Color", b)) for b in BAND_COLORS]
+    overview += [(f"elapsed{b}Color: Style.waveform{b}PastColor", f"elapsed{b}Color: rgbMode ? {rgb_band(b, True)} : " + three_band(f"waveform{b}PastColor", b, BAND_PAST)) for b in BAND_COLORS]
     deck_overview = list(overview) + [
         # A shadow deck draws its source's slip line: the source's slip timeline in samples, 0 while slip is not active.
         ("    readonly property bool isSlipModeActive: !isRemoteDeck && pSlipActive && pSlipActive.translator\n        ? pSlipActive.translator.value\n        : false\n",
