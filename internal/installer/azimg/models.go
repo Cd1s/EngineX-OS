@@ -72,9 +72,10 @@ var gen2ByPrefix = map[string]Model{
 	},
 }
 
-// LookupGen1Compatible resolves an AZ01 device-tree compatible string (e.g. "inmusic,jp07").
+// LookupGen1Compatible resolves an exact AZ01 device-tree compatible string (e.g. "inmusic,jp07"),
+// matching az01_packer.py's models_of() exact-key lookup.
 func LookupGen1Compatible(compat string) (Model, bool) {
-	m, ok := gen1ByCompatible[strings.ToLower(strings.TrimSpace(compat))]
+	m, ok := gen1ByCompatible[compat]
 	return m, ok
 }
 

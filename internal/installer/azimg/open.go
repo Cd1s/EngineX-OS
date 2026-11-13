@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sync"
 )
 
 // Image represents an opened and structurally verified EngineX firmware image or bundle.
@@ -23,6 +24,7 @@ type Image struct {
 	headerVersion string
 	headerSHA256  [32]byte
 	hasHeaderSHA  bool
+	bundleMu      sync.Mutex
 	bundle        *Bundle
 }
 

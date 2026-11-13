@@ -480,11 +480,12 @@ func (c *countingSHA1Reader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// preflightXZStream validates the XZ stream header, integrity check type, and LZMA2
-// dictionary/memory limits in block headers before ulikunitz/xz allocates decoder buffers.
-// Necessary because ulikunitz/xz's ReaderConfig.DictCap acts as a floor rather than a cap.
+// preflightXZStream validates the XZ stream header, footer, index, and every block header
+// (including LZMA2 dictionary/memory limits and uncompressed size caps) before ulikunitz/xz
+// allocates decoder buffers. Necessary because ulikunitz/xz's ReaderConfig.DictCap acts as
+// a floor rather than a cap.
 func preflightXZStream(r io.ReaderAt, offset, size int64, limits Limits) error {
-	if size < 24 {
+	if size < 32 {
 		return fmt.Errorf("%w: truncated XZ stream (%d bytes)", ErrCorrupt, size)
 	}
 	var hdr [12]byte
@@ -513,22 +514,104 @@ func preflightXZStream(r io.ReaderAt, offset, size int64, limits Limits) error {
 		return fmt.Errorf("%w: missing or unsupported XZ integrity check id 0x%02x", ErrCorrupt, checkID)
 	}
 
+	// Validate XZ stream footer at the exact end of the PARTL payload (rejects trailing
+	// bytes, concatenated streams, and post-stream zero padding).
+	var ftr [12]byte
+	if _, err := io.ReadFull(io.NewSectionReader(r, offset+size-12, 12), ftr[:]); err != nil {
+		return fmt.Errorf("%w: reading XZ stream footer: %v", ErrCorrupt, err)
+	}
+	if ftr[10] != 'Y' || ftr[11] != 'Z' {
+		return fmt.Errorf("%w: invalid XZ stream footer magic or trailing data", ErrCorrupt)
+	}
+	if crc32.ChecksumIEEE(ftr[4:10]) != binary.LittleEndian.Uint32(ftr[0:4]) {
+		return fmt.Errorf("%w: invalid XZ stream footer CRC32", ErrCorrupt)
+	}
+	if ftr[8] != hdr[6] || ftr[9] != hdr[7] {
+		return fmt.Errorf("%w: XZ stream footer flags mismatch", ErrCorrupt)
+	}
+
+	backwardSize := binary.LittleEndian.Uint32(ftr[4:8])
+	indexSize := (int64(backwardSize) + 1) * 4
+	const maxIndexSize = 4 << 20
+	if indexSize < 8 || indexSize > maxIndexSize || 12+indexSize > size-12 {
+		return fmt.Errorf("%w: invalid XZ index size %d", ErrCorrupt, indexSize)
+	}
+	indexStart := size - 12 - indexSize
+	idx := make([]byte, indexSize)
+	if _, err := io.ReadFull(io.NewSectionReader(r, offset+indexStart, indexSize), idx); err != nil {
+		return fmt.Errorf("%w: reading XZ index: %v", ErrCorrupt, err)
+	}
+	if idx[0] != 0x00 {
+		return fmt.Errorf("%w: invalid XZ index indicator 0x%02x", ErrCorrupt, idx[0])
+	}
+	if crc32.ChecksumIEEE(idx[:indexSize-4]) != binary.LittleEndian.Uint32(idx[indexSize-4:]) {
+		return fmt.Errorf("%w: invalid XZ index CRC32", ErrCorrupt)
+	}
+
+	ip := 1
+	idxBodyEnd := int(indexSize - 4)
+	numRecords, n := readUvarintSlice(idx[ip:idxBodyEnd])
+	if n <= 0 {
+		return fmt.Errorf("%w: invalid XZ index record count", ErrCorrupt)
+	}
+	ip += n
+	const maxPreflightBlocks = 65536
+	if numRecords > maxPreflightBlocks {
+		return fmt.Errorf("%w: XZ block count %d exceeds %d limit", ErrLimitExceeded, numRecords, maxPreflightBlocks)
+	}
+
+	type xzIndexRec struct {
+		unpadded     int64
+		uncompressed uint64
+	}
+	records := make([]xzIndexRec, 0, int(numRecords))
+	var totalUncompressed uint64
+	for i := uint64(0); i < numRecords; i++ {
+		unpadded, n1 := readUvarintSlice(idx[ip:idxBodyEnd])
+		if n1 <= 0 {
+			return fmt.Errorf("%w: invalid XZ index unpadded size", ErrCorrupt)
+		}
+		ip += n1
+		uncomp, n2 := readUvarintSlice(idx[ip:idxBodyEnd])
+		if n2 <= 0 {
+			return fmt.Errorf("%w: invalid XZ index uncompressed size", ErrCorrupt)
+		}
+		ip += n2
+		if unpadded < 8 || unpadded > uint64(indexStart-12) {
+			return fmt.Errorf("%w: XZ index unpadded size %d out of bounds", ErrCorrupt, unpadded)
+		}
+		if uncomp > uint64(limits.MaxRootfsSize) || totalUncompressed > uint64(limits.MaxRootfsSize)-uncomp {
+			return fmt.Errorf("%w: XZ total uncompressed size exceeds %d limit", ErrLimitExceeded, limits.MaxRootfsSize)
+		}
+		totalUncompressed += uncomp
+		records = append(records, xzIndexRec{unpadded: int64(unpadded), uncompressed: uncomp})
+	}
+	padLen := idxBodyEnd - ip
+	if padLen < 0 || padLen > 3 {
+		return fmt.Errorf("%w: invalid XZ index padding length %d", ErrCorrupt, padLen)
+	}
+	for _, b := range idx[ip:idxBodyEnd] {
+		if b != 0 {
+			return fmt.Errorf("%w: nonzero XZ index padding", ErrCorrupt)
+		}
+	}
+
+	// Walk every block using the verified Index offsets so later blocks cannot bypass dictionary caps.
 	pos := int64(12)
-	const maxPreflightBlocks = 4096
-	for block := 0; block < maxPreflightBlocks; block++ {
-		if pos >= size {
-			return fmt.Errorf("%w: truncated XZ stream before index", ErrCorrupt)
+	for _, rec := range records {
+		paddedBlock := ((rec.unpadded + 3) / 4) * 4
+		if paddedBlock > indexStart-pos {
+			return fmt.Errorf("%w: XZ block extends past index start", ErrCorrupt)
 		}
 		var b0 [1]byte
 		if _, err := io.ReadFull(io.NewSectionReader(r, offset+pos, 1), b0[:]); err != nil {
 			return fmt.Errorf("%w: reading XZ block header size: %v", ErrCorrupt, err)
 		}
 		if b0[0] == 0 {
-			// Index indicator reached; all block headers verified.
-			return nil
+			return fmt.Errorf("%w: unexpected index indicator inside XZ block", ErrCorrupt)
 		}
 		bhLen := (int64(b0[0]) + 1) * 4
-		if bhLen < 8 || bhLen > 1024 || pos+bhLen > size {
+		if bhLen < 8 || bhLen > 1024 || bhLen > rec.unpadded {
 			return fmt.Errorf("%w: invalid XZ block header length %d", ErrCorrupt, bhLen)
 		}
 		bh := make([]byte, bhLen)
@@ -544,14 +627,14 @@ func preflightXZStream(r io.ReaderAt, offset, size int64, limits Limits) error {
 		}
 		numFilters := int(flags&0x03) + 1
 		p := 2
-		var compSize uint64
-		hasCompSize := flags&0x40 != 0
-		if hasCompSize {
-			v, n := readUvarintSlice(bh[p : bhLen-4])
+		if flags&0x40 != 0 {
+			compSize, n := readUvarintSlice(bh[p : bhLen-4])
 			if n <= 0 {
 				return fmt.Errorf("%w: invalid XZ block compressed size", ErrCorrupt)
 			}
-			compSize = v
+			if compSize == 0 || compSize > uint64(rec.unpadded-bhLen-checkLen) || uint64(bhLen)+compSize+uint64(checkLen) != uint64(rec.unpadded) {
+				return fmt.Errorf("%w: XZ block compressed size mismatch against index", ErrCorrupt)
+			}
 			p += n
 		}
 		if flags&0x80 != 0 {
@@ -561,6 +644,9 @@ func preflightXZStream(r io.ReaderAt, offset, size int64, limits Limits) error {
 			}
 			if v > uint64(limits.MaxRootfsSize) {
 				return fmt.Errorf("%w: XZ block uncompressed size %d exceeds %d limit", ErrLimitExceeded, v, limits.MaxRootfsSize)
+			}
+			if v != rec.uncompressed {
+				return fmt.Errorf("%w: XZ block uncompressed size mismatch against index", ErrCorrupt)
 			}
 			p += n
 		}
@@ -592,22 +678,12 @@ func preflightXZStream(r io.ReaderAt, offset, size int64, limits Limits) error {
 				}
 			}
 		}
-		if !hasCompSize {
-			// Without explicit compressed size in block header we cannot jump to subsequent blocks;
-			// ulikunitz/xz still validates stream/block CRCs and we verified block 0's dict limit.
-			return nil
-		}
-		if compSize == 0 || compSize > uint64(size-pos-bhLen) {
-			return fmt.Errorf("%w: invalid XZ block compressed span", ErrCorrupt)
-		}
-		paddedComp := ((int64(compSize) + 3) / 4) * 4
-		nextPos := pos + bhLen + paddedComp + checkLen
-		if nextPos > size {
-			return fmt.Errorf("%w: XZ block extends past partition end", ErrCorrupt)
-		}
-		pos = nextPos
+		pos += paddedBlock
 	}
-	return fmt.Errorf("%w: excessive XZ block count", ErrLimitExceeded)
+	if pos != indexStart {
+		return fmt.Errorf("%w: XZ block span (%d) does not match index start (%d)", ErrCorrupt, pos, indexStart)
+	}
+	return nil
 }
 
 func readUvarintSlice(b []byte) (uint64, int) {

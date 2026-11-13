@@ -159,9 +159,14 @@ type AZ01Metadata struct {
 
 // Entry represents a verified, canonically-named regular file entry inside a Gen-2 bundle
 // or its nested UI archive.
+//
+// Open returns an io.ReadCloser that re-hashes the member bytes on the fly against SHA256.
+// Verification happens immediately once Size bytes have been read (so io.ReadFull(..., make([]byte, Size))
+// and io.CopyN(..., Size) return ErrDigestMismatch on that read if the backing ReaderAt was
+// tampered with), as well as on early EOF.
 type Entry struct {
 	Path   string // Canonical image/archive-relative POSIX path (no leading slash).
-	Mode   uint32 // Unix permission bits (e.g. 0755, 0644).
+	Mode   uint32 // Unix permission bits masked to 0o777 (no setuid/setgid/sticky).
 	Size   int64
 	SHA256 [32]byte
 	Open   func() (io.ReadCloser, error)
