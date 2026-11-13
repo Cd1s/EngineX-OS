@@ -3104,10 +3104,12 @@ SERVICES_MAIN = """
 		running: root.scBroadcastOn
 		onTriggered: root.scSyncBroadcastMeta()
 	}
-	// Only a rekordbox USB export's quick-imported overview is low and needs the
-	// stretch. Its audio sits under the export's Contents folder; streams, Stream
-	// downloads and Engine Library music never do, so they keep stock height.
-	function scOverviewScale(track, rgb) {
+	// Only Praline / Half needs a bottom-anchored stretch for rekordbox Contents/
+	// exports: its shaders attenuate amplitude by 0.30/0.40/0.625. Butterfly / Full
+	// omits that attenuation and mirrors around 0.5, so keep unit scale to avoid
+	// clipping either peak in stacked lanes, matching scOverviewStrip.yStretch.
+	function scOverviewScale(track, rgb, half) {
+		if (half === false) return 1
 		const path = track && track.path ? String(track.path) : ""
 		if (!/(^|\\/)Contents\\//.test(path)) return 1
 		return rgb ? @RGB_SCALE@ : @BANDS_SCALE@
@@ -5411,12 +5413,12 @@ def edits(dev: bool):
     wave += [(f"color{b}Color: Style.waveform{b}Color", f"color{b}Color: {three_band(f'waveform{b}Color', b)}") for b in BAND_COLORS]
     overview = [(f"rgbMode ? Style.waveformRGB{b}Color : Style.waveform{b}Color", f'rgbMode ? "{RGB_COLORS[b]}" : ' + three_band(f"waveform{b}Color", b)) for b in BAND_COLORS]
     overview += [(f"elapsed{b}Color: Style.waveform{b}PastColor", f'elapsed{b}Color: rgbMode ? "{RGB_PAST[b]}" : ' + three_band(f"waveform{b}PastColor", b, BAND_PAST)) for b in BAND_COLORS]
-    # Deck overview: drop the 7 px gap under the waveform so it uses the full bar,
-    # and stretch the amplitude of tracks quick-imported from a rekordbox USB, whose
-    # converted overview looks flat in the strip (scOverviewScale). The default style
-    # (Praline) grows up from the bottom edge, so scale from there; only y changes,
-    # so needle drop and markers keep their x. The container clips what the
-    # stretch pushes past the top. transform must sit outside the anchors group.
+    # Deck overview: drop the 7 px gap so the waveform uses the full bar. Only
+    # Praline / Half quick-imported rekordbox overviews need a bottom-anchored
+    # stretch; Butterfly / Full already spans the bar and stays at unit scale
+    # about its midpoint, including reduced-height stacked lanes (#233). Only y
+    # changes, preserving needle drop and markers' x. The container clips Half's
+    # stretched peaks. Keep the transform outside the anchors group.
     deck_overview = list(overview) + [
         # A shadow deck draws its source's slip line: the source's slip timeline in samples, 0 while slip is not active.
         ("    readonly property bool isSlipModeActive: !isRemoteDeck && pSlipActive && pSlipActive.translator\n        ? pSlipActive.translator.value\n        : false\n",
@@ -5428,7 +5430,7 @@ def edits(dev: bool):
         ("		objectName: \"Deck_WaveformOverview_ViewContainer\"\n",
          "		objectName: \"Deck_WaveformOverview_ViewContainer\"\n		clip: true\n"),
         ("			visible: waveformOverview.songLoaded && !waveformOverview.isRemoteDeck\n",
-         "			transform: Scale { origin.y: overview.height; yScale: root.scOverviewScale(overview.trackData, overview.rgbMode) }\n"
+         "			transform: Scale { origin.y: overview.displayType === WaveformOverviewView.Butterfly ? overview.height / 2 : overview.height; yScale: root.scOverviewScale(overview.trackData, overview.rgbMode, overview.displayType !== WaveformOverviewView.Butterfly) }\n"
          "			visible: waveformOverview.songLoaded && !waveformOverview.isRemoteDeck\n"),
     ]
     main = DEV_HARNESS if dev else ""

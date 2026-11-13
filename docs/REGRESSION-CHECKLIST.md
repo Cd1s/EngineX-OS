@@ -6,7 +6,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 
 ---
 
-## Regression Table (145 Rows)
+## Regression Table (146 Rows)
 
 | # | Behaviour that must keep working | Issue / commit that fixed it | How it is checked (automated test name, or exact real-deck / sandbox step) | Release gate / deck acceptance / recording coverage |
 | --- | --- | --- | --- | --- |
@@ -155,6 +155,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 | 143 | **Rekordbox 6/7 `OneLibraryAdapter.Read` filters soft-deleted rows (`rb_local_deleted != 0`) across tracks, playlists, playlist entries, and cues (`BH2-A4-6`)** | `BH2-A4-6` | `pkg/rekordbox::TestOneLibrarySkipsSoftDeletedRekordboxRows` | Release workflow Step 2 (`go test -race ./pkg/rekordbox/...`) |
 | 144 | **Beatport HLS AAC remuxer (`aacWriter.finish`) writes `0` instead of overflowing `uint32(m.rate)<<16` in `mp4a` for `> 65535 Hz` (`88.2` / `96 kHz`) streams while preserving `mdhd` and `esds` rates (`BH2-A8-21`)** | `BH2-A8-21` | `pkg/providers::TestBeatportAACWriter96kHzDoesNotOverflowMP4ABox` | Release workflow Step 2 (`go test -race ./pkg/providers/...`) |
 | 145 | **`providers.collectPages` rejects non-positive `size <= 0` without divide-by-zero panic (`BH2-A8-22`)** | `BH2-A8-22` | `pkg/providers::TestCollectPagesZeroPageSizeDoesNotPanic` | Release workflow Step 2 (`go test -race ./pkg/providers/...`) |
+| 146 | **Full / Butterfly overview peaks never clip in reduced-height dual-layer stacked lanes** (#233 Part 1): SC6000 `JP13`, SC5000 `JP07`, and all `5.0.4` / `5.3.0` players and consoles keep `yScale = 1` centered at `overview.height / 2`; Half / Praline retains the `1.3x` RGB / `2.2x` Denon and 3-Band bottom-anchored stretch for Rekordbox `Contents/` exports; single-layer non-Rekordbox views keep stock amplitude | `#233` (Part 1) | `tools/az01-packer/test_ui_mod.py::OverviewFullButterflyScaleTest` (patch expressions and both versions' three-language packs, lane heights 86 / 46 / 44 / 30); `JP13` offscreen sandbox check: Layer B on/off, Half / Full, live Scale geometry on native 48 px stacked nodes and an 88 px stock-component fixture | Dual-layer stacked overview / SC6000 `JP13` offscreen sandbox |
 
 ---
 
