@@ -49,13 +49,13 @@ func buildValidGPTDisk(totalSectors uint64, specs []gptPartSpec) []byte {
 	copy(hdr[0:8], rockchip.GPTSignature)
 	binary.LittleEndian.PutUint32(hdr[8:12], rockchip.GPTRevision1)
 	binary.LittleEndian.PutUint32(hdr[12:16], 92)
-	binary.LittleEndian.PutUint64(hdr[24:32], 1)                 // MyLBA
-	binary.LittleEndian.PutUint64(hdr[32:40], totalSectors-1)    // AlternateLBA
-	binary.LittleEndian.PutUint64(hdr[40:48], 34)                // FirstUsableLBA
-	binary.LittleEndian.PutUint64(hdr[48:56], totalSectors-34)   // LastUsableLBA
-	binary.LittleEndian.PutUint64(hdr[72:80], 2)                 // PartitionEntryLBA
-	binary.LittleEndian.PutUint32(hdr[80:84], numEntries)        // NumberOfPartitionEntries
-	binary.LittleEndian.PutUint32(hdr[84:88], entrySize)         // SizeOfPartitionEntry
+	binary.LittleEndian.PutUint64(hdr[24:32], 1)               // MyLBA
+	binary.LittleEndian.PutUint64(hdr[32:40], totalSectors-1)  // AlternateLBA
+	binary.LittleEndian.PutUint64(hdr[40:48], 34)              // FirstUsableLBA
+	binary.LittleEndian.PutUint64(hdr[48:56], totalSectors-34) // LastUsableLBA
+	binary.LittleEndian.PutUint64(hdr[72:80], 2)               // PartitionEntryLBA
+	binary.LittleEndian.PutUint32(hdr[80:84], numEntries)      // NumberOfPartitionEntries
+	binary.LittleEndian.PutUint32(hdr[84:88], entrySize)       // SizeOfPartitionEntry
 	entryCRC := crc32.ChecksumIEEE(entryBytes)
 	binary.LittleEndian.PutUint32(hdr[88:92], entryCRC)
 	hdrCRC := crc32.ChecksumIEEE(hdr[:92])
