@@ -5,10 +5,13 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"github.com/Cd1s/EngineX-OS/internal/testaudio"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -68,9 +71,9 @@ func (m *mockSamplerRunner) Run(ctx context.Context, name string, args ...string
 		outPath := args[len(args)-1]
 		if strings.HasSuffix(outPath, ".wav") {
 			_ = os.MkdirAll(filepath.Dir(outPath), 0o755)
-			hdr := make([]byte, 44)
+			hdr := make([]byte, 44+44100*4)
 			copy(hdr[0:4], "RIFF")
-			binary.LittleEndian.PutUint32(hdr[4:8], 36)
+			binary.LittleEndian.PutUint32(hdr[4:8], 36+44100*4)
 			copy(hdr[8:12], "WAVE")
 			copy(hdr[12:16], "fmt ")
 			binary.LittleEndian.PutUint32(hdr[16:20], 16)
@@ -81,6 +84,7 @@ func (m *mockSamplerRunner) Run(ctx context.Context, name string, args ...string
 			binary.LittleEndian.PutUint16(hdr[32:34], 4)
 			binary.LittleEndian.PutUint16(hdr[34:36], 16)
 			copy(hdr[36:40], "data")
+			binary.LittleEndian.PutUint32(hdr[40:44], 44100*4)
 			_ = os.WriteFile(outPath, hdr, 0o644)
 		}
 	}
@@ -275,5 +279,94 @@ func TestLoopToSamplerPadFFmpegFallback(t *testing.T) {
 	cmd := mockRunner.commands[0]
 	if cmd[0] != "ffmpeg" {
 		t.Fatalf("expected ffmpeg command, got: %s", cmd[0])
+	}
+	if !strings.Contains(strings.Join(cmd, " "), "aresample=44100,atrim=start_sample=44100:end_sample=88200,asetpts=PTS-STARTPTS") {
+		t.Fatalf("sample bounds missing: %v", cmd)
+	}
+}
+
+func TestSamplerSparseWAVAndCancellation(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "large.wav")
+	createSyntheticWav(t, source, 44100, 1)
+	f, err := os.OpenFile(source, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const size = 64 << 20
+	var header [4]byte
+	binary.LittleEndian.PutUint32(header[:], size)
+	if _, err = f.WriteAt(header[:], 40); err != nil {
+		t.Fatal(err)
+	}
+	if err = f.Truncate(44 + size); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	s := New(Config{StateDir: t.TempDir(), UIDir: t.TempDir()}, nil)
+	out := filepath.Join(t.TempDir(), "slice.wav")
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	err = s.sliceLoop(context.Background(), source, out, 100, 102, 44100)
+	runtime.ReadMemStats(&after)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := after.TotalAlloc - before.TotalAlloc; n > 8<<20 {
+		t.Fatalf("tiny slice allocated %d bytes", n)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err = s.sliceLoop(ctx, source, out, 100, 102, 44100); err != context.Canceled {
+		t.Fatalf("cancellation: %v", err)
+	}
+}
+
+func TestSamplerFLACWithoutFFmpeg(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	source := filepath.Join(t.TempDir(), "source.flac")
+	var encoded bytes.Buffer
+	samples := []int32{1, 2, 3, 4, 5, 6}
+	if err := testaudio.FLAC(&encoded, samples); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, encoded.Bytes(), 0600); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(t.TempDir(), "slice.wav")
+	s := New(Config{StateDir: t.TempDir(), UIDir: t.TempDir()}, nil)
+	if err := s.sliceLoop(context.Background(), source, out, 1, 4, testaudio.Rate); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(out)
+	if err != nil || len(b) != 50 || !bytes.Equal(b[44:], []byte{2, 0, 3, 0, 4, 0}) {
+		t.Fatalf("slice %x: %v", b, err)
+	}
+	if err := s.sliceLoop(context.Background(), source, out, 1, 100, testaudio.Rate); err == nil {
+		t.Fatal("past EOF accepted")
+	}
+	SetSamplerRunner(func(context.Context, string, ...string) ([]byte, error) { return nil, exec.ErrNotFound })
+	defer SetSamplerRunner(nil)
+	if err := os.WriteFile(source, []byte("fLaC corrupt"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.sliceLoop(context.Background(), source, out, 1, 4, testaudio.Rate); err == nil {
+		t.Fatal("corrupt FLAC accepted")
+	}
+}
+
+func TestSamplerRejectsIncompleteToolOutput(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "audio.mp3")
+	if err := os.WriteFile(source, []byte("test input for mocked ffmpeg"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	SetSamplerRunner(func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		createSyntheticWav(t, args[len(args)-1], 44100, 1)
+		return nil, nil
+	})
+	defer SetSamplerRunner(nil)
+	s := New(Config{StateDir: t.TempDir(), UIDir: t.TempDir()}, nil)
+	out := filepath.Join(t.TempDir(), "slice.wav")
+	if err := s.sliceLoop(context.Background(), source, out, 0, 100, 44100); err == nil {
+		t.Fatal("incomplete tool output reported as success")
 	}
 }

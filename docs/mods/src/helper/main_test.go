@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Cd1s/EngineX-OS/docs/mods/src/modkit"
 )
@@ -21,6 +22,8 @@ func (s *stub) Status() (any, error) { return map[string]any{"ok": true}, nil }
 func (s *stub) Action(req map[string]any) (any, error) {
 	s.last = req
 	switch req["action"] {
+	case "slow":
+		time.Sleep(3200 * time.Millisecond)
 	case "bad":
 		return nil, modkit.Bad("nope")
 	case "boom":
@@ -136,5 +139,14 @@ func TestEveryModHasAFeature(t *testing.T) {
 		if features[mod] == nil {
 			t.Errorf("%s has no feature", mod)
 		}
+	}
+}
+
+func TestSlowActionResponse(t *testing.T) {
+	body := `{"action":"slow"}`
+	raw := "POST /action HTTP/1.1\r\nHost: 127.0.0.1:17834\r\nContent-Type: application/json\r\nContent-Length: " + strconv.Itoa(len(body)) + "\r\n\r\n" + body
+	code, response := roundTrip(t, handler{port: 17834, feature: &stub{}}, raw)
+	if code != 200 || !strings.Contains(response, `"done":true`) {
+		t.Fatalf("%d: %s", code, response)
 	}
 }

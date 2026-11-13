@@ -228,6 +228,9 @@ type handler struct {
 var statusText = map[int]string{200: "OK", 400: "Bad Request", 403: "Forbidden", 404: "Not Found", 500: "Internal Server Error", 501: "Not Implemented"}
 
 func reply(w io.Writer, code int, value any) {
+	if conn, ok := w.(net.Conn); ok {
+		_ = conn.SetWriteDeadline(time.Now().Add(3 * time.Second))
+	}
 	blob, err := json.Marshal(value)
 	if err != nil {
 		code, blob = 500, []byte(`{"error":"unencodable status"}`)
@@ -251,7 +254,7 @@ func (h handler) allowed(hdr textproto.MIMEHeader) bool {
 
 func (h handler) handle(conn net.Conn) {
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
 	r := bufio.NewReader(conn)
 	tp := textproto.NewReader(r)
 	line, err := tp.ReadLine()
