@@ -68,7 +68,7 @@ are rejected. Stop output before changing routes or patch.
 Circle, 8-Figure and Pan-Tilt Sweep move `speed` beats per cycle (default 4).
 With `followDeck` enabled (default `true`), the helper automatically obtains the
 MASTER deck's beat phase (`BeatNumber`), played tempo (`CurrentBPM`), and play
-state from `stream-sync` on `http://127.0.0.1:8080/v1/sc5000/clock` (no deck
+state from `stream-sync` on `http://127.0.0.1:8080/v1/enginex/clock` (no deck
 Mod panel is required; overrides via `ENGINEX_WEBUI_URL` for tests). It selects
 in priority order:
 
@@ -85,9 +85,9 @@ held with advancing `TrackPosition` counts as playing. The beat clock is kept
 strictly in memory and **never writes `show.json`** while running. Note that Pro
 DJ Link CDJ beat phase is approximate (`BeatInBar` + `PlayPositionMS` modulo beat
 duration, without beatgrid offset/pitch adjustment). On older `5.3.0.4` hosts
-without `/v1/sc5000/clock`, the helper caches absence and falls back at 2–4 Hz to
+without `/v1/enginex/clock`, the helper caches absence and falls back at 2–4 Hz to
 `/peer/decks` (requires 4-Deck Waveform and reflects the last posted beat
-snapshot) plus `/v1/sc5000/prolink`.
+snapshot) plus `/v1/enginex/prolink`.
 
 Optional **phrase awareness** (`phraseBeats`, 0–256, default `0` = off; optional
 `phraseScenes` array of scene overrides or built-in 4-color palette rotation)

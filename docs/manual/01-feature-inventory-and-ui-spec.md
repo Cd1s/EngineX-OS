@@ -14,9 +14,9 @@
 
 | 任务原文 | 仓库实际 |
 |---|---|
-| Web 控制台地址 `http://<碟机IP>:8080/ui` | 地址是 **`http://<碟机IP>:8080/`**（`pkg/webui/server.go` 的 `GET /`）。`/v1/sc5000/ui` 是碟机本机调用的设置接口，不是网页 |
+| Web 控制台地址 `http://<碟机IP>:8080/ui` | 地址是 **`http://<碟机IP>:8080/`**（`pkg/webui/server.go` 的 `GET /`）。`/v1/enginex/ui` 是碟机本机调用的设置接口，不是网页 |
 | Web 入口代码在 `pkg/webui/ui_page.go` | 没有这个文件。页面是 **`pkg/webui/index.html`**（嵌入二进制），登录页是 `server.go` 里的 `consoleLoginPage` |
-| Web 控制台有"一键在线 OTA 更新"和"日志诊断" | **一键在线 OTA 执行只在碟机屏幕上**（设置 → 关于 / 更新，走本机回环接口 `/v1/sc5000/update?apply=1`；控制台 `/api/update` 仅只读查询）。**日志诊断已在 5.3.0.4 提供**：控制台提供 `详细日志（Verbose logging）` 开关、自动脱敏的 `下载日志`（`/api/logs` → `enginex-logs.txt`）与启动异常报告下载（`/api/boot-report`） |
+| Web 控制台有"一键在线 OTA 更新"和"日志诊断" | **一键在线 OTA 执行只在碟机屏幕上**（设置 → 关于 / 更新，走本机回环接口 `/v1/enginex/update?apply=1`；控制台 `/api/update` 仅只读查询）。**日志诊断已在 5.3.0.4 提供**：控制台提供 `详细日志（Verbose logging）` 开关、自动脱敏的 `下载日志`（`/api/logs` → `enginex-logs.txt`）与启动异常报告下载（`/api/boot-report`） |
 
 ## 1. 支持的 16 款机型
 
@@ -86,7 +86,7 @@
 
 ### 2.2 各菜单页 EngineX 条目明细（5.3.0.4）
 
-`<DATA>/ui/settings.conf` 简称 conf。接口 `POST /v1/sc5000/ui?<参数>`（别名 `/v1/enginex/ui`）仅接受本机回环调用，Web 控制台用 `POST /api/ui`，参数相同。默认值是"conf 里没有这个键"时的取值。
+`<DATA>/ui/settings.conf` 简称 conf。接口 `POST /v1/enginex/ui?<参数>`（别名 `/v1/sc5000/ui`）仅接受本机回环调用，Web 控制台用 `POST /api/ui`，参数相同。默认值是"conf 里没有这个键"时的取值。
 
 | # | 所属菜单页 | 英文 / 简中 / 繁中 | 作用 | 默认 | 接口参数 | conf 键 | 备注 |
 |---|---|---|---|---|---|---|---|
@@ -180,7 +180,7 @@
 
 - 未登录显示登录页（标题 "Stream Sync"，按浏览器语言显示 英 / 简 / 繁）。访问码保存在 `<DATA>/state/access-token`（0600），**碟机屏幕 设置 → 关于 能看到**；删掉文件再重启即换新码。
 - `POST /login` 校验后下发 Cookie `stream_sync`（HttpOnly、SameSite=Strict）；`/api/*` 另接受 `Authorization: Bearer`。写请求要求同源。
-- `/v1/sc5000/*`（别名 `/v1/enginex/*`）和 TIDAL 网关只接受本机 `127.0.0.1`，同网的人调不了。
+- `/v1/enginex/*`（别名 `/v1/sc5000/*`）和 TIDAL 网关只接受本机 `127.0.0.1`，同网的人调不了。
 - 流媒体手机页 `/m/<服务>` 用一次性令牌，不是 Cookie，不能进控制台。
 
 ### 3.2 页面模块逐个清点（`index.html`，三语切换在右上角 EN / 简体中文 / 繁體中文）
@@ -220,17 +220,17 @@
 
 | 能力 | 载体 | 说明 |
 |---|---|---|
-| 五合一静态二进制 | `enginex-suite`（兼容旧名 `sc5000-suite`，多入口：`rb-bridge`、`stream-sync`、`engine-guardian`、`stems-processor`、`sc5000-deemixd`） | 为塞进固定几何的 5.0.4 rootfs，`sc5000-suite-exec` 首次从 `.xz` 解到 `<DATA>/bin`，按内容哈希刷新 |
+| 五合一静态二进制 | `enginex-suite`（兼容旧名 `sc5000-suite`，多入口：`rb-bridge`、`stream-sync`、`engine-guardian`、`stems-processor`、`enginex-deemixd`） | 为塞进固定几何的 5.0.4 rootfs，`enginex-suite-exec` 首次从 `.xz` 解到 `<DATA>/bin`，按内容哈希刷新 |
 | `stream-sync` | `stream-sync.service`，`:8080`，CPU3 | Web 控制台、流媒体网关（假装 TIDAL 的本机网关，`/au/oauth2/*`、`/v1/*`）、下载 / 分析队列、OTA、设置接口、影子轨道、Wi-Fi 传歌、重定位 |
-| `sc5000-deemixd` | `127.0.0.1:6595` | Deezer 直连下载队列（无损 FLAC / 320k），Deezer 曲目和网易云「Deemix 优先」通道使用；Spotify 走原生直连，不经过它 |
+| `enginex-deemixd` | `127.0.0.1:6595` | Deezer 直连下载队列（无损 FLAC / 320k），Deezer 曲目和网易云「Deemix 优先」通道使用；Spotify 走原生直连，不经过它 |
 | `rb-bridge` | 挂载钩子 + `rb-bridge.service --prolink` | 挂载时 2 秒内转换 Rekordbox 导出（歌单、Hot Cue、Memory Cue、Loop、拍线）；`--prolink` 只收 Pro DJ Link，不写库；`--watch` 已退役（立即退出） |
 | `engine-guardian` | 挂载钩子 `--heal-mount --data-only` | 修复异常拔盘损坏的库数据；`--watch` 已退役，服务不启用 |
-| `engine-ui-guard` | `engine.service` 的 pre / post / stop | 连续 3 次 15 s 内崩溃进安全模式；补写 TIDAL 账号条目（避免 5.3.0 的 "Connect to your Engine DJ Profile" 弹窗）；4 碟布局的手柄分配改写与角色解析；每次 Engine 启动后重跑 `sc5000-perf-tune`；退出原因为 Analytics 变更或出厂重置失败时拉起 Engine |
-| `sc5000-debloat` | `engine.service` ExecStartPre + 开机 | 有线网口 100 → 1000 Mbps、IRQ 亲和、关闭自动擦除、遥测屏蔽、修脚本 |
-| `sc5000-perf-tune` | 开机 + 每次 Engine 启动后 | CPU 1.2 GHz 起 ondemand、GPU 降频、sysctl、I/O 调度、U 盘 SD 预读 1 MiB；IRQ / 音频线程固定 CPU0，UI 在 CPU1-2，后台在 CPU3 |
-| 存储 | `edisksd` 钩子 + `sc5000-storage@.service`、`sc5000-storage-discover` | exFAT / NTFS（内核自带）、HFS+（只读，只读盘上叠可写 overlay `Engine Library`）；HFS+ 绝不可写（内核 BUG 会重启并损坏盘）；去掉"未安全弹出"弹窗 |
+| `engine-ui-guard` | `engine.service` 的 pre / post / stop | 连续 3 次 15 s 内崩溃进安全模式；补写 TIDAL 账号条目（避免 5.3.0 的 "Connect to your Engine DJ Profile" 弹窗）；4 碟布局的手柄分配改写与角色解析；每次 Engine 启动后重跑 `enginex-perf-tune`；退出原因为 Analytics 变更或出厂重置失败时拉起 Engine |
+| `enginex-debloat` | `engine.service` ExecStartPre + 开机 | 有线网口 100 → 1000 Mbps、IRQ 亲和、关闭自动擦除、遥测屏蔽、修脚本 |
+| `enginex-perf-tune` | 开机 + 每次 Engine 启动后 | CPU 1.2 GHz 起 ondemand、GPU 降频、sysctl、I/O 调度、U 盘 SD 预读 1 MiB；IRQ / 音频线程固定 CPU0，UI 在 CPU1-2，后台在 CPU3 |
+| 存储 | `edisksd` 钩子 + `enginex-storage@.service`、`enginex-storage-discover` | exFAT / NTFS（内核自带）、HFS+（只读，只读盘上叠可写 overlay `Engine Library`）；HFS+ 绝不可写（内核 BUG 会重启并损坏盘）；去掉"未安全弹出"弹窗 |
 | SSH / SFTP | `sshd` drop-in，后台 slice | 没有默认密码，密码登录关闭，公开固件不带公钥；公钥放 `<DATA>/authorized_keys` |
-| 资源隔离 | `resourceguard`、`sc5000-background.slice` | 后台工作 SCHED_IDLE + nice 19 + 空闲 I/O，不碰音频核 |
+| 资源隔离 | `resourceguard`、`enginex-background.slice` | 后台工作 SCHED_IDLE + nice 19 + 空闲 I/O，不碰音频核 |
 
 ### 4.2 Engine 内存钩子（`libengine-ui-hook.so`，`LD_PRELOAD`）
 
@@ -257,7 +257,7 @@
 | Pro DJ Link 读 CDJ | `prolink_share=1` 后读局域网 CDJ 的 rekordbox 库（NFS 只读）；3-Band 波形、60 fps 播放头 |
 | Pro DJ Link 共享给 CDJ | `prolink_export=1`，实验功能；没有 rekordbox U 盘时保持 ON 等待，插盘后自动启动（`retryExport` 每 10 s） |
 | Master 交接 | 与 CDJ 之间始终只有一个 Master，双向交接；本机当 Master 时发 BPM 和拍点供 CDJ BEAT SYNC |
-| 双机 4 轨与影子轨道 | 两台 SC5000/SC6000 或一台 + 一台 CDJ 同局域网；每台负责自己的两轨，另一台的曲目、播放 / CUE、位置、速度、Master、同步、Hot Cue 在本机以静音影子轨道跟随；延迟见 `sc5000-shadow-decks` 记录 |
+| 双机 4 轨与影子轨道 | 两台 SC5000/SC6000 或一台 + 一台 CDJ 同局域网；每台负责自己的两轨，另一台的曲目、播放 / CUE、位置、速度、Master、同步、Hot Cue 在本机以静音影子轨道跟随；延迟见 `enginex-shadow-decks` 记录 |
 | Stems | 三级：云中继 → 局域网电脑（`enginex-stemsd`，UDP 17891 自动发现，`tools/stems/run-home-worker.*`）→ 碟机本机分轨（比播放快 1.4 倍）；碟机上 `stems-processor` 代替原厂子进程 |
 | 流媒体网关 | 本机伪装 TIDAL，覆盖网易云、Spotify、Deezer、SoundCloud、Beatport、Apple Music；Apple Music 由 Engine 5.3.0 自带音源播放（EngineX 只负责解锁），网关不再匹配 Deezer 或网易云；Beatport 按订阅档位取 FLAC / 256k AAC / 128k AAC；播放过的曲目缓存在 `/data`，再次加载免下载 |
 | 登录中继 | `enginex-relay`（可选自建）：让手机走移动数据登录，Deezer 网页内登录，Stems 公网入口 |
@@ -266,7 +266,7 @@
 | 在线升级 | 一代机下载 `*-Update.img`，校验 AZ01 头尾，调用原厂 `az01-update --net`；二代机下载带 128 字节 `ENGINEX_DATA_BUNDLE_IMG_V1` 头的 `*-Update.img`（未挂载预加载更新器链路或无 `planck-remote-screen` 的 AZ04 机型由 Go 校验载荷 SHA-256 与 `SHA256SUMS` 后就地替换 `<DATA>`，64 MiB 下载上限、128 MiB 解包上限、只接受普通文件） |
 | 发版门禁 | `release-gate.sh`（上一版在线升级 → 新版开机全功能验收），不属于运行时功能 |
 
-APFS 备注：不支持。固件只加载 `hfsplus` 和 `overlay`（`rootfs-overlay/etc/modules-load.d/sc5000-filesystems.conf`），`kernel-modules/` 里构建的 `apfs.ko` 没有装进镜像；README、官网和用户手册都写明不支持 `APFS`，请用 `exFAT` 或 `Mac OS 扩展`。
+APFS 备注：不支持。固件只加载 `hfsplus` 和 `overlay`（`rootfs-overlay/etc/modules-load.d/enginex-filesystems.conf`），`kernel-modules/` 里构建的 `apfs.ko` 没有装进镜像；README、官网和用户手册都写明不支持 `APFS`，请用 `exFAT` 或 `Mac OS 扩展`。
 
 ### 4.4 辅助工具（不进固件）
 
@@ -332,7 +332,7 @@ EngineX Soft Limiter (0 dBFS)	EngineX 防破音软限幅	EngineX 防破音軟限
 ### 6.2 `tools/ui-mod/build_packs.py`
 
 - `EXTRA_DEVICE_ENTRIES`：`text: "4-Deck Waveform"` → `"4-Deck Layout"`。
-- `Live Stream` 条目加 `enabled: root.scBroadcastConfigured`（需要在 `/v1/sc5000/ui` 响应里补一个只读 `broadcastConfigured`，由 `broadcast-config.json` 是否有 URL 决定），并在未配置时用 `root.scT("Set up in the web console first")` 作副标题。
+- `Live Stream` 条目加 `enabled: root.scBroadcastConfigured`（需要在 `/v1/enginex/ui` 响应里补一个只读 `broadcastConfigured`，由 `broadcast-config.json` 是否有 URL 决定），并在未配置时用 `root.scT("Set up in the web console first")` 作副标题。
 - 混音台页的 Upfader Echo Out 补 `visible: !root.scPlayer`（与设备页、磁贴一致）。设备页那份删除，只留混音台和磁贴。
 - `JOG_ENTRY` 拆开：Jog Light Mode 留设备页；Master Soft Clipper、Auto-Gain 移到 `MixerTabContent.qml` 注入块；Auto-Analyze Drives 移到曲库页；两个 Pro DJ Link 条目移到网络页。（一代 5.0.4 与 5.3.0 的页面文件路径不同，沿用 `v53()` 分支。曲库页、网络页是按 `i18n.tsv` 里的标签页名推断的，动手前先在 `extract_qrc.py` 解出的 QML 里确认 `Preferences/` 下有对应的 TabContent 文件。）
 - `QUALITY_ENTRY`（Streaming Quality、NetEase Download）和 OmniSource 移到 `Entries/StreamingServices.qml` 注入块，靠近 `STREAM_SWITCHES`。
@@ -381,4 +381,4 @@ beta:      ['Beta', '测试版', '測試版']
 
 `lang`、`waveform`、`sources`、`known`、`scope`、`quality`、`jog`、`netease_mode`、`playhead`、`four_deck_waveform`、`four_deck_role`、`prolink_waveform`（默认开，仅 `=0` 写入）、`upfader_echo`、`auto_analyze`、`master_limiter`、`auto_gain`、`omni_source`、`prolink_share`、`prolink_export`、`github_repo`。布尔项只在为开时写入 `=1`（`prolink_waveform` 相反，只在为关时写入 `=0`），所以"文件里没有"等于默认值。
 
-只读状态字段（`/v1/sc5000/ui` 与 `/api/ui` 返回，不写入）：`version`、`safeMode`、`loggedIn`、`broadcastEnabled`、`relayUrl`、`deemixPasswordSet`、`prolinkExportActive`、`player`、`fourDeckRoleActive`；仅回环接口额外返回 `accessCode`、`consoleUrl`。
+只读状态字段（`/v1/enginex/ui` 与 `/api/ui` 返回，不写入）：`version`、`safeMode`、`loggedIn`、`broadcastEnabled`、`relayUrl`、`deemixPasswordSet`、`prolinkExportActive`、`player`、`fourDeckRoleActive`；仅回环接口额外返回 `accessCode`、`consoleUrl`。

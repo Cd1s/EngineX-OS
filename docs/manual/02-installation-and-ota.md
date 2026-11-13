@@ -493,7 +493,7 @@ You can do the same from the web console at `http://<deck IP>:8080` on the same 
 **第二代 / 2nd gen / 第二代**
 
 二代机系统分区（rootfs）为只读且从未被修改，恢复原厂启动只需移除数据包与 ALSA 引导钩子（保留用户曲库、设置与 SSH 密钥）：
-- **Web 控制台一键回退**：浏览器打开碟机 IP，在 Web 控制台点击「Revert to Stock」（或发送 `POST /v1/sc5000/uninstall-gen2`）。
+- **Web 控制台一键回退**：浏览器打开碟机 IP，在 Web 控制台点击「Revert to Stock」（或发送 `POST /v1/enginex/uninstall-gen2`）。
 - **安装器网络卸载**：电脑端运行 `EngineX-Installer --uninstall`（需碟机在同一局域网并可访问 SSH）。
 - **本地 shell 脚本**：
 ```sh
@@ -502,8 +502,8 @@ sh /data/enginex/bundle/uninstall.sh && reboot
 ```
 
 - 中：只移除数据包新增的内容，系统分区本来就没被改过。
-- EN: It removes only what the bundle added; the system partition was never modified. You can also revert in one click via Web Console ("Revert to Stock"), `POST /v1/sc5000/uninstall-gen2`, or `EngineX-Installer --uninstall` over the network (SSH).
-- 繁：只移除資料包新增的內容，系統分割區本來就未被改動。亦可透過 Web 控制台（「Revert to Stock」）、`POST /v1/sc5000/uninstall-gen2` 或 `EngineX-Installer --uninstall`（經網路 SSH）一鍵還原。
+- EN: It removes only what the bundle added; the system partition was never modified. You can also revert in one click via Web Console ("Revert to Stock"), `POST /v1/enginex/uninstall-gen2`, or `EngineX-Installer --uninstall` over the network (SSH).
+- 繁：只移除資料包新增的內容，系統分割區本來就未被改動。亦可透過 Web 控制台（「Revert to Stock」）、`POST /v1/enginex/uninstall-gen2` 或 `EngineX-Installer --uninstall`（經網路 SSH）一鍵還原。
 - 无法连接网络或 shell 时：经 Fastboot（AZ04 机型经 1cc5:2027 usbupdate）刷回你自己的原始 `/data` 分区备份。/ With no shell or network access: flash back your original `/data` backup via Fastboot (or 1cc5:2027 usbupdate on AZ04). / 無法連線網路或 shell 時：經 Fastboot（AZ04 機型經 1cc5:2027 usbupdate）刷回自己的原始 `/data` 分割區備份。
 
 **第一代 / 1st gen / 第一代**

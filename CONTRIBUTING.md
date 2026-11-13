@@ -57,7 +57,7 @@ PRIME4PLUS data-bundle path when running Go tests. See
 
 Maintainers follow the checklist in [`.claude/rules/release-workflow.md`](./.claude/rules/release-workflow.md). In short, for version `<VERSION>`:
 
-1. **Version file**: `rootfs-overlay/etc/sc5000/version.txt`.
+1. **Version file**: `rootfs-overlay/etc/enginex/version.txt`.
 2. **Three READMEs** (`README.md`, `README.zh-CN.md`, `README.zh-TW.md`) and **`docs/site/content.js`** (+ `?v=N` in `docs/index.html`): the hero image `alt`, the version in the intro and the performance table, and all **20** primary download links in "How to Install & Update" (4 `EngineX-Installer-<VERSION>-*` + 8 first-gen `*-Update.img` + 8 second-gen `*-Update.img`; `*-Data-Bundle.tar.gz` is also published alongside them in `5.3.0.4`/`5.3.0.5` for legacy Gen-2 OTA before retiring in `5.3.0.6+`, #215):
    `https://github.com/Cd1s/EngineX-OS/releases/latest/download/<PREFIX>-<VERSION>-EngineX-OS-<Model>-Update.img`
 3. **Hero banners** `docs/assets/hero-banner*.svg`: only if they show a version (they do not today).
