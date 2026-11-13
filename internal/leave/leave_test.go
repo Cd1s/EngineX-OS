@@ -425,3 +425,80 @@ func TestLeaveStagedPayloadIsDurableBeforeTheFirstSwap(t *testing.T) {
 		t.Fatalf("%d swaps; not synced before the first: %q", swaps, unsynced)
 	}
 }
+
+// swapLog follows every exchange: its two directories must be synced before the next exchange,
+// and while the journal still exists, so before cleanup removes it and the other side.
+type swapLog struct {
+	journal  string
+	pending  map[string]bool
+	problems []string
+}
+
+func (l *swapLog) install(t *testing.T) {
+	realSync, realExchange := syncPath, Exchange
+	t.Cleanup(func() { syncPath, Exchange = realSync, realExchange })
+	syncPath = func(p string) error {
+		if l.pending[p] {
+			delete(l.pending, p)
+			if len(l.pending) == 0 && !exists(l.journal) {
+				l.problems = append(l.problems, "synced only after the journal was removed: "+p)
+			}
+		}
+		return realSync(p)
+	}
+	Exchange = func(a, b string) error {
+		if strings.Contains(a, "/probe-") {
+			return realExchange(a, b)
+		}
+		if len(l.pending) > 0 {
+			l.problems = append(l.problems, fmt.Sprintf("exchanging %s while %v is not synced", a, l.pending))
+		}
+		err := realExchange(a, b)
+		l.pending = map[string]bool{filepath.Dir(a): true, filepath.Dir(b): true}
+		return err
+	}
+}
+
+func (l *swapLog) check(t *testing.T, what string) {
+	t.Helper()
+	if len(l.pending) > 0 {
+		l.problems = append(l.problems, fmt.Sprintf("never synced: %v", l.pending))
+	}
+	if len(l.problems) > 0 {
+		t.Fatalf("%s:\n%s", what, strings.Join(l.problems, "\n"))
+	}
+}
+
+// #234 review round 3 (R2): an exchange is atomic but not yet durable. The layout, UI and bundle
+// exchanges of an install and the exchanges back of a rollback each have their two directories
+// synced before the next one and before cleanup; so is the journal's own entry in /data.
+func TestLeaveSwapsAreDurableBeforeTheNextStepAndCleanup(t *testing.T) {
+	d, root := newDeck(t)
+	l := &swapLog{journal: filepath.Join(root, "data", journalName)}
+	l.install(t)
+	dataSynced := false
+	inner := syncPath
+	syncPath = func(p string) error {
+		if p == filepath.Join(root, "data") && exists(filepath.Join(l.journal, "stage")) && !exists(filepath.Join(l.journal, "id")) {
+			dataSynced = true
+		}
+		return inner(p)
+	}
+	if err := d.Install(legacyBundle(t, "5.3.0.2")); err != nil {
+		t.Fatal(err)
+	}
+	l.check(t, "install")
+	if !dataSynced {
+		t.Fatal("/data (the journal's entry) not synced before the journal id")
+	}
+	// A rollback: cut right before the bundle, then this release's next boot.
+	d, root = newDeck(t)
+	l = &swapLog{journal: filepath.Join(root, "data", journalName)}
+	l.install(t)
+	cutAt(t, d, legacyBundle(t, "5.3.0.2"), "bundle")
+	l.pending, l.problems = nil, nil // the cut install itself is checked above
+	if err := d.Recover(); err != nil {
+		t.Fatal(err)
+	}
+	l.check(t, "rollback")
+}

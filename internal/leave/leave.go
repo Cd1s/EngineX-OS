@@ -123,12 +123,18 @@ func writeSync(p string, b []byte) error {
 }
 
 func syncDir(p string) error {
-	f, err := os.Open(p)
-	if err != nil {
-		return err
+	return syncPath(p)
+}
+
+// syncDirs makes the renames and exchanges just done in these directories durable, before the
+// next step and before cleanup removes the other side (#234 review round 3).
+func syncDirs(dirs ...string) error {
+	for _, dir := range dirs {
+		if err := syncPath(dir); err != nil {
+			return err
+		}
 	}
-	defer f.Close()
-	return f.Sync()
+	return nil
 }
 
 func copyFile(src, dst string) error {
@@ -297,6 +303,9 @@ func (d Deck) Install(target string) error {
 	if err := syncTree(journal); err != nil {
 		return fail(err)
 	}
+	if err := syncDirs(d.data()); err != nil { // the journal's own entry in /data
+		return fail(err)
+	}
 	// From here a cut is put back by Recover: the id says the stage is complete. So is an error.
 	if err := writeSync(filepath.Join(journal, "id"), []byte(ids+"\n")); err != nil {
 		return fail(err)
@@ -331,6 +340,9 @@ func (d Deck) commit(journal, stage, live string) error {
 		if err := Exchange(d.data("enginex"), link); err != nil {
 			return err
 		}
+		if err := syncDirs(d.data()); err != nil {
+			return err
+		}
 		crash("layout-exchanged")
 		if err := relink(d.data("enginex"), "sc5000-custom"); err != nil {
 			return err
@@ -360,6 +372,9 @@ func (d Deck) commit(journal, stage, live string) error {
 				return err
 			}
 		}
+		if err := syncDirs(filepath.Dir(src), filepath.Dir(dst)); err != nil {
+			return err
+		}
 	}
 	crash("files")
 	for _, f := range files {
@@ -375,6 +390,9 @@ func (d Deck) commit(journal, stage, live string) error {
 	// 5. The commit: from this exchange on the older release is the deck's.
 	crash("bundle")
 	if err := Exchange(filepath.Join(stage, "bundle"), filepath.Join(live, "bundle")); err != nil {
+		return err
+	}
+	if err := syncDirs(stage, live); err != nil { // durable before finish removes this release's bundle
 		return err
 	}
 	crash("committed")
@@ -458,6 +476,9 @@ func (d Deck) recover() error {
 		} else if err := Exchange(dst, filepath.Join(stage, p)); err != nil {
 			return err
 		}
+		if err := syncDirs(filepath.Dir(dst), filepath.Join(stage, filepath.Dir(p))); err != nil {
+			return err
+		}
 	}
 	enginex, link := d.data("enginex"), d.data("sc5000-custom")
 	if exists(filepath.Join(journal, "layout")) && realDir(link) {
@@ -478,6 +499,9 @@ func (d Deck) recover() error {
 			if err := os.Symlink("enginex", link); err != nil {
 				return err
 			}
+		}
+		if err := syncDirs(d.data()); err != nil {
+			return err
 		}
 	}
 	return os.RemoveAll(journal)
