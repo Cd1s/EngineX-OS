@@ -5,7 +5,7 @@ import test_ui_mod
 
 RX = r"""
 const props=new Map();
-let posMs=10000, seeks=0, wheelMoves=[];
+let posMs=10000, seeks=0, wheelMoves=[], frameOnly=false;
 globalThis.scShadowBent=null;
 globalThis.scShadowBendTimer={interval:0,running:false,stop(){this.running=false},restart(){this.running=true}};
 const P=path=>{
@@ -14,9 +14,9 @@ const P=path=>{
     p={_s:path.endsWith('/SongLoaded')||path.endsWith('/PlayState'),_v:path.endsWith('/SampleRate')?48000:0,
        string:path.endsWith('/SpeedRange')?'8':path.endsWith('/SyncMode')?'Off':'',
        entries:['4','8','10','20','50','100'],index:1,
-       get state(){return this._s},set state(v){this._s=v},
-       get value(){return this._v},set value(v){this._v=v;if(path.endsWith('/SetSongPosition')){posMs=v*400000;seeks++}},
-       get unnormalized(){return path.endsWith('/TrackLength')?48000*400:path.endsWith('/TrackPosition')?posMs*48:0},
+       get state(){assert(!frameOnly,"state read during scratch frame: "+path);return this._s},set state(v){this._s=v},
+       get value(){assert(!frameOnly,"value read during scratch frame: "+path);return this._v},set value(v){this._v=v;if(path.endsWith('/SetSongPosition')){posMs=v*400000;seeks++}},
+       get unnormalized(){assert(!frameOnly||path.endsWith('/TrackPosition'),"extra frame read: "+path);return path.endsWith('/TrackLength')?48000*400:path.endsWith('/TrackPosition')?posMs*48:0},
        incValue(t){wheelMoves.push(t);posMs+=t/23.5},
        decValue(t){wheelMoves.push(-t);posMs-=t/23.5}};
     props.set(path,p);
@@ -28,7 +28,7 @@ const E=(o)=>Object.assign({deck:2,path:'/data/enginex/shadow-v3/peer-1/a.flac',
 scShadowApplyAll([E({positionMs:10000})],false);
 now+=1500; posMs=11500;
 scShadowApplyAll([E({})],false);
-for(let i=1;i<=5;i++){now+=25;scShadowApplyAll([E({scratch:true,positionMs:11500-i*40,at:now})],false);}
+for(let i=1;i<=5;i++){now+=25;scShadowApplyAll([E({scratch:true,positionMs:11500-i*40,at:now})],false);scShadowScratchTimer.tick();}
 assert.equal(P('/Engine/Deck2/ExternalScratchWheelTouch').state,true,'precondition: touch engaged');
 """
 
@@ -155,8 +155,48 @@ const before=seeks;
 for(let i=0;i<40;i++) {
     now+=25;
     scShadowApplyAll([E({scratch:true,positionMs:20000+i*250,at:now})],false);
+    scShadowScratchTimer.tick();
 }
+assert(seeks>before,'large position discontinuity did not use the seek fallback');
 assert(seeks-before<=4,'fast scratch flushed decoder '+(seeks-before)+' times per second');
+""")
+
+    def test_interpolated_small_and_heavy_scratches_move_every_frame(self):
+        for speed in [0.35, 3.5]:
+            with self.subTest(speed=speed):
+                self.js(RX + "const speed=" + str(speed) + r""";
+const start=now, ring=scShadowAt[2].scratchSamples, beforeSeeks=seeks;
+const position=t=>11300-speed*((t%500)<=250?t%500:500-t%500);
+let previousFramePos=posMs, frames=0, maxError=0;
+for(let t=1;t<=2000;t++) {
+    now=start+t;
+    if(t%25===0) scShadowApplyAll([E({scratch:true,positionMs:position(t),at:now})],false);
+    if(t%16!==0) continue;
+    const before=previousFramePos;
+    frameOnly=true; scShadowScratchTimer.tick(); frameOnly=false;
+    if(t>160) {
+        const expected=position(t-60), phase=(t-60)%250;
+        if(phase>32&&phase<218) {
+            assert(Math.abs(posMs-before)>0.1,'idle scratch frame between source updates at '+t);
+            assert(Math.abs(posMs-before)<=speed*16*1.6+1,'large per-frame jog burst at '+t);
+            frames++;
+        }
+        maxError=Math.max(maxError,Math.abs(posMs-expected));
+    }
+    previousFramePos=posMs;
+}
+assert(frames>60,'insufficient moving-frame coverage');
+assert(maxError<=speed*16+2,'playout lag differs from 60 ms: '+maxError);
+assert.equal(seeks,beforeSeeks,'heavy scratch must never re-buffer the decoder');
+assert.strictEqual(scShadowAt[2].scratchSamples,ring,'sample ring allocated again');
+// After samples stop: extrapolate by at most 60 ms, then hold the final target.
+for(let t=2016;t<=2320;t+=16) {now=start+t;scShadowScratchTimer.tick();}
+assert(Math.abs(posMs-(position(2000)+speed*60))<2,'extrapolation did not stop after 60 ms');
+now+=16;
+scShadowApplyAll([E({scratch:false,positionMs:position(2000),at:now})],false);
+assert.equal(scShadowScratchTimer.running,false,'frame timer kept running after release');
+assert.equal(P('/Engine/Deck2/ExternalScratchWheelTouch').state,false);
+assert(Math.abs(posMs-position(2000))<=35,'scratch-end landing changed');
 """)
 
     def test_sender_reuses_sampling_buffers_at_40hz(self):

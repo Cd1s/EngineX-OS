@@ -1493,7 +1493,7 @@ SERVICES_MAIN = """
 				// A held platter is not an indefinitely stale GUI read. After
 				// 500 ms use its real position once, then keep the normal jog line
 				// until playback advances again; never seek on every held tick.
-				s.phaseHold = s.sync && s.ps && p.ps && s.net === p.net && !freshRaw &&
+				s.phaseHold = !s.scratch && s.sync && s.ps && p.ps && s.net === p.net && !freshRaw &&
 					(p.phaseHold || now - s.rawStillAt >= 500)
 				if (s.phaseHold) s.posMs = s.rawPos
 				if (s.phaseHold) { if (!p.phaseHold) s.jumps++ }
@@ -2038,8 +2038,6 @@ SERVICES_MAIN = """
 				if (!at.scratchSamples) at.scratchSamples = [0, 0, 0, 0, 0, 0, 0, 0]
 				at.scratchHead = 0; at.scratchCount = 0
 				at.scratchPosition = g("/Track/TrackPosition"); at.scratchMove = mv
-				at.scratchSet = g("/Track/SetSongPosition"); at.scratchLength = len / sr * 1000
-				at.scratchEnd = at.scratchLength - root.scShadowEndGap()
 			}
 			if (en && !en.state) en.state = true
 			if (tc && !tc.state) tc.state = true
@@ -2289,11 +2287,10 @@ SERVICES_MAIN = """
 				const posMs = at.scratchPosition.unnormalized / at.sampleRate * 1000, drift = target - posMs
 				at.drift = drift
 				if ((at.scratchJump || Math.abs(drift) > 1000) && now - at.seekAt >= 250) {
-					at.scratchSet.value = Math.max(0, Math.min(target, at.scratchEnd)) / at.scratchLength
-					at.seekAt = now; at.landing = undefined; at.env = undefined; at.scratchJump = false
+					root.scShadowSeek(d, at, target); at.scratchJump = false
 				} else if (at.scratchMove) {
-					// Two frames of source travel let fast scratches catch up without a decoder seek.
-					const cap = Math.max(15, Math.ceil(Math.abs(velocity) * 32 * at.scratchScale))
+					// A playout window of source travel lets fast scratches catch up without a decoder seek.
+					const cap = Math.max(15, Math.ceil(Math.abs(velocity) * root.scShadowScratchDelay * at.scratchScale))
 					const ticks = Math.min(cap, Math.round(Math.abs(drift) * at.scratchScale))
 					if (ticks >= 15) {
 						if (drift > 0) at.scratchMove.incValue(ticks, 0, 0, false, true, 0)
