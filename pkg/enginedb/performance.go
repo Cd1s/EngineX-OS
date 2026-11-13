@@ -5,11 +5,15 @@ import (
 	"bytes"
 	"cmp"
 	"compress/zlib"
+	"context"
+	"database/sql"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"log"
 	"math"
+	"net/url"
+	"path/filepath"
 	"slices"
 	"unicode/utf8"
 
@@ -164,6 +168,67 @@ func TrackDataPeaks(track, overview []byte) []byte {
 	return out
 }
 
+// FillOverviewMaxima completes the overviews an earlier build imported: they end in a
+// zero triple where Engine expects each band's maximum, the value it scales that band by.
+func FillOverviewMaxima(ctx context.Context, mount string) error {
+	dbPath := filepath.Join(mount, "Engine Library", "Database2", "m.db")
+	if err := safeFile(dbPath); err != nil {
+		return err
+	}
+	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: dbPath}).String()+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, `SELECT trackId, overviewWaveFormData FROM PerformanceData WHERE thirdPartySourceId=1`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	fixed := map[int64][]byte{}
+	for rows.Next() {
+		var id int64
+		var blob []byte
+		if err := rows.Scan(&id, &blob); err != nil {
+			return err
+		}
+		raw, err := QUncompress(blob, 8<<20)
+		if err != nil || len(raw) < 27 || len(raw)%3 != 0 {
+			continue
+		}
+		top := raw[len(raw)-3:]
+		if top[0]|top[1]|top[2] != 0 {
+			continue
+		}
+		for i, v := range raw[24 : len(raw)-3] {
+			top[i%3] = max(top[i%3], v)
+		}
+		if top[0]|top[1]|top[2] != 0 {
+			if fixed[id], err = QCompress(raw); err != nil {
+				return err
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for id, blob := range fixed {
+		if _, err := tx.ExecContext(ctx, `UPDATE PerformanceData SET overviewWaveFormData=? WHERE trackId=?`, blob, id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func EncodePerformance(t rekordbox.Track, a *rekordbox.Analysis) (Performance, error) {
 	if a == nil {
 		a = &rekordbox.Analysis{}
@@ -271,7 +336,9 @@ func EncodePerformance(t rekordbox.Track, a *rekordbox.Analysis) (Performance, e
 			}
 			b.Write(peak[:])
 		}
-		b.Write([]byte{0, 0, 0})
+		// Engine scales each band by this band-maximum trailer; with zeros it draws
+		// the bytes unscaled, a third of the height of a track it analysed itself.
+		b.Write(top[:])
 		p.Overview, e = QCompress(b.Bytes())
 		if e != nil {
 			return p, e
