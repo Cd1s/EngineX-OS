@@ -1,32 +1,32 @@
 #!/bin/sh
 # The existing safe-mode marker now means a persistent, hook-free stock boot.
 # Only a rendered main view may acknowledge an attempt; uptime is not health.
-primary_ui=${SC5000_PRIMARY_UI_DIR:-/data/enginex/ui}
-legacy_ui=${SC5000_LEGACY_UI_DIR:-/data/sc5000-custom/ui}
-UI=${SC5000_UI_DIR:-$primary_ui}
+primary_ui=${ENGINEX_PRIMARY_UI_DIR:-/data/enginex/ui}
+legacy_ui=${ENGINEX_LEGACY_UI_DIR:-/data/sc5000-custom/ui}
+UI=${ENGINEX_UI_DIR:-$primary_ui}
 [ -d "$UI" ] || [ ! -d "$legacy_ui" ] || UI=$legacy_ui
-guardian=${SC5000_ENGINE_GUARDIAN:-/usr/local/bin/engine-guardian}
-limit=${SC5000_BOOT_TIMEOUT:-180}
-window=${SC5000_BOOT_CRASH_WINDOW:-300}
-failures=${SC5000_BOOT_CRASH_LIMIT:-3}
+guardian=${ENGINEX_ENGINE_GUARDIAN:-/usr/local/bin/engine-guardian}
+limit=${ENGINEX_BOOT_TIMEOUT:-180}
+window=${ENGINEX_BOOT_CRASH_WINDOW:-300}
+failures=${ENGINEX_BOOT_CRASH_LIMIT:-3}
 # Set by this boot's first `pre` (/run is empty at every boot). A stop without it is an instance
 # that never started under the guard: on second-generation decks the stock Engine every boot starts
 # with, which boot-activate restarts into the hooked one. Its clean stop must not wipe the previous
 # boot's crash and power-cut evidence before `pre` reads it (BH-F52-4).
-pre_mark=${SC5000_GUARD_PRE_MARK:-/run/enginex-engine-guard.pre}
+pre_mark=${ENGINEX_GUARD_PRE_MARK:-/run/enginex-engine-guard.pre}
 case $limit in ''|*[!0-9]*|0) limit=180 ;; esac
 case $window in ''|*[!0-9]*|0) window=300 ;; esac
 case $failures in ''|*[!0-9]*|0) failures=3 ;; esac
 [ "${#limit}" -le 5 ] && [ "$limit" -le 86400 ] || limit=180
 [ "${#window}" -le 5 ] && [ "$window" -le 86400 ] || window=300
 [ "${#failures}" -le 3 ] && [ "$failures" -le 100 ] || failures=3
-poll=${SC5000_BOOT_POLL_INTERVAL:-1}
+poll=${ENGINEX_BOOT_POLL_INTERVAL:-1}
 case $poll in .1|0.1|.5|0.5|1|2|5) ;; *) poll=1 ;; esac
 record() {
     mkdir -p "$UI" || return 1
     (umask 077; printf '%s\n' "$2" > "$UI/.$1.$$" && mv -f "$UI/.$1.$$" "$UI/$1")
 }
-uptime_seconds() { cut -d. -f1 "${SC5000_BOOT_UPTIME:-/proc/uptime}"; }
+uptime_seconds() { cut -d. -f1 "${ENGINEX_BOOT_UPTIME:-/proc/uptime}"; }
 quarantine() {
     rm -rf "$UI/mods-overlay"
     : > "$UI/mods-quarantined"
@@ -35,8 +35,8 @@ quarantine() {
         : > "$primary_ui/mods-quarantined"
     fi
     # A fallback during this boot must also undo our earlier assignment binds.
-    assign=${SC5000_ASSIGNMENT_DIR:-/usr/Engine/AssignmentFiles/PresetAssignmentFiles}
-    patched=${SC5000_ASSIGNMENT_PATCHED:-/run/enginex-assignments}
+    assign=${ENGINEX_ASSIGNMENT_DIR:-/usr/Engine/AssignmentFiles/PresetAssignmentFiles}
+    patched=${ENGINEX_ASSIGNMENT_PATCHED:-/run/enginex-assignments}
     for f in "$assign"/JP0[78]/*Assignments.qml "$assign"/JP1[34]/*Assignments.qml; do
         [ -f "$patched/${f##*/}" ] || continue
         ! mountpoint -q "$f" || umount "$f" || :
@@ -52,7 +52,7 @@ fallback() {
     quarantine
 }
 begin_attempt() {
-    rm -f "${SC5000_QUIT_REASON_FILE:-/tmp/engine-quit-reason}"
+    rm -f "${ENGINEX_QUIT_REASON_FILE:-/tmp/engine-quit-reason}"
     # /proc's boot UUID also distinguishes a stale acknowledgement after a reboot.
     token=$(cat /proc/sys/kernel/random/uuid 2>/dev/null)-$$-$(uptime_seconds)
     rm -f "$UI/boot-ready"
@@ -63,7 +63,7 @@ begin_attempt() {
 case ${1:-} in
 runtime)
     [ ! -e "$UI/safe-mode" ] || exit 0
-    exec "${SC5000_DEBLOAT:-/usr/local/bin/enginex-debloat}" --apply-runtime
+    exec "${ENGINEX_DEBLOAT:-/usr/local/bin/enginex-debloat}" --apply-runtime
     ;;
 service)
     shift
@@ -73,7 +73,7 @@ service)
         # Arm recovery before loading anything into the vendor launcher. Its
         # updater children still need the hook on a normal EngineX start.
         begin_attempt
-        export LD_PRELOAD=${SC5000_UI_HOOK:-/etc/enginex/libengine-ui-hook.so}
+        export LD_PRELOAD=${ENGINEX_UI_HOOK:-/etc/enginex/libengine-ui-hook.so}
     fi
     exec "$@"
     ;;
@@ -106,12 +106,12 @@ launch)
         exec "$@"
     fi
     begin_attempt
-    LD_PRELOAD=${SC5000_UI_HOOK:-/etc/enginex/libengine-ui-hook.so} "$@" &
+    LD_PRELOAD=${ENGINEX_UI_HOOK:-/etc/enginex/libengine-ui-hook.so} "$@" &
     child=$!
     trap 'kill -TERM "$child" 2>/dev/null; wait "$child" 2>/dev/null; exit 143' TERM INT HUP
     wait "$child"; result=$?
     trap - TERM INT HUP
-    reason=$(cat "${SC5000_QUIT_REASON_FILE:-/tmp/engine-quit-reason}" 2>/dev/null)
+    reason=$(cat "${ENGINEX_QUIT_REASON_FILE:-/tmp/engine-quit-reason}" 2>/dev/null)
     intentional=
     case $reason in Poweroff|Reboot|UpdateFromLoader|UpdateFromFile|UpdateFromUrl|TestApp|ControllerMode|UpdateFirmware|FactoryReset|AnalyticsChange) intentional=1 ;; esac
     if [ "$result" -ne 0 ] && [ "$result" -ne 7 ] && [ -z "$intentional" ]; then
@@ -147,7 +147,7 @@ watch)
             if [ "$now" -ge "$exported" ]; then
                 exported=$((now + 5))
                 if [ -x "$guardian" ]; then
-                    "$guardian" --timeout 15s --boot-report --ui-dir "$UI" --mount-root "${SC5000_BOOT_MEDIA_ROOT:-/media}" >/dev/null 2>&1 || :
+                    "$guardian" --timeout 15s --boot-report --ui-dir "$UI" --mount-root "${ENGINEX_BOOT_MEDIA_ROOT:-/media}" >/dev/null 2>&1 || :
                 fi
             fi
         else
@@ -218,7 +218,7 @@ pre|settings)
     echo "$n" > "$UI/boot-count"
     # Drop the shared cache left by older EngineX releases before a stock reflash.
     # The hook redirects EngineX's bytecode to its own cache.
-    rm -rf "${SC5000_ENGINE_DATA_DIR:-/data/AppDataUser/AIR Music Technology/Engine}/.cache/qml"
+    rm -rf "${ENGINEX_ENGINE_DATA_DIR:-/data/AppDataUser/AIR Music Technology/Engine}/.cache/qml"
     # #140: Qt rebuilds EngineX's cache after a crash, power cut or fallback.
     if [ -n "$dirty" ] || [ "$count" -ge "$failures" ] || [ -e "$UI/safe-mode" ]; then
         rm -rf "$UI/qml-cache"
@@ -254,7 +254,7 @@ pre|settings)
     # persisted stock Lighting choice before every start, including crash restarts.
     lighting_state=false
     if grep -qx 'engine_lighting=1' "$UI/settings.conf" 2>/dev/null; then lighting_state=true; fi
-    state_dir=${SC5000_STATE_DIR:-/data/AppDataUser/AIR Music Technology/Engine/State}
+    state_dir=${ENGINEX_STATE_DIR:-/data/AppDataUser/AIR Music Technology/Engine/State}
     gui_state="$state_dir/PlanckGuiState.json"
     mkdir -p "$state_dir" 2>/dev/null || :
     if [ ! -s "$gui_state" ]; then
@@ -326,16 +326,16 @@ pre|settings)
     # Engine 5.3.0 cannot ATTACH anything while its internal m.db reserves page bytes
     # (a `.recover`ed copy did): rebuild it with reserve 0 before Engine opens it.
     # Also run the once-per-library #246 MP3 beat-grid correction while Engine is stopped.
-    guardian=${SC5000_ENGINE_GUARDIAN:-/usr/local/bin/engine-guardian}
+    guardian=${ENGINEX_ENGINE_GUARDIAN:-/usr/local/bin/engine-guardian}
     # A huge or locked m.db must not hold the splash screen forever.
     t=; ! command -v timeout >/dev/null 2>&1 || t="timeout 10"
-    [ ! -x "$guardian" ] || $t "$guardian" --heal-mount "${SC5000_ENGINE_DATA_DIR:-/data/AppDataUser/AIR Music Technology/Engine}" --normalize-reserve --fix-mp3-grids --timeout 10s > /dev/null 2>&1 || :
+    [ ! -x "$guardian" ] || $t "$guardian" --heal-mount "${ENGINEX_ENGINE_DATA_DIR:-/data/AppDataUser/AIR Music Technology/Engine}" --normalize-reserve --fix-mp3-grids --timeout 10s > /dev/null 2>&1 || :
     # Engine 5.3.0 sends a TIDAL client with no saved account (or a tokenless SSO
     # account) to the Engine DJ Profile login (#56, #159), and every EngineX service
     # runs on that client. With stored accessToken/refreshToken credentials Engine
     # logs in to the local gateway at start instead of timing out after 150 s.
     # Real TIDAL (scope=tidal) keeps the stock login.
-    accounts=${SC5000_STREAMING_ACCOUNTS:-/data/StreamingAccounts.json}
+    accounts=${ENGINEX_STREAMING_ACCOUNTS:-/data/StreamingAccounts.json}
     export T='"TIDAL": "{\"provider\":\"TIDAL\",\"providerType\":\"TIDAL\",\"accessToken\":\"enginex\",\"refreshToken\":\"enginex\"}"'
     # #224: an old settings file may retain scope=tidal after TIDAL is disabled.
     sources=$(sed -n 's/^sources=//p' "$UI/settings.conf" 2>/dev/null | tail -n 1)
@@ -376,11 +376,11 @@ pre|settings)
     # #263: the motorized players (JP08, JP14) also get their decks named (scDecks): stock
     # ties the motor and the platter's layer to decks 1 and 2, so on 2+4 the platter never
     # turned and its touch reached deck 1, and on 1+3 deck 3 had neither.
-    assign=${SC5000_ASSIGNMENT_DIR:-/usr/Engine/AssignmentFiles/PresetAssignmentFiles}
-    patched=${SC5000_ASSIGNMENT_PATCHED:-/run/enginex-assignments}
+    assign=${ENGINEX_ASSIGNMENT_DIR:-/usr/Engine/AssignmentFiles/PresetAssignmentFiles}
+    patched=${ENGINEX_ASSIGNMENT_PATCHED:-/run/enginex-assignments}
     on=; ! grep -qx 'four_deck_waveform=1' "$UI/settings.conf" 2>/dev/null || on=1
     if [ -n "$on" ]; then
-        state_dir=${SC5000_STATE_DIR:-/data/AppDataUser/AIR Music Technology/Engine/State}
+        state_dir=${ENGINEX_STATE_DIR:-/data/AppDataUser/AIR Music Technology/Engine/State}
         for state_file in "$state_dir/PlanckGuiState.json" "$state_dir/PlanckClientState.json"; do
             [ -f "$state_file" ] || continue
             cp -p "$state_file" "$state_file.tmp" || continue
@@ -403,7 +403,7 @@ pre|settings)
     case $role in
     12|13|24|34|1|2) ;;
     *) # FOOLPROOF INVARIANT (#49/#123): auto MUST map odd Player -> 13 and even Player -> 24 so linked SC5000 / Shadow Decks never cross-control each other. NEVER change auto to 12.
-        state=${SC5000_PLANCK_STATE:-"/data/AppDataUser/AIR Music Technology/Engine/State/PlanckClientState.json"}
+        state=${ENGINEX_PLANCK_STATE:-"/data/AppDataUser/AIR Music Technology/Engine/State/PlanckClientState.json"}
         n=$(grep -A1 '"Player": {' "$state" 2>/dev/null | sed -n 's/.*"string": "\([0-9]*\)".*/\1/p' | head -n 1)
         case $n in *[02468]) role=24 ;; *) role=13 ;; esac ;;
     esac
@@ -483,7 +483,7 @@ post)
     [ ! -e "$UI/safe-mode" ] || exit 0
     # Engine's setup script has just set the GPU to performance. This also covers
     # boot, when a start request would merge with an already running tune job.
-    "${SC5000_PERF_TUNE:-/usr/local/bin/enginex-perf-tune}" >/dev/null 2>&1
+    "${ENGINEX_PERF_TUNE:-/usr/local/bin/enginex-perf-tune}" >/dev/null 2>&1
     # Legacy launchers and the release gate call post after spawning Engine.
     # New launchers create this before exec, including internal crash retries.
     if [ ! -e "$UI/safe-mode" ] && [ ! -s "$UI/boot-token" ]; then begin_attempt; fi
@@ -506,7 +506,7 @@ stop)
     # gets here without a reboot when az01-update --erase-data failed (not on AC power);
     # UpdateFromFile when az01-update --file rejected the image (a corrupt or foreign
     # .img on a stick): the deck stayed on a black screen until power-cycled (BH-GC2-4).
-    reason_file=${SC5000_QUIT_REASON_FILE:-/tmp/engine-quit-reason}
+    reason_file=${ENGINEX_QUIT_REASON_FILE:-/tmp/engine-quit-reason}
     case $(cat "$reason_file" 2>/dev/null) in
     AnalyticsChange) ;;
     FactoryReset|UpdateFromFile) [ "$(systemctl is-system-running 2>/dev/null)" != stopping ] || exit 0 ;;

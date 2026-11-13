@@ -4,8 +4,8 @@
 set -eu
 APPLET="$1"
 shift
-SHARE=${SC5000_SUITE_SHARE:-/usr/share/enginex}
-TARGET_DIR=${SC5000_SUITE_DIR:-/data/enginex/bin}
+SHARE=${ENGINEX_SUITE_SHARE:-/usr/share/enginex}
+TARGET_DIR=${ENGINEX_SUITE_DIR:-/data/enginex/bin}
 if ! mkdir -p "$TARGET_DIR" 2>/dev/null || [ ! -w "$TARGET_DIR" ]; then
     TARGET_DIR="/tmp/enginex-bin"
     mkdir -p "$TARGET_DIR"

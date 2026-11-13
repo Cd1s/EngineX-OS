@@ -46,8 +46,8 @@ const (
 	gen2ImgMagic    = "ENGINEX_DATA_BUNDLE_IMG_V1\n"
 	gen2ImgHeader   = 128
 	compatCmd       = "cat /sys/firmware/devicetree/base/compatible"
-	// install.sh's own default; the variable is only set by tests.
-	customDirSh = `"${SC5000_CUSTOM:-/data/enginex}"`
+	// install.sh's own default; the variable is only set by tests (SC5000_CUSTOM before 5.3.0.5, #234).
+	customDirSh = `"${ENGINEX_CUSTOM:-${SC5000_CUSTOM:-/data/enginex}}"`
 )
 
 func init() {

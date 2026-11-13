@@ -29,7 +29,7 @@ case $tool in
             awk -F '|' -v dev="$dev" -v col="$col" '$1==dev {print $col; found=1} END {exit !found}' "$MOCK_ROOT/mounts"
         else
             path=$5
-            if [[ $path == "$SC5000_MEDIA_ROOT/sc5000-sd-cache" ]]; then
+            if [[ $path == "$ENGINEX_MEDIA_ROOT/sc5000-sd-cache" ]]; then
                 cat "$MOCK_ROOT/sd-type"
             else
                 cat "$MOCK_ROOT/internal-type"
@@ -115,39 +115,39 @@ run_storage() { sh "$STORAGE" "$@" > "$MOCK_ROOT/output" 2>&1; }
 fixture() {
     export MOCK_ROOT=$TMP/case-$count
     mkdir -p "$MOCK_ROOT"/{types,uuid,sys/class/block,proc,media,internal,outside}
-    export SC5000_SYS_ROOT=$MOCK_ROOT/sys SC5000_PROC_ROOT=$MOCK_ROOT/proc
-    export SC5000_THREAD_DELAYS= # no delayed Engine thread passes outliving a case
-    export SC5000_RUN_ROOT=$MOCK_ROOT/run SC5000_MEDIA_ROOT=$MOCK_ROOT/media
-    export SC5000_INTERNAL_CACHE=$MOCK_ROOT/internal
-    export SC5000_UI_DIR=$MOCK_ROOT/ui SC5000_PRIMARY_UI_DIR=$MOCK_ROOT/ui SC5000_LEGACY_UI_DIR=$MOCK_ROOT/legacy-ui
-    export SC5000_ASSIGNMENT_DIR=$MOCK_ROOT/assignments SC5000_ASSIGNMENT_PATCHED=$MOCK_ROOT/patched
-    export SC5000_STATE_DIR=$MOCK_ROOT/state SC5000_PLANCK_STATE=$MOCK_ROOT/planck.json
-    export SC5000_ENGINE_GUARDIAN=$TMP/bin/engine-guardian
-    export SC5000_RB_BRIDGE=$TMP/bin/rb-bridge SC5000_STORAGE_NOTIFY=$TMP/bin/notify
+    export ENGINEX_SYS_ROOT=$MOCK_ROOT/sys ENGINEX_PROC_ROOT=$MOCK_ROOT/proc
+    export ENGINEX_THREAD_DELAYS= # no delayed Engine thread passes outliving a case
+    export ENGINEX_RUN_ROOT=$MOCK_ROOT/run ENGINEX_MEDIA_ROOT=$MOCK_ROOT/media
+    export ENGINEX_INTERNAL_CACHE=$MOCK_ROOT/internal
+    export ENGINEX_UI_DIR=$MOCK_ROOT/ui ENGINEX_PRIMARY_UI_DIR=$MOCK_ROOT/ui ENGINEX_LEGACY_UI_DIR=$MOCK_ROOT/legacy-ui
+    export ENGINEX_ASSIGNMENT_DIR=$MOCK_ROOT/assignments ENGINEX_ASSIGNMENT_PATCHED=$MOCK_ROOT/patched
+    export ENGINEX_STATE_DIR=$MOCK_ROOT/state ENGINEX_PLANCK_STATE=$MOCK_ROOT/planck.json
+    export ENGINEX_ENGINE_GUARDIAN=$TMP/bin/engine-guardian
+    export ENGINEX_RB_BRIDGE=$TMP/bin/rb-bridge ENGINEX_STORAGE_NOTIFY=$TMP/bin/notify
     : > "$MOCK_ROOT/log"
     : > "$MOCK_ROOT/mounts"
     printf 'ext4\n' > "$MOCK_ROOT/sd-type"
     printf 'ext4\n' > "$MOCK_ROOT/internal-type"
     unset MOCK_FSCK_RC MOCK_MOUNT_FAIL MOCK_MOD_FAIL MOCK_BUSY_TARGET MOCK_PDB MOCK_FAKE_EXPORT
     unset MOCK_MOUNT_FAIL_TARGET MOCK_APFS_LIBRARY
-    unset MOCK_LIB_SYMLINK MOCK_BRIDGE_RC MOCK_BRIDGE_SLEEP MOCK_TASKSET_FAIL SC5000_FRONT_SD_DEVICE
-    unset SC5000_BRIDGE_TIMEOUT SC5000_GUARDIAN_TIMEOUT MOCK_ENGINE_DB MOCK_EXPORT_NAME MOCK_EXPORT_DIR MOCK_GUARDIAN_SLEEP MOCK_GUARDIAN_RC
+    unset MOCK_LIB_SYMLINK MOCK_BRIDGE_RC MOCK_BRIDGE_SLEEP MOCK_TASKSET_FAIL ENGINEX_FRONT_SD_DEVICE
+    unset ENGINEX_BRIDGE_TIMEOUT ENGINEX_GUARDIAN_TIMEOUT MOCK_ENGINE_DB MOCK_EXPORT_NAME MOCK_EXPORT_DIR MOCK_GUARDIAN_SLEEP MOCK_GUARDIAN_RC
 }
 device() {
-    mkdir -p "$SC5000_SYS_ROOT/class/block/$1"
+    mkdir -p "$ENGINEX_SYS_ROOT/class/block/$1"
     printf '%s\n' "$2" > "$MOCK_ROOT/types/$1"
     printf '%s\n' "${3:-AABB-1234}" > "$MOCK_ROOT/uuid/$1"
 }
 sd_device() {
     device mmcblk1p1 "${1:-ext4}" SD-1234
-    mkdir -p "$SC5000_SYS_ROOT/class/block/mmcblk1/device"
-    printf 'SD\n' > "$SC5000_SYS_ROOT/class/block/mmcblk1/device/type"
+    mkdir -p "$ENGINEX_SYS_ROOT/class/block/mmcblk1/device"
+    printf 'SD\n' > "$ENGINEX_SYS_ROOT/class/block/mmcblk1/device/type"
 }
 
 fixture
 device sda1 hfsplus
-printf '/dev/sda1|hfsplus|%s/vivi|ro,nosuid\n' "$SC5000_MEDIA_ROOT" > "$MOCK_ROOT/mounts"
-mkdir -p "$SC5000_MEDIA_ROOT/vivi/.PIONEER/rekordbox"; touch "$SC5000_MEDIA_ROOT/vivi/.PIONEER/rekordbox/export.pdb"
+printf '/dev/sda1|hfsplus|%s/vivi|ro,nosuid\n' "$ENGINEX_MEDIA_ROOT" > "$MOCK_ROOT/mounts"
+mkdir -p "$ENGINEX_MEDIA_ROOT/vivi/.PIONEER/rekordbox"; touch "$ENGINEX_MEDIA_ROOT/vivi/.PIONEER/rekordbox/export.pdb"
 ACTION=add DEVNAME=/dev/sda1 run_storage
 lacks 'mount ' "$MOCK_ROOT/log"
 lacks 'fsck.hfsplus' "$MOCK_ROOT/log"
@@ -157,8 +157,8 @@ ok 'read-only HFS+ from edisksd is never remounted, checked or written'
 
 fixture
 device sda1 exfat
-printf '/dev/sda1|exfat|%s/STICK|rw,nosuid\n' "$SC5000_MEDIA_ROOT" > "$MOCK_ROOT/mounts"
-mkdir -p "$SC5000_MEDIA_ROOT/STICK/PIONEER/rekordbox"; touch "$SC5000_MEDIA_ROOT/STICK/PIONEER/rekordbox/export.pdb"
+printf '/dev/sda1|exfat|%s/STICK|rw,nosuid\n' "$ENGINEX_MEDIA_ROOT" > "$MOCK_ROOT/mounts"
+mkdir -p "$ENGINEX_MEDIA_ROOT/STICK/PIONEER/rekordbox"; touch "$ENGINEX_MEDIA_ROOT/STICK/PIONEER/rekordbox/export.pdb"
 MOCK_ENGINE_DB=1 run_storage add /dev/sda1
 lacks 'rb-bridge ' "$MOCK_ROOT/log"
 lacks 'engine-guardian ' "$MOCK_ROOT/log"
@@ -168,14 +168,14 @@ ok 'writable export is left to edisksd-hook; the worker never writes databases'
 
 fixture
 device sda1 vfat
-SC5000_MOUNT_WAIT=0 run_storage add /dev/sda1
+ENGINEX_MOUNT_WAIT=0 run_storage add /dev/sda1
 has 'not mounted by edisksd' "$MOCK_ROOT/output"
 lacks 'rb-bridge ' "$MOCK_ROOT/log"
 ok 'device not mounted by edisksd is left alone'
 
 fixture
-mkdir -p "$SC5000_SYS_ROOT/class/block/mmcblk0p7" "$SC5000_SYS_ROOT/class/block/mmcblk0/device"
-printf 'MMC\n' > "$SC5000_SYS_ROOT/class/block/mmcblk0/device/type"
+mkdir -p "$ENGINEX_SYS_ROOT/class/block/mmcblk0p7" "$ENGINEX_SYS_ROOT/class/block/mmcblk0/device"
+printf 'MMC\n' > "$ENGINEX_SYS_ROOT/class/block/mmcblk0/device/type"
 run_storage add /dev/mmcblk0p7
 lacks 'findmnt' "$MOCK_ROOT/log"
 expect_fail sh "$STORAGE" add /dev/../etc/passwd
@@ -184,65 +184,65 @@ run_storage --discover
 ok 'internal eMMC, malformed devices and coldplug discovery are handled safely'
 
 # BH-GC2-5: --discover also matched the whole disk of a partitioned stick (sda next
-# to sda1) and waited the full SC5000_MOUNT_WAIT for edisksd to mount it, which it
+# to sda1) and waited the full ENGINEX_MOUNT_WAIT for edisksd to mount it, which it
 # never does, holding the storage lock. A stick without partitions is still waited for.
 fixture
 device sda1 exfat
-mkdir -p "$SC5000_SYS_ROOT/class/block/sda/sda1"
-printf '/dev/sda1|exfat|%s/STICK|rw,nosuid\n' "$SC5000_MEDIA_ROOT" > "$MOCK_ROOT/mounts"
+mkdir -p "$ENGINEX_SYS_ROOT/class/block/sda/sda1"
+printf '/dev/sda1|exfat|%s/STICK|rw,nosuid\n' "$ENGINEX_MEDIA_ROOT" > "$MOCK_ROOT/mounts"
 start=$(date +%s)
-SC5000_MOUNT_WAIT=3 run_storage --discover
+ENGINEX_MOUNT_WAIT=3 run_storage --discover
 [[ $(( $(date +%s) - start )) -lt 2 ]] || fail 'discover waited for a partitioned whole disk'
 has 'ready: /dev/sda1' "$MOCK_ROOT/output"
 lacks 'not mounted by edisksd: /dev/sda' "$MOCK_ROOT/output"
-mkdir -p "$SC5000_SYS_ROOT/class/block/sdb"
+mkdir -p "$ENGINEX_SYS_ROOT/class/block/sdb"
 start=$(date +%s)
-SC5000_MOUNT_WAIT=1 run_storage add /dev/sdb
+ENGINEX_MOUNT_WAIT=1 run_storage add /dev/sdb
 [[ $(( $(date +%s) - start )) -ge 1 ]] || fail 'a whole disk without partitions must still be waited for'
 has 'not mounted by edisksd: /dev/sdb' "$MOCK_ROOT/output"
 ok 'coldplug discovery skips partitioned whole disks at once; a superfloppy stick is still waited for'
 
 fixture
-mkdir -p "$SC5000_PROC_ROOT/sys/"{vm,fs}
+mkdir -p "$ENGINEX_PROC_ROOT/sys/"{vm,fs}
 for knob in vm/swappiness vm/vfs_cache_pressure vm/dirty_background_ratio vm/dirty_ratio fs/file-max; do
-    printf '99\n' > "$SC5000_PROC_ROOT/sys/$knob"
+    printf '99\n' > "$ENGINEX_PROC_ROOT/sys/$knob"
 done
 for cpu in 0 1 2 3; do
-    dir=$SC5000_SYS_ROOT/devices/system/cpu/cpu$cpu/cpufreq
+    dir=$ENGINEX_SYS_ROOT/devices/system/cpu/cpu$cpu/cpufreq
     mkdir -p "$dir"
     printf 'ondemand\n' > "$dir/scaling_governor"
     printf '1800000\n' > "$dir/cpuinfo_max_freq"
     printf '600000\n' > "$dir/scaling_min_freq"
     printf '1200000\n' > "$dir/scaling_max_freq"
 done
-gpu=$SC5000_SYS_ROOT/class/devfreq/ffa30000.gpu
+gpu=$ENGINEX_SYS_ROOT/class/devfreq/ffa30000.gpu
 mkdir -p "$gpu"
 printf 'performance\n' > "$gpu/governor"
 printf '100000000 200000000 300000000 400000000 600000000\n' > "$gpu/available_frequencies"
 printf '600000000\n' > "$gpu/max_freq"
 printf '600000000\n' > "$gpu/min_freq"
-for dev in sda sdb mmcblk1; do mkdir -p "$SC5000_SYS_ROOT/block/$dev/queue"; done
-printf '[none] mq-deadline kyber\n' > "$SC5000_SYS_ROOT/block/sda/queue/scheduler"
-printf '128\n' > "$SC5000_SYS_ROOT/block/sda/queue/read_ahead_kb"
-printf '7812500000\n' > "$SC5000_SYS_ROOT/block/sdb/size"
-printf '128\n' > "$SC5000_SYS_ROOT/block/sdb/queue/read_ahead_kb"
-printf '[none]\n' > "$SC5000_SYS_ROOT/block/mmcblk1/queue/scheduler"
-mkdir -p "$SC5000_SYS_ROOT/block/mmcblk0/queue" "$SC5000_SYS_ROOT/devices/system/cpu/cpufreq/ondemand"
-printf 'none mq-deadline kyber [bfq]\n' > "$SC5000_SYS_ROOT/block/mmcblk0/queue/scheduler"
-for knob in up_threshold sampling_down_factor ignore_nice_load; do printf '0\n' > "$SC5000_SYS_ROOT/devices/system/cpu/cpufreq/ondemand/$knob"; done
-mkdir -p "$SC5000_SYS_ROOT/devices/virtual/workqueue"
-printf '6\n' > "$SC5000_SYS_ROOT/devices/virtual/workqueue/cpumask"
-printf ' CPU0 CPU1 CPU2 CPU3\n 42: 1 0 0 0 GIC i2s-audio\n 43: 0 1 0 0 GIC ehci\n' > "$SC5000_PROC_ROOT/interrupts"
-printf ' 44: 0 1 0 0 GIC ffa30000.gpu\n 45: 0 1 0 0 GIC ehci_hcd\n 46: 0 1 0 0 GIC ffb20000\n' >> "$SC5000_PROC_ROOT/interrupts"
-printf ' 144: 0 1 0 0 GIC ffa30000.gpu\n 145: 0 1 0 0 GIC ff540000\n 146: 0 1 0 0 GIC ffb20000\n' >> "$SC5000_PROC_ROOT/interrupts"
-printf ' 51: 0 0 1 0 GIC ff650000.i2c\n 52: 0 1 0 0 GIC panfrost-gpu\n 53: 0 1 0 0 GIC ff940000.vop\n 54: 0 1 0 0 GIC panfrost-job\n 55: 0 0 1 0 GIC eth0\n 65: 0 0 1 0 GIC dw-mci\n' >> "$SC5000_PROC_ROOT/interrupts"
-for irq in 42 43 44 45 46 51 52 53 54 55 65 144 145 146; do mkdir -p "$SC5000_PROC_ROOT/irq/$irq"; printf 'f\n' > "$SC5000_PROC_ROOT/irq/$irq/smp_affinity"; done
-mkdir -p "$SC5000_PROC_ROOT/100/task/"{100,101,102} "$SC5000_PROC_ROOT/200"
-ln -s /usr/Engine/Engine "$SC5000_PROC_ROOT/100/exe"
-printf 'EMain\n' > "$SC5000_PROC_ROOT/100/comm"
-printf '/usr/Engine/Engine\n' > "$SC5000_PROC_ROOT/100/cmdline"
-printf 'irq/42-i2s\n' > "$SC5000_PROC_ROOT/200/comm"
-mkdir -p "$SC5000_PROC_ROOT/100/task/"{103,104,105,106,107,108,110}
+for dev in sda sdb mmcblk1; do mkdir -p "$ENGINEX_SYS_ROOT/block/$dev/queue"; done
+printf '[none] mq-deadline kyber\n' > "$ENGINEX_SYS_ROOT/block/sda/queue/scheduler"
+printf '128\n' > "$ENGINEX_SYS_ROOT/block/sda/queue/read_ahead_kb"
+printf '7812500000\n' > "$ENGINEX_SYS_ROOT/block/sdb/size"
+printf '128\n' > "$ENGINEX_SYS_ROOT/block/sdb/queue/read_ahead_kb"
+printf '[none]\n' > "$ENGINEX_SYS_ROOT/block/mmcblk1/queue/scheduler"
+mkdir -p "$ENGINEX_SYS_ROOT/block/mmcblk0/queue" "$ENGINEX_SYS_ROOT/devices/system/cpu/cpufreq/ondemand"
+printf 'none mq-deadline kyber [bfq]\n' > "$ENGINEX_SYS_ROOT/block/mmcblk0/queue/scheduler"
+for knob in up_threshold sampling_down_factor ignore_nice_load; do printf '0\n' > "$ENGINEX_SYS_ROOT/devices/system/cpu/cpufreq/ondemand/$knob"; done
+mkdir -p "$ENGINEX_SYS_ROOT/devices/virtual/workqueue"
+printf '6\n' > "$ENGINEX_SYS_ROOT/devices/virtual/workqueue/cpumask"
+printf ' CPU0 CPU1 CPU2 CPU3\n 42: 1 0 0 0 GIC i2s-audio\n 43: 0 1 0 0 GIC ehci\n' > "$ENGINEX_PROC_ROOT/interrupts"
+printf ' 44: 0 1 0 0 GIC ffa30000.gpu\n 45: 0 1 0 0 GIC ehci_hcd\n 46: 0 1 0 0 GIC ffb20000\n' >> "$ENGINEX_PROC_ROOT/interrupts"
+printf ' 144: 0 1 0 0 GIC ffa30000.gpu\n 145: 0 1 0 0 GIC ff540000\n 146: 0 1 0 0 GIC ffb20000\n' >> "$ENGINEX_PROC_ROOT/interrupts"
+printf ' 51: 0 0 1 0 GIC ff650000.i2c\n 52: 0 1 0 0 GIC panfrost-gpu\n 53: 0 1 0 0 GIC ff940000.vop\n 54: 0 1 0 0 GIC panfrost-job\n 55: 0 0 1 0 GIC eth0\n 65: 0 0 1 0 GIC dw-mci\n' >> "$ENGINEX_PROC_ROOT/interrupts"
+for irq in 42 43 44 45 46 51 52 53 54 55 65 144 145 146; do mkdir -p "$ENGINEX_PROC_ROOT/irq/$irq"; printf 'f\n' > "$ENGINEX_PROC_ROOT/irq/$irq/smp_affinity"; done
+mkdir -p "$ENGINEX_PROC_ROOT/100/task/"{100,101,102} "$ENGINEX_PROC_ROOT/200"
+ln -s /usr/Engine/Engine "$ENGINEX_PROC_ROOT/100/exe"
+printf 'EMain\n' > "$ENGINEX_PROC_ROOT/100/comm"
+printf '/usr/Engine/Engine\n' > "$ENGINEX_PROC_ROOT/100/cmdline"
+printf 'irq/42-i2s\n' > "$ENGINEX_PROC_ROOT/200/comm"
+mkdir -p "$ENGINEX_PROC_ROOT/100/task/"{103,104,105,106,107,108,110}
 for tid in 100 101 102 103 104 105 106 107 108 110; do
     policy=0; name=GUI
     if [[ $tid == 101 ]]; then policy=1; name=AudioRT; fi
@@ -254,46 +254,46 @@ for tid in 100 101 102 103 104 105 106 107 108 110; do
     if [[ $tid == 107 ]]; then name=J:I:Takingfreez; fi
     if [[ $tid == 108 ]]; then name=QQmlThread; fi
     if [[ $tid == 110 ]]; then name=AudioOut; fi # named before its RT policy is set
-    if (( tid >= 103 )); then printf 'Cpus_allowed_list:\t1\n' > "$SC5000_PROC_ROOT/100/task/$tid/status"; fi
-    if [[ $tid == 107 ]]; then printf 'Cpus_allowed_list:\t0-3\n' > "$SC5000_PROC_ROOT/100/task/$tid/status"; fi
-    if [[ $tid == 108 ]]; then printf 'Cpus_allowed_list:\t2\n' > "$SC5000_PROC_ROOT/100/task/$tid/status"; fi
-    printf '%s\n' "$name" > "$SC5000_PROC_ROOT/100/task/$tid/comm"
+    if (( tid >= 103 )); then printf 'Cpus_allowed_list:\t1\n' > "$ENGINEX_PROC_ROOT/100/task/$tid/status"; fi
+    if [[ $tid == 107 ]]; then printf 'Cpus_allowed_list:\t0-3\n' > "$ENGINEX_PROC_ROOT/100/task/$tid/status"; fi
+    if [[ $tid == 108 ]]; then printf 'Cpus_allowed_list:\t2\n' > "$ENGINEX_PROC_ROOT/100/task/$tid/status"; fi
+    printf '%s\n' "$name" > "$ENGINEX_PROC_ROOT/100/task/$tid/comm"
     {
         printf '%s (name with spaces) S' "$tid"
         for ((field=4; field<=40; field++)); do printf ' 0'; done
         printf ' %s\n' "$policy"
-    } > "$SC5000_PROC_ROOT/100/task/$tid/stat"
+    } > "$ENGINEX_PROC_ROOT/100/task/$tid/stat"
 done
 # OfflineAnalyzer can inherit the GUI's single-CPU mask; include its child too.
-mkdir -p "$SC5000_PROC_ROOT/300/task"
-ln -s /usr/Engine/OfflineAnalyzer "$SC5000_PROC_ROOT/300/exe"
-printf '/usr/Engine/OfflineAnalyzer\n' > "$SC5000_PROC_ROOT/300/cmdline"
-cp -r "$SC5000_PROC_ROOT/100/task/105" "$SC5000_PROC_ROOT/300/task/300"
-cp -r "$SC5000_PROC_ROOT/100/task/105" "$SC5000_PROC_ROOT/300/task/301"
+mkdir -p "$ENGINEX_PROC_ROOT/300/task"
+ln -s /usr/Engine/OfflineAnalyzer "$ENGINEX_PROC_ROOT/300/exe"
+printf '/usr/Engine/OfflineAnalyzer\n' > "$ENGINEX_PROC_ROOT/300/cmdline"
+cp -r "$ENGINEX_PROC_ROOT/100/task/105" "$ENGINEX_PROC_ROOT/300/task/300"
+cp -r "$ENGINEX_PROC_ROOT/100/task/105" "$ENGINEX_PROC_ROOT/300/task/301"
 for entry in '201 144-ffa3000' '202 145-ff54000' '203 99-eth0' '204 99-other' '205 146-ffb2000' '206 54-panfrost'; do
     read -r pid name <<< "$entry"
-    mkdir -p "$SC5000_PROC_ROOT/$pid"
-    printf 'irq/%s\n' "$name" > "$SC5000_PROC_ROOT/$pid/comm"
+    mkdir -p "$ENGINEX_PROC_ROOT/$pid"
+    printf 'irq/%s\n' "$name" > "$ENGINEX_PROC_ROOT/$pid/comm"
 done
 sh "$PERF" > "$MOCK_ROOT/output" 2>&1
 for cpu in 0 1 2 3; do
-    has ondemand "$SC5000_SYS_ROOT/devices/system/cpu/cpu$cpu/cpufreq/scaling_governor"
-    has 1200000 "$SC5000_SYS_ROOT/devices/system/cpu/cpu$cpu/cpufreq/scaling_min_freq"
+    has ondemand "$ENGINEX_SYS_ROOT/devices/system/cpu/cpu$cpu/cpufreq/scaling_governor"
+    has 1200000 "$ENGINEX_SYS_ROOT/devices/system/cpu/cpu$cpu/cpufreq/scaling_min_freq"
 done
 has simple_ondemand "$gpu/governor"
 has 300000000 "$gpu/min_freq"
-has 50 "$SC5000_SYS_ROOT/devices/system/cpu/cpufreq/ondemand/up_threshold"
-has 10 "$SC5000_SYS_ROOT/devices/system/cpu/cpufreq/ondemand/sampling_down_factor"
-has '[bfq]' "$SC5000_SYS_ROOT/block/mmcblk0/queue/scheduler"
-has 10 "$SC5000_PROC_ROOT/sys/vm/swappiness"
-has 50 "$SC5000_PROC_ROOT/sys/vm/vfs_cache_pressure"
-has 5 "$SC5000_PROC_ROOT/sys/vm/dirty_background_ratio"
-has 1048576 "$SC5000_PROC_ROOT/sys/fs/file-max"
-has mq-deadline "$SC5000_SYS_ROOT/block/sda/queue/scheduler"
-has 1024 "$SC5000_SYS_ROOT/block/sda/queue/read_ahead_kb"
-has 2048 "$SC5000_SYS_ROOT/block/sdb/queue/read_ahead_kb"
-has none "$SC5000_SYS_ROOT/block/mmcblk1/queue/scheduler"
-has 9 "$SC5000_SYS_ROOT/devices/virtual/workqueue/cpumask"
+has 50 "$ENGINEX_SYS_ROOT/devices/system/cpu/cpufreq/ondemand/up_threshold"
+has 10 "$ENGINEX_SYS_ROOT/devices/system/cpu/cpufreq/ondemand/sampling_down_factor"
+has '[bfq]' "$ENGINEX_SYS_ROOT/block/mmcblk0/queue/scheduler"
+has 10 "$ENGINEX_PROC_ROOT/sys/vm/swappiness"
+has 50 "$ENGINEX_PROC_ROOT/sys/vm/vfs_cache_pressure"
+has 5 "$ENGINEX_PROC_ROOT/sys/vm/dirty_background_ratio"
+has 1048576 "$ENGINEX_PROC_ROOT/sys/fs/file-max"
+has mq-deadline "$ENGINEX_SYS_ROOT/block/sda/queue/scheduler"
+has 1024 "$ENGINEX_SYS_ROOT/block/sda/queue/read_ahead_kb"
+has 2048 "$ENGINEX_SYS_ROOT/block/sdb/queue/read_ahead_kb"
+has none "$ENGINEX_SYS_ROOT/block/mmcblk1/queue/scheduler"
+has 9 "$ENGINEX_SYS_ROOT/devices/virtual/workqueue/cpumask"
 has 'EnvironmentFile=-/etc/default/enginex-perf' "$ROOT/rootfs-overlay/etc/systemd/system/engine.service.d/60-ui-hook.conf"
 has 'Environment=QT_LOGGING_CONF=/data/logging.ini' "$ROOT/rootfs-overlay/etc/systemd/system/engine.service.d/60-ui-hook.conf"
 lacks 'taskset <-pc> <0> <101>' "$MOCK_ROOT/log"
@@ -309,13 +309,13 @@ has 'taskset <-pc> <0,3> <301>' "$MOCK_ROOT/log"
 lacks '> <106>' "$MOCK_ROOT/log"
 lacks '> <110>' "$MOCK_ROOT/log"
 lacks 'chrt <-f> <-p> <40> <106>' "$MOCK_ROOT/log"
-has 1 "$SC5000_PROC_ROOT/irq/42/smp_affinity"
-has 8 "$SC5000_PROC_ROOT/irq/43/smp_affinity"
+has 1 "$ENGINEX_PROC_ROOT/irq/42/smp_affinity"
+has 8 "$ENGINEX_PROC_ROOT/irq/43/smp_affinity"
 has 'taskset <-pc> <0> <200>' "$MOCK_ROOT/log"
 has 'chrt <-f> <-p> <99> <200>' "$MOCK_ROOT/log"
-has 4 "$SC5000_PROC_ROOT/irq/44/smp_affinity"
-has 8 "$SC5000_PROC_ROOT/irq/45/smp_affinity"
-has 1 "$SC5000_PROC_ROOT/irq/46/smp_affinity"
+has 4 "$ENGINEX_PROC_ROOT/irq/44/smp_affinity"
+has 8 "$ENGINEX_PROC_ROOT/irq/45/smp_affinity"
+has 1 "$ENGINEX_PROC_ROOT/irq/46/smp_affinity"
 has 'taskset <-pc> <2> <201>' "$MOCK_ROOT/log"
 has 'taskset <-pc> <3> <202>' "$MOCK_ROOT/log"
 has 'taskset <-pc> <3> <203>' "$MOCK_ROOT/log"
@@ -326,14 +326,14 @@ has 'chrt <-f> <-p> <40> <202>' "$MOCK_ROOT/log"
 has 'chrt <-f> <-p> <40> <206>' "$MOCK_ROOT/log"
 has 'taskset <-pc> <0> <205>' "$MOCK_ROOT/log"
 has 'chrt <-f> <-p> <99> <205>' "$MOCK_ROOT/log"
-has 1 "$SC5000_PROC_ROOT/irq/146/smp_affinity"
-has 4 "$SC5000_PROC_ROOT/irq/144/smp_affinity"
-has 8 "$SC5000_PROC_ROOT/irq/145/smp_affinity"
-for irq in 52 53 54; do has 4 "$SC5000_PROC_ROOT/irq/$irq/smp_affinity"; done
-for irq in 51 55 65; do has 8 "$SC5000_PROC_ROOT/irq/$irq/smp_affinity"; done
-find "$SC5000_SYS_ROOT" "$SC5000_PROC_ROOT" -type f -exec sha256sum {} + | sort > "$MOCK_ROOT/before"
+has 1 "$ENGINEX_PROC_ROOT/irq/146/smp_affinity"
+has 4 "$ENGINEX_PROC_ROOT/irq/144/smp_affinity"
+has 8 "$ENGINEX_PROC_ROOT/irq/145/smp_affinity"
+for irq in 52 53 54; do has 4 "$ENGINEX_PROC_ROOT/irq/$irq/smp_affinity"; done
+for irq in 51 55 65; do has 8 "$ENGINEX_PROC_ROOT/irq/$irq/smp_affinity"; done
+find "$ENGINEX_SYS_ROOT" "$ENGINEX_PROC_ROOT" -type f -exec sha256sum {} + | sort > "$MOCK_ROOT/before"
 sh "$PERF" > "$MOCK_ROOT/output" 2>&1
-find "$SC5000_SYS_ROOT" "$SC5000_PROC_ROOT" -type f -exec sha256sum {} + | sort > "$MOCK_ROOT/after"
+find "$ENGINEX_SYS_ROOT" "$ENGINEX_PROC_ROOT" -type f -exec sha256sum {} + | sort > "$MOCK_ROOT/after"
 cmp -s "$MOCK_ROOT/before" "$MOCK_ROOT/after" || fail 'performance tuning is not idempotent'
 ok 'CPU/GPU, sysctl, schedulers, IRQs and RT-vs-GUI affinity are idempotent'
 
@@ -346,16 +346,16 @@ n=$(cat "$MOCK_ROOT/sleep-count" 2>/dev/null || printf 0)
 n=$((n + 1))
 printf '%s\n' "$n" > "$MOCK_ROOT/sleep-count"
 if [[ $n == 2 ]]; then
-    cp -r "$SC5000_PROC_ROOT/100/task/105" "$SC5000_PROC_ROOT/100/task/109"
-    printf 'event_engine\n' > "$SC5000_PROC_ROOT/100/task/109/comm"
+    cp -r "$ENGINEX_PROC_ROOT/100/task/105" "$ENGINEX_PROC_ROOT/100/task/109"
+    printf 'event_engine\n' > "$ENGINEX_PROC_ROOT/100/task/109/comm"
 elif [[ $n == 3 ]]; then
     printf '%s\n' "$PPID" > "$MOCK_ROOT/sweeper-pid"
-    unlink "$SC5000_PROC_ROOT/100/exe"
+    unlink "$ENGINEX_PROC_ROOT/100/exe"
     touch "$MOCK_ROOT/sweeper-done"
 fi
 SLEEP
 chmod +x "$TMP/bin/sleep"
-SC5000_THREAD_DELAYS=0 SC5000_THREAD_INTERVAL=30 sh "$PERF" > "$MOCK_ROOT/output" 2>&1
+ENGINEX_THREAD_DELAYS=0 ENGINEX_THREAD_INTERVAL=30 sh "$PERF" > "$MOCK_ROOT/output" 2>&1
 for ((attempt=0; attempt<100; attempt++)); do
     [[ ! -e $MOCK_ROOT/sweeper-done ]] || break
     /bin/sleep 0.05
@@ -370,7 +370,7 @@ done
 [[ -z $sweeper_state || $sweeper_state == Z ]] || fail 'sweeper survived Engine exit'
 has 'taskset <-pc> <0,3> <109>' "$MOCK_ROOT/log"
 unlink "$TMP/bin/sleep"
-ln -s /usr/Engine/Engine "$SC5000_PROC_ROOT/100/exe"
+ln -s /usr/Engine/Engine "$ENGINEX_PROC_ROOT/100/exe"
 ok 'late helpers leave the GUI core and the sweeper stops with Engine'
 # BH-GC2-16: the vendor script restarts Engine in its own loop under a new PID. The sweeper kept
 # checking the old one and stopped; it must find the new Engine and keep sweeping its threads.
@@ -382,27 +382,27 @@ n=$(cat "$MOCK_ROOT/sleep-count" 2>/dev/null || printf 0)
 n=$((n + 1))
 printf '%s\n' "$n" > "$MOCK_ROOT/sleep-count"
 if [[ $n == 2 ]]; then
-    unlink "$SC5000_PROC_ROOT/100/exe"
-    mkdir -p "$SC5000_PROC_ROOT/400/task"
-    ln -s /usr/Engine/Engine "$SC5000_PROC_ROOT/400/exe"
-    printf '/usr/Engine/Engine\n' > "$SC5000_PROC_ROOT/400/cmdline"
-    cp -r "$SC5000_PROC_ROOT/100/task/100" "$SC5000_PROC_ROOT/400/task/400"
-    cp -r "$SC5000_PROC_ROOT/100/task/105" "$SC5000_PROC_ROOT/400/task/401"
-    printf 'event_engine\n' > "$SC5000_PROC_ROOT/400/task/401/comm"
+    unlink "$ENGINEX_PROC_ROOT/100/exe"
+    mkdir -p "$ENGINEX_PROC_ROOT/400/task"
+    ln -s /usr/Engine/Engine "$ENGINEX_PROC_ROOT/400/exe"
+    printf '/usr/Engine/Engine\n' > "$ENGINEX_PROC_ROOT/400/cmdline"
+    cp -r "$ENGINEX_PROC_ROOT/100/task/100" "$ENGINEX_PROC_ROOT/400/task/400"
+    cp -r "$ENGINEX_PROC_ROOT/100/task/105" "$ENGINEX_PROC_ROOT/400/task/401"
+    printf 'event_engine\n' > "$ENGINEX_PROC_ROOT/400/task/401/comm"
 elif [[ $n == 3 ]]; then
-    unlink "$SC5000_PROC_ROOT/400/exe"
+    unlink "$ENGINEX_PROC_ROOT/400/exe"
     touch "$MOCK_ROOT/sweeper-done"
 fi
 SLEEP
 chmod +x "$TMP/bin/sleep"
-SC5000_THREAD_DELAYS=0 SC5000_THREAD_INTERVAL=30 sh "$PERF" > "$MOCK_ROOT/output" 2>&1
+ENGINEX_THREAD_DELAYS=0 ENGINEX_THREAD_INTERVAL=30 sh "$PERF" > "$MOCK_ROOT/output" 2>&1
 for ((attempt=0; attempt<60; attempt++)); do
     [[ ! -e $MOCK_ROOT/sweeper-done ]] || break
     /bin/sleep 0.05
 done
 unlink "$TMP/bin/sleep"
-rm -rf "$SC5000_PROC_ROOT/400"
-ln -s /usr/Engine/Engine "$SC5000_PROC_ROOT/100/exe"
+rm -rf "$ENGINEX_PROC_ROOT/400"
+ln -s /usr/Engine/Engine "$ENGINEX_PROC_ROOT/100/exe"
 has 'taskset <-pc> <0,3> <401>' "$MOCK_ROOT/log"
 ok 'the thread sweeper follows Engine across an in-loop restart under a new PID (BH-GC2-16)'
 
@@ -420,8 +420,8 @@ has 'taskset <-pc> <2> <103>' "$MOCK_ROOT/log"
 ok 'the Engine thread sweep reads /proc with shell builtins'
 
 # Hot at Engine start: the GPU idles at its lowest clock.
-mkdir -p "$SC5000_SYS_ROOT/class/thermal/thermal_zone0"
-printf '90000\n' > "$SC5000_SYS_ROOT/class/thermal/thermal_zone0/temp"
+mkdir -p "$ENGINEX_SYS_ROOT/class/thermal/thermal_zone0"
+printf '90000\n' > "$ENGINEX_SYS_ROOT/class/thermal/thermal_zone0/temp"
 sh "$PERF" > "$MOCK_ROOT/output" 2>&1
 has 100000000 "$gpu/min_freq"
 ok 'a hot deck keeps the lowest GPU clock'
@@ -459,7 +459,7 @@ ok 'device scripts run under /bin/sh'
 suite_share=$TMP/suite-share suite_dir=$TMP/suite-bin
 mkdir -p "$suite_share"
 printf '#!/bin/sh\necho image-1 "$@"\n' | gzip -c > "$suite_share/enginex-suite.gz"
-run_suite() { SC5000_SUITE_SHARE=$suite_share SC5000_SUITE_DIR=$suite_dir sh "$ROOT/rootfs-overlay/usr/local/bin/enginex-suite-exec" x; }
+run_suite() { ENGINEX_SUITE_SHARE=$suite_share ENGINEX_SUITE_DIR=$suite_dir sh "$ROOT/rootfs-overlay/usr/local/bin/enginex-suite-exec" x; }
 [[ $(run_suite) == 'image-1 x' ]] || fail 'suite archive is unpacked on first start'
 printf '#!/bin/sh\necho hand "$@"\n' > "$suite_dir/enginex-suite"
 touch -t 200001010000 "$suite_dir/enginex-suite"
@@ -514,60 +514,60 @@ has 'feature_disable=0x82004' "$ROOT/rootfs-overlay/usr/lib/modprobe.d/brcmfmac.
 ok 'stock connman online check, read-only HFS+, rootfs brcmfmac options'
 
 GUARD=$ROOT/rootfs-overlay/etc/enginex/engine-ui-guard
-export SC5000_UI_DIR=$TMP/ui-guard SC5000_STREAMING_ACCOUNTS=$TMP/StreamingAccounts.json
-export SC5000_ENGINE_DATA_DIR=$TMP/engine-data SC5000_GUARD_PRE_MARK=$TMP/guard-pre-mark
+export ENGINEX_UI_DIR=$TMP/ui-guard ENGINEX_STREAMING_ACCOUNTS=$TMP/StreamingAccounts.json
+export ENGINEX_ENGINE_DATA_DIR=$TMP/engine-data ENGINEX_GUARD_PRE_MARK=$TMP/guard-pre-mark
 # #56: every start leaves Engine a TIDAL account entry (valid JSON, other accounts
 # kept) unless TIDAL itself is the selected service.
-tidal_entry() { python3 -c 'import json,sys; a=json.load(open(sys.argv[1])); d=json.loads(a["TIDAL"]); assert d["providerType"] == "TIDAL" and d.get("accessToken") == "enginex" and d.get("refreshToken") == "enginex"; print(len(a))' "$SC5000_STREAMING_ACCOUNTS"; }
+tidal_entry() { python3 -c 'import json,sys; a=json.load(open(sys.argv[1])); d=json.loads(a["TIDAL"]); assert d["providerType"] == "TIDAL" and d.get("accessToken") == "enginex" and d.get("refreshToken") == "enginex"; print(len(a))' "$ENGINEX_STREAMING_ACCOUNTS"; }
 sh "$GUARD" pre; [[ $(tidal_entry) == 1 ]] || fail 'guard must create the TIDAL account entry with non-SSO tokens (#159)'
-printf '{\n    "SoundCloud": "{\\"provider\\":\\"SoundCloud\\"}"\n}\n' > "$SC5000_STREAMING_ACCOUNTS"
+printf '{\n    "SoundCloud": "{\\"provider\\":\\"SoundCloud\\"}"\n}\n' > "$ENGINEX_STREAMING_ACCOUNTS"
 sh "$GUARD" pre; [[ $(tidal_entry) == 2 ]] || fail 'guard must add TIDAL beside other accounts'
-printf '{\n    "TIDAL": "{\\"provider\\":\\"TIDAL\\",\\"providerType\\":\\"TIDAL\\"}"\n}\n' > "$SC5000_STREAMING_ACCOUNTS"
+printf '{\n    "TIDAL": "{\\"provider\\":\\"TIDAL\\",\\"providerType\\":\\"TIDAL\\"}"\n}\n' > "$ENGINEX_STREAMING_ACCOUNTS"
 sh "$GUARD" pre; [[ $(tidal_entry) == 1 ]] || fail 'guard must upgrade legacy tokenless TIDAL entry (#159)'
-cp "$SC5000_STREAMING_ACCOUNTS" "$TMP/accounts.before"; sh "$GUARD" pre
-cmp -s "$TMP/accounts.before" "$SC5000_STREAMING_ACCOUNTS" || fail 'guard must leave an existing TIDAL entry alone'
-rm "$SC5000_STREAMING_ACCOUNTS"; mkdir -p "$SC5000_UI_DIR"; echo scope=tidal > "$SC5000_UI_DIR/settings.conf"
-sh "$GUARD" pre; [[ ! -e $SC5000_STREAMING_ACCOUNTS ]] || fail 'guard must not touch accounts while TIDAL is selected'
+cp "$ENGINEX_STREAMING_ACCOUNTS" "$TMP/accounts.before"; sh "$GUARD" pre
+cmp -s "$TMP/accounts.before" "$ENGINEX_STREAMING_ACCOUNTS" || fail 'guard must leave an existing TIDAL entry alone'
+rm "$ENGINEX_STREAMING_ACCOUNTS"; mkdir -p "$ENGINEX_UI_DIR"; echo scope=tidal > "$ENGINEX_UI_DIR/settings.conf"
+sh "$GUARD" pre; [[ ! -e $ENGINEX_STREAMING_ACCOUNTS ]] || fail 'guard must not touch accounts while TIDAL is selected'
 # #224: disabled TIDAL cannot retain stale upstream routing across boot.
-printf 'scope=tidal\nsources=spotify,netease\n' > "$SC5000_UI_DIR/settings.conf"
+printf 'scope=tidal\nsources=spotify,netease\n' > "$ENGINEX_UI_DIR/settings.conf"
 sh "$GUARD" pre
-! grep -qx 'scope=tidal' "$SC5000_UI_DIR/settings.conf" || fail 'disabled TIDAL retained stale scope'
+! grep -qx 'scope=tidal' "$ENGINEX_UI_DIR/settings.conf" || fail 'disabled TIDAL retained stale scope'
 [[ $(tidal_entry) == 1 ]] || fail 'disabled TIDAL must seed the gateway account'
 has 'Wants=stream-sync.service' "$ROOT/rootfs-overlay/etc/systemd/system/engine.service.d/60-ui-hook.conf"
 has 'After=stream-sync.service' "$ROOT/rootfs-overlay/etc/systemd/system/engine.service.d/60-ui-hook.conf"
-rm -rf "$SC5000_UI_DIR"
+rm -rf "$ENGINEX_UI_DIR"
 for _ in 1 2 3; do SERVICE_RESULT=success sh "$GUARD" stop; sh "$GUARD" pre; done
-[[ ! -e $SC5000_UI_DIR/safe-mode && $(cat "$SC5000_UI_DIR/boot-count") == 1 ]] || fail 'clean restarts must not reach safe-mode'
+[[ ! -e $ENGINEX_UI_DIR/safe-mode && $(cat "$ENGINEX_UI_DIR/boot-count") == 1 ]] || fail 'clean restarts must not reach safe-mode'
 for result in signal core-dump exit-code; do SERVICE_RESULT=$result sh "$GUARD" stop; sh "$GUARD" pre; done
-[[ -e $SC5000_UI_DIR/safe-mode ]] || fail 'three crashed starts must enter safe-mode'
+[[ -e $ENGINEX_UI_DIR/safe-mode ]] || fail 'three crashed starts must enter safe-mode'
 # #140: a corrupt Qt QML cache must not survive a crash, safe-mode or a hung/hard-powered-off start (boot-token left).
-SERVICE_RESULT=signal sh "$GUARD" stop; mkdir -p "$SC5000_ENGINE_DATA_DIR/.cache/qml" "$SC5000_UI_DIR/qml-cache"; sh "$GUARD" pre
-[[ ! -e $SC5000_ENGINE_DATA_DIR/.cache/qml && ! -e $SC5000_UI_DIR/qml-cache ]] || fail 'a crashed start must clear both QML disk caches'
-rm -f "$SC5000_UI_DIR"/*; mkdir -p "$SC5000_ENGINE_DATA_DIR/.cache/qml" "$SC5000_UI_DIR/qml-cache"; sh "$GUARD" pre
-[[ -d $SC5000_UI_DIR/qml-cache && ! -e $SC5000_ENGINE_DATA_DIR/.cache/qml ]] || fail 'a clean start must keep EngineX bytecode and drop the legacy shared cache before stock handback'
-sh "$GUARD" post; mkdir -p "$SC5000_ENGINE_DATA_DIR/.cache/qml" "$SC5000_UI_DIR/qml-cache"; sh "$GUARD" pre
-[[ ! -e $SC5000_ENGINE_DATA_DIR/.cache/qml && ! -e $SC5000_UI_DIR/qml-cache && $(cat "$SC5000_UI_DIR/boot-count") == 2 ]] || fail 'a leftover boot-token must count as a crash and clear both QML caches'
+SERVICE_RESULT=signal sh "$GUARD" stop; mkdir -p "$ENGINEX_ENGINE_DATA_DIR/.cache/qml" "$ENGINEX_UI_DIR/qml-cache"; sh "$GUARD" pre
+[[ ! -e $ENGINEX_ENGINE_DATA_DIR/.cache/qml && ! -e $ENGINEX_UI_DIR/qml-cache ]] || fail 'a crashed start must clear both QML disk caches'
+rm -f "$ENGINEX_UI_DIR"/*; mkdir -p "$ENGINEX_ENGINE_DATA_DIR/.cache/qml" "$ENGINEX_UI_DIR/qml-cache"; sh "$GUARD" pre
+[[ -d $ENGINEX_UI_DIR/qml-cache && ! -e $ENGINEX_ENGINE_DATA_DIR/.cache/qml ]] || fail 'a clean start must keep EngineX bytecode and drop the legacy shared cache before stock handback'
+sh "$GUARD" post; mkdir -p "$ENGINEX_ENGINE_DATA_DIR/.cache/qml" "$ENGINEX_UI_DIR/qml-cache"; sh "$GUARD" pre
+[[ ! -e $ENGINEX_ENGINE_DATA_DIR/.cache/qml && ! -e $ENGINEX_UI_DIR/qml-cache && $(cat "$ENGINEX_UI_DIR/boot-count") == 2 ]] || fail 'a leftover boot-token must count as a crash and clear both QML caches'
 # #140: power cut after a healthy start (no stop hook, no boot-token) still drops the cache but is no crash.
-rm -f "$SC5000_UI_DIR"/*; sh "$GUARD" pre; mkdir -p "$SC5000_ENGINE_DATA_DIR/.cache/qml" "$SC5000_UI_DIR/qml-cache"; sh "$GUARD" pre
-[[ ! -e $SC5000_ENGINE_DATA_DIR/.cache/qml && ! -e $SC5000_UI_DIR/qml-cache && $(cat "$SC5000_UI_DIR/boot-count") == 1 ]] || fail 'a start without a stop hook must clear both QML caches without counting a crash'
+rm -f "$ENGINEX_UI_DIR"/*; sh "$GUARD" pre; mkdir -p "$ENGINEX_ENGINE_DATA_DIR/.cache/qml" "$ENGINEX_UI_DIR/qml-cache"; sh "$GUARD" pre
+[[ ! -e $ENGINEX_ENGINE_DATA_DIR/.cache/qml && ! -e $ENGINEX_UI_DIR/qml-cache && $(cat "$ENGINEX_UI_DIR/boot-count") == 1 ]] || fail 'a start without a stop hook must clear both QML caches without counting a crash'
 # BH-F52-4: a second-generation boot starts the stock Engine, and boot-activate restarts it into the
 # hooked one. That clean stop of an instance that never ran `pre` this boot must leave the previous
 # boot's evidence (an unacknowledged start, a running-sentinel left by a power cut) for `pre`.
-rm -rf "$SC5000_UI_DIR"; mkdir -p "$SC5000_UI_DIR/qml-cache" "$SC5000_ENGINE_DATA_DIR/.cache/qml"
-echo tok > "$SC5000_UI_DIR/boot-token"; : > "$SC5000_UI_DIR/running-sentinel"
-echo 2 > "$SC5000_UI_DIR/boot-failures"; date +%s > "$SC5000_UI_DIR/boot-window"
-rm -f "$SC5000_GUARD_PRE_MARK"   # a new boot
+rm -rf "$ENGINEX_UI_DIR"; mkdir -p "$ENGINEX_UI_DIR/qml-cache" "$ENGINEX_ENGINE_DATA_DIR/.cache/qml"
+echo tok > "$ENGINEX_UI_DIR/boot-token"; : > "$ENGINEX_UI_DIR/running-sentinel"
+echo 2 > "$ENGINEX_UI_DIR/boot-failures"; date +%s > "$ENGINEX_UI_DIR/boot-window"
+rm -f "$ENGINEX_GUARD_PRE_MARK"   # a new boot
 SERVICE_RESULT=success sh "$GUARD" stop; sh "$GUARD" pre
-[[ -e $SC5000_UI_DIR/safe-mode && ! -e $SC5000_ENGINE_DATA_DIR/.cache/qml && ! -e $SC5000_UI_DIR/qml-cache ]] ||
+[[ -e $ENGINEX_UI_DIR/safe-mode && ! -e $ENGINEX_ENGINE_DATA_DIR/.cache/qml && ! -e $ENGINEX_UI_DIR/qml-cache ]] ||
     fail 'the stock Engine stop before the hooked start must not erase the last boot crash evidence (BH-F52-4)'
-rm -f "$SC5000_UI_DIR"/*; SERVICE_RESULT=success sh "$GUARD" stop; sh "$GUARD" pre   # this boot's own clean restart
-[[ ! -e $SC5000_UI_DIR/safe-mode && $(cat "$SC5000_UI_DIR/boot-count") == 1 ]] || fail 'a clean restart after pre must still reset the state'
+rm -f "$ENGINEX_UI_DIR"/*; SERVICE_RESULT=success sh "$GUARD" stop; sh "$GUARD" pre   # this boot's own clean restart
+[[ ! -e $ENGINEX_UI_DIR/safe-mode && $(cat "$ENGINEX_UI_DIR/boot-count") == 1 ]] || fail 'a clean restart after pre must still reset the state'
 ok 'a second-generation boot keeps the last boot crash and power-cut evidence across the stock Engine handover (BH-F52-4)'
 # BH-GF3-6: the UAC2 gadget offers the computer the sample rate chosen in the Web Console (it was
 # always 48000), also when the gadget already exists; an unsupported rate is refused.
 USB_AUDIO=$ROOT/rootfs-overlay/usr/sbin/enginex-usb-audio
 mkdir -p "$TMP/configfs/usb_gadget" "$TMP/udc/fe800000.usb"
-usb_audio() { SC5000_CONFIGFS=$TMP/configfs SC5000_UDC_CLASS=$TMP/udc sh "$USB_AUDIO" "$@" >/dev/null; }
+usb_audio() { ENGINEX_CONFIGFS=$TMP/configfs ENGINEX_UDC_CLASS=$TMP/udc sh "$USB_AUDIO" "$@" >/dev/null; }
 srate=$TMP/configfs/usb_gadget/enginex_uac2/functions/uac2.usb0/c_srate
 usb_audio enable-uac2 96000; [[ $(cat "$srate") == 96000 && $(cat "$TMP/configfs/usb_gadget/enginex_uac2/UDC") == fe800000.usb ]] ||
     fail 'enable-uac2 must set the chosen sample rate and bind the gadget'
@@ -575,48 +575,48 @@ usb_audio enable-uac2 44100; [[ $(cat "$srate") == 44100 ]] || fail 'enable-uac2
 usb_audio enable-uac2; [[ $(cat "$srate") == 48000 ]] || fail 'enable-uac2 without a rate keeps the 48000 default'
 ! usb_audio enable-uac2 12345 2>/dev/null || fail 'enable-uac2 must refuse an unsupported rate'
 ok 'the USB-B audio gadget offers the sample rate chosen in the Web Console (BH-GF3-6)'
-SERVICE_RESULT=success sh "$GUARD" stop; mkdir -p "$SC5000_ENGINE_DATA_DIR/.cache/qml" "$SC5000_UI_DIR/qml-cache"; sh "$GUARD" pre
-[[ -d $SC5000_UI_DIR/qml-cache && ! -e $SC5000_ENGINE_DATA_DIR/.cache/qml ]] || fail 'a clean stop must keep EngineX bytecode and leave no legacy shared cache'
+SERVICE_RESULT=success sh "$GUARD" stop; mkdir -p "$ENGINEX_ENGINE_DATA_DIR/.cache/qml" "$ENGINEX_UI_DIR/qml-cache"; sh "$GUARD" pre
+[[ -d $ENGINEX_UI_DIR/qml-cache && ! -e $ENGINEX_ENGINE_DATA_DIR/.cache/qml ]] || fail 'a clean stop must keep EngineX bytecode and leave no legacy shared cache'
 # #140: the healthy timer leaves the token when Engine is gone, so the next pre counts a crash.
-SC5000_UI_HEALTHY_AFTER=1 SC5000_UI_ALIVE_CMD=false sh "$GUARD" post; sleep 1.5
-[[ -e $SC5000_UI_DIR/boot-token ]] || fail 'a dead Engine must not clear boot-token'
+ENGINEX_UI_HEALTHY_AFTER=1 ENGINEX_UI_ALIVE_CMD=false sh "$GUARD" post; sleep 1.5
+[[ -e $ENGINEX_UI_DIR/boot-token ]] || fail 'a dead Engine must not clear boot-token'
 # #140: a hung engine-guardian must not block Engine start.
 if command -v timeout >/dev/null; then
     printf '#!/bin/sh\nsleep 60\n' > "$TMP/slow-guardian"; chmod +x "$TMP/slow-guardian"
-    start=$SECONDS; SC5000_ENGINE_GUARDIAN=$TMP/slow-guardian sh "$GUARD" pre
+    start=$SECONDS; ENGINEX_ENGINE_GUARDIAN=$TMP/slow-guardian sh "$GUARD" pre
     (( SECONDS - start < 20 )) || fail 'guard pre must time out a hung engine-guardian'
 fi
 # #246: engine-ui-guard pre must pass --normalize-reserve and --fix-mp3-grids to engine-guardian.
 printf '#!/bin/sh\nprintf "%%s\\n" "$*" > "%s/guardian-pre.args"\n' "$TMP" > "$TMP/record-guardian"; chmod +x "$TMP/record-guardian"
-SC5000_ENGINE_GUARDIAN=$TMP/record-guardian sh "$GUARD" pre
+ENGINEX_ENGINE_GUARDIAN=$TMP/record-guardian sh "$GUARD" pre
 grep -Fq -- "--normalize-reserve --fix-mp3-grids" "$TMP/guardian-pre.args" || fail 'guard pre must pass --normalize-reserve --fix-mp3-grids to engine-guardian'
 # #7: a crashed start's timer must not reset the streak of the starts after it.
-rm -f "$SC5000_UI_DIR"/*
-export SC5000_UI_HEALTHY_AFTER=1 SC5000_UI_ALIVE_CMD=true
+rm -f "$ENGINEX_UI_DIR"/*
+export ENGINEX_UI_HEALTHY_AFTER=1 ENGINEX_UI_ALIVE_CMD=true
 sh "$GUARD" pre; sh "$GUARD" post
 SERVICE_RESULT=signal sh "$GUARD" stop; sh "$GUARD" pre
 sleep 1.5
-[[ $(cat "$SC5000_UI_DIR/boot-count") == 2 ]] || fail 'stale timer reset the crash streak'
+[[ $(cat "$ENGINEX_UI_DIR/boot-count") == 2 ]] || fail 'stale timer reset the crash streak'
 sh "$GUARD" post; sleep 1.5
-[[ -e $SC5000_UI_DIR/boot-count ]] || fail 'uptime alone must not clear a boot without UI readiness'
-token=$(cat "$SC5000_UI_DIR/boot-token")
+[[ -e $ENGINEX_UI_DIR/boot-count ]] || fail 'uptime alone must not clear a boot without UI readiness'
+token=$(cat "$ENGINEX_UI_DIR/boot-token")
 sh "$GUARD" ready "$token"
-SC5000_BOOT_POLL_INTERVAL=.1 sh "$GUARD" watch > "$TMP/ui-watch.log" 2>&1 & ui_watch=$!
+ENGINEX_BOOT_POLL_INTERVAL=.1 sh "$GUARD" watch > "$TMP/ui-watch.log" 2>&1 & ui_watch=$!
 sleep .3
 kill "$ui_watch"; wait "$ui_watch" || :
-[[ ! -e $SC5000_UI_DIR/boot-count ]] || fail 'only the current UI-ready attempt may clear boot-count'
+[[ ! -e $ENGINEX_UI_DIR/boot-count ]] || fail 'only the current UI-ready attempt may clear boot-count'
 # #140 (b82197b): a power cut after a UI-ready start leaves running-sentinel; the second boot
 # purges the possibly truncated QML cache and is no crash.
-[[ -e $SC5000_UI_DIR/running-sentinel ]] || fail 'healthy start before power cut must keep running-sentinel'
-mkdir -p "$SC5000_ENGINE_DATA_DIR/.cache/qml" "$SC5000_UI_DIR/qml-cache"
-printf truncated > "$SC5000_ENGINE_DATA_DIR/.cache/qml/powercut.qmlc"
-printf corrupt > "$SC5000_UI_DIR/qml-cache/powercut.qmlc"
+[[ -e $ENGINEX_UI_DIR/running-sentinel ]] || fail 'healthy start before power cut must keep running-sentinel'
+mkdir -p "$ENGINEX_ENGINE_DATA_DIR/.cache/qml" "$ENGINEX_UI_DIR/qml-cache"
+printf truncated > "$ENGINEX_ENGINE_DATA_DIR/.cache/qml/powercut.qmlc"
+printf corrupt > "$ENGINEX_UI_DIR/qml-cache/powercut.qmlc"
 sh "$GUARD" pre
-[[ ! -e $SC5000_ENGINE_DATA_DIR/.cache/qml && ! -e $SC5000_UI_DIR/qml-cache && ! -e $SC5000_UI_DIR/safe-mode && $(cat "$SC5000_UI_DIR/boot-count") == 1 && -e $SC5000_UI_DIR/running-sentinel ]] ||
+[[ ! -e $ENGINEX_ENGINE_DATA_DIR/.cache/qml && ! -e $ENGINEX_UI_DIR/qml-cache && ! -e $ENGINEX_UI_DIR/safe-mode && $(cat "$ENGINEX_UI_DIR/boot-count") == 1 && -e $ENGINEX_UI_DIR/running-sentinel ]] ||
     fail 'second boot after healthy power cut must purge .cache/qml without entering safe-mode'
 has '--phase boot2' "$ROOT/tools/az01-packer/release-gate.sh"
 has 'boot2: main UI acknowledged the current boot attempt' "$ROOT/tools/az01-packer/release-gate.sh"
-unset SC5000_UI_HEALTHY_AFTER SC5000_UI_ALIVE_CMD
+unset ENGINEX_UI_HEALTHY_AFTER ENGINEX_UI_ALIVE_CMD
 # Quit reasons the stock script exits 0 after: the guard must restart Engine unless
 # the system is already rebooting (FactoryReset when az01-update --erase-data worked).
 mkdir -p "$TMP/guard-bin"
@@ -626,17 +626,17 @@ echo "$*" >> "$GUARD_LOG"
 [ "$1" != is-system-running ] || echo "$GUARD_STATE"
 MOCK
 chmod +x "$TMP/guard-bin/systemctl"
-export SC5000_QUIT_REASON_FILE=$TMP/quit-reason GUARD_LOG=$TMP/guard-log
+export ENGINEX_QUIT_REASON_FILE=$TMP/quit-reason GUARD_LOG=$TMP/guard-log
 for case in 'FactoryReset running 1' 'FactoryReset degraded 1' 'FactoryReset stopping 0' 'UpdateFromFile running 1' 'UpdateFromFile stopping 0' 'UpdateFromUrl running 0' 'AnalyticsChange stopping 1' 'Poweroff running 0' ' running 0'; do
     set -- $case; [[ $# == 3 ]] || set -- '' "$@"
-    [[ -z $1 ]] && rm -f "$SC5000_QUIT_REASON_FILE" || echo "$1" > "$SC5000_QUIT_REASON_FILE"
+    [[ -z $1 ]] && rm -f "$ENGINEX_QUIT_REASON_FILE" || echo "$1" > "$ENGINEX_QUIT_REASON_FILE"
     : > "$GUARD_LOG"
     GUARD_STATE=$2 SERVICE_RESULT=success PATH=$TMP/guard-bin:$PATH sh "$GUARD" stop
     started=$(grep -c '^start --no-block engine.service$' "$GUARD_LOG" || :)
     [[ $started == "$3" ]] || fail "guard stop reason='$1' state=$2 started=$started want $3"
-    if [[ $3 == 1 && -e $SC5000_QUIT_REASON_FILE ]]; then fail "guard must consume quit reason $1"; fi
+    if [[ $3 == 1 && -e $ENGINEX_QUIT_REASON_FILE ]]; then fail "guard must consume quit reason $1"; fi
 done
-unset SC5000_QUIT_REASON_FILE GUARD_LOG
+unset ENGINEX_QUIT_REASON_FILE GUARD_LOG
 # #49: in the 4-deck layout the guard binds, per start, a player's assignment file for
 # its role (bindings only: the assignment loader rejects handlers); off, the stock file.
 assign=$TMP/assign; mkdir -p "$assign/JP07" "$assign/JP13" "$TMP/ui-roles"
@@ -656,11 +656,11 @@ grep -qxF "$2" "$GUARD_LOG.bound" 2>/dev/null
 MOCK
 chmod +x "$TMP/guard-bin/mount" "$TMP/guard-bin/umount" "$TMP/guard-bin/mountpoint"
 printf '{\n  "Player": {\n    "string": "2",\n    "type": 4\n  }\n}\n' > "$TMP/planck-state.json"
-export GUARD_LOG=$TMP/guard-log SC5000_ASSIGNMENT_DIR=$assign SC5000_ASSIGNMENT_PATCHED=$TMP/assign-patched SC5000_PLANCK_STATE=$TMP/planck-state.json
+export GUARD_LOG=$TMP/guard-log ENGINEX_ASSIGNMENT_DIR=$assign ENGINEX_ASSIGNMENT_PATCHED=$TMP/assign-patched ENGINEX_PLANCK_STATE=$TMP/planck-state.json
 j=$TMP/assign-patched/JP07_Controller_Assignments.qml
 role_case() { # <four_deck_role or ""> <resolved role> <group in the name binding> <LAYER: stock|own|none>
     printf 'four_deck_waveform=1\n%s\n' "${1:+four_deck_role=$1}" > "$TMP/ui-roles/settings.conf"
-    SC5000_UI_DIR=$TMP/ui-roles PATH=$TMP/guard-bin:$PATH sh "$GUARD" pre
+    ENGINEX_UI_DIR=$TMP/ui-roles PATH=$TMP/guard-bin:$PATH sh "$GUARD" pre
     [[ $(cat "$TMP/assign-patched/role") == "$2" ]] || fail "role '$1' resolved to $(cat "$TMP/assign-patched/role"), want $2"
     [[ $(grep -c '^mount --bind' "$GUARD_LOG") == 1 ]] || fail "role '$1': want exactly one bind"
     grep -A2 '^        id: deckConfig$' "$j" | grep -q "name: Config.device.isPlayer ? \"\" : $3" || fail "role '$1': name binding"
@@ -686,7 +686,7 @@ role_case 1 1 '"Left"' none
 role_case 2 2 '"Right"' none
 # FOOLPROOF (#49/#123): auto maps odd Player -> 13, even -> 24, with or without any paired-player file; never 12
 player_state() { printf '{\n  "Player": {\n    "string": "%s",\n    "type": 4\n  }\n}\n' "$1" > "$TMP/planck-state.json"; }
-export SC5000_PAIRED_PLAYER=$TMP/paired-player
+export ENGINEX_PAIRED_PLAYER=$TMP/paired-player
 for paired in absent present; do
     rm -f "$TMP/paired-player"; [[ $paired == absent ]] || touch "$TMP/paired-player"
     for mode in '' auto; do
@@ -695,10 +695,10 @@ for paired in absent present; do
     done
 done
 rm -f "$TMP/paired-player"
-unset SC5000_PAIRED_PLAYER
+unset ENGINEX_PAIRED_PLAYER
 [[ ! -e $TMP/assign-patched/JP13_Controller_Assignments.qml ]] || fail 'an unpatchable file must not be bound'
 printf 'lang=en\n' > "$TMP/ui-roles/settings.conf"
-SC5000_UI_DIR=$TMP/ui-roles PATH=$TMP/guard-bin:$PATH sh "$GUARD" pre
+ENGINEX_UI_DIR=$TMP/ui-roles PATH=$TMP/guard-bin:$PATH sh "$GUARD" pre
 has "umount $assign/JP07/JP07_Controller_Assignments.qml" "$GUARD_LOG"
 if grep -q '^mount --bind' "$GUARD_LOG"; then fail 'the 4-deck layout off must leave the stock assignment files'; fi
 # Settings copy refreshes derived controls without replaying recovery or recoloring.
@@ -716,28 +716,28 @@ cat > "$TMP/copy-state/PlanckClientState.json" <<'JSON'
 JSON
 printf '{"data":{"GUI":{"childorder":["ShowLayerB"],"children":{"ShowLayerB":{"state":false,"type":1}}}}}\n' > "$TMP/copy-state/PlanckGuiState.json"
 : > "$GUARD_LOG"
-SC5000_UI_DIR=$TMP/ui-copy SC5000_STATE_DIR=$TMP/copy-state PATH=$TMP/guard-bin:$PATH sh "$GUARD" settings
+ENGINEX_UI_DIR=$TMP/ui-copy ENGINEX_STATE_DIR=$TMP/copy-state PATH=$TMP/guard-bin:$PATH sh "$GUARD" settings
 has '"color": "#ff000000"' "$TMP/copy-state/PlanckClientState.json"
 [[ $(cat "$TMP/assign-patched/role") == 24 ]] || fail 'settings copy lost the receiver role'
 [[ $(cat "$TMP/ui-copy/boot-token") == copy-token && $(cat "$TMP/ui-copy/boot-count") == 7 && -f $TMP/ui-copy/qml-cache/keep ]] || fail 'settings refresh replayed crash recovery'
 cp "$TMP/copy-state/PlanckGuiState.json" "$TMP/copy-state/before"
 touch "$TMP/ui-copy/safe-mode"
 : > "$GUARD_LOG"
-SC5000_UI_DIR=$TMP/ui-copy SC5000_STATE_DIR=$TMP/copy-state PATH=$TMP/guard-bin:$PATH sh "$GUARD" settings
+ENGINEX_UI_DIR=$TMP/ui-copy ENGINEX_STATE_DIR=$TMP/copy-state PATH=$TMP/guard-bin:$PATH sh "$GUARD" settings
 cmp -s "$TMP/copy-state/before" "$TMP/copy-state/PlanckGuiState.json" || fail 'settings refresh changed safe-mode state'
 [[ ! -s $GUARD_LOG ]] || fail 'settings refresh changed safe-mode assignments'
 ok 'settings copy refresh preserves colors, role, recovery counters and safe-mode state'
-unset GUARD_LOG SC5000_ASSIGNMENT_DIR SC5000_ASSIGNMENT_PATCHED SC5000_PLANCK_STATE
+unset GUARD_LOG ENGINEX_ASSIGNMENT_DIR ENGINEX_ASSIGNMENT_PATCHED ENGINEX_PLANCK_STATE
 has 'ExecStopPost=-/etc/enginex/engine-ui-guard stop' "$ROOT/rootfs-overlay/etc/systemd/system/engine.service.d/override.conf"
 has 'ExecStopPost=-/etc/enginex/engine-ui-guard stop' "$debloat_root/etc/systemd/system/engine.service.d/override.conf"
 for conf in "$ROOT/rootfs-overlay/etc/systemd/system/engine.service.d/override.conf" "$debloat_root/etc/systemd/system/engine.service.d/override.conf"; do
     has 'Environment=HOME=/tmp/enginex-engine-home' "$conf"
     has "command -v connmanctl >/dev/null || exit 0" "$conf"
 done
-has 'SC5000_BOOT_TIMEOUT:-180' "$GUARD"
-has 'SC5000_BOOT_CRASH_LIMIT:-3' "$GUARD"
-has 'SC5000_BOOT_CRASH_WINDOW:-300' "$GUARD"
-unset SC5000_UI_DIR
+has 'ENGINEX_BOOT_TIMEOUT:-180' "$GUARD"
+has 'ENGINEX_BOOT_CRASH_LIMIT:-3' "$GUARD"
+has 'ENGINEX_BOOT_CRASH_WINDOW:-300' "$GUARD"
+unset ENGINEX_UI_DIR
 ok 'UI guard: deliberate restarts reset the boot count, crashes still reach safe-mode, failed FactoryReset and UpdateFromFile restart Engine'
 
 lacks '"/GUI/Scripted/ZoomIn"' "$ROOT/tools/ui-mod/build_packs.py"
@@ -821,7 +821,7 @@ done
 "$TMP/usb-audio/bystander" > /dev/null 2>&1 < /dev/null & bystander=$!
 "$TMP/usb-audio/alsaloop" > /dev/null 2>&1 < /dev/null & routed=$!
 usb_fail() { kill "$bystander" "$routed" 2>/dev/null || :; fail "$@"; }
-usb_audio() { SC5000_USB_AUDIO_PIDFILE=$usb_pid sh "$USB_AUDIO" "$@" > "$TMP/usb-audio/out" 2>&1 || usb_fail "enginex-usb-audio $* failed"; }
+usb_audio() { ENGINEX_USB_AUDIO_PIDFILE=$usb_pid sh "$USB_AUDIO" "$@" > "$TMP/usb-audio/out" 2>&1 || usb_fail "enginex-usb-audio $* failed"; }
 for _ in 1 2 3 4 5 6 7 8 9 10; do [[ $(cat "/proc/$routed/comm" 2>/dev/null) == alsaloop ]] && break; /bin/sleep 0.1; done
 echo "$bystander" > "$usb_pid"
 usb_audio status
@@ -838,7 +838,7 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$routed" 2>/dev/null || break; /bin/s
 ! kill -0 "$routed" 2>/dev/null || usb_fail 'route-dac stop left its own alsaloop running'
 kill "$bystander" 2>/dev/null || :
 wait "$bystander" "$routed" 2>/dev/null || :
-has 'PIDFILE="${SC5000_USB_AUDIO_PIDFILE:-/run/enginex-usb-audio.pid}"' "$USB_AUDIO"
+has 'PIDFILE="${ENGINEX_USB_AUDIO_PIDFILE:-/run/enginex-usb-audio.pid}"' "$USB_AUDIO"
 ok 'USB DAC routing: only its own alsaloop is stopped, a reused PID is left alone, PID file under /run'
 
 cmp -s "$ROOT/rootfs-overlay/etc/enginex/libengine-ui-hook.so" "$ROOT/rootfs-overlay/usr/local/lib/enginex/libengine-ui-hook.so" ||

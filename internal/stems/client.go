@@ -16,7 +16,7 @@ import (
 
 const (
 	// DefaultRelayURL is empty: operators configure their own self-hosted relay
-	// in deemix-config.json (via http://sc5000.lan:8080) or SC5000_STEMS_URL.
+	// in deemix-config.json (via http://sc5000.lan:8080) or ENGINEX_STEMS_URL.
 	DefaultRelayURL = ""
 	// DefaultRelayConfig is stream-sync's relay settings file on the deck.
 	DefaultRelayConfig = "/data/enginex/state/deemix-config.json"
@@ -37,33 +37,36 @@ type Client struct {
 
 // ResolveClient picks the backend in this order:
 //
-//  1. SC5000_STEMS_URL set: talk to that address directly. The credential is
-//     SC5000_STEMS_TOKEN, else the token file (SC5000_STEMS_TOKEN_FILE,
+//  1. ENGINEX_STEMS_URL set: talk to that address directly. The credential is
+//     ENGINEX_STEMS_TOKEN, else the token file (ENGINEX_STEMS_TOKEN_FILE,
 //     default /etc/sc5000-stems/token).
-//  2. Otherwise the relay from deemix-config.json (SC5000_STEMS_CONFIG,
+//  2. Otherwise the relay from deemix-config.json (ENGINEX_STEMS_CONFIG,
 //     default /data/enginex/state/deemix-config.json): relayUrl and the
-//     console password deemixPassword. SC5000_STEMS_TOKEN overrides the
+//     console password deemixPassword. ENGINEX_STEMS_TOKEN overrides the
 //     password.
+//
+// Each ENGINEX_STEMS_* name is also read as SC5000_STEMS_*, its name before 5.3.0.5 (#234).
 func ResolveClient(getenv func(string) string) (Client, error) {
-	override := strings.TrimSpace(getenv("SC5000_STEMS_TOKEN"))
-	if endpoint := strings.TrimSpace(getenv("SC5000_STEMS_URL")); endpoint != "" {
+	getenv = withLegacyStemsEnv(getenv)
+	override := strings.TrimSpace(getenv("ENGINEX_STEMS_TOKEN"))
+	if endpoint := strings.TrimSpace(getenv("ENGINEX_STEMS_URL")); endpoint != "" {
 		if !validEndpoint(endpoint) {
-			return Client{}, errors.New("SC5000_STEMS_URL must be https, or http on a private network")
+			return Client{}, errors.New("ENGINEX_STEMS_URL must be https, or http on a private network")
 		}
 		if override != "" {
-			return Client{endpoint, override, "SC5000_STEMS_URL"}, nil
+			return Client{endpoint, override, "ENGINEX_STEMS_URL"}, nil
 		}
-		path := getenv("SC5000_STEMS_TOKEN_FILE")
+		path := getenv("ENGINEX_STEMS_TOKEN_FILE")
 		if path == "" {
 			path = DefaultTokenFile
 		}
 		secret, err := Secret(path)
 		if err != nil {
-			return Client{}, fmt.Errorf("token for SC5000_STEMS_URL: %w", err)
+			return Client{}, fmt.Errorf("token for ENGINEX_STEMS_URL: %w", err)
 		}
-		return Client{endpoint, secret, "SC5000_STEMS_URL"}, nil
+		return Client{endpoint, secret, "ENGINEX_STEMS_URL"}, nil
 	}
-	path := getenv("SC5000_STEMS_CONFIG")
+	path := getenv("ENGINEX_STEMS_CONFIG")
 	if path == "" {
 		path = DefaultRelayConfig
 	}
@@ -154,3 +157,16 @@ func validEndpoint(raw string) bool {
 }
 
 var cgnat = &net.IPNet{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)}
+
+// withLegacyStemsEnv falls back to SC5000_STEMS_<x> when ENGINEX_STEMS_<x> is not set (#234).
+func withLegacyStemsEnv(getenv func(string) string) func(string) string {
+	return func(name string) string {
+		if v := getenv(name); v != "" {
+			return v
+		}
+		if rest, ok := strings.CutPrefix(name, "ENGINEX_STEMS_"); ok {
+			return getenv("SC5000_STEMS_" + rest)
+		}
+		return ""
+	}
+}

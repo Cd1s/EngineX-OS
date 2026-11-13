@@ -96,7 +96,7 @@ static void test_open_verify(void) {
     assert(unlink(cmd) == 0);
 
     // Valid bundle .tar.gz inside ENGINEX_DATA_BUNDLE_IMG_V1: az01_apply_image unpacks, runs install.sh, and unlinks when flags=1
-    put(dir, "pkg/top/install.sh", "#!/bin/sh\nprintf '5.3.0.3\\n' > \"$SC5000_CUSTOM/applied-version.txt\"\n");
+    put(dir, "pkg/top/install.sh", "#!/bin/sh\nprintf '5.3.0.3\\n' > \"$ENGINEX_CUSTOM/applied-version.txt\"\n");
     snprintf(cmd, sizeof cmd, "chmod +x %s/pkg/top/install.sh && tar -C %s/pkg -czf %s/bundle.tar.gz top", dir, dir, dir);
     assert(system(cmd) == 0);
     char hex[65] = {0};
@@ -206,9 +206,9 @@ static void test_erase(void) {
     assert(symlink(outside, link) == 0);
 
     setenv("ENGINEX_TEST_DATA_ROOT", root, 1);
-    setenv("SC5000_TEST_PASSTHROUGH_ERASE", "1", 1);  // passthrough: no stock function here -> -1, nothing wiped
+    setenv("ENGINEX_TEST_PASSTHROUGH_ERASE", "1", 1);  // passthrough: no stock function here -> -1, nothing wiped
     assert(az01_erase_data_partition() == -1 && exists(root, "AppDataUser/x.db"));
-    unsetenv("SC5000_TEST_PASSTHROUGH_ERASE");
+    unsetenv("ENGINEX_TEST_PASSTHROUGH_ERASE");
     if (access("/usr/share/enginex/enginex-suite.xz", F_OK) == 0) { puts("erase: SKIP (1st-gen rootfs host)"); return; }
     assert(az01_erase_data_partition() == 0);
     for (size_t i = 0; i < sizeof wiped / sizeof *wiped; i++) assert(!exists(root, wiped[i]));

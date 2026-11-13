@@ -118,8 +118,8 @@ DefaultMountOptions=force
 CONF
 fi # offline/staging patches
 if [ "$runtime" = 1 ]; then
-    boot_ui=${SC5000_UI_DIR:-${SC5000_PRIMARY_UI_DIR:-/data/enginex/ui}}
-    legacy_ui=${SC5000_LEGACY_UI_DIR:-/data/sc5000-custom/ui}
+    boot_ui=${ENGINEX_UI_DIR:-${ENGINEX_PRIMARY_UI_DIR:-/data/enginex/ui}}
+    legacy_ui=${ENGINEX_LEGACY_UI_DIR:-/data/sc5000-custom/ui}
     [ -d "$boot_ui" ] || [ ! -d "$legacy_ui" ] || boot_ui=$legacy_ui
     if [ -e "$boot_ui/safe-mode" ]; then
         # This independent unit keeps Wi-Fi reachable without tuning stock Engine.

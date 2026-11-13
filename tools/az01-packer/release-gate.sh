@@ -130,7 +130,7 @@ SH
         check "new: no SSH key in a public image" test ! -s "$R/usr/share/sc5000-custom/authorized_keys"
         check "new: internal drive Engine Library mounted at /media/az01-internal" test -s "$R/media/az01-internal/Engine Library/Database2/m.db"
         check "new: sc5000-debloat --apply-runtime" in_root /usr/local/bin/sc5000-debloat --apply-runtime
-        check "new: sc5000-perf-tune" in_root SC5000_PROC_ROOT=/proc SC5000_SYS_ROOT=/sys /usr/local/bin/sc5000-perf-tune
+        check "new: sc5000-perf-tune" in_root ENGINEX_PROC_ROOT=/proc ENGINEX_SYS_ROOT=/sys /usr/local/bin/sc5000-perf-tune
         check "new: 8 MiB TCP buffers" grep -qx '4096 131072 8388608' "$R/proc/sys/net/ipv4/tcp_rmem"
         mkdir -p "$R/run/sshd"
         check "new: sshd -t" in_root /usr/sbin/sshd -t -f /usr/share/sc5000-custom/sshd_config
@@ -141,7 +141,7 @@ SH
         check "boot2: upfader_echo=1 persisted across power cut" grep -qx 'upfader_echo=1' "$W/data/sc5000-custom/ui/settings.conf"
         check "boot2: internal drive Engine Library intact across power cut" python3 -I -c 'import sqlite3,sys; sys.exit(0 if sqlite3.connect(sys.argv[1]).execute("select count(*) from Track").fetchone()[0] == 8 else 1)' "$R/media/az01-internal/Engine Library/Database2/m.db"
         check "boot2: sc5000-debloat --apply-runtime" in_root /usr/local/bin/sc5000-debloat --apply-runtime
-        check "boot2: sc5000-perf-tune" in_root SC5000_PROC_ROOT=/proc SC5000_SYS_ROOT=/sys /usr/local/bin/sc5000-perf-tune
+        check "boot2: sc5000-perf-tune" in_root ENGINEX_PROC_ROOT=/proc ENGINEX_SYS_ROOT=/sys /usr/local/bin/sc5000-perf-tune
     fi
     umount "$R/proc"
     mount -t proc proc "$R/proc"
@@ -522,8 +522,8 @@ export SUITE_CMDS
 # Host-side helpers: an armhf stems-probe, the Rekordbox fixture, and the internal Engine library.
 [ -r /etc/profile.d/buildtools.sh ] && . /etc/profile.d/buildtools.sh
 (cd "$REPO" && GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -trimpath -o "$W/bin/stems-probe" ./cmd/stems-probe)
-(cd "$REPO" && SC5000_GATE_EXPORT=$W/usb go test -count=1 -run '^TestGateExport$' ./internal/testfixture >/dev/null)
-(cd "$REPO" && SC5000_GATE_LIBRARY=$W/drive go test -count=1 -run '^TestGateLibrary$' ./internal/testlibrary >/dev/null)
+(cd "$REPO" && ENGINEX_GATE_EXPORT=$W/usb go test -count=1 -run '^TestGateExport$' ./internal/testfixture >/dev/null)
+(cd "$REPO" && ENGINEX_GATE_LIBRARY=$W/drive go test -count=1 -run '^TestGateLibrary$' ./internal/testlibrary >/dev/null)
 
 # A throwaway CA for the GitHub mock; only the sandboxes trust it.
 (cd "$W/tls" &&

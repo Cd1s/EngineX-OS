@@ -821,7 +821,7 @@ class FilesystemTests(unittest.TestCase):
         # Missing lib_dir: seed script skips without creating lib_dir and exits 0.
         missing_lib = self.root / 'missing-var-lib'
         r = subprocess.run(['sh', str(seed_script)],
-                           env=dict(os.environ, SC5000_TIMESTAMP_FILE=str(ts), SC5000_TIMESYNC_LIB_DIR=str(missing_lib)),
+                           env=dict(os.environ, ENGINEX_TIMESTAMP_FILE=str(ts), ENGINEX_TIMESYNC_LIB_DIR=str(missing_lib)),
                            capture_output=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertFalse(missing_lib.exists())
@@ -829,7 +829,7 @@ class FilesystemTests(unittest.TestCase):
         # Existing lib_dir: seeds missing/older clock to build_epoch, preserves newer clock, and never fails on symlink.
         lib_dir = self.root / 'var-lib'
         lib_dir.mkdir()
-        seed_env = dict(os.environ, SC5000_TIMESTAMP_FILE=str(ts), SC5000_TIMESYNC_LIB_DIR=str(lib_dir))
+        seed_env = dict(os.environ, ENGINEX_TIMESTAMP_FILE=str(ts), ENGINEX_TIMESYNC_LIB_DIR=str(lib_dir))
         r = subprocess.run(['sh', str(seed_script)], env=seed_env, capture_output=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         clock = lib_dir / 'systemd/timesync/clock'
@@ -872,10 +872,10 @@ class FilesystemTests(unittest.TestCase):
         seed.mkdir()
 
         env = dict(os.environ,
-                   SC5000_TZ_STATE_FILE=str(tz_state),
-                   SC5000_CONFIG_DIR=str(data / '.config'),
-                   SC5000_ZONEINFO_DIR=str(zdir),
-                   SC5000_PRODUCT_CODE_FILE=str(pcode))
+                   ENGINEX_TZ_STATE_FILE=str(tz_state),
+                   ENGINEX_CONFIG_DIR=str(data / '.config'),
+                   ENGINEX_ZONEINFO_DIR=str(zdir),
+                   ENGINEX_PRODUCT_CODE_FILE=str(pcode))
         prep_script = az.PREPARE.replace(b'/data', str(data).encode()).replace(
             b'/usr/share/enginex', str(seed).encode())
 

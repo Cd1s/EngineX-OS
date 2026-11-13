@@ -543,10 +543,10 @@ class UiModSourceTest(unittest.TestCase):
         self.assertIn("SplashScreenLoader", probe)
         self.assertIn("SCPROBE splash|", probe)
         self.assertIn("SCPROBE splash|0|1|", gate)
-        self.assertIn("SC5000_GATE_LIBRARY=$W/drive", gate)
+        self.assertIn("ENGINEX_GATE_LIBRARY=$W/drive", gate)
         self.assertIn("/media/az01-internal", gate)
         self.assertIn("boot2: main UI acknowledged the current boot attempt without fallback (#140)", gate)
-        self.assertNotIn("SC5000_UI_ALIVE_CMD=", gate)  # uptime is not health (#140 boot safety)
+        self.assertNotIn("ENGINEX_UI_ALIVE_CMD=", gate)  # uptime is not health (#140 boot safety)
         self.assertIn("--bounding-set=-sys_time", gate)
         self.assertIn("kill -KILL", gate)
         self.assertIn("--phase boot2", gate)
@@ -5630,7 +5630,7 @@ assert.equal(scLanStemsLine({{online: true, hostname: 'studio-mac', backend: 'hp
             env = {**os.environ, "ENGINEX_STEMS_HOME": str(tdir / "home")}
             env.pop("ENGINEX_STEMS_BACKEND", None)
             env.pop("ENGINEX_STEMSD", None)
-            env.pop("SC5000_STEMSD", None)
+            env.pop("ENGINEX_STEMSD", None)
             r_default = subprocess.run(["/bin/sh", str(stems_dir / "run-home-worker.sh")], env=env, capture_output=True, text=True)
             self.assertEqual(r_default.returncode, 0, r_default.stderr)
             calls_default = log_file.read_text(encoding="utf-8")
@@ -6164,19 +6164,19 @@ class EngineLightingDefaultOffAndPersistTest(unittest.TestCase):
                         (ui / "safe-mode").touch()
                     path_env = os.environ["PATH"]
                     if busybox:
-                        binary = Path(os.environ.get("SC5000_TEST_BUSYBOX", shutil.which("busybox") or str(LAB / "sclive4-rea61-followup/rootfs/usr/bin/busybox")))
+                        binary = Path(os.environ.get("ENGINEX_TEST_BUSYBOX", shutil.which("busybox") or str(LAB / "sclive4-rea61-followup/rootfs/usr/bin/busybox")))
                         if not binary.is_file():
                             self.skipTest("stock BusyBox fixture unavailable")
                         bin_dir = root / "bin"
                         bin_dir.mkdir()
                         (bin_dir / "awk").symlink_to(binary)
                         path_env = str(bin_dir) + ":" + path_env
-                    env = dict(os.environ, PATH=path_env, SC5000_UI_DIR=str(ui), SC5000_PRIMARY_UI_DIR=str(ui),
-                               SC5000_LEGACY_UI_DIR=str(ui), SC5000_STATE_DIR=str(state),
-                               SC5000_STREAMING_ACCOUNTS=str(root / "accounts"),
-                               SC5000_ENGINE_DATA_DIR=str(root / "engine"),
-                               SC5000_ASSIGNMENT_DIR=str(root / "assign"),
-                               SC5000_ASSIGNMENT_PATCHED=str(root / "patched"), SC5000_ENGINE_GUARDIAN="/bin/false")
+                    env = dict(os.environ, PATH=path_env, ENGINEX_UI_DIR=str(ui), ENGINEX_PRIMARY_UI_DIR=str(ui),
+                               ENGINEX_LEGACY_UI_DIR=str(ui), ENGINEX_STATE_DIR=str(state),
+                               ENGINEX_STREAMING_ACCOUNTS=str(root / "accounts"),
+                               ENGINEX_ENGINE_DATA_DIR=str(root / "engine"),
+                               ENGINEX_ASSIGNMENT_DIR=str(root / "assign"),
+                               ENGINEX_ASSIGNMENT_PATCHED=str(root / "patched"), ENGINEX_ENGINE_GUARDIAN="/bin/false")
                     result = subprocess.run(["sh", str(REPO / "rootfs-overlay/etc/enginex/engine-ui-guard"), "pre"], env=env, capture_output=True, text=True)
                     self.assertEqual(result.returncode, 0, result.stderr)
                     if safe:

@@ -3638,7 +3638,7 @@ int az01_apply_image(const char *path, int flags) {
         // install.sh, so an older install.sh that does not know "install.sh <img>" is not needed.
         static const char script[] =
             "set -e; d=\"${2:-" ENGINEX_DATA_DIR "}\"; "
-            "[ -z \"$2\" ] || export SC5000_CUSTOM=\"$d\" SC5000_ALSA_OVERLAY=\"$d/alsa-conf.d\"; "
+            "[ -z \"$2\" ] || export ENGINEX_CUSTOM=\"$d\" ENGINEX_ALSA_OVERLAY=\"$d/alsa-conf.d\" SC5000_CUSTOM=\"$d\" SC5000_ALSA_OVERLAY=\"$d/alsa-conf.d\"; "
             "mkdir -p \"$d\"; w=$(mktemp -d \"$d/.ota-img.XXXXXX\"); trap 'rm -rf \"$w\"' 0; "
             "tail -c +129 \"$1\" | tar -xzf - -C \"$w\"; sh \"$w\"/*/install.sh";
         char *const argv[] = {"sh", "-c", (char *)script, "sh", (char *)path, custom_dir, NULL};
@@ -3711,7 +3711,7 @@ int az01_erase_data_partition(void) {
     char probe_boot[PATH_MAX], probe_inst[PATH_MAX];
     snprintf(probe_boot, sizeof probe_boot, "%s/enginex/bundle/boot-activate.sh", root);
     snprintf(probe_inst, sizeof probe_inst, "%s/enginex/bundle/install.sh", root);
-    if (getenv("SC5000_TEST_PASSTHROUGH_ERASE") ||
+    if (getenv("ENGINEX_TEST_PASSTHROUGH_ERASE") ||
         (access(probe_boot, F_OK) != 0 && access(probe_inst, F_OK) != 0) ||
         access("/usr/share/enginex/enginex-suite.xz", F_OK) == 0) {
         // 1st-gen: EngineX lives in the rootfs and enginex-prepare restores it after the stock erase.

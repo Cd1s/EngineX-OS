@@ -553,8 +553,8 @@ func startSSHDeck(t *testing.T, port int, compatible string) *sshDeck {
 	}
 	t.Cleanup(func() { l.Close() })
 	env := append(os.Environ(), "PATH="+shim+":"+os.Getenv("PATH"), "TMPDIR="+d.Data,
-		"SC5000_CUSTOM="+filepath.Join(d.Data, "enginex"),
-		"SC5000_ALSA_OVERLAY="+filepath.Join(d.Data, "system/var/overlay/lib/alsa/conf.d"))
+		"ENGINEX_CUSTOM="+filepath.Join(d.Data, "enginex"),
+		"ENGINEX_ALSA_OVERLAY="+filepath.Join(d.Data, "system/var/overlay/lib/alsa/conf.d"))
 	go func() {
 		for {
 			c, err := l.Accept()
