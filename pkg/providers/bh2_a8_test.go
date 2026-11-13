@@ -2,6 +2,7 @@ package providers
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"io"
 	"testing"
@@ -71,5 +72,15 @@ func TestBeatportAACWriter96kHzDoesNotOverflowMP4ABox(t *testing.T) {
 	srFixed := binary.BigEndian.Uint32(out.buf[idx+4+6+2+8+8 : idx+4+6+2+8+8+4])
 	if srFixed == uint32(96000<<16&0xffffffff) || srFixed != 0 {
 		t.Fatalf("mp4a 16.16 samplerate overflowed to 0x%08x (%d Hz), want 0 for 96 kHz", srFixed, srFixed>>16)
+	}
+}
+
+func TestCollectPagesZeroPageSizeDoesNotPanic(t *testing.T) {
+	slots := make(chan struct{}, 2)
+	_, err := collectPages(context.Background(), slots, 0, 5, func(int) (listPage[int], error) {
+		return listPage[int]{items: []int{1}, more: true, total: 10}, nil
+	})
+	if err == nil {
+		t.Fatal("collectPages(size=0) returned nil error")
 	}
 }

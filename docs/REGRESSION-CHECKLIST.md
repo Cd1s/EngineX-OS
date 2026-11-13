@@ -91,6 +91,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 | 79 | **`deemixd.credentials` accepts private LAN / `.local` / `.lan` / Tailscale HTTP relay URLs via `stems.ValidEndpoint`, matching `webui` (`BH2-A8-20`)** | `BH2-A8-20` | `internal/deemixd::TestPrivateLANRelayAcceptedInCredentials` | Release workflow Step 2 (`go test -race ./internal/deemixd/...`) |
 | 80 | **Rekordbox 6/7 `OneLibraryAdapter.Read` filters soft-deleted rows (`rb_local_deleted != 0`) across tracks, playlists, playlist entries, and cues (`BH2-A4-6`)** | `BH2-A4-6` | `pkg/rekordbox::TestOneLibrarySkipsSoftDeletedRekordboxRows` | Release workflow Step 2 (`go test -race ./pkg/rekordbox/...`) |
 | 81 | **Beatport HLS AAC remuxer (`aacWriter.finish`) writes `0` instead of overflowing `uint32(m.rate)<<16` in `mp4a` for `> 65535 Hz` (`88.2` / `96 kHz`) streams while preserving `mdhd` and `esds` rates (`BH2-A8-21`)** | `BH2-A8-21` | `pkg/providers::TestBeatportAACWriter96kHzDoesNotOverflowMP4ABox` | Release workflow Step 2 (`go test -race ./pkg/providers/...`) |
+| 82 | **`providers.collectPages` rejects non-positive `size <= 0` without divide-by-zero panic (`BH2-A8-22`)** | `BH2-A8-22` | `pkg/providers::TestCollectPagesZeroPageSizeDoesNotPanic` | Release workflow Step 2 (`go test -race ./pkg/providers/...`) |
 
 ---
 
