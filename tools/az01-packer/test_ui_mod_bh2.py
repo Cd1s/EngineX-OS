@@ -44,6 +44,66 @@ class UiModBH2Test(unittest.TestCase):
         block = bp.SERVICES_MAIN.split("if (v.updateAvailable && v.downloadUrl)", 1)[1].split("x.send()", 1)[0]
         self.assertIn("scUpdateModel.clear()", block)
 
+    def test_connected_source_encoder_navigation_skips_hidden_and_reaches_footer_bh2_a6_5(self):
+        bp = load_build_packs()
+        for root, focus_node in (
+            ("Skins/Embedded/", "Skins/Embedded/StateNodes/EmbeddedControlFocusNode.qml"),
+            ("Skins/EmbeddedCommon/", "Skins/EmbeddedCommon/StateNodes/EmbeddedCommonControlFocusNode.qml"),
+        ):
+            bp.ROOT = root
+            edits = bp.edits(False)
+            self.assertIn(focus_node, edits)
+            focus_joined = "\n".join(new for _old, new in edits[focus_node])
+            self.assertIn('name: "ScSourceIndex"', focus_joined)
+            self.assertIn('name: "ScSourceSelect"', focus_joined)
+
+            state_key = root + "StateNodes/States/SourceScreenState.qml"
+            state_joined = "\n".join(new for _old, new in edits[state_key])
+            self.assertIn('index: "/Qml/ControlFocus/ScSourceIndex"', state_joined)
+            self.assertIn('action: "/Qml/ControlFocus/ScSourceSelect"', state_joined)
+
+            conn_key = root + "Views/BrowserSource/ConnectedSource.qml"
+            conn_joined = "\n".join(new for _old, new in edits[conn_key])
+            self.assertIn("function scEntries()", conn_joined)
+            self.assertIn("function scStep(", conn_joined)
+            self.assertIn("function scActivate()", conn_joined)
+            self.assertIn('connectedSource.scFocusKind === "footer"', conn_joined)
+
+        js_body = bp.SOURCE_FOOTER.split("function scHiddenSourceName(name) {", 1)[1].split("\tConnections {\n\t\ttarget: PlanckGUI", 1)[0]
+        script = """
+const assert = require("assert");
+let scFocusKind = "", scFocusRow = -1, scFocusService = "";
+let opened = [], selectedConn = [];
+const connectedSource = { expanded: false, parent: null, itemAtIndex: () => null };
+const scFooterRepeater = { itemAt: () => null };
+const root = {
+  scSourceNameRole: 257,
+  scServices: [{ id: "tidal", name: "TIDAL" }, { id: "spotify", name: "Spotify" }, { id: "deezer", name: "Deezer" }],
+  scSources: ["tidal", "spotify", "deezer"],
+  scOpen: id => opened.push(id),
+};
+const connRows = ["TIDAL", "SoundCloud", "USB 1"];
+const cm = { rowCount: () => connRows.length, index: r => r, data: r => connRows[r] };
+const Planck = { librarianController: { browserSourceControllerPtr: () => ({ connectedSourceModel: () => cm, availableSourceModel: () => null, select: idx => selectedConn.push(idx) }) } };
+function scHiddenSourceName(name) {
+""" + js_body + """
+scStep(1);
+assert.strictEqual(scFocusKind, "conn");
+assert.strictEqual(scFocusRow, 2); // skipped hidden TIDAL(0) and SoundCloud(1), landed on USB 1(2)
+scStep(-1);
+assert.strictEqual(scFocusKind, "conn");
+assert.strictEqual(scFocusRow, 2); // turning up clamps at first visible row, never enters 0-height rows
+scStep(1);
+assert.strictEqual(scFocusKind, "footer");
+assert.strictEqual(scFocusService, "tidal");
+scStep(1);
+assert.strictEqual(scFocusService, "spotify");
+scActivate();
+assert.deepStrictEqual(opened, ["spotify"]);
+"""
+        res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
