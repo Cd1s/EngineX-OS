@@ -121,3 +121,30 @@ func TestOneLibraryTempDirNeverUsesHostDataInTests(t *testing.T) {
 		t.Fatalf("selectOneLibraryTempDir(inTest=false) = %q, want %q", got, filepath.Join(fakeData, "tmp"))
 	}
 }
+
+// The fallback was os.TempDir() itself, and prepareOneLibraryTempDir chmods its
+// directory to 0700: every go test run as root turned the build host's /tmp
+// to 0700, which broke the r4 release build (Engine runs as nobody there).
+func TestOneLibraryTempDirLeavesSystemTempModeAlone(t *testing.T) {
+	sysTmp := t.TempDir()
+	if err := os.Chmod(sysTmp, 0o777|os.ModeSticky); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", sysTmp)
+	for _, inTest := range []bool{true, false} {
+		dir := selectOneLibraryTempDir(filepath.Join(sysTmp, "no-data"), inTest)
+		if filepath.Dir(dir) != sysTmp {
+			t.Fatalf("selectOneLibraryTempDir(inTest=%v) = %q, want a directory inside %q", inTest, dir, sysTmp)
+		}
+		if err := prepareOneLibraryTempDir(dir); err != nil {
+			t.Fatal(err)
+		}
+		st, err := os.Stat(sysTmp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.Mode()&(os.ModePerm|os.ModeSticky) != os.ModePerm|os.ModeSticky {
+			t.Fatalf("system temp dir mode = %v after prepareOneLibraryTempDir, want 1777", st.Mode())
+		}
+	}
+}
