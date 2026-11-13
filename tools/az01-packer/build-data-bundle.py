@@ -223,12 +223,20 @@ restore_gen2_timezone() {
 # rekordbox sticks already mounted when the hook was not yet active (present at boot).
 convert_mounted() {
     [ ! -e "$dest/ui/safe-mode" ] || return 0
-    [ -x "$bin_dir/rb-bridge" ] || return 0
-    for m in "${SC5000_MEDIA_ROOT:-/media}"/*; do
-        if [ -d "$m/PIONEER" ] || [ -d "$m/.PIONEER" ]; then
-            "$bin_dir/rb-bridge" --mount-path "$m" >/dev/null 2>&1 || :
-        fi
-    done
+    if [ -x "$bin_dir/rb-bridge" ]; then
+        for m in "${SC5000_MEDIA_ROOT:-/media}"/*; do
+            if [ -d "$m/PIONEER" ] || [ -d "$m/.PIONEER" ]; then
+                "$bin_dir/rb-bridge" --mount-path "$m" >/dev/null 2>&1 || :
+            fi
+        done
+    fi
+    if [ -x "$bin_dir/engine-guardian" ]; then
+        for m in "${SC5000_MEDIA_ROOT:-/media}"/*; do
+            if [ ! -d "$m/PIONEER" ] && [ ! -d "$m/.PIONEER" ] && [ -f "$m/Engine Library/Database2/m.db" ]; then
+                "$bin_dir/engine-guardian" --heal-mount "$m" --fix-mp3-grids --timeout 5s >/dev/null 2>&1 || :
+            fi
+        done
+    fi
 }
 
 # ExecStartPre=- of the hooked Engine: the stock Engine this boot started with has stopped and the
