@@ -32,8 +32,9 @@ const (
 var (
 	ErrUnsupportedVar   = errors.New("fastboot: variable not supported")
 	ErrProductMismatch  = errors.New("fastboot: device product does not match expected board")
-	ErrSparseRequired   = errors.New("fastboot: image exceeds max-download-size and sparse is disabled")
+	ErrSparseRequired   = errors.New("fastboot: sparse support required")
 	ErrInvalidPartition = errors.New("fastboot: invalid partition name")
+	ErrSessionDirty     = errors.New("fastboot: USB protocol session desynchronized after aborted data transfer")
 )
 
 // ProtocolError represents a FAIL or malformed response returned by the device.
@@ -122,6 +123,7 @@ type Client struct {
 	chunkSize      int
 	maxInfoPackets int
 	onInfo         func(string)
+	dirty          bool
 }
 
 // New constructs a fastboot Client bound to an open USB device and endpoint pair.
@@ -202,16 +204,19 @@ func (c *Client) GetPartitionType(ctx context.Context, partition string) (string
 // VerifyProduct checks "getvar:product" against expectedBoard on the active USB
 // session. When allowMissingUSBBoard is non-empty and the bootloader reports
 // "product" as unsupported (as on Gen-1 SC5000), it permits the match only if
-// allowMissingUSBBoard normalizes to expectedBoard.
+// expectedBoard is a known Gen-1 board and allowMissingUSBBoard normalizes to it.
 func (c *Client) VerifyProduct(ctx context.Context, expectedBoard, allowMissingUSBBoard string) (string, error) {
-	want := proto.BoardCode(expectedBoard)
-	if want == "" {
-		return "", errors.New("fastboot: expected board code is empty")
+	wantBoard, ok := proto.LookupBoard(expectedBoard)
+	if !ok {
+		return "", fmt.Errorf("%w: unknown expected board %q", ErrProductMismatch, expectedBoard)
 	}
 	raw, err := c.GetVar(ctx, "product")
 	if err != nil {
 		if errors.Is(err, ErrUnsupportedVar) && allowMissingUSBBoard != "" {
-			if gotFallback := proto.BoardCode(allowMissingUSBBoard); gotFallback == want {
+			if wantBoard.Gen2 {
+				return "", fmt.Errorf("%w: missing product fallback is only valid for Gen-1 boards, not %s", ErrProductMismatch, wantBoard.Code)
+			}
+			if gotFallback := proto.BoardCode(allowMissingUSBBoard); gotFallback == wantBoard.Code {
 				return gotFallback, nil
 			}
 			return "", fmt.Errorf("%w: USB fallback %q != expected %q", ErrProductMismatch, allowMissingUSBBoard, expectedBoard)
@@ -219,7 +224,7 @@ func (c *Client) VerifyProduct(ctx context.Context, expectedBoard, allowMissingU
 		return "", err
 	}
 	got := proto.BoardCode(raw)
-	if got != want {
+	if got != wantBoard.Code {
 		return "", fmt.Errorf("%w: got %q (%s), want %q", ErrProductMismatch, raw, got, expectedBoard)
 	}
 	return got, nil
@@ -240,6 +245,9 @@ func (c *Client) Reboot(ctx context.Context) error {
 // Download sends "download:<hexsize>" and streams exact size bytes from r to
 // the device, validating both the DATA acknowledgement and final OKAY reply.
 func (c *Client) Download(ctx context.Context, r io.Reader, size int64, progress proto.ProgressFunc) error {
+	if c.dirty {
+		return ErrSessionDirty
+	}
 	if r == nil {
 		return errors.New("fastboot: nil download reader")
 	}
@@ -247,7 +255,7 @@ func (c *Client) Download(ctx context.Context, r io.Reader, size int64, progress
 		return fmt.Errorf("fastboot: download size %d out of protocol range [1..%d]", size, maxFastbootSingleSize)
 	}
 	cmd := fmt.Sprintf("download:%08x", uint32(size))
-	if err := c.sendCommand(ctx, cmd); err != nil {
+	if err := c.sendCommand(ctx, cmd, false); err != nil {
 		return err
 	}
 	pktType, payload, err := c.readReplyUntil(ctx, cmd, c.cmdTimeout, false, true)
@@ -265,8 +273,8 @@ func (c *Client) Download(ctx context.Context, r io.Reader, size int64, progress
 		return fmt.Errorf("fastboot %q: device requested %d bytes, host offered %d", cmd, offered, size)
 	}
 
-	// From the first data write onward, an interrupted transfer may leave
-	// partial or full data staged on the device.
+	// Device is now in the DATA phase; any premature exit leaves the USB
+	// session out of sync until reopened.
 	buf := make([]byte, minInt(c.chunkSize, int(minInt64(size, int64(c.chunkSize)))))
 	var sent int64
 	proto.EmitProgress(progress, "download", 0, size)
@@ -277,12 +285,14 @@ func (c *Client) Download(ctx context.Context, r io.Reader, size int64, progress
 		}
 		n, rerr := io.ReadFull(r, buf[:toRead])
 		if rerr != nil {
+			c.dirty = true
 			if sent > 0 {
 				return proto.MarkOutcomeUnknown("fastboot download read", rerr)
 			}
 			return fmt.Errorf("fastboot download read: %w", rerr)
 		}
 		if err := c.writeBulkExact(ctx, buf[:n], c.dataTimeout); err != nil {
+			c.dirty = true
 			return proto.MarkOutcomeUnknown("fastboot download write", err)
 		}
 		sent += int64(n)
@@ -291,6 +301,10 @@ func (c *Client) Download(ctx context.Context, r io.Reader, size int64, progress
 
 	pktType, payload, err = c.readReplyUntil(ctx, cmd, c.cmdTimeout, true, false)
 	if err != nil {
+		var pe *ProtocolError
+		if errors.As(err, &pe) {
+			return err
+		}
 		return proto.MarkOutcomeUnknown("fastboot download final ack", err)
 	}
 	if pktType != "OKAY" {
@@ -317,6 +331,9 @@ type FlashOptions struct {
 	// AllowMissingProductBoard optionally supplies an already-verified USB
 	// VID/PID board match for Gen-1 bootloaders that do not implement getvar:product.
 	AllowMissingProductBoard string
+
+	// AllowUnverifiedProduct explicitly opts out of ExpectedBoard verification.
+	AllowUnverifiedProduct bool
 
 	// MaxDownloadSize overrides querying getvar:max-download-size when > 0.
 	// If <= 0, Client queries getvar:max-download-size and refuses to guess if missing.
@@ -352,6 +369,8 @@ func (c *Client) Flash(ctx context.Context, partition string, img proto.Image, o
 		if _, err := c.VerifyProduct(ctx, opts.ExpectedBoard, opts.AllowMissingProductBoard); err != nil {
 			return err
 		}
+	} else if !opts.AllowUnverifiedProduct {
+		return errors.New("fastboot: ExpectedBoard is required unless AllowUnverifiedProduct is set")
 	}
 
 	maxDown := opts.MaxDownloadSize
@@ -385,6 +404,9 @@ func (c *Client) Flash(ctx context.Context, partition string, img proto.Image, o
 	}
 
 	if !opts.AllowSparse {
+		if isSp {
+			return fmt.Errorf("%w: input is already sparse and AllowSparse is false", ErrSparseRequired)
+		}
 		return fmt.Errorf("%w: image %d bytes > max-download-size %d bytes", ErrSparseRequired, img.Size, maxDown)
 	}
 
@@ -438,7 +460,10 @@ func (c *Client) Flash(ctx context.Context, partition string, img proto.Image, o
 }
 
 func (c *Client) simpleCommand(ctx context.Context, cmd string, timeout time.Duration, mutating bool) (string, error) {
-	if err := c.sendCommand(ctx, cmd); err != nil {
+	if c.dirty {
+		return "", ErrSessionDirty
+	}
+	if err := c.sendCommand(ctx, cmd, mutating); err != nil {
 		return "", err
 	}
 	pktType, payload, err := c.readReplyUntil(ctx, cmd, timeout, mutating, false)
@@ -455,14 +480,20 @@ func (c *Client) simpleCommand(ctx context.Context, cmd string, timeout time.Dur
 	return payload, nil
 }
 
-func (c *Client) sendCommand(ctx context.Context, cmd string) error {
+func (c *Client) sendCommand(ctx context.Context, cmd string, mutating bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if cmd == "" || len(cmd) > c.maxCmdLen {
 		return fmt.Errorf("fastboot: command length %d out of range [1..%d]", len(cmd), c.maxCmdLen)
 	}
-	return c.writeBulkExact(ctx, []byte(cmd), c.cmdTimeout)
+	if err := c.writeBulkExact(ctx, []byte(cmd), c.cmdTimeout); err != nil {
+		if mutating {
+			return proto.MarkOutcomeUnknown("fastboot "+cmd+" write", err)
+		}
+		return err
+	}
+	return nil
 }
 
 func (c *Client) writeBulkExact(ctx context.Context, data []byte, timeout time.Duration) error {
@@ -483,21 +514,24 @@ func (c *Client) writeBulkExact(ctx context.Context, data []byte, timeout time.D
 
 func (c *Client) readReplyUntil(ctx context.Context, cmd string, timeout time.Duration, mutating, expectData bool) (string, string, error) {
 	buf := make([]byte, responseReadSize)
+	tctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	for infoCount := 0; infoCount <= c.maxInfoPackets; {
-		if err := ctx.Err(); err != nil {
+		if err := tctx.Err(); err != nil {
 			if mutating {
 				return "", "", proto.MarkOutcomeUnknown("fastboot "+cmd, err)
 			}
 			return "", "", err
 		}
-		tctx, cancel := context.WithTimeout(ctx, timeout)
 		n, err := c.dev.ReadBulk(tctx, c.eps.In, buf)
-		cancel()
 		if err != nil {
 			if mutating {
 				return "", "", proto.MarkOutcomeUnknown("fastboot "+cmd, err)
 			}
 			return "", "", err
+		}
+		if n < 0 || n > len(buf) {
+			return "", "", fmt.Errorf("fastboot %q: invalid ReadBulk count %d", cmd, n)
 		}
 		if n < 4 {
 			return "", "", fmt.Errorf("fastboot %q: truncated reply (%d bytes)", cmd, n)

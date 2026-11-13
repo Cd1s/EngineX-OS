@@ -471,6 +471,35 @@ func TestFastbootFaultInjectionAndUnknownOutcome(t *testing.T) {
 	if !proto.IsOutcomeUnknown(err6) {
 		t.Fatalf("piece 2 failure after piece 1 flashed must be OutcomeUnknown, got %v", err6)
 	}
+
+	// Case 7: write error while sending mutating flash:<part> command -> OutcomeUnknown.
+	dev7 := newFakeFastbootDevice()
+	dev7.fault = faultRule{onWriteCall: 1, writeErr: context.DeadlineExceeded}
+	cl7, _ := fastboot.New(dev7, proto.Endpoints{In: 0x81, Out: 0x01})
+	if err := cl7.FlashPartition(context.Background(), "data"); !proto.IsOutcomeUnknown(err) {
+		t.Fatalf("mutating flash command write failure must be OutcomeUnknown, got %v", err)
+	}
+
+	// Case 8: premature reader failure at sent==0 during DATA phase taints session.
+	dev8 := newFakeFastbootDevice()
+	cl8, _ := fastboot.New(dev8, proto.Endpoints{In: 0x81, Out: 0x01})
+	if err := cl8.Download(context.Background(), bytes.NewReader(nil), 16, nil); err == nil {
+		t.Fatal("expected reader EOF error")
+	}
+	if _, err := cl8.GetVar(context.Background(), "product"); !errors.Is(err, fastboot.ErrSessionDirty) {
+		t.Fatalf("expected ErrSessionDirty after aborted DATA phase, got %v", err)
+	}
+
+	// Case 9: Gen-2 or unknown board cannot bypass VerifyProduct via allowMissingUSBBoard.
+	dev9 := newFakeFastbootDevice()
+	delete(dev9.vars, "product")
+	cl9, _ := fastboot.New(dev9, proto.Endpoints{In: 0x81, Out: 0x01})
+	if _, err := cl9.VerifyProduct(context.Background(), "jc11s", "jc11s"); !errors.Is(err, fastboot.ErrProductMismatch) {
+		t.Fatalf("Gen-2 missing product fallback must be rejected, got %v", err)
+	}
+	if _, err := cl9.VerifyProduct(context.Background(), "notaboard", "notaboard"); !errors.Is(err, fastboot.ErrProductMismatch) {
+		t.Fatalf("unknown board must be rejected, got %v", err)
+	}
 }
 
 func TestParseSizeValue(t *testing.T) {

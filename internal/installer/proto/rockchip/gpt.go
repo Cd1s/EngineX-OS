@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"hash/crc32"
 	"sort"
-	"strings"
 	"unicode/utf16"
 )
 
@@ -125,7 +124,7 @@ func ParseGPTHeader(sector []byte, totalSectors uint64) (GPTHeader, error) {
 	if h.MyLBA != 1 {
 		return GPTHeader{}, fmt.Errorf("%w: primary MyLBA=%d, want 1", ErrInvalidGPT, h.MyLBA)
 	}
-	if h.SizeOfPartitionEntry < minGPTEntrySize || h.SizeOfPartitionEntry > maxGPTEntrySize || h.SizeOfPartitionEntry%8 != 0 {
+	if h.SizeOfPartitionEntry < minGPTEntrySize || h.SizeOfPartitionEntry > maxGPTEntrySize || h.SizeOfPartitionEntry&(h.SizeOfPartitionEntry-1) != 0 {
 		return GPTHeader{}, fmt.Errorf("%w: invalid entry size %d", ErrInvalidGPT, h.SizeOfPartitionEntry)
 	}
 	if h.NumberOfPartitionEntries == 0 || h.NumberOfPartitionEntries > maxGPTEntries {
@@ -135,9 +134,9 @@ func ParseGPTHeader(sector []byte, totalSectors uint64) (GPTHeader, error) {
 		return GPTHeader{}, fmt.Errorf("%w: PartitionEntryLBA %d < 2", ErrInvalidGPT, h.PartitionEntryLBA)
 	}
 	entrySectors := h.EntryArraySectors()
-	if h.PartitionEntryLBA+entrySectors > h.FirstUsableLBA {
-		return GPTHeader{}, fmt.Errorf("%w: entry array [%d..%d) overlaps FirstUsableLBA %d",
-			ErrInvalidGPT, h.PartitionEntryLBA, h.PartitionEntryLBA+entrySectors, h.FirstUsableLBA)
+	if h.PartitionEntryLBA > h.FirstUsableLBA || entrySectors > h.FirstUsableLBA-h.PartitionEntryLBA {
+		return GPTHeader{}, fmt.Errorf("%w: entry array (start=%d sectors=%d) overlaps FirstUsableLBA %d",
+			ErrInvalidGPT, h.PartitionEntryLBA, entrySectors, h.FirstUsableLBA)
 	}
 	if h.FirstUsableLBA > h.LastUsableLBA {
 		return GPTHeader{}, fmt.Errorf("%w: FirstUsableLBA %d > LastUsableLBA %d", ErrInvalidGPT, h.FirstUsableLBA, h.LastUsableLBA)
@@ -226,5 +225,5 @@ func decodeUTF16LEName(raw []byte) string {
 		}
 		units = append(units, u)
 	}
-	return strings.TrimSpace(string(utf16.Decode(units)))
+	return string(utf16.Decode(units))
 }

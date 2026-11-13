@@ -36,14 +36,16 @@ const (
 	cswStatusFail       uint8 = 0x01
 	cswStatusPhaseError uint8 = 0x02
 
-	// RockUSB CDB opcodes.
+	// RockUSB CDB opcodes (verified against rockchip-linux/rkdeveloptool RKComm.h).
 	OpTestUnitReady  uint8 = 0x00
 	OpReadFlashID    uint8 = 0x01
 	OpReadLBA        uint8 = 0x14
 	OpWriteLBA       uint8 = 0x15
 	OpReadFlashInfo  uint8 = 0x1A
-	OpReadChipInfo   uint8 = 0xAA
-	OpReadCapability uint8 = 0xAC
+	OpReadChipInfo   uint8 = 0x1B
+	OpReadStorage    uint8 = 0x2B
+	OpReadCapability uint8 = 0xAA
+	OpDeviceReset    uint8 = 0xFF
 
 	defaultCommandTimeout = 5 * time.Second
 	defaultDataTimeout    = 15 * time.Second
@@ -230,6 +232,11 @@ func (c *Client) Probe(ctx context.Context, vid, pid uint16) (ProbeResult, error
 
 	if capRaw, capErr := c.execDataIn(ctx, OpReadCapability, 6, nil, 8); capErr == nil {
 		copy(res.Capability[:], capRaw)
+	} else {
+		var se *StatusError
+		if !errors.As(capErr, &se) {
+			return ProbeResult{}, fmt.Errorf("rockchip read capability: %w", capErr)
+		}
 	}
 
 	readyErr := c.execNoData(ctx, OpTestUnitReady, 6, nil)
@@ -298,9 +305,10 @@ func (c *Client) ReadLayout(ctx context.Context, probe ProbeResult) (Layout, err
 	}
 
 	entrySectors := hdr.EntryArraySectors()
-	if entrySectors == 0 || hdr.PartitionEntryLBA+entrySectors > uint64(probe.FlashInfo.TotalSectors) {
-		return Layout{}, fmt.Errorf("%w: entry array [%d..%d) exceeds disk sectors %d",
-			ErrInvalidGPT, hdr.PartitionEntryLBA, hdr.PartitionEntryLBA+entrySectors, probe.FlashInfo.TotalSectors)
+	totalSectors := uint64(probe.FlashInfo.TotalSectors)
+	if entrySectors == 0 || hdr.PartitionEntryLBA > totalSectors || entrySectors > totalSectors-hdr.PartitionEntryLBA {
+		return Layout{}, fmt.Errorf("%w: entry array (start=%d sectors=%d) exceeds disk sectors %d",
+			ErrInvalidGPT, hdr.PartitionEntryLBA, entrySectors, totalSectors)
 	}
 	entryBytes, err := c.readSectorsRange(ctx, hdr.PartitionEntryLBA, entrySectors)
 	if err != nil {
@@ -352,6 +360,10 @@ func PrepareVerifiedTarget(probe ProbeResult, layout Layout, partition string, i
 	}
 	if matched == nil {
 		return VerifiedTarget{}, fmt.Errorf("%w: partition %q not found in GPT", ErrLayoutUnavailable, partition)
+	}
+	if matched.StartLBA > matched.EndLBA || (layout.TotalSectors > 0 && matched.EndLBA >= layout.TotalSectors) {
+		return VerifiedTarget{}, fmt.Errorf("%w: partition %q bounds [%d..%d] exceed disk sectors %d",
+			ErrInvalidGPT, partition, matched.StartLBA, matched.EndLBA, layout.TotalSectors)
 	}
 	if uint64(imageSize) > matched.ByteSize() {
 		return VerifiedTarget{}, fmt.Errorf("rockchip: image (%d bytes) exceeds partition %q (%d bytes)",
@@ -438,8 +450,9 @@ func (c *Client) WriteVerifiedTarget(ctx context.Context, target VerifiedTarget,
 }
 
 func (c *Client) readSectorsRange(ctx context.Context, startLBA, count uint64) ([]byte, error) {
-	if startLBA+count > uint64(^uint32(0)) {
-		return nil, fmt.Errorf("rockchip: LBA range [%d..%d) overflows 32-bit RockUSB", startLBA, startLBA+count)
+	const maxLBA32 = uint64(^uint32(0))
+	if startLBA > maxLBA32 || count > maxLBA32-startLBA+1 {
+		return nil, fmt.Errorf("rockchip: LBA range (start=%d count=%d) overflows 32-bit RockUSB", startLBA, count)
 	}
 	out := make([]byte, 0, int(count)*SectorSize)
 	var done uint64
@@ -472,7 +485,7 @@ func (c *Client) readLBA(ctx context.Context, lba uint32, sectors uint16) ([]byt
 
 func (c *Client) execNoData(ctx context.Context, opcode, cbLen uint8, cdbArgs []byte) error {
 	tag := c.allocTag()
-	cbw, err := EncodeCBW(tag, 0, cbwFlagDataOut, opcode, cbLen, cdbArgs)
+	cbw, err := EncodeCBW(tag, 0, cbwFlagDataIn, opcode, cbLen, cdbArgs)
 	if err != nil {
 		return err
 	}
@@ -504,6 +517,9 @@ func (c *Client) execDataIn(ctx context.Context, opcode, cbLen uint8, cdbArgs []
 		tctx, cancel := context.WithTimeout(ctx, c.dataTimeout)
 		n, rerr := c.dev.ReadBulk(tctx, c.eps.In, data[got:])
 		cancel()
+		if n < 0 || n > len(data[got:]) {
+			return nil, fmt.Errorf("rockchip opcode 0x%02x data-in: invalid ReadBulk count %d", opcode, n)
+		}
 		got += n
 		if rerr != nil {
 			return nil, fmt.Errorf("rockchip opcode 0x%02x data-in: %w", opcode, rerr)
@@ -535,6 +551,9 @@ func (c *Client) readCSW(ctx context.Context, expectedTag, maxTransfer uint32) (
 	n, err := c.dev.ReadBulk(tctx, c.eps.In, raw[:])
 	if err != nil {
 		return CSW{}, err
+	}
+	if n < 0 || n > len(raw) {
+		return CSW{}, fmt.Errorf("%w: invalid ReadBulk count %d", ErrBadWrapper, n)
 	}
 	return ParseCSW(raw[:n], expectedTag, maxTransfer)
 }
