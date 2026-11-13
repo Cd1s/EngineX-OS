@@ -2666,6 +2666,183 @@ assert.equal(value().toFixed(2),'130.18');
 """)
 
     @unittest.skipUnless(shutil.which("node"), "node needed for the display-state behavioral checks")
+    def test_bpm_info_and_bpm_item_update_with_pitch_fader_before_waveform_analyzed(self):
+        # Issue #231: Rekordbox / unanalyzed track loaded on deck (e.g. 125 BPM).
+        # While the waveform is loading, SongAnalyzed is false. When the user moves the
+        # pitch fader, the displayed BPM must update in real time from exact pitch
+        # (deckData.speedState, not 1-decimal SpeedState.translator.string) and must not
+        # jump when waveform loading completes.
+        qrc = LAB / "5.3.0" / "qrc"
+        if not qrc.is_dir():
+            self.skipTest(f"{qrc} not found")
+        with tempfile.TemporaryDirectory(prefix="ui-header-bpm-test-") as tmp:
+            packs = Path(tmp) / "packs"
+            result = subprocess.run(["python3", str(BUILD_PACKS), "--qrc", str(qrc), "--out", str(packs)],
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            composite = "Skins/EngineOS/UI/CompositeControls/"
+            for lang in ("en", "zh-Hans", "zh-Hant"):
+                info_lang = (packs / lang / composite / "Deck/DeckItem/BpmInfo.qml").read_text()
+                bpm_lang = (packs / lang / "Skins/Embedded/Items/Bpm.qml").read_text()
+                self.assertIn("scDeckView.deckData", info_lang, lang)
+                self.assertIn("scDeckData.speedState", info_lang, lang)
+                self.assertIn("OriginalBPM", info_lang, lang)
+                self.assertIn("scDeckData.speedState", bpm_lang, lang)
+                self.assertIn("OriginalBPM", bpm_lang, lang)
+
+            info = (packs / "en" / composite / "Deck/DeckItem/BpmInfo.qml").read_text()
+            m_info = re.search(r"readonly property var scBpm2: \{(.*?)\n    \}", info, re.S)
+            self.assertIsNotNone(m_info, "BpmInfo.qml must compute scBpm2 dynamically before SongAnalyzed")
+            # Simulate Engine's real SpeedState StringTranslator ("%+.1f%", 1 decimal, no .unnormalized)
+            # alongside exact C++ deckData.speedState.
+            script = r"""
+            const assert = require('assert');
+            function fmtSpeedState(p) {
+                return (p >= 0 ? "+" : "") + p.toFixed(1) + "%";
+            }
+            function makeBpmInfo(isAnalyzed, currentBpm, pitchArg, metaBpmStr, bpmText, bpmFractionalText, opts = {}) {
+                const isLoaded = opts.loaded !== undefined ? opts.loaded : !!(bpmText && bpmText !== "-");
+                const origBpm = opts.origBpm !== undefined ? opts.origBpm : 0;
+                const bpmInfoView = { bpmText: bpmText, bpmFractionalText: bpmFractionalText };
+                const scDeckData = opts.deckData !== undefined ? opts.deckData : { songLoaded: isLoaded, speedState: pitchArg };
+                const scLoaded = { translator: { state: isLoaded } };
+                const scOrigBpm = { translator: { unnormalized: origBpm } };
+                const scBpm = { translator: { unnormalized: currentBpm } };
+                const scAnalyzed = { translator: { state: isAnalyzed } };
+                const scSpeed = { translator: { string: fmtSpeedState(pitchArg) } };
+                const scMetaBpm = { translator: { string: metaBpmStr } };
+                """ + m_info.group(1) + r"""
+            }
+            // 1. Empty / unloaded deck: returns null even if stale deck translators remain non-zero
+            assert.strictEqual(makeBpmInfo(false, 0, 0, "", "-", ""), null);
+            assert.strictEqual(makeBpmInfo(false, 128.0, 1.6, "128.0", "-", "", { loaded: false, origBpm: 128.0 }), null);
+            // 2. Track loaded with no BPM anywhere and unanalyzed: returns null (preserves stock "-")
+            assert.strictEqual(makeBpmInfo(false, 0, 1.6, "", "-", "", { loaded: true }), null);
+            // 3. Track loaded at 125 BPM, waveform loading (isAnalyzed: false), pitch at 0% / +1.60% / +3.20% / -4.00%
+            assert.deepStrictEqual(makeBpmInfo(false, 125.0, 0, "125.0", "125", ".0"), ["125", "00"]);
+            assert.deepStrictEqual(makeBpmInfo(false, 125.0, 1.6, "125.0", "125", ".0"), ["127", "00"]);
+            assert.deepStrictEqual(makeBpmInfo(false, 125.0, 3.2, "125.0", "125", ".0"), ["129", "00"]);
+            assert.deepStrictEqual(makeBpmInfo(false, 125.0, -4.0, "125.0", "125", ".0"), ["120", "00"]);
+            // 4. Exact pitch precision from deckData.speedState vs 1-decimal SpeedState.translator.string:
+            //    +1.5625% -> SpeedState.translator.string is "+1.6%" (which would wrongly give 130.05)
+            //    +1.6953125% -> SpeedState.translator.string is "+1.7%" (which would wrongly give 130.18)
+            assert.strictEqual(fmtSpeedState(1.5625), "+1.6%");
+            assert.deepStrictEqual(makeBpmInfo(false, 128.0, 1.5625, "128.0", "128", ".0", { origBpm: 128.0 }), ["130", "00"]);
+            assert.strictEqual(fmtSpeedState(1.6953125), "+1.7%");
+            assert.deepStrictEqual(makeBpmInfo(false, 128.0, 1.6953125, "128.0", "128", ".0", { origBpm: 128.0 }), ["130", "17"]);
+            // 5. CurrentBPM === 0 while waveform is loading
+            assert.deepStrictEqual(makeBpmInfo(false, 0, 0, "125.0", "125", ".0"), ["125", "00"]);
+            assert.deepStrictEqual(makeBpmInfo(false, 0, 1.6, "125.0", "125", ".0"), ["127", "00"]);
+            assert.deepStrictEqual(makeBpmInfo(false, 0, 0, "128.4", "128", ".4", { origBpm: 128.36 }), ["128", "36"]);
+            assert.deepStrictEqual(makeBpmInfo(false, 0, 1.6, "128.4", "128", ".4", { origBpm: 128.36 }), ["130", "41"]);
+            // 6. Integer MetaDataBPM without decimal point ("128", stock bpmFractionalText is "")
+            assert.deepStrictEqual(makeBpmInfo(false, 0, 0, "128", "128", ""), ["128", "00"]);
+            assert.deepStrictEqual(makeBpmInfo(false, 0, 1.5625, "128", "128", ""), ["130", "00"]);
+            assert.deepStrictEqual(makeBpmInfo(false, 128.0, 0, "128", "128", ""), ["128", "00"]);
+            assert.deepStrictEqual(makeBpmInfo(false, 128.0, 1.5625, "128", "128", ""), ["130", "00"]);
+            // 7. 2-decimal Rekordbox BPM (128.36) vs 1-decimal ("128.4") or integer ("128") MetaDataBPM:
+            //    updates live with pitch fader and does NOT jump when SongAnalyzed flips to true.
+            for (const origBpm of [128.36, 0]) {
+                const unanalyzedZero = makeBpmInfo(false, 128.36, 0, "128.4", "128", ".4", { origBpm });
+                const analyzedZero = makeBpmInfo(true, 128.36, 0, "128.4", "128", ".4", { origBpm: 128.36 });
+                assert.deepStrictEqual(unanalyzedZero, ["128", "36"]);
+                assert.deepStrictEqual(unanalyzedZero, analyzedZero);
+
+                const unanalyzedPitched = makeBpmInfo(false, 128.36, 1.6, "128.4", "128", ".4", { origBpm });
+                const analyzedPitched = makeBpmInfo(true, 128.36 * 1.016, 1.6, "128.4", "130", ".4", { origBpm: 128.36 });
+                assert.deepStrictEqual(unanalyzedPitched, ["130", "41"]);
+                assert.deepStrictEqual(unanalyzedPitched, analyzedPitched);
+
+                const unanalyzedIntMeta = makeBpmInfo(false, 128.36, 1.6, "128", "128", "", { origBpm });
+                assert.deepStrictEqual(unanalyzedIntMeta, ["130", "41"]);
+                assert.deepStrictEqual(unanalyzedIntMeta, analyzedPitched);
+            }
+            // 8. Sync state: Engine cur already differs from base (e.g. 130.00), uses cur directly without double-pitching
+            assert.deepStrictEqual(makeBpmInfo(false, 130.0, 1.6, "125.0", "125", ".0", { origBpm: 125.0 }), ["130", "00"]);
+            assert.deepStrictEqual(makeBpmInfo(false, 130.0, 1.6, "125.0", "125", ".0"), ["130", "00"]);
+            // 9. Analyzed track: uses exact current BPM in 2-decimal format
+            assert.deepStrictEqual(makeBpmInfo(true, 127.0, 1.6, "125.0", "127", ".0", { origBpm: 125.0 }), ["127", "00"]);
+            console.log("BpmInfo tests passed");
+            """
+            output = subprocess.check_output(["node", "-e", script], text=True)
+            self.assertIn("BpmInfo tests passed", output)
+
+            # Test Bpm.qml scPitch + currentBPMSplit behavior via node
+            bpm_qml = (packs / "en" / "Skins/Embedded/Items/Bpm.qml").read_text()
+            m_pitch = re.search(r"readonly property real scPitch: \{(.*?)\n    \}", bpm_qml, re.S)
+            m_split = re.search(r"readonly property var currentBPMSplit: \{(.*?)\n    \}", bpm_qml, re.S)
+            self.assertIsNotNone(m_pitch, "Bpm.qml must compute scPitch from exact deckData.speedState")
+            self.assertIsNotNone(m_split, "Bpm.qml must compute currentBPMSplit dynamically")
+            bpm_script = r"""
+            const assert = require('assert');
+            function fmtSpeedState(p) {
+                return (p >= 0 ? "+" : "") + p.toFixed(1) + "%";
+            }
+            function evalPitch(bpmPropertyName, pitchArg, deckData) {
+                const scDeckData = deckData !== undefined ? deckData : { speedState: pitchArg };
+                const scSpeed = { translator: { string: fmtSpeedState(pitchArg) } };
+                """ + m_pitch.group(1) + r"""
+            }
+            function makeBpm(songAnalyzed, bpmValue, pitchArg, metaDataBpm, opts = {}) {
+                const decimalPlaces = opts.decimalPlaces !== undefined ? opts.decimalPlaces : 1;
+                const bpmPropertyName = opts.bpmPropertyName || "CurrentBPM";
+                const externalBpm = !!opts.externalBpm;
+                const origBpm = opts.origBpm !== undefined ? opts.origBpm : 0;
+                const bpm = { decimalPlaces };
+                const scPitch = evalPitch(bpmPropertyName, pitchArg, opts.deckData);
+                const scOrigBpm = { translator: { unnormalized: origBpm } };
+                const hasMetaDataBpm = !!metaDataBpm;
+                """ + m_split.group(1) + r"""
+            }
+            // 1. Unanalyzed without metadata or base BPM: returns [] (currentBPMSplitValid is false, displays "-")
+            assert.deepStrictEqual(makeBpm(false, 0, 0, ""), []);
+            // 2. Exact scPitch from deckData.speedState (not 1-decimal SpeedState.translator.string "+1.6%" / "+1.7%")
+            assert.strictEqual(evalPitch("CurrentBPM", 1.5625), 1.5625);
+            assert.strictEqual(evalPitch("OriginalBPM", 1.5625), 0);
+            assert.deepStrictEqual(makeBpm(false, 128.0, 1.5625, "128.0", { decimalPlaces: 2, origBpm: 128.0 }), ["130", "00"]);
+            assert.deepStrictEqual(makeBpm(false, 128.0, 1.6953125, "128.0", { decimalPlaces: 2, origBpm: 128.0 }), ["130", "17"]);
+            // 3. CurrentBPM === 0 while waveform is loading
+            assert.deepStrictEqual(makeBpm(false, 0, 0, "125.0"), ["125", "0"]);
+            assert.deepStrictEqual(makeBpm(false, 0, 1.6, "125.0"), ["127", "0"]);
+            assert.deepStrictEqual(makeBpm(false, 0, 1.6, "128.4", { decimalPlaces: 2, origBpm: 128.36 }), ["130", "41"]);
+            // 4. Integer MetaDataBPM ("128"): always returns 2-part [integral, fraction] so currentBPMSplitValid === true
+            assert.deepStrictEqual(makeBpm(false, 0, 0, "128"), ["128", "0"]);
+            assert.deepStrictEqual(makeBpm(false, 128.0, 0, "128"), ["128", "0"]);
+            assert.deepStrictEqual(makeBpm(false, 128.0, 0, "128", { decimalPlaces: 2 }), ["128", "00"]);
+            assert.deepStrictEqual(makeBpm(false, 0, 1.5625, "128"), ["130", "0"]);
+            assert.deepStrictEqual(makeBpm(false, 128.0, 1.5625, "128"), ["130", "0"]);
+            assert.deepStrictEqual(makeBpm(false, 128.0, 1.5625, "128", { decimalPlaces: 2 }), ["130", "00"]);
+            // 5. 2-decimal Rekordbox BPM (128.36) vs 1-decimal ("128.4") or integer ("128") MetaDataBPM: no jump on analyze
+            for (const origBpm of [128.36, 0]) {
+                assert.deepStrictEqual(makeBpm(false, 128.36, 0, "128.4", { decimalPlaces: 2, origBpm }), ["128", "36"]);
+                assert.deepStrictEqual(
+                    makeBpm(false, 128.36, 1.6, "128.4", { decimalPlaces: 2, origBpm }),
+                    makeBpm(true, 128.36 * 1.016, 1.6, "128.4", { decimalPlaces: 2, origBpm: 128.36 })
+                );
+                assert.deepStrictEqual(
+                    makeBpm(false, 128.36, 1.6, "128", { decimalPlaces: 2, origBpm }),
+                    ["130", "41"]
+                );
+                assert.deepStrictEqual(
+                    makeBpm(false, 128.36, 1.6, "128.4", { decimalPlaces: 1, origBpm }),
+                    makeBpm(true, 128.36 * 1.016, 1.6, "128.4", { decimalPlaces: 1, origBpm: 128.36 })
+                );
+            }
+            // 6. Sync state while unanalyzed: uses synced bpmValue without double-pitching
+            assert.deepStrictEqual(makeBpm(false, 130.0, 1.6, "125.0", { origBpm: 125.0 }), ["130", "0"]);
+            assert.deepStrictEqual(makeBpm(false, 130.0, 1.6, "125.0"), ["130", "0"]);
+            // 7. OriginalBPM callers (DecksTabBarBpm / WaveformOverviewInfo / BPMLabel) ignore pitch
+            assert.deepStrictEqual(makeBpm(false, 128.36, 1.6, "128.4", { decimalPlaces: 2, bpmPropertyName: "OriginalBPM", origBpm: 128.36 }), ["128", "36"]);
+            // 8. Shadow deck externalBpm isolation: never leaks local deck OriginalBPM / MetaDataBPM when shadow tempo is 0
+            assert.deepStrictEqual(makeBpm(false, 0, 1.6, "128.0", { decimalPlaces: 2, externalBpm: true, origBpm: 128.0 }), []);
+            // 9. Analyzed -> 127.0
+            assert.deepStrictEqual(makeBpm(true, 127.0, 1.6, "125.0"), ["127", "0"]);
+            console.log("Bpm.qml tests passed");
+            """
+            output2 = subprocess.check_output(["node", "-e", bpm_script], text=True)
+            self.assertIn("Bpm.qml tests passed", output2)
+
+    @unittest.skipUnless(shutil.which("node"), "node needed for the display-state behavioral checks")
     def test_sender_posts_exact_tempo_changes_at_the_same_rounded_pitch(self):
         self.js(r"""
 let current=130.17,bodies=[],pings=0;
