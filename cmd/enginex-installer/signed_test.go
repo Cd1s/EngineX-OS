@@ -543,3 +543,88 @@ func TestInstallerDoesNotGoBackToAnOlderRelease(t *testing.T) {
 		}
 	})
 }
+
+// The installer compares with what the deck says it runs, so it must have all of it: a release file
+// that is there and cannot be read stops the install before anything is sent (review of #239: the
+// read of release-tag failed, the answer came back without it and r1 went onto a deck that runs r2).
+// A file that is not there is normal (older releases have no release-tag) and does not stop it.
+// A directory in the place of the file makes the real shell command fail to read it.
+func TestInstallerStopsWhenItCannotReadTheInstalledRelease(t *testing.T) {
+	need(t, "python3", "unshare")
+	const older = "v5.3.0.5-r1"
+	type state struct{ name, version, tag string } // "dir": a file that cannot be read; "": no such file
+	states := []struct {
+		state
+		refused bool
+	}{
+		{state{"version.txt only, an older version", "5.3.0.4\n", ""}, false},
+		{state{"release-tag cannot be read", "5.3.0.5\n", "dir"}, true},
+		{state{"version.txt cannot be read", "dir", "v5.3.0.5-r2\n"}, true},
+	}
+	setup := func(t *testing.T, o *options, compatible string, st state) *sshDeck {
+		sd := startSSHDeck(t, o.SSHPort, compatible)
+		custom := filepath.Join(sd.Data, "enginex")
+		os.MkdirAll(filepath.Join(custom, "bundle"), 0o755)
+		for file, content := range map[string]string{"version.txt": st.version, "bundle/release-tag": st.tag} {
+			switch content {
+			case "":
+			case "dir":
+				os.MkdirAll(filepath.Join(custom, file), 0o755)
+			default:
+				os.WriteFile(filepath.Join(custom, file), []byte(content), 0o644)
+			}
+		}
+		return sd
+	}
+	check := func(t *testing.T, sd *sshDeck, err error, refused bool, sent string) {
+		t.Helper()
+		cmds := strings.Join(sd.Commands(), "\n")
+		if !refused {
+			if err != nil {
+				t.Fatalf("a deck whose release files are fine was refused: %v", err)
+			}
+			if !strings.Contains(cmds, sent) {
+				t.Errorf("nothing was installed:\n%s", cmds)
+			}
+			return
+		}
+		if err == nil || !strings.Contains(err.Error(), "cannot read the release the deck runs") || !strings.Contains(err.Error(), "cannot read /") {
+			t.Fatalf("err = %v, want the read failure named", err)
+		}
+		if strings.Contains(cmds, sent) {
+			t.Errorf("something was sent to the deck after the failed read:\n%s", cmds)
+		}
+	}
+	for _, c := range states {
+		t.Run("second generation online/"+c.name, func(t *testing.T) {
+			b := buildBundle(t, "PRIME4PLUS", "5.3.0.5", older)
+			o := testOpts(t)
+			useRelease(o, releaseServerTag(t, b, "", nil, older))
+			sd := setup(t, o, "inmusic,jc11s\x00nxp,imx8mm\x00", c.state)
+			announceFrom(t, "127.0.0.1", freeUDPFrom(o), airD("prime4plus-lab", "DISCOVERER_HOWDY_", "JC11S", "2.3.4", 1))
+			check(t, sd, run(ctxT(t), o), c.refused, "install.sh")
+		})
+		t.Run("second generation from the cache/"+c.name, func(t *testing.T) {
+			b := buildBundle(t, "PRIME4PLUS", "5.3.0.5", older)
+			o := testOpts(t)
+			srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "down", http.StatusServiceUnavailable) }))
+			t.Cleanup(srv.Close)
+			useRelease(o, srv)
+			name := filepath.Base(b.ImagePath)
+			if err := copyFile(b.ImagePath, filepath.Join(o.WorkDir, name)); err != nil {
+				t.Fatal(err)
+			}
+			writeSidecars(t, o.WorkDir, map[string]string{name: sha(t, b.ImagePath)}, testReleasePriv, older)
+			sd := setup(t, o, "inmusic,jc11s\x00nxp,imx8mm\x00", c.state)
+			announceFrom(t, "127.0.0.1", freeUDPFrom(o), airD("prime4plus-lab", "DISCOVERER_HOWDY_", "JC11S", "2.3.4", 1))
+			check(t, sd, run(ctxT(t), o), c.refused, "install.sh")
+		})
+		t.Run("first generation/"+c.name, func(t *testing.T) {
+			const name = "SC5000-5.3.0.5-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img"
+			o := testOpts(t)
+			useRelease(o, oneFileRelease(t, name, []byte("AZ01 older revision"), signFault{tag: older}, nil, ""))
+			sd := setup(t, o, "inmusic,jp07\x00", c.state)
+			check(t, sd, modeA(ctxT(t), o, deck{IP: "127.0.0.1"}), c.refused, "az01-update --file")
+		})
+	}
+}
