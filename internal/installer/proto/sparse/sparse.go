@@ -36,6 +36,7 @@ const (
 	maxHeaderSize   uint16 = 4096
 	maxBlockSize    uint32 = 64 << 20
 	maxTotalChunks  uint32 = 1 << 20
+	maxLogicalBytes uint64 = 1 << 40 // 1 TiB sanity cap for untrusted headers
 	scanBufferBytes int64  = 1 << 20
 )
 
@@ -142,6 +143,9 @@ func ParseHeader(src io.ReaderAt, size int64) (Header, error) {
 	}
 	if h.TotalBlocks > 0 && h.TotalChunks == 0 {
 		return Header{}, errors.New("sparse: non-zero TotalBlocks with zero TotalChunks")
+	}
+	if uint64(h.TotalBlocks) > maxLogicalBytes/uint64(h.BlockSize) {
+		return Header{}, fmt.Errorf("sparse: logical size (%d * %d) exceeds limit %d", h.TotalBlocks, h.BlockSize, maxLogicalBytes)
 	}
 	return h, nil
 }
@@ -1013,34 +1017,103 @@ func crcUpdatePattern(crc uint32, pat [4]byte, total uint64, scratch []byte) uin
 	if total == 0 {
 		return crc
 	}
-	fillLen := len(scratch) - (len(scratch) % 4)
-	if fillLen == 0 {
-		fillLen = 4
-	}
-	for i := 0; i < fillLen; i += 4 {
-		copy(scratch[i:i+4], pat[:])
-	}
-	for total > 0 {
-		step := uint64(fillLen)
-		if total < step {
-			step = total
+	if total%4 != 0 {
+		fillLen := len(scratch) - (len(scratch) % 4)
+		if fillLen == 0 {
+			fillLen = 4
 		}
-		crc = crc32.Update(crc, crc32.IEEETable, scratch[:step])
-		total -= step
+		for i := 0; i < fillLen; i += 4 {
+			copy(scratch[i:i+4], pat[:])
+		}
+		for total > 0 {
+			step := uint64(fillLen)
+			if total < step {
+				step = total
+			}
+			crc = crc32.Update(crc, crc32.IEEETable, scratch[:step])
+			total -= step
+		}
+		return crc
 	}
-	return crc
+	patCRC := crc32Repeat4(pat, total/4)
+	return gf2ShiftBytes(crc, total) ^ patCRC
 }
 
-func crcUpdateZeroes(crc uint32, total uint64, zeroBuf []byte) uint32 {
-	for total > 0 {
-		step := uint64(len(zeroBuf))
-		if total < step {
-			step = total
-		}
-		crc = crc32.Update(crc, crc32.IEEETable, zeroBuf[:step])
-		total -= step
+func crcUpdateZeroes(crc uint32, total uint64, _ []byte) uint32 {
+	if total == 0 {
+		return crc
 	}
-	return crc
+	return gf2ShiftBytes(crc^0xFFFFFFFF, total) ^ 0xFFFFFFFF
+}
+
+func crc32Repeat4(pat [4]byte, count uint64) uint32 {
+	var accCRC uint32
+	curCRC := crc32.ChecksumIEEE(pat[:])
+	curLen := uint64(4)
+	for count > 0 {
+		if count&1 != 0 {
+			accCRC = gf2ShiftBytes(accCRC, curLen) ^ curCRC
+		}
+		count >>= 1
+		if count > 0 {
+			curCRC = gf2ShiftBytes(curCRC, curLen) ^ curCRC
+			curLen <<= 1
+		}
+	}
+	return accCRC
+}
+
+// gf2ShiftBytes multiplies vec (mod IEEE 0xedb88320) by x^(8*nbytes) in O(log nbytes).
+func gf2ShiftBytes(vec uint32, nbytes uint64) uint32 {
+	if nbytes == 0 || vec == 0 {
+		return vec
+	}
+	var odd, even [32]uint32
+	odd[0] = crc32.IEEE
+	row := uint32(1)
+	for n := 1; n < 32; n++ {
+		odd[n] = row
+		row <<= 1
+	}
+	gf2MatrixSquare(&even, &odd) // x^2
+	gf2MatrixSquare(&odd, &even) // x^4
+	gf2MatrixSquare(&even, &odd) // x^8 (1 byte)
+	for nbytes > 0 {
+		if nbytes&1 != 0 {
+			vec = gf2MatrixTimes(&even, vec)
+		}
+		nbytes >>= 1
+		if nbytes == 0 {
+			break
+		}
+		gf2MatrixSquare(&odd, &even)
+		if nbytes&1 != 0 {
+			vec = gf2MatrixTimes(&odd, vec)
+		}
+		nbytes >>= 1
+		if nbytes == 0 {
+			break
+		}
+		gf2MatrixSquare(&even, &odd)
+	}
+	return vec
+}
+
+func gf2MatrixTimes(mat *[32]uint32, vec uint32) uint32 {
+	var sum uint32
+	for i := 0; vec != 0; i++ {
+		if vec&1 != 0 {
+			sum ^= mat[i]
+		}
+		vec >>= 1
+	}
+	return sum
+}
+
+func gf2MatrixSquare(square, mat *[32]uint32) {
+	for n := 0; n < 32; n++ {
+		square[n] = gf2MatrixTimes(mat, mat[n])
+	}
 }
 
 func copyReaderAtToWriterAt(dst io.WriterAt, dstOff int64, src io.ReaderAt, srcOff, n int64, scratch []byte) error {

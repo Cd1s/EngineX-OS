@@ -338,7 +338,7 @@ func PrepareVerifiedTarget(probe ProbeResult, layout Layout, partition string, i
 	if probe.Mode != ModeLoader || !probe.StorageReady {
 		return VerifiedTarget{}, fmt.Errorf("%w (mode=%s)", ErrNotLoader, probe.Mode)
 	}
-	if !layout.Verified || layout.SectorSize != SectorSize {
+	if !layout.Verified || layout.SectorSize != SectorSize || layout.TotalSectors == 0 {
 		return VerifiedTarget{}, fmt.Errorf("%w: layout is not verified", ErrLayoutUnavailable)
 	}
 	if !allowedTargetPartitions[partition] {

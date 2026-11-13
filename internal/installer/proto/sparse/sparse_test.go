@@ -452,4 +452,49 @@ func TestParseRejectsCorruptAndTruncatedInputs(t *testing.T) {
 	if _, _, err := sparse.ParseChunks(bytes.NewReader(hostile.Bytes()), int64(hostile.Len())); err == nil {
 		t.Fatal("expected immediate error on cblocks > TotalBlocks")
 	}
+
+	// Self-consistent hostile header claiming TotalBlocks=0xFFFFFFFF * 64 MiB (256 PiB)
+	// must be rejected immediately by the logical size limit.
+	var huge bytes.Buffer
+	hugeHdr := sparse.MarshalHeader(sparse.Header{
+		MajorVersion: sparse.MajorVersion,
+		BlockSize:    64 << 20,
+		TotalBlocks:  0xFFFFFFFF,
+		TotalChunks:  1,
+	})
+	hugeChk := sparse.MarshalChunkHeader(sparse.ChunkTypeFill, 0xFFFFFFFF, uint32(sparse.ChunkHeaderSize)+4)
+	huge.Write(hugeHdr[:])
+	huge.Write(hugeChk[:])
+	huge.Write([]byte{0xDE, 0xAD, 0xBE, 0xEF})
+	if _, _, err := sparse.ParseChunks(bytes.NewReader(huge.Bytes()), int64(huge.Len())); err == nil {
+		t.Fatal("expected error on 256 PiB sparse logical size")
+	}
+
+	// Verify O(log N) CRC32 for large FILL + DONT_CARE chunks matches byte-by-byte IEEE CRC32.
+	const testBlocks = 256 // 1 MiB at 4 KiB
+	pat := []byte{0x12, 0x34, 0x56, 0x78}
+	wantCRC := crc32.Update(0, crc32.IEEETable, bytes.Repeat(pat, (testBlocks*4096)/4))
+	wantCRC = crc32.Update(wantCRC, crc32.IEEETable, make([]byte, testBlocks*4096))
+	var crcStream bytes.Buffer
+	cHdr := sparse.MarshalHeader(sparse.Header{
+		MajorVersion:  sparse.MajorVersion,
+		BlockSize:     4096,
+		TotalBlocks:   2 * testBlocks,
+		TotalChunks:   3,
+		ImageChecksum: wantCRC,
+	})
+	cFill := sparse.MarshalChunkHeader(sparse.ChunkTypeFill, testBlocks, uint32(sparse.ChunkHeaderSize)+4)
+	cSkip := sparse.MarshalChunkHeader(sparse.ChunkTypeDontCare, testBlocks, uint32(sparse.ChunkHeaderSize))
+	cEnd := sparse.MarshalChunkHeader(sparse.ChunkTypeCRC32, 0, uint32(sparse.ChunkHeaderSize)+4)
+	crcStream.Write(cHdr[:])
+	crcStream.Write(cFill[:])
+	crcStream.Write(pat)
+	crcStream.Write(cSkip[:])
+	crcStream.Write(cEnd[:])
+	var rawWant [4]byte
+	binary.LittleEndian.PutUint32(rawWant[:], wantCRC)
+	crcStream.Write(rawWant[:])
+	if _, _, err := sparse.ParseChunks(bytes.NewReader(crcStream.Bytes()), int64(crcStream.Len())); err != nil {
+		t.Fatalf("ParseChunks with O(log N) FILL/DONT_CARE CRC32 failed: %v", err)
+	}
 }
