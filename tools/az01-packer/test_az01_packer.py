@@ -7,6 +7,7 @@ import os
 import re
 from pathlib import Path
 import shutil
+import stat
 import struct
 import subprocess
 import tempfile
@@ -117,7 +118,7 @@ class ContainerTests(unittest.TestCase):
                      '/etc/../boot/x', '/etc//x', '/etc/x\nwrite bad', '/etc/"x', 'relative'):
             with self.subTest(path=path), self.assertRaises(az.SafetyError):
                 az.writable(path)
-        az.writable('/usr/libexec/sc5000-custom-prepare')
+        az.writable('/usr/libexec/enginex-prepare')
 
     def test_usb_id_header_and_invalid_counts(self):
         im = az.Image(fixture())
@@ -219,19 +220,19 @@ class FilesystemTests(unittest.TestCase):
         az.inject(self.fs, az.public_key(self.key.with_suffix('.pub').read_text()))
         self.assertEqual(self.fs.snapshot(), before)
         self.assertIn(b'AuthorizedKeysFile /data/enginex/',
-                      self.fs.read('/usr/share/sc5000-custom/sshd_config'))
+                      self.fs.read('/usr/share/enginex/sshd_config'))
         self.assertIn(b'root:$6$', self.fs.read('/etc/shadow'))
-        prepare = self.fs.read('/usr/lib/systemd/system/sc5000-custom-prepare.service')
+        prepare = self.fs.read('/usr/lib/systemd/system/enginex-prepare.service')
         self.assertIn(b'RequiresMountsFor=/data /etc /var\n', prepare)
         self.assertNotIn(b'Requires=etc.mount', prepare)  # 5.3.0 has no etc.mount
         # After a factory reset /data is blank: the UI packs must exist before Engine starts.
-        self.assertIn(b'Before=sc5000-custom-sshd.service engine.service stream-sync.service', prepare)
-        self.assertIn('sc5000-custom.target', self.fs.entries(
+        self.assertIn(b'Before=enginex-sshd.service engine.service stream-sync.service', prepare)
+        self.assertIn('enginex.target', self.fs.entries(
             '/usr/lib/systemd/system/multi-user.target.wants'))
-        self.assertIn('sc5000-custom-etc-reset.service', self.fs.entries(
+        self.assertIn('enginex-etc-reset.service', self.fs.entries(
             '/usr/lib/systemd/system/etc.mount.wants'))
         self.assertIn(b'Before=etc.mount',
-                      self.fs.read('/usr/lib/systemd/system/sc5000-custom-etc-reset.service'))
+                      self.fs.read('/usr/lib/systemd/system/enginex-etc-reset.service'))
         az.check_fs(self.disk)
 
     def test_prepare_installs_ui_packs_once_per_version(self):
@@ -256,8 +257,8 @@ class FilesystemTests(unittest.TestCase):
         (ui/'safe-mode').write_text('')
         (ui/'boot-count').write_text('3')
         script = az.PREPARE.replace(b'/data', str(data).encode()).replace(
-            b'/usr/share/sc5000-custom', str(seed).encode()).replace(
-            b'/etc/sc5000/version.txt', str(version).encode())
+            b'/usr/share/enginex', str(seed).encode()).replace(
+            b'/etc/enginex/version.txt', str(version).encode())
         passed = subprocess.run(['sh', '-s'], input=script, capture_output=True)
         self.assertEqual(passed.returncode, 0, passed.stderr)
         self.assertEqual((ui/'packs/en/Main.qml').read_text(), 'new')
@@ -307,7 +308,7 @@ class FilesystemTests(unittest.TestCase):
         (seed/'authorized_keys').write_bytes(key)
         data = self.root/'data'
         script = az.PREPARE.replace(b'/data', str(data).encode()).replace(
-            b'/usr/share/sc5000-custom', str(seed).encode())
+            b'/usr/share/enginex', str(seed).encode())
         failed = subprocess.run(['sh', '-s'], input=script.replace(
             b'/usr/bin/ssh-keygen', b'/usr/bin/false'), capture_output=True)
         self.assertNotEqual(failed.returncode, 0)
@@ -335,13 +336,13 @@ class FilesystemTests(unittest.TestCase):
         # #46: public images seed no key, sshd needs a non-empty authorized_keys,
         # and the key public images up to 5.0.4.1 seeded is dropped from /data.
         az.inject(self.fs, None)
-        self.assertNotIn('authorized_keys', self.fs.entries('/usr/share/sc5000-custom'))
+        self.assertNotIn('authorized_keys', self.fs.entries('/usr/share/enginex'))
         self.assertIn(b'ConditionFileNotEmpty=/data/enginex/authorized_keys',
-                      self.fs.read('/usr/lib/systemd/system/sc5000-custom-sshd.service'))
+                      self.fs.read('/usr/lib/systemd/system/enginex-sshd.service'))
         seed, data = self.root/'seed', self.root/'data'
         seed.mkdir()
         script = az.PREPARE.replace(b'/data', str(data).encode()).replace(
-            b'/usr/share/sc5000-custom', str(seed).encode())
+            b'/usr/share/enginex', str(seed).encode())
         run = lambda: subprocess.run(['sh', '-s'], input=script, capture_output=True)
         state = data/'enginex'
         p = run()
@@ -380,7 +381,7 @@ class FilesystemTests(unittest.TestCase):
         (old/'authorized_keys').write_bytes(own)
         for template in (az.ETC_RESET, az.PREPARE):
             script = template.replace(b'/data', str(data).encode()).replace(
-                b'/usr/share/sc5000-custom', str(seed).encode())
+                b'/usr/share/enginex', str(seed).encode())
             for _ in range(2):
                 p = subprocess.run(['sh', '-s'], input=script, capture_output=True)
                 self.assertEqual(p.returncode, 0, p.stderr)
@@ -467,13 +468,13 @@ class FilesystemTests(unittest.TestCase):
         self.fs.snapshot()
 
     def test_custom_service_gets_mount_ordering_and_target_registration(self):
-        service = self.root/'sc5000-test.service'
+        service = self.root/'enginex-test.service'
         service.write_text('[Service]\nExecStart=/usr/bin/true\n')
         az.inject(self.fs, az.public_key(self.key.with_suffix('.pub').read_text()), [service])
-        self.assertIn(b'After=sc5000-custom-prepare.service', self.fs.read(
-            '/usr/lib/systemd/system/sc5000-test.service.d/sc5000-ordering.conf'))
-        self.assertIn('sc5000-test.service', self.fs.entries(
-            '/usr/lib/systemd/system/sc5000-custom.target.wants'))
+        self.assertIn(b'After=enginex-prepare.service', self.fs.read(
+            '/usr/lib/systemd/system/enginex-test.service.d/enginex-ordering.conf'))
+        self.assertIn('enginex-test.service', self.fs.entries(
+            '/usr/lib/systemd/system/enginex.target.wants'))
 
     def test_overlay_mcu_and_protected_symlinks_rejected(self):
         overlay = self.root/'overlay'
@@ -585,16 +586,83 @@ class FilesystemTests(unittest.TestCase):
     def test_set_version_writes_version_and_new_reset_epoch(self):
         overlay = Path(__file__).resolve().parents[2]/'rootfs-overlay'
         az.inject(self.fs, b'key', overlay=overlay, version='5.0.4.1')
-        self.assertEqual(self.fs.read('/etc/sc5000/version.txt'), b'5.0.4.1\n')
-        reset = self.fs.read('/usr/libexec/sc5000-custom-etc-reset')
+        self.assertEqual(self.fs.read('/etc/enginex/version.txt'), b'5.0.4.1\n')
+        reset = self.fs.read('/usr/libexec/enginex-etc-reset')
         self.assertRegex(reset, rb'epoch=5\.0\.4\.1-[0-9a-f]{12}\n')
         # Upper-layer copies of image-managed /etc files are dropped on upgrade (#33).
         self.assertIn(b' sc5000/engine-ui-guard', reset)
+        self.assertIn(b' enginex/engine-ui-guard', reset)
         self.assertIn(b' systemd/system/engine.service.d/override.conf', reset)
         with self.assertRaises(az.SafetyError):
             az.inject(self.fs, b'key', overlay=overlay, version='5.0.4.1; rm -rf /')
         self.assertTrue(az.VERSION_RE.fullmatch('5.3.0.1.1'))
         self.assertIsNone(az.VERSION_RE.fullmatch('5.3.0.1.1.1'))
+
+    # #234: names an image of 5.3.0.5 may still carry under sc5000 (compatibility links only).
+    RENAME_234_LINKS = {
+        '/etc/sc5000': 'enginex',
+        '/usr/local/lib/sc5000': 'enginex',
+        '/usr/share/sc5000-custom': 'enginex',
+        '/usr/local/bin/sc5000-debloat': 'enginex-debloat',
+        '/usr/local/bin/sc5000-perf-tune': 'enginex-perf-tune',
+        '/usr/local/bin/sc5000-prolink-diag': 'enginex-prolink-diag',
+        '/usr/local/bin/sc5000-storage-mount': 'enginex-storage-mount',
+        '/usr/sbin/sc5000-bt-helper': 'enginex-bt-helper',
+        '/usr/sbin/sc5000-usb-audio': 'enginex-usb-audio',
+    }
+
+    def test_234_image_has_enginex_names_and_only_compat_links_named_sc5000(self):
+        overlay = Path(__file__).resolve().parents[2]/'rootfs-overlay'
+        az.inject(self.fs, None, overlay=overlay, version='5.3.0.5')
+        entries = dict(self.fs.walk())
+        old = {p: m for p, m in entries.items() if 'sc5000' in p}
+        self.assertEqual(sorted(old), sorted(self.RENAME_234_LINKS))
+        for path, target in self.RENAME_234_LINKS.items():
+            self.assertTrue(stat.S_ISLNK(old[path][1]), path)
+            self.assertIn('Fast link dest: "%s"' % target, self.fs.cmd(f'stat "{path}"'))
+        # The real directory carries the version; older installers and gates read it through the link.
+        self.assertEqual(self.fs.read('/etc/enginex/version.txt'), b'5.3.0.5\n')
+        self.assertEqual(az.ExtFS.validate_link(self.fs, '/etc/sc5000', 'enginex'), '/etc/enginex')
+        for wants in ('/usr/lib/systemd/system/multi-user.target.wants', '/etc/systemd/system/multi-user.target.wants'):
+            names = self.fs.entries(wants)
+            self.assertFalse([n for n in names if 'sc5000' in n], wants)
+        self.assertIn('enginex.target', self.fs.entries('/usr/lib/systemd/system/multi-user.target.wants'))
+        self.assertTrue({'enginex-debloat.service', 'enginex-deemixd.service', 'enginex-perf-tune.service',
+                         'enginex-storage-discover.service'} <= set(self.fs.entries('/etc/systemd/system/multi-user.target.wants')))
+        # Every unit and drop-in the image enables says enginex, never the old target or prepare unit.
+        for path, meta in entries.items():
+            if stat.S_ISREG(meta[1]) and re.search(r'/systemd/system/.*\.(service|target|slice|conf)$', path):
+                body = b'\n'.join(l for l in self.fs.read(path).splitlines() if not l.lstrip().startswith(b'#'))
+                self.assertNotRegex(body, rb'sc5000-(custom|background|engine\.slice|storage|deemixd|debloat|perf)', path)
+                self.assertNotRegex(body, rb'(?m)^Description=.*SC5000', path)
+        az.check_fs(self.disk)
+
+    def test_234_etc_reset_drops_old_and_new_named_upper_copies(self):
+        overlay = Path(__file__).resolve().parents[2]/'rootfs-overlay'
+        az.inject(self.fs, None, overlay=overlay, version='5.3.0.5')
+        data = self.root/'data'
+        upper = data/'system/etc/overlay'
+        stale = ['sc5000/libengine-ui-hook.so', 'sc5000/version.txt', 'sc5000/release-tag',
+                 'systemd/system/sc5000-deemixd.service', 'systemd/system/sc5000-background.slice',
+                 'systemd/system/stream-sync.service.d/50-sc5000-background.conf',
+                 'systemd/system/edisksd.service.d/50-sc5000-hook.conf', 'default/sc5000-perf',
+                 'udev/rules.d/60-sc5000-storage.rules', 'systemd/journald.conf.d/sc5000.conf',
+                 'dnsmasq.d/sc5000-telemetry.conf', 'systemd/system/enginex-deemixd.service']
+        for name in stale + ['keep.conf', 'systemd/system/user-own.service']:
+            (upper/name).parent.mkdir(parents=True, exist_ok=True)
+            (upper/name).write_text('r4')
+        (upper/'systemd/system/multi-user.target.wants').mkdir(parents=True)
+        (upper/'systemd/system/multi-user.target.wants/sc5000-deemixd.service').symlink_to('../sc5000-deemixd.service')
+        # An r4 prepare on a 5.0.4 image linked /etc/enginex -> sc5000 in the upper layer: over the
+        # image's /etc/sc5000 -> enginex link that is a loop, and the hook would never load.
+        (upper/'enginex').symlink_to('sc5000')
+        script = self.fs.read('/usr/libexec/enginex-etc-reset').replace(b'/data', str(data).encode())
+        p = subprocess.run(['sh', '-s'], input=script, capture_output=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        for name in stale + ['enginex', 'systemd/system/multi-user.target.wants/sc5000-deemixd.service']:
+            self.assertFalse(os.path.lexists(upper/name), name)
+        self.assertEqual((upper/'keep.conf').read_text(), 'r4')
+        self.assertEqual((upper/'systemd/system/user-own.service').read_text(), 'r4')
 
     def test_overlay_debloat_runs_offline(self):
         overlay = Path(__file__).resolve().parents[2]/'rootfs-overlay'
@@ -606,28 +674,28 @@ class FilesystemTests(unittest.TestCase):
 
     def test_guardian_and_template_services(self):
         services = []
-        for name in ('engine-guardian.service', 'sc5000-storage@.service'):
+        for name in ('engine-guardian.service', 'enginex-storage@.service'):
             source = self.root/name
             source.write_text('[Service]\nExecStart=/usr/bin/true\n')
             services.append(source)
         az.inject(self.fs, b'key', services)
-        wants = self.fs.entries('/usr/lib/systemd/system/sc5000-custom.target.wants')
+        wants = self.fs.entries('/usr/lib/systemd/system/enginex.target.wants')
         self.assertIn('engine-guardian.service', wants)
-        self.assertNotIn('sc5000-storage@.service', wants)
+        self.assertNotIn('enginex-storage@.service', wants)
         for source in services:
             dest = '/usr/lib/systemd/system/'+source.name
             self.assertEqual(self.fs.read(dest), source.read_bytes())
-            self.assertIn(b'After=sc5000-custom-prepare.service',
-                          self.fs.read(dest+'.d/sc5000-ordering.conf'))
+            self.assertIn(b'After=enginex-prepare.service',
+                          self.fs.read(dest+'.d/enginex-ordering.conf'))
 
     def test_invalid_and_duplicate_services_refused_before_write(self):
-        for name in ('sshd.service', 'sc5000-custom-prepare.service',
-                     'sc5000-bad@@.service', 'sc5000-foo@bar.service'):
+        for name in ('sshd.service', 'enginex-prepare.service',
+                     'enginex-bad@@.service', 'enginex-foo@bar.service'):
             source = self.root/name
             source.write_text('[Service]\nExecStart=/usr/bin/true\n')
             with self.subTest(name=name), self.assertRaises(az.SafetyError):
                 az.inject(self.fs, b'key', [source])
-        source = self.root/'sc5000-ok.service'
+        source = self.root/'enginex-ok.service'
         source.write_text('[Service]\nExecStart=/usr/bin/true\n')
         with self.assertRaises(az.SafetyError):
             az.inject(self.fs, b'key', [source, source])
@@ -730,8 +798,8 @@ class FilesystemTests(unittest.TestCase):
         overlay = Path(__file__).resolve().parents[2] / 'rootfs-overlay'
         az.inject(self.fs, None, overlay=overlay)
 
-        # 1. sc5000-custom-etc-reset stays out of sysinit.target.wants and orders before var/var-lib mounts.
-        etc_reset_unit = self.fs.read('/usr/lib/systemd/system/sc5000-custom-etc-reset.service')
+        # 1. enginex-etc-reset stays out of sysinit.target.wants and orders before var/var-lib mounts.
+        etc_reset_unit = self.fs.read('/usr/lib/systemd/system/enginex-etc-reset.service')
         self.assertIn(b'Before=etc.mount\n', etc_reset_unit)
         self.assertNotIn(b'var.mount', etc_reset_unit)
         self.assertNotIn(b'sysinit.target', etc_reset_unit)
@@ -741,8 +809,8 @@ class FilesystemTests(unittest.TestCase):
         # 2. systemd-timesyncd drop-in runs separate seed script with -+ and finite TimeoutStartSec.
         seed_dropin = self.fs.read('/usr/lib/systemd/system/systemd-timesyncd.service.d/10-enginex-seed.conf')
         self.assertIn(b'TimeoutStartSec=15s\n', seed_dropin)
-        self.assertIn(b'ExecStartPre=-+/usr/libexec/sc5000-timesync-seed\n', seed_dropin)
-        seed_script = overlay / 'usr/libexec/sc5000-timesync-seed'
+        self.assertIn(b'ExecStartPre=-+/usr/libexec/enginex-timesync-seed\n', seed_dropin)
+        seed_script = overlay / 'usr/libexec/enginex-timesync-seed'
         self.assertTrue(os.access(seed_script, os.X_OK))
 
         ts = self.root / 'timestamp'
@@ -809,7 +877,7 @@ class FilesystemTests(unittest.TestCase):
                    SC5000_ZONEINFO_DIR=str(zdir),
                    SC5000_PRODUCT_CODE_FILE=str(pcode))
         prep_script = az.PREPARE.replace(b'/data', str(data).encode()).replace(
-            b'/usr/share/sc5000-custom', str(seed).encode())
+            b'/usr/share/enginex', str(seed).encode())
 
         # Missing Engine.conf -> restores Asia/Shanghai.
         r = subprocess.run(['sh', '-s'], input=prep_script, env=env, capture_output=True)
@@ -846,42 +914,42 @@ class OverlayOrderingTests(unittest.TestCase):
     OVERLAY = Path(__file__).resolve().parents[2]/'rootfs-overlay'
 
     def runtime_units(self):
-        """Overlay services that write the runtime dir: they start the suite (sc5000-suite-exec
-        unpacks into /data/sc5000-custom/bin), run the guard or name the dir themselves."""
+        """Overlay services that write the runtime dir: they start the suite (enginex-suite-exec
+        unpacks into /data/enginex/bin), run the guard or name the dir themselves."""
         bindir = self.OVERLAY/'usr/local/bin'
         suite = {'/usr/local/bin/'+p.name for p in bindir.iterdir()
-                 if p.is_file() and p.name != 'sc5000-suite-exec' and b'sc5000-suite-exec' in p.read_bytes()}
-        self.assertTrue({'/usr/local/bin/rb-bridge', '/usr/local/bin/sc5000-deemixd',
+                 if p.is_file() and p.name != 'enginex-suite-exec' and b'enginex-suite-exec' in p.read_bytes()}
+        self.assertTrue({'/usr/local/bin/rb-bridge', '/usr/local/bin/enginex-deemixd',
                          '/usr/local/bin/stream-sync'} <= suite, suite)
         units = {}
         for unit in sorted((self.OVERLAY/'etc/systemd/system').glob('*.service')):
             text = unit.read_text() + ''.join(p.read_text() for p in sorted(unit.parent.glob(unit.name+'.d/*.conf')))
             progs = {re.sub(r'^[-+@!:]*', '', line.split('=', 1)[1]).split(' ')[0]
                      for line in text.splitlines() if re.match(r'Exec\w*=\S', line)}
-            if progs & (suite | {'/etc/sc5000/engine-ui-guard'}) or re.search(r'/data/(sc5000-custom|enginex)\b', text):
+            if progs & (suite | {'/etc/enginex/engine-ui-guard'}) or re.search(r'/data/(sc5000-custom|enginex)\b', text):
                 units[unit.name] = text
         return units
 
     def test_runtime_dir_writers_start_after_prepare_migrated_it(self):
         # #103: prepare renames /data/sc5000-custom to /data/enginex and then links the old name.
-        # rb-bridge and sc5000-deemixd started beside it on a blank /data or the first boot after
-        # an update: sc5000-suite-exec's mkdir -p /data/sc5000-custom/bin between the two steps
+        # rb-bridge and enginex-deemixd started beside it on a blank /data or the first boot after
+        # an update: enginex-suite-exec's mkdir -p /data/sc5000-custom/bin between the two steps
         # left a real old dir, so the UI hook's /data/sc5000-custom/ui was gone for that boot and
         # the next boot's merge set its writes aside.
-        prepare = az.UNITS['sc5000-custom-prepare.service']
+        prepare = az.UNITS['enginex-prepare.service']
         before = set(re.search(r'^Before=(.*)$', prepare, re.M).group(1).split())
         units = self.runtime_units()
-        self.assertTrue({'rb-bridge.service', 'sc5000-deemixd.service', 'stream-sync.service',
+        self.assertTrue({'rb-bridge.service', 'enginex-deemixd.service', 'stream-sync.service',
                          'engine-guardian.service'} <= set(units), sorted(units))
         for name, text in units.items():
             after = {u for line in re.findall(r'^After=(.*)$', text, re.M) for u in line.split()}
             with self.subTest(unit=name):
-                self.assertTrue(name in before or 'sc5000-custom-prepare.service' in after,
-                                name+' is not ordered after sc5000-custom-prepare.service')
+                self.assertTrue(name in before or 'enginex-prepare.service' in after,
+                                name+' is not ordered after enginex-prepare.service')
         # Ordering only: prepare itself must not wait for any of them (no cycle).
         prepare_after = {u for line in re.findall(r'^After=(.*)$', prepare, re.M) for u in line.split()}
         self.assertFalse(prepare_after & set(units), prepare_after & set(units))
-        for name in ('rb-bridge.service', 'sc5000-deemixd.service'):
+        for name in ('rb-bridge.service', 'enginex-deemixd.service'):
             self.assertNotRegex(units[name], r'(?m)^(Requires|BindsTo|Requisite)=')
 
     def test_edisksd_hook_spawns_rb_bridge_only_after_prepare(self):
@@ -889,11 +957,11 @@ class OverlayOrderingTests(unittest.TestCase):
         # plugged in at power-on is mounted while prepare may be moving the runtime dir.
         hook = (self.OVERLAY.parent/'tools/edisksd-hook/edisksd_hook.c').read_text()
         self.assertIn('"/usr/local/bin/rb-bridge"', hook)
-        dropin = (self.OVERLAY/'etc/systemd/system/edisksd.service.d/50-sc5000-hook.conf').read_text()
-        self.assertRegex(dropin, r'(?m)^After=.*\bsc5000-custom-prepare\.service\b')
+        dropin = (self.OVERLAY/'etc/systemd/system/edisksd.service.d/50-enginex-hook.conf').read_text()
+        self.assertRegex(dropin, r'(?m)^After=.*\benginex-prepare\.service\b')
         # edisksd is a vendor unit: ordering only (CONTRIBUTING), and still preloads the hook.
         self.assertNotRegex(dropin, r'(?m)^(Requires|BindsTo|Requisite|Wants)=')
-        self.assertIn('Environment=LD_PRELOAD=/etc/sc5000/libedisksd-hook.so', dropin)
+        self.assertIn('Environment=LD_PRELOAD=/etc/enginex/libedisksd-hook.so', dropin)
 
 
 if __name__ == '__main__':

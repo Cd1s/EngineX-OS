@@ -4,8 +4,8 @@ set -euo pipefail
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 TMP=$(mktemp -d "$ROOT/tests/.tmp.XXXXXX")
 trap 'rm -rf -- "$TMP"' EXIT
-STORAGE=$ROOT/rootfs-overlay/usr/local/bin/sc5000-storage-mount
-PERF=$ROOT/rootfs-overlay/usr/local/bin/sc5000-perf-tune
+STORAGE=$ROOT/rootfs-overlay/usr/local/bin/enginex-storage-mount
+PERF=$ROOT/rootfs-overlay/usr/local/bin/enginex-perf-tune
 mkdir -p "$TMP/bin"
 cat > "$TMP/bin/mock" <<'MOCK'
 #!/bin/bash
@@ -294,7 +294,7 @@ has 1024 "$SC5000_SYS_ROOT/block/sda/queue/read_ahead_kb"
 has 2048 "$SC5000_SYS_ROOT/block/sdb/queue/read_ahead_kb"
 has none "$SC5000_SYS_ROOT/block/mmcblk1/queue/scheduler"
 has 9 "$SC5000_SYS_ROOT/devices/virtual/workqueue/cpumask"
-has 'EnvironmentFile=-/etc/default/sc5000-perf' "$ROOT/rootfs-overlay/etc/systemd/system/engine.service.d/60-ui-hook.conf"
+has 'EnvironmentFile=-/etc/default/enginex-perf' "$ROOT/rootfs-overlay/etc/systemd/system/engine.service.d/60-ui-hook.conf"
 has 'Environment=QT_LOGGING_CONF=/data/logging.ini' "$ROOT/rootfs-overlay/etc/systemd/system/engine.service.d/60-ui-hook.conf"
 lacks 'taskset <-pc> <0> <101>' "$MOCK_ROOT/log"
 lacks 'taskset <-pc> <1-2> <100>' "$MOCK_ROOT/log"
@@ -436,21 +436,21 @@ fixture
 sh "$PERF" > "$MOCK_ROOT/output" 2>&1
 ok 'missing cpufreq, GPU, IRQ and process facilities are nonfatal'
 
-for service in sc5000-storage@.service rb-bridge.service.d/50-sc5000-background.conf \
-    stream-sync.service.d/50-sc5000-background.conf ssh.service.d/50-sc5000-background.conf \
-    sshd.service.d/50-sc5000-background.conf; do
+for service in enginex-storage@.service rb-bridge.service.d/50-enginex-background.conf \
+    stream-sync.service.d/50-enginex-background.conf ssh.service.d/50-enginex-background.conf \
+    sshd.service.d/50-enginex-background.conf; do
     file=$ROOT/rootfs-overlay/etc/systemd/system/$service
     has 'CPUAffinity=3' "$file"
     has 'CPUWeight=10' "$file"
     has 'IOWeight=10' "$file"
 done
-has 'IMPORT{builtin}="blkid"' "$ROOT/rootfs-overlay/etc/udev/rules.d/60-sc5000-storage.rules"
-lacks 'UDISKS_IGNORE' "$ROOT/rootfs-overlay/etc/udev/rules.d/60-sc5000-storage.rules"
-lacks ', RUN+=' "$ROOT/rootfs-overlay/etc/udev/rules.d/60-sc5000-storage.rules"
+has 'IMPORT{builtin}="blkid"' "$ROOT/rootfs-overlay/etc/udev/rules.d/60-enginex-storage.rules"
+lacks 'UDISKS_IGNORE' "$ROOT/rootfs-overlay/etc/udev/rules.d/60-enginex-storage.rules"
+lacks ', RUN+=' "$ROOT/rootfs-overlay/etc/udev/rules.d/60-enginex-storage.rules"
 has 'Restart=always' "$ROOT/rootfs-overlay/etc/systemd/system/rb-bridge.service"
 ok 'background service isolation and systemd udev handoff are installed'
 
-for script in "$STORAGE" "$PERF" "$ROOT/rootfs-overlay/usr/local/bin/sc5000-suite-exec" "$ROOT/rootfs-overlay/etc/sc5000/engine-ui-guard"; do
+for script in "$STORAGE" "$PERF" "$ROOT/rootfs-overlay/usr/local/bin/enginex-suite-exec" "$ROOT/rootfs-overlay/etc/enginex/engine-ui-guard"; do
     [[ $(head -n 1 "$script") == '#!/bin/sh' ]] || fail "$script must use /bin/sh (no bash on Engine OS)"
     if command -v busybox >/dev/null; then busybox sh -n "$script" || fail "busybox sh syntax: $script"; else sh -n "$script"; fi
 done
@@ -458,19 +458,31 @@ ok 'device scripts run under /bin/sh'
 
 suite_share=$TMP/suite-share suite_dir=$TMP/suite-bin
 mkdir -p "$suite_share"
-printf '#!/bin/sh\necho image-1 "$@"\n' | gzip -c > "$suite_share/sc5000-suite.gz"
-run_suite() { SC5000_SUITE_SHARE=$suite_share SC5000_SUITE_DIR=$suite_dir sh "$ROOT/rootfs-overlay/usr/local/bin/sc5000-suite-exec" x; }
+printf '#!/bin/sh\necho image-1 "$@"\n' | gzip -c > "$suite_share/enginex-suite.gz"
+run_suite() { SC5000_SUITE_SHARE=$suite_share SC5000_SUITE_DIR=$suite_dir sh "$ROOT/rootfs-overlay/usr/local/bin/enginex-suite-exec" x; }
 [[ $(run_suite) == 'image-1 x' ]] || fail 'suite archive is unpacked on first start'
-printf '#!/bin/sh\necho hand "$@"\n' > "$suite_dir/sc5000-suite"
-touch -t 200001010000 "$suite_dir/sc5000-suite"
+printf '#!/bin/sh\necho hand "$@"\n' > "$suite_dir/enginex-suite"
+touch -t 200001010000 "$suite_dir/enginex-suite"
 [[ $(run_suite) == 'hand x' ]] || fail 'a hand-deployed suite survives restarts of the same image'
-printf '#!/bin/sh\necho image-2 "$@"\n' | gzip -c > "$suite_share/sc5000-suite.gz"
-touch -t 200001010000 "$suite_share/sc5000-suite.gz"
+printf '#!/bin/sh\necho image-2 "$@"\n' | gzip -c > "$suite_share/enginex-suite.gz"
+touch -t 200001010000 "$suite_share/enginex-suite.gz"
 touch "$suite_dir/sc5000-deemixd" "$suite_dir/stems-processor" "$suite_dir/sc5000-suite.prev" "$suite_dir/sc5000-suite.pre-x" "$suite_dir/drmgrab"
 [[ $(run_suite) == 'image-2 x' ]] || fail 'a new image archive replaces the suite even with an older mtime'
 [[ ! -e $suite_dir/sc5000-deemixd && ! -e $suite_dir/stems-processor && ! -e $suite_dir/sc5000-suite.prev && ! -e $suite_dir/sc5000-suite.pre-x && -e $suite_dir/drmgrab ]] ||
     fail 'a new image removes the replaced standalone binaries and backups only'
 ok 'suite binary follows the image archive content, not mtime'
+# #234: the first start after an update from 5.3.0.4 (sc5000-suite in the same /data bin dir)
+# removes the old-named suite, its id and temporaries, and leaves only the new one.
+printf '#!/bin/sh\necho image-3 "$@"\n' | gzip -c > "$suite_share/enginex-suite.gz"
+printf '#!/bin/sh\necho old\n' > "$suite_dir/sc5000-suite"
+printf 'old-id\n' > "$suite_dir/sc5000-suite.id"
+touch "$suite_dir/sc5000-suite.123.tmp" "$suite_dir/enginex-deemixd"
+[[ $(run_suite) == 'image-3 x' ]] || fail 'the renamed suite is unpacked next to an old-named one'
+for f in sc5000-suite sc5000-suite.id sc5000-suite.123.tmp enginex-deemixd; do
+    [[ ! -e $suite_dir/$f ]] || fail "update from an older release leaves $f in the suite dir"
+done
+[[ -x $suite_dir/enginex-suite && -e $suite_dir/drmgrab ]] || fail 'old-name cleanup removed the new suite or a foreign file'
+ok 'suite unpack removes the binaries an older release unpacked as sc5000-suite (#234)'
 
 fixture
 expect_fail env TARGET_CONFIG= TARGET_SYMVERS= bash "$ROOT/kernel-modules/build_modules.sh" modules
@@ -479,12 +491,12 @@ ok 'module build refuses missing target ABI inputs before building'
 debloat_root=$TMP/debloat-root
 mkdir -p "$debloat_root/etc"
 printf '127.0.0.1 localhost\n0.0.0.0 inmusicbrands.com\n' > "$debloat_root/etc/hosts"
-sh "$ROOT/rootfs-overlay/usr/local/bin/sc5000-debloat" --root "$debloat_root"
-sh "$ROOT/rootfs-overlay/usr/local/bin/sc5000-debloat" --root "$debloat_root"
+sh "$ROOT/rootfs-overlay/usr/local/bin/enginex-debloat" --root "$debloat_root"
+sh "$ROOT/rootfs-overlay/usr/local/bin/enginex-debloat" --root "$debloat_root"
 lacks '0.0.0.0 inmusicbrands.com' "$debloat_root/etc/hosts"
-lacks 'address=/inmusicbrands.com/' "$debloat_root/etc/dnsmasq.d/sc5000-telemetry.conf"
+lacks 'address=/inmusicbrands.com/' "$debloat_root/etc/dnsmasq.d/enginex-telemetry.conf"
 has '0.0.0.0 telemetry.inmusicbrands.com' "$debloat_root/etc/hosts"
-has 'address=/logstash.inmusicbrands.com/0.0.0.0' "$debloat_root/etc/dnsmasq.d/sc5000-telemetry.conf"
+has 'address=/logstash.inmusicbrands.com/0.0.0.0' "$debloat_root/etc/dnsmasq.d/enginex-telemetry.conf"
 [[ $(grep -c 'logstash.inmusicbrands.com' "$debloat_root/etc/hosts") == 1 ]] || fail 'hosts entries duplicated'
 has 'EnableOnlineCheck = true' "$debloat_root/etc/connman/main.conf"
 has 'OnlineCheckIPv4URL = http://ipv4.connman.inmusicbrands.com/' "$debloat_root/etc/connman/main.conf"
@@ -493,15 +505,15 @@ has 'CONNMAN_DISCOVER_RETRIES=5' "$debloat_root/etc/systemd/system/connman.servi
 has '[ntfs3]' "$debloat_root/etc/edisksd/main.conf"
 lacks '[hfsplus]' "$debloat_root/etc/edisksd/main.conf"
 # #60: Bluetooth stays on for every board (JC11, JC16, JP07, JP13); nothing masks it.
-grep -Eq '^ +if command -v rfkill .*; then rfkill unblock bluetooth' "$ROOT/rootfs-overlay/usr/local/bin/sc5000-debloat" || fail 'debloat no longer unblocks Bluetooth'
+grep -Eq '^ +if command -v rfkill .*; then rfkill unblock bluetooth' "$ROOT/rootfs-overlay/usr/local/bin/enginex-debloat" || fail 'debloat no longer unblocks Bluetooth'
 if grep -rEil 'bluetooth' "$debloat_root/etc/systemd" | grep -q .; then fail 'debloat touches a Bluetooth unit'; fi
 for module in btbcm hci_uart; do
-    if grep -qx "$module" "$ROOT/rootfs-overlay/etc/modules-load.d/sc5000-filesystems.conf"; then fail "$module must not be force-loaded"; fi
+    if grep -qx "$module" "$ROOT/rootfs-overlay/etc/modules-load.d/enginex-filesystems.conf"; then fail "$module must not be force-loaded"; fi
 done
 has 'feature_disable=0x82004' "$ROOT/rootfs-overlay/usr/lib/modprobe.d/brcmfmac.conf"
 ok 'stock connman online check, read-only HFS+, rootfs brcmfmac options'
 
-GUARD=$ROOT/rootfs-overlay/etc/sc5000/engine-ui-guard
+GUARD=$ROOT/rootfs-overlay/etc/enginex/engine-ui-guard
 export SC5000_UI_DIR=$TMP/ui-guard SC5000_STREAMING_ACCOUNTS=$TMP/StreamingAccounts.json
 export SC5000_ENGINE_DATA_DIR=$TMP/engine-data SC5000_GUARD_PRE_MARK=$TMP/guard-pre-mark
 # #56: every start leaves Engine a TIDAL account entry (valid JSON, other accounts
@@ -546,7 +558,7 @@ rm -f "$SC5000_UI_DIR"/*; SERVICE_RESULT=success sh "$GUARD" stop; sh "$GUARD" p
 ok 'a second-generation boot keeps the last boot crash and power-cut evidence across the stock Engine handover (BH-F52-4)'
 # BH-GF3-6: the UAC2 gadget offers the computer the sample rate chosen in the Web Console (it was
 # always 48000), also when the gadget already exists; an unsupported rate is refused.
-USB_AUDIO=$ROOT/rootfs-overlay/usr/sbin/sc5000-usb-audio
+USB_AUDIO=$ROOT/rootfs-overlay/usr/sbin/enginex-usb-audio
 mkdir -p "$TMP/configfs/usb_gadget" "$TMP/udc/fe800000.usb"
 usb_audio() { SC5000_CONFIGFS=$TMP/configfs SC5000_UDC_CLASS=$TMP/udc sh "$USB_AUDIO" "$@" >/dev/null; }
 srate=$TMP/configfs/usb_gadget/enginex_uac2/functions/uac2.usb0/c_srate
@@ -672,8 +684,8 @@ SC5000_UI_DIR=$TMP/ui-roles PATH=$TMP/guard-bin:$PATH sh "$GUARD" pre
 has "umount $assign/JP07/JP07_Controller_Assignments.qml" "$GUARD_LOG"
 if grep -q '^mount --bind' "$GUARD_LOG"; then fail 'the 4-deck layout off must leave the stock assignment files'; fi
 unset GUARD_LOG SC5000_ASSIGNMENT_DIR SC5000_ASSIGNMENT_PATCHED SC5000_PLANCK_STATE
-has 'ExecStopPost=-/etc/sc5000/engine-ui-guard stop' "$ROOT/rootfs-overlay/etc/systemd/system/engine.service.d/override.conf"
-has 'ExecStopPost=-/etc/sc5000/engine-ui-guard stop' "$debloat_root/etc/systemd/system/engine.service.d/override.conf"
+has 'ExecStopPost=-/etc/enginex/engine-ui-guard stop' "$ROOT/rootfs-overlay/etc/systemd/system/engine.service.d/override.conf"
+has 'ExecStopPost=-/etc/enginex/engine-ui-guard stop' "$debloat_root/etc/systemd/system/engine.service.d/override.conf"
 for conf in "$ROOT/rootfs-overlay/etc/systemd/system/engine.service.d/override.conf" "$debloat_root/etc/systemd/system/engine.service.d/override.conf"; do
     has 'Environment=HOME=/tmp/sc5000-engine-home' "$conf"
     has "command -v connmanctl >/dev/null || exit 0" "$conf"
@@ -706,7 +718,7 @@ has "[Time]" "$NTP_CONF"
 has "FallbackNTP=" "$NTP_CONF"
 has "FallbackNTP=ntp.aliyun.com ntp.tencent.com time.apple.com time.cloudflare.com pool.ntp.org time.google.com" "$NTP_CONF"
 cmp -s "$NTP_CONF" "$debloat_root/etc/systemd/timesyncd.conf.d/10-enginex-ntp.conf" ||
-    fail "sc5000-debloat --root timesyncd drop-in differs from rootfs-overlay"
+    fail "enginex-debloat --root timesyncd drop-in differs from rootfs-overlay"
 python3 -I - "$ROOT" "$TMP" <<'PY'
 import importlib.util, subprocess, sys
 from pathlib import Path
@@ -741,11 +753,11 @@ assert "systemctl restart --no-block systemd-timesyncd.service" in ba
 assert "/run/systemd/timesyncd.conf.d/10-enginex-ntp.conf" in bdb.UNINSTALL
 PY
 SEED_CONF=$ROOT/rootfs-overlay/usr/lib/systemd/system/systemd-timesyncd.service.d/10-enginex-seed.conf
-SEED_BIN=$ROOT/rootfs-overlay/usr/libexec/sc5000-timesync-seed
+SEED_BIN=$ROOT/rootfs-overlay/usr/libexec/enginex-timesync-seed
 [[ -f $SEED_CONF ]] || fail "missing $SEED_CONF"
 [[ -x $SEED_BIN ]] || fail "missing executable $SEED_BIN"
 has "TimeoutStartSec=15s" "$SEED_CONF"
-has "ExecStartPre=-+/usr/libexec/sc5000-timesync-seed" "$SEED_CONF"
+has "ExecStartPre=-+/usr/libexec/enginex-timesync-seed" "$SEED_CONF"
 lacks 'timesync_persist' "$ROOT/tools/ui-mod/engine_ui_hook.c"
 lacks 'persist_monotonic_clock' "$ROOT/tools/ui-mod/engine_ui_hook.c"
 has 'onSystemTimeZoneSetSucceeded' "$ROOT/tools/ui-mod/build_packs.py"
@@ -754,7 +766,7 @@ ok "timesyncd drop-in, etc-reset survival, Gen1/Gen2 parity and TZ/clock persist
 
 # BH2-A3-9: route-dac stops the alsaloop it started and nothing else; the recorded
 # PID may long belong to another process (alsaloop ends when the DAC is unplugged).
-USB_AUDIO=$ROOT/rootfs-overlay/usr/sbin/sc5000-usb-audio
+USB_AUDIO=$ROOT/rootfs-overlay/usr/sbin/enginex-usb-audio
 usb_pid=$TMP/usb-audio.pid
 mkdir -p "$TMP/usb-audio"
 # Two idle processes, one of them named alsaloop; both end by themselves within a minute.
@@ -765,7 +777,7 @@ done
 "$TMP/usb-audio/bystander" > /dev/null 2>&1 < /dev/null & bystander=$!
 "$TMP/usb-audio/alsaloop" > /dev/null 2>&1 < /dev/null & routed=$!
 usb_fail() { kill "$bystander" "$routed" 2>/dev/null || :; fail "$@"; }
-usb_audio() { SC5000_USB_AUDIO_PIDFILE=$usb_pid sh "$USB_AUDIO" "$@" > "$TMP/usb-audio/out" 2>&1 || usb_fail "sc5000-usb-audio $* failed"; }
+usb_audio() { SC5000_USB_AUDIO_PIDFILE=$usb_pid sh "$USB_AUDIO" "$@" > "$TMP/usb-audio/out" 2>&1 || usb_fail "enginex-usb-audio $* failed"; }
 for _ in 1 2 3 4 5 6 7 8 9 10; do [[ $(cat "/proc/$routed/comm" 2>/dev/null) == alsaloop ]] && break; /bin/sleep 0.1; done
 echo "$bystander" > "$usb_pid"
 usb_audio status
@@ -785,14 +797,14 @@ wait "$bystander" "$routed" 2>/dev/null || :
 has 'PIDFILE="${SC5000_USB_AUDIO_PIDFILE:-/run/sc5000-usb-audio.pid}"' "$USB_AUDIO"
 ok 'USB DAC routing: only its own alsaloop is stopped, a reused PID is left alone, PID file under /run'
 
-cmp -s "$ROOT/rootfs-overlay/etc/sc5000/libengine-ui-hook.so" "$ROOT/rootfs-overlay/usr/local/lib/sc5000/libengine-ui-hook.so" ||
+cmp -s "$ROOT/rootfs-overlay/etc/enginex/libengine-ui-hook.so" "$ROOT/rootfs-overlay/usr/local/lib/enginex/libengine-ui-hook.so" ||
     fail 'both libengine-ui-hook.so copies in rootfs-overlay must match'
 if command -v arm-linux-gnueabihf-gcc >/dev/null 2>&1 && command -v arm-linux-gnueabihf-strip >/dev/null 2>&1 && command -v arm-linux-gnueabihf-readelf >/dev/null 2>&1; then
     OUT=$TMP/libengine-ui-hook.so sh "$ROOT/tools/ui-mod/build.sh"
-    cmp -s "$TMP/libengine-ui-hook.so" "$ROOT/rootfs-overlay/etc/sc5000/libengine-ui-hook.so" ||
+    cmp -s "$TMP/libengine-ui-hook.so" "$ROOT/rootfs-overlay/etc/enginex/libengine-ui-hook.so" ||
         fail 'rootfs-overlay libengine-ui-hook.so is out of sync with tools/ui-mod/engine_ui_hook.c'
     OUT=$TMP/libedisksd-hook.so sh "$ROOT/tools/edisksd-hook/build.sh"
-    cmp -s "$TMP/libedisksd-hook.so" "$ROOT/rootfs-overlay/etc/sc5000/libedisksd-hook.so" ||
+    cmp -s "$TMP/libedisksd-hook.so" "$ROOT/rootfs-overlay/etc/enginex/libedisksd-hook.so" ||
         fail 'rootfs-overlay libedisksd-hook.so is out of sync with tools/edisksd-hook/edisksd_hook.c'
     ok 'committed 32-bit hooks in rootfs-overlay match fresh source builds byte-for-byte'
 fi

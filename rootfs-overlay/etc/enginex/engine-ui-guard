@@ -63,7 +63,7 @@ begin_attempt() {
 case ${1:-} in
 runtime)
     [ ! -e "$UI/safe-mode" ] || exit 0
-    exec "${SC5000_DEBLOAT:-/usr/local/bin/sc5000-debloat}" --apply-runtime
+    exec "${SC5000_DEBLOAT:-/usr/local/bin/enginex-debloat}" --apply-runtime
     ;;
 service)
     shift
@@ -73,7 +73,7 @@ service)
         # Arm recovery before loading anything into the vendor launcher. Its
         # updater children still need the hook on a normal EngineX start.
         begin_attempt
-        export LD_PRELOAD=${SC5000_UI_HOOK:-/etc/sc5000/libengine-ui-hook.so}
+        export LD_PRELOAD=${SC5000_UI_HOOK:-/etc/enginex/libengine-ui-hook.so}
     fi
     exec "$@"
     ;;
@@ -89,7 +89,7 @@ launch)
         exec "$@"
     fi
     begin_attempt
-    LD_PRELOAD=${SC5000_UI_HOOK:-/etc/sc5000/libengine-ui-hook.so} "$@" &
+    LD_PRELOAD=${SC5000_UI_HOOK:-/etc/enginex/libengine-ui-hook.so} "$@" &
     child=$!
     trap 'kill -TERM "$child" 2>/dev/null; wait "$child" 2>/dev/null; exit 143' TERM INT HUP
     wait "$child"; result=$?
@@ -442,7 +442,7 @@ post)
     [ ! -e "$UI/safe-mode" ] || exit 0
     # Engine's setup script has just set the GPU to performance. This also covers
     # boot, when a start request would merge with an already running tune job.
-    "${SC5000_PERF_TUNE:-/usr/local/bin/sc5000-perf-tune}" >/dev/null 2>&1
+    "${SC5000_PERF_TUNE:-/usr/local/bin/enginex-perf-tune}" >/dev/null 2>&1
     # Legacy launchers and the release gate call post after spawning Engine.
     # New launchers create this before exec, including internal crash retries.
     if [ ! -e "$UI/safe-mode" ] && [ ! -s "$UI/boot-token" ]; then begin_attempt; fi

@@ -1,0 +1,70 @@
+#!/bin/sh
+# edisksd companion. Engine OS mounts removable media through edisksd and
+# Engine follows edisksd over D-Bus; mounting here as well races that state
+# machine. This worker never mounts, checks or writes block devices or their
+# databases. It waits for edisksd's mountpoint and reports it.
+# HFS+ stays read-only: rw writes oops hfsplus.ko on the 6.6 RT kernel.
+# POSIX sh: the stock rootfs has BusyBox ash and no bash.
+set -eu
+umask 022
+SYS=${SC5000_SYS_ROOT:-/sys}
+RUN=${SC5000_RUN_ROOT:-/run/sc5000-storage}
+WAIT=${SC5000_MOUNT_WAIT:-30}
+log() { printf 'enginex-storage: %s\n' "$*" >&2; }
+die() { log "$*"; exit 1; }
+mkdir -p "$RUN"
+[ ! -L "$RUN" ] || die "symlinked run directory: $RUN"
+exec 9>"$RUN/lock"
+flock -x 9
+
+action=${1:-${ACTION:-add}}
+if [ "$action" = --discover ]; then
+    flock -u 9
+    result=0
+    for node in "$SYS"/class/block/mmcblk*p* "$SYS"/class/block/sd*; do
+        [ -e "$node" ] || continue
+        "$0" add "/dev/${node##*/}" || result=1
+    done
+    exit "$result"
+fi
+dev=${2:-${DEVNAME:-}}
+case $dev in
+    /dev/sd[a-z]|/dev/sd[a-z][0-9]|/dev/sd[a-z][0-9][0-9]) ;;
+    /dev/mmcblk[0-9]p[0-9]|/dev/mmcblk[0-9]p[0-9][0-9]) ;;
+    *) die "unsupported device: $dev" ;;
+esac
+name=${dev##*/}
+case $action in add|change) ;; remove) exit 0 ;; *) die "unsupported action: $action" ;; esac
+# A partitioned whole disk (sda with sda1...) is never mounted itself: its
+# partitions are. Waiting for it held the lock for the whole $WAIT on every
+# such USB stick or SATA disk at boot, and the partitions' own hotplug mounts
+# queued behind it (BH-GC2-5). A disk without partitions (a superfloppy stick)
+# is still waited for.
+case $name in sd[a-z])
+    for child in "$SYS/class/block/$name/$name"[0-9]*; do
+        [ ! -e "$child" ] || exit 0
+    done ;;
+esac
+# Never touch the internal eMMC: only SD-type MMC cards are removable media.
+case $name in mmcblk*)
+    parent=${name%%p*}
+    [ "$(cat "$SYS/class/block/$parent/device/type" 2>/dev/null)" = SD ] || exit 0 ;;
+esac
+
+target= tries=0
+while :; do
+    target=$(findmnt -rn -S "$dev" -o TARGET 2>/dev/null | head -n 1) || target=
+    [ -z "$target" ] || break
+    tries=$((tries + 1))
+    [ "$tries" -le "$WAIT" ] || { log "not mounted by edisksd: $dev"; exit 0; }
+    sleep 1
+done
+options=$(findmnt -rn -S "$dev" -o OPTIONS 2>/dev/null | head -n 1) || options=
+case ,$options, in *,ro,*)
+    log "read-only: $dev at $target"
+    exit 0 ;;
+esac
+
+# Conversion and repair run from edisksd-hook, before Engine learns of the mount:
+# Engine and an external writer on the same open database corrupt it.
+log "ready: $dev at $target"

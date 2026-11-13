@@ -5553,7 +5553,7 @@ class EngineLightingDefaultOffAndPersistTest(unittest.TestCase):
                                SC5000_ENGINE_DATA_DIR=str(root / "engine"),
                                SC5000_ASSIGNMENT_DIR=str(root / "assign"),
                                SC5000_ASSIGNMENT_PATCHED=str(root / "patched"), SC5000_ENGINE_GUARDIAN="/bin/false")
-                    result = subprocess.run(["sh", str(REPO / "rootfs-overlay/etc/sc5000/engine-ui-guard"), "pre"], env=env, capture_output=True, text=True)
+                    result = subprocess.run(["sh", str(REPO / "rootfs-overlay/etc/enginex/engine-ui-guard"), "pre"], env=env, capture_output=True, text=True)
                     self.assertEqual(result.returncode, 0, result.stderr)
                     if safe:
                         self.assertEqual(path.read_text() if path.exists() else None, before)

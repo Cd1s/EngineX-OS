@@ -14,11 +14,11 @@ run() {
     if [ "$rc" != 0 ]; then failed=1; tail -n 12 "$work/$name.log" | cut -c1-200 | head -n 40; fi
 }
 run hook-first sh tools/ui-mod/build.sh
-cp rootfs-overlay/etc/sc5000/libengine-ui-hook.so "$work/hook-first.so"
+cp rootfs-overlay/etc/enginex/libengine-ui-hook.so "$work/hook-first.so"
 run hook-second sh tools/ui-mod/build.sh
-run reproducible cmp "$work/hook-first.so" rootfs-overlay/etc/sc5000/libengine-ui-hook.so
-cp rootfs-overlay/etc/sc5000/libengine-ui-hook.so rootfs-overlay/usr/local/lib/sc5000/libengine-ui-hook.so
-sha256sum rootfs-overlay/etc/sc5000/libengine-ui-hook.so rootfs-overlay/usr/local/lib/sc5000/libengine-ui-hook.so > "$work/hook-sha256.txt"
+run reproducible cmp "$work/hook-first.so" rootfs-overlay/etc/enginex/libengine-ui-hook.so
+cp rootfs-overlay/etc/enginex/libengine-ui-hook.so rootfs-overlay/usr/local/lib/enginex/libengine-ui-hook.so
+sha256sum rootfs-overlay/etc/enginex/libengine-ui-hook.so rootfs-overlay/usr/local/lib/enginex/libengine-ui-hook.so > "$work/hook-sha256.txt"
 run hook-az04 env CROSS= OUT="$work/az04-hook.so" sh tools/ui-mod/build.sh
 run gofmt bash -c 'gofmt -l . > out/fx-validation/gofmt-files.txt && test ! -s out/fx-validation/gofmt-files.txt'
 run vet go vet ./...

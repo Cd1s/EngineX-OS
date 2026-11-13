@@ -1,0 +1,11 @@
+[Unit]
+Description=EngineX IRQ, networking and firmware script corrections
+After=engine.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/enginex-debloat --apply-runtime
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

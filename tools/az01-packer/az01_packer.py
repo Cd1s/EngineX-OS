@@ -504,8 +504,8 @@ chmod 700 /data/enginex
 work=$(mktemp -d /data/enginex/.prepare.XXXXXX)
 trap 'rm -rf "$work"' 0
 # Public images seed no key: SSH stays off until the owner adds one (#46).
-if [ ! -e /data/enginex/authorized_keys ] && [ -s /usr/share/sc5000-custom/authorized_keys ]; then
-    cp /usr/share/sc5000-custom/authorized_keys "$work/authorized_keys"
+if [ ! -e /data/enginex/authorized_keys ] && [ -s /usr/share/enginex/authorized_keys ]; then
+    cp /usr/share/enginex/authorized_keys "$work/authorized_keys"
     chmod 600 "$work/authorized_keys"
     mv "$work/authorized_keys" /data/enginex/authorized_keys
 fi
@@ -513,7 +513,7 @@ fi
 retired=@RETIRED@
 if [ -f /data/enginex/authorized_keys ] && [ ! -e /data/enginex/keep-release-key ] &&
     grep -qF "$retired" /data/enginex/authorized_keys &&
-    ! grep -qsF "$retired" /usr/share/sc5000-custom/authorized_keys; then
+    ! grep -qsF "$retired" /usr/share/enginex/authorized_keys; then
     grep -vF "$retired" /data/enginex/authorized_keys > "$work/authorized_keys" || :
     chmod 600 "$work/authorized_keys"
     mv "$work/authorized_keys" /data/enginex/authorized_keys
@@ -530,10 +530,10 @@ fi
 # A firmware update rewrites / but never /data: install the image's UI packs
 # once per release, before Engine starts (engine.service orders after this unit).
 install_ui() {
-    archive=${SC5000_UI_ARCHIVE:-/usr/share/sc5000-custom/ui-packs.tar.xz}
+    archive=${SC5000_UI_ARCHIVE:-/usr/share/enginex/ui-packs.tar.xz}
     ui=${SC5000_UI_DIR:-/data/enginex/ui}
     [ -f "$archive" ] || return 0
-    version=$(cat /etc/sc5000/version.txt 2>/dev/null || echo unknown)
+    version=$(cat /etc/enginex/version.txt 2>/dev/null || echo unknown)
     # Releases keep their version (5.0.4.1) across rebuilds: also key on the archive.
     id=$(sha256sum < "$archive" | cut -d' ' -f1)
     if [ -d "$ui/packs" ] && [ "$(cat "$ui/.pack-version" 2>/dev/null)" = "$version" ] &&
@@ -696,9 +696,8 @@ restore_timezone() {
         fi
     fi
 }
-[ ! -d /etc/sc5000 ] || [ -e /etc/enginex ] || ln -s sc5000 /etc/enginex 2>/dev/null || :
-install_ui || echo "sc5000-custom-prepare: UI packs not installed" >&2
-restore_timezone || echo "sc5000-custom-prepare: timezone not restored" >&2
+install_ui || echo "enginex-prepare: UI packs not installed" >&2
+restore_timezone || echo "enginex-prepare: timezone not restored" >&2
 '''
 # Public half of the key public images up to 5.0.4.1 shipped (#46). Not a secret.
 RETIRED_RELEASE_KEY = b'AAAAC3NzaC1lZDI1NTE5AAAAIC6p0NjBPb0vPCGB3XloshlMtXoYgVc6ig+JQAYnVUSz'
@@ -762,43 +761,43 @@ Subsystem sftp /usr/libexec/sftp-server
 '''
 
 UNITS = {
-    'sc5000-custom.target': '''[Unit]
-Description=SC5000 custom services
-Requires=sc5000-custom-prepare.service
-Wants=sc5000-custom-sshd.service
-After=etc.mount var.mount var-lib.mount data.mount sc5000-custom-prepare.service
+    'enginex.target': '''[Unit]
+Description=EngineX OS services
+Requires=enginex-prepare.service
+Wants=enginex-sshd.service
+After=etc.mount var.mount var-lib.mount data.mount enginex-prepare.service
 ''',
-    'sc5000-custom-prepare.service': '''[Unit]
-Description=Prepare persistent SC5000 access
+    'enginex-prepare.service': '''[Unit]
+Description=Prepare persistent EngineX OS access
 # Only mounts the rootfs defines: 5.0.4 has etc.mount and var.mount, 5.3.0 has
 # neither, and Requires= on a missing unit failed this unit and SSH with it.
 RequiresMountsFor=/data /etc /var
-Before=sc5000-custom-sshd.service engine.service stream-sync.service
+Before=enginex-sshd.service engine.service stream-sync.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/libexec/sc5000-custom-prepare
+ExecStart=/usr/libexec/enginex-prepare
 ''',
-    'sc5000-custom-etc-reset.service': '''[Unit]
+    'enginex-etc-reset.service': '''[Unit]
 Description=Drop stale Engine 4.3.4 /etc overlay entries
 DefaultDependencies=no
 RequiresMountsFor=/data
 Before=etc.mount
 [Service]
 Type=oneshot
-ExecStart=/usr/libexec/sc5000-custom-etc-reset
+ExecStart=/usr/libexec/enginex-etc-reset
 ''',
-    'sc5000-custom-sshd.service': '''[Unit]
-Description=SC5000 public key SSH
-Requires=sc5000-custom-prepare.service
-After=sc5000-custom-prepare.service network.target
+    'enginex-sshd.service': '''[Unit]
+Description=EngineX OS public key SSH
+Requires=enginex-prepare.service
+After=enginex-prepare.service network.target
 Conflicts=sshd.service sshd.socket
 # No key, no SSH: public images ship none (#46).
 ConditionFileNotEmpty=/data/enginex/authorized_keys
 [Service]
 Type=simple
 ExecStartPre=/usr/bin/mkdir -p /run/sshd
-ExecStart=/usr/sbin/sshd -D -e -f /usr/share/sc5000-custom/sshd_config
+ExecStart=/usr/sbin/sshd -D -e -f /usr/share/enginex/sshd_config
 Restart=on-failure
 ''',
 }
@@ -825,7 +824,7 @@ def public_key(data):
     return (lines[0]+'\n').encode()
 
 
-# Files sc5000-debloat --root rewrites in a staged root (#33). Copied out of the
+# Files enginex-debloat --root rewrites in a staged root (#33). Copied out of the
 # image, patched by the overlay's own script and written back, so the offline
 # image and the runtime script share one definition.
 DEBLOAT_INPUTS = ('/usr/Engine/Scripts/engine', '/usr/Engine/Scripts/setup-prerequisites.sh',
@@ -846,10 +845,10 @@ def offline_debloat(fs, script):
                 continue
             (root/path[1:]).write_bytes(data)
             before[path] = data
-        script_path = root.parent/'sc5000-debloat'
+        script_path = root.parent/'enginex-debloat'
         script_path.write_bytes(script)
         p = subprocess.run(['sh', str(script_path), '--root', str(root)], capture_output=True, text=True)
-        require(p.returncode == 0, 'sc5000-debloat --root failed: ' + (p.stdout + p.stderr)[-800:])
+        require(p.returncode == 0, 'enginex-debloat --root failed: ' + (p.stdout + p.stderr)[-800:])
         for source in sorted(root.rglob('*')):
             dest = '/' + source.relative_to(root).as_posix()
             if source.is_symlink():
@@ -887,7 +886,7 @@ def inject(fs, key=None, services=(), overlay=None, version=None):
     service_data = {}
     for source in services:
         source = Path(source)
-        require((re.fullmatch(r'sc5000-[a-z0-9-]+@?\.service', source.name) or
+        require((re.fullmatch(r'enginex-[a-z0-9-]+@?\.service', source.name) or
                  source.name == 'engine-guardian.service') and
                 source.name not in UNITS and source.name not in service_data,
                 'custom service must have a unique supported service name')
@@ -898,7 +897,7 @@ def inject(fs, key=None, services=(), overlay=None, version=None):
     if version is not None:
         require(VERSION_RE.fullmatch(version), 'invalid --set-version (e.g. 5.0.4.1)')
         # The deck's update check reads it; the release tag compares against it.
-        additions['/etc/sc5000/version.txt'] = ((version + '\n').encode(), 0o644)
+        additions['/etc/enginex/version.txt'] = ((version + '\n').encode(), 0o644)
     etc = sorted(p for p in additions if p.startswith('/etc/'))
     digest = hashlib.sha256()
     for path in etc:
@@ -908,17 +907,25 @@ def inject(fs, key=None, services=(), overlay=None, version=None):
         fs.write(path, data, mode)
     for path, target in links.items():
         fs.link(path, target, planned)
-    if '/usr/local/bin/sc5000-debloat' in additions:
-        offline_debloat(fs, additions['/usr/local/bin/sc5000-debloat'][0])
+    if '/usr/local/bin/enginex-debloat' in additions:
+        offline_debloat(fs, additions['/usr/local/bin/enginex-debloat'][0])
     if key:  # private builds only; public releases ship no key (#46)
-        fs.write('/usr/share/sc5000-custom/authorized_keys', key, 0o600)
-    fs.write('/usr/share/sc5000-custom/sshd_config', SSHD_CONFIG)
-    fs.write('/usr/libexec/sc5000-custom-prepare', PREPARE, 0o755)
+        fs.write('/usr/share/enginex/authorized_keys', key, 0o600)
+    fs.write('/usr/share/enginex/sshd_config', SSHD_CONFIG)
+    fs.write('/usr/libexec/enginex-prepare', PREPARE, 0o755)
     # sc5000/stems-runtime-prepare: the live Stems deployment of 2026-11-03 put it
     # in the /etc upper layer; its /usr/local/bin overlay would shadow the image's
     # stems-processor wrapper.
-    managed = [p[len('/etc/'):] for p in etc] + (['sc5000/stems-runtime-prepare'] if etc else [])
-    fs.write('/usr/libexec/sc5000-custom-etc-reset', etc_reset(epoch, managed), 0o755)
+    managed = [p[len('/etc/'):] for p in etc]
+    if etc:
+        managed += sorted(p[len('/etc/'):] for p in links if p.startswith('/etc/'))
+        # Up to 5.3.0.4 the same files had sc5000 names (#234), and an image of that time could
+        # leave copies (and an /etc/enginex -> sc5000 link) in the upper layer: whole old and new
+        # directories go, since the image ships /etc/enginex and the /etc/sc5000 link to it.
+        managed += sorted({p.replace('enginex', 'sc5000') for p in managed} - set(managed))
+        managed = sorted(set(managed) | {'sc5000', 'sc5000/stems-runtime-prepare', 'enginex',
+                                         'dnsmasq.d/sc5000-telemetry.conf'})
+    fs.write('/usr/libexec/enginex-etc-reset', etc_reset(epoch, managed), 0o755)
     # A locked root account is rejected even for public-key auth with UsePAM=no.
     # A fresh random unreachable password hash unlocks the account; SSH password
     # and interactive authentication remain explicitly disabled.
@@ -935,17 +942,17 @@ def inject(fs, key=None, services=(), overlay=None, version=None):
     fs.write('/etc/shadow', ('\n'.join(shadow)+'\n').encode(), 0o400)
     for name, content in UNITS.items():
         fs.write('/usr/lib/systemd/system/'+name, content.encode())
-    fs.link('/usr/lib/systemd/system/multi-user.target.wants/sc5000-custom.target',
-            '/usr/lib/systemd/system/sc5000-custom.target')
-    fs.link('/usr/lib/systemd/system/etc.mount.wants/sc5000-custom-etc-reset.service',
-            '/usr/lib/systemd/system/sc5000-custom-etc-reset.service')
+    fs.link('/usr/lib/systemd/system/multi-user.target.wants/enginex.target',
+            '/usr/lib/systemd/system/enginex.target')
+    fs.link('/usr/lib/systemd/system/etc.mount.wants/enginex-etc-reset.service',
+            '/usr/lib/systemd/system/enginex-etc-reset.service')
     for name, data in service_data.items():
         fs.write('/usr/lib/systemd/system/'+name, data)
-        fs.write('/usr/lib/systemd/system/'+name+'.d/sc5000-ordering.conf',
-                 b'[Unit]\nRequires=sc5000-custom-prepare.service\n'
-                 b'After=sc5000-custom-prepare.service etc.mount var.mount\n')
+        fs.write('/usr/lib/systemd/system/'+name+'.d/enginex-ordering.conf',
+                 b'[Unit]\nRequires=enginex-prepare.service\n'
+                 b'After=enginex-prepare.service etc.mount var.mount\n')
         if not name.endswith('@.service'):
-            fs.link('/usr/lib/systemd/system/sc5000-custom.target.wants/'+name,
+            fs.link('/usr/lib/systemd/system/enginex.target.wants/'+name,
                     '/usr/lib/systemd/system/'+name)
 
 
@@ -982,7 +989,7 @@ def main(argv=None):
             s.add_argument('--ssh-public-key', type=Path, help='seed key for a private build; public releases omit it')
             s.add_argument('--overlay', type=Path)
             s.add_argument('--service', action='append', default=[], type=Path)
-            s.add_argument('--set-version', help='EngineX release written to /etc/sc5000/version.txt, e.g. 5.0.4.1')
+            s.add_argument('--set-version', help='EngineX release written to /etc/enginex/version.txt, e.g. 5.0.4.1')
             s.add_argument('--splash', type=Path, help='custom 4,096,000-byte splash payload')
             s.add_argument('--recoverysplash', type=Path, help='custom 4,096,000-byte recoverysplash payload')
         elif name == 'repack':

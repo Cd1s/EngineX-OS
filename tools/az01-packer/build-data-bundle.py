@@ -934,7 +934,7 @@ def build(version, suite, hook, ui_packs, out, prefix='SCLIVE4', edisksd_hook=No
     for applet in APPLETS:
         files[f'bin/{applet}'] = (WRAPPER.format(applet).encode(), 0o755)
     files['bin/engine-ui-guard'] = ((Path(__file__).resolve().parents[2] /
-                                  'rootfs-overlay/etc/sc5000/engine-ui-guard').read_bytes(), 0o755)
+                                  'rootfs-overlay/etc/enginex/engine-ui-guard').read_bytes(), 0o755)
     files['ui-packs.tar'] = (ui_packs_tar(ui_packs), 0o644)
     files['version.txt'] = (f'{version}\n'.encode(), 0o644)
     files['model'] = (f'{prefix}\n'.encode(), 0o644)  # install.sh refuses it on another model (BH-G2-1)

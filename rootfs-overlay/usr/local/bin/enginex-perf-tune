@@ -1,0 +1,227 @@
+#!/bin/sh
+# Best effort and repeatable: unavailable/read-only knobs never block playback.
+# POSIX sh: the stock Engine OS rootfs has BusyBox ash and no bash.
+set -u
+boot_ui=${SC5000_UI_DIR:-${SC5000_PRIMARY_UI_DIR:-/data/enginex/ui}}
+legacy_ui=${SC5000_LEGACY_UI_DIR:-/data/sc5000-custom/ui}
+[ -d "$boot_ui" ] || [ ! -d "$legacy_ui" ] || boot_ui=$legacy_ui
+[ ! -e "$boot_ui/safe-mode" ] || exit 0
+SYS=${SC5000_SYS_ROOT:-/sys}
+PROC=${SC5000_PROC_ROOT:-/proc}
+AUDIO_IRQ=${SC5000_AUDIO_IRQ_PATTERN:-ffb20000|snd|alsa|i2s|spdif|audio}
+GPU_IRQ=${SC5000_GPU_IRQ_PATTERN:-ffa30000|panfrost|vop|hdmi}
+export LC_ALL=C
+log() { printf 'enginex-perf: %s\n' "$*" >&2; }
+# Case-insensitive extended-regex match of $1 against pattern $2.
+matches() { printf '%s\n' "$1" | grep -Eiq -- "$2"; }
+write_knob() {
+    [ -e "$1" ] || return 0
+    if [ -w "$1" ] && { printf '%s\n' "$2" > "$1"; } 2>/dev/null; then return 0; fi
+    [ "${3:-}" = quiet ] || log "unavailable: $1"
+    return 0
+}
+# Hottest thermal zone in millidegrees, 0 when unknown.
+hot=0
+for zone in "$SYS"/class/thermal/thermal_zone*/temp; do
+    t=$(cat "$zone" 2>/dev/null) || continue
+    case $t in ''|*[!0-9]*) continue ;; esac
+    [ "$t" -gt "$hot" ] && hot=$t
+done
+# On battery (PRIME GO unplugged) the GPU may drop to its lowest clock.
+battery=
+for ps in "$SYS"/class/power_supply/*; do
+    [ "$(cat "$ps/type" 2>/dev/null)" = Battery ] && [ "$(cat "$ps/status" 2>/dev/null)" = Discharging ] && battery=1
+done
+# Audio first. CPU clocks stay dynamic but never drop below 1.2 GHz: at 408 MHz
+# the audio thread missed periods (ALSA xruns). Locking 1.6 GHz ran the deck
+# above 90 C; 1.2 GHz measured about 72 C (both 4-deck decks idle at ~81 C).
+for cpu in 0 1 2 3; do
+    dir=$SYS/devices/system/cpu/cpu$cpu/cpufreq
+    [ -d "$dir" ] || continue
+    write_knob "$dir/scaling_governor" ondemand
+    write_knob "$dir/scaling_min_freq" 1200000
+done
+# Ramp up early and hold the raised clock for 10 samples. stream-sync is niced
+# and must not raise the clock.
+write_knob "$SYS/devices/system/cpu/cpufreq/ondemand/up_threshold" 50 quiet
+write_knob "$SYS/devices/system/cpu/cpufreq/ondemand/sampling_down_factor" 10 quiet
+write_knob "$SYS/devices/system/cpu/cpufreq/ondemand/ignore_nice_load" 1 quiet
+# The Mali GPU scales on demand from 300 MHz on mains: from 100 MHz each ramp
+# for the 4-deck waveforms dropped frames, and a higher floor only adds heat. On
+# battery or above 85 C at Engine start it idles at its lowest clock. Engine's
+# setup script sets it to performance at each start, so engine.service runs this
+# script afterwards.
+gpu_floor=300000000
+[ -n "$battery" ] || [ "$hot" -gt 85000 ] && gpu_floor=0
+for gpu in "$SYS"/class/devfreq/*ffa30000* "$SYS"/devices/platform/ffa30000.gpu/devfreq/*; do
+    [ -d "$gpu" ] || continue
+    write_knob "$gpu/governor" simple_ondemand
+    # The lowest available clock at or above the floor, else the highest.
+    min=$(tr ' ' '\n' < "$gpu/available_frequencies" 2>/dev/null | sort -n | awk -v f="$gpu_floor" '$1 ~ /^[0-9]+$/ { last = $1; if ($1 >= f) { print; done = 1; exit } } END { if (!done && last != "") print last }') || min=
+    case $min in ''|*[!0-9]*) ;; *) write_knob "$gpu/min_freq" "$min" ;; esac
+done
+
+write_knob "$PROC/sys/vm/swappiness" 10
+write_knob "$PROC/sys/vm/vfs_cache_pressure" 50
+write_knob "$PROC/sys/vm/dirty_background_ratio" 5
+write_knob "$PROC/sys/vm/dirty_ratio" 15
+write_knob "$PROC/sys/fs/file-max" 1048576
+write_knob "$PROC/sys/net/core/rmem_max" 8388608 quiet
+write_knob "$PROC/sys/net/core/wmem_max" 8388608 quiet
+write_knob "$PROC/sys/net/ipv4/tcp_rmem" "4096 131072 8388608" quiet
+write_knob "$PROC/sys/net/ipv4/tcp_wmem" "4096 65536 8388608" quiet
+# LC003: 1 MiB read-ahead keeps far seeks in long MP3 sets fed; 2 MiB for large storage (>= 2TB/4TB SATA/USB).
+for dev_dir in "$SYS"/block/sd* "$SYS"/block/mmcblk*; do
+    [ -d "$dev_dir" ] || continue
+    ra="$dev_dir/queue/read_ahead_kb"
+    ra_val=1024
+    if [ -r "$dev_dir/size" ]; then
+        sectors=$(cat "$dev_dir/size" 2>/dev/null || echo 0)
+        # 4TB SATA/USB is ~7.8e9 sectors. 32-bit safe: check if >= 10 digits and trunc >= 2000 (~1TB+)
+        if [ "${#sectors}" -ge 10 ]; then
+            trunc=${sectors%??????}
+            if [ -n "$trunc" ] && [ "$trunc" -ge 2000 ] 2>/dev/null; then
+                ra_val=2048
+            fi
+        fi
+    fi
+    write_knob "$ra" "$ra_val" quiet
+done
+for scheduler in "$SYS"/block/*/queue/scheduler; do
+    [ -r "$scheduler" ] || continue
+    available=" $(cat "$scheduler") "
+    case $available in
+        # Engine's SchedulerManager sets BFQ with strict guarantees; keep it.
+        *\[bfq\]*) ;;
+        *[\ \[]mq-deadline[\ \]]*) write_knob "$scheduler" mq-deadline ;;
+        *[\ \[]none[\ \]]*) write_knob "$scheduler" none ;;
+    esac
+done
+# CF018/CF001/LC001: Keep PRIME 4 JMicron USB-SATA, USB SSDs and lighting Mod adapters from autosuspending,
+# and keep unbound kernel workqueues off the GUI (1) and SceneGraph (2) cores.
+write_knob "$SYS/devices/virtual/workqueue/cpumask" 9 quiet
+write_knob "$SYS/module/usbcore/parameters/autosuspend" -1 quiet
+for lpm in "$SYS"/class/scsi_host/host*/link_power_management_policy; do
+    [ -e "$lpm" ] && write_knob "$lpm" max_performance quiet
+done
+for pm in "$SYS"/block/sd*/device/power/control "$SYS"/bus/usb/devices/*/power/control; do
+    [ -e "$pm" ] && write_knob "$pm" on quiet
+done
+for dly in "$SYS"/block/sd*/device/power/autosuspend_delay_ms; do
+    [ -e "$dly" ] && write_knob "$dly" -1 quiet
+done
+
+# CPU 1 GUI, CPU 2 SceneGraph + GPU/VOP, CPU 3 peripheral IRQs,
+# CPU 0 audio DMA. Helpers/workqueues use 0,3. Engine's RT audio threads keep
+# their separate original cores and priorities: all four cores already host RT
+# audio, so complete audio/IRQ isolation is impossible without moving them.
+# Keep non-audio IRQ threads below AudioWatcher (45) and render/output (49).
+classify() {
+    if matches "$1" "$AUDIO_IRQ"; then echo 0
+    elif matches "$1" "$GPU_IRQ"; then echo 2
+    else echo 3
+    fi
+}
+# Route movable non-audio interrupts away from CPU0. Per-CPU/managed IRQs may
+# reject writes, which is expected. PREEMPT_RT IRQ threads are pinned below too.
+irq_map=
+if [ -r "$PROC/interrupts" ]; then
+    while IFS= read -r line; do
+        irq=$(printf '%s\n' "$line" | sed -n 's/^[[:space:]]*\([0-9][0-9]*\):.*/\1/p')
+        [ -n "$irq" ] || continue
+        cpu=$(classify "$line")
+        case $cpu in 0) mask=1 ;; 2) mask=4 ;; *) mask=8 ;; esac
+        irq_map="$irq_map $irq=$cpu"
+        write_knob "$PROC/irq/$irq/smp_affinity" "$mask" quiet
+    done < "$PROC/interrupts"
+fi
+
+# PREEMPT_RT IRQ threads follow their IRQ. This runs once per Engine start.
+for process in "$PROC"/[0-9]*; do
+    comm=$(cat "$process/comm" 2>/dev/null) || continue
+    case $comm in irq/*) ;; *) continue ;; esac
+    pid=${process##*/}
+    # comm is limited to 15 bytes: irq/148-ffb20000 loses its last digit.
+    # Use the IRQ number to recover the classification from interrupts.
+    cpu=
+    irq=$(printf '%s\n' "$comm" | sed -n 's|^irq/\([0-9][0-9]*\)-.*|\1|p')
+    if [ -n "$irq" ]; then
+        for entry in $irq_map; do
+            [ "${entry%%=*}" = "$irq" ] && cpu=${entry#*=}
+        done
+    fi
+    [ -n "$cpu" ] || cpu=$(classify "$comm")
+    taskset -pc "$cpu" "$pid" >/dev/null 2>&1 || log "thread exited or affinity unavailable: $pid"
+    if [ "$cpu" = 0 ]; then
+        chrt -f -p 99 "$pid" >/dev/null 2>&1 || log "IRQ priority unavailable: $pid"
+    else
+        chrt -f -p 40 "$pid" >/dev/null 2>&1 || log "IRQ priority unavailable: $pid"
+    fi
+done
+# Identify the GUI by TID == PID, not comm: 5.3.0 has two EMain helpers too.
+# Every non-RT helper (including JobController and OfflineAnalyzer) avoids 1/2,
+# regardless of its inherited mask. Never change RT audio/MIDI policy or mask.
+engine_path=
+engine_threads() {
+    engine_path=
+    for p in "$PROC"/[0-9]*; do
+        analyzer=
+        # Builtins only below: a cat/sed/awk per thread made every 30 s sweep ~560
+        # forks over 3.5 s on the helpers' cores, and waveform frames 50-125 ms late.
+        cmdline=; read -r cmdline 2>/dev/null <"$p/cmdline"
+        [ -n "$cmdline" ] || continue # a kernel thread
+        case $(readlink "$p/exe" 2>/dev/null) in
+            */Engine/Engine) engine_path=$p ;;
+            */OfflineAnalyzer) analyzer=1 ;;
+            *) continue ;;
+        esac
+        for task in "$p"/task/[0-9]*; do
+            read -r name 2>/dev/null <"$task/comm" || continue
+            # An audio thread can be named before Engine promotes it to RT.
+            case $name in AudioOut|AudioRenderer*|AudioWatcher) continue ;; esac
+            read -r stat 2>/dev/null <"$task/stat" || continue
+            # policy is field 41: 39th after the ") " that ends comm (comm may hold spaces)
+            set -- ${stat##*) }
+            policy=${39}
+            [ "$policy" = 0 ] || [ "$policy" = 3 ] || [ "$policy" = 5 ] || continue
+            cpus=
+            while read -r key value; do
+                [ "$key" = Cpus_allowed_list: ] && { cpus=$value; break; }
+            done 2>/dev/null <"$task/status"
+            if [ -n "$analyzer" ]; then want=0,3
+            elif [ "${task##*/}" = "${p##*/}" ]; then want=1
+            elif [ "$name" = SceneGraph ]; then want=2
+            else want=0,3
+            fi
+            [ "$cpus" = "$want" ] && continue
+            taskset -pc "$want" "${task##*/}" >/dev/null 2>&1 || log "thread exited or affinity unavailable: ${task##*/}"
+        done
+    done
+}
+engine_alive() {
+    [ -n "$engine_path" ] || return 1
+    case $(readlink "$engine_path/exe" 2>/dev/null) in */Engine/Engine) return 0 ;; *) return 1 ;; esac
+}
+engine_threads
+# Engine starts most threads 10-20 s after its start; engine-ui-guard post runs
+# this inside engine.service, so the worker is stopped with Engine. Keep sweeping
+# late network/job threads too, rather than leaving them on an inherited GUI core.
+delays=${SC5000_THREAD_DELAYS-20 40}
+interval=${SC5000_THREAD_INTERVAL-30}
+case $interval in ''|*[!0-9]*) interval= ;; esac
+if [ -n "$interval" ] && ! [ "$interval" -gt 0 ] 2>/dev/null; then interval=; fi
+if [ -n "$delays" ]; then
+    (
+        for d in $delays; do sleep "$d" || exit; engine_threads; done
+        while [ -n "$interval" ] && engine_alive; do
+            sleep "$interval" || exit
+            # A fresh scan: the vendor script can restart Engine in its own loop under a new
+            # PID, and checking the old one stopped the sweeper for the rest of the run (BH-GC2-16).
+            engine_threads
+            engine_alive || break
+        done
+    ) </dev/null >/dev/null 2>&1 &
+    # The sweeper and its subprocesses must also stay off the two UI cores.
+    taskset -pc 0,3 "$!" >/dev/null 2>&1 || :
+fi
+exit 0

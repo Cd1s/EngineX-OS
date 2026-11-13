@@ -347,7 +347,7 @@ def ensure_base_artifacts(
         print("==> Compiling ALSA null + monotonic clock + vsync fixture...", flush=True)
         sh(f'arm-linux-gnueabihf-gcc -O2 -shared -fPIC -Wall -Wextra "{fixture_c}" -o "{fixture_so}" -ldl')
 
-    hook_so = src_dir / "rootfs-overlay/etc/sc5000/libengine-ui-hook.so"
+    hook_so = src_dir / "rootfs-overlay/etc/enginex/libengine-ui-hook.so"
     if build_hook or commit_changed or not hook_so.is_file():
         print(f"==> Building libengine-ui-hook.so ({ver_info['line']} @ {ver_info['commit']})...", flush=True)
         sh(f'cd "{src_dir}" && sh tools/ui-mod/build.sh')
@@ -362,7 +362,7 @@ def ensure_base_artifacts(
                 pass
     if build_suite or commit_changed or not suite_bin.is_file():
         print(f"==> Building sc5000-suite (armhf) ({ver_info['line']} @ {ver_info['commit']})...", flush=True)
-        sh(f'cd "{src_dir}" && GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -o "{suite_bin}" ./cmd/sc5000-suite')
+        sh(f'cd "{src_dir}" && GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -o "{suite_bin}" ./cmd/enginex-suite')
 
     packs_dir = WORK / "packs"
     if not (packs_dir / "en").is_dir():
@@ -690,8 +690,8 @@ def start_services(side: str, src_dir: Path | None = None) -> None:
     (sdir / "data/inMusicTempFiles").mkdir(parents=True, exist_ok=True)
 
     # Sync /etc/sc5000 overlay files (libengine-ui-hook.so, engine-ui-guard, etc.) into the live chroot
-    if src_dir is not None and (src_dir / "rootfs-overlay/etc/sc5000").is_dir():
-        for f in (src_dir / "rootfs-overlay/etc/sc5000").iterdir():
+    if src_dir is not None and (src_dir / "rootfs-overlay/etc/enginex").is_dir():
+        for f in (src_dir / "rootfs-overlay/etc/enginex").iterdir():
             if f.is_file():
                 dst = sdir / "tmp" / f.name
                 shutil.copy2(f, dst)

@@ -26,7 +26,7 @@ BASE=$(cd "$FW" && ls *-Update.img | sed -n 's/^SC5000-\([0-9.]*\)-Update\.img$/
 [ -n "$BASE" ] && [ "$(echo "$BASE" | wc -l)" = 1 ] || { echo "need exactly one SC5000-<base>-Update.img in $FW" >&2; exit 2; }
 
 # 1. One static ARMv7 binary for all five tools, and the UI packs.
-GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X github.com/Cd1s/EngineX-OS/pkg/webui.ReleaseBuild=1" -o "$WORK/sc5000-suite" ./cmd/sc5000-suite
+GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X github.com/Cd1s/EngineX-OS/pkg/webui.ReleaseBuild=1" -o "$WORK/enginex-suite" ./cmd/enginex-suite
 # QML comes straight from the base image's Engine, so a new base needs no hand-made qrc tree.
 if [ -z "${QRC:-}" ]; then
     arm-linux-gnueabihf-gcc -O2 -shared -fPIC -o "$WORK/qrc_dump.so" tools/ui-mod/qrc_dump.c -ldl
@@ -53,23 +53,23 @@ python3 tools/ui-mod/build_packs.py --release --qrc "$QRC" --splash "$WORK/splas
 STAGE=$WORK/overlay
 cp -a rootfs-overlay "$STAGE"
 rm -f "$STAGE/README.md"
-printf '%s\n' "$TAG" > "$STAGE/etc/sc5000/release-tag"
-mkdir -p "$STAGE/usr/share/sc5000-custom" "$STAGE/usr/sbin"
+printf '%s\n' "$TAG" > "$STAGE/etc/enginex/release-tag"
+mkdir -p "$STAGE/usr/share/enginex" "$STAGE/usr/sbin"
 # BusyBox xzcat on the deck rejects BCJ filters; lc/lp/pb suit 32-bit ARM code.
 # The 8 MiB dictionary keeps the deck's decoder memory as it was with -6.
-xz -T0 --check=crc32 --lzma2=preset=9e,dict=8MiB,lc=0,lp=2,pb=2 -c "$WORK/sc5000-suite" > "$STAGE/usr/share/sc5000-custom/sc5000-suite.xz"
-gzip -dc "$WORK/packs.tar.gz" | xz -T0 --check=crc32 --lzma2=preset=9e,dict=8MiB -c > "$STAGE/usr/share/sc5000-custom/ui-packs.tar.xz"
+xz -T0 --check=crc32 --lzma2=preset=9e,dict=8MiB,lc=0,lp=2,pb=2 -c "$WORK/enginex-suite" > "$STAGE/usr/share/enginex/enginex-suite.xz"
+gzip -dc "$WORK/packs.tar.gz" | xz -T0 --check=crc32 --lzma2=preset=9e,dict=8MiB -c > "$STAGE/usr/share/enginex/ui-packs.tar.xz"
 install -m 0755 "$FSCK" "$STAGE/usr/sbin/fsck.hfsplus"
-chmod 0644 "$STAGE/usr/share/sc5000-custom/"*
+chmod 0644 "$STAGE/usr/share/enginex/"*
 
 # 1b. Second generation: /data bundles. 6 armhf models share the 32-bit suite and hooks, AZ04 (PRIME 4 G2, SYSTEM ONE) needs arm64 ones.
 mkdir -p "$WORK/hooks32" "$WORK/hooks64"
 OUT=$WORK/hooks32/libengine-ui-hook.so sh tools/ui-mod/build.sh
 OUT=$WORK/hooks32/libedisksd-hook.so sh tools/edisksd-hook/build.sh
-install -m 0755 "$WORK/hooks32/libengine-ui-hook.so" "$STAGE/etc/sc5000/libengine-ui-hook.so"
-install -m 0755 "$WORK/hooks32/libengine-ui-hook.so" "$STAGE/usr/local/lib/sc5000/libengine-ui-hook.so"
-install -m 0755 "$WORK/hooks32/libedisksd-hook.so" "$STAGE/etc/sc5000/libedisksd-hook.so"
-GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X github.com/Cd1s/EngineX-OS/pkg/webui.ReleaseBuild=1" -o "$WORK/sc5000-suite-arm64" ./cmd/sc5000-suite
+install -m 0755 "$WORK/hooks32/libengine-ui-hook.so" "$STAGE/etc/enginex/libengine-ui-hook.so"
+install -m 0755 "$WORK/hooks32/libengine-ui-hook.so" "$STAGE/usr/local/lib/enginex/libengine-ui-hook.so"
+install -m 0755 "$WORK/hooks32/libedisksd-hook.so" "$STAGE/etc/enginex/libedisksd-hook.so"
+GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X github.com/Cd1s/EngineX-OS/pkg/webui.ReleaseBuild=1" -o "$WORK/enginex-suite-arm64" ./cmd/enginex-suite
 CROSS64=aarch64-linux-gnu-; [ "$(uname -m)" != aarch64 ] || CROSS64=
 CROSS=$CROSS64 OUT=$WORK/hooks64/libengine-ui-hook.so sh tools/ui-mod/build.sh
 CROSS=$CROSS64 OUT=$WORK/hooks64/libedisksd-hook.so sh tools/edisksd-hook/build.sh
@@ -118,12 +118,12 @@ for f in "$OUT/"*-Update.img; do
 done
 
 for m in SCLIVE4 SCLIVE2 PRIME4PLUS PRIMEGOPLUS MIXSTREAMPROPLUS MIXSTREAMPROGO; do
-    python3 tools/az01-packer/build-data-bundle.py "$VERSION" --release-tag "$TAG" --prefix "$m" --suite "$WORK/sc5000-suite" \
+    python3 tools/az01-packer/build-data-bundle.py "$VERSION" --release-tag "$TAG" --prefix "$m" --suite "$WORK/enginex-suite" \
         --hook "$WORK/hooks32/libengine-ui-hook.so" --ui-packs "$WORK/packs.tar.gz" --out "$WORK/bundle-$m" >/dev/null
     cp "$WORK/bundle-$m/$m-$VERSION-EngineX-OS-Data-Bundle.tar.gz" "$WORK/bundle-$m/$m-$VERSION-EngineX-OS-"*-Update.img "$OUT/"
 done
 for m in PRIME4G2 SYSTEMONE; do
-    python3 tools/az01-packer/build-data-bundle.py "$VERSION" --release-tag "$TAG" --prefix "$m" --suite "$WORK/sc5000-suite-arm64" \
+    python3 tools/az01-packer/build-data-bundle.py "$VERSION" --release-tag "$TAG" --prefix "$m" --suite "$WORK/enginex-suite-arm64" \
         --hook "$WORK/hooks64/libengine-ui-hook.so" --ui-packs "$WORK/packs.tar.gz" --out "$WORK/bundle-$m" >/dev/null
     cp "$WORK/bundle-$m/$m-$VERSION-EngineX-OS-Data-Bundle.tar.gz" "$WORK/bundle-$m/$m-$VERSION-EngineX-OS-"*-Update.img "$OUT/"
 done
