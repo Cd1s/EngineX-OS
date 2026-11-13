@@ -17,6 +17,12 @@ case $VERSION in *[!0-9.]*|'') echo "version must be digits and dots" >&2; exit 
 TAG=${RELEASE_TAG:-v$VERSION}
 case $TAG in "v$VERSION"|"v$VERSION-r"[1-9]|"v$VERSION-r"[1-9][0-9]) ;; *) echo "RELEASE_TAG must be v$VERSION or v$VERSION-rN" >&2; exit 2 ;; esac
 [ ! -e "$OUT" ] || { echo "$OUT exists; refusing to overwrite" >&2; exit 2; }
+# A public release is signed (#239) and decks check the signature against the keys embedded in this
+# build: without one, every deck would refuse the update. Stop before the long build, not after it.
+if [ "$KEY" = none ]; then
+    CGO_ENABLED=0 go run ./cmd/enginex-sign --list-keys >/dev/null ||
+        { echo "no trusted release public key in internal/releasesig/keys.go; a public release would be refused by every deck (#239)" >&2; exit 2; }
+fi
 ROOT=$(pwd)
 KEYARG=$KEY; [ "$KEY" != none ] || KEYARG=
 WORK=$(mktemp -d)
@@ -130,4 +136,5 @@ done
 
 cd "$OUT"
 sha256sum *-Update.img *-Data-Bundle.tar.gz > SHA256SUMS.txt
+# Not signed yet: build-installer.sh adds the installers to this list, then sign-release.sh signs it (#239).
 ls -l

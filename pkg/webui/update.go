@@ -54,50 +54,6 @@ func isDeckDataDir(dir string) bool {
 	return dir == realDeckCustomDir || dir == realLegacyCustomDir
 }
 
-var (
-	engineScriptPath       = "/usr/Engine/Scripts/engine"
-	planckRemoteScreenPath = "/usr/bin/planck-remote-screen"
-	updateFileURLPath      = "/tmp/update-file-url"
-	engineQuitReasonPath   = "/tmp/engine-quit-reason"
-	allowUpdateFromURL     = isDeckDataDir
-	quitEngineForUpdate    = func() error {
-		if err := guardHostCommand("pkill"); err != nil {
-			return err
-		}
-		return exec.Command("pkill", "-TERM", "-f", "^/usr/Engine/Engine( |$)").Run()
-	}
-)
-
-func hasPreloadedPlanckUpdater(scriptPath, updaterPath string) bool {
-	if _, err := os.Stat(updaterPath); err != nil {
-		return false
-	}
-	b, err := os.ReadFile(scriptPath)
-	if err != nil {
-		return false
-	}
-	for _, line := range strings.Split(string(b), "\n") {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		if strings.Contains(trimmed, "LD_PRELOAD=") && strings.Contains(trimmed, "planck-remote-screen") {
-			return true
-		}
-	}
-	return false
-}
-
-func canUseUpdateFromURL(customDir string) bool {
-	if !allowUpdateFromURL(customDir) {
-		return false
-	}
-	if dataBundleBoards[imagePrefix(deviceCompatible())] {
-		return hasPreloadedPlanckUpdater(engineScriptPath, planckRemoteScreenPath)
-	}
-	return true
-}
-
 var githubRepoRE = regexp.MustCompile(`^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$`)
 
 type updateStatus struct {
@@ -178,44 +134,36 @@ func (s *Server) setUpdateProgress(p float64, errMsg string, done bool) {
 	}
 }
 
-func hasMatchingStagedImage(path, downloadURL string) bool {
+// hasMatchingStagedImage reports whether path already holds the image of downloadURL with the
+// signed SHA-256 want; a file of an earlier build under the same URL is downloaded again.
+func hasMatchingStagedImage(path, downloadURL, want string) bool {
 	if b, err := os.ReadFile(path + ".url"); err != nil || strings.TrimSpace(string(b)) != downloadURL {
 		return false
 	}
-	return hasValidAZ01Image(path)
+	return hasValidAZ01Image(path) && hasDigest(path, want)
 }
 
+// applyOnlineUpdate installs the update at downloadURL (#239). It first verifies the release
+// signature and takes the file's signed SHA-256 from it, then downloads the file itself and
+// checks that digest before anything is applied. Engine's own updater is not handed the URL:
+// it would download the file again, unchecked.
 func (s *Server) applyOnlineUpdate(downloadURL string) {
+	want, msg := s.signedAssetDigest(downloadURL)
+	if msg != "" {
+		s.setUpdateProgress(0, msg, true)
+		return
+	}
 	if strings.HasSuffix(downloadURL, bundleSuffix) {
-		s.applyDataBundleUpdate(downloadURL)
+		s.applyDataBundleUpdate(downloadURL, want)
 		return
 	}
 	customDir := s.customDir()
-	// Trigger stock Denon full-screen graphical updater (/usr/bin/planck-remote-screen --update)
-	// via /usr/Engine/Scripts/engine's native UpdateFromUrl quit handler. On Gen-2 boards, only
-	// hand off to UpdateFromUrl when /usr/Engine/Scripts/engine already wraps planck-remote-screen
-	// with LD_PRELOAD (and planck-remote-screen exists); otherwise download and apply in Go (#215).
-	if canUseUpdateFromURL(customDir) {
-		if err := os.WriteFile(updateFileURLPath, []byte(downloadURL+"\n"), 0o644); err == nil {
-			if err := os.WriteFile(engineQuitReasonPath, []byte("UpdateFromUrl\n"), 0o644); err == nil {
-				s.setUpdateProgress(0.10, "", false)
-				time.Sleep(150 * time.Millisecond)
-				// Engine renames itself "EMain", so match the command line, not the name.
-				if quitEngineForUpdate() == nil {
-					s.setUpdateProgress(1.0, "", true)
-					return
-				}
-				_ = os.Remove(engineQuitReasonPath)
-				_ = os.Remove(updateFileURLPath)
-			}
-		}
-	}
 	staged := stagedUpdateFile
 	if !isDeckDataDir(customDir) {
 		_ = os.MkdirAll(customDir, 0o700)
 		staged = filepath.Join(customDir, "az01-update.img")
 	}
-	if !hasMatchingStagedImage(staged, downloadURL) {
+	if !hasMatchingStagedImage(staged, downloadURL, want) {
 		part := staged + ".part"
 		_ = os.Remove(part)
 		_ = os.Remove(staged + ".url")
@@ -249,10 +197,21 @@ func (s *Server) applyOnlineUpdate(downloadURL string) {
 		}
 		total := resp.ContentLength
 		var written int64
+		sum := sha256.New()
 		buf := make([]byte, 256*1024)
 		for {
 			n, rerr := resp.Body.Read(buf)
 			if n > 0 {
+				written += int64(n)
+				if written > updateMaxDownload {
+					out.Close()
+					resp.Body.Close()
+					cancel()
+					_ = os.Remove(part)
+					s.setUpdateProgress(0, "update download too large", true)
+					return
+				}
+				sum.Write(buf[:n])
 				if _, werr := out.Write(buf[:n]); werr != nil {
 					out.Close()
 					resp.Body.Close()
@@ -261,7 +220,6 @@ func (s *Server) applyOnlineUpdate(downloadURL string) {
 					s.setUpdateProgress(0, "disk write failed", true)
 					return
 				}
-				written += int64(n)
 				if total > 0 {
 					p := 0.05 + 0.88*(float64(written)/float64(total))
 					if p > 0.93 {
@@ -286,6 +244,11 @@ func (s *Server) applyOnlineUpdate(downloadURL string) {
 		out.Close()
 		resp.Body.Close()
 		cancel()
+		if hex.EncodeToString(sum.Sum(nil)) != want {
+			_ = os.Remove(part)
+			s.setUpdateProgress(0, msgUpdateMismatch, true)
+			return
+		}
 		if s.tryApplyGen2Image(part) {
 			return
 		}
@@ -610,7 +573,7 @@ func (s *Server) isGen2Locked() bool {
 // applyDataBundleUpdate downloads a second-generation /data bundle, unpacks it
 // into a scratch directory next to the install and lets its own install.sh
 // verify SHA256SUMS and swap the parts in (#86).
-func (s *Server) applyDataBundleUpdate(downloadURL string) {
+func (s *Server) applyDataBundleUpdate(downloadURL, want string) {
 	fail := func(msg string) { s.setUpdateProgress(0, msg, true) }
 	customDir := s.customDir()
 	if err := os.MkdirAll(customDir, 0o700); err != nil {
@@ -624,7 +587,7 @@ func (s *Server) applyDataBundleUpdate(downloadURL string) {
 	}
 	defer os.RemoveAll(work)
 	archive := filepath.Join(work, "bundle.tar.gz")
-	if msg := s.downloadBundle(downloadURL, archive); msg != "" {
+	if msg := s.downloadBundle(downloadURL, archive, want); msg != "" {
 		fail(msg)
 		return
 	}
@@ -715,8 +678,9 @@ func (s *Server) installDataBundleReader(r io.Reader, work string) {
 	}
 }
 
-// downloadBundle fetches url into dest, at most bundleMaxDown bytes; it returns an error message or "".
-func (s *Server) downloadBundle(url, dest string) string {
+// downloadBundle fetches url into dest, at most bundleMaxDown bytes, and checks that its
+// SHA-256 is want (from the signed SHA256SUMS.txt); it returns an error message or "".
+func (s *Server) downloadBundle(url, dest, want string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
@@ -742,6 +706,7 @@ func (s *Server) downloadBundle(url, dest string) string {
 	}
 	defer out.Close()
 	var written int64
+	sum := sha256.New()
 	buf := make([]byte, 128*1024)
 	for {
 		n, rerr := resp.Body.Read(buf)
@@ -750,6 +715,7 @@ func (s *Server) downloadBundle(url, dest string) string {
 			if written > bundleMaxDown {
 				return "update download too large"
 			}
+			sum.Write(buf[:n])
 			if _, werr := out.Write(buf[:n]); werr != nil {
 				return "disk write failed"
 			}
@@ -758,6 +724,9 @@ func (s *Server) downloadBundle(url, dest string) string {
 			}
 		}
 		if rerr == io.EOF {
+			if hex.EncodeToString(sum.Sum(nil)) != want {
+				return msgUpdateMismatch
+			}
 			return ""
 		}
 		if rerr != nil {

@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Cd1s/EngineX-OS/internal/releasesig"
 )
 
 func writeTestKeys(t *testing.T, dir string) (pubPath, privPath string) {
@@ -61,7 +63,16 @@ func TestSignAndVerifyTool(t *testing.T) {
 		}
 		return ""
 	}
-	if err := run([]string{sumsPath}, getenv, &out, &errBuf); err != nil {
+	// This key is not embedded in the build: signing with it is refused unless it is asked for
+	// (the release gate signs mock releases with a throwaway key). A release signed with a key
+	// the decks do not trust would be refused by every one of them.
+	if err := run([]string{sumsPath}, getenv, &out, &errBuf); err == nil || !strings.Contains(err.Error(), "decks would refuse") {
+		t.Fatalf("signing with a key that is not embedded: %v", err)
+	}
+	if _, err := os.Stat(sumsPath + ".sig"); err == nil {
+		t.Fatal("a signature was written for an untrusted key")
+	}
+	if err := run([]string{"--allow-untrusted", sumsPath}, getenv, &out, &errBuf); err != nil {
 		t.Fatalf("sign failed: %v", err)
 	}
 	combined := out.String() + errBuf.String()
@@ -75,6 +86,11 @@ func TestSignAndVerifyTool(t *testing.T) {
 		t.Fatalf("verify failed: %v", err)
 	}
 
+	// Without --pubkey the embedded keys are used, and the throwaway key is not one of them.
+	if err := run([]string{"--verify", sumsPath}, getenv, &out, &errBuf); err == nil {
+		t.Fatal("--verify accepted a signature of a key that is not embedded")
+	}
+
 	// Tampered SHA256SUMS.txt fails --verify.
 	if err := os.WriteFile(sumsPath, []byte(strings.Replace(sumsContent, "0", "1", 1)), 0o644); err != nil {
 		t.Fatal(err)
@@ -83,3 +99,20 @@ func TestSignAndVerifyTool(t *testing.T) {
 		t.Fatal("verify accepted tampered SHA256SUMS.txt")
 	}
 }
+
+func TestListKeysFailsWithoutEmbeddedKey(t *testing.T) {
+	var out, errBuf bytes.Buffer
+	err := run([]string{"--list-keys"}, func(string) string { return "" }, &out, &errBuf)
+	keys, kerr := releasesigTrusted()
+	if kerr != nil {
+		t.Fatal(kerr)
+	}
+	if (len(keys) == 0) != (err != nil) {
+		t.Fatalf("--list-keys: err %v with %d embedded keys", err, len(keys))
+	}
+	if err == nil && strings.Count(out.String(), "\n") != len(keys) {
+		t.Fatalf("--list-keys printed %q for %d keys", out.String(), len(keys))
+	}
+}
+
+func releasesigTrusted() ([]ed25519.PublicKey, error) { return releasesig.TrustedPublicKeys() }
