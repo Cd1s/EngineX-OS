@@ -1,11 +1,11 @@
 package webui
 
 import (
-	"context"
-	"database/sql"
 	"net/http"
-	"net/url"
+	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 )
@@ -13,37 +13,61 @@ import (
 // overviewScaleGet tells the deck's overview whether Engine scales the overview of the
 // track at ?path=. An import by an earlier build ends in a zero triple where Engine
 // expects each band's maximum, and Engine draws it at a third of the height. rb-bridge
-// completes those when the stick is inserted, but not in a library it cannot write, on a
-// stick that stayed in, or after a scan that failed. The overview keeps the stretch it
-// had before for every track this does not vouch for.
+// completes those when the stick is inserted and vouches for the library in a file of its
+// own (enginedb.VouchOverviews). The answer comes from that file alone: m.db belongs to
+// Engine while the stick is in. The overview keeps the stretch it had before for every
+// track this does not vouch for: a library rb-bridge could not write, a stick that stayed
+// in, an import by an earlier build since.
 func (s *Server) overviewScaleGet(w http.ResponseWriter, r *http.Request) {
-	f := r.URL.Query().Get("path")
-	lib := engineLibrary(f, s.shadow.dataRoot, s.shadow.mediaRoot)
-	rel, err := filepath.Rel(lib, f)
-	if err != nil || !overviewScaled(r.Context(), filepath.Join(lib, "Database2", "m.db"), filepath.ToSlash(rel)) {
-		http.Error(w, "no band maxima", http.StatusNotFound)
+	if !overviewVouched(s.shadow.mediaRoot, r.URL.Query().Get("path")) {
+		http.Error(w, "not vouched for", http.StatusNotFound)
 		return
 	}
 	w.Write([]byte("scaled"))
 }
 
-// overviewScaled reports whether the library lists the track with an overview that has
-// its band maxima, or with none yet: Engine then builds its own. Read-only: Engine owns
-// the database (#49).
-func overviewScaled(ctx context.Context, mdb, rel string) bool {
-	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: mdb}).String()+"?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(500)")
-	if err != nil {
+// overviewVouched reports whether f, a track's path as Engine gives it, is on a volume
+// under mediaRoot whose library rb-bridge vouches for. Engine's name for the volume is
+// its directory there or a name of its own; then the track is on every volume that holds
+// the file, and each of them has to vouch.
+func overviewVouched(mediaRoot, f string) bool {
+	mediaRoot = filepath.Clean(mediaRoot)
+	rel, err := filepath.Rel(mediaRoot, f)
+	if err != nil || !filepath.IsLocal(rel) {
 		return false
 	}
-	defer db.Close()
-	var blob []byte
-	if db.QueryRowContext(ctx, `SELECT substr(p.overviewWaveFormData,1,8388609) FROM Track t LEFT JOIN PerformanceData p ON p.trackId=t.id WHERE t.path=?`, rel).Scan(&blob) != nil {
+	name, track, ok := strings.Cut(rel, string(filepath.Separator))
+	if !ok {
 		return false
 	}
-	if len(blob) == 0 {
-		return true
+	volumes := []string{name}
+	if _, err := os.Lstat(filepath.Join(mediaRoot, name)); err != nil {
+		volumes = nil
+		entries, _ := os.ReadDir(mediaRoot)
+		for _, e := range entries {
+			if st, err := os.Lstat(filepath.Join(mediaRoot, e.Name(), track)); e.IsDir() && err == nil && st.Mode().IsRegular() {
+				volumes = append(volumes, e.Name())
+			}
+		}
 	}
-	raw, err := enginedb.QUncompress(blob, 8<<20)
-	n := len(raw)
-	return err == nil && n >= 27 && raw[n-1]|raw[n-2]|raw[n-3] != 0
+	for _, volume := range volumes {
+		if !volumeVouches(mediaRoot, volume, track) {
+			return false
+		}
+	}
+	return len(volumes) > 0
+}
+
+// volumeVouches reports whether the library of the volume vouches for the track's
+// overview. No symlink may stand between mediaRoot and the vouch: it could lead to a
+// library elsewhere.
+func volumeVouches(mediaRoot, volume, track string) bool {
+	dir := filepath.Join(mediaRoot, volume, "Engine Library", "Database2")
+	for p := dir; p != mediaRoot; p = filepath.Dir(p) {
+		if st, err := os.Lstat(p); err != nil || !st.IsDir() {
+			return false
+		}
+	}
+	raw, ok := enginedb.OverviewVouch(dir)
+	return ok && !slices.Contains(raw, "../"+filepath.ToSlash(track)) // Track.path, from "Engine Library"
 }

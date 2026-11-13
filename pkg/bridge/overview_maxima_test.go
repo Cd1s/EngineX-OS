@@ -12,7 +12,8 @@ import (
 )
 
 // oldOverviews imports count tracks and then zeroes the band maxima that end their
-// overviews, as an earlier build left them. It returns the overviews Engine expects.
+// overviews and removes the vouch for them, as an earlier build left the library. It
+// returns the overviews Engine expects.
 func oldOverviews(t *testing.T, count int) (string, *sql.DB, map[int64][]byte) {
 	t.Helper()
 	root := t.TempDir()
@@ -39,6 +40,18 @@ func oldOverviews(t *testing.T, count int) (string, *sql.DB, map[int64][]byte) {
 	if err := rows.Close(); err != nil || len(want) != count {
 		t.Fatal("fixture tracks", len(want), err)
 	}
+	if raw, ok := enginedb.OverviewVouch(filepath.Join(root, "Engine Library/Database2")); !ok || len(raw) != 0 {
+		t.Fatal("a library this build has just imported is not vouched for", raw, ok)
+	}
+	zeroMaxima(t, db, want)
+	if err := os.Remove(filepath.Join(root, "Engine Library/Database2/.rb-bridge-overview")); err != nil {
+		t.Fatal(err)
+	}
+	return root, db, want
+}
+
+func zeroMaxima(t *testing.T, db *sql.DB, want map[int64][]byte) {
+	t.Helper()
 	for id, raw := range want {
 		old := bytes.Clone(raw)
 		clear(old[len(old)-3:])
@@ -47,7 +60,6 @@ func oldOverviews(t *testing.T, count int) (string, *sql.DB, map[int64][]byte) {
 			t.Fatal(err)
 		}
 	}
-	return root, db, want
 }
 
 // completed reports whether every overview in table has its band maxima.
@@ -81,16 +93,32 @@ func TestStampBypassCompletesOldOverviewsOnce(t *testing.T) {
 	if r := issue233Mount(t, root, enginedb.Options{}); !r.Bypassed || !completed(t, db, "PerformanceData", want) || !overviewMarked(root) {
 		t.Fatalf("old overview not completed on the bypass: %+v", r)
 	}
-	for id, raw := range want {
-		old := bytes.Clone(raw)
-		clear(old[len(old)-3:])
-		blob, _ := enginedb.QCompress(old)
-		if _, err := db.Exec(`UPDATE PerformanceData SET overviewWaveFormData=? WHERE trackId=?`, blob, id); err != nil {
-			t.Fatal(err)
-		}
-	}
+	zeroMaxima(t, db, want)
 	if issue233Mount(t, root, enginedb.Options{}); completed(t, db, "PerformanceData", want) {
 		t.Fatal("the library was scanned again")
+	}
+}
+
+// Review of a2cfaa3: after this build completed a library, an earlier build on another
+// deck imports into it again and leaves overviews without band maxima. The mark of a
+// completed library was final, so they stayed that way. Its import wrote rb-bridge's own
+// database: that ends the vouch, and the next insert here completes them.
+func TestImportByAnEarlierBuildIsCompletedAtTheNextInsert(t *testing.T) {
+	root, db, want := oldOverviews(t, 2)
+	dir := filepath.Join(root, "Engine Library/Database2")
+	vouched := func() bool { _, ok := enginedb.OverviewVouch(dir); return ok }
+	if issue233Mount(t, root, enginedb.Options{}); !completed(t, db, "PerformanceData", want) || !vouched() {
+		t.Fatal("the library was not completed and vouched for")
+	}
+	zeroMaxima(t, db, want)
+	if _, err := db.Exec(`UPDATE bridge.BridgeState SET fingerprint=fingerprint||'0'`); err != nil { // as it encodes them again
+		t.Fatal(err)
+	}
+	if vouched() {
+		t.Fatal("still vouched for after the earlier build's import")
+	}
+	if r := issue233Mount(t, root, enginedb.Options{}); !r.Bypassed || !completed(t, db, "PerformanceData", want) || !vouched() {
+		t.Fatalf("the earlier build's overviews were not completed: %+v", r)
 	}
 }
 
@@ -136,5 +164,20 @@ CREATE TRIGGER ViewUpdate INSTEAD OF UPDATE ON PerformanceData BEGIN UPDATE Real
 	exec(`DROP VIEW PerformanceData; ALTER TABLE RealPerformanceData RENAME TO PerformanceData`)
 	if issue233Mount(t, root, enginedb.Options{}); !completed(t, db, "PerformanceData", want) || !overviewMarked(root) {
 		t.Fatal("the next insert did not complete the library")
+	}
+}
+
+// A library this build vouches for stays vouched for through its own next import: until
+// the next insert, the deck would draw every track of the stick as r5 did.
+func TestOwnNextImportKeepsTheVouch(t *testing.T) {
+	root := t.TempDir()
+	testfixture.LargeExport(t, root, 1)
+	issue233Mount(t, root, enginedb.Options{})
+	testfixture.LargeExport(t, root, 2)
+	if r := issue233Mount(t, root, enginedb.Options{}); r.Added != 1 || r.Deferred != 0 {
+		t.Fatalf("second import: %+v", r)
+	}
+	if raw, ok := enginedb.OverviewVouch(filepath.Join(root, "Engine Library/Database2")); !ok || len(raw) != 0 {
+		t.Fatal("not vouched for after this build's own import", raw, ok)
 	}
 }

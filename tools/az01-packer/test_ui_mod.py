@@ -5911,9 +5911,9 @@ class OverviewFullButterflyScaleTest(unittest.TestCase):
     A track whose overview Engine scales keeps the stock geometry (nothing of ours scales,
     clips or moves the native view), so its peaks fit every lane exactly as on stock;
     rb-bridge gives Engine the band maxima it scales by (pkg/enginedb
-    TestOverviewEndsWithBandMaxima). A rekordbox track without them (an import by an
-    earlier build that rb-bridge could not complete) keeps the geometry r5 gave every
-    rekordbox track, so it is never drawn smaller than on r5; Full is never stretched."""
+    TestOverviewEndsWithBandMaxima). A rekordbox track keeps the geometry r5 gave every
+    one of them until stream-sync vouches for its scale, so one whose overview rb-bridge
+    could not complete is never drawn smaller than on r5; Full is never stretched."""
 
     def check_overview(self, main, overview):
         self.assertNotIn("scOverviewScale", main)
@@ -5953,7 +5953,8 @@ for (const WaveformOverviewView of [{Praline: 0, Butterfly: 1}, {Praline: 1, But
         }
     }
 }
-// Which tracks are asked about, and what the answer does.
+// Which tracks are asked about, and what the answer does. Review of a2cfaa3: a rekordbox
+// track had the stock geometry until the answer came, and for good when none came.
 const requests = [];
 class XMLHttpRequest { open(method, url) { this.method = method; this.url = url } send() { requests.push(this) } }
 const answer = (x, status) => { x.readyState = 4; x.status = status; x.onreadystatechange() };
@@ -5967,29 +5968,32 @@ for (const track of [null, {}, {path: null}, {path: ''}, {path: '/media/USB/Musi
     assert.equal(requests.length, 0, 'nothing to ask for ' + JSON.stringify(track));
 }
 const path = '/media/USB 1/Contents/Artist & Co/track #1.mp3';
-for (const [status, raw] of [[200, false], [404, true], [0, true], [500, true]]) {
-    overview.scRaw = true;
+for (const [status, raw] of [[200, false], [404, true], [0, true], [500, true], [null, true]]) {
+    overview.scRaw = false;
     load({path});
-    assert.equal(overview.scRaw, false, 'stock geometry until the answer');
+    assert.equal(overview.scRaw, true, 'r5 geometry from the moment the track is loaded');
     const x = requests.pop();
     assert.equal(requests.length, 0);
     assert.equal(x.method, 'GET');
     assert.equal(x.url, 'http://127.0.0.1:8080/v1/sc5000/overview-scale?path=' + encodeURIComponent(path));
-    x.readyState = 2; x.onreadystatechange();
-    assert.equal(overview.scRaw, false);
-    answer(x, status);
+    // No answer yet, for as long as it takes: headers, a body on its way, nothing at all.
+    for (const state of [1, 2, 3]) { x.readyState = state; x.status = state > 1 ? 200 : 0; x.onreadystatechange(); }
+    assert.equal(overview.scRaw, true, 'r5 geometry while the request is pending');
+    if (status !== null) answer(x, status);
     assert.equal(overview.scRaw, raw, 'status ' + status);
 }
 // An answer for a track that is no longer loaded changes nothing.
 load({path});
 const late = requests.pop();
 load({path: '/media/USB 1/Contents/other.mp3'});
-answer(late, 404);
+answer(late, 200);
+assert.equal(overview.scRaw, true, 'vouched for another track');
+answer(requests.pop(), 200);
 assert.equal(overview.scRaw, false);
-answer(requests.pop(), 404);
-assert.equal(overview.scRaw, true);
+load({path});
+assert.equal(overview.scRaw, true, 'the next rekordbox track starts from r5 geometry');
 load({path: '/media/USB 1/Engine Library/Music/track.flac'});
-assert.equal(overview.scRaw, false, 'the next track starts from stock');
+assert.equal(overview.scRaw, false, 'and any other track from stock');
 """
         result = subprocess.run([shutil.which("node"), "-e", js], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)

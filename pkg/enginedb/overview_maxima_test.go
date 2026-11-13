@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
@@ -36,7 +37,9 @@ func TestFillOverviewMaximaOnlyCompletesImportedZeroTrailers(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	if _, err := db.Exec(`CREATE TABLE PerformanceData (trackId INTEGER PRIMARY KEY, overviewWaveFormData BLOB, thirdPartySourceId INTEGER)`); err != nil {
+	if _, err := db.Exec(`CREATE TABLE PerformanceData (trackId INTEGER PRIMARY KEY, overviewWaveFormData BLOB, thirdPartySourceId INTEGER);
+CREATE TABLE Track (id INTEGER PRIMARY KEY, path TEXT);
+INSERT INTO Track VALUES (1,'../Contents/1.mp3'),(2,'../Contents/2.mp3'),(3,'../Contents/3.mp3'),(4,'../Contents/4.mp3'),(5,'../Contents/5.mp3'),(6,'../Contents/6.mp3')`); err != nil {
 		t.Fatal(err)
 	}
 	overview := func(trailer ...byte) []byte {
@@ -48,11 +51,18 @@ func TestFillOverviewMaximaOnlyCompletesImportedZeroTrailers(t *testing.T) {
 		return blob
 	}
 	old, done := overview(0, 0, 0), overview(9, 9, 9)
-	if _, err := db.Exec(`INSERT INTO PerformanceData VALUES (1,?,1),(2,?,1),(3,?,NULL),(4,x'00',1)`, old, done, old); err != nil {
+	silent, err := QCompress(make([]byte, 24+6+3))
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := FillOverviewMaxima(context.Background(), mount); err != nil {
+	if _, err := db.Exec(`INSERT INTO PerformanceData VALUES (1,?,1),(2,?,1),(3,?,NULL),(4,x'00',1),(5,NULL,1),(6,?,1)`, old, done, old, silent); err != nil {
 		t.Fatal(err)
+	}
+	// Left without band maxima: what cannot be read and what has no signal. A track with no
+	// overview at all is not among them, Engine builds its own.
+	left, err := FillOverviewMaxima(context.Background(), mount)
+	if err != nil || !slices.Equal(left, []string{"../Contents/4.mp3", "../Contents/6.mp3"}) {
+		t.Fatal(left, err)
 	}
 	get := func(id int) (blob []byte) {
 		if err := db.QueryRow(`SELECT overviewWaveFormData FROM PerformanceData WHERE trackId=?`, id).Scan(&blob); err != nil {

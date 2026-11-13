@@ -4523,17 +4523,18 @@ OVERVIEW_Y_SCALE_BANDS = 2.2
 # A rekordbox track an earlier build imported has an overview without the band maxima
 # Engine scales by, a third of the height. rb-bridge completes it when the stick is
 # inserted, but not in a library it cannot write, on a stick that stayed in, or after a
-# failed scan. Such a track is drawn as r5 drew every rekordbox track: Half stretched from
-# the bottom and clipped, no gap below. Full is never stretched (#233). Every other track,
-# and this one once stream-sync vouches for its scale, keeps the stock geometry.
+# failed scan. So a track on a rekordbox stick is drawn as r5 drew every one of them (Half
+# stretched from the bottom and clipped, no gap below) until stream-sync vouches for its
+# scale; with no answer it stays that way, never smaller than on r5. Full is never
+# stretched (#233). Every other track keeps the stock geometry.
 OVERVIEW_RAW = """			property bool scRaw: false
 			readonly property var scTrack: trackData
 			onScTrackChanged: {
-				scRaw = false
 				const path = scTrack && scTrack.path ? String(scTrack.path) : ""
-				if (!/(^|\\/)Contents\\//.test(path)) return
+				scRaw = /(^|\\/)Contents\\//.test(path)
+				if (!scRaw) return
 				const track = scTrack, x = new XMLHttpRequest()
-				x.onreadystatechange = function() { if (x.readyState === 4 && overview.scTrack === track) overview.scRaw = x.status !== 200 }
+				x.onreadystatechange = function() { if (x.readyState === 4 && x.status === 200 && overview.scTrack === track) overview.scRaw = false }
 				x.open("GET", "http://127.0.0.1:8080/v1/sc5000/overview-scale?path=" + encodeURIComponent(path))
 				x.send()
 			}
