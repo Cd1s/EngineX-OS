@@ -27,7 +27,7 @@ func TestProlinkExportSettingLifecycle(t *testing.T) {
 	defer srv.Close()
 	request := func(query string) (int, prolinkResponse) {
 		t.Helper()
-		resp, err := http.Post(srv.URL+"/v1/sc5000/prolink?"+query, "", nil)
+		resp, err := http.Post(srv.URL+"/v1/enginex/prolink?"+query, "", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -174,7 +174,7 @@ func TestLinkMasterAskedAgainFromAnotherDeck(t *testing.T) {
 		t.Helper()
 		body := fmt.Sprintf(`[{"deck":1,"playing":true,"bpm":120,"master":%v},{"deck":2,"playing":true,"bpm":120,"master":%v}]`, masterDeck == 1, masterDeck == 2)
 		w := httptest.NewRecorder()
-		s.decksPost(w, httptest.NewRequest("POST", "/v1/sc5000/decks", strings.NewReader(body)))
+		s.decksPost(w, httptest.NewRequest("POST", "/v1/enginex/decks", strings.NewReader(body)))
 		if w.Code != 200 {
 			t.Fatalf("decks: %d", w.Code)
 		}
@@ -237,7 +237,7 @@ func TestLinkMasterTakenBackWhenNobodyHoldsIt(t *testing.T) {
 		t.Helper()
 		body := fmt.Sprintf(`[{"deck":1,"playing":true,"bpm":120,"master":%v},{"deck":2,"playing":true,"bpm":120,"master":%v}]`, masterDeck == 1, masterDeck == 2)
 		w := httptest.NewRecorder()
-		s.decksPost(w, httptest.NewRequest("POST", "/v1/sc5000/decks", strings.NewReader(body)))
+		s.decksPost(w, httptest.NewRequest("POST", "/v1/enginex/decks", strings.NewReader(body)))
 		if w.Code != 200 {
 			t.Fatalf("decks: %d", w.Code)
 		}
@@ -324,7 +324,7 @@ func TestLinkMasterAskedAgainOnTheSameDeck(t *testing.T) {
 		t.Helper()
 		body := fmt.Sprintf(`[{"deck":1,"playing":true,"bpm":120,"master":true,"masterPress":%d}]`, presses)
 		w := httptest.NewRecorder()
-		s.decksPost(w, httptest.NewRequest("POST", "/v1/sc5000/decks", strings.NewReader(body)))
+		s.decksPost(w, httptest.NewRequest("POST", "/v1/enginex/decks", strings.NewReader(body)))
 		if w.Code != 200 {
 			t.Fatalf("decks: %d", w.Code)
 		}

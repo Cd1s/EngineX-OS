@@ -60,7 +60,7 @@ func TestRelocateEndpoints(t *testing.T) {
 		t.Fatalf("unknown drive: %d", code)
 	}
 	// The deck's own route applies, and only when asked to.
-	code, v = relocatePost(t, srv, "/v1/sc5000/relocate", `{"dryRun":false}`, "")
+	code, v = relocatePost(t, srv, "/v1/enginex/relocate", `{"dryRun":false}`, "")
 	d, _ := v["drives"].([]any)
 	if code != 200 || len(d) != 1 || stored() != "../Moved/song.mp3" {
 		t.Fatalf("%d %v %s", code, v, stored())

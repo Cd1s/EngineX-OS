@@ -17,7 +17,7 @@ func TestLibraryStatusEndpointAndSkeletonRejection(t *testing.T) {
 	defer s.Close()
 
 	// 1. Non-loopback requests must be rejected with 403.
-	lanReq := httptest.NewRequest(http.MethodGet, "/v1/sc5000/library-status?path="+url.QueryEscape(filepath.Join(mediaRoot, "USB")), nil)
+	lanReq := httptest.NewRequest(http.MethodGet, "/v1/enginex/library-status?path="+url.QueryEscape(filepath.Join(mediaRoot, "USB")), nil)
 	lanReq.RemoteAddr = "192.168.1.42:54321"
 	lanRec := httptest.NewRecorder()
 	s.ServeHTTP(lanRec, lanReq)
@@ -27,7 +27,7 @@ func TestLibraryStatusEndpointAndSkeletonRejection(t *testing.T) {
 
 	query := func(p string) bool {
 		t.Helper()
-		req := httptest.NewRequest(http.MethodGet, "/v1/sc5000/library-status?path="+url.QueryEscape(p), nil)
+		req := httptest.NewRequest(http.MethodGet, "/v1/enginex/library-status?path="+url.QueryEscape(p), nil)
 		req.RemoteAddr = "127.0.0.1:54321"
 		rec := httptest.NewRecorder()
 		s.ServeHTTP(rec, req)

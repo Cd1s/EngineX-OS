@@ -197,7 +197,7 @@ func TestOmniSourcePlaysDriveFilesDirectly(t *testing.T) {
 	// A symlink on the media must not serve a file outside the volume.
 	tidalGet(t, base, "/v1/stream/"+strconv.FormatInt(ids["Omni Link"], 10)+".flac", 404, nil)
 	var src struct{ Path string }
-	tidalGet(t, base, "/v1/sc5000/stems/source?id="+strconv.FormatInt(ids["Omni One"], 10), 200, &src)
+	tidalGet(t, base, "/v1/enginex/stems/source?id="+strconv.FormatInt(ids["Omni One"], 10), 200, &src)
 	if src.Path != filepath.Join(root, "Contents/Artist/One.flac") {
 		t.Fatal("Stems use the drive file:", src.Path)
 	}

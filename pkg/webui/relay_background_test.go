@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// BH-GC2-12: GET /v1/sc5000/ui, which Engine's QML polls every 3 s on its GUI thread, probed a
+// BH-GC2-12: GET /v1/enginex/ui, which Engine's QML polls every 3 s on its GUI thread, probed a
 // configured Stems relay inside the request and waited up to 1.5 s for one that did not answer.
 // The probes run in the background now; the handler answers from what they last found.
 func TestUIStatusNeverWaitsOnTheRelay(t *testing.T) {
@@ -34,7 +34,7 @@ func TestUIStatusNeverWaitsOnTheRelay(t *testing.T) {
 		t.Fatal(err)
 	}
 	get := func() (*httptest.ResponseRecorder, time.Duration) {
-		r := httptest.NewRequest("GET", "/v1/sc5000/ui", nil)
+		r := httptest.NewRequest("GET", "/v1/enginex/ui", nil)
 		r.RemoteAddr = "127.0.0.1:4000"
 		w := httptest.NewRecorder()
 		start := time.Now()

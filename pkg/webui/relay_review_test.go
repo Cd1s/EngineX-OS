@@ -41,7 +41,7 @@ func newRelayFake(t *testing.T, name string, hang bool) *relayFake {
 
 func pollUI(t *testing.T, s *Server) (string, time.Duration) {
 	t.Helper()
-	r := httptest.NewRequest("GET", "/v1/sc5000/ui", nil)
+	r := httptest.NewRequest("GET", "/v1/enginex/ui", nil)
 	r.RemoteAddr = "127.0.0.1:4000"
 	w := httptest.NewRecorder()
 	start := time.Now()
@@ -60,7 +60,7 @@ func waitFor(t *testing.T, what string, ok func() bool) {
 
 // Review of 25cea50: the probe held relayProbeMu for its whole request, so a settings write
 // during a hung probe waited for it (updateRelayConfig 1.5 s, under uiMu, and with it
-// GET /v1/sc5000/ui).
+// GET /v1/enginex/ui).
 func TestSettingsWriteNeverWaitsOnAHungProbe(t *testing.T) {
 	relay := newRelayFake(t, "hung", true)
 	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
@@ -84,7 +84,7 @@ func TestSettingsWriteNeverWaitsOnAHungProbe(t *testing.T) {
 	}()
 	time.Sleep(10 * time.Millisecond)
 	if _, took := pollUI(t, s); took > 50*time.Millisecond {
-		t.Fatalf("GET /v1/sc5000/ui during a settings write took %v", took)
+		t.Fatalf("GET /v1/enginex/ui during a settings write took %v", took)
 	}
 	select {
 	case took := <-done:

@@ -81,7 +81,7 @@ func TestStemsSourceRecordsUnderTrackProviderNotCurrentBrowserScope(t *testing.T
 	spTrack := providers.Track{ID: "sp123", Title: "Spotify Song", Artist: "DJ", Provider: "spotify"}
 	tid := s.tidal.addTrack(trackRef{track: spTrack, session: "sp-sess"})
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/sc5000/stems/source?id="+strconv.FormatInt(tid, 10), nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/enginex/stems/source?id="+strconv.FormatInt(tid, 10), nil)
 	req.RemoteAddr = "127.0.0.1:41000"
 	w := httptest.NewRecorder()
 	s.ServeHTTP(w, req)
@@ -107,7 +107,7 @@ func TestStemsSourceRecordsUnderTrackProviderNotCurrentBrowserScope(t *testing.T
 		track:   providers.Track{ID: "sp456", Title: "NetEase Session Song", Artist: "DJ", Provider: "spotify"},
 		session: "ne-sess",
 	})
-	req2 := httptest.NewRequest(http.MethodGet, "/v1/sc5000/stems/source?id="+strconv.FormatInt(neTid, 10), nil)
+	req2 := httptest.NewRequest(http.MethodGet, "/v1/enginex/stems/source?id="+strconv.FormatInt(neTid, 10), nil)
 	req2.RemoteAddr = "127.0.0.1:41000"
 	w2 := httptest.NewRecorder()
 	s.ServeHTTP(w2, req2)

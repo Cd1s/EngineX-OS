@@ -784,7 +784,7 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	v.DeckClock = s.deckClockWanted(now)
 	v.USBPreparing = s.usbPreparingActive(now)
-	if r.Method == http.MethodGet && r.URL.Path == "/v1/sc5000/ui" {
+	if r.Method == http.MethodGet && r.URL.Path == "/v1/enginex/ui" {
 		body, err := json.Marshal(struct {
 			uiSettings
 			AccessCode string `json:"accessCode"`

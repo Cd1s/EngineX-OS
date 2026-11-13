@@ -1,7 +1,7 @@
 package webui
 
 // Relocate Missing Tracks (#74): POST /api/relocate (console login) and
-// POST /v1/sc5000/relocate (the deck itself). A request that does not say
+// POST /v1/enginex/relocate (the deck itself). A request that does not say
 // dryRun:false only previews; applying backs m.db up first (enginedb.Relocate).
 
 import (

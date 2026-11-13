@@ -86,7 +86,7 @@ func TestBeatportPhoneLoginBrowseAndPlay(t *testing.T) {
 	srv := httptest.NewServer(ui)
 	defer srv.Close()
 
-	resp, err := http.Post(srv.URL+"/v1/sc5000/login?provider=beatport", "", nil)
+	resp, err := http.Post(srv.URL+"/v1/enginex/login?provider=beatport", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,14 +102,14 @@ func TestBeatportPhoneLoginBrowseAndPlay(t *testing.T) {
 	if !strings.Contains(string(body), "Connected") {
 		t.Fatalf("phone page: %s", body)
 	}
-	if !strings.Contains(string(tidalGet(t, srv.URL, "/v1/sc5000/login?provider=beatport", 200, nil)), `"status":"done"`) {
+	if !strings.Contains(string(tidalGet(t, srv.URL, "/v1/enginex/login?provider=beatport", 200, nil)), `"status":"done"`) {
 		t.Fatal("deck login not done")
 	}
 	if info, err := os.Stat(filepath.Join(state, "beatport-owner.json")); err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatal(info, err)
 	}
 
-	if resp, err = http.Post(srv.URL+"/v1/sc5000/ui?scope=beatport", "", nil); err != nil {
+	if resp, err = http.Post(srv.URL+"/v1/enginex/ui?scope=beatport", "", nil); err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
@@ -173,7 +173,7 @@ func TestRelayDeliversABeatportToken(t *testing.T) {
 	ui := New(Config{AccessToken: "c", UIDir: t.TempDir(), StateDir: state, RelayURL: relay.URL}, nil)
 	srv := httptest.NewServer(ui)
 	defer srv.Close()
-	resp, err := http.Post(srv.URL+"/v1/sc5000/login?provider=beatport", "", nil)
+	resp, err := http.Post(srv.URL+"/v1/enginex/login?provider=beatport", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +181,7 @@ func TestRelayDeliversABeatportToken(t *testing.T) {
 	if !strings.HasPrefix(ui.logins["beatport"].Target, relay.URL+"/m/beatport?t=") {
 		t.Fatalf("%+v", ui.logins["beatport"])
 	}
-	if !strings.Contains(string(tidalGet(t, srv.URL, "/v1/sc5000/login?provider=beatport", 200, nil)), `"status":"done"`) {
+	if !strings.Contains(string(tidalGet(t, srv.URL, "/v1/enginex/login?provider=beatport", 200, nil)), `"status":"done"`) {
 		t.Fatal("relay login not collected")
 	}
 	if p := ui.ownerBeatport(); p == nil || p.Token().Refresh != "r" {

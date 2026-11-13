@@ -59,7 +59,7 @@ func (s *Server) relaySettings() (relay, password string) {
 }
 
 // relayStatusView is what the status handlers show. It never waits on the network: Engine's
-// QML polls /v1/sc5000/ui every 3 s on its GUI thread, and an unreachable relay held that
+// QML polls /v1/enginex/ui every 3 s on its GUI thread, and an unreachable relay held that
 // request for up to 1.5 s (BH-GC2-12). The probes run in refreshRelayStatus, in the
 // background; their answers are in stems-lan.json (and in memory when it cannot be written).
 func (s *Server) relayStatusView() relayConfigStatus {
@@ -227,7 +227,7 @@ var (
 )
 
 // scheduleLANStemsProbe asynchronously discovers or re-checks a zero-config LAN
-// Stems renderer without blocking Engine QML's 3-second /v1/sc5000/ui poll
+// Stems renderer without blocking Engine QML's 3-second /v1/enginex/ui poll
 // (BH2-A9-1). It writes stems-lan.json only on a real state transition, keeping
 // X-UI-Digest stable across steady-state polls.
 func (s *Server) scheduleLANStemsProbe(saved *stems.LANState) {

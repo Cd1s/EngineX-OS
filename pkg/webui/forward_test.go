@@ -45,7 +45,7 @@ func TestRemoteConsoleForwardHasNoGateway(t *testing.T) {
 		}
 		return resp.StatusCode, b.String()
 	}
-	for _, p := range []string{"/v1/sc5000/ui", "//v1/sc5000/ui", "/v1/../v1/sc5000/ui", "/%76%31/sc5000/ui", "/v1", "/au/oauth2/token", "/v1/sc5000/boot"} {
+	for _, p := range []string{"/v1/enginex/ui", "//v1/enginex/ui", "/v1/../v1/enginex/ui", "/%76%31/sc5000/ui", "/v1", "/au/oauth2/token", "/v1/enginex/boot"} {
 		status, body := get(forward.URL, p, nil)
 		if status != http.StatusNotFound || strings.Contains(body, code) {
 			t.Fatalf("forwarded GET %s: %d %q, want 404 without the access code", p, status, body)
@@ -61,11 +61,11 @@ func TestRemoteConsoleForwardHasNoGateway(t *testing.T) {
 	// A tunnel set up to reach the main listener: the edge's headers mark it as from outside.
 	main := httptest.NewServer(s)
 	defer main.Close()
-	if status, body := get(main.URL, "/v1/sc5000/ui", nil); status != http.StatusOK || !strings.Contains(body, code) {
+	if status, body := get(main.URL, "/v1/enginex/ui", nil); status != http.StatusOK || !strings.Contains(body, code) {
 		t.Fatalf("Engine's own request to the gateway: %d", status)
 	}
 	for _, h := range []string{"Cf-Connecting-Ip", "Cf-Ray", "Cdn-Loop"} {
-		if status, body := get(main.URL, "/v1/sc5000/ui", map[string]string{h: "x"}); status != http.StatusForbidden || strings.Contains(body, code) {
+		if status, body := get(main.URL, "/v1/enginex/ui", map[string]string{h: "x"}); status != http.StatusForbidden || strings.Contains(body, code) {
 			t.Fatalf("gateway request carrying %s: %d %q, want 403", h, status, body)
 		}
 	}

@@ -113,7 +113,7 @@ func TestTidalGatewayLoginAndHint(t *testing.T) {
 		t.Fatalf("deezer titles=%q", got)
 	}
 	for _, scope := range []string{"netease", "spotify"} {
-		resp, err := http.Post(srv.URL+"/v1/sc5000/ui?scope="+scope, "", nil)
+		resp, err := http.Post(srv.URL+"/v1/enginex/ui?scope="+scope, "", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -243,10 +243,10 @@ func TestTidalGatewayPlaylistStreamAndImport(t *testing.T) {
 		t.Fatal("stream body differs from download")
 	}
 	var src struct{ Path string }
-	if tidalGet(t, srv.URL, "/v1/sc5000/stems/source?id="+id, 200, &src); src.Path != file {
+	if tidalGet(t, srv.URL, "/v1/enginex/stems/source?id="+id, 200, &src); src.Path != file {
 		t.Fatalf("stems source %q, want %q", src.Path, file)
 	}
-	tidalGet(t, srv.URL, "/v1/sc5000/stems/source?id=999999", 404, nil)
+	tidalGet(t, srv.URL, "/v1/enginex/stems/source?id=999999", 404, nil)
 	// The stemmed row heads netease's own Stems list and no other service's.
 	var stemLists tidalList
 	tidalGet(t, srv.URL, "/v1/users/1/favorites/playlists", 200, &stemLists)
@@ -262,7 +262,7 @@ func TestTidalGatewayPlaylistStreamAndImport(t *testing.T) {
 	if len(ui.stemmed("deezer")) != 0 || len(ui.stemmed("spotify")) != 0 {
 		t.Fatal("stems list leaked into another service")
 	}
-	if tidalGet(t, srv.URL, "/v1/sc5000/stems/local?id="+id, 200, &src); src.Path != file {
+	if tidalGet(t, srv.URL, "/v1/enginex/stems/local?id="+id, 200, &src); src.Path != file {
 		t.Fatalf("stems local %q", src.Path)
 	}
 	r, _ := http.NewRequest("GET", stream, nil)
@@ -328,7 +328,7 @@ func TestTidalGatewayPlaylistStreamAndImport(t *testing.T) {
 	ui.mu.Lock()
 	ui.sessions["deezer-search"] = &Session{ID: "deezer-search", Provider: "deezer", Ready: true, p: &providers.Deezer{BaseURL: ui.tidal.catalog.BaseURL, UserID: "fixture"}}
 	ui.mu.Unlock()
-	if resp, err := http.Post(srv.URL+"/v1/sc5000/ui?scope=deezer", "", nil); err != nil {
+	if resp, err := http.Post(srv.URL+"/v1/enginex/ui?scope=deezer", "", nil); err != nil {
 		t.Fatal(err)
 	} else {
 		resp.Body.Close()
@@ -411,7 +411,7 @@ func TestTidalScopeGoesToTidalsOwnServers(t *testing.T) {
 	ui := New(Config{AccessToken: "c", UIDir: t.TempDir(), StateDir: t.TempDir(), TidalAPIURL: api.URL, TidalAuthURL: auth.URL}, nil)
 	srv := httptest.NewServer(ui)
 	defer srv.Close()
-	if r, err := http.Post(srv.URL+"/v1/sc5000/ui?scope=tidal", "", nil); err != nil || r.StatusCode != 200 {
+	if r, err := http.Post(srv.URL+"/v1/enginex/ui?scope=tidal", "", nil); err != nil || r.StatusCode != 200 {
 		t.Fatal(err)
 	}
 	req, _ := http.NewRequest("GET", srv.URL+"/v1//users/1/playlists/?countryCode=US", nil)
@@ -431,11 +431,11 @@ func TestTidalScopeGoesToTidalsOwnServers(t *testing.T) {
 	}
 	// The deck's own settings stay local, and other services stop going upstream.
 	var settings struct{ Scope string }
-	tidalGet(t, srv.URL, "/v1/sc5000/ui", 200, &settings)
+	tidalGet(t, srv.URL, "/v1/enginex/ui", 200, &settings)
 	if settings.Scope != "tidal" || len(got) != 2 {
 		t.Fatalf("%+v %q", settings, got)
 	}
-	if r, err := http.Post(srv.URL+"/v1/sc5000/ui?scope=netease", "", nil); err != nil || r.StatusCode != 200 {
+	if r, err := http.Post(srv.URL+"/v1/enginex/ui?scope=netease", "", nil); err != nil || r.StatusCode != 200 {
 		t.Fatal(err)
 	}
 	tidalGet(t, srv.URL, "/v1/genres", 200, nil)
@@ -561,7 +561,7 @@ func TestArtServesAKnownRowOnly(t *testing.T) {
 	ui := New(Config{AccessToken: "c", UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
 	srv := httptest.NewServer(ui)
 	defer srv.Close()
-	resp, err := http.Get(srv.URL + "/v1/sc5000/art?song=Unknown&artist=Nobody")
+	resp, err := http.Get(srv.URL + "/v1/enginex/art?song=Unknown&artist=Nobody")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -571,7 +571,7 @@ func TestArtServesAKnownRowOnly(t *testing.T) {
 	}
 	// Only https artwork is ever fetched.
 	ui.tidal.addTrack(trackRef{track: providers.Track{ID: "1", Title: "S", Artist: "A", Provider: "deezer", CoverURL: "http://169.254.169.254/x"}})
-	resp, err = http.Get(srv.URL + "/v1/sc5000/art?song=S&artist=A")
+	resp, err = http.Get(srv.URL + "/v1/enginex/art?song=S&artist=A")
 	if err != nil {
 		t.Fatal(err)
 	}

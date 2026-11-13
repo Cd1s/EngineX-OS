@@ -34,7 +34,7 @@ func TestHotCuesGetAndPost(t *testing.T) {
 	client := srv.Client()
 
 	// 1. Initial GET on an empty drive: should return 8 default slots & palette
-	getURL := srv.URL + "/v1/sc5000/hotcues?drive=" + driveName + "&trackId=123"
+	getURL := srv.URL + "/v1/enginex/hotcues?drive=" + driveName + "&trackId=123"
 	resp, err := client.Get(getURL)
 	if err != nil {
 		t.Fatal(err)
@@ -72,7 +72,7 @@ func TestHotCuesGetAndPost(t *testing.T) {
 		"color":      "#E53935",
 		"positionMs": pos,
 	})
-	postResp, err := client.Post(srv.URL+"/v1/sc5000/hotcues", "application/json", bytes.NewReader(postBody))
+	postResp, err := client.Post(srv.URL+"/v1/enginex/hotcues", "application/json", bytes.NewReader(postBody))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestHotCuesGetAndPost(t *testing.T) {
 		"label":   "Break",
 		"color":   "#00ACC1",
 	})
-	postResp2, err := client.Post(srv.URL+"/v1/sc5000/hotcues", "application/json", bytes.NewReader(postBody2))
+	postResp2, err := client.Post(srv.URL+"/v1/enginex/hotcues", "application/json", bytes.NewReader(postBody2))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +169,7 @@ func TestHotCuesValidationAndSecurity(t *testing.T) {
 		"drive\\escape",
 	}
 	for _, badDrive := range traversals {
-		resp, _ := client.Get(srv.URL + "/v1/sc5000/hotcues?drive=" + badDrive + "&trackId=1")
+		resp, _ := client.Get(srv.URL + "/v1/enginex/hotcues?drive=" + badDrive + "&trackId=1")
 		if resp.StatusCode != 400 {
 			t.Errorf("expected 400 for GET traversal %q, got %d", badDrive, resp.StatusCode)
 		}
@@ -182,7 +182,7 @@ func TestHotCuesValidationAndSecurity(t *testing.T) {
 			"label":   "Bad",
 			"color":   "#E53935",
 		})
-		pResp, _ := client.Post(srv.URL+"/v1/sc5000/hotcues", "application/json", bytes.NewReader(postBody))
+		pResp, _ := client.Post(srv.URL+"/v1/enginex/hotcues", "application/json", bytes.NewReader(postBody))
 		if pResp.StatusCode != 400 {
 			t.Errorf("expected 400 for POST traversal %q, got %d", badDrive, pResp.StatusCode)
 		}
@@ -198,7 +198,7 @@ func TestHotCuesValidationAndSecurity(t *testing.T) {
 			"label":   "Bad",
 			"color":   "#E53935",
 		})
-		pResp, _ := client.Post(srv.URL+"/v1/sc5000/hotcues", "application/json", bytes.NewReader(postBody))
+		pResp, _ := client.Post(srv.URL+"/v1/enginex/hotcues", "application/json", bytes.NewReader(postBody))
 		if pResp.StatusCode != 400 {
 			t.Errorf("expected 400 for index %d, got %d", badIndex, pResp.StatusCode)
 		}
@@ -214,7 +214,7 @@ func TestHotCuesValidationAndSecurity(t *testing.T) {
 			"label":   "Bad",
 			"color":   badColor,
 		})
-		pResp, _ := client.Post(srv.URL+"/v1/sc5000/hotcues", "application/json", bytes.NewReader(postBody))
+		pResp, _ := client.Post(srv.URL+"/v1/enginex/hotcues", "application/json", bytes.NewReader(postBody))
 		if pResp.StatusCode != 400 {
 			t.Errorf("expected 400 for color %q, got %d", badColor, pResp.StatusCode)
 		}
@@ -230,7 +230,7 @@ func TestHotCuesValidationAndSecurity(t *testing.T) {
 			"label":   "Bad",
 			"color":   "#E53935",
 		})
-		pResp, _ := client.Post(srv.URL+"/v1/sc5000/hotcues", "application/json", bytes.NewReader(postBody))
+		pResp, _ := client.Post(srv.URL+"/v1/enginex/hotcues", "application/json", bytes.NewReader(postBody))
 		if pResp.StatusCode != 400 {
 			t.Errorf("expected 400 for trackId %v, got %d", badTrackID, pResp.StatusCode)
 		}
@@ -295,7 +295,7 @@ func TestHotCuesSyncWithMDB(t *testing.T) {
 		"label":   "Chorus",
 		"color":   "#FB8C00",
 	})
-	resp, err := client.Post(srv.URL+"/v1/sc5000/hotcues", "application/json", bytes.NewReader(postBody))
+	resp, err := client.Post(srv.URL+"/v1/enginex/hotcues", "application/json", bytes.NewReader(postBody))
 	if err != nil {
 		t.Fatal(err)
 	}

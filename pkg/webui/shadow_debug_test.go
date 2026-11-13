@@ -30,11 +30,11 @@ func TestShadowDebugSnapshotSurvivesHeartbeat(t *testing.T) {
 	ready, resume, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	w := &shadowSnapshotWriter{httptest.NewRecorder(), ready, resume}
 	go func() {
-		s.shadowDebugGet(w, httptest.NewRequest("GET", "/v1/sc5000/debug/shadow", nil))
+		s.shadowDebugGet(w, httptest.NewRequest("GET", "/v1/enginex/debug/shadow", nil))
 		close(done)
 	}()
 	<-ready // the snapshot is built and unlocked; JSON encoding has not begun
-	s.decksAlive(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/sc5000/decks/alive", nil))
+	s.decksAlive(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/enginex/decks/alive", nil))
 	close(resume)
 	<-done
 	var out struct{ Own []deckState }

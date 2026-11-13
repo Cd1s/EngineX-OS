@@ -106,7 +106,7 @@ CAPPY
             --listen 127.0.0.1:8080 --deemixd "" --relay-url "" --disable-guard > "$log_file" 2>&1 &
         SS_PID=$!
         for _ in $(seq 1 60); do
-            if python3 -I -c 'import urllib.request,sys; r=urllib.request.urlopen("http://127.0.0.1:8080/v1/sc5000/ui",timeout=0.5); sys.exit(0 if r.status==200 else 1)' 2>/dev/null; then
+            if python3 -I -c 'import urllib.request,sys; r=urllib.request.urlopen("http://127.0.0.1:8080/v1/enginex/ui",timeout=0.5); sys.exit(0 if r.status==200 else 1)' 2>/dev/null; then
                 return 0
             fi
             sleep 0.1

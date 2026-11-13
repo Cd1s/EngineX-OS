@@ -41,11 +41,11 @@ BOOT_READY = r'''
                                     request = null
                                     if (ack.status === 200 || ack.status === 204) sent = true
                                 }
-                                ack.open("POST", "http://127.0.0.1:8080/v1/sc5000/boot/ready", true)
+                                ack.open("POST", "http://127.0.0.1:8080/v1/enginex/boot/ready", true)
                                 ack.setRequestHeader("Content-Type", "application/json")
                                 ack.send(JSON.stringify({token: token}))
                             }
-                            x.open("GET", "http://127.0.0.1:8080/v1/sc5000/boot", true)
+                            x.open("GET", "http://127.0.0.1:8080/v1/enginex/boot", true)
                             x.send()
                         }
                     }
@@ -481,7 +481,7 @@ SERVICES_MAIN = """
         }
     }
 
-	// SC5000 UI mod: settings owned by stream-sync (see pkg/webui/ui_settings.go).
+	// EngineX UI mod: settings owned by stream-sync (see pkg/webui/ui_settings.go).
 	property string scVersion: ""
 	property string scLang: "@LANG@"
 	property string scWave: "denon"
@@ -603,7 +603,7 @@ SERVICES_MAIN = """
 		if (m.waveformCount.currentIndex !== w) m.waveformCount.setCurrentIndex(w)
 		return true
 	}
-	property string scShadowMode: "auto" // from /v1/sc5000/ui: auto (each slot by its source), engine or cdj (every source down one path)
+	property string scShadowMode: "auto" // from /v1/enginex/ui: auto (each slot by its source), engine or cdj (every source down one path)
 	property int scShadowLineMask: 0 // Engine mode on a console: bit N = a CDJ is on Deck N's Line In, where only the display renderer draws its waveform
 	property bool scShadowDisplayOnly: true // the /shadow response is authoritative; missing means the safe default. What a deck without its own displayOnly follows
 	property int scShadowEngineMask: 0 // per slot: bit N = Deck N goes through Engine (load, seek, speed); clear = the display renderer draws it and Engine is left alone
@@ -716,7 +716,7 @@ SERVICES_MAIN = """
 		const req = {key: key, busy: true, started: Date.now(), next: 0, tries: old && old.key === key ? old.tries + 1 : 1}
 		scShadowDisplayRequests[d] = req
 		const x = new XMLHttpRequest()
-		x.open("GET", "http://127.0.0.1:8080/v1/sc5000/shadow/display?deck=" + d + "&key=" + encodeURIComponent(key))
+		x.open("GET", "http://127.0.0.1:8080/v1/enginex/shadow/display?deck=" + d + "&key=" + encodeURIComponent(key))
 		x.onreadystatechange = function() {
 			if (x.readyState !== 4 || root.scShadowDisplayRequests[d] !== req) return
 			req.busy = false
@@ -918,7 +918,7 @@ SERVICES_MAIN = """
 		for (const [k] of scViewPrefs) s[k] = typeof root[k] === "boolean" ? root[k] : String(root[k])
 		return s
 	}
-	// EngineX settings a view keeps too: [snapshot key = root property, /v1/sc5000/ui query].
+	// EngineX settings a view keeps too: [snapshot key = root property, /v1/enginex/ui query].
 	readonly property var scViewPrefs: [["scWave", "waveform"], ["scUIScale", "uiScale"],
 		["scTracklistWaveform", "tracklistWaveform"], ["scDualColumn", "browserDualColumn"], ["scCueCountdown", "cueCountdown"], ["scBeatJumpPads", "beatJumpPads"], ["scSwapLoopOrder", "swapLoopOrder"]]
 	function scViewApply(s) {
@@ -951,7 +951,7 @@ SERVICES_MAIN = """
 	}
 	function scViewStore() {
 		const x = new XMLHttpRequest()
-		x.open("POST", "http://127.0.0.1:8080/v1/sc5000/views")
+		x.open("POST", "http://127.0.0.1:8080/v1/enginex/views")
 		x.send(JSON.stringify({active: scViewActive, views: scViews}))
 	}
 	function scViewSave() {
@@ -976,7 +976,7 @@ SERVICES_MAIN = """
 			if (!root.scViewsRead) {
 				root.scViewsRead = true
 				const x = new XMLHttpRequest()
-				x.open("GET", "http://127.0.0.1:8080/v1/sc5000/views")
+				x.open("GET", "http://127.0.0.1:8080/v1/enginex/views")
 				x.onreadystatechange = function() {
 					if (x.readyState !== 4) return
 					try {
@@ -1042,7 +1042,7 @@ SERVICES_MAIN = """
 		else if (j !== scViewLast) scViewSave()
 	}
 	// #49 shadow decks: post this player's decks for the other EngineX player and
-	// drive the decks it does not play from GET /v1/sc5000/shadow (a CDJ or the
+	// drive the decks it does not play from GET /v1/enginex/shadow (a CDJ or the
 	// other player); the hook keeps them silent. Units measured on a JP07:
 	// TrackPosition/TrackLength are track samples, Speed is the fader (0.5 = 0 %,
 	// 0..1 = the SpeedRange), Play is the play state. A seek flushes Engine's
@@ -1275,7 +1275,7 @@ SERVICES_MAIN = """
 		if (!anyPlaying && sig === scDeckClockSig && now - scDeckClockPostAt < 1000) return
 		scDeckClockSig = sig
 		scDeckClockPostAt = now
-		x.open("POST", "http://127.0.0.1:8080/v1/sc5000/clock")
+		x.open("POST", "http://127.0.0.1:8080/v1/enginex/clock")
 		x.send(JSON.stringify(out))
 	}
 	// 25 Hz around every edge and a CUE preview, 12.5 Hz in steady playback (the
@@ -1688,7 +1688,7 @@ SERVICES_MAIN = """
 		// Nothing the peer shows changed: ping instead of serialising the decks again
 		// (stream-sync keeps them live and extrapolated). Full post at least every 5 s.
 		if (!edge && !scShadowPostFull && now - scShadowFullAt < 5000 && own.length === scShadowSent.length) {
-			post.open("POST", "http://127.0.0.1:8080/v1/sc5000/decks/alive")
+			post.open("POST", "http://127.0.0.1:8080/v1/enginex/decks/alive")
 			post.send()
 			return
 		}
@@ -1700,7 +1700,7 @@ SERVICES_MAIN = """
 		}
 		scShadowSent.length = own.length
 		scShadowFullAt = now; scShadowPostFull = false
-		post.open("POST", "http://127.0.0.1:8080/v1/sc5000/decks")
+		post.open("POST", "http://127.0.0.1:8080/v1/enginex/decks")
 		post.send(JSON.stringify(own))
 	}
 	// One request at a time: Go holds it until the other player's state changes
@@ -1767,7 +1767,7 @@ SERVICES_MAIN = """
 			}
 		}
 		const scLineQuery = scLines ? "&line=" + scLines.join(",") : ""
-		x.open("GET", "http://127.0.0.1:8080/v1/sc5000/shadow?ver=" + scShadowVer + (scShadowIdle ? "&idle=1" : "") + scLineQuery)
+		x.open("GET", "http://127.0.0.1:8080/v1/enginex/shadow?ver=" + scShadowVer + (scShadowIdle ? "&idle=1" : "") + scLineQuery)
 		x.send()
 	}
 	// The Engine slots whose track is still on its way: stream-sync copies it, or
@@ -2531,7 +2531,7 @@ SERVICES_MAIN = """
 		if (!scShadowDbgBuf.length || now - scShadowDbgAt < 500) return
 		scShadowDbgAt = now
 		const x = new XMLHttpRequest()
-		x.open("POST", "http://127.0.0.1:8080/v1/sc5000/debug/shadow")
+		x.open("POST", "http://127.0.0.1:8080/v1/enginex/debug/shadow")
 		x.send(JSON.stringify(scShadowDbgBuf))
 		scShadowDbgBuf = []
 	}
@@ -2680,7 +2680,7 @@ SERVICES_MAIN = """
 		prompt.finished.connect(function(r) { if (r === Prompt.AcceptRole) scCall(query, function() { Planck.quit(QuitReasons.AnalyticsChange, false) }) })
 	}
 	property string scUpdateRepo: "Cd1s/EngineX-OS"
-	// #79: only GET /v1/sc5000/ui (loopback) carries these; shown in Settings -> About.
+	// #79: only GET /v1/enginex/ui (loopback) carries these; shown in Settings -> About.
 	property string scConsoleUrl: ""
 	property string scAccessCode: ""
 	// #148: home enginex-stemsd / remote Stems status from stems-lan.json.
@@ -2837,7 +2837,7 @@ SERVICES_MAIN = """
 	}
 	function scFetchUpdate(apply) {
 		const x = new XMLHttpRequest()
-		x.open("GET", "http://127.0.0.1:8080/v1/sc5000/update" + (apply ? "?apply=1" : ""))
+		x.open("GET", "http://127.0.0.1:8080/v1/enginex/update" + (apply ? "?apply=1" : ""))
 		x.onreadystatechange = function() {
 			if (x.readyState !== 4) return
 			if (x.status !== 200) {
@@ -2939,7 +2939,7 @@ SERVICES_MAIN = """
 		if (id === "tidal") return "qrc:/@ICONS@/SourceTIDALColored.png"
 		if (id === "soundcloud") return "qrc:/@ICONS@/SourceSoundCloudColored.png"
 		if (id === "beatport") return "qrc:/@ICONS@/SourceBeatport%20LINKColored.png"
-		return "file:///data/sc5000-custom/ui/icons/" + id + ".png"
+		return "file:///data/enginex/ui/icons/" + id + ".png"
 	}
 	// The gateway appends " [128 BPM 8A]" to a row's label; see labelWithBPM. A value
 	// Engine analysed itself always wins, so these only fill empty columns.
@@ -2955,12 +2955,12 @@ SERVICES_MAIN = """
 		if (!t("SongLoaded").state) return p
 		const title = scPlainTitle(t("SongName").string || "")
 		if (title === "") return p
-		return "http://127.0.0.1:8080/v1/sc5000/art?song=" + encodeURIComponent(title) + "&artist=" + encodeURIComponent(t("ArtistName").string || "")
+		return "http://127.0.0.1:8080/v1/enginex/art?song=" + encodeURIComponent(title) + "&artist=" + encodeURIComponent(t("ArtistName").string || "")
 	}
 	function scDeckArtPending(deck, path, url) {
 		if (path !== "" && path !== "image://streaming/") return false
 		const loaded = root.scTr("/Engine/Deck" + deck + "/Track/SongLoaded")
-		return !!loaded && loaded.state && String(url).indexOf("http://127.0.0.1:8080/v1/sc5000/art?") !== 0
+		return !!loaded && loaded.state && String(url).indexOf("http://127.0.0.1:8080/v1/enginex/art?") !== 0
 	}
 	property int scMidiTargetDeck: 3
 	property int scMidiLastAckSeq: 0
@@ -3192,7 +3192,7 @@ SERVICES_MAIN = """
 	function scPostTimeZone(tz) {
 		if (scIsBadTimeZone(tz)) return
 		const x = new XMLHttpRequest()
-		x.open("POST", "http://127.0.0.1:8080/v1/sc5000/ui?timezone=" + encodeURIComponent(tz))
+		x.open("POST", "http://127.0.0.1:8080/v1/enginex/ui?timezone=" + encodeURIComponent(tz))
 		x.onreadystatechange = function() {
 			if (x.readyState !== 4) return
 			if (x.status === 200 && root.scPendingTimeZone === tz) root.scPendingTimeZone = ""
@@ -3264,7 +3264,7 @@ SERVICES_MAIN = """
 			}
 			scUiPollAt = Date.now()
 			scUiPollScope = scScopePending ? "" : scScope
-			scUiPoll.open("GET", "http://127.0.0.1:8080/v1/sc5000/ui")
+			scUiPoll.open("GET", "http://127.0.0.1:8080/v1/enginex/ui")
 			scUiPoll.send()
 			return
 		}
@@ -3273,7 +3273,7 @@ SERVICES_MAIN = """
 		const scopeChange = query && query.indexOf("scope=") === 0
 		if (scopeChange) scScopePending++
 		const x = new XMLHttpRequest()
-		x.open(query ? "POST" : "GET", "http://127.0.0.1:8080/v1/sc5000/ui" + (query ? "?" + query : ""))
+		x.open(query ? "POST" : "GET", "http://127.0.0.1:8080/v1/enginex/ui" + (query ? "?" + query : ""))
 		x.onreadystatechange = function() {
 			if (x.readyState !== 4) return
 			if (scopeChange) scScopePending--
@@ -3484,7 +3484,7 @@ SERVICES_MAIN = """
 			if (key === scLastBroadcastTrack) return
 			scLastBroadcastTrack = key
 			const x = new XMLHttpRequest()
-			x.open("POST", "http://127.0.0.1:8080/v1/sc5000/broadcast/metadata?artist=" + encodeURIComponent(artist) + "&title=" + encodeURIComponent(title))
+			x.open("POST", "http://127.0.0.1:8080/v1/enginex/broadcast/metadata?artist=" + encodeURIComponent(artist) + "&title=" + encodeURIComponent(title))
 			x.send()
 			return
 		}
@@ -3537,7 +3537,7 @@ SERVICES_MAIN = """
 	property int scLoginSerial: 0
 	function scLoginRequest(method, id, done) {
 		const x = new XMLHttpRequest()
-		x.open(method, "http://127.0.0.1:8080/v1/sc5000/login?provider=" + id)
+		x.open(method, "http://127.0.0.1:8080/v1/enginex/login?provider=" + id)
 		x.onreadystatechange = function() {
 			if (x.readyState !== 4 || scLogin !== id) return
 			if (x.status === 200) done(JSON.parse(x.responseText))
@@ -3650,7 +3650,7 @@ SERVICES_MAIN = """
 		const deck = root.scDeckList().slice().reverse().find(d => !root.scDeckLocked(d) && !Planck.getProperty("/Engine/Deck%1/PlayState".arg(d)).translator.state)
 		if (!deck) return true // all decks playing: never interrupt playback
 		const x = new XMLHttpRequest()
-		x.open("GET", "http://127.0.0.1:8080/v1/sc5000/stems/source?id=" + m[1])
+		x.open("GET", "http://127.0.0.1:8080/v1/enginex/stems/source?id=" + m[1])
 		x.onreadystatechange = function() {
 			if (x.readyState !== 4 || x.status !== 200) return
 			if (Planck.getProperty("/Engine/Deck%1/PlayState".arg(deck)).translator.state) return // started playing while we waited
@@ -3692,7 +3692,7 @@ SERVICES_MAIN = """
 		onTriggered: {
 			if (tries-- <= 0) { stop(); return }
 			const x = new XMLHttpRequest()
-			x.open("GET", "http://127.0.0.1:8080/v1/sc5000/stems/track-id?path=" + encodeURIComponent(path))
+			x.open("GET", "http://127.0.0.1:8080/v1/enginex/stems/track-id?path=" + encodeURIComponent(path))
 			x.onreadystatechange = function() {
 				if (x.readyState !== 4 || x.status !== 200) return
 				const r = JSON.parse(x.responseText)
@@ -3748,7 +3748,7 @@ SERVICES_MAIN = """
 		const m = /^streaming:\\/\\/TIDAL\\/Track\\/(\\d+)$/.exec(uri)
 		if (!m) return
 		const x = new XMLHttpRequest()
-		x.open("GET", "http://127.0.0.1:8080/v1/sc5000/stems/local?id=" + m[1])
+		x.open("GET", "http://127.0.0.1:8080/v1/enginex/stems/local?id=" + m[1])
 		x.onreadystatechange = function() {
 			if (x.readyState !== 4 || x.status !== 200) return
 			if (Planck.getProperty("/Engine/Deck%1/PlayState".arg(deck)).translator.state) return
@@ -3835,7 +3835,7 @@ LOGIN_DIALOG = """
 						cache: false
 						opacity: parent.renew ? 0.08 : 1
 						visible: root.scLoginSerial > 0
-						source: root.scLogin && root.scLoginSerial > 0 ? "http://127.0.0.1:8080/v1/sc5000/login/qr?provider=" + root.scLogin + "&n=" + root.scLoginSerial : ""
+						source: root.scLogin && root.scLoginSerial > 0 ? "http://127.0.0.1:8080/v1/enginex/login/qr?provider=" + root.scLogin + "&n=" + root.scLoginSerial : ""
 					}
 					Text {
 						anchors.centerIn: parent
@@ -6107,7 +6107,7 @@ def edits(dev: bool):
                 if (req.readyState !== 4 || next !== scLightingChoice) return
                 if (req.status !== 200 && !retry) scLightingRetry.restart()
             }
-            req.open("POST", "http://127.0.0.1:8080/v1/sc5000/ui?engineLighting=" + (next ? "1" : "0"))
+            req.open("POST", "http://127.0.0.1:8080/v1/enginex/ui?engineLighting=" + (next ? "1" : "0"))
             req.send()
         }
         Timer { id: scLightingRetry; interval: 1500; onTriggered: scSaveLighting(true) }
@@ -6395,7 +6395,7 @@ def edits(dev: bool):
         v + "BrowseView/Components/Components/AlbumArt.qml": [(
             'source: row.modelData.albumArt ? row.modelData.albumArt : ""',
             'source: (!row.modelData.albumArt || row.modelData.albumArt === "image://streaming/") && row.streamingProviderName && root.scScope !== "tidal" && row.modelData.song'
-            ' ? "http://127.0.0.1:8080/v1/sc5000/art?song=" + encodeURIComponent(root.scPlainTitle(row.modelData.song)) + "&artist=" + encodeURIComponent(row.modelData.artist || "")'
+            ' ? "http://127.0.0.1:8080/v1/enginex/art?song=" + encodeURIComponent(root.scPlainTitle(row.modelData.song)) + "&artist=" + encodeURIComponent(row.modelData.artist || "")'
             ' : (row.modelData.albumArt ? row.modelData.albumArt : "")',
         ), (
             "asynchronous: true\n",
@@ -6546,7 +6546,7 @@ def edits(dev: bool):
                 "        if (!isStreamingProviderWithSort) return\n"
                 "        try {\n"
                 "            var scReq = new XMLHttpRequest()\n"
-                '            scReq.open("POST", "http://127.0.0.1:8080/v1/sc5000/ui", true)\n'
+                '            scReq.open("POST", "http://127.0.0.1:8080/v1/enginex/ui", true)\n'
                 '            scReq.setRequestHeader("Content-Type", "application/json")\n'
                 "            scReq.send(JSON.stringify({\n"
                 '                "streamSortRole": sortRole === "playOrder" ? "default" : sortRole,\n'
@@ -6637,7 +6637,7 @@ def edits(dev: bool):
             "                        if (cc && cc.isCurrentCollectionStreaming) {\n"
             "                            try {\n"
             "                                var scReq = new XMLHttpRequest()\n"
-            '                                scReq.open("POST", "http://127.0.0.1:8080/v1/sc5000/ui", true)\n'
+            '                                scReq.open("POST", "http://127.0.0.1:8080/v1/enginex/ui", true)\n'
             '                                scReq.setRequestHeader("Content-Type", "application/json")\n'
             "                                scReq.send(JSON.stringify({\n"
             '                                    "streamSortRole": modelData.role === "playOrder" ? "default" : modelData.role\n'
@@ -6661,7 +6661,7 @@ def edits(dev: bool):
             "                var willBeAsc = !sortViewModel.isAscending\n"
             "                try {\n"
             "                    var scReq = new XMLHttpRequest()\n"
-            '                    scReq.open("POST", "http://127.0.0.1:8080/v1/sc5000/ui", true)\n'
+            '                    scReq.open("POST", "http://127.0.0.1:8080/v1/enginex/ui", true)\n'
             '                    scReq.setRequestHeader("Content-Type", "application/json")\n'
             "                    scReq.send(JSON.stringify({\n"
             '                        "streamSortOrder": willBeAsc ? "asc" : "desc"\n'
@@ -7125,7 +7125,7 @@ def edits(dev: bool):
             '                    scGlobalConfig.scReverseJogRight = !!j.jogInvertRight\n'
             '                } catch (e) {}\n'
             '            }\n'
-            '            x.open("GET", "http://127.0.0.1:8080/v1/sc5000/ui")\n'
+            '            x.open("GET", "http://127.0.0.1:8080/v1/enginex/ui")\n'
             '            x.send()\n'
             '        }\n'
             '    }\n')]
@@ -7679,7 +7679,7 @@ def edits(dev: bool):
             "                }\n"
             "                messageBox.scFinishSelection(devicePath, seq, converted)\n"
             "            }\n"
-            '            xhr.open("GET", "http://127.0.0.1:8080/v1/sc5000/library-status?path=" + encodeURIComponent(devicePath))\n'
+            '            xhr.open("GET", "http://127.0.0.1:8080/v1/enginex/library-status?path=" + encodeURIComponent(devicePath))\n'
             "            xhr.send()\n"
             "        }\n"
             "    }\n"

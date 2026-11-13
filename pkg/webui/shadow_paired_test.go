@@ -93,7 +93,7 @@ func TestShadowPeerActiveLayer(t *testing.T) {
 			ver := s.shadow.ver
 			s.shadow.mu.Unlock()
 			active := func() []int {
-				role, decks := shadowGetJSON(t, srv.URL+"/v1/sc5000/shadow")
+				role, decks := shadowGetJSON(t, srv.URL+"/v1/enginex/shadow")
 				if role != "13" {
 					t.Fatalf("role %q", role)
 				}
@@ -133,7 +133,7 @@ func TestOrphanPairedViewIsNotPairedPlayer(t *testing.T) {
 	}
 	srv := httptest.NewServer(New(Config{UIDir: dir, StateDir: t.TempDir()}, nil))
 	defer srv.Close()
-	resp, err := http.Get(srv.URL + "/v1/sc5000/ui")
+	resp, err := http.Get(srv.URL + "/v1/enginex/ui")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -320,8 +320,8 @@ func (s *Server) prolinkPost(w http.ResponseWriter, r *http.Request) {
 	s.prolinkGet(w, r)
 }
 
-// prolinkToggle is POST /v1/sc5000/prolink?share=0|1, the same setting as
-// /v1/sc5000/ui?prolinkShare=.
+// prolinkToggle is POST /v1/enginex/prolink?share=0|1, the same setting as
+// /v1/enginex/ui?prolinkShare=.
 func (s *Server) prolinkToggle(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	if !q.Has("share") && !q.Has("export") {

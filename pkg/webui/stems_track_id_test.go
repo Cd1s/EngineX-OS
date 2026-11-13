@@ -30,13 +30,13 @@ func TestStemsTrackID(t *testing.T) {
 	srv := httptest.NewServer(New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil))
 	defer srv.Close()
 	var got struct{ TrackID int64 }
-	tidalGet(t, srv.URL, "/v1/sc5000/stems/track-id?path=%2Fdata%2Fsc5000-custom%2FStream%2Fnetease-1.flac", 200, &got)
+	tidalGet(t, srv.URL, "/v1/enginex/stems/track-id?path=%2Fdata%2Fsc5000-custom%2FStream%2Fnetease-1.flac", 200, &got)
 	if got.TrackID != 86 {
 		t.Fatalf("trackId %d, want newest 86", got.TrackID)
 	}
-	tidalGet(t, srv.URL, "/v1/sc5000/stems/track-id?path=%2Fx%2Fnone.flac", 200, &got)
+	tidalGet(t, srv.URL, "/v1/enginex/stems/track-id?path=%2Fx%2Fnone.flac", 200, &got)
 	if got.TrackID != 0 {
 		t.Fatalf("trackId %d, want 0", got.TrackID)
 	}
-	tidalGet(t, srv.URL, "/v1/sc5000/stems/track-id", 400, nil)
+	tidalGet(t, srv.URL, "/v1/enginex/stems/track-id", 400, nil)
 }
