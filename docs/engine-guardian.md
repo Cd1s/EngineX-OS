@@ -9,8 +9,8 @@ binary layouts come from section 7 of `re-report/ENGINE-5.0.4-ANALYSIS.md`.
 
 ```sh
 go test ./... -v
-GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o bin/sc5000-suite ./cmd/sc5000-suite
-bash -n rootfs-overlay/usr/local/bin/sc5000-debloat
+GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o bin/enginex-suite ./cmd/enginex-suite
+bash -n rootfs-overlay/usr/local/bin/enginex-debloat
 
 engine-guardian --heal-mount /media/USB
 engine-guardian --heal-mount /media/USB --max-sessions 50
@@ -89,7 +89,7 @@ Copy the overlay into a **writable staging root**, install the ARM binary as
 `usr/local/bin/engine-guardian`, then run:
 
 ```sh
-sh rootfs-overlay/usr/local/bin/sc5000-debloat --root /path/to/staging-root
+sh rootfs-overlay/usr/local/bin/enginex-debloat --root /path/to/staging-root
 ```
 
 This patches the original engine/prerequisite scripts, fixes `shift1`, disables
@@ -100,7 +100,7 @@ Persistent downloaded music should live under `/media/sc5000-sd-cache/Downloads`
 the vendor's remaining encryption/storage behavior is not replaced here.
 
 The overlay enables both systemd units through relative wants links. The engine
-drop-in runs runtime tuning before startup, and `sc5000-debloat.service` repeats
+drop-in runs runtime tuning before startup, and `enginex-debloat.service` repeats
 it after the vendor prerequisites. Runtime mode never rewrites the rootfs.
 Audio IRQs use CPU 0/FIFO 99, GPU CPU 1, USB/network CPU 2, and guardian runs with
 idle CPU/I/O scheduling on CPU 3. Missing hardware utilities are tolerated;
