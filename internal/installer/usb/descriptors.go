@@ -17,6 +17,7 @@ func parseConfiguration(data []byte) ([]Interface, error) {
 	var result []Interface
 	current := -1
 	counts := make(map[[2]uint8]uint8)
+	numbers := make(map[uint8]bool)
 	for offset := 0; offset < len(data); {
 		if len(data)-offset < 2 {
 			return bad()
@@ -36,6 +37,7 @@ func parseConfiguration(data []byte) ([]Interface, error) {
 				return bad()
 			}
 			counts[key] = d[4]
+			numbers[d[2]] = true
 			result = append(result, Interface{Number: d[2], Alternate: d[3], Class: d[5], Subclass: d[6], Protocol: d[7]})
 			current = len(result) - 1
 		case 5:
@@ -59,6 +61,9 @@ func parseConfiguration(data []byte) ([]Interface, error) {
 		if int(counts[[2]uint8{it.Number, it.Alternate}]) != len(it.Endpoints) {
 			return bad()
 		}
+	}
+	if len(numbers) != int(data[4]) {
+		return bad()
 	}
 	return result, nil
 }
