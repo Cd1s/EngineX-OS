@@ -8,8 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"net/http"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -69,6 +69,16 @@ func (s *Server) relayStatusView() relayConfigStatus {
 	v.LANStems = s.savedLANStems()
 	if st := s.relaySeen.Load(); st != nil && (v.LANStems == nil || st.Checked.After(v.LANStems.Checked)) {
 		v.LANStems = st
+	}
+	if relay == "" || password == "" || v.LANStems == nil || !v.LANStems.Online {
+		// The LAN renderer (#224 pairing, BH2-A9-1): scheduleLANStemsProbe only starts a
+		// goroutine, at most once per lanProbeEvery, never for the configured relay, and
+		// writes stems-lan.json only when its state changes. The request does not wait.
+		lanSaved := v.LANStems
+		if lanSaved != nil && relay != "" && strings.TrimRight(strings.TrimSpace(lanSaved.Endpoint), "/") == strings.TrimRight(strings.TrimSpace(relay), "/") {
+			lanSaved = nil
+		}
+		s.scheduleLANStemsProbe(lanSaved)
 	}
 	return v
 }
@@ -151,8 +161,8 @@ func (s *Server) relayRefreshLoop() {
 	}
 }
 
-// refreshRelayStatus runs every network probe behind relayStatusView, each with its own
-// once-per-30-s limit. Another probe joins with one more line here.
+// refreshRelayStatus runs the relay probe behind relayStatusView (once per 30 s at most).
+// The LAN probe is started from relayStatusView itself: it never blocks the request.
 func (s *Server) refreshRelayStatus() {
 	s.relayRefresh.mu.Lock()
 	gen := s.relayRefresh.gen
@@ -161,14 +171,6 @@ func (s *Server) refreshRelayStatus() {
 	saved := s.savedLANStems()
 	if st := s.probeRelayStems(relay, password, saved); st != nil {
 		s.storeRelaySeen(gen, st)
-	} else if relay == "" || password == "" || saved == nil || !saved.Online {
-		// The LAN renderer (#224 pairing, BH2-A9-1): at most once per 30 s, never the
-		// configured relay, and stems-lan.json is written only when its state changes.
-		lanSaved := saved
-		if lanSaved != nil && relay != "" && strings.TrimRight(strings.TrimSpace(lanSaved.Endpoint), "/") == strings.TrimRight(strings.TrimSpace(relay), "/") {
-			lanSaved = nil
-		}
-		s.scheduleLANStemsProbe(lanSaved)
 	}
 }
 
@@ -233,7 +235,7 @@ func (s *Server) scheduleLANStemsProbe(saved *stems.LANState) {
 	if dir == "" {
 		return
 	}
-	probe := lanStemsProbe
+	probe, every := lanStemsProbe, lanProbeEvery
 	if probe == nil {
 		return
 	}
@@ -244,7 +246,7 @@ func (s *Server) scheduleLANStemsProbe(saved *stems.LANState) {
 	}
 
 	relayProbeMu.Lock()
-	if lanProbeInFlight[dir] || time.Since(lanProbed[dir]) < lanProbeEvery {
+	if lanProbeInFlight[dir] || time.Since(lanProbed[dir]) < every {
 		relayProbeMu.Unlock()
 		return
 	}
