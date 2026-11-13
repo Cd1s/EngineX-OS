@@ -16,6 +16,7 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/binary"
 	"encoding/json"
@@ -492,7 +493,9 @@ func resolveNetPathFile(np, dataRoot, mediaRoot string, engineCache bool) string
 // stableTrackKey removes the per-load session suffix from a source file key.
 func stableTrackKey(key string) string {
 	base, seq, ok := strings.Cut(key, "-")
-	if ok && base != "local" && len(seq) >= 8 { return base }
+	if ok && base != "local" && len(seq) >= 8 {
+		return base
+	}
 	return key
 }
 
@@ -516,18 +519,38 @@ func resolveInMusicTempPath(ctx context.Context, orig string, size int64, dataRo
 		if _, err := os.Stat(mdb); err != nil {
 			continue
 		}
-		rel, err := dbPathByFilename(ctx, mdb, orig, size)
+		db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: mdb}).String()+"?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(500)")
 		if err != nil {
-			if !errors.Is(err, sql.ErrNoRows) {
-				return ""
-			}
-			continue
-		}
-		cand := filepath.Join(lib, filepath.FromSlash(rel))
-		if match != "" && match != cand {
 			return ""
 		}
-		match = cand
+		rows, err := db.QueryContext(ctx, `SELECT path FROM Track WHERE filename = ?`, orig)
+		if err != nil {
+			db.Close()
+			return ""
+		}
+		for rows.Next() {
+			var rel string
+			if err := rows.Scan(&rel); err != nil {
+				rows.Close()
+				db.Close()
+				return ""
+			}
+			cand := filepath.Join(lib, filepath.FromSlash(rel))
+			if st, err := os.Stat(cand); err == nil && st.Mode().IsRegular() && st.Size() == size {
+				if match != "" && match != cand {
+					rows.Close()
+					db.Close()
+					return ""
+				}
+				match = cand
+			}
+		}
+		err = rows.Err()
+		rows.Close()
+		db.Close()
+		if err != nil {
+			return ""
+		}
 	}
 	return match
 }
@@ -574,7 +597,36 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 				if n := displayFileName(d.Artist, d.Title, d.Ext); n != "" {
 					d.Name = n // Engine shows a tagless streaming cache file by its name
 				}
-				d.Key = s.shadow.resolvedTrackKey(r.Context(), d.Deck, f, st)
+				d.Key = fmt.Sprintf("%x", fnvSum(fmt.Sprintf("%s %d %d", f, st.Size(), st.ModTime().UnixNano())))
+				if orig, ok := inMusicTempOrig(f, s.shadow.dataRoot); ok {
+					sh := s.shadow
+					sh.resolveMu.Lock()
+					id, c := shadowIdentity(st), sh.resolved[d.Deck]
+					cached := c.path == f && c.identity == id
+					if cached && c.libraryPath != "" {
+						rst, err := os.Stat(c.libraryPath)
+						cached = err == nil && shadowIdentity(rst) == c.libraryIdentity
+					}
+					if !cached {
+						c = shadowResolvedFile{path: f, identity: id}
+						if fingerprint, err := shadowFingerprint(f, st.Size()); err == nil {
+							if real := resolveInMusicTempPath(r.Context(), orig, st.Size(), sh.dataRoot); real != "" {
+								if rst, err := os.Stat(real); err == nil {
+									if other, err := shadowFingerprint(real, rst.Size()); err == nil && fingerprint == other {
+										c.libraryPath, c.libraryIdentity = real, shadowIdentity(rst)
+										c.key = fmt.Sprintf("%x", sha256.Sum256([]byte(fmt.Sprintf("%s %d %d %s", real, rst.Size(), rst.ModTime().UnixNano(), fingerprint))))
+									}
+								}
+							}
+							if c.key == "" {
+								c.key = fmt.Sprintf("%x", sha256.Sum256([]byte(fmt.Sprintf("temp:%s %d %s", orig, id.modified, fingerprint))))
+							}
+						}
+						sh.resolved[d.Deck] = c
+					}
+					d.Key = c.key
+					sh.resolveMu.Unlock()
+				}
 			}
 		}
 		s.shadow.mu.Lock()

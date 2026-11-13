@@ -236,11 +236,19 @@ func (c *shadowSourceCache) trim(keep string) bool {
 		size, oldest := 0, ""
 		for key, e := range c.entries {
 			size += cap(e.asset.Artwork) + cap(e.asset.Overview.Bands) + cap(e.asset.Beats)*16
-			if e.asset.Waveform != nil { size += cap(e.asset.Waveform.Bands) }
-			if key != keep && !e.queued && !e.working && (oldest == "" || e.at.Before(c.entries[oldest].at)) { oldest = key }
+			if e.asset.Waveform != nil {
+				size += cap(e.asset.Waveform.Bands)
+			}
+			if key != keep && !e.queued && !e.working && (oldest == "" || e.at.Before(c.entries[oldest].at)) {
+				oldest = key
+			}
 		}
-		if len(c.entries) <= 16 && size <= 32<<20 { return true }
-		if oldest == "" { return false }
+		if len(c.entries) <= 16 && size <= 32<<20 {
+			return true
+		}
+		if oldest == "" {
+			return false
+		}
 		delete(c.entries, oldest)
 	}
 }
