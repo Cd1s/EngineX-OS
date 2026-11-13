@@ -2039,7 +2039,7 @@ SERVICES_MAIN = """
 				at.scratchTouch = tc ? !!tc.state : undefined
 				at.scratchPosition = g("/Track/TrackPosition"); at.scratchMove = mv
 				at.scratchMirror = at.link ? root.scTr("/Engine/BeatInfoSenderControl/" + at.link + "/PositionInSamples" + (e.src >= 1 && e.src <= 4 ? e.src : d)) : null
-				at.scratchSeen = 0; at.scratchPush = undefined
+				at.scratchOwn = null; at.scratchPush = undefined
 			}
 			if (en && !en.state) en.state = true
 			if (tc && !tc.state) tc.state = true
@@ -2294,35 +2294,29 @@ SERVICES_MAIN = """
 				let raw = -1
 				try { if (at.scratchMirror) raw = at.scratchMirror.value } catch (err) {}
 				const live = typeof raw === "number" && isFinite(raw) && raw >= 0
-				const src = live ? raw / at.sampleRate * 1000 : at.scratchPush, seen = live ? now : at.scratchPushAt
-				if (!at.scratchSeen) {
+				if (!at.scratchOwn) {
 					at.scratchX = posMs; at.scratchRem = 0; at.scratchPeriod = 35; at.scratchPace = 0; at.scratchFrame = now
-					at.scratchRaw = at.scratchSrc = src; at.scratchVel = at.scratchWas = 0; at.scratchSpan = 0; at.scratchSeen = seen; at.scratchLive = live
-				} else if (live !== at.scratchLive) {
-					// The other source tells another time (our own update is 40-80 ms older than the mirror): its
-					// sample is no travel since the last one, which read as a stroke back. The deck rests where it
-					// is until the next one tells the speed.
-					at.scratchSrc = at.scratchX; at.scratchVel = at.scratchSpan = 0
-					at.scratchRaw = src; at.scratchSeen = seen; at.scratchLive = live
-				} else if (src !== at.scratchRaw) {
-					const gap = seen - at.scratchSeen
-					if (live && gap >= 20 && gap <= 60) at.scratchPeriod += (gap - at.scratchPeriod) * 0.05
-					// After a rest the travel is one sample's; a cue or needle drop under the hand (faster than 60x) is no speed.
-					const span = !at.scratchSpan ? at.scratchPeriod : live ? Math.max(1, Math.round(gap / at.scratchPeriod)) * at.scratchPeriod : Math.max(20, Math.min(60, gap))
-					at.scratchSpan = Math.abs(src - at.scratchRaw) > span * 60 ? 0 : span
-					at.scratchVel = at.scratchSpan ? (src - at.scratchRaw) / span : 0
-					at.scratchRaw = at.scratchSrc = src; at.scratchSeen = seen
-				} else if (at.scratchVel && (now - at.scratchSeen > at.scratchSpan * 1.5 || Math.abs(at.scratchVel) * (now - at.scratchSeen - at.scratchSpan) > 60)) {
-					// It rests where that line took the deck: half a sample past the newest one, and 60 ms of track
-					// at most (what a scratch at 3.5x runs on; a whip stopped dead ran on 350 ms and came back).
-					at.scratchSrc += Math.max(-60, Math.min(60, at.scratchVel * at.scratchSpan * 0.5)); at.scratchVel = at.scratchSpan = 0
+					at.scratchOwn = {}; at.scratchMir = {}; at.scratchWas = 0; at.scratchHold = 0; at.scratchLive = live
 				}
-				const vel = at.scratchVel, dt = Math.max(1, Math.min(50, now - at.scratchFrame))
+				root.scShadowScratchLine(at, at.scratchOwn, at.scratchPush, at.scratchPushAt, now, false)
+				if (live) {
+					root.scShadowScratchLine(at, at.scratchMir, raw / at.sampleRate * 1000, now, now, true)
+					// Back in the middle of a scratch, the mirror leads again once it has told a speed.
+					if (at.scratchMir.span) at.scratchLive = true
+				} else {
+					// Our own update tells where the source was 40-80 ms before the mirror did: the deck is ahead of
+					// that line, and waits for it there (100 ms at most, should the source have stopped short of it).
+					if (at.scratchLive) { at.scratchHold = now + 100; at.scratchWay = at.scratchWas }
+					at.scratchLive = false; at.scratchMir.raw = undefined
+				}
+				const l = at.scratchLive ? at.scratchMir : at.scratchOwn
+				const vel = l.vel, dt = Math.max(1, Math.min(50, now - at.scratchFrame))
 				at.scratchFrame = now
-				const target = at.scratchSrc + vel * (Math.min(now - at.scratchSeen, at.scratchSpan * 1.5) - at.scratchSpan)
+				const target = l.src + vel * (Math.min(now - l.seen, l.span * 1.5) - l.span)
+				const joining = !at.scratchLive && now < at.scratchHold, ahead = joining && (target - at.scratchX) * (vel || at.scratchWay) < 0
 				at.drift = target - posMs
 				if (root.scShadowDebug) root.scShadowDbg({deck: d, act: "scratch-frame", posMs: posMs, target: target, drift: at.drift, link: live})
-				if (Math.abs(target - at.scratchX) > 2000 + Math.abs(vel) * 100) {
+				if (!ahead && Math.abs(target - at.scratchX) > 2000 + Math.abs(vel) * 100) {
 					// Too far for the jog (a jump, or a deck that was not on the source): one seek, 4 a second at most.
 					// A frame late in a whip is a sample of the source's own speed behind: that is not far.
 					if (now - at.seekAt >= 250) { root.scShadowSeek(d, at, target); at.scratchX = target; at.scratchRem = 0 }
@@ -2332,13 +2326,16 @@ SERVICES_MAIN = """
 				let step = vel * at.scratchWas < 0 ? 0 : vel * dt
 				at.scratchWas = vel
 				step += (target - at.scratchX - step) * 0.25
-				if (step * vel < 0) step = 0
+				if (step * vel < 0 || ahead) step = 0
+				else if (joining && Math.abs(step) > Math.abs(target - at.scratchX)) step = target - at.scratchX // onto that line, not past it
 				step = Math.max(-800, Math.min(800, step)) // no frame sends more than the jog was measured at
 				at.scratchX += step
 				// The report is up to 80 ms old, and knows nothing of this frame's ticks or the last one's: it says
-				// what the ticks did only once the deck has been slow for a while.
+				// what the ticks did only once the deck has been slow for a while. (It can be 3 ms older still: 1 ms
+				// of track at 3.5x, but 11 ms past the stop of a whip at 24x. Past 10x it gets 100 ms; below, where
+				// every scratch recorded ran (5.6x at most), the 80 a scratch was tuned with.)
 				at.scratchPace = Math.max(Math.abs(step) / dt, at.scratchPace * 0.9)
-				const slip = posMs - at.scratchX, tol = 3 + at.scratchPace * 100
+				const slip = posMs - at.scratchX, tol = 3 + at.scratchPace * (at.scratchPace > 10 ? 100 : 80)
 				// For a frame or two after a seek the report is still where the deck was before it (measured).
 				if (Math.abs(slip) > tol && now - at.seekAt > 100) step = Math.max(-800, Math.min(800, step - (slip - (slip > 0 ? tol : -tol)) * 0.15))
 				const ticks = Math.round(step * 20 + at.scratchRem)
@@ -2346,6 +2343,25 @@ SERVICES_MAIN = """
 				if (ticks > 0) at.scratchMove.incValue(ticks, 0, 0, false, true, 0)
 				else if (ticks < 0) at.scratchMove.decValue(-ticks, 0, 0, false, true, 0)
 			}
+		}
+	}
+	// One source's line l through its last two samples. The mirror and our own update each keep their
+	// own: they tell different times, and one's sample after the other's read as a stroke back.
+	function scShadowScratchLine(at, l, src, seen, now, mirror) {
+		if (l.raw === undefined) {
+			l.raw = l.src = src; l.seen = seen; l.vel = l.span = 0
+		} else if (src !== l.raw) {
+			const gap = seen - l.seen
+			if (mirror && gap >= 20 && gap <= 60) at.scratchPeriod += (gap - at.scratchPeriod) * 0.05
+			// After a rest the travel is one sample's; a cue or needle drop under the hand (faster than 60x) is no speed.
+			const span = !l.span ? at.scratchPeriod : mirror ? Math.max(1, Math.round(gap / at.scratchPeriod)) * at.scratchPeriod : Math.max(20, Math.min(60, gap))
+			l.span = Math.abs(src - l.raw) > span * 60 ? 0 : span
+			l.vel = l.span ? (src - l.raw) / span : 0
+			l.raw = l.src = src; l.seen = seen
+		} else if (l.vel && (now - l.seen > l.span * 1.5 || Math.abs(l.vel) * (now - l.seen - l.span) > 60)) {
+			// It rests where that line took the deck: half a sample past the newest one, and 60 ms of track
+			// at most (what a scratch at 3.5x runs on; a whip stopped dead ran on 350 ms and came back).
+			l.src += Math.max(-60, Math.min(60, l.vel * l.span * 0.5)); l.vel = l.span = 0
 		}
 	}
 	function scShadowScratchRelease(d, at) {

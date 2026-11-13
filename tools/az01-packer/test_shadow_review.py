@@ -451,6 +451,147 @@ assert.equal(seeks,beforeSeeks);
 assert(Math.abs((plant?truePos:posMs)-(11300+3.5*(1200-50)))<70,'the copy is not on the source again: '+((plant?truePos:posMs)-(11300+3.5*1150)));
 """)
 
+    # frame() where a seek may come: its reads are allowed.
+    TICK = "if(plant){const held=posMs;scShadowScratchTimer.tick();pending+=posMs-held;posMs=held}else scShadowScratchTimer.tick();"
+
+    def test_source_at_rest_after_a_change_of_source_is_landed_on(self):
+        # 5b1d645 dropped the line at a change of source and rested until the other source's next different sample
+        # told a speed. A source that had stopped sent none: after a 50x whip the copy stayed 256 ms short of the
+        # stop until the hand let go, and where our own update came 80 ms late it ran 373 ms past the stop and back.
+        # Each source keeps its own line now; one at rest is a line like any other, and is landed on.
+        for speed in (3.5, 24, 40, 50):
+            for drop in (325, 330, 335, 340, 345, 350, 360):
+                for delay in (40, 80):
+                    for plant in (False, True):
+                        with self.subTest(speed=speed, drop=drop, delay=delay, plant=plant):
+                            self.js(self.FAR + (self.PLANT if plant else "") + "const speed=%s, drop=%d, delay=%d, plant=%s;" % (speed, drop, delay, str(plant).lower()) + r"""
+const start=now, beforeSeeks=seeks; let src=21300, raw=src*48, peak=-Infinity, back=0, last;
+for(let t=1;t<=1200;t++) {
+    now=start+t; if(t<=280) src+=speed;
+    if(plant) stepPlant(t);
+    if(t%35===0) raw=src*48;
+    P(MIRROR)._v=t>=drop&&t<drop+400?NaN:raw;      // the mirror goes as the source stops, and is back while it rests
+    if(t%25===0) scShadowApplyAll([E({scratch:true,positionMs:21300+speed*Math.min(280,Math.max(0,t-delay)),at:now})],false);
+    if(t%16!==0) continue;
+    """ + self.TICK + r"""
+    const deck=plant?truePos:posMs;
+    if(t>=280) { peak=Math.max(peak,deck-src); if(last!==undefined) back=Math.max(back,last-deck); last=deck; }
+}
+const off=(plant?truePos:posMs)-src;
+assert.equal(seeks,beforeSeeks);
+assert(Math.abs(off)<=65,'the source stands still and the copy stayed '+off.toFixed(0)+' ms off it');
+assert(peak<=65,'the copy ran '+peak.toFixed(0)+' ms past the stop');
+// A whip comes to rest once. At 3.5x the two lines end up to 43 ms apart (each runs half its last sample on):
+// the copy settles from the one to the other, 8 ms a frame at most.
+assert(back<=(speed>10?1:10),'the copy came back '+back.toFixed(1)+' ms in one frame after the stop');
+""")
+
+    def test_sources_taking_turns_do_not_stop_the_scratch(self):
+        # A mirror read that is a position on one frame and none on the next. Every change was a rest until the
+        # next sample (5b1d645): taking turns each frame, a steady 3.5x scratch stood for 800 ms, then seeked.
+        # The mirror leads again only once it has told a speed; until then our own update's line is still there.
+        for frames in (1, 2, 4):
+            with self.subTest(frames=frames):
+                self.js(RX + "const frames=%d;" % frames + r"""
+const start=now, beforeSeeks=seeks; let raw=11300*48, from=0, advance=0, idle=0, longest=0, back=0, last=posMs;
+for(let t=1;t<=1400;t++) {
+    now=start+t;
+    if(t%35===0) raw=(11300+3.5*t)*48;
+    P(MIRROR)._v=t>=400&&t<1200&&Math.floor((t-400)/(16*frames))%2===0?NaN:raw;
+    if(t%25===0) scShadowApplyAll([E({scratch:true,positionMs:11300+3.5*Math.max(0,t-40),at:now})],false);
+    if(t===399) from=posMs;
+    if(t===1199) advance=posMs-from;
+    if(t%16!==0) continue;
+    scShadowScratchTimer.tick();
+    if(t>=400&&t<1200) { idle=Math.abs(posMs-last)<0.05?idle+1:0; longest=Math.max(longest,idle); back=Math.max(back,last-posMs); }
+    last=posMs;
+}
+assert.equal(seeks,beforeSeeks,'sources taking turns ended in a seek');
+assert(advance>=2500,'the copy went '+advance.toFixed(0)+' of the source\'s 2800 ms');
+assert(longest*16<=48,'the copy stood for '+longest*16+' ms of a steady scratch');
+assert(back<=0.1,'the copy went back '+back.toFixed(1)+' ms');
+""")
+
+    def test_change_of_source_in_a_whip_or_with_a_late_update_is_no_seek_and_no_step_back(self):
+        # What the rules for a change of source are there for. Our own update's line is 40-80 ms of the source's
+        # travel behind the copy when the mirror goes: the copy waits for it where it is, and joins it without
+        # running past it. With the update itself late (a line at rest, far behind) that was a jog back, in a whip
+        # a seek back; a mirror that led again from its first sample, with no speed yet, was a seek in a whip, and
+        # one whose line was kept through 2.5 s without it came back as a seek to where the source had been then.
+        for speed in (3.5, 24, 40):
+            for drop in (500, 550, 575):
+                for delay in (40, 80):
+                    for late, away in ((0, 150), (90, 150)) + (((0, 2500),) if speed == 3.5 else ()):
+                        for plant in (False, True):
+                            with self.subTest(speed=speed, drop=drop, delay=delay, late=late, away=away, plant=plant):
+                                self.js(RX + (self.PLANT if plant else "") + "const speed=%s, drop=%d, delay=%d, late=%d, away=%d, plant=%s;" % (speed, drop, delay, late, away, str(plant).lower()) + r"""
+const start=now, beforeSeeks=seeks, read=P(MIRROR); let src=11300, back=0, last;
+for(let t=1;t<=drop+away+500;t++) {
+    now=start+t; src+=speed; if(plant) stepPlant(t);
+    if(t%35===0) read._v=src*48;
+    scShadowAt[2].scratchMirror=t>=drop&&t<drop+away?{value:-1}:read;
+    if(t%25===0&&!(t>=drop-30&&t<drop-30+late)) scShadowApplyAll([E({scratch:true,positionMs:11300+speed*Math.max(0,t-delay),at:now})],false);
+    if(t%16!==0) continue;
+    const mark=wheelMoves.length;
+    """ + self.TICK + r"""
+    const deck=plant?truePos:posMs;
+    if(t>=drop-50) { for(const ticks of wheelMoves.slice(mark)) back=Math.max(back,-ticks/20); if(last!==undefined) back=Math.max(back,last-deck); }
+    last=deck;
+}
+assert(back<=0.1,'the change of source moved the copy back '+back.toFixed(1)+' ms');
+// Our own update 90 ms late in a whip is a jump when it comes, as it was without the mirror: one seek on.
+assert(seeks-beforeSeeks<=(speed>10&&late?1:0),'the change of source cost '+(seeks-beforeSeeks)+' seeks');
+const off=(plant?truePos:posMs)-(src-speed*50);
+assert(Math.abs(off)<20*speed,'the copy is not on the source again: '+off.toFixed(0));
+""")
+
+    def test_scratch_carried_on_by_our_own_update_lands_where_it_stops(self):
+        # The wait at a change of source ends after 100 ms. Left on, the way the copy went when the mirror was lost
+        # held it back for good: a stroke back and a stop on our own update left it 177 ms off the source (24x).
+        for speed in (3.5, 24):
+            for drop in (150, 200, 250, 300, 350):
+                for delay in (40, 80):
+                    for plant in (False, True):
+                        with self.subTest(speed=speed, drop=drop, delay=delay, plant=plant):
+                            self.js(self.FAR + (self.PLANT if plant else "") + "const speed=%s, drop=%d, delay=%d, plant=%s;" % (speed, drop, delay, str(plant).lower()) + r"""
+const start=now, beforeSeeks=seeks;
+const source=t=>21300+speed*(t<400?t:t<700?800-t:100);     // forward, back, and a stop
+for(let t=1;t<=1400;t++) {
+    now=start+t; if(plant) stepPlant(t);
+    if(t%35===0) P(MIRROR)._v=t<drop?source(t)*48:-1;      // the mirror goes for good in the stroke forward
+    if(t%25===0) scShadowApplyAll([E({scratch:true,positionMs:source(Math.max(0,t-delay)),at:now})],false);
+    if(t%16===0) { """ + self.TICK + r""" }
+}
+const off=(plant?truePos:posMs)-source(1400);
+assert.equal(seeks,beforeSeeks);
+assert(Math.abs(off)<=65,'the copy rests '+off.toFixed(0)+' ms off the source');
+""")
+
+    def test_missed_jog_at_scratch_speed_is_made_up_as_soon_as_before_the_whip_allowance(self):
+        # 5b1d645 gave the deck's report 100 ms at every speed, for a whip's sake (11 ms past the stop at 24x with
+        # 80). At 3.5x that is 70 ms of track more a deck may lag before it is told: one that does 80 % of the ticks
+        # was 473 ms behind at the stop instead of 401, and on the source 304 ms after it instead of 256.
+        for gain, lag, landing in ((0.8, 402, 256), (0.985, 266, 96)):
+            with self.subTest(gain=gain):
+                self.js(RX + "const gain=%s, lag=%d, landing=%d;" % (gain, lag, landing) + r"""
+let truePos=posMs, pending=0, atStop=0, settled=null; const trail=[], start=now;
+for(let t=1;t<=8200;t++) {
+    now=start+t;
+    if(t%12===0) { truePos+=pending*gain; pending=0; }
+    trail.push(truePos);
+    if(t%35===0) posMs=trail[Math.max(0,trail.length-21)];
+    const src=11300+3.5*Math.min(6000,t);                  // six seconds at 3.5x, then a stop
+    if(t%35===0) P(MIRROR)._v=src*48;
+    if(t%25===0) scShadowApplyAll([E({scratch:true,positionMs:11300+3.5*Math.max(0,Math.min(6000,t-40)),at:now})],false);
+    if(t%16!==0) continue;
+    const held=posMs; scShadowScratchTimer.tick(); pending+=posMs-held; posMs=held;
+    if(t===6000) atStop=src-truePos;
+    if(t>6050&&settled===null&&Math.abs(truePos-src)<=65) settled=t-6000;
+}
+assert(atStop<=lag,'the deck was '+atStop.toFixed(0)+' ms behind at the stop');
+assert(settled!==null&&settled<=landing,'the deck was on the source '+settled+' ms after the stop');
+""")
+
     def test_no_frame_sends_more_than_the_jog_was_measured_at(self):
         # 16000 ticks a frame (800 ms, 50x) is as far as the jog was measured on a JP07 (19.8-20.3 ticks a ms).
         self.js(RX + r"""
@@ -530,7 +671,8 @@ for(let t=1;t<=700;t++) {
     if(t%25===0) scShadowApplyAll([E({scratch:true,positionMs:11300+2*t,at:now})],false);
     if(t%16===0) scShadowScratchTimer.tick();
 }
-assert(Number.isFinite(scShadowAt[2].scratchX)&&Number.isFinite(scShadowAt[2].scratchVel),'an unusable sample stayed in the follower');
+const at=scShadowAt[2];
+assert([at.scratchX,at.scratchMir.vel,at.scratchMir.src,at.scratchOwn.vel,at.scratchOwn.src].every(Number.isFinite),'an unusable sample stayed in the follower');
 assert(Math.abs(posMs-(11300+2*(700-50)))<60,'the copy is not on the source again: '+(posMs-12600));
 assert.equal(seeks,beforeSeeks);
 """)
