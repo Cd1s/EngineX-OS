@@ -116,7 +116,7 @@ func tryUSB(ctx context.Context, o *options, board string) (found bool, err erro
 	if err != nil {
 		fallback, ok := proto.Gen1BoardByUSBID(c.info.VID, c.info.PID)
 		if !errors.Is(err, fastboot.ErrUnsupportedVar) || !ok {
-			return false, fmt.Errorf("cannot read the fastboot product: %w", err)
+			return true, fmt.Errorf("cannot read the fastboot product: %w", err)
 		}
 		product = fallback.Code
 	}

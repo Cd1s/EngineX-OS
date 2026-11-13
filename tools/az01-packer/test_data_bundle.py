@@ -1067,7 +1067,7 @@ exec REAL "$@"
         self.assertEqual(res.returncode, 0, res.stderr)
         args = ['--uninstall', '--image', 'my deck.img']
         retained = ('az01_packer.py', 'host-install-userdata.py', 'host-install-fastboot.sh',
-                    'host-install-usbupdate.py', 'third_party/installer/GO-LICENSE',
+                    'third_party/installer/GO-LICENSE',
                     'third_party/installer/xz/LICENSE', 'third_party/installer/purego/LICENSE')
         for t in ('linux-amd64', 'macos-arm64'):
             with self.subTest(t):
