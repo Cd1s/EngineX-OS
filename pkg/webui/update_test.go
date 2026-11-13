@@ -117,7 +117,13 @@ func bundleInstallScript(t *testing.T) []byte {
 	}
 	// The packer expands @MIGRATE_IF_DEFAULT@ into the /data migration; the test deck is not
 	// a real /data (SC5000_CUSTOM is set), so there is nothing to migrate.
-	return bytes.ReplaceAll(m[1], []byte("@MIGRATE_IF_DEFAULT@"), []byte(":"))
+	script := bytes.ReplaceAll(m[1], []byte("@MIGRATE_IF_DEFAULT@"), []byte(":"))
+	// @SWAP_UNDO@ is the real rollback of an interrupted install (BH-G2-4).
+	undo := regexp.MustCompile(`(?s)\nSWAP_UNDO = r"""(.*?)"""`).FindSubmatch(src)
+	if undo == nil {
+		t.Fatal("SWAP_UNDO not found in build-data-bundle.py")
+	}
+	return bytes.ReplaceAll(script, []byte("@SWAP_UNDO@"), undo[1])
 }
 
 func tarOf(t *testing.T, files map[string]string) []byte {

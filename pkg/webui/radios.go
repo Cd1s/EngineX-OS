@@ -57,6 +57,9 @@ func strayEthernetDefault(routes string) (string, bool) {
 // GuardRoutes removes that route whenever it appears, until ctx ends. The cable keeps
 // its link-local address, so Link and direct connections are unaffected.
 func GuardRoutes(ctx context.Context) {
+	if guardHostCommand("ip") != nil {
+		return // never the routes of a machine that is not a deck
+	}
 	tick := time.NewTicker(5 * time.Second)
 	defer tick.Stop()
 	for {

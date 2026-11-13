@@ -170,7 +170,13 @@ struct sc_seq_ext { uint32_t len; void *ptr; } __attribute__((packed)); // ALSA'
 static int led_pct = 100;
 static pthread_mutex_t led_mu = PTHREAD_MUTEX_INITIALIZER;
 static struct led_slot { uchar len; uchar raw[15]; uchar ev[SEQ_EV_SIZE]; void *handle; } led_slots[16][128];
-static void *seq_direct_cache, *seq_drain_cache;
+static void *seq_direct_cache;
+// A snd_seq_t is not thread-safe and Engine's own sends do not take led_mu, so the cached LEDs are
+// resent on Engine's thread, inside its next snd_seq_event_output_direct on the same handle, never
+// from the poll thread (BH-O55-4). led_gen counts brightness changes; each handle remembers the last
+// one it replayed.
+static unsigned led_gen;
+static struct { void *handle; unsigned gen; } led_seen[8];
 
 // RGB LED SysEx? On match fills ch/idx and the offset of the 3 RGB bytes. Screen SysEx (0B/7C) never matches.
 static int led_sysex(const uchar *b, uint32_t len, int *ch, int *idx, int *rgb) {
@@ -217,10 +223,44 @@ static void led_scaled_sysex(const uchar *raw, uint32_t len, int rgb, int pct, u
     }
 }
 
+// Caller holds led_mu, on Engine's thread: resend handle's cached RGB LEDs at the current level.
+static void led_replay_locked(int (*real)(void *, void *), void *handle, int pct) {
+    for (int c = 0; c < 16; c++)
+        for (int i = 0; i < 128; i++) {
+            struct led_slot *s = &led_slots[c][i];
+            int ch, idx, rgb;
+            if (!s->len || s->handle != handle || !led_sysex(s->raw, s->len, &ch, &idx, &rgb)) continue;
+            uchar scaled[16], copy[SEQ_EV_SIZE] __attribute__((aligned(8)));
+            struct sc_seq_ext ext = {s->len, scaled};
+            led_scaled_sysex(s->raw, s->len, rgb, pct, scaled);
+            memcpy(copy, s->ev, SEQ_EV_SIZE);
+            memcpy(copy + 16, &ext, sizeof ext);
+            real(handle, copy);
+        }
+}
+
+// A brightness change this handle has not replayed yet: replay it now, before Engine's own event.
+static void led_catch_up(int (*real)(void *, void *), void *handle) {
+    unsigned gen = __atomic_load_n(&led_gen, __ATOMIC_ACQUIRE);
+    if (!gen) return;
+    pthread_mutex_lock(&led_mu);
+    int k = 0, free_k = -1;
+    for (; k < 8 && led_seen[k].handle != handle; k++)
+        if (!led_seen[k].handle && free_k < 0) free_k = k;
+    if (k == 8) k = free_k;
+    if (k >= 0 && led_seen[k].gen != gen) {
+        led_seen[k].handle = handle;
+        led_seen[k].gen = gen;
+        led_replay_locked(real, handle, __atomic_load_n(&led_pct, __ATOMIC_RELAXED));
+    }
+    pthread_mutex_unlock(&led_mu);
+}
+
 int snd_seq_event_output_direct(void *handle, void *ev) {
     int (*real)(void *, void *) = next_symbol(&seq_direct_cache, "snd_seq_event_output_direct");
     if (!real) return -ENOSYS;
     if (!ev || !is_engine()) return real(handle, ev);
+    led_catch_up(real, handle);
     uchar *e = ev;
     if (e[0] == SEQ_SYSEX && (e[1] & 0x0c) == 0x04) {
         struct sc_seq_ext ext;
@@ -247,31 +287,13 @@ int snd_seq_event_output_direct(void *handle, void *ev) {
     return real(handle, ev);
 }
 
-// led_brightness= changed: resend cached RGB SysEx LEDs so the deck dims/brightens at once.
+// led_brightness= changed (poll thread): publish the level; Engine's thread resends the cached RGB
+// SysEx LEDs with its next controller event on each handle (led_catch_up), so the deck dims or
+// brightens without this thread ever writing to Engine's sequencer handle.
 static void led_replay(int pct) {
-    int (*direct)(void *, void *) = next_symbol(&seq_direct_cache, "snd_seq_event_output_direct");
-    int (*drain)(void *) = next_symbol(&seq_drain_cache, "snd_seq_drain_output");
-    if (!direct) return;
-    void *handles[8] = {0};
-    int nh = 0;
     pthread_mutex_lock(&led_mu);
     __atomic_store_n(&led_pct, pct, __ATOMIC_RELAXED);
-    for (int c = 0; c < 16; c++)
-        for (int i = 0; i < 128; i++) {
-            struct led_slot *s = &led_slots[c][i];
-            int ch, idx, rgb;
-            if (!s->len || !s->handle || !led_sysex(s->raw, s->len, &ch, &idx, &rgb)) continue;
-            uchar scaled[16], copy[SEQ_EV_SIZE] __attribute__((aligned(8)));
-            struct sc_seq_ext ext = {s->len, scaled};
-            led_scaled_sysex(s->raw, s->len, rgb, pct, scaled);
-            memcpy(copy, s->ev, SEQ_EV_SIZE);
-            memcpy(copy + 16, &ext, sizeof ext);
-            direct(s->handle, copy);
-            int k = 0;
-            while (k < nh && handles[k] != s->handle) k++;
-            if (k == nh && nh < 8) handles[nh++] = s->handle;
-        }
-    if (drain) for (int k = 0; k < nh; k++) drain(handles[k]);
+    __atomic_store_n(&led_gen, led_gen + 1 ? led_gen + 1 : 1, __ATOMIC_RELEASE);
     pthread_mutex_unlock(&led_mu);
 }
 
@@ -2855,6 +2877,14 @@ static int raw_access(const char *path, int mode) {
     return real ? real(path, mode) : -1;
 }
 
+// The bundle lives in /data/enginex (#103); /data/sc5000-custom is the compat link to it, or
+// the real directory on a deck the first boot has not migrated yet (BH-GF4-4).
+#ifndef STEMS_ENGINEX_PROCESSOR
+#define STEMS_ENGINEX_PROCESSOR "/data/enginex/bundle/stems-processor"
+#endif
+#ifndef STEMS_ENGINEX_BIN_PROCESSOR
+#define STEMS_ENGINEX_BIN_PROCESSOR "/data/enginex/bundle/bin/stems-processor"
+#endif
 #ifndef STEMS_BUNDLE_PROCESSOR
 #define STEMS_BUNDLE_PROCESSOR "/data/sc5000-custom/bundle/stems-processor"
 #endif
@@ -2868,10 +2898,10 @@ static const char *stems_processor_path(const char *path) {
                  !strcmp(path, "/usr/Engine/stems-processor") ||
                  !strcmp(path, "/secure-media/stems-processor/bin/stems-processor"))) {
         if (raw_access(path, X_OK) != 0) {
-            if (raw_access(STEMS_BUNDLE_PROCESSOR, X_OK) == 0)
-                return STEMS_BUNDLE_PROCESSOR;
-            if (raw_access(STEMS_BUNDLE_BIN_PROCESSOR, X_OK) == 0)
-                return STEMS_BUNDLE_BIN_PROCESSOR;
+            const char *const bundled[] = {STEMS_ENGINEX_PROCESSOR, STEMS_ENGINEX_BIN_PROCESSOR,
+                                           STEMS_BUNDLE_PROCESSOR, STEMS_BUNDLE_BIN_PROCESSOR};
+            for (size_t i = 0; i < sizeof bundled / sizeof *bundled; i++)
+                if (raw_access(bundled[i], X_OK) == 0) return bundled[i];
         }
     }
     return path;
@@ -3112,8 +3142,49 @@ static size_t read_full(int fd, uint8_t *buf, size_t count) {
     return total;
 }
 
+// The model prefix this deck's images carry (SC5000, SCLIVE4, ...), from the device tree, or ""
+// when the board is not one of ours. BH-G2-1: the check below compared only the payload digest, so
+// a SYSTEM ONE (arm64) image installed on an SC LIVE 4 (armhf) and the reverse.
+static const char *enginex_compatible_path = "/sys/firmware/devicetree/base/compatible";
+static void enginex_device_prefix(char out[32]) {
+    static const char *const boards[][2] = {
+        {"inmusic,jp07", "SC5000"}, {"inmusic,jp08", "SC5000M"}, {"inmusic,jp11", "PRIMEGO"},
+        {"inmusic,jp13", "SC6000"}, {"inmusic,jp14", "SC6000M"}, {"inmusic,jc11", "PRIME4"},
+        {"inmusic,jc16", "PRIME2"}, {"inmusic,nh08", "MIXSTREAMPRO"}, {"inmusic,jp21", "SCLIVE4"},
+        {"inmusic,jp20", "SCLIVE2"}, {"inmusic,jc11s", "PRIME4PLUS"}, {"inmusic,jp11s", "PRIMEGOPLUS"},
+        {"inmusic,nh08s", "MIXSTREAMPROPLUS"}, {"inmusic,nh10", "MIXSTREAMPROGO"},
+        {"inmusic,jp24", "PRIME4G2"}, {"inmusic,rmz2", "SYSTEMONE"}};
+    char buf[512];
+    out[0] = 0;
+    int fd = open(enginex_compatible_path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return;
+    size_t n = read_full(fd, (uint8_t *)buf, sizeof buf - 1);
+    close(fd);
+    buf[n] = 0;
+    for (size_t off = 0; off < n; off += strlen(buf + off) + 1)
+        for (size_t i = 0; i < sizeof boards / sizeof *boards; i++)
+            if (!strcmp(buf + off, boards[i][0])) { snprintf(out, 32, "%s", boards[i][1]); return; }
+}
+
+// The header's prefix line (after the digest) names this deck's model.
+static int enginex_img_for_this_deck(const uint8_t head[ENGINEX_IMG_HEADER]) {
+    char device[32], want[32] = "";
+    const char *p = (const char *)head + ENGINEX_IMG_MAGIC_LEN + 65;
+    const char *nl = memchr(p, '\n', (size_t)((const char *)head + ENGINEX_IMG_HEADER - p)); // bounded: the header need not hold a NUL
+    size_t len = nl ? (size_t)(nl - p) : 0;
+    if (len == 0 || len >= sizeof want || memchr(p, 0, len)) return 0;
+    memcpy(want, p, len);
+    enginex_device_prefix(device);
+    if (!*device || strcmp(device, want)) {
+        fprintf(stderr, "engine-ui-hook: refusing an EngineX image for %s on %s\n", want, *device ? device : "an unknown board");
+        return 0;
+    }
+    return 1;
+}
+
 // IMG_NONE: not an EngineX data bundle at all. IMG_BAD: it claims to be one but has no V1 header,
-// is truncated or its payload SHA-256 differs from the header's. IMG_OK: header and payload agree.
+// is truncated, its payload SHA-256 differs from the header's, or it is for another model.
+// IMG_OK: header and payload agree and the image is for this deck.
 static int enginex_img_check(const char *path) {
     uint8_t head[ENGINEX_IMG_HEADER];
     int fd = path ? open(path, O_RDONLY | O_CLOEXEC) : -1;
@@ -3138,7 +3209,8 @@ static int enginex_img_check(const char *path) {
     close(fd);
     if (!ok) return IMG_BAD;
     sha256_final(&c, hex);
-    return strncasecmp(hex, (const char *)head + ENGINEX_IMG_MAGIC_LEN, 64) == 0 ? IMG_OK : IMG_BAD;
+    if (strncasecmp(hex, (const char *)head + ENGINEX_IMG_MAGIC_LEN, 64) != 0) return IMG_BAD;
+    return enginex_img_for_this_deck(head) ? IMG_OK : IMG_BAD;
 }
 
 static int enginex_gen2_locked(void) {
@@ -3258,28 +3330,46 @@ int az01_apply_image(const char *path, int flags) {
 }
 
 // Removes path (a file, a symlink itself, or a directory tree on root_dev) without following symlinks
-// or crossing a mount point.
-static void rm_tree(int parent, const char *name, dev_t root_dev) {
-    if (unlinkat(parent, name, 0) == 0 || errno == ENOENT) return;
+// or crossing a mount point (a mount point is left alone, not a failure). -1 when something could not
+// be removed: the name is logged, never the contents (BH-G2-6).
+static int rm_tree(int parent, const char *name, dev_t root_dev) {
+    if (unlinkat(parent, name, 0) == 0 || errno == ENOENT) return 0;
+    int unlink_err = errno;
     struct stat st;
-    if (fstatat(parent, name, &st, AT_SYMLINK_NOFOLLOW) != 0 || st.st_dev != root_dev) return;
+    if (fstatat(parent, name, &st, AT_SYMLINK_NOFOLLOW) != 0) return errno == ENOENT ? 0 : -1;
+    if (st.st_dev != root_dev) return 0;
+    if (!S_ISDIR(st.st_mode)) {
+        fprintf(stderr, "engine-ui-hook: Factory Reset could not remove %s: %s\n", name, strerror(unlink_err));
+        return -1;
+    }
+    int failed = 0;
     int fd = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (fd >= 0) {
         if (fstat(fd, &st) == 0 && st.st_dev == root_dev) {
             DIR *d = fdopendir(fd);
             if (d) {
                 struct dirent *e;
-                while ((e = readdir(d)) != NULL)
-                    if (strcmp(e->d_name, ".") && strcmp(e->d_name, "..")) rm_tree(dirfd(d), e->d_name, root_dev);
+                errno = 0;
+                while ((e = readdir(d)) != NULL) {
+                    if (strcmp(e->d_name, ".") && strcmp(e->d_name, "..")) failed |= rm_tree(dirfd(d), e->d_name, root_dev);
+                    errno = 0;
+                }
+                if (errno) failed = -1;
                 closedir(d);
             } else {
                 close(fd);
+                failed = -1;
             }
         } else {
             close(fd);
+            return 0;  // became a mount point
         }
     }
-    unlinkat(parent, name, AT_REMOVEDIR);
+    if (unlinkat(parent, name, AT_REMOVEDIR) != 0 && errno != ENOENT) {
+        if (!failed) fprintf(stderr, "engine-ui-hook: Factory Reset could not remove %s: %s\n", name, strerror(errno));
+        return -1;
+    }
+    return failed ? -1 : 0;
 }
 
 // Factory Reset on a /data-bundle deck: wipes the user's data and EngineX's own settings but keeps
@@ -3309,11 +3399,12 @@ int az01_erase_data_partition(void) {
     DIR *d = fdopendir(rootfd);
     if (!d) { close(rootfd); return -1; }
     static const char *const keep[] = {"enginex", "system", "sc5000-custom", "lost+found"};
+    int failed = 0;
     struct dirent *e;
     while ((e = readdir(d)) != NULL) {
         int skip = !strcmp(e->d_name, ".") || !strcmp(e->d_name, "..");
         for (size_t i = 0; i < sizeof keep / sizeof *keep; i++) skip |= !strcmp(e->d_name, keep[i]);
-        if (!skip) rm_tree(rootfd, e->d_name, root_st.st_dev);
+        if (!skip && rm_tree(rootfd, e->d_name, root_st.st_dev)) failed = -1;
     }
     int ef = openat(rootfd, "enginex", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (ef >= 0) {
@@ -3321,12 +3412,21 @@ int az01_erase_data_partition(void) {
             "state", "mods", "Stream", "shadow-v3", "ui-scale.env", "ssh-config.json", "mounts.json", "automix.json",
             "ui/settings.conf", "ui/views.json", "ui/mods-overlay", "ui/mods-quarantined",
             "ui/safe-mode", "ui/boot-count", "ui/boot-token", "ui/last-crash", "ui/running-sentinel"};
-        for (size_t i = 0; i < sizeof gone / sizeof *gone; i++) rm_tree(ef, gone[i], root_st.st_dev);
-        mkdirat(ef, "state", 0755);
-        mkdirat(ef, "mods", 0755);
+        for (size_t i = 0; i < sizeof gone / sizeof *gone; i++)
+            if (rm_tree(ef, gone[i], root_st.st_dev)) failed = -1;
+        static const char *const fresh[] = {"state", "mods"};
+        for (size_t i = 0; i < sizeof fresh / sizeof *fresh; i++)
+            if (mkdirat(ef, fresh[i], 0755) != 0 && errno != EEXIST) failed = -1;
         close(ef);
     }
     closedir(d);
+    // BH-G2-6: a reset that left user data behind (read-only or failing /data) is reported as failed,
+    // not as success with a reboot; Engine shows the error and the deck keeps running.
+    if (failed) {
+        fprintf(stderr, "engine-ui-hook: Factory Reset failed: user data is still on %s\n", root);
+        sync();
+        return -1;
+    }
     if (!testing) enginex_reboot();
     else sync();
     return 0;

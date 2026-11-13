@@ -288,7 +288,8 @@ func (b *idleBody) stop() {
 }
 
 // Backend serves /v1/engine. An empty Secret serves LAN callers without a
-// credential (a home renderer found by discovery); others are refused.
+// credential (a home renderer found by discovery); others are refused. A
+// nonempty Secret is required from every caller.
 type Backend struct {
 	Secret string
 	Worker []string
@@ -322,10 +323,9 @@ func (b *Backend) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+b.Secret)) != 1 {
-		if ip == nil || ip.IsLoopback() || !(ip.IsPrivate() || cgnat.Contains(ip)) {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
+		// A configured credential applies to every caller, LAN or not.
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
 	}
 	if r.Method == "GET" && r.URL.Path == "/healthz" {
 		name, separator := cmp.Or(b.Name, "hpss"), "spectral-hpss-approximation"

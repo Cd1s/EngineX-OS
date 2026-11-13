@@ -202,3 +202,41 @@ func TestDisplayMalformedPerformance(t *testing.T) {
 		})
 	}
 }
+
+// BH-GC1-4: stock Engine 5.3.0 stores Hot Cues and Saved Loops before sample
+// zero (7 of the 13 DemoDevice tracks: -1024, -1103.21, -927.17, -590.19). The
+// parser rejected the whole track, so the shadow display showed nothing for it.
+func TestDisplayStockPrerollHotCueAndLoop(t *testing.T) {
+	p := displayFixture(t)
+	cues, err := QUncompress(p.QuickCues, 64<<10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Hot Cue 1 ("drop") moves into the pre-roll.
+	off := 8 + 1 + int(cues[8])
+	big.PutUint64(cues[off:], math.Float64bits(-1103.21))
+	blob, err := QCompress(cues)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loops := bytes.Clone(p.Loops)
+	loff := 8 + 1 + int(loops[8]) + 22 // slot 2 holds the fixture's loop
+	loff += 1 + int(loops[loff])
+	little.PutUint64(loops[loff:], math.Float64bits(-590.19))
+	d, err := ParseDisplayPerformance(p.TrackData, p.Overview, p.Beats, blob, loops)
+	if err != nil {
+		t.Fatalf("stock pre-roll rejected: %v", err)
+	}
+	if len(d.Cues) != 3 || d.Cues[0].N != "drop" || d.Cues[0].MS != 0 || len(d.Loops) != 1 || d.Loops[0].StartMS != 0 || d.Loops[0].EndMS != 2500 {
+		t.Fatalf("pre-roll cue/loop: %+v %+v", d.Cues, d.Loops)
+	}
+	// A loop that ends before the track starts is not shown; an inverted one is still invalid.
+	little.PutUint64(loops[loff+8:], math.Float64bits(-100))
+	if d, err = ParseDisplayPerformance(p.TrackData, p.Overview, p.Beats, blob, loops); err != nil || len(d.Loops) != 0 {
+		t.Fatalf("pre-roll-only loop: %+v %v", d.Loops, err)
+	}
+	little.PutUint64(loops[loff+8:], math.Float64bits(-1000))
+	if _, err = ParseDisplayPerformance(p.TrackData, p.Overview, p.Beats, blob, loops); err == nil {
+		t.Fatal("inverted loop accepted")
+	}
+}

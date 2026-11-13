@@ -215,8 +215,10 @@ if [ -n "$delays" ]; then
         for d in $delays; do sleep "$d" || exit; engine_threads; done
         while [ -n "$interval" ] && engine_alive; do
             sleep "$interval" || exit
-            engine_alive || break
+            # A fresh scan: the vendor script can restart Engine in its own loop under a new
+            # PID, and checking the old one stopped the sweeper for the rest of the run (BH-GC2-16).
             engine_threads
+            engine_alive || break
         done
     ) </dev/null >/dev/null 2>&1 &
     # The sweeper and its subprocesses must also stay off the two UI cores.

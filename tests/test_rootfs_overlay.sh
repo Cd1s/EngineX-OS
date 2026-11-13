@@ -183,6 +183,25 @@ expect_fail sh "$STORAGE" add /dev/sdz1x
 run_storage --discover
 ok 'internal eMMC, malformed devices and coldplug discovery are handled safely'
 
+# BH-GC2-5: --discover also matched the whole disk of a partitioned stick (sda next
+# to sda1) and waited the full SC5000_MOUNT_WAIT for edisksd to mount it, which it
+# never does, holding the storage lock. A stick without partitions is still waited for.
+fixture
+device sda1 exfat
+mkdir -p "$SC5000_SYS_ROOT/class/block/sda/sda1"
+printf '/dev/sda1|exfat|%s/STICK|rw,nosuid\n' "$SC5000_MEDIA_ROOT" > "$MOCK_ROOT/mounts"
+start=$(date +%s)
+SC5000_MOUNT_WAIT=3 run_storage --discover
+[[ $(( $(date +%s) - start )) -lt 2 ]] || fail 'discover waited for a partitioned whole disk'
+has 'ready: /dev/sda1' "$MOCK_ROOT/output"
+lacks 'not mounted by edisksd: /dev/sda' "$MOCK_ROOT/output"
+mkdir -p "$SC5000_SYS_ROOT/class/block/sdb"
+start=$(date +%s)
+SC5000_MOUNT_WAIT=1 run_storage add /dev/sdb
+[[ $(( $(date +%s) - start )) -ge 1 ]] || fail 'a whole disk without partitions must still be waited for'
+has 'not mounted by edisksd: /dev/sdb' "$MOCK_ROOT/output"
+ok 'coldplug discovery skips partitioned whole disks at once; a superfloppy stick is still waited for'
+
 fixture
 mkdir -p "$SC5000_PROC_ROOT/sys/"{vm,fs}
 for knob in vm/swappiness vm/vfs_cache_pressure vm/dirty_background_ratio vm/dirty_ratio fs/file-max; do
@@ -353,6 +372,39 @@ has 'taskset <-pc> <0,3> <109>' "$MOCK_ROOT/log"
 unlink "$TMP/bin/sleep"
 ln -s /usr/Engine/Engine "$SC5000_PROC_ROOT/100/exe"
 ok 'late helpers leave the GUI core and the sweeper stops with Engine'
+# BH-GC2-16: the vendor script restarts Engine in its own loop under a new PID. The sweeper kept
+# checking the old one and stopped; it must find the new Engine and keep sweeping its threads.
+rm -f "$MOCK_ROOT/sleep-count" "$MOCK_ROOT/sweeper-done"
+cat > "$TMP/bin/sleep" <<'SLEEP'
+#!/bin/bash
+set -eu
+n=$(cat "$MOCK_ROOT/sleep-count" 2>/dev/null || printf 0)
+n=$((n + 1))
+printf '%s\n' "$n" > "$MOCK_ROOT/sleep-count"
+if [[ $n == 2 ]]; then
+    unlink "$SC5000_PROC_ROOT/100/exe"
+    mkdir -p "$SC5000_PROC_ROOT/400/task"
+    ln -s /usr/Engine/Engine "$SC5000_PROC_ROOT/400/exe"
+    printf '/usr/Engine/Engine\n' > "$SC5000_PROC_ROOT/400/cmdline"
+    cp -r "$SC5000_PROC_ROOT/100/task/100" "$SC5000_PROC_ROOT/400/task/400"
+    cp -r "$SC5000_PROC_ROOT/100/task/105" "$SC5000_PROC_ROOT/400/task/401"
+    printf 'event_engine\n' > "$SC5000_PROC_ROOT/400/task/401/comm"
+elif [[ $n == 3 ]]; then
+    unlink "$SC5000_PROC_ROOT/400/exe"
+    touch "$MOCK_ROOT/sweeper-done"
+fi
+SLEEP
+chmod +x "$TMP/bin/sleep"
+SC5000_THREAD_DELAYS=0 SC5000_THREAD_INTERVAL=30 sh "$PERF" > "$MOCK_ROOT/output" 2>&1
+for ((attempt=0; attempt<60; attempt++)); do
+    [[ ! -e $MOCK_ROOT/sweeper-done ]] || break
+    /bin/sleep 0.05
+done
+unlink "$TMP/bin/sleep"
+rm -rf "$SC5000_PROC_ROOT/400"
+ln -s /usr/Engine/Engine "$SC5000_PROC_ROOT/100/exe"
+has 'taskset <-pc> <0,3> <401>' "$MOCK_ROOT/log"
+ok 'the thread sweeper follows Engine across an in-loop restart under a new PID (BH-GC2-16)'
 
 # The sweep runs beside playback every 30 s: no process per Engine thread.
 for tool in cat sed awk; do
@@ -451,7 +503,7 @@ ok 'stock connman online check, read-only HFS+, rootfs brcmfmac options'
 
 GUARD=$ROOT/rootfs-overlay/etc/sc5000/engine-ui-guard
 export SC5000_UI_DIR=$TMP/ui-guard SC5000_STREAMING_ACCOUNTS=$TMP/StreamingAccounts.json
-export SC5000_ENGINE_DATA_DIR=$TMP/engine-data
+export SC5000_ENGINE_DATA_DIR=$TMP/engine-data SC5000_GUARD_PRE_MARK=$TMP/guard-pre-mark
 # #56: every start leaves Engine a TIDAL account entry (valid JSON, other accounts
 # kept) unless TIDAL itself is the selected service.
 tidal_entry() { python3 -c 'import json,sys; a=json.load(open(sys.argv[1])); d=json.loads(a["TIDAL"]); assert d["providerType"] == "TIDAL" and d.get("accessToken") == "enginex" and d.get("refreshToken") == "enginex"; print(len(a))' "$SC5000_STREAMING_ACCOUNTS"; }
@@ -479,6 +531,31 @@ sh "$GUARD" post; mkdir -p "$SC5000_ENGINE_DATA_DIR/.cache/qml"; sh "$GUARD" pre
 # #140: power cut after a healthy start (no stop hook, no boot-token) still drops the cache but is no crash.
 rm -f "$SC5000_UI_DIR"/*; sh "$GUARD" pre; mkdir -p "$SC5000_ENGINE_DATA_DIR/.cache/qml"; sh "$GUARD" pre
 [[ ! -e $SC5000_ENGINE_DATA_DIR/.cache/qml && $(cat "$SC5000_UI_DIR/boot-count") == 1 ]] || fail 'a start without a stop hook must clear the QML cache without counting a crash'
+# BH-F52-4: a second-generation boot starts the stock Engine, and boot-activate restarts it into the
+# hooked one. That clean stop of an instance that never ran `pre` this boot must leave the previous
+# boot's evidence (an unacknowledged start, a running-sentinel left by a power cut) for `pre`.
+rm -rf "$SC5000_UI_DIR"; mkdir -p "$SC5000_UI_DIR" "$SC5000_ENGINE_DATA_DIR/.cache/qml"
+echo tok > "$SC5000_UI_DIR/boot-token"; : > "$SC5000_UI_DIR/running-sentinel"
+echo 2 > "$SC5000_UI_DIR/boot-failures"; date +%s > "$SC5000_UI_DIR/boot-window"
+rm -f "$SC5000_GUARD_PRE_MARK"   # a new boot
+SERVICE_RESULT=success sh "$GUARD" stop; sh "$GUARD" pre
+[[ -e $SC5000_UI_DIR/safe-mode && ! -e $SC5000_ENGINE_DATA_DIR/.cache/qml ]] ||
+    fail 'the stock Engine stop before the hooked start must not erase the last boot crash evidence (BH-F52-4)'
+rm -f "$SC5000_UI_DIR"/*; SERVICE_RESULT=success sh "$GUARD" stop; sh "$GUARD" pre   # this boot's own clean restart
+[[ ! -e $SC5000_UI_DIR/safe-mode && $(cat "$SC5000_UI_DIR/boot-count") == 1 ]] || fail 'a clean restart after pre must still reset the state'
+ok 'a second-generation boot keeps the last boot crash and power-cut evidence across the stock Engine handover (BH-F52-4)'
+# BH-GF3-6: the UAC2 gadget offers the computer the sample rate chosen in the Web Console (it was
+# always 48000), also when the gadget already exists; an unsupported rate is refused.
+USB_AUDIO=$ROOT/rootfs-overlay/usr/sbin/sc5000-usb-audio
+mkdir -p "$TMP/configfs/usb_gadget" "$TMP/udc/fe800000.usb"
+usb_audio() { SC5000_CONFIGFS=$TMP/configfs SC5000_UDC_CLASS=$TMP/udc sh "$USB_AUDIO" "$@" >/dev/null; }
+srate=$TMP/configfs/usb_gadget/enginex_uac2/functions/uac2.usb0/c_srate
+usb_audio enable-uac2 96000; [[ $(cat "$srate") == 96000 && $(cat "$TMP/configfs/usb_gadget/enginex_uac2/UDC") == fe800000.usb ]] ||
+    fail 'enable-uac2 must set the chosen sample rate and bind the gadget'
+usb_audio enable-uac2 44100; [[ $(cat "$srate") == 44100 ]] || fail 'enable-uac2 must change the rate of an existing gadget'
+usb_audio enable-uac2; [[ $(cat "$srate") == 48000 ]] || fail 'enable-uac2 without a rate keeps the 48000 default'
+! usb_audio enable-uac2 12345 2>/dev/null || fail 'enable-uac2 must refuse an unsupported rate'
+ok 'the USB-B audio gadget offers the sample rate chosen in the Web Console (BH-GF3-6)'
 SERVICE_RESULT=success sh "$GUARD" stop; mkdir -p "$SC5000_ENGINE_DATA_DIR/.cache/qml"; sh "$GUARD" pre
 [[ -d $SC5000_ENGINE_DATA_DIR/.cache/qml ]] || fail 'a clean stop must keep the QML disk cache'
 # #140: the healthy timer leaves the token when Engine is gone, so the next pre counts a crash.
@@ -525,7 +602,7 @@ echo "$*" >> "$GUARD_LOG"
 MOCK
 chmod +x "$TMP/guard-bin/systemctl"
 export SC5000_QUIT_REASON_FILE=$TMP/quit-reason GUARD_LOG=$TMP/guard-log
-for case in 'FactoryReset running 1' 'FactoryReset degraded 1' 'FactoryReset stopping 0' 'AnalyticsChange stopping 1' 'Poweroff running 0' ' running 0'; do
+for case in 'FactoryReset running 1' 'FactoryReset degraded 1' 'FactoryReset stopping 0' 'UpdateFromFile running 1' 'UpdateFromFile stopping 0' 'UpdateFromUrl running 0' 'AnalyticsChange stopping 1' 'Poweroff running 0' ' running 0'; do
     set -- $case; [[ $# == 3 ]] || set -- '' "$@"
     [[ -z $1 ]] && rm -f "$SC5000_QUIT_REASON_FILE" || echo "$1" > "$SC5000_QUIT_REASON_FILE"
     : > "$GUARD_LOG"
@@ -605,7 +682,7 @@ has 'SC5000_BOOT_TIMEOUT:-180' "$GUARD"
 has 'SC5000_BOOT_CRASH_LIMIT:-3' "$GUARD"
 has 'SC5000_BOOT_CRASH_WINDOW:-300' "$GUARD"
 unset SC5000_UI_DIR
-ok 'UI guard: deliberate restarts reset the boot count, crashes still reach safe-mode, failed FactoryReset restarts Engine'
+ok 'UI guard: deliberate restarts reset the boot count, crashes still reach safe-mode, failed FactoryReset and UpdateFromFile restart Engine'
 
 lacks '"/GUI/Scripted/ZoomIn"' "$ROOT/tools/ui-mod/build_packs.py"
 lacks 'BrowseEncoder.qml' "$ROOT/tools/ui-mod/build_packs.py"

@@ -332,6 +332,27 @@ var mountReadBudget = 8 * time.Second
 // Otherwise files are read for mountReadBudget at most, and the export counts as
 // imported only once no track was left without its cues.
 func ConvertAtMount(ctx context.Context, mount string, opts enginedb.Options, full bool) (enginedb.Result, error) {
+	r, err := convertAtMount(ctx, mount, opts, full)
+	applyPendingAtMount(ctx, mount)
+	return r, err
+}
+
+// applyPendingAtMount applies the library edits the Web Console queued while Engine had the
+// library open (Hot Cues, Relocate: enginedb.QueuePending). engine-guardian --heal-mount
+// applies them on other sticks; the mount hook does not run it on a stick with a rekordbox
+// export, so rb-bridge does, after its own import and on the stamp bypass as well.
+func applyPendingAtMount(ctx context.Context, mount string) {
+	if ctx.Err() != nil || !writable(mount) {
+		return
+	}
+	if n, err := enginedb.ApplyPending(ctx, mount); err != nil {
+		log.Printf("rb-bridge: queued library edits not applied: %v", err)
+	} else if n > 0 {
+		log.Printf("rb-bridge: applied %d queued library edits", n)
+	}
+}
+
+func convertAtMount(ctx context.Context, mount string, opts enginedb.Options, full bool) (enginedb.Result, error) {
 	// The file-reading budget starts once the library is read: decrypting a
 	// OneLibrary must not use up the time meant for cues and waveforms.
 	var budget time.Duration

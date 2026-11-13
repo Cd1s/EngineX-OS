@@ -150,21 +150,32 @@ func StreamSync(args []string) error {
 	}
 	server := &http.Server{Addr: *listen, Handler: ui, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 2 * time.Minute, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16384}
 	go ui.SyncRelaySettings(ctx)
+	go ui.RestoreSSH(ctx) // first generation: the console's SSH settings after a boot
 	go webui.GuardRoutes(ctx)
 	dl.RemoveStaleParts()
 	dl.Trim("")
 	go watchEngineTemp(ctx)
 	go watchPersistentClock(ctx)
+	// Tunnels and Tailscale forward to a loopback console listener of their own,
+	// which has no route to the deck-local streaming gateway.
+	forward := &http.Server{Addr: webui.ForwardAddr, Handler: ui.ForwardHandler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 2 * time.Minute, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16384}
+	go func() {
+		if err := forward.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			fmt.Fprintf(os.Stderr, "stream-sync: remote console listener %s: %v\n", webui.ForwardAddr, err)
+		}
+	}()
 	done := make(chan error, 1)
 	go func() { done <- server.ListenAndServe() }()
 	select {
 	case err = <-done:
+		forward.Close()
 		if err != http.ErrServerClosed {
 			return err
 		}
 	case <-ctx.Done():
 		shutdown, cancel := webui.ShutdownContext()
 		defer cancel()
+		go forward.Shutdown(shutdown)
 		if err = server.Shutdown(shutdown); err != nil {
 			return err
 		}

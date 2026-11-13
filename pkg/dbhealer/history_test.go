@@ -202,3 +202,80 @@ func TestHistorySchemaVersionProtection(t *testing.T) {
 		t.Fatal("future history data changed")
 	}
 }
+
+// historyMount is a drive with m.db and an hm.db holding sessions, given as
+// (startTime, isDeleted) pairs, each with one entry for track 1.
+func historyMount(t *testing.T, sessions [][2]int) (mount, hm string) {
+	t.Helper()
+	db, path := newLibrary(t)
+	track(t, db, 1)
+	db.Close()
+	mount = t.TempDir()
+	dir := filepath.Join(mount, "Engine Library", "Database2")
+	os.MkdirAll(dir, 0755)
+	blob, _ := os.ReadFile(path)
+	os.WriteFile(filepath.Join(dir, "m.db"), blob, 0644)
+	hist, hpath := newLibrary(t)
+	track(t, hist, 1)
+	mustExec(t, hist, `CREATE TABLE Historylist(id INTEGER PRIMARY KEY,startTime INTEGER,isDeleted BOOLEAN);
+    CREATE TABLE HistorylistEntity(id INTEGER PRIMARY KEY,listId INTEGER,trackId INTEGER);`)
+	for i, s := range sessions {
+		mustExec(t, hist, `INSERT INTO Historylist VALUES(?,?,?)`, i+1, s[0], s[1])
+		mustExec(t, hist, `INSERT INTO HistorylistEntity VALUES(?,?,1)`, i+1, i+1)
+	}
+	hist.Close()
+	blob, _ = os.ReadFile(hpath)
+	hm = filepath.Join(dir, "hm.db")
+	os.WriteFile(hm, blob, 0644)
+	return mount, hm
+}
+
+func historyCount(t *testing.T, hm, where string) (n int) {
+	t.Helper()
+	db, err := Open(hm, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.QueryRow("SELECT count(*) FROM Historylist " + where).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// BH-F52-2: the mount hook's heal (--data-only) deleted every history session
+// but the newest 50 on each insert, and added sqlite_stat1 to hm.db (BH-GC1-13).
+// Stock Engine keeps them all.
+func TestDataOnlyHealKeepsTheWholeHistory(t *testing.T) {
+	var sessions [][2]int
+	for i := 0; i < 60; i++ {
+		sessions = append(sessions, [2]int{100 + i, 0})
+	}
+	mount, hm := historyMount(t, sessions)
+	r, err := HealMountDataOnly(mount, 0)
+	if err != nil || r.HistoryPruned {
+		t.Fatalf("%+v %v", r, err)
+	}
+	if n := historyCount(t, hm, ""); n != 60 {
+		t.Fatalf("sessions after the mount heal: %d, want 60", n)
+	}
+	db, _ := Open(hm, true)
+	defer db.Close()
+	var stat int
+	db.QueryRow("SELECT count(*) FROM sqlite_master WHERE name='sqlite_stat1'").Scan(&stat)
+	if stat != 0 {
+		t.Fatal("the data-only heal changed hm.db's schema (sqlite_stat1)")
+	}
+}
+
+// BH-GC1-13: sessions the DJ deleted on the deck (isDeleted=1) counted towards
+// the limit, so newer deleted ones took the place of the visible history.
+func TestPruneHistoryKeepsVisibleSessionsOverDeletedOnes(t *testing.T) {
+	_, hm := historyMount(t, [][2]int{{100, 0}, {200, 1}, {300, 1}})
+	if err := PruneHistoryDB(hm, 2); err != nil {
+		t.Fatal(err)
+	}
+	if n := historyCount(t, hm, "WHERE COALESCE(isDeleted,0)=0"); n != 1 {
+		t.Fatalf("visible sessions left: %d, want 1", n)
+	}
+}

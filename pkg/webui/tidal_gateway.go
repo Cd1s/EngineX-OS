@@ -290,6 +290,13 @@ func newTidalGateway(s *Server) *tidalGateway {
 	g.mux.HandleFunc("POST /v1/sc5000/mods/upload", s.handleModsUpload)
 	g.mux.HandleFunc("GET /v1/sc5000/ssh", s.handleSSH)
 	g.mux.HandleFunc("POST /v1/sc5000/ssh", s.handleSSH)
+	// Every /v1/ path reaches this mux only (Server.ServeHTTP): a route
+	// registered on s.mux alone answered with emptyPage (BH-GC2-3).
+	g.mux.HandleFunc("GET /v1/sc5000/unlock-gen2", s.handleUnlockGen2)
+	g.mux.HandleFunc("POST /v1/sc5000/unlock-gen2", s.handleUnlockGen2)
+	g.mux.HandleFunc("POST /v1/sc5000/uninstall-gen2", s.handleUninstallGen2)
+	g.mux.HandleFunc("GET /v1/sc5000/tailscale", s.handleTailscale)
+	g.mux.HandleFunc("POST /v1/sc5000/tailscale", s.handleTailscale)
 	g.mux.HandleFunc("GET /v1/sc5000/mounts", s.handleMounts)
 	g.mux.HandleFunc("POST /v1/sc5000/mounts", s.handleMounts)
 	g.mux.HandleFunc("DELETE /v1/sc5000/mounts", s.handleMounts)
@@ -415,15 +422,38 @@ func tidalNumericID(name string) uint32 { return crc32.ChecksumIEEE([]byte(name)
 
 func isTidal(p string) bool { return strings.HasPrefix(p, "/v1/") || strings.HasPrefix(p, "/au/") }
 
+// canonicalV1 maps /v1/enginex/..., the deck API under the product's name, onto the
+// /v1/sc5000/... routes. Both prefixes reach the same handlers behind the same rules (the
+// loopback check above runs first); /v1/sc5000/ stays for good, since older installers, UI
+// packs and users' scripts call it. One mapping here, not a second copy of each route.
+func canonicalV1(p string) string {
+	if rest, ok := strings.CutPrefix(p, "/v1/enginex"); ok && (rest == "" || rest[0] == '/') {
+		return "/v1/sc5000" + rest
+	}
+	return p
+}
+
+// relayedFromOutside reports a request a tunnel on the deck carried in from elsewhere: it
+// arrives from loopback, but with headers the tunnel's edge always adds and a caller cannot
+// remove. Engine and the deck's own tools never send them.
+func relayedFromOutside(r *http.Request) bool {
+	for _, h := range []string{"Cf-Connecting-Ip", "Cf-Ray", "Cdn-Loop", "Tailscale-User-Login"} {
+		if _, ok := r.Header[h]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 // ServeHTTP folds the "/au//" and "/v1//" joins produced by the patched base
 // URLs. The gateway has no console login, so only the deck itself may use it.
 func (g *tidalGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if ip := net.ParseIP(host); err != nil || ip == nil || !ip.IsLoopback() {
+	if ip := net.ParseIP(host); err != nil || ip == nil || !ip.IsLoopback() || relayedFromOutside(r) {
 		fail(w, 403, errors.New("the streaming gateway is local to the deck"))
 		return
 	}
-	clean := path.Clean(r.URL.Path)
+	clean := canonicalV1(path.Clean(r.URL.Path))
 	if !isTidal(clean + "/") {
 		http.NotFound(w, r)
 		return
