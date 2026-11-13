@@ -72,7 +72,9 @@ func (s *stager) observe(ctx context.Context, d prolink.Device) {
 		defer func() {
 			s.mu.Lock()
 			for _, slot := range slots {
-				delete(s.running, fmt.Sprintf("%s/%d", host.String(), slot))
+				key := fmt.Sprintf("%s/%d", host.String(), slot)
+				s.last[key] = time.Now()
+				delete(s.running, key)
 			}
 			s.mu.Unlock()
 		}()

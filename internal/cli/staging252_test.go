@@ -83,11 +83,6 @@ func TestStaging252HostSlotExclusion(t *testing.T) {
 	// Wait for both queued hosts to finish, then check the cooldown as well.
 	s.copyMu.Lock()
 	s.copyMu.Unlock()
-	s.mu.Lock()
-	for key := range s.last {
-		s.last[key] = time.Now()
-	}
-	s.mu.Unlock()
 	a.Number = 2
 	s.observe(ctx, a)
 	select {
