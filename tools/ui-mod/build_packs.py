@@ -6141,10 +6141,12 @@ def edits(dev: bool):
             ),
         ],
         # Engine asks TIDAL's image server for a row's artwork; the other services' come
-        # from the gateway. The row's provider label marks a streaming row.
+        # from the gateway. The row's provider label marks a streaming row. Like the deck
+        # (scDeckArtUrl), a row Engine has art for keeps it: Remote Library rows carry a
+        # provider label too (#223).
         v + "BrowseView/Components/Components/AlbumArt.qml": [(
             'source: row.modelData.albumArt ? row.modelData.albumArt : ""',
-            'source: row.streamingProviderName && root.scScope !== "tidal" && row.modelData.song'
+            'source: (!row.modelData.albumArt || row.modelData.albumArt === "image://streaming/") && row.streamingProviderName && root.scScope !== "tidal" && row.modelData.song'
             ' ? "http://127.0.0.1:8080/v1/sc5000/art?song=" + encodeURIComponent(root.scPlainTitle(row.modelData.song)) + "&artist=" + encodeURIComponent(row.modelData.artist || "")'
             ' : (row.modelData.albumArt ? row.modelData.albumArt : "")',
         ), (
