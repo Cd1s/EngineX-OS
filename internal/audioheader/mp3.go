@@ -1,6 +1,7 @@
 package audioheader
 
 import (
+	"bufio"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -165,6 +166,78 @@ func OpenMP3(path string) (MP3Info, error) {
 		return MP3Info{}, err
 	}
 	return ReadMP3(f, st.Size())
+}
+
+// PeekMP3StartOffset inspects the first post-ID3 MPEG frame in br without
+// consuming bytes and returns the number of leading decoded PCM samples
+// FFmpeg/Engine trims (Xing/Info frame samples plus LAME/Lavf/Lavc start_pad + 529).
+func PeekMP3StartOffset(br *bufio.Reader) int {
+	hdr, _ := br.Peek(4)
+	if len(hdr) < 4 {
+		return 0
+	}
+	f, ok := decodeMPEGHeader(binary.BigEndian.Uint32(hdr))
+	if !ok || f.layer != 3 {
+		return 0
+	}
+	frame, _ := br.Peek(f.frameSize)
+	if len(frame) < f.frameSize {
+		return 0
+	}
+	p := 4 + f.sideInfo
+	if p+8 > len(frame) {
+		return 0
+	}
+	tag := string(frame[p : p+4])
+	if tag != "Xing" && tag != "Info" {
+		return 0
+	}
+	flags := binary.BigEndian.Uint32(frame[p+4 : p+8])
+	p += 8
+	var frames, headerFilesize uint32
+	fieldsOK := true
+	if flags&0x01 != 0 {
+		if p+4 <= len(frame) {
+			frames = binary.BigEndian.Uint32(frame[p : p+4])
+			p += 4
+		} else {
+			fieldsOK = false
+		}
+	}
+	if fieldsOK && flags&0x02 != 0 {
+		if p+4 <= len(frame) {
+			headerFilesize = binary.BigEndian.Uint32(frame[p : p+4])
+			p += 4
+		} else {
+			fieldsOK = false
+		}
+	}
+	if fieldsOK && flags&0x04 != 0 {
+		if p+100 <= len(frame) {
+			p += 100
+		} else {
+			fieldsOK = false
+		}
+	}
+	if fieldsOK && flags&0x08 != 0 {
+		if p+4 <= len(frame) {
+			p += 4
+		} else {
+			fieldsOK = false
+		}
+	}
+	lameSkip := 0
+	if fieldsOK && p+24 <= len(frame) {
+		prefix := string(frame[p : p+4])
+		if prefix == "LAME" || prefix == "Lavf" || prefix == "Lavc" {
+			v := uint32(frame[p+21])<<16 | uint32(frame[p+22])<<8 | uint32(frame[p+23])
+			lameSkip = int(v>>12) + lameDecoderPad
+		}
+	}
+	if frames == 0 && headerFilesize == 0 {
+		return lameSkip
+	}
+	return f.spf + lameSkip
 }
 
 // ReadMP3 skips any leading ID3v2 tags, parses a leading Layer III Xing/Info +

@@ -177,7 +177,7 @@ func replaceFile(path string, rewrite func(io.Reader, io.Writer) error) error {
 		err = closeErr
 	}
 	if err == nil {
-		err = os.Chmod(tmp.Name(), info.Mode().Perm())
+		err = chmodPerm(tmp.Name(), info.Mode().Perm())
 	}
 	if err != nil {
 		return err

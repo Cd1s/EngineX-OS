@@ -105,6 +105,7 @@ func (a *Analysis) section(tag string, s []byte, h int) error {
 		if len(s) < min {
 			return bad()
 		}
+		listType := be.Uint32(s[12:])
 		n := int(be.Uint16(s[countAt:]))
 		if n > (len(s)-off)/12 {
 			return bad()
@@ -119,14 +120,17 @@ func (a *Analysis) section(tag string, s []byte, h int) error {
 				return bad()
 			}
 			p = p[:size]
+			off += size
 			c := Cue{}
+			var cueType byte
 			if tag == "PCOB" {
 				if size < 56 || string(p[:4]) != "PCPT" {
 					return bad()
 				}
+				cueType = p[28]
 				c.HotCue = be.Uint32(p[12:])
 				c.Active = be.Uint32(p[16:]) == 4
-				c.Loop = p[28] == 2
+				c.Loop = cueType == 2
 				c.TimeMS = be.Uint32(p[32:])
 				c.EndMS = be.Uint32(p[36:])
 			} else {
@@ -134,8 +138,9 @@ func (a *Analysis) section(tag string, s []byte, h int) error {
 					return bad()
 				}
 				c.Extended = true
+				cueType = p[16]
 				c.HotCue = be.Uint32(p[12:])
-				c.Loop = p[16] == 2
+				c.Loop = cueType == 2
 				c.TimeMS = be.Uint32(p[20:])
 				c.EndMS = be.Uint32(p[24:])
 				c.ColorID = p[28]
@@ -156,11 +161,28 @@ func (a *Analysis) section(tag string, s []byte, h int) error {
 					}
 				}
 			}
+			if cueType != 1 && cueType != 2 {
+				continue
+			}
+			if c.TimeMS == 0xffffffff || (c.Loop && c.EndMS == 0xffffffff) {
+				continue
+			}
+			switch listType {
+			case 0:
+				if c.HotCue != 0 {
+					continue
+				}
+			case 1:
+				if c.HotCue < 1 || c.HotCue > 8 {
+					continue
+				}
+			default:
+				continue
+			}
 			if c.Loop && c.EndMS < c.TimeMS {
 				return fmt.Errorf("loop end precedes start")
 			}
 			a.mergeCue(c)
-			off += size
 		}
 	case "PWV3", "PWV5", "PWV7", "PWV4", "PWAV", "PWV2":
 		if len(s) < 20 {

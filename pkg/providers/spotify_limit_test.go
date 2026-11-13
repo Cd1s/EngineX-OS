@@ -56,13 +56,19 @@ func spotifyListsSettled(t *testing.T) {
 	}
 }
 
+type spotifyRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f spotifyRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
 // spotifyTestAPI is a Web API with 120 playlists, 130 liked songs and 250
 // tracks in every playlist. refuse may answer a request itself (a 429).
-func spotifyTestAPI(t *testing.T, refuse func(n int, w http.ResponseWriter, r *http.Request) bool) (*httptest.Server, *atomic.Int32) {
+// Requests are counted on the client side before RoundTrip returns so a
+// cancelled liked-songs request never increments calls after Playlists returns.
+func spotifyTestAPI(t *testing.T, p *Spotify, refuse func(n int, w http.ResponseWriter, r *http.Request) bool) *atomic.Int32 {
 	t.Helper()
-	var calls atomic.Int32
+	var calls, served atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		n := int(calls.Add(1))
+		n := int(served.Add(1))
 		if refuse != nil && refuse(n, w, r) {
 			return
 		}
@@ -97,14 +103,27 @@ func spotifyTestAPI(t *testing.T, refuse func(n int, w http.ResponseWriter, r *h
 		}
 	}))
 	t.Cleanup(srv.Close)
-	return srv, &calls
+	base := srv.Client().Transport
+	p.BaseURL = srv.URL
+	p.HTTP = &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: spotifyRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if err := r.Context().Err(); err != nil {
+				return nil, err
+			}
+			calls.Add(1)
+			return base.RoundTrip(r)
+		}),
+	}
+	return &calls
 }
 
 // #227 (b): a burst that ran into the rolling limit is waited out, as long as
 // Retry-After says, and the listing succeeds.
 func TestSpotifyShortRateLimitIsWaitedOut(t *testing.T) {
 	var refused atomic.Int32
-	srv, calls := spotifyTestAPI(t, func(_ int, w http.ResponseWriter, r *http.Request) bool {
+	p := &Spotify{Token: Token{AccessToken: "own-app"}}
+	calls := spotifyTestAPI(t, p, func(_ int, w http.ResponseWriter, r *http.Request) bool {
 		// The second page of each listing is refused once.
 		if r.URL.Query().Get("offset") == "0" || r.URL.Query().Get("limit") == "1" || refused.Add(1) > 1 {
 			return false
@@ -113,7 +132,6 @@ func TestSpotifyShortRateLimitIsWaitedOut(t *testing.T) {
 		w.WriteHeader(429)
 		return true
 	})
-	p := &Spotify{BaseURL: srv.URL, Token: Token{AccessToken: "own-app"}}
 	_, slept := spotifyTestClock(p)
 	lists, err := p.Playlists(context.Background())
 	if err != nil || len(lists) != 121 || lists[0].ID != SpotifyLikedID || lists[0].Count != 130 {
@@ -148,18 +166,17 @@ func TestSpotifyShortRateLimitIsWaitedOut(t *testing.T) {
 func TestSpotifyQRLoginBrowsesNativelyWhenTheWebAPILimitsIt(t *testing.T) {
 	for _, retryAfter := range []string{"1", "3600", ""} {
 		t.Run("Retry-After "+retryAfter, func(t *testing.T) {
-			srv, calls := spotifyTestAPI(t, func(_ int, w http.ResponseWriter, _ *http.Request) bool {
+			p := spotifyStoredTest(t)
+			calls := spotifyTestAPI(t, p, func(_ int, w http.ResponseWriter, _ *http.Request) bool {
 				if retryAfter != "" {
 					w.Header().Set("Retry-After", retryAfter)
 				}
 				w.WriteHeader(429)
 				return true
 			})
-			p := spotifyStoredTest(t)
 			advance, slept := spotifyTestClock(p)
 			lib := &spotifyLibraryFixture{fakeSpotifyNative: &fakeSpotifyNative{done: make(chan struct{})}}
 			p.native = lib
-			p.BaseURL = srv.URL
 			p.Token = Token{AccessToken: "device-grant", RefreshToken: "r", ClientID: SpotifyBuiltinClientID, Expiry: time.Now().Add(time.Hour)}
 			open := func() {
 				t.Helper()
@@ -217,7 +234,8 @@ func TestSpotifyQRLoginBrowsesNativelyWhenTheWebAPILimitsIt(t *testing.T) {
 func TestSpotifyLastingRateLimitStopsAsking(t *testing.T) {
 	limited := atomic.Bool{}
 	limited.Store(true)
-	srv, calls := spotifyTestAPI(t, func(_ int, w http.ResponseWriter, _ *http.Request) bool {
+	p := &Spotify{Token: Token{AccessToken: "own-app"}}
+	calls := spotifyTestAPI(t, p, func(_ int, w http.ResponseWriter, _ *http.Request) bool {
 		if !limited.Load() {
 			return false
 		}
@@ -225,7 +243,6 @@ func TestSpotifyLastingRateLimitStopsAsking(t *testing.T) {
 		w.WriteHeader(429)
 		return true
 	})
-	p := &Spotify{BaseURL: srv.URL, Token: Token{AccessToken: "own-app"}}
 	advance, slept := spotifyTestClock(p)
 	for i := 0; i < 5; i++ {
 		_, err := p.Playlists(context.Background())
@@ -254,12 +271,12 @@ func TestSpotifyLastingRateLimitStopsAsking(t *testing.T) {
 
 // Short waits that never end are not sat out for ever.
 func TestSpotifyRepeatedShortLimitGivesUp(t *testing.T) {
-	srv, calls := spotifyTestAPI(t, func(_ int, w http.ResponseWriter, _ *http.Request) bool {
+	p := &Spotify{Token: Token{AccessToken: "own-app"}}
+	calls := spotifyTestAPI(t, p, func(_ int, w http.ResponseWriter, _ *http.Request) bool {
 		w.Header().Set("Retry-After", "1")
 		w.WriteHeader(429)
 		return true
 	})
-	p := &Spotify{BaseURL: srv.URL, Token: Token{AccessToken: "own-app"}}
 	_, slept := spotifyTestClock(p)
 	if _, err := p.Tracks(context.Background(), "pl1"); !errors.Is(err, StatusError(429)) {
 		t.Fatalf("tracks: %v", err)

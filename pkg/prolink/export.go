@@ -264,11 +264,10 @@ func (e *Exporter) SetEnabled(on bool) error {
 	if e.run != nil {
 		return nil
 	}
-	r, err := startExport(e.cfg)
+	r, err := startExport(e.cfg, e.deck)
 	if err != nil {
 		return err
 	}
-	r.deck = e.deck
 	e.run = r
 	return nil
 }
@@ -287,7 +286,7 @@ func (e *Exporter) Rebind() error {
 	}
 	e.run.close()
 	e.run = nil
-	r, err := startExport(e.cfg)
+	r, err := startExport(e.cfg, e.deck)
 	if err != nil {
 		return err
 	}
@@ -346,7 +345,7 @@ type exportRun struct {
 	nfs               *NFSServer
 	db                *DBServer
 	discovery, status *net.UDPConn
-	beat              *net.UDPConn // nil without Observe or when the port is taken
+	beat              *net.UDPConn // nil when the port is taken
 	deck              ExportDeck
 	handoff           byte // the player we agreed to hand master to
 	// Tempo master on the link (#217). yielded: that player took it, so our
@@ -403,10 +402,10 @@ func MountedExports() []string {
 			continue
 		}
 		root := strings.NewReplacer(`\040`, " ", `\011`, "\t", `\134`, `\`).Replace(fields[1])
-		pdb, pdbErr := os.Stat(filepath.Join(root, "PIONEER", "rekordbox", "export.pdb"))
 		mdb, mdbErr := os.Stat(filepath.Join(root, "Engine Library", "Database2", "m.db"))
-		// A rekordbox export, or an Engine library the bridge exports for CDJs (#63).
-		if pdbErr == nil && pdb.Mode().IsRegular() || mdbErr == nil && mdb.Mode().IsRegular() {
+		hasMDB := mdbErr == nil && mdb.Mode().IsRegular()
+		// A rekordbox export.pdb (PIONEER or .PIONEER), or an Engine library the bridge exports for CDJs (#63).
+		if hasExportPDB(root) || (hasMDB && !hasNativeRekordboxExport(root)) {
 			roots = append(roots, root)
 		}
 	}
@@ -517,7 +516,7 @@ func exportIdentity(cfg ExportConfig) (net.IP, net.HardwareAddr, net.IP, *net.IP
 	return nil, nil, nil, nil, errors.New("prolink: no IPv4 interface for export")
 }
 
-func startExport(cfg ExportConfig) (*exportRun, error) {
+func startExport(cfg ExportConfig, deck ExportDeck) (*exportRun, error) {
 	root := cfg.Root
 	if root == "" {
 		roots := MountedExports()
@@ -543,16 +542,28 @@ func startExport(cfg ExportConfig) (*exportRun, error) {
 		return nil, err
 	}
 	nfs := &NFSServer{Root: root, StreamDirs: StreamDirs}
-	rel := ""
-	for _, part := range []string{"PIONEER", "rekordbox", "export.pdb"} {
-		var status uint32
-		rel, status = nfs.child(rel, part)
-		if status != nfsOK {
-			return nil, errors.New("prolink: invalid export.pdb path")
+	resolveExportPDB := func(pdir string) (string, error) {
+		rel := ""
+		for _, part := range []string{pdir, "rekordbox", "export.pdb"} {
+			var status uint32
+			rel, status = nfs.child(rel, part)
+			if status != nfsOK {
+				return "", errors.New("prolink: invalid export.pdb path")
+			}
+			if _, status = nfs.stat(rel); status != nfsOK {
+				return "", errors.New("prolink: export.pdb must not follow symlinks")
+			}
 		}
-		if _, status = nfs.stat(rel); status != nfsOK {
-			return nil, errors.New("prolink: export.pdb must not follow symlinks")
+		return rel, nil
+	}
+	rel, err := resolveExportPDB("PIONEER")
+	if err != nil {
+		if dotRel, dotErr := resolveExportPDB(".PIONEER"); dotErr == nil {
+			rel, err = dotRel, nil
 		}
+	}
+	if err != nil {
+		return nil, err
 	}
 	pdb := filepath.Join(root, rel)
 	fs, err := os.OpenRoot(root)
@@ -599,7 +610,7 @@ func startExport(cfg ExportConfig) (*exportRun, error) {
 		}
 		return net.JoinHostPort(ip.String(), port)
 	}
-	r := &exportRun{network: network, observe: cfg.Observe, nfs: nfs, ip: ip, mac: mac, lib: lib, pdb: pdb, pdbInfo: st, peers: make(map[string]exportPeer), mounted: true, done: make(chan struct{}), wake: make(chan struct{}, 1)}
+	r := &exportRun{network: network, observe: cfg.Observe, nfs: nfs, deck: deck, ip: ip, mac: mac, lib: lib, pdb: pdb, pdbInfo: st, peers: make(map[string]exportPeer), mounted: true, done: make(chan struct{}), wake: make(chan struct{}, 1)}
 	var disk syscall.Statfs_t
 	if syscall.Statfs(root, &disk) == nil {
 		r.capacity = uint64(disk.Blocks) * uint64(disk.Bsize)
@@ -658,13 +669,13 @@ func startExport(cfg ExportConfig) (*exportRun, error) {
 		r.updates = make(chan Device, 16)
 		r.wg.Add(1)
 		go r.observeLoop()
-		if r.beat, err = listenLinkUDP(beatAddress(cfg, ip), true); err != nil {
-			log.Printf("prolink: no absolute positions on the beat port: %v", err)
-			r.beat, err = nil, nil
-		} else {
-			r.wg.Add(1)
-			go r.receiveBeats()
-		}
+	}
+	if r.beat, err = listenLinkUDP(beatAddress(cfg, ip), true); err != nil {
+		log.Printf("prolink: no absolute positions on the beat port: %v", err)
+		r.beat, err = nil, nil
+	} else {
+		r.wg.Add(1)
+		go r.receiveBeats()
 	}
 	r.wg.Add(4)
 	go r.receivePeers()
@@ -719,6 +730,7 @@ func (r *exportRun) chooseLocked(now time.Time) {
 			}
 		}
 	}
+	r.first = len(r.peers) == 0
 	old := r.player
 	r.player = 0
 	if !r.probed || !r.mounted || now.Before(r.floodUntil) {
@@ -921,8 +933,10 @@ func (r *exportRun) receiveBeats() {
 			r.mu.Unlock()
 			continue
 		}
-		if d, err := ParsePacket(b[:n], 50001, addr.IP); err == nil && d.PacketType == 0x0b && d.Number >= 1 && d.Number <= 6 && r.network.Contains(addr.IP) {
-			r.observe(d)
+		if r.observe != nil {
+			if d, err := ParsePacket(b[:n], 50001, addr.IP); err == nil && d.PacketType == 0x0b && d.Number >= 1 && d.Number <= 6 && r.network.Contains(addr.IP) {
+				r.observe(d)
+			}
 		}
 	}
 }
@@ -983,9 +997,10 @@ func (r *exportRun) announceLoop(probe time.Duration) {
 		case <-r.done:
 			return
 		case <-timer.C:
+			st, err := os.Stat(r.pdb)
 			r.mu.Lock()
 			r.probed = true
-			r.first = len(r.peers) == 0
+			r.mounted = err == nil && os.SameFile(r.pdbInfo, st) && r.pdbInfo.ModTime().Equal(st.ModTime()) && r.pdbInfo.Size() == st.Size()
 			r.chooseLocked(time.Now())
 			r.mu.Unlock()
 		case <-statusTicker.C:
@@ -1105,8 +1120,10 @@ func (r *exportRun) statusPacket() []byte {
 			binary.BigEndian.PutUint16(b[0x92:], uint16(math.Round(d.BPM*100)))
 		}
 		if f := 1 + d.Pitch/100; f > 0 {
-			binary.BigEndian.PutUint32(b[0x8c:], uint32(math.Round(0x100000*f)))
-			binary.BigEndian.PutUint32(b[0x98:], uint32(math.Round(0x100000*f)))
+			rawPitch := uint32(math.Round(0x100000 * f))
+			for _, off := range []int{0x8c, 0x98, 0xc0, 0xc4} {
+				binary.BigEndian.PutUint32(b[off:], rawPitch)
+			}
 		}
 	}
 	if r.handoff != 0 && master {

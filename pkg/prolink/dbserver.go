@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"sort"
 	"strings"
@@ -197,16 +198,16 @@ func (s *DBServer) Listen(address string) error {
 	if active {
 		return errors.New("prolink: dbserver already listening")
 	}
-	s.tracks = make(map[uint32]rekordbox.Track, len(s.Library.Tracks))
+	tracks := make(map[uint32]rekordbox.Track, len(s.Library.Tracks))
 	for _, t := range s.Library.Tracks {
-		s.tracks[t.ID] = t
+		tracks[t.ID] = t
 	}
-	s.trackItems = make([]dbItem, 0, len(s.Library.Tracks))
+	trackItems := make([]dbItem, 0, len(s.Library.Tracks))
 	for _, t := range s.Library.Tracks {
-		s.trackItems = append(s.trackItems, dbItem{id: t.ID, kind: 0x0704, label: t.Title, secondary: t.Artist})
+		trackItems = append(trackItems, dbItem{id: t.ID, kind: 0x0704, label: t.Title, secondary: t.Artist})
 	}
-	sort.SliceStable(s.trackItems, func(i, j int) bool {
-		return strings.ToUpper(s.trackItems[i].label) < strings.ToUpper(s.trackItems[j].label)
+	sort.SliceStable(trackItems, func(i, j int) bool {
+		return strings.ToUpper(trackItems[i].label) < strings.ToUpper(trackItems[j].label)
 	})
 	l, err := net.Listen("tcp4", address)
 	if err != nil {
@@ -218,6 +219,7 @@ func (s *DBServer) Listen(address string) error {
 		l.Close()
 		return errors.New("prolink: dbserver already listening")
 	}
+	s.tracks, s.trackItems = tracks, trackItems
 	s.listener, s.clients = l, make(map[net.Conn]bool)
 	s.mu.Unlock()
 	s.wg.Add(1)
@@ -365,7 +367,10 @@ func (s *DBServer) serve(c net.Conn, port uint16) {
 			}
 			start := min(uint64(m.args[1].n), uint64(len(items)))
 			end := min(start+uint64(m.args[2].n), uint64(len(items)))
-			for _, item := range items[start:end] {
+			for idx, item := range items[start:end] {
+				if idx > 0 && idx%256 == 0 {
+					_ = c.SetDeadline(time.Now().Add(30 * time.Second))
+				}
 				if reply(0x4101, item.fields()...) != nil {
 					return
 				}
@@ -384,13 +389,18 @@ func (s *DBServer) serve(c net.Conn, port uint16) {
 		}
 		// Menu locations are independent (main, submenu, metadata, etc.).
 		key := m.args[0].n
-		if _, ok := menus[key]; !ok {
-			if len(menuOrder) == 4 {
-				delete(menus, menuOrder[0])
-				menuOrder = menuOrder[1:]
+		if _, ok := menus[key]; ok {
+			for i, k := range menuOrder {
+				if k == key {
+					menuOrder = append(menuOrder[:i], menuOrder[i+1:]...)
+					break
+				}
 			}
-			menuOrder = append(menuOrder, key)
+		} else if len(menuOrder) == 4 {
+			delete(menus, menuOrder[0])
+			menuOrder = menuOrder[1:]
 		}
+		menuOrder = append(menuOrder, key)
 		menus[key] = items
 		if reply(0x4000, dbNumber(uint32(m.kind)), dbNumber(uint32(len(items)))) != nil {
 			return
@@ -467,7 +477,7 @@ func (s *DBServer) query(m dbMessage) ([]dbItem, error) {
 				items = append(items, dbItem{parent: uint32(t.FileSize), id: t.ID, kind: 0, label: t.Path})
 				return items, nil
 			}
-			return []dbItem{{id: t.ID, kind: 4, label: t.Title}, {kind: 7, label: t.Artist}, {kind: 2, label: t.Album}, {kind: 0xb, id: uint32(t.Duration)}, {kind: 0xd, id: uint32(t.BPM * 100)}, {kind: 0xf, label: t.Key}, {kind: 0x23, label: t.Comment}}, nil
+			return []dbItem{{id: t.ID, kind: 4, label: t.Title}, {kind: 7, label: t.Artist}, {kind: 2, label: t.Album}, {kind: 0xb, id: uint32(math.Round(t.Duration))}, {kind: 0xd, id: uint32(math.Round(t.BPM * 100))}, {kind: 0xf, label: t.Key}, {kind: 0x23, label: t.Comment}}, nil
 		}
 	}
 	return nil, fmt.Errorf("prolink: unavailable dbserver query 0x%04x", m.kind)

@@ -55,7 +55,12 @@ func (r tickReader) Read(p []byte) (int, error) {
 // Oversized tracks fail explicitly rather than exhausting the player's RAM.
 const MaxDecodedSamples = 32 * 1024 * 1024
 
-func decodeFile(path string, ticker Ticker) (*Audio, error) {
+func decodeFile(path string, ticker Ticker) (audio *Audio, err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			audio, err = nil, fmt.Errorf("analyzer: malformed audio: %v", p)
+		}
+	}()
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -73,8 +78,7 @@ func decodeFile(path string, ticker Ticker) (*Audio, error) {
 		return DecodeFLAC(br)
 	case len(head) >= 4 && string(head[0:4]) == "OggS":
 		return decodeOggVorbis(br, ticker, MaxDecodedSamples)
-	case len(head) >= 3 && string(head[0:3]) == "ID3",
-		len(head) >= 2 && head[0] == 0xFF && head[1]&0xE0 == 0xE0:
+	case len(head) >= 2 && head[0] == 0xFF && head[1]&0xE0 == 0xE0:
 		return DecodeMP3(br)
 	}
 	return nil, fmt.Errorf("analyzer: unsupported audio format: %s", path)
@@ -89,7 +93,12 @@ const (
 
 // DecodeWAV 解码 PCM 8/16/24/32 bit 与 IEEE float 32/64 bit 的 WAV，
 // 包括 WAVEFORMATEXTENSIBLE 头（子格式 GUID 的前两字节即格式码）。
-func DecodeWAV(r io.Reader) (*Audio, error) {
+func DecodeWAV(r io.Reader) (audio *Audio, err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			audio, err = nil, fmt.Errorf("analyzer: wav: malformed stream: %v", p)
+		}
+	}()
 	var riff [12]byte
 	if _, err := io.ReadFull(r, riff[:]); err != nil {
 		return nil, err
@@ -221,7 +230,12 @@ func decodeWAVData(r io.Reader, format, channels, sampleRate, bits int) (*Audio,
 }
 
 // DecodeFLAC 用纯 Go 的 mewkiz/flac 解码。
-func DecodeFLAC(r io.Reader) (*Audio, error) {
+func DecodeFLAC(r io.Reader) (audio *Audio, err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			audio, err = nil, fmt.Errorf("analyzer: flac: malformed stream: %v", p)
+		}
+	}()
 	br := bufio.NewReader(r)
 	if err := audioheader.SkipID3(br); err != nil {
 		return nil, err
@@ -287,12 +301,18 @@ func DecodeFLAC(r io.Reader) (*Audio, error) {
 }
 
 // DecodeMP3 用纯 Go 的 go-mp3 解码（Deemix 回退到 MP3 320k 时使用）。
-func DecodeMP3(r io.Reader) (*Audio, error) {
+func DecodeMP3(r io.Reader) (audio *Audio, err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			audio, err = nil, fmt.Errorf("analyzer: mp3: malformed stream: %v", p)
+		}
+	}()
 	// go-mp3 不跳过 ID3v2 标签，这里手动跳过。
-	br := bufio.NewReader(r)
+	br := bufio.NewReaderSize(r, 8192)
 	if err := audioheader.SkipID3(br); err != nil {
 		return nil, err
 	}
+	startTrim := audioheader.PeekMP3StartOffset(br)
 	dec, err := mp3.NewDecoder(br)
 	if err != nil {
 		return nil, fmt.Errorf("analyzer: mp3: %w", err)
@@ -303,13 +323,18 @@ func DecodeMP3(r io.Reader) (*Audio, error) {
 	}
 	a := &Audio{SampleRate: sampleRate, Channels: 2, BitsPerSample: 16, Format: "mp3"}
 	buf := make([]byte, 4*4096)
+	trimmed := 0
 	for {
 		n, err := io.ReadFull(dec, buf)
-		if len(a.Samples)+n/4 > MaxDecodedSamples {
-			return nil, errors.New("analyzer: PCM memory limit exceeded")
-		}
 		n -= n % 4
 		for off := 0; off < n; off += 4 {
+			if trimmed < startTrim {
+				trimmed++
+				continue
+			}
+			if len(a.Samples)+1 > MaxDecodedSamples {
+				return nil, errors.New("analyzer: PCM memory limit exceeded")
+			}
 			l := int16(binary.LittleEndian.Uint16(buf[off:]))
 			rr := int16(binary.LittleEndian.Uint16(buf[off+2:]))
 			a.Samples = append(a.Samples, float32((float64(l)+float64(rr))/65536))

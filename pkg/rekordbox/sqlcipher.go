@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"testing"
 )
 
 // Rekordbox OneLibrary SQLCipher 4 passphrase from pyrekordbox/onelibrary/database.py (deobfuscate(BLOB)).
@@ -175,12 +176,19 @@ func DecryptSQLCipher4(ctx context.Context, r io.Reader, size int64, w io.Writer
 
 // The plaintext copy goes to the EngineX state directory on /data (eMMC), not
 // to /tmp, which is a RAM tmpfs on the decks (SC5000: 1 GB of 2 GB RAM).
-// Hosts without /data/enginex (development, tests) use the system temp dir.
-var oneLibraryTempDir = func() string {
-	if st, err := os.Stat("/data/enginex"); err == nil && st.IsDir() {
-		return "/data/enginex/tmp"
+// Tests and hosts without /data/enginex always use the system temp dir so
+// running go test never writes to a build host's /data/enginex/tmp.
+func selectOneLibraryTempDir(dataRoot string, inTest bool) string {
+	if !inTest {
+		if st, err := os.Stat(dataRoot); err == nil && st.IsDir() {
+			return filepath.Join(dataRoot, "tmp")
+		}
 	}
 	return os.TempDir()
+}
+
+var oneLibraryTempDir = func() string {
+	return selectOneLibraryTempDir("/data/enginex", testing.Testing())
 }
 
 // freeBytes reports the space available to us on the filesystem of dir.

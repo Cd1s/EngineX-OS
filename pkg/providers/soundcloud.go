@@ -12,6 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -81,6 +82,10 @@ func (a *SoundCloudAuth) Token(ctx context.Context, id, secret string) (string, 
 		err = a.post(ctx, form, id, secret, &r)
 	}
 	if err != nil {
+		var st StatusError
+		if errors.As(err, &st) && (st == 400 || st == 401) {
+			return "", fmt.Errorf("soundcloud: invalid credentials: %w", StatusError(401))
+		}
 		return "", err
 	}
 	a.saved.ClientID, a.saved.Access, a.saved.Refresh, a.saved.Expiry = id, r.Access, r.Refresh, r.expiry()
@@ -177,7 +182,7 @@ func (a *SoundCloudAuth) UserToken(ctx context.Context, id, secret string) (stri
 	}
 	if a.saved.UserRefresh == "" {
 		a.dropUser()
-		return "", errors.New("soundcloud: login expired")
+		return "", fmt.Errorf("soundcloud: login expired: %w", StatusError(401))
 	}
 	var r soundCloudTokenResponse
 	form := url.Values{"grant_type": {"refresh_token"}, "refresh_token": {a.saved.UserRefresh}}
@@ -187,6 +192,7 @@ func (a *SoundCloudAuth) UserToken(ctx context.Context, id, secret string) (stri
 		var st StatusError
 		if errors.As(err, &st) && (st == 400 || st == 401) {
 			a.dropUser()
+			return "", fmt.Errorf("soundcloud: login expired: %w", StatusError(401))
 		}
 		return "", err
 	}
@@ -296,12 +302,14 @@ func (s *SoundCloud) site() string {
 // webClientID finds the public client ID in soundcloud.com's scripts. SoundCloud
 // changes it now and then, so a refused one is looked up again.
 func (s *SoundCloud) webClientID(ctx context.Context, renew bool) (string, error) {
+	site := s.site()
 	scWebMu.Lock()
-	defer scWebMu.Unlock()
-	if id := scWebIDs[s.site()]; id != "" && !renew {
+	if id := scWebIDs[site]; id != "" && !renew {
+		scWebMu.Unlock()
 		return id, nil
 	}
-	page, err := s.text(ctx, s.site()+"/")
+	scWebMu.Unlock()
+	page, err := s.text(ctx, site+"/")
 	if err != nil {
 		return "", err
 	}
@@ -313,7 +321,9 @@ func (s *SoundCloud) webClientID(ctx context.Context, renew bool) (string, error
 			continue
 		}
 		if m := scClientIDRe.FindStringSubmatch(js); m != nil {
-			scWebIDs[s.site()] = m[1]
+			scWebMu.Lock()
+			scWebIDs[site] = m[1]
+			scWebMu.Unlock()
 			return m[1], nil
 		}
 	}
@@ -438,8 +448,8 @@ func (s *SoundCloud) headers(ctx context.Context) (http.Header, error) {
 	default:
 		return nil, errors.New("soundcloud: not connected")
 	}
-	if err != nil && appKeys && !s.Auth.HasUser() {
-		// The account login expired for good: carry on as without one.
+	if err != nil && appKeys && !s.Auth.HasUser() && (s.Token != "" || s.UserID != 0) {
+		// The account login expired for good: carry on as without one when a pasted token or public UserID exists.
 		if token, err = s.Token, nil; token == "" {
 			token, err = s.Auth.Token(ctx, s.ClientID, s.Secret)
 		}
@@ -451,15 +461,36 @@ func (s *SoundCloud) headers(ctx context.Context) (http.Header, error) {
 	return h, nil
 }
 
+func (a *SoundCloudAuth) invalidateUser(stale string) {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.load()
+	if stale != "" && a.saved.UserAccess == stale {
+		a.saved.UserExpiry = time.Time{}
+	}
+}
+
 func (s *SoundCloud) get(ctx context.Context, address string, out any) error {
 	if s.web() {
 		return s.webGet(ctx, address, out)
 	}
+	hadUser := s.Auth != nil && s.Auth.HasUser()
 	h, err := s.headers(ctx)
 	if err != nil {
 		return err
 	}
-	return JSON(ctx, s.HTTP, "GET", address, nil, h, out)
+	err = JSON(ctx, s.HTTP, "GET", address, nil, h, out)
+	var st StatusError
+	if hadUser && errors.As(err, &st) && st == 401 && s.ClientID != "" && s.Secret != "" {
+		s.Auth.invalidateUser(strings.TrimPrefix(h.Get("Authorization"), "OAuth "))
+		if h2, rerr := s.headers(ctx); rerr == nil {
+			return JSON(ctx, s.HTTP, "GET", address, nil, h2, out)
+		}
+	}
+	return err
 }
 
 func (s *SoundCloud) list(path string, q url.Values) string {
@@ -596,30 +627,27 @@ func (p *scPlaylist) UnmarshalJSON(b []byte) error {
 	return json.Unmarshal(b, (*plain)(p))
 }
 
-func (s *SoundCloud) playlistPages(ctx context.Context, address, prefix string, out []Playlist) []Playlist {
+func (s *SoundCloud) playlistPages(ctx context.Context, address, prefix string, out []Playlist) ([]Playlist, error) {
 	for address != "" && len(out) < soundCloudListLimit {
 		var r struct {
 			Collection []scPlaylist `json:"collection"`
 			Next       string       `json:"next_href"`
 		}
-		if s.get(ctx, address, &r) != nil {
-			return out // what was already read is still worth showing
+		if err := s.get(ctx, address, &r); err != nil {
+			return out, err
 		}
 		for _, p := range r.Collection {
 			out = append(out, Playlist{strconv.FormatInt(p.ID, 10), prefix + p.Title, p.TrackCount})
 		}
 		address = s.nextPage(r.Next)
 	}
-	return out
+	return out, nil
 }
 
 // library is where the account's own lists live. A user's token also reaches private
 // ones through /me; otherwise it is the public profile.
 func (s *SoundCloud) library() (string, error) {
-	if s.web() && s.UserID != 0 {
-		return "/users/" + strconv.FormatInt(s.UserID, 10), nil
-	}
-	if s.Token != "" || s.Auth.HasUser() {
+	if s.Token != "" || (!s.web() && s.Auth.HasUser()) {
 		return "/me", nil
 	}
 	if s.UserID != 0 {
@@ -636,8 +664,29 @@ func (s *SoundCloud) Playlists(ctx context.Context) ([]Playlist, error) {
 	}
 	q := func() url.Values { return url.Values{"limit": {"100"}, "show_tracks": {"false"}} }
 	out := []Playlist{{ID: soundCloudLikesID, Title: "Liked Tracks & Sets（我点赞的音乐）"}}
-	out = s.playlistPages(ctx, s.list(root+"/playlists", q()), "", out)
-	return s.playlistPages(ctx, s.list(root+s.path("/likes/playlists", "/playlist_likes"), q()), "【收藏】", out), nil
+	out, err = s.playlistPages(ctx, s.list(root+"/playlists", q()), "", out)
+	var st StatusError
+	if errors.As(err, &st) && st == 404 && s.web() && root == "/me" && s.UserID != 0 {
+		root = "/users/" + strconv.FormatInt(s.UserID, 10)
+		out, err = s.playlistPages(ctx, s.list(root+"/playlists", q()), "", out)
+	}
+	if err != nil {
+		return nil, err
+	}
+	likesPath := s.path("/likes/playlists", "/playlist_likes")
+	var likeErr error
+	out, likeErr = s.playlistPages(ctx, s.list(root+likesPath, q()), "【收藏】", out)
+	if errors.As(likeErr, &st) && st == 404 && s.web() && root == "/me" && s.UserID != 0 {
+		out, likeErr = s.playlistPages(ctx, s.list("/users/"+strconv.FormatInt(s.UserID, 10)+likesPath, q()), "【收藏】", out)
+	}
+	if likeErr != nil {
+		var lst StatusError
+		if errors.As(likeErr, &lst) && lst == 404 {
+			return out, nil
+		}
+		return nil, likeErr
+	}
+	return out, nil
 }
 
 func (s *SoundCloud) trackPages(ctx context.Context, address string) ([]Track, error) {
@@ -648,9 +697,6 @@ func (s *SoundCloud) trackPages(ctx context.Context, address string) ([]Track, e
 			Next       string    `json:"next_href"`
 		}
 		if err := s.get(ctx, address, &r); err != nil {
-			if len(out) > 0 {
-				return out, nil
-			}
 			return nil, err
 		}
 		for _, t := range r.Collection {
@@ -677,10 +723,19 @@ func (s *SoundCloud) Tracks(ctx context.Context, id string) ([]Track, error) {
 			q.Del("access") // some accounts' likes refuse the filter
 			out, err = s.trackPages(ctx, address())
 		}
+		if errors.As(err, &st) && st == 404 && s.web() && root == "/me" && s.UserID != 0 {
+			out, err = s.trackPages(ctx, s.list("/users/"+strconv.FormatInt(s.UserID, 10)+"/track_likes", q))
+		}
 		if errors.As(err, &st) && (st == 400 || st == 401 || st == 403) && !s.web() && s.UserID != 0 {
 			// The login or app token is refused: a public profile's likes still read.
-			w := *s
-			w.ClientID, w.Secret, w.Token = "", "", ""
+			w := &SoundCloud{
+				BaseURL:  s.BaseURL,
+				HTTP:     s.HTTP,
+				UserID:   s.UserID,
+				Username: s.Username,
+				WebURL:   s.WebURL,
+				SiteURL:  s.SiteURL,
+			}
 			return w.Tracks(ctx, id)
 		}
 		return out, err
@@ -712,13 +767,15 @@ func (s *SoundCloud) webPlaylistTracks(ctx context.Context, id string) ([]Track,
 			missing = append(missing, strconv.FormatInt(t.ID, 10))
 		}
 	}
-	// Preserve the successful prefix if a detail batch fails, as before.
-	got, _ := collectBatches(ctx, soundcloudPages, (len(missing)+49)/50, func(batch int) ([]scTrack, error) {
+	got, err := collectBatches(ctx, soundcloudPages, (len(missing)+49)/50, func(batch int) ([]scTrack, error) {
 		start := batch * 50
 		var tracks []scTrack
 		err := s.get(ctx, s.base()+"/tracks?"+url.Values{"ids": {strings.Join(missing[start:min(start+50, len(missing))], ",")}}.Encode(), &tracks)
 		return tracks, err
 	})
+	if err != nil {
+		return nil, err
+	}
 	for _, t := range got {
 		full[t.ID] = t
 	}

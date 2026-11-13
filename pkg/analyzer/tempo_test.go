@@ -99,6 +99,29 @@ func TestCombSearchRejectsInvalidRangeBeforeIteration(t *testing.T) {
 	}
 }
 
+func TestAnalyzeFirstBeatAlignsWithKickTransients(t *testing.T) {
+	for _, sr := range []int{44100, 48000} {
+		x := make([]float32, sr*8)
+		for i := range x {
+			sec := float64(i) / float64(sr)
+			if sec < 0.25 {
+				continue
+			}
+			phase := math.Mod(sec-0.25, 0.5)
+			if phase < 0.06 {
+				x[i] = float32(0.8 * math.Exp(-phase*90) * math.Sin(2*math.Pi*70*phase))
+			}
+		}
+		res, err := Analyze(&Audio{SampleRate: sr, Channels: 1, BitsPerSample: 16, Samples: x}, Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if delta := math.Abs(res.FirstBeat - 0.25); delta > 0.015 {
+			t.Fatalf("sr=%d: FirstBeat=%0.4fs (delta=%0.1fms from 0.2500s kick, want <= 15ms)", sr, res.FirstBeat, delta*1000)
+		}
+	}
+}
+
 func TestFoldBPMStaysInsideANarrowWindow(t *testing.T) {
 	for _, c := range []struct{ bpm, lo, hi, want float64 }{
 		{87.9, 88, 175, 88},    // no octave of 87.9 lies in [88, 175]; 88 is nearer

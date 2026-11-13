@@ -84,7 +84,7 @@ func LocalRender(in io.Reader, out io.Writer) error {
 	ch, _ := strconv.Atoi(init["numChannels"])
 	rate, _ := strconv.ParseFloat(init["sampleRate"], 64)
 	maxBlock, _ := strconv.Atoi(init["maxBlockSize"])
-	if ch < 1 || ch > 2 || rate < 8000 || rate > 192000 || maxBlock < 1 || maxBlock > 65536 {
+	if ch < 1 || ch > 2 || !(rate >= 8000 && rate <= 192000) || maxBlock < 1 || maxBlock > 65536 {
 		return fmt.Errorf("stems: unsupported init %v", init)
 	}
 	if err = send(fmt.Sprintf("preparing=ready\n\npreparing=ready\nnumReturnChannels=%d\n\n", 4*ch)); err != nil {

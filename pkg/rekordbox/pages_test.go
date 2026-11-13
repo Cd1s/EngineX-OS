@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"runtime"
 	"testing"
 )
 
@@ -100,5 +101,39 @@ func TestPDBLiveRowInsideWhatAFullGroupWouldReserve(t *testing.T) {
 	}
 	if len(l.Keys) != 20 || l.Keys[20] != "20A" {
 		t.Fatalf("%v", l.Keys)
+	}
+}
+
+func TestPDBRejectsDuplicateTablePageChainsWithoutMemoryBlowup(t *testing.T) {
+	const ps = 65536
+	const nt = 128
+	buf := make([]byte, 2*ps)
+	le := binary.LittleEndian
+	le.PutUint32(buf[4:], ps)
+	le.PutUint32(buf[8:], nt)
+	for i := 0; i < nt; i++ {
+		le.PutUint32(buf[28+i*16:], 16)
+		le.PutUint32(buf[36+i*16:], 1)
+		le.PutUint32(buf[40+i*16:], 1)
+	}
+	p := buf[ps:]
+	le.PutUint32(p[4:], 1)
+	le.PutUint32(p[8:], 16)
+	le.PutUint32(p[24:], 8191)
+	for i := 0; i < 8191; i++ {
+		base := ps - (i/16)*36
+		le.PutUint16(p[base-6-2*(i%16):], uint16(i))
+		le.PutUint16(p[base-4:], 0xffff)
+	}
+
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	l, err := ParsePDB(bytes.NewReader(buf), int64(len(buf)))
+	runtime.ReadMemStats(&after)
+	if err == nil {
+		t.Fatalf("ParsePDB accepted shared table page chain (Columns=%d)", len(l.Columns))
+	}
+	if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 4<<20 {
+		t.Fatalf("ParsePDB allocated %d bytes (>4 MiB) before rejecting shared page chain", alloc)
 	}
 }

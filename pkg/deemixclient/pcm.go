@@ -206,9 +206,14 @@ func pcmToFLAC(src string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// Disable mewkiz/flac's built-in analysis: its 32-bit int bit-cost accumulator
+	// overflows on 24-bit and high-residual PCM on armhf, picking k=0 and inflating
+	// unary residuals by >200,000x. analyzeSubframe64 performs 64-bit analysis instead.
+	enc.EnablePredictionAnalysis(false)
 	channels := frame.Channels(p.channels - 1) // independent channels, in order
 	r := bufio.NewReaderSize(io.NewSectionReader(in, p.offset, p.length), 1<<20)
 	raw := make([]byte, flacBlock*p.frameBytes())
+	resBuf := make([]int32, flacBlock)
 	for left := frames; left > 0; {
 		n := int(min(left, flacBlock))
 		if _, err := io.ReadFull(r, raw[:n*p.frameBytes()]); err != nil {
@@ -223,6 +228,9 @@ func pcmToFLAC(src string) (string, error) {
 			for c := 0; c < p.channels; c++ {
 				f.Subframes[c].Samples[i] = pcmSample(raw[(i*p.channels+c)*width:], width, p.bigEndian, p.unsigned)
 			}
+		}
+		for c := 0; c < p.channels; c++ {
+			analyzeSubframe64(f.Subframes[c], uint(p.bits), resBuf)
 		}
 		if err := enc.WriteFrame(f); err != nil {
 			return "", err
@@ -259,5 +267,108 @@ func pcmSample(b []byte, width int, bigEndian, unsigned bool) int32 {
 			return int32(uint32(b[0])<<24|uint32(b[1])<<16|uint32(b[2])<<8) >> 8
 		}
 		return int32(uint32(b[2])<<24|uint32(b[1])<<16|uint32(b[0])<<8) >> 8
+	}
+}
+
+// analyzeSubframe64 selects constant, fixed (orders 0..4 with Rice1/Rice2), or
+// verbatim encoding using uint64 bit-cost accumulation so 24-bit and high-residual
+// blocks never overflow 32-bit int on armhf.
+func analyzeSubframe64(sf *frame.Subframe, bps uint, resBuf []int32) {
+	samples := sf.Samples
+	n := len(samples)
+	if n < 2 {
+		sf.Pred = frame.PredVerbatim
+		sf.Order = 0
+		sf.RiceSubframe = nil
+		return
+	}
+	allEqual := true
+	for i := 1; i < n; i++ {
+		if samples[i] != samples[0] {
+			allEqual = false
+			break
+		}
+	}
+	if allEqual {
+		sf.Pred = frame.PredConstant
+		sf.Order = 0
+		sf.RiceSubframe = nil
+		return
+	}
+
+	verbatimBits := uint64(8) + uint64(n)*uint64(bps)
+	bestBits := verbatimBits
+	bestOrder := 0
+	bestK := uint(0)
+	useFixed := false
+
+	maxK := uint(14)
+	if bps > 16 {
+		maxK = 24
+	}
+
+	for order := 0; order <= 4 && order < n; order++ {
+		res := resBuf[:n-order]
+		overflow := false
+		for i := order; i < n; i++ {
+			var pred int64
+			switch order {
+			case 1:
+				pred = int64(samples[i-1])
+			case 2:
+				pred = 2*int64(samples[i-1]) - int64(samples[i-2])
+			case 3:
+				pred = 3*int64(samples[i-1]) - 3*int64(samples[i-2]) + int64(samples[i-3])
+			case 4:
+				pred = 4*int64(samples[i-1]) - 6*int64(samples[i-2]) + 4*int64(samples[i-3]) - int64(samples[i-4])
+			}
+			d := int64(samples[i]) - pred
+			if d < math.MinInt32 || d > math.MaxInt32 {
+				overflow = true
+				break
+			}
+			res[i-order] = int32(d)
+		}
+		if overflow {
+			continue
+		}
+		for k := uint(0); k <= maxK; k++ {
+			paramBits := uint64(4)
+			if k > 14 {
+				paramBits = 5
+			}
+			bits := uint64(8) + uint64(order)*uint64(bps) + 2 + 4 + paramBits
+			for _, r := range res {
+				folded := uint32((r << 1) ^ (r >> 31))
+				bits += uint64(folded>>k) + 1 + uint64(k)
+				if bits >= bestBits {
+					break
+				}
+			}
+			if bits < bestBits {
+				bestBits = bits
+				bestOrder = order
+				bestK = k
+				useFixed = true
+			}
+		}
+	}
+
+	if !useFixed {
+		sf.Pred = frame.PredVerbatim
+		sf.Order = 0
+		sf.RiceSubframe = nil
+		return
+	}
+	sf.Pred = frame.PredFixed
+	sf.Order = bestOrder
+	if bestK > 14 {
+		sf.ResidualCodingMethod = frame.ResidualCodingMethodRice2
+	} else {
+		sf.ResidualCodingMethod = frame.ResidualCodingMethodRice1
+	}
+	sf.RiceSubframe = &frame.RiceSubframe{
+		PartOrder:  0,
+		Partitions: []frame.RicePartition{{Param: bestK}},
 	}
 }

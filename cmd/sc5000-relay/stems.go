@@ -19,6 +19,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Cd1s/EngineX-OS/internal/stems"
 )
 
 const (
@@ -30,8 +32,12 @@ const (
 	stemsFramingHeader = "X-Stems-Framing"
 	// stemsCredential is the LoadCredential= name in the systemd drop-in.
 	stemsCredential = "stems-token"
-	stemsIdleRead   = 120 * time.Second
 	stemsIdleWrite  = 30 * time.Second
+)
+
+var (
+	stemsIdleRead  = 120 * time.Second
+	stemsDrainRead = 10 * time.Minute
 )
 
 type stemsProxy struct {
@@ -194,7 +200,12 @@ func (p *stemsProxy) engine(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 500, map[string]any{"ok": false, "error": "full duplex unavailable"})
 		return
 	}
-	body := &stemsBody{r: r.Body, rc: rc, closed: make(chan struct{})}
+	body := &stemsBody{
+		r:       r.Body,
+		rc:      rc,
+		tracker: stems.UploadTracker{Packed: r.Header.Get(stemsFramingHeader) == "2"},
+		closed:  make(chan struct{}),
+	}
 	// Runs last: unblock any pending upload read and wait for the transport
 	// to release the body before the server discards the connection.
 	defer body.finish()
@@ -248,7 +259,7 @@ func (p *stemsProxy) engine(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(200)
 	_ = rc.Flush()
 
-	_, copyErr := io.Copy(&stemsFlushWriter{w: w, rc: rc}, resp.Body)
+	_, copyErr := io.Copy(&stemsFlushWriter{w: w, rc: rc, body: body}, resp.Body)
 	status := resp.Trailer.Get(stemsStatusTrailer)
 	if copyErr != nil || status == "" {
 		status = "failed"
@@ -263,13 +274,15 @@ func (p *stemsProxy) engine(w http.ResponseWriter, r *http.Request) {
 // stemsBody is the upload side. Each read extends an idle deadline so a
 // vanished deck cannot hold the renderer slot; finish ends it for good.
 type stemsBody struct {
-	r       io.Reader
-	rc      *http.ResponseController
-	mu      sync.Mutex
-	stopped bool
-	eof     bool
-	once    sync.Once
-	closed  chan struct{}
+	r          io.Reader
+	rc         *http.ResponseController
+	tracker    stems.UploadTracker
+	mu         sync.Mutex
+	stopped    bool
+	eof        bool
+	uploadDone bool
+	once       sync.Once
+	closed     chan struct{}
 }
 
 func (b *stemsBody) Read(p []byte) (int, error) {
@@ -278,20 +291,41 @@ func (b *stemsBody) Read(p []byte) (int, error) {
 		b.mu.Unlock()
 		return 0, io.ErrClosedPipe
 	}
-	_ = b.rc.SetReadDeadline(time.Now().Add(stemsIdleRead))
+	if b.uploadDone || b.eof {
+		_ = b.rc.SetReadDeadline(time.Now().Add(stemsDrainRead))
+	} else {
+		_ = b.rc.SetReadDeadline(time.Now().Add(stemsIdleRead))
+	}
 	b.mu.Unlock()
 	n, err := b.r.Read(p)
-	if err == io.EOF {
+	doneNow := n > 0 && b.tracker.Feed(p[:n])
+	if err == io.EOF || doneNow {
 		// The upload is complete and the server now watches the connection
-		// for a hang-up; that watch must not time out while stems still flow.
+		// for a hang-up under a bounded drain window refreshed by writes.
 		b.mu.Lock()
-		b.eof = true
+		if err == io.EOF {
+			b.eof = true
+		}
+		if doneNow {
+			b.uploadDone = true
+		}
 		if !b.stopped {
-			_ = b.rc.SetReadDeadline(time.Time{})
+			_ = b.rc.SetReadDeadline(time.Now().Add(stemsDrainRead))
 		}
 		b.mu.Unlock()
 	}
 	return n, err
+}
+
+func (b *stemsBody) touchDrain() {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if (b.uploadDone || b.eof) && !b.stopped {
+		_ = b.rc.SetReadDeadline(time.Now().Add(stemsDrainRead))
+	}
 }
 
 // Close is called by the transport once it stops sending the upload.
@@ -315,12 +349,14 @@ func (b *stemsBody) finish() {
 }
 
 type stemsFlushWriter struct {
-	w  http.ResponseWriter
-	rc *http.ResponseController
+	w    http.ResponseWriter
+	rc   *http.ResponseController
+	body *stemsBody
 }
 
 func (f *stemsFlushWriter) Write(p []byte) (int, error) {
 	_ = f.rc.SetWriteDeadline(time.Now().Add(stemsIdleWrite))
+	f.body.touchDrain()
 	n, err := f.w.Write(p)
 	if err == nil {
 		err = f.rc.Flush()

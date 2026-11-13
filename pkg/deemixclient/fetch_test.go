@@ -132,3 +132,116 @@ func TestSpotifyCacheIgnoresLegacyCrossServiceFiles(t *testing.T) {
 		t.Fatal("Spotify interrupted part was not removed")
 	}
 }
+
+func TestCacheLRUModTimeMultiKeepAndActiveDeckProtectionOnMinFree(t *testing.T) {
+	dir := t.TempDir()
+	c := &Client{DownloadDir: dir, MaxCache: 250}
+
+	writeAge := func(name string, age time.Duration) string {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte("OggS-synthetic-track-payload-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		when := time.Now().Add(-age)
+		if err := os.Chtimes(p, when, when); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	// 1. LRU: touching trackA via Cached() records in-memory LRU without mutating disk ModTime,
+	// so Trim evicts trackB instead of trackA while jobs.go mtime checks stay intact.
+	a := writeAge("spotify-trackA.ogg", 3*time.Hour)
+	b := writeAge("spotify-trackB.ogg", 2*time.Hour)
+	beforeA, _ := os.Stat(a)
+	if dl := c.Cached("spotify-trackA"); dl == nil {
+		t.Fatal("Cached(spotify-trackA) missed")
+	}
+	afterA, _ := os.Stat(a)
+	if !beforeA.ModTime().Equal(afterA.ModTime()) {
+		t.Fatalf("Cached() mutated disk ModTime: %v -> %v", beforeA.ModTime(), afterA.ModTime())
+	}
+	cur := writeAge("spotify-trackC.ogg", 0)
+	c.Trim(cur)
+	if _, err := os.Stat(b); !os.IsNotExist(err) {
+		t.Fatal("Trim did not evict least-recently-used trackB")
+	}
+	if _, err := os.Stat(a); err != nil {
+		t.Fatal("Trim evicted recently accessed trackA (FIFO bug)")
+	}
+
+	// 2. Open files (/proc/self/fd) and kept files are protected even under MinFree pressure,
+	// while non-open stale files are evicted.
+	dir2 := t.TempDir()
+	c2 := &Client{DownloadDir: dir2, MaxCache: 1 << 30, MinFree: 1 << 62}
+	stale := filepath.Join(dir2, "spotify-stale.ogg")
+	if err := os.WriteFile(stale, make([]byte, 100), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-5 * time.Hour)
+	_ = os.Chtimes(stale, oldTime, oldTime)
+
+	deck1 := filepath.Join(dir2, "spotify-deck1.ogg")
+	deck2 := filepath.Join(dir2, "spotify-deck2.ogg")
+	_ = os.WriteFile(deck1, []byte("OggS-deck1"), 0o600)
+	_ = os.WriteFile(deck2, []byte("OggS-deck2"), 0o600)
+	openDeck1, err := os.Open(deck1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer openDeck1.Close()
+	c2.Trim(deck2)
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatal("stale unpinned file not evicted under MinFree")
+	}
+	if _, err := os.Stat(deck1); err != nil {
+		t.Fatal("open Deck 1 file wiped by Deck 2 Trim under MinFree")
+	}
+	if _, err := os.Stat(deck2); err != nil {
+		t.Fatal("current Deck 2 track wiped by Trim")
+	}
+}
+
+func TestCachedPreservesDiskModTimeAndMinFreeRecoversSpace(t *testing.T) {
+	dir := t.TempDir()
+	c := &Client{DownloadDir: dir, MaxCache: 1 << 30, MinFree: 1 << 62}
+
+	p1 := filepath.Join(dir, "spotify-only1.ogg")
+	p2 := filepath.Join(dir, "spotify-only2.ogg")
+	fixedTime := time.Now().Add(-10 * time.Minute).Truncate(time.Second)
+	for _, p := range []string{p1, p2} {
+		if err := os.WriteFile(p, []byte("OggS-recent"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, fixedTime, fixedTime); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// 1. Cached() must NOT mutate disk ModTime (jobs.go:924 rejects mtime changes during analysis).
+	before, err := os.Stat(p1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Cached("spotify-only1") == nil {
+		t.Fatal("Cached(spotify-only1) missed")
+	}
+	after, err := os.Stat(p1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !before.ModTime().Equal(after.ModTime()) {
+		t.Fatalf("Cached() mutated disk ModTime (%v -> %v), breaking jobs.go analysis check", before.ModTime(), after.ModTime())
+	}
+
+	// 2. When no older non-active files remain and disk is below MinFree, Trim(p2) must still
+	// be able to evict non-open p1 so free space can recover.
+	c.Trim(p2)
+	if _, err := os.Stat(p1); !os.IsNotExist(err) {
+		t.Fatal("Trim failed to evict recent non-open file when disk remained below MinFree")
+	}
+	if _, err := os.Stat(p2); err != nil {
+		t.Fatal("Trim evicted explicitly kept file p2")
+	}
+}

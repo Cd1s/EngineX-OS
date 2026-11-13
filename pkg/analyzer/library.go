@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 	_ "modernc.org/sqlite"
 )
 
@@ -215,24 +216,37 @@ func qCompress(raw []byte) ([]byte, error) {
 	return b.Bytes(), nil
 }
 
-// PerformanceBlobs follows the observed 5.0.4 layouts, not the obsolete p.db
-// format. Reserved/unknown fields are zero. The trackData enum and RGB channel
-// interpretation remain inferences; see docs/stream-sync.md for device gates.
+// PerformanceBlobs writes Engine 5.3.0's 68-byte trackData (with measured band peaks),
+// overviewWaveFormData (with 3-byte band-max trailer), and beatData blobs.
 func PerformanceBlobs(r *Result) (track, overview, beats []byte, err error) {
-	var t, o, b bytes.Buffer
-	binary.Write(&t, binary.BigEndian, float64(r.SampleRate))
-	binary.Write(&t, binary.BigEndian, uint64(r.TotalSamples))
-	binary.Write(&t, binary.BigEndian, uint32(r.Key.EngineID))
-	for i := 0; i < 3; i++ {
-		binary.Write(&t, binary.BigEndian, float64(0))
+	var top [3]byte
+	for _, p := range r.Overview {
+		top[0] = max(top[0], p.LowValue)
+		top[1] = max(top[1], p.MidValue)
+		top[2] = max(top[2], p.HighValue)
 	}
+	var t, o, b bytes.Buffer
 	binary.Write(&o, binary.BigEndian, uint64(OverviewEntries))
 	binary.Write(&o, binary.BigEndian, uint64(len(r.Overview)))
 	binary.Write(&o, binary.BigEndian, r.OverviewSamplesPerEntry)
 	for _, p := range r.Overview {
 		o.Write([]byte{p.LowValue, p.MidValue, p.HighValue})
 	}
-	o.Write([]byte{0, 0, 0})
+	o.Write(top[:])
+
+	binary.Write(&t, binary.BigEndian, float64(r.SampleRate))
+	binary.Write(&t, binary.BigEndian, uint64(r.TotalSamples))
+	binary.Write(&t, binary.BigEndian, uint32(r.Key.EngineID))
+	for _, pk := range r.BandPeaks {
+		if math.IsNaN(pk) || math.IsInf(pk, 0) || pk < 0 {
+			pk = 0
+		} else if pk > 1 {
+			pk = 1
+		}
+		binary.Write(&t, binary.BigEndian, pk)
+	}
+	rawTrack := enginedb.TrackDataPeaks(t.Bytes(), o.Bytes())
+
 	binary.Write(&b, binary.BigEndian, float64(r.SampleRate))
 	binary.Write(&b, binary.BigEndian, float64(r.TotalSamples))
 	b.WriteByte(1)
@@ -246,7 +260,7 @@ func PerformanceBlobs(r *Result) (track, overview, beats []byte, err error) {
 		}
 	}
 	b.WriteByte(0)
-	if track, err = qCompress(t.Bytes()); err != nil {
+	if track, err = qCompress(rawTrack); err != nil {
 		return
 	}
 	if overview, err = qCompress(o.Bytes()); err != nil {

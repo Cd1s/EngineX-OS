@@ -76,6 +76,16 @@ type BPMStore struct {
 	// Spotify's own rate limit, separate from ReccoBeats'.
 	spotifyWaitTill time.Time
 	spotifyNext     time.Time
+	spotifyGate     chan struct{}
+}
+
+func (b *BPMStore) spotifySlot() chan struct{} {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.spotifyGate == nil {
+		b.spotifyGate = make(chan struct{}, 1)
+	}
+	return b.spotifyGate
 }
 
 func bpmKey(t Track) string { return t.Provider + ":" + t.ID }
@@ -463,13 +473,21 @@ func (b *BPMStore) features(ctx context.Context, ids ...string) BPMInfo {
 // spotifySearch is paced, because a list of unknown tracks would otherwise use up the
 // login's rate limit, and then the owner's own Spotify lists stop opening too.
 func (b *BPMStore) spotifySearch(ctx context.Context, t Track) []Track {
-	if b.Spotify == nil {
+	if ctx.Err() != nil || b.Spotify == nil {
 		return nil
 	}
 	s := b.Spotify()
 	if s == nil {
 		return nil
 	}
+	gate := b.spotifySlot()
+	select {
+	case gate <- struct{}{}:
+	case <-ctx.Done():
+		return nil
+	}
+	defer func() { <-gate }()
+
 	b.mu.Lock()
 	now := time.Now()
 	if now.Before(b.spotifyWaitTill) {
@@ -477,15 +495,27 @@ func (b *BPMStore) spotifySearch(ctx context.Context, t Track) []Track {
 		return nil
 	}
 	wait := b.spotifyNext.Sub(now)
-	b.spotifyNext = now.Add(max(wait, 0) + spotifyLookupGap)
 	b.mu.Unlock()
 	if wait > 0 {
+		timer := time.NewTimer(wait)
 		select {
-		case <-time.After(wait):
+		case <-timer.C:
 		case <-ctx.Done():
+			timer.Stop()
 			return nil
 		}
 	}
+	if ctx.Err() != nil {
+		return nil
+	}
+	b.mu.Lock()
+	now = time.Now()
+	if now.Before(b.spotifyWaitTill) {
+		b.mu.Unlock()
+		return nil
+	}
+	b.spotifyNext = now.Add(spotifyLookupGap)
+	b.mu.Unlock()
 	found, err := s.Search(ctx, bpmQuery(t))
 	if err != nil {
 		if strings.Contains(err.Error(), "HTTP 429") {
@@ -684,20 +714,40 @@ func (b *BPMStore) soundCloud(ctx context.Context, t Track, cfg BPMConfig) BPMIn
 
 // Config reads the optional service keys.
 func (b *BPMStore) Config() BPMConfig {
-	var v BPMConfig
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if data, err := os.ReadFile(b.ConfigPath); err == nil {
-		json.Unmarshal(data, &v)
+	return b.configLocked()
+}
+
+func (b *BPMStore) configLocked() BPMConfig {
+	var v BPMConfig
+	if b.ConfigPath != "" {
+		if data, err := os.ReadFile(b.ConfigPath); err == nil {
+			_ = json.Unmarshal(data, &v)
+		}
 	}
 	return v
 }
 
-// SaveConfig writes the optional service keys.
+// SaveConfig writes the optional service keys under b.mu so concurrent readers and writers serialize cleanly.
 func (b *BPMStore) SaveConfig(v BPMConfig) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if b.ConfigPath == "" {
 		return errors.New("bpm: no configuration file")
 	}
+	return SaveJSON(b.ConfigPath, v)
+}
+
+// UpdateConfig atomically reads, modifies, and writes BPMConfig under b.mu.
+func (b *BPMStore) UpdateConfig(fn func(*BPMConfig)) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.ConfigPath == "" {
+		return errors.New("bpm: no configuration file")
+	}
+	v := b.configLocked()
+	fn(&v)
 	return SaveJSON(b.ConfigPath, v)
 }
 

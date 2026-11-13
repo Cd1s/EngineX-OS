@@ -112,7 +112,7 @@ func (p *packWriter) Write(b []byte) (int, error) {
 	e := p.s.feed(b, func(f map[string]string) (int64, error) {
 		if v, ok := f["numReturnChannels"]; ok {
 			n, err := strconv.Atoi(v)
-			if err != nil || n <= 0 || n%4 != 0 {
+			if err != nil || n <= 0 || n > 64 || n%4 != 0 {
 				return 0, fmt.Errorf("stems pack: bad numReturnChannels %q", v)
 			}
 			p.planes = n
@@ -124,11 +124,11 @@ func (p *packWriter) Write(b []byte) (int, error) {
 		if !ok {
 			return 0, nil
 		}
-		n, err := strconv.Atoi(v)
-		if err != nil || n < 0 || p.planes == 0 {
+		n, err := count(f, "returnFrames", 1<<20)
+		if err != nil || p.planes == 0 {
 			return 0, fmt.Errorf("stems pack: bad returnFrames %q", v)
 		}
-		p.want, p.cur = n*p.planes*4, p.cur[:0]
+		p.want, p.cur = int(n)*p.planes*4, p.cur[:0]
 		return int64(p.want), nil
 	})
 	return len(b), cmpErr(e, p.err)

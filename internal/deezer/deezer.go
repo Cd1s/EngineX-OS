@@ -125,10 +125,10 @@ func (s *Session) DownloadTrack(ctx context.Context, trackID, dst string, opts D
 		return "", err
 	}
 	sngID, token := song.Results.SNGID.String(), song.Results.TrackToken
-	if token == "" {
-		return "", errors.New("deezer: no track token")
-	}
 	try := func(sngID, token string) (string, error) {
+		if token == "" || sngID == "" {
+			return "", errors.New("deezer: no track token")
+		}
 		srcURL, format, err := s.mediaURL(ctx, token, opts)
 		if err != nil {
 			return "", err

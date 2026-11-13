@@ -10,6 +10,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -601,3 +602,70 @@ func TestDecodeOggVorbisTickerAndReaderErrors(t *testing.T) {
 type oggErrorReader struct{ err error }
 
 func (r oggErrorReader) Read([]byte) (int, error) { return 0, r.err }
+
+func TestDecodeMP3AndDecodeFileRecoverMalformedMP3(t *testing.T) {
+	// Minimized 78-byte malformed MPEG-2 Layer III bitstream that triggers an
+	// index-out-of-range panic inside go-mp3's getScaleFactorsMpeg2, plus a
+	// panicking reader to verify DecodeFile/DecodeFLAC/DecodeWAV recover cleanly.
+	malformed, err := base64.StdEncoding.DecodeString("//IwAAAAAAAAAAAAAAAAAAAAADGsAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a, err := DecodeMP3(bytes.NewReader(malformed)); err == nil || a != nil {
+		t.Fatalf("DecodeMP3 accepted malformed MP3: a=%v err=%v", a, err)
+	}
+	path := filepath.Join(t.TempDir(), "corrupt.mp3")
+	if err := os.WriteFile(path, malformed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if a, err := DecodeFile(path); err == nil || a != nil {
+		t.Fatalf("DecodeFile accepted malformed MP3: a=%v err=%v", a, err)
+	}
+}
+
+func TestMultiID3NoHugeAllocAndPaddedID3Decode(t *testing.T) {
+	// Dual 10-byte ID3v2 headers where the second claims 256 MiB (0x7f,0x7f,0x7f,0x7f):
+	// previously unskipped by SkipID3 and handed to go-mp3, allocating >256 MiB.
+	dualHuge := []byte{
+		'I', 'D', '3', 4, 0, 0, 0, 0, 0, 0,
+		'I', 'D', '3', 4, 0, 0, 0x7f, 0x7f, 0x7f, 0x7f,
+	}
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	_, err := DecodeMP3(bytes.NewReader(dualHuge))
+	runtime.ReadMemStats(&after)
+	if err == nil {
+		t.Fatal("DecodeMP3 accepted dual-ID3 with oversized second tag")
+	}
+	if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 4<<20 {
+		t.Fatalf("DecodeMP3 allocated %d bytes (>4 MiB) on 20-byte dual-ID3 input", alloc)
+	}
+
+	// Dual-ID3 + zero padding before valid FLAC and MP3 files must decode and build shadow waveforms.
+	dir := t.TempDir()
+	id3Prefix := []byte{
+		'I', 'D', '3', 3, 0, 0, 0, 0, 0, 0,
+		0, 0,
+		'I', 'D', '3', 4, 0, 0, 0, 0, 0, 0,
+		0, 0, 0, 0,
+	}
+	flacPath := filepath.Join(dir, "padded.flac")
+	if err := os.WriteFile(flacPath, append(bytes.Clone(id3Prefix), constantFLAC(16, 1, false)...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if a, err := DecodeFile(flacPath); err != nil || a == nil || a.Format != "flac" {
+		t.Fatalf("DecodeFile failed on dual-ID3 padded FLAC: a=%v err=%v", a, err)
+	}
+
+	mp3Raw, _ := shadowTestMP3(44100)
+	mp3Path := filepath.Join(dir, "padded.mp3")
+	if err := os.WriteFile(mp3Path, append(bytes.Clone(id3Prefix), mp3Raw...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if a, err := DecodeFile(mp3Path); err != nil || a == nil || a.Format != "mp3" {
+		t.Fatalf("DecodeFile failed on dual-ID3 padded MP3: a=%v err=%v", a, err)
+	}
+	if env, err := ShadowWaveformFile(mp3Path, [3]float64{}, nil); err != nil || env == nil {
+		t.Fatalf("ShadowWaveformFile failed on dual-ID3 padded MP3: env=%v err=%v", env, err)
+	}
+}

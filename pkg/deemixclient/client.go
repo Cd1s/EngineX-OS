@@ -11,12 +11,32 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
 )
+
+const maxTrackedLRU = 512
+
+var (
+	queueURLToken   = regexp.MustCompile(`(?i)https?://\S+`)
+	queueBareSecret = regexp.MustCompile(`\b(?:[0-9a-fA-F]{32,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_.-]+)\b`)
+)
+
+func sanitizeQueueError(msg string) string {
+	msg = queueURLToken.ReplaceAllString(msg, "<url>")
+	msg = queueBareSecret.ReplaceAllString(msg, "<redacted>")
+	msg = strings.Join(strings.Fields(msg), " ")
+	msg = strings.TrimPrefix(msg, "deemix: ")
+	if runes := []rune(msg); len(runes) > 256 {
+		msg = string(runes[:256])
+	}
+	return strings.TrimSpace(msg)
+}
 
 type Client struct {
 	// Mode is "queue" (REST bridge) or "directory" (POST /api/download,
@@ -38,6 +58,9 @@ type Client struct {
 	MaxCache int64
 	// MinFree also evicts while the volume has less free space (needs MaxCache).
 	MinFree int64
+
+	mu       sync.Mutex
+	lastUsed map[string]time.Time
 }
 type QueueStatus struct {
 	ID       string  `json:"id"`
@@ -137,7 +160,11 @@ func (c *Client) Download(ctx context.Context, t providers.Track, progress func(
 		return dl, nil
 	}
 	if c.Mode == "directory" {
-		return c.downloadDirectory(ctx, t, progress)
+		dl, err := c.downloadDirectory(ctx, t, progress)
+		if err == nil && dl != nil {
+			c.rememberActive(dl.Path)
+		}
+		return dl, err
 	}
 	if c.Mode != "" && c.Mode != "queue" {
 		return nil, errors.New("deemix: unsupported adapter mode")
@@ -158,6 +185,12 @@ func (c *Client) Download(ctx context.Context, t providers.Track, progress func(
 	}
 	for {
 		if q.Error != "" {
+			if progress != nil {
+				progress(q)
+			}
+			if detail := sanitizeQueueError(q.Error); detail != "" {
+				return nil, fmt.Errorf("deemix: %s", detail)
+			}
 			return nil, errors.New("deemix: queue reported an error; check CantStream/FLAC availability")
 		}
 		if progress != nil {
@@ -178,6 +211,7 @@ func (c *Client) Download(ctx context.Context, t providers.Track, progress func(
 			if !quality.Lossless && !c.lossyAllowed() {
 				return nil, errors.New("deemix: MP3 fallback needs explicit --allow-320k")
 			}
+			c.rememberActive(p)
 			return &Download{Path: p, Quality: quality}, nil
 		}
 		timer := time.NewTimer(interval)
@@ -232,13 +266,10 @@ func (c *Client) LinkAs(src *Download, name string) (*Download, error) {
 		os.Remove(tmp)
 		return nil, err
 	}
-	// Only one of name's formats is kept, so Cached finds the one just saved.
-	for _, ext := range []string{".flac", ".mp3", ".mp4"} {
-		if other := filepath.Join(c.DownloadDir, name+ext); other != dst {
-			os.Remove(other)
-		}
-	}
-	c.Trim(dst)
+	c.removeOtherFormats(name, dst)
+	c.rememberActive(src.Path)
+	c.rememberActive(dst)
+	c.Trim(dst, src.Path)
 	return &Download{Path: dst, Quality: src.Quality}, nil
 }
 
@@ -293,6 +324,13 @@ func (c *Client) downloadDirectory(ctx context.Context, t providers.Track, progr
 		Result *bool  `json:"result"`
 	}
 	if json.Unmarshal(raw, &result) == nil && (result.Error != "" || result.ErrID != "" || (result.Result != nil && !*result.Result)) {
+		detail := sanitizeQueueError(result.Error)
+		if detail == "" {
+			detail = sanitizeQueueError(result.ErrID)
+		}
+		if detail != "" {
+			return nil, fmt.Errorf("deemix: submission failed: %s", detail)
+		}
 		return nil, errors.New("deemix: submission failed; check CantStream/FLAC availability")
 	}
 	interval := c.PollInterval

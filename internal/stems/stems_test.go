@@ -3,6 +3,7 @@ package stems
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -148,5 +149,137 @@ func TestDisconnectKillsWorkerIgnoringStdin(t *testing.T) {
 	}
 	if len(b.Slot) != 0 {
 		t.Fatal("worker ignoring stdin was not killed")
+	}
+}
+
+func TestSlowRenderAfterDoneDoesNotTimeoutIdleUpload(t *testing.T) {
+	prev := uploadIdleRead
+	uploadIdleRead = 80 * time.Millisecond
+	t.Cleanup(func() { uploadIdleRead = prev })
+
+	// Worker reads init + 1 non-empty block + action=done, then takes 250ms
+	// (> uploadIdleRead) to finish draining while Engine keeps its upload open.
+	worker := []string{"/bin/sh", "-c", `
+printf 'session=FFFFFFFFFFFFFFFF\n\n'
+while IFS= read -r l && [ -n "$l" ]; do :; done
+printf 'preparing=ready\n\npreparing=ready\nnumReturnChannels=4\n\n'
+while IFS= read -r l && [ -n "$l" ]; do :; done
+dd bs=16 count=1 >/dev/null 2>&1
+while IFS= read -r l; do
+  [ "$l" = "action=done" ] && break
+done
+while IFS= read -r l && [ -n "$l" ]; do :; done
+sleep 0.25
+printf 'returnFrames=4\n\n'
+dd if=/dev/zero bs=64 count=1 2>/dev/null
+printf 'returnFrames=0\n\n'
+`}
+	b := &Backend{Secret: secret, Worker: worker, Slot: make(chan struct{}, 1)}
+	s := httptest.NewServer(b)
+	defer s.Close()
+
+	in, send := io.Pipe()
+	defer send.Close()
+	var out bytes.Buffer
+	done := make(chan error, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go func() { done <- Proxy(ctx, s.URL, secret, in, &out) }()
+
+	blk := append([]byte("numChannels=1\nsampleRate=44100\nmaxBlockSize=4\n\naction=block\nnumSamples=4\n\n"), make([]byte, 4*4)...)
+	send.Write(append(blk, []byte("action=done\n\n")...))
+	// Deliberately leave send open (no EOF), matching Engine waiting on child stdout.
+	if err := <-done; err != nil {
+		t.Fatalf("Proxy killed slow render after action=done: %v", err)
+	}
+}
+
+func TestLocalRenderRejectsNaNSampleRate(t *testing.T) {
+	var out bytes.Buffer
+	in := append([]byte("numChannels=2\nsampleRate=NaN\nmaxBlockSize=4\n\naction=block\nnumSamples=1\n\n"), make([]byte, 8)...)
+	in = append(in, []byte("action=done\n\n")...)
+	if err := LocalRender(bytes.NewReader(in), &out); err == nil {
+		t.Fatal("LocalRender accepted sampleRate=NaN without error")
+	}
+}
+
+func TestProxyClassifiesCloudflare530AndStartupTimeoutAsUnavailable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(530)
+	}))
+	defer srv.Close()
+	err := Proxy(context.Background(), srv.URL, secret, strings.NewReader("numChannels=2\nsampleRate=44100\nmaxBlockSize=4\n\n"), io.Discard)
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("Proxy status 530 err=%v, want ErrUnavailable", err)
+	}
+
+	prev := startupTimeout
+	startupTimeout = 60 * time.Millisecond
+	t.Cleanup(func() { startupTimeout = prev })
+	unblock := make(chan struct{})
+	stalled := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-unblock
+	}))
+	defer stalled.Close()
+	defer close(unblock)
+	err = Proxy(context.Background(), stalled.URL, secret, strings.NewReader("numChannels=2\nsampleRate=44100\nmaxBlockSize=4\n\n"), io.Discard)
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("Proxy startup timeout err=%v, want ErrUnavailable", err)
+	}
+}
+
+func setDrainBoundForTest(t *testing.T, d time.Duration) {
+	t.Helper()
+	prev := uploadDrainRead
+	uploadDrainRead = d
+	t.Cleanup(func() { uploadDrainRead = prev })
+}
+
+func TestPostDoneDrainReadIsBoundedWhenWorkerStalls(t *testing.T) {
+	// Even after action=done, a stalled worker + half-open client must not hold
+	// Backend.Slot forever on an infinite read deadline.
+	worker := []string{"/bin/sh", "-c", `
+printf 'session=FFFFFFFFFFFFFFFF\n\n'
+while IFS= read -r l; do
+  [ "$l" = "action=done" ] && break
+done
+exec sleep 60
+`}
+	b := &Backend{Secret: secret, Worker: worker, Slot: make(chan struct{}, 1)}
+	s := httptest.NewServer(b)
+	defer s.Close()
+
+	// Temporarily tighten the post-done drain bound via uploadIdleRead / hook:
+	prevIdle := uploadIdleRead
+	uploadIdleRead = 50 * time.Millisecond
+	t.Cleanup(func() { uploadIdleRead = prevIdle })
+	setDrainBoundForTest(t, 120*time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	in, send := io.Pipe()
+	defer send.Close()
+	go func() { <-ctx.Done(); send.CloseWithError(ctx.Err()) }()
+
+	done := make(chan error, 1)
+	go func() { done <- Proxy(ctx, s.URL, secret, in, io.Discard) }()
+
+	blk := append([]byte("numChannels=1\nsampleRate=44100\nmaxBlockSize=4\n\naction=block\nnumSamples=4\n\n"), make([]byte, 4*4)...)
+	send.Write(append(blk, []byte("action=done\n\n")...))
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected stalled worker after action=done to fail within drain bound")
+		}
+	case <-time.After(700 * time.Millisecond):
+		t.Fatal("post-done session had no upper bound and held the render slot")
+	}
+	until := time.Now().Add(time.Second)
+	for len(b.Slot) != 0 && time.Now().Before(until) {
+		time.Sleep(time.Millisecond)
+	}
+	if len(b.Slot) != 0 {
+		t.Fatal("render slot was not released after post-done drain timeout")
 	}
 }

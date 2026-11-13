@@ -34,13 +34,13 @@ type pipeline struct {
 	cur, in  []byte   // the renderer reply, Engine block being received
 	want     int      // its payload size
 	inWant   int
+	inGot    int
 	upOut    []byte // bytes for the renderer from the current read
 	started  bool
 	done     bool
-	blocks   int  // blocks sent upstream
-	awaiting bool // Engine's current block is still arriving
-	owed     int  // replies due before the renderer said how wide they are
-	replies  int  // renderer replies seen after started
+	blocks   int // blocks sent upstream
+	owed     int // replies due before the renderer said how wide they are
+	replies  int // renderer replies seen after started
 	final    bool
 	err      error
 }
@@ -54,15 +54,19 @@ func newPipeline(out io.Writer) *pipeline {
 		}
 	}
 	p.up.data = func(b []byte) {
+		p.inGot += len(b)
 		if !p.packed {
 			p.upOut = append(p.upOut, b...)
-		} else if p.in = append(p.in, b...); len(p.in) == p.inWant {
+		} else if p.in = append(p.in, b...); len(p.in) == p.inWant && len(p.input) > 0 {
 			for c, n := 0, len(p.in)/len(p.input); c < len(p.input); c++ {
 				p.input[c] = append(p.input[c], p.in[c*n:(c+1)*n]...)
 			}
 			at, n := len(p.upOut), len(p.in)/2
 			p.upOut = slices.Grow(p.upOut, n)[:at+n]
 			packSamples(p.upOut[at:], p.in)
+		}
+		if p.inWant > 0 && p.inGot == p.inWant {
+			p.finishBlock()
 		}
 	}
 	return p
@@ -140,6 +144,15 @@ func (p *pipeline) reply(n int) {
 	}
 }
 
+// finishBlock emits or records the single reply owed for a completed Engine block.
+func (p *pipeline) finishBlock() {
+	if p.nplanes == 0 {
+		p.owed++
+	} else {
+		p.reply(p.maxBlock)
+	}
+}
+
 // flush sends every queued frame, in maxBlock pieces.
 func (p *pipeline) flush() {
 	for p.queued() > 0 {
@@ -158,7 +171,7 @@ func (p *pipeline) fromEngine(b []byte) ([]byte, error) {
 		p.upOut = append(p.upOut, p.up.raw...)
 		if p.maxBlock == 0 {
 			n, err := strconv.Atoi(f["maxBlockSize"])
-			if err != nil || n <= 0 {
+			if err != nil || n <= 0 || p.eng.Channels <= 0 {
 				return 0, fmt.Errorf("stems pipeline: bad init %v", f)
 			}
 			p.maxBlock = n
@@ -166,16 +179,25 @@ func (p *pipeline) fromEngine(b []byte) ([]byte, error) {
 		}
 		switch f["action"] {
 		case "block":
+			if p.done {
+				return 0, fmt.Errorf("stems protocol: block after done")
+			}
+			if p.eng.Channels <= 0 {
+				return 0, fmt.Errorf("stems pipeline: missing input channels")
+			}
 			n, err := count(f, "numSamples", int64(p.maxBlock))
 			if err != nil {
 				return 0, err
 			}
-			p.started, p.awaiting = true, true
+			p.started = true
 			p.blocks++
 			if p.input == nil && p.packed {
 				p.input = make([][]byte, p.eng.Channels)
 			}
-			p.in, p.inWant = p.in[:0], int(n)*p.eng.Channels*4
+			p.in, p.inGot, p.inWant = p.in[:0], 0, int(n)*p.eng.Channels*4
+			if p.inWant == 0 {
+				p.finishBlock()
+			}
 			return int64(p.inWant), nil
 		case "done":
 			p.done = true
@@ -185,13 +207,8 @@ func (p *pipeline) fromEngine(b []byte) ([]byte, error) {
 		}
 		return 0, nil
 	})
-	if e == nil && p.awaiting && p.up.skip == 0 {
-		p.awaiting = false
-		if p.nplanes == 0 {
-			p.owed++
-		} else {
-			p.reply(p.maxBlock)
-		}
+	if e == nil {
+		e = p.eng.Err()
 	}
 	return p.upOut, cmpErr(e, p.err)
 }
@@ -204,24 +221,27 @@ func (p *pipeline) Write(b []byte) (int, error) {
 	e := p.down.feed(b, func(f map[string]string) (int64, error) {
 		v, ok := f["returnFrames"]
 		if !ok {
-			p.write(p.down.raw)
 			if c, has := f["numReturnChannels"]; has {
 				n, err := strconv.Atoi(c)
-				if err != nil || n <= 0 || n > 64 || n%4 != 0 {
+				if err != nil || n <= 0 || n > 64 || n%4 != 0 || p.eng.Channels <= 0 || n != 4*p.eng.Channels {
 					return 0, fmt.Errorf("stems pipeline: bad numReturnChannels %q", c)
 				}
+				p.write(p.down.raw)
 				p.nplanes, p.planes = n, make([][]byte, n)
 				for ; p.owed > 0; p.owed-- {
 					p.reply(p.maxBlock)
 				}
+				return 0, nil
 			}
+			p.write(p.down.raw)
 			return 0, nil
 		}
-		n, err := strconv.Atoi(v)
-		if err != nil || n < 0 || p.nplanes == 0 || !(p.started || p.done) {
+		n64, err := count(f, "returnFrames", 1<<20)
+		if err != nil || p.nplanes == 0 || !(p.started || p.done) {
 			return 0, fmt.Errorf("stems pipeline: unexpected returnFrames %q", v)
 		}
-		if p.packed && n > 0 && (p.input == nil || n > len(p.input[0])/4) {
+		n := int(n64)
+		if p.packed && n > 0 && (len(p.input) != p.nplanes/4 || n > len(p.input[0])/4) {
 			return 0, fmt.Errorf("stems pipeline: %d frames returned beyond the input", n)
 		}
 		p.replies++
@@ -248,6 +268,9 @@ func (p *pipeline) Write(b []byte) (int, error) {
 func (p *pipeline) Complete() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.err != nil {
+		return p.err
+	}
 	if (p.started || p.done) && !p.final {
 		return fmt.Errorf("stems pipeline: renderer ended before its final reply")
 	}

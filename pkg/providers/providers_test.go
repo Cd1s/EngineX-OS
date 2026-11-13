@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"math/big"
 	"net/http"
@@ -19,6 +20,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -382,5 +384,127 @@ func TestSpotifyConnectBlobRoundTrip(t *testing.T) {
 	blob[20] ^= 1
 	if _, err := k.DecryptBlob(ck, base64.StdEncoding.EncodeToString(blob)); err == nil {
 		t.Fatal("a tampered blob was accepted")
+	}
+}
+
+func TestSpotifyAuthorizationRefreshLockAnd401Retry(t *testing.T) {
+	inTokenReq := make(chan struct{})
+	releaseTokenReq := make(chan struct{})
+	var refreshCalls atomic.Int32
+	var nativeCalls atomic.Int32
+	var likedInFlight atomic.Int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/token":
+			n := refreshCalls.Add(1)
+			if n == 1 {
+				close(inTokenReq)
+				<-releaseTokenReq
+			}
+			json.NewEncoder(w).Encode(map[string]any{
+				"access_token": "refreshed-" + strconv.Itoa(int(n)),
+				"expires_in":   3600,
+				"token_type":   "Bearer",
+			})
+		case "/search":
+			auth := r.Header.Get("Authorization")
+			if auth == "Bearer revoked-but-unexpired" {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			ioJSON(w, `{"tracks":{"items":[{"id":"t1","name":"Fixed","type":"track","duration_ms":1000}]}}`)
+		case "/me/playlists":
+			w.WriteHeader(http.StatusInternalServerError)
+		case "/me/tracks":
+			select {
+			case <-r.Context().Done():
+			case <-time.After(120 * time.Millisecond):
+			}
+			ioJSON(w, `{"total":1,"items":[]}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	// 1 & 2: Refreshing an expired OAuth token must NOT hold s.mu across network I/O,
+	// and must prefer OAuth RefreshToken over nativeFactory even when stored creds exist.
+	sp := spotifyStoredTest(t)
+	sp.BaseURL = srv.URL
+	sp.AccountsURL = srv.URL
+	sp.ClientID = "public-client"
+	sp.TokenPath = filepath.Join(t.TempDir(), "token.json")
+	sp.HTTP = &http.Client{Transport: spotifyProtocolRoundTrip(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/me/tracks" {
+			likedInFlight.Add(1)
+			defer likedInFlight.Add(-1)
+		}
+		return http.DefaultTransport.RoundTrip(r)
+	})}
+	sp.Token = Token{
+		AccessToken:  "expired-tok",
+		RefreshToken: "refresh-tok",
+		Expiry:       time.Now().Add(-time.Hour),
+		ClientID:     "public-client",
+	}
+	sp.nativeFactory = func(context.Context) (spotifyNative, error) {
+		nativeCalls.Add(1)
+		return nil, io.ErrUnexpectedEOF
+	}
+
+	searchDone := make(chan error, 1)
+	go func() {
+		_, err := sp.Search(context.Background(), "house")
+		searchDone <- err
+	}()
+
+	select {
+	case err := <-searchDone:
+		t.Fatalf("Search skipped OAuth RefreshToken and failed early: %v (nativeCalls=%d)", err, nativeCalls.Load())
+	case <-inTokenReq:
+	}
+	hasTokDone := make(chan bool, 1)
+	go func() { hasTokDone <- sp.HasToken() }()
+	select {
+	case <-hasTokDone:
+	case <-time.After(80 * time.Millisecond):
+		close(releaseTokenReq)
+		<-searchDone
+		t.Fatal("HasToken blocked on s.mu while OAuth tokenRequest was in flight")
+	}
+	close(releaseTokenReq)
+	if err := <-searchDone; err != nil {
+		t.Fatalf("Search after refresh: %v", err)
+	}
+	if nativeCalls.Load() != 0 {
+		t.Fatalf("nativeFactory called %d times despite valid OAuth RefreshToken", nativeCalls.Load())
+	}
+
+	// 3: HTTP 401 on a non-expired token refreshes once via RefreshToken and succeeds.
+	sp.mu.Lock()
+	sp.Token.AccessToken = "revoked-but-unexpired"
+	sp.Token.Expiry = time.Now().Add(time.Hour)
+	sp.mu.Unlock()
+	tracks, err := sp.Search(context.Background(), "techno")
+	if err != nil || len(tracks) != 1 || tracks[0].ID != "t1" {
+		t.Fatalf("Search on 401 did not refresh and retry: tracks=%v err=%v", tracks, err)
+	}
+
+	// 4: apiPlaylists waits for the liked goroutine when /me/playlists fails.
+	_, err = sp.Playlists(context.Background())
+	if err == nil {
+		t.Fatal("expected error from 500 /me/playlists")
+	}
+	if inFlight := likedInFlight.Load(); inFlight != 0 {
+		t.Fatalf("apiPlaylists leaked liked goroutine (inFlight=%d)", inFlight)
+	}
+
+	// 5: With stored credentials and a token lacking RefreshToken, authorization uses native login5 bearer.
+	sp.mu.Lock()
+	sp.Token = Token{AccessToken: "connect-no-refresh", Expiry: time.Now().Add(time.Hour)}
+	sp.mu.Unlock()
+	if _, err := sp.Search(context.Background(), "techno"); !errors.Is(err, io.ErrUnexpectedEOF) || nativeCalls.Load() == 0 {
+		t.Fatalf("refreshless token bypassed stored login5 bearer: err=%v nativeCalls=%d", err, nativeCalls.Load())
 	}
 }
