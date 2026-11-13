@@ -182,38 +182,6 @@ if [ -d "$dest" ] && [ ! -L "$dest/gen2-unlocked" ]; then
     [ -e "$dest/gen2-locked" ] || [ -e "$dest/gen2-unlocked" ] || printf '1\n' > "$dest/gen2-unlocked" 2>/dev/null || :
 fi
 
-# A later release says enginex where this one says sc5000. When this bundle is
-# installed over such a release without a reboot (a rollback), what that release
-# left would act next to ours: every daemon twice, Engine with two drop-ins, two
-# ALSA files starting two bundles. Remove it before anything of ours is written.
-newer_names=0
-for f in /run/systemd/system/enginex-*.service; do
-    [ -e "$f" ] || [ -L "$f" ] || continue
-    case "${f##*/}" in
-    enginex-stream-sync.service|enginex-rb-bridge.service|enginex-sc5000-deemixd.service) continue ;;
-    esac
-    [ "$(cat /proc/1/comm 2>/dev/null)" != systemd ] || systemctl stop "${f##*/}" >/dev/null 2>&1 || :
-    rm -f "$f"
-    newer_names=1
-done
-for f in /run/systemd/system/engine.service.d/99-enginex*.conf /run/systemd/system/edisksd.service.d/99-enginex*.conf; do
-    [ -e "$f" ] || [ -L "$f" ] || continue
-    rm -f "$f"
-    newer_names=1
-done
-if [ -e /run/enginex-engine-script ]; then
-    # its wrapped Scripts/engine: ours is made from the vendor's script below
-    ! mountpoint -q /usr/Engine/Scripts/engine || umount /usr/Engine/Scripts/engine || :
-    rm -f /run/enginex-engine-script
-    newer_names=1
-fi
-newer_alsa=${SC5000_ALSA_OVERLAY:-$(dirname "$dest")/$(cat "$bundle_dir/alsa-dir" 2>/dev/null || echo system/var/overlay/lib/alsa/conf.d)}
-for f in "$newer_alsa"/99-enginex*.conf; do
-    [ -e "$f" ] || [ -L "$f" ] || continue
-    rm -f "$f"
-done
-[ "$newer_names" = 0 ] || pkill -x enginex-suite 2>/dev/null || :
-
 mkdir -p /run/systemd/system/engine.service.d
 
 # No KillMode=process: engine.service is Type=forking with the Scripts/engine shell as main PID, so it would
@@ -617,8 +585,6 @@ fi
 [ "$(cat "$dest/version.txt" 2>/dev/null)" != "$version" ] || rm -f "$dest/version.txt"
 rm -f "$dest/gen2-unlocked"
 rm -f "$alsa_dest/99-sc5000-custom.conf"
-# what a later release left under its enginex names, when this one was installed over it
-rm -f "$alsa_dest"/99-enginex*.conf
 rmdir "$alsa_dest" 2>/dev/null || :
 if [ -z "${SC5000_CUSTOM:-}" ] && [ -e /run/sc5000-engine-script ]; then
     ! mountpoint -q /usr/Engine/Scripts/engine || umount /usr/Engine/Scripts/engine || :
@@ -631,12 +597,6 @@ if [ -z "${SC5000_CUSTOM:-}" ]; then
             systemctl stop "enginex-$applet.service" 2>/dev/null || :
             rm -f "/run/systemd/system/enginex-$applet.service"
         done
-        for unit in /run/systemd/system/enginex-*.service; do
-            [ -e "$unit" ] || continue
-            systemctl stop "${unit##*/}" 2>/dev/null || :
-            rm -f "$unit"
-        done
-        rm -f /run/systemd/system/engine.service.d/99-enginex*.conf /run/systemd/system/edisksd.service.d/99-enginex*.conf
         systemctl stop engine-guardian.service 2>/dev/null || :
         rm -f /run/systemd/system/engine-guardian.service
         rm -f /run/systemd/system/engine.service.d/99-sc5000.conf /run/systemd/system/edisksd.service.d/99-sc5000.conf /run/systemd/timesyncd.conf.d/10-enginex-ntp.conf /run/sc5000-tz-newer
@@ -644,7 +604,6 @@ if [ -z "${SC5000_CUSTOM:-}" ]; then
         systemctl restart --no-block edisksd.service systemd-timesyncd.service 2>/dev/null || :
     fi
     pkill -x sc5000-suite 2>/dev/null || :
-    pkill -x enginex-suite 2>/dev/null || :
     rm -f /run/systemd/system/enginex-stream-sync.service \
           /run/systemd/system/engine-guardian.service \
           /run/systemd/system/enginex-rb-bridge.service \
