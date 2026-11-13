@@ -14,6 +14,7 @@
 <link rel="alternate" hreflang="zh-CN" href="https://enginexdj.com/?lang=s">
 <link rel="alternate" hreflang="zh-TW" href="https://enginexdj.com/?lang=t">
 <link rel="icon" type="image/svg+xml" href="site/favicon.svg">
+<link rel="manifest" href="site.webmanifest">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="EngineX OS">
 <meta property="og:title" content="EngineX OS — Custom OS for 16 Denon DJ, Numark & Rane Standalone Units">
@@ -46,6 +47,46 @@
     "price": "0",
     "priceCurrency": "USD"
   }
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "Which Denon DJ, Numark, and Rane units does EngineX OS support?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "EngineX OS supports 16 standalone units: Gen 1 (SC5000, SC5000M, SC6000, SC6000M, PRIME 4, PRIME 2, PRIME GO, Mixstream Pro) and Gen 2 (SC LIVE 4, SC LIVE 2, PRIME 4+, PRIME GO+, Mixstream Pro+, Mixstream Pro Go, PRIME 4 G2, Rane SYSTEM ONE)."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Does EngineX OS support Spotify natively without a laptop?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Yes. EngineX OS integrates pure-Go Spotify stream decryption with Spotify Connect LAN pairing and official QR Device Authorization directly on the standalone deck."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Can I plug a Rekordbox 6 or Rekordbox 7 USB drive into Denon DJ decks?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Yes. Built-in rb-bridge automatically imports Rekordbox USB exports (including playlists, hot cues, memory cues, beat grids, waveforms, and artwork) into Engine Library format when plugged in, without modifying your Rekordbox source files."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Can I revert back to official Engine OS?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Yes. Flashing back to stock firmware is completely reversible using the official Engine OS .img updater from Denon DJ, Numark, or Rane."
+      }
+    }
+  ]
 }
 </script>
 <script>/* 先定主题再出样式，避免闪烁 */document.documentElement.dataset.theme=localStorage.getItem("enginex-docs-theme")||(matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light")</script>
