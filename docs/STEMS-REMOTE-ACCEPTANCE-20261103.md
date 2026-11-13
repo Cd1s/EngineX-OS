@@ -25,7 +25,7 @@
 | 段 | 设计 | 实际部署 / 实测 |
 |---|---|---|
 | 在线曲下载 | 用户期望在中继主机下载 | **未实现**。relay 从第一次提交 c24a140（11-02）起对 `/api/audio` 等一律返回 410；在线曲由碟机本机的 `sc5000-deemixd` 下载。git 里从来没有远端缓存方案 |
-| 分轨输入 | — | Engine 在碟机上解码，float32 PCM 实时逐块上传：deck → `relay.example.com`（碟机上解析为 192.168.1.6:443，即路由器边缘）→ relay-host relay :6595 → stemsd :6596 → `worker.py` |
+| 分轨输入 | — | Engine 在碟机上解码，float32 PCM 实时逐块上传：deck → `relay.example.com`（碟机上解析为 192.168.1.6:443，即路由器边缘）→ 中继主机 relay :6595 → stemsd :6596 → `worker.py` |
 | 分离器 | — | numpy/scipy 频谱 HPSS / 声像近似，**不是神经网络模型**（中继主机上没有 torch/demucs）。四轨相加等于原曲 |
 | 打包 | — | Engine 在碟机上自行编码并加密，写入 U 盘 `Engine Library/Stems/<trackId> <uuid>.stems` |
 | 缓存 | — | **无**。同一首重新渲染会全量重新上传、重新计算 |

@@ -233,7 +233,7 @@ configuration is enabled. Test fake snapshots/counters are synchronized.
 
 ## Validation and physical acceptance
 
-All compilation/tests run only in this task's the build host build directory.
+All compilation/tests run only in this task's build directory on the build host.
 Coverage includes bounded/malformed PerformanceData, source adjusted sparse
 markers, cue/loop endian rules, PNG pixels/tiles, no audio/perf fetch on default
 receive, read-only m.db/stm.db with isAnalyzed=0, role/source identity, dual-deck

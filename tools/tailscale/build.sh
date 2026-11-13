@@ -1,6 +1,6 @@
 #!/bin/sh
 # Builds the trimmed Tailscale client the deck downloads on demand (#130).
-# Run on the build host (the build host), never on the laptop or the deck:
+# Run on the build host, never on the laptop or the deck:
 #   sh tools/tailscale/build.sh <tailscale-tag, e.g. v1.104.5> <out-dir>
 # Output: <out-dir>/tailscaled-armhf, tailscaled-arm64 (UPX-packed box binary, ~4 MB each) and SHA256SUMS.
 # Upload them to the GitHub release "tailscale-<tag>" that pkg/webui/tailscale.go points at.

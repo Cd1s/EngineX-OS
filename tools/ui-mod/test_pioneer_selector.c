@@ -1,4 +1,4 @@
-/* Native the build host: gcc -std=c11 -O2 -Wall -Wextra -Werror -pthread
+/* Native build host: gcc -std=c11 -O2 -Wall -Wextra -Werror -pthread
  * tools/ui-mod/test_pioneer_selector.c -lm -o out/test_pioneer_selector
  * Repeat with -fsanitize=address,undefined and -fsanitize=thread. */
 #define _GNU_SOURCE

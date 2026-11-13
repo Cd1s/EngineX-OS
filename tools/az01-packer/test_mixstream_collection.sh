@@ -1,5 +1,5 @@
 #!/bin/bash
-# the build host only, after mixstream-sandbox.sh: undo ONLY the collection branches.
+# Build host only, after mixstream-sandbox.sh: undo ONLY the collection branches.
 # The live RTTI gate must reject NhSweepFxCollection despite unlocked flags.
 set -euo pipefail
 REPO=$(cd "$(dirname "$0")/../.." && pwd)

@@ -1,4 +1,4 @@
-// the build host native armhf; executes A32 trampolines against the real stock Engines.
+// Build host, native armhf; executes A32 trampolines against the real stock Engines.
 // arm-linux-gnueabihf-gcc -O2 -Wall -Wextra -o test_sclive_aux test_sclive_aux.c -ldl -lpthread
 // ./test_sclive_aux <5.3.0 Engine> <5.3.0-sclive4 Engine>
 #define ENGINE_UI_HOOK_TEST

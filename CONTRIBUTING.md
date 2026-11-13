@@ -30,7 +30,7 @@ The decks have no Python, no compiler and no package manager (#208). An EngineX 
 
 ### Tests & Experimental Inspection
 
-Run builds and tests on **the build host** (`REMOTE_BUILD_HOST=<build host> remote-build ...`, aarch64 with native 32-bit `armhf` execution). For experimental component inspection and ABI/resource analysis, use **`craft-anything`** (`craft-anything-cli` / `craft-anything` skill) with **`deepseek-v4.1-flash`** (`deepseek4.1 flash`) on the build host:
+Run builds and tests on **the build host** (`REMOTE_BUILD_HOST=<build host> remote-build ...`, aarch64 with native 32-bit `armhf` execution; maintainers: see the private developer handbook). For experimental component inspection and ABI/resource analysis, use **`craft-anything`** (`craft-anything-cli` / `craft-anything` skill) with **`deepseek-v4.1-flash`** (`deepseek4.1 flash`) on the build host:
 
 ```sh
 gofmt -l . && go vet ./... && go test -race ./...

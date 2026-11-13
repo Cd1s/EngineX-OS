@@ -1,5 +1,5 @@
 #!/bin/bash
-# Private, native Engine/eglfs smoke test on the the build host build host. Never a deck.
+# Private, native Engine/eglfs smoke test on the build host. Never a deck.
 set -euo pipefail
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 W=$REPO/out/shadow-native

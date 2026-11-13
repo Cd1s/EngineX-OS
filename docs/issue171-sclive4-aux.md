@@ -186,7 +186,7 @@ Reproduce on the build host, from the build checkout, using a **new** sandbox pa
 
 ```sh
 X171_LIVE_AUDIO=1 bash tools/az01-packer/sclive-aux-sandbox.sh \
-  /root/workspace/sc5000-a1-20261109/r6-20261110/new-live-run
+  <new-sandbox-dir>
 ```
 
 The script builds its trace hook separately and checks all three languages. The

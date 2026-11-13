@@ -215,7 +215,7 @@ func writable(mount string) bool {
 }
 
 func Convert(ctx context.Context, mount string, opts enginedb.Options) (enginedb.Result, error) {
-	return convert(ctx, mount, opts, nil, 0)
+	return convert(ctx, mount, opts, nil, 0, time.Time{})
 }
 
 // preread is a library ConvertAtMount has already read (and, for OneLibrary,
@@ -227,8 +227,8 @@ type preread struct {
 }
 
 // convert is Convert with an optional preread library. budget > 0 sets the
-// file-reading deadline once the library has been read.
-func convert(ctx context.Context, mount string, opts enginedb.Options, pre *preread, budget time.Duration) (enginedb.Result, error) {
+// file-reading deadline once the library has been read and reconciled.
+func convert(ctx context.Context, mount string, opts enginedb.Options, pre *preread, budget time.Duration, mountStart time.Time) (enginedb.Result, error) {
 	r, e := compat.NewResolver(mount)
 	if e != nil {
 		return enginedb.Result{}, e
@@ -264,12 +264,21 @@ func convert(ctx context.Context, mount string, opts enginedb.Options, pre *prer
 			return enginedb.Result{}, e
 		}
 	}
-	if budget > 0 {
-		opts.Deadline = time.Now().Add(budget)
-	}
 	opts.StagedOnly = stagedOnly
 	if e := ReconcileContext(ctx, r, l); e != nil {
 		return enginedb.Result{}, e
+	}
+	if budget > 0 && opts.Deadline.IsZero() {
+		if !mountStart.IsZero() {
+			if remaining := maxMountHookBudget - time.Since(mountStart); remaining < budget {
+				if remaining > time.Second {
+					budget = remaining
+				} else {
+					budget = time.Second
+				}
+			}
+		}
+		opts.Deadline = time.Now().Add(budget)
 	}
 	return enginedb.SyncResolved(ctx, r, l, opts)
 }
@@ -295,9 +304,6 @@ func ReconcileContext(ctx context.Context, r *compat.Resolver, l *rekordbox.Libr
 		rel, err := r.ResolveContext(ctx, t.Path)
 		if ctx.Err() != nil {
 			return ctx.Err()
-		}
-		if err == nil {
-			_, err = os.Stat(r.FullPath(rel))
 		}
 		if errors.Is(err, os.ErrNotExist) {
 			replaced[t.ID] = 0
@@ -341,7 +347,10 @@ const (
 // The edisksd hook kills rb-bridge 20 s after the mount, which rolled back the
 // whole import, playlists included (#48). Stop reading files after this; the
 // rest of the tracks finish on later mounts. A variable only for tests.
-var mountReadBudget = 8 * time.Second
+var (
+	mountReadBudget    = 8 * time.Second
+	maxMountHookBudget = 14 * time.Second
+)
 
 // ConvertAtMount is Convert for when a volume is mounted, while Engine is waiting
 // for it. An export unchanged since the last import is skipped at once. A large
@@ -371,6 +380,7 @@ func applyPendingAtMount(ctx context.Context, mount string) {
 }
 
 func convertAtMount(ctx context.Context, mount string, opts enginedb.Options, full bool) (enginedb.Result, error) {
+	mountStart := time.Now()
 	// The file-reading budget starts once the library is read: decrypting a
 	// OneLibrary must not use up the time meant for cues and waveforms.
 	var budget time.Duration
@@ -395,7 +405,7 @@ func convertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 	} else {
 		staged := strings.TrimSpace(stagedStamp(mount))
 		if staged == "" {
-			return convert(ctx, mount, opts, nil, budget)
+			return convert(ctx, mount, opts, nil, budget, mountStart)
 		}
 		stamp = stampVersion + " " + staged
 	}
@@ -428,10 +438,6 @@ func convertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 			return result, err
 		}
 		pre = &preread{l, stagedOnly, r}
-		if budget > 0 {
-			opts.Deadline = time.Now().Add(budget)
-			budget = 0
-		}
 		opts.StagedOnly = stagedOnly
 		// A large library's first import takes only what the export holds, built
 		// aside and published in one go, so its playlists are there when Engine
@@ -439,27 +445,6 @@ func convertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 		// MP3 offsets are read on the next inserts, a read budget at a time, in
 		// the in-place import below: no stamp until no track is left without them.
 		// Before, the stamp was written here and they were never read.
-		if len(l.Tracks) > fastImportTracks && !hasLibrary(dir) {
-			if !writable(mount) {
-				return enginedb.Result{Bypassed: true}, nil
-			}
-			if err := ReconcileContext(ctx, r, l); err != nil {
-				cleanEmptyEngineLibrary(dir)
-				return result, err
-			}
-			opts.Fast = true
-			result, err = stagedImport(ctx, dir, l, opts, r)
-			if err != nil {
-				cleanEmptyEngineLibrary(dir)
-			} else {
-				writeMark(dir, pendingName, stamp)
-				log.Printf("rb-bridge: %d tracks imported without cues; the next mounts read them", len(l.Tracks))
-			}
-			return result, err
-		}
-		// A first import that failed or was killed in place left an empty m.db,
-		// and Engine then showed the stick as an empty Engine library instead of
-		// offering its own rekordbox import (#53). Build it aside; publish or nothing.
 		if !hasLibrary(dir) {
 			if !writable(mount) {
 				return enginedb.Result{Bypassed: true}, nil
@@ -467,6 +452,21 @@ func convertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 			if err := ReconcileContext(ctx, r, l); err != nil {
 				cleanEmptyEngineLibrary(dir)
 				return result, err
+			}
+			if len(l.Tracks) > fastImportTracks {
+				opts.Fast = true
+				result, err = stagedImport(ctx, dir, l, opts, r)
+				if err != nil {
+					cleanEmptyEngineLibrary(dir)
+				} else {
+					writeMark(dir, pendingName, stamp)
+					log.Printf("rb-bridge: %d tracks imported without cues; the next mounts read them", len(l.Tracks))
+				}
+				return result, err
+			}
+			if budget > 0 && opts.Deadline.IsZero() {
+				opts.Deadline = time.Now().Add(budget)
+				budget = 0
 			}
 			result, err = stagedImport(ctx, dir, l, opts, r)
 			if err != nil {
@@ -483,7 +483,7 @@ func convertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 	// The same export as a mount that left tracks without their files: read
 	// only those, the others are known to be imported with theirs.
 	opts.Resume = resume || (!full && !opts.SmartMatch && readMark(dir, pendingName) == stamp)
-	result, err = convert(ctx, mount, opts, pre, budget)
+	result, err = convert(ctx, mount, opts, pre, budget, mountStart)
 	if err == nil && result.Deferred > 0 {
 		writeMark(dir, pendingName, stamp)
 		log.Printf("rb-bridge: %d tracks imported without cues; the next mount reads them", result.Deferred)

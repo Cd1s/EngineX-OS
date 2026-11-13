@@ -81,7 +81,7 @@ R=一次上游请求耗时；P=该接口页数；B=详情批次数；L=Apple 已
 
 ## PM 空出碟机后执行
 
-脚本 `tools/measure-stream-cold-20261109.py` 仅调用指定的 `sshctl run "$BUILD_HOST" --no-stdin --argv sh -c 'deck L/R ...'`。不切 scope、不登录、不清缓存、不改文件；元数据 GET 仍可能沿原逻辑触发最多 12 张封面的后台内存预热，并非完全没有出站请求。输出仅 code/TTFB/total 或匿名文件数/字节数。UUID 从当前 Engine 已显示歌单取得，不输出列表响应、日志正文、媒体地址或任何凭据。
+脚本 `tools/measure-stream-cold-20261109.py` 仅调用指定的 `sshctl run "$BUILD_HOST" --no-stdin --argv sh -c 'deck L/R ...'`（`BUILD_HOST` 为编译机的 ssm 别名）。不切 scope、不登录、不清缓存、不改文件；元数据 GET 仍可能沿原逻辑触发最多 12 张封面的后台内存预热，并非完全没有出站请求。输出仅 code/TTFB/total 或匿名文件数/字节数。UUID 从当前 Engine 已显示歌单取得，不输出列表响应、日志正文、媒体地址或任何凭据。
 
 ```sh
 # 左/右分别用当前 scope 下已经显示的真实 playlist UUID。

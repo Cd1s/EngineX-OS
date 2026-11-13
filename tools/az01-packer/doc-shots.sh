@@ -17,7 +17,7 @@
 #   - docs/assets/screenshots/zh-TW/06-preferences-enginex-github-update.png (900x562 RGB, Traditional Chinese)
 #
 # Requirements:
-#   - Runs on the build host host (aarch64 with 32-bit EL0) as root
+#   - Runs on the build host (aarch64 with 32-bit EL0) as root
 #   - /dev/dri/card0 available (virtio-gpu)
 #   - Memory limit per process <= 4G
 
@@ -178,7 +178,7 @@ PY
 fi
 
 # Main host entrypoint
-[ "$(uname -m)" = "aarch64" ] || { echo "Error: the build host (aarch64) required" >&2; exit 1; }
+[ "$(uname -m)" = "aarch64" ] || { echo "Error: an aarch64 build host is required" >&2; exit 1; }
 [ -e "$IMG" ] || { echo "Error: image file $IMG not found" >&2; exit 1; }
 
 W=/var/tmp/doc-shots-work-$$

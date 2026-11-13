@@ -151,6 +151,7 @@ static int lim_enabled, gain_enabled; // gain_enabled: #64 auto_gain=1
 static int bt_out_pair;               // bt_out=: output pair sent to Bluetooth (default 0, the first)
 static int echo_enabled;              // #104 upfader_echo=1: Echo Out on the master bus
 static int echo_player_bypass;        // standalone players hide Echo Out and Color FX Style; stored values behave as Off
+static int echo_master_bypass;        // #258 all 5.3.0 consoles use native per-channel Transition FX
 static unsigned pfx_time_ms;          // #162: zero OFF, otherwise 10..4000
 static struct sc_pfx_ms master_ms[4];
 static int pioneer_fx_mode;           // #88 Pioneer FX emulations
@@ -1134,8 +1135,9 @@ static uint32_t hook_master_output(void *host, void *context, int in_channels, c
         rc = orig(host, context, in_channels, in, out_channels, out, frames);
     }
     // #104 Echo Out rings the master output out after music stops; before the limiter.
+    // #258 every 5.3.0 console has native per-channel Transition FX; never stack master echo.
     if (out && frames > 0) {
-        int echo = __atomic_load_n(&echo_player_bypass, __ATOMIC_RELAXED) ? 0 : __atomic_load_n(&echo_enabled, __ATOMIC_RELAXED);
+        int echo = (__atomic_load_n(&echo_player_bypass, __ATOMIC_RELAXED) || __atomic_load_n(&echo_master_bypass, __ATOMIC_RELAXED)) ? 0 : __atomic_load_n(&echo_enabled, __ATOMIC_RELAXED);
         for (int ch = 0; ch < out_channels && ch / 2 < MASTER_ECHO_PAIRS; ch += 2)
             if (out[ch]) sc_echo_planar(&master_echo[ch / 2], out[ch], ch + 1 < out_channels ? out[ch + 1] : NULL, (unsigned)frames, echo);
     }
@@ -2121,6 +2123,7 @@ static const struct engine_build engine_builds[] = {
 
 static void select_build(const struct engine_build *b) {
     build = b;
+    echo_master_bypass = strcmp(b->name, "5.0.4") != 0; // retain legacy Echo Out only on the old base
     for (unsigned i = 0; i < DSP_HOOK_COUNT; i++) dsp_hooks[i].offset = b->dsp[i];
 }
 

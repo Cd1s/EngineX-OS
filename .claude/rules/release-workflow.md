@@ -42,9 +42,9 @@ git grep -n "<OLD>" -- README.md README.zh-CN.md README.zh-TW.md rootfs-overlay 
 
 `tests/`、`test_az01_packer.py` 里的版本号是测试数据，不要改。镜像里的 `/etc/sc5000/version.txt` 由 `build-release.sh` 的 `--set-version` 写入，第 1 步改的仓库文件用于实机热部署和保持一致。
 
-## 2. 测试（只在编译机编译机上跑，本机不编译）
+## 2. 测试（只在编译机上跑，本机不编译）
 
-本项目的编译、单测、门禁、打包与组件实验分析主机是 **the build host**（aarch64，支持 32 位 EL0，碟机的 armhf 程序原生运行）。2026-11-05 起不再用 IN。`remote-build` 默认仍连 IN，所以每次都写 `REMOTE_BUILD_HOST=<build host> remote-build ...`。实验与组件结构分析统一使用 **`craft-anything`**（`craft-anything` skill / `craft-anything-cli`）配合 **Gemini 3.8 Flash** 模型（2026-11-13 起，DeepSeek 已无额度）在编译机上进行。机器上的固定材料在 `/root/build/sc5000-lab/`：`fw/`（5.0.4 官方底包）、`fw-5.3.0/`、`fw-5.3.0-gen2/`、`5.0.4/qrc`、`5.3.0/qrc`、`5.0.4|5.3.0/tree/usr/Engine/Engine`、`systemone-analysis/`、`deps-sqlite/`（armhf `sqlite3.o`）、`sbin/fsck.hfsplus`、`release-<OLD>/`（上一版 3 个代表 `.img`，供门禁用）。Go 1.27.1 在 `/etc/profile.d/buildtools.sh`。
+本项目的编译、单测、门禁、打包与组件实验分析都在**编译机**上做（aarch64，支持 32 位 EL0，碟机的 armhf 程序原生运行）。`remote-build` 默认连的是另一台机器，所以每次都写 `REMOTE_BUILD_HOST=<build host> remote-build ...`（主机别名和 `REMOTE_BUILD_HOST` 的取值见私有开发者手册）。实验与组件结构分析统一使用 **`craft-anything`**（`craft-anything` skill / `craft-anything-cli`）配合 **Gemini 3.8 Flash** 模型（2026-11-13 起，DeepSeek 已无额度）在编译机上进行。机器上的固定材料在 `/root/build/sc5000-lab/`：`fw/`（5.0.4 官方底包）、`fw-5.3.0/`、`fw-5.3.0-gen2/`、`5.0.4/qrc`、`5.3.0/qrc`、`5.0.4|5.3.0/tree/usr/Engine/Engine`、`systemone-analysis/`、`deps-sqlite/`（armhf `sqlite3.o`）、`sbin/fsck.hfsplus`、`release-<OLD>/`（上一版 3 个代表 `.img`，供门禁用）。Go 1.27.1 在 `/etc/profile.d/buildtools.sh`。
 
 ```sh
 gofmt -l . && go vet ./... && go test -race ./...
@@ -129,7 +129,7 @@ bash tools/az01-packer/release-gate.sh \
 
 退出码为 0、`results.txt` 里没有 `FAIL`，才能进第 5 步。
 
-运行位置：门禁在编译机上原生跑（armhf 直接执行，不经 `qemu-arm`）。旧的 x86 编译机 IN 上 Engine 每次启动要 60–90 秒，编译机上约 2 秒。`release-gate.sh` 在没有注册 `qemu-arm` binfmt 且 `uname -m` 是 `aarch64`/`arm*` 时原生执行；在 x86 上仍要求带 F 标志的 `qemu-arm` binfmt。门禁全部在 `unshare -m -n -p` + chroot 里运行，挂载的是两个镜像解包出的**真实 `rootfs.ext2`**，宿主的 `/proc`、`/sys` 不会被写到：
+运行位置：门禁在编译机上原生跑（armhf 直接执行，不经 `qemu-arm`）。旧的 x86 编译机上 Engine 每次启动要 60–90 秒，ARM 编译机上约 2 秒。`release-gate.sh` 在没有注册 `qemu-arm` binfmt 且 `uname -m` 是 `aarch64`/`arm*` 时原生执行；在 x86 上仍要求带 F 标志的 `qemu-arm` binfmt。门禁全部在 `unshare -m -n -p` + chroot 里运行，挂载的是两个镜像解包出的**真实 `rootfs.ext2`**，宿主的 `/proc`、`/sys` 不会被写到：
 
 | 阶段 | 检查 |
 | --- | --- |
@@ -190,7 +190,7 @@ gh release view v<VERSION> --repo Cd1s/EngineX-OS --json assets -q '.assets[] | 
 每次发版上传完成后（或大规模沙箱/门禁测试结束后），**必须立即清理编译机（及 x86 编译机、本机 `/tmp`）上的编译、门禁、解包临时目录与 Go 缓存**，只保留 `/root/build/sc5000-lab/` 固定实验材料与当前最新版的 3 个门禁基准 `.img`：
 
 ```sh
-sshctl run "$BUILD_HOST" --no-stdin --argv sh -c '
+sshctl run "${BUILD_HOST:?set BUILD_HOST to the build host alias}" --no-stdin --argv sh -c '
 set -eu
 # 1. 将本次发布的 3 个代表镜像（JP07、JP13、JC11）存入 sc5000-lab/release-<VERSION> 供下次门禁作 <OLD> 基准，并删除旧版 release-* / databundle-*
 mkdir -p /root/build/sc5000-lab/release-<VERSION>
