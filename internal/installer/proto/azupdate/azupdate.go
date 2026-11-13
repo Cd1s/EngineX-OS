@@ -154,6 +154,8 @@ func WithStatusTimeout(d time.Duration) Option {
 	}
 }
 
+// WithChunkSize sets the image chunk size. New rejects values above the
+// native USB transfer limit before any protocol I/O.
 func WithChunkSize(n int) Option {
 	return func(c *Client) {
 		if n > 0 {
@@ -217,6 +219,9 @@ func New(dev proto.BulkDevice, eps proto.Endpoints, opts ...Option) (*Client, er
 		if opt != nil {
 			opt(c)
 		}
+	}
+	if c.chunkSize > proto.MaxBulkTransferSize {
+		return nil, fmt.Errorf("azupdate: chunk size %d exceeds USB transfer limit %d", c.chunkSize, proto.MaxBulkTransferSize)
 	}
 	if len(c.partitions) == 0 {
 		return nil, errors.New("azupdate: no allowlisted partitions (data, userdata) configured")

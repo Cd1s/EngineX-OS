@@ -90,6 +90,8 @@ func WithMaxCommandLength(n int) Option {
 	}
 }
 
+// WithChunkSize sets the download chunk size. New rejects values above the
+// native USB transfer limit before any protocol I/O.
 func WithChunkSize(n int) Option {
 	return func(c *Client) {
 		if n > 0 {
@@ -148,6 +150,12 @@ func New(dev proto.BulkDevice, eps proto.Endpoints, opts ...Option) (*Client, er
 		if opt != nil {
 			opt(c)
 		}
+	}
+	if c.chunkSize > proto.MaxBulkTransferSize {
+		return nil, fmt.Errorf("fastboot: chunk size %d exceeds USB transfer limit %d", c.chunkSize, proto.MaxBulkTransferSize)
+	}
+	if c.maxCmdLen > proto.MaxBulkTransferSize {
+		return nil, fmt.Errorf("fastboot: command limit %d exceeds USB transfer limit %d", c.maxCmdLen, proto.MaxBulkTransferSize)
 	}
 	return c, nil
 }
