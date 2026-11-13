@@ -258,3 +258,81 @@ func TestOwnImportKeepsThePlaceOfTheBackfill(t *testing.T) {
 		t.Fatal("the backfill began again at the first track after this build's own import")
 	}
 }
+
+// Review of 6a23453: beside a journal there is no generation, and a place recorded then
+// says nothing about an import behind it. This build's own import removed the journal and
+// kept that place under the new generation: the backfill went on from it and marked the
+// library as done, with an earlier build's overview before the place still without its
+// band maxima. (The reviewer's test, with SQLite's own persistent journal.)
+func TestOwnImportDoesNotVouchForAPlaceRecordedWithoutAGeneration(t *testing.T) {
+	root, db, want := oldOverviews(t, 2)
+	first := int64(math.MaxInt64)
+	for id := range want {
+		first = min(first, id)
+	}
+	var old []byte
+	if err := db.QueryRow(`SELECT overviewWaveFormData FROM PerformanceData WHERE trackId=?`, first).Scan(&old); err != nil {
+		t.Fatal(err)
+	}
+	fixed, err := enginedb.QCompress(want[first])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE PerformanceData SET overviewWaveFormData=? WHERE trackId=?`, fixed, first); err != nil {
+		t.Fatal(err)
+	}
+	var mode string
+	if err := db.QueryRow(`PRAGMA bridge.journal_mode=PERSIST`).Scan(&mode); err != nil || mode != "persist" {
+		t.Fatal(mode, err)
+	}
+	if _, err := db.Exec(`INSERT OR REPLACE INTO bridge.BridgeLibrary(key,value) VALUES('source','{}')`); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(root, "Engine Library", "Database2")
+	journal := filepath.Join(dir, ".rb-bridge-state.db-journal")
+	if _, err := os.Stat(journal); err != nil {
+		t.Fatal("fixture has no persistent journal:", err)
+	}
+	progress := filepath.Join(dir, ".rb-bridge-overview")
+	if err := os.WriteFile(progress, []byte("- "+strconv.FormatInt(first, 10)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The place was right when it was recorded. An earlier build now replaces that
+	// overview and writes its import's metadata in the same transaction.
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE PerformanceData SET overviewWaveFormData=? WHERE trackId=?`, old, first); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`INSERT OR REPLACE INTO bridge.BridgeLibrary(key,value) VALUES('source','{"foreign":true}')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(journal); err != nil {
+		t.Fatal("fixture: the earlier build's import left no persistent journal:", err)
+	}
+	testfixture.LargeExport(t, root, 3)
+	restore := bridge.SlowExportReadForTest(0, time.Nanosecond)
+	t.Cleanup(restore)
+	r := issue233Mount(t, root, enginedb.Options{})
+	restore()
+	if _, err := os.Stat(journal); !os.IsNotExist(err) {
+		t.Fatal("fixture: this build's import did not remove the journal:", err)
+	}
+	for attempt := 0; r.Deferred > 0 && attempt < 5; attempt++ {
+		r = issue233Mount(t, root, enginedb.Options{})
+	}
+	issue233Mount(t, root, enginedb.Options{})
+	mark, err := os.ReadFile(progress)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !completed(t, db, "PerformanceData", map[int64][]byte{first: want[first]}) {
+		t.Fatalf("the place recorded without a generation was kept (%q): the earlier build's overview before it is still without its band maxima", mark)
+	}
+}

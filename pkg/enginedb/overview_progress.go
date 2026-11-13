@@ -17,8 +17,9 @@ const overviewProgressFile = ".rb-bridge-overview"
 
 // OverviewProgress is how far the backfill of a library's overviews has come.
 type OverviewProgress struct {
-	after int64 // every imported overview up to this track has been seen
-	done  bool
+	after      int64 // every imported overview up to this track has been seen
+	done       bool
+	unverified bool // recorded without a generation: an import behind it would not have shown
 }
 
 // importGeneration changes with every import, an earlier build's on another deck too,
@@ -46,7 +47,7 @@ func importGeneration(dir string) string {
 // ReadOverviewProgress is the progress recorded for the library on mount, if no import
 // has run since it was recorded; from the start otherwise. Without a generation nothing
 // shows an import, so the place is kept and "done" never is: the backfill then goes
-// round the library, a mount's time at a go.
+// round the library, a mount's time at a go, and that place is not kept into a generation.
 func ReadOverviewProgress(mount string) OverviewProgress {
 	dir := filepath.Join(mount, "Engine Library", "Database2")
 	start := OverviewProgress{after: math.MinInt64}
@@ -66,7 +67,7 @@ func ReadOverviewProgress(mount string) OverviewProgress {
 		return OverviewProgress{done: true}
 	case len(f) == 2:
 		if after, err := strconv.ParseInt(f[1], 10, 64); err == nil {
-			return OverviewProgress{after: after}
+			return OverviewProgress{after: after, unverified: generation == "-"}
 		}
 	}
 	return start
@@ -74,11 +75,16 @@ func ReadOverviewProgress(mount string) OverviewProgress {
 
 // Keep records the progress for the library as it is now. rb-bridge calls it after an
 // import of its own, which changes the generation and leaves no overview without band
-// maxima: where the backfill stood still holds.
+// maxima: where the backfill stood still holds. A place recorded without a generation
+// does not hold: an earlier build may have imported behind it, so with a generation now
+// the record stays as it is, which no longer matches, and the next read starts over.
 func (p OverviewProgress) Keep(mount string) error {
 	dir := filepath.Join(mount, "Engine Library", "Database2")
 	name := filepath.Join(dir, overviewProgressFile)
 	generation := importGeneration(dir)
+	if p.unverified && generation != "" {
+		return nil
+	}
 	text := generation + " " + strconv.FormatInt(p.after, 10)
 	switch {
 	case p.done && generation == "": // nothing would show a later import
