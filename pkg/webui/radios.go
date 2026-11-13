@@ -119,16 +119,21 @@ func wifiTwinRoutes(routes string) (add, del [][]string) {
 // arpConf is where the kernel keeps each interface's ARP settings.
 const arpConf = "/proc/sys/net/ipv4/conf"
 
-// ownARPAddress makes eth0 and wlan0 ask for a neighbour's address with their own
-// (arp_announce 2; stock is 0, the address of the packet that waits). With the cable first,
-// a packet from Wi-Fi's address to the subnet leaves by the cable, and its ARP request said
-// there that Wi-Fi's address is the sender. The router then sent that address's traffic to
-// the cable, where a socket bound to wlan0 never gets it: Engine's Wi-Fi online check is
-// one, it timed out and Engine disconnected Wi-Fi.
+// ownARPAddress makes eth0 and wlan0 speak by ARP for their own address only: they ask
+// for a neighbour's address with their own (arp_announce 2; stock is 0, the address of the
+// packet that waits) and answer only a request for an address they hold themselves
+// (arp_ignore 1; stock is 0, any address of the deck). With the cable first, a packet from
+// Wi-Fi's address to the subnet leaves by the cable, and its ARP request said there that
+// Wi-Fi's address is the sender; and a request for Wi-Fi's address that reaches the cable
+// was answered there, with the cable's hardware address. Either way the router then sent
+// that address's traffic to the cable, where a socket bound to wlan0 never gets it:
+// Engine's Wi-Fi online check is one, it timed out and Engine disconnected Wi-Fi.
 func ownARPAddress(conf string) error {
 	for _, dev := range []string{"eth0", "wlan0"} {
-		if err := os.WriteFile(filepath.Join(conf, dev, "arp_announce"), []byte("2"), 0o644); err != nil {
-			return err
+		for _, set := range [][2]string{{"arp_announce", "2"}, {"arp_ignore", "1"}} {
+			if err := os.WriteFile(filepath.Join(conf, dev, set[0]), []byte(set[1]), 0o644); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

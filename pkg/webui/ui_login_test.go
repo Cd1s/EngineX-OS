@@ -895,20 +895,33 @@ func TestCableGoesBeforeWiFiOnTheSameSubnet(t *testing.T) {
 // and disconnected Wi-Fi. A packet from Wi-Fi's address that left by the cable had asked
 // for its neighbour with Wi-Fi's address; one such packet made a request bound to wlan0
 // time out, and none did once both interfaces asked with their own address.
-func TestCableBeforeWiFiAsksWithItsOwnAddress(t *testing.T) {
+// Review of e216388: the other direction was still open. A request for Wi-Fi's address
+// that reaches the cable was answered there with the cable's hardware address (in a
+// network namespace the router learned it and the request bound to wlan0 timed out), so
+// both interfaces also answer for their own address only.
+func TestCableBeforeWiFiAsksAndAnswersWithItsOwnAddress(t *testing.T) {
 	dir := t.TempDir()
 	conf, table, calls := filepath.Join(dir, "conf"), filepath.Join(dir, "table"), filepath.Join(dir, "calls")
-	for _, dev := range []string{"eth0", "wlan0", "lo"} {
-		os.MkdirAll(filepath.Join(conf, dev), 0o755)
-		os.WriteFile(filepath.Join(conf, dev, "arp_announce"), []byte("0\n"), 0o644)
+	settings := []string{"eth0/arp_announce", "wlan0/arp_announce", "eth0/arp_ignore", "wlan0/arp_ignore"}
+	stock := func() {
+		for _, name := range append([]string{"lo/arp_announce", "lo/arp_ignore"}, settings...) {
+			os.RemoveAll(filepath.Join(conf, name))
+			os.MkdirAll(filepath.Dir(filepath.Join(conf, name)), 0o755)
+			os.WriteFile(filepath.Join(conf, name), []byte("0\n"), 0o644)
+		}
 	}
-	announce := func(dev string) string {
-		b, _ := os.ReadFile(filepath.Join(conf, dev, "arp_announce"))
-		return strings.TrimSpace(string(b))
+	now := func(names ...string) string {
+		var got []string
+		for _, name := range names {
+			b, _ := os.ReadFile(filepath.Join(conf, name))
+			got = append(got, strings.TrimSpace(string(b)))
+		}
+		return strings.Join(got, " ")
 	}
-	// ip: prints the table, and records every change with what the two interfaces ask with at that moment.
-	script := "#!/bin/sh\nif [ \"$2\" = show ]; then cat '" + table + "'; exit; fi\n" +
-		"echo \"$* | $(cat '" + conf + "/eth0/arp_announce') $(cat '" + conf + "/wlan0/arp_announce' 2>/dev/null)\" >> '" + calls + "'\n"
+	// ip: prints the table, and records every change with what the two interfaces ask with
+	// and answer for at that moment.
+	script := "#!/bin/sh\nif [ \"$2\" = show ]; then cat '" + table + "'; exit; fi\ncd '" + conf + "'\n" +
+		"echo \"$* | $(for f in " + strings.Join(settings, " ") + "; do printf '%s ' \"$(cat $f)\"; done)\" >> '" + calls + "'\n"
 	if err := os.WriteFile(filepath.Join(dir, "ip"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -920,29 +933,34 @@ func TestCableBeforeWiFiAsksWithItsOwnAddress(t *testing.T) {
 	const wifi = "192.168.1.0/24 dev wlan0 scope link  src 192.168.1.187 \n"
 	const cable = "192.168.1.0/24 dev eth0 scope link  src 192.168.1.238 \n"
 
+	stock()
 	os.WriteFile(table, []byte(gateway+wifi+"192.168.1.6 dev wlan0 scope link \n"), 0o644)
 	guardRoutesOnce(context.Background(), conf)
-	if b, _ := os.ReadFile(calls); len(b) != 0 || announce("eth0") != "0" || announce("wlan0") != "0" {
-		t.Fatalf("Wi-Fi alone is not left as it is: %q %s %s", b, announce("eth0"), announce("wlan0"))
+	if b, _ := os.ReadFile(calls); len(b) != 0 || now(settings...) != "0 0 0 0" {
+		t.Fatalf("Wi-Fi alone is not left as it is: %q %s", b, now(settings...))
 	}
 
 	os.WriteFile(table, []byte(gateway+wifi+cable), 0o644)
 	guardRoutesOnce(context.Background(), conf)
 	b, _ := os.ReadFile(calls)
-	if want := "route add 192.168.1.0/24 dev wlan0 scope link src 192.168.1.187 metric 600 | 2 2\n" +
-		"route del 192.168.1.0/24 dev wlan0 scope link src 192.168.1.187 metric 0 | 2 2\n"; string(b) != want {
-		t.Fatalf("the cable went first while an interface still asked with the other's address:\n%s", b)
+	if want := "route add 192.168.1.0/24 dev wlan0 scope link src 192.168.1.187 metric 600 | 2 2 1 1 \n" +
+		"route del 192.168.1.0/24 dev wlan0 scope link src 192.168.1.187 metric 0 | 2 2 1 1 \n"; string(b) != want {
+		t.Fatalf("the cable went first while an interface still asked with (2 2) or answered for (1 1) the other's address:\n%s", b)
 	}
-	if announce("lo") != "0" {
+	if now("lo/arp_announce", "lo/arp_ignore") != "0 0" {
 		t.Fatal("an interface that shares no subnet was changed")
 	}
 
-	// No setting, no cable first: Wi-Fi keeps working as it did before the route change.
-	os.Remove(calls)
-	os.RemoveAll(filepath.Join(conf, "wlan0"))
-	guardRoutesOnce(context.Background(), conf)
-	if b, _ := os.ReadFile(calls); len(b) != 0 {
-		t.Fatalf("the cable went first without the setting:\n%s", b)
+	// Not every setting, no cable first: Wi-Fi keeps working as it did before the route change.
+	for _, name := range settings {
+		stock()
+		os.Remove(calls)
+		os.Remove(filepath.Join(conf, name))
+		os.Mkdir(filepath.Join(conf, name), 0o755) // cannot be written
+		guardRoutesOnce(context.Background(), conf)
+		if b, _ := os.ReadFile(calls); len(b) != 0 {
+			t.Fatalf("the cable went first without %s:\n%s", name, b)
+		}
 	}
 }
 
