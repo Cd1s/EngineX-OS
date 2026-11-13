@@ -42,7 +42,7 @@ func TestPWV7BandsAreLowMidHighOnRekordboxDemoTracks(t *testing.T) {
 				continue
 			}
 			phase := (ms - float64(beats[k].TimeMS)) / float64(beats[k+1].TimeMS-beats[k].TimeMS)
-			for band, v := range waveRGB(wave, i) {
+			for band, v := range WaveRGB(wave, i) {
 				if phase < 1.0/16 {
 					onBeat[band] += float64(v) * 4
 				} else if phase >= 0.25 && phase < 0.5 {

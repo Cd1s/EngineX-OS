@@ -181,7 +181,7 @@ func TestSimCDJ3000ServerToDenon(t *testing.T) {
 	if live.Number != 4 || live.SourceSlot != 3 || live.TrackID != 1 || live.BPM != 120 || live.Pitch != 3.125 || live.EffectiveBPM != 123.75 || !live.Master || !live.Playing || !live.Sync || !live.OnAir || live.Beat != 2 || live.Title == "" {
 		t.Fatalf("live metadata: %+v", live)
 	}
-	if len(live.Waveform) != 4 || live.Waveform[0] != [3]byte{30, 10, 20} || live.Waveform[3] != [3]byte{120, 100, 110} {
+	if len(live.Waveform) != 4 || live.Waveform[0] != [3]byte{10, 20, 30} || live.Waveform[3] != [3]byte{100, 110, 120} {
 		t.Fatal("2EX three-band waveform not selected")
 	}
 	beatSeen := false

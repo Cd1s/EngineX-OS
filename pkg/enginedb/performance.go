@@ -328,7 +328,7 @@ func EncodePerformance(t rekordbox.Track, a *rekordbox.Analysis) (Performance, e
 			}
 			var peak [3]byte
 			for j := lo; j < hi && j < n; j++ {
-				v := waveRGB(*wave, int(j))
+				v := WaveRGB(*wave, int(j))
 				for c := 0; c < 3; c++ {
 					peak[c] = max(peak[c], v[c])
 					top[c] = max(top[c], v[c])
@@ -476,7 +476,10 @@ func cueColor(c rekordbox.Cue) [4]byte {
 	return [4]byte{255, 0, 255, 0}
 }
 
-func waveRGB(w rekordbox.Waveform, i int) [3]byte {
+// WaveRGB is entry i of a rekordbox waveform as Engine's low, mid, high. PWV7 holds its
+// bytes in that order (TestPWV7BandsAreLowMidHighOnRekordboxDemoTracks), not the mid,
+// high, low of Deep Symmetry's ANLZ documentation.
+func WaveRGB(w rekordbox.Waveform, i int) [3]byte {
 	offset := uint64(i) * uint64(w.EntryBytes)
 	if i < 0 || w.EntryBytes == 0 || offset >= uint64(len(w.Data)) || uint64(w.EntryBytes) > uint64(len(w.Data))-offset {
 		return [3]byte{}
