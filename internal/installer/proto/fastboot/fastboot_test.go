@@ -452,17 +452,16 @@ func TestFastbootFaultInjectionAndUnknownOutcome(t *testing.T) {
 
 	// Case 6: multi-piece sparse failure on piece 2 -> OutcomeUnknown (piece 1 already flashed).
 	const blkSize = 4096
-	raw := bytes.Repeat([]byte{0x12, 0x34, 0x56, 0x78}, 8*blkSize/4)
-	raw[0] = 0x99 // force non-uniform in first block
-	raw[6*blkSize] = 0xAA
+	raw := make([]byte, 8*blkSize)
+	for i := range raw {
+		raw[i] = byte((i*7 + i/blkSize) ^ 0x5A)
+	}
 	capBytes := int64(28 + 12 + 12 + 4*blkSize)
 	dev6 := newFakeFastbootDevice()
 	dev6.vars["max-download-size"] = fmt.Sprintf("0x%x", capBytes)
-	dev6.failOnCmd["flash:data"] = ""
 	// Inject a read failure on piece 2's download command (read #6).
 	// Piece 0: getvar product (1), getvar max-download-size (2), dl1 DATA (3), dl1 OKAY (4), flash1 OKAY (5).
 	// Piece 1: dl2 DATA (6) fails.
-	delete(dev6.failOnCmd, "flash:data")
 	dev6.fault = faultRule{onReadCall: 6, readErr: io.EOF}
 	cl6, _ := fastboot.New(dev6, proto.Endpoints{In: 0x81, Out: 0x01}, fastboot.WithCommandTimeout(time.Second))
 	err6 := cl6.Flash(context.Background(), "data", proto.Image{Data: bytes.NewReader(raw), Size: int64(len(raw))}, fastboot.FlashOptions{
