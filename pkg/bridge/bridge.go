@@ -327,6 +327,8 @@ func ReconcileContext(ctx context.Context, r *compat.Resolver, l *rekordbox.Libr
 
 const (
 	stampName = ".rb-bridge-stamp"
+	// overviewName marks a library whose overviews FillOverviewMaxima has completed.
+	overviewName = ".rb-bridge-overview"
 	// pendingName holds the stamp of an export whose import left tracks without
 	// their files read; the next mount of the same export resumes it.
 	pendingName  = ".rb-bridge-pending"
@@ -413,6 +415,10 @@ func convertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 					deadline = time.Now().Add(mountReadBudget)
 				}
 				_, _ = enginedb.MigrateArtworkBefore(ctx, mount, deadline)
+				// ...and, once, the overview scale earlier builds left out.
+				if readMark(dir, overviewName) == "" && enginedb.FillOverviewMaxima(ctx, mount) == nil {
+					writeMark(dir, overviewName, "1")
+				}
 			}
 			return enginedb.Result{Bypassed: true}, nil
 		}

@@ -3267,16 +3267,6 @@ SERVICES_MAIN = """
 		running: root.scBroadcastOn
 		onTriggered: root.scSyncBroadcastMeta()
 	}
-	// Only Praline / Half needs a bottom-anchored stretch for rekordbox Contents/
-	// exports: its shaders attenuate amplitude by 0.30/0.40/0.625. Butterfly / Full
-	// omits that attenuation and mirrors around 0.5, so keep unit scale to avoid
-	// clipping either peak in stacked lanes, matching scOverviewStrip.yStretch.
-	function scOverviewScale(track, rgb, half) {
-		if (half === false) return 1
-		const path = track && track.path ? String(track.path) : ""
-		if (!/(^|\\/)Contents\\//.test(path)) return 1
-		return rgb ? @RGB_SCALE@ : @BANDS_SCALE@
-	}
 	// Settings and the Control Center selector both switch the palette here.
 	function scSetWave(id) {
 		if (id === "rgb" && scWave !== "rgb") {
@@ -4525,10 +4515,9 @@ RGB_COLORS = {"Low": "#ff1428", "Mid": "#00e632", "High": "#0078ff"}
 RGB_PAST = {"Low": "#7f0a14", "Mid": "#007319", "High": "#003c80"}
 
 
-# Vertical stretch of the deck overview waveform for tracks on a rekordbox USB
-# export (1.0 = stock height; every other track keeps 1.0). RGB draws
-# each column at full amplitude and fills the strip quickly; Denon and 3-Band
-# stack the bands as separate, lower layers and need more.
+# Vertical stretch of the Half overview strip a shadow deck draws from stream-sync's
+# tile. RGB draws each column at full amplitude; Denon and 3-Band stack the bands as
+# separate, lower layers and need more.
 OVERVIEW_Y_SCALE_RGB = 1.3
 OVERVIEW_Y_SCALE_BANDS = 2.2
 
@@ -5783,12 +5772,6 @@ def edits(dev: bool):
     wave += [(f"color{b}Color: Style.waveform{b}Color", f"color{b}Color: {three_band(f'waveform{b}Color', b)}") for b in BAND_COLORS]
     overview = [(f"rgbMode ? Style.waveformRGB{b}Color : Style.waveform{b}Color", f'rgbMode ? "{RGB_COLORS[b]}" : ' + three_band(f"waveform{b}Color", b)) for b in BAND_COLORS]
     overview += [(f"elapsed{b}Color: Style.waveform{b}PastColor", f'elapsed{b}Color: rgbMode ? "{RGB_PAST[b]}" : ' + three_band(f"waveform{b}PastColor", b, BAND_PAST)) for b in BAND_COLORS]
-    # Deck overview: drop the 7 px gap so the waveform uses the full bar. Only
-    # Praline / Half quick-imported rekordbox overviews need a bottom-anchored
-    # stretch; Butterfly / Full already spans the bar and stays at unit scale
-    # about its midpoint, including reduced-height stacked lanes (#233). Only y
-    # changes, preserving needle drop and markers' x. The container clips Half's
-    # stretched peaks. Keep the transform outside the anchors group.
     deck_overview = list(overview) + [
         # A shadow deck draws its source's slip line: the source's slip timeline in samples, 0 while slip is not active.
         ("    readonly property bool isSlipModeActive: !isRemoteDeck && pSlipActive && pSlipActive.translator\n        ? pSlipActive.translator.value\n        : false\n",
@@ -5796,12 +5779,6 @@ def edits(dev: bool):
          "    readonly property bool isSlipModeActive: scSlip > 0 || (!isRemoteDeck && pSlipActive && pSlipActive.translator\n        ? pSlipActive.translator.value\n        : false)\n"),
         ("    readonly property int slipModePosition: isSlipModeActive && pSlipModePosition",
          "    readonly property int slipModePosition: scSlip > 0 ? scSlip : isSlipModeActive && pSlipModePosition"),
-        ("				bottomMargin: 7\n", "				bottomMargin: 0\n"),
-        ("		objectName: \"Deck_WaveformOverview_ViewContainer\"\n",
-         "		objectName: \"Deck_WaveformOverview_ViewContainer\"\n		clip: true\n"),
-        ("			visible: waveformOverview.songLoaded && !waveformOverview.isRemoteDeck\n",
-         "			transform: Scale { origin.y: overview.displayType === WaveformOverviewView.Butterfly ? overview.height / 2 : overview.height; yScale: root.scOverviewScale(overview.trackData, overview.rgbMode, overview.displayType !== WaveformOverviewView.Butterfly) }\n"
-         "			visible: waveformOverview.songLoaded && !waveformOverview.isRemoteDeck\n"),
     ]
     main = DEV_HARNESS if dev else ""
     services_main = (SERVICES_MAIN
@@ -5809,7 +5786,7 @@ def edits(dev: bool):
                      .replace("@TIDAL_SELECT@", TIDAL_SELECT_530 if v53() else "")
                      .replace("@TIDAL_PAIRING@", TIDAL_PAIRING_530 if v53() else "")
                      .replace("@TIDAL_LOGIN_PENDING@", "\tproperty bool scTidalLoginPending: false" if v53() else ""))
-    services = (services_main + FX_CONTROLLER).replace("@ICONS@", "Skins/UIKit/Icons" if v53() else "UIKit.1/UIKit/Icons").replace("@RGB_SCALE@", str(OVERVIEW_Y_SCALE_RGB)).replace("@BANDS_SCALE@", str(OVERVIEW_Y_SCALE_BANDS)) + (SMART_SYNC_MAIN if v53() else "")
+    services = (services_main + FX_CONTROLLER).replace("@ICONS@", "Skins/UIKit/Icons" if v53() else "UIKit.1/UIKit/Icons") + (SMART_SYNC_MAIN if v53() else "")
     out = PatchDict({
         # The file name shadows the native SoundSwitch context object.
         prefs + "Entries/SoundSwitch.qml": [(

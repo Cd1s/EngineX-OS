@@ -5905,73 +5905,29 @@ class EngineLightingDefaultOffAndPersistTest(unittest.TestCase):
         self.assertNotIn('engineLighting=', bp.SERVICES_ENTRIES)
 
 
-@unittest.skipUnless(shutil.which("node"), "node needed for the overview scale behavioral checks")
 class OverviewFullButterflyScaleTest(unittest.TestCase):
-    """#233: mirrored Full peaks fit even the smallest stacked overview lane."""
+    """#233: mirrored Full peaks fit even the smallest stacked overview lane.
 
-    def check_overview(self, main, overview):
-        scale = re.search(r"function scOverviewScale\([^)]*\)\s*\{.*?\n\s*\}", main, re.S)
-        self.assertIsNotNone(scale)
-        transform = re.search(r"transform: Scale \{ origin.y: ([^;]+); yScale: ([^\n]+?) \}", overview)
-        self.assertIsNotNone(transform)
-        js = "const assert = require('assert/strict');\n" + scale.group(0) + "\n"
-        js += "const geometry = (overview, WaveformOverviewView) => { const root = {scOverviewScale}; return {origin: (" + transform.group(1) + "), scale: (" + transform.group(2) + ")}; };\n"
-        js += r"""
-// Stock lane heights: full player, StackedMiniDeckLayout / Player_Mini,
-// 5.0.4 passive WaveformOverviews, and four-deck Console_Mini.
-// Check symbolic test values and the native JP13 enum (Full preference 1 maps to Butterfly 0).
-for (const WaveformOverviewView of [{Praline: 0, Butterfly: 1}, {Praline: 1, Butterfly: 0}]) {
-    for (const height of [86, 46, 44, 30]) {
-        for (const rgbMode of [false, true]) {
-            for (const path of ['../Contents/Artist/Album/track.mp3',
-                                '../Engine Library/Music/track.flac', '',
-                                '../Stream/download.mp3', '../NotContents/track.mp3']) {
-                for (const displayType of [0, 1]) {
-                    const got = geometry({height, rgbMode, displayType, trackData: {path}}, WaveformOverviewView);
-                    const full = displayType === WaveformOverviewView.Butterfly;
-                    const expected = !full && path === '../Contents/Artist/Album/track.mp3'
-                        ? (rgbMode ? 1.3 : 2.2) : 1;
-                    const context = JSON.stringify({height, rgbMode, path, displayType, got});
-                    const mappedTop = got.origin + (0 - got.origin) * got.scale;
-                    const mappedBottom = got.origin + (height - got.origin) * got.scale;
-                    assert.equal(got.scale, expected, 'yScale: ' + context +
-                        ' mapped=[' + mappedTop + ',' + mappedBottom + ']');
-                    assert.equal(got.origin, full ? height / 2 : height, 'origin.y: ' + context);
-                    if (full) {
-                        assert.ok(mappedTop >= 0, 'Full top peak clipped: ' + context);
-                        assert.ok(mappedBottom <= height, 'Full bottom peak clipped: ' + context);
-                    }
-                }
-            }
-            for (const trackData of [null, {}, {path: null}]) {
-                for (const displayType of [0, 1]) {
-                    assert.equal(geometry({height, rgbMode, displayType, trackData}, WaveformOverviewView).scale, 1);
-                }
-            }
-        }
-    }
-}
-"""
-        result = subprocess.run([shutil.which("node"), "-e", js], capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
+    The deck overview keeps its stock geometry (nothing of ours scales, clips or moves the
+    native view), so peaks fit every lane exactly as on stock; rb-bridge gives Engine the
+    band maxima it scales by instead (pkg/enginedb TestOverviewEndsWithBandMaxima)."""
 
-    def test_patch_expressions_keep_full_peaks_inside_every_lane(self):
+    def test_patches_leave_the_native_overview_geometry_alone(self):
         old_root = bp.ROOT
         try:
             for version, root in (("5.0.4", "Skins/EmbeddedCommon/"), ("5.3.0", "Skins/Embedded/")):
                 with self.subTest(version=version):
                     bp.ROOT = root
                     patches = bp.edits(False)
-                    # Minimal stock anchors also exercise the patch without lab fixtures in CI.
-                    main = "\n".join(bp.patch(old, old, new, root + "EmbeddedMain.qml")
-                                     for old, new in patches[root + "EmbeddedMain.qml"])
-                    overview = "\n".join(bp.patch(old, old, new, root + "Views/Common/WaveformOverview/WaveformOverview.qml")
-                                         for old, new in patches[root + "Views/Common/WaveformOverview/WaveformOverview.qml"])
-                    self.check_overview(main, overview)
+                    main = "\n".join(new for _, new in patches[root + "EmbeddedMain.qml"])
+                    overview = "\n".join(new for _, new in patches[root + "Views/Common/WaveformOverview/WaveformOverview.qml"])
+                    self.assertNotIn("scOverviewScale", main)
+                    for ours in ("transform", "clip:", "bottomMargin"):
+                        self.assertNotIn(ours, overview)
         finally:
             bp.ROOT = old_root
 
-    def test_built_packs_keep_full_peaks_inside_every_lane(self):
+    def test_built_packs_keep_the_stock_overview_geometry(self):
         built = 0
         for version, root in (("5.0.4", "Skins/EmbeddedCommon/"), ("5.3.0", "Skins/Embedded/")):
             qrc = LAB / version / "qrc"
@@ -5985,11 +5941,17 @@ for (const WaveformOverviewView of [{Praline: 0, Butterfly: 1}, {Praline: 1, But
                     for language in ("en", "zh-Hans", "zh-Hant"):
                         with self.subTest(language=language):
                             base = packs / language / root
-                            self.check_overview((base / "EmbeddedMain.qml").read_text(),
-                                                (base / "Views/Common/WaveformOverview/WaveformOverview.qml").read_text())
+                            self.assertNotIn("scOverviewScale", (base / "EmbeddedMain.qml").read_text())
+                            overview = (base / "Views/Common/WaveformOverview/WaveformOverview.qml").read_text()
+                            # The shadow layer appended to this file has its own strip and transform.
+                            native = overview.split("EngineX_Shadow_", 1)[0]
+                            self.assertIn("bottomMargin: 7", native)
+                            self.assertNotIn("transform:", native)
+                            self.assertNotRegex(native, r'objectName: "Deck_WaveformOverview_ViewContainer"\s*clip: true')
         if not built:
             self.skipTest(f"{LAB} QRC fixtures not found")
 
+    @unittest.skipUnless(shutil.which("node"), "node needed for the overview scale behavioral checks")
     def test_shadow_full_overview_keeps_unit_stretch(self):
         strip = bp.SHADOW_LAYER.split("id: scOverviewStrip", 1)[1]
         stretch = re.search(r"readonly property real yStretch: ([^\n]+)", strip).group(1)
