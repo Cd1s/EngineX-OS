@@ -23,6 +23,10 @@ type tsFake struct {
 	state   string
 	authURL string
 	keyFile string
+	forwards map[string]string
+	flakyStatus bool
+	statusCalls int
+	serveError string
 }
 
 func (f *tsFake) run(_ context.Context, name string, args ...string) ([]byte, error) {
@@ -41,11 +45,35 @@ func (f *tsFake) run(_ context.Context, name string, args ...string) ([]byte, er
 	case name == "systemctl" && len(args) > 0 && args[0] == "stop":
 		f.active = false
 	case strings.HasSuffix(name, "/tailscale") && len(args) > 1 && args[1] == "status":
+		f.statusCalls++
+		if f.flakyStatus && f.statusCalls%2 == 0 {
+			return nil, context.DeadlineExceeded
+		}
 		if !f.active {
 			return nil, errors.New("no daemon")
 		}
 		return []byte(`{"Version":"1.104.5","BackendState":"` + f.state + `","AuthURL":"` + f.authURL +
 			`","Self":{"HostName":"deck","TailscaleIPs":["100.64.0.7"]}}`), nil
+	case strings.HasSuffix(name, "/tailscale") && len(args) > 2 && args[1] == "serve":
+		switch args[2] {
+		case "status":
+			tcp := map[string]map[string]string{}
+			for port, target := range f.forwards {
+				tcp[port] = map[string]string{"TCPForward": target}
+			}
+			out, err := json.Marshal(map[string]any{"TCP": tcp})
+			return out, err
+		case "reset":
+			f.forwards = nil
+		case "--bg":
+			if f.serveError != "" {
+				return []byte(f.serveError), errors.New("exit 1")
+			}
+			if f.forwards == nil {
+				f.forwards = map[string]string{}
+			}
+			f.forwards[strings.TrimPrefix(args[3], "--tcp=")] = strings.TrimPrefix(args[4], "tcp://")
+		}
 	case strings.HasSuffix(name, "/tailscale") && len(args) > 1 && args[1] == "up":
 		for _, a := range args {
 			if p, ok := strings.CutPrefix(a, "--auth-key=file:"); ok {
@@ -56,6 +84,83 @@ func (f *tsFake) run(_ context.Context, name string, args ...string) ([]byte, er
 		}
 	}
 	return []byte("ok\n"), nil
+}
+
+func tsPollingServer(t *testing.T, f *tsFake) *Server {
+	t.Helper()
+	tailscaleServed.Store(false)
+	SetSystemRunner(f.run)
+	t.Cleanup(func() { SetSystemRunner(nil); tailscaleServed.Store(false) })
+	s := New(Config{StateDir: t.TempDir(), UIDir: t.TempDir()}, nil)
+	if err := os.MkdirAll(filepath.Dir(s.tailscaleBin()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(s.tailscaleBin(), []byte("x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.saveTailscaleConfig(TailscaleConfig{Enabled: true, Forward: TailscaleForward{SSH: true}}); err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+func TestTailscaleFlakyStatusKeepsForwards(t *testing.T) {
+	f := &tsFake{active: true, state: "Running", flakyStatus: true, forwards: map[string]string{"22": "127.0.0.1:22"}}
+	s := tsPollingServer(t, f)
+	for i := 0; i < 10; i++ {
+		w := httptest.NewRecorder()
+		s.handleTailscale(w, httptest.NewRequest(http.MethodGet, "/api/tailscale", nil))
+		if !tailscaleServed.Load() {
+			t.Errorf("poll %d forgot applied forwards after a status timeout", i)
+		}
+	}
+	if f.has("serve reset") || f.has("serve --bg") {
+		cmds, _ := f.snapshot()
+		t.Fatalf("polling changed matching forwards: %v", cmds)
+	}
+}
+
+func TestTailscaleForwardChangeAppliesOnce(t *testing.T) {
+	f := &tsFake{active: true, state: "Running", forwards: map[string]string{"22": "127.0.0.1:22"}}
+	s := tsPollingServer(t, f)
+	if code, _, out := tsPost(t, s, `{"forward":{"ssh":true,"webui":true}}`); code != http.StatusOK {
+		t.Fatalf("change forwards: %d %s", code, out)
+	}
+	for i := 0; i < 3; i++ {
+		s.handleTailscale(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/tailscale", nil))
+	}
+	cmds, _ := f.snapshot()
+	if f.has("serve reset") || f.has("serve --bg --tcp=22 ") || strings.Count(strings.Join(cmds, "\n"), "serve --bg --tcp=8080 ") != 1 {
+		t.Fatalf("must add only the missing forward once: %v", cmds)
+	}
+	// Removing the last service clears the persistent forwards once.
+	if code, _, out := tsPost(t, s, `{"forward":{"ssh":false,"webui":false}}`); code != http.StatusOK {
+		t.Fatalf("remove forwards: %d %s", code, out)
+	}
+	s.handleTailscale(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/tailscale", nil))
+	cmds, _ = f.snapshot()
+	if len(f.forwards) != 0 || strings.Count(strings.Join(cmds, "\n"), "serve reset") != 1 {
+		t.Fatalf("must remove stale forwards once: %v", cmds)
+	}
+}
+
+func TestTailscaleServeFailureInView(t *testing.T) {
+	f := &tsFake{active: true, state: "Running", serveError: "Serve is not enabled on your tailnet; HTTPS must be enabled"}
+	s := tsPollingServer(t, f)
+	w := httptest.NewRecorder()
+	s.handleTailscale(w, httptest.NewRequest(http.MethodGet, "/api/tailscale", nil))
+	if !strings.Contains(w.Body.String(), `"serveError":`) || !strings.Contains(w.Body.String(), f.serveError) {
+		t.Fatalf("serve failure missing from status response: %s", w.Body.String())
+	}
+	if tailscaleServed.Load() {
+		t.Fatal("failed forwards must remain eligible for retry")
+	}
+	f.serveError = ""
+	w = httptest.NewRecorder()
+	s.handleTailscale(w, httptest.NewRequest(http.MethodGet, "/api/tailscale", nil))
+	if strings.Contains(w.Body.String(), `"serveError":`) || !tailscaleServed.Load() {
+		t.Fatalf("successful retry did not clear the error: %s", w.Body.String())
+	}
 }
 
 func (f *tsFake) has(sub string) bool {
