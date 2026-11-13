@@ -2,7 +2,7 @@
 
 > 状态：**原始需求蓝图；当前进度见 [变更记录](docs/ISSUE-FIXES-2026-11-04.md)**。
 > 本文中的秒读、完整 Cue/波形兼容和功能描述是目标，不代表均已通过实机验收。
-> 目标设备：Denon DJ SC5000 Prime (`sc5000.lan` / `192.168.1.108`，硬件代号 `JP07`，Rockchip RK3288 ARMv7)
+> 目标设备：Denon DJ SC5000 Prime (`enginex.lan` / `192.168.1.108`，硬件代号 `JP07`，Rockchip RK3288 ARMv7)
 > 基础底包：Engine OS 5.0.4 官方固件（`AZ01` 容器 / Yocto Scarthgap / Linux 6.6.119-rt / Qt 6.7.2）
 > 仿真测试环境：`Peyton-C/QEngine`（在编译机 `IN` 上模拟 `JP07` 硬件刷机与联调）
 

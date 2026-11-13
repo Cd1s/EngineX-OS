@@ -7,10 +7,10 @@ qCompress 格式。不会打开 `PIONEER/` 或音频文件进行写入，不安�
 ## 使用
 
 ```sh
-go build -o bin/sc5000-suite ./cmd/sc5000-suite
-bin/sc5000-suite rb-bridge --mount-path /media/usb
-bin/sc5000-suite rb-bridge --mount-path /media/usb --smart-match 123
-bin/sc5000-suite rb-bridge --prolink --bind 0.0.0.0
+go build -o bin/enginex-suite ./cmd/enginex-suite
+bin/enginex-suite rb-bridge --mount-path /media/usb
+bin/enginex-suite rb-bridge --mount-path /media/usb --smart-match 123
+bin/enginex-suite rb-bridge --prolink --bind 0.0.0.0
 ```
 
 `--smart-match` 参数是参考曲目的 **Rekordbox ID**；默认关闭。推荐列表在根歌单树
@@ -97,9 +97,9 @@ Engine 原生 quickCues 只支持 8 槽（A–H），空槽位置为 -1。这些
 `stream-sync` 的 **Pro DJ Link Export to CDJ (Beta)** 开关默认关闭。关闭时导出组件
 没有监听 socket、公告、goroutine 或定时器；原有被动发现继续独立工作。开启前先挂载
 含 `PIONEER/rekordbox/export.pdb` 的 U 盘；多个盘选择 `/media` 下排序后的第一个。
-设置可用 `POST /v1/sc5000/ui?prolinkExport=1` 或
-`POST /v1/sc5000/prolink?export=1` 修改，也可在启动前写入 `prolink_export=1`。
-改为 `0` 会同步关闭全部导出连接。`GET /v1/sc5000/prolink` 的 `export` 是保存的意愿，
+设置可用 `POST /v1/enginex/ui?prolinkExport=1` 或
+`POST /v1/enginex/prolink?export=1` 修改，也可在启动前写入 `prolink_export=1`。
+改为 `0` 会同步关闭全部导出连接。`GET /v1/enginex/prolink` 的 `export` 是保存的意愿，
 `exportState` 报告实际监听地址和编号；启动失败不会阻止普通控制台启动。
 
 开启后提供只读 UDP portmapper/MOUNTv1/NFSv2（`/C/`），TCP 12523 的端口查询、
@@ -126,8 +126,8 @@ SQLiteAdapter 可替换版本相关的解析逻辑，无法识别/加密的库�
 
 ```sh
 go test ./... -v
-GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o bin/sc5000-suite ./cmd/sc5000-suite
-file bin/sc5000-suite
+GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o bin/enginex-suite ./cmd/enginex-suite
+file bin/enginex-suite
 ```
 
 端到端 fixture 独立构造 DeviceSQL 数据/非数据页、DAT / EXT / 2EX、NFD 日文/韩文/

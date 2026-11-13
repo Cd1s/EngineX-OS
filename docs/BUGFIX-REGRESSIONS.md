@@ -51,7 +51,7 @@
 . /etc/profile.d/buildtools.sh && GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go test ./pkg/enginedb ./pkg/rekordbox ./pkg/compat -c -o /dev/null
 python3 -m unittest discover -s tools/az01-packer -v
 bash tests/test_rootfs_overlay.sh
-bash -n sim/qengine/run_qengine.sh rootfs-overlay/usr/local/bin/sc5000-storage-mount rootfs-overlay/usr/local/bin/sc5000-perf-tune rootfs-overlay/usr/local/bin/sc5000-debloat
+bash -n sim/qengine/run_qengine.sh rootfs-overlay/usr/local/bin/enginex-storage-mount rootfs-overlay/usr/local/bin/enginex-perf-tune rootfs-overlay/usr/local/bin/enginex-debloat
 ```
 
 另外逐个执行上述脚本的 `bash -n`（bash 的多个文件参数并不会逐一解析），并通过全仓七个 Shell 脚本（含无扩展名的 mount.hfsplus）的语法检查。

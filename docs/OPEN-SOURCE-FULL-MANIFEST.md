@@ -25,7 +25,7 @@
 | **Stems 四轨分轨控制** | 仅开放给特定机型，SC5000 (`JP07`) 被软件阉割锁死 | **全机型原生解锁**：左侧歌单树第 0 行显示原厂 `Stems` 列表；加载已分轨曲目自动展开屏幕底部原厂 `[ Vocal ] [ Melody ] [ Bass ] [ Drums ]` 触控消音栏，并支持双击硬件 `HOT CUE` 进入打击垫 4 轨控制 |
 | **U 盘与流媒体 Stems 算力** | 机内无实时神经网络算力，仅读桌面端预渲染 `.stems` | **本机 U 盘曲目 + 四大流媒体曲目均可一键远程分轨**：支持拖入侧栏 `Stems` 列表或左滑点击「`分軌 Stems`」；经 `X-Stems-Framing: 2` 双向 `int16` 压缩流水线 + 远端向量化批处理，**6.8 倍实时速度（4 分钟歌曲约 35 秒完成）**；四大流媒体各自拥有独立的第 0 行 `Stems` 歌单，互不串列表、不混入 U 盘 |
 | **流媒体平台支持** | 仅支持 TIDAL / SoundCloud Go+ / Beatport / Beatsource / Dropbox | **原厂界面原生集成 5 大平台**：**网易云音乐**（手机 App 扫码）、**Spotify**（扫码 OAuth）、**Deezer**（扫码/ARL + 免登录公共榜单）、**SoundCloud**（扫码/Token + Lossless/320k 音质联动 + 点赞分页）、**TIDAL**（原厂直通）；列表自带 `[128 BPM 8A]` 调性与速度预览 |
-| **流媒体下载与分析隔离** | 在 `Engine` 进程内下载解码，易抢占主线程与音频缓冲 | 由独立守护进程 `stream-sync` + `sc5000-deemixd` 接管，通过 `resourceguard` 严格锁定在 **`CPU3` + `SCHED_IDLE` + `nice 19` + `IOPRIO_CLASS_IDLE` + 80% 占空比节流**，边放歌边下歌分析零断音 |
+| **流媒体下载与分析隔离** | 在 `Engine` 进程内下载解码，易抢占主线程与音频缓冲 | 由独立守护进程 `stream-sync` + `enginex-deemixd` 接管，通过 `resourceguard` 严格锁定在 **`CPU3` + `SCHED_IDLE` + `nice 19` + `IOPRIO_CLASS_IDLE` + 80% 占空比节流**，边放歌边下歌分析零断音 |
 | **先锋 Rekordbox U 盘导入** | 弹窗询问后在机内逐首重扫音频算波形，千首曲库耗时数十分钟且易写坏 `m.db` | **挂载阶段零扫描秒读 (`libedisksd-hook.so` + `rb-bridge`)**：自动屏蔽原厂慢速导入弹窗；直接将 `export.pdb` / `exportLibrary.db` / `exportOneLibrary.db` 与 `USBANLZ/*.DAT/.EXT/.2EX` 波形、拍线、Hot Cue、Memory Cue 秒转为 Engine 5.0.4 `m.db`；>500 首大库走 `tmpfs` 增量秒同步；**100% 不触碰 `PIONEER/` 原目录** |
 | **Engine 数据库自愈 (`dbhealer`)** | 遇到链表断链、透明 Cue、损坏波形或膨胀历史库直接报错 `Corrupted` 并提示格式化 | 挂载返回前由 `engine-guardian --data-only` 自动修复 `Playlist`/`PlaylistEntity` 循环与断链、修复透明 `Alpha=0` Cue/Loop、将超高清封面缩至 `<=512x512` JPEG、守护 `Information(id=1, uuid)`、裁剪膨胀 `hm.db` |
 | **Engine 内部 SQLite I/O 引擎** | 默认 `synchronous=FULL`、临时表落盘，每次写历史/改 Cue 在 FAT32/exFAT 上频繁创建/删除 `-journal` 并同步 `fsync` 阻塞主线程 | `libengine-ui-hook.so` 拦截静态编译的 `sqlite3_open` / `sqlite3_open_v2`，自动对所有业务库注入 `PRAGMA synchronous=NORMAL; PRAGMA temp_store=MEMORY; PRAGMA cache_size=-8000;`，临时表与 8MB 页缓存全进 RAM |
@@ -39,7 +39,7 @@
 ## 二、二进制层重构与 Hook 完整清单 (`tools/ui-mod/engine_ui_hook.c` & `tools/edisksd-hook/edisksd_hook.c`)
 
 ### 1. `/usr/Engine/Engine` 内存热补丁与跳板清单（`libengine-ui-hook.so`）
-所有补丁在进程启动构造函数 `edit_engine()` 中先校验 ELF `NT_GNU_BUILD_ID` (`af073865...`) 与目标偏移处的预期指令字节，支持原厂未改二进制与离线打过补丁的二进制，不修改只读 rootfs 上的 `/usr/Engine/Engine` 文件，随时可通过 `/data/sc5000-custom/ui/safe-mode` 一键回退原厂状态：
+所有补丁在进程启动构造函数 `edit_engine()` 中先校验 ELF `NT_GNU_BUILD_ID` (`af073865...`) 与目标偏移处的预期指令字节，支持原厂未改二进制与离线打过补丁的二进制，不修改只读 rootfs 上的 `/usr/Engine/Engine` 文件，随时可通过 `/data/enginex/ui/safe-mode` 一键回退原厂状态：
 
 | ELF 虚拟地址 / 符号 | 原厂逻辑 | 定制替换逻辑 | 作用与跨机型覆盖范围 |
 |---|---|---|---|
@@ -53,13 +53,13 @@
 | `0x1897e70` / `0x1897dcc` / `0x1678644` | 未知文件系统报错 `Incompatible Format`；将 `hfsplus` 改写为不存在的 `ufsd` | 未知文件系统映射为支持位；保留内核原生 `hfsplus` 驱动名 | 支持 HFS+ / APFS / NTFS / exFAT / FAT32 全格式挂载不弹格式不兼容报错 |
 | `0x58af34` / `0x167295c` / `0x16728c0` | `handleReadOnlyDeviceEjected` 自动弹出只读卷；`DeviceManager::isReadOnly` 拒绝挂载只读盘上的曲库 | 均返回 `0` (`false`) | 允许只读 HFS+ 盘结合 `overlayfs` 正常读写 `Engine Library` 且永不被自动弹出 |
 | `0x1cba858` (`sqlite3_open`) / `0x1cba874` (`sqlite3_open_v2`) / `0x1c91f74` (`sqlite3_exec`) | 静态链接的 SQLite 3.45.3 默认打开连接 | 校验指令头与 `sqlite3_api_routines` (`0x29980a4`) 槽位 70/135/55 后安装跳板：`posthog.db`/`events.db` 重定向至 `":memory:"`；其余库自动执行 `PRAGMA synchronous=NORMAL; temp_store=MEMORY; cache_size=-8000;` | 彻底消除写历史/改 Cue 时的 FAT32/exFAT 磁盘同步停顿，消灭遥测闪存写入 |
-| `_Z21qRegisterResourceDataiPKhS0_S0_` | 注册内嵌 QML 资源树 | 按 `/data/sc5000-custom/ui/settings.conf` 的 `lang`（`en`/`zh-Hans`/`zh-Hant`）动态替换 `/data/sc5000-custom/ui/packs/<lang>/` 下对应的 QML 文件 | 零 rootfs 改动实现三语 UI 与流媒体/波形/Stems 界面增强；连续 3 次启动不满 90 秒由 `engine-ui-guard` 自动触发 `safe-mode` 恢复原厂 UI |
+| `_Z21qRegisterResourceDataiPKhS0_S0_` | 注册内嵌 QML 资源树 | 按 `/data/enginex/ui/settings.conf` 的 `lang`（`en`/`zh-Hans`/`zh-Hant`）动态替换 `/data/enginex/ui/packs/<lang>/` 下对应的 QML 文件 | 零 rootfs 改动实现三语 UI 与流媒体/波形/Stems 界面增强；连续 3 次启动不满 90 秒由 `engine-ui-guard` 自动触发 `safe-mode` 恢复原厂 UI |
 | `pthread_setname_np` / `prctl` / `__prctl_time64` / `pthread_setschedparam` / `pthread_setaffinity_np` | 默认线程调度，且 `RenderStemsJob` 绑核超出 4 核时触发 `fatal("Failed setting CPU Affinity")` 崩溃 | 1) 越界亲和性掩码自动回退至在线 CPU 集合（防 4 核崩溃）；2) `Analysis Queue`、`OfflineAnalyzer`、`Dropbox*`、`Beatport*`、`sentry*`、`CrashHandler*` 避开 `CPU1/2` + `SCHED_OTHER` + `nice 10` + best-effort I/O 7；瞬时 `J:*` 作业名及 `Freeze Checker` 不降级；3) `QQuickPixmapRea` 仅避开 `CPU1/2`，保留继承的 nice/I/O 优先级；4) `FileInfoThread` 是文件夹扫描器，避开 `CPU1/2` + `nice 10`，保留原 I/O 优先级 | 保护 `CPU1`（`EMain`）与 `CPU2`（`SceneGraph`）的执行时间，同时保留封面读取进度和同盘播放余量 |
-| `open` / `open64` / `openat` / `openat64` | 打开 `/data/.../analytics/` 与 `/CrashReportDB/` | 重定向至 `/tmp/sc5000-engine-volatile-<uid>/` (tmpfs) | 防止任何绕过 SQLite 的文件操作向内部 eMMC 闪存写入遥测或崩溃锁文件 |
+| `open` / `open64` / `openat` / `openat64` | 打开 `/data/.../analytics/` 与 `/CrashReportDB/` | 重定向至 `/tmp/enginex-engine-volatile-<uid>/` (tmpfs) | 防止任何绕过 SQLite 的文件操作向内部 eMMC 闪存写入遥测或崩溃锁文件 |
 | `posix_spawn` / `execve` / `execv` | 启动 `/usr/Engine/crashpad_handler` | 匹配 `crashpad_handler` 直接返回 `ENOENT` | 砍掉后台常驻崩溃上传守护进程，节省内存与文件锁 |
 
 ### 2. `/usr/libexec/edisksd` 挂载拦截器（`libedisksd-hook.so`）
-Engine 打开外接存储后，任何外部进程写其 `m.db` / `hm.db` 都会导致 SQLite 锁冲突与删库。因此我们通过 `LD_PRELOAD=/etc/sc5000/libedisksd-hook.so` 拦截 `edisksd` 的 `mnt_context_mount` 与 `mnt_context_umount`，在 20 秒预算内完成预处理；rekordbox 盘先在私有 mount 命名空间里挂载并转换，之后才做 Engine 能看到的真正挂载（edisksd 的挂载表监视器一见到挂载就会通知 Engine，#182）：
+Engine 打开外接存储后，任何外部进程写其 `m.db` / `hm.db` 都会导致 SQLite 锁冲突与删库。因此我们通过 `LD_PRELOAD=/etc/enginex/libedisksd-hook.so` 拦截 `edisksd` 的 `mnt_context_mount` 与 `mnt_context_umount`，在 20 秒预算内完成预处理；rekordbox 盘先在私有 mount 命名空间里挂载并转换，之后才做 Engine 能看到的真正挂载（edisksd 的挂载表监视器一见到挂载就会通知 Engine，#182）：
 1. 若检测到只读 HFS+ 盘且含 `PIONEER` / `.PIONEER`，自动在 `<mount>/Engine Library` 上绑定 `/data/enginex/hfs-libraries/<卷 ID>` 作为可写视图（只跟随 `/data/sc5000-custom -> enginex` 这一条兼容软链）；
 2. 若含先锋导出库，同步调用 `/usr/local/bin/rb-bridge --mount-path <mount>` 完成秒级转换；
 3. 若为原生 Engine U 盘（含 `Engine Library/Database2/m.db`），同步调用 `/usr/local/bin/engine-guardian --heal-mount <mount> --data-only` 完成链表与数据自愈；
@@ -104,7 +104,7 @@ Engine 打开外接存储后，任何外部进程写其 `m.db` / `hm.db` 都会�
 
 ## 三、原厂 QML 前端补丁完整清单 (`tools/ui-mod/build_packs.py`)
 
-所有 QML 改动均通过 `build_packs.py` 编译进 `/data/sc5000-custom/ui/packs/{en,zh-Hans,zh-Hant}`，由 `libengine-ui-hook.so` 在内存中按文件级替换：
+所有 QML 改动均通过 `build_packs.py` 编译进 `/data/enginex/ui/packs/{en,zh-Hans,zh-Hant}`，由 `libengine-ui-hook.so` 在内存中按文件级替换：
 
 | 原厂 QML 路径 (`Skins/EmbeddedCommon/...`) | 修改内容与作用 |
 |---|---|
@@ -117,7 +117,7 @@ Engine 打开外接存储后，任何外部进程写其 `m.db` / `hm.db` 都会�
 | `Views/ControlCenter/Tabs/Preferences/Entries/WaveformStyle.qml` & `TabContents/DeviceTabContent.qml` & `Entries/Base/ListEntry.qml` | 在设备偏好设置页新增：`Language`（English / 简体中文 / 繁體中文）、`Waveform Style`（Denon / RGB / 3-Band）、`Streaming Quality`（Lossless / 320kbps）、`NetEase Download`（Official / Deemix First）、`Jog Light Mode`（Static / Psy Rainbow / Psy Fast / Psy BPM Sync） |
 | `Views/BrowserSource/ConnectedSource.qml` & `SourceScreen.qml` & `Preferences/Entries/StreamingServices.qml` & `Common/Sidebar/Sidebar.qml` | 在音源选择页、设置页与侧栏展示 **TIDAL、网易云音乐、Spotify、Deezer、SoundCloud** 五大独立入口与彩色图标，支持一键扫码登录/切换账号 |
 | `Views/Streaming/Streaming*.qml` & `BrowseView/Components/TrackList.qml` & `Breadcrumb*.qml` & `RetryingHint.qml` | 将原厂写死的 `TIDAL` 品牌文案动态替换为当前选中的流媒体平台名称 (`root.scBrand`)；移除 `onShowTrackTooLong()` 时长拦截以支持数小时的 DJ Set 串流播放；隐藏非当前平台的无关分类行 (`Featured`/`Genres`/`Moods`/`TIDAL Rising`) |
-| `Views/BrowseView/Components/Components/AlbumArt.qml` / `Bpm.qml` / `Key.qml` / `Song.qml` | 从本地网关 `/v1/sc5000/art` 加载流媒体缩略图；从网关 `copyright` 预览后缀中提取尚未经本机分析的外部 BPM 与 Camelot 调性填入原生列（本机分析完成后始终以本机实测值为准） |
+| `Views/BrowseView/Components/Components/AlbumArt.qml` / `Bpm.qml` / `Key.qml` / `Song.qml` | 从本地网关 `/v1/enginex/art` 加载流媒体缩略图；从网关 `copyright` 预览后缀中提取尚未经本机分析的外部 BPM 与 Camelot 调性填入原生列（本机分析完成后始终以本机实测值为准） |
 | `Items/MessageBoxes/ImproperDeviceEjectMessageBox.qml` | 自动清除 `deviceEjectedImproperly` 标志并静默关闭「设备未安全弹出」阻断弹窗 |
 | `Views/ControlCenter/Tabs/Preferences/Entries/LoadPreferencesDialog.qml` | 插入带 `user.profile` 的他人 U 盘时自动选 `No`，保留碟机自身偏好设置，不弹窗打断演出 |
 | `Items/MessageBoxes/RekordBoxImportDialog.qml` | 自动接管 `onRequestChanged`（允许 NFS 并触发设备自动选择后直接返回），彻底屏蔽原厂缓慢且易损毁数据库的机内 Rekordbox 导入弹窗 |
@@ -135,8 +135,8 @@ Engine 打开外接存储后，任何外部进程写其 `m.db` / `hm.db` 都会�
 
 ## 四、Go 后端服务与 Linux 系统层组件清单
 
-### 1. 多合一静态 ARMv7 核心套件：`cmd/sc5000-suite`
-为适应 5.0.4 固定大小的 `rootfs.ext2` 分区，编译为单一静态多调用二进制（部署于 `/data/sc5000-custom/bin/sc5000-suite`），包含三大子命令：
+### 1. 多合一静态 ARMv7 核心套件：`cmd/enginex-suite`
+为适应 5.0.4 固定大小的 `rootfs.ext2` 分区，编译为单一静态多调用二进制（部署于 `/data/enginex/bin/enginex-suite`），包含三大子命令：
 1. **`rb-bridge`（`pkg/rekordbox` + `pkg/enginedb` + `pkg/bridge` + `pkg/compat` + `pkg/prolink`）**：
    - 解析 Rekordbox 5 (`export.pdb` DeviceSQL) 与 Rekordbox 6/7 OneLibrary (`exportLibrary.db` / `exportOneLibrary.db` SQLite)；
    - 解析 `PIONEER/USBANLZ/*/*.DAT/.EXT/.2EX`（`PQTZ` 拍线、`PCOB`/`PCO2` Hot Cue A–H 与 Memory Cue/Loop、`PWAV`/`PWV2`–`PWV7` 波形、`PSSI` 曲目结构）；
@@ -155,21 +155,21 @@ Engine 打开外接存储后，任何外部进程写其 `m.db` / `hm.db` 都会�
    - 自动裁剪膨胀的历史库 `hm.db`（默认保留最近 50 场会话）。
 
 ### 2. 流媒体无损下载与远程 Stems 分轨组件
-- **`sc5000-suite sc5000-deemixd` (`internal/deemixd`, `internal/deezer`)**：本地 `127.0.0.1:6595` 守护进程，支持 Deezer Blowfish CBC 条带解密、无损 FLAC / 320k MP3 下载、WAV/AIFF 转 FLAC、多段并发分片拉取与 `<=512x512` 封面内嵌 (`pkg/deemixclient/cover.go`)。
-- **`sc5000-suite stems-processor` (`internal/stemsproc`) + `cmd/sc5000-stemsd` + `cmd/sc5000-relay` + `tools/stems/worker.py` (`internal/stems`)**：
+- **`enginex-suite enginex-deemixd` (`internal/deemixd`, `internal/deezer`)**：本地 `127.0.0.1:6595` 守护进程，支持 Deezer Blowfish CBC 条带解密、无损 FLAC / 320k MP3 下载、WAV/AIFF 转 FLAC、多段并发分片拉取与 `<=512x512` 封面内嵌 (`pkg/deemixclient/cover.go`)。
+- **`enginex-suite stems-processor` (`internal/stemsproc`) + `cmd/sc5000-stemsd` + `cmd/sc5000-relay` + `tools/stems/worker.py` (`internal/stems`)**：
   - 碟机端 `stems-processor` 伪装为原厂分轨器，采用本地流水线即时应答 Engine `action=block`，并通过 `X-Stems-Framing: 2` 将输入块转为 `int16` 流式上传；
   - 远端 `sc5000-stemsd` 驱动 `worker.py`（基于 2048 点 STFT 与一维拼接中值滤波的 4 轨分离器：Vocals / Melody / Bass / Drums），将前三轨以 `int16` 帧流式回传，碟机端用原始 `float32` 减去前三轨无损还原第 4 轨。
   - **GitHub Issue #1：零配置局域网家用电脑算力卸载**：
     - 三级回退：已配置云端中继 → 局域网家用电脑 → 碟机 `CPU3` 本机 `LocalRender`。只有前一级连接都建立不起来（尚未读取 Engine 任何数据）时才换下一级，同一会话绝不拆到两台机器；
     - 发现：`internal/stems/discovery.go` + `mdns.go`（纯标准库）。碟机同时发送 UDP 17891 广播探针 `ENGINEX_STEMS_DISCOVER_V1` 与 mDNS `_enginex-stems._tcp.local.` PTR 查询，350 ms 内取最先应答者；`sc5000-stemsd` 应答 JSON 信标与 PTR / SRV / TXT / A 记录（`dns-sd -B`、`avahi-browse` 也能看到）。服务端只应答局域网来源，避免被用作反射放大；
-    - 缓存与状态：找到的电脑写入 `/data/sc5000-custom/state/stems-lan.json`，下次先快速 `GET /healthz` 探活；网页控制台 `GET /api/relay` 的 `lanStems` 字段显示电脑名称、后端与是否在线；
+    - 缓存与状态：找到的电脑写入 `/data/enginex/state/stems-lan.json`，下次先快速 `GET /healthz` 探活；网页控制台 `GET /api/relay` 的 `lanStems` 字段显示电脑名称、后端与是否在线；
     - 安全：家用电脑以 `-token-file=` 免密运行，只接受局域网来源；碟机绝不把中继密码发给自动发现的电脑；忙碌的电脑被跳过；
     - 后端：`worker.py --backend auto|hpss|demucs`（或 `ENGINEX_STEMS_BACKEND`）。`htdemucs` 使用 CUDA / Apple MPS / CPU，按 10 秒分段、1 秒线性交叉淡化，旋律仍取余量，传输协议不变；`auto` 未安装 demucs 时回退 `hpss`；`sc5000-stemsd` 启动时探测一次后端，旧版 `worker.py` 不支持探测时记录警告并按 `hpss` 运行；
     - 一键启动：`tools/stems/run-home-worker.sh`（macOS / Linux）与 `run-home-worker.ps1`（Windows，NVIDIA 显卡自动安装 CUDA 版 torch）。
 
 ### 3. Linux 系统服务与调优脚本 (`rootfs-overlay/`)
-- `usr/local/bin/sc5000-perf-tune`：每次 Engine 启动后执行，设置 CPU `1.2GHz` 下限、GPU `simple_ondemand`、内核 `vm`/`fs` 参数、保留 `bfq` 调度器、关闭 USB/SATA 休眠 (`autosuspend=-1`, `link_power_management_policy=max_performance`)、将 `workqueue/cpumask` 设为 `6`（避开 `CPU0`）、并将 `ffb20000` (ALSA) 锁 `CPU0` (`FIFO 99`)、`ffa30000` (GPU) 锁 `CPU1`、`ehci`/`xhci`/`dwc2`/`ff500000`/`ff540000`/`dwmmc`/`sata`/`eth0` 锁 `CPU2`。
-- `usr/local/bin/sc5000-debloat`：开机/离线幂等补丁，开启千兆网口 (`az01-ethernet-speed 1000`)、禁用 `encrypt-fs.sh` 中的危险自动擦除 (`az01-update --erase-data`)、修正 `setup-usb-gadget.sh` 语法错误 (`shift1` $\rightarrow$ `shift 1`)、将 `journald` 设为 `volatile` (RAM 16M)、屏蔽 PostHog/Logstash 遥测域名、关闭 `wlan0` 省电模式、开启 `ntfs3` `force` 挂载。
+- `usr/local/bin/enginex-perf-tune`：每次 Engine 启动后执行，设置 CPU `1.2GHz` 下限、GPU `simple_ondemand`、内核 `vm`/`fs` 参数、保留 `bfq` 调度器、关闭 USB/SATA 休眠 (`autosuspend=-1`, `link_power_management_policy=max_performance`)、将 `workqueue/cpumask` 设为 `6`（避开 `CPU0`）、并将 `ffb20000` (ALSA) 锁 `CPU0` (`FIFO 99`)、`ffa30000` (GPU) 锁 `CPU1`、`ehci`/`xhci`/`dwc2`/`ff500000`/`ff540000`/`dwmmc`/`sata`/`eth0` 锁 `CPU2`。
+- `usr/local/bin/enginex-debloat`：开机/离线幂等补丁，开启千兆网口 (`az01-ethernet-speed 1000`)、禁用 `encrypt-fs.sh` 中的危险自动擦除 (`az01-update --erase-data`)、修正 `setup-usb-gadget.sh` 语法错误 (`shift1` $\rightarrow$ `shift 1`)、将 `journald` 设为 `volatile` (RAM 16M)、屏蔽 PostHog/Logstash 遥测域名、关闭 `wlan0` 省电模式、开启 `ntfs3` `force` 挂载。
 - `usr/lib/modprobe.d/brcmfmac.conf`：设置 `options brcmfmac roamoff=1 feature_disable=0x82000` 根治博通 Wi-Fi 漫游断流。
 
 ---
@@ -189,11 +189,11 @@ Engine 打开外接存储后，任何外部进程写其 `m.db` / `hm.db` 都会�
 
 | 编号 | 机型 / 版本 | 缺陷现象 | 状态 | 本系统解决机制 / 对应代码位置 |
 |---|---|---|---|---|
-| **CF001** | SC5000 5.0.4 | 播放中波形逐段消失，播放头走到缺失处停音（外接 SSD/U 盘） | ✅ **已防御** | `sc5000-perf-tune` 禁用 USB/SATA 休眠 (`autosuspend=-1`, `power/control=on`) + `engine_ui_hook.c` SQLite `synchronous=NORMAL; temp_store=MEMORY;` 消除写历史阻塞磁盘队列 + `Analysis Queue` 降为 `SCHED_IDLE`/`IOPRIO_CLASS_IDLE` |
+| **CF001** | SC5000 5.0.4 | 播放中波形逐段消失，播放头走到缺失处停音（外接 SSD/U 盘） | ✅ **已防御** | `enginex-perf-tune` 禁用 USB/SATA 休眠 (`autosuspend=-1`, `power/control=on`) + `engine_ui_hook.c` SQLite `synchronous=NORMAL; temp_store=MEMORY;` 消除写历史阻塞磁盘队列 + `Analysis Queue` 降为 `SCHED_IDLE`/`IOPRIO_CLASS_IDLE` |
 | **CF002 / EOS-03** | SC5000 5.0.2 | 详细/总览波形间歇空白，Grid/Cue 仍在 | ✅ **已防御** | `pkg/dbhealer/performance.go` 严格校验 3099B `overviewWaveFormData` 与 44B `trackData`，损坏时写入合法三通道占位符并标记 `GuardianReanalysis` 重算，保留原有 Cue 与 Beatgrid |
 | **CF003 / EOS-05** | SC5000 / SC Live 4 5.0.1–5.0.4 | 双层使用约 45 分钟至 2 小时后变慢、无法搜歌、转盘屏掉帧卡顿 | ✅ **已防御** | 1) `engine_ui_hook.c` 将 `posthog.db`/`events.db` 重定向至 `:memory:`，砍掉每次交互的闪存写入与 4 个 `J:I:Takingfreez` 探针抢占；<br>2) `hm.db`/`m.db` 启用 8MB RAM 页缓存与内存临时表；<br>3) `pkg/webui` 与 `pkg/providers` 所有内存 Map（封面、曲目、BPM、下载队列）实施单条淘汰硬上限；<br>4) `dbhealer` 物化 `PlaylistPath` 视图并裁剪 `hm.db` |
 | **CF004 / EOS-04** | SC5000 5.0.1 | 列表预听很慢；大库展开歌单卡顿 | ✅ **已防御** | `pkg/dbhealer/chains.go` (`materialize`) 将耗时 O(N²) 的递归视图 `PlaylistPath` 物化为带索引的 `MaterializedPlaylistPath` 表 + CPU 保底 1.2GHz |
-| **CF005** | SC5000 5.0.1+ | Wi-Fi 反复断开或感叹号 | ✅ **已根治** | `rootfs-overlay/usr/lib/modprobe.d/brcmfmac.conf` (`roamoff=1`) + `sc5000-debloat` 关闭 `wlan0 power_save`、保留 `ipv4.connman.inmusicbrands.com` 在线检测并限制 DHCP 重试 |
+| **CF005** | SC5000 5.0.1+ | Wi-Fi 反复断开或感叹号 | ✅ **已根治** | `rootfs-overlay/usr/lib/modprobe.d/brcmfmac.conf` (`roamoff=1`) + `enginex-debloat` 关闭 `wlan0 power_save`、保留 `ipv4.connman.inmusicbrands.com` 在线检测并限制 DHCP 重试 |
 | **CF006** | SC5000 5.0.1 | 触盘 Scratch 偶发不响应但 Pitch 仍有效 | ✅ **已缓解** | `engine_ui_hook.c` 将所有后台线程移出 `CPU1`（`EMain` UI/触盘事件核）并消除 SQLite 主线程 `fsync` 停顿 |
 | **CF007** | SC6000 5.0.4 | Instant Doubles 后 Pitch 中位亮箭头 | 🟢 **5.0.4 原厂已有软接管中位区间** | 反汇编 `0xc63cac` / `0xc60de8` 证实原厂已含 `0.499..0.501` 中位区间与软接管重算 |
 | **CF008** | SC6000 5.0.4 | 来源窗口不能用旋钮切换、Back 关不掉 | ✅ **已实机部署** | `build_packs.py` (`legacy_qml_fixes`)：`SourceScreenState.qml` Back / Forward 改发 `/GUI/CloseDialogs`；`SourceScreen.qml` 增加方向键 / Enter / Escape 导航 |
@@ -202,13 +202,13 @@ Engine 打开外接存储后，任何外部进程写其 `m.db` / `hm.db` 都会�
 | **RA003** | PRIME GO 4.2–5.x | 右 Pitch 推子速度范围轻微波动 | 🔧 **主机侧已加守卫 / 物理采样在独立 MCU** | 推子 ADC 位于 PRIME GO 面板 MCU；主机侧速度变更经 `0x153312c` `PlaybackTempoChange` 正有限值守卫（已实机部署） |
 | **CF013** | SC6000 5.0.1 | 云服务解绑后进不了重新授权界面 | ✅ **流媒体已解决 / 原生云盘已实机部署** | 网易云/Spotify/Deezer/SoundCloud 在音源列表右侧常驻「切换账号 / 扫码登录」按钮；原生云盘：`CloudUtilityDialog.qml` 在 `loggedIn === false` 时显示 LOG IN 并调用 `showAddAccountDialog` |
 | **CF014 / LC030** | SC6000M 5.0.4 | 马达运行轻微漂移；暂停微动转盘向前跳并爆裂声 | 🔧 **主机侧已加守卫 / 扭矩环在独立 MCU** | `MotorizedPlatterScratchControl::RampdownTimeChange` `0xd0b5bc` 非负有限值守卫（已实机部署）；电机扭矩环位于 M 系列电机控制板 MCU |
-| **CF017 / CF018 / H134 / LA-040** | PRIME 4 4.3.4–5.x | 内置 SATA SSD 演出中偶尔休眠消失导致所有 Deck 变无声；电脑模式误报需格式化 | ✅ **已根治** | 查明 PRIME 4 内置 SATA 走 JMicron JMS578 (`152d:0578`) USB 桥接：`sc5000-perf-tune` 强制 `usbcore.autosuspend=-1`、`scsi_host link_power_management_policy=max_performance`、`sd* power/control=on` 及 `autosuspend_delay_ms=-1` |
+| **CF017 / CF018 / H134 / LA-040** | PRIME 4 4.3.4–5.x | 内置 SATA SSD 演出中偶尔休眠消失导致所有 Deck 变无声；电脑模式误报需格式化 | ✅ **已根治** | 查明 PRIME 4 内置 SATA 走 JMicron JMS578 (`152d:0578`) USB 桥接：`enginex-perf-tune` 强制 `usbcore.autosuspend=-1`、`scsi_host link_power_management_policy=max_performance`、`sd* power/control=on` 及 `autosuspend_delay_ms=-1` |
 | **GL-011** | PRIME 4 5.0.4 (`Seabass #73`) | 接受「更新 Rekordbox 曲库」提示后，21/21 测试未真正导入新增歌曲 | ✅ **已根治** | 屏蔽原厂失效的机内更新提示；`pkg/bridge/bridge.go` (`ConvertAtMount`) 检测 `export.pdb`/`exportLibrary.db`/`exportOneLibrary.db` 变更戳记，在 `tmpfs` 上保留 `.rb-bridge-state.db` 秒级完成增量新歌与歌单导入 (`TestLargeMountIncrementalSyncAddsNewTracksAndPlaylists_GL011`) |
 | **N001 / N002 / N003** | 全机型 5.0.4 | 快速连续切歌、空闲 Deck 加载无损 WAV/AIFF/FLAC、带转盘屏设备载歌时罕见断音 | ✅ **已加固** | 官方 5.0.4 已做初步修复；本系统进一步锁定 CPU 下限 `1.2GHz`（消除 408MHz 欠载 XRUN），并让 `Analysis Queue` 避开 `CPU1/2`（`SCHED_OTHER` + `nice 10` + best-effort I/O 7）；`QQuickPixmapRea` 仅避开 `CPU1/2`，保留调用方 nice/I/O 优先级；文件夹扫描器 `FileInfoThread` 避开 `CPU1/2`，保持 `nice 10` 和原 I/O 优先级，兼顾封面读取与同盘播放 |
 | **N004** | 全机型 5.0.4 | Sampler 特定条件下短促点击声 | ✅ **5.0.4 已修 + 声部事件已守护** | 官方 5.0.4 发行说明已修主要触发点；`SamplerControl` StopImmediately `0xc5b2e0` / Stop `0xc5b30c` / Play `0xc5b338` 跳板做声部代际跟踪（已实机部署） |
 | **N005** | 全机型 5.0.4 | SoundCloud 点赞歌曲/歌单分页处理 | ✅ **已根治** | `pkg/providers/soundcloud.go` (`playlistPages`/`trackPages` `linked_partitioning=true` 自动翻页至 2000 首) + `pkg/webui/tidal_gateway.go` (`favoriteTracks` 对接 `"likes"`) |
 | **N006** | 全机型 5.0.3 | 加载带高清封面的歌曲导致音频中断 | ✅ **已根治** | `pkg/deemixclient/cover.go` (`capCover`) 与 `pkg/dbhealer/artwork.go` 双重拦截：拒绝 `>16MP` 解码炸弹，将所有大图双线性缩放为 `<=512x512` JPEG，配合 `QQuickPixmapRea` 避开 `CPU1/2` 且保留调用方优先级、`FileInfoThread` 文件夹扫描保持 `nice 10` 与原 I/O 优先级，为同盘播放保留余量 |
-| **N007 / N008 / N009 / N010** | 全机型 5.0.2–5.0.3 | History 编辑歌单不稳、流媒体搜索滚动崩溃、浏览 History 后列表不刷新、开机内部声卡未配置 | 🟢 **5.0.4 底包已含** | 已包含在官方 5.0.2–5.0.4 底包中，且 `sc5000-perf-tune` 不重置 ALSA 混音器状态 |
+| **N007 / N008 / N009 / N010** | 全机型 5.0.2–5.0.3 | History 编辑歌单不稳、流媒体搜索滚动崩溃、浏览 History 后列表不刷新、开机内部声卡未配置 | 🟢 **5.0.4 底包已含** | 已包含在官方 5.0.2–5.0.4 底包中，且 `enginex-perf-tune` 不重置 ALSA 混音器状态 |
 | **N012–N037** | 全机型 5.0.0 | Beat Grid 与波形对齐、慢网流媒体下载不全、导入 Rekordbox 崩溃、History 封面丢失等 | ✅ **已解决** | 5.0.0–5.0.4 底包已含基础修复；流媒体整曲预下载落盘由 `stream-sync` 接管（杜绝半截流文件），Rekordbox 导入由 `rb-bridge` 接管（杜绝原厂导入崩溃） |
 
 ---
@@ -241,8 +241,8 @@ Engine 打开外接存储后，任何外部进程写其 `m.db` / `hm.db` 都会�
 | **H055** | 1.x | 32 位 WAV（含 IEEE Float 32/64-bit 与 `WAVEFORMATEXTENSIBLE`）无法加载或时长错乱 | ✅ **已根治** | `pkg/compat/audio.go` (`wavHeader`) 与 `pkg/analyzer/decode.go` (`DecodeWAV`) 完整支持 PCM 8/16/24/32-bit、IEEE Float 32/64-bit、`RF64` (`ds64`) 与 `0xFFFE` 扩展头 (`TestWAVContainer32Valid24`) |
 | **2.2.x / 2.3.x** | 2.x | 损坏音频文件导致整机冻结；FAT32 扩展 Unicode 字符（macOS NFD/NFC）文件名报丢失；不兼容文件系统报错 | ✅ **已根治** | 1) `pkg/compat/path.go` 全路径 Unicode NFC + Case-Fold 归一化解决 macOS NFD 丢歌；<br>2) `pkg/compat/audio.go` 与 `pkg/analyzer/decode.go` 严格校验容器边界与 `MaxDecodedSamples` 内存上限；<br>3) `engine_ui_hook.c` 解锁 `0x1897e70`/`0x1897dcc` 全文件系统兼容位 |
 | **H129 / H132 / EOS-01 / EOS-02** | 1.x–3.x | 大数据库误报 Corrupted、第三方编辑曲库触发断链或删库、迁移卡死 | ✅ **已根治** | `edisksd_hook.so` + `dbhealer` 挂载前原子修复链表与 schema，桥接状态外置至 `.rb-bridge-state.db`，彻底规避 Engine 的未知表删库机制 |
-| **LC001** | 3.x | 拔插 SoundSwitch DMX USB 适配器（FTDI `ftdi_sio`）时音频卡顿/降速 | ✅ **已根治** | `sc5000-perf-tune` 将 `ff500000`、`ff540000`、`ehci`、`xhci`、`dwc2` 中断全部绑定至 `CPU2`，并设置 `workqueue/cpumask=6` 禁止 USB 枚举 `kworker` 在 `CPU0`（ALSA 核心）上运行 |
-| **LC003** | 3.x | 播放约 2 小时大 MP3/Set，提前跳到较远 Cue 后约 0.5–0.8 秒静音 | ✅ **已缓解** | `sc5000-perf-tune` 将 USB / SD 块设备 `read_ahead_kb` 提升至 `1024` KiB（2026-11-04 实机读回 `sda` / `mmcblk1` 均为 1024） |
+| **LC001** | 3.x | 拔插 SoundSwitch DMX USB 适配器（FTDI `ftdi_sio`）时音频卡顿/降速 | ✅ **已根治** | `enginex-perf-tune` 将 `ff500000`、`ff540000`、`ehci`、`xhci`、`dwc2` 中断全部绑定至 `CPU2`，并设置 `workqueue/cpumask=6` 禁止 USB 枚举 `kworker` 在 `CPU0`（ALSA 核心）上运行 |
+| **LC003** | 3.x | 播放约 2 小时大 MP3/Set，提前跳到较远 Cue 后约 0.5–0.8 秒静音 | ✅ **已缓解** | `enginex-perf-tune` 将 USB / SD 块设备 `read_ahead_kb` 提升至 `1024` KiB（2026-11-04 实机读回 `sda` / `mmcblk1` 均为 1024） |
 | **LA-020** | 1.x–3.x | Auto Gate 混入旧 FX | ✅ **已实机部署 / 已防御** | `Effects::AutoGate::process` `0xe3a598` 跳板调用 `sc_dsp_autogate_pre_process`，FX 切换后清零 AutoGate 相位 |
 | **H130 / LA-018** | 1.x–3.x | 开关 Key Lock 金属失真 | 🟢 **5.0.4 原厂已逐帧步进** | 反汇编确认 `ElastiqueFader`（`0x1534398`）已按 `step = 1/(rate × 0.001)` 逐采样帧步进，不挂载重混 Hook；仅对 `TimeStretchingModifier::PlaybackTempoChange` `0x153312c` 做正有限值守卫 |
 | **LA-033 / LA-036** | 1.x–3.x | 长按关 Sync 波形 glitch、慢停切层截断 | ✅ **已加固** | `0x153312c` Tempo 正有限值守卫 + `RampDownModifier::ChangeRampTime` `0x1500950` 非负有限值守卫（全部已实机部署） |
@@ -259,7 +259,7 @@ Engine 打开外接存储后，任何外部进程写其 `m.db` / `hm.db` 都会�
 | **GL-010 (`libdjinterop #201`)** | 强制守护 `Information` 表 `id = 1`、合法非空 `uuid`、正随机 `currentPlayedIndiciator` 与 schema `3.0.2`，防止设备判定 Corrupted 清空曲库 | ✅ **已根治** | `pkg/enginedb/sync.go:126-154` + `pkg/dbhealer/db.go:135-150` (`TestCF049Bogus500BPMAndGL010InformationGuard`) |
 | **GL-012 (`Seabass #75`)** | 封面与音频路径与驱动器卷标解耦，支持隐藏 `.PIONEER` 目录与大小写/NFC 混用 | ✅ **已根治** | `pkg/compat/path.go` (`CleanRelative` / `Resolve`) + `pkg/enginedb/sync.go` (`AlbumArt` SHA-1 去重表) |
 | **GL-013 (`Seabass #56`)** | Cue 与 Loop 颜色强制 `Alpha = 255`，防止第三方导出 `Alpha = 0` 导致打击垫与波形标记全透明隐形 | ✅ **已根治** | `pkg/enginedb/performance.go:320` (`cueColor`) + `pkg/dbhealer/performance.go` (`alignLoops` & `healQuickCues`) + `TestExactContainerSamplesAndLegacyCueColor` |
-| **GL-016–GL-020 (`StageLinQ` / `Pro DJ Link`)** | 被动监听发现与状态包边界校验，不破坏多机 StageLinQ / Pro DJ Link 广播与路由 | ✅ **已根治** | `pkg/prolink/prolink.go` + `sc5000-debloat` 仅屏蔽遥测域名，不篡改设备网卡路由与 `avahi`/`connman` 链路本地地址 |
+| **GL-016–GL-020 (`StageLinQ` / `Pro DJ Link`)** | 被动监听发现与状态包边界校验，不破坏多机 StageLinQ / Pro DJ Link 广播与路由 | ✅ **已根治** | `pkg/prolink/prolink.go` + `enginex-debloat` 仅屏蔽遥测域名，不篡改设备网卡路由与 `avahi`/`connman` 链路本地地址 |
 | **RA011 / CF020–CF023 / N051–N054** | 超长 UTF-8 标签安全截断（`<=255` 字节且不截断多字节字符）、膨胀历史库 `hm.db` 自动瘦身、防 `qCompress` 解压炸弹 | ✅ **已根治** | `pkg/enginedb/performance.go:70-79` (`label`) + `pkg/dbhealer/history.go` (`PruneHistoryDB`) + `pkg/dbhealer/performance.go:18-43` (`DecodeQCompress` 32MB 硬上限) |
 
 ---
@@ -267,9 +267,9 @@ Engine 打开外接存储后，任何外部进程写其 `m.db` / `hm.db` 都会�
 ## 六、开源发布前检查清单（Pre-Open-Source Checklist）
 
 1. **不含任何私钥或账号凭据**：
-   - 全仓已通过检查：所有的 Deezer ARL、网易云 Cookie、Spotify Token、SoundCloud Secret、Relay 密码均只存在于碟机运行时的 `/data/sc5000-custom/state/` 目录下（不在 Git 仓库中）。
+   - 全仓已通过检查：所有的 Deezer ARL、网易云 Cookie、Spotify Token、SoundCloud Secret、Relay 密码均只存在于碟机运行时的 `/data/enginex/state/` 目录下（不在 Git 仓库中）。
 2. **自建后端地址完全解耦（零硬编码个人域名）**：
    - `pkg/webui/relay.go` (`DefaultRelayURL = ""`)、`internal/stems/client.go` (`DefaultRelayURL = ""`)、`internal/deemixd/deemixd.go` (`defaultRelay = ""`) 与 `cmd/sc5000-relay/main.go` (`--public https://relay.example.com`) 已彻底移除任何个人域名；
-   - 未配置云端 Relay 时，碟机扫码登录默认走本机局域网（`http://sc5000.lan:8080`），外部用户可在碟机网页控制台（`http://sc5000.lan:8080` $\rightarrow$「云端登录服务」）或环境变量 `SC5000_STEMS_URL` / `--relay-url` 中自由填入自己部署的 `sc5000-relay` / `sc5000-stemsd` 后端地址。
+   - 未配置云端 Relay 时，碟机扫码登录默认走本机局域网（`http://enginex.lan:8080`），外部用户可在碟机网页控制台（`http://enginex.lan:8080` $\rightarrow$「云端登录服务」）或环境变量 `ENGINEX_STEMS_URL` / `--relay-url` 中自由填入自己部署的 `sc5000-relay` / `sc5000-stemsd` 后端地址。
 3. **不分发受版权保护的原厂二进制**：
    - 仓库中只包含我们自研的 Go 源码（`cmd/`、`pkg/`、`internal/`）、C Hook 源码（`tools/ui-mod/engine_ui_hook.c`、`tools/edisksd-hook/edisksd_hook.c`）、Python 打包/补丁脚本（`tools/az01-packer/`、`tools/ui-mod/build_packs.py`、`tools/stems/worker.py`）与系统配置层（`rootfs-overlay/`），不包含天龙原厂 `/usr/Engine/Engine` 二进制或原厂 QML 源码包。

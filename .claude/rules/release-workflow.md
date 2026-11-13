@@ -9,7 +9,7 @@
   - 版本号、产物文件名、`version.txt` 和关于页都保持 `<VERSION>`，不执行第 1 步；
   - 新建 Release，tag 为 `v<VERSION>-rN`（N 从 2 开始，每次重发加 1），标题 `EngineX OS <VERSION> rN`，`--target` 为这次构建的提交，设为 `--latest`，上传 `SHA256SUMS.txt` 列出的全部产物和 `SHA256SUMS.txt`。碟机读 `releases/latest`，按 tag 里的数字逐段比较，段数多者更新，所以 `<VERSION>` 及更早版本的碟机都会收到；
   - 原来的 `v<VERSION>` Release 保留，tag 不移动：新 Release 建好之后，用 `gh release upload v<VERSION> ... --clobber` 把同名文件换成这次构建的产物，在它的说明开头写明「文件已于 <日期> 换成 <VERSION> rN 的构建，见 `v<VERSION>-rN`」并换上新的 SHA-256 表。它不能再是 Latest：改说明时带 `gh release edit v<VERSION> --latest=false`，最后用 `gh api repos/Cd1s/EngineX-OS/releases/latest -q .tag_name` 确认输出是 `v<VERSION>-rN`；
-  - 构建时把 `RELEASE_TAG=v<VERSION>-rN` 写在第 3 步 `remote-build` 单引号里的远端脚本内，紧贴 `build-release.sh`：`RELEASE_TAG=v<VERSION>-rN sh tools/az01-packer/build-release.sh ...`。写在 `remote-build` 命令前面不会传到编译机，产物会不报错地写成默认的 `v<VERSION>`。`build-release.sh` 把它写进镜像的 `/etc/sc5000/release-tag` 和二代数据包的 `release-tag`，装上这次构建的碟机用它和 Release 的 tag 比较，不会反复提示同一个重发；不设时默认 `v<VERSION>`；
+  - 构建时把 `RELEASE_TAG=v<VERSION>-rN` 写在第 3 步 `remote-build` 单引号里的远端脚本内，紧贴 `build-release.sh`：`RELEASE_TAG=v<VERSION>-rN sh tools/az01-packer/build-release.sh ...`。写在 `remote-build` 命令前面不会传到编译机，产物会不报错地写成默认的 `v<VERSION>`。`build-release.sh` 把它写进镜像的 `/etc/enginex/release-tag` 和二代数据包的 `release-tag`，装上这次构建的碟机用它和 Release 的 tag 比较，不会反复提示同一个重发；不设时默认 `v<VERSION>`；
   - 门禁的旧镜像用同一版本的上一次构建（`release-<VERSION>/`），并加 `GATE_RELEASE_TAG=v<VERSION>-rN`：门禁会验证旧构建收到这个 tag、新镜像不再被提示同一个 tag、以及下一个版本仍会被提示；
   - `-rN` 和热修复的第五段（`<VERSION>.1`）占用同一段数字，同一个 `<VERSION>` 只用其中一种。
 - **新版本**：只有维护者明确要求才升版本号。按全部步骤做，新建 `v<VERSION>` tag 与 Release。
@@ -19,7 +19,7 @@
 
 | 文件 | 要改的地方 |
 | --- | --- |
-| `rootfs-overlay/etc/sc5000/version.txt` | 整个文件内容就是 `<VERSION>` |
+| `rootfs-overlay/etc/enginex/version.txt` | 整个文件内容就是 `<VERSION>` |
 | `README.md`、`README.zh-CN.md`、`README.zh-TW.md` | 第 3 行 hero 图的 `alt="EngineX OS <VERSION>"`；简介里的 `**EngineX OS <VERSION>**`；性能对比表表头里的 `` `EngineX OS <VERSION>` ``；本版本新特性与使用教程章节；「如何安装与升级」里 4 个平台 `EngineX-Installer-<VERSION>`、8 款一代机 `*-Update.img` 与 8 款二代机主下载 `*-Update.img` 的文件名和下载链接（共 20 条主直链，三份 README 同步更新；`5.3.0.4` / `5.3.0.5` Release 资产中同时保留 8 个 `*-Data-Bundle.tar.gz` 供旧版二代机屏幕 OTA 平滑过渡，`5.3.0.6+` 起彻底退役，#215） |
 | `docs/index.html`、`docs/site/{content.js,app.js,style.css}` | 官网 `https://enginexdj.com`（独立全屏首页 `Home` + 三栏使用文档 `Docs`）：更新三语 `version: "<VERSION>"`、新功能章节与刷机/使用教程、全部 20 条下载链接（4 个安装器 + 16 个 `*-Update.img`：8 款一代 + 8 款二代），并递增 `docs/index.html`（及 `docs/site/content.js` 如有）里的静态资源缓存参数 `?v=N` |
 | `docs/site/assets/shots/*.png`、`docs/assets/screenshots/{zh-CN,zh-TW,en}/*.png` | 凡涉及界面、菜单、控制中心磁贴或版本号变更，必须在编译机上基于 `<VERSION>` 底包通过 `QT_QPA_PLATFORM=eglfs`（`/dev/dri/card0` `virtio-gpu` + Mesa OpenGL，避免 `offscreen` 下 `ColoredImage` 图标空白）重新渲染三语实测截图并同步替换官网与 README 截图（实机硬件专属截图如 `07-bluetooth-audio.png` 保持不变） |
@@ -40,7 +40,7 @@ https://github.com/Cd1s/EngineX-OS/releases/latest/download/<PREFIX>-<VERSION>-E
 git grep -n "<OLD>" -- README.md README.zh-CN.md README.zh-TW.md rootfs-overlay docs/index.html docs/site/content.js docs/assets
 ```
 
-`tests/`、`test_az01_packer.py` 里的版本号是测试数据，不要改。镜像里的 `/etc/sc5000/version.txt` 由 `build-release.sh` 的 `--set-version` 写入，第 1 步改的仓库文件用于实机热部署和保持一致。
+`tests/`、`test_az01_packer.py` 里的版本号是测试数据，不要改。镜像里的 `/etc/enginex/version.txt` 由 `build-release.sh` 的 `--set-version` 写入，第 1 步改的仓库文件用于实机热部署和保持一致。
 
 ## 2. 测试（只在编译机编译机上跑，本机不编译）
 
@@ -81,9 +81,9 @@ JC11S fixture 是独立的官方 PRIME4PLUS rootfs，不能用 SC LIVE 4 或 PRI
 2. 用干净目录构建（`remote-build` 同步不会删除远端已删除的文件，旧目录会带上残留）：
 
 ```sh
-REMOTE_BUILD_HOST=<build host> remote-build --name sc5000-release-<短说明> --clean -- \
+REMOTE_BUILD_HOST=<build host> remote-build --name enginex-release-<短说明> --clean -- \
   '. /etc/profile.d/buildtools.sh
-   OUT=/var/tmp/sc5000-release-<VERSION>
+   OUT=/var/tmp/enginex-release-<VERSION>
    rm -rf "$OUT"
    sh tools/az01-packer/build-release.sh <VERSION> /root/build/sc5000-lab/fw-5.3.0 none /root/build/sc5000-lab/sbin/fsck.hfsplus "$OUT"
    sh tools/az01-packer/build-installer.sh <VERSION> "$OUT"'
@@ -98,7 +98,7 @@ REMOTE_BUILD_HOST=<build host> remote-build --name sc5000-release-<短说明> --
 ## 4. 校验镜像
 
 - 三个镜像组各抽一个，`python3 tools/az01-packer/az01_packer.py unpack <img> --output <新目录>` 要输出 `"verified": true`。
-- 在解包出的 `rootfs.ext2` 里用 `debugfs -R "cat <路径>"` 核对：`/etc/sc5000/version.txt` 是 `<VERSION>`，本次修改的文件确实在镜像里。
+- 在解包出的 `rootfs.ext2` 里用 `debugfs -R "cat <路径>"` 核对：`/etc/enginex/version.txt` 是 `<VERSION>`，本次修改的文件确实在镜像里。
 - **开机画面（必做）**：三个一代镜像组（`SC5000`、`SC6000`、`PRIME4`）各跑 `python3 -I tools/splash/splash_tool.py decode --input <解包目录>/splash.payload --stock <同组官方解包目录>/splash.payload --output /tmp/splash-<组>.png`，逐个打开核对画面正立且右下角版本号是 `<VERSION>`（#226）；二代镜像核对界面包里的 `img/SplashScreen.png` 也是 `<VERSION>`。
 - 同一组的机型 sha256 应相同：
 
@@ -110,7 +110,7 @@ REMOTE_BUILD_HOST=<build host> remote-build --name sc5000-release-<短说明> --
 
 ## 4b. 发版门禁：上一版在线升级 → 新版开机全功能验收（硬性，不过不发）
 
-教训（5.3.0.1）：官方 5.3.0 删掉了 `etc.mount` / `var.mount`，`sc5000-custom-prepare.service` 上的 `Requires=` 因此失败。从 5.0.4.2 在线升级后，UI 包、版本号和 SSH 全部失效，而单测和镜像抽查都没发现。碟机多在俱乐部现场用，这类问题不能留给用户自己去踩。
+教训（5.3.0.1）：官方 5.3.0 删掉了 `etc.mount` / `var.mount`，`enginex-prepare.service` 上的 `Requires=` 因此失败。从 5.0.4.2 在线升级后，UI 包、版本号和 SSH 全部失效，而单测和镜像抽查都没发现。碟机多在俱乐部现场用，这类问题不能留给用户自己去踩。
 
 教训（5.3.0.1 重发）：Engine 5.3.0 强制打开 Qt 的 QML 磁盘缓存（`QML_FORCE_DISK_CACHE` 盖过我们的 `QML_DISABLE_DISK_CACHE`），缓存放在 `/data/AppDataUser/AIR Music Technology/Engine/.cache/qml`，只按源文件时间戳判断是否过期。实机曾经在没有 UI 包的情况下跑过一次 Engine，留下了原厂缓存；之后 hook 日志照样显示「48 files」，界面却一直是原厂的。门禁以前只数 hook 日志，没看渲染结果，所以没发现。现在 hook 按内容给替换的 qrc 文件打时间戳，门禁先种下原厂旧缓存，再读实际渲染出的节点。
 
@@ -123,7 +123,7 @@ REMOTE_BUILD_HOST=<build host> remote-build --name sc5000-release-<短说明> --
 # 编译机上以 root 运行，在 remote-build 同步过来的仓库根目录
 bash tools/az01-packer/release-gate.sh \
   <上一版目录>/SC5000-<OLD>-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img \
-  <新输出目录>/SC5000-<VERSION>-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img <VERSION> /var/tmp/sc5000-gate-<短说明>
+  <新输出目录>/SC5000-<VERSION>-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img <VERSION> /var/tmp/enginex-gate-<短说明>
 # SC6000 组用 SC6000 JP13，PRIME 4 组用 PRIME4 JC11；工作目录每次用新的
 ```
 
@@ -134,9 +134,9 @@ bash tools/az01-packer/release-gate.sh \
 | 阶段 | 检查 |
 | --- | --- |
 | 静态审计 | 新 rootfs 里所有自定义 unit 的 `Requires/BindsTo/Wants/After/Slice` 目标、`Exec*` 与 `EnvironmentFile`、脚本解释器和脚本里的绝对路径工具、suite 直接调用的工具（`exec.Command`）是否真实存在；`command -v` 可选工具缺失记为 WARN（例如 `iw` 缺失时，关闭 Wi-Fi 省电的分支从不执行）；宿主 systemd 再用 `systemd-analyze verify --root` 把所有自定义 unit 和带 drop-in 的官方 unit 解析一遍（5.3.0.1 第一次构建时它报出了 `Unit var.mount not found`），输出必须为空；overlay 里每个动态 ELF 跑 `ld.so --list`；engine 脚本不再强制 100 Mbps；所有 Engine 脚本过 `sh -n` |
-| 上一版在线升级 | 旧 rootfs + 空 `/data`：etc-reset → prepare → stream-sync + Engine（带 UI hook）；本地 TLS GitHub mock 发布新版；`/v1/sc5000/update` 发现新版 → `?apply=1` → Engine 以 `UpdateFromUrl` 退出 → 官方 engine 脚本 → `az01-update --net` 下载并校验新镜像，并进入 Applying；作为对照，翻转一个字节的镜像必须在 Verifying 阶段被拒绝 |
-| 新版开机 | 同一个 `/data` 换成新 rootfs：etc-reset → prepare（检查版本号、UI 包、SSH host key 保留）→ `sc5000-debloat --apply-runtime` → `sc5000-perf-tune` → `sshd -t` → safe-mode 下先跑一次原厂 Engine，在 `/data` 留下原厂 QML 缓存（复现 5.3.0.1 实机故障）→ stream-sync / deemixd / rb-bridge / engine-guardian / storage-discover / edisksd + hook → Engine + UI hook |
-| 新版功能 | QML 替换数等于 UI 包文件数 + 1（门禁探针）；探针 `tools/az01-packer/gate-ui-probe.qml`（只在沙箱里替换原厂 `QmlWarnings.qml`，不进镜像）读取 Engine 实际渲染的节点：Settings → Services → Streaming 显示包里的 Deezer、SoundCloud 和 Beatport 各一行、原厂 Tidal 隐藏，About 显示 `EngineX OS <VERSION>`，控制中心有波形磁贴；Engine 补丁 16 处（TidalAPI 网关、Stems 等），21 个 DSP guard（含 Flanger 补偿 #54、主输出软限幅 #58），SQLite hook 已装，无 QML 加载错误、无崩溃，各守护进程存活；`/v1/sc5000/ui`、`POST /au/oauth2/token`、deemixd `/healthz` 正常；stems-probe 与 `stems-processor` 完成握手和分轨；rb-bridge 转换 Rekordbox 导出；fsck.hfsplus 可执行；下一次在线升级（mock 发布 `<VERSION>` 末位 +1）同样走通 |
+| 上一版在线升级 | 旧 rootfs + 空 `/data`：etc-reset → prepare → stream-sync + Engine（带 UI hook）；本地 TLS GitHub mock 发布新版；`/v1/enginex/update` 发现新版 → `?apply=1` → Engine 以 `UpdateFromUrl` 退出 → 官方 engine 脚本 → `az01-update --net` 下载并校验新镜像，并进入 Applying；作为对照，翻转一个字节的镜像必须在 Verifying 阶段被拒绝 |
+| 新版开机 | 同一个 `/data` 换成新 rootfs：etc-reset → prepare（检查版本号、UI 包、SSH host key 保留）→ `enginex-debloat --apply-runtime` → `enginex-perf-tune` → `sshd -t` → safe-mode 下先跑一次原厂 Engine，在 `/data` 留下原厂 QML 缓存（复现 5.3.0.1 实机故障）→ stream-sync / deemixd / rb-bridge / engine-guardian / storage-discover / edisksd + hook → Engine + UI hook |
+| 新版功能 | QML 替换数等于 UI 包文件数 + 1（门禁探针）；探针 `tools/az01-packer/gate-ui-probe.qml`（只在沙箱里替换原厂 `QmlWarnings.qml`，不进镜像）读取 Engine 实际渲染的节点：Settings → Services → Streaming 显示包里的 Deezer、SoundCloud 和 Beatport 各一行、原厂 Tidal 隐藏，About 显示 `EngineX OS <VERSION>`，控制中心有波形磁贴；Engine 补丁 16 处（TidalAPI 网关、Stems 等），21 个 DSP guard（含 Flanger 补偿 #54、主输出软限幅 #58），SQLite hook 已装，无 QML 加载错误、无崩溃，各守护进程存活；`/v1/enginex/ui`、`POST /au/oauth2/token`、deemixd `/healthz` 正常；stems-probe 与 `stems-processor` 完成握手和分轨；rb-bridge 转换 Rekordbox 导出；fsck.hfsplus 可执行；下一次在线升级（mock 发布 `<VERSION>` 末位 +1）同样走通 |
 
 - 预期值随底包变：`GATE_EXPECT_APPLIED`（默认：独立播放器 20、一体机 28，后者多 8 处 #206 录音补丁）、`GATE_EXPECT_DSP`（默认 21）、`GATE_LANG`（默认 `zh-Hans`）。一代 5.3.0 的常驻 hook 站点表增加到 20 项，因此同步更新补丁数默认值。只有底包或 hook 站点表变了才改，并写进变更记录。
 - 沙箱里不真正执行、而是由记录 shim 代替的命令：`kexec`、`systemctl`、`reboot`、`encrypt-fs.sh`（对 `/data` 做 fscrypt，失败时会触发 Factory Reset）、`az01-update --erase-data`。`planck-remote-screen` 在沙箱里没有显示，它的 shim 改调 `az01-update --net`，两者用的是同一个 libaz01-prog 下载与校验代码。沙箱里没有 eMMC，`Applying` 之后会报 `unsupported operation`，这是预期结果，记为 INFO。真实刷写和重启仍需按第 8 步在实机上抽查。
@@ -183,7 +183,7 @@ gh release view v<VERSION> --repo Cd1s/EngineX-OS --json assets -q '.assets[] | 
 
 - 实机只做热部署和只读核对；部署前先备份被替换的文件。
 - 实机验收时必须跑完 [`docs/REGRESSION-CHECKLIST.md`](../../docs/REGRESSION-CHECKLIST.md) 中的实机必检项（包括标有 `[NO AUTOMATED TEST]` 的跨机手动 `MASTER` 互切、原厂 `LOAD` 流媒体播放、按键灯目测等），并将结果写入 `docs/ISSUE-FIXES-<VERSION>.md`。
-- 测碟机端在线更新时，要把实机两个 `version.txt`（`/data/sc5000-custom/version.txt` 和 `/etc/sc5000/version.txt`）临时改成比 `<VERSION>` 旧的版本才会出现更新提示；`/etc` 那份用 bind mount 临时文件，重启即恢复。
+- 测碟机端在线更新时，要把实机两个 `version.txt`（`/data/enginex/version.txt` 和 `/etc/enginex/version.txt`）临时改成比 `<VERSION>` 旧的版本才会出现更新提示；`/etc` 那份用 bind mount 临时文件，重启即恢复。
 
 ## 9. 发版后与日常编译垃圾清理（必做，防磁盘与 tmpfs 爆满）
 

@@ -2,13 +2,13 @@
 
 `engine_ui_hook.c` is preloaded into `/usr/Engine/Engine` and swaps files in
 Engine's embedded Qt resources for those in
-`/data/sc5000-custom/ui/packs/<language>/`. Rootfs and the Engine binary stay
+`/data/enginex/ui/packs/<language>/`. Rootfs and the Engine binary stay
 untouched. `build_packs.py` builds the packs from the QML extracted from Engine
 5.0.4: language, waveform palette, separate NetEase/Spotify/Deezer sources and
 removal of the improper-eject prompt.
 
     python3 build_packs.py --qrc <extracted qrc> --out out/ui-packs
-    # unpack out/ui-packs.tar.gz into /data/sc5000-custom/ui on the deck
+    # unpack out/ui-packs.tar.gz into /data/enginex/ui on the deck
 
 `--dev` adds an eval/screenshot harness; it also needs
 `QML_XHR_ALLOW_FILE_READ=1` and must never ship.
@@ -49,7 +49,7 @@ while running crashed PID 1 once.
 ## Recovery
 
 - Three Engine starts in a row that crash within 15 s create
-  `/data/sc5000-custom/ui/safe-mode` and the stock UI returns. A deliberate
+  `/data/enginex/ui/safe-mode` and the stock UI returns. A deliberate
   stop or restart (language switch, deploy) resets the count
   (`engine-ui-guard stop`, run from `override.conf`).
 - To remove the mod: delete
@@ -119,7 +119,7 @@ not run PRAGMA. `:memory:` connections do not run the tuning SQL. `open16` is no
 intercepted.
 
 `open`, `open64`, `openat`, and `openat64` additionally map analytics sidecars
-and CrashReportDB files into a private `/tmp/sc5000-engine-volatile-<uid>/`
+and CrashReportDB files into a private `/tmp/enginex-engine-volatile-<uid>/`
 tree, preserving absolute path identity and handling relative dirfds. `/tmp`
 must be tmpfs for this fallback to avoid storage writes. This is an open fallback,
 not an overlay for mkdir/stat/rename/unlink or other processes.
@@ -203,7 +203,7 @@ and keep audio running; it does not show each pop is gone by ear.
 
 ## Master soft limiter (`master_limiter.h`, #58)
 
-Off by default; Settings → "Master Soft Clipper" or `POST /v1/sc5000/ui?masterLimiter=1`
+Off by default; Settings → "Master Soft Clipper" or `POST /v1/enginex/ui?masterLimiter=1`
 writes `master_limiter=1` to `settings.conf`, which the hook polls once a second
 from a SCHED_OTHER thread. It is the 21st DSP site: airHost's device callback
 (5.0.4 `0x1462a6c`, 5.3.0 `0xc77934`, 7 arguments, the last three on the stack),
