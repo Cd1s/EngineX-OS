@@ -8,6 +8,21 @@ static char stems_bundle_file[4096], stems_bin_file[4096];
 #include "engine_ui_hook.c"
 #include <assert.h>
 
+static void *named_policy_worker(void *arg) {
+    const char *name = arg;
+    int before = getpriority(PRIO_PROCESS, 0);
+    long io_before = syscall(SYS_ioprio_get, 1, 0);
+    assert(!pthread_setname_np(pthread_self(), name));
+    int kind = thread_class(name);
+    assert(getpriority(PRIO_PROCESS, 0) == (kind == 1 ? before : 10));
+    assert(syscall(SYS_ioprio_get, 1, 0) == (kind == 2 ? ((2 << 13) | 7) : io_before));
+    cpu_set_t cpus;
+    assert(!sched_getaffinity(0, sizeof cpus, &cpus));
+    assert(!CPU_ISSET(1, &cpus) && !CPU_ISSET(2, &cpus));
+    if (kind == 2) assert(sched_getscheduler(0) == SCHED_OTHER);
+    return NULL;
+}
+
 static void test_thread_policy(void) {
     const char *jobs[] = {"J:I:Takingfreez", "J:N:Searching o", "J:I:Collecting", "Taking freeze", "Collecting anal", "Freeze Checker "};
     for (size_t i = 0; i < sizeof jobs / sizeof *jobs; i++) assert(thread_class(jobs[i]) == 0);
@@ -15,6 +30,7 @@ static void test_thread_policy(void) {
     assert(thread_class("Analysis Queue ") == 2);
     assert(thread_class("OfflineAnalyzer") == 2);
     assert(thread_class("QQuickPixmapRea") == 1);
+    assert(thread_class("FileInfoThread") == 3);
     assert(thread_class("AudioOut") == 0);
     assert(thread_class("AudioRenderer2") == 0);
     assert(thread_class("AudioWatcher") == 0);
@@ -29,6 +45,15 @@ static void test_thread_policy(void) {
     assert(!sched_getaffinity(0, sizeof after, &after) && CPU_EQUAL(&before, &after));
     assert(sched_getscheduler(0) == policy && getpriority(PRIO_PROCESS, 0) == nice);
     assert(syscall(SYS_ioprio_get, 1, 0) == io);
+    const char *workers[] = {"QQuickPixmapRea", "FileInfoThread", "Analysis Queue", "Dropbox"};
+    hook_test_engine = 1;
+    for (size_t i = 0; i < sizeof workers / sizeof *workers; i++) {
+        pthread_t worker;
+        assert(!pthread_create(&worker, NULL, named_policy_worker, (void *)workers[i]));
+        assert(!pthread_join(worker, NULL));
+    }
+    hook_test_engine = 0;
+    assert(getpriority(PRIO_PROCESS, 0) == nice && syscall(SYS_ioprio_get, 1, 0) == io);
     puts("JobController: transient job names retain scheduling, affinity and I/O priority: PASS");
 }
 

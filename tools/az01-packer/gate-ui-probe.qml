@@ -43,6 +43,40 @@ Item {
         const sc = PlanckGUI.views ? PlanckGUI.views.splashScreenController : null
         return !!(sc && sc.viewModel && sc.viewModel.isUnlocked)
     }
+    function reportTrackArt() {
+        // AlbumArt needs TrackList's delegate context; inspect real Demo rows.
+        let count = 0, placeholders = 0
+        const inspectArt = function (o) {
+            if (o.objectName === "Browser_TrackList" && o.visible) probe.artRoot = o
+            if (o.objectName !== "albumArt_tracklist" || !o.visible || o.width <= 0 || !String(o.source)) return
+            count++
+            const ch = kids(o)
+            for (let i = 0; i < ch.length; i++) {
+                const child = ch[i]
+                if (child.objectName === "albumArt_placeholder" &&
+                        (String(child.source) === "qrc:/AlbumArtPlaceholder.png" ||
+                         String(child.source) === "qrc:/UIKit.1/UIKit/Icons/PlaceHolder.png") && !child.asynchronous &&
+                        child.status === Image.Ready && child.visible === (o.status !== Image.Ready)) {
+                    placeholders++
+                    break
+                }
+            }
+        }
+        // PlanckGUI.views exposes controllers, not BrowseView's visual tree in 5.3.0.
+        // report() caches its TrackList during the existing scan; never rescan the
+        // whole window on every artwork retry (20-35 s per walk under QEMU).
+        if (probe.artRoot) {
+            walk(probe.artRoot, new Set(), inspectArt)
+        }
+        if (count === 0 && !probe.artFallbackWalked) {
+            probe.artFallbackWalked = true
+            walk(probe.Window.window.contentItem, new Set(), inspectArt)
+        }
+        const ok = count > 0 && placeholders === count
+        if (ok || ++probe.artWait > 5)
+            console.warn("SCPROBE trackart|" + (count > 0 ? 1 : 0) + "|" + (ok ? 1 : 0) + "|")
+        return ok || probe.artWait > 5
+    }
     function report() {
         const lighting = Planck.getProperty("/GUI/SoundSwitchViewEnabled")
         const toggleable = !!(typeof Config !== "undefined" && Config && Config.integrations && Config.integrations.soundSwitch && Config.integrations.soundSwitch.isLightingIntegrationToggleable)
@@ -52,6 +86,7 @@ Item {
         let tabView = null
         let splashLoader = null
         walk(probe.Window.window.contentItem, new Set(), function (o) {
+            if (o.objectName === "Browser_TrackList" && o.visible) probe.artRoot = o
             if (!main && "scAutoAnalyze" in o) main = o
             if (!tabView && o.objectName === "ControlCenterTabView") tabView = o
             if (!splashLoader && o.objectName === "SplashScreenLoader") splashLoader = o
@@ -115,6 +150,11 @@ Item {
     property bool demoConnected: false
     property bool samplerConnected: false
     property int demoWait: 0
+    property bool artSelected: false
+    property bool artOpened: false
+    property int artWait: 0
+    property var artRoot: null
+    property bool artFallbackWalked: false
 
     Repeater {
         id: scAvailSources
@@ -166,23 +206,61 @@ Item {
                     selectAvailableMatch(/Demo/i)
                     probe.demoWait = 0
                     probe.phase = 2
+                    // The scan may overrun interval; discard a pending catch-up tick.
+                    restart()
                     return
                 }
                 if (probe.phase === 2) {
+                    let demoIndex = -1
                     for (let i = 0; i < scConnSources.count; i++) {
                         const it = scConnSources.itemAt(i)
-                        if (it && (it.isDemo || /Demo/i.test(it.rowName))) probe.demoConnected = true
+                        if (it && (it.isDemo || /Demo/i.test(it.rowName))) {
+                            probe.demoConnected = true
+                            demoIndex = i
+                        }
                     }
                     if (!probe.demoConnected && ++probe.demoWait <= 5) {
                         selectAvailableMatch(/Demo/i)
                         return
                     }
+                    if (!probe.demoConnected) {
+                        console.warn("SCPROBE trackart|0|0|")
+                        selectAvailableMatch(/Sample/i)
+                        probe.demoWait = 0
+                        probe.phase = 3
+                        restart()
+                        return
+                    }
+                    if (!probe.artSelected) {
+                        // Attaching is not selecting: use ConnectedSourceDelegate's
+                        // click path so Demo is current even with no /media/SDCARD.
+                        const bsc = Planck.librarianController.browserSourceControllerPtr()
+                        bsc.select(bsc.connectedSourceModel().index(demoIndex, 0))
+                        probe.artSelected = true
+                        restart()
+                        return
+                    }
+                    if (!probe.artOpened) {
+                        if (PlanckGUI.views.sourceScreenView.visible) PlanckGUI.views.sourceScreenView.close()
+                        Planck.getProperty("/GUI/ShowBrowseView").translator.state = true
+                        Planck.getProperty("/Client/Librarian/Collections").translator.string = CollectionNameCraylist
+                        const rootIndex = Planck.librarianController.devicesController.selectedDeviceCraylistRootModelIndex
+                        Planck.librarianController.craylistController.select(rootIndex, 1, true, false)
+                        probe.artOpened = true
+                        restart()
+                        return
+                    }
+                    const artDone = reportTrackArt()
+                    restart()
+                    if (!artDone) return
+                    Planck.getProperty("/GUI/ShowBrowseView").translator.state = false
                     const ssv = PlanckGUI.views.sourceScreenView
                     if (!ssv.visible) ssv.onQuickSourceButtonClicked()
                     if (!ssv.expanded) ssv.onExpandButtonClicked()
                     selectAvailableMatch(/Sample/i)
                     probe.demoWait = 0
                     probe.phase = 3
+                    restart()
                     return
                 }
                 if (probe.phase === 3) {
