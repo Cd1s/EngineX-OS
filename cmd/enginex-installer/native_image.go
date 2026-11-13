@@ -21,6 +21,8 @@ type bundleInfo struct {
 	bundle             *azimg.Bundle
 }
 
+var verifyImage = ext4.VerifyFile
+
 func readBundle(ctx context.Context, path string) (*bundleInfo, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -94,7 +96,7 @@ func buildImage(ctx context.Context, o *options, b *bundleInfo, size int64, name
 	if err := fs.Close(); err != nil {
 		return "", false, err
 	}
-	if err := ext4.VerifyFile(ctx, path, changes); err != nil {
+	if err := verifyImage(ctx, path, changes); err != nil {
 		return "", false, fmt.Errorf("image readback: %w; nothing flashed", err)
 	}
 	keep = true
@@ -106,6 +108,15 @@ func imageChanges(ctx context.Context, o *options, b *bundleInfo, fs *ext4.Image
 	if err != nil {
 		return ext4.ChangeSet{}, err
 	}
+	if root == "enginex" {
+		legacy, err := fs.Lstat("sc5000-custom")
+		if err != nil {
+			return ext4.ChangeSet{}, err
+		}
+		if legacy == ext4.Directory {
+			return ext4.ChangeSet{}, errors.New("legacy /sc5000-custom directory conflicts with /enginex; nothing flashed")
+		}
+	}
 	cs := ext4.ChangeSet{
 		Directories: []string{root + "/bundle/bin", root + "/bundle/lib", root + "/ui"},
 		Links:       links, Remove: []string{root + "/gen2-locked"},
@@ -113,7 +124,9 @@ func imageChanges(ctx context.Context, o *options, b *bundleInfo, fs *ext4.Image
 	add := func(e azimg.Entry, path string, mode uint32) {
 		cs.Files = append(cs.Files, ext4.Entry{Path: path, Mode: mode, Size: e.Size, SHA256: e.SHA256, Open: e.Open})
 	}
+	missing := map[string]bool{"bin/sc5000-suite": true, "lib/libengine-ui-hook.so": true, "boot-activate.sh": true, "ALSA configuration": true}
 	err = b.bundle.Walk(ctx, func(e azimg.Entry) error {
+		delete(missing, e.Path)
 		mode := uint32(0o644)
 		switch {
 		case strings.HasPrefix(e.Path, "bin/"), strings.HasPrefix(e.Path, "lib/"):
@@ -122,6 +135,7 @@ func imageChanges(ctx context.Context, o *options, b *bundleInfo, fs *ext4.Image
 			mode = 0o755
 		case e.Path == "version.txt", e.Path == "release-tag", e.Path == "model", e.Path == "alsa-dir", e.Path == "SHA256SUMS":
 		case e.Path == "99-sc5000-custom.conf", e.Path == "99-enginex.conf":
+			delete(missing, "ALSA configuration")
 			for _, dir := range []string{"system/var/overlay/lib/alsa/conf.d", "system/var-lib/alsa/conf.d"} {
 				add(e, dir+"/"+e.Path, mode)
 			}
@@ -133,6 +147,9 @@ func imageChanges(ctx context.Context, o *options, b *bundleInfo, fs *ext4.Image
 	})
 	if err != nil {
 		return cs, err
+	}
+	for path := range missing {
+		return cs, fmt.Errorf("bundle lacks %s; nothing flashed", path)
 	}
 	for _, dir := range b.bundle.UIDirs() {
 		cs.Directories = append(cs.Directories, root+"/ui/"+dir)

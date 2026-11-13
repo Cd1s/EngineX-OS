@@ -23,6 +23,3 @@ their own terms and attribution requirements still apply. Preserve these
 license files in the installer archives when the native packages are integrated.
 The XZ command-line program and its code are not part of the installer.
 
-The initial package skeletons contain import anchors so `go mod tidy` retains
-the pins. Package implementers can replace each anchor with the real import in
-their own package without changing the module versions.

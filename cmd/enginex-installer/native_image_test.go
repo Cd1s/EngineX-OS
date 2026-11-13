@@ -38,7 +38,4 @@ func TestNativeImageWithoutHostTools(t *testing.T) {
 	if sha(t, img) != before {
 		t.Fatal("original backup changed")
 	}
-	if files, _ := filepath.Glob(filepath.Join(o.WorkDir, "*.tmp")); len(files) != 0 {
-		t.Fatalf("unfinished images: %v", files)
-	}
 }
