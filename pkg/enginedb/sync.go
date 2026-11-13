@@ -868,7 +868,7 @@ func writePlaylists(ctx context.Context, q *stmtCache, l *rekordbox.Library, opt
 			// Engine can rebuild imported playlists under new ids, which orphans
 			// BridgePlaylist. Take such a list back rather than adding a duplicate.
 			var id int64
-			e := q.QueryRowContext(ctx, `SELECT id FROM Playlist WHERE title=? AND parentListId=? AND isExplicitlyExported=1 AND id NOT IN (SELECT listId FROM BridgePlaylist)`, p.Name, parent).Scan(&id)
+			e := q.QueryRowContext(ctx, `SELECT id FROM Playlist WHERE title=? AND parentListId=? AND isExplicitlyExported=1 AND id NOT IN (SELECT listId FROM BridgePlaylist) AND NOT EXISTS (SELECT 1 FROM BridgeLibrary WHERE key='native-playlist:' || Playlist.id)`, p.Name, parent).Scan(&id)
 			if e == nil {
 				if _, e = q.ExecContext(ctx, `DELETE FROM PlaylistEntity WHERE listId=?`, id); e != nil {
 					return e

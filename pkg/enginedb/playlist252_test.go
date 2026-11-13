@@ -1,10 +1,14 @@
 package enginedb
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"fmt"
+	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/Cd1s/EngineX-OS/internal/testfixture"
@@ -311,40 +315,226 @@ func TestPreserveNestedNativeHierarchy(t *testing.T) {
 	}
 }
 
-func TestRollbackOnFailurePreservesNativeChildren(t *testing.T) {
+func nativePlaylistFixture(t *testing.T) (string, *rekordbox.Library, *sql.DB, int64) {
+	t.Helper()
 	root := t.TempDir()
 	testfixture.Export(t, root)
 	lib, err := rekordbox.ReadPDB(filepath.Join(root, "PIONEER/rekordbox/export.pdb"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	opts := Options{Fast: true}
-	if _, err = Sync(context.Background(), root, lib, opts); err != nil {
+	if _, err = Sync(context.Background(), root, lib, Options{Fast: true}); err != nil {
 		t.Fatal(err)
 	}
+	db := dbOpen(t, root)
+	return root, lib, db, scalar[int64](t, db, `SELECT id FROM Playlist WHERE title='Folder'`)
+}
 
-	engine := dbOpen(t, root)
-	folderID := scalar[int64](t, engine, `SELECT id FROM Playlist WHERE title='Folder'`)
-
-	res, err := engine.Exec(`INSERT INTO Playlist(title,parentListId,isPersisted,nextListId) VALUES('Rollback Test',?,1,0)`, folderID)
+func playlistExec(t *testing.T, db *sql.DB, query string, args ...any) int64 {
+	t.Helper()
+	res, err := db.Exec(query, args...)
 	if err != nil {
 		t.Fatal(err)
 	}
-	nativeID, _ := res.LastInsertId()
-
-	// Alter library name to trigger rebuild, but pass an already-cancelled context so Sync fails.
-	lib.Playlists[0].Name += " Fail"
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	_, err = Sync(ctx, root, lib, opts)
-	if err == nil {
-		t.Fatal("expected Sync to fail with cancelled context")
+	id, err := res.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
 	}
+	return id
+}
 
-	// Native child must still be under original folderID, not modified or deleted.
-	parent := scalar[int64](t, engine, `SELECT parentListId FROM Playlist WHERE id=?`, nativeID)
-	if parent != folderID {
-		t.Fatalf("after rollback, parentListId=%d, expected original %d", parent, folderID)
+func playlistChain(t *testing.T, db *sql.DB, parent int64) []int64 {
+	t.Helper()
+	rows, err := db.Query(`SELECT id,COALESCE(nextListId,0) FROM Playlist WHERE parentListId=?`, parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodes := map[int64]int64{}
+	incoming := map[int64]bool{}
+	for rows.Next() {
+		var id, next int64
+		if err = rows.Scan(&id, &next); err != nil {
+			t.Fatal(err)
+		}
+		nodes[id] = next
+		incoming[next] = true
+	}
+	if err = rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	rows.Close()
+	var heads []int64
+	for id := range nodes {
+		if !incoming[id] {
+			heads = append(heads, id)
+		}
+	}
+	if len(heads) != 1 {
+		t.Fatalf("parent %d heads %v, nodes %v", parent, heads, nodes)
+	}
+	seen := map[int64]bool{}
+	var chain []int64
+	for id := heads[0]; id != 0; id = nodes[id] {
+		if _, ok := nodes[id]; !ok || seen[id] {
+			t.Fatalf("broken chain at %d: %v", id, nodes)
+		}
+		seen[id] = true
+		chain = append(chain, id)
+	}
+	if len(chain) != len(nodes) {
+		t.Fatalf("unreachable siblings: %v / %v", chain, nodes)
+	}
+	return chain
+}
+
+func TestNativeChildSurvivesParentChanges(t *testing.T) {
+	for _, mode := range []string{"rename", "remove"} {
+		t.Run(mode, func(t *testing.T) {
+			root, lib, db, folder := nativePlaylistFixture(t)
+			id := playlistExec(t, db, `INSERT INTO Playlist(title,parentListId,isPersisted,nextListId) VALUES('Keep',?,1,0)`, folder)
+			playlistExec(t, db, `INSERT INTO PlaylistEntity(listId,trackId,databaseUuid,nextEntityId) VALUES(?,3,(SELECT uuid FROM Information),0)`, id)
+			if mode == "rename" {
+				for i := range lib.Playlists {
+					if lib.Playlists[i].ID == 10 {
+						lib.Playlists[i].Name = "Renamed Folder"
+					}
+				}
+			} else {
+				lib.Playlists = nil
+			}
+			if _, err := Sync(context.Background(), root, lib, Options{Fast: true}); err != nil {
+				t.Fatal(err)
+			}
+			if scalar[int64](t, db, `SELECT parentListId FROM Playlist WHERE id=?`, id) != 0 || !reflect.DeepEqual(playlistEntityTracks(t, db, id), []int64{3}) {
+				t.Fatal("native data changed")
+			}
+			playlistChain(t, db, 0)
+		})
+	}
+}
+
+func assertNativePlaylist(t *testing.T, db *sql.DB, id int64) {
+	t.Helper()
+	if parent := scalar[int64](t, db, `SELECT parentListId FROM Playlist WHERE id=?`, id); parent != 0 {
+		t.Fatalf("native playlist %d parent=%d, want 0", id, parent)
+	}
+	if got := playlistEntityTracks(t, db, id); !reflect.DeepEqual(got, []int64{3}) {
+		t.Fatalf("native playlist %d tracks overwritten: %v, want [3]", id, got)
+	}
+	if flag := scalar[int](t, db, `SELECT isExplicitlyExported FROM Playlist WHERE id=?`, id); flag != 1 {
+		t.Fatalf("native export flag changed: %d", flag)
+	}
+	playlistChain(t, db, 0)
+}
+
+func TestExportedNativeChildCannotBeAdopted(t *testing.T) {
+	root, lib, db, folder := nativePlaylistFixture(t)
+	id := playlistExec(t, db, `INSERT INTO Playlist(title,parentListId,isPersisted,nextListId,isExplicitlyExported) VALUES('Native Set',?,1,0,1)`, folder)
+	playlistExec(t, db, `INSERT INTO PlaylistEntity(listId,trackId,databaseUuid,nextEntityId) VALUES(?,3,(SELECT uuid FROM Information),0)`, id)
+	for i := range lib.Playlists {
+		if lib.Playlists[i].ID == 10 {
+			lib.Playlists[i].Name = "Native Set"
+		}
+	}
+	// Protection must survive another transaction, not only the initial promotion.
+	for _, name := range []string{"First rebuild", "Second rebuild"} {
+		for i := range lib.Playlists {
+			if lib.Playlists[i].ID == 11 {
+				lib.Playlists[i].Name = name
+			}
+		}
+		if _, err := Sync(context.Background(), root, lib, Options{Fast: true}); err != nil {
+			t.Fatal(err)
+		}
+		assertNativePlaylist(t, db, id)
+		if imported := scalar[int64](t, db, `SELECT id FROM Playlist WHERE title='Native Set (rekordbox)' AND parentListId=0`); imported == id {
+			t.Fatal("native playlist claimed as imported folder")
+		}
+	}
+	lib.Playlists = nil
+	if _, err := Sync(context.Background(), root, lib, Options{Fast: true}); err != nil {
+		t.Fatal(err)
+	}
+	assertNativePlaylist(t, db, id)
+}
+
+func TestPreserveInterleavedNativeSiblingOrder(t *testing.T) {
+	root, lib, db, folder := nativePlaylistFixture(t)
+	owned := scalar[int64](t, db, `SELECT id FROM Playlist WHERE title='Nested'`)
+	second := playlistExec(t, db, `INSERT INTO Playlist(title,parentListId,isPersisted,nextListId) VALUES('Second',?,1,0)`, folder)
+	first := playlistExec(t, db, `INSERT INTO Playlist(title,parentListId,isPersisted,nextListId) VALUES('First',?,1,?)`, folder, owned)
+	if got := playlistChain(t, db, folder); !reflect.DeepEqual(got, []int64{first, owned, second}) {
+		t.Fatalf("fixture chain %v", got)
+	}
+	lib.Playlists[0].Name += " Renamed"
+	if _, err := Sync(context.Background(), root, lib, Options{Fast: true}); err != nil {
+		t.Fatal(err)
+	}
+	var natives []int64
+	for _, id := range playlistChain(t, db, 0) {
+		if id == first || id == second {
+			natives = append(natives, id)
+		}
+	}
+	if !reflect.DeepEqual(natives, []int64{first, second}) {
+		t.Fatalf("native relative order reversed: %v, want %v", natives, []int64{first, second})
+	}
+}
+
+func TestRollbackOnFailurePreservesNativeChildren(t *testing.T) {
+	for _, point := range []string{"second-reparent", "delete", "late"} {
+		t.Run(point, func(t *testing.T) {
+			root, lib, db, folder := nativePlaylistFixture(t)
+			id := playlistExec(t, db, `INSERT INTO Playlist(title,parentListId,isPersisted,nextListId) VALUES('Keep',?,1,0)`, folder)
+			playlistExec(t, db, `UPDATE Playlist SET isExplicitlyExported=1 WHERE id=?`, id)
+			second := playlistExec(t, db, `INSERT INTO Playlist(title,parentListId,isPersisted,nextListId) VALUES('Keep Two',?,1,0)`, folder)
+			playlistExec(t, db, `INSERT INTO PlaylistEntity(listId,trackId,databaseUuid,nextEntityId) VALUES(?,3,(SELECT uuid FROM Information),0)`, id)
+			var trigger string
+			switch point {
+			case "second-reparent":
+				trigger = fmt.Sprintf(`CREATE TRIGGER playlist_fail BEFORE UPDATE OF parentListId ON Playlist WHEN OLD.id=%d AND (SELECT parentListId FROM Playlist WHERE id=%d)=0 BEGIN SELECT RAISE(ABORT,'playlist-injected'); END`, second, id)
+			case "delete":
+				trigger = fmt.Sprintf(`CREATE TRIGGER playlist_fail BEFORE DELETE ON Playlist WHEN OLD.id=%d AND (SELECT parentListId FROM Playlist WHERE id=%d)=0 BEGIN SELECT RAISE(ABORT,'playlist-injected'); END`, folder, id)
+			case "late":
+				trigger = fmt.Sprintf(`CREATE TRIGGER playlist_fail BEFORE UPDATE OF lastRekordBoxLibraryImportReadCounter ON Information WHEN (SELECT parentListId FROM Playlist WHERE id=%d)=0 BEGIN SELECT RAISE(ABORT,'playlist-injected'); END`, id)
+			}
+			playlistExec(t, db, trigger)
+			dir := filepath.Join(root, "Engine Library/Database2")
+			before := map[string][]byte{}
+			for _, name := range []string{"m.db", stateFile} {
+				b, err := os.ReadFile(filepath.Join(dir, name))
+				if err != nil {
+					t.Fatal(err)
+				}
+				before[name] = b
+			}
+			for i := range lib.Playlists {
+				if lib.Playlists[i].ID == 10 {
+					lib.Playlists[i].Name = "Keep"
+				}
+			}
+			_, err := Sync(context.Background(), root, lib, Options{Fast: true})
+			if err == nil || !strings.Contains(err.Error(), "playlist-injected") {
+				t.Fatalf("injection not reached: %v", err)
+			}
+			for name, b := range before {
+				after, err := os.ReadFile(filepath.Join(dir, name))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(b, after) {
+					t.Errorf("%s changed after rollback", name)
+				}
+			}
+			if !reflect.DeepEqual(playlistEntityTracks(t, db, id), []int64{3}) {
+				t.Fatal("track changed")
+			}
+			playlistChain(t, db, folder)
+			playlistExec(t, db, `DROP TRIGGER playlist_fail`)
+			if _, err = Sync(context.Background(), root, lib, Options{Fast: true}); err != nil {
+				t.Fatal(err)
+			}
+			assertNativePlaylist(t, db, id)
+		})
 	}
 }

@@ -11,6 +11,7 @@ type nativeChildNode struct {
 	id    int64
 	title string
 	next  int64
+	owned bool
 }
 
 func orderNativeChildren(nodes []nativeChildNode) []nativeChildNode {
@@ -34,7 +35,9 @@ func orderNativeChildren(nodes []nativeChildNode) []nativeChildNode {
 				break
 			}
 			seen[id] = true
-			out = append(out, n)
+			if !n.owned {
+				out = append(out, n)
+			}
 			id = n.next
 		}
 	}
@@ -50,7 +53,8 @@ func orderNativeChildren(nodes []nativeChildNode) []nativeChildNode {
 }
 
 func reparentNativeChildren(ctx context.Context, q sqlExecer, owned string) error {
-	rows, err := q.QueryContext(ctx, `SELECT id, COALESCE(title,''), parentListId, COALESCE(nextListId,0) FROM Playlist WHERE parentListId IN (`+owned+`) AND id NOT IN (SELECT listId FROM BridgePlaylist) ORDER BY parentListId, id`)
+	// Walk complete sibling chains before filtering out bridge-owned nodes.
+	rows, err := q.QueryContext(ctx, `SELECT id, COALESCE(title,''), parentListId, COALESCE(nextListId,0), id IN (SELECT listId FROM BridgePlaylist) FROM Playlist WHERE parentListId IN (`+owned+`) ORDER BY parentListId, id`)
 	if err != nil {
 		return err
 	}
@@ -58,7 +62,7 @@ func reparentNativeChildren(ctx context.Context, q sqlExecer, owned string) erro
 	for rows.Next() {
 		var parent int64
 		var n nativeChildNode
-		if err = rows.Scan(&n.id, &n.title, &parent, &n.next); err != nil {
+		if err = rows.Scan(&n.id, &n.title, &parent, &n.next, &n.owned); err != nil {
 			rows.Close()
 			return err
 		}
@@ -89,8 +93,13 @@ func reparentNativeChildren(ctx context.Context, q sqlExecer, owned string) erro
 				return err
 			}
 			var nextVal any
-			if i+1 < len(nodes) && n.next == nodes[i+1].id {
+			if i+1 < len(nodes) {
 				nextVal = nodes[i+1].id
+			}
+			// Engine's export flag is not ownership. Remember this native ID so
+			// neither this rebuild nor a later one can adopt it by title.
+			if _, err = q.ExecContext(ctx, `INSERT OR IGNORE INTO BridgeLibrary(key,value) VALUES('native-playlist:' || ?, '1')`, n.id); err != nil {
+				return err
 			}
 			if _, err = q.ExecContext(ctx, `UPDATE Playlist SET parentListId=0, title=?, nextListId=? WHERE id=?`, title, nextVal, n.id); err != nil {
 				return err
