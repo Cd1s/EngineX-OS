@@ -61,7 +61,7 @@ type deckState struct {
 	Title        string  `json:"title,omitempty"` // a streaming track's real title (QML or stm.db): the copy is named after it
 	Artist       string  `json:"artist,omitempty"`
 	KeyName      string  `json:"keyName,omitempty"`      // the key as the source's header writes it ("-": none); the shadow header shows it, not the copy's own analysis
-	ID           string  `json:"id,omitempty"`           // what the source has loaded (also the display metadata revision): its Key (a copy), its Net (this player's own file), a CDJ's slot and track id. The QML loads again when it changes
+	ID           string  `json:"id,omitempty"`           // Engine mode, what the source has loaded: its Key (a copy), its Net (this player's own file), a CDJ's slot and track id. The QML loads again when it changes
 	DurationMS   float64 `json:"durationMs,omitempty"`   // the track's length on the source: tells the QML whether Engine holds this track or another
 	Loading      bool    `json:"loading,omitempty"`      // shadow deck: the peer has a track whose audio is still being fetched
 	Progress     float64 `json:"progress,omitempty"`     // while loading, 0..1: how much of the copy (Engine mode) or of the source's detail waveform is done. Absent: not known, the QML shows a ring that turns
@@ -489,26 +489,10 @@ func resolveNetPathFile(np, dataRoot, mediaRoot string, engineCache bool) string
 	return cached
 }
 
-func isHexString(s string) bool {
-	if s == "" {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
-			return false
-		}
-	}
-	return true
-}
-
-// stableTrackKey extracts the source file identity from a per-load session key
-// ("<baseKey>-<seq>"), leaving short test keys and "local-<hash>" keys intact.
+// stableTrackKey removes the per-load session suffix from a source file key.
 func stableTrackKey(key string) string {
 	base, seq, ok := strings.Cut(key, "-")
-	if ok && base != "local" && len(base) >= 8 && len(seq) >= 8 && isHexString(base) && isHexString(seq) {
-		return base
-	}
+	if ok && base != "local" && len(seq) >= 8 { return base }
 	return key
 }
 

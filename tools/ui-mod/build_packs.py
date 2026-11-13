@@ -801,7 +801,7 @@ SERVICES_MAIN = """
 	// steady playback then only move the extrapolation anchor (read imperatively
 	// by the displays) instead of re-running every shadow binding per reply.
 	function scShadowSameSample(s, key, e) {
-		if (s.key !== key || s.id !== (e.id || "") || s.name !== (e.name || "") || s.title !== (e.title || "") || s.artist !== (e.artist || "") || s.keyName !== (e.keyName || "") ||
+		if (s.key !== key || s.name !== (e.name || "") || s.title !== (e.title || "") || s.artist !== (e.artist || "") || s.keyName !== (e.keyName || "") ||
 			s.playing !== !!e.playing || s.scratch !== !!e.scratch || s.stale !== !!e.stale || s.metadataOnly !== !!e.metadataOnly || s.lineIn !== !!e.lineIn || s.pitch !== (Number(e.pitch) || 0) ||
 			s.cuePos !== (typeof e.cuePos === "number" ? e.cuePos : undefined) || s.master !== !!e.master ||
 			s.lead !== (e.lead !== undefined && e.lead !== null ? !!e.lead : !!e.master) || s.sync !== !!e.sync || s.keylock !== !!e.keylock ||
@@ -843,12 +843,8 @@ SERVICES_MAIN = """
 			// From the cover of an Engine load (header only, detail: false) to the display renderer, as on a
 			// live switch to All CDJ Mode: start over, or the lane keeps the stretched overview for good.
 			const fromCover = !!old && old.engine && !e.engine
-			const newSession = !!old && old.id !== (e.id || "")
-			if (fromCover || newSession) {
-				delete scShadowDisplayRequests[d]; delete scShadowDisplayText[d]
-				delete scShadowGridCache[d]; delete scShadowLiveCueCache[d]
-			}
-			const sample = {key: key, id: e.id || "", name: e.name || "", title: e.title || "", artist: e.artist || "", keyName: e.keyName || "",
+			if (fromCover) { delete scShadowDisplayRequests[d]; delete scShadowDisplayText[d] }
+			const sample = {key: key, name: e.name || "", title: e.title || "", artist: e.artist || "", keyName: e.keyName || "",
 				playing: !!e.playing, scratch: !!e.scratch, stale: !!e.stale, metadataOnly: !!e.metadataOnly, positionMs: pos, at: at,
 				pitch: Number(e.pitch) || 0, rate: Number(e.rate) || 0, lineIn: isLine,
 				cuePos: typeof e.cuePos === "number" ? e.cuePos : undefined, master: !!e.master,
@@ -857,7 +853,7 @@ SERVICES_MAIN = """
 				jumps: Number(e.jumps) || 0,
 				progress: Number(e.progress) || 0, error: e.error || "", engine: !!e.engine, copying: !!e.copying, durationMs: Number(e.durationMs) || 0,
 				fallback: e.fallback || "",
-				meta: old && old.key === key && !fromCover && !newSession ? old.meta : null,
+				meta: old && old.key === key && !fromCover ? old.meta : null,
 				liveCues: Array.isArray(e.cues) ? (same ? old.liveCues : e.cues) : old && old.key === key ? old.liveCues : null}
 			if (!next) next = Object.assign({}, scShadowDisplay)
 			next[d] = sample
@@ -1768,7 +1764,7 @@ SERVICES_MAIN = """
 			const d = Number(e.deck), at = scShadowAt[d]
 			if (e.displayOnly === true || e.lineIn || scFourDeckRole.indexOf(String(d)) >= 0 || !(e.path || e.loading)) continue
 			if (e.path && at && at.ready && at.path === e.path) continue
-			out.push({deck: d, key: e.key || "", id: e.id || "", title: e.title, artist: e.artist, bpm: e.bpm, pitch: e.pitch, durationMs: e.durationMs,
+			out.push({deck: d, key: e.key || "", title: e.title, artist: e.artist, bpm: e.bpm, pitch: e.pitch, durationMs: e.durationMs,
 				loading: true, engine: true, copying: !e.path, progress: e.progress, error: e.error})
 		}
 		return out
