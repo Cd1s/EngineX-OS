@@ -5,7 +5,7 @@
 #   bash tools/az01-packer/doc-shots.sh [UPDATE_IMG] [NEXT_VERSION] [OUT_DIR]
 #
 # Arguments:
-#   UPDATE_IMG    Path to SC5000-*-Update.img (default: /var/tmp/sc5000-release-5.3.0.4/SC5000-5.3.0.4-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img)
+#   UPDATE_IMG    Path to SC5000-*-Update.img (default: /var/tmp/enginex-release-5.3.0.4/SC5000-5.3.0.4-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img)
 #   NEXT_VERSION  Mock newer version for OTA screenshot (default: v5.3.0.5)
 #   OUT_DIR       Repository root directory (default: repo root containing this script)
 #
@@ -24,7 +24,7 @@
 set -euo pipefail
 
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
-IMG=${1:-/var/tmp/sc5000-release-5.3.0.4/SC5000-5.3.0.4-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img}
+IMG=${1:-/var/tmp/enginex-release-5.3.0.4/SC5000-5.3.0.4-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img}
 NEXTV=${2:-v5.3.0.5}
 OUT_REPO=${3:-$REPO}
 

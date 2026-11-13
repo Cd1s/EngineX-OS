@@ -11,7 +11,7 @@ set -eu
 CONFIGFS_MNT="${SC5000_CONFIGFS:-/sys/kernel/config}"
 UDC_CLASS="${SC5000_UDC_CLASS:-/sys/class/udc}"
 GADGET_DIR="$CONFIGFS_MNT/usb_gadget/enginex_uac2"
-PIDFILE="${SC5000_USB_AUDIO_PIDFILE:-/run/sc5000-usb-audio.pid}"
+PIDFILE="${SC5000_USB_AUDIO_PIDFILE:-/run/enginex-usb-audio.pid}"
 CARDS_FILE="/proc/asound/cards"
 
 ensure_configfs() {

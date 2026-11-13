@@ -74,8 +74,8 @@ CAPPY
         done
         printf 'JP07' > "$R/sys/firmware/devicetree/base/inmusic,product-code"
         printf 'inmusic,jp07\0inmusic,az01\0rockchip,rk3288\0' > "$R/sys/firmware/devicetree/base/compatible"
-        mkdir -p "$R/run/dbus" "$R/run/systemd/timesync" "$R/tmp/sc5000-engine-home"
-        chmod 0700 "$R/tmp/sc5000-engine-home"
+        mkdir -p "$R/run/dbus" "$R/run/systemd/timesync" "$R/tmp/enginex-engine-home"
+        chmod 0700 "$R/tmp/enginex-engine-home"
         chown -R 994:992 "$R/run/systemd/timesync"
         mkdir -p -m 0755 "$R/run/vclock"
         cp "$W/vclock_shim.so" "$R/run/vclock/vclock_shim.so"
@@ -248,7 +248,7 @@ HOSTS
 
     chroot "$R" /usr/bin/dbus-daemon --system --fork --nopidfile > "$W/dbus1.log" 2>&1 || chroot "$R" /usr/bin/dbus-daemon --system --fork
     chroot "$R" /usr/bin/env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-        HOME=/tmp/sc5000-engine-home MESA_SHADER_CACHE_MAX_SIZE=32M QML_DISABLE_DISK_CACHE=1 \
+        HOME=/tmp/enginex-engine-home MESA_SHADER_CACHE_MAX_SIZE=32M QML_DISABLE_DISK_CACHE=1 \
         QT_QPA_PLATFORM=offscreen MALLOC_ARENA_MAX=1 LD_LIBRARY_PATH=/usr/qt/lib \
         VCLOCK_FILE=/run/vclock/state LD_PRELOAD=/run/vclock/vclock_shim.so:/etc/sc5000/libengine-ui-hook.so \
         /usr/Engine/Engine -d0 > "$W/engine-boot1.log" 2>&1 &
@@ -336,7 +336,7 @@ HOSTS
     start_stream_sync "$W/streamsync-boot2.log"
     chroot "$R" /usr/bin/dbus-daemon --system --fork --nopidfile > "$W/dbus2.log" 2>&1 || chroot "$R" /usr/bin/dbus-daemon --system --fork
     chroot "$R" /usr/bin/env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-        HOME=/tmp/sc5000-engine-home MESA_SHADER_CACHE_MAX_SIZE=32M QML_DISABLE_DISK_CACHE=1 \
+        HOME=/tmp/enginex-engine-home MESA_SHADER_CACHE_MAX_SIZE=32M QML_DISABLE_DISK_CACHE=1 \
         QT_QPA_PLATFORM=offscreen MALLOC_ARENA_MAX=1 LD_LIBRARY_PATH=/usr/qt/lib \
         VCLOCK_FILE=/run/vclock/state LD_PRELOAD=/run/vclock/vclock_shim.so:/etc/sc5000/libengine-ui-hook.so \
         /usr/Engine/Engine -d0 > "$W/engine-boot2.log" 2>&1 &

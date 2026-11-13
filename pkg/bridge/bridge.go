@@ -212,7 +212,7 @@ func ensureWritableEngineLibrary(mount string) bool {
 	if base == "" || base == "." || base == "/" {
 		return false
 	}
-	lower := "/run/sc5000-empty"
+	lower := "/run/enginex-empty"
 	upper := filepath.Join("/data/enginex/hfs-lib", base, "upper")
 	work := filepath.Join("/data/enginex/hfs-lib", base, "work")
 	for _, d := range []string{lower, upper, work} {

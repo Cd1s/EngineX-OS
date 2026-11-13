@@ -71,7 +71,7 @@ func TestDebloatScriptCompleteOfflineAndIdempotent(t *testing.T) {
 		t.Fatalf("cleanup: %q %v", target, err)
 	}
 	conf := read(t, root, "etc/systemd/system/engine.service.d/override.conf")
-	for _, line := range []string{"LimitCORE=0", "ExecStopPost=\n", "exec /usr/Engine/Scripts/cleanup-JP07.sh'", "ExecStopPost=-/etc/enginex/engine-ui-guard stop", "Environment=HOME=/tmp/sc5000-engine-home", "Environment=QML_DISABLE_DISK_CACHE=1", "ExecStartPre=/etc/enginex/engine-ui-guard runtime"} {
+	for _, line := range []string{"LimitCORE=0", "ExecStopPost=\n", "exec /usr/Engine/Scripts/cleanup-JP07.sh'", "ExecStopPost=-/etc/enginex/engine-ui-guard stop", "Environment=HOME=/tmp/enginex-engine-home", "Environment=QML_DISABLE_DISK_CACHE=1", "ExecStartPre=/etc/enginex/engine-ui-guard runtime"} {
 		if !strings.Contains(conf, line) {
 			t.Fatal(conf)
 		}

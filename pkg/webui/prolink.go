@@ -118,7 +118,7 @@ func liveProlinkStatePath() string {
 	if env := os.Getenv("SC5000_PROLINK_STATE"); env != "" {
 		return env
 	}
-	return "/tmp/sc5000-prolink.json"
+	return "/tmp/enginex-prolink.json"
 }
 
 // postedDeviceTTL: a posted report older than this no longer stands for a deck (prolink.

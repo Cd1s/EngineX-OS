@@ -209,7 +209,7 @@ static void test_erase(void) {
     setenv("SC5000_TEST_PASSTHROUGH_ERASE", "1", 1);  // passthrough: no stock function here -> -1, nothing wiped
     assert(az01_erase_data_partition() == -1 && exists(root, "AppDataUser/x.db"));
     unsetenv("SC5000_TEST_PASSTHROUGH_ERASE");
-    if (access("/usr/share/sc5000-custom/sc5000-suite.xz", F_OK) == 0) { puts("erase: SKIP (1st-gen rootfs host)"); return; }
+    if (access("/usr/share/enginex/enginex-suite.xz", F_OK) == 0) { puts("erase: SKIP (1st-gen rootfs host)"); return; }
     assert(az01_erase_data_partition() == 0);
     for (size_t i = 0; i < sizeof wiped / sizeof *wiped; i++) assert(!exists(root, wiped[i]));
     for (size_t i = 0; i < sizeof kept / sizeof *kept; i++) assert(exists(root, kept[i]));
@@ -235,7 +235,7 @@ static void test_erase_reports_failure(void) {
     put(root, "enginex/bundle/install.sh", "x");
     put(root, "StreamingAccounts.json", "x");
     put(root, "AppDataUser/x.db", "x");
-    if (access("/usr/share/sc5000-custom/sc5000-suite.xz", F_OK) == 0) { puts("erase failure: SKIP (1st-gen rootfs host)"); return; }
+    if (access("/usr/share/enginex/enginex-suite.xz", F_OK) == 0) { puts("erase failure: SKIP (1st-gen rootfs host)"); return; }
     fflush(NULL);
     pid_t child = fork();
     assert(child >= 0);

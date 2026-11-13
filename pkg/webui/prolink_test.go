@@ -17,10 +17,10 @@ func TestProlinkStatePath(t *testing.T) {
 	stateDir := t.TempDir()
 	srv := New(Config{StateDir: stateDir}, nil)
 
-	// 1. Initially no prolink.json exists and no env set -> returns /tmp/sc5000-prolink.json
+	// 1. Initially no prolink.json exists and no env set -> returns /tmp/enginex-prolink.json
 	t.Setenv("SC5000_PROLINK_STATE", "")
-	if p := srv.ProlinkStatePath(); p != "/tmp/sc5000-prolink.json" {
-		t.Errorf("got %q, want /tmp/sc5000-prolink.json", p)
+	if p := srv.ProlinkStatePath(); p != "/tmp/enginex-prolink.json" {
+		t.Errorf("got %q, want /tmp/enginex-prolink.json", p)
 	}
 
 	// 2. SC5000_PROLINK_STATE env set and no file in StateDir -> returns env value

@@ -34,9 +34,17 @@ import (
 const (
 	tailscaleVersion = "1.104.5"
 	tailscaleUnit    = "enginex-tailscaled"
-	tailscaleSocket  = "/run/sc5000-tailscaled.sock"
+	tailscaleSocket  = "/run/enginex-tailscaled.sock"
 	tailscaleWebPort = 8080 // stream-sync console
+	// legacyTailscaleUnit is the transient unit's name before 5.3.0.5 (#234). An in-place
+	// update of a /data bundle keeps it running, and a second daemon on the same state dir
+	// would fight it, so it is stopped before this one starts.
+	legacyTailscaleUnit = "sc5000-tailscaled"
 )
+
+// legacyTailscaleSocket points at the daemon's socket under its name before 5.3.0.5 (#234),
+// for a Tailscale Remote Mod installed earlier that still asks there; tests move it.
+var legacyTailscaleSocket = "/run/sc5000-tailscaled.sock"
 
 // tailscaleReleaseURL hosts tailscaled-<arch> and SHA256SUMS; tests point it at httptest.
 var tailscaleReleaseURL = "https://github.com/Cd1s/EngineX-OS/releases/download/tailscale-v" + tailscaleVersion
@@ -157,6 +165,7 @@ func (s *Server) tailscaleStart(ctx context.Context) error {
 		return nil
 	}
 	run := getSystemRunner()
+	_, _ = run(ctx, "systemctl", "stop", legacyTailscaleUnit)
 	_, _ = run(ctx, "systemctl", "reset-failed", tailscaleUnit)
 	// A transient unit works on both the image and the read-only-root /data bundle decks.
 	out, err := run(ctx, "systemd-run", "--unit="+tailscaleUnit, "--slice=enginex-background.slice",
@@ -167,13 +176,29 @@ func (s *Server) tailscaleStart(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("start tailscaled: %v: %s", err, strings.TrimSpace(string(out)))
 	}
+	if isDeckStateDir(s.cfg.StateDir) { // never the build host's /run in tests
+		linkLegacyTailscaleSocket()
+	}
 	return nil
+}
+
+// linkLegacyTailscaleSocket points the old socket name at the new one, unless something
+// that is not a symlink (an old daemon's own socket) is there.
+func linkLegacyTailscaleSocket() {
+	if fi, err := os.Lstat(legacyTailscaleSocket); err == nil {
+		if fi.Mode()&os.ModeSymlink == 0 {
+			return
+		}
+		os.Remove(legacyTailscaleSocket)
+	}
+	_ = os.Symlink(filepath.Base(tailscaleSocket), legacyTailscaleSocket)
 }
 
 func (s *Server) tailscaleStop(ctx context.Context) {
 	tailscaleServed.Store(false)
 	tailscaleServeError.Store("")
 	_, _ = getSystemRunner()(ctx, "systemctl", "stop", tailscaleUnit)
+	_, _ = getSystemRunner()(ctx, "systemctl", "stop", legacyTailscaleUnit)
 }
 
 // tailscaleStatus distinguishes an unavailable status from a confirmed backend state.

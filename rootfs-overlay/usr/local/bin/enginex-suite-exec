@@ -7,7 +7,7 @@ shift
 SHARE=${SC5000_SUITE_SHARE:-/usr/share/enginex}
 TARGET_DIR=${SC5000_SUITE_DIR:-/data/enginex/bin}
 if ! mkdir -p "$TARGET_DIR" 2>/dev/null || [ ! -w "$TARGET_DIR" ]; then
-    TARGET_DIR="/tmp/sc5000-custom-bin"
+    TARGET_DIR="/tmp/enginex-bin"
     mkdir -p "$TARGET_DIR"
 fi
 BIN="$TARGET_DIR/enginex-suite"
