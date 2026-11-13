@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -22,6 +23,9 @@ import (
 type SystemRunner func(ctx context.Context, name string, args ...string) ([]byte, error)
 
 var defaultSystemRunner SystemRunner = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+	if err := guardHostCommand(name); err != nil {
+		return nil, err
+	}
 	cmd := exec.CommandContext(ctx, name, args...)
 	return cmd.CombinedOutput()
 }
@@ -83,6 +87,84 @@ type sshPostRequest struct {
 
 // sshRunDropInPath is the /run fallback for read-only roots (2nd-gen decks); a var for tests.
 var sshRunDropInPath = "/run/systemd/system/sshd.service.d/51-port.conf"
+
+// First-generation EngineX images run their own key-only sshd unit (az01_packer.py):
+// Conflicts=sshd.service, PasswordAuthentication no, keys in /data/enginex. Starting
+// the stock sshd there stopped it (BH-GC2-9). Second-generation decks keep the stock
+// sshd.service and its read-only /etc.
+const gen1SSHUnit = "sc5000-custom-sshd"
+
+var gen1SSHDropInPath = "/etc/systemd/system/sc5000-custom-sshd.service.d/51-port.conf"
+
+// gen1SSHRunDropInPath: first-generation 5.3.0 roots are mounted read-only too (no etc.mount),
+// so the port drop-in goes to /run there; RestoreSSH writes it again on every boot.
+var gen1SSHRunDropInPath = "/run/systemd/system/sc5000-custom-sshd.service.d/51-port.conf"
+
+// writeGen1SSHPort writes the first-generation unit's port drop-in: /etc where it is
+// writable, /run otherwise (review of 03cf399: EROFS was ignored, the port silently not set).
+func writeGen1SSHPort(port int) error {
+	// -p overrides the Port of EngineX's own sshd_config.
+	dropIn := fmt.Sprintf("[Service]\nExecStart=\nExecStart=/usr/sbin/sshd -D -e -f /usr/share/sc5000-custom/sshd_config -p %d\n", port)
+	if os.MkdirAll(filepath.Dir(gen1SSHDropInPath), 0o755) == nil && os.WriteFile(gen1SSHDropInPath, []byte(dropIn), 0o644) == nil {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(gen1SSHRunDropInPath), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(gen1SSHRunDropInPath, []byte(dropIn), 0o644)
+}
+
+// RestoreSSH applies the console's SSH settings on a first-generation deck after a boot:
+// its prepare script starts the key-only unit on port 22 whenever a key is stored and never
+// reads them, and /run, where the port drop-in and the runtime mask live, is empty after a
+// reboot. Second-generation decks do this in boot-activate.sh. Without saved settings
+// nothing changes (#46, #116).
+func (s *Server) RestoreSSH(ctx context.Context) {
+	if !onDeck() {
+		return
+	}
+	unit, _ := sshUnit()
+	if unit != gen1SSHUnit {
+		return
+	}
+	if _, err := os.Stat(s.sshConfigPath()); err != nil {
+		return
+	}
+	cfg := s.loadSSHConfig()
+	runner := getSystemRunner()
+	if !cfg.Enabled {
+		_, _ = runner(ctx, "systemctl", "stop", unit)
+		_, _ = runner(ctx, "systemctl", "mask", "--runtime", unit)
+		return
+	}
+	if cfg.Port != 22 {
+		if err := writeGen1SSHPort(cfg.Port); err != nil {
+			log.Printf("ssh: port %d not restored: %v", cfg.Port, err)
+			return
+		}
+		_, _ = runner(ctx, "systemctl", "daemon-reload")
+		_, _ = runner(ctx, "systemctl", "restart", unit)
+	}
+}
+
+// sshUnit is the SSH unit this deck runs, and whether it takes passwords.
+func sshUnit() (unit string, passwords bool) {
+	if dataBundleBoards[imagePrefix(deviceCompatible())] {
+		return "sshd", true
+	}
+	return gen1SSHUnit, false
+}
+
+// sshRunning: only "active" from systemctl is running; inactive, failed or no
+// systemctl at all is not (an error used to fall back to "enabled", BH-GC2-9).
+func sshRunning(ctx context.Context, runner SystemRunner) bool {
+	if !onDeck() {
+		return false
+	}
+	unit, _ := sshUnit()
+	out, err := runner(ctx, "systemctl", "is-active", unit)
+	return err == nil && strings.TrimSpace(string(out)) == "active"
+}
 
 // sshPersistKeyDir is where authorized_keys survives reboot; falls back to StateDir when absent.
 var sshPersistKeyDir = "/data/enginex"
@@ -189,18 +271,30 @@ func (s *Server) handleUninstallGen2(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	runner := getSystemRunner()
+	if uninstallOnDeck(customDir) {
+		// uninstall.sh stops enginex-stream-sync.service, this very process's
+		// unit, and systemd then ends every process of that unit: the script
+		// halfway (engine.service left pointing at the removed bundle) and the
+		// reboot after it (BH-GC2-2). It runs in a unit of its own instead,
+		// which reboots the deck when the script succeeds.
+		if out, err := runner(r.Context(), "systemd-run", "--unit=enginex-uninstall-gen2", "--collect", "--no-block", "--quiet",
+			"/bin/sh", "-c", `sh "$0" && { systemctl reboot || reboot; }`, uninstallScript); err != nil {
+			fail(w, http.StatusInternalServerError, fmt.Errorf("uninstall could not start: %w: %s", err, out))
+			return
+		}
+		respond(w, map[string]any{"ok": true, "prefix": prefix, "rebooting": true})
+		return
+	}
+	// Off a deck (a developer machine, a test): run it here and never reboot.
 	if out, err := runner(r.Context(), "sh", uninstallScript); err != nil {
 		fail(w, http.StatusInternalServerError, fmt.Errorf("uninstall failed: %w: %s", err, out))
 		return
 	}
-	if isDeckDataDir(customDir) {
-		go func() {
-			time.Sleep(500 * time.Millisecond)
-			_, _ = runner(context.Background(), "sh", "-c", "systemctl reboot || reboot || :")
-		}()
-	}
 	respond(w, map[string]any{"ok": true, "prefix": prefix})
 }
+
+// uninstallOnDeck: the deck's own /data/enginex (or the legacy path).
+var uninstallOnDeck = isDeckDataDir
 
 func (s *Server) handleSSH(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
@@ -215,14 +309,7 @@ func (s *Server) handleSSH(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSSHGet(w http.ResponseWriter, r *http.Request) {
 	cfg := s.loadSSHConfig()
-	running := false
-	runner := getSystemRunner()
-	if out, err := runner(r.Context(), "systemctl", "is-active", "sshd"); err == nil {
-		running = strings.TrimSpace(string(out)) == "active"
-	} else if cfg.Enabled {
-		// Fallback in environments without systemctl
-		running = true
-	}
+	running := sshRunning(r.Context(), getSystemRunner())
 
 	respond(w, SSHStatusView{
 		Enabled:          cfg.Enabled,
@@ -269,6 +356,14 @@ func (s *Server) handleSSHPost(w http.ResponseWriter, r *http.Request) {
 
 	cfg := s.loadSSHConfigLocked()
 	runner := getSystemRunner()
+	// Off a deck (a developer machine, a build host running tests) the settings
+	// are only saved: never a drop-in for that machine's sshd, never a command (r3).
+	deck := onDeck()
+	unit, passwords := sshUnit()
+	if setPassword && deck && !passwords {
+		fail(w, http.StatusBadRequest, errors.New("this deck's SSH takes public keys only: add a public key instead of a password"))
+		return
+	}
 
 	if setKey {
 		store := s.sshKeyStorePath()
@@ -278,12 +373,22 @@ func (s *Server) handleSSHPost(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Same as boot-activate.sh: copy, else bind-mount over the read-only /root.
-		_, _ = runner(r.Context(), "sh", "-c", `{ mkdir -p -m 700 /root/.ssh && cp "$1" /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys; } 2>/dev/null || mount --bind "$1" /root/.ssh/authorized_keys 2>/dev/null || :`, "sh", store)
+		if deck {
+			_, _ = runner(r.Context(), "sh", "-c", `{ mkdir -p -m 700 /root/.ssh && cp "$1" /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys; } 2>/dev/null || mount --bind "$1" /root/.ssh/authorized_keys 2>/dev/null || :`, "sh", store)
+		}
 		cfg.HasAuthorizedKey = true
 	}
 
 	if in.Port != nil {
 		cfg.Port = *in.Port
+	}
+	if in.Port != nil && deck && unit == gen1SSHUnit {
+		if err := writeGen1SSHPort(cfg.Port); err != nil {
+			fail(w, http.StatusInternalServerError, errors.New("could not set the ssh port"))
+			return
+		}
+		_, _ = runner(r.Context(), "systemctl", "daemon-reload")
+	} else if in.Port != nil && deck {
 		// Apply port configuration drop-in if directory exists or via runner
 		portDropIn := fmt.Sprintf("[Service]\nExecStart=\nExecStart=/usr/sbin/sshd -D -e -p %d\n", cfg.Port)
 		_ = os.MkdirAll(filepath.Dir(sshPortDropInPath), 0o755)
@@ -295,7 +400,7 @@ func (s *Server) handleSSHPost(w http.ResponseWriter, r *http.Request) {
 		_, _ = runner(r.Context(), "systemctl", "daemon-reload") // the drop-in is ignored until reloaded
 	}
 
-	if setPassword {
+	if setPassword && deck {
 		// The password is a positional parameter, so the shell never expands it.
 		if _, err := runner(r.Context(), "sh", "-c", `printf 'root:%s\n' "$1" | chpasswd`, "sh", *in.Password); err != nil {
 			fail(w, http.StatusInternalServerError, errors.New("could not set root password"))
@@ -306,14 +411,26 @@ func (s *Server) handleSSHPost(w http.ResponseWriter, r *http.Request) {
 
 	if in.Enabled != nil {
 		cfg.Enabled = *in.Enabled
+	}
+	if in.Enabled != nil && deck {
 		if cfg.Enabled {
-			_, _ = runner(r.Context(), "systemctl", "unmask", "sshd")
-			_, _ = runner(r.Context(), "systemctl", "restart", "sshd")
+			if unit == gen1SSHUnit { // its mask is a runtime one (read-only /etc), see below
+				_, _ = runner(r.Context(), "systemctl", "unmask", "--runtime", unit)
+			}
+			_, _ = runner(r.Context(), "systemctl", "unmask", unit)
+			_, _ = runner(r.Context(), "systemctl", "restart", unit)
 		} else {
-			_, _ = runner(r.Context(), "systemctl", "stop", "sshd")
+			_, _ = runner(r.Context(), "systemctl", "stop", unit)
+			if unit == gen1SSHUnit { // the prepare script's target would start it again
+				_, _ = runner(r.Context(), "systemctl", "mask", "--runtime", unit)
+			}
 		}
-	} else if in.Port != nil && cfg.Enabled {
-		_, _ = runner(r.Context(), "systemctl", "restart", "sshd")
+	} else if in.Port != nil && cfg.Enabled && deck {
+		_, _ = runner(r.Context(), "systemctl", "restart", unit)
+	} else if setKey && cfg.Enabled && deck {
+		// A first key lets the key-only unit start (ConditionFileNotEmpty); it
+		// was saved but SSH never came up until the next boot (BH-GC2-9).
+		_, _ = runner(r.Context(), "systemctl", "start", unit)
 	}
 
 	if err := s.saveSSHConfigLocked(cfg); err != nil {
@@ -326,7 +443,7 @@ func (s *Server) handleSSHPost(w http.ResponseWriter, r *http.Request) {
 		Port:             cfg.Port,
 		HasPassword:      cfg.HasPassword,
 		HasAuthorizedKey: cfg.HasAuthorizedKey,
-		Running:          cfg.Enabled,
+		Running:          sshRunning(r.Context(), runner),
 	})
 }
 
@@ -514,9 +631,27 @@ func (s *Server) handleMountsGet(w http.ResponseWriter, r *http.Request) {
 	list := s.loadMounts()
 	views := make([]RemoteMountView, 0, len(list))
 	for _, m := range list {
+		// What is mounted now, not the flag saved when it was: nothing remounts a share after a
+		// reboot, and a mount can drop (BH-GC2-14).
+		m.Mounted = mountedAt(m.MountPoint)
 		views = append(views, toMountView(m))
 	}
 	respond(w, views)
+}
+
+// mountedAt reports whether path is a mount point now. A var for the tests.
+var mountedAt = func(path string) bool {
+	b, err := os.ReadFile("/proc/self/mounts")
+	if err != nil {
+		return false
+	}
+	escaped := strings.NewReplacer(`\`, `\134`, " ", `\040`, "\t", `\011`, "\n", `\012`).Replace(filepath.Clean(path))
+	for _, line := range strings.Split(string(b), "\n") {
+		if f := strings.Fields(line); len(f) > 1 && f[1] == escaped {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) handleMountsPost(w http.ResponseWriter, r *http.Request) {
@@ -631,8 +766,17 @@ func (s *Server) handleMountsPost(w http.ResponseWriter, r *http.Request) {
 		Options:    strings.TrimSpace(in.Options),
 	}
 
+	// BH-GC2-14: a share switched off is unmounted, a changed one is mounted afresh, and a mount
+	// that fails is reported (the settings are kept) instead of answering 200 with mounted: true.
+	if existingIdx >= 0 && mountedAt(list[existingIdx].MountPoint) {
+		old := list[existingIdx]
+		if err := s.unmountRemote(r.Context(), &old); err != nil && !enabled {
+			log.Printf("webui: unmount %s: %v", old.MountPoint, err)
+		}
+	}
+	var mountErr error
 	if enabled {
-		_ = s.mountRemote(r.Context(), &m)
+		mountErr = s.mountRemote(r.Context(), &m)
 	}
 
 	if existingIdx >= 0 {
@@ -649,6 +793,10 @@ func (s *Server) handleMountsPost(w http.ResponseWriter, r *http.Request) {
 	// Synchronize to OmniSource NAS list
 	s.syncMountToNAS(m)
 
+	if mountErr != nil {
+		fail(w, http.StatusBadGateway, fmt.Errorf("saved, but mounting %s failed: %w", m.Name, mountErr))
+		return
+	}
 	respond(w, toMountView(m))
 }
 

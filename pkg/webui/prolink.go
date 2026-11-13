@@ -109,30 +109,69 @@ func (s *Server) ProlinkStatePath() string {
 			return p
 		}
 	}
+	return liveProlinkStatePath()
+}
+
+// liveProlinkStatePath is where rb-bridge --prolink keeps the live CDJ/DJM state
+// (its --state-file default, SC5000_PROLINK_STATE in its unit).
+func liveProlinkStatePath() string {
 	if env := os.Getenv("SC5000_PROLINK_STATE"); env != "" {
 		return env
 	}
 	return "/tmp/sc5000-prolink.json"
 }
 
+// postedDeviceTTL: a posted report older than this no longer stands for a deck (prolink.
+// BuildSnapshot shows a deck only within 10 s of its LastSeen).
+const postedDeviceTTL = time.Minute
+
+// mergedDevices: rb-bridge's live state, the snapshot of posted devices kept in
+// <StateDir>/prolink.json, then the devices posted to this server. The file in
+// StateDir used to replace the live state for good once anything was posted,
+// across restarts too (BH-GC2-8); now, per device, the newer report wins.
 func (s *Server) mergedDevices() []prolink.Device {
 	devMap := make(map[string]prolink.Device)
-	statePath := s.ProlinkStatePath()
-	if data, err := os.ReadFile(statePath); err == nil {
+	paths := []string{liveProlinkStatePath()}
+	if p := s.ProlinkStatePath(); p != paths[0] {
+		paths = append(paths, p)
+	}
+	for _, statePath := range paths {
+		data, err := os.ReadFile(statePath)
+		if err != nil {
+			continue
+		}
 		var snap prolink.Snapshot
-		if err := json.Unmarshal(data, &snap); err == nil {
-			for _, d := range snap.Devices {
-				devMap[deviceKey(d)] = d
+		if err := json.Unmarshal(data, &snap); err != nil {
+			continue
+		}
+		for _, d := range snap.Devices {
+			k := deviceKey(d)
+			if existing, ok := devMap[k]; !ok {
+				devMap[k] = d
+			} else if d.LastSeen.After(existing.LastSeen) {
+				devMap[k] = mergeDevice(existing, d)
+			} else {
+				devMap[k] = mergeDevice(d, existing)
 			}
 		}
 	}
+	// A posted device competes like the files do: the newer report wins. It used to be laid
+	// over the live state unconditionally, so one POST for a deck rb-bridge also sees froze its
+	// title, BPM and play state and, 10 s later, its LastSeen made it offline (review of 9d7c4ce).
+	// A posted report no newer source has replaced is dropped once a deck counts as gone.
 	prolinkMu.Lock()
 	if posted := postedDevices[s]; posted != nil {
 		for k, d := range posted {
-			if existing, ok := devMap[k]; ok {
+			if time.Since(d.LastSeen) > postedDeviceTTL {
+				delete(posted, k)
+				continue
+			}
+			if existing, ok := devMap[k]; !ok {
+				devMap[k] = d
+			} else if d.LastSeen.After(existing.LastSeen) {
 				devMap[k] = mergeDevice(existing, d)
 			} else {
-				devMap[k] = d
+				devMap[k] = mergeDevice(d, existing)
 			}
 		}
 	}

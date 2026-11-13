@@ -115,6 +115,9 @@ type Server struct {
 	addUserRetryAt atomic.Int64
 	authMu         sync.Mutex
 	authFails      map[string]*authStrike // wrong access codes per client network
+	consoles       consoleSessions        // console sign-ins; the cookie carries one of these, not the code
+	relayRefresh   relayRefresher         // status probes, off the request path (BH-GC2-12)
+	relaySeen      lanStemsSeen           // their last answer, when stems-lan.json could not keep it
 }
 
 func New(cfg Config, jobs *Jobs) *Server {
@@ -362,6 +365,7 @@ func (s *Server) Close() {
 	prolinkMu.Lock()
 	delete(postedDevices, s)
 	prolinkMu.Unlock()
+	s.closeBroadcast()
 }
 
 // DefaultStateDir keeps logins on the deck's writable partition; its home is read-only.
@@ -516,11 +520,27 @@ func (s *Server) authorized(w http.ResponseWriter, r *http.Request) (ok, locked 
 	cookie := false
 	if c, err := r.Cookie("stream_sync"); err == nil && v == "" {
 		v, cookie = c.Value, true
+		if s.consoles.valid(s.cfg.StateDir, v) {
+			return true, false
+		}
 	}
 	if ok, locked = s.tryCode(r, v); !ok && cookie {
 		http.SetCookie(w, &http.Cookie{Name: "stream_sync", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil})
+	} else if ok && cookie {
+		// A cookie from before sign-in sessions carried the code itself: replace it.
+		s.setConsoleCookie(w, r)
 	}
 	return ok, locked
+}
+
+// setConsoleCookie signs this browser in with a new session token.
+func (s *Server) setConsoleCookie(w http.ResponseWriter, r *http.Request) bool {
+	token, err := s.consoles.issue(s.cfg.StateDir)
+	if err != nil {
+		return false
+	}
+	http.SetCookie(w, &http.Cookie{Name: "stream_sync", Value: token, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil})
+	return true
 }
 
 var errAuthLocked = errors.New("too many wrong access codes, try again in a minute")
@@ -611,7 +631,10 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		fail(w, 401, errors.New("invalid access code"))
 		return
 	}
-	http.SetCookie(w, &http.Cookie{Name: "stream_sync", Value: s.cfg.AccessToken, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil})
+	if !s.setConsoleCookie(w, r) {
+		fail(w, 500, errors.New("cannot start a console session"))
+		return
+	}
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 func (s *Server) makeProvider(name string, guest bool, user string) (providers.Provider, error) {

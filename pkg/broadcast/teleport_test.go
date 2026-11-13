@@ -2,6 +2,7 @@ package broadcast
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"net"
 	"testing"
@@ -249,4 +250,24 @@ func TestLANStreamerValidation(t *testing.T) {
 		t.Errorf("unexpected Push error: %v", err)
 	}
 	_ = s.Close()
+}
+
+// BH-GF2-18 / BH-GF3-1: on 32-bit armhf a Teleport length >= 0x7fffffe8 wrapped
+// 24+int(dataLen) negative, passed the bounds check and the slice panicked
+// (stream-sync ended by one UDP packet). Run with GOARCH=arm too.
+func TestParseTeleportFrameHugeLengthOn32Bit(t *testing.T) {
+	for _, n := range []uint32{0x7fffffe8, 0x80000000, 0xfffffff0, 0xffffffff, 25, 1} {
+		frame := append([]byte(TeleportMagicTLPT), make([]byte, 16)...)
+		frame = binary.BigEndian.AppendUint32(frame, n)
+		if _, err := ParseTeleportFrame(frame); err == nil {
+			t.Fatalf("length %#x with no payload accepted", n)
+		}
+	}
+	frame := append([]byte(TeleportMagicTLPT), make([]byte, 16)...)
+	frame = binary.BigEndian.AppendUint32(frame, 4)
+	frame = append(frame, 1, 2, 3, 4, 9)
+	f, err := ParseTeleportFrame(frame)
+	if err != nil || len(f.Payload) != 4 || f.Payload[3] != 4 {
+		t.Fatalf("valid frame: %+v %v", f, err)
+	}
 }

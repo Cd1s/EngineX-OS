@@ -207,6 +207,24 @@ func ExtractEmbeddedArtwork(audioPath string) ([]byte, error) {
 	return nil, ErrNoArtwork
 }
 
+// maxArtworkBytes bounds what one file's tag or cover atom may make us read: a 10-byte header must
+// not allocate 256 MiB on a 32-bit deck with 1-2 GB of RAM (BH-GC1-14).
+const maxArtworkBytes = 32 << 20
+
+// remaining is how many bytes f holds after its current position.
+func remaining(f io.ReadSeeker) (int64, error) {
+	pos, err := f.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return 0, err
+	}
+	end, err := f.Seek(0, io.SeekEnd)
+	if err != nil {
+		return 0, err
+	}
+	_, err = f.Seek(pos, io.SeekStart)
+	return end - pos, err
+}
+
 func extractMP3Artwork(f io.ReadSeeker) ([]byte, error) {
 	hdr := make([]byte, 10)
 	if _, err := io.ReadFull(f, hdr); err != nil {
@@ -218,20 +236,35 @@ func extractMP3Artwork(f io.ReadSeeker) ([]byte, error) {
 	ver := hdr[3]
 	flags := hdr[5]
 	tagSize := int(hdr[6]&0x7F)<<21 | int(hdr[7]&0x7F)<<14 | int(hdr[8]&0x7F)<<7 | int(hdr[9]&0x7F)
+	// The header's size is a claim: read no more than the file holds, and no more than the cap
+	// (a cover past it is not found, nothing more).
+	left, err := remaining(f)
+	if err != nil {
+		return nil, err
+	}
+	tagSize = int(min(int64(tagSize), left, maxArtworkBytes))
 	tagData := make([]byte, tagSize)
 	if _, err := io.ReadFull(f, tagData); err != nil {
 		return nil, err
 	}
+	if ver == 2 {
+		return id3v22Artwork(tagData)
+	}
 
+	// Every length below is a 32-bit claim of the file: compared in int64, so that on the
+	// first-generation decks' 32-bit build (int is 32 bits) none can wrap past a bound.
 	offset := 0
 	if flags&0x40 != 0 {
+		var extSize int64
 		if ver == 4 && len(tagData) >= 4 {
-			extSize := int(tagData[0]&0x7F)<<21 | int(tagData[1]&0x7F)<<14 | int(tagData[2]&0x7F)<<7 | int(tagData[3]&0x7F)
-			offset = extSize
+			extSize = int64(tagData[0]&0x7F)<<21 | int64(tagData[1]&0x7F)<<14 | int64(tagData[2]&0x7F)<<7 | int64(tagData[3]&0x7F)
 		} else if ver == 3 && len(tagData) >= 4 {
-			extSize := int(binary.BigEndian.Uint32(tagData[:4]))
-			offset = 4 + extSize
+			extSize = 4 + int64(binary.BigEndian.Uint32(tagData[:4]))
 		}
+		if extSize > int64(len(tagData)) {
+			return nil, ErrNoArtwork
+		}
+		offset = int(extSize)
 	}
 
 	for offset+10 <= len(tagData) {
@@ -239,15 +272,16 @@ func extractMP3Artwork(f io.ReadSeeker) ([]byte, error) {
 			break
 		}
 		frameID := string(tagData[offset : offset+4])
-		var frameSize int
+		var size int64
 		if ver == 4 {
-			frameSize = int(tagData[offset+4]&0x7F)<<21 | int(tagData[offset+5]&0x7F)<<14 | int(tagData[offset+6]&0x7F)<<7 | int(tagData[offset+7]&0x7F)
+			size = int64(tagData[offset+4]&0x7F)<<21 | int64(tagData[offset+5]&0x7F)<<14 | int64(tagData[offset+6]&0x7F)<<7 | int64(tagData[offset+7]&0x7F)
 		} else {
-			frameSize = int(binary.BigEndian.Uint32(tagData[offset+4 : offset+8]))
+			size = int64(binary.BigEndian.Uint32(tagData[offset+4 : offset+8]))
 		}
-		if frameSize <= 0 || offset+10+frameSize > len(tagData) {
+		if size <= 0 || size > int64(len(tagData)-offset-10) {
 			break
 		}
+		frameSize := int(size)
 		frameBody := tagData[offset+10 : offset+10+frameSize]
 		if frameID == "APIC" {
 			if idx := findImageOffset(frameBody); idx >= 0 {
@@ -255,6 +289,25 @@ func extractMP3Artwork(f io.ReadSeeker) ([]byte, error) {
 			}
 		}
 		offset += 10 + frameSize
+	}
+	return nil, ErrNoArtwork
+}
+
+// id3v22Artwork finds a PIC frame in an ID3v2.2 tag, whose frame headers are 6 bytes (a 3-byte ID
+// and a 3-byte size) instead of v2.3/v2.4's 10 (BH-GC1-14).
+func id3v22Artwork(tagData []byte) ([]byte, error) {
+	for offset := 0; offset+6 <= len(tagData) && tagData[offset] != 0; {
+		frameSize := int(tagData[offset+3])<<16 | int(tagData[offset+4])<<8 | int(tagData[offset+5])
+		if frameSize <= 0 || offset+6+frameSize > len(tagData) {
+			break
+		}
+		if string(tagData[offset:offset+3]) == "PIC" {
+			body := tagData[offset+6 : offset+6+frameSize]
+			if idx := findImageOffset(body); idx >= 0 {
+				return validateImage(body[idx:])
+			}
+		}
+		offset += 6 + frameSize
 	}
 	return nil, ErrNoArtwork
 }
@@ -278,19 +331,27 @@ func extractFLACArtwork(f io.ReadSeeker) ([]byte, error) {
 		blockLen := int(hdr[1])<<16 | int(hdr[2])<<8 | int(hdr[3])
 
 		if blockType == 6 {
-			data := make([]byte, blockLen)
+			// The block header's length is a claim too: no more than the file holds.
+			left, err := remaining(f)
+			if err != nil {
+				return nil, err
+			}
+			if int64(blockLen) > left {
+				return nil, ErrNoArtwork
+			}
+			data := make([]byte, min(int64(blockLen), maxArtworkBytes))
 			if _, err := io.ReadFull(f, data); err != nil {
 				return nil, err
 			}
-			if len(data) >= 32 {
-				mimeLen := int(binary.BigEndian.Uint32(data[4:8]))
-				if 8+mimeLen+4 <= len(data) {
-					descLen := int(binary.BigEndian.Uint32(data[8+mimeLen : 8+mimeLen+4]))
+			if n := int64(len(data)); n >= 32 {
+				mimeLen := int64(binary.BigEndian.Uint32(data[4:8]))
+				if 8+mimeLen+4 <= n {
+					descLen := int64(binary.BigEndian.Uint32(data[8+mimeLen : 8+mimeLen+4]))
 					dataOffset := 8 + mimeLen + 4 + descLen + 16
-					if dataOffset+4 <= len(data) {
-						imgLen := int(binary.BigEndian.Uint32(data[dataOffset : dataOffset+4]))
+					if dataOffset+4 <= n {
+						imgLen := int64(binary.BigEndian.Uint32(data[dataOffset : dataOffset+4]))
 						imgStart := dataOffset + 4
-						if imgStart+imgLen <= len(data) {
+						if imgStart+imgLen <= n {
 							return validateImage(data[imgStart : imgStart+imgLen])
 						}
 					}
@@ -345,7 +406,7 @@ func parseMP4Atoms(f io.ReadSeeker, start, length int64) ([]byte, error) {
 		} else if atomSize == 0 {
 			atomSize = (start + length) - curr
 		}
-		if atomSize < headerLen || curr+atomSize > start+length {
+		if atomSize < headerLen || atomSize > start+length-curr { // a 64-bit size must not wrap curr
 			break
 		}
 
@@ -387,7 +448,7 @@ func parseMP4Covr(f io.ReadSeeker, start, length int64) ([]byte, error) {
 			break
 		}
 		if atomType == "data" {
-			if atomSize > 16 {
+			if atomSize > 16 && atomSize-16 <= maxArtworkBytes {
 				payloadLen := atomSize - 16
 				payload := make([]byte, payloadLen)
 				if _, err := f.Seek(curr+16, io.SeekStart); err == nil {

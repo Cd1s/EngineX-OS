@@ -240,8 +240,11 @@ func (s *Server) tailscaleServe(ctx context.Context, cfg TailscaleConfig) {
 		ports = append(ports, tailscaleWebPort)
 	}
 	for _, p := range ports {
-		n := strconv.Itoa(p)
-		_, _ = s.tailscaleCmd(ctx, "serve", "--bg", "--tcp="+n, "tcp://127.0.0.1:"+n)
+		n, target := strconv.Itoa(p), "127.0.0.1:"+strconv.Itoa(p)
+		if p == tailscaleWebPort {
+			target = ForwardAddr // the console without the deck-local gateway
+		}
+		_, _ = s.tailscaleCmd(ctx, "serve", "--bg", "--tcp="+n, "tcp://"+target)
 	}
 }
 

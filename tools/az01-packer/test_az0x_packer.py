@@ -1,5 +1,7 @@
 """Unit tests for az0x_packer.py (#119)."""
+import contextlib
 import hashlib
+import io
 import json
 import os
 import struct
@@ -194,6 +196,28 @@ class AZ0xPackerTests(unittest.TestCase):
         self.assertEqual(len(splash_recs), 2)
         for r in splash_recs:
             self.assertEqual(r['sha256'], expected_sha)
+
+    def test_truncated_or_corrupt_container_is_not_verified(self):
+        """BH-G2-10: info checked only the header and said verified for a header-only file or a damaged
+        record, and replace-splash copied damaged BOOT/rootfs records into an output it called verified."""
+        raw = make_az0x_fixture()
+        head = az0x_packer.info(raw[:az0x_packer.HEADER_SIZE])
+        self.assertFalse(head['verified'])
+        self.assertTrue(az0x_packer.info(raw)['record_hashes_verified'])
+        self.assertFalse(az0x_packer.info(raw)['signature_verified'])
+        self.assertTrue(any('outside the file' in p for p in head['problems']))
+        bad = bytearray(raw)
+        boot = next(r for r in az0x_packer.info(raw)['records'] if r['magic'] == 'BOOT')
+        bad[boot['offset']] ^= 1
+        meta = az0x_packer.info(bytes(bad))
+        self.assertFalse(meta['verified'])
+        self.assertTrue(any('SHA-256 mismatch' in p for p in meta['problems']))
+        with self.assertRaises(az0x_packer.SafetyError):
+            az0x_packer.replace_splash(bytes(bad), b'N' * az0x_packer.SPLASH_SIZE)
+        img = self.work / 'corrupt.img'
+        img.write_bytes(bytes(bad))
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(az0x_packer.main(['info', str(img)]), 1)
 
     def test_real_sclive2_header_if_present(self):
         real_path = Path('/root/build/sc5000-lab/fw-5.3.0/SCLIVE2-5.3.0-Update.img')

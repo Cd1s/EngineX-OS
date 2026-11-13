@@ -281,11 +281,17 @@ func healMount(mount string, maxSessions int, dataOnly bool) (Report, error) {
 		for _, warning := range hr.Warnings {
 			r.Warnings = append(r.Warnings, "history: "+warning)
 		}
-		if err = PruneHistoryDB(history, maxSessions); err != nil {
-			r.Healthy = false
-			return r, fmt.Errorf("history: %w", err)
+		// The mount hook's heal (--data-only) never prunes a DJ's history: stock
+		// Engine keeps every session, and this deleted all but the newest 50 on
+		// every insert, then added sqlite_stat1 to hm.db (BH-F52-2, BH-GC1-13).
+		// An explicit full heal still prunes.
+		if !dataOnly {
+			if err = PruneHistoryDB(history, maxSessions); err != nil {
+				r.Healthy = false
+				return r, fmt.Errorf("history: %w", err)
+			}
+			r.HistoryPruned = true
 		}
-		r.HistoryPruned = true
 		if dataOnly {
 			r.ReanalysisPending += hr.ReanalysisPending
 			return r, nil

@@ -246,11 +246,14 @@ func parseDisplayCues(blob []byte, rate, samples float64) ([]DisplayCue, error) 
 			return nil, err
 		}
 		p := displayFloat(raw[off:], big)
-		if !displayFinite(p) || p < -1 || p > samples {
+		if !displayFinite(p) || p > samples {
 			return nil, fmt.Errorf("display: invalid cue position")
 		}
-		if p >= 0 {
-			out = append(out, DisplayCue{I: i, MS: p * 1000 / rate, N: name, C: displayColor(raw[off+8:])})
+		// Exactly -1 is an unset pad. Stock Engine also stores Hot Cues before
+		// sample zero (AAC/MP3 pre-roll, e.g. -1024): shown at the track start
+		// instead of failing the whole track (BH-GC1-4).
+		if p != -1 {
+			out = append(out, DisplayCue{I: i, MS: math.Max(p, 0) * 1000 / rate, N: name, C: displayColor(raw[off+8:])})
 		}
 		off += 12
 	}
@@ -290,10 +293,14 @@ func parseDisplayLoops(raw []byte, rate, samples float64) ([]DisplayLoop, error)
 			return nil, fmt.Errorf("display: invalid loop flags/position")
 		}
 		if raw[off+16] == 1 && raw[off+17] == 1 {
-			if a < 0 || b <= a || b > samples {
+			if b <= a || b > samples {
 				return nil, fmt.Errorf("display: invalid loop range")
 			}
-			out = append(out, DisplayLoop{StartMS: a * 1000 / rate, EndMS: b * 1000 / rate, N: name, C: displayColor(raw[off+18:])})
+			// A stock Saved Loop may start in the pre-roll (BH-GC1-4); one
+			// that ends there has nothing to show.
+			if b > 0 {
+				out = append(out, DisplayLoop{StartMS: math.Max(a, 0) * 1000 / rate, EndMS: b * 1000 / rate, N: name, C: displayColor(raw[off+18:])})
+			}
 		}
 		off += 22
 	}

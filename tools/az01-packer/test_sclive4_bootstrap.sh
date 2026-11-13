@@ -366,9 +366,9 @@ raw[-1] ^= 1
 pathlib.Path(sys.argv[2]).write_bytes(raw)
 ' "$NEXT_IMG" "$BAD_IMG"
 
-unshare -m -n -p -f bash -s -- "$ROOTFS" "$TARGET" "$IMG" "$VARLIB" "$TMP" "$BAD_IMG" "$NEXT_IMG" <<'EOF'
+unshare -m -n -p -f bash -s -- "$ROOTFS" "$TARGET" "$IMG" "$VARLIB" "$TMP" "$BAD_IMG" "$NEXT_IMG" "$UPDATE_PREFIX" <<'EOF'
 set -euo pipefail
-ROOTFS=$1; TARGET=$2; IMG=$3; VARLIB=$4; TMP=$5; BAD_IMG=$6; NEXT_IMG=$7
+ROOTFS=$1; TARGET=$2; IMG=$3; VARLIB=$4; TMP=$5; BAD_IMG=$6; NEXT_IMG=$7; UPDATE_PREFIX=$8
 mount --bind "$ROOTFS" "$TARGET"
 mount -o remount,ro,bind "$TARGET"
 mount -o loop "$IMG" "$TARGET/data"
@@ -378,6 +378,13 @@ mount -t tmpfs tmpfs "$TARGET/tmp"
 mount --bind /dev "$TARGET/dev"
 mount -t proc proc "$TARGET/proc"
 mount -t sysfs sysfs "$TARGET/sys"
+# The hook installs an EngineX image only for the deck's own model (BH-G2-1): give
+# the chroot that deck's device tree, not the build host's.
+case $UPDATE_PREFIX in SCLIVE4) board=jp21 ;; PRIME4PLUS) board=jc11s ;; PRIME4G2) board=jp24 ;; SYSTEMONE) board=rmz2 ;; *) echo "no board for $UPDATE_PREFIX" >&2; exit 1 ;; esac
+mount -t tmpfs tmpfs "$TARGET/sys/firmware"
+mkdir -p "$TARGET/sys/firmware/devicetree/base"
+printf 'inmusic,%s\0rockchip,rk3288\0' "$board" > "$TARGET/sys/firmware/devicetree/base/compatible"
+printf '%s\n' "$(echo "$board" | tr a-z A-Z)" > "$TARGET/sys/firmware/devicetree/base/inmusic,product-code"
 
 printf '#!/bin/sh\necho "$*" >> /tmp/systemctl-shim.log\nexit 0\n' > "$TARGET/tmp/systemctl-shim"
 chmod 755 "$TARGET/tmp/systemctl-shim"

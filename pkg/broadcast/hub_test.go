@@ -71,8 +71,8 @@ func TestStalledLiveListenerIsTrimmed(t *testing.T) {
 	if !bytes.Equal(pcm, stream[len(stream)-len(pcm):]) {
 		t.Fatal("trimmed backlog is not the newest audio on a frame boundary")
 	}
-	if l.Dropped != int64(len(stream)-len(pcm)) {
-		t.Fatalf("dropped %d bytes, want %d", l.Dropped, len(stream)-len(pcm))
+	if l.Dropped() != int64(len(stream)-len(pcm)) {
+		t.Fatalf("dropped %d bytes, want %d", l.Dropped(), len(stream)-len(pcm))
 	}
 	next := testFrames(100000, 1152)
 	h.publish(next)
@@ -89,5 +89,63 @@ func TestLiveListenerEndsWhenStopped(t *testing.T) {
 	h.closeAll()
 	if _, ok := nextWithin(l, time.Second); ok {
 		t.Fatal("listener still open after the broadcaster stopped")
+	}
+}
+
+// r3 review: a listener that connected while Live Stream was being turned off
+// (the handler saw it enabled, then closeAll ran) was registered afterwards and
+// stayed parked for good, holding its connection. It ends at once now, until the
+// broadcaster starts again.
+func TestLiveListenerAfterStopIsNotParked(t *testing.T) {
+	h := &hub{}
+	h.closeAll()
+	l, cancel := h.subscribeLive(300)
+	defer cancel()
+	start := time.Now()
+	if _, ok := nextWithin(l, 2*time.Second); ok || time.Since(start) > 500*time.Millisecond {
+		t.Fatalf("a listener subscribed after the stop is parked (%v) or got audio", time.Since(start))
+	}
+	ch, cancelCh := h.subscribe()
+	defer cancelCh()
+	select {
+	case _, open := <-ch:
+		if open {
+			t.Fatal("a channel subscriber after the stop received audio")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a channel subscriber after the stop stayed parked")
+	}
+	h.reopen()
+	l2, cancel2 := h.subscribeLive(0)
+	defer cancel2()
+	live := testFrames(5000, 1152)
+	h.publish(live)
+	if pcm, ok := nextWithin(l2, time.Second); !ok || !bytes.Equal(pcm, live) {
+		t.Fatal("no audio for a listener after the restart")
+	}
+}
+
+// r3 review: Listener.Dropped was a plain int64 written under the listener's
+// lock and read without it. Read it while audio is trimmed (run with -race).
+func TestListenerDroppedIsSafeToReadDuringPublish(t *testing.T) {
+	h := &hub{}
+	l, cancel := h.subscribeLive(0)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		publishFrames(h, 0, 2000)
+	}()
+	var last int64
+	for running := true; running; {
+		select {
+		case <-done:
+			running = false
+		default:
+			last = l.Dropped()
+		}
+	}
+	if l.Dropped() == 0 || last < 0 {
+		t.Fatal("nothing counted as dropped")
 	}
 }

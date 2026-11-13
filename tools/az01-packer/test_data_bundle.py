@@ -1,12 +1,15 @@
 import hashlib
 import importlib.util
 import io
+import json
 import os
 import shutil
 import subprocess
 import tarfile
 import tempfile
 import unittest
+import zipfile
+from unittest import mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -258,6 +261,46 @@ class DataBundleTest(unittest.TestCase):
         return subprocess.run(['sh', str(script)], env=env,
                               capture_output=True, text=True, check=check)
 
+    def test_install_refuses_a_bundle_for_another_cpu_or_model(self):
+        """BH-G2-1: install.sh checked only SHA256SUMS, so an intact SYSTEM ONE (arm64) bundle
+        installed on an SC LIVE 4 (armhf) and replaced working binaries with ones it cannot run."""
+        compat = self.tmp / 'compatible'
+        compat.write_bytes(b'inmusic,jp21\0rockchip,rk3288\0')
+        engine = self.tmp / 'Engine'
+        engine.write_bytes(fake_elf(bdb.EM_ARM, b'engine'))
+        aarch64 = self.tmp / 'suite64'
+        aarch64.write_bytes(fake_elf(bdb.EM_AARCH64, b'suite'))
+        hook64 = self.tmp / 'hook64.so'
+        hook64.write_bytes(fake_elf(bdb.EM_AARCH64, b'hook'))
+        # The deck's BusyBox od knows -b but not GNU's -A/-t: a GNU-only call refused every bundle.
+        shims = self.tmp / 'busybox-shims'
+        shims.mkdir()
+        od = shims / 'od'
+        od.write_text('#!/bin/sh\nfor a; do case $a in -b) ;; -*) echo "od: invalid option $a" >&2; exit 1 ;; esac; done\n'
+                      f'exec {shutil.which("od")} "$@"\n')
+        od.chmod(0o755)
+        deck = {'SC5000_COMPATIBLE': str(compat), 'SC5000_SYSTEM_ELF': str(engine),
+                'PATH': f"{shims}:{self.env.get('PATH', os.environ['PATH'])}"}
+
+        def install(result, name):
+            shutil.rmtree(self.tmp / 'x', ignore_errors=True)
+            self.extract(result)
+            src = next((self.tmp / 'x').iterdir())  # <PREFIX>-<VERSION>-EngineX-OS-Data-Bundle
+            env = {**self.env, **deck, 'SC5000_CUSTOM': str(self.tmp / name), 'SC5000_ALSA_OVERLAY': str(self.tmp / (name + '-alsa'))}
+            return subprocess.run(['sh', str(src / 'install.sh')], env=env, capture_output=True, text=True)
+
+        res = install(self.build(out='sys1', prefix='SYSTEMONE', suite=aarch64, hook=hook64), 'd1')
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn('another CPU', res.stderr)
+        self.assertFalse((self.tmp / 'd1/bundle').exists())
+        res = install(self.build(out='live2', prefix='SCLIVE2'), 'd2')
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn('bundle is for SCLIVE2', res.stderr)
+        self.assertFalse((self.tmp / 'd2/bundle').exists())
+        res = install(self.build(out='live4', prefix='SCLIVE4'), 'd3')
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual((self.tmp / 'd3/bundle/model').read_text(), 'SCLIVE4\n')
+
     def test_install_uninstall_does_not_call_host_commands(self):
         src = self.extract(self.build())
         dest = self.tmp / 'custom'
@@ -445,6 +488,115 @@ class DataBundleTest(unittest.TestCase):
         self.assertIn('Type: regular', stat('/sc5000-custom/version.txt'))
         self.assertNotIn('Type:', stat('/enginex'))
 
+    def test_host_install_fails_when_a_write_did_not_land(self):
+        """BH-G2-3: debugfs exits 0 when a write fails and the readback only looked at three files,
+        so an image without (or with a cut) UI hook was reported ok and flashed."""
+        for tool in ('debugfs', 'mkfs.ext4'):
+            if subprocess.run(['which', tool], capture_output=True).returncode != 0:
+                self.skipTest(f'{tool} not installed on this host')
+        r = self.build()
+        hspec = importlib.util.spec_from_file_location('host_install_userdata', HERE / 'host-install-userdata.py')
+        hmod = importlib.util.module_from_spec(hspec)
+        hspec.loader.exec_module(hmod)
+        short = self.tmp / 'short.so'
+        short.write_bytes(b'\x7fELF')
+        shims = self.tmp / 'debugfs-shim'
+        shims.mkdir()
+        # Only the batch write is altered: the UI hook's write reads another source, as when the
+        # image fills up or a path is wrong; every other command runs on the real debugfs.
+        (shims / 'debugfs').write_text(r'''#!/bin/sh
+if [ "$1" = -w ] && [ "$2" = -f ]; then
+    sed -i "s|^write \"[^\"]*/libengine-ui-hook.so\"|write \"$HOOK_SRC\"|" "$3"
+fi
+exec REAL "$@"
+'''.replace('REAL', shutil.which('debugfs')))
+        (shims / 'debugfs').chmod(0o755)
+        for name, src in (('missing', '/nonexistent/libengine-ui-hook.so'), ('truncated', str(short))):
+            with self.subTest(name):
+                img = self.tmp / f'{name}.img'
+                subprocess.run(['dd', 'if=/dev/zero', f'of={img}', 'bs=1M', 'count=32'], check=True, capture_output=True)
+                subprocess.run(['mkfs.ext4', '-F', str(img)], check=True, capture_output=True)
+                env = {'PATH': f"{shims}:{os.environ['PATH']}", 'HOOK_SRC': src}
+                with mock.patch.dict(os.environ, env):
+                    with self.assertRaises(SystemExit) as cm:
+                        hmod.inject(img, r['bundle'])
+                self.assertIn('libengine-ui-hook.so', str(cm.exception))
+        img = self.tmp / 'good.img'  # unaltered: every file and the compat link read back
+        subprocess.run(['dd', 'if=/dev/zero', f'of={img}', 'bs=1M', 'count=32'], check=True, capture_output=True)
+        subprocess.run(['mkfs.ext4', '-F', str(img)], check=True, capture_output=True)
+        self.assertEqual(hmod.inject(img, r['bundle'])['status'], 'ok')
+
+    def install_ab(self, mv_on_packs):
+        """Install version A, then version B with an mv that does `mv_on_packs` (shell) when B's staged
+        ui/packs is moved into place, i.e. after B's bundle is already active (BH-G2-4)."""
+        dest, alsa = self.tmp / 'gen', self.tmp / 'gen-alsa'
+
+        def unpack(result):  # extract() names the default version's directory
+            shutil.rmtree(self.tmp / 'x', ignore_errors=True)
+            self.extract(result)
+            return next((self.tmp / 'x').iterdir())
+        self.sh(unpack(self.build('a')) / 'install.sh', dest, alsa_dest=alsa)
+        b = self.build('b', version='5.3.0.2', ui_packs=self.ui_tar({'packs/a/Main.qml': b'Item { B }'}, 'b.tar.gz'))
+        shims = self.tmp / 'mv-shim'
+        shims.mkdir(exist_ok=True)
+        (shims / 'mv').write_text(
+            '#!/bin/sh\n'
+            f'case "$1" in */.bundle.*/ui/packs) {mv_on_packs} ;; esac\n'
+            f'exec {shutil.which("mv")} "$@"\n')
+        (shims / 'mv').chmod(0o755)
+        env = {**self.env, 'SC5000_CUSTOM': str(dest), 'SC5000_ALSA_OVERLAY': str(alsa),
+               'PATH': f"{shims}:{self.env['PATH']}"}
+        src = unpack(b)
+        self.assertIn('5.3.0.2', src.name)
+        res = subprocess.run(['sh', str(src / 'install.sh')], env=env, capture_output=True, text=True)
+        return dest, alsa, res
+
+    def assert_generation_a(self, dest, alsa):
+        self.assertEqual((dest / 'bundle/version.txt').read_text(), '5.3.0.1.1\n')
+        self.assertEqual((dest / 'ui/packs/a/Main.qml').read_bytes(), b'Item {}')
+        self.assertEqual((dest / 'ui/icons/x.svg').read_bytes(), b'<svg/>')
+        self.assertEqual((dest / 'ui/.pack-version').read_text(), '5.3.0.1.1\n')
+        self.assertEqual((dest / 'version.txt').read_text(), '5.3.0.1.1\n')
+        self.assertEqual((dest / 'gen2-unlocked').read_text(), '1\n')
+        self.assertTrue((alsa / '99-sc5000-custom.conf').is_file())
+        left = sorted(str(p.relative_to(dest)) for p in dest.rglob('*')
+                      if p.name.startswith(('.install-', '.bundle.')) or p.name.endswith(('.replaced', '.undo')))
+        self.assertEqual(left, [])
+
+    def test_install_failure_keeps_the_previous_generation(self):
+        """BH-G2-4: install.sh deleted the old bundle before the UI packs were in place, so a failure
+        after that left B's bundle with no packs (A's parked in packs.replaced) and A's markers."""
+        dest, alsa, res = self.install_ab('echo "mv: cannot move" >&2; exit 1')
+        self.assertNotEqual(res.returncode, 0)
+        self.assert_generation_a(dest, alsa)
+
+    def test_boot_undoes_an_install_cut_off_half_way(self):
+        """BH-G2-4: a power cut between swapping the bundle and the UI packs; the next boot puts the
+        previous generation back and runs its activator instead of starting a half-installed B."""
+        dest, alsa, res = self.install_ab('kill -9 $PPID; exit 1')
+        self.assertNotEqual(res.returncode, 0)
+        self.assertEqual((dest / 'bundle/version.txt').read_text(), '5.3.0.2\n')  # cut off half-way
+        self.assertFalse((dest / 'ui/packs').exists())
+        # The generation that comes back records that its own activator ran; the /run paths of the
+        # activator that finds the half-done install stay in this test's scratch dir.
+        mark = self.tmp / 'activated'
+        for a in (dest / '.install-old/bundle/boot-activate.sh',):
+            if a.exists():
+                a.write_text(f'#!/bin/sh\necho "$0" > {mark}\n')
+        run_dir = self.tmp / 'run'
+        (run_dir / 'systemd/system').mkdir(parents=True)
+        b_activate = dest / 'bundle/boot-activate.sh'
+        b_activate.write_text(b_activate.read_text().replace('/run/', f'{run_dir}/'))
+        env = {**self.env, 'SC5000_CUSTOM': str(dest), 'SC5000_ALSA_OVERLAY': str(alsa),
+               'SC5000_PID1_COMM': str(self.pid1_systemd()),
+               'SC5000_STREAMING_ACCOUNTS': str(self.tmp / 'StreamingAccounts.json'),
+               'SC5000_PRODUCT_CODE_FILE': str(self.tmp / 'product-code'),
+               'SC5000_TIMESYNC_LIB_DIR': str(self.tmp / 'no-lib')}
+        res = subprocess.run(['sh', str(b_activate)], env=env, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assert_generation_a(dest, alsa)
+        self.assertEqual(mark.read_text().strip(), str(dest / 'bundle/boot-activate.sh'))
+
     def migrate(self, legacy_files, new_files=None):
         """Run the bundle's install.sh with /data pointed at a scratch dir."""
         src = self.extract(self.build())
@@ -536,7 +688,10 @@ class DataBundleTest(unittest.TestCase):
                    SC5000_CONFIG_DIR=str(root / '.config'),
                    SC5000_ZONEINFO_DIR=str(zdir),
                    SC5000_PRODUCT_CODE_FILE=str(pcode),
-                   SC5000_TZ_NEWER_MARKER=str(marker))
+                   SC5000_TZ_NEWER_MARKER=str(marker),
+                   # The host's PID 1 and /data stay out of it (a sandbox has neither).
+                   SC5000_PID1_COMM=str(self.pid1_systemd()),
+                   SC5000_STREAMING_ACCOUNTS=str(self.tmp / 'StreamingAccounts.json'))
 
         # 1. Missing lib_dir must NOT be created; ExecStartPre (--restore-tz) writes America/New_York.
         res = subprocess.run(['sh', str(ba_relocated)], env=env, capture_output=True)
@@ -579,6 +734,110 @@ class DataBundleTest(unittest.TestCase):
         self.assertEqual(conf.read_text(), '[TimeDateSettings]\nTZEnvVar=UTC\n')
         self.assertFalse(marker.exists())
 
+    def pid1_systemd(self):
+        comm = self.tmp / 'pid1-comm'
+        comm.write_text('systemd\n')
+        return comm
+
+    def test_boot_sticks_are_converted_between_stock_and_hooked_engine(self):
+        """BH-F52-6: boot-activate converted a rekordbox stick present at boot while the stock Engine
+        ran (and could have the stick open, or the DJ load from it), then restarted Engine under the
+        DJ. The conversion now runs once per boot from the hooked Engine's ExecStartPre."""
+        src = self.extract(self.build())
+        root = self.tmp / 'gen2-convert'
+        dest = root / 'enginex'
+        (dest / 'bundle/bin').mkdir(parents=True)
+        (dest / 'state').mkdir()
+        calls = self.tmp / 'rb-bridge.calls'
+        bridge = dest / 'bundle/bin/rb-bridge'
+        bridge.write_text(f'#!/bin/sh\necho "$*" >> {calls}\n')
+        bridge.chmod(0o755)
+        media = self.tmp / 'media'
+        (media / 'STICK/PIONEER').mkdir(parents=True)
+        (media / 'PLAIN').mkdir()
+        run_dir = self.tmp / 'run-convert'
+        ba = self.tmp / 'boot-activate-convert.sh'
+        ba.write_text((src / 'boot-activate.sh').read_text().replace('/run/', str(run_dir) + '/'))
+        env = dict(self.env, SC5000_CUSTOM=str(dest), SC5000_MEDIA_ROOT=str(media),
+                   SC5000_CONVERT_MARK=str(run_dir / 'boot-converted'),
+                   SC5000_PID1_COMM=str(self.pid1_systemd()),
+                   SC5000_ROOT_SSH_DIR=str(root / 'root-ssh'),
+                   SC5000_STREAMING_ACCOUNTS=str(root / 'StreamingAccounts.json'),
+                   SC5000_CONFIG_DIR=str(root / '.config'),
+                   SC5000_TIMESYNC_LIB_DIR=str(root / 'timesync'),
+                   SC5000_PRODUCT_CODE_FILE=str(self.tmp / 'no-product-code'),
+                   SC5000_TZ_NEWER_MARKER=str(run_dir / 'tz-newer'))
+        res = subprocess.run(['sh', str(ba)], env=env, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn('restart --no-block engine.service', self.host_commands.read_text())
+        self.assertFalse(calls.exists(), 'converted while the stock Engine was still running')
+        self.host_commands.write_text('')
+        dropin = (run_dir / 'systemd/system/engine.service.d/99-sc5000.conf').read_text().splitlines()
+        pre = dropin.index(next(l for l in dropin if l.endswith('engine-ui-guard pre')))
+        self.assertTrue(dropin[pre + 1].startswith('ExecStartPre=-') and dropin[pre + 1].endswith('boot-activate.sh --convert-mounted'),
+                        dropin)
+        for _ in range(2):  # the hooked Engine's first start converts; a later restart does not repeat it
+            res = subprocess.run(['sh', str(ba), '--convert-mounted'], env=env, capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(calls.read_text().splitlines(), [f'--mount-path {media}/STICK'])
+
+    def test_boot_activate_follows_console_ssh_settings(self):
+        """BH-GC2-9 / BH-GF4-15: boot-activate.sh started sshd whenever a key was stored, even
+        after the console turned SSH off, never without a key (a root password set in the
+        console did not survive a reboot), and always on port 22 (the console's port drop-in
+        lives in /run)."""
+        src = self.extract(self.build())
+        root = self.tmp / 'gen2-ssh'
+        dest = root / 'enginex'
+        (dest / 'state').mkdir(parents=True)
+        run_dir = self.tmp / 'run-ssh'
+        ba = self.tmp / 'boot-activate-ssh.sh'
+        ba.write_text((src / 'boot-activate.sh').read_text().replace('/run/', str(run_dir) + '/'))
+        sshd = self.tmp / 'fake-sshd'
+        sshd.write_text('#!/bin/sh\nexit 0\n')
+        sshd.chmod(0o755)
+        env = dict(self.env, SC5000_CUSTOM=str(dest), SC5000_SSHD=str(sshd),
+                   SC5000_PID1_COMM=str(self.pid1_systemd()),
+                   SC5000_ROOT_SSH_DIR=str(root / 'root-ssh'),
+                   SC5000_STREAMING_ACCOUNTS=str(root / 'StreamingAccounts.json'),
+                   SC5000_CONFIG_DIR=str(root / '.config'),
+                   SC5000_TIMESYNC_LIB_DIR=str(root / 'timesync'),
+                   SC5000_PRODUCT_CODE_FILE=str(self.tmp / 'no-product-code'),
+                   SC5000_TZ_NEWER_MARKER=str(run_dir / 'tz-newer'))
+        dropin = run_dir / 'systemd/system/sshd.service.d/51-port.conf'
+        cfg = dest / 'state/ssh-config.json'
+        key = dest / 'authorized_keys'
+
+        def boot(key_text, config):
+            if key_text:
+                key.write_text(key_text)
+            elif key.exists():
+                key.unlink()
+            if config is None:
+                cfg.unlink(missing_ok=True)
+            else:
+                cfg.write_text(json.dumps(config, indent=2))
+            if dropin.exists():
+                dropin.unlink()
+            self.host_commands.write_text('')
+            res = subprocess.run(['sh', str(ba)], env=env, capture_output=True)
+            self.assertEqual(res.returncode, 0, res.stderr)
+            started = 'start --no-block sshd.service' in self.host_commands.read_text()
+            self.host_commands.write_text('')
+            return started
+
+        k = 'ssh-ed25519 AAAA test\n'
+        self.assertTrue(boot(k, None))  # #116: a key alone, no console settings: as before
+        self.assertFalse(dropin.exists())
+        self.assertFalse(boot(None, None))  # #46: no key, no SSH
+        self.assertFalse(boot(k, {'enabled': False, 'port': 22}))  # turned off in the console
+        self.assertTrue(boot(k, {'enabled': True, 'port': 2222}))
+        self.assertIn('-p 2222', dropin.read_text())
+        self.assertTrue(boot(None, {'enabled': True, 'port': 22, 'hasPassword': True}))
+        self.assertFalse(boot(None, {'enabled': True, 'port': 2222, 'hasPassword': False}))
+        self.assertFalse(dropin.exists())
+        self.assertEqual((root / 'root-ssh/authorized_keys').read_text(), k)
+
     def test_boot_activate_wraps_engine_and_updaters_and_marks_gen2_unlocked(self):
         r = self.build()
         src = self.extract(r)
@@ -593,6 +852,7 @@ class DataBundleTest(unittest.TestCase):
         engine_script = self.tmp / 'vendor-engine-script'
         stock_script = (
             '#!/bin/sh\n'
+            '/usr/bin/az01-ethernet-speed 100\n'
             'while [ 1 ]\n'
             'do\n'
             '\t/usr/Engine/Engine -d0 -loggerOptions "Type, Message, Thread, Category, SplitLongLines"\n'
@@ -629,6 +889,9 @@ class DataBundleTest(unittest.TestCase):
         self.assertIn(f'\t\tenv LD_PRELOAD="{lib_hook}" /usr/sbin/az01-update --file "$UPDATE_FILE"\n', rewritten)
         self.assertIn(f'\t\tenv LD_PRELOAD="{lib_hook}" /usr/bin/planck-remote-screen --update "$UPDATE_FILE"\n', rewritten)
         self.assertIn(f'\t\tenv LD_PRELOAD="{lib_hook}" /usr/sbin/az01-update --erase-data\n', rewritten)
+        # BH-GC2-6: Gigabit stays Gigabit, as on first-generation images.
+        self.assertIn('\n/usr/bin/az01-ethernet-speed 1000\n', rewritten)
+        self.assertNotIn('az01-ethernet-speed 100\n', rewritten)
 
         # 2. Removing gen2-locked lets boot-activate.sh mark gen2-unlocked; re-running on bound script is idempotent.
         (dest / 'gen2-locked').unlink()
@@ -721,6 +984,46 @@ class DataBundleTest(unittest.TestCase):
         for line in lines:
             digest, fname = line.split('  ')
             self.assertEqual(hashlib.sha256((out_dir / fname).read_bytes()).hexdigest(), digest, fname)
+
+    def test_installer_launchers_pass_their_arguments_on(self):
+        """BH-G2-8: the macOS and Windows launchers started the installer without arguments, so
+        `Install-EngineX.command --uninstall` ran an install."""
+        out_dir = self.tmp / 'launchers'
+        out_dir.mkdir()
+        fake_bin = self.tmp / 'launcher-go-bin'
+        fake_bin.mkdir()
+        (fake_bin / 'go').write_text(
+            '#!/bin/sh\nout=""\nwhile [ $# -gt 0 ]; do\n'
+            '  if [ "$1" = "-o" ]; then out="$2"; shift 2; else shift; fi\n'
+            'done\nprintf \'#!/bin/sh\\nprintf "%%s\\\\n" "$@" > "$ARGS_LOG"\\n\' > "$out"\nchmod 755 "$out"\n')
+        (fake_bin / 'go').chmod(0o755)
+        env = {**self.env, 'PATH': f"{fake_bin}:{self.env['PATH']}"}
+        res = subprocess.run(['sh', str(HERE / 'build-installer.sh'), '5.3.0.4', str(out_dir)],
+                             env=env, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        args = ['--uninstall', '--image', 'my deck.img']
+        for t in ('linux-amd64', 'macos-arm64'):
+            with self.subTest(t):
+                d = self.tmp / f'unpacked-{t}'
+                if t.startswith('linux'):
+                    d.mkdir()
+                    with tarfile.open(out_dir / f'EngineX-Installer-5.3.0.4-{t}.tar.gz') as tf:
+                        tf.extractall(d)
+                    launcher = d / 'install-enginex.sh'
+                else:
+                    with zipfile.ZipFile(out_dir / f'EngineX-Installer-5.3.0.4-{t}.zip') as z:
+                        z.extractall(d)
+                    for f in ('Install-EngineX.command', 'enginex-installer'):
+                        (d / f).chmod(0o755)  # extractall drops the mode bits the zip keeps
+                    launcher = d / 'Install-EngineX.command'
+                log = self.tmp / f'args-{t}'
+                res = subprocess.run(['sh', str(launcher), *args], env={**env, 'ARGS_LOG': str(log)},
+                                     input='\n', capture_output=True, text=True)
+                self.assertEqual(res.returncode, 0, res.stderr)
+                self.assertEqual(log.read_text().splitlines(), args)
+        with zipfile.ZipFile(out_dir / 'EngineX-Installer-5.3.0.4-windows-amd64.zip') as z:
+            bat = z.read('Install-EngineX.bat').decode()
+        self.assertIn('\r\nenginex-installer.exe %*\r\n', bat)
 
 if __name__ == '__main__':
     unittest.main()

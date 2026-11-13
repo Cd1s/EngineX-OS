@@ -49,7 +49,14 @@ type RelocateResult struct {
 	Unresolved int    `json:"unresolved"` // missing tracks with no single match
 	Applied    bool   `json:"applied"`
 	Backup     string `json:"backup,omitempty"`
+	// Queued: Engine has the library open, so the moves wait in the library
+	// and are applied before Engine next opens it (eject and insert the drive).
+	Queued bool `json:"queued,omitempty"`
 }
+
+// relocateScanned, when set (tests), runs after the drive is scanned and before anything is
+// written: where Engine may open the library meanwhile.
+var relocateScanned func()
 
 type driveFile struct {
 	rel  string // from the drive root, slash separated
@@ -74,17 +81,16 @@ func Relocate(ctx context.Context, opts RelocateOptions) (RelocateResult, error)
 	if st, err := os.Stat(dbPath); err != nil || st.Size() == 0 {
 		return res, errors.New("no Engine Library on this drive")
 	}
-	mode := "?_pragma=busy_timeout(5000)"
-	if opts.DryRun {
-		mode = "?mode=ro&_pragma=busy_timeout(5000)"
-	}
+	// The search only reads: m.db is opened read-only for it, and for writing only once the
+	// moves are known and no other process has the library open at that moment.
 	u := url.URL{Scheme: "file", Path: dbPath}
-	db, err := sql.Open("sqlite", u.String()+mode)
+	ro, err := sql.Open("sqlite", u.String()+"?mode=ro&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return res, err
 	}
-	defer db.Close()
-	db.SetMaxOpenConns(1)
+	defer ro.Close()
+	ro.SetMaxOpenConns(1)
+	db := ro
 
 	missing, taken, err := findMissing(ctx, db, opts.Root)
 	if err != nil {
@@ -98,17 +104,31 @@ func Relocate(ctx context.Context, opts RelocateOptions) (RelocateResult, error)
 	if err != nil {
 		return res, err
 	}
+	if relocateScanned != nil {
+		relocateScanned()
+	}
 	res.Moves = match(missing, files, taken)
 	res.Unresolved = len(missing) - len(res.Moves)
 	if opts.DryRun || len(res.Moves) == 0 {
 		return res, nil
 	}
-
-	backup := dbPath + ".bak.relocate"
-	if _, err = os.Lstat(backup); err == nil {
-		backup += fmt.Sprintf(".%d", time.Now().UnixNano()) // keep the first backup
+	// Engine may have opened the drive while it was scanned.
+	if LibraryInUse(opts.Root) {
+		// No write while Engine has m.db open (BH-GC1-3).
+		if err = QueuePending(opts.Root, func(p *Pending) { p.Relocate = append(p.Relocate, res.Moves...) }); err != nil {
+			return res, err
+		}
+		res.Queued = true
+		return res, nil
 	}
-	if _, err = db.ExecContext(ctx, `VACUUM INTO ?`, backup); err != nil {
+	ro.Close()
+	if db, err = sql.Open("sqlite", u.String()+"?_pragma=busy_timeout(5000)"); err != nil {
+		return res, err
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	backup, err := relocateBackup(ctx, db, dbPath)
+	if err != nil {
 		return res, fmt.Errorf("backup failed, nothing changed: %w", err)
 	}
 	res.Backup = backup
@@ -132,6 +152,34 @@ func Relocate(ctx context.Context, opts RelocateOptions) (RelocateResult, error)
 	}
 	res.Applied = true
 	return res, nil
+}
+
+// relocateBackup keeps the first backup (m.db.bak.relocate) and the one made
+// before the latest relocation (m.db.bak.relocate.last); every run used to add
+// another full copy of m.db in Database2.
+func relocateBackup(ctx context.Context, db *sql.DB, dbPath string) (string, error) {
+	first := dbPath + ".bak.relocate"
+	if _, err := os.Lstat(first); errors.Is(err, os.ErrNotExist) {
+		_, err = db.ExecContext(ctx, `VACUUM INTO ?`, first)
+		return first, err
+	}
+	last := first + ".last"
+	tmp := fmt.Sprintf("%s.tmp-%d", last, time.Now().UnixNano())
+	if _, err := db.ExecContext(ctx, `VACUUM INTO ?`, tmp); err != nil {
+		os.Remove(tmp)
+		return "", err
+	}
+	if err := os.Rename(tmp, last); err != nil {
+		os.Remove(tmp)
+		return "", err
+	}
+	// Timestamped copies older builds left beside it.
+	if old, _ := filepath.Glob(first + ".[0-9]*"); len(old) > 0 {
+		for _, f := range old {
+			os.Remove(f)
+		}
+	}
+	return last, nil
 }
 
 // findMissing returns the local tracks without a file, and the lower-cased paths
