@@ -142,6 +142,7 @@ const (
 
 type uiSettings struct {
 	EngineLighting bool    `json:"engineLighting"` // Stock lighting switch; opt in, saved independently of Engine shutdown.
+	USBPreparing   bool    `json:"usbPreparing,omitempty"`
 	Version        string  `json:"version,omitempty"`
 	Quality        string  `json:"quality"`
 	NeteaseMode    string  `json:"neteaseMode"`
@@ -690,6 +691,20 @@ func (s *Server) scope() string {
 	return s.loadUI().Scope
 }
 
+// One metadata lookup only: never follow symlinks or read USB contents here.
+func (s *Server) usbPreparingActive(now time.Time) bool {
+	path := s.cfg.USBPreparingPath
+	if path == "" {
+		path = "/run/enginex-usb-preparing"
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	age := now.Sub(info.ModTime())
+	return age <= 30*time.Second && age >= -5*time.Second
+}
+
 func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 	s.uiMu.Lock()
 	v := s.loadUI()
@@ -721,7 +736,9 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 	v.Capabilities = boardCapabilities(board)
 	v.FourDeckRoleActive = s.activeRole(v)
 	v.TimeZone = s.savedTimeZone()
-	v.DeckClock = s.deckClockWanted(time.Now())
+	now := time.Now()
+	v.DeckClock = s.deckClockWanted(now)
+	v.USBPreparing = s.usbPreparingActive(now)
 	if r.Method == http.MethodGet && r.URL.Path == "/v1/sc5000/ui" {
 		body, err := json.Marshal(struct {
 			uiSettings

@@ -64,7 +64,7 @@ func prepareTracks(ctx context.Context, res *compat.Resolver, l *rekordbox.Libra
 				continue
 			}
 		}
-		rel, e := res.Resolve(t.Path)
+		rel, e := res.ResolveContext(ctx, t.Path)
 		if e != nil {
 			return nil, fmt.Errorf("track %d: %w", t.ID, e)
 		}
@@ -143,15 +143,18 @@ func (f exportFileInfo) ModTime() time.Time { return time.Time{} }
 // from directory entries, as in a full import (#6). A path that cannot be
 // resolved (missing file) keeps the export spelling; one that tries to leave
 // the volume is dropped.
-func prepareFast(res *compat.Resolver, l *rekordbox.Library) []preparedTrack {
+func prepareFast(ctx context.Context, res *compat.Resolver, l *rekordbox.Library) ([]preparedTrack, error) {
 	prepared := make([]preparedTrack, 0, len(l.Tracks))
 	paths := map[string]bool{}
 	for _, t := range l.Tracks {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		rel := strings.TrimLeft(path.Clean("/"+t.Path), "/")
 		if rel == "" || t.Path == "" || strings.HasPrefix(rel, "PIONEER/") || strings.HasPrefix(rel, ".PIONEER/") {
 			continue
 		}
-		if resolved, e := res.Resolve(t.Path); e == nil {
+		if resolved, e := res.ResolveContext(ctx, t.Path); e == nil {
 			rel = resolved
 		}
 		if paths[rel] {
@@ -160,7 +163,7 @@ func prepareFast(res *compat.Resolver, l *rekordbox.Library) []preparedTrack {
 		paths[rel] = true
 		prepared = append(prepared, preparedTrack{track: t, rel: rel, hash: "fast:" + t.RecordHash, info: exportFileInfo{size: t.FileSize}})
 	}
-	return prepared
+	return prepared, ctx.Err()
 }
 
 // Stage every moved owned row first, so even two source tracks swapping paths

@@ -5903,5 +5903,98 @@ for (const WaveformOverviewView of [{Praline: 0, Butterfly: 1}, {Praline: 1, But
         self.assertEqual(result.returncode, 0, result.stderr)
 
 
+class UsbPreparingFeedbackTest(unittest.TestCase):
+    def test_translations(self):
+        rows = [line.split("\t") for line in (REPO / "tools/ui-mod/i18n.tsv").read_text().splitlines()]
+        self.assertIn(["Preparing USB…", "正在准备 USB…", "正在準備 USB…"], rows)
+
+    def check_feedback(self, main, sources, label="Preparing USB…"):
+        for text in ('property bool scUsbPreparing: false', 'scUsbPreparing = !!v.usbPreparing',
+                     'interval: 1000', 'running: root.scUsbPreparing', 'onTriggered: root.scCall()',
+                     'objectName: "EngineX_UsbPreparingBanner"', 'enabled: false',
+                     'visible: root.scUsbPreparing', 'Style.surface03Color', 'Style.active01Color',
+                     'Style.font02Color', 'root.robotoMediumFontLoader.name', '#142',
+                     'text: root.scT('):
+            self.assertIn(text, main)
+        # Built packs wrap each literal in the existing live language translator.
+        self.assertRegex(main, r'text: root.scT\([^\n]*' + re.escape(label))
+        self.assertRegex(sources, r'text: root.scT\([^\n]*' + re.escape(label))
+        banner = main.split('objectName: "EngineX_UsbPreparingBanner"' , 1)[1].split('\n\t\t}', 1)[0]
+        self.assertNotIn('focus: true', banner)
+        self.assertNotIn('prompts.post(', banner)
+        for text in ('objectName: "EngineX_UsbPreparingRow"', 'visible: root.scUsbPreparing',
+                     'height: root.scUsbPreparing ? 108 : 0', 'enabled: false',
+                     'width: connectedSource.width', 'Style.surface02Color', 'text: root.scT('):
+            self.assertIn(text, sources)
+        self.assertLess(sources.index('EngineX_UsbPreparingRow'), sources.index('Repeater {'))
+
+    def test_patches_both_versions(self):
+        old_root = bp.ROOT
+        try:
+            for version, root in (("5.0.4", "Skins/EmbeddedCommon/"), ("5.3.0", "Skins/Embedded/")):
+                with self.subTest(version=version):
+                    bp.ROOT = root
+                    patches = bp.edits(False)
+                    main = "\n".join(bp.patch(old, old, new, root + "EmbeddedMain.qml")
+                                     for old, new in patches[root + "EmbeddedMain.qml"])
+                    rel = next(k for k in patches if k.endswith('/ConnectedSource.qml'))
+                    sources = "\n".join(bp.patch(old, old, new, rel) for old, new in patches[rel])
+                    self.check_feedback(main, sources)
+        finally:
+            bp.ROOT = old_root
+
+    def test_built_packs_both_versions(self):
+        built = 0
+        for version, root in (("5.0.4", "Skins/EmbeddedCommon/"), ("5.3.0", "Skins/Embedded/")):
+            qrc = LAB / version / "qrc"
+            if not qrc.is_dir():
+                continue
+            built += 1
+            with self.subTest(version=version), tempfile.TemporaryDirectory(prefix="usb-feedback-") as tmp:
+                packs = Path(tmp) / "packs"
+                res = subprocess.run(["python3", str(BUILD_PACKS), "--release", "--qrc", str(qrc), "--out", str(packs)], capture_output=True, text=True)
+                self.assertEqual(res.returncode, 0, res.stderr)
+                for lang in ("en", "zh-Hans", "zh-Hant"):
+                    base = packs / lang / root
+                    source = next(base.rglob('ConnectedSource.qml'))
+                    self.check_feedback((base / 'EmbeddedMain.qml').read_text(), source.read_text(),
+                                        {'en': 'Preparing USB…', 'zh-Hans': '正在准备 USB…', 'zh-Hant': '正在準備 USB…'}[lang])
+        if not built:
+            self.skipTest(f"{LAB} QRC fixtures not found")
+
+    def test_scapply_clears_omitted_and_false_state(self):
+        self.assertIsNotNone(shutil.which('node'), 'Node is required for behavioral coverage')
+        apply = re.search(r'function scApply\(v\) \{.*?\n\t\}', bp.SERVICES_MAIN, re.S)
+        self.assertIsNotNone(apply)
+        same = re.search(r'function scSameItems\(a, b\) \{.*?\n\t\}', bp.SERVICES_MAIN, re.S)
+        self.assertIsNotNone(same)
+        # Execute the complete production function with inert native collaborators.
+        script = r"""
+const assert = require('assert/strict');
+const vm = require('vm');
+const noop = new Proxy(function() {}, {get: () => noop, apply: () => noop});
+const state = {scUsbPreparing: false, scSources: [], scLoggedIn: [], scHasMixer: false,
+    scHasStemsEq: false, scUiLoaded: true, scLastGoodTimeZone: '', root: noop,
+    Planck: {getProperty: () => ({translator: {index: 0}})}, Config: noop};
+const context = new Proxy(state, {has: () => true, get: (o,k) => k in o ? o[k] : noop,
+    set: (o,k,v) => {o[k]=v; return true;}});
+vm.createContext(context);
+""" + 'vm.runInContext(' + json.dumps(same.group(0)) + ', context);\n' + 'vm.runInContext(' + json.dumps(apply.group(0)) + ', context);\n' + r"""
+assert.equal(state.scUsbPreparing, false);
+for (const [input, expected] of [[{usbPreparing: true}, true], [{usbPreparing: false}, false],
+                                [{usbPreparing: true}, true], [{}, false]]) {
+    state.scApply(input);
+    assert.equal(state.scUsbPreparing, expected);
+}
+state.scApply({sources: ["tidal"], loggedIn: ["tidal"]});
+assert.deepEqual(Array.from(state.scSources), ["tidal"]);
+state.scApply({sources: [], loggedIn: []});
+assert.deepEqual(Array.from(state.scSources), []);
+assert.deepEqual(Array.from(state.scLoggedIn), []);
+"""
+        result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
