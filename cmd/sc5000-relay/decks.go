@@ -200,7 +200,7 @@ func (ds *deckStore) upsert(in deckInfo) deckInfo {
 
 	if in.ID == "" {
 		switch {
-		case in.LANIP != "" && in.LANIP != "sc5000.lan":
+		case in.LANIP != "" && in.LANIP != "sc5000.lan" && in.LANIP != "enginex.lan": // placeholders, not addresses (#234)
 			in.ID = in.LANIP
 		case in.AccessCode != "":
 			in.ID = "deck-" + strings.ToLower(normalizeDeckCode(in.AccessCode))

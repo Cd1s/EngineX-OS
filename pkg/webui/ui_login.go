@@ -343,7 +343,7 @@ func pickLANHost(found []lanAddr) string {
 			}
 		}
 	}
-	return "sc5000.lan"
+	return "enginex.lan"
 }
 
 // ownerSession returns the single owner session of a service, creating it if needed.
