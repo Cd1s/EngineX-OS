@@ -119,6 +119,8 @@ type deckState struct {
 	Jumps int `json:"jumps,omitempty"`
 	// Cue: Playing only because CUE is held (Engine's PlayState stays false).
 	Cue bool `json:"cue,omitempty"`
+	// Scratch: platter touched or scratched (do not extrapolate at +1x or smooth).
+	Scratch bool `json:"scratch,omitempty"`
 	// MasterPress counts the MASTER presses on this deck since Engine started
 	// (the QML's own do not count). Read from the player's own post only, never passed on.
 	MasterPress int `json:"masterPress,omitempty"`
@@ -193,6 +195,7 @@ type peerLocalFile struct {
 const (
 	shadowPlayingDriftMS = 12
 	shadowPausedDriftMS  = 0.5
+	shadowScratchDriftMS = 5
 )
 
 // A deck's speed is measured over at least shadowSkewSpan of one line, from
@@ -223,12 +226,15 @@ func samePeerPicture(old peerDeck, d deckState, now time.Time) bool {
 		o.Title != d.Title || o.Artist != d.Artist || o.KeyName != d.KeyName || o.Loading != d.Loading || o.Active != d.Active || o.Stale != d.Stale || o.MetadataOnly != d.MetadataOnly ||
 		o.Playing != d.Playing || o.Pitch != d.Pitch || !sameOptionalBool(o.Master, d.Master) || !sameOptionalBool(o.Lead, d.Lead) || o.Loop != d.Loop || o.KeyOffset != d.KeyOffset || o.Stems != d.Stems || o.Slip != d.Slip || o.ShadowMaster != d.ShadowMaster || o.Sync != d.Sync || o.BPM != d.BPM ||
 		o.CurrentBPM != d.CurrentBPM || o.Range != d.Range || (o.KeyLock == nil) != (d.KeyLock == nil) || (o.KeyLock != nil && *o.KeyLock != *d.KeyLock) ||
-		o.Jumps != d.Jumps || o.Cue != d.Cue || o.Link != d.Link || (o.CuePos == nil) != (d.CuePos == nil) ||
+		o.Jumps != d.Jumps || o.Cue != d.Cue || o.Scratch != d.Scratch || o.Link != d.Link || (o.CuePos == nil) != (d.CuePos == nil) ||
 		(o.CuePos != nil && *o.CuePos != *d.CuePos) || (o.Cues == nil) != (d.Cues == nil) || !slices.Equal(o.Cues, d.Cues) {
 		return false
 	}
 	if !o.Playing {
 		return math.Abs(old.anchorPos-d.PositionMS) <= shadowPausedDriftMS
+	}
+	if o.Scratch {
+		return math.Abs(old.anchorPos-d.PositionMS) <= shadowScratchDriftMS
 	}
 	expect := old.anchorPos + float64(now.Sub(old.anchorAt).Microseconds())/1000*old.speed()
 	return math.Abs(expect-d.PositionMS) <= shadowPlayingDriftMS
@@ -246,6 +252,7 @@ type precisePos struct {
 // cdjSeen is what observe last saw of a CDJ, to find its edges as they arrive.
 type cdjSeen struct {
 	playing bool // playing, or previewing with CUE held
+	scratch bool
 	track   uint32
 	ms      float64 // the last absolute position (0x0b) and when it came
 	at      time.Time
@@ -480,6 +487,77 @@ func resolveNetPathFile(np, dataRoot, mediaRoot string, engineCache bool) string
 	return cached
 }
 
+func isHexString(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
+// stableTrackKey extracts the source file identity from a per-load session key
+// ("<baseKey>-<seq>"), leaving short test keys and "local-<hash>" keys intact.
+func stableTrackKey(key string) string {
+	base, seq, ok := strings.Cut(key, "-")
+	if ok && base != "local" && len(base) >= 8 && len(seq) >= 8 && isHexString(base) && isHexString(seq) {
+		return base
+	}
+	return key
+}
+
+func inMusicTempOrig(f, dataRoot string) (string, bool) {
+	temp := filepath.Join(dataRoot, "inMusicTempFiles") + string(filepath.Separator)
+	if !strings.HasPrefix(f, temp) {
+		return "", false
+	}
+	_, orig, ok := strings.Cut(filepath.Base(f), "_")
+	if !ok || orig == "" {
+		return "", false
+	}
+	return orig, true
+}
+
+func resolveInMusicTempPath(ctx context.Context, orig string, size int64, dataRoot string) string {
+	lib := filepath.Join(dataRoot, "AppDataUser/AIR Music Technology/Engine/Engine Library")
+	var match string
+	for _, name := range []string{"m.db", "stm.db"} {
+		mdb := filepath.Join(lib, "Database2", name)
+		if _, err := os.Stat(mdb); err != nil {
+			continue
+		}
+		db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: mdb}).String()+"?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(500)")
+		if err != nil {
+			continue
+		}
+		rows, err := db.QueryContext(ctx, `SELECT path FROM Track WHERE filename = ? LIMIT 8`, orig)
+		if err == nil {
+			for rows.Next() {
+				var rel string
+				if rows.Scan(&rel) != nil || rel == "" {
+					continue
+				}
+				cand := filepath.Join(lib, filepath.FromSlash(rel))
+				if st, err := os.Stat(cand); err == nil && st.Mode().IsRegular() && st.Size() == size {
+					if match != "" && match != cand {
+						rows.Close()
+						db.Close()
+						return ""
+					}
+					match = cand
+				}
+			}
+			rows.Close()
+		}
+		db.Close()
+	}
+	return match
+}
+
 // decksPost takes this deck's own decks from its QML (loopback only: /v1/).
 func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 	var decks []deckState
@@ -522,7 +600,18 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 				if n := displayFileName(d.Artist, d.Title, d.Ext); n != "" {
 					d.Name = n // Engine shows a tagless streaming cache file by its name
 				}
-				d.Key = fmt.Sprintf("%x", fnvSum(fmt.Sprintf("%s %d %d", f, st.Size(), st.ModTime().UnixNano())))
+				if orig, ok := inMusicTempOrig(f, s.shadow.dataRoot); ok {
+					if realPath := resolveInMusicTempPath(r.Context(), orig, st.Size(), s.shadow.dataRoot); realPath != "" {
+						if rst, err := os.Stat(realPath); err == nil && rst.Mode().IsRegular() {
+							d.Key = fmt.Sprintf("%x", fnvSum(fmt.Sprintf("%s %d %d", realPath, rst.Size(), rst.ModTime().UnixNano())))
+						}
+					}
+					if d.Key == "" {
+						d.Key = fmt.Sprintf("%x", fnvSum(fmt.Sprintf("temp:%s %d", orig, st.Size())))
+					}
+				} else {
+					d.Key = fmt.Sprintf("%x", fnvSum(fmt.Sprintf("%s %d %d", f, st.Size(), st.ModTime().UnixNano())))
+				}
 			}
 		}
 		s.shadow.mu.Lock()
@@ -661,7 +750,7 @@ func (sh *shadowState) ownForPeer(now time.Time) []deckState {
 		for _, d := range sh.own {
 			d.Path = ""
 			d.Stale = now.Sub(sh.ownAt) >= 2*time.Second
-			if d.Playing {
+			if d.Playing && !d.Scratch {
 				// The QML posts only on a change and pings in between: carry the
 				// position and beat phase on while it is alive, at most 2 s past its last word.
 				until := min(now.UnixMilli(), sh.ownAt.UnixMilli()+2000)
@@ -974,7 +1063,7 @@ func (sh *shadowState) takePeer(ip string, decks []deckState, now time.Time) {
 		if slot == 0 {
 			continue
 		} // all slots belong to other tracks; never overwrite a sibling
-		if d.Playing && !d.Stale {
+		if d.Playing && !d.Stale && !d.Scratch {
 			d.PositionMS += late * (1 + d.Pitch/100)
 		}
 		d.Sent, d.Rate = 0, 0
@@ -983,11 +1072,14 @@ func (sh *shadowState) takePeer(ip string, decks []deckState, now time.Time) {
 		if ok = ok && (old.ip == ip || old.Link != "" && old.Link == d.Link); ok {
 			p.skew = old.skew
 		}
+		if d.Scratch {
+			p.refAt = time.Time{}
+		}
 		if ok && samePeerPicture(old, d, now) {
 			p.anchorPos, p.anchorAt, p.refPos, p.refAt = old.anchorPos, old.anchorAt, old.refPos, old.refAt
 			// The line's own slope, once it is long enough to tell: anchored anew
 			// with the new speed, which reaches the QML as a few ms to steer over.
-			if d.Playing && late <= shadowSkewLateMS {
+			if d.Playing && !d.Scratch && late <= shadowSkewLateMS {
 				if p.refAt.IsZero() {
 					if now.Sub(p.anchorAt) >= shadowSkewSettle {
 						p.refPos, p.refAt = d.PositionMS, now
@@ -1209,7 +1301,47 @@ func libraryPerf(ctx context.Context, f, dataRoot, mediaRoot string) ([]byte, er
 			return perf, nil
 		}
 	}
+	if orig, ok := inMusicTempOrig(f, dataRoot); ok {
+		for _, name := range []string{"m.db", "stm.db"} {
+			if perf, err2 := dbPerfByFilename(ctx, filepath.Join(lib, "Database2", name), orig); err2 == nil {
+				return perf, nil
+			}
+		}
+	}
 	return nil, err
+}
+
+func dbPerfByFilename(ctx context.Context, mdb, filename string) ([]byte, error) {
+	if _, err := os.Stat(mdb); err != nil {
+		return nil, err
+	}
+	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: mdb}).String()+"?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(500)")
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	rows, err := db.QueryContext(ctx, `SELECT coalesce(t.bpmAnalyzed, t.bpm), p.trackData, p.beatData, p.overviewWaveFormData
+		FROM Track t JOIN PerformanceData p ON p.trackId = t.id WHERE t.filename = ? AND length(p.trackData)>4 AND length(p.beatData)>4 AND length(p.overviewWaveFormData)>4 LIMIT 2`, filename)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var bpm sql.NullFloat64
+	var track, beats, overview []byte
+	count := 0
+	for rows.Next() {
+		count++
+		if count > 1 {
+			return nil, fmt.Errorf("perf: ambiguous filename")
+		}
+		if err := rows.Scan(&bpm, &track, &beats, &overview); err != nil {
+			return nil, err
+		}
+	}
+	if count != 1 {
+		return nil, sql.ErrNoRows
+	}
+	return perfFromBlobs(bpm.Float64, track, beats, overview)
 }
 
 func dbPerf(ctx context.Context, mdb, rel string) ([]byte, error) {
@@ -1337,6 +1469,11 @@ func (sh *shadowState) observeAt(d prolink.Device, now time.Time) {
 		expect := c.line + float64(now.Sub(c.at).Microseconds())/1000*c.rate
 		late := expect - ms
 		moving := !jump && !c.at.IsZero() && ms > c.ms
+		scratch := !jump && !c.at.IsZero() && (ms < c.ms-1 || (c.still >= 1 && c.still < cdjStill))
+		if scratch != c.scratch || (scratch && math.Abs(ms-c.ms) >= 5) {
+			edge = true
+		}
+		c.scratch = scratch
 		if !moving || !c.moving || math.Abs(rate-c.rate) > 2e-6 || late <= 0 {
 			c.line, c.n = ms, 0
 		} else if c.line, c.n = expect, c.n+1; c.n == 1 || late < c.late {
@@ -1592,7 +1729,7 @@ func (s *Server) shadowLegacy(role string, now time.Time, all bool, lines ...[]i
 		if pfx := imagePrefix(deviceCompatible()); pfx == "" || playerBoards[pfx] {
 			d.Master = new(false)
 		}
-		if d.Playing {
+		if d.Playing && !d.Scratch {
 			d.PositionMS, d.Rate = p.carried(now.Sub(p.at))
 		}
 		d.Progress, d.Error = 0, "" // ours to say, not the peer's
@@ -1609,9 +1746,10 @@ func (s *Server) shadowLegacy(role string, now time.Time, all bool, lines ...[]i
 		// then: that appears once the peer's Engine has cached the file, mid-track.
 		d.ID = d.Net
 		if d.Path == "" && d.Key != "" {
-			// Not by address: a player on eth0 and wlan0 is heard from both, and the
-			// track was copied and loaded (and analysed) twice.
-			key := "peer:" + d.Key
+			// Not by address (eth0+wlan0), and keyed by the source's file identity
+			// without the per-load session suffix so reloading the same track reuses
+			// the local copy and its Engine m.db analysis.
+			key := "peer:" + stableTrackKey(d.Key)
 			d.ID = d.Key
 			wanted[key] = now
 			d.Path = sh.files[key]
@@ -1650,7 +1788,7 @@ func (s *Server) shadowLegacy(role string, now time.Time, all bool, lines ...[]i
 			continue
 		}
 		cue := dev.PlayState1 == cdjCuePlay
-		d := deckState{Deck: deck, Playing: dev.Playing || cue, Cue: cue, Jumps: sh.cdj[dev.Number].jumps, PositionMS: float64(dev.PlayPositionMS), Pitch: sh.cdj[dev.Number].exact(dev.Pitch), Master: new(dev.Master), Lead: new(dev.Master), Sync: dev.Sync, BPM: dev.BPM, DurationMS: float64(dev.DurationMS), Title: dev.Title, Artist: dev.Artist}
+		d := deckState{Deck: deck, Playing: dev.Playing || cue, Cue: cue, Scratch: sh.cdj[dev.Number].scratch, Jumps: sh.cdj[dev.Number].jumps, PositionMS: float64(dev.PlayPositionMS), Pitch: sh.cdj[dev.Number].exact(dev.Pitch), Master: new(dev.Master), Lead: new(dev.Master), Sync: dev.Sync, BPM: dev.BPM, DurationMS: float64(dev.DurationMS), Title: dev.Title, Artist: dev.Artist}
 		if len(consoleLines) > 0 {
 			d.LineIn = true
 		}
