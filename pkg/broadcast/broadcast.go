@@ -249,7 +249,10 @@ func (b *Broadcaster) Status() Status {
 	lanOn := b.cfg.LANMode != "" && b.cfg.LANMode != "off"
 	lanUp, lastError := false, b.lastError
 	if b.cfg.ServerURL != "" && b.cfg.Protocol == "shoutcast" {
-		lastError = shoutcastUnsupported
+		if lastError != "" {
+			lastError += "; "
+		}
+		lastError += shoutcastUnsupported
 	}
 	lanErr, sent := b.lanErr, b.bytesSent.Load()
 	if b.lanStreamer != nil {
