@@ -12,7 +12,7 @@
 
 **[Features](#features)** · **[Download & Install](#install)** · **[Screenshots](#gallery)** · **[Benchmarks](#benchmarks)** · **[Sponsor](#sponsor)**
 
-📖 **Online User Guide**: <https://enginexdj.com> · 🗺️ **Roadmap**: <https://enginexdj.com/#roadmap>
+📖 **Online User Guide**: <https://enginexdj.com> · **Roadmap**: <https://enginexdj.com/#roadmap>
 
 </div>
 
