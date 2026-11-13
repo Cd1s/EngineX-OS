@@ -133,10 +133,12 @@ func TestTailscaleForwardChangeAppliesOnce(t *testing.T) {
 	if f.has("serve reset") || f.has("serve --bg --tcp=22 ") || strings.Count(strings.Join(cmds, "\n"), "serve --bg --tcp=8080 ") != 1 {
 		t.Fatalf("must add only the missing forward once: %v", cmds)
 	}
-	// Removing the last service clears the persistent forwards once.
+	// A config change during a status timeout is applied by the next good poll.
+	f.flakyStatus = true
 	if code, _, out := tsPost(t, s, `{"forward":{"ssh":false,"webui":false}}`); code != http.StatusOK {
 		t.Fatalf("remove forwards: %d %s", code, out)
 	}
+	f.flakyStatus = false
 	s.handleTailscale(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/tailscale", nil))
 	cmds, _ = f.snapshot()
 	if len(f.forwards) != 0 || strings.Count(strings.Join(cmds, "\n"), "serve reset") != 1 {
