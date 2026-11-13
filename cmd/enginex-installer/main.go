@@ -1064,83 +1064,6 @@ func isDeckUSB(line string) bool {
 		strings.Contains(lower, "inmusic") || strings.Contains(lower, "prime 4") || strings.Contains(lower, "sc live") || strings.Contains(lower, "mixstream")
 }
 
-var (
-	pnpBlockRE = regexp.MustCompile(`\n[ \t]*\n`)
-	winVIDPID  = regexp.MustCompile(`(?i)VID_([0-9a-f]{4})&PID_([0-9a-f]{4})`)
-	descKeyRE  = regexp.MustCompile(`(?i)(description|opis|beschreibung|descrip|descriz|описание|描述|説明|설명)`)
-	macVID     = regexp.MustCompile(`"idVendor" = (\d+)`)
-	macPID     = regexp.MustCompile(`"idProduct" = (\d+)`)
-)
-
-// parsePnPUtil turns `pnputil /enum-devices /connected` output into "vid:pid name" lines.
-// It works across all Windows languages (English, Polish, German, French, Chinese, etc.) by extracting
-// VID_xxxx&PID_yyyy and the device description from following lines in the device block.
-func parsePnPUtil(out string) string {
-	var b strings.Builder
-	// pnputil emits one blank-line-separated block per device, with its instance
-	// path first. Only that path can identify the device; descriptions and other
-	// fields may themselves contain VID/PID text supplied by an unrelated device.
-	for _, block := range pnpBlockRE.Split(strings.TrimSpace(strings.ReplaceAll(out, "\r\n", "\n")), -1) {
-		lines := strings.Split(strings.TrimSpace(block), "\n")
-		_, instance, ok := strings.Cut(strings.TrimSpace(lines[0]), ":")
-		instance = strings.TrimSpace(instance)
-		if !ok || !strings.HasPrefix(strings.ToUpper(instance), `USB\VID_`) {
-			continue
-		}
-		m := winVIDPID.FindStringSubmatch(instance)
-		if m == nil {
-			continue
-		}
-		desc, fallback := "", ""
-		for _, line := range lines[1:] {
-			key, val, ok := strings.Cut(strings.TrimSpace(line), ":")
-			if !ok {
-				continue
-			}
-			val = strings.TrimSpace(val)
-			if val == "" || strings.HasPrefix(val, "{") || strings.HasSuffix(strings.ToLower(val), ".inf") {
-				continue
-			}
-			if strings.EqualFold(val, "started") || strings.EqualFold(val, "stopped") || strings.EqualFold(val, "disconnected") {
-				continue
-			}
-			if descKeyRE.MatchString(key) {
-				desc = val
-				break
-			}
-			if fallback == "" {
-				fallback = val
-			}
-		}
-		if desc == "" {
-			desc = fallback
-		}
-		id := strings.ToLower(m[1] + ":" + m[2])
-		if desc != "" {
-			fmt.Fprintf(&b, "%s %s\n", id, desc)
-		} else {
-			fmt.Fprintln(&b, id)
-		}
-	}
-	return b.String()
-}
-
-// parseIOReg turns `ioreg -p IOUSB -l` blocks ("+-o <name>@..." then decimal idVendor/idProduct) into "vid:pid name" lines.
-func parseIOReg(out string) string {
-	var b strings.Builder
-	for _, blk := range strings.Split(out, "+-o ")[1:] {
-		v, p := macVID.FindStringSubmatch(blk), macPID.FindStringSubmatch(blk)
-		if v == nil || p == nil {
-			continue
-		}
-		vi, _ := strconv.Atoi(v[1])
-		pi, _ := strconv.Atoi(p[1])
-		name, _, _ := strings.Cut(blk, "@")
-		fmt.Fprintf(&b, "%04x:%04x %s\n", vi, pi, strings.TrimSpace(name))
-	}
-	return b.String()
-}
-
 // diagnoseUSB distinguishes a connected deck from an available update protocol.
 func diagnoseUSB(ctx context.Context, o *options) {
 	var hits []string
@@ -1275,22 +1198,6 @@ func sshPublicKey(o *options) string {
 }
 
 func fileExists(p string) bool { _, err := os.Stat(p); return err == nil }
-
-func copyFile(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	out, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	if _, err = io.Copy(out, in); err == nil {
-		err = out.Close()
-	}
-	return err
-}
 
 func confirm(o *options, zh, en string) error {
 	if o.Yes {

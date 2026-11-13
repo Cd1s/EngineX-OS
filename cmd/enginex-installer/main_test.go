@@ -25,7 +25,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -334,28 +333,17 @@ func TestEAASPacketValidation(t *testing.T) {
 	}
 }
 
-func TestPnPDescriptionCannotImpersonateADeck(t *testing.T) {
+func TestUSBDescriptionCannotImpersonateADeck(t *testing.T) {
 	o := testOpts(t)
-	for _, instance := range []string{`USB\VID_046D&PID_C52B\1234`, `HID\VID_046D&PID_C52B\1234`} {
-		pnputil := "Instance ID: " + instance + "\r\n" +
-			"Device Description: USB\\VID_15E4&PID_303F\\fake adapter for 15e4:303f\r\n" +
-			"Manufacturer Name: USB\\VID_15E4&PID_103F\\fake\r\n"
-		o.ListUSB = func(context.Context) string { return parsePnPUtil(pnputil) }
-		if board, line := usbDeck(ctxT(t), o, gen2USB); board != "" || line != "" {
-			t.Fatalf("product text impersonated a deck: %q, %q", board, line)
-		}
+	d := &testUSB{info: usbInfo(0x05e3, 0x0610, "15e4:d007 Denon PRIME 4+", false)}
+	o.USB = d
+	o.defaults()
+	if found, err := tryUSB(ctxT(t), o, ""); found || err != nil || d.opens != 0 {
+		t.Fatalf("found=%t err=%v opens=%d", found, err, d.opens)
 	}
-}
-
-func TestPnPUtilExtraBlankLinesKeepAllDevices(t *testing.T) {
-	first := "Instance ID: USB\\VID_046D&PID_C52B\\1234\nDevice Description: Keyboard"
-	second := "Instance ID: USB\\VID_15E4&PID_303F\\5678\nDevice Description: Numark MIXSTREAM PRO PLUS"
-	for _, separator := range []string{"\n\n", "\n\n\n", "\n\n\n\n", "\n \t\n\n"} {
-		got := parsePnPUtil(first + separator + second)
-		want := "046d:c52b Keyboard\n15e4:303f Numark MIXSTREAM PRO PLUS\n"
-		if got != want {
-			t.Errorf("separator %q: got %q, want %q", separator, got, want)
-		}
+	o.ListUSB = func(context.Context) string { return usbLine(d.info) }
+	if board, _ := usbDeck(ctxT(t), o, gen2USB); board != "" {
+		t.Fatalf("description became device identity: %s", board)
 	}
 }
 
@@ -872,9 +860,17 @@ func TestModeBFreshImageFlashedToData(t *testing.T) {
 	need(t, "python3", "mke2fs", "debugfs", "e2fsck", "dumpe2fs")
 	b := buildBundle(t, "PRIME4PLUS", "5.3.0.2")
 	fb := newFastboot(t, "JC11S", true)
+	fb.Bin.enumerate = func() []usb.DeviceInfo {
+		info := fb.Bin.info
+		info.Interfaces = nil
+		return []usb.DeviceInfo{info}
+	}
 	o := modeBOpts(t, fb, b)
 	if err := run(ctxT(t), o); err != nil {
 		t.Fatalf("run: %v\n%s", err, o.Out)
+	}
+	if fb.Bin.opens != 1 || fb.Bin.closes != 1 {
+		t.Fatalf("USB session opens=%d closes=%d", fb.Bin.opens, fb.Bin.closes)
 	}
 	flashed := fb.Flashed()
 	if len(flashed) != 1 || !strings.HasPrefix(flashed[0], "flash data ") {
@@ -1300,8 +1296,11 @@ func TestModeBAsksBeforeFlashing(t *testing.T) {
 	if err := run(ctxT(t), o); err == nil || !strings.Contains(err.Error(), "取消") {
 		t.Fatalf("err = %v, want a cancel", err)
 	}
-	if img, _ := filepath.Glob(filepath.Join(o.WorkDir, "*.img")); len(img) == 0 {
-		t.Error("should have built the image and asked, not stopped earlier")
+	if !strings.Contains(o.Out.(*bytes.Buffer).String(), "ALL music, library and settings") {
+		t.Error("did not ask about erasing the data partition")
+	}
+	if dirs, _ := filepath.Glob(filepath.Join(o.WorkDir, ".enginex-image-*")); len(dirs) != 0 {
+		t.Errorf("cancelled images left behind: %v", dirs)
 	}
 	if f := fb.Flashed(); len(f) != 0 {
 		t.Errorf("flashed %v", f)
@@ -1358,7 +1357,7 @@ func TestNoDeckPrintsFirstGenGuide(t *testing.T) {
 		t.Fatalf("err = %v, want the no-deck error", err)
 	}
 	out := o.Out.(*bytes.Buffer).String()
-	for _, want := range []string{"PRIME GO", "Settings -> Update -> Reboot", "Reboot to Computer Update Mode", "15a2:007d", "FAT32/exFAT", "SYSTEM ONE", "51337"} {
+	for _, want := range []string{"PRIME GO", "Settings -> Update -> Reboot", "Reboot to Computer Update Mode", "15e4:d006", "FAT32/exFAT", "SYSTEM ONE", "51337"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("guide is missing %q", want)
 		}
@@ -1519,151 +1518,13 @@ func TestIsDeckUSB(t *testing.T) {
 			t.Errorf("isDeckUSB(%q) = %v, want %v", line, got, want)
 		}
 	}
-	win := winVIDPID.ReplaceAllString(`Instance ID:   USB\VID_2207&PID_0006\0123456789`, "$1:$2")
-	if !isDeckUSB(win) {
-		t.Errorf("pnputil line not recognised: %s", win)
-	}
-	mac := parseIOReg(`+-o Root  <class IORegistryEntry>
-	  +-o PRIME 4+@14100000  <class IOUSBHostDevice>
-	    {
-	      "idProduct" = 12810
-	      "idVendor" = 8711
-	    }
-	  +-o Keyboard@14200000  <class IOUSBHostDevice>
-	    {
-	      "idVendor" = 1452
-	      "idProduct" = 641
-	    }
-`)
-	if mac != "2207:320a PRIME 4+\n05ac:0281 Keyboard\n" {
-		t.Errorf("parseIOReg = %q", mac)
-	}
-}
-
-func TestParsePnPUtil(t *testing.T) {
-	// Polish Windows output with CRLF (Issue #161: bogiepl's screenshot)
-	polish := "Narzędzie Microsoft PnP Utility\r\n\r\n" +
-		"Identyfikator wystąpienia:  USB\\VID_15E4&PID_D012\\6&14562B34&0&1\r\n" +
-		"Opis urządzenia:            Denon DJ SC LIVE 4 Update\r\n" +
-		"Nazwa klasy:                MEDIA\r\n" +
-		"Identyfikator GUID klasy:   {4d36e96c-e325-11ce-bfc1-08002be10318}\r\n" +
-		"Nazwa producenta:           InMusic\r\n" +
-		"Stan:                       Started\r\n" +
-		"Nazwa sterownika:           oem123.inf\r\n\r\n" +
-		"Identyfikator wystąpienia:  USB\\VID_046D&PID_C52B\\5&26f7a627&0&1\r\n" +
-		"Opis urządzenia:            Logitech USB Receiver\r\n" +
-		"Nazwa klasy:                USB\r\n"
-	got := parsePnPUtil(polish)
-	want := "15e4:d012 Denon DJ SC LIVE 4 Update\n046d:c52b Logitech USB Receiver\n"
-	if got != want {
-		t.Errorf("parsePnPUtil(polish) = %q, want %q", got, want)
-	}
-
-	// English Windows output
-	english := `Instance ID:                USB\VID_15E4&PID_D007\0123456789
-Device Description:         Denon DJ PRIME 4 Plus
-Class Name:                 MEDIA
-Class GUID:                 {4d36e96c-e325-11ce-bfc1-08002be10318}
-Manufacturer Name:          InMusic
-Status:                     Started
-Driver Name:                oem456.inf
-`
-	gotEng := parsePnPUtil(english)
-	wantEng := "15e4:d007 Denon DJ PRIME 4 Plus\n"
-	if gotEng != wantEng {
-		t.Errorf("parsePnPUtil(english) = %q, want %q", gotEng, wantEng)
-	}
-
-	// German and Chinese Windows output with swapped field orders
-	multilingual := `Instanz-ID:                 USB\VID_15E4&PID_D011\1234
-Klassenname:                MEDIA
-Gerätebeschreibung:         Denon DJ SC LIVE 2
-Status:                     Started
-
-Instance ID:                USB\VID_15E4&PID_C00C\5678
-设备描述:                   Denon DJ PRIME GO+
-Class Name:                 MEDIA
-
-Instance ID:                USB\VID_2207&PID_320A\9999
-`
-	gotMulti := parsePnPUtil(multilingual)
-	wantMulti := "15e4:d011 Denon DJ SC LIVE 2\n15e4:c00c Denon DJ PRIME GO+\n2207:320a\n"
-	if gotMulti != wantMulti {
-		t.Errorf("parsePnPUtil(multilingual) = %q, want %q", gotMulti, wantMulti)
-	}
-}
-
-// Mixstream Pro+ (15e4:303f) on Windows in Firmware Update Mode (#164)
-func TestWindowsMixstreamProPlusDetection(t *testing.T) {
-	t.Cleanup(func() { goos = runtime.GOOS })
-	goos = "windows"
-	pnputilOut := `Instance ID:                USB\VID_15E4&PID_303F\0123456789
-Device Description:         Numark MIXSTREAM PRO PLUS
-Class Name:                 USBDevice
-Status:                     Started
-`
-	o := testOpts(t)
-	o.ListUSB = func(context.Context) string {
-		return parsePnPUtil(pnputilOut)
-	}
-	board, line := usbDeck(ctxT(t), o, gen2USB)
-	if board != "nh08s" || !strings.Contains(line, "15e4:303f") || !strings.Contains(line, "Numark MIXSTREAM PRO PLUS") {
-		t.Errorf("usbDeck = %q, %q; want nh08s with Numark MIXSTREAM PRO PLUS line", board, line)
-	}
-
-	diagnoseUSB(ctxT(t), o)
-	out := o.Out.(*bytes.Buffer).String()
-	if !strings.Contains(out, "15e4:303f") || !strings.Contains(out, "Numark MIXSTREAM PRO PLUS") || !strings.Contains(out, "Zadig") || !strings.Contains(out, "{F72FE0D4-CBCB-407D-8814-9ED673D0DD6B}") || !strings.Contains(out, "wsl -u root") {
-		t.Errorf("diagnoseUSB did not give Zadig WinUSB, Android GUID, and WSL root hint for Mixstream Pro+:\n%s", out)
-	}
-}
-
-// On Windows, SC LIVE 4 (15e4:d012) in Computer Update mode with vendor drivers must be
-// recognized by usbDeck and diagnoseUSB even when fastboot has no WinUSB driver bound (#161).
-func TestWindowsSCLive4Detection(t *testing.T) {
-	t.Cleanup(func() { goos = runtime.GOOS })
-	goos = "windows"
-	pnputilOut := `Identyfikator wystąpienia:  USB\VID_15E4&PID_D012\6&14562B34&0&1
-Opis urządzenia:            Denon DJ SC LIVE 4 Update
-Nazwa klasy:                MEDIA
-Stan:                       Started
-`
-	o := testOpts(t)
-	o.ListUSB = func(context.Context) string {
-		return parsePnPUtil(pnputilOut)
-	}
-	board, line := usbDeck(ctxT(t), o, gen2USB)
-	if board != "jp21" || !strings.Contains(line, "15e4:d012") || !strings.Contains(line, "Denon DJ SC LIVE 4 Update") {
-		t.Errorf("usbDeck = %q, %q; want jp21 with SC LIVE 4 Update line", board, line)
-	}
-
-	// Negative case: a device whose product name mentions another deck's ID must NOT match
-	o.ListUSB = func(context.Context) string {
-		return "1234:5678 adapter for 15e4:d012\n"
-	}
-	if b, l := usbDeck(ctxT(t), o, gen2USB); b != "" || l != "" {
-		t.Errorf("usbDeck matched non-deck line: board=%q, line=%q", b, l)
-	}
-
-	// Positive diagnosis
-	o.ListUSB = func(context.Context) string {
-		return parsePnPUtil(pnputilOut)
-	}
-	diagnoseUSB(ctxT(t), o)
-	out := o.Out.(*bytes.Buffer).String()
-	if !strings.Contains(out, "15e4:d012") || !strings.Contains(out, "Denon DJ SC LIVE 4 Update") || !strings.Contains(out, "Zadig") {
-		t.Errorf("diagnoseUSB did not give the Zadig WinUSB hint for SC LIVE 4:\n%s", out)
-	}
-}
-
-// Keep the main branch's Windows first-generation fallback working after pnputil normalization.
-func TestWindowsGen1PnPUtilDetection(t *testing.T) {
-	o := testOpts(t)
-	o.ListUSB = func(context.Context) string {
-		return parsePnPUtil("Instance ID: USB\\VID_15E4&PID_D006\\SC5000\r\nDevice Description: Denon DJ SC5000 Update\r\n")
-	}
-	if board, line := usbDeck(ctxT(t), o, gen1USB); board != "jp07" || !strings.Contains(line, "Denon DJ SC5000 Update") {
-		t.Fatalf("usbDeck = %q, %q; want jp07 with the Windows device description", board, line)
+	for _, info := range []usb.DeviceInfo{
+		usbInfo(0x2207, 0x0006, "Android", false),
+		usbInfo(0x2207, 0x320a, "PRIME 4+", false),
+	} {
+		if !isDeckUSB(usbLine(info)) {
+			t.Errorf("native USB device not recognised: %s", usbLine(info))
+		}
 	}
 }
 
@@ -2015,61 +1876,6 @@ func TestUSBUpdateModeRefusals(t *testing.T) {
 
 // The real flasher runs from the bundle under python3 -E and reports why it cannot write.
 
-func TestParsePnPUtilMixstream(t *testing.T) {
-	// Polish Windows output with CRLF (Issue #161)
-	polish := "Narzędzie Microsoft PnP Utility\r\n\r\n" +
-		"Identyfikator wystąpienia:  USB\\VID_15E4&PID_D012\\6&14562B34&0&1\r\n" +
-		"Opis urządzenia:            Denon DJ SC LIVE 4 Update\r\n" +
-		"Nazwa klasy:                MEDIA\r\n" +
-		"Identyfikator GUID klasy:   {4d36e96c-e325-11ce-bfc1-08002be10318}\r\n" +
-		"Nazwa producenta:           InMusic\r\n" +
-		"Stan:                       Started\r\n" +
-		"Nazwa sterownika:           oem123.inf\r\n\r\n" +
-		"Identyfikator wystąpienia:  USB\\VID_046D&PID_C52B\\5&26f7a627&0&1\r\n" +
-		"Opis urządzenia:            Logitech USB Receiver\r\n" +
-		"Nazwa klasy:                USB\r\n"
-	got := parsePnPUtil(polish)
-	want := "15e4:d012 Denon DJ SC LIVE 4 Update\n046d:c52b Logitech USB Receiver\n"
-	if got != want {
-		t.Errorf("parsePnPUtil(polish) = %q, want %q", got, want)
-	}
-
-	// English Windows output with Mixstream Pro+ (#164)
-	english := `Instance ID:                USB\VID_15E4&PID_303F\0123456789
-Device Description:         Numark MIXSTREAM PRO PLUS
-Class Name:                 USBDevice
-Class GUID:                 {88bae032-5a81-49f0-bc3d-a4ff138216d6}
-Manufacturer Name:          Numark
-Status:                     Started
-Driver Name:                oem789.inf
-`
-	gotEng := parsePnPUtil(english)
-	wantEng := "15e4:303f Numark MIXSTREAM PRO PLUS\n"
-	if gotEng != wantEng {
-		t.Errorf("parsePnPUtil(english) = %q, want %q", gotEng, wantEng)
-	}
-
-	// German and Chinese Windows output with swapped field orders
-	multilingual := `Instanz-ID:                 USB\VID_15E4&PID_D011\1234
-Klassenname:                MEDIA
-Gerätebeschreibung:         Denon DJ SC LIVE 2
-Status:                     Started
-
-Instance ID:                USB\VID_15E4&PID_2059\5678
-设备描述:                   Numark MIXSTREAM PRO GO
-Class Name:                 MEDIA
-
-Instance ID:                USB\VID_2207&PID_320A\9999
-`
-	gotMulti := parsePnPUtil(multilingual)
-	wantMulti := "15e4:d011 Denon DJ SC LIVE 2\n15e4:2059 Numark MIXSTREAM PRO GO\n2207:320a\n"
-	if gotMulti != wantMulti {
-		t.Errorf("parsePnPUtil(multilingual) = %q, want %q", gotMulti, wantMulti)
-	}
-}
-
-// #164: an installed deck asks for its access code (403 on /v1/sc5000/ui) and must still be recognised;
-// a bare 403 from some other web server must not be.
 func TestIsDeckUIRecognisesTheLoginPage(t *testing.T) {
 	login := `<!doctype html><title>Stream Sync</title><h1>Stream Sync</h1>`
 	cases := []struct {
@@ -2638,4 +2444,20 @@ func TestGen2LocalBundleFallbackOnGitHubHTTPErrorsAndProxy(t *testing.T) {
 	if ghHits != beforeHits {
 		t.Fatalf("explicit -bundle queried GitHub %d times, want 0", ghHits-beforeHits)
 	}
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	if _, err = io.Copy(out, in); err == nil {
+		err = out.Close()
+	}
+	return err
 }

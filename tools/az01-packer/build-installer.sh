@@ -25,11 +25,11 @@ for t in linux-amd64 macos-amd64 macos-arm64 windows-amd64; do
 	mkdir -p "$d/stems" "$d/third_party"
 	CGO_ENABLED=0 GOOS=$goos GOARCH=$arch go build -trimpath -o "$d/$exe" ./cmd/enginex-installer
 	CGO_ENABLED=0 GOOS=$goos GOARCH=$arch go build -trimpath -o "$d/stems/$stemsd" ./cmd/enginex-stemsd
-	cp tools/az01-packer/az01_packer.py tools/az01-packer/host-install-userdata.py tools/az01-packer/host-install-fastboot.sh tools/az01-packer/host-install-usbupdate.py "$d/"
+	cp tools/az01-packer/az01_packer.py tools/az01-packer/host-install-userdata.py tools/az01-packer/host-install-fastboot.sh "$d/"
 	cp -R third_party/installer "$d/third_party/"
 	cp tools/stems/worker.py tools/stems/run-home-worker.sh tools/stems/run-home-worker.ps1 tools/stems/README.md "$d/stems/"
 	chmod 644 "$d/az01_packer.py" "$d/stems/worker.py" "$d/stems/run-home-worker.ps1" "$d/stems/README.md"
-	chmod 755 "$d/$exe" "$d/host-install-userdata.py" "$d/host-install-fastboot.sh" "$d/host-install-usbupdate.py" "$d/stems/$stemsd" "$d/stems/run-home-worker.sh"
+	chmod 755 "$d/$exe" "$d/host-install-userdata.py" "$d/host-install-fastboot.sh" "$d/stems/$stemsd" "$d/stems/run-home-worker.sh"
 	# Every launcher passes its arguments on (--uninstall, --image, --key...: BH-G2-8).
 	case $os in
 	linux)

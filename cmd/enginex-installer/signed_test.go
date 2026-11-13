@@ -528,7 +528,7 @@ func TestInstallerDoesNotGoBackToAnOlderRelease(t *testing.T) {
 	t.Run("first generation", func(t *testing.T) {
 		const name = "SC5000-5.3.0.5-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img"
 		o := testOpts(t)
-		useRelease(o, oneFileRelease(t, name, []byte("AZ01 older revision"), signFault{tag: "v5.3.0.5-r1"}, nil, ""))
+		useRelease(o, oneFileRelease(t, name, gen1Container(t, "SC5000", []byte("older rootfs")), signFault{tag: "v5.3.0.5-r1"}, nil, ""))
 		sd := startSSHDeck(t, o.SSHPort, "inmusic,jp07\x00")
 		custom := filepath.Join(sd.Data, "enginex")
 		os.MkdirAll(filepath.Join(custom, "bundle"), 0o755)
@@ -622,7 +622,7 @@ func TestInstallerStopsWhenItCannotReadTheInstalledRelease(t *testing.T) {
 		t.Run("first generation/"+c.name, func(t *testing.T) {
 			const name = "SC5000-5.3.0.5-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img"
 			o := testOpts(t)
-			useRelease(o, oneFileRelease(t, name, []byte("AZ01 older revision"), signFault{tag: older}, nil, ""))
+			useRelease(o, oneFileRelease(t, name, gen1Container(t, "SC5000", []byte("older rootfs")), signFault{tag: older}, nil, ""))
 			sd := setup(t, o, "inmusic,jp07\x00", c.state)
 			check(t, sd, modeA(ctxT(t), o, deck{IP: "127.0.0.1"}), c.refused, "az01-update --file")
 		})

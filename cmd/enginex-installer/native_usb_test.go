@@ -131,7 +131,7 @@ func (d *testUSB) WriteBulk(ctx context.Context, _ uint8, b []byte) (int, error)
 		}
 	case command == "getvar:partition-size:data":
 		if fileExists(filepath.Join(d.dir, "nodata")) {
-			reply = "FAILVariable not implemented"
+			reply = "FAILGetVar Variable Not found"
 		} else {
 			reply += "0x4000000"
 		}
@@ -201,4 +201,52 @@ func (f fbShim) Flashed() []string {
 		}
 	}
 	return out
+}
+
+func TestNativeUSBSelection(t *testing.T) {
+	deck := usbInfo(0x18d1, 0x4ee0, "SC LIVE 4", false)
+	normal := usbInfo(0x15e4, 0xd012, "SC LIVE 4", false)
+	normal.Interfaces[0].Class = 1
+	for _, tc := range []struct {
+		name      string
+		devices   []usb.DeviceInfo
+		ambiguous bool
+	}{
+		{"none", nil, false},
+		{"normal-mode", []usb.DeviceInfo{normal}, false},
+		{"rockchip-loader", []usb.DeviceInfo{usbInfo(0x2207, 0x320a, "Rockchip", false)}, false},
+		{"two-decks", []usb.DeviceInfo{deck, deck}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := &testUSB{enumerate: func() []usb.DeviceInfo { return tc.devices }}
+			o := testOpts(t)
+			o.USB = d
+			o.defaults()
+			found, err := tryUSB(ctxT(t), o, "")
+			if found != tc.ambiguous || (err != nil) != tc.ambiguous || d.opens != 0 {
+				t.Fatalf("found=%t err=%v opens=%d", found, err, d.opens)
+			}
+		})
+	}
+}
+
+func TestWindowsNativeDriverHint(t *testing.T) {
+	oldOS := goos
+	goos = "windows"
+	t.Cleanup(func() { goos = oldOS })
+	o := testOpts(t)
+	o.ListUSB = func(context.Context) string {
+		return usbLine(usbInfo(0x15e4, 0x303f, "Numark MIXSTREAM PRO PLUS", false))
+	}
+	o.defaults()
+	diagnoseUSB(ctxT(t), o)
+	out := o.Out.(*bytes.Buffer).String()
+	if !strings.Contains(out, "WinUSB") || !strings.Contains(out, "Firmware Update Mode") {
+		t.Fatal(out)
+	}
+	for _, obsolete := range []string{"WSL", "Zadig", "Android Bootloader"} {
+		if strings.Contains(out, obsolete) {
+			t.Errorf("obsolete native instruction %s: %s", obsolete, out)
+		}
+	}
 }
