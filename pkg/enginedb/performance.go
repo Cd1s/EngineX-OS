@@ -176,13 +176,19 @@ var overviewBatch = 256
 // FillOverviewMaxima completes the overviews an earlier build imported: they end in a
 // zero triple where Engine expects each band's maximum, the value it scales that band by.
 // It commits a batch at a time and stops at deadline (zero: none): the mount hook kills
-// rb-bridge when its time is up, and what one mount completed must not be lost to the
-// next. done reports that it has been through every overview.
+// rb-bridge when its time is up. After each batch it records how far it has come
+// (OverviewProgress), and the next mount goes on from there: a library whose finished
+// part alone takes a mount's time to read would never be finished otherwise. done reports
+// that it has been through every overview.
 func FillOverviewMaxima(ctx context.Context, mount string, deadline time.Time) (done bool, err error) {
 	return fillOverviewMaxima(ctx, mount, deadline, time.Now)
 }
 
 func fillOverviewMaxima(ctx context.Context, mount string, deadline time.Time, now func() time.Time) (bool, error) {
+	progress := ReadOverviewProgress(mount)
+	if progress.done {
+		return true, nil
+	}
 	dbPath := filepath.Join(mount, "Engine Library", "Database2", "m.db")
 	if err := safeFile(dbPath); err != nil {
 		return false, err
@@ -193,15 +199,20 @@ func fillOverviewMaxima(ctx context.Context, mount string, deadline time.Time, n
 	}
 	defer db.Close()
 	db.SetMaxOpenConns(1)
-	for after := int64(math.MinInt64); ; {
+	for {
 		if !deadline.IsZero() && !now().Before(deadline) {
 			return false, nil
 		}
-		n, last, err := fillOverviewBatch(ctx, db, after)
-		if err != nil || n < overviewBatch {
-			return err == nil, err
+		n, last, err := fillOverviewBatch(ctx, db, progress.after)
+		if err != nil {
+			return false, err
 		}
-		after = last
+		// Only what is committed counts: killed before the next line, the next mount reads
+		// this batch once more and finds it complete.
+		progress.after, progress.done = last, n < overviewBatch
+		if err := progress.Keep(mount); err != nil || progress.done {
+			return progress.done, err
+		}
 	}
 }
 

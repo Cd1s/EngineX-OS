@@ -3,8 +3,12 @@ package bridge_test
 import (
 	"bytes"
 	"database/sql"
+	"encoding/hex"
+	"math"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -76,9 +80,24 @@ func completed(t *testing.T, db *sql.DB, table string, want map[int64][]byte) bo
 	return true
 }
 
+// overviewMarked reports whether the backfill is recorded as through the library: the
+// generation of its imports alone, with no track to go on from.
 func overviewMarked(root string) bool {
-	_, err := os.Stat(filepath.Join(root, "Engine Library/Database2/.rb-bridge-overview"))
-	return err == nil
+	b, err := os.ReadFile(filepath.Join(root, "Engine Library/Database2/.rb-bridge-overview"))
+	return err == nil && len(strings.Fields(string(b))) == 1
+}
+
+// recordPlace writes the backfill's progress as a mount cut short after track leaves it.
+func recordPlace(t *testing.T, root string, track int64) {
+	t.Helper()
+	dir := filepath.Join(root, "Engine Library/Database2")
+	state, err := os.ReadFile(filepath.Join(dir, ".rb-bridge-state.db"))
+	if err != nil || len(state) < 100 {
+		t.Fatal(len(state), err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".rb-bridge-overview"), []byte(hex.EncodeToString(state[:100])+" "+strconv.FormatInt(track, 10)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // A stick an earlier build imported has overviews without the band maxima Engine scales
@@ -191,5 +210,51 @@ CREATE TRIGGER ViewUpdate INSTEAD OF UPDATE ON PerformanceData BEGIN UPDATE Real
 	exec(`DROP VIEW PerformanceData; ALTER TABLE RealPerformanceData RENAME TO PerformanceData`)
 	if issue233Mount(t, root, enginedb.Options{}); !completed(t, db, "PerformanceData", want) || !overviewMarked(root) {
 		t.Fatal("the next insert did not complete the library")
+	}
+}
+
+// Review of d60a683: every mount read the library from its first track, so one whose
+// finished part took the mount's time never got further. A mount goes on after the track
+// the last one recorded,
+func TestOverviewBackfillGoesOnAfterTheRecordedTrack(t *testing.T) {
+	root, db, want := oldOverviews(t, 2)
+	first, second := int64(math.MaxInt64), int64(0)
+	for id := range want {
+		first, second = min(first, id), max(second, id)
+	}
+	recordPlace(t, root, first)
+	if r := issue233Mount(t, root, enginedb.Options{}); !r.Bypassed || !overviewMarked(root) {
+		t.Fatalf("the backfill did not finish: %+v", r)
+	}
+	if !completed(t, db, "PerformanceData", map[int64][]byte{second: want[second]}) || completed(t, db, "PerformanceData", map[int64][]byte{first: want[first]}) {
+		t.Fatal("the mount did not go on after the recorded track")
+	}
+}
+
+// and this build's own import in between keeps the place, also on a mount that has no
+// time left for the backfill itself.
+func TestOwnImportKeepsThePlaceOfTheBackfill(t *testing.T) {
+	root, db, want := oldOverviews(t, 2)
+	first, second := int64(math.MaxInt64), int64(0)
+	for id := range want {
+		first, second = min(first, id), max(second, id)
+	}
+	recordPlace(t, root, first)
+	testfixture.LargeExport(t, root, 3)
+	restore := bridge.SlowExportReadForTest(0, time.Nanosecond)
+	r := issue233Mount(t, root, enginedb.Options{})
+	restore()
+	if r.Bypassed || completed(t, db, "PerformanceData", map[int64][]byte{second: want[second]}) {
+		t.Fatalf("fixture: the mount had no import or had time for the backfill: %+v", r)
+	}
+	for r.Deferred > 0 { // the mounts that read the new track's files
+		r = issue233Mount(t, root, enginedb.Options{})
+	}
+	issue233Mount(t, root, enginedb.Options{})
+	if !overviewMarked(root) || !completed(t, db, "PerformanceData", map[int64][]byte{second: want[second]}) {
+		t.Fatal("the backfill did not finish after the import")
+	}
+	if completed(t, db, "PerformanceData", map[int64][]byte{first: want[first]}) {
+		t.Fatal("the backfill began again at the first track after this build's own import")
 	}
 }
