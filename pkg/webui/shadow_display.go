@@ -58,6 +58,7 @@ type shadowDisplayEntry struct {
 	at             time.Time
 	retry          time.Time
 	tileMu         sync.Mutex
+	imageBytes     int      // protected by tileMu, bounded across tiles and styles
 	tiles          [][]byte // detailed images are generated once, on first visible use
 	styled         map[shadowWaveStyle]map[int][]byte
 }
@@ -75,7 +76,7 @@ func (c *shadowDisplayCache) claim(id string, now time.Time) *shadowDisplayEntry
 	if e := c.entries[id]; e != nil {
 		return e
 	}
-	if len(c.entries) >= 16 {
+	if len(c.entries) >= shadowCacheEntries {
 		oldest := ""
 		for k, e := range c.entries {
 			if !e.busy && (oldest == "" || e.at.Before(c.entries[oldest].at)) {
@@ -89,6 +90,10 @@ func (c *shadowDisplayCache) claim(id string, now time.Time) *shadowDisplayEntry
 	}
 	e := &shadowDisplayEntry{at: now}
 	c.entries[id] = e
+	if !c.trim(id) {
+		delete(c.entries, id)
+		return nil
+	}
 	return e
 }
 
@@ -210,7 +215,7 @@ func (s *Server) shadowComposeDisplay(role string, now time.Time, lines ...[]int
 		}
 		p = s.localPeerTrack(p, now)
 		d := p.deckState
-		d.Deck, d.Key = deck, displayTrackKey(p)
+		d.Deck, d.Key, d.ID = deck, displayTrackKey(p), p.Key
 		d.LineIn = false
 		d.Stale = p.Stale || now.Sub(p.at) >= 2*time.Second
 		if d.Playing && !p.Scratch {
@@ -398,6 +403,10 @@ func (s *Server) ensureCDJDisplay(dev prolink.Device, host net.IP, key, version 
 		e.tiles = make([][]byte, (len(detail.Bands)/3+2047)/2048)
 	}
 	c.entries[key] = e
+	if !c.trim(key) {
+		delete(c.entries, key)
+		return nil
+	}
 	return e
 }
 
@@ -464,7 +473,9 @@ func (s *Server) ensureShadowDisplay(p peerDeck, now time.Time) *shadowDisplayEn
 		return nil
 	}
 	e.at = now
-	if e.asset != nil && (!e.asset.DetailPending || now.Before(e.retry) || e.busy) {
+	// Stable audio identity reuses the cache; a new load must refresh grid/cues.
+	current := e.asset != nil && e.asset.Key == p.Key
+	if current && (!e.asset.DetailPending || now.Before(e.retry) || e.busy) {
 		c.mu.Unlock()
 		return e // immutable after publication
 	}
@@ -475,7 +486,7 @@ func (s *Server) ensureShadowDisplay(p peerDeck, now time.Time) *shadowDisplayEn
 	e.busy = true
 	c.mu.Unlock()
 	go s.fetchShadowDisplay(p, id, e)
-	if e.asset != nil {
+	if current {
 		return e
 	}
 	return nil
@@ -557,11 +568,14 @@ func (s *Server) fetchShadowDisplay(p peerDeck, id string, slot *shadowDisplayEn
 			if a.Waveform != nil {
 				e.tiles = make([][]byte, (len(a.Waveform.Bands)/3+2047)/2048)
 			}
-		} else if slot.asset != nil {
+		} else if slot.asset != nil && slot.asset.Key == p.Key {
 			e.asset, e.wave, e.overview = slot.asset, slot.wave, slot.overview
 		}
 		c.entries[id] = e
-		changed = displayReadinessChanged(slot, e)
+		if !c.trim(id) {
+			delete(c.entries, id)
+		}
+		changed = displayReadinessChanged(slot, e) || (e.asset != nil && (slot.asset == nil || slot.asset.Key != e.asset.Key))
 	}
 	c.mu.Unlock()
 	sh.dbg.event("display-fetch", map[string]any{"deck": p.Deck, "ok": err == nil, "changed": changed})
@@ -864,46 +878,13 @@ func libraryDisplay(ctx context.Context, f, dataRoot, mediaRoot string) (*shadow
 		}
 	}
 	if orig, ok := inMusicTempOrig(f, dataRoot); ok {
-		for _, name := range []string{"m.db", "stm.db"} {
-			if a, err2 := dbDisplayByFilename(ctx, filepath.Join(lib, "Database2", name), orig); err2 == nil {
-				return a, nil
+		if st, statErr := os.Stat(f); statErr == nil {
+			if real := resolveInMusicTempPath(ctx, orig, st.Size(), dataRoot); real != "" {
+				return libraryDisplay(ctx, real, dataRoot, mediaRoot)
 			}
 		}
 	}
 	return nil, err
-}
-
-func dbDisplayByFilename(ctx context.Context, file, filename string) (*shadowDisplayAsset, error) {
-	if _, err := os.Stat(file); err != nil {
-		return nil, err
-	}
-	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: file}).String()+"?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(500)")
-	if err != nil {
-		return nil, err
-	}
-	defer db.Close()
-	rows, err := db.QueryContext(ctx, `SELECT path FROM Track WHERE filename = ? LIMIT 2`, filename)
-	if err != nil {
-		return nil, err
-	}
-	var rel string
-	count := 0
-	for rows.Next() {
-		count++
-		if count > 1 {
-			rows.Close()
-			return nil, fmt.Errorf("display: ambiguous filename")
-		}
-		if err := rows.Scan(&rel); err != nil {
-			rows.Close()
-			return nil, err
-		}
-	}
-	rows.Close()
-	if count != 1 || rel == "" {
-		return nil, sql.ErrNoRows
-	}
-	return dbDisplay(ctx, file, rel)
 }
 
 func bridgeDisplayWave(ctx context.Context, file, rel string, id int64, rate, durationMS float64) *enginedb.DisplayWave {
@@ -1140,6 +1121,11 @@ func (s *Server) shadowWaveformGet(w http.ResponseWriter, r *http.Request) {
 		if images == nil {
 			// Bound theme/brightness variants even for arbitrary local requests.
 			if len(e.styled) >= 8 {
+				for _, variant := range e.styled {
+					for _, png := range variant {
+						e.imageBytes -= cap(png)
+					}
+				}
 				clear(e.styled)
 			}
 			images = make(map[int][]byte)
@@ -1148,7 +1134,7 @@ func (s *Server) shadowWaveformGet(w http.ResponseWriter, r *http.Request) {
 		b := images[index]
 		if b == nil {
 			b, err = renderShadowWaveStyle(wave, width, height, style)
-			if err == nil {
+			if err == nil && e.retainImage(b) {
 				images[index] = b
 			}
 		}
@@ -1170,12 +1156,15 @@ func (s *Server) shadowWaveformGet(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		e.tileMu.Lock()
-		if e.tiles[n] == nil {
+		b = e.tiles[n]
+		if b == nil {
 			bands := e.asset.Waveform.Bands
 			lo, hi := n*2048*3, min(len(bands), (n+1)*2048*3)
-			e.tiles[n], err = renderShadowWave(enginedb.DisplayWave{Bands: bands[lo:hi]}, (hi-lo)/3, 128)
+			b, err = renderShadowWave(enginedb.DisplayWave{Bands: bands[lo:hi]}, (hi-lo)/3, 128)
+			if err == nil && e.retainImage(b) {
+				e.tiles[n] = b
+			}
 		}
-		b = e.tiles[n]
 		e.tileMu.Unlock()
 		if err != nil {
 			http.Error(w, "render failed", 500)

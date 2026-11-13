@@ -801,7 +801,7 @@ SERVICES_MAIN = """
 	// steady playback then only move the extrapolation anchor (read imperatively
 	// by the displays) instead of re-running every shadow binding per reply.
 	function scShadowSameSample(s, key, e) {
-		if (s.key !== key || s.name !== (e.name || "") || s.title !== (e.title || "") || s.artist !== (e.artist || "") || s.keyName !== (e.keyName || "") ||
+		if (s.key !== key || s.id !== (e.id || "") || s.name !== (e.name || "") || s.title !== (e.title || "") || s.artist !== (e.artist || "") || s.keyName !== (e.keyName || "") ||
 			s.playing !== !!e.playing || s.scratch !== !!e.scratch || s.stale !== !!e.stale || s.metadataOnly !== !!e.metadataOnly || s.lineIn !== !!e.lineIn || s.pitch !== (Number(e.pitch) || 0) ||
 			s.cuePos !== (typeof e.cuePos === "number" ? e.cuePos : undefined) || s.master !== !!e.master ||
 			s.lead !== (e.lead !== undefined && e.lead !== null ? !!e.lead : !!e.master) || s.sync !== !!e.sync || s.keylock !== !!e.keylock ||
@@ -843,8 +843,12 @@ SERVICES_MAIN = """
 			// From the cover of an Engine load (header only, detail: false) to the display renderer, as on a
 			// live switch to All CDJ Mode: start over, or the lane keeps the stretched overview for good.
 			const fromCover = !!old && old.engine && !e.engine
-			if (fromCover) { delete scShadowDisplayRequests[d]; delete scShadowDisplayText[d] }
-			const sample = {key: key, name: e.name || "", title: e.title || "", artist: e.artist || "", keyName: e.keyName || "",
+			const newSession = !!old && old.id !== (e.id || "")
+			if (fromCover || newSession) {
+				delete scShadowDisplayRequests[d]; delete scShadowDisplayText[d]
+				delete scShadowGridCache[d]; delete scShadowLiveCueCache[d]
+			}
+			const sample = {key: key, id: e.id || "", name: e.name || "", title: e.title || "", artist: e.artist || "", keyName: e.keyName || "",
 				playing: !!e.playing, scratch: !!e.scratch, stale: !!e.stale, metadataOnly: !!e.metadataOnly, positionMs: pos, at: at,
 				pitch: Number(e.pitch) || 0, rate: Number(e.rate) || 0, lineIn: isLine,
 				cuePos: typeof e.cuePos === "number" ? e.cuePos : undefined, master: !!e.master,
@@ -853,7 +857,7 @@ SERVICES_MAIN = """
 				jumps: Number(e.jumps) || 0,
 				progress: Number(e.progress) || 0, error: e.error || "", engine: !!e.engine, copying: !!e.copying, durationMs: Number(e.durationMs) || 0,
 				fallback: e.fallback || "",
-				meta: old && old.key === key && !fromCover ? old.meta : null,
+				meta: old && old.key === key && !fromCover && !newSession ? old.meta : null,
 				liveCues: Array.isArray(e.cues) ? (same ? old.liveCues : e.cues) : old && old.key === key ? old.liveCues : null}
 			if (!next) next = Object.assign({}, scShadowDisplay)
 			next[d] = sample
@@ -1039,7 +1043,7 @@ SERVICES_MAIN = """
 	// post over UDP and the receiver's Go wakes the long poll below. The receiver
 	// applies a play or stop edge on the first update, never behind a lock.
 	property var scShadowAt: ({})
-	property var scShadowPrev: ({}) // own decks at the last 40 ms sample
+	property var scShadowPrev: ({}) // two reusable buffers per own deck
 	property real scShadowPostAt: 0
 	property real scShadowPollAt: 0
 	property real scShadowVer: 0
@@ -1435,14 +1439,9 @@ SERVICES_MAIN = """
 			s.cue = !s.ps && !touch && !!g.cueLED.state && !!p && s.net === p.net && (s.posMs > p.posMs + 0.5 || p.cue)
 			s.playing = s.ps || s.cue
 			s.master = !!g.master.state
-			s.rawStillTicks = p && p.ps && s.net === p.net && now - p.at <= 150 && s.rawPos <= p.rawPos + 0.5 ? (p.rawStillTicks || 0) + 1 : 0
-			s.rawBackTicks = p && p.ps && s.net === p.net && now - p.at <= 150 && s.rawPos < p.rawPos - 1 ? (p.rawBackTicks || 0) + 1 : 0
-			s.pausedMoveTicks = p && !s.ps && !p.ps && s.net === p.net && !s.cue && now - p.at <= 150 && Math.abs(s.rawPos - p.rawPos) > 1 ? (p.pausedMoveTicks || 0) + 1 : 0
-			const jumpThreshold = s.sync && p && p.playing ? 40 * Math.max(1, 1 + s.pitch / 100) : (p && p.playing ? 180 : 5)
-			const rawDelta = p ? Math.abs(s.rawPos - (p.posMs + (p.playing ? (now - p.at) * (1 + p.pitch / 100) : 0))) : 0
-			const motionScratch = p && s.net === p.net && now - p.at <= 150 && rawDelta <= jumpThreshold && (s.ps ? (p.ps && (s.rawPos < p.rawPos - 45 || s.rawBackTicks >= 2 || s.rawStillTicks >= 2)) : (s.pausedMoveTicks >= 2))
-			s.scratch = s.loaded && (touch || !!motionScratch)
-			if (p && s.scratch !== !!p.scratch) edge = true
+			s.loop = !!g.loop.state
+			s.rawBackTicks = !s.loop && p && p.ps && s.net === p.net && now - p.at <= 150 && s.rawPos < p.rawPos - 1 ? (p.rawBackTicks || 0) + 1 : 0
+			s.pausedMoveTicks = !s.loop && p && !s.ps && !p.ps && s.net === p.net && !s.cue && now - p.at <= 150 && Math.abs(s.rawPos - p.rawPos) > 1 ? (p.pausedMoveTicks || 0) + 1 : 0
 			if (p && p.bpm === ob && p.currentBpm === cb && now - p.syncAt < 200) { s.sync = p.sync; s.syncAt = p.syncAt; s.range = p.range; s.rangeIndex = p.rangeIndex; s.keylock = p.keylock }
 			else {
 				s.sync = (g.sync.string || "Off") !== "Off"; s.syncAt = now; s.keylock = !!g.keylock.state
@@ -1450,6 +1449,12 @@ SERVICES_MAIN = """
 				s.rangeIndex = g.range.index
 				s.range = p && p.rangeIndex === s.rangeIndex ? p.range : parseFloat(g.range.string) || 0
 			}
+			const jumpThreshold = s.sync && p && p.playing ? 40 * Math.max(1, 1 + s.pitch / 100) : (p && p.playing ? 180 : 5)
+			const rawDelta = p ? Math.abs(s.rawPos - (p.posMs + (p.playing ? (now - p.at) * (1 + p.pitch / 100) : 0))) : 0
+			// Loop Roll also enables the stock loop state. Physical touch still wins.
+			const motionScratch = !s.loop && p && s.net === p.net && now - p.at <= 150 && rawDelta <= jumpThreshold && (s.ps ? (p.ps && (s.rawPos < p.rawPos - 45 || s.rawBackTicks >= 2)) : (s.pausedMoveTicks >= 2))
+			s.scratch = s.loaded && (touch || !!motionScratch)
+			if (p && s.scratch !== !!p.scratch) edge = true
 			const syncChange = p && s.sync && (!p.sync || Math.abs(s.pitch - p.pitch) > 0.02)
 			s.syncUntil = !s.sync ? 0 : syncChange ? now + 2000 : p ? p.syncUntil || 0 : 0
 			const syncMoving = s.ps && now < s.syncUntil
@@ -1763,7 +1768,7 @@ SERVICES_MAIN = """
 			const d = Number(e.deck), at = scShadowAt[d]
 			if (e.displayOnly === true || e.lineIn || scFourDeckRole.indexOf(String(d)) >= 0 || !(e.path || e.loading)) continue
 			if (e.path && at && at.ready && at.path === e.path) continue
-			out.push({deck: d, key: e.key || "", title: e.title, artist: e.artist, bpm: e.bpm, pitch: e.pitch, durationMs: e.durationMs,
+			out.push({deck: d, key: e.key || "", id: e.id || "", title: e.title, artist: e.artist, bpm: e.bpm, pitch: e.pitch, durationMs: e.durationMs,
 				loading: true, engine: true, copying: !e.path, progress: e.progress, error: e.error})
 		}
 		return out
@@ -1854,9 +1859,7 @@ SERVICES_MAIN = """
 		if ((scShadowDisplayOnly || ((scShadowEngineMask >> d) & 1) === 0) && !(scShadowAt[d] && scShadowAt[d].path)) return
 		const at = scShadowAt[d] || (scShadowAt[d] = {path: ""})
 		at.landing = undefined
-		const pTouch = root.scTr("/Engine/Deck" + d + "/ExternalScratchWheelTouch")
-		if (pTouch && pTouch.state) pTouch.state = false
-		at.scratch = false
+		scShadowScratchRelease(d, at)
 		// On an all-in-one console (#160), leave Decks 3/4 alone unless a shadow peer loaded them.
 		if (!root.scPlayer && !at.path) return
 		const pPlay = root.scTr("/Engine/Deck" + d + "/Play")
@@ -1887,10 +1890,13 @@ SERVICES_MAIN = """
 		// same path can be another file, and a track loaded again is a new load.
 		const id = e.id || e.path
 		if (at.path !== e.path || at.id !== id) {
+			scShadowScratchRelease(d, at)
 			at = scShadowAt[d] = {path: e.path, id: id, tries: 0, seekAt: 0, seeks: 0, loads: at.loads || 0, jumps: e.jumps, nativeSync: !!at.nativeSync}
 			root.scShadowLoad(d, at, e, now)
 			return
 		}
+		const wasScratch = !!at.scratch
+		if (!e.scratch || e.stale) scShadowScratchRelease(d, at)
 		if (!root.scShadowHolds(d, at, e, now)) return
 		at.ready = true
 		if (root.scShadowEnd(d, at, e, now)) return
@@ -1908,7 +1914,7 @@ SERVICES_MAIN = """
 		at.sourceTarget = e.positionMs + (e.playing && !e.scratch && e.at ? Math.max(0, now - e.at) * at.rate : 0)
 		at.sourceAt = now; at.sourcePlaying = !!e.playing && !e.stale
 		if (!at.sourcePlaying || !e.sync || !e.link || !root.scPlayer || at.nativeSync || (e.sync && e.pitch > 100)) at.landing = undefined
-		if (e.seq && e.seq === at.lastSeq && e.playing === local && !at.wantMaster && !at.check && !at.nativeSync && !e.scratch && !at.scratch) return
+		if (e.seq && e.seq === at.lastSeq && e.playing === local && !at.wantMaster && !at.check && !at.nativeSync && !e.scratch && !wasScratch) return
 		at.lastSeq = e.seq
 		const wasPreview = at.preview
 		at.preview = !!e.cue
@@ -2026,15 +2032,19 @@ SERVICES_MAIN = """
 			scPress("/Engine/Deck" + d + (wantSync ? "/Sync" : "/UnSync"))
 			at.syncAt = now + 800
 		}
-		if (e.scratch) {
+		if (e.scratch && !e.stale) {
 			at.landing = undefined; at.phaseUntil = 0; at.env = undefined; at.fine = undefined; at.over = 0; at.wide = false
 			if (scShadowBent && scShadowBent.at === at) scShadowBendEnd()
 			const en = g("/ExternalScratchWheelScratchEnable"), tc = g("/ExternalScratchWheelTouch"), mv = g("/ExternalScratchWheelMove")
+			if (!at.scratch) {
+				at.scratchEnable = en ? !!en.state : undefined
+				at.scratchTouch = tc ? !!tc.state : undefined
+			}
 			if (en && !en.state) en.state = true
 			if (tc && !tc.state) tc.state = true
 			at.scratch = true
 			if (Math.abs(drift) > 150) {
-				if (now - at.seekAt >= 80) seek(target)
+				if (now - at.seekAt >= 250) seek(target)
 			} else if (Math.abs(drift) > 6 && mv) {
 				const ticks = Math.min(2500, Math.round(Math.abs(drift) * (e.playing ? 15 : 35)))
 				if (ticks >= 15) {
@@ -2045,14 +2055,9 @@ SERVICES_MAIN = """
 			at.jumps = e.jumps
 			return dbg("scratch")
 		}
-		if (at.scratch) {
-			at.scratch = false
-			const tc = g("/ExternalScratchWheelTouch")
-			if (tc && tc.state) tc.state = false
-			at.env = undefined; at.fine = undefined; at.over = 0; at.wide = false
+		if (wasScratch) {
 			if (Math.abs(drift) > 35 && now - at.seekAt >= 80) {
-				seek(target)
-				at.jumps = e.jumps
+				seek(target); at.jumps = e.jumps
 				return dbg("scratch-end")
 			}
 		}
@@ -2261,9 +2266,19 @@ SERVICES_MAIN = """
 		b.p.state = false
 		b.at.env = undefined
 	}
+	function scShadowScratchRelease(d, at) {
+		if (!at || !at.scratch) return
+		const tc = root.scTr("/Engine/Deck" + d + "/ExternalScratchWheelTouch")
+		const en = root.scTr("/Engine/Deck" + d + "/ExternalScratchWheelScratchEnable")
+		if (tc && at.scratchTouch !== undefined && !!tc.state !== at.scratchTouch) tc.state = at.scratchTouch
+		if (en && at.scratchEnable !== undefined && !!en.state !== at.scratchEnable) en.state = at.scratchEnable
+		at.scratch = false; at.scratchTouch = undefined; at.scratchEnable = undefined
+		at.env = undefined; at.fine = undefined; at.over = 0; at.wide = false
+	}
 	// Asks Engine for the source's track on shadow deck d. Engine answers nothing,
 	// so scShadowHolds reads back what the deck holds and asks again.
 	function scShadowLoad(d, at, e, now) {
+		scShadowScratchRelease(d, at)
 		if (((scShadowEngineMask >> d) & 1) === 0) return
 		// Lock Playing Deck refuses a load onto a playing deck, and no other track
 		// may play under the source's name: stop first, and ask again soon.

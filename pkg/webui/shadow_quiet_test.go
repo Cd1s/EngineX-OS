@@ -262,6 +262,7 @@ func TestShadowStateHeaderCarriesDisplayDetail(t *testing.T) {
 	s.shadow.mu.Unlock()
 	id := displayPeerID(p)
 	set := func(a *shadowDisplayAsset) {
+		a.Key = "a"
 		s.shadow.display.mu.Lock()
 		s.shadow.display.entries = map[string]*shadowDisplayEntry{id: {asset: a, at: time.Now(), retry: time.Now().Add(time.Hour)}}
 		s.shadow.display.mu.Unlock()

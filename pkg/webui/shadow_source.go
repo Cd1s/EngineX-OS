@@ -54,75 +54,20 @@ func (s *Server) sourceDisplayAsset(ctx context.Context, path, key string, detai
 	if c.entries == nil {
 		c.entries = map[string]*shadowSourceEntry{}
 	}
-	if e := c.entries[stableKey]; e != nil && sameSourcePath(e.path, path, s.shadow.dataRoot) {
+	if e := c.entries[stableKey]; e != nil && sameSourcePath(e.path, path, s.shadow.dataRoot) && e.req == key {
 		e.at = time.Now()
-		if size := e.size.Load(); e.asset.DetailPending && size > 0 {
-			a := *e.asset // the cached asset stays immutable
-			a.Key = key
-			a.DetailProgress = min(1, math.Round(float64(e.read.Load())/float64(size)*100)/100)
-			c.mu.Unlock()
-			return &a, nil
+		a := e.asset
+		if size := e.size.Load(); a.DetailPending && size > 0 {
+			copyAsset := *a
+			copyAsset.DetailProgress = min(1, math.Round(float64(e.read.Load())/float64(size)*100)/100)
+			a = &copyAsset
 		}
-		if e.req == "" || e.req == key || !detail || e.asset.DetailPending {
-			a := e.asset
-			if a.Key != "" && a.Key != key {
-				copyAsset := *a
-				copyAsset.Key = key
-				a = &copyAsset
-			}
-			c.mu.Unlock()
-			return a, nil
-		}
-		// New load session for a previously computed track: reuse the Waveform
-		// envelope without re-decoding audio, refreshing lightweight m.db metadata.
-		cachedWave := e.asset.Waveform
-		cachedSource := e.asset.DetailSource
 		c.mu.Unlock()
-		fresh, err := libraryDisplay(ctx, path, s.shadow.dataRoot, s.shadow.mediaRoot)
-		c.mu.Lock()
-		defer c.mu.Unlock()
-		if err == nil && c.entries[stableKey] == e {
-			fresh.Key, fresh.Version = key, 1
-			if cachedWave != nil {
-				fresh.Waveform = cachedWave
-				fresh.Detail = true
-				fresh.DetailSource = cachedSource
-			}
-			fresh.DetailPending = false
-			e.asset = fresh
-			e.path = path
-			e.req = key
-			e.at = time.Now()
-			return fresh, nil
-		}
-		if e := c.entries[stableKey]; e != nil {
-			copyAsset := *e.asset
-			copyAsset.Key = key
-			return &copyAsset, nil
-		}
-	}
-	if !detail {
-		c.mu.Unlock()
-		a, err := libraryDisplay(ctx, path, s.shadow.dataRoot, s.shadow.mediaRoot)
-		if err == nil {
-			a.Key, a.Version = key, 1
-		}
-		return a, err
-	}
-	if len(c.entries) >= 16 {
-		oldest := ""
-		for k, e := range c.entries {
-			if !e.queued && !e.working && (oldest == "" || e.at.Before(c.entries[oldest].at)) {
-				oldest = k
-			}
-		}
-		if oldest == "" {
-			c.mu.Unlock()
-			return nil, fmt.Errorf("display source busy")
-		}
-		delete(c.entries, oldest)
+		return a, nil
 	}
 	c.mu.Unlock()
+	// Revalidate metadata on every new load, including a load while the audio
+	// worker is running. The immutable waveform survives metadata-only changes.
 	a, err := libraryDisplay(ctx, path, s.shadow.dataRoot, s.shadow.mediaRoot)
 	if err != nil {
 		return nil, err
@@ -131,10 +76,19 @@ func (s *Server) sourceDisplayAsset(ctx context.Context, path, key string, detai
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if e := c.entries[stableKey]; e != nil && sameSourcePath(e.path, path, s.shadow.dataRoot) {
-		e.at = time.Now()
-		copyAsset := *e.asset
-		copyAsset.Key = key
-		return &copyAsset, nil
+		if e.asset.Waveform != nil && (a.Waveform == nil || e.asset.DetailSource == "source-envelope") {
+			a.Waveform, a.DetailSource = e.asset.Waveform, e.asset.DetailSource
+			a.Detail = true
+		}
+		a.DetailPending = a.Waveform == nil && (e.queued || e.working)
+		e.asset, e.path, e.req, e.at = a, path, key, time.Now()
+		if !c.trim(stableKey) {
+			delete(c.entries, stableKey)
+		}
+		return a, nil
+	}
+	if !detail {
+		return a, nil
 	}
 	e := &shadowSourceEntry{asset: a, path: path, key: stableKey, req: key, at: time.Now()}
 	if a.Waveform == nil {
@@ -142,6 +96,10 @@ func (s *Server) sourceDisplayAsset(ctx context.Context, path, key string, detai
 		e.queued = true
 	}
 	c.entries[stableKey] = e
+	if !c.trim(stableKey) {
+		delete(c.entries, stableKey)
+		return nil, fmt.Errorf("display source exceeds cache budget")
+	}
 	if e.queued && !c.running {
 		c.running = true
 		go s.shadowSourceWorker()
@@ -237,9 +195,10 @@ func (s *Server) shadowSourceWorker() {
 		}
 		job.queued = false
 		job.working = true
+		path := job.path
 		c.mu.Unlock()
 		ticker := &shadowSourceTicker{s: s, job: job, key: job.key, window: time.Now(), deadline: time.Now().Add(10 * time.Minute)}
-		if st, err := os.Stat(job.path); err == nil {
+		if st, err := os.Stat(path); err == nil {
 			job.size.Store(st.Size())
 		}
 		var envelope *analyzer.ShadowEnvelope
@@ -248,8 +207,9 @@ func (s *Server) shadowSourceWorker() {
 			// PCM full scale for every band. Stretched to trackData's own band peaks
 			// (0.63/0.36/0.19 on a real track) the three bands stacked past the lane
 			// edge on 60 % of the bins: a lane filled top to bottom, no transients.
-			envelope, err = analyzer.ShadowWaveformFile(job.path, [3]float64{1, 1, 1}, ticker)
+			envelope, err = analyzer.ShadowWaveformFile(path, [3]float64{1, 1, 1}, ticker)
 		}
+		c.mu.Lock()
 		copyAsset := *job.asset
 		copyAsset.DetailPending = false
 		if err == nil && envelope != nil && envelope.SampleRate > 0 && len(envelope.Bands) > 0 {
@@ -263,13 +223,15 @@ func (s *Server) shadowSourceWorker() {
 				copyAsset.DetailSource = "source-envelope"
 			}
 		}
-		c.mu.Lock()
 		if c.entries[job.key] == job {
 			job.working = false
 			if errors.Is(err, context.Canceled) {
 				delete(c.entries, job.key)
 			} else {
 				job.asset = &copyAsset
+				if !c.trim(job.key) {
+					delete(c.entries, job.key)
+				}
 			}
 		}
 		c.mu.Unlock()
