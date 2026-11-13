@@ -236,6 +236,17 @@ func TestNativeUSBSelection(t *testing.T) {
 	}
 }
 
+func TestNativeUSBRefusesLANBoardMismatch(t *testing.T) {
+	bundle := buildBundle(t, "SCLIVE4", "5.3.0.5")
+	fb := newFastboot(t, "jp21", true)
+	o := testOpts(t)
+	o.USB, o.Bundle = fb.Bin, bundle.Path
+	o.defaults()
+	found, err := tryUSB(ctxT(t), o, "jp20")
+	if !found || err == nil || !strings.Contains(err.Error(), "LAN board and selected USB deck disagree") { t.Fatalf("found=%t err=%v", found, err) }
+	if flashed := fb.Flashed(); len(flashed) != 0 { t.Fatalf("flashed despite LAN/USB mismatch: %v", flashed) }
+}
+
 func TestWindowsNativeDriverHint(t *testing.T) {
 	oldOS := goos
 	goos = "windows"
