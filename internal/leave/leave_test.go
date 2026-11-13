@@ -392,3 +392,36 @@ func TestLeaveLayoutHandsBackWithoutInstalling(t *testing.T) {
 		t.Fatal("/data/sc5000-custom is not a real directory")
 	}
 }
+
+// #234 review round 2 (R2): the older installers write the stage with cp and tar and never sync;
+// a swap is atomic, but orders no file contents before it. Every staged file and directory is
+// synced before the first swap of a part.
+func TestLeaveStagedPayloadIsDurableBeforeTheFirstSwap(t *testing.T) {
+	defer func(e func(a, b string) error, s func(string) error) { Exchange, syncPath = e, s }(Exchange, syncPath)
+	synced := map[string]bool{}
+	realSync, realExchange := syncPath, Exchange
+	syncPath = func(p string) error { synced[p] = true; return realSync(p) }
+	d, root := newDeck(t)
+	stage := filepath.Join(root, "data", journalName, "stage")
+	var unsynced []string
+	swaps := 0
+	Exchange = func(a, b string) error {
+		if !strings.Contains(a, "/probe-") {
+			if swaps++; swaps == 1 {
+				filepath.Walk(stage, func(p string, fi os.FileInfo, err error) error {
+					if err == nil && (fi.Mode().IsRegular() || fi.IsDir()) && !synced[p] {
+						unsynced = append(unsynced, p)
+					}
+					return nil
+				})
+			}
+		}
+		return realExchange(a, b)
+	}
+	if err := d.Install(legacyBundle(t, "5.3.0.2")); err != nil {
+		t.Fatal(err)
+	}
+	if swaps == 0 || len(unsynced) > 0 {
+		t.Fatalf("%d swaps; not synced before the first: %q", swaps, unsynced)
+	}
+}
