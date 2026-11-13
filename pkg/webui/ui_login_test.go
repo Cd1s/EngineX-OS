@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -791,6 +792,100 @@ func TestStrayEthernetDefaultOnlyWhenWiFiHasARoute(t *testing.T) {
 	}
 	if _, ok := strayEthernetDefault("default via 10.0.0.1 dev eth0 \n" + wifi); ok {
 		t.Fatal("touched a real Ethernet gateway")
+	}
+}
+
+// applyRoutes does to a route table what GuardRoutes's ip commands do, and routeDev picks
+// the interface the kernel would: the lowest metric, the first added among equals.
+func applyRoutes(table string, add, del [][]string) string {
+	lines := strings.Split(strings.TrimRight(table, "\n"), "\n")
+	for i := range del {
+		if add[i] != nil {
+			lines = append(lines, strings.Join(add[i][2:], " "))
+		}
+		for n, line := range lines {
+			f := strings.Fields(line)
+			if len(f) > 2 && f[0] == del[i][2] && f[2] == "wlan0" && !strings.Contains(line, "metric") {
+				lines = append(lines[:n], lines[n+1:]...)
+				break
+			}
+		}
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
+func routeDev(table, subnet string) string {
+	dev, best := "", -1
+	for _, line := range strings.Split(table, "\n") {
+		f := strings.Fields(line)
+		if len(f) < 3 || f[0] != subnet {
+			continue
+		}
+		metric := 0
+		for i := 1; i+1 < len(f); i++ {
+			if f[i] == "metric" {
+				metric, _ = strconv.Atoi(f[i+1])
+			}
+		}
+		if best < 0 || metric < best {
+			dev, best = f[2], metric
+		}
+	}
+	return dev
+}
+
+// Real decks, two SC5000 on one router by cable and by Wi-Fi: the deck that held the USB
+// drive answered the other's Link loads over Wi-Fi, because wlan0 had its address 1.1 s
+// before eth0 (13-19 MB tracks took 7.4-11.3 s to load, 4.1 s from the drive itself).
+func TestCableGoesBeforeWiFiOnTheSameSubnet(t *testing.T) {
+	const gateway = "default via 192.168.1.6 dev wlan0 \n"
+	const hosts = "192.168.1.6 dev eth0 scope link \n192.168.1.6 dev wlan0 scope link \n"
+	const wifi = "192.168.1.0/24 dev wlan0 scope link  src 192.168.1.108 \n"
+	const cable = "192.168.1.0/24 dev eth0 scope link  src 192.168.1.224 \n"
+	for name, table := range map[string]string{"Wi-Fi up first (the deck's own table)": gateway + wifi + cable + hosts, "the cable up first": gateway + cable + wifi + hosts} {
+		add, del := wifiTwinRoutes(table)
+		if len(del) != 1 || add[0] == nil {
+			t.Fatalf("%s: %v %v", name, add, del)
+		}
+		if got := strings.Join(add[0], " "); got != "route add 192.168.1.0/24 dev wlan0 scope link src 192.168.1.108 metric 600" {
+			t.Fatalf("%s: %s", name, got)
+		}
+		fixed := applyRoutes(table, add, del)
+		if dev := routeDev(fixed, "192.168.1.0/24"); dev != "eth0" {
+			t.Fatalf("%s: the other deck is reached over %s\n%s", name, dev, fixed)
+		}
+		if !strings.Contains(fixed, gateway) || !strings.Contains(fixed, hosts) {
+			t.Fatalf("%s: the default route or the gateway's routes changed\n%s", name, fixed)
+		}
+		if add, del := wifiTwinRoutes(fixed); len(add)+len(del) != 0 {
+			t.Fatalf("%s: done twice: %v %v", name, add, del)
+		}
+		// connman brings Wi-Fi up again (a new lease): its route is back, behind the cable's or not.
+		for _, again := range []string{fixed + wifi, wifi + fixed} {
+			add, del := wifiTwinRoutes(again)
+			if len(del) != 1 || add[0] != nil {
+				t.Fatalf("%s: after connman set the route again: %v %v", name, add, del)
+			}
+			if dev := routeDev(applyRoutes(again, add, del), "192.168.1.0/24"); dev != "eth0" {
+				t.Fatalf("%s: after connman set the route again: %s", name, dev)
+			}
+		}
+		// The cable comes out: connman takes eth0's address and routes away, Wi-Fi still has its own.
+		out := strings.ReplaceAll(strings.ReplaceAll(fixed, cable, ""), "192.168.1.6 dev eth0 scope link \n", "")
+		if add, del := wifiTwinRoutes(out); len(add)+len(del) != 0 || routeDev(out, "192.168.1.0/24") != "wlan0" {
+			t.Fatalf("%s: with the cable out: %v %v\n%s", name, add, del, out)
+		}
+	}
+	for name, table := range map[string]string{
+		"Wi-Fi only":                        gateway + wifi + "192.168.1.6 dev wlan0 scope link \n",
+		"the cable only":                    "default via 192.168.1.6 dev eth0 \n" + cable + "192.168.1.6 dev eth0 scope link \n",
+		"the cable on another subnet":       gateway + wifi + "192.168.2.0/24 dev eth0 scope link  src 192.168.2.20 \n",
+		"a cable to the other deck + Wi-Fi": gateway + wifi + "169.254.0.0/16 dev eth0 scope link  src 169.254.31.7 \n" + "192.168.1.6 dev wlan0 scope link \n",
+		"a route through a gateway":         gateway + wifi + "192.168.1.0/24 via 10.0.0.1 dev eth0 \n",
+	} {
+		if add, del := wifiTwinRoutes(table); len(add)+len(del) != 0 {
+			t.Fatalf("%s: %v %v", name, add, del)
+		}
 	}
 }
 
