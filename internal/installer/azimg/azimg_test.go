@@ -11,13 +11,20 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"hash/crc32"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/Cd1s/EngineX-OS/internal/installer/azimg"
@@ -36,6 +43,7 @@ func az01String(s string) []byte {
 
 type az01Opts struct {
 	version    uint32
+	build      string
 	compat     []string
 	usbs       []uint32
 	rootfsName string
@@ -49,6 +57,9 @@ type az01Opts struct {
 func buildSyntheticAZ01(o az01Opts) []byte {
 	if o.version == 0 {
 		o.version = 1
+	}
+	if o.build == "" {
+		o.build = "test-build"
 	}
 	if len(o.compat) == 0 {
 		o.compat = []string{"inmusic,jp07"}
@@ -70,7 +81,7 @@ func buildSyntheticAZ01(o az01Opts) []byte {
 	}
 
 	var hdr bytes.Buffer
-	hdr.Write(az01String("test-build"))
+	hdr.Write(az01String(o.build))
 	_ = binary.Write(&hdr, binary.LittleEndian, uint32(len(o.compat)))
 	for _, c := range o.compat {
 		hdr.Write(az01String(c))
@@ -141,6 +152,103 @@ func compressXZ(t *testing.T, data []byte, checkSum uint8) []byte {
 	return buf.Bytes()
 }
 
+func xzUvarint(v uint64) []byte {
+	var out []byte
+	for v >= 0x80 {
+		out = append(out, byte(v)|0x80)
+		v >>= 7
+	}
+	return append(out, byte(v))
+}
+
+// buildMultiBlockXZ builds a valid multi-block XZ stream (CRC32 check) with unsized block
+// headers (as xz -T1 writes them) and the given LZMA2 dictionary property byte per block.
+func buildMultiBlockXZ(dictProps []byte) []byte {
+	var b bytes.Buffer
+	b.Write([]byte{0xfd, '7', 'z', 'X', 'Z', 0})
+	flags := []byte{0x00, 0x01}
+	b.Write(flags)
+	_ = binary.Write(&b, binary.LittleEndian, crc32.ChecksumIEEE(flags))
+	type rec struct{ unpadded, uncompressed uint64 }
+	var recs []rec
+	data := []byte("hello")
+	for _, d := range dictProps {
+		bh := []byte{0x02, 0x00, 0x21, 0x01, d, 0x00, 0x00, 0x00}
+		b.Write(bh)
+		_ = binary.Write(&b, binary.LittleEndian, crc32.ChecksumIEEE(bh))
+		chunk := append([]byte{0x01, 0x00, byte(len(data) - 1)}, data...)
+		chunk = append(chunk, 0x00)
+		b.Write(chunk)
+		b.Write(make([]byte, (4-len(chunk)%4)%4))
+		_ = binary.Write(&b, binary.LittleEndian, crc32.ChecksumIEEE(data))
+		recs = append(recs, rec{uint64(12 + len(chunk) + 4), uint64(len(data))})
+	}
+	idx := []byte{0x00}
+	idx = append(idx, xzUvarint(uint64(len(recs)))...)
+	for _, r := range recs {
+		idx = append(idx, xzUvarint(r.unpadded)...)
+		idx = append(idx, xzUvarint(r.uncompressed)...)
+	}
+	for len(idx)%4 != 0 {
+		idx = append(idx, 0)
+	}
+	var crc [4]byte
+	binary.LittleEndian.PutUint32(crc[:], crc32.ChecksumIEEE(idx))
+	idx = append(idx, crc[:]...)
+	b.Write(idx)
+	var foot [6]byte
+	binary.LittleEndian.PutUint32(foot[:4], uint32(len(idx)/4-1))
+	foot[4], foot[5] = 0x00, 0x01
+	_ = binary.Write(&b, binary.LittleEndian, crc32.ChecksumIEEE(foot[:]))
+	b.Write(foot[:])
+	b.WriteString("YZ")
+	return b.Bytes()
+}
+
+// buildMultiBlockXZWithBadCompSize builds an XZ stream whose block header includes
+// compressedSize (flags=0x40) that disagrees with the stream index record.
+func buildMultiBlockXZWithBadCompSize() []byte {
+	var b bytes.Buffer
+	b.Write([]byte{0xfd, '7', 'z', 'X', 'Z', 0})
+	flags := []byte{0x00, 0x01}
+	b.Write(flags)
+	_ = binary.Write(&b, binary.LittleEndian, crc32.ChecksumIEEE(flags))
+	data := []byte("hello")
+	chunk := append([]byte{0x01, 0x00, byte(len(data) - 1)}, data...)
+	chunk = append(chunk, 0x00)
+	// Block header: size=2 (12 bytes), flags=0x40 (compressedSize present), compSize=99 (wrong, real is 9), filter=LZMA2 prop=0
+	bh := []byte{0x02, 0x40, 99, 0x21, 0x01, 0x00, 0x00, 0x00}
+	b.Write(bh)
+	_ = binary.Write(&b, binary.LittleEndian, crc32.ChecksumIEEE(bh))
+	b.Write(chunk)
+	b.Write(make([]byte, (4-len(chunk)%4)%4))
+	_ = binary.Write(&b, binary.LittleEndian, crc32.ChecksumIEEE(data))
+	unpadded := uint64(12 + len(chunk) + 4)
+	idx := append([]byte{0x00}, xzUvarint(1)...)
+	idx = append(idx, xzUvarint(unpadded)...)
+	idx = append(idx, xzUvarint(uint64(len(data)))...)
+	for len(idx)%4 != 0 {
+		idx = append(idx, 0)
+	}
+	var crc [4]byte
+	binary.LittleEndian.PutUint32(crc[:], crc32.ChecksumIEEE(idx))
+	idx = append(idx, crc[:]...)
+	b.Write(idx)
+	var foot [6]byte
+	binary.LittleEndian.PutUint32(foot[:4], uint32(len(idx)/4-1))
+	foot[4], foot[5] = 0x00, 0x01
+	_ = binary.Write(&b, binary.LittleEndian, crc32.ChecksumIEEE(foot[:]))
+	b.Write(foot[:])
+	b.WriteString("YZ")
+	return b.Bytes()
+}
+
+func totalAllocBytes() uint64 {
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	return ms.TotalAlloc
+}
+
 func TestAZ01ValidAlignedAndModels(t *testing.T) {
 	ctx := context.Background()
 	raw := []byte("hello engine rootfs payload")
@@ -201,20 +309,56 @@ func TestAZ01HostileInputsAndTruncation(t *testing.T) {
 		t.Fatalf("FDT err = %v, want ErrInvalidFormat", err)
 	}
 
-	// Corrupt version, unknown model, wrong partition name, wrong algo, trailing bytes, corrupt payload/digest/EOF.
-	badCases := map[string][]byte{
-		"version-2":       buildSyntheticAZ01(az01Opts{version: 2}),
-		"unknown-compat":  buildSyntheticAZ01(az01Opts{compat: []string{"inmusic,xx99"}}),
-		"bad-part-name":   buildSyntheticAZ01(az01Opts{rootfsName: "uboot"}),
-		"bad-part-path":   buildSyntheticAZ01(az01Opts{rootfsName: "../rootfs"}),
-		"bad-comp":        buildSyntheticAZ01(az01Opts{rootfsComp: "none"}),
-		"bad-hash-algo":   buildSyntheticAZ01(az01Opts{hashAlgo: "sha256"}),
-		"extra-signature": buildSyntheticAZ01(az01Opts{extraTrail: []byte("sig")}),
-	}
-	for name, b := range badCases {
-		if _, err := azimg.Open(ctx, bytes.NewReader(b), int64(len(b)), azimg.Limits{}); err == nil {
-			t.Errorf("%s was accepted", name)
+	// Compatible-string match must be exact like az01_packer.py (reject case/whitespace variants).
+	for _, badCompat := range []string{"inmusic,xx99", " inmusic,jp07", "INMUSIC,JP07", "inmusic,jp07 "} {
+		img := buildSyntheticAZ01(az01Opts{compat: []string{badCompat}})
+		if _, err := azimg.Open(ctx, bytes.NewReader(img), int64(len(img)), azimg.Limits{}); !errors.Is(err, azimg.ErrModelMismatch) {
+			t.Errorf("compat %q err = %v, want ErrModelMismatch", badCompat, err)
 		}
+	}
+
+	// Corrupt version, strings, partition name, algo, trailing bytes, nonzero align padding, missing NUL.
+	badCases := map[string]struct {
+		data []byte
+		want error
+	}{
+		"version-2":       {buildSyntheticAZ01(az01Opts{version: 2}), azimg.ErrUnsupported},
+		"bad-part-name":   {buildSyntheticAZ01(az01Opts{rootfsName: "uboot"}), azimg.ErrCorrupt},
+		"bad-part-path":   {buildSyntheticAZ01(az01Opts{rootfsName: "../rootfs"}), azimg.ErrCorrupt},
+		"bad-comp":        {buildSyntheticAZ01(az01Opts{rootfsComp: "none"}), azimg.ErrCorrupt},
+		"bad-hash-algo":   {buildSyntheticAZ01(az01Opts{hashAlgo: "sha256"}), azimg.ErrCorrupt},
+		"extra-signature": {buildSyntheticAZ01(az01Opts{extraTrail: []byte("sig")}), azimg.ErrCorrupt},
+		"build-nul":       {buildSyntheticAZ01(az01Opts{build: "bad\x00str"}), azimg.ErrCorrupt},
+		"build-nonascii":  {buildSyntheticAZ01(az01Opts{build: "bad\x80str"}), azimg.ErrCorrupt},
+	}
+	for name, tc := range badCases {
+		if _, err := azimg.Open(ctx, bytes.NewReader(tc.data), int64(len(tc.data)), azimg.Limits{}); !errors.Is(err, tc.want) {
+			t.Errorf("%s err = %v, want %v", name, err, tc.want)
+		}
+	}
+
+	// Corrupt NUL terminator of "test-build" string specifically (without changing padding).
+	badTerm := append([]byte(nil), good...)
+	// Offset 12=len("test-build")=10; bytes 16..25 are "test-build"; byte 26 is NUL terminator.
+	badTerm[26] = 'X'
+	if _, err := azimg.Open(ctx, bytes.NewReader(badTerm), int64(len(badTerm)), azimg.Limits{}); !errors.Is(err, azimg.ErrCorrupt) {
+		t.Errorf("missing string NUL terminator err = %v, want ErrCorrupt", err)
+	}
+
+	// Non-zero alignment padding before EOF must be rejected (aligned image with pad > 0).
+	unaligned := buildSyntheticAZ01(az01Opts{rootfs: []byte("rootfs0"), alignEOF: true})
+	imUn, err := azimg.Open(ctx, bytes.NewReader(unaligned), int64(len(unaligned)), azimg.Limits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	metaUn, _ := imUn.AZ01()
+	if metaUn.EOFOffset%8 == 0 {
+		t.Fatal("test setup expected non-8-byte-aligned EOFOffset before padding")
+	}
+	badAlignPad := append([]byte(nil), unaligned...)
+	badAlignPad[metaUn.EOFOffset] = 0x01
+	if _, err := azimg.Open(ctx, bytes.NewReader(badAlignPad), int64(len(badAlignPad)), azimg.Limits{}); !errors.Is(err, azimg.ErrCorrupt) {
+		t.Errorf("nonzero alignment padding err = %v, want ErrCorrupt", err)
 	}
 
 	im, err := azimg.Open(ctx, bytes.NewReader(good), int64(len(good)), azimg.Limits{})
@@ -242,11 +386,12 @@ func TestAZ01HostileXZStreams(t *testing.T) {
 	payload := compressXZ(t, bytes.Repeat([]byte("A"), 256*1024), xz.CRC32)
 
 	for name, badXZ := range map[string][]byte{
-		"trailing-junk": append(append([]byte(nil), payload...), []byte("junk")...),
-		"concatenated":  append(append([]byte(nil), payload...), payload...),
-		"truncated":     payload[:len(payload)-1],
-		"not-xz":        []byte("notxz"),
-		"no-check":      compressXZ(t, []byte("hello"), 0),
+		"trailing-junk":     append(append([]byte(nil), payload...), []byte("junk")...),
+		"trailing-zero-pad": append(buildMultiBlockXZ([]byte{0x00}), 0, 0, 0, 0),
+		"concatenated":      append(append([]byte(nil), payload...), payload...),
+		"truncated":         payload[:len(payload)-1],
+		"not-xz":            []byte("notxz"),
+		"no-check":          compressXZ(t, []byte("hello"), 0),
 	} {
 		t.Run(name, func(t *testing.T) {
 			imgBytes := buildSyntheticAZ01(az01Opts{rootfs: badXZ})
@@ -270,15 +415,42 @@ func TestAZ01HostileXZStreams(t *testing.T) {
 		t.Fatalf("oversized rootfs err = %v, want ErrLimitExceeded", err)
 	}
 
-	// Hostile 4 GiB LZMA2 dictionary in XZ block header must be rejected before allocation.
-	hostileDictXZ := buildHostileDictXZ(0x28) // 4 GiB - 1 dictionary
-	dictImg := buildSyntheticAZ01(az01Opts{rootfs: hostileDictXZ})
-	imDict, err := azimg.Open(ctx, bytes.NewReader(dictImg), int64(len(dictImg)), azimg.Limits{})
+	// Multi-block XZ without compressedSize in block headers: control succeeds, but block 2
+	// declaring a 1 GiB dictionary (prop 36) must be rejected BEFORE allocation.
+	okMulti := buildSyntheticAZ01(az01Opts{rootfs: buildMultiBlockXZ([]byte{0x00, 0x00})})
+	imOKMulti, err := azimg.Open(ctx, bytes.NewReader(okMulti), int64(len(okMulti)), azimg.Limits{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := imDict.ExtractRootfs(ctx, io.Discard); !errors.Is(err, azimg.ErrLimitExceeded) {
-		t.Fatalf("hostile LZMA2 dict err = %v, want ErrLimitExceeded", err)
+	var outMulti bytes.Buffer
+	if _, err := imOKMulti.ExtractRootfs(ctx, &outMulti); err != nil || outMulti.String() != "hellohello" {
+		t.Fatalf("2-block valid XZ failed: %q err=%v", outMulti.String(), err)
+	}
+
+	hostileMulti := buildSyntheticAZ01(az01Opts{rootfs: buildMultiBlockXZ([]byte{0x00, 36})})
+	imHostileMulti, err := azimg.Open(ctx, bytes.NewReader(hostileMulti), int64(len(hostileMulti)), azimg.Limits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := totalAllocBytes()
+	_, err = imHostileMulti.ExtractRootfs(ctx, io.Discard)
+	allocDelta := totalAllocBytes() - before
+	if !errors.Is(err, azimg.ErrLimitExceeded) {
+		t.Fatalf("2nd-block 1 GiB dict err = %v, want ErrLimitExceeded", err)
+	}
+	if allocDelta > 32<<20 {
+		t.Fatalf("2nd-block 1 GiB dict allocated %d MiB before rejection", allocDelta>>20)
+	}
+
+	// Also test sized XZ block header whose compressedSize mismatches the index record (M32).
+	sizedBadXZ := buildMultiBlockXZWithBadCompSize()
+	sizedImg := buildSyntheticAZ01(az01Opts{rootfs: sizedBadXZ})
+	imSized, err := azimg.Open(ctx, bytes.NewReader(sizedImg), int64(len(sizedImg)), azimg.Limits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := imSized.ExtractRootfs(ctx, io.Discard); !errors.Is(err, azimg.ErrCorrupt) {
+		t.Fatalf("mismatched block compSize err = %v, want ErrCorrupt", err)
 	}
 
 	// Also test SHA256 XZ integrity check is accepted.
@@ -294,28 +466,13 @@ func TestAZ01HostileXZStreams(t *testing.T) {
 	}
 }
 
-func buildHostileDictXZ(dictProp byte) []byte {
-	var b bytes.Buffer
-	// XZ Stream Header (12 bytes): magic + flags (CRC32) + CRC32
-	b.Write([]byte{0xfd, '7', 'z', 'X', 'Z', 0})
-	flags := []byte{0x00, 0x01}
-	b.Write(flags)
-	_ = binary.Write(&b, binary.LittleEndian, crc32.ChecksumIEEE(flags))
-	// XZ Block Header (12 bytes): size=2 -> 12 bytes, flags=0x00 (1 filter, no sizes), filter=LZMA2 (0x21, len=1, dictProp), pad, CRC32
-	bh := []byte{0x02, 0x00, 0x21, 0x01, dictProp, 0x00, 0x00, 0x00}
-	b.Write(bh)
-	_ = binary.Write(&b, binary.LittleEndian, crc32.ChecksumIEEE(bh))
-	// Minimal trailing padding so stream length >= 24
-	b.Write(make([]byte, 12))
-	return b.Bytes()
-}
-
 type tarEntrySpec struct {
-	name     string
-	typeflag byte
-	mode     int64
-	data     []byte
-	linkname string
+	name       string
+	typeflag   byte
+	mode       int64
+	data       []byte
+	linkname   string
+	paxRecords map[string]string
 }
 
 func buildRawTar(t *testing.T, specs []tarEntrySpec) []byte {
@@ -324,11 +481,15 @@ func buildRawTar(t *testing.T, specs []tarEntrySpec) []byte {
 	tw := tar.NewWriter(&buf)
 	for _, s := range specs {
 		h := &tar.Header{
-			Name:     s.name,
-			Mode:     s.mode,
-			Size:     int64(len(s.data)),
-			Typeflag: s.typeflag,
-			Linkname: s.linkname,
+			Name:       s.name,
+			Mode:       s.mode,
+			Size:       int64(len(s.data)),
+			Typeflag:   s.typeflag,
+			Linkname:   s.linkname,
+			PAXRecords: s.paxRecords,
+		}
+		if len(s.paxRecords) > 0 {
+			h.Format = tar.FormatPAX
 		}
 		if err := tw.WriteHeader(h); err != nil {
 			t.Fatal(err)
@@ -345,48 +506,107 @@ func buildRawTar(t *testing.T, specs []tarEntrySpec) []byte {
 	return buf.Bytes()
 }
 
-func buildValidGen2BundleTarGz(t *testing.T, prefix, version string, extra map[string][]byte, omitFromSums map[string]bool) []byte {
+type bundleBuildOpts struct {
+	prefix          string
+	top             string
+	extra           map[string][]byte
+	modes           map[string]int64
+	omitFromSums    map[string]bool
+	extraSumsLines  []string
+	rawExtraEntries []tarEntrySpec
+	omitSumsFile    bool
+	emptySumsFile   bool
+	gzipStored      bool
+	corruptSumFor   string
+}
+
+func buildTestBundleTarGz(t *testing.T, o bundleBuildOpts) []byte {
 	t.Helper()
-	top := prefix + "-" + version + "-EngineX-OS-Data-Bundle"
+	if o.prefix == "" {
+		o.prefix = "SCLIVE4"
+	}
+	version := "5.3.0.4"
+	top := o.top
+	if top == "" {
+		top = o.prefix + "-" + version + "-EngineX-OS-Data-Bundle"
+	}
 	uiTar := buildRawTar(t, []tarEntrySpec{
 		{name: "packs", typeflag: tar.TypeDir, mode: 0o755},
 		{name: "packs/en/Main.qml", typeflag: tar.TypeReg, mode: 0o644, data: []byte("Item {}\n")},
 		{name: "icons/deezer.svg", typeflag: tar.TypeReg, mode: 0o644, data: []byte("<svg/>\n")},
 	})
+	alsa := "system/var/overlay/lib/alsa/conf.d\n"
+	if o.prefix == "SYSTEMONE" || o.prefix == "PRIME4G2" {
+		alsa = "system/var-lib/alsa/conf.d\n"
+	}
 	files := map[string][]byte{
-		"bin/sc5000-suite":         []byte("suite-bin"),
+		"bin/sc5000-suite":         []byte("suite-bin-PAYLOAD-0123456789"),
 		"lib/libengine-ui-hook.so": []byte("hook-so"),
 		"boot-activate.sh":         []byte("#!/bin/sh\n"),
 		"99-sc5000-custom.conf":    []byte("pcm.!default {}\n"),
-		"alsa-dir":                 []byte("system/var/overlay/lib/alsa/conf.d\n"),
+		"alsa-dir":                 []byte(alsa),
 		"version.txt":              []byte(version + "\n"),
 		"release-tag":              []byte("v" + version + "-r4\n"),
-		"model":                    []byte(prefix + "\n"),
+		"model":                    []byte(o.prefix + "\n"),
 		"ui-packs.tar":             uiTar,
 	}
-	for k, v := range extra {
+	for k, v := range o.extra {
 		files[k] = v
 	}
 	var sums strings.Builder
 	for rel, data := range files {
-		if omitFromSums[rel] {
+		if o.omitFromSums[rel] {
 			continue
 		}
 		h := sha256.Sum256(data)
-		sums.WriteString(hex.EncodeToString(h[:]) + "  " + rel + "\n")
+		hexStr := hex.EncodeToString(h[:])
+		if o.corruptSumFor == rel {
+			hexStr = strings.Repeat("0", 64)
+		}
+		sums.WriteString(hexStr + "  " + rel + "\n")
+	}
+	for _, extraLine := range o.extraSumsLines {
+		sums.WriteString(extraLine + "\n")
 	}
 
 	var gzBuf bytes.Buffer
-	gw := gzip.NewWriter(&gzBuf)
+	level := gzip.DefaultCompression
+	if o.gzipStored {
+		level = gzip.NoCompression
+	}
+	gw, err := gzip.NewWriterLevel(&gzBuf, level)
+	if err != nil {
+		t.Fatal(err)
+	}
 	tw := tar.NewWriter(gw)
 	_ = tw.WriteHeader(&tar.Header{Name: top, Typeflag: tar.TypeDir, Mode: 0o755})
 	for rel, data := range files {
-		_ = tw.WriteHeader(&tar.Header{Name: top + "/" + rel, Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(data))})
+		mode := int64(0o644)
+		if m, ok := o.modes[rel]; ok {
+			mode = m
+		}
+		if err := tw.WriteHeader(&tar.Header{Name: top + "/" + rel, Typeflag: tar.TypeReg, Mode: mode, Size: int64(len(data))}); err != nil {
+			t.Fatal(err)
+		}
 		_, _ = tw.Write(data)
 	}
-	sumsBytes := []byte(sums.String())
-	_ = tw.WriteHeader(&tar.Header{Name: top + "/SHA256SUMS", Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(sumsBytes))})
-	_, _ = tw.Write(sumsBytes)
+	for _, s := range o.rawExtraEntries {
+		h := &tar.Header{Name: s.name, Typeflag: s.typeflag, Mode: s.mode, Size: int64(len(s.data)), Linkname: s.linkname}
+		if err := tw.WriteHeader(h); err != nil {
+			t.Fatal(err)
+		}
+		if len(s.data) > 0 {
+			_, _ = tw.Write(s.data)
+		}
+	}
+	if !o.omitSumsFile {
+		sumsBytes := []byte(sums.String())
+		if o.emptySumsFile {
+			sumsBytes = nil
+		}
+		_ = tw.WriteHeader(&tar.Header{Name: top + "/SHA256SUMS", Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(sumsBytes))})
+		_, _ = tw.Write(sumsBytes)
+	}
 	_ = tw.Close()
 	_ = gw.Close()
 	return gzBuf.Bytes()
@@ -400,9 +620,28 @@ func wrapGen2Image(tarGz []byte, prefix, version string) []byte {
 	return append(padded, tarGz...)
 }
 
+type mutatingReaderAt struct {
+	b []byte
+	n atomic.Int64
+}
+
+func (r *mutatingReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	if off < 0 || off >= int64(len(r.b)) {
+		return 0, io.EOF
+	}
+	n := copy(p, r.b[off:])
+	r.n.Add(int64(n))
+	if n < len(p) {
+		return n, io.EOF
+	}
+	return n, nil
+}
+
 func TestGen2ImageAndBundleValidWalkAndOpen(t *testing.T) {
 	ctx := context.Background()
-	tarGz := buildValidGen2BundleTarGz(t, "SCLIVE4", "5.3.0.4", nil, nil)
+	tarGz := buildTestBundleTarGz(t, bundleBuildOpts{
+		modes: map[string]int64{"bin/sc5000-suite": 0o6755},
+	})
 	imgBytes := wrapGen2Image(tarGz, "SCLIVE4", "5.3.0.4")
 
 	for _, tc := range []struct {
@@ -424,6 +663,20 @@ func TestGen2ImageAndBundleValidWalkAndOpen(t *testing.T) {
 			if !im.SupportsBoard("jp21") || !im.SupportsBoard("SCLIVE4") || im.SupportsBoard("rmz2") {
 				t.Fatalf("unexpected model support: %+v", im.Models())
 			}
+
+			// Concurrent Bundle() calls must be race-free and return the same verified bundle.
+			var bwg sync.WaitGroup
+			for i := 0; i < 4; i++ {
+				bwg.Add(1)
+				go func() {
+					defer bwg.Done()
+					if _, err := im.Bundle(ctx); err != nil {
+						t.Errorf("concurrent Bundle: %v", err)
+					}
+				}()
+			}
+			bwg.Wait()
+
 			b, err := im.Bundle(ctx)
 			if err != nil {
 				t.Fatalf("Bundle: %v", err)
@@ -432,7 +685,6 @@ func TestGen2ImageAndBundleValidWalkAndOpen(t *testing.T) {
 				t.Fatalf("unexpected Bundle meta: version=%q tag=%q model=%+v ui=%v", b.Version(), b.ReleaseTag(), b.Model(), b.HasUIPacks())
 			}
 
-			// Collect entries during Walk and open them AFTER Walk returns (both sequential and reverse order).
 			var entries []azimg.Entry
 			if err := b.Walk(ctx, func(e azimg.Entry) error {
 				entries = append(entries, e)
@@ -444,6 +696,9 @@ func TestGen2ImageAndBundleValidWalkAndOpen(t *testing.T) {
 				t.Fatalf("too few bundle entries: %d", len(entries))
 			}
 			for _, e := range entries {
+				if e.Path == "bin/sc5000-suite" && e.Mode != 0o755 {
+					t.Fatalf("Entry.Mode = %#o, want 0755 (setuid/setgid masked)", e.Mode)
+				}
 				rc, err := e.Open()
 				if err != nil {
 					t.Fatalf("Open(%s): %v", e.Path, err)
@@ -465,7 +720,6 @@ func TestGen2ImageAndBundleValidWalkAndOpen(t *testing.T) {
 			if len(uiEntries) != 2 {
 				t.Fatalf("uiEntries = %d, want 2", len(uiEntries))
 			}
-			// Reverse order + concurrent read verification.
 			var wg sync.WaitGroup
 			for i := len(uiEntries) - 1; i >= 0; i-- {
 				e := uiEntries[i]
@@ -499,30 +753,91 @@ func TestGen2ImageAndBundleValidWalkAndOpen(t *testing.T) {
 	}
 }
 
+// TestGen2EntryOpenVerifiesOnExactSizeRead proves Entry.Open() detects TOCTOU tampering
+// immediately once Entry.Size bytes have been read (io.ReadFull / io.CopyN), not only at EOF.
+func TestGen2EntryOpenVerifiesOnExactSizeRead(t *testing.T) {
+	ctx := context.Background()
+	raw := buildTestBundleTarGz(t, bundleBuildOpts{gzipStored: true})
+	ra := &mutatingReaderAt{b: append([]byte(nil), raw...)}
+	im, err := azimg.Open(ctx, ra, int64(len(raw)), azimg.Limits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := im.Bundle(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pos := bytes.Index(ra.b, []byte("suite-bin-PAYLOAD"))
+	if pos < 0 {
+		t.Fatal("stored payload not found")
+	}
+	ra.b[pos] ^= 0x20
+
+	var target azimg.Entry
+	_ = b.Walk(ctx, func(e azimg.Entry) error {
+		if e.Path == "bin/sc5000-suite" {
+			target = e
+		}
+		return nil
+	})
+
+	rc1, err := target.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = io.ReadFull(rc1, make([]byte, target.Size))
+	_ = rc1.Close()
+	if !errors.Is(err, azimg.ErrDigestMismatch) {
+		t.Fatalf("io.ReadFull(exact size) err = %v, want ErrDigestMismatch", err)
+	}
+
+	rc2, err := target.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = io.CopyN(io.Discard, rc2, target.Size)
+	_ = rc2.Close()
+	if !errors.Is(err, azimg.ErrDigestMismatch) {
+		t.Fatalf("io.CopyN(exact size) err = %v, want ErrDigestMismatch", err)
+	}
+}
+
 func TestGen2HostileWrappersManifestsAndArchives(t *testing.T) {
 	ctx := context.Background()
-	tarGz := buildValidGen2BundleTarGz(t, "SCLIVE4", "5.3.0.4", nil, nil)
+	tarGz := buildTestBundleTarGz(t, bundleBuildOpts{})
 	goodImg := wrapGen2Image(tarGz, "SCLIVE4", "5.3.0.4")
 
 	// 1. Corrupt 128-byte wrapper cases.
 	badDirtyPad := append([]byte(nil), goodImg...)
-	badDirtyPad[127] = 'X' // non-zero padding byte
-	badModel := wrapGen2Image(tarGz, "UNKNOWN", "5.3.0.4")
-	badVer := wrapGen2Image(tarGz, "SCLIVE4", "5.3")
+	badDirtyPad[127] = 'X'
+	badDigestTerm := append([]byte(nil), goodImg...)
+	badDigestTerm[27+64] = ' ' // break newline after 64-hex digest
+	// Build a lower-case prefix wrapper manually so wrapGen2Image doesn't normalize it.
+	sum := sha256.Sum256(tarGz)
+	lowerPrefixHdr := "ENGINEX_DATA_BUNDLE_IMG_V1\n" + hex.EncodeToString(sum[:]) + "\nsclive4\n5.3.0.4\n"
+	badLowerPrefix := make([]byte, 128)
+	copy(badLowerPrefix, lowerPrefixHdr)
+	badLowerPrefix = append(badLowerPrefix, tarGz...)
+
 	badSHA := append([]byte(nil), goodImg...)
 	badSHA[len(badSHA)-1] ^= 1
-	badGzip := wrapGen2Image([]byte("not gzip data"), "SCLIVE4", "5.3.0.4")
-	for name, b := range map[string][]byte{
-		"truncated-hdr": goodImg[:100],
-		"hdr-only":      goodImg[:128],
-		"dirty-padding": badDirtyPad,
-		"bad-model":     badModel,
-		"bad-version":   badVer,
-		"payload-sha":   badSHA,
-		"non-gzip":      badGzip,
+	for name, tc := range map[string]struct {
+		data []byte
+		want error
+	}{
+		"truncated-hdr":    {goodImg[:100], azimg.ErrCorrupt},
+		"hdr-only":         {goodImg[:128], azimg.ErrCorrupt},
+		"legacy-no-v1":     {append([]byte("ENGINEX_DATA_BUNDLE_OLD\n"), make([]byte, 200)...), azimg.ErrCorrupt},
+		"bad-digest-term":  {badDigestTerm, azimg.ErrCorrupt},
+		"dirty-padding":    {badDirtyPad, azimg.ErrCorrupt},
+		"bad-model":        {wrapGen2Image(tarGz, "UNKNOWN", "5.3.0.4"), azimg.ErrModelMismatch},
+		"lowercase-prefix": {badLowerPrefix, azimg.ErrModelMismatch},
+		"bad-version":      {wrapGen2Image(tarGz, "SCLIVE4", "5.3"), azimg.ErrCorrupt},
+		"payload-sha":      {badSHA, azimg.ErrDigestMismatch},
+		"non-gzip":         {wrapGen2Image([]byte("not gzip data"), "SCLIVE4", "5.3.0.4"), azimg.ErrCorrupt},
 	} {
-		if _, err := azimg.Open(ctx, bytes.NewReader(b), int64(len(b)), azimg.Limits{}); err == nil {
-			t.Errorf("%s accepted by Open", name)
+		if _, err := azimg.Open(ctx, bytes.NewReader(tc.data), int64(len(tc.data)), azimg.Limits{}); !errors.Is(err, tc.want) {
+			t.Errorf("%s err = %v, want %v", name, err, tc.want)
 		}
 	}
 
@@ -532,80 +847,200 @@ func TestGen2HostileWrappersManifestsAndArchives(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open concatImg: %v", err)
 	}
-	if _, err := imConcat.Bundle(ctx); err == nil {
-		t.Fatal("concatenated gzip stream was accepted")
+	if _, err := imConcat.Bundle(ctx); !errors.Is(err, azimg.ErrCorrupt) {
+		t.Fatalf("concatenated gzip err = %v, want ErrCorrupt", err)
 	}
 
-	// 3. Unlisted file smuggled into bundle rejected.
-	smuggled := buildValidGen2BundleTarGz(t, "SCLIVE4", "5.3.0.4", map[string][]byte{"evil.sh": []byte("x")}, map[string]bool{"evil.sh": true})
-	if _, err := azimg.Open(ctx, bytes.NewReader(smuggled), int64(len(smuggled)), azimg.Limits{}); err == nil {
-		t.Fatal("unlisted smuggled bundle member was accepted")
+	// 3. Manifest consistency checks (all with otherwise valid archives).
+	for _, name := range []string{"missing-sums", "empty-sums"} {
+		opts := bundleBuildOpts{omitSumsFile: name == "missing-sums", emptySumsFile: name == "empty-sums"}
+		raw := buildTestBundleTarGz(t, opts)
+		_, err := azimg.Open(ctx, bytes.NewReader(raw), int64(len(raw)), azimg.Limits{})
+		if !errors.Is(err, azimg.ErrCorrupt) || !strings.Contains(err.Error(), "SHA256SUMS missing or empty") {
+			t.Errorf("%s err = %v, want ErrCorrupt with SHA256SUMS missing or empty", name, err)
+		}
 	}
-
-	// 4. Expanded budget including nested ui-packs.tar enforced.
-	imSmall, err := azimg.Open(ctx, bytes.NewReader(goodImg), int64(len(goodImg)), azimg.Limits{MaxExpandedSize: 20})
-	if err != nil {
-		t.Fatalf("Open with small expanded limit: %v", err)
+	badManifests := map[string]struct {
+		data []byte
+		want error
+	}{
+		"unlisted-file": {buildTestBundleTarGz(t, bundleBuildOpts{extra: map[string][]byte{"evil.sh": []byte("x")}, omitFromSums: map[string]bool{"evil.sh": true}}), azimg.ErrCorrupt},
+		"missing-file":  {buildTestBundleTarGz(t, bundleBuildOpts{extraSumsLines: []string{strings.Repeat("a", 64) + "  missing.txt"}}), azimg.ErrCorrupt},
+		"dup-sums-line": {buildTestBundleTarGz(t, bundleBuildOpts{extraSumsLines: []string{strings.Repeat("b", 64) + "  version.txt"}}), azimg.ErrCorrupt},
+		"bad-sums-path": {buildTestBundleTarGz(t, bundleBuildOpts{extraSumsLines: []string{strings.Repeat("c", 64) + "  ../version.txt"}}), azimg.ErrUnsafePath},
+		"sums-mismatch": {buildTestBundleTarGz(t, bundleBuildOpts{corruptSumFor: "version.txt"}), azimg.ErrDigestMismatch},
 	}
-	if _, err := imSmall.Bundle(ctx); !errors.Is(err, azimg.ErrLimitExceeded) {
-		t.Fatalf("expected ErrLimitExceeded for expanded budget, got %v", err)
-	}
-
-	// 5. Unsafe paths, duplicates, and unsupported link/device types in outer and nested tar.
-	hostileMembers := []tarEntrySpec{
-		{name: "SCLIVE4-5.3.0.4-EngineX-OS-Data-Bundle/../escape", typeflag: tar.TypeReg, mode: 0o644, data: []byte("x")},
-		{name: "/etc/passwd", typeflag: tar.TypeReg, mode: 0o644, data: []byte("x")},
-		{name: `C:\Windows\win.ini`, typeflag: tar.TypeReg, mode: 0o644, data: []byte("x")},
-		{name: `\\server\share\x`, typeflag: tar.TypeReg, mode: 0o644, data: []byte("x")},
-		{name: "SCLIVE4-5.3.0.4-EngineX-OS-Data-Bundle/link", typeflag: tar.TypeSymlink, mode: 0o777, linkname: "/etc/passwd"},
-		{name: "SCLIVE4-5.3.0.4-EngineX-OS-Data-Bundle/hard", typeflag: tar.TypeLink, mode: 0o644, linkname: "version.txt"},
-		{name: "SCLIVE4-5.3.0.4-EngineX-OS-Data-Bundle/dev", typeflag: tar.TypeChar, mode: 0o600},
-	}
-	for _, hm := range hostileMembers {
-		rawTar := buildRawTar(t, []tarEntrySpec{
-			{name: "SCLIVE4-5.3.0.4-EngineX-OS-Data-Bundle", typeflag: tar.TypeDir, mode: 0o755},
-			hm,
-		})
-		var gz bytes.Buffer
-		gw := gzip.NewWriter(&gz)
-		_, _ = gw.Write(rawTar)
-		_ = gw.Close()
-		if _, err := azimg.Open(ctx, bytes.NewReader(gz.Bytes()), int64(gz.Len()), azimg.Limits{}); err == nil {
-			t.Errorf("hostile member %q (type %q) was accepted", hm.name, hm.typeflag)
+	for name, tc := range badManifests {
+		if _, err := azimg.Open(ctx, bytes.NewReader(tc.data), int64(len(tc.data)), azimg.Limits{}); !errors.Is(err, tc.want) {
+			t.Errorf("%s err = %v, want %v", name, err, tc.want)
 		}
 	}
 
-	// Duplicate member rejected.
-	dupTar := buildRawTar(t, []tarEntrySpec{
-		{name: "SCLIVE4-5.3.0.4-EngineX-OS-Data-Bundle", typeflag: tar.TypeDir, mode: 0o755},
-		{name: "SCLIVE4-5.3.0.4-EngineX-OS-Data-Bundle/version.txt", typeflag: tar.TypeReg, mode: 0o644, data: []byte("5.3.0.4\n")},
-		{name: "./SCLIVE4-5.3.0.4-EngineX-OS-Data-Bundle/version.txt", typeflag: tar.TypeReg, mode: 0o644, data: []byte("5.3.0.4\n")},
-	})
-	var dupGz bytes.Buffer
-	gw := gzip.NewWriter(&dupGz)
-	_, _ = gw.Write(dupTar)
-	_ = gw.Close()
-	if _, err := azimg.Open(ctx, bytes.NewReader(dupGz.Bytes()), int64(dupGz.Len()), azimg.Limits{}); err == nil {
-		t.Fatal("duplicate archive member was accepted")
+	// 4. Strict metadata validation (version.txt NBSP, release-tag, alsa-dir, top-vs-model).
+	badMeta := map[string]struct {
+		opts bundleBuildOpts
+		want error
+	}{
+		"version-nbsp":     {bundleBuildOpts{extra: map[string][]byte{"version.txt": []byte("5.3.0.4\u00a0\n")}}, azimg.ErrCorrupt},
+		"reltag-shell":     {bundleBuildOpts{extra: map[string][]byte{"release-tag": []byte("v5.3.0.4\n$(id)\n")}}, azimg.ErrCorrupt},
+		"reltag-wrong-ver": {bundleBuildOpts{extra: map[string][]byte{"release-tag": []byte("v9.9.9\n")}}, azimg.ErrCorrupt},
+		"alsa-arbitrary":   {bundleBuildOpts{extra: map[string][]byte{"alsa-dir": []byte("etc/cron.d\n")}}, azimg.ErrCorrupt},
+		"alsa-wrong-arch":  {bundleBuildOpts{prefix: "SCLIVE4", extra: map[string][]byte{"alsa-dir": []byte("system/var-lib/alsa/conf.d\n")}}, azimg.ErrCorrupt},
+		"alsa-az04-wrong":  {bundleBuildOpts{prefix: "SYSTEMONE", extra: map[string][]byte{"alsa-dir": []byte("system/var/overlay/lib/alsa/conf.d\n")}}, azimg.ErrCorrupt},
+		"top-wrong-model":  {bundleBuildOpts{prefix: "SCLIVE4", top: "PRIME4PLUS-5.3.0.4-EngineX-OS-Data-Bundle"}, azimg.ErrModelMismatch},
+	}
+	for name, tc := range badMeta {
+		raw := buildTestBundleTarGz(t, tc.opts)
+		if _, err := azimg.Open(ctx, bytes.NewReader(raw), int64(len(raw)), azimg.Limits{}); !errors.Is(err, tc.want) {
+			t.Errorf("%s err = %v, want %v", name, err, tc.want)
+		}
 	}
 
-	// Duplicate manifest line in SHA256SUMS rejected.
-	verSum := sha256.Sum256([]byte("5.3.0.4\n"))
-	dupSums := hex.EncodeToString(verSum[:]) + "  version.txt\n" + hex.EncodeToString(verSum[:]) + "  version.txt\n"
-	dupManifestTar := buildRawTar(t, []tarEntrySpec{
-		{name: "SCLIVE4-5.3.0.4-EngineX-OS-Data-Bundle", typeflag: tar.TypeDir, mode: 0o755},
-		{name: "SCLIVE4-5.3.0.4-EngineX-OS-Data-Bundle/version.txt", typeflag: tar.TypeReg, mode: 0o644, data: []byte("5.3.0.4\n")},
-		{name: "SCLIVE4-5.3.0.4-EngineX-OS-Data-Bundle/SHA256SUMS", typeflag: tar.TypeReg, mode: 0o644, data: []byte(dupSums)},
-	})
-	var dupMGz bytes.Buffer
-	gw2 := gzip.NewWriter(&dupMGz)
-	_, _ = gw2.Write(dupManifestTar)
-	_ = gw2.Close()
-	if _, err := azimg.Open(ctx, bytes.NewReader(dupMGz.Bytes()), int64(dupMGz.Len()), azimg.Limits{}); err == nil {
-		t.Fatal("duplicate SHA256SUMS entry was accepted")
+	// 5. Configured Limits enforced on outer AND nested archives.
+	for name, lim := range map[string]azimg.Limits{
+		"MaxCompressedSize": {MaxCompressedSize: 64},
+		"MaxExpandedSize":   {MaxExpandedSize: 20},
+		"MaxArchiveEntries": {MaxArchiveEntries: 3},
+		"MaxMemberSize":     {MaxMemberSize: 4},
+		"MaxManifestSize":   {MaxManifestSize: 8},
+	} {
+		im, err := azimg.Open(ctx, bytes.NewReader(goodImg), int64(len(goodImg)), lim)
+		if err == nil {
+			_, err = im.Bundle(ctx)
+		}
+		if !errors.Is(err, azimg.ErrLimitExceeded) {
+			t.Errorf("%s err = %v, want ErrLimitExceeded", name, err)
+		}
 	}
 
-	// Wrapper model/version mismatch against inner bundle rejected.
+	// Outer MaxMemberSize tested without ui-packs.tar so nested MaxMemberSize cannot mask it (M13).
+	outerMemTar := func() []byte {
+		top := "SCLIVE4-5.3.0.4-EngineX-OS-Data-Bundle"
+		ver := []byte("5.3.0.4\n")
+		mod := []byte("SCLIVE4\n")
+		big := bytes.Repeat([]byte("B"), 300)
+		sv, sm, sb := sha256.Sum256(ver), sha256.Sum256(mod), sha256.Sum256(big)
+		sums := []byte(hex.EncodeToString(sv[:]) + "  version.txt\n" +
+			hex.EncodeToString(sm[:]) + "  model\n" +
+			hex.EncodeToString(sb[:]) + "  bin/big\n")
+		raw := buildRawTar(t, []tarEntrySpec{
+			{name: top, typeflag: tar.TypeDir, mode: 0o755},
+			{name: top + "/version.txt", typeflag: tar.TypeReg, mode: 0o644, data: ver},
+			{name: top + "/model", typeflag: tar.TypeReg, mode: 0o644, data: mod},
+			{name: top + "/bin/big", typeflag: tar.TypeReg, mode: 0o644, data: big},
+			{name: top + "/SHA256SUMS", typeflag: tar.TypeReg, mode: 0o644, data: sums},
+		})
+		var gz bytes.Buffer
+		gw := gzip.NewWriter(&gz)
+		_, _ = gw.Write(raw)
+		_ = gw.Close()
+		return gz.Bytes()
+	}()
+	if _, err := azimg.Open(ctx, bytes.NewReader(outerMemTar), int64(len(outerMemTar)), azimg.Limits{MaxMemberSize: 250}); !errors.Is(err, azimg.ErrLimitExceeded) {
+		t.Errorf("outer MaxMemberSize err = %v, want ErrLimitExceeded", err)
+	}
+	if _, err := azimg.Open(ctx, bytes.NewReader(outerMemTar), int64(len(outerMemTar)), azimg.Limits{MaxArchiveEntries: 3}); !errors.Is(err, azimg.ErrLimitExceeded) {
+		t.Errorf("outer MaxArchiveEntries err = %v, want ErrLimitExceeded", err)
+	}
+
+	// Nested ui-packs.tar placed LAST (after SHA256SUMS) so outer loop cannot mask M41.
+	nestedUIOnly := buildRawTar(t, []tarEntrySpec{
+		{name: "packs", typeflag: tar.TypeDir, mode: 0o755},
+		{name: "packs/a.qml", typeflag: tar.TypeReg, mode: 0o644, data: bytes.Repeat([]byte("Q"), 200)},
+		{name: "packs/b.qml", typeflag: tar.TypeReg, mode: 0o644, data: []byte("B")},
+		{name: "packs/c.qml", typeflag: tar.TypeReg, mode: 0o644, data: []byte("C")},
+	})
+	nestedLastTarGz := func() []byte {
+		top := "SCLIVE4-5.3.0.4-EngineX-OS-Data-Bundle"
+		ver := []byte("5.3.0.4\n")
+		mod := []byte("SCLIVE4\n")
+		sv, sm, su := sha256.Sum256(ver), sha256.Sum256(mod), sha256.Sum256(nestedUIOnly)
+		sums := []byte(hex.EncodeToString(sv[:]) + "  version.txt\n" +
+			hex.EncodeToString(sm[:]) + "  model\n" +
+			hex.EncodeToString(su[:]) + "  ui-packs.tar\n")
+		raw := buildRawTar(t, []tarEntrySpec{
+			{name: top, typeflag: tar.TypeDir, mode: 0o755},
+			{name: top + "/version.txt", typeflag: tar.TypeReg, mode: 0o644, data: ver},
+			{name: top + "/model", typeflag: tar.TypeReg, mode: 0o644, data: mod},
+			{name: top + "/SHA256SUMS", typeflag: tar.TypeReg, mode: 0o644, data: sums},
+			{name: top + "/ui-packs.tar", typeflag: tar.TypeReg, mode: 0o644, data: nestedUIOnly},
+		})
+		var gz bytes.Buffer
+		gw := gzip.NewWriter(&gz)
+		_, _ = gw.Write(raw)
+		_ = gw.Close()
+		return gz.Bytes()
+	}()
+	// Outer has 5 entries (top + version.txt + model + SHA256SUMS + ui-packs.tar); nested adds 4 -> 9.
+	if _, err := azimg.Open(ctx, bytes.NewReader(nestedLastTarGz), int64(len(nestedLastTarGz)), azimg.Limits{MaxArchiveEntries: 6}); !errors.Is(err, azimg.ErrLimitExceeded) {
+		t.Errorf("nested MaxArchiveEntries err = %v, want ErrLimitExceeded", err)
+	}
+	// Nested ui-packs.tar header declaring h.Size=128 KiB inside a small 1.5 KiB ui-packs.tar
+	// must fail nested MaxMemberSize (64 KiB) with ErrLimitExceeded even though outer ui-packs.tar passes.
+	var truncUI bytes.Buffer
+	twUI := tar.NewWriter(&truncUI)
+	_ = twUI.WriteHeader(&tar.Header{Name: "packs", Typeflag: tar.TypeDir, Mode: 0o755})
+	_ = twUI.WriteHeader(&tar.Header{Name: "packs/big.qml", Typeflag: tar.TypeReg, Mode: 0o644, Size: 128 << 10})
+	// Note: do not write 128 KiB payload; ui-packs.tar stays ~1.5 KiB.
+	nestedMemberLimTar := buildTestBundleTarGz(t, bundleBuildOpts{
+		extra: map[string][]byte{"ui-packs.tar": truncUI.Bytes()},
+	})
+	if _, err := azimg.Open(ctx, bytes.NewReader(nestedMemberLimTar), int64(len(nestedMemberLimTar)), azimg.Limits{MaxMemberSize: 64 << 10}); !errors.Is(err, azimg.ErrLimitExceeded) {
+		t.Errorf("nested MaxMemberSize err = %v, want ErrLimitExceeded", err)
+	}
+	// Outer files are <2500 bytes, ui-packs.tar itself is 2560 bytes, wait: set MaxMemberSize only?
+	// Test nested MaxMemberSize where outer ui-packs.tar is smaller? No: outer ui-packs.tar >= sum(nested).
+	// Instead test nested duplicate path in ui-packs.tar!
+	dupUITar := buildTestBundleTarGz(t, bundleBuildOpts{
+		extra: map[string][]byte{
+			"ui-packs.tar": buildRawTar(t, []tarEntrySpec{
+				{name: "packs", typeflag: tar.TypeDir, mode: 0o755},
+				{name: "packs/Main.qml", typeflag: tar.TypeReg, mode: 0o644, data: []byte("a")},
+				{name: "./packs/main.qml", typeflag: tar.TypeReg, mode: 0o644, data: []byte("b")},
+			}),
+		},
+	})
+	if _, err := azimg.Open(ctx, bytes.NewReader(dupUITar), int64(len(dupUITar)), azimg.Limits{}); !errors.Is(err, azimg.ErrCorrupt) {
+		t.Errorf("nested case-insensitive duplicate err = %v, want ErrCorrupt", err)
+	}
+
+	// 6. Outer hostile entry types, traversal/outside-top, and duplicate paths (all with valid SHA256SUMS).
+	top := "SCLIVE4-5.3.0.4-EngineX-OS-Data-Bundle"
+	outerHostiles := map[string]struct {
+		spec tarEntrySpec
+		want error
+	}{
+		"outside-top":  {tarEntrySpec{name: "OTHER/evil", typeflag: tar.TypeReg, mode: 0o644, data: []byte("x")}, azimg.ErrUnsafePath},
+		"traversal":    {tarEntrySpec{name: top + "/../escape", typeflag: tar.TypeReg, mode: 0o644, data: []byte("x")}, azimg.ErrUnsafePath},
+		"abs-path":     {tarEntrySpec{name: "/etc/passwd", typeflag: tar.TypeReg, mode: 0o644, data: []byte("x")}, azimg.ErrUnsafePath},
+		"win-drive":    {tarEntrySpec{name: `C:\Windows\win.ini`, typeflag: tar.TypeReg, mode: 0o644, data: []byte("x")}, azimg.ErrUnsafePath},
+		"unc-path":     {tarEntrySpec{name: `\\server\share\x`, typeflag: tar.TypeReg, mode: 0o644, data: []byte("x")}, azimg.ErrUnsafePath},
+		"symlink":      {tarEntrySpec{name: top + "/link", typeflag: tar.TypeSymlink, mode: 0o777, linkname: "/etc/passwd"}, azimg.ErrUnsafePath},
+		"hardlink":     {tarEntrySpec{name: top + "/hard", typeflag: tar.TypeLink, mode: 0o644, linkname: "version.txt"}, azimg.ErrUnsafePath},
+		"chardev":      {tarEntrySpec{name: top + "/dev", typeflag: tar.TypeChar, mode: 0o600}, azimg.ErrUnsafePath},
+		"dup-outer":    {tarEntrySpec{name: "./" + top + "/version.txt", typeflag: tar.TypeReg, mode: 0o644, data: []byte("5.3.0.4\n")}, azimg.ErrCorrupt},
+		"dup-case":     {tarEntrySpec{name: top + "/VERSION.TXT", typeflag: tar.TypeReg, mode: 0o644, data: []byte("5.3.0.4\n")}, azimg.ErrCorrupt},
+		"dup-nfc-nfd":  {tarEntrySpec{name: top + "/cafe\u0301.txt", typeflag: tar.TypeReg, mode: 0o644, data: []byte("x")}, azimg.ErrCorrupt},
+		"win-reserved": {tarEntrySpec{name: top + "/aux.txt", typeflag: tar.TypeReg, mode: 0o644, data: []byte("x")}, azimg.ErrUnsafePath},
+		"ntfs-ads":     {tarEntrySpec{name: top + "/a:b", typeflag: tar.TypeReg, mode: 0o644, data: []byte("x")}, azimg.ErrUnsafePath},
+		"trail-dot":    {tarEntrySpec{name: top + "/x.", typeflag: tar.TypeReg, mode: 0o644, data: []byte("x")}, azimg.ErrUnsafePath},
+		"trail-space":  {tarEntrySpec{name: top + "/x ", typeflag: tar.TypeReg, mode: 0o644, data: []byte("x")}, azimg.ErrUnsafePath},
+		"bidi-rlo":     {tarEntrySpec{name: top + "/\u202etxt.exe", typeflag: tar.TypeReg, mode: 0o644, data: []byte("x")}, azimg.ErrUnsafePath},
+		"c1-ctrl":      {tarEntrySpec{name: top + "/a\u0085b", typeflag: tar.TypeReg, mode: 0o644, data: []byte("x")}, azimg.ErrUnsafePath},
+		"bad-utf8":     {tarEntrySpec{name: top + "/\xff\xfe", typeflag: tar.TypeReg, mode: 0o644, data: []byte("x")}, azimg.ErrUnsafePath},
+		"long-seg":     {tarEntrySpec{name: top + "/" + strings.Repeat("a", 300), typeflag: tar.TypeReg, mode: 0o644, data: []byte("x")}, azimg.ErrUnsafePath},
+	}
+	for name, tc := range outerHostiles {
+		raw := buildTestBundleTarGz(t, bundleBuildOpts{
+			extra:           map[string][]byte{"caf\u00e9.txt": []byte("x")},
+			rawExtraEntries: []tarEntrySpec{tc.spec},
+		})
+		if _, err := azimg.Open(ctx, bytes.NewReader(raw), int64(len(raw)), azimg.Limits{}); !errors.Is(err, tc.want) {
+			t.Errorf("outer hostile %s err = %v, want %v", name, err, tc.want)
+		}
+	}
+
+	// 7. Wrapper model/version mismatch against inner bundle rejected.
 	mismatchModelImg := wrapGen2Image(tarGz, "SYSTEMONE", "5.3.0.4")
 	imMisModel, err := azimg.Open(ctx, bytes.NewReader(mismatchModelImg), int64(len(mismatchModelImg)), azimg.Limits{})
 	if err != nil {
@@ -619,27 +1054,124 @@ func TestGen2HostileWrappersManifestsAndArchives(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open mismatchVerImg: %v", err)
 	}
-	if _, err := imMisVer.Bundle(ctx); err == nil {
-		t.Fatal("wrapper vs bundle version mismatch was accepted")
+	if _, err := imMisVer.Bundle(ctx); !errors.Is(err, azimg.ErrCorrupt) {
+		t.Fatalf("wrapper vs bundle version mismatch err = %v, want ErrCorrupt", err)
 	}
 
-	// Nested ui-packs.tar without packs/ directory rejected.
+	// 8. Nested ui-packs.tar without packs/ or with symlink rejected.
 	noPacksUI := buildRawTar(t, []tarEntrySpec{
 		{name: "icons/x.svg", typeflag: tar.TypeReg, mode: 0o644, data: []byte("<svg/>")},
 	})
-	badUITarGz := buildValidGen2BundleTarGz(t, "SCLIVE4", "5.3.0.4", map[string][]byte{"ui-packs.tar": noPacksUI}, nil)
-	if _, err := azimg.Open(ctx, bytes.NewReader(badUITarGz), int64(len(badUITarGz)), azimg.Limits{}); err == nil {
-		t.Fatal("ui-packs.tar without packs/ was accepted")
+	badUITarGz := buildTestBundleTarGz(t, bundleBuildOpts{extra: map[string][]byte{"ui-packs.tar": noPacksUI}})
+	if _, err := azimg.Open(ctx, bytes.NewReader(badUITarGz), int64(len(badUITarGz)), azimg.Limits{}); !errors.Is(err, azimg.ErrCorrupt) {
+		t.Fatalf("ui-packs.tar without packs/ err = %v, want ErrCorrupt", err)
 	}
-
-	// Nested ui-packs.tar with symlink rejected.
 	symlinkUI := buildRawTar(t, []tarEntrySpec{
 		{name: "packs", typeflag: tar.TypeDir, mode: 0o755},
 		{name: "packs/evil", typeflag: tar.TypeSymlink, mode: 0o777, linkname: "/etc/shadow"},
 	})
-	symUITarGz := buildValidGen2BundleTarGz(t, "SCLIVE4", "5.3.0.4", map[string][]byte{"ui-packs.tar": symlinkUI}, nil)
+	symUITarGz := buildTestBundleTarGz(t, bundleBuildOpts{extra: map[string][]byte{"ui-packs.tar": symlinkUI}})
 	if _, err := azimg.Open(ctx, bytes.NewReader(symUITarGz), int64(len(symUITarGz)), azimg.Limits{}); !errors.Is(err, azimg.ErrUnsafePath) {
 		t.Fatalf("symlink in ui-packs.tar err = %v, want ErrUnsafePath", err)
+	}
+}
+
+// TestGen2PAXHeaderBombAndLongPathAllocation verifies that PAX extended header bombs
+// are charged against MaxExpandedSize and overlong archive paths fail before large allocations.
+func TestGen2PAXHeaderBombAndLongPathAllocation(t *testing.T) {
+	ctx := context.Background()
+	top := "SCLIVE4-5.3.0.4-EngineX-OS-Data-Bundle"
+
+	// 1. Entries with 500,000-byte names must be rejected on entry 0 without large allocations.
+	var longBuf bytes.Buffer
+	gw1, err := gzip.NewWriterLevel(&longBuf, gzip.NoCompression)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tw1 := tar.NewWriter(gw1)
+	_ = tw1.WriteHeader(&tar.Header{Name: top, Typeflag: tar.TypeDir, Mode: 0o755})
+	for i := 0; i < 10; i++ {
+		name := top + "/" + fmt.Sprintf("%05d", i) + strings.Repeat("a", 500_000)
+		if err := tw1.WriteHeader(&tar.Header{Name: name, Typeflag: tar.TypeReg, Mode: 0o644, Format: tar.FormatPAX}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = tw1.Close()
+	_ = gw1.Close()
+
+	before := totalAllocBytes()
+	_, err = azimg.Open(ctx, bytes.NewReader(longBuf.Bytes()), int64(longBuf.Len()), azimg.Limits{})
+	delta := totalAllocBytes() - before
+	if !errors.Is(err, azimg.ErrUnsafePath) {
+		t.Fatalf("long archive path err = %v, want ErrUnsafePath", err)
+	}
+	if delta > 32<<20 {
+		t.Fatalf("long archive path allocated %d MiB before rejection", delta>>20)
+	}
+
+	// 2. ~16 MiB of consecutive PAX extended headers must hit MaxExpandedSize (8 MiB) early.
+	var head bytes.Buffer
+	twHead := tar.NewWriter(&head)
+	_ = twHead.WriteHeader(&tar.Header{Name: top, Typeflag: tar.TypeDir, Mode: 0o755})
+	var one bytes.Buffer
+	twOne := tar.NewWriter(&one)
+	_ = twOne.WriteHeader(&tar.Header{
+		Name: top + "/f", Typeflag: tar.TypeReg, Mode: 0o644, Format: tar.FormatPAX,
+		PAXRecords: map[string]string{"comment": strings.Repeat("A", 500_000)},
+	})
+	xPart := one.Bytes()[:one.Len()-512]
+	var paxRaw bytes.Buffer
+	gw2, err := gzip.NewWriterLevel(&paxRaw, gzip.NoCompression)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = gw2.Write(head.Bytes())
+	for i := 0; i < 32; i++ {
+		_, _ = gw2.Write(xPart)
+	}
+	_, _ = gw2.Write(one.Bytes())
+	_, _ = gw2.Write(make([]byte, 1024))
+	_ = gw2.Close()
+
+	ra := &mutatingReaderAt{b: paxRaw.Bytes()}
+	_, err = azimg.Open(ctx, ra, int64(len(ra.b)), azimg.Limits{MaxExpandedSize: 8 << 20})
+	if !errors.Is(err, azimg.ErrLimitExceeded) {
+		t.Fatalf("PAX header bomb err = %v, want ErrLimitExceeded", err)
+	}
+	if frac := float64(ra.n.Load()) / float64(len(ra.b)); frac > 0.75 {
+		t.Fatalf("PAX header bomb read fraction %.2f > 0.75 before rejection", frac)
+	}
+
+	// 3. Gzip trailer zero-padding bomb exceeding remainingBudget (MaxExpandedSize - gzOut.n - uiExpanded)
+	// while still staying below gzOut's standalone cap (kills M26).
+	uiPayload := bytes.Repeat([]byte("U"), 8192)
+	uiTar := buildRawTar(t, []tarEntrySpec{
+		{name: "packs", typeflag: tar.TypeDir, mode: 0o755},
+		{name: "packs/ui.qml", typeflag: tar.TypeReg, mode: 0o644, data: uiPayload},
+	})
+	baseTarGz := buildTestBundleTarGz(t, bundleBuildOpts{
+		gzipStored: true,
+		extra:      map[string][]byte{"ui-packs.tar": uiTar},
+	})
+	// Inflate baseTarGz to inspect uncompressed tar length, then append 5 KiB trailing zeros
+	// and pick MaxExpandedSize so gzOut.n + trailer <= MaxExpandedSize < gzOut.n + uiExpanded + trailer.
+	gzr, err := gzip.NewReader(bytes.NewReader(baseTarGz))
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseTarBytes, err := io.ReadAll(gzr)
+	_ = gzr.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var zeroBomb bytes.Buffer
+	gw3 := gzip.NewWriter(&zeroBomb)
+	_, _ = gw3.Write(baseTarBytes)
+	_, _ = gw3.Write(make([]byte, 5120))
+	_ = gw3.Close()
+	limM26 := azimg.Limits{MaxExpandedSize: int64(len(baseTarBytes)) + 10000}
+	if _, err := azimg.Open(ctx, bytes.NewReader(zeroBomb.Bytes()), int64(zeroBomb.Len()), limM26); !errors.Is(err, azimg.ErrLimitExceeded) {
+		t.Fatalf("gzip trailer bomb err = %v, want ErrLimitExceeded", err)
 	}
 }
 
@@ -654,19 +1186,21 @@ func TestHostAndArchivePathsSeparation(t *testing.T) {
 	if err := azimg.ValidateHostPath(`C:\Users\DJ\img.img`, false); !errors.Is(err, azimg.ErrUnsafePath) {
 		t.Errorf("POSIX host path accepted backslash: %v", err)
 	}
-	for _, bad := range []string{"", "/tmp/bad\"name", "/tmp/bad\nname", "/tmp/bad\x00name"} {
+	for _, bad := range []string{"", "/tmp/bad\"name", "/tmp/bad\nname", "/tmp/bad\x00name", "/tmp/bad\u202ename", "/tmp/\xff"} {
 		if err := azimg.ValidateHostPath(bad, true); err == nil {
 			t.Errorf("host path %q accepted on Windows", bad)
 		}
 	}
 
-	// Canonical archive paths always reject Windows drive/UNC, backslashes, leading /, and traversal.
+	// Canonical archive paths reject unsafe/Windows/overlong/invalid-UTF-8 inputs.
 	for _, bad := range []string{
 		"", "/", "/etc/passwd", "//server/share", `\\server\share`, `C:foo`, `C:\foo`, `C:/foo`,
-		`a\b`, "../a", "a/../b", "a/./b", "a//b", "a/b/", ".\x00a", "a\nb",
+		`a\b`, "a:b", "../a", "a/../b", "a/./b", "a//b", "a/b/", ".\x00a", "a\nb",
+		"docs/CON", "docs/aux.txt", "docs/x.", "docs/x ", "docs/\u202etxt.exe", "docs/a\u0085b",
+		"docs/\xff\xfe", "docs/" + strings.Repeat("a", 256), strings.Repeat("a/", 2050) + "f",
 	} {
-		if _, err := azimg.CleanArchivePath(bad, false); err == nil {
-			t.Errorf("archive path %q accepted", bad)
+		if _, err := azimg.CleanArchivePath(bad, false); !errors.Is(err, azimg.ErrUnsafePath) {
+			t.Errorf("archive path %q accepted or wrong err: %v", bad, err)
 		}
 	}
 	if m, ok := azimg.LookupModel("prime4+"); !ok || m.Prefix != "PRIME4PLUS" || m.Board != "jc11s" {
@@ -680,28 +1214,106 @@ func TestHostAndArchivePathsSeparation(t *testing.T) {
 	}
 }
 
+// TestModelTablesMatchInstallerMain guards against drift between azimg's model tables
+// and cmd/enginex-installer/main.go's gen1Boards / gen2Boards without cross-package imports.
+func TestModelTablesMatchInstallerMain(t *testing.T) {
+	mainPath := filepath.Join("..", "..", "..", "cmd", "enginex-installer", "main.go")
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, mainPath, nil, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", mainPath, err)
+	}
+
+	type boardSpec struct{ prefix, fullName string }
+	extractMap := func(varName string) map[string]boardSpec {
+		out := map[string]boardSpec{}
+		for _, decl := range file.Decls {
+			gd, ok := decl.(*ast.GenDecl)
+			if !ok {
+				continue
+			}
+			for _, spec := range gd.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok || len(vs.Names) == 0 || vs.Names[0].Name != varName {
+					continue
+				}
+				cl, ok := vs.Values[0].(*ast.CompositeLit)
+				if !ok {
+					t.Fatalf("%s is not a composite literal", varName)
+				}
+				for _, elt := range cl.Elts {
+					kv := elt.(*ast.KeyValueExpr)
+					k, _ := strconv.Unquote(kv.Key.(*ast.BasicLit).Value)
+					val := kv.Value.(*ast.CompositeLit)
+					p, _ := strconv.Unquote(val.Elts[0].(*ast.BasicLit).Value)
+					n, _ := strconv.Unquote(val.Elts[1].(*ast.BasicLit).Value)
+					out[k] = boardSpec{prefix: p, fullName: n}
+				}
+			}
+		}
+		return out
+	}
+
+	gen1Main := extractMap("gen1Boards")
+	gen2Main := extractMap("gen2Boards")
+	if len(gen1Main) != 8 || len(gen2Main) != 8 {
+		t.Fatalf("unexpected board counts in main.go: gen1=%d gen2=%d", len(gen1Main), len(gen2Main))
+	}
+
+	for board, spec := range gen1Main {
+		mCompat, ok := azimg.LookupGen1Compatible("inmusic," + board)
+		if !ok {
+			t.Errorf("azimg missing gen1 compatible %q", "inmusic,"+board)
+			continue
+		}
+		if mCompat.Board != board || mCompat.Prefix != spec.prefix || mCompat.FullName != spec.fullName || mCompat.Gen2 {
+			t.Errorf("gen1 drift for %q: azimg=%+v main=%+v", board, mCompat, spec)
+		}
+		if mBoard, ok := azimg.LookupModel(board); !ok || mBoard != mCompat {
+			t.Errorf("LookupModel(%q) mismatch: %+v vs %+v", board, mBoard, mCompat)
+		}
+	}
+	for board, spec := range gen2Main {
+		mPrefix, ok := azimg.LookupGen2Prefix(spec.prefix)
+		if !ok {
+			t.Errorf("azimg missing gen2 prefix %q", spec.prefix)
+			continue
+		}
+		if mPrefix.Board != board || mPrefix.Prefix != spec.prefix || mPrefix.FullName != spec.fullName || !mPrefix.Gen2 {
+			t.Errorf("gen2 drift for %q: azimg=%+v main=%+v", board, mPrefix, spec)
+		}
+		if mBoard, ok := azimg.LookupModel(board); !ok || mBoard != mPrefix {
+			t.Errorf("LookupModel(%q) mismatch: %+v vs %+v", board, mBoard, mPrefix)
+		}
+	}
+}
+
 // TestRealFixturesParity runs against real firmware fixtures when ENGINEX_AZIMG_PARITY=1.
-// On the build host, it verifies byte-exact parity against tools/az01-packer/az01_packer.py
-// for all 3 official 5.3.0 AZ01 groups, EngineX 5.3.0.4 AZ01 images, rejects signed AZ0x/AZ04
-// vendor images, and validates Gen-2 r4 *-Update.img archives.
+// It verifies byte-exact parity against tools/az01-packer/az01_packer.py for all 3 official
+// 5.3.0 AZ01 groups and EngineX 5.3.0.4 AZ01 images, fails if signed vendor AZ0x/AZ04 fixtures
+// are missing or accepted, and validates Gen-2 *-Update.img archives when ENGINEX_GEN2_FIXTURE_DIR is set.
 func TestRealFixturesParity(t *testing.T) {
 	if os.Getenv("ENGINEX_AZIMG_PARITY") != "1" {
-		t.Skip("set ENGINEX_AZIMG_PARITY=1 on ARM build host with /root/build/sc5000-lab")
+		t.Skip("set ENGINEX_AZIMG_PARITY=1 with firmware fixtures directory")
 	}
 	ctx := context.Background()
 
+	labDir := os.Getenv("ENGINEX_LAB_DIR")
+	if labDir == "" {
+		labDir = "/root/build/sc5000-lab"
+	}
 	packer := filepath.Join("..", "..", "..", "tools", "az01-packer", "az01_packer.py")
 	if _, err := os.Stat(packer); err != nil {
 		t.Fatalf("missing az01_packer.py at %s: %v", packer, err)
 	}
 
 	az01Images := []string{
-		"/root/build/sc5000-lab/fw-5.3.0/SC5000-5.3.0-Update.img",
-		"/root/build/sc5000-lab/fw-5.3.0/SC6000-5.3.0-Update.img",
-		"/root/build/sc5000-lab/fw-5.3.0/PRIME4-5.3.0-Update.img",
-		"/root/build/sc5000-lab/release-5.3.0.4/SC5000-5.3.0.4-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img",
-		"/root/build/sc5000-lab/release-5.3.0.4/SC6000-5.3.0.4-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img",
-		"/root/build/sc5000-lab/release-5.3.0.4/PRIME4-5.3.0.4-EngineX-OS-Denon-PRIME-4-JC11-Update.img",
+		filepath.Join(labDir, "fw-5.3.0", "SC5000-5.3.0-Update.img"),
+		filepath.Join(labDir, "fw-5.3.0", "SC6000-5.3.0-Update.img"),
+		filepath.Join(labDir, "fw-5.3.0", "PRIME4-5.3.0-Update.img"),
+		filepath.Join(labDir, "release-5.3.0.4", "SC5000-5.3.0.4-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img"),
+		filepath.Join(labDir, "release-5.3.0.4", "SC6000-5.3.0.4-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img"),
+		filepath.Join(labDir, "release-5.3.0.4", "PRIME4-5.3.0.4-EngineX-OS-Denon-PRIME-4-JC11-Update.img"),
 	}
 	for _, imgPath := range az01Images {
 		if _, err := os.Stat(imgPath); err != nil {
@@ -747,7 +1359,6 @@ func TestRealFixturesParity(t *testing.T) {
 				t.Fatalf("metadata mismatch: go=%+v py=%+v", meta, pyInfo)
 			}
 
-			// Compare rootfs SHA-256 against Python-extracted rootfs.ext2 without buffering entire 400+ MiB in RAM.
 			goHash := sha256.New()
 			goSize, err := im.ExtractRootfs(ctx, goHash)
 			if err != nil {
@@ -767,7 +1378,6 @@ func TestRealFixturesParity(t *testing.T) {
 				t.Fatalf("rootfs parity mismatch: go=(%d, %x) py=(%d, %x)", goSize, goHash.Sum(nil), pySize, pyHash.Sum(nil))
 			}
 
-			// Also verify splash and recoverysplash parity.
 			for _, part := range []string{"splash", "recoverysplash"} {
 				gh := sha256.New()
 				if _, err := im.ExtractPartition(ctx, part, gh); err != nil {
@@ -785,20 +1395,21 @@ func TestRealFixturesParity(t *testing.T) {
 		})
 	}
 
-	// Signed vendor AZ0x / AZ04 images must be rejected with ErrSignedContainer.
+	// Signed vendor AZ0x / AZ04 images must exist and be rejected with ErrSignedContainer.
 	for _, signedPath := range []string{
-		"/root/build/sc5000-lab/fw-5.3.0/SCLIVE4-5.3.0-Update.img",
-		"/root/build/sc5000-lab/fw-5.3.0/SCLIVE2-5.3.0-Update.img",
-		"/root/build/sc5000-lab/fw-5.3.0-gen2/PRIME4G2-5.3.0-Update.img",
+		filepath.Join(labDir, "fw-5.3.0", "SCLIVE4-5.3.0-Update.img"),
+		filepath.Join(labDir, "fw-5.3.0", "SCLIVE2-5.3.0-Update.img"),
+		filepath.Join(labDir, "fw-5.3.0-gen2", "PRIME4G2-5.3.0-Update.img"),
 	} {
-		if _, err := os.Stat(signedPath); err != nil {
-			continue
-		}
 		f, err := os.Open(signedPath)
 		if err != nil {
+			t.Fatalf("missing signed vendor fixture %s: %v", signedPath, err)
+		}
+		st, err := f.Stat()
+		if err != nil {
+			_ = f.Close()
 			t.Fatal(err)
 		}
-		st, _ := f.Stat()
 		_, err = azimg.Open(ctx, f, st.Size(), azimg.Limits{})
 		_ = f.Close()
 		if !errors.Is(err, azimg.ErrSignedContainer) {
@@ -806,7 +1417,6 @@ func TestRealFixturesParity(t *testing.T) {
 		}
 	}
 
-	// Real r4 Gen-2 *-Update.img fixtures if provided via ENGINEX_GEN2_FIXTURE_DIR.
 	if gen2Dir := os.Getenv("ENGINEX_GEN2_FIXTURE_DIR"); gen2Dir != "" {
 		imgs, err := filepath.Glob(filepath.Join(gen2Dir, "*-Update.img"))
 		if err != nil || len(imgs) == 0 {
@@ -819,7 +1429,10 @@ func TestRealFixturesParity(t *testing.T) {
 					t.Fatal(err)
 				}
 				defer f.Close()
-				st, _ := f.Stat()
+				st, err := f.Stat()
+				if err != nil {
+					t.Fatal(err)
+				}
 				im, err := azimg.Open(ctx, f, st.Size(), azimg.Limits{})
 				if err != nil {
 					t.Fatalf("Open: %v", err)
