@@ -24,6 +24,9 @@ const (
 	// MP3GridStampFile records that pre-5.3.0.4 EngineX MP3 grids in this
 	// Engine Library have been shifted by their file start offset (#246).
 	MP3GridStampFile = ".enginex-mp3-grid-stamp"
+	// MP3GridCursorFile records resume progress across interrupted runs so
+	// leading Unchanged/Skipped tracks are not re-inspected on every boot.
+	MP3GridCursorFile = ".enginex-mp3-grid-cursor"
 
 	mp3GridStampVersion = "v1"
 	defaultMP3BatchSize = 25
@@ -91,6 +94,51 @@ func writeMP3GridStamp(path string, r MP3GridReport) error {
 	content := fmt.Sprintf("%s candidates=%d corrected=%d unchanged=%d skipped=%d\n",
 		mp3GridStampVersion, r.Candidates, r.Corrected, r.Unchanged, r.Skipped)
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".enginex-mp3-grid-stamp-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err = tmp.WriteString(content); err == nil {
+		err = tmp.Sync()
+	}
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		_ = os.Chmod(tmp.Name(), 0o644)
+		err = os.Rename(tmp.Name(), path)
+	}
+	return err
+}
+
+type mp3GridCursor struct {
+	lastID     int64
+	candidates int
+	corrected  int
+	unchanged  int
+	skipped    int
+}
+
+func readMP3GridCursor(path string) mp3GridCursor {
+	cur := mp3GridCursor{lastID: math.MinInt64}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return cur
+	}
+	var ver string
+	var parsed mp3GridCursor
+	n, err := fmt.Sscanf(strings.TrimSpace(string(b)), "%s last_id=%d candidates=%d corrected=%d unchanged=%d skipped=%d",
+		&ver, &parsed.lastID, &parsed.candidates, &parsed.corrected, &parsed.unchanged, &parsed.skipped)
+	if err != nil || n != 6 || ver != mp3GridStampVersion || parsed.candidates < 0 || parsed.corrected < 0 || parsed.unchanged < 0 || parsed.skipped < 0 {
+		return cur
+	}
+	return parsed
+}
+
+func writeMP3GridCursor(path string, c mp3GridCursor) error {
+	content := fmt.Sprintf("%s last_id=%d candidates=%d corrected=%d unchanged=%d skipped=%d\n",
+		mp3GridStampVersion, c.lastID, c.candidates, c.corrected, c.unchanged, c.skipped)
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".enginex-mp3-grid-cursor-*")
 	if err != nil {
 		return err
 	}
@@ -338,8 +386,9 @@ func FixMP3Grids(ctx context.Context, root string, opts MP3GridOptions) (MP3Grid
 	dbDir := filepath.Join(root, "Engine Library", "Database2")
 	dbPath := filepath.Join(dbDir, "m.db")
 	stampPath := filepath.Join(dbDir, MP3GridStampFile)
+	cursorPath := filepath.Join(dbDir, MP3GridCursorFile)
 
-	for _, p := range []string{dbPath, dbPath + "-wal", dbPath + "-journal", dbPath + "-shm", stampPath} {
+	for _, p := range []string{dbPath, dbPath + "-wal", dbPath + "-journal", dbPath + "-shm", stampPath, cursorPath} {
 		if err := safeFile(p); err != nil {
 			return r, err
 		}
@@ -409,6 +458,7 @@ func FixMP3Grids(ctx context.Context, root string, opts MP3GridOptions) (MP3Grid
 	}
 
 	bridgeOwned := bridgeOwnedTracks(ctx, dbDir)
+	cursor := readMP3GridCursor(cursorPath)
 
 	type candidate struct {
 		id       int64
@@ -421,31 +471,49 @@ func FixMP3Grids(ctx context.Context, root string, opts MP3GridOptions) (MP3Grid
 		loops    []byte
 	}
 	type update struct {
-		id    int64
-		track []byte
-		beat  []byte
-		cues  any
-		loops any
+		id           int64
+		track        []byte
+		beat         []byte
+		cues         []byte
+		cuesChanged  bool
+		loops        []byte
+		loopsChanged bool
 	}
 
-	var lastID int64 = math.MinInt64
+	lastID := cursor.lastID
+	committedID := cursor.lastID
+	var committedCand, committedCorr, committedUnch, committedSkip int
+	saveCursor := func() {
+		if committedID > cursor.lastID {
+			_ = writeMP3GridCursor(cursorPath, mp3GridCursor{
+				lastID:     committedID,
+				candidates: cursor.candidates + committedCand,
+				corrected:  cursor.corrected + committedCorr,
+				unchanged:  cursor.unchanged + committedUnch,
+				skipped:    cursor.skipped + committedSkip,
+			})
+		}
+	}
+
 	for {
 		if ctx.Err() != nil || (!deadline.IsZero() && nowFn().After(deadline)) {
 			r.Interrupted = true
+			saveCursor()
 			return r, ctx.Err()
 		}
 		if LibraryInUse(root) {
 			r.Interrupted = true
+			saveCursor()
 			return r, ErrLibraryInUse
 		}
 
 		rows, err := db.QueryContext(ctx, `
 			SELECT t.id, coalesce(t.path,''), coalesce(t.comment,''),
-			       substr(p.trackData,1,33554433),
-			       substr(p.overviewWaveFormData,1,33554433),
-			       substr(p.beatData,1,33554433),
-			       substr(p.quickCues,1,33554433),
-			       substr(p.loops,1,33554433)
+			       substr(p.trackData,1,4097),
+			       substr(p.overviewWaveFormData,1,8388609),
+			       substr(p.beatData,1,65537),
+			       substr(p.quickCues,1,65537),
+			       substr(p.loops,1,65537)
 			FROM Track t
 			JOIN PerformanceData p ON p.trackId = t.id
 			WHERE t.id > ?
@@ -453,8 +521,8 @@ func FixMP3Grids(ctx context.Context, root string, opts MP3GridOptions) (MP3Grid
 			  AND coalesce(t.isBeatGridLocked, 0) = 0
 			  AND t.pdbImportKey IS NULL
 			  AND coalesce(p.thirdPartySourceId, 0) = 0
-			  AND length(p.trackData) > 4
-			  AND length(p.beatData) > 4
+			  AND length(p.trackData) > 4 AND length(p.trackData) <= 4096
+			  AND length(p.beatData) > 4  AND length(p.beatData) <= 65536
 			  AND (lower(coalesce(t.fileType, '')) = 'mp3' OR lower(t.path) LIKE '%.mp3')
 			  AND (
 			    t.path LIKE '../Music/Stream/%' OR t.path LIKE 'Music/Stream/%' OR
@@ -487,23 +555,36 @@ func FixMP3Grids(ctx context.Context, root string, opts MP3GridOptions) (MP3Grid
 
 		var updates []update
 		var interruptedErr error
+		batchTailID := committedID
+		markClean := func(id int64) {
+			batchTailID = id
+			if len(updates) == 0 {
+				committedID = id
+				committedCand = r.Candidates
+				committedCorr = r.Corrected
+				committedUnch = r.Unchanged
+				committedSkip = r.Skipped
+			}
+		}
 		for _, c := range page {
 			lastID = c.id
 			if bridgeOwned[c.id] || !isEngineXMP3Proxy(c.path, c.comment) {
+				markClean(c.id)
 				continue
 			}
 			rawTrack, err := QUncompress(c.track, 4096)
 			if err != nil || len(rawTrack) != 44 {
+				markClean(c.id)
 				continue
 			}
 			rawBeat, beatRate, sampleLen, ok := parsePreR4AnalyzerBeatData(c.beat)
 			if !ok {
+				markClean(c.id)
 				continue
 			}
 
-			// Budget/in-use checks happen before opening audio files so an
-			// interrupted run never discards already-prepared updates in this batch
-			// without committing them first (below).
+			// Budget check happens before opening audio files so an interrupted run
+			// commits already-prepared updates in this batch and persists the cursor.
 			if ctx.Err() != nil {
 				r.Interrupted = true
 				interruptedErr = ctx.Err()
@@ -513,27 +594,25 @@ func FixMP3Grids(ctx context.Context, root string, opts MP3GridOptions) (MP3Grid
 				r.Interrupted = true
 				break
 			}
-			if LibraryInUse(root) {
-				r.Interrupted = true
-				interruptedErr = ErrLibraryInUse
-				break
-			}
 
 			r.Candidates++
 			audioPath, err := resolveTrackAudioPath(rootAbs, rootReal, c.path)
 			if err != nil {
 				r.Skipped++
 				log.Printf("enginedb: mp3 grid fix: skipped track %d (%s): %v", c.id, c.path, err)
+				markClean(c.id)
 				continue
 			}
 			info, err := audioheader.OpenMP3(audioPath)
 			if err != nil {
 				r.Skipped++
 				log.Printf("enginedb: mp3 grid fix: skipped track %d (%s): %v", c.id, c.path, err)
+				markClean(c.id)
 				continue
 			}
 			if info.StartOffsetSamples <= 0 {
 				r.Unchanged++
+				markClean(c.id)
 				continue
 			}
 
@@ -543,7 +622,7 @@ func FixMP3Grids(ctx context.Context, root string, opts MP3GridOptions) (MP3Grid
 			}
 
 			var rawOverview []byte
-			if len(c.overview) > 0 {
+			if len(c.overview) > 0 && len(c.overview) <= 8<<20 {
 				if ov, oerr := QUncompress(c.overview, 8<<20); oerr == nil {
 					rawOverview = ov
 				}
@@ -556,36 +635,40 @@ func FixMP3Grids(ctx context.Context, root string, opts MP3GridOptions) (MP3Grid
 			if err != nil {
 				return r, err
 			}
-			var cuesArg any
-			if c.cues != nil {
+			var cuesOut []byte
+			var cuesChanged bool
+			if len(c.cues) > 0 && len(c.cues) <= 65536 {
 				if newCues, changed, cerr := shiftQuickCues(c.cues, shift); cerr != nil {
 					return r, cerr
 				} else if changed {
-					cuesArg = newCues
-				} else {
-					cuesArg = c.cues
+					cuesOut = newCues
+					cuesChanged = true
 				}
 			}
-			var loopsArg any
-			if c.loops != nil {
+			var loopsOut []byte
+			var loopsChanged bool
+			if len(c.loops) > 0 && len(c.loops) <= 65536 {
 				if newLoops, changed := shiftLoops(c.loops, shift, sampleLen); changed {
-					loopsArg = newLoops
-				} else {
-					loopsArg = c.loops
+					loopsOut = newLoops
+					loopsChanged = true
 				}
 			}
 			updates = append(updates, update{
-				id:    c.id,
-				track: newTrack,
-				beat:  newBeat,
-				cues:  cuesArg,
-				loops: loopsArg,
+				id:           c.id,
+				track:        newTrack,
+				beat:         newBeat,
+				cues:         cuesOut,
+				cuesChanged:  cuesChanged,
+				loops:        loopsOut,
+				loopsChanged: loopsChanged,
 			})
+			batchTailID = c.id
 		}
 
 		if len(updates) > 0 {
 			if LibraryInUse(root) {
 				r.Interrupted = true
+				saveCursor()
 				return r, ErrLibraryInUse
 			}
 			tx, err := db.BeginTx(ctx, nil)
@@ -593,32 +676,55 @@ func FixMP3Grids(ctx context.Context, root string, opts MP3GridOptions) (MP3Grid
 				return r, err
 			}
 			for _, u := range updates {
-				if _, err := tx.ExecContext(ctx,
-					`UPDATE PerformanceData SET trackData=?, beatData=?, quickCues=?, loops=? WHERE trackId=?`,
-					u.track, u.beat, u.cues, u.loops, u.id,
-				); err != nil {
+				var execErr error
+				switch {
+				case u.cuesChanged && u.loopsChanged:
+					_, execErr = tx.ExecContext(ctx, `UPDATE PerformanceData SET trackData=?, beatData=?, quickCues=?, loops=? WHERE trackId=?`, u.track, u.beat, u.cues, u.loops, u.id)
+				case u.cuesChanged:
+					_, execErr = tx.ExecContext(ctx, `UPDATE PerformanceData SET trackData=?, beatData=?, quickCues=? WHERE trackId=?`, u.track, u.beat, u.cues, u.id)
+				case u.loopsChanged:
+					_, execErr = tx.ExecContext(ctx, `UPDATE PerformanceData SET trackData=?, beatData=?, loops=? WHERE trackId=?`, u.track, u.beat, u.loops, u.id)
+				default:
+					_, execErr = tx.ExecContext(ctx, `UPDATE PerformanceData SET trackData=?, beatData=? WHERE trackId=?`, u.track, u.beat, u.id)
+				}
+				if execErr != nil {
 					tx.Rollback()
-					return r, err
+					return r, execErr
 				}
 			}
 			if err := tx.Commit(); err != nil {
 				return r, err
 			}
 			r.Corrected += len(updates)
+			committedID = batchTailID
+			committedCand = r.Candidates
+			committedCorr = r.Corrected
+			committedUnch = r.Unchanged
+			committedSkip = r.Skipped
 		}
 
 		if r.Interrupted {
+			saveCursor()
 			return r, interruptedErr
 		}
 	}
 
-	if r.Candidates > 0 {
-		if err := writeMP3GridStamp(stampPath, r); err != nil {
+	total := MP3GridReport{
+		Candidates: cursor.candidates + r.Candidates,
+		Corrected:  cursor.corrected + r.Corrected,
+		Unchanged:  cursor.unchanged + r.Unchanged,
+		Skipped:    cursor.skipped + r.Skipped,
+	}
+	if total.Candidates > 0 {
+		if err := writeMP3GridStamp(stampPath, total); err != nil {
 			return r, err
 		}
-		if r.Corrected > 0 || r.Skipped > 0 {
-			log.Printf("enginedb: mp3 grid fix on %s: corrected=%d unchanged=%d skipped=%d", root, r.Corrected, r.Unchanged, r.Skipped)
+		_ = os.Remove(cursorPath)
+		if total.Corrected > 0 || total.Skipped > 0 {
+			log.Printf("enginedb: mp3 grid fix on %s: corrected=%d unchanged=%d skipped=%d", root, total.Corrected, total.Unchanged, total.Skipped)
 		}
+	} else {
+		_ = os.Remove(cursorPath)
 	}
 	return r, nil
 }

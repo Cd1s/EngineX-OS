@@ -371,4 +371,36 @@ func TestGuardianFixMP3GridsFlagsAndExecution(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &res3); err != nil || len(res3) != 1 || res3[0].MP3Grids == nil || !res3[0].MP3Grids.Bypassed || res3[0].MP3Grids.Corrected != 0 {
 		t.Fatalf("second run did not bypass: %s err=%v", &out, err)
 	}
+
+	// 3. Standalone --heal-mount --fix-mp3-grids --timeout 5s (Gen-2 convert_mounted path).
+	m3 := filepath.Join(t.TempDir(), "Gen2USB")
+	seedPreR4MP3Mount(t, m3)
+	out.Reset()
+	errOut.Reset()
+	if code := Guardian([]string{"--heal-mount", m3, "--fix-mp3-grids", "--timeout", "5s"}, &out, &errOut); code != 0 {
+		t.Fatalf("standalone fix code=%d out=%s err=%s", code, &out, &errOut)
+	}
+	var res4 []guardianResult
+	if err := json.Unmarshal(out.Bytes(), &res4); err != nil || len(res4) != 1 || res4[0].MP3Grids == nil || res4[0].MP3Grids.Corrected != 1 {
+		t.Fatalf("unexpected standalone fix result: %s err=%v", &out, err)
+	}
+	if got := readFirstBeatOffset(t, m3); math.Abs(got-(5000.0-2257)) > 1e-6 {
+		t.Fatalf("beat0=%v, want %v", got, 5000.0-2257)
+	}
+
+	// 4. --status --fix-mp3-grids stays read-only (--status wins).
+	m4 := filepath.Join(t.TempDir(), "ReadOnlyStatus")
+	seedPreR4MP3Mount(t, m4)
+	out.Reset()
+	errOut.Reset()
+	if code := Guardian([]string{"--heal-mount", m4, "--status", "--fix-mp3-grids"}, &out, &errOut); code != 0 {
+		t.Fatalf("status+fix code=%d out=%s err=%s", code, &out, &errOut)
+	}
+	var res5 []guardianResult
+	if err := json.Unmarshal(out.Bytes(), &res5); err != nil || len(res5) != 1 || res5[0].MP3Grids != nil {
+		t.Fatalf("expected --status to skip MP3Grids: %s err=%v", &out, err)
+	}
+	if got := readFirstBeatOffset(t, m4); math.Abs(got-5000.0) > 1e-6 {
+		t.Fatalf("--status modified beat0=%v, want 5000.0", got)
+	}
 }

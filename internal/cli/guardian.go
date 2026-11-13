@@ -57,7 +57,7 @@ func Guardian(args []string, out, errOut io.Writer) int {
 	dataOnly := fs.Bool("data-only", false, "repair table data but leave Engine's views, triggers and indexes untouched")
 	sessions := fs.Int("max-sessions", dbhealer.DefaultMaxSessions, "maximum history sessions; 0 uses 50")
 	reserve := fs.Bool("normalize-reserve", false, "only rebuild libraries whose page reserve byte is not 0 (breaks ATTACH in Engine 5.3.0); Engine must not be running")
-	fixGrids := fs.Bool("fix-mp3-grids", false, "once-per-library shift of pre-5.3.0.4 EngineX MP3 beat grids, cues and loops")
+	fixGrids := fs.Bool("fix-mp3-grids", false, "once-per-library shift of pre-5.3.0.4 EngineX MP3 beat grids, cues and loops (standalone unless combined with --data-only or --normalize-reserve)")
 	bootReport := fs.Bool("boot-report", false, "save and export a sanitized boot report without touching libraries")
 	uiDir := fs.String("ui-dir", "/data/enginex/ui", "boot safety state directory")
 	deadline := fs.Duration("timeout", 0, "maximum command runtime; 0 disables the deadline")

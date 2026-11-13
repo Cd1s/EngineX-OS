@@ -567,6 +567,10 @@ if command -v timeout >/dev/null; then
     start=$SECONDS; SC5000_ENGINE_GUARDIAN=$TMP/slow-guardian sh "$GUARD" pre
     (( SECONDS - start < 20 )) || fail 'guard pre must time out a hung engine-guardian'
 fi
+# #246: engine-ui-guard pre must pass --normalize-reserve and --fix-mp3-grids to engine-guardian.
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" > "%s/guardian-pre.args"\n' "$TMP" > "$TMP/record-guardian"; chmod +x "$TMP/record-guardian"
+SC5000_ENGINE_GUARDIAN=$TMP/record-guardian sh "$GUARD" pre
+grep -Fq -- "--normalize-reserve --fix-mp3-grids" "$TMP/guardian-pre.args" || fail 'guard pre must pass --normalize-reserve --fix-mp3-grids to engine-guardian'
 # #7: a crashed start's timer must not reset the streak of the starts after it.
 rm -f "$SC5000_UI_DIR"/*
 export SC5000_UI_HEALTHY_AFTER=1 SC5000_UI_ALIVE_CMD=true
