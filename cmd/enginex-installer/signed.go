@@ -194,11 +194,13 @@ func verifyCached(path string) (tag string, err error) {
 
 // installedReleaseCmd prints what the deck says it runs, from the files its own update check reads
 // (pkg/webui installedVersion and installedRelease): "V <version>" for each version file, "T <tag>"
-// for each release-tag file.
+// for each release-tag file. A file that is not there is skipped (older releases have no tag file);
+// one that is there and cannot be read fails the command, so that refuseOlder never compares with
+// part of the answer.
 const installedReleaseCmd = `for f in ` + customDirSh + `/version.txt /data/sc5000-custom/version.txt /etc/enginex/version.txt /etc/sc5000/version.txt; do ` +
-	`[ -r "$f" ] && printf 'V %s\n' "$(cat "$f")"; done; ` +
+	`[ -e "$f" ] || continue; v=$(cat "$f") || { echo "cannot read $f" >&2; exit 1; }; printf 'V %s\n' "$v"; done; ` +
 	`for f in /etc/enginex/release-tag /etc/sc5000/release-tag ` + customDirSh + `/bundle/release-tag /data/sc5000-custom/bundle/release-tag; do ` +
-	`[ -r "$f" ] && printf 'T %s\n' "$(cat "$f")"; done; :`
+	`[ -e "$f" ] || continue; v=$(cat "$f") || { echo "cannot read $f" >&2; exit 1; }; printf 'T %s\n' "$v"; done`
 
 // refuseOlder stops an install of a package fetched from a release (o.release is the tag its signed
 // list proves) when the deck already runs a newer one: a genuine older release replayed by whoever
@@ -210,7 +212,8 @@ func refuseOlder(ctx context.Context, o *options, cl *ssh.Client, label string) 
 	}
 	out, err := sshRead(ctx, cl, installedReleaseCmd)
 	if err != nil {
-		return fmt.Errorf("%s: cannot read the installed release: %w", label, err)
+		return fmt.Errorf("%s 无法读取碟机当前的发布版本，没有安装任何东西（%s）/ %s: cannot read the release the deck runs, so nothing was installed (%s): %w",
+			label, strings.TrimSpace(out), label, strings.TrimSpace(out), err)
 	}
 	version := "dev"
 	var tags []string
