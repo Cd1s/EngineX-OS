@@ -40,6 +40,8 @@ for t in linux-amd64 macos-amd64 macos-arm64 windows-amd64; do
 	macos)
 		printf '#!/bin/sh\ncd "$(dirname "$0")"\n./enginex-installer "$@"\nprintf "Press Enter to close..."\nread answer\n' >"$d/Install-EngineX.command"
 		chmod 755 "$d/Install-EngineX.command"
+		cp tools/stems/run-home-worker.command "$d/stems/"
+		chmod 755 "$d/stems/run-home-worker.command"
 		;;
 	windows)
 		printf '@echo off\r\ncd /d "%%~dp0"\r\nenginex-installer.exe %%*\r\npause\r\n' >"$d/Install-EngineX.bat"
