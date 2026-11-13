@@ -183,7 +183,6 @@ if [ "$#" = 0 ] && [ -d "$dest/.install-old" ] && [ ! -L "$dest/.install-old" ];
     exit 0
 fi
 # The guard belongs to this invocation; daemons it starts must take their own lock later.
-leave_pid=${ENGINEX_LEAVE_PID:-}
 unset ENGINEX_LEAVE_LOCKED ENGINEX_LEAVE_PID
 
 check_gen2_tz_newer() {
@@ -685,15 +684,12 @@ else
     if [ -n "$ssh_start" ] && ! pgrep -x sshd >/dev/null 2>&1; then
         mkdir -p /var/run/sshd && "$sshd_bin" -p "$ssh_port" || :
     fi
-    if [ -n "$leave_pid" ]; then
-        # The activation owner is a suite too; keep its lock alive through this fallback.
-        for suite_pid in $(pgrep -x enginex-suite 2>/dev/null); do
-            [ "$suite_pid" = "$leave_pid" ] || kill "$suite_pid" 2>/dev/null || :
-        done
-    else
-        pkill -x enginex-suite 2>/dev/null || :
-    fi
-    pkill -x sc5000-suite 2>/dev/null || : # the suite's name before 5.3.0.5 (#234)
+    # Restart only service applets; leave helpers may hold or be waiting for the lock (#234).
+    for suite_pid in $(pgrep -x 'enginex-suite|sc5000-suite' 2>/dev/null); do
+        case "$(tr '\0' '\n' 2>/dev/null < "/proc/$suite_pid/cmdline" | sed -n '2p')" in
+            stream-sync|rb-bridge|enginex-deemixd|sc5000-deemixd) kill "$suite_pid" 2>/dev/null || : ;;
+        esac
+    done
     [ -x "$bin_dir/stream-sync" ] && "$bin_dir/stream-sync" --listen :8080 --cpu 3 >/dev/null 2>&1 &
     [ -x "$bin_dir/rb-bridge" ] && "$bin_dir/rb-bridge" --prolink >/dev/null 2>&1 &
     [ -x "$bin_dir/enginex-deemixd" ] && "$bin_dir/enginex-deemixd" -state-dir "$dest/state" >/dev/null 2>&1 &
