@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -336,34 +337,106 @@ func TestFindLANRetriesLostWiFiBroadcastAndUsesMDNSARecord(t *testing.T) {
 		t.Fatalf("FindLAN after single lost Wi-Fi broadcast = (%q, %v), want (%q, true)", endpoint, ok, lanSrv.URL)
 	}
 
-	// 2. Simulate a reflected or multi-NIC mDNS reply arriving from 127.0.0.2 while the A record
-	// advertises the real GPU listener IP 127.0.0.1 where HTTP is listening.
-	pcReflector, err := net.ListenPacket("udp4", "127.0.0.2:0")
+	// 2. mDNS A-record validation:
+	// (a) A packet from 127.0.0.2 advertising loopback 127.0.0.1 or an off-subnet private IP
+	// must NOT make the deck probe that A-record IP; it falls back to pkt.from.IP (127.0.0.2).
+	var victimHits atomic.Int32
+	victimSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		victimHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"ok":true,"busy":false,"backend":"htdemucs","protocol":"engine-5.0.4"}`))
+	}))
+	defer victimSrv.Close()
+	victimPort, _ := strconv.Atoi(victimSrv.URL[strings.LastIndex(victimSrv.URL, ":")+1:])
+
+	var spoofOffSubnet atomic.Bool
+	pcSpoof, err := net.ListenPacket("udp4", "127.0.0.2:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer pcReflector.Close()
+	defer pcSpoof.Close()
 	go func() {
 		buf := make([]byte, 1500)
 		for {
-			n, from, err := pcReflector.ReadFrom(buf)
+			n, from, err := pcSpoof.ReadFrom(buf)
 			if err != nil {
 				return
 			}
 			if id, ok := mdnsQuery(buf[:n]); ok {
-				ans := mdnsAnswer(id, true, Beacon{Port: port, Backend: "htdemucs", Hostname: "gpu-pc", Version: 2}, net.IPv4(127, 0, 0, 1))
-				pcReflector.WriteTo(ans, from)
-				return
+				spoofIP := net.IPv4(127, 0, 0, 1)
+				spoofPort := victimPort
+				if spoofOffSubnet.Load() {
+					spoofIP = net.IPv4(10, 254, 254, 9)
+					spoofPort = 17890
+				}
+				ans := mdnsAnswer(id, true, Beacon{Port: spoofPort, Backend: "htdemucs", Hostname: "spoof-pc", Version: 2}, spoofIP)
+				pcSpoof.WriteTo(ans, from)
 			}
 		}
 	}()
 
 	discoverTargets = func() []*net.UDPAddr { return nil }
-	mdnsTargets = func() []*net.UDPAddr { return []*net.UDPAddr{pcReflector.LocalAddr().(*net.UDPAddr)} }
+	mdnsTargets = func() []*net.UDPAddr { return []*net.UDPAddr{pcSpoof.LocalAddr().(*net.UDPAddr)} }
 
 	state2 := filepath.Join(t.TempDir(), LANStateName)
-	if endpoint, ok := FindLAN(ctx, state2, 300*time.Millisecond); !ok || endpoint != lanSrv.URL {
-		t.Fatalf("FindLAN via reflected/multi-NIC mDNS A record = (%q, %v), want (%q, true)", endpoint, ok, lanSrv.URL)
+	if endpoint, ok := FindLAN(ctx, state2, 120*time.Millisecond); ok || victimHits.Load() != 0 {
+		t.Fatalf("spoofed loopback mDNS A record probed 127.0.0.1: endpoint=%q ok=%v victimHits=%d", endpoint, ok, victimHits.Load())
+	}
+	spoofOffSubnet.Store(true)
+	var seenEndpoint string
+	_ = discoverLANServers(ctx, 120*time.Millisecond, func(ep string, _ Beacon) bool {
+		seenEndpoint = ep
+		return true
+	})
+	if seenEndpoint != "http://127.0.0.2:17890" {
+		t.Fatalf("off-subnet mDNS A record endpoint = %q, want fallback to packet source http://127.0.0.2:17890", seenEndpoint)
+	}
+	_, sub50, _ := net.ParseCIDR("192.168.50.0/24")
+	if !validMDNSRecordIP(net.IPv4(10, 20, 30, 40), net.IPv4(10, 20, 30, 40), nil) ||
+		!validMDNSRecordIP(net.IPv4(192, 168, 50, 9), net.IPv4(192, 168, 1, 1), []*net.IPNet{sub50}) ||
+		validMDNSRecordIP(net.IPv4(127, 0, 0, 1), net.IPv4(127, 0, 0, 1), []*net.IPNet{sub50}) ||
+		validMDNSRecordIP(net.IPv4(10, 99, 0, 5), net.IPv4(192, 168, 50, 1), []*net.IPNet{sub50}) {
+		t.Fatal("validMDNSRecordIP accepted loopback/off-subnet IP or rejected matching/local-subnet IP")
+	}
+
+	// (b) When the mDNS A record falls inside localLANIPv4Nets() (non-loopback local subnet),
+	// a reflected packet from 127.0.0.2 resolves to that local-subnet listener IP.
+	if nets := localLANIPv4Nets(); len(nets) > 0 {
+		ln, err := net.Listen("tcp4", net.JoinHostPort(nets[0].IP.String(), "0"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer ln.Close()
+		srvReal := &http.Server{Handler: &Backend{Slot: make(chan struct{}, 1), Name: "htdemucs"}}
+		defer srvReal.Close()
+		go srvReal.Serve(ln)
+		realPort := ln.Addr().(*net.TCPAddr).Port
+		wantRealURL := "http://" + net.JoinHostPort(nets[0].IP.String(), strconv.Itoa(realPort))
+
+		pcReflector, err := net.ListenPacket("udp4", "127.0.0.2:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer pcReflector.Close()
+		go func() {
+			buf := make([]byte, 1500)
+			for {
+				n, from, err := pcReflector.ReadFrom(buf)
+				if err != nil {
+					return
+				}
+				if id, ok := mdnsQuery(buf[:n]); ok {
+					ans := mdnsAnswer(id, true, Beacon{Port: realPort, Backend: "htdemucs", Hostname: "gpu-pc", Version: 2}, nets[0].IP)
+					pcReflector.WriteTo(ans, from)
+					return
+				}
+			}
+		}()
+		mdnsTargets = func() []*net.UDPAddr { return []*net.UDPAddr{pcReflector.LocalAddr().(*net.UDPAddr)} }
+		state2b := filepath.Join(t.TempDir(), LANStateName)
+		if endpoint, ok := FindLAN(ctx, state2b, 300*time.Millisecond); !ok || endpoint != wantRealURL {
+			t.Fatalf("FindLAN via local-subnet mDNS A record = (%q, %v), want (%q, true)", endpoint, ok, wantRealURL)
+		}
 	}
 
 	// 3. ProbeLANState (called by deck UI / Web Console when idle) pairs immediately and writes stems-lan.json.

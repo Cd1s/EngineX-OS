@@ -1,7 +1,8 @@
 # Turn this Windows PC into the Stems renderer for EngineX decks on the same
 # LAN / Wi-Fi. Decks find it automatically (UDP 17891 / mDNS) and render on the
-# deck again once it is switched off. Allow enginex-stemsd.exe on BOTH Private
-# and Public networks when Windows Firewall asks (Windows Wi-Fi defaults to Public).
+# deck again once it is switched off. Set your home Wi-Fi network profile to
+# Private in Windows Settings (inbound firewall rules default to Domain,Private
+# + LocalSubnet; pass -AllowPublicFirewall only on a trusted home Wi-Fi marked Public).
 #
 #   powershell -ExecutionPolicy Bypass -File tools\stems\run-home-worker.ps1          # default: install demucs (htdemucs, NVIDIA CUDA or CPU)
 #   powershell -ExecutionPolicy Bypass -File tools\stems\run-home-worker.ps1 hpss     # fast spectral split, numpy + scipy only
@@ -9,7 +10,10 @@
 # Needs Python 3 (python.org or the py launcher) and enginex-stemsd.exe (in
 # PATH, next to this script, or $env:ENGINEX_STEMSD). Packages go into
 # %USERPROFILE%\.enginex-stems\venv.
-param([ValidateSet('auto', 'hpss', 'demucs', 'htdemucs')][string]$Backend = $(if ($env:ENGINEX_STEMS_BACKEND) { $env:ENGINEX_STEMS_BACKEND } else { 'demucs' }))
+param(
+    [ValidateSet('auto', 'hpss', 'demucs', 'htdemucs')][string]$Backend = $(if ($env:ENGINEX_STEMS_BACKEND) { $env:ENGINEX_STEMS_BACKEND } else { 'demucs' }),
+    [switch]$AllowPublicFirewall
+)
 # Not 'Stop': Windows PowerShell 5.1 would turn a probe's stderr (2>$null) into an error. Failures throw.
 $ErrorActionPreference = 'Continue'
 $here = $PSScriptRoot
@@ -54,20 +58,24 @@ if ($resolvedBackend -eq 'htdemucs') {
     Invoke-Checked $py -c "from demucs.pretrained import get_model; get_model('htdemucs')"
 }
 
-# Ensure Windows Defender Firewall does not drop UDP 17891 / TCP 17890 on Public Wi-Fi profiles.
+# Ensure Windows Defender Firewall allows UDP 17891 / TCP 17890 on Domain,Private LocalSubnet (Public requires -AllowPublicFirewall).
 try {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $isAdmin = $identity -and ([Security.Principal.WindowsPrincipal]$identity).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     $ruleName = 'EngineX Stems LAN Worker'
     if ($isAdmin) {
         Remove-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue | Out-Null
-        New-NetFirewallRule -DisplayName $ruleName -Direction Inbound -Action Allow -Program $bin -Profile Domain,Private,Public -Enabled True -ErrorAction SilentlyContinue | Out-Null
+        if ($AllowPublicFirewall) {
+            New-NetFirewallRule -DisplayName $ruleName -Direction Inbound -Action Allow -Program $bin -Profile Domain,Private,Public -RemoteAddress LocalSubnet -Enabled True -ErrorAction SilentlyContinue | Out-Null
+        } else {
+            New-NetFirewallRule -DisplayName $ruleName -Direction Inbound -Action Allow -Program $bin -Profile Domain,Private -RemoteAddress LocalSubnet -Enabled True -ErrorAction SilentlyContinue | Out-Null
+        }
     } else {
         $appRules = Get-NetFirewallApplicationFilter -Program $bin -ErrorAction SilentlyContinue | Get-NetFirewallRule -ErrorAction SilentlyContinue | Where-Object { $_.Enabled -eq 'True' -and $_.Direction -eq 'Inbound' }
         if ($appRules | Where-Object { $_.Action -eq 'Block' }) {
-            Write-Warning "EngineX OS: Windows Firewall has an active Inbound BLOCK rule for $bin. Decks on Wi-Fi/LAN cannot pair until you allow enginex-stemsd.exe on Private and Public networks (or run PowerShell as Administrator once)."
-        } elseif (-not ($appRules | Where-Object { $_.Action -eq 'Allow' -and ($_.Profile -match 'Any|Public') })) {
-            Write-Host "EngineX OS: If Windows Firewall prompts, tick BOTH Private and Public networks (Windows Wi-Fi defaults to Public)." -ForegroundColor Yellow
+            Write-Warning "EngineX OS: Windows Firewall has an active Inbound BLOCK rule for $bin. Decks on Wi-Fi/LAN cannot pair until you allow enginex-stemsd.exe on your Private home network (or run PowerShell as Administrator once; pass -AllowPublicFirewall only on a trusted home Wi-Fi marked Public)."
+        } elseif (-not ($appRules | Where-Object { $_.Action -eq 'Allow' -and ($_.Profile -match 'Any|Private|Domain') })) {
+            Write-Host "EngineX OS: Set your home Wi-Fi to Private in Windows Settings and allow enginex-stemsd.exe on Private networks when Windows Firewall prompts (pass -AllowPublicFirewall as Administrator only on a trusted home Wi-Fi marked Public)." -ForegroundColor Yellow
         }
     }
 } catch {}

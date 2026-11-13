@@ -308,6 +308,22 @@ func DiscoverLANServer(ctx context.Context, timeout time.Duration) (string, Beac
 	return gotEndpoint, gotBeacon, nil
 }
 
+func validMDNSRecordIP(mdnsIP, fromIP net.IP, localNets []*net.IPNet) bool {
+	ip4 := mdnsIP.To4()
+	if ip4 == nil || ip4.IsLoopback() || !lanIP(ip4) {
+		return false
+	}
+	if from4 := fromIP.To4(); from4 != nil && ip4.Equal(from4) {
+		return true
+	}
+	for _, n := range localNets {
+		if n != nil && !n.IP.IsLoopback() && n.Contains(ip4) {
+			return true
+		}
+	}
+	return false
+}
+
 func discoverLANServers(ctx context.Context, timeout time.Duration, accept func(endpoint string, b Beacon) bool) error {
 	primary, err := net.ListenUDP("udp4", nil)
 	if err != nil {
@@ -318,7 +334,8 @@ func discoverLANServers(ctx context.Context, timeout time.Duration, accept func(
 		net  *net.IPNet // nil on primary wildcard socket
 	}
 	socks := []probeSock{{conn: primary}}
-	for _, ifNet := range localLANIPv4Nets() {
+	localNets := localLANIPv4Nets()
+	for _, ifNet := range localNets {
 		if len(socks) >= 8 {
 			break
 		}
@@ -438,7 +455,7 @@ func discoverLANServers(ctx context.Context, timeout time.Duration, accept func(
 				b, mdnsIP, _ = parseMDNSWithIP(pkt.data)
 			}
 			peerIP := pkt.from.IP
-			if lanIP(mdnsIP) {
+			if validMDNSRecordIP(mdnsIP, pkt.from.IP, localNets) {
 				peerIP = mdnsIP
 			}
 			if b.Service != beaconService || b.Port < 1 || b.Port > 65535 || !lanIP(peerIP) {
