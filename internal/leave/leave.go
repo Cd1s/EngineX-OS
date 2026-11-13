@@ -126,6 +126,17 @@ func syncDir(p string) error {
 	return syncPath(p)
 }
 
+// realDirs keeps the paths that are real directories (a journal half removed has no stage).
+func realDirs(paths ...string) []string {
+	var out []string
+	for _, p := range paths {
+		if realDir(p) {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 // syncDirs makes the renames and exchanges just done in these directories durable, before the
 // next step and before cleanup removes the other side (#234 review round 3).
 func syncDirs(dirs ...string) error {
@@ -444,13 +455,22 @@ func (d Deck) recover() error {
 	id := readLine(filepath.Join(journal, "id"))
 	stage := filepath.Join(journal, "stage/root")
 	live, err := d.live()
-	if id == "" || err != nil || !hasMarker(filepath.Join(stage, "bundle"), id) {
-		// Not prepared yet (nothing was changed), or committed: the older bundle is live.
+	if id == "" || err != nil {
+		// Not prepared yet: nothing was changed.
 		if err == nil {
 			d.finish(live)
 		} else {
 			os.RemoveAll(journal)
 		}
+		return nil
+	}
+	if !hasMarker(filepath.Join(stage, "bundle"), id) {
+		// Committed: the older bundle is live. Its exchange is made durable first, again if that
+		// sync failed before, and only then go the journal and this release's parked bundle.
+		if err := syncDirs(realDirs(live, stage)...); err != nil {
+			return err
+		}
+		d.finish(live)
 		return nil
 	}
 	// The older bundle never went in: every other part goes back.
@@ -480,6 +500,11 @@ func (d Deck) recover() error {
 			return err
 		}
 	}
+	// The barriers again, whether or not this run swapped anything: a retry after a failed sync
+	// finds the parts already back and must not skip their sync before cleanup.
+	if err := syncDirs(realDirs(filepath.Join(live, "ui"), filepath.Join(stage, "ui"))...); err != nil {
+		return err
+	}
 	enginex, link := d.data("enginex"), d.data("sc5000-custom")
 	if exists(filepath.Join(journal, "layout")) && realDir(link) {
 		if t, err := os.Readlink(enginex); err == nil && t != "enginex" {
@@ -500,7 +525,9 @@ func (d Deck) recover() error {
 				return err
 			}
 		}
-		if err := syncDirs(d.data()); err != nil {
+	}
+	if exists(filepath.Join(journal, "layout")) {
+		if err := syncDirs(d.data()); err != nil { // also when an earlier run did the exchange back
 			return err
 		}
 	}
