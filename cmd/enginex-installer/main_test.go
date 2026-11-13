@@ -958,7 +958,9 @@ func TestNativeReadbackRefusesUnverifiableActivation(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), "image readback") || !strings.HasSuffix(err.Error(), "nothing flashed") {
 				t.Fatalf("readback %s: %v", path, err)
 			}
-			if flashed := fb.Flashed(); len(flashed) != 0 { t.Fatalf("flashed after readback failure: %v", flashed) }
+			if flashed := fb.Flashed(); len(flashed) != 0 {
+				t.Fatalf("flashed after readback failure: %v", flashed)
+			}
 		})
 	}
 }
@@ -1443,7 +1445,9 @@ func TestUSBDeckWithoutExternalToolsWaitsForUpdateMode(t *testing.T) {
 	if !strings.Contains(out, "15e4:d007") || strings.Contains(out, "install fastboot") {
 		t.Fatal(out)
 	}
-	if strings.Contains(out, "sudo") { t.Errorf("root was told to use sudo: %s", out) }
+	if strings.Contains(out, "sudo") {
+		t.Errorf("root was told to use sudo: %s", out)
+	}
 }
 
 func TestUSBDeckWaitsForFirmwareUpdateMode(t *testing.T) {
@@ -1985,16 +1989,26 @@ func TestImageFlagAliasAndUnwrapGen2ImageOrBundle(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, err := readBundle(ctxT(t), b.ImagePath)
-	if err != nil { t.Fatal(err) }
-	if !bytes.Equal(got.TarGz, tarBytes) { t.Fatal("readBundle changed the verified image payload") }
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got.TarGz, tarBytes) {
+		t.Fatal("readBundle changed the verified image payload")
+	}
 	gotTar, err := readBundle(ctxT(t), b.Path)
-	if err != nil { t.Fatal(err) }
-	if !bytes.Equal(gotTar.TarGz, tarBytes) { t.Fatal("readBundle changed the legacy bundle payload") }
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(gotTar.TarGz, tarBytes) {
+		t.Fatal("readBundle changed the legacy bundle payload")
+	}
 
 	flipped := append([]byte(nil), imgBytes...)
 	flipped[len(flipped)-1] ^= 1
 	flippedPath := filepath.Join(t.TempDir(), "flipped.img")
-	if err := os.WriteFile(flippedPath, flipped, 0o600); err != nil { t.Fatal(err) }
+	if err := os.WriteFile(flippedPath, flipped, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := readBundle(ctxT(t), flippedPath); err == nil || !strings.Contains(err.Error(), "SHA-256") {
 		t.Errorf("flipped payload accepted: %v", err)
 	}
@@ -2006,7 +2020,9 @@ func TestImageFlagAliasAndUnwrapGen2ImageOrBundle(t *testing.T) {
 		"az01 gen1":         append([]byte("AZ01"), make([]byte, 200)...),
 	} {
 		badPath := filepath.Join(t.TempDir(), "bad.img")
-		if err := os.WriteFile(badPath, bad, 0o600); err != nil { t.Fatal(err) }
+		if err := os.WriteFile(badPath, bad, 0o600); err != nil {
+			t.Fatal(err)
+		}
 		if _, err := readBundle(ctxT(t), badPath); err == nil {
 			t.Errorf("%s accepted without error", name)
 		}
