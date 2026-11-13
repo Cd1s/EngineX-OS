@@ -400,6 +400,8 @@ func convertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 		stamp = stampVersion + " " + staged
 	}
 	dir := filepath.Join(mount, "Engine Library", "Database2")
+	oldStamp := readMark(dir, stampName)
+	opts.LegacyOffsets = oldStamp != "" && !strings.HasPrefix(oldStamp, stampVersion+" ")
 	resume := false
 	if !full && !opts.SmartMatch && importedStamp(dir) == stamp {
 		// Earlier builds stamped a large library imported from the export alone

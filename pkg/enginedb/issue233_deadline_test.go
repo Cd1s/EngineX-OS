@@ -32,8 +32,9 @@ func TestIssue233ExpiredIncrementalBudgetDoesNotReadEveryNewMP3(t *testing.T) {
 	t.Cleanup(func() { audioHeader = old })
 	headers := 0
 	audioHeader = func(p string) (compat.AudioInfo, error) { headers++; return old(p) }
+	// The completed existing row is not deferred by a new export (#233 B1).
 	r, err := Sync(ctx, root, read(), Options{Deadline: time.Now().Add(-time.Second)})
-	if err != nil || r.Added != 2999 || r.Deferred != 3000 {
+	if err != nil || r.Added != 2999 || r.Deferred != 2999 {
 		t.Fatalf("expired incremental import: %+v %v", r, err)
 	}
 	// prepareTracks deliberately prepares one track even after the cut-off;
