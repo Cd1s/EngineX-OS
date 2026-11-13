@@ -376,3 +376,15 @@ func TestAZ01XZBlockCountCaps(t *testing.T) {
 		}
 	}
 }
+
+// Only LZMA2 is decoded, so a filter chain must be rejected even when the block
+// check matches the raw LZMA2 output.
+func TestAZ01XZFilterChainMustBeLZMA2(t *testing.T) {
+	stream := buildMultiBlockXZ([]byte{0})
+	bh := stream[12:24]
+	copy(bh, []byte{0x02, 0x01, 0x03, 0x01, 0x00, 0x21, 0x01, 0x00}) // delta(dist 1), LZMA2
+	binary.LittleEndian.PutUint32(bh[8:], crc32.ChecksumIEEE(bh[:8]))
+	if n, err := extractXZ(t, stream, io.Discard); !errors.Is(err, azimg.ErrCorrupt) || n != 0 {
+		t.Fatalf("delta+LZMA2 chain: n=%d err=%v; want preflight ErrCorrupt", n, err)
+	}
+}
