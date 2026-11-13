@@ -25,6 +25,7 @@ func TestConfigurationDescriptors(t *testing.T) {
 		"duplicate endpoint": func(b []byte) []byte { b[27] = b[20]; return b },
 		"endpoint zero":      func(b []byte) []byte { b[20] = 0; return b },
 		"count":              func(b []byte) []byte { b[13] = 3; return b },
+		"interface count":    func(b []byte) []byte { b[4] = 2; return b },
 		"duplicate alternate": func(b []byte) []byte {
 			b = append(b, b[9:18]...)
 			binary.LittleEndian.PutUint16(b[2:4], uint16(len(b)))
@@ -110,11 +111,79 @@ func TestSessionWaitingTransferCancellation(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+func TestSessionHonorsLongerExplicitDeadline(t *testing.T) {
+	s := newSession()
+	parent, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	ctx, end, err := s.beginTimeout(parent, time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer end()
+	parentDeadline, _ := parent.Deadline()
+	actualDeadline, _ := ctx.Deadline()
+	if !actualDeadline.Equal(parentDeadline) {
+		t.Fatalf("caller deadline clamped: %v versus %v", actualDeadline, parentDeadline)
+	}
+	select {
+	case <-ctx.Done():
+		t.Fatal("explicit deadline replaced by fallback")
+	case <-time.After(5 * time.Millisecond):
+	}
+	cancel()
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("explicit-deadline transfer did not cancel")
+	}
+}
+
+func TestSessionAppliesDefaultWithoutDeadline(t *testing.T) {
+	s := newSession()
+	ctx, end, err := s.beginTimeout(context.Background(), time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer end()
+	select {
+	case <-ctx.Done():
+		if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			t.Fatal(ctx.Err())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("default deadline absent")
+	}
+}
 func TestErrorWriteUncertainty(t *testing.T) {
 	err := fault("write", System, true, context.DeadlineExceeded)
 	var detail *Error
 	if !errors.Is(err, context.DeadlineExceeded) || !errors.As(err, &detail) || detail.Kind != Timeout || !detail.MayHaveWritten {
 		t.Fatal(err)
+	}
+}
+
+func TestControlStaysOnSelectedInterface(t *testing.T) {
+	interfaces, _ := parseConfiguration(configurationFixture())
+	it := interfaces[0]
+	for _, test := range []struct {
+		typ, request uint8
+		index        uint16
+		length       int
+	}{
+		{0xc1, 1, 4, 1}, {0xc1, 1, 0x103, 1}, {0xc2, 1, 0x82, 1}, {0xc2, 1, 0x181, 1}, {0xc0, 1, 0, 65536}, {0, 9, 0, 0}, {1, 11, 3, 0},
+	} {
+		if err := controlRequest(it, test.typ, test.request, test.index, test.length); err == nil {
+			t.Fatalf("accepted escaping control %+v", test)
+		}
+	}
+	for _, test := range []struct {
+		typ, request uint8
+		index        uint16
+	}{{0xc1, 1, 3}, {0xc2, 1, 0x81}, {0xc0, 1, 0}, {0x80, 6, 0}} {
+		if err := controlRequest(it, test.typ, test.request, test.index, 64); err != nil {
+			t.Fatalf("rejected valid control %+v: %v", test, err)
+		}
 	}
 }
 

@@ -138,6 +138,10 @@ func newSession() *session {
 	return &session{gate: make(chan struct{}, 1), ctx: ctx, cancel: cancel}
 }
 func (s *session) begin(parent context.Context) (context.Context, func(), error) {
+	return s.beginTimeout(parent, defaultTimeout)
+}
+
+func (s *session) beginTimeout(parent context.Context, fallback time.Duration) (context.Context, func(), error) {
 	select {
 	case <-s.ctx.Done():
 		return nil, nil, fault("transfer", Disconnected, false, errors.New("device is closed"))
@@ -151,7 +155,13 @@ func (s *session) begin(parent context.Context) (context.Context, func(), error)
 		return nil, nil, fault("transfer", Disconnected, false, errors.New("device is closed"))
 	default:
 	}
-	ctx, cancel := context.WithTimeout(parent, defaultTimeout)
+	var ctx context.Context
+	var cancel context.CancelFunc
+	if _, ok := parent.Deadline(); ok {
+		ctx, cancel = context.WithCancel(parent)
+	} else {
+		ctx, cancel = context.WithTimeout(parent, fallback)
+	}
 	stop := context.AfterFunc(s.ctx, cancel)
 	return ctx, func() { stop(); cancel(); <-s.gate }, nil
 }
@@ -174,12 +184,43 @@ func timeoutMS(ctx context.Context) uint32 {
 	if d < time.Millisecond {
 		return 1
 	}
+	if d/time.Millisecond >= time.Duration(^uint32(0)) {
+		return ^uint32(0)
+	}
 	return uint32((d + time.Millisecond - 1) / time.Millisecond)
 }
 
 func transferSize(n int) error {
 	if n > transferLimit {
 		return fault("transfer", Protocol, false, errors.New("transfer exceeds 16 MiB limit"))
+	}
+	return nil
+}
+
+func controlRequest(it Interface, typ, request uint8, index uint16, length int) error {
+	if length > 65535 {
+		return fault("control", Protocol, false, errors.New("control length exceeds uint16"))
+	}
+	switch typ & 0x1f {
+	case 1:
+		if index != uint16(it.Number) {
+			return fault("control", Protocol, false, errors.New("control targets another interface"))
+		}
+	case 2:
+		if index > 255 {
+			return fault("control", Protocol, false, errors.New("invalid endpoint index"))
+		}
+		if err := bulkEndpoint(it, uint8(index), index&0x80 != 0); err != nil {
+			return err
+		}
+	case 0:
+	default:
+		return fault("control", Unsupported, false, errors.New("unsupported control recipient"))
+	}
+	// Configuration/address/alternate selection is owned by Open, never by
+	// protocol control traffic on an already selected interface.
+	if typ&0x60 == 0 && typ&0x80 == 0 && (request == 5 || request == 9 || request == 11) {
+		return fault("control", Unsupported, false, errors.New("control request changes device configuration"))
 	}
 	return nil
 }

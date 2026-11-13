@@ -234,6 +234,7 @@ func (b *linuxBackend) Open(ctx context.Context, id DeviceID, number, alt uint8)
 		releaseErr := b.calls.ioctl(fd, 0x80045510, unsafe.Pointer(&claim))
 		return cleanup(errors.Join(linuxError("set alternate", err, false), linuxError("release interface", releaseErr, false)))
 	}
+	a.info.Interfaces = []Interface{it}
 	return &linuxDevice{s: newSession(), fd: fd, calls: b.calls, info: a.info, it: it}, nil
 }
 
@@ -355,11 +356,8 @@ func (d *linuxDevice) WriteBulk(ctx context.Context, ep uint8, data []byte) (int
 	return d.exchange(ctx, ep, data, false, true)
 }
 func (d *linuxDevice) Control(ctx context.Context, typ, request uint8, value, index uint16, data []byte) (int, error) {
-	if len(data) > 65535 {
-		return 0, fault("control", Protocol, false, errors.New("control length exceeds uint16"))
-	}
-	if typ&0x1f == 1 && uint8(index) != d.it.Number {
-		return 0, fault("control", Protocol, false, errors.New("control targets another interface"))
+	if err := controlRequest(d.it, typ, request, index, len(data)); err != nil {
+		return 0, err
 	}
 	buffer := make([]byte, 8+len(data))
 	buffer[0] = typ
