@@ -6,10 +6,12 @@ import (
 	"encoding/binary"
 	"errors"
 	"hash/crc32"
+	"io"
 	"testing"
 
 	"github.com/Cd1s/EngineX-OS/internal/installer/azimg"
 	"github.com/ulikunitz/xz"
+	"github.com/ulikunitz/xz/lzma"
 )
 
 type xzTestRecord struct{ unpadded, uncompressed uint64 }
@@ -107,6 +109,7 @@ func TestAZ01XZIndexCannotHideRealBlocks(t *testing.T) {
 				{"hidden-large-dictionary", rewriteXZIndex(t, buildMultiBlockXZWithFlags([]byte{0, 36}, tc.flags), merge), azimg.ErrLimitExceeded},
 				{"merged-index", rewriteXZIndex(t, honest, merge), azimg.ErrCorrupt},
 				{"fewer-index-records", rewriteXZIndex(t, honest, func(records []xzTestRecord) []xzTestRecord { return records[:1] }), azimg.ErrCorrupt},
+				{"extra-index-record", rewriteXZIndex(t, honest, func(records []xzTestRecord) []xzTestRecord { return append(records, records[1]) }), azimg.ErrCorrupt},
 			} {
 				t.Run(attack.name, func(t *testing.T) {
 					image := buildSyntheticAZ01(az01Opts{rootfs: attack.stream})
@@ -216,4 +219,133 @@ func TestAZ01XZUncompressedBoundsDespiteLyingIndex(t *testing.T) {
 			t.Fatalf("switched=%v n=%d written=%d err=%v; want bounded output after source changes", r.switched, n, out.n, err)
 		}
 	})
+}
+
+// xzOneBlock wraps LZMA2 data (end marker included) in a CRC32 XZ stream with an
+// unsized block header (4 KiB dictionary) and an Index that matches the block.
+func xzOneBlock(t *testing.T, lzma2, data []byte) []byte {
+	t.Helper()
+	b := []byte{0xfd, '7', 'z', 'X', 'Z', 0, 0x00, 0x01}
+	b = binary.LittleEndian.AppendUint32(b, crc32.ChecksumIEEE(b[6:8]))
+	bh := []byte{0x02, 0x00, 0x21, 0x01, 0x00, 0x00, 0x00, 0x00}
+	b = binary.LittleEndian.AppendUint32(append(b, bh...), crc32.ChecksumIEEE(bh))
+	b = append(append(b, lzma2...), make([]byte, (4-len(lzma2)%4)%4)...)
+	b = binary.LittleEndian.AppendUint32(b, crc32.ChecksumIEEE(data))
+	// Empty Index and footer placeholders; rewriteXZIndex replaces both.
+	b = append(b, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0x00, 0x01, 'Y', 'Z')
+	return rewriteXZIndex(t, b, func([]xzTestRecord) []xzTestRecord {
+		return []xzTestRecord{{uint64(12 + len(lzma2) + 4), uint64(len(data))}}
+	})
+}
+
+func extractXZ(t *testing.T, stream []byte, w io.Writer) (int64, error) {
+	t.Helper()
+	ctx := context.Background()
+	image := buildSyntheticAZ01(az01Opts{rootfs: stream})
+	im, err := azimg.Open(ctx, bytes.NewReader(image), int64(len(image)), azimg.Limits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return im.ExtractRootfs(ctx, w)
+}
+
+// The LZMA decoder stops when a chunk's range coder finishes; it does not require
+// the chunk's declared packed size to be consumed. Bytes appended inside that size
+// were parsed as an end marker, block check and a second block header declaring a
+// 1 GiB dictionary, which header-only preflight never sees.
+func TestAZ01XZChunkOverrunCannotHideBlockHeader(t *testing.T) {
+	data := bytes.Repeat([]byte("engine rootfs "), 64)
+	var raw bytes.Buffer
+	zw, err := lzma.Writer2Config{DictCap: lzma.MinDictCap}.NewWriter2(&raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := zw.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	chunk := raw.Bytes()[:raw.Len()-1] // one LZMA chunk; drop the end marker
+	if chunk[0] < 0xe0 || int(binary.BigEndian.Uint16(chunk[3:5]))+7 != len(chunk) {
+		t.Fatalf("fixture must be a single LZMA chunk, control 0x%02x", chunk[0])
+	}
+	var out bytes.Buffer
+	if _, err := extractXZ(t, xzOneBlock(t, append(chunk, 0), data), &out); err != nil || !bytes.Equal(out.Bytes(), data) {
+		t.Fatalf("honest control: %d bytes, err=%v", out.Len(), err)
+	}
+
+	pad := (4 - (len(chunk)+1)%4) % 4 // block padding in the decoder's view
+	hidden := append([]byte{0}, make([]byte, pad)...)
+	hidden = binary.LittleEndian.AppendUint32(hidden, crc32.ChecksumIEEE(data))
+	bh := []byte{0x02, 0x00, 0x21, 0x01, 36, 0x00, 0x00, 0x00}
+	hidden = binary.LittleEndian.AppendUint32(append(hidden, bh...), crc32.ChecksumIEEE(bh))
+	// 4-pad data bytes give the outer block the same padding, so only the
+	// block-end check can tell the two views apart.
+	hidden = append(hidden, 0x01, 0x00, byte(3-pad))
+	hidden = append(hidden, bytes.Repeat([]byte("x"), 4-pad)...)
+	overrun := append(append([]byte(nil), chunk...), hidden...)
+	binary.BigEndian.PutUint16(overrun[3:5], uint16(len(overrun)-6-1))
+	overrun = append(overrun, 0)
+
+	// Fixture precondition: the decoder really leaves the appended bytes unread.
+	src := bytes.NewReader(overrun)
+	zr, err := lzma.NewReader2(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := io.ReadAll(zr); err != nil || !bytes.Equal(got, data) || src.Len() != len(hidden) {
+		t.Fatalf("decoder did not stop early: %d bytes, %d unread, err=%v", len(got), src.Len(), err)
+	}
+
+	before := totalAllocBytes()
+	_, err = extractXZ(t, xzOneBlock(t, overrun, data), io.Discard)
+	allocated := totalAllocBytes() - before
+	if !errors.Is(err, azimg.ErrCorrupt) || allocated > 32<<20 {
+		t.Fatalf("err=%v allocated=%d MiB; want ErrCorrupt without the hidden dictionary", err, allocated>>20)
+	}
+}
+
+// With an honest Index, block header size fields must still match the block.
+func TestAZ01XZHeaderSizeFieldsMatchBlock(t *testing.T) {
+	for _, flags := range []byte{0x40, 0x80} {
+		stream := buildMultiBlockXZWithFlags([]byte{0}, flags)
+		bh := stream[12 : 12+(int(stream[12])+1)*4]
+		bh[2]++ // the only size field present
+		binary.LittleEndian.PutUint32(bh[len(bh)-4:], crc32.ChecksumIEEE(bh[:len(bh)-4]))
+		if n, err := extractXZ(t, stream, io.Discard); !errors.Is(err, azimg.ErrCorrupt) || n != 0 {
+			t.Errorf("flags 0x%02x: n=%d err=%v; want preflight ErrCorrupt", flags, n, err)
+		}
+	}
+}
+
+func TestAZ01XZBlockCheckVerified(t *testing.T) {
+	for _, check := range []byte{xz.CRC32, xz.CRC64, xz.SHA256} {
+		stream := compressXZ(t, []byte("rootfs payload"), check)
+		var out bytes.Buffer
+		if _, err := extractXZ(t, stream, &out); err != nil || out.String() != "rootfs payload" {
+			t.Fatalf("check 0x%02x control: %q err=%v", check, out.String(), err)
+		}
+		// The last byte before the Index belongs to the single block's check.
+		indexSize := (int(binary.LittleEndian.Uint32(stream[len(stream)-8:])) + 1) * 4
+		stream[len(stream)-12-indexSize-1] ^= 1
+		if _, err := extractXZ(t, stream, io.Discard); !errors.Is(err, azimg.ErrCorrupt) {
+			t.Errorf("check 0x%02x: tampered block check err=%v; want ErrCorrupt", check, err)
+		}
+	}
+}
+
+func TestAZ01XZNonzeroPaddingRejected(t *testing.T) {
+	stream := buildMultiBlockXZ([]byte{0})
+	headerPad := append([]byte(nil), stream...)
+	bh := headerPad[12:24]
+	bh[7] = 1
+	binary.LittleEndian.PutUint32(bh[8:], crc32.ChecksumIEEE(bh[:8]))
+	blockPad := append([]byte(nil), stream...)
+	blockPad[24+9] = 1 // after the 9-byte LZMA2 data
+	for name, bad := range map[string][]byte{"header": headerPad, "block": blockPad} {
+		if n, err := extractXZ(t, bad, io.Discard); !errors.Is(err, azimg.ErrCorrupt) || n != 0 {
+			t.Errorf("nonzero %s padding: n=%d err=%v; want preflight ErrCorrupt", name, n, err)
+		}
+	}
 }
