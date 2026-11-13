@@ -1557,6 +1557,9 @@ func (g *tidalGateway) stemsSource(w http.ResponseWriter, r *http.Request) {
 	}
 	// The row joins the Stems list of the service it was stemmed from.
 	stemsScope := ref.track.Provider
+	if v := g.sessionByID(ref.session); v != nil && v.Provider != "" {
+		stemsScope = v.Provider
+	}
 	if stemsScope == "" {
 		stemsScope = g.s.scope()
 	}
