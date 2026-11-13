@@ -55,9 +55,15 @@ func (d *testUSB) Enumerate(context.Context) ([]usb.DeviceInfo, error) {
 	return []usb.DeviceInfo{d.info}, nil
 }
 
-func (d *testUSB) Open(context.Context, usb.DeviceID, uint8, uint8) (usb.Device, error) {
+func (d *testUSB) Open(_ context.Context, id usb.DeviceID, _, _ uint8) (usb.Device, error) {
 	d.opens++
-	return d, d.openErr
+	if id != d.info.ID {
+		return nil, errors.New("opened the wrong USB attachment")
+	}
+	if d.openErr != nil {
+		return nil, d.openErr
+	}
+	return d, nil
 }
 
 func (d *testUSB) Info() usb.DeviceInfo                   { return d.info }

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"crypto/sha1"
 	"encoding/binary"
-	"fmt"
 
 	"github.com/ulikunitz/xz"
 	"net/http"
@@ -128,7 +127,7 @@ func gen1Container(t *testing.T, prefix string, rootfs []byte) []byte {
 		}
 	}
 	if board == "" {
-		t.Fatal(fmt.Sprintf("unknown fixture prefix %s", prefix))
+		t.Fatalf("unknown fixture prefix %s", prefix)
 	}
 	var header bytes.Buffer
 	str(&header, "test-build")
