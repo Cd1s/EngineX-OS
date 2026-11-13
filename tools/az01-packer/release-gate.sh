@@ -77,7 +77,7 @@ phase() {
     mount --bind "$W/$name-ca.crt" "$bundle"
     # Deck-destructive commands: record and succeed.
     cp "$R$(chroot "$R" /bin/readlink -f /usr/sbin/az01-update)" "$R/run/gate/az01-update.real"
-    printf '#!/bin/sh\necho "SHIM $0 $*" >> /tmp/gate-shim.log\n' > "$R/run/gate/record"
+    cp "$REPO/tools/az01-packer/gate-record.sh" "$R/run/gate/record"
     printf '#!/bin/sh\necho "SHIM $0 $*" >> /tmp/gate-shim.log\n[ "$1" = --update ] && exec /usr/sbin/az01-update --net "$2"\n' > "$R/run/gate/planck"
     cat > "$R/run/gate/az01-update" <<'SH'
 #!/bin/sh
