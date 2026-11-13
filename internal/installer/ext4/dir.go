@@ -232,7 +232,12 @@ func (f *fsys) parseEntries(blk []byte, end int, idx int) ([]dirent, error) {
 	return out, nil
 }
 
+// lookup finds name in dir. Names in an encrypted directory are ciphertext,
+// so a plaintext lookup there is refused rather than reported as missing.
 func (f *fsys) lookup(dir *inode, name string) (uint32, uint8, error) {
+	if dir.flags()&flagEncrypt != 0 {
+		return 0, 0, fmt.Errorf("%w: directory inode %d is encrypted; its names cannot be looked up", ErrUnsupported, dir.num)
+	}
 	blocks, err := f.readDir(dir)
 	if err != nil {
 		return 0, 0, err
