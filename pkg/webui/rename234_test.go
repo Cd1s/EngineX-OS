@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"errors"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -134,7 +135,7 @@ func TestRename234EveryRouteUnderBothPrefixes(t *testing.T) {
 func rename234Bundle(t *testing.T, version, tag string) []byte {
 	t.Helper()
 	files := map[string]string{
-		"install.sh":  "#!/bin/sh\nset -eu\ncp \"$(dirname \"$0\")/version.txt\" \"$ENGINEX_CUSTOM/version.txt\"\n",
+		"install.sh":  "#!/bin/sh\nset -eu\ncp \"$(dirname \"$0\")/version.txt\" \"$ENGINEX_CUSTOM/version.txt\"\n: > \"$ENGINEX_CUSTOM/in-place\"\n",
 		"version.txt": version + "\n",
 		"SHA256SUMS":  "", // checked by install.sh, which this fake one skips
 	}
@@ -155,34 +156,70 @@ func rename234Bundle(t *testing.T, version, tag string) []byte {
 	return b.Bytes()
 }
 
-// #234: a bundle of an older release than the installed one (a downgrade by upload) is installed,
-// but never activated in place: this release's leave step takes its units out of /run and
-// reboots. A newer one is activated in place as before, after the daemons under either suite
-// name have ended.
+// #234: a bundle of an older release than the installed one (a downgrade by upload) never runs
+// its install.sh over /data (review R1/R2): installOlder stages it and swaps it in
+// (internal/leave), and this release's leave step takes its units out of /run and reboots. A
+// refusal reaches the screen and changes nothing. A newer one is installed and activated in place
+// as before, after the daemons under either suite name have ended.
 func TestRename234OlderBundleLeavesAndRebootsInsteadOfActivating(t *testing.T) {
-	defer func(a func(string) bool, l func(string) bool) { activatesOnDeck, launchActivation = a, l }(activatesOnDeck, launchActivation)
-	var scripts []string
+	defer func(a func(string) bool, l func(string) bool, i func(string) error) {
+		activatesOnDeck, launchActivation, installOlder = a, l, i
+	}(activatesOnDeck, launchActivation, installOlder)
+	var scripts, staged []string
+	var refuse error
 	activatesOnDeck = func(string) bool { return true }
 	launchActivation = func(script string) bool { scripts = append(scripts, script); return true }
 	for _, c := range []struct {
 		version, tag string
 		older        bool
+		refused      bool
 	}{
-		{"5.3.0.4", "v5.3.0.4-r5", true},
-		{"5.3.0.5", "v5.3.0.5-r1", true},
-		{"5.3.0.5", "v5.3.0.5-r2", false},
-		{"5.3.0.6", "", false},
+		{"5.3.0.4", "v5.3.0.4-r5", true, false},
+		{"5.3.0.2", "", true, true},
+		{"5.3.0.5", "v5.3.0.5-r1", true, false},
+		{"5.3.0.5", "v5.3.0.5-r2", false, false},
+		{"5.3.0.6", "", false, false},
 	} {
 		custom := filepath.Join(t.TempDir(), "enginex")
 		os.MkdirAll(filepath.Join(custom, "bundle"), 0o700)
 		os.WriteFile(filepath.Join(custom, "version.txt"), []byte("5.3.0.5\n"), 0o644)
 		os.WriteFile(filepath.Join(custom, "bundle", releaseTagName), []byte("v5.3.0.5-r2\n"), 0o644)
+		installOlder = func(top string) error {
+			b, _ := os.ReadFile(filepath.Join(top, "version.txt"))
+			staged = append(staged, strings.TrimSpace(string(b)))
+			if refuse != nil {
+				return refuse
+			}
+			return os.WriteFile(filepath.Join(custom, "version.txt"), b, 0o644)
+		}
+		refuse = nil
+		if c.refused {
+			refuse = errors.New("this deck cannot swap directories atomically")
+		}
 		s := New(Config{AccessToken: "c", UIDir: t.TempDir(), StateDir: t.TempDir(), VersionFile: filepath.Join(custom, "version.txt")}, nil)
-		scripts = nil
+		scripts, staged = nil, nil
 		s.applyDataBundleFromReader(bytes.NewReader(rename234Bundle(t, c.version, c.tag)))
 		s.Close()
-		if b, _ := os.ReadFile(filepath.Join(custom, "version.txt")); strings.TrimSpace(string(b)) != c.version {
-			t.Fatalf("%s %s: not installed (%q, %+v)", c.version, c.tag, b, s.updateCache)
+		_, err := os.Stat(filepath.Join(custom, "in-place"))
+		inPlace := err == nil
+		want := c.version
+		if c.refused {
+			want = "5.3.0.5"
+		}
+		if b, _ := os.ReadFile(filepath.Join(custom, "version.txt")); strings.TrimSpace(string(b)) != want {
+			t.Fatalf("%s %s: version %q, want %s (%+v)", c.version, c.tag, b, want, s.updateCache)
+		}
+		if c.older && (inPlace || len(staged) != 1 || staged[0] != c.version) {
+			t.Fatalf("older %s %s: install.sh in place %v, staged %q", c.version, c.tag, inPlace, staged)
+		}
+		if !c.older && (!inPlace || len(staged) != 0) {
+			t.Fatalf("newer %s %s: install.sh in place %v, staged %q", c.version, c.tag, inPlace, staged)
+		}
+		if c.refused {
+			if len(scripts) != 0 || !strings.Contains(s.updateCache.Error, "cannot swap directories atomically") {
+				t.Errorf("refused %s: activations %q, error %q", c.version, scripts, s.updateCache.Error)
+			}
+			continue
 		}
 		if len(scripts) != 1 {
 			t.Fatalf("%s %s: %d activations", c.version, c.tag, len(scripts))

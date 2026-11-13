@@ -9,10 +9,11 @@ import (
 	"time"
 )
 
-// #234: EngineX-Installer of 5.3.0.5 installs an older release over it (5.3.0.5 -> r5), then
-// runs the installed release's leave step, which reboots, instead of the older bundle's
+// #234: EngineX-Installer of 5.3.0.5 hands an older release (5.3.0.5 -> r5) to the installed
+// release's leave step, which installs it through a stage (review R1/R2: never the older
+// install.sh in place), and then runs the step again to reboot, instead of the older bundle's
 // boot-activate.sh: that one never runs in place over 5.3.0.5's units. A newer or the same
-// release is still activated in place.
+// release is still installed and activated in place.
 func TestRename234ModeAOlderBundleLeavesInsteadOfActivating(t *testing.T) {
 	need(t, "python3", "unshare")
 	for _, c := range []struct {
@@ -33,7 +34,9 @@ func TestRename234ModeAOlderBundleLeavesInsteadOfActivating(t *testing.T) {
 		os.WriteFile(filepath.Join(custom, "version.txt"), []byte("5.3.0.5\n"), 0o644)
 		os.WriteFile(filepath.Join(custom, "bundle/release-tag"), []byte("v5.3.0.5\n"), 0o644)
 		marker := filepath.Join(deck.Data, "left")
-		os.WriteFile(filepath.Join(deck.Data, "run-enginex-leave.sh"), []byte("#!/bin/sh\necho \"$*\" > '"+marker+"'\n"), 0o755)
+		// The stand-in step installs what --install gives it, the way internal/leave ends up.
+		os.WriteFile(filepath.Join(deck.Data, "run-enginex-leave.sh"), []byte("#!/bin/sh\necho \"$*\" >> '"+marker+"'\n"+
+			"[ \"$1\" != --install ] || sh \"$2/install.sh\"\n"), 0o755)
 		announceFrom(t, "127.0.0.1", freeUDPFrom(o), airD("prime4plus-lab", "DISCOVERER_HOWDY_", "JC11S", "2.3.4", 1))
 
 		if err := run(ctxT(t), o); err != nil {
@@ -44,14 +47,16 @@ func TestRename234ModeAOlderBundleLeavesInsteadOfActivating(t *testing.T) {
 		}
 		cmds := strings.Join(deck.Commands(), "\n")
 		activated := strings.Contains(cmds, "/bundle/boot-activate.sh")
-		left := false
-		for i := 0; i < 100 && c.older && !left; i++ {
-			_, err := os.Stat(marker)
-			left = err == nil
+		var steps []string
+		for i := 0; i < 100 && c.older && len(steps) < 2; i++ {
+			raw, _ := os.ReadFile(marker)
+			steps = strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n")
 			time.Sleep(50 * time.Millisecond)
 		}
-		if c.older && (activated || !left) {
-			t.Errorf("older %s: boot-activate.sh ran %v, leave step ran %v\n%s", c.version, activated, left, cmds)
+		installs := len(steps) == 2 && strings.HasPrefix(steps[0], "--install ") &&
+			strings.Contains(steps[0], "/.enginex-leave.incoming/") && strings.HasSuffix(steps[0], " --no-reboot") && steps[1] == ""
+		if c.older && (activated || !installs) {
+			t.Errorf("older %s: boot-activate.sh ran %v, leave steps %q\n%s", c.version, activated, steps, cmds)
 		}
 		if !c.older && (!activated || strings.Contains(cmds, "leave")) {
 			t.Errorf("newer %s: boot-activate.sh ran %v\n%s", c.version, activated, cmds)

@@ -477,6 +477,11 @@ MIGRATE = r'''# /data/sc5000-custom became /data/enginex (#103): one rename keep
 old=/data/sc5000-custom
 new=/data/enginex
 if [ -d "$old" ] && [ ! -L "$old" ]; then
+    # A downgrade to a release before 5.3.0.3 handed the real directory back and left enginex as
+    # the link to it (#234, internal/leave): that link goes, the directory moves back.
+    case $(readlink "$new" 2>/dev/null) in
+    sc5000-custom | /data/sc5000-custom | enginex) rm -f "$new" ;;
+    esac
     if [ ! -e "$new" ] && [ ! -L "$new" ]; then
         mv "$old" "$new"
     elif [ -d "$new" ] && [ ! -L "$new" ]; then
