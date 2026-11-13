@@ -4,9 +4,10 @@
 #
 # Every replaced file is a bind mount from tmpfs (/run/enginex-dev), so the files
 # underneath stay untouched and a reboot puts them back. `rollback` unmounts
-# without a reboot. Only the names in target() can be replaced; nothing else is
-# written outside /run/enginex-dev and /run/enginex-dev-lock. This script never
-# starts a Factory Reset, runs az01-update or reboots.
+# without a reboot. Managed deploys only replace the names in target() and keep
+# their working files in /run/enginex-dev and /run/enginex-dev-lock. This script never
+# starts a Factory Reset or runs az01-update. Generic exec needs an explicit
+# --allow-reboot for reboot-family commands.
 set -eu
 STATE=/run/enginex-dev
 IN=$STATE/incoming
@@ -19,18 +20,56 @@ die() { echo "deck-agent: $*" >&2; exit 1; }
 LOCK=/run/enginex-dev-lock
 refuse() { echo "deck-agent: $*" >&2; exit 3; }
 field() { sed -n "s/^$1 //p" "$LOCK/owner" 2>/dev/null || :; }
+process_start() { sed 's/.*) //' "/proc/$1/stat" 2>/dev/null | awk '{ print $20 }'; }
+lock_cleanup() {
+    # Retire this directory before deleting metadata. A concurrent recovery may
+    # have pinned its inode, but a new operation can now take a fresh mutex.
+    retired=$(mktemp -d "$LOCK/.done.XXXXXX")
+    mv "$LOCK/.mutex" "$retired/mutex"
+    rm -f "$retired/mutex/process"
+    rmdir "$retired/mutex" "$retired" 2>/dev/null || :
+}
 lock_guard() {
     mkdir -p "$LOCK"
     # A child command can arrive during its wrapper's brief lease renewal.
     attempt=0
     until mkdir "$LOCK/.mutex" 2>/dev/null; do
-        [ "$attempt" -lt 10 ] || refuse 'deck operation busy (or interrupted; reboot clears the mutex)'
+        [ "$attempt" -lt 10 ] || refuse 'deck operation busy; retry or inspect deck-lock status'
         attempt=$((attempt + 1))
         sleep 0.05
     done
-    trap 'rmdir "$LOCK/.mutex"' EXIT
+    trap lock_cleanup EXIT
+    trap 'exit 129' HUP
     trap 'exit 130' INT
+    trap 'exit 141' PIPE
     trap 'exit 143' TERM
+    printf '%s %s\n' "$$" "$(process_start "$$")" > "$LOCK/.mutex/process"
+}
+lock_recover() {
+    [ -d "$LOCK/.mutex" ] || { echo 'no mutex to recover'; return; }
+    # Pin the inode before taking the recovery guard. Cleanup can retire it
+    # while a new operation creates a different directory at the same path.
+    cd "$LOCK/.mutex" || refuse 'mutex changed; retry recovery'
+    mkdir .recovery 2>/dev/null || refuse 'mutex recovery already running'
+    trap 'rmdir .recovery 2>/dev/null || :' EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 141' PIPE
+    trap 'exit 143' TERM
+    read -r pid ticks < process || refuse 'mutex process metadata missing; inspect with the maintainer'
+    case $pid in ''|*[!0-9]*) refuse 'invalid mutex pid' ;; esac
+    case $ticks in ''|*[!0-9]*) refuse 'invalid mutex start time' ;; esac
+    [ "$(process_start "$pid")" != "$ticks" ] || refuse "mutex held by live process $pid"
+    quarantine=$(mktemp -d "$LOCK/.stale.XXXXXX")
+    stale_path=$(pwd -P)
+    mv "$stale_path" "$quarantine/mutex"
+    rm -f process
+    rmdir .recovery
+    trap - EXIT
+    cd "$LOCK"
+    rmdir "$quarantine/mutex" "$quarantine"
+    case $stale_path in "$LOCK"/.done.*/mutex) rmdir "${stale_path%/mutex}" 2>/dev/null || : ;; esac
+    echo "recovered dead mutex $pid $ticks"
 }
 lock_live() {
     expires=$(field expires)
@@ -57,7 +96,7 @@ lock_write() {
 lock_finish() {
     # A command pins the lease while it runs, then gives its caller a full TTL.
     lock_write "$(field owner)" "$(field host)" "$(field purpose)" "$(field ttl)"
-    rmdir "$LOCK/.mutex"
+    lock_cleanup
 }
 
 case ${1:-} in
@@ -67,7 +106,17 @@ lock-status)
         cat "$LOCK/owner"
         if lock_live; then echo 'live yes'; else echo 'live no'; fi
     fi
-    [ ! -d "$LOCK/.mutex" ] || echo 'busy yes'
+    if [ -d "$LOCK/.mutex" ]; then
+        echo 'busy yes'
+        if [ -r "$LOCK/.mutex/process" ]; then
+            read -r pid ticks < "$LOCK/.mutex/process" || :
+            echo "mutex_pid ${pid:-unknown}"
+            echo "mutex_started ${ticks:-unknown}"
+        fi
+    fi
+    exit 0 ;;
+lock-recover)
+    lock_recover
     exit 0 ;;
 lock-acquire)
     shift
@@ -135,6 +184,13 @@ target() {
     echo "$p"
 }
 
+mount_id() { awk -v t="$1" '$5 == t { id = $1 } END { print id }' /proc/self/mountinfo; }
+owned_mount() {
+    [ -f "$STATE/mount-ids/$1" ] && [ "$(cat "$STATE/mount-ids/$1")" = "$(mount_id "$2")" ] &&
+        [ "$(stat -c %d:%i "$STATE/files/$1")" = "$(stat -c %d:%i "$2")" ]
+}
+require_owned_mount() { owned_mount "$1" "$2" || refuse "$2 has a mount not created by deck-push; leaving it intact"; }
+
 mounted() { awk -v t="$1" '$5 == t { f = 1 } END { exit !f }' /proc/self/mountinfo; }
 
 # A file's sha256; for a directory the sha256 of the "<sha256>  ./<path>" lines of
@@ -185,11 +241,30 @@ restart() {
     done
 }
 
+check_command() {
+    # Catch common destructive commands, including ordinary sh -c usage.
+    # This is a convenience guard; arbitrary root programs can bypass it.
+    text=$(printf '%s\n' "$@" | tr '[:upper:]' '[:lower:]' | tr '\n\t' '  ' | tr -d "\"'")
+    case $text in
+    *az01-update*--erase-data*|*factoryreset*|*factory-reset*|*factory_reset*|*factory\ reset*)
+        refuse 'factory reset and erase-data commands are forbidden' ;;
+    esac
+    if printf '%s\n' "$text" | grep -Eq '(^|[^a-z0-9_.-])mkfs([.a-z0-9_-]*)([^a-z0-9_.-]|$)|(^|[^a-z0-9_.-])dd[[:space:]].*of=/dev/|(^|[^a-z0-9_.-])rm[[:space:]].*(-[^[:space:]]*r|--recursive).*[[:space:]]/data([/[:space:];&|]|$)'; then
+        refuse 'destructive filesystem command is forbidden'
+    fi
+    if [ "$allow_reboot" != 1 ] && printf '%s\n' "$text" | grep -Eq '(^|[^a-z0-9_.-])(reboot|poweroff|halt|shutdown|kexec)([^a-z0-9_.-]|$)|(reboot|poweroff|halt|kexec|soft-reboot)\.target|(^|[^a-z0-9_.-])(telinit|init)[[:space:]]+[06]([^0-9]|$)'; then
+        refuse 'reboot-family command needs --allow-reboot'
+    fi
+}
+
 cmd=${1:-}
 [ $# -eq 0 ] || shift
 case $cmd in
 exec)
     # Keep the mutex until the child ends, even if its lease expires meanwhile.
+    allow_reboot=0
+    case ${1:-} in --allow-reboot) allow_reboot=1; shift ;; --) shift ;; esac
+    check_command "$@"
     "$@"
     ;;
 digest)
@@ -204,6 +279,7 @@ preflight)
     echo "emain ${pid:--}"
     for n in "$@"; do
         p=$(target "$n")
+        if mounted "$p"; then require_owned_mount "$n" "$p"; fi
         echo "target $n $p $(digest "$p")"
     done
     [ ! -f "$STATE/mounted" ] || while read -r n; do echo "devmount $n $(target "$n")"; done < "$STATE/mounted"
@@ -219,10 +295,10 @@ backup)
 apply)
     # stdin: a tar with plan ("<name> <path in the tar>" lines), services, manifest.json, files.
     rm -rf "$IN"
-    mkdir -p "$IN" "$STATE/files" "$STATE/orig"
+    mkdir -p "$IN" "$STATE/files" "$STATE/orig" "$STATE/mount-ids"
     tar -C "$IN" -xf -
     for f in plan services manifest.json; do [ -f "$IN/$f" ] || die "incomplete upload: no $f"; done
-    while read -r n src; do target "$n" > /dev/null; case $src in '' | /* | *..*) die "bad source path for $n: $src" ;; esac; done < "$IN/plan"
+    while read -r n src; do p=$(target "$n"); if mounted "$p"; then require_owned_mount "$n" "$p"; fi; case $src in '' | /* | *..*) die "bad source path for $n: $src" ;; esac; done < "$IN/plan"
     while read -r n src; do
         p=$(target "$n")
         [ -e "$IN/$src" ] || die "$n: $src missing from the upload"
@@ -238,6 +314,7 @@ apply)
         rm -rf "$STATE/files/$n"
         mv "$IN/$src" "$STATE/files/$n"
         mount --bind "$STATE/files/$n" "$p"
+        mount_id "$p" > "$STATE/mount-ids/$n"
         grep -qx "$n" "$STATE/mounted" 2>/dev/null || echo "$n" >> "$STATE/mounted"
         echo "mounted $n $p $(digest "$p")"
     done < "$IN/plan"
@@ -251,12 +328,17 @@ apply)
     ;;
 rollback)
     [ -f "$STATE/mounted" ] || { echo "nothing to roll back"; exit 0; }
+    while read -r n; do
+        p=$(target "$n")
+        if mounted "$p"; then require_owned_mount "$n" "$p"; fi
+    done < "$STATE/mounted"
     # Last mounted first; one name per line, names have no spaces.
     # shellcheck disable=SC2013
     for n in $(awk '{ l[NR] = $0 } END { for (i = NR; i > 0; i--) print l[i] }' "$STATE/mounted"); do
         p=$(target "$n")
         # Lazy, as in apply: the services still map these files until their restart.
-        while mounted "$p"; do umount -l "$p"; done
+        if mounted "$p"; then umount -l "$p"; fi
+        ! mounted "$p" || refuse "$p still has another mount; leaving it intact"
         echo "restored $n $p $(digest "$p") $(cat "$STATE/orig/$n" 2>/dev/null || echo -)"
     done
     # shellcheck disable=SC2046

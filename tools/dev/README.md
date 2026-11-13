@@ -22,15 +22,17 @@ tools/dev/deck-push smoke left
 tools/dev/deck-push left --rollback
 tools/dev/deck-lock release left
 tools/dev/deck-lock status                 # read-only; no lease needed
-tools/dev/deck-lock run right left --purpose "sync pair" --wait -- ./pair-test.sh
+tools/dev/deck-lock run right left --purpose "sync pair" --wait --wait-timeout 5m -- ./pair-test.sh
 tools/dev/deck-lock run left --purpose "read-only check" --ssh -- uptime
 ```
 
 Acquire, deploy, test, roll back, release. Left and right can serve different agents;
 a two-deck test takes **left then right**, whatever order the caller supplies.
-If right is busy, an acquisition releases any lease it just took on left before
-waiting (`--wait`) or refusing (exit 3). Existing leases owned by the caller are
-borrowed, so a nested wrapper keeps them. `run` renews local command leases,
+With `--wait`, the tool polls read-only status with backoff and starts acquisition
+only when every requested deck is available. `--wait-timeout` bounds the wait
+(default 5 minutes). A race during acquisition releases every newly acquired lease
+before retrying or refusing (exit 3). Existing leases owned by the caller are
+borrowed without changing their purpose or TTL; a nested wrapper keeps them. `run` renews local command leases,
 terminates the command on lease loss, and releases its own leases on exit or signal.
 `deck` passes literal argv; use `sh -c '...'` explicitly for shell syntax.
 
@@ -40,9 +42,20 @@ purpose and expiry (1 h default, configurable with `--ttl`). `mkdir` serializes
 updates and deck operations. An executing deck command holds the lease until it finishes.
 A reboot clears the lease **and every development mount**: reacquire before
 redeploying or testing. An expired idle lease may be acquired by another agent.
-An untrappable kill during an operation can leave its mutex busy; fail closed,
-check the process with the maintainer, and use an approved reboot to clear it.
+HUP and PIPE clean up the mutex after an SSH disconnect. If SIGKILL leaves a
+mutex behind, run `deck-lock status left`, then `deck-lock recover left`.
+Recovery compares the saved PID and `/proc/<pid>/stat` start time and clears only
+a dead holder, leaving the lease and development mounts intact. A live holder
+is never cleared. Missing process metadata requires maintainer inspection.
+Ordinary contention means another operation is running: wait or retry it.
 Do not remove an active mutex or use raw SSH to bypass the lock.
+
+`deck` and `run --ssh` reject common destructive commands on the deck: factory
+reset / `az01-update --erase-data`, `mkfs`, `dd of=/dev/...`, and recursive removal
+under `/data`. Reboot-family commands also require `--allow-reboot`, placed before
+`--` (for example, `deck left --allow-reboot -- reboot`) after maintainer approval.
+This deny list is a convenience, not a sandbox: root scripts and indirect programs
+can bypass it. Factory reset and erase-data remain forbidden on real decks.
 
 `deck-push lock/unlock/status` remain compatible aliases. Smoke, rollback and
 status with deck details also require ownership. `deck-push backups` is local;
@@ -67,7 +80,7 @@ What a push does:
 
 `--rollback` lazily unmounts everything deck-push mounted (a restarted service may still map the pushed file), restarts the services those pushes restarted, checks that every target is back to its digest from before the first push, and runs the smoke check again. A reboot rolls back too, because `/run` and the mounts do not survive it.
 
-deck-push and its deck side (`deck-agent.sh`, sent over SSH as the argument of `sh -c`, never installed) only touch the five targets above, `/run/enginex-dev` and `/run/enginex-dev-lock`. They only restart these five units. They never reboot the deck, never run `az01-update` and never start a Factory Reset. First-generation decks only (armhf, `/etc/sc5000` hooks); a second-generation `/data` bundle has other paths.
+Managed deck-push operations and their deck side (`deck-agent.sh`, sent over SSH as the argument of `sh -c`, never installed) only touch the five targets above, `/run/enginex-dev` and `/run/enginex-dev-lock`. They only restart these five units. Managed deploy and rollback never reboot the deck, run `az01-update` or start a Factory Reset; generic commands use the guard described above. First-generation decks only (armhf, `/etc/sc5000` hooks); a second-generation `/data` bundle has other paths.
 
 ### Decks
 
@@ -110,3 +123,9 @@ shellcheck tools/dev/fake-deck.sh tools/dev/quick-gate tools/dev/test_deck_push_
 `fake-deck.sh` is a chroot onto an overlay of the build host's `/` in its own mount, pid and network namespaces. Its `/data` and `/etc/sc5000` persist in its directory like flash. Its `/run` is tmpfs, so `fake-deck.sh reboot` drops every mount like a real reboot. ssh reaches it through `sshd -i` under `nsenter`, so it opens no port. `systemctl`, `journalctl` and Engine (`EMain`) are stand-ins; the service wrappers and the pushed suite are real.
 
 Run these tests only on the authorized ARM build hosts; quick-gate needs the lab on the release-gate host. The sandbox creates two named fake decks for concurrent-agent tests and uses a fake backup-vault executable. It never connects to a real deck or changes the host `/tmp` mode or mount.
+
+The dev tests and source builds require a Git checkout, including HEAD metadata.
+`remote-build` copies files without `.git`; initialize a checkout in its task-owned
+directory before testing (for example, `git init`, `git add -A`, then a local
+snapshot commit). Keep the checkout history when testing `--commit` or a ui-sheet
+comparison. Run unit tests and e2e from that checkout, not an exported source tree.

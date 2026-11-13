@@ -208,8 +208,9 @@ class Deck:
             raise Failed(f"{self.name}: deck-agent {args[0]} failed ({r.returncode}): " + " | ".join(err[-5:]))
         return r.stdout.decode(errors="replace") if stdout is subprocess.PIPE else ""
 
-    def command(self, argv):
-        return self.agent(["exec", *argv], stdout=None, timeout=None)
+    def command(self, argv, allow_reboot=False):
+        flag = "--allow-reboot" if allow_reboot else "--"
+        return self.agent(["exec", flag, *argv], stdout=None, timeout=None)
 
 
 class Config:
@@ -265,10 +266,11 @@ class LockStore:
 
     def read(self, name):
         record = dict(facts(self.cfg.deck(name).agent(["lock-status"])))
-        if "owner" not in record:
+        if not record:
             return None
         for k in ("acquired", "expires", "ttl"):
-            record[k] = int(record[k])
+            if k in record:
+                record[k] = int(record[k])
         return record
 
     def holder(self, name):
@@ -284,7 +286,7 @@ class LockStore:
 
     def release(self, name, owner):
         cur = self.read(name)
-        if not cur:
+        if not cur or "owner" not in cur:
             return False
         if cur["owner"] != owner:
             raise Refused(f"{name} is locked by {cur['owner']}")
@@ -303,34 +305,66 @@ def ordered_decks(names):
     return sorted(set(names), key=lambda n: (0 if n == "left" else 1 if n == "right" else 2, n))
 
 
-def acquire_many(locks, names, owner, purpose, ttl, wait=False):
+def acquire_many(locks, names, owner, purpose, ttl, wait=False, wait_timeout=300):
+    names = ordered_decks(names)
+    deadline = time.monotonic() + wait_timeout
+    delay = 1.0
     while True:
         acquired = []
-        try:
-            for name in ordered_decks(names):
-                before = locks.holder(name)
-                # Record the granted lock before processing an interruption.
-                previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
+        states = {name: locks.read(name) for name in names} if wait else {}
+        available = all(not cur or (cur.get("busy") != "yes" and
+                        (cur.get("live") != "yes" or cur.get("owner") == owner))
+                        for cur in states.values())
+        if wait and time.monotonic() >= deadline:
+            raise Refused(f"timed out waiting for {', '.join(names)} after {wait_timeout:g}s")
+        if available:
+            try:
+                for name in names:
+                    before = states.get(name) if wait else locks.holder(name)
+                    if before and before.get("live") == "yes" and before.get("owner") == owner:
+                        acquired.append((name, True))
+                        continue
+                    # Record the granted lock before processing an interruption.
+                    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK,
+                                                           {signal.SIGINT, signal.SIGTERM, signal.SIGHUP})
+                    try:
+                        locks.acquire(name, owner, purpose, ttl)
+                        acquired.append((name, False))
+                    finally:
+                        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+                return acquired
+            except BaseException as error:
                 try:
-                    locks.acquire(name, owner, purpose, ttl)
-                    # A nested wrapper borrows an already held lease.
-                    acquired.append((name, bool(before and before["owner"] == owner)))
-                finally:
-                    signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
-            return acquired
-        except BaseException as error:
-            for name, borrowed in reversed(acquired):
-                if not borrowed:
-                    locks.release(name, owner)
-            if not wait or not isinstance(error, Refused):
-                raise
-            time.sleep(0.25)
+                    release_many(locks, acquired, owner)
+                except Exception as cleanup_error:
+                    raise Failed(f"{error}; cleanup: {cleanup_error}") from error
+                if not wait or not isinstance(error, Refused):
+                    raise
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise Refused(f"timed out waiting for {', '.join(names)} after {wait_timeout:g}s")
+        time.sleep(min(delay, remaining))
+        delay = min(delay * 2, 5)
 
 
-def release_many(locks, acquired, owner):
+def release_many(locks, acquired, owner, *, skip_other_owners=False, report=False):
+    errors = []
     for name, borrowed in reversed(acquired):
-        if not borrowed:
-            locks.release(name, owner)
+        if borrowed:
+            continue
+        try:
+            if skip_other_owners:
+                cur = locks.read(name)
+                if cur and cur.get("owner") not in (None, owner):
+                    continue
+            held = locks.release(name, owner)
+            if report:
+                print(f"released {name}" if held else f"{name}: not held")
+        except Exception as error:
+            errors.append((name, error))
+    if errors:
+        kind = Refused if all(isinstance(error, Refused) for _, error in errors) else Failed
+        raise kind("release errors: " + "; ".join(f"{name}: {error}" for name, error in errors))
 
 
 def run_leased(a, cfg, owner):
@@ -338,22 +372,22 @@ def run_leased(a, cfg, owner):
     names = ordered_decks(a.decks)
     if a.ssh and len(names) != 1:
         raise ValueError("--ssh needs exactly one deck")
-    acquired = acquire_many(locks, names, owner, a.purpose, a.ttl, a.wait)
+    acquired = acquire_many(locks, names, owner, a.purpose, a.ttl, a.wait, a.wait_timeout)
     proc = None
     old_handlers = {}
     def interrupted(signum, _frame):
         raise KeyboardInterrupt
     try:
-        for sig in (signal.SIGINT, signal.SIGTERM):
+        for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
             old_handlers[sig] = signal.signal(sig, interrupted)
         command = a.command
         if a.ssh:
             deck = cfg.deck(names[0])
             locks.require(names[0], owner)
-            return deck.command(command)
+            return deck.command(command, a.allow_reboot)
         proc = subprocess.Popen(command, start_new_session=True,
                                 env={**os.environ, "DECK_PUSH_OWNER": owner})
-        interval = max(0.1, min(a.ttl / 3, 30))
+        interval = max(0.1, min(min(locks.read(name)["ttl"] for name in names) / 3, 30))
         while True:
             try:
                 return proc.wait(timeout=interval)
@@ -749,8 +783,10 @@ def cmd_status(a, cfg):
         lock = locks.read(n)
         if lock and lock.get("live") == "yes":
             print(f"{n}: locked by {lock['owner']} until {stamp(lock['expires'])}: {lock['purpose']}")
-        elif lock:
+        elif lock and "owner" in lock:
             print(f"{n}: free (lock of {lock['owner']} expired {stamp(lock['expires'])})")
+        elif lock and lock.get("busy") == "yes":
+            print(f"{n}: free; mutex busy")
         else:
             print(f"{n}: free")
     if a.deck:
@@ -815,17 +851,19 @@ def lock_main(argv=None):
         i = argv.index("--")
         argv, command = argv[:i], argv[i + 1:]
     ap = argparse.ArgumentParser(prog="deck-lock")
-    ap.add_argument("action", choices=("acquire", "release", "status", "run"))
+    ap.add_argument("action", choices=("acquire", "release", "status", "recover", "run"))
     ap.add_argument("decks", nargs="*")
     ap.add_argument("--purpose")
     ap.add_argument("--ttl", default="1h")
     ap.add_argument("--wait", action="store_true")
+    ap.add_argument("--wait-timeout", default="5m", help="bound --wait (default: 5m)")
+    ap.add_argument("--allow-reboot", action="store_true", help="allow reboot-family commands with --ssh")
     ap.add_argument("--ssh", action="store_true", help="run command on the single named deck")
     ap.add_argument("--owner")
     a = ap.parse_args(argv)
     def interrupted(signum, _frame):
         raise KeyboardInterrupt
-    previous_term = signal.signal(signal.SIGTERM, interrupted)
+    previous_handlers = {sig: signal.signal(sig, interrupted) for sig in (signal.SIGTERM, signal.SIGHUP)}
     try:
         cfg = Config()
         explicit_decks = bool(a.decks)
@@ -840,28 +878,37 @@ def lock_main(argv=None):
         if a.action == "status":
             for name in ordered_decks(a.decks):
                 cur = locks.read(name)
-                print(f"{name}: " + (f"{'locked' if cur['live'] == 'yes' else 'expired'} owner={cur['owner']} host={cur['host']} "
-                      f"until={stamp(cur['expires'])} purpose={cur['purpose']} busy={cur.get('busy', 'no')}" if cur else "free"))
+                if cur and "owner" in cur:
+                    print(f"{name}: {'locked' if cur['live'] == 'yes' else 'expired'} owner={cur['owner']} "
+                          f"host={cur['host']} until={stamp(cur['expires'])} purpose={cur['purpose']} "
+                          f"busy={cur.get('busy', 'no')}")
+                else:
+                    print(f"{name}: free" + ("; mutex busy" if cur and cur.get("busy") == "yes" else ""))
+                if cur and cur.get("busy") == "yes":
+                    print(f"{name}: mutex pid={cur.get('mutex_pid', 'unknown')} start={cur.get('mutex_started', 'unknown')}")
+            return 0
+        if a.action == "recover":
+            for name in ordered_decks(a.decks):
+                print(f"{name}: " + cfg.deck(name).agent(["lock-recover"]).strip())
             return 0
         owner = resolve_owner(a)
         if a.action == "release":
-            for name in reversed(ordered_decks(a.decks)):
-                cur = locks.read(name)
-                if not explicit_decks and cur and cur["owner"] != owner:
-                    continue
-                locks.release(name, owner)
-                print(f"released {name}")
+            release_many(locks, [(name, False) for name in ordered_decks(a.decks)], owner,
+                         skip_other_owners=not explicit_decks, report=True)
             return 0
         a.purpose = " ".join((a.purpose or "").split())
         if not 0 < len(a.purpose) <= 200:
             raise ValueError("--purpose must be 1-200 characters")
         a.ttl = parse_ttl(a.ttl)
+        a.wait_timeout = parse_ttl(a.wait_timeout)
+        if a.allow_reboot and (a.action != "run" or not a.ssh):
+            raise ValueError("--allow-reboot needs run --ssh")
         if a.action == "run":
             if not command:
                 raise ValueError("run needs -- <command...>")
             a.command = command
             return run_leased(a, cfg, owner)
-        acquire_many(locks, a.decks, owner, a.purpose, a.ttl, a.wait)
+        acquire_many(locks, a.decks, owner, a.purpose, a.ttl, a.wait, a.wait_timeout)
         for name in ordered_decks(a.decks):
             print(f"locked {name} for {owner}")
         return 0
@@ -877,7 +924,8 @@ def lock_main(argv=None):
         print(f"deck-lock: {e}", file=sys.stderr)
         return EXIT_ERROR
     finally:
-        signal.signal(signal.SIGTERM, previous_term)
+        for sig, handler in previous_handlers.items():
+            signal.signal(sig, handler)
 
 
 def deck_main():
@@ -885,6 +933,7 @@ def deck_main():
     ap = argparse.ArgumentParser(prog="deck")
     ap.add_argument("deck")
     ap.add_argument("--owner")
+    ap.add_argument("--allow-reboot", action="store_true")
     if "--" in argv:
         split = argv.index("--")
         a = ap.parse_args(argv[:split])
@@ -897,7 +946,7 @@ def deck_main():
     try:
         cfg = Config()
         LockStore(cfg).require(a.deck, resolve_owner(a))
-        return cfg.deck(a.deck).command(a.command)
+        return cfg.deck(a.deck).command(a.command, a.allow_reboot)
     except Refused as e:
         print(f"deck: refused: {e}", file=sys.stderr)
         return EXIT_REFUSED

@@ -13,7 +13,6 @@ import json
 import configparser
 import time
 import signal
-import multiprocessing
 import os
 import shutil
 import subprocess
@@ -586,10 +585,13 @@ class DeckLockTests(unittest.TestCase):
         self.assertIn("owner=alice", self.call("status", "left"))
 
     def test_expiry_reacquire_and_previous_owner_refused(self):
-        self.call("acquire", "left", "--purpose", "stale", "--ttl", "1s")
+        self.call("acquire", "left", "--purpose", "stale", "--ttl", "1h")
         cfg = dp.Config(self.ini, env={})
         dp.LockStore(cfg).require("left", "alice")
-        time.sleep(1.2)
+        deck = cfg.deck("left")
+        subprocess.run(["ssh", *deck.ssh_options, deck.ssh,
+                        "sed -i 's/^expires .*/expires 0/' /run/enginex-dev-lock/owner"],
+                       check=True, capture_output=True)
         self.call("left", "--", "true", tool="deck", want=3)
         self.call("acquire", "left", "--purpose", "new", owner="bob")
         with self.assertRaises(dp.Refused):
