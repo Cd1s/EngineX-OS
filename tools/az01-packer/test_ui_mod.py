@@ -4235,6 +4235,77 @@ class StockJogControlsTest(unittest.TestCase):
             bp.ROOT = old_root
 
 
+class MotorizedPlatterRoleTest(unittest.TestCase):
+    """#263: SC5000M / SC6000M in the 4-deck layout (4 Decks, Paired Player)."""
+    REL = "ControlSurfaceModules/ControlSurfaceModules/Motorized.qml"
+    # engine-ui-guard's scDecks per 4-deck role (tests/test_rootfs_overlay.sh checks the guard), with the decks LAYER walks through.
+    ROLES = {"13": ([1, 3], [1, 3, 1]), "24": ([2, 4], [2, 4, 2]), "12": ([1, 2], [1, 2, 1]), "34": ([3, 4], [3, 4, 3]),
+             "1": ([1, 3], [1]), "2": ([2, 4], [2])}
+
+    def patched(self):
+        qrc = LAB / "5.3.0/qrc"
+        if not qrc.is_dir():
+            self.skipTest(f"{qrc} not found")
+        stock = (qrc / self.REL).read_text()
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            text = stock
+            for old, new in bp.edits(False)[self.REL]:
+                text = bp.patch(text, old, new, self.REL)
+        finally:
+            bp.ROOT = old_root
+        return stock, text
+
+    def test_only_the_deck_list_differs_from_stock(self):
+        stock, text = self.patched()
+        changed = [(a, b) for a, b in zip(stock.splitlines(), text.splitlines()) if a != b]
+        self.assertEqual(len(stock.splitlines()), len(text.splitlines()))
+        self.assertEqual(changed, [("        model: [1, 2]", "        model: deckConfig.scDecks || [1, 2]")])
+
+    @unittest.skipUnless(shutil.which("node"), "node needed for the platter role checks")
+    def test_platter_layer_and_motor_slot_follow_the_role(self):
+        # Stock ties the motor and ExternalPlatterLayerActive to decks 1 and 2. On 2+4 the boot marked deck 1 (another
+        # player's) and deck 2 sat in motor slot 1, which the device does not run until the layer changes; on 1+3
+        # deck 3 had no slot at all. The stock per-deck code runs here unchanged, over the patched deck list.
+        stock, text = self.patched()
+        model = re.search(r"\n        model: ([^\n]+)\n", text).group(1)
+        boot = re.search(r"Component\.onCompleted: ([^\n]+)\n", text.split("Repeater {", 1)[1]).group(1)
+        layer = re.search(r"function onActiveDeckIndexChanged\(\) \{\n(.*?)\n                \}", text, re.S).group(1)
+        script = "const assert = require('node:assert/strict');\n"
+        script += "const model = " + json.dumps(model) + ", boot = " + json.dumps(boot) + ", layer = " + json.dumps(layer) + ";\n"
+        script += "const roles = " + json.dumps(self.ROLES) + ";\n"
+        script += r"""
+function run(scDecks, walk, modelSource) {
+    const active = {}, deckConfig = {scDecks: scDecks, activeDeckIndex: String(walk[0])};
+    const decks = new Function('deckConfig', 'return ' + modelSource)(deckConfig);
+    const items = decks.map((modelData, index) => ({modelData, index, pLayerActive: {translator: {get state() { return !!active[modelData] }, set state(v) { active[modelData] = v }}}}));
+    for (const it of items) new Function('index', 'pLayerActive', boot)(it.index, it.pLayerActive);
+    const seen = [];
+    walk.forEach((deck, step) => {
+        if (step) { deckConfig.activeDeckIndex = String(deck); for (const it of items) new Function('deckConfig', 'modelData', 'pLayerActive', layer)(deckConfig, it.modelData, it.pLayerActive); }
+        const on = Object.keys(active).filter(d => active[d]).map(Number), slot = decks.indexOf(deck);
+        seen.push({deck, on, slot});
+    });
+    return seen;
+}
+for (const [role, [scDecks, walk]] of Object.entries(roles)) {
+    for (const s of run(scDecks, walk, model)) {
+        assert.deepEqual(s.on, [s.deck], 'role ' + role + ': the platter belongs to deck(s) ' + s.on + ' while the unit plays deck ' + s.deck);
+        assert.ok(s.slot === 0 || s.slot === 1, 'role ' + role + ': deck ' + s.deck + ' has no motor slot');
+    }
+    assert.equal(run(scDecks, walk, model)[0].slot, 0, 'role ' + role + ': layer A is motor slot 0, as on a stock player');
+}
+// Without the guard's deck list (4-deck off, or a stock assignment file) it is stock: decks 1 and 2.
+assert.deepEqual(run(undefined, [1, 2, 1], model).map(s => s.on), [[1], [2], [1]]);
+// What stock did on 2+4 (the report): deck 1 marked at boot, the unit's deck 2 in slot 1.
+const stock = run(undefined, [2, 4, 2], '[1, 2]');
+assert.deepEqual(stock[0].on, [1]); assert.equal(stock[0].slot, 1); assert.equal(stock[1].slot, -1);
+"""
+        result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+
 class MasterLedStockTest(unittest.TestCase):
     @unittest.skipUnless(shutil.which("node"), "node needed for the MASTER LED behavior checks")
     def test_own_master_path_keeps_stock_dim_level_and_manual_request(self):

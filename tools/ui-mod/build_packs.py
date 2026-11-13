@@ -6411,6 +6411,15 @@ def edits(dev: bool):
             "            readonly property string isMasterPath: Config.network.hasSyncing &&\n"
             "                    !(!Config.device.isPlayer && [\"JP07\", \"JP08\", \"JP13\", \"JP14\"].indexOf(Config.device.name) >= 0)\n",
         )]
+        # #263: the motorized players (JP08, JP14) turn the platter and mark its layer for decks 1
+        # and 2 only, the two layers of a stock player. In the 4-deck layout a player holds 1+3,
+        # 2+4, ...: on 2+4 the motor never ran and the platter's touch reached deck 1, on 1+3 deck 3
+        # had neither. engine-ui-guard names the unit's decks in its assignment file
+        # (deckConfig.scDecks, layer A first, so the two motor slots stay 0 and 1); without it, stock.
+        out["ControlSurfaceModules/ControlSurfaceModules/Motorized.qml"] = [(
+            "        model: [1, 2]\n",
+            "        model: deckConfig.scDecks || [1, 2]\n",
+        )]
         # #49: a swipe loads the role's own decks (1+3: left 1, right 3), not the stock
         # left/right layer deck. Only "Deck N" actions; Prepare List etc. stay stock.
         for side, right in (("left", "false"), ("right", "true")):
