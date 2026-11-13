@@ -6617,8 +6617,160 @@ def edits(dev: bool):
         }
 '''),
         ]
-        # #166: the compact Numark decks have four pads and no Stems EQ key.
-        # Leave hardware pad modes alone; the preference selects a touch bank.
+        # #166 / #261: compact Numark decks (NH08/NH08S/NH10) have four pads and no Stems EQ key.
+        # When Beat Jump bank is enabled, show performance pads (row 1) and Beat Jump (row 2)
+        # simultaneously without sacrificing either, with Sweep FX and Stems EQ in a matching 2-row column.
+        # When Beat Jump bank is off, show Sweep FX and Stems EQ side-by-side in a 2-column single row
+        # so they never vertically overlap at any UI scale.
+        old_pads_layout = '''        GridLayout {
+            id: padsLayout
+            objectName: "Deck_Pads_Layout"
+
+            columns: isWideLayout ? 8 : 4
+            columnSpacing: 4
+            rowSpacing: 4
+            Layout.leftMargin: padViewDeckModeSelect.showModeSelectUI && !isPadLayoutMirrored ? 0 : 16
+            Layout.rightMargin: padViewDeckModeSelect.showModeSelectUI && isPadLayoutMirrored ? 0 : 16
+            Layout.topMargin: 16
+            Layout.bottomMargin: 16
+            Layout.fillWidth: true
+
+            readonly property string padViewMode: padViewDeckModeSelect.padViewMode
+
+            Repeater {
+                model: pads.padViewDeckModeSelect.padViews.length
+
+                Pad {
+                    objectName: "Deck_Pad"
+                    Layout.fillWidth: true
+                    implicitHeight: 32
+
+                    required property int index
+                    readonly property PadViewInterface view: pads.padViewDeckModeSelect.padViews[index]
+                    model: view.model
+                    padStyle: view.padStyle
+                }
+            }
+        }
+    }
+}'''
+        new_pads_layout = '''        GridLayout {
+            visible: pads.scMixstream
+            columns: pads.scBeatJumpBank ? 1 : 2
+            columnSpacing: 4
+            rowSpacing: 4
+            Layout.preferredWidth: pads.scBeatJumpBank ? 84 : 156
+            Layout.fillHeight: true
+            Layout.topMargin: pads.scBeatJumpBank ? 8 : 16
+            Layout.bottomMargin: pads.scBeatJumpBank ? 8 : 16
+            Button {
+                objectName: "MixstreamSweepFx" + pads.deckIndex
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                leftPadding: 4; rightPadding: 4; topPadding: 0; bottomPadding: 0
+                font.pixelSize: 11
+                font.bold: true
+                text: "SWEEP FX"
+                enabled: Config.ui.hasSweepFxSelectionPopup
+                background: Rectangle {
+                    color: down ? Style.surface03Color : Style.surface02Color
+                    radius: 4
+                    border.width: 1
+                    border.color: Style.surface03Color
+                }
+                onClicked: root.scMixstreamSweepOpen = true
+            }
+            Button {
+                objectName: "MixstreamStemsEq" + pads.deckIndex
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                leftPadding: 4; rightPadding: 4; topPadding: 0; bottomPadding: 0
+                font.pixelSize: 11
+                font.bold: true
+                text: "EQ / STEMS"
+                highlighted: !!pads.scStripMode && pads.scStripMode.index === 1
+                enabled: Config.audio.hasStemsLevel && !!pads.scStripMode
+                background: Rectangle {
+                    color: highlighted ? Style.active01Color : (down ? Style.surface03Color : Style.surface02Color)
+                    radius: 4
+                    border.width: 1
+                    border.color: highlighted ? Style.active02Color : Style.surface03Color
+                }
+                onClicked: pads.scStripMode.index = pads.scStripMode.index === 1 ? 0 : 1
+            }
+        }
+
+        ColumnLayout {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            Layout.leftMargin: padViewDeckModeSelect.showModeSelectUI && !isPadLayoutMirrored ? 0 : 16
+            Layout.rightMargin: padViewDeckModeSelect.showModeSelectUI && isPadLayoutMirrored ? 0 : 16
+            Layout.topMargin: pads.scMixstream && pads.scBeatJumpBank ? 8 : 16
+            Layout.bottomMargin: pads.scMixstream && pads.scBeatJumpBank ? 8 : 16
+            spacing: pads.scBeatJumpBank ? 4 : 0
+
+            GridLayout {
+                id: padsLayout
+                objectName: "Deck_Pads_Layout"
+
+                columns: isWideLayout ? 8 : 4
+                columnSpacing: 4
+                rowSpacing: 4
+                Layout.fillWidth: true
+
+                readonly property string padViewMode: padViewDeckModeSelect.padViewMode
+
+                Repeater {
+                    model: pads.padViewDeckModeSelect.padViews.length
+
+                    Pad {
+                        objectName: "Deck_Pad"
+                        Layout.fillWidth: true
+                        implicitHeight: 32
+
+                        required property int index
+                        readonly property PadViewInterface view: pads.padViewDeckModeSelect.padViews[index]
+                        model: view.model
+                        padStyle: view.padStyle
+                    }
+                }
+            }
+
+            RowLayout {
+                objectName: "MixstreamBeatJumpBank" + pads.deckIndex
+                visible: pads.scBeatJumpBank
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                spacing: 4
+                Repeater {
+                    model: [
+                        {label: "Jump −", action: "JumpBack"},
+                        {label: "Jump +", action: "JumpForward"},
+                        {label: "½", action: "BeatJumpHalve"},
+                        {label: "×2", action: "BeatJumpDouble"}
+                    ]
+                    delegate: Button {
+                        required property var modelData
+                        objectName: "Mixstream" + modelData.action + pads.deckIndex
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        leftPadding: 4; rightPadding: 4; topPadding: 0; bottomPadding: 0
+                        font.pixelSize: 13
+                        font.bold: true
+                        background: Rectangle {
+                            color: down ? Style.surface03Color : Style.surface02Color
+                            radius: 4
+                            border.width: 1
+                            border.color: Style.surface03Color
+                        }
+                        text: typeof root !== "undefined" && root.scT ? root.scT(modelData.label) : modelData.label
+                        onClicked: pads.scJump(modelData.action)
+                    }
+                }
+            }
+        }
+    }
+}'''
         scaled[ROOT + "Items/Pads/Pads.qml"].extend([
             ('    required property int deckIndex\n', '''    required property int deckIndex
     readonly property bool scMixstream: Config.audio.fx.hasNHFx
@@ -6630,61 +6782,7 @@ def edits(dev: bool):
         if (p && p.translator) p.translator.state = true
     }
 '''),
-            ('        GridLayout {\n            id: padsLayout\n', '''        ColumnLayout {
-            visible: pads.scMixstream
-            Layout.preferredWidth: 84
-            Layout.fillHeight: true
-            Layout.topMargin: 16
-            Layout.bottomMargin: 16
-            spacing: 4
-            Button {
-                objectName: "MixstreamSweepFx" + pads.deckIndex
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-                text: "SWEEP FX"
-                enabled: Config.ui.hasSweepFxSelectionPopup
-                onClicked: root.scMixstreamSweepOpen = true
-            }
-            Button {
-                objectName: "MixstreamStemsEq" + pads.deckIndex
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-                text: "EQ / STEMS"
-                highlighted: !!pads.scStripMode && pads.scStripMode.index === 1
-                enabled: Config.audio.hasStemsLevel && !!pads.scStripMode
-                onClicked: pads.scStripMode.index = pads.scStripMode.index === 1 ? 0 : 1
-            }
-        }
-
-        RowLayout {
-            objectName: "MixstreamBeatJumpBank" + pads.deckIndex
-            visible: pads.scBeatJumpBank
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-            Layout.margins: 16
-            spacing: 4
-            Repeater {
-                model: [
-                    {label: "Jump −", action: "JumpBack"},
-                    {label: "Jump +", action: "JumpForward"},
-                    {label: "½", action: "BeatJumpHalve"},
-                    {label: "×2", action: "BeatJumpDouble"}
-                ]
-                delegate: Button {
-                    required property var modelData
-                    objectName: "Mixstream" + modelData.action + pads.deckIndex
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    text: typeof root !== "undefined" && root.scT ? root.scT(modelData.label) : modelData.label
-                    onClicked: pads.scJump(modelData.action)
-                }
-            }
-        }
-
-        GridLayout {
-            id: padsLayout
-            visible: !pads.scBeatJumpBank
-'''),
+            (old_pads_layout, new_pads_layout),
         ])
         # Pad LED Brightness on the hardware pads. The controller QML runs in its own engine
         # (no `root`), so its one GlobalAssignmentConfig reads ledBrightness from stream-sync
