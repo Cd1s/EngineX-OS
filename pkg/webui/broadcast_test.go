@@ -493,8 +493,8 @@ func TestUSBAudioEndpoints(t *testing.T) {
 		t.Errorf("unexpected POST response: %+v", postRes)
 	}
 
-	// 3. Direct handleUSBAudio call simulating /v1/sc5000/usb-audio
-	req := httptest.NewRequest("GET", "/v1/sc5000/usb-audio", nil)
+	// 3. Direct handleUSBAudio call simulating /v1/enginex/usb-audio
+	req := httptest.NewRequest("GET", "/v1/enginex/usb-audio", nil)
 	rec := httptest.NewRecorder()
 	s.handleUSBAudio(rec, req)
 	if rec.Code != http.StatusOK {

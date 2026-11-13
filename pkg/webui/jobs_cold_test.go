@@ -118,7 +118,7 @@ func TestColdTidalPassthroughLatency300ms(t *testing.T) {
 	ui := New(Config{AccessToken: "fixture", UIDir: t.TempDir(), StateDir: t.TempDir(), TidalAPIURL: api.URL}, nil)
 	srv := httptest.NewServer(ui)
 	defer srv.Close()
-	res, err := http.Post(srv.URL+"/v1/sc5000/ui?scope=tidal", "", nil)
+	res, err := http.Post(srv.URL+"/v1/enginex/ui?scope=tidal", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

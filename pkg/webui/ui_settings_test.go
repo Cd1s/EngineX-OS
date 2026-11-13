@@ -18,7 +18,7 @@ import (
 
 func uiPost(t *testing.T, base, query string) (int, uiSettings) {
 	t.Helper()
-	resp, err := http.Post(base+"/v1/sc5000/ui?"+query, "", nil)
+	resp, err := http.Post(base+"/v1/enginex/ui?"+query, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ func TestUISettingsRejectBadValues(t *testing.T) {
 func TestUISettingsConsoleNeedsLoginAndRemoteGatewayIsRefused(t *testing.T) {
 	ui := New(Config{AccessToken: "code", UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("POST", "/v1/sc5000/ui?lang=en&restart=1", nil)
+	r := httptest.NewRequest("POST", "/v1/enginex/ui?lang=en&restart=1", nil)
 	r.RemoteAddr = "192.0.2.10:4000"
 	ui.ServeHTTP(w, r)
 	if w.Code != 403 {
@@ -534,7 +534,7 @@ func TestUIScale(t *testing.T) {
 	// A server started over reads the saved scale back from disk.
 	srv2 := httptest.NewServer(New(Config{UIDir: dir, StateDir: t.TempDir()}, nil))
 	defer srv2.Close()
-	resp, err := http.Get(srv2.URL + "/v1/sc5000/ui")
+	resp, err := http.Get(srv2.URL + "/v1/enginex/ui")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -726,7 +726,7 @@ func TestUIStatusDigestFollowsTheBody(t *testing.T) {
 	defer srv.Close()
 	get := func() (string, string) {
 		t.Helper()
-		r, err := http.Get(srv.URL + "/v1/sc5000/ui")
+		r, err := http.Get(srv.URL + "/v1/enginex/ui")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1003,7 +1003,7 @@ func TestEngineLightingDefaultOffAndPersistence(t *testing.T) {
 		if got, ok := loaded["engineLighting"]; !ok || got != want {
 			t.Errorf("loadUI engineLighting: got %v (present=%v), want %v", got, ok, want)
 		}
-		resp, err := http.Get(srv.URL + "/v1/sc5000/ui")
+		resp, err := http.Get(srv.URL + "/v1/enginex/ui")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1030,7 +1030,7 @@ func TestEngineLightingDefaultOffAndPersistence(t *testing.T) {
 			t.Errorf("%s did not preserve engine_lighting=1", query)
 		}
 	}
-	resp, err := http.Post(srv.URL+"/v1/sc5000/ui", "application/json", strings.NewReader(`{"engineLighting":false}`))
+	resp, err := http.Post(srv.URL+"/v1/enginex/ui", "application/json", strings.NewReader(`{"engineLighting":false}`))
 	if err != nil {
 		t.Fatal(err)
 	}

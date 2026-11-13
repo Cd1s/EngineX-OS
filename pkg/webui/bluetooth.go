@@ -283,7 +283,7 @@ type bluetoothPostRequest struct {
 	AutoReconnect *bool   `json:"autoReconnect"`
 }
 
-// handleBluetooth dispatches GET and POST requests for /v1/sc5000/bluetooth.
+// handleBluetooth dispatches GET and POST requests for /v1/enginex/bluetooth.
 func (s *Server) handleBluetooth(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:

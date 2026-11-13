@@ -21,7 +21,7 @@ func TestOwnForPeerCarriesBeatForward(t *testing.T) {
 	now := time.Now()
 	w := httptest.NewRecorder()
 	body := fmt.Sprintf(`[{"deck":1,"playing":true,"positionMs":5000,"pitch":10,"bpm":120,"currentBpm":132,"beat":1.0,"master":true,"at":%d}]`, now.UnixMilli())
-	s.decksPost(w, httptest.NewRequest("POST", "/v1/sc5000/decks", strings.NewReader(body)))
+	s.decksPost(w, httptest.NewRequest("POST", "/v1/enginex/decks", strings.NewReader(body)))
 	if w.Code != 200 {
 		t.Fatalf("decksPost: %d", w.Code)
 	}
@@ -73,56 +73,56 @@ func TestDeckClockEndpointAndLoopbackGuard(t *testing.T) {
 	s := New(Config{UIDir: uiDir, StateDir: t.TempDir()}, nil)
 	defer s.Close()
 
-	// Non-loopback requests to /v1/sc5000/clock are rejected with 403.
+	// Non-loopback requests to /v1/enginex/clock are rejected with 403.
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/v1/sc5000/clock", nil)
+	req := httptest.NewRequest("GET", "/v1/enginex/clock", nil)
 	req.RemoteAddr = "192.168.1.50:12345"
 	s.ServeHTTP(rec, req)
 	if rec.Code != http.StatusForbidden {
-		t.Fatalf("LAN GET /v1/sc5000/clock = %d, want 403", rec.Code)
+		t.Fatalf("LAN GET /v1/enginex/clock = %d, want 403", rec.Code)
 	}
 
 	// Initially uiStatus omits deckClock (unchanged digest when dmx-studio is off).
 	rec = httptest.NewRecorder()
-	req = httptest.NewRequest("GET", "/v1/sc5000/ui", nil)
+	req = httptest.NewRequest("GET", "/v1/enginex/ui", nil)
 	req.RemoteAddr = "127.0.0.1:4000"
 	s.ServeHTTP(rec, req)
 	if rec.Code != 200 || strings.Contains(rec.Body.String(), `"deckClock"`) {
-		t.Fatalf("initial /v1/sc5000/ui should omit deckClock: code=%d body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("initial /v1/enginex/ui should omit deckClock: code=%d body=%s", rec.Code, rec.Body.String())
 	}
 
-	// Polling GET /v1/sc5000/clock activates deckClock in /v1/sc5000/ui without starting shadow beacons.
+	// Polling GET /v1/enginex/clock activates deckClock in /v1/enginex/ui without starting shadow beacons.
 	rec = httptest.NewRecorder()
-	req = httptest.NewRequest("GET", "/v1/sc5000/clock", nil)
+	req = httptest.NewRequest("GET", "/v1/enginex/clock", nil)
 	req.RemoteAddr = "127.0.0.1:4001"
 	s.ServeHTTP(rec, req)
 	if rec.Code != 200 {
-		t.Fatalf("loopback GET /v1/sc5000/clock = %d", rec.Code)
+		t.Fatalf("loopback GET /v1/enginex/clock = %d", rec.Code)
 	}
 	s.shadow.mu.Lock()
 	running := s.shadow.running
 	s.shadow.mu.Unlock()
 	if running {
-		t.Fatal("GET /v1/sc5000/clock must not start 4-deck shadow beacons")
+		t.Fatal("GET /v1/enginex/clock must not start 4-deck shadow beacons")
 	}
 
 	rec = httptest.NewRecorder()
-	req = httptest.NewRequest("GET", "/v1/sc5000/ui", nil)
+	req = httptest.NewRequest("GET", "/v1/enginex/ui", nil)
 	req.RemoteAddr = "127.0.0.1:4002"
 	s.ServeHTTP(rec, req)
 	if !strings.Contains(rec.Body.String(), `"deckClock":true`) {
 		t.Fatalf("expected deckClock:true after clock poll, got %s", rec.Body.String())
 	}
 
-	// Posting local clock samples updates /v1/sc5000/clock without touching shadow.own.
+	// Posting local clock samples updates /v1/enginex/clock without touching shadow.own.
 	nowMS := time.Now().UnixMilli()
 	postBody := fmt.Sprintf(`[{"deck":1,"playing":true,"master":true,"lead":true,"bpm":120,"currentBpm":120,"beat":1.5,"positionMs":4000,"at":%d}]`, nowMS-250)
 	rec = httptest.NewRecorder()
-	req = httptest.NewRequest("POST", "/v1/sc5000/clock", strings.NewReader(postBody))
+	req = httptest.NewRequest("POST", "/v1/enginex/clock", strings.NewReader(postBody))
 	req.RemoteAddr = "127.0.0.1:4003"
 	s.ServeHTTP(rec, req)
 	if rec.Code != 200 {
-		t.Fatalf("POST /v1/sc5000/clock = %d: %s", rec.Code, rec.Body.String())
+		t.Fatalf("POST /v1/enginex/clock = %d: %s", rec.Code, rec.Body.String())
 	}
 	s.shadow.mu.Lock()
 	ownLen := len(s.shadow.own)
@@ -133,7 +133,7 @@ func TestDeckClockEndpointAndLoopbackGuard(t *testing.T) {
 	}
 
 	rec = httptest.NewRecorder()
-	req = httptest.NewRequest("GET", "/v1/sc5000/clock", nil)
+	req = httptest.NewRequest("GET", "/v1/enginex/clock", nil)
 	req.RemoteAddr = "127.0.0.1:4004"
 	s.ServeHTTP(rec, req)
 	var snap struct {
@@ -155,11 +155,11 @@ func TestDeckClockEndpointAndLoopbackGuard(t *testing.T) {
 	// Out-of-order older POST is ignored.
 	oldBody := fmt.Sprintf(`[{"deck":2,"playing":true,"master":true,"bpm":140,"currentBpm":140,"beat":0.5,"at":%d}]`, nowMS-1000)
 	rec = httptest.NewRecorder()
-	req = httptest.NewRequest("POST", "/v1/sc5000/clock", strings.NewReader(oldBody))
+	req = httptest.NewRequest("POST", "/v1/enginex/clock", strings.NewReader(oldBody))
 	req.RemoteAddr = "127.0.0.1:4005"
 	s.ServeHTTP(rec, req)
 	rec = httptest.NewRecorder()
-	req = httptest.NewRequest("GET", "/v1/sc5000/clock", nil)
+	req = httptest.NewRequest("GET", "/v1/enginex/clock", nil)
 	req.RemoteAddr = "127.0.0.1:4006"
 	s.ServeHTTP(rec, req)
 	snap = struct {
@@ -174,24 +174,24 @@ func TestDeckClockEndpointAndLoopbackGuard(t *testing.T) {
 
 	// Envelope form {"decks":[...]} deduplicates decks (<=4), and invalid JSON returns 400.
 	rec = httptest.NewRecorder()
-	req = httptest.NewRequest("POST", "/v1/sc5000/clock", strings.NewReader("{bad json"))
+	req = httptest.NewRequest("POST", "/v1/enginex/clock", strings.NewReader("{bad json"))
 	req.RemoteAddr = "127.0.0.1:4007"
 	s.ServeHTTP(rec, req)
 	if rec.Code != 400 {
-		t.Fatalf("invalid JSON POST /v1/sc5000/clock = %d, want 400", rec.Code)
+		t.Fatalf("invalid JSON POST /v1/enginex/clock = %d, want 400", rec.Code)
 	}
 
 	nowMS = time.Now().UnixMilli()
 	envBody := fmt.Sprintf(`{"decks":[{"deck":1,"playing":false,"master":true,"bpm":120,"currentBpm":120,"beat":2.5,"positionMs":5000,"at":%d},{"deck":1,"playing":true,"bpm":130,"beat":0.1,"at":%d},{"deck":5,"playing":true,"bpm":120,"beat":0.1,"at":%d}]}`, nowMS, nowMS, nowMS)
 	rec = httptest.NewRecorder()
-	req = httptest.NewRequest("POST", "/v1/sc5000/clock", strings.NewReader(envBody))
+	req = httptest.NewRequest("POST", "/v1/enginex/clock", strings.NewReader(envBody))
 	req.RemoteAddr = "127.0.0.1:4008"
 	s.ServeHTTP(rec, req)
 	if rec.Code != 200 {
 		t.Fatalf("envelope POST = %d", rec.Code)
 	}
 	rec = httptest.NewRecorder()
-	req = httptest.NewRequest("GET", "/v1/sc5000/clock", nil)
+	req = httptest.NewRequest("GET", "/v1/enginex/clock", nil)
 	req.RemoteAddr = "127.0.0.1:4009"
 	s.ServeHTTP(rec, req)
 	snap = struct {
@@ -219,7 +219,7 @@ func TestDeckClockEndpointAndLoopbackGuard(t *testing.T) {
 	}
 	s.shadow.mu.Unlock()
 	rec = httptest.NewRecorder()
-	req = httptest.NewRequest("GET", "/v1/sc5000/clock", nil)
+	req = httptest.NewRequest("GET", "/v1/enginex/clock", nil)
 	req.RemoteAddr = "127.0.0.1:4010"
 	s.ServeHTTP(rec, req)
 	snap = struct {
@@ -249,7 +249,7 @@ func TestDeckClockEndpointAndLoopbackGuard(t *testing.T) {
 	s.shadow.clockPolled = time.Now().Add(-16 * time.Second)
 	s.shadow.mu.Unlock()
 	rec = httptest.NewRecorder()
-	req = httptest.NewRequest("GET", "/v1/sc5000/ui", nil)
+	req = httptest.NewRequest("GET", "/v1/enginex/ui", nil)
 	req.RemoteAddr = "127.0.0.1:4011"
 	s.ServeHTTP(rec, req)
 	if strings.Contains(rec.Body.String(), `"deckClock"`) {
@@ -262,19 +262,19 @@ func TestDeckClockIncludesProlinkAndModEnabledFlag(t *testing.T) {
 	s := New(Config{UIDir: uiDir, StateDir: t.TempDir()}, nil)
 	defer s.Close()
 
-	// Enabling dmx-studio in mods-state.json sets deckClock in /v1/sc5000/ui without polling first.
+	// Enabling dmx-studio in mods-state.json sets deckClock in /v1/enginex/ui without polling first.
 	if err := os.WriteFile(filepath.Join(uiDir, "mods-state.json"), []byte(`{"mods":{"dmx-studio":{"enabled":true}}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/v1/sc5000/ui", nil)
+	req := httptest.NewRequest("GET", "/v1/enginex/ui", nil)
 	req.RemoteAddr = "127.0.0.1:4010"
 	s.ServeHTTP(rec, req)
 	if !strings.Contains(rec.Body.String(), `"deckClock":true`) {
 		t.Fatalf("enabled dmx-studio should set deckClock:true, got %s", rec.Body.String())
 	}
 
-	// Inject a Pro DJ Link CDJ device and verify /v1/sc5000/clock exposes it.
+	// Inject a Pro DJ Link CDJ device and verify /v1/enginex/clock exposes it.
 	prolinkMu.Lock()
 	postedDevices[s] = map[string]prolink.Device{
 		"2": {
@@ -293,7 +293,7 @@ func TestDeckClockIncludesProlinkAndModEnabledFlag(t *testing.T) {
 	prolinkMu.Unlock()
 
 	rec = httptest.NewRecorder()
-	req = httptest.NewRequest("GET", "/v1/sc5000/clock", nil)
+	req = httptest.NewRequest("GET", "/v1/enginex/clock", nil)
 	req.RemoteAddr = "127.0.0.1:4011"
 	s.ServeHTTP(rec, req)
 	var snap struct {
@@ -359,7 +359,7 @@ func TestUIStatusNeverBlocksOnModsManagerLock(t *testing.T) {
 	uiDone := make(chan int, 1)
 	go func() {
 		rec := httptest.NewRecorder()
-		req := httptest.NewRequest("GET", "/v1/sc5000/ui", nil)
+		req := httptest.NewRequest("GET", "/v1/enginex/ui", nil)
 		req.RemoteAddr = "127.0.0.1:4020"
 		s.ServeHTTP(rec, req)
 		uiDone <- rec.Code
@@ -367,9 +367,9 @@ func TestUIStatusNeverBlocksOnModsManagerLock(t *testing.T) {
 	select {
 	case code := <-uiDone:
 		if code != 200 {
-			t.Fatalf("GET /v1/sc5000/ui = %d, want 200", code)
+			t.Fatalf("GET /v1/enginex/ui = %d, want 200", code)
 		}
 	case <-time.After(1 * time.Second):
-		t.Fatal("GET /v1/sc5000/ui stalled while StartEnabled held managerMu")
+		t.Fatal("GET /v1/enginex/ui stalled while StartEnabled held managerMu")
 	}
 }

@@ -11,7 +11,7 @@ func TestViewsRoundTrip(t *testing.T) {
 	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
 	get := func() string {
 		w := httptest.NewRecorder()
-		s.viewsGet(w, httptest.NewRequest("GET", "/v1/sc5000/views", nil))
+		s.viewsGet(w, httptest.NewRequest("GET", "/v1/enginex/views", nil))
 		return strings.TrimSpace(w.Body.String())
 	}
 	if got := get(); got != `{"active":1,"views":{}}` {
@@ -19,7 +19,7 @@ func TestViewsRoundTrip(t *testing.T) {
 	}
 	post := func(body string) int {
 		w := httptest.NewRecorder()
-		s.viewsPost(w, httptest.NewRequest("POST", "/v1/sc5000/views", strings.NewReader(body)))
+		s.viewsPost(w, httptest.NewRequest("POST", "/v1/enginex/views", strings.NewReader(body)))
 		return w.Code
 	}
 	good := `{"active":4,"views":{"4":{"deckCount":"4 Decks","pads":false}}}`

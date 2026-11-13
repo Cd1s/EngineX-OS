@@ -49,7 +49,7 @@ func TestSpotifyDeviceQRUsesOfficialConfirmation(t *testing.T) {
 	ui := New(Config{StateDir: state, UIDir: t.TempDir(), HTTP: hc, RelayURL: "https://relay.example.invalid"}, nil)
 	defer ui.Close()
 	w := httptest.NewRecorder()
-	ui.loginStart(w, httptest.NewRequest("POST", "/v1/sc5000/login?provider=spotify", nil))
+	ui.loginStart(w, httptest.NewRequest("POST", "/v1/enginex/login?provider=spotify", nil))
 	if w.Code != 200 || calls != 1 || strings.Contains(w.Body.String(), "private-fixture-code") {
 		t.Fatal("device code leaked or request failed")
 	}
@@ -72,14 +72,14 @@ func TestSpotifyDeviceQRUsesOfficialConfirmation(t *testing.T) {
 		t.Fatal("device phone page did not offer direct confirmation")
 	}
 	w = httptest.NewRecorder()
-	ui.loginStatus(w, httptest.NewRequest("GET", "/v1/sc5000/login/status?provider=spotify", nil))
+	ui.loginStatus(w, httptest.NewRequest("GET", "/v1/enginex/login/status?provider=spotify", nil))
 	if calls != 1 || flow.Status != "waiting" {
 		t.Fatal("polling interval ignored")
 	}
 	ui.mu.Lock()
 	flow.expires = time.Now().Add(-time.Minute)
 	ui.mu.Unlock()
-	ui.loginStatus(httptest.NewRecorder(), httptest.NewRequest("GET", "/v1/sc5000/login/status?provider=spotify", nil))
+	ui.loginStatus(httptest.NewRecorder(), httptest.NewRequest("GET", "/v1/enginex/login/status?provider=spotify", nil))
 	if flow.Status != "expired" {
 		t.Fatal("expired device code still offered")
 	}
@@ -88,7 +88,7 @@ func TestSpotifyDeviceEndpointOfflineKeepsPKCE(t *testing.T) {
 	ui := New(Config{StateDir: t.TempDir(), UIDir: t.TempDir(), HTTP: &http.Client{Transport: spotifyRoundTrip(func(*http.Request) (*http.Response, error) { return nil, errors.New("offline") })}}, nil)
 	defer ui.Close()
 	w := httptest.NewRecorder()
-	ui.loginStart(w, httptest.NewRequest("POST", "/v1/sc5000/login?provider=spotify", nil))
+	ui.loginStart(w, httptest.NewRequest("POST", "/v1/enginex/login?provider=spotify", nil))
 	if w.Code != 200 || !strings.Contains(w.Body.String(), "/m/spotify?t=") {
 		t.Fatal("offline login fallback missing")
 	}

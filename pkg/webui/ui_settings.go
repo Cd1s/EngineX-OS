@@ -714,7 +714,7 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 	v.FourDeckRoleActive = s.activeRole(v)
 	v.TimeZone = s.savedTimeZone()
 	v.DeckClock = s.deckClockWanted(time.Now())
-	if r.Method == http.MethodGet && r.URL.Path == "/v1/sc5000/ui" {
+	if r.Method == http.MethodGet && r.URL.Path == "/v1/enginex/ui" {
 		body, err := json.Marshal(struct {
 			uiSettings
 			AccessCode string `json:"accessCode"`

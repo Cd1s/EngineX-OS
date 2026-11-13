@@ -2,8 +2,8 @@ package webui
 
 // Shadow deck debug telemetry: with debug_telemetry=1 in settings.conf, or the
 // file /tmp/enginex-debug, every own post, every peer update and every decision
-// the receiving QML takes (POST /v1/sc5000/debug/shadow) is one JSON line in
-// shadowDebugLog and in a ring that GET /v1/sc5000/debug/shadow serves with the
+// the receiving QML takes (POST /v1/enginex/debug/shadow) is one JSON line in
+// shadowDebugLog and in a ring that GET /v1/enginex/debug/shadow serves with the
 // live state. Off by default: release images never write it.
 
 import (

@@ -144,7 +144,7 @@ PY
 
     # Wait for stream-sync to be ready
     for i in $(seq 1 40); do
-        if curl -sf http://127.0.0.1:8080/v1/sc5000/ui >/dev/null 2>&1; then
+        if curl -sf http://127.0.0.1:8080/v1/enginex/ui >/dev/null 2>&1; then
             break
         fi
         sleep 0.1

@@ -478,7 +478,7 @@ func safeRegisterRoute(mux *http.ServeMux, pattern string, handler http.HandlerF
 	mux.HandleFunc(pattern, handler)
 }
 
-// RegisterTunnelRoutes registers /api/tunnel and /v1/sc5000/tunnel on s.
+// RegisterTunnelRoutes registers /api/tunnel and /v1/enginex/tunnel on s.
 func (s *Server) RegisterTunnelRoutes() {
 	if s == nil {
 		return
@@ -488,11 +488,11 @@ func (s *Server) RegisterTunnelRoutes() {
 	}
 	safeRegisterRoute(s.mux, "GET /api/tunnel", s.handleTunnel)
 	safeRegisterRoute(s.mux, "POST /api/tunnel", s.handleTunnel)
-	safeRegisterRoute(s.mux, "GET /v1/sc5000/tunnel", s.handleTunnel)
-	safeRegisterRoute(s.mux, "POST /v1/sc5000/tunnel", s.handleTunnel)
+	safeRegisterRoute(s.mux, "GET /v1/enginex/tunnel", s.handleTunnel)
+	safeRegisterRoute(s.mux, "POST /v1/enginex/tunnel", s.handleTunnel)
 	if s.tidal != nil && s.tidal.mux != nil {
-		safeRegisterRoute(s.tidal.mux, "GET /v1/sc5000/tunnel", s.handleTunnel)
-		safeRegisterRoute(s.tidal.mux, "POST /v1/sc5000/tunnel", s.handleTunnel)
+		safeRegisterRoute(s.tidal.mux, "GET /v1/enginex/tunnel", s.handleTunnel)
+		safeRegisterRoute(s.tidal.mux, "POST /v1/enginex/tunnel", s.handleTunnel)
 	}
 }
 

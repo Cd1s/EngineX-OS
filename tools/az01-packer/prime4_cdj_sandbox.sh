@@ -71,7 +71,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(png)
             return
-        if u.path == '/v1/sc5000/ui':
+        if u.path == '/v1/enginex/ui':
             res = {
                 "version": "5.3.0.4",
                 "fourDeckWaveform": True,
@@ -86,7 +86,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
-        if u.path == '/v1/sc5000/shadow':
+        if u.path == '/v1/enginex/shadow':
             now_ms = int(time.time() * 1000)
             lines_param = q.get('line', [''])[0]
             decks = []
@@ -116,7 +116,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
-        if u.path == '/v1/sc5000/shadow/display':
+        if u.path == '/v1/enginex/shadow/display':
             asset = {
                 "version": 1,
                 "key": "cdj:fixture",

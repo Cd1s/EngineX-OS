@@ -522,7 +522,7 @@ func TestUninstallGen2Endpoint(t *testing.T) {
 
 	// 1. Generation 1 deck (e.g. SC5000 JP07) -> 400 Bad Request
 	_ = os.WriteFile(compatible, []byte("inmusic,jp07\x00rockchip,rk3288\x00"), 0o644)
-	for _, path := range []string{"/v1/sc5000/uninstall-gen2", "/api/uninstall-gen2"} {
+	for _, path := range []string{"/v1/enginex/uninstall-gen2", "/api/uninstall-gen2"} {
 		req := httptest.NewRequest(http.MethodPost, path, nil)
 		w := httptest.NewRecorder()
 		s.handleUninstallGen2(w, req)
@@ -533,7 +533,7 @@ func TestUninstallGen2Endpoint(t *testing.T) {
 
 	// 2. Generation 2 deck (e.g. SC LIVE 4 JP21) without uninstall.sh -> 404 Not Found
 	_ = os.WriteFile(compatible, []byte("inmusic,jp21\x00rockchip,rk3288\x00"), 0o644)
-	for _, path := range []string{"/v1/sc5000/uninstall-gen2", "/api/uninstall-gen2"} {
+	for _, path := range []string{"/v1/enginex/uninstall-gen2", "/api/uninstall-gen2"} {
 		req := httptest.NewRequest(http.MethodPost, path, nil)
 		w := httptest.NewRecorder()
 		s.handleUninstallGen2(w, req)
@@ -552,7 +552,7 @@ func TestUninstallGen2Endpoint(t *testing.T) {
 		t.Fatalf("write uninstall.sh: %v", err)
 	}
 
-	for _, path := range []string{"/v1/sc5000/uninstall-gen2", "/api/uninstall-gen2"} {
+	for _, path := range []string{"/v1/enginex/uninstall-gen2", "/api/uninstall-gen2"} {
 		req := httptest.NewRequest(http.MethodPost, path, nil)
 		w := httptest.NewRecorder()
 		s.handleUninstallGen2(w, req)
@@ -602,7 +602,7 @@ func TestUninstallGen2RunsOutsideStreamSyncUnit(t *testing.T) {
 	version := filepath.Join(stateDir, "version.txt")
 	_ = os.WriteFile(version, []byte("5.3.0.4\n"), 0o644)
 	s := New(Config{StateDir: stateDir, UIDir: t.TempDir(), VersionFile: version}, nil)
-	req := httptest.NewRequest(http.MethodPost, "/v1/sc5000/uninstall-gen2", nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/enginex/uninstall-gen2", nil)
 	req.RemoteAddr = "127.0.0.1:43210"
 	w := httptest.NewRecorder()
 	s.ServeHTTP(w, req)

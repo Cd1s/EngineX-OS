@@ -286,14 +286,14 @@ func (s *Server) RegisterBroadcastRoutes() {
 	s.mux.HandleFunc("POST /api/broadcast/metadata", s.broadcastMetadataPost)
 	s.mux.HandleFunc("GET /api/usb-audio", s.handleUSBAudio)
 	s.mux.HandleFunc("POST /api/usb-audio", s.handleUSBAudio)
-	s.mux.HandleFunc("GET /v1/sc5000/usb-audio", s.handleUSBAudio)
-	s.mux.HandleFunc("POST /v1/sc5000/usb-audio", s.handleUSBAudio)
+	s.mux.HandleFunc("GET /v1/enginex/usb-audio", s.handleUSBAudio)
+	s.mux.HandleFunc("POST /v1/enginex/usb-audio", s.handleUSBAudio)
 	// Public on purpose (like the phone pages): OBS/VLC/browsers open these without a console cookie.
 	s.mux.HandleFunc("GET /live.mp3", s.liveMP3)
 	s.mux.HandleFunc("GET /live.wav", s.liveWAV)
 }
 
-// handleUSBAudio handles GET and POST requests for /v1/sc5000/usb-audio and /api/usb-audio.
+// handleUSBAudio handles GET and POST requests for /v1/enginex/usb-audio and /api/usb-audio.
 func (s *Server) handleUSBAudio(w http.ResponseWriter, r *http.Request) {
 	mgr := s.usbAudioManager()
 

@@ -122,7 +122,7 @@ func currentVersion(path string) string {
 	return "dev"
 }
 
-// update answers GET /v1/sc5000/update with the newest release of the repo.
+// update answers GET /v1/enginex/update with the newest release of the repo.
 func (s *Server) update(w http.ResponseWriter, r *http.Request) {
 	s.uiMu.Lock()
 	repo := s.loadUI().GitHubRepo
@@ -134,7 +134,7 @@ func (s *Server) update(w http.ResponseWriter, r *http.Request) {
 			// Detached: a deck page closing mid-check must not cache "unreachable" (#13).
 			s.updateCache = s.checkRelease(context.WithoutCancel(r.Context()), repo)
 		}
-		if strings.HasPrefix(r.URL.Path, "/v1/sc5000/update") && r.URL.Query().Get("apply") == "1" &&
+		if strings.HasPrefix(r.URL.Path, "/v1/enginex/update") && r.URL.Query().Get("apply") == "1" &&
 			s.updateCache.UpdateAvailable && s.updateCache.DownloadURL != "" {
 			s.updateCache.Updating = true
 			s.updateCache.Progress = 0.05
@@ -588,7 +588,7 @@ func (s *Server) customDir() string {
 
 // isGen2Unlocked reports whether the *-Update.img upgrade path is open (#119, #215):
 // true whenever gen2-locked is absent and either customDir is the deck's /data runtime dir
-// or gen2-unlocked exists, keeping GET /v1/sc5000/unlock-gen2 consistent with checkRelease.
+// or gen2-unlocked exists, keeping GET /v1/enginex/unlock-gen2 consistent with checkRelease.
 func (s *Server) isGen2Unlocked() bool {
 	if s.isGen2Locked() {
 		return false

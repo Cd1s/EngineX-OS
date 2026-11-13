@@ -1034,7 +1034,7 @@ func (s *Server) shadowDisplayGet(w http.ResponseWriter, r *http.Request) {
 	}
 	art := ""
 	if len(a.Artwork) != 0 {
-		art = "http://127.0.0.1:8080/v1/sc5000/shadow/artwork" + q
+		art = "http://127.0.0.1:8080/v1/enginex/shadow/artwork" + q
 	}
 	var tiles []string
 	width := 2048
@@ -1043,7 +1043,7 @@ func (s *Server) shadowDisplayGet(w http.ResponseWriter, r *http.Request) {
 		width = len(a.Waveform.Bands) / 3
 		waveDuration = float64(width) * a.Waveform.SamplesPerBin / a.SampleRate * 1000
 		for i := range e.tiles {
-			tiles = append(tiles, "http://127.0.0.1:8080/v1/sc5000/shadow/waveform.png"+q+"&tile="+strconv.Itoa(i))
+			tiles = append(tiles, "http://127.0.0.1:8080/v1/enginex/shadow/waveform.png"+q+"&tile="+strconv.Itoa(i))
 		}
 	}
 	title, artist := a.Title, a.Artist
@@ -1056,9 +1056,9 @@ func (s *Server) shadowDisplayGet(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	respond(w, map[string]any{"key": d.Key, "title": title, "artist": artist, "bpm": a.BPM, "keyName": a.KeyName,
 		"sampleRate": a.SampleRate, "durationMs": a.DurationMS, "beats": a.Beats, "cues": cues, "loops": a.Loops, "detail": a.Detail, "detailPending": a.DetailPending, "detailSource": a.DetailSource,
-		"waveformUrl":   "http://127.0.0.1:8080/v1/sc5000/shadow/waveform.png" + q,
+		"waveformUrl":   "http://127.0.0.1:8080/v1/enginex/shadow/waveform.png" + q,
 		"waveformTiles": tiles, "waveformWidth": width, "waveformDurationMs": waveDuration, "tileWidth": 2048,
-		"overviewUrl": "http://127.0.0.1:8080/v1/sc5000/shadow/waveform.png" + q + "&overview=1", "artworkUrl": art})
+		"overviewUrl": "http://127.0.0.1:8080/v1/enginex/shadow/waveform.png" + q + "&overview=1", "artworkUrl": art})
 }
 
 func (s *Server) shadowWaveformGet(w http.ResponseWriter, r *http.Request) {

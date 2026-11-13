@@ -1,6 +1,6 @@
 package webui
 
-// GET /api/prolink/diag (console login) and /v1/sc5000/prolink/diag (the deck
+// GET /api/prolink/diag (console login) and /v1/enginex/prolink/diag (the deck
 // itself): a self-check for the PRIME 4 <-> CDJ-3000 beta test (#59, #63).
 // It reads settings, interfaces, sockets and discovered peers only; no account
 // file, token, cookie, Wi-Fi key, serial number or MAC address goes into it.

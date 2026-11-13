@@ -47,7 +47,7 @@ func TestTimeZonePersistenceNormalizesSpacesSavesExplicitUTCAndRejectsInvalid(t 
 
 	postTZ := func(val string) (saved bool, current string) {
 		t.Helper()
-		resp, err := http.Post(srv.URL+"/v1/sc5000/ui?timezone="+val, "", nil)
+		resp, err := http.Post(srv.URL+"/v1/enginex/ui?timezone="+val, "", nil)
 		if err != nil {
 			t.Fatalf("POST timezone=%q: %v", val, err)
 		}
@@ -77,13 +77,13 @@ func TestTimeZonePersistenceNormalizesSpacesSavesExplicitUTCAndRejectsInvalid(t 
 
 	assertGETTimeZone := func(want string) {
 		t.Helper()
-		getResp, err := http.Get(srv.URL + "/v1/sc5000/ui")
+		getResp, err := http.Get(srv.URL + "/v1/enginex/ui")
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer getResp.Body.Close()
 		if getResp.StatusCode != http.StatusOK {
-			t.Fatalf("GET /v1/sc5000/ui status = %d", getResp.StatusCode)
+			t.Fatalf("GET /v1/enginex/ui status = %d", getResp.StatusCode)
 		}
 		var status struct {
 			TimeZone string `json:"timezone"`
@@ -92,11 +92,11 @@ func TestTimeZonePersistenceNormalizesSpacesSavesExplicitUTCAndRejectsInvalid(t 
 			t.Fatal(err)
 		}
 		if status.TimeZone != want {
-			t.Fatalf("GET /v1/sc5000/ui timezone = %q, want %q", status.TimeZone, want)
+			t.Fatalf("GET /v1/enginex/ui timezone = %q, want %q", status.TimeZone, want)
 		}
 	}
 
-	// 2. Manual selection of Asia/Shanghai updates state/timezone and appears in GET /v1/sc5000/ui.
+	// 2. Manual selection of Asia/Shanghai updates state/timezone and appears in GET /v1/enginex/ui.
 	saved, cur = postTZ("Asia%2FShanghai")
 	if !saved || cur != "Asia/Shanghai" {
 		t.Fatalf("Asia/Shanghai: saved=%v cur=%q", saved, cur)

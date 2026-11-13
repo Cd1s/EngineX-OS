@@ -54,7 +54,7 @@ func TestModsUpload(t *testing.T) {
 			}
 			base := t.TempDir()
 			s := New(Config{StateDir: filepath.Join(base, "state"), UIDir: filepath.Join(base, "ui")}, nil)
-			req := httptest.NewRequest(http.MethodPost, "/v1/sc5000/mods/upload", &body)
+			req := httptest.NewRequest(http.MethodPost, "/v1/enginex/mods/upload", &body)
 			req.Header.Set("Content-Type", contentType)
 			w := httptest.NewRecorder()
 			s.mux.ServeHTTP(w, req)
@@ -65,7 +65,7 @@ func TestModsUpload(t *testing.T) {
 				t.Fatal("uploaded mod must stay disabled until enabled")
 			}
 			w = httptest.NewRecorder()
-			s.handleMods(w, httptest.NewRequest(http.MethodPost, "/v1/sc5000/mods", bytes.NewBufferString(`{"id":"upload-test","enabled":true}`)))
+			s.handleMods(w, httptest.NewRequest(http.MethodPost, "/v1/enginex/mods", bytes.NewBufferString(`{"id":"upload-test","enabled":true}`)))
 			if w.Code != 200 {
 				t.Fatalf("enable %d: %s", w.Code, w.Body.String())
 			}
@@ -73,7 +73,7 @@ func TestModsUpload(t *testing.T) {
 				t.Fatal(err)
 			}
 			w = httptest.NewRecorder()
-			s.handleMods(w, httptest.NewRequest(http.MethodPost, "/v1/sc5000/mods", bytes.NewBufferString(`{"id":"upload-test","action":"uninstall"}`)))
+			s.handleMods(w, httptest.NewRequest(http.MethodPost, "/v1/enginex/mods", bytes.NewBufferString(`{"id":"upload-test","action":"uninstall"}`)))
 			if w.Code != 200 {
 				t.Fatalf("uninstall %d: %s", w.Code, w.Body.String())
 			}
@@ -90,7 +90,7 @@ func TestModsTailscaleLifecycle(t *testing.T) {
 	s := New(Config{StateDir: filepath.Join(base, "state"), UIDir: filepath.Join(base, "ui")}, nil)
 	for _, body := range []string{`{"id":"tailscale-remote","enabled":true}`, `{"id":"tailscale-remote","enabled":false}`, `{"id":"tailscale-remote","action":"uninstall"}`} {
 		w := httptest.NewRecorder()
-		s.handleMods(w, httptest.NewRequest(http.MethodPost, "/v1/sc5000/mods", bytes.NewBufferString(body)))
+		s.handleMods(w, httptest.NewRequest(http.MethodPost, "/v1/enginex/mods", bytes.NewBufferString(body)))
 		if w.Code != 200 {
 			t.Fatalf("%s: %d %s", body, w.Code, w.Body.String())
 		}
@@ -139,7 +139,7 @@ func TestMods_WebUI_Get(t *testing.T) {
 		},
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/sc5000/mods", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/enginex/mods", nil)
 	rec := httptest.NewRecorder()
 	srv.handleMods(rec, req)
 
@@ -193,7 +193,7 @@ func TestMods_WebUI_PostEnableAndDisable(t *testing.T) {
 
 	// 1. Enable mod
 	body := bytes.NewBufferString(`{"id": "wave-mod", "enabled": true}`)
-	req := httptest.NewRequest(http.MethodPost, "/v1/sc5000/mods", body)
+	req := httptest.NewRequest(http.MethodPost, "/v1/enginex/mods", body)
 	rec := httptest.NewRecorder()
 	srv.handleMods(rec, req)
 
@@ -208,7 +208,7 @@ func TestMods_WebUI_PostEnableAndDisable(t *testing.T) {
 	}
 
 	// Verify GET reports enabled: true
-	getReq := httptest.NewRequest(http.MethodGet, "/v1/sc5000/mods", nil)
+	getReq := httptest.NewRequest(http.MethodGet, "/v1/enginex/mods", nil)
 	getRec := httptest.NewRecorder()
 	srv.handleMods(getRec, getReq)
 
@@ -225,7 +225,7 @@ func TestMods_WebUI_PostEnableAndDisable(t *testing.T) {
 
 	// 2. Disable mod
 	bodyDisable := bytes.NewBufferString(`{"id": "wave-mod", "enabled": false}`)
-	reqDisable := httptest.NewRequest(http.MethodPost, "/v1/sc5000/mods", bodyDisable)
+	reqDisable := httptest.NewRequest(http.MethodPost, "/v1/enginex/mods", bodyDisable)
 	recDisable := httptest.NewRecorder()
 	srv.handleMods(recDisable, reqDisable)
 
@@ -263,7 +263,7 @@ func TestMods_WebUI_QuarantineReset(t *testing.T) {
 
 	// Call quarantine_reset via POST
 	body := bytes.NewBufferString(`{"action": "quarantine_reset"}`)
-	req := httptest.NewRequest(http.MethodPost, "/v1/sc5000/mods", body)
+	req := httptest.NewRequest(http.MethodPost, "/v1/enginex/mods", body)
 	rec := httptest.NewRecorder()
 	srv.handleMods(rec, req)
 
@@ -294,7 +294,7 @@ func TestMods_WebUI_InvalidRequests(t *testing.T) {
 	}
 
 	// Method not allowed
-	req1 := httptest.NewRequest(http.MethodDelete, "/v1/sc5000/mods", nil)
+	req1 := httptest.NewRequest(http.MethodDelete, "/v1/enginex/mods", nil)
 	rec1 := httptest.NewRecorder()
 	srv.handleMods(rec1, req1)
 	if rec1.Code != http.StatusMethodNotAllowed {
@@ -302,7 +302,7 @@ func TestMods_WebUI_InvalidRequests(t *testing.T) {
 	}
 
 	// Bad JSON
-	req2 := httptest.NewRequest(http.MethodPost, "/v1/sc5000/mods", bytes.NewBufferString(`{invalid`))
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/enginex/mods", bytes.NewBufferString(`{invalid`))
 	rec2 := httptest.NewRecorder()
 	srv.handleMods(rec2, req2)
 	if rec2.Code != http.StatusBadRequest {
@@ -310,7 +310,7 @@ func TestMods_WebUI_InvalidRequests(t *testing.T) {
 	}
 
 	// Missing fields
-	req3 := httptest.NewRequest(http.MethodPost, "/v1/sc5000/mods", bytes.NewBufferString(`{}`))
+	req3 := httptest.NewRequest(http.MethodPost, "/v1/enginex/mods", bytes.NewBufferString(`{}`))
 	rec3 := httptest.NewRecorder()
 	srv.handleMods(rec3, req3)
 	if rec3.Code != http.StatusBadRequest {
@@ -369,51 +369,51 @@ func TestModsWebConsoleLANEndpoints(t *testing.T) {
 		}
 	}
 
-	// 3. /v1/sc5000/mods and /v1/sc5000/mods/upload from LAN return 403 (streaming gateway loopback check)
+	// 3. /v1/enginex/mods and /v1/enginex/mods/upload from LAN return 403 (streaming gateway loopback check)
 	{
-		req := httptest.NewRequest(http.MethodGet, "/v1/sc5000/mods", nil)
+		req := httptest.NewRequest(http.MethodGet, "/v1/enginex/mods", nil)
 		req.RemoteAddr = lanAddr
 		rec := httptest.NewRecorder()
 		srv.ServeHTTP(rec, req)
 		if rec.Code != http.StatusForbidden {
-			t.Fatalf("expected 403 for /v1/sc5000/mods from LAN, got %d", rec.Code)
+			t.Fatalf("expected 403 for /v1/enginex/mods from LAN, got %d", rec.Code)
 		}
 
-		reqUp := httptest.NewRequest(http.MethodPost, "/v1/sc5000/mods/upload", bytes.NewReader(arc1))
+		reqUp := httptest.NewRequest(http.MethodPost, "/v1/enginex/mods/upload", bytes.NewReader(arc1))
 		reqUp.Header.Set("Content-Type", "application/gzip")
 		reqUp.RemoteAddr = lanAddr
 		recUp := httptest.NewRecorder()
 		srv.ServeHTTP(recUp, reqUp)
 		if recUp.Code != http.StatusForbidden {
-			t.Fatalf("expected 403 for /v1/sc5000/mods/upload from LAN, got %d", recUp.Code)
+			t.Fatalf("expected 403 for /v1/enginex/mods/upload from LAN, got %d", recUp.Code)
 		}
 	}
 
-	// 3b. /v1/sc5000/mods and /v1/sc5000/mods/upload from loopback succeed via srv.ServeHTTP without console login
+	// 3b. /v1/enginex/mods and /v1/enginex/mods/upload from loopback succeed via srv.ServeHTTP without console login
 	{
-		reqUp := httptest.NewRequest(http.MethodPost, "/v1/sc5000/mods/upload", bytes.NewReader(arc1))
+		reqUp := httptest.NewRequest(http.MethodPost, "/v1/enginex/mods/upload", bytes.NewReader(arc1))
 		reqUp.Header.Set("Content-Type", "application/gzip")
 		reqUp.RemoteAddr = "127.0.0.1:45678"
 		recUp := httptest.NewRecorder()
 		srv.ServeHTTP(recUp, reqUp)
 		if recUp.Code != http.StatusOK {
-			t.Fatalf("expected 200 for loopback /v1/sc5000/mods/upload, got %d: %s", recUp.Code, recUp.Body.String())
+			t.Fatalf("expected 200 for loopback /v1/enginex/mods/upload, got %d: %s", recUp.Code, recUp.Body.String())
 		}
 		var upRes map[string]any
 		if err := json.Unmarshal(recUp.Body.Bytes(), &upRes); err != nil || upRes["id"] != "lan-test-1" {
 			t.Fatalf("expected mod id lan-test-1 in loopback upload response, got: %s", recUp.Body.String())
 		}
 
-		reqList := httptest.NewRequest(http.MethodGet, "/v1/sc5000/mods", nil)
+		reqList := httptest.NewRequest(http.MethodGet, "/v1/enginex/mods", nil)
 		reqList.RemoteAddr = "127.0.0.1:45678"
 		recList := httptest.NewRecorder()
 		srv.ServeHTTP(recList, reqList)
 		if recList.Code != http.StatusOK {
-			t.Fatalf("expected 200 for loopback /v1/sc5000/mods, got %d: %s", recList.Code, recList.Body.String())
+			t.Fatalf("expected 200 for loopback /v1/enginex/mods, got %d: %s", recList.Code, recList.Body.String())
 		}
 		var listRes modsListResponse
 		if err := json.Unmarshal(recList.Body.Bytes(), &listRes); err != nil {
-			t.Fatalf("failed to decode loopback /v1/sc5000/mods response: %v", err)
+			t.Fatalf("failed to decode loopback /v1/enginex/mods response: %v", err)
 		}
 		found := false
 		for _, m := range listRes.Mods {

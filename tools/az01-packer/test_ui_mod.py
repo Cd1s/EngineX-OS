@@ -349,7 +349,7 @@ class UiModSourceTest(unittest.TestCase):
     def test_boot_ready_waits_for_main_splash_and_never_blocks_gui(self):
         self.assertIn('!scBootSplash.active && planckQuickView.isMainScreen', bp.BOOT_READY)
         self.assertNotIn('scBootReadyTimer.parent', bp.BOOT_READY)
-        self.assertIn('/v1/sc5000/boot/ready', bp.BOOT_READY)
+        self.assertIn('/v1/enginex/boot/ready', bp.BOOT_READY)
         self.assertIn('JSON.stringify({token: token})', bp.BOOT_READY)
         self.assertIn('request !== x', bp.BOOT_READY)
         self.assertIn('old.abort()', bp.BOOT_READY)
@@ -503,7 +503,7 @@ class UiModSourceTest(unittest.TestCase):
         self.assertIn("at.sd * 0.85 + drift * 0.15", m)
         self.assertNotIn("at.postPlay", m)  # the gap after Play is closed by scShadowBend, not a second seek
         self.assertIn("e.seq === at.lastSeq", m)
-        self.assertIn('x.open("POST", "http://127.0.0.1:8080/v1/sc5000/debug/shadow")', m)
+        self.assertIn('x.open("POST", "http://127.0.0.1:8080/v1/enginex/debug/shadow")', m)
         self.assertIn("root.scShadowDebug = !!r.debug", m)
         self.assertIn("LoadOverlay/LoadOverlayDecks.qml", SRC)
         # Standalone EngineX peers share Sync/master; consoles (#160) still need shadow control
@@ -1901,7 +1901,7 @@ layer=0; tick(40); assert.equal(bodies.length,3); assert.equal(bodies[2][0].acti
         # the poll is idle: the next /shadow answer goes through scShadowApplyAll.
         line = next(l for l in bp.SERVICES_MAIN.splitlines() if l.lstrip().startswith("onScPairedOnChanged:"))
         body = line.split(":", 1)[1]
-        self.assertIn('/v1/sc5000/shadow?ver=" + scShadowVer + (scShadowIdle ? "&idle=1" : "")', Path(bp.__file__).read_text(encoding="utf-8"))
+        self.assertIn('/v1/enginex/shadow?ver=" + scShadowVer + (scShadowIdle ? "&idle=1" : "")', Path(bp.__file__).read_text(encoding="utf-8"))
         if not shutil.which("node"):
             self.skipTest("node not installed")
         script = f"""
@@ -2180,7 +2180,7 @@ class UiModBuildTest(unittest.TestCase):
                             main = pack.extractfile(f"packs/{lang}/Skins/Embedded/EmbeddedMain.qml").read().decode()
                             self.assertIn("scShadowApplyDisplay(decks.filter(e => e.displayOnly === true).concat(scShadowCovers(decks)))", main)
                             self.assertIn("s.metadataOnly", main)
-                            self.assertIn("/v1/sc5000/shadow/display?deck=", main)
+                            self.assertIn("/v1/enginex/shadow/display?deck=", main)
                             self.assertIn("scDeckLocked", main)
                             for component, name in (("Waveform", "waveform"), ("WaveformOverview", "overview")):
                                 wave = pack.extractfile(f"packs/{lang}/Skins/Embedded/Views/Common/{component}/{component}.qml").read().decode()
@@ -4934,7 +4934,7 @@ class TimeZonePersistenceTest(unittest.TestCase):
     def test_timezone_capture_normalizes_spaces_guards_boot_fallback_and_saves_picker_utc(self):
         self.assertIn("function onSystemTimeZoneSetSucceeded() { root.scOnTimeZoneChanged() }", bp.SERVICES_MAIN)
         self.assertIn("function onTimeZoneSelect() { root.scTimeZonePickerUsed = true }", bp.SERVICES_MAIN)
-        self.assertIn("http://127.0.0.1:8080/v1/sc5000/ui?timezone=", bp.SERVICES_MAIN)
+        self.assertIn("http://127.0.0.1:8080/v1/enginex/ui?timezone=", bp.SERVICES_MAIN)
         import shutil, subprocess
         if not shutil.which("node"):
             return
@@ -4999,12 +4999,12 @@ globalThis.Planck = {{
 // 1. Auto-detected zone with space display formatting ("America/New York") normalizes to "America/New_York".
 Planck.timeDateController.setSystemTimeZone('America/New_York');
 assert.equal(scLastGoodTimeZone, 'America/New_York');
-assert.equal(posts.at(-1), 'http://127.0.0.1:8080/v1/sc5000/ui?timezone=America%2FNew_York');
+assert.equal(posts.at(-1), 'http://127.0.0.1:8080/v1/enginex/ui?timezone=America%2FNew_York');
 
 // 2. Manual selection of Asia/Shanghai posts Asia/Shanghai.
 Planck.timeDateController.setSystemTimeZone('Asia/Shanghai');
 assert.equal(scLastGoodTimeZone, 'Asia/Shanghai');
-assert.equal(posts.at(-1), 'http://127.0.0.1:8080/v1/sc5000/ui?timezone=Asia%2FShanghai');
+assert.equal(posts.at(-1), 'http://127.0.0.1:8080/v1/enginex/ui?timezone=Asia%2FShanghai');
 
 // 3. Unsolicited boot-window UTC (picker NOT used) stays guarded even if NTP jumps wall-clock Date.now() +12 days!
 fakeNow += 12 * 86400 * 1000;
@@ -5023,7 +5023,7 @@ assert.equal(scTimeZonePickerUsed, true);
 assert.equal(scLastGoodTimeZone, 'UTC');
 assert.equal(currentDisplayTz, 'UTC');
 assert.equal(currentIsUtc, true);
-assert.equal(posts.at(-1), 'http://127.0.0.1:8080/v1/sc5000/ui?timezone=UTC');
+assert.equal(posts.at(-1), 'http://127.0.0.1:8080/v1/enginex/ui?timezone=UTC');
 
 // 5. Once the 30s monotonic Timer expires (scTimeZoneBootWindowOpen = false), UTC is saved even without picker.
 scTimeZonePickerUsed = false;
@@ -5031,7 +5031,7 @@ Planck.timeDateController.setSystemTimeZone('Asia/Shanghai');
 scTimeZoneBootWindowOpen = false;
 Planck.timeDateController.setSystemTimeZone('UTC');
 assert.equal(scLastGoodTimeZone, 'UTC');
-assert.equal(posts.at(-1), 'http://127.0.0.1:8080/v1/sc5000/ui?timezone=UTC');
+assert.equal(posts.at(-1), 'http://127.0.0.1:8080/v1/enginex/ui?timezone=UTC');
 """
         r = subprocess.run(["node", "-e", script], capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -5176,7 +5176,7 @@ assert.equal(scLanStemsLine({{online: true, hostname: 'studio-mac', backend: 'hp
         fn = m.split("function scDeckClockDeckProps(", 1)[1].split("\t// 25 Hz around every edge", 1)[0]
         self.assertNotIn("Planck.getProperty", fn)
         self.assertNotRegex(fn, r'\.string\b')
-        self.assertIn('http://127.0.0.1:8080/v1/sc5000/clock', fn)
+        self.assertIn('http://127.0.0.1:8080/v1/enginex/clock', fn)
         if shutil.which("node"):
             tr_fn = m.split("function scTr(path) {", 1)[1].split("// #151:", 1)[0]
             script = r'''
@@ -5310,7 +5310,7 @@ class OneLibraryNoChooseDbTest(unittest.TestCase):
         self.assertNotIn("prompts.post", patched)
         self.assertNotIn("Choose your Database", patched)
         self.assertNotIn("onDeviceAdded", patched)
-        self.assertIn("/v1/sc5000/library-status?path=", patched)
+        self.assertIn("/v1/enginex/library-status?path=", patched)
 
         qrc = LAB / "5.3.0" / "qrc"
         if qrc.is_dir():
@@ -5332,7 +5332,7 @@ class OneLibraryNoChooseDbTest(unittest.TestCase):
                         "function scHasRegisteredDatabaseUuid(devicePath)",
                         "function scFinishSelection(devicePath, seq, useEngineLibrary)",
                         "function scExpirePendingRequests(nowMs)",
-                        "/v1/sc5000/library-status?path=",
+                        "/v1/enginex/library-status?path=",
                         "controller.chooseEngineLibrary(devicePath)",
                         "controller.chooseOneLibrary(devicePath)",
                     ):
@@ -5388,7 +5388,7 @@ class XMLHttpRequest {{
     open(method, url) {{ this.method = method; this.url = url; this.readyState = 1; }}
     send() {{
         const u = new URL(this.url);
-        assert.equal(u.pathname, "/v1/sc5000/library-status");
+        assert.equal(u.pathname, "/v1/enginex/library-status");
         const p = u.searchParams.get("path");
         const entry = server[p];
         if (entry === "hold") {{
@@ -5590,7 +5590,7 @@ class EngineLightingDefaultOffAndPersistTest(unittest.TestCase):
                         self.assertIn('const SoundSwitch = root.scLightingBackend', switch)
                         self.assertRegex(switch, r'if\s*\(!next\s*&&[\s\S]+?SoundSwitch.stopBackend\(\)')
                         self.assertIn('typeof SoundSwitch.stopBackend === "function"', switch)
-                        self.assertIn('http://127.0.0.1:8080/v1/sc5000/ui?engineLighting=', switch)
+                        self.assertIn('http://127.0.0.1:8080/v1/enginex/ui?engineLighting=', switch)
                         self.assertIn('XMLHttpRequest', switch)
                         self.assertIn('interval: 1500', switch)
                         self.assertIn('req.status !== 200', switch)

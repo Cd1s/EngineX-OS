@@ -103,14 +103,14 @@ func TestDecksAlivePingKeepsOwnDecksLive(t *testing.T) {
 	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
 	ping := func() int {
 		w := httptest.NewRecorder()
-		s.decksAlive(w, httptest.NewRequest("POST", "/v1/sc5000/decks/alive", nil))
+		s.decksAlive(w, httptest.NewRequest("POST", "/v1/enginex/decks/alive", nil))
 		return w.Code
 	}
 	if c := ping(); c != http.StatusConflict {
 		t.Fatalf("ping before any post: %d, want 409 (ask for a full post)", c)
 	}
 	w := httptest.NewRecorder()
-	s.decksPost(w, httptest.NewRequest("POST", "/v1/sc5000/decks", strings.NewReader(fmt.Sprintf(`[{"deck":1,"playing":true,"positionMs":5000,"pitch":10,"bpm":120,"beat":1,"master":true,"at":%d}]`, time.Now().UnixMilli()))))
+	s.decksPost(w, httptest.NewRequest("POST", "/v1/enginex/decks", strings.NewReader(fmt.Sprintf(`[{"deck":1,"playing":true,"positionMs":5000,"pitch":10,"bpm":120,"beat":1,"master":true,"at":%d}]`, time.Now().UnixMilli()))))
 	if w.Code != 200 {
 		t.Fatal(w.Code)
 	}
@@ -165,7 +165,7 @@ func TestShadowStateHeaderSkipsHeartbeats(t *testing.T) {
 	wantTempo := 130.17
 	header := func() string {
 		t.Helper()
-		r, err := http.Get(srv.URL + "/v1/sc5000/shadow")
+		r, err := http.Get(srv.URL + "/v1/enginex/shadow")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -247,7 +247,7 @@ func TestShadowStateHeaderCarriesDisplayDetail(t *testing.T) {
 	uiPost(t, srv.URL, "fourDeckWaveform=1&shadowMode=cdj")
 	get := func() (string, []deckState) {
 		t.Helper()
-		r, err := http.Get(srv.URL + "/v1/sc5000/shadow")
+		r, err := http.Get(srv.URL + "/v1/enginex/shadow")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -294,7 +294,7 @@ func TestShadowLongPollHoldsQuietAnswers(t *testing.T) {
 		ver := s.shadow.ver
 		s.shadow.mu.Unlock()
 		start := time.Now()
-		r, err := http.Get(fmt.Sprintf("%s/v1/sc5000/shadow?ver=%d", srv.URL, ver))
+		r, err := http.Get(fmt.Sprintf("%s/v1/enginex/shadow?ver=%d", srv.URL, ver))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -460,7 +460,7 @@ func TestShadowCarriesRangeAndKeyLock(t *testing.T) {
 	os.WriteFile(fourDeckRolePath, []byte("13"), 0600)
 	uiPost(t, srv.URL, "fourDeckWaveform=1")
 	w := httptest.NewRecorder()
-	s.decksPost(w, httptest.NewRequest("POST", "/v1/sc5000/decks", strings.NewReader(fmt.Sprintf(`[{"deck":1,"range":100,"keylock":false,"at":%d}]`, time.Now().UnixMilli()))))
+	s.decksPost(w, httptest.NewRequest("POST", "/v1/enginex/decks", strings.NewReader(fmt.Sprintf(`[{"deck":1,"range":100,"keylock":false,"at":%d}]`, time.Now().UnixMilli()))))
 	if w.Code != 200 {
 		t.Fatal(w.Code)
 	}
@@ -480,7 +480,7 @@ func TestShadowCarriesRangeAndKeyLock(t *testing.T) {
 	if len(out) != 1 || out[0].Range != 100 || out[0].KeyLock == nil || *out[0].KeyLock {
 		t.Fatalf("own deck for the peer: %+v", out)
 	}
-	r, err := http.Get(srv.URL + "/v1/sc5000/shadow")
+	r, err := http.Get(srv.URL + "/v1/enginex/shadow")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -508,7 +508,7 @@ func TestShadowDisplayCarriesKeyNameAndLead(t *testing.T) {
 	os.WriteFile(fourDeckRolePath, []byte("13"), 0600)
 	uiPost(t, srv.URL, "fourDeckWaveform=1&shadowLegacyEngine=0")
 	w := httptest.NewRecorder()
-	s.decksPost(w, httptest.NewRequest("POST", "/v1/sc5000/decks", strings.NewReader(fmt.Sprintf(`[{"deck":1,"keyName":"8B","lead":true,"at":%d}]`, time.Now().UnixMilli()))))
+	s.decksPost(w, httptest.NewRequest("POST", "/v1/enginex/decks", strings.NewReader(fmt.Sprintf(`[{"deck":1,"keyName":"8B","lead":true,"at":%d}]`, time.Now().UnixMilli()))))
 	if w.Code != 200 {
 		t.Fatal(w.Code)
 	}
@@ -527,7 +527,7 @@ func TestShadowDisplayCarriesKeyNameAndLead(t *testing.T) {
 	if ver2 == ver1 || ver3 == ver2 {
 		t.Fatalf("keyName or lead change must bump ver: %d %d %d", ver1, ver2, ver3)
 	}
-	r, err := http.Get(srv.URL + "/v1/sc5000/shadow")
+	r, err := http.Get(srv.URL + "/v1/enginex/shadow")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -550,7 +550,7 @@ func TestShadowCarriesShadowMaster(t *testing.T) {
 	os.WriteFile(fourDeckRolePath, []byte("13"), 0600)
 	uiPost(t, srv.URL, "fourDeckWaveform=1")
 	w := httptest.NewRecorder()
-	s.decksPost(w, httptest.NewRequest("POST", "/v1/sc5000/decks", strings.NewReader(fmt.Sprintf(`[{"deck":1,"shadowMaster":2,"at":%d}]`, time.Now().UnixMilli()))))
+	s.decksPost(w, httptest.NewRequest("POST", "/v1/enginex/decks", strings.NewReader(fmt.Sprintf(`[{"deck":1,"shadowMaster":2,"at":%d}]`, time.Now().UnixMilli()))))
 	if w.Code != 200 {
 		t.Fatal(w.Code)
 	}
@@ -564,7 +564,7 @@ func TestShadowCarriesShadowMaster(t *testing.T) {
 	if len(out) != 1 || out[0].ShadowMaster != 2 || ver2 == ver {
 		t.Fatalf("own deck for the peer: %+v, ver %d -> %d", out, ver, ver2)
 	}
-	r, err := http.Get(srv.URL + "/v1/sc5000/shadow")
+	r, err := http.Get(srv.URL + "/v1/enginex/shadow")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -587,7 +587,7 @@ func TestShadowCarriesKeyName(t *testing.T) {
 	os.WriteFile(fourDeckRolePath, []byte("13"), 0600)
 	uiPost(t, srv.URL, "fourDeckWaveform=1")
 	w := httptest.NewRecorder()
-	s.decksPost(w, httptest.NewRequest("POST", "/v1/sc5000/decks", strings.NewReader(fmt.Sprintf(`[{"deck":1,"keyName":"-","at":%d}]`, time.Now().UnixMilli()))))
+	s.decksPost(w, httptest.NewRequest("POST", "/v1/enginex/decks", strings.NewReader(fmt.Sprintf(`[{"deck":1,"keyName":"-","at":%d}]`, time.Now().UnixMilli()))))
 	if w.Code != 200 {
 		t.Fatal(w.Code)
 	}
@@ -604,7 +604,7 @@ func TestShadowCarriesKeyName(t *testing.T) {
 	if ver2 == ver {
 		t.Fatalf("a new key must wake the QML: ver %d %d", ver, ver2)
 	}
-	r, err := http.Get(srv.URL + "/v1/sc5000/shadow")
+	r, err := http.Get(srv.URL + "/v1/enginex/shadow")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -674,7 +674,7 @@ func TestShadowReplyTellsLead(t *testing.T) {
 	if !woke {
 		t.Fatal("LEAD on the source must wake the QML")
 	}
-	r, err := http.Get(srv.URL + "/v1/sc5000/shadow")
+	r, err := http.Get(srv.URL + "/v1/enginex/shadow")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -720,7 +720,7 @@ func TestShadowReplyTellsDeckDisplayState(t *testing.T) {
 		}
 	}
 	s.shadow.mu.Unlock()
-	r, err := http.Get(srv.URL + "/v1/sc5000/shadow")
+	r, err := http.Get(srv.URL + "/v1/enginex/shadow")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -755,7 +755,7 @@ func TestShadowIdleReplyKeepsActiveSnapshots(t *testing.T) {
 	get := func(query string) *httptest.ResponseRecorder {
 		t.Helper()
 		w := httptest.NewRecorder()
-		s.shadowGet(w, httptest.NewRequest("GET", "/v1/sc5000/shadow"+query, nil))
+		s.shadowGet(w, httptest.NewRequest("GET", "/v1/enginex/shadow"+query, nil))
 		return w
 	}
 	decks := func(w *httptest.ResponseRecorder) []deckState {
@@ -831,7 +831,7 @@ func TestShadowLongPollFollowsALiveModeSwitch(t *testing.T) {
 	// let it finish before the deferred restores above run.
 	defer func() { <-posted }()
 	start := time.Now()
-	r, err := http.Get(fmt.Sprintf("%s/v1/sc5000/shadow?ver=%d", srv.URL, ver))
+	r, err := http.Get(fmt.Sprintf("%s/v1/enginex/shadow?ver=%d", srv.URL, ver))
 	if err != nil {
 		t.Fatal(err)
 	}

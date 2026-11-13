@@ -107,7 +107,7 @@ func TestShadowDeckFromPeer(t *testing.T) {
 	a := httptest.NewServer(New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil))
 	defer a.Close()
 	body := `[{"deck":2,"net":"net://u/(Unknown)/sc5000-custom/Stream/a.mp3","playing":true,"positionMs":1000,"pitch":2},{"deck":4,"net":"net://u/(Unknown)/../etc/passwd"}]`
-	if resp, err := http.Post(a.URL+"/v1/sc5000/decks", "application/json", strings.NewReader(body)); err != nil || resp.StatusCode != 200 {
+	if resp, err := http.Post(a.URL+"/v1/enginex/decks", "application/json", strings.NewReader(body)); err != nil || resp.StatusCode != 200 {
 		t.Fatalf("post: %v %v", resp, err)
 	}
 	var peer struct{ Decks []deckState }
@@ -129,7 +129,7 @@ func TestShadowDeckFromPeer(t *testing.T) {
 	fourDeckRolePath = filepath.Join(t.TempDir(), "role")
 	defer func() { fourDeckRolePath = "/run/enginex-assignments/role" }()
 	os.WriteFile(fourDeckRolePath, []byte("13\n"), 0o644)
-	if role, decks := shadowGetJSON(t, b.URL+"/v1/sc5000/shadow"); role != "" || len(decks) != 0 {
+	if role, decks := shadowGetJSON(t, b.URL+"/v1/enginex/shadow"); role != "" || len(decks) != 0 {
 		t.Fatalf("shadow without the 4-deck layout: %q %+v", role, decks)
 	}
 	os.MkdirAll(filepath.Join(dirB, "ui"), 0o755)
@@ -142,7 +142,7 @@ func TestShadowDeckFromPeer(t *testing.T) {
 	for {
 		bs.shadowPollPeers()
 		// Deck 4 is the peer's too, with nothing loaded: an entry without a file.
-		role, decks := shadowGetJSON(t, b.URL+"/v1/sc5000/shadow")
+		role, decks := shadowGetJSON(t, b.URL+"/v1/enginex/shadow")
 		if role != "13" || len(decks) != 2 || decks[0].Deck != 2 || !decks[0].Playing || decks[0].Pitch != 2 || decks[0].PositionMS < 1000 || decks[1].Deck != 4 || decks[1].Path != "" {
 			t.Fatalf("shadow: %q %+v", role, decks)
 		}
@@ -186,7 +186,7 @@ func TestShadowPerfFromPeer(t *testing.T) {
 	defer a.Close()
 	vol := filepath.Base(root)
 	body := `[{"deck":2,"net":"net://u/` + vol + `/Contents/it's.mp3","playing":true},{"deck":4,"net":"net://u/` + vol + `/Contents/raw.mp3"}]`
-	if resp, err := http.Post(a.URL+"/v1/sc5000/decks", "application/json", strings.NewReader(body)); err != nil || resp.StatusCode != 200 {
+	if resp, err := http.Post(a.URL+"/v1/enginex/decks", "application/json", strings.NewReader(body)); err != nil || resp.StatusCode != 200 {
 		t.Fatalf("post: %v %v", resp, err)
 	}
 	as.shadow.mu.Lock()
@@ -272,7 +272,7 @@ func TestShadowSharedUSBAndEngineCache(t *testing.T) {
 	post := func() deckState {
 		t.Helper()
 		w := httptest.NewRecorder()
-		a.decksPost(w, httptest.NewRequest("POST", "/v1/sc5000/decks", strings.NewReader(`[{"deck":1,"net":"net://uuid/USB/track.flac"}]`)))
+		a.decksPost(w, httptest.NewRequest("POST", "/v1/enginex/decks", strings.NewReader(`[{"deck":1,"net":"net://uuid/USB/track.flac"}]`)))
 		if w.Code != http.StatusOK {
 			t.Fatal(w.Code)
 		}
@@ -289,7 +289,7 @@ func TestShadowSharedUSBAndEngineCache(t *testing.T) {
 		t.Fatalf("missing source: %+v", d)
 	}
 	b.shadow.peerDecks[1] = peerDeck{deckState: d, ip: "127.0.0.1", at: time.Now()}
-	role, got := shadowGetJSON(t, server.URL+"/v1/sc5000/shadow")
+	role, got := shadowGetJSON(t, server.URL+"/v1/enginex/shadow")
 	if role != "24" || len(got) != 1 || got[0].Path != local || got[0].Net != "" {
 		t.Fatalf("local source: %s %+v", role, got)
 	}
@@ -325,16 +325,16 @@ func TestShadowDeckFromCDJ(t *testing.T) {
 	os.WriteFile(fourDeckRolePath, []byte("24\n"), 0o644)
 	uiPost(t, srv.URL, "fourDeckWaveform=1&shadowMode=engine")
 	dev := `{"address":"127.0.0.1","name":"CDJ-3000","number":3,"playing":true,"play_position_ms":5000,"pitch":-1.5,"master":true,"sync":true}`
-	if resp, err := http.Post(srv.URL+"/v1/sc5000/prolink", "application/json", strings.NewReader(dev)); err != nil || resp.StatusCode != 200 {
+	if resp, err := http.Post(srv.URL+"/v1/enginex/prolink", "application/json", strings.NewReader(dev)); err != nil || resp.StatusCode != 200 {
 		t.Fatalf("post device: %v %v", resp, err)
 	}
-	_, decks := shadowGetJSON(t, srv.URL+"/v1/sc5000/shadow")
+	_, decks := shadowGetJSON(t, srv.URL+"/v1/enginex/shadow")
 	if len(decks) != 1 || decks[0].Deck != 3 || !decks[0].Playing || decks[0].Pitch != -1.5 || decks[0].PositionMS < 5000 || decks[0].Path != "" || (decks[0].Master == nil || !*decks[0].Master) || !decks[0].Sync {
 		t.Fatalf("shadow: %+v", decks)
 	}
 	// A CDJ-3000's absolute position (0x0b) wins over the beat-based one.
 	s.shadow.observe(prolink.Device{Number: 3, PacketType: 0x0b, PrecisePosition: true, PlayPositionMS: 9000})
-	if _, decks = shadowGetJSON(t, srv.URL+"/v1/sc5000/shadow"); len(decks) != 1 || decks[0].PositionMS < 9000 || decks[0].PositionMS > 9500 {
+	if _, decks = shadowGetJSON(t, srv.URL+"/v1/enginex/shadow"); len(decks) != 1 || decks[0].PositionMS < 9000 || decks[0].PositionMS > 9500 {
 		t.Fatalf("precise: %+v", decks)
 	}
 	// CUE: the status packet says paused; the position packets that keep coming
@@ -343,10 +343,10 @@ func TestShadowDeckFromCDJ(t *testing.T) {
 		`{"address":"127.0.0.1","name":"CDJ-3000","number":3,"packet_type":10,"playing":false,"play_position_ms":52}`,
 		`{"address":"127.0.0.1","name":"CDJ-3000","number":3,"packet_type":11,"play_position_ms":52}`,
 	} {
-		http.Post(srv.URL+"/v1/sc5000/prolink", "application/json", strings.NewReader(d))
+		http.Post(srv.URL+"/v1/enginex/prolink", "application/json", strings.NewReader(d))
 	}
 	s.shadow.observe(prolink.Device{Number: 3, PacketType: 0x0b, PrecisePosition: true, PlayPositionMS: 52})
-	if _, decks = shadowGetJSON(t, srv.URL+"/v1/sc5000/shadow"); len(decks) != 1 || decks[0].Playing || decks[0].PositionMS != 52 {
+	if _, decks = shadowGetJSON(t, srv.URL+"/v1/enginex/shadow"); len(decks) != 1 || decks[0].Playing || decks[0].PositionMS != 52 {
 		t.Fatalf("cue: %+v", decks)
 	}
 }
@@ -481,7 +481,7 @@ func TestShadowDeckFromStreamedRow(t *testing.T) {
 	defer srv.Close()
 	id := s.tidal.addTrack(trackRef{track: providers.Track{ID: "1", Provider: localProvider}, file: file, drive: drive})
 	body := fmt.Sprintf(`[{"deck":1,"net":"streaming://TIDAL/Track/%d"},{"deck":3,"net":"streaming://TIDAL/Track/999999"}]`, id)
-	if resp, err := http.Post(srv.URL+"/v1/sc5000/decks", "application/json", strings.NewReader(body)); err != nil || resp.StatusCode != 200 {
+	if resp, err := http.Post(srv.URL+"/v1/enginex/decks", "application/json", strings.NewReader(body)); err != nil || resp.StatusCode != 200 {
 		t.Fatalf("post: %v %v", resp, err)
 	}
 	var peer struct{ Decks []deckState }
@@ -521,7 +521,7 @@ func TestShadowStreamingDownloadFromStmDB(t *testing.T) {
 	srv := httptest.NewServer(s)
 	defer srv.Close()
 	body := `[{"deck":3,"net":"streaming://TIDAL/Track/37"},{"deck":1,"net":"streaming://TIDAL/Track/38"}]`
-	if resp, err := http.Post(srv.URL+"/v1/sc5000/decks", "application/json", strings.NewReader(body)); err != nil || resp.StatusCode != 200 {
+	if resp, err := http.Post(srv.URL+"/v1/enginex/decks", "application/json", strings.NewReader(body)); err != nil || resp.StatusCode != 200 {
 		t.Fatalf("post: %v %v", resp, err)
 	}
 	s.shadow.mu.Lock()
@@ -546,7 +546,7 @@ func TestShadowPositionFromSampleTime(t *testing.T) {
 	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
 	sampled := time.Now().UnixMilli() - 1000
 	w := httptest.NewRecorder()
-	s.decksPost(w, httptest.NewRequest("POST", "/v1/sc5000/decks", strings.NewReader(fmt.Sprintf(`[{"deck":1,"playing":true,"positionMs":5000,"at":%d},{"deck":3,"playing":true,"positionMs":5000,"at":1}]`, sampled))))
+	s.decksPost(w, httptest.NewRequest("POST", "/v1/enginex/decks", strings.NewReader(fmt.Sprintf(`[{"deck":1,"playing":true,"positionMs":5000,"at":%d},{"deck":3,"playing":true,"positionMs":5000,"at":1}]`, sampled))))
 	if w.Code != http.StatusOK {
 		t.Fatal(w.Code)
 	}
@@ -602,7 +602,7 @@ func TestShadowUDPPushWakesLongPoll(t *testing.T) {
 	uiPost(t, b.URL, "fourDeckWaveform=1&shadowMode=engine")
 
 	var first struct{ Ver uint64 }
-	resp, err := http.Get(b.URL + "/v1/sc5000/shadow")
+	resp, err := http.Get(b.URL + "/v1/enginex/shadow")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -611,7 +611,7 @@ func TestShadowUDPPushWakesLongPoll(t *testing.T) {
 
 	// Nothing new: the long poll holds for its 120 ms.
 	start := time.Now()
-	shadowGetJSON(t, fmt.Sprintf("%s/v1/sc5000/shadow?ver=%d", b.URL, first.Ver))
+	shadowGetJSON(t, fmt.Sprintf("%s/v1/enginex/shadow?ver=%d", b.URL, first.Ver))
 	if d := time.Since(start); d < 100*time.Millisecond || d > time.Second {
 		t.Fatalf("idle long poll returned after %v, want ~120 ms", d)
 	}
@@ -623,12 +623,12 @@ func TestShadowUDPPushWakesLongPoll(t *testing.T) {
 	done := make(chan result, 1)
 	go func() {
 		start := time.Now()
-		_, decks := shadowGetJSON(t, fmt.Sprintf("%s/v1/sc5000/shadow?ver=%d", b.URL, first.Ver))
+		_, decks := shadowGetJSON(t, fmt.Sprintf("%s/v1/enginex/shadow?ver=%d", b.URL, first.Ver))
 		done <- result{decks, time.Since(start)}
 	}()
 	time.Sleep(30 * time.Millisecond) // the poll is waiting
 	w := httptest.NewRecorder()
-	a.decksPost(w, httptest.NewRequest("POST", "/v1/sc5000/decks", strings.NewReader(fmt.Sprintf(`[{"deck":2,"playing":true,"positionMs":4000,"jumps":3,"at":%d,"cuePos":3792.6,"cues":[{"i":2,"p":11910836.7,"n":"Drop","c":"#00ff00"}]}]`, time.Now().UnixMilli()))))
+	a.decksPost(w, httptest.NewRequest("POST", "/v1/enginex/decks", strings.NewReader(fmt.Sprintf(`[{"deck":2,"playing":true,"positionMs":4000,"jumps":3,"at":%d,"cuePos":3792.6,"cues":[{"i":2,"p":11910836.7,"n":"Drop","c":"#00ff00"}]}]`, time.Now().UnixMilli()))))
 	buf := make([]byte, 64<<10)
 	recv.SetReadDeadline(time.Now().Add(time.Second))
 	n, _, err := recv.ReadFromUDP(buf)
@@ -662,7 +662,7 @@ func TestShadowUDPPushWakesLongPoll(t *testing.T) {
 
 	// An older post (the QML's XHRs race) neither replaces nor gets pushed.
 	w = httptest.NewRecorder()
-	a.decksPost(w, httptest.NewRequest("POST", "/v1/sc5000/decks", strings.NewReader(fmt.Sprintf(`[{"deck":2,"playing":false,"positionMs":1,"at":%d}]`, time.Now().UnixMilli()-500))))
+	a.decksPost(w, httptest.NewRequest("POST", "/v1/enginex/decks", strings.NewReader(fmt.Sprintf(`[{"deck":2,"playing":false,"positionMs":1,"at":%d}]`, time.Now().UnixMilli()-500))))
 	a.shadow.mu.Lock()
 	defer a.shadow.mu.Unlock()
 	if a.shadow.own[0].PositionMS != 4000 {
@@ -799,7 +799,7 @@ func TestShadowDebugTelemetry(t *testing.T) {
 	defer func() { shadowDebugLog, shadowDebugMax = oldLog, oldMax }()
 	s := New(Config{UIDir: filepath.Join(dir, "ui"), StateDir: t.TempDir()}, nil)
 	post := `[{"deck":1,"playing":true,"positionMs":5000,"pitch":11.1111,"bpm":126,"currentBpm":140,"sync":true}]`
-	s.decksPost(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/sc5000/decks", strings.NewReader(post)))
+	s.decksPost(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/enginex/decks", strings.NewReader(post)))
 	if _, err := os.Stat(shadowDebugLog); err == nil || len(s.shadow.dbg.lines()) != 0 {
 		t.Fatal("telemetry written while off")
 	}
@@ -816,18 +816,18 @@ func TestShadowDebugTelemetry(t *testing.T) {
 		t.Fatal("debug_telemetry=1 not read")
 	}
 	for range 5 {
-		s.decksPost(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/sc5000/decks", strings.NewReader(post)))
+		s.decksPost(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/enginex/decks", strings.NewReader(post)))
 	}
 	s.shadow.mu.Lock()
 	s.shadow.takePeer("192.0.2.9", []deckState{{Deck: 2, Seq: 1, Playing: true}}, time.Now())
 	s.shadow.mu.Unlock()
 	w := httptest.NewRecorder()
-	s.shadowDebugPost(w, httptest.NewRequest("POST", "/v1/sc5000/debug/shadow", strings.NewReader(`[{"deck":2,"act":"pll","drift":40,"pll":3.2,"t":1}]`)))
+	s.shadowDebugPost(w, httptest.NewRequest("POST", "/v1/enginex/debug/shadow", strings.NewReader(`[{"deck":2,"act":"pll","drift":40,"pll":3.2,"t":1}]`)))
 	if w.Code != 200 {
 		t.Fatal(w.Code, w.Body)
 	}
 	w = httptest.NewRecorder()
-	s.shadowDebugGet(w, httptest.NewRequest("GET", "/v1/sc5000/debug/shadow", nil))
+	s.shadowDebugGet(w, httptest.NewRequest("GET", "/v1/enginex/debug/shadow", nil))
 	var got struct {
 		Enabled   bool
 		PeerDecks []struct {

@@ -67,7 +67,7 @@ func TestProlinkDiag(t *testing.T) {
 	if rec := get("/api/prolink/diag", "192.0.2.9:1", ""); rec.Code != 401 {
 		t.Fatalf("console route without login: %d", rec.Code)
 	}
-	if rec := get("/v1/sc5000/prolink/diag", "192.0.2.9:1", ""); rec.Code != 403 {
+	if rec := get("/v1/enginex/prolink/diag", "192.0.2.9:1", ""); rec.Code != 403 {
 		t.Fatalf("gateway route from the LAN: %d", rec.Code)
 	}
 
@@ -101,7 +101,7 @@ func TestProlinkDiag(t *testing.T) {
 		t.Errorf("missing checks %v in %+v", want, d.Checks)
 	}
 
-	rec = get("/v1/sc5000/prolink/diag?format=text", "127.0.0.1:1", "")
+	rec = get("/v1/enginex/prolink/diag?format=text", "127.0.0.1:1", "")
 	body := rec.Body.String()
 	if rec.Code != 200 || !strings.Contains(body, "### EngineX OS Pro DJ Link diagnostic") || !strings.Contains(body, "| 3 | CDJ-3000 | 192.0.2.33 |") {
 		t.Fatalf("text report %d:\n%s", rec.Code, body)

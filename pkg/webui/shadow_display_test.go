@@ -96,11 +96,11 @@ func TestCDJDisplayCachedANLZWithoutAudio(t *testing.T) {
 		}
 		return w.Body.Bytes()
 	}
-	_, decks := shadowGetJSON(t, srv.URL+"/v1/sc5000/shadow")
+	_, decks := shadowGetJSON(t, srv.URL+"/v1/enginex/shadow")
 	if len(decks) != 1 || decks[0].MetadataOnly || decks[0].Path != "" || decks[0].Net != "" || decks[0].Deck != 1 {
 		t.Fatalf("CDJ display state: %+v", decks)
 	}
-	get("/v1/sc5000/shadow", 200)
+	get("/v1/enginex/shadow", 200)
 	if wait := s.shadow.pollWait(false, time.Now()); wait != 120*time.Millisecond {
 		t.Fatalf("cached CDJ positions must retain 120 ms polls, got %v", wait)
 	}
@@ -113,14 +113,14 @@ func TestCDJDisplayCachedANLZWithoutAudio(t *testing.T) {
 		Cues          []enginedb.DisplayCue
 		WaveformTiles []string
 	}
-	if err := json.Unmarshal(get("/v1/sc5000/shadow/display"+q, 200), &meta); err != nil {
+	if err := json.Unmarshal(get("/v1/enginex/shadow/display"+q, 200), &meta); err != nil {
 		t.Fatal(err)
 	}
 	if meta.Title != dev.Title || !meta.Detail || meta.DurationMS != 1500 || len(meta.Beats) != 4 || len(meta.Cues) < 4 || len(meta.WaveformTiles) != 1 {
 		t.Fatalf("ANLZ display asset: %+v", meta)
 	}
 	for _, suffix := range []string{"", "&overview=1", "&tile=0", "&tile=0&low=ff0000&mid=00ff00&high=0000ff&rgb=1&saturation=1.612&brightAmp=0.473&brightGain=2.405&brightFloor=0.197"} {
-		if _, err := png.Decode(bytes.NewReader(get("/v1/sc5000/shadow/waveform.png"+q+suffix, 200))); err != nil {
+		if _, err := png.Decode(bytes.NewReader(get("/v1/enginex/shadow/waveform.png"+q+suffix, 200))); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -138,7 +138,7 @@ func TestCDJDisplayCachedANLZWithoutAudio(t *testing.T) {
 	prolinkMu.Lock()
 	postedDevices[s][deviceKey(dev)] = dev
 	prolinkMu.Unlock()
-	get("/v1/sc5000/shadow/display"+q, 404)
+	get("/v1/enginex/shadow/display"+q, 404)
 }
 
 func TestCDJDisplayWithoutANLZIsMetadataOnly(t *testing.T) {
@@ -388,7 +388,7 @@ func TestShadowPathBySource(t *testing.T) {
 	}
 	poll := func() (bool, []deckState) {
 		t.Helper()
-		resp, err := http.Get(srv.URL + "/v1/sc5000/shadow")
+		resp, err := http.Get(srv.URL + "/v1/enginex/shadow")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -407,7 +407,7 @@ func TestShadowPathBySource(t *testing.T) {
 	}
 	asset := func(d deckState, key string) int {
 		t.Helper()
-		resp, err := http.Get(srv.URL + "/v1/sc5000/shadow/display?deck=" + strconv.Itoa(d.Deck) + "&key=" + url.QueryEscape(key))
+		resp, err := http.Get(srv.URL + "/v1/enginex/shadow/display?deck=" + strconv.Itoa(d.Deck) + "&key=" + url.QueryEscape(key))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -550,7 +550,7 @@ func TestDisplayEndpointsCheckRoleKeyAndExpiry(t *testing.T) {
 		}
 		return r
 	}
-	resp := get("/v1/sc5000/shadow")
+	resp := get("/v1/enginex/shadow")
 	var state struct{ DisplayOnly bool }
 	json.NewDecoder(resp.Body).Decode(&state)
 	resp.Body.Close()
@@ -564,7 +564,7 @@ func TestDisplayEndpointsCheckRoleKeyAndExpiry(t *testing.T) {
 	p.MetadataOnly = true
 	s.shadow.peerDecks[2] = p
 	s.shadow.mu.Unlock()
-	resp = get("/v1/sc5000/shadow")
+	resp = get("/v1/enginex/shadow")
 	resp.Body.Close()
 	if resp.Header.Get("X-Shadow-State") != "" {
 		t.Fatal("CDJ continuous state must not be skipped by peer version")
@@ -573,7 +573,7 @@ func TestDisplayEndpointsCheckRoleKeyAndExpiry(t *testing.T) {
 	p.MetadataOnly = false
 	s.shadow.peerDecks[2] = p
 	s.shadow.mu.Unlock()
-	resp = get("/v1/sc5000/shadow/display?deck=2&key=" + displayTrackKey(p))
+	resp = get("/v1/enginex/shadow/display?deck=2&key=" + displayTrackKey(p))
 	var meta struct{ Cues []enginedb.DisplayCue }
 	json.NewDecoder(resp.Body).Decode(&meta)
 	resp.Body.Close()
@@ -581,7 +581,7 @@ func TestDisplayEndpointsCheckRoleKeyAndExpiry(t *testing.T) {
 		t.Fatalf("live cues: %d %+v", resp.StatusCode, meta.Cues)
 	}
 	for _, query := range []string{"deck=1&key=track-a", "deck=2&key=wrong", "deck=9&key=track-a"} {
-		resp = get("/v1/sc5000/shadow/waveform.png?" + query)
+		resp = get("/v1/enginex/shadow/waveform.png?" + query)
 		resp.Body.Close()
 		if resp.StatusCode != 404 {
 			t.Fatalf("wrong identity accepted: %s", query)
@@ -591,7 +591,7 @@ func TestDisplayEndpointsCheckRoleKeyAndExpiry(t *testing.T) {
 	p.at = time.Now().Add(-3 * time.Second)
 	s.shadow.peerDecks[2] = p
 	s.shadow.mu.Unlock()
-	resp = get("/v1/sc5000/shadow/waveform.png?deck=2&key=" + displayTrackKey(p))
+	resp = get("/v1/enginex/shadow/waveform.png?deck=2&key=" + displayTrackKey(p))
 	resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Fatal("jitter discarded cached display")
@@ -599,7 +599,7 @@ func TestDisplayEndpointsCheckRoleKeyAndExpiry(t *testing.T) {
 	s.shadow.mu.Lock()
 	s.shadow.takePeer(p.ip, nil, time.Now())
 	s.shadow.mu.Unlock()
-	resp = get("/v1/sc5000/shadow/waveform.png?deck=2&key=" + displayTrackKey(p))
+	resp = get("/v1/enginex/shadow/waveform.png?deck=2&key=" + displayTrackKey(p))
 	resp.Body.Close()
 	if resp.StatusCode != 404 {
 		t.Fatal("explicit goodbye kept the display")
@@ -607,7 +607,7 @@ func TestDisplayEndpointsCheckRoleKeyAndExpiry(t *testing.T) {
 	if _, v := uiPost(t, srv.URL, "shadowMode=engine"); v.ShadowMode != "engine" {
 		t.Fatal("rollback setting lost")
 	}
-	resp = get("/v1/sc5000/shadow")
+	resp = get("/v1/enginex/shadow")
 	if resp.Header.Get("X-Shadow-State") != "" {
 		t.Fatal("legacy responses must always be applied")
 	}
@@ -727,7 +727,7 @@ func TestDisplayTilesAndSourceIdentity(t *testing.T) {
 	key := displayTrackKey(p)
 	q := "?deck=3&key=" + key
 	for tile, wantWidth := range []int{2048, 2048, 3} {
-		r, err := http.Get(srv.URL + "/v1/sc5000/shadow/waveform.png" + q + "&tile=" + strconv.Itoa(tile))
+		r, err := http.Get(srv.URL + "/v1/enginex/shadow/waveform.png" + q + "&tile=" + strconv.Itoa(tile))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -743,7 +743,7 @@ func TestDisplayTilesAndSourceIdentity(t *testing.T) {
 	// Combining overview and tile must not poison the detailed tile cache.
 	palette := "&low=ff1428&mid=00e632&high=0078ff&rgb=1&saturation=1.612&brightAmp=0.473&brightGain=2.405&brightFloor=0.197"
 	for _, extra := range []string{"&overview=1", ""} {
-		r, err := http.Get(srv.URL + "/v1/sc5000/shadow/waveform.png" + q + "&tile=2" + palette + extra)
+		r, err := http.Get(srv.URL + "/v1/enginex/shadow/waveform.png" + q + "&tile=2" + palette + extra)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -756,7 +756,7 @@ func TestDisplayTilesAndSourceIdentity(t *testing.T) {
 			t.Fatalf("styled tile cache dimensions: %v", im.Bounds())
 		}
 	}
-	r, err := http.Get(srv.URL + "/v1/sc5000/shadow/display" + q)
+	r, err := http.Get(srv.URL + "/v1/enginex/shadow/display" + q)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -897,7 +897,7 @@ func TestDisplayKeyStaysStableUntilConfirmedTrackReload(t *testing.T) {
 		t.Helper()
 		body, _ := json.Marshal([]deckState{{Deck: 1, Net: net}})
 		w := httptest.NewRecorder()
-		s.decksPost(w, httptest.NewRequest("POST", "/v1/sc5000/decks", bytes.NewReader(body)))
+		s.decksPost(w, httptest.NewRequest("POST", "/v1/enginex/decks", bytes.NewReader(body)))
 		if w.Code != 200 {
 			t.Fatal(w.Code)
 		}
@@ -1271,11 +1271,11 @@ func consoleLineHTTPServer(t *testing.T) (*Server, string) {
 
 func TestConsoleLineStateClearedWhenParameterMissing(t *testing.T) {
 	_, base := consoleLineHTTPServer(t)
-	_, decks := shadowGetJSON(t, base+"/v1/sc5000/shadow?line=1")
+	_, decks := shadowGetJSON(t, base+"/v1/enginex/shadow?line=1")
 	if len(decks) != 1 || decks[0].Deck != 1 || !decks[0].LineIn {
 		t.Fatalf("Line channel 1: %+v", decks)
 	}
-	_, decks = shadowGetJSON(t, base+"/v1/sc5000/shadow")
+	_, decks = shadowGetJSON(t, base+"/v1/enginex/shadow")
 	if len(decks) != 1 || decks[0].Deck != 4 || decks[0].LineIn {
 		t.Fatalf("switch back to Engine must restore default slot: %+v", decks)
 	}
@@ -1285,13 +1285,13 @@ func TestConsoleLineCDJAssetsAllChannels(t *testing.T) {
 	_, base := consoleLineHTTPServer(t)
 	for channel := 1; channel <= 4; channel++ {
 		t.Run(strconv.Itoa(channel), func(t *testing.T) {
-			_, decks := shadowGetJSON(t, base+"/v1/sc5000/shadow?line="+strconv.Itoa(channel))
+			_, decks := shadowGetJSON(t, base+"/v1/enginex/shadow?line="+strconv.Itoa(channel))
 			if len(decks) != 1 || decks[0].Deck != channel || !decks[0].LineIn || decks[0].MetadataOnly {
 				t.Fatalf("Line channel %d: %+v", channel, decks)
 			}
 			q := "?deck=" + strconv.Itoa(channel) + "&key=" + url.QueryEscape(decks[0].Key)
 			for _, route := range []string{"display", "waveform.png"} {
-				resp, err := http.Get(base + "/v1/sc5000/shadow/" + route + q)
+				resp, err := http.Get(base + "/v1/enginex/shadow/" + route + q)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -1319,7 +1319,7 @@ func TestConsoleLineCDJInAutoMode(t *testing.T) {
 			s.shadow.files["peer:sc-track"] = audio
 			s.shadow.peerDecks = map[int]peerDeck{3: {deckState: deckState{Deck: 3, Key: "sc-track"}, ip: "192.0.2.1", at: time.Now()}}
 			s.shadow.mu.Unlock()
-			_, decks := shadowGetJSON(t, base+"/v1/sc5000/shadow?line="+strconv.Itoa(channel))
+			_, decks := shadowGetJSON(t, base+"/v1/enginex/shadow?line="+strconv.Itoa(channel))
 			var sc, cdj *deckState
 			for i := range decks {
 				if decks[i].DisplayOnly {
@@ -1343,7 +1343,7 @@ func TestConsoleLineCDJInAutoMode(t *testing.T) {
 			}
 			q := "?deck=" + strconv.Itoa(channel) + "&key=" + url.QueryEscape(cdj.Key)
 			for _, route := range []string{"display", "waveform.png"} {
-				resp, err := http.Get(base + "/v1/sc5000/shadow/" + route + q)
+				resp, err := http.Get(base + "/v1/enginex/shadow/" + route + q)
 				if err != nil {
 					t.Fatal(err)
 				}

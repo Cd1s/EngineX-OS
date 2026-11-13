@@ -18,7 +18,7 @@ func TestBluetoothDefaultStatus(t *testing.T) {
 	s := New(Config{UIDir: uiDir, StateDir: stateDir}, nil)
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v1/sc5000/bluetooth", nil)
+	r := httptest.NewRequest("GET", "/v1/enginex/bluetooth", nil)
 	s.handleBluetooth(w, r)
 
 	if w.Code != http.StatusOK {
@@ -57,7 +57,7 @@ func TestBluetoothSwitchModeAndPersistence(t *testing.T) {
 
 	// 1. Switch to source mode
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("POST", "/v1/sc5000/bluetooth", strings.NewReader(`{"mode":"source"}`))
+	r := httptest.NewRequest("POST", "/v1/enginex/bluetooth", strings.NewReader(`{"mode":"source"}`))
 	r.Header.Set("Content-Type", "application/json")
 	s.handleBluetooth(w, r)
 
@@ -87,7 +87,7 @@ func TestBluetoothSwitchModeAndPersistence(t *testing.T) {
 
 	// 2. Switch back to sink mode and set assignLayer to Layer A
 	w = httptest.NewRecorder()
-	r = httptest.NewRequest("POST", "/v1/sc5000/bluetooth", strings.NewReader(`{"mode":"sink","assignLayer":"Layer A"}`))
+	r = httptest.NewRequest("POST", "/v1/enginex/bluetooth", strings.NewReader(`{"mode":"sink","assignLayer":"Layer A"}`))
 	r.Header.Set("Content-Type", "application/json")
 	s.handleBluetooth(w, r)
 
@@ -110,7 +110,7 @@ func TestBluetoothSwitchModeAndPersistence(t *testing.T) {
 	// 3. Restart simulation: create a new Server instance using the same UIDir
 	s2 := New(Config{UIDir: uiDir, StateDir: stateDir}, nil)
 	w = httptest.NewRecorder()
-	r = httptest.NewRequest("GET", "/v1/sc5000/bluetooth", nil)
+	r = httptest.NewRequest("GET", "/v1/enginex/bluetooth", nil)
 	s2.handleBluetooth(w, r)
 
 	if w.Code != http.StatusOK {
@@ -129,7 +129,7 @@ func TestBluetoothSwitchModeAndPersistence(t *testing.T) {
 
 	// 4. Test query parameters
 	w = httptest.NewRecorder()
-	r = httptest.NewRequest("POST", "/v1/sc5000/bluetooth?mode=source&assignLayer=CH+2", nil)
+	r = httptest.NewRequest("POST", "/v1/enginex/bluetooth?mode=source&assignLayer=CH+2", nil)
 	s2.handleBluetooth(w, r)
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200 OK with query parameters, got %d: %s", w.Code, w.Body.String())
@@ -241,7 +241,7 @@ func TestBluetoothRunnerInjectionAndMocking(t *testing.T) {
 
 	// GET status with mocked devices
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v1/sc5000/bluetooth", nil)
+	r := httptest.NewRequest("GET", "/v1/enginex/bluetooth", nil)
 	s.handleBluetooth(w, r)
 
 	if w.Code != http.StatusOK {
@@ -262,7 +262,7 @@ func TestBluetoothRunnerInjectionAndMocking(t *testing.T) {
 	// POST with stabilize, mode change, and connect MAC
 	w = httptest.NewRecorder()
 	body := `{"stabilize":true,"mode":"source","mac":"11:22:33:44:55:66"}`
-	r = httptest.NewRequest("POST", "/v1/sc5000/bluetooth", strings.NewReader(body))
+	r = httptest.NewRequest("POST", "/v1/enginex/bluetooth", strings.NewReader(body))
 	r.Header.Set("Content-Type", "application/json")
 	s.handleBluetooth(w, r)
 
@@ -290,7 +290,7 @@ func TestBluetoothInvalidParameters(t *testing.T) {
 
 	// Invalid mode
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("POST", "/v1/sc5000/bluetooth", strings.NewReader(`{"mode":"invalid_mode"}`))
+	r := httptest.NewRequest("POST", "/v1/enginex/bluetooth", strings.NewReader(`{"mode":"invalid_mode"}`))
 	s.handleBluetooth(w, r)
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 for invalid mode, got %d", w.Code)
@@ -298,7 +298,7 @@ func TestBluetoothInvalidParameters(t *testing.T) {
 
 	// Invalid assignLayer
 	w = httptest.NewRecorder()
-	r = httptest.NewRequest("POST", "/v1/sc5000/bluetooth", strings.NewReader(`{"assignLayer":"CH 5"}`))
+	r = httptest.NewRequest("POST", "/v1/enginex/bluetooth", strings.NewReader(`{"assignLayer":"CH 5"}`))
 	s.handleBluetooth(w, r)
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 for invalid assignLayer, got %d", w.Code)
@@ -306,7 +306,7 @@ func TestBluetoothInvalidParameters(t *testing.T) {
 
 	// Invalid MAC
 	w = httptest.NewRecorder()
-	r = httptest.NewRequest("POST", "/v1/sc5000/bluetooth", strings.NewReader(`{"mac":"not-a-valid-mac"}`))
+	r = httptest.NewRequest("POST", "/v1/enginex/bluetooth", strings.NewReader(`{"mac":"not-a-valid-mac"}`))
 	s.handleBluetooth(w, r)
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 for invalid mac, got %d", w.Code)
@@ -314,7 +314,7 @@ func TestBluetoothInvalidParameters(t *testing.T) {
 
 	// Invalid JSON
 	w = httptest.NewRecorder()
-	r = httptest.NewRequest("POST", "/v1/sc5000/bluetooth", strings.NewReader(`{invalid json`))
+	r = httptest.NewRequest("POST", "/v1/enginex/bluetooth", strings.NewReader(`{invalid json`))
 	s.handleBluetooth(w, r)
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 for bad json, got %d", w.Code)
@@ -322,7 +322,7 @@ func TestBluetoothInvalidParameters(t *testing.T) {
 
 	// Method not allowed
 	w = httptest.NewRecorder()
-	r = httptest.NewRequest("DELETE", "/v1/sc5000/bluetooth", nil)
+	r = httptest.NewRequest("DELETE", "/v1/enginex/bluetooth", nil)
 	s.handleBluetooth(w, r)
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Errorf("expected 405 for DELETE, got %d", w.Code)
@@ -343,7 +343,7 @@ func TestBluetoothShowPoweredNo(t *testing.T) {
 	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v1/sc5000/bluetooth", nil)
+	r := httptest.NewRequest("GET", "/v1/enginex/bluetooth", nil)
 	s.handleBluetooth(w, r)
 
 	if w.Code != http.StatusOK {
