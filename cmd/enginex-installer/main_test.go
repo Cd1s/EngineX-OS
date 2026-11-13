@@ -81,7 +81,7 @@ func buildBundle(t *testing.T, prefix, version string, releaseTag ...string) bun
 	if len(releaseTag) > 0 {
 		tag = releaseTag[0]
 	}
-	suite, hook := filepath.Join(dir, "sc5000-suite"), filepath.Join(dir, "libengine-ui-hook.so")
+	suite, hook := filepath.Join(dir, "enginex-suite"), filepath.Join(dir, "libengine-ui-hook.so")
 	os.WriteFile(suite, fakeELF(machine, "suite-"+prefix+"-"+tag), 0o755)
 	os.WriteFile(hook, fakeELF(machine, "hook-"+prefix+"-"+tag), 0o755)
 	ui := filepath.Join(dir, "packs.tar")
@@ -535,7 +535,7 @@ func startSSHDeck(t *testing.T, port int, compatible string) *sshDeck {
 	need(t, "unshare")
 	d := &sshDeck{Port: port, Data: t.TempDir(), compatible: compatible}
 	shim := t.TempDir()
-	for _, n := range []string{"systemctl", "pgrep"} { // boot-activate.sh must not touch the host
+	for _, n := range []string{"systemctl", "pgrep", "reboot"} { // boot-activate.sh and leave.sh must not touch the host
 		os.WriteFile(filepath.Join(shim, n), []byte("#!/bin/sh\nexit 0\n"), 0o755)
 	}
 	_, key, _ := ed25519.GenerateKey(rand.Reader)
@@ -554,7 +554,8 @@ func startSSHDeck(t *testing.T, port int, compatible string) *sshDeck {
 	t.Cleanup(func() { l.Close() })
 	env := append(os.Environ(), "PATH="+shim+":"+os.Getenv("PATH"), "TMPDIR="+d.Data,
 		"ENGINEX_CUSTOM="+filepath.Join(d.Data, "enginex"),
-		"ENGINEX_ALSA_OVERLAY="+filepath.Join(d.Data, "system/var/overlay/lib/alsa/conf.d"))
+		"ENGINEX_ALSA_OVERLAY="+filepath.Join(d.Data, "system/var/overlay/lib/alsa/conf.d"),
+		"ENGINEX_LEAVE_SH="+filepath.Join(d.Data, "run-enginex-leave.sh")) // #234: a test's stand-in for /run/enginex/leave.sh
 	go func() {
 		for {
 			c, err := l.Accept()
@@ -638,7 +639,7 @@ func TestModeAInstallsBundleOverSSH(t *testing.T) {
 		t.Errorf("bundle downloads = %d, want 1", downloads)
 	}
 	custom := filepath.Join(deck.Data, "enginex")
-	if got, want := sha(t, filepath.Join(custom, "bundle/bin/sc5000-suite")), sha(t, b.SuitePath); got != want {
+	if got, want := sha(t, filepath.Join(custom, "bundle/bin/enginex-suite")), sha(t, b.SuitePath); got != want {
 		t.Errorf("installed suite sha %s, want %s", got, want)
 	}
 	if v, _ := os.ReadFile(filepath.Join(custom, "version.txt")); strings.TrimSpace(string(v)) != "5.3.0.2" {
@@ -835,14 +836,14 @@ func checkImage(t *testing.T, img string, suitePath string) {
 	if hdr := sh(t, "dumpe2fs", "-h", img); !strings.Contains(hdr, "az01-data") || !strings.Contains(hdr, "encrypt") {
 		t.Errorf("label/features wrong:\n%s", hdr)
 	}
-	st := sh(t, "debugfs", "-R", "stat /enginex/bundle/bin/sc5000-suite", img)
+	st := sh(t, "debugfs", "-R", "stat /enginex/bundle/bin/enginex-suite", img)
 	for _, want := range []string{"Type: regular", "Mode:  0755", "User:     0   Group:     0"} {
 		if !strings.Contains(st, want) {
 			t.Errorf("suite inode lacks %q:\n%s", want, st)
 		}
 	}
 	out := filepath.Join(t.TempDir(), "suite")
-	sh(t, "debugfs", "-R", "dump /enginex/bundle/bin/sc5000-suite "+out, img)
+	sh(t, "debugfs", "-R", "dump /enginex/bundle/bin/enginex-suite "+out, img)
 	if sha(t, out) != sha(t, suitePath) {
 		t.Error("suite in the image differs from the bundle's")
 	}
@@ -2064,7 +2065,7 @@ func TestUSBUpdateModeFlashesA64MiBDataImage(t *testing.T) {
 		}
 	}
 	out := filepath.Join(t.TempDir(), "suite")
-	sh(t, "debugfs", "-R", "dump /enginex/bundle/bin/sc5000-suite "+out, shim.img)
+	sh(t, "debugfs", "-R", "dump /enginex/bundle/bin/enginex-suite "+out, shim.img)
 	if sha(t, out) != sha(t, b.SuitePath) {
 		t.Error("suite in the image differs from the bundle's")
 	}
@@ -2636,7 +2637,7 @@ func TestGen2SameVersionReReleaseReplacesStaleWorkDirPackage(t *testing.T) {
 	if got, _ := os.ReadFile(filepath.Join(custom, "bundle/release-tag")); strings.TrimSpace(string(got)) != "v5.3.0.4-r3" {
 		t.Fatalf("installed bundle/release-tag = %q, want v5.3.0.4-r3", got)
 	}
-	if got, want := sha(t, filepath.Join(custom, "bundle/bin/sc5000-suite")), sha(t, r3Pkg.SuitePath); got != want {
+	if got, want := sha(t, filepath.Join(custom, "bundle/bin/enginex-suite")), sha(t, r3Pkg.SuitePath); got != want {
 		t.Fatalf("installed suite sha %s, want r3 suite %s", got, want)
 	}
 

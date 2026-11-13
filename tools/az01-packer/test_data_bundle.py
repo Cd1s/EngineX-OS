@@ -37,7 +37,7 @@ class DataBundleTest(unittest.TestCase):
             shim.chmod(0o755)
         self.env = {'PATH': f"{shim_bin}:{os.environ.get('PATH', '/usr/bin:/bin')}",
                     'HOST_COMMAND_LOG': str(self.host_commands)}
-        self.suite = self.tmp / 'sc5000-suite'
+        self.suite = self.tmp / 'enginex-suite'
         self.suite_bytes = fake_elf(bdb.EM_ARM, b'suite')
         self.suite.write_bytes(self.suite_bytes)
         self.hook = self.tmp / 'libengine-ui-hook.so'
@@ -82,10 +82,10 @@ class DataBundleTest(unittest.TestCase):
                          f"{hashlib.sha256(bundle.read_bytes()).hexdigest()}  {bundle.name}\n")
         src = self.extract(r)
         self.assertEqual((src / 'version.txt').read_text(), '5.3.0.1.1\n')
-        self.assertEqual((src / 'bin/sc5000-suite').read_bytes(), self.suite_bytes)
+        self.assertEqual((src / 'bin/enginex-suite').read_bytes(), self.suite_bytes)
         self.assertEqual((src / 'lib/libengine-ui-hook.so').read_bytes(), self.hook_bytes)
         for applet in bdb.APPLETS:
-            self.assertIn(f'sc5000-suite" {applet} ', (src / 'bin' / applet).read_text())
+            self.assertIn(f'enginex-suite" {applet} ', (src / 'bin' / applet).read_text())
             self.assertTrue((src / 'bin' / applet).stat().st_mode & 0o100)
 
         self.assertTrue((src / 'boot-activate.sh').exists())
@@ -98,7 +98,7 @@ class DataBundleTest(unittest.TestCase):
                       (src / 'boot-activate.sh').read_text())
         self.assertIn('ExecStartPre=/bin/mkdir -p -m 0700 /tmp/enginex-engine-home',
                       (src / 'boot-activate.sh').read_text())
-        self.assertIn('EnvironmentFile=-/data/sc5000-custom/ui-scale.env',
+        self.assertIn('EnvironmentFile=-/data/enginex/ui-scale.env',
                       (src / 'boot-activate.sh').read_text())
         self.assertIn('enginex-stream-sync.service',
                       (src / 'boot-activate.sh').read_text())
@@ -135,7 +135,7 @@ class DataBundleTest(unittest.TestCase):
                     self.assertEqual(wrapper.mode, 0o755)
                     self.assertEqual(bundle.extractfile(wrapper).read(),
                                      bdb.WRAPPER.format('stems-processor').encode())
-                    self.assertEqual(bundle.extractfile(f'{top}/bin/sc5000-suite').read(), self.suite_bytes)
+                    self.assertEqual(bundle.extractfile(f'{top}/bin/enginex-suite').read(), self.suite_bytes)
 
     def test_gen2_img_wraps_the_bundle_and_installs_with_unlock(self):
         r = self.build()
@@ -163,7 +163,7 @@ class DataBundleTest(unittest.TestCase):
         # a link of that name is not followed.
         stale = dest / '.img-install.AbCdEf'
         (stale / 'SCLIVE4-old/bin').mkdir(parents=True)
-        (stale / 'SCLIVE4-old/bin/sc5000-suite').write_bytes(b'x' * 4096)
+        (stale / 'SCLIVE4-old/bin/enginex-suite').write_bytes(b'x' * 4096)
         keep = self.tmp / 'not-ours'
         keep.mkdir()
         (keep / 'file').write_text('stays')
@@ -192,11 +192,11 @@ class DataBundleTest(unittest.TestCase):
         self.assertTrue((src / 'lib/libedisksd-hook.so').stat().st_mode & 0o100)
         self.assertIn('libedisksd-hook.so', (src / 'SHA256SUMS').read_text())
         boot = (src / 'boot-activate.sh').read_text()
-        self.assertIn('edisksd.service.d/99-sc5000.conf', boot)
+        self.assertIn('edisksd.service.d/99-enginex.conf', boot)
         self.assertIn('systemctl restart edisksd.service', boot)  # blocking, only when the drop-in changed
         self.assertIn('cmp -s', boot)
         self.assertIn('--mount-path "$m"', boot)
-        self.assertIn('edisksd.service.d/99-sc5000.conf', (src / 'uninstall.sh').read_text())
+        self.assertIn('edisksd.service.d/99-enginex.conf', (src / 'uninstall.sh').read_text())
         edisksd.write_bytes(fake_elf(bdb.EM_AARCH64, b'edisksd'))
         with self.assertRaises(SystemExit):
             self.build('out-wrong-arch')
@@ -391,7 +391,7 @@ class DataBundleTest(unittest.TestCase):
         (dest / 'ui').mkdir()
         (dest / 'ui/safe-mode').write_text('1')
         self.sh(src / 'install.sh', dest, alsa_dest=alsa_dest)
-        self.assertEqual((dest / 'bundle/bin/sc5000-suite').read_bytes(), self.suite_bytes)
+        self.assertEqual((dest / 'bundle/bin/enginex-suite').read_bytes(), self.suite_bytes)
         self.assertEqual((dest / 'ui/packs/a/Main.qml').read_bytes(), b'Item {}')
         self.assertTrue((dest / 'ui/icons/x.svg').exists())
         self.assertFalse((dest / 'ui/safe-mode').exists())
@@ -468,7 +468,7 @@ class DataBundleTest(unittest.TestCase):
 
     def test_damaged_bundle_installs_nothing(self):
         src = self.extract(self.build())
-        (src / 'bin/sc5000-suite').write_bytes(b'\x7fELF tampered')
+        (src / 'bin/enginex-suite').write_bytes(b'\x7fELF tampered')
         dest = self.tmp / 'custom'
         r = self.sh(src / 'install.sh', dest, alsa_dest=self.tmp / 'alsa', check=False)
         self.assertNotEqual(r.returncode, 0)
@@ -506,7 +506,7 @@ class DataBundleTest(unittest.TestCase):
         self.assertIn('regular', hook_out)
         self.assertIn('0644', hook_out)
 
-        suite_out = subprocess.run(['debugfs', '-R', 'stat /enginex/bundle/bin/sc5000-suite', str(img)], capture_output=True, text=True).stdout
+        suite_out = subprocess.run(['debugfs', '-R', 'stat /enginex/bundle/bin/enginex-suite', str(img)], capture_output=True, text=True).stdout
         self.assertIn('0755', suite_out)
         # #103: the old path is a symlink, and the ALSA hook's old-path library resolves through it.
         for rel, kind in (('/sc5000-custom', 'symlink'), ('/sc5000-custom/bundle/lib/libengine-ui-hook.so', 'regular')):
@@ -815,6 +815,116 @@ exec REAL "$@"
         self.assertEqual(conf.read_text(), '[TimeDateSettings]\nTZEnvVar=UTC\n')
         self.assertFalse(marker.exists())
 
+    def test_234_boot_activate_over_an_older_releases_run(self):
+        """#234: an update in place from a release before 5.3.0.5 (its updater ends its daemons by name
+        and runs this boot-activate.sh; its installer runs it over SSH) leaves that release's units,
+        drop-ins and runtime files in /run. Activation takes them out: every daemon has one unit, under
+        its new name, the old deemixd unit is stopped and forgotten, and nothing outside /run moves."""
+        src = self.extract(self.build())
+        root = self.tmp / 'inplace'
+        dest = root / 'enginex'
+        res = subprocess.run(['sh', str(src / 'install.sh')], env={**self.env, 'ENGINEX_CUSTOM': str(dest),
+                             'ENGINEX_ALSA_OVERLAY': str(root / 'alsa')}, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        run_dir = self.tmp / 'run-inplace'
+        units = run_dir / 'systemd/system'
+        r4 = {  # what r4's boot-activate.sh left loaded
+            'systemd/system/enginex-sc5000-deemixd.service': '[Service]\nExecStart=/data/enginex/bundle/bin/sc5000-deemixd\n',
+            'systemd/system/enginex-stream-sync.service': '[Service]\nExecStart=old\n',
+            'systemd/system/engine.service.d/99-sc5000.conf': '[Service]\nEnvironment=SC5000_UI_HOOK=x\n',
+            'systemd/system/edisksd.service.d/99-sc5000.conf': '[Service]\nEnvironment=LD_PRELOAD=x\n',
+            'systemd/system/foreign.service': 'not ours\n',
+            'sc5000-engine-script': '#!/bin/sh\n', 'sc5000-assignments/role': '13\n', 'sc5000/version.txt': '5.3.0.4\n',
+            'sc5000-boot-converted': '', 'sc5000-tz-newer': '',
+        }
+        for name, text in r4.items():
+            (run_dir / name).parent.mkdir(parents=True, exist_ok=True)
+            (run_dir / name).write_text(text)
+        ba = self.tmp / 'boot-activate-inplace.sh'
+        ba.write_text((src / 'boot-activate.sh').read_text().replace('/run/', str(run_dir) + '/')
+                      .replace('/usr/Engine/Scripts/engine', str(self.tmp / 'no-engine-script')))
+        env = dict(self.env, ENGINEX_CUSTOM=str(dest), ENGINEX_TIMESTAMP_FILE=str(self.tmp / 'no-ts'),
+                   ENGINEX_CONFIG_DIR=str(root / '.config'), ENGINEX_PID1_COMM=str(self.pid1_systemd()),
+                   ENGINEX_STREAMING_ACCOUNTS=str(self.tmp / 'StreamingAccounts.json'))
+        res = subprocess.run(['sh', str(ba)], env=env, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        cmds = self.host_commands.read_text()
+        self.host_commands.write_text('')
+        for gone in ('systemd/system/enginex-sc5000-deemixd.service', 'systemd/system/engine.service.d/99-sc5000.conf',
+                     'systemd/system/edisksd.service.d/99-sc5000.conf', 'sc5000-engine-script', 'sc5000-assignments',
+                     'sc5000', 'sc5000-boot-converted', 'sc5000-tz-newer'):
+            self.assertFalse(os.path.lexists(run_dir / gone), gone)
+        self.assertEqual(sorted(p.name for p in units.glob('enginex-*.service')),
+                         ['enginex-deemixd.service', 'enginex-rb-bridge.service', 'enginex-stream-sync.service'])
+        self.assertIn(f'ExecStart={dest}/bundle/bin/enginex-deemixd ', (units / 'enginex-deemixd.service').read_text())
+        self.assertNotIn('ExecStart=old', (units / 'enginex-stream-sync.service').read_text())
+        self.assertEqual([p.name for p in (units / 'engine.service.d').iterdir()], ['99-enginex.conf'])
+        self.assertEqual((units / 'foreign.service').read_text(), 'not ours\n')
+        self.assertTrue((run_dir / 'enginex-boot-converted').exists() and (run_dir / 'enginex-tz-newer').exists())
+        self.assertIn('stop enginex-sc5000-deemixd.service', cmds)
+        self.assertIn('reset-failed enginex-sc5000-deemixd.service', cmds)
+        self.assertIn('restart --no-block enginex-stream-sync.service enginex-rb-bridge.service enginex-deemixd.service', cmds)
+        drop = (units / 'engine.service.d/99-enginex.conf').read_text()
+        self.assertNotIn('sc5000', drop.replace('/data/sc5000-custom', ''))
+        self.assertIn('Wants=enginex-stream-sync.service enginex-rb-bridge.service enginex-deemixd.service', drop)
+        # The leave step is in place for a later downgrade, outside /data.
+        leave = run_dir / 'enginex/leave.sh'
+        self.assertTrue(leave.is_file() and os.access(leave, os.X_OK))
+        # A second run (the next boot) has nothing old left to stop.
+        res = subprocess.run(['sh', str(ba)], env=env, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertNotIn('enginex-sc5000-deemixd', self.host_commands.read_text())
+        self.host_commands.write_text('')
+
+    def test_234_leave_step_removes_only_this_releases_units(self):
+        """#234: the leave step before an older release is applied removes this release's enginex units,
+        its 99-enginex.conf drop-ins, the bound Engine script and the suite cache, nothing else, and
+        follows no symlinked directory (a units dir that points at /data/Music loses nothing)."""
+        root = self.tmp / 'leave-root'
+        units = root / 'run/systemd/system'
+        ours = ['enginex-deemixd.service', 'enginex-stream-sync.service', 'enginex-rb-bridge.service',
+                'engine.service.d/99-enginex.conf', 'edisksd.service.d/99-enginex.conf']
+        theirs = ['engine-guardian.service', 'foreign.service', 'engine.service.d/50-user.conf',
+                  'sshd.service.d/51-port.conf']
+        for name in ours + theirs:
+            (units / name).parent.mkdir(parents=True, exist_ok=True)
+            (units / name).write_text(name)
+        (units / 'enginex-masked.service').symlink_to('/dev/null')
+        (root / 'run/enginex-engine-script').write_text('#!/bin/sh\n')
+        (root / 'data/enginex/bin').mkdir(parents=True)
+        for f in ('enginex-suite', 'enginex-suite.id', 'keep'):
+            (root / 'data/enginex/bin' / f).write_text(f)
+        leave = self.tmp / 'leave.sh'
+        leave.write_text(bdb.LEAVE_SH)
+        env = {**self.env, 'ENGINEX_LEAVE_ROOT': str(root)}
+        res = subprocess.run(['sh', str(leave)], env=env, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        for name in ours + ['enginex-masked.service']:
+            self.assertFalse(os.path.lexists(units / name), name)
+        for name in theirs:
+            self.assertEqual((units / name).read_text(), name)
+        self.assertFalse((root / 'run/enginex-engine-script').exists())
+        self.assertEqual(sorted(p.name for p in (root / 'data/enginex/bin').iterdir()), ['keep'])
+        # Symlinked directories on the way are never followed.
+        music = self.tmp / 'Music'
+        (music / 'engine.service.d').mkdir(parents=True)
+        for name in ('enginex-song.service', 'engine.service.d/99-enginex.conf'):
+            (music / name).write_text('a song')
+        shutil.rmtree(root / 'run/systemd')
+        (root / 'run/systemd').mkdir()
+        (root / 'run/systemd/system').symlink_to(music)
+        res = subprocess.run(['sh', str(leave)], env=env, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        (root / 'run/systemd/system').unlink()
+        (root / 'run/systemd/system').mkdir()
+        (root / 'run/systemd/system/engine.service.d').symlink_to(music / 'engine.service.d')
+        res = subprocess.run(['sh', str(leave)], env=env, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual((music / 'enginex-song.service').read_text(), 'a song')
+        self.assertEqual((music / 'engine.service.d/99-enginex.conf').read_text(), 'a song')
+        # boot-activate.sh carries this very script.
+        self.assertIn(bdb.LEAVE_SH, bdb.BOOT_ACTIVATE)
+
     def pid1_systemd(self):
         comm = self.tmp / 'pid1-comm'
         comm.write_text('systemd\n')
@@ -853,7 +963,7 @@ exec REAL "$@"
         self.assertIn('restart --no-block engine.service', self.host_commands.read_text())
         self.assertFalse(calls.exists(), 'converted while the stock Engine was still running')
         self.host_commands.write_text('')
-        dropin = (run_dir / 'systemd/system/engine.service.d/99-sc5000.conf').read_text().splitlines()
+        dropin = (run_dir / 'systemd/system/engine.service.d/99-enginex.conf').read_text().splitlines()
         pre = dropin.index(next(l for l in dropin if l.endswith('engine-ui-guard pre')))
         self.assertTrue(dropin[pre + 1].startswith('ExecStartPre=-') and dropin[pre + 1].endswith('boot-activate.sh --convert-mounted'),
                         dropin)
