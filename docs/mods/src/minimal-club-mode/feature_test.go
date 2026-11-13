@@ -69,3 +69,60 @@ func TestPauseRestoreAndPartialRestore(t *testing.T) {
 		}
 	}
 }
+
+// #234 review R3: a pause saved before an update names the downloader unit of that release
+// (sc5000-deemixd.service on 1st gen, enginex-sc5000-deemixd.service on 2nd gen); after it only
+// enginex-deemixd.service exists. Disable starts the unit this release has, and the pause ends;
+// the same after a downgrade, the other way round.
+func TestRename234PauseSavedUnderAnotherReleasesUnitIsUndone(t *testing.T) {
+	old := Systemctl
+	defer func() { Systemctl = old }()
+	for _, c := range []struct{ saved, installed string }{
+		{"sc5000-deemixd.service", "enginex-deemixd.service"},
+		{"enginex-sc5000-deemixd.service", "enginex-deemixd.service"},
+		{"enginex-deemixd.service", "sc5000-deemixd.service"},
+		{"enginex-deemixd.service", "enginex-sc5000-deemixd.service"},
+	} {
+		live := map[string]bool{}
+		var started []string
+		Systemctl = func(args ...string) (string, string, int) {
+			unit := args[1]
+			if !allowed(unit) {
+				t.Fatalf("touched %v", args)
+			}
+			switch args[0] {
+			case "show":
+				if unit == c.installed {
+					return "loaded\n", "", 0
+				}
+				return "not-found\n", "", 0
+			case "is-active":
+				if live[unit] {
+					return "active\n", "", 0
+				}
+				return "inactive\n", "", 3
+			case "start":
+				if unit != c.installed {
+					return "", "Unit " + unit + " not found.", 5
+				}
+				started = append(started, unit)
+				live[unit] = true
+			}
+			return "", "", 0
+		}
+		state := t.TempDir()
+		f, _ := New(modkit.Env{State: state})
+		if err := modkit.SaveJSON(state+"/paused.json", map[string]any{"active": true, "services": []string{c.saved}, "phase": "paused"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.(*feature).Action(map[string]any{"action": "disable"}); err != nil {
+			t.Fatalf("%s on a release with %s: %v", c.saved, c.installed, err)
+		}
+		if !reflect.DeepEqual(started, []string{c.installed}) {
+			t.Fatalf("%s: started %v, want %s", c.saved, started, c.installed)
+		}
+		if _, err := os.Stat(state + "/paused.json"); !os.IsNotExist(err) {
+			t.Fatalf("%s: the pause is still saved", c.saved)
+		}
+	}
+}
