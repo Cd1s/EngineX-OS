@@ -4524,12 +4524,15 @@ BAND_PAST = {"Low": "#00307f", "Mid": "#996300", "High": "#999999"}
 RGB_COLORS = {"Low": "#ff1428", "Mid": "#00e632", "High": "#0078ff"}
 RGB_PAST = {"Low": "#7f0a14", "Mid": "#007319", "High": "#003c80"}
 # PRGB (experiment): the colours with which Engine's RGB shader comes closest to
-# rekordbox's RGB waveform on the same track. Fitted on rekordbox's own analysis of its
-# demo tracks: its three bands (PWV7, what a rekordbox track's overview holds) through
-# Shader/WaveForm/WaveFormFBORGB.ps against its colour waveform (PWV5). Where the lows
-# lead rekordbox draws pure red; RGB's green and light blue made that yellow and cyan.
-PRGB_COLORS = {"Low": "#ff0000", "Mid": "#00b172", "High": "#0d00bd"}
-PRGB_PAST = {"Low": "#7f0000", "Mid": "#005839", "High": "#06005e"}
+# rekordbox's RGB waveform (PWV5) of the same track. Fitted on rekordbox's two demo
+# tracks through Shader/WaveForm/WaveFormFBORGB.ps, over both things the shader is given:
+# Engine's own bands (read back from deck renders: what the detail view and the deck
+# overview draw in RGB style) and rekordbox's three bands (PWV7: what the overview of a
+# rekordbox track in the library holds). The shader's uniforms stay stock: moving them too
+# gains nothing on Engine's bands. rekordbox draws pure red where the lows lead and blue
+# for the highs; RGB's colours gave that an orange tint, green edges and light blue.
+PRGB_COLORS = {"Low": "#ff0000", "Mid": "#00bf75", "High": "#1354ff"}
+PRGB_PAST = {"Low": "#7f0000", "Mid": "#005f3a", "High": "#092a7f"}
 
 
 # Vertical stretch of the Half overview strip a shadow deck draws from stream-sync's

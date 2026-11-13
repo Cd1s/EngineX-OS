@@ -6285,7 +6285,8 @@ class PRGBStyleTest(unittest.TestCase):
                 self.assertEqual(got[f"{band} rgb"], [rgb, rgb, rgb_past])
                 self.assertEqual(got[f"{band} 3band"], [fade, main, past])
                 self.assertEqual(got[f"{band} prgb"], [bp.PRGB_COLORS[band], bp.PRGB_COLORS[band], bp.PRGB_PAST[band]])
-        self.assertEqual(bp.PRGB_COLORS, {"Low": "#ff0000", "Mid": "#00b172", "High": "#0d00bd"})
+        self.assertEqual(bp.PRGB_COLORS, {"Low": "#ff0000", "Mid": "#00bf75", "High": "#1354ff"})
+        self.assertEqual(bp.PRGB_PAST, {"Low": "#7f0000", "Mid": "#005f3a", "High": "#092a7f"})
 
     def test_prgb_runs_engines_rgb_shader(self):
         main = SRC
