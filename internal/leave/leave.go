@@ -153,6 +153,30 @@ func relink(p, target string) error {
 	return syncDir(filepath.Dir(p))
 }
 
+// syncPath makes one file's contents or one directory's entries durable; tests record it.
+var syncPath = func(p string) error {
+	f, err := os.Open(p)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return f.Sync()
+}
+
+// syncTree makes a whole staged tree durable before anything of it is swapped in: the older
+// installers copy with cp and tar and never sync, and an atomic swap orders no data before it.
+func syncTree(root string) error {
+	return filepath.Walk(root, func(p string, fi os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !fi.Mode().IsRegular() && !fi.IsDir() {
+			return nil // a symlink is an entry of its directory, synced with that
+		}
+		return syncPath(p)
+	})
+}
+
 func hasMarker(dir, id string) bool {
 	return id != "" && readLine(filepath.Join(dir, markerName)) == id
 }
@@ -267,6 +291,11 @@ func (d Deck) Install(target string) error {
 		if err := writeSync(filepath.Join(journal, "layout"), nil); err != nil {
 			return fail(err)
 		}
+	}
+	// The staged payload, the backups and their directories reach the disk before the id, and
+	// so before the first swap (#234 review round 2).
+	if err := syncTree(journal); err != nil {
+		return fail(err)
 	}
 	// From here a cut is put back by Recover: the id says the stage is complete. So is an error.
 	if err := writeSync(filepath.Join(journal, "id"), []byte(ids+"\n")); err != nil {
