@@ -6,8 +6,10 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/Cd1s/EngineX-OS/internal/testfixture"
+	"github.com/Cd1s/EngineX-OS/pkg/bridge"
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 )
 
@@ -39,6 +41,12 @@ func oldOverviews(t *testing.T, count int) (string, *sql.DB, map[int64][]byte) {
 	if err := rows.Close(); err != nil || len(want) != count {
 		t.Fatal("fixture tracks", len(want), err)
 	}
+	zeroMaxima(t, db, want)
+	return root, db, want
+}
+
+func zeroMaxima(t *testing.T, db *sql.DB, want map[int64][]byte) {
+	t.Helper()
 	for id, raw := range want {
 		old := bytes.Clone(raw)
 		clear(old[len(old)-3:])
@@ -47,7 +55,6 @@ func oldOverviews(t *testing.T, count int) (string, *sql.DB, map[int64][]byte) {
 			t.Fatal(err)
 		}
 	}
-	return root, db, want
 }
 
 // completed reports whether every overview in table has its band maxima.
@@ -81,16 +88,64 @@ func TestStampBypassCompletesOldOverviewsOnce(t *testing.T) {
 	if r := issue233Mount(t, root, enginedb.Options{}); !r.Bypassed || !completed(t, db, "PerformanceData", want) || !overviewMarked(root) {
 		t.Fatalf("old overview not completed on the bypass: %+v", r)
 	}
-	for id, raw := range want {
-		old := bytes.Clone(raw)
-		clear(old[len(old)-3:])
-		blob, _ := enginedb.QCompress(old)
-		if _, err := db.Exec(`UPDATE PerformanceData SET overviewWaveFormData=? WHERE trackId=?`, blob, id); err != nil {
-			t.Fatal(err)
-		}
-	}
+	zeroMaxima(t, db, want)
 	if issue233Mount(t, root, enginedb.Options{}); completed(t, db, "PerformanceData", want) {
 		t.Fatal("the library was scanned again")
+	}
+}
+
+// Review of a2cfaa3: after this build completed a library, an earlier build on another
+// deck imports into it again and leaves overviews without band maxima. The mark of a
+// completed library was final, so they stayed a third of the height. That import wrote
+// rb-bridge's own database: the mark no longer stands, and the next insert completes them.
+func TestImportByAnEarlierBuildIsCompletedAtTheNextInsert(t *testing.T) {
+	root, db, want := oldOverviews(t, 2)
+	if issue233Mount(t, root, enginedb.Options{}); !completed(t, db, "PerformanceData", want) || !overviewMarked(root) {
+		t.Fatal("the library was not completed and marked")
+	}
+	zeroMaxima(t, db, want)
+	if _, err := db.Exec(`UPDATE bridge.BridgeState SET fingerprint=fingerprint||'0'`); err != nil { // as it encodes them again
+		t.Fatal(err)
+	}
+	if r := issue233Mount(t, root, enginedb.Options{}); !r.Bypassed || !completed(t, db, "PerformanceData", want) {
+		t.Fatalf("the earlier build's overviews were not completed: %+v", r)
+	}
+	zeroMaxima(t, db, want)
+	if issue233Mount(t, root, enginedb.Options{}); completed(t, db, "PerformanceData", want) {
+		t.Fatal("the library was scanned once more with no import in between")
+	}
+}
+
+// This build's own import of a changed export writes rb-bridge's database too. A library
+// completed before it is still complete after it, and is not read through again: on a
+// large library that holds the mount up.
+func TestOwnImportDoesNotScanACompletedLibraryAgain(t *testing.T) {
+	root, db, want := oldOverviews(t, 1)
+	if issue233Mount(t, root, enginedb.Options{}); !completed(t, db, "PerformanceData", want) || !overviewMarked(root) {
+		t.Fatal("the library was not completed and marked")
+	}
+	testfixture.LargeExport(t, root, 2)
+	if r := issue233Mount(t, root, enginedb.Options{}); r.Added != 1 || r.Deferred != 0 {
+		t.Fatalf("second import: %+v", r)
+	}
+	zeroMaxima(t, db, want)
+	if r := issue233Mount(t, root, enginedb.Options{}); !r.Bypassed || completed(t, db, "PerformanceData", want) {
+		t.Fatalf("the library was scanned again after this build's own import: %+v", r)
+	}
+}
+
+// A scan the mount's time cut short leaves the library unmarked, and the next insert goes
+// on with it.
+func TestOverviewBackfillCutShortGoesOnAtTheNextInsert(t *testing.T) {
+	root, db, want := oldOverviews(t, 2)
+	restore := bridge.SlowExportReadForTest(0, time.Nanosecond)
+	r := issue233Mount(t, root, enginedb.Options{})
+	restore()
+	if !r.Bypassed || completed(t, db, "PerformanceData", want) || overviewMarked(root) {
+		t.Fatalf("fixture: the mount had time for the overviews: %+v", r)
+	}
+	if issue233Mount(t, root, enginedb.Options{}); !completed(t, db, "PerformanceData", want) || !overviewMarked(root) {
+		t.Fatal("the next insert did not complete the library")
 	}
 }
 
