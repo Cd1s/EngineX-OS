@@ -78,6 +78,8 @@ Item {
                     for (let deck = 1; deck <= 2; deck++) {
                         const bank = probe.find("MixstreamBeatJumpBank" + deck)
                         probe.check(!!bank && bank.visible, "visible touch Beat Jump bank " + deck)
+                        const padsLayout = probe.find("Deck_Pads_Layout")
+                        probe.check(!!padsLayout && padsLayout.visible, "visible native pads alongside Beat Jump " + deck)
                         for (const a of ["JumpBack", "JumpForward", "BeatJumpHalve", "BeatJumpDouble"]) {
                             const button = probe.find("Mixstream" + a + deck)
                             probe.check(!!button && button.enabled && button.width >= 44 && button.height >= 44,
@@ -86,6 +88,9 @@ Item {
                         }
                         const eq = probe.find("MixstreamStemsEq" + deck)
                         probe.check(!!eq && eq.enabled && eq.height >= 44, "touch EQ / STEMS deck " + deck)
+                        const sweep = probe.find("MixstreamSweepFx" + deck)
+                        probe.check(!!sweep && sweep.enabled && sweep.height >= 44, "touch SWEEP FX deck " + deck)
+                        probe.check(sweep.y + sweep.height <= eq.y, "no overlap 2-row Sweep FX above Stems EQ deck " + deck)
                         const own = probe.tr("/Engine/Mixer/Channel" + deck + "/ChannelStrip/Mode")
                         const other = probe.tr("/Engine/Mixer/Channel" + (3 - deck) + "/ChannelStrip/Mode")
                         const before = other.index
@@ -140,7 +145,15 @@ Item {
                 } else {
                     for (let deck = 1; deck <= 2; deck++) {
                         const bank = probe.find("MixstreamBeatJumpBank" + deck)
-                        probe.check(!!bank && !bank.visible, "Beat Jump preference off restores native pads " + deck)
+                        probe.check(!!bank && !bank.visible, "Beat Jump preference off hides Beat Jump bank " + deck)
+                        const padsLayout = probe.find("Deck_Pads_Layout")
+                        probe.check(!!padsLayout && padsLayout.visible, "native pads remain visible deck " + deck)
+                        const sweep = probe.find("MixstreamSweepFx" + deck)
+                        const eq = probe.find("MixstreamStemsEq" + deck)
+                        probe.check(!!sweep && !!eq, "controls found deck " + deck)
+                        probe.check(sweep.y === eq.y, "single-row Sweep FX and Stems EQ share same row deck " + deck)
+                        probe.check(sweep.x + sweep.width <= eq.x || eq.x + eq.width <= sweep.x,
+                                    "no horizontal overlap Sweep FX and Stems EQ deck " + deck)
                     }
                     console.warn("X166 DONE|PASS|")
                     running = false
