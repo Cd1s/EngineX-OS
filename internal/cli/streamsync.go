@@ -150,6 +150,7 @@ func StreamSync(args []string) error {
 	}
 	server := &http.Server{Addr: *listen, Handler: ui, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 2 * time.Minute, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16384}
 	go ui.SyncRelaySettings(ctx)
+	go ui.RestoreSSH(ctx) // first generation: the console's SSH settings after a boot
 	go webui.GuardRoutes(ctx)
 	dl.RemoveStaleParts()
 	dl.Trim("")

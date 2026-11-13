@@ -96,6 +96,57 @@ const gen1SSHUnit = "sc5000-custom-sshd"
 
 var gen1SSHDropInPath = "/etc/systemd/system/sc5000-custom-sshd.service.d/51-port.conf"
 
+// gen1SSHRunDropInPath: first-generation 5.3.0 roots are mounted read-only too (no etc.mount),
+// so the port drop-in goes to /run there; RestoreSSH writes it again on every boot.
+var gen1SSHRunDropInPath = "/run/systemd/system/sc5000-custom-sshd.service.d/51-port.conf"
+
+// writeGen1SSHPort writes the first-generation unit's port drop-in: /etc where it is
+// writable, /run otherwise (review of 03cf399: EROFS was ignored, the port silently not set).
+func writeGen1SSHPort(port int) error {
+	// -p overrides the Port of EngineX's own sshd_config.
+	dropIn := fmt.Sprintf("[Service]\nExecStart=\nExecStart=/usr/sbin/sshd -D -e -f /usr/share/sc5000-custom/sshd_config -p %d\n", port)
+	if os.MkdirAll(filepath.Dir(gen1SSHDropInPath), 0o755) == nil && os.WriteFile(gen1SSHDropInPath, []byte(dropIn), 0o644) == nil {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(gen1SSHRunDropInPath), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(gen1SSHRunDropInPath, []byte(dropIn), 0o644)
+}
+
+// RestoreSSH applies the console's SSH settings on a first-generation deck after a boot:
+// its prepare script starts the key-only unit on port 22 whenever a key is stored and never
+// reads them, and /run, where the port drop-in and the runtime mask live, is empty after a
+// reboot. Second-generation decks do this in boot-activate.sh. Without saved settings
+// nothing changes (#46, #116).
+func (s *Server) RestoreSSH(ctx context.Context) {
+	if !onDeck() {
+		return
+	}
+	unit, _ := sshUnit()
+	if unit != gen1SSHUnit {
+		return
+	}
+	if _, err := os.Stat(s.sshConfigPath()); err != nil {
+		return
+	}
+	cfg := s.loadSSHConfig()
+	runner := getSystemRunner()
+	if !cfg.Enabled {
+		_, _ = runner(ctx, "systemctl", "stop", unit)
+		_, _ = runner(ctx, "systemctl", "mask", "--runtime", unit)
+		return
+	}
+	if cfg.Port != 22 {
+		if err := writeGen1SSHPort(cfg.Port); err != nil {
+			log.Printf("ssh: port %d not restored: %v", cfg.Port, err)
+			return
+		}
+		_, _ = runner(ctx, "systemctl", "daemon-reload")
+		_, _ = runner(ctx, "systemctl", "restart", unit)
+	}
+}
+
 // sshUnit is the SSH unit this deck runs, and whether it takes passwords.
 func sshUnit() (unit string, passwords bool) {
 	if dataBundleBoards[imagePrefix(deviceCompatible())] {
@@ -332,10 +383,10 @@ func (s *Server) handleSSHPost(w http.ResponseWriter, r *http.Request) {
 		cfg.Port = *in.Port
 	}
 	if in.Port != nil && deck && unit == gen1SSHUnit {
-		// -p overrides the Port of EngineX's own sshd_config.
-		dropIn := fmt.Sprintf("[Service]\nExecStart=\nExecStart=/usr/sbin/sshd -D -e -f /usr/share/sc5000-custom/sshd_config -p %d\n", cfg.Port)
-		_ = os.MkdirAll(filepath.Dir(gen1SSHDropInPath), 0o755)
-		_ = os.WriteFile(gen1SSHDropInPath, []byte(dropIn), 0o644)
+		if err := writeGen1SSHPort(cfg.Port); err != nil {
+			fail(w, http.StatusInternalServerError, errors.New("could not set the ssh port"))
+			return
+		}
 		_, _ = runner(r.Context(), "systemctl", "daemon-reload")
 	} else if in.Port != nil && deck {
 		// Apply port configuration drop-in if directory exists or via runner
@@ -363,10 +414,16 @@ func (s *Server) handleSSHPost(w http.ResponseWriter, r *http.Request) {
 	}
 	if in.Enabled != nil && deck {
 		if cfg.Enabled {
+			if unit == gen1SSHUnit { // its mask is a runtime one (read-only /etc), see below
+				_, _ = runner(r.Context(), "systemctl", "unmask", "--runtime", unit)
+			}
 			_, _ = runner(r.Context(), "systemctl", "unmask", unit)
 			_, _ = runner(r.Context(), "systemctl", "restart", unit)
 		} else {
 			_, _ = runner(r.Context(), "systemctl", "stop", unit)
+			if unit == gen1SSHUnit { // the prepare script's target would start it again
+				_, _ = runner(r.Context(), "systemctl", "mask", "--runtime", unit)
+			}
 		}
 	} else if in.Port != nil && cfg.Enabled && deck {
 		_, _ = runner(r.Context(), "systemctl", "restart", unit)
