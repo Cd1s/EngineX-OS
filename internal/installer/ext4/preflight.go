@@ -14,7 +14,7 @@ import (
 func (img *Image) preflight(p *plan) error {
 	f := img.fs
 	sim := &simulation{f: f, freeBlocks: int64(f.sbFreeBlocks()), freeInodes: int64(f.sbFreeInodes()),
-		created: map[string]bool{}, entryBytes: map[string]uint64{}}
+		dirs: map[string]*dirModel{}}
 	root, err := f.readInode(rootIno)
 	if err != nil {
 		return err
@@ -59,7 +59,9 @@ func (img *Image) preflight(p *plan) error {
 				return fmt.Errorf("%w: /%s is a non-empty directory", ErrExists, k)
 			}
 		}
-		sim.release(in)
+		if err := sim.unlink(parts, in); err != nil {
+			return err
+		}
 	}
 	for _, parts := range p.dirs {
 		if err := sim.ensureDir(parts); err != nil {
@@ -82,7 +84,9 @@ func (img *Image) preflight(p *plan) error {
 			if in.flags()&flagEncrypt != 0 {
 				return fmt.Errorf("%w: /%s is encrypted", ErrUnsupported, k)
 			}
-			sim.release(in) // installFile unlinks it first
+			if err := sim.unlink(op.parts, in); err != nil { // installFile unlinks it first
+				return err
+			}
 		}
 		n := (uint64(op.e.Size) + uint64(f.bs) - 1) / uint64(f.bs)
 		if err := sim.use(n+treeBlocks(n, f.bs), 1); err != nil {
@@ -111,7 +115,9 @@ func (img *Image) preflight(p *plan) error {
 			if t, err := f.readAll(in, uint64(f.bs)); err == nil && string(t) == l.target {
 				continue // installLink keeps it
 			}
-			sim.release(in)
+			if err := sim.unlink(l.parts, in); err != nil {
+				return err
+			}
 		}
 		var blocks uint64
 		if len(l.target) >= inodeBlockLen {
@@ -133,8 +139,7 @@ type simulation struct {
 	freeBlocks, freeInodes int64
 	usedBlocks, usedInodes int64 // net, from the start of the change
 	peakBlocks, peakInodes int64
-	created                map[string]bool   // directories this change creates
-	entryBytes             map[string]uint64 // per directory: bytes of new entries
+	dirs                   map[string]*dirModel // directories the change touches, by path
 }
 
 func (s *simulation) use(blocks, inodes uint64) error {
@@ -149,16 +154,23 @@ func (s *simulation) use(blocks, inodes uint64) error {
 	return nil
 }
 
-// release credits what unlinking in frees: its blocks and inode when this
-// is its last link. Blocks shared through an xattr block are not credited.
-func (s *simulation) release(in *inode) {
+// unlink replays unlinking parts (inode in): its name leaves the directory,
+// and its blocks and inode are credited when this is its last link. Blocks
+// shared through an xattr block are not credited.
+func (s *simulation) unlink(parts []string, in *inode) error {
+	d, err := s.dir(strings.Join(parts[:len(parts)-1], "/"))
+	if err != nil {
+		return err
+	}
+	d.remove(parts[len(parts)-1])
 	if in.links() > 1 && !in.isDir() {
-		return
+		return nil
 	}
 	if in.fileACL(s.f) == 0 {
 		s.usedBlocks -= int64(in.blocks512(s.f) * 512 / uint64(s.f.bs))
 	}
 	s.usedInodes--
+	return nil
 }
 
 // ensureDir walks parts, charging every directory the change must create.
@@ -166,7 +178,7 @@ func (s *simulation) ensureDir(parts []string) error {
 	f := s.f
 	for i := range parts {
 		k := strings.Join(parts[:i+1], "/")
-		if s.created[k] {
+		if s.dirs[k] != nil {
 			continue
 		}
 		in, err := f.lstat(k)
@@ -174,13 +186,15 @@ func (s *simulation) ensureDir(parts []string) error {
 			return err
 		}
 		if in == nil {
-			s.created[k] = true
 			if err := s.use(1, 1); err != nil {
 				return err
 			}
 			if err := s.entry(parts[:i+1]); err != nil {
 				return err
 			}
+			// mkdir makes one block holding '.' and '..', in one extent.
+			s.dirs[k] = &dirModel{blocks: 1, extent: true, exts: 1,
+				slots: []slot{{0, ".", 12, 12}, {0, "..", f.dirEnd() - 12, 12}}}
 			continue
 		}
 		if !in.isDir() {
@@ -196,31 +210,43 @@ func (s *simulation) ensureDir(parts []string) error {
 	return nil
 }
 
-// entry charges the growth of the parent directory for one new name.
-func (s *simulation) entry(parts []string) error {
-	dir := strings.Join(parts[:len(parts)-1], "/")
-	before := s.dirBlocks(dir, s.entryBytes[dir])
-	s.entryBytes[dir] += uint64(direntLen(len(parts[len(parts)-1])))
-	return s.use(s.dirBlocks(dir, s.entryBytes[dir])-before, 0)
+// dir returns the layout model of the directory at path, loading it once.
+func (s *simulation) dir(path string) (*dirModel, error) {
+	if d := s.dirs[path]; d != nil {
+		return d, nil
+	}
+	in, err := s.f.lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if in == nil || !in.isDir() {
+		return nil, fmt.Errorf("%w: /%s is not a directory", ErrExists, path)
+	}
+	d, err := s.f.loadDirModel(in)
+	if err != nil {
+		return nil, err
+	}
+	s.dirs[path] = d
+	return d, nil
 }
 
-// dirBlocks bounds the blocks a directory gains from b bytes of new entries.
-func (s *simulation) dirBlocks(dir string, b uint64) uint64 {
-	if b == 0 {
-		return 0
+// entry replays adding the last name of parts to its directory and charges
+// any growth. A block-mapped directory cannot grow (appendBlock refuses it),
+// so that is refused here, before any write.
+func (s *simulation) entry(parts []string) error {
+	path := strings.Join(parts[:len(parts)-1], "/")
+	d, err := s.dir(path)
+	if err != nil {
+		return err
 	}
-	end := uint64(s.f.dirEnd())
-	if s.created[dir] {
-		// A new directory's first block (charged at creation) has room
-		// after '.' and '..'.
-		if b <= end-24 {
-			return 0
-		}
-		return (b-(end-24)+end/2-1)/(end/2) + 1
+	before := d.cost(s.f.bs)
+	if !d.add(parts[len(parts)-1], s.f.dirEnd()) {
+		return nil
 	}
-	// Existing directory: assume no reusable slack; every block added is
-	// at least half full, and one more block may hold its extent tree.
-	return (b+end/2-1)/(end/2) + 1
+	if !d.extent {
+		return fmt.Errorf("%w: directory /%s uses block maps and has no room for another name", ErrUnsupported, path)
+	}
+	return s.use(d.cost(s.f.bs)-before, 0)
 }
 
 // treeBlocks bounds the extent tree blocks a file of n blocks can need if

@@ -148,6 +148,9 @@ func (c *checker) run(ctx context.Context) error {
 				}
 				continue
 			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			in, err := f.readInode(num)
 			if err != nil {
 				c.addf("%v", err)
@@ -161,7 +164,7 @@ func (c *checker) run(ctx context.Context) error {
 	if c.dupes > 0 || c.aborted {
 		// Shared blocks: the later passes would re-walk shared structures
 		// and add nothing to an already failed check.
-		c.addf("%d blocks are claimed more than once; directory and bitmap checks skipped", c.dupes)
+		c.addf("%d blocks are claimed more than once or a mapping is damaged; directory and bitmap checks skipped", c.dupes)
 		return nil
 	}
 
@@ -238,6 +241,7 @@ func (c *checker) inode(in *inode, marked bool, orphanFile uint32) {
 			exts, meta, err := f.fileMap(in)
 			if err != nil {
 				c.addf("reserved inode %d: %v", num, err)
+				c.aborted = true
 				return
 			}
 			for _, e := range exts {
@@ -274,7 +278,10 @@ func (c *checker) inode(in *inode, marked bool, orphanFile uint32) {
 	c.inUse[num] = info
 	exts, meta, err := f.fileMap(in)
 	if err != nil {
+		// The check has failed. Stop here: a damaged tree shared by other
+		// inodes would otherwise be walked again for each of them.
 		c.addf("%v", err)
+		c.aborted = true
 		return
 	}
 	var nblocks uint64
