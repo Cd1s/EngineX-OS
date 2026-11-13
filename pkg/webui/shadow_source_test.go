@@ -167,3 +167,74 @@ func TestSourceEnvelopeKeepsPCMScale(t *testing.T) {
 		t.Fatalf("low band %d for a quarter-scale tone, want ~64 (trackData peaks %v)", low, a.Peaks)
 	}
 }
+
+func TestShadowSourceWaveformCacheAcrossReloads(t *testing.T) {
+	_, root, db := testlibrary.Create(t)
+	path := filepath.Join(root, "Contents/song.wav")
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	const rate = 8000
+	const samples = 2 * rate
+	var wav bytes.Buffer
+	wav.WriteString("RIFF")
+	binary.Write(&wav, binary.LittleEndian, uint32(36+samples*2))
+	wav.WriteString("WAVEfmt ")
+	for _, v := range []any{uint32(16), uint16(1), uint16(1), uint32(rate), uint32(rate * 2), uint16(2), uint16(16)} {
+		binary.Write(&wav, binary.LittleEndian, v)
+	}
+	wav.WriteString("data")
+	binary.Write(&wav, binary.LittleEndian, uint32(samples*2))
+	for i := 0; i < samples; i++ {
+		binary.Write(&wav, binary.LittleEndian, int16(8192*math.Sin(2*math.Pi*100*float64(i)/rate)))
+	}
+	if err := os.WriteFile(path, wav.Bytes(), 0600); err != nil {
+		t.Fatal(err)
+	}
+	p, err := enginedb.EncodePerformance(rekordbox.Track{Duration: 2, SampleRate: rate}, &rekordbox.Analysis{
+		Beats:     []rekordbox.Beat{{TimeMS: 250, BPM: 120, Number: 1}, {TimeMS: 750, BPM: 120, Number: 2}},
+		Waveforms: []rekordbox.Waveform{{Tag: "PWV7", EntryBytes: 3, Data: []byte{100, 50, 25}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`INSERT INTO Track(path,filename,bpmAnalyzed,isAnalyzed) VALUES('../Contents/song.wav','song.wav',120,0)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`UPDATE PerformanceData SET trackData=?,overviewWaveFormData=?,beatData=?,quickCues=?,loops=?`, p.TrackData, p.Overview, p.Beats, p.QuickCues, p.Loops); err != nil {
+		t.Fatal(err)
+	}
+	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	defer s.Close()
+	s.shadow.mediaRoot = filepath.Dir(root)
+	s.shadow.own = []deckState{{Deck: 1, Key: "source-a", Path: path}}
+	c := &s.shadow.sourceDisplay
+	c.mu.Lock()
+	if c.waveforms == nil {
+		c.waveforms = map[string]enginedb.DisplayWave{}
+	}
+	c.waveforms[path] = enginedb.DisplayWave{SamplesPerBin: 441, Bands: []byte{1, 2, 3}}
+	c.mu.Unlock()
+
+	a, err := s.sourceDisplayAsset(context.Background(), path, "source-a", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Waveform == nil || a.DetailPending || !a.Detail {
+		t.Fatalf("cached waveform was not reused: %+v", a)
+	}
+	if c.running {
+		t.Fatal("worker should not run when waveform is in cache")
+	}
+
+	a2, err := s.sourceDisplayAsset(context.Background(), path, "source-b", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a2.Waveform == nil || a2.DetailPending || !a2.Detail {
+		t.Fatalf("cached waveform was not reused on key-2: %+v", a2)
+	}
+	if c.running {
+		t.Fatal("worker should not run on key-2 when waveform is in cache")
+	}
+}

@@ -72,6 +72,7 @@ type deckState struct {
 	DisplayOnly  bool    `json:"displayOnly,omitempty"`  // this slot goes to the display renderer; Engine must not load it
 	Fallback     string  `json:"fallback,omitempty"`     // auto mode, a CDJ on the display renderer: why Engine cannot have its file (cdjFallback); the QML says so on the lane
 	Playing      bool    `json:"playing"`
+	Scratch      bool    `json:"scratch,omitempty"`
 	PositionMS   float64 `json:"positionMs"`
 	Pitch        float64 `json:"pitch"` // percent
 	// Rate is how fast PositionMS runs on the receiver's clock, track ms per ms,
@@ -221,13 +222,13 @@ func samePeerPicture(old peerDeck, d deckState, now time.Time) bool {
 	o := old.deckState
 	if o.Deck != d.Deck || o.Path != d.Path || o.Net != d.Net || o.Key != d.Key || o.Ext != d.Ext || o.Name != d.Name ||
 		o.Title != d.Title || o.Artist != d.Artist || o.KeyName != d.KeyName || o.Loading != d.Loading || o.Active != d.Active || o.Stale != d.Stale || o.MetadataOnly != d.MetadataOnly ||
-		o.Playing != d.Playing || o.Pitch != d.Pitch || !sameOptionalBool(o.Master, d.Master) || !sameOptionalBool(o.Lead, d.Lead) || o.Loop != d.Loop || o.KeyOffset != d.KeyOffset || o.Stems != d.Stems || o.Slip != d.Slip || o.ShadowMaster != d.ShadowMaster || o.Sync != d.Sync || o.BPM != d.BPM ||
+		o.Playing != d.Playing || o.Scratch != d.Scratch || o.Pitch != d.Pitch || !sameOptionalBool(o.Master, d.Master) || !sameOptionalBool(o.Lead, d.Lead) || o.Loop != d.Loop || o.KeyOffset != d.KeyOffset || o.Stems != d.Stems || o.Slip != d.Slip || o.ShadowMaster != d.ShadowMaster || o.Sync != d.Sync || o.BPM != d.BPM ||
 		o.CurrentBPM != d.CurrentBPM || o.Range != d.Range || (o.KeyLock == nil) != (d.KeyLock == nil) || (o.KeyLock != nil && *o.KeyLock != *d.KeyLock) ||
 		o.Jumps != d.Jumps || o.Cue != d.Cue || o.Link != d.Link || (o.CuePos == nil) != (d.CuePos == nil) ||
 		(o.CuePos != nil && *o.CuePos != *d.CuePos) || (o.Cues == nil) != (d.Cues == nil) || !slices.Equal(o.Cues, d.Cues) {
 		return false
 	}
-	if !o.Playing {
+	if !o.Playing || o.Scratch || d.Scratch {
 		return math.Abs(old.anchorPos-d.PositionMS) <= shadowPausedDriftMS
 	}
 	expect := old.anchorPos + float64(now.Sub(old.anchorAt).Microseconds())/1000*old.speed()
@@ -353,10 +354,19 @@ type shadowState struct {
 	display             shadowDisplayCache
 	sourceDisplay       shadowSourceCache
 	lines               []int // Line/Phono mixer channel inputs on all-in-one consoles
+	trackGridSig        map[string]int64
+	trackGridHash       map[string]uint64
 }
 
 func newShadowState() *shadowState {
-	return &shadowState{precise: map[byte]precisePos{}, cdj: map[byte]cdjSeen{}, peers: map[string]time.Time{}, peerDecks: map[int]peerDeck{}, peerSeq: map[string]int64{}, notify: make(chan struct{}), files: map[string]string{}, busy: map[string]bool{}, copies: map[string]*shadowCopy{}, copyRetry: time.Second, copyTimeout: 2 * time.Minute, used: map[string]time.Time{}, streamFiles: map[string]streamTrack{}, peerTaken: map[string]time.Time{}, peerClock: map[string]peerClock{}, dataRoot: shadowDataRoot, mediaRoot: shadowMediaRoot, beacon: shadowBeaconOn}
+	return &shadowState{
+		precise: map[byte]precisePos{}, cdj: map[byte]cdjSeen{}, peers: map[string]time.Time{}, peerDecks: map[int]peerDeck{},
+		peerSeq: map[string]int64{}, notify: make(chan struct{}), files: map[string]string{}, busy: map[string]bool{},
+		copies: map[string]*shadowCopy{}, copyRetry: time.Second, copyTimeout: 2 * time.Minute, used: map[string]time.Time{},
+		streamFiles: map[string]streamTrack{}, peerTaken: map[string]time.Time{}, peerClock: map[string]peerClock{},
+		dataRoot: shadowDataRoot, mediaRoot: shadowMediaRoot, beacon: shadowBeaconOn,
+		trackGridSig: map[string]int64{}, trackGridHash: map[string]uint64{},
+	}
 }
 
 // shadow-v3: copies under the old "shadow" were analysed by Engine itself,
@@ -525,17 +535,14 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 				d.Key = fmt.Sprintf("%x", fnvSum(fmt.Sprintf("%s %d %d", f, st.Size(), st.ModTime().UnixNano())))
 			}
 		}
-		s.shadow.mu.Lock()
 		if d.Key != "" {
 			d.baseKey = d.Key
-			d.Key = fmt.Sprintf("%s-%x", d.baseKey, seq)
-			for _, previous := range s.shadow.own {
-				if previous.Deck == d.Deck && previous.baseKey == d.baseKey && previous.Path == d.Path && previous.Key != "" {
-					d.Key = previous.Key
-					break
-				}
+			gh := s.trackGridHash(r.Context(), d.Path)
+			if gh != 0 {
+				d.Key = fmt.Sprintf("%s-g%x", d.baseKey, gh)
 			}
 		}
+		s.shadow.mu.Lock()
 		logIt := np != "" && d.Path == "" && s.shadow.unresolved[d.Deck] != np
 		if logIt {
 			s.shadow.unresolved[d.Deck] = np
@@ -661,7 +668,7 @@ func (sh *shadowState) ownForPeer(now time.Time) []deckState {
 		for _, d := range sh.own {
 			d.Path = ""
 			d.Stale = now.Sub(sh.ownAt) >= 2*time.Second
-			if d.Playing {
+			if d.Playing && !d.Scratch {
 				// The QML posts only on a change and pings in between: carry the
 				// position and beat phase on while it is alive, at most 2 s past its last word.
 				until := min(now.UnixMilli(), sh.ownAt.UnixMilli()+2000)
@@ -974,7 +981,7 @@ func (sh *shadowState) takePeer(ip string, decks []deckState, now time.Time) {
 		if slot == 0 {
 			continue
 		} // all slots belong to other tracks; never overwrite a sibling
-		if d.Playing && !d.Stale {
+		if d.Playing && !d.Stale && !d.Scratch {
 			d.PositionMS += late * (1 + d.Pitch/100)
 		}
 		d.Sent, d.Rate = 0, 0
@@ -987,7 +994,7 @@ func (sh *shadowState) takePeer(ip string, decks []deckState, now time.Time) {
 			p.anchorPos, p.anchorAt, p.refPos, p.refAt = old.anchorPos, old.anchorAt, old.refPos, old.refAt
 			// The line's own slope, once it is long enough to tell: anchored anew
 			// with the new speed, which reaches the QML as a few ms to steer over.
-			if d.Playing && late <= shadowSkewLateMS {
+			if d.Playing && !d.Scratch && late <= shadowSkewLateMS {
 				if p.refAt.IsZero() {
 					if now.Sub(p.anchorAt) >= shadowSkewSettle {
 						p.refPos, p.refAt = d.PositionMS, now
@@ -1192,6 +1199,62 @@ func engineLibrary(f, dataRoot, mediaRoot string) string {
 		return filepath.Join(mediaRoot, vol, "Engine Library")
 	}
 	return filepath.Join(dataRoot, "AppDataUser/AIR Music Technology/Engine/Engine Library")
+}
+
+// trackGridHash returns a hash of the track's beatData in m.db or stm.db,
+// or 0 if unanalyzed/unavailable. Cached by database modification signature.
+func (s *Server) trackGridHash(ctx context.Context, f string) uint64 {
+	if f == "" {
+		return 0
+	}
+	lib := engineLibrary(f, s.shadow.dataRoot, s.shadow.mediaRoot)
+	if lib == "" {
+		return 0
+	}
+	rel, err := filepath.Rel(lib, f)
+	if err != nil {
+		return 0
+	}
+	slashRel := filepath.ToSlash(rel)
+	for _, name := range []string{"m.db", "stm.db"} {
+		mdb := filepath.Join(lib, "Database2", name)
+		st, err := os.Stat(mdb)
+		if err != nil || !st.Mode().IsRegular() {
+			continue
+		}
+		sig := st.ModTime().UnixNano() ^ st.Size()
+		if wst, err := os.Stat(mdb + "-wal"); err == nil {
+			sig ^= (wst.ModTime().UnixNano() << 1) ^ wst.Size()
+		}
+		s.shadow.mu.Lock()
+		if s.shadow.trackGridSig == nil {
+			s.shadow.trackGridSig = map[string]int64{}
+			s.shadow.trackGridHash = map[string]uint64{}
+		}
+		if s.shadow.trackGridSig[f] == sig {
+			h := s.shadow.trackGridHash[f]
+			s.shadow.mu.Unlock()
+			return h
+		}
+		s.shadow.mu.Unlock()
+
+		db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: mdb}).String()+"?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(100)")
+		if err != nil {
+			continue
+		}
+		var beatData []byte
+		err = db.QueryRowContext(ctx, `SELECT p.beatData FROM Track t JOIN PerformanceData p ON p.trackId = t.id WHERE (t.path = ? OR t.path = ?) AND length(p.beatData)>4`, slashRel, filepath.Base(f)).Scan(&beatData)
+		db.Close()
+		if err == nil && len(beatData) > 0 {
+			h := fnvSum(string(beatData))
+			s.shadow.mu.Lock()
+			s.shadow.trackGridSig[f] = sig
+			s.shadow.trackGridHash[f] = h
+			s.shadow.mu.Unlock()
+			return h
+		}
+	}
+	return 0
 }
 
 // libraryPerf reads f's analysis from its m.db. Read-only: Engine owns that

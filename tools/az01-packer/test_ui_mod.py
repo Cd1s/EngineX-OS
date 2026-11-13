@@ -2162,6 +2162,15 @@ for (let i = 0; i < 20; i++) { now += 500; scGcCheck(); }
 assert.equal(runs, 1, "startup gc() runs only once, not repeatedly");
 """)
 
+    def test_scratch_mode_suppresses_forward_extrapolation_and_animator(self):
+        self.js(r"""
+let s = {positionMs: 5000, at: 10000, playing: true, pitch: 0, scratch: true};
+assert.equal(scShadowPosition(s, 11000), 5000);
+assert.equal(scShadowPosition(s, 12000), 5000);
+s.scratch = false;
+assert.equal(scShadowPosition(s, 11000), 6000);
+""")
+
 
 class UiModBuildTest(unittest.TestCase):
     def test_jc11_jc11s_packs_contain_shadow_display(self):

@@ -913,8 +913,69 @@ func TestDisplayKeyStaysStableUntilConfirmedTrackReload(t *testing.T) {
 	if post("") != "" {
 		t.Fatal("eject did not clear the loaded key")
 	}
-	if post(path) == first {
-		t.Fatal("reloading the same file reused stale grid/assets")
+	if post(path) != first {
+		t.Fatal("reloading the same file changed the key, breaking cache")
+	}
+}
+
+func TestShadowGridEditUpdatesKey(t *testing.T) {
+	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	defer s.Close()
+	s.shadow.dataRoot = t.TempDir()
+	songPath := filepath.Join(s.shadow.dataRoot, "song.mp3")
+	if err := os.WriteFile(songPath, []byte("audio"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	dbDir := filepath.Join(s.shadow.dataRoot, "AppDataUser/AIR Music Technology/Engine/Engine Library/Database2")
+	if err := os.MkdirAll(dbDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(dbDir, "m.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	_, _ = db.Exec(`CREATE TABLE Track(id INTEGER PRIMARY KEY, path TEXT);
+		CREATE TABLE PerformanceData(trackId INTEGER, beatData BLOB);
+		INSERT INTO Track(id, path) VALUES(1, 'song.mp3');
+		INSERT INTO PerformanceData(trackId, beatData) VALUES(1, 'GRID_VERSION_1');`)
+
+	post := func(net string) string {
+		t.Helper()
+		body, _ := json.Marshal([]deckState{{Deck: 1, Net: net}})
+		w := httptest.NewRecorder()
+		s.decksPost(w, httptest.NewRequest("POST", "/v1/sc5000/decks", bytes.NewReader(body)))
+		if w.Code != 200 {
+			t.Fatal(w.Code)
+		}
+		s.shadow.mu.Lock()
+		defer s.shadow.mu.Unlock()
+		return s.shadow.own[0].Key
+	}
+	path := "net://uuid/(Unknown)/song.mp3"
+	k1 := post(path)
+	if k1 == "" {
+		t.Fatal("key should not be empty")
+	}
+
+	// Edit beat grid in m.db
+	_, err = db.Exec(`UPDATE PerformanceData SET beatData='GRID_VERSION_2' WHERE trackId=1`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Add(time.Second)
+	_ = os.Chtimes(dbPath, now, now)
+
+	k2 := post(path)
+	if k2 == "" || k2 == k1 {
+		t.Fatalf("editing beatgrid must change key: k1=%s k2=%s", k1, k2)
+	}
+
+	post("")
+	k3 := post(path)
+	if k3 != k2 {
+		t.Fatalf("reloading track with same grid must preserve key: k2=%s k3=%s", k2, k3)
 	}
 }
 

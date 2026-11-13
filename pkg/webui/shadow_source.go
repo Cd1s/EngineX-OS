@@ -10,6 +10,7 @@ import (
 	"math"
 	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -30,9 +31,10 @@ type shadowSourceEntry struct {
 }
 
 type shadowSourceCache struct {
-	mu      sync.Mutex
-	entries map[string]*shadowSourceEntry
-	running bool
+	mu        sync.Mutex
+	entries   map[string]*shadowSourceEntry
+	waveforms map[string]enginedb.DisplayWave
+	running   bool
 }
 
 // sourceDisplayAsset is the display data of one of this player's tracks. With
@@ -80,8 +82,19 @@ func (s *Server) sourceDisplayAsset(ctx context.Context, path, key string, detai
 	a.Key, a.Version = key, 1
 	e := &shadowSourceEntry{asset: a, path: path, key: key, at: time.Now()}
 	if a.Waveform == nil {
-		a.DetailPending = true
-		e.queued = true
+		if c.waveforms != nil {
+			if w, ok := c.waveforms[path]; ok {
+				wCopy := w
+				a.Waveform = &wCopy
+				a.Detail = true
+				a.DetailSource = "source-envelope"
+				a.DetailPending = false
+			}
+		}
+		if a.Waveform == nil {
+			a.DetailPending = true
+			e.queued = true
+		}
 	}
 	c.entries[key] = e
 	if e.queued && !c.running {
@@ -100,7 +113,7 @@ func (s *Server) shadowSourceLoaded(key string) bool {
 	s.shadow.mu.Lock()
 	defer s.shadow.mu.Unlock()
 	for _, d := range s.shadow.own {
-		if d.Key == key && d.Path != "" {
+		if (d.Key == key || d.baseKey == key || (d.baseKey != "" && strings.HasPrefix(key, d.baseKey+"-"))) && d.Path != "" {
 			return true
 		}
 	}
@@ -205,6 +218,18 @@ func (s *Server) shadowSourceWorker() {
 			}
 		}
 		c.mu.Lock()
+		if copyAsset.Waveform != nil {
+			if c.waveforms == nil {
+				c.waveforms = map[string]enginedb.DisplayWave{}
+			}
+			if len(c.waveforms) >= 32 {
+				for k := range c.waveforms {
+					delete(c.waveforms, k)
+					break
+				}
+			}
+			c.waveforms[job.path] = *copyAsset.Waveform
+		}
 		if c.entries[job.key] == job {
 			job.working = false
 			if errors.Is(err, context.Canceled) {
