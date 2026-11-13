@@ -6027,13 +6027,16 @@ def edits(dev: bool):
                 "		providerName: root.scBrand(Planck.librarianController.streamingInterfaceController.selectedProviderDisplayName)\n",
             ),
         ],
-        # Engine asks TIDAL's image server for a row's artwork; the other services' come
-        # from the gateway. The row's provider label marks a streaming row.
+        # Engine asks TIDAL's image server for a row's artwork; custom streaming services
+        # come from the gateway. Native sources (SD, USB, Remote Library / EaaS, and native
+        # cloud/streaming) keep row.modelData.albumArt.
         v + "BrowseView/Components/Components/AlbumArt.qml": [(
             'source: row.modelData.albumArt ? row.modelData.albumArt : ""',
-            'source: row.streamingProviderName && root.scScope !== "tidal" && row.modelData.song'
+            'source: (String(row.modelData && row.modelData.albumArt || "") !== "" && row.modelData.albumArt !== "image://streaming/")'
+            ' ? row.modelData.albumArt'
+            ' : (((row.streamingProviderName && String(row.streamingProviderName).toLowerCase() === "tidal") || (row.modelData && String(row.modelData.uri || "").indexOf("streaming://TIDAL/") === 0)) && (typeof root !== "undefined" && root && root.scScope !== "tidal") && row.modelData && row.modelData.song'
             ' ? "http://127.0.0.1:8080/v1/sc5000/art?song=" + encodeURIComponent(root.scPlainTitle(row.modelData.song)) + "&artist=" + encodeURIComponent(row.modelData.artist || "")'
-            ' : (row.modelData.albumArt ? row.modelData.albumArt : "")',
+            ' : (row.modelData && row.modelData.albumArt ? row.modelData.albumArt : ""))',
         ), (
             "asynchronous: true\n",
             "asynchronous: true\n"
@@ -6043,7 +6046,7 @@ def edits(dev: bool):
             '        source: "qrc:/' + ("AlbumArtPlaceholder.png" if v53() else "UIKit.1/UIKit/Icons/PlaceHolder.png") + '"\n'
             "        fillMode: Image.PreserveAspectCrop\n"
             "        smooth: true\n"
-            '        visible: !!parent && parent.status !== Image.Ready && String(parent.source) !== ""\n'
+            '        visible: !!parent && parent.status !== Image.Ready && !(typeof row !== "undefined" && row && (row.isButton || row.isLabel || row.isPlaylist))\n'
             "    }\n",
         )],
         v + "BrowseView/Components/Components/" + ("BrowseViewBpm.qml" if v53() else "Bpm.qml"): [('text: row.modelData.bpm || ""', 'text: row.modelData.bpm || root.scPreview(row.modelData.providerName)[1]')],
