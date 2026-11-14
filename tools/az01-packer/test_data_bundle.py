@@ -837,8 +837,14 @@ exec REAL "$@"
         bridge = dest / 'bundle/bin/rb-bridge'
         bridge.write_text(f'#!/bin/sh\necho "$*" >> {calls}\n')
         bridge.chmod(0o755)
+        gcalls = self.tmp / 'guardian.calls'
+        guardian = dest / 'bundle/bin/engine-guardian'
+        guardian.write_text(f'#!/bin/sh\necho "$*" >> {gcalls}\n')
+        guardian.chmod(0o755)
         media = self.tmp / 'media'
         (media / 'STICK/PIONEER').mkdir(parents=True)
+        (media / 'ENGINE_STICK/Engine Library/Database2').mkdir(parents=True)
+        (media / 'ENGINE_STICK/Engine Library/Database2/m.db').write_bytes(b'')
         (media / 'PLAIN').mkdir()
         run_dir = self.tmp / 'run-convert'
         ba = self.tmp / 'boot-activate-convert.sh'
@@ -856,6 +862,7 @@ exec REAL "$@"
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertIn('restart --no-block engine.service', self.host_commands.read_text())
         self.assertFalse(calls.exists(), 'converted while the stock Engine was still running')
+        self.assertFalse(gcalls.exists(), 'fixed MP3 grids while the stock Engine was still running')
         self.host_commands.write_text('')
         dropin = (run_dir / 'systemd/system/engine.service.d/99-sc5000.conf').read_text().splitlines()
         pre = dropin.index(next(l for l in dropin if l.endswith('engine-ui-guard pre')))
@@ -865,6 +872,8 @@ exec REAL "$@"
             res = subprocess.run(['sh', str(ba), '--convert-mounted'], env=env, capture_output=True, text=True)
             self.assertEqual(res.returncode, 0, res.stderr)
         self.assertEqual(calls.read_text().splitlines(), [f'--mount-path {media}/STICK'])
+        self.assertEqual(gcalls.read_text().splitlines(),
+                         [f'--heal-mount {media}/ENGINE_STICK --fix-mp3-grids --timeout 5s'])
 
     def test_boot_activate_follows_console_ssh_settings(self):
         """BH-GC2-9 / BH-GF4-15: boot-activate.sh started sshd whenever a key was stored, even
