@@ -206,6 +206,62 @@ func TestSpotifyStoredLoginUnlocksPlaylists(t *testing.T) {
 	}
 }
 
+func TestSpotifyPaginationFailureDoesNotBlockOnHangingLikedTracks(t *testing.T) {
+	p := &Spotify{Token: Token{AccessToken: "token"}}
+	likedStarted := make(chan struct{})
+	likedCanceled := make(chan struct{})
+	testDone := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/me/tracks" {
+			close(likedStarted)
+			select {
+			case <-r.Context().Done():
+				close(likedCanceled)
+			case <-testDone:
+			}
+			return
+		}
+		select {
+		case <-likedStarted:
+		case <-testDone:
+			return
+		}
+		http.Error(w, "page 0 rate limited immediately", 429)
+	}))
+	defer srv.Close()
+	defer close(testDone)
+	p.BaseURL = srv.URL
+
+	type result struct {
+		lists []Playlist
+		err   error
+	}
+	resCh := make(chan result, 1)
+	go func() {
+		lists, err := p.Playlists(context.Background())
+		resCh <- result{lists, err}
+	}()
+
+	select {
+	case res := <-resCh:
+		if res.err == nil {
+			t.Fatal("expected 429 error, got nil")
+		}
+		if res.lists != nil {
+			t.Fatalf("expected nil list on failure, got %+v", res.lists)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Playlists call timed out; did not cancel liked tracks promptly")
+	}
+
+	select {
+	case <-likedCanceled:
+		// Observed context cancellation on hanging liked tracks request!
+	case <-time.After(2 * time.Second):
+		t.Fatal("/me/tracks was not canceled")
+	}
+}
+
 func spotifyInnerTestBlob(device, username string) []byte {
 	raw := []byte{0, 0, 0, 1, 0, 4, 't', 'e', 's', 't'}
 	raw = append(raw, make([]byte, 32-len(raw))...)

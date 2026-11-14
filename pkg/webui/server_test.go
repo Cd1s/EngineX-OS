@@ -3,6 +3,7 @@ package webui
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -368,4 +369,158 @@ func TestLoginAccessCodeInputAndLockout(t *testing.T) {
 	if code := login("K7M9-P4X2", "192.0.2.3"); code != http.StatusSeeOther {
 		t.Fatalf("other client: %d", code)
 	}
+}
+
+func (s *Server) consoleTarget(r *http.Request) string {
+	return s.qrTarget(r)
+}
+
+func TestConsoleQRTarget(t *testing.T) {
+	lan := "http://" + lanHost() + ":8080"
+	ui := New(Config{StateDir: t.TempDir()}, nil)
+
+	t.Run("LANAndCustomHost", func(t *testing.T) {
+		// Case 1: Caller accessed via LAN IP / custom host (e.g. 192.168.1.100:8080)
+		r := httptest.NewRequest("GET", "/api/console-qr", nil)
+		r.Host = "192.168.1.100:8080"
+		target := ui.consoleTarget(r)
+		if target != "http://192.168.1.100:8080" {
+			t.Fatalf("target = %q, want http://192.168.1.100:8080", target)
+		}
+	})
+
+	t.Run("ForwardedProtoHTTPS", func(t *testing.T) {
+		// Case 2: Caller accessed via HTTPS proxy / forwarded header (with or without explicit port)
+		r := httptest.NewRequest("GET", "/api/console-qr", nil)
+		r.Host = "deck.local:8080"
+		r.Header.Set("X-Forwarded-Proto", "https")
+		if got := ui.consoleTarget(r); got != "https://deck.local:8080" {
+			t.Fatalf("target = %q, want https://deck.local:8080", got)
+		}
+
+		r = httptest.NewRequest("GET", "/api/console-qr", nil)
+		r.Host = "deck.example"
+		if got := ui.consoleTarget(r); got != "http://deck.example" {
+			t.Fatalf("target = %q, want http://deck.example", got)
+		}
+	})
+
+	t.Run("IPv6NonLoopbackHost", func(t *testing.T) {
+		// Case 2b: Non-loopback IPv6 host preserves brackets
+		r := httptest.NewRequest("GET", "/api/console-qr", nil)
+		r.Host = "[2001:db8::1]:8080"
+		if got := ui.consoleTarget(r); got != "http://[2001:db8::1]:8080" {
+			t.Fatalf("target = %q, want http://[2001:db8::1]:8080", got)
+		}
+
+		r = httptest.NewRequest("GET", "/api/console-qr", nil)
+		r.Host = "[2001:db8::1]"
+		if got := ui.consoleTarget(r); got != "http://[2001:db8::1]" {
+			t.Fatalf("target = %q, want http://[2001:db8::1]", got)
+		}
+	})
+
+	t.Run("ProxiedLoopbackLANScheme", func(t *testing.T) {
+		// Case 2c: Reverse proxy accessing loopback via HTTPS still generates http:// for the LAN device IP
+		rProxy := httptest.NewRequest("GET", "/api/console-qr", nil)
+		rProxy.Host = "localhost:8080"
+		rProxy.Header.Set("X-Forwarded-Proto", "https")
+		if got := ui.consoleTarget(rProxy); got != lan {
+			t.Fatalf("proxied loopback target = %q, want %s", got, lan)
+		}
+	})
+
+	t.Run("DirectNonLoopbackIPForwardedHTTPS", func(t *testing.T) {
+		// Case 2d: Direct non-loopback IP accessed with X-Forwarded-Proto: https honors HTTPS scheme
+		rIPHTTPS := httptest.NewRequest("GET", "/api/console-qr", nil)
+		rIPHTTPS.Host = "10.0.0.5:9090"
+		rIPHTTPS.Header.Set("X-Forwarded-Proto", "https")
+		if got := ui.consoleTarget(rIPHTTPS); got != "https://10.0.0.5:9090" {
+			t.Fatalf("ip https target = %q, want https://10.0.0.5:9090", got)
+		}
+	})
+
+	t.Run("IPv6ZoneIdentifierRFC6874", func(t *testing.T) {
+		// Case 2e: IPv6 with zone identifier (e.g. fe80::1%eth0) produces valid RFC 6874 URL with %25 and honors HTTPS
+		rZoneHTTPS := httptest.NewRequest("GET", "/api/console-qr", nil)
+		rZoneHTTPS.Host = "[fe80::1%eth0]:8080"
+		rZoneHTTPS.Header.Set("X-Forwarded-Proto", "https")
+		if got := ui.consoleTarget(rZoneHTTPS); got != "https://[fe80::1%25eth0]:8080" {
+			t.Fatalf("zone ipv6 https target = %q, want https://[fe80::1%%25eth0]:8080", got)
+		}
+
+		// Case 2f: IPv6 zone literal starting with 25 (e.g. fe80::1%25eth0) encodes as %2525eth0
+		rZone25 := httptest.NewRequest("GET", "/api/console-qr", nil)
+		rZone25.Host = "[fe80::1%25eth0]:8080"
+		if got := ui.consoleTarget(rZone25); got != "http://[fe80::1%2525eth0]:8080" {
+			t.Fatalf("zone starting with 25 target = %q, want http://[fe80::1%%2525eth0]:8080", got)
+		}
+	})
+
+	t.Run("DirectTLSConnection", func(t *testing.T) {
+		// Case 2g: Direct non-loopback IP accessed with actual TLS connection (r.TLS != nil, no X-Forwarded-Proto)
+		rDirectTLS := httptest.NewRequest("GET", "/api/console-qr", nil)
+		rDirectTLS.Host = "10.0.0.5:9090"
+		rDirectTLS.TLS = &tls.ConnectionState{}
+		if got := ui.consoleTarget(rDirectTLS); got != "https://10.0.0.5:9090" {
+			t.Fatalf("direct tls target = %q, want https://10.0.0.5:9090", got)
+		}
+	})
+
+	t.Run("LoopbackPortForward", func(t *testing.T) {
+		// Case 3: Caller accessed via loopback / SSH port forwarding (e.g. localhost:18080)
+		// Must point to device LAN IP and server's listening port (8080), NOT the client's forwarded port (18080).
+		r := httptest.NewRequest("GET", "/api/console-qr", nil)
+		r.Host = "localhost:18080"
+		if got := ui.consoleTarget(r); got != lan {
+			t.Fatalf("port forward target = %q, want %s", got, lan)
+		}
+	})
+
+	t.Run("LoopbackAndLocalHosts", func(t *testing.T) {
+		for _, loopHost := range []string{"localhost:8080", "localhost", "127.0.0.1:8080", "127.0.0.1", "[::1]:8080", "[::1]", "sc5000.lan:8080", "sc5000.lan"} {
+			r := httptest.NewRequest("GET", "/api/console-qr", nil)
+			r.Host = loopHost
+			targetLoopback := ui.consoleTarget(r)
+			if targetLoopback != lan {
+				t.Errorf("loopback/placeholder %q got %q, want %s", loopHost, targetLoopback, lan)
+			}
+		}
+	})
+
+	t.Run("CustomPublicURL", func(t *testing.T) {
+		// Case 4: Explicit custom PublicURL (e.g. https://mydeck.example.com)
+		r := httptest.NewRequest("GET", "/api/console-qr", nil)
+		uiCustom := New(Config{PublicURL: "https://mydeck.example.com", StateDir: t.TempDir()}, nil)
+		if got := uiCustom.consoleTarget(r); got != "https://mydeck.example.com" {
+			t.Fatalf("target = %q, want https://mydeck.example.com", got)
+		}
+	})
+
+	t.Run("DefaultPublicURLReplaced", func(t *testing.T) {
+		// Case 5: Default PublicURL (http://sc5000.lan:8080) is replaced by caller host
+		uiDefault := New(Config{PublicURL: "http://sc5000.lan:8080", StateDir: t.TempDir()}, nil)
+		r := httptest.NewRequest("GET", "/api/console-qr", nil)
+		r.Host = "10.0.0.42:8080"
+		if got := uiDefault.consoleTarget(r); got != "http://10.0.0.42:8080" {
+			t.Fatalf("target = %q, want http://10.0.0.42:8080", got)
+		}
+	})
+
+	t.Run("EndpointPNG", func(t *testing.T) {
+		// Case 7: Verify /api/console-qr endpoint produces valid PNG
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest("GET", "/api/console-qr", nil)
+		r.AddCookie(&http.Cookie{Name: "stream_sync", Value: ui.AccessToken()})
+		ui.ServeHTTP(w, r)
+		if w.Code != 200 {
+			t.Fatalf("console-qr status: %d", w.Code)
+		}
+		if ct := w.Header().Get("Content-Type"); ct != "image/png" {
+			t.Fatalf("content-type = %q, want image/png", ct)
+		}
+		if !bytes.HasPrefix(w.Body.Bytes(), []byte("\x89PNG")) {
+			t.Fatalf("console-qr response is not a valid PNG")
+		}
+	})
 }
