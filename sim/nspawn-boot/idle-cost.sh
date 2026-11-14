@@ -3,6 +3,11 @@ idle_cost_prepare() {
     mkdir -p "$W/data/enginex/ui"
     # A settings.conf to boot with, e.g. one that turns the four-deck layout on.
     [ -z "${NSPAWN_IDLE_SETTINGS:-}" ] || install -m 600 "$NSPAWN_IDLE_SETTINGS" "$W/data/enginex/ui/settings.conf"
+    # The working tree's shell scripts instead of the image's: a change is measured without a rebuild.
+    if [ "${NSPAWN_IDLE_TREE:-0}" = 1 ]; then
+        cp "$REPO/rootfs-overlay/etc/sc5000/engine-ui-guard" "$R/etc/sc5000/engine-ui-guard"
+        cp "$REPO/rootfs-overlay/usr/local/bin/sc5000-perf-tune" "$R/usr/local/bin/sc5000-perf-tune"
+    fi
     [ "${NSPAWN_IDLE_STOCK:-0}" = 1 ] || return 0
     # Baseline: the image's own Engine in safe mode (no hook, no UI pack) and none of our daemons.
     : > "$W/data/enginex/ui/safe-mode"
