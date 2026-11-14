@@ -25,11 +25,17 @@ func TestHasLibrary(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	if _, err = db.Exec(`CREATE TABLE Track(id INTEGER PRIMARY KEY)`); err != nil {
+	if _, err = db.Exec(`CREATE TABLE Track(id INTEGER PRIMARY KEY); CREATE TABLE Playlist(id INTEGER PRIMARY KEY)`); err != nil {
 		t.Fatal(err)
 	}
 	if hasLibrary(dir) {
 		t.Fatal("skeleton with an empty Track table")
+	}
+	if _, err = db.Exec(`INSERT INTO Playlist DEFAULT VALUES`); err != nil {
+		t.Fatal(err)
+	}
+	if !hasLibrary(dir) {
+		t.Fatal("m.db with only a playlist must not be replaced")
 	}
 	if _, err = db.Exec(`INSERT INTO Track DEFAULT VALUES`); err != nil {
 		t.Fatal(err)
@@ -50,7 +56,7 @@ func TestImportedStampIgnoresSkeleton(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	if _, err = db.Exec(`CREATE TABLE Track(id INTEGER PRIMARY KEY)`); err != nil {
+	if _, err = db.Exec(`CREATE TABLE Track(id INTEGER PRIMARY KEY); CREATE TABLE Playlist(id INTEGER PRIMARY KEY)`); err != nil {
 		t.Fatal(err)
 	}
 	writeStamp(dir, "s1")

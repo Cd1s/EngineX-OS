@@ -532,6 +532,9 @@ func completeOverviews(ctx context.Context, mount string, deadline time.Time) {
 }
 
 func cleanEmptyEngineLibrary(dir string) {
+	if enginedb.OpenElsewhere(filepath.Join(dir, "m.db")) != 0 {
+		return
+	}
 	// Leave no Engine Library for Engine to mistake for one; Remove spares non-empty dirs.
 	// An empty m.db is what an earlier build left behind on a failed import.
 	for _, name := range []string{"m.db", stateName} {
@@ -581,7 +584,7 @@ func importedStamp(dir string) string {
 	return strings.TrimSpace(string(b))
 }
 
-// hasLibrary reports an m.db with tracks, whatever wrote it. Stock Engine leaves a
+// hasLibrary reports an m.db with tracks or playlists, whatever wrote it. Stock Engine leaves a
 // ~80 KB skeleton with an empty Track table when it saw a rekordbox stick without
 // the unpatched import, and that is not a library. An m.db that cannot be read
 // counts as one, so it is never replaced blindly.
@@ -596,7 +599,7 @@ func hasLibrary(dir string) bool {
 	}
 	defer db.Close()
 	var n int
-	return db.QueryRow(`SELECT count(*) FROM Track`).Scan(&n) != nil || n > 0
+	return db.QueryRow(`SELECT EXISTS(SELECT 1 FROM Track) OR EXISTS(SELECT 1 FROM Playlist)`).Scan(&n) != nil || n > 0
 }
 
 // HasPopulatedLibrary reports whether mount carries a readable Engine Library
@@ -669,6 +672,9 @@ func stagedImport(ctx context.Context, dir string, l *rekordbox.Library, opts en
 		return enginedb.Result{}, err
 	}
 	defer unlock()
+	if enginedb.LibraryInUse(res.FullPath("")) {
+		return enginedb.Result{}, enginedb.ErrLibraryInUse
+	}
 	// An earlier run may have died between the two renames.
 	if err = finishPublish(dir, stateName, "m.db"); err != nil {
 		return enginedb.Result{}, err
@@ -678,6 +684,27 @@ func stagedImport(ctx context.Context, dir string, l *rekordbox.Library, opts en
 		return enginedb.Result{}, err
 	}
 	defer os.RemoveAll(work)
+	// Keep one read-only connection so data_version detects commits to m.db
+	// or its WAL while we import the snapshot. File identity also catches an
+	// Engine-created/replaced database, including an initially absent m.db.
+	p := filepath.Join(dir, "m.db")
+	before, err := os.Stat(p)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return enginedb.Result{}, err
+	}
+	var source *sql.DB
+	var version int
+	if before != nil {
+		source, err = sql.Open("sqlite", (&url.URL{Scheme: "file", Path: p, RawQuery: "mode=ro&_pragma=busy_timeout(5000)"}).String())
+		if err != nil {
+			return enginedb.Result{}, err
+		}
+		defer source.Close()
+		source.SetMaxOpenConns(1)
+		if err = source.QueryRowContext(ctx, `PRAGMA data_version`).Scan(&version); err != nil {
+			return enginedb.Result{}, err
+		}
+	}
 	// Tracks and bridge state already held on this volume stay in the library for incremental sync.
 	for _, name := range []string{"m.db", stateName} {
 		if err = snapshot(filepath.Join(dir, name), filepath.Join(work, name)); err != nil {
@@ -690,7 +717,31 @@ func stagedImport(ctx context.Context, dir string, l *rekordbox.Library, opts en
 	if err != nil {
 		return result, err
 	}
-	return result, publish(work, dir, stateName, "m.db")
+	return result, publish(work, dir, func() error {
+		after, err := os.Stat(p)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		changed := (before == nil) != (after == nil)
+		if before != nil && after != nil {
+			changed = !os.SameFile(before, after)
+			var current int
+			if err = source.QueryRowContext(ctx, `PRAGMA data_version`).Scan(&current); err != nil {
+				return err
+			}
+			changed = changed || current != version
+		}
+		if changed {
+			return errors.New("Engine library changed during import; retry on next mount")
+		}
+		if enginedb.LibraryInUse(res.FullPath("")) {
+			return enginedb.ErrLibraryInUse
+		}
+		if source != nil {
+			return source.Close()
+		}
+		return nil
+	}, stateName, "m.db")
 }
 
 // mergeByPath is Reconcile without touching the disk.
