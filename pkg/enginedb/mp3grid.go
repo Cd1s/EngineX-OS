@@ -482,29 +482,32 @@ func FixMP3Grids(ctx context.Context, root string, opts MP3GridOptions) (MP3Grid
 
 	lastID := cursor.lastID
 	committedID := cursor.lastID
+	savedID := cursor.lastID
 	var committedCand, committedCorr, committedUnch, committedSkip int
-	saveCursor := func() {
-		if committedID > cursor.lastID {
-			_ = writeMP3GridCursor(cursorPath, mp3GridCursor{
+	saveCursor := func() error {
+		if committedID > savedID {
+			if err := writeMP3GridCursor(cursorPath, mp3GridCursor{
 				lastID:     committedID,
 				candidates: cursor.candidates + committedCand,
 				corrected:  cursor.corrected + committedCorr,
 				unchanged:  cursor.unchanged + committedUnch,
 				skipped:    cursor.skipped + committedSkip,
-			})
+			}); err != nil {
+				return fmt.Errorf("mp3 grid cursor: %w", err)
+			}
+			savedID = committedID
 		}
+		return nil
 	}
 
 	for {
 		if ctx.Err() != nil || (!deadline.IsZero() && nowFn().After(deadline)) {
 			r.Interrupted = true
-			saveCursor()
-			return r, ctx.Err()
+			return r, errors.Join(ctx.Err(), saveCursor())
 		}
 		if LibraryInUse(root) {
 			r.Interrupted = true
-			saveCursor()
-			return r, ErrLibraryInUse
+			return r, errors.Join(ErrLibraryInUse, saveCursor())
 		}
 
 		rows, err := db.QueryContext(ctx, `
@@ -668,8 +671,7 @@ func FixMP3Grids(ctx context.Context, root string, opts MP3GridOptions) (MP3Grid
 		if len(updates) > 0 {
 			if LibraryInUse(root) {
 				r.Interrupted = true
-				saveCursor()
-				return r, ErrLibraryInUse
+				return r, errors.Join(ErrLibraryInUse, saveCursor())
 			}
 			tx, err := db.BeginTx(ctx, nil)
 			if err != nil {
@@ -703,8 +705,11 @@ func FixMP3Grids(ctx context.Context, root string, opts MP3GridOptions) (MP3Grid
 			committedSkip = r.Skipped
 		}
 
+		// Checkpoint completed pages even when none of their tracks needed an UPDATE.
+		if err := saveCursor(); err != nil {
+			return r, err
+		}
 		if r.Interrupted {
-			saveCursor()
 			return r, interruptedErr
 		}
 	}

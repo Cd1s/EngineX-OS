@@ -10,6 +10,7 @@ import (
 	"errors"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -745,5 +746,77 @@ func TestFixMP3GridsRefusesOpenLibrary(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(filepath.Dir(dbPath), MP3GridStampFile)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("stamp written while library was open")
+	}
+}
+
+// #246: completed pages, including those with no UPDATE, survive a hard exit.
+func TestFixMP3GridsCursorSurvivesProcessExit(t *testing.T) {
+	if root := os.Getenv("ENGINEX_TEST_MP3_CURSOR_ROOT"); root != "" {
+		calls := 0
+		base := time.Unix(1700000000, 0)
+		_, _ = FixMP3Grids(context.Background(), root, MP3GridOptions{Budget: time.Second, BatchSize: 1, Now: func() time.Time {
+			calls++
+			// The first page has finished; stop before the next page begins.
+			if calls == 4 {
+				os.Exit(73)
+			}
+			return base
+		}})
+		os.Exit(74)
+	}
+	for _, kind := range []string{"unchanged", "skipped", "corrected"} {
+		t.Run(kind, func(t *testing.T) {
+			dbPath, root, db := testlibrary.Create(t)
+			switch kind {
+			case "unchanged":
+				writeVBRIFixture(t, root, "Music/Stream/a.mp3")
+			case "corrected":
+				copyAudioFixture(t, root, "Music/Stream/a.mp3", "01-lame-cbr-info-48000.mp3")
+			}
+			td := makeTrackDataBlob(t, 48000, 480000, 1, [3]float64{0.6, 0.3, 0.1}, false)
+			bt := makeAnalyzerBeatBlob(t, 48000, 480000, 1000, 481000, 16)
+			insertAnalyzerTrack(t, db, 1, "../Music/Stream/a.mp3", "mp3", "", 0, td, nil, bt, nil, nil)
+			db.Close()
+			cmd := exec.Command(os.Args[0], "-test.run=^TestFixMP3GridsCursorSurvivesProcessExit$")
+			cmd.Env = append(os.Environ(), "ENGINEX_TEST_MP3_CURSOR_ROOT="+root)
+			output, err := cmd.CombinedOutput()
+			if e, ok := err.(*exec.ExitError); !ok || e.ExitCode() != 73 {
+				t.Fatalf("helper: %v %s", err, output)
+			}
+			cursor := filepath.Join(filepath.Dir(dbPath), MP3GridCursorFile)
+			if _, err := os.Stat(cursor); err != nil {
+				t.Fatalf("completed page has no persisted cursor after process exit: %v", err)
+			}
+			if got := readMP3GridCursor(cursor); got.lastID != 1 || got.candidates != 1 {
+				t.Fatalf("cursor=%+v, want track 1 processed", got)
+			}
+			rep, err := FixMP3Grids(context.Background(), root, MP3GridOptions{})
+			if err != nil || rep.Candidates != 0 || rep.Interrupted {
+				t.Fatalf("resume re-inspected completed page: %+v, %v", rep, err)
+			}
+		})
+	}
+}
+
+func TestFixMP3GridsReturnsCursorWriteError(t *testing.T) {
+	dbPath, root, db := testlibrary.Create(t)
+	writeVBRIFixture(t, root, "Music/Stream/a.mp3")
+	td := makeTrackDataBlob(t, 48000, 480000, 1, [3]float64{}, false)
+	bt := makeAnalyzerBeatBlob(t, 48000, 480000, 1000, 481000, 16)
+	insertAnalyzerTrack(t, db, 1, "../Music/Stream/a.mp3", "mp3", "", 0, td, nil, bt, nil, nil)
+	db.Close()
+	calls := 0
+	_, err := FixMP3Grids(context.Background(), root, MP3GridOptions{Budget: time.Second, BatchSize: 1, Now: func() time.Time {
+		calls++
+		if calls == 3 {
+			// Make the atomic rename fail after initial path validation.
+			if err := os.Mkdir(filepath.Join(filepath.Dir(dbPath), MP3GridCursorFile), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return time.Unix(1700000000, 0)
+	}})
+	if err == nil {
+		t.Fatal("cursor write failure was ignored")
 	}
 }

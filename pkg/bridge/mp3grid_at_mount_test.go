@@ -8,23 +8,25 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/Cd1s/EngineX-OS/internal/testfixture"
 	"github.com/Cd1s/EngineX-OS/pkg/bridge"
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 )
 
-func TestConvertAtMountFixesEngineXMP3Grids(t *testing.T) {
+func seedEngineXMP3GridAtMount(t *testing.T, opts enginedb.Options) (string, func() float64) {
+	t.Helper()
 	root := t.TempDir()
 	testfixture.Export(t, root)
-	if _, err := bridge.ConvertAtMount(context.Background(), root, enginedb.Options{}, false); err != nil {
+	if _, err := bridge.ConvertAtMount(context.Background(), root, opts, false); err != nil {
 		t.Fatal(err)
 	}
 	mp3Bytes, err := os.ReadFile(filepath.Join("..", "..", "internal", "audioheader", "testdata", "01-lame-cbr-info-44100.mp3"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	dst := filepath.Join(root, "Music", "Stream", "pre-r4.mp3")
+	dst := filepath.Join(root, "MUSIC", "Stream", "pre-r4.mp3")
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +67,7 @@ func TestConvertAtMountFixesEngineXMP3Grids(t *testing.T) {
 	}
 
 	db := dbOpen(t, root)
-	res, err := db.Exec(`INSERT INTO Track(path,filename,fileType,comment,isAnalyzed,isAvailable,isMetadataImported,isBeatGridLocked) VALUES('../Music/Stream/pre-r4.mp3','pre-r4.mp3','mp3','[320k] MP3 44100 Hz; FLAC unavailable',1,1,1,0)`)
+	res, err := db.Exec(`INSERT INTO Track(path,filename,fileType,comment,isAnalyzed,isAvailable,isMetadataImported,isBeatGridLocked) VALUES('../MUSIC/Stream/pre-r4.mp3','pre-r4.mp3','mp3','[320k] MP3 44100 Hz; FLAC unavailable',1,1,1,0)`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,12 +79,6 @@ func TestConvertAtMountFixesEngineXMP3Grids(t *testing.T) {
 		t.Fatal(err)
 	}
 	db.Close()
-
-	// Next mount hits the rekordbox stamp bypass yet still fixes the EngineX MP3 row.
-	r, err := bridge.ConvertAtMount(context.Background(), root, enginedb.Options{}, false)
-	if err != nil || !r.Bypassed {
-		t.Fatalf("ConvertAtMount: %+v %v", r, err)
-	}
 
 	readBeat0 := func() float64 {
 		d := dbOpen(t, root)
@@ -97,6 +93,18 @@ func TestConvertAtMountFixesEngineXMP3Grids(t *testing.T) {
 		}
 		return math.Float64frombits(binary.LittleEndian.Uint64(raw[25:33]))
 	}
+	return root, readBeat0
+}
+
+func TestConvertAtMountFixesEngineXMP3Grids(t *testing.T) {
+	root, readBeat0 := seedEngineXMP3GridAtMount(t, enginedb.Options{})
+
+	// Next mount hits the rekordbox stamp bypass yet still fixes the EngineX MP3 row.
+	r, err := bridge.ConvertAtMount(context.Background(), root, enginedb.Options{}, false)
+	if err != nil || !r.Bypassed {
+		t.Fatalf("ConvertAtMount: %+v %v", r, err)
+	}
+
 	if got := readBeat0(); math.Abs(got-(5000.0-2257)) > 1e-6 {
 		t.Fatalf("beat0=%v, want %v", got, 5000.0-2257)
 	}
@@ -107,5 +115,29 @@ func TestConvertAtMountFixesEngineXMP3Grids(t *testing.T) {
 	}
 	if got := readBeat0(); math.Abs(got-(5000.0-2257)) > 1e-6 {
 		t.Fatalf("beat0 after second mount=%v, want %v", got, 5000.0-2257)
+	}
+}
+
+// #246: the MP3 grid pass must share the conversion's read deadline.
+func TestConvertAtMountMP3GridsShareReadBudget(t *testing.T) {
+	root, readBeat0 := seedEngineXMP3GridAtMount(t, enginedb.Options{Fast: true})
+	if err := os.Remove(filepath.Join(root, "Engine Library/Database2/.rb-bridge-stamp")); err != nil {
+		t.Fatal(err)
+	}
+	restore := bridge.SlowExportReadForTest(0, time.Nanosecond)
+	defer restore()
+	r, err := bridge.ConvertAtMount(context.Background(), root, enginedb.Options{}, false)
+	if err != nil || r.Deferred == 0 {
+		t.Fatalf("ConvertAtMount: %+v %v", r, err)
+	}
+	if got := readBeat0(); got != 5000 {
+		t.Fatalf("MP3 grid changed after shared read budget exhausted: beat0=%v, want 5000; import deferred=%d", got, r.Deferred)
+	}
+	restore()
+	if _, err := bridge.ConvertAtMount(context.Background(), root, enginedb.Options{}, false); err != nil {
+		t.Fatal(err)
+	}
+	if got := readBeat0(); math.Abs(got-2743) > 1e-6 {
+		t.Fatalf("next mount beat0=%v, want 2743", got)
 	}
 }
