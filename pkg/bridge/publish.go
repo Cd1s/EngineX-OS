@@ -61,7 +61,7 @@ func snapshot(src, dst string) error {
 }
 
 // publish moves the named databases from work into dir as one unit.
-func publish(work, dir string, names ...string) error {
+func publish(work, dir string, unchanged func() error, names ...string) error {
 	stage := filepath.Join(dir, publishDir)
 	if err := os.RemoveAll(stage); err != nil {
 		return err
@@ -76,6 +76,12 @@ func publish(work, dir string, names ...string) error {
 		if err := syncFile(filepath.Join(stage, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
+	}
+	// Check after the potentially slow copies, before READY makes this stage
+	// recoverable. An aborted import must never publish on the next mount.
+	if err := unchanged(); err != nil {
+		os.RemoveAll(stage)
+		return err
 	}
 	if err := os.WriteFile(filepath.Join(stage, publishReady), nil, 0o644); err != nil {
 		return err

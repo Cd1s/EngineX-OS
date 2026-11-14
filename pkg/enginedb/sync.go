@@ -134,7 +134,7 @@ func open(ctx context.Context, p string) (*sql.DB, *sql.Tx, error) {
 		}
 	}
 	u := url.URL{Scheme: "file", Path: p}
-	db, e := sql.Open("sqlite", u.String()+"?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)")
+	db, e := sql.Open("sqlite", u.String()+"?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_txlock=immediate")
 	if e != nil {
 		return nil, nil, e
 	}
@@ -442,6 +442,11 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 		return result, fmt.Errorf("bridge already syncing: %w", err)
 	}
 	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	// Preparation can outlast the mount hook's window before Engine opens the
+	// library. Check the actual output, including an explicit DatabaseDir.
+	if OpenElsewhere(filepath.Join(dir, "m.db")) != 0 {
+		return result, ErrLibraryInUse
+	}
 	db, tx, err := open(ctx, filepath.Join(dir, "m.db"))
 	if err != nil {
 		return result, err
@@ -805,6 +810,11 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 		if _, err = migrateArtwork(ctx, tx, artDir, opts.Deadline, now); err != nil {
 			return result, err
 		}
+	}
+	// Resume prepares unfinished files inside this transaction. Engine may
+	// have opened the library since the pre-write check; roll back in that case.
+	if OpenElsewhere(filepath.Join(dir, "m.db")) != 0 {
+		return result, ErrLibraryInUse
 	}
 	err = tx.Commit()
 	return result, err
