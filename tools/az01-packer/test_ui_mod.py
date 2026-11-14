@@ -5578,6 +5578,9 @@ class StemsHqHintAndInstallerTest(unittest.TestCase):
         rows = bp.load_dict()
         offline_en = "On-deck stems (basic quality). For high-quality stems, run the EngineX Stems service on a computer on the same network."
         online_prefix = "High-quality stems:"
+        basic_hint = "For high-quality stems, that computer needs the htdemucs model."
+        self.assertEqual(rows["Basic-quality stems:"], {"zh-Hans": "基础音质分轨：", "zh-Hant": "基礎音質分軌："})
+        self.assertIn("htdemucs", rows[basic_hint]["zh-Hans"])
         self.assertIn(offline_en, rows)
         self.assertIn(online_prefix, rows)
         self.assertIn("EngineX Stems", rows[offline_en]["zh-Hans"])
@@ -5599,13 +5602,16 @@ function scT(s) {{
 assert.equal(scLanStemsLine(null, 'en'), {json.dumps(offline_en)});
 assert.equal(scLanStemsLine({{online: false, hostname: 'studio-mac', backend: 'htdemucs'}}, 'en'), {json.dumps(offline_en)});
 assert.equal(scLanStemsLine({{online: true, hostname: 'studio-mac', backend: 'htdemucs'}}, 'en'), 'High-quality stems: studio-mac (htdemucs)');
-assert.equal(scLanStemsLine({{online: true, endpoint: 'http://192.168.1.9:17890'}}, 'en'), 'High-quality stems: http://192.168.1.9:17890 (htdemucs)');
+// #238: hpss, and a service that does not name its backend (it ran hpss), are not "high quality".
+assert.equal(scLanStemsLine({{online: true, endpoint: 'http://192.168.1.9:17890'}}, 'en'), 'Basic-quality stems: http://192.168.1.9:17890 (hpss). ' + {json.dumps(basic_hint)});
+assert.equal(scLanStemsLine({{online: true, hostname: 'studio-mac', backend: 'hpss'}}, 'en'), 'Basic-quality stems: studio-mac (hpss). ' + {json.dumps(basic_hint)});
 scLang = 'zh-Hans';
 assert.equal(scLanStemsLine(null, scLang), rows[{json.dumps(offline_en)}]['zh-Hans']);
 assert.equal(scLanStemsLine({{online: true, hostname: 'studio-mac', backend: 'htdemucs'}}, scLang), '高音质分轨：studio-mac (htdemucs)');
 scLang = 'zh-Hant';
 assert.equal(scLanStemsLine(null, scLang), rows[{json.dumps(offline_en)}]['zh-Hant']);
-assert.equal(scLanStemsLine({{online: true, hostname: 'studio-mac', backend: 'hpss'}}, scLang), '高音質分軌：studio-mac (hpss)');
+assert.equal(scLanStemsLine({{online: true, hostname: 'studio-mac', backend: 'htdemucs'}}, scLang), '高音質分軌：studio-mac (htdemucs)');
+assert.equal(scLanStemsLine({{online: true, hostname: 'studio-mac', backend: 'hpss'}}, scLang), '基礎音質分軌：studio-mac (hpss)。如需高音質分軌，該電腦需要安裝 htdemucs 模型。');
 """
         r = subprocess.run(["node", "-e", script], capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)

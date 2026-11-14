@@ -34,7 +34,7 @@ Everything runs right inside the familiar Denon DJ interface — install it and 
 ### 1. 4-Part Stems on Every Model (Vocals / Melody / Bass / Drums)
 - Swipe left on any local or streaming track to split **Vocals, Melody, Bass, and Drums**, organized automatically in the sidebar `Stems` list;
 - Mute or solo individual stems from the Performance Pads, or press **Shift + Cue (PFL)** on supported mixer consoles (`Profile → Playback → Stems EQ Mode`) to turn channel `HIGH / MID / LOW` EQ knobs into smooth Stems level controls;
-- Separates tracks standalone on the deck with no computer required, or automatically uses a Mac / PC on the same Wi-Fi / LAN for high-quality `htdemucs` neural separation (`PRIME 4 G2` and `SYSTEM ONE` keep their official Stems behavior).
+- Separates tracks standalone on the deck with no computer required (basic quality), or automatically uses a Mac / PC on the same Wi-Fi / LAN for high-quality `htdemucs` neural separation (`PRIME 4 G2` and `SYSTEM ONE` keep their official Stems behavior).
 
 ### 2. 7 Built-In Streaming Services (Phone QR & One-Tap Login)
 - **TIDAL, NetEase Cloud Music, Spotify, Deezer, SoundCloud, Beatport, and Apple Music** appear right alongside your USB and SD drives in the Source menu;
@@ -265,9 +265,15 @@ If stock already hangs at the logo and SSH is unavailable, first flash EngineX w
 - Tap **Update** on the touchscreen — all 16 first- and second-generation models download, verify, and install `5.3.0.4` directly while keeping your library, logins, saved views, and Mods (`*-Data-Bundle.tar.gz` is also included in the GitHub Release alongside `*-Update.img` so older `5.3.0.2` / `5.3.0.3` 2nd-gen decks one-tap OTA upgrade seamlessly on screen and automatically unlock `.img` updates on boot).
 
 ### Optional: High-Quality Neural Stems on Your Computer
-> **In development for 5.3.0.5 — on-deck Stems (#238):** without a computer, the deck now separates vocals, bass, drums and melody with a spectral method instead of splitting frequency bands. It is not a neural network, so some bleed between the stems remains. Measured: 60 seconds of music took 16.5–17.0 seconds of work on an idle SC5000 before the vocals became stereo; that change added about 6 % on the build host (2.50 s → 2.65 s for the same audio on its armhf core) and has not been re-measured on a deck. While the deck is playing it only gets idle processor time: that has not been measured, so expect it to take longer. For the cleanest stems, use the computer service below.
+> **In development for 5.3.0.5 — on-deck Stems (#238):** without a computer, the deck now separates vocals, bass, drums and melody with a spectral method instead of splitting frequency bands. It is not a neural network, so some bleed between the stems remains. Measured: 60 seconds of music took 16.5–17.0 seconds of work on an idle SC5000 before the vocals became stereo; that change added about 6 % on the build host (2.50 s → 2.65 s for the same audio on its armhf core) and has not been re-measured on a deck. While the deck is playing it only gets idle processor time: that has not been measured, so expect it to take longer. For the cleanest stems, use the computer service below. From 5.3.0.5 the deck also stops calling a computer that runs `hpss` high quality: it shows `Basic-quality stems: <host> (hpss)` and says that computer needs the `htdemucs` model (5.3.0.4 shows `High-quality stems` for it).
 
-On-deck separation uses a fast lightweight split. For studio-grade neural Stems (`htdemucs` on GPU, Apple Silicon MPS, or CPU), unzip `EngineX-Installer` on a Mac or PC on the same Wi-Fi / LAN and double-click `stems/run-home-worker.command` on macOS, or run one command in a terminal (append `hpss` if you want lightweight mode without PyTorch). Your deck discovers the computer automatically with no IP or password setup and displays `High-quality stems: <host> (htdemucs)` under **Profile → Library** and **Settings → About / Update**:
+Stems on first-generation units are made in one of three ways, and the deck names the one in use under **Profile → Library** and **Settings → About / Update** (`PRIME 4 G2` and `SYSTEM ONE` use the stock Stems):
+
+- **On-deck Stems (basic quality)**: no computer needed. Not a neural network, so some bleed between the stems remains.
+- **Computer Stems, `hpss` (basic quality)**: the computer service without the neural model (started with `hpss`, or PyTorch / Demucs is not installed). A spectral approximation, not a neural network.
+- **Computer Stems, `htdemucs` (high quality, recommended)**: a neural model, the one to use for real separation. A GPU is recommended (NVIDIA CUDA or Apple Silicon); without one it runs on the CPU and takes longer.
+
+For the high-quality mode (`htdemucs` on GPU, Apple Silicon MPS, or CPU), unzip `EngineX-Installer` on a Mac or PC on the same Wi-Fi / LAN and double-click `stems/run-home-worker.command` on macOS, or run one command in a terminal (append `hpss` if you want lightweight mode without PyTorch). Your deck discovers the computer automatically with no IP or password setup and displays `High-quality stems: <host> (htdemucs)` under **Profile → Library** and **Settings → About / Update**:
 ```sh
 # macOS (double-click stems/run-home-worker.command, or run in Terminal) / Linux
 ./stems/run-home-worker.sh

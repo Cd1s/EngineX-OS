@@ -2689,11 +2689,12 @@ SERVICES_MAIN = """
 	function scLanStemsLine(st, lang) {
 		void lang
 		const host = st && st.online ? String(st.hostname || st.endpoint || "") : ""
-		if (host) {
-			const backend = String(st.backend || "htdemucs")
-			return scT("High-quality stems:") + (scLang === "en" ? " " : "") + host + " (" + backend + ")"
-		}
-		return scT("On-deck stems (basic quality). For high-quality stems, run the EngineX Stems service on a computer on the same network.")
+		if (!host) return scT("On-deck stems (basic quality). For high-quality stems, run the EngineX Stems service on a computer on the same network.")
+		const en = scLang === "en"
+		// #238: only the neural model is high quality. A service without it runs hpss
+		// (so did every service that does not name its backend).
+		if (st.backend === "htdemucs") return scT("High-quality stems:") + (en ? " " : "") + host + " (htdemucs)"
+		return scT("Basic-quality stems:") + (en ? " " : "") + host + " (hpss)" + (en ? ". " : "。") + scT("For high-quality stems, that computer needs the htdemucs model.")
 	}
 	property string scUpdateText: ""
 	property bool scBroadcastOn: false
