@@ -439,13 +439,16 @@ func consoleURL(r *http.Request) string {
 	if err != nil {
 		name = r.Host
 	}
-	if ip := net.ParseIP(name); name == "" || name == "localhost" || name == "sc5000.lan" || (ip != nil && ip.IsLoopback()) {
+	host := strings.Trim(name, "[]")
+	if ip := net.ParseIP(host); host == "" || host == "localhost" || host == "sc5000.lan" || (ip != nil && ip.IsLoopback()) {
 		return "http://" + lanHost() + ":8080"
 	}
-	if r.TLS != nil || strings.HasSuffix(name, ".trycloudflare.com") {
-		return "https://" + r.Host
+	proto, _, _ := strings.Cut(r.Header.Get("X-Forwarded-Proto"), ",")
+	scheme := "http"
+	if r.TLS != nil || strings.EqualFold(strings.TrimSpace(proto), "https") || strings.HasSuffix(name, ".trycloudflare.com") {
+		scheme = "https"
 	}
-	return "http://" + r.Host
+	return (&url.URL{Scheme: scheme, Host: r.Host}).String()
 }
 
 // legacyAccessCode matches codes from older releases: providers.RandomID (43 base64url) or 32 hex.
