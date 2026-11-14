@@ -70,7 +70,7 @@ Everything runs right inside the familiar Denon DJ interface — install it and 
 - **Per-deck `Reverse Jog Wheel` (#213)**: one toggle on 1-jog players, separate left / right toggles on 2-jog consoles, in `Settings → Device` and the `:8080` web console; hidden on motorized-platter models.
 - **`Fader Echo` on every console (#258) & motorized platters in 4-deck layouts (#263)**: `Fader Echo` uses the native per-channel Transition FX on all 5.3.0 consoles without stacked echo or stutter; the platter motor and touch nudge now work for the decks a `SC5000M` / `SC6000M` holds in `4 Decks` or `Paired Player`.
 - **`Mixstream` Sweep FX and Stems EQ pads (#261)**: `Mixstream Pro`, `Pro+` and `Pro Go` keep Sweep FX, Stems EQ and the Beat Jump bank usable together on the pads bar.
-- **On-deck Stems really separate (#238)**: without a computer the deck separates vocals, bass, drums and melody with a spectral method instead of splitting frequency bands. It is not a neural network, so some bleed remains; the computer service stays the cleanest option.
+- **On-deck Stems really separate (#238)**: without a computer the deck separates vocals, bass, drums and melody with a spectral method instead of splitting frequency bands. It is not a neural network, so some bleed remains; the computer service stays the cleanest option. Vocals keep their stereo placement, and Stems uploads that stall or trickle no longer hold a slot or worker (#243).
 - **Set tracklist export (#268)**: the web console's Set tracklist card downloads a recorded set as text or CSV, keeping play order and repeated tracks.
 - **rekordbox colours and sizes**: `3-Band` uses the rekordbox / CDJ-3000 palette, and the deck overview of tracks from a rekordbox USB is as tall as Engine's own, also for tracks played before or whose import was cut short.
 - **Live Stream is WAV-only and captures on demand**: the console offers one fixed format (WAV, 16-bit, 48 kHz, stereo) and no Shoutcast target; with nobody listening nothing is captured, which saves about 7% of one CPU core on an idle deck.
@@ -78,8 +78,8 @@ Everything runs right inside the familiar Denon DJ interface — install it and 
 - **Remote Library covers (#223)**: Engine DJ Desktop Remote Library tracks show their covers in the list on `SC LIVE 4`.
 
 ### Fixes & Improvements
-- **Large and slow USB sticks**: Rekordbox imports with thousands of tracks resume cues and artwork within the mount time limit (#264, #272), keep the FAT32 bridge state under 4 GiB, backfill overviews even when a card's export is slow to read, and keep existing track and playlist IDs and deck edits when a legacy import is completed. Libraries staged from Pro DJ Link players are bounded per drive, and the other player's drive offers no Stems, as in stock (#252).
-- **Eject and update from HFS+ sticks**: ejecting a read-only HFS+ stick works while Engine has its library open and a refused eject says why; a firmware update from an `*-Update.img` on a Mac-formatted stick installs the file that was chosen.
+- **Large and slow USB sticks**: Rekordbox imports with thousands of tracks resume cues and artwork within the mount time limit (#264, #272), keep the FAT32 bridge state under 4 GiB, backfill overviews even when a card's export is slow to read, and keep existing track and playlist IDs and deck edits when a legacy import is completed, and an import no longer overwrites library changes Engine makes at the same time. Libraries staged from Pro DJ Link players are bounded per drive, and the other player's drive offers no Stems, as in stock (#252).
+- **Eject and update from HFS+ sticks**: ejecting a read-only HFS+ stick works while Engine has its library open and a refused eject says why; a firmware update from an `*-Update.img` on a Mac-formatted stick installs the file that was chosen, in normal and safe mode.
 - **Shadow deck scratching**: heavy and very fast scratching moves the shadow deck smoothly along the source's own path.
 - **Streaming**: Spotify loads and the TIDAL login carrier no longer interfere (#269), Spotify Collection has no blank rows (#279), Spotify's native Ogg keeps a name Engine recognizes (#277), provider settings are written atomically (#247) and partial provider pages load with strict quality (#248).
 - **Lighter idle deck**: the boot watch and the 30-second thread sweep do far less work, and the Link / Stems gates follow stock for network drives.
@@ -201,7 +201,7 @@ Everything runs right inside the familiar Denon DJ interface — install it and 
 
 The system is slimmed down so all extra features use minimal storage and leave more free memory than stock firmware:
 
-| Metric | Stock / Before Refactoring | `EngineX OS 5.3.0.5` (Measured on SC5000) | What It Means for DJs |
+| Metric | Stock / Before Refactoring | `EngineX OS 5.3.0.5` (numbers measured on SC5000 with 5.3.0.4) | What It Means for DJs |
 | :--- | :--- | :--- | :--- |
 | **Firmware Image Size (`*-Update.img`)** | Official stock 5.3.0: `147.79 MB`<br>Earlier custom build: `~210 MB` | **`151.44 MB`** (SC6000 `151.58 MB`, PRIME 4 `151.52 MB`) | **Only `3.64 MB` larger than stock firmware** |
 | **Internal Storage Used After Clean Flash** | `~243 MB` left behind by older builds | **`17.2 MB` for core app + 3-language UI** (`45.6 MB` including extra drive format drivers) | Frees up **nearly `200 MB`** of internal flash space |
