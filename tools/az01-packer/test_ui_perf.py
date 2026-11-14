@@ -64,6 +64,7 @@ const Planck = {getProperty(path) {
     return {translator: properties[path] ||= {state: false, value: 0, unnormalized: 0, string: ""}};
 }};
 var scPropCache = {}, scCuePropCache = {}, scCueInfoCache = {}, scCueInfoMemo = {}, scUiPoll = null, scUiPollAt = 0, scUiDigest = "", scUiAppliedAt = 0, ensured = 0;
+var scScope = "", scScopePending = 0, scUiPollScope = "";
 function scEnsureTidal() { ensured++; }
 const reads = [];
 const clock = d => ({get tick() { reads.push(d); return d; }});

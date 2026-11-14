@@ -6424,7 +6424,7 @@ globalThis.Planck = {librarianController:{
     streamingPlaylistsController:{invalidateUI() {}}
 }};
 Object.assign(globalThis, {
-    scSources:['tidal','spotify'], scLoggedIn:['spotify'],
+    scSources:['tidal','spotify'], scLoggedIn:['spotify'], scScopePending:0,
     scProviders:{count:1,objectAt() {return {tidalProvider:tp};}},
     scEnsureTidal() {}, scCall(q, done) { done(); },
     scSelectTidal() {return true;}, scEnterTimer:{start() {}},
@@ -6471,6 +6471,79 @@ for (const available of [false,true]) {
         assert.equal(enters,0,hidden); assert.equal(opens,1,hidden);
     }
 }
+""")
+
+    def test_stale_tidal_open_cannot_logout_spotify_carrier_269(self):
+        changed = self.function(bp.SERVICES_MAIN, "onLoggedInChanged") if "function onLoggedInChanged(" in bp.SERVICES_MAIN else "function onLoggedInChanged() {}"
+        self.run_js("""
+let logouts=0;
+const pending=[];
+const tp={loggedIn:true, loginToService() {this.loggedIn=true;}};
+globalThis.provider=tp; globalThis.tidalProvider=tp;
+globalThis.root=globalThis;
+globalThis.Planck={librarianController:{
+    streamingInterfaceController:{logoutOfProvider() {logouts++;}},
+    streamingPlaylistsController:{invalidateUI() {}}
+}};
+Object.assign(globalThis, {
+    scSources:['tidal','spotify'], scLoggedIn:['spotify'], scScope:'spotify',
+    scUiLoaded:true, scTidalLoggedIn:false, scTidalSynthetic:true,
+    scUiPoll:null, scUiPollScope:'', scUiPollAt:0, scScopePending:0, scTidalLogoutPending:false,
+    scProviders:{count:1,objectAt() {return {tidalProvider:tp};}},
+    scEnsureTidal() {}, scSelectTidal() {return true;},
+    scEnterTimer:{start() {}}, scLoginBegin() {throw Error('unexpected login');},
+    scApply(v) {if (v.scope !== undefined) scScope=v.scope;},
+    XMLHttpRequest:class {
+        constructor() {this.readyState=0;}
+        open() {this.readyState=1; pending.push(this);}
+        send() {}
+        getResponseHeader() {return '';}
+        finish(scope,status=200) {this.readyState=4; this.status=status; this.responseText=JSON.stringify({scope}); this.onreadystatechange();}
+    }
+});
+""" + self.function(bp.SERVICES_MAIN, "scCall") + "\n" + self.function(bp.SERVICES_MAIN, "scUiPollReply") + "\n" + changed + "\n" + bp.TIDAL_OPEN_530 + """
+scOpen('tidal');
+scOpen('spotify');
+assert.equal(pending.length,1,'concurrent scope POSTs could reorder server state');
+pending[0].finish('tidal');
+pending[1].finish('spotify');
+assert.equal(logouts,0,'stale real-TIDAL callback logged out the Spotify carrier');
+assert.equal(scScope,'spotify','stale scope reply rotated the selected service');
+scScope='tidal'; scCall();
+scOpen('spotify'); pending[3].finish('spotify');
+pending[2].finish('tidal');
+assert.equal(scScope,'spotify','stale poll restored real TIDAL');
+// Polls can also reach the server before a pending scope POST, and reply later.
+scScope='tidal'; scTidalLoginPending=true; scOpen('spotify'); scCall();
+assert.equal(scTidalLoginPending,false,'Spotify inherited pending real pairing');
+pending[4].finish('spotify'); pending[5].finish('tidal');
+assert.equal(scScope,'spotify','in-flight poll restored real TIDAL');
+scScope='tidal'; scOpen('spotify'); scCall();
+pending[7].finish('tidal'); pending[6].finish('spotify');
+assert.equal(scScope,'spotify');
+// Keep unrelated callbacks, even when their reply carries an old scope.
+scScope='tidal'; let callbacks=0; scCall('waveform=denon',()=>callbacks++);
+scOpen('spotify'); pending[8].finish('tidal'); pending[9].finish('spotify');
+assert.equal(scScope,'spotify'); assert.equal(callbacks,1);
+scOpen('tidal'); scOpen('spotify');
+pending[10].finish('tidal',502); pending[11].finish('spotify');
+assert.equal(scScope,'spotify','failed older POST lost the latest source choice');
+scTidalLoginPending=true; tp.loggedIn=false;
+""" + "\nfunction pairingTick() {\n" + bp.TIDAL_PAIRING_530 + "\n}\npairingTick();\n" + """
+assert.equal(scTidalLoginPending,false,'pairing timer stayed active for Spotify');
+assert.equal(logouts,0); assert.equal(scScopePending,0);
+// A legitimate TIDAL logout can finish after the user returns to Spotify.
+tp.loggedIn=true; scOpen('tidal'); pending[12].finish('tidal');
+assert.equal(logouts,1); assert.equal(scTidalLogoutPending,true);
+scOpen('spotify'); pending[13].finish('spotify');
+tp.loggedIn=false; onLoggedInChanged();
+assert.equal(tp.loggedIn,true,'late explicit logout stranded the Spotify carrier');
+assert.equal(scTidalLogoutPending,false); assert.equal(scScope,'spotify');
+// An unrelated auth-state error must not start a re-login loop.
+tp.loggedIn=false; onLoggedInChanged(); assert.equal(tp.loggedIn,false);
+// A later explicit open still works if the native signal was not delivered.
+scTidalLogoutPending=true; scOpen('spotify'); pending[14].finish('spotify');
+assert.equal(tp.loggedIn,true); assert.equal(scTidalLogoutPending,false);
 """)
 
     def test_generated_530_packs_guard_profile_pairing_and_encoder(self):

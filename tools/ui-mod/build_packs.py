@@ -396,20 +396,30 @@ TIDAL_OPEN_530 = """	function scTidalProvider() {
 		return null
 	}
 	function scGatewayLogin(tp) {
-		if (tp && !tp.loggedIn) tp.loginToService(
-			JSON.stringify({provider: tp.name, accessToken: "enginex", refreshToken: "enginex"}),
-			1, "userInterfaceLogin")
+		if (tp && !tp.loggedIn) {
+			scTidalLogoutPending = false
+			tp.loginToService(
+				JSON.stringify({provider: tp.name, accessToken: "enginex", refreshToken: "enginex"}),
+				1, "userInterfaceLogin")
+		}
 	}
 	function scOpen(id) {
 		if (id === "tidal" && scSources.indexOf("tidal") < 0) return
 		scAskedAt = Date.now()
 		scScope = id // before Engine's TIDAL client can raise a prompt; scApply confirms it
+		if (id !== "tidal") scTidalLoginPending = false
+		if (scScopePending) return // Send source changes in order; keep the latest intent.
 		scEnsureTidal()
 		scCall("scope=" + id, function() {
+			if (scScope !== id) { scOpen(scScope); return }
 			const tp = scTidalProvider()
+			console.warn("EngineX load step=carrier action=open scope=" + id + " loggedIn=" + !!(tp && tp.loggedIn))
 			scTidalLoginPending = !!(id === "tidal" && scUiLoaded && !root.scTidalLoggedIn && (root.scTidalSynthetic || (tp && !tp.loggedIn)))
 			if (id !== "tidal" || root.scTidalLoggedIn) scGatewayLogin(tp)
-			else if (scUiLoaded && root.scTidalSynthetic && tp && tp.loggedIn) Planck.librarianController.streamingInterfaceController.logoutOfProvider(tp)
+			else if (scUiLoaded && root.scTidalSynthetic && tp && tp.loggedIn) {
+				scTidalLogoutPending = true
+				Planck.librarianController.streamingInterfaceController.logoutOfProvider(tp)
+			}
 			Planck.librarianController.streamingPlaylistsController.invalidateUI()
 			scSelectPending = !scTidalLoginPending && !scSelectTidal()
 			scEnterTries = 8
@@ -422,8 +432,10 @@ TIDAL_OPEN_504 = """
 	function scOpen(id) {
 		scAskedAt = Date.now()
 		scScope = id // before Engine's TIDAL client can raise a prompt; scApply confirms it
+		if (scScopePending) return
 		scEnsureTidal()
 		scCall("scope=" + id, function() {
+			if (scScope !== id) { scOpen(scScope); return }
 			Planck.librarianController.streamingPlaylistsController.invalidateUI()
 			scSelectPending = !scSelectTidal()
 			scEnterTries = 8
@@ -438,6 +450,7 @@ TIDAL_SELECT_530 = """		const tp = scTidalProvider()
 TIDAL_PAIRING_530 = """			// logoutOfProvider finishes asynchronously. Wait before selecting the
 			// same carrier again, then request its stock login even if current.
 			if (scTidalLoginPending) {
+				if (scScope !== "tidal") { scTidalLoginPending = false; return }
 				const tp = scTidalProvider()
 				if (tp && !tp.loggedIn) {
 					scTidalLoginPending = false
@@ -3249,15 +3262,26 @@ SERVICES_MAIN = """
 				scUiPoll.abort()
 			}
 			scUiPollAt = Date.now()
+			scUiPollScope = scScopePending ? "" : scScope
 			scUiPoll.open("GET", "http://127.0.0.1:8080/v1/sc5000/ui")
 			scUiPoll.send()
 			return
 		}
+		// An old source reply must not reopen real TIDAL and log out its carrier.
+		const scope = scScopePending ? "" : scScope
+		const scopeChange = query && query.indexOf("scope=") === 0
+		if (scopeChange) scScopePending++
 		const x = new XMLHttpRequest()
 		x.open(query ? "POST" : "GET", "http://127.0.0.1:8080/v1/sc5000/ui" + (query ? "?" + query : ""))
 		x.onreadystatechange = function() {
-			if (x.readyState !== 4 || x.status !== 200) return
+			if (x.readyState !== 4) return
+			if (scopeChange) scScopePending--
+			if (x.status !== 200) {
+				if (scopeChange && scope !== scScope) scOpen(scScope)
+				return
+			}
 			const reply = JSON.parse(x.responseText)
+			if (scope !== scScope || scScopePending) delete reply.scope
 			if (!reply.fxSelectorReady) scApply(reply)
 			if (done) done(reply)
 		}
@@ -3266,11 +3290,14 @@ SERVICES_MAIN = """
 	property bool scUsbPreparing: false
 	Timer { interval: 1000; repeat: true; running: root.scUsbPreparing; onTriggered: root.scCall() }
 	property var scUiPoll: null
+	property int scScopePending: 0
+	property bool scTidalLogoutPending: false
+	property string scUiPollScope: ""
 	property real scUiPollAt: 0
 	property string scUiDigest: ""
 	property real scUiAppliedAt: 0
 	function scUiPollReply() {
-		if (scUiPoll.readyState !== 4 || scUiPoll.status !== 200) return
+		if (scUiPoll.readyState !== 4 || scUiPoll.status !== 200 || scScopePending || scUiPollScope !== scScope) return
 		// Unchanged settings (stream-sync's digest): skip the parse and the writes,
 		// but re-apply every 30 s in case a local change raced a reply.
 		const digest = scUiPoll.getResponseHeader("X-UI-Digest") || "", now = Date.now()
@@ -3738,7 +3765,16 @@ SERVICES_MAIN = """
 			function ensure() { if (["TIDAL", "Tidal"].indexOf(provider.name) >= 0 && !provider.integrated) provider.integrated = true }
 			readonly property Connections watcher: Connections {
 				target: provider
+				ignoreUnknownSignals: true
 				function onIntegratedChanged() { ensure() }
+				function onLoggedInChanged() {
+					if (!tidalProvider) return
+					console.warn("EngineX load step=carrier scope=" + root.scScope + " loggedIn=" + !!provider.loggedIn)
+					if (!provider.loggedIn && root.scTidalLogoutPending) {
+						root.scTidalLogoutPending = false
+						if (root.scScope !== "tidal") root.scGatewayLogin(tidalProvider)
+					}
+				}
 			}
 			Component.onCompleted: ensure()
 		}
