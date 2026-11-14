@@ -29,7 +29,8 @@ import (
 	"github.com/Cd1s/EngineX-OS/internal/stems"
 )
 
-const defaultWorkerPath = "/opt/sc5000-stems/worker.py"
+const defaultWorkerPath = "/opt/enginex-stems/worker.py"
+const legacyWorkerPath = "/opt/sc5000-stems/worker.py"
 
 func defaultBackend() string {
 	return cmp.Or(os.Getenv("ENGINEX_STEMS_BACKEND"), "htdemucs")
@@ -57,7 +58,7 @@ func Main() {
 		}
 		secret = s
 	}
-	*worker = resolveWorkerPath(*worker, set["worker"], os.Executable)
+	*worker = resolveWorkerPath(*worker, set["worker"], os.Executable, legacyWorkerPath)
 	*python = resolvePythonPath(*python, set["python"], runtime.GOOS, os.Getenv("ENGINEX_STEMS_HOME"), os.UserHomeDir, exec.LookPath)
 	name, args, err := resolveWorkerWithLog(*python, *worker, *backend, os.Stderr)
 	if err != nil {
@@ -114,12 +115,14 @@ func resolveWorker(python, worker, backend string) (string, []string, error) {
 	return resolveWorkerWithLog(python, worker, backend, os.Stderr)
 }
 
-func resolveWorkerPath(flagVal string, flagSet bool, exePath func() (string, error)) string {
+func resolveWorkerPath(flagVal string, flagSet bool, exePath func() (string, error), legacyPath string) string {
 	if flagSet {
 		return flagVal
 	}
-	if info, err := os.Stat(flagVal); err == nil && !info.IsDir() {
-		return flagVal
+	for _, path := range []string{flagVal, legacyPath} {
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			return path
+		}
 	}
 	if exePath != nil {
 		if exe, err := exePath(); err == nil && exe != "" {

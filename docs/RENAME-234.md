@@ -13,7 +13,7 @@ Mod, a hand-written script, a guide. This page lists both.
 | Libraries | `/usr/local/lib/sc5000/` | `/usr/local/lib/enginex/` | link |
 | Shared files | `/usr/share/sc5000-custom/` | `/usr/share/enginex/` | link |
 | Boot scripts | `/usr/libexec/sc5000-custom-{prepare,etc-reset}`, `sc5000-timesync-seed` | `/usr/libexec/enginex-{prepare,etc-reset}`, `enginex-timesync-seed` | — |
-| Hand-run tools | `/usr/local/bin/sc5000-{debloat,perf-tune,prolink-diag,storage-mount}`, `/usr/sbin/sc5000-{bt-helper,usb-audio}` | `enginex-*` | links under the old names |
+| Hand-run tools | `/usr/local/bin/sc5000-{debloat,perf-tune,prolink-diag,storage-mount}`, `/usr/sbin/sc5000-usb-audio` | `enginex-*` | links under the old names |
 | Other tools | `sc5000-{deemixd,suite-exec}`, `/usr/sbin/sc5000-{perf-tune,storage-discover}`, `/usr/local/libexec/sc5000-storage-notify` | `enginex-*` | — |
 | Image units | `sc5000-custom.target`, `sc5000-custom-{prepare,sshd,etc-reset}.service`, `sc5000-{debloat,deemixd,perf-tune,storage-discover}.service`, `sc5000-storage@.service`, `sc5000-{background,engine}.slice` | `enginex.target`, `enginex-*.service`, `enginex-storage@.service`, `enginex-*.slice` | — (etc-reset removes upper-layer copies under both names) |
 | Image config | `/etc/default/sc5000-*`, `sysctl.d/90-sc5000-perf.conf`, `modules-load.d/sc5000-filesystems.conf`, `journald.conf.d/sc5000.conf`, `udev 60-sc5000-storage.rules`, `dnsmasq.d/sc5000-telemetry.conf`, `/var/cache/sc5000` | `enginex` in the same places | — |
@@ -65,7 +65,7 @@ These keep their sc5000 names, because every installed deck loads Engine through
   name, older environment names, old names an in-place update ends or cleans up, the stems
   server side, a few comments about the old layout). A new sc5000 in a shipped file fails that test.
 - Server side, unchanged: `cmd/sc5000-relay`, the `sc5000-stemsd` alias, `/etc/sc5000-stems`,
-  `/opt/sc5000-stems`, `deploy/`.
+  `deploy/`; the default worker is `/opt/enginex-stems/worker.py`, with the old `/opt/sc5000-stems/worker.py` read on upgrade.
 - Persisted ids: stems list ids start with `sc5000-stems-`.
 - Dead legacy: `/media/sc5000-sd-cache` (unused since `8856176`, still read).
 - Lab paths on the build hosts (`/root/build/sc5000-lab`), the Denon model name `SC5000` and

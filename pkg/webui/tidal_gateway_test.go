@@ -1035,7 +1035,7 @@ func TestHTTPSCover(t *testing.T) {
 // local so a placeholder credential reaching it is observable without a login.
 func TestTidalSyntheticCredentialsNeverReachUpstream(t *testing.T) {
 	for _, disabled := range []bool{false, true} {
-		for _, tok := range []string{"enginex", "sc5000-token", "sc5000-refresh", ""} {
+		for _, tok := range []string{"enginex", "enginex-token", "enginex-refresh", "sc5000-token", "sc5000-refresh", ""} {
 			t.Run(strconv.FormatBool(disabled)+"/"+tok, func(t *testing.T) {
 				var calls atomic.Int32
 				up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1); w.WriteHeader(418) }))
@@ -1137,7 +1137,7 @@ func TestTidalRealLoginSurvivesScopeSwitch(t *testing.T) {
 		t.Errorf("auth permissions = %o", st.Mode().Perm())
 	}
 	uiPost(t, srv.URL, "scope=spotify")
-	if b := post("/au//oauth2/token", "grant_type=refresh_token&refresh_token=test-real-refresh"); !bytes.Contains(b, []byte("sc5000-refresh")) {
+	if b := post("/au//oauth2/token", "grant_type=refresh_token&refresh_token=test-real-refresh"); !bytes.Contains(b, []byte("enginex-refresh")) {
 		t.Error("Spotify needs the local token")
 	}
 	// Reconstruct the gateway, as after a reboot; real auth must survive on disk.

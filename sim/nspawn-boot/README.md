@@ -20,7 +20,7 @@ The test checks etc-reset execution, prepare and the core services, the current
 UI-ready token without fallback, Engine process liveness, the release gate's
 default applied-hook count (20 on players, 28 on consoles), pack replacement,
 the gate's QML load-error patterns, an empty `systemctl --failed`, and a JSON
-response from `/v1/sc5000/ui`. `WALL TIME` measures nspawn start to UI readiness;
+response from `/v1/enginex/ui`. `WALL TIME` measures nspawn start to UI readiness;
 the remaining boot jobs are checked afterward. Readiness must take under 60 s.
 
 Validated with the 5.3.0.4 release fixtures, guest systemd 255 and nspawn 257:
