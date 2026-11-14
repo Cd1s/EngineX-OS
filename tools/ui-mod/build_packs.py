@@ -132,13 +132,25 @@ FX_CONTROLLER = r'''
     onScFxTypeNameChanged: {
         if (scFxSelected >= 0 && !scFxBusy && scFxTypeName !== "Flanger") {
             scFxSelected = -1; scFxIndex = djFxView ? djFxView.selectionIndex : -1
+            scFxPublishIndex()
             root.scCall("fxUnit=" + scFxUnit + "&fxMode=0")
         }
     }
     Connections {
         target: scCtrl.djFxView
         function onSelectionIndexChanged() {
-            if (scCtrl.scFxSelected < 0 && !scCtrl.scFxBusy && !scCtrl.scFxBrowsing) scCtrl.scFxIndex = scCtrl.djFxView.selectionIndex
+            if (scCtrl.djFxView && scCtrl.scFxSelected < 0 && !scCtrl.scFxBusy && !scCtrl.scFxBrowsing) {
+                scCtrl.scFxIndex = scCtrl.djFxView.selectionIndex
+                scCtrl.scFxPublishIndex()
+            }
+        }
+        function onSelectionPopoutVisibleChanged() {
+            if (scCtrl.djFxView && !scCtrl.djFxView.selectionPopoutVisible) {
+                scFxAutoCommit.stop()
+                scCtrl.scFxBrowsing = false
+                scCtrl.scFxIndex = scCtrl.scFxSelected
+                scCtrl.scFxPublishIndex()
+            }
         }
     }
     readonly property string scFxBus: "EngineXFx" + scFxUnit
@@ -146,8 +158,16 @@ FX_CONTROLLER = r'''
         Planck.createProperty(scFxBus + "Plus", false, 3),
         Planck.createProperty(scFxBus + "Minus", false, 3),
         Planck.createProperty(scFxBus + "Accept", false, 3),
-        Planck.createProperty(scFxBus + "Ready", false, 1)]
+        Planck.createProperty(scFxBus + "Ready", false, 1),
+        Planck.createProperty(scFxBus + "Index", 0.0, 0)]
     readonly property var scFxReady: scFxProps && Planck.getProperty("/GUI/Scripted/" + scFxBus + "Ready")
+    readonly property var scFxIndexProp: scFxProps && Planck.getProperty("/GUI/Scripted/" + scFxBus + "Index")
+    function scFxPublishIndex() {
+        if (scFxIndexProp && scFxIndexProp.translator) {
+            const idx = scFxIndex >= 0 ? scFxIndex : (scFxSelected >= 0 ? scFxSelected : (djFxView ? djFxView.selectionIndex : -1))
+            scFxIndexProp.translator.value = idx >= 0 ? (idx + 1) / 32.0 : 0.0
+        }
+    }
     readonly property var scFxStock: djFxView ? Array.from(djFxView.effectsNames) : []
     readonly property bool scFxEnabled: !!root.scFxSelectorAvailable && scFxStock.indexOf("Flanger") >= 0
     readonly property var scFxNames: scFxEnabled ? scFxStock.concat([
@@ -169,8 +189,19 @@ FX_CONTROLLER = r'''
             ++scCtrl.scFxRequest
             scCtrl.scFxBusy = false; scCtrl.scFxQueued = -1
             scCtrl.scFxIndex = scCtrl.scFxSelected
+            scCtrl.scFxPublishIndex()
         }
     }
+    Timer {
+        id: scFxAutoCommit
+        interval: 600
+        onTriggered: {
+            if (scCtrl.scFxBrowsing && scCtrl.scFxIndex >= 0) {
+                scCtrl.scFxAccept(scCtrl.scFxIndex)
+            }
+        }
+    }
+    function scFxStopAutoCommit() { scFxAutoCommit.stop() }
     function scFxSetReady() {
         if (scFxReady && scFxReady.translator) scFxReady.translator.state = scFxEnabled
     }
@@ -190,22 +221,39 @@ FX_CONTROLLER = r'''
         const next = Math.max(0, Math.min(scFxNames.length - 1, at + delta))
         if (next === at) return
         scFxIndex = next
-        if (Config.device.hasDJFxContinuousKnobs) scFxAccept(scFxIndex)
-        else { scFxBrowsing = true; djFxView.selecting() }
+        scFxPublishIndex()
+        scFxBrowsing = true
+        if (djFxView) djFxView.selecting()
+        scFxAutoCommit.restart()
     }
     function scFxAccept(index) {
         if (!djFxView || index < 0 || index >= scFxNames.length) return
+        scFxAutoCommit.stop()
         if (!scFxEnabled) { djFxView.selectEffect(index); return }
-        if (scFxBusy) { scFxQueued = index; return }
         const mode = index >= scFxStock.length ? index - scFxStock.length + 1 : 0
+        if (!mode && scFxSelected < 0) {
+            scFxIndex = index
+            scFxSelected = -1
+            scFxBrowsing = false
+            scFxPublishIndex()
+            djFxView.selectEffect(index)
+            djFxView.abortSelecting()
+            return
+        }
+        if (scFxBusy) { scFxQueued = index; return }
         const request = ++scFxRequest
         scFxIndex = index
         scFxBusy = true
+        scFxPublishIndex()
         // The hook acknowledgement is a barrier: mapping ALWAYS precedes Type.
         root.scCall("fxUnit=" + scFxUnit + "&fxMode=" + mode, function(reply) {
-            if (request !== scFxRequest || !djFxView) return
+            if (request !== scFxRequest || !djFxView) {
+                if (scFxQueued >= 0) scFxFinish()
+                return
+            }
             scFxSelected = mode ? index : -1
             scFxBrowsing = false
+            scFxPublishIndex()
             if (!mode || reply.fxBind) djFxView.selectEffect(mode ? scFxStock.indexOf("Flanger") : index)
             if (mode && reply.fxBind) {
                 scFxMix = Planck.getProperty(scFxPath + "Mix")
@@ -264,9 +312,11 @@ FX_CONTROLLER = r'''
         enabled: scCtrl.scFxEnabled
         onChanged: {
             if (!scCtrl.djFxView) return
+            scFxAutoCommit.stop()
             if (!scCtrl.djFxView.selectionPopoutVisible) {
                 if (scCtrl.scFxIndex < 0) scCtrl.scFxIndex = scCtrl.scFxSelected >= 0 ? scCtrl.scFxSelected : scCtrl.djFxView.selectionIndex
                 scCtrl.scFxBrowsing = true
+                scCtrl.scFxPublishIndex()
                 scCtrl.djFxView.selecting()
             } else if (scCtrl.scFxIndex >= 0) scCtrl.scFxAccept(scCtrl.scFxIndex)
         }
@@ -292,8 +342,10 @@ FX_SELECTOR = r'''
     }
     function scFxAbort() {
         if (scFxController) {
+            scFxController.scFxStopAutoCommit()
             scFxController.scFxBrowsing = false
             scFxController.scFxIndex = scFxController.scFxSelected
+            scFxController.scFxPublishIndex()
         }
         if (djFxView) djFxView.abortSelecting()
     }
@@ -7569,6 +7621,22 @@ def edits(dev: bool):
             ("onAccepted: result => djFxView.selectEffect(result)", "onAccepted: result => djFx.scFxAccept(result)"),
             ("onRejected: djFxView.abortSelecting()", "onRejected: djFx.scFxAbort()"),
             ("parameter: djFxView ? djFxView.selectParameter : null", "parameter: djFxView ? djFxView.selectParameter : null\n            text: djFx.scFxSelected >= 0 ? djFx.scFxNames[djFx.scFxSelected] : (parameter ? parameter.valueText : \"\")"),
+        ]
+        out["ControlSurfaceModules/ControlSurfaceModules/DJFxSelect.qml"] = [
+            ("import QtQuick 2.12", "import QtQuick 2.12\nimport Planck 1.0"),
+            ("                readonly property string fxType: fxConfig.channel[modelData].fxType", """                readonly property int scUnit: fxConfig.hasSendStyleEffects ? Number(modelData) : 3 + Math.max(0, Number(String(modelData).replace("Channel", "")) - 1)
+                readonly property var scPxProp: Planck.getProperty("/GUI/Scripted/EngineXFx" + scUnit + "Index")
+                readonly property int scPxIndex: scPxProp && scPxProp.translator && scPxProp.translator.value > 0 ? Math.round(scPxProp.translator.value * 32.0) - 1 : -1
+                readonly property var scAllNames: [
+                    "ECHO", "ECHO OUT", "SWELL VERB", "DELAY", "FLANGER", "PHASER", "HOLD ECHO",
+                    "PING PONG", "RECYCLER", "ROLL", "STUTTER OUT", "RISER", "PITCH DOWN",
+                    "SCALE DOWN", "REVERB", "LFO VERB", "REVERB DROP", "REVERSE VERB",
+                    "REVERB RISE", "FLANGER (-)", "FLEX GATE", "BEATBREAK", "LFO FILTER",
+                    "BACKSPIN", "BRAKE", "CRUSH",
+                    "SPIRAL", "PITCH ECHO", "SLIP ROLL", "DUB ECHO", "SPACE"
+                ]
+                readonly property string scCustomName: scPxIndex >= 0 && scPxIndex < scAllNames.length ? scAllNames[scPxIndex] : ""
+                readonly property string fxType: scCustomName !== "" ? scCustomName : fxConfig.channel[modelData].fxType"""),
         ]
         out["ControlSurfaceModules/ControlSurfaceModules/private/DJFxSelectKnob.qml"] = [
             ("        Item {\n", "        Item {\n" + FX_KNOB),

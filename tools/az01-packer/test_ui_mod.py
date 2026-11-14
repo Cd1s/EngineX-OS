@@ -381,6 +381,39 @@ class UiModSourceTest(unittest.TestCase):
         self.assertIn('visible: !root.scFxMasterBypassed', bp.PLAYBACK_ENTRIES)
         self.assertIn('scFxSelectorAvailable = scFxMasterBypassed && (Config.audio.fx.hasDJFx || Config.audio.fx.hasNHFx)', SRC)
 
+    def test_prime4_fx_selector_browsing_and_oled_mapping_issue285(self):
+        qml = bp.FX_CONTROLLER
+        self.assertIn('id: scFxAutoCommit', qml)
+        self.assertIn('scFxBrowsing = true', qml)
+        self.assertIn('djFxView.selecting()', qml)
+        self.assertIn('scFxAutoCommit.restart()', qml)
+        self.assertIn('scFxAutoCommit.stop()', qml)
+        self.assertIn('scFxPublishIndex()', qml)
+        self.assertIn('Planck.createProperty(scFxBus + "Index", 0.0, 0)', qml)
+        self.assertIn('if (!mode && scFxSelected < 0)', qml)
+        self.assertNotIn('if (Config.device.hasDJFxContinuousKnobs) scFxAccept(scFxIndex)', qml)
+
+        # Check FX_SELECTOR abort logic
+        selector_qml = bp.FX_SELECTOR
+        self.assertIn('scFxController.scFxStopAutoCommit()', selector_qml)
+        self.assertIn('scFxController.scFxBrowsing = false', selector_qml)
+        self.assertIn('scFxController.scFxPublishIndex()', selector_qml)
+
+        # Check DJFxSelect.qml OLED display patch
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            edits = bp.edits(False)
+            self.assertIn("ControlSurfaceModules/ControlSurfaceModules/DJFxSelect.qml", edits)
+            oled_edits = edits["ControlSurfaceModules/ControlSurfaceModules/DJFxSelect.qml"]
+            oled_code = "".join(rep for _, rep in oled_edits)
+            for px_name in ("SPIRAL", "PITCH ECHO", "SLIP ROLL", "DUB ECHO", "SPACE"):
+                self.assertIn(px_name, oled_code)
+            self.assertIn("/GUI/Scripted/EngineXFx", oled_code)
+            self.assertIn("scPxIndex < scAllNames.length", oled_code)
+        finally:
+            bp.ROOT = old_root
+
     def test_auto_analyze_cannot_submit_native_work(self):
         # Saved-on settings, drive insertion, playback and arbitrary filesystem
         # contents must all have the same result: zero automatic submissions.
