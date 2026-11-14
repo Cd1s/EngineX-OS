@@ -3,7 +3,6 @@ package compat
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -16,10 +15,15 @@ import (
 	"golang.org/x/text/unicode/norm"
 )
 
+type dirEntry struct {
+	name      string
+	isSymlink bool
+}
+
 type Resolver struct {
 	root     string
 	mu       sync.Mutex
-	dirs     map[string]map[string][]string
+	dirs     map[string]map[string][]dirEntry
 	resolved map[string]string
 	missing  map[string]bool
 }
@@ -35,7 +39,7 @@ func NewResolver(root string) (*Resolver, error) {
 	}
 	return &Resolver{
 		root:     r,
-		dirs:     map[string]map[string][]string{},
+		dirs:     map[string]map[string][]dirEntry{},
 		resolved: map[string]string{},
 		missing:  map[string]bool{},
 	}, nil
@@ -84,11 +88,7 @@ func (r *Resolver) ResolveContext(ctx context.Context, s string) (string, error)
 		return "", err
 	}
 	if cached, ok := r.resolved[rel]; ok {
-		st, err := os.Lstat(filepath.Join(r.root, cached))
-		if err == nil && st.Mode()&os.ModeSymlink == 0 {
-			return cached, nil
-		}
-		delete(r.resolved, rel)
+		return cached, nil
 	}
 	if r.missing[rel] {
 		return "", fmt.Errorf("resolve %q: %w", s, fs.ErrNotExist)
@@ -106,9 +106,12 @@ func (r *Resolver) ResolveContext(ctx context.Context, s string) (string, error)
 			if err != nil {
 				return "", err
 			}
-			idx = map[string][]string{}
+			idx = map[string][]dirEntry{}
 			for _, ent := range entries {
-				idx[canonical(ent.Name())] = append(idx[canonical(ent.Name())], ent.Name())
+				idx[canonical(ent.Name())] = append(idx[canonical(ent.Name())], dirEntry{
+					name:      ent.Name(),
+					isSymlink: ent.Type()&fs.ModeSymlink != 0,
+				})
 			}
 			r.dirs[cur] = idx
 		}
@@ -128,9 +131,9 @@ func (r *Resolver) ResolveContext(ctx context.Context, s string) (string, error)
 				}
 			}
 		}
-		for _, name := range matches {
-			if name == component {
-				matches = []string{name}
+		for _, m := range matches {
+			if m.name == component {
+				matches = []dirEntry{m}
 				break
 			}
 		}
@@ -141,15 +144,9 @@ func (r *Resolver) ResolveContext(ctx context.Context, s string) (string, error)
 		if len(matches) != 1 {
 			return "", fmt.Errorf("ambiguous normalized path %q", s)
 		}
-		cur = filepath.Join(cur, matches[0])
-		st, err := os.Lstat(filepath.Join(r.root, cur))
-		if err != nil {
-			if errors.Is(err, fs.ErrNotExist) {
-				r.missing[rel] = true
-			}
-			return "", err
-		}
-		if st.Mode()&os.ModeSymlink != 0 {
+		m := matches[0]
+		cur = filepath.Join(cur, m.name)
+		if m.isSymlink {
 			return "", fmt.Errorf("symlink refused: %s", cur)
 		}
 	}
