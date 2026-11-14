@@ -24,6 +24,9 @@ if [ -f "$scripts/engine" ]; then
     # Each retry inside the vendor loop gets a fresh ready token and can select
     # stock Engine. Keep the vendor's exit codes and quit-reason dispatch intact.
     sed -i -E 's@^([[:space:]]*)/usr/Engine/Engine([[:space:]])@\1/etc/sc5000/engine-ui-guard launch /usr/Engine/Engine\2@' "$scripts/engine"
+    # Firmware update from a file: let the guard point an image on an HFS+ stick at the stick's own mount
+    # first, in safe-mode too. A failed guard leaves the path as Engine wrote it.
+    sed -i -E 's@^([[:space:]]*)UPDATE_FILE=\$\(cat /tmp/update-file-path\)[[:space:]]*$@\1UPDATE_FILE=$(/etc/sc5000/engine-ui-guard update-file >/dev/null 2>\&1; cat /tmp/update-file-path)@' "$scripts/engine"
 fi
 if [ -f "$scripts/setup-prerequisites.sh" ]; then
     sed -i -E \

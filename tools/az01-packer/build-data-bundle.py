@@ -299,12 +299,15 @@ EOF
 # Engine patch constructor stays inert. Keep that minimal activator for network
 # diagnostics on subsequent fallback boots; inject nothing into stock Engine.
 # Wrap the actual Engine invocation, including retries inside the vendor loop.
+# Its update-from-file step asks the guard first (an image on an HFS+ stick, as on
+# first-generation images); a failed guard leaves the path as Engine wrote it.
 # The stock script also forces Gigabit Ethernet down to 100 Mbps on every Engine
 # start; first-generation images set 1000 (debloat patch), so do these (BH-GC2-6).
 if [ -x "$bin_dir/engine-ui-guard" ] && [ -f /usr/Engine/Scripts/engine ]; then
     script_stage=$(mktemp /run/sc5000-engine-script.XXXXXX)
     sed -E \
         -e "s|^([[:space:]]*)/usr/Engine/Engine([[:space:]])|\\1$bin_dir/engine-ui-guard launch /usr/Engine/Engine\\2|" \
+        -e "s|^([[:space:]]*)UPDATE_FILE=\\\$\\(cat /tmp/update-file-path\\)[[:space:]]*\$|\\1UPDATE_FILE=\$($bin_dir/engine-ui-guard update-file >/dev/null 2>\\&1; cat /tmp/update-file-path)|" \
         -e "s|^([[:space:]]*(exec[[:space:]]+)?)/usr/sbin/az01-update([[:space:]].*)?\$|\\1env LD_PRELOAD=\"$lib_hook\" /usr/sbin/az01-update\\3|" \
         -e "s|^([[:space:]]*(exec[[:space:]]+)?)az01-update([[:space:]]+--erase-data([[:space:]].*)?)\$|\\1env LD_PRELOAD=\"$lib_hook\" /usr/sbin/az01-update\\3|" \
         -e "s|^([[:space:]]*(exec[[:space:]]+)?)/usr/bin/planck-remote-screen([[:space:]].*)?\$|\\1env LD_PRELOAD=\"$lib_hook\" /usr/bin/planck-remote-screen\\3|" \

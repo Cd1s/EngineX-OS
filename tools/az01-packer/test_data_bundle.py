@@ -18,6 +18,11 @@ bdb = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(bdb)
 
 TOP = 'SCLIVE4-5.3.0.1.1-EngineX-OS-Data-Bundle'
+# Stock engine scripts of second-generation decks, as kept in the build host's lab:
+# SC LIVE 4 (armhf) and SYSTEM ONE (AZ04).
+LAB = Path(os.environ.get('SC5000_LAB_DIR', '/root/build/sc5000-lab'))
+STOCK_GEN2 = [LAB / 'sclive4-rea61-followup/rootfs/usr/Engine/Scripts/engine',
+              LAB / 'systemone-analysis/rootfs/usr/Engine/Scripts/engine']
 
 
 def fake_elf(machine, tag):
@@ -932,6 +937,36 @@ exec REAL "$@"
         self.assertFalse(dropin.exists())
         self.assertEqual((root / 'root-ssh/authorized_keys').read_text(), k)
 
+    @unittest.skipUnless(all(p.is_file() for p in STOCK_GEN2), 'needs the second-generation stock rootfs of the build-host lab')
+    def test_boot_activate_guards_the_stock_update_file_step(self):
+        # The stock scripts themselves: a base whose line no longer matches fails here instead of
+        # silently keeping the stock step (an image on an HFS+ stick would then not install again).
+        src = self.extract(self.build())
+        dest = self.tmp / 'gen2-update-file' / 'enginex'
+        (dest / 'bundle/bin').mkdir(parents=True)
+        shutil.copy2(src / 'bin/engine-ui-guard', dest / 'bundle/bin/engine-ui-guard')
+        run_dir = self.tmp / 'run-update-file'
+        (run_dir / 'systemd/system').mkdir(parents=True)
+        engine_script = self.tmp / 'stock-engine-script'
+        ba = self.tmp / 'boot-activate-update-file.sh'
+        ba.write_text((src / 'boot-activate.sh').read_text().replace('/run/', str(run_dir) + '/')
+                      .replace('/usr/Engine/Scripts/engine', str(engine_script)))
+        env = dict(self.env, SC5000_CUSTOM=str(dest), SC5000_TIMESTAMP_FILE=str(self.tmp / 'no-ts'),
+                   SC5000_CONFIG_DIR=str(dest.parent / '.config'))
+        guarded = (f'\tUPDATE_FILE=$({dest}/bundle/bin/engine-ui-guard update-file >/dev/null 2>&1; '
+                   'cat /tmp/update-file-path)\n')
+        for stock in STOCK_GEN2:
+            with self.subTest(stock=str(stock)):
+                text = stock.read_text()
+                self.assertEqual(text.count('UPDATE_FILE=$(cat /tmp/update-file-path)'), 1)
+                engine_script.write_text(text)
+                res = subprocess.run(['sh', str(ba)], env=env, capture_output=True, text=True)
+                self.assertEqual(res.returncode, 0, res.stderr)
+                self.host_commands.write_text('')  # the recorded bind of the rewritten script
+                rewritten = (run_dir / 'sc5000-engine-script').read_text()
+                self.assertNotIn('UPDATE_FILE=$(cat /tmp/update-file-path)', rewritten)
+                self.assertEqual(rewritten.count(guarded), 1)
+
     def test_boot_activate_wraps_engine_and_updaters_and_marks_gen2_unlocked(self):
         r = self.build()
         src = self.extract(r)
@@ -950,6 +985,7 @@ exec REAL "$@"
             'while [ 1 ]\n'
             'do\n'
             '\t/usr/Engine/Engine -d0 -loggerOptions "Type, Message, Thread, Category, SplitLongLines"\n'
+            '\t\t\tUPDATE_FILE=$(cat /tmp/update-file-path)\n'
             '\t\t/usr/sbin/az01-update --file "$UPDATE_FILE"\n'
             '\t\t/usr/bin/planck-remote-screen --update "$UPDATE_FILE"\n'
             '\t\taz01-update --erase-data\n'
@@ -980,6 +1016,8 @@ exec REAL "$@"
         rewritten = stage.read_text()
         lib_hook = f'{dest}/bundle/lib/libengine-ui-hook.so'
         self.assertIn(f'\t{dest}/bundle/bin/engine-ui-guard launch /usr/Engine/Engine -d0', rewritten)
+        self.assertIn(f'\t\t\tUPDATE_FILE=$({dest}/bundle/bin/engine-ui-guard update-file >/dev/null 2>&1; '
+                      'cat /tmp/update-file-path)\n', rewritten)
         self.assertIn(f'\t\tenv LD_PRELOAD="{lib_hook}" /usr/sbin/az01-update --file "$UPDATE_FILE"\n', rewritten)
         self.assertIn(f'\t\tenv LD_PRELOAD="{lib_hook}" /usr/bin/planck-remote-screen --update "$UPDATE_FILE"\n', rewritten)
         self.assertIn(f'\t\tenv LD_PRELOAD="{lib_hook}" /usr/sbin/az01-update --erase-data\n', rewritten)

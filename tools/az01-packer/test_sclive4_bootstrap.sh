@@ -184,6 +184,7 @@ grep -q 'SC5000_UI_HOOK=/data/enginex/bundle/lib/libengine-ui-hook.so' \
     '$TARGET/run/systemd/system/engine.service.d/99-sc5000.conf'
 grep -q 'UnsetEnvironment=LD_PRELOAD' '$TARGET/run/systemd/system/engine.service.d/99-sc5000.conf'
 grep -q 'engine-ui-guard launch /usr/Engine/Engine' '$TARGET/usr/Engine/Scripts/engine'
+grep -Fq 'UPDATE_FILE=\$(/data/enginex/bundle/bin/engine-ui-guard update-file >/dev/null 2>&1; cat /tmp/update-file-path)' '$TARGET/usr/Engine/Scripts/engine'
 grep -Fq 'env LD_PRELOAD=\"/data/enginex/bundle/lib/libengine-ui-hook.so\" /usr/sbin/az01-update --file' '$TARGET/usr/Engine/Scripts/engine'
 grep -Fq 'env LD_PRELOAD=\"/data/enginex/bundle/lib/libengine-ui-hook.so\" /usr/bin/planck-remote-screen --update' '$TARGET/usr/Engine/Scripts/engine'
 grep -Fq 'env LD_PRELOAD=\"/data/enginex/bundle/lib/libengine-ui-hook.so\" /usr/sbin/az01-update --erase-data' '$TARGET/usr/Engine/Scripts/engine'

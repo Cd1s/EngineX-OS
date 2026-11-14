@@ -18,6 +18,11 @@ import az01_packer as az
 # Firmware fixtures are read-only shared inputs. Keep disposable image writes
 # in the caller's sandbox (or the ordinary system temporary directory).
 TEST_TMPDIR = os.environ.get('ENGINEX_TEST_TMPDIR')
+# Official 5.3.0 images of the three first-generation image groups, as kept in the build host's lab.
+LAB = Path(os.environ.get('SC5000_LAB_DIR', '/root/build/sc5000-lab'))
+STOCK_530 = [LAB/'fw-5.3.0'/f'{name}-5.3.0-Update.img' for name in ('SC5000', 'SC6000', 'PRIME4')]
+GUARDED_UPDATE_FILE = (b'UPDATE_FILE=$(/etc/sc5000/engine-ui-guard update-file >/dev/null 2>&1; '
+                       b'cat /tmp/update-file-path)\n')
 
 
 def string(value):
@@ -598,11 +603,32 @@ class FilesystemTests(unittest.TestCase):
 
     def test_overlay_debloat_runs_offline(self):
         overlay = Path(__file__).resolve().parents[2]/'rootfs-overlay'
-        self.fs.write('/usr/Engine/Scripts/engine', b'#!/bin/sh\n/usr/bin/az01-ethernet-speed 100\n', 0o755)
+        self.fs.write('/usr/Engine/Scripts/engine', b'#!/bin/sh\n/usr/bin/az01-ethernet-speed 100\n'
+                      b'\t\t\tUPDATE_FILE=$(cat /tmp/update-file-path)\n', 0o755)
         az.inject(self.fs, b'key', overlay=overlay)
         self.assertIn(b'az01-ethernet-speed 1000', self.fs.read('/usr/Engine/Scripts/engine'))
+        self.assertIn(b'\t\t\t' + GUARDED_UPDATE_FILE, self.fs.read('/usr/Engine/Scripts/engine'))
         self.assertIn(b'0.0.0.0 telemetry.inmusicbrands.com', self.fs.read('/etc/hosts'))
         az.check_fs(self.disk)
+
+    @unittest.skipUnless(all(p.is_file() for p in STOCK_530), 'needs the official 5.3.0 images of the build-host lab')
+    def test_overlay_debloat_guards_the_stock_update_file_step(self):
+        # The stock scripts themselves: a base whose line no longer matches fails here instead of
+        # silently keeping the stock step (an image on an HFS+ stick would then not install again).
+        debloat = (Path(__file__).resolve().parents[2]/'rootfs-overlay/usr/local/bin/sc5000-debloat').read_bytes()
+        for image in STOCK_530:
+            with self.subTest(image=image.name):
+                stock = self.root/'stock.ext2'
+                with stock.open('wb') as f:
+                    az.inflate(az.Image(image.read_bytes()).payload(), f)
+                script = az.ExtFS(stock).read('/usr/Engine/Scripts/engine')
+                stock.unlink()
+                self.assertEqual(script.count(b'UPDATE_FILE=$(cat /tmp/update-file-path)'), 1)
+                self.fs.write('/usr/Engine/Scripts/engine', script, 0o755)
+                az.offline_debloat(self.fs, debloat)
+                patched = self.fs.read('/usr/Engine/Scripts/engine')
+                self.assertNotIn(b'UPDATE_FILE=$(cat /tmp/update-file-path)', patched)
+                self.assertEqual(patched.count(b'\t' + GUARDED_UPDATE_FILE), 1)
 
     def test_guardian_and_template_services(self):
         services = []

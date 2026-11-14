@@ -60,6 +60,25 @@ begin_attempt() {
     record boot-stage engine-start
     record boot-token "$token"
 }
+# An update image on an HFS+ stick is reached through edisksd-hook's view (a tmpfs of binds over
+# /media/<volume>). Walking up from it, the stock updater never meets the stick's root and hands the
+# update environment a wrong upgrade-file. Point it at the same file below the view's backing mount.
+# Only a file on the stick itself: the hook binds no top-level symlink, but one further down (or a
+# `..`) could lead off the stick. Such a path is left as Engine wrote it.
+stick_path() {
+    file=$(cat "$1" 2>/dev/null) || return 0
+    for view in "${SC5000_HFS_VIEWS:-/run/sc5000-hfs-views}"/view-*/view; do
+        dir=$file
+        while [ "$dir" != "${dir%/*}" ]; do
+            dir=${dir%/*}
+            [ "$dir" -ef "$view" ] || continue
+            stick=$(readlink -f "${view%/view}/backing") && real=$(readlink -f "$stick/${file#"$dir"/}") &&
+                [ ! -L "$stick/${file#"$dir"/}" ] && [ "$real" -ef "$file" ] || return 0
+            case $real in "$stick"/*) printf '%s\n' "$real" > "$1" ;; esac
+            return 0
+        done
+    done
+}
 case ${1:-} in
 runtime)
     [ ! -e "$UI/safe-mode" ] || exit 0
@@ -122,6 +141,11 @@ launch)
         rm -f "$UI/boot-token" "$UI/boot-ready" "$UI/boot-progress"
     fi
     exit "$result"
+    ;;
+update-file)
+    # The stock engine script's UpdateFromFile step calls this before it reads the path (sc5000-debloat,
+    # boot-activate), after every Engine exit: also safe-mode's stock Engine, which `launch` execs.
+    stick_path "${SC5000_UPDATE_FILE_PATH:-/tmp/update-file-path}"
     ;;
 ready)
     [ ! -e "$UI/safe-mode" ] && [ -n "${2:-}" ] && [ "$(cat "$UI/boot-token" 2>/dev/null)" = "$2" ] || exit 1
