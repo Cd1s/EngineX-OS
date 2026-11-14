@@ -433,17 +433,22 @@ func (s *Server) consoleQR(w http.ResponseWriter, r *http.Request) {
 // this browser reached the console by, unless that only works on this machine. Most
 // routers do not resolve sc5000.lan, so a QR code pointing there opened a blank page (#218).
 func consoleURL(r *http.Request) string {
+	if r == nil {
+		return "http://" + lanHost() + ":8080"
+	}
 	name, _, err := net.SplitHostPort(r.Host)
 	if err != nil {
 		name = r.Host
 	}
-	if ip := net.ParseIP(name); name == "" || name == "localhost" || name == "sc5000.lan" || (ip != nil && ip.IsLoopback()) {
+	host := strings.Trim(name, "[]")
+	if ip := net.ParseIP(host); host == "" || host == "localhost" || host == "sc5000.lan" || (ip != nil && ip.IsLoopback()) {
 		return "http://" + lanHost() + ":8080"
 	}
-	if r.TLS != nil || strings.HasSuffix(name, ".trycloudflare.com") {
-		return "https://" + r.Host
+	scheme := "http"
+	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" || strings.HasSuffix(name, ".trycloudflare.com") {
+		scheme = "https"
 	}
-	return "http://" + r.Host
+	return (&url.URL{Scheme: scheme, Host: r.Host}).String()
 }
 
 // legacyAccessCode matches codes from older releases: providers.RandomID (43 base64url) or 32 hex.
