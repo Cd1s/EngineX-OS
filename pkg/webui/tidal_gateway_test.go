@@ -902,7 +902,7 @@ func TestSoundCloudPlaybackInfoCodecMatchesStreamWhenLosslessOnly(t *testing.T) 
 	ui.tidal.tracks[2] = trackRef{track: spotify}
 	ui.tidal.mu.Unlock()
 
-	for id, want := range map[string][2]string{"1": {"audio/mpeg", ".mp3"}, "2": {"audio/ogg", ".ogg"}} {
+	for id, want := range map[string][2]string{"1": {"audio/mpeg", ".mp3"}, "2": {"audio/mpeg", ".mp3"}} {
 		var info struct {
 			Manifest string `json:"manifest"`
 		}
@@ -910,11 +910,15 @@ func TestSoundCloudPlaybackInfoCodecMatchesStreamWhenLosslessOnly(t *testing.T) 
 		raw, _ := base64.StdEncoding.DecodeString(info.Manifest)
 		var m struct {
 			MimeType string   `json:"mimeType"`
+			Codecs   string   `json:"codecs"`
 			URLs     []string `json:"urls"`
 		}
 		json.Unmarshal(raw, &m)
 		if m.MimeType != want[0] || len(m.URLs) != 1 || !strings.HasSuffix(m.URLs[0], want[1]) {
 			t.Fatalf("track %s: %s", id, raw)
+		}
+		if id == "2" && m.Codecs != "mp3" {
+			t.Fatalf("track 2 (spotify) expected codec mp3, got %q (Engine OS TIDAL client rejects vorbis: #277)", m.Codecs)
 		}
 		resp, err := http.Get(m.URLs[0])
 		if err != nil {
@@ -924,6 +928,90 @@ func TestSoundCloudPlaybackInfoCodecMatchesStreamWhenLosslessOnly(t *testing.T) 
 		if resp.StatusCode != 200 || resp.Header.Get("Content-Type") != want[0] {
 			t.Fatalf("track %s stream: %d %q", id, resp.StatusCode, resp.Header.Get("Content-Type"))
 		}
+	}
+}
+
+// #277: Spotify native OGG Vorbis must be advertised to Engine OS's TIDAL client
+// as codec "mp3" / .mp3 URL so Engine saves <id>.mp3 instead of dropping the extension.
+// Engine's TrackDeckControlLoadWorker fails with FAILED_TO_CREATE_READER (22) on extensionless
+// files, whereas ffmpegFileReader probes and plays OGG Vorbis under the .mp3 extension.
+func TestSpotifyNativeOggAdvertisedAsMp3ForEngineCompatibility(t *testing.T) {
+	dir := t.TempDir()
+	jobs := NewJobs(Pipeline{Catalog: fixtureCatalog{}, Deemix: &deemixclient.Client{DownloadDir: dir, AllowLossy: false}})
+	defer jobs.Close()
+	ui := New(Config{AccessToken: "c", UIDir: t.TempDir(), StateDir: t.TempDir()}, jobs)
+	srv := httptest.NewServer(ui)
+	defer srv.Close()
+
+	ogg := filepath.Join(dir, "spotify-sp277.ogg")
+	oggData := []byte("OggS-spotify-vorbis-payload")
+	if err := os.WriteFile(ogg, oggData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	track := providers.Track{ID: "sp277", Provider: "spotify", Title: "Song", Artist: "Artist"}
+	jobs.files[trackKey(track)] = fetched{dl: &deemixclient.Download{Path: ogg}}
+	ui.tidal.mu.Lock()
+	ui.tidal.tracks[42] = trackRef{track: track}
+	ui.tidal.mu.Unlock()
+
+	// 1. PlaybackInfo: must declare codecs="mp3", mimeType="audio/mpeg", and url ending in ".mp3"
+	var info struct {
+		Manifest string `json:"manifest"`
+	}
+	tidalGet(t, srv.URL, "/v1/tracks/42/playbackinfopostpaywall", 200, &info)
+	raw, err := base64.StdEncoding.DecodeString(info.Manifest)
+	if err != nil {
+		t.Fatalf("decode manifest: %v", err)
+	}
+	var manifest struct {
+		MimeType string   `json:"mimeType"`
+		Codecs   string   `json:"codecs"`
+		URLs     []string `json:"urls"`
+	}
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		t.Fatalf("unmarshal manifest: %v", err)
+	}
+	if manifest.Codecs != "mp3" {
+		t.Errorf("manifest codecs = %q, want %q", manifest.Codecs, "mp3")
+	}
+	if manifest.MimeType != "audio/mpeg" {
+		t.Errorf("manifest mimeType = %q, want %q", manifest.MimeType, "audio/mpeg")
+	}
+	if len(manifest.URLs) != 1 || !strings.HasSuffix(manifest.URLs[0], "/v1/stream/42.mp3") {
+		t.Errorf("manifest URLs = %v, want ending in /v1/stream/42.mp3", manifest.URLs)
+	}
+
+	// 2. StreamURL (legacy endpoint): must also return codec="mp3" and url ending in ".mp3"
+	var streamURLResp struct {
+		URL   string `json:"url"`
+		Codec string `json:"codec"`
+	}
+	tidalGet(t, srv.URL, "/v1/tracks/42/streamurl", 200, &streamURLResp)
+	if streamURLResp.Codec != "mp3" {
+		t.Errorf("streamURL codec = %q, want %q", streamURLResp.Codec, "mp3")
+	}
+	if !strings.HasSuffix(streamURLResp.URL, "/v1/stream/42.mp3") {
+		t.Errorf("streamURL URL = %q, want ending in /v1/stream/42.mp3", streamURLResp.URL)
+	}
+
+	// 3. GET /v1/stream/42.mp3: serves the OGG data with 200 OK and audio/mpeg
+	resp, err := http.Get(manifest.URLs[0])
+	if err != nil {
+		t.Fatalf("stream get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Errorf("stream status = %d, want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "audio/mpeg" {
+		t.Errorf("stream Content-Type = %q, want %q", ct, "audio/mpeg")
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read stream: %v", err)
+	}
+	if !bytes.Equal(body, oggData) {
+		t.Errorf("stream body mismatch: got %q, want %q", body, oggData)
 	}
 }
 
