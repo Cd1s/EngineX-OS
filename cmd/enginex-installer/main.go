@@ -1596,6 +1596,7 @@ func run(ctx context.Context, o *options) error {
 			}
 		}
 		if len(candidates) == 0 {
+			firewallHint(o)
 			return stockRescue()
 		}
 		if len(candidates) != 1 {
@@ -1641,7 +1642,7 @@ func run(ctx context.Context, o *options) error {
 }
 
 func registerFlags(fs *flag.FlagSet, o *options) {
-	fs.StringVar(&o.Bundle, "bundle", "", "*-Update.img or Data-Bundle.tar.gz to install (default: signed package beside this installer matching its version, otherwise latest release)")
+	fs.StringVar(&o.Bundle, "bundle", "", "*-Update.img or Data-Bundle.tar.gz to install (use a signed matching-version package beside this installer when present; otherwise default: latest release; a package in the folder is reused only when its SHA-256 matches)")
 	fs.StringVar(&o.Bundle, "image", "", "alias for -bundle: *-Update.img to install")
 	fs.StringVar(&o.Backup, "userdata-backup", "", "mode B: a backup image of the deck's data partition to inject into (keeps the user's files; if omitted, a fresh partition is created)")
 	fs.StringVar(&o.Key, "key", "", "mode A: SSH private key (default ~/.ssh/id_*; password denon is also tried)")

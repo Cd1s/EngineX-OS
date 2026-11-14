@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Cd1s/EngineX-OS/internal/installer/usb"
 )
@@ -131,6 +132,12 @@ func TestRestoreStockPreparesBeforeUSB(t *testing.T) {
 		t.Fatal(err)
 	}
 	ssh := startSSHDeck(t, o.SSHPort, "inmusic,jp14\x00")
+	oldReadTimeout := sshReadTimeout
+	sshReadTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { sshReadTimeout = oldReadTimeout })
+	if err := os.WriteFile(filepath.Join(ssh.Shim, "systemctl"), []byte("#!/bin/sh\n[ \"$1\" != stop ] || sleep 0.3\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	fb := newFastboot(t, "jp14", true)
 	fb.Bin.enumerate = func() []usb.DeviceInfo {
 		if !strings.Contains(strings.Join(ssh.Commands(), "\n"), "systemctl poweroff") {
@@ -154,6 +161,25 @@ func TestRestoreStockUnreachableShowsRescue(t *testing.T) {
 	err := run(ctxT(t), o)
 	if err == nil || !strings.Contains(err.Error(), "first flash EngineX") {
 		t.Fatalf("err=%v", err)
+	}
+	if out := o.Out.(*bytes.Buffer).String(); !strings.Contains(out, "51337") || !strings.Contains(out, "11224") {
+		t.Fatalf("missing LAN firewall guidance: %s", out)
+	}
+}
+
+func TestRestoreStockRefusesADeckWithoutEngineX(t *testing.T) {
+	o := testOpts(t)
+	o.RestoreStock, o.Bundle = true, "must-not-open.img"
+	ssh := startSSHDeck(t, o.SSHPort, "inmusic,jp14\x00")
+	if err := os.Remove(filepath.Join(ssh.Data, "rootfs-version.txt")); err != nil {
+		t.Fatal(err)
+	}
+	err := modeA(ctxT(t), o, deck{IP: "127.0.0.1"})
+	if err == nil || !strings.Contains(err.Error(), "first flash EngineX") {
+		t.Fatalf("err=%v", err)
+	}
+	if strings.Contains(strings.Join(ssh.Commands(), "\n"), "systemctl stop") {
+		t.Fatalf("stock deck was stopped: %v", ssh.Commands())
 	}
 }
 

@@ -514,6 +514,7 @@ func TestBoardTable(t *testing.T) {
 type sshDeck struct {
 	Port       int
 	Data       string
+	Shim       string
 	mu         sync.Mutex
 	cmds       []string
 	compatible string
@@ -529,7 +530,11 @@ func startSSHDeck(t *testing.T, port int, compatible string) *sshDeck {
 	t.Helper()
 	need(t, "unshare")
 	d := &sshDeck{Port: port, Data: t.TempDir(), compatible: compatible}
+	if err := os.WriteFile(filepath.Join(d.Data, "rootfs-version.txt"), []byte("5.3.0.5"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	shim := t.TempDir()
+	d.Shim = shim
 	for _, n := range []string{"systemctl", "pgrep"} { // boot-activate.sh must not touch the host
 		os.WriteFile(filepath.Join(shim, n), []byte("#!/bin/sh\nexit 0\n"), 0o755)
 	}
@@ -584,7 +589,9 @@ func startSSHDeck(t *testing.T, port int, compatible string) *sshDeck {
 							if p.Cmd == "cat /sys/firmware/devicetree/base/compatible" {
 								io.WriteString(ch, d.compatible)
 							} else if p.Cmd == stockEngineXCmd {
-								io.WriteString(ch, "EngineX\n")
+								if _, err := os.Stat(filepath.Join(d.Data, "rootfs-version.txt")); err != nil {
+									status = 1
+								}
 							} else if strings.Contains(p.Cmd, "/usr/sbin/az01-update --file") {
 								f, err := os.Create(filepath.Join(d.Data, "az01-update.img"))
 								if err != nil {

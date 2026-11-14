@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -77,7 +78,7 @@ func prepareStockRestore(ctx context.Context, o *options, cl *ssh.Client, d deck
 		"Stop Engine on "+m.Name+", clear its shared QML cache and power it off, then restore official firmware over USB. Music and libraries are kept; back up first."); err != nil {
 		return err
 	}
-	stopCtx, cancel := context.WithTimeout(ctx, sshReadTimeout)
+	stopCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 	if out, err := sshRun(stopCtx, cl, stockCleanupCmd(), nil); err != nil {
 		return fmt.Errorf("stock restore preparation: %w\n%s", err, out)

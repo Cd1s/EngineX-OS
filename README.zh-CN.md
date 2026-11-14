@@ -237,7 +237,7 @@
 
 从 [Releases](https://github.com/Cd1s/EngineX-OS/releases/latest) 下载电脑对应的安装器。链接格式为 `https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-<VERSION>-<platform>.zip`（`linux-amd64` 使用 `.tar.gz`；ZIP 平台为 `windows-amd64`、`macos-amd64`、`macos-arm64`）。
 
-1. 先备份数据，让碟机正常启动 EngineX 并连接电脑所在的局域网。Windows 运行 `Restore-Official-Firmware.bat`，macOS 运行 `.command`，Linux 运行 `.sh`（USB 权限不足时用 `sudo`）。等效命令是 `enginex-installer --restore-stock`。
+1. 先备份数据，让碟机正常启动 EngineX 并连接电脑所在的局域网，先关闭其他碟机。Windows 运行 `Restore-Official-Firmware.bat`，macOS 运行 `.command`，Linux 运行 `.sh`（USB 权限不足时用 `sudo`）。等效命令是 `enginex-installer --restore-stock`。
 2. 一代机先确认清理共享 QML 缓存。工具停止 Engine，只删除它的共享 QML 缓存，执行同步并正常关机，保留音乐与曲库，避免 r5 旧缓存导致官方固件卡在 Logo。二代机则使用现有的局域网 SSH 卸载流程，不刷写固件。
 3. 拔下含更新文件的存储设备。SC5000／SC5000M／SC6000／SC6000M 按住 **MEDIA EJECT + SOURCE + LAYER** 再开机，看到 **Computer Update** 或芯片图标后松开，连接 USB 线。其他一代机请按[官方更新说明](https://support.enginedj.com/support/solutions/articles/69000797882)操作。
 4. 确认恢复官方 5.3.0 后保持供电与 USB 连接，直至刷写及重启完成。一代机镜像直接从 Engine DJ 官方地址下载，也可从 [Engine DJ Downloads](https://enginedj.com/downloads) 下载对应机型的官方 5.3.0 文件，以 `--image "官方镜像路径.img"` 指定。工具检查 AZ01 机型、完整性及固定的官方 SHA-256，拒绝改名的 EngineX 或修改过的镜像；安装包不包含官方固件。

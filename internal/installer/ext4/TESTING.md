@@ -1,7 +1,7 @@
 # Package ext4: tests and oracles (#255 work package C)
 
-All commands run on an approved ARM build host (the build host or
-the second ARM build host) as root, inside a private mount namespace:
+All commands run on an approved ARM build host as root, inside a private mount
+namespace:
 
 ```sh
 . /etc/profile.d/buildtools.sh
