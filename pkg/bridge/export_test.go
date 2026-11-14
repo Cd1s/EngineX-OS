@@ -1,6 +1,9 @@
 package bridge
 
-import "time"
+import (
+	"sync"
+	"time"
+)
 
 // FinishPublishForTest exposes finishPublish to the external test package.
 func FinishPublishForTest(dir string) error { return finishPublish(dir, stateName, "m.db") }
@@ -14,4 +17,15 @@ func SlowExportReadForTest(d, budget time.Duration) func() {
 	oldAfter, oldBudget := afterExportRead, mountReadBudget
 	afterExportRead, mountReadBudget = func() { time.Sleep(d) }, budget
 	return func() { afterExportRead, mountReadBudget = oldAfter, oldBudget }
+}
+
+// HoldExportReadForTest keeps an export read from ending: reading is closed once
+// rb-bridge is in it, and the read goes on after release. restore puts the hook back
+// once nothing reads any more.
+func HoldExportReadForTest() (reading <-chan struct{}, release, restore func()) {
+	old := afterExportRead
+	in, out := make(chan struct{}), make(chan struct{})
+	var entered, released sync.Once
+	afterExportRead = func() { entered.Do(func() { close(in) }); <-out }
+	return in, func() { released.Do(func() { close(out) }) }, func() { afterExportRead = old }
 }
