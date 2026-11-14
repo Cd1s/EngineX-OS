@@ -1089,7 +1089,11 @@ static int unmount_view(struct libmnt_context *ctx,struct owned_view *v,int (*re
     if(mount(NULL,rescue,NULL,MS_PRIVATE|MS_REC,NULL)){int saved=errno;umount2(rescue,MNT_DETACH|UMOUNT_NOFOLLOW);errno=saved;return -saved;}
     unsigned removed=0;int rc=0,saved=0;
     for(;removed<v->count;removed++) {
-        if(path_join(pub,sizeof pub,v->target,v->child[removed].name)||umount2(pub,UMOUNT_NOFOLLOW)) {saved=errno;goto restore_children;}
+        // "Engine Library", last, is the cached library on /data. Engine keeps its database open
+        // there across Eject; that holds nothing of the stick, so it is detached (a later failure
+        // moves the rescue copy back, #23). Every entry from the stick is still refused in use.
+        int lazy=strcmp(v->child[removed].name,"Engine Library")?0:MNT_DETACH;
+        if(path_join(pub,sizeof pub,v->target,v->child[removed].name)||umount2(pub,UMOUNT_NOFOLLOW|lazy)) {saved=errno;goto restore_children;}
     }
     if(umount2(v->target,UMOUNT_NOFOLLOW)){saved=errno;goto restore_children;}
     if(mount_id(v->target)!=v->base_id) {saved=EBUSY;goto restore_root;}

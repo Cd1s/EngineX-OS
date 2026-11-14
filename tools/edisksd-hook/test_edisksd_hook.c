@@ -235,6 +235,7 @@ static void mount_ro(const char *disk,const char *target) {
     assert(!make_dirs(target));assert(!mount(disk,target,NULL,MS_BIND,NULL));
     assert(!mount(NULL,target,NULL,MS_BIND|MS_REMOUNT|MS_RDONLY,NULL));
 }
+static unsigned count_mounts(const char *),count_views(void);
 static void test_mounts(const char *root) {
     // No mount operation may propagate out of this disposable namespace.
     assert(!mount(NULL,"/",NULL,MS_REC|MS_PRIVATE,NULL));
@@ -253,7 +254,7 @@ static void test_mounts(const char *root) {
     struct libmnt_context c={.target=target};
     // A busy child cannot be lazily removed. Previously removed siblings return.
     // edisksd shows Engine only what this returns: it was -1, "Operation not permitted".
-    int held=open(lib,O_RDONLY);assert(held>=0);real_calls=0;
+    int held=open(song,O_RDONLY);assert(held>=0);real_calls=0;
     assert(unmount_dispatch(&c,real_unmount)==-EBUSY&&errno==EBUSY&&real_calls==0);
     expect_file(lib,"deck cue retained");expect_file(song,"audio");close(held);
     // A busy presentation root also restores all detached children.
@@ -261,12 +262,16 @@ static void test_mounts(const char *root) {
     assert(unmount_dispatch(&c,real_unmount)==-EBUSY&&errno==EBUSY&&real_calls==0);
     expect_file(lib,"deck cue retained");expect_file(song,"audio");close(held);
     // Real parent failure after removing our view must restore it atomically
-    // from the already cloned rescue tree, not reconstruct an empty library.
-    c.fail=1;real_calls=0;
+    // from the already cloned rescue tree, not reconstruct an empty library (#23),
+    // also when Engine holds the library's database and its bind was detached.
+    c.fail=1;real_calls=0;held=open(lib,O_RDONLY);assert(held>=0);
     assert(unmount_dispatch(&c,real_unmount)!=0&&errno==EBUSY&&real_calls==1);
-    assert(mount_id(target)!=raw_id);expect_file(lib,"deck cue retained");expect_file(song,"audio");
+    assert(mount_id(target)!=raw_id);expect_file(lib,"deck cue retained");expect_file(song,"audio");close(held);
     struct owned_view *reloaded=load_view(target);assert(reloaded);free(reloaded); // daemon restart ownership recovery
-    c.fail=0;assert(!unmount_dispatch(&c,real_unmount));
+    // Engine keeps its library database open across Eject (left deck, 2026-11-14). That file is
+    // the cached library's on /data, not the stick's: the stick is ejected, no view part stays.
+    unsigned views=count_views();held=open(lib,O_RDONLY);assert(held>=0);
+    c.fail=0;assert(!unmount_dispatch(&c,real_unmount)&&count_mounts(target)==0&&count_views()==views-1);close(held);
     join(p,disk_a,"Engine Library/Database2/m.db");expect_file(p,"native playlist/cues");
     // Fresh disk, identical public label, independent persistent namespace.
     mount_ro(disk_b,target);assert(!prepare_view(target,"uuid-B",deadline_from(now_ms())));
@@ -674,16 +679,16 @@ static void test_hfs_view_copies_only_metadata(const char *root) {
     // Engine's metadata is the writable copy, and Engine may add next to it.
     join(p,target,"Engine Library/Database2/m.db");expect_file(p,"engine dj export 1");write_file(p,"deck cue");
     join(p,target,"Engine Library/deck-made");write_file(p,"x");
-    // Eject: a busy track, a busy library and a failed real umount all put every bind back.
+    // Eject: a busy track, and a failed real umount while Engine has its database open, put every bind back.
     struct libmnt_context c={.target=target};
     join(p,target,"Engine Library/Music/Artist/track.mp3");int held=open(p,O_RDONLY);assert(held>=0);real_calls=0;
     assert(unmount_dispatch(&c,real_unmount)==-EBUSY&&errno==EBUSY&&real_calls==0);close(held);
     join(p,target,"Engine Library/Database2/m.db");held=open(p,O_RDONLY);assert(held>=0);
-    assert(unmount_dispatch(&c,real_unmount)==-EBUSY&&errno==EBUSY&&real_calls==0);close(held);
-    c.fail=1;assert(unmount_dispatch(&c,real_unmount)!=0&&errno==EBUSY&&real_calls==1);c.fail=0;
+    c.fail=1;assert(unmount_dispatch(&c,real_unmount)!=0&&errno==EBUSY&&real_calls==1);c.fail=0;close(held);
     join(p,target,"Engine Library/Music/Artist/track.mp3");assert(!stat(p,&st)&&st.st_size==(8<<20));
     join(p,target,"Engine Library/Database2/m.db");expect_file(p,"deck cue");
-    assert(!unmount_dispatch(&c,real_unmount));
+    // Engine's open database is the cached library's: the stick and its nested binds still go.
+    held=open(p,O_RDONLY);assert(held>=0);assert(!unmount_dispatch(&c,real_unmount)&&count_mounts(target)==0);close(held);
     join(p,disk,"Engine Library/Database2/m.db");expect_file(p,"engine dj export 1");
     join(p,disk,"Engine Library/deck-made");assert(access(p,F_OK)==-1&&errno==ENOENT);
     // An older build's full copy in the cached library is replaced by the stick's own folder.
