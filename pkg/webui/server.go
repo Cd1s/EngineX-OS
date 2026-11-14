@@ -201,6 +201,8 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.mux.HandleFunc("POST /m/{provider}", s.phonePost)
 	s.mux.HandleFunc("GET /api/ui", s.uiStatus)
 	s.mux.HandleFunc("GET /api/logs", s.downloadLogs)
+	s.mux.HandleFunc("GET /api/tracklists", s.tracklists)
+	s.mux.HandleFunc("GET /api/tracklists/export", s.exportTracklist)
 	s.mux.HandleFunc("GET /boot-status", s.bootStatus)
 	s.mux.HandleFunc("POST /api/boot-reset", s.bootReset)
 	s.mux.HandleFunc("GET /api/boot-reset", func(w http.ResponseWriter, r *http.Request) {

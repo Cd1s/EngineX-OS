@@ -91,6 +91,12 @@ a{color:var(--accent)}label.chk{display:flex;align-items:center;gap:10px;cursor:
   <small id="relState" role="status"></small>
   <div id="relRows" class="rows"></div>
  </section>
+ <section class="card">
+  <h2><span class="ic">≡</span><span data-i18n="tlTitle"></span></h2>
+  <small data-i18n="tlHint"></small><small id="tracklistState" role="status"></small>
+  <div class="bar"><button class="btn" onclick="action(showTracklists)" data-i18n="tlLoad"></button><select id="tracklistSet" data-i18n-aria="tlSet"></select></div>
+  <div class="bar"><button class="btn" id="tracklistTxt" onclick="downloadTracklist('txt')" data-i18n="tlText" disabled></button><button class="btn" id="tracklistCsv" onclick="downloadTracklist('csv')" disabled>CSV</button></div>
+ </section>
 </div>
 <div class="col">
  <section class="card">
@@ -134,6 +140,8 @@ a{color:var(--accent)}label.chk{display:flex;align-items:center;gap:10px;cursor:
 const $=id=>document.getElementById(id);let current='',loginSession='',lastWave='',sessions=[],qrTimer=null,qrChecking=false,lastUI=null,lastDrives=[],redrawList=null,lastJobs=null;
 // Every visible string: [English, 简体中文, 繁體中文].
 const T={
+tlTitle:['Set tracklist','演出曲目表','演出曲目表'],tlHint:['Export recorded Engine history from a mounted drive. Remote Library plays are available only if Engine recorded them.','导出已挂载磁盘上的 Engine 历史；Remote Library 播放仅在 Engine 已记录时可导出。','匯出已掛載磁碟上的 Engine 歷史；Remote Library 播放僅在 Engine 已記錄時可匯出。'],
+tlReadError:['Could not read history on: {0}','无法读取这些磁盘的历史：{0}','無法讀取這些磁碟的歷史：{0}'],tlLoad:['Refresh recorded sets','刷新已记录的演出','重新整理已記錄的演出'],tlSet:['Recorded set','已记录的演出','已記錄的演出'],tlEmpty:['No recorded sets','没有已记录的演出','沒有已記錄的演出'],tlText:['Download text','下载文本','下載文字'],
 verboseLog:['Verbose logging','详细日志','詳細日誌'],verboseLogSub:['Off by default. Engine will restart; playback will stop.','默认关闭。Engine 会重启，播放会中断。','預設關閉。Engine 會重新啟動，播放會中斷。'],downloadLogs:['Download logs','下载日志','下載日誌'],
 queueIdle:['Background queue','后台工作队列','背景工作佇列'],streaming:['Streaming & accounts','流媒体与账号','串流與帳號'],pNetease:['NetEase','网易云','網易雲'],
 guest:['Guest mode','访客临时加歌','訪客臨時加歌'],guestSub:['Guest logins stay in memory for 8 hours; downloads go to [Guest / 临时加歌]. Hot cues are kept.','访客凭据只保存在内存，8 小时后失效；下载进入 [Guest / 临时加歌]，原有 Hot Cue 保留。','訪客憑證只保存在記憶體，8 小時後失效；下載進入 [Guest / 临时加歌]，原有 Hot Cue 保留。'],
@@ -200,7 +208,7 @@ function applyLang(){document.documentElement.lang=lang==='en'?'en':lang==='zh-H
  for(const e of document.querySelectorAll('[data-i18n-aria]'))e.setAttribute('aria-label',t(e.dataset.i18nAria));
  for(const e of document.querySelectorAll('[data-i18n-alt]'))e.alt=t(e.dataset.i18nAlt);
  for(const b of document.querySelectorAll('[data-lang]'))b.classList.toggle('on',b.dataset.lang===lang)}
-function setLang(l,save){if(!LANGS.includes(l))return;lang=l;if(save)localStorage.setItem('enginex-console-lang',l);applyLang();if(lastUI)showUI(lastUI);renderSessions();renderDrives();if(redrawList)redrawList();if(lastMods)renderMods(lastMods);if(lastJobs)renderJobs(lastJobs,true);action(async()=>{await showRelay();await showTunnel().catch(()=>{});await showSpotify();await showBpm();await showBroadcast();await showTailscale().catch(()=>{});await showSSH().catch(()=>{});await showGen2().catch(()=>{})})}
+function setLang(l,save){if(!LANGS.includes(l))return;lang=l;if(save)localStorage.setItem('enginex-console-lang',l);applyLang();if(lastUI)showUI(lastUI);renderSessions();renderDrives();renderTracklists();if(redrawList)redrawList();if(lastMods)renderMods(lastMods);if(lastJobs)renderJobs(lastJobs,true);action(async()=>{await showRelay();await showTunnel().catch(()=>{});await showSpotify();await showBpm();await showBroadcast();await showTailscale().catch(()=>{});await showSSH().catch(()=>{});await showGen2().catch(()=>{})})}
 for(const b of document.querySelectorAll('[data-lang]'))b.onclick=()=>setLang(b.dataset.lang,true);
 async function showBpm(){const v=await api('bpm');$('bpmState').textContent='SoundCloud: '+(v.soundcloudSet?t('set'):t('unset'))+' · GetSongBPM: '+(v.getSongBpmSet?t('set'):t('unset'))}
 async function saveBpm(){const b={};if($('scClient').value)b.soundcloudClientId=$('scClient').value.trim();if($('scSecret').value)b.soundcloudClientSecret=$('scSecret').value.trim();if($('scToken').value)b.soundcloudToken=$('scToken').value.trim();if($('gsbKey').value)b.getSongBpmKey=$('gsbKey').value.trim();await api('bpm',{method:'POST',body:JSON.stringify(b)});$('scClient').value=$('scSecret').value=$('scToken').value=$('gsbKey').value='';await showBpm()}
@@ -217,6 +225,10 @@ let noticeTimer=null;function notice(m){$('notice').textContent=m||'';clearTimeo
 async function api(path,opts={}){const r=await fetch('/api/'+path,{...opts,headers:{'Content-Type':'application/json'}});const v=await r.json();if(!r.ok)throw Error(v.error||r.status);return v}
 const post=(p,v={})=>api(p,{method:'POST',body:JSON.stringify(v)});
 async function action(fn){try{notice('');await fn()}catch(e){notice(e.message)}}
+let lastTracklists=[],lastTracklistUnavailable=[];
+function renderTracklists(){const sel=$('tracklistSet'),keep=sel.value;sel.replaceChildren();for(const set of lastTracklists){const o=document.createElement('option');o.value=new URLSearchParams({drive:set.drive,id:set.id}).toString();o.textContent=set.drive+' · '+(set.title||set.id)+(set.startTime?' · '+set.startTime:'');sel.append(o)}if(!lastTracklists.length){const o=document.createElement('option');o.dataset.i18n='tlEmpty';o.textContent=t('tlEmpty');sel.append(o)}else if([...sel.options].some(o=>o.value===keep))sel.value=keep;sel.disabled=$('tracklistTxt').disabled=$('tracklistCsv').disabled=!lastTracklists.length;$('tracklistState').textContent=lastTracklistUnavailable.length?t('tlReadError',lastTracklistUnavailable.join(', ')):''}
+async function showTracklists(){const v=await api('tracklists');lastTracklists=v.sets;lastTracklistUnavailable=v.unavailable;renderTracklists()}
+function downloadTracklist(format){if(lastTracklists.length)location.href='/api/tracklists/export?'+$('tracklistSet').value+'&format='+format}
 function renderSessions(){const selected=current;$('sessions').replaceChildren();for(const s of sessions){const o=document.createElement('option');o.value=s.id;o.textContent=s.provider+' · '+(s.guest?t('guestShort'):t('owner'))+(s.ready?' ✓':' · '+t('needLogin'));$('sessions').append(o)}if(!sessions.length){const o=document.createElement('option');o.textContent=t('noAccount');o.disabled=true;o.selected=true;$('sessions').append(o)}current=sessions.some(s=>s.id===selected)?selected:(sessions[0]?.id||'');if(current)$('sessions').value=current;for(const b of document.querySelectorAll('[data-provider]'))b.classList.toggle('ok',sessions.some(s=>s.provider===b.dataset.provider&&s.ready))}
 async function refreshSessions(){sessions=await api('sessions');renderSessions()}
 $('sessions').onchange=()=>{current=$('sessions').value;$('rows').replaceChildren();redrawList=null};
@@ -358,6 +370,6 @@ async function modUpload(f){if(!f)return;if(!/\.(tar\.gz|tgz)$/i.test(f.name)){n
 $('modFile').onchange=e=>{const f=e.target.files[0];e.target.value='';action(()=>modUpload(f))};
 $('modDrop').ondragover=e=>{e.preventDefault();$('modDrop').style.borderColor='var(--accent)'};$('modDrop').ondragleave=()=>{$('modDrop').style.borderColor=''};
 $('modDrop').ondrop=e=>{e.preventDefault();$('modDrop').style.borderColor='';const f=e.dataTransfer.files[0];action(()=>modUpload(f))};
-applyLang();renderSessions();renderDrives();
+applyLang();renderSessions();renderDrives();renderTracklists();
 action(async()=>{const v=await api('ui');if(!localStorage.getItem('enginex-console-lang')&&LANGS.includes(v.language))setLang(v.language,false);showUI(v);await showDrives();await showRelay();await showTunnel().catch(()=>{});await showSpotify();await showBpm();await showBroadcast();await showTailscale().catch(()=>{});await showSSH().catch(()=>{});await showGen2().catch(()=>{});await showMods().catch(()=>{});await refreshSessions();await jobs()});setInterval(()=>{jobs().catch(()=>{})},2000);
 </script></html>
