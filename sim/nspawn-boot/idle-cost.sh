@@ -1,8 +1,10 @@
 # Sourced by boot.sh inside its private mount namespace when NSPAWN_IDLE_COST=<seconds>.
 idle_cost_prepare() {
+    mkdir -p "$W/data/enginex/ui"
+    # A settings.conf to boot with, e.g. one that turns the four-deck layout on.
+    [ -z "${NSPAWN_IDLE_SETTINGS:-}" ] || install -m 600 "$NSPAWN_IDLE_SETTINGS" "$W/data/enginex/ui/settings.conf"
     [ "${NSPAWN_IDLE_STOCK:-0}" = 1 ] || return 0
     # Baseline: the image's own Engine in safe mode (no hook, no UI pack) and none of our daemons.
-    mkdir -p "$W/data/enginex/ui"
     : > "$W/data/enginex/ui/safe-mode"
     # prepare clears safe-mode when it installs a pack version it has not seen.
     cp "$R/etc/sc5000/version.txt" "$W/data/enginex/ui/.pack-version"

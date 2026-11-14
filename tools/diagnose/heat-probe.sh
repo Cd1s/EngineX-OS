@@ -6,8 +6,12 @@
 # Arguments: seconds to measure (default 300) and a label for the report. Start the second
 # run with a track already playing. It reads /proc and /sys only: nothing is written to the
 # deck, no setting is changed, no profiler or signal is used. Between its two snapshots it
-# sleeps, waking every 30 s to read the temperatures, so it ends by itself after the given
-# seconds (the stock image has no timeout or nice command). BusyBox sh and awk are enough.
+# sleeps, waking once a second to read the CPU clock and the sound card's buffer state
+# (this kernel keeps no time_in_state), so it ends by itself after the given seconds (the
+# stock image has no timeout or nice command). BusyBox sh and awk are enough.
+# Reading a PCM status file returns avail_max, the fullest the buffer was read back since the
+# previous read, and restarts that count: a diagnostic value only. An underrun is
+# avail_max >= buffer_size.
 set -u
 SECS=${1:-300}
 LABEL=${2:-unlabelled}
@@ -16,6 +20,7 @@ export LC_ALL=C
 # The deck's sshd and consoles share CPU 3: never compete with them, however this was started.
 chrt --idle -p 0 $$ >/dev/null 2>&1 || :
 SYS=${HEAT_PROBE_SYS:-/sys}
+ASOUND=${HEAT_PROBE_ASOUND:-/proc/asound}
 CPU=$SYS/devices/system/cpu
 val() { v=; read -r v 2>/dev/null < "$1"; printf '%s' "${v:-?}"; }
 
@@ -27,6 +32,17 @@ temps() {
         [ -r "$c" ] && printf ' %s' "$(val "$c")"
     done
     echo
+}
+# One sample: the shared CPU clock, and every open playback stream's state and avail_max.
+sample() {
+    echo "@S clock $(val "$CPU/cpu0/cpufreq/scaling_cur_freq")"
+    for f in "$ASOUND"/card*/pcm*p/sub*/status; do
+        st=; mx=
+        while read -r k a b; do
+            case $k in state:) st=$a ;; avail_max) mx=$b ;; esac
+        done 2>/dev/null < "$f"
+        [ -z "$st" ] || echo "@S pcm ${f#"$ASOUND"/} $st ${mx:-0}"
+    done
 }
 # Everything that is compared between the start and the end, one tagged line each.
 snap() {
@@ -80,16 +96,22 @@ for c in "$SYS"/class/thermal/cooling_device*; do
 done
 
 echo
+echo '## Sound card streams (an underrun is avail_max >= buffer_size)'
+for f in "$ASOUND"/card*/pcm*p/sub*/hw_params; do
+    [ -r "$f" ] && echo "${f#"$ASOUND"/}: $(tr '\n' ' ' < "$f")"
+done
+echo
 echo "## Temperatures (millidegrees) and core clocks (kHz) every 30 s"
 printf 't=0'; temps
 exec 3>&1 # the 30 s lines go straight out, not through awk
 {
     snap A
     t=0
+    sample > /dev/null # restart avail_max: count the window only
     while [ "$t" -lt "$SECS" ]; do
-        step=$((SECS - t)); [ "$step" -le 30 ] || step=30
-        ${HEAT_PROBE_SLEEP:-sleep} "$step"; t=$((t + step))
-        { printf 't=%s' "$t"; temps; } >&3
+        ${HEAT_PROBE_SLEEP:-sleep} 1; t=$((t + 1))
+        sample
+        [ $((t % 30)) != 0 ] && [ "$t" != "$SECS" ] || { printf 't=%s' "$t"; temps; } >&3
     done
     snap B
     # Names for the processes that are alive at the end (the suite daemons share one comm).
@@ -122,6 +144,8 @@ kind == "irq" && $3 ~ /^[0-9A-Za-z]+:$/ {
 kind == "task" { task(line); tk[snapshot, key] = ticks; if (snapshot == "B") { tcomm[key] = comm; tpol[key] = policy; tcpu[key] = last_cpu; keys[++nkey] = key } }
 kind == "cmd" { pid = $3; c = line; sub(/^[^ ]+ /, "", c); cmd[pid] = substr(c, 1, 60) }
 kind == "file" { f = $3; k = $4; v = $5; if ($3 ~ /time_in_state$/) { tis[snapshot, f, k] = v; if (snapshot == "A") { tf[++ntis] = f; tk2[ntis] = k } } else if (snapshot == "B") trans[++ntrans] = line }
+kind == "clock" { clock[$3]++; nclock++ }
+kind == "pcm" { pcm[$3]++; if ($4 != "RUNNING") stopped[$3]++; if ($5 > fullest[$3]) fullest[$3] = $5 }
 kind == "idle" { idt[snapshot, $3] = $5; idu[snapshot, $3] = $6; idn[$3] = $4; if (snapshot == "A") ids[++nid] = $3 }
 END {
     secs = up["B"] - up["A"]; hz = 100
@@ -134,7 +158,12 @@ END {
         for (i = 1; i <= 8; i++) { d[i] = cpu["B", c, i] - cpu["A", c, i]; total += d[i] }
         if (total > 0) printf "%-5s %5.1f %5.1f %5.1f %5.1f %5.1f | %5.1f %5.1f\n", c, 100 * d[1] / total, 100 * d[2] / total, 100 * d[3] / total, 100 * d[6] / total, 100 * d[7] / total, 100 * d[4] / total, 100 * d[5] / total
     }
-    print "\n## Time at each CPU clock, % of the window (kHz)"
+    print "\n## CPU clock, % of the 1 s samples (kHz)"
+    for (k in clock) printf "%8d kHz %5.1f\n", k, 100 * clock[k] / nclock | "sort -n"
+    fflush(); close("sort -n")
+    print "\n## Sound card streams: samples, samples not RUNNING, highest avail_max (frames)"
+    for (k in pcm) printf "%s %d %d %d\n", k, pcm[k], stopped[k], fullest[k]
+    print "\n## Time at each CPU clock, % of the window (kHz), where the kernel counts it"
     for (n = 1; n <= ntis; n++) {
         f = tf[n]; k = tk2[n]; share = (tis["B", f, k] - tis["A", f, k]) / secs      # 10 ms units
         c = f; sub(/\/cpufreq.*/, "", c); sub(/.*\//, "", c)
