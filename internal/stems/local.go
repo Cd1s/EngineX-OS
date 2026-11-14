@@ -1,11 +1,10 @@
 package stems
 
 // LocalRender answers Engine's Stems child protocol on the deck itself, for a
-// deck with no renderer set up. It is a coarse frequency split, not a
-// separator: bass below 250 Hz, vocals the 250-4000 Hz band of the mid
-// signal, drums above 4 kHz, and melody the exact remainder, so the four
-// stems sum to the input. The filters are causal: each block is answered at
-// once with the same number of frames, and nothing is left to drain.
+// deck with no renderer set up, with the separator in separate.go. The
+// separator looks a few hundred milliseconds ahead, so the first blocks are
+// answered with no frames and the rest follows after done, in pieces of at
+// most maxBlockSize frames (as the network pipeline and worker.py answer).
 
 import (
 	"bufio"
@@ -17,29 +16,6 @@ import (
 	"strconv"
 	"strings"
 )
-
-// biquad is an RBJ cookbook second-order section, transposed direct form II.
-type biquad struct{ b0, b1, b2, a1, a2, z1, z2 float64 }
-
-func newBiquad(highPass bool, f0, rate float64) *biquad {
-	w := 2 * math.Pi * f0 / rate
-	alpha := math.Sin(w) / math.Sqrt2 // sin(w)/(2Q) with Q = 1/sqrt(2)
-	cos := math.Cos(w)
-	a0 := 1 + alpha
-	b := (1 - cos) / 2
-	b1 := 1 - cos
-	if highPass {
-		b, b1 = (1+cos)/2, -(1 + cos)
-	}
-	return &biquad{b0: b / a0, b1: b1 / a0, b2: b / a0, a1: -2 * cos / a0, a2: (1 - alpha) / a0}
-}
-
-func (f *biquad) step(x float64) float64 {
-	y := f.b0*x + f.z1
-	f.z1 = f.b1*x - f.a1*y + f.z2
-	f.z2 = f.b2*x - f.a2*y
-	return y
-}
 
 func readHeader(r *bufio.Reader) (map[string]string, error) {
 	f, used := map[string]string{}, 0
@@ -93,12 +69,21 @@ func LocalRender(in io.Reader, out io.Writer) error {
 	if err = send(fmt.Sprintf("preparing=ready\n\npreparing=ready\nnumReturnChannels=%d\n\n", 4*ch)); err != nil {
 		return err
 	}
-	type chain struct{ low, high, vocalHigh, vocalLow *biquad }
-	filters := make([]chain, ch)
-	for c := range filters {
-		filters[c] = chain{newBiquad(false, 250, rate), newBiquad(true, 4000, rate), newBiquad(true, 250, rate), newBiquad(false, 4000, rate)}
+	sep := newSeparator(ch, rate)
+	pcm := make([]byte, maxBlock*ch*4)
+	// reply hands Engine the queued frames, at most maxBlock of them.
+	reply := func() error {
+		n := min(maxBlock, len(sep.out[0]))
+		w.WriteString("returnFrames=" + strconv.Itoa(n) + "\n\n")
+		for i, plane := range sep.out {
+			for k, v := range plane[:n] {
+				binary.LittleEndian.PutUint32(pcm[k*4:], math.Float32bits(v))
+			}
+			w.Write(pcm[:n*4])
+			sep.out[i] = plane[n:]
+		}
+		return w.Flush()
 	}
-	pcm, stems := make([]byte, maxBlock*ch*4), make([]byte, maxBlock*ch*16)
 	for {
 		f, err := readHeader(r)
 		if err != nil {
@@ -106,6 +91,12 @@ func LocalRender(in io.Reader, out io.Writer) error {
 		}
 		switch f["action"] {
 		case "done":
+			sep.drain()
+			for len(sep.out[0]) > 0 {
+				if err = reply(); err != nil {
+					return err
+				}
+			}
 			return send("returnFrames=0\n\n")
 		case "block":
 		default:
@@ -119,32 +110,18 @@ func LocalRender(in io.Reader, out io.Writer) error {
 		if _, err = io.ReadFull(r, x); err != nil {
 			return errors.New("stems: truncated PCM block")
 		}
-		sample := func(c, k int) float32 { return math.Float32frombits(binary.LittleEndian.Uint32(x[(c*n+k)*4:])) }
-		put := func(stem, c, k int, v float32) {
-			binary.LittleEndian.PutUint32(stems[((stem*ch+c)*n+k)*4:], math.Float32bits(v))
-		}
-		for k := 0; k < n; k++ {
-			mid := 0.0
-			for c := 0; c < ch; c++ {
-				mid += float64(sample(c, k))
-			}
-			mid /= float64(ch)
-			// mid is mono, so every channel's vocal chain yields the same value.
-			vocals := float32(filters[0].vocalLow.step(filters[0].vocalHigh.step(mid)))
-			for c := 0; c < ch; c++ {
-				fl := filters[c]
-				v := sample(c, k)
-				bass := float32(fl.low.step(float64(v)))
-				drums := float32(fl.high.step(float64(v)))
-				put(0, c, k, vocals)
-				put(1, c, k, bass)
-				put(2, c, k, drums)
-				put(3, c, k, v-vocals-bass-drums)
+		for c := range sep.in {
+			for k := 0; k < n; k++ {
+				v := binary.LittleEndian.Uint32(x[(c*n+k)*4:])
+				if v&0x7f800000 == 0x7f800000 { // NaN or infinite
+					return errors.New("stems: non-finite PCM")
+				}
+				sep.in[c] = append(sep.in[c], math.Float32frombits(v))
 			}
 		}
-		w.WriteString("returnFrames=" + strconv.Itoa(n) + "\n\n")
-		w.Write(stems[:n*ch*16])
-		if err = w.Flush(); err != nil {
+		sep.owed += n
+		sep.run()
+		if err = reply(); err != nil {
 			return err
 		}
 	}

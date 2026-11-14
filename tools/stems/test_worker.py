@@ -213,4 +213,45 @@ class WorkerTests(unittest.TestCase):
             'Default firewall rule must be -Profile Domain,Private -RemoteAddress LocalSubnet',
         )
 
+    def test_macos_command_wrapper_runs_home_worker_from_any_cwd(self):
+        cmd_file = Path(__file__).resolve().with_name('run-home-worker.command')
+        self.assertTrue(cmd_file.exists(), 'tools/stems/run-home-worker.command missing')
+        self.assertTrue(os.access(cmd_file, os.X_OK), 'run-home-worker.command must be executable')
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            stems_dir = root / 'stems'
+            stems_dir.mkdir()
+            (stems_dir / 'run-home-worker.command').write_text(cmd_file.read_text(), encoding='utf-8')
+            (stems_dir / 'run-home-worker.command').chmod(0o755)
+            args_file = root / 'args.txt'
+            (stems_dir / 'run-home-worker.sh').write_text(
+                f'#!/bin/sh\npwd > "{root / "cwd.txt"}"\nprintf "%s\\n" "$@" > "{args_file}"\nexit "${{TEST_EXIT:-0}}"\n',
+                encoding='utf-8',
+            )
+
+            res_ok = subprocess.run(
+                ['/bin/sh', str(stems_dir / 'run-home-worker.command'), 'hpss'],
+                cwd=str(root),
+                input='\n',
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(res_ok.returncode, 0, res_ok.stderr)
+            self.assertEqual(Path(root / 'cwd.txt').read_text().strip(), str(stems_dir.resolve()))
+            self.assertEqual(args_file.read_text().splitlines(), ['hpss'])
+
+            env = dict(os.environ, TEST_EXIT='2')
+            res_fail = subprocess.run(
+                ['/bin/sh', str(stems_dir / 'run-home-worker.command')],
+                cwd=str(root),
+                env=env,
+                input='\n',
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(res_fail.returncode, 2)
+            self.assertIn('Press Enter to close...', res_fail.stdout)
+
 if __name__=='__main__':unittest.main()
