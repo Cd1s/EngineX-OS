@@ -70,6 +70,7 @@ done
 FIRMWARE="$(cd "$(dirname "$FIRMWARE")" && pwd)/$(basename "$FIRMWARE")"
 WORK_DIR="${QENGINE_WORK_DIR:-/root/build/qengine}"
 mkdir -p "$WORK_DIR"
+WORK_DIR="$(cd "$WORK_DIR" && pwd -P)"
 
 TASK_TMP_DIR="$(mktemp -d "$WORK_DIR/tmp.XXXXXX")"
 export TMPDIR="$TASK_TMP_DIR"
@@ -129,7 +130,7 @@ cleanup() {
             [ -n "$dir" ] && [ -d "$dir" ] || continue
             umount -R "$dir" 2>/dev/null || true
             # -T includes mounts below a directory that is not itself a mountpoint.
-            if ! mounts="$(findmnt -rn -R -T "$dir" -o TARGET)"; then
+            if ! mounts="$(findmnt -ln -R -T "$dir" -o TARGET)"; then
                 echo "ERROR: cannot inspect mounts below $dir; retaining it." >&2
                 rc=1
                 continue
