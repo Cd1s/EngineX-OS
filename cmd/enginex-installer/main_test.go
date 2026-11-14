@@ -25,7 +25,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -33,6 +32,9 @@ import (
 	"unicode/utf16"
 
 	"golang.org/x/crypto/ssh"
+
+	"github.com/Cd1s/EngineX-OS/internal/installer/ext4"
+	"github.com/Cd1s/EngineX-OS/internal/installer/usb"
 )
 
 func need(t *testing.T, tools ...string) {
@@ -136,6 +138,11 @@ func sha(t *testing.T, path string) string {
 
 // releaseServer is a TLS GitHub: releases/latest plus the bundle download.
 func releaseServer(t *testing.T, b bundleFile, digest string, downloads *int) *httptest.Server {
+	return releaseServerTag(t, b, digest, downloads, "v"+b.Version)
+}
+
+// releaseServerTag is releaseServer for a release called tag.
+func releaseServerTag(t *testing.T, b bundleFile, digest string, downloads *int, tag string) *httptest.Server {
 	t.Helper()
 	var srv *httptest.Server
 	mux := http.NewServeMux()
@@ -144,7 +151,7 @@ func releaseServer(t *testing.T, b bundleFile, digest string, downloads *int) *h
 		digest = "sha256:" + sha(t, b.Path)
 	}
 	mux.HandleFunc("/repos/Cd1s/EngineX-OS/releases/latest", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{"tag_name": "v" + b.Version, "assets": []map[string]string{
+		json.NewEncoder(w).Encode(map[string]any{"tag_name": tag, "assets": []map[string]string{
 			{"name": "SC5000-" + b.Version + "-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img", "browser_download_url": srv.URL + "/dl/img", "digest": "sha256:00"},
 			{"name": name, "browser_download_url": srv.URL + "/dl/" + name, "digest": digest},
 		}})
@@ -155,8 +162,7 @@ func releaseServer(t *testing.T, b bundleFile, digest string, downloads *int) *h
 		}
 		http.ServeFile(w, r, b.Path)
 	})
-	srv = httptest.NewTLSServer(mux)
-	t.Cleanup(srv.Close)
+	srv = signedTLS(t, mux, map[string]string{name: sha(t, b.Path)})
 	return srv
 }
 
@@ -217,7 +223,7 @@ func announceFrom(t *testing.T, src string, udpPort int, pkt []byte) {
 func testOpts(t *testing.T) *options {
 	t.Helper()
 	return &options{
-		Repo: "Cd1s/EngineX-OS", Yes: true, Fastboot: "no-such-fastboot-binary",
+		Repo: "Cd1s/EngineX-OS", Yes: true, USB: &testUSB{},
 		AirDAddr: fmt.Sprintf("127.0.0.1:%d", freeUDP(t)),
 		EAASAddr: fmt.Sprintf("127.0.0.1:%d", freeUDP(t)),
 		AirDWait: 800 * time.Millisecond,
@@ -326,28 +332,17 @@ func TestEAASPacketValidation(t *testing.T) {
 	}
 }
 
-func TestPnPDescriptionCannotImpersonateADeck(t *testing.T) {
+func TestUSBDescriptionCannotImpersonateADeck(t *testing.T) {
 	o := testOpts(t)
-	for _, instance := range []string{`USB\VID_046D&PID_C52B\1234`, `HID\VID_046D&PID_C52B\1234`} {
-		pnputil := "Instance ID: " + instance + "\r\n" +
-			"Device Description: USB\\VID_15E4&PID_303F\\fake adapter for 15e4:303f\r\n" +
-			"Manufacturer Name: USB\\VID_15E4&PID_103F\\fake\r\n"
-		o.ListUSB = func(context.Context) string { return parsePnPUtil(pnputil) }
-		if board, line := usbDeck(ctxT(t), o, gen2USB); board != "" || line != "" {
-			t.Fatalf("product text impersonated a deck: %q, %q", board, line)
-		}
+	d := &testUSB{info: usbInfo(0x05e3, 0x0610, "15e4:d007 Denon PRIME 4+", false)}
+	o.USB = d
+	o.defaults()
+	if found, err := tryUSB(ctxT(t), o, ""); found || err != nil || d.opens != 0 {
+		t.Fatalf("found=%t err=%v opens=%d", found, err, d.opens)
 	}
-}
-
-func TestPnPUtilExtraBlankLinesKeepAllDevices(t *testing.T) {
-	first := "Instance ID: USB\\VID_046D&PID_C52B\\1234\nDevice Description: Keyboard"
-	second := "Instance ID: USB\\VID_15E4&PID_303F\\5678\nDevice Description: Numark MIXSTREAM PRO PLUS"
-	for _, separator := range []string{"\n\n", "\n\n\n", "\n\n\n\n", "\n \t\n\n"} {
-		got := parsePnPUtil(first + separator + second)
-		want := "046d:c52b Keyboard\n15e4:303f Numark MIXSTREAM PRO PLUS\n"
-		if got != want {
-			t.Errorf("separator %q: got %q, want %q", separator, got, want)
-		}
+	o.ListUSB = func(context.Context) string { return usbLine(d.info) }
+	if board, _ := usbDeck(ctxT(t), o, gen2USB); board != "" {
+		t.Fatalf("description became device identity: %s", board)
 	}
 }
 
@@ -406,7 +401,7 @@ func TestDiscoveryListenersSharePortsWithSOReuseAddr(t *testing.T) {
 
 func TestRunWaitsForEAASCandidatesOnlyOnce(t *testing.T) {
 	o := testOpts(t)
-	o.Fastboot = "true"
+	o.USB = &testUSB{}
 	o.WaitUSB = -time.Second
 	for _, ip := range []string{"127.0.0.8", "127.0.0.9"} {
 		announceFrom(t, ip, freeUDPFromAddr(o.EAASAddr), []byte("EAAS\x01\x00"))
@@ -432,7 +427,7 @@ func TestDiscoverEAASDoesNotPromoteUnknownAirD(t *testing.T) {
 
 func TestEAASNeverDialsSSHBasedOnHTTPResponse(t *testing.T) {
 	o := testOpts(t)
-	o.Fastboot = "true" // no USB devices; do not invoke a real fastboot binary
+	o.USB = &testUSB{} // no USB devices; do not invoke a real fastboot binary
 	o.WaitUSB = -time.Second
 	o.defaults()
 	l, err := net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", o.SSHPort))
@@ -766,9 +761,9 @@ func TestModeAUninstallsALegacySc5000CustomBundle(t *testing.T) {
 
 // ---- Test 3: mode B against a fastboot shim and real ext4 images ---------------
 
-type fbShim struct{ Bin, Dir string }
+type legacyFBShim struct{ Bin, Dir string }
 
-func newFastboot(t *testing.T, product string, hasData bool) fbShim {
+func newLegacyFastboot(t *testing.T, product string, hasData bool) legacyFBShim {
 	t.Helper()
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "product"), []byte(product), 0o644)
@@ -802,15 +797,15 @@ esac
 `
 	bin := filepath.Join(dir, "fastboot")
 	os.WriteFile(bin, []byte(script), 0o755)
-	return fbShim{bin, dir}
+	return legacyFBShim{bin, dir}
 }
 
-func (f fbShim) Calls() []string {
+func (f legacyFBShim) Calls() []string {
 	b, _ := os.ReadFile(filepath.Join(f.Dir, "calls.log"))
 	return strings.Split(strings.TrimSpace(string(b)), "\n")
 }
 
-func (f fbShim) Flashed() []string {
+func (f legacyFBShim) Flashed() []string {
 	var out []string
 	for _, c := range f.Calls() {
 		if strings.HasPrefix(c, "flash ") {
@@ -855,7 +850,7 @@ func checkImage(t *testing.T, img string, suitePath string) {
 
 func modeBOpts(t *testing.T, fb fbShim, b bundleFile) *options {
 	o := testOpts(t)
-	o.Fastboot = fb.Bin
+	o.USB = fb.Bin
 	useRelease(o, releaseServer(t, b, "", nil))
 	return o
 }
@@ -864,9 +859,20 @@ func TestModeBFreshImageFlashedToData(t *testing.T) {
 	need(t, "python3", "mke2fs", "debugfs", "e2fsck", "dumpe2fs")
 	b := buildBundle(t, "PRIME4PLUS", "5.3.0.2")
 	fb := newFastboot(t, "JC11S", true)
+	fb.Bin.enumerate = func() []usb.DeviceInfo {
+		info := fb.Bin.info
+		info.Interfaces = nil
+		info.Driver = "WinUSB"
+		parent := info
+		parent.ID, parent.Driver = "physical-parent", "usbccgp"
+		return []usb.DeviceInfo{parent, info}
+	}
 	o := modeBOpts(t, fb, b)
 	if err := run(ctxT(t), o); err != nil {
 		t.Fatalf("run: %v\n%s", err, o.Out)
+	}
+	if fb.Bin.opens != 1 || fb.Bin.closes != 1 {
+		t.Fatalf("USB session opens=%d closes=%d", fb.Bin.opens, fb.Bin.closes)
 	}
 	flashed := fb.Flashed()
 	if len(flashed) != 1 || !strings.HasPrefix(flashed[0], "flash data ") {
@@ -929,34 +935,31 @@ func TestModeBJC11SRefusesUnverifiedPartition(t *testing.T) {
 	}
 }
 
-func TestModeBJC11SRefusesUnverifiableActivation(t *testing.T) {
-	need(t, "python3", "mke2fs", "debugfs", "e2fsck")
-	realDebugfs, err := exec.LookPath("debugfs")
-	if err != nil {
-		t.Fatal(err)
-	}
-	b := buildBundle(t, "PRIME4PLUS", "5.3.0.3")
+func TestNativeReadbackRefusesUnverifiableActivation(t *testing.T) {
+	need(t, "debugfs")
+	bundle := buildBundle(t, "PRIME4PLUS", "5.3.0.5")
+	originalVerify := verifyImage
+	t.Cleanup(func() { verifyImage = originalVerify })
 	for _, path := range []string{
-		"/enginex/version.txt", "/enginex/bundle/version.txt",
-		"/enginex/bundle/boot-activate.sh", "/enginex/bundle/lib/libengine-ui-hook.so",
-		"/sc5000-custom/bundle/boot-activate.sh", "/sc5000-custom/bundle/lib/libengine-ui-hook.so",
-		"/system/var/overlay/lib/alsa/conf.d/99-sc5000-custom.conf",
+		"enginex/version.txt", "enginex/bundle/version.txt",
+		"enginex/bundle/boot-activate.sh", "enginex/bundle/lib/libengine-ui-hook.so",
+		"sc5000-custom/bundle/boot-activate.sh", "sc5000-custom/bundle/lib/libengine-ui-hook.so",
+		"system/var/overlay/lib/alsa/conf.d/99-sc5000-custom.conf",
 	} {
 		t.Run(path, func(t *testing.T) {
-			shim := t.TempDir()
-			// Simulate debugfs' success exit with missing/stale file contents.
-			script := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = -R ] && [ \"$2\" = %q ]; then echo stale; exit 0; fi\nexec %q \"$@\"\n", "cat "+path, realDebugfs)
-			if err := os.WriteFile(filepath.Join(shim, "debugfs"), []byte(script), 0o755); err != nil {
-				t.Fatal(err)
+			verifyImage = func(ctx context.Context, image string, changes ext4.ChangeSet) error {
+				sh(t, "debugfs", "-w", "-R", "rm /"+path, image)
+				return originalVerify(ctx, image, changes)
 			}
-			t.Setenv("PATH", shim+string(os.PathListSeparator)+os.Getenv("PATH"))
 			fb := newFastboot(t, "JC11S", true)
-			err := run(ctxT(t), modeBOpts(t, fb, b))
-			if err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "nothing flashed") {
-				t.Fatalf("err = %v", err)
+			o := testOpts(t)
+			o.USB, o.Bundle = fb.Bin, bundle.Path
+			err := run(ctxT(t), o)
+			if err == nil || !strings.Contains(err.Error(), "image readback") || !strings.HasSuffix(err.Error(), "nothing flashed") {
+				t.Fatalf("readback %s: %v", path, err)
 			}
-			if calls := fb.Flashed(); len(calls) != 0 {
-				t.Fatalf("flashed without activation files: %v", calls)
+			if flashed := fb.Flashed(); len(flashed) != 0 {
+				t.Fatalf("flashed after readback failure: %v", flashed)
 			}
 		})
 	}
@@ -1007,7 +1010,7 @@ func TestModeBJC11SPublishedBundle(t *testing.T) {
 		t.Run(fmt.Sprintf("legacy=%t", legacy), func(t *testing.T) {
 			fb := newFastboot(t, "JC11S", true)
 			o := testOpts(t)
-			o.Fastboot, o.Bundle = fb.Bin, path
+			o.USB, o.Bundle = fb.Bin, path
 			o.Key = filepath.Join(t.TempDir(), "no-host-key")
 			if legacy {
 				o.Backup = jc11sLegacyBackup(t)
@@ -1080,17 +1083,16 @@ func TestModeBRefusesUnknownBoards(t *testing.T) {
 
 func imageRelease(t *testing.T, prefix string) (*httptest.Server, []byte) {
 	t.Helper()
-	content := []byte("test firmware image")
+	content := gen1Container(t, prefix, []byte("rootfs"))
 	digest := sha256.Sum256(content)
 	var srv *httptest.Server
-	srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv = signedTLS(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/img" {
 			_, _ = w.Write(content)
 			return
 		}
 		json.NewEncoder(w).Encode(map[string]any{"tag_name": "v5.3.0.2", "assets": []map[string]string{{"name": prefix + "-5.3.0.2-EngineX-OS-test-Update.img", "browser_download_url": srv.URL + "/img", "digest": "sha256:" + hex.EncodeToString(digest[:])}}})
-	}))
-	t.Cleanup(srv.Close)
+	}), map[string]string{prefix + "-5.3.0.2-EngineX-OS-test-Update.img": hex.EncodeToString(digest[:])})
 	return srv, content
 }
 
@@ -1122,14 +1124,10 @@ func TestGen1Fastboot(t *testing.T) {
 			o := testOpts(t)
 			o.defaults()
 			fb := newFastboot(t, tc.board, true)
-			o.Fastboot = fb.Bin
+			o.USB = fb.Bin
 			srv, _ := imageRelease(t, tc.prefix)
 			useRelease(o, srv)
-			o.Packer = filepath.Join(t.TempDir(), "packer.py")
-			if err := os.WriteFile(o.Packer, []byte("import pathlib,sys\np=pathlib.Path(sys.argv[sys.argv.index('--output')+1]); p.mkdir(); (p/'rootfs.ext2').write_bytes(b'rootfs')\n"), 0600); err != nil {
-				t.Fatal(err)
-			}
-			if err := modeB(ctxT(t), o); err != nil {
+			if err := run(ctxT(t), o); err != nil {
 				t.Fatal(err)
 			}
 			calls := strings.Join(fb.Calls(), "\n")
@@ -1143,9 +1141,9 @@ func TestGen1Fastboot(t *testing.T) {
 				"正在解锁碟机…",
 				"Flashing rootfs partition (6 B) over USB; this may take several minutes. Do not disconnect USB or power off the deck...",
 				"正在向碟机写入 rootfs 分区 (6 B)，通过 USB 传输可能需要几分钟，请勿断开连接或关闭电源…",
-				"Sending 'rootfs'",
-				"Writing 'rootfs'",
-				"OKAY",
+				"download: ",
+				"flash: ",
+				"100%",
 				"正在重启碟机…",
 				"Rebooting deck...",
 			} {
@@ -1162,15 +1160,12 @@ func TestGen1FastbootWithoutProductUsesUSBID(t *testing.T) {
 	o := testOpts(t)
 	o.defaults()
 	fb := newFastboot(t, "", true)
-	o.Fastboot = fb.Bin
+	o.USB = fb.Bin
+	fb.Bin.info.VID, fb.Bin.info.PID = 0x15e4, 0xd006
 	o.ListUSB = func(context.Context) string { return "05e3:0610 USB2.1 Hub\n15e4:d006 SC5000 Prime\n" }
 	srv, _ := imageRelease(t, "SC5000")
 	useRelease(o, srv)
-	o.Packer = filepath.Join(t.TempDir(), "packer.py")
-	if err := os.WriteFile(o.Packer, []byte("import pathlib,sys\np=pathlib.Path(sys.argv[sys.argv.index('--output')+1]); p.mkdir(); (p/'rootfs.ext2').write_bytes(b'rootfs')\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := modeB(ctxT(t), o); err != nil {
+	if err := run(ctxT(t), o); err != nil {
 		t.Fatalf("modeB: %v\n%s", err, o.Out)
 	}
 	if f := fb.Flashed(); len(f) != 1 || !strings.HasPrefix(f[0], "flash rootfs ") {
@@ -1185,9 +1180,9 @@ func TestModeBWithoutProductOrKnownUSBRefuses(t *testing.T) {
 	o := testOpts(t)
 	o.defaults()
 	fb := newFastboot(t, "", true)
-	o.Fastboot = fb.Bin
+	o.USB = fb.Bin
 	o.ListUSB = func(context.Context) string { return "15e4:d007 PRIME 4 Plus\n" } // 2nd gen answers getvar product itself
-	err := modeB(ctxT(t), o)
+	err := run(ctxT(t), o)
 	if err == nil || !strings.Contains(err.Error(), "cannot read the fastboot product") {
 		t.Fatalf("err = %v", err)
 	}
@@ -1264,7 +1259,7 @@ func TestDownloadRefusesAWrongReleaseDigest(t *testing.T) {
 	b := buildBundle(t, "PRIME4PLUS", "5.3.0.2")
 	fb := newFastboot(t, "JC11S", true)
 	o := testOpts(t)
-	o.Fastboot = fb.Bin
+	o.USB = fb.Bin
 	useRelease(o, releaseServer(t, b, "sha256:"+strings.Repeat("ab", 32), nil))
 	if err := run(ctxT(t), o); err == nil || !strings.Contains(err.Error(), "SHA-256") {
 		t.Fatalf("err = %v, want a SHA-256 mismatch", err)
@@ -1283,8 +1278,11 @@ func TestModeBAsksBeforeFlashing(t *testing.T) {
 	if err := run(ctxT(t), o); err == nil || !strings.Contains(err.Error(), "取消") {
 		t.Fatalf("err = %v, want a cancel", err)
 	}
-	if img, _ := filepath.Glob(filepath.Join(o.WorkDir, "*.img")); len(img) == 0 {
-		t.Error("should have built the image and asked, not stopped earlier")
+	if !strings.Contains(o.Out.(*bytes.Buffer).String(), "ALL music, library and settings") {
+		t.Error("did not ask about erasing the data partition")
+	}
+	if dirs, _ := filepath.Glob(filepath.Join(o.WorkDir, ".enginex-image-*")); len(dirs) != 0 {
+		t.Errorf("cancelled images left behind: %v", dirs)
 	}
 	if f := fb.Flashed(); len(f) != 0 {
 		t.Errorf("flashed %v", f)
@@ -1297,13 +1295,7 @@ func TestLockedDeckWaitsForUSBThenFlashes(t *testing.T) {
 	fb := newFastboot(t, "JC11S", true)
 	// The deck is announced but SSH is closed, and fastboot reports no device
 	// until the user has rebooted it: the shim plays that by hiding devices at first.
-	hidden := filepath.Join(fb.Dir, "devices.real")
-	os.Rename(fb.Bin, hidden)
-	os.WriteFile(fb.Bin, []byte(fmt.Sprintf(`#!/bin/sh
-d=$(dirname "$0")
-if [ "$1" = devices ] && [ ! -f "$d/usb" ]; then echo "$*" >> "$d/calls.log"; touch "$d/polled"; [ -f "$d/polled2" ] && touch "$d/usb"; touch "$d/polled2"; exit 0; fi
-exec sh %q "$@"
-`, hidden)), 0o755)
+	fb.Bin.appearAfter = 3
 	o := modeBOpts(t, fb, b)
 	o.WaitUSB = 20 * time.Second
 	announceFrom(t, "127.0.0.1", freeUDPFrom(o), airD("prime4plus-lab", "DISCOVERER_HOWDY_", "JC11S", "2", 1))
@@ -1321,7 +1313,7 @@ exec sh %q "$@"
 // The shell installer picks the same partition as the Go one.
 func TestFastbootScriptPicksDataOrUserdata(t *testing.T) {
 	for _, hasData := range []bool{true, false} {
-		fb := newFastboot(t, "JC11S", hasData)
+		fb := newLegacyFastboot(t, "JC11S", hasData)
 		img := filepath.Join(t.TempDir(), "u.img")
 		os.WriteFile(img, []byte("image"), 0o644)
 		cmd := exec.Command("sh", filepath.Join(repoRoot(t), "tools/az01-packer/host-install-fastboot.sh"), img)
@@ -1347,7 +1339,7 @@ func TestNoDeckPrintsFirstGenGuide(t *testing.T) {
 		t.Fatalf("err = %v, want the no-deck error", err)
 	}
 	out := o.Out.(*bytes.Buffer).String()
-	for _, want := range []string{"PRIME GO", "Settings -> Update -> Reboot", "Reboot to Computer Update Mode", "15a2:007d", "FAT32/exFAT", "SYSTEM ONE", "51337"} {
+	for _, want := range []string{"PRIME GO", "Settings -> Update -> Reboot", "Reboot to Computer Update Mode", "15e4:d006", "FAT32/exFAT", "SYSTEM ONE", "51337"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("guide is missing %q", want)
 		}
@@ -1411,140 +1403,58 @@ func TestBoardCodeJC11SVariants(t *testing.T) {
 	}
 }
 
-func logShim(t *testing.T, body string) (string, string) {
-	t.Helper()
-	dir := t.TempDir()
-	bin := filepath.Join(dir, "fastboot")
-	os.WriteFile(bin, []byte("#!/bin/sh\necho \"$*\" >> \""+dir+"/calls.log\"\n"+body), 0o755)
-	return bin, filepath.Join(dir, "calls.log")
-}
-
-// #129: old fastboot builds only list whitelisted vendors; try inMusic 0x15e4, then Rockchip 0x2207, and keep what worked.
-func TestFastbootFallsBackToRockchipVID(t *testing.T) {
-	bin, log := logShim(t, `[ "$1 $2 $3" = "-i 0x2207 devices" ] && printf 'RK0001\tfastboot\n'
-exit 0
-`)
-	o := testOpts(t)
-	o.Fastboot = bin
-	o.defaults()
-	if s := fastbootDevices(ctxT(t), o); len(s) != 1 || s[0] != "RK0001" {
-		t.Fatalf("serials = %v", s)
-	}
-	fb(ctxT(t), o, "getvar", "product")
-	b, _ := os.ReadFile(log)
-	if got := strings.TrimSpace(string(b)); got != "devices\n-i 0x15e4 devices\n-i 0x2207 devices\n-i 0x2207 getvar product" {
-		t.Errorf("calls:\n%s", got)
-	}
-}
-
-func TestFastbootWithoutDeviceDoesNotKeepVID(t *testing.T) {
-	bin, _ := logShim(t, "exit 0\n")
-	o := testOpts(t)
-	o.Fastboot = bin
-	o.defaults()
-	if s := fastbootDevices(ctxT(t), o); len(s) != 0 || o.fbVID != "" {
-		t.Errorf("serials = %v, fbVID = %q", s, o.fbVID)
-	}
-}
-
-// #129: RattyDAVE's Arch android-tools prints "Android Fastboot" (capital F, two words), with or without -l,
-// and rejects -i; the deck must be found and -i must not be retried.
-func TestFastbootListsAndroidFastboot(t *testing.T) {
-	for _, line := range []string{`A12303258600613\tAndroid Fastboot`, `A12303258600613        Android Fastboot usb:3-3.1`, `A12303258600613\tfastboot`} {
-		bin, _ := logShim(t, `[ "$1" = devices ] && printf '`+line+`\n'
-exit 0
-`)
-		o := testOpts(t)
-		o.Fastboot = bin
-		o.defaults()
-		if s := fastbootDevices(ctxT(t), o); len(s) != 1 || s[0] != "A12303258600613" || o.fbVID != "" {
-			t.Errorf("%q: serials = %v, fbVID = %q", line, s, o.fbVID)
-		}
-	}
-	bin, log := logShim(t, `[ "$1" = -i ] && { echo "fastboot: invalid option -- 'i'" >&2; exit 1; }
-exit 0
-`)
-	o := testOpts(t)
-	o.Fastboot = bin
-	o.defaults()
-	if s := fastbootDevices(ctxT(t), o); len(s) != 0 || o.fbVID != "" {
-		t.Errorf("serials = %v, fbVID = %q", s, o.fbVID)
-	}
-	if b, _ := os.ReadFile(log); strings.TrimSpace(string(b)) != "devices\n-i 0x15e4 devices" {
-		t.Errorf("calls:\n%s", b)
-	}
-}
-
-// #164: modern platform-tools (fastboot 35+) prints "fastboot: unknown option -- i";
-// fastbootDevices must stop after the first attempt and not try further fbVIDs.
-func TestFastbootStopsOnUnknownOption(t *testing.T) {
-	bin, log := logShim(t, `[ "$1" = -i ] && { echo "fastboot: unknown option -- i" >&2; exit 1; }
-exit 0
-`)
-	o := testOpts(t)
-	o.Fastboot = bin
-	o.defaults()
-	if s := fastbootDevices(ctxT(t), o); len(s) != 0 || o.fbVID != "" {
-		t.Errorf("serials = %v, fbVID = %q", s, o.fbVID)
-	}
-	if b, _ := os.ReadFile(log); strings.TrimSpace(string(b)) != "devices\n-i 0x15e4 devices" {
-		t.Errorf("calls:\n%s", b)
-	}
-}
-
-// #129: Linux fastboot without udev access lists "no permissions"; tell the user how to fix it, once.
-func TestFastbootNoPermissionsHint(t *testing.T) {
-	bin, _ := logShim(t, `printf '????????????\tno permissions (missing udev rules? user is in the plugdev group); see [http://developer.android.com/tools/device.html]\n'
-`)
+func TestNativeUSBNoPermissionsHint(t *testing.T) {
+	oldOS := goos
+	goos = "linux"
+	t.Cleanup(func() { goos = oldOS })
 	t.Cleanup(func() { geteuid = os.Geteuid })
 	for _, uid := range []int{1000, 0} {
 		geteuid = func() int { return uid }
 		o := testOpts(t)
-		o.Fastboot = bin
+		fb := newFastboot(t, "JC11S", true)
+		fb.Bin.openErr = &usb.Error{Kind: usb.Permission, Err: os.ErrPermission}
+		o.USB = fb.Bin
 		o.defaults()
-		fastbootDevices(ctxT(t), o)
-		if s := fastbootDevices(ctxT(t), o); len(s) != 0 {
-			t.Errorf("serials = %v", s)
+		for range 2 {
+			if _, err := tryUSB(ctxT(t), o, ""); !errors.Is(err, os.ErrPermission) {
+				t.Fatal(err)
+			}
 		}
 		out := o.Out.(*bytes.Buffer).String()
-		if uid == 0 && strings.Contains(out, "sudo") { // already root: "use sudo" would be a lie
-			t.Errorf("root was told to use sudo:\n%s", out)
+		if uid == 0 && strings.Contains(out, "sudo") {
+			t.Errorf("root was told to use sudo: %s", out)
 		}
-		if uid != 0 && (strings.Count(out, "/etc/udev/rules.d/99-enginex.rules") != 2 || !strings.Contains(out, " 15e4 1cc5 ")) { // zh + en, printed once
-			t.Errorf("hint:\n%s", out)
+		if uid != 0 && strings.Count(out, "sudo") != 2 {
+			t.Errorf("hint must be printed once in each language: %s", out)
 		}
 	}
 }
 
-// #129: RattyDAVE ran as root with a normally booted PRIME 4+ on USB (15e4:d007) and no fastboot installed.
-func TestUSBDeckWithoutFastbootSaysInstallFastboot(t *testing.T) {
-	t.Cleanup(func() { geteuid = os.Geteuid })
+func TestUSBDeckWithoutExternalToolsWaitsForUpdateMode(t *testing.T) {
+	oldUID := geteuid
 	geteuid = func() int { return 0 }
+	t.Cleanup(func() { geteuid = oldUID })
 	o := testOpts(t)
-	o.ListUSB = func(context.Context) string {
-		return "15e4:e008 Denon DJ PRIME 4 Plus Hub\n15e4:d007 DENON DJ Denon DJ PRIME 4 Plus\n"
-	}
+	o.WaitUSB = time.Millisecond
+	o.ListUSB = func(context.Context) string { return "15e4:d007 Denon DJ PRIME 4 Plus\n" }
 	err := run(ctxT(t), o)
-	if err == nil || !strings.Contains(err.Error(), "fastboot is not installed") || !strings.Contains(err.Error(), "15e4:d007") {
-		t.Fatalf("err = %v", err)
+	if err == nil || !strings.Contains(err.Error(), "timed out waiting for fastboot") {
+		t.Fatalf("err=%v", err)
 	}
-	if out := o.Out.(*bytes.Buffer).String() + err.Error(); strings.Contains(out, "with sudo") || strings.Contains(out, "用 sudo") {
-		t.Errorf("told to use sudo:\n%s", out)
+	out := o.Out.(*bytes.Buffer).String()
+	if !strings.Contains(out, "15e4:d007") || strings.Contains(out, "install fastboot") {
+		t.Fatal(out)
+	}
+	if strings.Contains(out, "sudo") {
+		t.Errorf("root was told to use sudo: %s", out)
 	}
 }
 
-// #129: a normally booted PRIME 4+ on USB, not on the LAN: wait for Firmware Update Mode, then flash.
 func TestUSBDeckWaitsForFirmwareUpdateMode(t *testing.T) {
 	need(t, "python3", "mke2fs", "debugfs", "e2fsck")
 	b := buildBundle(t, "PRIME4PLUS", "5.3.0.2")
 	fb := newFastboot(t, "JC11S", true)
-	hidden := filepath.Join(fb.Dir, "devices.real")
-	os.Rename(fb.Bin, hidden)
-	os.WriteFile(fb.Bin, []byte(fmt.Sprintf(`#!/bin/sh
-d=$(dirname "$0")
-if [ "$1" = devices ] && [ ! -f "$d/usb" ]; then n=$(cat "$d/n" 2>/dev/null || echo 0); echo $((n+1)) > "$d/n"; [ "$n" -ge 3 ] && touch "$d/usb"; exit 0; fi
-exec sh %q "$@"
-`, hidden)), 0o755)
+	fb.Bin.appearAfter = 4
 	o := modeBOpts(t, fb, b)
 	o.WaitUSB = 20 * time.Second
 	o.ListUSB = func(context.Context) string { return "15e4:d007 DENON DJ Denon DJ PRIME 4 Plus\n" }
@@ -1589,161 +1499,13 @@ func TestIsDeckUSB(t *testing.T) {
 			t.Errorf("isDeckUSB(%q) = %v, want %v", line, got, want)
 		}
 	}
-	win := winVIDPID.ReplaceAllString(`Instance ID:   USB\VID_2207&PID_0006\0123456789`, "$1:$2")
-	if !isDeckUSB(win) {
-		t.Errorf("pnputil line not recognised: %s", win)
-	}
-	mac := parseIOReg(`+-o Root  <class IORegistryEntry>
-	  +-o PRIME 4+@14100000  <class IOUSBHostDevice>
-	    {
-	      "idProduct" = 12810
-	      "idVendor" = 8711
-	    }
-	  +-o Keyboard@14200000  <class IOUSBHostDevice>
-	    {
-	      "idVendor" = 1452
-	      "idProduct" = 641
-	    }
-`)
-	if mac != "2207:320a PRIME 4+\n05ac:0281 Keyboard\n" {
-		t.Errorf("parseIOReg = %q", mac)
-	}
-}
-
-func TestParsePnPUtil(t *testing.T) {
-	// Polish Windows output with CRLF (Issue #161: bogiepl's screenshot)
-	polish := "Narzędzie Microsoft PnP Utility\r\n\r\n" +
-		"Identyfikator wystąpienia:  USB\\VID_15E4&PID_D012\\6&14562B34&0&1\r\n" +
-		"Opis urządzenia:            Denon DJ SC LIVE 4 Update\r\n" +
-		"Nazwa klasy:                MEDIA\r\n" +
-		"Identyfikator GUID klasy:   {4d36e96c-e325-11ce-bfc1-08002be10318}\r\n" +
-		"Nazwa producenta:           InMusic\r\n" +
-		"Stan:                       Started\r\n" +
-		"Nazwa sterownika:           oem123.inf\r\n\r\n" +
-		"Identyfikator wystąpienia:  USB\\VID_046D&PID_C52B\\5&26f7a627&0&1\r\n" +
-		"Opis urządzenia:            Logitech USB Receiver\r\n" +
-		"Nazwa klasy:                USB\r\n"
-	got := parsePnPUtil(polish)
-	want := "15e4:d012 Denon DJ SC LIVE 4 Update\n046d:c52b Logitech USB Receiver\n"
-	if got != want {
-		t.Errorf("parsePnPUtil(polish) = %q, want %q", got, want)
-	}
-
-	// English Windows output
-	english := `Instance ID:                USB\VID_15E4&PID_D007\0123456789
-Device Description:         Denon DJ PRIME 4 Plus
-Class Name:                 MEDIA
-Class GUID:                 {4d36e96c-e325-11ce-bfc1-08002be10318}
-Manufacturer Name:          InMusic
-Status:                     Started
-Driver Name:                oem456.inf
-`
-	gotEng := parsePnPUtil(english)
-	wantEng := "15e4:d007 Denon DJ PRIME 4 Plus\n"
-	if gotEng != wantEng {
-		t.Errorf("parsePnPUtil(english) = %q, want %q", gotEng, wantEng)
-	}
-
-	// German and Chinese Windows output with swapped field orders
-	multilingual := `Instanz-ID:                 USB\VID_15E4&PID_D011\1234
-Klassenname:                MEDIA
-Gerätebeschreibung:         Denon DJ SC LIVE 2
-Status:                     Started
-
-Instance ID:                USB\VID_15E4&PID_C00C\5678
-设备描述:                   Denon DJ PRIME GO+
-Class Name:                 MEDIA
-
-Instance ID:                USB\VID_2207&PID_320A\9999
-`
-	gotMulti := parsePnPUtil(multilingual)
-	wantMulti := "15e4:d011 Denon DJ SC LIVE 2\n15e4:c00c Denon DJ PRIME GO+\n2207:320a\n"
-	if gotMulti != wantMulti {
-		t.Errorf("parsePnPUtil(multilingual) = %q, want %q", gotMulti, wantMulti)
-	}
-}
-
-// Mixstream Pro+ (15e4:303f) on Windows in Firmware Update Mode (#164)
-func TestWindowsMixstreamProPlusDetection(t *testing.T) {
-	t.Cleanup(func() { goos = runtime.GOOS })
-	goos = "windows"
-	pnputilOut := `Instance ID:                USB\VID_15E4&PID_303F\0123456789
-Device Description:         Numark MIXSTREAM PRO PLUS
-Class Name:                 USBDevice
-Status:                     Started
-`
-	o := testOpts(t)
-	o.ListUSB = func(context.Context) string {
-		return parsePnPUtil(pnputilOut)
-	}
-	board, line := usbDeck(ctxT(t), o, gen2USB)
-	if board != "nh08s" || !strings.Contains(line, "15e4:303f") || !strings.Contains(line, "Numark MIXSTREAM PRO PLUS") {
-		t.Errorf("usbDeck = %q, %q; want nh08s with Numark MIXSTREAM PRO PLUS line", board, line)
-	}
-
-	diagnoseUSB(ctxT(t), o)
-	out := o.Out.(*bytes.Buffer).String()
-	if !strings.Contains(out, "15e4:303f") || !strings.Contains(out, "Numark MIXSTREAM PRO PLUS") || !strings.Contains(out, "Zadig") || !strings.Contains(out, "{F72FE0D4-CBCB-407D-8814-9ED673D0DD6B}") || !strings.Contains(out, "wsl -u root") {
-		t.Errorf("diagnoseUSB did not give Zadig WinUSB, Android GUID, and WSL root hint for Mixstream Pro+:\n%s", out)
-	}
-}
-
-// On Windows, SC LIVE 4 (15e4:d012) in Computer Update mode with vendor drivers must be
-// recognized by usbDeck and diagnoseUSB even when fastboot has no WinUSB driver bound (#161).
-func TestWindowsSCLive4Detection(t *testing.T) {
-	t.Cleanup(func() { goos = runtime.GOOS })
-	goos = "windows"
-	pnputilOut := `Identyfikator wystąpienia:  USB\VID_15E4&PID_D012\6&14562B34&0&1
-Opis urządzenia:            Denon DJ SC LIVE 4 Update
-Nazwa klasy:                MEDIA
-Stan:                       Started
-`
-	o := testOpts(t)
-	o.ListUSB = func(context.Context) string {
-		return parsePnPUtil(pnputilOut)
-	}
-	board, line := usbDeck(ctxT(t), o, gen2USB)
-	if board != "jp21" || !strings.Contains(line, "15e4:d012") || !strings.Contains(line, "Denon DJ SC LIVE 4 Update") {
-		t.Errorf("usbDeck = %q, %q; want jp21 with SC LIVE 4 Update line", board, line)
-	}
-
-	// Negative case: a device whose product name mentions another deck's ID must NOT match
-	o.ListUSB = func(context.Context) string {
-		return "1234:5678 adapter for 15e4:d012\n"
-	}
-	if b, l := usbDeck(ctxT(t), o, gen2USB); b != "" || l != "" {
-		t.Errorf("usbDeck matched non-deck line: board=%q, line=%q", b, l)
-	}
-
-	// Positive diagnosis
-	o.ListUSB = func(context.Context) string {
-		return parsePnPUtil(pnputilOut)
-	}
-	diagnoseUSB(ctxT(t), o)
-	out := o.Out.(*bytes.Buffer).String()
-	if !strings.Contains(out, "15e4:d012") || !strings.Contains(out, "Denon DJ SC LIVE 4 Update") || !strings.Contains(out, "Zadig") {
-		t.Errorf("diagnoseUSB did not give the Zadig WinUSB hint for SC LIVE 4:\n%s", out)
-	}
-}
-
-// Keep the main branch's Windows first-generation fallback working after pnputil normalization.
-func TestWindowsGen1PnPUtilDetection(t *testing.T) {
-	o := testOpts(t)
-	o.ListUSB = func(context.Context) string {
-		return parsePnPUtil("Instance ID: USB\\VID_15E4&PID_D006\\SC5000\r\nDevice Description: Denon DJ SC5000 Update\r\n")
-	}
-	if board, line := usbDeck(ctxT(t), o, gen1USB); board != "jp07" || !strings.Contains(line, "Denon DJ SC5000 Update") {
-		t.Fatalf("usbDeck = %q, %q; want jp07 with the Windows device description", board, line)
-	}
-}
-
-func TestBuildImageMissingMke2fsSaysWSL(t *testing.T) {
-	t.Setenv("PATH", t.TempDir()) // empty PATH so mke2fs is not found
-	b := &bundleInfo{Path: "test.tar.gz", Version: "5.3.0.3"}
-	o := testOpts(t)
-	_, _, err := buildImage(ctxT(t), o, b, 64<<20, "test.img", "data")
-	if err == nil || !strings.Contains(err.Error(), "wsl -u root") || !strings.Contains(err.Error(), "fastboot") || !strings.Contains(err.Error(), "mke2fs") {
-		t.Fatalf("buildImage without mke2fs err = %v, want wsl -u root, fastboot, and mke2fs guide", err)
+	for _, info := range []usb.DeviceInfo{
+		usbInfo(0x2207, 0x0006, "Android", false),
+		usbInfo(0x2207, 0x320a, "PRIME 4+", false),
+	} {
+		if !isDeckUSB(usbLine(info)) {
+			t.Errorf("native USB device not recognised: %s", usbLine(info))
+		}
 	}
 }
 
@@ -1751,7 +1513,7 @@ func TestRunUninstallSkipsFastbootAndUSB(t *testing.T) {
 	fb := newFastboot(t, "nh08s", true)
 	o := testOpts(t)
 	o.Uninstall = true
-	o.Fastboot = fb.Bin
+	o.USB = fb.Bin
 	o.ListUSB = func(context.Context) string { return "1cc5:2027 Rane SYSTEM ONE\n" }
 	err := run(ctxT(t), o)
 	if err == nil || !strings.Contains(err.Error(), "--uninstall") {
@@ -1763,7 +1525,7 @@ func TestModeAUninstallFailsFastWithoutCallingModeAB(t *testing.T) {
 	fb := newFastboot(t, "nh08s", true)
 	o := testOpts(t)
 	o.Uninstall = true
-	o.Fastboot = fb.Bin
+	o.USB = fb.Bin
 
 	// Case 1: LAN deck discovered but SSH fails -> must NOT call modeAB or flash
 	d := deck{Name: "Denon DJ SC LIVE 4", IP: "127.0.0.1", Board: "jp21", Known: true}
@@ -1791,11 +1553,11 @@ func TestModeBMixstreamProPlusFastboot(t *testing.T) {
 	o := testOpts(t)
 	o.defaults()
 	fb := newFastboot(t, "nh08s", true)
-	o.Fastboot = fb.Bin
+	o.USB = fb.Bin
 	o.ListUSB = func(context.Context) string { return "15e4:303f Numark MIXSTREAM PRO PLUS\n" }
 	b := buildBundle(t, "MIXSTREAMPROPLUS", "5.3.0.3")
 	o.Bundle = b.Path
-	if err := modeB(ctxT(t), o); err != nil {
+	if err := run(ctxT(t), o); err != nil {
 		t.Fatalf("modeB with nh08s err: %v\n%s", err, o.Out)
 	}
 	if out := o.Out.(*bytes.Buffer).String(); !strings.Contains(out, "Numark Mixstream Pro+ (nh08s)") {
@@ -1827,22 +1589,20 @@ func (s *safeBuffer) String() string {
 	return s.buf.String()
 }
 
-func TestCaptureWriterSwallowsDisplayErrors(t *testing.T) {
-	cw := &captureWriter{
-		buf: &bytes.Buffer{},
-		out: failWriter{err: errors.New("broken pipe")},
+func TestNativeTransferSurvivesDisplayErrors(t *testing.T) {
+	b := buildBundle(t, "PRIME4PLUS", "5.3.0.5")
+	fb := newFastboot(t, "JC11S", true)
+	o := modeBOpts(t, fb, b)
+	o.Out = failWriter{err: errors.New("broken pipe")}
+	if err := run(ctxT(t), o); err != nil {
+		t.Fatal(err)
 	}
-	msg := []byte("Sending 'userdata'...\n")
-	n, err := cw.Write(msg)
-	if err != nil || n != len(msg) {
-		t.Fatalf("Write returned (%d, %v), want (%d, nil)", n, err, len(msg))
+	if len(fb.Flashed()) != 1 {
+		t.Fatal(fb.Calls())
 	}
-	if cw.buf.String() != string(msg) {
-		t.Fatalf("buffer = %q, want %q", cw.buf.String(), string(msg))
-	}
+	checkImage(t, filepath.Join(fb.Dir, "flashed-data.img"), b.SuitePath)
 }
 
-// #129: writing to a broken stdout pipe (fd 1) during flash must not terminate the installer with SIGPIPE.
 func TestSigpipeStdoutSubprocess(t *testing.T) {
 	if os.Getenv("TEST_SIGPIPE_CHILD") == "1" {
 		fb := newFastboot(t, "JC11S", true)
@@ -1902,9 +1662,9 @@ func TestModeBStreamsFlashProgressAndSize(t *testing.T) {
 	for _, want := range []string{
 		"Flashing data partition (64.0 MB) over USB; this may take several minutes. Do not disconnect USB or power off the deck...",
 		"正在向碟机写入 data 分区 (64.0 MB)，通过 USB 传输可能需要几分钟，请勿断开连接或关闭电源…",
-		"Sending 'data'",
-		"Writing 'data'",
-		"OKAY",
+		"download: ",
+		"flash: ",
+		"100%",
 		"正在重启碟机…",
 		"Rebooting deck...",
 		"USB write complete; activation after reboot is not verified",
@@ -1915,64 +1675,46 @@ func TestModeBStreamsFlashProgressAndSize(t *testing.T) {
 	}
 }
 
-// #129: verify fbLive delivers stdout/stderr chunks before the process finishes.
-func TestFbLiveStreamsBeforeProcessExit(t *testing.T) {
-	dir := t.TempDir()
-	bin := filepath.Join(dir, "slow-fastboot")
-	syncFile := filepath.Join(dir, "sync")
-	script := fmt.Sprintf(`#!/bin/sh
-echo "line 1: sending" >&2
-touch %q
-for i in $(seq 1 100); do
-  if [ -f %q.ack ]; then break; fi
-  sleep 0.05
-done
-echo "line 2: done" >&2
-`, syncFile, syncFile)
-	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
+func TestNativeProgressStreamsBeforeFlashCompletes(t *testing.T) {
+	b := buildBundle(t, "PRIME4PLUS", "5.3.0.5")
+	fb := newFastboot(t, "JC11S", true)
+	started, resume := make(chan struct{}), make(chan struct{})
+	fb.Bin.beforeFlash = func(ctx context.Context) error {
+		close(started)
+		select {
+		case <-resume:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
-
-	outBuf := &safeBuffer{}
-	o := testOpts(t)
-	o.Fastboot = bin
-	o.Out = outBuf
-	o.defaults()
-
+	o := modeBOpts(t, fb, b)
+	out := &safeBuffer{}
+	o.Out = out
+	ctx := ctxT(t)
 	done := make(chan error, 1)
-	go func() {
-		_, err := fbLive(ctxT(t), o, "flash", "userdata", "dummy.img")
-		done <- err
-	}()
-
-	deadline := time.Now().Add(3 * time.Second)
-	for !strings.Contains(outBuf.String(), "line 1: sending") && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
+	go func() { done <- run(ctx, o) }()
+	select {
+	case <-started:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
 	}
-	if !strings.Contains(outBuf.String(), "line 1: sending") {
-		t.Fatalf("timed out waiting for early streaming output, got %q", outBuf.String())
+	if !strings.Contains(out.String(), "download:") {
+		t.Errorf("no live progress: %s", out.String())
 	}
-
-	// Verify child process is still actively waiting and has not exited
 	select {
 	case err := <-done:
-		t.Fatalf("child process exited prematurely before ack: %v", err)
+		t.Fatalf("flash completed before acknowledgement: %v", err)
 	default:
 	}
-
-	if err := os.WriteFile(syncFile+".ack", []byte("1"), 0o644); err != nil {
+	close(resume)
+	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
-	if err := <-done; err != nil {
-		t.Fatalf("fbLive failed: %v", err)
-	}
-
-	if !strings.Contains(outBuf.String(), "line 2: done") {
-		t.Fatalf("expected completion output, got %q", outBuf.String())
+	if !strings.Contains(out.String(), "flash:") {
+		t.Fatal(out.String())
 	}
 }
-
-// ---- mode C: 1cc5:2027 Firmware Update Mode (#116) --------------------------
 
 func TestAZModel(t *testing.T) {
 	for _, c := range []struct{ board, bundle, line, want string }{
@@ -2017,41 +1759,35 @@ func TestAZModelLocalBundle(t *testing.T) {
 	}
 }
 
-type usbShim struct {
-	script []byte
-	img    string
-	calls  int
-}
-
-func azOpts(t *testing.T, b bundleFile, usb func(int) string) (*options, *usbShim) {
+func azOpts(t *testing.T, b bundleFile, list func(int) string) (*options, *testUSB) {
 	o := testOpts(t)
 	useRelease(o, releaseServer(t, b, "", nil))
-	n := 0
-	o.ListUSB = func(context.Context) string { n++; return usb(n) }
-	shim := &usbShim{}
-	o.USBFlash = func(_ context.Context, o *options, script []byte, img string) error {
-		shim.calls++
-		shim.script = script
-		shim.img = filepath.Join(t.TempDir(), "flashed.img")
-		fmt.Fprintln(o.Out, "writing data: 100% (64 / 64 MiB)")
-		return copyFile(img, shim.img)
+	d := &testUSB{img: filepath.Join(t.TempDir(), "flashed.img")}
+	d.enumerate = func() []usb.DeviceInfo {
+		text := list(d.polls)
+		_, product, found := strings.Cut(text, azID)
+		if !found {
+			return nil
+		}
+		d.info = usbInfo(0x1cc5, 0x2027, strings.TrimSpace(product), true)
+		return []usb.DeviceInfo{d.info}
 	}
-	return o, shim
+	o.USB = d
+	return o, d
 }
 
 func TestUSBUpdateModeFlashesA64MiBDataImage(t *testing.T) {
 	need(t, "python3", "mke2fs", "debugfs", "e2fsck", "dumpe2fs")
 	b := buildBundle(t, "SYSTEMONE", "5.3.0.3")
 	o, shim := azOpts(t, b, func(int) string { return "1d6b:0002 Linux Foundation\n1cc5:2027 inMusic SYSTEM ONE\n" })
+	originalPath := os.Getenv("PATH")
+	t.Setenv("PATH", t.TempDir())
 	if err := run(ctxT(t), o); err != nil {
 		t.Fatalf("run: %v\n%s", err, o.Out)
 	}
+	t.Setenv("PATH", originalPath)
 	if shim.calls != 1 {
 		t.Fatalf("USB flash calls = %d", shim.calls)
-	}
-	want, _ := os.ReadFile(filepath.Join(repoRoot(t), "tools/az01-packer/host-install-usbupdate.py"))
-	if !bytes.Equal(shim.script, want) {
-		t.Error("flasher is not the bundle's host-install-usbupdate.py")
 	}
 	if fi, _ := os.Stat(shim.img); fi == nil || fi.Size() != 64<<20 {
 		t.Fatalf("image size = %v, want 64 MiB", fi)
@@ -2109,82 +1845,12 @@ func TestUSBUpdateModeRefusals(t *testing.T) {
 		t.Errorf("declined: err = %v", err)
 	}
 	o, shim3 := azOpts(t, b, func(int) string { return "1cc5:2027 SYSTEM ONE\n" })
-	o.USBFlash = func(context.Context, *options, []byte, string) error { return errors.New("status 2") }
-	if err := run(ctxT(t), o); err == nil || !strings.Contains(err.Error(), "write-part: status 2") {
+	shim3.status = 2
+	if err := run(ctxT(t), o); err == nil || !strings.Contains(err.Error(), "status 2") {
 		t.Errorf("flash failure: err = %v", err)
 	}
 	if shim.calls+shim2.calls+shim3.calls != 0 {
 		t.Error("flashed anyway")
-	}
-}
-
-// The real flasher runs from the bundle under python3 -E and reports why it cannot write.
-func TestUSBFlashRunsTheBundleScript(t *testing.T) {
-	if python() == "" {
-		t.Skip("python3 not installed")
-	}
-	script, _ := os.ReadFile(filepath.Join(repoRoot(t), "tools/az01-packer/host-install-usbupdate.py"))
-	img := filepath.Join(t.TempDir(), "data.img")
-	os.WriteFile(img, make([]byte, 4096), 0o644)
-	o := testOpts(t)
-	if err := usbFlash(ctxT(t), o, script, img); err == nil {
-		t.Fatal("no deck on this host, yet the flash succeeded")
-	}
-	if s := o.Out.(*bytes.Buffer).String(); !strings.Contains(s, "host-install-usbupdate: ") {
-		t.Errorf("output:\n%s", s)
-	}
-}
-
-func TestParsePnPUtilMixstream(t *testing.T) {
-	// Polish Windows output with CRLF (Issue #161)
-	polish := "Narzędzie Microsoft PnP Utility\r\n\r\n" +
-		"Identyfikator wystąpienia:  USB\\VID_15E4&PID_D012\\6&14562B34&0&1\r\n" +
-		"Opis urządzenia:            Denon DJ SC LIVE 4 Update\r\n" +
-		"Nazwa klasy:                MEDIA\r\n" +
-		"Identyfikator GUID klasy:   {4d36e96c-e325-11ce-bfc1-08002be10318}\r\n" +
-		"Nazwa producenta:           InMusic\r\n" +
-		"Stan:                       Started\r\n" +
-		"Nazwa sterownika:           oem123.inf\r\n\r\n" +
-		"Identyfikator wystąpienia:  USB\\VID_046D&PID_C52B\\5&26f7a627&0&1\r\n" +
-		"Opis urządzenia:            Logitech USB Receiver\r\n" +
-		"Nazwa klasy:                USB\r\n"
-	got := parsePnPUtil(polish)
-	want := "15e4:d012 Denon DJ SC LIVE 4 Update\n046d:c52b Logitech USB Receiver\n"
-	if got != want {
-		t.Errorf("parsePnPUtil(polish) = %q, want %q", got, want)
-	}
-
-	// English Windows output with Mixstream Pro+ (#164)
-	english := `Instance ID:                USB\VID_15E4&PID_303F\0123456789
-Device Description:         Numark MIXSTREAM PRO PLUS
-Class Name:                 USBDevice
-Class GUID:                 {88bae032-5a81-49f0-bc3d-a4ff138216d6}
-Manufacturer Name:          Numark
-Status:                     Started
-Driver Name:                oem789.inf
-`
-	gotEng := parsePnPUtil(english)
-	wantEng := "15e4:303f Numark MIXSTREAM PRO PLUS\n"
-	if gotEng != wantEng {
-		t.Errorf("parsePnPUtil(english) = %q, want %q", gotEng, wantEng)
-	}
-
-	// German and Chinese Windows output with swapped field orders
-	multilingual := `Instanz-ID:                 USB\VID_15E4&PID_D011\1234
-Klassenname:                MEDIA
-Gerätebeschreibung:         Denon DJ SC LIVE 2
-Status:                     Started
-
-Instance ID:                USB\VID_15E4&PID_2059\5678
-设备描述:                   Numark MIXSTREAM PRO GO
-Class Name:                 MEDIA
-
-Instance ID:                USB\VID_2207&PID_320A\9999
-`
-	gotMulti := parsePnPUtil(multilingual)
-	wantMulti := "15e4:d011 Denon DJ SC LIVE 2\n15e4:2059 Numark MIXSTREAM PRO GO\n2207:320a\n"
-	if gotMulti != wantMulti {
-		t.Errorf("parsePnPUtil(multilingual) = %q, want %q", gotMulti, wantMulti)
 	}
 }
 
@@ -2267,8 +1933,11 @@ func gen2ImageReleaseServer(t *testing.T, imgPath string, alsoBundlePath string,
 			http.NotFound(w, r)
 		}
 	})
-	srv = httptest.NewTLSServer(mux)
-	t.Cleanup(srv.Close)
+	files := map[string]string{imgName: sha(t, imgPath)}
+	if alsoBundlePath != "" {
+		files[filepath.Base(alsoBundlePath)] = sha(t, alsoBundlePath)
+	}
+	srv = signedTLS(t, mux, files)
 	return srv
 }
 
@@ -2319,18 +1988,28 @@ func TestImageFlagAliasAndUnwrapGen2ImageOrBundle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := unwrapGen2ImageOrBundle(imgBytes)
-	if err != nil || !bytes.Equal(got, tarBytes) {
-		t.Fatalf("unwrapGen2ImageOrBundle(valid .img) err=%v, equal=%v", err, bytes.Equal(got, tarBytes))
+	got, err := readBundle(ctxT(t), b.ImagePath)
+	if err != nil {
+		t.Fatal(err)
 	}
-	gotTar, err := unwrapGen2ImageOrBundle(tarBytes)
-	if err != nil || !bytes.Equal(gotTar, tarBytes) {
-		t.Fatalf("unwrapGen2ImageOrBundle(.tar.gz) err=%v", err)
+	if !bytes.Equal(got.TarGz, tarBytes) {
+		t.Fatal("readBundle changed the verified image payload")
+	}
+	gotTar, err := readBundle(ctxT(t), b.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(gotTar.TarGz, tarBytes) {
+		t.Fatal("readBundle changed the legacy bundle payload")
 	}
 
 	flipped := append([]byte(nil), imgBytes...)
 	flipped[len(flipped)-1] ^= 1
-	if _, err := unwrapGen2ImageOrBundle(flipped); err == nil || !strings.Contains(err.Error(), "SHA-256") {
+	flippedPath := filepath.Join(t.TempDir(), "flipped.img")
+	if err := os.WriteFile(flippedPath, flipped, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readBundle(ctxT(t), flippedPath); err == nil || !strings.Contains(err.Error(), "SHA-256") {
 		t.Errorf("flipped payload accepted: %v", err)
 	}
 	for name, bad := range map[string][]byte{
@@ -2340,7 +2019,11 @@ func TestImageFlagAliasAndUnwrapGen2ImageOrBundle(t *testing.T) {
 		"legacy no v1":      append([]byte("ENGINEX_DATA_BUNDLE_OLD\n"), make([]byte, 200)...),
 		"az01 gen1":         append([]byte("AZ01"), make([]byte, 200)...),
 	} {
-		if _, err := unwrapGen2ImageOrBundle(bad); err == nil {
+		badPath := filepath.Join(t.TempDir(), "bad.img")
+		if err := os.WriteFile(badPath, bad, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := readBundle(ctxT(t), badPath); err == nil {
 			t.Errorf("%s accepted without error", name)
 		}
 	}
@@ -2362,7 +2045,7 @@ func TestFetchBundlePrefersGen2UpdateImgForAllPrefixes(t *testing.T) {
 
 			// 1. Release with ONLY *-Update.img (no .tar.gz)
 			var srvOnlyImg *httptest.Server
-			srvOnlyImg = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			srvOnlyImg = signedTLS(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == "/dl/"+imgName {
 					w.Write(imgPayload)
 					return
@@ -2375,8 +2058,7 @@ func TestFetchBundlePrefersGen2UpdateImgForAllPrefixes(t *testing.T) {
 						"digest":               "sha256:" + hex.EncodeToString(imgSum[:]),
 					}},
 				})
-			}))
-			defer srvOnlyImg.Close()
+			}), map[string]string{imgName: hex.EncodeToString(imgSum[:])})
 
 			o1 := testOpts(t)
 			o1.defaults()
@@ -2388,7 +2070,7 @@ func TestFetchBundlePrefersGen2UpdateImgForAllPrefixes(t *testing.T) {
 
 			// 2. Release with BOTH .tar.gz (listed first) and *-Update.img (listed second) -> still picks *-Update.img
 			var srvBoth *httptest.Server
-			srvBoth = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			srvBoth = signedTLS(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
 				case "/dl/" + imgName:
 					w.Write(imgPayload)
@@ -2403,8 +2085,7 @@ func TestFetchBundlePrefersGen2UpdateImgForAllPrefixes(t *testing.T) {
 						},
 					})
 				}
-			}))
-			defer srvBoth.Close()
+			}), map[string]string{bundleName: hex.EncodeToString(bundleSum[:]), imgName: hex.EncodeToString(imgSum[:])})
 
 			o2 := testOpts(t)
 			o2.defaults()
@@ -2484,7 +2165,7 @@ func TestGen2UpdateImgEndToEndAllModes(t *testing.T) {
 		badImg := corruptGen2ImagePayload(t, b.ImagePath)
 		fbBad := newFastboot(t, "JC11S", true)
 		oBad := testOpts(t)
-		oBad.Fastboot = fbBad.Bin
+		oBad.USB = fbBad.Bin
 		useRelease(oBad, gen2ImageReleaseServer(t, badImg, "", nil))
 		if err := run(ctxT(t), oBad); err == nil || !strings.Contains(err.Error(), "SHA-256") {
 			t.Fatalf("Mode B corrupted Update.img err = %v, want SHA-256 mismatch", err)
@@ -2493,10 +2174,10 @@ func TestGen2UpdateImgEndToEndAllModes(t *testing.T) {
 			t.Fatalf("Mode B flashed corrupted Update.img: %v", f)
 		}
 
-		// Valid *-Update.img (no .tar.gz in release) builds, verifies JC11S activation, and flashes.
+		// Valid *-Update.img builds, verifies the prepared image, and flashes.
 		fb := newFastboot(t, "JC11S", true)
 		o := testOpts(t)
-		o.Fastboot = fb.Bin
+		o.USB = fb.Bin
 		useRelease(o, gen2ImageReleaseServer(t, b.ImagePath, "", nil))
 		if err := run(ctxT(t), o); err != nil {
 			t.Fatalf("Mode B Update.img failed: %v\n%s", err, o.Out)
@@ -2531,27 +2212,20 @@ func TestGen2UpdateImgEndToEndAllModes(t *testing.T) {
 		badImg := corruptGen2ImagePayload(t, b.ImagePath)
 		oBad := testOpts(t)
 		useRelease(oBad, gen2ImageReleaseServer(t, badImg, "", nil))
-		oBad.ListUSB = func(context.Context) string { return "1cc5:2027 inMusic SYSTEM ONE\n" }
-		badCalls := 0
-		oBad.USBFlash = func(context.Context, *options, []byte, string) error { badCalls++; return nil }
+		_, badUSB := azOpts(t, b, func(int) string { return "1cc5:2027 inMusic SYSTEM ONE" })
+		oBad.USB = badUSB
 		if err := run(ctxT(t), oBad); err == nil || !strings.Contains(err.Error(), "SHA-256") {
 			t.Fatalf("Mode C corrupted Update.img err = %v, want SHA-256 mismatch", err)
 		}
-		if badCalls != 0 {
-			t.Fatalf("Mode C flashed corrupted Update.img (%d calls)", badCalls)
+		if badUSB.calls != 0 {
+			t.Fatalf("Mode C flashed corrupted Update.img (%d calls)", badUSB.calls)
 		}
 
 		// Valid *-Update.img (no .tar.gz in release) builds 64 MiB ext4 image and flashes over 1cc5:2027.
 		o := testOpts(t)
 		useRelease(o, gen2ImageReleaseServer(t, b.ImagePath, "", nil))
-		o.ListUSB = func(context.Context) string { return "1cc5:2027 inMusic SYSTEM ONE\n" }
-		shim := &usbShim{}
-		o.USBFlash = func(_ context.Context, o *options, script []byte, img string) error {
-			shim.calls++
-			shim.script = script
-			shim.img = filepath.Join(t.TempDir(), "flashed-az04.img")
-			return copyFile(img, shim.img)
-		}
+		_, shim := azOpts(t, b, func(int) string { return "1cc5:2027 inMusic SYSTEM ONE" })
+		o.USB = shim
 		if err := run(ctxT(t), o); err != nil {
 			t.Fatalf("Mode C Update.img failed: %v\n%s", err, o.Out)
 		}
@@ -2597,7 +2271,7 @@ func TestGen2SameVersionReReleaseReplacesStaleWorkDirPackage(t *testing.T) {
 
 	downloads := 0
 	var srv *httptest.Server
-	srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv = signedTLS(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/repos/Cd1s/EngineX-OS/releases/latest":
 			json.NewEncoder(w).Encode(map[string]any{
@@ -2614,7 +2288,7 @@ func TestGen2SameVersionReReleaseReplacesStaleWorkDirPackage(t *testing.T) {
 		default:
 			http.NotFound(w, r)
 		}
-	}))
+	}), map[string]string{imgName: sha(t, r3Pkg.ImagePath)})
 	defer srv.Close()
 
 	o := testOpts(t)
@@ -2707,6 +2381,8 @@ func TestGen2LocalBundleFallbackOnGitHubHTTPErrorsAndProxy(t *testing.T) {
 	if err := copyFile(pkg.ImagePath, filepath.Join(workWithPkg, imgName)); err != nil {
 		t.Fatal(err)
 	}
+	// The package was downloaded by an earlier run, which kept its signed list beside it (#239).
+	writeSidecars(t, workWithPkg, map[string]string{imgName: sha(t, pkg.ImagePath)}, testReleasePriv, "v5.3.0.4-r3")
 	o0 := testOpts(t)
 	d := startSSHDeck(t, o0.SSHPort, "inmusic,jp24\x00inmusic,az04\x00")
 
@@ -2752,4 +2428,20 @@ func TestGen2LocalBundleFallbackOnGitHubHTTPErrorsAndProxy(t *testing.T) {
 	if ghHits != beforeHits {
 		t.Fatalf("explicit -bundle queried GitHub %d times, want 0", ghHits-beforeHits)
 	}
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	if _, err = io.Copy(out, in); err == nil {
+		err = out.Close()
+	}
+	return err
 }

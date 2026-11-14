@@ -17,6 +17,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Cd1s/EngineX-OS/internal/releasesig"
 )
 
 func TestUpdateChecksTheConfiguredGitHubRepo(t *testing.T) {
@@ -62,25 +64,6 @@ func TestUpdateChecksTheConfiguredGitHubRepo(t *testing.T) {
 	}
 	if v := get(); asked != "/repos/me/fork/releases/latest" || v.Current != "v1" || v.Latest != "v2" || !v.UpdateAvailable || v.Error != "" || v.DownloadURL != "https://example.invalid/sc5000.img" {
 		t.Fatalf("update %+v (asked %s)", v, asked)
-	}
-}
-
-func TestNewerVersion(t *testing.T) {
-	for _, c := range []struct {
-		latest, current string
-		want            bool
-	}{
-		{"v2", "v1", true},
-		{"v1", "v1", false},
-		{"v1", "v2", false}, // rollback / lower latest
-		{"v5.0.4-custom.10", "v5.0.4-custom.9", true},
-		{"v5.0.4-custom.1", "v5.0.4", true},
-		{"v5.0.4", "dev", false}, // unknown current version
-		{"", "v1", false},
-	} {
-		if got := newerVersion(c.latest, c.current); got != c.want {
-			t.Errorf("newerVersion(%q, %q) = %v", c.latest, c.current, got)
-		}
 	}
 }
 
@@ -182,13 +165,29 @@ func testBundle(t *testing.T, prefix, version string, badSums bool) []byte {
 }
 
 func bundleDeck(t *testing.T, compatible string, assets func(base string) string, bundle []byte) (*Server, string) {
+	return bundleDeckWith(t, compatible, assets, bundle, releaseFault{})
+}
+
+// bundleDeckWith is a deck whose GitHub serves a release signed with the test release key
+// (SHA256SUMS.txt and .sig beside the update file, #239), unless fault says otherwise.
+func bundleDeckWith(t *testing.T, compatible string, assets func(base string) string, bundle []byte, fault releaseFault) (*Server, string) {
 	var base string
 	gh := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/repos/Cd1s/EngineX-OS/releases/latest":
-			fmt.Fprintf(w, `{"tag_name":"v5.3.0.3","html_url":"https://x/r","assets":[%s]}`, assets(base))
+			fmt.Fprintf(w, `{"tag_name":%q,"html_url":"https://x/r","assets":[%s]}`, fault.apiTag(), assets(base))
 		case strings.HasSuffix(r.URL.Path, ".tar.gz") || strings.HasSuffix(r.URL.Path, "-Update.img"):
-			w.Write(bundle)
+			if fault.serve != nil {
+				fault.serve(w, r, fault.served(bundle))
+				return
+			}
+			w.Write(fault.served(bundle))
+		case strings.HasSuffix(r.URL.Path, "/"+releasesig.SumsAssetName) && !fault.unsigned:
+			sums, _ := fault.signed(assetNames(assets(base)), bundle)
+			w.Write(sums)
+		case strings.HasSuffix(r.URL.Path, "/"+releasesig.SigAssetName) && !fault.unsigned:
+			_, sig := fault.signed(assetNames(assets(base)), bundle)
+			w.Write(sig)
 		default:
 			http.NotFound(w, r)
 		}
@@ -198,7 +197,11 @@ func bundleDeck(t *testing.T, compatible string, assets func(base string) string
 	state := t.TempDir()
 	custom := filepath.Join(state, "sc5000-custom")
 	os.MkdirAll(custom, 0o700)
-	os.WriteFile(filepath.Join(custom, "version.txt"), []byte("5.3.0.2\n"), 0o644)
+	os.WriteFile(filepath.Join(custom, "version.txt"), []byte(fault.installedVersion()+"\n"), 0o644)
+	if fault.installTag != "" { // a bundle install carries the release tag it came from
+		os.MkdirAll(filepath.Join(custom, "bundle"), 0o700)
+		os.WriteFile(filepath.Join(custom, "bundle", releaseTagName), []byte(fault.installTag+"\n"), 0o644)
+	}
 	cf := filepath.Join(state, "compatible")
 	os.WriteFile(cf, []byte(compatible+"\x00"), 0o644)
 	t.Cleanup(func(old string) func() { return func() { deviceCompatiblePath = old } }(deviceCompatiblePath))
@@ -447,16 +450,12 @@ func TestUnpackBundleRefusesUnsafeArchives(t *testing.T) {
 	}
 }
 
-func TestApplyOnlineUpdateGen2PreloadCompatibility(t *testing.T) {
-	oldScript, oldPlanck := engineScriptPath, planckRemoteScreenPath
-	oldURLFile, oldReasonFile := updateFileURLPath, engineQuitReasonPath
-	oldAllow, oldQuit := allowUpdateFromURL, quitEngineForUpdate
-	t.Cleanup(func() {
-		engineScriptPath, planckRemoteScreenPath = oldScript, oldPlanck
-		updateFileURLPath, engineQuitReasonPath = oldURLFile, oldReasonFile
-		allowUpdateFromURL, quitEngineForUpdate = oldAllow, oldQuit
-	})
-
+// #239: the deck no longer hands the update URL to Denon's updater (UpdateFromUrl): that updater
+// downloads the file on its own and checks only the image's own integrity fields, so the release
+// signature could not be tied to what is flashed. Every board downloads the file itself, checks
+// it against the signed SHA256SUMS.txt and installs it: the second generation unpacks the bundle,
+// the first runs az01-update on the staged image.
+func TestApplyOnlineUpdateInstallsTheVerifiedFileItself(t *testing.T) {
 	makeValidGen2Img := func(t *testing.T, prefix, version string) []byte {
 		t.Helper()
 		bundle := testBundle(t, prefix, version, false)
@@ -465,130 +464,46 @@ func TestApplyOnlineUpdateGen2PreloadCompatibility(t *testing.T) {
 		copy(head[:], fmt.Sprintf("%s%x\n%s\n%s\n", gen2ImgMagic, sum, prefix, version))
 		return append(head[:], bundle...)
 	}
+	for _, c := range []struct{ name, compatible, imgName, prefix string }{
+		{"armhf second generation", "inmusic,jp21", "SCLIVE4-5.3.0.3-EngineX-OS-Denon-SC-LIVE-4-JP21-Update.img", "SCLIVE4"},
+		{"AZ04 second generation", "inmusic,rmz2", "SYSTEMONE-5.3.0.3-EngineX-OS-Rane-SYSTEM-ONE-RMZ2-Update.img", "SYSTEMONE"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			assets := func(base string) string {
+				return fmt.Sprintf(`{"name":%q,"browser_download_url":%q}`, c.imgName, base+"/dl/"+c.imgName)
+			}
+			s, custom := bundleDeck(t, c.compatible, assets, makeValidGen2Img(t, c.prefix, "5.3.0.3"))
+			getUpdate(s, "")
+			getUpdate(s, "?apply=1")
+			v := waitUpdate(t, s)
+			if v.Error != "" || v.Current != "5.3.0.3" || v.Progress != 1 {
+				t.Fatalf("apply failed: %+v", v)
+			}
+			if b, _ := os.ReadFile(filepath.Join(custom, "version.txt")); string(b) != "5.3.0.3\n" {
+				t.Errorf("version.txt = %q, want 5.3.0.3", b)
+			}
+		})
+	}
 
-	t.Run("Gen-2 without LD_PRELOAD on planck-remote-screen skips UpdateFromUrl and installs via tryApplyGen2Image", func(t *testing.T) {
-		tmp := t.TempDir()
-		engineScriptPath = filepath.Join(tmp, "engine")
-		planckRemoteScreenPath = filepath.Join(tmp, "planck-remote-screen")
-		updateFileURLPath = filepath.Join(tmp, "update-file-url")
-		engineQuitReasonPath = filepath.Join(tmp, "engine-quit-reason")
-		os.WriteFile(planckRemoteScreenPath, []byte("#!/bin/sh\n"), 0o755)
-		// Earlier 5.3.0.4 script: Engine is wrapped with engine-ui-guard, planck-remote-screen is NOT wrapped with LD_PRELOAD.
-		os.WriteFile(engineScriptPath, []byte(
-			"#!/bin/sh\n\t/data/enginex/bundle/bin/engine-ui-guard launch /usr/Engine/Engine -d0\n\t/usr/bin/planck-remote-screen --update \"$UPDATE_FILE\"\n",
-		), 0o755)
-		allowUpdateFromURL = func(string) bool { return true }
-		quitCalls := 0
-		quitEngineForUpdate = func() error { quitCalls++; return nil }
-
-		imgName := "SCLIVE4-5.3.0.3-EngineX-OS-Denon-SC-LIVE-4-JP21-Update.img"
-		assets := func(base string) string {
-			return fmt.Sprintf(`{"name":%q,"browser_download_url":%q}`, imgName, base+"/dl/"+imgName)
-		}
-		s, custom := bundleDeck(t, "inmusic,jp21", assets, makeValidGen2Img(t, "SCLIVE4", "5.3.0.3"))
-		getUpdate(s, "")
-		getUpdate(s, "?apply=1")
-		v := waitUpdate(t, s)
-		if v.Error != "" || v.Current != "5.3.0.3" || v.Progress != 1 {
-			t.Fatalf("fallback apply failed: %+v", v)
-		}
-		if quitCalls != 0 {
-			t.Fatalf("quitEngineForUpdate called %d times on unhooked planck-remote-screen, want 0", quitCalls)
-		}
-		if _, err := os.Stat(engineQuitReasonPath); err == nil {
-			t.Fatal("engine-quit-reason written despite unhooked planck-remote-screen")
-		}
-		if b, _ := os.ReadFile(filepath.Join(custom, "version.txt")); string(b) != "5.3.0.3\n" {
-			t.Errorf("version.txt = %q, want 5.3.0.3", b)
-		}
-	})
-
-	t.Run("Gen-2 with LD_PRELOAD on planck-remote-screen takes UpdateFromUrl shortcut", func(t *testing.T) {
-		tmp := t.TempDir()
-		engineScriptPath = filepath.Join(tmp, "engine")
-		planckRemoteScreenPath = filepath.Join(tmp, "planck-remote-screen")
-		updateFileURLPath = filepath.Join(tmp, "update-file-url")
-		engineQuitReasonPath = filepath.Join(tmp, "engine-quit-reason")
-		os.WriteFile(planckRemoteScreenPath, []byte("#!/bin/sh\n"), 0o755)
-		os.WriteFile(engineScriptPath, []byte(
-			"#!/bin/sh\n\t/data/enginex/bundle/bin/engine-ui-guard launch /usr/Engine/Engine -d0\n\tenv LD_PRELOAD=\"/data/enginex/bundle/lib/libengine-ui-hook.so\" /usr/bin/planck-remote-screen --update \"$UPDATE_FILE\"\n",
-		), 0o755)
-		allowUpdateFromURL = func(string) bool { return true }
-		quitCalls := 0
-		quitEngineForUpdate = func() error { quitCalls++; return nil }
-
-		imgName := "SCLIVE4-5.3.0.3-EngineX-OS-Denon-SC-LIVE-4-JP21-Update.img"
-		assets := func(base string) string {
-			return fmt.Sprintf(`{"name":%q,"browser_download_url":%q}`, imgName, base+"/dl/"+imgName)
-		}
-		// Serve invalid bytes if downloaded: UpdateFromUrl shortcut must return before HTTP download.
-		s, custom := bundleDeck(t, "inmusic,jp21", assets, []byte("not-downloaded"))
-		u := getUpdate(s, "")
-		getUpdate(s, "?apply=1")
-		v := waitUpdate(t, s)
-		if v.Error != "" || v.Progress != 1 || quitCalls != 1 {
-			t.Fatalf("UpdateFromUrl shortcut failed: %+v (quitCalls=%d)", v, quitCalls)
-		}
-		if got, _ := os.ReadFile(updateFileURLPath); string(got) != u.DownloadURL+"\n" {
-			t.Errorf("update-file-url = %q, want %q", got, u.DownloadURL+"\n")
-		}
-		if got, _ := os.ReadFile(engineQuitReasonPath); string(got) != "UpdateFromUrl\n" {
-			t.Errorf("engine-quit-reason = %q, want UpdateFromUrl", got)
-		}
-		if b, _ := os.ReadFile(filepath.Join(custom, "version.txt")); string(b) != "5.3.0.2\n" {
-			t.Errorf("Go fallback unexpectedly modified version.txt: %q", b)
-		}
-	})
-
-	t.Run("AZ04 without planck-remote-screen binary falls back to Go download and tryApplyGen2Image", func(t *testing.T) {
-		tmp := t.TempDir()
-		engineScriptPath = filepath.Join(tmp, "engine")
-		planckRemoteScreenPath = filepath.Join(tmp, "missing-planck-remote-screen")
-		updateFileURLPath = filepath.Join(tmp, "update-file-url")
-		engineQuitReasonPath = filepath.Join(tmp, "engine-quit-reason")
-		os.WriteFile(engineScriptPath, []byte(
-			"#!/bin/sh\n\tenv LD_PRELOAD=\"/data/enginex/bundle/lib/libengine-ui-hook.so\" /usr/bin/planck-remote-screen --update \"$UPDATE_FILE\"\n",
-		), 0o755)
-		allowUpdateFromURL = func(string) bool { return true }
-		quitCalls := 0
-		quitEngineForUpdate = func() error { quitCalls++; return nil }
-
-		imgName := "SYSTEMONE-5.3.0.3-EngineX-OS-Rane-SYSTEM-ONE-RMZ2-Update.img"
-		assets := func(base string) string {
-			return fmt.Sprintf(`{"name":%q,"browser_download_url":%q}`, imgName, base+"/dl/"+imgName)
-		}
-		s, custom := bundleDeck(t, "inmusic,rmz2", assets, makeValidGen2Img(t, "SYSTEMONE", "5.3.0.3"))
-		getUpdate(s, "")
-		getUpdate(s, "?apply=1")
-		v := waitUpdate(t, s)
-		if v.Error != "" || v.Current != "5.3.0.3" || quitCalls != 0 {
-			t.Fatalf("AZ04 fallback failed: %+v (quitCalls=%d)", v, quitCalls)
-		}
-		if b, _ := os.ReadFile(filepath.Join(custom, "version.txt")); string(b) != "5.3.0.3\n" {
-			t.Errorf("version.txt = %q, want 5.3.0.3", b)
-		}
-	})
-
-	t.Run("Gen-1 always uses UpdateFromUrl without requiring LD_PRELOAD on planck-remote-screen", func(t *testing.T) {
-		tmp := t.TempDir()
-		engineScriptPath = filepath.Join(tmp, "engine")
-		planckRemoteScreenPath = filepath.Join(tmp, "missing-planck-remote-screen")
-		updateFileURLPath = filepath.Join(tmp, "update-file-url")
-		engineQuitReasonPath = filepath.Join(tmp, "engine-quit-reason")
-		allowUpdateFromURL = func(string) bool { return true }
-		quitCalls := 0
-		quitEngineForUpdate = func() error { quitCalls++; return nil }
-
+	t.Run("first generation downloads, verifies and runs az01-update --file", func(t *testing.T) {
+		img := az01Image()
 		imgName := "SC5000-5.3.0.3-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img"
 		assets := func(base string) string {
 			return fmt.Sprintf(`{"name":%q,"browser_download_url":%q}`, imgName, base+"/dl/"+imgName)
 		}
-		s, _ := bundleDeck(t, "inmusic,jp07", assets, []byte("not-downloaded"))
+		s, custom := bundleDeck(t, "inmusic,jp07", assets, img)
+		calls := fakeAz01Update(t)
 		getUpdate(s, "")
 		getUpdate(s, "?apply=1")
-		v := waitUpdate(t, s)
-		if v.Error != "" || v.Progress != 1 || quitCalls != 1 {
-			t.Fatalf("Gen-1 UpdateFromUrl failed: %+v (quitCalls=%d)", v, quitCalls)
+		if v := waitUpdate(t, s); v.Error != noRestart {
+			t.Fatalf("Gen-1 apply failed: %+v", v)
+		}
+		staged := filepath.Join(custom, "az01-update.img")
+		if got := readCalls(t, calls); got != "--file "+staged+"\n" {
+			t.Fatalf("az01-update was run as %q, want --file %s", got, staged)
+		}
+		if !hasDigest(staged, fmt.Sprintf("%x", sha256.Sum256(img))) {
+			t.Error("the staged image is not the signed one")
 		}
 	})
 }
@@ -699,11 +614,11 @@ func TestGen2EndToEndReReleaseApplyAndCustomDirResolution(t *testing.T) {
 	_, plainTar, _, _ := buildRealGen2("5.3.0.4", "v5.3.0.4")
 	r3Img, r3Tar, r3ImgName, r3TarName := buildRealGen2("5.3.0.4", "v5.3.0.4-r3")
 
-	defer func(vf, ivf, bcd, lbcd, dcp, irtf, prsp string) {
+	defer func(vf, ivf, bcd, lbcd, dcp, irtf string) {
 		versionFile, imageVersionFile = vf, ivf
 		bundleCustomDir, legacyBundleCustomDir = bcd, lbcd
-		deviceCompatiblePath, imageReleaseTagFile, planckRemoteScreenPath = dcp, irtf, prsp
-	}(versionFile, imageVersionFile, bundleCustomDir, legacyBundleCustomDir, deviceCompatiblePath, imageReleaseTagFile, planckRemoteScreenPath)
+		deviceCompatiblePath, imageReleaseTagFile = dcp, irtf
+	}(versionFile, imageVersionFile, bundleCustomDir, legacyBundleCustomDir, deviceCompatiblePath, imageReleaseTagFile)
 
 	for _, viaImg := range []bool{true, false} {
 		mode := "update-img"
@@ -717,7 +632,6 @@ func TestGen2EndToEndReReleaseApplyAndCustomDirResolution(t *testing.T) {
 			versionFile = filepath.Join(legacyBundleCustomDir, "version.txt")
 			imageVersionFile = filepath.Join(root, "no-etc-version")
 			imageReleaseTagFile = filepath.Join(root, "no-etc-release-tag")
-			planckRemoteScreenPath = filepath.Join(root, "no-planck-remote-screen") // AZ04 has none
 			deviceCompatiblePath = filepath.Join(root, "compatible")
 			os.WriteFile(deviceCompatiblePath, []byte("inmusic,jp24\x00inmusic,az04\x00"), 0o644)
 
@@ -752,6 +666,13 @@ func TestGen2EndToEndReReleaseApplyAndCustomDirResolution(t *testing.T) {
 					w.Write(r3Img)
 				case "/dl/" + r3TarName:
 					w.Write(r3Tar)
+				case "/dl/" + releasesig.SumsAssetName, "/dl/" + releasesig.SigAssetName:
+					// The release is signed (#239): both of its files are listed.
+					sums := []byte(fmt.Sprintf("%x  %s\n%x  %s\n%s  %s\n", sha256.Sum256(r3Img), r3ImgName, sha256.Sum256(r3Tar), r3TarName, releasesig.TagDigest(curTag), releasesig.TagEntryName))
+					if strings.HasSuffix(r.URL.Path, ".sig") {
+						sums, _ = releasesig.Sign(testReleasePriv, sums)
+					}
+					w.Write(sums)
 				default:
 					http.NotFound(w, r)
 				}
