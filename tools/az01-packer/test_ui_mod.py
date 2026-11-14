@@ -18,6 +18,59 @@ spec.loader.exec_module(bp)
 SRC = BUILD_PACKS.read_text()
 
 
+class OnOffSwitchCompatibilityTest(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("node"), "Node is required for switch handlers")
+    def test_both_bases_follow_external_state_after_clicks_in_all_languages(self):
+        expected = {
+            "scBroadcastOn": "broadcast", "scProlinkShare": "prolinkShare",
+            "scProlinkExport": "prolinkExport", "scMasterLimiter": "masterLimiter",
+            "scAutoGain": "autoGain", "scUpfaderEcho": "upfaderEcho",
+            "scStemsEqMode": "stemsEqMode", "scBeatJumpPads": "beatJumpPads",
+            "scSwapLoopOrder": "swapLoopOrder", "scDualColumn": "browserDualColumn",
+            "scTracklistWaveform": "tracklistWaveform", "scOmniSource": "omniSource",
+            "scCueCountdown": "cueCountdown",
+        }
+        for version, skin in (("5.0.4", "EmbeddedCommon"), ("5.3.0", "Embedded")):
+            qrc = LAB / version / "qrc"
+            self.assertTrue(qrc.is_dir(), str(qrc))
+            stock = qrc / f"Skins/{skin}/Views/ControlCenter/Tabs/Preferences/Entries/Base/SwitchEntry.qml"
+            self.assertIn("property alias checkedExternally: control.checkedExternally", stock.read_text())
+            with tempfile.TemporaryDirectory() as tmp:
+                out = Path(tmp) / "packs"
+                built = subprocess.run(["python3", str(BUILD_PACKS), "--qrc", str(qrc), "--out", str(out)], capture_output=True, text=True)
+                self.assertEqual(built.returncode, 0, built.stderr)
+                for lang in ("en", "zh-Hans", "zh-Hant"):
+                    with self.subTest(version=version, lang=lang):
+                        blocks = []
+                        for page in (out / lang).rglob("*.qml"):
+                            blocks += re.findall(r"EntryBase\.SwitchEntry \{([^{}]*)\}", page.read_text())
+                        self.assertEqual(len(blocks), len(expected))
+                        actual = {}
+                        for block in blocks:
+                            # checked is mutated by Qt on a tap; checkedExternally stays
+                            # bound to settings even when another client changes them.
+                            binding = re.search(r"checkedExternally:\s*(!!root\.(\w+))", block)
+                            self.assertIsNotNone(binding, block)
+                            expression, flag = binding.groups()
+                            handler = re.search(r"onClicked:\s*([^\n]+)", block).group(1)
+                            key = re.search(r'scCall\("(\w+)=', handler).group(1)
+                            actual[flag] = key
+                            script = """
+const assert = require('assert');
+const calls = [], root = {scCall: q => calls.push(q)};
+// Click, external change, then click again: each request uses the latest setting.
+for (const state of [0, 1, 1, 0]) {
+    root[FLAG] = state;
+    assert.equal(EXPRESSION, !!state);
+    HANDLER;
+    assert.equal(calls.pop(), KEY + '=' + (state ? 0 : 1));
+}
+""".replace("FLAG", json.dumps(flag)).replace("KEY", json.dumps(key)).replace("EXPRESSION", expression).replace("HANDLER", handler)
+                            result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+                            self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertEqual(actual, expected)
+
+
 class QMLCacheCompatibilityTest(unittest.TestCase):
     @unittest.skipUnless(shutil.which("cc"), "A C compiler is required for the cache ABI test")
     def test_engine_cache_isolated_from_stock_and_other_processes(self):
@@ -853,9 +906,37 @@ assert.strictEqual(vfx.enabled, false);
         self.assertNotIn("border", cap)
         self.assertEqual(cap.count("{"), cap.count("}"))
 
+    def test_on_off_settings_use_engines_switch_row(self):
+        # Two-state EngineX settings use Engine's own SwitchEntry, as stock does for its
+        # two-state preferences, not an "Off" / "On" list.
+        rows = {
+            "Live Stream": ("scBroadcastOn", "broadcast", bp.SERVICES_ENTRIES),
+            "Pro DJ Link Library": ("scProlinkShare", "prolinkShare", bp.SERVICES_ENTRIES),
+            "Pro DJ Link Export to CDJ (Beta)": ("scProlinkExport", "prolinkExport", bp.SERVICES_ENTRIES),
+            "Master Soft Clipper": ("scMasterLimiter", "masterLimiter", bp.PLAYBACK_ENTRIES),
+            "Auto-Gain (0 dB Normalize)": ("scAutoGain", "autoGain", bp.PLAYBACK_ENTRIES),
+            "Echo Out": ("scUpfaderEcho", "upfaderEcho", bp.PLAYBACK_ENTRIES),
+            "Stems EQ Mode": ("scStemsEqMode", "stemsEqMode", bp.PLAYBACK_ENTRIES),
+            "Beat Jump Pad Bank": ("scBeatJumpPads", "beatJumpPads", bp.BEAT_JUMP_ENTRIES),
+            "Swap Loop / Beat Jump": ("scSwapLoopOrder", "swapLoopOrder", bp.BEAT_JUMP_ENTRIES),
+            "Dual-Column Browser": ("scDualColumn", "browserDualColumn", bp.DUAL_COLUMN_ENTRY),
+            "Tracklist Waveform": ("scTracklistWaveform", "tracklistWaveform", bp.LIBRARY_ENTRIES),
+            "OmniSource (Drives in Streaming)": ("scOmniSource", "omniSource", bp.LIBRARY_ENTRIES),
+            "Cue Countdown": ("scCueCountdown", "cueCountdown", bp.VIEW_ENTRIES),
+        }
+        for text, (flag, key, qml) in rows.items():
+            block = re.search(r'EntryBase\.(\w+) \{\n\t\t\ttext: "' + re.escape(text) + r'"\n([\s\S]*?)\n\t\t\},', qml)
+            self.assertIsNotNone(block, text)
+            self.assertEqual(block.group(1), "SwitchEntry", text)
+            self.assertIn(f"checkedExternally: !!root.{flag}", block.group(2), text)
+            self.assertIn(f'onClicked: root.scCall("{key}=" + (root.{flag} ? 0 : 1))', block.group(2), text)
+        self.assertIn('objectName: "ControlCenter_LiveStream"', bp.SERVICES_ENTRIES)  # gate probe
+        for qml in (bp.SERVICES_ENTRIES, bp.PLAYBACK_ENTRIES, bp.LIBRARY_ENTRIES, bp.VIEW_ENTRIES, bp.SAFETY_ENTRIES, bp.DISPLAY_ENTRIES):
+            self.assertNotIn('values: ["Off", "On"]', qml)
+
     def test_cue_countdown_toggle_only_in_view(self):
         self.assertIn('["scCueCountdown", "cueCountdown"]', SRC)
-        self.assertIn('root.scCall("cueCountdown=" + index)', bp.CUE_COUNTDOWN_ENTRY)
+        self.assertIn('root.scCall("cueCountdown=" + (root.scCueCountdown ? 0 : 1))', bp.CUE_COUNTDOWN_ENTRY)
         self.assertIn(bp.CUE_COUNTDOWN_ENTRY, bp.VIEW_ENTRIES)
         for dup in (bp.UI_SCALE_ENTRY, bp.FOUR_DECK_ENTRIES, bp.DUAL_COLUMN_ENTRY, bp.BEAT_JUMP_ENTRIES):
             self.assertIn(dup, bp.VIEW_ENTRIES)
