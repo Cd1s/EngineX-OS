@@ -389,3 +389,39 @@ func TestOverviewsDoNotWaitForAnImportThatDoesNotFinish(t *testing.T) {
 		t.Fatal("the overviews waited for the import")
 	}
 }
+
+// Real deck, an SC5000 with an SD card that also carries the staged exports of two
+// Pioneer players: reading the export with those outlasted the 17 s the mount hook gives
+// rb-bridge, at every mount, and the overviews had been moved behind that read. 10 of the
+// card's 11 tracks kept their small Full and Half overview; the build with the overviews
+// first had them complete 0.6 s after the same mount. The test above did not show it: its
+// export fails at once, and a fast-failing read is not a slow read.
+func TestOverviewsDoNotWaitForAnExportThatIsStillBeingRead(t *testing.T) {
+	root, db, want := oldOverviews(t, 2)
+	later := time.Now().Add(time.Minute) // written again since the import: this mount reads it
+	if err := os.Chtimes(filepath.Join(root, "PIONEER/rekordbox/export.pdb"), later, later); err != nil {
+		t.Fatal(err)
+	}
+	reading, release, restore := bridge.HoldExportReadForTest()
+	var err error
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, err = bridge.ConvertAtMount(context.Background(), root, enginedb.Options{}, false)
+	}()
+	t.Cleanup(func() { release(); <-done; restore() })
+	select {
+	case <-reading:
+	case <-done:
+		t.Fatalf("fixture: the export was not read: %v", err)
+	}
+	// rb-bridge is in the read, where the hook's kill found it on the card.
+	if !completed(t, db, "PerformanceData", want) || !overviewMarked(root) {
+		t.Fatal("the overviews waited for the export to be read")
+	}
+	release()
+	<-done
+	if err != nil {
+		t.Fatal(err)
+	}
+}

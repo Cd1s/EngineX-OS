@@ -197,17 +197,18 @@ function run(opts = {}) {
     const ACTIONS = actions;
     const scDeck = opts.deck || 0;
     LABEL_FUNCTION
+    const Planck = {
+        librarianController: {stemsQueueManager: {
+            startRenderTracks: id => calls.push(['render', id])},
+            devicesController: {isCurrentDeviceNetworkDrive: !!opts.link}},
+        getProperty: path => ({translator: new Proxy({}, {
+            set: (o, key, value) => {writes[path] = value; return true;}})})
+    };
     const scStem = eval(expr.scStem);
     const labels = eval(expr.actionLabels);
     const messages = eval(expr.actionCommitMessages);
     const actionCommitMessages = messages;
     const colors = eval(expr.actionColors);
-    const Planck = {
-        librarianController: {stemsQueueManager: {
-            startRenderTracks: id => calls.push(['render', id])}},
-        getProperty: path => ({translator: new Proxy({}, {
-            set: (o, key, value) => {writes[path] = value; return true;}})})
-    };
     let textCommitValid;
     if (opts.commit !== undefined) {
         const actionIndex = opts.commit;
@@ -225,7 +226,9 @@ for (const streaming of [false, true]) {
     assert.deepStrictEqual(r.calls, streaming ? [['stream', 99]] :
                                                [['stream', 42], ['render', '42']]);
 }
-for (const opts of [{stemsList: true}, {az04: true}]) {
+// The other player's drive over Link: no Stems entry, as in stock. Real decks, two SC5000:
+// a swipe there answered "not enough space available on SD (SD)" for a card with 52 GiB free.
+for (const opts of [{stemsList: true}, {az04: true}, {link: true}, {link: true, streaming: true}]) {
     const r = run(opts);
     assert.deepStrictEqual(r.labels, stock);
     assert.deepStrictEqual(r.colors, ['stock0', 'stock1']);
@@ -244,6 +247,9 @@ assert.deepStrictEqual(routed.labels, ['Deck 3', stock[1], 'Stems']);
 assert.deepStrictEqual(routed.calls, []);
 assert.deepStrictEqual(routed.writes, {'/Client/Librarian/LoadToDeck3': true});
 assert.strictEqual(routed.current, 7);
+const linked = run({link: true, deck: 3, commit: 0});
+assert.deepStrictEqual(linked.labels, ['Deck 3', stock[1]]);
+assert.deepStrictEqual(linked.writes, {'/Client/Librarian/LoadToDeck3': true});
 """
                             stock = [f"Deck {deck}", "Prepare" if side == "left" else "Load"]
                             for key, value in (
@@ -256,6 +262,24 @@ assert.strictEqual(routed.current, 7);
                                 script = script.replace(key, value)
                             checked = subprocess.run(["node"], input=script, capture_output=True, text=True)
                             self.assertEqual(checked.returncode, 0, checked.stderr)
+                    # The Stems list takes dropped rows on the deck's own drives only.
+                    with self.subTest(version=version, lang=lang, what="Stems list"):
+                        qml = (out / lang / "Skins/Embedded/Views/BrowseView/Components/Craylist.qml").read_text()
+                        gate = re.search(r"typeRole === ListsModel\.Stemslist\) \{\n\s*if \((.*)\) \{\n\s*return \[TouchDragListToStemsList, TouchDragTracksToStemsList\]", qml)
+                        self.assertIsNotNone(gate)
+                        script = r"""
+const assert = require('assert');
+const takes = (az04, rendering, isCurrentDeviceNetworkDrive) => {
+    const root = {scIsAZ04: az04}, Config = {device: {hasStemsProEmbeddedRendering: rendering}};
+    return !!eval(GATE);
+};
+assert.deepStrictEqual([takes(false, false, false), takes(false, false, true)], [true, false]);
+assert.deepStrictEqual([takes(true, true, false), takes(true, true, true), takes(true, false, false)], [true, false, false]);
+""".replace("GATE", json.dumps(gate.group(1)))
+                        checked = subprocess.run(["node"], input=script, capture_output=True, text=True)
+                        self.assertEqual(checked.returncode, 0, checked.stderr)
+
+
 class TrackListArtworkPlaceholderAndReaderPriorityTest(unittest.TestCase):
     def test_built_track_art_keeps_native_source_and_synchronous_fallback(self):
         for version, skin in (("5.0.4", "EmbeddedCommon"), ("5.3.0", "Embedded")):
@@ -844,6 +868,23 @@ assert.strictEqual(vfx.enabled, false);
     def test_deck_list_follows_four_deck_role(self):
         self.assertIn('root.scFourDeckRole.split("").map(c => parseInt(c))', bp.SERVICES_MAIN)
         self.assertEqual(SRC.count("root.decks && root.decks.length ? root.decks : [1, 2]"), 1)  # only inside scDeckList
+
+    def test_update_refusal_messages_are_translated(self):
+        """#239: the deck shows the fixed refusal messages of pkg/webui/update_verify.go on its screen
+        (scT(v.error)); each needs a Chinese line, and a failed update raises a warning prompt."""
+        go = (REPO / "pkg/webui/update_verify.go").read_text(encoding="utf-8")
+        msgs = re.findall(r'^\s*msgUpdate\w+\s*=\s*"([^"]+)"', go, re.M)
+        self.assertGreaterEqual(len(msgs), 9, msgs)
+        msgs.append("update download too large")  # update.go: a file over the size limit
+        rows = {l.split("\t")[0]: l.split("\t")[1:] for l in (REPO / "tools/ui-mod/i18n.tsv").read_text(encoding="utf-8").splitlines() if l and not l.startswith("#")}
+        for m in msgs + ["Update Failed"]:
+            self.assertIn(m, rows, f"missing translation in tools/ui-mod/i18n.tsv: {m!r}")
+            for lang, val in zip(("zh-Hans", "zh-Hant"), rows[m]):
+                self.assertTrue(val.strip() and val != m, f"{m} ({lang}) is not translated")
+        self.assertIn("function scUpdateFailed(err)", bp.SERVICES_MAIN)
+        self.assertIn("type: Prompt.Warning", bp.SERVICES_MAIN)
+        # The reboot notice also arrives as an error text, with progress 1: it is not a failure.
+        self.assertIn("v.error && !(v.progress >= 1)) scUpdateFailed(v.error)", bp.SERVICES_MAIN)
 
     def test_i18n_has_stem(self):
         rows = [l.split("\t") for l in (REPO / "tools/ui-mod/i18n.tsv").read_text().splitlines()]

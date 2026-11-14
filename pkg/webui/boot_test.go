@@ -61,7 +61,7 @@ func TestBootUpdateFailureKeepsFallback(t *testing.T) {
 	s, dir, _ := bootTestServer(t)
 	putBootTestFile(t, dir, "safe-mode", "ui-ready-timeout")
 	putBootTestFile(t, dir, "boot-count", "4")
-	s.applyOnlineUpdate("://invalid")
+	s.applyOnlineUpdate("://invalid", "v5.3.0.5")
 	if !bootMarker(dir, "safe-mode") || !bootMarker(dir, "boot-count") {
 		t.Fatal("starting a failed update cleared persistent fallback")
 	}

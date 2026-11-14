@@ -19,6 +19,20 @@ const maxAudio = 1 << 30
 // imports what it finds there, under a "[Pro DJ Link: <name>]" folder (#59).
 const StagedDir = ".prolink-cache"
 
+// exportName is what a deck of ours calls itself on the link when it shares its library
+// as a player (export.go).
+const exportName = "EngineX Export Beta"
+
+// OwnExport reports whether d is a deck of ours sharing its library as a player. What it
+// shares is that deck's own drive, which Engine Link already reaches: it is no player's
+// library to copy (two decks copied each other's whole stick onto an SD card, 50 GB).
+func OwnExport(d Device) bool { return d.Name == exportName }
+
+// StagedExport is where Stage leaves the export.pdb of the library it copied to dir. It is
+// written last and at the end of every copy: a folder without it was never finished, and
+// its time is when its player was last copied.
+func StagedExport(dir string) string { return filepath.Join(dir, pdbPath) }
+
 // SafeRel turns a path from a remote export into one that stays inside its root.
 func SafeRel(p string) (string, bool) {
 	rel := filepath.Clean(strings.TrimPrefix(p, "/"))

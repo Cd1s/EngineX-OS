@@ -148,10 +148,30 @@ func GuardRoutes(ctx context.Context) {
 	if guardHostCommand("ip") != nil {
 		return // never the routes of a machine that is not a deck
 	}
-	tick := time.NewTicker(5 * time.Second)
+	guardRoutes(ctx, arpConf, 5*time.Second)
+}
+
+func guardRoutes(ctx context.Context, conf string, every time.Duration) {
+	tick := time.NewTicker(every)
 	defer tick.Stop()
+	own, said := false, false
 	for {
-		guardRoutesOnce(ctx, arpConf)
+		// From the start, not from the first shared subnet on: a pass comes up to 5 s
+		// after the second address, and until then either interface asked and answered
+		// for the other's. At boot stream-sync is up seconds before connman has an
+		// address, so neither ever does. Tried again until both interfaces are there;
+		// guardRoutesOnce still sets them before the cable goes first, for an interface
+		// that came back later.
+		if !own {
+			err := ownARPAddress(conf)
+			if own = err == nil; own {
+				log.Printf("stream-sync: eth0 and wlan0 ask and answer by ARP for their own address only")
+			} else if !said {
+				said = true
+				log.Printf("stream-sync: eth0 and wlan0 keep the stock ARP settings for now: %v", err)
+			}
+		}
+		guardRoutesOnce(ctx, conf)
 		select {
 		case <-ctx.Done():
 			return

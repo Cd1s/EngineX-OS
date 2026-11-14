@@ -2828,6 +2828,16 @@ SERVICES_MAIN = """
 		}
 		scFetchUpdate(true)
 	}
+	function scUpdateFailed(err) {
+		try {
+			PlanckGUI.views.prompts.post({
+				type: Prompt.Warning,
+				title: scT("Update Failed"),
+				message: scT(err),
+				options: Prompt.Ok
+			})
+		} catch (e) {}
+	}
 	// EngineX checks its own GitHub repository, not Denon's firmware server.
 	function scCheckUpdate() {
 		if (scUpdating) return
@@ -2847,8 +2857,13 @@ SERVICES_MAIN = """
 			}
 			const v = JSON.parse(x.responseText)
 			if (v.currentVersion && v.currentVersion !== "dev") scVersion = v.currentVersion
+			const scWasUpdating = scUpdating
 			scUpdating = !!v.updating
 			scUpdateText = v.error ? scT(v.error) : v.updating ? scT("Updating…") + " " + Math.round((v.progress || 0.05) * 100) + "%" : v.updateAvailable ? scT("New release available:") + " " + v.latestVersion : scT("Up to date") + " (" + v.currentVersion + ")"
+			// An update that failed (a release without a valid signature, a damaged download)
+			// is told to the user in a prompt, not only in the small line of the About page.
+			// "Update installed. Please reboot" also comes as an error text, with progress 1.
+			if (scWasUpdating && !v.updating && v.error && !(v.progress >= 1)) scUpdateFailed(v.error)
 			if (v.updateAvailable && v.downloadUrl) {
 				const lbl = v.updating ? Math.round((v.progress || 0.05) * 100) + "%" : scT("Update")
 				const prog = v.updating ? (v.progress || 0.05) : 0
@@ -6198,9 +6213,11 @@ def edits(dev: bool):
         prefs + "Entries/Time.qml": [(
             '		text: "Sync Time"\n',
             '		text: "Sync Time"\n		enabled: !root.scDeckList().some(d => { const p = Planck.getProperty("/Engine/Deck" + d + "/PlayState"); return !!(p && p.translator && p.translator.state) })\n')],
+        # The other player's drive over Link (a network drive) offers no Stems, as in stock:
+        # Engine has nowhere to write them and answers "not enough space" for a card with room.
         v + "BrowseView/Components/Craylist.qml": [
             ("Config.device.hasStemsProEmbeddedRendering && !isCurrentDeviceNetworkDrive" if v53() else "Config.device.hasStemsProEmbeddedRendering",
-             '(typeof root !== "undefined" && root && root.scIsAZ04 ? (' + ("Config.device.hasStemsProEmbeddedRendering && !isCurrentDeviceNetworkDrive" if v53() else "Config.device.hasStemsProEmbeddedRendering") + ') : true)'),
+             '(typeof root !== "undefined" && root && root.scIsAZ04 ? (' + ("Config.device.hasStemsProEmbeddedRendering && !isCurrentDeviceNetworkDrive" if v53() else "Config.device.hasStemsProEmbeddedRendering") + ') : ' + ("!isCurrentDeviceNetworkDrive" if v53() else "true") + ')'),
             (
                 "				var trackInfo = info.payload[key]\n				tracks.push(trackInfo.uniqueID)\n			}\n			Planck.librarianController.stemsQueueManager.startRenderTracks(",
                 "				var trackInfo = info.payload[key]\n				if (!root.scStemStream(trackInfo.uniqueID)) tracks.push(trackInfo.uniqueID)\n			}\n			if (tracks.length) Planck.librarianController.stemsQueueManager.startRenderTracks(")],
@@ -6708,7 +6725,7 @@ def edits(dev: bool):
             # #224: share the left-action template with Deck 2, including Stems-list exclusion.
             swipe_edits = [
                 (f"    readonly property list<string> actionLabels: {a}.map(action => action.display.label)\n",
-                 '    readonly property bool scStem: !(typeof root !== "undefined" && root && root.scIsAZ04) && !(typeof trackList !== "undefined" && trackList && trackList.isStemsList) && !!(row.isStreamingTrack || row.streamingProviderName || String(row.modelData && row.modelData.uri || "").startsWith("streaming://TIDAL/Track/") || (row.modelData && row.modelData.trackId > 0)) && !leftActions.some(action => /stem/i.test(String(action.display && action.display.label || "")))\n'
+                 '    readonly property bool scStem: !(typeof root !== "undefined" && root && root.scIsAZ04) && !(typeof trackList !== "undefined" && trackList && trackList.isStemsList) && !Planck.librarianController.devicesController.isCurrentDeviceNetworkDrive && !!(row.isStreamingTrack || row.streamingProviderName || String(row.modelData && row.modelData.uri || "").startsWith("streaming://TIDAL/Track/") || (row.modelData && row.modelData.trackId > 0)) && !leftActions.some(action => /stem/i.test(String(action.display && action.display.label || "")))\n'
                  f"    readonly property int scDeck: root.scSwipeDeck({right})\n"
                  "    function scLabel(s) { return scDeck > 0 ? String(s).replace(/\\d+/, scDeck) : s }\n"
                  f"    readonly property list<string> actionLabels: {a}.map(action => /^stems?$/i.test(String(action.display && action.display.label || \"\")) ? root.scT(\"Stems\") : scLabel(action.display.label)).concat(scStem ? [root.scT(\"Stems\")] : [])\n"),

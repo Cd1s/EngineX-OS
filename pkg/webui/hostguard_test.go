@@ -39,8 +39,9 @@ func TestSystemCommandsNeverReachTheHostFromTests(t *testing.T) {
 	if _, err := os.Stat(log); !os.IsNotExist(err) {
 		t.Fatal("host systemctl ran")
 	}
-	if err := quitEngineForUpdate(); !errors.Is(err, errHostCommand) {
-		t.Fatalf("host pkill not refused: %v", err)
+	// The first-generation update runs az01-update on the staged image (#239).
+	if err := guardHostCommand(az01UpdateBin); !errors.Is(err, errHostCommand) {
+		t.Fatalf("host az01-update not refused: %v", err)
 	}
 	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
 	if err := s.restartEngine(); !errors.Is(err, errHostCommand) {

@@ -1037,7 +1037,8 @@ exec REAL "$@"
     def test_release_scripts_emit_28_artifacts_and_sha256sums(self):
         rel_sh = (HERE / 'build-release.sh').read_text()
         self.assertIn('-Data-Bundle.tar.gz"', rel_sh)
-        self.assertIn('sha256sum *-Update.img *-Data-Bundle.tar.gz > SHA256SUMS.txt', rel_sh)
+        # RELEASE-TAG.txt (#239) is listed too: it is how the signed list names its release tag.
+        self.assertIn('sha256sum *-Update.img *-Data-Bundle.tar.gz RELEASE-TAG.txt > SHA256SUMS.txt', rel_sh)
 
         out_dir = self.tmp / 'release-out'
         out_dir.mkdir()
@@ -1056,25 +1057,29 @@ exec REAL "$@"
         for pfx, model in bdb.MODEL_NAMES.items():
             (out_dir / f'{pfx}-5.3.0.4-EngineX-OS-{model}-Update.img').write_bytes(f'gen2-img-{pfx}'.encode())
             (out_dir / f'{pfx}-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz').write_bytes(f'gen2-bundle-{pfx}'.encode())
+        (out_dir / 'RELEASE-TAG.txt').write_text('v5.3.0.4\n')
 
         fake_bin = self.tmp / 'fake-go-bin'
         fake_bin.mkdir()
         fake_go = fake_bin / 'go'
         fake_go.write_text(
-            '#!/bin/sh\nout=""\nwhile [ $# -gt 0 ]; do\n'
+            '#!/bin/sh\nprintf "%s\\n" "$*" >> "$GO_ARGS_LOG"\nout=""\nwhile [ $# -gt 0 ]; do\n'
             '  if [ "$1" = "-o" ]; then out="$2"; shift 2; else shift; fi\n'
             'done\nprintf "#!/bin/sh\\nexit 0\\n" > "$out"\nchmod 755 "$out"\n'
         )
         fake_go.chmod(0o755)
-        env = {**self.env, 'PATH': f"{fake_bin}:{self.env['PATH']}"}
+        go_log = self.tmp / 'go-args'
+        env = {**self.env, 'PATH': f"{fake_bin}:{self.env['PATH']}", 'GO_ARGS_LOG': str(go_log)}
         res = subprocess.run(['sh', str(HERE / 'build-installer.sh'), '5.3.0.4', str(out_dir)],
                              env=env, capture_output=True, text=True)
         self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(go_log.read_text().count('-X main.installerVersion=5.3.0.4'), 4)
         self.assertEqual(len(list(out_dir.glob('*-Update.img'))), 16)
         self.assertEqual(len(list(out_dir.glob('*-Data-Bundle.tar.gz'))), 8)
         self.assertEqual(len(list(out_dir.glob('EngineX-Installer-5.3.0.4-*'))), 4)
         lines = (out_dir / 'SHA256SUMS.txt').read_text().splitlines()
-        self.assertEqual(len(lines), 28, lines)
+        self.assertEqual(len(lines), 29, lines)  # the 28 artifacts and RELEASE-TAG.txt
+        self.assertIn('RELEASE-TAG.txt', [line.split('  ')[1] for line in lines])
         for line in lines:
             digest, fname = line.split('  ')
             self.assertEqual(hashlib.sha256((out_dir / fname).read_bytes()).hexdigest(), digest, fname)
@@ -1096,7 +1101,10 @@ exec REAL "$@"
                              env=env, capture_output=True, text=True)
         self.assertEqual(res.returncode, 0, res.stderr)
         args = ['--uninstall', '--image', 'my deck.img']
-        for t in ('linux-amd64', 'macos-arm64'):
+        retained = ('az01_packer.py', 'host-install-userdata.py', 'host-install-fastboot.sh',
+                    'third_party/installer/GO-LICENSE',
+                    'third_party/installer/xz/LICENSE', 'third_party/installer/purego/LICENSE')
+        for t in ('linux-amd64', 'macos-arm64', 'macos-amd64'):
             with self.subTest(t):
                 d = self.tmp / f'unpacked-{t}'
                 if t.startswith('linux'):
@@ -1111,13 +1119,26 @@ exec REAL "$@"
                         (d / f).chmod(0o755)  # extractall drops the mode bits the zip keeps
                     launcher = d / 'Install-EngineX.command'
                 log = self.tmp / f'args-{t}'
+                for member in retained:
+                    self.assertTrue((d / member).is_file(), member)
                 res = subprocess.run(['sh', str(launcher), *args], env={**env, 'ARGS_LOG': str(log)},
                                      input='\n', capture_output=True, text=True)
                 self.assertEqual(res.returncode, 0, res.stderr)
                 self.assertEqual(log.read_text().splitlines(), args)
+                restore = d / ('Restore-Official-Firmware.sh' if t.startswith('linux') else 'Restore-Official-Firmware.command')
+                self.assertTrue(restore.is_file())
+                image_args = ['--image', 'official deck.img']
+                res = subprocess.run(['sh', str(restore), *image_args], env={**env, 'ARGS_LOG': str(log)},
+                                     input='\n', capture_output=True, text=True)
+                self.assertEqual(res.returncode, 0, res.stderr)
+                self.assertEqual(log.read_text().splitlines(), ['--restore-stock', *image_args])
         with zipfile.ZipFile(out_dir / 'EngineX-Installer-5.3.0.4-windows-amd64.zip') as z:
             bat = z.read('Install-EngineX.bat').decode()
+            restore_bat = z.read('Restore-Official-Firmware.bat').decode()
+            for member in retained:
+                self.assertIn(member, z.namelist())
         self.assertIn('\r\nenginex-installer.exe %*\r\n', bat)
+        self.assertIn('\r\nenginex-installer.exe --restore-stock %*\r\n', restore_bat)
 
 if __name__ == '__main__':
     unittest.main()

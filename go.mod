@@ -4,12 +4,14 @@ go 1.26.0
 
 require (
 	github.com/devgianlu/go-librespot v0.10.5
+	github.com/ebitengine/purego v0.11.3
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/hajimehoshi/go-mp3 v0.3.4
 	github.com/jfreymuth/oggvorbis v1.0.5
 	github.com/mewkiz/flac v1.0.14
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
+	github.com/ulikunitz/xz v0.5.17
 	golang.org/x/crypto v0.58.0
 	golang.org/x/sys v0.49.0
 	golang.org/x/text v0.43.0

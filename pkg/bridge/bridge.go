@@ -470,6 +470,23 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 	if !full && opts.SmartMatch && !canWrite {
 		return enginedb.Result{Bypassed: true}, nil
 	}
+	// The overviews before anything is read from the export. On a card that also carries
+	// the staged exports of thousands of tracks that read alone outlasts the mount's time:
+	// the hook kills rb-bridge in it at every mount, and after it no overview was ever
+	// completed. At most half of the time for reading files and never past the hook's
+	// own limit; what it takes comes off the time the import and the MP3 grids share.
+	backfill := canWrite && hasLibrary(dir)
+	if backfill {
+		start := time.Now()
+		limit := opts.Deadline
+		if limit.IsZero() {
+			limit = start.Add(min(budget, max(maxMountHookBudget-time.Since(mountStart), time.Second)))
+		}
+		completeOverviews(ctx, mount, start.Add(limit.Sub(start)/2))
+		if budget > 0 {
+			budget = max(budget-time.Since(start), 1)
+		}
+	}
 	if !full && !bypass {
 		// Parsing/decrypting the export does not spend the file-reading budget.
 		l, stagedOnly, err := readLibrary(ctx, mount)
@@ -478,17 +495,13 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 			pre = &preread{l, stagedOnly, r}
 		}
 	}
-	// Start the shared absolute deadline before backfill, which gets at most
-	// half the remaining time. Import and MP3 grids use what is left, even if
-	// reading the export fails or the import bypasses its unchanged stamp.
-	if canWrite && hasLibrary(dir) {
-		start := time.Now()
-		if opts.Deadline.IsZero() {
-			remaining := max(maxMountHookBudget-time.Since(mountStart), time.Second)
-			opts.Deadline = start.Add(min(budget, remaining))
-			budget = 0
-		}
-		completeOverviews(ctx, mount, start.Add(opts.Deadline.Sub(start)/2))
+	// Start the shared absolute deadline once the library is read. Import and MP3
+	// grids use what the backfill left, even if reading the export fails or the
+	// import bypasses its unchanged stamp.
+	if backfill && opts.Deadline.IsZero() {
+		remaining := max(maxMountHookBudget-time.Since(mountStart), time.Second)
+		opts.Deadline = time.Now().Add(min(budget, remaining))
+		budget = 0
 	}
 	overviews := enginedb.ReadOverviewProgress(mount) // before this mount's import writes anything
 	if bypass {

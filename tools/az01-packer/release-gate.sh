@@ -19,6 +19,14 @@
 #     reading Settings -> Services -> Streaming rows, About and Control Center),
 #     streaming gateway, Stems handshake, Rekordbox conversion, fsck.hfsplus, and
 #     an abrupt hard power cut (SIGKILL of the running namespace, no clean stop);
+#  3b. signed releases (#239): the image's suite carries the release public key; a
+#     throwaway key replaces it in the sandbox copy (same length, every other byte of
+#     the shipped binary untouched) and signs the mock releases. The previous release
+#     (no verification) still installs a release that carries the signature files; the
+#     new image installs a correctly signed one (download, verify, az01-update --file)
+#     and refuses (in boot2, the phase that runs the new image's online update) an unsigned one, one signed by another key, one whose list was edited
+#     after signing, one whose image differs from the signed SHA-256, and a genuine signed
+#     list of one revision shown under the tag of another (the list names its release tag);
 #  4. second boot after power cut on the same /data and internal Engine library
 #     (boot 2, #140): verifies running-sentinel dirty QML cache purge without false
 #     safe-mode, persisted settings/SSH key/library, full boot splash dismissal +
@@ -54,10 +62,75 @@ unit_exec() { # ExecStart of a unit as the image ships it (last one wins)
     sed -n 's/^ExecStart=//p' "$R/etc/systemd/system/$1" "$R/usr/lib/systemd/system/$1" 2>/dev/null | tail -1
 }
 
+# The shipped suite embeds the release public key (#239). The gate cannot sign with the real
+# private key, so the sandbox's copy of the binary gets the throwaway key in its place: the key is
+# found by its base64 body (exactly once per embedded key, else this fails: the image has no key,
+# or not the one the checkout lists), every other byte stays as shipped. sc5000-suite-exec unpacks
+# the same archive on first start and keeps the result while the archive's hash is unchanged.
+patch_release_key() { # [lenient]: every listed key (new image) / at least one of them (previous release)
+    local bin=$W/data/sc5000-custom/bin archive=$R/usr/share/sc5000-custom/sc5000-suite.xz
+    [ -s "$archive" ] || { echo "no $archive"; return 1; }
+    mkdir -p "$bin"
+    xz -dc "$archive" > "$bin/sc5000-suite.swap" || return 1
+    python3 -I - "$bin/sc5000-suite.swap" "$W/signing/embedded.txt" "$SIGN_BODY" "${1:-strict}" <<'PY' || return 1
+import sys
+path, listing, new, mode = sys.argv[1:5]
+data = open(path, 'rb').read()
+new = new.encode()
+swapped = 0
+for line in open(listing):
+    if not line.strip():
+        continue
+    body = line.split()[2].encode()
+    if len(body) != len(new):
+        sys.exit('key body lengths differ')
+    n = data.count(body)
+    if n == 0 and mode == 'lenient':
+        continue  # a key this older release does not carry (a rotation added it later)
+    if n != 1:
+        sys.exit('the embedded release key is in the binary %d times, want 1' % n)
+    data = data.replace(body, new)
+    swapped += 1
+if not swapped:
+    sys.exit('none of the listed release keys is in the binary')
+open(path, 'wb').write(data)
+PY
+    chmod 755 "$bin/sc5000-suite.swap"
+    mv -f "$bin/sc5000-suite.swap" "$bin/sc5000-suite"
+    sha256sum < "$archive" | cut -d' ' -f1 > "$bin/sc5000-suite.id"
+}
+
+# Does the previous release verify update signatures (5.3.0.5 and later)? Then its own updater is
+# the one the gate drives, with the sandbox key; otherwise it is the stock updater (UpdateFromUrl).
+# The asset name of the signature is in the binaries that verify it, and in no older one.
+old_verifies_signatures() {
+    # grep -c reads all of the input: with -q it would stop at the first match, xz would get SIGPIPE and
+    # pipefail would report the pipeline as failed.
+    xz -dc "$R/usr/share/sc5000-custom/sc5000-suite.xz" 2>/dev/null | grep -ac 'SHA256SUMS.txt.sig' > /dev/null
+}
+
+# A deck refuses an update that does not verify: say why, install nothing (#239).
+refusal() { # <suffix of the mock repo / release> <message the deck shows>
+    local sfx=$1 msg=$2 ui=$W/data/sc5000-custom/ui/settings.conf
+    echo "github_repo=Cd1s/EngineX-OS-$sfx" >> "$ui"
+    : > "$R/tmp/gate-shim.log"
+    curl -sf http://127.0.0.1:8080/v1/sc5000/update > "$W/boot2-$sfx-offer.json" || :
+    check "boot2: the $sfx release is offered, so the refusal is the signature's" json "$W/boot2-$sfx-offer.json" \
+        "j.get('updateAvailable') is True and j.get('latestVersion') == 'v$NEXTV-$sfx'"
+    curl -sf "http://127.0.0.1:8080/v1/sc5000/update?apply=1" > /dev/null || :
+    settled() { curl -sf http://127.0.0.1:8080/v1/sc5000/update > "$W/boot2-$sfx-result.json" 2>/dev/null && json "$W/boot2-$sfx-result.json" "not j.get('updating') and j.get('error')"; }
+    wait_for 900 settled || :
+    check "boot2: the $sfx release is refused: $msg" json "$W/boot2-$sfx-result.json" "j.get('error') == '$msg' and not j.get('updating')"
+    check "boot2: the $sfx release: az01-update never ran, no image kept" \
+        bash -c "! grep -q 'az01-update' '$R/tmp/gate-shim.log' && test ! -e '$W/data/az01-update.img' && test ! -e '$W/data/az01-update.img.part'"
+    sed -i "\#^github_repo=Cd1s/EngineX-OS-$sfx\$#d" "$ui"
+}
+
 # --- phase: one boot of one rootfs, PID 1 of its own pid + mount namespace ---
 phase() {
     local name=$1 R=$W/$1 v
     [ "$name" != boot2 ] || R=$W/new
+    local legacy_ota=0
     mount --make-rprivate /
     for d in tmp run dev sys media; do mount -t tmpfs tmpfs "$R/$d"; done
     if [ -d "$R/var/volatile" ]; then
@@ -81,6 +154,7 @@ phase() {
     printf '#!/bin/sh\necho "SHIM $0 $*" >> /tmp/gate-shim.log\n[ "$1" = --update ] && exec /usr/sbin/az01-update --net "$2"\n' > "$R/run/gate/planck"
     cat > "$R/run/gate/az01-update" <<'SH'
 #!/bin/sh
+echo "SHIM az01-update $*" >> /tmp/gate-shim.log
 case " $* " in *" --erase-data "*) echo "SHIM refused $0 $*" >> /tmp/gate-shim.log; exit 1 ;; esac
 { /run/gate/az01-update.real "$@"; echo "rc=$?"; } 2>&1 | tee -a /tmp/gate-az01.log
 rc=$(sed -n 's/^rc=//p' /tmp/gate-az01.log | tail -1); exit "${rc:-1}"
@@ -155,6 +229,16 @@ SH
     printf 'f\n' > "$R/proc/irq/41/smp_affinity"
     printf '0-3\n' > "$R/proc/irq/41/smp_affinity_list"
 
+    legacy_ota=0  # the previous release hands the URL to the stock updater (no signature check)
+    if [ "$name" != old ]; then
+        check "$name: the suite carries the release key (swapped for the throwaway key in this sandbox)" patch_release_key
+    elif old_verifies_signatures; then
+        note "old: the previous release verifies update signatures: its signed updater is driven, with the sandbox key"
+        check "old: the suite carries a release key (swapped for the throwaway key in this sandbox)" patch_release_key lenient
+    else
+        legacy_ota=1
+        note "old: the previous release predates signed updates: it hands the URL to the stock updater"
+    fi
     mkdir -p "$R/run/dbus"
     chroot "$R" /usr/bin/dbus-daemon --system --fork --nopidfile >> "$W/$name-boot.log" 2>&1 || chroot "$R" /usr/bin/dbus-daemon --system --fork
     declare -A pid
@@ -373,15 +457,45 @@ SH
     check "$name: /v1/sc5000/update offers $tag over $cur" json "$W/$name-update.json" \
         "j.get('currentVersion') == '$cur' and j.get('latestVersion') == '$tag' and j.get('updateAvailable') is True and j.get('downloadUrl') == 'https://github.com/Cd1s/EngineX-OS/releases/download/$tag/$asset'"
     check "$name: Engine still running before the update" bash -c "! grep -aqE 'Crash with|SOFT RESET' '$W/$name-engine.log'"
+    if [ "$name" = boot2 ]; then
+        # Releases the deck must refuse, each a mock release of its own (#239). The online update runs in
+        # the old phase and, for the new image, here: the new phase ends in the power cut before it.
+        refusal unsigned 'update refused: this release is not signed'
+        refusal badsig 'update refused: the release signature is not valid'
+        refusal edited 'update refused: the release signature is not valid'
+        refusal tampered 'update refused: the file does not match the signed checksum'
+        refusal r3 'update refused: the signature is for a different release'
+        rm -f "$W/mock/corrupt-Update.img"
+        curl -sf http://127.0.0.1:8080/v1/sc5000/update > "$W/$name-update.json" || :
+        check "$name: after the refusals the signed $tag is offered again" json "$W/$name-update.json" \
+            "j.get('latestVersion') == '$tag' and j.get('updateAvailable') is True"
+    fi
     : > "$R/tmp/gate-shim.log"
+    : > "$R/tmp/gate-az01.log"
     curl -sf "http://127.0.0.1:8080/v1/sc5000/update?apply=1" > "$W/$name-apply.json" || :
-    check "$name: Engine quit with UpdateFromUrl" wait_for 120 grep -aq "Starting update from url: https://github.com/Cd1s/EngineX-OS/releases/download/$tag/" "$W/$name-engine.log"
-    check "$name: the engine script handed the URL to the updater" wait_for 60 grep -qF "SHIM /usr/bin/planck-remote-screen --update https://github.com/Cd1s/EngineX-OS/releases/download/$tag/$asset" "$R/tmp/gate-shim.log"
-    # libaz01-prog only starts "Applying" after the image verified; flashing itself
-    # needs the deck's eMMC (the sandbox has none) and is checked on a real deck.
-    wait_for "$UPDATE_TIMEOUT" grep -q '^rc=' "$R/tmp/gate-az01.log" || :
-    check "$name: az01-update downloaded and verified the image" \
-        grep -aq "Applying https://github.com/Cd1s/EngineX-OS/releases/download/$tag/$asset" "$R/tmp/gate-az01.log"
+    if [ "$legacy_ota" = 1 ]; then
+        check "$name: Engine quit with UpdateFromUrl" wait_for 120 grep -aq "Starting update from url: https://github.com/Cd1s/EngineX-OS/releases/download/$tag/" "$W/$name-engine.log"
+        check "$name: the engine script handed the URL to the updater" wait_for 60 grep -qF "SHIM /usr/bin/planck-remote-screen --update https://github.com/Cd1s/EngineX-OS/releases/download/$tag/$asset" "$R/tmp/gate-shim.log"
+        # libaz01-prog only starts "Applying" after the image verified; flashing itself
+        # needs the deck's eMMC (the sandbox has none) and is checked on a real deck.
+        wait_for "$UPDATE_TIMEOUT" grep -q '^rc=' "$R/tmp/gate-az01.log" || :
+        check "$name: az01-update downloaded and verified the image" \
+            grep -aq "Applying https://github.com/Cd1s/EngineX-OS/releases/download/$tag/$asset" "$R/tmp/gate-az01.log"
+    else
+        # From 5.3.0.5 the deck verifies the signature, downloads the file itself, compares its
+        # SHA-256 with the signed list and only then runs az01-update on the staged copy (#239).
+        # The previous release takes this path too once it is a 5.3.0.5 or later.
+        check "$name: the signed update was verified, downloaded and handed to az01-update --file" \
+            wait_for "$UPDATE_TIMEOUT" grep -qF "SHIM az01-update --file /data/az01-update.img" "$R/tmp/gate-shim.log"
+        check "$name: the engine was not told to quit for the stock updater (no UpdateFromUrl)" \
+            bash -c "! grep -aq 'Starting update from url' '$W/$name-engine.log' && ! grep -q 'planck-remote-screen' '$R/tmp/gate-shim.log'"
+        check "$name: the staged image is the signed one" test "$(sha256sum < "$W/data/az01-update.img" | cut -d' ' -f1)" = "$IMG_SHA"
+        wait_for "$UPDATE_TIMEOUT" grep -q '^rc=' "$R/tmp/gate-az01.log" || :
+        # az01-update --file prints nothing while it verifies; on a good image it stops only at the step the
+        # sandbox cannot do (no eMMC: "unsupported operation"), on a damaged one it says "file corrupt".
+        check "$name: az01-update accepted the staged image (it stops only at the missing eMMC)" \
+            bash -c "grep -aq 'unsupported operation' '$R/tmp/gate-az01.log' && ! grep -aq 'file corrupt' '$R/tmp/gate-az01.log'"
+    fi
     check "$name: no download, signature or compatibility error" \
         bash -c "! grep -aiE 'verification failed|not compatible|no valid signature|download error|failed to download' '$R/tmp/gate-az01.log'"
     note "$name: sandbox apply step: $(grep -a 'failed to update\|^rc=' "$R/tmp/gate-az01.log" | tr '\n' ' ')"
@@ -389,12 +503,11 @@ SH
         # Control: the same download + verify path must reject the image with one byte flipped.
         cp "$R/tmp/gate-az01.log" "$W/old-az01.log"
         : > "$R/tmp/gate-az01.log"
-        python3 -I -c 'import shutil,sys; shutil.copyfile(sys.argv[1], sys.argv[2]); f=open(sys.argv[2], "r+b"); n=f.seek(0, 2)//2; f.seek(n); b=f.read(1); f.seek(n); f.write(bytes([b[0]^0xff]))' \
-            "$NEW_IMG" "$W/mock/assets/gate-corrupt-Update.img"
+        ln -sf "$W/mock/corrupt-Update.img" "$W/mock/assets/$tag/gate-corrupt-Update.img"
         in_root /usr/sbin/az01-update --net "https://github.com/Cd1s/EngineX-OS/releases/download/$tag/gate-corrupt-Update.img" > /dev/null 2>&1 || :
         check "old: a one-byte corrupted image is rejected before Applying" bash -c "grep -aq Verifying '$R/tmp/gate-az01.log' && ! grep -aq Applying '$R/tmp/gate-az01.log'"
         note "old: corrupted image: $(tr '\r' '\n' < "$R/tmp/gate-az01.log" | grep -av '^Downloading' | tr '\n' ' ')"
-        rm -f "$W/mock/assets/gate-corrupt-Update.img"
+        rm -f "$W/mock/assets/$tag/gate-corrupt-Update.img"
         cp "$R/tmp/gate-az01.log" "$W/old-corrupt-az01.log"
         cp "$W/old-az01.log" "$R/tmp/gate-az01.log"
     elif [ "$name" = boot2 ]; then
@@ -485,7 +598,7 @@ if grep -qs '^enabled' /proc/sys/fs/binfmt_misc/qemu-arm; then
 else
     case $(uname -m) in aarch64|arm*) ;; *) echo "needs an ARM host or qemu-arm binfmt with the F flag" >&2; exit 2 ;; esac
 fi
-for t in python3 openssl curl unshare chroot ip readelf realpath systemd-analyze setpriv; do command -v $t >/dev/null || { echo "missing $t" >&2; exit 2; }; done
+for t in python3 openssl curl unshare chroot ip readelf realpath systemd-analyze setpriv xz sha256sum; do command -v $t >/dev/null || { echo "missing $t" >&2; exit 2; }; done
 OLD_IMG=$(realpath "$1"); NEW_IMG=$(realpath "$2"); NEWV=$3
 W=$(realpath -m "${4:-$(mktemp -d /var/tmp/sc5000-gate.XXXXXX)}")
 [ ! -e "$W/results.txt" ] || { echo "$W was used before; give a new work dir" >&2; exit 2; }
@@ -533,10 +646,35 @@ export SUITE_CMDS
  printf 'subjectAltName=DNS:github.com,DNS:api.github.com\nextendedKeyUsage=serverAuth\n' > leaf.ext &&
  openssl x509 -req -in leaf.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 2 -out leaf.pem -extfile leaf.ext 2>/dev/null)
 printf '127.0.0.1 localhost\n127.0.0.1 api.github.com github.com\n' > "$W/hosts"
-release() { # <file> <tag> <asset name> <image>: GitHub's releases/latest answer
-    ln -sf "$4" "$W/mock/assets/$3"
-    printf '{"tag_name":"%s","html_url":"https://github.com/Cd1s/EngineX-OS/releases/tag/%s","assets":[{"name":"%s","browser_download_url":"https://github.com/Cd1s/EngineX-OS/releases/download/%s/%s"}]}\n' \
-        "$2" "$2" "$3" "$2" "$3" > "$1"
+# Throwaway release keys (#239): the first signs the mock releases, the second is "someone else".
+mkdir -p "$W/signing"
+(umask 077; openssl genpkey -algorithm ed25519 -out "$W/signing/release.key" 2>/dev/null; openssl genpkey -algorithm ed25519 -out "$W/signing/other.key" 2>/dev/null)
+openssl pkey -in "$W/signing/release.key" -pubout -out "$W/signing/release.pub" 2>/dev/null
+SIGN_BODY=$(grep -v '^-----' "$W/signing/release.pub" | tr -d '\n')
+(cd "$REPO" && CGO_ENABLED=0 go build -trimpath -o "$W/bin/enginex-sign" ./cmd/enginex-sign)
+if "$W/bin/enginex-sign" --list-keys > "$W/signing/embedded.txt" 2> "$W/signing/embedded.err"; then
+    pass "release key: $(wc -l < "$W/signing/embedded.txt") trusted public key(s) embedded in internal/releasesig/keys.go"
+else
+    fail "release key: $(cat "$W/signing/embedded.err")"
+fi
+IMG_SHA=$(sha256sum "$NEW_IMG" | cut -d' ' -f1)
+export SIGN_BODY IMG_SHA
+asset_json() { printf '{"name":"%s","browser_download_url":"https://github.com/Cd1s/EngineX-OS/releases/download/%s/%s"}' "$2" "$1" "$2"; }
+release() { # <file> <tag> <asset name> <image file> [unsigned|<key file>] [edit] [<tag the list is for>]: GitHub's releases/latest answer
+    local d=$W/mock/assets/$2 assets key=${5:-$W/signing/release.key} listtag=${7:-$2}
+    mkdir -p "$d"
+    ln -sf "$4" "$d/$3"
+    assets=$(asset_json "$2" "$3")
+    if [ "$key" != unsigned ]; then
+        # The list names the files and, like a real release's, its own tag (RELEASE-TAG.txt).
+        printf '%s\n' "$listtag" > "$d/RELEASE-TAG.txt"
+        { printf '%s  %s\n' "$IMG_SHA" "$3"; printf '%s  RELEASE-TAG.txt\n' "$(sha256sum < "$d/RELEASE-TAG.txt" | cut -d' ' -f1)"; } > "$d/SHA256SUMS.txt"
+        printf '%s\n' "$2" > "$d/RELEASE-TAG.txt"
+        ENGINEX_RELEASE_KEY=$key "$W/bin/enginex-sign" --allow-untrusted "$d/SHA256SUMS.txt" > /dev/null
+        [ "${6:-}" != edit ] || printf '%s  %s\n' "$(printf x | sha256sum | cut -d' ' -f1)" extra-file.bin >> "$d/SHA256SUMS.txt"
+        assets="$assets,$(asset_json "$2" SHA256SUMS.txt),$(asset_json "$2" SHA256SUMS.txt.sig),$(asset_json "$2" RELEASE-TAG.txt)"
+    fi
+    printf '{"tag_name":"%s","html_url":"https://github.com/Cd1s/EngineX-OS/releases/tag/%s","assets":[%s]}\n' "$2" "$2" "$assets" > "$1"
 }
 release "$W/mock/release-old.json" "$RELTAG" "$NEW_NAME" "$NEW_IMG"
 echo "$NEW_NAME" > "$W/mock/asset-old"
@@ -545,20 +683,38 @@ NEXT_NAME=$PREFIX-$NEXTV-EngineX-OS-$MODEL-$PRODUCT-Update.img
 release "$W/mock/release-new.json" "v$NEXTV" "$NEXT_NAME" "$NEW_IMG"
 echo "$NEXT_NAME" > "$W/mock/asset-new"
 cp "$W/mock/asset-new" "$W/mock/asset-boot2"
+# Releases the new image must refuse: not signed, signed by another key, list edited after
+# signing, and an image with one byte changed under a correct signature.
+python3 -I -c 'import shutil,sys; shutil.copyfile(sys.argv[1], sys.argv[2]); f=open(sys.argv[2], "r+b"); n=f.seek(0, 2)//2; f.seek(n); b=f.read(1); f.seek(n); f.write(bytes([b[0]^0xff]))' \
+    "$NEW_IMG" "$W/mock/corrupt-Update.img"
+release "$W/mock/release-unsigned.json" "v$NEXTV-unsigned" "$NEXT_NAME" "$NEW_IMG" unsigned
+release "$W/mock/release-badsig.json" "v$NEXTV-badsig" "$NEXT_NAME" "$NEW_IMG" "$W/signing/other.key"
+release "$W/mock/release-edited.json" "v$NEXTV-edited" "$NEXT_NAME" "$NEW_IMG" "$W/signing/release.key" edit
+release "$W/mock/release-tampered.json" "v$NEXTV-tampered" "$NEXT_NAME" "$W/mock/corrupt-Update.img"
+# A genuine, correctly signed list of revision r1 shown under the tag of r3 (the file names are the same).
+release "$W/mock/release-r3.json" "v$NEXTV-r3" "$NEXT_NAME" "$NEW_IMG" "$W/signing/release.key" signed "v$NEXTV-r1"
 cat > "$W/mock/server.py" <<'PY'
-import http.server, os, ssl, sys
+import http.server, os, re, ssl, sys
 root = sys.argv[1]
 class H(http.server.BaseHTTPRequestHandler):
     def reply(self, body):
         if self.path.endswith('/releases/latest'):
-            installed = '/repos/Cd1s/EngineX-OS-installed/' in self.path  # the release the new image is
-            data = open(os.path.join(root, 'release-old.json' if installed else 'release.json'), 'rb').read()
+            # EngineX-OS-installed is the release the new image is; EngineX-OS-<x> is the mock release of scenario x.
+            m = re.match(r'/repos/Cd1s/EngineX-OS(?:-([A-Za-z0-9]+))?/releases/latest', self.path)
+            sfx = m.group(1) if m else None
+            name = 'release.json' if sfx is None else 'release-old.json' if sfx == 'installed' else 'release-%s.json' % sfx
+            if not os.path.isfile(os.path.join(root, name)):
+                return self.send_error(404)
+            data = open(os.path.join(root, name), 'rb').read()
             self.send_response(200); self.send_header('Content-Type', 'application/json')
             self.send_header('Content-Length', str(len(data))); self.end_headers()
             if body: self.wfile.write(data)
             return
-        path = os.path.join(root, 'assets', os.path.basename(self.path.split('?')[0]))
-        if '/releases/download/' not in self.path or not os.path.isfile(path):
+        # .../releases/download/<tag>/<file>: every mock release has a directory of its own.
+        tail = self.path.split('?')[0].partition('/releases/download/')[2]
+        tag, _, fname = tail.partition('/')
+        path = os.path.join(root, 'assets', os.path.basename(tag), os.path.basename(fname))
+        if not tail or not os.path.isfile(path):
             return self.send_error(404)
         self.send_response(200); self.send_header('Content-Type', 'application/octet-stream')
         self.send_header('Content-Length', str(os.path.getsize(path))); self.end_headers()
