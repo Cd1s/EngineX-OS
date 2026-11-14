@@ -1295,8 +1295,7 @@ func engineWaveforms(raw []byte, duration float64) ([]rekordbox.Waveform, error)
 				peak[c] = max(peak[c], raw[24+j*3+uint64(c)])
 			}
 		}
-		// PWV7 byte order is mid, high, low (Deep Symmetry ANLZ documentation).
-		copy(bands[3*i:], []byte{peak[1], peak[2], peak[0]})
+		copy(bands[3*i:], peak[:]) // PWV7 is low, mid, high as well (enginedb.WaveRGB)
 		// PWV5 packs 3-bit RGB and 5-bit height. Normalize the Engine band scales
 		// used by the importer, rather than copying incompatible overview bytes.
 		r, g, b := min(1, float64(peak[0])*0.0066), min(1, float64(peak[1])*0.0035), min(1, float64(peak[2])*0.0016)

@@ -410,6 +410,7 @@ func convertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 		stamp = stampVersion + " " + staged
 	}
 	dir := filepath.Join(mount, "Engine Library", "Database2")
+	overviews := enginedb.ReadOverviewProgress(mount) // before this mount writes anything
 	oldStamp := readMark(dir, stampName)
 	opts.LegacyOffsets = oldStamp != "" && !strings.HasPrefix(oldStamp, stampVersion+" ")
 	resume := false
@@ -423,6 +424,7 @@ func convertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 					deadline = time.Now().Add(mountReadBudget)
 				}
 				_, _ = enginedb.MigrateArtworkBefore(ctx, mount, deadline)
+				completeOverviews(ctx, mount, deadline)
 			}
 			return enginedb.Result{Bypassed: true}, nil
 		}
@@ -484,6 +486,14 @@ func convertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 	// only those, the others are known to be imported with theirs.
 	opts.Resume = resume || (!full && !opts.SmartMatch && readMark(dir, pendingName) == stamp)
 	result, err = convert(ctx, mount, opts, pre, budget, mountStart)
+	if err == nil && !result.Bypassed {
+		// Only this build has written since the progress was read, and it leaves no overview
+		// without band maxima: the backfill goes on where it was, also with no time left now.
+		if err := overviews.Keep(mount); err != nil {
+			log.Printf("rb-bridge: overview progress not kept: %v", err)
+		}
+		completeOverviews(ctx, mount, opts.Deadline) // the tracks this import had no reason to read again
+	}
 	if err == nil && result.Deferred > 0 {
 		writeMark(dir, pendingName, stamp)
 		log.Printf("rb-bridge: %d tracks imported without cues; the next mount reads them", result.Deferred)
@@ -492,6 +502,15 @@ func convertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 		os.Remove(filepath.Join(dir, pendingName))
 	}
 	return result, err
+}
+
+// completeOverviews gives the overviews an earlier build imported the scale Engine
+// expects, in the time until deadline; the next mount goes on from where this one stopped.
+// A library it has been through is not read again until an import by another build.
+func completeOverviews(ctx context.Context, mount string, deadline time.Time) {
+	if _, err := enginedb.FillOverviewMaxima(ctx, mount, deadline); err != nil {
+		log.Printf("rb-bridge: overviews not completed: %v", err)
+	}
 }
 
 func cleanEmptyEngineLibrary(dir string) {

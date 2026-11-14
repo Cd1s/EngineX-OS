@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
 
@@ -300,36 +301,10 @@ func ExtractANLZ(a *rekordbox.Analysis) (waveform [][3]byte, beats []BeatGridPoi
 	}
 	if wave != nil && int(wave.EntryBytes) <= len(wave.Data) {
 		total := len(wave.Data) / int(wave.EntryBytes)
-		getCol := func(i int) [3]byte {
-			off := i * int(wave.EntryBytes)
-			p := wave.Data[off : off+int(wave.EntryBytes)]
-			switch wave.Tag {
-			case "PWV7":
-				if len(p) >= 3 {
-					// 3-band [mid, high, low] -> [Low, Mid, High]
-					return [3]byte{p[2], p[0], p[1]}
-				}
-			case "PWV5":
-				if len(p) >= 2 {
-					v := binary.BigEndian.Uint16(p)
-					h := float64((v>>2)&31) / 31.0
-					r := byte(float64((v>>13)&7) * 255.0 / 7.0 * h)
-					g := byte(float64((v>>10)&7) * 255.0 / 7.0 * h)
-					b := byte(float64((v>>7)&7) * 255.0 / 7.0 * h)
-					return [3]byte{r, g, b}
-				}
-			case "PWV4":
-				if len(p) >= 6 {
-					return [3]byte{p[3], p[4], p[5]}
-				}
-			}
-			v := byte(int(p[0]&31) * 255 / 31)
-			return [3]byte{v, v, v}
-		}
 		if total <= 256 {
 			waveform = make([][3]byte, total)
 			for i := 0; i < total; i++ {
-				waveform[i] = getCol(i)
+				waveform[i] = enginedb.WaveRGB(*wave, i)
 			}
 		} else {
 			const bins = 256
@@ -342,7 +317,7 @@ func ExtractANLZ(a *rekordbox.Analysis) (waveform [][3]byte, beats []BeatGridPoi
 				}
 				var peak [3]byte
 				for j := lo; j < hi && j < total; j++ {
-					col := getCol(j)
+					col := enginedb.WaveRGB(*wave, j)
 					if col[0] > peak[0] {
 						peak[0] = col[0]
 					}
