@@ -42,7 +42,7 @@ repo, out = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
 spec = importlib.util.spec_from_file_location("bdb", repo / "tools/az01-packer/build-data-bundle.py")
 bdb = importlib.util.module_from_spec(spec); spec.loader.exec_module(bdb)
 ntp = (repo / "rootfs-overlay/etc/systemd/timesyncd.conf.d/10-enginex-ntp.conf").read_text()
-text = bdb.BOOT_ACTIVATE.replace("@MIGRATE_IF_DEFAULT@", "").replace("@TIMESYNCD_DROPIN@", ntp)
+text = bdb.BOOT_ACTIVATE.replace("@SWAP_UNDO@", bdb.SWAP_UNDO).replace("@MIGRATE_IF_DEFAULT@", "").replace("@TIMESYNCD_DROPIN@", ntp)
 out.write_text(text)
 PY
 chmod 0755 "$DEST/bundle/boot-activate.sh"
@@ -144,6 +144,7 @@ def sub(old, new):
 # The engine.service drop-in is the one real systemd path; every other unit file stays in the work dir.
 sub("/run/systemd/system/engine.service.d", "@DROPIN@")
 sub("/run/systemd/system/", f"{tmp}/units/")
+sub("/run/systemd/system", f"{tmp}/units")
 sub("@DROPIN@", dropin_dir)
 sub("Wants=enginex-stream-sync.service enginex-rb-bridge.service enginex-deemixd.service engine-guardian.service\n", "")
 sub("engine-ui-guard service /usr/Engine/Scripts/runengine",
@@ -161,8 +162,7 @@ sub("$bundle_dir/boot-activate.sh --restore-tz", f"{dst} --restore-tz")
 sub("/run/systemd/timesyncd.conf.d/10-enginex-ntp.conf", f"{tmp}/ntp.conf")
 sub("/run/systemd/timesyncd.conf.d", f"{tmp}/ntp.d")
 sub("/run/enginex", f"{tmp}/run-enginex")
-sub("accounts=/data/StreamingAccounts.json", f"accounts={tmp}/data/StreamingAccounts.json")
-sub("[ -d /data ]", f"[ -d {tmp}/data ]")
+sub("accounts=${ENGINEX_STREAMING_ACCOUNTS:-/data/StreamingAccounts.json}", f"accounts={tmp}/data/StreamingAccounts.json")
 sub("systemctl restart --no-block enginex-stream-sync.service enginex-rb-bridge.service enginex-deemixd.service engine-guardian.service || :", ":")
 sub('[ "$timesyncd_changed" = 0 ] || systemctl restart --no-block systemd-timesyncd.service || :', ":")
 sub("pgrep -x 'enginex-suite|sc5000-suite' 2>/dev/null", ":")
@@ -170,6 +170,7 @@ sub("engine.service", unit)
 # What may still reach the host's systemd: the reload, the restart of our unit, and two
 # branches this fixture never enters (no SSH key and no edisksd hook in the bundle).
 allowed = ("systemctl daemon-reload", f"systemctl restart --no-block {unit}",
+           "systemctl stop enginex-sc5000-deemixd.service", "systemctl reset-failed enginex-sc5000-deemixd.service",
            "systemctl start --no-block sshd.service", "systemctl restart edisksd.service")
 for line in s.splitlines():
     if "systemctl " in line and not line.lstrip().startswith("#") and not any(a in line for a in allowed):
