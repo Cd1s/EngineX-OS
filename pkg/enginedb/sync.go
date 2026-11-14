@@ -35,6 +35,10 @@ var schema string
 // resets again on each attach if they return, so nothing of ours may live there.
 const stateFile = ".rb-bridge-state.db"
 
+// defaultMaxBridgeStateBytes (3 GiB) keeps .rb-bridge-state.db safely below
+// FAT32's 4 GiB single-file limit (#272) while leaving ample room for journal files.
+const defaultMaxBridgeStateBytes int64 = 3 << 30
+
 const bridgeSchema = `
 CREATE TABLE bridge.BridgeState(path TEXT PRIMARY KEY, trackId INTEGER NOT NULL, fingerprint TEXT NOT NULL);
 CREATE TABLE bridge.BridgeAnalysis(trackId INTEGER PRIMARY KEY, sourceJSON BLOB NOT NULL, audioJSON BLOB NOT NULL);
@@ -71,6 +75,9 @@ type Options struct {
 	// predates v2 MP3 offset alignment. Deferred existing rows must stay pending
 	// until their legacy performance has been realigned on a later mount.
 	LegacyOffsets bool `json:"-"`
+	// MaxBridgeStateBytes caps the size of .rb-bridge-state.db to keep it safely
+	// below FAT32's 4 GiB single-file limit (#272). Zero uses defaultMaxBridgeStateBytes (3 GiB).
+	MaxBridgeStateBytes int64 `json:"-"`
 	// Now is the clock Deadline is checked against; nil means time.Now. Tests
 	// use it to put the deadline inside a library whatever the host's load.
 	Now func() time.Time `json:"-"`
@@ -82,7 +89,11 @@ type Result struct {
 	// Degraded tracks had an unreadable audio, analysis or artwork file and were
 	// imported from the export's metadata alone, so one bad file cannot empty the
 	// whole stick (#53). They are read again once their files change.
-	Degraded         int `json:",omitempty"`
+	Degraded int `json:",omitempty"`
+	// AnalysisSkipped tracks had cues and waveforms imported into PerformanceData,
+	// but their BridgeAnalysis row was omitted to keep .rb-bridge-state.db within
+	// the FAT32 4 GiB single-file limit (#272).
+	AnalysisSkipped  int `json:",omitempty"`
 	PlaylistsChanged bool
 	Bypassed         bool
 }
@@ -700,13 +711,29 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 			}
 		}
 		if !fast {
-			sourceJSON, _ := json.Marshal(struct {
-				Track    rekordbox.Track
-				Analysis *rekordbox.Analysis
-			}{original, a})
-			audioJSON, _ := json.Marshal(audio)
-			if _, e = q.ExecContext(ctx, `INSERT INTO BridgeAnalysis(trackId,sourceJSON,audioJSON) VALUES(?,?,?) ON CONFLICT(trackId) DO UPDATE SET sourceJSON=excluded.sourceJSON,audioJSON=excluded.audioJSON`, id, sourceJSON, audioJSON); e != nil {
-				return result, e
+			var bridgeBytes int64
+			var pages, pSize int64
+			if tx.QueryRowContext(ctx, `PRAGMA bridge.page_count`).Scan(&pages) == nil &&
+				tx.QueryRowContext(ctx, `PRAGMA bridge.page_size`).Scan(&pSize) == nil && pages > 0 && pSize > 0 {
+				bridgeBytes = pages * pSize
+			} else if st, err := os.Stat(filepath.Join(dir, stateFile)); err == nil {
+				bridgeBytes = st.Size()
+			}
+			maxBytes := opts.MaxBridgeStateBytes
+			if maxBytes <= 0 {
+				maxBytes = defaultMaxBridgeStateBytes
+			}
+			if bridgeBytes >= maxBytes {
+				result.AnalysisSkipped++
+			} else {
+				sourceJSON, _ := json.Marshal(struct {
+					Track    rekordbox.Track
+					Analysis *rekordbox.Analysis
+				}{original, a})
+				audioJSON, _ := json.Marshal(audio)
+				if _, e = q.ExecContext(ctx, `INSERT INTO BridgeAnalysis(trackId,sourceJSON,audioJSON) VALUES(?,?,?) ON CONFLICT(trackId) DO UPDATE SET sourceJSON=excluded.sourceJSON,audioJSON=excluded.audioJSON`, id, sourceJSON, audioJSON); e != nil {
+					return result, e
+				}
 			}
 		}
 		if existing {

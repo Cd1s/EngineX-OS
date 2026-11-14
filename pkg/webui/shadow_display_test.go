@@ -2,6 +2,7 @@ package webui
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -856,6 +857,24 @@ func TestBridgeDetailsBelongToLibraryPathAndDuration(t *testing.T) {
 	w := bridgeDisplayWave(ctx, filepath.Join(dir, "m.db"), "../Contents/a.flac", 1, 44100, 4000)
 	if w == nil || len(w.Bands) != 1800 {
 		t.Fatal("persisted PWV7 detail not read")
+	}
+	var gzBuf bytes.Buffer
+	gw := gzip.NewWriter(&gzBuf)
+	if _, err = gw.Write(b); err != nil {
+		t.Fatal(err)
+	}
+	if err = gw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`INSERT INTO BridgeAnalysis VALUES(2,?);`, gzBuf.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`INSERT INTO BridgeState VALUES('../Contents/gz.flac',2)`); err != nil {
+		t.Fatal(err)
+	}
+	wGz := bridgeDisplayWave(ctx, filepath.Join(dir, "m.db"), "../Contents/gz.flac", 2, 44100, 4000)
+	if wGz == nil || len(wGz.Bands) != 1800 {
+		t.Fatal("gzipped persisted PWV7 detail not read")
 	}
 	for _, tc := range []struct {
 		file, path string
