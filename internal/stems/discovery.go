@@ -496,6 +496,12 @@ func discoverLANServers(ctx context.Context, timeout time.Duration, accept func(
 // in statePath if its /healthz still answers, else whatever answers a probe.
 // It records the outcome in statePath and spends at most about 3×timeout.
 func FindLAN(ctx context.Context, statePath string, timeout time.Duration) (string, bool) {
+	st, ok := FindLANRenderer(ctx, statePath, timeout)
+	return st.Endpoint, ok
+}
+
+// FindLANRenderer is FindLAN with what the renderer said about itself.
+func FindLANRenderer(ctx context.Context, statePath string, timeout time.Duration) (LANState, bool) {
 	var last LANState
 	if b, err := os.ReadFile(statePath); err == nil {
 		json.Unmarshal(b, &last)
@@ -517,7 +523,7 @@ func FindLAN(ctx context.Context, statePath string, timeout time.Duration) (stri
 	}
 	if !ok {
 		if isRelay || (last.Endpoint != "" && !lanEndpoint(last.Endpoint)) {
-			return "", false
+			return LANState{}, false
 		}
 		st = last // keep the last renderer for the console and the next quick check
 	}
@@ -527,7 +533,7 @@ func FindLAN(ctx context.Context, statePath string, timeout time.Duration) (stri
 			os.Rename(statePath+".tmp", statePath)
 		}
 	}
-	return st.Endpoint, ok
+	return st, ok
 }
 
 // ProbeLANState discovers or refreshes the LAN Stems renderer for the deck UI
