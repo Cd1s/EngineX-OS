@@ -47,10 +47,10 @@ Everything runs right inside the familiar Denon DJ interface — install it and 
 - Works with `FAT32` / `exFAT` / `NTFS` and Mac `HFS+` (`Mac OS Extended`; `APFS` is not supported: format the stick as `exFAT` or `Mac OS Extended`), aligns MP3 encoder start offsets so grids and cues sit right on the beat, repairs drive databases after an accidental unplug, and removes the "improper eject" popup;
 - **Pro DJ Link (Beta)** under `Settings → Services` browses a CDJ's Rekordbox USB stick over LAN / Wi-Fi, shares your deck's library to CDJs, hands `MASTER` back and forth, and displays CDJ waveforms on shadow decks or all-in-one `Line In` channels.
 
-### 4. Linked 4-Deck & Paired Player Views, Saved Layouts & 3 Languages
+### 4. Linked 4-Deck & Paired Player Views, Saved Layouts & 4 Languages
 - **`Linked View` (`Layout → ENGINEX VIEW PRESET → Linked View`)**: switch standalone players between `Stock`, `Paired Player` (two full-height waveforms showing your active layer on top and the partner player's active layer below), and `4 Decks` (four stacked waveforms with silent shadow decks following another EngineX deck or CDJ); 4-deck all-in-one consoles switch between `Stock` and `4 Decks`;
 - **5 Saved Views & UI Scale**: save up to five custom layouts (`View 1`–`View 5`) with per-view `Cue Countdown`, `UI Scale` (`110%`–`75%`), `Dual-Column Browser` with BPM, and `Swap Loop / Beat Jump`;
-- **3 Waveform Styles & 3 Languages**: switch live between **English, 简体中文, and 繁體中文**, and toggle between `Denon`, `RGB`, and Pioneer-style `3-Band` waveforms from the Control Center or `Profile → Display → Waveform Style` across all 16 models.
+- **3 Waveform Styles & 4 Languages**: switch live between **English, 简体中文, 繁體中文, and Español**, and toggle between `Denon`, `RGB`, and Pioneer-style `3-Band` waveforms from the Control Center or `Profile → Display → Waveform Style` across all 16 models.
 
 ### 5. Studio-Clean Audio, All-in-One FX & Gigabit Networking
 - **21 Real-Time Audio Guards**: click-free FX switching, zero-latency `Master Soft Clipper` (-0.1 dBFS ceiling), `Auto-Gain (0 dB Normalize)`, Flanger volume drop compensation, and smooth `Fader Echo` / `Echo Out` tails on mixer consoles;
@@ -243,7 +243,7 @@ Second-generation units (**SC LIVE 4, SC LIVE 2, PRIME 4+, PRIME GO+, Mixstream 
 
 </details>
 
-> **PRIME 4 G2 / Rane SYSTEM ONE (64-bit models)**: includes the 3-language UI, streaming services (including unlocked stock Apple Music, Spotify, Deezer, SoundCloud, Beatport, TIDAL, and NetEase), streaming recording, audio guards (`Master Soft Clipper`, `Auto-Gain`, `Echo Out`, `Color FX Style`, `PX Delay Time Mode`), Rekordbox USB direct-read, and `:8080` web console features; Stems remain as provided by official firmware.
+> **PRIME 4 G2 / Rane SYSTEM ONE (64-bit models)**: includes the 4-language UI, streaming services (including unlocked stock Apple Music, Spotify, Deezer, SoundCloud, Beatport, TIDAL, and NetEase), streaming recording, audio guards (`Master Soft Clipper`, `Auto-Gain`, `Echo Out`, `Color FX Style`, `PX Delay Time Mode`), Rekordbox USB direct-read, and `:8080` web console features; Stems remain as provided by official firmware.
 
 ### Option 2: One-Click On-Deck Update (Already Running EngineX OS)
 - Connect your deck to Wi-Fi or Ethernet and open **Settings → About / Update**;
