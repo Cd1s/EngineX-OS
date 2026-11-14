@@ -124,8 +124,28 @@ func exportCandidates(r *compat.Resolver, mount string) ([]exportCandidate, erro
 		return oneLib, nil
 	case pdb.mtime.Sub(oneLib[0].mtime) > exportNewerMargin:
 		return append([]exportCandidate{*pdb}, oneLib...), nil
+	case oneLib[0].mtime.Sub(pdb.mtime) > exportNewerMargin:
+		return append(oneLib, *pdb), nil
 	default:
-		// Prefer the richer OneLibrary unless export.pdb is genuinely newer.
+		// On ties, retain the recorded source to preserve deck edits and lists.
+		dir := filepath.Join(mount, "Engine Library", "Database2")
+		mark := readMark(dir, pendingName)
+		if mark == "" {
+			mark = readMark(dir, stampName)
+		}
+		mark = strings.TrimPrefix(mark, stampVersion+" ")
+		for i, c := range oneLib {
+			if strings.HasPrefix(mark, c.rel+" ") {
+				oneLib[0], oneLib[i] = oneLib[i], oneLib[0]
+				return append(oneLib, *pdb), nil
+			}
+		}
+		for _, name := range []string{stampName, pendingName, stateName} {
+			if _, err := os.Stat(filepath.Join(dir, name)); !errors.Is(err, os.ErrNotExist) {
+				return append([]exportCandidate{*pdb}, oneLib...), nil
+			}
+		}
+		// Only a fresh stick adopts the richer format on a timestamp tie.
 		return append(oneLib, *pdb), nil
 	}
 }

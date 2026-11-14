@@ -159,46 +159,104 @@ func TestExportSelectionMTimeAndFallback(t *testing.T) {
 	})
 }
 
-// BH-GF4-14: changing the preferred format must invalidate main's PDB-first
-// dual-export stamp, then retain the normal bypass on the next mount.
-func TestExportTieInvalidatesPDBFirstStamp(t *testing.T) {
+// Upgrading an r5 PDB import must retain its source, deck edits and native lists.
+func TestExportTieKeepsPDBImport(t *testing.T) {
+	for _, mark := range []string{"stamp", "pending", "state only"} {
+		t.Run(mark, func(t *testing.T) {
+			root := t.TempDir()
+			testfixture.Export(t, root)
+			testfixture.Write(t, root, "MUSIC/one.wav", testfixture.WAV(true))
+			testfixture.Write(t, root, "MUSIC/two.wav", testfixture.WAV(true))
+			ctx := context.Background()
+			if res, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false); err != nil || res.Added != 5 {
+				t.Fatalf("initial PDB import: %+v %v", res, err)
+			}
+			engine := dbOpen(t, root)
+			trackID := scalar[int64](t, engine, `SELECT id FROM Track WHERE pdbImportKey=1`)
+			position := 250.0
+			if err := enginedb.SetQuickCue(ctx, engine, trackID, 0, "Deck edit", "#12AB34", &position); err != nil {
+				t.Fatal(err)
+			}
+			wantCue := scalar[[]byte](t, engine, `SELECT quickCues FROM PerformanceData WHERE trackId=?`, trackID)
+			if _, err := engine.Exec(`INSERT INTO Playlist(title,parentListId,isPersisted,nextListId) VALUES('Native',0,1,0)`); err != nil {
+				t.Fatal(err)
+			}
+			listID := scalar[int64](t, engine, `SELECT id FROM Playlist WHERE title='Native'`)
+			if _, err := engine.Exec(`INSERT INTO PlaylistEntity(listId,trackId,databaseUuid,nextEntityId) SELECT ?,?,uuid,0 FROM Information`, listID, trackID); err != nil {
+				t.Fatal(err)
+			}
+			pdbStat, err := os.Stat(filepath.Join(root, "PIONEER/rekordbox/export.pdb"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			dbPath := filepath.Join(root, "PIONEER/rekordbox/exportLibrary.db")
+			copyEncryptedOneLibraryFixture(t, dbPath)
+			if err := os.Chtimes(dbPath, pdbStat.ModTime(), pdbStat.ModTime()); err != nil {
+				t.Fatal(err)
+			}
+			dbStat, err := os.Stat(dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dir := filepath.Join(root, "Engine Library/Database2")
+			stampPath := filepath.Join(dir, ".rb-bridge-stamp")
+			oldStamp := fmt.Sprintf("v2 PIONEER/rekordbox/export.pdb %d %d | PIONEER/rekordbox/exportLibrary.db %d %d\n",
+				pdbStat.Size(), pdbStat.ModTime().UnixNano(), dbStat.Size(), dbStat.ModTime().UnixNano())
+			if err := os.Remove(stampPath); err != nil {
+				t.Fatal(err)
+			}
+			if mark != "state only" {
+				if err := os.WriteFile(filepath.Join(dir, ".rb-bridge-"+mark), []byte(oldStamp), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			res, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false)
+			if err != nil || (mark == "stamp" && !res.Bypassed) {
+				t.Fatalf("upgrade mount: %+v %v", res, err)
+			}
+			if got := scalar[string](t, engine, `SELECT path FROM Track WHERE id=? AND pdbImportKey=1`, trackID); got == "" {
+				t.Fatal("PDB track identity lost")
+			}
+			if got := scalar[[]byte](t, engine, `SELECT quickCues FROM PerformanceData WHERE trackId=?`, trackID); !bytes.Equal(got, wantCue) {
+				t.Fatal("deck hot cue edit lost")
+			}
+			if n := scalar[int](t, engine, `SELECT count(*) FROM PlaylistEntity WHERE listId=? AND trackId=?`, listID, trackID); n != 1 {
+				t.Fatal("native playlist entry lost")
+			}
+			if got, err := os.ReadFile(stampPath); err != nil || string(got) != oldStamp {
+				t.Fatalf("PDB-first stamp changed: %q %v", got, err)
+			}
+			lib, err := bridge.ReadLibrary(ctx, root)
+			if err != nil || len(lib.Tracks) != 5 || lib.Tracks[0].ID != 1 {
+				t.Fatalf("source switched from PDB: %+v %v", lib, err)
+			}
+		})
+	}
+}
+
+func TestFreshExportTieKeepsSQLImport(t *testing.T) {
 	root := t.TempDir()
 	testfixture.Export(t, root)
 	testfixture.Write(t, root, "MUSIC/one.wav", testfixture.WAV(true))
 	testfixture.Write(t, root, "MUSIC/two.wav", testfixture.WAV(true))
-	ctx := context.Background()
-	if res, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false); err != nil || res.Added != 5 {
-		t.Fatalf("initial PDB import: %+v %v", res, err)
-	}
-	pdbPath := filepath.Join(root, "PIONEER/rekordbox/export.pdb")
-	pdbStat, err := os.Stat(pdbPath)
+	dbPath := filepath.Join(root, "PIONEER/rekordbox/exportLibrary.db")
+	copyEncryptedOneLibraryFixture(t, dbPath)
+	pdbStat, err := os.Stat(filepath.Join(root, "PIONEER/rekordbox/export.pdb"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	dbPath := filepath.Join(root, "PIONEER/rekordbox/exportLibrary.db")
-	copyEncryptedOneLibraryFixture(t, dbPath)
 	if err := os.Chtimes(dbPath, pdbStat.ModTime(), pdbStat.ModTime()); err != nil {
 		t.Fatal(err)
 	}
-	dbStat, err := os.Stat(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	stampPath := filepath.Join(root, "Engine Library/Database2/.rb-bridge-stamp")
-	oldStamp := fmt.Sprintf("v2 PIONEER/rekordbox/export.pdb %d %d | PIONEER/rekordbox/exportLibrary.db %d %d\n",
-		pdbStat.Size(), pdbStat.ModTime().UnixNano(), dbStat.Size(), dbStat.ModTime().UnixNano())
-	if err := os.WriteFile(stampPath, []byte(oldStamp), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if res, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false); err != nil || res.Bypassed || res.Deferred != 0 {
-		t.Fatalf("upgrade PDB-first stamp: %+v %v", res, err)
-	}
-	engine := dbOpen(t, root)
-	if n := scalar[int](t, engine, `SELECT count(*) FROM Track WHERE pdbImportKey IN (101,102,103)`); n != 3 {
-		t.Fatalf("OneLibrary tracks imported: got %d, want 3", n)
+	ctx := context.Background()
+	if res, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false); err != nil || res.Added != 3 {
+		t.Fatalf("fresh SQL import: %+v %v", res, err)
 	}
 	if res, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false); err != nil || !res.Bypassed {
-		t.Fatalf("unchanged OneLibrary stamp: %+v %v", res, err)
+		t.Fatalf("unchanged SQL stamp: %+v %v", res, err)
+	}
+	if lib, err := bridge.ReadLibrary(ctx, root); err != nil || len(lib.Tracks) != 3 || lib.Tracks[0].ID != 101 {
+		t.Fatalf("source switched from SQL: %+v %v", lib, err)
 	}
 }
 
