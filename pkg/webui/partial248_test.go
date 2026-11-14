@@ -86,6 +86,16 @@ func TestGatewayPartial248ShowsRowsAndOneUnavailableNotice(t *testing.T) {
 						if kind != "playlists" && kind != "favoritePlaylists" && (rows[2]["allowStreaming"] != false || rows[2]["streamReady"] != false) {
 							t.Fatal("notice can be loaded as audio")
 						}
+						if kind == "playlists" || kind == "favoritePlaylists" {
+							w := httptest.NewRecorder()
+							r := httptest.NewRequest("GET", "/v1/playlists/"+rows[2]["uuid"].(string), nil)
+							r.RemoteAddr = "127.0.0.1:1234"
+							s.tidal.ServeHTTP(w, r)
+							var detail struct{ Title string }
+							if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &detail) != nil || detail.Title != rows[2]["title"] {
+								t.Fatal("opening a partial-list notice replaced it with a login hint")
+							}
+						}
 						if kind == "tracks" || kind == "items" || kind == "likes" {
 							id := fmt.Sprintf("%.0f", rows[2]["id"])
 							for _, endpoint := range []string{"/v1/tracks/" + id + "/playbackinfopostpaywall", "/v1/stream/" + id + ".mp3"} {
@@ -156,12 +166,79 @@ func TestBrowsePartial248KeepsPrefixAndErrorUntilRetry(t *testing.T) {
 				t.Fatalf("partial list persisted as complete: %v", err)
 			}
 			clock.Add(int64(browseRetry + time.Second))
+			nextFailure := errors.New("retry temporarily offline")
+			partial, retryErr := c.get(context.Background(), key, func(context.Context) (browseData, error) {
+				calls.Add(1)
+				return browseData{}, nextFailure
+			})
+			if len(partial.Lists) != 2 || len(partial.Tracks) != 2 || !errors.Is(retryErr, nextFailure) {
+				t.Fatalf("failed retry discarded the existing prefix: %+v, %v", partial, retryErr)
+			}
+			var auth providers.StatusError
+			if errors.As(cause, &auth) && !errors.Is(retryErr, auth) {
+				t.Fatal("transport failure during retry hid the pending re-login action")
+			}
+			clock.Add(int64(browseRetry + time.Second))
 			data, err := c.get(context.Background(), key, func(context.Context) (browseData, error) {
 				calls.Add(1)
 				return browseFixture("complete"), nil
 			})
-			if err != nil || len(data.Lists) != 1 || data.Lists[0].Title != "complete" || calls.Load() != 2 {
+			if err != nil || len(data.Lists) != 1 || data.Lists[0].Title != "complete" || calls.Load() != 3 {
 				t.Fatalf("successful retry did not replace partial: %+v, %v, calls=%d", data, err, calls.Load())
+			}
+		})
+	}
+}
+
+func TestGatewayPartial248OmniKeepsOneNoticeAndAuthError(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "settings.conf"), []byte("scope=soundcloud\nomni_source=1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s := New(Config{UIDir: dir, StateDir: t.TempDir(), MediaRoot: t.TempDir(), Factory: func(string, bool, string) (providers.Provider, error) { return nil, errors.New("unconfigured") }}, nil)
+	defer s.Close()
+	for provider, cause := range map[string]error{"soundcloud": context.DeadlineExceeded, "spotify": providers.StatusError(403)} {
+		s.sessions[provider] = &Session{ID: provider, Provider: provider, Ready: true, p: &partial248Provider{provider: provider, cause: cause}, expires: time.Now().Add(time.Hour)}
+	}
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/v1/users/1/playlists", nil)
+	r.RemoteAddr = "127.0.0.1:1234"
+	s.tidal.ServeHTTP(w, r)
+	var page struct{ Items []map[string]any }
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil {
+		t.Fatalf("listing: %d %s", w.Code, w.Body.String())
+	}
+	if len(page.Items) != 5 || page.Items[2]["title"] != "[Spotify] one" || !strings.Contains(fmt.Sprint(page.Items[4]), "403") || !strings.Contains(fmt.Sprint(page.Items[4]["description"]), "Spotify") {
+		t.Fatalf("partial aggregate/auth notice lost: %+v", page.Items)
+	}
+}
+
+func TestGatewayPartial248AlbumAndPublicChartRoutes(t *testing.T) {
+	for _, path := range []string{"/v1/albums/7/tracks", "/v1/albums/7/items", "/v1/users/1/playlists"} {
+		t.Run(path, func(t *testing.T) {
+			scope, session, operation, id := "netease", "owner", "tracks", "album:7"
+			data := browseData{Tracks: []browseTrack{{Track: providers.Track{ID: "one", Title: "one", Provider: scope}}, {Track: providers.Track{ID: "two", Title: "two", Provider: scope}}}}
+			if strings.Contains(path, "/users/") {
+				scope, session, operation, id = "deezer", "public", "charts", ""
+				data = browseData{Lists: []providers.Playlist{{ID: "one", Title: "one"}, {ID: "two", Title: "two"}}}
+			}
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "settings.conf"), []byte("scope="+scope+"\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			s := New(Config{UIDir: dir, StateDir: t.TempDir(), Factory: func(string, bool, string) (providers.Provider, error) { return nil, errors.New("unconfigured") }}, nil)
+			defer s.Close()
+			if scope == "netease" {
+				s.sessions[session] = &Session{ID: session, Provider: scope, Ready: true, p: &providers.Netease{Cookie: "fixture", UserID: 1}, expires: time.Now().Add(time.Hour)}
+			}
+			_, _ = s.tidal.browse.get(context.Background(), browseKey(scope, session, operation, id), func(context.Context) (browseData, error) { return data, context.DeadlineExceeded })
+			w := httptest.NewRecorder()
+			r := httptest.NewRequest("GET", path, nil)
+			r.RemoteAddr = "127.0.0.1:1234"
+			s.tidal.ServeHTTP(w, r)
+			var page struct{ Items []map[string]any }
+			if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil || len(page.Items) != 3 || page.Items[0]["title"] != "one" || page.Items[1]["title"] != "two" || !strings.Contains(fmt.Sprint(page.Items[2]["title"]), "List incomplete") {
+				t.Fatalf("partial typed route: %d %s", w.Code, w.Body.String())
 			}
 		})
 	}

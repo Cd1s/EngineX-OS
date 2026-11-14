@@ -10,12 +10,14 @@ package webui
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/Cd1s/EngineX-OS/pkg/djay"
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
@@ -361,7 +363,7 @@ func localFile(ref trackRef) (string, error) {
 }
 
 // omniPlaylists adds the drives' playlists and the other services' to a listing.
-func (g *tidalGateway) omniPlaylists(ctx context.Context, scope string, add func(map[string]any)) {
+func (g *tidalGateway) omniPlaylists(ctx context.Context, scope string, add func(map[string]any)) (string, error) {
 	drives := g.s.drives()
 	for _, lists := range each(ctx, drives, drivePlaylists) {
 		for _, p := range lists {
@@ -396,7 +398,20 @@ func (g *tidalGateway) omniPlaylists(ctx context.Context, scope string, add func
 			others = append(others, v)
 		}
 	}
-	lists := each(ctx, others, func(ctx context.Context, v *Session) ([]providers.Playlist, error) { return g.browseLists(ctx, v) })
+	var failedMu sync.Mutex
+	var partialErr error
+	var partialProvider string
+	lists := each(ctx, others, func(ctx context.Context, v *Session) ([]providers.Playlist, error) {
+		lists, err := g.browseLists(ctx, v)
+		if err != nil && len(lists) > 0 {
+			failedMu.Lock()
+			if partialErr == nil || errors.Is(err, providers.StatusError(401)) || errors.Is(err, providers.StatusError(403)) {
+				partialProvider, partialErr = v.Provider, err
+			}
+			failedMu.Unlock()
+		}
+		return lists, err
+	})
 	for i, v := range others {
 		for _, p := range lists[i] {
 			p.Title = "[" + providerLabels[v.Provider] + "] " + p.Title
@@ -435,6 +450,7 @@ func (g *tidalGateway) omniPlaylists(ctx context.Context, scope string, add func
 		ref := playlistRef{"nas", localProvider, listObj, false}
 		add(g.refJSON(g.addPlaylist(ref), ref))
 	}
+	return partialProvider, partialErr
 }
 
 // omniTracks searches Algoriddim djay libraries across mounted drives for tracks matching query.

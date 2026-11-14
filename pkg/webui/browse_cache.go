@@ -192,6 +192,13 @@ func (c *browseCache) start(key string, load func(context.Context) (browseData, 
 			} else if revoked {
 				c.insert(key, &browseEntry{err: err, used: now, retry: now.Add(browseRetry)})
 			} else if e := c.entries[key]; e != nil {
+				if e.partial {
+					data = e.data // A failed retry still has the preceding prefix.
+					var pending providers.StatusError
+					if errors.As(e.err, &pending) && (pending == 401 || pending == 403) {
+						err = errors.Join(pending, err)
+					}
+				}
 				e.err, e.retry = err, now.Add(browseRetry)
 			} else {
 				c.insert(key, &browseEntry{err: err, used: now, retry: now.Add(browseRetry)})

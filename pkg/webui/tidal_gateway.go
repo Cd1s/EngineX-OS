@@ -41,22 +41,26 @@ const hintPlaylist = "00000000-0000-5000-8000-000000005000"
 const listNoticeProvider = "enginex-list-status"
 
 func (g *tidalGateway) incompleteMessage(provider string, err error) (string, string) {
-	title, hint := "List incomplete, retry", "Wait a few seconds, then go back and reopen to retry."
+	title, hint := "List incomplete", "Wait a few seconds, then go back and reopen to retry."
+	action, login := "go back and reopen to retry", "sign in again"
 	g.s.uiMu.Lock()
 	lang := g.s.loadUI().Language
 	g.s.uiMu.Unlock()
 	switch lang {
 	case "zh-Hans":
-		title, hint = "列表未完成，请重试", "请稍等几秒，然后返回并重新打开列表。"
+		title, hint = "列表未完成", "请稍等几秒，然后返回并重新打开列表。"
+		action, login = "返回后重新打开重试", "请重新登录"
 	case "zh-Hant":
-		title, hint = "清單未完成，請重試", "請稍等幾秒，然後返回並重新開啟清單。"
+		title, hint = "清單未完成", "請稍等幾秒，然後返回並重新開啟清單。"
+		action, login = "返回後重新開啟重試", "請重新登入"
 	}
 	var status providers.StatusError
 	if errors.As(err, &status) && (status == 401 || status == 403) {
 		title += fmt.Sprintf(" (%d)", status)
+		action = login
 		hint = sourceFailedTitle(provider, err) + ": http://" + lanHost() + ":8080"
 	}
-	return title, hint
+	return title + " — " + action, hint
 }
 
 // Stock renders this as an unavailable track row. It is metadata, never audio;
@@ -521,8 +525,13 @@ func (g *tidalGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		raw, endpoint, _ := strings.Cut(rest, "/")
 		if id, err := strconv.ParseInt(raw, 10, 64); err == nil && (endpoint == "" || endpoint == "playbackinfopostpaywall" || endpoint == "streamurl") {
 			g.mu.Lock()
-			_, localTrack = g.tracks[id]
+			ref, exists := g.tracks[id]
+			localTrack = exists
 			g.mu.Unlock()
+			if ref.track.Provider == listNoticeProvider {
+				fail(w, 404, errors.New("list notice is not audio"))
+				return
+			}
 			log.Printf("stream-sync: load track=%d scope=%s step=request local=%t", id, g.s.scope(), localTrack)
 		}
 	}
@@ -904,6 +913,9 @@ func playlistJSON(id, title, description string, count int) map[string]any {
 	return map[string]any{"uuid": id, "title": title, "numberOfTracks": count, "numberOfVideos": 0, "description": description, "duration": 0, "lastUpdated": now, "created": now, "type": "USER", "publicPlaylist": false, "url": "http://sc5000.lan:8080", "image": "", "squareImage": "", "popularity": 0}
 }
 func (g *tidalGateway) refJSON(id string, ref playlistRef) map[string]any {
+	if ref.provider == listNoticeProvider {
+		return playlistJSON(id, ref.list.Title, "", 0)
+	}
 	label := providerLabels[ref.provider]
 	return playlistJSON(id, ref.list.Title, label+" 歌单，经 EngineX OS 下载播放", ref.list.Count)
 }
@@ -940,6 +952,12 @@ func (g *tidalGateway) playlists(w http.ResponseWriter, r *http.Request) {
 	favorites := strings.HasSuffix(r.URL.Path, "/favorites/playlists")
 	items := []any{}
 	var partialErr error
+	partialProvider := scope
+	markPartial := func(provider string, err error) {
+		if err != nil && (partialErr == nil || errors.Is(err, providers.StatusError(401)) || errors.Is(err, providers.StatusError(403))) {
+			partialProvider, partialErr = provider, err
+		}
+	}
 	add := func(v map[string]any) {
 		if favorites {
 			// Favourites wrap the playlist in "item"; flat fields also satisfy flat parsers.
@@ -957,8 +975,8 @@ func (g *tidalGateway) playlists(w http.ResponseWriter, r *http.Request) {
 	for i, v := range sessions {
 		if err := failed[v]; err != nil && len(lists[i]) == 0 {
 			add(playlistJSON(hintPlaylist, sourceFailedTitle(v.Provider, err), err.Error(), 0))
-		} else if err != nil && partialErr == nil {
-			partialErr = err
+		} else {
+			markPartial(v.Provider, err)
 		}
 		for _, p := range lists[i] {
 			ref := playlistRef{v.ID, v.Provider, p, v.Guest}
@@ -980,19 +998,23 @@ func (g *tidalGateway) playlists(w http.ResponseWriter, r *http.Request) {
 			ref := playlistRef{"", "deezer", p, false}
 			add(g.refJSON(g.addPlaylist(ref), ref))
 		}
-		if chartErr != nil && len(defaults[0]) > 0 && partialErr == nil {
-			partialErr = chartErr
+		if len(defaults[0]) > 0 {
+			markPartial("deezer", chartErr)
 		}
 	}
 	if g.s.omniSource() && !favorites {
-		g.omniPlaylists(r.Context(), scope, add)
+		provider, err := g.omniPlaylists(r.Context(), scope, add)
+		markPartial(provider, err)
 	}
 	if scope != "deezer" && len(sessions) == 0 {
 		add(playlistJSON(hintPlaylist, hintTitle(scope), "手机打开 http://"+lanHost()+":8080 登录后，歌单会出现在这里", 0))
 	}
 	if partialErr != nil {
-		title, hint := g.incompleteMessage(scope, partialErr)
-		add(playlistJSON(hintPlaylist, title, hint, 0))
+		title, hint := g.incompleteMessage(partialProvider, partialErr)
+		ref := playlistRef{provider: listNoticeProvider, list: providers.Playlist{ID: scope, Title: title}}
+		v := g.refJSON(g.addPlaylist(ref), ref)
+		v["description"] = hint
+		add(v)
 	}
 	respond(w, page(r, 100, items))
 }
@@ -1281,6 +1303,10 @@ func (g *tidalGateway) playlistTracks(w http.ResponseWriter, r *http.Request) {
 	ref, ok := g.list(id)
 	if !ok {
 		fail(w, 404, errors.New("playlist not found"))
+		return
+	}
+	if ref.provider == listNoticeProvider {
+		respond(w, page(r, 500, []any{}))
 		return
 	}
 
