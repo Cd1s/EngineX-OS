@@ -2,13 +2,13 @@
 # Signs the final SHA256SUMS.txt of a release (#239). Run on the build host, last, after
 # build-release.sh AND build-installer.sh (the installer step rewrites SHA256SUMS.txt, so a
 # signature made earlier would not match the file that is published):
-#   ENGINEX_RELEASE_KEY=<release key file> sh tools/az01-packer/sign-release.sh <out-dir>
-# The key is a root-only (0600) PKCS#8 PEM Ed25519 key; the tool reads its path from
-# ENGINEX_RELEASE_KEY and never prints it. It writes <out-dir>/SHA256SUMS.txt.sig, which is
+#   sh tools/az01-packer/sign-release.sh <out-dir>
+# The key stays at /root/.config/enginex/release.key (root-only, 0600, PKCS#8 PEM Ed25519).
+# The hook pins that path for the signer. It writes <out-dir>/SHA256SUMS.txt.sig, which is
 # uploaded to the Release with the other files.
 set -eu
 OUT=$(cd "${1:?release output directory}" && pwd)
-: "${ENGINEX_RELEASE_KEY:?set ENGINEX_RELEASE_KEY to the release key file (public releases are signed, #239)}"
+export ENGINEX_RELEASE_KEY=/root/.config/enginex/release.key
 cd "$(dirname "$0")/../.."
 # The list must describe the files that are about to be uploaded, all of them, and nothing else.
 sh tools/az01-packer/check-release-manifest.sh "$OUT"

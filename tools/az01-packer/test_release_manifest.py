@@ -62,6 +62,30 @@ class ReleaseManifestCheck(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("29 entries", r.stdout)  # 28 artifacts + RELEASE-TAG.txt
 
+    def test_signing_hook_uses_only_the_release_key_path(self):
+        self.build()
+        bin_dir = self.dir / "bin"
+        bin_dir.mkdir()
+        fake_go = bin_dir / "go"
+        fake_go.write_text("""#!/bin/sh
+while [ "$1" != -o ]; do shift; done
+cat > "$2" <<'EOF'
+#!/bin/sh
+[ "$1" = --verify ] && exit 0
+printf '%s\\n' "$ENGINEX_RELEASE_KEY" > "$KEY_PATH_LOG"
+: > "$1.sig"
+EOF
+chmod 755 "$2"
+""")
+        fake_go.chmod(0o755)
+        log = self.dir / "key-path"
+        env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
+               "ENGINEX_RELEASE_KEY": str(self.dir / "other.key"), "KEY_PATH_LOG": str(log)}
+        r = subprocess.run(["sh", str(REPO / "tools/az01-packer/sign-release.sh"), str(self.dir)],
+                           capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(log.read_text().strip(), "/root/.config/enginex/release.key")
+
     def test_plain_tag_and_later_releases_without_bundles(self):
         self.build(tag="v5.3.0.6", version="5.3.0.6", skip=[n for n in release_files("5.3.0.6") if "Data-Bundle" in n])
         self.assertEqual(self.check(ENGINEX_EXPECT_BUNDLES=0).returncode, 0)
