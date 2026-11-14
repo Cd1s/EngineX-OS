@@ -76,10 +76,23 @@ echo 'PASS hang timeout, stock environment, quarantine and fallback persistence'
 fixture healthy
 sh "$GUARD" pre
 BOOT_TEST_MODE=ready launch
-has_file "$SC5000_UI_DIR/boot-ready"; watch
-sleep 3
+has_file "$SC5000_UI_DIR/boot-ready"
+# Once the UI is ready the watch forks nothing but its sleep: it ran cut, cat (three times)
+# and rm every second of a session, more CPU than any of our daemons.
+mkdir "$W/counted"
+for tool in cat cut rm; do
+    printf '#!/bin/sh\necho %s >> "$BOOT_TEST_FORK_LOG"\nexec %s "$@"\n' "$tool" "$(command -v "$tool")" > "$W/counted/$tool"
+done
+chmod +x "$W/counted/"*
+PATH=$W/counted:$PATH BOOT_TEST_FORK_LOG=$W/forks.log sh "$GUARD" watch > "$W/watch.log" 2>&1 & pids+=("$!")
+sleep 1
+: > "$W/forks.log"
+sleep 2
+[ ! -s "$W/forks.log" ] || fail "the ready watch still forks: $(sort "$W/forks.log" | uniq -c | tr '\n' ' ')"
+grep -q '^ui-ready$' "$SC5000_UI_DIR/boot-stage" || fail 'ready stage not recorded'
+[ ! -e "$SC5000_UI_DIR/boot-count" ] || fail 'ready boot kept its failure count'
 [ ! -e "$SC5000_UI_DIR/safe-mode" ] || fail 'normal UI-ready boot fell back'
-echo 'PASS normal boot never falls back'
+echo 'PASS normal boot never falls back; the ready watch forks nothing'
 
 fixture progress
 sh "$GUARD" pre; launch
