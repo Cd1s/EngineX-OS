@@ -215,7 +215,7 @@ func writable(mount string) bool {
 }
 
 func Convert(ctx context.Context, mount string, opts enginedb.Options) (enginedb.Result, error) {
-	return convert(ctx, mount, opts, nil, 0, time.Time{})
+	return convert(ctx, mount, &opts, nil, 0, time.Time{})
 }
 
 // preread is a library ConvertAtMount has already read (and, for OneLibrary,
@@ -227,8 +227,8 @@ type preread struct {
 }
 
 // convert is Convert with an optional preread library. budget > 0 sets the
-// file-reading deadline once the library has been read and reconciled.
-func convert(ctx context.Context, mount string, opts enginedb.Options, pre *preread, budget time.Duration, mountStart time.Time) (enginedb.Result, error) {
+// file-reading deadline after reconciliation and leaves it in opts for backfill.
+func convert(ctx context.Context, mount string, opts *enginedb.Options, pre *preread, budget time.Duration, mountStart time.Time) (enginedb.Result, error) {
 	r, e := compat.NewResolver(mount)
 	if e != nil {
 		return enginedb.Result{}, e
@@ -280,7 +280,7 @@ func convert(ctx context.Context, mount string, opts enginedb.Options, pre *prer
 		}
 		opts.Deadline = time.Now().Add(budget)
 	}
-	return enginedb.SyncResolved(ctx, r, l, opts)
+	return enginedb.SyncResolved(ctx, r, l, *opts)
 }
 
 // Reconcile fits a real export to what a library can hold, so that one odd entry
@@ -405,7 +405,7 @@ func convertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 	} else {
 		staged := strings.TrimSpace(stagedStamp(mount))
 		if staged == "" {
-			return convert(ctx, mount, opts, nil, budget, mountStart)
+			return convert(ctx, mount, &opts, nil, budget, mountStart)
 		}
 		stamp = stampVersion + " " + staged
 	}
@@ -485,7 +485,7 @@ func convertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 	// The same export as a mount that left tracks without their files: read
 	// only those, the others are known to be imported with theirs.
 	opts.Resume = resume || (!full && !opts.SmartMatch && readMark(dir, pendingName) == stamp)
-	result, err = convert(ctx, mount, opts, pre, budget, mountStart)
+	result, err = convert(ctx, mount, &opts, pre, budget, mountStart)
 	if err == nil && !result.Bypassed {
 		// Only this build has written since the progress was read, and it leaves no overview
 		// without band maxima: the backfill goes on where it was, also with no time left now.

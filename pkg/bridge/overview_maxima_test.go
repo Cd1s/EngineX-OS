@@ -242,9 +242,12 @@ func TestOwnImportKeepsThePlaceOfTheBackfill(t *testing.T) {
 	recordPlace(t, root, first)
 	testfixture.LargeExport(t, root, 3)
 	restore := bridge.SlowExportReadForTest(0, time.Nanosecond)
+	t.Cleanup(restore)
 	r := issue233Mount(t, root, enginedb.Options{})
 	restore()
-	if r.Bypassed || completed(t, db, "PerformanceData", map[int64][]byte{second: want[second]}) {
+	// #264 starts the budget after reconciliation; its computed deadline must
+	// also reach the backfill after the import has consumed that budget.
+	if r.Bypassed || r.Deferred == 0 || completed(t, db, "PerformanceData", map[int64][]byte{second: want[second]}) {
 		t.Fatalf("fixture: the mount had no import or had time for the backfill: %+v", r)
 	}
 	for r.Deferred > 0 { // the mounts that read the new track's files
