@@ -54,6 +54,7 @@ type options struct {
 	Repo, API                     string
 	Yes                           bool
 	Uninstall                     bool
+	RestoreStock                  bool
 	HTTP                          *http.Client
 	USB                           usb.Backend
 	AirDAddr, EAASAddr            string        // StageLinQ and EAAS UDP listen addresses
@@ -562,6 +563,9 @@ func fetchBundle(ctx context.Context, o *options, prefix, dir string) (string, e
 // downloaded, so an offline install failed and an online one could flash another build).
 func gen1Image(ctx context.Context, o *options, prefix string) (string, error) {
 	o.release = ""
+	if o.RestoreStock {
+		return stockImage(ctx, o, prefix)
+	}
 	if o.Bundle == "" {
 		return fetchImage(ctx, o, prefix)
 	}
@@ -878,13 +882,16 @@ func modeA(ctx context.Context, o *options, d deck) error {
 	// An EAAS beacon does not prove this is a deck. Even a matching HTTP response
 	// must not upgrade this hint into permission to send SSH credentials (#164).
 	if d.FromEAAS && d.Board == "" {
-		if o.Uninstall {
+		if o.Uninstall || o.RestoreStock {
 			return fmt.Errorf("%s: 收到未验证的 EAAS 广播，无法执行网络卸载 / received unverified EAAS beacon, cannot uninstall over SSH", label)
 		}
 		return modeAB(ctx, o, d)
 	}
 	cl, err := dialSSH(ctx, o, d.IP)
 	if err != nil {
+		if o.RestoreStock {
+			return stockRescue()
+		}
 		if o.Uninstall {
 			return fmt.Errorf("%s: 卸载需通过 SSH 连接碟机，无法连接 SSH / --uninstall requires SSH access to the deck, cannot connect: %w", label, err)
 		}
@@ -902,7 +909,10 @@ func modeA(ctx context.Context, o *options, d deck) error {
 	if !ok {
 		return fmt.Errorf("%s: 未知型号 / unknown board %q", label, strings.TrimSpace(out))
 	}
-	if o.Uninstall {
+	if o.RestoreStock && !gen2 {
+		return prepareStockRestore(ctx, o, cl, d, code, m)
+	}
+	if o.Uninstall || o.RestoreStock {
 		if !gen2 {
 			return fmt.Errorf("%s (%s): 一代机请使用 U 盘刷回官方固件 / 1st-generation deck; copy the stock firmware *.img to a USB stick to revert to stock", label, m.Name)
 		}
@@ -1123,7 +1133,9 @@ func modeAB(ctx context.Context, o *options, d deck) error {
 	if m, _, ok := lookupBoard(d.Board); ok {
 		model = " [" + m.Name + "]"
 	}
-	if d.FromEAAS && d.Board == "" {
+	if o.RestoreStock {
+		stockUSBGuide(o)
+	} else if d.FromEAAS && d.Board == "" {
 		o.say("收到来自 "+d.IP+" 的 EAAS 广播，尚不能确认设备型号。如果这是你的碟机，请在碟机上进入 Firmware Update Mode 并连接 USB；将通过 fastboot 确认型号。",
 			"Received an unverified EAAS beacon from "+d.IP+"; its model is unknown. If this is your deck, enter Firmware Update Mode on the deck and connect USB; fastboot must identify the model.")
 	} else {
@@ -1220,6 +1232,9 @@ func modeB(ctx context.Context, o *options, session *updateSession) error {
 	o.say("USB Fastboot 识别到 "+m.Name+" ("+board+")", "Fastboot found "+m.Name)
 	if !gen2 {
 		return modeBGen1(ctx, o, session, m)
+	}
+	if o.RestoreStock {
+		return errors.New("2nd-gen stock restore uses LAN/SSH --uninstall; nothing flashed")
 	}
 	b, err := obtainBundle(ctx, o, m.Prefix)
 	if err != nil {
@@ -1336,11 +1351,25 @@ func modeBGen1(ctx context.Context, o *options, session *updateSession, m model)
 	if err != nil {
 		return err
 	}
+	if o.RestoreStock {
+		firmware := stockFirmware[m.Prefix]
+		digest := sha256.New()
+		if _, err := io.Copy(digest, io.NewSectionReader(file, 0, st.Size())); err != nil {
+			return err
+		}
+		if hex.EncodeToString(digest.Sum(nil)) != firmware.SHA256 {
+			return errors.New("official image changed during validation; nothing flashed")
+		}
+	}
 	maxDown, err := session.fb.GetMaxDownloadSize(ctx)
 	if err != nil {
 		return err
 	}
-	if err := confirm(o, "将解锁并刷写 "+m.Name+" 的 rootfs，可能损坏设备或数据，请先备份。", "Unlock and flash "+m.Name+" rootfs; device or data could be damaged. Back up first."); err != nil {
+	zh, en := "将解锁并刷写 "+m.Name+" 的 rootfs，可能损坏设备或数据，请先备份。", "Unlock and flash "+m.Name+" rootfs; device or data could be damaged. Back up first."
+	if o.RestoreStock {
+		zh, en = "将把 "+m.Name+" 恢复为官方 Engine OS 5.3.0，移除 EngineX。确认已备份，并保持 USB 和电源连接。", "Restore official Engine OS 5.3.0 on "+m.Name+" and remove EngineX. Confirm your backup; keep USB and power connected."
+	}
+	if err := confirm(o, zh, en); err != nil {
 		return err
 	}
 	o.say("正在解锁碟机…", "Unlocking deck...")
@@ -1505,9 +1534,13 @@ func modeAZ(ctx context.Context, o *options, session *updateSession, board, line
 func run(ctx context.Context, o *options) error {
 	ignoreSIGPIPE()
 	o.defaults()
-	o.guide()
+	if o.RestoreStock {
+		o.say("恢复官方固件：请先让 EngineX 正常启动，并连接到电脑所在的网络。一代机会先清理共享 QML 缓存并关机，二代机使用网络卸载。", "Restore official firmware: first boot EngineX on the same LAN as this computer. First-gen decks clear their shared QML cache and power off; second-gen decks use LAN uninstall.")
+	} else {
+		o.guide()
+	}
 	var usbErr error
-	if !o.Uninstall {
+	if !o.Uninstall && !o.RestoreStock {
 		var found bool
 		found, usbErr = tryUSB(ctx, o, "")
 		if found {
@@ -1521,7 +1554,23 @@ func run(ctx context.Context, o *options) error {
 	var errs []error
 	n := 0
 	var eaas []deck
-	for _, d := range discover(ctx, o) {
+	devices := discover(ctx, o)
+	if o.RestoreStock {
+		var candidates []deck
+		for _, d := range devices {
+			if d.Known && !(d.FromEAAS && d.Board == "") {
+				candidates = append(candidates, d)
+			}
+		}
+		if len(candidates) == 0 {
+			return stockRescue()
+		}
+		if len(candidates) != 1 {
+			return errors.New("multiple decks found on the LAN; connect only the deck to restore")
+		}
+		return modeA(ctx, o, candidates[0])
+	}
+	for _, d := range devices {
 		if d.FromEAAS && d.Board == "" {
 			eaas = append(eaas, d)
 			continue
@@ -1566,6 +1615,7 @@ func registerFlags(fs *flag.FlagSet, o *options) {
 	fs.StringVar(&o.Password, "password", "", "mode A: SSH password for root")
 	fs.StringVar(&o.Repo, "repo", "Cd1s/EngineX-OS", "GitHub repository to download from")
 	fs.BoolVar(&o.Yes, "yes", false, "do not ask before flashing")
+	fs.BoolVar(&o.RestoreStock, "restore-stock", false, "restore official Engine OS 5.3.0 on a 1st-gen deck; uninstall over LAN on 2nd-gen decks")
 	fs.BoolVar(&o.Uninstall, "uninstall", false, "remove the EngineX data bundle from a 2nd-generation deck over SSH and return to stock")
 }
 

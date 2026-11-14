@@ -108,6 +108,9 @@ func tryUSB(ctx context.Context, o *options, board string) (found bool, err erro
 		}
 	}
 	if c.az {
+		if o.RestoreStock {
+			return true, errors.New("2nd-gen stock restore uses LAN/SSH --uninstall; nothing flashed")
+		}
 		s.az, err = azupdate.New(dev, eps)
 		if err != nil {
 			return false, err

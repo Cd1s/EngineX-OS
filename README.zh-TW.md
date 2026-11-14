@@ -233,6 +233,17 @@
    - **Denon DJ PRIME 4 G2**：[`PRIME4G2-5.3.0.4-EngineX-OS-Denon-PRIME-4-G2-JP24-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME4G2-5.3.0.4-EngineX-OS-Denon-PRIME-4-G2-JP24-Update.img)
    - **Rane SYSTEM ONE**：[`SYSTEMONE-5.3.0.4-EngineX-OS-Rane-SYSTEM-ONE-RMZ2-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SYSTEMONE-5.3.0.4-EngineX-OS-Rane-SYSTEM-ONE-RMZ2-Update.img)
 
+### 恢復官方韌體（5.3.0.5，尚未發佈）
+
+從 [Releases](https://github.com/Cd1s/EngineX-OS/releases/latest) 下載電腦對應的安裝器。連結格式為 `https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-<VERSION>-<platform>.zip`（`linux-amd64` 使用 `.tar.gz`；ZIP 平台為 `windows-amd64`、`macos-amd64`、`macos-arm64`）。
+
+1. 先備份資料，讓播放機正常啟動 EngineX 並連接電腦所在的區域網路。Windows 執行 `Restore-Official-Firmware.bat`，macOS 執行 `.command`，Linux 執行 `.sh`（USB 權限不足時用 `sudo`）。等效命令是 `enginex-installer --restore-stock`。
+2. 第一代先確認清理共用 QML 快取。工具停止 Engine，只刪除它的共用 QML 快取，執行同步並正常關機，保留音樂與曲庫，避免 r5 舊快取導致官方韌體停在 Logo。第二代則使用現有的區域網路 SSH 解除安裝流程，不刷寫韌體。
+3. 拔除含更新檔案的儲存裝置。SC5000／SC5000M／SC6000／SC6000M 按住 **MEDIA EJECT + SOURCE + LAYER** 再開機，看到 **Computer Update** 或晶片圖示後放開，連接 USB 線。其他第一代機型請依[官方更新說明](https://support.enginedj.com/support/solutions/articles/69000797882)操作。
+4. 確認恢復官方 5.3.0 後保持供電與 USB 連線，直到刷寫及重新啟動完成。第一代映像直接從 Engine DJ 官方網址下載，也可從 [Engine DJ Downloads](https://enginedj.com/downloads) 下載對應機型的官方 5.3.0 檔案，以 `--image "官方映像路徑.img"` 指定。工具檢查 AZ01 機型、完整性與固定的官方 SHA-256，拒絕改名的 EngineX 或修改過的映像；安裝包不包含官方韌體。
+
+如果已刷回官方韌體且停在 Logo、無法連接 SSH，請先用一般安裝器刷入 EngineX 並讓它正常啟動，再執行恢復工具。刷官方韌體會保留 `/data`，重複刷寫本身不會清除舊 QML 快取。
+
 <details>
 <summary>二代機終端機手動安裝與解除安裝恢復原廠</summary>
 
