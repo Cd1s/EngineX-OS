@@ -1,4 +1,5 @@
 import importlib.util
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -16,7 +17,72 @@ def load_build_packs():
     return mod
 
 
+def js_body(text, marker):
+    start = text.index("{", text.index(marker)) + 1
+    depth, end = 1, start
+    while depth:
+        depth += (text[end] == "{") - (text[end] == "}")
+        end += 1
+    return text[start:end - 1]
+
+
 class UiModBH2Test(unittest.TestCase):
+    def test_spotify_root_categories_compact_both_stock_spellings_279(self):
+        bp = load_build_packs()
+        for root in ("Skins/Embedded/", "Skins/EmbeddedCommon/"):
+            bp.ROOT = root
+            edits = bp.edits(False)
+            key = root + "Views/BrowseView/Components/BreadcrumbView/BreadcrumbStackView.qml"
+            patched = "\n".join(new for old, new in edits[key])
+            count = js_body(patched, "readonly property int scVisibleRows:")
+            hidden = re.search(r"readonly property bool scHidden: (.*)", patched).group(1)
+            script = """
+const assert=require('node:assert/strict');
+const root={scScope:'spotify'}, breadcrumbView={isStreamingContent:true};
+const categories=['My Playlists','My Collection','Featured','Genres','Moods',''];
+const contentView={scModelRev:0,StackView:{index:0},rowCount:6,
+ model:{roles(){return {display:0}},index(n){return n},data(n){return categories[n]}}};
+let modelData;
+function rows() {COUNT}
+function hidden() {return HIDDEN;}
+for (const spelling of ['TIDAL Rising','Tidal Rising']) {
+    categories[5]=spelling;
+    for (const [scope,expected] of [['spotify',1],['netease',2],['tidal',6]]) {
+        root.scScope=scope;
+        assert.equal(rows(),expected,scope+' / '+spelling);
+        for (let n=0;n<categories.length;n++) {
+            modelData={display:categories[n]};
+            assert.equal(hidden(),n>=expected,scope+' / '+categories[n]);
+        }
+        contentView.StackView.index=1;
+        assert.equal(rows(),6); assert.equal(hidden(),false);
+        contentView.StackView.index=0;
+    }
+}
+breadcrumbView.isStreamingContent=false;
+assert.equal(rows(),6); assert.equal(hidden(),false);
+""".replace("COUNT", count).replace("HIDDEN", hidden)
+            result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_playlist_entry_uses_stock_push_signal_279(self):
+        bp = load_build_packs()
+        timer = bp.SERVICES_MAIN[bp.SERVICES_MAIN.index("id: scEnterTimer"):]
+        tick = js_body(timer, "onTriggered:").replace("@TIDAL_PAIRING@", "")
+        script = """
+const assert=require('node:assert/strict');
+let pushed=0, stopped=0, scSelectPending=false, scEnterTries=8;
+const uiContainer={};
+let row={push(){pushed++;},clicked(mouse){throw Error('native click requires mouse.x/y');}};
+function scFindMyPlaylists(){return row;}
+function stop(){stopped++;}
+function tick(){TICK}
+tick(); assert.equal(pushed,1); assert.equal(stopped,1);
+row=null; tick(); assert.equal(pushed,1); assert.equal(stopped,1); assert.equal(scEnterTries,7);
+""".replace("TICK", tick)
+        result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_connected_accounts_dialog_suppressed_for_custom_services_bh2_a6_2(self):
         bp = load_build_packs()
         for root in ("Skins/Embedded/", "Skins/EmbeddedCommon/"):
