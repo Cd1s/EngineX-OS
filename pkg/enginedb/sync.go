@@ -731,7 +731,15 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 					Analysis *rekordbox.Analysis
 				}{original, a})
 				audioJSON, _ := json.Marshal(audio)
-				if _, e = q.ExecContext(ctx, `INSERT INTO BridgeAnalysis(trackId,sourceJSON,audioJSON) VALUES(?,?,?) ON CONFLICT(trackId) DO UPDATE SET sourceJSON=excluded.sourceJSON,audioJSON=excluded.audioJSON`, id, sourceJSON, audioJSON); e != nil {
+				packedSource, e := packAnalysis(sourceJSON)
+				if e != nil {
+					return result, e
+				}
+				packedAudio, e := packAnalysis(audioJSON)
+				if e != nil {
+					return result, e
+				}
+				if _, e = q.ExecContext(ctx, `INSERT INTO BridgeAnalysis(trackId,sourceJSON,audioJSON) VALUES(?,?,?) ON CONFLICT(trackId) DO UPDATE SET sourceJSON=excluded.sourceJSON,audioJSON=excluded.audioJSON`, id, packedSource, packedAudio); e != nil {
 					return result, e
 				}
 			}
