@@ -26,11 +26,7 @@ func TestMain(m *testing.M) {
 	sshPersistKeyDir = at("data", "enginex-absent")
 	tlsPersistDir = at("data", "enginex-absent")
 	deviceCompatiblePath = at("sys", "compatible-absent")
-	updateFileURLPath = at("tmp", "update-file-url")
-	engineQuitReasonPath = at("tmp", "engine-quit-reason")
 	fourDeckRolePath = at("run", "enginex-assignments", "role")
-	engineScriptPath = at("usr", "Engine", "Scripts", "engine")
-	planckRemoteScreenPath = at("usr", "bin", "planck-remote-screen")
 	// The update keeps updateReserve free for Engine; the tests run on whatever disk the host has.
 	freeBytes = func(string) (int64, bool) { return 1 << 40, true }
 	code := m.Run()

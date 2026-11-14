@@ -76,14 +76,14 @@ names() { # <rootfs>
 # The shipped suite embeds the release public key (#239). The gate cannot sign with the real
 # private key, so the sandbox's copy of the binary gets the throwaway key in its place: the key is
 # found by its base64 body (exactly once per embedded key, else this fails: the image has no key,
-# or not the one the checkout lists), every other byte stays as shipped. sc5000-suite-exec unpacks
+# or not the one the checkout lists), every other byte stays as shipped. enginex-suite-exec unpacks
 # the same archive on first start and keeps the result while the archive's hash is unchanged.
 patch_release_key() { # [lenient]: every listed key (new image) / at least one of them (previous release)
-    local bin=$W/data/sc5000-custom/bin archive=$R/usr/share/sc5000-custom/sc5000-suite.xz
+    local bin=$(data_dir)/bin archive=$R$N_SHARE/$N_UNIT-suite.xz
     [ -s "$archive" ] || { echo "no $archive"; return 1; }
     mkdir -p "$bin"
-    xz -dc "$archive" > "$bin/sc5000-suite.swap" || return 1
-    python3 -I - "$bin/sc5000-suite.swap" "$W/signing/embedded.txt" "$SIGN_BODY" "${1:-strict}" <<'PY' || return 1
+    xz -dc "$archive" > "$bin/$N_UNIT-suite.swap" || return 1
+    python3 -I - "$bin/$N_UNIT-suite.swap" "$W/signing/embedded.txt" "$SIGN_BODY" "${1:-strict}" <<'PY' || return 1
 import sys
 path, listing, new, mode = sys.argv[1:5]
 data = open(path, 'rb').read()
@@ -106,9 +106,9 @@ if not swapped:
     sys.exit('none of the listed release keys is in the binary')
 open(path, 'wb').write(data)
 PY
-    chmod 755 "$bin/sc5000-suite.swap"
-    mv -f "$bin/sc5000-suite.swap" "$bin/sc5000-suite"
-    sha256sum < "$archive" | cut -d' ' -f1 > "$bin/sc5000-suite.id"
+    chmod 755 "$bin/$N_UNIT-suite.swap"
+    mv -f "$bin/$N_UNIT-suite.swap" "$bin/$N_UNIT-suite"
+    sha256sum < "$archive" | cut -d' ' -f1 > "$bin/$N_UNIT-suite.id"
 }
 
 # Does the previous release verify update signatures (5.3.0.5 and later)? Then its own updater is
@@ -117,19 +117,19 @@ PY
 old_verifies_signatures() {
     # grep -c reads all of the input: with -q it would stop at the first match, xz would get SIGPIPE and
     # pipefail would report the pipeline as failed.
-    xz -dc "$R/usr/share/sc5000-custom/sc5000-suite.xz" 2>/dev/null | grep -ac 'SHA256SUMS.txt.sig' > /dev/null
+    xz -dc "$R$N_SHARE/$N_UNIT-suite.xz" 2>/dev/null | grep -ac 'SHA256SUMS.txt.sig' > /dev/null
 }
 
 # A deck refuses an update that does not verify: say why, install nothing (#239).
 refusal() { # <suffix of the mock repo / release> <message the deck shows>
-    local sfx=$1 msg=$2 ui=$W/data/sc5000-custom/ui/settings.conf
+    local sfx=$1 msg=$2 ui=$(data_dir)/ui/settings.conf
     echo "github_repo=Cd1s/EngineX-OS-$sfx" >> "$ui"
     : > "$R/tmp/gate-shim.log"
-    curl -sf http://127.0.0.1:8080/v1/sc5000/update > "$W/boot2-$sfx-offer.json" || :
+    curl -sf http://127.0.0.1:8080$N_API/update > "$W/boot2-$sfx-offer.json" || :
     check "boot2: the $sfx release is offered, so the refusal is the signature's" json "$W/boot2-$sfx-offer.json" \
         "j.get('updateAvailable') is True and j.get('latestVersion') == 'v$NEXTV-$sfx'"
-    curl -sf "http://127.0.0.1:8080/v1/sc5000/update?apply=1" > /dev/null || :
-    settled() { curl -sf http://127.0.0.1:8080/v1/sc5000/update > "$W/boot2-$sfx-result.json" 2>/dev/null && json "$W/boot2-$sfx-result.json" "not j.get('updating') and j.get('error')"; }
+    curl -sf "http://127.0.0.1:8080$N_API/update?apply=1" > /dev/null || :
+    settled() { curl -sf http://127.0.0.1:8080$N_API/update > "$W/boot2-$sfx-result.json" 2>/dev/null && json "$W/boot2-$sfx-result.json" "not j.get('updating') and j.get('error')"; }
     wait_for 900 settled || :
     check "boot2: the $sfx release is refused: $msg" json "$W/boot2-$sfx-result.json" "j.get('error') == '$msg' and not j.get('updating')"
     check "boot2: the $sfx release: az01-update never ran, no image kept" \
@@ -487,7 +487,7 @@ SH
         refusal tampered 'update refused: the file does not match the signed checksum'
         refusal r3 'update refused: the signature is for a different release'
         rm -f "$W/mock/corrupt-Update.img"
-        curl -sf http://127.0.0.1:8080/v1/sc5000/update > "$W/$name-update.json" || :
+        curl -sf http://127.0.0.1:8080$N_API/update > "$W/$name-update.json" || :
         check "$name: after the refusals the signed $tag is offered again" json "$W/$name-update.json" \
             "j.get('latestVersion') == '$tag' and j.get('updateAvailable') is True"
     fi

@@ -17,7 +17,7 @@ import (
 
 type bundleInfo struct {
 	Path, Top, Version string
-	Tag string
+	Tag                string
 	TarGz              []byte
 	bundle             *azimg.Bundle
 }
@@ -125,9 +125,12 @@ func imageChanges(ctx context.Context, o *options, b *bundleInfo, fs *ext4.Image
 	add := func(e azimg.Entry, path string, mode uint32) {
 		cs.Files = append(cs.Files, ext4.Entry{Path: path, Mode: mode, Size: e.Size, SHA256: e.SHA256, Open: e.Open})
 	}
-	missing := map[string]bool{"bin/sc5000-suite": true, "lib/libengine-ui-hook.so": true, "boot-activate.sh": true, "99-sc5000-custom.conf": true}
+	missing := map[string]bool{"bin/enginex-suite": true, "lib/libengine-ui-hook.so": true, "boot-activate.sh": true, "99-sc5000-custom.conf": true}
 	err = b.bundle.Walk(ctx, func(e azimg.Entry) error {
 		delete(missing, e.Path)
+		if e.Path == "bin/sc5000-suite" {
+			delete(missing, "bin/enginex-suite") // A bundle installed before the rename.
+		}
 		mode := uint32(0o644)
 		switch {
 		case strings.HasPrefix(e.Path, "bin/"), strings.HasPrefix(e.Path, "lib/"):

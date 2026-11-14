@@ -812,6 +812,10 @@ normal|media/VOL/Firmware/off/V-Update.img|media/VOL/Firmware/off/V-Update.img
 normal|media/VOL/Firmware/../../outside/V-Update.img|media/VOL/Firmware/../../outside/V-Update.img
 normal|media/VOL/Firmware/../X-Update.img|views/view-a/backing/X-Update.img
 CASES
+# An in-place upgrade can leave a view mounted under the previous release's /run name.
+printf %s "$hfs/media/VOL/X-Update.img" > "$ENGINEX_UPDATE_FILE_PATH"
+ENGINEX_HFS_VIEWS=$hfs/absent ENGINEX_LEGACY_HFS_VIEWS=$hfs/views sh "$GUARD" update-file
+[[ $(cat "$ENGINEX_UPDATE_FILE_PATH") == "$hfs/views/view-a/backing/X-Update.img" ]] || fail 'guard lost an HFS view mounted before the rename'
 rm -f "$hfs/ui/safe-mode" "$ENGINEX_UPDATE_FILE_PATH"
 sh "$GUARD" update-file < /dev/null || fail 'guard update-file without a chosen file failed'
 [ ! -e "$ENGINEX_UPDATE_FILE_PATH" ] || fail 'guard update-file without a chosen file wrote one'

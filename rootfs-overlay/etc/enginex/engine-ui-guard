@@ -67,7 +67,8 @@ begin_attempt() {
 # `..`) could lead off the stick. Such a path is left as Engine wrote it.
 stick_path() {
     file=$(cat "$1" 2>/dev/null) || return 0
-    for view in "${SC5000_HFS_VIEWS:-/run/sc5000-hfs-views}"/view-*/view; do
+    for view in "${ENGINEX_HFS_VIEWS:-/run/enginex-hfs-views}"/view-*/view \
+        "${ENGINEX_LEGACY_HFS_VIEWS:-/run/sc5000-hfs-views}"/view-*/view; do
         dir=$file
         while [ "$dir" != "${dir%/*}" ]; do
             dir=${dir%/*}
@@ -143,9 +144,9 @@ launch)
     exit "$result"
     ;;
 update-file)
-    # The stock engine script's UpdateFromFile step calls this before it reads the path (sc5000-debloat,
+    # The stock engine script's UpdateFromFile step calls this before it reads the path (enginex-debloat,
     # boot-activate), after every Engine exit: also safe-mode's stock Engine, which `launch` execs.
-    stick_path "${SC5000_UPDATE_FILE_PATH:-/tmp/update-file-path}"
+    stick_path "${ENGINEX_UPDATE_FILE_PATH:-/tmp/update-file-path}"
     ;;
 ready)
     [ ! -e "$UI/safe-mode" ] && [ -n "${2:-}" ] && [ "$(cat "$UI/boot-token" 2>/dev/null)" = "$2" ] || exit 1
@@ -168,7 +169,7 @@ watch)
     while :; do
         # Builtins only once the UI is ready: this turn runs every second of a session, and its
         # five forks (cut, cat, rm) cost more CPU than any of our daemons.
-        IFS= read -r now < "${SC5000_BOOT_UPTIME:-/proc/uptime}"; now=${now%%.*}
+        IFS= read -r now < "${ENGINEX_BOOT_UPTIME:-/proc/uptime}"; now=${now%%.*}
         if [ -e "$UI/safe-mode" ]; then
             if [ "$now" -ge "$exported" ]; then
                 exported=$((now + 5))

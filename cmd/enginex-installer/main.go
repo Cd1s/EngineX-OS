@@ -32,7 +32,7 @@ import (
 	"time"
 	"unicode/utf16"
 
-	xrelease "github.com/Cd1s/EngineX-OS/internal/release"
+	"github.com/Cd1s/EngineX-OS/internal/releasesig"
 	"golang.org/x/crypto/ssh"
 
 	"github.com/Cd1s/EngineX-OS/internal/installer/azimg"
@@ -1054,9 +1054,11 @@ func modeA(ctx context.Context, o *options, d deck) error {
 	// #234: decided before anything is written. An older release than the installed one is
 	// installed, but this release's leave step and a reboot follow, never the older
 	// boot-activate.sh in place over this release's units.
-	installed, _ := sshRead(ctx, cl, installedReleaseCmd)
-	iv, it, _ := strings.Cut(installed, "\n")
-	older := xrelease.Older(iv, it, b.Version, b.Tag)
+	installed, err := readInstalledRelease(ctx, cl, label)
+	if err != nil {
+		return err
+	}
+	older := releasesig.NewerVersion(installed, releasesig.InstalledRelease(b.Version, []string{b.Tag}))
 	sayGen2Steps(o, filepath.Base(b.Path))
 	install := installCmd(b.Top)
 	if older {

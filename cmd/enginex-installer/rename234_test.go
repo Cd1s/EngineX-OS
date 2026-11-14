@@ -24,10 +24,8 @@ func TestRename234ModeAOlderBundleLeavesInsteadOfActivating(t *testing.T) {
 		{"5.3.0.6", "", false},
 	} {
 		b := buildBundle(t, "PRIME4PLUS", c.version, c.tag)
-		downloads := 0
-		rel := releaseServer(t, b, "", &downloads)
 		o := testOpts(t)
-		useRelease(o, rel)
+		o.Bundle = b.Path
 		deck := startSSHDeck(t, o.SSHPort, "inmusic,jc11s\x00nxp,imx8mm\x00")
 		custom := filepath.Join(deck.Data, "enginex")
 		os.MkdirAll(filepath.Join(custom, "bundle"), 0o700)

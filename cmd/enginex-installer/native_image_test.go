@@ -13,7 +13,7 @@ import (
 	"github.com/Cd1s/EngineX-OS/internal/installer/ext4"
 )
 
-func dropBundleFile(t *testing.T, src, member string) string {
+func rewriteBundleFile(t *testing.T, src, member, replacement string) string {
 	t.Helper()
 	f, err := os.Open(src)
 	if err != nil {
@@ -42,12 +42,19 @@ func dropBundleFile(t *testing.T, src, member string) string {
 			t.Fatal(err)
 		}
 		if strings.HasSuffix(h.Name, "/"+member) {
-			continue
+			if replacement == "" {
+				continue
+			}
+			h.Name = strings.TrimSuffix(h.Name, member) + replacement
 		}
 		if strings.HasSuffix(h.Name, "/SHA256SUMS") {
 			var keep []string
 			for _, line := range strings.Split(string(data), "\n") {
-				if !strings.HasSuffix(line, "  "+member) {
+				if strings.HasSuffix(line, "  "+member) {
+					if replacement != "" {
+						keep = append(keep, strings.TrimSuffix(line, member)+replacement)
+					}
+				} else {
 					keep = append(keep, line)
 				}
 			}
@@ -76,11 +83,11 @@ func dropBundleFile(t *testing.T, src, member string) string {
 
 func TestNativeImageRequiresCompleteBundle(t *testing.T) {
 	bundle := buildBundle(t, "SCLIVE4", "5.3.0.5")
-	for _, member := range []string{"bin/sc5000-suite", "lib/libengine-ui-hook.so", "boot-activate.sh", "99-sc5000-custom.conf"} {
+	for _, member := range []string{"bin/enginex-suite", "lib/libengine-ui-hook.so", "boot-activate.sh", "99-sc5000-custom.conf"} {
 		t.Run(member, func(t *testing.T) {
 			fb := newFastboot(t, "jp21", true)
 			o := testOpts(t)
-			o.USB, o.Bundle = fb.Bin, dropBundleFile(t, bundle.Path, member)
+			o.USB, o.Bundle = fb.Bin, rewriteBundleFile(t, bundle.Path, member, "")
 			err := run(ctxT(t), o)
 			if err == nil || !strings.Contains(err.Error(), member) || !strings.HasSuffix(err.Error(), "nothing flashed") {
 				t.Fatalf("missing %s: %v", member, err)
@@ -177,5 +184,37 @@ func TestNativeImageWithoutHostTools(t *testing.T) {
 	}
 	if sha(t, img) != before {
 		t.Fatal("original backup changed")
+	}
+}
+
+// Native image installation must accept a renamed bundle and an explicitly selected older bundle.
+func TestRename234NativeImageAcceptsBothSuiteNames(t *testing.T) {
+	bundle := buildBundle(t, "SCLIVE4", "5.3.0.5")
+	for _, suite := range []string{"bin/enginex-suite", "bin/sc5000-suite"} {
+		t.Run(suite, func(t *testing.T) {
+			path := bundle.Path
+			if suite != "bin/enginex-suite" {
+				path = rewriteBundleFile(t, path, "bin/enginex-suite", suite)
+			}
+			b, err := readBundle(ctxT(t), path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fs, err := ext4.Create(ctxT(t), filepath.Join(t.TempDir(), "data.img"), ext4.CreateOptions{Size: 64 << 20})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer fs.Close()
+			changes, err := imageChanges(ctxT(t), testOpts(t), b, fs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := fs.Apply(ctxT(t), changes); err != nil {
+				t.Fatal(err)
+			}
+			if typ, err := fs.Lstat("enginex/bundle/" + suite); err != nil || typ != ext4.Regular {
+				t.Fatalf("suite was not installed: %v %v", typ, err)
+			}
+		})
 	}
 }

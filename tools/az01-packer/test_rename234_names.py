@@ -30,7 +30,7 @@ ANY = ['*']
 BUNDLE = ['tools/az01-packer/build-data-bundle.py']
 UPDATERS = BUNDLE + ['pkg/webui/update.go', 'cmd/enginex-installer/main.go',
                      'tools/az01-packer/host-install-userdata.py', 'tools/ui-mod/engine_ui_hook.c']
-SUITE = ['cmd/enginex-suite/main.go', 'rootfs-overlay/usr/local/bin/enginex-suite-exec']
+SUITE = ['cmd/enginex-suite/main.go', 'cmd/enginex-installer/native_image.go', 'rootfs-overlay/usr/local/bin/enginex-suite-exec']
 PACKER = ['tools/az01-packer/az01_packer.py', 'tools/az01-packer/rootfs_audit.py']
 STEMS = ['internal/stems/*', 'internal/stemsd/*', 'internal/stemsproc/*', 'tools/stems/*',
          'pkg/webui/relay.go', 'pkg/webui/ui_settings.go']
@@ -63,6 +63,8 @@ ALLOW = [
     (['pkg/webui/tailscale.go', 'pkg/mods/*', 'tools/mods/*', 'tools/tailscale/*', 'docs/mods/src/*'],
      r'\bsc5000-tailscaled\b|/run/sc5000-tailscaled\.sock',
      'the tailscale unit and socket name of releases before 5.3.0.5 and of installed Mods'),
+    (['rootfs-overlay/etc/enginex/engine-ui-guard'], r'/run/sc5000-hfs-views',
+     'an HFS view mounted by the old release still maps updates to the original stick'),
     (['tools/edisksd-hook/*'], r'sc5000-hfs-views?\b|/run/sc5000-hfs-views',
      'views the hook of an older release mounted stay hidden after an in-place update'),
     (['pkg/webui/shadow_debug.go'], r'/tmp/sc5000-debug', 'debug flag file of older releases'),
