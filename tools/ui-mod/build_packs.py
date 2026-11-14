@@ -481,6 +481,7 @@ SERVICES_MAIN = """
 	property bool scAutoAnalyze: false
 	readonly property bool scAutoAnalyzeAvailable: false
 	property bool scOmniSource: false // #62, served by the streaming gateway
+	property bool scRemoteLoad: false // LAN API loads a track onto an idle deck (off by default)
 	property bool scProlinkShare: false // #59, read by rb-bridge
 	property bool scProlinkExport: false // #63, experimental export to CDJs
 	// #49: the decks this player owns in the 4-deck layout ("13", "24", "12", "1", "2";
@@ -3110,6 +3111,7 @@ SERVICES_MAIN = """
 		scAutoGain = !!v.autoGain
 		scAutoAnalyze = !!v.autoAnalyze
 		scOmniSource = !!v.omniSource
+		scRemoteLoad = !!v.remoteLoad
 		scProlinkShare = !!v.prolinkShare
 		scProlinkExport = !!v.prolinkExport
 		scPlayer = !!v.player
@@ -3409,6 +3411,156 @@ SERVICES_MAIN = """
 	Timer {
 		interval: 3000; running: true; repeat: true; triggeredOnStart: true
 		onTriggered: scCall("")
+	}
+	// Remote Load (LAN API, off by default): while the switch is on, tell webui
+	// what this unit's decks hold and load the file a LAN client asked for onto
+	// an idle deck this unit owns. Playback is never touched: a playing deck is
+	// refused, checked again right before the load. Engine loads asynchronously;
+	// play pressed in that window is refused only by Engine's Lock Playing Deck,
+	// so a load is refused while that preference reads Off.
+	property var scRemoteActive: null // {id, deck, file, path, until, before, fresh}: waiting for Engine to show the track
+	property var scRemoteUpdates: [] // request results for the next poll
+	property var scRemoteSent: [] // results in the poll in flight, queued again if it fails
+	property var scRemoteXhr: null
+	property real scRemoteAt: 0
+	property var scRemotePositions: ({}) // deck -> position at the last look (scRemoteBusy)
+	property var scRemoteMovedAt: ({}) // deck -> when its position last moved
+	Timer {
+		interval: 500; repeat: true; running: root.scRemoteLoad
+		onTriggered: root.scRemotePoll()
+		// Only when the switch turns off: no work at all while it stays off.
+		onRunningChanged: if (!running) root.scRemoteReset()
+	}
+	function scRemoteReset() {
+		if (scRemoteActive || scRemoteUpdates.length || scRemoteSent.length) { scRemoteActive = null; scRemoteUpdates = []; scRemoteSent = [] }
+	}
+	// Decks this unit may load: not held by a peer; on a player its own decks, on a
+	// 2-deck console decks 1 and 2 only.
+	function scRemoteLocal(d) { return !root.scDeckLocked(d) && (root.scIsPlayerBoard ? root.scDeckList().indexOf(d) >= 0 : root.scCanFourDeck || d <= 2) }
+	// Busy: Engine plays the deck, or it is audible without PlayState. On a real
+	// SC LIVE 4 PlayState stayed false with CUE held (preview), while scratching
+	// and while searching, and a load replaced the previewed track. Those move the
+	// position, so a position that moved in the last 1.5 s counts, and so does a
+	// touched jog wheel or platter, which is about to move it.
+	function scRemoteBusy(d) {
+		const p = root.scShadowProperties(d)
+		const now = Date.now()
+		const pos = p.position.value
+		// A first position (switch-on, a deck that just loaded) has no history and
+		// counts as moved, so a CUE held right after a load is not missed.
+		if (pos !== undefined && pos !== scRemotePositions[d]) scRemoteMovedAt[d] = now
+		scRemotePositions[d] = pos
+		return !!p.play.state || !!p.touch.state || !!p.platterTouch.state || now - (scRemoteMovedAt[d] || 0) < 1500
+	}
+	function scRemoteDecks() {
+		const decks = []
+		for (let d = 1; d <= 4; d++) {
+			const p = root.scShadowProperties(d)
+			decks.push({deck: d, local: root.scRemoteLocal(d), loaded: !!p.loaded.state, playing: root.scRemoteBusy(d),
+				title: String(p.title.string || ""), artist: String(p.artist.string || "")})
+		}
+		return decks
+	}
+	// Engine's name for a track (file:// or net://<id>/<volume>/<path>, maybe
+	// percent-encoded), decoded and in NFC like the requested path.
+	function scRemoteName(name) {
+		let s = String(name || "")
+		try { s = decodeURIComponent(s) } catch (err) {}
+		if (s.normalize) s = s.normalize("NFC")
+		return s
+	}
+	// Engine's own "Lock Playing Deck" preference, read as stock QML reads it:
+	// true for "On", false for "Off", null for anything else (not reported). Only Engine can refuse
+	// a load that lands after the DJ pressed play: the load runs asynchronously.
+	function scRemoteLock() {
+		const t = root.scTr("/Client/Preferences/Profile/Application/LockPlayingDeck")
+		const v = t ? String(t.string || "") : ""
+		return v === "On" ? true : v === "Off" ? false : null
+	}
+	function scRemoteReport(id, status, reason) {
+		scRemoteUpdates = scRemoteUpdates.concat([{id: id, status: status, reason: reason || ""}])
+	}
+	// The track Engine names on deck d as Engine names it (in NFC), "" when the deck is empty.
+	function scRemoteHeld(d) {
+		const p = root.scShadowProperties(d)
+		const s = p.loaded.state ? String(p.net.string || p.uri.string || "") : ""
+		return s.normalize ? s.normalize("NFC") : s
+	}
+	// Confirmation: the deck's track, as named or decoded (like scShadowWrong),
+	// must end with "/" + the drive-relative path, and Engine must have loaded
+	// since the request (fresh): the track differs from the one the deck held
+	// before, or a check saw the deck empty or SongLoading set. A deck that
+	// already held this very file and shows no load in between is not confirmed
+	// and ends as "timeout" after 5 s. While SongLoading is set (a slow stick, a
+	// long file) there is no timeout, and each poll names the request as active
+	// so webui keeps it open. The deck UI stops waiting after 60 s, as the shadow loader does, so a
+	// SongLoading flag that never clears does not block further loads.
+	function scRemoteCheck(now) {
+		const a = scRemoteActive
+		if (!a) return
+		const held = root.scRemoteHeld(a.deck)
+		const loading = !!(root.scTr("/Engine/Deck" + a.deck + "/Track/SongLoading") || {}).state
+		if (loading || held === "" || held !== a.before) a.fresh = true
+		const tail = "/" + a.path
+		let status = "", reason = ""
+		if (a.fresh && !loading && held !== "" && (held.endsWith(tail) || root.scRemoteName(held).endsWith(tail))) status = "loaded"
+		else if (held !== "" && held !== a.before && !loading) { status = "failed"; reason = "other track loaded" }
+		else if (now > a.until && (!loading || now > a.until + 55000)) { status = "failed"; reason = "timeout" }
+		if (!status) return
+		scRemoteActive = null
+		root.scRemoteReport(a.id, status, reason)
+	}
+	function scRemotePoll() {
+		const now = Date.now()
+		root.scRemoteCheck(now)
+		let x = scRemoteXhr
+		if (!x) {
+			x = new XMLHttpRequest()
+			x.onreadystatechange = root.scRemoteReply
+			scRemoteXhr = x
+		}
+		if (x.readyState !== 0 && x.readyState !== 4) {
+			if (now - scRemoteAt < 5000) return
+			x.abort()
+		}
+		scRemoteSent = scRemoteSent.concat(scRemoteUpdates)
+		scRemoteUpdates = []
+		scRemoteAt = now
+		x.open("POST", "http://127.0.0.1:8080/v1/sc5000/remote-load")
+		x.setRequestHeader("Content-Type", "application/json")
+		// active: the request this deck still waits for, so webui keeps it "loading"
+		// during a slow load instead of ending it with its 8 s backstop.
+		x.send(JSON.stringify({decks: root.scRemoteDecks(), lockPlayingDeck: root.scRemoteLock(), updates: scRemoteSent,
+			active: scRemoteActive ? scRemoteActive.id : ""}))
+	}
+	function scRemoteReply() {
+		const x = scRemoteXhr
+		if (!x || x.readyState !== 4) return
+		if (x.status !== 200) return // scRemoteSent goes out again with the next poll
+		scRemoteSent = []
+		let req = null
+		try { req = JSON.parse(x.responseText).request } catch (err) {}
+		if (req && req.id && root.scRemoteLoad) root.scRemoteExecute(req)
+	}
+	function scRemoteExecute(req) {
+		const deck = parseInt(req.deck)
+		if (scRemoteActive) { root.scRemoteReport(req.id, "rejected", "busy"); return }
+		if (!(deck >= 1 && deck <= 4) || !req.file || !req.path) { root.scRemoteReport(req.id, "failed", "bad request"); return }
+		if (!root.scRemoteLocal(deck)) { root.scRemoteReport(req.id, "rejected", "deck locked"); return }
+		const ps = root.scTr("/Engine/Deck" + deck + "/PlayState")
+		const load = root.scTr("/Client/Librarian/AddToDatabaseAndLoadToDeck" + deck)
+		if (!ps || !load) { root.scRemoteReport(req.id, "failed", "deck unavailable"); return }
+		if (ps.state || root.scRemoteBusy(deck)) { root.scRemoteReport(req.id, "rejected", "deck playing"); return }
+		// Without Engine's lock, play pressed while Engine loads would swap the playing track.
+		// Unknown counts as off: the load goes ahead only while the deck reads On.
+		const lock = root.scRemoteLock()
+		if (lock !== true) { root.scRemoteReport(req.id, "rejected", lock === false ? "lock playing deck is off" : "lock playing deck unknown"); return }
+		const before = root.scRemoteHeld(deck)
+		// encodeURI keeps "#" and "?": in a file name they would start a fragment or query.
+		load.url = "file://" + encodeURI(req.file).replace(/#/g, "%23").replace(/[?]/g, "%3F")
+		let path = String(req.path)
+		if (path.normalize) path = path.normalize("NFC")
+		scRemoteActive = {id: req.id, deck: deck, file: String(req.file), path: path, until: Date.now() + 5000, before: before, fresh: false}
 	}
 	// Keep Engine's own Stems list in the library sidebar (the hook enables it on JP07)
 	// and its Performance Pads bar on screen.
@@ -3992,6 +4144,12 @@ SERVICES_ENTRIES = QUALITY_ENTRY + """
 			values: ["Off", "On"]
 			currentValue: values[root.scProlinkExport ? 1 : 0]
 			onSelected: function(index) { root.scCall("prolinkExport=" + index) }
+		},
+		EntryBase.ListEntry {
+			text: "Remote Load (LAN API)"
+			values: ["Off", "On"]
+			currentValue: values[root.scRemoteLoad ? 1 : 0]
+			onSelected: function(index) { root.scCall("remoteLoad=" + index) }
 		},
 """
 

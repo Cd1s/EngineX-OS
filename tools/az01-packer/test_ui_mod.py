@@ -6251,5 +6251,454 @@ for (const available of [false,true]) {
                     self.assertIn("showAddAccountDialog(tp)", main)
 
 
+class RemoteLoadUiTest(unittest.TestCase):
+    def test_remote_load_ui(self):
+        self.assertIn('text: "Remote Load (LAN API)"', bp.SERVICES_ENTRIES)
+        self.assertIn("remoteLoad=", bp.SERVICES_ENTRIES)
+        self.assertIn('currentValue: values[root.scRemoteLoad ? 1 : 0]', bp.SERVICES_ENTRIES)
+        for s in ("property bool scRemoteLoad: false", "scRemoteLoad = !!v.remoteLoad", "running: root.scRemoteLoad",
+                  "/v1/sc5000/remote-load", "AddToDatabaseAndLoadToDeck\" + deck",
+                  'root.scTr("/Engine/Deck" + deck + "/PlayState")', "deck playing", "other track loaded"):
+            self.assertIn(s, SRC)
+        lines = (REPO / "tools/ui-mod/i18n.tsv").read_text(encoding="utf-8").splitlines()
+        self.assertIn("Remote Load (LAN API)\t远程加载（局域网 API）\t遠端載入（區域網路 API）", lines)
+
+    def test_remote_load_reads_lock_playing_deck(self):
+        # The path and value stock Engine QML reads (docs/re-report/rea-evidence/observations.jsonl).
+        for s in ('root.scTr("/Client/Preferences/Profile/Application/LockPlayingDeck")', 'v === "On"',
+                  "lockPlayingDeck: root.scRemoteLock()", "lock playing deck is off"):
+            self.assertIn(s, SRC)
+
+
+@unittest.skipUnless(shutil.which("node"), "node needed for the remote load behavioral checks")
+class RemoteLoadBehaviourTest(unittest.TestCase):
+    """Run the real scRemote* QML functions against a fake Engine and XHR."""
+
+    def js(self, body):
+        functions = []
+        for name in ("scRemoteLocal", "scRemoteDecks", "scRemoteName", "scRemoteReport", "scRemoteHeld", "scRemoteCheck", "scRemoteReset",
+                     "scRemotePoll", "scRemoteReply", "scRemoteExecute", "scRemoteLock", "scRemoteBusy"):
+            start = re.search(r"(?m)^\tfunction " + name + r"\([^\n]*\) \{", bp.SERVICES_MAIN)
+            self.assertIsNotNone(start, name)
+            line_end = bp.SERVICES_MAIN.index("\n", start.start())
+            if bp.SERVICES_MAIN[start.start():line_end].rstrip().endswith("}"):
+                end = line_end
+            else:
+                end = bp.SERVICES_MAIN.index("\n\t}", start.end()) + 3
+            functions.append(bp.SERVICES_MAIN[start.start():end])
+        setup = r"""
+const assert = require('assert');
+let now = 10000;
+Date.now = () => now;
+globalThis.root = globalThis;
+const empty = {};
+// Engine: deck d's translators; a missing deck has none. Lock Playing Deck is On.
+const engine = {'/Client/Preferences/Profile/Application/LockPlayingDeck': {string: 'On'}};
+function deck(d, o) {
+    engine["/Engine/Deck" + d + "/PlayState"] = {state: !!o.play};
+    engine["/Client/Librarian/AddToDatabaseAndLoadToDeck" + d] = {url: ""};
+    props[d] = {play: engine["/Engine/Deck" + d + "/PlayState"], loaded: {state: !!o.loaded},
+        uri: {string: o.uri || ""}, net: {string: o.net || ""}, title: {string: o.title || ""}, artist: {string: o.artist || ""},
+        position: {value: o.pos}, touch: {state: !!o.touch}, platterTouch: {state: !!o.platter}};
+}
+const props = {};
+const locked = {};
+Object.assign(globalThis, {
+    scRemoteLoad: true, scRemoteActive: null, scRemoteUpdates: [], scRemoteSent: [], scRemoteXhr: null, scRemoteAt: 0,
+    scRemotePositions: {}, scRemoteMovedAt: {},
+    scIsPlayerBoard: false, deckList: [1, 2],
+    scDeckList() { return deckList; },
+    scDeckLocked(d) { return !!locked[d]; },
+    scShadowProperties(d) {
+        return props[d] || {play: empty, loaded: empty, uri: empty, net: empty, title: empty, artist: empty,
+            position: empty, touch: empty, platterTouch: empty};
+    },
+    scTr(path) { return engine[path] || null; },
+    scBoard: 'JC11', scPlayer: false,
+});
+Object.defineProperty(globalThis, 'scCanFourDeck', {get() { return (""" + self.can_four_deck() + r"""); }});
+const sent = [];
+globalThis.XMLHttpRequest = class {
+    constructor() { this.readyState = 0; }
+    open(method, url) { assert.equal(method, 'POST'); assert.equal(url, 'http://127.0.0.1:8080/v1/sc5000/remote-load'); this.readyState = 1; }
+    setRequestHeader() {}
+    abort() { this.readyState = 0; }
+    send(body) { sent.push(JSON.parse(body)); }
+    finish(status, data) {
+        this.status = status; this.responseText = JSON.stringify(data); this.readyState = 4;
+        this.onreadystatechange();
+    }
+};
+"""
+        res = subprocess.run(["node", "-e", setup + "\n".join(functions) + "\n" + body], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+
+    def can_four_deck(self):
+        m = re.search(r"readonly property bool scCanFourDeck: ([^\n]+)", bp.SERVICES_MAIN)
+        self.assertIsNotNone(m)
+        return m.group(1)
+
+    def test_local_decks_follow_the_board(self):
+        self.js(r"""
+const local = () => scRemoteDecks().map(e => e.local);
+scBoard = 'JP21';  // SC LIVE 4: four decks
+assert.deepEqual(local(), [true, true, true, true]);
+scBoard = 'JP20';  // SC LIVE 2: a 2-deck console
+assert.deepEqual(local(), [true, true, false, false]);
+scBoard = 'JP11';  // PRIME GO
+assert.deepEqual(local(), [true, true, false, false]);
+scBoard = 'JP07'; scIsPlayerBoard = true; deckList = [2, 4];  // a player: only its own decks
+assert.deepEqual(local(), [false, true, false, true]);
+""")
+
+    def test_decks_report_local_only_for_owned_unlocked_decks(self):
+        self.js(r"""
+deck(1, {play: true, loaded: true, title: 'A', artist: 'X'});
+deck(2, {});
+locked[2] = true;
+let d = scRemoteDecks();
+assert.deepEqual(d.map(e => e.deck), [1, 2, 3, 4]);
+assert.deepEqual(d[0], {deck: 1, local: true, loaded: true, playing: true, title: 'A', artist: 'X'});
+assert.equal(d[1].local, false);
+// A player in the 4-deck layout owns only its own decks.
+scIsPlayerBoard = true; locked[2] = false; deckList = [1, 3];
+d = scRemoteDecks();
+assert.deepEqual(d.map(e => e.local), [true, false, true, false]);
+""")
+
+    def test_poll_posts_decks_and_updates_and_loads_an_idle_deck(self):
+        self.js(r"""
+deck(1, {});
+scRemoteReport('old', 'failed', 'timeout');
+scRemotePoll();
+assert.equal(sent.length, 1);
+assert.deepEqual(sent[0].updates, [{id: 'old', status: 'failed', reason: 'timeout'}]);
+assert.equal(sent[0].decks.length, 4);
+assert.deepEqual(scRemoteUpdates, []);
+// In flight: the next tick does not send again.
+scRemotePoll();
+assert.equal(sent.length, 1);
+scRemoteXhr.finish(200, {request: {id: 'r1', deck: 1, file: '/media/USB A/Mix #1.mp3', path: 'Mix #1.mp3'}});
+assert.equal(engine['/Client/Librarian/AddToDatabaseAndLoadToDeck1'].url, 'file:///media/USB%20A/Mix%20%231.mp3');
+assert.equal(scRemoteActive.id, 'r1');
+assert.equal(scRemoteActive.until, now + 5000);
+// Engine reports the track, percent-encoded as a URI.
+props[1].loaded.state = true;
+props[1].uri.string = 'file:///media/USB%20A/Mix%20%231.mp3';
+now += 500;
+scRemotePoll();
+assert.equal(scRemoteActive, null);
+assert.deepEqual(sent[1].updates, [{id: 'r1', status: 'loaded', reason: ''}]);
+""")
+
+    def test_failed_post_keeps_the_updates(self):
+        self.js(r"""
+scRemoteReport('r1', 'loaded', '');
+scRemotePoll();
+scRemoteXhr.finish(503, {});
+scRemoteReport('r2', 'rejected', 'deck playing');
+scRemotePoll();
+assert.deepEqual(sent[1].updates, [{id: 'r1', status: 'loaded', reason: ''}, {id: 'r2', status: 'rejected', reason: 'deck playing'}]);
+scRemoteXhr.finish(200, {request: null});
+scRemotePoll();
+assert.deepEqual(sent[2].updates, []);
+""")
+
+    def test_never_loads_a_playing_or_locked_deck(self):
+        self.js(r"""
+deck(1, {play: true, loaded: true});
+deck(2, {});
+locked[2] = true;
+scRemoteExecute({id: 'p', deck: 1, file: '/media/USB/a.mp3', path: 'a.mp3'});
+scRemoteExecute({id: 'l', deck: 2, file: '/media/USB/a.mp3', path: 'a.mp3'});
+scRemoteExecute({id: 'n', deck: 3, file: '/media/USB/a.mp3', path: 'a.mp3'});
+assert.equal(engine['/Client/Librarian/AddToDatabaseAndLoadToDeck1'].url, '');
+assert.equal(engine['/Client/Librarian/AddToDatabaseAndLoadToDeck2'].url, '');
+assert.equal(scRemoteActive, null);
+assert.deepEqual(scRemoteUpdates.map(u => [u.id, u.status, u.reason]),
+    [['p', 'rejected', 'deck playing'], ['l', 'rejected', 'deck locked'], ['n', 'failed', 'deck unavailable']]);
+""")
+
+    def test_an_audible_deck_without_play_state_is_busy(self):
+        # Real SC LIVE 4 (2026-11-13): with CUE held, scratching or searching,
+        # PlayState stayed false and a request loaded over the preview.
+        self.js(r"""
+const req = (id, d) => scRemoteExecute({id: id, deck: d, file: '/media/USB/b.mp3', path: 'b.mp3'});
+const url = d => engine['/Client/Librarian/AddToDatabaseAndLoadToDeck' + d].url;
+deck(1, {loaded: true, pos: 0.10});
+assert.equal(scRemoteDecks()[0].playing, true);    // first sample: no history, counts as moved
+now += 1600;
+assert.equal(scRemoteDecks()[0].playing, false);   // still for 1.5 s: idle
+now += 500; props[1].position.value = 0.12;         // CUE held: the position moves, PlayState stays false
+assert.equal(scRemoteDecks()[0].playing, true);
+now += 100; props[1].position.value = 0.121;
+req('cue', 1);
+assert.equal(url(1), '');
+assert.deepEqual(scRemoteUpdates.pop(), {id: 'cue', status: 'rejected', reason: 'deck playing'});
+// CUE released: the deck is still for 1.5 s before it counts as idle again.
+now += 600;
+assert.equal(scRemoteDecks()[0].playing, true);
+now += 1000;
+assert.equal(scRemoteDecks()[0].playing, false);
+req('idle', 1);
+assert.equal(scRemoteActive.id, 'idle');
+assert.notEqual(url(1), '');
+scRemoteActive = null;
+// A touched jog wheel or platter counts at once, before the position moves.
+deck(2, {loaded: true, pos: 0.3, touch: true});
+assert.equal(scRemoteDecks()[1].playing, true);
+props[2].touch.state = false; props[2].platterTouch.state = true;
+assert.equal(scRemoteDecks()[1].playing, true);
+props[2].platterTouch.state = false; now += 1600;
+assert.equal(scRemoteDecks()[1].playing, false);
+// An empty deck (no position) is not busy.
+deck(3, {});
+assert.equal(scRemoteDecks()[2].playing, false);
+""")
+
+    def test_a_deck_that_just_loaded_is_busy_before_its_position_has_history(self):
+        # Review of 1a6edad8: the DJ loads a track by hand and holds CUE at once;
+        # the pickup poll is the first defined position after the empty deck.
+        self.js(r"""
+deck(1, {loaded: true, pos: 0.5});
+scRemoteDecks(); now += 2000;
+assert.equal(scRemoteDecks()[0].playing, false);
+// The track is swapped: no position while Engine loads, then the new one.
+props[1].position.value = undefined;
+now += 500; assert.equal(scRemoteDecks()[0].playing, false);
+props[1].position.value = 0.0;
+now += 500;
+scRemoteExecute({id: 'r1', deck: 1, file: '/media/USB/b.mp3', path: 'b.mp3'});
+assert.equal(engine['/Client/Librarian/AddToDatabaseAndLoadToDeck1'].url, '');
+assert.deepEqual(scRemoteUpdates, [{id: 'r1', status: 'rejected', reason: 'deck playing'}]);
+""")
+
+    def test_reply_after_switch_off_is_not_executed(self):
+        self.js(r"""
+deck(1, {});
+scRemotePoll();
+scRemoteLoad = false;
+scRemoteXhr.finish(200, {request: {id: 'r1', deck: 1, file: '/media/USB/a.mp3', path: 'a.mp3'}});
+assert.equal(engine['/Client/Librarian/AddToDatabaseAndLoadToDeck1'].url, '');
+assert.equal(scRemoteActive, null);
+""")
+
+    def test_url_escapes_query_and_fragment_characters(self):
+        self.js(r"""
+deck(1, {});
+scRemoteExecute({id: 'q', deck: 1, file: '/media/USB/What? #2 100%.mp3', path: 'What? #2 100%.mp3'});
+assert.equal(engine['/Client/Librarian/AddToDatabaseAndLoadToDeck1'].url, 'file:///media/USB/What%3F%20%232%20100%25.mp3');
+// Engine names it encoded; the decoded name confirms the load.
+props[1].loaded.state = true;
+props[1].uri.string = 'file:///media/USB/What%3F%20%232%20100%25.mp3';
+now += 500; scRemoteCheck(now);
+assert.deepEqual(scRemoteUpdates, [{id: 'q', status: 'loaded', reason: ''}]);
+// A network path names it plain.
+scRemoteUpdates = []; props[1].loaded.state = false; props[1].uri.string = '';
+scRemoteExecute({id: 'q2', deck: 1, file: '/media/USB/What? #2 100%.mp3', path: 'What? #2 100%.mp3'});
+props[1].loaded.state = true;
+props[1].net.string = 'net://1/USB/What? #2 100%.mp3';
+now += 500; scRemoteCheck(now);
+assert.deepEqual(scRemoteUpdates, [{id: 'q2', status: 'loaded', reason: ''}]);
+""")
+
+    def test_switch_off_resets_only_when_something_is_set(self):
+        # scApply (every 3 s) only copies the switch; the reset runs when the poll timer stops.
+        start = bp.SERVICES_MAIN.index("\tfunction scApply(v) {")
+        apply = bp.SERVICES_MAIN[start:bp.SERVICES_MAIN.index("\n\t}", start)]
+        self.assertIn("scRemoteLoad = !!v.remoteLoad", apply)
+        self.assertNotRegex(apply, r"scRemote(Active|Updates|Sent) =")
+        self.assertRegex(bp.SERVICES_MAIN, r"running: root\.scRemoteLoad\n\t\tonTriggered: root\.scRemotePoll\(\)\n"
+                         r"(\t\t//[^\n]*\n)?\t\tonRunningChanged: if \(!running\) root\.scRemoteReset\(\)\n")
+        self.js(r"""
+let writes = 0;
+const store = {scRemoteActive: null, scRemoteUpdates: [], scRemoteSent: []};
+for (const k of Object.keys(store))
+    Object.defineProperty(globalThis, k, {configurable: true, get() { return store[k]; }, set(v) { writes++; store[k] = v; }});
+scRemoteReset(); scRemoteReset();
+assert.equal(writes, 0);
+store.scRemoteSent = [{id: 'x'}];
+scRemoteReset();
+assert.equal(writes, 3);
+assert.deepEqual(store.scRemoteSent, []);
+store.scRemoteActive = {id: 'y'};
+scRemoteReset();
+assert.equal(store.scRemoteActive, null);
+store.scRemoteUpdates = [{id: 'z'}];
+scRemoteReset();
+assert.deepEqual(store.scRemoteUpdates, []);
+""")
+
+    def test_confirmation_timeout_and_other_track(self):
+        self.js(r"""
+// The deck already holds an older track: that is not "another track loaded".
+deck(1, {loaded: true, net: '/media/USB/old.mp3'});
+scRemoteExecute({id: 'r1', deck: 1, file: '/media/USB/new.mp3', path: 'new.mp3'});
+now += 500; scRemoteCheck(now);
+assert.notEqual(scRemoteActive, null);
+assert.deepEqual(scRemoteUpdates, []);
+now += 5000; scRemoteCheck(now);
+assert.equal(scRemoteActive, null);
+assert.deepEqual(scRemoteUpdates, [{id: 'r1', status: 'failed', reason: 'timeout'}]);
+scRemoteUpdates = [];
+scRemoteExecute({id: 'r2', deck: 1, file: '/media/USB/new.mp3', path: 'new.mp3'});
+props[1].net.string = '/media/USB/third.mp3';
+now += 500; scRemoteCheck(now);
+assert.equal(scRemoteActive, null);
+assert.deepEqual(scRemoteUpdates, [{id: 'r2', status: 'failed', reason: 'other track loaded'}]);
+""")
+
+    def test_second_request_while_one_loads_is_rejected(self):
+        self.js(r"""
+deck(1, {}); deck(2, {});
+scRemoteExecute({id: 'r1', deck: 1, file: '/media/USB/a.mp3', path: 'a.mp3'});
+scRemoteExecute({id: 'r2', deck: 2, file: '/media/USB/b.mp3', path: 'b.mp3'});
+assert.equal(scRemoteActive.id, 'r1');
+assert.equal(engine['/Client/Librarian/AddToDatabaseAndLoadToDeck2'].url, '');
+assert.deepEqual(scRemoteUpdates, [{id: 'r2', status: 'rejected', reason: 'busy'}]);
+""")
+
+    def test_same_file_name_elsewhere_is_no_confirmation(self):
+        self.js(r"""
+// The deck holds a file with the same name from another folder.
+deck(1, {loaded: true, uri: 'file:///media/USB/Old/a.mp3'});
+scRemoteExecute({id: 'r1', deck: 1, file: '/media/USB/Music/a.mp3', path: 'Music/a.mp3'});
+now += 500; scRemoteCheck(now);
+assert.notEqual(scRemoteActive, null);
+assert.deepEqual(scRemoteUpdates, []);
+props[1].uri.string = 'file:///media/USB/Music/a.mp3';
+now += 500; scRemoteCheck(now);
+assert.deepEqual(scRemoteUpdates, [{id: 'r1', status: 'loaded', reason: ''}]);
+// An empty deck that ends up with a same-named file from another folder.
+scRemoteUpdates = []; props[1].loaded.state = false; props[1].uri.string = '';
+scRemoteExecute({id: 'r2', deck: 1, file: '/media/USB/Music/a.mp3', path: 'Music/a.mp3'});
+props[1].loaded.state = true; props[1].net.string = 'net://1/USB/Other/a.mp3';
+now += 500; scRemoteCheck(now);
+assert.deepEqual(scRemoteUpdates, [{id: 'r2', status: 'failed', reason: 'other track loaded'}]);
+""")
+
+    def test_same_file_already_on_the_deck_needs_a_fresh_load(self):
+        self.js(r"""
+deck(1, {loaded: true, uri: 'file:///media/USB/Music/a.mp3'});
+scRemoteExecute({id: 'r1', deck: 1, file: '/media/USB/Music/a.mp3', path: 'Music/a.mp3'});
+assert.equal(engine['/Client/Librarian/AddToDatabaseAndLoadToDeck1'].url, 'file:///media/USB/Music/a.mp3');
+now += 500; scRemoteCheck(now);
+assert.deepEqual(scRemoteUpdates, []);
+// Engine reloads it: SongLoading, then the same track again.
+engine['/Engine/Deck1/Track/SongLoading'] = {state: true};
+now += 500; scRemoteCheck(now);
+assert.deepEqual(scRemoteUpdates, []);
+engine['/Engine/Deck1/Track/SongLoading'].state = false;
+now += 500; scRemoteCheck(now);
+assert.deepEqual(scRemoteUpdates, [{id: 'r1', status: 'loaded', reason: ''}]);
+// No load seen at all: a timeout, never "loaded".
+scRemoteUpdates = [];
+scRemoteExecute({id: 'r2', deck: 1, file: '/media/USB/Music/a.mp3', path: 'Music/a.mp3'});
+for (let i = 0; i < 11; i++) { now += 500; scRemoteCheck(now); }
+assert.deepEqual(scRemoteUpdates, [{id: 'r2', status: 'failed', reason: 'timeout'}]);
+""")
+
+    def test_request_without_path_is_a_bad_request(self):
+        self.js(r"""
+deck(1, {});
+scRemoteExecute({id: 'r1', deck: 1, file: '/media/USB/a.mp3'});
+assert.equal(engine['/Client/Librarian/AddToDatabaseAndLoadToDeck1'].url, '');
+assert.deepEqual(scRemoteUpdates, [{id: 'r1', status: 'failed', reason: 'bad request'}]);
+""")
+
+    def test_lock_playing_deck_off_is_refused_and_reported(self):
+        self.js(r"""
+const LOCK = '/Client/Preferences/Profile/Application/LockPlayingDeck';
+delete engine[LOCK];
+deck(1, {});
+// Unknown (Engine names no such preference): refused like Off, the poll says null.
+scRemotePoll();
+assert.strictEqual(sent[0].lockPlayingDeck, null);
+scRemoteExecute({id: 'u', deck: 1, file: '/media/USB/a.mp3', path: 'a.mp3'});
+assert.equal(engine['/Client/Librarian/AddToDatabaseAndLoadToDeck1'].url, '');
+assert.equal(scRemoteActive, null);
+assert.deepEqual(scRemoteUpdates.pop(), {id: 'u', status: 'rejected', reason: 'lock playing deck unknown'});
+// Off: refused, nothing written to Engine.
+engine[LOCK] = {string: 'Off'};
+scRemoteXhr.finish(200, {request: null});
+scRemotePoll();
+assert.strictEqual(sent[1].lockPlayingDeck, false);
+scRemoteExecute({id: 'o', deck: 1, file: '/media/USB/a.mp3', path: 'a.mp3'});
+assert.equal(engine['/Client/Librarian/AddToDatabaseAndLoadToDeck1'].url, '');
+assert.equal(scRemoteActive, null);
+assert.deepEqual(scRemoteUpdates, [{id: 'o', status: 'rejected', reason: 'lock playing deck is off'}]);
+// On: loads.
+engine[LOCK].string = 'On';
+scRemoteXhr.finish(200, {request: null});
+scRemotePoll();
+assert.strictEqual(sent[2].lockPlayingDeck, true);
+scRemoteExecute({id: 'n', deck: 1, file: '/media/USB/a.mp3', path: 'a.mp3'});
+assert.equal(engine['/Client/Librarian/AddToDatabaseAndLoadToDeck1'].url, 'file:///media/USB/a.mp3');
+assert.equal(scRemoteActive.id, 'n');
+""")
+
+    def test_no_timeout_while_engine_is_still_loading(self):
+        self.js(r"""
+deck(1, {});
+scRemoteExecute({id: 'r1', deck: 1, file: '/media/USB/long.flac', path: 'long.flac'});
+engine['/Engine/Deck1/Track/SongLoading'] = {state: true};
+// A slow stick: Engine is still loading well past the 5 s window.
+for (let i = 0; i < 16; i++) { now += 500; scRemoteCheck(now); }
+assert.notEqual(scRemoteActive, null);
+assert.deepEqual(scRemoteUpdates, []);
+engine['/Engine/Deck1/Track/SongLoading'].state = false;
+props[1].loaded.state = true; props[1].uri.string = 'file:///media/USB/long.flac';
+now += 500; scRemoteCheck(now);
+assert.deepEqual(scRemoteUpdates, [{id: 'r1', status: 'loaded', reason: ''}]);
+""")
+
+    def test_songloading_stuck_ends_after_60_seconds(self):
+        self.js(r"""
+deck(1, {});
+scRemoteExecute({id: 'r1', deck: 1, file: '/media/USB/long.flac', path: 'long.flac'});
+engine['/Engine/Deck1/Track/SongLoading'] = {state: true};
+// SongLoading never clears: the deck is not blocked for good, as the shadow loader's 60 s.
+for (let i = 0; i < 118; i++) { now += 500; scRemoteCheck(now); }
+assert.notEqual(scRemoteActive, null);
+for (let i = 0; i < 4; i++) { now += 500; scRemoteCheck(now); }
+assert.equal(scRemoteActive, null);
+assert.deepEqual(scRemoteUpdates, [{id: 'r1', status: 'failed', reason: 'timeout'}]);
+""")
+
+    def test_lock_playing_deck_unknown_value_is_refused(self):
+        self.js(r"""
+// A value other than On/Off (another Engine build) is reported as unknown and,
+// like Off, refuses the load: only a lock the deck reads as On lets it through.
+engine['/Client/Preferences/Profile/Application/LockPlayingDeck'] = {string: 'Enabled'};
+deck(1, {});
+scRemotePoll();
+assert.strictEqual(sent[0].lockPlayingDeck, null);
+scRemoteExecute({id: 'u', deck: 1, file: '/media/USB/a.mp3', path: 'a.mp3'});
+assert.equal(engine['/Client/Librarian/AddToDatabaseAndLoadToDeck1'].url, '');
+assert.deepEqual(scRemoteUpdates, [{id: 'u', status: 'rejected', reason: 'lock playing deck unknown'}]);
+""")
+
+    def test_poll_names_the_request_it_still_waits_for(self):
+        self.js(r"""
+deck(1, {});
+scRemotePoll();
+assert.strictEqual(sent[0].active, '');
+scRemoteXhr.finish(200, {request: {id: 'r1', deck: 1, file: '/media/USB/long.flac', path: 'long.flac'}});
+engine['/Engine/Deck1/Track/SongLoading'] = {state: true};
+now += 500; scRemotePoll();
+assert.strictEqual(sent[1].active, 'r1');
+""")
+
+    def test_plain_name_with_percent_sequence_confirms(self):
+        self.js(r"""
+// Engine names the file plain; "%41" is part of the name, not an escape.
+deck(1, {});
+scRemoteExecute({id: 'r1', deck: 1, file: '/media/USB/Mix %41.mp3', path: 'Mix %41.mp3'});
+props[1].loaded.state = true; props[1].net.string = 'net://1/USB/Mix %41.mp3';
+now += 500; scRemoteCheck(now);
+assert.deepEqual(scRemoteUpdates, [{id: 'r1', status: 'loaded', reason: ''}]);
+""")
+
+
 if __name__ == "__main__":
     unittest.main()

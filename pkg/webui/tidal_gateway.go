@@ -276,6 +276,7 @@ func newTidalGateway(s *Server) *tidalGateway {
 	g.mux.HandleFunc("GET /v1/sc5000/library-status", s.libraryStatusGet)
 	g.mux.HandleFunc("GET /v1/sc5000/update", s.update)
 	g.mux.HandleFunc("POST /v1/sc5000/ui", s.uiUpdate)
+	g.mux.HandleFunc("POST /v1/sc5000/remote-load", s.remoteLoadPoll)
 	g.mux.HandleFunc("GET /v1/sc5000/views", s.viewsGet)
 	g.mux.HandleFunc("POST /v1/sc5000/views", s.viewsPost)
 	g.mux.HandleFunc("POST /v1/sc5000/relocate", s.relocate)
