@@ -458,6 +458,42 @@ func TestExportedNativeChildCannotBeAdopted(t *testing.T) {
 	assertNativePlaylist(t, db, id)
 }
 
+func TestNativeChildSurvivesLostBridgeState(t *testing.T) {
+	for _, mode := range []string{"removed", "wiped"} {
+		t.Run(mode, func(t *testing.T) {
+			root, lib, db, folder := nativePlaylistFixture(t)
+			id := playlistExec(t, db, `INSERT INTO Playlist(title,parentListId,isPersisted,nextListId,isExplicitlyExported) VALUES('Native Set',?,1,0,1)`, folder)
+			playlistExec(t, db, `INSERT INTO PlaylistEntity(listId,trackId,databaseUuid,nextEntityId) VALUES(?,3,(SELECT uuid FROM Information),0)`, id)
+			lib.Playlists[0].Name += " Renamed"
+			if _, err := Sync(context.Background(), root, lib, Options{Fast: true}); err != nil {
+				t.Fatal(err)
+			}
+			assertNativePlaylist(t, db, id)
+			state := filepath.Join(root, "Engine Library/Database2", stateFile)
+			if mode == "removed" {
+				if err := os.Remove(state); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.WriteFile(state, nil, 0600); err != nil {
+				t.Fatal(err)
+			}
+			lib.Playlists = []rekordbox.Playlist{{ID: 100, Name: "Native Set", Tracks: []uint32{1}}}
+			// The fresh import must also protect the native row on later rebuilds.
+			for _, tracks := range [][]uint32{{1}, {2}} {
+				lib.Playlists[0].Tracks = tracks
+				if _, err := Sync(context.Background(), root, lib, Options{Fast: true}); err != nil {
+					t.Fatal(err)
+				}
+				assertNativePlaylist(t, db, id)
+				imported := scalar[int64](t, db, `SELECT id FROM Playlist WHERE title='Native Set (rekordbox)' AND parentListId=0`)
+				if imported == id || !reflect.DeepEqual(playlistEntityTracks(t, db, imported), []int64{int64(tracks[0])}) {
+					t.Fatal("import did not retain separate ownership and tracks")
+				}
+			}
+		})
+	}
+}
+
 func TestPreserveInterleavedNativeSiblingOrder(t *testing.T) {
 	root, lib, db, folder := nativePlaylistFixture(t)
 	owned := scalar[int64](t, db, `SELECT id FROM Playlist WHERE title='Nested'`)

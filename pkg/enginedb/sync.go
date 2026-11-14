@@ -804,6 +804,11 @@ func uniqueTitle(ctx context.Context, q sqlExecer, name string, parent int64) (s
 }
 
 func writePlaylists(ctx context.Context, q *stmtCache, l *rekordbox.Library, opts Options, mapping map[uint32]int64, databaseUUID string, recommendations []uint32) error {
+	// Without prior import metadata, existing unowned rows cannot be identified
+	// as rebuilt imports. Preserve that decision across subsequent imports too.
+	if _, e := q.ExecContext(ctx, `INSERT OR IGNORE INTO BridgeLibrary(key,value) SELECT 'native-playlist:' || id, '1' FROM Playlist WHERE id NOT IN (SELECT listId FROM BridgePlaylist) AND NOT EXISTS (SELECT 1 FROM BridgeLibrary WHERE key IN ('playlists','source'))`); e != nil {
+		return e
+	}
 	owned := `SELECT listId FROM BridgePlaylist`
 	predicate := ""
 	if opts.StagedOnly {
