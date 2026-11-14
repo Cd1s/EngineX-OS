@@ -229,7 +229,7 @@ printf '128\n' > "$SC5000_SYS_ROOT/block/sdb/queue/read_ahead_kb"
 printf '[none]\n' > "$SC5000_SYS_ROOT/block/mmcblk1/queue/scheduler"
 mkdir -p "$SC5000_SYS_ROOT/block/mmcblk0/queue" "$SC5000_SYS_ROOT/devices/system/cpu/cpufreq/ondemand"
 printf 'none mq-deadline kyber [bfq]\n' > "$SC5000_SYS_ROOT/block/mmcblk0/queue/scheduler"
-for knob in up_threshold sampling_down_factor ignore_nice_load; do printf '0\n' > "$SC5000_SYS_ROOT/devices/system/cpu/cpufreq/ondemand/$knob"; done
+for knob in sampling_rate up_threshold sampling_down_factor ignore_nice_load; do printf '0\n' > "$SC5000_SYS_ROOT/devices/system/cpu/cpufreq/ondemand/$knob"; done
 mkdir -p "$SC5000_SYS_ROOT/devices/virtual/workqueue"
 printf '6\n' > "$SC5000_SYS_ROOT/devices/virtual/workqueue/cpumask"
 printf ' CPU0 CPU1 CPU2 CPU3\n 42: 1 0 0 0 GIC i2s-audio\n 43: 0 1 0 0 GIC ehci\n' > "$SC5000_PROC_ROOT/interrupts"
@@ -282,7 +282,9 @@ for cpu in 0 1 2 3; do
 done
 has simple_ondemand "$gpu/governor"
 has 300000000 "$gpu/min_freq"
-has 50 "$SC5000_SYS_ROOT/devices/system/cpu/cpufreq/ondemand/up_threshold"
+# 2 ms samples with a 50% threshold held an idle deck at 1.608 GHz 70-84% of the time.
+has 20000 "$SC5000_SYS_ROOT/devices/system/cpu/cpufreq/ondemand/sampling_rate"
+has 80 "$SC5000_SYS_ROOT/devices/system/cpu/cpufreq/ondemand/up_threshold"
 has 10 "$SC5000_SYS_ROOT/devices/system/cpu/cpufreq/ondemand/sampling_down_factor"
 has '[bfq]' "$SC5000_SYS_ROOT/block/mmcblk0/queue/scheduler"
 has 10 "$SC5000_PROC_ROOT/sys/vm/swappiness"

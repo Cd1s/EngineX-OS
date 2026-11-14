@@ -79,7 +79,9 @@ These settings do not reserve CPU0 against every stock daemon or unmovable
 kernel interrupt, and do not replace a verified RT kernel/boot policy.
 
 `sc5000-perf-tune` sets CPU0-3 to `ondemand` with a 1.2 GHz minimum (lower
-clocks caused ALSA xruns), `up_threshold` 50 and `sampling_down_factor` 10, and the `ffa30000.gpu`
+clocks caused ALSA xruns; stock holds 1.608 GHz with the `performance` governor). Above the
+minimum the clock rises only on sustained load: `sampling_rate` 20000 (20 ms, a whole display
+frame), `up_threshold` 80 and `sampling_down_factor` 10. It sets the `ffa30000.gpu`
 devfreq to `simple_ondemand` from 300 MHz (its lowest clock on battery or above 85 C). IRQs:
 audio on CPU0, GPU/VOP/HDMI on CPU1 (Engine's GUI core), everything else (touch I2C, MMC, USB,
 eth0) on CPU2. Engine's SceneGraph thread moves to CPU2 and its normal-priority helpers on CPU1
