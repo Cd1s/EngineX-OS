@@ -377,37 +377,9 @@ var (
 // Otherwise files are read for mountReadBudget at most, and the export counts as
 // imported only once no track was left without its cues.
 func ConvertAtMount(ctx context.Context, mount string, opts enginedb.Options, full bool) (enginedb.Result, error) {
-	r, err := convertAtMount(ctx, mount, &opts, full)
-	// A bypass without file reads has not started the shared read budget yet.
-	if opts.Deadline.IsZero() && !full {
-		opts.Deadline = time.Now().Add(mountReadBudget)
-	}
-	if !opts.Deadline.IsZero() {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithDeadline(ctx, opts.Deadline)
-		defer cancel()
-	}
+	r, err := convertAtMount(ctx, mount, opts, full)
 	applyPendingAtMount(ctx, mount)
-	fixMP3GridsAtMount(ctx, mount, opts.Deadline)
 	return r, err
-}
-
-func fixMP3GridsAtMount(ctx context.Context, mount string, deadline time.Time) {
-	if ctx.Err() != nil || !writable(mount) {
-		return
-	}
-	var budget time.Duration
-	if !deadline.IsZero() {
-		budget = time.Until(deadline)
-		if budget <= 0 {
-			return
-		}
-	}
-	if r, err := enginedb.FixMP3Grids(ctx, mount, enginedb.MP3GridOptions{Budget: budget}); err != nil {
-		log.Printf("rb-bridge: mp3 grid fix not finished: %v", err)
-	} else if r.Corrected > 0 || r.Skipped > 0 {
-		log.Printf("rb-bridge: mp3 grid fix: corrected=%d unchanged=%d skipped=%d interrupted=%v", r.Corrected, r.Unchanged, r.Skipped, r.Interrupted)
-	}
 }
 
 // applyPendingAtMount applies the library edits the Web Console queued while Engine had the
@@ -425,7 +397,7 @@ func applyPendingAtMount(ctx context.Context, mount string) {
 	}
 }
 
-func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, full bool) (enginedb.Result, error) {
+func convertAtMount(ctx context.Context, mount string, opts enginedb.Options, full bool) (enginedb.Result, error) {
 	mountStart := time.Now()
 	// The file-reading budget starts once the library is read: decrypting a
 	// OneLibrary must not use up the time meant for cues and waveforms.
@@ -474,11 +446,12 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 		// (BH-GC1-2); it still has tracks without their files read.
 		if resume = hasFastTracks(dir); !resume {
 			if writable(mount) { // drives imported by an earlier build still get their covers
-				if opts.Deadline.IsZero() {
-					opts.Deadline = time.Now().Add(mountReadBudget)
+				deadline := opts.Deadline
+				if deadline.IsZero() {
+					deadline = time.Now().Add(mountReadBudget)
 				}
-				_, _ = enginedb.MigrateArtworkBefore(ctx, mount, opts.Deadline)
-				completeOverviews(ctx, mount, opts.Deadline)
+				_, _ = enginedb.MigrateArtworkBefore(ctx, mount, deadline)
+				completeOverviews(ctx, mount, deadline)
 			}
 			return enginedb.Result{Bypassed: true}, nil
 		}
@@ -511,7 +484,7 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 			}
 			if len(l.Tracks) > fastImportTracks {
 				opts.Fast = true
-				result, err = stagedImport(ctx, dir, l, *opts, r)
+				result, err = stagedImport(ctx, dir, l, opts, r)
 				if err != nil {
 					cleanEmptyEngineLibrary(dir)
 				} else {
@@ -524,7 +497,7 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 				opts.Deadline = time.Now().Add(budget)
 				budget = 0
 			}
-			result, err = stagedImport(ctx, dir, l, *opts, r)
+			result, err = stagedImport(ctx, dir, l, opts, r)
 			if err != nil {
 				cleanEmptyEngineLibrary(dir)
 			} else if result.Deferred > 0 {

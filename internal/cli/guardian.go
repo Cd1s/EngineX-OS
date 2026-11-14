@@ -20,27 +20,7 @@ var guardianBootReport = webui.WriteBootReport
 
 type guardianResult struct {
 	dbhealer.Report
-	MP3Grids *enginedb.MP3GridReport `json:"mp3_grids,omitempty"`
-	Error    string                  `json:"error,omitempty"`
-}
-
-func mp3GridBudget(deadline time.Duration, mountOnly bool) time.Duration {
-	const defaultMountBudget = 4 * time.Second
-	switch {
-	case deadline > 0:
-		b := deadline / 2
-		if b > defaultMountBudget {
-			b = defaultMountBudget
-		}
-		if b <= 0 {
-			b = deadline
-		}
-		return b
-	case mountOnly:
-		return defaultMountBudget
-	default:
-		return 0
-	}
+	Error string `json:"error,omitempty"`
 }
 
 // Guardian heals or inspects Engine OS 5.0.4 libraries once and prints JSON.
@@ -57,7 +37,6 @@ func Guardian(args []string, out, errOut io.Writer) int {
 	dataOnly := fs.Bool("data-only", false, "repair table data but leave Engine's views, triggers and indexes untouched")
 	sessions := fs.Int("max-sessions", dbhealer.DefaultMaxSessions, "maximum history sessions; 0 uses 50")
 	reserve := fs.Bool("normalize-reserve", false, "only rebuild libraries whose page reserve byte is not 0 (breaks ATTACH in Engine 5.3.0); Engine must not be running")
-	fixGrids := fs.Bool("fix-mp3-grids", false, "once-per-library shift of pre-5.3.0.4 EngineX MP3 beat grids, cues and loops (standalone unless combined with --data-only or --normalize-reserve)")
 	bootReport := fs.Bool("boot-report", false, "save and export a sanitized boot report without touching libraries")
 	uiDir := fs.String("ui-dir", "/data/enginex/ui", "boot safety state directory")
 	deadline := fs.Duration("timeout", 0, "maximum command runtime; 0 disables the deadline")
@@ -82,7 +61,7 @@ func Guardian(args []string, out, errOut io.Writer) int {
 		defer timer.Stop()
 	}
 	if *bootReport {
-		if fs.NArg() != 0 || *mount != "" || *status || *dataOnly || *reserve || *fixGrids {
+		if fs.NArg() != 0 || *mount != "" || *status || *dataOnly || *reserve {
 			fmt.Fprintln(errOut, "--boot-report cannot be combined with database operations")
 			return 2
 		}
@@ -105,37 +84,13 @@ func Guardian(args []string, out, errOut io.Writer) int {
 	code := 0
 	for _, m := range mounts {
 		var r dbhealer.Report
-		var mp3Report *enginedb.MP3GridReport
 		var err error
-		runMP3Fix := func(mountOnly bool) {
-			mr, ferr := enginedb.FixMP3Grids(context.Background(), m, enginedb.MP3GridOptions{
-				Budget: mp3GridBudget(*deadline, mountOnly),
-			})
-			mp3Report = &mr
-			if ferr != nil {
-				fmt.Fprintln(errOut, "engine-guardian: mp3 grid fix:", ferr)
-			} else if mr.Corrected > 0 || mr.Skipped > 0 {
-				fmt.Fprintf(errOut, "engine-guardian: mp3 grid fix: corrected=%d unchanged=%d skipped=%d interrupted=%v\n",
-					mr.Corrected, mr.Unchanged, mr.Skipped, mr.Interrupted)
-			}
-		}
 		switch {
 		case *status: // read-only, so it wins over --reserve
 			r, err = dbhealer.InspectMount(m)
 		case *reserve:
 			r.Mount, r.CheckedAt = m, time.Now().UTC()
 			r.ReserveFixed, err = dbhealer.NormalizeDatabase2(filepath.Join(m, "Engine Library", "Database2"))
-			r.Healthy = err == nil
-			if err == nil && *fixGrids {
-				runMP3Fix(false)
-			}
-		case *fixGrids && !*dataOnly:
-			r.Mount, r.CheckedAt = m, time.Now().UTC()
-			mr, ferr := enginedb.FixMP3Grids(context.Background(), m, enginedb.MP3GridOptions{
-				Budget: mp3GridBudget(*deadline, false),
-			})
-			mp3Report = &mr
-			err = ferr
 			r.Healthy = err == nil
 		default:
 			// Edits the Web Console queued while Engine had this library open
@@ -151,9 +106,6 @@ func Guardian(args []string, out, errOut io.Writer) int {
 			} else {
 				r, err = dbhealer.HealMount(m, *sessions)
 			}
-			if err == nil {
-				runMP3Fix(*dataOnly)
-			}
 		}
 		if err == nil && !*status {
 			if progressErr := webui.RecordBootDatabaseProgress(*uiDir); progressErr != nil {
@@ -161,7 +113,7 @@ func Guardian(args []string, out, errOut io.Writer) int {
 				fmt.Fprintln(errOut, "engine-guardian: boot progress could not be recorded")
 			}
 		}
-		res := guardianResult{Report: r, MP3Grids: mp3Report}
+		res := guardianResult{Report: r}
 		if err != nil {
 			res.Error, res.Healthy, code = err.Error(), false, 1
 		}
