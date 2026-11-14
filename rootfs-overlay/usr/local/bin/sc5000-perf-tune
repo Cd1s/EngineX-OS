@@ -162,14 +162,17 @@ done
 # Every non-RT helper (including JobController and OfflineAnalyzer) avoids 1/2,
 # regardless of its inherited mask. Never change RT audio/MIDI policy or mask.
 engine_path=
+swept=
 engine_threads() {
     engine_path=
+    sweeping=
     for p in "$PROC"/[0-9]*; do
         analyzer=
         # Builtins only below: a cat/sed/awk per thread made every 30 s sweep ~560
         # forks over 3.5 s on the helpers' cores, and waveform frames 50-125 ms late.
         cmdline=; read -r cmdline 2>/dev/null <"$p/cmdline"
-        [ -n "$cmdline" ] || continue # a kernel thread
+        # Every other program (a kernel thread has no command line): no readlink for those.
+        case $cmdline in *Engine*|*OfflineAnalyzer*) ;; *) continue ;; esac
         case $(readlink "$p/exe" 2>/dev/null) in
             */Engine/Engine) engine_path=$p ;;
             */OfflineAnalyzer) analyzer=1 ;;
@@ -177,6 +180,11 @@ engine_threads() {
         esac
         for task in "$p"/task/[0-9]*; do
             read -r name 2>/dev/null <"$task/comm" || continue
+            # A thread the last sweep saw under this name is placed already. The shell reads a
+            # status file a byte at a time: 110 000 reads a sweep for them all, 1.2% of a core.
+            thread="${p##*/}/${task##*/}=$name"
+            sweeping="$sweeping|$thread|"
+            case $swept in *"|$thread|"*) continue ;; esac
             # An audio thread can be named before Engine promotes it to RT.
             case $name in AudioOut|AudioRenderer*|AudioWatcher) continue ;; esac
             read -r stat 2>/dev/null <"$task/stat" || continue
@@ -197,6 +205,7 @@ engine_threads() {
             taskset -pc "$want" "${task##*/}" >/dev/null 2>&1 || log "thread exited or affinity unavailable: ${task##*/}"
         done
     done
+    swept=$sweeping
 }
 engine_alive() {
     [ -n "$engine_path" ] || return 1
