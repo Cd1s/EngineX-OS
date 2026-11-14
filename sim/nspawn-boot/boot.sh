@@ -70,10 +70,15 @@ EOF
         source "$REPO/tools/az01-packer/settings-copy-guest.sh"
         settings_copy_prepare
     fi
+    if [ -n "${NSPAWN_IDLE_COST:-}" ]; then
+        source "$REPO/sim/nspawn-boot/idle-cost.sh"
+        idle_cost_prepare
+    fi
     cat "$W/masked-units.txt"
     date +%s%N > "$W/start-ns"
     local run_timeout=65s
     [ "${NSPAWN_SETTINGS_COPY_FLOW:-0}" != 1 ] || run_timeout=120s
+    [ -z "${NSPAWN_IDLE_COST:-}" ] || run_timeout=$((150 + ${NSPAWN_IDLE_SETTLE:-60} + NSPAWN_IDLE_COST))s
     SYSTEMD_LOG_TARGET=console SYSTEMD_LOG_LEVEL=debug \
         timeout --signal=TERM --kill-after=5s "$run_timeout" systemd-nspawn \
         --boot --directory="$R" --machine="nspawn-boot-$$" --register=no \
@@ -113,6 +118,7 @@ EOF
         guest /bin/systemctl is-system-running --quiet 2>/dev/null && break
         sleep 0.2
     done
+    [ -z "${NSPAWN_IDLE_COST:-}" ] || idle_cost_observe || failed=1
     if [ -n "$init_pid" ] && [ -e "/proc/$init_pid" ]; then
         guest /bin/journalctl -b --no-pager > "$W/journal.log" || failed=1
         guest /bin/journalctl -u engine.service --no-pager > "$W/engine.log" || failed=1
