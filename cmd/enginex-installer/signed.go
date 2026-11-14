@@ -153,8 +153,8 @@ func keepSums(o *options, dir string, sums, sig []byte, tag string) {
 	}
 }
 
-// verifyCached is for a package that was downloaded earlier and is picked up again without the
-// user naming it, when GitHub cannot be read. It is not the user's own build: it must come with
+// verifyCached checks a package selected automatically beside the installer or from an earlier
+// download. It is not the user's own build: it must come with
 // the signed list that was kept when it was downloaded, the signature must verify, and the list
 // must give the file's hash. Anything less is refused; the warn-only path of verifyLocal is for
 // files the user passes with --image or --bundle. It returns the release tag the list proves, for
@@ -165,7 +165,7 @@ func verifyCached(path string) (tag string, err error) {
 	sig, gerr := os.ReadFile(filepath.Join(dir, sigFile))
 	kept, terr := os.ReadFile(filepath.Join(dir, releasesig.TagEntryName))
 	if serr != nil || gerr != nil || terr != nil {
-		return "", fmt.Errorf("无法读取 GitHub，而本地的 %s 没有已验证的签名清单，拒绝使用 / GitHub cannot be read and the local %s has no verified signed list kept with it; nothing flashed", base, base)
+		return "", fmt.Errorf("本地的 %s 没有已验证的签名清单，拒绝使用 / the local %s has no verified signed list kept with it; nothing flashed", base, base)
 	}
 	keys, err := trustedKeys()
 	if err != nil {

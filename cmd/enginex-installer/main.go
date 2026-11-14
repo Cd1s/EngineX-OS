@@ -495,7 +495,7 @@ type release struct {
 	} `json:"assets"`
 }
 
-// fetchBundle downloads the latest release's Gen-2 *-Update.img (or legacy Data-Bundle.tar.gz fallback)
+// fetchBundle prefers this installer's matching signed sibling, else downloads the latest Gen-2 *-Update.img (or legacy Data-Bundle.tar.gz fallback)
 // for prefix into dir and checks GitHub's SHA-256 (#215).
 func fetchBundle(ctx context.Context, o *options, prefix, dir string) (string, error) {
 	if path, err := ownVersionPackage(o, prefix); path != "" || err != nil {
@@ -565,7 +565,7 @@ func fetchBundle(ctx context.Context, o *options, prefix, dir string) (string, e
 
 // fetchImage flashes only a file whose SHA-256 is in the release's signed SHA256SUMS.txt (#239).
 // gen1Image is the first-generation *-Update.img to install: the one --image/--bundle names (it must
-// be this model's EngineX AZ01 image), else the latest release's (BH-G2-7: both Gen-1 paths always
+// be this model's EngineX AZ01 image), else a matching signed sibling or the latest release's (BH-G2-7: both Gen-1 paths always
 // downloaded, so an offline install failed and an online one could flash another build).
 func gen1Image(ctx context.Context, o *options, prefix string) (string, error) {
 	o.release = ""
@@ -682,7 +682,7 @@ func downloadLimit(ctx context.Context, o *options, url, wantSHA, dest string, l
 	return os.Rename(part, dest)
 }
 
-// obtainBundle uses --bundle/--image, else checks the latest release and reuses a local package
+// obtainBundle uses --bundle/--image, else a matching signed sibling, else checks the latest release and reuses a local package
 // in the work dir only when its SHA-256 matches the latest asset (or when the latest release cannot
 // be read due to network/HTTP/proxy errors) (#215, #218).
 func obtainBundle(ctx context.Context, o *options, prefix string) (*bundleInfo, error) {
