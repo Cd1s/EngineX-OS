@@ -711,7 +711,18 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 		// Track's factory trigger already inserted PerformanceData(trackId).
 		// Fast mode leaves it empty, which is what makes Engine analyse on load.
 		if !fast {
-			if _, e = q.ExecContext(ctx, `UPDATE PerformanceData SET trackData=?,overviewWaveFormData=?,beatData=?,quickCues=?,loops=?,thirdPartySourceId=1,activeOnLoadLoops=? WHERE trackId=?`, perf.TrackData, perf.Overview, perf.Beats, perf.QuickCues, perf.Loops, perf.ActiveLoops, id); e != nil {
+			// Engine clears the source mark when it writes a loaded track back.
+			// Protect edits after an earlier performance import, while an initial
+			// fast import still needs its first Rekordbox cues/grid (#233).
+			if _, e = q.ExecContext(ctx, `UPDATE PerformanceData SET
+				trackData=?,overviewWaveFormData=?,
+				beatData=CASE WHEN old.imported AND thirdPartySourceId IS NULL AND beatData IS NOT NULL THEN beatData ELSE ? END,
+				quickCues=CASE WHEN old.imported AND thirdPartySourceId IS NULL AND quickCues IS NOT NULL THEN quickCues ELSE ? END,
+				loops=CASE WHEN old.imported AND thirdPartySourceId IS NULL AND loops IS NOT NULL THEN loops ELSE ? END,
+				activeOnLoadLoops=CASE WHEN old.imported AND thirdPartySourceId IS NULL AND loops IS NOT NULL THEN activeOnLoadLoops ELSE ? END,
+				thirdPartySourceId=CASE WHEN old.imported AND thirdPartySourceId IS NULL AND (beatData IS NOT NULL OR quickCues IS NOT NULL OR loops IS NOT NULL) THEN NULL ELSE 1 END
+				FROM (SELECT EXISTS(SELECT 1 FROM BridgeAnalysis WHERE trackId=?) AS imported) old
+				WHERE trackId=?`, perf.TrackData, perf.Overview, perf.Beats, perf.QuickCues, perf.Loops, perf.ActiveLoops, id, id); e != nil {
 				return result, e
 			}
 		}
@@ -871,18 +882,20 @@ func writePlaylists(ctx context.Context, q *stmtCache, l *rekordbox.Library, opt
 	}
 	// Delete leaves first: factory parent-delete triggers only cascade one level
 	// when recursive_triggers is disabled, so explicitly remove the whole owned tree.
-	rows, e := q.QueryContext(ctx, owned+` ORDER BY listId DESC`)
+	rows, e := q.QueryContext(ctx, `SELECT sourceId,listId FROM BridgePlaylist`+predicate+` ORDER BY listId DESC`)
 	if e != nil {
 		return e
 	}
 	var ids []int64
+	previousIDs := map[int64]int64{}
 	for rows.Next() {
-		var id int64
-		if e = rows.Scan(&id); e != nil {
+		var source, id int64
+		if e = rows.Scan(&source, &id); e != nil {
 			rows.Close()
 			return e
 		}
 		ids = append(ids, id)
+		previousIDs[source] = id
 	}
 	e = rows.Err()
 	rows.Close()
@@ -920,7 +933,12 @@ func writePlaylists(ctx context.Context, q *stmtCache, l *rekordbox.Library, opt
 				if e != nil {
 					return e
 				}
-				r, e := q.ExecContext(ctx, `INSERT INTO Playlist(title,parentListId,isPersisted,nextListId,isExplicitlyExported) VALUES(?,?,1,0,1)`, title, parent)
+				// Rebuilding membership/tree order must not change list identity.
+				var previousID any
+				if oldID, ok := previousIDs[int64(p.ID)]; ok {
+					previousID = oldID
+				}
+				r, e := q.ExecContext(ctx, `INSERT INTO Playlist(id,title,parentListId,isPersisted,nextListId,isExplicitlyExported) VALUES(?,?,?,1,0,1)`, previousID, title, parent)
 				if e != nil {
 					return e
 				}
@@ -954,7 +972,11 @@ func writePlaylists(ctx context.Context, q *stmtCache, l *rekordbox.Library, opt
 		if exists > 0 {
 			return fmt.Errorf("[Smart Match] already exists; source playlist is protected")
 		}
-		r, e := q.ExecContext(ctx, `INSERT INTO Playlist(title,parentListId,isPersisted,nextListId,isExplicitlyExported) VALUES('[Smart Match]',0,1,0,1)`)
+		var previousID any
+		if oldID, ok := previousIDs[-1]; ok {
+			previousID = oldID
+		}
+		r, e := q.ExecContext(ctx, `INSERT INTO Playlist(id,title,parentListId,isPersisted,nextListId,isExplicitlyExported) VALUES(?,'[Smart Match]',0,1,0,1)`, previousID)
 		if e != nil {
 			return e
 		}

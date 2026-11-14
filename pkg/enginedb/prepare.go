@@ -207,11 +207,15 @@ func prepareFast(ctx context.Context, res *compat.Resolver, l *rekordbox.Library
 // Both temporary paths and the final rename are in the import transaction.
 func stageOwnedMoves(ctx context.Context, tx *sql.Tx, prepared []preparedTrack, stagedOnly bool) (map[uint32]int64, error) {
 	targets := map[uint32]*preparedTrack{}
+	byPath := map[string]*preparedTrack{}
 	for i := range prepared {
 		p := &prepared[i]
 		targets[p.track.ID] = p
+		byPath["../"+p.rel] = p
 	}
-	rows, e := tx.QueryContext(ctx, `SELECT s.trackId,t.pdbImportKey,s.path,s.fingerprint FROM BridgeState s JOIN Track t ON t.id=s.trackId`)
+	// Legacy rows can share one import-wide pdbImportKey value. Our saved
+	// source record retains the per-track ID, including across moves/swaps.
+	rows, e := tx.QueryContext(ctx, `SELECT s.trackId,t.pdbImportKey,s.path,s.fingerprint,CASE WHEN json_valid(CAST(a.sourceJSON AS TEXT)) THEN json_extract(CAST(a.sourceJSON AS TEXT),'$.Track.ID') END FROM BridgeState s JOIN Track t ON t.id=s.trackId LEFT JOIN BridgeAnalysis a ON a.trackId=s.trackId`)
 	if e != nil {
 		return nil, e
 	}
@@ -222,13 +226,44 @@ func stageOwnedMoves(ctx context.Context, tx *sql.Tx, prepared []preparedTrack, 
 	var moves []move
 	var removed []int64
 	owned := map[uint32]int64{}
+	type ownedTrack struct {
+		id          int64
+		source      uint32
+		oldPath, fp string
+		recorded    sql.NullInt64
+	}
+	var tracks []ownedTrack
+	counts := map[uint32]int{}
 	for rows.Next() {
-		var id int64
-		var source uint32
-		var oldPath, fp string
-		if e = rows.Scan(&id, &source, &oldPath, &fp); e != nil {
+		var t ownedTrack
+		if e = rows.Scan(&t.id, &t.source, &t.oldPath, &t.fp, &t.recorded); e != nil {
 			rows.Close()
 			return nil, e
+		}
+		if t.recorded.Valid {
+			t.source = uint32(t.recorded.Int64)
+		}
+		tracks = append(tracks, t)
+		counts[t.source]++
+	}
+	e = rows.Err()
+	rows.Close()
+	if e != nil {
+		return nil, e
+	}
+	for _, t := range tracks {
+		id, source, oldPath, fp := t.id, t.source, t.oldPath, t.fp
+		if stagedOnly && source < 1<<24 && targets[source] == nil && byPath[oldPath] == nil {
+			continue // a remote-only import must not identify or remove absent local sources
+		}
+		// Fast/capped or damaged state may have no saved source ID. A unique
+		// owned path still identifies a row whose shared import key does not.
+		if !t.recorded.Valid && (counts[source] > 1 || targets[source] == nil) {
+			if p := byPath[oldPath]; p != nil {
+				source = p.track.ID
+			} else if counts[source] > 1 {
+				return nil, fmt.Errorf("cannot identify bridge track %d with shared source ID %d", id, source)
+			}
 		}
 		p, ok := targets[source]
 		if !ok {
@@ -253,11 +288,6 @@ func stageOwnedMoves(ctx context.Context, tx *sql.Tx, prepared []preparedTrack, 
 		if target != oldPath {
 			moves = append(moves, move{id, source})
 		}
-	}
-	e = rows.Err()
-	rows.Close()
-	if e != nil {
-		return nil, e
 	}
 	paths := map[string]uint32{}
 	for _, p := range prepared {
