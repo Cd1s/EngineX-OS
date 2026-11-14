@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -791,6 +792,175 @@ func TestStrayEthernetDefaultOnlyWhenWiFiHasARoute(t *testing.T) {
 	}
 	if _, ok := strayEthernetDefault("default via 10.0.0.1 dev eth0 \n" + wifi); ok {
 		t.Fatal("touched a real Ethernet gateway")
+	}
+}
+
+// applyRoutes does to a route table what GuardRoutes's ip commands do, and routeDev picks
+// the interface the kernel would: the lowest metric, the first added among equals.
+func applyRoutes(table string, add, del [][]string) string {
+	lines := strings.Split(strings.TrimRight(table, "\n"), "\n")
+	for i := range del {
+		if add[i] != nil {
+			lines = append(lines, strings.Join(add[i][2:], " "))
+		}
+		for n, line := range lines {
+			f := strings.Fields(line)
+			if len(f) > 2 && f[0] == del[i][2] && f[2] == "wlan0" && !strings.Contains(line, "metric") {
+				lines = append(lines[:n], lines[n+1:]...)
+				break
+			}
+		}
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
+func routeDev(table, subnet string) string {
+	dev, best := "", -1
+	for _, line := range strings.Split(table, "\n") {
+		f := strings.Fields(line)
+		if len(f) < 3 || f[0] != subnet {
+			continue
+		}
+		metric := 0
+		for i := 1; i+1 < len(f); i++ {
+			if f[i] == "metric" {
+				metric, _ = strconv.Atoi(f[i+1])
+			}
+		}
+		if best < 0 || metric < best {
+			dev, best = f[2], metric
+		}
+	}
+	return dev
+}
+
+// Real decks, two SC5000 on one router by cable and by Wi-Fi: the deck that held the USB
+// drive answered the other's Link loads over Wi-Fi, because wlan0 had its address 1.1 s
+// before eth0 (13-19 MB tracks took 7.4-11.3 s to load, 4.1 s from the drive itself).
+func TestCableGoesBeforeWiFiOnTheSameSubnet(t *testing.T) {
+	const gateway = "default via 192.168.1.6 dev wlan0 \n"
+	const hosts = "192.168.1.6 dev eth0 scope link \n192.168.1.6 dev wlan0 scope link \n"
+	const wifi = "192.168.1.0/24 dev wlan0 scope link  src 192.168.1.108 \n"
+	const cable = "192.168.1.0/24 dev eth0 scope link  src 192.168.1.224 \n"
+	for name, table := range map[string]string{"Wi-Fi up first (the deck's own table)": gateway + wifi + cable + hosts, "the cable up first": gateway + cable + wifi + hosts} {
+		add, del := wifiTwinRoutes(table)
+		if len(del) != 1 || add[0] == nil {
+			t.Fatalf("%s: %v %v", name, add, del)
+		}
+		if got := strings.Join(add[0], " "); got != "route add 192.168.1.0/24 dev wlan0 scope link src 192.168.1.108 metric 600" {
+			t.Fatalf("%s: %s", name, got)
+		}
+		fixed := applyRoutes(table, add, del)
+		if dev := routeDev(fixed, "192.168.1.0/24"); dev != "eth0" {
+			t.Fatalf("%s: the other deck is reached over %s\n%s", name, dev, fixed)
+		}
+		if !strings.Contains(fixed, gateway) || !strings.Contains(fixed, hosts) {
+			t.Fatalf("%s: the default route or the gateway's routes changed\n%s", name, fixed)
+		}
+		if add, del := wifiTwinRoutes(fixed); len(add)+len(del) != 0 {
+			t.Fatalf("%s: done twice: %v %v", name, add, del)
+		}
+		// connman brings Wi-Fi up again (a new lease): its route is back, behind the cable's or not.
+		for _, again := range []string{fixed + wifi, wifi + fixed} {
+			add, del := wifiTwinRoutes(again)
+			if len(del) != 1 || add[0] != nil {
+				t.Fatalf("%s: after connman set the route again: %v %v", name, add, del)
+			}
+			if dev := routeDev(applyRoutes(again, add, del), "192.168.1.0/24"); dev != "eth0" {
+				t.Fatalf("%s: after connman set the route again: %s", name, dev)
+			}
+		}
+		// The cable comes out: connman takes eth0's address and routes away, Wi-Fi still has its own.
+		out := strings.ReplaceAll(strings.ReplaceAll(fixed, cable, ""), "192.168.1.6 dev eth0 scope link \n", "")
+		if add, del := wifiTwinRoutes(out); len(add)+len(del) != 0 || routeDev(out, "192.168.1.0/24") != "wlan0" {
+			t.Fatalf("%s: with the cable out: %v %v\n%s", name, add, del, out)
+		}
+	}
+	for name, table := range map[string]string{
+		"Wi-Fi only":                        gateway + wifi + "192.168.1.6 dev wlan0 scope link \n",
+		"the cable only":                    "default via 192.168.1.6 dev eth0 \n" + cable + "192.168.1.6 dev eth0 scope link \n",
+		"the cable on another subnet":       gateway + wifi + "192.168.2.0/24 dev eth0 scope link  src 192.168.2.20 \n",
+		"a cable to the other deck + Wi-Fi": gateway + wifi + "169.254.0.0/16 dev eth0 scope link  src 169.254.31.7 \n" + "192.168.1.6 dev wlan0 scope link \n",
+		"a route through a gateway":         gateway + wifi + "192.168.1.0/24 via 10.0.0.1 dev eth0 \n",
+	} {
+		if add, del := wifiTwinRoutes(table); len(add)+len(del) != 0 {
+			t.Fatalf("%s: %v %v", name, add, del)
+		}
+	}
+}
+
+// Real decks, two SC5000 behind a Wi-Fi repeater by cable and on the router by Wi-Fi, the
+// kit of d7a2158: in two boots of two where the cable's address came 3 s after Wi-Fi's,
+// Engine logged "online check failed Timeout was reached" 10 s after the cable went first
+// and disconnected Wi-Fi. A packet from Wi-Fi's address that left by the cable had asked
+// for its neighbour with Wi-Fi's address; one such packet made a request bound to wlan0
+// time out, and none did once both interfaces asked with their own address.
+// Review of e216388: the other direction was still open. A request for Wi-Fi's address
+// that reaches the cable was answered there with the cable's hardware address (in a
+// network namespace the router learned it and the request bound to wlan0 timed out), so
+// both interfaces also answer for their own address only.
+func TestCableBeforeWiFiAsksAndAnswersWithItsOwnAddress(t *testing.T) {
+	dir := t.TempDir()
+	conf, table, calls := filepath.Join(dir, "conf"), filepath.Join(dir, "table"), filepath.Join(dir, "calls")
+	settings := []string{"eth0/arp_announce", "wlan0/arp_announce", "eth0/arp_ignore", "wlan0/arp_ignore"}
+	stock := func() {
+		for _, name := range append([]string{"lo/arp_announce", "lo/arp_ignore"}, settings...) {
+			os.RemoveAll(filepath.Join(conf, name))
+			os.MkdirAll(filepath.Dir(filepath.Join(conf, name)), 0o755)
+			os.WriteFile(filepath.Join(conf, name), []byte("0\n"), 0o644)
+		}
+	}
+	now := func(names ...string) string {
+		var got []string
+		for _, name := range names {
+			b, _ := os.ReadFile(filepath.Join(conf, name))
+			got = append(got, strings.TrimSpace(string(b)))
+		}
+		return strings.Join(got, " ")
+	}
+	// ip: prints the table, and records every change with what the two interfaces ask with
+	// and answer for at that moment.
+	script := "#!/bin/sh\nif [ \"$2\" = show ]; then cat '" + table + "'; exit; fi\ncd '" + conf + "'\n" +
+		"echo \"$* | $(for f in " + strings.Join(settings, " ") + "; do printf '%s ' \"$(cat $f)\"; done)\" >> '" + calls + "'\n"
+	if err := os.WriteFile(filepath.Join(dir, "ip"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := guardHostCommand("ip"); err != nil {
+		t.Fatal(err)
+	}
+	const gateway = "default via 192.168.1.6 dev wlan0 \n"
+	const wifi = "192.168.1.0/24 dev wlan0 scope link  src 192.168.1.187 \n"
+	const cable = "192.168.1.0/24 dev eth0 scope link  src 192.168.1.238 \n"
+
+	stock()
+	os.WriteFile(table, []byte(gateway+wifi+"192.168.1.6 dev wlan0 scope link \n"), 0o644)
+	guardRoutesOnce(context.Background(), conf)
+	if b, _ := os.ReadFile(calls); len(b) != 0 || now(settings...) != "0 0 0 0" {
+		t.Fatalf("Wi-Fi alone is not left as it is: %q %s", b, now(settings...))
+	}
+
+	os.WriteFile(table, []byte(gateway+wifi+cable), 0o644)
+	guardRoutesOnce(context.Background(), conf)
+	b, _ := os.ReadFile(calls)
+	if want := "route add 192.168.1.0/24 dev wlan0 scope link src 192.168.1.187 metric 600 | 2 2 1 1 \n" +
+		"route del 192.168.1.0/24 dev wlan0 scope link src 192.168.1.187 metric 0 | 2 2 1 1 \n"; string(b) != want {
+		t.Fatalf("the cable went first while an interface still asked with (2 2) or answered for (1 1) the other's address:\n%s", b)
+	}
+	if now("lo/arp_announce", "lo/arp_ignore") != "0 0" {
+		t.Fatal("an interface that shares no subnet was changed")
+	}
+
+	// Not every setting, no cable first: Wi-Fi keeps working as it did before the route change.
+	for _, name := range settings {
+		stock()
+		os.Remove(calls)
+		os.Remove(filepath.Join(conf, name))
+		os.Mkdir(filepath.Join(conf, name), 0o755) // cannot be written
+		guardRoutesOnce(context.Background(), conf)
+		if b, _ := os.ReadFile(calls); len(b) != 0 {
+			t.Fatalf("the cable went first without %s:\n%s", name, b)
+		}
 	}
 }
 
