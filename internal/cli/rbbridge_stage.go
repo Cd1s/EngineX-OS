@@ -114,6 +114,9 @@ func (s *stager) observe(ctx context.Context, d prolink.Device) {
 					continue
 				}
 				cache := filepath.Join(mount, prolink.StagedDir)
+				if _, err := os.Lstat(cache); err == nil && !realDir(cache) {
+					continue // a link or a file in its place: nothing is written through it either
+				}
 				s.tidy(cache)
 				room := func() int64 {
 					if statfs(mount, &fs) != nil {

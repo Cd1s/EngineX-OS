@@ -217,7 +217,7 @@ func TestStagingDropsLongUnseenPlayersForRoom(t *testing.T) {
 }
 
 // A drive is whatever was plugged in. A symbolic link where the staged libraries belong
-// could point at any folder: nothing is removed through it, with or without room.
+// could point at any folder: nothing is removed or written through it, with or without room.
 func TestStagingRemovesNothingThroughASymlink(t *testing.T) {
 	for name, other := range map[string]int64{"with room": 20 * stageGiB, "out of room": 64*stageGiB - 64*stageGiB/10} {
 		d := stageDrive{root: t.TempDir(), size: 64 * stageGiB, other: other}
@@ -229,7 +229,9 @@ func TestStagingRemovesNothingThroughASymlink(t *testing.T) {
 		if err := os.Symlink(elsewhere.cache(), d.cache()); err != nil {
 			t.Fatal(err)
 		}
-		stageSee(t, d, stageCDJ, 0, nil)
+		if calls := stageSee(t, d, stageCDJ, 0, nil); len(calls) != 0 {
+			t.Errorf("%s: a copy was started through a symbolic link: %+v", name, calls)
+		}
 		for _, kept := range []string{unfinished, old, leftover} {
 			if _, err := os.Stat(kept); err != nil {
 				t.Errorf("%s: removed through a symbolic link: %v", name, err)
