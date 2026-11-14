@@ -1,4 +1,5 @@
 # Sourced by boot.sh inside its private mount namespace when NSPAWN_IDLE_COST=<seconds>.
+# shellcheck shell=bash disable=SC2154 # W, R, REPO, init_pid and guest are boot.sh's
 idle_cost_prepare() {
     mkdir -p "$W/data/enginex/ui"
     # A settings.conf to boot with, e.g. one that turns the four-deck layout on.
