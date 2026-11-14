@@ -48,16 +48,14 @@ func TestMountReadsTheExportOnceAndBudgetsAfterIt(t *testing.T) {
 	}
 }
 
-// r2 review: with export.pdb and exportLibrary.db from the same rekordbox
-// export (mtimes within 5 s), the OneLibrary went first, which changed the
-// source, the Rekordbox IDs and the stamp of drives imported before.
-func TestExportPDBStaysFirstWhenBothFormatsAreFresh(t *testing.T) {
+// Prefer the richer export on timestamp ties, retaining genuinely newer PDBs.
+func TestExportSelectionFreshness(t *testing.T) {
 	cases := []struct {
 		name       string
 		oneLibDiff time.Duration
 		wantPDB    bool
 	}{
-		{"same export", 3 * time.Second, true},
+		{"same export", 3 * time.Second, false},
 		{"pdb newer", -time.Minute, true},
 		{"onelibrary newer", 10 * time.Second, false},
 	}
