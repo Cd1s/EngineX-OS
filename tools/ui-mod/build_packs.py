@@ -396,9 +396,12 @@ TIDAL_OPEN_530 = """	function scTidalProvider() {
 		return null
 	}
 	function scGatewayLogin(tp) {
-		if (tp && !tp.loggedIn && !scTidalLogoutPending) tp.loginToService(
-			JSON.stringify({provider: tp.name, accessToken: "enginex", refreshToken: "enginex"}),
-			1, "userInterfaceLogin")
+		if (tp && !tp.loggedIn) {
+			scTidalLogoutPending = false
+			tp.loginToService(
+				JSON.stringify({provider: tp.name, accessToken: "enginex", refreshToken: "enginex"}),
+				1, "userInterfaceLogin")
+		}
 	}
 	function scOpen(id) {
 		if (id === "tidal" && scSources.indexOf("tidal") < 0) return

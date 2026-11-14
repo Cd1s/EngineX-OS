@@ -6282,6 +6282,9 @@ assert.equal(tp.loggedIn,true,'late explicit logout stranded the Spotify carrier
 assert.equal(scTidalLogoutPending,false); assert.equal(scScope,'spotify');
 // An unrelated auth-state error must not start a re-login loop.
 tp.loggedIn=false; onLoggedInChanged(); assert.equal(tp.loggedIn,false);
+// A later explicit open still works if the native signal was not delivered.
+scTidalLogoutPending=true; scOpen('spotify'); pending[14].finish('spotify');
+assert.equal(tp.loggedIn,true); assert.equal(scTidalLogoutPending,false);
 """)
 
     def test_generated_530_packs_guard_profile_pairing_and_encoder(self):
