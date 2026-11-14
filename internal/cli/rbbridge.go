@@ -41,6 +41,10 @@ func RBBridge(args []string, stdout io.Writer) error {
 	link := fs.Bool("prolink", false, "listen for Rekordbox / Pro DJ Link announcements and player status")
 	bind := fs.String("bind", "0.0.0.0", "IPv4 address for Pro DJ Link listeners")
 	full := fs.Bool("full", false, "with --mount-path: read every file for cues and waveforms, even if unchanged")
+	exportXML := fs.Bool("export-xml", false, "export newly created Hot Cues, Loops and tracks to rekordbox.xml")
+	xmlTargetOS := fs.String("xml-target-os", "mac", "target OS for rekordbox.xml file paths: mac, win, linux")
+	xmlDriveLetter := fs.String("xml-drive-letter", "E", "drive letter for Windows paths in rekordbox.xml")
+	xmlOutput := fs.String("xml-output", "", "optional custom path for exported rekordbox.xml")
 	migrateArt := fs.Bool("migrate-artwork", false, "with --mount-path: only give an existing library the cover files Engine Link needs; Engine must not have the volume open")
 	smart := fs.Uint("smart-match", 0, "optional recommendation playlist relative to this Rekordbox track ID")
 	defaultStateFile := "/tmp/sc5000-prolink.json"
@@ -82,6 +86,19 @@ func RBBridge(args []string, stdout io.Writer) error {
 	var mu sync.Mutex
 	enc := json.NewEncoder(stdout)
 	emit := func(v any) { mu.Lock(); defer mu.Unlock(); _ = enc.Encode(v) }
+	if *mount != "" && *exportXML {
+		summary, err := bridge.ExportRekordboxXML(ctx, bridge.XMLExportOptions{
+			MountPath:   *mount,
+			TargetOS:    *xmlTargetOS,
+			DriveLetter: *xmlDriveLetter,
+			OutputPath:  *xmlOutput,
+		})
+		if err != nil {
+			return err
+		}
+		emit(summary)
+		return nil
+	}
 	if *mount != "" && *migrateArt {
 		n, err := enginedb.MigrateArtwork(ctx, *mount)
 		emit(map[string]int{"ArtworkMigrated": n})
