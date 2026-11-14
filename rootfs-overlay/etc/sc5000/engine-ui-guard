@@ -60,6 +60,22 @@ begin_attempt() {
     record boot-stage engine-start
     record boot-token "$token"
 }
+# An update image on an HFS+ stick is reached through edisksd-hook's view (a tmpfs of binds over
+# /media/<volume>). Walking up from it, the stock updater never meets the stick's root and hands the
+# update environment a wrong upgrade-file. Point it at the same file below the view's backing mount.
+stick_path() {
+    file=$(cat "$1" 2>/dev/null) || return 0
+    for view in "${SC5000_HFS_VIEWS:-/run/sc5000-hfs-views}"/view-*/view; do
+        dir=$file
+        while [ "$dir" != "${dir%/*}" ]; do
+            dir=${dir%/*}
+            [ "$dir" -ef "$view" ] || continue
+            real=${view%/view}/backing/${file#"$dir"/}
+            [ "$real" -ef "$file" ] && printf '%s\n' "$real" > "$1"
+            return 0
+        done
+    done
+}
 case ${1:-} in
 runtime)
     [ ! -e "$UI/safe-mode" ] || exit 0
@@ -112,6 +128,7 @@ launch)
     wait "$child"; result=$?
     trap - TERM INT HUP
     reason=$(cat "${SC5000_QUIT_REASON_FILE:-/tmp/engine-quit-reason}" 2>/dev/null)
+    [ "$reason" != UpdateFromFile ] || stick_path "${SC5000_UPDATE_FILE_PATH:-/tmp/update-file-path}"
     intentional=
     case $reason in Poweroff|Reboot|UpdateFromLoader|UpdateFromFile|UpdateFromUrl|TestApp|ControllerMode|UpdateFirmware|FactoryReset|AnalyticsChange) intentional=1 ;; esac
     if [ "$result" -ne 0 ] && [ "$result" -ne 7 ] && [ -z "$intentional" ]; then

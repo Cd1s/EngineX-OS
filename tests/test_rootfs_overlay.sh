@@ -725,8 +725,30 @@ done
 has 'SC5000_BOOT_TIMEOUT:-180' "$GUARD"
 has 'SC5000_BOOT_CRASH_LIMIT:-3' "$GUARD"
 has 'SC5000_BOOT_CRASH_WINDOW:-300' "$GUARD"
-unset SC5000_UI_DIR
-ok 'UI guard: deliberate restarts reset the boot count, crashes still reach safe-mode, failed FactoryReset and UpdateFromFile restart Engine'
+# An update image on an HFS+ stick is reached through edisksd-hook's view (a tmpfs of binds over
+# /media/<volume>), where the stock updater cannot find the stick's root. The guard must hand it
+# the same file below the view's backing mount. Links stand in for the mounts (-ef: device+inode).
+hfs=$TMP/hfs-update
+export SC5000_UI_DIR=$hfs/ui SC5000_HFS_VIEWS=$hfs/views SC5000_UPDATE_FILE_PATH=$hfs/update-file-path SC5000_QUIT_REASON_FILE=$hfs/quit-reason
+mkdir -p "$hfs/views/view-a/backing/Firmware" "$hfs/media/VOL/Engine Library" "$hfs/fat"
+: > "$hfs/views/view-a/backing/X-Update.img"; : > "$hfs/views/view-a/backing/Firmware/Y-Update.img"
+ln -s "$hfs/media/VOL" "$hfs/views/view-a/view"
+ln "$hfs/views/view-a/backing/X-Update.img" "$hfs/media/VOL/X-Update.img"
+ln -s "$hfs/views/view-a/backing/Firmware" "$hfs/media/VOL/Firmware"
+: > "$hfs/media/VOL/Engine Library/Z-Update.img"; : > "$hfs/fat/W-Update.img"
+printf '#!/bin/sh\necho "$1" > "$SC5000_QUIT_REASON_FILE"; printf %%s "$2" > "$SC5000_UPDATE_FILE_PATH"\n' > "$hfs/engine"
+while IFS='|' read -r reason path want; do
+    sh "$GUARD" launch sh "$hfs/engine" "$reason" "$hfs/$path" < /dev/null 2>/dev/null
+    [[ $(cat "$SC5000_UPDATE_FILE_PATH") == "$hfs/$want" ]] || fail "guard launch $reason $path: update file $(cat "$SC5000_UPDATE_FILE_PATH"), want $hfs/$want"
+done <<'CASES'
+UpdateFromFile|media/VOL/X-Update.img|views/view-a/backing/X-Update.img
+UpdateFromFile|media/VOL/Firmware/Y-Update.img|views/view-a/backing/Firmware/Y-Update.img
+UpdateFromFile|media/VOL/Engine Library/Z-Update.img|media/VOL/Engine Library/Z-Update.img
+UpdateFromFile|fat/W-Update.img|fat/W-Update.img
+Reboot|media/VOL/X-Update.img|media/VOL/X-Update.img
+CASES
+unset SC5000_UI_DIR SC5000_HFS_VIEWS SC5000_UPDATE_FILE_PATH SC5000_QUIT_REASON_FILE
+ok 'UI guard: deliberate restarts reset the boot count, crashes still reach safe-mode, failed FactoryReset and UpdateFromFile restart Engine, an update image on an HFS+ stick reaches the stock updater on the stick'"'"'s own mount'
 
 lacks '"/GUI/Scripted/ZoomIn"' "$ROOT/tools/ui-mod/build_packs.py"
 lacks 'BrowseEncoder.qml' "$ROOT/tools/ui-mod/build_packs.py"
