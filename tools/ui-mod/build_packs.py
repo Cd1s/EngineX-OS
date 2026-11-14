@@ -6947,7 +6947,7 @@ def edits(dev: bool):
                 text: "SWEEP FX"
                 enabled: Config.ui.hasSweepFxSelectionPopup
                 background: Rectangle {
-                    color: down ? Style.surface03Color : Style.surface02Color
+                    color: parent.down ? Style.surface03Color : Style.surface02Color
                     radius: 4
                     border.width: 1
                     border.color: Style.surface03Color
@@ -6965,10 +6965,10 @@ def edits(dev: bool):
                 highlighted: !!pads.scStripMode && pads.scStripMode.index === 1
                 enabled: Config.audio.hasStemsLevel && !!pads.scStripMode
                 background: Rectangle {
-                    color: highlighted ? Style.active01Color : (down ? Style.surface03Color : Style.surface02Color)
+                    color: parent.highlighted ? Style.active01Color : (parent.down ? Style.surface03Color : Style.surface02Color)
                     radius: 4
                     border.width: 1
-                    border.color: highlighted ? Style.active02Color : Style.surface03Color
+                    border.color: parent.highlighted ? Style.active02Color : Style.surface03Color
                 }
                 onClicked: pads.scStripMode.index = pads.scStripMode.index === 1 ? 0 : 1
             }
@@ -7032,7 +7032,7 @@ def edits(dev: bool):
                         font.pixelSize: 13
                         font.bold: true
                         background: Rectangle {
-                            color: down ? Style.surface03Color : Style.surface02Color
+                            color: parent.down ? Style.surface03Color : Style.surface02Color
                             radius: 4
                             border.width: 1
                             border.color: Style.surface03Color
