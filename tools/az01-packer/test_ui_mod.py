@@ -6496,5 +6496,49 @@ class ThreeBandPaletteTest(unittest.TestCase):
                 self.assertIn(f'elapsed{band}Color: rgbMode ? "{rgb_past}" : (root.scWave === "3band" ? "{past}" : Style.waveform{band}PastColor)', overview)
 
 
+class MixstreamPadsLayoutTest(unittest.TestCase):
+    """#261: Mixstream Pro (NH08/NH08S/NH10) pads bar layout tests.
+    Prevents Sweep FX and Stems EQ overlap while keeping native pads and Beat Jump accessible."""
+
+    def test_pads_layout_patch_applies_and_maintains_coexistence(self):
+        qrc = LAB / "5.3.0/qrc"
+        if not qrc.is_dir():
+            self.skipTest(f"{LAB} 5.3.0 QRC not found")
+        pads_path = qrc / "Skins/Embedded/Items/Pads/Pads.qml"
+        pads_content = pads_path.read_text(encoding="utf-8")
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            patches = bp.edits(False)[bp.ROOT + "Items/Pads/Pads.qml"]
+            for old, new in patches:
+                pads_content = bp.patch(pads_content, old, new, "Items/Pads/Pads.qml")
+        finally:
+            bp.ROOT = old_root
+
+        # 1. Verification of Mixstream controls structure
+        self.assertIn('visible: pads.scMixstream', pads_content)
+        self.assertIn('columns: pads.scBeatJumpBank ? 1 : 2', pads_content)
+        self.assertIn('objectName: "MixstreamSweepFx" + pads.deckIndex', pads_content)
+        self.assertIn('objectName: "MixstreamStemsEq" + pads.deckIndex', pads_content)
+        self.assertIn('objectName: "MixstreamBeatJumpBank" + pads.deckIndex', pads_content)
+        self.assertIn('id: padsLayout', pads_content)
+
+        # 2. Performance pads are not suppressed when Beat Jump bank is active (#261)
+        self.assertNotIn('visible: !pads.scBeatJumpBank', pads_content)
+
+        # 3. Compact button padding and background styling preventing visual overlap
+        self.assertIn('leftPadding: 4; rightPadding: 4', pads_content)
+        self.assertIn('font.pixelSize: 11', pads_content)
+        self.assertIn('background: Rectangle {', pads_content)
+
+        # 4. Non-Mixstream isolation: natural height preserved without forced stretching
+        column_block = pads_content.split('ColumnLayout {', 1)[1].split('GridLayout {\n                id: padsLayout', 1)[0]
+        self.assertIn('Layout.topMargin: pads.scMixstream && pads.scBeatJumpBank ? 8 : 16', column_block)
+        self.assertIn('Layout.bottomMargin: pads.scMixstream && pads.scBeatJumpBank ? 8 : 16', column_block)
+        self.assertIn('spacing: pads.scBeatJumpBank ? 4 : 0', column_block)
+        pads_layout_block = pads_content.split('id: padsLayout', 1)[1].split('Repeater {', 1)[0]
+        self.assertNotIn('Layout.fillHeight: true', pads_layout_block)
+
+
 if __name__ == "__main__":
     unittest.main()
