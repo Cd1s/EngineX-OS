@@ -116,6 +116,7 @@
 | 24 | `Layout → ENGINEX VIEW PRESET` | `Linked View` / 联机视图 / 聯機視圖 | 独立播放机切换 `Stock` / `Paired Player` / `4 Decks`，四通道一体机切换 `Stock` / `4 Decks` | `Stock` | `fourDeckWaveform=0\|1`、`pairedView=0\|1` | `four_deck_waveform`、`paired_view` | `Stock` 与另两项互切重启 Engine；`Paired Player` ↔ `4 Decks` 免重启（#49、#201） |
 | 25 | `Layout → ENGINEX VIEW PRESET` | `4-Deck Role` / 四轨角色 / 四軌角色 | 本机负责轨道：`Auto`、`1+3`、`2+4`、`1+2`、`3+4`、`1`、`2` | `auto` | `fourDeckRole=auto\|13\|24\|12\|34\|1\|2` | `four_deck_role` | 开启联机视图时显示，切换重启 Engine |
 | 26 | `Layout → ENGINEX VIEW PRESET` | `Shadow Deck Mode` / 影子轨模式 / 影子軌模式 | 切换 `Auto`、`All Engine Mode`、`All CDJ Mode` | `auto` | `shadowMode=auto\|engine\|cdj` | `shadow_mode` | 实时切换无需重启 Engine（#201） |
+| 27 | `Settings → Services` | `Remote Load (LAN API)` / 远程加载（局域网 API） / 遠端載入（區域網路 API） | 开启后局域网内持访问码的客户端可经 `/api/remote-load` 把 U 盘 / SD 卡上的歌加载到空闲轨道；正在播放的轨道不会被加载；只能在碟机上开关（网页控制台不提供，`POST /api/ui` 带 `remoteLoad` 返回 403）；接口见 `docs/remote-load-api.md` | 关 | `remoteLoad=0\|1` | `remote_load` | - |
 
 > 历史移除说明：旧版 `5.3.0.2` 曾在设备页放置的 `Jog Light Mode`（转盘灯效）与 `Auto-Analyze Drives (Unavailable)`（插盘自动分析占位开关）已在 `5.3.0.4` 从 QML 界面彻底移除。
 
@@ -379,6 +380,6 @@ beta:      ['Beta', '测试版', '測試版']
 
 ## 8. 附：`settings.conf` 键全表
 
-`lang`、`waveform`、`sources`、`known`、`scope`、`quality`、`jog`、`netease_mode`、`playhead`、`four_deck_waveform`、`four_deck_role`、`prolink_waveform`（默认开，仅 `=0` 写入）、`upfader_echo`、`auto_analyze`、`master_limiter`、`auto_gain`、`omni_source`、`prolink_share`、`prolink_export`、`github_repo`。布尔项只在为开时写入 `=1`（`prolink_waveform` 相反，只在为关时写入 `=0`），所以"文件里没有"等于默认值。
+`lang`、`waveform`、`sources`、`known`、`scope`、`quality`、`jog`、`netease_mode`、`playhead`、`four_deck_waveform`、`four_deck_role`、`prolink_waveform`（默认开，仅 `=0` 写入）、`upfader_echo`、`auto_analyze`、`master_limiter`、`auto_gain`、`omni_source`、`prolink_share`、`prolink_export`、`remote_load`、`github_repo`。布尔项只在为开时写入 `=1`（`prolink_waveform` 相反，只在为关时写入 `=0`），所以"文件里没有"等于默认值。
 
 只读状态字段（`/v1/sc5000/ui` 与 `/api/ui` 返回，不写入）：`version`、`safeMode`、`loggedIn`、`broadcastEnabled`、`relayUrl`、`deemixPasswordSet`、`prolinkExportActive`、`player`、`fourDeckRoleActive`；仅回环接口额外返回 `accessCode`、`consoleUrl`。
