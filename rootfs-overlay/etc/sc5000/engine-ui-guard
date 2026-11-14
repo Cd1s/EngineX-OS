@@ -142,7 +142,9 @@ watch)
     seen= progress= since=$(uptime_seconds) exported=0
     trap 'exit 0' TERM INT HUP
     while :; do
-        now=$(uptime_seconds)
+        # Builtins only once the UI is ready: this turn runs every second of a session, and its
+        # five forks (cut, cat, rm) cost more CPU than any of our daemons.
+        IFS= read -r now < "${SC5000_BOOT_UPTIME:-/proc/uptime}"; now=${now%%.*}
         if [ -e "$UI/safe-mode" ]; then
             if [ "$now" -ge "$exported" ]; then
                 exported=$((now + 5))
@@ -151,11 +153,13 @@ watch)
                 fi
             fi
         else
-            token=$(cat "$UI/boot-token" 2>/dev/null)
-            ready=$(cat "$UI/boot-ready" 2>/dev/null)
+            token= ready= stage=
+            IFS= read -r token 2>/dev/null < "$UI/boot-token"
+            IFS= read -r ready 2>/dev/null < "$UI/boot-ready"
             if [ -n "$token" ] && [ "$token" = "$ready" ]; then
-                rm -f "$UI/boot-count"
-                [ "$(cat "$UI/boot-stage" 2>/dev/null)" = ui-ready ] || record boot-stage ui-ready
+                [ ! -e "$UI/boot-count" ] || rm -f "$UI/boot-count"
+                IFS= read -r stage 2>/dev/null < "$UI/boot-stage"
+                [ "$stage" = ui-ready ] || record boot-stage ui-ready
             elif [ -n "$token" ]; then
                 if [ "$token" != "$seen" ]; then
                     seen=$token; progress=; since=$now
