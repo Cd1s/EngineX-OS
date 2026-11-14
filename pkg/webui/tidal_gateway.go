@@ -484,6 +484,18 @@ func (g *tidalGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	// An unpaired TIDAL browser must not turn a known gateway row into an
+	// authentication failure. Paired TIDAL keeps its own numeric ID namespace.
+	localTrack := false
+	if rest, ok := strings.CutPrefix(clean, "/v1/tracks/"); ok && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+		raw, endpoint, _ := strings.Cut(rest, "/")
+		if id, err := strconv.ParseInt(raw, 10, 64); err == nil && (endpoint == "" || endpoint == "playbackinfopostpaywall" || endpoint == "streamurl") {
+			g.mu.Lock()
+			_, localTrack = g.tracks[id]
+			g.mu.Unlock()
+			log.Printf("stream-sync: load track=%d scope=%s step=request local=%t", id, g.s.scope(), localTrack)
+		}
+	}
 	if !strings.HasPrefix(clean, "/v1/sc5000/") && !strings.HasPrefix(clean, "/v1/stream/") {
 		// Clone before changing headers or form bodies used by Engine.
 		r = r.Clone(r.Context())
@@ -495,7 +507,7 @@ func (g *tidalGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.s.uiMu.Lock()
 		v := g.s.loadUI()
 		g.s.uiMu.Unlock()
-		if v.Scope == "tidal" && slices.Contains(v.Sources, "tidal") {
+		if v.Scope == "tidal" && slices.Contains(v.Sources, "tidal") && (!localTrack || g.hasRealAuth()) {
 			// Only real TIDAL grants rotate tokens. Keep synthetic logins independent.
 			if r.Method == http.MethodPost && strings.HasSuffix(clean, "/oauth2/token") {
 				g.refreshMu.Lock()
@@ -1546,6 +1558,8 @@ func (g *tidalGateway) streamTarget(r *http.Request, id int64, ref trackRef) (ad
 		} else if codec != "flac" {
 			ext = "mp4"
 		}
+	} else if ref.track.Provider == "spotify" {
+		codec, ext = "vorbis", "ogg"
 	} else if g.s.jobs != nil {
 		switch strings.ToLower(path.Ext(g.s.jobs.File(ref.track))) {
 		case ".mp3":
@@ -1566,16 +1580,16 @@ func (g *tidalGateway) streamTarget(r *http.Request, id int64, ref trackRef) (ad
 	return "http://" + host + "/v1/stream/" + strconv.FormatInt(id, 10) + "." + ext, codec
 }
 
-// knownCodec downloads first when MP3 fallback is allowed, because the codec
-// is only known afterwards; otherwise Deemix delivers FLAC or fails.
+// Spotify always delivers native Vorbis. Other variable-codec sources download
+// first; otherwise Deemix delivers FLAC or fails.
 func (g *tidalGateway) knownCodec(w http.ResponseWriter, r *http.Request, ref trackRef) bool {
 	j := g.s.jobs
-	if ref.file != "" || j == nil || j.File(ref.track) != "" {
+	if ref.file != "" || ref.track.Provider == "spotify" || j == nil || j.File(ref.track) != "" {
 		return true
 	}
-	// These providers deliver mp3/mp4/ogg whatever the quality setting, so the real suffix is only known after the download.
+	// These providers can deliver different codecs regardless of the quality setting.
 	switch ref.track.Provider {
-	case "soundcloud", "spotify", "beatport", "webdav", "subsonic", "plex":
+	case "soundcloud", "beatport", "webdav", "subsonic", "plex":
 	default:
 		if !j.Lossy() {
 			return true
@@ -1593,6 +1607,7 @@ func (g *tidalGateway) playbackInfo(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	log.Printf("stream-sync: load track=%d provider=%s scope=%s step=request api=manifest", id, ref.track.Provider, g.s.scope())
 	if !g.knownCodec(w, r, ref) {
 		return
 	}
@@ -1606,11 +1621,13 @@ func (g *tidalGateway) playbackInfo(w http.ResponseWriter, r *http.Request) {
 		mime = "audio/ogg"
 	}
 	manifest, _ := json.Marshal(map[string]any{"mimeType": mime, "codecs": codec, "encryptionType": "NONE", "urls": []string{address}})
+	log.Printf("stream-sync: load track=%d provider=%s step=manifest codec=%s", id, ref.track.Provider, codec)
 	respond(w, map[string]any{"trackId": id, "assetPresentation": "FULL", "audioMode": "STEREO", "audioQuality": "LOSSLESS", "manifestMimeType": "application/vnd.tidal.bts", "manifestHash": "", "manifest": base64.StdEncoding.EncodeToString(manifest), "albumReplayGain": 0, "albumPeakAmplitude": 1, "trackReplayGain": 0, "trackPeakAmplitude": 1})
 }
 func (g *tidalGateway) streamURL(w http.ResponseWriter, r *http.Request) {
 	if id, ref, ok := g.lookup(w, r.PathValue("id")); ok && g.knownCodec(w, r, ref) {
 		address, codec := g.streamTarget(r, id, ref)
+		log.Printf("stream-sync: load track=%d provider=%s scope=%s step=manifest api=streamurl codec=%s", id, ref.track.Provider, g.s.scope(), codec)
 		respond(w, map[string]any{"url": address, "codec": codec, "soundQuality": "LOSSLESS", "trackId": id})
 	}
 }
@@ -1694,6 +1711,8 @@ func (g *tidalGateway) stream(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	started := time.Now()
+	log.Printf("stream-sync: load track=%d provider=%s scope=%s step=stream result=request", id, ref.track.Provider, g.s.scope())
 	if ref.file != "" { // OmniSource: straight from the drive, with Range
 		p, err := localFile(ref)
 		if err != nil {
@@ -1716,6 +1735,7 @@ func (g *tidalGateway) stream(w http.ResponseWriter, r *http.Request) {
 	http.NewResponseController(w).SetWriteDeadline(time.Time{})
 	p, err := g.s.jobs.Fetch(r.Context(), ref.session, ref.track, ref.guest)
 	if err != nil {
+		log.Printf("stream-sync: load track=%d provider=%s step=stream result=failed elapsed=%s canceled=%t error_type=%T", id, ref.track.Provider, time.Since(started).Round(time.Millisecond), r.Context().Err() != nil, err)
 		fail(w, 502, err)
 		return
 	}
@@ -1729,6 +1749,7 @@ func (g *tidalGateway) stream(w http.ResponseWriter, r *http.Request) {
 	} else if strings.HasSuffix(strings.ToLower(p), ".wav") {
 		w.Header().Set("Content-Type", "audio/wav")
 	}
+	log.Printf("stream-sync: load track=%d provider=%s step=stream result=ready elapsed=%s canceled=%t mime=%s", id, ref.track.Provider, time.Since(started).Round(time.Millisecond), r.Context().Err() != nil, w.Header().Get("Content-Type"))
 	// Engine's stm.db row exists by now; it may still be settling, so retry a few times.
 	go func() {
 		for _, wait := range []time.Duration{0, 800 * time.Millisecond, 1700 * time.Millisecond, 3500 * time.Millisecond} {
