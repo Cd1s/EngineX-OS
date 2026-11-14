@@ -340,15 +340,23 @@ func TestInstallerUsesItsOwnVersionBesideTheExecutable(t *testing.T) {
 	for _, c := range []struct {
 		name, prefix, path string
 		unsigned           bool
+		folder             string
 	}{
-		{"gen1 image", "SC5000", gen1, false},
-		{"gen2 image before legacy bundle", "SCLIVE4", b.ImagePath, false},
-		{"gen2 legacy bundle", "SCLIVE4", b.Path, false},
-		{"unsigned gen1 refused", "SC5000", gen1, true},
-		{"unsigned gen2 refused", "SCLIVE4", b.ImagePath, true},
+		{"gen1 image", "SC5000", gen1, false, ""},
+		{"gen2 image before legacy bundle", "SCLIVE4", b.ImagePath, false, ""},
+		{"gen2 legacy bundle", "SCLIVE4", b.Path, false, ""},
+		{"unsigned gen1 refused", "SC5000", gen1, true, ""},
+		{"unsigned gen2 refused", "SCLIVE4", b.ImagePath, true, ""},
+		{"folder with glob characters", "SC5000", gen1, false, "Engine [5.3.0.5] downloads"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			dir := t.TempDir()
+			if c.folder != "" {
+				dir = filepath.Join(dir, c.folder)
+				if err := os.Mkdir(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
 			installerExecutable = func() (string, error) { return filepath.Join(dir, "enginex-installer"), nil }
 			files := map[string]string{}
 			paths := []string{c.path}
@@ -390,6 +398,11 @@ func TestInstallerUsesItsOwnVersionBesideTheExecutable(t *testing.T) {
 			if c.unsigned {
 				if err == nil || !strings.Contains(err.Error(), "no verified signed list") {
 					t.Fatalf("unsigned automatic package: path=%q err=%v", path, err)
+				}
+				for _, hint := range []string{"SHA256SUMS.txt", "SHA256SUMS.txt.sig", "RELEASE-TAG.txt", "same release", "or remove the file"} {
+					if !strings.Contains(err.Error(), hint) {
+						t.Errorf("missing recovery guidance %q: %v", hint, err)
+					}
 				}
 			} else if err != nil || path != filepath.Join(dir, filepath.Base(c.path)) || o.release != "v5.3.0.5-r2" {
 				t.Fatalf("own-version selection: path=%q release=%q err=%v", path, o.release, err)

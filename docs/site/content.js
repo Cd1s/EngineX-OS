@@ -823,6 +823,10 @@
         { k: "shot", name: "21b-settings-copy.png", cap: L("复制设置前明确确认：Engine 将重启，播放会停止，本机身份保留", "複製設定前明確確認：Engine 將重新啟動，播放會停止，本機身分保留", "Receiving-deck confirmation: Engine restarts, playback stops, and local identity is retained") },
         { k: "shot", name: "21a-usb-profile-import.png", cap: L("恢复原厂配置导入提示：由用户选择 No / Yes", "恢復原廠設定檔匯入提示：由使用者選擇 No / Yes", "Restored stock profile prompt: the user chooses No or Yes") },
         { k: "note", tone: "new", text: L(
+          "5.3.0.5 开发中：安装器旁若有机型与安装器版本均匹配的 `*-Update.img` 或 `*-Data-Bundle.tar.gz`，会优先使用，不查询 `releases/latest`。同一目录还需放入同一发布版本的 `SHA256SUMS.txt`、`SHA256SUMS.txt.sig` 和 `RELEASE-TAG.txt`；缺少时请补齐这些文件，或移除本地镜像／数据包后查询最新版。",
+          "5.3.0.5 開發中：安裝器旁若有機型與安裝器版本均相符的 `*-Update.img` 或 `*-Data-Bundle.tar.gz`，會優先使用，不查詢 `releases/latest`。同一目錄還需放入同一發佈版本的 `SHA256SUMS.txt`、`SHA256SUMS.txt.sig` 和 `RELEASE-TAG.txt`；缺少時請補齊這些檔案，或移除本機映像／資料包後查詢最新版。",
+          "In development for 5.3.0.5: the installer prefers a matching model's `*-Update.img` or `*-Data-Bundle.tar.gz` for its own version beside the executable, without checking `releases/latest`. Keep `SHA256SUMS.txt`, `SHA256SUMS.txt.sig` and `RELEASE-TAG.txt` from that same release in the folder too; if they are missing, add them or remove the local image/bundle to check the latest release.") },
+        { k: "note", tone: "new", text: L(
           "5.3.0.5 开发中：EngineX 的 QML 缓存与原厂隔离，首次启动会清理旧共享缓存。恢复原厂前请先启动一次修复版，再正常关机并刷入官方固件；下方提供 r5 卡 Logo 的已验证缓存故障救援步骤。",
           "5.3.0.5 開發中：EngineX 的 QML 快取與原廠隔離，首次啟動會清理舊共用快取。恢復原廠前請先啟動一次修復版，再正常關機並刷入官方韌體；下方提供 r5 卡 Logo 的已驗證快取故障救援步驟。",
           "In development for 5.3.0.5: EngineX uses a separate QML cache and clears the old shared cache at startup. Boot the fixed build once before shutting down normally and flashing stock. The FAQ below gives the verified r5 recovery steps for the reproduced cache fault.") },

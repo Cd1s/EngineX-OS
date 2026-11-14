@@ -731,15 +731,29 @@ func ownVersionPackage(o *options, prefix string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	base := filepath.Join(filepath.Dir(exe), prefix+"-"+installerVersion+"-EngineX-OS-")
-	paths, _ := filepath.Glob(base + "*-Update.img")
-	if len(paths) == 0 {
-		paths, _ = filepath.Glob(base + "Data-Bundle.tar.gz")
+	dir := filepath.Dir(exe)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", err
 	}
-	if len(paths) == 0 {
+	base := prefix + "-" + installerVersion + "-EngineX-OS-"
+	var path string
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasPrefix(name, base) {
+			continue
+		}
+		if strings.HasSuffix(name, "-Update.img") {
+			path = filepath.Join(dir, name)
+			break
+		}
+		if name == base+"Data-Bundle.tar.gz" {
+			path = filepath.Join(dir, name)
+		}
+	}
+	if path == "" {
 		return "", nil
 	}
-	path := paths[0]
 	if o.release, err = verifyCached(path); err != nil {
 		return "", err
 	}

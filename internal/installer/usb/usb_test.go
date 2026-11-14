@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"os"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -218,6 +220,11 @@ func TestControlStaysOnSelectedInterface(t *testing.T) {
 // This smoke test enumerates descriptors only. It never opens or claims a
 // device and is also run as a precompiled executable on Windows and macOS.
 func TestNativeEnumeration(t *testing.T) {
+	if runtime.GOOS == "linux" {
+		if _, err := os.Stat("/sys/bus/usb/devices"); os.IsNotExist(err) {
+			t.Skip("Linux USB sysfs is unavailable")
+		}
+	}
 	b, err := NewBackend()
 	if err != nil {
 		t.Fatal(err)

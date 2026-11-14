@@ -202,6 +202,8 @@
 
 解壓後於終端機執行 `Install-EngineX.bat`（Windows）、`Install-EngineX.command`（macOS）或 `./install-enginex.sh`（Linux）。區域網路安裝需播放機已開啟 root SSH，可完整保留音樂與設定；**5.3.0.5（尚未發佈）**：安裝器原生建立映像並透過 USB 傳輸，無需 Python、fastboot、e2fsprogs、libusb 或 WSL。Windows 使用系統 WinUSB 驅動程式，Linux 的 USB 存取可能需要 `sudo`。現有 Python／Shell 輔助腳本在此版本保留為手動備用方式，舊版安裝器仍需其主機工具。**請先備份播放機資料**：透過 USB 刷入全新二代機 `/data` 映像會清空內建 `/data` 分割區上的音樂、曲庫與設定（刷機前請拔除隨身碟與 SD 卡）。
 
+**5.3.0.5（尚未發佈）**：若安裝器旁有機型與安裝器版本均相符的 `*-Update.img` 或 `*-Data-Bundle.tar.gz`，會優先使用，不查詢 `releases/latest`。同一目錄還需放入同一發佈版本的 `SHA256SUMS.txt`、`SHA256SUMS.txt.sig` 和 `RELEASE-TAG.txt`；缺少時請補齊這些檔案，或移除本機映像／資料包後查詢最新版。
+
 ### 方式一：一代機型 —— 隨身碟免電腦直接刷機
 1. 點擊下方對應你機器型號的直連網址下載 `*-Update.img` 韌體（或前往 [**Releases 頁面**](https://github.com/Cd1s/EngineX-OS/releases/latest)）：
    - **Denon DJ SC5000 Prime**：[`SC5000-5.3.0.4-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC5000-5.3.0.4-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img)
@@ -237,7 +239,7 @@
 
 從 [Releases](https://github.com/Cd1s/EngineX-OS/releases/latest) 下載電腦對應的安裝器。連結格式為 `https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-<VERSION>-<platform>.zip`（`linux-amd64` 使用 `.tar.gz`；ZIP 平台為 `windows-amd64`、`macos-amd64`、`macos-arm64`）。
 
-1. 先備份資料，讓播放機正常啟動 EngineX 並連接電腦所在的區域網路，先關閉其他碟機。Windows 執行 `Restore-Official-Firmware.bat`，macOS 執行 `.command`，Linux 執行 `.sh`（USB 權限不足時用 `sudo`）。等效命令是 `enginex-installer --restore-stock`。
+1. 先備份資料，讓播放機正常啟動 EngineX 並連接電腦所在的區域網路，先關閉其他播放機。Windows 執行 `Restore-Official-Firmware.bat`，macOS 執行 `.command`，Linux 執行 `.sh`（USB 權限不足時用 `sudo`）。等效命令是 `enginex-installer --restore-stock`。
 2. 第一代先確認清理共用 QML 快取。工具停止 Engine，只刪除它的共用 QML 快取，執行同步並正常關機，保留音樂與曲庫，避免 r5 舊快取導致官方韌體停在 Logo。第二代則使用現有的區域網路 SSH 解除安裝流程，不刷寫韌體。
 3. 拔除含更新檔案的儲存裝置。SC5000／SC5000M／SC6000／SC6000M 按住 **MEDIA EJECT + SOURCE + LAYER** 再開機，看到 **Computer Update** 或晶片圖示後放開，連接 USB 線。其他第一代機型請依[官方更新說明](https://support.enginedj.com/support/solutions/articles/69000797882)操作。
 4. 確認恢復官方 5.3.0 後保持供電與 USB 連線，直到刷寫及重新啟動完成。第一代映像直接從 Engine DJ 官方網址下載，也可從 [Engine DJ Downloads](https://enginedj.com/downloads) 下載對應機型的官方 5.3.0 檔案，以 `--image "官方映像路徑.img"` 指定。工具檢查 AZ01 機型、完整性與固定的官方 SHA-256，拒絕改名的 EngineX 或修改過的映像；安裝包不包含官方韌體。

@@ -165,7 +165,7 @@ func verifyCached(path string) (tag string, err error) {
 	sig, gerr := os.ReadFile(filepath.Join(dir, sigFile))
 	kept, terr := os.ReadFile(filepath.Join(dir, releasesig.TagEntryName))
 	if serr != nil || gerr != nil || terr != nil {
-		return "", fmt.Errorf("本地的 %s 没有已验证的签名清单，拒绝使用 / the local %s has no verified signed list kept with it; nothing flashed", base, base)
+		return "", fmt.Errorf("本地的 %s 没有已验证的签名清单，拒绝使用；请将同一发布版本的 SHA256SUMS.txt、SHA256SUMS.txt.sig 和 RELEASE-TAG.txt 放入同一文件夹，或移除此文件 / the local %s has no verified signed list kept with it; put SHA256SUMS.txt, SHA256SUMS.txt.sig and RELEASE-TAG.txt of the same release in this folder, or remove the file; nothing flashed", base, base)
 	}
 	keys, err := trustedKeys()
 	if err != nil {

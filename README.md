@@ -202,6 +202,8 @@ The system is slimmed down so all extra features use minimal storage and leave m
 
 Extract the archive and run `Install-EngineX.bat` (Windows), `Install-EngineX.command` (macOS), or `./install-enginex.sh` (Linux) in a terminal. LAN installation requires root SSH on the deck and preserves your library and settings. **5.3.0.5 (unreleased):** the executable prepares images and transfers over USB natively, without Python, fastboot, e2fsprogs, libusb or WSL. Windows uses the system WinUSB driver; Linux USB access may require `sudo`. Existing Python/shell helpers remain manual fallbacks for this release; older installers still need their host tools. **Back up your deck first**: writing a fresh second-generation `/data` image over USB erases internal `/data` storage (unplug USB sticks and SD cards beforehand).
 
+**5.3.0.5 (unreleased):** the installer prefers a matching model's `*-Update.img` or `*-Data-Bundle.tar.gz` for its own version beside the executable, without checking `releases/latest`. Keep `SHA256SUMS.txt`, `SHA256SUMS.txt.sig` and `RELEASE-TAG.txt` from that same release in the folder too; if they are missing, add them or remove the local image/bundle to check the latest release.
+
 ### Option 1: First-Generation Models — Direct USB Stick Install
 1. Download the `*-Update.img` file for your exact model (or visit [**Releases**](https://github.com/Cd1s/EngineX-OS/releases/latest)):
    - **Denon DJ SC5000 Prime**: [`SC5000-5.3.0.4-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC5000-5.3.0.4-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img)
