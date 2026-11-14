@@ -20,7 +20,7 @@ spec.loader.exec_module(bdb)
 TOP = 'SCLIVE4-5.3.0.1.1-EngineX-OS-Data-Bundle'
 # Stock engine scripts of second-generation decks, as kept in the build host's lab:
 # SC LIVE 4 (armhf) and SYSTEM ONE (AZ04).
-LAB = Path(os.environ.get('SC5000_LAB_DIR', '/root/build/sc5000-lab'))
+LAB = Path(os.environ.get('ENGINEX_LAB_DIR', '/root/build/sc5000-lab'))
 STOCK_GEN2 = [LAB / 'sclive4-rea61-followup/rootfs/usr/Engine/Scripts/engine',
               LAB / 'systemone-analysis/rootfs/usr/Engine/Scripts/engine']
 
@@ -1211,8 +1211,8 @@ pkill() { printf 'pkill %s\\n' "$*" >> "$KILLED"; }
         ba = self.tmp / 'boot-activate-update-file.sh'
         ba.write_text((src / 'boot-activate.sh').read_text().replace('/run/', str(run_dir) + '/')
                       .replace('/usr/Engine/Scripts/engine', str(engine_script)))
-        env = dict(self.env, SC5000_CUSTOM=str(dest), SC5000_TIMESTAMP_FILE=str(self.tmp / 'no-ts'),
-                   SC5000_CONFIG_DIR=str(dest.parent / '.config'))
+        env = dict(self.env, ENGINEX_CUSTOM=str(dest), ENGINEX_TIMESTAMP_FILE=str(self.tmp / 'no-ts'),
+                   ENGINEX_CONFIG_DIR=str(dest.parent / '.config'))
         guarded = (f'\tUPDATE_FILE=$({dest}/bundle/bin/engine-ui-guard update-file >/dev/null 2>&1; '
                    'cat /tmp/update-file-path)\n')
         for stock in STOCK_GEN2:
@@ -1223,7 +1223,7 @@ pkill() { printf 'pkill %s\\n' "$*" >> "$KILLED"; }
                 res = subprocess.run(['sh', str(ba)], env=env, capture_output=True, text=True)
                 self.assertEqual(res.returncode, 0, res.stderr)
                 self.host_commands.write_text('')  # the recorded bind of the rewritten script
-                rewritten = (run_dir / 'sc5000-engine-script').read_text()
+                rewritten = (run_dir / 'enginex-engine-script').read_text()
                 self.assertNotIn('UPDATE_FILE=$(cat /tmp/update-file-path)', rewritten)
                 self.assertEqual(rewritten.count(guarded), 1)
 

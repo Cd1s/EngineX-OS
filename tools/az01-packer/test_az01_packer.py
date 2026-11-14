@@ -20,9 +20,9 @@ import az01_packer as az
 # in the caller's sandbox (or the ordinary system temporary directory).
 TEST_TMPDIR = os.environ.get('ENGINEX_TEST_TMPDIR')
 # Official 5.3.0 images of the three first-generation image groups, as kept in the build host's lab.
-LAB = Path(os.environ.get('SC5000_LAB_DIR', '/root/build/sc5000-lab'))
+LAB = Path(os.environ.get('ENGINEX_LAB_DIR', '/root/build/sc5000-lab'))
 STOCK_530 = [LAB/'fw-5.3.0'/f'{name}-5.3.0-Update.img' for name in ('SC5000', 'SC6000', 'PRIME4')]
-GUARDED_UPDATE_FILE = (b'UPDATE_FILE=$(/etc/sc5000/engine-ui-guard update-file >/dev/null 2>&1; '
+GUARDED_UPDATE_FILE = (b'UPDATE_FILE=$(/etc/enginex/engine-ui-guard update-file >/dev/null 2>&1; '
                        b'cat /tmp/update-file-path)\n')
 
 
@@ -739,7 +739,7 @@ class FilesystemTests(unittest.TestCase):
     def test_overlay_debloat_guards_the_stock_update_file_step(self):
         # The stock scripts themselves: a base whose line no longer matches fails here instead of
         # silently keeping the stock step (an image on an HFS+ stick would then not install again).
-        debloat = (Path(__file__).resolve().parents[2]/'rootfs-overlay/usr/local/bin/sc5000-debloat').read_bytes()
+        debloat = (Path(__file__).resolve().parents[2]/'rootfs-overlay/usr/local/bin/enginex-debloat').read_bytes()
         for image in STOCK_530:
             with self.subTest(image=image.name):
                 stock = self.root/'stock.ext2'
