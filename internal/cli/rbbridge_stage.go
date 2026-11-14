@@ -3,6 +3,7 @@ package cli
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -127,6 +128,7 @@ func (s *stager) observe(ctx context.Context, d prolink.Device) {
 				if budget > 0 {
 					dst = filepath.Join(cache, name)
 					budget += dirSize(dst) // Stage counts what the folder already holds
+					// shortcut: Stage writes export.pdb last and outside the budget: one file of at most 64 MiB, against a reserve of 4 GiB
 					break
 				}
 			}
@@ -177,13 +179,17 @@ func (s *stager) waiting(name string) bool {
 // short, and a library that never got its export.pdb (bridge imports only one that has
 // it), unless a copy into it is running or waiting and goes on from what is there.
 func (s *stager) tidy(cache string) {
+	if !realDir(cache) {
+		return
+	}
 	dirs, _ := os.ReadDir(cache)
 	for _, d := range dirs {
 		dir := filepath.Join(cache, d.Name())
 		if !d.IsDir() {
 			continue
 		}
-		if _, err := os.Stat(prolink.StagedExport(dir)); os.IsNotExist(err) && !s.waiting(d.Name()) {
+		// ENOTDIR: a damaged library where PIONEER or rekordbox is a file has none either.
+		if _, err := os.Stat(prolink.StagedExport(dir)); (os.IsNotExist(err) || errors.Is(err, syscall.ENOTDIR)) && !s.waiting(d.Name()) {
 			if os.RemoveAll(dir) == nil {
 				log.Printf("rb-bridge: removed %s: its copy was never finished", dir)
 			}
@@ -207,6 +213,9 @@ func (s *stager) expire(cache string) bool {
 	if inUse == nil {
 		inUse = stagedInUse
 	}
+	if !realDir(cache) {
+		return false
+	}
 	var oldest string
 	var at time.Time
 	dirs, _ := os.ReadDir(cache)
@@ -225,6 +234,13 @@ func (s *stager) expire(cache string) bool {
 	}
 	log.Printf("rb-bridge: removed %s to make room: its player was last copied %s", oldest, at.Format("2006-01-02"))
 	return true
+}
+
+// realDir reports whether path is a directory itself. A symbolic link in the cache's place
+// could point anywhere: nothing is ever removed through one.
+func realDir(path string) bool {
+	st, err := os.Lstat(path)
+	return err == nil && st.IsDir()
 }
 
 // stagedInUse reports whether any process has a file under dir open.

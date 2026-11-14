@@ -157,7 +157,12 @@ func TestStagingRemovesWhatNoImportCanUse(t *testing.T) {
 	leftover := filepath.Join(kept, "Contents/a/.fetch-123")
 	stageFile(t, leftover, 1<<20, time.Time{})
 	mine := d.staged(t, "CDJ-3000 1 USB", stageGiB, false, 0) // this player's own, cut short: the copy goes on
+	damaged := filepath.Join(d.cache(), "XDJ 4 USB")
+	stageFile(t, filepath.Join(damaged, "PIONEER"), 4096, time.Time{}) // a file where the folder belongs
 	calls := stageSee(t, d, stageCDJ, 0, nil)
+	if _, err := os.Stat(damaged); !os.IsNotExist(err) {
+		t.Errorf("a library whose PIONEER is a file is still there: %v", err)
+	}
 	if _, err := os.Stat(gone); !os.IsNotExist(err) {
 		t.Errorf("a library without its export.pdb and with no copy running is still there: %v", err)
 	}
@@ -208,6 +213,28 @@ func TestStagingDropsLongUnseenPlayersForRoom(t *testing.T) {
 	recent = d.staged(t, "Recent 3 USB", 7*stageGiB, true, 13*day)
 	if calls := stageSee(t, d, stageCDJ, 0, nil); !there(recent) || len(calls) != 0 {
 		t.Errorf("a player seen within 14 days keeps its library, and nothing is copied over the budget: %v %+v", there(recent), calls)
+	}
+}
+
+// A drive is whatever was plugged in. A symbolic link where the staged libraries belong
+// could point at any folder: nothing is removed through it, with or without room.
+func TestStagingRemovesNothingThroughASymlink(t *testing.T) {
+	for name, other := range map[string]int64{"with room": 20 * stageGiB, "out of room": 64*stageGiB - 64*stageGiB/10} {
+		d := stageDrive{root: t.TempDir(), size: 64 * stageGiB, other: other}
+		elsewhere := stageDrive{root: t.TempDir()}
+		unfinished := elsewhere.staged(t, "XDJ 2 USB", stageGiB, false, 0)
+		old := elsewhere.staged(t, "Old 1 USB", stageGiB, true, 40*24*time.Hour)
+		leftover := filepath.Join(old, "Contents/a/.fetch-123")
+		stageFile(t, leftover, 1<<20, time.Time{})
+		if err := os.Symlink(elsewhere.cache(), d.cache()); err != nil {
+			t.Fatal(err)
+		}
+		stageSee(t, d, stageCDJ, 0, nil)
+		for _, kept := range []string{unfinished, old, leftover} {
+			if _, err := os.Stat(kept); err != nil {
+				t.Errorf("%s: removed through a symbolic link: %v", name, err)
+			}
+		}
 	}
 }
 
