@@ -1548,15 +1548,19 @@ func (g *tidalGateway) streamTarget(r *http.Request, id int64, ref trackRef) (ad
 		}
 	} else if g.s.jobs != nil {
 		switch strings.ToLower(path.Ext(g.s.jobs.File(ref.track))) {
-		case ".mp3":
+		case ".mp3", ".ogg":
+			// Engine OS's TIDAL client (handleManifest) only recognizes FLAC/flac,
+			// mp3 (from patched aac), and mp4a.40.2/5; advertising "vorbis" or ".ogg"
+			// causes Engine to drop the extension and fail in TrackDeckControlLoadWorker
+			// with FAILED_TO_CREATE_READER (#277). Serving .ogg under the patched "mp3"
+			// codec lets Engine save <id>.mp3, which ffmpegFileReader probes and decodes
+			// natively via libavformat's ogg demuxer.
 			codec, ext = "mp3", "mp3"
-		case ".ogg":
-			codec, ext = "vorbis", "ogg"
 		case ".mp4", ".m4a", ".aac":
 			// Engine saves this codec as .mp4, which its AAC reader opens.
 			codec, ext = "mp4a.40.2", "mp4"
 		case ".wav":
-			codec, ext = "wav", "wav"
+			codec, ext = "flac", "flac"
 		}
 	}
 	host := r.Host
@@ -1722,10 +1726,8 @@ func (g *tidalGateway) stream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "audio/flac")
 	if strings.HasSuffix(strings.ToLower(p), ".mp4") {
 		w.Header().Set("Content-Type", "audio/mp4")
-	} else if strings.HasSuffix(strings.ToLower(p), ".mp3") {
+	} else if strings.HasSuffix(strings.ToLower(p), ".mp3") || strings.HasSuffix(strings.ToLower(p), ".ogg") {
 		w.Header().Set("Content-Type", "audio/mpeg")
-	} else if strings.HasSuffix(strings.ToLower(p), ".ogg") {
-		w.Header().Set("Content-Type", "audio/ogg")
 	} else if strings.HasSuffix(strings.ToLower(p), ".wav") {
 		w.Header().Set("Content-Type", "audio/wav")
 	}
