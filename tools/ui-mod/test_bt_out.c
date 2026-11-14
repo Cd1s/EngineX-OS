@@ -1,6 +1,6 @@
-/* Bluetooth output: while a speaker listens (the encoder runs), hook_master_output keeps the pair bt_out= selects (brought
- * from the render rate to the A2DP stream rate), and hook_bt_send, which Engine calls inside the next callback, hands
- * exactly that to BluetoothSignalSender::audio, which otherwise gets silence. With nobody listening nothing runs.
+/* Bluetooth output: while a speaker listens (the encoder runs), hook_master_output sends the pair bt_out= selects
+ * (brought from the render rate to the A2DP stream rate) to the sender seen during that callback.
+ * BluetoothSignalSender::audio otherwise gets silence. With nobody listening nothing runs.
  * arm-linux-gnueabihf-gcc -O2 -mthumb -march=armv7-a -mfpu=neon -mfloat-abi=hard tools/ui-mod/test_bt_out.c -ldl -lpthread -lm -o /tmp/test_bt_out
  * Also native aarch64: gcc -O2 tools/ui-mod/test_bt_out.c -ldl -lpthread -lm. No Engine or rootfs needed.
  * The tests below the "regressions" line are written for the first versions of this feature too (-DBT_OUT_OLD with
@@ -207,6 +207,76 @@ static double bt_sum(void) {
 
 /* ---- regressions ---- */
 
+#if !defined(BT_OUT_OLD) && !defined(BT_OUT_FB)
+/* The sender runs before the render is ready. Hand it the finished block before returning
+ * from that same callback, without an extra callback of queueing or a second copy on drain. */
+static void test_latency(void) {
+    reset(48000, 44100);
+    block(4, 225);
+    fprintf(stderr, "hook queue: %d frames (%.3f ms), delivered %lld\n",
+            bt_pend, 1000.0 * bt_pend / 44100, delivered);
+    assert(delivered > 200 && bt_pend == 0);
+    long long before = delivered;
+    block0(225);
+    drain();
+    assert(delivered == before);
+    nested = 0;
+    block(4, 225); // no sender in this callback: do not reuse an earlier sender object
+    assert(delivered == before && bt_pend > 200);
+    drain();
+    assert(delivered > before && bt_pend == 0);
+}
+
+/* Use the shipped libsbc (argv[2]) to check the packet header and frame length,
+ * including a sink capped below 32. BT_OUT_QUALITY_OLD exercises stock directly. */
+static void test_quality(const char *path) {
+    void *lib = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
+    if (!lib) fprintf(stderr, "%s\n", dlerror());
+    assert(lib);
+    int (*init)(void *, unsigned long) = dlsym(lib, "sbc_init");
+    void (*finish)(void *) = dlsym(lib, "sbc_finish");
+    size_t (*length)(void *) = dlsym(lib, "sbc_get_frame_length");
+    int (*reinit)(void *, unsigned long, const void *, size_t) = sbc_reinit_a2dp;
+#ifdef BT_OUT_QUALITY_OLD
+    reinit = dlsym(lib, "sbc_reinit_a2dp");
+#endif
+    assert(init && finish && length && reinit);
+    unsigned long sbc[16] = {0};
+    int16_t pcm[256] = {0};
+    uint8_t packet[1024], config[] = {0x22, 0x15, 2, 53};
+    assert(init(sbc, 0) == 0);
+    static const uint8_t caps[] = {53, 31, 2, 53};
+    for (unsigned i = 0; i < sizeof caps; i++) {
+        config[3] = caps[i];
+        assert(reinit(sbc, 0, config, sizeof config) == 0);
+        ssize_t written = 0;
+        size_t frame = length(sbc);
+        assert(sbc_encode(sbc, pcm, sizeof pcm, packet, sizeof packet, &written) == sizeof pcm);
+        fprintf(stderr, "SBC cap %u: packet bitpool %u, frame %zu bytes\n", caps[i], packet[2], frame);
+        assert(packet[0] == 0x9c && packet[2] == caps[i] && written == (ssize_t)frame);
+    }
+    hook_test_engine = 0;
+    assert(reinit(sbc, 0, config, sizeof config) == 0);
+    assert(((uint8_t *)sbc)[sizeof(unsigned long) + 5] == 32);
+    hook_test_engine = 1;
+    assert(reinit(sbc, 0, config, 3) < 0);
+    config[2] = 0;
+    assert(reinit(sbc, 0, config, sizeof config) == -EINVAL);
+    config[2] = 54;
+    assert(reinit(sbc, 0, config, sizeof config) == -EINVAL);
+    config[2] = 2; config[3] = 251;
+    assert(reinit(sbc, 0, config, sizeof config) == -EINVAL);
+    config[0] = 0x28; config[1] = 0x19; config[3] = 100; // mono, 4 subbands: legal ceiling 64
+    assert(reinit(sbc, 0, config, sizeof config) == 0);
+    ssize_t written = 0;
+    assert(sbc_encode(sbc, pcm, 128, packet, sizeof packet, &written) == 128);
+    assert(packet[2] == 64 && written == (ssize_t)length(sbc));
+    config[2] = 65;
+    assert(reinit(sbc, 0, config, sizeof config) == -EINVAL);
+    finish(sbc);
+}
+#endif
+
 /* The filters overshoot a +-1 signal (1.08 at 96 -> 48 kHz, 1.15 at 48 -> 44.1 kHz) and the sender wraps what is past
  * full scale into the opposite polarity: nothing past +-1 may reach it, and a signal that is not a number is silence. */
 static void test_clip(void) {
@@ -230,8 +300,7 @@ static void test_clip(void) {
     for (int i = 260; i < got_n; i++) assert(fabsf(got[0][i] - 0.1f) < 0.002f && fabsf(got[1][i] - 0.1f) < 0.002f);
 }
 
-/* Engine calls the sender inside the callback, so the block it takes was kept by the callback before, whatever
- * length that was: a run of different lengths never falls back to Engine's own feed, and loses and repeats nothing. */
+/* Different callback lengths never fall back to Engine's own feed, and lose and repeat nothing. */
 static void test_blocks(void) {
     static const int cuts[] = {450, 451, 449, 450, 451, 449, 450, 450, 451, 449, 450, 451, 449, 450, 451, 449};
     reset(96000, 44100);
@@ -432,6 +501,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(only, "deck")) test_deck();
         else if (!strcmp(only, "ring")) test_ring();
 #if !defined(BT_OUT_OLD) && !defined(BT_OUT_FB)
+        else if (!strcmp(only, "latency")) test_latency();
+        else if (!strcmp(only, "quality")) { assert(argc == 3); test_quality(argv[2]); }
         else if (!strcmp(only, "realtime")) { test_realtime(48000, 225); test_realtime(96000, 450); test_realtime(44100, 225); }
 #endif
         else return 2;
@@ -475,7 +546,7 @@ int main(int argc, char **argv) {
         bt_send_orig = installed; nested = was;
     }
     block(4, 450);
-    assert(bt_pend > 0 && stock_calls == BT_IDLE + 8);
+    assert(bt_pend == 0 && delivered > 0 && stock_calls == BT_IDLE + 8);
     /* the speaker goes away: after BT_IDLE callbacks without the encoder it is Engine's feed again, and what waited is gone */
     listening = 0;
     for (int i = 0; i < BT_IDLE; i++) block(4, 450);
@@ -484,8 +555,7 @@ int main(int argc, char **argv) {
     assert(stock_calls == 1 && bt_pend == 0);
 
     /* An output pair of the device, as it is (render and stream rate equal): the default is the first pair,
-     * not off. Players are 4 channels, a PRIME 4 has 10. A copy comes two frames late, and the sender's call of the
-     * next callback takes it. */
+     * not off. Players are 4 channels, a PRIME 4 has 10. Interpolation adds two frames of history. */
     for (int channels = 4; channels <= 10; channels += 6)
         for (int pair = 0; pair < channels / 2; pair++) {
             reset(48000, 48000);
@@ -511,7 +581,7 @@ int main(int argc, char **argv) {
     /* The longest block at the highest ratio (44.1 kHz render to a 48 kHz stream) fits and leaves the position in range. */
     reset(44100, 48000);
     block(4, BT_BLOCK);
-    assert(bt_ip >= -2 && bt_pend > BT_BLOCK && bt_pend < BT_OUT);
+    assert(bt_ip >= -2 && bt_pend == 0 && delivered > BT_BLOCK && delivered < BT_OUT);
 
     /* A call without outputs (a player makes them too) between the kept block and the sender changes nothing: the block
      * goes once, whoever's sender call takes it. */
@@ -657,6 +727,7 @@ int main(int argc, char **argv) {
 
     /* regressions, above */
     test_ring();
+    test_latency();
     test_deck();
     test_clip();
     test_blocks();
