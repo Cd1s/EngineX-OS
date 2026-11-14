@@ -405,17 +405,59 @@ rm -rf "$SC5000_PROC_ROOT/400"
 ln -s /usr/Engine/Engine "$SC5000_PROC_ROOT/100/exe"
 has 'taskset <-pc> <0,3> <401>' "$MOCK_ROOT/log"
 ok 'the thread sweeper follows Engine across an in-loop restart under a new PID (BH-GC2-16)'
+# A thread the last sweep saw under the same name is not read again: reading them all was
+# 110 000 one-byte reads every 30 s on a deck, 1.2% of a core. Engine's pooled threads come
+# and go, so only the new thread is read. The fake status files never change: a thread
+# that is looked at is placed again.
+rm -f "$MOCK_ROOT/sleep-count" "$MOCK_ROOT/sweeper-done"
+cat > "$TMP/bin/sleep" <<'SLEEP'
+#!/bin/bash
+set -eu
+n=$(cat "$MOCK_ROOT/sleep-count" 2>/dev/null || printf 0)
+n=$((n + 1))
+printf '%s\n' "$n" > "$MOCK_ROOT/sleep-count"
+if [[ $n == 1 ]]; then
+    : > "$MOCK_ROOT/log" # the start-up sweep is over
+elif [[ $n == 2 ]]; then
+    cp "$MOCK_ROOT/log" "$MOCK_ROOT/log-unchanged"
+    cp -r "$SC5000_PROC_ROOT/100/task/105" "$SC5000_PROC_ROOT/100/task/111"
+elif [[ $n == 3 ]]; then
+    unlink "$SC5000_PROC_ROOT/100/exe"
+    touch "$MOCK_ROOT/sweeper-done"
+fi
+SLEEP
+chmod +x "$TMP/bin/sleep"
+SC5000_THREAD_DELAYS=0 SC5000_THREAD_INTERVAL=30 sh "$PERF" > "$MOCK_ROOT/output" 2>&1
+for ((attempt=0; attempt<100; attempt++)); do
+    [[ ! -e $MOCK_ROOT/sweeper-done ]] || break
+    /bin/sleep 0.05
+done
+unlink "$TMP/bin/sleep"
+rm -rf "$SC5000_PROC_ROOT/100/task/111"
+ln -s /usr/Engine/Engine "$SC5000_PROC_ROOT/100/exe"
+[[ -e $MOCK_ROOT/log-unchanged ]] || fail 'the sweeper did not reach its second sweep'
+lacks '<103>' "$MOCK_ROOT/log-unchanged"
+has 'taskset <-pc> <0,3> <111>' "$MOCK_ROOT/log"
+lacks '<103>' "$MOCK_ROOT/log"
+ok 'a thread that is already placed is not read again; a new thread is placed'
 
-# The sweep runs beside playback every 30 s: no process per Engine thread.
-for tool in cat sed awk; do
+# The sweep runs beside playback every 30 s: no process per Engine thread, and none for a
+# program that is neither Engine nor its analyzer.
+mkdir -p "$SC5000_PROC_ROOT/500"
+ln -s /usr/local/bin/stream-sync "$SC5000_PROC_ROOT/500/exe"
+printf '/usr/local/bin/stream-sync\n' > "$SC5000_PROC_ROOT/500/cmdline"
+for tool in cat sed awk readlink; do
     real=$(command -v "$tool")
     printf '#!/bin/sh\nprintf "%%s\\n" "%s $*" >> "$MOCK_ROOT/forks"\nexec %s "$@"\n' "$tool" "$real" > "$TMP/bin/$tool"
     chmod +x "$TMP/bin/$tool"
 done
 : > "$MOCK_ROOT/forks"; : > "$MOCK_ROOT/log"
 sh "$PERF" > "$MOCK_ROOT/output" 2>&1
-rm "$TMP/bin/cat" "$TMP/bin/sed" "$TMP/bin/awk"
+rm "$TMP/bin/cat" "$TMP/bin/sed" "$TMP/bin/awk" "$TMP/bin/readlink"
+rm -r "$SC5000_PROC_ROOT/500"
 lacks '/task/' "$MOCK_ROOT/forks"
+lacks '/500/exe' "$MOCK_ROOT/forks"
+has '/100/exe' "$MOCK_ROOT/forks"
 has 'taskset <-pc> <2> <103>' "$MOCK_ROOT/log"
 ok 'the Engine thread sweep reads /proc with shell builtins'
 
