@@ -3402,7 +3402,10 @@ SERVICES_MAIN = """
 @TIDAL_PAIRING@
 			if (scSelectPending) scSelectPending = !scSelectTidal()
 			const row = scFindMyPlaylists(uiContainer)
-			if (row) row.clicked(null)
+			if (row) {
+				if (typeof row.push === "function") row.push()
+				else row.clicked({})
+			}
 			if (row || --scEnterTries <= 0) stop()
 		}
 	}
@@ -6169,7 +6172,7 @@ def edits(dev: bool):
              "			readonly property int scVisibleRows: {\n"
              "				void contentView.scModelRev\n"
              "				if (!breadcrumbView.isStreamingContent || root.scScope === \"tidal\" || contentView.StackView.index !== 0 || !contentView.model) return contentView.rowCount\n"
-             "				const hidden = root.scScope === \"netease\" ? [\"Featured\", \"Genres\", \"Moods\", \"TIDAL Rising\"] : [\"My Collection\", \"Featured\", \"Genres\", \"Moods\", \"TIDAL Rising\"]\n"
+             "				const hidden = root.scScope === \"netease\" ? [\"Featured\", \"Genres\", \"Moods\", \"TIDAL Rising\", \"Tidal Rising\"] : [\"My Collection\", \"Featured\", \"Genres\", \"Moods\", \"TIDAL Rising\", \"Tidal Rising\"]\n"
              "				const roles = contentView.model.roles ? contentView.model.roles() : null\n"
              "				const dispRole = roles && roles.display !== undefined ? roles.display : 0\n"
              "				let n = contentView.rowCount\n"
@@ -6187,7 +6190,7 @@ def edits(dev: bool):
              "					breadcrumbView.keyPressedForSelection()\n					if (currentRowIndex + 1 < scVisibleRows) currentRowIndex++\n"),
             ('				objectName: "Browser_Collection_StackView_ViewDelegate"\n',
              '				objectName: "Browser_Collection_StackView_ViewDelegate"\n'
-             '				readonly property bool scHidden: breadcrumbView.isStreamingContent && root.scScope !== "tidal" && contentView.StackView.index === 0 && !!modelData && (root.scScope === "netease" ? ["Featured", "Genres", "Moods", "TIDAL Rising"] : ["My Collection", "Featured", "Genres", "Moods", "TIDAL Rising"]).indexOf(modelData.display) >= 0\n'
+             '				readonly property bool scHidden: breadcrumbView.isStreamingContent && root.scScope !== "tidal" && contentView.StackView.index === 0 && !!modelData && (root.scScope === "netease" ? ["Featured", "Genres", "Moods", "TIDAL Rising", "Tidal Rising"] : ["My Collection", "Featured", "Genres", "Moods", "TIDAL Rising", "Tidal Rising"]).indexOf(modelData.display) >= 0\n'
              # The view assigns visible itself and would undo a binding. These rows
              # end the list, so what stays is blank space below My Playlists.
              '				opacity: scHidden ? 0 : 1\n'),

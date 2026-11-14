@@ -122,6 +122,82 @@ assert.deepStrictEqual(opened, ["spotify"]);
             view_joined = "\n".join(new for _old, new in edits[view_key])
             self.assertIn("contentContainer.stackView.currentItem.scVisibleRows", view_joined)
 
+    def test_breadcrumb_stack_view_hides_tidal_rising_both_casings_issue_279(self):
+        bp = load_build_packs()
+        # Verify scEnterTimer uses push()
+        self.assertIn('if (typeof row.push === "function") row.push()', bp.SERVICES_MAIN)
+        self.assertIn("else row.clicked({})", bp.SERVICES_MAIN)
+
+        for root in ("Skins/Embedded/", "Skins/EmbeddedCommon/"):
+            bp.ROOT = root
+            edits = bp.edits(False)
+            stack_key = root + "Views/BrowseView/Components/BreadcrumbView/BreadcrumbStackView.qml"
+            stack_joined = "\n".join(new for _old, new in edits[stack_key])
+            self.assertIn('"TIDAL Rising", "Tidal Rising"', stack_joined)
+
+        # Behavioral test in Node for both 5.0.4 ("TIDAL Rising") and 5.3.0 ("Tidal Rising")
+        script = """
+const assert = require("assert");
+
+function evalRows(scope, categories) {
+    const hidden = scope === "netease"
+        ? ["Featured", "Genres", "Moods", "TIDAL Rising", "Tidal Rising"]
+        : ["My Collection", "Featured", "Genres", "Moods", "TIDAL Rising", "Tidal Rising"];
+    let n = categories.length;
+    while (n > 0) {
+        const entryLabel = categories[n - 1];
+        if (hidden.indexOf(entryLabel) < 0) break;
+        n--;
+    }
+    const hiddenMap = {};
+    for (let i = 0; i < categories.length; i++) {
+        const cat = categories[i];
+        hiddenMap[cat] = scope !== "tidal" && hidden.indexOf(cat) >= 0;
+    }
+    return { visibleRows: scope === "tidal" ? categories.length : n, hiddenMap };
+}
+
+// 5.3.0 casing: "Tidal Rising"
+const stock530 = ["My Playlists", "My Collection", "Featured", "Genres", "Moods", "Tidal Rising"];
+
+// Spotify (Issue #279): should collapse to 1 visible row ("My Playlists"), no blank gaps
+const resSpotify530 = evalRows("spotify", stock530);
+assert.strictEqual(resSpotify530.visibleRows, 1);
+assert.strictEqual(resSpotify530.hiddenMap["My Playlists"], false);
+assert.strictEqual(resSpotify530.hiddenMap["My Collection"], true);
+assert.strictEqual(resSpotify530.hiddenMap["Featured"], true);
+assert.strictEqual(resSpotify530.hiddenMap["Genres"], true);
+assert.strictEqual(resSpotify530.hiddenMap["Moods"], true);
+assert.strictEqual(resSpotify530.hiddenMap["Tidal Rising"], true);
+
+// NetEase: keeps "My Playlists" and "My Collection", hides 4 categories
+const resNetease530 = evalRows("netease", stock530);
+assert.strictEqual(resNetease530.visibleRows, 2);
+assert.strictEqual(resNetease530.hiddenMap["My Playlists"], false);
+assert.strictEqual(resNetease530.hiddenMap["My Collection"], false);
+assert.strictEqual(resNetease530.hiddenMap["Tidal Rising"], true);
+
+// Tidal: keeps all 6 categories
+const resTidal530 = evalRows("tidal", stock530);
+assert.strictEqual(resTidal530.visibleRows, 6);
+for (const cat of stock530) assert.strictEqual(resTidal530.hiddenMap[cat], false);
+
+// 5.0.4 casing: "TIDAL Rising"
+const stock504 = ["My Playlists", "My Collection", "Featured", "Genres", "Moods", "TIDAL Rising"];
+const resSpotify504 = evalRows("spotify", stock504);
+assert.strictEqual(resSpotify504.visibleRows, 1);
+assert.strictEqual(resSpotify504.hiddenMap["TIDAL Rising"], true);
+
+const resNetease504 = evalRows("netease", stock504);
+assert.strictEqual(resNetease504.visibleRows, 2);
+assert.strictEqual(resNetease504.hiddenMap["TIDAL Rising"], true);
+
+const resTidal504 = evalRows("tidal", stock504);
+assert.strictEqual(resTidal504.visibleRows, 6);
+"""
+        res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+
     def test_connected_source_clears_sc_tidal_row_on_destruction_bh2_a6_7(self):
         bp = load_build_packs()
         for root in ("Skins/Embedded/", "Skins/EmbeddedCommon/"):
