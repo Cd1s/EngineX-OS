@@ -195,10 +195,7 @@ func (d *Deezer) Playlists(ctx context.Context) ([]Playlist, error) {
 		}
 		return out, err
 	})
-	if err != nil {
-		return nil, err
-	}
-	return all, nil
+	return all, err
 }
 func (d *Deezer) Tracks(ctx context.Context, id string) ([]Track, error) {
 	all, err := collectPages(ctx, deezerPages, 100, 1000, func(page int) (listPage[Track], error) {
@@ -214,10 +211,7 @@ func (d *Deezer) Tracks(ctx context.Context, id string) ([]Track, error) {
 		}
 		return out, err
 	})
-	if err != nil {
-		return nil, err
-	}
-	return all, nil
+	return all, err
 }
 func (d *Deezer) Search(ctx context.Context, query string) ([]Track, error) {
 	var r struct{ Data []dzTrack }

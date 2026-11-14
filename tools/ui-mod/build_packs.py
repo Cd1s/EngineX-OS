@@ -2533,7 +2533,7 @@ SERVICES_MAIN = """
 			message: root.scT("Restart Engine to apply? Playback will stop."),
 			options: Prompt.Cancel | Prompt.Ok
 		})
-		prompt.finished.connect(function(r) { if (r === Prompt.AcceptRole) scCall(query + "&restart=1") })
+		prompt.finished.connect(function(r) { if (r === Prompt.AcceptRole) scCall(query, function() { Planck.quit(QuitReasons.AnalyticsChange, false) }) })
 	}
 	property string scUpdateRepo: "Cd1s/EngineX-OS"
 	// #79: only GET /v1/sc5000/ui (loopback) carries these; shown in Settings -> About.
@@ -3048,6 +3048,34 @@ SERVICES_MAIN = """
 		ignoreUnknownSignals: true
 		function onTimeZoneSelect() { root.scTimeZonePickerUsed = true }
 		function onSystemTimeZoneSetSucceeded() { root.scOnTimeZoneChanged() }
+	}
+	// 5.3.0.5 Bluetooth speaker output: which output pair a connected speaker gets (GET/POST /v1/sc5000/bluetooth, loopback).
+	// The names are the API's; the panel shows them as the deck names its outputs.
+	property var scBtLayers: []
+	property string scBtLayer: ""
+	function scBtLabel(name) { return name === "Master" ? "Main" : name }
+	function scBtLabels(names) { return names.map(scBtLabel) }
+	function scBtReply(x) {
+		if (x.readyState !== 4 || x.status !== 200) return
+		const r = JSON.parse(x.responseText)
+		scBtLayers = r.layers || []
+		scBtLayer = r.assignLayer || ""
+	}
+	function scBtLoad() {
+		const x = new XMLHttpRequest()
+		x.open("GET", "http://127.0.0.1:8080/v1/sc5000/bluetooth")
+		x.onreadystatechange = function() { scBtReply(x) }
+		x.send()
+	}
+	function scBtSet(name) {
+		const x = new XMLHttpRequest()
+		x.open("POST", "http://127.0.0.1:8080/v1/sc5000/bluetooth?assignLayer=" + encodeURIComponent(name))
+		x.onreadystatechange = function() {
+			if (x.readyState !== 4) return
+			if (x.status === 200) scBtReply(x)
+			else scBtLoad()
+		}
+		x.send()
 	}
 	function scCall(query, done) {
 		if (!query && !done) {
@@ -3927,6 +3955,39 @@ Grid {
 	}
 }
 """
+
+# Bluetooth panel (5.3.0): "Output Source" under "Assign Input to", for the speaker the panel's own Available Devices
+# list pairs and connects. Only models that offer more than one output (Layer A/B, Main/Booth/Headphones/Zone).
+BLUETOOTH_OUT_ENTRY = """            PrefsConditionalEntry {
+                active: Config.audio.hasBluetoothOutput && root.scBtLayers.length > 1
+                sourceComponent: ListEntry {
+                    implicitHeight: 72
+                    text: "Output Source"
+                    objectName: "Bluetooth_OutputSource"
+                    textColor: Style.font02Color
+                    values: root.scBtLabels(root.scBtLayers)
+                    currentValue: root.scBtLabel(root.scBtLayer)
+                    onSelected: index => {
+                        root.scBtSet(root.scBtLayers[index])
+                    }
+                    entryWidth: narrow
+                        ? PrefsComponentSizes.ListEntryButton.Smaller
+                        : PrefsComponentSizes.ListEntryButton.Default
+                }
+            }
+"""
+BLUETOOTH_SELECT = [
+    ("    navigation: controller.navigation\n",
+     "    navigation: controller.navigation\n"
+     "    Connections {\n"
+     "        target: dialog.controller\n"
+     "        function onVisibleChanged() { if (dialog.controller.visible) root.scBtLoad() }\n"
+     "    }\n"
+     "    Component.onCompleted: root.scBtLoad()\n"),
+    ('            PrefsSliderEntry {\n                text: "Bluetooth Device Volume"\n',
+     BLUETOOTH_OUT_ENTRY + '            PrefsSliderEntry {\n                text: "Bluetooth Device Volume"\n'),
+]
+
 
 STREAM_SWITCHES = """
 	Repeater {
@@ -5981,6 +6042,7 @@ def edits(dev: bool):
 \t\t\t},
 \t\t\t""" + ("CrossfaderCalibration {}" if v53() else "CrossfaderCalibration { }")),
         ],
+        **({v + "Bluetooth/BluetoothSelect.qml": BLUETOOTH_SELECT} if v53() else {}),
         prefs + "Entries/StreamingServices.qml": [
             ("		visible: !isCloudService && !isEaasService\n", '		visible: !isCloudService && !isEaasService && ["TIDAL", "Tidal", "SoundCloud", "Beatport LINK"].indexOf(provider.name) < 0\n'),
             ('import "Base"\n', 'import QtQuick.Layouts 1.12\nimport "Base"\n'),
@@ -6098,10 +6160,12 @@ def edits(dev: bool):
             ),
         ],
         # Engine asks TIDAL's image server for a row's artwork; the other services' come
-        # from the gateway. The row's provider label marks a streaming row.
+        # from the gateway. The row's provider label marks a streaming row. Like the deck
+        # (scDeckArtUrl), a row Engine has art for keeps it: Remote Library rows carry a
+        # provider label too (#223).
         v + "BrowseView/Components/Components/AlbumArt.qml": [(
             'source: row.modelData.albumArt ? row.modelData.albumArt : ""',
-            'source: row.streamingProviderName && root.scScope !== "tidal" && row.modelData.song'
+            'source: (!row.modelData.albumArt || row.modelData.albumArt === "image://streaming/") && row.streamingProviderName && root.scScope !== "tidal" && row.modelData.song'
             ' ? "http://127.0.0.1:8080/v1/sc5000/art?song=" + encodeURIComponent(root.scPlainTitle(row.modelData.song)) + "&artist=" + encodeURIComponent(row.modelData.artist || "")'
             ' : (row.modelData.albumArt ? row.modelData.albumArt : "")',
         ), (
@@ -6119,14 +6183,6 @@ def edits(dev: bool):
         v + "BrowseView/Components/Components/" + ("BrowseViewBpm.qml" if v53() else "Bpm.qml"): [('text: row.modelData.bpm || ""', 'text: row.modelData.bpm || root.scPreview(row.modelData.providerName)[1]')],
         v + "BrowseView/Components/Components/Key.qml": [('text: row.modelData.key || ""', 'text: row.modelData.key || root.scPreview(row.modelData.providerName)[2] || ""')],
         v + "BrowseView/Components/Components/Song.qml": [('title: row.modelData.song || ""', 'title: root.scPlainTitle(row.modelData.song)')],
-        # Selecting a drive that carries an Engine profile asked "Load drive profile to
-        # device?" on every insert. Answer "No" unasked: the deck keeps its own settings.
-        prefs + "Entries/LoadPreferencesDialog.qml": [(
-            "		if(show && !pQuitting) {\n			let messageObject = {\n",
-            "		if(show && !pQuitting) {\n"
-            "			Qt.callLater(() => { pShow.translator.state = false; pFinshedLoadingProfile.translator.state = true })\n"
-            "			return\n"
-            "			let messageObject = {\n")],
         # rb-bridge converts rekordbox media at mount. Engine's own slow import of a
         # large library corrupted m.db, so always take the prompt's "Ignore" branch.
         ROOT + "Items/MessageBoxes/RekordBoxImportDialog.qml": [(
@@ -6408,6 +6464,15 @@ def edits(dev: bool):
             "            readonly property string isMasterPath: Config.network.hasSyncing\n",
             "            readonly property string isMasterPath: Config.network.hasSyncing &&\n"
             "                    !(!Config.device.isPlayer && [\"JP07\", \"JP08\", \"JP13\", \"JP14\"].indexOf(Config.device.name) >= 0)\n",
+        )]
+        # #263: the motorized players (JP08, JP14) turn the platter and mark its layer for decks 1
+        # and 2 only, the two layers of a stock player. In the 4-deck layout a player holds 1+3,
+        # 2+4, ...: on 2+4 the motor never ran and the platter's touch reached deck 1, on 1+3 deck 3
+        # had neither. engine-ui-guard names the unit's decks in its assignment file
+        # (deckConfig.scDecks, layer A first, so the two motor slots stay 0 and 1); without it, stock.
+        out["ControlSurfaceModules/ControlSurfaceModules/Motorized.qml"] = [(
+            "        model: [1, 2]\n",
+            "        model: deckConfig.scDecks || [1, 2]\n",
         )]
         # #49: a swipe loads the role's own decks (1+3: left 1, right 3), not the stock
         # left/right layer deck. Only "Deck N" actions; Prepare List etc. stay stock.

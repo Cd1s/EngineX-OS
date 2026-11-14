@@ -8,7 +8,12 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	"image/png"
 	"io"
+	"math"
 	"net/url"
 	"os"
 	"os/exec"
@@ -152,8 +157,14 @@ func (f *feature) Action(req map[string]any) (any, error) {
 		cmd := exec.CommandContext(ctx, "ffmpeg", "-nostdin", "-v", "error", "-y", "-i", source,
 			"-vf", "scale=600:600:force_original_aspect_ratio=increase,crop=600:600",
 			"-frames:v", "1", "-update", "1", temp)
+		defer os.Remove(temp)
 		if out, err := cmd.CombinedOutput(); err != nil {
-			return nil, fmt.Errorf("ffmpeg failed: %v: %s", err, bytes.TrimSpace(out))
+			if !errors.Is(err, exec.ErrNotFound) {
+				return nil, fmt.Errorf("ffmpeg failed: %w: %s", err, bytes.TrimSpace(out))
+			}
+			if err := cropImage(source, temp); err != nil {
+				return nil, err
+			}
 		}
 		header := make([]byte, 24)
 		fh, err := os.Open(temp)
@@ -277,3 +288,45 @@ func (f *feature) apply(req map[string]any) (any, error) {
 }
 
 func (f *feature) Close() {}
+
+// cropImage uses Go's image codecs when the deck has no ffmpeg.
+func cropImage(source, target string) error {
+	f, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	cfg, _, err := image.DecodeConfig(f)
+	if err != nil {
+		return err
+	}
+	if cfg.Width <= 0 || cfg.Height <= 0 || int64(cfg.Width)*int64(cfg.Height) > 16<<20 {
+		return modkit.Bad("image dimensions exceed safe limit")
+	}
+	if _, err = f.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	src, _, err := image.Decode(f)
+	if err != nil {
+		return err
+	}
+	bounds := src.Bounds()
+	scale := 600 / float64(min(bounds.Dx(), bounds.Dy()))
+	dst := image.NewNRGBA(image.Rect(0, 0, 600, 600))
+	for y := 0; y < 600; y++ {
+		for x := 0; x < 600; x++ {
+			sx := bounds.Min.X + int(math.Floor((float64(x)+.5-300)/scale+float64(bounds.Dx())/2))
+			sy := bounds.Min.Y + int(math.Floor((float64(y)+.5-300)/scale+float64(bounds.Dy())/2))
+			dst.Set(x, y, src.At(sx, sy))
+		}
+	}
+	out, err := os.Create(target)
+	if err != nil {
+		return err
+	}
+	err = png.Encode(out, dst)
+	if closeErr := out.Close(); err == nil {
+		err = closeErr
+	}
+	return err
+}

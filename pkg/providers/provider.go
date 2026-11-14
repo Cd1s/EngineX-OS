@@ -45,6 +45,9 @@ type Playlist struct {
 	Title string `json:"title"`
 	Count int    `json:"count"`
 }
+
+// Listing methods may return an ordered successful prefix together with an
+// error. A non-nil error means the list is incomplete, including auth failures.
 type Provider interface {
 	Playlists(context.Context) ([]Playlist, error)
 	Tracks(context.Context, string) ([]Track, error)

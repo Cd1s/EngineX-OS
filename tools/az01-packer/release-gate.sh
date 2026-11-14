@@ -219,7 +219,7 @@ SH
             python3 -I -c 'import json,sys; a=json.load(open(sys.argv[1])); sys.exit(json.loads(a["TIDAL"])["providerType"] != "TIDAL")' "$W/data/StreamingAccounts.json"
     elif [ "$name" = boot2 ]; then
         check "boot2: engine-ui-guard purged dirty QML cache after power cut (#140)" \
-            test ! -e "$W/data/AppDataUser/AIR Music Technology/Engine/.cache/qml/powercut-truncated.qmlc"
+            test ! -e "$W/data/AppDataUser/AIR Music Technology/Engine/.cache/qml/powercut-truncated.qmlc" -a ! -e "$ui/qml-cache/powercut-truncated.qmlc"
         check "boot2: healthy boot before power cut did not trigger safe-mode (#140)" \
             bash -c "test ! -e '$ui/safe-mode' && test \"\$(cat '$ui/boot-count')\" = 1"
         check "boot2: running-sentinel re-armed for second boot (#140)" test -e "$ui/running-sentinel"
@@ -238,6 +238,12 @@ SH
     local run_seconds=$ENGINE_SECONDS
     [ "$name" != boot2 ] || run_seconds=$BOOT2_SECONDS
     sleep "$run_seconds"
+    if [ "$name" != old ]; then
+        check "$name: EngineX generated private QML bytecode" \
+            bash -c "find '$ui/qml-cache' -name '*.qmlc' -print -quit 2>/dev/null | grep -q ."
+        check "$name: stock's shared QML cache contains no EngineX bytecode" \
+            bash -c "! find '$W/data/AppDataUser/AIR Music Technology/Engine/.cache/qml' -name '*.qmlc' -print -quit 2>/dev/null | grep -q ."
+    fi
     if [ "$name" = new ]; then
         local log=$W/new-engine.log files label
         check "new: render probe reported (Settings -> Services, About)" wait_for "$ENGINE_START" grep -aq 'SCPROBE done|' "$log"
@@ -458,8 +464,9 @@ inner() {
         wait "$new_ns" || fail "new phase aborted before power cut"
     fi
     check "powercut: running-sentinel survived unclean power cut (#140)" test -e "$W/data/sc5000-custom/ui/running-sentinel"
-    mkdir -p "$W/data/AppDataUser/AIR Music Technology/Engine/.cache/qml"
+    mkdir -p "$W/data/AppDataUser/AIR Music Technology/Engine/.cache/qml" "$W/data/sc5000-custom/ui/qml-cache"
     printf 'truncated-qmlc' > "$W/data/AppDataUser/AIR Music Technology/Engine/.cache/qml/powercut-truncated.qmlc"
+    printf 'truncated-qmlc' > "$W/data/sc5000-custom/ui/qml-cache/powercut-truncated.qmlc"
     unshare -m -p -f --kill-child "$SELF" --phase boot2 || fail "boot2 phase aborted"
 }
 

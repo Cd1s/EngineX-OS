@@ -85,6 +85,11 @@ func TestIssue233LargeSkeletonAndEngineAnalyzedResume(t *testing.T) {
 	if err != nil || info.StartOffsetSamples != 2257 {
 		t.Fatalf("LAME fixture: %+v %v", info, err)
 	}
+	if info.Samples != 2*1152 {
+		t.Fatalf("LAME fixture sample count: %d, want 2304", info.Samples)
+	}
+	// VBR headers now supply the sample count used by the resumed import.
+	track.SampleCount = info.Samples
 	track.StartOffsetSamples = info.StartOffsetSamples
 	want, err := enginedb.EncodePerformance(track, a)
 	if err != nil {

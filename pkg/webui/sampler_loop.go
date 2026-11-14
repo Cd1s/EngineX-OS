@@ -2,10 +2,11 @@ package webui
 
 import (
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Cd1s/EngineX-OS/docs/mods/src/modkit"
+	sampler "github.com/Cd1s/EngineX-OS/docs/mods/src/sampler-pad-studio"
 	"net/http"
 	"os"
 	"os/exec"
@@ -111,128 +112,30 @@ func (s *Server) determineSampleOutputPath(trackPath string, deck, pad int) stri
 	return filepath.Join(fallbackDir, filename)
 }
 
-// sliceWavDirect attempts to slice [inSample, outSample) from a 16-bit PCM WAV in pure Go.
-func sliceWavDirect(data []byte, inSample, outSample int64) ([]byte, bool) {
-	if len(data) < 44 {
-		return nil, false
-	}
-	if string(data[0:4]) != "RIFF" || string(data[8:12]) != "WAVE" {
-		return nil, false
-	}
-
-	offset := 12
-	var fmtChunk []byte
-	var dataChunkOffset int
-	var dataChunkSize int
-
-	for offset+8 <= len(data) {
-		chunkID := string(data[offset : offset+4])
-		chunkSize := int(binary.LittleEndian.Uint32(data[offset+4 : offset+8]))
-		chunkDataStart := offset + 8
-
-		if chunkID == "fmt " {
-			if chunkDataStart+chunkSize <= len(data) {
-				fmtChunk = data[chunkDataStart : chunkDataStart+chunkSize]
-			}
-		} else if chunkID == "data" {
-			dataChunkOffset = chunkDataStart
-			dataChunkSize = chunkSize
-			break
-		}
-
-		offset = chunkDataStart + chunkSize
-		if chunkSize%2 != 0 {
-			offset++
-		}
-	}
-
-	if fmtChunk == nil || len(fmtChunk) < 16 || dataChunkOffset == 0 {
-		return nil, false
-	}
-
-	audioFormat := binary.LittleEndian.Uint16(fmtChunk[0:2])
-	numChannels := binary.LittleEndian.Uint16(fmtChunk[2:4])
-	sampleRate := binary.LittleEndian.Uint32(fmtChunk[4:8])
-	bitsPerSample := binary.LittleEndian.Uint16(fmtChunk[14:16])
-
-	// We handle 16-bit PCM directly
-	if audioFormat != 1 || bitsPerSample != 16 || numChannels == 0 {
-		return nil, false
-	}
-
-	bytesPerFrame := int64(numChannels) * 2
-	maxData := len(data) - dataChunkOffset
-	if dataChunkSize > maxData {
-		dataChunkSize = maxData
-	}
-
-	startByte := inSample * bytesPerFrame
-	endByte := outSample * bytesPerFrame
-
-	if startByte < 0 {
-		startByte = 0
-	}
-	if startByte > int64(dataChunkSize) {
-		startByte = int64(dataChunkSize)
-	}
-	if endByte > int64(dataChunkSize) {
-		endByte = int64(dataChunkSize)
-	}
-	if endByte < startByte {
-		endByte = startByte
-	}
-
-	rawSlice := data[dataChunkOffset+int(startByte) : dataChunkOffset+int(endByte)]
-
-	// Build standard 16-bit PCM WAV
-	hdr := make([]byte, 44)
-	copy(hdr[0:4], "RIFF")
-	binary.LittleEndian.PutUint32(hdr[4:8], uint32(36+len(rawSlice)))
-	copy(hdr[8:12], "WAVE")
-	copy(hdr[12:16], "fmt ")
-	binary.LittleEndian.PutUint32(hdr[16:20], 16)
-	binary.LittleEndian.PutUint16(hdr[20:22], 1)
-	binary.LittleEndian.PutUint16(hdr[22:24], numChannels)
-	binary.LittleEndian.PutUint32(hdr[24:28], sampleRate)
-	binary.LittleEndian.PutUint32(hdr[28:32], sampleRate*uint32(numChannels)*2)
-	binary.LittleEndian.PutUint16(hdr[32:34], numChannels*2)
-	binary.LittleEndian.PutUint16(hdr[34:36], 16)
-	copy(hdr[36:40], "data")
-	binary.LittleEndian.PutUint32(hdr[40:44], uint32(len(rawSlice)))
-
-	out := make([]byte, 44+len(rawSlice))
-	copy(out[0:44], hdr)
-	copy(out[44:], rawSlice)
-	return out, true
-}
-
-// sliceLoop extracts [inSample, outSample) from trackPath and writes 16-bit PCM WAV to outPath.
+// sliceLoop extracts [inSample, outSample) from trackPath and writes PCM WAV to outPath.
 // errEmptyLoop means the requested range holds no audio frames.
 var errEmptyLoop = errors.New("loop range contains no audio frames")
 
 func (s *Server) sliceLoop(ctx context.Context, trackPath, outPath string, inSample, outSample int64, sampleRate int) error {
-	raw, err := os.ReadFile(trackPath)
+	wav, err := sampler.ReadWAVRange(ctx, trackPath, inSample, outSample, sampleRate)
 	if err == nil {
-		if sliced, ok := sliceWavDirect(raw, inSample, outSample); ok {
-			if len(sliced) <= 44 {
-				return errEmptyLoop
-			}
-			_ = os.MkdirAll(filepath.Dir(outPath), 0o755)
-			return os.WriteFile(outPath, sliced, 0o644)
+		if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
+			return err
 		}
+		return wav.Write(outPath)
+	}
+	if !errors.Is(err, sampler.ErrNotPCM) {
+		return err
 	}
 
 	// Fallback to ffmpeg for MP3, FLAC, AIFF, or complex audio
 	runner := getSamplerRunner()
-	startSec := float64(inSample) / float64(sampleRate)
-	durationSec := float64(outSample-inSample) / float64(sampleRate)
 
 	_ = os.MkdirAll(filepath.Dir(outPath), 0o755)
 	args := []string{
 		"-y",
-		"-ss", fmt.Sprintf("%.6f", startSec),
-		"-t", fmt.Sprintf("%.6f", durationSec),
 		"-i", trackPath,
+		"-af", fmt.Sprintf("aresample=%d,atrim=start_sample=%d:end_sample=%d,asetpts=PTS-STARTPTS", sampleRate, inSample, outSample),
 		"-ar", strconv.Itoa(sampleRate),
 		"-ac", "2",
 		"-c:a", "pcm_s16le",
@@ -241,9 +144,23 @@ func (s *Server) sliceLoop(ctx context.Context, trackPath, outPath string, inSam
 
 	out, err := runner(ctx, "ffmpeg", args...)
 	if err != nil {
-		return fmt.Errorf("sampler ffmpeg fallback failed: %w (output: %s)", err, string(out))
+		if !errors.Is(err, exec.ErrNotFound) {
+			return fmt.Errorf("sampler ffmpeg fallback failed: %w (output: %s)", err, string(out))
+		}
+		wav, err := sampler.ReadAudio(ctx, trackPath, inSample, outSample, sampleRate)
+		if err != nil {
+			return err
+		}
+		return wav.Write(outPath)
 	}
 
+	wav, err = sampler.ReadWAVRange(ctx, outPath, 0, -1, sampleRate)
+	if err != nil {
+		return err
+	}
+	if wav.Frames() != outSample-inSample {
+		return errEmptyLoop
+	}
 	return nil
 }
 
@@ -292,7 +209,7 @@ func (s *Server) handleSamplerLoopToPad(w http.ResponseWriter, r *http.Request) 
 	outPath := s.determineSampleOutputPath(in.TrackPath, in.Deck, in.Pad)
 
 	if err := s.sliceLoop(r.Context(), in.TrackPath, outPath, in.InSample, in.OutSample, in.SampleRate); err != nil {
-		if errors.Is(err, errEmptyLoop) {
+		if errors.Is(err, errEmptyLoop) || modkit.IsBad(err) {
 			fail(w, http.StatusBadRequest, err)
 			return
 		}

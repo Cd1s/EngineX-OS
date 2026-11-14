@@ -232,14 +232,18 @@ func (c *idleConn) Write(p []byte) (int, error) {
 }
 
 var (
-	uploadIdleRead  = 120 * time.Second
-	uploadDrainRead = 10 * time.Minute
+	// Provisional until header/upload timings are measured on real decks (#243).
+	uploadHeaderRead   = 30 * time.Second
+	uploadProgressRead = 30 * time.Minute
+	uploadIdleRead     = 120 * time.Second
+	uploadDrainRead    = 10 * time.Minute
 )
 
 type idleBody struct {
 	r          io.Reader
 	c          *http.ResponseController
 	tracker    UploadTracker
+	timer      *time.Timer
 	mu         sync.Mutex
 	uploadDone bool
 	stopped    bool
@@ -258,11 +262,20 @@ func (b *idleBody) Read(p []byte) (int, error) {
 	}
 	b.mu.Unlock()
 	n, err := b.r.Read(p)
-	if n > 0 && b.tracker.Feed(p[:n]) {
+	if n > 0 {
+		initialized := b.tracker.init
+		complete := b.tracker.Feed(p[:n])
 		b.mu.Lock()
-		b.uploadDone = true
 		if !b.stopped {
-			b.c.SetReadDeadline(time.Now().Add(uploadDrainRead))
+			if complete {
+				b.uploadDone = true
+				b.timer.Stop()
+				b.c.SetReadDeadline(time.Now().Add(uploadDrainRead))
+			} else if !initialized && b.tracker.init {
+				// A fixed upload bound cannot be renewed by trickling bytes
+				// or tiny blocks; rendering after action=done is separate.
+				b.timer.Reset(uploadProgressRead)
+			}
 		}
 		b.mu.Unlock()
 	}
@@ -283,6 +296,9 @@ func (b *idleBody) touchDrain() {
 func (b *idleBody) stop() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.stopped {
+		return
+	}
 	b.stopped = true
 	b.c.SetReadDeadline(time.Now())
 }
@@ -391,6 +407,11 @@ func (b *Backend) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// A body error must terminate the worker; a normal EOF is how Engine ends a session.
 	done := make(chan error, 1)
 	body := &idleBody{r: r.Body, c: http.NewResponseController(w), tracker: UploadTracker{Packed: framing == "2"}}
+	body.timer = time.AfterFunc(uploadHeaderRead, func() {
+		cancel() // Also interrupts a blocked write to worker stdin.
+		body.stop()
+	})
+	defer body.timer.Stop()
 	go func() {
 		var dst io.Writer = stdin
 		if framing == "2" {

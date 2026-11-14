@@ -104,6 +104,7 @@ a{color:var(--accent)}label.chk{display:flex;align-items:center;gap:10px;cursor:
   <div class="setting"><div class="txt"><b data-i18n="tOmni"></b><span class="sub" data-i18n="sOmni"></span></div><label class="sw"><input type="checkbox" data-toggle="omniSource"><span></span></label></div>
   <div class="setting"><div class="txt"><b data-i18n="tShare"></b><span class="sub" data-i18n="sShare"></span></div><label class="sw"><input type="checkbox" data-toggle="prolinkShare"><span></span></label></div>
   <div class="setting"><div class="txt"><b><span data-i18n="tExport"></span><span class="tag" data-i18n="beta"></span></b><span class="sub" data-i18n="sExport"></span></div><label class="sw"><input type="checkbox" data-toggle="prolinkExport"><span></span></label></div>
+  <div class="setting"><div class="txt"><b data-i18n="tBtOut"></b><span class="sub" data-i18n="sBtOut"></span></div><select id="btOut" aria-label="Bluetooth" style="width:auto;min-width:150px"></select></div>
   <div class="setting"><div class="txt"><b data-i18n="verboseLog"></b><span class="sub" data-i18n="verboseLogSub"></span></div><label class="sw"><input type="checkbox" data-toggle="verboseLog"><span></span></label><a class="btn" href="/api/logs" download="enginex-logs.txt" data-i18n="downloadLogs"></a></div>
   <small id="uiState"></small>
   <div id="bootRetryActions" hidden><button class="btn" id="bootRetry" data-i18n="bootRetry"></button> <a class="btn" href="/api/boot-report" download data-i18n="bootReport"></a></div>
@@ -150,6 +151,7 @@ tEcho:['Upfader Echo Out','推子切歌自动回音','推桿切歌自動回音']
 tLimiter:['Master soft clipper','0dB 防破音软限幅','0dB 防破音軟限幅'],sLimiter:['Stops clipping at the master output; applies right away','防止主输出削波，立即生效','防止主輸出削波，立即生效'],
 tGain:['Auto-Gain 0 dB','自动增益 0 dB 归一化','自動增益 0 dB 正規化'],sGain:['Brings every track to 0 dB peak, with the soft limiter','把每首歌峰值拉到 0 dB，含软限幅','把每首歌峰值拉到 0 dB，含軟限幅'],
 tFxTimeMode:['PX delay time mode','先锋效果延时模式 (PX)','先鋒效果延遲模式 (PX)'],sFxTimeMode:['Spiral / Pitch Echo / Dub Echo only: default timing or 10–4000 ms; stock FX stay in beats','仅作用于 Spiral / Pitch Echo / Dub Echo（默认或 10–4000 ms）；原厂效果仍按节拍同步','僅作用於 Spiral / Pitch Echo / Dub Echo（預設或 10–4000 ms）；原廠效果仍依節拍同步'],fxBeats:['Default (Off)','默认（关闭）','預設（關閉）'],
+tBtOut:['Bluetooth speaker output','蓝牙音箱输出','藍牙喇叭輸出'],sBtOut:['What the deck sends to a speaker connected in its Bluetooth list. Adds about 150–250 ms: for monitoring or a second room, not for beatmatching','碟机发给已连接蓝牙音箱的声音。会多出约 150–250 ms 延迟：用于监听或另一个房间，不能用来对拍','碟機傳給已連線藍牙喇叭的聲音。會多出約 150–250 ms 延遲：用於監聽或另一個房間，不能用來對拍'],btMaster:['Master','Master 主输出','Master 主輸出'],btBooth:['Booth','Booth','Booth'],btHeadphones:['Headphones (Cue)','耳机 (Cue)','耳機 (Cue)'],btZone:['Zone','Zone','Zone'],btLayerA:['Layer A','Layer A','Layer A'],btLayerB:['Layer B','Layer B','Layer B'],
 tOmni:['OmniSource','OmniSource 全源同屏混排','OmniSource 全源同屏混排'],sOmni:['Show USB / SD drives next to streaming in one browser and search','在流媒体浏览和搜索里同时显示 U 盘 / SD 卡','在串流瀏覽和搜尋裡同時顯示隨身碟 / SD 卡'],
 tShare:['Pro DJ Link library','Pro DJ Link 曲库','Pro DJ Link 曲庫'],sShare:['Read the USB drives of CDJs on the network','读取局域网内 CDJ 的 U 盘','讀取區域網路內 CDJ 的隨身碟'],
 waitRbUsb:['On: starts by itself once a rekordbox USB is plugged in','已开启：插入 rekordbox U 盘后自动开始共享','已開啟：插入 rekordbox 隨身碟後自動開始分享'],tExport:['Pro DJ Link export to CDJ','Pro DJ Link 共享本机 U 盘给 CDJ','Pro DJ Link 分享本機隨身碟給 CDJ'],sExport:['Let CDJs browse this deck’s USB drive. Not yet tested on a real CDJ','让 CDJ 浏览本机 U 盘；尚未在真 CDJ 上验证','讓 CDJ 瀏覽本機隨身碟；尚未在實機 CDJ 上驗證'],beta:['Beta','实验性','實驗性'],needRbUsb:['Plug in a USB drive with a rekordbox export first: this deck shares only rekordbox USB drives with CDJs.','请先插入带 rekordbox 导出的 U 盘：本机只能把 rekordbox U 盘共享给 CDJ。','請先插入帶 rekordbox 匯出的隨身碟：本機只能把 rekordbox 隨身碟分享給 CDJ。'],
@@ -277,8 +279,13 @@ async function jobs(){
   v.overview.forEach((p,i)=>{c.fillStyle='rgb('+p.LowValue+','+p.MidValue+','+p.HighValue+')';const h=Math.max(p.LowValue,p.MidValue,p.HighValue)*70/255;c.fillRect(i,(70-h)/2,1,h)});
  }
 }
+let lastBt=null;const btNames={Master:'btMaster',Booth:'btBooth',Headphones:'btHeadphones',Zone:'btZone','Layer A':'btLayerA','Layer B':'btLayerB'};
+function renderBt(){const sel=$('btOut');sel.replaceChildren();for(const n of lastBt.layers){const o=document.createElement('option');o.value=n;o.textContent=t(btNames[n]);o.selected=n===lastBt.assignLayer;sel.append(o)}sel.disabled=lastBt.layers.length<2}
+async function showBt(){lastBt=await api('bluetooth');renderBt()}
+$('btOut').onchange=()=>action(async()=>{lastBt=await post('bluetooth',{assignLayer:$('btOut').value});renderBt()});
 const toggleKeys=['upfaderEcho','masterLimiter','autoGain','omniSource','prolinkShare','prolinkExport'];
 function showUI(v){lastUI=v;
+ if(lastBt)renderBt();
  if(v.version||v.buildTag){$('version').textContent=(v.version?'v'+v.version:'')+(v.buildTag?(v.version?' · ':'')+v.buildTag:'');$('version').hidden=false}
  for(const e of document.querySelectorAll('[data-toggle]'))e.checked=!!v[e.dataset.toggle];
  const tg=k=>document.querySelector('[data-toggle="'+k+'"]');
@@ -359,5 +366,5 @@ $('modFile').onchange=e=>{const f=e.target.files[0];e.target.value='';action(()=
 $('modDrop').ondragover=e=>{e.preventDefault();$('modDrop').style.borderColor='var(--accent)'};$('modDrop').ondragleave=()=>{$('modDrop').style.borderColor=''};
 $('modDrop').ondrop=e=>{e.preventDefault();$('modDrop').style.borderColor='';const f=e.dataTransfer.files[0];action(()=>modUpload(f))};
 applyLang();renderSessions();renderDrives();
-action(async()=>{const v=await api('ui');if(!localStorage.getItem('enginex-console-lang')&&LANGS.includes(v.language))setLang(v.language,false);showUI(v);await showDrives();await showRelay();await showTunnel().catch(()=>{});await showSpotify();await showBpm();await showBroadcast();await showTailscale().catch(()=>{});await showSSH().catch(()=>{});await showGen2().catch(()=>{});await showMods().catch(()=>{});await refreshSessions();await jobs()});setInterval(()=>{jobs().catch(()=>{})},2000);
+action(async()=>{const v=await api('ui');if(!localStorage.getItem('enginex-console-lang')&&LANGS.includes(v.language))setLang(v.language,false);showUI(v);await showDrives();await showRelay();await showTunnel().catch(()=>{});await showSpotify();await showBt().catch(()=>{});await showBpm();await showBroadcast();await showTailscale().catch(()=>{});await showSSH().catch(()=>{});await showGen2().catch(()=>{});await showMods().catch(()=>{});await refreshSessions();await jobs()});setInterval(()=>{jobs().catch(()=>{})},2000);
 </script></html>

@@ -3,6 +3,7 @@ package enginedb
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -26,7 +27,7 @@ type preparedTrack struct {
 	uninspected bool
 	// broken is why the track's analysis or artwork could not be found (#53).
 	broken error
-	// late tracks came after the preparation cut-off: not stat'ed or opened,
+	// late tracks could not be read within this import (cut-off or file error):
 	// imported as Fast imports them and left for the next import.
 	late bool
 }
@@ -54,7 +55,11 @@ func prepareTracks(ctx context.Context, res *compat.Resolver, l *rekordbox.Libra
 		// A finished track is found under the export's own spelling without a
 		// directory lookup: on a slow stick resolving thousands of finished
 		// tracks used up the time meant for the others.
-		if guess := strings.TrimLeft(path.Clean("/"+t.Path), "/"); done != nil {
+		guess, e := compat.CleanRelative(t.Path)
+		if e != nil {
+			return nil, fmt.Errorf("track %d: %w", t.ID, e)
+		}
+		if done != nil {
 			if fp, ok := done["../"+guess]; ok {
 				if other, ok := paths[guess]; ok {
 					return nil, fmt.Errorf("tracks %d and %d resolve to the same audio path %q", other, t.ID, guess)
@@ -64,9 +69,17 @@ func prepareTracks(ctx context.Context, res *compat.Resolver, l *rekordbox.Libra
 				continue
 			}
 		}
+		var p preparedTrack
 		rel, e := res.ResolveContext(ctx, t.Path)
 		if e != nil {
-			return nil, fmt.Errorf("track %d: %w", t.ID, e)
+			// A failed directory lookup cannot verify the path's identity.
+			if !errors.Is(e, os.ErrNotExist) {
+				return nil, fmt.Errorf("track %d: %w", t.ID, e)
+			}
+			if p, e = unreadableAudio(t, guess, e); e != nil {
+				return nil, fmt.Errorf("track %d: %w", t.ID, e)
+			}
+			rel = guess
 		}
 		if other, ok := paths[rel]; ok {
 			return nil, fmt.Errorf("tracks %d and %d resolve to the same audio path %q", other, t.ID, rel)
@@ -76,19 +89,36 @@ func prepareTracks(ctx context.Context, res *compat.Resolver, l *rekordbox.Libra
 			prepared = append(prepared, preparedTrack{track: t, rel: rel, hash: fp, info: exportFileInfo{size: t.FileSize}})
 			continue
 		}
+		if p.audioErr != nil {
+			prepared = append(prepared, p)
+			continue
+		}
 		// Once past the cut-off, every track left is late: no clock reading per track.
 		if late = late || ready > 0 && !cutoff.IsZero() && now().After(cutoff); late {
 			prepared = append(prepared, preparedTrack{track: t, rel: rel, hash: "fast:" + t.RecordHash, info: exportFileInfo{size: t.FileSize}, late: true})
 			continue
 		}
-		ready++
-		p, e := prepareOne(res, t, rel, cutoff, now, ready > 1)
+		p, e = prepareOne(res, t, rel, cutoff, now, ready > 0)
 		if e != nil {
 			return nil, e
+		}
+		if !p.late {
+			ready++
 		}
 		prepared = append(prepared, p)
 	}
 	return prepared, nil
+}
+
+// Keep an unreadable file export-only and retry it on a later mount. Path
+// validation, ambiguous names and cancellation still abort the import.
+func unreadableAudio(t rekordbox.Track, rel string, err error) (preparedTrack, error) {
+	var fileErr *os.PathError
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
+		!errors.Is(err, os.ErrNotExist) && !errors.As(err, &fileErr) {
+		return preparedTrack{}, err
+	}
+	return preparedTrack{track: t, rel: rel, hash: "fast:" + t.RecordHash, info: exportFileInfo{size: t.FileSize}, audioErr: err, broken: err, late: true}, nil
 }
 
 // prepareOne stats and fingerprints one track. Past cutoff, when mayDefer, an
@@ -97,7 +127,7 @@ func prepareOne(res *compat.Resolver, t rekordbox.Track, rel string, cutoff time
 	full := res.FullPath(rel)
 	st, e := statFile(full)
 	if e != nil {
-		return preparedTrack{}, e
+		return unreadableAudio(t, rel, e)
 	}
 	if !st.Mode().IsRegular() {
 		return preparedTrack{}, fmt.Errorf("audio not regular: %s", rel)
@@ -119,6 +149,12 @@ func prepareOne(res *compat.Resolver, t rekordbox.Track, rel string, cutoff time
 			fp.MP3Offset = info.OffsetClass
 			audio = &info
 		} else {
+			if p, e := unreadableAudio(t, rel, err); e == nil {
+				return p, nil
+			}
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return preparedTrack{}, err
+			}
 			audioErr = err
 		}
 	}
@@ -170,11 +206,12 @@ func prepareFast(ctx context.Context, res *compat.Resolver, l *rekordbox.Library
 // can retain their Engine IDs without violating Track's immediate UNIQUE(path).
 // Both temporary paths and the final rename are in the import transaction.
 func stageOwnedMoves(ctx context.Context, tx *sql.Tx, prepared []preparedTrack, stagedOnly bool) (map[uint32]int64, error) {
-	targets := map[uint32]string{}
-	for _, p := range prepared {
-		targets[p.track.ID] = "../" + p.rel
+	targets := map[uint32]*preparedTrack{}
+	for i := range prepared {
+		p := &prepared[i]
+		targets[p.track.ID] = p
 	}
-	rows, e := tx.QueryContext(ctx, `SELECT s.trackId,t.pdbImportKey,s.path FROM BridgeState s JOIN Track t ON t.id=s.trackId`)
+	rows, e := tx.QueryContext(ctx, `SELECT s.trackId,t.pdbImportKey,s.path,s.fingerprint FROM BridgeState s JOIN Track t ON t.id=s.trackId`)
 	if e != nil {
 		return nil, e
 	}
@@ -188,12 +225,12 @@ func stageOwnedMoves(ctx context.Context, tx *sql.Tx, prepared []preparedTrack, 
 	for rows.Next() {
 		var id int64
 		var source uint32
-		var oldPath string
-		if e = rows.Scan(&id, &source, &oldPath); e != nil {
+		var oldPath, fp string
+		if e = rows.Scan(&id, &source, &oldPath, &fp); e != nil {
 			rows.Close()
 			return nil, e
 		}
-		target, ok := targets[source]
+		p, ok := targets[source]
 		if !ok {
 			if stagedOnly && source < 1<<24 {
 				continue
@@ -206,6 +243,13 @@ func stageOwnedMoves(ctx context.Context, tx *sql.Tx, prepared []preparedTrack, 
 			return nil, fmt.Errorf("ambiguous bridge source ID %d", source)
 		}
 		owned[source] = id
+		// An unreadable re-export must not park a completed row and lose its
+		// fingerprint (and deck edits). Its source ID identifies the old row.
+		if p.late && p.audioErr != nil && fp != "" && !strings.HasPrefix(fp, "fast:") {
+			p.rel, p.hash, p.late = strings.TrimPrefix(oldPath, "../"), fp, false
+			p.uninspected = true
+		}
+		target := "../" + p.rel
 		if target != oldPath {
 			moves = append(moves, move{id, source})
 		}
@@ -214,6 +258,14 @@ func stageOwnedMoves(ctx context.Context, tx *sql.Tx, prepared []preparedTrack, 
 	rows.Close()
 	if e != nil {
 		return nil, e
+	}
+	paths := map[string]uint32{}
+	for _, p := range prepared {
+		source, target := p.track.ID, "../"+p.rel
+		if other, ok := paths[target]; ok {
+			return nil, fmt.Errorf("tracks %d and %d resolve to the same audio path %q", other, source, strings.TrimPrefix(target, "../"))
+		}
+		paths[target] = source
 	}
 	// Release obsolete paths before moving or inserting their replacements.
 	for _, id := range removed {

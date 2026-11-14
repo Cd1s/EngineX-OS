@@ -1,4 +1,7 @@
-/* Actual master callback, native AZ04 and armhf, including mono output. */
+/* Actual master callback, native AZ04 and armhf, including mono output.
+ * gcc -O2 tools/ui-mod/test_ms_master_hook.c -ldl -lpthread -lm -o /tmp/test_ms_master_hook && /tmp/test_ms_master_hook
+ * arm-linux-gnueabihf-gcc -O2 tools/ui-mod/test_ms_master_hook.c -ldl -lpthread -lm -o /tmp/test_ms_master_hook-armhf && /tmp/test_ms_master_hook-armhf
+ */
 #define ENGINE_UI_HOOK_TEST
 int hook_test_engine;
 #include "engine_ui_hook.c"
@@ -116,11 +119,33 @@ static void test_hidden_means_off(void) {
         assert(run_echo_tail() == 0.0f);
     }
 
-    // Same stored upfader_echo=1 on a mixer console (JC16) rings out as expected.
+    // #258: all 5.3.0 consoles use native per-channel Transition FX, never master PCM echo.
+    static const char *const consoles[] = {
+        "JC16", "JC11", "JC11S", "JP11", "JP11S", "JP20", "JP21",
+        "NH08", "NH08S", "NH09", "NH10", "JP24", "RMZ2"
+    };
+    for (unsigned b = 0; b < sizeof engine_builds / sizeof *engine_builds; ++b) {
+        if (!strcmp(engine_builds[b].name, "5.0.4")) continue;
+        select_build(&engine_builds[b]);
+        for (unsigned c = 0; c < sizeof consoles / sizeof *consoles; ++c) {
+            write_file(board_path, consoles[c]);
+            write_file(conf_path, "upfader_echo=1\npioneer_fx=off\nfx_time_mode=ms\nfx_time_ms=250\n");
+            usleep(180000);
+            float tail = run_echo_tail();
+            printf("master native Transition FX %s %s tail=%.6f\n", build->name, consoles[c], tail);
+            fflush(stdout);
+            assert(tail == 0.0f);
+        }
+    }
     write_file(board_path, "JC16\n");
-    write_file(conf_path, "upfader_echo=1\npioneer_fx=off\nfx_time_mode=ms\nfx_time_ms=250\n");
     usleep(180000);
+
+#if !defined(__aarch64__)
+    // The old 5.0.4 base keeps its legacy master Echo Out.
+    select_build(&engine_builds[0]);
     assert(run_echo_tail() > 0.05f);
+    select_build(&engine_builds[1]);
+#endif
 
     // 2. Hidden PX Delay Time Mode / (ms) when Color FX Style is Off or Space behaves as Off while keeping 250 ms stored.
     write_file(conf_path, "pioneer_fx=off\nfx_time_mode=ms\nfx_time_ms=250\n");

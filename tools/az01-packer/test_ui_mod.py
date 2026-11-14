@@ -18,6 +18,105 @@ spec.loader.exec_module(bp)
 SRC = BUILD_PACKS.read_text()
 
 
+class QMLCacheCompatibilityTest(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("cc"), "A C compiler is required for the cache ABI test")
+    def test_engine_cache_isolated_from_stock_and_other_processes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = Path(tmp) / "test-qml-cache"
+            source = REPO / "tools/ui-mod/test_qml_cache.c"
+            compiled = subprocess.run(
+                ["cc", "-O2", "-I" + str(source.parent), str(source),
+                 "-ldl", "-lpthread", "-lm", "-o", str(binary)],
+                capture_output=True, text=True)
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            result = subprocess.run([str(binary)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+
+class NativeRestartCompatibilityTest(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("node"), "Node is required for native restart ordering")
+    def test_restart_saves_settings_then_uses_the_native_exit_path(self):
+        start = bp.SERVICES_MAIN.index("function scRestartCall(query) {")
+        end = bp.SERVICES_MAIN.index("\n\tproperty string scUpdateRepo", start)
+        function = bp.SERVICES_MAIN[start:end]
+        script = r"""
+const assert = require('assert');
+let finish, saved;
+const calls = [];
+const root = {scT: s => s};
+const Prompt = {Warning: 0, Cancel: 1, Ok: 2, AcceptRole: 3, RejectRole: 4};
+const QuitReasons = {AnalyticsChange: 7};
+const PlanckGUI = {views: {prompts: {post: () => ({finished: {connect: f => {finish = f}}})}}};
+const Planck = {quit: (reason, force) => calls.push(['quit', reason, force])};
+const scCall = (query, done) => {calls.push(['save', query]); saved = done};
+FUNCTION
+scRestartCall('fourDeckRole=24');
+finish(Prompt.RejectRole);
+assert.deepStrictEqual(calls, []);
+scRestartCall('fourDeckRole=24');
+finish(Prompt.AcceptRole);
+assert.deepStrictEqual(calls, [['save', 'fourDeckRole=24']]);
+assert.equal(typeof saved, 'function');
+saved({});
+assert.deepStrictEqual(calls, [['save', 'fourDeckRole=24'], ['quit', QuitReasons.AnalyticsChange, false]]);
+""".replace("FUNCTION", function)
+        result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+
+class USBProfileCompatibilityTest(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("node"), "Node is required for profile choices")
+    def test_usb_profile_waits_for_yes_or_no_and_loads_only_on_yes(self):
+        qrc = LAB / "5.3.0/qrc"
+        if not qrc.is_dir():
+            self.skipTest(f"{qrc} not found (run on the build host)")
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "packs"
+            built = subprocess.run(
+                ["python3", str(BUILD_PACKS), "--qrc", str(qrc), "--out", str(out)],
+                capture_output=True, text=True)
+            self.assertEqual(built.returncode, 0, built.stderr)
+            for lang in ("en", "zh-Hans", "zh-Hant"):
+                rel = "Skins/Embedded/Views/ControlCenter/Tabs/Preferences/Entries/LoadPreferencesDialog.qml"
+                packed = out / lang / rel
+                qml = (packed if packed.exists() else qrc / rel).read_text()
+                start = qml.index("onShowChanged: {") + len("onShowChanged: {")
+                depth, end = 1, start
+                while depth:
+                    depth += (qml[end] == "{") - (qml[end] == "}")
+                    end += 1
+                handler = qml[start:end - 1]
+                script = r"""
+const assert = require('assert');
+for (const accept of [true, false]) {
+    let loaded = 0, finished;
+    const posted = [], show = true, pQuitting = false;
+    const messageText = 'Load drive profile to device?', subItem = {};
+    const Prompt = {No: 1, Yes: 2, AcceptRole: 3, RejectRole: 4};
+    const pShow = {translator: {state: true}};
+    const pFinshedLoadingProfile = {translator: {state: false}};
+    const Qt = {callLater: f => f()};
+    const PlanckGUI = {views: {prompts: {post: m => {
+        posted.push(m); return {finished: {connect: f => { finished = f }}};
+    }}}};
+    const loadPreferences = () => loaded++;
+    (function() { HANDLER })();
+    assert.equal(posted.length, 1, 'inserting a profile must offer the stock choice');
+    assert.equal(posted[0].options, Prompt.No | Prompt.Yes);
+    assert.equal(loaded, 0);
+    assert.equal(pShow.translator.state, true, 'wait for the user');
+    assert.equal(pFinshedLoadingProfile.translator.state, false);
+    finished(accept ? Prompt.AcceptRole : Prompt.RejectRole);
+    assert.equal(loaded, accept ? 1 : 0);
+    assert.equal(pShow.translator.state, false);
+    assert.equal(pFinshedLoadingProfile.translator.state, true);
+}
+""".replace("HANDLER", handler)
+                with self.subTest(lang=lang):
+                    result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+
 class PrimeGoSwipeStemsTest(unittest.TestCase):
     """#224: both JP11 swipe menus offer Stems without changing full-swipe load."""
 
@@ -182,10 +281,14 @@ class TrackListArtworkPlaceholderAndReaderPriorityTest(unittest.TestCase):
                                 self.assertIn("anchors.fill: parent", child[1])
                                 self.assertIn("visible: !!parent && parent.status !== Image.Ready && String(parent.source) !== \"\"", child[1])
                                 self.assertNotIn("asynchronous: true", child[1])
-                                # Native SD and Remote Library tracks must retain image://planck.
-                                line = next(line for line in source.splitlines() if "source: row.streamingProviderName" in line)
-                                script = "const assert=require('node:assert/strict'); const row={streamingProviderName:'',modelData:{albumArt:'image://planck/track?size=100',song:'Song'}};\n"
-                                script += "assert.equal((" + line.strip().removeprefix("source: ") + "), row.modelData.albumArt);"
+                                # Native SD and Remote Library tracks must retain image://planck. SD rows
+                                # have no provider label; Remote Library (Eaas) and Dropbox rows have one.
+                                # Gateway rows, which Engine has no art for, still ask the gateway.
+                                line = next(line for line in source.splitlines() if "/v1/sc5000/art" in line)
+                                script = "const assert=require('node:assert/strict'); const root={scScope:'deezer',scPlainTitle:s=>s};\n"
+                                script += "const art=(streamingProviderName,albumArt)=>{const row={streamingProviderName,modelData:{albumArt,song:'Song',artist:'A'}}; return " + line.strip().removeprefix("source: ") + "};\n"
+                                script += "for (const p of ['', 'Eaas', 'Dropbox']) assert.equal(art(p, 'image://planck/7?size=100'), 'image://planck/7?size=100');\n"
+                                script += "for (const a of ['', 'image://streaming/']) assert.equal(art('Deezer', a), 'http://127.0.0.1:8080/v1/sc5000/art?song=Song&artist=A');"
                                 checked = subprocess.run(["node", "-e", script], capture_output=True, text=True)
                                 self.assertEqual(checked.returncode, 0, checked.stderr)
 
@@ -2188,6 +2291,81 @@ class UiModBuildTest(unittest.TestCase):
                             for component, name in (("Waveform", "waveform"), ("WaveformOverview", "overview")):
                                 wave = pack.extractfile(f"packs/{lang}/Skins/Embedded/Views/Common/{component}/{component}.qml").read().decode()
                                 self.assertIn(f'objectName: "EngineX_Shadow_{name}"', wave)
+
+    BT_PRELUDE = """
+const assert = require('node:assert/strict');
+const calls = [];
+let layers = ["Master", "Booth", "Headphones", "Zone"], layer = "Master";
+class XMLHttpRequest {
+  open(method, url) { this.method = method; this.url = url }
+  send() {
+    calls.push(this.method + " " + this.url);
+    this.status = 200;
+    if (this.method === "POST") {
+      const name = decodeURIComponent(new URL(this.url).searchParams.get("assignLayer"));
+      if (!layers.includes(name)) this.status = 400; else layer = name;
+    }
+    this.responseText = JSON.stringify({assignLayer: layer, layers});
+    this.readyState = 4; this.onreadystatechange();
+  }
+}
+const root = {scBtLayers: [], scBtLayer: ""};
+"""
+    BT_CHECKS = """
+scBtLoad();
+assert.deepEqual(root.scBtLayers, layers); assert.equal(root.scBtLayer, "Master");
+assert.deepEqual(scBtLabels(root.scBtLayers), ["Main", "Booth", "Headphones", "Zone"]);
+scBtSet("Headphones");
+assert.equal(root.scBtLayer, "Headphones");
+assert.equal(calls.at(-1), "POST http://127.0.0.1:8080/v1/sc5000/bluetooth?assignLayer=Headphones");
+layers = ["Layer A", "Layer B"]; layer = "Layer A"; scBtLoad();
+scBtSet("Layer B");
+assert.equal(root.scBtLayer, "Layer B");
+assert.equal(calls.at(-1), "POST http://127.0.0.1:8080/v1/sc5000/bluetooth?assignLayer=Layer%20B");
+scBtSet("Zone"); /* refused with 400: the panel asks again and shows what the deck says */
+assert.equal(root.scBtLayer, "Layer B");
+assert.equal(calls.at(-1), "GET http://127.0.0.1:8080/v1/sc5000/bluetooth");
+console.log("PASS");
+"""
+
+    def test_bluetooth_panel_output_source(self):
+        # 5.3.0.5: the stock Bluetooth panel (which scans, lists, pairs and connects speakers itself) gets an "Output Source"
+        # row under "Assign Input to", fed by /v1/sc5000/bluetooth through the root's scBt* helpers.
+        qrc = LAB / "5.3.0" / "qrc"
+        if not qrc.is_dir():
+            self.skipTest(f"{qrc} not found (run on the build host)")
+        with tempfile.TemporaryDirectory(prefix="ui-bt-test-") as tmp:
+            res = subprocess.run(["python3", str(BUILD_PACKS), "--qrc", str(qrc), "--out", str(Path(tmp) / "packs")],
+                                 capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0, res.stderr)
+            for lang, title in (("en", "Output Source"), ("zh-Hans", "输出来源"), ("zh-Hant", "輸出來源")):
+                panel = (Path(tmp) / "packs" / lang / "Skins/Embedded/Views/Bluetooth/BluetoothSelect.qml").read_text(encoding="utf-8")
+                self.assertIn('objectName: "Bluetooth_OutputSource"', panel)
+                self.assertIn("active: Config.audio.hasBluetoothOutput && root.scBtLayers.length > 1", panel)
+                self.assertIn("root.scBtSet(root.scBtLayers[index])", panel)
+                self.assertIn("function onVisibleChanged() { if (dialog.controller.visible) root.scBtLoad() }", panel)
+                self.assertRegex(panel, r'text: .*"Output Source"|text: .*"%s"' % title)
+                main = (Path(tmp) / "packs" / lang / "Skins/Embedded/EmbeddedMain.qml").read_text(encoding="utf-8")
+                dictionaries = json.loads(re.search(r"readonly property var scDicts: \((.+)\)", main).group(1))
+                self.assertEqual(json.loads(dictionaries[lang])["Output Source"], title)
+                # after "Assign Input to", before the volume slider; the stock entries and the list that pairs and connects stay
+                self.assertLess(panel.index("Bluetooth_Routing_SubTitleComponent"), panel.index("Bluetooth_OutputSource"))
+                self.assertLess(panel.index("Bluetooth_OutputSource"), panel.index("Bluetooth_Volume"))
+                self.assertIn("dialog.controller.setChannel(values[index])", panel)
+                self.assertIn("dialog.controller.entryClicked(identifier)", panel)
+                if lang != "en":
+                    continue
+                helpers = re.search(r"\tproperty var scBtLayers: \[\]\n(.*?\n)\tfunction scCall\(", main, re.S)
+                self.assertIsNotNone(helpers)
+                # Run the generated helpers against a stand-in for the gateway that answers like the Go handler.
+                body = re.sub(r"^\tproperty [^\n]*\n", "", helpers.group(1), flags=re.M)
+                body = re.sub(r"^\t", "", body, flags=re.M).replace("scBtLayers = ", "root.scBtLayers = ").replace("scBtLayer = ", "root.scBtLayer = ")
+                node = shutil.which("node")
+                if not node:
+                    self.skipTest("node not found")
+                run = subprocess.run([node, "-e", self.BT_PRELUDE + body + self.BT_CHECKS], capture_output=True, text=True)
+                self.assertEqual(run.returncode, 0, run.stderr + run.stdout)
+                self.assertIn("PASS", run.stdout)
 
     def test_build_530(self):
         qrc = LAB / "5.3.0" / "qrc"
@@ -4229,6 +4407,77 @@ class StockJogControlsTest(unittest.TestCase):
                             self.assertFalse(f"ControlSurfaceModules/ControlSurfaceModules/{name}.qml" in edits, name)
         finally:
             bp.ROOT = old_root
+
+
+class MotorizedPlatterRoleTest(unittest.TestCase):
+    """#263: SC5000M / SC6000M in the 4-deck layout (4 Decks, Paired Player)."""
+    REL = "ControlSurfaceModules/ControlSurfaceModules/Motorized.qml"
+    # engine-ui-guard's scDecks per 4-deck role (tests/test_rootfs_overlay.sh checks the guard), with the decks LAYER walks through.
+    ROLES = {"13": ([1, 3], [1, 3, 1]), "24": ([2, 4], [2, 4, 2]), "12": ([1, 2], [1, 2, 1]), "34": ([3, 4], [3, 4, 3]),
+             "1": ([1, 3], [1]), "2": ([2, 4], [2])}
+
+    def patched(self):
+        qrc = LAB / "5.3.0/qrc"
+        if not qrc.is_dir():
+            self.skipTest(f"{qrc} not found")
+        stock = (qrc / self.REL).read_text()
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            text = stock
+            for old, new in bp.edits(False)[self.REL]:
+                text = bp.patch(text, old, new, self.REL)
+        finally:
+            bp.ROOT = old_root
+        return stock, text
+
+    def test_only_the_deck_list_differs_from_stock(self):
+        stock, text = self.patched()
+        changed = [(a, b) for a, b in zip(stock.splitlines(), text.splitlines()) if a != b]
+        self.assertEqual(len(stock.splitlines()), len(text.splitlines()))
+        self.assertEqual(changed, [("        model: [1, 2]", "        model: deckConfig.scDecks || [1, 2]")])
+
+    @unittest.skipUnless(shutil.which("node"), "node needed for the platter role checks")
+    def test_platter_layer_and_motor_slot_follow_the_role(self):
+        # Stock ties the motor and ExternalPlatterLayerActive to decks 1 and 2. On 2+4 the boot marked deck 1 (another
+        # player's) and deck 2 sat in motor slot 1, which the device does not run until the layer changes; on 1+3
+        # deck 3 had no slot at all. The stock per-deck code runs here unchanged, over the patched deck list.
+        stock, text = self.patched()
+        model = re.search(r"\n        model: ([^\n]+)\n", text).group(1)
+        boot = re.search(r"Component\.onCompleted: ([^\n]+)\n", text.split("Repeater {", 1)[1]).group(1)
+        layer = re.search(r"function onActiveDeckIndexChanged\(\) \{\n(.*?)\n                \}", text, re.S).group(1)
+        script = "const assert = require('node:assert/strict');\n"
+        script += "const model = " + json.dumps(model) + ", boot = " + json.dumps(boot) + ", layer = " + json.dumps(layer) + ";\n"
+        script += "const roles = " + json.dumps(self.ROLES) + ";\n"
+        script += r"""
+function run(scDecks, walk, modelSource) {
+    const active = {}, deckConfig = {scDecks: scDecks, activeDeckIndex: String(walk[0])};
+    const decks = new Function('deckConfig', 'return ' + modelSource)(deckConfig);
+    const items = decks.map((modelData, index) => ({modelData, index, pLayerActive: {translator: {get state() { return !!active[modelData] }, set state(v) { active[modelData] = v }}}}));
+    for (const it of items) new Function('index', 'pLayerActive', boot)(it.index, it.pLayerActive);
+    const seen = [];
+    walk.forEach((deck, step) => {
+        if (step) { deckConfig.activeDeckIndex = String(deck); for (const it of items) new Function('deckConfig', 'modelData', 'pLayerActive', layer)(deckConfig, it.modelData, it.pLayerActive); }
+        const on = Object.keys(active).filter(d => active[d]).map(Number), slot = decks.indexOf(deck);
+        seen.push({deck, on, slot});
+    });
+    return seen;
+}
+for (const [role, [scDecks, walk]] of Object.entries(roles)) {
+    for (const s of run(scDecks, walk, model)) {
+        assert.deepEqual(s.on, [s.deck], 'role ' + role + ': the platter belongs to deck(s) ' + s.on + ' while the unit plays deck ' + s.deck);
+        assert.ok(s.slot === 0 || s.slot === 1, 'role ' + role + ': deck ' + s.deck + ' has no motor slot');
+    }
+    assert.equal(run(scDecks, walk, model)[0].slot, 0, 'role ' + role + ': layer A is motor slot 0, as on a stock player');
+}
+// Without the guard's deck list (4-deck off, or a stock assignment file) it is stock: decks 1 and 2.
+assert.deepEqual(run(undefined, [1, 2, 1], model).map(s => s.on), [[1], [2], [1]]);
+// What stock did on 2+4 (the report): deck 1 marked at boot, the unit's deck 2 in slot 1.
+const stock = run(undefined, [2, 4, 2], '[1, 2]');
+assert.deepEqual(stock[0].on, [1]); assert.equal(stock[0].slot, 1); assert.equal(stock[1].slot, -1);
+"""
+        result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 class MasterLedStockTest(unittest.TestCase):

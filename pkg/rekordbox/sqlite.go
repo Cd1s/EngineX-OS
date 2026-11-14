@@ -166,7 +166,7 @@ func parseSQLiteCue(r sqlRecord) (Cue, bool) {
 	var timeMS, endMS uint32
 	var loop bool
 	if inUsec, hasUsec := r.sint("inUsec", "in_usec"); hasUsec {
-		if isUnsetCueTime(inUsec) {
+		if isUnsetCueTime(inUsec) || inUsec > math.MaxInt64-500 {
 			return Cue{}, false
 		}
 		inMS := (inUsec + 500) / 1000
@@ -174,13 +174,19 @@ func parseSQLiteCue(r sqlRecord) (Cue, bool) {
 			return Cue{}, false
 		}
 		timeMS = uint32(inMS)
-		if outUsec, hasOut := r.sint("outUsec", "out_usec"); hasOut && outUsec > 0 && !isUnsetCueTime(outUsec) && outUsec > inUsec {
+		if outUsec, hasOut := r.sint("outUsec", "out_usec"); hasOut && outUsec > 0 && !isUnsetCueTime(outUsec) && outUsec > inUsec && outUsec <= math.MaxInt64-500 {
 			outMS := (outUsec + 500) / 1000
 			if outMS <= math.MaxUint32 {
-				loop = true
 				endMS = uint32(outMS)
 				if endMS <= timeMS {
-					endMS = timeMS + 1
+					if timeMS < math.MaxUint32 {
+						loop = true
+						endMS = timeMS + 1
+					} else {
+						endMS = 0
+					}
+				} else {
+					loop = true
 				}
 			}
 		}
