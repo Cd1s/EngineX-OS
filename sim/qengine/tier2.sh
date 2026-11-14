@@ -29,8 +29,6 @@ EOF
     exit 1
 }
 
-[ $# -ge 1 ] || usage
-
 # Tier-2 emulation requires an x86 host (e.g. the AMD build host). Refuse native ARM hosts
 # to prevent registering qemu-arm binfmt, which breaks the native armhf release gate.
 case "$(uname -m)" in
@@ -40,6 +38,8 @@ case "$(uname -m)" in
         exit 1
         ;;
 esac
+
+[ $# -ge 1 ] || usage
 
 FIRMWARE=""
 TIMEOUT="$DEFAULT_TIMEOUT"
@@ -71,7 +71,62 @@ FIRMWARE="$(cd "$(dirname "$FIRMWARE")" && pwd)/$(basename "$FIRMWARE")"
 WORK_DIR="${QENGINE_WORK_DIR:-/root/build/qengine}"
 mkdir -p "$WORK_DIR"
 
+TASK_TMP_DIR="$WORK_DIR/tmp"
+mkdir -p "$TASK_TMP_DIR"
+export TMPDIR="$TASK_TMP_DIR"
+
 QENGINE_DIR="$WORK_DIR/QEngine"
+
+# Resource tracking for cleanup
+TRACKED_CONTAINERS=()
+TRACKED_MOUNTS=()
+TRACKED_LOOPS=()
+QEMU_PID=""
+INSTANCE_DIR=""
+SERIAL_LOG=""
+QEMU_LOG=""
+
+cleanup() {
+    local rc=$?
+    trap - EXIT INT TERM
+
+    if [ -n "$QEMU_PID" ] && kill -0 "$QEMU_PID" 2>/dev/null; then
+        echo "--- Stopping QEMU PID $QEMU_PID ---"
+        kill -TERM "$QEMU_PID" 2>/dev/null || true
+        sleep 1
+        kill -KILL "$QEMU_PID" 2>/dev/null || true
+        wait "$QEMU_PID" 2>/dev/null || true
+    fi
+
+    for cid in "${TRACKED_CONTAINERS[@]}"; do
+        if [ -n "$cid" ]; then
+            docker rm -f "$cid" >/dev/null 2>&1 || true
+        fi
+    done
+
+    for mnt in "${TRACKED_MOUNTS[@]}"; do
+        if [ -n "$mnt" ] && mountpoint -q "$mnt" 2>/dev/null; then
+            umount "$mnt" 2>/dev/null || umount -l "$mnt" 2>/dev/null || true
+        fi
+        [ -d "$mnt" ] && rm -rf "$mnt" 2>/dev/null || true
+    done
+
+    for loop in "${TRACKED_LOOPS[@]}"; do
+        if [ -n "$loop" ]; then
+            losetup -d "$loop" 2>/dev/null || true
+        fi
+    done
+
+    if [ "$KEEP_INSTANCE" -ne 1 ]; then
+        [ -n "$INSTANCE_DIR" ] && [ -d "$INSTANCE_DIR" ] && rm -rf "$INSTANCE_DIR"
+        [ -n "$SERIAL_LOG" ] && [ -f "$SERIAL_LOG" ] && rm -f "$SERIAL_LOG"
+        [ -n "$QEMU_LOG" ] && [ -f "$QEMU_LOG" ] && rm -f "$QEMU_LOG"
+        [ -d "$TASK_TMP_DIR" ] && rm -rf "$TASK_TMP_DIR"
+    fi
+
+    exit "$rc"
+}
+trap cleanup EXIT INT TERM
 
 echo "=== EngineX OS QEngine Tier 2 Test Runner ==="
 echo "Firmware image : $FIRMWARE"
@@ -90,13 +145,25 @@ if [ "$CURRENT_REV" != "$PINNED_COMMIT" ]; then
     git -C "$QENGINE_DIR" checkout "$PINNED_COMMIT"
 fi
 
+# Override hard-coded /tmp paths in upstream scripts to isolate within TASK_TMP_DIR
+find "$QENGINE_DIR/scripts/build_scripts" -type f -exec sed -i \
+    -e 's|mktemp /tmp/|mktemp "$TMPDIR"/|g' \
+    -e 's|mktemp -d /tmp/|mktemp -d "$TMPDIR"/|g' \
+    -e 's|/tmp/qengine-|"$TMPDIR"/qengine-|g' \
+    -e 's|/tmp/build-|"$TMPDIR"/build-|g' {} +
+
+# Direct QEngine's drop-in to 99-qengine.conf so EngineX's override.conf remains untouched
+if [ -f "$QENGINE_DIR/scripts/build_scripts/build_armv7_engine_rootfs.sh" ]; then
+    sed -i 's|/mnt/rootfs/etc/systemd/system/\$APP_UNIT.d/override.conf|/mnt/rootfs/etc/systemd/system/\$APP_UNIT.d/99-qengine.conf|' "$QENGINE_DIR/scripts/build_scripts/build_armv7_engine_rootfs.sh"
+fi
+
 # Fix upstream launcher regex for EngineX engine invocations
 if [ -f "$QENGINE_DIR/scripts/build_scripts/rootfs_steps/skip_firmware_update.sh" ]; then
     sed -i '/-skipFirmwareUpdate/!s|\([[:space:]]*[^ ]*/usr/Engine/Engine\) |\1 -skipFirmwareUpdate |' "$QENGINE_DIR/scripts/build_scripts/rootfs_steps/skip_firmware_update.sh"
 fi
 
 # 2. Check prerequisites on the host
-for tool in qemu-system-aarch64 qemu-img docker file dumpe2fs debugfs; do
+for tool in qemu-system-aarch64 qemu-img docker file dumpe2fs debugfs losetup; do
     command -v "$tool" >/dev/null 2>&1 || {
         echo "ERROR: required host tool '$tool' not found." >&2
         exit 1
@@ -135,76 +202,58 @@ if [ ! -f "$SSH_KEY_PRIV" ]; then
 fi
 SSH_PUB_CONTENT="$(cat "${SSH_KEY_PRIV}.pub")"
 
-unshare -m bash <<EOF
-set -euo pipefail
-MNT_DIR=\$(mktemp -d /var/tmp/qengine_mnt.XXXXXX)
-mount -o loop "$ROOTFS_IMG" "\$MNT_DIR"
+MNT_DIR="$(mktemp -d "$TASK_TMP_DIR/mnt.XXXXXX")"
+TRACKED_MOUNTS+=("$MNT_DIR")
 
-IS_ENGINEX=0
-if [ -f "\$MNT_DIR/etc/sc5000/engine-ui-guard" ] || [ -f "\$MNT_DIR/etc/systemd/system/engine.service.d/60-ui-hook.conf" ]; then
-    IS_ENGINEX=1
+LOOP_DEV="$(losetup -f --show "$ROOTFS_IMG")"
+TRACKED_LOOPS+=("$LOOP_DEV")
+
+if ! mount "$LOOP_DEV" "$MNT_DIR"; then
+    echo "ERROR: failed to mount $LOOP_DEV on $MNT_DIR" >&2
+    exit 1
 fi
 
-if [ "\$IS_ENGINEX" -eq 1 ]; then
-    # Fix drop-ins: upstream new_instance.sh overwrites engine.service.d/override.conf.
-    # Move QEngine's touchbridge/midisurface dependencies to 99-qengine.conf and restore our override.conf.
-    mkdir -p "\$MNT_DIR/etc/systemd/system/engine.service.d"
-    cat > "\$MNT_DIR/etc/systemd/system/engine.service.d/99-qengine.conf" <<'CFG'
-[Unit]
-After=touchbridge.service midisurface.service
-Requires=touchbridge.service
-Wants=midisurface.service
-CFG
+IS_ENGINEX=0
+if [ -f "$MNT_DIR/etc/sc5000/engine-ui-guard" ] || [ -f "$MNT_DIR/etc/systemd/system/engine.service.d/60-ui-hook.conf" ]; then
+    IS_ENGINEX=1
+    echo "--- Detected EngineX OS image ---"
+else
+    echo "--- Detected stock inMusic image ---"
+fi
 
-    # Restore our override.conf drop-in
-    cat > "\$MNT_DIR/etc/systemd/system/engine.service.d/override.conf" <<'CFG'
-[Unit]
-Wants=sc5000-custom-prepare.service
-After=sc5000-custom-prepare.service
-
-[Service]
-LimitCORE=0
-ExecStopPost=
-ExecStopPost=-/bin/sh -c 'command -v connmanctl >/dev/null || exit 0; exec /usr/Engine/Scripts/cleanup-JP07.sh'
-ExecStopPost=-/etc/sc5000/engine-ui-guard stop
-Environment=HOME=/tmp/sc5000-engine-home MESA_SHADER_CACHE_MAX_SIZE=32M
-Environment=QML_DISABLE_DISK_CACHE=1
-ExecStartPre=/bin/mkdir -p -m 0700 /tmp/sc5000-engine-home
-ExecStartPre=/etc/sc5000/engine-ui-guard runtime
-CFG
-
+if [ "$IS_ENGINEX" -eq 1 ]; then
     # Fix LD_PRELOAD conflict: configure /etc/ld.so.preload to load QEngine shims system-wide
     # so they remain loaded even when UnsetEnvironment=LD_PRELOAD and engine-ui-guard execute.
-    echo "/root/dtshim.so /root/drmatomic.so /root/alsashim.so /root/quitshim.so" > "\$MNT_DIR/etc/ld.so.preload"
+    echo "/root/dtshim.so /root/drmatomic.so /root/alsashim.so /root/quitshim.so" > "$MNT_DIR/etc/ld.so.preload"
 
     # Also patch engine-ui-guard as fallback safeguard to append shims if LD_PRELOAD is set
-    if [ -f "\$MNT_DIR/etc/sc5000/engine-ui-guard" ]; then
-        sed -i 's|export LD_PRELOAD=\${SC5000_UI_HOOK:-/etc/sc5000/libengine-ui-hook.so}|export LD_PRELOAD="\${SC5000_UI_HOOK:-/etc/sc5000/libengine-ui-hook.so}:/root/dtshim.so:/root/drmatomic.so:/root/alsashim.so:/root/quitshim.so"|' "\$MNT_DIR/etc/sc5000/engine-ui-guard"
-        sed -i 's|LD_PRELOAD=\${SC5000_UI_HOOK:-/etc/sc5000/libengine-ui-hook.so} "\\\$@" &|LD_PRELOAD="\${SC5000_UI_HOOK:-/etc/sc5000/libengine-ui-hook.so}:/root/dtshim.so:/root/drmatomic.so:/root/alsashim.so:/root/quitshim.so" "\\\$@" &|' "\$MNT_DIR/etc/sc5000/engine-ui-guard"
+    if [ -f "$MNT_DIR/etc/sc5000/engine-ui-guard" ]; then
+        sed -i 's|export LD_PRELOAD=\${SC5000_UI_HOOK:-/etc/sc5000/libengine-ui-hook.so}|export LD_PRELOAD="\${SC5000_UI_HOOK:-/etc/sc5000/libengine-ui-hook.so}:/root/dtshim.so:/root/drmatomic.so:/root/alsashim.so:/root/quitshim.so"|' "$MNT_DIR/etc/sc5000/engine-ui-guard"
+        sed -i 's|LD_PRELOAD=\${SC5000_UI_HOOK:-/etc/sc5000/libengine-ui-hook.so} "\\\$@" &|LD_PRELOAD="\${SC5000_UI_HOOK:-/etc/sc5000/libengine-ui-hook.so}:/root/dtshim.so:/root/drmatomic.so:/root/alsashim.so:/root/quitshim.so" "\\\$@" &|' "$MNT_DIR/etc/sc5000/engine-ui-guard"
     fi
 fi
 
 # Setup SSH test key for automated verification
-mkdir -p "\$MNT_DIR/root/.ssh"
-chmod 700 "\$MNT_DIR/root/.ssh"
-echo "$SSH_PUB_CONTENT" > "\$MNT_DIR/root/.ssh/authorized_keys"
-chmod 600 "\$MNT_DIR/root/.ssh/authorized_keys"
+mkdir -p "$MNT_DIR/root/.ssh"
+chmod 700 "$MNT_DIR/root/.ssh"
+echo "$SSH_PUB_CONTENT" > "$MNT_DIR/root/.ssh/authorized_keys"
+chmod 600 "$MNT_DIR/root/.ssh/authorized_keys"
 
-if [ -d "\$MNT_DIR/usr/share/sc5000-custom" ]; then
-    echo "$SSH_PUB_CONTENT" > "\$MNT_DIR/usr/share/sc5000-custom/authorized_keys"
-    chmod 600 "\$MNT_DIR/usr/share/sc5000-custom/authorized_keys"
+if [ -d "$MNT_DIR/usr/share/sc5000-custom" ]; then
+    echo "$SSH_PUB_CONTENT" > "$MNT_DIR/usr/share/sc5000-custom/authorized_keys"
+    chmod 600 "$MNT_DIR/usr/share/sc5000-custom/authorized_keys"
 fi
 
 # Ensure sshd is enabled and permits root login
-mkdir -p "\$MNT_DIR/etc/systemd/system/multi-user.target.wants"
-ln -sf /lib/systemd/system/sshd.service "\$MNT_DIR/etc/systemd/system/multi-user.target.wants/sshd.service"
-if [ -f "\$MNT_DIR/etc/ssh/sshd_config" ]; then
-    echo "PermitRootLogin yes" >> "\$MNT_DIR/etc/ssh/sshd_config"
+mkdir -p "$MNT_DIR/etc/systemd/system/multi-user.target.wants"
+ln -sf /lib/systemd/system/sshd.service "$MNT_DIR/etc/systemd/system/multi-user.target.wants/sshd.service"
+if [ -f "$MNT_DIR/etc/ssh/sshd_config" ]; then
+    echo "PermitRootLogin yes" >> "$MNT_DIR/etc/ssh/sshd_config"
 fi
 
 # Configure network interface DHCP for systemd-networkd
-mkdir -p "\$MNT_DIR/etc/systemd/network"
-cat > "\$MNT_DIR/etc/systemd/network/20-wired.network" <<'CFG'
+mkdir -p "$MNT_DIR/etc/systemd/network"
+cat > "$MNT_DIR/etc/systemd/network/20-wired.network" <<'CFG'
 [Match]
 Name=eth* en*
 
@@ -213,20 +262,24 @@ DHCP=yes
 CFG
 
 # Mask hardware-bound verity / hostname units that fail under generic emulator
-ln -sf /dev/null "\$MNT_DIR/etc/systemd/system/az0x-loadpin-trustpoints.service"
-ln -sf /dev/null "\$MNT_DIR/etc/systemd/system/az0x-setup-hostname.service"
+ln -sf /dev/null "$MNT_DIR/etc/systemd/system/az0x-loadpin-trustpoints.service"
+ln -sf /dev/null "$MNT_DIR/etc/systemd/system/az0x-setup-hostname.service"
 
 # Setup serial autologin on ttyAMA0
-mkdir -p "\$MNT_DIR/etc/systemd/system/serial-getty@ttyAMA0.service.d"
-cat > "\$MNT_DIR/etc/systemd/system/serial-getty@ttyAMA0.service.d/autologin.conf" <<'CFG'
+mkdir -p "$MNT_DIR/etc/systemd/system/serial-getty@ttyAMA0.service.d"
+cat > "$MNT_DIR/etc/systemd/system/serial-getty@ttyAMA0.service.d/autologin.conf" <<'CFG'
 [Service]
 ExecStart=
 ExecStart=-/sbin/agetty --autologin root --keep-baud 115200,38400,9600 %I \$TERM
 CFG
 
-umount "\$MNT_DIR"
-rm -rf "\$MNT_DIR"
-EOF
+umount "$MNT_DIR"
+losetup -d "$LOOP_DEV"
+rm -rf "$MNT_DIR"
+
+# Clean tracked mount and loop
+TRACKED_MOUNTS=()
+TRACKED_LOOPS=()
 
 # 6. Launch QEMU in headless TCG mode with tuned performance options
 SERIAL_LOG="$WORK_DIR/${INSTANCE_NAME}.serial.log"
@@ -247,19 +300,6 @@ export KERNEL_EXTRA_ARGS="systemd.show_status=1 systemd.log_color=0"
 "$QENGINE_DIR/scripts/qemu/run_instance.sh" --name "$INSTANCE_NAME" --display none --no-gl > "$QEMU_LOG" 2>&1 &
 QEMU_PID=$!
 echo "QEMU PID: $QEMU_PID (SSH port: $SSH_PORT)"
-
-cleanup() {
-    if kill -0 "$QEMU_PID" 2>/dev/null; then
-        echo "--- Stopping QEMU PID $QEMU_PID ---"
-        kill -TERM "$QEMU_PID" 2>/dev/null || true
-        sleep 2
-        kill -KILL "$QEMU_PID" 2>/dev/null || true
-    fi
-    if [ "$KEEP_INSTANCE" -ne 1 ]; then
-        rm -rf "$INSTANCE_DIR" "$SERIAL_LOG" "$QEMU_LOG"
-    fi
-}
-trap cleanup EXIT
 
 # 7. Probing
 echo "--- Probing guest boot status (max ${TIMEOUT}s) ---"
@@ -326,21 +366,14 @@ report() {
 echo ""
 echo "=== Test Results ==="
 
-if [ -f "$WORK_DIR/${INSTANCE_NAME}.is_enginex" ] || [ "$ENGINE_OK" -eq 1 ]; then
-    # Check if instance is EngineX OS
-    if guest_exec '[ -f /etc/sc5000/engine-ui-guard ] || [ -f /etc/systemd/system/engine.service.d/60-ui-hook.conf ]' 2>/dev/null; then
-        IS_ENGINEX=1
-    else
-        IS_ENGINEX=0
-    fi
-fi
-
 if [ "$IS_ENGINEX" -eq 0 ]; then
     report PASS "Stock boot to Engine in ${TOTAL_SECS}s"
 else
-    report PASS "EngineX boot to Engine in ${TOTAL_SECS}s"
+    if [ "$SSH_OK" -ne 1 ]; then
+        report FAIL "SSH access unavailable to perform EngineX unit verification"
+    else
+        report PASS "EngineX boot to Engine in ${TOTAL_SECS}s"
 
-    if [ "$SSH_OK" -eq 1 ]; then
         # Check 1: systemctl --failed is empty
         FAILED_UNITS="$(guest_exec 'systemctl --failed --no-legend 2>/dev/null || true' | tr -d '\r' | grep -v '^$' || true)"
         if [ -z "$FAILED_UNITS" ]; then
@@ -385,14 +418,16 @@ else
         fi
 
         # Check 6: journal has no errors from our units
-        UNIT_JOURNAL_ERRS="$(guest_exec 'journalctl -u sc5000-custom-prepare -u stream-sync -u rb-bridge -u sc5000-deemixd -u engine-guardian -p err..emerg --no-legend 2>/dev/null || true' | tr -d '\r' | grep -v '^$' || true)"
-        if [ -z "$UNIT_JOURNAL_ERRS" ]; then
-            report PASS "Journal has no errors from EngineX units"
+        if JOURNAL_OUT="$(guest_exec 'journalctl --no-pager -p err..emerg -u sc5000-custom-prepare -u stream-sync -u rb-bridge -u sc5000-deemixd -u engine-guardian -u engine 2>&1')"; then
+            ERR_LINES="$(echo "$JOURNAL_OUT" | tr -d '\r' | grep -v '^\s*$' | grep -v -- '-- No entries --' || true)"
+            if [ -z "$ERR_LINES" ]; then
+                report PASS "Journal has no errors from EngineX units"
+            else
+                report FAIL "Journal errors detected from EngineX units: $(echo "$ERR_LINES" | head -n 3 | tr '\n' '; ')"
+            fi
         else
-            report FAIL "Journal errors detected from EngineX units: $(echo "$UNIT_JOURNAL_ERRS" | head -n 3 | tr '\n' '; ')"
+            report FAIL "journalctl query failed: $(echo "$JOURNAL_OUT" | head -n 1)"
         fi
-    else
-        report FAIL "SSH access unavailable to perform guest unit verification"
     fi
 fi
 
