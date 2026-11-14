@@ -147,6 +147,7 @@ phase() {
     local name=$1 R=$W/$1 v
     [ "$name" != boot2 ] || R=$W/new
     local legacy_ota=0
+    names "$R"
     mount --make-rprivate /
     for d in tmp run dev sys media; do mount -t tmpfs tmpfs "$R/$d"; done
     if [ -d "$R/var/volatile" ]; then

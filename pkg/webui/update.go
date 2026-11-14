@@ -19,9 +19,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Cd1s/EngineX-OS/internal/releasesig"
 	"github.com/Cd1s/EngineX-OS/internal/leave"
 	"github.com/Cd1s/EngineX-OS/internal/release"
+	"github.com/Cd1s/EngineX-OS/internal/releasesig"
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
 )
 
