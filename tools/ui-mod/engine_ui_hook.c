@@ -155,6 +155,8 @@ static int echo_master_bypass;        // #258 all 5.3.0 consoles use native per-
 static unsigned pfx_time_ms;          // #162: zero OFF, otherwise 10..4000
 static struct sc_pfx_ms master_ms[4];
 static int pioneer_fx_mode;           // #88 Pioneer FX emulations
+#define MASTER_PFX_PAIRS 4
+static struct sc_master_pioneer_fx master_pfx[MASTER_PFX_PAIRS];
 static const char *four_deck_settings = UI_ROOT "/settings.conf";
 static const char *product_code_path = "/sys/firmware/devicetree/base/inmusic,product-code";
 static int player_board(void);
@@ -371,6 +373,9 @@ static void *lim_poll(void *arg) {
     struct timespec resolve; // bind clock_gettime here: its first call takes the loader lock, which the audio thread must not
     clock_gettime(CLOCK_MONOTONIC, &resolve);
     for (;;) {
+        if (__atomic_load_n(&pioneer_fx_mode, __ATOMIC_RELAXED))
+            for (unsigned pair = 0; pair < MASTER_PFX_PAIRS; ++pair)
+                sc_master_pioneer_fx_prepare(&master_pfx[pair]);
         fx_selector_poll();
         static struct stat previous;
         static int had_settings;
@@ -693,6 +698,32 @@ static void hook_px_rate(void *handler, const void *event) {
 }
 #endif
 
+/* ChannelDJFx::process traverses this owner's EffectCollection. Flanger's
+ * final call supplies effect+0x68 (armhf), effect+0xb8 (AZ04) to DSP_COMMON.
+ * Read only during the live owner's event, never cache/dereference it on a
+ * different render thread. The installed entry points are BuildID-checked. */
+static void dsp_mark_owner_transition(void *owner, uint32_t kind) {
+    if (!owner) return;
+#if defined(__aarch64__)
+    const unsigned collection_offset = 0x40, common_offset = 0xb8;
+#else
+    const unsigned collection_offset = 0x28, common_offset = 0x68;
+#endif
+    void *collection;
+    memcpy(&collection, (char *)owner + collection_offset, sizeof collection);
+    if (!collection) return;
+    uintptr_t begin, end;
+    memcpy(&begin, (char *)collection + sizeof(void *), sizeof begin);
+    memcpy(&end, (char *)collection + 2 * sizeof(void *), sizeof end);
+    if (!begin || end < begin || begin % sizeof(void *) || end % sizeof(void *) ||
+        end - begin > 128 * sizeof(void *)) return;
+    for (uintptr_t at = begin; at < end; at += sizeof(void *)) {
+        void *effect;
+        memcpy(&effect, (void *)at, sizeof effect);
+        if (effect) sc_dsp_fx_mark_transition((char *)effect + common_offset, kind);
+    }
+}
+
 static void dsp_transition(unsigned slot, uint32_t kind, void *handler, const void *event) {
 #if !defined(__aarch64__)
     if (fx_selector_supported && (slot == DSP_SWITCH || slot == DSP_CHANGE)) {
@@ -704,7 +735,7 @@ static void dsp_transition(unsigned slot, uint32_t kind, void *handler, const vo
     if (fx_selector_supported && (slot == DSP_TURN_OFF || slot == DSP_TURN_ON))
         sc_pfx_reset_owner(dsp_bound_owner(handler));
 #endif
-    sc_dsp_fx_mark_transition(dsp_bound_owner(handler), kind);
+    dsp_mark_owner_transition(dsp_bound_owner(handler), kind);
     ((dsp_event_fn)dsp_originals[slot])(handler, event);
 }
 
@@ -900,8 +931,6 @@ static struct sc_lim master_lim[8];
 static struct sc_gain master_gain[8];
 #define MASTER_ECHO_PAIRS 4 // 384 KB of BSS each, untouched until Echo Out is armed
 static struct sc_echo master_echo[MASTER_ECHO_PAIRS];
-#define MASTER_PFX_PAIRS 4
-static struct sc_master_pioneer_fx master_pfx[MASTER_PFX_PAIRS];
 // #49: in the 4-deck layout a player's 4-channel device (two stereo pairs) leaves
 // decks 3 and 4 without output buffers, and Engine skips rendering them ("Mixer
 // skipped ... unassigned output buffer"): their playheads stand still. All four
@@ -1154,9 +1183,9 @@ static uint32_t hook_master_output(void *host, void *context, int in_channels, c
                     for (int i = 0; i < frames; ++i) {
                         float dl = out[ch][i], dr = r ? r[i] : 0.0f;
                         float right = dr;
-                        sc_master_pioneer_fx_planar(&master_pfx[ch / 2], &out[ch][i], r ? &r[i] : NULL, 1, pfx);
+                        int mode = sc_master_pioneer_fx_planar(&master_pfx[ch / 2], &out[ch][i], r ? &r[i] : NULL, 1, pfx);
                         if (r) right = r[i];
-                        sc_ms_mix(timing, dl, dr, &out[ch][i], &right, pfx, ms, 0.5f, 1);
+                        sc_ms_mix(timing, dl, dr, &out[ch][i], &right, mode, ms, 0.5f, 1);
                         if (r) r[i] = right;
                     }
                 } else {

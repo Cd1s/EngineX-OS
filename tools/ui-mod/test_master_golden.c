@@ -44,6 +44,7 @@ int main(void) {
 #endif
     for (int mode = 1; mode <= 5; ++mode) {
         memset(master_pfx, 0, sizeof master_pfx);
+        for (unsigned pair = 0; pair < MASTER_PFX_PAIRS; ++pair) sc_master_pioneer_fx_prepare(&master_pfx[pair]);
         pioneer_fx_mode = mode;
         uint32_t random = 1234567;
         uint64_t hash = UINT64_C(14695981039346656037);

@@ -1,12 +1,11 @@
-/* Keep dfdef97 master Color FX on every architecture. Namespace the frozen
- * source so armhf selector instances can use their parameterized DSP separately.
- * Include before pioneer_fx.h; the frozen source itself stays byte-identical. */
+/* Keep legacy master Color FX on every architecture, with worker-prepared banks.
+ * Include before pioneer_fx.h to keep selector DSP names separate. */
 #ifndef SC_PIONEER_MASTER_H
 #define SC_PIONEER_MASTER_H
 #define sc_pioneer_fx_mode sc_master_pioneer_fx_mode
-#define sc_pioneer_fx sc_master_pioneer_fx
+#define sc_pioneer_fx sc_master_pfx_bank
 #define sc_pioneer_fx_parse sc_master_pioneer_fx_parse
-#define sc_pioneer_fx_planar sc_master_pioneer_fx_planar
+#define sc_pioneer_fx_planar sc_master_pfx_bank_planar
 #define sc_pfx_sanitize sc_master_pfx_sanitize
 #define sc_pfx_state sc_master_pfx_state
 #define sc_pfx_clamp_out sc_master_pfx_clamp_out
@@ -37,4 +36,56 @@
 #undef sc_pioneer_fx_parse
 #undef sc_pioneer_fx
 #undef sc_pioneer_fx_mode
+
+/* Same READY/LIVE ownership transfer as the selector. The audio callback
+ * retains its current effect until a clean spare is available; OFF is immediate.
+ * Only the polling worker touches DIRTY buffers, including faulting in pages. */
+enum { SC_MASTER_PFX_DIRTY, SC_MASTER_PFX_PREPARING, SC_MASTER_PFX_READY, SC_MASTER_PFX_LIVE };
+struct sc_master_pioneer_fx {
+    struct sc_master_pfx_bank bank[2];
+    unsigned state[2];
+    unsigned current; /* bank index + 1, zero when off */
+    uint32_t write_pos; /* preserve the legacy ring cursor across mode changes */
+};
+
+static inline void sc_master_pioneer_fx_prepare(struct sc_master_pioneer_fx *s) {
+    for (unsigned i = 0; i < 2; ++i) {
+        unsigned expected = SC_MASTER_PFX_DIRTY;
+        if (!__atomic_compare_exchange_n(&s->state[i], &expected, SC_MASTER_PFX_PREPARING,
+                                         0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) continue;
+        memset(&s->bank[i], 0, sizeof s->bank[i]);
+        __atomic_store_n(&s->state[i], SC_MASTER_PFX_READY, __ATOMIC_RELEASE);
+    }
+}
+
+static inline int sc_master_pioneer_fx_planar(struct sc_master_pioneer_fx *s,
+                                               float *l, float *r, unsigned frames, int mode) {
+    if (!s || !l || !frames) return SC_MASTER_PFX_OFF;
+    if (mode == SC_MASTER_PFX_OFF) {
+        if (s->current)
+            __atomic_store_n(&s->state[s->current - 1], SC_MASTER_PFX_DIRTY, __ATOMIC_RELEASE);
+        s->current = 0;
+        return SC_MASTER_PFX_OFF;
+    }
+    if (!s->current || mode != s->bank[s->current - 1].active_mode) {
+        for (unsigned i = 0; i < 2; ++i) {
+            unsigned expected = SC_MASTER_PFX_READY;
+            if (!__atomic_compare_exchange_n(&s->state[i], &expected, SC_MASTER_PFX_LIVE,
+                                             0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) continue;
+            s->bank[i].active_mode = mode;
+            s->bank[i].write_pos = s->write_pos;
+            if (s->current)
+                __atomic_store_n(&s->state[s->current - 1], SC_MASTER_PFX_DIRTY, __ATOMIC_RELEASE);
+            s->current = i + 1;
+            break;
+        }
+    }
+    if (s->current) {
+        struct sc_master_pfx_bank *bank = &s->bank[s->current - 1];
+        sc_master_pfx_bank_planar(bank, l, r, frames, bank->active_mode);
+        s->write_pos = bank->write_pos;
+        return bank->active_mode;
+    }
+    return SC_MASTER_PFX_OFF;
+}
 #endif

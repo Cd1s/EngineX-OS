@@ -141,7 +141,8 @@ static void test_px_rate_render(void) {
     puts("test_px_rate_render PASS (fresh-state production event-to-audio path)");
 }
 static void test_px_off_on_reset(void) {
-    int owner, effect;
+    unsigned char owner[0x40] = {0}; /* live-owner fixture, empty collection */
+    int effect;
     unsigned char handler[24] = {0}, event[64] = {0};
     uint32_t address = (uint32_t)(uintptr_t)&owner;
     memcpy(handler + 12, &address, 4);

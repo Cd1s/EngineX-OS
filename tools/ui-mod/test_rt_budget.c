@@ -29,6 +29,12 @@ static void report(const char *path, unsigned frames, unsigned ms,
            (unsigned long long)maximum, misses);
 }
 
+static void report_switch_total(uint64_t total, unsigned blocks)
+{
+    printf("legacy-mode-switch-4-pairs total_ns=%llu blocks=%u\n",
+           (unsigned long long)total, blocks);
+}
+
 /* live_tap.h also defines the non-RT FIFO worker. Audit it separately; only
  * sc_tap_push is exercised below. The pure DSP headers get a compile-time ban
  * on common allocation, locking, I/O and waiting APIs, including unused paths.
@@ -119,6 +125,10 @@ int main(void)
                             samples[p][0][i] = x; samples[p][1][i] = -x;
                         }
                     }
+                    #ifndef T4_BASELINE
+                    if (path == 1) for (unsigned p = 0; p < PAIRS; ++p)
+                        sc_master_pioneer_fx_prepare(&master[p]);
+#endif
                     int mode = (int)((block / 8) % 6); /* OFF, all modes, transitions */
                     if (path == 2) {
                         selector.time_ms = ms;
@@ -146,5 +156,23 @@ int main(void)
             }
         }
     }
+    uint64_t switch_max = 0, switch_total = 0;
+    unsigned switch_misses = 0;
+    for (unsigned block = 0; block < BLOCKS; ++block) {
+#ifndef T4_BASELINE
+        for (unsigned p = 0; p < PAIRS; ++p) sc_master_pioneer_fx_prepare(&master[p]);
+#endif
+        uint64_t start = now_ns();
+        for (unsigned p = 0; p < PAIRS; ++p)
+            sc_master_pioneer_fx_planar(&master[p], samples[p][0], samples[p][1], 1,
+                                        1 + block % 5);
+        uint64_t elapsed = now_ns() - start;
+        switch_total += elapsed;
+        if (elapsed > switch_max) switch_max = elapsed;
+        if (elapsed > 1000000000u / 96000u) ++switch_misses;
+    }
+    report("legacy-mode-switch-4-pairs", 1, 0, 1000000000u / 96000u, switch_max, switch_misses);
+    /* Total supplements the maximum when other host tasks preempt a sample. */
+    report_switch_total(switch_total, BLOCKS);
     return failures ? EXIT_FAILURE : EXIT_SUCCESS;
 }

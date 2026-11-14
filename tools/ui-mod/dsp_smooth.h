@@ -48,18 +48,21 @@ enum {
 
 /* De-click ramp of one FX common tail (one per effect; Engine runs several on
  * different audio threads, and nothing proves one common stays on one thread).
- * Every field is accessed with __atomic builtins; a transition never writes
- * them, it only bumps the global generation. generation and ramp_remaining
+ * Every field is accessed with __atomic builtins; an event only publishes a
+ * transition epoch for this common. generation and ramp_remaining
  * belong to whoever holds `busy` (sc_dsp_chain_enter .. sc_dsp_chain_exit). */
 struct sc_dsp_chain {
     void *self;                   /* common tail instance, NULL when free; published last */
     uint32_t generation;          /* FX generation it last synced to */
+    uint32_t transition;          /* last event targeting self, or slot birth */
+    uint32_t ramp_generation;     /* last transition consumed, or slot birth */
     int32_t ramp_remaining;       /* frames left in its de-click ramp */
     uint32_t busy;                /* 1 while a call owns the slot; only ever try-acquired */
 };
 
 struct sc_dsp_state {
     uint32_t generation;          /* bumped by every FX transition */
+    uint32_t epoch;               /* orders targeted events and slot publication */
     uint32_t sampler_generation;  /* observation only; independent of FX ramps */
     uint32_t next_evict;          /* round-robin victim when the AutoGate table is full */
     struct {
@@ -146,16 +149,28 @@ static inline double sc_dsp_read_f64(const void *base, size_t byte_offset)
     return sc_dsp_finite_f64(v) ? v : 0.0;
 }
 
-/* 2. FX transitions. Any thread may mark one; every common tail ramps once. */
-static inline void sc_dsp_fx_mark_transition(const void *fx_owner, uint32_t kind)
+/* 2. Any thread may mark a common belonging to the event's ChannelDJFx owner.
+ * The hook resolves that owner's collection during its live event. The global
+ * generation ages unused slots and observes AutoGate events; it never arms ramps. */
+static inline void sc_dsp_fx_mark_transition(const void *common, uint32_t kind)
 {
-    /* shortcut: any FX event ramps every common tail once, because the owner
-     * (ChannelDJFx) has no verified mapping to a common (effect+0x68) object;
-     * make it precise once that mapping is reversed. */
-    (void)fx_owner;
     if (kind < SC_DSP_FX_TRANSITION_TURN_ON || kind > SC_DSP_FX_TRANSITION_ENABLE)
         return;
-    __atomic_add_fetch(&sc_dsp_state()->generation, 1u, __ATOMIC_RELEASE);
+    struct sc_dsp_state *s = sc_dsp_state();
+    __atomic_add_fetch(&s->generation, 1u, __ATOMIC_RELEASE);
+    if (!common) return;
+    uint32_t gen = __atomic_add_fetch(&s->epoch, 1u, __ATOMIC_ACQ_REL);
+    for (int i = 0; i < SC_DSP_CHAIN_SLOTS; ++i) {
+        struct sc_dsp_chain *c = &s->chain[i];
+        if (__atomic_load_n(&c->self, __ATOMIC_ACQUIRE) != common) continue;
+        uint32_t old = __atomic_load_n(&c->transition, __ATOMIC_RELAXED);
+        /* Publish monotonically even with overlapping control events. An
+         * event delayed across slot reuse predates
+         * its new ramp_generation, so cannot re-arm the unrelated common. */
+        while ((int32_t)(gen - old) > 0 &&
+               !__atomic_compare_exchange_n(&c->transition, &old, gen, 0,
+                                             __ATOMIC_RELEASE, __ATOMIC_RELAXED)) {}
+    }
 }
 
 static inline int sc_dsp_chain_try(struct sc_dsp_chain *c)
@@ -201,10 +216,12 @@ static inline struct sc_dsp_chain *sc_dsp_chain_enter(void *common)
             sc_dsp_chain_exit(c);
             continue;
         }
-        if (__atomic_load_n(&c->generation, __ATOMIC_RELAXED) != gen) {
-            __atomic_store_n(&c->generation, gen, __ATOMIC_RELAXED);
+        uint32_t transition = __atomic_load_n(&c->transition, __ATOMIC_ACQUIRE);
+        if ((int32_t)(transition - __atomic_load_n(&c->ramp_generation, __ATOMIC_RELAXED)) > 0) {
+            __atomic_store_n(&c->ramp_generation, transition, __ATOMIC_RELAXED);
             __atomic_store_n(&c->ramp_remaining, (int32_t)SC_DSP_RAMP_FRAMES, __ATOMIC_RELAXED);
         }
+        __atomic_store_n(&c->generation, gen, __ATOMIC_RELAXED);
         return c;
     }
     for (int pass = 0; pass < 2; pass++) { /* 0: free slots, 1: stale slots */
@@ -223,6 +240,12 @@ static inline struct sc_dsp_chain *sc_dsp_chain_enter(void *common)
                 sc_dsp_chain_exit(c);
                 continue;
             }
+            /* Unpublish before taking the birth epoch. A delayed marker for
+             * the previous identity then necessarily predates this birth. */
+            __atomic_store_n(&c->self, NULL, __ATOMIC_RELEASE);
+            uint32_t birth = __atomic_add_fetch(&s->epoch, 1u, __ATOMIC_ACQ_REL);
+            __atomic_store_n(&c->transition, birth, __ATOMIC_RELAXED);
+            __atomic_store_n(&c->ramp_generation, birth, __ATOMIC_RELAXED);
             __atomic_store_n(&c->generation, gen, __ATOMIC_RELAXED);
             __atomic_store_n(&c->ramp_remaining, (int32_t)SC_DSP_RAMP_FRAMES, __ATOMIC_RELAXED);
             __atomic_store_n(&c->self, common, __ATOMIC_RELEASE); /* publish last */

@@ -10,6 +10,17 @@
 #include "dsp_smooth.h"
 #include "master_limiter.h"
 #include "echo_out.h"
+/* Count clears reached by the legacy audio path, separately from its worker. */
+static _Thread_local int master_audio;
+static _Thread_local size_t master_audio_cleared;
+static void *master_memset(void *p, int c, size_t n)
+{
+    if (master_audio) master_audio_cleared += n;
+    return memset(p, c, n);
+}
+#define memset master_memset
+#include "pioneer_master.h"
+#undef memset
 #include "pioneer_fx.h"
 
 static int failures;
@@ -139,7 +150,7 @@ static void test_post_process(void)
         in_l[i] = in_r[i] = 0.0f;
         out_l[i] = out_r[i] = 1.0f;
     }
-    sc_dsp_fx_mark_transition(NULL, SC_DSP_FX_TRANSITION_TURN_ON);
+    sc_dsp_fx_mark_transition(&fx[0], SC_DSP_FX_TRANSITION_TURN_ON);
     post_on(&fx[0], in, out, 100, 100);
     float *in2[2] = {in_l + 100, in_r + 100}, *out2[2] = {out_l + 100, out_r + 100};
     post_on(&fx[0], in2, out2, N - 100, N - 100);
@@ -163,7 +174,7 @@ static void test_post_process(void)
     CHECK(out_l[0] == 1.0f);
 
     /* In-place processing has no dry copy: only sanitized, ramp left armed. */
-    sc_dsp_fx_mark_transition(NULL, SC_DSP_FX_TRANSITION_TURN_OFF);
+    sc_dsp_fx_mark_transition(&fx[0], SC_DSP_FX_TRANSITION_TURN_OFF);
     c = enter(&fx[0]);
     sc_dsp_fx_common_post_process(c, out, out, N, N);
     CHECK(out_l[0] == 1.0f && c->ramp_remaining == SC_DSP_RAMP_FRAMES);
@@ -172,7 +183,7 @@ static void test_post_process(void)
     CHECK(out_l[0] == 0.0f);
 
     /* Not a transition kind: nothing re-arms. */
-    sc_dsp_fx_mark_transition(NULL, 99);
+    sc_dsp_fx_mark_transition(&fx[0], 99);
     CHECK(ramp_of(&fx[0]) == 0);
 
     /* No chain, no buffers: no crash, and a NULL chain never ramps. */
@@ -197,7 +208,7 @@ static void test_post_process(void)
     big_out_l[SC_DSP_RAMP_FRAMES + 72] = NAN;
     big_out_r[SC_DSP_RAMP_FRAMES + 1] = INFINITY;
     big_out_l[7] = NAN;
-    sc_dsp_fx_mark_transition(NULL, SC_DSP_FX_TRANSITION_SWITCH);
+    sc_dsp_fx_mark_transition(&fx[1], SC_DSP_FX_TRANSITION_SWITCH);
     c = enter(&fx[1]);
     sc_dsp_fx_common_post_process(c, dry_pair, big_out, BIG, SC_DSP_RAMP_FRAMES);
     sc_dsp_chain_exit(c);
@@ -212,7 +223,7 @@ static void test_post_process(void)
     dry_l[2] = NAN;
     for (int i = 0; i < SC_DSP_RAMP_FRAMES; i++)
         big_out_l[i] = big_out_r[i] = 1.0f;
-    sc_dsp_fx_mark_transition(NULL, SC_DSP_FX_TRANSITION_TURN_ON);
+    sc_dsp_fx_mark_transition(&fx[1], SC_DSP_FX_TRANSITION_TURN_ON);
     post_on(&fx[1], dry_pair, big_out, SC_DSP_RAMP_FRAMES, SC_DSP_RAMP_FRAMES);
     CHECK(sc_dsp_finite_f32(big_out_l[2]) && big_out_l[2] > 0.0f && big_out_l[2] < 1.0f);
 
@@ -222,7 +233,7 @@ static void test_post_process(void)
         in_l[i] = in_r[i] = 0.0f;
         out_l[i] = out_r[i] = 1.0f;
     }
-    sc_dsp_fx_mark_transition(NULL, SC_DSP_FX_TRANSITION_TURN_ON);
+    sc_dsp_fx_mark_transition(&fx[1], SC_DSP_FX_TRANSITION_TURN_ON);
     c = enter(&fx[1]);
     sc_dsp_fx_common_post_process(c, in, out, N, 0);
     CHECK(out_l[0] == 1.0f && c->ramp_remaining == SC_DSP_RAMP_FRAMES);
@@ -234,10 +245,10 @@ static void test_post_process(void)
     /* Re-armed mid-ramp: the new transition restarts from dry, not where the old one stopped. */
     for (int i = 0; i < N; i++)
         out_l[i] = out_r[i] = 1.0f;
-    sc_dsp_fx_mark_transition(NULL, SC_DSP_FX_TRANSITION_TURN_ON);
+    sc_dsp_fx_mark_transition(&fx[1], SC_DSP_FX_TRANSITION_TURN_ON);
     post_on(&fx[1], in, out, 64, 64);
     CHECK(out_l[63] > 0.4f && out_l[63] < 0.6f);
-    sc_dsp_fx_mark_transition(NULL, SC_DSP_FX_TRANSITION_TURN_OFF);
+    sc_dsp_fx_mark_transition(&fx[1], SC_DSP_FX_TRANSITION_TURN_OFF);
     for (int i = 0; i < N; i++)
         out_l[i] = out_r[i] = 1.0f;
     post_on(&fx[1], in, out, 64, 64);
@@ -270,6 +281,28 @@ static void test_two_chains(void)
     CHECK(fabsf(a_l[127] - 127.0f / 128.0f) < 1e-6f && a_l[128] == 1.0f && ca->ramp_remaining == 0);
     CHECK(enter(&b_id) == cb && cb->ramp_remaining == 0);       /* A finishing did not re-arm B */
     sc_dsp_chain_exit(cb);
+}
+
+/* BH-O55-6: another owner's event must not restart a live chain's ramp,
+ * including when that chain still has a partial ramp. */
+static void test_transition_isolation(void)
+{
+    static char a, b;
+    float dry[256] = {0}, wet[256];
+    float *in[] = {dry, dry}, *out[] = {wet, wet};
+    for (unsigned i = 0; i < 256; ++i) wet[i] = 1;
+    post_on(&a, in, out, 256, 256);
+    post_on(&b, in, out, 256, 256);
+    sc_dsp_fx_mark_transition(&a, SC_DSP_FX_TRANSITION_CHANGE);
+    CHECK(ramp_of(&a) == SC_DSP_RAMP_FRAMES);
+    CHECK(ramp_of(&b) == 0);
+    sc_dsp_fx_mark_transition(&b, SC_DSP_FX_TRANSITION_TURN_OFF);
+    struct sc_dsp_chain *cb = enter(&b);
+    cb->ramp_remaining = 37;
+    sc_dsp_chain_exit(cb);
+    sc_dsp_fx_mark_transition(&a, SC_DSP_FX_TRANSITION_TURN_ON);
+    CHECK(ramp_of(&b) == 37);
+    CHECK(ramp_of(&a) == SC_DSP_RAMP_FRAMES);
 }
 
 static void reset_chains(void)
@@ -423,7 +456,8 @@ static void *event_thread(void *arg)
 {
     (void)arg;
     while (!__atomic_load_n(&stop_events, __ATOMIC_ACQUIRE)) {
-        sc_dsp_fx_mark_transition(NULL, SC_DSP_FX_TRANSITION_CHANGE);
+        for (unsigned i = 0; i < COMMONS; ++i)
+            sc_dsp_fx_mark_transition(&thread_commons[i], SC_DSP_FX_TRANSITION_CHANGE);
         sched_yield();
     }
     return NULL;
@@ -955,12 +989,76 @@ static void test_pioneer_fx(void)
     }
 }
 
+static struct sc_master_pioneer_fx prepared_master;
+#ifndef T4_BASELINE
+static unsigned master_worker_stop;
+static void *master_prepare_thread(void *arg)
+{
+    (void)arg;
+    while (!__atomic_load_n(&master_worker_stop, __ATOMIC_ACQUIRE)) {
+        sc_master_pioneer_fx_prepare(&prepared_master);
+        sched_yield();
+    }
+    return NULL;
+}
+#endif
+
+static void test_master_preparation(void)
+{
+    float l[64], r[64];
+    memset(&prepared_master, 0, sizeof prepared_master);
+    master_audio_cleared = 0;
+    for (int mode = 1; mode <= 5; ++mode) {
+#ifndef T4_BASELINE
+        sc_master_pioneer_fx_prepare(&prepared_master);
+#endif
+        for (unsigned i = 0; i < 64; ++i) l[i] = r[i] = 0.25f;
+        master_audio = 1;
+        sc_master_pioneer_fx_planar(&prepared_master, l, r, 64, mode);
+        master_audio = 0;
+        CHECK(isfinite(l[63]) && isfinite(r[63]));
+    }
+    CHECK(master_audio_cleared == 0); /* old path clears 488 KB per mode */
+#ifndef T4_BASELINE
+    unsigned current = prepared_master.current;
+    /* Consume the last spare; without the worker a third selection waits. */
+    sc_master_pioneer_fx_prepare(&prepared_master);
+    sc_master_pioneer_fx_planar(&prepared_master, l, r, 64, 1);
+    CHECK(prepared_master.current != current);
+    current = prepared_master.current;
+    sc_master_pioneer_fx_planar(&prepared_master, l, r, 64, 2);
+    CHECK(prepared_master.current == current);
+    CHECK(prepared_master.bank[current - 1].active_mode == 1);
+    sc_master_pioneer_fx_prepare(&prepared_master);
+    sc_master_pioneer_fx_planar(&prepared_master, l, r, 64, 2);
+    CHECK(prepared_master.bank[prepared_master.current - 1].active_mode == 2);
+    sc_master_pioneer_fx_planar(&prepared_master, l, r, 64, 0);
+    CHECK(prepared_master.current == 0);
+
+    pthread_t worker;
+    __atomic_store_n(&master_worker_stop, 0, __ATOMIC_RELEASE);
+    CHECK(pthread_create(&worker, NULL, master_prepare_thread, NULL) == 0);
+    for (unsigned block = 0; block < 10000; ++block) {
+        for (unsigned i = 0; i < 64; ++i) l[i] = r[i] = 0.25f;
+        master_audio = 1;
+        sc_master_pioneer_fx_planar(&prepared_master, l, r, 64, block % 6);
+        master_audio = 0;
+        for (unsigned i = 0; i < 64; ++i) CHECK(isfinite(l[i]) && isfinite(r[i]));
+    }
+    __atomic_store_n(&master_worker_stop, 1, __ATOMIC_RELEASE);
+    pthread_join(worker, NULL);
+    CHECK(master_audio_cleared == 0);
+#endif
+}
+
 int main(void)
 {
+    test_master_preparation();
     test_finite();
     test_autogate();
     test_post_process();
     test_two_chains();
+    test_transition_isolation();
     test_chain_full();
     test_chain_busy();
     test_chain_threads();

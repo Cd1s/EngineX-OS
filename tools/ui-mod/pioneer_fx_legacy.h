@@ -168,32 +168,7 @@ static inline void sc_pioneer_fx_planar(struct sc_pioneer_fx *s, float *l, float
         return;
     }
 
-    if (mode != s->active_mode) {
-        s->active_mode = mode;
-        s->spiral_head_a = 0.0f;
-        s->spiral_lp_l = s->spiral_lp_r = 0.0f;
-        s->pe_head_fifth = s->pe_head_octave = 0.0f;
-        s->pe_lp_l = s->pe_lp_r = 0.0f;
-        s->roll_captured = 0;
-        s->roll_play_pos = 0;
-        s->roll_active = 0;
-        s->dub_hp_l = s->dub_hp_r = 0.0f;
-        s->dub_lp_l = s->dub_lp_r = 0.0f;
-        s->space_lp_l = s->space_lp_r = 0.0f;
-        s->ap1_pos_l = s->ap1_pos_r = 0;
-        s->ap2_pos_l = s->ap2_pos_r = 0;
-        s->ap3_pos_l = s->ap3_pos_r = 0;
-        memset(s->buf_l, 0, sizeof(s->buf_l));
-        memset(s->buf_r, 0, sizeof(s->buf_r));
-        memset(s->roll_buf_l, 0, sizeof(s->roll_buf_l));
-        memset(s->roll_buf_r, 0, sizeof(s->roll_buf_r));
-        memset(s->ap1_l, 0, sizeof(s->ap1_l));
-        memset(s->ap1_r, 0, sizeof(s->ap1_r));
-        memset(s->ap2_l, 0, sizeof(s->ap2_l));
-        memset(s->ap2_r, 0, sizeof(s->ap2_r));
-        memset(s->ap3_l, 0, sizeof(s->ap3_l));
-        memset(s->ap3_r, 0, sizeof(s->ap3_r));
-    }
+    /* pioneer_master.h supplies a prepared, exclusively owned bank. */
 
     uint32_t wpos = s->write_pos;
 

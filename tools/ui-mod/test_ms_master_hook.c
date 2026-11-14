@@ -8,16 +8,68 @@ int hook_test_engine;
 #include <assert.h>
 #include <math.h>
 #include <sys/mount.h>
+
+static unsigned transition_calls;
+static void transition_fixture(void *handler, const void *event) {
+    assert(handler && !event);
+    ++transition_calls;
+}
+static void test_owner_transitions(void) {
+#if defined(__aarch64__)
+    enum { COLLECTION = 0x40, COMMON = 0xb8, BOUND = 24 };
+#else
+    enum { COLLECTION = 0x28, COMMON = 0x68, BOUND = 12 };
+#endif
+    unsigned char owners[2][128] = {{0}}, effects[3][256] = {{0}}, handler[64] = {0};
+    void *a[] = {effects[0], effects[1]}, *b[] = {effects[2]};
+    void *collections[][3] = {{NULL, a, a + 2}, {NULL, b, b + 1}};
+    for (unsigned i = 0; i < 2; ++i) {
+        void *collection = collections[i];
+        memcpy(owners[i] + COLLECTION, &collection, sizeof collection);
+    }
+    memset(sc_dsp_state(), 0, sizeof *sc_dsp_state());
+    for (unsigned i = 0; i < 3; ++i) {
+        struct sc_dsp_chain *c = sc_dsp_chain_enter(effects[i] + COMMON);
+        assert(c); c->ramp_remaining = 0; sc_dsp_chain_exit(c);
+    }
+    void *owner = owners[0];
+    memcpy(handler + BOUND, &owner, sizeof owner);
+    dsp_originals[DSP_ENABLE] = (void *)transition_fixture;
+    hook_fx_enable(handler, NULL);
+    assert(transition_calls == 1);
+    for (unsigned i = 0; i < 3; ++i) {
+        struct sc_dsp_chain *c = sc_dsp_chain_enter(effects[i] + COMMON);
+        assert(c && c->ramp_remaining == (i < 2 ? SC_DSP_RAMP_FRAMES : 0));
+        sc_dsp_chain_exit(c);
+    }
+    memset(sc_dsp_state(), 0, sizeof *sc_dsp_state());
+    puts("owner transition: both owned commons ramp; other owner remains steady PASS");
+}
+
 static uint32_t copy_input(void *h, void *c, int ic, const float *const *in,
                            int oc, float *const *out, int frames) {
     (void)h; (void)c; assert(ic == oc);
     for (int ch = 0; ch < oc; ++ch) memcpy(out[ch], in[ch], (size_t)frames * sizeof(float));
     return 7;
 }
+/* Also safe after lim_start_poll(): retire audio ownership instead of zeroing
+ * a bank that the polling worker may currently be preparing. */
+static void reset_master(void) {
+    float dry = 0;
+    for (unsigned pair = 0; pair < MASTER_PFX_PAIRS; ++pair) {
+        struct sc_master_pioneer_fx *s = &master_pfx[pair];
+        sc_master_pioneer_fx_planar(s, &dry, NULL, 1, SC_MASTER_PFX_OFF);
+        s->write_pos = 0;
+        sc_master_pioneer_fx_prepare(s);
+        for (unsigned i = 0; i < 2; ++i)
+            while (__atomic_load_n(&s->state[i], __ATOMIC_ACQUIRE) == SC_MASTER_PFX_PREPARING)
+                sched_yield();
+    }
+}
 static void test_clicks(void) {
     for (int mode = 1; mode <= 4; ++mode) {
         if (!sc_ms_effect(mode)) continue;
-        memset(master_pfx, 0, sizeof master_pfx);
+        reset_master();
         memset(master_ms, 0, sizeof master_ms); sc_ms_prepare(&master_ms[0]);
         pioneer_fx_mode = mode;
         float previous = 0, maximum = 0;
@@ -41,7 +93,7 @@ static void test_style_drains(void) {
         for (unsigned t = 0; t < 3; ++t) {
             float maximum = 0;
             for (unsigned phase = 0; phase < sizeof phases / sizeof *phases; ++phase) {
-                memset(master_pfx, 0, sizeof master_pfx);
+                reset_master();
                 memset(master_ms, 0, sizeof master_ms); sc_ms_prepare(&master_ms[0]);
                 pfx_time_ms = 500;
                 unsigned change = 2 * 96000 + phases[phase];
@@ -151,7 +203,7 @@ static void test_hidden_means_off(void) {
     write_file(conf_path, "pioneer_fx=off\nfx_time_mode=ms\nfx_time_ms=250\n");
     usleep(180000);
     assert(__atomic_load_n(&pfx_time_ms, __ATOMIC_ACQUIRE) == 250);
-    memset(master_pfx, 0, sizeof master_pfx);
+    reset_master();
     memset(master_ms, 0, sizeof master_ms); sc_ms_prepare(&master_ms[0]);
     for (unsigned n = 0; n < 512; ++n) {
         float dry = 0.3f * sinf((float)n * 0.1f), l, r;
@@ -163,7 +215,8 @@ static void test_hidden_means_off(void) {
     write_file(conf_path, "pioneer_fx=space\nfx_time_mode=ms\nfx_time_ms=250\n");
     usleep(180000);
     struct sc_master_pioneer_fx ref_space = {0};
-    memset(master_pfx, 0, sizeof master_pfx);
+    sc_master_pioneer_fx_prepare(&ref_space);
+    reset_master();
     for (unsigned n = 0; n < 512; ++n) {
         float dry = 0.2f * sinf((float)n * 0.07f), l, r, rl = dry, rr = dry;
         const float *in[] = {&dry, &dry}; float *out[] = {&l, &r};
@@ -176,7 +229,7 @@ static void test_hidden_means_off(void) {
     write_file(conf_path, "pioneer_fx=spiral\nfx_time_mode=ms\nfx_time_ms=250\n");
     usleep(180000);
     __atomic_store_n(&fx_selector_master_bypass, 1, __ATOMIC_RELEASE);
-    memset(master_pfx, 0, sizeof master_pfx);
+    reset_master();
     memset(master_ms, 0, sizeof master_ms); sc_ms_prepare(&master_ms[0]);
     for (unsigned n = 0; n < 512; ++n) {
         float dry = 0.25f * cosf((float)n * 0.05f), l, r;
@@ -192,7 +245,7 @@ static void test_hidden_means_off(void) {
         write_file(conf_path, "pioneer_fx=space\nfx_time_mode=ms\nfx_time_ms=250\n");
         usleep(180000);
         assert(__atomic_load_n(&pioneer_fx_mode, __ATOMIC_RELAXED) == 0);
-        memset(master_pfx, 0, sizeof master_pfx);
+        reset_master();
         memset(master_ms, 0, sizeof master_ms); sc_ms_prepare(&master_ms[0]);
         for (unsigned n = 0; n < 512; ++n) {
             float dry = 0.2f * sinf((float)n * 0.07f), l, r;
@@ -207,10 +260,11 @@ static void test_hidden_means_off(void) {
     puts("master hidden-means-off PASS");
 }
 int main(void) {
+    test_owner_transitions();
     dsp_originals[DSP_MASTER] = (void *)copy_input;
     pioneer_fx_mode = 4;
     for (int channels = 1; channels <= 2; ++channels) {
-        memset(master_pfx, 0, sizeof master_pfx);
+        reset_master();
         memset(master_ms, 0, sizeof master_ms);
         sc_ms_prepare(&master_ms[0]);
         pfx_time_ms = 4000;
