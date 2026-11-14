@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/md5"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
@@ -22,6 +23,8 @@ import (
 	"time"
 )
 
+const defaultMaxCache = 5000
+
 type NASConfig struct {
 	Protocol string `json:"protocol"` // "webdav", "subsonic", "plex"
 	URL      string `json:"url"`      // e.g. "https://nas.example.com/music" or "http://192.168.1.10:4533"
@@ -32,11 +35,14 @@ type NASConfig struct {
 }
 
 type SelfHostedProvider struct {
-	cfg         NASConfig
-	client      *http.Client
-	mu          sync.RWMutex
-	webdavCache map[string]Track  // href/ID -> Track
-	plexPartMap map[string]string // ratingKey -> Part.key or Part.key -> Part.key
+	cfg          NASConfig
+	client       *http.Client
+	mu           sync.RWMutex
+	webdavCache  map[string]Track  // href/ID -> Track
+	webdavKeys   []string          // FIFO eviction queue
+	plexPartMap  map[string]string // ratingKey -> Part.key or Part.key -> Part.key
+	plexPartKeys []string          // FIFO eviction queue
+	maxCache     int               // max entries for webdavCache and plexPartMap (<=0 uses defaultMaxCache)
 }
 
 func NewSelfHostedProvider(cfg NASConfig, c *http.Client) *SelfHostedProvider {
@@ -48,6 +54,7 @@ func NewSelfHostedProvider(cfg NASConfig, c *http.Client) *SelfHostedProvider {
 		client:      c,
 		webdavCache: make(map[string]Track),
 		plexPartMap: make(map[string]string),
+		maxCache:    defaultMaxCache,
 	}
 }
 
@@ -192,7 +199,28 @@ type subsonicSong struct {
 	Path        string  `json:"path"`
 }
 
+func validateBaseURL(proto, raw string) (*url.URL, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, fmt.Errorf("%s: empty URL", proto)
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("%s: invalid URL: %w", proto, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return nil, fmt.Errorf("%s: invalid URL scheme %q", proto, u.Scheme)
+	}
+	if u.Host == "" {
+		return nil, fmt.Errorf("%s: missing URL host", proto)
+	}
+	return u, nil
+}
+
 func (p *SelfHostedProvider) subsonicGet(ctx context.Context, action string, extra url.Values, out *subsonicResponse) error {
+	if _, err := validateBaseURL("subsonic", p.cfg.URL); err != nil {
+		return err
+	}
 	params := p.subsonicAuthParams()
 	for k, vals := range extra {
 		for _, v := range vals {
@@ -340,6 +368,9 @@ func checkSubsonicMediaError(resp *http.Response) error {
 }
 
 func (p *SelfHostedProvider) subsonicDownloadTrack(ctx context.Context, trackID, destDir string) (string, error) {
+	if _, err := validateBaseURL("subsonic", p.cfg.URL); err != nil {
+		return "", err
+	}
 	// First try /rest/download.view?id=<id>
 	params := p.subsonicAuthParams()
 	params.Set("id", trackID)
@@ -442,6 +473,9 @@ func (p *SelfHostedProvider) setWebDAVAuth(req *http.Request) {
 }
 
 func (p *SelfHostedProvider) webdavPropfind(ctx context.Context, targetURL string) ([]davResponse, error) {
+	if _, err := validateBaseURL("webdav", targetURL); err != nil {
+		return nil, err
+	}
 	propfindXML := `<?xml version="1.0" encoding="utf-8" ?>
 <D:propfind xmlns:D="DAV:">
   <D:prop>
@@ -593,11 +627,23 @@ func (p *SelfHostedProvider) cacheWebDAVTrack(t Track) {
 	if p.webdavCache == nil {
 		p.webdavCache = make(map[string]Track)
 	}
+	max := p.maxCache
+	if max <= 0 {
+		max = defaultMaxCache
+	}
+	if _, exists := p.webdavCache[t.ID]; !exists {
+		for len(p.webdavCache) >= max && len(p.webdavKeys) > 0 {
+			evictKey := p.webdavKeys[0]
+			p.webdavKeys = p.webdavKeys[1:]
+			delete(p.webdavCache, evictKey)
+		}
+		p.webdavKeys = append(p.webdavKeys, t.ID)
+	}
 	p.webdavCache[t.ID] = t
 }
 
 func resolveWebDAVURL(baseRaw, ref string) (*url.URL, error) {
-	u, err := url.Parse(baseRaw)
+	u, err := validateBaseURL("webdav", baseRaw)
 	if err != nil {
 		return nil, err
 	}
@@ -607,7 +653,14 @@ func resolveWebDAVURL(baseRaw, ref string) (*url.URL, error) {
 	if u.RawPath != "" && !strings.HasSuffix(u.RawPath, "/") {
 		u.RawPath += "/"
 	}
-	return u.Parse(ref)
+	refU, err := u.Parse(ref)
+	if err != nil {
+		return nil, fmt.Errorf("webdav: invalid target URL: %w", err)
+	}
+	if refU.Host != "" && (refU.Host != u.Host || refU.Scheme != u.Scheme) {
+		return nil, errors.New("webdav: target host does not match base URL")
+	}
+	return refU, nil
 }
 
 func (p *SelfHostedProvider) webdavPlaylistTracks(ctx context.Context, playlistID string) ([]Track, error) {
@@ -618,6 +671,10 @@ func (p *SelfHostedProvider) webdavPlaylistTracks(ctx context.Context, playlistI
 			return nil, err
 		}
 		targetURL = subU.String()
+	} else {
+		if _, err := validateBaseURL("webdav", p.cfg.URL); err != nil {
+			return nil, err
+		}
 	}
 
 	responses, err := p.webdavPropfind(ctx, targetURL)
@@ -659,6 +716,9 @@ func (p *SelfHostedProvider) webdavPlaylistTracks(ctx context.Context, playlistI
 }
 
 func (p *SelfHostedProvider) webdavSearch(ctx context.Context, query string) ([]Track, error) {
+	if _, err := validateBaseURL("webdav", p.cfg.URL); err != nil {
+		return nil, err
+	}
 	p.mu.RLock()
 	cachedCount := len(p.webdavCache)
 	p.mu.RUnlock()
@@ -701,11 +761,17 @@ func (p *SelfHostedProvider) webdavDownloadTrack(ctx context.Context, trackID, d
 		return "", fmt.Errorf("webdav: download HTTP %d", resp.StatusCode)
 	}
 
-	unescapedPath, _ := url.PathUnescape(targetU.Path)
-	filename := path.Base(unescapedPath)
-	if filename == "" || filename == "." || filename == "/" {
-		filename = "webdav-track.mp3"
+	ext := filepath.Ext(targetU.Path)
+	if ext == "" {
+		ext = parseExtFromHeader(resp.Header.Get("Content-Disposition"))
+		if ext == "" {
+			ext = extFromContentType(resp.Header.Get("Content-Type"))
+		}
+		if ext == "" {
+			ext = ".mp3"
+		}
 	}
+	filename := nasCacheFilename(targetU, targetU.Path+"\x00"+targetU.RawQuery, ext)
 	return saveStreamToFile(destDir, filename, resp.Body)
 }
 
@@ -769,6 +835,18 @@ func (p *SelfHostedProvider) setPlexPart(ratingKeyOrPart, partKey string) {
 	if p.plexPartMap == nil {
 		p.plexPartMap = make(map[string]string)
 	}
+	max := p.maxCache
+	if max <= 0 {
+		max = defaultMaxCache
+	}
+	if _, exists := p.plexPartMap[ratingKeyOrPart]; !exists {
+		for len(p.plexPartMap) >= max && len(p.plexPartKeys) > 0 {
+			evictKey := p.plexPartKeys[0]
+			p.plexPartKeys = p.plexPartKeys[1:]
+			delete(p.plexPartMap, evictKey)
+		}
+		p.plexPartKeys = append(p.plexPartKeys, ratingKeyOrPart)
+	}
 	p.plexPartMap[ratingKeyOrPart] = partKey
 }
 
@@ -779,6 +857,9 @@ func (p *SelfHostedProvider) getPlexPart(key string) string {
 }
 
 func (p *SelfHostedProvider) plexGet(ctx context.Context, pathAndQuery string, out *plexContainer) error {
+	if _, err := validateBaseURL("plex", p.cfg.URL); err != nil {
+		return err
+	}
 	sep := "?"
 	if strings.Contains(pathAndQuery, "?") {
 		sep = "&"
@@ -928,6 +1009,16 @@ func (p *SelfHostedProvider) plexSearch(ctx context.Context, query string) ([]Tr
 }
 
 func (p *SelfHostedProvider) plexDownloadTrack(ctx context.Context, trackID, destDir string) (string, error) {
+	baseU, err := validateBaseURL("plex", p.cfg.URL)
+	if err != nil {
+		return "", err
+	}
+	if strings.Contains(trackID, "://") {
+		u, err := url.Parse(trackID)
+		if err != nil || u.Host != "" {
+			return "", fmt.Errorf("plex: invalid track ID %q", trackID)
+		}
+	}
 	partKey := trackID
 	if !strings.HasPrefix(partKey, "/") {
 		if pk := p.getPlexPart(trackID); pk != "" {
@@ -949,7 +1040,7 @@ func (p *SelfHostedProvider) plexDownloadTrack(ctx context.Context, trackID, des
 		return "", fmt.Errorf("plex: could not resolve part key for track %q", trackID)
 	}
 
-	downloadURL := strings.TrimRight(p.cfg.URL, "/") + partKey
+	downloadURL := strings.TrimRight(baseU.String(), "/") + partKey
 	if tok := p.plexToken(); tok != "" {
 		if strings.Contains(downloadURL, "?") {
 			downloadURL += "&X-Plex-Token=" + url.QueryEscape(tok)
@@ -973,16 +1064,35 @@ func (p *SelfHostedProvider) plexDownloadTrack(ctx context.Context, trackID, des
 		return "", fmt.Errorf("plex: download HTTP %d", resp.StatusCode)
 	}
 
-	filename := path.Base(partKey)
-	if filename == "" || filename == "." || filename == "/" {
-		filename = fmt.Sprintf("plex-%s.mp3", sanitizeFilename(trackID))
+	ext := filepath.Ext(req.URL.Path)
+	if ext == "" {
+		ext = parseExtFromHeader(resp.Header.Get("Content-Disposition"))
+		if ext == "" {
+			ext = extFromContentType(resp.Header.Get("Content-Type"))
+		}
+		if ext == "" {
+			ext = ".mp3"
+		}
 	}
+	filename := nasCacheFilename(baseU, strings.TrimRight(baseU.Path, "/")+partKey, ext)
 	return saveStreamToFile(destDir, filename, resp.Body)
 }
 
 // ----------------------------------------------------------------------------
 // Helpers
 // ----------------------------------------------------------------------------
+
+// Keep NAS downloads flat for the source index and the shared cache quota.
+func nasCacheFilename(server *url.URL, resource, ext string) string {
+	host := strings.ToLower(server.Host)
+	if server.Scheme == "http" && server.Port() == "80" {
+		host = strings.TrimSuffix(host, ":80")
+	} else if server.Scheme == "https" && server.Port() == "443" {
+		host = strings.TrimSuffix(host, ":443")
+	}
+	sum := sha256.Sum256([]byte(server.Scheme + "://" + host + "\x00" + resource))
+	return fmt.Sprintf("nas-%x%s", sum, strings.ToLower(ext))
+}
 
 func parseExtFromHeader(cd string) string {
 	if cd == "" {

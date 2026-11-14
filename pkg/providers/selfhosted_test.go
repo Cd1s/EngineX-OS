@@ -293,7 +293,7 @@ func TestSelfHostedWebDAV(t *testing.T) {
 			switch r.URL.Path {
 			case "/music/root_track.flac":
 				w.Write([]byte("FAKE-FLAC-AUDIO"))
-			case "/music/Electronic/synths.mp3":
+			case "/music/Electronic/synths.mp3", "/music/Other/synths.mp3":
 				w.Write([]byte("FAKE-MP3-AUDIO"))
 			default:
 				http.NotFound(w, r)
@@ -365,8 +365,19 @@ func TestSelfHostedWebDAV(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WebDAV DownloadTrack failed: %v", err)
 	}
-	if filepath.Base(dlPath) != "synths.mp3" {
-		t.Fatalf("unexpected filename: %s", dlPath)
+	name := filepath.Base(dlPath)
+	digest, hashErr := hex.DecodeString(strings.TrimSuffix(strings.TrimPrefix(name, "nas-"), ".mp3"))
+	if filepath.Dir(dlPath) != filepath.Clean(tmpDir) || strings.ContainsAny(name, `/\`) ||
+		!strings.HasPrefix(name, "nas-") || filepath.Ext(name) != ".mp3" || hashErr != nil || len(digest) != 32 {
+		t.Fatalf("unexpected flat NAS cache filename: %s", dlPath)
+	}
+	again, err := p.DownloadTrack(ctx, "/music/Electronic/synths.mp3", tmpDir)
+	if err != nil || again != dlPath {
+		t.Fatalf("unstable cache name: first=%s again=%s error=%v", dlPath, again, err)
+	}
+	other, err := p.DownloadTrack(ctx, "/music/Other/synths.mp3", tmpDir)
+	if err != nil || other == dlPath || filepath.Dir(other) != filepath.Clean(tmpDir) || filepath.Ext(other) != ".mp3" {
+		t.Fatalf("same basename in another folder did not get a distinct flat MP3 name: %s, error=%v", other, err)
 	}
 	data, _ := os.ReadFile(dlPath)
 	if string(data) != "FAKE-MP3-AUDIO" {
