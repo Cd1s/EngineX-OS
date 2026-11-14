@@ -24,7 +24,7 @@ class DictionaryTest(unittest.TestCase):
                 data = json.loads(encoded)
                 self.assertTrue(all(isinstance(value, str) for value in data.values()))
                 selected = json.loads(data[lang])
-                self.assertAlmostEqual(len(selected) / original_entries, 1 / 3)
+                self.assertAlmostEqual(len(selected) / original_entries, 1 / len(packs.LANGUAGES))
                 self.assertIn(f'property string scLang: "{lang}"', generated)
                 self.assertIn("JSON.parse(scDicts[scLang] || scDicts.en)", generated)
                 # Live switches must translate every baked spelling exactly as before.

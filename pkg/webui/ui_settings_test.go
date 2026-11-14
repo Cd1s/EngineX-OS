@@ -55,10 +55,18 @@ func TestUISettingsPersistAndRestart(t *testing.T) {
 	if err != nil || !slices.Contains(splitLines(data), "lang=zh-Hant") {
 		t.Fatalf("hook cannot read the language: %q %v", data, err)
 	}
+	// Spanish (es) works and persists the same way.
+	if code, v := uiPost(t, srv.URL, "lang=es"); code != 200 || v.Language != "es" {
+		t.Fatalf("%d %+v", code, v)
+	}
+	data, err = os.ReadFile(filepath.Join(dir, "settings.conf"))
+	if err != nil || !slices.Contains(splitLines(data), "lang=es") {
+		t.Fatalf("hook cannot read the language: %q %v", data, err)
+	}
 	// A second server, as after a reboot, sees the same settings.
 	again := httptest.NewServer(New(cfg, nil))
 	defer again.Close()
-	if _, v := uiPost(t, again.URL, ""); v.Waveform != "3band" || v.Language != "zh-Hant" {
+	if _, v := uiPost(t, again.URL, ""); v.Waveform != "3band" || v.Language != "es" {
 		t.Fatalf("not persisted: %+v", v)
 	}
 }
