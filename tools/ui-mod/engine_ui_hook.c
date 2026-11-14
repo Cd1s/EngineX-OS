@@ -927,8 +927,8 @@ static signed char four_deck_route[2] = {0, 1}; // deck (0-3) on RCA A and RCA B
 // called inside the master callback, on its thread, once per block, with a pair nobody fills. bt_out=<pair> in
 // settings.conf picks the output pair that replaces it (default 0: Master, or a player's Layer A; there is no off).
 // Nothing is processed unless the encoder runs (one clock read a callback measures the callback's rate meanwhile):
-// sbc_encode counts its calls, and with no speaker connected Engine's own feed goes through as it always did. The callback appends its block to bt_buf; the sender, called inside the next
-// callback, takes whatever is there, so one block's length need not match the next one's.
+// sbc_encode counts its calls, and with no speaker connected Engine's own feed goes through as it always did. The
+// sender is called before rendering; remember it and hand over the finished block before this callback returns.
 // The sender does not resample: the SBC stream has the rate BlueZ negotiated (44.1 kHz when the speaker offers both;
 // sbc_encode reports it) while the callback runs at its own rate (48 kHz on a Gen-1 player, measured on the wall clock).
 // A render of 88.2 kHz or more is halved by an 11-tap half-band, a 29-tap low-pass at 20.5 kHz keeps what a lower stream rate cannot carry from folding down, and a
@@ -942,6 +942,9 @@ static signed char four_deck_route[2] = {0, 1}; // deck (0-3) on RCA A and RCA B
 #define BT_FADE 128                      // frames a new source, rate or speaker takes to come in
 #define BT_IDLE 64                       // master callbacks without an encoder call: nobody listens
 static void (*bt_send_orig)(void *, const float *const *, int);
+static void *bt_send_self;
+static int bt_send_seen;                       // sender called during this master callback
+static void bt_flush(void *self);
 static float bt_buf[2][2 * BT_OUT];            // stream-rate frames the sender has not taken yet,
 static int bt_pend;                            // and how many
 static float bt_x[2][BT_HIST + BT_BLOCK];      // render-rate input behind the last BT_HIST samples
@@ -959,6 +962,22 @@ static int bt_idle = BT_IDLE;                  // callbacks since the encoder la
 static unsigned bt_render, bt_cand;            // the callback's rate, measured on the wall clock (0: not yet), and the last window's
 static unsigned long long bt_m_ns, bt_m_frames; // that window: its start, and the frames of the callbacks after the first
 static unsigned stream_rate;                   // SBC rate of the A2DP stream: 0 until the first encode, then 16, 32, 44.1 or 48 kHz
+
+// libsbc reinitialises bitpool to 32; its A2DP parser sets the format but ignores
+// the negotiated bitpool range. Set it before Engine asks for the encoded frame length.
+int sbc_reinit_a2dp(void *sbc, unsigned long flags, const void *config, size_t len) {
+    static void *cache;
+    int (*real)(void *, unsigned long, const void *, size_t) = next_symbol(&cache, "sbc_reinit_a2dp");
+    if (!real) return -ENOSYS;
+    int rc = real(sbc, flags, config, len);
+    if (!rc && is_engine()) {
+        const uint8_t *c = config; // real validates the four-byte SBC format
+        unsigned limit = (c[0] & 0x0c ? 16u : 32u) * (c[1] & 0x08 ? 4u : 8u);
+        if (c[2] < 2 || c[2] > c[3] || c[3] > 250 || c[2] > limit) return -EINVAL;
+        ((uint8_t *)sbc)[sizeof(unsigned long) + 5] = c[3] < limit ? c[3] : limit;
+    }
+    return rc;
+}
 
 // libsbc's sbc_t starts with `unsigned long flags; uint8_t frequency;` (0..3 = 16, 32, 44.1, 48 kHz).
 static void bt_encoded(const void *sbc) {
@@ -1128,6 +1147,7 @@ static uint32_t hook_master_output(void *host, void *context, int in_channels, c
                                    int out_channels, float *const *out, int frames) {
     audio_callback_fn orig = (audio_callback_fn)dsp_originals[DSP_MASTER];
     uint32_t rc;
+    bt_send_seen = 0;
     unsigned encodes = __atomic_load_n(&bt_encodes, __ATOMIC_ACQUIRE);
     bt_idle = encodes != bt_seen ? 0 : bt_idle < BT_IDLE ? bt_idle + 1 : BT_IDLE;
     bt_seen = encodes;
@@ -1187,11 +1207,14 @@ static uint32_t hook_master_output(void *host, void *context, int in_channels, c
     // #50 Live Stream: the first pair as it goes to the DAC; one relaxed load when nobody listens.
     if (out && frames > 0 && out_channels > 0)
         sc_tap_push(&live_tap, out[0], out_channels > 1 ? out[1] : NULL, (uint32_t)frames);
-    // hook_bt_send runs inside the next callback and takes this block with the ones waiting. Calls without outputs (a
-    // player also makes those) add nothing and take nothing away.
+    // The sender called during orig is still alive here: hand it the finished output now.
+    // Calls without outputs (a player also makes those) add nothing and take nothing away.
     if (out && out_channels > 0 && bt_send_orig) {
         unsigned render = bt_measure(frames);
-        if (render && bt_idle < BT_IDLE) bt_capture(out_channels, out, frames, render);
+        if (render && bt_idle < BT_IDLE) {
+            bt_capture(out_channels, out, frames, render);
+            if (bt_send_seen) bt_flush(bt_send_self);
+        }
     }
     return rc;
 }
@@ -1216,11 +1239,7 @@ static int bt_ring_room(const void *self) {
 
 // BluetoothSignalSender::audio(this, float *const in[2], int frames); it takes at most 512 frames a call. With a speaker
 // listening it gets what the callbacks kept (nothing yet: nothing), otherwise Engine's own feed.
-static void hook_bt_send(void *self, const float *const *in, int frames) {
-    if (bt_idle == BT_IDLE) {
-        bt_send_orig(self, in, frames);
-        return;
-    }
+static void bt_flush(void *self) {
     for (int i = 0; i < bt_pend;) {
         int n = bt_pend - i < 512 ? bt_pend - i : 512, room = bt_ring_room(self);
         if (room && n > room) n = room;
@@ -1229,6 +1248,16 @@ static void hook_bt_send(void *self, const float *const *in, int frames) {
         i += n;
     }
     bt_pend = 0;
+}
+
+static void hook_bt_send(void *self, const float *const *in, int frames) {
+    if (bt_idle == BT_IDLE) {
+        bt_send_orig(self, in, frames);
+        return;
+    }
+    bt_send_self = self;
+    bt_send_seen = 1;
+    bt_flush(self);
 }
 
 static int dsp_buffers_overlap(const float *a, const float *b, uint32_t frames) {

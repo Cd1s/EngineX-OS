@@ -225,11 +225,21 @@ thread and `BluetoothSignalSender::audio(this, float *const in[2], int frames)`,
 feeds it its deck 1 pair). We add nothing but a feed. Engine calls the sender inside the master callback, on its
 thread, before the callback's output exists; so `hook_master_output` keeps the pair `bt_out=<n>` selects (outputs
 `2n`, `2n+1`; default 0, which is Master or a player's Layer A, not "off"; a pair the output does not have is pair 0,
-and `lim_poll` never stores a negative one) after the callback, and `hook_bt_send`, in the next callback, takes everything kept and hands
-it to the sender in calls of at most 512 frames. What waits is a FIFO of stream-rate frames, so one block's length need
-not match the next one's, and a block goes once. Calls without outputs (a player makes them too) add and take nothing.
+and `lim_poll` never stores a negative one) after the render. `hook_bt_send` remembers the sender seen during that
+callback, and the finished output is handed over before the same callback returns, in calls of at most 512 frames.
+This removes one callback of queueing (4.69 ms for 225 frames at 48 kHz). A block goes once, whatever its length;
+calls without outputs (a player makes them too) add nothing.
 Sender entry per build: Gen-1 5.3.0 `0xf56034`, Gen-2 armhf `0xf629b0`, AZ04 `0x102eb20` (the table's `bt_send`;
 5.0.4 has none).
+
+The stock libsbc A2DP parser leaves bitpool at its default 32 despite a higher negotiated maximum. The
+`sbc_reinit_a2dp` interposer sets the highest legal bitpool in the negotiated range before Engine calculates the
+encoded frame length. The speaker's limit is never exceeded; a lower limit is respected too. With a 44.1 kHz,
+16-block, 8-subband stereo stream, bitpool 32 is 209.5 kb/s and 53 is 325.2 kb/s. Channel mode, transport batching
+and the stock ring size stay as negotiated. Dual channel SBC-XQ is not forced: it requires renegotiation and
+roughly doubles the payload at the same bitpool. The Tribit tested here does not report its playback delay;
+Ableton Link's delay compensation is a separate setting. `test_bt_out quality <libsbc.so>` checks encoded packet
+headers and frame lengths with the shipped armhf or AZ04 library; `test_bt_out latency` checks same-callback delivery.
 
 Nothing runs unless a speaker listens. The `sbc_encode` interposer counts the encoder's calls; a master callback that
 sees `BT_IDLE` (64) callbacks go by without one treats the speaker as gone: it drops what waits and Engine's own feed
