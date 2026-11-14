@@ -135,6 +135,8 @@ refusal() { # <suffix of the mock repo / release> <message the deck shows>
     check "boot2: the $sfx release: az01-update never ran, no image kept" \
         bash -c "! grep -q 'az01-update' '$R/tmp/gate-shim.log' && test ! -e '$W/data/az01-update.img' && test ! -e '$W/data/az01-update.img.part'"
     sed -i "\#^github_repo=Cd1s/EngineX-OS-$sfx\$#d" "$ui"
+}
+
 # The deck's data directory after prepare ran: /data/enginex since 5.3.0.3 (#103), the real
 # /data/sc5000-custom on an older previous release (#234 review R5). Not the rootfs names above:
 # a 5.3.0.2 or older baseline has not migrated it, and the new boot moves it over.
