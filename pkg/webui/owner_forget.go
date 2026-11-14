@@ -9,6 +9,8 @@ import (
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
 )
 
+var testSoundCloudForgetHook func()
+
 // forgetOwner removes the saved login of an owner account that was signed out in
 // the console. Only Spotify did this (its Logout); the other services kept their
 // file, and the "signed out" mark is in memory, so the account was back after the
@@ -51,8 +53,14 @@ func (s *Server) forgetOwner(provider string) error {
 		// ownerSoundCloudProvider would find it again for the next session.
 		if !unreadable && owner.Token != "" && s.cfg.BPM != nil {
 			if keys := s.cfg.BPM.Config(); keys.SoundCloudToken == owner.Token {
-				keys.SoundCloudToken = ""
-				if err := s.cfg.BPM.SaveConfig(keys); err != nil {
+				if testSoundCloudForgetHook != nil {
+					testSoundCloudForgetHook()
+				}
+				if err := s.cfg.BPM.UpdateConfig(func(keys *providers.BPMConfig) {
+					if keys.SoundCloudToken == owner.Token {
+						keys.SoundCloudToken = ""
+					}
+				}); err != nil {
 					return err
 				}
 			}
