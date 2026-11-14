@@ -18,6 +18,105 @@ spec.loader.exec_module(bp)
 SRC = BUILD_PACKS.read_text()
 
 
+class QMLCacheCompatibilityTest(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("cc"), "A C compiler is required for the cache ABI test")
+    def test_engine_cache_isolated_from_stock_and_other_processes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = Path(tmp) / "test-qml-cache"
+            source = REPO / "tools/ui-mod/test_qml_cache.c"
+            compiled = subprocess.run(
+                ["cc", "-O2", "-I" + str(source.parent), str(source),
+                 "-ldl", "-lpthread", "-lm", "-o", str(binary)],
+                capture_output=True, text=True)
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            result = subprocess.run([str(binary)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+
+class NativeRestartCompatibilityTest(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("node"), "Node is required for native restart ordering")
+    def test_restart_saves_settings_then_uses_the_native_exit_path(self):
+        start = bp.SERVICES_MAIN.index("function scRestartCall(query) {")
+        end = bp.SERVICES_MAIN.index("\n\tproperty string scUpdateRepo", start)
+        function = bp.SERVICES_MAIN[start:end]
+        script = r"""
+const assert = require('assert');
+let finish, saved;
+const calls = [];
+const root = {scT: s => s};
+const Prompt = {Warning: 0, Cancel: 1, Ok: 2, AcceptRole: 3, RejectRole: 4};
+const QuitReasons = {AnalyticsChange: 7};
+const PlanckGUI = {views: {prompts: {post: () => ({finished: {connect: f => {finish = f}}})}}};
+const Planck = {quit: (reason, force) => calls.push(['quit', reason, force])};
+const scCall = (query, done) => {calls.push(['save', query]); saved = done};
+FUNCTION
+scRestartCall('fourDeckRole=24');
+finish(Prompt.RejectRole);
+assert.deepStrictEqual(calls, []);
+scRestartCall('fourDeckRole=24');
+finish(Prompt.AcceptRole);
+assert.deepStrictEqual(calls, [['save', 'fourDeckRole=24']]);
+assert.equal(typeof saved, 'function');
+saved({});
+assert.deepStrictEqual(calls, [['save', 'fourDeckRole=24'], ['quit', QuitReasons.AnalyticsChange, false]]);
+""".replace("FUNCTION", function)
+        result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+
+class USBProfileCompatibilityTest(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("node"), "Node is required for profile choices")
+    def test_usb_profile_waits_for_yes_or_no_and_loads_only_on_yes(self):
+        qrc = LAB / "5.3.0/qrc"
+        if not qrc.is_dir():
+            self.skipTest(f"{qrc} not found (run on the build host)")
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "packs"
+            built = subprocess.run(
+                ["python3", str(BUILD_PACKS), "--qrc", str(qrc), "--out", str(out)],
+                capture_output=True, text=True)
+            self.assertEqual(built.returncode, 0, built.stderr)
+            for lang in ("en", "zh-Hans", "zh-Hant"):
+                rel = "Skins/Embedded/Views/ControlCenter/Tabs/Preferences/Entries/LoadPreferencesDialog.qml"
+                packed = out / lang / rel
+                qml = (packed if packed.exists() else qrc / rel).read_text()
+                start = qml.index("onShowChanged: {") + len("onShowChanged: {")
+                depth, end = 1, start
+                while depth:
+                    depth += (qml[end] == "{") - (qml[end] == "}")
+                    end += 1
+                handler = qml[start:end - 1]
+                script = r"""
+const assert = require('assert');
+for (const accept of [true, false]) {
+    let loaded = 0, finished;
+    const posted = [], show = true, pQuitting = false;
+    const messageText = 'Load drive profile to device?', subItem = {};
+    const Prompt = {No: 1, Yes: 2, AcceptRole: 3, RejectRole: 4};
+    const pShow = {translator: {state: true}};
+    const pFinshedLoadingProfile = {translator: {state: false}};
+    const Qt = {callLater: f => f()};
+    const PlanckGUI = {views: {prompts: {post: m => {
+        posted.push(m); return {finished: {connect: f => { finished = f }}};
+    }}}};
+    const loadPreferences = () => loaded++;
+    (function() { HANDLER })();
+    assert.equal(posted.length, 1, 'inserting a profile must offer the stock choice');
+    assert.equal(posted[0].options, Prompt.No | Prompt.Yes);
+    assert.equal(loaded, 0);
+    assert.equal(pShow.translator.state, true, 'wait for the user');
+    assert.equal(pFinshedLoadingProfile.translator.state, false);
+    finished(accept ? Prompt.AcceptRole : Prompt.RejectRole);
+    assert.equal(loaded, accept ? 1 : 0);
+    assert.equal(pShow.translator.state, false);
+    assert.equal(pFinshedLoadingProfile.translator.state, true);
+}
+""".replace("HANDLER", handler)
+                with self.subTest(lang=lang):
+                    result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+
 class PrimeGoSwipeStemsTest(unittest.TestCase):
     """#224: both JP11 swipe menus offer Stems without changing full-swipe load."""
 

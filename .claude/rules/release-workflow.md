@@ -114,6 +114,8 @@ REMOTE_BUILD_HOST=<build host> remote-build --name sc5000-release-<短说明> --
 
 教训（5.3.0.1 重发）：Engine 5.3.0 强制打开 Qt 的 QML 磁盘缓存（`QML_FORCE_DISK_CACHE` 盖过我们的 `QML_DISABLE_DISK_CACHE`），缓存放在 `/data/AppDataUser/AIR Music Technology/Engine/.cache/qml`，只按源文件时间戳判断是否过期。实机曾经在没有 UI 包的情况下跑过一次 Engine，留下了原厂缓存；之后 hook 日志照样显示「48 files」，界面却一直是原厂的。门禁以前只数 hook 日志，没看渲染结果，所以没发现。现在 hook 按内容给替换的 qrc 文件打时间戳，门禁先种下原厂旧缓存，再读实际渲染出的节点。
 
+5.3.0.5 development: EngineX bytecode belongs in `ui/qml-cache`; the guard clears the legacy shared cache before stock handback. The gate must find private `.qmlc` files and no shared ones, and seed both caches for its power-cut reboot. See `docs/stock-handback-investigation.md`.
+
 教训（5.3.0.4 候选）：`f6b87f8` 新增 `0x16fbc38` hook 站点排除静音影子槽参与 `MASTER` 选举后，只验了「影子副本不抢 MASTER」，没验早已修好的「两台真碟机之间手动切换 MASTER」，结果双机同时显示 `LEAD` 且按 `MASTER` 键无效。任何对共享机制（`MASTER`/Sync 选举、hook 站点、header 布局、patch 字典）的修改必须同时回归相邻既有行为，不得只测本次单点目标。
 
 - 自定义 unit **不得对官方单元用硬依赖**（`Requires=` / `BindsTo=` / `Requisite=`），因为新底包可能删掉它。挂载用 `RequiresMountsFor=<路径>`（只对底包真有的挂载单元生效），其余用 `Wants=` + `After=`。`rootfs_audit.py` 把违反的写法记为 FAIL。

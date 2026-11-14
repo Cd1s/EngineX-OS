@@ -2662,7 +2662,7 @@ SERVICES_MAIN = """
 			message: root.scT("Restart Engine to apply? Playback will stop."),
 			options: Prompt.Cancel | Prompt.Ok
 		})
-		prompt.finished.connect(function(r) { if (r === Prompt.AcceptRole) scCall(query + "&restart=1") })
+		prompt.finished.connect(function(r) { if (r === Prompt.AcceptRole) scCall(query, function() { Planck.quit(QuitReasons.AnalyticsChange, false) }) })
 	}
 	property string scUpdateRepo: "Cd1s/EngineX-OS"
 	// #79: only GET /v1/sc5000/ui (loopback) carries these; shown in Settings -> About.
@@ -6291,14 +6291,6 @@ def edits(dev: bool):
         v + "BrowseView/Components/Components/" + ("BrowseViewBpm.qml" if v53() else "Bpm.qml"): [('text: row.modelData.bpm || ""', 'text: row.modelData.bpm || root.scPreview(row.modelData.providerName)[1]')],
         v + "BrowseView/Components/Components/Key.qml": [('text: row.modelData.key || ""', 'text: row.modelData.key || root.scPreview(row.modelData.providerName)[2] || ""')],
         v + "BrowseView/Components/Components/Song.qml": [('title: row.modelData.song || ""', 'title: root.scPlainTitle(row.modelData.song)')],
-        # Selecting a drive that carries an Engine profile asked "Load drive profile to
-        # device?" on every insert. Answer "No" unasked: the deck keeps its own settings.
-        prefs + "Entries/LoadPreferencesDialog.qml": [(
-            "		if(show && !pQuitting) {\n			let messageObject = {\n",
-            "		if(show && !pQuitting) {\n"
-            "			Qt.callLater(() => { pShow.translator.state = false; pFinshedLoadingProfile.translator.state = true })\n"
-            "			return\n"
-            "			let messageObject = {\n")],
         # rb-bridge converts rekordbox media at mount. Engine's own slow import of a
         # large library corrupted m.db, so always take the prompt's "Ignore" branch.
         ROOT + "Items/MessageBoxes/RekordBoxImportDialog.qml": [(

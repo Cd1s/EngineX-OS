@@ -529,24 +529,24 @@ for _ in 1 2 3; do SERVICE_RESULT=success sh "$GUARD" stop; sh "$GUARD" pre; don
 for result in signal core-dump exit-code; do SERVICE_RESULT=$result sh "$GUARD" stop; sh "$GUARD" pre; done
 [[ -e $SC5000_UI_DIR/safe-mode ]] || fail 'three crashed starts must enter safe-mode'
 # #140: a corrupt Qt QML cache must not survive a crash, safe-mode or a hung/hard-powered-off start (boot-token left).
-SERVICE_RESULT=signal sh "$GUARD" stop; mkdir -p "$SC5000_ENGINE_DATA_DIR/.cache/qml"; sh "$GUARD" pre
-[[ ! -e $SC5000_ENGINE_DATA_DIR/.cache/qml ]] || fail 'a crashed start must clear the QML disk cache'
-rm -f "$SC5000_UI_DIR"/*; mkdir -p "$SC5000_ENGINE_DATA_DIR/.cache/qml"; sh "$GUARD" pre
-[[ -d $SC5000_ENGINE_DATA_DIR/.cache/qml ]] || fail 'a clean start must keep the QML disk cache'
-sh "$GUARD" post; mkdir -p "$SC5000_ENGINE_DATA_DIR/.cache/qml"; sh "$GUARD" pre
-[[ ! -e $SC5000_ENGINE_DATA_DIR/.cache/qml && $(cat "$SC5000_UI_DIR/boot-count") == 2 ]] || fail 'a leftover boot-token must count as a crash and clear the QML cache'
+SERVICE_RESULT=signal sh "$GUARD" stop; mkdir -p "$SC5000_ENGINE_DATA_DIR/.cache/qml" "$SC5000_UI_DIR/qml-cache"; sh "$GUARD" pre
+[[ ! -e $SC5000_ENGINE_DATA_DIR/.cache/qml && ! -e $SC5000_UI_DIR/qml-cache ]] || fail 'a crashed start must clear both QML disk caches'
+rm -f "$SC5000_UI_DIR"/*; mkdir -p "$SC5000_ENGINE_DATA_DIR/.cache/qml" "$SC5000_UI_DIR/qml-cache"; sh "$GUARD" pre
+[[ -d $SC5000_UI_DIR/qml-cache && ! -e $SC5000_ENGINE_DATA_DIR/.cache/qml ]] || fail 'a clean start must keep EngineX bytecode and drop the legacy shared cache before stock handback'
+sh "$GUARD" post; mkdir -p "$SC5000_ENGINE_DATA_DIR/.cache/qml" "$SC5000_UI_DIR/qml-cache"; sh "$GUARD" pre
+[[ ! -e $SC5000_ENGINE_DATA_DIR/.cache/qml && ! -e $SC5000_UI_DIR/qml-cache && $(cat "$SC5000_UI_DIR/boot-count") == 2 ]] || fail 'a leftover boot-token must count as a crash and clear both QML caches'
 # #140: power cut after a healthy start (no stop hook, no boot-token) still drops the cache but is no crash.
-rm -f "$SC5000_UI_DIR"/*; sh "$GUARD" pre; mkdir -p "$SC5000_ENGINE_DATA_DIR/.cache/qml"; sh "$GUARD" pre
-[[ ! -e $SC5000_ENGINE_DATA_DIR/.cache/qml && $(cat "$SC5000_UI_DIR/boot-count") == 1 ]] || fail 'a start without a stop hook must clear the QML cache without counting a crash'
+rm -f "$SC5000_UI_DIR"/*; sh "$GUARD" pre; mkdir -p "$SC5000_ENGINE_DATA_DIR/.cache/qml" "$SC5000_UI_DIR/qml-cache"; sh "$GUARD" pre
+[[ ! -e $SC5000_ENGINE_DATA_DIR/.cache/qml && ! -e $SC5000_UI_DIR/qml-cache && $(cat "$SC5000_UI_DIR/boot-count") == 1 ]] || fail 'a start without a stop hook must clear both QML caches without counting a crash'
 # BH-F52-4: a second-generation boot starts the stock Engine, and boot-activate restarts it into the
 # hooked one. That clean stop of an instance that never ran `pre` this boot must leave the previous
 # boot's evidence (an unacknowledged start, a running-sentinel left by a power cut) for `pre`.
-rm -rf "$SC5000_UI_DIR"; mkdir -p "$SC5000_UI_DIR" "$SC5000_ENGINE_DATA_DIR/.cache/qml"
+rm -rf "$SC5000_UI_DIR"; mkdir -p "$SC5000_UI_DIR/qml-cache" "$SC5000_ENGINE_DATA_DIR/.cache/qml"
 echo tok > "$SC5000_UI_DIR/boot-token"; : > "$SC5000_UI_DIR/running-sentinel"
 echo 2 > "$SC5000_UI_DIR/boot-failures"; date +%s > "$SC5000_UI_DIR/boot-window"
 rm -f "$SC5000_GUARD_PRE_MARK"   # a new boot
 SERVICE_RESULT=success sh "$GUARD" stop; sh "$GUARD" pre
-[[ -e $SC5000_UI_DIR/safe-mode && ! -e $SC5000_ENGINE_DATA_DIR/.cache/qml ]] ||
+[[ -e $SC5000_UI_DIR/safe-mode && ! -e $SC5000_ENGINE_DATA_DIR/.cache/qml && ! -e $SC5000_UI_DIR/qml-cache ]] ||
     fail 'the stock Engine stop before the hooked start must not erase the last boot crash evidence (BH-F52-4)'
 rm -f "$SC5000_UI_DIR"/*; SERVICE_RESULT=success sh "$GUARD" stop; sh "$GUARD" pre   # this boot's own clean restart
 [[ ! -e $SC5000_UI_DIR/safe-mode && $(cat "$SC5000_UI_DIR/boot-count") == 1 ]] || fail 'a clean restart after pre must still reset the state'
@@ -563,8 +563,8 @@ usb_audio enable-uac2 44100; [[ $(cat "$srate") == 44100 ]] || fail 'enable-uac2
 usb_audio enable-uac2; [[ $(cat "$srate") == 48000 ]] || fail 'enable-uac2 without a rate keeps the 48000 default'
 ! usb_audio enable-uac2 12345 2>/dev/null || fail 'enable-uac2 must refuse an unsupported rate'
 ok 'the USB-B audio gadget offers the sample rate chosen in the Web Console (BH-GF3-6)'
-SERVICE_RESULT=success sh "$GUARD" stop; mkdir -p "$SC5000_ENGINE_DATA_DIR/.cache/qml"; sh "$GUARD" pre
-[[ -d $SC5000_ENGINE_DATA_DIR/.cache/qml ]] || fail 'a clean stop must keep the QML disk cache'
+SERVICE_RESULT=success sh "$GUARD" stop; mkdir -p "$SC5000_ENGINE_DATA_DIR/.cache/qml" "$SC5000_UI_DIR/qml-cache"; sh "$GUARD" pre
+[[ -d $SC5000_UI_DIR/qml-cache && ! -e $SC5000_ENGINE_DATA_DIR/.cache/qml ]] || fail 'a clean stop must keep EngineX bytecode and leave no legacy shared cache'
 # #140: the healthy timer leaves the token when Engine is gone, so the next pre counts a crash.
 SC5000_UI_HEALTHY_AFTER=1 SC5000_UI_ALIVE_CMD=false sh "$GUARD" post; sleep 1.5
 [[ -e $SC5000_UI_DIR/boot-token ]] || fail 'a dead Engine must not clear boot-token'
@@ -592,9 +592,11 @@ kill "$ui_watch"; wait "$ui_watch" || :
 # #140 (b82197b): a power cut after a UI-ready start leaves running-sentinel; the second boot
 # purges the possibly truncated QML cache and is no crash.
 [[ -e $SC5000_UI_DIR/running-sentinel ]] || fail 'healthy start before power cut must keep running-sentinel'
-mkdir -p "$SC5000_ENGINE_DATA_DIR/.cache/qml"; printf truncated > "$SC5000_ENGINE_DATA_DIR/.cache/qml/powercut.qmlc"
+mkdir -p "$SC5000_ENGINE_DATA_DIR/.cache/qml" "$SC5000_UI_DIR/qml-cache"
+printf truncated > "$SC5000_ENGINE_DATA_DIR/.cache/qml/powercut.qmlc"
+printf corrupt > "$SC5000_UI_DIR/qml-cache/powercut.qmlc"
 sh "$GUARD" pre
-[[ ! -e $SC5000_ENGINE_DATA_DIR/.cache/qml && ! -e $SC5000_UI_DIR/safe-mode && $(cat "$SC5000_UI_DIR/boot-count") == 1 && -e $SC5000_UI_DIR/running-sentinel ]] ||
+[[ ! -e $SC5000_ENGINE_DATA_DIR/.cache/qml && ! -e $SC5000_UI_DIR/qml-cache && ! -e $SC5000_UI_DIR/safe-mode && $(cat "$SC5000_UI_DIR/boot-count") == 1 && -e $SC5000_UI_DIR/running-sentinel ]] ||
     fail 'second boot after healthy power cut must purge .cache/qml without entering safe-mode'
 has '--phase boot2' "$ROOT/tools/az01-packer/release-gate.sh"
 has 'boot2: main UI acknowledged the current boot attempt' "$ROOT/tools/az01-packer/release-gate.sh"
