@@ -164,6 +164,58 @@ func TestDeadline243HealthySlowUploads(t *testing.T) {
 	}
 }
 
+// A renderer reads the upload only as fast as it separates, so a slow one keeps
+// a long track's upload open for as long as it works. While audio keeps
+// arriving above the floor that is a healthy job. A bound on the whole upload
+// cut it (5.3.0.5 beta 1: htdemucs on a CPU, tracks beyond about 20 minutes).
+func TestDeadline243SlowRendererKeepsItsJob(t *testing.T) {
+	deadline243Limits(t)
+	t.Setenv("STEMS_TEST_BLOCK_TIME", "100ms")
+	const blocks, frames = 20, 65536 // 1.5 s of audio per block; the floor is 0.05 s per 500 ms
+	worker := []string{os.Args[0], "-test.run=^TestProtocolWorker$", "--", "protocol-worker"}
+	c, upload, resp, _ := deadline243Connection(t, worker, "1")
+	c.SetDeadline(time.Now().Add(30 * time.Second))
+	sess := &Session{}
+	result := make(chan error, 1)
+	go func() { result <- readFrames(resp.Body, io.Discard, sess) }()
+	start := time.Now()
+	send := func(s string) {
+		sess.FeedIn([]byte(s))
+		io.WriteString(upload, s)
+	}
+	send(init243)
+	block := fmt.Sprintf("action=block\nnumSamples=%d\n\n", frames) + strings.Repeat("\x00", frames*4)
+	for i := 0; i < blocks; i++ {
+		send(block)
+	}
+	send("action=done\n\n")
+	if err := <-result; err != nil {
+		t.Fatalf("a renderer at work for %v on a steady upload lost its job: %v", time.Since(start).Round(100*time.Millisecond), err)
+	}
+	if d := time.Since(start); d < 2*uploadProgressRead {
+		t.Fatalf("the job took %v, too short to outlast a bound on the whole upload", d)
+	}
+}
+
+// Progress is audio that arrived, not audio that was announced.
+func TestUploadTrackerCountsReceivedAudio(t *testing.T) {
+	var u UploadTracker
+	u.Feed([]byte(init243 + "action=block\nnumSamples=44100\n\n"))
+	if got := u.Audio(); got != 0 {
+		t.Fatalf("%v s for a block that was only announced", got)
+	}
+	u.Feed(make([]byte, 22050*4))
+	if got := u.Audio(); got != 0.5 {
+		t.Fatalf("%v s, want 0.5", got)
+	}
+	low := UploadTracker{Packed: true}
+	low.Feed([]byte("numChannels=2\nsampleRate=1\nmaxBlockSize=1024\n\naction=block\nnumSamples=8000\n\n"))
+	low.Feed(make([]byte, 8000*2*2))
+	if got := low.Audio(); got != 1 {
+		t.Fatalf("%v s at a claimed 1 Hz, want 1 (progress counts at 8000 Hz or more)", got)
+	}
+}
+
 func TestDeadline243SlowRenderAfterDone(t *testing.T) {
 	deadline243Limits(t)
 	uploadIdleRead = 80 * time.Millisecond

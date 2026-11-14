@@ -17,7 +17,8 @@ import (
 
 // TestProtocolWorker is re-executed as a worker speaking worker.py's dialect
 // with zero latency. STEMS_TEST_MODE=fail exits 1 after draining; truncate
-// exits 0 without the closing returnFrames=0.
+// exits 0 without the closing returnFrames=0. STEMS_TEST_BLOCK_TIME is how long
+// it works on each block before it reads the next (a slow renderer).
 func TestProtocolWorker(t *testing.T) {
 	if os.Args[len(os.Args)-1] != "protocol-worker" {
 		return
@@ -49,6 +50,9 @@ func TestProtocolWorker(t *testing.T) {
 		n, _ := strconv.Atoi(f["numSamples"])
 		if _, err := io.ReadFull(in, make([]byte, n*ch*4)); err != nil {
 			os.Exit(4)
+		}
+		if d, _ := time.ParseDuration(os.Getenv("STEMS_TEST_BLOCK_TIME")); d > 0 {
+			time.Sleep(d)
 		}
 		out.WriteString(fmt.Sprintf("returnFrames=%d\n\n", n))
 		out.Write(bytes.Repeat([]byte{1}, n*4*ch*4))

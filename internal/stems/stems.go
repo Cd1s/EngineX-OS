@@ -232,12 +232,19 @@ func (c *idleConn) Write(p []byte) (int, error) {
 }
 
 var (
-	// Provisional until header/upload timings are measured on real decks (#243).
+	// Engine's init header has uploadHeaderRead (provisional until timed on real
+	// decks, #243). After it, every uploadProgressRead must bring in at least
+	// uploadProgressFloor of its length in audio. The upload as a whole has no
+	// bound of its own: the worker takes the next blocks only when it has
+	// separated the last, so the upload lasts as long as the rendering, and a
+	// 30-minute bound cut slow renderers on long tracks. The job has 6 hours.
 	uploadHeaderRead   = 30 * time.Second
-	uploadProgressRead = 30 * time.Minute
+	uploadProgressRead = 5 * time.Minute
 	uploadIdleRead     = 120 * time.Second
 	uploadDrainRead    = 10 * time.Minute
 )
+
+const uploadProgressFloor = 0.1 // of real time
 
 type idleBody struct {
 	r          io.Reader
@@ -247,6 +254,9 @@ type idleBody struct {
 	mu         sync.Mutex
 	uploadDone bool
 	stopped    bool
+	inited     bool    // the init header has arrived
+	audio      float64 // seconds of audio received
+	mark       float64 // audio at the last progress check
 }
 
 func (b *idleBody) Read(p []byte) (int, error) {
@@ -266,14 +276,14 @@ func (b *idleBody) Read(p []byte) (int, error) {
 		initialized := b.tracker.init
 		complete := b.tracker.Feed(p[:n])
 		b.mu.Lock()
+		b.audio = b.tracker.Audio()
 		if !b.stopped {
 			if complete {
 				b.uploadDone = true
 				b.timer.Stop()
 				b.c.SetReadDeadline(time.Now().Add(uploadDrainRead))
 			} else if !initialized && b.tracker.init {
-				// A fixed upload bound cannot be renewed by trickling bytes
-				// or tiny blocks; rendering after action=done is separate.
+				b.inited = true
 				b.timer.Reset(uploadProgressRead)
 			}
 		}
@@ -291,6 +301,24 @@ func (b *idleBody) touchDrain() {
 	if b.uploadDone && !b.stopped {
 		b.c.SetReadDeadline(time.Now().Add(uploadDrainRead))
 	}
+}
+
+// expire runs when the timer fires. Before the init header that is the end.
+// After it the job goes on while audio keeps arriving: trickled bytes, empty
+// or tiny blocks and a worker that stopped reading bring none.
+func (b *idleBody) expire(cancel func()) {
+	b.mu.Lock()
+	keep := b.uploadDone || b.stopped // it fired as the upload ended
+	if !keep && b.inited && b.audio-b.mark >= uploadProgressFloor*uploadProgressRead.Seconds() {
+		b.mark, keep = b.audio, true
+		b.timer.Reset(uploadProgressRead)
+	}
+	b.mu.Unlock()
+	if keep {
+		return
+	}
+	cancel() // Also interrupts a blocked write to worker stdin.
+	b.stop()
 }
 
 func (b *idleBody) stop() {
@@ -407,10 +435,7 @@ func (b *Backend) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// A body error must terminate the worker; a normal EOF is how Engine ends a session.
 	done := make(chan error, 1)
 	body := &idleBody{r: r.Body, c: http.NewResponseController(w), tracker: UploadTracker{Packed: framing == "2"}}
-	body.timer = time.AfterFunc(uploadHeaderRead, func() {
-		cancel() // Also interrupts a blocked write to worker stdin.
-		body.stop()
-	})
+	body.timer = time.AfterFunc(uploadHeaderRead, func() { body.expire(cancel) })
 	defer body.timer.Stop()
 	go func() {
 		var dst io.Writer = stdin
