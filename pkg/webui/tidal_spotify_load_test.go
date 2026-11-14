@@ -53,7 +53,7 @@ func spotifyManifest(t *testing.T, data []byte) string {
 		MimeType, Codecs, EncryptionType string
 		URLs                             []string
 	}
-	if err := json.Unmarshal(raw, &manifest); err != nil || manifest.MimeType != "audio/ogg" || manifest.Codecs != "vorbis" || manifest.EncryptionType != "NONE" || len(manifest.URLs) != 1 || !strings.HasSuffix(manifest.URLs[0], ".ogg") {
+	if err := json.Unmarshal(raw, &manifest); err != nil || manifest.MimeType != "audio/ogg" || manifest.Codecs != "mp3" || manifest.EncryptionType != "NONE" || len(manifest.URLs) != 1 || !strings.HasSuffix(manifest.URLs[0], ".mp3") {
 		t.Fatalf("Spotify manifest: %s (%v)", raw, err)
 	}
 	return manifest.URLs[0]
@@ -80,7 +80,7 @@ func TestSpotifyFetchFailureIsTrackLoadFailure269(t *testing.T) {
 				address = spotifyManifest(t, data)
 			} else {
 				var v struct{ URL, Codec string }
-				if err := json.Unmarshal(data, &v); err != nil || v.Codec != "vorbis" || !strings.HasSuffix(v.URL, ".ogg") {
+				if err := json.Unmarshal(data, &v); err != nil || v.Codec != "mp3" || !strings.HasSuffix(v.URL, ".mp3") {
 					t.Fatalf("streamUrl: %s (%v)", data, err)
 				}
 				address = v.URL
@@ -166,6 +166,36 @@ func TestSpotifyManifestLoadsNativeOgg269(t *testing.T) {
 		if err != nil || resp.StatusCode != http.StatusPartialContent || resp.Header.Get("Content-Type") != "audio/ogg" || !bytes.Equal(body, fixture[:32]) || calls.Load() != 1 {
 			t.Fatalf("native Ogg Range: HTTP %d, calls=%d (%v)", resp.StatusCode, calls.Load(), err)
 		}
+	}
+}
+
+// #277: the carrier's recognized naming tag must not change the actual audio.
+// Native NH08 opens these same valid Ogg bytes through its FFmpeg reader with
+// either .ogg or .mp3, while an extensionless file never reaches that reader.
+func TestSpotifyEngineDownloadNameKeepsNativeMedia277(t *testing.T) {
+	fixture, err := os.ReadFile("testdata/spotify-native-44100.ogg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, srv, track := spotifyLoadGateway(t, func(w http.ResponseWriter, r *http.Request) { w.Write(fixture) })
+	address := spotifyManifest(t, tidalGet(t, srv.URL, track+"playbackinfopostpaywall", http.StatusOK, nil))
+	resp, err := http.Get(address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil || resp.StatusCode != http.StatusOK || resp.Header.Get("Content-Type") != "audio/ogg" || !bytes.Equal(body, fixture) {
+		t.Fatalf("native media: status=%d type=%q bytes=%d (%v)", resp.StatusCode, resp.Header.Get("Content-Type"), len(body), err)
+	}
+	// The legacy endpoint and a warm manifest must keep the same download name.
+	var legacy struct{ URL, Codec string }
+	tidalGet(t, srv.URL, track+"streamurl", http.StatusOK, &legacy)
+	if legacy.Codec != "mp3" || legacy.URL != address {
+		t.Fatalf("legacy naming: %+v", legacy)
+	}
+	if warm := spotifyManifest(t, tidalGet(t, srv.URL, track+"playbackinfopostpaywall", http.StatusOK, nil)); warm != address {
+		t.Fatalf("warm naming: %s", warm)
 	}
 }
 
