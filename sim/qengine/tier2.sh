@@ -147,10 +147,10 @@ fi
 
 # Override hard-coded /tmp paths in upstream scripts to isolate within TASK_TMP_DIR
 find "$QENGINE_DIR/scripts/build_scripts" -type f -exec sed -i \
-    -e 's|mktemp /tmp/|mktemp "$TMPDIR"/|g' \
-    -e 's|mktemp -d /tmp/|mktemp -d "$TMPDIR"/|g' \
-    -e 's|/tmp/qengine-|"$TMPDIR"/qengine-|g' \
-    -e 's|/tmp/build-|"$TMPDIR"/build-|g' {} +
+    -e 's|mktemp /tmp/|mktemp "${TMPDIR:-/tmp}"/|g' \
+    -e 's|mktemp -d /tmp/|mktemp -d "${TMPDIR:-/tmp}"/|g' \
+    -e 's|/tmp/qengine-|"${TMPDIR:-/tmp}"/qengine-|g' \
+    -e 's|/tmp/build-|"${TMPDIR:-/tmp}"/build-|g' {} +
 
 # Direct QEngine's drop-in to 99-qengine.conf so EngineX's override.conf remains untouched
 if [ -f "$QENGINE_DIR/scripts/build_scripts/build_armv7_engine_rootfs.sh" ]; then
@@ -159,7 +159,7 @@ fi
 
 # Fix upstream launcher regex for EngineX engine invocations
 if [ -f "$QENGINE_DIR/scripts/build_scripts/rootfs_steps/skip_firmware_update.sh" ]; then
-    sed -i '/-skipFirmwareUpdate/!s|\([[:space:]]*[^ ]*/usr/Engine/Engine\) |\1 -skipFirmwareUpdate |' "$QENGINE_DIR/scripts/build_scripts/rootfs_steps/skip_firmware_update.sh"
+    sed -i 's|sed -i .*-skipFirmwareUpdate.*|sed -i "s\\|/usr/Engine/Engine \\|/usr/Engine/Engine -skipFirmwareUpdate \\|\" \"\$_launcher\"|' "$QENGINE_DIR/scripts/build_scripts/rootfs_steps/skip_firmware_update.sh"
 fi
 
 # 2. Check prerequisites on the host
