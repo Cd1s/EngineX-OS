@@ -22,6 +22,7 @@ Host requirements on the AMD build host:
 - `qemu-utils` (`qemu-img`)
 - `qemu-user-static`, `binfmt-support`
 - `file`, `e2fsprogs` (`dumpe2fs`, `debugfs`)
+- `util-linux` (`losetup`, `findmnt`, `mount`, `umount`)
 
 ## Measured Boot Performance
 
