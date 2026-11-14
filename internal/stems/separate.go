@@ -10,8 +10,7 @@ package stems
 //     which is the kick;
 //   - bass: what is held below 190 Hz, weighted towards the centre;
 //   - vocals: what is held (judged over a shorter time, so vibrato stays)
-//     between 180 Hz and 7 kHz and is common to both channels; it is taken
-//     from the mid signal, so sounds panned to one side never get in;
+//     between 180 Hz and 7 kHz, as far as it is common to both channels;
 //   - melody: the exact remainder, so the four stems sum to the input.
 //
 // It is not a neural separator. The constants were tuned for the highest
@@ -206,11 +205,11 @@ type separator struct {
 	long, short *timeMedian
 	// Per bin, for the frame being separated: its medians over the long
 	// time, over the short time and across frequency, then its masks.
-	held, heldNear, across, drums, bass []float32
-	scratch                             []float32 // medianAcross's window
+	held, heldNear, across, vocals, drums, bass []float32
+	scratch                                     []float32 // medianAcross's window
 
 	frame      []float32      // n samples
-	spec       [][2][]float32 // spectra to synthesise: vocals, then bass and drums per channel
+	spec       [][2][]float32 // spectra to synthesise: vocals, bass and drums, each per channel
 	ola        [][]float32    // their overlap-add, n samples each
 	skip, owed int            // leading frames to drop; frames received and not yet queued
 	out        [][]float32    // queued output per stem and channel
@@ -227,9 +226,9 @@ func newSeparator(ch int, rate float64) *separator {
 		in: make([][]float32, ch), ring: make([]spectrum, long/2+1), look: long / 2, near: near / 2,
 		long: newTimeMedian(bins, long), short: newTimeMedian(bins, near),
 		held: make([]float32, bins), heldNear: make([]float32, bins), across: make([]float32, bins),
-		drums: make([]float32, bins), bass: make([]float32, bins),
+		vocals: make([]float32, bins), drums: make([]float32, bins), bass: make([]float32, bins),
 		scratch: make([]float32, int(330*float64(n)/rate)|1), frame: make([]float32, n),
-		spec: make([][2][]float32, 1+2*ch), ola: make([][]float32, 1+2*ch), skip: n - hop, out: make([][]float32, 4*ch)}
+		spec: make([][2][]float32, 3*ch), ola: make([][]float32, 3*ch), skip: n - hop, out: make([][]float32, 4*ch)}
 	for i := range s.win {
 		s.win[i] = float32(0.5 - 0.5*math.Cos(2*math.Pi*float64(i)/float64(n)))
 		s.syn[i] = s.win[i] / (1.5 * float32(n/2)) // squared Hann windows a quarter apart sum to 1.5
@@ -298,7 +297,6 @@ func sqrt32(x float32) float32 { return float32(math.Sqrt(float64(x))) }
 func (s *separator) separate(sp *spectrum) {
 	const tiny = 1e-20
 	medianAcross(sp.mag, s.across, s.scratch)
-	vr, vi := s.spec[0][0], s.spec[0][1]
 	lr, li, rr, ri := sp.re[0], sp.im[0], sp.re[s.ch-1], sp.im[s.ch-1]
 	for k, a := range sp.mag {
 		h, p2 := s.held[k], s.across[k]*s.across[k]
@@ -313,23 +311,25 @@ func (s *separator) separate(sp *spectrum) {
 		near := s.heldNear[k]
 		tonal := 1 - p2/(p2+4*near*near+tiny)
 		// One channel has no centre to find: it gives 0.7 of what is tonal to the vocals.
-		mr, mi, centre, bass := lr[k], li[k], float32(0.7), (1-drums)*s.low[k]
+		centre, bass := float32(0.7), (1-drums)*s.low[k]
 		if s.ch == 2 {
-			mr, mi = (mr+rr[k])/2, (mi+ri[k])/2
+			mr, mi := (lr[k]+rr[k])/2, (li[k]+ri[k])/2
 			sr, si := lr[k]-mr, li[k]-mi
 			mid, side := sqrt32(mr*mr+mi*mi), sqrt32(sr*sr+si*si)
 			centre = max(mid-side, 0) / (mid + side + 1e-10)
 			bass *= sqrt32(centre)
 		}
-		v := tonal * s.voice[k] * centre
-		vr[k], vi[k], s.drums[k], s.bass[k] = v*mr, v*mi, drums, bass
+		vocals := tonal * s.voice[k] * centre
+		// The drums are taken from what the vocals leave.
+		s.vocals[k], s.bass[k], s.drums[k] = vocals, bass, drums*(1-vocals)
 	}
 	for c := 0; c < s.ch; c++ {
 		re, im := sp.re[c], sp.im[c]
-		br, bi, dr, di := s.spec[1+c][0], s.spec[1+c][1], s.spec[1+s.ch+c][0], s.spec[1+s.ch+c][1]
-		for k, bass := range s.bass {
-			br[k], bi[k] = bass*re[k], bass*im[k]
-			dr[k], di[k] = s.drums[k]*(re[k]-vr[k]), s.drums[k]*(im[k]-vi[k])
+		for i, mask := range [3][]float32{s.vocals, s.bass, s.drums} {
+			outRe, outIm := s.spec[i*s.ch+c][0], s.spec[i*s.ch+c][1]
+			for k, m := range mask {
+				outRe[k], outIm[k] = m*re[k], m*im[k]
+			}
 		}
 	}
 	for i, part := range s.spec {
@@ -346,7 +346,7 @@ func (s *separator) separate(sp *spectrum) {
 	take = min(take, s.owed)
 	s.owed -= take
 	for c := 0; c < s.ch; c++ {
-		v, b, d := s.ola[0][:take], s.ola[1+c][:take], s.ola[1+s.ch+c][:take]
+		v, b, d := s.ola[c][:take], s.ola[s.ch+c][:take], s.ola[2*s.ch+c][:take]
 		x := s.in[c][:take]
 		s.out[c] = append(s.out[c], v...)
 		s.out[s.ch+c] = append(s.out[s.ch+c], b...)

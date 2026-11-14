@@ -169,6 +169,26 @@ func TestLocalRenderSeparatesKnownStems(t *testing.T) {
 	}
 }
 
+// A voice that is louder on the left stays louder on the left in the vocals
+// (taking the vocals from the mid signal put it in the middle).
+func TestLocalRenderVocalsKeepTheirPlace(t *testing.T) {
+	const rate = 44100
+	stems, _ := testMix(rate, 3*rate)
+	voice := stems[0][0]
+	right := make([]float32, len(voice))
+	for i, v := range voice {
+		right[i] = v / 2
+	}
+	got, _ := localStems(t, rate, 1024, [][]float32{voice, right})
+	var l, r float64
+	for i := rate; i < 2*rate; i++ {
+		l, r = l+float64(got[0][i])*float64(got[0][i]), r+float64(got[1][i])*float64(got[1][i])
+	}
+	if l < 1e-3 || l/r < 3 || l/r > 5 {
+		t.Fatalf("vocals energy left %g, right %g; the input has four times more on the left", l, r)
+	}
+}
+
 // One or two channels, any rate, blocks of any size, audio shorter than the
 // separator's lookahead: localStems checks the replies and the sum.
 func TestLocalRenderAnyShape(t *testing.T) {
