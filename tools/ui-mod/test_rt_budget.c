@@ -4,7 +4,9 @@
  * concurrency; its timings include cold/reset blocks and must not be averaged.
  * A block's time is the least it took in PASSES identical passes: a shared build host
  * preempts a 0.07 ms block for 2 ms now and then, while a clear or a wait in the code
- * costs the same in every pass.
+ * costs the same in every pass. So the least only filters the host out. It cannot hide
+ * a lock, an allocation or a blocking call that happens to be quick once: those are
+ * banned outright, here by the poison list and in the hook by test_rt_callback.c.
  * Vendor DSP, hook dispatch/routing, loader locks, faults and the tap consumer
  * need separate native/deck checks. No scheduler policy is changed here. */
 #define _POSIX_C_SOURCE 200809L

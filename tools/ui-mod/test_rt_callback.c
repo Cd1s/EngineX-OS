@@ -19,7 +19,8 @@
  * "selftest" sleeps inside an audio block on purpose and passes only when the guard saw it.
  * Host-side like test_rt_budget.c: the budget is the block's duration at 96 kHz, on the
  * build host's CPU, and a block's time is the least it took in three identical passes (a
- * shared host preempts a block now and then; a wait in the code costs every pass).
+ * shared host preempts a block now and then; a wait in the code costs every pass). The
+ * least only filters the host out: a banned call fails the test however quick it is.
  * No Engine, rootfs or device is needed. */
 #define ENGINE_UI_HOOK_TEST
 int hook_test_engine;
