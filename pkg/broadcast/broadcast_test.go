@@ -3,6 +3,7 @@ package broadcast
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/binary"
 	"fmt"
@@ -252,6 +253,82 @@ func TestShoutcastTargetIsNotPushed(t *testing.T) {
 	}
 	if st := b.Status(); st.Streaming || !strings.Contains(st.LastError, "Shoutcast is not supported") || !strings.Contains(st.LastError, "Icecast") {
 		t.Errorf("status %+v, want not streaming and a Shoutcast-not-supported error", st)
+	}
+}
+
+// #245: saving a stream setting restarted capture together with the pusher and the LAN
+// stream, which closed every /live.wav listener: OBS and VLC had to reconnect on each
+// save. Now only what the setting is about restarts. Switching Live Stream off still
+// ends the listener.
+func TestSettingsChangeKeepsLocalListeners(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	connected := make(chan struct{}, 8)
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			connected <- struct{}{}
+			conn.Close()
+		}
+	}()
+
+	b := New(newTestGuard())
+	defer b.Close()
+	cfg := Config{Enabled: true}
+	save := func() {
+		t.Helper()
+		if err := b.Configure(cfg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	save()
+	l, cancel := b.SubscribeLive(0)
+	defer cancel()
+	next := func() bool {
+		ctx, done := context.WithTimeout(context.Background(), 2*time.Second)
+		defer done()
+		_, ok := l.Next(ctx)
+		return ok
+	}
+	flows := func(when string) {
+		t.Helper()
+		if !next() {
+			t.Fatalf("%s: the listener was closed, or its audio stopped", when)
+		}
+	}
+	flows("before any change")
+	cfg.StreamName = "Another name"
+	save()
+	flows("after a new stream name")
+	cfg.LANMode, cfg.LANTarget = "rtp", "127.0.0.1:5004"
+	save()
+	flows("after turning the LAN stream on")
+	if st := b.Status(); st.LANMode != "rtp" || st.LastError != "" {
+		t.Fatalf("the LAN stream did not start with the new settings: %+v", st)
+	}
+	cfg.ServerURL, cfg.Password = ln.Addr().String(), "pw"
+	save()
+	flows("after adding a server")
+	select {
+	case <-connected:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the pusher did not start for the new server")
+	}
+	cfg.ServerURL, cfg.LANMode = "", "off"
+	save()
+	flows("after removing the server and the LAN stream")
+	cfg.Enabled = false
+	save()
+	for i := 0; next(); i++ { // what was queued is still delivered, then it ends
+		if i > 200 {
+			t.Fatal("the listener is still served with Live Stream off")
+		}
 	}
 }
 
