@@ -91,3 +91,37 @@ func TestRBBridgeProlinkFlags(t *testing.T) {
 		t.Fatalf("expected bind error, got %v", err)
 	}
 }
+
+func TestRBBridgeExportXML(t *testing.T) {
+	root := t.TempDir()
+	testfixture.Export(t, root)
+	var convertOut bytes.Buffer
+	if err := RBBridge([]string{"--mount-path", root}, &convertOut); err != nil {
+		t.Fatalf("initial conversion failed: %v", err)
+	}
+
+	var xmlOut bytes.Buffer
+	if err := RBBridge([]string{"--mount-path", root, "--export-xml", "--xml-target-os=mac"}, &xmlOut); err != nil {
+		t.Fatalf("export-xml failed: %v", err)
+	}
+
+	var summary struct {
+		Path        string `json:"path"`
+		TotalTracks int    `json:"totalTracks"`
+	}
+	if err := json.Unmarshal(xmlOut.Bytes(), &summary); err != nil {
+		t.Fatalf("unmarshal summary: %v (%s)", err, xmlOut.String())
+	}
+	if summary.TotalTracks == 0 {
+		t.Errorf("expected tracks in summary: %+v", summary)
+	}
+
+	xmlPath := filepath.Join(root, "rekordbox.xml")
+	data, err := os.ReadFile(xmlPath)
+	if err != nil {
+		t.Fatalf("read exported xml: %v", err)
+	}
+	if !strings.Contains(string(data), "<DJ_PLAYLISTS") {
+		t.Errorf("missing DJ_PLAYLISTS tag in %s", xmlPath)
+	}
+}

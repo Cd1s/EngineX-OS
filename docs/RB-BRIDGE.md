@@ -9,6 +9,7 @@ qCompress 格式。不会打开 `PIONEER/` 或音频文件进行写入，不安�
 ```sh
 go build -o bin/sc5000-suite ./cmd/sc5000-suite
 bin/sc5000-suite rb-bridge --mount-path /media/usb
+bin/sc5000-suite rb-bridge --mount-path /media/usb --export-xml
 bin/sc5000-suite rb-bridge --mount-path /media/usb --smart-match 123
 bin/sc5000-suite rb-bridge --prolink --bind 0.0.0.0
 ```
@@ -121,6 +122,16 @@ USB 媒体详情在 UDP 50002 广播并响应查询，并向已发现的 peer �
 SQLiteAdapter 可替换版本相关的解析逻辑，无法识别/加密的库明确报错，不改写源库。
 只读 SQLite 使用 immutable，防止 `mode=ro` 仍创建/修改 SHM；有非空 WAL/journal
 的活动库必须先取得正常 checkpoint 的导出快照，工具不会操作源 journal。
+
+### 导出回 Rekordbox（Rekordbox XML 导出，#271）
+
+在碟机上演出打碟时新创建的 Hot Cues、Saved Loops 和歌单保存在介质的 Engine 曲库（`m.db`）中。
+为安全导回 Pioneer / Rekordbox，EngineX OS 提供标准 Rekordbox XML 导出支持（避免直接改写 PDB/ANLZ 专有二进制文件带来的介质损坏风险）：
+
+- **Web 控制台 (`:8080`)**：在「Rekordbox XML 导出」面板中，选择目标盘与目标系统（macOS `/Volumes/...` 或 Windows `E:\...`），点击「一键导出到 U 盘」直接在 U 盘根目录生成 `rekordbox.xml`（旧文件自动备份为 `.bak`），或点击「直接下载 XML」下载到电脑；
+- **命令行工具**：`rb-bridge --mount-path /media/usb --export-xml`（支持 `--xml-target-os=mac|win|linux` 与 `--xml-drive-letter=E`、`--xml-output=<自定义路径>`）；
+- **API 接口**：`POST /api/rekordbox/export?drive=<盘>` 或 `GET /api/rekordbox/export?drive=<盘>`（亦可经由 `/v1/enginex/rekordbox/export` 调用）；
+- **电脑端 Rekordbox 导入**：在电脑端 Rekordbox 左侧树状导航中展开 `rekordbox xml`，在对应歌单或曲目上右键选择 `Import to Collection`（导入到曲库），即可一键无损同步所有在 EngineX OS 上新建的 Hot Cues、Saved Loops 和歌单。
 
 ## 验证
 

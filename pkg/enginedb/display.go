@@ -24,6 +24,7 @@ type DisplayCue struct {
 }
 
 type DisplayLoop struct {
+	Slot    int     `json:"slot,omitempty"`
 	StartMS float64 `json:"startMs"`
 	EndMS   float64 `json:"endMs"`
 	N       string  `json:"n,omitempty"`
@@ -283,7 +284,7 @@ func parseDisplayLoops(raw []byte, rate, samples float64) ([]DisplayLoop, error)
 		}
 	}
 	off, out := 8, []DisplayLoop{}
-	for range raw[0] {
+	for slot := 0; slot < int(raw[0]); slot++ {
 		name, err := displayLabel(raw, &off, 22)
 		if err != nil {
 			return nil, err
@@ -299,10 +300,26 @@ func parseDisplayLoops(raw []byte, rate, samples float64) ([]DisplayLoop, error)
 			// A stock Saved Loop may start in the pre-roll (BH-GC1-4); one
 			// that ends there has nothing to show.
 			if b > 0 {
-				out = append(out, DisplayLoop{StartMS: math.Max(a, 0) * 1000 / rate, EndMS: b * 1000 / rate, N: name, C: displayColor(raw[off+18:])})
+				out = append(out, DisplayLoop{Slot: slot, StartMS: math.Max(a, 0) * 1000 / rate, EndMS: b * 1000 / rate, N: name, C: displayColor(raw[off+18:])})
 			}
 		}
 		off += 22
 	}
 	return out, nil
+}
+
+// ParseDisplayCues decodes PerformanceData.quickCues into DisplayCue slices.
+func ParseDisplayCues(blob []byte, rate, samples float64) ([]DisplayCue, error) {
+	if samples <= 0 {
+		samples = math.MaxFloat64
+	}
+	return parseDisplayCues(blob, rate, samples)
+}
+
+// ParseDisplayLoops decodes PerformanceData.loops into DisplayLoop slices.
+func ParseDisplayLoops(raw []byte, rate, samples float64) ([]DisplayLoop, error) {
+	if samples <= 0 {
+		samples = math.MaxFloat64
+	}
+	return parseDisplayLoops(raw, rate, samples)
 }
