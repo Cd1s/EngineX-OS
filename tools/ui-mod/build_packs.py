@@ -3971,29 +3971,28 @@ QUALITY_ENTRY = """
 		},
 """
 
+def switch_entry(text, flag, key, extra=""):
+    """An On/Off setting as Engine's own switch row (Entries/Base/SwitchEntry.qml), the
+    control stock uses for its two-state preferences. A tap sends the opposite of the
+    state stream-sync last reported. @CHECKED@ is resolved by sc_switches() per base."""
+    return (f'\n\t\tEntryBase.SwitchEntry {{\n\t\t\ttext: "{text}"\n{extra}'
+            f'\t\t\t@CHECKED@: !!root.{flag}\n'
+            f'\t\t\tonClicked: root.scCall("{key}=" + (root.{flag} ? 0 : 1))\n\t\t}},\n')
+
+
+def sc_switches(qml):
+    # 5.3.0's Switch has checkedExternally, which only follows the bound state; checked is
+    # also flipped by the switch itself and so drifts from a state that another client
+    # (web console) changes. Older bases only have checked.
+    return qml.replace("@CHECKED@", "checkedExternally" if v53() else "checked")
+
+
 # Settings -> Services: streaming, live stream and Pro DJ Link. The gate probe looks
 # for objectName ControlCenter_LiveStream (it was a Control Center tile up to #50).
-SERVICES_ENTRIES = QUALITY_ENTRY + """
-		EntryBase.ListEntry {
-			text: "Live Stream"
-			objectName: "ControlCenter_LiveStream"
-			values: ["Off", "On"]
-			currentValue: values[root.scBroadcastOn ? 1 : 0]
-			onSelected: function(index) { root.scCall("broadcast=" + index) }
-		},
-		EntryBase.ListEntry {
-			text: "Pro DJ Link Library"
-			values: ["Off", "On"]
-			currentValue: values[root.scProlinkShare ? 1 : 0]
-			onSelected: function(index) { root.scCall("prolinkShare=" + index) }
-		},
-		EntryBase.ListEntry {
-			text: "Pro DJ Link Export to CDJ (Beta)"
-			values: ["Off", "On"]
-			currentValue: values[root.scProlinkExport ? 1 : 0]
-			onSelected: function(index) { root.scCall("prolinkExport=" + index) }
-		},
-"""
+SERVICES_ENTRIES = (QUALITY_ENTRY
+    + switch_entry("Live Stream", "scBroadcastOn", "broadcast", '\t\t\tobjectName: "ControlCenter_LiveStream"\n')
+    + switch_entry("Pro DJ Link Library", "scProlinkShare", "prolinkShare")
+    + switch_entry("Pro DJ Link Export to CDJ (Beta)", "scProlinkExport", "prolinkExport"))
 
 # User Profile -> Display: deck BPM decimal places (#229).
 DISPLAY_ENTRIES = """
@@ -4006,33 +4005,10 @@ DISPLAY_ENTRIES = """
 """
 
 # User Profile -> Playback: audio DSP and playback.
-PLAYBACK_ENTRIES = """
-		EntryBase.ListEntry {
-			text: "Master Soft Clipper"
-			values: ["Off", "On"]
-			currentValue: values[root.scMasterLimiter ? 1 : 0]
-			onSelected: function(index) { root.scCall("masterLimiter=" + index) }
-		},
-		EntryBase.ListEntry {
-			text: "Auto-Gain (0 dB Normalize)"
-			values: ["Off", "On"]
-			currentValue: values[root.scAutoGain ? 1 : 0]
-			onSelected: function(index) { root.scCall("autoGain=" + index) }
-		},
-		EntryBase.ListEntry {
-			text: "Echo Out"
-			visible: root.scHasMixer
-			values: ["Off", "On"]
-			currentValue: values[root.scUpfaderEcho ? 1 : 0]
-			onSelected: function(index) { root.scCall("upfaderEcho=" + index) }
-		},
-		EntryBase.ListEntry {
-			text: "Stems EQ Mode"
-			visible: root.scHasStemsEq
-			values: ["Off", "On"]
-			currentValue: values[root.scStemsEqMode ? 1 : 0]
-			onSelected: function(index) { root.scCall("stemsEqMode=" + index) }
-		},
+PLAYBACK_ENTRIES = (switch_entry("Master Soft Clipper", "scMasterLimiter", "masterLimiter")
+    + switch_entry("Auto-Gain (0 dB Normalize)", "scAutoGain", "autoGain")
+    + switch_entry("Echo Out", "scUpfaderEcho", "upfaderEcho", "\t\t\tvisible: root.scHasMixer\n")
+    + switch_entry("Stems EQ Mode", "scStemsEqMode", "stemsEqMode", "\t\t\tvisible: root.scHasStemsEq\n") + """
 		EntryBase.ListEntry {
 			text: "Color FX Style"
 			// No PX effects on standalone players; the hook keeps a stored style Off there.
@@ -4066,24 +4042,10 @@ PLAYBACK_ENTRIES = """
 			currentValue: String(root.scFxTimeMs)
 			onSelected: function(index) { root.scCall("fxTimeMs=" + times[index]) }
 		},
-"""
+""")
 
-BEAT_JUMP_ENTRIES = """
-		EntryBase.ListEntry {
-			text: "Beat Jump Pad Bank"
-			visible: root.scIsMixstream
-			values: ["Off", "On"]
-			currentValue: values[root.scBeatJumpPads ? 1 : 0]
-			onSelected: function(index) { root.scCall("beatJumpPads=" + index) }
-		},
-		EntryBase.ListEntry {
-			text: "Swap Loop / Beat Jump"
-			visible: root.scHasAutoLoopKnob
-			values: ["Off", "On"]
-			currentValue: values[root.scSwapLoopOrder ? 1 : 0]
-			onSelected: function(index) { root.scCall("swapLoopOrder=" + index) }
-		},
-"""
+BEAT_JUMP_ENTRIES = (switch_entry("Beat Jump Pad Bank", "scBeatJumpPads", "beatJumpPads", "\t\t\tvisible: root.scIsMixstream\n")
+    + switch_entry("Swap Loop / Beat Jump", "scSwapLoopOrder", "swapLoopOrder", "\t\t\tvisible: root.scHasAutoLoopKnob\n"))
 
 SAFETY_ENTRIES = """
 		EntryBase.ListEntry {
@@ -4095,41 +4057,13 @@ SAFETY_ENTRIES = """
 		},
 """
 
-DUAL_COLUMN_ENTRY = """
-		EntryBase.ListEntry {
-			text: "Dual-Column Browser"
-			values: ["Off", "On"]
-			currentValue: values[root.scDualColumn ? 1 : 0]
-			onSelected: function(index) { root.scCall("browserDualColumn=" + index) }
-		},
-"""
+DUAL_COLUMN_ENTRY = switch_entry("Dual-Column Browser", "scDualColumn", "browserDualColumn")
 
-TRACKLIST_WAVEFORM_ENTRY = """
-		EntryBase.ListEntry {
-			text: "Tracklist Waveform"
-			values: ["Off", "On"]
-			currentValue: values[root.scTracklistWaveform ? 1 : 0]
-			onSelected: function(index) { root.scCall("tracklistWaveform=" + index) }
-		},
-"""
+TRACKLIST_WAVEFORM_ENTRY = switch_entry("Tracklist Waveform", "scTracklistWaveform", "tracklistWaveform")
 
-LIBRARY_ENTRIES = """
-		EntryBase.ListEntry {
-			text: "OmniSource (Drives in Streaming)"
-			values: ["Off", "On"]
-			currentValue: values[root.scOmniSource ? 1 : 0]
-			onSelected: function(index) { root.scCall("omniSource=" + index) }
-		},
-""" + TRACKLIST_WAVEFORM_ENTRY
+LIBRARY_ENTRIES = switch_entry("OmniSource (Drives in Streaming)", "scOmniSource", "omniSource") + TRACKLIST_WAVEFORM_ENTRY
 
-CUE_COUNTDOWN_ENTRY = """
-		EntryBase.ListEntry {
-			text: "Cue Countdown"
-			values: ["Off", "On"]
-			currentValue: values[root.scCueCountdown ? 1 : 0]
-			onSelected: function(index) { root.scCall("cueCountdown=" + index) }
-		},
-"""
+CUE_COUNTDOWN_ENTRY = switch_entry("Cue Countdown", "scCueCountdown", "cueCountdown")
 
 UI_SCALE_ENTRY = """
 		EntryBase.ListEntry {
@@ -5949,7 +5883,7 @@ def edits(dev: bool):
         ],
         **{prefs + ("" if v53() else "TabContents/") + f"{name}TabContent.qml": [
             (f'import "{"" if v53() else "../"}Entries"\n', f'import QtQuick.Layouts 1.12\nimport "{"" if v53() else "../"}Entries"\nimport "{"" if v53() else "../"}Entries/Base" as EntryBase\nimport Planck 1.0\n'),
-            (f"{last} {{}}", f"{last} {{}}," + entries.rstrip().rstrip(",")),
+            (f"{last} {{}}", f"{last} {{}}," + sc_switches(entries).rstrip().rstrip(",")),
         ] for name, last, entries in ([
             ("Display", "TrackOverviewStyle", DISPLAY_ENTRIES),
         ] if v53() else []) + [
@@ -5960,7 +5894,7 @@ def edits(dev: bool):
         ]},
         v + "ControlCenter/Tabs/LayoutManagerTab.qml": [
             ('import "Preferences/Entries/Base"\n', 'import "Preferences/Entries/Base"\nimport "Preferences/Entries/Base" as EntryBase\n'),
-            ("DeckSwap {\n id: deckSwap\n }", "DeckSwap { id: deckSwap }," + VIEW_ENTRIES.replace("@HEADLINE@", "PrefsHeadline" if v53() else "Headline").rstrip().rstrip(",")),
+            ("DeckSwap {\n id: deckSwap\n }", "DeckSwap { id: deckSwap }," + sc_switches(VIEW_ENTRIES).replace("@HEADLINE@", "PrefsHeadline" if v53() else "Headline").rstrip().rstrip(",")),
         ],
         prefs + ("" if v53() else "TabContents/") + "MixerTabContent.qml": [
             (f'import "{"" if v53() else "../"}Entries"\n',

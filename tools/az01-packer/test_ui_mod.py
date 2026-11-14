@@ -726,9 +726,49 @@ assert.strictEqual(vfx.enabled, false);
         self.assertNotIn("border", cap)
         self.assertEqual(cap.count("{"), cap.count("}"))
 
+    def test_on_off_settings_use_engines_switch_row(self):
+        # Two-state EngineX settings use Engine's own SwitchEntry, as stock does for its
+        # two-state preferences, not an "Off" / "On" list.
+        rows = {
+            "Live Stream": ("scBroadcastOn", "broadcast", bp.SERVICES_ENTRIES),
+            "Pro DJ Link Library": ("scProlinkShare", "prolinkShare", bp.SERVICES_ENTRIES),
+            "Pro DJ Link Export to CDJ (Beta)": ("scProlinkExport", "prolinkExport", bp.SERVICES_ENTRIES),
+            "Master Soft Clipper": ("scMasterLimiter", "masterLimiter", bp.PLAYBACK_ENTRIES),
+            "Auto-Gain (0 dB Normalize)": ("scAutoGain", "autoGain", bp.PLAYBACK_ENTRIES),
+            "Echo Out": ("scUpfaderEcho", "upfaderEcho", bp.PLAYBACK_ENTRIES),
+            "Stems EQ Mode": ("scStemsEqMode", "stemsEqMode", bp.PLAYBACK_ENTRIES),
+            "Beat Jump Pad Bank": ("scBeatJumpPads", "beatJumpPads", bp.BEAT_JUMP_ENTRIES),
+            "Swap Loop / Beat Jump": ("scSwapLoopOrder", "swapLoopOrder", bp.BEAT_JUMP_ENTRIES),
+            "Dual-Column Browser": ("scDualColumn", "browserDualColumn", bp.DUAL_COLUMN_ENTRY),
+            "Tracklist Waveform": ("scTracklistWaveform", "tracklistWaveform", bp.LIBRARY_ENTRIES),
+            "OmniSource (Drives in Streaming)": ("scOmniSource", "omniSource", bp.LIBRARY_ENTRIES),
+            "Cue Countdown": ("scCueCountdown", "cueCountdown", bp.VIEW_ENTRIES),
+        }
+        for text, (flag, key, qml) in rows.items():
+            block = re.search(r'EntryBase\.(\w+) \{\n\t\t\ttext: "' + re.escape(text) + r'"\n([\s\S]*?)\n\t\t\},', qml)
+            self.assertIsNotNone(block, text)
+            self.assertEqual(block.group(1), "SwitchEntry", text)
+            self.assertIn(f"@CHECKED@: !!root.{flag}", block.group(2), text)
+            self.assertIn(f'onClicked: root.scCall("{key}=" + (root.{flag} ? 0 : 1))', block.group(2), text)
+        self.assertIn('objectName: "ControlCenter_LiveStream"', bp.SERVICES_ENTRIES)  # gate probe
+        for qml in (bp.SERVICES_ENTRIES, bp.PLAYBACK_ENTRIES, bp.LIBRARY_ENTRIES, bp.VIEW_ENTRIES, bp.SAFETY_ENTRIES, bp.DISPLAY_ENTRIES):
+            self.assertNotIn('values: ["Off", "On"]', qml)
+        old = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            self.assertIn("checkedExternally: !!root.scCueCountdown", bp.sc_switches(bp.CUE_COUNTDOWN_ENTRY))
+            bp.ROOT = "Skins/EmbeddedCommon/"
+            self.assertIn("\tchecked: !!root.scCueCountdown", bp.sc_switches(bp.CUE_COUNTDOWN_ENTRY))
+        finally:
+            bp.ROOT = old
+        # Every place that inserts these rows resolves the placeholder.
+        self.assertEqual(SRC.count(" + sc_switches("), 2)
+        self.assertIn('f"{last} {{}}," + sc_switches(entries)', SRC)
+        self.assertIn('"DeckSwap { id: deckSwap }," + sc_switches(VIEW_ENTRIES)', SRC)
+
     def test_cue_countdown_toggle_only_in_view(self):
         self.assertIn('["scCueCountdown", "cueCountdown"]', SRC)
-        self.assertIn('root.scCall("cueCountdown=" + index)', bp.CUE_COUNTDOWN_ENTRY)
+        self.assertIn('root.scCall("cueCountdown=" + (root.scCueCountdown ? 0 : 1))', bp.CUE_COUNTDOWN_ENTRY)
         self.assertIn(bp.CUE_COUNTDOWN_ENTRY, bp.VIEW_ENTRIES)
         for dup in (bp.UI_SCALE_ENTRY, bp.FOUR_DECK_ENTRIES, bp.DUAL_COLUMN_ENTRY, bp.BEAT_JUMP_ENTRIES):
             self.assertIn(dup, bp.VIEW_ENTRIES)
