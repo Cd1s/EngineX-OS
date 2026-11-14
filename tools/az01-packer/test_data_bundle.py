@@ -1102,7 +1102,7 @@ exec REAL "$@"
         retained = ('az01_packer.py', 'host-install-userdata.py', 'host-install-fastboot.sh',
                     'third_party/installer/GO-LICENSE',
                     'third_party/installer/xz/LICENSE', 'third_party/installer/purego/LICENSE')
-        for t in ('linux-amd64', 'macos-arm64'):
+        for t in ('linux-amd64', 'macos-arm64', 'macos-amd64'):
             with self.subTest(t):
                 d = self.tmp / f'unpacked-{t}'
                 if t.startswith('linux'):
@@ -1123,11 +1123,20 @@ exec REAL "$@"
                                      input='\n', capture_output=True, text=True)
                 self.assertEqual(res.returncode, 0, res.stderr)
                 self.assertEqual(log.read_text().splitlines(), args)
+                restore = d / ('Restore-Official-Firmware.sh' if t.startswith('linux') else 'Restore-Official-Firmware.command')
+                self.assertTrue(restore.is_file())
+                image_args = ['--image', 'official deck.img']
+                res = subprocess.run(['sh', str(restore), *image_args], env={**env, 'ARGS_LOG': str(log)},
+                                     input='\n', capture_output=True, text=True)
+                self.assertEqual(res.returncode, 0, res.stderr)
+                self.assertEqual(log.read_text().splitlines(), ['--restore-stock', *image_args])
         with zipfile.ZipFile(out_dir / 'EngineX-Installer-5.3.0.4-windows-amd64.zip') as z:
             bat = z.read('Install-EngineX.bat').decode()
+            restore_bat = z.read('Restore-Official-Firmware.bat').decode()
             for member in retained:
                 self.assertIn(member, z.namelist())
         self.assertIn('\r\nenginex-installer.exe %*\r\n', bat)
+        self.assertIn('\r\nenginex-installer.exe --restore-stock %*\r\n', restore_bat)
 
 if __name__ == '__main__':
     unittest.main()

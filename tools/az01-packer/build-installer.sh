@@ -34,19 +34,22 @@ for t in linux-amd64 macos-amd64 macos-arm64 windows-amd64; do
 	case $os in
 	linux)
 		printf '#!/bin/sh\ncd "$(dirname "$0")"\nexec ./enginex-installer "$@"\n' >"$d/install-enginex.sh"
-		chmod 755 "$d/install-enginex.sh"
+		printf '#!/bin/sh\ncd "$(dirname "$0")"\nexec ./enginex-installer --restore-stock "$@"\n' >"$d/Restore-Official-Firmware.sh"
+		chmod 755 "$d/install-enginex.sh" "$d/Restore-Official-Firmware.sh"
 		tar --owner=0 --group=0 -C "$d" -czf "$OUT/EngineX-Installer-$V-$t.tar.gz" .
 		continue
 		;;
 	macos)
 		printf '#!/bin/sh\ncd "$(dirname "$0")"\n./enginex-installer "$@"\nprintf "Press Enter to close..."\nread answer\n' >"$d/Install-EngineX.command"
-		chmod 755 "$d/Install-EngineX.command"
+		printf '#!/bin/sh\ncd "$(dirname "$0")"\n./enginex-installer --restore-stock "$@"\nprintf "Press Enter to close..."\nread answer\n' >"$d/Restore-Official-Firmware.command"
+		chmod 755 "$d/Install-EngineX.command" "$d/Restore-Official-Firmware.command"
 		cp tools/stems/run-home-worker.command "$d/stems/"
 		chmod 755 "$d/stems/run-home-worker.command"
 		;;
 	windows)
 		printf '@echo off\r\ncd /d "%%~dp0"\r\nenginex-installer.exe %%*\r\npause\r\n' >"$d/Install-EngineX.bat"
-		chmod 644 "$d/Install-EngineX.bat"
+		printf '@echo off\r\ncd /d "%%~dp0"\r\nenginex-installer.exe --restore-stock %%*\r\npause\r\n' >"$d/Restore-Official-Firmware.bat"
+		chmod 644 "$d/Install-EngineX.bat" "$d/Restore-Official-Firmware.bat"
 		;;
 	esac
 	python3 -I - "$d" "$OUT/EngineX-Installer-$V-$t.zip" <<'EOF'

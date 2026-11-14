@@ -583,6 +583,8 @@ func startSSHDeck(t *testing.T, port int, compatible string) *sshDeck {
 							status := 0
 							if p.Cmd == "cat /sys/firmware/devicetree/base/compatible" {
 								io.WriteString(ch, d.compatible)
+							} else if p.Cmd == stockEngineXCmd {
+								io.WriteString(ch, "EngineX\n")
 							} else if strings.Contains(p.Cmd, "/usr/sbin/az01-update --file") {
 								f, err := os.Create(filepath.Join(d.Data, "az01-update.img"))
 								if err != nil {
