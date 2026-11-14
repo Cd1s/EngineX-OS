@@ -32,18 +32,24 @@ battery=
 for ps in "$SYS"/class/power_supply/*; do
     [ "$(cat "$ps/type" 2>/dev/null)" = Battery ] && [ "$(cat "$ps/status" 2>/dev/null)" = Discharging ] && battery=1
 done
-# Audio first. CPU clocks stay dynamic but never drop below 1.2 GHz: at 408 MHz
-# the audio thread missed periods (ALSA xruns). Locking 1.6 GHz ran the deck
-# above 90 C; 1.2 GHz measured about 72 C (both 4-deck decks idle at ~81 C).
+# Audio first: the 1.2 GHz floor protects it. Under the floor the clock ramped too late
+# and the audio thread missed periods (ALSA xruns, crackle). Stock holds 1.608 GHz at
+# 1.35 V (performance governor); that ran the deck above 90 C, 1.2 GHz at 1.10 V about 72 C.
 for cpu in 0 1 2 3; do
     dir=$SYS/devices/system/cpu/cpu$cpu/cpufreq
     [ -d "$dir" ] || continue
     write_knob "$dir/scaling_governor" ondemand
     write_knob "$dir/scaling_min_freq" 1200000
 done
-# Ramp up early and hold the raised clock for 10 samples. stream-sync is niced
-# and must not raise the clock.
-write_knob "$SYS/devices/system/cpu/cpufreq/ondemand/up_threshold" 50 quiet
+# Above the floor the clock follows sustained load only. The four cores share one clock
+# and the 5.3.0 kernel samples every 2 ms: one core busy for a whole sample (a frame being
+# drawn, an audio period) sent all four to 1.608 GHz, and the 10-sample hold kept an idle
+# deck there 70-84% of the time, with 1 200 interrupts a second on the CPU regulator's bus.
+# A 20 ms sample spans a display frame and four audio periods, so a periodic burst counts
+# as its share of the time; over 80% of a core is real load, and the raised clock is then
+# held for 10 samples (200 ms). stream-sync is niced and must not raise the clock.
+write_knob "$SYS/devices/system/cpu/cpufreq/ondemand/sampling_rate" 20000 quiet
+write_knob "$SYS/devices/system/cpu/cpufreq/ondemand/up_threshold" 80 quiet
 write_knob "$SYS/devices/system/cpu/cpufreq/ondemand/sampling_down_factor" 10 quiet
 write_knob "$SYS/devices/system/cpu/cpufreq/ondemand/ignore_nice_load" 1 quiet
 # The Mali GPU scales on demand from 300 MHz on mains: from 100 MHz each ramp
