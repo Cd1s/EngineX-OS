@@ -53,10 +53,19 @@ func overviewLibrary(t *testing.T) (mount string, db *sql.DB, overview func(trai
 	}
 }
 
-func TestFillOverviewMaximaOnlyCompletesImportedZeroTrailers(t *testing.T) {
+// Real decks, 5.3.0.5 kit with the backfill: "小波形 全幅半幅还是不对", only RGB looked right.
+// On the maintainer's stick every track he had played before had thirdPartySourceId NULL
+// and still a zero trailer (6 of 75 on one stick, 8 of 11 on another), the one he had
+// loaded that morning among them: Engine writes a loaded track's row back without the
+// mark of an import, and the backfill read only the rows that still had it.
+func TestFillOverviewMaximaCompletesEveryZeroTrailer(t *testing.T) {
 	mount, db, overview := overviewLibrary(t)
 	old, done := overview(0, 0, 0), overview(9, 9, 9)
-	if _, err := db.Exec(`INSERT INTO PerformanceData VALUES (1,?,1),(2,?,1),(3,?,NULL),(4,x'00',1)`, old, done, old); err != nil {
+	silent, err := QCompress(make([]byte, 24+6+3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO PerformanceData VALUES (1,?1,1),(2,?2,1),(3,?1,NULL),(4,x'00',1),(5,?2,NULL),(6,?3,NULL),(7,NULL,NULL)`, old, done, silent); err != nil {
 		t.Fatal(err)
 	}
 	if through, err := FillOverviewMaxima(context.Background(), mount, time.Time{}); err != nil || !through {
@@ -68,11 +77,13 @@ func TestFillOverviewMaximaOnlyCompletesImportedZeroTrailers(t *testing.T) {
 		}
 		return blob
 	}
-	if raw, err := QUncompress(get(1), 1<<20); err != nil || !bytes.Equal(raw[len(raw)-3:], []byte{60, 200, 90}) || !bytes.Equal(raw[24:30], []byte{10, 200, 3, 60, 20, 90}) {
-		t.Fatalf("imported zero trailer: %v %v", raw, err)
+	for id, what := range map[int]string{1: "an imported track", 3: "a track Engine has loaded since"} {
+		if raw, err := QUncompress(get(id), 1<<20); err != nil || !bytes.Equal(raw[len(raw)-3:], []byte{60, 200, 90}) || !bytes.Equal(raw[24:30], []byte{10, 200, 3, 60, 20, 90}) {
+			t.Fatalf("the zero trailer of %s: %v %v", what, raw, err)
+		}
 	}
-	if !bytes.Equal(get(2), done) || !bytes.Equal(get(3), old) || !bytes.Equal(get(4), []byte{0}) {
-		t.Fatal("a completed, native or unreadable overview was rewritten")
+	if !bytes.Equal(get(2), done) || !bytes.Equal(get(5), done) || !bytes.Equal(get(4), []byte{0}) || !bytes.Equal(get(6), silent) || get(7) != nil {
+		t.Fatal("a completed, unreadable, silent or missing overview was rewritten")
 	}
 }
 

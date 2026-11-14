@@ -15,9 +15,15 @@ import (
 // through every overview. A generation of "-" stands for none.
 const overviewProgressFile = ".rb-bridge-overview"
 
+// overviewScan begins every generation: what the backfill reads. 2 is every overview. The
+// scan before it read only the rows still marked as imported and recorded the header
+// alone, so a library it recorded as done is read again: the tracks Engine had loaded
+// were not among them.
+const overviewScan = "2:"
+
 // OverviewProgress is how far the backfill of a library's overviews has come.
 type OverviewProgress struct {
-	after      int64 // every imported overview up to this track has been seen
+	after      int64 // every overview up to this track has been seen
 	done       bool
 	unverified bool // recorded without a generation: an import behind it would not have shown
 }
@@ -41,7 +47,7 @@ func importGeneration(dir string) string {
 	if _, err := os.Lstat(state + "-journal"); err == nil {
 		return ""
 	}
-	return hex.EncodeToString(header)
+	return overviewScan + hex.EncodeToString(header)
 }
 
 // ReadOverviewProgress is the progress recorded for the library on mount, if no import
