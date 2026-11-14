@@ -4248,17 +4248,10 @@ QUALITY_ENTRY = """
 def switch_entry(text, flag, key, extra=""):
     """An On/Off setting as Engine's own switch row (Entries/Base/SwitchEntry.qml), the
     control stock uses for its two-state preferences. A tap sends the opposite of the
-    state stream-sync last reported. @CHECKED@ is resolved by sc_switches() per base."""
+    state stream-sync last reported. Both bases expose checkedExternally."""
     return (f'\n\t\tEntryBase.SwitchEntry {{\n\t\t\ttext: "{text}"\n{extra}'
-            f'\t\t\t@CHECKED@: !!root.{flag}\n'
+            f'\t\t\tcheckedExternally: !!root.{flag}\n'
             f'\t\t\tonClicked: root.scCall("{key}=" + (root.{flag} ? 0 : 1))\n\t\t}},\n')
-
-
-def sc_switches(qml):
-    # 5.3.0's Switch has checkedExternally, which only follows the bound state; checked is
-    # also flipped by the switch itself and so drifts from a state that another client
-    # (web console) changes. Older bases only have checked.
-    return qml.replace("@CHECKED@", "checkedExternally" if v53() else "checked")
 
 
 # Settings -> Services: streaming, live stream and Pro DJ Link. The gate probe looks
@@ -6188,7 +6181,7 @@ def edits(dev: bool):
         ],
         **{prefs + ("" if v53() else "TabContents/") + f"{name}TabContent.qml": [
             (f'import "{"" if v53() else "../"}Entries"\n', f'import QtQuick.Layouts 1.12\nimport "{"" if v53() else "../"}Entries"\nimport "{"" if v53() else "../"}Entries/Base" as EntryBase\nimport Planck 1.0\n'),
-            (f"{last} {{}}", f"{last} {{}}," + sc_switches(entries).rstrip().rstrip(",")),
+            (f"{last} {{}}", f"{last} {{}}," + entries.rstrip().rstrip(",")),
         ] for name, last, entries in ([
             ("Display", "TrackOverviewStyle", DISPLAY_ENTRIES),
         ] if v53() else []) + [
@@ -6199,7 +6192,7 @@ def edits(dev: bool):
         ]},
         v + "ControlCenter/Tabs/LayoutManagerTab.qml": [
             ('import "Preferences/Entries/Base"\n', 'import "Preferences/Entries/Base"\nimport "Preferences/Entries/Base" as EntryBase\n'),
-            ("DeckSwap {\n id: deckSwap\n }", "DeckSwap { id: deckSwap }," + sc_switches(VIEW_ENTRIES).replace("@HEADLINE@", "PrefsHeadline" if v53() else "Headline").rstrip().rstrip(",")),
+            ("DeckSwap {\n id: deckSwap\n }", "DeckSwap { id: deckSwap }," + VIEW_ENTRIES.replace("@HEADLINE@", "PrefsHeadline" if v53() else "Headline").rstrip().rstrip(",")),
         ],
         prefs + ("" if v53() else "TabContents/") + "MixerTabContent.qml": [
             (f'import "{"" if v53() else "../"}Entries"\n',

@@ -18,6 +18,59 @@ spec.loader.exec_module(bp)
 SRC = BUILD_PACKS.read_text()
 
 
+class OnOffSwitchCompatibilityTest(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("node"), "Node is required for switch handlers")
+    def test_both_bases_follow_external_state_after_clicks_in_all_languages(self):
+        expected = {
+            "scBroadcastOn": "broadcast", "scProlinkShare": "prolinkShare",
+            "scProlinkExport": "prolinkExport", "scMasterLimiter": "masterLimiter",
+            "scAutoGain": "autoGain", "scUpfaderEcho": "upfaderEcho",
+            "scStemsEqMode": "stemsEqMode", "scBeatJumpPads": "beatJumpPads",
+            "scSwapLoopOrder": "swapLoopOrder", "scDualColumn": "browserDualColumn",
+            "scTracklistWaveform": "tracklistWaveform", "scOmniSource": "omniSource",
+            "scCueCountdown": "cueCountdown",
+        }
+        for version, skin in (("5.0.4", "EmbeddedCommon"), ("5.3.0", "Embedded")):
+            qrc = LAB / version / "qrc"
+            self.assertTrue(qrc.is_dir(), str(qrc))
+            stock = qrc / f"Skins/{skin}/Views/ControlCenter/Tabs/Preferences/Entries/Base/SwitchEntry.qml"
+            self.assertIn("property alias checkedExternally: control.checkedExternally", stock.read_text())
+            with tempfile.TemporaryDirectory() as tmp:
+                out = Path(tmp) / "packs"
+                built = subprocess.run(["python3", str(BUILD_PACKS), "--qrc", str(qrc), "--out", str(out)], capture_output=True, text=True)
+                self.assertEqual(built.returncode, 0, built.stderr)
+                for lang in ("en", "zh-Hans", "zh-Hant"):
+                    with self.subTest(version=version, lang=lang):
+                        blocks = []
+                        for page in (out / lang).rglob("*.qml"):
+                            blocks += re.findall(r"EntryBase\.SwitchEntry \{([^{}]*)\}", page.read_text())
+                        self.assertEqual(len(blocks), len(expected))
+                        actual = {}
+                        for block in blocks:
+                            # checked is mutated by Qt on a tap; checkedExternally stays
+                            # bound to settings even when another client changes them.
+                            binding = re.search(r"checkedExternally:\s*(!!root\.(\w+))", block)
+                            self.assertIsNotNone(binding, block)
+                            expression, flag = binding.groups()
+                            handler = re.search(r"onClicked:\s*([^\n]+)", block).group(1)
+                            key = re.search(r'scCall\("(\w+)=', handler).group(1)
+                            actual[flag] = key
+                            script = """
+const assert = require('assert');
+const calls = [], root = {scCall: q => calls.push(q)};
+// Click, external change, then click again: each request uses the latest setting.
+for (const state of [0, 1, 1, 0]) {
+    root[FLAG] = state;
+    assert.equal(EXPRESSION, !!state);
+    HANDLER;
+    assert.equal(calls.pop(), KEY + '=' + (state ? 0 : 1));
+}
+""".replace("FLAG", json.dumps(flag)).replace("KEY", json.dumps(key)).replace("EXPRESSION", expression).replace("HANDLER", handler)
+                            result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+                            self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertEqual(actual, expected)
+
+
 class QMLCacheCompatibilityTest(unittest.TestCase):
     @unittest.skipUnless(shutil.which("cc"), "A C compiler is required for the cache ABI test")
     def test_engine_cache_isolated_from_stock_and_other_processes(self):
@@ -875,23 +928,11 @@ assert.strictEqual(vfx.enabled, false);
             block = re.search(r'EntryBase\.(\w+) \{\n\t\t\ttext: "' + re.escape(text) + r'"\n([\s\S]*?)\n\t\t\},', qml)
             self.assertIsNotNone(block, text)
             self.assertEqual(block.group(1), "SwitchEntry", text)
-            self.assertIn(f"@CHECKED@: !!root.{flag}", block.group(2), text)
+            self.assertIn(f"checkedExternally: !!root.{flag}", block.group(2), text)
             self.assertIn(f'onClicked: root.scCall("{key}=" + (root.{flag} ? 0 : 1))', block.group(2), text)
         self.assertIn('objectName: "ControlCenter_LiveStream"', bp.SERVICES_ENTRIES)  # gate probe
         for qml in (bp.SERVICES_ENTRIES, bp.PLAYBACK_ENTRIES, bp.LIBRARY_ENTRIES, bp.VIEW_ENTRIES, bp.SAFETY_ENTRIES, bp.DISPLAY_ENTRIES):
             self.assertNotIn('values: ["Off", "On"]', qml)
-        old = bp.ROOT
-        try:
-            bp.ROOT = "Skins/Embedded/"
-            self.assertIn("checkedExternally: !!root.scCueCountdown", bp.sc_switches(bp.CUE_COUNTDOWN_ENTRY))
-            bp.ROOT = "Skins/EmbeddedCommon/"
-            self.assertIn("\tchecked: !!root.scCueCountdown", bp.sc_switches(bp.CUE_COUNTDOWN_ENTRY))
-        finally:
-            bp.ROOT = old
-        # Every place that inserts these rows resolves the placeholder.
-        self.assertEqual(SRC.count(" + sc_switches("), 2)
-        self.assertIn('f"{last} {{}}," + sc_switches(entries)', SRC)
-        self.assertIn('"DeckSwap { id: deckSwap }," + sc_switches(VIEW_ENTRIES)', SRC)
 
     def test_cue_countdown_toggle_only_in_view(self):
         self.assertIn('["scCueCountdown", "cueCountdown"]', SRC)
