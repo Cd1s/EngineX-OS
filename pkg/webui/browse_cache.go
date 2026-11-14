@@ -48,6 +48,7 @@ type browseEntry struct {
 	data            []byte
 	at, used, retry time.Time
 	disk            bool
+	partial         bool
 	err             error
 }
 type browseFlight struct {
@@ -99,7 +100,13 @@ func (c *browseCache) get(ctx context.Context, key string, load func(context.Con
 	}
 	if e != nil {
 		e.used = now
-		if e.data != nil && now.Sub(e.at) < c.stale {
+		if e.partial && now.Before(e.retry) {
+			data, cause := e.data, e.err
+			c.mu.Unlock()
+			v, _ := decodeBrowse(data)
+			return v, cause
+		}
+		if !e.partial && e.data != nil && now.Sub(e.at) < c.stale {
 			if (e.disk || now.Sub(e.at) >= c.ttl) && !now.Before(e.retry) {
 				c.start(key, load)
 			}
@@ -122,10 +129,11 @@ func (c *browseCache) get(ctx context.Context, key string, load func(context.Con
 	case <-ctx.Done():
 		return browseData{}, ctx.Err()
 	case <-f.done:
+		v, err := decodeBrowse(f.data)
 		if f.err != nil {
-			return browseData{}, f.err
+			err = f.err
 		}
-		return decodeBrowse(f.data)
+		return v, err
 	}
 }
 
@@ -153,14 +161,19 @@ func (c *browseCache) start(key string, load func(context.Context) (browseData, 
 			}()
 			var v browseData
 			v, err = load(ctx)
-			if err == nil {
-				data, err = json.Marshal(v)
+			if err == nil || len(v.Lists) > 0 || len(v.Tracks) > 0 {
+				var encodeErr error
+				data, encodeErr = json.Marshal(v)
+				if err == nil {
+					err = encodeErr
+				}
 			}
 		}()
 		c.mu.Lock()
 		now := c.now()
 		persist := err == nil && len(data) <= browseEntryBytes
 		oversized := err == nil && !persist
+		partial := err != nil && len(data) > 0
 		var status providers.StatusError
 		revoked := errors.As(err, &status) && (status == 401 || status == 403)
 		if persist {
@@ -172,7 +185,11 @@ func (c *browseCache) start(key string, load func(context.Context) (browseData, 
 			// reader must join this flight rather than reload that snapshot.
 			c.insert(key, &browseEntry{used: now})
 		} else if err != nil && !errors.Is(err, errBrowseBusy) {
-			if revoked {
+			if partial {
+				// Keep the prefix with its error for native pagination, never as a
+				// complete hit or a disk snapshot. Only another request retries it.
+				c.insert(key, &browseEntry{data: data, partial: true, err: err, used: now, retry: now.Add(browseRetry)})
+			} else if revoked {
 				c.insert(key, &browseEntry{err: err, used: now, retry: now.Add(browseRetry)})
 			} else if e := c.entries[key]; e != nil {
 				e.err, e.retry = err, now.Add(browseRetry)
@@ -183,9 +200,9 @@ func (c *browseCache) start(key string, load func(context.Context) (browseData, 
 		c.mu.Unlock()
 		// Slow flash writes cannot hold up unrelated warm reads. Serialize disk
 		// maintenance independently; atomic rename makes concurrent reads safe.
-		if persist || revoked || oversized {
+		if persist || revoked || oversized || partial {
 			c.diskMu.Lock()
-			if revoked || oversized {
+			if revoked || oversized || partial {
 				if c.dir != "" {
 					_ = os.Remove(filepath.Join(c.dir, key+".json"))
 				}
@@ -340,9 +357,6 @@ func (g *tidalGateway) browseLists(ctx context.Context, v *Session) ([]providers
 func (g *tidalGateway) browseTracks(ctx context.Context, provider, session string, p providers.Provider, id string) ([]providers.Track, error) {
 	data, err := g.browse.get(ctx, browseKey(provider, session, "tracks", id), func(ctx context.Context) (browseData, error) {
 		tracks, err := p.Tracks(ctx, id)
-		if err != nil {
-			return browseData{}, err
-		}
 		if len(tracks) > maxPlaylistTracks {
 			return browseData{}, errBrowseTooLarge
 		}
@@ -350,7 +364,7 @@ func (g *tidalGateway) browseTracks(ctx context.Context, provider, session strin
 		for i, t := range tracks {
 			out[i] = browseTrack{t, t.ThumbURL, t.Preview}
 		}
-		return browseData{Tracks: out}, nil
+		return browseData{Tracks: out}, err
 	})
 	tracks := make([]providers.Track, len(data.Tracks))
 	for i, t := range data.Tracks {
