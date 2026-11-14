@@ -6,7 +6,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 
 ---
 
-## Regression Table (222 Rows)
+## Regression Table (223 Rows)
 
 | # | Behaviour that must keep working | Issue / commit that fixed it | How it is checked (automated test name, or exact real-deck / sandbox step) | Release gate / deck acceptance / recording coverage |
 | --- | --- | --- | --- | --- |
@@ -234,6 +234,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 | 222 | **On-deck Stems separate the sources instead of splitting frequency bands** (#238, users called the on-deck stems unusable: the split at 250 Hz and 4 kHz scored below 0 dB on every stem of the MUSDB18 excerpts): `LocalRender` runs the STFT soft-mask separator in `internal/stems/separate.go`; vocals, bass, drums and melody of a mix with known stems come back above fixed signal-to-distortion floors, every Engine block is answered before the next one is asked for, the four stems sum to the input, and a NaN or infinite sample is refused | `#238` | `internal/stems::TestLocalRenderSeparatesKnownStems`, `TestLocalRenderVocalsKeepTheirPlace`, `TestLocalRenderSplitsAndSumsToInput`, `TestLocalRenderAnyShape`, `TestLocalRenderRejectsNonFinitePCM`, `TestRFFTMatchesDFT`; **`[NO AUTOMATED TEST]`** for a real Engine render: on a 1st-gen deck with no relay and no LAN worker, render one track, load it, and mute each Stems pad in turn | Release workflow Step 2 Go suites; deck acceptance |
 
 ---
+| 223 | **Live Stream captures only while somebody listens** (left deck, 2026-11-14: Live Stream had been on for two days with no listener, no server and no LAN stream; `stream-sync` used 7.3% of a core on the idle deck and 1.9% once Live Stream was switched off): with no `/live.wav` listener, no Icecast server and no LAN stream the capture loop keeps the feed closed, so the hook copies nothing out of the audio callback; the feed opens for the first listener and closes after the last. That listener gets its `?buffer=` cushion in one piece as soon as it is captured, with no silence owed for the pause; a listener who joins a running capture gets the cushion at once, as before. A server or a LAN stream keeps capture running as before | `agent/5305-live-on-demand` | `pkg/broadcast`: `TestFeedIsClosedWhileNobodyListens` (old loop: "the feed is read with nobody listening"), `TestFirstListenerWaitsForItsCushion`, `TestPauseNobodyHeardOwesNoSilence`; `pkg/webui`: `TestLiveWAVPrefillsRequestedBuffer`, `TestLiveWAVDefaultBufferIsWiredTuned` (both updated to this spec, maintainer 2026-11-14) | Real deck: Live Stream on and nobody listening: `ls -l /proc/$(pidof Engine)/fd` lists no `sc5000-broadcast.pcm` and `stream-sync` stays under 2% of a core; open `/live.wav` in VLC: audio after 1 to 2 s of silence; close it: the FIFO is closed again within a second |
 
 ## Automated Test Gaps (`[NO AUTOMATED TEST]`)
 

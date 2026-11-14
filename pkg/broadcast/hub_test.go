@@ -40,6 +40,28 @@ func TestLivePrefillMatchesBuffer(t *testing.T) {
 	}
 }
 
+// Capture starts with the first listener, so there is no history for it to start on.
+// Its first audio is the whole cushion: sent as it came, 24 ms at a time, the player
+// would never have one.
+func TestFirstListenerWaitsForItsCushion(t *testing.T) {
+	h := &hub{}
+	l, cancel := h.subscribeLive(300)
+	defer cancel()
+	stream := publishFrames(h, 0, 240)
+	if pcm, ok := nextWithin(l, 50*time.Millisecond); ok {
+		t.Fatalf("got %d bytes before the 300 ms cushion was captured", len(pcm))
+	}
+	stream = append(stream, publishFrames(h, 240*SampleRate/1000, 72)...)
+	if pcm, ok := nextWithin(l, time.Second); !ok || !bytes.Equal(pcm, stream) {
+		t.Fatalf("first audio %d bytes, want the %d captured so far in one piece", len(pcm), len(stream))
+	}
+	live := testFrames(50000, 1152)
+	h.publish(live)
+	if pcm, ok := nextWithin(l, time.Second); !ok || !bytes.Equal(pcm, live) {
+		t.Fatal("after the cushion, audio must go out as it comes")
+	}
+}
+
 // buffer=0 is the wired/lowest-latency mode: no history, only what plays from now on.
 func TestLiveBufferZeroSendsNoHistory(t *testing.T) {
 	h := &hub{}

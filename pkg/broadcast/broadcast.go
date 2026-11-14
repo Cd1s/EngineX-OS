@@ -441,8 +441,32 @@ func (b *Broadcaster) workerLoop(ctx context.Context, _ *resourceguard.Throttle)
 			input.f.Close()
 		}
 	}()
+	waiting := false
 	for ctx.Err() == nil {
 		pass := time.Now()
+		b.mu.Lock()
+		ls := b.lanStreamer
+		b.mu.Unlock()
+		// Live Stream is on and nobody listens (no /live.wav client, no server, no LAN
+		// target): leave the feed closed. An open feed makes the hook copy every block out
+		// of the audio callback and this loop resample it: 7% of a core on an idle deck.
+		if ls == nil && !cfg.pushes() && b.hub.idle() {
+			if input.f != nil {
+				input.f.Close()
+				input = pcmReader{}
+			}
+			waiting = true
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(listenerPoll):
+			}
+			continue
+		}
+		if waiting {
+			waiting = false
+			p.skip(time.Since(start))
+		}
 		if input.f == nil { // the hook may create the PCM source after the stream is enabled
 			if f, err := os.OpenFile(cfg.InputPath, os.O_RDONLY|syscall.O_NONBLOCK, 0); err == nil {
 				input = pcmReader{f: f}
@@ -461,9 +485,6 @@ func (b *Broadcaster) workerLoop(ctx context.Context, _ *resourceguard.Throttle)
 		if out := p.step(pcm, time.Since(start)); out != nil {
 			b.hub.publish(out)
 
-			b.mu.Lock()
-			ls := b.lanStreamer
-			b.mu.Unlock()
 			if ls != nil {
 				_ = ls.Push(out)
 			}
@@ -491,6 +512,9 @@ func (b *Broadcaster) workerLoop(ctx context.Context, _ *resourceguard.Throttle)
 		}
 	}
 }
+
+// listenerPoll is how often a capture loop with nobody to send to looks for a listener.
+const listenerPoll = 250 * time.Millisecond
 
 // silenceAfter is how long the PCM feed may pause before keep-alive silence is sent.
 // The hook writes about every 10 ms; a single empty 24 ms tick is jitter, and

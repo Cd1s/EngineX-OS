@@ -45,6 +45,7 @@ type Listener struct {
 	queue   []byte
 	target  int // bytes kept after a trim (BufferMS)
 	limit   int // a queue above this is trimmed (BufferMS + TrimSlackMS)
+	need    int // bytes the first Next waits for when there was no history to start on
 	ready   chan struct{}
 	done    chan struct{}
 	closed  bool
@@ -77,6 +78,10 @@ func (h *hub) subscribeLive(bufferMS int) (*Listener, func()) {
 	if n := min(l.target, len(h.history)); n > 0 {
 		l.queue = append([]byte(nil), h.history[len(h.history)-n:]...)
 		l.ready <- struct{}{}
+	} else {
+		// Nothing was captured yet (capture starts for this listener): hold its first
+		// audio until the cushion is there, or it would play with none for good.
+		l.need = l.target
 	}
 	h.mu.Unlock()
 	return l, func() {
@@ -116,11 +121,13 @@ func (l *Listener) push(pcm []byte) {
 }
 
 // Next waits for queued audio and takes all of it; ok is false once the listener
-// is closed (the broadcaster stopped) or ctx ends.
+// is closed (the broadcaster stopped) or ctx ends. A listener that capture started
+// for gets its cushion in one piece, as soon as that much has been captured.
 func (l *Listener) Next(ctx context.Context) (pcm []byte, ok bool) {
 	for {
 		l.mu.Lock()
-		if len(l.queue) > 0 {
+		if len(l.queue) > 0 && len(l.queue) >= l.need {
+			l.need = 0
 			pcm, l.queue = l.queue, nil
 			l.mu.Unlock()
 			return pcm, true
@@ -184,6 +191,18 @@ func (h *hub) publish(pcm []byte) {
 		default:
 		}
 	}
+}
+
+// idle reports that nobody listens, and forgets the audio kept for a listener's
+// cushion: the next listener must not start on what played before capture paused.
+func (h *hub) idle() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.subs)+len(h.listeners) > 0 {
+		return false
+	}
+	h.history = nil
+	return true
 }
 
 func (h *hub) count() int {
