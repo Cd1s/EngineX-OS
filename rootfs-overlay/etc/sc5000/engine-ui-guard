@@ -197,10 +197,12 @@ pre)
     rm -f "$UI/boot-token" "$UI/boot-ready"
     : > "$UI/running-sentinel"
     echo "$n" > "$UI/boot-count"
-    # #140: a .qmlc truncated by a power cut would trap the deck at the splash screen;
-    # Qt rebuilds the cache, so drop it after any crash and in safe-mode.
+    # Drop the shared cache left by older EngineX releases before a stock reflash.
+    # The hook redirects EngineX's bytecode to its own cache.
+    rm -rf "${SC5000_ENGINE_DATA_DIR:-/data/AppDataUser/AIR Music Technology/Engine}/.cache/qml"
+    # #140: Qt rebuilds EngineX's cache after a crash, power cut or fallback.
     if [ -n "$dirty" ] || [ "$count" -ge "$failures" ] || [ -e "$UI/safe-mode" ]; then
-        rm -rf "${SC5000_ENGINE_DATA_DIR:-/data/AppDataUser/AIR Music Technology/Engine}/.cache/qml"
+        rm -rf "$UI/qml-cache"
     fi
     if [ "$count" -ge "$failures" ]; then fallback crash-loop; fi
     if [ -e "$UI/safe-mode" ]; then

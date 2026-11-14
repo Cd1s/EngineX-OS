@@ -60,6 +60,12 @@ blocking risk; it does not establish the cause of #140.
 
 ## State and fallback
 
+The stock-handback fix under development for 5.3.0.5 stores EngineX bytecode in
+`ui/qml-cache`. Pre-start clears the legacy shared cache; crashes, power cuts
+and fallback also clear the private cache. See
+[the handback investigation](stock-handback-investigation.md) for the native
+stock crash, recovery and profile tests.
+
 The existing `engine-ui-guard` owns the state and the existing
 `engine-guardian.service` runs its watchdog. Database `--watch` stays retired.
 The guard wraps each invocation of the real Engine, including retries within

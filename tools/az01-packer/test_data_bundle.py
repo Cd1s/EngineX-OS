@@ -389,6 +389,30 @@ class DataBundleTest(unittest.TestCase):
         self.assertFalse((alsa_dest / '99-sc5000-custom.conf').exists())
         self.assertNotEqual(self.sh(src / 'uninstall.sh', dest, alsa_dest=alsa_dest, check=False).returncode, 0)
 
+    def test_uninstall_removes_qml_bytecode_without_changing_user_data(self):
+        src = self.extract(self.build())
+        dest, engine, alsa = self.tmp / 'custom', self.tmp / 'engine', self.tmp / 'alsa'
+        self.sh(src / 'install.sh', dest, alsa_dest=alsa)
+        private, shared = dest / 'ui/qml-cache', engine / '.cache/qml'
+        for cache in (private, shared):
+            cache.mkdir(parents=True)
+            (cache / 'bad.qmlc').write_bytes(b'corrupt bytecode')
+        keep = {engine / 'State/PlanckClientState.json': b'player settings',
+                engine / 'Engine Library/Database2/m.db': b'library',
+                engine / '.cache/artwork/cover.jpg': b'artwork',
+                dest / 'cache/music.flac': b'music'}
+        for path, data in keep.items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        env = {**self.env, 'SC5000_CUSTOM': str(dest), 'SC5000_ALSA_OVERLAY': str(alsa),
+               'SC5000_ENGINE_DATA_DIR': str(engine)}
+        subprocess.run(['sh', str(dest / 'bundle/uninstall.sh')], env=env,
+                       capture_output=True, text=True, check=True)
+        self.assertFalse(private.exists())
+        self.assertFalse(shared.exists())
+        for path, data in keep.items():
+            self.assertEqual(path.read_bytes(), data, str(path))
+
     def test_uninstall_keeps_packs_installed_by_someone_else(self):
         src = self.extract(self.build())
         dest = self.tmp / 'custom'

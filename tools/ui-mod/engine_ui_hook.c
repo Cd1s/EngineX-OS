@@ -121,6 +121,17 @@ static int is_engine(void) {
 #endif
 }
 
+int setenv(const char *name, const char *value, int overwrite) {
+    static void *cache;
+    int (*real)(const char *, const char *, int) = next_symbol(&cache, "setenv");
+    if (!real) { errno = ENOSYS; return -1; }
+    // Engine overwrites QML_DISK_CACHE_PATH at startup. Keep its compiled
+    // EngineX resources out of the cache a stock reflash will read.
+    if (name && !strcmp(name, "QML_DISK_CACHE_PATH") && is_engine() && access(UI_ROOT "/safe-mode", F_OK))
+        value = UI_ROOT "/qml-cache";
+    return real(name, value, overwrite);
+}
+
 static void *alsa_sw_cache, *alsa_tstamp_set_cache, *alsa_tstamp_get_cache;
 
 int snd_pcm_sw_params_set_tstamp_type(void *pcm, void *params, int type) {

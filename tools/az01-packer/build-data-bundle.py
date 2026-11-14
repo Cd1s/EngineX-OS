@@ -691,7 +691,7 @@ echo "EngineX OS $(cat version.txt) installed in $dest"
 
 UNINSTALL = r'''#!/bin/sh
 # Removes only what install.sh put in /data/enginex. SSH keys, settings,
-# caches and downloads stay; UI packs stay if something else replaced them.
+# streaming caches and downloads stay; UI packs stay if something else replaced them.
 set -eu
 @MIGRATE_IF_DEFAULT@
 dest=${SC5000_CUSTOM:-/data/enginex}
@@ -772,6 +772,13 @@ if [ -z "${SC5000_CUSTOM:-}" ]; then
           /run/systemd/system/edisksd.service.d/99-sc5000.conf \
           /run/systemd/timesyncd.conf.d/10-enginex-ntp.conf /run/sc5000-tz-newer
 fi
+# Bytecode is disposable and must not outlive the resource pack that produced it.
+rm -rf "$dest/ui/qml-cache"
+case ${SC5000_CUSTOM:-/data/enginex} in
+    /data/enginex|/data/sc5000-custom) engine_data=${SC5000_ENGINE_DATA_DIR:-/data/AppDataUser/AIR Music Technology/Engine} ;;
+    *) engine_data=${SC5000_ENGINE_DATA_DIR:-} ;;
+esac
+[ -z "$engine_data" ] || rm -rf "$engine_data/.cache/qml"
 echo "EngineX OS $version removed from $dest"
 '''
 
