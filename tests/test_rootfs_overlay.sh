@@ -689,6 +689,32 @@ printf 'lang=en\n' > "$TMP/ui-roles/settings.conf"
 SC5000_UI_DIR=$TMP/ui-roles PATH=$TMP/guard-bin:$PATH sh "$GUARD" pre
 has "umount $assign/JP07/JP07_Controller_Assignments.qml" "$GUARD_LOG"
 if grep -q '^mount --bind' "$GUARD_LOG"; then fail 'the 4-deck layout off must leave the stock assignment files'; fi
+# Settings copy refreshes derived controls without replaying recovery or recoloring.
+mkdir -p "$TMP/ui-copy/qml-cache" "$TMP/copy-state"
+printf 'four_deck_waveform=1\nfour_deck_role=24\n' > "$TMP/ui-copy/settings.conf"
+printf 'keep\n' > "$TMP/ui-copy/qml-cache/keep"
+printf 'copy-token\n' > "$TMP/ui-copy/boot-token"
+printf '7\n' > "$TMP/ui-copy/boot-count"
+cat > "$TMP/copy-state/PlanckClientState.json" <<'JSON'
+{
+ "PlayerColor3": {
+  "color": "#ff000000"
+ }
+}
+JSON
+printf '{"data":{"GUI":{"childorder":["ShowLayerB"],"children":{"ShowLayerB":{"state":false,"type":1}}}}}\n' > "$TMP/copy-state/PlanckGuiState.json"
+: > "$GUARD_LOG"
+SC5000_UI_DIR=$TMP/ui-copy SC5000_STATE_DIR=$TMP/copy-state PATH=$TMP/guard-bin:$PATH sh "$GUARD" settings
+has '"color": "#ff000000"' "$TMP/copy-state/PlanckClientState.json"
+[[ $(cat "$TMP/assign-patched/role") == 24 ]] || fail 'settings copy lost the receiver role'
+[[ $(cat "$TMP/ui-copy/boot-token") == copy-token && $(cat "$TMP/ui-copy/boot-count") == 7 && -f $TMP/ui-copy/qml-cache/keep ]] || fail 'settings refresh replayed crash recovery'
+cp "$TMP/copy-state/PlanckGuiState.json" "$TMP/copy-state/before"
+touch "$TMP/ui-copy/safe-mode"
+: > "$GUARD_LOG"
+SC5000_UI_DIR=$TMP/ui-copy SC5000_STATE_DIR=$TMP/copy-state PATH=$TMP/guard-bin:$PATH sh "$GUARD" settings
+cmp -s "$TMP/copy-state/before" "$TMP/copy-state/PlanckGuiState.json" || fail 'settings refresh changed safe-mode state'
+[[ ! -s $GUARD_LOG ]] || fail 'settings refresh changed safe-mode assignments'
+ok 'settings copy refresh preserves colors, role, recovery counters and safe-mode state'
 unset GUARD_LOG SC5000_ASSIGNMENT_DIR SC5000_ASSIGNMENT_PATCHED SC5000_PLANCK_STATE
 has 'ExecStopPost=-/etc/sc5000/engine-ui-guard stop' "$ROOT/rootfs-overlay/etc/systemd/system/engine.service.d/override.conf"
 has 'ExecStopPost=-/etc/sc5000/engine-ui-guard stop' "$debloat_root/etc/systemd/system/engine.service.d/override.conf"

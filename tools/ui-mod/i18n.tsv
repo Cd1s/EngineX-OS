@@ -609,3 +609,37 @@ Single / Dual layer: Shift + Layer, or Layout > PERFORMANCE LAYOUT > Deck Layout
 Stock	原厂	原廠
 Preparing USB…	正在准备 USB…	正在準備 USB…
 Output Source	输出来源	輸出來源
+Settings copy	复制设置	複製設定
+Copy settings from another deck	从另一台设备复制设置	從另一台裝置複製設定
+Select a deck	选择设备	選擇裝置
+Copy settings	复制设置	複製設定
+Undo last copy	撤销上次复制	復原上次複製
+Stock preferences	原厂偏好设置	原廠偏好設定
+EngineX settings	EngineX 设置	EngineX 設定
+Skipped settings	已跳过的设置	已略過的設定
+Engine will restart and playback will stop.	Engine 将重启，播放会停止。	Engine 將重新啟動，播放會停止。
+Player number, role, colours and identity stay on this deck.	保留本机的碟机编号、角色、颜色和身份信息。	保留本機的碟機編號、角色、顏色與身分資訊。
+Allow settings copy?	允许复制设置？	允許複製設定？
+Allow this deck to read your preferences once?	允许这台设备读取一次偏好设置？	允許這台裝置讀取一次偏好設定？
+Approve the request on the source deck	请在来源设备上允许此次请求	請在來源裝置上允許此次要求
+Pause playback before copying or undoing settings	请先暂停播放，再复制或撤销设置	請先暫停播放，再複製或復原設定
+Include EngineX settings	包含 EngineX 设置	包含 EngineX 設定
+Previous settings restored	已恢复之前的设置	已還原先前的設定
+Settings copied	设置已复制	設定已複製
+Settings request failed	设置请求失败	設定要求失敗
+Settings request timed out	设置请求超时	設定要求逾時
+Engine did not finish loading the profile	Engine 未能完成加载设置	Engine 未能完成載入設定
+native preferences are not ready	原厂偏好设置尚未就绪	原廠偏好設定尚未就緒
+source is not a discovered EngineX peer	来源设备已离线，请重新选择	來源裝置已離線，請重新選擇
+could not reach source deck	无法连接来源设备	無法連線至來源裝置
+source deck cannot accept this request	来源设备暂时无法接受请求	來源裝置暫時無法接受要求
+settings request expired	复制设置请求已过期	複製設定要求已過期
+source screen authentication required	来源设备验证未完成，请重试	來源裝置驗證未完成，請重試
+no settings copy to undo	没有可撤销的设置复制	沒有可復原的設定複製
+pause playback before copying or undoing settings	请先暂停播放，再复制或撤销设置	請先暫停播放，再複製或復原設定
+Engine did not accept every preference; restore the previous settings	Engine 未接受全部设置，请恢复之前的设置	Engine 未接受全部設定，請還原先前的設定
+settings import failed; undo restores the previous settings	设置导入失败，可撤销以恢复之前的设置	設定匯入失敗，可復原以還原先前的設定
+select a local USB or SD drive	请选择本机 USB 或 SD 存储设备	請選擇本機 USB 或 SD 儲存裝置
+could not read the native drive profile	无法读取存储设备上的原厂设置	無法讀取儲存裝置上的原廠設定
+EngineX profile is missing, invalid or belongs to a different native profile	EngineX 设置文件缺失、无效或与原厂设置不匹配	EngineX 設定檔遺失、無效或與原廠設定不符
+drive profile changed; review and confirm it again	存储设备上的设置已更改，请重新确认	儲存裝置上的設定已變更，請重新確認

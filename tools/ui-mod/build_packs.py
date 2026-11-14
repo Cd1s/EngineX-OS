@@ -333,6 +333,7 @@ FX_JOG_TARGET = r'''
 '''
 
 HERE = Path(__file__).resolve().parent
+SETTINGS_COPY_MAIN = (HERE / "settings_copy.qml").read_text(encoding="utf-8")
 # The deck skin: Skins/EmbeddedCommon up to 5.0.4, Skins/Embedded from 5.3.0 (set in main).
 ROOT = "Skins/EmbeddedCommon/"
 # Translated, and scanned for compared literals: the trees the 5.0.4 packs always covered.
@@ -4400,6 +4401,23 @@ UI_SCALE_ENTRY = """
 		},
 """
 
+SETTINGS_COPY_ENTRIES = """
+        EntryBase.ListEntry {
+            text: "Copy settings from another deck"
+            objectName: "EngineX_CopySettings"
+            values: ["Select a deck"].concat(root.scCopyState.peers || [])
+            currentValue: values[0]
+            onSelected: function(index) { if (index > 0) root.scCopyBegin(values[index]) }
+        },
+        EntryBase.PrefsButtonEntry {
+            text: "Undo last copy"
+            objectName: "EngineX_UndoSettings"
+            buttonText: "Undo"
+            enabled: !!root.scCopyState.undo || !!root.scCopyState.rollback
+            onClicked: root.scCopyUndo()
+        },
+"""
+
 LED_ENTRY = """
 		EntryBase.ListEntry {
 			text: "Pad LED Brightness"
@@ -6076,7 +6094,7 @@ def edits(dev: bool):
                      .replace("@TIDAL_SELECT@", TIDAL_SELECT_530 if v53() else "")
                      .replace("@TIDAL_PAIRING@", TIDAL_PAIRING_530 if v53() else "")
                      .replace("@TIDAL_LOGIN_PENDING@", "\tproperty bool scTidalLoginPending: false" if v53() else ""))
-    services = (services_main + FX_CONTROLLER).replace("@ICONS@", "Skins/UIKit/Icons" if v53() else "UIKit.1/UIKit/Icons") + (SMART_SYNC_MAIN if v53() else "")
+    services = (services_main + FX_CONTROLLER + (SETTINGS_COPY_MAIN if v53() else "")).replace("@ICONS@", "Skins/UIKit/Icons" if v53() else "UIKit.1/UIKit/Icons") + (SMART_SYNC_MAIN if v53() else "")
     out = PatchDict({
         # The file name shadows the native SoundSwitch context object.
         prefs + "Entries/SoundSwitch.qml": [(
@@ -6214,7 +6232,7 @@ def edits(dev: bool):
         # 5.3.0 moved it up from TabContents/, so its imports lost the "../".
         prefs + ("" if v53() else "TabContents/") + "DeviceTabContent.qml": [
             (f'import "{"" if v53() else "../"}Entries"\n', f'import "{"" if v53() else "../"}Entries"\nimport "{"" if v53() else "../"}Entries/Base" as EntryBase\nimport Planck 1.0\n'),
-            ("		PlayerNumber { },\n", LANGUAGE_ENTRY + LED_ENTRY + (POWER_ENTRY if v53() else "") + "		PlayerNumber { },\n"),
+            ("		PlayerNumber { },\n", LANGUAGE_ENTRY + LED_ENTRY + (POWER_ENTRY + SETTINGS_COPY_ENTRIES if v53() else "") + "		PlayerNumber { },\n"),
             *([("        PlatterCalibration {},\n", "        PlatterCalibration {},\n" + JOG_INVERT_ENTRIES)] if v53() else []),
         ],
         **{prefs + ("" if v53() else "TabContents/") + f"{name}TabContent.qml": [
@@ -7990,6 +8008,23 @@ def edits(dev: bool):
             ("""                target: PropertyTarget {
                     prop: fxConfig.channel[modelData].pEffectIndex
                 }""", FX_JOG_TARGET.strip("\n")),
+        ]
+    if v53():
+        dialog = prefs + "Entries/LoadPreferencesDialog.qml"
+        out[dialog] = [
+            ("import QtQuick 2.15\n", "import QtQuick 2.15\nimport QtQuick.Controls 2.12\n"),
+            ("    signal loadPreferences()\n", "    signal loadPreferences()\n    property bool scCopyIncludeAvailable: false\n    property bool scCopyInclude: true\n"),
+            ("        Row {\n", "        Column {\n            spacing: 12\n            Row {\n"),
+            ("            spacing: 20\n            anchors.verticalCenter: parent.verticalCenter\n", "            spacing: 20\n"),
+            ("        if (show && !pQuitting) {\n", "        if (show && !pQuitting) {\n            if (typeof root !== \"undefined\" && root && root.scCopyUSBPrompt) {\n                root.scCopyUSBPrompt(loadPreferenceDialog, pShow, pFinshedLoadingProfile, function() { loadPreferences() }, subItem)\n                return\n            }\n"),
+        ]
+        # Close the nested stock Row before adding the optional companion switch.
+        out[dialog].append(("        }\n    }\n\n    readonly property bool show:",
+            "            }\n            CheckBox {\n                visible: loadPreferenceDialog.scCopyIncludeAvailable\n                text: root.scT(\"Include EngineX settings\")\n                checked: loadPreferenceDialog.scCopyInclude\n                onToggled: loadPreferenceDialog.scCopyInclude = checked\n            }\n        }\n    }\n\n    readonly property bool show:"))
+        save = prefs + "Entries/PrefsSavePreferences.qml"
+        out[save] = [
+            ("    onClicked: pSavePreferences.translator.state = true\n", "    onClicked: { root.scCopySaveDrive = root.scCopyCurrentDrive(); pSavePreferences.translator.state = true }\n"),
+            ("                savedFlash.restart()\n", "                savedFlash.restart()\n                root.scCopyExportDrive()\n"),
         ]
     return out
 

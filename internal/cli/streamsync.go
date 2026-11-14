@@ -34,6 +34,7 @@ const (
 // StreamSync runs the on-device playlist/download/analyze console.
 func StreamSync(args []string) error {
 	fs := flag.NewFlagSet("stream-sync", flag.ContinueOnError)
+	settingsCopyPrestart := fs.Bool("settings-copy-prestart", false, "prepare a confirmed settings import before Engine starts")
 	cfg := resourceguard.DefaultConfig()
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -64,6 +65,9 @@ func StreamSync(args []string) error {
 	fs.BoolVar(&cfg.StrictCPU, "strict-cpu", false, "refuse work when the requested isolated CPU is unavailable")
 	if err = fs.Parse(args); err != nil {
 		return err
+	}
+	if *settingsCopyPrestart {
+		return webui.SettingsCopyBeforeEngine()
 	}
 	if *spotifyToken == "" {
 		*spotifyToken = filepath.Join(*state, "spotify-token.json") // follows --state-dir (#31)

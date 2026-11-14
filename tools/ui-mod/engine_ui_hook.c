@@ -32,6 +32,7 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+#include "settings_copy_profile.h"
 #include "dsp_smooth.h"
 #include "master_limiter.h"
 #include "echo_out.h"
@@ -3157,8 +3158,14 @@ static const char *stems_processor_path(const char *path);
 static int redirected_open(int dirfd, const char *path, int flags, mode_t mode) {
     static void *cache;
     int (*real)(int, const char *, int, ...) = next_symbol(&cache, "openat");
-    if (is_engine()) path = stems_processor_path(path);
     char mapped[PATH_MAX];
+    if (is_engine()) {
+        path = stems_processor_path(path);
+        int copied = sc_copy_profile_read(path, flags, UI_ROOT "/../settings-copy/usb-read",
+                                         UI_ROOT "/../settings-copy/usb.profile", mapped, sizeof mapped);
+        if (copied < 0) { errno = ESTALE; return -1; }
+        if (copied && access(UI_ROOT "/safe-mode", F_OK)) path = mapped;
+    }
     const char *target = volatile_path(dirfd, path, mapped);
     if (!target) return -1;
     if (target == mapped) dirfd = AT_FDCWD;
