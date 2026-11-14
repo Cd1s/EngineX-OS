@@ -186,7 +186,7 @@ Deck powered on, same router as the computer, and root SSH is available (or Engi
 
 1. 在碟机上打开 **Settings → About / Update → Firmware Update Mode → Options**（若有提示选 **PC**；中文界面：**设置 → 关于 / 更新 → 固件更新模式 → 选项**）；
 2. 碟机重启进入蓝屏电脑图标的 Fastboot 模式后，用 USB-B 线连接电脑；
-3. 启动安装器，它会自动轮询 `fastboot devices` 等待连接（最长 10 分钟）。
+3. 启动安装器，它会自动轮询原生 USB 更新接口等待连接（最长 10 分钟）。
 
 > 本仓库没有记录各机型进入 Fastboot 的硬件组合键，所以这里不提供，以免误导。请使用屏幕菜单这条路径。
 
@@ -194,7 +194,7 @@ Deck powered on, same router as the computer, and root SSH is available (or Engi
 
 1. On the deck open **Settings → About / Update → Firmware Update Mode → Options** (choose **PC** if asked);
 2. once it has rebooted into Fastboot mode (blue-screen computer icon), connect a USB-B cable to the computer;
-3. start the installer; it polls `fastboot devices` and waits for up to 10 minutes.
+3. start the installer; it probes native USB update interfaces and waits for up to 10 minutes.
 
 > This repository records no per-model hardware key combination for Fastboot, so none is given here rather than guessing. Use the on-screen route.
 
@@ -202,7 +202,7 @@ Deck powered on, same router as the computer, and root SSH is available (or Engi
 
 1. 在碟機上開啟 **Settings → About / Update → Firmware Update Mode → Options**（若有提示選 **PC**；繁體介面：**設定 → 關於 / 更新 → 韌體更新模式 → 選項**）；
 2. 碟機重啟進入藍屏電腦圖示的 Fastboot 模式後，以 USB-B 線連接電腦；
-3. 啟動安裝器，它會自動輪詢 `fastboot devices` 等待連線（最長 10 分鐘）。
+3. 啟動安裝器，它會自動輪詢原生 USB 更新介面等待連線（最長 10 分鐘）。
 
 > 本專案未記載各機型進入 Fastboot 的硬體組合鍵，因此不在此列出以免誤導。請使用螢幕選單路徑。
 
@@ -251,7 +251,13 @@ Deck powered on, same router as the computer, and root SSH is available (or Engi
 - EN: The installer can unlock and flash the rootfs of a 1st-generation deck over Fastboot, but that path is **experimental** and not validated on all models. Prefer Method 2 (USB stick).
 - 繁：安裝器可對第一代走 Fastboot 刷 rootfs，但此路徑**屬實驗性**，並未在所有機型驗證。第一代請優先使用方法二（USB 隨身碟）。
 
-### 2.6 Fastboot 依赖 / Fastboot requirements / Fastboot 需求
+### 2.6 安装器依赖 / Installer requirements / 安裝器需求
+
+- 中：5.3.0.5 原生安装器（尚未发布）无需 Python、fastboot、e2fsprogs、libusb 或 WSL。Windows 使用系统 WinUSB 驱动；Linux USB 权限不足时使用 `sudo`。无法打开更新接口时会停止，不会自动更换驱动或执行备用脚本。
+- EN: The 5.3.0.5 native installer (unreleased) needs no Python, fastboot, e2fsprogs, libusb or WSL. Windows uses the system WinUSB driver; use `sudo` for Linux USB permission errors. An unavailable update interface stops the install; the executable does not replace drivers or run fallback scripts.
+- 繁：5.3.0.5 原生安裝器（尚未發佈）無需 Python、fastboot、e2fsprogs、libusb 或 WSL。Windows 使用系統 WinUSB 驅動程式；Linux USB 權限不足時使用 `sudo`。無法開啟更新介面時會停止，不會自動更換驅動程式或執行備用腳本。
+
+**旧版安装器及手动备用脚本 / Older installers and manual fallback scripts / 舊版安裝器與手動備用腳本**
 
 | 项目 / Item / 項目 | 说明 / Detail / 說明 |
 | :-- | :-- |
@@ -442,27 +448,27 @@ You can do the same from the web console at `http://<deck IP>:8080` on the same 
 - EN: On a SmartScreen warning choose "More info → Run anyway". If antivirus blocks it, whitelist the extracted folder.
 - 繁：遇到 SmartScreen 警告時點「更多資訊 → 仍要執行」；若被防毒攔截，請將解壓縮資料夾加入白名單。
 
-**Linux**：先安装系统 `fastboot` 包（如 `sudo apt install fastboot`、`sudo dnf install android-tools` 或 `sudo pacman -S android-tools`）与 `e2fsprogs`，再运行 `chmod +x install-enginex.sh`；USB Fastboot 线刷请用 `sudo ./install-enginex.sh`（或按安装器提示为 USB 厂商 ID `15e4` / `1cc5` / `2207` / `18d1` 配置 `udev` 规则）以便访问 USB / install `fastboot` (`apt install fastboot` / `dnf install android-tools` / `pacman -S android-tools`) and `e2fsprogs` first, then run `chmod +x install-enginex.sh` and use `sudo` (or add a `udev` rule for vendor IDs `15e4` / `1cc5` / `2207` / `18d1`) if USB access is needed / 先安裝系統 `fastboot` 套件（如 `apt install fastboot`、`dnf install android-tools` 或 `pacman -S android-tools`）與 `e2fsprogs`，再執行 `chmod +x install-enginex.sh`，USB 線刷時請加 `sudo`（或依提示設定 `udev` 規則）以便存取 USB。
+**Linux（旧版辅助脚本 / older helpers / 舊版輔助腳本）**：先安装系统 `fastboot` 包（如 `sudo apt install fastboot`、`sudo dnf install android-tools` 或 `sudo pacman -S android-tools`）与 `e2fsprogs`，再运行 `chmod +x install-enginex.sh`；USB Fastboot 线刷请用 `sudo ./install-enginex.sh`（或按安装器提示为 USB 厂商 ID `15e4` / `1cc5` / `2207` / `18d1` 配置 `udev` 规则）以便访问 USB / install `fastboot` (`apt install fastboot` / `dnf install android-tools` / `pacman -S android-tools`) and `e2fsprogs` first, then run `chmod +x install-enginex.sh` and use `sudo` (or add a `udev` rule for vendor IDs `15e4` / `1cc5` / `2207` / `18d1`) if USB access is needed / 先安裝系統 `fastboot` 套件（如 `apt install fastboot`、`dnf install android-tools` 或 `pacman -S android-tools`）與 `e2fsprogs`，再執行 `chmod +x install-enginex.sh`，USB 線刷時請加 `sudo`（或依提示設定 `udev` 規則）以便存取 USB。
 
-### 5.2 Windows 的 Fastboot 驱动 / Fastboot driver on Windows / Windows 的 Fastboot 驅動
+### 5.2 Windows USB 驱动 / Windows USB driver / Windows USB 驅動程式
 
-- 中：安装器的 Fastboot 路径在 Windows 上要求在 **WSL** 里用 Linux 包，并让 WSL 能访问 USB（例如 usbipd-win）。若 `fastboot devices` 看不到碟机，可用 Zadig 为该 USB 设备安装 **WinUSB** 驱动后再试。驱动与 WSL 的 USB 直通属于通用做法，**本仓库没有逐机型验证**；先用 `fastboot devices` 单独确认能看到设备，再启动安装器。
-- EN: On Windows the Fastboot path expects the Linux package inside **WSL** with USB passthrough (for example usbipd-win). If `fastboot devices` shows nothing, install the **WinUSB** driver for that USB device with Zadig and retry. Driver and WSL passthrough steps are generic practice and **not verified per model in this repository**; first confirm `fastboot devices` lists the deck, then start the installer.
-- 繁：Windows 上 Fastboot 路徑需在 **WSL** 中使用 Linux 版，並讓 WSL 可存取 USB（例如 usbipd-win）。若 `fastboot devices` 看不到碟機，可用 Zadig 為該 USB 裝置安裝 **WinUSB** 驅動後重試。驅動與 WSL USB 直通屬通用做法，**本專案未逐機型驗證**；請先確認 `fastboot devices` 能列出碟機，再啟動安裝器。
+- 中：5.3.0.5 直接运行 Windows 安装器，更新接口须使用系统内置 WinUSB。出现 `binding` 错误时请保留错误输出；不要更换正常音频或 HID 接口的驱动。旧版脚本所需的 WSL 路径见 2.6。
+- EN: Run the Windows installer directly in 5.3.0.5; the update interface must use the in-box WinUSB driver. Keep the output if a `binding` error appears; do not replace the normal audio or HID interface driver. Section 2.6 covers WSL for the older helpers.
+- 繁：5.3.0.5 直接執行 Windows 安裝器，更新介面須使用系統內建 WinUSB。出現 `binding` 錯誤時請保留錯誤輸出；不要更換正常音訊或 HID 介面的驅動程式。舊版腳本所需的 WSL 路徑見 2.6。
 
 ### 5.3 安装器报错对照 / Installer messages / 安裝器訊息對照
 
 | 提示 / Message / 訊息 | 原因与处理 / Cause & fix / 原因與處理 |
 | :-- | :-- |
-| `没有发现碟机` / `no deck found` | 碟机没开机、不在同一 /24 网段、本机防火墙拦截了 UDP `51337` / `11224`，或是未解锁原厂机。开机并接同一路由器、放行防火墙 UDP `51337` 与 `11224`；或进入 Firmware Update Mode 后接 USB（模式 B，Linux 请确认已安装 `fastboot` / `android-tools`）。/ Power on, join the same router and allow UDP `51337` & `11224` in the host firewall, or boot into Firmware Update Mode and use USB (Mode B; ensure `fastboot` / `android-tools` is installed on Linux). / 開機並連到同一路由器、放行防火牆 UDP `51337` 與 `11224`，或進入 Firmware Update Mode 後接 USB（模式 B，Linux 請確認已安裝 `fastboot` / `android-tools`）。 |
+| `没有发现碟机` / `no deck found` | 碟机没开机、不在同一 /24 网段、本机防火墙拦截了 UDP `51337` / `11224`，或是未解锁原厂机。开机并接同一路由器、放行防火墙 UDP `51337` 与 `11224`；或进入 Firmware Update Mode 后接 USB（模式 B；原生安装器无需安装 fastboot）。/ Power on, join the same router and allow UDP `51337` & `11224` in the host firewall, or boot into Firmware Update Mode and use USB (Mode B; the native installer needs no fastboot executable). / 開機並連到同一路由器、放行防火牆 UDP `51337` 與 `11224`，或進入 Firmware Update Mode 後接 USB（模式 B；原生安裝器無需安裝 fastboot）。 |
 | `SSH 登录失败 / SSH login failed` | SSH 可达但认证失败。用 `--key` 或 `--password`。/ Use `--key` or `--password`. / 改用 `--key` 或 `--password`。 |
-| `没有找到 fastboot 程序` / `fastboot is not installed` | PATH 里没有 `fastboot`。安装 Android platform-tools（Linux：`apt install fastboot` / `dnf install android-tools` / `pacman -S android-tools`）。/ Install Android platform-tools (`apt install fastboot` / `dnf install android-tools` / `pacman -S android-tools` on Linux). / 安裝 Android platform-tools（Linux：`apt install fastboot` / `dnf install android-tools` / `pacman -S android-tools`）。 |
+| 旧版备用脚本 / Older fallback: `fastboot is not installed` | PATH 里没有 `fastboot`。安装 Android platform-tools（Linux：`apt install fastboot` / `dnf install android-tools` / `pacman -S android-tools`）。/ Install Android platform-tools (`apt install fastboot` / `dnf install android-tools` / `pacman -S android-tools` on Linux). / 安裝 Android platform-tools（Linux：`apt install fastboot` / `dnf install android-tools` / `pacman -S android-tools`）。 |
 | `等待 USB Fastboot 超时` / `timed out waiting for fastboot` | 10 分钟内没看到设备。换 USB 线/端口，确认碟机在 Firmware Update Mode。/ Change cable/port, confirm Firmware Update Mode. / 更換 USB 線/連接埠，確認碟機處於 Firmware Update Mode。 |
 | `未知型号 … 不刷写` / `unknown board, nothing flashed` | 板号不在支持表里，安装器拒绝刷写，属保护行为。/ Protective refusal; the board is not supported. / 板號不在支援表中，安裝器拒絕刷寫，屬保護行為。 |
 | `wrong model refused` | `--image` / `--bundle` 的文件名前缀与碟机型号不符。换对应型号的 `*-Update.img`。/ The `--image` / `--bundle` prefix does not match the deck. / `--image` / `--bundle` 檔名前綴與機型不符。 |
 | `SHA256SUMS mismatch … damaged` / `download SHA-256 mismatch` | 下载损坏或被篡改。删除文件重下，不要强行安装。/ Delete and re-download; do not force it. / 刪除後重新下載，勿強行安裝。 |
-| `读不到 data 分区大小` | 无法确定新镜像大小。用 `--userdata-backup` 提供备份镜像。/ Pass `--userdata-backup`. / 以 `--userdata-backup` 提供備份映像。 |
-| `需要 python3 和 e2fsprogs` | 缺 Python 3 / `debugfs` / `mke2fs`。安装后重试（Windows 用 WSL）。/ Install them (WSL on Windows). / 安裝後重試（Windows 用 WSL）。 |
+| `cannot verify a data partition size` | 无法确认目标大小，停止刷写；备份也不能覆盖未知目标。/ Stop: the target size must be known, including when using a backup. / 無法確認目標大小，停止刷寫；備份也不能覆寫未知目標。 |
+| 旧版备用脚本 / Older fallback: `需要 python3 和 e2fsprogs` | 缺 Python 3 / `debugfs` / `mke2fs`。安装后重试（Windows 用 WSL）。/ Install them (WSL on Windows). / 安裝後重試（Windows 用 WSL）。 |
 | `installed version reads back as …` | 安装后读回的版本与包不符，安装器不会继续激活。保留输出并重试一次。/ The installer does not activate; retry once and keep the output. / 安裝器不會繼續啟用；保留輸出並重試一次。 |
 
 ### 5.4 刷机后保留用户配置 / Keeping your settings / 刷機後保留使用者設定
