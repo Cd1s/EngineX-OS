@@ -181,7 +181,7 @@ The system is slimmed down so all extra features use minimal storage and leave m
 | **Free RAM Available (out of `2 GB`)** | `~680 – 780 MB` free | **`1,042 MB` free** (main player uses `~150 MB` less RAM; all background services use just **`29.2 MB`**) | **`~260 MB` more free memory** — zero lag during long sets |
 | **Audio Core Interruption by Downloads** | `5% – 25%` spikes when downloading or indexing | **`0.0%`**: all downloads and Stems splitting run on a separate background core | **96 kHz audio playback is never interrupted** |
 | **Rekordbox USB Reading Speed** | ~8 min first import, 15–24 s every re-plug | **`< 2 seconds` first plug**, **`0.03 seconds`** after that | Plug in your Rekordbox stick and play right away |
-| **4-Minute Track Stems Split Time** | Locked / unavailable on SC5000 | **`~35 seconds`** via PC / cloud; **`1.4×` faster than playback** on the deck alone | Split vocals on the fly even mid-set |
+| **4-Minute Track Stems Split Time** | Locked / unavailable on SC5000 | **`~35 seconds`** via PC / cloud; faster than playback on the deck alone | Split vocals on the fly even mid-set |
 | **Sync Across Large BPM Gaps** | Sync cannot reach the other tempo once the gap is wider than the pitch range; widen Pitch Range by hand | **Smart Sync** steps Pitch Range up automatically (up to `±100%`); Bar / Beat / Tempo switch in the Control Center | Sync tracks far apart in tempo without opening settings |
 | **Network Speed** | Ethernet limited to `100 Mbps` | Ethernet **`1 Gbps` (1000 Mbps)** full duplex; Wi-Fi about `9–10 MB/s` (hardware bus limit) | Copy large libraries fast over a network cable |
 
@@ -252,6 +252,8 @@ Second-generation units (**SC LIVE 4, SC LIVE 2, PRIME 4+, PRIME GO+, Mixstream 
 - Tap **Update** on the touchscreen — all 16 first- and second-generation models download, verify, and install `5.3.0.4` directly while keeping your library, logins, saved views, and Mods (`*-Data-Bundle.tar.gz` is also included in the GitHub Release alongside `*-Update.img` so older `5.3.0.2` / `5.3.0.3` 2nd-gen decks one-tap OTA upgrade seamlessly on screen and automatically unlock `.img` updates on boot).
 
 ### Optional: High-Quality Neural Stems on Your Computer
+> **In development for 5.3.0.5 — on-deck Stems (#238):** without a computer, the deck now separates vocals, bass, drums and melody with a spectral method instead of splitting frequency bands. It is not a neural network, so some bleed between the stems remains. An idle SC5000 needs about 18 seconds of work per minute of music, and longer while it is playing. For the cleanest stems, use the computer service below.
+
 On-deck separation uses a fast lightweight split. For studio-grade neural Stems (`htdemucs` on GPU, Apple Silicon MPS, or CPU), unzip `EngineX-Installer` on a Mac or PC on the same Wi-Fi / LAN and double-click `stems/run-home-worker.command` on macOS, or run one command in a terminal (append `hpss` if you want lightweight mode without PyTorch). Your deck discovers the computer automatically with no IP or password setup and displays `High-quality stems: <host> (htdemucs)` under **Profile → Library** and **Settings → About / Update**:
 ```sh
 # macOS (double-click stems/run-home-worker.command, or run in Terminal) / Linux

@@ -258,7 +258,7 @@
 | Pro DJ Link 共享给 CDJ | `prolink_export=1`，实验功能；没有 rekordbox U 盘时保持 ON 等待，插盘后自动启动（`retryExport` 每 10 s） |
 | Master 交接 | 与 CDJ 之间始终只有一个 Master，双向交接；本机当 Master 时发 BPM 和拍点供 CDJ BEAT SYNC |
 | 双机 4 轨与影子轨道 | 两台 SC5000/SC6000 或一台 + 一台 CDJ 同局域网；每台负责自己的两轨，另一台的曲目、播放 / CUE、位置、速度、Master、同步、Hot Cue 在本机以静音影子轨道跟随；延迟见 `sc5000-shadow-decks` 记录 |
-| Stems | 三级：云中继 → 局域网电脑（`enginex-stemsd`，UDP 17891 自动发现，`tools/stems/run-home-worker.*`）→ 碟机本机分轨（比播放快 1.4 倍）；碟机上 `stems-processor` 代替原厂子进程 |
+| Stems | 三级：云中继 → 局域网电脑（`enginex-stemsd`，UDP 17891 自动发现，`tools/stems/run-home-worker.*`）→ 碟机本机分轨（比播放快，非神经网络）；碟机上 `stems-processor` 代替原厂子进程 |
 | 流媒体网关 | 本机伪装 TIDAL，覆盖网易云、Spotify、Deezer、SoundCloud、Beatport、Apple Music；Apple Music 由 Engine 5.3.0 自带音源播放（EngineX 只负责解锁），网关不再匹配 Deezer 或网易云；Beatport 按订阅档位取 FLAC / 256k AAC / 128k AAC；播放过的曲目缓存在 `/data`，再次加载免下载 |
 | 登录中继 | `enginex-relay`（可选自建）：让手机走移动数据登录，Deezer 网页内登录，Stems 公网入口 |
 | 直播推流 | WAV 直连 `/live.wav`；可选推送到 Icecast（不支持 Shoutcast） |
