@@ -252,12 +252,13 @@ static void test_mounts(const char *root) {
     int denied=open(song,O_WRONLY);assert(denied<0&&errno==EROFS);
     struct libmnt_context c={.target=target};
     // A busy child cannot be lazily removed. Previously removed siblings return.
+    // edisksd shows Engine only what this returns: it was -1, "Operation not permitted".
     int held=open(lib,O_RDONLY);assert(held>=0);real_calls=0;
-    assert(unmount_dispatch(&c,real_unmount)!=0&&errno==EBUSY&&real_calls==0);
+    assert(unmount_dispatch(&c,real_unmount)==-EBUSY&&errno==EBUSY&&real_calls==0);
     expect_file(lib,"deck cue retained");expect_file(song,"audio");close(held);
     // A busy presentation root also restores all detached children.
     held=open(target,O_RDONLY|O_DIRECTORY);assert(held>=0);real_calls=0;
-    assert(unmount_dispatch(&c,real_unmount)!=0&&errno==EBUSY&&real_calls==0);
+    assert(unmount_dispatch(&c,real_unmount)==-EBUSY&&errno==EBUSY&&real_calls==0);
     expect_file(lib,"deck cue retained");expect_file(song,"audio");close(held);
     // Real parent failure after removing our view must restore it atomically
     // from the already cloned rescue tree, not reconstruct an empty library.
@@ -676,9 +677,9 @@ static void test_hfs_view_copies_only_metadata(const char *root) {
     // Eject: a busy track, a busy library and a failed real umount all put every bind back.
     struct libmnt_context c={.target=target};
     join(p,target,"Engine Library/Music/Artist/track.mp3");int held=open(p,O_RDONLY);assert(held>=0);real_calls=0;
-    assert(unmount_dispatch(&c,real_unmount)!=0&&errno==EBUSY&&real_calls==0);close(held);
+    assert(unmount_dispatch(&c,real_unmount)==-EBUSY&&errno==EBUSY&&real_calls==0);close(held);
     join(p,target,"Engine Library/Database2/m.db");held=open(p,O_RDONLY);assert(held>=0);
-    assert(unmount_dispatch(&c,real_unmount)!=0&&errno==EBUSY&&real_calls==0);close(held);
+    assert(unmount_dispatch(&c,real_unmount)==-EBUSY&&errno==EBUSY&&real_calls==0);close(held);
     c.fail=1;assert(unmount_dispatch(&c,real_unmount)!=0&&errno==EBUSY&&real_calls==1);c.fail=0;
     join(p,target,"Engine Library/Music/Artist/track.mp3");assert(!stat(p,&st)&&st.st_size==(8<<20));
     join(p,target,"Engine Library/Database2/m.db");expect_file(p,"deck cue");

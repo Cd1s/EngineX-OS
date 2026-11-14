@@ -1087,7 +1087,7 @@ static int unmount_view(struct libmnt_context *ctx,struct owned_view *v,int (*re
     }
     if(bind_checked(view,rescue,MS_BIND|MS_REC))return -errno;
     if(mount(NULL,rescue,NULL,MS_PRIVATE|MS_REC,NULL)){int saved=errno;umount2(rescue,MNT_DETACH|UMOUNT_NOFOLLOW);errno=saved;return -saved;}
-    unsigned removed=0;int rc=-1,saved=0;
+    unsigned removed=0;int rc=0,saved=0;
     for(;removed<v->count;removed++) {
         if(path_join(pub,sizeof pub,v->target,v->child[removed].name)||umount2(pub,UMOUNT_NOFOLLOW)) {saved=errno;goto restore_children;}
     }
@@ -1107,8 +1107,8 @@ static int unmount_view(struct libmnt_context *ctx,struct owned_view *v,int (*re
     }
     if(update_public_ids(v))note("record update failed on",v->target,errno);
     umount2(rescue,MNT_DETACH|UMOUNT_NOFOLLOW); // only our private spare tree
- failed:
-    mnt_context_set_syscall_status(ctx,-(saved?saved:EBUSY));errno=saved?saved:EBUSY;return rc?rc:-EBUSY;
+ failed: // edisksd reports only what this returns (mnt_context_get_excode): -1 read "Operation not permitted"
+    mnt_context_set_syscall_status(ctx,-(saved?saved:EBUSY));errno=saved?saved:EBUSY;return rc?rc:-errno;
 }
 static int unmount_dispatch(struct libmnt_context *ctx,int (*real)(struct libmnt_context *)) {
     const char *target=mnt_context_get_target(ctx);
