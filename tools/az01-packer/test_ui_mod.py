@@ -6650,6 +6650,14 @@ class MixstreamPadsLayoutTest(unittest.TestCase):
         pads_layout_block = pads_content.split('id: padsLayout', 1)[1].split('Repeater {', 1)[0]
         self.assertNotIn('Layout.fillHeight: true', pads_layout_block)
 
+        # 5. Button background Rectangles must scope Button properties to parent, not bare down/highlighted (#266 regression)
+        for block in re.findall(r'background:\s*Rectangle\s*\{([^}]+)\}', pads_content):
+            self.assertFalse(re.search(r'(?<!parent\.)\bdown\b', block), f"Bare 'down' found in background: {block}")
+            self.assertFalse(re.search(r'(?<!parent\.)\bhighlighted\b', block), f"Bare 'highlighted' found in background: {block}")
+        self.assertIn('color: parent.down ?', pads_content)
+        self.assertIn('color: parent.highlighted ?', pads_content)
+        self.assertIn('border.color: parent.highlighted ?', pads_content)
+
 
 class ReverseJogWheelTest(unittest.TestCase):
     def test_device_tab_and_jog_wheel_patches_on_530_and_504_compat(self):
