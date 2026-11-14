@@ -10,7 +10,7 @@
 | 4 | 同一事务删除消失的桥接曲目、状态和本库成员，释放旧路径 | `TestDeletedSourceReleasesPathAndMembership`、`TestDeletedSourceCleanupRollsBackOnBadAnalysis` |
 | 5 | 安全相对/绝对链接、覆盖非目录链接、guardian/模板服务、FDT SafetyError | az01-packer 的 33 项测试，包含真实 ext2 和完整 overlay 重复注入 |
 | 6 | schema 触发器/索引、歌单 ownership 完整性、NULL 尾链、短分析采样数、保留源封面哈希 | schema/performance/boundary 测试及 `TestEOS09ArtworkResizeHashAndOrphan` |
-| 7 | 单次 QMP timeout/OSError 后重新连接，持续尝试到 deadline | `sim/qengine/test_smoke.py` 用真实 Unix socket 分别模拟握手和查询超时 |
+| 7 | 历史 QMP timeout/OSError 重连控制器随 `run_qengine.sh` 退役；当前 Tier 2 不声明 QMP 重连覆盖 | `sim/qengine/test_smoke.py` 现覆盖架构守卫及构建失败清理 |
 | 8 | 空文件名、非普通/过大封面、FLAC 范围、合并设备/TTL、启动前校验 | rekordbox、bridge、compat、prolink 和 rb-bridge 的新增回归 |
 | 9 | FLAC 位深与声道范围 | `TestDecodeFLACFormatBoundsAndInheritedFields`、`TestDecodeFLACRejectsInvalidOrInconsistentStreamInfo` |
 | 10 | MP3 采样率范围 | `TestDecodeMP3SampleRates` |
@@ -51,7 +51,7 @@
 . /etc/profile.d/buildtools.sh && GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go test ./pkg/enginedb ./pkg/rekordbox ./pkg/compat -c -o /dev/null
 python3 -m unittest discover -s tools/az01-packer -v
 bash tests/test_rootfs_overlay.sh
-bash -n sim/qengine/run_qengine.sh rootfs-overlay/usr/local/bin/sc5000-storage-mount rootfs-overlay/usr/local/bin/sc5000-perf-tune rootfs-overlay/usr/local/bin/sc5000-debloat
+bash -n sim/qengine/tier2.sh rootfs-overlay/usr/local/bin/sc5000-storage-mount rootfs-overlay/usr/local/bin/sc5000-perf-tune rootfs-overlay/usr/local/bin/sc5000-debloat
 ```
 
 另外逐个执行上述脚本的 `bash -n`（bash 的多个文件参数并不会逐一解析），并通过全仓七个 Shell 脚本（含无扩展名的 mount.hfsplus）的语法检查。

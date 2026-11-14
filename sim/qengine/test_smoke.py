@@ -1,73 +1,75 @@
-"""Exercise the smoke controller with a real Unix QMP socket, without QEMU."""
-import json
-from pathlib import Path
-import socket
+import os
 import subprocess
-import sys
 import tempfile
-import threading
-import time
 import unittest
+from pathlib import Path
 
+class Tier2SmokeTest(unittest.TestCase):
+    def test_tier2_arch_guard(self):
+        root = Path(__file__).resolve().parent.parent.parent
+        script = root / 'tests' / 'test_tier2_arch_guard.sh'
+        res = subprocess.run(['/bin/bash', str(script)], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
 
-class SmokeRetryTest(unittest.TestCase):
-    def test_transient_qmp_timeout_reconnects(self):
-        script = Path(__file__).with_name('run_qengine.sh').read_text()
-        code = script.split("<<'PY'\n", 1)[1].rsplit('\nPY', 1)[0]
-        # The smoke controller is the script's final Python heredoc.
-        if 'scope' not in code or 'guest-userspace' not in code:
-            self.fail('smoke controller not found')
-        for phase in ('greeting', 'query'):
-            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as tmp:
-                work = Path(tmp)
-                (work / 'serial.log').write_text('Linux version 6.1\nsystemd[1]: started\n')
-                listener = socket.socket(socket.AF_UNIX)
-                listener.bind(str(work / 'qmp.sock'))
-                listener.listen(4)
-                listener.settimeout(7)
-                failures = []
-                accepts = []
+    def test_failed_builder_cleans_its_container_and_private_tmp(self):
+        root = Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            work = base / 'work'
+            upstream = work / 'QEngine'
+            (upstream / '.git').mkdir(parents=True)
+            scripts = upstream / 'scripts/build_scripts'
+            scripts.mkdir(parents=True)
+            (upstream / 'build').mkdir()
+            for name in ('vmlinuz-generic-armhf', 'initrd-generic-armhf'):
+                (upstream / 'build' / name).write_text('fixture')
+            sibling = work / 'tmp/sibling'
+            sibling.mkdir(parents=True)
+            firmware = base / 'firmware.img'
+            firmware.touch()
+            log = base / 'docker.log'
+            tools = base / 'bin'
+            tools.mkdir()
 
-                def serve():
-                    try:
-                        while len(accepts) < 2:
-                            conn, _ = listener.accept()
-                            accepts.append(1)
-                            with conn:
-                                if len(accepts) == 1 and phase == 'greeting':
-                                    time.sleep(1.2)
-                                    continue
-                                conn.sendall(b'{"QMP":{}}\n')
-                                with conn.makefile('rb') as stream:
-                                    for line in stream:
-                                        command = json.loads(line)['execute']
-                                        if len(accepts) == 1 and command == 'query-status':
-                                            time.sleep(1.2)
-                                            break
-                                        values = {
-                                            'qmp_capabilities': {},
-                                            'query-status': {'running': True},
-                                            'query-block': [{'device': 'rekordbox', 'inserted': {'ro': True}}],
-                                            'human-monitor-command': 'usb-storage drive = "rekordbox"',
-                                        }
-                                        conn.sendall((json.dumps({'return': values[command]}) + '\n').encode())
-                    except Exception as exc:
-                        failures.append(exc)
-                    finally:
-                        listener.close()
+            def script(path, body):
+                path.write_text('#!/bin/bash\nset -eu\n' + body)
+                path.chmod(0o755)
 
-                worker = threading.Thread(target=serve, daemon=True)
-                worker.start()
-                result = subprocess.run(
-                    [sys.executable, '-c', code, tmp, '6', sys.executable, '-c', 'import time; time.sleep(15)'],
-                    capture_output=True, text=True, timeout=12)
-                worker.join(timeout=8)
-                self.assertFalse(worker.is_alive(), 'QMP test server did not finish')
-                self.assertFalse(failures, failures)
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                self.assertEqual(json.loads((work / 'status.json').read_text())['result'], 'PASS')
-                self.assertEqual(len(accepts), 2)
+            script(scripts / 'new_instance.sh', 'docker run fixture\n')
+            script(tools / 'uname', 'echo x86_64\n')
+            script(tools / 'git', 'echo 9c2dfd6f206c2e2c3d77cfd1ac483350c68a77c8\n')
+            script(tools / 'docker', '''
+if [ "$1" = run ]; then
+    [ "$2" = --cidfile ] || exit 99
+    printf 'fixture-cid\\n' > "$3"
+    exit 42
+fi
+printf '%s\\n' "$*" >> "$DOCKER_TEST_LOG"
+''')
+            for name in ('qemu-system-aarch64', 'qemu-img', 'file', 'dumpe2fs',
+                         'debugfs', 'losetup', 'umount'):
+                script(tools / name, 'exit 0\n')
+            script(tools / 'findmnt', '''
+echo /
+if [ "${SIMULATE_MOUNT:-0}" = 1 ]; then echo "$TMPDIR/mounted"; fi
+''')
+            env = dict(os.environ, PATH=f'{tools}:{os.environ["PATH"]}',
+                       QENGINE_WORK_DIR=str(work), DOCKER_TEST_LOG=str(log))
+            res = subprocess.run(['bash', str(root / 'sim/qengine/tier2.sh'),
+                                  str(firmware)], env=env, capture_output=True,
+                                 text=True, timeout=15)
+            self.assertEqual(res.returncode, 42, res.stdout + res.stderr)
+            self.assertEqual(log.read_text(), 'rm -f fixture-cid\n')
+            self.assertTrue(sibling.is_dir())
+            self.assertEqual(list(work.glob('tmp.*')), [])
 
+            res = subprocess.run(['bash', str(root / 'sim/qengine/tier2.sh'),
+                                  str(firmware)], env=dict(env, SIMULATE_MOUNT='1'),
+                                 capture_output=True, text=True, timeout=15)
+            self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
+            self.assertIn('mounts remain', res.stderr)
+            self.assertEqual(len(list(work.glob('tmp.*'))), 1)
+            self.assertTrue(sibling.is_dir())
 
 if __name__ == '__main__':
     unittest.main()
