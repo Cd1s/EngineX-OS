@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -449,14 +450,14 @@ func TestUpdateKeepsFreeSpaceForTheDeck(t *testing.T) {
 	t.Run("a server that sends more than room is cut off at the budget", func(t *testing.T) {
 		const room = 30 * MiB
 		setSpace(t, room+20*MiB, 20*MiB)
-		var largest int64
+		var largest atomic.Int64
 		var custom string
 		fault := releaseFault{serve: func(w http.ResponseWriter, r *http.Request, content []byte) {
 			// No Content-Length: the size is not known up front, so only the budget can stop it.
 			f, _ := w.(http.Flusher)
 			for off := 0; off < len(content); off += MiB {
-				if st, err := os.Stat(filepath.Join(custom, "az01-update.img.part")); err == nil && st.Size() > largest {
-					largest = st.Size()
+				if st, err := os.Stat(filepath.Join(custom, "az01-update.img.part")); err == nil {
+					largest.Store(max(largest.Load(), st.Size()))
 				}
 				end := off + MiB
 				if end > len(content) {
@@ -479,8 +480,8 @@ func TestUpdateKeepsFreeSpaceForTheDeck(t *testing.T) {
 		if v := waitUpdate(t, s); v.Error != msgUpdateNoSpace {
 			t.Fatalf("got %+v, want %q", v, msgUpdateNoSpace)
 		}
-		if largest > room+MiB { // one chunk of slack for the moment the server looked
-			t.Errorf("the partial download grew to %d MiB, the budget was %d MiB", largest/MiB, room/MiB)
+		if size := largest.Load(); size > room+MiB { // one chunk of slack for the moment the server looked
+			t.Errorf("the partial download grew to %d MiB, the budget was %d MiB", size/MiB, room/MiB)
 		}
 		nothingInstalled(t, gen1, custom, calls, "5.3.0.2")
 	})
