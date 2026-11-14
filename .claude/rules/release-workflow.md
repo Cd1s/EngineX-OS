@@ -60,6 +60,7 @@ python3 -m unittest discover -s tools/stems
 #   tools/edisksd-hook/test_edisksd_hook.c（--mounts 只在 unshare -m 里跑）
 #   tools/ui-mod/test_az04_hook.c（AZ04 64 位 hook：编译机原生 gcc 编译，参数给 AZ04 的 Engine）
 #   tools/ui-mod/test_rt_budget.c（#237 音频回调实时预算：编译机原生 gcc 与 arm-linux-gnueabihf-gcc 各编译运行一次，退出码须为 0）
+#   tools/ui-mod/test_rt_callback.c（#237 钩子真实音频函数：不得调用分配、加锁、等待、I/O，且每块在预算内；原生与 armhf 各跑一次，再跑 `selftest`，两者退出码均须为 0）
 ```
 
 JC11S fixture 是独立的官方 PRIME4PLUS rootfs，不能用 SC LIVE 4 或 PRIME 4 G2 代替。

@@ -22,7 +22,7 @@ Thanks for helping. EngineX OS runs on decks that people play live on, so the ba
   - a loop runs once per frame of the block, or a small fixed number of times. Nothing whose size does not come from the block is cleared, copied or searched there: prepare and clear state on the polling worker and hand it over with one atomic word (`sc_pfx_instance_prepare`, `sc_ms_prepare`);
   - other threads are reached through atomics only, and a slot that is taken is skipped, never waited for (`sc_dsp_chain_enter`, `sc_pfx_enter_input`);
   - state lives in static storage, which is resident because Engine locks its memory; the stack takes a few KB at most;
-  - `tools/ui-mod/test_rt_budget.c` passes natively and as armhf: every block inside its real-time duration, with those calls poisoned in the DSP headers. New audio-path code gets a case there, and `test_dsp_smooth.c` runs under TSan when state is shared between threads;
+  - `tools/ui-mod/test_rt_budget.c` and `test_rt_callback.c` pass natively and as armhf. The first times the DSP headers block by block and compiles them with those calls poisoned; the second runs the hook's real audio functions with everything switched on and fails when one of those calls is reached from them. A new audio-path function is added to `audio_block()` there, and `test_dsp_smooth.c` runs under TSan when state is shared between threads;
   - known exception, until that effect is reworked: the frozen master Pioneer FX (`pioneer_fx_legacy.h`) clears 488 KB per stereo pair in the block where its mode changes.
 - **All models**: the same image group serves several models (see the table below). Check every model of the group, or limit the change explicitly.
 - **Destructive operations**: Factory Reset, `az01-update --erase-data` and boots with a blank `/data` are tested in a sandbox or VM (`unshare -m` + `qemu-arm` with the unpacked rootfs), never on a real deck.
@@ -47,6 +47,7 @@ python3 -m unittest discover -s tools/stems
 # C compatibility adapters: build commands are in the header of each file
 #   tools/ui-mod/test_dsp_smooth.c   (also with ASan/UBSan and TSan)
 #   tools/ui-mod/test_rt_budget.c    (real-time budget of the audio-path DSP; native and armhf)
+#   tools/ui-mod/test_rt_callback.c  (the hook's audio functions: no blocking call, block budget; then `selftest`)
 #   tools/ui-mod/test_stems_feature.c (armhf native on the build host)
 #   tools/edisksd-hook/test_edisksd_hook.c
 #   tools/ui-mod/test_az04_hook.c
