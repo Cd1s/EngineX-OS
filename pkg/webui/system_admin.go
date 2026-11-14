@@ -59,8 +59,8 @@ func getSystemRunner() SystemRunner {
 // sshPortDropInPath is a var so tests do not write the host's /etc.
 var sshPortDropInPath = "/etc/systemd/system/sshd.service.d/51-port.conf"
 
-// sshReservedPorts are EngineX's own listeners (console, relay, stems).
-var sshReservedPorts = []int{8080, 6595, 13579}
+// sshReservedPorts are EngineX's own listeners (console, console HTTPS, relay, stems).
+var sshReservedPorts = []int{8080, 8443, 6595, 13579}
 
 type SSHConfig struct {
 	Enabled          bool   `json:"enabled"`

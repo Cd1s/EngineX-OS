@@ -24,6 +24,7 @@ func TestMain(m *testing.M) {
 	gen1SSHDropInPath = at("etc", "systemd", "system", "sc5000-custom-sshd.service.d", "51-port.conf")
 	gen1SSHRunDropInPath = at("run", "systemd", "system", "sc5000-custom-sshd.service.d", "51-port.conf")
 	sshPersistKeyDir = at("data", "enginex-absent")
+	tlsPersistDir = at("data", "enginex-absent")
 	deviceCompatiblePath = at("sys", "compatible-absent")
 	fourDeckRolePath = at("run", "sc5000-assignments", "role")
 	// The update keeps updateReserve free for Engine; the tests run on whatever disk the host has.
