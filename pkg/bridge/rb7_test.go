@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -30,33 +31,36 @@ func copyEncryptedOneLibraryFixture(t *testing.T, dst string) {
 }
 
 func TestExportSelectionMTimeAndFallback(t *testing.T) {
-	// Both files from one rekordbox 7 export: export.pdb stays first (r2 review),
-	// so drives imported before keep their source, IDs and stamp.
-	t.Run("prefers_export_pdb_when_mtimes_close", func(t *testing.T) {
-		root := t.TempDir()
-		testfixture.Export(t, root)
-		testfixture.Write(t, root, "MUSIC/one.wav", testfixture.WAV(true))
-		testfixture.Write(t, root, "MUSIC/two.wav", testfixture.WAV(true))
-		dbPath := filepath.Join(root, "PIONEER/rekordbox/exportLibrary.db")
-		copyEncryptedOneLibraryFixture(t, dbPath)
-		pdbPath := filepath.Join(root, "PIONEER/rekordbox/export.pdb")
-
-		now := time.Unix(1730000000, 0)
-		if err := os.Chtimes(pdbPath, now, now); err != nil {
-			t.Fatal(err)
+	for _, name := range []string{"exportLibrary.db", "exportOneLibrary.db"} {
+		for _, diff := range []time.Duration{-6, -5, -3, 0, 3, 5, 6} {
+			t.Run(fmt.Sprintf("%s_%ds", name, int(diff)), func(t *testing.T) {
+				root := t.TempDir()
+				testfixture.Export(t, root)
+				dbPath := filepath.Join(root, "PIONEER/rekordbox", name)
+				copyEncryptedOneLibraryFixture(t, dbPath)
+				pdbPath := filepath.Join(root, "PIONEER/rekordbox/export.pdb")
+				now := time.Unix(1730000000, 0)
+				if err := os.Chtimes(pdbPath, now, now); err != nil {
+					t.Fatal(err)
+				}
+				mtime := now.Add(diff * time.Second)
+				if err := os.Chtimes(dbPath, mtime, mtime); err != nil {
+					t.Fatal(err)
+				}
+				lib, err := bridge.ReadLibrary(context.Background(), root)
+				if err != nil {
+					t.Fatal(err)
+				}
+				wantID := uint32(101)
+				if diff < -5 {
+					wantID = 1
+				}
+				if len(lib.Tracks) == 0 || lib.Tracks[0].ID != wantID {
+					t.Fatalf("first track ID: got %+v, want %d", lib.Tracks, wantID)
+				}
+			})
 		}
-		if err := os.Chtimes(dbPath, now.Add(-3*time.Second), now.Add(-3*time.Second)); err != nil {
-			t.Fatal(err)
-		}
-
-		lib, err := bridge.ReadLibrary(context.Background(), root)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(lib.Tracks) != 5 || lib.Tracks[0].ID != 1 {
-			t.Fatalf("expected export.pdb tracks when mtime within 5s, got %+v", lib.Tracks)
-		}
-	})
+	}
 
 	t.Run("prefers_newer_export_by_more_than_5s_and_invalidates_stamp", func(t *testing.T) {
 		root := t.TempDir()
@@ -126,6 +130,18 @@ func TestExportSelectionMTimeAndFallback(t *testing.T) {
 			t.Fatalf("expected fallback to valid export.pdb, got %v (err=%v)", lib, err)
 		}
 
+		// A tied but unreadable SQLCipher export must still fall back to PDB.
+		pdbStat, err := os.Stat(filepath.Join(root, "PIONEER/rekordbox/export.pdb"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(dbPath, pdbStat.ModTime(), pdbStat.ModTime()); err != nil {
+			t.Fatal(err)
+		}
+		if lib, err := bridge.ReadLibrary(context.Background(), root); err != nil || len(lib.Tracks) != 5 {
+			t.Fatalf("tied SQLCipher fallback: %+v %v", lib, err)
+		}
+
 		// Now make export.pdb newer by > 5s and corrupt, while exportLibrary.db is valid SQLCipher 4.
 		copyEncryptedOneLibraryFixture(t, dbPath)
 		pdbPath := filepath.Join(root, "PIONEER/rekordbox/export.pdb")
@@ -141,6 +157,49 @@ func TestExportSelectionMTimeAndFallback(t *testing.T) {
 			t.Fatalf("expected fallback to valid SQLCipher 4 exportLibrary.db, got %v (err=%v)", lib, err)
 		}
 	})
+}
+
+// BH-GF4-14: changing the preferred format must invalidate main's PDB-first
+// dual-export stamp, then retain the normal bypass on the next mount.
+func TestExportTieInvalidatesPDBFirstStamp(t *testing.T) {
+	root := t.TempDir()
+	testfixture.Export(t, root)
+	testfixture.Write(t, root, "MUSIC/one.wav", testfixture.WAV(true))
+	testfixture.Write(t, root, "MUSIC/two.wav", testfixture.WAV(true))
+	ctx := context.Background()
+	if res, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false); err != nil || res.Added != 5 {
+		t.Fatalf("initial PDB import: %+v %v", res, err)
+	}
+	pdbPath := filepath.Join(root, "PIONEER/rekordbox/export.pdb")
+	pdbStat, err := os.Stat(pdbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(root, "PIONEER/rekordbox/exportLibrary.db")
+	copyEncryptedOneLibraryFixture(t, dbPath)
+	if err := os.Chtimes(dbPath, pdbStat.ModTime(), pdbStat.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	dbStat, err := os.Stat(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stampPath := filepath.Join(root, "Engine Library/Database2/.rb-bridge-stamp")
+	oldStamp := fmt.Sprintf("v2 PIONEER/rekordbox/export.pdb %d %d | PIONEER/rekordbox/exportLibrary.db %d %d\n",
+		pdbStat.Size(), pdbStat.ModTime().UnixNano(), dbStat.Size(), dbStat.ModTime().UnixNano())
+	if err := os.WriteFile(stampPath, []byte(oldStamp), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false); err != nil || res.Bypassed || res.Deferred != 0 {
+		t.Fatalf("upgrade PDB-first stamp: %+v %v", res, err)
+	}
+	engine := dbOpen(t, root)
+	if n := scalar[int](t, engine, `SELECT count(*) FROM Track WHERE pdbImportKey IN (101,102,103)`); n != 3 {
+		t.Fatalf("OneLibrary tracks imported: got %d, want 3", n)
+	}
+	if res, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false); err != nil || !res.Bypassed {
+		t.Fatalf("unchanged OneLibrary stamp: %+v %v", res, err)
+	}
 }
 
 func TestMacHiddenDotPioneerOneLibraryCuesAndIncrementalDelta(t *testing.T) {

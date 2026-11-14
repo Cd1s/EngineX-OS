@@ -122,13 +122,11 @@ func exportCandidates(r *compat.Resolver, mount string) ([]exportCandidate, erro
 		return []exportCandidate{*pdb}, nil
 	case pdb == nil:
 		return oneLib, nil
-	case oneLib[0].mtime.Sub(pdb.mtime) > exportNewerMargin:
-		// rekordbox 7 with Device Library unticked leaves an old export.pdb behind.
-		return append(oneLib, *pdb), nil
-	default:
-		// Written by the same export (or export.pdb is newer): export.pdb first,
-		// as before, so imported drives keep their Rekordbox IDs and stamps.
+	case pdb.mtime.Sub(oneLib[0].mtime) > exportNewerMargin:
 		return append([]exportCandidate{*pdb}, oneLib...), nil
+	default:
+		// Prefer the richer OneLibrary unless export.pdb is genuinely newer.
+		return append(oneLib, *pdb), nil
 	}
 }
 
