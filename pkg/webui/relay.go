@@ -187,6 +187,7 @@ func (s *Server) loggedInServices() []string {
 	return out
 }
 
+// Tests may commit another writer after the no-op check and before the atomic update.
 var testRelayPullHook func()
 
 // pullBPMConfig copies keys set on the relay. A key the relay does not have is left
@@ -244,10 +245,10 @@ func (s *Server) pullRelayConfig(ctx context.Context) error {
 	if next == v {
 		return nil
 	}
+	if testRelayPullHook != nil {
+		testRelayPullHook()
+	}
 	return s.cfg.BPM.UpdateConfig(func(v *providers.BPMConfig) {
-		if testRelayPullHook != nil {
-			testRelayPullHook()
-		}
 		if r.Config.SoundCloudClientID != "" {
 			v.SoundCloudClientID = r.Config.SoundCloudClientID
 		}

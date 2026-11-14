@@ -9,6 +9,7 @@ import (
 
 // The optional BPM service keys can be replaced but are never read back out.
 
+// Tests may commit another writer before the atomic read/modify/write begins.
 var testBPMConfigPostHook func()
 
 func (s *Server) bpmConfigGet(w http.ResponseWriter, r *http.Request) {
@@ -28,10 +29,10 @@ func (s *Server) bpmConfigPost(w http.ResponseWriter, r *http.Request) {
 		fail(w, 503, errors.New("BPM lookup is off"))
 		return
 	}
+	if testBPMConfigPostHook != nil {
+		testBPMConfigPostHook()
+	}
 	err := s.cfg.BPM.UpdateConfig(func(v *providers.BPMConfig) {
-		if testBPMConfigPostHook != nil {
-			testBPMConfigPostHook()
-		}
 		if in.SoundCloudClientID != "" {
 			v.SoundCloudClientID = in.SoundCloudClientID
 		}
