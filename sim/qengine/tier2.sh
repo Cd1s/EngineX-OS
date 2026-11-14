@@ -159,7 +159,7 @@ fi
 
 # Fix upstream launcher regex for EngineX engine invocations
 if [ -f "$QENGINE_DIR/scripts/build_scripts/rootfs_steps/skip_firmware_update.sh" ]; then
-    sed -i 's|sed -i .*-skipFirmwareUpdate.*|sed -i "s\\|/usr/Engine/Engine \\|/usr/Engine/Engine -skipFirmwareUpdate \\|\" \"\$_launcher\"|' "$QENGINE_DIR/scripts/build_scripts/rootfs_steps/skip_firmware_update.sh"
+    sed -i 's#sed -i .*-skipFirmwareUpdate.*#sed -i "s|/usr/Engine/Engine |/usr/Engine/Engine -skipFirmwareUpdate |" "$_launcher"#' "$QENGINE_DIR/scripts/build_scripts/rootfs_steps/skip_firmware_update.sh"
 fi
 
 # 2. Check prerequisites on the host
