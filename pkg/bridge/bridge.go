@@ -377,9 +377,37 @@ var (
 // Otherwise files are read for mountReadBudget at most, and the export counts as
 // imported only once no track was left without its cues.
 func ConvertAtMount(ctx context.Context, mount string, opts enginedb.Options, full bool) (enginedb.Result, error) {
-	r, err := convertAtMount(ctx, mount, opts, full)
+	r, err := convertAtMount(ctx, mount, &opts, full)
+	// A bypass without file reads has not started the shared read budget yet.
+	if opts.Deadline.IsZero() && !full {
+		opts.Deadline = time.Now().Add(mountReadBudget)
+	}
+	if !opts.Deadline.IsZero() {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, opts.Deadline)
+		defer cancel()
+	}
 	applyPendingAtMount(ctx, mount)
+	fixMP3GridsAtMount(ctx, mount, opts.Deadline)
 	return r, err
+}
+
+func fixMP3GridsAtMount(ctx context.Context, mount string, deadline time.Time) {
+	if ctx.Err() != nil || !writable(mount) {
+		return
+	}
+	var budget time.Duration
+	if !deadline.IsZero() {
+		budget = time.Until(deadline)
+		if budget <= 0 {
+			return
+		}
+	}
+	if r, err := enginedb.FixMP3Grids(ctx, mount, enginedb.MP3GridOptions{Budget: budget}); err != nil {
+		log.Printf("rb-bridge: mp3 grid fix not finished: %v", err)
+	} else if r.Corrected > 0 || r.Skipped > 0 {
+		log.Printf("rb-bridge: mp3 grid fix: corrected=%d unchanged=%d skipped=%d interrupted=%v", r.Corrected, r.Unchanged, r.Skipped, r.Interrupted)
+	}
 }
 
 // applyPendingAtMount applies the library edits the Web Console queued while Engine had the
@@ -397,7 +425,7 @@ func applyPendingAtMount(ctx context.Context, mount string) {
 	}
 }
 
-func convertAtMount(ctx context.Context, mount string, opts enginedb.Options, full bool) (enginedb.Result, error) {
+func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, full bool) (enginedb.Result, error) {
 	mountStart := time.Now()
 	// The file-reading budget starts once the library is read: decrypting a
 	// OneLibrary must not use up the time meant for cues and waveforms.
@@ -423,51 +451,68 @@ func convertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 	} else {
 		staged := strings.TrimSpace(stagedStamp(mount))
 		if staged == "" {
-			return convert(ctx, mount, &opts, nil, budget, mountStart)
+			return convert(ctx, mount, opts, nil, budget, mountStart)
 		}
 		stamp = stampVersion + " " + staged
 	}
 	dir := filepath.Join(mount, "Engine Library", "Database2")
-	// The overviews first, in at most half of the time for reading files, and the import
-	// reads files in what is left. They came after the import, and an import that does not
-	// finish in the mount's time is killed at every mount: on a card that also carried
-	// staged exports of thousands of tracks no overview was ever completed.
-	if budget > 0 && writable(mount) && hasLibrary(dir) {
-		start := time.Now()
-		completeOverviews(ctx, mount, start.Add(budget/2))
-		budget = max(budget-time.Since(start), 1)
-	}
-	overviews := enginedb.ReadOverviewProgress(mount) // before this mount's import writes anything
+	// Prepare a read-only drive's writable library view before reading its stamp.
+	canWrite := !full && writable(mount)
 	oldStamp := readMark(dir, stampName)
 	opts.LegacyOffsets = oldStamp != "" && !strings.HasPrefix(oldStamp, stampVersion+" ")
-	resume := false
-	if !full && !opts.SmartMatch && importedStamp(dir) == stamp {
-		// Earlier builds stamped a large library imported from the export alone
-		// (BH-GC1-2); it still has tracks without their files read.
-		if resume = hasFastTracks(dir); !resume {
-			if writable(mount) { // drives imported by an earlier build still get their covers
-				deadline := opts.Deadline
-				if deadline.IsZero() {
-					deadline = time.Now().Add(mountReadBudget)
-				}
-				_, _ = enginedb.MigrateArtworkBefore(ctx, mount, deadline)
-				completeOverviews(ctx, mount, deadline)
-			}
-			return enginedb.Result{Bypassed: true}, nil
-		}
-	}
+	bypass := !full && !opts.SmartMatch && importedStamp(dir) == stamp
+	// An earlier export-only import still has tracks without their files read.
+	resume := bypass && hasFastTracks(dir)
+	bypass = bypass && !resume
 	var result enginedb.Result
 	var pre *preread
-	if !full && !opts.SmartMatch {
+	var readErr error
+	if !full && opts.SmartMatch && !canWrite {
+		return enginedb.Result{Bypassed: true}, nil
+	}
+	if !full && !bypass {
+		// Parsing/decrypting the export does not spend the file-reading budget.
 		l, stagedOnly, err := readLibrary(ctx, mount)
-		if err != nil {
-			if !hasLibrary(dir) {
-				cleanEmptyEngineLibrary(dir)
-			}
-			return result, err
+		readErr = err
+		if err == nil {
+			pre = &preread{l, stagedOnly, r}
 		}
-		pre = &preread{l, stagedOnly, r}
-		opts.StagedOnly = stagedOnly
+	}
+	// Start the shared absolute deadline before backfill, which gets at most
+	// half the remaining time. Import and MP3 grids use what is left, even if
+	// reading the export fails or the import bypasses its unchanged stamp.
+	if canWrite && hasLibrary(dir) {
+		start := time.Now()
+		if opts.Deadline.IsZero() {
+			remaining := max(maxMountHookBudget-time.Since(mountStart), time.Second)
+			opts.Deadline = start.Add(min(budget, remaining))
+			budget = 0
+		}
+		completeOverviews(ctx, mount, start.Add(opts.Deadline.Sub(start)/2))
+	}
+	overviews := enginedb.ReadOverviewProgress(mount) // before this mount's import writes anything
+	if bypass {
+		if writable(mount) { // drives imported by an earlier build still get their covers
+			if opts.Deadline.IsZero() {
+				opts.Deadline = time.Now().Add(mountReadBudget)
+			}
+			_, _ = enginedb.MigrateArtworkBefore(ctx, mount, opts.Deadline)
+			completeOverviews(ctx, mount, opts.Deadline)
+		}
+		return enginedb.Result{Bypassed: true}, nil
+	}
+	if readErr != nil {
+		if opts.SmartMatch && errors.Is(readErr, os.ErrNotExist) {
+			return enginedb.Result{Bypassed: true}, nil
+		}
+		if !hasLibrary(dir) {
+			cleanEmptyEngineLibrary(dir)
+		}
+		return result, readErr
+	}
+	if pre != nil && !opts.SmartMatch {
+		l := pre.l
+		opts.StagedOnly = pre.stagedOnly
 		// A large library's first import takes only what the export holds, built
 		// aside and published in one go, so its playlists are there when Engine
 		// first sees the stick (#182). Its cues, loops, beat grids, waveforms and
@@ -482,9 +527,14 @@ func convertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 				cleanEmptyEngineLibrary(dir)
 				return result, err
 			}
+			if budget > 0 && opts.Deadline.IsZero() {
+				remaining := max(maxMountHookBudget-time.Since(mountStart), time.Second)
+				opts.Deadline = time.Now().Add(min(budget, remaining))
+				budget = 0
+			}
 			if len(l.Tracks) > fastImportTracks {
 				opts.Fast = true
-				result, err = stagedImport(ctx, dir, l, opts, r)
+				result, err = stagedImport(ctx, dir, l, *opts, r)
 				if err != nil {
 					cleanEmptyEngineLibrary(dir)
 				} else {
@@ -493,11 +543,7 @@ func convertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 				}
 				return result, err
 			}
-			if budget > 0 && opts.Deadline.IsZero() {
-				opts.Deadline = time.Now().Add(budget)
-				budget = 0
-			}
-			result, err = stagedImport(ctx, dir, l, opts, r)
+			result, err = stagedImport(ctx, dir, l, *opts, r)
 			if err != nil {
 				cleanEmptyEngineLibrary(dir)
 			} else if result.Deferred > 0 {
@@ -512,7 +558,7 @@ func convertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 	// The same export as a mount that left tracks without their files: read
 	// only those, the others are known to be imported with theirs.
 	opts.Resume = resume || (!full && !opts.SmartMatch && readMark(dir, pendingName) == stamp)
-	result, err = convert(ctx, mount, &opts, pre, budget, mountStart)
+	result, err = convert(ctx, mount, opts, pre, budget, mountStart)
 	if err == nil && !result.Bypassed {
 		// Only this build has written since the progress was read, and it leaves no overview
 		// without band maxima: the backfill goes on where it was, also with no time left now.

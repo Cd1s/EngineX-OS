@@ -3,14 +3,18 @@ package cli
 import (
 	"bytes"
 	"database/sql"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 )
 
 func TestGuardianCommandDeadlineWithoutTimeoutUtility(t *testing.T) {
@@ -227,5 +231,176 @@ func TestGuardianBootProgressOnlyAfterCompletedWork(t *testing.T) {
 	unchanged, err = os.ReadFile(filepath.Join(ui, "boot-progress"))
 	if err != nil || !bytes.Equal(next, unchanged) {
 		t.Fatal("fallback work emitted progress")
+	}
+}
+
+func seedPreR4MP3Mount(t *testing.T, mount string) {
+	t.Helper()
+	dir := filepath.Join(mount, "Engine Library", "Database2")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", filepath.Join(dir, "m.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	schema, err := os.ReadFile("../../pkg/dbhealer/testdata/engine-5.0.4.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	schema = bytes.ReplaceAll(schema, []byte("CREATE TABLE sqlite_sequence(name,seq);"), nil)
+	if _, err = db.Exec(string(schema)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec("INSERT INTO Information(uuid,schemaVersionMajor,schemaVersionMinor,schemaVersionPatch) VALUES('cli-mp3',3,0,2)"); err != nil {
+		t.Fatal(err)
+	}
+	mp3Bytes, err := os.ReadFile(filepath.Join("..", "..", "internal", "audioheader", "testdata", "01-lame-cbr-info-44100.mp3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(mount, "Music", "Stream", "101.mp3")
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dst, mp3Bytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var tb bytes.Buffer
+	_ = binary.Write(&tb, binary.BigEndian, 44100.0)
+	_ = binary.Write(&tb, binary.BigEndian, uint64(441000))
+	_ = binary.Write(&tb, binary.BigEndian, uint32(1))
+	for _, pk := range [3]float64{0.68, 0.40, 0.18} {
+		_ = binary.Write(&tb, binary.BigEndian, pk)
+	}
+	td, err := enginedb.QCompress(tb.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bb bytes.Buffer
+	_ = binary.Write(&bb, binary.BigEndian, 44100.0)
+	_ = binary.Write(&bb, binary.BigEndian, 441000.0)
+	bb.WriteByte(1)
+	for range 2 {
+		_ = binary.Write(&bb, binary.BigEndian, uint64(2))
+		_ = binary.Write(&bb, binary.LittleEndian, 5000.0)
+		_ = binary.Write(&bb, binary.LittleEndian, int64(-4))
+		_ = binary.Write(&bb, binary.LittleEndian, uint32(24))
+		_ = binary.Write(&bb, binary.LittleEndian, uint32(0))
+		_ = binary.Write(&bb, binary.LittleEndian, 445000.0)
+		_ = binary.Write(&bb, binary.LittleEndian, int64(20))
+		_ = binary.Write(&bb, binary.LittleEndian, uint32(0))
+		_ = binary.Write(&bb, binary.LittleEndian, uint32(0))
+	}
+	bb.WriteByte(0)
+	bd, err := enginedb.QCompress(bb.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := db.Exec(`INSERT INTO Track(id,path,filename,fileType,comment,isAnalyzed,isAvailable,isMetadataImported,isBeatGridLocked) VALUES(1,'../Music/Stream/101.mp3','101.mp3','mp3','[320k] MP3 44100 Hz; FLAC unavailable',1,1,1,0)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE PerformanceData SET trackData=?,beatData=? WHERE trackId=1`, td, bd); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func readFirstBeatOffset(t *testing.T, mount string) float64 {
+	t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(mount, "Engine Library", "Database2", "m.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var blob []byte
+	if err := db.QueryRow(`SELECT beatData FROM PerformanceData WHERE trackId=1`).Scan(&blob); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := enginedb.QUncompress(blob, 8<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return math.Float64frombits(binary.LittleEndian.Uint64(raw[25:33]))
+}
+
+func TestGuardianFixMP3GridsFlagsAndExecution(t *testing.T) {
+	var out, errOut bytes.Buffer
+	if code := Guardian([]string{"--boot-report", "--fix-mp3-grids"}, &out, &errOut); code != 2 {
+		t.Fatalf("--boot-report --fix-mp3-grids: code=%d", code)
+	}
+
+	// 1. --normalize-reserve --fix-mp3-grids (internal library pre-start path).
+	m1 := filepath.Join(t.TempDir(), "Engine")
+	seedPreR4MP3Mount(t, m1)
+	out.Reset()
+	errOut.Reset()
+	if code := Guardian([]string{"--heal-mount", m1, "--normalize-reserve", "--fix-mp3-grids", "--timeout", "10s"}, &out, &errOut); code != 0 {
+		t.Fatalf("normalize+fix code=%d out=%s err=%s", code, &out, &errOut)
+	}
+	var res1 []guardianResult
+	if err := json.Unmarshal(out.Bytes(), &res1); err != nil || len(res1) != 1 || res1[0].MP3Grids == nil || res1[0].MP3Grids.Corrected != 1 {
+		t.Fatalf("unexpected normalize+fix result: %s err=%v", &out, err)
+	}
+	if got := readFirstBeatOffset(t, m1); math.Abs(got-(5000.0-2257)) > 1e-6 {
+		t.Fatalf("beat0=%v, want %v", got, 5000.0-2257)
+	}
+
+	// 2. --heal-mount --data-only (stick mount pre-step path) + second run idempotency.
+	m2 := filepath.Join(t.TempDir(), "USB")
+	seedPreR4MP3Mount(t, m2)
+	out.Reset()
+	errOut.Reset()
+	if code := Guardian([]string{"--heal-mount", m2, "--data-only"}, &out, &errOut); code != 0 {
+		t.Fatalf("data-only code=%d out=%s err=%s", code, &out, &errOut)
+	}
+	var res2 []guardianResult
+	if err := json.Unmarshal(out.Bytes(), &res2); err != nil || len(res2) != 1 || res2[0].MP3Grids == nil || res2[0].MP3Grids.Corrected != 1 {
+		t.Fatalf("unexpected data-only result: %s err=%v", &out, err)
+	}
+	if got := readFirstBeatOffset(t, m2); math.Abs(got-(5000.0-2257)) > 1e-6 {
+		t.Fatalf("beat0=%v, want %v", got, 5000.0-2257)
+	}
+	out.Reset()
+	if code := Guardian([]string{"--heal-mount", m2, "--fix-mp3-grids"}, &out, &errOut); code != 0 {
+		t.Fatalf("second run code=%d", code)
+	}
+	var res3 []guardianResult
+	if err := json.Unmarshal(out.Bytes(), &res3); err != nil || len(res3) != 1 || res3[0].MP3Grids == nil || !res3[0].MP3Grids.Bypassed || res3[0].MP3Grids.Corrected != 0 {
+		t.Fatalf("second run did not bypass: %s err=%v", &out, err)
+	}
+
+	// 3. Standalone --heal-mount --fix-mp3-grids --timeout 5s (Gen-2 convert_mounted path).
+	m3 := filepath.Join(t.TempDir(), "Gen2USB")
+	seedPreR4MP3Mount(t, m3)
+	out.Reset()
+	errOut.Reset()
+	if code := Guardian([]string{"--heal-mount", m3, "--fix-mp3-grids", "--timeout", "5s"}, &out, &errOut); code != 0 {
+		t.Fatalf("standalone fix code=%d out=%s err=%s", code, &out, &errOut)
+	}
+	var res4 []guardianResult
+	if err := json.Unmarshal(out.Bytes(), &res4); err != nil || len(res4) != 1 || res4[0].MP3Grids == nil || res4[0].MP3Grids.Corrected != 1 {
+		t.Fatalf("unexpected standalone fix result: %s err=%v", &out, err)
+	}
+	if got := readFirstBeatOffset(t, m3); math.Abs(got-(5000.0-2257)) > 1e-6 {
+		t.Fatalf("beat0=%v, want %v", got, 5000.0-2257)
+	}
+
+	// 4. --status --fix-mp3-grids stays read-only (--status wins).
+	m4 := filepath.Join(t.TempDir(), "ReadOnlyStatus")
+	seedPreR4MP3Mount(t, m4)
+	out.Reset()
+	errOut.Reset()
+	if code := Guardian([]string{"--heal-mount", m4, "--status", "--fix-mp3-grids"}, &out, &errOut); code != 0 {
+		t.Fatalf("status+fix code=%d out=%s err=%s", code, &out, &errOut)
+	}
+	var res5 []guardianResult
+	if err := json.Unmarshal(out.Bytes(), &res5); err != nil || len(res5) != 1 || res5[0].MP3Grids != nil {
+		t.Fatalf("expected --status to skip MP3Grids: %s err=%v", &out, err)
+	}
+	if got := readFirstBeatOffset(t, m4); math.Abs(got-5000.0) > 1e-6 {
+		t.Fatalf("--status modified beat0=%v, want 5000.0", got)
 	}
 }

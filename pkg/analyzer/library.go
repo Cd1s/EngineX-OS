@@ -49,6 +49,7 @@ func OpenLibrary(path string) (*Library, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(0)
 	l := &Library{db: db, root: filepath.Dir(filepath.Dir(filepath.Dir(abs)))}
 	var major, minor, patch int
 	err = db.QueryRow("SELECT uuid,schemaVersionMajor,schemaVersionMinor,schemaVersionPatch FROM Information").Scan(&l.uuid, &major, &minor, &patch)

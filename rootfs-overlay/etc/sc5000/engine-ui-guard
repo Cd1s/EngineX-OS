@@ -304,10 +304,11 @@ pre)
     fi
     # Engine 5.3.0 cannot ATTACH anything while its internal m.db reserves page bytes
     # (a `.recover`ed copy did): rebuild it with reserve 0 before Engine opens it.
+    # Also run the once-per-library #246 MP3 beat-grid correction while Engine is stopped.
     guardian=${SC5000_ENGINE_GUARDIAN:-/usr/local/bin/engine-guardian}
     # A huge or locked m.db must not hold the splash screen forever.
     t=; ! command -v timeout >/dev/null 2>&1 || t="timeout 10"
-    [ ! -x "$guardian" ] || $t "$guardian" --heal-mount "${SC5000_ENGINE_DATA_DIR:-/data/AppDataUser/AIR Music Technology/Engine}" --normalize-reserve --timeout 10s > /dev/null 2>&1 || :
+    [ ! -x "$guardian" ] || $t "$guardian" --heal-mount "${SC5000_ENGINE_DATA_DIR:-/data/AppDataUser/AIR Music Technology/Engine}" --normalize-reserve --fix-mp3-grids --timeout 10s > /dev/null 2>&1 || :
     # Engine 5.3.0 sends a TIDAL client with no saved account (or a tokenless SSO
     # account) to the Engine DJ Profile login (#56, #159), and every EngineX service
     # runs on that client. With stored accessToken/refreshToken credentials Engine
