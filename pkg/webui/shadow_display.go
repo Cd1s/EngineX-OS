@@ -2,6 +2,7 @@ package webui
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"database/sql"
 	"encoding/base64"
@@ -891,6 +892,16 @@ func bridgeDisplayWave(ctx context.Context, file, rel string, id int64, rate, du
 	var b []byte
 	if db.QueryRowContext(ctx, `SELECT substr(a.sourceJSON,1,12582913) FROM BridgeAnalysis a JOIN BridgeState s ON s.trackId=a.trackId WHERE a.trackId=? AND s.path=?`, id, rel).Scan(&b) != nil || len(b) > shadowDisplayLimit {
 		return nil
+	}
+	if len(b) >= 2 && b[0] == 0x1f && b[1] == 0x8b {
+		zr, err := gzip.NewReader(bytes.NewReader(b))
+		if err == nil {
+			decompressed, err := io.ReadAll(io.LimitReader(zr, shadowDisplayLimit))
+			zr.Close()
+			if err == nil {
+				b = decompressed
+			}
+		}
 	}
 	var source struct{ Analysis *rekordbox.Analysis }
 	if json.Unmarshal(b, &source) != nil {
