@@ -60,6 +60,16 @@ static unsigned char gate[0x300];
 static char common;
 static volatile float observed;
 
+/* Engine locks all its memory (mlockall): on a deck the hook's 40 MB of BSS is
+ * resident before the first callback, so an audio block never takes a first-touch
+ * page fault on this state. Untouched here, the first master effect change did:
+ * 0.2 ms a pair to clear 488 KB of new pages, against 0.03 ms once they exist. */
+static void resident(void *state, size_t size)
+{
+    volatile unsigned char *bytes = state;
+    for (size_t i = 0; i < size; i += 4096) bytes[i] = 0;
+}
+
 static void guards(unsigned frames)
 {
     float *in[] = {dry[0], dry[1]};
@@ -99,6 +109,11 @@ int main(void)
 {
     const unsigned sizes[] = {64, 128, 256, 512, 1024, 4096, MAX_FRAMES};
     unsigned failures = 0;
+    resident(samples, sizeof samples); resident(dry, sizeof dry);
+    resident(echo, sizeof echo); resident(master, sizeof master);
+    resident(timing, sizeof timing); resident(gain, sizeof gain);
+    resident(limiter, sizeof limiter); resident(&selector, sizeof selector);
+    resident(&tap, sizeof tap);
     /* Worker preparation stays outside the measured audio blocks. */
     for (unsigned p = 0; p < PAIRS; ++p) sc_ms_prepare(&timing[p]);
     tap.on = 1;
