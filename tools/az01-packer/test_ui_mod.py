@@ -197,17 +197,18 @@ function run(opts = {}) {
     const ACTIONS = actions;
     const scDeck = opts.deck || 0;
     LABEL_FUNCTION
+    const Planck = {
+        librarianController: {stemsQueueManager: {
+            startRenderTracks: id => calls.push(['render', id])},
+            devicesController: {isCurrentDeviceNetworkDrive: !!opts.link}},
+        getProperty: path => ({translator: new Proxy({}, {
+            set: (o, key, value) => {writes[path] = value; return true;}})})
+    };
     const scStem = eval(expr.scStem);
     const labels = eval(expr.actionLabels);
     const messages = eval(expr.actionCommitMessages);
     const actionCommitMessages = messages;
     const colors = eval(expr.actionColors);
-    const Planck = {
-        librarianController: {stemsQueueManager: {
-            startRenderTracks: id => calls.push(['render', id])}},
-        getProperty: path => ({translator: new Proxy({}, {
-            set: (o, key, value) => {writes[path] = value; return true;}})})
-    };
     let textCommitValid;
     if (opts.commit !== undefined) {
         const actionIndex = opts.commit;
@@ -225,7 +226,9 @@ for (const streaming of [false, true]) {
     assert.deepStrictEqual(r.calls, streaming ? [['stream', 99]] :
                                                [['stream', 42], ['render', '42']]);
 }
-for (const opts of [{stemsList: true}, {az04: true}]) {
+// The other player's drive over Link: no Stems entry, as in stock. Real decks, two SC5000:
+// a swipe there answered "not enough space available on SD (SD)" for a card with 52 GiB free.
+for (const opts of [{stemsList: true}, {az04: true}, {link: true}, {link: true, streaming: true}]) {
     const r = run(opts);
     assert.deepStrictEqual(r.labels, stock);
     assert.deepStrictEqual(r.colors, ['stock0', 'stock1']);
@@ -244,6 +247,9 @@ assert.deepStrictEqual(routed.labels, ['Deck 3', stock[1], 'Stems']);
 assert.deepStrictEqual(routed.calls, []);
 assert.deepStrictEqual(routed.writes, {'/Client/Librarian/LoadToDeck3': true});
 assert.strictEqual(routed.current, 7);
+const linked = run({link: true, deck: 3, commit: 0});
+assert.deepStrictEqual(linked.labels, ['Deck 3', stock[1]]);
+assert.deepStrictEqual(linked.writes, {'/Client/Librarian/LoadToDeck3': true});
 """
                             stock = [f"Deck {deck}", "Prepare" if side == "left" else "Load"]
                             for key, value in (
@@ -256,6 +262,24 @@ assert.strictEqual(routed.current, 7);
                                 script = script.replace(key, value)
                             checked = subprocess.run(["node"], input=script, capture_output=True, text=True)
                             self.assertEqual(checked.returncode, 0, checked.stderr)
+                    # The Stems list takes dropped rows on the deck's own drives only.
+                    with self.subTest(version=version, lang=lang, what="Stems list"):
+                        qml = (out / lang / "Skins/Embedded/Views/BrowseView/Components/Craylist.qml").read_text()
+                        gate = re.search(r"typeRole === ListsModel\.Stemslist\) \{\n\s*if \((.*)\) \{\n\s*return \[TouchDragListToStemsList, TouchDragTracksToStemsList\]", qml)
+                        self.assertIsNotNone(gate)
+                        script = r"""
+const assert = require('assert');
+const takes = (az04, rendering, isCurrentDeviceNetworkDrive) => {
+    const root = {scIsAZ04: az04}, Config = {device: {hasStemsProEmbeddedRendering: rendering}};
+    return !!eval(GATE);
+};
+assert.deepStrictEqual([takes(false, false, false), takes(false, false, true)], [true, false]);
+assert.deepStrictEqual([takes(true, true, false), takes(true, true, true), takes(true, false, false)], [true, false, false]);
+""".replace("GATE", json.dumps(gate.group(1)))
+                        checked = subprocess.run(["node"], input=script, capture_output=True, text=True)
+                        self.assertEqual(checked.returncode, 0, checked.stderr)
+
+
 class TrackListArtworkPlaceholderAndReaderPriorityTest(unittest.TestCase):
     def test_built_track_art_keeps_native_source_and_synchronous_fallback(self):
         for version, skin in (("5.0.4", "EmbeddedCommon"), ("5.3.0", "Embedded")):
