@@ -400,7 +400,16 @@ func convertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 		stamp = stampVersion + " " + staged
 	}
 	dir := filepath.Join(mount, "Engine Library", "Database2")
-	overviews := enginedb.ReadOverviewProgress(mount) // before this mount writes anything
+	// The overviews first, in at most half of the time for reading files, and the import
+	// reads files in what is left. They came after the import, and an import that does not
+	// finish in the mount's time is killed at every mount: on a card that also carried
+	// staged exports of thousands of tracks no overview was ever completed.
+	if budget > 0 && writable(mount) && hasLibrary(dir) {
+		start := time.Now()
+		completeOverviews(ctx, mount, start.Add(budget/2))
+		budget = max(budget-time.Since(start), 1)
+	}
+	overviews := enginedb.ReadOverviewProgress(mount) // before this mount's import writes anything
 	oldStamp := readMark(dir, stampName)
 	opts.LegacyOffsets = oldStamp != "" && !strings.HasPrefix(oldStamp, stampVersion+" ")
 	resume := false

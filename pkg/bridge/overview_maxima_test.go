@@ -2,6 +2,7 @@ package bridge_test
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/hex"
 	"math"
@@ -95,7 +96,7 @@ func recordPlace(t *testing.T, root string, track int64) {
 	if err != nil || len(state) < 100 {
 		t.Fatal(len(state), err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, ".rb-bridge-overview"), []byte(hex.EncodeToString(state[:100])+" "+strconv.FormatInt(track, 10)+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, ".rb-bridge-overview"), []byte("2:"+hex.EncodeToString(state[:100])+" "+strconv.FormatInt(track, 10)+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -334,5 +335,54 @@ func TestOwnImportDoesNotVouchForAPlaceRecordedWithoutAGeneration(t *testing.T) 
 	}
 	if !completed(t, db, "PerformanceData", map[int64][]byte{first: want[first]}) {
 		t.Fatalf("the place recorded without a generation was kept (%q): the earlier build's overview before it is still without its band maxima", mark)
+	}
+}
+
+// Real decks: a stick the backfill had recorded as done still had the tracks the
+// maintainer plays without their band maxima. Engine had loaded them before, and it
+// writes a loaded track's row back without the mark of an import; the backfill read only
+// the rows with that mark. It reads every overview, and what the narrower scan recorded
+// (the generation alone, with no "2:" before it) does not count as done.
+func TestBackfillCompletesTheTracksEngineHasLoaded(t *testing.T) {
+	root, db, want := oldOverviews(t, 3)
+	loaded := int64(math.MaxInt64)
+	for id := range want {
+		loaded = min(loaded, id)
+	}
+	if _, err := db.Exec(`UPDATE PerformanceData SET thirdPartySourceId=NULL WHERE trackId=?`, loaded); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(root, "Engine Library/Database2")
+	state, err := os.ReadFile(filepath.Join(dir, ".rb-bridge-state.db"))
+	if err != nil || len(state) < 100 {
+		t.Fatal(len(state), err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".rb-bridge-overview"), []byte(hex.EncodeToString(state[:100])+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if r := issue233Mount(t, root, enginedb.Options{}); !r.Bypassed || !overviewMarked(root) {
+		t.Fatalf("the mount: %+v", r)
+	}
+	if !completed(t, db, "PerformanceData", want) {
+		t.Fatal("a track Engine has loaded kept its small overview")
+	}
+	var mark sql.NullInt64
+	if err := db.QueryRow(`SELECT thirdPartySourceId FROM PerformanceData WHERE trackId=?`, loaded).Scan(&mark); err != nil || mark.Valid {
+		t.Fatal("the row's mark was changed:", mark, err)
+	}
+}
+
+// Real deck: an SD card that also carried two staged exports (15 000 files). Its import was
+// killed at every boot when the mount's time was up, the backfill came after the import,
+// and every track on the card kept its small overview. The overviews no longer wait for
+// the import: here the export has changed and cannot be read, so the import ends early.
+func TestOverviewsDoNotWaitForAnImportThatDoesNotFinish(t *testing.T) {
+	root, db, want := oldOverviews(t, 2)
+	testfixture.Write(t, root, "PIONEER/rekordbox/export.pdb", []byte("an export that is not one"))
+	if r, err := bridge.ConvertAtMount(context.Background(), root, enginedb.Options{}, false); err == nil {
+		t.Fatalf("fixture: the import went through: %+v", r)
+	}
+	if !completed(t, db, "PerformanceData", want) {
+		t.Fatal("the overviews waited for the import")
 	}
 }

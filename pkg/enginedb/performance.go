@@ -173,8 +173,12 @@ func TrackDataPeaks(track, overview []byte) []byte {
 // variable only for tests.
 var overviewBatch = 256
 
-// FillOverviewMaxima completes the overviews an earlier build imported: they end in a
-// zero triple where Engine expects each band's maximum, the value it scales that band by.
+// FillOverviewMaxima completes the overviews that end in a zero triple where Engine expects
+// each band's maximum, the value it scales that band by. An earlier build imported them so,
+// and they stay so in a row Engine has written again: once it has loaded a track it writes
+// the row back with the overview as it read it and without the mark of an import
+// (thirdPartySourceId), so that mark does not say which rows are meant. Engine's own
+// analysis ends in the maxima, and an overview that is all zero stays as it is.
 // It commits a batch at a time and stops at deadline (zero: none): the mount hook kills
 // rb-bridge when its time is up. After each batch it records how far it has come
 // (OverviewProgress), and the next mount goes on from there: a library whose finished
@@ -216,15 +220,15 @@ func fillOverviewMaxima(ctx context.Context, mount string, deadline time.Time, n
 	}
 }
 
-// fillOverviewBatch completes the next overviewBatch imported overviews past the track
-// after, and returns how many it read and the last track among them.
+// fillOverviewBatch completes the next overviewBatch overviews past the track after, and
+// returns how many it read and the last track among them.
 func fillOverviewBatch(ctx context.Context, db *sql.DB, after int64) (n int, last int64, err error) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, 0, err
 	}
 	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, `SELECT trackId, overviewWaveFormData FROM PerformanceData WHERE thirdPartySourceId=1 AND trackId>? ORDER BY trackId LIMIT ?`, after, overviewBatch)
+	rows, err := tx.QueryContext(ctx, `SELECT trackId, overviewWaveFormData FROM PerformanceData WHERE trackId>? ORDER BY trackId LIMIT ?`, after, overviewBatch)
 	if err != nil {
 		return 0, 0, err
 	}
