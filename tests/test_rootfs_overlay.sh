@@ -771,7 +771,9 @@ has 'SC5000_BOOT_CRASH_WINDOW:-300' "$GUARD"
 # /media/<volume>), where the stock updater cannot find the stick's root. The stock update-from-file
 # step runs `update-file` first, which hands it the same file below the view's backing mount, also in
 # safe-mode (where `launch` execs stock Engine). Links stand in for the mounts (-ef: device+inode).
-hfs=$TMP/hfs-update
+# A symlink below the top level, or a `..`, that leads off the stick is left as Engine wrote it;
+# a `..` that stays on the stick gets the resolved path.
+hfs=$(cd "$TMP" && pwd -P)/hfs-update
 export SC5000_UI_DIR=$hfs/ui SC5000_HFS_VIEWS=$hfs/views SC5000_UPDATE_FILE_PATH=$hfs/update-file-path
 mkdir -p "$hfs/ui" "$hfs/views/view-a/backing/Firmware" "$hfs/media/VOL/Engine Library" "$hfs/fat"
 : > "$hfs/views/view-a/backing/X-Update.img"; : > "$hfs/views/view-a/backing/Firmware/Y-Update.img"
@@ -779,6 +781,9 @@ ln -s "$hfs/media/VOL" "$hfs/views/view-a/view"
 ln "$hfs/views/view-a/backing/X-Update.img" "$hfs/media/VOL/X-Update.img"
 ln -s "$hfs/views/view-a/backing/Firmware" "$hfs/media/VOL/Firmware"
 : > "$hfs/media/VOL/Engine Library/Z-Update.img"; : > "$hfs/fat/W-Update.img"
+mkdir "$hfs/views/view-a/outside"; : > "$hfs/views/view-a/outside/V-Update.img"
+ln -s "$hfs/views/view-a/outside/V-Update.img" "$hfs/views/view-a/backing/Firmware/evil-Update.img"
+ln -s "$hfs/views/view-a/outside" "$hfs/views/view-a/backing/Firmware/off"
 while IFS='|' read -r mode path want; do
     rm -f "$hfs/ui/safe-mode"; [ "$mode" = normal ] || : > "$hfs/ui/safe-mode"
     printf %s "$hfs/$path" > "$SC5000_UPDATE_FILE_PATH"
@@ -790,6 +795,10 @@ normal|media/VOL/Firmware/Y-Update.img|views/view-a/backing/Firmware/Y-Update.im
 safe-mode|media/VOL/X-Update.img|views/view-a/backing/X-Update.img
 normal|media/VOL/Engine Library/Z-Update.img|media/VOL/Engine Library/Z-Update.img
 normal|fat/W-Update.img|fat/W-Update.img
+normal|media/VOL/Firmware/evil-Update.img|media/VOL/Firmware/evil-Update.img
+normal|media/VOL/Firmware/off/V-Update.img|media/VOL/Firmware/off/V-Update.img
+normal|media/VOL/Firmware/../../outside/V-Update.img|media/VOL/Firmware/../../outside/V-Update.img
+normal|media/VOL/Firmware/../X-Update.img|views/view-a/backing/X-Update.img
 CASES
 rm -f "$hfs/ui/safe-mode" "$SC5000_UPDATE_FILE_PATH"
 sh "$GUARD" update-file < /dev/null || fail 'guard update-file without a chosen file failed'

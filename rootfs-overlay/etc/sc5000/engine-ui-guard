@@ -63,6 +63,8 @@ begin_attempt() {
 # An update image on an HFS+ stick is reached through edisksd-hook's view (a tmpfs of binds over
 # /media/<volume>). Walking up from it, the stock updater never meets the stick's root and hands the
 # update environment a wrong upgrade-file. Point it at the same file below the view's backing mount.
+# Only a file on the stick itself: the hook binds no top-level symlink, but one further down (or a
+# `..`) could lead off the stick. Such a path is left as Engine wrote it.
 stick_path() {
     file=$(cat "$1" 2>/dev/null) || return 0
     for view in "${SC5000_HFS_VIEWS:-/run/sc5000-hfs-views}"/view-*/view; do
@@ -70,8 +72,9 @@ stick_path() {
         while [ "$dir" != "${dir%/*}" ]; do
             dir=${dir%/*}
             [ "$dir" -ef "$view" ] || continue
-            real=${view%/view}/backing/${file#"$dir"/}
-            [ "$real" -ef "$file" ] && printf '%s\n' "$real" > "$1"
+            stick=$(readlink -f "${view%/view}/backing") && real=$(readlink -f "$stick/${file#"$dir"/}") &&
+                [ ! -L "$stick/${file#"$dir"/}" ] && [ "$real" -ef "$file" ] || return 0
+            case $real in "$stick"/*) printf '%s\n' "$real" > "$1" ;; esac
             return 0
         done
     done
