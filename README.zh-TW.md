@@ -200,7 +200,9 @@
 - [macOS Intel](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.4-macos-amd64.zip)
 - [Linux x86_64](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.4-linux-amd64.tar.gz)
 
-解壓後於終端機執行 `Install-EngineX.bat`（Windows）、`Install-EngineX.command`（macOS）或 `./install-enginex.sh`（Linux）。區域網路安裝需播放機已開啟 root SSH，可完整保留音樂與設定；USB 線刷需安裝 `fastboot` 與 Python 3（新建二代機 `/data` 映像另需 `e2fsprogs`；Windows 線刷二代機請透過 `usbipd-win` 將 USB 直通給 WSL 2，並以 `wsl -u root` 執行 Linux 版安裝器）。**請先備份播放機資料**：透過 USB 刷入全新二代機 `/data` 映像會清空內建 `/data` 分割區上的音樂、曲庫與設定（刷機前請拔除隨身碟與 SD 卡）。
+解壓後於終端機執行 `Install-EngineX.bat`（Windows）、`Install-EngineX.command`（macOS）或 `./install-enginex.sh`（Linux）。區域網路安裝需播放機已開啟 root SSH，可完整保留音樂與設定；**5.3.0.5（尚未發佈）**：安裝器原生建立映像並透過 USB 傳輸，無需 Python、fastboot、e2fsprogs、libusb 或 WSL。Windows 使用系統 WinUSB 驅動程式，Linux 的 USB 存取可能需要 `sudo`。現有 Python／Shell 輔助腳本在此版本保留為手動備用方式，舊版安裝器仍需其主機工具。**請先備份播放機資料**：透過 USB 刷入全新二代機 `/data` 映像會清空內建 `/data` 分割區上的音樂、曲庫與設定（刷機前請拔除隨身碟與 SD 卡）。
+
+**5.3.0.5（尚未發佈）**：若安裝器旁有機型與安裝器版本均相符的 `*-Update.img` 或 `*-Data-Bundle.tar.gz`，會優先使用，不查詢 `releases/latest`。同一目錄還需放入同一發佈版本的 `SHA256SUMS.txt`、`SHA256SUMS.txt.sig` 和 `RELEASE-TAG.txt`；缺少時請補齊這些檔案，或移除本機映像／資料包後查詢最新版。
 
 ### 方式一：一代機型 —— 隨身碟免電腦直接刷機
 1. 點擊下方對應你機器型號的直連網址下載 `*-Update.img` 韌體（或前往 [**Releases 頁面**](https://github.com/Cd1s/EngineX-OS/releases/latest)）：
@@ -221,7 +223,7 @@
 
 1. **原廠二代機首次安裝（執行一次 `EngineX-Installer` 一鍵解鎖）**：
    - 解壓上方 **`EngineX-Installer`**，於終端機執行 `Install-EngineX.bat`（Windows）、`Install-EngineX.command`（macOS）或 `./install-enginex.sh`（Linux）。
-   - 於原廠播放機螢幕開啟 **設定 → 關於 / 更新 → 韌體更新模式 → 選項** 進入 USB 更新模式並接上 USB 線——安裝器會自動執行 **[1/2] 一鍵解鎖 `.img` 升級鏈** 與 **[2/2] 刷入 `*-Update.img`**（僅寫入 `/data/enginex`，不改唯讀系統分割區；Windows 請用 `usbipd-win` 將 USB 直通給 WSL 2 並以 `wsl -u root` 執行 Linux 版安裝器；`PRIME 4 G2` 與 `SYSTEM ONE` 寫入完成後按電源鍵關機再開機即可啟用；若播放機已開 root SSH，同區域網路即可無損安裝且不清空 `/data`）。
+   - 於原廠播放機螢幕開啟 **設定 → 關於 / 更新 → 韌體更新模式 → 選項** 進入 USB 更新模式並接上 USB 線——安裝器會自動執行 **[1/2] 一鍵解鎖 `.img` 升級鏈** 與 **[2/2] 刷入 `*-Update.img`**（僅寫入 `/data/enginex`，不改唯讀系統分割區；舊版腳本式 Windows 安裝器請用 `usbipd-win` 將 USB 直通給 WSL 2 並以 `wsl -u root` 執行 Linux 版安裝器；`PRIME 4 G2` 與 `SYSTEM ONE` 寫入完成後按電源鍵關機再開機即可啟用；若播放機已開 root SSH，同區域網路即可無損安裝且不清空 `/data`）。
 2. **此後每次更新（隨身碟直刷或螢幕一鍵 OTA，無需電腦）**：
    - 完成首次解鎖後（先前已安裝過 EngineX 的二代機開機時也會自動解鎖），二代機的升級方式與一代機完全相同：將下方對應機型的 `*-Update.img` 保持原檔名放進 **FAT32 或 exFAT 隨身碟根目錄** 於播放機螢幕升級（**設定 → 關於 / 更新 → 韌體更新模式 → 選項 → USB/SD**），或直接點 **設定 → 關於 / 更新 → 更新** 一鍵線上 OTA！
    - **Denon DJ SC LIVE 4**：[`SCLIVE4-5.3.0.4-EngineX-OS-Denon-SC-LIVE-4-JP21-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SCLIVE4-5.3.0.4-EngineX-OS-Denon-SC-LIVE-4-JP21-Update.img)
@@ -232,6 +234,17 @@
    - **Numark Mixstream Pro Go**：[`MIXSTREAMPROGO-5.3.0.4-EngineX-OS-Numark-Mixstream-Pro-Go-NH10-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/MIXSTREAMPROGO-5.3.0.4-EngineX-OS-Numark-Mixstream-Pro-Go-NH10-Update.img)
    - **Denon DJ PRIME 4 G2**：[`PRIME4G2-5.3.0.4-EngineX-OS-Denon-PRIME-4-G2-JP24-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME4G2-5.3.0.4-EngineX-OS-Denon-PRIME-4-G2-JP24-Update.img)
    - **Rane SYSTEM ONE**：[`SYSTEMONE-5.3.0.4-EngineX-OS-Rane-SYSTEM-ONE-RMZ2-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SYSTEMONE-5.3.0.4-EngineX-OS-Rane-SYSTEM-ONE-RMZ2-Update.img)
+
+### 恢復官方韌體（5.3.0.5，尚未發佈）
+
+從 [Releases](https://github.com/Cd1s/EngineX-OS/releases/latest) 下載電腦對應的安裝器。連結格式為 `https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-<VERSION>-<platform>.zip`（`linux-amd64` 使用 `.tar.gz`；ZIP 平台為 `windows-amd64`、`macos-amd64`、`macos-arm64`）。
+
+1. 先備份資料，讓播放機正常啟動 EngineX 並連接電腦所在的區域網路，先關閉其他播放機。Windows 執行 `Restore-Official-Firmware.bat`，macOS 執行 `.command`，Linux 執行 `.sh`（USB 權限不足時用 `sudo`）。等效命令是 `enginex-installer --restore-stock`。
+2. 第一代先確認清理共用 QML 快取。工具停止 Engine，只刪除它的共用 QML 快取，執行同步並正常關機，保留音樂與曲庫，避免 r5 舊快取導致官方韌體停在 Logo。第二代則使用現有的區域網路 SSH 解除安裝流程，不刷寫韌體。
+3. 拔除含更新檔案的儲存裝置。SC5000／SC5000M／SC6000／SC6000M 按住 **MEDIA EJECT + SOURCE + LAYER** 再開機，看到 **Computer Update** 或晶片圖示後放開，連接 USB 線。其他第一代機型請依[官方更新說明](https://support.enginedj.com/support/solutions/articles/69000797882)操作。
+4. 確認恢復官方 5.3.0 後保持供電與 USB 連線，直到刷寫及重新啟動完成。第一代映像直接從 Engine DJ 官方網址下載，也可從 [Engine DJ Downloads](https://enginedj.com/downloads) 下載對應機型的官方 5.3.0 檔案，以 `--image "官方映像路徑.img"` 指定。工具檢查 AZ01 機型、完整性與固定的官方 SHA-256，拒絕改名的 EngineX 或修改過的映像；安裝包不包含官方韌體。
+
+如果已刷回官方韌體且停在 Logo、無法連接 SSH，請先用一般安裝器刷入 EngineX 並讓它正常啟動，再執行恢復工具。刷官方韌體會保留 `/data`，重複刷寫本身不會清除舊 QML 快取。
 
 <details>
 <summary>二代機終端機手動安裝與解除安裝恢復原廠</summary>

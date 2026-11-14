@@ -25,11 +25,9 @@ func TestMain(m *testing.M) {
 	gen1SSHRunDropInPath = at("run", "systemd", "system", "sc5000-custom-sshd.service.d", "51-port.conf")
 	sshPersistKeyDir = at("data", "enginex-absent")
 	deviceCompatiblePath = at("sys", "compatible-absent")
-	updateFileURLPath = at("tmp", "update-file-url")
-	engineQuitReasonPath = at("tmp", "engine-quit-reason")
 	fourDeckRolePath = at("run", "sc5000-assignments", "role")
-	engineScriptPath = at("usr", "Engine", "Scripts", "engine")
-	planckRemoteScreenPath = at("usr", "bin", "planck-remote-screen")
+	// The update keeps updateReserve free for Engine; the tests run on whatever disk the host has.
+	freeBytes = func(string) (int64, bool) { return 1 << 40, true }
 	code := m.Run()
 	os.RemoveAll(dir)
 	os.Exit(code)

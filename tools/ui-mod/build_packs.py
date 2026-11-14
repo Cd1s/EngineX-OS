@@ -2828,6 +2828,16 @@ SERVICES_MAIN = """
 		}
 		scFetchUpdate(true)
 	}
+	function scUpdateFailed(err) {
+		try {
+			PlanckGUI.views.prompts.post({
+				type: Prompt.Warning,
+				title: scT("Update Failed"),
+				message: scT(err),
+				options: Prompt.Ok
+			})
+		} catch (e) {}
+	}
 	// EngineX checks its own GitHub repository, not Denon's firmware server.
 	function scCheckUpdate() {
 		if (scUpdating) return
@@ -2847,8 +2857,13 @@ SERVICES_MAIN = """
 			}
 			const v = JSON.parse(x.responseText)
 			if (v.currentVersion && v.currentVersion !== "dev") scVersion = v.currentVersion
+			const scWasUpdating = scUpdating
 			scUpdating = !!v.updating
 			scUpdateText = v.error ? scT(v.error) : v.updating ? scT("Updating…") + " " + Math.round((v.progress || 0.05) * 100) + "%" : v.updateAvailable ? scT("New release available:") + " " + v.latestVersion : scT("Up to date") + " (" + v.currentVersion + ")"
+			// An update that failed (a release without a valid signature, a damaged download)
+			// is told to the user in a prompt, not only in the small line of the About page.
+			// "Update installed. Please reboot" also comes as an error text, with progress 1.
+			if (scWasUpdating && !v.updating && v.error && !(v.progress >= 1)) scUpdateFailed(v.error)
 			if (v.updateAvailable && v.downloadUrl) {
 				const lbl = v.updating ? Math.round((v.progress || 0.05) * 100) + "%" : scT("Update")
 				const prog = v.updating ? (v.progress || 0.05) : 0
