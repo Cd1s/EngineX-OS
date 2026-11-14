@@ -425,7 +425,7 @@ class DataBundleTest(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(data)
         env = {**self.env, 'SC5000_CUSTOM': str(dest), 'SC5000_ALSA_OVERLAY': str(alsa),
-               'SC5000_ENGINE_DATA_DIR': str(engine)}
+               'ENGINEX_ENGINE_DATA_DIR': str(engine)}
         subprocess.run(['sh', str(dest / 'bundle/uninstall.sh')], env=env,
                        capture_output=True, text=True, check=True)
         self.assertFalse(private.exists())

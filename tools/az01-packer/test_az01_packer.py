@@ -664,7 +664,6 @@ class FilesystemTests(unittest.TestCase):
         '/usr/local/bin/sc5000-perf-tune': 'enginex-perf-tune',
         '/usr/local/bin/sc5000-prolink-diag': 'enginex-prolink-diag',
         '/usr/local/bin/sc5000-storage-mount': 'enginex-storage-mount',
-        '/usr/sbin/sc5000-bt-helper': 'enginex-bt-helper',
         '/usr/sbin/sc5000-usb-audio': 'enginex-usb-audio',
     }
 
@@ -1047,12 +1046,22 @@ class Rename234UpgradeTests(unittest.TestCase):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(content)
                 path.chmod(0o600)
+            native = {
+                'StreamingAccounts.json': b'{"Deezer":"saved-account"}\n',
+                '.config/jp07.user.settings/AIR Music Technology/Engine.conf': b'[Settings]\nName=My deck\n',
+            }
+            for rel, content in native.items():
+                path = data / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(content)
             script = az.MIGRATE.replace('/data', str(data))
             for boot in range(2):
                 result = subprocess.run(['sh', '-eu', '-c', script], capture_output=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertTrue(new.is_dir() and not new.is_symlink())
                 self.assertEqual(os.readlink(old), 'enginex')
+                for rel, content in native.items():
+                    self.assertEqual((data / rel).read_bytes(), content, rel)
                 for rel, content in saved.items():
                     self.assertEqual((new / rel).read_bytes(), content, (boot, rel))
                     self.assertEqual((old / rel).read_bytes(), content, (boot, rel))
