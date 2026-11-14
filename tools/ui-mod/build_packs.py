@@ -497,6 +497,7 @@ SERVICES_MAIN = """
 	readonly property bool scIsMixstream: typeof Config !== "undefined" && Config && Config.audio && Config.audio.fx && Config.audio.fx.hasNHFx !== undefined ? !!Config.audio.fx.hasNHFx : ["NH08", "NH08S", "NH10"].indexOf(scBoard) >= 0
 	readonly property bool scHasStemsEq: scHasMixer && (typeof Config !== "undefined" && Config && Config.audio ? !!Config.audio.hasStemsLevel : false)
 	readonly property bool scIsAZ04: ["JP24", "RMZ2"].indexOf(scBoard) >= 0
+	readonly property bool scHasJogWheel: !(typeof Config !== "undefined" && Config && Config.device && Config.device.hasMotorizedPlatters) && ["JP08", "JP14", "RMZ2"].indexOf(scBoard) < 0
 	readonly property var scTransitionFxView: typeof PlanckGUI !== "undefined" && PlanckGUI && PlanckGUI.views ? (PlanckGUI.views.transitionFx || null) : null
 	readonly property bool scHasStockTransitionTile: typeof Config !== "undefined" && Config && Config.audio && Config.audio.fx && Config.device
 		? (!!Config.audio.fx.hasTransitionFx && !Config.device.hasHardwareFaderFxButtons && !!scTransitionFxView)
@@ -2690,6 +2691,37 @@ SERVICES_MAIN = """
 	property int scBpmDecimals: 2
 	property int scSyncGuardPct: 0
 	property bool scSwapLoopOrder: false
+	property bool scReverseJogLeft: false
+	property bool scReverseJogRight: false
+	property bool scReverseJogSynced: false
+	readonly property var scReverseJogProps: [
+		Planck.createProperty("EngineXJogInvertLeft", false, 1),
+		Planck.createProperty("EngineXJogInvertRight", false, 1),
+		Planck.createProperty("EngineXJogInvertReady", false, 1)]
+	readonly property var scReverseJogLeftProp: scReverseJogProps && Planck.getProperty("/GUI/Scripted/EngineXJogInvertLeft")
+	readonly property var scReverseJogRightProp: scReverseJogProps && Planck.getProperty("/GUI/Scripted/EngineXJogInvertRight")
+	readonly property var scReverseJogReadyProp: scReverseJogProps && Planck.getProperty("/GUI/Scripted/EngineXJogInvertReady")
+	function scSyncReverseJog(ready) {
+		const pL = scReverseJogLeftProp && scReverseJogLeftProp.translator ? scReverseJogLeftProp : Planck.getProperty("/GUI/Scripted/EngineXJogInvertLeft")
+		const pR = scReverseJogRightProp && scReverseJogRightProp.translator ? scReverseJogRightProp : Planck.getProperty("/GUI/Scripted/EngineXJogInvertRight")
+		const pReady = scReverseJogReadyProp && scReverseJogReadyProp.translator ? scReverseJogReadyProp : Planck.getProperty("/GUI/Scripted/EngineXJogInvertReady")
+		if (!(pL && pL.translator && pR && pR.translator)) {
+			scReverseJogSynced = false
+			return
+		}
+		pL.translator.state = scReverseJogLeft
+		pR.translator.state = scReverseJogRight
+		if (ready && pReady && pReady.translator) {
+			pReady.translator.state = true
+			scReverseJogSynced = true
+		} else {
+			scReverseJogSynced = false
+		}
+	}
+	Timer {
+		interval: 250; running: root.scUiLoaded && !root.scReverseJogSynced; repeat: true
+		onTriggered: root.scSyncReverseJog(true)
+	}
 	property int scLedBrightness: 100
 	property int scUIScale: 100
 	property bool scStemsEqMode: false
@@ -3303,6 +3335,11 @@ SERVICES_MAIN = """
 			else if (v.sync_guard_pct !== undefined) scSyncGuardPct = parseInt(v.sync_guard_pct) || 0
 			if (v.swapLoopOrder !== undefined) scSwapLoopOrder = !!v.swapLoopOrder
 			else if (v.swap_loop_order !== undefined) scSwapLoopOrder = v.swap_loop_order === "1" || v.swap_loop_order === 1 || v.swap_loop_order === true
+			if (v.jogInvertLeft !== undefined) scReverseJogLeft = !!v.jogInvertLeft
+			else if (v.jog_invert_left !== undefined) scReverseJogLeft = v.jog_invert_left === "1" || v.jog_invert_left === 1 || v.jog_invert_left === true
+			if (v.jogInvertRight !== undefined) scReverseJogRight = !!v.jogInvertRight
+			else if (v.jog_invert_right !== undefined) scReverseJogRight = v.jog_invert_right === "1" || v.jog_invert_right === 1 || v.jog_invert_right === true
+			if (typeof scSyncReverseJog === "function") scSyncReverseJog(true)
 			if (v.ledBrightness !== undefined) scLedBrightness = parseInt(v.ledBrightness) || 100
 			else if (v.led_brightness !== undefined) scLedBrightness = parseInt(v.led_brightness) || 100
 			if (v.uiScale !== undefined) scUIScale = parseInt(v.uiScale) || 100
@@ -3378,6 +3415,8 @@ SERVICES_MAIN = """
 		scCueCountdown = true // default on: only an explicit cue_countdown=0 turns it off
 		scBpmDecimals = 2
 		scTracklistWaveform = true
+		root.scReverseJogLeft = false
+		root.scReverseJogRight = false
 		for (const line of (text || "").split("\\n")) {
 			const eq = line.indexOf("=")
 			if (eq < 0) continue
@@ -3389,6 +3428,8 @@ SERVICES_MAIN = """
 			else if (key === "bpm_decimals") root.scBpmDecimals = val === "1" ? 1 : 2
 			else if (key === "sync_guard_pct") root.scSyncGuardPct = parseInt(val) || 0
 			else if (key === "swap_loop_order") root.scSwapLoopOrder = val === "1"
+			else if (key === "jog_invert_left") root.scReverseJogLeft = val === "1" || val === "true"
+			else if (key === "jog_invert_right") root.scReverseJogRight = val === "1" || val === "true"
 			else if (key === "led_brightness") root.scLedBrightness = parseInt(val) || 100
 			else if (key === "ui_scale") root.scUIScale = parseInt(val) || 100
 			else if (key === "stems_eq_mode") root.scStemsEqMode = val === "1"
@@ -3397,6 +3438,7 @@ SERVICES_MAIN = """
 			else if (key === "fx_time_ms" && line.trim().indexOf("fx_time_ms=") === 0) fxMs = scFxMsInteger(line.trim().slice(11))
 			else if (key === "pioneer_fx") root.scPioneerFx = val || "off"
 		}
+		if (typeof scSyncReverseJog === "function") scSyncReverseJog(true)
 		scFxMsApply(fxMode, fxMs)
 	}
 	function scSyncBroadcastMeta() {
@@ -4425,6 +4467,28 @@ LANGUAGE_ENTRY = """
 			onSelected: function(index) {
 				if (ids[index] !== root.scLang) root.scCall("lang=" + ids[index])
 			}
+		},
+"""
+
+# #213: per-deck jog wheel direction inversion using stock HighSpeedJogWheelAssignment.invert.
+# Players (1 jog wheel) show one toggle mapped to jogInvertLeft; non-motorized consoles show
+# separate Left and Right toggles; motorized platter units (SC5000M/SC6000M/SYSTEM ONE) hide both.
+JOG_INVERT_ENTRIES = """
+		EntryBase.ListEntry {
+			objectName: "EngineX_JogInvertLeft"
+			text: root.scIsPlayerBoard ? "Reverse Jog Wheel" : "Reverse Left Jog Wheel"
+			visible: root.scHasJogWheel
+			values: ["Off", "On"]
+			currentValue: values[root.scReverseJogLeft ? 1 : 0]
+			onSelected: function(index) { root.scCall("jogInvertLeft=" + index) }
+		},
+		EntryBase.ListEntry {
+			objectName: "EngineX_JogInvertRight"
+			text: "Reverse Right Jog Wheel"
+			visible: root.scHasJogWheel && !root.scIsPlayerBoard
+			values: ["Off", "On"]
+			currentValue: values[root.scReverseJogRight ? 1 : 0]
+			onSelected: function(index) { root.scCall("jogInvertRight=" + index) }
 		},
 """
 
@@ -6115,6 +6179,7 @@ def edits(dev: bool):
         prefs + ("" if v53() else "TabContents/") + "DeviceTabContent.qml": [
             (f'import "{"" if v53() else "../"}Entries"\n', f'import "{"" if v53() else "../"}Entries"\nimport "{"" if v53() else "../"}Entries/Base" as EntryBase\nimport Planck 1.0\n'),
             ("		PlayerNumber { },\n", LANGUAGE_ENTRY + LED_ENTRY + (POWER_ENTRY if v53() else "") + "		PlayerNumber { },\n"),
+            *([("        PlatterCalibration {},\n", "        PlatterCalibration {},\n" + JOG_INVERT_ENTRIES)] if v53() else []),
         ],
         **{prefs + ("" if v53() else "TabContents/") + f"{name}TabContent.qml": [
             (f'import "{"" if v53() else "../"}Entries"\n', f'import QtQuick.Layouts 1.12\nimport "{"" if v53() else "../"}Entries"\nimport "{"" if v53() else "../"}Entries/Base" as EntryBase\nimport Planck 1.0\n'),
@@ -6966,6 +7031,29 @@ def edits(dev: bool):
             '    objectName: "Global Assignment Config"\n'
             '    property real scPadBrightness: 1\n'
             '    property bool scSwapLoopOrder: false\n'
+            '    property bool scReverseJogLeft: false\n'
+            '    property bool scReverseJogRight: false\n'
+            '    property var pReverseJogLeft: Planck.getProperty("/GUI/Scripted/EngineXJogInvertLeft")\n'
+            '    property var pReverseJogRight: Planck.getProperty("/GUI/Scripted/EngineXJogInvertRight")\n'
+            '    property var pReverseJogReady: Planck.getProperty("/GUI/Scripted/EngineXJogInvertReady")\n'
+            '    readonly property bool scReverseJogLeftEffective: (pReverseJogReady && pReverseJogReady.translator && pReverseJogReady.translator.state && pReverseJogLeft && pReverseJogLeft.translator) ? !!pReverseJogLeft.translator.state : scReverseJogLeft\n'
+            '    readonly property bool scReverseJogRightEffective: (pReverseJogReady && pReverseJogReady.translator && pReverseJogReady.translator.state && pReverseJogRight && pReverseJogRight.translator) ? !!pReverseJogRight.translator.state : scReverseJogRight\n'
+            '    function scIsReverseJog(deckName) {\n'
+            '        return deckName === "Right" ? scReverseJogRightEffective : scReverseJogLeftEffective\n'
+            '    }\n'
+            '    Timer {\n'
+            '        interval: 500\n'
+            '        running: !scGlobalConfig.pReverseJogReady || !scGlobalConfig.pReverseJogReady.translator || !scGlobalConfig.pReverseJogLeft || !scGlobalConfig.pReverseJogLeft.translator || !scGlobalConfig.pReverseJogRight || !scGlobalConfig.pReverseJogRight.translator\n'
+            '        repeat: true\n'
+            '        onTriggered: {\n'
+            '            if (!scGlobalConfig.pReverseJogLeft || !scGlobalConfig.pReverseJogLeft.translator)\n'
+            '                scGlobalConfig.pReverseJogLeft = Planck.getProperty("/GUI/Scripted/EngineXJogInvertLeft")\n'
+            '            if (!scGlobalConfig.pReverseJogRight || !scGlobalConfig.pReverseJogRight.translator)\n'
+            '                scGlobalConfig.pReverseJogRight = Planck.getProperty("/GUI/Scripted/EngineXJogInvertRight")\n'
+            '            if (!scGlobalConfig.pReverseJogReady || !scGlobalConfig.pReverseJogReady.translator)\n'
+            '                scGlobalConfig.pReverseJogReady = Planck.getProperty("/GUI/Scripted/EngineXJogInvertReady")\n'
+            '        }\n'
+            '    }\n'
             '    Timer {\n'
             '        interval: 10000; running: true; repeat: true; triggeredOnStart: true\n'
             '        onTriggered: {\n'
@@ -6977,12 +7065,25 @@ def edits(dev: bool):
             '                    const n = parseInt(j.ledBrightness)\n'
             '                    if (n >= 20 && n <= 100) scGlobalConfig.scPadBrightness = n / 100\n'
             '                    scGlobalConfig.scSwapLoopOrder = !!j.swapLoopOrder\n'
+            '                    scGlobalConfig.scReverseJogLeft = !!j.jogInvertLeft\n'
+            '                    scGlobalConfig.scReverseJogRight = !!j.jogInvertRight\n'
             '                } catch (e) {}\n'
             '            }\n'
             '            x.open("GET", "http://127.0.0.1:8080/v1/sc5000/ui")\n'
             '            x.send()\n'
             '        }\n'
             '    }\n')]
+        # #213: per-deck jog wheel inversion using stock HighSpeedJogWheelAssignment.invert
+        # (and swapped Shift+Jog track-search targets on models with hasTrackSearch).
+        scaled["ControlSurfaceModules/ControlSurfaceModules/JogWheel.qml"] = [
+            ('    readonly property string scratchWheelPath: deckConfig.activeDeckPath + "ExternalScratchWheel"\n',
+             '    readonly property string scratchWheelPath: deckConfig.activeDeckPath + "ExternalScratchWheel"\n'
+             '    readonly property bool scReverseJogActive: typeof globalConfig !== "undefined" && globalConfig && globalConfig.scIsReverseJog ? !!globalConfig.scIsReverseJog(deckConfig.name) : false\n'),
+            ('        master: device\n',
+             '        master: device\n        invert: module.scReverseJogActive\n'),
+            ('                targetLeft: PropertyTarget {\n                    path: deckConfig.activeDeckTrackPath + "SeekBackward"\n                }\n                targetRight: PropertyTarget {\n                    path: deckConfig.activeDeckTrackPath + "SeekForward"\n                }\n',
+             '                targetLeft: PropertyTarget {\n                    path: deckConfig.activeDeckTrackPath + (module.scReverseJogActive ? "SeekForward" : "SeekBackward")\n                }\n                targetRight: PropertyTarget {\n                    path: deckConfig.activeDeckTrackPath + (module.scReverseJogActive ? "SeekBackward" : "SeekForward")\n                }\n'),
+        ]
         pad_brt = '    scBrightness: typeof globalConfig !== "undefined" && globalConfig && globalConfig.scPadBrightness ? globalConfig.scPadBrightness : 1\n'
         # #135: Swap Loop / Beat Jump: the Auto Loop knob beat-jumps unshifted and resizes the loop with Shift.
         scaled["ControlSurfaceModules/ControlSurfaceModules/private/AutoLoopKnob.qml"] = [(

@@ -770,7 +770,7 @@ func TestBoardCapabilitiesAndSettingsCompatJP07vsJC11(t *testing.T) {
 			player:    true,
 			caps: uiCapabilities{
 				Mixer: false, FourDeck: true, AutoLoopKnob: true, BeatJumpPads: false,
-				TrackSkipKeys: true, StemsEq: false, LineInAux: false, Gen2: false, RemoteStems: true,
+				TrackSkipKeys: true, StemsEq: false, LineInAux: false, Gen2: false, RemoteStems: true, JogWheel: true,
 			},
 		},
 		{
@@ -780,7 +780,7 @@ func TestBoardCapabilitiesAndSettingsCompatJP07vsJC11(t *testing.T) {
 			player:    false,
 			caps: uiCapabilities{
 				Mixer: true, FourDeck: true, AutoLoopKnob: true, BeatJumpPads: false,
-				TrackSkipKeys: true, StemsEq: true, LineInAux: false, Gen2: false, RemoteStems: true,
+				TrackSkipKeys: true, StemsEq: true, LineInAux: false, Gen2: false, RemoteStems: true, JogWheel: true,
 			},
 		},
 		{
@@ -790,7 +790,7 @@ func TestBoardCapabilitiesAndSettingsCompatJP07vsJC11(t *testing.T) {
 			player:    false,
 			caps: uiCapabilities{
 				Mixer: true, FourDeck: false, AutoLoopKnob: true, BeatJumpPads: false,
-				TrackSkipKeys: false, StemsEq: true, LineInAux: false, Gen2: false, RemoteStems: true,
+				TrackSkipKeys: false, StemsEq: true, LineInAux: false, Gen2: false, RemoteStems: true, JogWheel: true,
 			},
 		},
 		{
@@ -800,7 +800,7 @@ func TestBoardCapabilitiesAndSettingsCompatJP07vsJC11(t *testing.T) {
 			player:    false,
 			caps: uiCapabilities{
 				Mixer: true, FourDeck: false, AutoLoopKnob: false, BeatJumpPads: true,
-				TrackSkipKeys: false, StemsEq: true, LineInAux: false, Gen2: false, RemoteStems: true,
+				TrackSkipKeys: false, StemsEq: true, LineInAux: false, Gen2: false, RemoteStems: true, JogWheel: true,
 			},
 		},
 		{
@@ -810,7 +810,7 @@ func TestBoardCapabilitiesAndSettingsCompatJP07vsJC11(t *testing.T) {
 			player:    false,
 			caps: uiCapabilities{
 				Mixer: true, FourDeck: true, AutoLoopKnob: true, BeatJumpPads: false,
-				TrackSkipKeys: true, StemsEq: true, LineInAux: true, Gen2: true, RemoteStems: true,
+				TrackSkipKeys: true, StemsEq: true, LineInAux: true, Gen2: true, RemoteStems: true, JogWheel: true,
 			},
 		},
 		{
@@ -820,7 +820,27 @@ func TestBoardCapabilitiesAndSettingsCompatJP07vsJC11(t *testing.T) {
 			player:    false,
 			caps: uiCapabilities{
 				Mixer: true, FourDeck: true, AutoLoopKnob: true, BeatJumpPads: false,
-				TrackSkipKeys: true, StemsEq: false, LineInAux: false, Gen2: true, RemoteStems: false,
+				TrackSkipKeys: true, StemsEq: false, LineInAux: false, Gen2: true, RemoteStems: false, JogWheel: true,
+			},
+		},
+		{
+			name:      "JP08 SC5000M",
+			compat:    "inmusic,jp08\x00",
+			wantBoard: "SC5000M",
+			player:    true,
+			caps: uiCapabilities{
+				Mixer: false, FourDeck: true, AutoLoopKnob: true, BeatJumpPads: false,
+				TrackSkipKeys: true, StemsEq: false, LineInAux: false, Gen2: false, RemoteStems: true, JogWheel: false,
+			},
+		},
+		{
+			name:      "RMZ2 SYSTEM ONE",
+			compat:    "inmusic,rmz2\x00",
+			wantBoard: "SYSTEMONE",
+			player:    false,
+			caps: uiCapabilities{
+				Mixer: true, FourDeck: false, AutoLoopKnob: true, BeatJumpPads: false,
+				TrackSkipKeys: true, StemsEq: true, LineInAux: false, Gen2: true, RemoteStems: false, JogWheel: false,
 			},
 		},
 	}
@@ -1148,5 +1168,80 @@ func TestUIUpdateIgnoresRemovedToggleParameter(t *testing.T) {
 	code, v := uiPost(t, srv.URL, "toggle=tidal")
 	if code != 200 || v.Scope != "tidal" || !slices.Contains(v.Sources, "tidal") {
 		t.Error("removed toggle parameter still changes sources")
+	}
+}
+
+func TestUISettingsJogInvert(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Config{AccessToken: "code", UIDir: dir, StateDir: t.TempDir()}
+	srv := httptest.NewServer(New(cfg, nil))
+	defer srv.Close()
+
+	// 1. Default off
+	if code, v := uiPost(t, srv.URL, ""); code != 200 || v.JogInvertLeft || v.JogInvertRight {
+		t.Fatalf("unexpected defaults: code=%d %+v", code, v)
+	}
+
+	// 2. Enable left only, then both, verify settings.conf and reload
+	if code, v := uiPost(t, srv.URL, "jogInvertLeft=1"); code != 200 || !v.JogInvertLeft || v.JogInvertRight {
+		t.Fatalf("left enable failed: code=%d %+v", code, v)
+	}
+	confBytes, err := os.ReadFile(filepath.Join(dir, "settings.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := splitLines(confBytes)
+	if !slices.Contains(lines, "jog_invert_left=1") || slices.Contains(lines, "jog_invert_right=1") {
+		t.Fatalf("unexpected settings.conf after left enable:\n%s", string(confBytes))
+	}
+
+	if code, v := uiPost(t, srv.URL, "jogInvertRight=1"); code != 200 || !v.JogInvertLeft || !v.JogInvertRight {
+		t.Fatalf("right enable failed: code=%d %+v", code, v)
+	}
+
+	srv2 := httptest.NewServer(New(cfg, nil))
+	defer srv2.Close()
+	if code, v := uiPost(t, srv2.URL, ""); code != 200 || !v.JogInvertLeft || !v.JogInvertRight {
+		t.Fatalf("reload failed: code=%d %+v", code, v)
+	}
+
+	// 3. Reject invalid values
+	for _, bad := range []string{"jogInvertLeft=maybe", "jogInvertRight=2"} {
+		if code, _ := uiPost(t, srv.URL, bad); code != 400 {
+			t.Errorf("expected 400 for %s, got %d", bad, code)
+		}
+	}
+
+	// 4. Reset to false omits keys from settings.conf
+	if code, v := uiPost(t, srv.URL, "jogInvertLeft=0&jogInvertRight=0"); code != 200 || v.JogInvertLeft || v.JogInvertRight {
+		t.Fatalf("reset failed: code=%d %+v", code, v)
+	}
+	confBytes, _ = os.ReadFile(filepath.Join(dir, "settings.conf"))
+	for _, line := range splitLines(confBytes) {
+		if strings.HasPrefix(line, "jog_invert_") {
+			t.Errorf("unexpected default line in settings.conf: %q", line)
+		}
+	}
+
+	// 5. Legacy 5.0.4 UI pack without ControlSurfaceModules/JogWheel.qml suppresses JogWheel capability
+	pack504 := filepath.Join(dir, "packs", "en", "Skins", "EmbeddedCommon")
+	if err := os.MkdirAll(pack504, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pack504, "EmbeddedMain.qml"), []byte("Item{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code, v := uiPost(t, srv.URL, ""); code != 200 || v.Capabilities.JogWheel {
+		t.Fatalf("expected JogWheel=false for legacy 5.0.4 pack, got code=%d %+v", code, v.Capabilities)
+	}
+	pack530 := filepath.Join(dir, "packs", "en", "ControlSurfaceModules", "ControlSurfaceModules")
+	if err := os.MkdirAll(pack530, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pack530, "JogWheel.qml"), []byte("Item{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code, v := uiPost(t, srv.URL, ""); code != 200 || !v.Capabilities.JogWheel {
+		t.Fatalf("expected JogWheel=true when 5.3.0 JogWheel.qml is present, got code=%d %+v", code, v.Capabilities)
 	}
 }

@@ -624,7 +624,7 @@ class UiModSourceTest(unittest.TestCase):
     def test_zoom_and_browse_encoder_are_stock(self):
         # The maintainer wants the stock ZOOM / Browse knob: 0.5 s per detent, hold = Grid Edit,
         # Shift+hold = Cue Edit, double press = Instant Double, also while playing (#147, #157 undone).
-        for gone in ("/GUI/Scripted/Zoom", "scZoom(", "BrowseEncoder.qml", "DeckAction.qml", "Vinyl.qml", "JogWheel.qml",
+        for gone in ("/GUI/Scripted/Zoom", "scZoom(", "BrowseEncoder.qml", "DeckAction.qml", "Vinyl.qml",
                      "!deckConfig.gridEditActive && deckConfig.playing"):
             self.assertNotIn(gone, SRC)
         self.assertIn("Planck.getProperty(\"/Engine/Master/WaveformZoom\")", bp.ZOOM_PROP)  # the shadow lane reads it
@@ -4402,7 +4402,17 @@ for (const rate of [1, 0.5]) {
 
 class StockJogControlsTest(unittest.TestCase):
     def test_jog_and_vinyl_keep_stock_grid_edit_behavior(self):
-        # #157 stays closed with stock behavior, including during playback.
+        # #157 stays closed with stock behavior, including during playback; JogWheel.qml (#213) only
+        # adds invert + Shift+Jog track-search target swap on 5.3.0+ and keeps Jog Touch & BeatGrid Edit stock.
+        expected_jog_patches = [
+            ('    readonly property string scratchWheelPath: deckConfig.activeDeckPath + "ExternalScratchWheel"\n',
+             '    readonly property string scratchWheelPath: deckConfig.activeDeckPath + "ExternalScratchWheel"\n'
+             '    readonly property bool scReverseJogActive: typeof globalConfig !== "undefined" && globalConfig && globalConfig.scIsReverseJog ? !!globalConfig.scIsReverseJog(deckConfig.name) : false\n'),
+            ('        master: device\n',
+             '        master: device\n        invert: module.scReverseJogActive\n'),
+            ('                targetLeft: PropertyTarget {\n                    path: deckConfig.activeDeckTrackPath + "SeekBackward"\n                }\n                targetRight: PropertyTarget {\n                    path: deckConfig.activeDeckTrackPath + "SeekForward"\n                }\n',
+             '                targetLeft: PropertyTarget {\n                    path: deckConfig.activeDeckTrackPath + (module.scReverseJogActive ? "SeekForward" : "SeekBackward")\n                }\n                targetRight: PropertyTarget {\n                    path: deckConfig.activeDeckTrackPath + (module.scReverseJogActive ? "SeekBackward" : "SeekForward")\n                }\n'),
+        ]
         old_root = bp.ROOT
         try:
             for root in ("Skins/Embedded/", "Skins/EmbeddedCommon/"):
@@ -4410,8 +4420,36 @@ class StockJogControlsTest(unittest.TestCase):
                 for dev in (False, True):
                     with self.subTest(root=root, dev=dev):
                         edits = bp.edits(dev)
-                        for name in ("Vinyl", "JogWheel", "BrowseEncoder", "DeckAction"):
+                        for name in ("Vinyl", "BrowseEncoder", "DeckAction"):
                             self.assertFalse(f"ControlSurfaceModules/ControlSurfaceModules/{name}.qml" in edits, name)
+                        jog_rel = "ControlSurfaceModules/ControlSurfaceModules/JogWheel.qml"
+                        if root == "Skins/EmbeddedCommon/":
+                            self.assertFalse(jog_rel in edits)
+                        else:
+                            # Unconditional exact-tuple check (never weakens when 5.3.0/qrc is absent):
+                            self.assertEqual(edits[jog_rel], expected_jog_patches)
+            qrc = LAB / "5.3.0/qrc"
+            if qrc.is_dir():
+                rel = "ControlSurfaceModules/ControlSurfaceModules/JogWheel.qml"
+                stock = (qrc / rel).read_text(encoding="utf-8")
+                bp.ROOT = "Skins/Embedded/"
+                patched = stock
+                for old, new in bp.edits(False)[rel]:
+                    patched = bp.patch(patched, old, new, rel)
+                # ValueNoteAssignment ("Jog Touch") and HighSpeedJogWheelAssignment enabled/propertyPath/target stay byte-identical.
+                self.assertEqual(
+                    patched.split("    ValueNoteAssignment {", 1)[1].split("    HighSpeedJogWheelAssignment {", 1)[0],
+                    stock.split("    ValueNoteAssignment {", 1)[1].split("    HighSpeedJogWheelAssignment {", 1)[0],
+                )
+                self.assertEqual(
+                    patched.split("        channel: deckConfig.midiChannel\n        enabled:", 1)[1].split("        master: device", 1)[0],
+                    stock.split("        channel: deckConfig.midiChannel\n        enabled:", 1)[1].split("        master: device", 1)[0],
+                )
+                self.assertEqual(
+                    patched.split("        readonly property string propertyPath: {", 1)[1].split("    Loader {\n        active: module.hasTrackSearch", 1)[0],
+                    stock.split("        readonly property string propertyPath: {", 1)[1].split("    Loader {\n        active: module.hasTrackSearch", 1)[0],
+                )
+                self.assertNotIn("gridEditActive &&", patched)
         finally:
             bp.ROOT = old_root
 
@@ -6538,6 +6576,163 @@ class MixstreamPadsLayoutTest(unittest.TestCase):
         self.assertIn('spacing: pads.scBeatJumpBank ? 4 : 0', column_block)
         pads_layout_block = pads_content.split('id: padsLayout', 1)[1].split('Repeater {', 1)[0]
         self.assertNotIn('Layout.fillHeight: true', pads_layout_block)
+
+
+class ReverseJogWheelTest(unittest.TestCase):
+    def test_device_tab_and_jog_wheel_patches_on_530_and_504_compat(self):
+        rows = bp.load_dict()
+        for key, hans, hant in (
+            ("Reverse Jog Wheel", "反转转盘方向", "反轉轉盤方向"),
+            ("Reverse Left Jog Wheel", "反转左侧转盘方向", "反轉左側轉盤方向"),
+            ("Reverse Right Jog Wheel", "反转右侧转盘方向", "反轉右側轉盤方向"),
+        ):
+            self.assertEqual(rows[key]["zh-Hans"], hans)
+            self.assertEqual(rows[key]["zh-Hant"], hant)
+
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/EmbeddedCommon/"
+            e504 = bp.edits(False)
+            self.assertNotIn("ControlSurfaceModules/ControlSurfaceModules/JogWheel.qml", e504)
+            dev_504 = "".join(new for _, new in e504["Skins/EmbeddedCommon/Views/ControlCenter/Tabs/Preferences/TabContents/DeviceTabContent.qml"])
+            self.assertNotIn("EngineX_JogInvert", dev_504)
+        finally:
+            bp.ROOT = old_root
+
+        qrc = LAB / "5.3.0" / "qrc"
+        if not qrc.is_dir():
+            self.skipTest(f"{qrc} not found")
+        with tempfile.TemporaryDirectory(prefix="ui-reverse-jog-") as tmp:
+            out = Path(tmp) / "packs"
+            res = subprocess.run(["python3", str(BUILD_PACKS), "--qrc", str(qrc), "--out", str(out), "--release"],
+                                 capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0, res.stderr)
+            for lang, expected_left, expected_right in (
+                ("en", "Reverse Left Jog Wheel", "Reverse Right Jog Wheel"),
+                ("zh-Hans", "反转左侧转盘方向", "反转右侧转盘方向"),
+                ("zh-Hant", "反轉左側轉盤方向", "反轉右側轉盤方向"),
+            ):
+                dev = (out / lang / "Skins/Embedded/Views/ControlCenter/Tabs/Preferences/DeviceTabContent.qml").read_text(encoding="utf-8")
+                self.assertIn('objectName: "EngineX_JogInvertLeft"', dev)
+                self.assertIn('objectName: "EngineX_JogInvertRight"', dev)
+                self.assertIn(expected_left, dev)
+                self.assertIn(expected_right, dev)
+                self.assertIn('root.scCall("jogInvertLeft=" + index)', dev)
+                self.assertIn('root.scCall("jogInvertRight=" + index)', dev)
+                jog = (out / lang / "ControlSurfaceModules/ControlSurfaceModules/JogWheel.qml").read_text(encoding="utf-8")
+                self.assertIn("invert: module.scReverseJogActive", jog)
+                self.assertIn('module.scReverseJogActive ? "SeekForward" : "SeekBackward"', jog)
+                self.assertIn('module.scReverseJogActive ? "SeekBackward" : "SeekForward"', jog)
+                gcfg = (out / lang / "ControlSurfaceModules/ControlSurfaceModules/GlobalAssignmentConfig.qml").read_text(encoding="utf-8")
+                self.assertIn('/GUI/Scripted/EngineXJogInvertLeft', gcfg)
+                self.assertIn('/GUI/Scripted/EngineXJogInvertRight', gcfg)
+                self.assertIn('/GUI/Scripted/EngineXJogInvertReady', gcfg)
+                self.assertIn('scGlobalConfig.scReverseJogLeft = !!j.jogInvertLeft', gcfg)
+                self.assertIn('scGlobalConfig.scReverseJogRight = !!j.jogInvertRight', gcfg)
+
+    @unittest.skipUnless(shutil.which("node"), "node needed for Reverse Jog Wheel JS tests")
+    def test_capability_gating_single_dual_and_motorized_and_planck_bridge_js(self):
+        fn_sync = re.search(r"function scSyncReverseJog\([^)]*\)\s*\{[\s\S]*?\n\t\}", bp.SERVICES_MAIN).group(0)
+        fn_parse = re.search(r"function scParseSettingsConf\([^)]*\)\s*\{[\s\S]*?\n\t\}", bp.SERVICES_MAIN).group(0)
+        script = f"""
+const assert = require('node:assert/strict');
+function uiCaps(board, scPlayer, hasMotorizedPlatters) {{
+    const scBoard = String(board || "");
+    const scIsPlayerBoard = !!scPlayer || ["JP07", "JP08", "JP13", "JP14"].indexOf(scBoard) >= 0;
+    const scHasJogWheel = !hasMotorizedPlatters && ["JP08", "JP14", "RMZ2"].indexOf(scBoard) < 0;
+    const showLeft = scHasJogWheel;
+    const showRight = scHasJogWheel && !scIsPlayerBoard;
+    const leftTitle = scIsPlayerBoard ? "Reverse Jog Wheel" : "Reverse Left Jog Wheel";
+    return {{ showLeft, showRight, leftTitle }};
+}}
+// 1-jog players keep 1 row even when #49 4-deck hook clears Config.device.isPlayer
+assert.deepEqual(uiCaps("JP07", true, false), {{ showLeft: true, showRight: false, leftTitle: "Reverse Jog Wheel" }});
+assert.deepEqual(uiCaps("JP13", false, false), {{ showLeft: true, showRight: false, leftTitle: "Reverse Jog Wheel" }});
+// 2-jog consoles (including SC LIVE 4 JP21, PRIME 4 JC11, Mixstream NH08, PRIME 4 G2 JP24) show both Left & Right
+for (const b of ["JP21", "JP20", "JC11", "JC11S", "JC16", "JP11", "JP11S", "NH08", "NH08S", "NH10", "JP24"]) {{
+    assert.deepEqual(uiCaps(b, false, false), {{ showLeft: true, showRight: true, leftTitle: "Reverse Left Jog Wheel" }}, b);
+}}
+// Motorized platter models (SC5000M, SC6000M, SYSTEM ONE) hide both rows
+assert.deepEqual(uiCaps("JP08", true, true), {{ showLeft: false, showRight: false, leftTitle: "Reverse Jog Wheel" }});
+assert.deepEqual(uiCaps("JP14", true, true), {{ showLeft: false, showRight: false, leftTitle: "Reverse Jog Wheel" }});
+assert.deepEqual(uiCaps("RMZ2", false, true), {{ showLeft: false, showRight: false, leftTitle: "Reverse Left Jog Wheel" }});
+assert.deepEqual(uiCaps("RMZ2", false, false), {{ showLeft: false, showRight: false, leftTitle: "Reverse Left Jog Wheel" }});
+
+// Test Planck bridge + settings.conf parser + GlobalAssignmentConfig fallback/sync
+const planck = {{
+    "/GUI/Scripted/EngineXJogInvertLeft": {{ translator: {{ state: false }} }},
+    "/GUI/Scripted/EngineXJogInvertRight": {{ translator: {{ state: false }} }},
+    "/GUI/Scripted/EngineXJogInvertReady": {{ translator: {{ state: false }} }},
+}};
+globalThis.Planck = {{ getProperty: (p) => planck[p] || null }};
+let scReverseJogLeft = false, scReverseJogRight = false, scReverseJogSynced = false;
+let scCueCountdown = true, scTracklistWaveform = true, scDualColumn = false, scSyncGuardPct = 0;
+let scSwapLoopOrder = false, scLedBrightness = 100, scUIScale = 100, scStemsEqMode = false;
+let scBeatJumpPads = false, scPioneerFx = "off", scFxTimeMode = "beats", scFxTimeMs = 500;
+globalThis.root = {{
+    get scDualColumn() {{ return scDualColumn; }}, set scDualColumn(v) {{ scDualColumn = v; }},
+    get scTracklistWaveform() {{ return scTracklistWaveform; }}, set scTracklistWaveform(v) {{ scTracklistWaveform = v; }},
+    get scCueCountdown() {{ return scCueCountdown; }}, set scCueCountdown(v) {{ scCueCountdown = v; }},
+    get scSyncGuardPct() {{ return scSyncGuardPct; }}, set scSyncGuardPct(v) {{ scSyncGuardPct = v; }},
+    get scSwapLoopOrder() {{ return scSwapLoopOrder; }}, set scSwapLoopOrder(v) {{ scSwapLoopOrder = v; }},
+    get scReverseJogLeft() {{ return scReverseJogLeft; }}, set scReverseJogLeft(v) {{ scReverseJogLeft = v; }},
+    get scReverseJogRight() {{ return scReverseJogRight; }}, set scReverseJogRight(v) {{ scReverseJogRight = v; }},
+    get scLedBrightness() {{ return scLedBrightness; }}, set scLedBrightness(v) {{ scLedBrightness = v; }},
+    get scUIScale() {{ return scUIScale; }}, set scUIScale(v) {{ scUIScale = v; }},
+    get scStemsEqMode() {{ return scStemsEqMode; }}, set scStemsEqMode(v) {{ scStemsEqMode = v; }},
+    get scBeatJumpPads() {{ return scBeatJumpPads; }}, set scBeatJumpPads(v) {{ scBeatJumpPads = v; }},
+    get scPioneerFx() {{ return scPioneerFx; }}, set scPioneerFx(v) {{ scPioneerFx = v; }},
+}};
+const scReverseJogLeftProp = Planck.getProperty("/GUI/Scripted/EngineXJogInvertLeft");
+const scReverseJogRightProp = Planck.getProperty("/GUI/Scripted/EngineXJogInvertRight");
+const scReverseJogReadyProp = Planck.getProperty("/GUI/Scripted/EngineXJogInvertReady");
+function scFxMsInteger(v) {{ return parseInt(v) || 500; }}
+function scFxMsApply(m, v) {{ scFxTimeMode = m; scFxTimeMs = v; }}
+{fn_sync}
+{fn_parse}
+
+function effective(httpL, httpR, deckName) {{
+    const pL = planck["/GUI/Scripted/EngineXJogInvertLeft"];
+    const pR = planck["/GUI/Scripted/EngineXJogInvertRight"];
+    const pReady = planck["/GUI/Scripted/EngineXJogInvertReady"];
+    const effL = (pReady && pReady.translator && pReady.translator.state && pL && pL.translator) ? !!pL.translator.state : httpL;
+    const effR = (pReady && pReady.translator && pReady.translator.state && pR && pR.translator) ? !!pR.translator.state : httpR;
+    return deckName === "Right" ? effR : effL;
+}}
+
+// Before Ready=true, HTTP timer value wins (so startup never misses saved jog_invert_left=1)
+assert.equal(effective(true, false, "Left"), true);
+assert.equal(effective(true, false, ""), true);
+assert.equal(effective(true, false, "Right"), false);
+
+// Partial translator availability (e.g., pR translator missing while pReady exists) MUST NOT mark Ready=true
+const savedRightTranslator = planck["/GUI/Scripted/EngineXJogInvertRight"].translator;
+planck["/GUI/Scripted/EngineXJogInvertRight"].translator = null;
+scParseSettingsConf("jog_invert_left=1\\njog_invert_right=1\\n");
+assert.equal(scReverseJogSynced, false);
+assert.equal(planck["/GUI/Scripted/EngineXJogInvertReady"].translator.state, false, "Ready must stay false until both Left and Right translators exist");
+assert.equal(effective(false, true, "Right"), true, "HTTP fallback continues serving Right while Ready is false");
+planck["/GUI/Scripted/EngineXJogInvertRight"].translator = savedRightTranslator;
+
+// Parsing settings.conf populates Left/Right AND flips Ready=true
+scParseSettingsConf("jog_invert_left=1\\njog_invert_right=0\\n");
+assert.equal(scReverseJogSynced, true);
+assert.equal(planck["/GUI/Scripted/EngineXJogInvertLeft"].translator.state, true);
+assert.equal(planck["/GUI/Scripted/EngineXJogInvertRight"].translator.state, false);
+assert.equal(planck["/GUI/Scripted/EngineXJogInvertReady"].translator.state, true);
+assert.equal(effective(false, true, "Left"), true);
+assert.equal(effective(false, true, ""), true);
+assert.equal(effective(false, true, "Right"), false);
+
+// Re-parsing settings.conf after clearing keys resets booleans cleanly
+scParseSettingsConf("ui_scale=100\\n");
+assert.equal(planck["/GUI/Scripted/EngineXJogInvertLeft"].translator.state, false);
+assert.equal(planck["/GUI/Scripted/EngineXJogInvertRight"].translator.state, false);
+assert.equal(effective(true, true, "Left"), false);
+assert.equal(effective(true, true, "Right"), false);
+"""
+        res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
 
 
 if __name__ == "__main__":
