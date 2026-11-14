@@ -54,6 +54,7 @@ var shadowDataRoot, shadowMediaRoot, shadowBeaconOn = "/data", "/media", true
 type deckState struct {
 	baseKey      string  // source-only file identity; Key also identifies the loaded session
 	Deck         int     `json:"deck"`
+	Src          int     `json:"src,omitempty"`  // shadow deck in another slot than the source's own deck number (#160): that number, by which stock's position mirror names it
 	Path         string  `json:"path,omitempty"` // a file on this deck
 	Net          string  `json:"net,omitempty"`  // Engine's TrackNetworkPath, posted by the QML
 	Key          string  `json:"key,omitempty"`  // changes with the track
@@ -1706,6 +1707,10 @@ func (s *Server) shadowLegacy(role string, now time.Time, all bool, lines ...[]i
 			continue
 		}
 		d := p.deckState
+		d.Src = 0
+		if d.Deck != deck {
+			d.Src = d.Deck
+		}
 		d.Deck = deck
 		d.LineIn, d.DisplayOnly = false, false
 		if d.Lead == nil {

@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 )
 
-// hub fans captured PCM out to local HTTP listeners (/live.mp3, /live.wav).
+// hub fans captured PCM out to local HTTP listeners (/live.wav).
 type hub struct {
 	mu        sync.Mutex
 	subs      map[chan []byte]struct{}

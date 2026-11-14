@@ -104,8 +104,8 @@ func TestBroadcastPostConfigAndPasswordHandling(t *testing.T) {
 	if !st.PasswordSet {
 		t.Errorf("expected passwordSet=true")
 	}
-	if st.Bitrate != 320 {
-		t.Errorf("expected bitrate=320, got %d", st.Bitrate)
+	if st.Format != "wav" { // the old client's "mp3"
+		t.Errorf("expected format=wav, got %s", st.Format)
 	}
 	if st.StreamName != "Main Stage" {
 		t.Errorf("expected streamName='Main Stage', got %s", st.StreamName)
@@ -286,12 +286,10 @@ func enableLiveWithPCM(t *testing.T, s *Server, stateDir string) {
 
 func TestLiveStreamOffReturns503(t *testing.T) {
 	s, _ := newTestServer(t)
-	for _, path := range []string{"/live.wav", "/live.mp3"} {
-		rec := httptest.NewRecorder()
-		s.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
-		if rec.Code != http.StatusServiceUnavailable {
-			t.Errorf("%s: expected 503 while Live Stream is off, got %d", path, rec.Code)
-		}
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, httptest.NewRequest("GET", "/live.wav", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 while Live Stream is off, got %d", rec.Code)
 	}
 }
 
@@ -321,40 +319,36 @@ func TestLiveWAVStreamIsPublic(t *testing.T) {
 	}
 }
 
-func TestLiveMP3UsesExternalEncoder(t *testing.T) {
+// The MP3 output is retired: /live.mp3 leads to /live.wav, with or without an
+// encoder on the deck.
+func TestLiveMP3RedirectsToWAV(t *testing.T) {
 	s, dir := newTestServer(t)
 	enableLiveWithPCM(t, s, dir)
 	srv := httptest.NewServer(s)
 	defer srv.Close()
 
-	// Without lame/ffmpeg the endpoint says so instead of sending fake audio.
-	t.Setenv("PATH", t.TempDir())
-	resp, err := http.Get(srv.URL + "/live.mp3")
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("expected 503 without an encoder, got %d", resp.StatusCode)
-	}
-
-	// A fake "lame" that just copies stdin to stdout proves the PCM goes through it.
 	bin := t.TempDir()
 	if err := os.WriteFile(filepath.Join(bin, "lame"), []byte("#!/bin/sh\nexec cat\n"), 0755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+":/bin:/usr/bin")
-	resp, err = http.Get(srv.URL + "/live.mp3")
+	noFollow := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	resp, err := noFollow.Get(srv.URL + "/live.mp3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusFound || resp.Header.Get("Location") != "/live.wav" {
+		t.Fatalf("/live.mp3: %d, Location %q; want a redirect to /live.wav", resp.StatusCode, resp.Header.Get("Location"))
+	}
+	resp, err = http.Get(srv.URL + "/live.mp3") // what a player does
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != 200 || resp.Header.Get("Content-Type") != "audio/mpeg" {
-		t.Fatalf("unexpected response: %d %q", resp.StatusCode, resp.Header.Get("Content-Type"))
-	}
-	buf := make([]byte, 4)
-	if _, err := io.ReadFull(resp.Body, buf); err != nil || !bytes.Equal(buf, []byte{1, 2, 3, 4}) {
-		t.Errorf("encoder output not streamed: %v %v", buf, err)
+	head := make([]byte, 12)
+	if _, err := io.ReadFull(resp.Body, head); err != nil || resp.Header.Get("Content-Type") != "audio/wav" || string(head[:4]) != "RIFF" {
+		t.Fatalf("following /live.mp3: %q %q %v, want the WAV stream", resp.Header.Get("Content-Type"), head, err)
 	}
 }
 
@@ -675,76 +669,6 @@ func TestLANHostPrefersWired(t *testing.T) {
 	}
 	if got := pickLANHost(nil); got != "sc5000.lan" {
 		t.Fatalf("no address: %s, want the name", got)
-	}
-}
-
-// smallSendBuffer gives every accepted connection a small kernel send buffer, so a
-// listener that stops reading blocks the handler's Write within a second of audio.
-type smallSendBuffer struct{ net.Listener }
-
-func (l smallSendBuffer) Accept() (net.Conn, error) {
-	c, err := l.Listener.Accept()
-	if tc, ok := c.(*net.TCPConn); ok {
-		_ = tc.SetWriteBuffer(8 << 10)
-	}
-	return c, err
-}
-
-// BH2-A3-2: /live.mp3 had no write deadline at all. A listener that went away
-// without closing kept its handler, encoder process and hub subscription until
-// TCP gave up (about fifteen minutes).
-func TestLiveMP3DropsAListenerThatStoppedReading(t *testing.T) {
-	old := liveMP3Stall
-	liveMP3Stall = 300 * time.Millisecond
-	t.Cleanup(func() { liveMP3Stall = old })
-	s, dir := newTestServer(t)
-	enableLiveWithPCM(t, s, dir)
-	bin := t.TempDir()
-	pidFile := filepath.Join(t.TempDir(), "encoder.pid")
-	if err := os.WriteFile(filepath.Join(bin, "lame"), []byte("#!/bin/sh\necho $$ > '"+pidFile+"'\nexec cat\n"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", bin+":/bin:/usr/bin")
-	srv := httptest.NewUnstartedServer(s)
-	srv.Listener = smallSendBuffer{srv.Listener}
-	srv.Start()
-	defer srv.Close()
-
-	u, _ := url.Parse(srv.URL)
-	d := net.Dialer{Control: func(_, _ string, rc syscall.RawConn) error {
-		return rc.Control(func(fd uintptr) {
-			_ = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, syscall.TCP_MAXSEG, 1448)
-			_ = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_RCVBUF, 32<<10)
-		})
-	}}
-	conn, err := d.Dial("tcp", u.Host)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-	if _, err := fmt.Fprintf(conn, "GET /live.mp3 HTTP/1.1\r\nHost: x\r\n\r\n"); err != nil {
-		t.Fatal(err)
-	}
-	// The stream is flowing: status line and some audio. Then the listener reads no more.
-	if got := readFor(t, conn, 500*time.Millisecond); !bytes.HasPrefix(got, []byte("HTTP/1.1 200")) || len(got) < 4096 {
-		t.Fatalf("no stream before the stall: %d bytes %q", len(got), got[:min(len(got), 40)])
-	}
-	if n := s.broadcaster().Status().Listeners; n != 1 {
-		t.Fatalf("listeners while streaming = %d, want 1", n)
-	}
-	pid, err := os.ReadFile(pidFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	deadline := time.Now().Add(5 * time.Second)
-	for s.broadcaster().Status().Listeners != 0 {
-		if time.Now().After(deadline) {
-			t.Fatalf("the listener stopped reading 5 s ago and still holds its place (stall limit %v)", liveMP3Stall)
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	if _, err := os.Stat("/proc/" + strings.TrimSpace(string(pid))); err == nil {
-		t.Fatalf("encoder process %s outlived its listener", strings.TrimSpace(string(pid)))
 	}
 }
 

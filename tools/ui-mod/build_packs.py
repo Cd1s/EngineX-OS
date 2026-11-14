@@ -1392,8 +1392,9 @@ SERVICES_MAIN = """
 				position: root.scTr(q + "Position") || scShadowEmptyObject, name: root.scTr(q + "Name") || scShadowEmptyObject,
 				color: root.scTr(q + "Color") || scShadowEmptyObject})
 		}
-		// Rare signals: a play or CUE press restores the 25 Hz sampling at once.
-		for (const t of [p.play, p.cueLED]) if (t.stateChanged) t.stateChanged.connect(root.scShadowWake)
+		// Rare signals: a play or CUE press, or a hand on the platter, restores the 25 Hz sampling at once
+		// (at the 5 Hz of a resting deck a scratch began up to 200 ms late on the other player: measured).
+		for (const t of [p.play, p.cueLED, p.touch, p.platterTouch]) if (t.stateChanged) t.stateChanged.connect(root.scShadowWake)
 		scShadowDeckProperties[d] = p
 		return p
 	}
@@ -1493,7 +1494,7 @@ SERVICES_MAIN = """
 				// A held platter is not an indefinitely stale GUI read. After
 				// 500 ms use its real position once, then keep the normal jog line
 				// until playback advances again; never seek on every held tick.
-				s.phaseHold = s.sync && s.ps && p.ps && s.net === p.net && !freshRaw &&
+				s.phaseHold = !s.scratch && s.sync && s.ps && p.ps && s.net === p.net && !freshRaw &&
 					(p.phaseHold || now - s.rawStillAt >= 500)
 				if (s.phaseHold) s.posMs = s.rawPos
 				if (s.phaseHold) { if (!p.phaseHold) s.jumps++ }
@@ -1872,6 +1873,7 @@ SERVICES_MAIN = """
 		if (u1) u1.state = true
 		const u2 = root.scTr("/Engine/Deck" + d + "/Track/Unload")
 		if (u2) u2.state = true
+		scShadowMirrorOff(d, at.mirror)
 		delete scShadowAt[d]
 		if (scShadowHead[d]) { const head = Object.assign({}, scShadowHead); delete head[d]; scShadowHead = head }
 	}
@@ -1887,7 +1889,7 @@ SERVICES_MAIN = """
 		const id = e.id || e.path
 		if (at.path !== e.path || at.id !== id) {
 			scShadowScratchRelease(d, at)
-			at = scShadowAt[d] = {path: e.path, id: id, tries: 0, seekAt: 0, seeks: 0, loads: at.loads || 0, jumps: e.jumps, nativeSync: !!at.nativeSync}
+			at = scShadowAt[d] = {path: e.path, id: id, tries: 0, seekAt: 0, seeks: 0, loads: at.loads || 0, jumps: e.jumps, nativeSync: !!at.nativeSync, mirror: at.mirror}
 			root.scShadowLoad(d, at, e, now)
 			return
 		}
@@ -1898,7 +1900,7 @@ SERVICES_MAIN = """
 		if (root.scShadowEnd(d, at, e, now)) return
 		at.link = e.link || ""
 		at.rate = scShadowRate(e)
-		// no scShadowLink(): a RemoteState/Register subscription made Engine spam "service has disappeared" and block the Librarian when the other player went off; our UDP push already carries the edges
+		scShadowMirror(d, at, now)
 		scShadowCues(d, at, e, now)
 		// Updates sent before an Engine Link edge arrive after it: skip them, or
 		// they would undo the edge for a moment.
@@ -1922,7 +1924,7 @@ SERVICES_MAIN = """
 		if ((!e.link || !root.scPlayer) && e.master && !at.master) at.wantMaster = now + 5000
 		if (!e.master || (e.link && root.scPlayer)) at.wantMaster = 0
 		at.master = !!e.master
-		const sr = g("/Track/SampleRate").value, len = g("/Track/TrackLength").unnormalized
+		const sr = at.sampleRate || (at.sampleRate = g("/Track/SampleRate").value), len = g("/Track/TrackLength").unnormalized
 		if (!(sr > 0 && len > 0)) return
 		const syncEdge = !!e.sync && at.sourceSync === false
 		const tempoStep = at.sourceRate !== undefined && Math.abs(at.rate - at.sourceRate) > 2e-4
@@ -2035,27 +2037,27 @@ SERVICES_MAIN = """
 			if (!at.scratch) {
 				at.scratchEnable = en ? !!en.state : undefined
 				at.scratchTouch = tc ? !!tc.state : undefined
+				at.scratchPosition = g("/Track/TrackPosition"); at.scratchMove = mv
+				at.scratchMirror = at.link ? root.scTr("/Engine/BeatInfoSenderControl/" + at.link + "/PositionInSamples" + (e.src >= 1 && e.src <= 4 ? e.src : d)) : null
+				at.scratchOwn = null; at.scratchPush = undefined
 			}
 			if (en && !en.state) en.state = true
 			if (tc && !tc.state) tc.state = true
 			at.scratch = true
-			if (Math.abs(drift) > 150) {
-				if (now - at.seekAt >= 250) seek(target)
-			} else if (Math.abs(drift) > 6 && mv) {
-				const ticks = Math.min(2500, Math.round(Math.abs(drift) * (e.playing ? 15 : 35)))
-				if (ticks >= 15) {
-					if (drift > 0) mv.incValue(ticks, 0, 0, false, true, 0)
-					else mv.decValue(ticks, 0, 0, false, true, 0)
-				}
-			}
+			if (e.positionMs !== at.scratchPush) { at.scratchPush = e.positionMs; at.scratchPushAt = e.at || now }
+			scShadowScratchTimer.start()
 			at.jumps = e.jumps
 			return dbg("scratch")
 		}
 		if (wasScratch) {
+			// Let go while it plays, the deck plays on the frames' one sample behind (25-45 ms, measured).
+			// Jog ticks sent with the release do nothing, and a pitch bend by the last samples' speed went
+			// the wrong way when the source had just turned (both measured): one seek, as before.
 			if (Math.abs(drift) > 35 && now - at.seekAt >= 80) {
 				seek(target); at.jumps = e.jumps
 				return dbg("scratch-end")
 			}
+			at.target = undefined // paused, it stopped that sample short: where the source rests is a new position, though it be the old one
 		}
 		if (!e.playing) {
 			at.landing = undefined; at.phaseUntil = 0
@@ -2262,6 +2264,106 @@ SERVICES_MAIN = """
 		b.p.state = false
 		b.at.env = undefined
 	}
+	// Scratch follow, one step a frame. The source's playhead is stock's mirror (scShadowMirror)
+	// and, until that runs or without Engine Link (a CDJ), our own update. The deck is moved with
+	// jog ticks: 20 a track ms on a JP07, playing or paused, at 44.1 and 48 kHz, for 5 to 16000
+	// ticks a frame (measured: 50x). It reports its position ~40 ms late, 29 times a second: steering
+	// by that report at 35 ticks a ms overshot every stroke (a +-160 ms scratch drew +-800 ms,
+	// a third of the time the wrong way). So the frames keep their own position, on the line
+	// between the source's last two samples: one sample behind, at the speed the source had,
+	// and nowhere it has not been (carried on from its newest sample at once, a stroke's end
+	// drew 40 ms too far). A late sample is waited for half a sample longer on that line, then
+	// the deck rests there; when the sample comes the deck is slowed, never turned back. The
+	// mirror arrives once a period, which the frames only see to 16 ms: its speed is the travel
+	// over the period itself. The report only trims what the ticks did not do, once the deck is
+	// slow enough for it to tell.
+	// A whip of the platter runs past 20x. Up to 60x over the time a sample spans (a stalled frame
+	// misses one) it is motion like any other, the jog's: the seek is for a cue under the hand and
+	// a copy 2 s off. (At 500 ms a sample it took every sample past 14x for a jump: the copy stood,
+	// and went by 4 seeks a second.)
+	Timer {
+		id: scShadowScratchTimer
+		interval: 16; repeat: true
+		onTriggered: {
+			const now = Date.now()
+			for (let d = 1; d <= 4; d++) {
+				const at = root.scShadowAt[d]
+				if (!at || !at.scratch || !at.scratchMove) continue
+				const posMs = at.scratchPosition.unnormalized / at.sampleRate * 1000
+				// -1 until the stream runs. That, a read that fails or anything else that is no position: our own update.
+				let raw = -1
+				try { if (at.scratchMirror) raw = at.scratchMirror.value } catch (err) {}
+				const live = typeof raw === "number" && isFinite(raw) && raw >= 0
+				if (!at.scratchOwn) {
+					at.scratchX = posMs; at.scratchRem = 0; at.scratchPeriod = 35; at.scratchPace = 0; at.scratchFrame = now
+					at.scratchOwn = {}; at.scratchMir = {}; at.scratchWas = 0; at.scratchHold = 0; at.scratchLive = live
+				}
+				root.scShadowScratchLine(at, at.scratchOwn, at.scratchPush, at.scratchPushAt, now, false)
+				if (live) {
+					root.scShadowScratchLine(at, at.scratchMir, raw / at.sampleRate * 1000, now, now, true)
+					// Back in the middle of a scratch, the mirror leads again once it has told a speed.
+					if (at.scratchMir.span) at.scratchLive = true
+				} else {
+					// Our own update tells where the source was 40-80 ms before the mirror did: the deck is ahead of
+					// that line, and waits for it there (100 ms at most, should the source have stopped short of it).
+					if (at.scratchLive) { at.scratchHold = now + 100; at.scratchWay = at.scratchWas }
+					at.scratchLive = false; at.scratchMir.raw = undefined
+				}
+				const l = at.scratchLive ? at.scratchMir : at.scratchOwn
+				const vel = l.vel, dt = Math.max(1, Math.min(50, now - at.scratchFrame))
+				at.scratchFrame = now
+				const target = l.src + vel * (Math.min(now - l.seen, l.span * 1.5) - l.span)
+				const joining = !at.scratchLive && now < at.scratchHold, ahead = joining && (target - at.scratchX) * (vel || at.scratchWay) < 0
+				at.drift = target - posMs
+				if (root.scShadowDebug) root.scShadowDbg({deck: d, act: "scratch-frame", posMs: posMs, target: target, drift: at.drift, link: live})
+				if (!ahead && Math.abs(target - at.scratchX) > 2000 + Math.abs(vel) * 100) {
+					// Too far for the jog (a jump, or a deck that was not on the source): one seek, 4 a second at most.
+					// A frame late in a whip is a sample of the source's own speed behind: that is not far.
+					if (now - at.seekAt >= 250) { root.scShadowSeek(d, at, target); at.scratchX = target; at.scratchRem = 0 }
+					continue
+				}
+				// The frame that first sees a turn carries no speed: the line went the old way for part of it.
+				let step = vel * at.scratchWas < 0 ? 0 : vel * dt
+				at.scratchWas = vel
+				step += (target - at.scratchX - step) * 0.25
+				if (step * vel < 0 || ahead) step = 0
+				else if (joining && Math.abs(step) > Math.abs(target - at.scratchX)) step = target - at.scratchX // onto that line, not past it
+				step = Math.max(-800, Math.min(800, step)) // no frame sends more than the jog was measured at
+				at.scratchX += step
+				// The report is up to 80 ms old, and knows nothing of this frame's ticks or the last one's: it says
+				// what the ticks did only once the deck has been slow for a while. (It can be 3 ms older still: 1 ms
+				// of track at 3.5x, but 11 ms past the stop of a whip at 24x. Past 10x it gets 100 ms; below, where
+				// every scratch recorded ran (5.6x at most), the 80 a scratch was tuned with.)
+				at.scratchPace = Math.max(Math.abs(step) / dt, at.scratchPace * 0.9)
+				const slip = posMs - at.scratchX, tol = 3 + at.scratchPace * (at.scratchPace > 10 ? 100 : 80)
+				// For a frame or two after a seek the report is still where the deck was before it (measured).
+				if (Math.abs(slip) > tol && now - at.seekAt > 100) step = Math.max(-800, Math.min(800, step - (slip - (slip > 0 ? tol : -tol)) * 0.15))
+				const ticks = Math.round(step * 20 + at.scratchRem)
+				at.scratchRem += step * 20 - ticks
+				if (ticks > 0) at.scratchMove.incValue(ticks, 0, 0, false, true, 0)
+				else if (ticks < 0) at.scratchMove.decValue(-ticks, 0, 0, false, true, 0)
+			}
+		}
+	}
+	// One source's line l through its last two samples. The mirror and our own update each keep their
+	// own: they tell different times, and one's sample after the other's read as a stroke back.
+	function scShadowScratchLine(at, l, src, seen, now, mirror) {
+		if (l.raw === undefined) {
+			l.raw = l.src = src; l.seen = seen; l.vel = l.span = 0
+		} else if (src !== l.raw) {
+			const gap = seen - l.seen
+			if (mirror && gap >= 20 && gap <= 60) at.scratchPeriod += (gap - at.scratchPeriod) * 0.05
+			// After a rest the travel is one sample's; a cue or needle drop under the hand (faster than 60x) is no speed.
+			const span = !l.span ? at.scratchPeriod : mirror ? Math.max(1, Math.round(gap / at.scratchPeriod)) * at.scratchPeriod : Math.max(20, Math.min(60, gap))
+			l.span = Math.abs(src - l.raw) > span * 60 ? 0 : span
+			l.vel = l.span ? (src - l.raw) / span : 0
+			l.raw = l.src = src; l.seen = seen
+		} else if (l.vel && (now - l.seen > l.span * 1.5 || Math.abs(l.vel) * (now - l.seen - l.span) > 60)) {
+			// It rests where that line took the deck: half a sample past the newest one, and 60 ms of track
+			// at most (what a scratch at 3.5x runs on; a whip stopped dead ran on 350 ms and came back).
+			l.src += Math.max(-60, Math.min(60, l.vel * l.span * 0.5)); l.vel = l.span = 0
+		}
+	}
 	function scShadowScratchRelease(d, at) {
 		if (!at || !at.scratch) return
 		const tc = root.scTr("/Engine/Deck" + d + "/ExternalScratchWheelTouch")
@@ -2269,6 +2371,9 @@ SERVICES_MAIN = """
 		if (tc && at.scratchTouch !== undefined && !!tc.state !== at.scratchTouch) tc.state = at.scratchTouch
 		if (en && at.scratchEnable !== undefined && !!en.state !== at.scratchEnable) en.state = at.scratchEnable
 		at.scratch = false; at.scratchTouch = undefined; at.scratchEnable = undefined
+		let active = false
+		for (let n = 1; n <= 4; n++) if (scShadowAt[n] && scShadowAt[n].scratch) active = true
+		if (!active) scShadowScratchTimer.stop()
 		at.env = undefined; at.fine = undefined; at.over = 0; at.wide = false
 	}
 	// Asks Engine for the source's track on shadow deck d. Engine answers nothing,
@@ -2476,6 +2581,30 @@ SERVICES_MAIN = """
 		at.seekAt = Date.now()
 		at.env = undefined
 		return target
+	}
+	// Stock's own mirror of the other player's playheads. Its Engine's BeatInfo stream, which
+	// stock switches on for Instant Doubles between players, puts each of its decks' positions
+	// (track samples, -1 until it runs) into /Engine/BeatInfoSenderControl/<its id>/
+	// PositionInSamples<N> every third audio block: 34.8 ms on a JP07, exact through a scratch
+	// and ~40 ms ahead of our own update (measured between two JP07). It starts 140 ms after the
+	// switch, so it stays on while a deck of that player is held (under 1 % of EMain), checked
+	// once a second: Engine switches it off itself when that player goes away and comes back.
+	// at.mirror is the player this slot keeps it on for: it outlives the slot's next load, which
+	// is not held yet when that player goes away.
+	// No RemoteState/Register, whose subscription blocked the Librarian when the player went off.
+	function scShadowMirror(d, at, now) {
+		if (at.mirror === at.link && now - (at.mirrorAt || 0) < 1000) return
+		if (at.mirror !== at.link) scShadowMirrorOff(d, at.mirror) // the slot went to another player's track
+		at.mirror = at.link; at.mirrorAt = now
+		const on = at.link ? root.scTr("/Engine/BeatInfoSenderControl/" + at.link + "/Enabled") : null
+		if (on && !on.state) on.state = true
+	}
+	// Off again, once no other slot keeps that player's mirror.
+	function scShadowMirrorOff(d, link) {
+		if (!link) return
+		for (const n in scShadowAt) if (Number(n) !== d && scShadowAt[n].mirror === link) return
+		const on = root.scTr("/Engine/BeatInfoSenderControl/" + link + "/Enabled")
+		if (on && on.state) on.state = false
 	}
 	// Engine Link already mirrors the other Engine's properties here, within a
 	// few ms of that Engine changing them (measured: our own update arrives

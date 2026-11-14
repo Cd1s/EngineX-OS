@@ -46,11 +46,8 @@ func TestConfigNormalizationAndDefaults(t *testing.T) {
 	if st.Username != "source" {
 		t.Errorf("expected default username source, got %s", st.Username)
 	}
-	if st.Format != "mp3" {
-		t.Errorf("expected default format mp3, got %s", st.Format)
-	}
-	if st.Bitrate != 192 {
-		t.Errorf("expected default bitrate 192, got %d", st.Bitrate)
+	if st.Format != "wav" {
+		t.Errorf("expected default format wav, got %s", st.Format)
 	}
 	if st.StreamName != "EngineX OS Live Mix" {
 		t.Errorf("expected default streamName, got %s", st.StreamName)
@@ -60,8 +57,6 @@ func TestConfigNormalizationAndDefaults(t *testing.T) {
 	cfg2 := Config{
 		Mountpoint: "teststream",
 		Protocol:   "ICECAST",
-		Format:     "MP3",
-		Bitrate:    320,
 	}
 	if err := b.Configure(cfg2); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -73,22 +68,10 @@ func TestConfigNormalizationAndDefaults(t *testing.T) {
 	if st2.Protocol != "icecast" {
 		t.Errorf("expected lowercase icecast, got %s", st2.Protocol)
 	}
-	if st2.Format != "mp3" {
-		t.Errorf("expected lowercase mp3, got %s", st2.Format)
-	}
-	if st2.Bitrate != 320 {
-		t.Errorf("expected bitrate 320, got %d", st2.Bitrate)
-	}
 
 	// Validation errors
 	if err := b.Configure(Config{Protocol: "unknown"}); err == nil {
 		t.Error("expected error for unknown protocol")
-	}
-	if err := b.Configure(Config{Format: "flac"}); err == nil {
-		t.Error("expected error for unaccepted format flac")
-	}
-	if err := b.Configure(Config{Bitrate: 96}); err == nil {
-		t.Error("expected error for unaccepted bitrate 96")
 	}
 }
 
@@ -122,7 +105,6 @@ func TestIcecastStreaming(t *testing.T) {
 
 	var (
 		handshakeHeaders []string
-		framesReceived   int
 		mu               sync.Mutex
 		done             = make(chan struct{})
 	)
@@ -152,23 +134,22 @@ func TestIcecastStreaming(t *testing.T) {
 		_, _ = io.WriteString(conn, "HTTP/1.0 200 OK\r\n\r\n")
 
 		// Read audio frames
-		buf := make([]byte, 1024)
+		buf, total := make([]byte, 1024), 0
 		for {
 			n, err := conn.Read(buf)
 			if err != nil {
 				return
 			}
-			if n >= 4 && buf[0] == 0xFF && buf[1] == 0xFB {
-				mu.Lock()
-				framesReceived++
-				if framesReceived >= 2 {
-					select {
-					case <-done:
-					default:
-						close(done)
-					}
+			if total == 0 && (n < 12 || string(buf[:4]) != "RIFF" || string(buf[8:12]) != "WAVE") {
+				return // the stream must open with the WAV header
+			}
+			total += n
+			if total >= 44+2*4608 {
+				select {
+				case <-done:
+				default:
+					close(done)
 				}
-				mu.Unlock()
 			}
 		}
 	}()
@@ -180,11 +161,9 @@ func TestIcecastStreaming(t *testing.T) {
 		Enabled:    true,
 		Protocol:   "icecast",
 		ServerURL:  "http://" + ln.Addr().String(),
-		Mountpoint: "/stream.mp3",
+		Mountpoint: "/stream.wav",
 		Username:   "source",
 		Password:   "hackme",
-		Format:     "mp3",
-		Bitrate:    192,
 		StreamName: "Live Set",
 	}
 
@@ -213,14 +192,14 @@ func TestIcecastStreaming(t *testing.T) {
 	headersText := strings.Join(handshakeHeaders, "\n")
 	mu.Unlock()
 
-	if !strings.Contains(headersText, "SOURCE /stream.mp3 HTTP/1.0") {
+	if !strings.Contains(headersText, "SOURCE /stream.wav HTTP/1.0") {
 		t.Errorf("missing SOURCE line in handshake:\n%s", headersText)
 	}
 	expectedAuth := base64.StdEncoding.EncodeToString([]byte("source:hackme"))
 	if !strings.Contains(headersText, "Authorization: Basic "+expectedAuth) {
 		t.Errorf("missing expected Authorization header in handshake:\n%s", headersText)
 	}
-	if !strings.Contains(headersText, "Content-Type: audio/mpeg") {
+	if !strings.Contains(headersText, "Content-Type: audio/wav") {
 		t.Errorf("missing Content-Type header in handshake:\n%s", headersText)
 	}
 	if !strings.Contains(headersText, "Ice-Name: Live Set") {
@@ -237,119 +216,42 @@ func TestIcecastStreaming(t *testing.T) {
 	}
 }
 
-func TestShoutcastStreaming(t *testing.T) {
+// SHOUTcast servers take MP3 or AAC, never WAV. A saved Shoutcast target used to be
+// connected to, sent RIFF/PCM and retried for ever; it is not pushed to now, Status
+// says what to do, and the local stream (/live.wav) keeps flowing.
+func TestShoutcastTargetIsNotPushed(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("failed to listen: %v", err)
+		t.Fatal(err)
 	}
 	defer ln.Close()
-
-	var (
-		passwordReceived string
-		icyReceived      []string
-		framesReceived   int
-		mu               sync.Mutex
-		done             = make(chan struct{})
-	)
-
+	connected := make(chan struct{}, 1)
 	go func() {
-		conn, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		defer conn.Close()
-
-		reader := bufio.NewReader(conn)
-		pwd, err := reader.ReadString('\n')
-		if err != nil {
-			return
-		}
-		mu.Lock()
-		passwordReceived = strings.TrimSpace(pwd)
-		mu.Unlock()
-
-		// Reply with OK2
-		_, _ = io.WriteString(conn, "OK2\r\n")
-
-		// Read ICY headers
-		for {
-			line, err := reader.ReadString('\n')
-			if err != nil {
-				return
-			}
-			mu.Lock()
-			icyReceived = append(icyReceived, strings.TrimSpace(line))
-			mu.Unlock()
-			if strings.TrimSpace(line) == "" {
-				break
-			}
-		}
-
-		// Read audio data
-		buf := make([]byte, 1024)
-		for {
-			n, err := conn.Read(buf)
-			if err != nil {
-				return
-			}
-			if n >= 4 && buf[0] == 0xFF && buf[1] == 0xFB {
-				mu.Lock()
-				framesReceived++
-				if framesReceived >= 2 {
-					select {
-					case <-done:
-					default:
-						close(done)
-					}
-				}
-				mu.Unlock()
-			}
+		if conn, err := ln.Accept(); err == nil {
+			connected <- struct{}{}
+			conn.Close()
 		}
 	}()
 
 	b := New(newTestGuard())
 	defer b.Close()
-
-	cfg := Config{
-		Enabled:    true,
-		Protocol:   "shoutcast",
-		ServerURL:  ln.Addr().String(), // test raw host:port format without scheme
-		Password:   "shoutpwd",
-		Bitrate:    256,
-		StreamName: "Club Radio",
+	if err := b.Configure(Config{Enabled: true, Protocol: "shoutcast", ServerURL: ln.Addr().String(), Password: "shoutpwd"}); err != nil {
+		t.Fatal(err)
 	}
-
-	if err := b.Configure(cfg); err != nil {
-		t.Fatalf("failed to configure shoutcast: %v", err)
-	}
-
+	pcm, cancel := b.Subscribe()
+	defer cancel()
 	select {
-	case <-done:
-	case <-time.After(3 * time.Second):
-		t.Fatal("timeout waiting for Shoutcast stream frames")
+	case <-pcm:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the local stream does not flow")
 	}
-
-	mu.Lock()
-	pwd := passwordReceived
-	icyText := strings.Join(icyReceived, "\n")
-	mu.Unlock()
-
-	if pwd != "shoutpwd" {
-		t.Errorf("expected password 'shoutpwd', got %q", pwd)
+	select {
+	case <-connected:
+		t.Fatal("pushed to a Shoutcast server")
+	case <-time.After(500 * time.Millisecond):
 	}
-	if !strings.Contains(icyText, "icy-name:Club Radio") {
-		t.Errorf("missing icy-name header in:\n%s", icyText)
-	}
-	if !strings.Contains(icyText, "icy-br:256") {
-		t.Errorf("missing icy-br:256 header in:\n%s", icyText)
-	}
-
-	st := b.Status()
-	if !st.Streaming {
-		t.Errorf("expected Streaming to be true")
-	}
-	if st.BytesSent <= 0 {
-		t.Errorf("expected BytesSent > 0, got %d", st.BytesSent)
+	if st := b.Status(); st.Streaming || !strings.Contains(st.LastError, "Shoutcast is not supported") || !strings.Contains(st.LastError, "Icecast") {
+		t.Errorf("status %+v, want not streaming and a Shoutcast-not-supported error", st)
 	}
 }
 
@@ -397,46 +299,6 @@ func TestIcecastHandshakeReject(t *testing.T) {
 	}
 	if !strings.Contains(st.LastError, "401") && !strings.Contains(st.LastError, "rejected") {
 		t.Errorf("expected reject error in LastError, got: %s", st.LastError)
-	}
-}
-
-func TestShoutcastHandshakeReject(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen error: %v", err)
-	}
-	defer ln.Close()
-
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			_, _ = io.WriteString(conn, "invalid password\r\n")
-			conn.Close()
-		}
-	}()
-
-	b := New(newTestGuard())
-	defer b.Close()
-
-	cfg := Config{
-		Enabled:   true,
-		Protocol:  "shoutcast",
-		ServerURL: ln.Addr().String(),
-		Password:  "wrong",
-	}
-
-	_ = b.Configure(cfg)
-	time.Sleep(200 * time.Millisecond)
-
-	st := b.Status()
-	if st.Streaming {
-		t.Errorf("should not be streaming when rejected")
-	}
-	if !strings.Contains(st.LastError, "authentication failed") {
-		t.Errorf("expected authentication failed in LastError, got: %s", st.LastError)
 	}
 }
 
@@ -522,35 +384,31 @@ func TestUpdateMetadataIcecast(t *testing.T) {
 	}
 }
 
-func TestUpdateMetadataShoutcast(t *testing.T) {
-	var lastPath string
+// A saved Shoutcast target is not pushed to, so its track titles are not sent either
+// (the deck used to call the server's admin.cgi).
+func TestUpdateMetadataSkipsAShoutcastTarget(t *testing.T) {
+	hits := make(chan string, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		lastPath = r.URL.RequestURI()
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprintln(w, "OK")
+		hits <- r.URL.Path
 	}))
 	defer server.Close()
-
 	b := New(newTestGuard())
 	defer b.Close()
-
-	b.cfg = Config{
-		Protocol:  "shoutcast",
-		ServerURL: server.URL,
-		Password:  "mypass",
+	b.cfg = Config{Protocol: "shoutcast", ServerURL: server.URL, Password: "mypass"}
+	if err := b.UpdateMetadata("Kraftwerk", "Autobahn"); err != nil {
+		t.Fatalf("UpdateMetadata: %v", err)
 	}
-
-	err := b.UpdateMetadata("Kraftwerk", "Autobahn")
-	if err != nil {
-		t.Fatalf("UpdateMetadata failed: %v", err)
+	select {
+	case path := <-hits:
+		t.Fatalf("the Shoutcast server got a request for %s", path)
+	default:
 	}
-
-	if !strings.Contains(lastPath, "/admin.cgi?mode=updinfo&pass=mypass&song=Kraftwerk+-+Autobahn") {
-		t.Errorf("unexpected shoutcast query URL: %s", lastPath)
+	if got := b.Status().CurrentTrack; got != "Kraftwerk - Autobahn" {
+		t.Errorf("current track = %q, want it kept for the local status", got)
 	}
 }
 
-func TestWAVAndOggStreaming(t *testing.T) {
+func TestWAVStreaming(t *testing.T) {
 	// Test WAV container header and framing
 	lnWAV, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -602,46 +460,6 @@ func TestWAVAndOggStreaming(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("timeout waiting for WAV stream header")
 	}
-
-	// Ogg: no Vorbis/Opus encoder on any deck. The old code sent an "OggS" page that
-	// wrapped raw PCM bytes (undecodable); now nothing is sent and the status says why.
-	lnOgg, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen error: %v", err)
-	}
-	defer lnOgg.Close()
-	oggConnected := make(chan struct{}, 1)
-	go func() {
-		if conn, err := lnOgg.Accept(); err == nil {
-			oggConnected <- struct{}{}
-			conn.Close()
-		}
-	}()
-
-	bOgg := New(newTestGuard())
-	defer bOgg.Close()
-
-	cfgOgg := Config{
-		Enabled:   true,
-		Protocol:  "icecast",
-		Format:    "ogg",
-		ServerURL: "http://" + lnOgg.Addr().String(),
-	}
-	if err := bOgg.Configure(cfgOgg); err != nil {
-		t.Fatalf("failed to configure ogg: %v", err)
-	}
-	deadline := time.Now().Add(3 * time.Second)
-	for bOgg.Status().LastError == "" && time.Now().Before(deadline) {
-		time.Sleep(20 * time.Millisecond)
-	}
-	if st := bOgg.Status(); !strings.Contains(st.LastError, "Ogg") || st.Streaming {
-		t.Fatalf("ogg: status %+v, want a clear Ogg encoder error", st)
-	}
-	select {
-	case <-oggConnected:
-		t.Fatal("ogg: connected to the server without an encoder")
-	case <-time.After(200 * time.Millisecond):
-	}
 }
 
 func TestInputPathPCM(t *testing.T) {
@@ -679,8 +497,7 @@ func TestInputPathPCM(t *testing.T) {
 		_, _ = io.WriteString(conn, "HTTP/1.0 200 OK\r\n\r\n")
 
 		frame := make([]byte, 1024)
-		n, err := conn.Read(frame)
-		if err == nil && n >= 68 {
+		if _, err := io.ReadAtLeast(conn, frame, 68); err == nil { // the 44-byte WAV header may arrive alone
 			close(done)
 		}
 	}()
@@ -713,7 +530,7 @@ func TestUpdateMetadataLastErrorDoesNotLeakPassword(t *testing.T) {
 	secretPassword := "superSecretPassword123!@#"
 	// Unreachable port
 	b.cfg = Config{
-		Protocol:  "shoutcast",
+		Protocol:  "icecast",
 		ServerURL: "http://127.0.0.1:59999",
 		Password:  secretPassword,
 	}
@@ -731,8 +548,28 @@ func TestUpdateMetadataLastErrorDoesNotLeakPassword(t *testing.T) {
 	if strings.Contains(st.LastError, escaped) {
 		t.Fatalf("Status().LastError leaked escaped password: %s", st.LastError)
 	}
-	if !strings.Contains(st.LastError, "***") {
-		t.Fatalf("expected '***' in sanitized LastError, got: %s", st.LastError)
+}
+
+// The Shoutcast "not supported" text is added to an error that is already there, not put
+// in its place, and the password stays out of the combined text.
+func TestShoutcastNoticeIsAppendedToTheLastError(t *testing.T) {
+	b := New(newTestGuard())
+	defer b.Close()
+
+	secretPassword := "superSecretPassword123!@#"
+	b.cfg = Config{Protocol: "icecast", ServerURL: "http://127.0.0.1:59999", Password: secretPassword}
+	if err := b.UpdateMetadata("Artist", "Track"); err == nil {
+		t.Fatal("expected error updating metadata against unreachable URL")
+	}
+	before := b.Status().LastError
+	b.cfg.Protocol = "shoutcast" // the same target, saved as Shoutcast
+
+	got := b.Status().LastError
+	if !strings.HasPrefix(got, before+"; ") || !strings.Contains(got, "Shoutcast is not supported") {
+		t.Errorf("LastError = %q, want %q followed by the Shoutcast notice", got, before)
+	}
+	if strings.Contains(got, secretPassword) || strings.Contains(got, url.QueryEscape(secretPassword)) {
+		t.Errorf("LastError leaked the password: %s", got)
 	}
 }
 
@@ -882,16 +719,6 @@ func TestLANModeBroadcaster(t *testing.T) {
 	}
 	if b.Status().LANMode != "off" {
 		t.Errorf("expected lanMode 'off'")
-	}
-}
-
-func TestShoutcastLoginUsesStreamID(t *testing.T) {
-	for _, c := range []struct{ user, want string }{
-		{"source", "pw"}, {"", "pw"}, {"admin", "pw"}, {"2", "pw:#2"}, {"#1", "pw:#1"}, {" #3 ", "pw:#3"},
-	} {
-		if got := shoutcastLogin(Config{Username: c.user, Password: "pw"}); got != c.want {
-			t.Errorf("user %q: got %q want %q", c.user, got, c.want)
-		}
 	}
 }
 
@@ -1122,9 +949,8 @@ collect:
 // BH2-A3-7: mount point, login and stream name go onto the lines of the server
 // handshake as they are; each must stay on its own line.
 func TestStreamSettingsStayOnTheirHandshakeLine(t *testing.T) {
-	handshake := func(protocol string, cfg Config) string {
+	handshake := func(cfg Config) string {
 		t.Helper()
-		cfg.Protocol = protocol
 		if err := normalizeConfig(&cfg); err != nil {
 			t.Fatal(err)
 		}
@@ -1135,11 +961,6 @@ func TestStreamSettingsStayOnTheirHandshakeLine(t *testing.T) {
 			defer server.Close()
 			r := bufio.NewReader(server)
 			var all string
-			if protocol == "shoutcast" { // the login line, then the answer, then the headers
-				line, _ := r.ReadString('\n')
-				all = line
-				_, _ = io.WriteString(server, "OK2\r\n")
-			}
 			for {
 				line, err := r.ReadString('\n')
 				all += line
@@ -1148,38 +969,27 @@ func TestStreamSettingsStayOnTheirHandshakeLine(t *testing.T) {
 				}
 			}
 			got <- all
-			if protocol == "icecast" { // Shoutcast waits for no answer to its headers
-				_, _ = io.WriteString(server, "HTTP/1.0 200 OK\r\n\r\n")
-			}
+			_, _ = io.WriteString(server, "HTTP/1.0 200 OK\r\n\r\n")
 		}()
 		b := New(newTestGuard())
 		defer b.Close()
 		_ = deck.SetDeadline(time.Now().Add(3 * time.Second))
 		_ = server.SetDeadline(time.Now().Add(3 * time.Second))
-		var err error
-		if protocol == "shoutcast" {
-			err = b.handshakeShoutcast(deck, cfg)
-		} else {
-			err = b.handshakeIcecast(deck, cfg)
-		}
-		if err != nil {
-			t.Fatalf("%s handshake: %v", protocol, err)
+		if err := b.handshakeIcecast(deck, cfg); err != nil {
+			t.Fatalf("handshake: %v", err)
 		}
 		select {
 		case all := <-got:
 			return all
 		case <-time.After(3 * time.Second):
-			t.Fatalf("%s: the server never saw the end of the handshake", protocol)
+			t.Fatal("the server never saw the end of the handshake")
 			return ""
 		}
 	}
 	plain := Config{Mountpoint: "/live", Username: "source", Password: "pw", StreamName: "Friday Night Mix"}
 	pasted := Config{Mountpoint: "/li\r\nve", Username: "sou\nrce", Password: "pw\r\n", StreamName: "Friday\r\n Night\x00 Mix\n"}
-	for _, protocol := range []string{"icecast", "shoutcast"} {
-		want, got := handshake(protocol, plain), handshake(protocol, pasted)
-		if got != want {
-			t.Errorf("%s: settings pasted with line breaks changed the handshake:\n got %q\nwant %q", protocol, got, want)
-		}
+	if want, got := handshake(plain), handshake(pasted); got != want {
+		t.Errorf("settings pasted with line breaks changed the handshake:\n got %q\nwant %q", got, want)
 	}
 }
 
