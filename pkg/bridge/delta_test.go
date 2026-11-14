@@ -98,17 +98,40 @@ func TestPlaylistAndSmartMatchDelta(t *testing.T) {
 	if e != nil || r.Updated+r.Added != 0 || r.PlaylistsChanged {
 		t.Fatal("delta not stable", r, e)
 	}
-	// Native children under an imported folder must block destructive rebuilds.
+	// cc025f09 guarded against trigger_after_delete_List cascade-deleting native
+	// children on folder rebuild by refusing the import; BH2-A4-3 reparents them to
+	// root while preserving their id, tracks, and sibling chain.
 	folder := scalar[int64](t, engine, `SELECT id FROM Playlist WHERE title='Folder'`)
-	if _, e = engine.Exec(`INSERT INTO Playlist(title,parentListId,isPersisted,nextListId) VALUES('User child',?,1,0)`, folder); e != nil {
+	res, e := engine.Exec(`INSERT INTO Playlist(title,parentListId,isPersisted,nextListId) VALUES('User child',?,1,0)`, folder)
+	if e != nil {
+		t.Fatal(e)
+	}
+	childID, e := res.LastInsertId()
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = engine.Exec(`INSERT INTO PlaylistEntity(listId,trackId,databaseUuid,nextEntityId) VALUES(?,1,(SELECT uuid FROM Information),0)`, childID); e != nil {
 		t.Fatal(e)
 	}
 	l.Playlists[0].Name += " changed"
-	if _, e = enginedb.Sync(context.Background(), root, l, opts); e == nil {
-		t.Fatal("native child silently deleted")
+	if _, e = enginedb.Sync(context.Background(), root, l, opts); e != nil {
+		t.Fatalf("reparent sync failed: %v", e)
 	}
-	if scalar[int](t, engine, `SELECT count(*) FROM Playlist WHERE title='User child'`) != 1 {
-		t.Fatal("native child lost")
+	if gotID := scalar[int64](t, engine, `SELECT id FROM Playlist WHERE title='User child'`); gotID != childID {
+		t.Fatalf("native child id %d, got %d", childID, gotID)
+	}
+	if got := entityChain(t, engine, childID); !reflect.DeepEqual(got, []int64{1}) {
+		t.Fatalf("native child tracks lost: %v", got)
+	}
+	if parent := scalar[int64](t, engine, `SELECT parentListId FROM Playlist WHERE id=?`, childID); parent != 0 {
+		t.Fatalf("native child parentListId=%d, expected 0", parent)
+	}
+	next := scalar[int64](t, engine, `SELECT nextListId FROM Playlist WHERE id=?`, childID)
+	if next != 0 && scalar[int](t, engine, `SELECT count(*) FROM Playlist WHERE id=? AND parentListId=0`, next) != 1 {
+		t.Fatalf("invalid sibling nextListId %d at root", next)
+	}
+	if scalar[int](t, engine, `SELECT count(*) FROM pragma_foreign_key_check`) != 0 {
+		t.Fatal("foreign key damaged after reparent")
 	}
 }
 

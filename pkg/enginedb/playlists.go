@@ -4,7 +4,124 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
 )
+
+type nativeChildNode struct {
+	id    int64
+	title string
+	next  int64
+	owned bool
+}
+
+func orderNativeChildren(nodes []nativeChildNode) []nativeChildNode {
+	byID := make(map[int64]nativeChildNode, len(nodes))
+	incoming := make(map[int64]bool, len(nodes))
+	for _, n := range nodes {
+		byID[n.id] = n
+	}
+	for _, n := range nodes {
+		if _, ok := byID[n.next]; ok {
+			incoming[n.next] = true
+		}
+	}
+	sort.Slice(nodes, func(i, j int) bool { return nodes[i].id < nodes[j].id })
+	out := make([]nativeChildNode, 0, len(nodes))
+	seen := make(map[int64]bool, len(nodes))
+	walk := func(id int64) {
+		for !seen[id] {
+			n, ok := byID[id]
+			if !ok {
+				break
+			}
+			seen[id] = true
+			if !n.owned {
+				out = append(out, n)
+			}
+			id = n.next
+		}
+	}
+	for _, n := range nodes {
+		if !incoming[n.id] {
+			walk(n.id)
+		}
+	}
+	for _, n := range nodes {
+		walk(n.id)
+	}
+	return out
+}
+
+func reparentNativeChildren(ctx context.Context, q sqlExecer, owned string) error {
+	// Walk complete sibling chains before filtering out bridge-owned nodes.
+	rows, err := q.QueryContext(ctx, `SELECT id, COALESCE(title,''), parentListId, COALESCE(nextListId,0), id IN (SELECT listId FROM BridgePlaylist) FROM Playlist WHERE parentListId IN (`+owned+`) ORDER BY parentListId, id`)
+	if err != nil {
+		return err
+	}
+	byParent := map[int64][]nativeChildNode{}
+	for rows.Next() {
+		var parent int64
+		var n nativeChildNode
+		if err = rows.Scan(&n.id, &n.title, &parent, &n.next, &n.owned); err != nil {
+			rows.Close()
+			return err
+		}
+		byParent[parent] = append(byParent[parent], n)
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err = rows.Close(); err != nil {
+		return err
+	}
+	if len(byParent) == 0 {
+		return nil
+	}
+
+	parents := make([]int64, 0, len(byParent))
+	for p := range byParent {
+		parents = append(parents, p)
+	}
+	sort.Slice(parents, func(i, j int) bool { return parents[i] < parents[j] })
+
+	for _, p := range parents {
+		nodes := orderNativeChildren(byParent[p])
+		for i, n := range nodes {
+			title, err := uniqueNativeTitle(ctx, q, n.title, n.id)
+			if err != nil {
+				return err
+			}
+			var nextVal any
+			if i+1 < len(nodes) {
+				nextVal = nodes[i+1].id
+			}
+			// Engine's export flag is not ownership. Remember this native ID so
+			// neither this rebuild nor a later one can adopt it by title.
+			if _, err = q.ExecContext(ctx, `INSERT OR IGNORE INTO BridgeLibrary(key,value) VALUES('native-playlist:' || ?, '1')`, n.id); err != nil {
+				return err
+			}
+			if _, err = q.ExecContext(ctx, `UPDATE Playlist SET parentListId=0, title=?, nextListId=? WHERE id=?`, title, nextVal, n.id); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func uniqueNativeTitle(ctx context.Context, q sqlExecer, name string, id int64) (string, error) {
+	title := name
+	for n := 1; ; n++ {
+		var count int
+		if err := q.QueryRowContext(ctx, `SELECT count(*) FROM Playlist WHERE title=? AND parentListId=0 AND id<>?`, title, id).Scan(&count); err != nil {
+			return "", err
+		}
+		if count == 0 {
+			return title, nil
+		}
+		title = fmt.Sprintf("%s (%d)", name, n)
+	}
+}
 
 // normalizePlaylistTails joins disconnected NULL-terminated native chains before
 // converting NULL to zero. Converting several sibling tails directly to zero
