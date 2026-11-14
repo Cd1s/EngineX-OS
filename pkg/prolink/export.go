@@ -763,7 +763,7 @@ func (r *exportRun) receivePeers() {
 		// Our own announcement, whichever interface it looped back on: a deck with
 		// eth0 and wlan0 on one subnet hears it from its Wi-Fi address too, and
 		// yielding to itself flipped numbers in a keepalive/media storm (#100).
-		if bytes.Equal(mac, r.mac) && d.Name == "EngineX Export Beta" {
+		if bytes.Equal(mac, r.mac) && d.Name == exportName {
 			continue
 		}
 		key := addr.IP.String() + "/" + net.HardwareAddr(mac).String()
@@ -1037,7 +1037,7 @@ func linkPacket(kind byte, length, nameOffset int) []byte {
 	b := make([]byte, length)
 	copy(b, magic)
 	b[10] = kind
-	copy(b[nameOffset:nameOffset+20], "EngineX Export Beta")
+	copy(b[nameOffset:nameOffset+20], exportName)
 	b[nameOffset+20] = 1
 	return b
 }
