@@ -194,7 +194,7 @@ echo "SMP=4" >> "$ENV_FILE"
 SSH_PORT="$(sed -n 's/^SSH_PORT=//p' "$ENV_FILE")"
 ROOTFS_IMG="$(sed -n 's/^ROOTFS_IMG=//p' "$ENV_FILE")"
 
-# 5. Fix test-side rootfs conflicts and setup automated probe access inside unshare -m
+# 5. Fix test-side rootfs conflicts and setup automated probe access
 echo "--- Configuring emulated rootfs for headless probing ---"
 SSH_KEY_PRIV="$WORK_DIR/id_tier2_ed25519"
 if [ ! -f "$SSH_KEY_PRIV" ]; then
@@ -222,34 +222,48 @@ else
 fi
 
 if [ "$IS_ENGINEX" -eq 1 ]; then
-    # Fix LD_PRELOAD conflict: configure /etc/ld.so.preload to load QEngine shims system-wide
-    # so they remain loaded even when UnsetEnvironment=LD_PRELOAD and engine-ui-guard execute.
-    echo "/root/dtshim.so /root/drmatomic.so /root/alsashim.so /root/quitshim.so" > "$MNT_DIR/etc/ld.so.preload"
-
-    # Also patch engine-ui-guard as fallback safeguard to append shims if LD_PRELOAD is set
+    # Do NOT write /etc/ld.so.preload: OpenSSH unprivileged privsep child seccomp sandbox
+    # triggers SIGSYS on constructor syscalls (eventfd2, pthread_create) when preloaded.
+    # Instead, patch engine-ui-guard so LD_PRELOAD includes QEngine shims for Engine only.
     if [ -f "$MNT_DIR/etc/sc5000/engine-ui-guard" ]; then
-        sed -i 's|export LD_PRELOAD=\${SC5000_UI_HOOK:-/etc/sc5000/libengine-ui-hook.so}|export LD_PRELOAD="\${SC5000_UI_HOOK:-/etc/sc5000/libengine-ui-hook.so}:/root/dtshim.so:/root/drmatomic.so:/root/alsashim.so:/root/quitshim.so"|' "$MNT_DIR/etc/sc5000/engine-ui-guard"
-        sed -i 's|LD_PRELOAD=\${SC5000_UI_HOOK:-/etc/sc5000/libengine-ui-hook.so} "\\\$@" &|LD_PRELOAD="\${SC5000_UI_HOOK:-/etc/sc5000/libengine-ui-hook.so}:/root/dtshim.so:/root/drmatomic.so:/root/alsashim.so:/root/quitshim.so" "\\\$@" &|' "$MNT_DIR/etc/sc5000/engine-ui-guard"
+        sed -i 's|\${SC5000_UI_HOOK:-/etc/sc5000/libengine-ui-hook.so}|\${SC5000_UI_HOOK:-/etc/sc5000/libengine-ui-hook.so}:/root/dtshim.so:/root/drmatomic.so:/root/alsashim.so:/root/quitshim.so|g' "$MNT_DIR/etc/sc5000/engine-ui-guard"
+    fi
+
+    # Strip UsePAM from sshd configs: az0x OpenSSH is built without PAM and fails rexec if UsePAM is present
+    for cfg in "$MNT_DIR/usr/share/sc5000-custom/sshd_config" "$MNT_DIR/etc/ssh/sshd_config"; do
+        if [ -f "$cfg" ]; then
+            sed -i '/UsePAM/d' "$cfg"
+        fi
+    done
+
+    # Seed automated public key into sc5000-custom seed location so prepare copies it to /data
+    if [ -d "$MNT_DIR/usr/share/sc5000-custom" ]; then
+        echo "$SSH_PUB_CONTENT" > "$MNT_DIR/usr/share/sc5000-custom/authorized_keys"
+        chmod 600 "$MNT_DIR/usr/share/sc5000-custom/authorized_keys"
+    fi
+
+    # Mask hardware-only services that cannot succeed in QEMU (avoids systemctl --failed noise)
+    ln -sf /dev/null "$MNT_DIR/etc/systemd/system/az0x-info.service"
+
+    # Clean 0-byte RSA key stub that causes OpenSSH daemon to terminate KEXINIT
+    rm -f "$MNT_DIR/etc/ssh/ssh_host_rsa_key"
+    rm -f "$MNT_DIR/etc/systemd/system/multi-user.target.wants/sshd.service"
+    mkdir -p "$MNT_DIR/etc/systemd/system/multi-user.target.wants"
+    ln -sf /usr/lib/systemd/system/sc5000-custom-sshd.service "$MNT_DIR/etc/systemd/system/multi-user.target.wants/sc5000-custom-sshd.service"
+else
+    # Stock inMusic firmware uses stock sshd.service
+    mkdir -p "$MNT_DIR/etc/systemd/system/multi-user.target.wants"
+    ln -sf /lib/systemd/system/sshd.service "$MNT_DIR/etc/systemd/system/multi-user.target.wants/sshd.service"
+    if [ -f "$MNT_DIR/etc/ssh/sshd_config" ]; then
+        echo "PermitRootLogin yes" >> "$MNT_DIR/etc/ssh/sshd_config"
     fi
 fi
 
-# Setup SSH test key for automated verification
+# Setup SSH test key in /root/.ssh as well
 mkdir -p "$MNT_DIR/root/.ssh"
 chmod 700 "$MNT_DIR/root/.ssh"
 echo "$SSH_PUB_CONTENT" > "$MNT_DIR/root/.ssh/authorized_keys"
 chmod 600 "$MNT_DIR/root/.ssh/authorized_keys"
-
-if [ -d "$MNT_DIR/usr/share/sc5000-custom" ]; then
-    echo "$SSH_PUB_CONTENT" > "$MNT_DIR/usr/share/sc5000-custom/authorized_keys"
-    chmod 600 "$MNT_DIR/usr/share/sc5000-custom/authorized_keys"
-fi
-
-# Ensure sshd is enabled and permits root login
-mkdir -p "$MNT_DIR/etc/systemd/system/multi-user.target.wants"
-ln -sf /lib/systemd/system/sshd.service "$MNT_DIR/etc/systemd/system/multi-user.target.wants/sshd.service"
-if [ -f "$MNT_DIR/etc/ssh/sshd_config" ]; then
-    echo "PermitRootLogin yes" >> "$MNT_DIR/etc/ssh/sshd_config"
-fi
 
 # Configure network interface DHCP for systemd-networkd
 mkdir -p "$MNT_DIR/etc/systemd/network"
@@ -307,6 +321,11 @@ SSH_OK=0
 ENGINE_OK=0
 ENGINE_T=0
 
+guest_exec() {
+    ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -o BatchMode=yes \
+        -o HostKeyAlgorithms=ssh-ed25519 -i "$SSH_KEY_PRIV" -p "$SSH_PORT" root@127.0.0.1 "$@"
+}
+
 deadline=$(( $(date +%s) + TIMEOUT ))
 while [ "$(date +%s)" -lt "$deadline" ]; do
     # Check serial log for Engine start
@@ -319,12 +338,10 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
     fi
 
     # Check SSH probe
-    if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=2 -o BatchMode=yes \
-           -i "$SSH_KEY_PRIV" -p "$SSH_PORT" root@127.0.0.1 'echo READY' 2>/dev/null | grep -q READY; then
+    if guest_exec 'echo READY' 2>/dev/null | grep -q READY; then
         SSH_OK=1
         if [ "$ENGINE_OK" -eq 0 ]; then
-            st="$(ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i "$SSH_KEY_PRIV" -p "$SSH_PORT" root@127.0.0.1 \
-                  'systemctl is-active engine.service 2>/dev/null || pgrep -f /usr/Engine || true' | tr -d '\r\n')"
+            st="$(guest_exec 'systemctl is-active engine.service 2>/dev/null || pgrep -f /usr/Engine || true' 2>/dev/null | tr -d '\r\n')"
             if [ "$st" = "active" ] || echo "$st" | grep -qE '^[0-9]+$'; then
                 ENGINE_OK=1
                 ENGINE_T=$(date +%s%N)
@@ -345,11 +362,6 @@ fi
 
 TOTAL_SECS=$(awk -v t0="$T0" -v t1="$ENGINE_T" 'BEGIN { printf "%.2f", (t1-t0)/1000000000 }')
 echo "=== Boot-to-Engine Time: ${TOTAL_SECS}s ==="
-
-guest_exec() {
-    ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -o BatchMode=yes \
-        -i "$SSH_KEY_PRIV" -p "$SSH_PORT" root@127.0.0.1 "$@"
-}
 
 ALL_PASS=1
 report() {
