@@ -164,6 +164,8 @@ func (s *Server) linkSoundCloudAccount(session *Session, userID int64, username,
 	return nil
 }
 
+var testSoundCloudSaveHook func()
+
 // linkSoundCloud checks and saves what the phone page or the relay collected. Binding
 // a public profile or a pasted token replaces any account login.
 func (s *Server) linkSoundCloud(ctx context.Context, session *Session, user, clientID, secret, token string) error {
@@ -197,9 +199,12 @@ func (s *Server) linkSoundCloud(ctx context.Context, session *Session, user, cli
 		return err
 	}
 	if s.cfg.BPM != nil {
-		keys := s.cfg.BPM.Config()
-		keys.SoundCloudClientID, keys.SoundCloudSecret, keys.SoundCloudToken = check.ClientID, check.Secret, check.Token
-		if err := s.cfg.BPM.SaveConfig(keys); err != nil {
+		if testSoundCloudSaveHook != nil {
+			testSoundCloudSaveHook()
+		}
+		if err := s.cfg.BPM.UpdateConfig(func(keys *providers.BPMConfig) {
+			keys.SoundCloudClientID, keys.SoundCloudSecret, keys.SoundCloudToken = check.ClientID, check.Secret, check.Token
+		}); err != nil {
 			return err
 		}
 	}

@@ -117,6 +117,88 @@ func TestRealEntryPointsLostUpdateInterleaving_RelayPaused(t *testing.T) {
 	}
 }
 
+func TestSoundCloudSaveInterleaving(t *testing.T) {
+	for _, delay := range []time.Duration{0, 60 * time.Millisecond} {
+		t.Run(delay.String(), func(t *testing.T) {
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/me" || r.Header.Get("Authorization") != "OAuth linked-token" {
+					t.Errorf("unexpected SoundCloud identity request: %s", r.URL.Path)
+				}
+				io.WriteString(w, `{"id":7,"username":"dj"}`)
+			}))
+			defer api.Close()
+			state := t.TempDir()
+			bpm := &providers.BPMStore{Path: filepath.Join(state, "bpm.json"), ConfigPath: filepath.Join(state, "bpm-config.json")}
+			if err := bpm.SaveConfig(providers.BPMConfig{GetSongBPMKey: "initial-key"}); err != nil {
+				t.Fatal(err)
+			}
+			ui := New(Config{AccessToken: "test-token", UIDir: t.TempDir(), StateDir: state, SoundCloudURL: api.URL, BPM: bpm}, nil)
+			testSoundCloudSaveHook = func() {
+				time.Sleep(delay)
+				req := httptest.NewRequest("POST", "/api/bpm", strings.NewReader(`{"getSongBpmKey":"updated-key"}`))
+				w := httptest.NewRecorder()
+				ui.bpmConfigPost(w, req)
+				if w.Code != http.StatusOK || bpm.Config().GetSongBPMKey != "updated-key" {
+					t.Fatalf("second writer did not commit: %d %s", w.Code, w.Body.String())
+				}
+			}
+			t.Cleanup(func() { testSoundCloudSaveHook = nil })
+
+			if err := ui.linkSoundCloud(t.Context(), &Session{p: &providers.SoundCloud{}}, "", "linked-client", "linked-secret", "linked-token"); err != nil {
+				t.Fatal(err)
+			}
+			want := providers.BPMConfig{SoundCloudClientID: "linked-client", SoundCloudSecret: "linked-secret", SoundCloudToken: "linked-token", GetSongBPMKey: "updated-key"}
+			if got := bpm.Config(); got != want {
+				t.Fatalf("lost update: got %+v, want %+v", got, want)
+			}
+		})
+	}
+}
+
+func TestSoundCloudForgetInterleaving(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, key, token string
+	}{
+		{"unrelated-key", `{"getSongBpmKey":"updated-key"}`, "updated-key", ""},
+		{"replacement-token", `{"soundcloudToken":"replacement-token"}`, "initial-key", "replacement-token"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, delay := range []time.Duration{0, 60 * time.Millisecond} {
+				t.Run(delay.String(), func(t *testing.T) {
+					state := t.TempDir()
+					bpm := &providers.BPMStore{Path: filepath.Join(state, "bpm.json"), ConfigPath: filepath.Join(state, "bpm-config.json")}
+					if err := bpm.SaveConfig(providers.BPMConfig{SoundCloudClientID: "app-id", SoundCloudSecret: "app-secret", SoundCloudToken: "pasted-token", GetSongBPMKey: "initial-key"}); err != nil {
+						t.Fatal(err)
+					}
+					ui := New(Config{AccessToken: "test-token", UIDir: t.TempDir(), StateDir: state, BPM: bpm}, nil)
+					if err := providers.SaveJSON(ui.soundCloudOwnerPath(), soundCloudOwner{7, "dj", "app-id", "app-secret", "pasted-token"}); err != nil {
+						t.Fatal(err)
+					}
+					testSoundCloudForgetHook = func() {
+						time.Sleep(delay)
+						req := httptest.NewRequest("POST", "/api/bpm", strings.NewReader(tc.body))
+						w := httptest.NewRecorder()
+						ui.bpmConfigPost(w, req)
+						cfg := bpm.Config()
+						if w.Code != http.StatusOK || cfg.GetSongBPMKey != tc.key || (tc.token != "" && cfg.SoundCloudToken != tc.token) {
+							t.Fatalf("second writer did not commit: %d %s", w.Code, w.Body.String())
+						}
+					}
+					t.Cleanup(func() { testSoundCloudForgetHook = nil })
+
+					if err := ui.forgetOwner("soundcloud"); err != nil {
+						t.Fatal(err)
+					}
+					want := providers.BPMConfig{SoundCloudClientID: "app-id", SoundCloudSecret: "app-secret", SoundCloudToken: tc.token, GetSongBPMKey: tc.key}
+					if got := bpm.Config(); got != want {
+						t.Fatalf("lost update: got %+v, want %+v", got, want)
+					}
+				})
+			}
+		})
+	}
+}
+
 // TestBPMConfigPostConcurrentPreservesFields tests that concurrent POST /api/bpm requests
 // modifying different fields do not overwrite or lose each other's updates.
 func TestBPMConfigPostConcurrentPreservesFields(t *testing.T) {
