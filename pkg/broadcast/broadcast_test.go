@@ -789,6 +789,69 @@ func TestReadPCMFromIdleFIFOWriter(t *testing.T) {
 	}
 }
 
+// A deck with Live Stream on and no listener ran the whole capture for nobody: the feed
+// stayed open, so the hook copied every audio block out of the audio callback and the
+// loop resampled it (7% of a core on an idle deck). The feed is opened for a listener
+// and closed again when the last one leaves.
+func TestFeedIsClosedWhileNobodyListens(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.pcm")
+	if err := syscall.Mkfifo(path, 0o644); err != nil {
+		t.Skip("mkfifo:", err)
+	}
+	b := New(newTestGuard())
+	defer b.Close()
+	if err := b.Configure(Config{Enabled: true, InputPath: path}); err != nil {
+		t.Fatal(err)
+	}
+	// A FIFO opens for writing without blocking only while a reader has it open.
+	writer := func() *os.File {
+		w, _ := os.OpenFile(path, os.O_WRONLY|syscall.O_NONBLOCK, 0)
+		return w
+	}
+	read := func(want bool) bool {
+		for range 60 {
+			w := writer()
+			if w != nil {
+				w.Close()
+			}
+			if (w != nil) == want {
+				return true
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		return false
+	}
+	time.Sleep(4 * captureTick)
+	if w := writer(); w != nil {
+		w.Close()
+		t.Fatal("the feed is read with nobody listening")
+	}
+	ch, cancel := b.Subscribe()
+	if !read(true) {
+		t.Fatal("the feed was not opened for a listener")
+	}
+	w := writer()
+	if w == nil {
+		t.Fatal("the feed closed under a listener")
+	}
+	defer w.Close()
+	deadline := time.After(3 * time.Second)
+	for heard := false; !heard; {
+		_, _ = w.Write(bytes.Repeat([]byte{0, 64, 0, 64}, 480)) // 10 ms, as the hook writes
+		select {
+		case pcm := <-ch:
+			heard = bytes.ContainsFunc(pcm, func(r rune) bool { return r != 0 })
+		case <-deadline:
+			t.Fatal("the listener got no audio from the feed")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	cancel()
+	if !read(false) {
+		t.Fatal("the feed stayed open after the last listener left")
+	}
+}
+
 // testFrames returns n s16le stereo frames whose two channels differ (L = i, R = ^i),
 // so any byte shift shows up as a frame that breaks the pattern.
 func testFrames(start, n int) []byte {

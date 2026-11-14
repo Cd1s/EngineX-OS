@@ -572,25 +572,42 @@ func openLive(t *testing.T, srvURL, query string) (net.Conn, []byte) {
 	return conn, head
 }
 
-// ?buffer=300: the player gets 300 ms of recent audio at once (a cushion for Wi-Fi
+// ?buffer=300: the player gets 300 ms of audio in one piece (a cushion for Wi-Fi
 // gaps); the old handler sent only live audio, about 19 KB per 100 ms.
+//
+// Spec changed (maintainer, 2026-11-14): capture no longer runs while nobody listens
+// (it cost 7% of a core on an idle deck), so there is no recent audio to hand to the
+// listener it starts for. That listener gets the same cushion as soon as it has been
+// captured; one who joins while somebody listens gets it at once, as before.
 func TestLiveWAVPrefillsRequestedBuffer(t *testing.T) {
 	s, dir := newTestServer(t)
 	enableLiveWithPCM(t, s, dir)
 	srv := httptest.NewServer(s)
 	defer srv.Close()
-	time.Sleep(700 * time.Millisecond) // let the feed build history
-	conn, head := openLive(t, srv.URL, "format=pcm&buffer=300")
-	defer conn.Close()
-	if !bytes.Contains(head, []byte("200 OK")) || !bytes.Contains(head, []byte("audio/L16;rate=48000;channels=2")) {
-		t.Fatalf("headers: %q", head)
+	time.Sleep(700 * time.Millisecond) // nobody listens: nothing is captured
+	cushion := func(who string) time.Duration {
+		start := time.Now()
+		conn, head := openLive(t, srv.URL, "format=pcm&buffer=300") // back with the first audio
+		waited := time.Since(start)
+		t.Cleanup(func() { conn.Close() })
+		if !bytes.Contains(head, []byte("200 OK")) || !bytes.Contains(head, []byte("audio/L16;rate=48000;channels=2")) {
+			t.Fatalf("%s: headers: %q", who, head)
+		}
+		got := readFor(t, conn, 120*time.Millisecond)
+		if len(got) < 300*192 {
+			t.Fatalf("%s: first 120 ms brought %d bytes, want the %d-byte cushion in one piece", who, len(got), 300*192)
+		}
+		if !bytes.Equal(got[:4], []byte{1, 2, 3, 4}) || len(got) < 8 || !bytes.Equal(got[len(got)&^3-4:len(got)&^3], []byte{1, 2, 3, 4}) {
+			t.Fatalf("%s: cushion is not on frame boundaries", who)
+		}
+		return waited
 	}
-	got := readFor(t, conn, 120*time.Millisecond)
-	if len(got) < 300*192 {
-		t.Fatalf("first 120 ms brought %d bytes, want the %d-byte cushion at once", len(got), 300*192)
+	// 300 ms of audio take 300 ms to capture; less means it was captured for nobody.
+	if waited := cushion("the listener capture starts for"); waited < 250*time.Millisecond || waited > 2*time.Second {
+		t.Fatalf("the first listener's cushion came after %v, want it once 300 ms were captured", waited)
 	}
-	if !bytes.Equal(got[:4], []byte{1, 2, 3, 4}) || len(got) < 8 || !bytes.Equal(got[len(got)&^3-4:len(got)&^3], []byte{1, 2, 3, 4}) {
-		t.Fatal("cushion is not on frame boundaries")
+	if waited := cushion("a listener who joins"); waited > 120*time.Millisecond {
+		t.Fatalf("a listener who joined a running capture waited %v for the cushion, want it at once", waited)
 	}
 }
 
@@ -626,6 +643,10 @@ func TestLiveWAVStalledListenerLatencyIsBounded(t *testing.T) {
 // Without ?buffer= the cushion is the wired default, 120 ms (the first version sent
 // 300 ms for Wi-Fi): the stream no longer drifts, so the cushion only covers the
 // deck's own jitter. ?buffer= still overrides it within 0..2000.
+//
+// Spec changed (maintainer, 2026-11-14): capture no longer runs while nobody listens,
+// so the listener it starts for gets the 120 ms once they are captured instead of
+// 120 ms of earlier audio at once. The size is the same for it and for one who joins.
 func TestLiveWAVDefaultBufferIsWiredTuned(t *testing.T) {
 	if broadcast.DefaultBufferMS != 120 {
 		t.Fatalf("default buffer %d ms, want 120", broadcast.DefaultBufferMS)
@@ -639,13 +660,15 @@ func TestLiveWAVDefaultBufferIsWiredTuned(t *testing.T) {
 	enableLiveWithPCM(t, s, dir)
 	srv := httptest.NewServer(s)
 	defer srv.Close()
-	time.Sleep(700 * time.Millisecond) // let the feed build history
-	conn, _ := openLive(t, srv.URL, "format=pcm")
-	defer conn.Close()
-	got := readFor(t, conn, 60*time.Millisecond)
-	// The cushion at once, then live audio for the 60 ms of the read (plus slack).
-	if lo, hi := 120*192, (120+60+70)*192; len(got) < lo || len(got) > hi {
-		t.Fatalf("first 60 ms brought %d bytes (%.0f ms), want the 120 ms cushion: %d..%d", len(got), float64(len(got))/192, lo, hi)
+	time.Sleep(700 * time.Millisecond) // nobody listens: nothing is captured
+	for _, who := range []string{"the listener capture starts for", "a listener who joins"} {
+		conn, _ := openLive(t, srv.URL, "format=pcm") // back with the first audio
+		defer conn.Close()
+		got := readFor(t, conn, 60*time.Millisecond)
+		// The cushion in one piece, then live audio for the 60 ms of the read (plus slack).
+		if lo, hi := 120*192, (120+60+70)*192; len(got) < lo || len(got) > hi {
+			t.Fatalf("%s: first 60 ms brought %d bytes (%.0f ms), want the 120 ms cushion: %d..%d", who, len(got), float64(len(got))/192, lo, hi)
+		}
 	}
 }
 

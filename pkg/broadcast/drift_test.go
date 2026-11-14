@@ -394,3 +394,16 @@ func BenchmarkPacerStep(b *testing.B) {
 	}
 	b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N)/480, "ns/frame")
 }
+
+// Capture pauses while nobody listens. No silence is owed for that pause: the listener
+// it resumes for would get a quarter second of it in one block on top of its cushion.
+func TestPauseNobodyHeardOwesNoSilence(t *testing.T) {
+	var p pacer
+	if out := p.step(nil, captureTick); len(out)/4 != 1152 {
+		t.Fatalf("first pass: %d frames, want 1152", len(out)/4)
+	}
+	p.skip(10 * time.Minute)
+	if out := p.step(nil, 10*time.Minute+captureTick); len(out)/4 < 1151 || len(out)/4 > 1153 {
+		t.Fatalf("first pass after a pause nobody heard: %d frames, want one 24 ms pass", len(out)/4)
+	}
+}

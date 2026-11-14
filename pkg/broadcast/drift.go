@@ -309,6 +309,14 @@ type pacer struct {
 	live    bool    // the last thing published was PCM
 }
 
+// skip leaves out the time up to now, when nobody listened: the stream goes on from
+// here, and no silence is owed for the pause (a first listener would get a quarter
+// second of it in one block, on top of the cushion it asked for).
+func (p *pacer) skip(now time.Duration) {
+	p.origin = float64(p.emitted) - SampleRate*now.Seconds()
+	p.live = false
+}
+
 // step takes what one read returned (nil: nothing) at monotonic time now since the
 // capture loop started and returns the bytes to publish (nil: nothing).
 func (p *pacer) step(pcm []byte, now time.Duration) []byte {
