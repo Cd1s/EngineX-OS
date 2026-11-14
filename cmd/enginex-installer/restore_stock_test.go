@@ -171,7 +171,7 @@ func TestRestoreStockRefusesADeckWithoutEngineX(t *testing.T) {
 	o := testOpts(t)
 	o.RestoreStock, o.Bundle = true, "must-not-open.img"
 	ssh := startSSHDeck(t, o.SSHPort, "inmusic,jp14\x00")
-	if err := os.Remove(filepath.Join(ssh.Data, "rootfs-version.txt")); err != nil {
+	if err := os.Remove(filepath.Join(ssh.Shim, "rootfs-version.txt")); err != nil {
 		t.Fatal(err)
 	}
 	err := modeA(ctxT(t), o, deck{IP: "127.0.0.1"})
