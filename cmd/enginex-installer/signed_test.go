@@ -331,6 +331,73 @@ func writeSidecars(t *testing.T, dir string, files map[string]string, key ed2551
 	}
 }
 
+func TestInstallerUsesItsOwnVersionBesideTheExecutable(t *testing.T) {
+	oldVersion, oldExecutable := installerVersion, installerExecutable
+	t.Cleanup(func() { installerVersion, installerExecutable = oldVersion, oldExecutable })
+	installerVersion = "5.3.0.5"
+	b := buildBundle(t, "SCLIVE4", "5.3.0.5")
+	gen1 := localGen1Image(t, "SC5000-5.3.0.5-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img", "AZ01 own version")
+	for _, c := range []struct {
+		name, prefix, path string
+		unsigned           bool
+	}{
+		{"gen1 image", "SC5000", gen1, false},
+		{"gen2 image before legacy bundle", "SCLIVE4", b.ImagePath, false},
+		{"gen2 legacy bundle", "SCLIVE4", b.Path, false},
+		{"unsigned gen1 refused", "SC5000", gen1, true},
+		{"unsigned gen2 refused", "SCLIVE4", b.ImagePath, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			installerExecutable = func() (string, error) { return filepath.Join(dir, "enginex-installer"), nil }
+			files := map[string]string{}
+			paths := []string{c.path}
+			if c.path == b.ImagePath {
+				paths = append(paths, b.Path)
+			}
+			for _, path := range paths {
+				raw, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				name := filepath.Base(path)
+				if err := os.WriteFile(filepath.Join(dir, name), raw, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				oldName := strings.Replace(name, "-5.3.0.5-", "-5.3.0.4-", 1)
+				if err := os.WriteFile(filepath.Join(dir, oldName), []byte("older package"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				files[name] = hexSHA(raw)
+			}
+			if !c.unsigned {
+				writeSidecars(t, dir, files, testReleasePriv, "v5.3.0.5-r2")
+			}
+			o := testOpts(t)
+			o.defaults()
+			useRelease(o, offlineRelease(t)) // any request, including releases/latest, fails the test
+			var path string
+			var err error
+			if c.prefix == "SC5000" {
+				path, err = gen1Image(ctxT(t), o, c.prefix)
+			} else {
+				var got *bundleInfo
+				got, err = obtainBundle(ctxT(t), o, c.prefix)
+				if got != nil {
+					path = got.Path
+				}
+			}
+			if c.unsigned {
+				if err == nil || !strings.Contains(err.Error(), "no verified signed list") {
+					t.Fatalf("unsigned automatic package: path=%q err=%v", path, err)
+				}
+			} else if err != nil || path != filepath.Join(dir, filepath.Base(c.path)) || o.release != "v5.3.0.5-r2" {
+				t.Fatalf("own-version selection: path=%q release=%q err=%v", path, o.release, err)
+			}
+		})
+	}
+}
+
 // GitHub cannot be read and the installer picks up a package from an earlier run by itself: the
 // user did not name it, so it must come with the signed list kept at its download (review of #239:
 // an unsigned cached file used to install with only a warning).

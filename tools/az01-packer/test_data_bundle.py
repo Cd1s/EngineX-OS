@@ -1063,15 +1063,17 @@ exec REAL "$@"
         fake_bin.mkdir()
         fake_go = fake_bin / 'go'
         fake_go.write_text(
-            '#!/bin/sh\nout=""\nwhile [ $# -gt 0 ]; do\n'
+            '#!/bin/sh\nprintf "%s\\n" "$*" >> "$GO_ARGS_LOG"\nout=""\nwhile [ $# -gt 0 ]; do\n'
             '  if [ "$1" = "-o" ]; then out="$2"; shift 2; else shift; fi\n'
             'done\nprintf "#!/bin/sh\\nexit 0\\n" > "$out"\nchmod 755 "$out"\n'
         )
         fake_go.chmod(0o755)
-        env = {**self.env, 'PATH': f"{fake_bin}:{self.env['PATH']}"}
+        go_log = self.tmp / 'go-args'
+        env = {**self.env, 'PATH': f"{fake_bin}:{self.env['PATH']}", 'GO_ARGS_LOG': str(go_log)}
         res = subprocess.run(['sh', str(HERE / 'build-installer.sh'), '5.3.0.4', str(out_dir)],
                              env=env, capture_output=True, text=True)
         self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(go_log.read_text().count('-X main.installerVersion=5.3.0.4'), 4)
         self.assertEqual(len(list(out_dir.glob('*-Update.img'))), 16)
         self.assertEqual(len(list(out_dir.glob('*-Data-Bundle.tar.gz'))), 8)
         self.assertEqual(len(list(out_dir.glob('EngineX-Installer-5.3.0.4-*'))), 4)

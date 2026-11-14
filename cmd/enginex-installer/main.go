@@ -48,6 +48,9 @@ const (
 	customDirSh = `"${SC5000_CUSTOM:-/data/enginex}"`
 )
 
+var installerVersion = "dev" // set by build-installer.sh
+var installerExecutable = os.Executable
+
 // options are the flags plus the seams the tests point at real local things.
 type options struct {
 	Bundle, Backup, Key, Password string
@@ -495,6 +498,9 @@ type release struct {
 // fetchBundle downloads the latest release's Gen-2 *-Update.img (or legacy Data-Bundle.tar.gz fallback)
 // for prefix into dir and checks GitHub's SHA-256 (#215).
 func fetchBundle(ctx context.Context, o *options, prefix, dir string) (string, error) {
+	if path, err := ownVersionPackage(o, prefix); path != "" || err != nil {
+		return path, err
+	}
 	var rel release
 	err := getJSON(ctx, o, o.API+"/repos/"+o.Repo+"/releases/latest", &rel)
 	if err == nil && rel.Tag == "" && len(rel.Assets) == 0 {
@@ -591,6 +597,9 @@ func gen1Image(ctx context.Context, o *options, prefix string) (string, error) {
 }
 
 func fetchImage(ctx context.Context, o *options, prefix string) (string, error) {
+	if path, err := ownVersionPackage(o, prefix); path != "" || err != nil {
+		return path, err
+	}
 	var rel release
 	if err := getJSON(ctx, o, o.API+"/repos/"+o.Repo+"/releases/latest", &rel); err != nil {
 		return "", err
@@ -712,6 +721,30 @@ func localBundle(dir, prefix string) string {
 		return local[0]
 	}
 	return ""
+}
+
+func ownVersionPackage(o *options, prefix string) (string, error) {
+	if installerVersion == "dev" {
+		return "", nil
+	}
+	exe, err := installerExecutable()
+	if err != nil {
+		return "", err
+	}
+	base := filepath.Join(filepath.Dir(exe), prefix+"-"+installerVersion+"-EngineX-OS-")
+	paths, _ := filepath.Glob(base + "*-Update.img")
+	if len(paths) == 0 {
+		paths, _ = filepath.Glob(base + "Data-Bundle.tar.gz")
+	}
+	if len(paths) == 0 {
+		return "", nil
+	}
+	path := paths[0]
+	if o.release, err = verifyCached(path); err != nil {
+		return "", err
+	}
+	o.say("使用安装器同版本的本地文件 "+filepath.Base(path), "Using the local package matching this installer: "+filepath.Base(path))
+	return path, nil
 }
 
 func fileSHA256(path string) (string, error) {
@@ -1608,7 +1641,7 @@ func run(ctx context.Context, o *options) error {
 }
 
 func registerFlags(fs *flag.FlagSet, o *options) {
-	fs.StringVar(&o.Bundle, "bundle", "", "*-Update.img or Data-Bundle.tar.gz to install (default: latest release; a package in the folder is reused only when its SHA-256 matches)")
+	fs.StringVar(&o.Bundle, "bundle", "", "*-Update.img or Data-Bundle.tar.gz to install (default: signed package beside this installer matching its version, otherwise latest release)")
 	fs.StringVar(&o.Bundle, "image", "", "alias for -bundle: *-Update.img to install")
 	fs.StringVar(&o.Backup, "userdata-backup", "", "mode B: a backup image of the deck's data partition to inject into (keeps the user's files; if omitted, a fresh partition is created)")
 	fs.StringVar(&o.Key, "key", "", "mode A: SSH private key (default ~/.ssh/id_*; password denon is also tried)")

@@ -23,7 +23,7 @@ for t in linux-amd64 macos-amd64 macos-arm64 windows-amd64; do
 	fi
 	d=$W/$t
 	mkdir -p "$d/stems" "$d/third_party"
-	CGO_ENABLED=0 GOOS=$goos GOARCH=$arch go build -trimpath -o "$d/$exe" ./cmd/enginex-installer
+	CGO_ENABLED=0 GOOS=$goos GOARCH=$arch go build -trimpath -ldflags "-X main.installerVersion=$V" -o "$d/$exe" ./cmd/enginex-installer
 	CGO_ENABLED=0 GOOS=$goos GOARCH=$arch go build -trimpath -o "$d/stems/$stemsd" ./cmd/enginex-stemsd
 	cp tools/az01-packer/az01_packer.py tools/az01-packer/host-install-userdata.py tools/az01-packer/host-install-fastboot.sh "$d/"
 	cp -R third_party/installer "$d/third_party/"
