@@ -3,17 +3,17 @@ settings_copy_prepare() {
     mkdir -p "$W/data/t7-drive"
     mkdir -p "$W/data/enginex/settings-copy" "$W/data/enginex/ui"
     printf '# T7 exact receiver bytes\r\nwaveform=denon\r\nfour_deck_role=24\r\nfuture_local_key=keep\r\n' > "$W/data/enginex/ui/settings.conf"
-    printf '# T7 exact scale bytes\nSC5000_UI_SCALE=100\n' > "$W/data/enginex/ui-scale.env"
+    printf '# T7 exact scale bytes\nENGINEX_UI_SCALE=100\n' > "$W/data/enginex/ui-scale.env"
     chmod 600 "$W/data/enginex/ui/settings.conf" "$W/data/enginex/ui-scale.env"
     if [ -n "${NSPAWN_SETTINGS_COPY_SUITE:-}" ]; then
         mkdir -p "$W/data/t7-bin"
-        cp "$NSPAWN_SETTINGS_COPY_SUITE" "$W/data/t7-bin/sc5000-suite"
-        chmod 755 "$W/data/t7-bin/sc5000-suite"
+        cp "$NSPAWN_SETTINGS_COPY_SUITE" "$W/data/t7-bin/enginex-suite"
+        chmod 755 "$W/data/t7-bin/enginex-suite"
         cat > "$R/usr/local/bin/stream-sync" <<'WRAPPER'
 #!/bin/sh
 if [ "${1:-}" = --settings-copy-prestart ] && [ "$(cat /data/t7-flow-stage 2>/dev/null)" = undo ]; then
     cp /data/enginex/settings-copy/undo.json /data/t7-undo-snapshot.json
-    /data/t7-bin/sc5000-suite stream-sync "$@" || exit "$?"
+    /data/t7-bin/enginex-suite stream-sync "$@" || exit "$?"
     mkdir -p /data/t7-prestart-files/enginex/settings-copy
     cp -a /data/enginex/settings-copy/EngineX-Settings /data/t7-prestart-files/enginex/settings-copy/
     mkdir -p /data/t7-prestart-files/AppDataUser/'AIR Music Technology'/Engine /data/t7-prestart-files/enginex/ui
@@ -23,13 +23,13 @@ if [ "${1:-}" = --settings-copy-prestart ] && [ "$(cat /data/t7-flow-stage 2>/de
     [ ! -f /data/enginex/ui-scale.env ] || cp -a /data/enginex/ui-scale.env /data/t7-prestart-files/enginex/
     exit 0
 fi
-exec /data/t7-bin/sc5000-suite stream-sync "$@"
+exec /data/t7-bin/enginex-suite stream-sync "$@"
 WRAPPER
-        cp "$REPO/rootfs-overlay/etc/sc5000/engine-ui-guard" "$R/etc/sc5000/engine-ui-guard"
+        cp "$REPO/rootfs-overlay/etc/enginex/engine-ui-guard" "$R/etc/enginex/engine-ui-guard"
     fi
     if [ -n "${NSPAWN_SETTINGS_COPY_HOOK:-}" ]; then
-        cp --remove-destination "$NSPAWN_SETTINGS_COPY_HOOK" "$R/etc/sc5000/libengine-ui-hook.so"
-        cp --remove-destination "$NSPAWN_SETTINGS_COPY_HOOK" "$R/usr/local/lib/sc5000/libengine-ui-hook.so"
+        cp --remove-destination "$NSPAWN_SETTINGS_COPY_HOOK" "$R/etc/enginex/libengine-ui-hook.so"
+        cp --remove-destination "$NSPAWN_SETTINGS_COPY_HOOK" "$R/usr/local/lib/enginex/libengine-ui-hook.so"
     fi
     if [ -n "${NSPAWN_SETTINGS_COPY_PACKS:-}" ]; then
         mkdir -p "$W/data/t7-packs"

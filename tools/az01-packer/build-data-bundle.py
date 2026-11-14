@@ -931,9 +931,9 @@ if [ -z "${ENGINEX_CUSTOM:-}" ]; then
 fi
 # Bytecode is disposable and must not outlive the resource pack that produced it.
 rm -rf "$dest/ui/qml-cache"
-case ${SC5000_CUSTOM:-/data/enginex} in
-    /data/enginex|/data/sc5000-custom) engine_data=${SC5000_ENGINE_DATA_DIR:-/data/AppDataUser/AIR Music Technology/Engine} ;;
-    *) engine_data=${SC5000_ENGINE_DATA_DIR:-} ;;
+case ${ENGINEX_CUSTOM:-/data/enginex} in
+    /data/enginex|/data/sc5000-custom) engine_data=${ENGINEX_ENGINE_DATA_DIR:-/data/AppDataUser/AIR Music Technology/Engine} ;;
+    *) engine_data=${ENGINEX_ENGINE_DATA_DIR:-} ;;
 esac
 [ -z "$engine_data" ] || rm -rf "$engine_data/.cache/qml"
 echo "EngineX OS $version removed from $dest"

@@ -3224,7 +3224,7 @@ SERVICES_MAIN = """
 		function onTimeZoneSelect() { root.scTimeZonePickerUsed = true }
 		function onSystemTimeZoneSetSucceeded() { root.scOnTimeZoneChanged() }
 	}
-	// 5.3.0.5 Bluetooth speaker output: which output pair a connected speaker gets (GET/POST /v1/sc5000/bluetooth, loopback).
+	// 5.3.0.5 Bluetooth speaker output: which output pair a connected speaker gets (GET/POST /v1/enginex/bluetooth, loopback).
 	// The names are the API's; the panel shows them as the deck names its outputs.
 	property var scBtLayers: []
 	property string scBtLayer: ""
@@ -3238,13 +3238,13 @@ SERVICES_MAIN = """
 	}
 	function scBtLoad() {
 		const x = new XMLHttpRequest()
-		x.open("GET", "http://127.0.0.1:8080/v1/sc5000/bluetooth")
+		x.open("GET", "http://127.0.0.1:8080/v1/enginex/bluetooth")
 		x.onreadystatechange = function() { scBtReply(x) }
 		x.send()
 	}
 	function scBtSet(name) {
 		const x = new XMLHttpRequest()
-		x.open("POST", "http://127.0.0.1:8080/v1/sc5000/bluetooth?assignLayer=" + encodeURIComponent(name))
+		x.open("POST", "http://127.0.0.1:8080/v1/enginex/bluetooth?assignLayer=" + encodeURIComponent(name))
 		x.onreadystatechange = function() {
 			if (x.readyState !== 4) return
 			if (x.status === 200) scBtReply(x)

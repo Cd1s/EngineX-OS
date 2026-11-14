@@ -27,7 +27,7 @@ type tidalAuth struct {
 
 func isSyntheticTidalToken(tok string) bool {
 	switch strings.TrimSpace(tok) {
-	case "", "enginex", "sc5000-token", "sc5000-refresh":
+	case "", "enginex", "enginex-token", "enginex-refresh", "sc5000-token", "sc5000-refresh":
 		return true
 	}
 	return false

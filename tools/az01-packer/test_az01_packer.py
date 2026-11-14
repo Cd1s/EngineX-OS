@@ -1023,3 +1023,37 @@ class OverlayOrderingTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class Rename234UpgradeTests(unittest.TestCase):
+    def test_234_r5_data_survives_migration_and_repeated_boot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp) / 'data'
+            old, new = data / 'sc5000-custom', data / 'enginex'
+            saved = {
+                'ui/settings.conf': b'lang=zh-TW\nfour_deck_role=24\nunknown=keep\n',
+                'state/access-token': b'test-access-code\n',
+                'state/deemix-config.json': b'{"quality":"flac"}\n',
+                'ui/packs/en/Skins/Main.qml': b'// installed pack\n',
+                'ui/mods-state.json': b'{"club":true}\n',
+                'mods/club/mod.json': b'{"id":"club"}\n',
+                'mods-state/club/.paused': b'sc5000-deemixd.service\n',
+                'ssh_host_ed25519_key': b'test-host-key\n',
+                'ui-scale.env': b'SC5000_UI_SCALE=85\n',
+                '.cache/account': b'cached-account\n',
+            }
+            for rel, content in saved.items():
+                path = old / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(content)
+                path.chmod(0o600)
+            script = az.MIGRATE.replace('/data', str(data))
+            for boot in range(2):
+                result = subprocess.run(['sh', '-eu', '-c', script], capture_output=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertTrue(new.is_dir() and not new.is_symlink())
+                self.assertEqual(os.readlink(old), 'enginex')
+                for rel, content in saved.items():
+                    self.assertEqual((new / rel).read_bytes(), content, (boot, rel))
+                    self.assertEqual((old / rel).read_bytes(), content, (boot, rel))
+                    self.assertEqual((new / rel).stat().st_mode & 0o777, 0o600, rel)

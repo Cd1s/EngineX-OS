@@ -21,7 +21,7 @@ SHIPPED = [
     'tools/ui-mod', 'tools/edisksd-hook', 'tools/mods', 'tools/diagnose', 'tools/tailscale',
     'tools/broadcast', 'tools/splash', 'tools/drmgrab', 'tools/stems', 'docs/mods/src',
     'tools/az01-packer/build-data-bundle.py', 'tools/az01-packer/az01_packer.py',
-    'tools/az01-packer/host-install-userdata.py', 'tools/az01-packer/rootfs_audit.py',
+    'tools/az01-packer/host-install-userdata.py', 'tools/az01-packer/rootfs_audit.py', 'sim/nspawn-boot/boot.sh',
 ]
 NOT_SHIPPED = ['*_test.go', '*/test_*', '*.md', '*.so', '*.png', '*.jpg', '*.ttf', '*.gz', '*.bin',
                '*/__pycache__/*', '*/testdata/*']
@@ -68,11 +68,15 @@ ALLOW = [
     (['pkg/webui/shadow_debug.go'], r'/tmp/sc5000-debug', 'debug flag file of older releases'),
     (['pkg/broadcast/broadcast.go'], r'/tmp/sc5000-broadcast\.pcm',
      'the hook feed of releases before 5.3.0.5: a saved configuration naming it reads this release\'s'),
+    (['sim/nspawn-boot/boot.sh'], r'sc5000-custom-(?:prepare|etc-reset)\.service|sc5000-deemixd\.service',
+     'the boot sandbox also accepts images built before the rename'),
     (PACKER, r'sc5000(?:/stems-runtime-prepare)?\b|sc5000-custom-\*?|dnsmasq\.d/sc5000-telemetry\.conf'
      r"|'sc5000'|\bsc5000\b",
      'etc-reset removes upper-layer copies under the old names; the audit knows them'),
     (['pkg/webui/radios.go'], r'sc5000-debloat\b', 'a deck whose read-only root still has it'),
     (['pkg/webui/spotify_mdns.go'], r'"sc5000"|\bsc5000\.local\b', 'the stock firmware\'s avahi host name'),
+    (['pkg/webui/tidal_auth.go'], r'sc5000-(?:token|refresh)',
+     'synthetic account tokens persisted by older releases must still be recognized'),
     (['pkg/webui/tidal_gateway.go'], r'\bsc5000-shadow-decks\b', 'a past incident, by name'),
     (['*'], r'/media/sc5000-sd-cache\b[\w./-]*', 'dead since 8856176; legacy read path'),
     (['pkg/webui/update.go', 'tools/az01-packer/build-data-bundle.py'], r'\(/etc/sc5000\b|\bsc5000\b',
@@ -89,7 +93,6 @@ OVERLAY_LINKS = {
     'usr/local/bin/sc5000-perf-tune': 'enginex-perf-tune',
     'usr/local/bin/sc5000-prolink-diag': 'enginex-prolink-diag',
     'usr/local/bin/sc5000-storage-mount': 'enginex-storage-mount',
-    'usr/sbin/sc5000-bt-helper': 'enginex-bt-helper',
     'usr/sbin/sc5000-usb-audio': 'enginex-usb-audio',
 }
 

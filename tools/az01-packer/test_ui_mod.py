@@ -308,11 +308,11 @@ class TrackListArtworkPlaceholderAndReaderPriorityTest(unittest.TestCase):
                                 # Native SD and Remote Library tracks must retain image://planck. SD rows
                                 # have no provider label; Remote Library (Eaas) and Dropbox rows have one.
                                 # Gateway rows, which Engine has no art for, still ask the gateway.
-                                line = next(line for line in source.splitlines() if "/v1/sc5000/art" in line)
+                                line = next(line for line in source.splitlines() if "/v1/enginex/art" in line)
                                 script = "const assert=require('node:assert/strict'); const root={scScope:'deezer',scPlainTitle:s=>s};\n"
                                 script += "const art=(streamingProviderName,albumArt)=>{const row={streamingProviderName,modelData:{albumArt,song:'Song',artist:'A'}}; return " + line.strip().removeprefix("source: ") + "};\n"
                                 script += "for (const p of ['', 'Eaas', 'Dropbox']) assert.equal(art(p, 'image://planck/7?size=100'), 'image://planck/7?size=100');\n"
-                                script += "for (const a of ['', 'image://streaming/']) assert.equal(art('Deezer', a), 'http://127.0.0.1:8080/v1/sc5000/art?song=Song&artist=A');"
+                                script += "for (const a of ['', 'image://streaming/']) assert.equal(art('Deezer', a), 'http://127.0.0.1:8080/v1/enginex/art?song=Song&artist=A');"
                                 checked = subprocess.run(["node", "-e", script], capture_output=True, text=True)
                                 self.assertEqual(checked.returncode, 0, checked.stderr)
 
@@ -2348,20 +2348,20 @@ assert.deepEqual(root.scBtLayers, layers); assert.equal(root.scBtLayer, "Master"
 assert.deepEqual(scBtLabels(root.scBtLayers), ["Main", "Booth", "Headphones", "Zone"]);
 scBtSet("Headphones");
 assert.equal(root.scBtLayer, "Headphones");
-assert.equal(calls.at(-1), "POST http://127.0.0.1:8080/v1/sc5000/bluetooth?assignLayer=Headphones");
+assert.equal(calls.at(-1), "POST http://127.0.0.1:8080/v1/enginex/bluetooth?assignLayer=Headphones");
 layers = ["Layer A", "Layer B"]; layer = "Layer A"; scBtLoad();
 scBtSet("Layer B");
 assert.equal(root.scBtLayer, "Layer B");
-assert.equal(calls.at(-1), "POST http://127.0.0.1:8080/v1/sc5000/bluetooth?assignLayer=Layer%20B");
+assert.equal(calls.at(-1), "POST http://127.0.0.1:8080/v1/enginex/bluetooth?assignLayer=Layer%20B");
 scBtSet("Zone"); /* refused with 400: the panel asks again and shows what the deck says */
 assert.equal(root.scBtLayer, "Layer B");
-assert.equal(calls.at(-1), "GET http://127.0.0.1:8080/v1/sc5000/bluetooth");
+assert.equal(calls.at(-1), "GET http://127.0.0.1:8080/v1/enginex/bluetooth");
 console.log("PASS");
 """
 
     def test_bluetooth_panel_output_source(self):
         # 5.3.0.5: the stock Bluetooth panel (which scans, lists, pairs and connects speakers itself) gets an "Output Source"
-        # row under "Assign Input to", fed by /v1/sc5000/bluetooth through the root's scBt* helpers.
+        # row under "Assign Input to", fed by /v1/enginex/bluetooth through the root's scBt* helpers.
         qrc = LAB / "5.3.0" / "qrc"
         if not qrc.is_dir():
             self.skipTest(f"{qrc} not found (run on the build host)")
@@ -3057,7 +3057,7 @@ assert.equal(value().toFixed(2),'130.18');
     @unittest.skipUnless(shutil.which("node"), "node needed for the display-state behavioral checks")
     def test_bpm_decimals_display_setting_and_formatting(self):
         # Issue #229: Settings -> Display -> BPM Decimals ("1" / "2", default "2") in all 3 languages,
-        # persisted via /v1/sc5000/ui + settings.conf, driving ONLY the places that show 2 decimals on
+        # persisted via /v1/enginex/ui + settings.conf, driving ONLY the places that show 2 decimals on
         # 5.3.0.4 (BpmInfo.qml / scBpm2 and the shadow / Paired Player header in DeckTrackData &
         # DeckPerformanceData), keeping stock-default Bpm instances unchanged on both 5.3.0 and 5.0.4,
         # and matching stock formatting (including metadata BPM "128" -> "128") when set to "1".

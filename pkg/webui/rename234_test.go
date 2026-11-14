@@ -235,3 +235,36 @@ func TestRename234OlderBundleLeavesAndRebootsInsteadOfActivating(t *testing.T) {
 		}
 	}
 }
+
+// Settings copy authorizes the same local screen after the gateway canonicalizes the old prefix.
+func TestRename234SettingsCopyLocalScreen(t *testing.T) {
+	for _, prefix := range []string{"/v1/enginex/", "/v1/sc5000/"} {
+		r := httptest.NewRequest("POST", prefix+"settings-copy", nil)
+		r.RemoteAddr = "127.0.0.1:1234"
+		if !copyLocalScreen(r) {
+			t.Errorf("local screen refused under %s", prefix)
+		}
+		r.Header.Set("Cf-Connecting-Ip", "192.0.2.1")
+		if copyLocalScreen(r) {
+			t.Errorf("relayed screen accepted under %s", prefix)
+		}
+		r.Header.Del("Cf-Connecting-Ip")
+		r.RemoteAddr = "192.0.2.1:1234"
+		if copyLocalScreen(r) {
+			t.Errorf("remote screen accepted under %s", prefix)
+		}
+	}
+}
+
+func TestRename234SyntheticTidalAccountsStayLocal(t *testing.T) {
+	for _, token := range []string{"enginex-token", "enginex-refresh", "sc5000-token", "sc5000-refresh"} {
+		g := New(Config{StateDir: t.TempDir(), UIDir: t.TempDir()}, nil)
+		if err := g.tidal.saveRealAuth(tidalAuth{AccessToken: token, RefreshToken: token}); err != nil {
+			t.Fatal(err)
+		}
+		if g.tidal.hasRealAuth() {
+			t.Errorf("synthetic account %q became real upstream credentials", token)
+		}
+		g.Close()
+	}
+}

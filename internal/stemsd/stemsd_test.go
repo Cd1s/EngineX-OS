@@ -81,9 +81,9 @@ func TestResolveWorkerPathFindsSiblingThroughSymlink(t *testing.T) {
 	if err := os.Symlink(realExe, symExe); err != nil {
 		t.Fatal(err)
 	}
-	missingDefault := filepath.Join(dir, "opt", "sc5000-stems", "worker.py")
+	missingDefault := filepath.Join(dir, "opt", "enginex-stems", "worker.py")
 
-	got := resolveWorkerPath(missingDefault, false, func() (string, error) { return symExe, nil })
+	got := resolveWorkerPath(missingDefault, false, func() (string, error) { return symExe, nil }, "")
 	if got != siblingWorker {
 		t.Fatalf("resolveWorkerPath(missing default, symlink exe) = %q, want %q", got, siblingWorker)
 	}
@@ -96,13 +96,13 @@ func TestResolveWorkerPathFindsSiblingThroughSymlink(t *testing.T) {
 	if err := os.WriteFile(presentDefault, []byte("# default\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got := resolveWorkerPath(presentDefault, false, func() (string, error) { return symExe, nil }); got != presentDefault {
+	if got := resolveWorkerPath(presentDefault, false, func() (string, error) { return symExe, nil }, ""); got != presentDefault {
 		t.Fatalf("resolveWorkerPath(existing default) = %q, want %q", got, presentDefault)
 	}
 
 	// Explicit -worker flag is never overridden.
 	explicit := filepath.Join(dir, "custom", "worker.py")
-	if got := resolveWorkerPath(explicit, true, func() (string, error) { return symExe, nil }); got != explicit {
+	if got := resolveWorkerPath(explicit, true, func() (string, error) { return symExe, nil }, ""); got != explicit {
 		t.Fatalf("resolveWorkerPath(explicit) = %q, want %q", got, explicit)
 	}
 }
@@ -268,5 +268,25 @@ func TestEmptyTokenFileFlagEnablesZeroConfigLANListen(t *testing.T) {
 	listen3, tok3 := resolveListenAndToken("127.0.0.1:6596", "/tmp/tok", map[string]bool{"token-file": true}, &log)
 	if listen3 != "127.0.0.1:6596" || tok3 != "/tmp/tok" {
 		t.Fatalf("resolveListenAndToken(-token-file /tmp/tok) = (%q, %q)", listen3, tok3)
+	}
+}
+
+func TestResolveWorkerPathKeepsLegacyInstallation(t *testing.T) {
+	root := t.TempDir()
+	current := filepath.Join(root, "enginex-stems", "worker.py")
+	legacy := filepath.Join(root, "sc5000-stems", "worker.py")
+	for _, path := range []string{legacy, current} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("# worker\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := resolveWorkerPath(current, false, nil, legacy); got != path {
+			t.Fatalf("resolved %q, want %q", got, path)
+		}
+	}
+	if got := resolveWorkerPath(current+".explicit", true, nil, legacy); got != current+".explicit" {
+		t.Fatalf("explicit worker changed to %q", got)
 	}
 }

@@ -421,7 +421,7 @@ func SettingsCopyBeforeEngine() error {
 		return errHostCommand
 	}
 	client := &http.Client{Timeout: 10 * time.Second}
-	response, err := client.Post("http://127.0.0.1:8080/v1/sc5000/settings-copy/prestart", "application/json", bytes.NewReader([]byte("{}")))
+	response, err := client.Post("http://127.0.0.1:8080/v1/enginex/settings-copy/prestart", "application/json", bytes.NewReader([]byte("{}")))
 	if err != nil {
 		return errors.New("settings copy preparation service is unavailable")
 	}
@@ -579,7 +579,7 @@ func (s *Server) settingsCopyControl(w http.ResponseWriter, r *http.Request) {
 
 func copyLocalScreen(r *http.Request) bool {
 	ip := net.ParseIP(copyRemoteIP(r))
-	return ip != nil && ip.IsLoopback() && !relayedFromOutside(r) && strings.HasPrefix(r.URL.Path, "/v1/sc5000/")
+	return ip != nil && ip.IsLoopback() && !relayedFromOutside(r) && strings.HasPrefix(canonicalV1(r.URL.Path), "/v1/enginex/")
 }
 
 func copyBundleHash(bundle copyBundle) string {
