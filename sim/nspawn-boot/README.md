@@ -47,6 +47,17 @@ Test-only changes to the copy:
   `systemd-networkd-wait-online.service`. The last one cannot obtain a physical
   network link in the isolated namespace. The list is also printed per run.
 
+Idle cost. `NSPAWN_IDLE_COST=<seconds>` keeps the booted guest idle for that long
+(after `NSPAWN_IDLE_SETTLE`, default 60 s) and prints what each systemd unit and
+thread spent: CPU time (cgroup, so exited children count), wake-ups, reads and
+writes (`idle_cost.py`). `NSPAWN_IDLE_STOCK=1` is the baseline: safe mode and none
+of our daemons, so the usual checks fail. `NSPAWN_IDLE_SETTINGS=<file>` boots
+with that `settings.conf` (for example the four-deck layout), and
+`NSPAWN_IDLE_TREE=1` uses the working tree's `engine-ui-guard` and
+`sc5000-perf-tune` instead of the image's. The build host's cores are faster
+than a deck's: compare runs with each other. On a deck use
+`tools/diagnose/heat-probe.sh`.
+
 Default cleanup removes the fresh `/var/tmp/nspawn-boot.*` directory after the
 container stops. `--keep` retains the copied rootfs, `/data`, console and guest
 journals, unpack verification, failed-unit list, API JSON, and results; it still
