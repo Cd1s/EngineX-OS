@@ -113,6 +113,7 @@ a{color:var(--accent)}label.chk{display:flex;align-items:center;gap:10px;cursor:
   <div class="setting"><div class="txt"><b data-i18n="tShare"></b><span class="sub" data-i18n="sShare"></span></div><label class="sw"><input type="checkbox" data-toggle="prolinkShare"><span></span></label></div>
   <div class="setting"><div class="txt"><b><span data-i18n="tExport"></span><span class="tag" data-i18n="beta"></span></b><span class="sub" data-i18n="sExport"></span></div><label class="sw"><input type="checkbox" data-toggle="prolinkExport"><span></span></label></div>
   <div class="setting"><div class="txt"><b data-i18n="tBtOut"></b><span class="sub" data-i18n="sBtOut"></span></div><select id="btOut" aria-label="Bluetooth" style="width:auto;min-width:150px"></select></div>
+  <div class="setting"><div class="txt"><b data-i18n="tHttps"></b><span class="sub" data-i18n="sHttps"></span></div><label class="sw"><input type="checkbox" data-toggle="consoleHttps"><span></span></label></div>
   <div class="setting"><div class="txt"><b data-i18n="verboseLog"></b><span class="sub" data-i18n="verboseLogSub"></span></div><label class="sw"><input type="checkbox" data-toggle="verboseLog"><span></span></label><a class="btn" href="/api/logs" download="enginex-logs.txt" data-i18n="downloadLogs"></a></div>
   <small id="uiState"></small>
   <div id="bootRetryActions" hidden><button class="btn" id="bootRetry" data-i18n="bootRetry"></button> <a class="btn" href="/api/boot-report" download data-i18n="bootReport"></a></div>
@@ -134,7 +135,7 @@ a{color:var(--accent)}label.chk{display:flex;align-items:center;gap:10px;cursor:
 <details class="card" id="gen2Card" hidden><summary><span class="ic">⚡</span><span data-i18n="gen2Title"></span></summary><div class="in"><small data-i18n="gen2Hint"></small><small id="gen2State"></small><div class="bar"><button class="btn primary" id="gen2Unlock" data-i18n="gen2Unlock"></button><button class="btn" id="gen2Uninstall" data-i18n="gen2Uninstall"></button></div></div></details>
 <details class="card"><summary><span class="ic">⌨</span><span data-i18n="sshTitle"></span></summary><div class="in"><small data-i18n="sshHint"></small><small id="sshState"></small><div class="setting"><div class="txt"><b data-i18n="sshEnabled"></b></div><label class="sw"><input type="checkbox" id="sshEnabled"><span></span></label></div><div class="bar"><input id="sshPort" type="number" min="1" max="65535" value="22" data-i18n-ph="sshPort" autocomplete="off"><input id="sshPass" type="password" data-i18n-ph="sshPass" autocomplete="new-password"></div><div class="bar"><input id="sshKey" data-i18n-ph="sshKey" autocomplete="off" spellcheck="false"></div><div class="bar"><button class="btn primary" id="sshSave" data-i18n="save"></button></div></div></details>
 <details class="card"><summary><span class="ic">♩</span><span data-i18n="bpmTitle"></span></summary><div class="in"><small id="bpmState"></small><div class="bar"><input id="scClient" data-i18n-ph="scClient" autocomplete="off"></div><div class="bar"><input id="scSecret" type="password" data-i18n-ph="scSecret" autocomplete="off"></div><div class="bar"><input id="scToken" type="password" data-i18n-ph="scToken" autocomplete="off"></div><div class="bar"><input id="gsbKey" type="password" data-i18n-ph="gsbKey" autocomplete="off"></div><button class="btn" onclick="action(saveBpm)" data-i18n="save"></button><small><a href="https://getsongbpm.com" target="_blank" rel="noreferrer">BPM data by GetSongBPM</a></small></div></details>
-<details class="card"><summary><span class="ic">▣</span><span data-i18n="qrTitle"></span></summary><div class="in"><img src="/api/console-qr" width="200" data-i18n-alt="qrAlt" style="background:#fff;border-radius:10px;padding:6px"><small data-i18n="qrHint"></small></div></details>
+<details class="card"><summary><span class="ic">▣</span><span data-i18n="qrTitle"></span></summary><div class="in"><img id="consoleQr" src="/api/console-qr" width="200" data-i18n-alt="qrAlt" style="background:#fff;border-radius:10px;padding:6px"><a id="consoleHttpsLink" hidden target="_blank" rel="noopener noreferrer" style="font-weight:700;overflow-wrap:anywhere"></a><small data-i18n="qrHint"></small></div></details>
 </div>
 </div>
 <div id="notice" role="status"></div>
@@ -176,6 +177,7 @@ modBrowse:['Browse & download community open-source Mods (enginexdj.com/#mods) �
 modQuarMsg:['Safe mode quarantined the Mods. They are not loaded until you reset.','安全模式已隔离 Mods，重置前不会加载。','安全模式已隔離 Mods，重置前不會載入。'],modQuarBtn:['Restore and reload Mods (Reset Quarantine)','恢复并重新加载 Mods（Reset Quarantine）','恢復並重新載入 Mods（Reset Quarantine）'],
 modDrop:['Click or drop a .tar.gz Mod package here to install','点击或拖入 .tar.gz Mod 包一键安装','點擊或拖入 .tar.gz Mod 包一鍵安裝'],modEmpty:['No Mods yet','暂无 Mod','暫無 Mod'],modInstall:['Install / Enable','安装 / 启用','安裝 / 啟用'],modUninstall:['Uninstall','卸载','解除安裝'],modConfirm:['Uninstall this Mod?','确定卸载这个 Mod？','確定解除安裝這個 Mod？'],modUploading:['Uploading {0}…','正在上传 {0}…','正在上傳 {0}…'],modDone:['Installed: {0}','已安装：{0}','已安裝：{0}'],modBad:['Please choose a .tar.gz file','请选择 .tar.gz 文件','請選擇 .tar.gz 檔案'],modAuthor:['by','作者','作者'],modQml:['QML','QML 数','QML 數'],
 qrTitle:['Open this console on a phone','手机扫码打开控制台','手機掃碼開啟控制台'],qrAlt:['QR code of this console','局域网控制台二维码','區域網路控制台 QR Code'],qrHint:['Same network only; log in with the console code shown on the deck.','需在同一局域网；用碟机显示的控制台访问码登录。','需在同一區域網路；用碟機顯示的控制台存取碼登入。'],
+tHttps:['HTTPS console (:8443)','启用控制台 HTTPS (:8443)','啟用主控台 HTTPS (:8443)'],sHttps:['Optional self-signed TLS on a separate port; HTTP (:8080) stays enabled','在独立端口开启自签名 HTTPS；原有 HTTP (:8080) 保持可用','於獨立連接埠開啟自簽名 HTTPS；原有 HTTP (:8080) 維持可用'],
 set:['set','已设置','已設定'],unset:['not set','未设置','未設定'],pwSet:['Password set','密码已设置','密碼已設定'],pwUnset:['No password','未设置密码','未設定密碼'],
 lanOn:['Home PC Stems: {0} ({1}) online','家里电脑 Stems：{0}（{1}）已连上','家裡電腦 Stems：{0}（{1}）已連上'],lanOff:['Home PC Stems: {0} offline, splitting on the deck','家里电脑 Stems：{0} 离线，碟机本机分轨','家裡電腦 Stems：{0} 離線，碟機本機分軌'],notFound:['not found','未发现','未發現'],
 bcStatus:['Status','状态','狀態'],bcConnected:['connected','已连上','已連上'],bcStreaming:['streaming','推流中','推流中'],bcFailed:['connection failed','连接失败','連線失敗'],bcConnecting:['connecting…','连接中…','連線中…'],bcOff:['off','未开启','未開啟'],bcSent:['sent','已发','已送出'],
@@ -299,7 +301,13 @@ function renderBt(){const sel=$('btOut');sel.replaceChildren();for(const n of la
 async function showBt(){lastBt=await api('bluetooth');renderBt()}
 $('btOut').onchange=()=>action(async()=>{lastBt=await post('bluetooth',{assignLayer:$('btOut').value});renderBt()});
 const toggleKeys=['upfaderEcho','masterLimiter','autoGain','jogInvertLeft','jogInvertRight','omniSource','prolinkShare','prolinkExport'];
+let lastHttps=null;
 function showUI(v){lastUI=v;
+ const httpsOn=!!v.consoleHttps;
+ const link=$('consoleHttpsLink');
+ if(httpsOn){const h=location.hostname.includes(':')&&!location.hostname.startsWith('[')?'['+location.hostname+']':location.hostname;const u='https://'+h+':'+(v.httpsPort||8443);link.href=u;link.textContent=u;link.hidden=false}else{link.hidden=true;link.removeAttribute('href');link.textContent=''}
+ if(lastHttps!==null&&lastHttps!==httpsOn)$('consoleQr').src='/api/console-qr?t='+Date.now();
+ lastHttps=httpsOn;
  if(lastBt)renderBt();
  if(v.version||v.buildTag){$('version').textContent=(v.version?'v'+v.version:'')+(v.buildTag?(v.version?' · ':'')+v.buildTag:'');$('version').hidden=false}
  for(const e of document.querySelectorAll('[data-toggle]'))e.checked=!!v[e.dataset.toggle];

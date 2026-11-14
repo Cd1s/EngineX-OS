@@ -285,6 +285,7 @@ To finish streaming QR logins when your phone is on 4G/5G mobile data (or manage
 - **No default SSH password or bundled SSH keys**: password login is disabled and public releases ship with no SSH keys, so SSH stays closed unless you add your own key.
 - **Local-only deck controls**: internal playback, language, waveform, Stems, and update controls only answer the deck itself, so nobody else on the same Wi-Fi can switch tracks, change settings, or reboot your player.
 - **Per-deck 8-character console code**: `http://<deck-ip>:8080` requires the random `XXXX-XXXX` code shown on your deck under **Settings → About / Update** (rate-limited after 5 wrong tries). Streaming QR codes only sign into that streaming service and never grant console access.
+- **Optional console HTTPS (`:8443`, HTTP stays default)**: turn on **HTTPS console (`:8443`)** in the console settings to also serve the console over HTTPS with a one-time self-signed certificate saved under `/data/enginex/` (mode `0600`, SANs covering the deck's IPs and hostname). HTTP on `:8080` keeps working unchanged, and the console QR code and deck link offer `https://` only while enabled.
 
 For contributors and source builds, see [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 

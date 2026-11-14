@@ -80,6 +80,11 @@ type Config struct {
 	// ProlinkExport selects the optional read-only CDJ export; zero uses the
 	// mounted USB and standard ports. It stays inert until explicitly enabled.
 	ProlinkExport prolink.ExportConfig
+	// HTTPSAddr enables the optional self-signed HTTPS listener (e.g. ":8443") when
+	// consoleHttps is turned on. Empty disables listener binding (used in unit tests).
+	HTTPSAddr string
+	// TLSCertDir overrides where the self-signed cert/key are stored (tests).
+	TLSCertDir string
 	// Factory is useful for embedded integrations and deterministic tests.
 	Factory func(provider string, guest bool, userID string) (providers.Provider, error)
 }
@@ -127,6 +132,12 @@ type Server struct {
 	consoles       consoleSessions        // console sign-ins; the cookie carries one of these, not the code
 	relayRefresh   relayRefresher         // status probes, off the request path (BH-GC2-12)
 	relaySeen      lanStemsSeen           // their last answer, when stems-lan.json could not keep it
+
+	httpsMu   sync.Mutex
+	httpsSrv  *http.Server
+	httpsLn   net.Listener
+	httpsPort int
+	httpsWG   sync.WaitGroup
 }
 
 func New(cfg Config, jobs *Jobs) *Server {
@@ -191,6 +202,11 @@ func New(cfg Config, jobs *Jobs) *Server {
 		// from starting. The export status reports whether it actually started.
 		if err := s.prolinkExport.SetEnabled(true); err != nil {
 			log.Printf("stream-sync: experimental Pro DJ Link export not started: %v", err)
+		}
+	}
+	if s.loadUI().ConsoleHTTPS && cfg.HTTPSAddr != "" {
+		if err := s.applyHTTPS(true); err != nil {
+			log.Printf("stream-sync: HTTPS listener not started: %v", err)
 		}
 	}
 	if cfg.StateDir != "" {
@@ -390,6 +406,8 @@ func (s *Server) Close() {
 	delete(postedDevices, s)
 	prolinkMu.Unlock()
 	s.closeBroadcast()
+	s.stopHTTPS(true)
+	s.httpsWG.Wait()
 }
 
 // DefaultStateDir keeps logins on the deck's writable partition; its home is read-only.
@@ -426,7 +444,36 @@ func (s *Server) qrTarget(r *http.Request) string {
 	if u := s.cfg.PublicURL; u != "" && !strings.Contains(u, "sc5000.lan") {
 		return u
 	}
-	return consoleURL(r)
+	target := consoleURL(r)
+	if !s.httpsOffered() {
+		return target
+	}
+	port := s.httpsPortStr()
+	if r.TLS != nil {
+		name, _, err := net.SplitHostPort(r.Host)
+		if err != nil {
+			name = r.Host
+		}
+		host := strings.Trim(name, "[]")
+		if ip := net.ParseIP(host); host == "" || host == "localhost" || host == "sc5000.lan" || (ip != nil && ip.IsLoopback()) {
+			return "https://" + net.JoinHostPort(lanHost(), port)
+		}
+		return target
+	}
+	if strings.HasPrefix(target, "https://") {
+		return target
+	}
+	u, err := url.Parse(target)
+	if err != nil || u.Host == "" {
+		return target
+	}
+	host, _, splitErr := net.SplitHostPort(u.Host)
+	if splitErr != nil {
+		host = strings.Trim(u.Host, "[]")
+	}
+	u.Scheme = "https"
+	u.Host = net.JoinHostPort(host, port)
+	return u.String()
 }
 
 func (s *Server) consoleQR(w http.ResponseWriter, r *http.Request) {
