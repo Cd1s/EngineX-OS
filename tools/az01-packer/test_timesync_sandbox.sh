@@ -486,7 +486,8 @@ managed = sorted(p.relative_to(repo / "rootfs-overlay/etc").as_posix()
 bspec = importlib.util.spec_from_file_location("build_data_bundle", repo / "tools/az01-packer/build-data-bundle.py")
 bdb = importlib.util.module_from_spec(bspec); bspec.loader.exec_module(bdb)
 ntp = (repo / "rootfs-overlay/etc/systemd/timesyncd.conf.d/10-enginex-ntp.conf").read_text()
-ba = bdb.BOOT_ACTIVATE.replace("@MIGRATE_IF_DEFAULT@", bdb.MIGRATE_IF_DEFAULT).replace("@TIMESYNCD_DROPIN@", ntp)
+# The same placeholders, in the same order, as build-data-bundle.py's boot-activate.sh.
+ba = bdb.BOOT_ACTIVATE.replace("@SWAP_UNDO@", bdb.SWAP_UNDO).replace("@MIGRATE_IF_DEFAULT@", bdb.MIGRATE_IF_DEFAULT).replace("@TIMESYNCD_DROPIN@", ntp)
 # Stop before daemon startup at the bottom of boot-activate.sh; we start timesyncd under vclock_shim below.
 ba = ba.split("# Sticks mounted before this ran")[0] + "\nrestore_gen2_timezone 0 || :\n"
 (w / "gen2-boot-activate.sh").write_text(ba)
