@@ -45,7 +45,7 @@
 | **BR-04** | 在同一个数据库事务中安全删除失效曲目，自动释放旧路径并回滚脏数据 | `pkg/bridge` 单测 `TestDeletedSourceReleasesPathAndMembership` 等 | 无需实机 | 自动化通过 |
 | **BR-05** | 固件 overlay 目录安全硬链接与符号链接边界检查，防止越界覆盖系统目录 | `tools/az01-packer` 单元测试集合 | 无需实机 | 自动化通过 |
 | **BR-06** | 数据库触发器与歌单 NULL 尾链修复，防止歌单列表顺序错乱与外键冲突 | `pkg/enginedb` 单测 `TestEOS09ArtworkResizeHashAndOrphan` 等 | 无需实机 | 自动化通过 |
-| **BR-07** | 虚拟机 QMP 模拟通信超时后自动重连直至超时截断 | `sim/qengine/test_smoke.py` | 无需实机 | 自动化通过 |
+| **BR-07** | 历史 QMP 重连控制器随 `run_qengine.sh` 退役；Tier 2 不再声明该覆盖 | `sim/qengine/test_smoke.py` 现测架构守卫和构建失败清理 | 无需实机 | QMP 用例已退役；当前覆盖见 Tier 2 README |
 | **BR-08** | Rekordbox/Bridge 异常文件名、过大封面与损坏 FLAC 范围校验拦截 | `pkg/compat`、`pkg/rekordbox`、`pkg/prolink` 单测 | 无需实机 | 自动化通过 |
 | **BR-09** | 严格校验 FLAC 文件的音频位深与声道数，格式非法直接拒绝解析 | `pkg/analyzer` 单测 `TestDecodeFLACFormatBoundsAndInheritedFields` | 无需实机 | 自动化通过 |
 | **BR-10** | 严格校验 MP3 采样率范围，超出支持范围的安全跳过防解码器死锁 | `pkg/analyzer` 单测 `TestDecodeMP3SampleRates` | 无需实机 | 自动化通过 |

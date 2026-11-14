@@ -54,7 +54,11 @@ Options:
 
 ## Adapter Architecture
 
-The adapter applies test-side rootfs modifications inside the emulated image copy (isolated via `unshare -m`) without modifying release artifacts:
+The adapter extracts a separate rootfs for each instance and modifies only that copy. Release images and tracked overlays remain unchanged. Its loop mount is under a private per-run temporary directory; it does not bind the host's `/dev`, `/proc`, `/sys` or `/run` into the image.
 1. **Drop-in preservation**: Upstream QEngine writes `engine.service.d/override.conf`. The test adapter preserves EngineX's `override.conf` and moves QEngine's hardware shims into `99-qengine.conf`.
-2. **LD_PRELOAD preservation**: Configures `/etc/ld.so.preload` and patches the test copy of `/etc/sc5000/engine-ui-guard` to ensure QEngine's hardware emulation shims (`dtshim`, `drmatomic`, `alsashim`, `quitshim`) remain loaded when `engine-ui-guard` unsets and sets `LD_PRELOAD`.
-3. **Automated probe access**: Configures `systemd-networkd` DHCP, seeds automated public keys for OpenSSH, and enables serial autologin for automated probe execution.
+2. **Engine preload**: Appends QEngine's hardware shims (`dtshim`, `drmatomic`, `alsashim`, `quitshim`) to `LD_PRELOAD` in the instance's `engine-ui-guard`. It does not configure global `/etc/ld.so.preload`, so OpenSSH's preauth sandbox does not load those shims.
+3. **Automated probe access**: Configures `systemd-networkd` DHCP, seeds a test SSH public key, removes unsupported `UsePAM` directives in the instance, and enables serial autologin. Hardware-only `az0x-info`, `az0x-loadpin-trustpoints` and `az0x-setup-hostname` units are masked in the instance.
+
+Upstream host scripts execute directly and use Docker (including a privileged rootfs builder). A per-run Docker wrapper records real container IDs for cleanup. The adapter redirects upstream host temporary files into its own directory and arms loop detach immediately after allocation, before mounting. Cleanup removes recorded containers, detaches the instance's loops, and checks for remaining mounts before deleting its directories; a directory with remaining mounts is retained and reported as an error.
+
+`python3 -m unittest discover -s sim/qengine -p test_smoke.py` checks the architecture guard and cleanup after a failed builder without running QEMU. The previous `run_qengine.sh` QMP timeout/reconnect controller and its test were retired when Tier 2 replaced that launcher; no QMP reconnect coverage is claimed.

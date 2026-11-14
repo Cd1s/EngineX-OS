@@ -71,14 +71,12 @@ FIRMWARE="$(cd "$(dirname "$FIRMWARE")" && pwd)/$(basename "$FIRMWARE")"
 WORK_DIR="${QENGINE_WORK_DIR:-/root/build/qengine}"
 mkdir -p "$WORK_DIR"
 
-TASK_TMP_DIR="$WORK_DIR/tmp"
-mkdir -p "$TASK_TMP_DIR"
+TASK_TMP_DIR="$(mktemp -d "$WORK_DIR/tmp.XXXXXX")"
 export TMPDIR="$TASK_TMP_DIR"
 
 QENGINE_DIR="$WORK_DIR/QEngine"
 
 # Resource tracking for cleanup
-TRACKED_CONTAINERS=()
 TRACKED_MOUNTS=()
 TRACKED_LOOPS=()
 QEMU_PID=""
@@ -98,30 +96,53 @@ cleanup() {
         wait "$QEMU_PID" 2>/dev/null || true
     fi
 
-    for cid in "${TRACKED_CONTAINERS[@]}"; do
-        if [ -n "$cid" ]; then
-            docker rm -f "$cid" >/dev/null 2>&1 || true
-        fi
+    for cidfile in "$TASK_TMP_DIR"/cids/*; do
+        [ -s "$cidfile" ] || continue
+        cid="$(cat "$cidfile")"
+        echo "--- Removing tracked container $cid ---"
+        "$QENGINE_DOCKER_BIN" rm -f "$cid" >/dev/null 2>&1 || true
     done
 
     for mnt in "${TRACKED_MOUNTS[@]}"; do
         if [ -n "$mnt" ] && mountpoint -q "$mnt" 2>/dev/null; then
-            umount "$mnt" 2>/dev/null || umount -l "$mnt" 2>/dev/null || true
+            umount -R "$mnt" 2>/dev/null || rc=1
         fi
-        [ -d "$mnt" ] && rm -rf "$mnt" 2>/dev/null || true
+        rmdir "$mnt" 2>/dev/null || true
     done
 
     for loop in "${TRACKED_LOOPS[@]}"; do
         if [ -n "$loop" ]; then
-            losetup -d "$loop" 2>/dev/null || true
+            losetup -d "$loop" 2>/dev/null || rc=1
         fi
     done
+    # A force-removed builder cannot run its trap; detach only this instance's loops.
+    if [ -n "$INSTANCE_DIR" ] && [ -f "$INSTANCE_DIR/rootfs.img" ]; then
+        while IFS= read -r loop; do
+            losetup -d "$loop" || rc=1
+        done < <(losetup --list --noheadings --output NAME --associated "$INSTANCE_DIR/rootfs.img")
+    fi
 
     if [ "$KEEP_INSTANCE" -ne 1 ]; then
-        [ -n "$INSTANCE_DIR" ] && [ -d "$INSTANCE_DIR" ] && rm -rf "$INSTANCE_DIR"
         [ -n "$SERIAL_LOG" ] && [ -f "$SERIAL_LOG" ] && rm -f "$SERIAL_LOG"
         [ -n "$QEMU_LOG" ] && [ -f "$QEMU_LOG" ] && rm -f "$QEMU_LOG"
-        [ -d "$TASK_TMP_DIR" ] && rm -rf "$TASK_TMP_DIR"
+        for dir in "$INSTANCE_DIR" "$TASK_TMP_DIR"; do
+            [ -n "$dir" ] && [ -d "$dir" ] || continue
+            umount -R "$dir" 2>/dev/null || true
+            # -T includes mounts below a directory that is not itself a mountpoint.
+            if ! mounts="$(findmnt -rn -R -T "$dir" -o TARGET)"; then
+                echo "ERROR: cannot inspect mounts below $dir; retaining it." >&2
+                rc=1
+                continue
+            fi
+            if printf '%s\n' "$mounts" | awk -v root="$dir" '
+                $0 == root || index($0, root "/") == 1 { found=1 }
+                END { exit !found }'; then
+                echo "ERROR: mounts remain below $dir; retaining it." >&2
+                rc=1
+                continue
+            fi
+            rm -rf -- "$dir"
+        done
     fi
 
     exit "$rc"
@@ -155,6 +176,10 @@ find "$QENGINE_DIR/scripts/build_scripts" -type f -exec sed -i \
 # Direct QEngine's drop-in to 99-qengine.conf so EngineX's override.conf remains untouched
 if [ -f "$QENGINE_DIR/scripts/build_scripts/build_armv7_engine_rootfs.sh" ]; then
     sed -i 's|/mnt/rootfs/etc/systemd/system/\$APP_UNIT.d/override.conf|/mnt/rootfs/etc/systemd/system/\$APP_UNIT.d/99-qengine.conf|' "$QENGINE_DIR/scripts/build_scripts/build_armv7_engine_rootfs.sh"
+    # Protect the interval before upstream installs its full mount cleanup trap.
+    if ! grep -q "^trap 'losetup -d" "$QENGINE_DIR/scripts/build_scripts/build_armv7_engine_rootfs.sh"; then
+        sed -i '/^losetup "\$LOOPDEV" "\$IMG"$/a trap '\''losetup -d "$LOOPDEV" || true'\'' EXIT' "$QENGINE_DIR/scripts/build_scripts/build_armv7_engine_rootfs.sh"
+    fi
 fi
 
 # Fix upstream launcher regex for EngineX engine invocations
@@ -163,12 +188,31 @@ if [ -f "$QENGINE_DIR/scripts/build_scripts/rootfs_steps/skip_firmware_update.sh
 fi
 
 # 2. Check prerequisites on the host
-for tool in qemu-system-aarch64 qemu-img docker file dumpe2fs debugfs losetup; do
+for tool in qemu-system-aarch64 qemu-img docker file dumpe2fs debugfs losetup findmnt; do
     command -v "$tool" >/dev/null 2>&1 || {
         echo "ERROR: required host tool '$tool' not found." >&2
         exit 1
     }
 done
+
+# Wrap upstream Docker calls so subprocesses record IDs in this run's directory.
+QENGINE_DOCKER_BIN="$(command -v docker)"
+export QENGINE_DOCKER_BIN
+export QENGINE_CID_DIR="$TASK_TMP_DIR/cids"
+mkdir -p "$TASK_TMP_DIR/bin" "$QENGINE_CID_DIR"
+cat > "$TASK_TMP_DIR/bin/docker" <<'SH'
+#!/bin/bash
+set -euo pipefail
+if [ "$1" = run ]; then
+    shift
+    cidfile="$(mktemp "$QENGINE_CID_DIR/container.XXXXXX")"
+    rm "$cidfile" # Docker requires a path that does not exist yet.
+    exec "$QENGINE_DOCKER_BIN" run --cidfile "$cidfile" "$@"
+fi
+exec "$QENGINE_DOCKER_BIN" "$@"
+SH
+chmod +x "$TASK_TMP_DIR/bin/docker"
+export PATH="$TASK_TMP_DIR/bin:$PATH"
 
 # 3. Ensure generic kernel and initrd exist
 if [ ! -s "$QENGINE_DIR/build/vmlinuz-generic-armhf" ] || [ ! -s "$QENGINE_DIR/build/initrd-generic-armhf" ]; then
@@ -289,7 +333,7 @@ CFG
 
 umount "$MNT_DIR"
 losetup -d "$LOOP_DEV"
-rm -rf "$MNT_DIR"
+rmdir "$MNT_DIR"
 
 # Clean tracked mount and loop
 TRACKED_MOUNTS=()
