@@ -1562,7 +1562,9 @@ func (g *tidalGateway) streamTarget(r *http.Request, id int64, ref trackRef) (ad
 			ext = "mp4"
 		}
 	} else if ref.track.Provider == "spotify" {
-		codec, ext = "vorbis", "ogg"
+		// TIDAL's codec tag chooses the downloaded filename. Its patched mp3
+		// tag keeps an extension; NH08's FFmpeg reader probes the native Ogg.
+		codec, ext = "mp3", "mp3"
 	} else if g.s.jobs != nil {
 		switch strings.ToLower(path.Ext(g.s.jobs.File(ref.track))) {
 		case ".mp3":
@@ -1622,6 +1624,9 @@ func (g *tidalGateway) playbackInfo(w http.ResponseWriter, r *http.Request) {
 		mime = "audio/mp4"
 	} else if ext == ".ogg" {
 		mime = "audio/ogg"
+	}
+	if ref.track.Provider == "spotify" {
+		mime = "audio/ogg" // The naming tag above does not change the media bytes.
 	}
 	manifest, _ := json.Marshal(map[string]any{"mimeType": mime, "codecs": codec, "encryptionType": "NONE", "urls": []string{address}})
 	log.Printf("stream-sync: load track=%d provider=%s step=manifest codec=%s", id, ref.track.Provider, codec)

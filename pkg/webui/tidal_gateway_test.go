@@ -902,7 +902,7 @@ func TestSoundCloudPlaybackInfoCodecMatchesStreamWhenLosslessOnly(t *testing.T) 
 	ui.tidal.tracks[2] = trackRef{track: spotify}
 	ui.tidal.mu.Unlock()
 
-	for id, want := range map[string][2]string{"1": {"audio/mpeg", ".mp3"}, "2": {"audio/ogg", ".ogg"}} {
+	for id, want := range map[string][2]string{"1": {"audio/mpeg", ".mp3"}, "2": {"audio/ogg", ".mp3"}} {
 		var info struct {
 			Manifest string `json:"manifest"`
 		}
