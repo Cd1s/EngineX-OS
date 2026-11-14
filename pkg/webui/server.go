@@ -92,6 +92,10 @@ type Server struct {
 	mux           *http.ServeMux
 	tidal         *tidalGateway
 	uiMu          sync.Mutex
+	copyMu        sync.Mutex
+	copyIncoming  *copyPeerRequest
+	copyOutgoing  *copyPeerRequest
+	copyReceived  *copyBundle
 	logsMu        sync.Mutex
 	fxMu          sync.Mutex // transient FX commands never hold the settings lock
 	stemsMu       sync.Mutex // streaming-stems.json
@@ -210,6 +214,10 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.mux.HandleFunc("GET /api/boot-report", s.downloadBootReport)
 	s.mux.HandleFunc("GET /api/update", s.update)
 	s.mux.HandleFunc("POST /api/ui", s.uiUpdate)
+	s.mux.HandleFunc("GET /api/settings-copy", s.settingsCopyStatus)
+	s.mux.HandleFunc("POST /api/settings-copy", s.settingsCopyControl)
+	s.mux.HandleFunc("POST /peer/settings-copy/request", s.settingsCopyRequest)
+	s.mux.HandleFunc("GET /api/settings-copy/transfer", s.settingsCopyTransfer)
 	s.mux.HandleFunc("GET /api/console-qr", s.consoleQR)
 	s.mux.HandleFunc("POST /api/sessions", s.createSession)
 	s.mux.HandleFunc("DELETE /api/sessions/{id}", s.deleteSession)
@@ -580,7 +588,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if strings.HasPrefix(r.URL.Path, "/api/") {
+	// A profile transfer has its own single-use, peer-bound grant, issued only
+	// after the source screen authenticates and approves this exact request.
+	if strings.HasPrefix(r.URL.Path, "/api/") && r.URL.Path != "/api/settings-copy/transfer" {
 		if ok, locked := s.authorized(w, r); locked {
 			fail(w, http.StatusTooManyRequests, errAuthLocked)
 			return

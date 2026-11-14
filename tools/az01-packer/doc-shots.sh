@@ -332,6 +332,25 @@ Item {
 }
 QML
 
+if [ "${DOC_SHOT_SETTINGS_COPY:-0}" = 1 ]; then
+    cp "$REPO/tools/az01-packer/settings-copy-shot.qml" "$W/probe.qml"
+    for spec in en:en zh-Hans:zh-CN zh-Hant:zh-TW; do
+        pack=${spec%%:*}; language=${spec#*:}
+        unshare -m -n -p -f --kill-child bash "$0" --render-one "$W" "$IMG_EXT2" "$pack" "$pack" "v$CURR_VERSION" "$W/raw/$language.png"
+    done
+    python3 - "$W/raw" "$OUT_REPO" <<'PY'
+from pathlib import Path
+from PIL import Image
+import sys
+raw, repo = map(Path, sys.argv[1:])
+for language in ('en', 'zh-CN', 'zh-TW'):
+    out = repo/'docs/assets/screenshots'/language/'21b-settings-copy.png'
+    out.parent.mkdir(parents=True, exist_ok=True)
+    Image.open(raw/(language+'.png')).convert('RGB').resize((900,562), Image.Resampling.LANCZOS).save(out)
+PY
+    exit
+fi
+
 echo "==> Rendering 1/4: English (up-to-date)..."
 unshare -m -n -p -f --kill-child bash "$0" --render-one "$W" "$IMG_EXT2" en en "v$CURR_VERSION" "$W/raw/shot-about-version.png"
 

@@ -11,7 +11,7 @@ inner() {
     local init_pid='' failed=0
     mount --make-rprivate /
     mount -o loop "$W/boot.ext2" "$R"
-    trap 'if [ -n "${runner:-}" ]; then kill -TERM "$runner" 2>/dev/null || :; wait "$runner" 2>/dev/null || :; fi; umount "$R"' EXIT
+    trap 'if [ -n "${runner:-}" ]; then kill -TERM "$runner" 2>/dev/null || :; wait "$runner" 2>/dev/null || :; fi; umount -R "$R"' EXIT
     mkdir -p "$R/opt/nspawn" "$R/etc/systemd/system/engine.service.d"
     # Same destructive-command recorder as release-gate.sh; keep the real
     # systemctl here because the image's PID 1 must manage its own services.
@@ -66,10 +66,16 @@ EOF
     printf '0-3\n' > "$R/opt/nspawn/irq/41/smp_affinity_list"
     # Keep the fake IRQ writable when the image remounts its root read-only.
     cp -a "$R/opt/nspawn/irq/." "$W/irq/"
+    if [ "${NSPAWN_SETTINGS_COPY:-0}" = 1 ]; then
+        source "$REPO/tools/az01-packer/settings-copy-guest.sh"
+        settings_copy_prepare
+    fi
     cat "$W/masked-units.txt"
     date +%s%N > "$W/start-ns"
+    local run_timeout=65s
+    [ "${NSPAWN_SETTINGS_COPY_FLOW:-0}" != 1 ] || run_timeout=120s
     SYSTEMD_LOG_TARGET=console SYSTEMD_LOG_LEVEL=debug \
-        timeout --signal=TERM --kill-after=5s 65s systemd-nspawn \
+        timeout --signal=TERM --kill-after=5s "$run_timeout" systemd-nspawn \
         --boot --directory="$R" --machine="nspawn-boot-$$" --register=no \
         --private-network --resolv-conf=off --link-journal=no --timezone=off \
         --drop-capability=CAP_SYS_TIME,CAP_SYS_MODULE,CAP_SYS_RAWIO,CAP_SYS_BOOT \
@@ -97,6 +103,10 @@ EOF
         fi
         sleep 0.2
     done
+    if [ "${NSPAWN_SETTINGS_COPY:-0}" = 1 ] && [ -s "$W/ready-ns" ]; then
+        # T7's native profile experiment uses the same fully booted guest.
+        settings_copy_observe || failed=1
+    fi
     # Keep observing startup until all boot jobs finish, including coldplug.
     # The wall time above is UI readiness, not this later verification point.
     while [ "$SECONDS" -lt "$end" ] && [ -e "/proc/$init_pid" ]; do
@@ -129,7 +139,11 @@ EOF
     # Same model defaults and QML failure expressions as release-gate.sh.
     case $PRODUCT in JP07|JP08|JP13|JP14) expected=20 ;; *) expected=28 ;; esac
     applied=$(grep -ac 'engine-ui-hook: applied 0x' "$W/engine.log" || :)
-    check "hook applied $applied/$expected (gate default)" test "$applied" -eq "$expected"
+    if [ "${NSPAWN_SETTINGS_COPY_FLOW:-0}" = 1 ]; then
+        check "hook applied on each Engine start ($applied)" test "$applied" -ge "$expected"
+    else
+        check "hook applied $applied/$expected (gate default)" test "$applied" -eq "$expected"
+    fi
     check 'UI pack loaded' grep -aq 'engine-ui-hook: .*packs/.*: [0-9]* files' "$W/engine.log"
     local qml_errors='Type [A-Za-z_][A-Za-z0-9_]* unavailable|PropertyChanges does not support creating|state-specific objects|is not a type|is not installed|Cannot assign to non-existent|Expected token|Syntax error|QQmlComponent: Component is not ready|failed to load component|possible QQuickItem::polish\(\)|called polish\(\) inside updatePolish'
     local qml_status=0
