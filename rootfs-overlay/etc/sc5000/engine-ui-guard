@@ -128,7 +128,6 @@ launch)
     wait "$child"; result=$?
     trap - TERM INT HUP
     reason=$(cat "${SC5000_QUIT_REASON_FILE:-/tmp/engine-quit-reason}" 2>/dev/null)
-    [ "$reason" != UpdateFromFile ] || stick_path "${SC5000_UPDATE_FILE_PATH:-/tmp/update-file-path}"
     intentional=
     case $reason in Poweroff|Reboot|UpdateFromLoader|UpdateFromFile|UpdateFromUrl|TestApp|ControllerMode|UpdateFirmware|FactoryReset|AnalyticsChange) intentional=1 ;; esac
     if [ "$result" -ne 0 ] && [ "$result" -ne 7 ] && [ -z "$intentional" ]; then
@@ -139,6 +138,11 @@ launch)
         rm -f "$UI/boot-token" "$UI/boot-ready" "$UI/boot-progress"
     fi
     exit "$result"
+    ;;
+update-file)
+    # The stock engine script's UpdateFromFile step calls this before it reads the path (sc5000-debloat,
+    # boot-activate), after every Engine exit: also safe-mode's stock Engine, which `launch` execs.
+    stick_path "${SC5000_UPDATE_FILE_PATH:-/tmp/update-file-path}"
     ;;
 ready)
     [ ! -e "$UI/safe-mode" ] && [ -n "${2:-}" ] && [ "$(cat "$UI/boot-token" 2>/dev/null)" = "$2" ] || exit 1
