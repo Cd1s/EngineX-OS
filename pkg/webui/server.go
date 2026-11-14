@@ -112,6 +112,7 @@ type Server struct {
 	// beatport is the owner's account, shared because each refresh rotates its token.
 	beatport *providers.Beatport
 	shadow   *shadowState // #49 shadow decks
+	remote   *remoteLoader
 
 	automixMu sync.Mutex
 	automix   *AutomixManager
@@ -138,6 +139,9 @@ func New(cfg Config, jobs *Jobs) *Server {
 	}
 	s := &Server{cfg: cfg, jobs: jobs, sessions: map[string]*Session{}, pending: map[string]pending{}, mux: http.NewServeMux(), ownerDeleted: map[string]bool{}, logins: map[string]*loginFlow{}, authFails: map[string]*authStrike{}}
 	s.shadow = newShadowState()
+	s.remote = newRemoteLoader(time.Now)
+	// The board never changes while running: read it once.
+	s.remote.setBoard(imagePrefix(deviceCompatible()))
 	if cfg.StateDir == "/data/sc5000-custom/state" { // on the deck, not in tests
 		go ensureSpotifyConnectService("/etc/avahi/services")
 	}
@@ -234,6 +238,9 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.mux.HandleFunc("GET /api/prolink/diag", s.prolinkDiagGet)
 	s.mux.HandleFunc("POST /api/prolink", s.prolinkPost)
 	s.mux.HandleFunc("GET /api/drives", s.dropDrivesGet)
+	s.mux.HandleFunc("GET /api/remote-load", s.remoteLoadStatus)
+	s.mux.HandleFunc("POST /api/remote-load", s.remoteLoadSubmit)
+	s.mux.HandleFunc("GET /api/remote-load/{id}", s.remoteLoadGet)
 	s.mux.HandleFunc("GET /peer/decks", s.peerDecksGet)
 	s.mux.HandleFunc("GET /peer/decks/{n}/audio", s.peerAudioGet)
 	s.mux.HandleFunc("GET /peer/decks/{n}/perf", s.peerPerfGet)

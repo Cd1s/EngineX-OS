@@ -159,6 +159,10 @@ type uiSettings struct {
 	// OmniSource adds every mounted drive's playlists and tracks, and the other
 	// services' playlists, to the streaming browser (#62). Off by default.
 	OmniSource bool `json:"omniSource"`
+	// RemoteLoad lets a LAN client load a track into an idle deck from an
+	// external drive. Deck-only: loopback POST /v1/sc5000/ui sets it, /api/ui
+	// refuses it. Off by default.
+	RemoteLoad bool `json:"remoteLoad"`
 	// ProlinkShare lets rb-bridge read the Rekordbox library of Pioneer
 	// players on the LAN (#59). Off by default.
 	ProlinkShare     bool     `json:"prolinkShare"`
@@ -364,6 +368,8 @@ func (s *Server) loadUI() uiSettings {
 			v.AutoGain = val == "1"
 		case "omni_source":
 			v.OmniSource = val == "1"
+		case "remote_load":
+			v.RemoteLoad = val == "1"
 		case "prolink_share":
 			v.ProlinkShare = val == "1"
 		case "prolink_export":
@@ -558,6 +564,9 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	}
 	if v.OmniSource {
 		text += "omni_source=1\n"
+	}
+	if v.RemoteLoad {
+		text += "remote_load=1\n"
 	}
 	if v.ProlinkShare {
 		text += "prolink_share=1\n"
@@ -802,6 +811,12 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+	}
+	// The switch belongs to the deck: not from the LAN console API. Tunnels
+	// never reach /v1 (the gateway refuses relayed requests, ForwardHandler).
+	if q.Has("remoteLoad") && strings.HasPrefix(r.URL.Path, "/api/") {
+		fail(w, 403, errors.New("remoteLoad can only be changed on the deck"))
+		return
 	}
 	if q.Has("relayUrl") && !validRelayURL(q.Get("relayUrl")) {
 		fail(w, 400, errInvalidRelayURL)
@@ -1081,6 +1096,15 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 		v.OmniSource = on == "1"
 	}
+	if q.Has("remoteLoad") {
+		on := q.Get("remoteLoad")
+		if on != "0" && on != "1" {
+			s.uiMu.Unlock()
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+		v.RemoteLoad = on == "1"
+	}
 	if q.Has("prolinkShare") {
 		on := q.Get("prolinkShare")
 		if on != "0" && on != "1" {
@@ -1193,4 +1217,10 @@ func (s *Server) restartEngine() error {
 		return err
 	}
 	return exec.Command("systemctl", "restart", "--no-block", "engine.service").Run()
+}
+
+func (s *Server) remoteLoadEnabled() bool {
+	s.uiMu.Lock()
+	defer s.uiMu.Unlock()
+	return s.loadUI().RemoteLoad
 }
