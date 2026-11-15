@@ -253,9 +253,9 @@ Deck powered on, same router as the computer, and root SSH is available (or Engi
 
 ### 2.6 安装器依赖 / Installer requirements / 安裝器需求
 
-- 中：5.3.0.5 原生安装器（尚未发布）无需 Python、fastboot、e2fsprogs、libusb 或 WSL。Windows 使用系统 WinUSB 驱动；Linux USB 权限不足时使用 `sudo`。无法打开更新接口时会停止，不会自动更换驱动或执行备用脚本。
-- EN: The 5.3.0.5 native installer (unreleased) needs no Python, fastboot, e2fsprogs, libusb or WSL. Windows uses the system WinUSB driver; use `sudo` for Linux USB permission errors. An unavailable update interface stops the install; the executable does not replace drivers or run fallback scripts.
-- 繁：5.3.0.5 原生安裝器（尚未發佈）無需 Python、fastboot、e2fsprogs、libusb 或 WSL。Windows 使用系統 WinUSB 驅動程式；Linux USB 權限不足時使用 `sudo`。無法開啟更新介面時會停止，不會自動更換驅動程式或執行備用腳本。
+- 中：5.3.0.5 原生安装器无需 Python、fastboot、e2fsprogs、libusb 或 WSL。Windows 使用系统 WinUSB 驱动；Linux USB 权限不足时使用 `sudo`。无法打开更新接口时会停止，不会自动更换驱动或执行备用脚本。
+- EN: The 5.3.0.5 native installer needs no Python, fastboot, e2fsprogs, libusb or WSL. Windows uses the system WinUSB driver; use `sudo` for Linux USB permission errors. An unavailable update interface stops the install; the executable does not replace drivers or run fallback scripts.
+- 繁：5.3.0.5 原生安裝器無需 Python、fastboot、e2fsprogs、libusb 或 WSL。Windows 使用系統 WinUSB 驅動程式；Linux USB 權限不足時使用 `sudo`。無法開啟更新介面時會停止，不會自動更換驅動程式或執行備用腳本。
 
 **旧版安装器及手动备用脚本 / Older installers and manual fallback scripts / 舊版安裝器與手動備用腳本**
 

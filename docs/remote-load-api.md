@@ -1,6 +1,6 @@
 # Remote Load LAN API
 
-Loads a track from a drive mounted under `/media` (USB stick, SD card, and on SC6000 / PRIME 4 a drive in the SATA bay) onto an idle deck over the local network. Not yet released.
+Loads a track from a drive mounted under `/media` (USB stick, SD card, and on SC6000 / PRIME 4 a drive in the SATA bay) onto an idle deck over the local network.
 
 ## Enabling
 
