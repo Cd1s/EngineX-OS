@@ -567,7 +567,8 @@ inner() {
     if [ "$N_ETC" = /etc/enginex ]; then # #234: what an older installer or gate reads, and the names it enables
         check "image: /etc/sc5000 is the compatibility link to enginex" test "$(readlink "$R/etc/sc5000")" = enginex
         check "image: /etc/sc5000/version.txt reads $NEWV through it" grep -qx "$NEWV" "$R/etc/sc5000/version.txt"
-        check "image: no unit named sc5000 is enabled" bash -c "! ls '$R/usr/lib/systemd/system/multi-user.target.wants' '$R/etc/systemd/system/multi-user.target.wants' '$R/usr/lib/systemd/system/enginex.target.wants' 2>/dev/null | grep -q sc5000"
+        # Match unit names only: ls of several dirs prints their paths, and a /var/tmp/sc5000-gate-* work dir matched.
+        check "image: no unit named sc5000 is enabled" bash -c "! find '$R/usr/lib/systemd/system/multi-user.target.wants' '$R/etc/systemd/system/multi-user.target.wants' '$R/usr/lib/systemd/system/enginex.target.wants' -mindepth 1 -maxdepth 1 -name '*sc5000*' 2>/dev/null | grep -q ."
     fi
     if python3 -I "$REPO/tools/az01-packer/rootfs_audit.py" "$R" --overlay "$REPO/rootfs-overlay" \
         $(for c in $SUITE_CMDS; do printf -- '--require-cmd %s ' "$c"; done) > "$W/audit.txt" 2>&1

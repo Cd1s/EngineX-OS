@@ -464,6 +464,23 @@ class FilesystemTests(unittest.TestCase):
                     'local ui=$D/ui'):
             self.assertIn(use, phase)
 
+    def test_234_release_gate_unit_check_ignores_its_own_work_dir_name(self):
+        # RC 2026-11-15: the gate's work dir is /var/tmp/sc5000-gate-*, and `ls` of several dirs
+        # printed their paths, so a clean image failed "no unit named sc5000 is enabled".
+        gate = (Path(__file__).resolve().parent / 'release-gate.sh').read_text()
+        m = re.search(r'check "image: no unit named sc5000 is enabled" bash -c "(.*)"$', gate, re.M)
+        self.assertIsNotNone(m, 'release-gate.sh has no sc5000 unit check')
+        root = self.root / 'sc5000-gate-unitcheck' / 'new'
+        wants = [root/'usr/lib/systemd/system/multi-user.target.wants',
+                 root/'etc/systemd/system/multi-user.target.wants', root/'usr/lib/systemd/system/enginex.target.wants']
+        for d in wants:
+            d.mkdir(parents=True, exist_ok=True)
+        (wants[1]/'enginex-prepare.service').touch()
+        cmd = m.group(1).replace('$R', str(root))
+        self.assertEqual(subprocess.run(['bash', '-c', cmd]).returncode, 0, 'a clean image must pass')
+        (wants[0]/'sc5000-prepare.service').touch()
+        self.assertNotEqual(subprocess.run(['bash', '-c', cmd]).returncode, 0, 'an sc5000 unit must fail')
+
     def test_etc_reset_drops_stale_434_overlay_once(self):
         data = self.root/'data'
         upper = data/'system/etc/overlay'
