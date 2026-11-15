@@ -173,9 +173,11 @@ func (c *browseCache) start(key string, load func(context.Context) (browseData, 
 		now := c.now()
 		persist := err == nil && len(data) <= browseEntryBytes
 		oversized := err == nil && !persist
-		partial := err != nil && len(data) > 0
 		var status providers.StatusError
 		revoked := errors.As(err, &status) && (status == 401 || status == 403)
+		// A complete snapshot outlives a partial refresh unless its login was revoked.
+		kept := c.entries[key]
+		partial := err != nil && len(data) > 0 && (revoked || kept == nil || kept.partial || kept.data == nil)
 		if persist {
 			c.insert(key, &browseEntry{data: data, at: now, used: now})
 		} else if oversized {

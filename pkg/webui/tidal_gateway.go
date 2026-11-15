@@ -59,6 +59,17 @@ func (g *tidalGateway) incompleteMessage(provider string, err error) (string, st
 		title += fmt.Sprintf(" (%d)", status)
 		action = login
 		hint = sourceFailedTitle(provider, err) + ": http://" + lanHost() + ":8080"
+		if lang == "zh-Hant" {
+			label := providerLabels[provider]
+			if provider == "netease" {
+				label = "網易雲音樂"
+			}
+			reason := "請重新登入"
+			if status == 403 {
+				reason = "帳號未獲授權"
+			}
+			hint = fmt.Sprintf("%s: %s (%d): http://%s:8080", label, reason, status, lanHost())
+		}
 	}
 	return title + " — " + action, hint
 }
@@ -1423,11 +1434,7 @@ func (g *tidalGateway) favoriteTracks(w http.ResponseWriter, r *http.Request) {
 		case "netease":
 			var lists []providers.Playlist
 			if lists, err = g.browseLists(r.Context(), v); len(lists) > 0 {
-				listErr := err
 				tracks, err = g.browseTracks(r.Context(), scope, v.ID, v.p, lists[0].ID)
-				if err == nil {
-					err = listErr
-				}
 			}
 		case "spotify":
 			tracks, err = g.browseTracks(r.Context(), scope, v.ID, v.p, providers.SpotifyLikedID)

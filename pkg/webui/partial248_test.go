@@ -243,3 +243,105 @@ func TestGatewayPartial248AlbumAndPublicChartRoutes(t *testing.T) {
 		})
 	}
 }
+
+func TestBrowsePartial248RefreshKeepsCompleteSnapshotExceptAuth(t *testing.T) {
+	for _, cause := range []error{context.DeadlineExceeded, providers.StatusError(401), providers.StatusError(403)} {
+		t.Run(cause.Error(), func(t *testing.T) {
+			c := newBrowseCache(t.TempDir())
+			clock := cacheClock(c)
+			key := browseKey("spotify", "owner", "lists", "")
+			full := browseData{Lists: []providers.Playlist{{ID: "one"}, {ID: "two"}, {ID: "three"}}}
+			if _, err := c.get(context.Background(), key, func(context.Context) (browseData, error) { return full, nil }); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(c.dir, key+".json")
+			snapshot, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			clock.Add(int64(browseTTL + time.Second))
+			release := make(chan struct{})
+			refresh := func(context.Context) (browseData, error) {
+				<-release
+				return browseData{Lists: full.Lists[:2]}, cause
+			}
+			data, err := c.get(context.Background(), key, refresh)
+			flight := currentBrowseFlight(c, key)
+			close(release)
+			if flight == nil {
+				t.Fatal("no background refresh")
+			}
+			waitBrowse(t, flight.done)
+			if err != nil || len(data.Lists) != 3 {
+				t.Fatalf("stale read blocked or lost data: %+v, %v", data, err)
+			}
+			data, err = c.get(context.Background(), key, refresh)
+			var auth providers.StatusError
+			if errors.As(cause, &auth) {
+				if !errors.Is(err, cause) || len(data.Lists) != 2 {
+					t.Fatalf("revoked login served old complete data: %+v, %v", data, err)
+				}
+				if _, err := os.Stat(path); !os.IsNotExist(err) {
+					t.Fatal("revoked snapshot persisted")
+				}
+			} else {
+				if err != nil || len(data.Lists) != 3 || data.Lists[2].ID != "three" {
+					t.Fatalf("partial refresh replaced complete data: %+v, %v", data, err)
+				}
+				kept, err := os.ReadFile(path)
+				if err != nil || string(kept) != string(snapshot) {
+					t.Fatal("partial refresh changed the complete disk snapshot")
+				}
+			}
+		})
+	}
+}
+
+func TestGatewayPartial248TraditionalAuthHints(t *testing.T) {
+	for _, provider := range []string{"spotify", "netease"} {
+		for status, message := range map[providers.StatusError]string{401: "請重新登入", 403: "帳號未獲授權"} {
+			t.Run(fmt.Sprint(provider, status), func(t *testing.T) {
+				dir := t.TempDir()
+				if err := os.WriteFile(filepath.Join(dir, "settings.conf"), []byte("lang=zh-Hant\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				s := New(Config{UIDir: dir, StateDir: t.TempDir()}, nil)
+				defer s.Close()
+				title, hint := s.tidal.incompleteMessage(provider, status)
+				if !strings.Contains(title, "請重新登入") || !strings.Contains(hint, message) || strings.Contains(hint, "请") || strings.Contains(hint, "账号") {
+					t.Fatalf("Traditional auth notice: %q / %q", title, hint)
+				}
+				if provider == "netease" && !strings.Contains(hint, "網易雲音樂") {
+					t.Fatalf("Simplified provider label: %q", hint)
+				}
+			})
+		}
+	}
+}
+
+type completeLikes248Provider struct{ partial248Provider }
+
+func (p *completeLikes248Provider) Tracks(ctx context.Context, id string) ([]providers.Track, error) {
+	complete := &partial248Provider{provider: "netease"}
+	complete.recovered.Store(true)
+	return complete.Tracks(ctx, id)
+}
+
+func TestGatewayPartial248CompleteLikesIgnorePlaylistDirectoryFailure(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "settings.conf"), []byte("scope=netease\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s := New(Config{UIDir: dir, StateDir: t.TempDir(), Factory: func(string, bool, string) (providers.Provider, error) { return nil, errors.New("unconfigured") }}, nil)
+	defer s.Close()
+	p := &completeLikes248Provider{partial248Provider{provider: "netease", cause: context.DeadlineExceeded}}
+	s.sessions["owner"] = &Session{ID: "owner", Provider: "netease", Ready: true, p: p, expires: time.Now().Add(time.Hour)}
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/v1/users/1/favorites/tracks", nil)
+	r.RemoteAddr = "127.0.0.1:1234"
+	s.tidal.ServeHTTP(w, r)
+	var page struct{ Items []map[string]any }
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil || len(page.Items) != 3 || page.Items[2]["title"] != "three" {
+		t.Fatalf("complete liked songs falsely marked incomplete: %d %s", w.Code, w.Body.String())
+	}
+}
