@@ -3,7 +3,6 @@ package enginedb
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -258,16 +257,15 @@ func stageOwnedMoves(ctx context.Context, tx *sql.Tx, prepared []preparedTrack, 
 			continue
 		}
 		var packed []byte
-		if e = tx.QueryRowContext(ctx, `SELECT substr(sourceJSON,1,67108865) FROM BridgeAnalysis WHERE trackId=?`, t.id).Scan(&packed); e != nil && !errors.Is(e, sql.ErrNoRows) {
+		if e = tx.QueryRowContext(ctx, `SELECT substr(sourceJSON,1,4096) FROM BridgeAnalysis WHERE trackId=?`, t.id).Scan(&packed); e != nil && !errors.Is(e, sql.ErrNoRows) {
 			return nil, e
 		}
-		plain, err := UnpackAnalysis(packed, 64<<20)
+		source, err := analysisSourceID(packed)
 		if err != nil {
 			return nil, fmt.Errorf("source record for track %d: %w", t.id, err)
 		}
-		var record struct{ Track struct{ ID uint32 } }
-		if json.Unmarshal(plain, &record) == nil && record.Track.ID != 0 {
-			t.recorded = sql.NullInt64{Int64: int64(record.Track.ID), Valid: true}
+		if source != 0 {
+			t.recorded = sql.NullInt64{Int64: int64(source), Valid: true}
 		}
 		if t.recorded.Valid {
 			t.source = uint32(t.recorded.Int64)

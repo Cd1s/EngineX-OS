@@ -3,6 +3,7 @@ package enginedb
 import (
 	"bytes"
 	"compress/gzip"
+	"encoding/json"
 	"errors"
 	"io"
 )
@@ -31,6 +32,32 @@ func packAnalysis(b []byte) ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+// The saved source struct starts with Track.ID, before cues and analysis.
+// Identity recovery needs only this prefix, never the waveform payload.
+func analysisSourceID(b []byte) (uint32, error) {
+	var r io.Reader = bytes.NewReader(b)
+	if len(b) >= 2 && b[0] == 0x1f && b[1] == 0x8b {
+		zr, err := gzip.NewReader(r)
+		if err != nil {
+			return 0, err
+		}
+		defer zr.Close()
+		r = zr
+	}
+	d := json.NewDecoder(io.LimitReader(r, 4096))
+	for _, want := range []any{json.Delim('{'), "Track", json.Delim('{'), "ID"} {
+		got, err := d.Token()
+		if err != nil || got != want {
+			return 0, nil
+		}
+	}
+	var id uint32
+	if err := d.Decode(&id); err != nil {
+		return 0, nil
+	}
+	return id, nil
 }
 
 // UnpackAnalysis returns a BridgeAnalysis column as JSON, whether it was

@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -148,6 +149,91 @@ func BenchmarkRepeatLargePDBIdentity253(b *testing.B) {
 				owned, err := stageOwnedMoves(context.Background(), tx, prepared, false)
 				if err != nil || len(owned) != n {
 					b.Fatalf("identity pass: %d %v", len(owned), err)
+				}
+			}
+		})
+	}
+}
+
+func TestLegacyIdentityDoesNotReadAnalysisPayload(t *testing.T) {
+	root, l, db, _ := recognition253Fixture(t, 10)
+	for id := 1; id <= 10; id++ {
+		source := []byte(fmt.Sprintf(`{"Track":{"ID":%d},"Analysis":{"Padding":%q}}`, id, strings.Repeat("waveform", 64<<10)))
+		packed, err := packAnalysis(source)
+		if err != nil {
+			t.Fatal(err)
+		}
+		packed[len(packed)-1] ^= 1 // the unused analysis tail cannot validate as a whole
+		if _, err = UnpackAnalysis(packed, 64<<20); err == nil {
+			t.Fatal("fixture must fail a full payload read")
+		}
+		if _, err = db.Exec(`INSERT INTO BridgeAnalysis(trackId,sourceJSON,audioJSON) VALUES(?,?,'{}')`, id, packed); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec(`UPDATE Track SET pdbImportKey=67`); err != nil {
+		t.Fatal(err)
+	}
+	l.Tracks[0].Path, l.Tracks[1].Path = l.Tracks[1].Path, l.Tracks[0].Path
+	r, err := Sync(context.Background(), root, l, Options{Fast: true})
+	if err != nil || r.Added != 0 {
+		t.Fatalf("legacy identity read the analysis payload: %+v %v", r, err)
+	}
+	for id, want := range map[int]string{1: "../" + testfixture.LargeTrackPath(2), 2: "../" + testfixture.LargeTrackPath(1)} {
+		var got string
+		if err = db.QueryRow(`SELECT path FROM Track WHERE id=?`, id).Scan(&got); err != nil || got != want {
+			t.Fatalf("track %d: path=%q %v", id, got, err)
+		}
+	}
+}
+
+func BenchmarkLegacySharedKeyIdentity253(b *testing.B) {
+	for _, format := range []string{"plain", "gzip"} {
+		b.Run(format, func(b *testing.B) {
+			_, _, db, prepared := recognition253Fixture(b, 6000)
+			rng := rand.New(rand.NewSource(253))
+			data := make([]byte, 250<<10)
+			for i := range data {
+				data[i] = byte(rng.Intn(128))
+			}
+			padding, err := json.Marshal(data)
+			if err != nil {
+				b.Fatal(err)
+			}
+			tx, err := db.Begin()
+			if err != nil {
+				b.Fatal(err)
+			}
+			for id := 1; id <= 600; id++ {
+				source := append([]byte(fmt.Sprintf(`{"Track":{"ID":%d},"Padding":`, id)), padding...)
+				source = append(source, '}')
+				if format == "gzip" {
+					source, err = packAnalysis(source)
+					if err != nil {
+						b.Fatal(err)
+					}
+				}
+				if _, err = tx.Exec(`INSERT INTO BridgeAnalysis(trackId,sourceJSON,audioJSON) VALUES(?,?,'{}')`, id, source); err != nil {
+					b.Fatal(err)
+				}
+			}
+			if _, err = tx.Exec(`UPDATE Track SET pdbImportKey=67`); err != nil {
+				b.Fatal(err)
+			}
+			if err = tx.Commit(); err != nil {
+				b.Fatal(err)
+			}
+			tx, err = db.Begin()
+			if err != nil {
+				b.Fatal(err)
+			}
+			defer tx.Rollback()
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				owned, err := stageOwnedMoves(context.Background(), tx, prepared, false)
+				if err != nil || len(owned) != 6000 {
+					b.Fatalf("legacy identity pass: %d %v", len(owned), err)
 				}
 			}
 		})
