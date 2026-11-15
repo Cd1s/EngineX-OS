@@ -56,6 +56,10 @@ CAPPY
     cp "$W/enginex-suite" "$DATA/enginex/bin/enginex-suite"
     chmod 0755 "$DATA/enginex/bin/enginex-suite"
     ln -sfn enginex-suite "$DATA/enginex/bin/stream-sync"
+    # Gen-2 activation enters the leave guard through its adjacent bundle suite.
+    mkdir -p "$DATA/enginex/bundle/bin"
+    cp "$W/enginex-suite" "$DATA/enginex/bundle/bin/enginex-suite"
+    cp "$W/gen2-boot-activate.sh" "$DATA/enginex/bundle/boot-activate.sh"
 
     mount --bind "$W/etc-merged" "$R/etc"
     mount --bind "$DATA" "$R/data"
@@ -380,7 +384,7 @@ HOSTS
     ip route del blackhole 127.0.0.10/32 2>/dev/null || :
     ip addr add 127.0.0.10/8 dev lo 2>/dev/null || :
     setup_volatile 5
-    chroot "$R" /bin/sh -s < "$W/gen2-boot-activate.sh"
+    chroot "$R" /bin/sh /data/enginex/bundle/boot-activate.sh
     [ -f "$R/run/systemd/timesyncd.conf.d/10-enginex-ntp.conf" ]
     [ "$(stat -c %Y "$R/var/lib/systemd/timesync/clock")" -eq "$BUILD_EPOCH" ]
     grep -Fqx "TZEnvVar=Asia/Shanghai" "$QCONF"
