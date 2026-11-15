@@ -63,7 +63,7 @@ python3 -m unittest discover -s tools/stems
 #   tools/ui-mod/test_rt_callback.c（#237 钩子真实音频函数：不得调用分配、加锁、等待、I/O，且每块在预算内；原生与 armhf 各跑一次，再跑 `selftest`，两者退出码均须为 0）
 ```
 
-JC11S fixture 是独立的官方 PRIME4PLUS rootfs，不能用 SC LIVE 4 或 PRIME 4 G2 代替。
+官方 `PRIME4PLUS-5.3.0-Update.img` 与 `SCLIVE4-5.3.0-Update.img` 逐字节完全一致（SHA-256 `bf5489d19d7ebd932b7408ab3e51e080648f557c52b78fe2c515929dc611ce7e`，同一个多板镜像与 `5.3.0-sclive4` Engine；不能用 64 位的 PRIME 4 G2 AZ04 镜像代替）：JC11S fixture 用的就是这份同一个官方镜像，以板号 `JC11S` 身份运行（关键是 `JC11S` 板号身份本身，而非另一套不同的 rootfs）。
 准备与校验摘要见 `docs/issue169-prime4plus-investigation.md`。把镜像解包到本次任务
 自建的目录后设置 `JC11S_ROOTFS`；不要写入只读的固定实验材料目录。普通 SC LIVE 4
 单独检查不设置此变量时会明确 WARN 跳过 JC11S，**发版不得跳过**。若要同时回归真实
@@ -115,13 +115,18 @@ For 5.3.0.5, run all three build steps in that order: firmware, installer archiv
 - 三个镜像组各抽一个，`python3 tools/az01-packer/az01_packer.py unpack <img> --output <新目录>` 要输出 `"verified": true`。
 - 在解包出的 `rootfs.ext2` 里用 `debugfs -R "cat <路径>"` 核对：`/etc/enginex/version.txt` 是 `<VERSION>`，本次修改的文件确实在镜像里。
 - **开机画面（必做）**：三个一代镜像组（`SC5000`、`SC6000`、`PRIME4`）各跑 `python3 -I tools/splash/splash_tool.py decode --input <解包目录>/splash.payload --stock <同组官方解包目录>/splash.payload --output /tmp/splash-<组>.png`，逐个打开核对画面正立且右下角版本号是 `<VERSION>`（#226）；二代镜像核对界面包里的 `img/SplashScreen.png` 也是 `<VERSION>`。
-- 同一组的机型 sha256 应相同：
+- 一代机同一组的构建产物 sha256 应相同（全系 16 款官方 5.3.0 底包实际上只有 6 个不同镜像、3 个不同 Engine 二进制）：
 
-| 镜像组 | 机型（前缀，板号） |
-| --- | --- |
-| SC5000 | `SC5000` JP07、`SC5000M` JP08、`PRIMEGO` JP11 |
-| SC6000 | `SC6000` JP13、`SC6000M` JP14 |
-| PRIME 4 | `PRIME4` JC11、`PRIME2` JC16、`MIXSTREAMPRO` NH08 |
+| 一代镜像组（hook `5.3.0`，Engine BuildID `be537e908121e76164ddbbf9730d472ba0b8f9d4`） | 机型（前缀，板号） | 官方 5.3.0 底包 SHA-256 |
+| --- | --- | --- |
+| SC5000 | `SC5000` JP07、`SC5000M` JP08、`PRIMEGO` JP11 | `b6536da4d181d08dfa6b5c3a3b3e90cfaece889cfd7a28d013b3df1349a6c0a6` |
+| SC6000 | `SC6000` JP13、`SC6000M` JP14 | `6d004688e643efeb1e430d06308dde255ebe77ff351fd3f168ed164af4ba57cd` |
+| PRIME 4 | `PRIME4` JC11、`PRIME2` JC16、`MIXSTREAMPRO` NH08 | `8e49313be0ef338d5452631c5772ee5b1d72e076cae65bf69a6df8b5b210029f` |
+
+- 二代机官方 5.3.0 底包分组（仅指官方底包逐字节相同；我们构建的二代 `*-Update.img` 按机型分别打包，除非实构建证明相同否则不假定它们共享 SHA-256）：
+  - **Denon 二代 armhf 多板底包**（`SCLIVE4` = `SCLIVE2` = `PRIME4PLUS` = `PRIMEGOPLUS`，板号 JP21、JP20、JC11S、JP11S；官方底包 SHA-256 `bf5489d19d7ebd932b7408ab3e51e080648f557c52b78fe2c515929dc611ce7e`；hook `5.3.0-sclive4`，Engine SHA-256 `68cb478d120d2793d5883876abe6eba49a3ca78b80abf041466113f93e1f0d58`，BuildID `b946c3b8d99d32998c8197d5dc905a6bddaa5d2f`）
+  - **Numark 二代 armhf 多板底包**（`MIXSTREAMPROGO` = `MIXSTREAMPROPLUS`，板号 NH10、NH08S；官方底包 SHA-256 `cdf268a70cf18a1255254cc19bdcc8f85962f7b12b7f10643ddd167b110212c4`；与 SC LIVE 系列共用同一个 `5.3.0-sclive4` Engine 二进制）
+  - **AZ04 64 位多板底包**（`PRIME4G2` = `SYSTEMONE`，板号 JP24、RMZ2；官方底包 SHA-256 `9b025745f73f8390b88ab9ab9a4926afea7556bc7dc80f5288ee06cadb6d146b`；hook `5.3.0-az04`，Engine SHA-256 `63dc843feb6738d463eb68a62c9f1bd2cd86dcb562fcaa77a4fef607fefdf0ed`，BuildID `040335918db1144f0c3452d6f23088d3c3a94613`）
 
 ## 4b. 发版门禁：上一版在线升级 → 新版开机全功能验收（硬性，不过不发）
 
