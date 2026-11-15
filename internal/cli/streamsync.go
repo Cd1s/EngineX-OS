@@ -41,6 +41,7 @@ func StreamSync(args []string) error {
 		home = "/root"
 	}
 	listen := fs.String("listen", ":8080", "touch/LAN HTTP listener")
+	httpsListen := fs.String("https-listen", ":8443", "optional touch/LAN HTTPS listener (enabled by consoleHttps setting)")
 	public := fs.String("public-url", "http://sc5000.lan:8080", "public console URL")
 	dbPath := fs.String("database", analyzer.DefaultDatabase, "existing Engine 5.0.4 m.db (back up before use)")
 	downloads := fs.String("downloads", defaultDownloads, "Deemix output root on the same SD volume")
@@ -139,7 +140,7 @@ func StreamSync(args []string) error {
 			return err
 		}
 	}
-	ui := webui.New(webui.Config{AccessToken: *token, PublicURL: *public, SpotifyClientID: *clientID, SpotifyRedirectURL: *redirect, SpotifyTokenPath: *spotifyToken, NeteaseURL: *netease, StateDir: *state, RelayURL: *relay, BPM: bpm}, jobs)
+	ui := webui.New(webui.Config{AccessToken: *token, PublicURL: *public, HTTPSAddr: *httpsListen, SpotifyClientID: *clientID, SpotifyRedirectURL: *redirect, SpotifyTokenPath: *spotifyToken, NeteaseURL: *netease, StateDir: *state, RelayURL: *relay, BPM: bpm}, jobs)
 	defer ui.Close()
 	// This is the one intentional local credential output: the operator needs
 	// it to pair the touch/phone console. No provider credentials are logged.

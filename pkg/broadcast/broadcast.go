@@ -115,6 +115,11 @@ type Broadcaster struct {
 	wg     sync.WaitGroup
 	conn   net.Conn
 
+	// The external pusher, started and stopped apart from capture (#245).
+	push       chan []byte // what capture feeds it; nil without a server
+	pushCancel context.CancelFunc
+	pushWG     sync.WaitGroup
+
 	// HTTP client used for metadata updates (can be overridden in tests).
 	httpClient *http.Client
 }
@@ -211,13 +216,20 @@ func (b *Broadcaster) Configure(cfg Config) error {
 	if err := normalizeConfig(&cfg); err != nil {
 		return err
 	}
+	capturing := b.cancel != nil && cfg.InputPath == b.cfg.InputPath
 	b.cfg = cfg
 
-	if cfg.Enabled {
+	switch {
+	case !cfg.Enabled:
+		b.stopLocked()
+	case capturing:
+		// #245: only where the stream is sent can have changed. Capture and its local
+		// listeners go on; a full restart made OBS and VLC reconnect on every save.
+		b.stopOutputsLocked()
+		b.startOutputsLocked()
+	default:
 		b.stopLocked()
 		b.startLocked()
-	} else {
-		b.stopLocked()
 	}
 	return nil
 }
@@ -304,7 +316,20 @@ func (b *Broadcaster) startLocked() {
 	ctx, cancel := context.WithCancel(context.Background())
 	b.cancel = cancel
 	b.wg.Add(1)
+	b.startOutputsLocked()
 
+	go func() {
+		defer b.wg.Done()
+		_ = b.guard.Run(ctx, func(t *resourceguard.Throttle) error {
+			b.workerLoop(ctx, t)
+			return nil
+		})
+	}()
+}
+
+// startOutputsLocked starts what the settings send the capture to: the LAN stream
+// and the external pusher. Caller must hold b.mu.
+func (b *Broadcaster) startOutputsLocked() {
 	if b.cfg.LANMode != "" && b.cfg.LANMode != "off" && b.cfg.LANTarget == "" {
 		b.lanErr = "no target set" // on, and nowhere to send: say so instead of "connecting"
 	} else if b.cfg.LANMode != "" && b.cfg.LANMode != "off" {
@@ -325,14 +350,16 @@ func (b *Broadcaster) startLocked() {
 			_ = streamer.Start() // the reason is kept in streamer.Err()
 		}
 	}
-
-	go func() {
-		defer b.wg.Done()
-		_ = b.guard.Run(ctx, func(t *resourceguard.Throttle) error {
-			b.workerLoop(ctx, t)
-			return nil
-		})
-	}()
+	if b.cfg.pushes() {
+		ctx, cancel := context.WithCancel(context.Background())
+		cfg, feed := b.cfg, make(chan []byte, 80) // about 0.8 s of ~10 ms chunks, as 32 was with 24 ms ones
+		b.push, b.pushCancel = feed, cancel
+		b.pushWG.Add(1)
+		go func() {
+			defer b.pushWG.Done()
+			b.pushLoop(ctx, cfg, feed)
+		}()
+	}
 }
 
 // stopLocked cancels context, closes connection, and waits for worker. Caller must hold b.mu.
@@ -341,6 +368,22 @@ func (b *Broadcaster) stopLocked() {
 		b.cancel()
 		b.cancel = nil
 	}
+	b.stopOutputsLocked()
+	b.hub.closeAll()
+
+	b.mu.Unlock()
+	b.wg.Wait()
+	b.mu.Lock()
+}
+
+// stopOutputsLocked stops the pusher and the LAN stream and waits for the pusher.
+// Caller must hold b.mu.
+func (b *Broadcaster) stopOutputsLocked() {
+	if b.pushCancel != nil {
+		b.pushCancel()
+		b.pushCancel = nil
+	}
+	b.push = nil
 	if b.conn != nil {
 		_ = b.conn.Close()
 		b.conn = nil
@@ -352,10 +395,9 @@ func (b *Broadcaster) stopLocked() {
 	b.lanErr = ""
 	b.streaming = false
 	b.connectedAt = ""
-	b.hub.closeAll()
 
 	b.mu.Unlock()
-	b.wg.Wait()
+	b.pushWG.Wait()
 	b.mu.Lock()
 }
 
@@ -406,8 +448,8 @@ func sanitizeError(err error, password string) string {
 const captureTick = 1152 * time.Second / SampleRate
 
 // workerLoop reads the PCM feed as it arrives, puts it on the system clock (see
-// pacer), fans it out to local listeners and, when a ServerURL is set, feeds the
-// external Icecast pusher. It is paced by the feed itself, so the guard's
+// pacer), fans it out to local listeners and feeds the LAN stream and the external
+// Icecast pusher while the settings have them (they come and go without it, #245). It is paced by the feed itself, so the guard's
 // cooperative throttle is not used here: its sleeps would only add jitter.
 func (b *Broadcaster) workerLoop(ctx context.Context, _ *resourceguard.Throttle) {
 	b.mu.Lock()
@@ -426,15 +468,6 @@ func (b *Broadcaster) workerLoop(ctx context.Context, _ *resourceguard.Throttle)
 		b.mu.Unlock()
 	}()
 
-	feed := make(chan []byte, 80) // about 0.8 s of ~10 ms chunks, as 32 was with 24 ms ones
-	if cfg.pushes() {
-		b.wg.Add(1)
-		go func() {
-			defer b.wg.Done()
-			b.pushLoop(ctx, cfg, feed)
-		}()
-	}
-
 	var input pcmReader
 	defer func() {
 		if input.f != nil {
@@ -445,12 +478,12 @@ func (b *Broadcaster) workerLoop(ctx context.Context, _ *resourceguard.Throttle)
 	for ctx.Err() == nil {
 		pass := time.Now()
 		b.mu.Lock()
-		ls := b.lanStreamer
+		ls, feed := b.lanStreamer, b.push
 		b.mu.Unlock()
 		// Live Stream is on and nobody listens (no /live.wav client, no server, no LAN
 		// target): leave the feed closed. An open feed makes the hook copy every block out
 		// of the audio callback and this loop resample it: 7% of a core on an idle deck.
-		if ls == nil && !cfg.pushes() && b.hub.idle() {
+		if ls == nil && feed == nil && b.hub.idle() {
 			if input.f != nil {
 				input.f.Close()
 				input = pcmReader{}

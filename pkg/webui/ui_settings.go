@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -227,6 +228,8 @@ type uiSettings struct {
 	FourDeckRoleActive string `json:"fourDeckRoleActive,omitempty"`
 	TimeZone           string `json:"timezone,omitempty"`
 	DeckClock          bool   `json:"deckClock,omitempty"`
+	ConsoleHTTPS       bool   `json:"consoleHttps"`
+	HTTPSPort          int    `json:"httpsPort,omitempty"`
 }
 
 // uiFourDeckRoles are the decks a player plays in the 4-deck layout (#49/#160), RCA A then B.
@@ -476,6 +479,8 @@ func (s *Server) loadUI() uiSettings {
 			if n, err := uiFxTimeInteger(val); err == nil {
 				v.FxTimeMs = int(max(10, min(4000, n)))
 			}
+		case "console_https":
+			v.ConsoleHTTPS = val == "1" || strings.EqualFold(val, "true")
 		}
 	}
 	if saved { // services added since the file was written start enabled; ones turned off stay off
@@ -636,6 +641,9 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	if v.GitHubRepo != defaultGitHubRepo {
 		text += "github_repo=" + v.GitHubRepo + "\n"
 	}
+	if v.ConsoleHTTPS {
+		text += "console_https=1\n"
+	}
 	tmp, err := os.CreateTemp(dir, ".settings-*")
 	if err != nil {
 		return err
@@ -782,6 +790,14 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	v.DeckClock = s.deckClockWanted(now)
 	v.USBPreparing = s.usbPreparingActive(now)
+	httpsOn := s.httpsOfferedLocked(v.ConsoleHTTPS)
+	if httpsOn {
+		v.HTTPSPort = s.httpsPortNum()
+	}
+	consoleLink := "http://" + lanHost() + ":8080"
+	if httpsOn {
+		consoleLink = "https://" + net.JoinHostPort(lanHost(), s.httpsPortStr())
+	}
 	if r.Method == http.MethodGet && r.URL.Path == "/v1/sc5000/ui" {
 		body, err := json.Marshal(struct {
 			uiSettings
@@ -789,7 +805,7 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 			ConsoleURL string `json:"consoleUrl"`
 			// LANStems: the home sc5000-stemsd last seen, for Settings -> About (#148).
 			LANStems *stems.LANState `json:"lanStems,omitempty"`
-		}{v, s.cfg.AccessToken, "http://" + lanHost() + ":8080", relay.LANStems})
+		}{v, s.cfg.AccessToken, consoleLink, relay.LANStems})
 		if err != nil {
 			fail(w, http.StatusInternalServerError, err)
 			return
@@ -846,6 +862,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	s.uiMu.Lock()
 	v := s.loadUI()
 	prevShadowMode := v.ShadowMode
+	prevConsoleHTTPS := v.ConsoleHTTPS
 	bad := func(field, val string, allowed []string) bool {
 		return q.Has(field) && !slices.Contains(allowed, val)
 	}
@@ -853,6 +870,19 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		s.uiMu.Unlock()
 		fail(w, 400, errors.New("invalid setting"))
 		return
+	}
+	if q.Has("consoleHttps") || q.Has("console_https") {
+		param := q.Get("consoleHttps")
+		if !q.Has("consoleHttps") {
+			param = q.Get("console_https")
+		}
+		b, ok := parseBoolParam(param)
+		if !ok {
+			s.uiMu.Unlock()
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+		v.ConsoleHTTPS = b
 	}
 	if q.Has("engineLighting") || q.Has("engine_lighting") {
 		param := q.Get("engineLighting")
@@ -1191,6 +1221,13 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	err := s.saveUI(v, q.Has("prolinkExport"))
 	if err != nil && q.Has("verboseLog") {
 		_ = writeVerboseLog(previousVerbose)
+	}
+	if err == nil && v.ConsoleHTTPS != prevConsoleHTTPS {
+		if herr := s.applyHTTPS(v.ConsoleHTTPS); herr != nil {
+			v.ConsoleHTTPS = prevConsoleHTTPS
+			_ = s.saveUI(v)
+			err = herr
+		}
 	}
 	s.uiMu.Unlock()
 	if err != nil {

@@ -100,7 +100,7 @@ assert.equal(scFxTimeMode,'beats'); assert.equal(scFxTimeMs,500);
 
     def test_playback_fx_visibility_and_hidden_means_off(self):
         entries = {}
-        for block in bp.PLAYBACK_ENTRIES.split("EntryBase.ListEntry {")[1:]:
+        for block in re.split(r"EntryBase\.(?:ListEntry|SwitchEntry) \{", bp.PLAYBACK_ENTRIES)[1:]:
             name = re.search(r'text:\s*"([^"]+)"', block).group(1)
             vis = re.search(r'visible:\s*([^\n]+)', block)
             entries[name] = vis.group(1).strip() if vis else "true"
