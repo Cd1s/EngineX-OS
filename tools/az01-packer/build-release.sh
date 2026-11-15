@@ -92,10 +92,13 @@ build() { # <official image prefix> <model prefix> <release name>...
     extract_stock_splash "$FW/$base-$BASE-Update.img" "$WORK/$base-stock-splash.bin"
     python3 -I tools/splash/splash_tool.py render --preset enginex --stock "$WORK/$base-stock-splash.bin" \
         --version "$VERSION" --bin "$WORK/$base-splash.bin" >/dev/null
+    # --grow: the stock 5.3.0 file system had 4 MiB left once EngineX was in, under what the ext4
+    # driver keeps back, so the rootfs grows to a size every 1st-gen partition holds, and the
+    # build stops if it ever keeps less than its margin free (az01_packer.py GEN1_ROOTFS_KIB).
     python3 tools/az01-packer/az01_packer.py patch-rootfs "$FW/$base-$BASE-Update.img" \
-        ${KEYARG:+--ssh-public-key "$KEYARG"} --overlay "$STAGE" --set-version "$VERSION" --output "$WORK/$base.ext2" >/dev/null
+        ${KEYARG:+--ssh-public-key "$KEYARG"} --overlay "$STAGE" --set-version "$VERSION" --grow --output "$WORK/$base.ext2" >/dev/null
     python3 tools/az01-packer/az01_packer.py repack "$FW/$base-$BASE-Update.img" \
-        --rootfs "$WORK/$base.ext2" --splash "$WORK/$base-splash.bin" --output "$WORK/$base.img" >/dev/null
+        --rootfs "$WORK/$base.ext2" --grow --splash "$WORK/$base-splash.bin" --output "$WORK/$base.img" >/dev/null
     rm -f "$WORK/$base.ext2" "$WORK/$base-stock-splash.bin" "$WORK/$base-splash.bin"
     while [ "$#" -ge 2 ]; do
         cmp -s "$FW/$base-$BASE-Update.img" "$FW/$1-$BASE-Update.img" ||
