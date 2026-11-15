@@ -25,7 +25,7 @@ const (
 )
 
 // Only downloads this pipeline named are ever evicted: Save's and Deemix's <id>.
-var evictable = regexp.MustCompile(`^((netease-|soundcloud-|beatport-)?\d+\.(flac|mp3|mp4)|spotify-[A-Za-z0-9]+\.(ogg|flac|mp3)|nas-[0-9a-f]{64}\.[^/]*)$`)
+var evictable = regexp.MustCompile(`^((netease-|soundcloud-|beatport-)?\d+\.(flac|mp3|mp4)|spotify-[A-Za-z0-9]+\.(ogg|flac|mp3|mp4)|applemusic-(i\.)?[A-Za-z0-9]+\.flac|nas-[0-9a-f]{64}\.[^/]*)$`)
 
 var defaultMedia = func() *http.Client {
 	t := http.DefaultTransport.(*http.Transport).Clone()
@@ -88,10 +88,6 @@ func (c *Client) Cached(name string) *Download {
 }
 
 func (c *Client) cachedLookup(name string) *Download {
-	if strings.HasPrefix(name, "spotify-") {
-		return c.cachedOgg(name)
-	}
-
 	for _, ext := range []string{".flac", ".mp3"} {
 		if dl, err := c.accept(filepath.Join(c.DownloadDir, name+ext)); err == nil {
 			return dl

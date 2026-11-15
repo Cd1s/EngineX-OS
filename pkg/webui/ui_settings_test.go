@@ -1355,3 +1355,61 @@ func TestSdHighSpeedDefaultsOffPersistsAndApplies(t *testing.T) {
 		}
 	}
 }
+
+func TestSpotifySourceSettingsPersistenceAndWiring(t *testing.T) {
+	dir := t.TempDir()
+	j := NewJobs(Pipeline{})
+	defer j.Close()
+	cfg := Config{UIDir: dir, StateDir: t.TempDir(), AccessToken: "fixture"}
+	s := New(cfg, j)
+	defer s.Close()
+	if got := j.spotifySource(); got != "auto" {
+		t.Fatalf("default source %q", got)
+	}
+	for _, source := range []string{"auto", "deezer", "netease", "beatport", "applemusic", "soundcloud"} {
+		t.Run(source, func(t *testing.T) {
+			for _, path := range []string{"/api/ui", "/v1/enginex/ui", "/v1/sc5000/ui"} {
+				req := httptest.NewRequest("POST", path+"?spotifySource="+source, nil)
+				req.RemoteAddr = "127.0.0.1:1234"
+				req.Header.Set("Authorization", "Bearer fixture")
+				w := httptest.NewRecorder()
+				s.ServeHTTP(w, req)
+				if w.Code != 200 || j.spotifySource() != source {
+					t.Fatalf("%s: %d %s, source %s", path, w.Code, w.Body, j.spotifySource())
+				}
+			}
+			b, err := os.ReadFile(filepath.Join(dir, "settings.conf"))
+			if err != nil || !strings.Contains(string(b), "spotify_source="+source+"\n") {
+				t.Fatalf("setting not saved: %v", err)
+			}
+			again := New(cfg, nil)
+			defer again.Close()
+			if got := again.spotifySource(); got != source {
+				t.Fatalf("restart source %q, want %q", got, source)
+			}
+		})
+	}
+	before, err := os.ReadFile(filepath.Join(dir, "settings.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{"", "tidal", "AUTO", "../../etc/passwd"} {
+		req := httptest.NewRequest("POST", "/v1/enginex/ui?spotifySource="+bad, nil)
+		req.RemoteAddr = "127.0.0.1:1234"
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, req)
+		if w.Code != 400 {
+			t.Fatalf("accepted invalid source %q: %d", bad, w.Code)
+		}
+	}
+	after, err := os.ReadFile(filepath.Join(dir, "settings.conf"))
+	if err != nil || string(after) != string(before) {
+		t.Fatal("invalid source changed settings")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "settings.conf"), []byte("spotify_source=invalid\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.spotifySource(); got != "auto" {
+		t.Fatalf("invalid saved source %q", got)
+	}
+}

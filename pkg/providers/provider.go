@@ -21,6 +21,7 @@ import (
 
 type Track struct {
 	ID         string   `json:"id"`
+	CatalogID  string   `json:"catalogId,omitempty"`
 	Title      string   `json:"title"`
 	Artist     string   `json:"artist"`
 	Artists    []string `json:"artists,omitempty"`

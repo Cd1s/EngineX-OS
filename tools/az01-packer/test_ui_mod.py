@@ -6861,13 +6861,13 @@ if (v53) {
         hidden = re.search(r'visible: (\[[^\n]+?\])\.indexOf\(model.name\) < 0', bp.AVAILABLE_SOURCE)
         self.assertIsNotNone(hidden)
         hidden_names = json.loads(hidden[1])
-        self.assertEqual(hidden_names, ["TIDAL", "Tidal", "SoundCloud", "Beatport LINK"])
+        self.assertEqual(hidden_names, ["TIDAL", "Tidal", "SoundCloud", "Beatport LINK", "Apple Music"])
         self.run_js("""
-let name='', enters=0, opens=0;
+let name='', enters=0, opens=0, last='';
 const model={index(i) {return i;},data() {return name;}};
 const nav={availableSourceIndex:0,connectedSourceIndex:0,enter() {enters++;}};
 const controller={navigation() {return nav;}};
-const root={scSourceNameRole:257,scScope:'spotify',scSources:['spotify'],scOpen() {opens++;}};
+const root={scSourceNameRole:257,scScope:'spotify',scSources:['spotify'],scOpen(id) {opens++; last=id;}};
 const Planck={librarianController:{browserSourceControllerPtr() {return {
     availableSourceModel() {return model;},connectedSourceModel() {return model;}
 };}}};
@@ -6881,6 +6881,7 @@ for (const available of [false,true]) {
     for (const hidden of hiddenNames) {
         name=hidden; enters=0; opens=0; scSourceEnter();
         assert.equal(enters,0,hidden); assert.equal(opens,1,hidden);
+        if (hidden === "Apple Music") assert.equal(last,"applemusic");
     }
 }
 """)
@@ -6984,6 +6985,13 @@ assert.equal(tp.loggedIn,true); assert.equal(scTidalLogoutPending,false);
                     self.assertIn('["TIDAL", "Tidal", "SoundCloud", "Beatport LINK"]', source)
                     self.assertIn('"Beatport LINK"', source)
                     main = (base / "EmbeddedMain.qml").read_text()
+                    self.assertIn('{ id: "applemusic", name: "Apple Music" }', main)
+                    self.assertIn('"applemusic"]', main)
+                    self.assertTrue((out / "icons/applemusic.png").is_file())
+                    self.assertIn('if (name === "Apple Music") { root.scOpen("applemusic"); return }', source)
+                    self.assertIn('root.scLoginBegin(modelData.id)', bp.SOURCE_FOOTER)
+                    self.assertIn('model: root.scServices', bp.STREAM_SWITCHES)
+                    self.assertIn('"Apple Music"', bp.AVAILABLE_SOURCE)
                     self.assertIn('scSources.indexOf("tidal") < 0 ||', main)
                     self.assertIn("scTidalLoggedIn = !!v.tidalLoggedIn", main)
                     self.assertIn("property bool scTidalSynthetic: false", main)

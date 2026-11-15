@@ -63,7 +63,7 @@
 
 ### 新功能
 - **二代机全系 8 款统一 `*-Update.img` 与一键解锁刷机**：全系 16 款机型现统一发布单文件 `*-Update.img` 升级包。原厂二代机首次只需进入 `固件更新模式` 连 USB 运行一次 `EngineX-Installer`，自动完成 **[1/2] 一键解锁 `.img` 升级链** 与 **[2/2] 刷入 `*-Update.img`**；解锁后后续升级与一代机完全一致——既可把 `*-Update.img` 放进 U 盘插机升级，也可在屏幕 `设置 → 关于 / 更新` 一键在线 OTA，全程免电脑。
-- **Spotify 原生音频与免配置登录**：Spotify Premium 直接拉取原生 320 kbps Ogg Vorbis 音频并自动生成 BPM、调性与波形入库，绝不跨平台找替身；同一网络下在 Spotify Connect 选择 **`EngineX OS`** 或扫描屏幕二维码即可登录，无需自建开发者应用。
+- Spotify 登录、歌单、红心与搜索保留；原生音频暂时停用（Spotify 阻止部分账号的音频密钥解密）。播放依次匹配碟机已登录的 Deezer、网易云、Beatport、Apple Music 或 SoundCloud。用 Spotify Connect 的 **`EngineX OS`** 或碟机二维码登录，无需自建 Client ID。
 - **`联机视图` 三合一选择器与 `双碟机配对` 2 轨视图**：`布局 → ENGINEX 视图预设 → 联机视图` 在 `SC5000 / SC6000` 上整合 `原厂` / `双碟机配对` / `4 轨`（4 轨一体机为 `原厂` / `4 轨`），一步即可切回 `原厂` 单/双层视图。`双碟机配对` 为两台联机独立碟机展示上下两条全高波形（上方为本机当前 Layer，下方实时跟随对端碟机当前 Layer），与 `4 轨` 互切无需重启 Engine。
 - **`影子轨模式`（`自动` / `全部 Engine 模式` / `全部 CDJ 模式`）免重启实时切换**：默认 `自动` 下，对端 EngineX 碟机或 CDJ U 盘中可拷贝的曲目由本机静音加载，用原厂界面完整绘制波形、拍线、滑行线、移调、循环、`Stems` 图标、绿色 `Sync` BPM 与 `主控 (LEAD)`（加载期间显示曲目信息与进度环）；无法拷贝的 CDJ 音源自动回退显示原厂样式的 CDJ 波形并注明原因。切换模式即时生效，不中断本机播放。
 - **一体机 `线路输入`（`Line In`）显示 CDJ-3000 波形**：在 `PRIME 4` 等一体机上把通道输入切到 `Line In`，联机的先锋 CDJ-3000 波形与播放进度会直接显示在该通道上。
@@ -258,7 +258,7 @@
 
 </details>
 
-> **PRIME 4 G2 / Rane SYSTEM ONE（64 位机型）**：已包含四语界面、7 大流媒体服务（含原厂 Apple Music 解锁、Spotify、Deezer、SoundCloud、Beatport、TIDAL、网易云）、流媒体录音、实时音质保护（`0dB 防破音软限幅`、`自动增益`、`回声淡出`、`先锋风格效果 (Color FX)`、`先锋效果延时模式 (PX)`）、Rekordbox U 盘直读与 `:8080` Web 控制台全部能力；Stems 保持官方固件行为。
+> **PRIME 4 G2 / Rane SYSTEM ONE（64 位机型）**：已包含四语界面、7 大流媒体服务（含通过 enginex-amd 下载 Apple Music、Spotify、Deezer、SoundCloud、Beatport、TIDAL、网易云）、流媒体录音、实时音质保护（`0dB 防破音软限幅`、`自动增益`、`回声淡出`、`先锋风格效果 (Color FX)`、`先锋效果延时模式 (PX)`）、Rekordbox U 盘直读与 `:8080` Web 控制台全部能力；Stems 保持官方固件行为。
 
 ### 方式二：碟机屏幕一键在线升级（已安装 EngineX OS 后）
 - 连接 Wi-Fi 或网线后打开 **设置 → 关于 / 更新**；
@@ -288,11 +288,13 @@ powershell -ExecutionPolicy Bypass -File .\stems\run-home-worker.ps1
 | 平台 | 登录方式 |
 | --- | --- |
 | **网易云音乐** | 用网易云音乐 App 扫屏幕二维码并确认（过期点一下刷新）；在 `设置 → 服务 → 网易云下载方式` 提供 `官方直下` 与 `Deemix 优先` 切换。 |
-| **Spotify** | **音频播放需 Spotify Premium。** 同一网络下在手机/电脑 Spotify Connect 点选 **`EngineX OS`**，或扫碟机二维码在 Spotify 官方授权页确认，无需自建 Client ID。直接拉取 320 kbps Ogg Vorbis（或 160 / 96 kbps）并自动分析 BPM、调性与波形，绝不跨平台兜底。 |
+| **Spotify** | Spotify 登录、歌单、红心与搜索保留；原生音频暂时停用（Spotify 阻止部分账号的音频密钥解密）。播放依次匹配碟机已登录的 Deezer、网易云、Beatport、Apple Music 或 SoundCloud。用 Spotify Connect 的 **`EngineX OS`** 或碟机二维码登录，无需自建 Client ID。 |
 | **Deezer** | 扫码后在手机页粘贴你自己的 **ARL**（页面附分步教程），同步歌单并解锁无损 FLAC 下载。 |
-| **SoundCloud** | 输入用户名或主页链接即可（私密歌单在「高级」填入 `oauth_token`）。超过 10 分钟的 DJ Set 与已绑 Go+ 账号直连官方高音质流；未绑 Go+ 时普通单曲自动在已登录的 Deezer / 网易云 / Beatport 匹配无损 / 320k 音频，避开 30 秒试听限制。 |
-| **Apple Music** | 直接使用已解锁的 Engine 5.3.0 原生 Apple Music 音源播放；手机页可粘贴公开歌单/专辑链接或登录个人资料库。 |
+| **SoundCloud** | 输入用户名或主页链接即可（私密歌单在「高级」填入 `oauth_token`）。超过 10 分钟的 DJ Set 与已绑 Go+ 账号直连官方高音质流；未绑 Go+ 时普通单曲自动在已登录的 Deezer / 网易云 / Beatport / Apple Music 匹配无损 / 320k 音频，避开 30 秒试听限制。 |
+| **Apple Music** | Apple Music 使用 **`enginex-amd`** 下载助手，将无损 ALAC 转为 FLAC 并缓存在碟机。助手无需 Docker，可在 macOS、Windows、Linux 运行，Gen-2 也可在本机运行。先在 `:8080` Web 控制台设置助手 URL／令牌，再通过碟机统一局域网手机页 `/m/applemusic` 或控制台完成 Apple ID／密码和六位 2FA 登录；也可打开助手登录页／二维码。歌单／专辑链接、MusicKit JS 与 `media-user-token` 表单用于浏览歌单和资料库，助手登录用于音频下载。`设置 → 服务 → 流媒体` 开关控制 EngineX Apple Music；原厂同名行隐藏，避免重复入口。 |
 | **TIDAL 与 Beatport** | 扫屏幕二维码登录个人账号即可（Beatport 仅保存登录令牌，曲目同样支持一键拆 Stems）。 |
+
+> **Spotify 音源（5.3.0.5）**：在 Web 控制台的「音乐」分区选择 `auto`、Deezer、网易云、Beatport、Apple Music 或 SoundCloud。自动模式按此顺序尝试；指定音源时只使用所选服务。已有缓存可继续播放。
 
 ### 选配：远程登录中继与免域名公网隧道
 当手机使用 4G/5G 流量扫码登录，或需要集中查看多台碟机状态时：

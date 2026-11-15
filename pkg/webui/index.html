@@ -71,6 +71,8 @@ a{color:var(--accent)}label.chk{display:flex;align-items:center;gap:10px;cursor:
    <button class="prov" data-provider="beatport" style="--c:#01ff95"><img src="/icons/beatport" alt="">Beatport</button>
    <button class="prov off" id="tidalInfo" style="--c:#ffffff" aria-disabled="true"><img src="/icons/tidal" alt="">TIDAL</button>
   </div>
+  <p class="sub" data-i18n="spAudio"></p>
+  <div class="setting"><div class="txt"><b data-i18n="spotifySource"></b><span class="sub" data-i18n="spotifySourceHint"></span></div><select id="spotifySource" data-i18n-aria="spotifySource"><option value="auto" data-i18n="spotifyAuto"></option><option value="deezer">Deezer</option><option value="netease" data-i18n="pNetease"></option><option value="beatport">Beatport</option><option value="applemusic">Apple Music</option><option value="soundcloud">SoundCloud</option></select></div>
   <div class="setting" id="spRow"><div class="txt"><b data-i18n="spTitle"></b><span class="sub" id="spState"></span><span class="sub" data-i18n="spHow"></span></div></div>
   <div class="bar"><input id="spClient" data-i18n-ph="spClient" autocomplete="off" spellcheck="false"><button class="btn primary" onclick="action(saveSpotify)" data-i18n="save"></button></div>
   <div class="setting"><div class="txt"><b data-i18n="guest"></b><span class="sub" data-i18n="guestSub"></span></div><label class="sw"><input type="checkbox" id="guest"><span></span></label></div>
@@ -78,6 +80,20 @@ a{color:var(--accent)}label.chk{display:flex;align-items:center;gap:10px;cursor:
   <div class="bar"><select id="sessions" data-i18n-aria="account"></select></div>
   <div class="bar"><button class="btn primary" id="browse" data-i18n="browse"></button><button class="btn" id="relogin" data-i18n="relogin"></button><button class="btn" id="logout" data-i18n="logout"></button></div>
   <div id="login"><img id="qr" data-i18n-alt="loginQr"><p><a id="auth" target="_blank" rel="noreferrer" data-i18n="openOnPhone"></a></p><button class="btn" id="check" data-i18n="checkNetease"></button><small id="loginStatus"></small></div>
+ </section>
+ <section class="card" id="amHelperCard">
+  <h3 data-i18n="amHelperTitle"></h3><p id="amState" role="status"></p>
+  <p class="sub" data-i18n="amHow"></p>
+  <div class="bar"><input id="amUrl" data-i18n-ph="amUrl" data-i18n-aria="amUrl" autocomplete="off"></div>
+  <div class="bar"><input id="amLoginUrl" data-i18n-ph="amLoginUrl" data-i18n-aria="amLoginUrl" autocomplete="off"></div>
+  <div class="bar"><input id="amToken" type="password" data-i18n-ph="amToken" data-i18n-aria="amToken" autocomplete="new-password"><button class="btn primary" onclick="action(saveAppleMusic)" data-i18n="save"></button></div>
+  <div class="setting"><div class="txt"><b id="amClearLabel" data-i18n="amClearToken"></b></div><label class="sw"><input type="checkbox" id="amClearToken" aria-labelledby="amClearLabel"><span></span></label></div>
+  <div id="amSignIn" hidden>
+   <form id="amLoginForm"><div class="bar"><input id="amUsername" placeholder="Apple ID" aria-label="Apple ID" autocomplete="username" required><input id="amPassword" type="password" data-i18n-ph="amPassword" data-i18n-aria="amPassword" autocomplete="current-password" required><button class="btn" data-i18n="amSignIn"></button></div></form>
+   <form id="am2FAForm" hidden><div class="bar"><input id="amCode" data-i18n-ph="amCode" data-i18n-aria="amCode" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" required><button class="btn" data-i18n="amVerify"></button></div></form>
+  </div>
+  <div id="amHelperLink" hidden><a id="amHelperOpen" target="_blank" rel="noreferrer" data-i18n="amOpen"></a><details><summary data-i18n="loginQr"></summary><img id="amHelperQR" width="200" height="200" data-i18n-alt="loginQr"></details></div>
+  <button class="btn" onclick="action(showAppleMusic)" data-i18n="amRefresh"></button>
  </section>
 </div>
 <div class="col">
@@ -188,6 +204,29 @@ a{color:var(--accent)}label.chk{display:flex;align-items:center;gap:10px;cursor:
 const $=id=>document.getElementById(id);let current='',loginSession='',lastWave='',sessions=[],qrTimer=null,qrChecking=false,lastUI=null,lastDrives=[],redrawList=null,lastJobs=null;
 // Every visible string: [English, 简体中文, 繁體中文, Español].
 const T={
+spotifySource:['Spotify audio source','Spotify 音源','Spotify 音源','Fuente de audio de Spotify'],
+spotifySourceHint:['Auto tries Deezer → NetEase → Beatport → Apple Music → SoundCloud. A selected service is used exclusively. Cached tracks are reused.','自动依次尝试 Deezer → 网易云 → Beatport → Apple Music → SoundCloud。指定音源时仅使用该服务；已有缓存会复用。','自動依序嘗試 Deezer → 網易雲 → Beatport → Apple Music → SoundCloud。指定音源時僅使用該服務；已有快取會重用。','Automático prueba Deezer → NetEase → Beatport → Apple Music → SoundCloud. Al elegir un servicio, se usa exclusivamente. Se reutilizan las pistas en caché.'],
+spotifyAuto:['Auto','自动','自動','Automático'],
+spAudio:['Spotify login, playlists and search remain available. Direct audio is temporarily disabled; connect another service for matching playback.','Spotify 登录、歌单与搜索仍可用。原生音频暂时停用，请连接其他服务匹配播放。','Spotify 登入、歌單與搜尋仍可用。原生音訊暫時停用，請連接其他服務比對播放。','El acceso, las listas y la búsqueda de Spotify siguen disponibles. El audio directo está desactivado temporalmente; conecta otro servicio para reproducir coincidencias.'],
+amHelperTitle:['Apple Music Download Helper','Apple Music 下载助手','Apple Music 下載助手','Asistente de descarga de Apple Music'],
+amHow:['enginex-amd supplies lossless FLAC. Sign in here or scan the helper QR; browse playlists/library from the deck LAN phone page.','enginex-amd 提供无损 FLAC。在此登录或扫描助手二维码；歌单和资料库通过碟机局域网手机页连接。','enginex-amd 提供無損 FLAC。在此登入或掃描助手 QR Code；歌單與資料庫透過碟機區域網路手機頁連接。','enginex-amd proporciona FLAC sin pérdidas. Inicia sesión aquí o escanea el QR del asistente; conecta las listas y la biblioteca desde la página móvil del deck en la red local.'],
+amUrl:['Helper URL','助手 URL','助手 URL','URL del asistente'],
+amLoginUrl:['Helper login URL (optional)','助手登录页 URL（可选）','助手登入頁 URL（選填）','URL de acceso al asistente (opcional)'],
+amToken:['Helper token (empty keeps it)','助手令牌（留空保留）','助手權杖（留空保留）','Token del asistente (vacío para conservarlo)'],
+amClearToken:['Clear saved helper token','清除已保存的助手令牌','清除已儲存的助手權杖','Borrar el token guardado del asistente'],
+amPassword:['Password','密码','密碼','Contraseña'],
+amCode:['Six-digit verification code','六位验证码','六位驗證碼','Código de verificación de seis dígitos'],
+amSignIn:['Sign in','登录','登入','Iniciar sesión'],
+amVerify:['Verify','验证','驗證','Verificar'],
+amOpen:['Open helper login','打开助手登录页','開啟助手登入頁','Abrir el acceso al asistente'],
+amRefresh:['Refresh status','刷新状态','重新整理狀態','Actualizar estado'],
+amNotConfigured:['Not configured','未配置','未設定','Sin configurar'],
+amOnline:['Online','在线','在線','En línea'],
+amOffline:['Offline','离线','離線','Sin conexión'],
+amReady:['Signed in','已登录','已登入','Sesión iniciada'],
+am2FA:['2FA required','需要双重验证','需要雙重驗證','Se requiere 2FA'],
+amBusy:['Signing in','正在登录','正在登入','Iniciando sesión'],
+amSignedOut:['Not signed in','未登录','未登入','Sesión no iniciada'],
 tlTitle:['Set tracklist','演出曲目表','演出曲目表','Lista de pistas de la sesión'],
 tlHint:['Export recorded Engine history from a mounted drive. Remote Library plays are available only if Engine recorded them.','导出已挂载磁盘上的 Engine 历史；Remote Library 播放仅在 Engine 已记录时可导出。','匯出已掛載磁碟上的 Engine 歷史；Remote Library 播放僅在 Engine 已記錄時可匯出。','Exporta el historial grabado de Engine desde una unidad montada. La reproducción de Remote Library solo está disponible si Engine la grabó.'],
 tlReadError:['Could not read history on: {0}','无法读取这些磁盘的历史：{0}','無法讀取這些磁碟的歷史：{0}','No se pudo leer el historial en: {0}'],
@@ -449,7 +488,7 @@ function applyLang(){document.documentElement.lang={en:'en','zh-Hans':'zh-CN','z
  for(const e of document.querySelectorAll('[data-i18n-aria]'))e.setAttribute('aria-label',t(e.dataset.i18nAria));
  for(const e of document.querySelectorAll('[data-i18n-alt]'))e.alt=t(e.dataset.i18nAlt);
  for(const b of document.querySelectorAll('[data-lang]'))b.classList.toggle('on',b.dataset.lang===lang)}
-function setLang(l,save){if(!LANGS.includes(l))return;lang=l;if(save)localStorage.setItem('enginex-console-lang',l);applyLang();if(lastUI)showUI(lastUI);renderSessions();renderDrives();renderTracklists();if(redrawList)redrawList();if(lastMods)renderMods(lastMods);if(lastJobs)renderJobs(lastJobs,true);action(async()=>{await showRelay();await showTunnel().catch(()=>{});await showSpotify();await showBpm();await showBroadcast();await showTailscale().catch(()=>{});await showSSH().catch(()=>{});await showGen2().catch(()=>{})})}
+function setLang(l,save){if(!LANGS.includes(l))return;lang=l;if(save)localStorage.setItem('enginex-console-lang',l);applyLang();if(lastUI)showUI(lastUI);renderSessions();renderDrives();renderTracklists();if(redrawList)redrawList();if(lastMods)renderMods(lastMods);if(lastJobs)renderJobs(lastJobs,true);action(async()=>{await showRelay();await showTunnel().catch(()=>{});await showSpotify();await showAppleMusic();await showBpm();await showBroadcast();await showTailscale().catch(()=>{});await showSSH().catch(()=>{});await showGen2().catch(()=>{})})}
 for(const b of document.querySelectorAll('[data-lang]'))b.onclick=()=>setLang(b.dataset.lang,true);
 async function showBpm(){const v=await api('bpm');$('bpmState').textContent='SoundCloud: '+(v.soundcloudSet?t('set'):t('unset'))+' · GetSongBPM: '+(v.getSongBpmSet?t('set'):t('unset'))}
 async function saveBpm(){const b={};if($('scClient').value)b.soundcloudClientId=$('scClient').value.trim();if($('scSecret').value)b.soundcloudClientSecret=$('scSecret').value.trim();if($('scToken').value)b.soundcloudToken=$('scToken').value.trim();if($('gsbKey').value)b.getSongBpmKey=$('gsbKey').value.trim();await api('bpm',{method:'POST',body:JSON.stringify(b)});$('scClient').value=$('scSecret').value=$('scToken').value=$('gsbKey').value='';await showBpm()}
@@ -457,6 +496,11 @@ const setVal=(id,x)=>{const e=$(id);if(document.activeElement!==e)e.value=x};
 async function showRelay(){const v=await api('relay');setVal('relayUrl',v.relayUrl);$('relayState').textContent=(v.deemixPasswordSet?t('pwSet'):t('pwUnset'))+(v.lanStems?' · '+(v.lanStems.online?t('lanOn',v.lanStems.hostname,v.lanStems.backend):t('lanOff',v.lanStems.hostname||t('notFound'))):'')}
 async function showSpotify(){const v=await api('spotify');$('spState').textContent=v.set?t('spSet',v.clientId,v.redirectUri):t('spUnset',v.redirectUri)}
 async function saveSpotify(){await api('spotify',{method:'POST',body:JSON.stringify({clientId:$('spClient').value.trim()})});$('spClient').value='';await showSpotify()}
+async function showAppleMusic(){const v=await api('applemusic');setVal('amUrl',v.helperUrl||'');setVal('amLoginUrl',v.helperLoginUrl||'');$('amState').textContent=v.configured?(t(v.online?'amOnline':'amOffline')+' · '+t(v.signedIn?'amReady':v.loginState==='2fa'?'am2FA':v.loginState==='logging-in'?'amBusy':'amSignedOut')):t('amNotConfigured');$('amToken').placeholder=t('amToken')+(v.tokenSet?' ●●●':'');$('amSignIn').hidden=!(v.configured&&v.online&&!v.signedIn);$('amLoginForm').hidden=v.loginState==='2fa';$('am2FAForm').hidden=v.loginState!=='2fa';$('amHelperLink').hidden=!(v.configured&&v.online);if(v.configured){$('amHelperOpen').href=v.loginPageUrl;$('amHelperQR').src='/api/applemusic/helper-qr'}}
+async function saveAppleMusic(){await api('applemusic',{method:'POST',body:JSON.stringify({helperUrl:$('amUrl').value.trim(),helperLoginUrl:$('amLoginUrl').value.trim(),helperToken:$('amToken').value,clearToken:$('amClearToken').checked})});$('amToken').value='';$('amClearToken').checked=false;await showAppleMusic()}
+$('spotifySource').onchange=()=>action(async()=>{showUI(await api('ui?'+new URLSearchParams({spotifySource:$('spotifySource').value}),{method:'POST'}))});
+$('amLoginForm').onsubmit=e=>{e.preventDefault();action(async()=>{try{await api('applemusic/login',{method:'POST',body:JSON.stringify({username:$('amUsername').value.trim(),password:$('amPassword').value})})}finally{$('amPassword').value=''}await showAppleMusic()})};
+$('am2FAForm').onsubmit=e=>{e.preventDefault();action(async()=>{try{await api('applemusic/2fa',{method:'POST',body:JSON.stringify({code:$('amCode').value.trim()})})}finally{$('amCode').value=''}await showAppleMusic()})};
 async function saveRelay(){const b={relayUrl:$('relayUrl').value.trim()};const p=$('relayPassword').value;if(p)b.deemixPassword=p;await api('relay',{method:'POST',body:JSON.stringify(b)});$('relayPassword').value='';await showRelay()}
 async function showBroadcast(v){v=v||await api('broadcast');setVal('bcUrl',v.serverUrl||'');setVal('bcMount',v.mountpoint||'');setVal('bcUser',v.username||'');$('bcPass').placeholder=t('bcPass')+(v.passwordSet?' ●●●':'');$('bcState').textContent=v.protocol==='shoutcast'&&v.serverUrl?t('bcShoutcast'):t('bcStatus')+': '+(v.enabled?(v.streaming?t('bcConnected')+' ('+(v.currentTrack||t('bcStreaming'))+')':v.lastError?t('bcFailed')+': '+v.lastError:t('bcConnecting')):t('bcOff'))+' · '+t('bcSent')+' '+Math.round((v.bytesSent||0)/1024)+' KB';$('bcToggle').textContent=v.enabled?t('bcStop'):t('bcStart')}
 async function saveBroadcast(){const v=await post('broadcast',{...bcForm(),protocol:'icecast'});$('bcPass').value='';await showBroadcast(v)}
@@ -546,6 +590,7 @@ function showUI(v){lastUI=v;
  if(v.version||v.buildTag){$('version').textContent=(v.version?'v'+v.version:'')+(v.buildTag?(v.version?' · ':'')+v.buildTag:'');$('version').hidden=false}
  for(const e of document.querySelectorAll('[data-toggle]'))e.checked=!!v[e.dataset.toggle];
  const tg=k=>document.querySelector('[data-toggle="'+k+'"]');
+ setVal('spotifySource',v.spotifySource||'auto');
  const caps=v.capabilities||{};
  tg('upfaderEcho').closest('.setting').hidden=caps.mixer!==undefined?!caps.mixer:!!v.player; // #52: players have no channel faders
  const hasJog=caps.jogWheel!==undefined?!!caps.jogWheel:true;
@@ -634,5 +679,5 @@ $('modFile').onchange=e=>{const f=e.target.files[0];e.target.value='';action(()=
 $('modDrop').ondragover=e=>{e.preventDefault();$('modDrop').style.borderColor='var(--accent)'};$('modDrop').ondragleave=()=>{$('modDrop').style.borderColor=''};
 $('modDrop').ondrop=e=>{e.preventDefault();$('modDrop').style.borderColor='';const f=e.dataTransfer.files[0];action(()=>modUpload(f))};
 applyLang();renderSessions();renderDrives();renderTracklists();
-action(async()=>{const v=await api('ui');if(!localStorage.getItem('enginex-console-lang')&&LANGS.includes(v.language))setLang(v.language,false);showUI(v);await showDrives();await showRelay();await showTunnel().catch(()=>{});await showSpotify();await showBt().catch(()=>{});await showBpm();await showBroadcast();await showTailscale().catch(()=>{});await showSSH().catch(()=>{});await showGen2().catch(()=>{});await showMods().catch(()=>{});await refreshSessions();await jobs()});setInterval(()=>{jobs().catch(()=>{})},2000);
+action(async()=>{const v=await api('ui');if(!localStorage.getItem('enginex-console-lang')&&LANGS.includes(v.language))setLang(v.language,false);showUI(v);await showDrives();await showRelay();await showTunnel().catch(()=>{});await showSpotify();await showAppleMusic();await showBt().catch(()=>{});await showBpm();await showBroadcast();await showTailscale().catch(()=>{});await showSSH().catch(()=>{});await showGen2().catch(()=>{});await showMods().catch(()=>{});await refreshSessions();await jobs()});setInterval(()=>{jobs().catch(()=>{})},2000);
 </script></html>

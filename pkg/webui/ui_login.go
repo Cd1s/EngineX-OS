@@ -556,7 +556,7 @@ func (s *Server) phoneGet(w http.ResponseWriter, r *http.Request) {
 				cancel()
 			}
 		}
-		phonePage(w, r, appleMusicPhonePage(lang, action, dev))
+		phonePage(w, r, appleMusicPhonePage(lang, action, dev, s.appleMusicPhoneHelper(r.Context(), lang, action)))
 	case "spotify":
 		session := s.sessionOf(flow)
 		sp, ok := session.p.(*providers.Spotify)
@@ -704,6 +704,29 @@ func (s *Server) phonePost(w http.ResponseWriter, r *http.Request) {
 		}
 		s.finishPhoneLogin(w, r, flow)
 	case *providers.AppleMusic:
+		if helperAction := r.Form.Get("helperAction"); helperAction != "" {
+			var status providers.AppleMusicHelperStatus
+			var err error
+			switch helperAction {
+			case "login":
+				status, err = s.appleMusic.HelperLoginBegin(r.Context(), strings.TrimSpace(r.Form.Get("username")), r.Form.Get("password"))
+			case "2fa":
+				status, err = s.appleMusic.HelperLogin2FA(r.Context(), strings.TrimSpace(r.Form.Get("code")))
+			default:
+				refuse("badForm", "")
+				return
+			}
+			if err != nil {
+				refuse("amFailed", tr(lang, "amHelperRetry"))
+				return
+			}
+			if status.SignedIn && p.Ready() {
+				s.finishPhoneLogin(w, r, flow)
+				return
+			}
+			http.Redirect(w, r, phoneAction(r, flow), http.StatusSeeOther)
+			return
+		}
 		o := p.Owner()
 		for field, dst := range map[string]*string{"userToken": &o.UserToken, "devToken": &o.DevToken, "storefront": &o.Storefront} {
 			if v := strings.TrimSpace(r.Form.Get(field)); v != "" {
@@ -739,7 +762,7 @@ func (s *Server) phonePost(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if err := p.SetOwner(r.Context(), o); err != nil {
-			log.Printf("stream-sync: Apple Music link failed: %v", err)
+			log.Print("stream-sync: Apple Music library login failed")
 			refuse("amFailed", tr(lang, "amFailedHint"))
 			return
 		}

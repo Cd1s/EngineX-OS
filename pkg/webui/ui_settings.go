@@ -119,11 +119,12 @@ func boardCapabilities(board string) uiCapabilities {
 const defaultUIDir = "/data/enginex/ui"
 
 var (
-	uiLanguages    = []string{"en", "zh-Hans", "zh-Hant", "es"}
-	uiWaveforms    = []string{"denon", "rgb", "3band"}
-	uiServices     = []string{"tidal", "netease", "spotify", "deezer", "soundcloud", "beatport", "applemusic"}
-	uiQualities    = []string{qualityFLAC, quality320k}
-	uiNeteaseModes = []string{neteaseOfficial, neteaseDeemix}
+	uiLanguages      = []string{"en", "zh-Hans", "zh-Hant", "es"}
+	uiWaveforms      = []string{"denon", "rgb", "3band"}
+	uiServices       = []string{"tidal", "netease", "spotify", "deezer", "soundcloud", "beatport", "applemusic"}
+	uiQualities      = []string{qualityFLAC, quality320k}
+	uiSpotifySources = []string{"auto", "deezer", "netease", "beatport", "applemusic", "soundcloud"}
+	uiNeteaseModes   = []string{neteaseOfficial, neteaseDeemix}
 	// TIDAL logs in through Engine's own flow against TIDAL's servers.
 	loginServices = []string{"netease", "spotify", "deezer", "soundcloud", "beatport", "applemusic"}
 
@@ -149,6 +150,7 @@ const (
 )
 
 type uiSettings struct {
+	SpotifySource  string  `json:"spotifySource"`
 	EngineLighting bool    `json:"engineLighting"` // Stock lighting switch; opt in, saved independently of Engine shutdown.
 	USBPreparing   bool    `json:"usbPreparing,omitempty"`
 	Version        string  `json:"version,omitempty"`
@@ -331,7 +333,7 @@ func uiFxTimeInteger(text string) (int64, error) {
 func (s *Server) loadUI() uiSettings {
 	known, saved, shadowModeSet := uiServicesBeforeKnown, false, false
 	v := uiSettings{
-		Language: "en", Waveform: "denon", Sources: slices.Clone(uiServices), Scope: "deezer", Quality: qualityFLAC, NeteaseMode: neteaseOfficial, GitHubRepo: defaultGitHubRepo, FourDeckWaveform: false, FourDeckRole: "auto", ShadowMode: "auto", ProlinkWaveform: true,
+		Language: "en", Waveform: "denon", Sources: slices.Clone(uiServices), Scope: "deezer", Quality: qualityFLAC, NeteaseMode: neteaseOfficial, SpotifySource: "auto", GitHubRepo: defaultGitHubRepo, FourDeckWaveform: false, FourDeckRole: "auto", ShadowMode: "auto", ProlinkWaveform: true,
 		TracklistWaveform: true, CueCountdown: true, BpmDecimals: 2,
 		StreamSortRole: "default", StreamSortOrder: "asc", LedBrightness: 100, PioneerFx: "off", UIScale: 100,
 		FxTimeMode: "beats", FxTimeMs: 500,
@@ -364,6 +366,10 @@ func (s *Server) loadUI() uiSettings {
 		case "quality":
 			if slices.Contains(uiQualities, val) {
 				v.Quality = val
+			}
+		case "spotify_source":
+			if slices.Contains(uiSpotifySources, val) {
+				v.SpotifySource = val
 			}
 		case "netease_mode":
 			if slices.Contains(uiNeteaseModes, val) {
@@ -554,7 +560,7 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	text := "lang=" + v.Language + "\nwaveform=" + v.Waveform + "\nsources=" + strings.Join(v.Sources, ",") + "\nknown=" + strings.Join(uiServices, ",") + "\nscope=" + v.Scope + "\nquality=" + v.Quality + "\nnetease_mode=" + v.NeteaseMode + "\nplayhead=" + strconv.FormatFloat(v.Playhead, 'f', -1, 64) + "\n"
+	text := "lang=" + v.Language + "\nwaveform=" + v.Waveform + "\nsources=" + strings.Join(v.Sources, ",") + "\nknown=" + strings.Join(uiServices, ",") + "\nscope=" + v.Scope + "\nquality=" + v.Quality + "\nspotify_source=" + v.SpotifySource + "\nnetease_mode=" + v.NeteaseMode + "\nplayhead=" + strconv.FormatFloat(v.Playhead, 'f', -1, 64) + "\n"
 	if v.EngineLighting {
 		text += "engine_lighting=1\n"
 	}
@@ -900,7 +906,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	bad := func(field, val string, allowed []string) bool {
 		return q.Has(field) && !slices.Contains(allowed, val)
 	}
-	if bad("lang", q.Get("lang"), uiLanguages) || bad("waveform", q.Get("waveform"), uiWaveforms) || bad("scope", q.Get("scope"), uiServices) || bad("quality", q.Get("quality"), uiQualities) || bad("neteaseMode", q.Get("neteaseMode"), uiNeteaseModes) || bad("fourDeckRole", q.Get("fourDeckRole"), uiFourDeckRoles) || bad("streamSortRole", q.Get("streamSortRole"), uiStreamSortRoles) || bad("streamSortOrder", q.Get("streamSortOrder"), uiStreamSortOrders) || bad("pioneerFx", q.Get("pioneerFx"), uiPioneerFxModes) || bad("shadowMode", q.Get("shadowMode"), uiShadowModes) || bad("fxTimeMode", q.Get("fxTimeMode"), uiFxTimeModes) {
+	if bad("spotifySource", q.Get("spotifySource"), uiSpotifySources) || bad("lang", q.Get("lang"), uiLanguages) || bad("waveform", q.Get("waveform"), uiWaveforms) || bad("scope", q.Get("scope"), uiServices) || bad("quality", q.Get("quality"), uiQualities) || bad("neteaseMode", q.Get("neteaseMode"), uiNeteaseModes) || bad("fourDeckRole", q.Get("fourDeckRole"), uiFourDeckRoles) || bad("streamSortRole", q.Get("streamSortRole"), uiStreamSortRoles) || bad("streamSortOrder", q.Get("streamSortOrder"), uiStreamSortOrders) || bad("pioneerFx", q.Get("pioneerFx"), uiPioneerFxModes) || bad("shadowMode", q.Get("shadowMode"), uiShadowModes) || bad("fxTimeMode", q.Get("fxTimeMode"), uiFxTimeModes) {
 		s.uiMu.Unlock()
 		fail(w, 400, errors.New("invalid setting"))
 		return
@@ -1163,6 +1169,9 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	if q.Has("fourDeckRole") {
 		v.FourDeckRole = q.Get("fourDeckRole")
+	}
+	if q.Has("spotifySource") {
+		v.SpotifySource = q.Get("spotifySource")
 	}
 	if q.Has("neteaseMode") {
 		v.NeteaseMode = q.Get("neteaseMode")
@@ -1479,4 +1488,11 @@ func (s *Server) applySDHighSpeed(enabled bool) (bool, error) {
 		return false, errors.New(msg)
 	}
 	return s.sdHighSpeedPending(enabled), nil
+}
+
+// spotifySource returns the owner's selected matching service for Spotify audio.
+func (s *Server) spotifySource() string {
+	s.uiMu.Lock()
+	defer s.uiMu.Unlock()
+	return s.loadUI().SpotifySource
 }
