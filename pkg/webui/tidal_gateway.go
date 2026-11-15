@@ -38,6 +38,48 @@ import (
 )
 
 const hintPlaylist = "00000000-0000-5000-8000-000000005000"
+const listNoticeProvider = "enginex-list-status"
+
+func (g *tidalGateway) incompleteMessage(provider string, err error) (string, string) {
+	title, hint := "List incomplete", "Wait a few seconds, then go back and reopen to retry."
+	action, login := "go back and reopen to retry", "sign in again"
+	g.s.uiMu.Lock()
+	lang := g.s.loadUI().Language
+	g.s.uiMu.Unlock()
+	switch lang {
+	case "zh-Hans":
+		title, hint = "列表未完成", "请稍等几秒，然后返回并重新打开列表。"
+		action, login = "返回后重新打开重试", "请重新登录"
+	case "zh-Hant":
+		title, hint = "清單未完成", "請稍等幾秒，然後返回並重新開啟清單。"
+		action, login = "返回後重新開啟重試", "請重新登入"
+	}
+	var status providers.StatusError
+	if errors.As(err, &status) && (status == 401 || status == 403) {
+		title += fmt.Sprintf(" (%d)", status)
+		action = login
+		hint = sourceFailedTitle(provider, err) + ": http://" + lanHost() + ":8080"
+		if lang == "zh-Hant" {
+			label := providerLabels[provider]
+			if provider == "netease" {
+				label = "網易雲音樂"
+			}
+			reason := "請重新登入"
+			if status == 403 {
+				reason = "帳號未獲授權"
+			}
+			hint = fmt.Sprintf("%s: %s (%d): http://%s:8080", label, reason, status, lanHost())
+		}
+	}
+	return title + " — " + action, hint
+}
+
+// Stock renders this as an unavailable track row. It is metadata, never audio;
+// reopening the list after the existing failure backoff explicitly retries it.
+func (g *tidalGateway) incompleteTrack(provider, key string, err error) any {
+	title, hint := g.incompleteMessage(provider, err)
+	return g.trackItems("", false, []providers.Track{{Provider: listNoticeProvider, ID: key, Title: title, Artist: hint}})[0]
+}
 
 // The deck shows NetEase, Spotify and Deezer as separate sources. They share
 // Engine's single TIDAL client, so the source the user last opened (the UI
@@ -496,8 +538,13 @@ func (g *tidalGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		raw, endpoint, _ := strings.Cut(rest, "/")
 		if id, err := strconv.ParseInt(raw, 10, 64); err == nil && (endpoint == "" || endpoint == "playbackinfopostpaywall" || endpoint == "streamurl") {
 			g.mu.Lock()
-			_, localTrack = g.tracks[id]
+			ref, exists := g.tracks[id]
+			localTrack = exists
 			g.mu.Unlock()
+			if ref.track.Provider == listNoticeProvider {
+				fail(w, 404, errors.New("list notice is not audio"))
+				return
+			}
 			log.Printf("stream-sync: load track=%d scope=%s step=request local=%t", id, g.s.scope(), localTrack)
 		}
 	}
@@ -660,11 +707,10 @@ func each[T, R any](ctx context.Context, in []T, fn func(context.Context, T) ([]
 				}
 			}()
 			r, err := fn(ctx, v)
+			out[i] = r
 			if err != nil {
 				log.Printf("stream-sync: gateway source failed: %v", err)
-				return
 			}
-			out[i] = r
 		}()
 	}
 	wg.Wait()
@@ -880,6 +926,9 @@ func playlistJSON(id, title, description string, count int) map[string]any {
 	return map[string]any{"uuid": id, "title": title, "numberOfTracks": count, "numberOfVideos": 0, "description": description, "duration": 0, "lastUpdated": now, "created": now, "type": "USER", "publicPlaylist": false, "url": "http://enginex.lan:8080", "image": "", "squareImage": "", "popularity": 0}
 }
 func (g *tidalGateway) refJSON(id string, ref playlistRef) map[string]any {
+	if ref.provider == listNoticeProvider {
+		return playlistJSON(id, ref.list.Title, "", 0)
+	}
 	label := providerLabels[ref.provider]
 	return playlistJSON(id, ref.list.Title, label+" 歌单，经 EngineX OS 下载播放", ref.list.Count)
 }
@@ -915,6 +964,13 @@ func (g *tidalGateway) playlists(w http.ResponseWriter, r *http.Request) {
 	})
 	favorites := strings.HasSuffix(r.URL.Path, "/favorites/playlists")
 	items := []any{}
+	var partialErr error
+	partialProvider := scope
+	markPartial := func(provider string, err error) {
+		if err != nil && (partialErr == nil || errors.Is(err, providers.StatusError(401)) || errors.Is(err, providers.StatusError(403))) {
+			partialProvider, partialErr = provider, err
+		}
+	}
 	add := func(v map[string]any) {
 		if favorites {
 			// Favourites wrap the playlist in "item"; flat fields also satisfy flat parsers.
@@ -930,8 +986,10 @@ func (g *tidalGateway) playlists(w http.ResponseWriter, r *http.Request) {
 		add(playlistJSON(stemsListID(scope), "Stems", "", n))
 	}
 	for i, v := range sessions {
-		if err := failed[v]; err != nil {
+		if err := failed[v]; err != nil && len(lists[i]) == 0 {
 			add(playlistJSON(hintPlaylist, sourceFailedTitle(v.Provider, err), err.Error(), 0))
+		} else {
+			markPartial(v.Provider, err)
 		}
 		for _, p := range lists[i] {
 			ref := playlistRef{v.ID, v.Provider, p, v.Guest}
@@ -940,23 +998,36 @@ func (g *tidalGateway) playlists(w http.ResponseWriter, r *http.Request) {
 	}
 	// Deezer's public charts need no login; the others explain how to log in.
 	if scope == "deezer" {
+		var chartErr error
 		defaults := each(r.Context(), []*providers.Deezer{g.catalog}, func(ctx context.Context, d *providers.Deezer) ([]providers.Playlist, error) {
 			data, err := g.browse.get(ctx, browseKey("deezer", "public", "charts", ""), func(ctx context.Context) (browseData, error) {
 				lists, err := d.ChartPlaylists(ctx)
 				return browseData{Lists: lists}, err
 			})
+			chartErr = err
 			return data.Lists, err
 		})
 		for _, p := range defaults[0] {
 			ref := playlistRef{"", "deezer", p, false}
 			add(g.refJSON(g.addPlaylist(ref), ref))
 		}
+		if len(defaults[0]) > 0 {
+			markPartial("deezer", chartErr)
+		}
 	}
 	if g.s.omniSource() && !favorites {
-		g.omniPlaylists(r.Context(), scope, add)
+		provider, err := g.omniPlaylists(r.Context(), scope, add)
+		markPartial(provider, err)
 	}
 	if scope != "deezer" && len(sessions) == 0 {
 		add(playlistJSON(hintPlaylist, hintTitle(scope), "手机打开 http://"+lanHost()+":8080 登录后，歌单会出现在这里", 0))
+	}
+	if partialErr != nil {
+		title, hint := g.incompleteMessage(partialProvider, partialErr)
+		ref := playlistRef{provider: listNoticeProvider, list: providers.Playlist{ID: scope, Title: title}}
+		v := g.refJSON(g.addPlaylist(ref), ref)
+		v["description"] = hint
+		add(v)
 	}
 	respond(w, page(r, 100, items))
 }
@@ -994,7 +1065,7 @@ func (g *tidalGateway) trackJSON(id int64, t providers.Track) map[string]any {
 	if len(artists) > 0 {
 		artist = artists[0]
 	}
-	return map[string]any{"id": id, "title": t.Title, "bpm": int(math.Round(t.BPM)), "duration": t.DurationMS / 1000, "replayGain": 0, "peak": 1, "allowStreaming": true, "streamReady": true, "premiumStreamingOnly": false, "trackNumber": 1, "volumeNumber": 1, "version": nil, "popularity": 0, "copyright": labelWithBPM(t), "url": "http://enginex.lan:8080", "isrc": t.ISRC, "editable": false, "explicit": false, "audioQuality": "LOSSLESS", "audioModes": []string{"STEREO"}, "artist": artist, "artists": artists, "album": map[string]any{"id": tidalNumericID(t.Album), "title": t.Album, "cover": nil, "vibrantColor": nil, "videoCover": nil}, "mixes": map[string]any{}}
+	return map[string]any{"id": id, "title": t.Title, "bpm": int(math.Round(t.BPM)), "duration": t.DurationMS / 1000, "replayGain": 0, "peak": 1, "allowStreaming": t.Provider != listNoticeProvider, "streamReady": t.Provider != listNoticeProvider, "premiumStreamingOnly": false, "trackNumber": 1, "volumeNumber": 1, "version": nil, "popularity": 0, "copyright": labelWithBPM(t), "url": "http://enginex.lan:8080", "isrc": t.ISRC, "editable": false, "explicit": false, "audioQuality": "LOSSLESS", "audioModes": []string{"STEREO"}, "artist": artist, "artists": artists, "album": map[string]any{"id": tidalNumericID(t.Album), "title": t.Album, "cover": nil, "vibrantColor": nil, "videoCover": nil}, "mixes": map[string]any{}}
 }
 
 // trackItems wraps each track as {"item":…,"type":"track"} (playlist items and
@@ -1247,6 +1318,10 @@ func (g *tidalGateway) playlistTracks(w http.ResponseWriter, r *http.Request) {
 		fail(w, 404, errors.New("playlist not found"))
 		return
 	}
+	if ref.provider == listNoticeProvider {
+		respond(w, page(r, 500, []any{}))
+		return
+	}
 
 	q := r.URL.Query()
 	sortParam := strings.ToLower(q.Get("sort"))
@@ -1317,7 +1392,7 @@ func (g *tidalGateway) playlistTracks(w http.ResponseWriter, r *http.Request) {
 		p, guest, session = v.p, v.Guest, v.ID
 	}
 	tracks, err := g.browseTracks(r.Context(), ref.provider, session, p, ref.list.ID)
-	if err != nil {
+	if err != nil && len(tracks) == 0 {
 		status := 502
 		if errors.Is(err, errBrowseTooLarge) {
 			status = 400
@@ -1339,7 +1414,11 @@ func (g *tidalGateway) playlistTracks(w http.ResponseWriter, r *http.Request) {
 	if role != "" && role != "default" {
 		sortStreamingTracks(refs, role, order)
 	}
-	respond(w, page(r, 500, g.refItems(refs)))
+	items := g.refItems(refs)
+	if err != nil {
+		items = append(items, g.incompleteTrack(ref.provider, browseKey(ref.provider, session, "tracks", ref.list.ID), err))
+	}
+	respond(w, page(r, 500, items))
 }
 
 // favoriteTracks maps to the owner's NetEase "liked songs", which NetEase
@@ -1356,7 +1435,7 @@ func (g *tidalGateway) favoriteTracks(w http.ResponseWriter, r *http.Request) {
 		switch scope {
 		case "netease":
 			var lists []providers.Playlist
-			if lists, err = g.browseLists(r.Context(), v); err == nil && len(lists) > 0 {
+			if lists, err = g.browseLists(r.Context(), v); len(lists) > 0 {
 				tracks, err = g.browseTracks(r.Context(), scope, v.ID, v.p, lists[0].ID)
 			}
 		case "spotify":
@@ -1364,9 +1443,12 @@ func (g *tidalGateway) favoriteTracks(w http.ResponseWriter, r *http.Request) {
 		case "soundcloud":
 			tracks, err = g.browseTracks(r.Context(), scope, v.ID, v.p, "likes")
 		}
-		if err == nil && len(tracks) <= maxPlaylistTracks {
+		if len(tracks) > 0 && len(tracks) <= maxPlaylistTracks {
 			g.s.cfg.BPM.Enrich(r.Context(), tracks)
 			items = g.trackItems(v.ID, false, tracks)
+			if err != nil {
+				items = append(items, g.incompleteTrack(scope, browseKey(scope, v.ID, "favorites", ""), err))
+			}
 		}
 		break
 	}
@@ -1424,12 +1506,16 @@ func (g *tidalGateway) albumTracks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tracks, err := g.browseTracks(r.Context(), "netease", session.ID, n, "album:"+r.PathValue("id"))
-	if err != nil {
+	if err != nil && len(tracks) == 0 {
 		fail(w, 502, err)
 		return
 	}
 	g.s.cfg.BPM.Enrich(r.Context(), tracks)
-	respond(w, page(r, 500, g.trackItems(session.ID, false, tracks)))
+	items := g.trackItems(session.ID, false, tracks)
+	if err != nil {
+		items = append(items, g.incompleteTrack("netease", browseKey("netease", session.ID, "tracks", "album:"+r.PathValue("id")), err))
+	}
+	respond(w, page(r, 500, items))
 }
 
 func (g *tidalGateway) search(w http.ResponseWriter, r *http.Request) {
@@ -1509,7 +1595,7 @@ func (g *tidalGateway) lookup(w http.ResponseWriter, raw string) (int64, trackRe
 		g.trackSeen[id] = g.seq
 	}
 	g.mu.Unlock()
-	if err != nil || !ok {
+	if err != nil || !ok || ref.track.Provider == listNoticeProvider {
 		fail(w, 404, errors.New("track not found; browse it on the deck first"))
 		return 0, trackRef{}, false
 	}
