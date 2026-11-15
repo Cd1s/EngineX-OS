@@ -197,6 +197,28 @@ class Image:
 
 MAX_ROOTFS = 2 * 1024**3
 
+# A patched 1st-gen rootfs is grown to this size (release builds, patch-rootfs --grow). The stock
+# 5.3.0 file systems use about 463 600 KiB of a partition that holds at least the 5.0.4 rootfs
+# inMusic shipped for the same boards (SC5000 group 504 076 KiB, SC6000 504 278, PRIME 4 503 937;
+# 5.0.4 and 5.3.0 carry the same board device trees); a JP07 deck's partition measures
+# 512 000 KiB. The stock updater (libaz01-prog) refuses only data that does not fit the partition.
+# What EngineX adds left the stock size 4 MiB free, under the ext4 driver's reserve: no mounted copy
+# could take a single new file (5.3.0.5 RC). 61 whole block groups of the stock geometry (1 KiB
+# blocks, 8192 per group): resize2fs drops a last group too small for its own metadata.
+GEN1_ROOTFS_KIB = 499712
+# Room a grown rootfs keeps beyond that reserve, or the build stops: a mounted copy (release gate,
+# nspawn boot) adds files there, and the next releases grow.
+GEN1_MIN_FREE_KIB = 16384
+GEN1_MIN_FREE_INODES = 4096
+# Superblock fields a growth changes; every other geometry field stays the stock one.
+GROWN_FIELDS = ('image_size', 'inode_count', 'block_count_lo', 'block_count_hi')
+
+
+def ext4_reserve_blocks(blocks, block_size, cluster_size):
+    """Blocks Linux's ext4 driver (also the one that mounts ext2) keeps back from every writer,
+    root included: min(2 % of the clusters, 4096 clusters), as ext4_calculate_resv_clusters."""
+    return min(blocks // (cluster_size // block_size) // 50, 4096) * (cluster_size // block_size)
+
 
 def compress_rootfs(data, original_payload):
     require(original_payload[:6] == b'\xfd7zXZ\0' and len(original_payload) >= 12,
@@ -289,6 +311,34 @@ class ExtFS:
         return dict(image_size=self.path.stat().st_size,
                     **{name: sb[offset:offset+size].hex()
                        for name, (offset, size) in fields.items()})
+
+    def room(self):
+        """Free space the way a mounted copy sees it: free blocks less the ext4 driver's reserve."""
+        with self.path.open('rb') as f:
+            f.seek(1024)
+            sb = f.read(1024)
+        word = lambda offset: struct.unpack_from('<I', sb, offset)[0]
+        wide = word(96) & 0x80  # INCOMPAT_64BIT: the high halves count
+        blocks = word(4) | (word(336) << 32 if wide else 0)
+        free = word(12) | (word(344) << 32 if wide else 0)
+        block, cluster = 1024 << word(24), 1024 << word(28)
+        reserve = ext4_reserve_blocks(blocks, block, cluster)
+        return dict(blocks=blocks, block_size=block, free_blocks=free, free_inodes=word(16),
+                    reserve_blocks=reserve, usable_kib=max(0, free - reserve) * block // 1024)
+
+    def grow(self, kib):
+        """Grow the image file and its file system to kib KiB: never shrink, never past
+        GEN1_ROOTFS_KIB, the size every 1st-gen rootfs partition is proven to hold."""
+        require(kib * 1024 <= GEN1_ROOTFS_KIB * 1024, f'rootfs growth past {GEN1_ROOTFS_KIB} KiB refused')
+        require(kib * 1024 >= self.path.stat().st_size, 'rootfs shrink refused')
+        require(shutil.which('resize2fs'), 'resize2fs is required (e2fsprogs)')
+        with self.path.open('r+b') as f:
+            f.truncate(kib * 1024)
+        # -f: the copy has just been checked (check_fs); resize2fs only asks for a fresh e2fsck run.
+        p = subprocess.run(['resize2fs', '-f', str(self.path), f'{kib}K'], capture_output=True, text=True)
+        require(p.returncode == 0, 'resize2fs failed: ' + (p.stdout + p.stderr)[-1000:])
+        room = self.room()
+        require(room['blocks'] * room['block_size'] == kib * 1024, f'rootfs did not grow to {kib} KiB')
 
     def entries(self, path):
         if path != '/':
@@ -997,8 +1047,13 @@ def main(argv=None):
             s.add_argument('--set-version', help='EngineX release written to /etc/enginex/version.txt, e.g. 5.0.4.1')
             s.add_argument('--splash', type=Path, help='custom 4,096,000-byte splash payload')
             s.add_argument('--recoverysplash', type=Path, help='custom 4,096,000-byte recoverysplash payload')
+            s.add_argument('--grow', action='store_true',
+                           help=f'grow the file system to {GEN1_ROOTFS_KIB} KiB and refuse a result with less than '
+                                f'{GEN1_MIN_FREE_KIB} KiB / {GEN1_MIN_FREE_INODES} inodes usable (release builds)')
         elif name == 'repack':
             s.add_argument('--rootfs', required=True, type=Path)
+            s.add_argument('--grow', action='store_true',
+                           help=f'the rootfs was grown by patch-rootfs --grow: accept exactly {GEN1_ROOTFS_KIB} KiB')
             s.add_argument('--splash', type=Path, help='custom 4,096,000-byte splash payload')
             s.add_argument('--recoverysplash', type=Path, help='custom 4,096,000-byte recoverysplash payload')
             s.add_argument('--output', required=True, help='new external AZ01 image')
@@ -1037,6 +1092,9 @@ def main(argv=None):
                     key = public_key(args.ssh_public_key.read_text()) if args.ssh_public_key else None
                     candidate = Path(temp)/'patched.ext2'
                     shutil.copyfile(stock, candidate)
+                    if args.grow:
+                        check_fs(candidate)
+                        ExtFS(candidate).grow(GEN1_ROOTFS_KIB)
                     inject(ExtFS(candidate), key, args.service, args.overlay, args.set_version)
                 else:
                     require(args.rootfs.is_file() and not args.rootfs.is_symlink(),
@@ -1044,11 +1102,22 @@ def main(argv=None):
                     candidate = Path(temp)/'candidate.ext2'
                     shutil.copyfile(args.rootfs, candidate)
                 candidate_fs = ExtFS(candidate)
-                require(candidate_fs.geometry() == original_fs.geometry(),
-                        'rootfs size/geometry/UUID/features changed; partition resize forbidden')
+                expected, got = original_fs.geometry(), candidate_fs.geometry()
+                if args.grow:  # only the size fields of a growth to GEN1_ROOTFS_KIB may differ
+                    keep = lambda g: {k: v for k, v in g.items() if k not in GROWN_FIELDS}
+                    require(got['image_size'] == GEN1_ROOTFS_KIB * 1024 and keep(got) == keep(expected),
+                            f'rootfs is not the stock one grown to {GEN1_ROOTFS_KIB} KiB')
+                else:
+                    require(got == expected, 'rootfs size/geometry/UUID/features changed; partition resize forbidden')
                 require(candidate_fs.snapshot() == before,
                         'protected bootloader/MCU content, metadata or ancestor changed')
                 check_fs(candidate)
+                if args.command == 'patch-rootfs' and args.grow:
+                    room = candidate_fs.room()
+                    require(room['usable_kib'] >= GEN1_MIN_FREE_KIB and room['free_inodes'] >= GEN1_MIN_FREE_INODES,
+                            f"rootfs keeps {room['usable_kib']} KiB and {room['free_inodes']} inodes usable, under the "
+                            f"{GEN1_MIN_FREE_KIB} KiB / {GEN1_MIN_FREE_INODES} inodes margin (the ext4 driver holds "
+                            f"back {room['reserve_blocks']} blocks): the image adds too much")
                 if args.command == 'patch-rootfs':
                     os.link(candidate, output)
                 else:
