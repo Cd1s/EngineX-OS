@@ -10,8 +10,9 @@
 #  2. the previous release boots (prepare, stream-sync, Engine) with a populated
 #     internal Engine library (/media/az01-internal), finds the new release on a
 #     local TLS GitHub mock and runs the deck's online update:
-#     /v1/sc5000/update?apply=1 (/v1/enginex since 5.3.0.5) -> Engine quits with UpdateFromUrl -> the stock
-#     engine script -> az01-update downloads and verifies the new image;
+#     r5: /v1/sc5000/update?apply=1 (/v1/enginex since 5.3.0.5) -> Engine quits with UpdateFromUrl -> the stock
+#     engine script -> az01-update downloads and verifies the new image. A previous
+#     signed release instead verifies and applies the file through its own updater;
 #  3. the new rootfs boots on the same /data (boot 1): etc-reset, prepare, debloat,
 #     perf-tune, sshd -t, a stock Engine run that leaves a stale QML cache, then
 #     stream-sync, deemixd, rb-bridge, guardian, storage, edisksd + hook, Engine +

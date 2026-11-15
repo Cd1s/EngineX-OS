@@ -422,9 +422,7 @@ func (s *Server) checkRelease(ctx context.Context, repo string) updateStatus {
 	v.Latest, v.URL = rel.Tag, rel.URL
 	v.UpdateAvailable = releasesig.NewerVersion(rel.Tag, s.installedRelease())
 	if prefix := imagePrefix(deviceCompatible()); prefix != "" {
-		// Engine's own scan expects <PREFIX>-<version>-...Update.img. The second generation
-		// takes the /data bundle (#86); once unlocked (#119) it prefers the bundle-carrying
-		// *-Update.img, which the updater hooks accept, and falls back to the bundle.
+		// All models use <PREFIX>-<version>-...Update.img; Gen-2 images carry the /data bundle.
 		find := func(suffix string) string {
 			for _, a := range rel.Assets {
 				if strings.HasPrefix(a.Name, prefix+"-") && strings.HasSuffix(a.Name, suffix) && strings.HasPrefix(a.URL, "https://") {
@@ -434,20 +432,12 @@ func (s *Server) checkRelease(ctx context.Context, repo string) updateStatus {
 			return ""
 		}
 		// Phased Gen-2 *-Update.img migration (#215):
-		//   - 5.3.0.4 (current): Releases publish both *-Update.img and *-Data-Bundle.tar.gz (28 artifacts);
-		//     checkRelease prefers -Update.img when not gen2-locked and falls back to -Data-Bundle.tar.gz.
-		//   - 5.3.0.5 (bridge): Releases still include *-Data-Bundle.tar.gz one final time so 5.3.0.2/5.3.0.3/early-5.3.0.4
-		//     decks can OTA upgrade to 5.3.0.5, while 5.3.0.5's own checkRelease switches to -Update.img ONLY.
+		//   - 5.3.0.4: checkRelease preferred -Update.img with a legacy bundle fallback.
+		//   - 5.3.0.5 (this bridge build): detect only -Update.img. Releases keep the legacy bundles
+		//     one final time for 5.3.0.2/5.3.0.3/early-5.3.0.4 updaters and installer compatibility.
 		//   - 5.3.0.6+ (final): Retire *-Data-Bundle.tar.gz from build-release.sh and GitHub Releases; all 16 models
 		//     use *-Update.img exclusively for USB, OTA, and EngineX-Installer.
-		if dataBundleBoards[prefix] {
-			if !s.isGen2Locked() {
-				v.DownloadURL = find("-Update.img")
-			}
-			if v.DownloadURL == "" {
-				v.DownloadURL = find(bundleSuffix)
-			}
-		} else {
+		if !dataBundleBoards[prefix] || !s.isGen2Locked() {
 			v.DownloadURL = find("-Update.img")
 		}
 	}
@@ -471,17 +461,16 @@ var imagePrefixes = map[string]string{
 	"inmusic,jp13": "SC6000", "inmusic,jp14": "SC6000M",
 	"inmusic,jc11": "PRIME4", "inmusic,jc16": "PRIME2", "inmusic,nh08": "MIXSTREAMPRO",
 	// The second generation (SC LIVE 4/2, PRIME 4+, PRIME GO+, Mixstream Pro+ / Pro Go;
-	// #61, #68, #69) runs signed AZ0x firmware with SC LIVE 4's Engine: no .img, only
-	// the /data bundle, so it is never offered. Its own prefix keeps a PRIME 4+ off
+	// #61, #68, #69) installs the bundle inside its own .img. Its prefix keeps a PRIME 4+ off
 	// the first PRIME 4 image and a Mixstream Pro+ off the Mixstream Pro one.
 	"inmusic,jp21": "SCLIVE4", "inmusic,jp20": "SCLIVE2",
 	"inmusic,jc11s": "PRIME4PLUS", "inmusic,jp11s": "PRIMEGOPLUS",
 	"inmusic,nh08s": "MIXSTREAMPROPLUS", "inmusic,nh10": "MIXSTREAMPROGO",
-	// PRIME 4 G2 / SYSTEM ONE: the 64-bit AZ04 firmware, also only a /data bundle (#76).
+	// PRIME 4 G2 / SYSTEM ONE: the 64-bit AZ04 bundle-carrying images (#76).
 	"inmusic,jp24": "PRIME4G2", "inmusic,rmz2": "SYSTEMONE",
 }
 
-// dataBundleBoards update from a Data-Bundle.tar.gz, not an .img (#86).
+// dataBundleBoards install their .img payload under /data rather than replacing rootfs (#86, #215).
 var dataBundleBoards = map[string]bool{"SCLIVE4": true, "SCLIVE2": true, "PRIME4PLUS": true, "PRIMEGOPLUS": true,
 	"MIXSTREAMPROPLUS": true, "MIXSTREAMPROGO": true, "PRIME4G2": true, "SYSTEMONE": true}
 

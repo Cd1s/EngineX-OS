@@ -99,7 +99,7 @@ cp version.txt "$ENGINEX_CUSTOM/version.txt"
 		return fmt.Sprintf(`{"name":%q,"browser_download_url":%q}`, name, base+"/dl/"+name)
 	}, b.Bytes())
 	getUpdate(s, "")
-	getUpdate(s, "?apply=1")
+	s.applyOnlineUpdate(s.cfg.GitHubURL+"/dl/"+name, "v5.3.0.3")
 	if v := waitUpdate(t, s); v.Error != "" || v.Progress != 1 {
 		t.Fatalf("a bundle with enginex names did not install: %+v", v)
 	}

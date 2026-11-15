@@ -183,6 +183,15 @@ func (k updateKind) assets(base string) string {
 	return fmt.Sprintf(`{"name":%q,"browser_download_url":%q}`, k.asset, base+"/dl/"+k.asset)
 }
 
+// Keep legacy input verification covered without offering it through 5.3.0.5 discovery.
+func (k updateKind) apply(s *Server) {
+	if strings.HasSuffix(k.asset, bundleSuffix) {
+		s.applyOnlineUpdate(s.cfg.GitHubURL+"/dl/"+k.asset, s.updateCache.Latest)
+	} else {
+		getUpdate(s, "?apply=1")
+	}
+}
+
 // nothingInstalled fails when an update that was refused left any trace on the deck.
 func nothingInstalled(t *testing.T, k updateKind, custom, calls, version string) {
 	t.Helper()
@@ -229,10 +238,10 @@ func TestUpdateRefusesWhatDoesNotVerify(t *testing.T) {
 			t.Run(c.name+"/"+k.name, func(t *testing.T) {
 				s, custom := bundleDeckWith(t, k.compatible, k.assets, k.content, c.fault)
 				calls := fakeAz01Update(t)
-				if u := getUpdate(s, ""); !u.UpdateAvailable || u.DownloadURL == "" || u.Error != "" {
+				if u := getUpdate(s, ""); !u.UpdateAvailable || (u.DownloadURL == "" && !strings.HasSuffix(k.asset, bundleSuffix)) || u.Error != "" {
 					t.Fatalf("the release is not offered: %+v", u)
 				}
-				getUpdate(s, "?apply=1")
+				k.apply(s)
 				v := waitUpdate(t, s)
 				if v.Error != c.want || v.Updating || v.Progress != 0 {
 					t.Fatalf("got %+v, want the refusal %q", v, c.want)
@@ -258,7 +267,7 @@ func TestUpdateRefusesAnEarlierRevisionShownAsALaterOne(t *testing.T) {
 			if u := getUpdate(s, ""); !u.UpdateAvailable || u.Latest != "v5.3.0.5-r3" {
 				t.Fatalf("r3 is not offered to a deck on r2: %+v", u)
 			}
-			getUpdate(s, "?apply=1")
+			k.apply(s)
 			if v := waitUpdate(t, s); k.gen1 && v.Error != noRestart || !k.gen1 && v.Error != "" {
 				t.Fatalf("the genuine r3 was refused: %+v", v)
 			}
@@ -268,7 +277,7 @@ func TestUpdateRefusesAnEarlierRevisionShownAsALaterOne(t *testing.T) {
 			s, custom = bundleDeckWith(t, k.compatible, k.assets, k.content, bad)
 			calls = fakeAz01Update(t)
 			getUpdate(s, "")
-			getUpdate(s, "?apply=1")
+			k.apply(s)
 			if v := waitUpdate(t, s); v.Error != msgUpdateWrongTag {
 				t.Fatalf("r1 shown as r3 was not refused: %+v", v)
 			}
@@ -310,7 +319,7 @@ func TestUpdateInstallsOnlyTheSignedFile(t *testing.T) {
 			s, custom := bundleDeck(t, k.compatible, k.assets, k.content)
 			calls := fakeAz01Update(t)
 			getUpdate(s, "")
-			getUpdate(s, "?apply=1")
+			k.apply(s)
 			v := waitUpdate(t, s)
 			if want := map[bool]string{true: noRestart, false: ""}[k.gen1]; v.Error != want {
 				t.Fatalf("a correctly signed release was not installed: %+v", v)
@@ -351,7 +360,7 @@ func TestUpdateKeyRotation(t *testing.T) {
 			trustOnly(t, c.keys...)
 			s, custom := bundleDeck(t, k.compatible, k.assets, k.content)
 			getUpdate(s, "")
-			getUpdate(s, "?apply=1")
+			k.apply(s)
 			v := waitUpdate(t, s)
 			if v.Error != c.want {
 				t.Fatalf("error %q, want %q", v.Error, c.want)
@@ -420,7 +429,7 @@ func TestUpdateKeepsFreeSpaceForTheDeck(t *testing.T) {
 		setSpace(t, bundleMaxUnpack+10*MiB, 30*MiB) // less than the unpacked bundle and the reserve
 		s, custom := bundleDeck(t, bundle.compatible, bundle.assets, bundle.content)
 		getUpdate(s, "")
-		getUpdate(s, "?apply=1")
+		bundle.apply(s)
 		if v := waitUpdate(t, s); v.Error != msgUpdateNoSpace {
 			t.Fatalf("got %+v, want %q", v, msgUpdateNoSpace)
 		}
@@ -433,7 +442,7 @@ func TestUpdateKeepsFreeSpaceForTheDeck(t *testing.T) {
 			setSpace(t, 30*MiB+bundleInstallPeak, 30*MiB) // exactly the reserve and the two copies: nothing for the download
 			s, custom := bundleDeck(t, k.compatible, k.assets, k.content)
 			getUpdate(s, "")
-			getUpdate(s, "?apply=1")
+			k.apply(s)
 			if v := waitUpdate(t, s); v.Error != msgUpdateNoSpace {
 				t.Fatalf("got %+v, want %q", v, msgUpdateNoSpace)
 			}
@@ -441,7 +450,7 @@ func TestUpdateKeepsFreeSpaceForTheDeck(t *testing.T) {
 			setSpace(t, 30*MiB+bundleInstallPeak+8*MiB, 30*MiB) // room for the download as well
 			s, _ = bundleDeck(t, k.compatible, k.assets, k.content)
 			getUpdate(s, "")
-			getUpdate(s, "?apply=1")
+			k.apply(s)
 			if v := waitUpdate(t, s); v.Error != "" {
 				t.Fatalf("with room it was refused: %+v", v)
 			}

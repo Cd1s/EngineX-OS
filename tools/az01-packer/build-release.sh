@@ -123,6 +123,8 @@ for f in "$OUT/"*-Update.img; do
     python3 "$ROOT/tools/az01-packer/az01_packer.py" info "$f" > "$OUT/verify/${b%.img}.info.json"
 done
 
+# 5.3.0.5 bridge (#215): keep all eight legacy bundles for older on-deck updaters.
+# This build's updater selects only *-Update.img; retire release bundles in 5.3.0.6.
 for m in SCLIVE4 SCLIVE2 PRIME4PLUS PRIMEGOPLUS MIXSTREAMPROPLUS MIXSTREAMPROGO; do
     python3 tools/az01-packer/build-data-bundle.py "$VERSION" --release-tag "$TAG" --prefix "$m" --suite "$WORK/enginex-suite" \
         --hook "$WORK/hooks32/libengine-ui-hook.so" --ui-packs "$WORK/packs.tar.gz" --out "$WORK/bundle-$m" >/dev/null
