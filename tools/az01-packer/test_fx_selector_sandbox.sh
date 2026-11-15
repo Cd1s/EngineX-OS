@@ -4,7 +4,7 @@ set -euo pipefail
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 PRODUCT=${FX_PRODUCT:-JC11}
 case "$PRODUCT" in JP07|JC11) ;; *) exit 2 ;; esac
-W=$REPO/out/fx-selector-native-$PRODUCT
+W=${FX_SANDBOX_DIR:-/var/tmp/fx-selector-native-$PRODUCT}
 if [ "${FX_READY_READONLY:-0}" = 1 ]; then W=$W-readonly; fi
 if [ "${1:-}" != --inner ]; then
     test "$(uname -m)" = aarch64

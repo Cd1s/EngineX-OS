@@ -148,6 +148,8 @@ Item {
                     probe.checkWire(1)
                     probe.check(Planck.getProperty("/Engine/Mixer/DJFxUnit1/Type").translator.string === "Flanger", "unit1-carrier")
                     probe.check(a.scFxSelected === a.scFxStock.length, "unit1-px-label")
+                    const pOled = Planck.getProperty("/GUI/Scripted/EngineXFx1Index")
+                    probe.check(pOled && pOled.translator && Math.round(pOled.translator.value * 32.0) - 1 === a.scFxStock.length, "oled-published-index")
                     probe.checkedOne = true
                     probe.rateStep = 0
                 }
