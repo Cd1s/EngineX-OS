@@ -778,7 +778,7 @@ func TestBoardCapabilitiesAndSettingsCompatJP07vsJC11(t *testing.T) {
 			player:    true,
 			caps: uiCapabilities{
 				Mixer: false, FourDeck: true, AutoLoopKnob: true, BeatJumpPads: false,
-				TrackSkipKeys: true, StemsEq: false, LineInAux: false, Gen2: false, RemoteStems: true, JogWheel: true,
+				TrackSkipKeys: true, StemsEq: false, LineInAux: false, Gen2: false, RemoteStems: true, JogWheel: true, SDHighSpeed: true,
 			},
 		},
 		{
@@ -788,7 +788,7 @@ func TestBoardCapabilitiesAndSettingsCompatJP07vsJC11(t *testing.T) {
 			player:    false,
 			caps: uiCapabilities{
 				Mixer: true, FourDeck: true, AutoLoopKnob: true, BeatJumpPads: false,
-				TrackSkipKeys: true, StemsEq: true, LineInAux: false, Gen2: false, RemoteStems: true, JogWheel: true,
+				TrackSkipKeys: true, StemsEq: true, LineInAux: false, Gen2: false, RemoteStems: true, JogWheel: true, SDHighSpeed: true,
 			},
 		},
 		{
@@ -798,7 +798,7 @@ func TestBoardCapabilitiesAndSettingsCompatJP07vsJC11(t *testing.T) {
 			player:    false,
 			caps: uiCapabilities{
 				Mixer: true, FourDeck: false, AutoLoopKnob: true, BeatJumpPads: false,
-				TrackSkipKeys: false, StemsEq: true, LineInAux: false, Gen2: false, RemoteStems: true, JogWheel: true,
+				TrackSkipKeys: false, StemsEq: true, LineInAux: false, Gen2: false, RemoteStems: true, JogWheel: true, SDHighSpeed: true,
 			},
 		},
 		{
@@ -808,7 +808,7 @@ func TestBoardCapabilitiesAndSettingsCompatJP07vsJC11(t *testing.T) {
 			player:    false,
 			caps: uiCapabilities{
 				Mixer: true, FourDeck: false, AutoLoopKnob: false, BeatJumpPads: true,
-				TrackSkipKeys: false, StemsEq: true, LineInAux: false, Gen2: false, RemoteStems: true, JogWheel: true,
+				TrackSkipKeys: false, StemsEq: true, LineInAux: false, Gen2: false, RemoteStems: true, JogWheel: true, SDHighSpeed: true,
 			},
 		},
 		{
@@ -818,7 +818,7 @@ func TestBoardCapabilitiesAndSettingsCompatJP07vsJC11(t *testing.T) {
 			player:    false,
 			caps: uiCapabilities{
 				Mixer: true, FourDeck: true, AutoLoopKnob: true, BeatJumpPads: false,
-				TrackSkipKeys: true, StemsEq: true, LineInAux: true, Gen2: true, RemoteStems: true, JogWheel: true,
+				TrackSkipKeys: true, StemsEq: true, LineInAux: true, Gen2: true, RemoteStems: true, JogWheel: true, SDHighSpeed: true,
 			},
 		},
 		{
@@ -838,7 +838,7 @@ func TestBoardCapabilitiesAndSettingsCompatJP07vsJC11(t *testing.T) {
 			player:    true,
 			caps: uiCapabilities{
 				Mixer: false, FourDeck: true, AutoLoopKnob: true, BeatJumpPads: false,
-				TrackSkipKeys: true, StemsEq: false, LineInAux: false, Gen2: false, RemoteStems: true, JogWheel: false,
+				TrackSkipKeys: true, StemsEq: false, LineInAux: false, Gen2: false, RemoteStems: true, JogWheel: false, SDHighSpeed: true,
 			},
 		},
 		{
@@ -1251,5 +1251,107 @@ func TestUISettingsJogInvert(t *testing.T) {
 	}
 	if code, v := uiPost(t, srv.URL, ""); code != 200 || !v.Capabilities.JogWheel {
 		t.Fatalf("expected JogWheel=true when 5.3.0 JogWheel.qml is present, got code=%d %+v", code, v.Capabilities)
+	}
+}
+
+func TestSdHighSpeedDefaultsOffPersistsAndApplies(t *testing.T) {
+	for _, board := range []string{"SC5000", "SCLIVE4", "PRIME4PLUS", "MIXSTREAMPROGO"} {
+		if !boardCapabilities(board).SDHighSpeed {
+			t.Fatalf("RK3288 board %s must support sdHighSpeed", board)
+		}
+	}
+	for _, board := range []string{"PRIME4G2", "SYSTEMONE"} {
+		if boardCapabilities(board).SDHighSpeed {
+			t.Fatalf("RK3588 board %s must hide sdHighSpeed", board)
+		}
+	}
+
+	dir := t.TempDir()
+	runDir := t.TempDir()
+	var calls []struct {
+		enabled bool
+		playing bool
+	}
+	pendingNext := false
+	failNext := false
+	cfg := Config{
+		AccessToken:       "c",
+		UIDir:             dir,
+		StateDir:          t.TempDir(),
+		SDHighSpeedRunDir: runDir,
+		ApplySDHighSpeed: func(enabled, playing bool) (bool, error) {
+			calls = append(calls, struct {
+				enabled bool
+				playing bool
+			}{enabled, playing})
+			if failNext {
+				return false, fmt.Errorf("mmc1 error -110")
+			}
+			return pendingNext, nil
+		},
+	}
+	srv := httptest.NewServer(New(cfg, nil))
+	defer srv.Close()
+
+	// 1. Default Off, pending false
+	if code, v := uiPost(t, srv.URL, ""); code != 200 || v.SdHighSpeed || v.SdHighSpeedPending || !v.Capabilities.SDHighSpeed {
+		t.Fatalf("unexpected defaults: code=%d %+v", code, v)
+	}
+
+	// 2. Toggle On persists sd_high_speed=1 and invokes apply hook
+	if code, v := uiPost(t, srv.URL, "sdHighSpeed=1"); code != 200 || !v.SdHighSpeed || v.SdHighSpeedPending {
+		t.Fatalf("enable failed: code=%d %+v", code, v)
+	}
+	if len(calls) != 1 || !calls[0].enabled || calls[0].playing {
+		t.Fatalf("unexpected apply calls: %+v", calls)
+	}
+	confBytes, err := os.ReadFile(filepath.Join(dir, "settings.conf"))
+	if err != nil || !slices.Contains(splitLines(confBytes), "sd_high_speed=1") {
+		t.Fatalf("settings.conf missing sd_high_speed=1: %q %v", string(confBytes), err)
+	}
+
+	// 3. Reload keeps sd_high_speed=1
+	srv2 := httptest.NewServer(New(cfg, nil))
+	defer srv2.Close()
+	if code, v := uiPost(t, srv2.URL, ""); code != 200 || !v.SdHighSpeed {
+		t.Fatalf("reload failed: code=%d %+v", code, v)
+	}
+
+	// 4. Playing guard reports sdHighSpeedPending from state file
+	pendingNext = true
+	if err := os.WriteFile(filepath.Join(runDir, "sd-highspeed.state"), []byte("deferred\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code, v := uiPost(t, srv.URL, "sdHighSpeed=0"); code != 200 || v.SdHighSpeed || !v.SdHighSpeedPending {
+		t.Fatalf("expected sdHighSpeedPending=true when deferred: code=%d %+v", code, v)
+	}
+	pendingNext = false
+	_ = os.Remove(filepath.Join(runDir, "sd-highspeed.state"))
+
+	// 5. Revert on hardware apply error restores previous persisted setting
+	failNext = true
+	if code, _ := uiPost(t, srv.URL, "sdHighSpeed=1"); code != 500 {
+		t.Fatalf("expected 500 when apply reverts, got %d", code)
+	}
+	if code, v := uiPost(t, srv.URL, ""); code != 200 || v.SdHighSpeed {
+		t.Fatalf("setting not reverted after apply error: code=%d %+v", code, v)
+	}
+	failNext = false
+
+	// 6. Reject invalid boolean values
+	if code, _ := uiPost(t, srv.URL, "sdHighSpeed=maybe"); code != 400 {
+		t.Fatalf("expected 400 for invalid value, got %d", code)
+	}
+
+	// 7. Web console markup includes RK3288 gate, toggle, and deferred hint
+	page, err := assets.ReadFile("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(page)
+	for _, want := range []string{`data-toggle="sdHighSpeed"`, `data-i18n="tSdHighSpeed"`, `data-i18n="sSdHighSpeed"`, `caps.sdHighSpeed===false`, `'sdHighSpeedPending'`} {
+		if !strings.Contains(html, want) {
+			t.Errorf("index.html missing %s", want)
+		}
 	}
 }

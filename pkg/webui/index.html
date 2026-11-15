@@ -114,6 +114,7 @@ a{color:var(--accent)}label.chk{display:flex;align-items:center;gap:10px;cursor:
   <div class="setting"><div class="txt"><b><span data-i18n="tExport"></span><span class="tag" data-i18n="beta"></span></b><span class="sub" data-i18n="sExport"></span></div><label class="sw"><input type="checkbox" data-toggle="prolinkExport"><span></span></label></div>
   <div class="setting"><div class="txt"><b data-i18n="tBtOut"></b><span class="sub" data-i18n="sBtOut"></span></div><select id="btOut" aria-label="Bluetooth" style="width:auto;min-width:150px"></select></div>
   <div class="setting"><div class="txt"><b data-i18n="tHttps"></b><span class="sub" data-i18n="sHttps"></span></div><label class="sw"><input type="checkbox" data-toggle="consoleHttps"><span></span></label></div>
+  <div class="setting"><div class="txt"><b data-i18n="tSdHighSpeed"></b><span class="sub" data-i18n="sSdHighSpeed"></span></div><label class="sw"><input type="checkbox" data-toggle="sdHighSpeed"><span></span></label></div>
   <div class="setting"><div class="txt"><b data-i18n="verboseLog"></b><span class="sub" data-i18n="verboseLogSub"></span></div><label class="sw"><input type="checkbox" data-toggle="verboseLog"><span></span></label><a class="btn" href="/api/logs" download="enginex-logs.txt" data-i18n="downloadLogs"></a></div>
   <small id="uiState"></small>
   <div id="bootRetryActions" hidden><button class="btn" id="bootRetry" data-i18n="bootRetry"></button> <a class="btn" href="/api/boot-report" download data-i18n="bootReport"></a></div>
@@ -200,6 +201,9 @@ tJogInvert:['Reverse jog wheel','反转转盘方向','反轉轉盤方向','Inver
 tJogInvertLeft:['Reverse left jog wheel','反转左侧转盘方向','反轉左側轉盤方向','Invertir rueda jog izquierda'],
 tJogInvertRight:['Reverse right jog wheel','反转右侧转盘方向','反轉右側轉盤方向','Invertir rueda jog derecha'],
 sJogInvert:['Inverts scratch and nudge input direction; applies right away','反转搓盘与微调转动方向，立即生效','反轉搓盤與微調轉動方向，立即生效','Invierte la dirección de scratch y nudge; se aplica de inmediato'],
+tSdHighSpeed:['High-speed SD card','高速 SD 卡模式','高速 SD 卡模式','Tarjeta SD de alta velocidad'],
+sSdHighSpeed:['Experimental: faster SD card reading (about 2x). Turn off if the SD card is not recognised.','实验性：加快 SD 卡读取速度（约 2 倍）。若无法识别 SD 卡请关闭。','實驗性：加快 SD 卡讀取速度（約 2 倍）。若無法辨識 SD 卡請關閉。','Experimental: lectura más rápida de tarjetas SD (aprox. 2x). Desactívalo si no se reconoce la tarjeta SD.'],
+sdHighSpeedPending:['Applies at next start or SD insert','将在下次启动或重新插入 SD 卡时生效','將在下次啟動或重新插入 SD 卡時生效','Se aplicará al próximo inicio o al insertar la tarjeta SD'],
 tFxTimeMode:['PX delay time mode','先锋效果延时模式 (PX)','先鋒效果延遲模式 (PX)','Modo de tiempo de delay PX'],
 sFxTimeMode:['Spiral / Pitch Echo / Dub Echo only: default timing or 10–4000 ms; stock FX stay in beats','仅作用于 Spiral / Pitch Echo / Dub Echo（默认或 10–4000 ms）；原厂效果仍按节拍同步','僅作用於 Spiral / Pitch Echo / Dub Echo（預設或 10–4000 ms）；原廠效果仍依節拍同步','Solo Spiral / Pitch Echo / Dub Echo: tiempo predeterminado o 10–4000 ms; los FX originales siguen en beats'],
 fxBeats:['Default (Off)','默认（关闭）','預設（關閉）','Predeterminado (desactivado)'],
@@ -480,7 +484,7 @@ let lastBt=null;const btNames={Master:'btMaster',Booth:'btBooth',Headphones:'btH
 function renderBt(){const sel=$('btOut');sel.replaceChildren();for(const n of lastBt.layers){const o=document.createElement('option');o.value=n;o.textContent=t(btNames[n]);o.selected=n===lastBt.assignLayer;sel.append(o)}sel.disabled=lastBt.layers.length<2}
 async function showBt(){lastBt=await api('bluetooth');renderBt()}
 $('btOut').onchange=()=>action(async()=>{lastBt=await post('bluetooth',{assignLayer:$('btOut').value});renderBt()});
-const toggleKeys=['upfaderEcho','masterLimiter','autoGain','jogInvertLeft','jogInvertRight','omniSource','prolinkShare','prolinkExport'];
+const toggleKeys=['upfaderEcho','masterLimiter','autoGain','jogInvertLeft','jogInvertRight','omniSource','prolinkShare','prolinkExport','sdHighSpeed'];
 let lastHttps=null;
 function showUI(v){lastUI=v;
  const httpsOn=!!v.consoleHttps;
@@ -502,6 +506,9 @@ function showUI(v){lastUI=v;
  jLeftTitle.dataset.i18n=hasDualJog?'tJogInvertLeft':'tJogInvert';
  jLeftTitle.textContent=hasDualJog?t('tJogInvertLeft'):t('tJogInvert');
  jRight.closest('.setting').hidden=!hasDualJog;
+ const sdEl=tg('sdHighSpeed');
+ sdEl.closest('.setting').hidden=caps.sdHighSpeed===false;
+ why(sdEl,v.sdHighSpeedPending?t('sdHighSpeedPending'):'');
  why(tg('prolinkExport'),v.prolinkExport&&!v.prolinkExportActive?t('waitRbUsb'):'');
  const segs={quality:v.quality,lang:v.language,fxTimeMode:v.fxTimeMode||'beats'};
  for(const g of document.querySelectorAll('[data-seg]'))for(const b of g.querySelectorAll('button'))b.classList.toggle('on',b.dataset.v===segs[g.dataset.seg]);

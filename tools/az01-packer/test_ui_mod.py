@@ -29,6 +29,7 @@ class OnOffSwitchCompatibilityTest(unittest.TestCase):
             "scSwapLoopOrder": "swapLoopOrder", "scDualColumn": "browserDualColumn",
             "scTracklistWaveform": "tracklistWaveform", "scOmniSource": "omniSource",
             "scCueCountdown": "cueCountdown", "scRemoteLoad": "remoteLoad",
+            "scSdHighSpeed": "sdHighSpeed",
         }
         for version, skin in (("5.0.4", "EmbeddedCommon"), ("5.3.0", "Embedded")):
             qrc = LAB / version / "qrc"
@@ -994,6 +995,7 @@ assert.strictEqual(vfx.enabled, false);
             "Tracklist Waveform": ("scTracklistWaveform", "tracklistWaveform", bp.LIBRARY_ENTRIES),
             "OmniSource (Drives in Streaming)": ("scOmniSource", "omniSource", bp.LIBRARY_ENTRIES),
             "Cue Countdown": ("scCueCountdown", "cueCountdown", bp.VIEW_ENTRIES),
+            "High-speed SD card": ("scSdHighSpeed", "sdHighSpeed", bp.SD_HIGH_SPEED_ENTRIES),
         }
         for text, (flag, key, qml) in rows.items():
             block = re.search(r'EntryBase\.(\w+) \{\n\t\t\ttext: "' + re.escape(text) + r'"\n([\s\S]*?)\n\t\t\},', qml)
@@ -1316,6 +1318,55 @@ assert.strictEqual(evalIsLead({{ master: false }}), false);
 """
             res_f4 = subprocess.run(["node", "-e", f4_js], capture_output=True, text=True)
             self.assertEqual(res_f4.returncode, 0, res_f4.stderr)
+
+    def test_sd_high_speed_switch_rk3288_only_and_four_languages(self):
+        self.assertIn("property bool scSdHighSpeed: false", bp.SERVICES_MAIN)
+        self.assertIn("property bool scSdHighSpeedPending: false", bp.SERVICES_MAIN)
+        self.assertIn("sd_high_speed", bp.SERVICES_MAIN)
+        self.assertIn("sdHighSpeedPending", bp.SERVICES_MAIN)
+        rows = {
+            l.split("\t")[0]: l.split("\t")[1:]
+            for l in (REPO / "tools/ui-mod/i18n.tsv").read_text(encoding="utf-8").splitlines()
+            if l and not l.startswith("#")
+        }
+        strings = (
+            "High-speed SD card",
+            "Experimental: faster SD card reading (about 2x). Turn off if the SD card is not recognised.",
+            "Applies at next start or SD insert",
+        )
+        for en in strings:
+            self.assertIn(en, rows, f"missing i18n row: {en!r}")
+            self.assertEqual(len(rows[en]), 3, en)
+            for idx, lang in enumerate(("zh-Hans", "zh-Hant", "es")):
+                val = rows[en][idx].strip()
+                self.assertTrue(val and val != en, f"{en!r} ({lang}) missing translation")
+        for version, rel in (
+            ("5.0.4", "Skins/EmbeddedCommon/Views/ControlCenter/Tabs/Preferences/TabContents/DeviceTabContent.qml"),
+            ("5.3.0", "Skins/Embedded/Views/ControlCenter/Tabs/Preferences/DeviceTabContent.qml"),
+        ):
+            qrc = LAB / version / "qrc"
+            with tempfile.TemporaryDirectory() as tmp:
+                out = Path(tmp) / "packs"
+                built = subprocess.run(
+                    ["python3", str(BUILD_PACKS), "--qrc", str(qrc), "--out", str(out)],
+                    capture_output=True, text=True,
+                )
+                self.assertEqual(built.returncode, 0, built.stderr)
+                for lang in ("en", "zh-Hans", "zh-Hant", "es"):
+                    with self.subTest(version=version, lang=lang):
+                        dev_qml = (out / lang / rel).read_text(encoding="utf-8")
+                        self.assertIn('objectName: "EngineX_SdHighSpeed"', dev_qml)
+                        self.assertIn("visible: !root.scIsAZ04", dev_qml)
+                        self.assertIn("checkedExternally: !!root.scSdHighSpeed", dev_qml)
+                        self.assertIn('root.scCall("sdHighSpeed=" + (root.scSdHighSpeed ? 0 : 1))', dev_qml)
+                        self.assertIn('objectName: "EngineX_SdHighSpeedHint"', dev_qml)
+                        self.assertIn('objectName: "EngineX_SdHighSpeedPending"', dev_qml)
+                        self.assertIn("visible: !root.scIsAZ04 && root.scSdHighSpeedPending", dev_qml)
+                        if lang != "en":
+                            idx = ("zh-Hans", "zh-Hant", "es").index(lang)
+                            for en in strings:
+                                self.assertIn(rows[en][idx], dev_qml)
+
 
     def test_display_only_shadow_lane_and_overview_match_stock(self):
         layer = bp.SHADOW_LAYER

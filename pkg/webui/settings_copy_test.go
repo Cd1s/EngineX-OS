@@ -10,7 +10,7 @@ import (
 )
 
 func TestSettingsCopyAllowlistAndModel(t *testing.T) {
-	source := uiSettings{Language: "en", Quality: qualityFLAC, Waveform: "rgb", ShadowMode: "auto", StreamSortRole: "default", StreamSortOrder: "asc", PioneerFx: "off", FxTimeMode: "beats", FxTimeMs: 500, LedBrightness: 100, UIScale: 100, BpmDecimals: 2, FourDeckRole: "13", Scope: "spotify", RelayURL: "https://private.invalid", GitHubRepo: "private/repo", VerboseLog: true, DebugTelemetry: true, UpfaderEcho: true, StemsEqMode: true, BeatJumpPads: true}
+	source := uiSettings{Language: "en", Quality: qualityFLAC, Waveform: "rgb", ShadowMode: "auto", StreamSortRole: "default", StreamSortOrder: "asc", PioneerFx: "off", FxTimeMode: "beats", FxTimeMs: 500, LedBrightness: 100, UIScale: 100, BpmDecimals: 2, FourDeckRole: "13", Scope: "spotify", RelayURL: "https://private.invalid", GitHubRepo: "private/repo", VerboseLog: true, DebugTelemetry: true, UpfaderEcho: true, StemsEqMode: true, BeatJumpPads: true, SdHighSpeed: true}
 	payload := copyUIExport(source)
 	for _, key := range []string{"fourDeckRole", "scope", "sources", "relayUrl", "githubRepo", "verboseLog", "debugTelemetry", "btOut", "loggedIn"} {
 		if _, found := payload[key]; found {
@@ -20,17 +20,28 @@ func TestSettingsCopyAllowlistAndModel(t *testing.T) {
 	destination := source
 	destination.FourDeckRole, destination.Scope = "24", "deezer"
 	destination.MasterLimiter = true
+	destination.SdHighSpeed = false
 	got, skipped, err := copyUIMerge(destination, payload, "SC5000")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.FourDeckRole != "24" || got.Scope != "deezer" || got.MasterLimiter || got.Waveform != "rgb" {
+	if got.FourDeckRole != "24" || got.Scope != "deezer" || got.MasterLimiter || got.Waveform != "rgb" || !got.SdHighSpeed {
 		t.Fatalf("copy lost identity/local values or false/default settings: %+v", got)
 	}
 	for _, key := range []string{"upfaderEcho", "stemsEqMode", "beatJumpPads"} {
 		if !slices.Contains(skipped, key) {
 			t.Errorf("missing model skip %s: %v", key, skipped)
 		}
+	}
+	if slices.Contains(skipped, "sdHighSpeed") {
+		t.Errorf("sdHighSpeed unexpectedly skipped on RK3288 board: %v", skipped)
+	}
+	az04Got, az04Skipped, err := copyUIMerge(destination, payload, "PRIME4G2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if az04Got.SdHighSpeed || !slices.Contains(az04Skipped, "sdHighSpeed") {
+		t.Fatalf("sdHighSpeed must be skipped on AZ04 board: got=%+v skipped=%v", az04Got, az04Skipped)
 	}
 	for _, tc := range []struct{ key, value string }{{"fourDeckRole", `"13"`}, {"scope", `"tidal"`}, {"uiScale", `88`}, {"waveform", `"unknown"`}, {"masterLimiter", `null`}, {"uiScale", `null`}, {"playhead", `2`}} {
 		if _, _, err := copyUIMerge(destination, map[string]json.RawMessage{tc.key: json.RawMessage(tc.value)}, "SC5000"); err == nil {

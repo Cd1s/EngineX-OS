@@ -4,6 +4,7 @@ package webui
 // engine_ui_hook.c, which only understands this key=value file.
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -81,6 +82,7 @@ type uiCapabilities struct {
 	Gen2          bool `json:"gen2"`
 	RemoteStems   bool `json:"remoteStems"`
 	JogWheel      bool `json:"jogWheel"`
+	SDHighSpeed   bool `json:"sdHighSpeed"`
 }
 
 func boardCapabilities(board string) uiCapabilities {
@@ -93,6 +95,7 @@ func boardCapabilities(board string) uiCapabilities {
 			StemsEq:       true,
 			RemoteStems:   true,
 			JogWheel:      true,
+			SDHighSpeed:   true,
 		}
 	}
 	isPlayer := playerBoards[board]
@@ -109,6 +112,7 @@ func boardCapabilities(board string) uiCapabilities {
 		Gen2:          dataBundleBoards[board],
 		RemoteStems:   !isAZ04,
 		JogWheel:      !motorizedBoards[board],
+		SDHighSpeed:   !isAZ04,
 	}
 }
 
@@ -213,6 +217,8 @@ type uiSettings struct {
 	BeatJumpPads        bool   `json:"beatJumpPads"`
 	JogInvertLeft       bool   `json:"jogInvertLeft"`
 	JogInvertRight      bool   `json:"jogInvertRight"`
+	SdHighSpeed         bool   `json:"sdHighSpeed"`
+	SdHighSpeedPending  bool   `json:"sdHighSpeedPending,omitempty"`
 	PioneerFx           string `json:"pioneerFx"`
 	FXSelectorAvailable bool   `json:"fxSelectorAvailable"`
 	FxTimeMode          string `json:"fxTimeMode"`
@@ -473,6 +479,8 @@ func (s *Server) loadUI() uiSettings {
 			v.JogInvertLeft = val == "1" || strings.EqualFold(val, "true")
 		case "jog_invert_right":
 			v.JogInvertRight = val == "1" || strings.EqualFold(val, "true")
+		case "sd_high_speed":
+			v.SdHighSpeed = val == "1" || strings.EqualFold(val, "true")
 		case "pioneer_fx":
 			if slices.Contains(uiPioneerFxModes, val) {
 				v.PioneerFx = val
@@ -640,6 +648,9 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	if v.JogInvertRight {
 		text += "jog_invert_right=1\n"
 	}
+	if v.SdHighSpeed {
+		text += "sd_high_speed=1\n"
+	}
 	if !s.fxSelectorAvailable() && v.PioneerFx != "" && v.PioneerFx != "off" {
 		text += "pioneer_fx=" + v.PioneerFx + "\n"
 	}
@@ -796,6 +807,7 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 	if s.isLegacy504Pack() {
 		v.Capabilities.JogWheel = false
 	}
+	v.SdHighSpeedPending = s.sdHighSpeedPending(v.SdHighSpeed)
 	v.FourDeckRoleActive = s.activeRole(v)
 	v.TimeZone = s.savedTimeZone()
 	now := time.Now()
@@ -880,6 +892,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	v := s.loadUI()
 	prevShadowMode := v.ShadowMode
 	prevConsoleHTTPS := v.ConsoleHTTPS
+	prevSdHighSpeed := v.SdHighSpeed
 	bad := func(field, val string, allowed []string) bool {
 		return q.Has(field) && !slices.Contains(allowed, val)
 	}
@@ -1056,6 +1069,19 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		v.JogInvertRight = b
+	}
+	if q.Has("sdHighSpeed") || q.Has("sd_high_speed") {
+		param := q.Get("sdHighSpeed")
+		if !q.Has("sdHighSpeed") {
+			param = q.Get("sd_high_speed")
+		}
+		b, ok := parseBoolParam(param)
+		if !ok {
+			s.uiMu.Unlock()
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+		v.SdHighSpeed = b
 	}
 	if q.Has("syncGuardPct") {
 		n, err := strconv.Atoi(q.Get("syncGuardPct"))
@@ -1263,6 +1289,16 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		fail(w, 500, err)
 		return
 	}
+	if v.SdHighSpeed != prevSdHighSpeed && boardCapabilities(imagePrefix(deviceCompatible())).SDHighSpeed {
+		if _, serr := s.applySDHighSpeed(v.SdHighSpeed); serr != nil {
+			s.uiMu.Lock()
+			v.SdHighSpeed = prevSdHighSpeed
+			_ = s.saveUI(v)
+			s.uiMu.Unlock()
+			fail(w, 500, serr)
+			return
+		}
+	}
 	if v.ShadowMode != prevShadowMode {
 		// Shadow Deck Mode switches live (#201): answer the held shadow long poll
 		// now, in the new mode, instead of after its wait.
@@ -1319,4 +1355,124 @@ func (s *Server) remoteLoadEnabled() bool {
 	s.uiMu.Lock()
 	defer s.uiMu.Unlock()
 	return s.loadUI().RemoteLoad
+}
+
+func (s *Server) sdHighSpeedRunDir() string {
+	if s.cfg.SDHighSpeedRunDir != "" {
+		return s.cfg.SDHighSpeedRunDir
+	}
+	return "/run/enginex"
+}
+
+func (s *Server) sdHighSpeedPending(want bool) bool {
+	runDir := s.sdHighSpeedRunDir()
+	b, err := os.ReadFile(filepath.Join(runDir, "sd-highspeed.state"))
+	if err != nil {
+		return false
+	}
+	if strings.TrimSpace(string(b)) != "deferred" {
+		return false
+	}
+	meta, err := os.ReadFile(filepath.Join(runDir, "sd-highspeed.deferred"))
+	if err != nil {
+		return true
+	}
+	lines := strings.SplitN(strings.TrimSpace(string(meta)), "\n", 2)
+	if len(lines) == 2 && lines[1] != "" {
+		if _, err := os.Stat(lines[1]); err != nil && os.IsNotExist(err) {
+			return false
+		}
+	}
+	if len(lines) >= 1 && lines[0] != "" {
+		if ios, err := os.ReadFile(filepath.Join("/sys/kernel/debug", lines[0], "ios")); err == nil {
+			if strings.Contains(string(ios), "sd high-speed") == want {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func (s *Server) anyDeckPlaying() bool {
+	now := time.Now()
+	if s.shadow != nil {
+		s.shadow.mu.Lock()
+		switch {
+		case len(s.shadow.own) > 0 && now.Sub(s.shadow.ownAt) < 2*time.Second:
+			for _, d := range s.shadow.own {
+				if d.Playing {
+					s.shadow.mu.Unlock()
+					return true
+				}
+			}
+		case len(s.shadow.clockDecks) > 0 && now.Sub(s.shadow.clockAt) < 2*time.Second:
+			for _, d := range s.shadow.clockDecks {
+				if d.Playing {
+					s.shadow.mu.Unlock()
+					return true
+				}
+			}
+		}
+		for _, p := range s.shadow.peerDecks {
+			if !p.Stale && now.Sub(p.at) < 2*time.Second && p.Playing {
+				s.shadow.mu.Unlock()
+				return true
+			}
+		}
+		s.shadow.mu.Unlock()
+	}
+	for _, dev := range s.mergedDevices() {
+		if dev.Number < 1 || dev.Number > 4 || strings.HasPrefix(dev.Name, "EngineX") || now.Sub(dev.LastSeen) >= 2*time.Second {
+			continue
+		}
+		if dev.Playing || dev.PlayState1 == cdjCuePlay {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) applySDHighSpeed(enabled bool) (bool, error) {
+	playing := s.anyDeckPlaying()
+	if s.cfg.ApplySDHighSpeed != nil {
+		return s.cfg.ApplySDHighSpeed(enabled, playing)
+	}
+	var candidates []string
+	if exe, err := os.Executable(); err == nil {
+		candidates = append(candidates, filepath.Join(filepath.Dir(exe), "enginex-sd-highspeed"))
+	}
+	candidates = append(candidates, "/data/enginex/bundle/bin/enginex-sd-highspeed", "/usr/local/bin/enginex-sd-highspeed")
+	script := ""
+	for _, c := range candidates {
+		if st, err := os.Stat(c); err == nil && !st.IsDir() {
+			script = c
+			break
+		}
+	}
+	if script == "" || guardHostCommand(script) != nil {
+		return false, nil
+	}
+	want := "0"
+	if enabled {
+		want = "1"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, script, "apply", want)
+	env := append(os.Environ(),
+		"ENGINEX_UI_DIR="+s.uiDir(),
+		"ENGINEX_RUN_ROOT="+s.sdHighSpeedRunDir(),
+	)
+	if playing {
+		env = append(env, "ENGINEX_DECK_PLAYING=1")
+	}
+	cmd.Env = env
+	if out, err := cmd.CombinedOutput(); err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg == "" {
+			msg = err.Error()
+		}
+		return false, errors.New(msg)
+	}
+	return s.sdHighSpeedPending(enabled), nil
 }

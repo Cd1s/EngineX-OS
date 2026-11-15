@@ -1,0 +1,345 @@
+#!/bin/sh
+# Opt-in RK3288 SD High Speed (50 MHz) helper.
+# Sets or clears MMC_CAP_SD_HIGHSPEED (0x4) in /sys/kernel/debug/mmcN/caps
+# for the removable SD card slot (never eMMC or SDIO) and, when a card is
+# inserted and idle, re-initializes it read-only via runtime PM (0x80).
+# POSIX sh: must run under both dash (Gen-1) and BusyBox ash (Gen-2).
+set -eu
+umask 022
+PATH="$PATH:/usr/sbin:/sbin"
+
+SYS=${ENGINEX_SYS_ROOT:-/sys}
+DBG=${ENGINEX_DEBUGFS_ROOT:-/sys/kernel/debug}
+DEV=${ENGINEX_DEV_ROOT:-/dev}
+RUN=${ENGINEX_RUN_ROOT:-/run/enginex}
+primary_ui=${ENGINEX_PRIMARY_UI_DIR:-/data/enginex/ui}
+legacy_ui=${ENGINEX_LEGACY_UI_DIR:-/data/sc5000-custom/ui}
+UI=${ENGINEX_UI_DIR:-$primary_ui}
+[ -d "$UI" ] || [ ! -d "$legacy_ui" ] || UI=$legacy_ui
+COMPAT=${ENGINEX_DT_COMPAT:-/sys/firmware/devicetree/base/compatible}
+CLOCK_URL=${ENGINEX_CLOCK_URL:-http://127.0.0.1:8080/v1/enginex/clock}
+DMESG_CMD=${ENGINEX_DMESG_CMD:-dmesg}
+AUTOSUSPEND_WAIT_S=${ENGINEX_MMC_AUTOSUSPEND_WAIT:-4}
+SETTLE_WAIT_S=${ENGINEX_MMC_SETTLE_WAIT:-1}
+
+log() { printf 'enginex-sd-highspeed: %s\n' "$*" >&2; }
+die() { log "$*"; exit 1; }
+
+case $AUTOSUSPEND_WAIT_S in ''|*[!0-9]*) AUTOSUSPEND_WAIT_S=4 ;; esac
+case $SETTLE_WAIT_S in ''|*[!0-9]*) SETTLE_WAIT_S=1 ;; esac
+
+mode=boot
+want=
+case ${1:-boot} in
+    boot)
+        mode=boot ;;
+    apply)
+        mode=apply
+        case ${2:-} in
+            0|1) want=$2 ;;
+            '') ;;
+            *) log "invalid target value: $2"; exit 2 ;;
+        esac ;;
+    0|1)
+        mode=apply
+        want=$1 ;;
+    *)
+        log "usage: enginex-sd-highspeed [boot|apply [0|1]]"
+        exit 2 ;;
+esac
+
+mkdir -p "$RUN"
+[ ! -L "$RUN" ] || die "symlinked run directory: $RUN"
+exec 9>"$RUN/sd-highspeed.lock"
+flock -x 9
+
+if [ -z "$want" ]; then
+    want=0
+    if [ ! -e "$UI/safe-mode" ] && grep -qx 'sd_high_speed=1' "$UI/settings.conf" 2>/dev/null; then
+        want=1
+    fi
+fi
+
+write_state() {
+    printf '%s\n' "$1" > "$RUN/sd-highspeed.state.tmp.$$" && mv -f "$RUN/sd-highspeed.state.tmp.$$" "$RUN/sd-highspeed.state"
+    [ "$1" = deferred ] || rm -f "$RUN/sd-highspeed.deferred"
+}
+
+if [ -r "$COMPAT" ]; then
+    compat_str=$(tr '\000' ' ' < "$COMPAT" 2>/dev/null || true)
+    case $compat_str in
+        *jp24*|*JP24*|*rmz2*|*RMZ2*|*rk3588*|*RK3588*)
+            log "skip: non-RK3288 board"
+            exit 0 ;;
+    esac
+fi
+
+is_non_sd_host() {
+    _h=$1
+    _hn=$2
+    _of=$(readlink -f "$_h/device/of_node" 2>/dev/null || printf '%s' "$_h/device/of_node")
+    _dv=$(readlink -f "$_h/device" 2>/dev/null || printf '%s' "$_h/device")
+    for _p in "$_h/non-removable" "$_h/broken-cd" \
+              "$_h/device/of_node/non-removable" "$_h/device/of_node/broken-cd" \
+              "$_of/non-removable" "$_of/broken-cd"; do
+        [ ! -e "$_p" ] || return 0
+    done
+    case "$_of|$_dv" in
+        *ff0f0000*|*ff0d0000*|*sdio*|*SDIO*) return 0 ;;
+    esac
+    for _c in "$_h/$_hn":* "$SYS/bus/mmc/devices/$_hn":*; do
+        [ -d "$_c" ] || continue
+        _t=$(cat "$_c/type" 2>/dev/null || true)
+        case $_t in
+            SDIO|MMC) return 0 ;;
+        esac
+    done
+    return 1
+}
+
+sd_host=
+sd_name=
+for _pass in 1 2; do
+    for _h in "$SYS"/class/mmc_host/mmc[0-9]*; do
+        [ -d "$_h" ] || continue
+        _hn=${_h##*/}
+        [ -f "$DBG/$_hn/caps" ] || continue
+        if is_non_sd_host "$_h" "$_hn"; then
+            continue
+        fi
+        _of=$(readlink -f "$_h/device/of_node" 2>/dev/null || printf '%s' "$_h/device/of_node")
+        _dv=$(readlink -f "$_h/device" 2>/dev/null || printf '%s' "$_h/device")
+        if [ "$_pass" = 1 ]; then
+            case "$_of|$_dv|$_h/device/of_node" in
+                *ff0c0000*) sd_host=$_h; sd_name=$_hn; break ;;
+            esac
+        else
+            if [ -e "$_h/device/of_node/cd-gpios" ] || [ -e "$_of/cd-gpios" ] || [ -e "$_h/cd-gpios" ]; then
+                sd_host=$_h
+                sd_name=$_hn
+                break
+            fi
+        fi
+    done
+    [ -z "$sd_host" ] || break
+done
+
+if [ -z "$sd_host" ]; then
+    [ "$want" = 1 ] || write_state off
+    exit 0
+fi
+
+caps_file="$DBG/$sd_name/caps"
+ios_file="$DBG/$sd_name/ios"
+
+orig_caps=$(tr -d '[:space:]' < "$caps_file" 2>/dev/null || true)
+case $orig_caps in
+    0x*|0X*) _hex=${orig_caps#??} ;;
+    *) _hex=$orig_caps ;;
+esac
+case $_hex in
+    ''|*[!0-9a-fA-F]*) die "invalid caps for $sd_name: $orig_caps" ;;
+esac
+
+orig_val=$((orig_caps))
+has_hs=$((orig_val & 0x4))
+orig_fmt=$(printf '0x%08x' "$orig_val")
+
+# Never write caps when Off and 0x4 is already clear.
+if [ "$want" = 0 ] && [ "$has_hs" -eq 0 ]; then
+    write_state off
+    exit 0
+fi
+
+if [ "$want" = 1 ]; then
+    target_val=$((orig_val | 0x4))
+else
+    if [ "$has_hs" -ne 0 ]; then
+        target_val=$((orig_val ^ 0x4))
+    else
+        target_val=$orig_val
+    fi
+fi
+target_caps=$(printf '0x%08x' "$target_val")
+
+if [ "$target_val" -ne "$orig_val" ]; then
+    printf '%s\n' "$target_caps" > "$caps_file" || die "failed to write $caps_file"
+fi
+
+find_sd_card() {
+    card_dir=
+    blk_dev=
+    for _c in "$SYS/bus/mmc/devices/$sd_name":* "$sd_host/$sd_name":* "$sd_host/device/$sd_name":*; do
+        [ -d "$_c" ] || continue
+        _t=$(cat "$_c/type" 2>/dev/null || true)
+        [ "$_t" = SD ] || continue
+        card_dir=$_c
+        for _b in "$_c"/block/mmcblk[0-9]*; do
+            [ -e "$_b" ] || continue
+            _bn=${_b##*/}
+            case $_bn in *p*) continue ;; esac
+            if [ -e "$DEV/$_bn" ]; then
+                blk_dev="$DEV/$_bn"
+                return 0
+            fi
+        done
+    done
+    # Fallback via /sys/class/block/mmcblkN/device -> card_dir
+    for _b in "$SYS"/class/block/mmcblk[0-9]*; do
+        [ -d "$_b" ] || continue
+        _bn=${_b##*/}
+        case $_bn in *p*) continue ;; esac
+        _bd=$(readlink -f "$_b/device" 2>/dev/null || true)
+        case ${_bd##*/} in
+            "$sd_name":*)
+                _t=$(cat "$_bd/type" 2>/dev/null || cat "$_b/device/type" 2>/dev/null || true)
+                [ "$_t" = SD ] || continue
+                card_dir=$_bd
+                if [ -e "$DEV/$_bn" ]; then
+                    blk_dev="$DEV/$_bn"
+                    return 0
+                fi ;;
+        esac
+    done
+    return 1
+}
+
+if ! find_sd_card; then
+    [ "$want" = 1 ] && write_state active || write_state off
+    log "$sd_name: caps=$target_caps (no card)"
+    exit 0
+fi
+
+ios_is_hs() {
+    _ios=$(cat "$ios_file" 2>/dev/null || true)
+    case $_ios in
+        *'sd high-speed'*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+if [ "$want" = 1 ] && ios_is_hs; then
+    write_state active
+    exit 0
+fi
+if [ "$want" = 0 ] && ! ios_is_hs; then
+    write_state off
+    exit 0
+fi
+
+if [ "$mode" = boot ] && [ "$want" = 1 ] && [ "$has_hs" -ne 0 ] && [ -f "$RUN/sd-highspeed.boot-done" ]; then
+    write_state active
+    exit 0
+fi
+
+# Playing guard when toggling live: apply caps bit only, leave the running card alone.
+if [ "$mode" = apply ]; then
+    playing=0
+    if [ "${ENGINEX_DECK_PLAYING:-0}" = 1 ]; then
+        playing=1
+    else
+        clock_json=
+        if command -v curl >/dev/null 2>&1; then
+            clock_json=$(curl -fsS --max-time 2 "$CLOCK_URL" 2>/dev/null || true)
+        elif command -v wget >/dev/null 2>&1; then
+            clock_json=$(wget -qO- -T 2 "$CLOCK_URL" 2>/dev/null || true)
+        fi
+        clock_compact=$(printf '%s' "$clock_json" | tr -d '[:space:]')
+        case $clock_compact in
+            *'"playing":true'*) playing=1 ;;
+        esac
+    fi
+    if [ "$playing" = 1 ]; then
+        printf '%s\n%s\n' "$sd_name" "$card_dir" > "$RUN/sd-highspeed.deferred.tmp.$$" && mv -f "$RUN/sd-highspeed.deferred.tmp.$$" "$RUN/sd-highspeed.deferred"
+        write_state deferred
+        log "$sd_name: deck playing; caps=$target_caps deferred"
+        exit 0
+    fi
+fi
+
+revert_caps() {
+    printf '%s\n' "$orig_fmt" > "$caps_file" 2>/dev/null || :
+    write_state error
+    log "$sd_name: reverted caps to $orig_fmt ($1)"
+    exit 1
+}
+
+flush_blk() {
+    if [ -b "$1" ] && command -v blockdev >/dev/null 2>&1; then
+        blockdev --flushbufs "$1" 2>/dev/null || :
+    fi
+}
+
+before_lines=$($DMESG_CMD 2>/dev/null | wc -l | tr -d '[:space:]')
+case $before_lines in ''|*[!0-9]*) before_lines=0 ;; esac
+
+# 1. Wake card (read-only 4 KiB).
+flush_blk "$blk_dev"
+dd if="$blk_dev" of=/dev/null bs=4096 count=1 2>/dev/null || revert_caps "wake read failed"
+
+# 2. Enable MMC_CAP_AGGRESSIVE_PM (0x80) keeping other caps bits.
+pm_val=$((target_val | 0x80))
+pm_caps=$(printf '0x%08x' "$pm_val")
+printf '%s\n' "$pm_caps" > "$caps_file" || revert_caps "failed to set aggressive PM bit"
+
+# 3. Wait longer than autosuspend (3000 ms).
+if [ "$AUTOSUSPEND_WAIT_S" -gt 0 ]; then
+    sleep "$AUTOSUSPEND_WAIT_S"
+fi
+if [ -z "${ENGINEX_MMC_AUTOSUSPEND_WAIT+x}" ] && [ -r "$card_dir/power/runtime_status" ]; then
+    _extra=0
+    while [ "$_extra" -lt 2 ]; do
+        _st=$(cat "$card_dir/power/runtime_status" 2>/dev/null || true)
+        [ "$_st" != active ] && break
+        sleep 1
+        _extra=$((_extra + 1))
+    done
+fi
+
+# 4. Read 4 KiB read-only from the block device to trigger re-init.
+flush_blk "$blk_dev"
+read_ok=1
+dd if="$blk_dev" of=/dev/null bs=4096 count=1 2>/dev/null || read_ok=0
+
+# 5. Clear 0x80 (unless it was already present originally).
+if [ $((orig_val & 0x80)) -eq 0 ]; then
+    printf '%s\n' "$target_caps" > "$caps_file" 2>/dev/null || :
+fi
+
+if [ "$SETTLE_WAIT_S" -gt 0 ]; then
+    sleep "$SETTLE_WAIT_S"
+fi
+
+[ "$read_ok" = 1 ] || revert_caps "post-suspend read failed"
+find_sd_card || revert_caps "card vanished"
+
+dmesg_all=$($DMESG_CMD 2>/dev/null || true)
+after_lines=$(printf '%s\n' "$dmesg_all" | wc -l | tr -d '[:space:]')
+case $after_lines in ''|*[!0-9]*) after_lines=0 ;; esac
+if [ "$after_lines" -ge "$before_lines" ]; then
+    dmesg_new=$(printf '%s\n' "$dmesg_all" | tail -n +"$((before_lines + 1))")
+else
+    dmesg_new=$dmesg_all
+fi
+if printf '%s\n' "$dmesg_new" | grep -qiE '(mmc[0-9]|dwmmc|ff0c0000).*(error|fail|timeout|crc|i/o error|bad|unable|reject)'; then
+    revert_caps "mmc error in dmesg"
+fi
+
+if [ "$want" = 0 ] && ios_is_hs; then
+    revert_caps "card remained in high-speed mode"
+fi
+
+if [ "$mode" = boot ]; then
+    : > "$RUN/sd-highspeed.boot-done"
+fi
+if [ "$want" = 1 ]; then
+    write_state active
+    if ios_is_hs; then
+        log "$sd_name: caps=$target_caps (sd high-speed)"
+    else
+        log "$sd_name: caps=$target_caps (legacy card via CMD6)"
+    fi
+else
+    write_state off
+    log "$sd_name: caps=$target_caps (high-speed off)"
+fi
