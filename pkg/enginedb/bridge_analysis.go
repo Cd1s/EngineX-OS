@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"sync"
 )
 
 // BridgeAnalysis keeps each imported track's Rekordbox source (track, cues,
@@ -18,17 +19,21 @@ import (
 
 var errAnalysisTooLarge = errors.New("enginedb: analysis row too large")
 
+var analysisWriters = sync.Pool{New: func() any {
+	// BestSpeed is a fixed valid level; keep its workspace across columns/rows.
+	w, _ := gzip.NewWriterLevel(io.Discard, gzip.BestSpeed)
+	return w
+}}
+
 func packAnalysis(b []byte) ([]byte, error) {
 	var buf bytes.Buffer
-	// BestSpeed: the deck compresses inside the mount-time read budget.
-	w, err := gzip.NewWriterLevel(&buf, gzip.BestSpeed)
-	if err != nil {
+	w := analysisWriters.Get().(*gzip.Writer)
+	w.Reset(&buf)
+	defer func() { w.Reset(io.Discard); analysisWriters.Put(w) }()
+	if _, err := w.Write(b); err != nil {
 		return nil, err
 	}
-	if _, err = w.Write(b); err != nil {
-		return nil, err
-	}
-	if err = w.Close(); err != nil {
+	if err := w.Close(); err != nil {
 		return nil, err
 	}
 	return buf.Bytes(), nil
