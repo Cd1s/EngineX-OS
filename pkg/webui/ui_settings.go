@@ -821,6 +821,12 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 	if httpsOn {
 		consoleLink = "https://" + net.JoinHostPort(lanHost(), s.httpsPortStr())
 	}
+	if pub := s.PublicTunnelURL(); pub != "" {
+		consoleLink = strings.TrimRight(pub, "/")
+	}
+	if u := s.cfg.PublicURL; u != "" && !strings.Contains(u, "enginex.lan") && !strings.Contains(u, "sc5000.lan") {
+		consoleLink = u
+	}
 	if r.Method == http.MethodGet && r.URL.Path == "/v1/enginex/ui" {
 		body, err := json.Marshal(struct {
 			uiSettings
