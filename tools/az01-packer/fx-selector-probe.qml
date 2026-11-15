@@ -138,7 +138,30 @@ Item {
             }
             if (probe.phase === 51) {
                 if (a.scFxBusy) return
-                probe.check(a.scFxIndex === a.scFxNames.length - 1, "continuous-five-step-burst-clamps")
+                probe.check(a.scFxIndex === a.scFxStock.length + 2, "continuous-one-step-per-detent-px")
+                let one = null
+                probe.walk(probe.knob, function(o) { if (o.scFxUnit === 1 && typeof o.scFxMove === "function") one = o })
+                one.scFxMove(-1, 8 / 63)
+                probe.phase = 52; return
+            }
+            if (probe.phase === 52) {
+                if (a.scFxBusy) return
+                probe.check(a.scFxIndex === a.scFxStock.length + 1, "continuous-dec-one-step-per-detent-px")
+                a.scFxIndex = 1
+                let one = null
+                probe.walk(probe.knob, function(o) { if (o.scFxUnit === 1 && typeof o.scFxMove === "function") one = o })
+                one.scFxMove(1, 1.0)
+                probe.phase = 53; return
+            }
+            if (probe.phase === 53) {
+                if (a.scFxBusy) return
+                probe.check(a.scFxIndex === 2, "continuous-one-step-per-detent-stock")
+                const tr = Planck.getProperty("/Engine/Mixer/DJFxUnit1/EffectIndex").translator
+                const savedStockIdx = tr.unnormalized
+                tr.unnormalized = 1
+                tr.incValue(8 / 63, 1.0, 0.0, false, false, 0)
+                probe.check(tr.unnormalized === 2, "stock-translator-one-step-per-detent")
+                tr.unnormalized = savedStockIdx
                 a.scFxAccept(a.scFxStock.length)
                 probe.phase = 6; return
             }

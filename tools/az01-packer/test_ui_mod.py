@@ -594,6 +594,43 @@ class UiModSourceTest(unittest.TestCase):
         finally:
             bp.ROOT = old_root
 
+    def test_prime4_fx_knob_moves_one_effect_per_detent(self):
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            edits = bp.edits(False)
+        finally:
+            bp.ROOT = old_root
+        knob_edits = edits["ControlSurfaceModules/ControlSurfaceModules/private/DJFxSelectKnob.qml"]
+        knob_code = "\n".join(rep for _, rep in knob_edits)
+        self.assertNotIn("* 63", knob_code)
+        m = re.search(r'function scFxMove\(direction, amount\)\s*\{.*?\n\s*\}', knob_code, re.S)
+        self.assertIsNotNone(m, knob_code)
+        move_fn = m.group(0)
+        script = f"""
+const assert = require('assert');
+let actions = [];
+function scFxAction(s) {{ actions.push(s); }}
+{move_fn}
+function incValue(amount) {{ scFxMove(1, amount); }}
+function decValue(amount) {{ scFxMove(-1, amount); }}
+for (const amt of [0, -1]) {{
+    actions = [];
+    incValue(amt);
+    assert.deepStrictEqual(actions, [], 'amount ' + amt);
+}}
+for (const amt of [1/63, 2/63, 4/63, 5/63, 8/63, 1.0]) {{
+    actions = [];
+    incValue(amt);
+    assert.deepStrictEqual(actions, ['Plus'], 'inc amount ' + amt);
+    actions = [];
+    decValue(amt);
+    assert.deepStrictEqual(actions, ['Minus'], 'dec amount ' + amt);
+}}
+"""
+        res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+
     def test_auto_analyze_cannot_submit_native_work(self):
         # Saved-on settings, drive insertion, playback and arbitrary filesystem
         # contents must all have the same result: zero automatic submissions.

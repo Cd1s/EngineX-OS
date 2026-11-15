@@ -364,10 +364,9 @@ FX_KNOB = r'''
             function scFxAction(suffix) { Planck.getProperty(scFxBus + suffix).translator.state = true }
             function scFxMove(direction, amount) {
                 if (!(amount > 0)) return // MIDI zero means no movement.
-                // JogOutput normalizes one detent to 1/63; preserve its decoded
-                // magnitude rather than changing continuous encoder behaviour.
-                const steps = Math.max(1, Math.min(63, Math.round(amount * 63)))
-                for (let n = 0; n < steps; ++n) scFxAction(direction > 0 ? "Plus" : "Minus")
+                // Stock EffectIndex.translator.incValue/decValue steps one entry per
+                // call for any positive amount (verified in JC11 sandbox).
+                scFxAction(direction > 0 ? "Plus" : "Minus")
             }
 '''
 
