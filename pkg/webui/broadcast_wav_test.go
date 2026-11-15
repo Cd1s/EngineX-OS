@@ -184,9 +184,9 @@ func TestConsoleBroadcastCardIsWAVOnly(t *testing.T) {
 		if !strings.Contains(page, `data-i18n="`+key+`"`) && !strings.Contains(page, "t('"+key+"')") {
 			t.Errorf("%s is not shown on the card", key)
 		}
-		m := regexp.MustCompile(key + `:\[('(?:[^'\\]|\\.)*'),('(?:[^'\\]|\\.)*'),('(?:[^'\\]|\\.)*')\]`).FindStringSubmatch(page)
+		m := regexp.MustCompile(key + `:\[('(?:[^'\\]|\\.)*'),('(?:[^'\\]|\\.)*'),('(?:[^'\\]|\\.)*'),('(?:[^'\\]|\\.)*')\]`).FindStringSubmatch(page)
 		if m == nil {
-			t.Fatalf("%s is not in all three languages", key)
+			t.Fatalf("%s is not in all languages", key)
 		}
 		for _, text := range m[1:] {
 			if !strings.Contains(text, want) {

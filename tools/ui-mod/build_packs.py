@@ -389,6 +389,18 @@ SETTINGS_COPY_MAIN = (HERE / "settings_copy.qml").read_text(encoding="utf-8")
 ROOT = "Skins/EmbeddedCommon/"
 # Translated, and scanned for compared literals: the trees the 5.0.4 packs always covered.
 TRANSLATED = ("Skins/EmbeddedCommon/", "Skins/Embedded/", "Skins/JP22SideScreen/", "UIKit.1/", "Skins/UIKit/")
+# One pack per language; i18n.tsv has a column for each one after English.
+LANGUAGES = ("en", "zh-Hans", "zh-Hant", "es")
+# Engine OS widgets the deck skin shows (deck source names, crossfader calibration, profile
+# card), translated live like Skins/Embedded/. Only these files: the rest of
+# Skins/EngineOS/ has not been reviewed.
+TRANSLATED_FILES = (
+    "Skins/EngineOS/UI/CompositeControls/CrossfaderCalibration/CrossfaderCalibrationView.qml",
+    "Skins/EngineOS/UI/CompositeControls/Deck/MicroDeck.qml",
+    "Skins/EngineOS/UI/CompositeControls/MediaDeck/ComputerDeckInfo.qml",
+    "Skins/EngineOS/UI/CompositeControls/MediaDeck/LineInDeckInfo.qml",
+    "Skins/EngineOS/UI/Controls/IdCard.qml",
+)
 DEV_HARNESS = """
 	Timer {
 		interval: 500; running: true; repeat: true
@@ -4663,8 +4675,8 @@ POWER_ENTRY = """
 LANGUAGE_ENTRY = """
 		EntryBase.ListEntry {
 			text: "Language"
-			readonly property var ids: ["en", "zh-Hans", "zh-Hant"]
-			values: ["English", "简体中文", "繁體中文"]
+			readonly property var ids: ["en", "zh-Hans", "zh-Hant", "es"]
+			values: ["English", "简体中文", "繁體中文", "Español"]
 			currentValue: values[Math.max(0, ids.indexOf(root.scLang))]
 			onSelected: function(index) {
 				if (ids[index] !== root.scLang) root.scCall("lang=" + ids[index])
@@ -7537,7 +7549,7 @@ def edits(dev: bool):
              '    readonly property string artistTextString: deckLoaded ? artistName : "No Track Loaded"\n',
              "    " + heads +
              '    readonly property string songTextString: deckLoaded ? (displayText.hideTitleArtist ? "" : (scHead && scHead.title) || displayText.display) : deckLabel\n'
-             '    readonly property string artistTextString: deckLoaded ? (displayText.hideTitleArtist ? "" : (scHead && scHead.title ? scHead.artist : artistName)) : "No Track Loaded"\n'),
+             '    readonly property string artistTextString: deckLoaded ? (displayText.hideTitleArtist ? "" : (scHead && scHead.title ? scHead.artist : artistName)) : ' + live_literal("No Track Loaded") + '\n'),
             ("    readonly property bool onlyFileName: view.onlyFileName\n",
              "    readonly property bool onlyFileName: view.onlyFileName && !(scHead && scHead.title)\n"),
             ("    readonly property bool isStemmed: view.stemmed\n",
@@ -8420,19 +8432,19 @@ def load_dict():
     rows = {}
     for line in (HERE / "i18n.tsv").read_text(encoding="utf-8").splitlines():
         if line and not line.startswith("#"):
-            en, hans, hant = line.split("\t")
-            rows[en] = {"zh-Hans": hans, "zh-Hant": hant}
+            en, hans, hant, es = line.split("\t")
+            rows[en] = {"zh-Hans": hans, "zh-Hant": hant, "es": es}
     return rows
 
 
 def encoded_dicts(rows):
     """Inactive languages stay scalar strings, not thousands of traced JS properties."""
     result = {}
-    for lang in ("en", "zh-Hans", "zh-Hant"):
+    for lang in LANGUAGES:
         d = {}
         for en, t in rows.items():
             to = en if lang == "en" else t[lang]
-            for spelling in (en, t["zh-Hans"], t["zh-Hant"]):
+            for spelling in (en, t["zh-Hans"], t["zh-Hant"], t["es"]):
                 d[spelling] = to
         result[lang] = json.dumps(d, ensure_ascii=False, separators=(",", ":"))
     return result
@@ -8493,7 +8505,7 @@ def render_language(text, lang, dicts, build_tag=""):
 def translated_qml(qrc: Path):
     for f in sorted(qrc.rglob("*.qml")):
         rel = f.relative_to(qrc).as_posix()
-        if rel.startswith(TRANSLATED) and "/Demo/" not in rel:
+        if (rel.startswith(TRANSLATED) or rel in TRANSLATED_FILES) and "/Demo/" not in rel:
             yield f, rel
 
 
@@ -8590,12 +8602,12 @@ def main():
     rows = load_dict()
     skip = compared_strings(a.qrc)
     dicts = encoded_dicts(rows)
-    for lang in ("en", "zh-Hans", "zh-Hant"):
+    for lang in LANGUAGES:
         table = {en: (en if lang == "en" else t[lang]) for en, t in rows.items()}
         files = dict(base)
         for f, rel in translated_qml(a.qrc):
             source = files.get(rel) or f.read_text(encoding="utf-8", errors="strict")
-            changed = translate(source, table, skip, live=rel.startswith(("Skins/EmbeddedCommon/", "Skins/Embedded/")))
+            changed = translate(source, table, skip, live=rel.startswith(("Skins/EmbeddedCommon/", "Skins/Embedded/")) or rel in TRANSLATED_FILES)
             if changed != source:
                 files[rel] = changed
         for rel, text in files.items():
@@ -8611,7 +8623,7 @@ def main():
         print(lang, len(files), "files")
     copy_icons(a.out / "icons")
     with tarfile.open(a.out.with_suffix(".tar.gz"), "w:gz") as t:
-        for lang in ("en", "zh-Hans", "zh-Hant"):
+        for lang in LANGUAGES:
             t.add(a.out / lang, arcname=f"packs/{lang}")
         t.add(a.out / "icons", arcname="icons")
 

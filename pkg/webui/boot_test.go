@@ -212,7 +212,7 @@ func TestBootResetCannotRaceReportPublication(t *testing.T) {
 
 // The console polls /boot-status once per page; showUI runs after every setting
 // change and must not add another poller. The public login notice and the console
-// table show the same three-language wording.
+// table show the same wording in every language.
 func TestBootNoticePollerOnceAndWordingShared(t *testing.T) {
 	b, err := assets.ReadFile("index.html")
 	if err != nil {
@@ -231,7 +231,7 @@ func TestBootNoticePollerOnceAndWordingShared(t *testing.T) {
 		t.Fatal("showUI re-registers the boot notice handlers")
 	}
 	for _, key := range []string{"bootFallbackSaved", "bootFallbackNoDrive", "bootFallbackNoReport"} {
-		m := regexp.MustCompile(key + `:(\['(?:[^'\\]|\\.)*','(?:[^'\\]|\\.)*','(?:[^'\\]|\\.)*'\])`).FindStringSubmatch(page)
+		m := regexp.MustCompile(key + `:(\['(?:[^'\\]|\\.)*','(?:[^'\\]|\\.)*','(?:[^'\\]|\\.)*','(?:[^'\\]|\\.)*'\])`).FindStringSubmatch(page)
 		if m == nil || !strings.Contains(bootLoginNoticeScript, m[1]) {
 			t.Errorf("%s: login notice wording differs from the console table", key)
 		}
