@@ -396,6 +396,7 @@ for language in ('en', 'zh-CN', 'zh-TW'):
     img = Image.open(raw/f'{language}-console.png').convert('RGB')
     out = repo/'docs/assets/screenshots'/language
     img.crop((0, 0, 2560, 2700)).save(out/'14-webui-console.png')
+    img.crop((0, 1780, 2560, 5060)).save(out/'15-webui-wifi-drop.png')
 PY
     exit
 fi
