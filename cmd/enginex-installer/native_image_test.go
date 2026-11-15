@@ -147,6 +147,40 @@ func TestNativeImageRefusesOversizedBackup(t *testing.T) {
 	}
 }
 
+func TestUSBUpdateModePreservesBackupSize(t *testing.T) {
+	ctx := ctxT(t)
+	b := buildBundle(t, "PRIME4G2", "5.3.0.5")
+	backup := filepath.Join(t.TempDir(), "data-backup.img")
+	fs, err := ext4.Create(ctx, backup, ext4.CreateOptions{Size: 128 << 20, Label: "data"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.Apply(ctx, ext4.ChangeSet{Files: []ext4.Entry{imageBytes("Music/keep.txt", []byte("keep"), 0o644)}}); err != nil {
+		t.Fatal(err)
+	}
+	fs.Close()
+	before := sha(t, backup)
+	o, device := azOpts(t, b, func(int) string { return "1cc5:2027 inMusic PRIME 4 G2\n" })
+	o.Backup = backup
+	if err := run(ctx, o); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := os.Stat(device.img); err != nil || st.Size() != 128<<20 {
+		t.Fatalf("backup filesystem size changed: %v %v", st, err)
+	}
+	result, err := ext4.Open(device.img)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer result.Close()
+	if got, err := result.ReadFile("Music/keep.txt", 4); err != nil || string(got) != "keep" {
+		t.Fatalf("backup music changed: %q %v", got, err)
+	}
+	if sha(t, backup) != before {
+		t.Fatal("source backup changed")
+	}
+}
+
 func TestNativeImageWithoutHostTools(t *testing.T) {
 	bundle := buildBundle(t, "PRIME4PLUS", "5.3.0.5")
 	b, err := readBundle(ctxT(t), bundle.Path)

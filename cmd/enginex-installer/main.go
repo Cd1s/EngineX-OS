@@ -3,7 +3,7 @@
 //
 //	mode A: the deck is on the LAN with SSH open -> stream the Data-Bundle over SSH.
 //	mode B: the deck is in fastboot (USB)         -> build a /data image and flash it.
-//	mode C: Firmware Update Mode as 1cc5:2027      -> build a 64 MiB /data image, write-part it over USB (#116).
+//	mode C: Firmware Update Mode as 1cc5:2027      -> size /data for the bundle and OTA, write-part it over USB (#116, #244).
 package main
 
 import (
@@ -1443,8 +1443,7 @@ func modeBGen1(ctx context.Context, o *options, session *updateSession, m model)
 // ---- mode C: Firmware Update Mode without fastboot (1cc5:2027) --------------
 
 const (
-	azID       = "1cc5:2027"
-	azDataSize = 64 << 20 // the fresh /data image SBDJUK flashed on a SYSTEM ONE (#116)
+	azID = "1cc5:2027"
 )
 
 // azNames match the USB product string when nothing else names the deck; most specific first.
@@ -1551,7 +1550,11 @@ func modeAZ(ctx context.Context, o *options, session *updateSession, board, line
 	if err != nil {
 		return err
 	}
-	img, fresh, err := buildImage(ctx, o, b, azDataSize, "data-enginex.img", "data")
+	size, err := azImageSize(ctx, o, b)
+	if err != nil {
+		return err
+	}
+	img, fresh, err := buildImage(ctx, o, b, size, "data-enginex.img", "data")
 	if err != nil {
 		return err
 	}
@@ -1659,7 +1662,7 @@ func run(ctx context.Context, o *options) error {
 func registerFlags(fs *flag.FlagSet, o *options) {
 	fs.StringVar(&o.Bundle, "bundle", "", "*-Update.img or Data-Bundle.tar.gz to install (use a signed matching-version package beside this installer when present; otherwise default: latest release; a package in the folder is reused only when its SHA-256 matches)")
 	fs.StringVar(&o.Bundle, "image", "", "alias for -bundle: *-Update.img to install")
-	fs.StringVar(&o.Backup, "userdata-backup", "", "mode B: a backup image of the deck's data partition to inject into (keeps the user's files; if omitted, a fresh partition is created)")
+	fs.StringVar(&o.Backup, "userdata-backup", "", "USB: a backup image of the deck's data partition to inject into (keeps the user's files; if omitted, a fresh partition is created)")
 	fs.StringVar(&o.Key, "key", "", "mode A: SSH private key (default ~/.ssh/id_*; password denon is also tried)")
 	fs.StringVar(&o.Password, "password", "", "mode A: SSH password for root")
 	fs.StringVar(&o.Repo, "repo", "Cd1s/EngineX-OS", "GitHub repository to download from")

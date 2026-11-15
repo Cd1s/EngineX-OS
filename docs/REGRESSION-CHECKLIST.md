@@ -6,7 +6,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 
 ---
 
-## Regression Table (227 Rows)
+## Regression Table (228 Rows)
 
 | # | Behaviour that must keep working | Issue / commit that fixed it | How it is checked (automated test name, or exact real-deck / sandbox step) | Release gate / deck acceptance / recording coverage |
 | --- | --- | --- | --- | --- |
@@ -238,6 +238,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 | 226 | **Spotify's native Ogg keeps a recognized Engine download name** (#277, NH08): use the carrier's patched `mp3` naming tag/URL while the BTS MIME, media response and original bytes remain `audio/ogg`. Cold manifests still return before acquisition; full-body/Range, warm cache, legacy stream URL and #269's track-only failures/real-auth isolation remain covered. No WAV change or transcoding. | `#277`, `#269` | `pkg/webui/tidal_spotify_load_test.go::TestSpotifyEngineDownloadNameKeepsNativeMedia277`, existing `TestSpotify*269`; native NH08 diagnostic: FFmpeg probes the same valid Ogg through `.ogg` and `.mp3`, unlike an extensionless file | Real NH08: cold/warm Spotify LOAD on both decks, correct audio and waveform, no logout/source rotation; actual user build/account failure still requires logs |
 | 227 | **EngineX binary settings use stock switch rows and keep following external changes after a tap** (#283): all 13 rows retain their existing state properties, `key=0/1` writes and visibility gates; both 5.0.4 and 5.3.0 bind stock `checkedExternally`, including changes from the web console | Stock settings rows (5.3.0.5) | `OnOffSwitchCompatibilityTest`; `UiModSourceTest.test_on_off_settings_use_engines_switch_row`; both QRC bases, all three languages | On a deck, toggle each visible row, change it from the web console, reopen the page and confirm the saved value |
 | 227 | **5.3.0.5 discovers only update images for OTA** (#215 bridge): legacy tar.gz assets stay in the release for older decks, but this updater never selects them, including when Gen-2 is locked. Installer legacy input compatibility remains. | #215 | `pkg/webui::TestUpdateNeverOffersLegacyBundles`, `TestUpdatePicksGen2ImgWhenUnlocked`, re-release and signed OTA suites | Older release to signed 5.3.0.5, then signed next release: release gates; real reboot/progress `[NO AUTOMATED TEST]` |
+| 228 | **Fresh mode-C data filesystems leave room for later signed OTA** (PRIME 4 G2 / SYSTEM ONE): measure bundle/UI content, reserve download/staging/Engine space and ext4 overhead; a supplied backup retains its size, music and source bytes. | #244 | `cmd/enginex-installer::TestUSBUpdateModeLeavesRoomForSignedOTA`, `TestUSBUpdateModePreservesBackupSize` | `[NO AUTOMATED TEST]` physical data partition capacity, first boot and next signed OTA on both AZ04 models |
 
 ## Automated Test Gaps (`[NO AUTOMATED TEST]`)
 

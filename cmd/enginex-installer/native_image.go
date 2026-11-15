@@ -23,6 +23,34 @@ type bundleInfo struct {
 
 var verifyImage = ext4.VerifyFile
 
+// Mode C has no partition-size query. Fresh filesystems include the measured bundle and UI,
+// the signed OTA budget (64 MiB download, two 128 MiB staging copies, 256 MiB Engine reserve),
+// plus 25% for ext4 metadata/reserved blocks and cache growth. Backups keep their exact size.
+func azImageSize(ctx context.Context, o *options, b *bundleInfo) (int64, error) {
+	if o.Backup != "" {
+		st, err := os.Stat(o.Backup)
+		if err != nil {
+			return 0, err
+		}
+		return st.Size(), nil
+	}
+	var payload int64
+	measure := func(e azimg.Entry) error {
+		payload += (e.Size + 4095) / 4096 * 4096
+		return nil
+	}
+	if err := b.bundle.Walk(ctx, measure); err != nil {
+		return 0, err
+	}
+	if err := b.bundle.WalkUI(ctx, measure); err != nil {
+		return 0, err
+	}
+	size := payload + (64+2*128+256)<<20
+	size += size / 4
+	const quantum = 64 << 20
+	return (size + quantum - 1) / quantum * quantum, nil
+}
+
 func readBundle(ctx context.Context, path string) (*bundleInfo, error) {
 	f, err := os.Open(path)
 	if err != nil {

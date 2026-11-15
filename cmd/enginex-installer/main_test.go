@@ -1785,7 +1785,7 @@ func azOpts(t *testing.T, b bundleFile, list func(int) string) (*options, *testU
 	return o, d
 }
 
-func TestUSBUpdateModeFlashesA64MiBDataImage(t *testing.T) {
+func TestUSBUpdateModeLeavesRoomForSignedOTA(t *testing.T) {
 	need(t, "python3", "mke2fs", "debugfs", "e2fsck", "dumpe2fs")
 	b := buildBundle(t, "SYSTEMONE", "5.3.0.3")
 	o, shim := azOpts(t, b, func(int) string { return "1d6b:0002 Linux Foundation\n1cc5:2027 inMusic SYSTEM ONE\n" })
@@ -1798,8 +1798,16 @@ func TestUSBUpdateModeFlashesA64MiBDataImage(t *testing.T) {
 	if shim.calls != 1 {
 		t.Fatalf("USB flash calls = %d", shim.calls)
 	}
-	if fi, _ := os.Stat(shim.img); fi == nil || fi.Size() != 64<<20 {
-		t.Fatalf("image size = %v, want 64 MiB", fi)
+	image, err := ext4.Open(shim.img)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := image.Profile()
+	image.Close()
+	// OTA needs 64 MiB download + two 128 MiB install copies + 256 MiB left for Engine.
+	// The updater sees available space after ext4's 5% reserved blocks.
+	if available := (profile.FreeBlocks - profile.Blocks/20) * uint64(profile.BlockSize); available < 576<<20 {
+		t.Fatalf("fresh AZ04 filesystem leaves %d available bytes, signed OTA needs 576 MiB", available)
 	}
 	sh(t, "e2fsck", "-fn", shim.img)
 	hdr := sh(t, "dumpe2fs", "-h", shim.img)
@@ -2230,7 +2238,7 @@ func TestGen2UpdateImgEndToEndAllModes(t *testing.T) {
 			t.Fatalf("Mode C flashed corrupted Update.img (%d calls)", badUSB.calls)
 		}
 
-		// Valid *-Update.img (no .tar.gz in release) builds 64 MiB ext4 image and flashes over 1cc5:2027.
+		// Valid *-Update.img (no .tar.gz in release) builds an ext4 image with OTA headroom and flashes over 1cc5:2027.
 		o := testOpts(t)
 		useRelease(o, gen2ImageReleaseServer(t, b.ImagePath, "", nil))
 		_, shim := azOpts(t, b, func(int) string { return "1cc5:2027 inMusic SYSTEM ONE" })
