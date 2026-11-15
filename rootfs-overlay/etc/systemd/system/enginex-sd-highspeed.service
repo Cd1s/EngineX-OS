@@ -1,0 +1,14 @@
+[Unit]
+Description=EngineX RK3288 SD card High Speed setup
+After=local-fs.target sys-kernel-debug.mount systemd-udev-settle.service enginex-prepare.service
+Wants=sys-kernel-debug.mount enginex-prepare.service
+Before=edisksd.service engine.service enginex-storage-discover.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=-/usr/local/bin/enginex-sd-highspeed boot
+TimeoutStartSec=15
+
+[Install]
+WantedBy=multi-user.target

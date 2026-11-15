@@ -412,6 +412,7 @@ Environment=HOME=/tmp/enginex-engine-home MESA_SHADER_CACHE_MAX_SIZE=32M
 Environment=QML_DISABLE_DISK_CACHE=1
 EnvironmentFile=-/data/enginex/ui-scale.env
 ExecStartPre=/bin/mkdir -p -m 0700 /tmp/enginex-engine-home
+ExecStartPre=-$bin_dir/enginex-sd-highspeed boot
 ExecStartPre=-$bundle_dir/boot-activate.sh --restore-tz
 ExecStartPre=-$bin_dir/engine-ui-guard pre
 ExecStartPre=-$bundle_dir/boot-activate.sh --convert-mounted
@@ -669,6 +670,7 @@ fi
 if [ "$(cat "${ENGINEX_PID1_COMM:-/proc/1/comm}" 2>/dev/null)" = systemd ] && systemctl daemon-reload >/dev/null 2>&1; then
     systemctl restart --no-block enginex-stream-sync.service enginex-rb-bridge.service enginex-deemixd.service engine-guardian.service || :
     [ -z "$ssh_start" ] || systemctl start --no-block sshd.service || :
+    [ ! -x "$bin_dir/enginex-sd-highspeed" ] || ENGINEX_UI_DIR="$dest/ui" ENGINEX_RUN_ROOT=/run/enginex "$bin_dir/enginex-sd-highspeed" boot || :
     # Blocking, so edisksd is up again before the hooked start converts what is in /media.
     [ "$edisksd_changed" = 0 ] || systemctl restart edisksd.service || :
     [ "$timesyncd_changed" = 0 ] || systemctl restart --no-block systemd-timesyncd.service || :
@@ -1103,6 +1105,8 @@ def build(version, suite, hook, ui_packs, out, prefix='SCLIVE4', edisksd_hook=No
         files[f'bin/{applet}'] = (WRAPPER.format(applet).encode(), 0o755)
     files['bin/engine-ui-guard'] = ((Path(__file__).resolve().parents[2] /
                                   'rootfs-overlay/etc/enginex/engine-ui-guard').read_bytes(), 0o755)
+    files['bin/enginex-sd-highspeed'] = ((Path(__file__).resolve().parents[2] /
+                                          'rootfs-overlay/usr/local/bin/enginex-sd-highspeed').read_bytes(), 0o755)
     files['ui-packs.tar'] = (ui_packs_tar(ui_packs), 0o644)
     files['version.txt'] = (f'{version}\n'.encode(), 0o644)
     files['model'] = (f'{prefix}\n'.encode(), 0o644)  # install.sh refuses it on another model (BH-G2-1)

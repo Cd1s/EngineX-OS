@@ -561,6 +561,8 @@ SERVICES_MAIN = """
 	property bool scRemoteLoad: false // LAN API loads a track onto an idle deck (off by default)
 	property bool scProlinkShare: false // #59, read by rb-bridge
 	property bool scProlinkExport: false // #63, experimental export to CDJs
+	property bool scSdHighSpeed: false // RK3288 SD High Speed (50 MHz), off by default
+	property bool scSdHighSpeedPending: false
 	// #49: the decks this player owns in the 4-deck layout ("13", "24", "12", "1", "2";
 	// empty: no 4-deck layout). Engine refuses loading the others (LoadToDeckFilter).
 	property string scFourDeckRole: ""
@@ -3535,6 +3537,9 @@ SERVICES_MAIN = """
 			else if (v.jog_invert_left !== undefined) scReverseJogLeft = v.jog_invert_left === "1" || v.jog_invert_left === 1 || v.jog_invert_left === true
 			if (v.jogInvertRight !== undefined) scReverseJogRight = !!v.jogInvertRight
 			else if (v.jog_invert_right !== undefined) scReverseJogRight = v.jog_invert_right === "1" || v.jog_invert_right === 1 || v.jog_invert_right === true
+			if (v.sdHighSpeed !== undefined) scSdHighSpeed = !!v.sdHighSpeed
+			else if (v.sd_high_speed !== undefined) scSdHighSpeed = v.sd_high_speed === "1" || v.sd_high_speed === 1 || v.sd_high_speed === true
+			scSdHighSpeedPending = !!v.sdHighSpeedPending
 			if (typeof scSyncReverseJog === "function") scSyncReverseJog(true)
 			if (v.ledBrightness !== undefined) scLedBrightness = parseInt(v.ledBrightness) || 100
 			else if (v.led_brightness !== undefined) scLedBrightness = parseInt(v.led_brightness) || 100
@@ -3613,6 +3618,7 @@ SERVICES_MAIN = """
 		scTracklistWaveform = true
 		root.scReverseJogLeft = false
 		root.scReverseJogRight = false
+		root.scSdHighSpeed = false
 		for (const line of (text || "").split("\\n")) {
 			const eq = line.indexOf("=")
 			if (eq < 0) continue
@@ -3626,6 +3632,7 @@ SERVICES_MAIN = """
 			else if (key === "swap_loop_order") root.scSwapLoopOrder = val === "1"
 			else if (key === "jog_invert_left") root.scReverseJogLeft = val === "1" || val === "true"
 			else if (key === "jog_invert_right") root.scReverseJogRight = val === "1" || val === "true"
+			else if (key === "sd_high_speed") root.scSdHighSpeed = val === "1" || val === "true"
 			else if (key === "led_brightness") root.scLedBrightness = parseInt(val) || 100
 			else if (key === "ui_scale") root.scUIScale = parseInt(val) || 100
 			else if (key === "stems_eq_mode") root.scStemsEqMode = val === "1"
@@ -4645,6 +4652,35 @@ UI_SCALE_ENTRY = """
 			currentValue: values[Math.max(0, ids.indexOf(String(root.scUIScale)))]
 			onSelected: function(index) { if (ids[index] !== String(root.scUIScale)) root.scCall("uiScale=" + ids[index]) }
 		},
+"""
+
+SD_HIGH_SPEED_ENTRIES = switch_entry(
+    "High-speed SD card",
+    "scSdHighSpeed",
+    "sdHighSpeed",
+    '\t\t\tobjectName: "EngineX_SdHighSpeed"\n\t\t\tvisible: !root.scIsAZ04\n',
+) + """\t\tText {
+\t\t\tobjectName: "EngineX_SdHighSpeedHint"
+\t\t\tvisible: !root.scIsAZ04
+\t\t\tLayout.fillWidth: true
+\t\t\tLayout.preferredHeight: implicitHeight
+\t\t\tleftPadding: 24; rightPadding: 24
+\t\t\twrapMode: Text.WordWrap
+\t\t\tcolor: "#9a9a9a"
+\t\t\tfont.pixelSize: 16
+\t\t\ttext: "Experimental: faster SD card reading (about 2x). Turn off if the SD card is not recognised."
+\t\t},
+\t\tText {
+\t\t\tobjectName: "EngineX_SdHighSpeedPending"
+\t\t\tvisible: !root.scIsAZ04 && root.scSdHighSpeedPending
+\t\t\tLayout.fillWidth: true
+\t\t\tLayout.preferredHeight: implicitHeight
+\t\t\tleftPadding: 24; rightPadding: 24
+\t\t\twrapMode: Text.WordWrap
+\t\t\tcolor: "#ffb74d"
+\t\t\tfont.pixelSize: 16
+\t\t\ttext: "Applies at next start or SD insert"
+\t\t},
 """
 
 SETTINGS_COPY_ENTRIES = """
@@ -6479,8 +6515,8 @@ def edits(dev: bool):
         ],
         # 5.3.0 moved it up from TabContents/, so its imports lost the "../".
         prefs + ("" if v53() else "TabContents/") + "DeviceTabContent.qml": [
-            (f'import "{"" if v53() else "../"}Entries"\n', f'import "{"" if v53() else "../"}Entries"\nimport "{"" if v53() else "../"}Entries/Base" as EntryBase\nimport Planck 1.0\n'),
-            ("		PlayerNumber { },\n", LANGUAGE_ENTRY + LED_ENTRY + (POWER_ENTRY + SETTINGS_COPY_ENTRIES if v53() else "") + "		PlayerNumber { },\n"),
+            (f'import "{"" if v53() else "../"}Entries"\n', f'import QtQuick.Layouts 1.12\nimport "{"" if v53() else "../"}Entries"\nimport "{"" if v53() else "../"}Entries/Base" as EntryBase\nimport Planck 1.0\n'),
+            ("		PlayerNumber { },\n", LANGUAGE_ENTRY + LED_ENTRY + (POWER_ENTRY + SETTINGS_COPY_ENTRIES if v53() else "") + SD_HIGH_SPEED_ENTRIES + "		PlayerNumber { },\n"),
             *([("        PlatterCalibration {},\n", "        PlatterCalibration {},\n" + JOG_INVERT_ENTRIES)] if v53() else []),
         ],
         **{prefs + ("" if v53() else "TabContents/") + f"{name}TabContent.qml": [

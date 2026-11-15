@@ -77,6 +77,10 @@ type Config struct {
 	MediaRoot string
 	// RestartEngine replaces "systemctl restart engine.service" in tests.
 	RestartEngine func() error
+	// SDHighSpeedRunDir overrides /run/enginex for SD high-speed state in tests.
+	SDHighSpeedRunDir string
+	// ApplySDHighSpeed overrides invoking enginex-sd-highspeed in tests.
+	ApplySDHighSpeed func(enabled, playing bool) (pending bool, err error)
 	// ProlinkExport selects the optional read-only CDJ export; zero uses the
 	// mounted USB and standard ports. It stays inert until explicitly enabled.
 	ProlinkExport prolink.ExportConfig

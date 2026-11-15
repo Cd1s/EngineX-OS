@@ -50,8 +50,8 @@ mkdir -p "$base/etc/systemd/system/engine.service.d" "$base/etc/systemd/journald
 cat > "$base/etc/systemd/system/engine.service.d/override.conf" <<'CONF'
 [Unit]
 # The image's UI packs and version.txt are installed by this unit (az01_packer PREPARE).
-Wants=enginex-prepare.service
-After=enginex-prepare.service
+Wants=enginex-prepare.service enginex-sd-highspeed.service
+After=enginex-prepare.service enginex-sd-highspeed.service
 
 [Service]
 LimitCORE=0

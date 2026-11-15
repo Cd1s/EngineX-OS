@@ -492,7 +492,7 @@ lacks ', RUN+=' "$ROOT/rootfs-overlay/etc/udev/rules.d/60-enginex-storage.rules"
 has 'Restart=always' "$ROOT/rootfs-overlay/etc/systemd/system/rb-bridge.service"
 ok 'background service isolation and systemd udev handoff are installed'
 
-for script in "$STORAGE" "$PERF" "$ROOT/rootfs-overlay/usr/local/bin/enginex-suite-exec" "$ROOT/rootfs-overlay/etc/enginex/engine-ui-guard"; do
+for script in "$STORAGE" "$PERF" "$ROOT/rootfs-overlay/usr/local/bin/enginex-suite-exec" "$ROOT/rootfs-overlay/etc/enginex/engine-ui-guard" "$ROOT/rootfs-overlay/usr/local/bin/enginex-sd-highspeed"; do
     [[ $(head -n 1 "$script") == '#!/bin/sh' ]] || fail "$script must use /bin/sh (no bash on Engine OS)"
     if command -v busybox >/dev/null; then busybox sh -n "$script" || fail "busybox sh syntax: $script"; else sh -n "$script"; fi
 done
@@ -934,6 +934,218 @@ if command -v arm-linux-gnueabihf-gcc >/dev/null 2>&1 && command -v arm-linux-gn
         fail 'rootfs-overlay libedisksd-hook.so is out of sync with tools/edisksd-hook/edisksd_hook.c'
     ok 'committed 32-bit hooks in rootfs-overlay match fresh source builds byte-for-byte'
 fi
+
+SD_HS=$ROOT/rootfs-overlay/usr/local/bin/enginex-sd-highspeed
+[[ -x $SD_HS ]] || fail "missing executable $SD_HS"
+# Boot ordering in Gen-1 systemd: runs before edisksd, engine and enginex-storage-discover.
+SD_HS_UNIT=$ROOT/rootfs-overlay/etc/systemd/system/enginex-sd-highspeed.service
+[[ -f $SD_HS_UNIT ]] || fail "missing $SD_HS_UNIT"
+[[ -L $ROOT/rootfs-overlay/etc/systemd/system/multi-user.target.wants/enginex-sd-highspeed.service ]] ||
+    fail "enginex-sd-highspeed.service not enabled in multi-user.target.wants"
+has 'Before=edisksd.service engine.service enginex-storage-discover.service' "$SD_HS_UNIT"
+has 'enginex-sd-highspeed.service' "$ROOT/rootfs-overlay/etc/systemd/system/edisksd.service.d/50-enginex-hook.conf"
+has 'enginex-sd-highspeed.service' "$ROOT/rootfs-overlay/etc/systemd/system/engine.service.d/override.conf"
+has 'enginex-sd-highspeed.service' "$debloat_root/etc/systemd/system/engine.service.d/override.conf"
+
+sdhs_fixture() {
+    sd_root=$TMP/sdhs-case-$count
+    rm -rf "$sd_root"
+    mkdir -p "$sd_root"/{sys/class/mmc_host,sys/class/block,sys/bus/mmc/devices,dbg,dev,run,ui,dt,bin}
+    # eMMC (mmc0: ff0f0000, non-removable + broken-cd)
+    mkdir -p "$sd_root/dt/mmc@ff0f0000" "$sd_root/sys/class/mmc_host/mmc0/device" "$sd_root/dbg/mmc0"
+    : > "$sd_root/dt/mmc@ff0f0000/non-removable"
+    : > "$sd_root/dt/mmc@ff0f0000/broken-cd"
+    ln -s "$sd_root/dt/mmc@ff0f0000" "$sd_root/sys/class/mmc_host/mmc0/device/of_node"
+    printf '0x4000000f\n' > "$sd_root/dbg/mmc0/caps"
+    printf 'timing spec:\t9 (mmc HS200)\n' > "$sd_root/dbg/mmc0/ios"
+    # SD slot (mmc1: ff0c0000, cd-gpios)
+    mkdir -p "$sd_root/dt/mmc@ff0c0000" "$sd_root/sys/class/mmc_host/mmc1/device" "$sd_root/dbg/mmc1"
+    : > "$sd_root/dt/mmc@ff0c0000/cd-gpios"
+    ln -s "$sd_root/dt/mmc@ff0c0000" "$sd_root/sys/class/mmc_host/mmc1/device/of_node"
+    printf '0x80000001\n' > "$sd_root/dbg/mmc1/caps"
+    printf 'timing spec:\t0 (legacy)\n' > "$sd_root/dbg/mmc1/ios"
+    # SDIO Wi-Fi (mmc2: ff0d0000, SDIO card)
+    mkdir -p "$sd_root/dt/mmc@ff0d0000" "$sd_root/sys/class/mmc_host/mmc2/device" "$sd_root/sys/class/mmc_host/mmc2/mmc2:0001" "$sd_root/dbg/mmc2"
+    : > "$sd_root/dt/mmc@ff0d0000/non-removable"
+    ln -s "$sd_root/dt/mmc@ff0d0000" "$sd_root/sys/class/mmc_host/mmc2/device/of_node"
+    printf 'SDIO\n' > "$sd_root/sys/class/mmc_host/mmc2/mmc2:0001/type"
+    printf '0x40000001\n' > "$sd_root/dbg/mmc2/caps"
+    printf 'timing spec:\t2 (sd high-speed)\n' > "$sd_root/dbg/mmc2/ios"
+    # Inserted SD card + fake raw device (read-only verification)
+    mkdir -p "$sd_root/sys/bus/mmc/devices/mmc1:aaaa/block/mmcblk1" "$sd_root/sys/bus/mmc/devices/mmc1:aaaa/power"
+    printf 'SD\n' > "$sd_root/sys/bus/mmc/devices/mmc1:aaaa/type"
+    printf 'auto\n' > "$sd_root/sys/bus/mmc/devices/mmc1:aaaa/power/control"
+    printf '3000\n' > "$sd_root/sys/bus/mmc/devices/mmc1:aaaa/power/autosuspend_delay_ms"
+    dd if=/dev/zero of="$sd_root/dev/mmcblk1" bs=4096 count=2 2>/dev/null
+    sha256sum "$sd_root/dev/mmcblk1" > "$sd_root/dev/mmcblk1.sha"
+    printf 'inmusic,jp07\0rockchip,rk3288\0' > "$sd_root/compatible"
+    : > "$sd_root/dmesg.log"
+    cat > "$sd_root/bin/dmesg" <<'MOCK'
+#!/bin/sh
+cat "$SDHS_DMESG"
+MOCK
+    cat > "$sd_root/bin/curl" <<'MOCK'
+#!/bin/sh
+printf '%s' "${SDHS_CLOCK_JSON:-{\"clockApi\":true,\"decks\":[]}}"
+MOCK
+    chmod +x "$sd_root/bin/dmesg" "$sd_root/bin/curl"
+}
+run_sdhs() {
+    PATH="$sd_root/bin:$PATH" \
+    ENGINEX_SYS_ROOT="$sd_root/sys" \
+    ENGINEX_DEBUGFS_ROOT="$sd_root/dbg" \
+    ENGINEX_DEV_ROOT="$sd_root/dev" \
+    ENGINEX_RUN_ROOT="$sd_root/run" \
+    ENGINEX_UI_DIR="$sd_root/ui" \
+    ENGINEX_DT_COMPAT="$sd_root/compatible" \
+    ENGINEX_DMESG_CMD="$sd_root/bin/dmesg" \
+    ENGINEX_CLOCK_URL="http://127.0.0.1:8080/v1/enginex/clock" \
+    ENGINEX_MMC_AUTOSUSPEND_WAIT=0 \
+    ENGINEX_MMC_SETTLE_WAIT=0 \
+    SDHS_DMESG="$sd_root/dmesg.log" \
+    sh "$SD_HS" "$@"
+}
+
+# 1. Off by default and 0x4 already clear -> never touches caps.
+sdhs_fixture
+chmod 0444 "$sd_root/dbg/mmc1/caps"
+run_sdhs boot
+[[ $(cat "$sd_root/dbg/mmc1/caps") == 0x80000001 ]] || fail 'Off mode changed mmc1 caps'
+[[ $(cat "$sd_root/dbg/mmc0/caps") == 0x4000000f && $(cat "$sd_root/dbg/mmc2/caps") == 0x40000001 ]] || fail 'Off mode touched eMMC/SDIO'
+[[ $(cat "$sd_root/run/sd-highspeed.state") == off ]] || fail 'Off mode state mismatch'
+ok 'enginex-sd-highspeed: Off with 0x4 clear does not write caps'
+
+# 2. On -> sets 0x4 keeping bit 31 and other bits, runs PM cycle (0x80 set then cleared), leaves card intact.
+sdhs_fixture
+printf 'sd_high_speed=1\n' > "$sd_root/ui/settings.conf"
+: > "$sd_root/caps.history"
+cat > "$sd_root/bin/dd" <<'MOCK'
+#!/bin/sh
+cat "$SDHS_CAP" >> "$SDHS_HIST"
+for a; do
+    case $a in if=*)
+        dev=${a#if=}
+        [ -e "$dev" ] || exit 1
+        printf '%s\n' "$dev" >> "$SDHS_READS" ;;
+    esac
+done
+if [ -n "${SDHS_PM_NEW_IOS:-}" ] && grep -qx '0x80000085' "$SDHS_HIST" 2>/dev/null; then
+    printf '%s\n' "$SDHS_PM_NEW_IOS" > "$SDHS_IOS"
+fi
+if [ -n "${SDHS_PM_DMESG_ERR:-}" ] && grep -qx '0x80000085' "$SDHS_HIST" 2>/dev/null; then
+    printf '%s\n' "$SDHS_PM_DMESG_ERR" >> "$SDHS_DMESG"
+fi
+if [ "${SDHS_PM_VANISH:-0}" = 1 ] && grep -qx '0x80000085' "$SDHS_HIST" 2>/dev/null; then
+    rm -rf "$SDHS_CARD" "$SDHS_BLK"
+fi
+exec /bin/dd "$@"
+MOCK
+chmod +x "$sd_root/bin/dd"
+SDHS_CAP="$sd_root/dbg/mmc1/caps" SDHS_HIST="$sd_root/caps.history" SDHS_READS="$sd_root/reads.log" \
+SDHS_IOS="$sd_root/dbg/mmc1/ios" SDHS_PM_NEW_IOS="$(printf 'timing spec:\t2 (sd high-speed)')" \
+    run_sdhs boot
+[[ $(cat "$sd_root/dbg/mmc1/caps") == 0x80000005 ]] || fail "caps got $(cat "$sd_root/dbg/mmc1/caps"), want 0x80000005"
+[[ $(cat "$sd_root/dbg/mmc0/caps") == 0x4000000f && $(cat "$sd_root/dbg/mmc2/caps") == 0x40000001 ]] || fail 'touched eMMC/SDIO caps'
+has '0x80000085' "$sd_root/caps.history"
+[[ $(wc -l < "$sd_root/reads.log") -ge 2 ]] || fail 'missing wake + post-suspend reads'
+sha256sum -c "$sd_root/dev/mmcblk1.sha" >/dev/null || fail 'block device was modified'
+[[ $(cat "$sd_root/run/sd-highspeed.state") == active ]] || fail 'On mode state mismatch'
+ok 'enginex-sd-highspeed: On sets 0x4 keeping other bits, runs PM re-init read-only, selects SD host only'
+
+# 3. Fallback host selection by cd-gpios when of_node path does not name ff0c0000.
+sdhs_fixture
+rm "$sd_root/sys/class/mmc_host/mmc1/device/of_node"
+mv "$sd_root/dt/mmc@ff0c0000" "$sd_root/dt/mmc-external-sd"
+ln -s "$sd_root/dt/mmc-external-sd" "$sd_root/sys/class/mmc_host/mmc1/device/of_node"
+printf 'sd_high_speed=1\n' > "$sd_root/ui/settings.conf"
+run_sdhs boot
+[[ $(cat "$sd_root/dbg/mmc1/caps") == 0x80000005 && $(cat "$sd_root/dbg/mmc0/caps") == 0x4000000f ]] || fail 'cd-gpios fallback missed mmc1'
+ok 'enginex-sd-highspeed: cd-gpios fallback picks removable SD slot and skips eMMC/SDIO'
+
+# 4. Revert on dmesg mmc error and on vanished card.
+sdhs_fixture
+printf 'sd_high_speed=1\n' > "$sd_root/ui/settings.conf"
+cat > "$sd_root/bin/dd" <<'MOCK'
+#!/bin/sh
+cat "$SDHS_CAP" >> "$SDHS_HIST"
+if [ -n "${SDHS_PM_DMESG_ERR:-}" ] && grep -qx '0x80000085' "$SDHS_HIST" 2>/dev/null; then
+    printf '%s\n' "$SDHS_PM_DMESG_ERR" >> "$SDHS_DMESG"
+fi
+if [ "${SDHS_PM_VANISH:-0}" = 1 ] && grep -qx '0x80000085' "$SDHS_HIST" 2>/dev/null; then
+    rm -rf "$SDHS_CARD" "$SDHS_BLK"
+fi
+exec /bin/dd "$@"
+MOCK
+chmod +x "$sd_root/bin/dd"
+if SDHS_CAP="$sd_root/dbg/mmc1/caps" SDHS_HIST="$sd_root/caps.history" \
+   SDHS_PM_DMESG_ERR='mmc1: error -110 whilst initialising SD card' run_sdhs apply 1 2>/dev/null; then
+    fail 'apply 1 must fail when dmesg reports mmc error'
+fi
+[[ $(cat "$sd_root/dbg/mmc1/caps") == 0x80000001 ]] || fail "did not revert caps after dmesg error: $(cat "$sd_root/dbg/mmc1/caps")"
+[[ $(cat "$sd_root/run/sd-highspeed.state") == error ]] || fail 'error state not written after dmesg error'
+
+sdhs_fixture
+printf 'sd_high_speed=1\n' > "$sd_root/ui/settings.conf"
+cat > "$sd_root/bin/dd" <<'MOCK'
+#!/bin/sh
+cat "$SDHS_CAP" >> "$SDHS_HIST"
+if [ "${SDHS_PM_VANISH:-0}" = 1 ] && grep -qx '0x80000085' "$SDHS_HIST" 2>/dev/null; then
+    rm -rf "$SDHS_CARD" "$SDHS_BLK"
+fi
+exec /bin/dd "$@"
+MOCK
+chmod +x "$sd_root/bin/dd"
+if SDHS_CAP="$sd_root/dbg/mmc1/caps" SDHS_HIST="$sd_root/caps.history" \
+   SDHS_PM_VANISH=1 SDHS_CARD="$sd_root/sys/bus/mmc/devices/mmc1:aaaa" SDHS_BLK="$sd_root/dev/mmcblk1" \
+   run_sdhs apply 1 2>/dev/null; then
+    fail 'apply 1 must fail when card vanishes'
+fi
+[[ $(cat "$sd_root/dbg/mmc1/caps") == 0x80000001 ]] || fail 'did not revert caps after card vanished'
+ok 'enginex-sd-highspeed: reverts caps to original value on mmc dmesg error or card disappearance'
+
+# 5. Playing guard: when /v1/enginex/clock reports playing:true, sets 0x4 only, no 0x80/reads, sets deferred state.
+sdhs_fixture
+cat > "$sd_root/bin/dd" <<'MOCK'
+#!/bin/sh
+echo "dd should not run while playing" >&2
+exit 99
+MOCK
+chmod +x "$sd_root/bin/dd"
+SDHS_CLOCK_JSON='{"clockApi":true,"decks":[{"deck":1,"playing":true}]}' run_sdhs apply 1
+[[ $(cat "$sd_root/dbg/mmc1/caps") == 0x80000005 ]] || fail 'playing guard did not set 0x4 in caps'
+[[ $(cat "$sd_root/run/sd-highspeed.state") == deferred ]] || fail 'playing guard did not write deferred state'
+ok 'enginex-sd-highspeed: playing guard applies 0x4 only and records deferred state'
+
+# 6. Turn Off when 0x4 was set clears 0x4 keeping other bits; non-RK3288 board is skipped.
+sdhs_fixture
+printf '0x80000005\n' > "$sd_root/dbg/mmc1/caps"
+printf 'timing spec:\t2 (sd high-speed)\n' > "$sd_root/dbg/mmc1/ios"
+cat > "$sd_root/bin/dd" <<'MOCK'
+#!/bin/sh
+cat "$SDHS_CAP" >> "$SDHS_HIST"
+if grep -qx '0x80000081' "$SDHS_HIST" 2>/dev/null; then
+    printf 'timing spec:\t0 (legacy)\n' > "$SDHS_IOS"
+fi
+exec /bin/dd "$@"
+MOCK
+chmod +x "$sd_root/bin/dd"
+SDHS_CAP="$sd_root/dbg/mmc1/caps" SDHS_HIST="$sd_root/caps.history" SDHS_IOS="$sd_root/dbg/mmc1/ios" \
+    run_sdhs apply 0
+[[ $(cat "$sd_root/dbg/mmc1/caps") == 0x80000001 ]] || fail 'apply 0 did not clear 0x4 preserving bit 31'
+
+sdhs_fixture
+printf 'inmusic,jp24\0rockchip,rk3588\0' > "$sd_root/compatible"
+printf 'sd_high_speed=1\n' > "$sd_root/ui/settings.conf"
+run_sdhs boot
+[[ $(cat "$sd_root/dbg/mmc1/caps") == 0x80000001 ]] || fail 'RK3588 board should not be touched'
+
+sdhs_fixture
+printf 'sd_high_speed=1\n' > "$sd_root/ui/settings.conf"
+: > "$sd_root/ui/safe-mode"
+chmod 0444 "$sd_root/dbg/mmc1/caps"
+run_sdhs boot
+[[ $(cat "$sd_root/dbg/mmc1/caps") == 0x80000001 ]] || fail 'safe-mode boot should not enable 0x4'
+ok 'enginex-sd-highspeed: apply 0 clears 0x4, safe-mode boots stock, and non-RK3288 boards are skipped'
 
 python3 -m unittest discover -s "$ROOT/sim/qengine" -p test_smoke.py >/dev/null
 [[ ! -s $HOST_COMMAND_LOG ]] || fail "unexpected host command: $(cat "$HOST_COMMAND_LOG")"

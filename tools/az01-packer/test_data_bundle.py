@@ -387,6 +387,22 @@ class DataBundleTest(unittest.TestCase):
         cat = subprocess.run(['debugfs', '-R', 'cat /enginex/bundle/release-tag', str(img)], capture_output=True, text=True).stdout
         self.assertEqual(cat, 'v5.3.0.1.1-r2\n')
 
+    def test_sd_high_speed_script_is_packaged_and_wired_at_boot(self):
+        src = self.extract(self.build())
+        script = src / 'bin/enginex-sd-highspeed'
+        self.assertTrue(script.is_file())
+        self.assertTrue(script.stat().st_mode & 0o100)
+        self.assertEqual(
+            script.read_bytes(),
+            (HERE.parents[1] / 'rootfs-overlay/usr/local/bin/enginex-sd-highspeed').read_bytes(),
+        )
+        self.assertIn('bin/enginex-sd-highspeed', (src / 'SHA256SUMS').read_text())
+        boot = (src / 'boot-activate.sh').read_text()
+        self.assertIn('ExecStartPre=-$bin_dir/enginex-sd-highspeed boot', boot)
+        self.assertIn('"$bin_dir/enginex-sd-highspeed" boot', boot)
+        self.assertLess(boot.index('"$bin_dir/enginex-sd-highspeed" boot'), boot.index('systemctl restart edisksd.service'))
+
+
     def test_install_then_uninstall_keeps_user_data(self):
         src = self.extract(self.build())
         dest = self.tmp / 'data/sc5000-custom'

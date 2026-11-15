@@ -758,3 +758,6 @@ Welcome to Engine DJ	欢迎使用 Engine DJ	歡迎使用 Engine DJ	Te damos la b
 Would you like to stop the current download to load this new track?	要停止当前下载并加载这首新曲目吗？	要停止目前下載並載入這首新曲目嗎？	¿Quieres detener la descarga actual para cargar esta pista nueva?
 Your recording was saved to the destination	录音已保存到目标位置	錄音已儲存到目標位置	Tu grabación se ha guardado en el destino
 and use the code below to activate this device.	并输入下面的代码激活这台设备。	並輸入下方的代碼啟用這台裝置。	e introduce el código de abajo para activar este dispositivo.
+High-speed SD card	高速 SD 卡模式	高速 SD 卡模式	Tarjeta SD de alta velocidad
+Experimental: faster SD card reading (about 2x). Turn off if the SD card is not recognised.	实验性：加快 SD 卡读取速度（约 2 倍）。若无法识别 SD 卡请关闭。	實驗性：加快 SD 卡讀取速度（約 2 倍）。若無法辨識 SD 卡請關閉。	Experimental: lectura más rápida de tarjetas SD (aprox. 2x). Desactívalo si no se reconoce la tarjeta SD.
+Applies at next start or SD insert	将在下次启动或重新插入 SD 卡时生效	將在下次啟動或重新插入 SD 卡時生效	Se aplicará al próximo inicio o al insertar la tarjeta SD

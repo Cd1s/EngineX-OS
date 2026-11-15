@@ -16,7 +16,7 @@ var copyUIBools = []string{
 	"engineLighting", "autoAnalyze", "masterLimiter", "autoGain",
 	"fourDeckWaveform", "pairedView", "prolinkWaveform", "upfaderEcho",
 	"browserDualColumn", "tracklistWaveform", "cueCountdown", "swapLoopOrder",
-	"stemsEqMode", "beatJumpPads",
+	"stemsEqMode", "beatJumpPads", "sdHighSpeed",
 }
 
 var copyUIEnums = map[string][]string{
@@ -64,6 +64,8 @@ func copyUISupported(key, board string) bool {
 		return playerBoards[board]
 	case "fourDeckWaveform", "shadowMode":
 		return c.FourDeck
+	case "sdHighSpeed":
+		return c.SDHighSpeed
 	}
 	return true
 }
