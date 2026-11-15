@@ -72,7 +72,7 @@ python3 tools/az01-packer/az01_packer.py repack \
 
 保护快照还覆盖 inode flags、链接数、时间戳、ACL/扩展属性；长属性通过 `ea_get` 读取完整值计算 SHA-256，不依赖 `ea_list` 省略值后的显示。父目录允许因新增普通子项导致大小/时间变化，其身份、权限、flags、ACL仍须保持。
 
-重包还必须保持官方 rootfs 的镜像长度、block/inode/group 几何、UUID、features、journal/descriptor/checksum身份。禁止对外部候选做扩容、换UUID或转换文件系统特性后重包；2 GiB上限只是资源限制，不是设备分区容量。官方5.0.4原始剩余空间约11.2 MiB，工具不自动扩容；较大自定义应用应另行部署到持久化数据分区，再通过服务启动。
+重包还必须保持官方 rootfs 的镜像长度、block/inode/group 几何、UUID、features、journal/descriptor/checksum身份。禁止对外部候选做扩容、换UUID或转换文件系统特性后重包；2 GiB上限只是资源限制，不是设备分区容量。唯一的例外是发版构建用的 `--grow`（`patch-rootfs` 和 `repack` 都要传）：文件系统扩到 `GEN1_ROOTFS_KIB`（499712 KiB，61 个 8 MiB 块组），低于每台一代机 rootfs 分区已证实的容量（官方 5.0.4 的 rootfs 为 503937–504278 KiB，JP07 实机分区 512000 KiB；原厂更新器只拒绝放不进分区的数据）。除大小相关字段外，几何一律保持；扩容后扣掉 ext4 驱动自留的块（2 % 与 4096 块取小）仍须留出 16 MiB 和 4096 个 inode，否则构建失败。教训（5.3.0.5 RC）：官方 5.3.0 rootfs 加上 EngineX 后只剩 4 MiB，低于 ext4 的 4096 块保留，门禁和 nspawn 挂载的副本连一个目录都建不了。较大的自定义应用仍应部署到持久化数据分区，再通过服务启动。
 
 ```bash
 python3 -m unittest discover -s tools/az01-packer -v 2>&1 | cut -c1-200 | head -40

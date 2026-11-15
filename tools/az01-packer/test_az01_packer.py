@@ -892,6 +892,117 @@ class FilesystemTests(unittest.TestCase):
         self.assertEqual(exc.exception.code, 2)
         self.assertFalse(output.exists())
 
+    @unittest.skipUnless(shutil.which('dumpe2fs'), 'dumpe2fs required')
+    def test_room_counts_the_ext4_drivers_reserve(self):
+        # The 5.3.0.5 RC numbers: 463 720 blocks of 1 KiB. With 4 147 free, deck1's df showed 53 KiB
+        # available (e37b921d); with 4 064 free, every write to a mounted copy failed (d40ad7b2).
+        self.assertEqual(az.ext4_reserve_blocks(463720, 1024, 1024), 4096)
+        self.assertEqual(az.ext4_reserve_blocks(16384, 1024, 1024), 327)
+        self.assertEqual(az.ext4_reserve_blocks(16384, 1024, 4096), 324)  # 81 clusters of 4 blocks
+        out = subprocess.run(['dumpe2fs', '-h', str(self.disk)], capture_output=True, text=True).stdout
+        room = self.fs.room()
+        self.assertEqual(room['blocks'], int(re.search(r'^Block count:\s+(\d+)', out, re.M)[1]))
+        self.assertEqual(room['free_blocks'], int(re.search(r'^Free blocks:\s+(\d+)', out, re.M)[1]))
+        self.assertEqual(room['free_inodes'], int(re.search(r'^Free inodes:\s+(\d+)', out, re.M)[1]))
+        reserve = az.ext4_reserve_blocks(room['blocks'], room['block_size'], room['block_size'])
+        self.assertEqual(room['usable_kib'], (room['free_blocks'] - reserve) * room['block_size'] // 1024)
+
+    @unittest.skipUnless(shutil.which('resize2fs'), 'resize2fs required')
+    def test_patch_rootfs_grow_changes_only_the_size_and_repack_takes_only_that(self):
+        original = self.root/'original.img'
+        original.write_bytes(fixture(lzma.compress(self.disk.read_bytes())))
+        out = self.root/'grown.ext2'
+        with unittest.mock.patch.object(az, 'GEN1_ROOTFS_KIB', 20480), \
+                unittest.mock.patch.object(az, 'GEN1_MIN_FREE_KIB', 1024), \
+                unittest.mock.patch.object(az, 'GEN1_MIN_FREE_INODES', 64):
+            self.assertEqual(az.main(['patch-rootfs', str(original), '--grow', '--output', str(out)]), 0)
+            grown = az.ExtFS(out)
+            self.assertEqual(out.stat().st_size, 20480 * 1024)
+            keep = lambda g: {k: v for k, v in g.items() if k not in az.GROWN_FIELDS}
+            self.assertEqual(keep(grown.geometry()), keep(self.fs.geometry()))
+            self.assertEqual(grown.snapshot(), self.fs.snapshot())
+            az.check_fs(out)
+            self.assertGreater(grown.room()['usable_kib'], self.fs.room()['usable_kib'] + 3000)
+            image = self.root/'grown.img'
+            self.assertEqual(az.main(['repack', str(original), '--rootfs', str(out), '--grow',
+                                      '--output', str(image)]), 0)
+            unpacked = self.root/'grown-unpacked'
+            self.assertEqual(az.main(['unpack', str(image), '--output', str(unpacked)]), 0)
+            self.assertEqual((unpacked/'rootfs.ext2').read_bytes(), out.read_bytes())
+            for argv in (['repack', str(original), '--rootfs', str(out)],          # growth not declared
+                         ['repack', str(original), '--rootfs', str(self.disk), '--grow']):  # not grown
+                with self.subTest(argv=argv[3:]), self.assertRaises(SystemExit) as exc:
+                    az.main(argv + ['--output', str(self.root/'must-not-exist.img')])
+                self.assertEqual(exc.exception.code, 2)
+            self.assertFalse((self.root/'must-not-exist.img').exists())
+
+    @unittest.skipUnless(shutil.which('resize2fs'), 'resize2fs required')
+    def test_patch_rootfs_grow_refuses_a_rootfs_without_room(self):
+        original = self.root/'original.img'
+        original.write_bytes(fixture(lzma.compress(self.disk.read_bytes())))
+        out = self.root/'too-full.ext2'
+        with unittest.mock.patch.object(az, 'GEN1_ROOTFS_KIB', 20480), \
+                unittest.mock.patch.object(az, 'GEN1_MIN_FREE_KIB', 20480):
+            with self.assertRaises(SystemExit) as exc:
+                az.main(['patch-rootfs', str(original), '--grow', '--output', str(out)])
+        self.assertEqual(exc.exception.code, 2)
+        self.assertFalse(out.exists())
+
+    @unittest.skipUnless(shutil.which('resize2fs'), 'resize2fs required')
+    def test_repack_grow_refuses_a_padded_file_whose_file_system_did_not_grow(self):
+        # Review of b6f868f8: repack --grow checked only the file length, so padding passed as growth.
+        original = self.root/'original.img'
+        original.write_bytes(fixture(lzma.compress(self.disk.read_bytes())))
+        padded = self.root/'padded.ext2'
+        shutil.copyfile(self.disk, padded)
+        with padded.open('r+b') as f:
+            f.truncate(20480 * 1024)  # the file reaches the target; its file system stays 16 MiB
+        az.check_fs(padded)
+        self.assertEqual(az.ExtFS(padded).room()['blocks'], self.fs.room()['blocks'])
+        out = self.root/'must-not-exist.img'
+        with unittest.mock.patch.object(az, 'GEN1_ROOTFS_KIB', 20480), self.assertRaises(SystemExit) as exc:
+            az.main(['repack', str(original), '--rootfs', str(padded), '--grow', '--output', str(out)])
+        self.assertEqual(exc.exception.code, 2)
+        self.assertFalse(out.exists())
+
+    @unittest.skipUnless(shutil.which('resize2fs'), 'resize2fs required')
+    def test_repack_grow_refuses_a_shrunk_file_system(self):
+        # Review of b6f868f8: a real shrink in a file of the target length passed as growth.
+        big = self.root/'big.ext2'
+        shutil.copyfile(self.disk, big)
+        with big.open('r+b') as f:
+            f.truncate(24576 * 1024)
+        subprocess.run(['resize2fs', '-f', str(big), '24576K'], check=True, capture_output=True)
+        original = self.root/'original.img'
+        original.write_bytes(fixture(lzma.compress(big.read_bytes())))
+        shrunk = self.root/'shrunk.ext2'
+        shutil.copyfile(big, shrunk)
+        subprocess.run(['resize2fs', '-f', str(shrunk), '20480K'], check=True, capture_output=True)
+        with shrunk.open('r+b') as f:
+            f.truncate(20480 * 1024)
+        az.check_fs(shrunk)
+        self.assertEqual(az.ExtFS(shrunk).room()['blocks'], 20480)
+        self.assertEqual(az.ExtFS(shrunk).snapshot(), az.ExtFS(big).snapshot())  # only the size differs
+        out = self.root/'must-not-exist.img'
+        with unittest.mock.patch.object(az, 'GEN1_ROOTFS_KIB', 20480), self.assertRaises(SystemExit) as exc:
+            az.main(['repack', str(original), '--rootfs', str(shrunk), '--grow', '--output', str(out)])
+        self.assertEqual(exc.exception.code, 2)
+        self.assertFalse(out.exists())
+
+    @unittest.skipUnless(shutil.which('resize2fs'), 'resize2fs required')
+    def test_grow_never_shrinks_or_passes_the_proven_partition_size(self):
+        size = self.disk.stat().st_size // 1024
+        with self.assertRaisesRegex(az.SafetyError, 'growth past'):
+            self.fs.grow(az.GEN1_ROOTFS_KIB + 1)
+        with self.assertRaisesRegex(az.SafetyError, 'shrink'):
+            self.fs.grow(size - 1024)
+        self.assertEqual(self.disk.stat().st_size // 1024, size)
+        # Below the smallest rootfs inMusic shipped for any 1st-gen group (5.0.4) and a JP07 deck's
+        # measured partition; Gen1RootfsRoomTests checks the 5.0.4 images themselves in the lab.
+        for what, kib in (('SC5000 5.0.4', 504076), ('SC6000 5.0.4', 504278), ('PRIME4 5.0.4', 503937),
+                          ('JP07 partition', 512000)):
+            self.assertLess(az.GEN1_ROOTFS_KIB, kib, what)
+
     def test_timesync_seed_dropin_and_non_clobbering_timezone_restore(self):
         import os
         overlay = Path(__file__).resolve().parents[2] / 'rootfs-overlay'
@@ -1111,3 +1222,60 @@ class Rename234UpgradeTests(unittest.TestCase):
                     self.assertEqual((new / rel).read_bytes(), content, (boot, rel))
                     self.assertEqual((old / rel).read_bytes(), content, (boot, rel))
                     self.assertEqual((new / rel).stat().st_mode & 0o777, 0o600, rel)
+
+
+@unittest.skipUnless(all(shutil.which(x) for x in ('debugfs', 'e2fsck', 'resize2fs')),
+                     'needs e2fsprogs (debugfs, e2fsck, resize2fs)')
+class Gen1RootfsRoomTests(unittest.TestCase):
+    """5.3.0.5 RC: what EngineX adds left the stock 5.3.0 rootfs with 4 064 free 1 KiB blocks, under
+    the 4 096 the ext4 driver keeps back, so the release gate's and nspawn boot's mounted copies
+    could not take one new file. A release rootfs is grown and must keep its margin."""
+
+    @unittest.skipUnless(all(p.is_file() for p in STOCK_530), 'needs the official 5.3.0 images of the build-host lab')
+    def test_release_rootfs_of_every_gen1_group_keeps_room(self):
+        script = (Path(__file__).resolve().parent/'build-release.sh').read_text()
+        calls = re.findall(r'az01_packer\.py (patch-rootfs|repack) (.*?)>/dev/null', script, re.S)
+        flags = {cmd: args.split() for cmd, args in calls}
+        self.assertIn('--grow', flags['patch-rootfs'], 'the release build does not grow the rootfs')
+        self.assertIn('--grow', flags['repack'], 'the release build repacks without --grow')
+        overlay = Path(__file__).resolve().parents[2]/'rootfs-overlay'
+        with tempfile.TemporaryDirectory(prefix='az01-room-', dir=TEST_TMPDIR) as tmp:
+            # The stage build-release.sh makes, its generated files at d40ad7b2's sizes plus headroom
+            # (suite 6.4 MB -> 7 MiB, UI packs 0.4 MB -> 1 MiB, fsck.hfsplus 0.7 MB -> 768 KiB).
+            stage = Path(tmp)/'overlay'
+            shutil.copytree(overlay, stage, symlinks=True)
+            (stage/'README.md').unlink(missing_ok=True)
+            (stage/'etc/enginex/release-tag').write_text('v5.3.0.5\n')
+            share = stage/'usr/share/enginex'
+            share.mkdir(parents=True, exist_ok=True)
+            (share/'enginex-suite.xz').write_bytes(os.urandom(7 << 20))
+            (share/'ui-packs.tar.xz').write_bytes(os.urandom(1 << 20))
+            (stage/'usr/sbin').mkdir(parents=True, exist_ok=True)
+            (stage/'usr/sbin/fsck.hfsplus').write_bytes(os.urandom(768 << 10))
+            for image in STOCK_530:
+                with self.subTest(image=image.name):
+                    out = Path(tmp)/(image.stem + '.ext2')
+                    argv = ['patch-rootfs', str(image), '--overlay', str(stage), '--set-version', '5.3.0.5',
+                            *[f for f in flags['patch-rootfs'] if f == '--grow'], '--output', str(out)]
+                    self.assertEqual(az.main(argv), 0)
+                    room = az.ExtFS(out).room()
+                    self.assertGreaterEqual(room['usable_kib'], az.GEN1_MIN_FREE_KIB, room)
+                    self.assertGreaterEqual(room['free_inodes'], az.GEN1_MIN_FREE_INODES, room)
+                    self.assertLessEqual(out.stat().st_size, az.GEN1_ROOTFS_KIB * 1024)
+                    out.unlink()
+
+    @unittest.skipUnless(all((LAB/'fw'/f'{n}-5.0.4-Update.img').is_file() for n in ('SC5000', 'SC6000', 'PRIME4')),
+                         'needs the official 5.0.4 images of the build-host lab')
+    def test_grown_rootfs_fits_where_the_504_rootfs_was_installed(self):
+        # Every 1st-gen deck took inMusic's 5.0.4 rootfs (the same board device trees as 5.3.0), and
+        # the stock updater refuses data that does not fit: its size is a floor for the partition.
+        with tempfile.TemporaryDirectory(prefix='az01-504-', dir=TEST_TMPDIR) as tmp:
+            for name in ('SC5000', 'SC6000', 'PRIME4'):
+                with self.subTest(group=name):
+                    xz = Path(tmp)/'rootfs.xz'
+                    xz.write_bytes(az.Image((LAB/'fw'/f'{name}-5.0.4-Update.img').read_bytes()).payload())
+                    listing = subprocess.run(['xz', '--robot', '-l', str(xz)], capture_output=True, text=True,
+                                             check=True).stdout
+                    size = int(next(l for l in listing.splitlines() if l.startswith('totals')).split('\t')[4])
+                    self.assertGreaterEqual(size, az.GEN1_ROOTFS_KIB * 1024)
+                    xz.unlink()
