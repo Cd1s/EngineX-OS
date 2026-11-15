@@ -178,14 +178,14 @@ class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
 class S(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
-S(("127.0.0.1", 8081), H).serve_forever()
+S(("127.0.0.1", 18080), H).serve_forever()
 PY
         PROXY_PID=$!
         sleep 1
         timeout 90 chromium-headless-shell --no-sandbox --disable-gpu --hide-scrollbars \
             --user-data-dir="$W/chrome-$DOC_SHOT_CONSOLE_LANG" --force-device-scale-factor=2 \
             --window-size=1280,3600 --virtual-time-budget=12000 \
-            --screenshot="$OUT_PNG" "http://127.0.0.1:8081/?lang=$DOC_SHOT_CONSOLE_LANG" > "$W/chromium.log" 2>&1 || true
+            --screenshot="$OUT_PNG" "http://127.0.0.1:18080/?lang=$DOC_SHOT_CONSOLE_LANG" > "$W/chromium.log" 2>&1 || true
         kill "$PROXY_PID" "$SYNC_PID" "$MOCK_PID" 2>/dev/null || true
         trap - EXIT
         [ -s "$OUT_PNG" ] || { echo "FAIL: $OUT_PNG not generated" >&2; exit 1; }
