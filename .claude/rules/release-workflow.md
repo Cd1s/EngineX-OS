@@ -87,7 +87,7 @@ REMOTE_BUILD_HOST=<build host> remote-build --name sc5000-release-<短说明> --
    rm -rf "$OUT"
    sh tools/az01-packer/build-release.sh <VERSION> /root/build/sc5000-lab/fw-5.3.0 none /root/build/sc5000-lab/sbin/fsck.hfsplus "$OUT"
    sh tools/az01-packer/build-installer.sh <VERSION> "$OUT"
-   ENGINEX_RELEASE_KEY=/root/.config/enginex/release.key sh tools/az01-packer/sign-release.sh "$OUT"'
+   sh tools/az01-packer/sign-release.sh "$OUT"'
 ```
 
 **签名（#239，5.3.0.5 起）**：每个 Release 的 `SHA256SUMS.txt` 都用发布密钥（Ed25519）签名，签名文件是 `SHA256SUMS.txt.sig`（对 `SHA256SUMS.txt` 原字节的签名，64 字节的标准 base64 加换行）。
@@ -105,6 +105,8 @@ REMOTE_BUILD_HOST=<build host> remote-build --name sc5000-release-<短说明> --
 第 3 个参数在公开发布时**必须是 `none`**：公开镜像不能内置任何人的 SSH 公钥（#46）。只有维护者自用的私有镜像才传公钥文件，且私有镜像不能上传到 Release。
 
 输出目录必须不存在、且不在任何 git 工作区里。`5.3.0.4` / `5.3.0.5` 产出 **8 个一代 `*-Update.img`、8 个二代 `*-Update.img`、8 个二代兼容 `*-Data-Bundle.tar.gz`、4 个平台 `EngineX-Installer-<VERSION>-*`、汇总全部 28 个产物的 `SHA256SUMS.txt`，以及它的签名 `SHA256SUMS.txt.sig`**，加上 `RELEASE-TAG.txt`（也在清单里）。上传共 31 个文件：28 个产物 + `RELEASE-TAG.txt` + `SHA256SUMS.txt` + `SHA256SUMS.txt.sig`。
+
+For 5.3.0.5, run all three build steps in that order: firmware, installer archives, then signing. `sign-release.sh` pins the root-only key path itself; callers do not select another key. `RELEASE-TAG.txt` is written by `build-release.sh` and included in the final signed manifest.
 
 ## 4. 校验镜像
 

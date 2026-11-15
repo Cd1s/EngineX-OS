@@ -218,7 +218,26 @@ func getUpdate(s *Server, q string) updateStatus {
 	return v
 }
 
-func TestUpdatePicksTheDataBundleOnSecondGeneration(t *testing.T) {
+func TestUpdateNeverOffersLegacyBundles(t *testing.T) {
+	assets := func(base string) string {
+		var all []string
+		for _, prefix := range imagePrefixes {
+			name := prefix + "-5.3.0.6" + bundleSuffix
+			all = append(all, fmt.Sprintf(`{"name":%q,"browser_download_url":%q}`, name, base+"/dl/"+name))
+		}
+		return strings.Join(all, ",")
+	}
+	for compatible := range imagePrefixes {
+		t.Run(compatible, func(t *testing.T) {
+			s, _ := bundleDeckWith(t, compatible, assets, nil, releaseFault{installed: "5.3.0.5", tag: "v5.3.0.6"})
+			if v := getUpdate(s, ""); v.DownloadURL != "" {
+				t.Fatalf("legacy bundle offered by the bridge build: %+v", v)
+			}
+		})
+	}
+}
+
+func TestUpdateIgnoresLegacyBundlesOnSecondGeneration(t *testing.T) {
 	allAssets := func(base string) string {
 		var a []string
 		for _, n := range []string{"PRIME4-5.3.0.3-EngineX-OS-Denon-PRIME4-JC11-Update.img", "SCLIVE4-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz",
@@ -228,11 +247,10 @@ func TestUpdatePicksTheDataBundleOnSecondGeneration(t *testing.T) {
 		return strings.Join(a, ",")
 	}
 	for compat, want := range map[string]string{
-		"inmusic,jp21": "SCLIVE4-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz", "inmusic,jc11s": "PRIME4PLUS-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz",
-		"inmusic,rmz2": "SYSTEMONE-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz", "inmusic,jc11": "PRIME4-5.3.0.3-EngineX-OS-Denon-PRIME4-JC11-Update.img",
+		"inmusic,jp21": "", "inmusic,jc11s": "", "inmusic,rmz2": "", "inmusic,jc11": "PRIME4-5.3.0.3-EngineX-OS-Denon-PRIME4-JC11-Update.img",
 	} {
 		s, _ := bundleDeck(t, compat, allAssets, nil)
-		if v := getUpdate(s, ""); !v.UpdateAvailable || !strings.HasSuffix(v.DownloadURL, "/dl/"+want) {
+		if v := getUpdate(s, ""); !v.UpdateAvailable || ((want == "" && v.DownloadURL != "") || (want != "" && !strings.HasSuffix(v.DownloadURL, "/dl/"+want))) {
 			t.Errorf("%s: %+v, want %s", compat, v, want)
 		}
 	}
@@ -252,11 +270,11 @@ func TestUpdatePicksGen2ImgWhenUnlocked(t *testing.T) {
 		want         string
 	}{
 		{"unlocked by default when gen2-locked is absent", "", both, img},
-		{"explicit gen2-locked falls back to bundle", "gen2-locked", both, bundle},
+		{"explicit gen2-locked offers no image or bundle", "gen2-locked", both, ""},
 		{"unlocked", "gen2-unlocked", both, img},
-		{"unlocked, release has no img", "gen2-unlocked", onlyBundle, bundle},
-		{"default, release has no img", "", onlyBundle, bundle},
-		{"unlocked but gen2-locked wins", "both", both, bundle},
+		{"unlocked, release has no img", "gen2-unlocked", onlyBundle, ""},
+		{"default, release has no img", "", onlyBundle, ""},
+		{"unlocked but gen2-locked wins", "both", both, ""},
 	} {
 		s, custom := bundleDeck(t, "inmusic,jp21", c.assets, nil)
 		switch c.marker {
@@ -268,7 +286,7 @@ func TestUpdatePicksGen2ImgWhenUnlocked(t *testing.T) {
 			os.WriteFile(filepath.Join(custom, "gen2-unlocked"), []byte("1\n"), 0o644)
 			os.WriteFile(filepath.Join(custom, "gen2-locked"), []byte("1\n"), 0o644)
 		}
-		if v := getUpdate(s, ""); !strings.HasSuffix(v.DownloadURL, "/dl/"+c.want) {
+		if v := getUpdate(s, ""); (c.want == "" && v.DownloadURL != "") || (c.want != "" && !strings.HasSuffix(v.DownloadURL, "/dl/"+c.want)) {
 			t.Errorf("%s: %+v, want %s", c.name, v, c.want)
 		}
 	}
@@ -322,7 +340,7 @@ func TestUpdateAppliesTheDataBundle(t *testing.T) {
 	t.Run("installs", func(t *testing.T) {
 		s, custom := bundleDeck(t, "inmusic,jp21", assets, testBundle(t, "SCLIVE4", "5.3.0.3", false))
 		getUpdate(s, "")
-		getUpdate(s, "?apply=1")
+		s.applyOnlineUpdate(s.cfg.GitHubURL+"/dl/"+name, "v5.3.0.3")
 		v := waitUpdate(t, s)
 		if v.Error != "" || v.UpdateAvailable || v.Current != "5.3.0.3" || v.Progress != 1 {
 			t.Fatalf("after apply: %+v", v)
@@ -339,7 +357,7 @@ func TestUpdateAppliesTheDataBundle(t *testing.T) {
 	t.Run("rejects damaged SHA256SUMS", func(t *testing.T) {
 		s, custom := bundleDeck(t, "inmusic,jp21", assets, testBundle(t, "SCLIVE4", "5.3.0.3", true))
 		getUpdate(s, "")
-		getUpdate(s, "?apply=1")
+		s.applyOnlineUpdate(s.cfg.GitHubURL+"/dl/"+name, "v5.3.0.3")
 		v := waitUpdate(t, s)
 		if !strings.HasPrefix(v.Error, "bundle install:") || !strings.Contains(v.Error, "SHA256SUMS mismatch") {
 			t.Fatalf("damaged bundle accepted: %+v", v)
@@ -543,7 +561,7 @@ func TestSameVersionReRelease(t *testing.T) {
 		{"gen2 r2 is offered r3", gen2, "5.3.0.4", "", "v5.3.0.4-r2", false, "v5.3.0.4-r3", true, "gen2.img"},
 		{"gen2 r2 is offered 5.3.0.5", gen2, "5.3.0.4", "", "v5.3.0.4-r2", false, "v5.3.0.5", true, "gen2.img"},
 		{"gen2 locked r2 is not offered r2", gen2, "5.3.0.4", "", "v5.3.0.4-r2", true, "v5.3.0.4-r2", false, ""},
-		{"gen2 locked r2 takes the r3 bundle", gen2, "5.3.0.4", "", "v5.3.0.4-r2", true, "v5.3.0.4-r3", true, "gen2.tar.gz"},
+		{"gen2 locked r2 offers no legacy bundle", gen2, "5.3.0.4", "", "v5.3.0.4-r2", true, "v5.3.0.4-r3", true, ""},
 		{"a tag left by another version is ignored", gen2, "5.3.0.3", "", "v5.3.0.4-r2", false, "v5.3.0.4-r2", true, "gen2.img"},
 	} {
 		dir := t.TempDir()
@@ -565,8 +583,12 @@ func TestSameVersionReRelease(t *testing.T) {
 		tag = c.release
 		s := New(Config{AccessToken: "c", UIDir: t.TempDir(), StateDir: dir, GitHubURL: gh.URL, VersionFile: filepath.Join(custom, "version.txt")}, nil)
 		v := getUpdate(s, "")
+		wantURL := ""
+		if c.asset != "" {
+			wantURL = "https://example.invalid/" + c.asset
+		}
 		if v.Error != "" || v.Current != c.version || v.Latest != c.release || v.UpdateAvailable != c.want ||
-			(c.want && v.DownloadURL != "https://example.invalid/"+c.asset) {
+			(c.want && v.DownloadURL != wantURL) {
 			t.Errorf("%s: %+v", c.name, v)
 		}
 	}
@@ -689,7 +711,14 @@ func TestGen2EndToEndReReleaseApplyAndCustomDirResolution(t *testing.T) {
 			if !u1.UpdateAvailable || u1.Current != "5.3.0.4" || u1.Latest != "v5.3.0.4-r3" {
 				t.Fatalf("plain 5.3.0.4 before r3: %+v", u1)
 			}
-			getUpdate(s1, "?apply=1")
+			if viaImg {
+				getUpdate(s1, "?apply=1")
+			} else {
+				if u1.DownloadURL != "" {
+					t.Fatalf("locked deck offered a legacy bundle: %+v", u1)
+				}
+				s1.applyOnlineUpdate(gh.URL+"/dl/"+r3TarName, curTag)
+			}
 			if done := waitUpdate(t, s1); done.Error != "" || done.Progress != 1 {
 				t.Fatalf("apply r3 (%s): %+v", mode, done)
 			}

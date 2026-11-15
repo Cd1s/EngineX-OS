@@ -496,7 +496,8 @@ type release struct {
 }
 
 // fetchBundle prefers this installer's matching signed sibling, else downloads the latest Gen-2 *-Update.img (or legacy Data-Bundle.tar.gz fallback)
-// for prefix into dir and checks GitHub's SHA-256 (#215).
+// for prefix into dir and verifies the signed SHA-256 (#215, #239). The bridge installer keeps
+// legacy input compatibility; the 5.3.0.5 on-deck updater discovers only *-Update.img.
 func fetchBundle(ctx context.Context, o *options, prefix, dir string) (string, error) {
 	if path, err := ownVersionPackage(o, prefix); path != "" || err != nil {
 		return path, err
