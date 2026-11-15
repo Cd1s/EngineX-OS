@@ -3,8 +3,10 @@ package enginedb
 import (
 	"bytes"
 	"compress/gzip"
+	"encoding/json"
 	"errors"
 	"io"
+	"sync"
 )
 
 // BridgeAnalysis keeps each imported track's Rekordbox source (track, cues,
@@ -17,20 +19,50 @@ import (
 
 var errAnalysisTooLarge = errors.New("enginedb: analysis row too large")
 
+var analysisWriters = sync.Pool{New: func() any {
+	// BestSpeed is a fixed valid level; keep its workspace across columns/rows.
+	w, _ := gzip.NewWriterLevel(io.Discard, gzip.BestSpeed)
+	return w
+}}
+
 func packAnalysis(b []byte) ([]byte, error) {
 	var buf bytes.Buffer
-	// BestSpeed: the deck compresses inside the mount-time read budget.
-	w, err := gzip.NewWriterLevel(&buf, gzip.BestSpeed)
-	if err != nil {
+	w := analysisWriters.Get().(*gzip.Writer)
+	w.Reset(&buf)
+	defer func() { w.Reset(io.Discard); analysisWriters.Put(w) }()
+	if _, err := w.Write(b); err != nil {
 		return nil, err
 	}
-	if _, err = w.Write(b); err != nil {
-		return nil, err
-	}
-	if err = w.Close(); err != nil {
+	if err := w.Close(); err != nil {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+// The saved source struct starts with Track.ID, before cues and analysis.
+// Identity recovery needs only this prefix, never the waveform payload.
+func analysisSourceID(b []byte) (uint32, error) {
+	var r io.Reader = bytes.NewReader(b)
+	if len(b) >= 2 && b[0] == 0x1f && b[1] == 0x8b {
+		zr, err := gzip.NewReader(r)
+		if err != nil {
+			return 0, err
+		}
+		defer zr.Close()
+		r = zr
+	}
+	d := json.NewDecoder(io.LimitReader(r, 4096))
+	for _, want := range []any{json.Delim('{'), "Track", json.Delim('{'), "ID"} {
+		got, err := d.Token()
+		if err != nil || got != want {
+			return 0, nil
+		}
+	}
+	var id uint32
+	if err := d.Decode(&id); err != nil {
+		return 0, nil
+	}
+	return id, nil
 }
 
 // UnpackAnalysis returns a BridgeAnalysis column as JSON, whether it was

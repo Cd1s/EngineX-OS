@@ -3,7 +3,6 @@ package enginedb
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -216,7 +215,7 @@ func stageOwnedMoves(ctx context.Context, tx *sql.Tx, prepared []preparedTrack, 
 	}
 	// Legacy rows can share one import-wide pdbImportKey value. Our saved
 	// source record retains the per-track ID, including across moves/swaps.
-	rows, e := tx.QueryContext(ctx, `SELECT s.trackId,t.pdbImportKey,s.path,s.fingerprint,substr(a.sourceJSON,1,67108865) FROM BridgeState s JOIN Track t ON t.id=s.trackId LEFT JOIN BridgeAnalysis a ON a.trackId=s.trackId`)
+	rows, e := tx.QueryContext(ctx, `SELECT s.trackId,t.pdbImportKey,s.path,s.fingerprint FROM BridgeState s JOIN Track t ON t.id=s.trackId`)
 	if e != nil {
 		return nil, e
 	}
@@ -237,22 +236,9 @@ func stageOwnedMoves(ctx context.Context, tx *sql.Tx, prepared []preparedTrack, 
 	counts := map[uint32]int{}
 	for rows.Next() {
 		var t ownedTrack
-		var packed []byte
-		if e = rows.Scan(&t.id, &t.source, &t.oldPath, &t.fp, &packed); e != nil {
+		if e = rows.Scan(&t.id, &t.source, &t.oldPath, &t.fp); e != nil {
 			rows.Close()
 			return nil, e
-		}
-		plain, err := UnpackAnalysis(packed, 64<<20)
-		if err != nil {
-			rows.Close()
-			return nil, fmt.Errorf("source record for track %d: %w", t.id, err)
-		}
-		var record struct{ Track struct{ ID uint32 } }
-		if json.Unmarshal(plain, &record) == nil && record.Track.ID != 0 {
-			t.recorded = sql.NullInt64{Int64: int64(record.Track.ID), Valid: true}
-		}
-		if t.recorded.Valid {
-			t.source = uint32(t.recorded.Int64)
 		}
 		tracks = append(tracks, t)
 		counts[t.source]++
@@ -261,6 +247,33 @@ func stageOwnedMoves(ctx context.Context, tx *sql.Tx, prepared []preparedTrack, 
 	rows.Close()
 	if e != nil {
 		return nil, e
+	}
+	for i := range tracks {
+		t := &tracks[i]
+		// A unique source ID and matching owned path already establish identity.
+		// Read saved waveforms only to recover an ambiguous/moved source, not
+		// on every insert of a partially prepared large library (#253).
+		if p := targets[t.source]; p != nil && counts[t.source] == 1 && "../"+p.rel == t.oldPath {
+			continue
+		}
+		var packed []byte
+		if e = tx.QueryRowContext(ctx, `SELECT substr(sourceJSON,1,4096) FROM BridgeAnalysis WHERE trackId=?`, t.id).Scan(&packed); e != nil && !errors.Is(e, sql.ErrNoRows) {
+			return nil, e
+		}
+		source, err := analysisSourceID(packed)
+		if err != nil {
+			return nil, fmt.Errorf("source record for track %d: %w", t.id, err)
+		}
+		if source != 0 {
+			t.recorded = sql.NullInt64{Int64: int64(source), Valid: true}
+		}
+		if t.recorded.Valid {
+			t.source = uint32(t.recorded.Int64)
+		}
+	}
+	clear(counts)
+	for _, t := range tracks {
+		counts[t.source]++
 	}
 	for _, t := range tracks {
 		id, source, oldPath, fp := t.id, t.source, t.oldPath, t.fp
