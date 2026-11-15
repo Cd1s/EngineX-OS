@@ -66,21 +66,42 @@ func (s *Server) relayStatusView() relayConfigStatus {
 	s.startRelayRefresh()
 	relay, password := s.relaySettings()
 	v := relayConfigStatus{RelayURL: relay, PasswordSet: password != ""}
-	v.LANStems = s.savedLANStems()
-	if st := s.relaySeen.Load(); st != nil && (v.LANStems == nil || st.Checked.After(v.LANStems.Checked)) {
-		v.LANStems = st
-	}
-	if relay == "" || password == "" || v.LANStems == nil || !v.LANStems.Online {
+	v.LANStems = routedStems(s.savedLANStems(), s.relaySeen.Load())
+	if relay == "" || password == "" || !neuralStems(v.LANStems) || !v.LANStems.Relay {
 		// The LAN renderer (#224 pairing, BH2-A9-1): scheduleLANStemsProbe only starts a
 		// goroutine, at most once per lanProbeEvery, never for the configured relay, and
 		// writes stems-lan.json only when its state changes. The request does not wait.
+		// It also runs while the relay only offers hpss: stems-processor then looks for
+		// a home renderer with the neural model, and so must the status (#238).
 		lanSaved := v.LANStems
 		if lanSaved != nil && relay != "" && strings.TrimRight(strings.TrimSpace(lanSaved.Endpoint), "/") == strings.TrimRight(strings.TrimSpace(relay), "/") {
 			lanSaved = nil
 		}
-		s.scheduleLANStemsProbe(lanSaved)
+		s.scheduleLANStemsProbe(lanSaved, v.LANStems != nil && v.LANStems.Online && v.LANStems.Relay)
 	}
 	return v
+}
+
+func neuralStems(st *stems.LANState) bool {
+	return st != nil && st.Online && st.Backend == stems.Neural
+}
+
+// routedStems picks which answer the deck shows, the saved one (stems-lan.json) or
+// the relay's last one, as stems-processor picks a renderer: a home renderer with
+// the neural model is used when the relay is busy or only offers hpss (#238), so
+// such a relay answer does not replace it. Otherwise the newer answer is shown.
+func routedStems(saved, relay *stems.LANState) *stems.LANState {
+	switch {
+	case relay == nil:
+		return saved
+	case saved == nil:
+		return relay
+	case !neuralStems(relay) && neuralStems(saved) && !saved.Relay:
+		return saved
+	case relay.Checked.After(saved.Checked):
+		return relay
+	}
+	return saved
 }
 
 func (s *Server) savedLANStems() *stems.LANState {
@@ -229,8 +250,10 @@ var (
 // scheduleLANStemsProbe asynchronously discovers or re-checks a zero-config LAN
 // Stems renderer without blocking Engine QML's 3-second /v1/sc5000/ui poll
 // (BH2-A9-1). It writes stems-lan.json only on a real state transition, keeping
-// X-UI-Digest stable across steady-state polls.
-func (s *Server) scheduleLANStemsProbe(saved *stems.LANState) {
+// X-UI-Digest stable across steady-state polls. With neuralOnly (an online relay
+// is what the deck shows) a home renderer is recorded only if it has the neural
+// model: one more that only offers hpss changes nothing about where tracks go.
+func (s *Server) scheduleLANStemsProbe(saved *stems.LANState, neuralOnly bool) {
 	dir := s.cfg.StateDir
 	if dir == "" {
 		return
@@ -289,6 +312,9 @@ func (s *Server) scheduleLANStemsProbe(saved *stems.LANState) {
 		}
 
 		path := filepath.Join(dir, stems.LANStateName)
+		if ok && neuralOnly && got.Backend != stems.Neural {
+			return
+		}
 		if ok {
 			got.Online = true
 			got.Checked = time.Now().UTC()
@@ -352,6 +378,9 @@ func (s *Server) probeRelayStems(relay, password string, saved *stems.LANState) 
 	st := &stems.LANState{Endpoint: relay, Hostname: h.Device, Backend: h.Backend, Online: !h.Busy, Relay: true, Checked: time.Now().UTC()}
 	if !s.relayGen(gen) { // the settings changed while it was asked
 		return nil
+	}
+	if !neuralStems(st) && neuralStems(saved) && !saved.Relay {
+		return st // the home renderer in the file is the one in use (routedStems): keep it there
 	}
 	providers.SaveJSON(filepath.Join(s.cfg.StateDir, stems.LANStateName), st) // best effort: the answer is returned anyway
 	return st

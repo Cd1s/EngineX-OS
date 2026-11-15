@@ -500,6 +500,31 @@ func FindLAN(ctx context.Context, statePath string, timeout time.Duration) (stri
 	return st.Endpoint, ok
 }
 
+// chooseLAN picks a home renderer: the cached one at once if it is up and has
+// the neural model, else what discovery finds, one with the neural model
+// before any other (#238: the cached or first renderer to answer may only
+// have hpss while another computer has the model). skip is true for an
+// endpoint that is not a home renderer.
+func chooseLAN(ctx context.Context, cached string, skip func(endpoint string) bool, timeout time.Duration) (LANState, bool) {
+	st, ok := LANState{}, false
+	if cached != "" {
+		st, ok = lanHealth(ctx, cached, timeout)
+	}
+	if ok && st.Backend == Neural {
+		return st, true
+	}
+	_ = discoverLANServers(ctx, timeout, func(endpoint string, _ Beacon) bool {
+		if (skip != nil && skip(endpoint)) || (ok && sameEndpoint(endpoint, st.Endpoint)) {
+			return false
+		}
+		if got, up := lanHealth(ctx, endpoint, timeout); up && (!ok || got.Backend == Neural) {
+			st, ok = got, true
+		}
+		return ok && st.Backend == Neural
+	})
+	return st, ok
+}
+
 // FindLANRenderer is FindLAN with what the renderer said about itself.
 func FindLANRenderer(ctx context.Context, statePath string, timeout time.Duration) (LANState, bool) {
 	var last LANState
@@ -508,19 +533,11 @@ func FindLANRenderer(ctx context.Context, statePath string, timeout time.Duratio
 	}
 	relayCfg := configuredRelayEndpoint(statePath)
 	isRelay := last.Relay || (relayCfg != "" && last.Endpoint != "" && sameEndpoint(last.Endpoint, relayCfg))
-	st, ok := LANState{}, false
+	cached := ""
 	if !isRelay && last.Endpoint != "" && lanEndpoint(last.Endpoint) {
-		st, ok = lanHealth(ctx, last.Endpoint, timeout)
+		cached = last.Endpoint
 	}
-	if !ok {
-		_ = discoverLANServers(ctx, timeout, func(endpoint string, _ Beacon) bool {
-			if relayCfg != "" && sameEndpoint(endpoint, relayCfg) {
-				return false
-			}
-			st, ok = lanHealth(ctx, endpoint, timeout)
-			return ok
-		})
-	}
+	st, ok := chooseLAN(ctx, cached, func(endpoint string) bool { return relayCfg != "" && sameEndpoint(endpoint, relayCfg) }, timeout)
 	if !ok {
 		if isRelay || (last.Endpoint != "" && !lanEndpoint(last.Endpoint)) {
 			return LANState{}, false
