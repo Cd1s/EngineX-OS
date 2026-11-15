@@ -37,12 +37,12 @@ mount -t tmpfs tmpfs "$R/proc/irq"
 mkdir -p "$R/proc/irq/41"
 printf 'f\n' > "$R/proc/irq/41/smp_affinity"
 printf '0-3\n' > "$R/proc/irq/41/smp_affinity_list"
-mkdir -p "$R/etc/sc5000" "$R/tmp/home" "$R/run/dbus" "$R/data/sc5000-custom/ui/packs"
-cp "$REPO/rootfs-overlay/etc/sc5000/libengine-ui-hook.so" "$R/etc/sc5000/"
-cp -a "$W/packs/en" "$R/data/sc5000-custom/ui/packs/"
-mkdir -p "$R/data/sc5000-custom/ui/packs/en/Skins/Common/Items"
-cp "$REPO/tools/az01-packer/prime4_cdj_probe.qml" "$R/data/sc5000-custom/ui/packs/en/Skins/Common/Items/QmlWarnings.qml"
-printf 'lang=en\nfour_deck_waveform=1\nfour_deck_role=12\n' > "$R/data/sc5000-custom/ui/settings.conf"
+mkdir -p "$R/etc/enginex" "$R/tmp/home" "$R/run/dbus" "$R/data/enginex/ui/packs"
+cp "$REPO/rootfs-overlay/etc/enginex/libengine-ui-hook.so" "$R/etc/enginex/"
+cp -a "$W/packs/en" "$R/data/enginex/ui/packs/"
+mkdir -p "$R/data/enginex/ui/packs/en/Skins/Common/Items"
+cp "$REPO/tools/az01-packer/prime4_cdj_probe.qml" "$R/data/enginex/ui/packs/en/Skins/Common/Items/QmlWarnings.qml"
+printf 'lang=en\nfour_deck_waveform=1\nfour_deck_role=12\n' > "$R/data/enginex/ui/settings.conf"
 chroot "$R" /usr/bin/dbus-daemon --system --fork --nopidfile > "$W/dbus.log" 2>&1 || true
 
 python3 - "$W" > "$W/http.log" 2>&1 <<'PY' &
@@ -71,7 +71,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(png)
             return
-        if u.path == '/v1/sc5000/ui':
+        if u.path == '/v1/enginex/ui':
             res = {
                 "version": "5.3.0.4",
                 "fourDeckWaveform": True,
@@ -86,7 +86,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
-        if u.path == '/v1/sc5000/shadow':
+        if u.path == '/v1/enginex/shadow':
             now_ms = int(time.time() * 1000)
             lines_param = q.get('line', [''])[0]
             decks = []
@@ -116,7 +116,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
-        if u.path == '/v1/sc5000/shadow/display':
+        if u.path == '/v1/enginex/shadow/display':
             asset = {
                 "version": 1,
                 "key": "cdj:fixture",
@@ -154,7 +154,7 @@ mock=$!
 trap 'kill "$mock" 2>/dev/null || true' EXIT
 
 timeout --kill-after=5s 35s chroot "$R" /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/tmp/home LD_LIBRARY_PATH=/usr/qt/lib \
-    LD_PRELOAD=/etc/sc5000/libengine-ui-hook.so QT_QPA_PLATFORM=eglfs QT_QPA_EGLFS_INTEGRATION=eglfs_kms \
+    LD_PRELOAD=/etc/enginex/libengine-ui-hook.so QT_QPA_PLATFORM=eglfs QT_QPA_EGLFS_INTEGRATION=eglfs_kms \
     QML_DISABLE_DISK_CACHE=1 MALLOC_ARENA_MAX=1 /usr/Engine/Engine -d0 > "$W/engine.log" 2>&1 || true
 
 if [ -s "$R/tmp/prime4-cdj-4deck.png" ]; then

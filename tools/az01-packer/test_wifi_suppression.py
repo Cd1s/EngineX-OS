@@ -68,17 +68,17 @@ class WifiSuppressionTest(unittest.TestCase):
         self.assertTrue(uikit_dialog.is_file(), f"{uikit_dialog} missing")
         uikit_dialog_content = uikit_dialog.read_text(encoding="utf-8")
         self.assertIn("cc.isCurrentCollectionStreaming", uikit_dialog_content)
-        self.assertIn('scReq.open("POST", "http://127.0.0.1:8080/v1/sc5000/ui", true)', uikit_dialog_content)
+        self.assertIn('scReq.open("POST", "http://127.0.0.1:8080/v1/enginex/ui", true)', uikit_dialog_content)
         self.assertNotIn(', false)', uikit_dialog_content.split('scReq.open(', 1)[1].split('\n', 1)[0])
-        self.assertTrue(uikit_dialog_content.index("http://127.0.0.1:8080/v1/sc5000/ui") < uikit_dialog_content.index("selectRole"))
+        self.assertTrue(uikit_dialog_content.index("http://127.0.0.1:8080/v1/enginex/ui") < uikit_dialog_content.index("selectRole"))
 
         uikit_order = out / "en" / "Skins" / "UIKit" / "Elements" / "StatusBar" / "SortOrderButton.qml"
         self.assertTrue(uikit_order.is_file(), f"{uikit_order} missing")
         uikit_order_content = uikit_order.read_text(encoding="utf-8")
         self.assertIn("cc.isCurrentCollectionStreaming", uikit_order_content)
-        self.assertIn('scReq.open("POST", "http://127.0.0.1:8080/v1/sc5000/ui", true)', uikit_order_content)
+        self.assertIn('scReq.open("POST", "http://127.0.0.1:8080/v1/enginex/ui", true)', uikit_order_content)
         self.assertNotIn(', false)', uikit_order_content.split('scReq.open(', 1)[1].split('\n', 1)[0])
-        self.assertTrue(uikit_order_content.index("http://127.0.0.1:8080/v1/sc5000/ui") < uikit_order_content.index("toggleOrder"))
+        self.assertTrue(uikit_order_content.index("http://127.0.0.1:8080/v1/enginex/ui") < uikit_order_content.index("toggleOrder"))
 
     def test_wifi_and_streaming_suppression_504(self):
         qrc = LAB / "5.0.4" / "qrc"
@@ -116,7 +116,7 @@ class WifiSuppressionTest(unittest.TestCase):
         sort_content_504 = sort_qml_504.read_text(encoding="utf-8")
         self.assertIn("|| isStreamingProviderWithSort", sort_content_504)
         self.assertIn("if (isStreamingProviderWithSort) return showPlayOrderRole ? [\"song\", \"bpm\", \"artist\", \"key\", \"rating\", \"length\", \"playOrder\"] : [\"song\", \"bpm\", \"artist\", \"key\", \"rating\", \"length\"]", sort_content_504)
-        self.assertIn('scReq.open("POST", "http://127.0.0.1:8080/v1/sc5000/ui", true)', sort_content_504)
+        self.assertIn('scReq.open("POST", "http://127.0.0.1:8080/v1/enginex/ui", true)', sort_content_504)
         self.assertNotIn(', false)', sort_content_504.split('scReq.open(', 1)[1].split('\n', 1)[0])
         self.assertIn("dialog.sortRow = sortRow", sort_content_504)
 

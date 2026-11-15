@@ -143,7 +143,7 @@ type USBAudioManager struct {
 // NewUSBAudioManager creates a new USBAudioManager.
 func NewUSBAudioManager(configPath, scriptPath, cardsPath string) *USBAudioManager {
 	if scriptPath == "" {
-		scriptPath = "/usr/sbin/sc5000-usb-audio"
+		scriptPath = "/usr/sbin/enginex-usb-audio"
 	}
 	if cardsPath == "" {
 		cardsPath = "/proc/asound/cards"
@@ -196,7 +196,7 @@ func (m *USBAudioManager) DetectDACs() ([]USBDAC, error) {
 // ErrInvalidUSBAudioConfig marks a configuration Apply refuses (the caller's mistake, not the deck's).
 var ErrInvalidUSBAudioConfig = errors.New("invalid USB audio configuration")
 
-// Apply validates configuration, writes to disk, and invokes /usr/sbin/sc5000-usb-audio. It reports a
+// Apply validates configuration, writes to disk, and invokes /usr/sbin/enginex-usb-audio. It reports a
 // configuration that could not be saved or a helper run that failed (BH-GF3-6: both were dropped and
 // the Web UI showed success); every step is still attempted.
 func (m *USBAudioManager) Apply(cfg USBAudioConfig) error {

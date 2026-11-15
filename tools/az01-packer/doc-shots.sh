@@ -5,7 +5,7 @@
 #   bash tools/az01-packer/doc-shots.sh [UPDATE_IMG] [NEXT_VERSION] [OUT_DIR]
 #
 # Arguments:
-#   UPDATE_IMG    Path to SC5000-*-Update.img (default: /var/tmp/sc5000-release-5.3.0.4/SC5000-5.3.0.4-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img)
+#   UPDATE_IMG    Path to SC5000-*-Update.img (default: /var/tmp/enginex-release-5.3.0.4/SC5000-5.3.0.4-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img)
 #   NEXT_VERSION  Mock newer version for OTA screenshot (default: v5.3.0.5)
 #   OUT_DIR       Repository root directory (default: repo root containing this script)
 #
@@ -24,7 +24,7 @@
 set -euo pipefail
 
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
-IMG=${1:-/var/tmp/sc5000-release-5.3.0.4/SC5000-5.3.0.4-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img}
+IMG=${1:-/var/tmp/enginex-release-5.3.0.4/SC5000-5.3.0.4-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img}
 NEXTV=${2:-v5.3.0.5}
 OUT_REPO=${3:-$REPO}
 
@@ -144,7 +144,7 @@ PY
 
     # Wait for stream-sync to be ready
     for i in $(seq 1 40); do
-        if curl -sf http://127.0.0.1:8080/v1/sc5000/ui >/dev/null 2>&1; then
+        if curl -sf http://127.0.0.1:8080/v1/enginex/ui >/dev/null 2>&1; then
             break
         fi
         sleep 0.1
@@ -155,7 +155,7 @@ PY
         PATH=/usr/bin:/bin:/usr/sbin:/sbin \
         HOME=/tmp/home \
         LD_LIBRARY_PATH=/usr/lib:/usr/qt/lib \
-        LD_PRELOAD=/etc/sc5000/libengine-ui-hook.so \
+        LD_PRELOAD=/etc/enginex/libengine-ui-hook.so \
         QT_QPA_PLATFORM=eglfs \
         QT_QPA_EGLFS_INTEGRATION=eglfs_kms \
         LIBGL_ALWAYS_SOFTWARE=1 \
@@ -190,7 +190,9 @@ python3 "$REPO/tools/az01-packer/az01_packer.py" unpack "$IMG" --output "$W/imag
 IMG_EXT2=$W/image/rootfs.ext2
 [ -f "$IMG_EXT2" ] || { echo "Error: unpacked rootfs.ext2 not found" >&2; exit 1; }
 
-CURR_VERSION=$(debugfs -R "cat /etc/sc5000/version.txt" "$IMG_EXT2" 2>/dev/null | grep -E '^[0-9]' | head -1)
+# /etc/enginex since 5.3.0.5 (#234); older images keep it in /etc/sc5000.
+CURR_VERSION=$(debugfs -R "cat /etc/enginex/version.txt" "$IMG_EXT2" 2>/dev/null | grep -E '^[0-9]' | head -1)
+[ -n "$CURR_VERSION" ] || CURR_VERSION=$(debugfs -R "cat /etc/sc5000/version.txt" "$IMG_EXT2" 2>/dev/null | grep -E '^[0-9]' | head -1)
 echo "Detected current version in image: $CURR_VERSION (mock next: $NEXTV)"
 
 echo "==> Building language packs..."

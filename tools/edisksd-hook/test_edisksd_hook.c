@@ -637,6 +637,30 @@ static void test_monitor_sees_plain_device_mount(const char *root) {
     (void)line;
     puts("r2 HFS view: edisksd's monitor sees only the plain device mount, never the bare mount before the view: PASS");
 }
+// #234: this hook names its view tmpfs enginex-hfs-view; an in-place update from an older release
+// can restart edisksd under it while views the old hook mounted (sc5000-hfs-view, helper mounts in
+// /run/sc5000-hfs-views) are still there. The monitor sees neither name, only the device mounts.
+static void test_monitor_hides_new_and_old_view_names(const char *root) {
+    char path[PATH_MAX],out[16384];join(path,root,"mountinfo-234");
+    FILE *f=fopen(path,"w");assert(f);
+    fprintf(f,"78 33 8:1 / /media/vivi rw,nosuid,nodev,noexec,relatime,nosymfollow shared:239 - hfsplus /dev/sda1 ro,umask=22\n");
+    fprintf(f,"79 33 8:17 / /media/old rw,nosuid,nodev,noexec,relatime,nosymfollow shared:241 - hfsplus /dev/sdb1 ro,umask=22\n");
+    fprintf(f,"260 25 0:21 /x/view-AAAAAA %s/view-AAAAAA rw,nosuid,nodev - tmpfs tmpfs rw,mode=755\n",test_runtime);
+    fprintf(f,"269 260 0:46 / %s/view-AAAAAA/view ro,nosuid - tmpfs enginex-hfs-view ro,size=16384k,mode=755\n",test_runtime);
+    fprintf(f,"304 78 0:46 / /media/vivi ro,nosuid,nodev,noexec,relatime shared:272 - tmpfs enginex-hfs-view ro,size=16384k,mode=755\n");
+    fprintf(f,"309 304 8:1 /.PIONEER /media/vivi/.PIONEER rw,nosuid shared:277 - hfsplus /dev/sda1 ro,umask=22\n");
+    fprintf(f,"360 25 0:22 /x/view-BBBBBB /run/sc5000-hfs-views/view-BBBBBB rw,nosuid,nodev - tmpfs tmpfs rw,mode=755\n");
+    fprintf(f,"361 360 8:17 / /run/sc5000-hfs-views/view-BBBBBB/backing rw,nosuid - hfsplus /dev/sdb1 ro,umask=22\n");
+    fprintf(f,"362 79 0:47 / /media/old ro,nosuid,nodev,noexec,relatime shared:273 - tmpfs sc5000-hfs-view ro,size=16384k,mode=755\n");
+    fprintf(f,"363 362 8:17 /.PIONEER /media/old/.PIONEER rw,nosuid shared:278 - hfsplus /dev/sdb1 ro,umask=22\n");
+    fclose(f);
+    int fd=hide_views(path);assert(fd>=0);
+    ssize_t n=pread(fd,out,sizeof out-1,0);assert(n>0);out[n]=0;close(fd);
+    assert(strstr(out,"78 33 8:1 / /media/vivi rw")&&strstr(out,"79 33 8:17 / /media/old rw"));
+    assert(!strstr(out,"hfs-view")&&!strstr(out,"view-AAAAAA")&&!strstr(out,"view-BBBBBB")&&!strstr(out,"/.PIONEER"));
+    int lines=0;for(char *p=out;*p;p++)lines+=*p=='\n';assert(lines==2);
+    puts("#234 HFS view: the monitor hides views under the new and the pre-5.3.0.5 name: PASS");
+}
 static void write_bytes(const char *path,size_t n) {
     int fd=open(path,O_WRONLY|O_CREAT|O_TRUNC|O_NOFOLLOW|O_CLOEXEC,0600);assert(fd>=0);
     static char block[65536];memset(block,'a',sizeof block);
@@ -1022,11 +1046,11 @@ static void test_prepare_state_lifecycle(const char *root) {
 }
 
 int main(int argc,char **argv) {
-    char root[]="/tmp/sc5000-edisks-tests-XXXXXX";assert(mkdtemp(root));
+    char root[]="/tmp/enginex-edisks-tests-XXXXXX";assert(mkdtemp(root));
     join(test_prepare_state,root,"run/enginex-usb-preparing");char prep_run[PATH_MAX];join(prep_run,root,"run");assert(!make_dirs(prep_run));
     join(test_media,root,"media");join(test_library,root,"libraries");join(test_runtime,root,"runtime");
     join(test_legacy_library,root,"legacy-libraries");join(test_utab,root,"utab");assert(!make_dirs(test_utab));
-    assert(!make_dirs(test_media));test_paths_and_copy(root);test_compat_symlink_root(root);test_time();test_slow_marker_follows_every_export_file(root);test_only_an_export_makes_a_rekordbox_stick(root);test_monitor_sees_plain_device_mount(root);
+    assert(!make_dirs(test_media));test_paths_and_copy(root);test_compat_symlink_root(root);test_time();test_slow_marker_follows_every_export_file(root);test_only_an_export_makes_a_rekordbox_stick(root);test_monitor_sees_plain_device_mount(root);test_monitor_hides_new_and_old_view_names(root);
     if(argc>1&&!strcmp(argv[1],"--mounts")){test_prepare_state_lifecycle(root);test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);test_library_is_walked_once(root);test_two_sticks_at_once(root);test_hfs_visible_mount_reuses_the_converted_library(root);test_private_mount_leaves_nothing_behind(root);test_hfs_view_copies_only_metadata(root);test_heal_before_visible(root);test_eject_while_another_stick_converts(root);test_eject_of_a_pulled_stick(root);test_heal_marker_survives_another_port(root);test_hfs_view_with_a_long_entry_name(root);test_hfs_view_artwork_is_writable(root);test_seed_keeps_its_own_previous_generation(root);test_view_binds_stay_out_of_a_shared_data(root);test_guardian_from_the_data_bundle(root);test_slow_marker_survives_another_port(root);}
     // Mount tests have removed all namespace mounts before deleting fixtures.
     int tmp=open("/tmp",O_RDONLY|O_DIRECTORY);assert(tmp>=0);remove_tree(tmp,strrchr(root,'/')+1);close(tmp);

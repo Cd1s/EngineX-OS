@@ -116,7 +116,7 @@ The page needs the console login because it lists the devices on your network. *
 **On the deck over SSH / 在碟机上（SSH）**
 
 ```sh
-sc5000-prolink-diag
+enginex-prolink-diag
 ```
 
 It checks the link speed, `rb-bridge` and `stream-sync`, the mounted drives and their `export.pdb`, waits 5 seconds and checks that every Pro DJ Link device sent packets in that window, then prints the full report above. The exit code is 1 when any line is `FAIL`.

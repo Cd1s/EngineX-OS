@@ -161,7 +161,7 @@ func TestSpotifyDeviceTerminalErrorAndConcurrentLANLink(t *testing.T) {
 	})}
 	ui := New(Config{StateDir: t.TempDir(), UIDir: t.TempDir(), HTTP: hc}, nil)
 	defer ui.Close()
-	ui.loginStart(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/sc5000/login?provider=spotify", nil))
+	ui.loginStart(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/enginex/login?provider=spotify", nil))
 	flow := ui.logins["spotify"]
 	if flow == nil || flow.spotifyDevice == nil {
 		t.Fatal("no device flow")
@@ -173,7 +173,7 @@ func TestSpotifyDeviceTerminalErrorAndConcurrentLANLink(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		ui.loginStatus(httptest.NewRecorder(), httptest.NewRequest("GET", "/v1/sc5000/login/status?provider=spotify", nil))
+		ui.loginStatus(httptest.NewRecorder(), httptest.NewRequest("GET", "/v1/enginex/login/status?provider=spotify", nil))
 	}()
 	select {
 	case <-entered:
@@ -196,7 +196,7 @@ func TestSpotifyDeviceTerminalErrorAndConcurrentLANLink(t *testing.T) {
 	flow.Status = "waiting"
 	ui.mu.Unlock()
 	w := httptest.NewRecorder()
-	ui.loginStatus(w, httptest.NewRequest("GET", "/v1/sc5000/login/status?provider=spotify", nil))
+	ui.loginStatus(w, httptest.NewRequest("GET", "/v1/enginex/login/status?provider=spotify", nil))
 	if !strings.Contains(w.Body.String(), `"status":"error"`) || !strings.Contains(w.Body.String(), `"error":"spotify:`) || tokenCalls != 1 {
 		t.Fatal("terminal device error was swallowed or permanent failure retried")
 	}

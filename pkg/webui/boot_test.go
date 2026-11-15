@@ -85,12 +85,12 @@ func TestBootReadinessCurrentAttemptAndLoopback(t *testing.T) {
 		name, method, path, body, remote string
 		status                           int
 	}{
-		{"local token", "GET", "/v1/sc5000/boot", "", "127.0.0.1:7", 200},
-		{"remote token", "GET", "/v1/sc5000/boot", "", "192.0.2.9:7", 403},
-		{"remote ready", "POST", "/v1/sc5000/boot/ready", `{"token":"attempt-one"}`, "192.0.2.9:7", 403},
-		{"stale ready", "POST", "/v1/sc5000/boot/ready", `{"token":"older"}`, "127.0.0.1:7", 409},
-		{"unknown fields", "POST", "/v1/sc5000/boot/ready", `{"token":"attempt-one","ready":true}`, "127.0.0.1:7", 400},
-		{"current ready", "POST", "/v1/sc5000/boot/ready", `{"token":"attempt-one"}`, "[::1]:7", 200},
+		{"local token", "GET", "/v1/enginex/boot", "", "127.0.0.1:7", 200},
+		{"remote token", "GET", "/v1/enginex/boot", "", "192.0.2.9:7", 403},
+		{"remote ready", "POST", "/v1/enginex/boot/ready", `{"token":"attempt-one"}`, "192.0.2.9:7", 403},
+		{"stale ready", "POST", "/v1/enginex/boot/ready", `{"token":"older"}`, "127.0.0.1:7", 409},
+		{"unknown fields", "POST", "/v1/enginex/boot/ready", `{"token":"attempt-one","ready":true}`, "127.0.0.1:7", 400},
+		{"current ready", "POST", "/v1/enginex/boot/ready", `{"token":"attempt-one"}`, "[::1]:7", 200},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := bootRequest(s, tc.method, tc.path, tc.body, tc.remote, "")
@@ -103,14 +103,14 @@ func TestBootReadinessCurrentAttemptAndLoopback(t *testing.T) {
 		t.Fatalf("ready %q: %v", b, err)
 	}
 	putBootTestFile(t, dir, "boot-token", "attempt-two\n")
-	if w := bootRequest(s, "POST", "/v1/sc5000/boot/ready", `{"token":"attempt-one"}`, "127.0.0.1:7", ""); w.Code != 409 {
+	if w := bootRequest(s, "POST", "/v1/enginex/boot/ready", `{"token":"attempt-one"}`, "127.0.0.1:7", ""); w.Code != 409 {
 		t.Fatal(w.Code)
 	}
 	putBootTestFile(t, dir, "safe-mode", "")
-	if w := bootRequest(s, "POST", "/v1/sc5000/boot/ready", `{"token":"attempt-two"}`, "127.0.0.1:7", ""); w.Code != 409 {
+	if w := bootRequest(s, "POST", "/v1/enginex/boot/ready", `{"token":"attempt-two"}`, "127.0.0.1:7", ""); w.Code != 409 {
 		t.Fatal(w.Code)
 	}
-	if w := bootRequest(s, "GET", "/v1/sc5000/boot", "", "127.0.0.1:7", ""); w.Code != 409 {
+	if w := bootRequest(s, "GET", "/v1/enginex/boot", "", "127.0.0.1:7", ""); w.Code != 409 {
 		t.Fatal(w.Code)
 	}
 }

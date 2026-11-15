@@ -10,7 +10,7 @@
 #  2. the previous release boots (prepare, stream-sync, Engine) with a populated
 #     internal Engine library (/media/az01-internal), finds the new release on a
 #     local TLS GitHub mock and runs the deck's online update:
-#     /v1/sc5000/update?apply=1 -> Engine quits with UpdateFromUrl -> the stock
+#     /v1/sc5000/update?apply=1 (/v1/enginex since 5.3.0.5) -> Engine quits with UpdateFromUrl -> the stock
 #     engine script -> az01-update downloads and verifies the new image;
 #  3. the new rootfs boots on the same /data (boot 1): etc-reset, prepare, debloat,
 #     perf-tune, sshd -t, a stock Engine run that leaves a stale QML cache, then
@@ -61,18 +61,29 @@ in_root() { chroot "$R" /usr/bin/env -i PATH=$PATH_DECK "$@"; }
 unit_exec() { # ExecStart of a unit as the image ships it (last one wins)
     sed -n 's/^ExecStart=//p' "$R/etc/systemd/system/$1" "$R/usr/lib/systemd/system/$1" 2>/dev/null | tail -1
 }
+# Names by rootfs (#234): the previous release may predate 5.3.0.5, which renamed sc5000 to
+# enginex (units, scripts, /etc and /usr dirs, the API prefix). /data/enginex is both.
+names() { # <rootfs>
+    if [ -e "$1/usr/libexec/enginex-prepare" ]; then
+        N_ETC=/etc/enginex N_SHARE=/usr/share/enginex N_LIBEXEC=/usr/libexec/enginex N_BIN=/usr/local/bin/enginex
+        N_UNIT=enginex N_API=/v1/enginex N_PACKER='enginex*'
+    else
+        N_ETC=/etc/sc5000 N_SHARE=/usr/share/sc5000-custom N_LIBEXEC=/usr/libexec/sc5000-custom N_BIN=/usr/local/bin/sc5000
+        N_UNIT=sc5000 N_API=/v1/sc5000 N_PACKER='sc5000-custom*'
+    fi
+}
 
 # The shipped suite embeds the release public key (#239). The gate cannot sign with the real
 # private key, so the sandbox's copy of the binary gets the throwaway key in its place: the key is
 # found by its base64 body (exactly once per embedded key, else this fails: the image has no key,
-# or not the one the checkout lists), every other byte stays as shipped. sc5000-suite-exec unpacks
+# or not the one the checkout lists), every other byte stays as shipped. enginex-suite-exec unpacks
 # the same archive on first start and keeps the result while the archive's hash is unchanged.
 patch_release_key() { # [lenient]: every listed key (new image) / at least one of them (previous release)
-    local bin=$W/data/sc5000-custom/bin archive=$R/usr/share/sc5000-custom/sc5000-suite.xz
+    local bin=$(data_dir)/bin archive=$R$N_SHARE/$N_UNIT-suite.xz
     [ -s "$archive" ] || { echo "no $archive"; return 1; }
     mkdir -p "$bin"
-    xz -dc "$archive" > "$bin/sc5000-suite.swap" || return 1
-    python3 -I - "$bin/sc5000-suite.swap" "$W/signing/embedded.txt" "$SIGN_BODY" "${1:-strict}" <<'PY' || return 1
+    xz -dc "$archive" > "$bin/$N_UNIT-suite.swap" || return 1
+    python3 -I - "$bin/$N_UNIT-suite.swap" "$W/signing/embedded.txt" "$SIGN_BODY" "${1:-strict}" <<'PY' || return 1
 import sys
 path, listing, new, mode = sys.argv[1:5]
 data = open(path, 'rb').read()
@@ -95,9 +106,9 @@ if not swapped:
     sys.exit('none of the listed release keys is in the binary')
 open(path, 'wb').write(data)
 PY
-    chmod 755 "$bin/sc5000-suite.swap"
-    mv -f "$bin/sc5000-suite.swap" "$bin/sc5000-suite"
-    sha256sum < "$archive" | cut -d' ' -f1 > "$bin/sc5000-suite.id"
+    chmod 755 "$bin/$N_UNIT-suite.swap"
+    mv -f "$bin/$N_UNIT-suite.swap" "$bin/$N_UNIT-suite"
+    sha256sum < "$archive" | cut -d' ' -f1 > "$bin/$N_UNIT-suite.id"
 }
 
 # Does the previous release verify update signatures (5.3.0.5 and later)? Then its own updater is
@@ -106,19 +117,19 @@ PY
 old_verifies_signatures() {
     # grep -c reads all of the input: with -q it would stop at the first match, xz would get SIGPIPE and
     # pipefail would report the pipeline as failed.
-    xz -dc "$R/usr/share/sc5000-custom/sc5000-suite.xz" 2>/dev/null | grep -ac 'SHA256SUMS.txt.sig' > /dev/null
+    xz -dc "$R$N_SHARE/$N_UNIT-suite.xz" 2>/dev/null | grep -ac 'SHA256SUMS.txt.sig' > /dev/null
 }
 
 # A deck refuses an update that does not verify: say why, install nothing (#239).
 refusal() { # <suffix of the mock repo / release> <message the deck shows>
-    local sfx=$1 msg=$2 ui=$W/data/sc5000-custom/ui/settings.conf
+    local sfx=$1 msg=$2 ui=$(data_dir)/ui/settings.conf
     echo "github_repo=Cd1s/EngineX-OS-$sfx" >> "$ui"
     : > "$R/tmp/gate-shim.log"
-    curl -sf http://127.0.0.1:8080/v1/sc5000/update > "$W/boot2-$sfx-offer.json" || :
+    curl -sf http://127.0.0.1:8080$N_API/update > "$W/boot2-$sfx-offer.json" || :
     check "boot2: the $sfx release is offered, so the refusal is the signature's" json "$W/boot2-$sfx-offer.json" \
         "j.get('updateAvailable') is True and j.get('latestVersion') == 'v$NEXTV-$sfx'"
-    curl -sf "http://127.0.0.1:8080/v1/sc5000/update?apply=1" > /dev/null || :
-    settled() { curl -sf http://127.0.0.1:8080/v1/sc5000/update > "$W/boot2-$sfx-result.json" 2>/dev/null && json "$W/boot2-$sfx-result.json" "not j.get('updating') and j.get('error')"; }
+    curl -sf "http://127.0.0.1:8080$N_API/update?apply=1" > /dev/null || :
+    settled() { curl -sf http://127.0.0.1:8080$N_API/update > "$W/boot2-$sfx-result.json" 2>/dev/null && json "$W/boot2-$sfx-result.json" "not j.get('updating') and j.get('error')"; }
     wait_for 900 settled || :
     check "boot2: the $sfx release is refused: $msg" json "$W/boot2-$sfx-result.json" "j.get('error') == '$msg' and not j.get('updating')"
     check "boot2: the $sfx release: az01-update never ran, no image kept" \
@@ -126,11 +137,19 @@ refusal() { # <suffix of the mock repo / release> <message the deck shows>
     sed -i "\#^github_repo=Cd1s/EngineX-OS-$sfx\$#d" "$ui"
 }
 
+# The deck's data directory after prepare ran: /data/enginex since 5.3.0.3 (#103), the real
+# /data/sc5000-custom on an older previous release (#234 review R5). Not the rootfs names above:
+# a 5.3.0.2 or older baseline has not migrated it, and the new boot moves it over.
+data_dir() {
+    if [ -d "$W/data/enginex" ] && [ ! -L "$W/data/enginex" ]; then echo "$W/data/enginex"; else echo "$W/data/sc5000-custom"; fi
+}
+
 # --- phase: one boot of one rootfs, PID 1 of its own pid + mount namespace ---
 phase() {
     local name=$1 R=$W/$1 v
     [ "$name" != boot2 ] || R=$W/new
     local legacy_ota=0
+    names "$R"
     mount --make-rprivate /
     for d in tmp run dev sys media; do mount -t tmpfs tmpfs "$R/$d"; done
     if [ -d "$R/var/volatile" ]; then
@@ -191,31 +210,33 @@ SH
         echo 0 > "$R/proc/sys/$k"
     done
     printf '           CPU0\n' > "$R/proc/interrupts"
-    in_root /usr/libexec/sc5000-custom-etc-reset > "$W/$name-boot.log" 2>&1 || fail "$name: sc5000-custom-etc-reset"
-    if in_root /usr/libexec/sc5000-custom-prepare >> "$W/$name-boot.log" 2>&1; then pass "$name: sc5000-custom-prepare"
-    else fail "$name: sc5000-custom-prepare"; fi
+    in_root $N_LIBEXEC-etc-reset > "$W/$name-boot.log" 2>&1 || fail "$name: etc-reset"
+    if in_root $N_LIBEXEC-prepare >> "$W/$name-boot.log" 2>&1; then pass "$name: prepare"
+    else fail "$name: prepare"; fi
+    local D
+    D=$(data_dir)
     if [ "$name" = old ]; then
-        printf 'lang=%s\n' "$LANG_PACK" > "$W/data/sc5000-custom/ui/settings.conf"
-        check "old: version $OLDV installed" grep -qx "$OLDV" "$W/data/sc5000-custom/version.txt"
+        printf 'lang=%s\n' "$LANG_PACK" > "$D/ui/settings.conf"
+        check "old: version $OLDV installed" grep -qx "$OLDV" "$D/version.txt"
     elif [ "$name" = new ]; then
-        check "new: version.txt is $NEWV" grep -qx "$NEWV" "$W/data/sc5000-custom/version.txt"
-        check "new: .pack-version is $NEWV" grep -qx "$NEWV" "$W/data/sc5000-custom/ui/.pack-version"
-        check "new: SSH host key kept across the update" cmp -s "$W/old-hostkey.pub" "$W/data/sc5000-custom/ssh_host_ed25519_key.pub"
-        check "new: no SSH key in a public image" test ! -s "$R/usr/share/sc5000-custom/authorized_keys"
+        check "new: version.txt is $NEWV" grep -qx "$NEWV" "$W/data/enginex/version.txt"
+        check "new: .pack-version is $NEWV" grep -qx "$NEWV" "$W/data/enginex/ui/.pack-version"
+        check "new: SSH host key kept across the update" cmp -s "$W/old-hostkey.pub" "$W/data/enginex/ssh_host_ed25519_key.pub"
+        check "new: no SSH key in a public image" test ! -s "$R$N_SHARE/authorized_keys"
         check "new: internal drive Engine Library mounted at /media/az01-internal" test -s "$R/media/az01-internal/Engine Library/Database2/m.db"
-        check "new: sc5000-debloat --apply-runtime" in_root /usr/local/bin/sc5000-debloat --apply-runtime
-        check "new: sc5000-perf-tune" in_root SC5000_PROC_ROOT=/proc SC5000_SYS_ROOT=/sys /usr/local/bin/sc5000-perf-tune
+        check "new: debloat --apply-runtime" in_root $N_BIN-debloat --apply-runtime
+        check "new: perf-tune" in_root ENGINEX_PROC_ROOT=/proc ENGINEX_SYS_ROOT=/sys $N_BIN-perf-tune
         check "new: 8 MiB TCP buffers" grep -qx '4096 131072 8388608' "$R/proc/sys/net/ipv4/tcp_rmem"
         mkdir -p "$R/run/sshd"
-        check "new: sshd -t" in_root /usr/sbin/sshd -t -f /usr/share/sc5000-custom/sshd_config
+        check "new: sshd -t" in_root /usr/sbin/sshd -t -f $N_SHARE/sshd_config
     else
-        check "boot2: version.txt stays $NEWV" grep -qx "$NEWV" "$W/data/sc5000-custom/version.txt"
-        check "boot2: .pack-version stays $NEWV" grep -qx "$NEWV" "$W/data/sc5000-custom/ui/.pack-version"
-        check "boot2: SSH host key preserved across power cut" cmp -s "$W/old-hostkey.pub" "$W/data/sc5000-custom/ssh_host_ed25519_key.pub"
-        check "boot2: upfader_echo=1 persisted across power cut" grep -qx 'upfader_echo=1' "$W/data/sc5000-custom/ui/settings.conf"
+        check "boot2: version.txt stays $NEWV" grep -qx "$NEWV" "$W/data/enginex/version.txt"
+        check "boot2: .pack-version stays $NEWV" grep -qx "$NEWV" "$W/data/enginex/ui/.pack-version"
+        check "boot2: SSH host key preserved across power cut" cmp -s "$W/old-hostkey.pub" "$W/data/enginex/ssh_host_ed25519_key.pub"
+        check "boot2: upfader_echo=1 persisted across power cut" grep -qx 'upfader_echo=1' "$W/data/enginex/ui/settings.conf"
         check "boot2: internal drive Engine Library intact across power cut" python3 -I -c 'import sqlite3,sys; sys.exit(0 if sqlite3.connect(sys.argv[1]).execute("select count(*) from Track").fetchone()[0] == 8 else 1)' "$R/media/az01-internal/Engine Library/Database2/m.db"
-        check "boot2: sc5000-debloat --apply-runtime" in_root /usr/local/bin/sc5000-debloat --apply-runtime
-        check "boot2: sc5000-perf-tune" in_root SC5000_PROC_ROOT=/proc SC5000_SYS_ROOT=/sys /usr/local/bin/sc5000-perf-tune
+        check "boot2: debloat --apply-runtime" in_root $N_BIN-debloat --apply-runtime
+        check "boot2: perf-tune" in_root ENGINEX_PROC_ROOT=/proc ENGINEX_SYS_ROOT=/sys $N_BIN-perf-tune
     fi
     umount "$R/proc"
     mount -t proc proc "$R/proc"
@@ -246,7 +267,7 @@ SH
     in_root $(unit_exec stream-sync.service) > "$W/$name-stream-sync.log" 2>&1 & pid[stream-sync]=$!
     if [ "$name" != old ]; then
         # shellcheck disable=SC2046
-        in_root $(unit_exec sc5000-deemixd.service) > "$W/$name-deemixd.log" 2>&1 & pid[deemixd]=$!
+        in_root $(unit_exec $N_UNIT-deemixd.service) > "$W/$name-deemixd.log" 2>&1 & pid[deemixd]=$!
         # shellcheck disable=SC2046
         in_root $(unit_exec rb-bridge.service) > "$W/$name-rb-bridge.log" 2>&1 & pid[rb-bridge]=$!
         if [ "$name" = new ]; then
@@ -254,20 +275,20 @@ SH
             # symbol of the preloaded hook at start is the check; the mount path itself is
             # tools/edisksd-hook/test_edisksd_hook.c --mounts (step 2).
             # shellcheck disable=SC2046
-            in_root LD_BIND_NOW=1 LD_PRELOAD=/etc/sc5000/libedisksd-hook.so $(unit_exec edisksd.service) > "$W/new-edisksd.log" 2>&1 &
+            in_root LD_BIND_NOW=1 LD_PRELOAD=$N_ETC/libedisksd-hook.so $(unit_exec edisksd.service) > "$W/new-edisksd.log" 2>&1 &
             check "new: engine-guardian --watch (retired database watch) exits 0" in_root /usr/local/bin/engine-guardian --watch
         fi
         # The repurposed engine-guardian.service is the boot watch (UI-ready deadline, reports).
         # shellcheck disable=SC2046
         in_root $(unit_exec engine-guardian.service) > "$W/$name-boot-guardian.log" 2>&1 & pid[boot-guardian]=$!
         # shellcheck disable=SC2046
-        check "$name: sc5000-storage-mount --discover" in_root $(unit_exec sc5000-storage-discover.service)
+        check "$name: storage-mount --discover" in_root $(unit_exec $N_UNIT-storage-discover.service)
     fi
     # engine.service: ExecStartPre (guard), runengine's environment, the stock engine script.
-    mkdir -p -m 0700 "$R/tmp/sc5000-engine-home"
-    local ui=$W/data/sc5000-custom/ui want=0
-    local engine_env=(HOME=/tmp/sc5000-engine-home MESA_SHADER_CACHE_MAX_SIZE=32M QML_DISABLE_DISK_CACHE=1
-        LD_PRELOAD=/etc/sc5000/libengine-ui-hook.so QT_QPA_PLATFORM=offscreen MALLOC_ARENA_MAX=1 LD_LIBRARY_PATH=/usr/qt/lib)
+    mkdir -p -m 0700 "$R/tmp/enginex-engine-home"
+    local ui=$D/ui want=0
+    local engine_env=(HOME=/tmp/enginex-engine-home MESA_SHADER_CACHE_MAX_SIZE=32M QML_DISABLE_DISK_CACHE=1
+        LD_PRELOAD=$N_ETC/libengine-ui-hook.so QT_QPA_PLATFORM=offscreen MALLOC_ARENA_MAX=1 LD_LIBRARY_PATH=/usr/qt/lib)
     if [ "$name" = new ]; then
         # The 5.3.0.1 deck kept the stock UI (2026-11-05): Engine 5.3.0 once ran without the
         # pack, and its forced QML disk cache in /data outlived every later boot with it.
@@ -293,9 +314,9 @@ SH
         want=$(find "$ui/packs/$LANG_PACK" -type f ! -name QmlWarnings.qml | wc -l)
     fi
     # The shipped guard chooses the preload for every new-release Engine attempt.
-    [ "$name" = old ] || engine_env=(HOME=/tmp/sc5000-engine-home MESA_SHADER_CACHE_MAX_SIZE=32M QML_DISABLE_DISK_CACHE=1
+    [ "$name" = old ] || engine_env=(HOME=/tmp/enginex-engine-home MESA_SHADER_CACHE_MAX_SIZE=32M QML_DISABLE_DISK_CACHE=1
         QT_QPA_PLATFORM=offscreen MALLOC_ARENA_MAX=1 LD_LIBRARY_PATH=/usr/qt/lib)
-    in_root /etc/sc5000/engine-ui-guard pre >> "$W/$name-boot.log" 2>&1 || :
+    in_root $N_ETC/engine-ui-guard pre >> "$W/$name-boot.log" 2>&1 || :
     if [ "$name" = new ]; then
         # #56: without a TIDAL account Engine 5.3.0 opens the Engine DJ Profile login
         # (device.enginedj.com) instead of logging in to the local gateway.
@@ -311,11 +332,11 @@ SH
     if [ "$name" = old ]; then
         in_root "${engine_env[@]}" /usr/Engine/Scripts/engine "$PRODUCT" > "$W/$name-engine.log" 2>&1 & pid[engine]=$!
     else
-        in_root "${engine_env[@]}" /etc/sc5000/engine-ui-guard service /usr/Engine/Scripts/engine "$PRODUCT" > "$W/$name-engine.log" 2>&1 & pid[engine]=$!
+        in_root "${engine_env[@]}" $N_ETC/engine-ui-guard service /usr/Engine/Scripts/engine "$PRODUCT" > "$W/$name-engine.log" 2>&1 & pid[engine]=$!
     fi
-    check "$name: stream-sync listens on :8080" wait_for 120 curl -sf -o /dev/null http://127.0.0.1:8080/v1/sc5000/ui
+    check "$name: stream-sync listens on :8080" wait_for 120 curl -sf -o /dev/null http://127.0.0.1:8080$N_API/ui
     check "$name: UI hook loaded the $LANG_PACK pack" wait_for "$ENGINE_START" grep -aq "packs/$LANG_PACK: [0-9]* files" "$W/$name-engine.log"
-    in_root /etc/sc5000/engine-ui-guard post >> "$W/$name-boot.log" 2>&1 || :
+    in_root $N_ETC/engine-ui-guard post >> "$W/$name-boot.log" 2>&1 || :
 
     # Engine removes a stale /tmp/update-file-url while it starts: a deck owner can only
     # press Update once it is up, so the gate waits the same way before ?apply=1.
@@ -375,24 +396,27 @@ SH
         # Fields 41/19 are policy/nice: fair background work must retain progress.
         check "new: OfflineAnalyzer uses SCHED_OTHER and nice 10 (#55)" bash -c "chroot '$R' /bin/sh -c 'cat /proc/[0-9]*/stat 2>/dev/null' | awk '\$2 == \"(OfflineAnalyzer)\" { n++; if (\$41 != 0 || \$19 != 10) bad = 1 } END { exit !(n && !bad) }'"
         check "new: edisksd starts with the hook preloaded (LD_BIND_NOW)" bash -c "grep -aq 'Loaded configuration' '$W/new-edisksd.log' && ! grep -aiE 'symbol lookup error|undefined symbol|cannot open shared object|cannot be preloaded' '$W/new-edisksd.log'"
-        curl -sf http://127.0.0.1:8080/v1/sc5000/ui > "$W/new-ui.json" || :
-        check "new: GET /v1/sc5000/ui reports $NEWV" json "$W/new-ui.json" "j.get('version') == '$NEWV'"
-        curl -sf -X POST "http://127.0.0.1:8080/v1/sc5000/ui?upfaderEcho=1" > "$W/new-ui-echo.json" || :
-        check "new: POST /v1/sc5000/ui?upfaderEcho=1 returns upfaderEcho: true" json "$W/new-ui-echo.json" "j.get('upfaderEcho') is True"
+        curl -sf http://127.0.0.1:8080$N_API/ui > "$W/new-ui.json" || :
+        check "new: GET $N_API/ui reports $NEWV" json "$W/new-ui.json" "j.get('version') == '$NEWV'"
+        # #234: /v1/sc5000 stays the permanent alias older installers, UI packs and Mods call.
+        curl -sf http://127.0.0.1:8080/v1/sc5000/ui > "$W/new-ui-alias.json" || :
+        check "new: GET /v1/sc5000/ui (alias) reports $NEWV" json "$W/new-ui-alias.json" "j.get('version') == '$NEWV'"
+        curl -sf -X POST "http://127.0.0.1:8080$N_API/ui?upfaderEcho=1" > "$W/new-ui-echo.json" || :
+        check "new: POST $N_API/ui?upfaderEcho=1 returns upfaderEcho: true" json "$W/new-ui-echo.json" "j.get('upfaderEcho') is True"
         curl -sf -X POST http://127.0.0.1:8080/au/oauth2/token > "$W/new-token.json" || :
         check "new: POST /au/oauth2/token (TIDAL gateway)" json "$W/new-token.json" "j.get('access_token')"
         check "new: Beatport is one of the deck's sources" json "$W/new-ui.json" "'beatport' in j.get('sources', [])"
-        curl -sf -X POST "http://127.0.0.1:8080/v1/sc5000/login?provider=beatport" > "$W/new-beatport-login.json" || :
+        curl -sf -X POST "http://127.0.0.1:8080$N_API/login?provider=beatport" > "$W/new-beatport-login.json" || :
         check "new: Beatport login flow starts" json "$W/new-beatport-login.json" "j.get('provider') == 'beatport' and '/m/beatport?t=' in j.get('target', '')"
         local phone
         phone=$(python3 -I -c 'import json,sys,urllib.parse as u; p=u.urlsplit(json.load(open(sys.argv[1]))["target"]); print(p.path + "?" + p.query)' "$W/new-beatport-login.json" 2>/dev/null || :)
         check "new: Beatport phone login page" bash -c "curl -sf 'http://127.0.0.1:8080$phone' | grep -q 'Beatport'"
-        check "new: UI pack carries the Beatport source" grep -rqs 'id: "beatport"' "$W/data/sc5000-custom/ui/packs/$LANG_PACK"
+        check "new: UI pack carries the Beatport source" grep -rqs 'id: "beatport"' "$W/data/enginex/ui/packs/$LANG_PACK"
         curl -sf http://127.0.0.1:6595/healthz > "$W/new-deemixd.json" || :
-        check "new: sc5000-deemixd /healthz" json "$W/new-deemixd.json" "j.get('ok') is True"
-        curl -sf -X POST -d '{"number":1,"name":"CDJ-3000","track_id":77,"bpm":128.0,"playing":true,"title":"Prolink Gate"}' http://127.0.0.1:8080/v1/sc5000/prolink > "$W/new-prolink.json" || :
+        check "new: deemixd /healthz" json "$W/new-deemixd.json" "j.get('ok') is True"
+        curl -sf -X POST -d '{"number":1,"name":"CDJ-3000","track_id":77,"bpm":128.0,"playing":true,"title":"Prolink Gate"}' http://127.0.0.1:8080$N_API/prolink > "$W/new-prolink.json" || :
         check "new: Pro DJ Link loopback API syncs CDJ-3000 to Deck 3 (#51)" json "$W/new-prolink.json" "j.get('enabled') is True and j.get('decks', {}).get('3', {}).get('title') == 'Prolink Gate'"
-        curl -sf -X POST "http://127.0.0.1:8080/v1/sc5000/broadcast/metadata?artist=Denon&title=Prime" > "$W/new-broadcast.json" || :
+        curl -sf -X POST "http://127.0.0.1:8080$N_API/broadcast/metadata?artist=Denon&title=Prime" > "$W/new-broadcast.json" || :
         check "new: Icecast/Shoutcast broadcast API updates live track metadata (#50)" json "$W/new-broadcast.json" "j.get('currentTrack') == 'Denon - Prime'"
         cp "$W/bin/stems-probe" "$R/tmp/stems-probe"
         check "new: Stems handshake and render (stems-probe -> stems-processor)" \
@@ -433,19 +457,19 @@ SH
         for v in "${!pid[@]}"; do check "boot2: $v still running after ${BOOT2_SECONDS}s" kill -0 "${pid[$v]}"; done
         check "boot2: UI-ready cleared the crash count (#140)" \
             bash -c 'test ! -e "$1/boot-count" && cmp -s "$1/boot-token" "$1/boot-ready"' sh "$ui"
-        curl -sf http://127.0.0.1:8080/v1/sc5000/ui > "$W/boot2-ui.json" || :
-        check "boot2: GET /v1/sc5000/ui reports $NEWV and persisted upfaderEcho" \
+        curl -sf http://127.0.0.1:8080$N_API/ui > "$W/boot2-ui.json" || :
+        check "boot2: GET $N_API/ui reports $NEWV and persisted upfaderEcho" \
             json "$W/boot2-ui.json" "j.get('version') == '$NEWV' and j.get('upfaderEcho') is True"
         curl -sf http://127.0.0.1:6595/healthz > "$W/boot2-deemixd.json" || :
-        check "boot2: sc5000-deemixd /healthz" json "$W/boot2-deemixd.json" "j.get('ok') is True"
+        check "boot2: deemixd /healthz" json "$W/boot2-deemixd.json" "j.get('ok') is True"
     fi
     if [ "$name" != old ]; then
         # This image must not be offered the release it was built for (a same-version
         # re-release has the tag v<version>-rN, which is newer than <version> alone).
         # Another repository name is another cache entry; the mock answers it with that release.
-        echo 'github_repo=Cd1s/EngineX-OS-installed' >> "$W/data/sc5000-custom/ui/settings.conf"
-        curl -sf http://127.0.0.1:8080/v1/sc5000/update > "$W/$name-update-installed.json" || :
-        sed -i '/^github_repo=Cd1s\/EngineX-OS-installed$/d' "$W/data/sc5000-custom/ui/settings.conf"
+        echo 'github_repo=Cd1s/EngineX-OS-installed' >> "$W/data/enginex/ui/settings.conf"
+        curl -sf http://127.0.0.1:8080$N_API/update > "$W/$name-update-installed.json" || :
+        sed -i '/^github_repo=Cd1s\/EngineX-OS-installed$/d' "$W/data/enginex/ui/settings.conf"
         check "$name: the installed release $RELTAG is not offered again" json "$W/$name-update-installed.json" \
             "j.get('currentVersion') == '$NEWV' and j.get('latestVersion') == '$RELTAG' and j.get('updateAvailable') is False"
     fi
@@ -453,8 +477,8 @@ SH
     local cur=$OLDV tag=$RELTAG asset
     [ "$name" = old ] || { cur=$NEWV; tag=v$NEXTV; }
     asset=$(cat "$W/mock/asset-$name")
-    curl -sf http://127.0.0.1:8080/v1/sc5000/update > "$W/$name-update.json" || :
-    check "$name: /v1/sc5000/update offers $tag over $cur" json "$W/$name-update.json" \
+    curl -sf http://127.0.0.1:8080$N_API/update > "$W/$name-update.json" || :
+    check "$name: $N_API/update offers $tag over $cur" json "$W/$name-update.json" \
         "j.get('currentVersion') == '$cur' and j.get('latestVersion') == '$tag' and j.get('updateAvailable') is True and j.get('downloadUrl') == 'https://github.com/Cd1s/EngineX-OS/releases/download/$tag/$asset'"
     check "$name: Engine still running before the update" bash -c "! grep -aqE 'Crash with|SOFT RESET' '$W/$name-engine.log'"
     if [ "$name" = boot2 ]; then
@@ -466,13 +490,13 @@ SH
         refusal tampered 'update refused: the file does not match the signed checksum'
         refusal r3 'update refused: the signature is for a different release'
         rm -f "$W/mock/corrupt-Update.img"
-        curl -sf http://127.0.0.1:8080/v1/sc5000/update > "$W/$name-update.json" || :
+        curl -sf http://127.0.0.1:8080$N_API/update > "$W/$name-update.json" || :
         check "$name: after the refusals the signed $tag is offered again" json "$W/$name-update.json" \
             "j.get('latestVersion') == '$tag' and j.get('updateAvailable') is True"
     fi
     : > "$R/tmp/gate-shim.log"
     : > "$R/tmp/gate-az01.log"
-    curl -sf "http://127.0.0.1:8080/v1/sc5000/update?apply=1" > "$W/$name-apply.json" || :
+    curl -sf "http://127.0.0.1:8080$N_API/update?apply=1" > "$W/$name-apply.json" || :
     if [ "$legacy_ota" = 1 ]; then
         check "$name: Engine quit with UpdateFromUrl" wait_for 120 grep -aq "Starting update from url: https://github.com/Cd1s/EngineX-OS/releases/download/$tag/" "$W/$name-engine.log"
         check "$name: the engine script handed the URL to the updater" wait_for 60 grep -qF "SHIM /usr/bin/planck-remote-screen --update https://github.com/Cd1s/EngineX-OS/releases/download/$tag/$asset" "$R/tmp/gate-shim.log"
@@ -511,12 +535,12 @@ SH
         cp "$R/tmp/gate-az01.log" "$W/old-corrupt-az01.log"
         cp "$W/old-az01.log" "$R/tmp/gate-az01.log"
     elif [ "$name" = boot2 ]; then
-        in_root SERVICE_RESULT=success /etc/sc5000/engine-ui-guard stop >> "$W/boot2-boot.log" 2>&1 || :
+        in_root SERVICE_RESULT=success $N_ETC/engine-ui-guard stop >> "$W/boot2-boot.log" 2>&1 || :
         check "boot2: clean stop clears running-sentinel (#140)" test ! -e "$ui/running-sentinel"
     fi
     cp "$R/tmp/gate-shim.log" "$W/$name-shim.log" 2>/dev/null || :
     cp "$R/tmp/gate-az01.log" "$W/$name-az01.log" 2>/dev/null || :
-    [ "$name" != old ] || cp "$W/data/sc5000-custom/ssh_host_ed25519_key.pub" "$W/old-hostkey.pub"
+    [ "$name" != old ] || cp "$D/ssh_host_ed25519_key.pub" "$W/old-hostkey.pub"
     # The update ramdisk consumes the staged image; the next boot never sees it.
     rm -f "$W/data/az01-update.img" "$W/data/az01-update.img.url"
 }
@@ -536,8 +560,14 @@ inner() {
         https://api.github.com/repos/Cd1s/EngineX-OS/releases/latest -o /dev/null || { fail "TLS GitHub mock"; return; }
 
     local R=$W/new interp f
-    check "image: /etc/sc5000/version.txt is $NEWV" grep -qx "$NEWV" "$R/etc/sc5000/version.txt"
-    check "image: /etc/sc5000/release-tag is $RELTAG" grep -qx "$RELTAG" "$R/etc/sc5000/release-tag"
+    names "$R"
+    check "image: $N_ETC/version.txt is $NEWV" grep -qx "$NEWV" "$R$N_ETC/version.txt"
+    check "image: $N_ETC/release-tag is $RELTAG" grep -qx "$RELTAG" "$R$N_ETC/release-tag"
+    if [ "$N_ETC" = /etc/enginex ]; then # #234: what an older installer or gate reads, and the names it enables
+        check "image: /etc/sc5000 is the compatibility link to enginex" test "$(readlink "$R/etc/sc5000")" = enginex
+        check "image: /etc/sc5000/version.txt reads $NEWV through it" grep -qx "$NEWV" "$R/etc/sc5000/version.txt"
+        check "image: no unit named sc5000 is enabled" bash -c "! ls '$R/usr/lib/systemd/system/multi-user.target.wants' '$R/etc/systemd/system/multi-user.target.wants' '$R/usr/lib/systemd/system/enginex.target.wants' 2>/dev/null | grep -q sc5000"
+    fi
     if python3 -I "$REPO/tools/az01-packer/rootfs_audit.py" "$R" --overlay "$REPO/rootfs-overlay" \
         $(for c in $SUITE_CMDS; do printf -- '--require-cmd %s ' "$c"; done) > "$W/audit.txt" 2>&1
     then pass "image: unit/command/tool audit ($(tail -1 "$W/audit.txt"))"
@@ -545,7 +575,7 @@ inner() {
     # The host's own systemd resolves the same transactions (it printed
     # "Unit var.mount not found" for the first 5.3.0.1 build).
     local units='' u
-    for u in $(cd "$REPO/rootfs-overlay/etc/systemd/system" && ls -d *.service *.target *.d) $(cd "$R/usr/lib/systemd/system" && ls sc5000-custom*); do
+    for u in $(cd "$REPO/rootfs-overlay/etc/systemd/system" && ls -d *.service *.target *.d) $(cd "$R/usr/lib/systemd/system" && ls $N_PACKER); do
         u=${u%.d}; u=${u/@./@gate.}
         [ -e "$R/usr/lib/systemd/system/${u/@gate./@.}" ] || [ -e "$R/etc/systemd/system/${u/@gate./@.}" ] && units="$units $u"
     done
@@ -576,10 +606,10 @@ inner() {
     else
         wait "$new_ns" || fail "new phase aborted before power cut"
     fi
-    check "powercut: running-sentinel survived unclean power cut (#140)" test -e "$W/data/sc5000-custom/ui/running-sentinel"
-    mkdir -p "$W/data/AppDataUser/AIR Music Technology/Engine/.cache/qml" "$W/data/sc5000-custom/ui/qml-cache"
+    check "powercut: running-sentinel survived unclean power cut (#140)" test -e "$W/data/enginex/ui/running-sentinel"
+    mkdir -p "$W/data/AppDataUser/AIR Music Technology/Engine/.cache/qml" "$W/data/enginex/ui/qml-cache"
     printf 'truncated-qmlc' > "$W/data/AppDataUser/AIR Music Technology/Engine/.cache/qml/powercut-truncated.qmlc"
-    printf 'truncated-qmlc' > "$W/data/sc5000-custom/ui/qml-cache/powercut-truncated.qmlc"
+    printf 'truncated-qmlc' > "$W/data/enginex/ui/qml-cache/powercut-truncated.qmlc"
     unshare -m -p -f --kill-child "$SELF" --phase boot2 || fail "boot2 phase aborted"
 }
 
@@ -600,7 +630,7 @@ else
 fi
 for t in python3 openssl curl unshare chroot ip readelf realpath systemd-analyze setpriv xz sha256sum; do command -v $t >/dev/null || { echo "missing $t" >&2; exit 2; }; done
 OLD_IMG=$(realpath "$1"); NEW_IMG=$(realpath "$2"); NEWV=$3
-W=$(realpath -m "${4:-$(mktemp -d /var/tmp/sc5000-gate.XXXXXX)}")
+W=$(realpath -m "${4:-$(mktemp -d /var/tmp/enginex-gate.XXXXXX)}")
 [ ! -e "$W/results.txt" ] || { echo "$W was used before; give a new work dir" >&2; exit 2; }
 NEW_NAME=$(basename "$NEW_IMG"); OLD_NAME=$(basename "$OLD_IMG")
 [[ $NEW_NAME =~ ^([A-Z0-9]+)-$NEWV-EngineX-OS-(.*)-([A-Z]{2}[0-9]{2})-Update\.img$ ]] || { echo "unexpected new image name $NEW_NAME" >&2; exit 2; }
@@ -635,12 +665,12 @@ export SUITE_CMDS
 # Host-side helpers: an armhf stems-probe, the Rekordbox fixture, and the internal Engine library.
 [ -r /etc/profile.d/buildtools.sh ] && . /etc/profile.d/buildtools.sh
 (cd "$REPO" && GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -trimpath -o "$W/bin/stems-probe" ./cmd/stems-probe)
-(cd "$REPO" && SC5000_GATE_EXPORT=$W/usb go test -count=1 -run '^TestGateExport$' ./internal/testfixture >/dev/null)
-(cd "$REPO" && SC5000_GATE_LIBRARY=$W/drive go test -count=1 -run '^TestGateLibrary$' ./internal/testlibrary >/dev/null)
+(cd "$REPO" && ENGINEX_GATE_EXPORT=$W/usb go test -count=1 -run '^TestGateExport$' ./internal/testfixture >/dev/null)
+(cd "$REPO" && ENGINEX_GATE_LIBRARY=$W/drive go test -count=1 -run '^TestGateLibrary$' ./internal/testlibrary >/dev/null)
 
 # A throwaway CA for the GitHub mock; only the sandboxes trust it.
 (cd "$W/tls" &&
- openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=sc5000-gate-ca -keyout ca.key -out ca.pem \
+ openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=enginex-gate-ca -keyout ca.key -out ca.pem \
      -addext basicConstraints=critical,CA:true -addext keyUsage=critical,keyCertSign,cRLSign 2>/dev/null &&
  openssl req -newkey rsa:2048 -nodes -subj /CN=github.com -keyout leaf.key -out leaf.csr 2>/dev/null &&
  printf 'subjectAltName=DNS:github.com,DNS:api.github.com\nextendedKeyUsage=serverAuth\n' > leaf.ext &&

@@ -487,8 +487,8 @@ func TestUSBAudioEndpoints(t *testing.T) {
 		t.Errorf("unexpected POST response: %+v", postRes)
 	}
 
-	// 3. Direct handleUSBAudio call simulating /v1/sc5000/usb-audio
-	req := httptest.NewRequest("GET", "/v1/sc5000/usb-audio", nil)
+	// 3. Direct handleUSBAudio call simulating /v1/enginex/usb-audio
+	req := httptest.NewRequest("GET", "/v1/enginex/usb-audio", nil)
 	rec := httptest.NewRecorder()
 	s.handleUSBAudio(rec, req)
 	if rec.Code != http.StatusOK {
@@ -690,7 +690,7 @@ func TestLANHostPrefersWired(t *testing.T) {
 	if got := pickLANHost([]lanAddr{{"wlan0", "10.0.0.7", false}}); got != "10.0.0.7" {
 		t.Fatalf("no link reported: %s, want the only address", got)
 	}
-	if got := pickLANHost(nil); got != "sc5000.lan" {
+	if got := pickLANHost(nil); got != "enginex.lan" {
 		t.Fatalf("no address: %s, want the name", got)
 	}
 }
@@ -797,5 +797,30 @@ func TestLiveWAVFallbackSetsAPerWriteDeadline(t *testing.T) {
 	}
 	if d := time.Until(w.deadlines[1]); d < 50*time.Second || d > 61*time.Second {
 		t.Fatalf("write deadline %v ahead, want the 60 s stall timeout", d)
+	}
+}
+
+// #234 review R4: the hook's feed is never saved by name (a console that sends the whole status
+// back would otherwise pin this release's name, and an older release after a downgrade would read
+// a feed nobody writes); a feed of the user's own is saved as given.
+func TestRename234BuiltinInputIsNotSaved(t *testing.T) {
+	for in, saved := range map[string]string{
+		"/tmp/enginex-broadcast.pcm": "",
+		"/tmp/sc5000-broadcast.pcm":  "",
+		"/tmp/my-mix.pcm":            "/tmp/my-mix.pcm",
+	} {
+		s, stateDir := newTestServer(t)
+		body, _ := json.Marshal(map[string]any{"inputPath": in, "format": "wav"})
+		if resp := doAuthRequest(t, s, "POST", "/api/broadcast", body); resp.StatusCode != http.StatusOK {
+			t.Fatalf("%s: %d", in, resp.StatusCode)
+		}
+		var cfg broadcast.Config
+		b, err := os.ReadFile(filepath.Join(stateDir, "broadcast-config.json"))
+		if err != nil || json.Unmarshal(b, &cfg) != nil {
+			t.Fatalf("%s: %v %s", in, err, b)
+		}
+		if cfg.InputPath != saved {
+			t.Errorf("%s saved as %q, want %q", in, cfg.InputPath, saved)
+		}
 	}
 }

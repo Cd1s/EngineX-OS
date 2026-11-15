@@ -11,9 +11,9 @@ import (
 // that tools/az01-packer/release-gate.sh bind-mounts at /media/az01-internal
 // across first boot, hard power cut, and second boot (#140).
 func TestGateLibrary(t *testing.T) {
-	dir := os.Getenv("SC5000_GATE_LIBRARY")
+	dir := os.Getenv("ENGINEX_GATE_LIBRARY")
 	if dir == "" {
-		t.Skip("set SC5000_GATE_LIBRARY to write the release-gate internal library")
+		t.Skip("set ENGINEX_GATE_LIBRARY to write the release-gate internal library")
 	}
 	ExportDrive(t, dir)
 }

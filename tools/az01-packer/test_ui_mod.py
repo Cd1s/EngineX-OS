@@ -361,11 +361,11 @@ class TrackListArtworkPlaceholderAndReaderPriorityTest(unittest.TestCase):
                                 # Native SD and Remote Library tracks must retain image://planck. SD rows
                                 # have no provider label; Remote Library (Eaas) and Dropbox rows have one.
                                 # Gateway rows, which Engine has no art for, still ask the gateway.
-                                line = next(line for line in source.splitlines() if "/v1/sc5000/art" in line)
+                                line = next(line for line in source.splitlines() if "/v1/enginex/art" in line)
                                 script = "const assert=require('node:assert/strict'); const root={scScope:'deezer',scPlainTitle:s=>s};\n"
                                 script += "const art=(streamingProviderName,albumArt)=>{const row={streamingProviderName,modelData:{albumArt,song:'Song',artist:'A'}}; return " + line.strip().removeprefix("source: ") + "};\n"
                                 script += "for (const p of ['', 'Eaas', 'Dropbox']) assert.equal(art(p, 'image://planck/7?size=100'), 'image://planck/7?size=100');\n"
-                                script += "for (const a of ['', 'image://streaming/']) assert.equal(art('Deezer', a), 'http://127.0.0.1:8080/v1/sc5000/art?song=Song&artist=A');"
+                                script += "for (const a of ['', 'image://streaming/']) assert.equal(art('Deezer', a), 'http://127.0.0.1:8080/v1/enginex/art?song=Song&artist=A');"
                                 checked = subprocess.run(["node", "-e", script], capture_output=True, text=True)
                                 self.assertEqual(checked.returncode, 0, checked.stderr)
 
@@ -529,7 +529,7 @@ class UiModSourceTest(unittest.TestCase):
     def test_boot_ready_waits_for_main_splash_and_never_blocks_gui(self):
         self.assertIn('!scBootSplash.active && planckQuickView.isMainScreen', bp.BOOT_READY)
         self.assertNotIn('scBootReadyTimer.parent', bp.BOOT_READY)
-        self.assertIn('/v1/sc5000/boot/ready', bp.BOOT_READY)
+        self.assertIn('/v1/enginex/boot/ready', bp.BOOT_READY)
         self.assertIn('JSON.stringify({token: token})', bp.BOOT_READY)
         self.assertIn('request !== x', bp.BOOT_READY)
         self.assertIn('old.abort()', bp.BOOT_READY)
@@ -596,10 +596,10 @@ class UiModSourceTest(unittest.TestCase):
         self.assertIn("SplashScreenLoader", probe)
         self.assertIn("SCPROBE splash|", probe)
         self.assertIn("SCPROBE splash|0|1|", gate)
-        self.assertIn("SC5000_GATE_LIBRARY=$W/drive", gate)
+        self.assertIn("ENGINEX_GATE_LIBRARY=$W/drive", gate)
         self.assertIn("/media/az01-internal", gate)
         self.assertIn("boot2: main UI acknowledged the current boot attempt without fallback (#140)", gate)
-        self.assertNotIn("SC5000_UI_ALIVE_CMD=", gate)  # uptime is not health (#140 boot safety)
+        self.assertNotIn("ENGINEX_UI_ALIVE_CMD=", gate)  # uptime is not health (#140 boot safety)
         self.assertIn("--bounding-set=-sys_time", gate)
         self.assertIn("kill -KILL", gate)
         self.assertIn("--phase boot2", gate)
@@ -683,7 +683,7 @@ class UiModSourceTest(unittest.TestCase):
         self.assertIn("at.sd * 0.85 + drift * 0.15", m)
         self.assertNotIn("at.postPlay", m)  # the gap after Play is closed by scShadowBend, not a second seek
         self.assertIn("e.seq === at.lastSeq", m)
-        self.assertIn('x.open("POST", "http://127.0.0.1:8080/v1/sc5000/debug/shadow")', m)
+        self.assertIn('x.open("POST", "http://127.0.0.1:8080/v1/enginex/debug/shadow")', m)
         self.assertIn("root.scShadowDebug = !!r.debug", m)
         self.assertIn("LoadOverlay/LoadOverlayDecks.qml", SRC)
         # Standalone EngineX peers share Sync/master; consoles (#160) still need shadow control
@@ -2133,7 +2133,7 @@ layer=0; tick(40); assert.equal(bodies.length,3); assert.equal(bodies[2][0].acti
         # the poll is idle: the next /shadow answer goes through scShadowApplyAll.
         line = next(l for l in bp.SERVICES_MAIN.splitlines() if l.lstrip().startswith("onScPairedOnChanged:"))
         body = line.split(":", 1)[1]
-        self.assertIn('/v1/sc5000/shadow?ver=" + scShadowVer + (scShadowIdle ? "&idle=1" : "")', Path(bp.__file__).read_text(encoding="utf-8"))
+        self.assertIn('/v1/enginex/shadow?ver=" + scShadowVer + (scShadowIdle ? "&idle=1" : "")', Path(bp.__file__).read_text(encoding="utf-8"))
         if not shutil.which("node"):
             self.skipTest("node not installed")
         script = f"""
@@ -2415,7 +2415,7 @@ class UiModBuildTest(unittest.TestCase):
                             main = pack.extractfile(f"packs/{lang}/Skins/Embedded/EmbeddedMain.qml").read().decode()
                             self.assertIn("scShadowApplyDisplay(decks.filter(e => e.displayOnly === true).concat(scShadowCovers(decks)))", main)
                             self.assertIn("s.metadataOnly", main)
-                            self.assertIn("/v1/sc5000/shadow/display?deck=", main)
+                            self.assertIn("/v1/enginex/shadow/display?deck=", main)
                             self.assertIn("scDeckLocked", main)
                             for component, name in (("Waveform", "waveform"), ("WaveformOverview", "overview")):
                                 wave = pack.extractfile(f"packs/{lang}/Skins/Embedded/Views/Common/{component}/{component}.qml").read().decode()
@@ -2446,20 +2446,20 @@ assert.deepEqual(root.scBtLayers, layers); assert.equal(root.scBtLayer, "Master"
 assert.deepEqual(scBtLabels(root.scBtLayers), ["Main", "Booth", "Headphones", "Zone"]);
 scBtSet("Headphones");
 assert.equal(root.scBtLayer, "Headphones");
-assert.equal(calls.at(-1), "POST http://127.0.0.1:8080/v1/sc5000/bluetooth?assignLayer=Headphones");
+assert.equal(calls.at(-1), "POST http://127.0.0.1:8080/v1/enginex/bluetooth?assignLayer=Headphones");
 layers = ["Layer A", "Layer B"]; layer = "Layer A"; scBtLoad();
 scBtSet("Layer B");
 assert.equal(root.scBtLayer, "Layer B");
-assert.equal(calls.at(-1), "POST http://127.0.0.1:8080/v1/sc5000/bluetooth?assignLayer=Layer%20B");
+assert.equal(calls.at(-1), "POST http://127.0.0.1:8080/v1/enginex/bluetooth?assignLayer=Layer%20B");
 scBtSet("Zone"); /* refused with 400: the panel asks again and shows what the deck says */
 assert.equal(root.scBtLayer, "Layer B");
-assert.equal(calls.at(-1), "GET http://127.0.0.1:8080/v1/sc5000/bluetooth");
+assert.equal(calls.at(-1), "GET http://127.0.0.1:8080/v1/enginex/bluetooth");
 console.log("PASS");
 """
 
     def test_bluetooth_panel_output_source(self):
         # 5.3.0.5: the stock Bluetooth panel (which scans, lists, pairs and connects speakers itself) gets an "Output Source"
-        # row under "Assign Input to", fed by /v1/sc5000/bluetooth through the root's scBt* helpers.
+        # row under "Assign Input to", fed by /v1/enginex/bluetooth through the root's scBt* helpers.
         qrc = LAB / "5.3.0" / "qrc"
         if not qrc.is_dir():
             self.skipTest(f"{qrc} not found (run on the build host)")
@@ -3155,7 +3155,7 @@ assert.equal(value().toFixed(2),'130.18');
     @unittest.skipUnless(shutil.which("node"), "node needed for the display-state behavioral checks")
     def test_bpm_decimals_display_setting_and_formatting(self):
         # Issue #229: Settings -> Display -> BPM Decimals ("1" / "2", default "2") in all 3 languages,
-        # persisted via /v1/sc5000/ui + settings.conf, driving ONLY the places that show 2 decimals on
+        # persisted via /v1/enginex/ui + settings.conf, driving ONLY the places that show 2 decimals on
         # 5.3.0.4 (BpmInfo.qml / scBpm2 and the shadow / Paired Player header in DeckTrackData &
         # DeckPerformanceData), keeping stock-default Bpm instances unchanged on both 5.3.0 and 5.0.4,
         # and matching stock formatting (including metadata BPM "128" -> "128") when set to "1".
@@ -5551,7 +5551,7 @@ class TimeZonePersistenceTest(unittest.TestCase):
     def test_timezone_capture_normalizes_spaces_guards_boot_fallback_and_saves_picker_utc(self):
         self.assertIn("function onSystemTimeZoneSetSucceeded() { root.scOnTimeZoneChanged() }", bp.SERVICES_MAIN)
         self.assertIn("function onTimeZoneSelect() { root.scTimeZonePickerUsed = true }", bp.SERVICES_MAIN)
-        self.assertIn("http://127.0.0.1:8080/v1/sc5000/ui?timezone=", bp.SERVICES_MAIN)
+        self.assertIn("http://127.0.0.1:8080/v1/enginex/ui?timezone=", bp.SERVICES_MAIN)
         import shutil, subprocess
         if not shutil.which("node"):
             return
@@ -5616,12 +5616,12 @@ globalThis.Planck = {{
 // 1. Auto-detected zone with space display formatting ("America/New York") normalizes to "America/New_York".
 Planck.timeDateController.setSystemTimeZone('America/New_York');
 assert.equal(scLastGoodTimeZone, 'America/New_York');
-assert.equal(posts.at(-1), 'http://127.0.0.1:8080/v1/sc5000/ui?timezone=America%2FNew_York');
+assert.equal(posts.at(-1), 'http://127.0.0.1:8080/v1/enginex/ui?timezone=America%2FNew_York');
 
 // 2. Manual selection of Asia/Shanghai posts Asia/Shanghai.
 Planck.timeDateController.setSystemTimeZone('Asia/Shanghai');
 assert.equal(scLastGoodTimeZone, 'Asia/Shanghai');
-assert.equal(posts.at(-1), 'http://127.0.0.1:8080/v1/sc5000/ui?timezone=Asia%2FShanghai');
+assert.equal(posts.at(-1), 'http://127.0.0.1:8080/v1/enginex/ui?timezone=Asia%2FShanghai');
 
 // 3. Unsolicited boot-window UTC (picker NOT used) stays guarded even if NTP jumps wall-clock Date.now() +12 days!
 fakeNow += 12 * 86400 * 1000;
@@ -5640,7 +5640,7 @@ assert.equal(scTimeZonePickerUsed, true);
 assert.equal(scLastGoodTimeZone, 'UTC');
 assert.equal(currentDisplayTz, 'UTC');
 assert.equal(currentIsUtc, true);
-assert.equal(posts.at(-1), 'http://127.0.0.1:8080/v1/sc5000/ui?timezone=UTC');
+assert.equal(posts.at(-1), 'http://127.0.0.1:8080/v1/enginex/ui?timezone=UTC');
 
 // 5. Once the 30s monotonic Timer expires (scTimeZoneBootWindowOpen = false), UTC is saved even without picker.
 scTimeZonePickerUsed = false;
@@ -5648,7 +5648,7 @@ Planck.timeDateController.setSystemTimeZone('Asia/Shanghai');
 scTimeZoneBootWindowOpen = false;
 Planck.timeDateController.setSystemTimeZone('UTC');
 assert.equal(scLastGoodTimeZone, 'UTC');
-assert.equal(posts.at(-1), 'http://127.0.0.1:8080/v1/sc5000/ui?timezone=UTC');
+assert.equal(posts.at(-1), 'http://127.0.0.1:8080/v1/enginex/ui?timezone=UTC');
 """
         r = subprocess.run(["node", "-e", script], capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -5728,7 +5728,7 @@ assert.equal(scLanStemsLine({{online: true, hostname: 'studio-mac', backend: 'hp
             env = {**os.environ, "ENGINEX_STEMS_HOME": str(tdir / "home")}
             env.pop("ENGINEX_STEMS_BACKEND", None)
             env.pop("ENGINEX_STEMSD", None)
-            env.pop("SC5000_STEMSD", None)
+            env.pop("ENGINEX_STEMSD", None)
             r_default = subprocess.run(["/bin/sh", str(stems_dir / "run-home-worker.sh")], env=env, capture_output=True, text=True)
             self.assertEqual(r_default.returncode, 0, r_default.stderr)
             calls_default = log_file.read_text(encoding="utf-8")
@@ -5797,7 +5797,7 @@ assert.equal(scLanStemsLine({{online: true, hostname: 'studio-mac', backend: 'hp
         fn = m.split("function scDeckClockDeckProps(", 1)[1].split("\t// 25 Hz around every edge", 1)[0]
         self.assertNotIn("Planck.getProperty", fn)
         self.assertNotRegex(fn, r'\.string\b')
-        self.assertIn('http://127.0.0.1:8080/v1/sc5000/clock', fn)
+        self.assertIn('http://127.0.0.1:8080/v1/enginex/clock', fn)
         if shutil.which("node"):
             tr_fn = m.split("function scTr(path) {", 1)[1].split("// #151:", 1)[0]
             script = r'''
@@ -6032,7 +6032,7 @@ class OneLibraryNoChooseDbTest(unittest.TestCase):
         self.assertNotIn("prompts.post", patched)
         self.assertNotIn("Choose your Database", patched)
         self.assertNotIn("onDeviceAdded", patched)
-        self.assertIn("/v1/sc5000/library-status?path=", patched)
+        self.assertIn("/v1/enginex/library-status?path=", patched)
 
         qrc = LAB / "5.3.0" / "qrc"
         if qrc.is_dir():
@@ -6054,7 +6054,7 @@ class OneLibraryNoChooseDbTest(unittest.TestCase):
                         "function scHasRegisteredDatabaseUuid(devicePath)",
                         "function scFinishSelection(devicePath, seq, useEngineLibrary)",
                         "function scExpirePendingRequests(nowMs)",
-                        "/v1/sc5000/library-status?path=",
+                        "/v1/enginex/library-status?path=",
                         "controller.chooseEngineLibrary(devicePath)",
                         "controller.chooseOneLibrary(devicePath)",
                     ):
@@ -6110,7 +6110,7 @@ class XMLHttpRequest {{
     open(method, url) {{ this.method = method; this.url = url; this.readyState = 1; }}
     send() {{
         const u = new URL(this.url);
-        assert.equal(u.pathname, "/v1/sc5000/library-status");
+        assert.equal(u.pathname, "/v1/enginex/library-status");
         const p = u.searchParams.get("path");
         const entry = server[p];
         if (entry === "hold") {{
@@ -6262,20 +6262,20 @@ class EngineLightingDefaultOffAndPersistTest(unittest.TestCase):
                         (ui / "safe-mode").touch()
                     path_env = os.environ["PATH"]
                     if busybox:
-                        binary = Path(os.environ.get("SC5000_TEST_BUSYBOX", shutil.which("busybox") or str(LAB / "sclive4-rea61-followup/rootfs/usr/bin/busybox")))
+                        binary = Path(os.environ.get("ENGINEX_TEST_BUSYBOX", shutil.which("busybox") or str(LAB / "sclive4-rea61-followup/rootfs/usr/bin/busybox")))
                         if not binary.is_file():
                             self.skipTest("stock BusyBox fixture unavailable")
                         bin_dir = root / "bin"
                         bin_dir.mkdir()
                         (bin_dir / "awk").symlink_to(binary)
                         path_env = str(bin_dir) + ":" + path_env
-                    env = dict(os.environ, PATH=path_env, SC5000_UI_DIR=str(ui), SC5000_PRIMARY_UI_DIR=str(ui),
-                               SC5000_LEGACY_UI_DIR=str(ui), SC5000_STATE_DIR=str(state),
-                               SC5000_STREAMING_ACCOUNTS=str(root / "accounts"),
-                               SC5000_ENGINE_DATA_DIR=str(root / "engine"),
-                               SC5000_ASSIGNMENT_DIR=str(root / "assign"),
-                               SC5000_ASSIGNMENT_PATCHED=str(root / "patched"), SC5000_ENGINE_GUARDIAN="/bin/false")
-                    result = subprocess.run(["sh", str(REPO / "rootfs-overlay/etc/sc5000/engine-ui-guard"), "pre"], env=env, capture_output=True, text=True)
+                    env = dict(os.environ, PATH=path_env, ENGINEX_UI_DIR=str(ui), ENGINEX_PRIMARY_UI_DIR=str(ui),
+                               ENGINEX_LEGACY_UI_DIR=str(ui), ENGINEX_STATE_DIR=str(state),
+                               ENGINEX_STREAMING_ACCOUNTS=str(root / "accounts"),
+                               ENGINEX_ENGINE_DATA_DIR=str(root / "engine"),
+                               ENGINEX_ASSIGNMENT_DIR=str(root / "assign"),
+                               ENGINEX_ASSIGNMENT_PATCHED=str(root / "patched"), ENGINEX_ENGINE_GUARDIAN="/bin/false")
+                    result = subprocess.run(["sh", str(REPO / "rootfs-overlay/etc/enginex/engine-ui-guard"), "pre"], env=env, capture_output=True, text=True)
                     self.assertEqual(result.returncode, 0, result.stderr)
                     if safe:
                         self.assertEqual(path.read_text() if path.exists() else None, before)
@@ -6312,7 +6312,7 @@ class EngineLightingDefaultOffAndPersistTest(unittest.TestCase):
                         self.assertIn('const SoundSwitch = root.scLightingBackend', switch)
                         self.assertRegex(switch, r'if\s*\(!next\s*&&[\s\S]+?SoundSwitch.stopBackend\(\)')
                         self.assertIn('typeof SoundSwitch.stopBackend === "function"', switch)
-                        self.assertIn('http://127.0.0.1:8080/v1/sc5000/ui?engineLighting=', switch)
+                        self.assertIn('http://127.0.0.1:8080/v1/enginex/ui?engineLighting=', switch)
                         self.assertIn('XMLHttpRequest', switch)
                         self.assertIn('interval: 1500', switch)
                         self.assertIn('req.status !== 200', switch)

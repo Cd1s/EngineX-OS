@@ -134,7 +134,7 @@ layout reset or suite restart is needed. This intentionally follows PM's
 no-timeout-clear requirement rather than silently stealing an offline slot.
 
 Local endpoints provide metadata, cached PNGs and cached artwork under
-`/v1/sc5000/shadow/`. Role, key and current source ownership are checked on every
+`/v1/enginex/shadow/`. Role, key and current source ownership are checked on every
 request, including cached responses. Cached assets remain available for stale
 but retained tracks. Explicit goodbye makes them inaccessible. Responses are
 no-store; a state version header lets QML skip parsing unchanged state bodies.
@@ -192,7 +192,7 @@ settings.conf). The path is chosen per shadow slot. `auto` decides by the
 slot's source: an EngineX peer's track is loaded by Engine and its stock
 components draw it (the maintainer requires the shadow deck to be the same
 components as a local deck, not a replica), a Pro DJ Link CDJ goes to this
-display-only renderer with `displayOnly` on its deck in the `/v1/sc5000/shadow`
+display-only renderer with `displayOnly` on its deck in the `/v1/enginex/shadow`
 answer. One slot of each kind works side by side; when a slot's source changes,
 the QML unloads Engine's copy (350 ms debounce) or clears the display slot.
 `engine` and `cdj` force every source down one path. `auto` is the default on

@@ -1,0 +1,19 @@
+[Unit]
+Description=EngineX storage worker for %I
+BindsTo=dev-%i.device
+Wants=enginex-storage-discover.service
+After=dev-%i.device enginex-storage-discover.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=-/etc/default/enginex-storage
+ExecStart=/usr/local/bin/enginex-storage-mount add /dev/%I
+TimeoutStartSec=10min
+TimeoutStopSec=30
+CPUAffinity=3
+CPUWeight=10
+IOWeight=10
+Slice=enginex-background.slice
+# The worker reads edisksd mounts in the host namespace. Do not add PrivateMounts,
+# ProtectSystem or other options that implicitly create a mount namespace.

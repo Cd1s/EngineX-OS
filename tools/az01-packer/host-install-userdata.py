@@ -269,7 +269,9 @@ def inject(img_path, bundle_tar, check=True, ssh_key=None):
         if wr.returncode != 0:
             fail(f'debugfs failed with code {wr.returncode} on {img}:\n' + '\n'.join(notes[-20:]))
         # debugfs exits 0 even when a write failed (full image, bad path): read back.
-        for rel in (f'{root}/version.txt', f'{root}/bundle/bin/sc5000-suite', f'{root}/gen2-unlocked'):
+        # The suite is enginex-suite since 5.3.0.5 (#234), sc5000-suite in older bundles.
+        suite = 'enginex-suite' if (broot / 'bin/enginex-suite').is_file() else 'sc5000-suite'
+        for rel in (f'{root}/version.txt', f'{root}/bundle/bin/{suite}', f'{root}/gen2-unlocked'):
             st = subprocess.run(['debugfs', '-R', f'stat /{rel}', str(img)], capture_output=True, text=True).stdout
             if 'Type: regular' not in st:
                 fail(f'/{rel} is not in {img} after writing (image full?)')

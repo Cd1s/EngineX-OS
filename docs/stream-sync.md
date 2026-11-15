@@ -3,15 +3,15 @@
 这是独立、可选的触控控制台，不改原厂 Deck、按键、Cue 或默认歌单。
 Go 服务完成歌单浏览、跨平台匹配、本地下载请求、WAV/FLAC/MP3 解码、
 BPM / Beatgrid / Camelot 调性 / RGB 波形分析及 SD 卡 SQLite 事务入库。
-stream-sync 本身不解密音频，下载交给碟机上的 `sc5000-deemixd`（`internal/deezer`，见提交 c24a140）。
+stream-sync 本身不解密音频，下载交给碟机上的 `enginex-deemixd`（`internal/deezer`，见提交 c24a140）。
 
 ## 构建与测试
 
 ```sh
 go test ./... -v
 go test -race ./...
-GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o bin/sc5000-suite ./cmd/sc5000-suite
-file bin/sc5000-suite
+GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o bin/enginex-suite ./cmd/enginex-suite
+file bin/enginex-suite
 ```
 
 所有依赖均支持纯 Go，包括 `modernc.org/sqlite`、`mewkiz/flac`、`go-mp3`
@@ -36,7 +36,7 @@ SQLite 测试使用本工作树捕获的完整原厂 SQL，包含触发器和链
   --spotify-redirect-url https://<已注册的设备回调地址>/oauth/spotify/callback
 ```
 
-`--listen :8080`、`--public-url http://sc5000.lan:8080` 为默认值。
+`--listen :8080`、`--public-url http://enginex.lan:8080` 为默认值。
 域名解析由现有 LAN DNS/mDNS 提供，本程序不修改 DNS。
 控制台访问码首次启动时随机生成并保存在 `<state-dir>/access-token`（0600），重启不变；只有首次生成时打印到日志，之后日志只提示文件位置。设备和手机在首页输入同一个码即可操作。
 也可显式设置 `--access-token`，应通过受限启动环境管理，避免共享 shell 历史。
@@ -102,7 +102,7 @@ HLS MP3；`policy` 为 SNIP（Go+ 试听）或 BLOCK 的曲目不列出，加密
 二维码包含普通 OAuth 授权 URL；不是 Spotify Device Code 协议。
 state / verifier / redirect / 10 分钟有效期绑定到具体会话，回调 state 单次消费。
 手机扫码要求**手机可访问且 Spotify 允许的已注册 HTTPS 回调**；
-Spotify 不接受普通 `http://sc5000.lan` 作为远程 OAuth redirect。
+Spotify 不接受普通 `http://enginex.lan` 作为远程 OAuth redirect。
 需要已有 HTTPS 反代把 `/oauth/spotify/callback` 转发到设备，或预先载入
 主人 token；设备本地浏览器可使用 Spotify 允许的 loopback callback。
 权限为 `playlist-read-private playlist-read-collaborative`，应用开发模式
@@ -120,8 +120,8 @@ Spotify 不接受普通 `http://sc5000.lan` 作为远程 OAuth redirect。
 音频全部下载到碟机本机，云端服务只传登录凭证，不经手音频。
 
 1. **碟机本机 Deemix**（默认 `127.0.0.1:6595`）：下文的 `queue` / `directory` 协议。
-   `sc5000-deemixd` 由 stream-sync 启动并在退出后重启（`--deemixd`，默认
-   `/data/sc5000-custom/bin/sc5000-deemixd`，空值关闭）；该端口已有进程在听时不另起一个。
+   `enginex-deemixd` 由 stream-sync 启动并在退出后重启（`--deemixd`，默认
+   `/data/enginex/bin/enginex-deemixd`，空值关闭）；该端口已有进程在听时不另起一个。
    不再用单独的 systemd 单元：碟机的 systemd 在可写 `/etc` overlay 挂载之前读单元，
    只在 overlay 里启用的单元开机不会启动，重启后 6595 没人听，点播报
    `TidalAPI::play The response didn't contain the required keys`。Spotify、Deezer
@@ -130,14 +130,14 @@ Spotify 不接受普通 `http://sc5000.lan` 作为远程 OAuth redirect。
    `exhigh` → `standard`），试听片段一律不算。其他平台的曲目先按标题、版本、共同艺人和
    ≤5 秒时长匹配网易云曲目。访客只用自己的登录，不碰主人的 cookie。
 
-stream-sync 不做音频解密，解密只发生在 `sc5000-deemixd` 里。
+stream-sync 不做音频解密，解密只发生在 `enginex-deemixd` 里。
 
 网易云文件存为 `netease-<id>.flac`，经 `Inspect` 校验后才可用，重启后直接复用。Deezer
 通道（含 Spotify/TIDAL 匹配和网易云 deemix 模式）的 `<Deezer id>.flac/.mp3` 也一样：
 `Download` 先查盘上已校验的文件，命中就不再下载。下载目录里的 `.sources.json` 记着
 `平台:曲目 id → 文件名`，重启后 `File`/`Fetch` 直接命中，连 Deezer 匹配搜索都不做。
 
-没有 SD 库时落在内部存储 `/data/sc5000-custom/Stream`（`/media/sc5000-sd-cache` 自 8856176
+没有 SD 库时落在内部存储 `/data/enginex/Stream`（`/media/sc5000-sd-cache` 自 8856176
 起不再挂载；前置 SD 由 edisksd 按卷标挂在 `/media/SD`，Engine 开着它的库，不往上写）。
 总量上限 3 GiB，`/data` 剩余不足 1 GiB 时也继续淘汰，按最近使用时间（命中会刷新 mtime）
 先删最久未用的（只动 `<id>.*`、`netease-<id>.*`、`soundcloud-<id>.*`）。
@@ -169,7 +169,7 @@ MP3 回退默认开启，标签写实际码率（如 `[128k]`），`--allow-320k
 
 - `state/deemix-config.json`：`relayUrl`（默认为空：`--relay-url` 不传时登录只走局域网）和 `deemixPassword`。
   碟机这边的密码不进仓库，只存在这个 0600 文件里；它必须和中继控制台的密码一致（中继首次启动的随机密码见 `deploy/relay-host/README.md`）。
-- 控制台首页、`/m/deezer`、`GET/POST /api/relay`（碟机本机为 `/v1/sc5000/relay`）和
+- 控制台首页、`/m/deezer`、`GET/POST /api/relay`（碟机本机为 `/v1/enginex/relay`）和
   `POST /api/ui?relayUrl=&deemixPassword=` 都可修改，保存后立即生效。
   密码只能写入，读取时只返回 `deemixPasswordSet`。地址必须是 https，或内网 IP 的 http。
 - 中继请求带 `X-Deemix-Password` 和 `Authorization: Bearer`，不跟随重定向。
@@ -182,7 +182,7 @@ MP3 回退默认开启，标签写实际码率（如 `[128k]`），`--allow-320k
 
 ## 封面
 
-曲目列表的缩略图由网关 `GET /v1/sc5000/art?song=&artist=` 提供，取各平台的小尺寸图，内存里留最近 300 张。下载的文件里
+曲目列表的缩略图由网关 `GET /v1/enginex/art?song=&artist=` 提供，取各平台的小尺寸图，内存里留最近 300 张。下载的文件里
 也内嵌封面（FLAC 的 PICTURE 块、MP3 的 APIC 帧），AAC 不内嵌。TIDAL 自己的列表不经过这里。
 
 ## BPM 与调性
@@ -205,7 +205,7 @@ ReccoBeats 返回 429 时暂停 5 分钟。
 片段下载到临时文件，分析后立即删除。它只有 30 秒，结果是估算值，整首分析后会被覆盖。
 
 GetSongBPM 和 SoundCloud 的密钥可选，存在 `state/bpm-config.json`，可在碟机控制台、
-`GET/POST /api/bpm`（碟机本机 `/v1/sc5000/bpm`）或 `https://relay.example.com` 的“BPM 增强”
+`GET/POST /api/bpm`（碟机本机 `/v1/enginex/bpm`）或 `https://relay.example.com` 的“BPM 增强”
 修改。碟机启动时和之后每小时从 `GET /api/config?secrets=1` 拉取一次，云端没有的密钥不覆盖本机。
 SoundCloud 用填入的 Client ID 调 v2 搜索，或用 OAuth Token 调 v1。
 
@@ -345,7 +345,7 @@ Deezer 连接的是公开资料页。Deezer 公开榜单无需登录；网易云
 
 - 设备码/令牌登录直接成功，订阅为 `PREMIUM_PLUS` / `LOSSLESS`；
 - 歌单 = 已登录的 `[网易云]`、`[Spotify]`、`[Deezer]` 歌单 + Deezer 精选；
-  尚未登录网易云/Spotify 时首项提示访问 `sc5000.lan:8080` 扫码；
+  尚未登录网易云/Spotify 时首项提示访问 `enginex.lan:8080` 扫码；
   重启后自动恢复已保存的 owner 登录；
 - 搜索并发查询 Deezer / 网易云 / Spotify 的曲目与歌单；
 - 每首曲目分配进程内稳定的正整数 trackId，播放信息返回

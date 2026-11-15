@@ -49,13 +49,17 @@ Environment=QT_QPA_PLATFORM=offscreen
 StandardOutput=journal
 StandardError=journal
 EOF
+    local prepare_unit=enginex-prepare.service reset_unit=enginex-etc-reset.service deemix_unit=enginex-deemixd.service
+    if [ ! -f "$R/usr/libexec/enginex-prepare" ]; then
+        prepare_unit=sc5000-custom-prepare.service reset_unit=sc5000-custom-etc-reset.service deemix_unit=sc5000-deemixd.service
+    fi
     # etc-reset was attached to etc.mount on older images. Enable it explicitly
     # before prepare when testing the 5.3 rootfs without that mount unit.
-    mkdir -p "$R/etc/systemd/system/sc5000-custom-prepare.service.d"
-    cat > "$R/etc/systemd/system/sc5000-custom-prepare.service.d/99-nspawn.conf" <<'EOF'
+    mkdir -p "$R/etc/systemd/system/$prepare_unit.d"
+    cat > "$R/etc/systemd/system/$prepare_unit.d/99-nspawn.conf" <<EOF
 [Unit]
-Wants=sc5000-custom-etc-reset.service
-After=sc5000-custom-etc-reset.service
+Wants=$reset_unit
+After=$reset_unit
 EOF
     printf '%s' "$PRODUCT" > "$W/dt/inmusic,product-code"
     printf 'inmusic,%s\0rockchip,rk3288\0' "${PRODUCT,,}" > "$W/dt/compatible"
@@ -117,7 +121,7 @@ EOF
         guest /bin/journalctl -b --no-pager > "$W/journal.log" || failed=1
         guest /bin/journalctl -u engine.service --no-pager > "$W/engine.log" || failed=1
         guest /bin/systemctl --failed --no-legend --plain --no-pager > "$W/failed-units.txt" || failed=1
-        guest /bin/systemctl show sc5000-custom-prepare.service sc5000-custom-etc-reset.service -p ActiveState -p Result -p ExecStart > "$W/prepare.txt" || failed=1
+        guest /bin/systemctl show "$prepare_unit" "$reset_unit" -p ActiveState -p Result -p ExecStart > "$W/prepare.txt" || failed=1
     fi
     local applied expected seconds
     check() {
@@ -129,13 +133,13 @@ EOF
     check 'no safe-mode fallback' test ! -e "$W/data/enginex/ui/safe-mode"
     check 'all systemd boot jobs completed' guest /bin/systemctl is-system-running --quiet
     local unit
-    for unit in sc5000-custom-prepare.service stream-sync.service engine-guardian.service engine.service rb-bridge.service sc5000-deemixd.service; do
+    for unit in "$prepare_unit" stream-sync.service engine-guardian.service engine.service rb-bridge.service "$deemix_unit"; do
         check "$unit active" guest /bin/systemctl is-active --quiet "$unit"
     done
     check 'Engine process running' guest /usr/bin/pgrep -f '^/usr/Engine/Engine( |$)'
     # Evaluated by the guest shell, not this host shell.
     # shellcheck disable=SC2016
-    check 'etc-reset executed successfully' guest /bin/sh -c 'test "$(systemctl show -p ExecMainStatus --value sc5000-custom-etc-reset.service)" = 0 && test "$(systemctl show -p ExecMainStartTimestampMonotonic --value sc5000-custom-etc-reset.service)" -gt 0'
+    check 'etc-reset executed successfully' guest /bin/sh -c 'test "$(systemctl show -p ExecMainStatus --value "$1")" = 0 && test "$(systemctl show -p ExecMainStartTimestampMonotonic --value "$1")" -gt 0' sh "$reset_unit"
     # Same model defaults and QML failure expressions as release-gate.sh.
     case $PRODUCT in JP07|JP08|JP13|JP14) expected=20 ;; *) expected=28 ;; esac
     applied=$(grep -ac 'engine-ui-hook: applied 0x' "$W/engine.log" || :)
@@ -150,9 +154,9 @@ EOF
     grep -aE "$qml_errors|Crash with|Unknown exit code" "$W/engine.log" > "$W/qml-errors.txt" || qml_status=$?
     check 'no QML load errors or Engine crashes' test "$qml_status" -eq 1
     check 'systemctl --failed empty' test ! -s "$W/failed-units.txt"
-    if nsenter -t "$init_pid" -n curl --max-time 2 -sf http://127.0.0.1:8080/v1/sc5000/ui > "$W/ui.json"; then
-        check '/v1/sc5000/ui answers JSON' python3 -I -c 'import json,sys; assert isinstance(json.load(open(sys.argv[1])),dict)' "$W/ui.json"
-    else echo 'FAIL /v1/sc5000/ui'; failed=1; fi
+    if nsenter -t "$init_pid" -n curl --max-time 2 -sf http://127.0.0.1:8080/v1/enginex/ui > "$W/ui.json"; then
+        check '/v1/enginex/ui answers JSON' python3 -I -c 'import json,sys; assert isinstance(json.load(open(sys.argv[1])),dict)' "$W/ui.json"
+    else echo 'FAIL /v1/enginex/ui'; failed=1; fi
     if [ -s "$W/ready-ns" ]; then
         seconds=$(python3 -I -c 'import sys; print("%.3f" % ((int(open(sys.argv[2]).read())-int(open(sys.argv[1]).read()))/1e9))' "$W/start-ns" "$W/ready-ns")
         echo "WALL TIME $PRODUCT ${seconds}s (nspawn start to Engine UI ready)"

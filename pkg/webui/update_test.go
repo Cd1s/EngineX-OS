@@ -45,7 +45,7 @@ func TestUpdateChecksTheConfiguredGitHubRepo(t *testing.T) {
 	s := New(Config{AccessToken: "c", UIDir: ui, StateDir: state, GitHubURL: gh.URL, VersionFile: version}, nil)
 	get := func() updateStatus {
 		w := httptest.NewRecorder()
-		s.update(w, httptest.NewRequest("GET", "/v1/sc5000/update", nil))
+		s.update(w, httptest.NewRequest("GET", "/v1/enginex/update", nil))
 		var v updateStatus
 		json.Unmarshal(w.Body.Bytes(), &v)
 		return v
@@ -99,7 +99,7 @@ func bundleInstallScript(t *testing.T) []byte {
 		t.Fatal("INSTALL not found in build-data-bundle.py")
 	}
 	// The packer expands @MIGRATE_IF_DEFAULT@ into the /data migration; the test deck is not
-	// a real /data (SC5000_CUSTOM is set), so there is nothing to migrate.
+	// a real /data (ENGINEX_CUSTOM is set), so there is nothing to migrate.
 	script := bytes.ReplaceAll(m[1], []byte("@MIGRATE_IF_DEFAULT@"), []byte(":"))
 	// @SWAP_UNDO@ is the real rollback of an interrupted install (BH-G2-4).
 	undo := regexp.MustCompile(`(?s)\nSWAP_UNDO = r"""(.*?)"""`).FindSubmatch(src)
@@ -212,7 +212,7 @@ func bundleDeckWith(t *testing.T, compatible string, assets func(base string) st
 
 func getUpdate(s *Server, q string) updateStatus {
 	w := httptest.NewRecorder()
-	s.update(w, httptest.NewRequest("GET", "/v1/sc5000/update"+q, nil))
+	s.update(w, httptest.NewRequest("GET", "/v1/enginex/update"+q, nil))
 	var v updateStatus
 	json.Unmarshal(w.Body.Bytes(), &v)
 	return v
@@ -277,7 +277,7 @@ func TestUpdatePicksGen2ImgWhenUnlocked(t *testing.T) {
 func TestUnlockGen2Endpoint(t *testing.T) {
 	call := func(s *Server, method string) map[string]any {
 		w := httptest.NewRecorder()
-		s.handleUnlockGen2(w, httptest.NewRequest(method, "/v1/sc5000/unlock-gen2", nil))
+		s.handleUnlockGen2(w, httptest.NewRequest(method, "/v1/enginex/unlock-gen2", nil))
 		var v map[string]any
 		json.Unmarshal(w.Body.Bytes(), &v)
 		v["status"] = w.Code
@@ -373,7 +373,7 @@ func TestUpdateAppliesTheDataBundle(t *testing.T) {
 		if !s.tryApplyGen2Image(lockedPart) || s.updateCache.Error != "gen2 .img update is locked" {
 			t.Fatalf("tryApplyGen2Image did not block gen2-locked: %+v", s.updateCache)
 		}
-		s.handleUnlockGen2(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/sc5000/unlock-gen2", nil))
+		s.handleUnlockGen2(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/enginex/unlock-gen2", nil))
 		if v := getUpdate(s, ""); !strings.HasSuffix(v.DownloadURL, "/dl/"+imgName) {
 			t.Fatalf("after unlock: %+v", v)
 		}
@@ -642,7 +642,7 @@ func TestGen2EndToEndReReleaseApplyAndCustomDirResolution(t *testing.T) {
 				t.Fatal(err)
 			}
 			cmd := exec.Command("sh", filepath.Join(top, "install.sh"))
-			cmd.Env = append(os.Environ(), "SC5000_CUSTOM="+bundleCustomDir, "SC5000_ALSA_OVERLAY="+filepath.Join(root, "alsa"))
+			cmd.Env = append(os.Environ(), "ENGINEX_CUSTOM="+bundleCustomDir, "ENGINEX_ALSA_OVERLAY="+filepath.Join(root, "alsa"))
 			if out, err := cmd.CombinedOutput(); err != nil {
 				t.Fatalf("seed install: %v\n%s", err, out)
 			}
@@ -725,7 +725,7 @@ func TestGen2EndToEndReReleaseApplyAndCustomDirResolution(t *testing.T) {
 			t.Fatal(err)
 		}
 		cmd := exec.Command("sh", filepath.Join(top, "install.sh"))
-		cmd.Env = append(os.Environ(), "SC5000_CUSTOM="+bundleCustomDir, "SC5000_ALSA_OVERLAY="+filepath.Join(root, "alsa"))
+		cmd.Env = append(os.Environ(), "ENGINEX_CUSTOM="+bundleCustomDir, "ENGINEX_ALSA_OVERLAY="+filepath.Join(root, "alsa"))
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("install r3: %v\n%s", err, out)
 		}

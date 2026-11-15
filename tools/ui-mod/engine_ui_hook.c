@@ -40,7 +40,7 @@
 #include "pioneer_ms.h"
 #include "live_tap.h"
 #ifndef SC_TAP_PATH
-#define SC_TAP_PATH "/tmp/sc5000-broadcast.pcm" // pkg/broadcast DefaultInputPath
+#define SC_TAP_PATH "/tmp/enginex-broadcast.pcm" // pkg/broadcast DefaultInputPath
 #endif
 static struct sc_tap live_tap; // #50, every Engine build; .bss (512 KiB ring), fd set by live_tap_drain
 #if !defined(__aarch64__)
@@ -55,7 +55,7 @@ static struct sc_tap live_tap; // #50, every Engine build; .bss (512 KiB ring), 
 #define A32_ONLY
 #endif
 
-#define UI_ROOT "/data/sc5000-custom/ui"
+#define UI_ROOT "/data/enginex/ui"
 #define FLAG_COMPRESSED 0x01
 #define FLAG_DIRECTORY 0x02
 #define FLAG_ZSTD 0x04
@@ -1757,7 +1757,7 @@ static int four_deck_layout(void) {
 // four_deck_role: the decks this player plays on RCA A / RCA B: 13, 24, 12, or a
 // single deck 1 / 2 with RCA B silent. auto (default) is what engine-ui-guard resolved
 // from the Engine player number before this start; it also maps the hardware.
-static const char *four_deck_resolved = "/run/sc5000-assignments/role";
+static const char *four_deck_resolved = "/run/enginex-assignments/role";
 static void read_role(const char *path, const char *key, char *role, size_t size) {
     FILE *f = fopen(path, "r");
     if (!f) return;
@@ -2612,8 +2612,8 @@ static const uint32_t oa_process_prefix[2] = {0xe16d42f4, 0xe1cd60f8}; // strd r
 #define OA_LOADER_MS 1500
 #endif
 #ifndef OA_LOG
-#define OA_LOG "/var/log/sc5000-uimod-oa.log"
-#define OA_SHADOW "/data/sc5000-custom/shadow-v3" // pkg/webui shadowDir()
+#define OA_LOG "/var/log/enginex-uimod-oa.log"
+#define OA_SHADOW "/data/enginex/shadow-v3" // pkg/webui shadowDir()
 #define OA_ENGINE_COPIES "/data/inMusicTempFiles/"
 #endif
 enum { OA_FINISHED = 0, OA_STARTED = 1, OA_DONE = 2, OA_STOPPED = 5, OA_PROGRESS_SIG = 6, OA_TRACK = 8, OA_BEATS = 9,
@@ -3133,7 +3133,7 @@ static const char *volatile_path(int dirfd, const char *path, char out[PATH_MAX]
         errno = EINVAL; return NULL;
     }
     char root[80];
-    snprintf(root, sizeof root, "/tmp/sc5000-engine-volatile-%u", (unsigned)geteuid());
+    snprintf(root, sizeof root, "/tmp/enginex-engine-volatile-%u", (unsigned)geteuid());
     if (!strncmp(full, root, strlen(root)) && full[strlen(root)] == '/') return path;
     if (mkdir(root, 0700) && errno != EEXIST) return NULL;
     struct stat st;
@@ -3337,9 +3337,9 @@ int sc5000_alsa_boot_hook(void *root, void *config, void **dst, void *private_da
     if (dst) *dst = NULL;
     if (g_hook_initialized) return 0;
     if (!is_engine()) return 0;
-    if (access("/run/sc5000-alsa-reexec.once", F_OK) == 0) return 0;
+    if (access("/run/enginex-alsa-reexec.once", F_OK) == 0) return 0;
 
-    int fd = open("/run/sc5000-alsa-reexec.once", O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    int fd = open("/run/enginex-alsa-reexec.once", O_CREAT | O_WRONLY | O_TRUNC, 0644);
     if (fd >= 0) close(fd);
 
     fprintf(stderr, "engine-ui-hook: ALSA one-shot boot hook triggered; activating EngineX OS\n");
@@ -3354,7 +3354,12 @@ int sc5000_alsa_boot_hook(void *root, void *config, void **dst, void *private_da
             if (devnull > 2) close(devnull);
         }
         unsetenv("LD_PRELOAD");
-        char *const argv[] = {"/bin/sh", "/data/sc5000-custom/bundle/boot-activate.sh", NULL};
+        // The ALSA file loaded this hook through /data/sc5000-custom: its boot-activate.sh is
+        // reachable there too while /data/enginex is a dangling link, for the moment a downgrade
+        // to a release before 5.3.0.3 hands the directory back (#234, internal/leave).
+        const char *activate = "/data/enginex/bundle/boot-activate.sh";
+        if (access(activate, R_OK) != 0) activate = "/data/sc5000-custom/bundle/boot-activate.sh";
+        char *const argv[] = {"/bin/sh", (char *)activate, NULL};
         execv("/bin/sh", argv);
         _exit(1);
     }
@@ -3632,16 +3637,24 @@ int az01_apply_image(const char *path, int flags) {
         fprintf(stderr, "engine-ui-hook: intercepted az01_apply_image with an EngineX data bundle image (%s)\n", path);
         const char *test_root = getenv("ENGINEX_TEST_DATA_ROOT");
         int testing = test_root && *test_root;
-        char custom_dir[PATH_MAX] = "";
-        if (testing) snprintf(custom_dir, sizeof custom_dir, "%s/enginex", test_root);
-        // Unpacked next to the install (the /tmp tmpfs is small) and installed by the bundle's own
-        // install.sh, so an older install.sh that does not know "install.sh <img>" is not needed.
+        char custom_dir[PATH_MAX] = "", leave[PATH_MAX] = "/run/enginex/leave.sh";
+        if (testing) {
+            snprintf(custom_dir, sizeof custom_dir, "%s/enginex", test_root);
+            snprintf(leave, sizeof leave, "%s/run/enginex/leave.sh", test_root);
+        }
+        // Unpacked next to the install (the /tmp tmpfs is small), so an older install.sh that does
+        // not know "install.sh <img>" is not needed. This release's leave step (#234) puts the
+        // bundle in: a newer one by its own install.sh in place, an older one through a stage and
+        // atomic swaps that survive a power cut (internal/leave). Then it takes this release's units
+        // out of /run before the reboot below. A failed install leaves this release as it is.
+        // Without the step (a release before 5.3.0.5 runs this hook) the bundle installs in place.
         static const char script[] =
             "set -e; d=\"${2:-" ENGINEX_DATA_DIR "}\"; "
-            "[ -z \"$2\" ] || export SC5000_CUSTOM=\"$d\" SC5000_ALSA_OVERLAY=\"$d/alsa-conf.d\"; "
+            "[ -z \"$2\" ] || export ENGINEX_CUSTOM=\"$d\" ENGINEX_ALSA_OVERLAY=\"$d/alsa-conf.d\" SC5000_CUSTOM=\"$d\" SC5000_ALSA_OVERLAY=\"$d/alsa-conf.d\"; "
             "mkdir -p \"$d\"; w=$(mktemp -d \"$d/.ota-img.XXXXXX\"); trap 'rm -rf \"$w\"' 0; "
-            "tail -c +129 \"$1\" | tar -xzf - -C \"$w\"; sh \"$w\"/*/install.sh";
-        char *const argv[] = {"sh", "-c", (char *)script, "sh", (char *)path, custom_dir, NULL};
+            "tail -c +129 \"$1\" | tar -xzf - -C \"$w\"; t=$(echo \"$w\"/*); "
+            "if [ -f \"$3\" ]; then sh \"$3\" --install \"$t\" --no-reboot; else sh \"$t\"/install.sh; fi";
+        char *const argv[] = {"sh", "-c", (char *)script, "sh", (char *)path, custom_dir, leave, NULL};
         if (run_wait("/bin/sh", argv) != 0) return -1;
         if (flags & 1) unlink(path);
         if (!testing) enginex_reboot();
@@ -3711,10 +3724,10 @@ int az01_erase_data_partition(void) {
     char probe_boot[PATH_MAX], probe_inst[PATH_MAX];
     snprintf(probe_boot, sizeof probe_boot, "%s/enginex/bundle/boot-activate.sh", root);
     snprintf(probe_inst, sizeof probe_inst, "%s/enginex/bundle/install.sh", root);
-    if (getenv("SC5000_TEST_PASSTHROUGH_ERASE") ||
+    if (getenv("ENGINEX_TEST_PASSTHROUGH_ERASE") ||
         (access(probe_boot, F_OK) != 0 && access(probe_inst, F_OK) != 0) ||
-        access("/usr/share/sc5000-custom/sc5000-suite.xz", F_OK) == 0) {
-        // 1st-gen: EngineX lives in the rootfs and sc5000-custom-prepare restores it after the stock erase.
+        access("/usr/share/enginex/enginex-suite.xz", F_OK) == 0) {
+        // 1st-gen: EngineX lives in the rootfs and enginex-prepare restores it after the stock erase.
         static void *orig_fn = NULL;
         int (*fn)(void) = next_symbol(&orig_fn, "az01_erase_data_partition");
         return fn ? fn() : -1;

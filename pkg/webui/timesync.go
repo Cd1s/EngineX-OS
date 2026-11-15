@@ -14,7 +14,7 @@ const (
 )
 
 func (s *Server) timezoneStatePath() string {
-	if s.cfg.StateDir != "" && s.cfg.StateDir != "/data/sc5000-custom/state" {
+	if s.cfg.StateDir != "" && !isDeckStateDir(s.cfg.StateDir) {
 		return filepath.Join(s.cfg.StateDir, "timezone")
 	}
 	if _, err := os.Stat("/data/enginex"); err == nil {

@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	DefaultMediaCacheDir = "/tmp/sc5000-prolink-media"
+	DefaultMediaCacheDir = "/tmp/enginex-prolink-media"
 	pdbPath              = "PIONEER/rekordbox/export.pdb"
 	dotPDBPath           = ".PIONEER/rekordbox/export.pdb"
 	maxPDB               = 64 << 20
@@ -224,9 +224,9 @@ func (m *MediaCache) resolve(dev Device, host net.IP) (*rekordbox.Analysis, stri
 }
 
 // SharedMediaCacheDir is also rb-bridge's CLI default. A custom --media-cache
-// must use the same SC5000_PROLINK_MEDIA_CACHE environment in the WebUI process.
+// must use the same ENGINEX_PROLINK_MEDIA_CACHE environment in the WebUI process.
 func SharedMediaCacheDir() string {
-	if dir := os.Getenv("SC5000_PROLINK_MEDIA_CACHE"); dir != "" {
+	if dir := os.Getenv("ENGINEX_PROLINK_MEDIA_CACHE"); dir != "" {
 		return dir
 	}
 	return DefaultMediaCacheDir

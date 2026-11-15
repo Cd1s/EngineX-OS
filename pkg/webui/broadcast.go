@@ -215,7 +215,11 @@ func (s *Server) broadcastPost(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, err)
 		return
 	}
-	if err := providers.SaveJSON(s.broadcastConfigPath(), cfg); err != nil {
+	saved := cfg
+	if broadcast.BuiltinInput(saved.InputPath) {
+		saved.InputPath = "" // the hook's feed: each release reads it under its own name (#234)
+	}
+	if err := providers.SaveJSON(s.broadcastConfigPath(), saved); err != nil {
 		fail(w, 500, errors.New("could not save broadcast settings"))
 		return
 	}
@@ -280,15 +284,15 @@ func (s *Server) RegisterBroadcastRoutes() {
 	s.mux.HandleFunc("POST /api/broadcast/metadata", s.broadcastMetadataPost)
 	s.mux.HandleFunc("GET /api/usb-audio", s.handleUSBAudio)
 	s.mux.HandleFunc("POST /api/usb-audio", s.handleUSBAudio)
-	s.mux.HandleFunc("GET /v1/sc5000/usb-audio", s.handleUSBAudio)
-	s.mux.HandleFunc("POST /v1/sc5000/usb-audio", s.handleUSBAudio)
+	s.mux.HandleFunc("GET /v1/enginex/usb-audio", s.handleUSBAudio)
+	s.mux.HandleFunc("POST /v1/enginex/usb-audio", s.handleUSBAudio)
 	// Public on purpose (like the phone pages): OBS/VLC/browsers open these without a console cookie.
 	s.mux.Handle("GET /live.mp3", http.RedirectHandler("/live.wav", http.StatusFound)) // the MP3 output is retired
 	s.mux.HandleFunc("GET /live.wav", s.liveWAV)
 	s.mux.HandleFunc("GET /live-header.wav", liveHeader)
 }
 
-// handleUSBAudio handles GET and POST requests for /v1/sc5000/usb-audio and /api/usb-audio.
+// handleUSBAudio handles GET and POST requests for /v1/enginex/usb-audio and /api/usb-audio.
 func (s *Server) handleUSBAudio(w http.ResponseWriter, r *http.Request) {
 	mgr := s.usbAudioManager()
 

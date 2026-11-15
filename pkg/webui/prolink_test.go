@@ -17,15 +17,15 @@ func TestProlinkStatePath(t *testing.T) {
 	stateDir := t.TempDir()
 	srv := New(Config{StateDir: stateDir}, nil)
 
-	// 1. Initially no prolink.json exists and no env set -> returns /tmp/sc5000-prolink.json
-	t.Setenv("SC5000_PROLINK_STATE", "")
-	if p := srv.ProlinkStatePath(); p != "/tmp/sc5000-prolink.json" {
-		t.Errorf("got %q, want /tmp/sc5000-prolink.json", p)
+	// 1. Initially no prolink.json exists and no env set -> returns /tmp/enginex-prolink.json
+	t.Setenv("ENGINEX_PROLINK_STATE", "")
+	if p := srv.ProlinkStatePath(); p != "/tmp/enginex-prolink.json" {
+		t.Errorf("got %q, want /tmp/enginex-prolink.json", p)
 	}
 
-	// 2. SC5000_PROLINK_STATE env set and no file in StateDir -> returns env value
+	// 2. ENGINEX_PROLINK_STATE env set and no file in StateDir -> returns env value
 	custom := filepath.Join(stateDir, "custom-env.json")
-	t.Setenv("SC5000_PROLINK_STATE", custom)
+	t.Setenv("ENGINEX_PROLINK_STATE", custom)
 	if p := srv.ProlinkStatePath(); p != custom {
 		t.Errorf("got %q, want %q", p, custom)
 	}
@@ -44,7 +44,7 @@ func TestProlinkGetEmpty(t *testing.T) {
 	stateDir := t.TempDir()
 	srv := New(Config{StateDir: stateDir}, nil)
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/sc5000/prolink", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/enginex/prolink", nil)
 	rec := httptest.NewRecorder()
 	srv.prolinkGet(rec, req)
 
@@ -87,7 +87,7 @@ func TestProlinkPostSingleDeviceAndGet(t *testing.T) {
 	}
 	body, _ := json.Marshal(dev)
 
-	postReq := httptest.NewRequest(http.MethodPost, "/v1/sc5000/prolink", bytes.NewReader(body))
+	postReq := httptest.NewRequest(http.MethodPost, "/v1/enginex/prolink", bytes.NewReader(body))
 	postRec := httptest.NewRecorder()
 	srv.prolinkPost(postRec, postReq)
 
@@ -124,7 +124,7 @@ func TestProlinkPostSingleDeviceAndGet(t *testing.T) {
 	}
 
 	// Test GET endpoint returns the same snapshot
-	getReq := httptest.NewRequest(http.MethodGet, "/v1/sc5000/prolink", nil)
+	getReq := httptest.NewRequest(http.MethodGet, "/v1/enginex/prolink", nil)
 	getRec := httptest.NewRecorder()
 	srv.prolinkGet(getRec, getReq)
 
@@ -158,7 +158,7 @@ func TestProlinkPostDeviceListAndDecksMapping(t *testing.T) {
 	}
 	body, _ := json.Marshal(payload)
 
-	postReq := httptest.NewRequest(http.MethodPost, "/v1/sc5000/prolink", bytes.NewReader(body))
+	postReq := httptest.NewRequest(http.MethodPost, "/v1/enginex/prolink", bytes.NewReader(body))
 	postRec := httptest.NewRecorder()
 	srv.prolinkPost(postRec, postReq)
 
@@ -209,7 +209,7 @@ func TestProlinkStateFileMerging(t *testing.T) {
 		LastSeen: time.Now(),
 	}
 	body, _ := json.Marshal(update)
-	postReq := httptest.NewRequest(http.MethodPost, "/v1/sc5000/prolink", bytes.NewReader(body))
+	postReq := httptest.NewRequest(http.MethodPost, "/v1/enginex/prolink", bytes.NewReader(body))
 	postRec := httptest.NewRecorder()
 	srv.prolinkPost(postRec, postReq)
 
@@ -237,12 +237,12 @@ func TestProlinkStateFileMerging(t *testing.T) {
 
 // #59: the media share toggle is routed on the gateway and shared with the UI settings.
 func TestProlinkShareToggle(t *testing.T) {
-	t.Setenv("SC5000_PROLINK_STATE", filepath.Join(t.TempDir(), "none.json"))
+	t.Setenv("ENGINEX_PROLINK_STATE", filepath.Join(t.TempDir(), "none.json"))
 	ui := New(Config{AccessToken: "c", UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
 	srv := httptest.NewServer(ui)
 	defer srv.Close()
 	get := func(method, query string) (int, prolinkResponse) {
-		req, _ := http.NewRequest(method, srv.URL+"/v1/sc5000/prolink"+query, nil)
+		req, _ := http.NewRequest(method, srv.URL+"/v1/enginex/prolink"+query, nil)
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatal(err)

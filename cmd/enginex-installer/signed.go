@@ -202,17 +202,10 @@ const installedReleaseCmd = `for f in ` + customDirSh + `/version.txt /data/sc50
 	`for f in /etc/enginex/release-tag /etc/sc5000/release-tag ` + customDirSh + `/bundle/release-tag /data/sc5000-custom/bundle/release-tag; do ` +
 	`[ -e "$f" ] || continue; v=$(cat "$f") || { echo "cannot read $f" >&2; exit 1; }; printf 'T %s\n' "$v"; done`
 
-// refuseOlder stops an install of a package fetched from a release (o.release is the tag its signed
-// list proves) when the deck already runs a newer one: a genuine older release replayed by whoever
-// serves the release page must not take a deck back. Same release is allowed (a repair). A file the
-// user names with --image or --bundle has no o.release and is theirs to choose.
-func refuseOlder(ctx context.Context, o *options, cl *ssh.Client, label string) error {
-	if o.release == "" {
-		return nil
-	}
+func readInstalledRelease(ctx context.Context, cl *ssh.Client, label string) (string, error) {
 	out, err := sshRead(ctx, cl, installedReleaseCmd)
 	if err != nil {
-		return fmt.Errorf("%s 无法读取碟机当前的发布版本，没有安装任何东西（%s）/ %s: cannot read the release the deck runs, so nothing was installed (%s): %w",
+		return "", fmt.Errorf("%s 无法读取碟机当前的发布版本，没有安装任何东西（%s）/ %s: cannot read the release the deck runs, so nothing was installed (%s): %w",
 			label, strings.TrimSpace(out), label, strings.TrimSpace(out), err)
 	}
 	version := "dev"
@@ -228,7 +221,22 @@ func refuseOlder(ctx context.Context, o *options, cl *ssh.Client, label string) 
 			tags = append(tags, val)
 		}
 	}
-	if installed := releasesig.InstalledRelease(version, tags); releasesig.NewerVersion(installed, o.release) {
+	return releasesig.InstalledRelease(version, tags), nil
+}
+
+// refuseOlder stops an install of a package fetched from a release (o.release is the tag its signed
+// list proves) when the deck already runs a newer one: a genuine older release replayed by whoever
+// serves the release page must not take a deck back. Same release is allowed (a repair). A file the
+// user names with --image or --bundle has no o.release and is theirs to choose.
+func refuseOlder(ctx context.Context, o *options, cl *ssh.Client, label string) error {
+	if o.release == "" {
+		return nil
+	}
+	installed, err := readInstalledRelease(ctx, cl, label)
+	if err != nil {
+		return err
+	}
+	if releasesig.NewerVersion(installed, o.release) {
 		return fmt.Errorf("%s 已经是 %s，比要安装的 %s 新，拒绝回退（要回退请用 --image 或 --bundle 指定旧文件）/ %s already runs %s, newer than %s; refusing to go back (to do that on purpose, name the older file with --image or --bundle)",
 			label, installed, o.release, label, installed, o.release)
 	}

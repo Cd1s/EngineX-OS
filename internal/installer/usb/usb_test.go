@@ -226,6 +226,14 @@ func TestNativeEnumeration(t *testing.T) {
 		}
 	}
 	b, err := NewBackend()
+	// armhf is a deck target; the desktop USB backend intentionally has no implementation there.
+	if runtime.GOOS == "linux" && runtime.GOARCH == "arm" {
+		var unsupported *Error
+		if b != nil || !errors.As(err, &unsupported) || unsupported.Kind != Unsupported {
+			t.Fatalf("armhf backend = %v, %v; want Unsupported", b, err)
+		}
+		return
+	}
 	if err != nil {
 		t.Fatal(err)
 	}

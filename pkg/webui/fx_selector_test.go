@@ -32,7 +32,7 @@ func TestFXSelectorRequiresMatchingAcknowledgement(t *testing.T) {
 		done <- os.ErrDeadlineExceeded
 	}()
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("POST", "/v1/sc5000/ui?fxUnit=1&fxMode=2", nil)
+	r := httptest.NewRequest("POST", "/v1/enginex/ui?fxUnit=1&fxMode=2", nil)
 	s.uiUpdate(w, r)
 	if err := <-done; err != nil {
 		t.Fatal(err)
@@ -56,7 +56,7 @@ func TestFXSelectorRejectsMissingHookAndInvalidUnits(t *testing.T) {
 		{"fxUnit=1&fxMode=6", 400}, {"fxUnit=1&fxMode=1", 503},
 	} {
 		w := httptest.NewRecorder()
-		s.uiUpdate(w, httptest.NewRequest("POST", "/v1/sc5000/ui?"+tc.query, nil))
+		s.uiUpdate(w, httptest.NewRequest("POST", "/v1/enginex/ui?"+tc.query, nil))
 		if w.Code != tc.code {
 			t.Fatalf("%s: %d", tc.query, w.Code)
 		}

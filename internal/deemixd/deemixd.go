@@ -1,5 +1,5 @@
-// Package deemixd is sc5000-deemixd: it downloads directly from Deezer on the
-// SC5000 for a queue on 127.0.0.1:6595. sc5000-suite runs Main.
+// Package deemixd is enginex-deemixd: it downloads directly from Deezer on the
+// deck for a queue on 127.0.0.1:6595. enginex-suite runs Main.
 package deemixd
 
 import (
@@ -29,8 +29,8 @@ import (
 )
 
 const (
-	defaultStateDir    = "/data/sc5000-custom/state"
-	defaultDownloadDir = "/data/sc5000-custom/Stream"
+	defaultStateDir    = "/data/enginex/state"
+	defaultDownloadDir = "/data/enginex/Stream"
 	sdDownloadDir      = "/media/sc5000-sd-cache/Music/Stream"
 	defaultRelay       = ""
 	defaultPassword    = "change-me-in-config"
@@ -82,9 +82,9 @@ func preferredDownloadDir() string {
 
 // Main runs the daemon until SIGINT/SIGTERM.
 func Main(args []string) error {
-	fs := flag.NewFlagSet("sc5000-deemixd", flag.ContinueOnError)
+	fs := flag.NewFlagSet("enginex-deemixd", flag.ContinueOnError)
 	downloadDir := fs.String("download-dir", preferredDownloadDir(), "directory for original FLAC/MP3 downloads")
-	stateDir := fs.String("state-dir", defaultStateDir, "SC5000 state directory")
+	stateDir := fs.String("state-dir", defaultStateDir, "EngineX state directory")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -103,7 +103,7 @@ func Main(args []string) error {
 	if errors.Is(err, syscall.EADDRINUSE) {
 		// stream-sync already supervises a downloader here (#159). Exit 0 so
 		// systemd's Restart=on-failure does not respawn this every 3 s.
-		log.Printf("sc5000-deemixd: %s already served; exiting", srv.Addr)
+		log.Printf("enginex-deemixd: %s already served; exiting", srv.Addr)
 		return nil
 	}
 	if err != nil {
@@ -123,7 +123,7 @@ func Main(args []string) error {
 		_ = srv.Shutdown(shutdown)
 		close(shutdownDone)
 	}()
-	log.Printf("sc5000-deemixd listening on %s; downloads: %s", srv.Addr, absDir)
+	log.Printf("enginex-deemixd listening on %s; downloads: %s", srv.Addr, absDir)
 	if err := srv.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}

@@ -96,7 +96,7 @@ static void test_open_verify(void) {
     assert(unlink(cmd) == 0);
 
     // Valid bundle .tar.gz inside ENGINEX_DATA_BUNDLE_IMG_V1: az01_apply_image unpacks, runs install.sh, and unlinks when flags=1
-    put(dir, "pkg/top/install.sh", "#!/bin/sh\nprintf '5.3.0.3\\n' > \"$SC5000_CUSTOM/applied-version.txt\"\n");
+    put(dir, "pkg/top/install.sh", "#!/bin/sh\nprintf '5.3.0.3\\n' > \"$ENGINEX_CUSTOM/applied-version.txt\"\n");
     snprintf(cmd, sizeof cmd, "chmod +x %s/pkg/top/install.sh && tar -C %s/pkg -czf %s/bundle.tar.gz top", dir, dir, dir);
     assert(system(cmd) == 0);
     char hex[65] = {0};
@@ -191,7 +191,7 @@ static void test_erase(void) {
         "enginex/ui/mods-overlay/a.qml", "enginex/ui/mods-quarantined/b", "enginex/ui/safe-mode", "enginex/ui/boot-count",
         "enginex/ui/boot-token", "enginex/ui/last-crash", "enginex/ui/running-sentinel"};
     static const char *const kept[] = {
-        "enginex/bundle/boot-activate.sh", "enginex/bundle/bin/sc5000-suite", "enginex/ui/packs/a/Main.qml", "enginex/ui/icons/x.svg",
+        "enginex/bundle/boot-activate.sh", "enginex/bundle/bin/enginex-suite", "enginex/ui/packs/a/Main.qml", "enginex/ui/icons/x.svg",
         "enginex/version.txt", "enginex/gen2-unlocked", "enginex/authorized_keys", "enginex/ssh_host_ed25519_key",
         "system/var-lib/alsa/conf.d/99-sc5000-custom.conf"};
     for (size_t i = 0; i < sizeof wiped / sizeof *wiped; i++) put(root, wiped[i], "x");
@@ -206,10 +206,10 @@ static void test_erase(void) {
     assert(symlink(outside, link) == 0);
 
     setenv("ENGINEX_TEST_DATA_ROOT", root, 1);
-    setenv("SC5000_TEST_PASSTHROUGH_ERASE", "1", 1);  // passthrough: no stock function here -> -1, nothing wiped
+    setenv("ENGINEX_TEST_PASSTHROUGH_ERASE", "1", 1);  // passthrough: no stock function here -> -1, nothing wiped
     assert(az01_erase_data_partition() == -1 && exists(root, "AppDataUser/x.db"));
-    unsetenv("SC5000_TEST_PASSTHROUGH_ERASE");
-    if (access("/usr/share/sc5000-custom/sc5000-suite.xz", F_OK) == 0) { puts("erase: SKIP (1st-gen rootfs host)"); return; }
+    unsetenv("ENGINEX_TEST_PASSTHROUGH_ERASE");
+    if (access("/usr/share/enginex/enginex-suite.xz", F_OK) == 0) { puts("erase: SKIP (1st-gen rootfs host)"); return; }
     assert(az01_erase_data_partition() == 0);
     for (size_t i = 0; i < sizeof wiped / sizeof *wiped; i++) assert(!exists(root, wiped[i]));
     for (size_t i = 0; i < sizeof kept / sizeof *kept; i++) assert(exists(root, kept[i]));
@@ -235,7 +235,7 @@ static void test_erase_reports_failure(void) {
     put(root, "enginex/bundle/install.sh", "x");
     put(root, "StreamingAccounts.json", "x");
     put(root, "AppDataUser/x.db", "x");
-    if (access("/usr/share/sc5000-custom/sc5000-suite.xz", F_OK) == 0) { puts("erase failure: SKIP (1st-gen rootfs host)"); return; }
+    if (access("/usr/share/enginex/enginex-suite.xz", F_OK) == 0) { puts("erase failure: SKIP (1st-gen rootfs host)"); return; }
     fflush(NULL);
     pid_t child = fork();
     assert(child >= 0);
@@ -256,9 +256,59 @@ static void test_erase_reports_failure(void) {
     puts("Factory Reset on a /data it cannot write reports failure, keeps the files, does not reboot (BH-G2-6): PASS");
 }
 
+// #234: after a good install from a USB image, this release's leave step (/run/enginex/leave.sh,
+// written by its boot-activate.sh) runs before the reboot, with --no-reboot: the hook reboots.
+// A failed install leaves the running release alone: no leave step.
+static void apply_with(const char *dir, const char *install, int want) {
+    char cmd[PATH_MAX * 3], img[PATH_MAX], hex[65] = {0};
+    snprintf(cmd, sizeof cmd, "rm -rf %s/pkg %s/bundle.tar.gz", dir, dir);
+    assert(system(cmd) == 0);
+    put(dir, "pkg/top/install.sh", install);
+    snprintf(cmd, sizeof cmd, "chmod +x %s/pkg/top/install.sh && tar -C %s/pkg -czf %s/bundle.tar.gz top", dir, dir, dir);
+    assert(system(cmd) == 0);
+    snprintf(cmd, sizeof cmd, "sha256sum < %s/bundle.tar.gz", dir);
+    FILE *p = popen(cmd, "r"); assert(p && fread(hex, 1, 64, p) == 64); pclose(p);
+    uint8_t head[ENGINEX_IMG_HEADER] = {0};
+    snprintf((char *)head, sizeof head, ENGINEX_IMG_MAGIC "%s\nSCLIVE4\n5.3.0.4\n", hex);
+    snprintf(img, sizeof img, "%s/apply.img", dir);
+    FILE *f = fopen(img, "wb"); assert(f && fwrite(head, 1, sizeof head, f) == sizeof head && !fclose(f));
+    snprintf(cmd, sizeof cmd, "cat %s/bundle.tar.gz >> %s", dir, img);
+    assert(system(cmd) == 0);
+    assert(az01_apply_image(img, 0) == want);
+}
+static void test_apply_runs_the_leave_step(void) {
+    char dir[] = "/tmp/gen2-leave-XXXXXX", cmd[PATH_MAX];
+    const char *inst = "#!/bin/sh\nprintf '5.3.0.4\\n' > \"$ENGINEX_CUSTOM/applied-version.txt\"\n";
+    assert(mkdtemp(dir));
+    board(dir, "inmusic,jp21");
+    setenv("ENGINEX_TEST_DATA_ROOT", dir, 1);
+    // A release before 5.3.0.5 has no leave step: the bundle's own install.sh, in place.
+    apply_with(dir, inst, 0);
+    assert(exists(dir, "enginex/applied-version.txt"));
+    snprintf(cmd, sizeof cmd, "rm -f %s/enginex/applied-version.txt", dir);
+    assert(system(cmd) == 0);
+    // The step gets the unpacked bundle and puts it in (an older one through its stage, #234
+    // review); the hook does not run install.sh itself, and the caller reboots.
+    put(dir, "run/enginex/leave.sh",
+        "[ \"$1\" = --install ] && [ -f \"$2/install.sh\" ] && printf '%s\\n' \"$3\" > \"$(dirname \"$0\")/left\"\n");
+    apply_with(dir, inst, 0);
+    assert(!exists(dir, "enginex/applied-version.txt") && exists(dir, "run/enginex/left"));
+    FILE *f = fopen(strcat(strcpy(cmd, dir), "/run/enginex/left"), "r");
+    char args[64] = {0};
+    assert(f && fgets(args, sizeof args, f) && !fclose(f) && !strcmp(args, "--no-reboot\n"));
+    // A step that fails (a bad bundle, a deck that cannot swap atomically) fails the apply.
+    put(dir, "run/enginex/leave.sh", "exit 1\n");
+    apply_with(dir, inst, -1);
+    unsetenv("ENGINEX_TEST_DATA_ROOT");
+    snprintf(cmd, sizeof cmd, "rm -rf %s", dir);
+    assert(system(cmd) == 0);
+    puts("#234: a USB image install goes through this release's leave step (--install, --no-reboot), in place without one, and fails with it: PASS");
+}
+
 int main(void) {
     test_sha256();
     test_open_verify();
+    test_apply_runs_the_leave_step();
     test_other_model_refused();
     test_erase();
     test_erase_reports_failure();

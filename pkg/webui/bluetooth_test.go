@@ -55,7 +55,7 @@ func TestBluetoothAssignLayerIsSavedForTheHook(t *testing.T) {
 	dir := t.TempDir()
 	s := New(Config{UIDir: dir, StateDir: t.TempDir()}, nil)
 
-	if code, st := bluetoothCall(t, s, "GET", "/v1/sc5000/bluetooth", ""); code != 200 || st.AssignLayer != "Master" || !slices.Equal(st.Layers, []string{"Master", "Booth", "Headphones", "Zone"}) {
+	if code, st := bluetoothCall(t, s, "GET", "/v1/enginex/bluetooth", ""); code != 200 || st.AssignLayer != "Master" || !slices.Equal(st.Layers, []string{"Master", "Booth", "Headphones", "Zone"}) {
 		t.Fatalf("default: %d %+v", code, st)
 	}
 	if conf := settingsConf(t, dir); strings.Contains(conf, "bt_out") {
@@ -64,8 +64,8 @@ func TestBluetoothAssignLayerIsSavedForTheHook(t *testing.T) {
 
 	// JSON body and query string both pick a layer; the hook gets its index.
 	for _, c := range []struct{ target, body, layer, line string }{
-		{"/v1/sc5000/bluetooth", `{"assignLayer":"Headphones"}`, "Headphones", "bt_out=2\n"},
-		{"/v1/sc5000/bluetooth?assignLayer=Zone", "", "Zone", "bt_out=3\n"},
+		{"/v1/enginex/bluetooth", `{"assignLayer":"Headphones"}`, "Headphones", "bt_out=2\n"},
+		{"/v1/enginex/bluetooth?assignLayer=Zone", "", "Zone", "bt_out=3\n"},
 		{"/api/bluetooth?assignLayer=Booth", "", "Booth", "bt_out=1\n"},
 	} {
 		if code, st := bluetoothCall(t, s, "POST", c.target, c.body); code != 200 || st.AssignLayer != c.layer {
@@ -86,12 +86,12 @@ func TestBluetoothAssignLayerIsSavedForTheHook(t *testing.T) {
 	if conf := settingsConf(t, dir); !strings.Contains(conf, "bt_out=1\n") || !strings.Contains(conf, "waveform=rgb\n") {
 		t.Fatalf("settings.conf after another save: %q", conf)
 	}
-	if code, st := bluetoothCall(t, s, "GET", "/v1/sc5000/bluetooth", ""); code != 200 || st.AssignLayer != "Booth" {
+	if code, st := bluetoothCall(t, s, "GET", "/v1/enginex/bluetooth", ""); code != 200 || st.AssignLayer != "Booth" {
 		t.Fatalf("after restart: %d %+v", code, st)
 	}
 
 	// The first pair is the default again: no line, as for every setting at its default.
-	if code, st := bluetoothCall(t, s, "POST", "/v1/sc5000/bluetooth", `{"assignLayer":"Master"}`); code != 200 || st.AssignLayer != "Master" {
+	if code, st := bluetoothCall(t, s, "POST", "/v1/enginex/bluetooth", `{"assignLayer":"Master"}`); code != 200 || st.AssignLayer != "Master" {
 		t.Fatalf("back to Master: %d %+v", code, st)
 	}
 	if conf := settingsConf(t, dir); strings.Contains(conf, "bt_out") {
@@ -103,10 +103,10 @@ func TestBluetoothPlayerPicksALayer(t *testing.T) {
 	asDeck(t, "inmusic,jp07") // SC5000
 	dir := t.TempDir()
 	s := New(Config{UIDir: dir, StateDir: t.TempDir()}, nil)
-	if code, st := bluetoothCall(t, s, "GET", "/v1/sc5000/bluetooth", ""); code != 200 || st.AssignLayer != "Layer A" {
+	if code, st := bluetoothCall(t, s, "GET", "/v1/enginex/bluetooth", ""); code != 200 || st.AssignLayer != "Layer A" {
 		t.Fatalf("default: %d %+v", code, st)
 	}
-	if code, st := bluetoothCall(t, s, "POST", "/v1/sc5000/bluetooth?assignLayer=Layer+B", ""); code != 200 || st.AssignLayer != "Layer B" {
+	if code, st := bluetoothCall(t, s, "POST", "/v1/enginex/bluetooth?assignLayer=Layer+B", ""); code != 200 || st.AssignLayer != "Layer B" {
 		t.Fatalf("Layer B: %d %+v", code, st)
 	}
 	if conf := settingsConf(t, dir); !strings.Contains(conf, "bt_out=1\n") {
@@ -117,15 +117,15 @@ func TestBluetoothPlayerPicksALayer(t *testing.T) {
 // A model offers only what was measured on it; a refused request changes nothing.
 func TestBluetoothRefusesWhatTheModelDoesNotHave(t *testing.T) {
 	for _, c := range []struct{ board, method, target, body string }{
-		{"inmusic,jc16", "POST", "/v1/sc5000/bluetooth", `{"assignLayer":"Zone"}`},       // PRIME 2 has Master and Headphones
-		{"inmusic,jc11", "POST", "/v1/sc5000/bluetooth", `{"assignLayer":"Layer A"}`},    // a player's name on a console
-		{"inmusic,jp07", "POST", "/v1/sc5000/bluetooth", `{"assignLayer":"Master"}`},     // and the other way
-		{"inmusic,jp11", "POST", "/v1/sc5000/bluetooth", `{"assignLayer":"Headphones"}`}, // PRIME GO: not measured
-		{"inmusic,jc11", "POST", "/v1/sc5000/bluetooth", `{"assignLayer":"CH 1"}`},       // the old names
-		{"inmusic,jc11", "POST", "/v1/sc5000/bluetooth", `{"assignLayer":"master"}`},     // exact names
-		{"inmusic,jc11", "POST", "/v1/sc5000/bluetooth", `{"mode":"source"}`},            // the source mode is gone
-		{"inmusic,jc11", "POST", "/v1/sc5000/bluetooth", `{invalid json`},
-		{"inmusic,jc11", "DELETE", "/v1/sc5000/bluetooth", ""},
+		{"inmusic,jc16", "POST", "/v1/enginex/bluetooth", `{"assignLayer":"Zone"}`},       // PRIME 2 has Master and Headphones
+		{"inmusic,jc11", "POST", "/v1/enginex/bluetooth", `{"assignLayer":"Layer A"}`},    // a player's name on a console
+		{"inmusic,jp07", "POST", "/v1/enginex/bluetooth", `{"assignLayer":"Master"}`},     // and the other way
+		{"inmusic,jp11", "POST", "/v1/enginex/bluetooth", `{"assignLayer":"Headphones"}`}, // PRIME GO: not measured
+		{"inmusic,jc11", "POST", "/v1/enginex/bluetooth", `{"assignLayer":"CH 1"}`},       // the old names
+		{"inmusic,jc11", "POST", "/v1/enginex/bluetooth", `{"assignLayer":"master"}`},     // exact names
+		{"inmusic,jc11", "POST", "/v1/enginex/bluetooth", `{"mode":"source"}`},            // the source mode is gone
+		{"inmusic,jc11", "POST", "/v1/enginex/bluetooth", `{invalid json`},
+		{"inmusic,jc11", "DELETE", "/v1/enginex/bluetooth", ""},
 	} {
 		asDeck(t, c.board)
 		dir := t.TempDir()
@@ -153,7 +153,7 @@ func TestBluetoothIgnoresABadSavedPair(t *testing.T) {
 			t.Fatal(err)
 		}
 		s := New(Config{UIDir: dir, StateDir: t.TempDir()}, nil)
-		if code, st := bluetoothCall(t, s, "GET", "/v1/sc5000/bluetooth", ""); code != 200 || st.AssignLayer != "Master" {
+		if code, st := bluetoothCall(t, s, "GET", "/v1/enginex/bluetooth", ""); code != 200 || st.AssignLayer != "Master" {
 			t.Errorf("%q: %d %+v, want Master", c.saved, code, st)
 		}
 		conf := settingsConf(t, dir)

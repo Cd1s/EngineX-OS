@@ -75,9 +75,11 @@ func TestConsoleHTTPSCertGeneratedOnceMode0600AndReused(t *testing.T) {
 		t.Fatalf("self-signed verify with pinned root failed: %v", err)
 	}
 
-	if !slices.Contains(leaf1.DNSNames, "localhost") {
-		ui1.Close()
-		t.Fatalf("DNSNames %v missing localhost", leaf1.DNSNames)
+	for _, name := range []string{"localhost", "enginex.lan", "sc5000.lan"} {
+		if !slices.Contains(leaf1.DNSNames, name) {
+			ui1.Close()
+			t.Fatalf("DNSNames %v missing %s", leaf1.DNSNames, name)
+		}
 	}
 	if h, err := os.Hostname(); err == nil && h != "" && net.ParseIP(h) == nil {
 		if !slices.Contains(leaf1.DNSNames, h) {
@@ -231,10 +233,12 @@ func TestConsoleHTTPSToggleLifecycleAndBothListeners(t *testing.T) {
 		t.Fatalf("on state qrTarget = %q, want %q", got, wantQR)
 	}
 	loopQR := httptest.NewRequest(http.MethodGet, "/api/console-qr", nil)
-	loopQR.Host = fmt.Sprintf("127.0.0.1:%d", st.HTTPSPort)
 	loopQR.TLS = &tls.ConnectionState{}
-	if got, want := ui.qrTarget(loopQR), fmt.Sprintf("https://%s:%d", lanHost(), st.HTTPSPort); got != want {
-		t.Fatalf("on state loopback TLS qrTarget = %q, want %q", got, want)
+	for _, host := range []string{"127.0.0.1", "enginex.lan", "sc5000.lan"} {
+		loopQR.Host = net.JoinHostPort(host, fmt.Sprint(st.HTTPSPort))
+		if got, want := ui.qrTarget(loopQR), fmt.Sprintf("https://%s:%d", lanHost(), st.HTTPSPort); got != want {
+			t.Errorf("TLS host %s qrTarget = %q, want %q", host, got, want)
+		}
 	}
 	cfQR := httptest.NewRequest(http.MethodGet, "/api/console-qr", nil)
 	cfQR.Host = "abc-def.trycloudflare.com"

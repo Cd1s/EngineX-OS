@@ -38,7 +38,7 @@ func TestPhoneLoginNeedsTokenAndLinksDeezer(t *testing.T) {
 	srv := httptest.NewServer(ui)
 	defer srv.Close()
 
-	resp, err := http.Post(srv.URL+"/v1/sc5000/login?provider=deezer", "", nil)
+	resp, err := http.Post(srv.URL+"/v1/enginex/login?provider=deezer", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,7 @@ func TestPhoneLoginNeedsTokenAndLinksDeezer(t *testing.T) {
 	if flow == nil || !regexp.MustCompile(`:8080/m/deezer\?t=`).MatchString(flow.Target) {
 		t.Fatalf("flow %+v", flow)
 	}
-	qr, err := http.Get(srv.URL + "/v1/sc5000/login/qr?provider=deezer")
+	qr, err := http.Get(srv.URL + "/v1/enginex/login/qr?provider=deezer")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +86,7 @@ func TestPhoneLoginNeedsTokenAndLinksDeezer(t *testing.T) {
 	if again.StatusCode != 403 {
 		t.Fatalf("reused token: %d", again.StatusCode)
 	}
-	status, err := http.Get(srv.URL + "/v1/sc5000/login?provider=deezer")
+	status, err := http.Get(srv.URL + "/v1/enginex/login?provider=deezer")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +114,7 @@ func TestSpotifyPhoneClientIDAndAccessToken(t *testing.T) {
 	defer ui.Close()
 	srv := httptest.NewServer(ui)
 	defer srv.Close()
-	resp, err := http.Post(srv.URL+"/v1/sc5000/login?provider=spotify", "", nil)
+	resp, err := http.Post(srv.URL+"/v1/enginex/login?provider=spotify", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +157,7 @@ func TestSpotifyLoginWorksWithoutAnOwnerClientID(t *testing.T) {
 	ui := New(Config{AccessToken: "test-console-code", UIDir: t.TempDir(), StateDir: t.TempDir(), SpotifyAccountsURL: "https://offline.example.invalid"}, nil)
 	srv := httptest.NewServer(ui)
 	defer srv.Close()
-	resp, err := http.Post(srv.URL+"/v1/sc5000/login?provider=spotify", "", nil)
+	resp, err := http.Post(srv.URL+"/v1/enginex/login?provider=spotify", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +179,7 @@ func TestSpotifyLoginWorksWithoutAnOwnerClientID(t *testing.T) {
 	if !got.Set || strings.Contains(got.ClientID, testSpotifyClientID) || got.RedirectURI != spotifyLoopbackRedirect {
 		t.Fatalf("saved: %+v", got)
 	}
-	resp, err = http.Post(srv.URL+"/v1/sc5000/login?provider=spotify", "", nil)
+	resp, err = http.Post(srv.URL+"/v1/enginex/login?provider=spotify", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +235,7 @@ func TestSpotifyPhoneLoginSurvivesASlowTwoFactorDetour(t *testing.T) {
 		b, _ := io.ReadAll(r.Body)
 		return string(b)
 	}
-	resp, err := http.Post(srv.URL+"/v1/sc5000/login?provider=spotify", "", nil)
+	resp, err := http.Post(srv.URL+"/v1/enginex/login?provider=spotify", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,7 +252,7 @@ func TestSpotifyPhoneLoginSurvivesASlowTwoFactorDetour(t *testing.T) {
 		ui.pending[k] = v
 	}
 	ui.mu.Unlock()
-	if s := get("/v1/sc5000/login?provider=spotify"); strings.Contains(s, "expired") {
+	if s := get("/v1/enginex/login?provider=spotify"); strings.Contains(s, "expired") {
 		t.Fatalf("the deck gave up on the QR code: %s", s)
 	}
 	get("/m/spotify?t=" + token) // the browser reloads the page on return
@@ -266,7 +266,7 @@ func TestSpotifyPhoneLoginSurvivesASlowTwoFactorDetour(t *testing.T) {
 	if !strings.Contains(string(body), "Connected") {
 		t.Fatalf("pasted callback refused: %s", body)
 	}
-	if s := get("/v1/sc5000/login?provider=spotify"); !strings.Contains(s, `"status":"done"`) {
+	if s := get("/v1/enginex/login?provider=spotify"); !strings.Contains(s, `"status":"done"`) {
 		t.Fatalf("deck status %s", s)
 	}
 }
@@ -284,7 +284,7 @@ func TestPhonePostAcceptsNullOriginButConsoleRejectsForeignOrigin(t *testing.T) 
 	ui := New(Config{AccessToken: "code", UIDir: t.TempDir(), StateDir: t.TempDir(), DeezerURL: deezerProfiles(t).URL}, nil)
 	srv := httptest.NewServer(ui)
 	defer srv.Close()
-	resp, err := http.Post(srv.URL+"/v1/sc5000/login?provider=deezer", "", nil)
+	resp, err := http.Post(srv.URL+"/v1/enginex/login?provider=deezer", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -337,7 +337,7 @@ func TestRelayLoginCollectsBothServices(t *testing.T) {
 	srv := httptest.NewServer(ui)
 	defer srv.Close()
 	poll := func(provider string) string {
-		r, err := http.Get(srv.URL + "/v1/sc5000/login?provider=" + provider)
+		r, err := http.Get(srv.URL + "/v1/enginex/login?provider=" + provider)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -348,7 +348,7 @@ func TestRelayLoginCollectsBothServices(t *testing.T) {
 	}
 	for _, provider := range []string{"spotify", "deezer"} {
 		status = "scanned"
-		r, err := http.Post(srv.URL+"/v1/sc5000/login?provider="+provider, "", nil)
+		r, err := http.Post(srv.URL+"/v1/enginex/login?provider="+provider, "", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -418,7 +418,7 @@ func TestRelayOutageStillShowsItsQRCode(t *testing.T) {
 	ui := New(Config{AccessToken: "code", SpotifyClientID: testSpotifyClientID, SpotifyAccountsURL: "https://offline.example.invalid", UIDir: t.TempDir(), StateDir: t.TempDir(), RelayURL: relay.URL}, nil)
 	srv := httptest.NewServer(ui)
 	defer srv.Close()
-	r, err := http.Post(srv.URL+"/v1/sc5000/login?provider=spotify", "", nil)
+	r, err := http.Post(srv.URL+"/v1/enginex/login?provider=spotify", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -433,7 +433,7 @@ func TestRelayPasswordIsNeverReadBack(t *testing.T) {
 	ui := New(Config{AccessToken: "code", UIDir: t.TempDir(), StateDir: state, RelayURL: "https://default.example"}, nil)
 	srv := httptest.NewServer(ui)
 	defer srv.Close()
-	r, err := http.Post(srv.URL+"/v1/sc5000/relay", "application/json", strings.NewReader(`{"deemixPassword":"hunter2"}`))
+	r, err := http.Post(srv.URL+"/v1/enginex/relay", "application/json", strings.NewReader(`{"deemixPassword":"hunter2"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -449,7 +449,7 @@ func TestRelayPasswordIsNeverReadBack(t *testing.T) {
 	if err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("%v %v", info, err)
 	}
-	r, err = http.Post(srv.URL+"/v1/sc5000/ui?deemixPassword=changed", "", nil)
+	r, err = http.Post(srv.URL+"/v1/enginex/ui?deemixPassword=changed", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -462,7 +462,7 @@ func TestRelayPasswordIsNeverReadBack(t *testing.T) {
 		t.Fatal(password)
 	}
 	// #9: a rejected request leaves the relay alone.
-	r, err = http.Post(srv.URL+"/v1/sc5000/ui?lang=xx&relayUrl=https://other.example", "", nil)
+	r, err = http.Post(srv.URL+"/v1/enginex/ui?lang=xx&relayUrl=https://other.example", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -479,7 +479,7 @@ func TestRelayPasswordIsNeverReadBack(t *testing.T) {
 	if _, password := ui.relaySettings(); password != "" {
 		t.Fatal("password followed the relay to another host")
 	}
-	r, err = http.Post(srv.URL+"/v1/sc5000/relay", "application/json", strings.NewReader(`{"relayUrl":"http://public.example"}`))
+	r, err = http.Post(srv.URL+"/v1/enginex/relay", "application/json", strings.NewReader(`{"relayUrl":"http://public.example"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -747,7 +747,7 @@ func TestRelayCollectsSoundCloudAndDeckChecksIt(t *testing.T) {
 	ui := New(Config{AccessToken: "c", UIDir: t.TempDir(), StateDir: state, RelayURL: relay.URL, SoundCloudURL: api.URL, SoundCloudTokenURL: api.URL + "/token", BPM: bpm}, nil)
 	srv := httptest.NewServer(ui)
 	defer srv.Close()
-	r, err := http.Post(srv.URL+"/v1/sc5000/login?provider=soundcloud", "", nil)
+	r, err := http.Post(srv.URL+"/v1/enginex/login?provider=soundcloud", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -755,7 +755,7 @@ func TestRelayCollectsSoundCloudAndDeckChecksIt(t *testing.T) {
 	if !strings.HasPrefix(ui.logins["soundcloud"].Target, relay.URL+"/m/soundcloud?t=") {
 		t.Fatalf("%+v", ui.logins["soundcloud"])
 	}
-	status, err := http.Get(srv.URL + "/v1/sc5000/login?provider=soundcloud")
+	status, err := http.Get(srv.URL + "/v1/enginex/login?provider=soundcloud")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1004,12 +1004,12 @@ func TestRelayDeliversASoundCloudAccountLogin(t *testing.T) {
 	ui := New(Config{AccessToken: "c", UIDir: t.TempDir(), StateDir: state, RelayURL: relay.URL, BPM: bpm}, nil)
 	srv := httptest.NewServer(ui)
 	defer srv.Close()
-	r, err := http.Post(srv.URL+"/v1/sc5000/login?provider=soundcloud", "", nil)
+	r, err := http.Post(srv.URL+"/v1/enginex/login?provider=soundcloud", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	r.Body.Close()
-	status, err := http.Get(srv.URL + "/v1/sc5000/login?provider=soundcloud")
+	status, err := http.Get(srv.URL + "/v1/enginex/login?provider=soundcloud")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1120,7 +1120,7 @@ func TestSpotifyConnectEndpoints(t *testing.T) {
 	}
 
 	// 2. Start a spotify login flow to test link update
-	r, err := http.Post(srv.URL+"/v1/sc5000/login?provider=spotify", "", nil)
+	r, err := http.Post(srv.URL+"/v1/enginex/login?provider=spotify", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -205,16 +205,16 @@ func ensureWritableEngineLibrary(mount string) bool {
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return false
 	}
-	if st, err := os.Stat("/data/sc5000-custom"); err != nil || !st.IsDir() {
+	if st, err := os.Stat("/data/enginex"); err != nil || !st.IsDir() {
 		return false
 	}
 	base := filepath.Base(filepath.Clean(mount))
 	if base == "" || base == "." || base == "/" {
 		return false
 	}
-	lower := "/run/sc5000-empty"
-	upper := filepath.Join("/data/sc5000-custom/hfs-lib", base, "upper")
-	work := filepath.Join("/data/sc5000-custom/hfs-lib", base, "work")
+	lower := "/run/enginex-empty"
+	upper := filepath.Join("/data/enginex/hfs-lib", base, "upper")
+	work := filepath.Join("/data/enginex/hfs-lib", base, "work")
 	for _, d := range []string{lower, upper, work} {
 		if os.MkdirAll(d, 0755) != nil {
 			return false

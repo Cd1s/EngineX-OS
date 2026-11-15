@@ -5,11 +5,11 @@ package webui
 // (shadow_display.go), keeping the corresponding local Engine slots empty.
 // The opt-in legacy mode drives silent local Engine decks and copies audio.
 // Sources are the other EngineX player, whose QML posts its own
-// decks to POST /v1/sc5000/decks, or a CDJ on Pro DJ Link, by player number.
+// decks to POST /v1/enginex/decks, or a CDJ on Pro DJ Link, by player number.
 //
 // Latency: the sender's QML posts on every edge (play, CUE, jump, pitch) within
 // 20 ms, Go pushes the post to the other player over UDP at once, and there it
-// wakes the QML's long poll (GET /v1/sc5000/shadow?ver=N). GET /peer/decks,
+// wakes the QML's long poll (GET /v1/enginex/shadow?ver=N). GET /peer/decks,
 // polled every 250 ms, is the fallback for lost datagrams.
 
 import (
@@ -1511,7 +1511,7 @@ func (s *Server) shadowGet(w http.ResponseWriter, r *http.Request) {
 	v := s.loadUI()
 	s.uiMu.Unlock()
 	role := s.activeRole(v)
-	debug := s.shadow.dbg.set(v.DebugTelemetry || fileExists(shadowDebugFlag))
+	debug := s.shadow.dbg.set(v.DebugTelemetry || shadowDebugFlagged())
 	query := r.URL.Query()
 	seen, seenErr := strconv.ParseUint(query.Get("ver"), 10, 64)
 	out := []deckState{}

@@ -32,6 +32,7 @@ import (
 	"time"
 	"unicode/utf16"
 
+	"github.com/Cd1s/EngineX-OS/internal/releasesig"
 	"golang.org/x/crypto/ssh"
 
 	"github.com/Cd1s/EngineX-OS/internal/installer/azimg"
@@ -45,7 +46,7 @@ const (
 	gen2ImgHeader = 128
 	compatCmd     = "cat /sys/firmware/devicetree/base/compatible"
 	// install.sh's own default; the variable is only set by tests.
-	customDirSh = `"${SC5000_CUSTOM:-/data/enginex}"`
+	customDirSh = `"${ENGINEX_CUSTOM:-${SC5000_CUSTOM:-/data/enginex}}"`
 )
 
 var installerVersion = "dev" // set by build-installer.sh
@@ -908,6 +909,26 @@ func sshRead(ctx context.Context, c *ssh.Client, cmd string) (string, error) {
 	return sshRun(ctx, c, cmd, nil)
 }
 
+// leaveCmd runs the leave step of the installed release (5.3.0.5 and later write it to /run at
+// every boot, #234) once more after an older bundle went in (leaveInstallCmd): it reboots.
+// Detached, so the reboot does not cut this SSH session short; a deck without the step just
+// reboots, and the older release starts clean.
+const leaveCmd = `leave=${ENGINEX_LEAVE_SH:-/run/enginex/leave.sh}; ` +
+	`nohup sh -c 'sleep 1; if [ -f "$0" ]; then exec sh "$0"; fi; sync; systemctl reboot || reboot' "$leave" </dev/null >/dev/null 2>&1 &`
+
+// leaveInstallCmd installs an OLDER release (#234): the streamed tarball is unpacked next to /data's
+// EngineX directory and handed to the installed release's leave step, which runs the older
+// install.sh into a stage only and moves the result in with atomic swaps that survive a power
+// cut (internal/leave), and takes its own units out of /run. Synchronous, so a refusal (a deck
+// that cannot swap atomically, a damaged bundle) reaches the user; the reboot follows apart.
+// A deck without the step (a release before 5.3.0.5 is installed) installs in place.
+func leaveInstallCmd(top string) string {
+	return fmt.Sprintf(`set -e; leave=${ENGINEX_LEAVE_SH:-/run/enginex/leave.sh}; d=%[2]s; in=$(dirname "$d")/.enginex-leave.incoming; `+
+		`rm -rf "$in"; mkdir -p "$in"; trap 'rm -rf "$in"' EXIT; cd "$in"; tar -xzf -; `+
+		`if [ -f "$leave" ]; then sh "$leave" --install "$in/%[1]s" --no-reboot; else sh "$in/%[1]s/install.sh"; fi; `+
+		`printf '1\n' > "$d/gen2-unlocked"; rm -f "$d/gen2-locked"`, top, customDirSh)
+}
+
 // installCmd unpacks the streamed tarball in the deck's temp dir, runs install.sh, and marks gen2-unlocked (#215).
 func installCmd(top string) string {
 	return fmt.Sprintf(`set -e; cd "${TMPDIR:-/tmp}"; trap 'rm -rf %[1]s' EXIT; rm -rf %[1]s; tar -xzf -; sh %[1]s/install.sh; printf '1\n' > %[2]s/gen2-unlocked; rm -f %[2]s/gen2-locked`, top, customDirSh)
@@ -1030,13 +1051,33 @@ func modeA(ctx context.Context, o *options, d deck) error {
 	if err := refuseOlder(ctx, o, cl, label); err != nil {
 		return err
 	}
+	// #234: decided before anything is written. An older release than the installed one is
+	// installed, but this release's leave step and a reboot follow, never the older
+	// boot-activate.sh in place over this release's units.
+	installed, err := readInstalledRelease(ctx, cl, label)
+	if err != nil {
+		return err
+	}
+	older := releasesig.NewerVersion(installed, releasesig.InstalledRelease(b.Version, []string{b.Tag}))
 	sayGen2Steps(o, filepath.Base(b.Path))
-	if out, err := sshRun(ctx, cl, installCmd(b.Top), bytes.NewReader(b.TarGz)); err != nil {
+	install := installCmd(b.Top)
+	if older {
+		install = leaveInstallCmd(b.Top)
+	}
+	if out, err := sshRun(ctx, cl, install, bytes.NewReader(b.TarGz)); err != nil {
 		return fmt.Errorf("%s: install failed: %w\n%s", label, err, out)
 	}
 	got, err := sshRead(ctx, cl, "cat "+customDirSh+"/version.txt")
 	if err != nil || strings.TrimSpace(got) != b.Version {
 		return fmt.Errorf("%s: installed version reads back as %q, expected %s", label, strings.TrimSpace(got), b.Version)
+	}
+	if older {
+		if out, err := sshRun(ctx, cl, leaveCmd, nil); err != nil {
+			return fmt.Errorf("%s: leave step failed: %w\n%s", label, err, out)
+		}
+		o.say(fmt.Sprintf("完成：%s 已安装较旧的 EngineX OS %s，碟机正在重启。", label, b.Version),
+			fmt.Sprintf("Done: the older EngineX OS %s is installed on %s; the deck is rebooting.", b.Version, label))
+		return nil
 	}
 	if out, err := sshRun(ctx, cl, `sh `+customDirSh+`/bundle/boot-activate.sh`, nil); err != nil {
 		return fmt.Errorf("%s: activation failed: %w\n%s", label, err, out)

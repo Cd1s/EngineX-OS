@@ -23,12 +23,12 @@ import (
 // Downloads go to the front SD when present, otherwise to internal storage.
 const (
 	defaultDownloads  = "/media/sc5000-sd-cache/Music/Stream"
-	fallbackDownloads = "/data/sc5000-custom/Stream"
+	fallbackDownloads = "/data/enginex/Stream"
 	// Internal storage is shared with Engine; the SD card has room to spare.
 	maxInternalCache = 3 << 30
 	// Engine needs room on /data for its databases and its own temp copies.
 	internalMinFree = 1 << 30
-	defaultDeemixd  = "/usr/local/bin/sc5000-deemixd"
+	defaultDeemixd  = "/usr/local/bin/enginex-deemixd"
 )
 
 // StreamSync runs the on-device playlist/download/analyze console.
@@ -42,7 +42,7 @@ func StreamSync(args []string) error {
 	}
 	listen := fs.String("listen", ":8080", "touch/LAN HTTP listener")
 	httpsListen := fs.String("https-listen", ":8443", "optional touch/LAN HTTPS listener (enabled by consoleHttps setting)")
-	public := fs.String("public-url", "http://sc5000.lan:8080", "public console URL")
+	public := fs.String("public-url", "http://enginex.lan:8080", "public console URL")
 	dbPath := fs.String("database", analyzer.DefaultDatabase, "existing Engine 5.0.4 m.db (back up before use)")
 	downloads := fs.String("downloads", defaultDownloads, "Deemix output root on the same SD volume")
 	base := fs.String("deemix-url", deemixdURL, "local REST bridge URL")
@@ -50,7 +50,7 @@ func StreamSync(args []string) error {
 	mode := fs.String("deemix-mode", "queue", "queue REST bridge or directory (/api/download + exact ID filenames)")
 	socket := fs.String("deemix-socket", "", "optional local Unix HTTP socket")
 	pid := fs.Int("deemix-pid", 0, "also isolate all existing threads of this Deemix PID")
-	deemixd := fs.String("deemixd", defaultDeemixd, "start and keep this sc5000-deemixd running for "+deemixdURL+"; empty leaves it to others")
+	deemixd := fs.String("deemixd", defaultDeemixd, "start and keep this enginex-deemixd running for "+deemixdURL+"; empty leaves it to others")
 	lossy := fs.Bool("allow-320k", true, "accept verified MP3 when FLAC is unavailable")
 	relay := fs.String("relay-url", webui.DefaultRelayURL, "cloud login relay; empty keeps logins on the LAN")
 	token := fs.String("access-token", "", "console access code (default: kept in <state-dir>/access-token)")

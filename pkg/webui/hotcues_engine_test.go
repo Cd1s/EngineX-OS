@@ -77,7 +77,7 @@ func cueSamples(t *testing.T, db *sql.DB, index int) float64 {
 func postCue(t *testing.T, url string, body map[string]any) map[string]any {
 	t.Helper()
 	b, _ := json.Marshal(body)
-	resp, err := http.Post(url+"/v1/sc5000/hotcues", "application/json", bytes.NewReader(b))
+	resp, err := http.Post(url+"/v1/enginex/hotcues", "application/json", bytes.NewReader(b))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestHotCuesUseTheTracksSampleRate(t *testing.T) {
 	mediaRoot, _, db := hotCueLibrary(t)
 	srv := httptest.NewServer(New(Config{AccessToken: "t", MediaRoot: mediaRoot, UIDir: t.TempDir(), StateDir: t.TempDir()}, nil))
 	defer srv.Close()
-	resp, err := http.Get(srv.URL + "/v1/sc5000/hotcues?drive=CUES&trackId=10")
+	resp, err := http.Get(srv.URL + "/v1/enginex/hotcues?drive=CUES&trackId=10")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +143,7 @@ func TestHotCuesWaitWhileAnotherProcessHoldsTheLibrary(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(filepath.Dir(dbPath), "enginex-pending.json")); err != nil {
 		t.Fatalf("edit not queued: %v", err)
 	}
-	resp, err := http.Get(srv.URL + "/v1/sc5000/hotcues?drive=CUES&trackId=10")
+	resp, err := http.Get(srv.URL + "/v1/enginex/hotcues?drive=CUES&trackId=10")
 	if err != nil {
 		t.Fatal(err)
 	}

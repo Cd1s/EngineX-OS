@@ -1,0 +1,16 @@
+[Unit]
+Description=EngineX SD-first coldplug discovery
+After=local-fs.target systemd-udev-trigger.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=-/etc/default/enginex-storage
+ExecStart=/usr/local/bin/enginex-storage-mount --discover
+CPUAffinity=3
+CPUWeight=10
+IOWeight=10
+Slice=enginex-background.slice
+
+[Install]
+WantedBy=multi-user.target

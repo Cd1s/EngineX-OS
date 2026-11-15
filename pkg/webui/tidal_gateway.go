@@ -267,73 +267,73 @@ func newTidalGateway(s *Server) *tidalGateway {
 	g.loadTracks()
 	g.mux.HandleFunc("POST /au/oauth2/device_authorization", g.deviceAuthorization)
 	g.mux.HandleFunc("POST /au/oauth2/token", g.token)
-	g.mux.HandleFunc("POST /v1/sc5000/login", s.loginStart)
-	g.mux.HandleFunc("GET /v1/sc5000/login", s.loginStatus)
-	g.mux.HandleFunc("GET /v1/sc5000/login/qr", s.loginQR)
-	g.mux.HandleFunc("GET /v1/sc5000/boot", s.bootGet)
-	g.mux.HandleFunc("POST /v1/sc5000/boot/ready", s.bootReady)
-	g.mux.HandleFunc("GET /v1/sc5000/ui", s.uiStatus)
-	g.mux.HandleFunc("GET /v1/sc5000/settings-copy", s.settingsCopyStatus)
-	g.mux.HandleFunc("POST /v1/sc5000/settings-copy", s.settingsCopyControl)
-	g.mux.HandleFunc("POST /v1/sc5000/settings-copy/prestart", s.settingsCopyPrestart)
-	g.mux.HandleFunc("GET /v1/sc5000/library-status", s.libraryStatusGet)
-	g.mux.HandleFunc("GET /v1/sc5000/update", s.update)
-	g.mux.HandleFunc("POST /v1/sc5000/ui", s.uiUpdate)
-	g.mux.HandleFunc("GET /v1/sc5000/views", s.viewsGet)
-	g.mux.HandleFunc("POST /v1/sc5000/views", s.viewsPost)
-	g.mux.HandleFunc("POST /v1/sc5000/relocate", s.relocate)
-	g.mux.HandleFunc("GET /v1/sc5000/bpm", s.bpmConfigGet)
-	g.mux.HandleFunc("POST /v1/sc5000/bpm", s.bpmConfigPost)
-	g.mux.HandleFunc("GET /v1/sc5000/art", g.art)
-	g.mux.HandleFunc("GET /v1/sc5000/hotcues", s.handleHotCues)
-	g.mux.HandleFunc("POST /v1/sc5000/hotcues", s.handleHotCues)
-	g.mux.HandleFunc("GET /v1/sc5000/bluetooth", s.handleBluetooth)
-	g.mux.HandleFunc("POST /v1/sc5000/bluetooth", s.handleBluetooth)
-	g.mux.HandleFunc("GET /v1/sc5000/nas", s.handleNASConfig)
-	g.mux.HandleFunc("POST /v1/sc5000/nas", s.handleNASConfig)
-	g.mux.HandleFunc("POST /v1/sc5000/nas/test", s.handleNASTest)
-	g.mux.HandleFunc("GET /v1/sc5000/mods", s.handleMods)
-	g.mux.HandleFunc("POST /v1/sc5000/mods", s.handleMods)
-	g.mux.HandleFunc("POST /v1/sc5000/mods/upload", s.handleModsUpload)
-	g.mux.HandleFunc("GET /v1/sc5000/ssh", s.handleSSH)
-	g.mux.HandleFunc("POST /v1/sc5000/ssh", s.handleSSH)
+	g.mux.HandleFunc("POST /v1/enginex/login", s.loginStart)
+	g.mux.HandleFunc("GET /v1/enginex/login", s.loginStatus)
+	g.mux.HandleFunc("GET /v1/enginex/login/qr", s.loginQR)
+	g.mux.HandleFunc("GET /v1/enginex/boot", s.bootGet)
+	g.mux.HandleFunc("POST /v1/enginex/boot/ready", s.bootReady)
+	g.mux.HandleFunc("GET /v1/enginex/ui", s.uiStatus)
+	g.mux.HandleFunc("GET /v1/enginex/settings-copy", s.settingsCopyStatus)
+	g.mux.HandleFunc("POST /v1/enginex/settings-copy", s.settingsCopyControl)
+	g.mux.HandleFunc("POST /v1/enginex/settings-copy/prestart", s.settingsCopyPrestart)
+	g.mux.HandleFunc("GET /v1/enginex/library-status", s.libraryStatusGet)
+	g.mux.HandleFunc("GET /v1/enginex/update", s.update)
+	g.mux.HandleFunc("POST /v1/enginex/ui", s.uiUpdate)
+	g.mux.HandleFunc("GET /v1/enginex/views", s.viewsGet)
+	g.mux.HandleFunc("POST /v1/enginex/views", s.viewsPost)
+	g.mux.HandleFunc("POST /v1/enginex/relocate", s.relocate)
+	g.mux.HandleFunc("GET /v1/enginex/bpm", s.bpmConfigGet)
+	g.mux.HandleFunc("POST /v1/enginex/bpm", s.bpmConfigPost)
+	g.mux.HandleFunc("GET /v1/enginex/art", g.art)
+	g.mux.HandleFunc("GET /v1/enginex/hotcues", s.handleHotCues)
+	g.mux.HandleFunc("POST /v1/enginex/hotcues", s.handleHotCues)
+	g.mux.HandleFunc("GET /v1/enginex/bluetooth", s.handleBluetooth)
+	g.mux.HandleFunc("POST /v1/enginex/bluetooth", s.handleBluetooth)
+	g.mux.HandleFunc("GET /v1/enginex/nas", s.handleNASConfig)
+	g.mux.HandleFunc("POST /v1/enginex/nas", s.handleNASConfig)
+	g.mux.HandleFunc("POST /v1/enginex/nas/test", s.handleNASTest)
+	g.mux.HandleFunc("GET /v1/enginex/mods", s.handleMods)
+	g.mux.HandleFunc("POST /v1/enginex/mods", s.handleMods)
+	g.mux.HandleFunc("POST /v1/enginex/mods/upload", s.handleModsUpload)
+	g.mux.HandleFunc("GET /v1/enginex/ssh", s.handleSSH)
+	g.mux.HandleFunc("POST /v1/enginex/ssh", s.handleSSH)
 	// Every /v1/ path reaches this mux only (Server.ServeHTTP): a route
 	// registered on s.mux alone answered with emptyPage (BH-GC2-3).
-	g.mux.HandleFunc("GET /v1/sc5000/unlock-gen2", s.handleUnlockGen2)
-	g.mux.HandleFunc("POST /v1/sc5000/unlock-gen2", s.handleUnlockGen2)
-	g.mux.HandleFunc("POST /v1/sc5000/uninstall-gen2", s.handleUninstallGen2)
-	g.mux.HandleFunc("GET /v1/sc5000/tailscale", s.handleTailscale)
-	g.mux.HandleFunc("POST /v1/sc5000/tailscale", s.handleTailscale)
-	g.mux.HandleFunc("GET /v1/sc5000/mounts", s.handleMounts)
-	g.mux.HandleFunc("POST /v1/sc5000/mounts", s.handleMounts)
-	g.mux.HandleFunc("DELETE /v1/sc5000/mounts", s.handleMounts)
-	g.mux.HandleFunc("DELETE /v1/sc5000/mounts/{id}", s.handleMounts)
-	g.mux.HandleFunc("GET /v1/sc5000/automix", s.handleAutomix)
-	g.mux.HandleFunc("POST /v1/sc5000/automix", s.handleAutomix)
-	g.mux.HandleFunc("POST /v1/sc5000/sampler/loop-to-pad", s.handleSamplerLoopToPad)
-	g.mux.HandleFunc("GET /v1/sc5000/usb-audio", s.handleUSBAudio)
-	g.mux.HandleFunc("POST /v1/sc5000/usb-audio", s.handleUSBAudio)
-	g.mux.HandleFunc("GET /v1/sc5000/stems/source", g.stemsSource)
-	g.mux.HandleFunc("GET /v1/sc5000/stems/local", g.stemsLocal)
-	g.mux.HandleFunc("GET /v1/sc5000/stems/track-id", g.stemsTrackID)
-	g.mux.HandleFunc("GET /v1/sc5000/relay", s.relayConfigGet)
-	g.mux.HandleFunc("POST /v1/sc5000/relay", s.relayConfigPost)
-	g.mux.HandleFunc("GET /v1/sc5000/prolink", s.prolinkGet)
-	g.mux.HandleFunc("GET /v1/sc5000/prolink/diag", s.prolinkDiagGet)
-	g.mux.HandleFunc("POST /v1/sc5000/prolink", s.prolinkPost)
-	g.mux.HandleFunc("POST /v1/sc5000/decks", s.decksPost)
-	g.mux.HandleFunc("POST /v1/sc5000/decks/alive", s.decksAlive)
-	g.mux.HandleFunc("GET /v1/sc5000/clock", s.deckClockGet)
-	g.mux.HandleFunc("POST /v1/sc5000/clock", s.deckClockPost)
-	g.mux.HandleFunc("GET /v1/sc5000/shadow", s.shadowGet)
-	g.mux.HandleFunc("GET /v1/sc5000/shadow/display", s.shadowDisplayGet)
-	g.mux.HandleFunc("GET /v1/sc5000/shadow/waveform.png", s.shadowWaveformGet)
-	g.mux.HandleFunc("GET /v1/sc5000/shadow/artwork", s.shadowArtworkGet)
-	g.mux.HandleFunc("GET /v1/sc5000/debug/shadow", s.shadowDebugGet)
-	g.mux.HandleFunc("POST /v1/sc5000/debug/shadow", s.shadowDebugPost)
-	g.mux.HandleFunc("GET /v1/sc5000/broadcast", s.broadcastGet)
-	g.mux.HandleFunc("POST /v1/sc5000/broadcast", s.broadcastPost)
-	g.mux.HandleFunc("POST /v1/sc5000/broadcast/metadata", s.broadcastMetadataPost)
+	g.mux.HandleFunc("GET /v1/enginex/unlock-gen2", s.handleUnlockGen2)
+	g.mux.HandleFunc("POST /v1/enginex/unlock-gen2", s.handleUnlockGen2)
+	g.mux.HandleFunc("POST /v1/enginex/uninstall-gen2", s.handleUninstallGen2)
+	g.mux.HandleFunc("GET /v1/enginex/tailscale", s.handleTailscale)
+	g.mux.HandleFunc("POST /v1/enginex/tailscale", s.handleTailscale)
+	g.mux.HandleFunc("GET /v1/enginex/mounts", s.handleMounts)
+	g.mux.HandleFunc("POST /v1/enginex/mounts", s.handleMounts)
+	g.mux.HandleFunc("DELETE /v1/enginex/mounts", s.handleMounts)
+	g.mux.HandleFunc("DELETE /v1/enginex/mounts/{id}", s.handleMounts)
+	g.mux.HandleFunc("GET /v1/enginex/automix", s.handleAutomix)
+	g.mux.HandleFunc("POST /v1/enginex/automix", s.handleAutomix)
+	g.mux.HandleFunc("POST /v1/enginex/sampler/loop-to-pad", s.handleSamplerLoopToPad)
+	g.mux.HandleFunc("GET /v1/enginex/usb-audio", s.handleUSBAudio)
+	g.mux.HandleFunc("POST /v1/enginex/usb-audio", s.handleUSBAudio)
+	g.mux.HandleFunc("GET /v1/enginex/stems/source", g.stemsSource)
+	g.mux.HandleFunc("GET /v1/enginex/stems/local", g.stemsLocal)
+	g.mux.HandleFunc("GET /v1/enginex/stems/track-id", g.stemsTrackID)
+	g.mux.HandleFunc("GET /v1/enginex/relay", s.relayConfigGet)
+	g.mux.HandleFunc("POST /v1/enginex/relay", s.relayConfigPost)
+	g.mux.HandleFunc("GET /v1/enginex/prolink", s.prolinkGet)
+	g.mux.HandleFunc("GET /v1/enginex/prolink/diag", s.prolinkDiagGet)
+	g.mux.HandleFunc("POST /v1/enginex/prolink", s.prolinkPost)
+	g.mux.HandleFunc("POST /v1/enginex/decks", s.decksPost)
+	g.mux.HandleFunc("POST /v1/enginex/decks/alive", s.decksAlive)
+	g.mux.HandleFunc("GET /v1/enginex/clock", s.deckClockGet)
+	g.mux.HandleFunc("POST /v1/enginex/clock", s.deckClockPost)
+	g.mux.HandleFunc("GET /v1/enginex/shadow", s.shadowGet)
+	g.mux.HandleFunc("GET /v1/enginex/shadow/display", s.shadowDisplayGet)
+	g.mux.HandleFunc("GET /v1/enginex/shadow/waveform.png", s.shadowWaveformGet)
+	g.mux.HandleFunc("GET /v1/enginex/shadow/artwork", s.shadowArtworkGet)
+	g.mux.HandleFunc("GET /v1/enginex/debug/shadow", s.shadowDebugGet)
+	g.mux.HandleFunc("POST /v1/enginex/debug/shadow", s.shadowDebugPost)
+	g.mux.HandleFunc("GET /v1/enginex/broadcast", s.broadcastGet)
+	g.mux.HandleFunc("POST /v1/enginex/broadcast", s.broadcastPost)
+	g.mux.HandleFunc("POST /v1/enginex/broadcast/metadata", s.broadcastMetadataPost)
 	g.mux.HandleFunc("GET /v1/ping", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("OK")) })
 	g.mux.HandleFunc("GET /v1/sessions", g.session)
 	g.mux.HandleFunc("GET /v1/users/{id}/subscription", g.subscription)
@@ -451,13 +451,14 @@ func tidalNumericID(name string) uint32 { return crc32.ChecksumIEEE([]byte(name)
 
 func isTidal(p string) bool { return strings.HasPrefix(p, "/v1/") || strings.HasPrefix(p, "/au/") }
 
-// canonicalV1 maps /v1/enginex/..., the deck API under the product's name, onto the
-// /v1/sc5000/... routes. Both prefixes reach the same handlers behind the same rules (the
-// loopback check above runs first); /v1/sc5000/ stays for good, since older installers, UI
-// packs and users' scripts call it. One mapping here, not a second copy of each route.
+// canonicalV1 maps /v1/sc5000/..., the deck API's name before 5.3.0.5 (#234), onto the
+// /v1/enginex/... routes. Both prefixes reach the same handlers behind the same rules (the
+// loopback check above runs first); /v1/sc5000/ stays for good, since installers, UI packs,
+// Mods and users' scripts of any release call it. One mapping here, not a second copy of
+// each route.
 func canonicalV1(p string) string {
-	if rest, ok := strings.CutPrefix(p, "/v1/enginex"); ok && (rest == "" || rest[0] == '/') {
-		return "/v1/sc5000" + rest
+	if rest, ok := strings.CutPrefix(p, "/v1/sc5000"); ok && (rest == "" || rest[0] == '/') {
+		return "/v1/enginex" + rest
 	}
 	return p
 }
@@ -499,7 +500,7 @@ func (g *tidalGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			log.Printf("stream-sync: load track=%d scope=%s step=request local=%t", id, g.s.scope(), localTrack)
 		}
 	}
-	if !strings.HasPrefix(clean, "/v1/sc5000/") && !strings.HasPrefix(clean, "/v1/stream/") {
+	if !strings.HasPrefix(clean, "/v1/enginex/") && !strings.HasPrefix(clean, "/v1/stream/") {
 		// Clone before changing headers or form bodies used by Engine.
 		r = r.Clone(r.Context())
 		form, err := g.captureAuth(r, clean)
@@ -534,13 +535,13 @@ func (g *tidalGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	g.mux.ServeHTTP(w, r2)
 }
 func (g *tidalGateway) deviceAuthorization(w http.ResponseWriter, r *http.Request) {
-	respond(w, map[string]any{"deviceCode": "sc5000-local", "userCode": "SC5000", "verificationUri": lanHost() + ":8080", "verificationUriComplete": "http://" + lanHost() + ":8080", "expiresIn": 600, "interval": 1})
+	respond(w, map[string]any{"deviceCode": "enginex-local", "userCode": "ENGINEX", "verificationUri": lanHost() + ":8080", "verificationUriComplete": "http://" + lanHost() + ":8080", "expiresIn": 600, "interval": 1})
 }
 func (g *tidalGateway) token(w http.ResponseWriter, r *http.Request) {
 	respond(w, map[string]any{"access_token": "sc5000-token", "refresh_token": "sc5000-refresh", "token_type": "Bearer", "expires_in": 86400, "user": map[string]any{"userId": 1, "countryCode": "US"}})
 }
 func (g *tidalGateway) session(w http.ResponseWriter, r *http.Request) {
-	respond(w, map[string]any{"sessionId": "sc5000-session", "userId": 1, "countryCode": "US"})
+	respond(w, map[string]any{"sessionId": "enginex-session", "userId": 1, "countryCode": "US"})
 }
 func (g *tidalGateway) subscription(w http.ResponseWriter, r *http.Request) {
 	respond(w, map[string]any{"status": "ACTIVE", "subscription": map[string]any{"type": "PREMIUM_PLUS"}, "highestSoundQuality": "LOSSLESS"})
@@ -875,7 +876,7 @@ func httpsCover(t *providers.Track) {
 func tidalTime(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000-0700") }
 func playlistJSON(id, title, description string, count int) map[string]any {
 	now := tidalTime(time.Now())
-	return map[string]any{"uuid": id, "title": title, "numberOfTracks": count, "numberOfVideos": 0, "description": description, "duration": 0, "lastUpdated": now, "created": now, "type": "USER", "publicPlaylist": false, "url": "http://sc5000.lan:8080", "image": "", "squareImage": "", "popularity": 0}
+	return map[string]any{"uuid": id, "title": title, "numberOfTracks": count, "numberOfVideos": 0, "description": description, "duration": 0, "lastUpdated": now, "created": now, "type": "USER", "publicPlaylist": false, "url": "http://enginex.lan:8080", "image": "", "squareImage": "", "popularity": 0}
 }
 func (g *tidalGateway) refJSON(id string, ref playlistRef) map[string]any {
 	label := providerLabels[ref.provider]
@@ -992,7 +993,7 @@ func (g *tidalGateway) trackJSON(id int64, t providers.Track) map[string]any {
 	if len(artists) > 0 {
 		artist = artists[0]
 	}
-	return map[string]any{"id": id, "title": t.Title, "bpm": int(math.Round(t.BPM)), "duration": t.DurationMS / 1000, "replayGain": 0, "peak": 1, "allowStreaming": true, "streamReady": true, "premiumStreamingOnly": false, "trackNumber": 1, "volumeNumber": 1, "version": nil, "popularity": 0, "copyright": labelWithBPM(t), "url": "http://sc5000.lan:8080", "isrc": t.ISRC, "editable": false, "explicit": false, "audioQuality": "LOSSLESS", "audioModes": []string{"STEREO"}, "artist": artist, "artists": artists, "album": map[string]any{"id": tidalNumericID(t.Album), "title": t.Album, "cover": nil, "vibrantColor": nil, "videoCover": nil}, "mixes": map[string]any{}}
+	return map[string]any{"id": id, "title": t.Title, "bpm": int(math.Round(t.BPM)), "duration": t.DurationMS / 1000, "replayGain": 0, "peak": 1, "allowStreaming": true, "streamReady": true, "premiumStreamingOnly": false, "trackNumber": 1, "volumeNumber": 1, "version": nil, "popularity": 0, "copyright": labelWithBPM(t), "url": "http://enginex.lan:8080", "isrc": t.ISRC, "editable": false, "explicit": false, "audioQuality": "LOSSLESS", "audioModes": []string{"STEREO"}, "artist": artist, "artists": artists, "album": map[string]any{"id": tidalNumericID(t.Album), "title": t.Album, "cover": nil, "vibrantColor": nil, "videoCover": nil}, "mixes": map[string]any{}}
 }
 
 // trackItems wraps each track as {"item":…,"type":"track"} (playlist items and
@@ -1404,7 +1405,7 @@ func (g *tidalGateway) favoriteAlbums(w http.ResponseWriter, r *http.Request) {
 			if len(names) > 0 {
 				main = names[0]
 			}
-			v := map[string]any{"id": a.ID, "title": a.Name, "numberOfTracks": a.Size, "numberOfVideos": 0, "numberOfVolumes": 1, "duration": 0, "releaseDate": "2000-01-01", "streamStartDate": "2000-01-01T00:00:00.000+0000", "cover": nil, "streamReady": true, "allowStreaming": true, "premiumStreamingOnly": false, "copyright": providerLabels["netease"], "explicit": false, "popularity": 0, "audioQuality": "LOSSLESS", "audioModes": []string{"STEREO"}, "type": "ALBUM", "url": "http://sc5000.lan:8080", "artist": main, "artists": names}
+			v := map[string]any{"id": a.ID, "title": a.Name, "numberOfTracks": a.Size, "numberOfVideos": 0, "numberOfVolumes": 1, "duration": 0, "releaseDate": "2000-01-01", "streamStartDate": "2000-01-01T00:00:00.000+0000", "cover": nil, "streamReady": true, "allowStreaming": true, "premiumStreamingOnly": false, "copyright": providerLabels["netease"], "explicit": false, "popularity": 0, "audioQuality": "LOSSLESS", "audioModes": []string{"STEREO"}, "type": "ALBUM", "url": "http://enginex.lan:8080", "artist": main, "artists": names}
 			flat := map[string]any{"item": v, "created": tidalTime(time.Now())}
 			for k, f := range v {
 				flat[k] = f

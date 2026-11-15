@@ -302,7 +302,7 @@ func TestShadowLegacyCoverReadsDisplayHead(t *testing.T) {
 	}
 	source("A")
 	var state struct{ Decks []deckState }
-	resp, err := http.Get(srv.URL + "/v1/sc5000/shadow")
+	resp, err := http.Get(srv.URL + "/v1/enginex/shadow")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -317,7 +317,7 @@ func TestShadowLegacyCoverReadsDisplayHead(t *testing.T) {
 		DetailPending                      bool
 	}
 	for deadline := time.Now().Add(3 * time.Second); ; time.Sleep(5 * time.Millisecond) {
-		resp, err := http.Get(srv.URL + "/v1/sc5000/shadow/display" + q)
+		resp, err := http.Get(srv.URL + "/v1/enginex/shadow/display" + q)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -334,7 +334,7 @@ func TestShadowLegacyCoverReadsDisplayHead(t *testing.T) {
 	if meta.Title != "Source title" || meta.Artist != "Source artist" || meta.KeyName != "8A" || meta.ArtworkURL == "" || meta.DetailPending {
 		t.Fatalf("cover data: %+v", meta)
 	}
-	for _, path := range []string{"/v1/sc5000/shadow/artwork" + q, "/v1/sc5000/shadow/waveform.png" + q + "&overview=1"} {
+	for _, path := range []string{"/v1/enginex/shadow/artwork" + q, "/v1/enginex/shadow/waveform.png" + q + "&overview=1"} {
 		resp, err := http.Get(srv.URL + path)
 		if err != nil {
 			t.Fatal(err)
@@ -344,7 +344,7 @@ func TestShadowLegacyCoverReadsDisplayHead(t *testing.T) {
 			t.Fatalf("%s: %d", path, resp.StatusCode)
 		}
 	}
-	if resp, _ := http.Get(srv.URL + "/v1/sc5000/shadow/display?deck=1&key=other"); resp.StatusCode != 404 {
+	if resp, _ := http.Get(srv.URL + "/v1/enginex/shadow/display?deck=1&key=other"); resp.StatusCode != 404 {
 		t.Fatal("another track's key accepted")
 	}
 	peer.mu.Lock()
@@ -382,7 +382,7 @@ func TestShadowDisplayDetailProgress(t *testing.T) {
 		s.shadow.display.mu.Lock()
 		s.shadow.display.entries = map[string]*shadowDisplayEntry{id: {asset: a, at: time.Now(), retry: time.Now().Add(time.Hour)}}
 		s.shadow.display.mu.Unlock()
-		r, err := http.Get(srv.URL + "/v1/sc5000/shadow")
+		r, err := http.Get(srv.URL + "/v1/enginex/shadow")
 		if err != nil {
 			t.Fatal(err)
 		}

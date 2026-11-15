@@ -99,6 +99,7 @@ func collectCertSANs() ([]string, []net.IP) {
 		}
 	}
 	addDNS("enginex.local")
+	addDNS("enginex.lan")
 	addDNS("sc5000.lan")
 
 	addIP(net.ParseIP("127.0.0.1"))

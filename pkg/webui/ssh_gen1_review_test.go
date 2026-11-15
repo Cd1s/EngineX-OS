@@ -22,18 +22,18 @@ func TestSSHGen1PortGoesToRunOnAReadOnlyEtc(t *testing.T) {
 		t.Fatal(err)
 	}
 	savedEtc, savedRun := gen1SSHDropInPath, gen1SSHRunDropInPath
-	gen1SSHDropInPath = filepath.Join(dir, "etc", "systemd", "system", "sc5000-custom-sshd.service.d", "51-port.conf")
-	gen1SSHRunDropInPath = filepath.Join(dir, "run", "systemd", "system", "sc5000-custom-sshd.service.d", "51-port.conf")
+	gen1SSHDropInPath = filepath.Join(dir, "etc", "systemd", "system", "enginex-sshd.service.d", "51-port.conf")
+	gen1SSHRunDropInPath = filepath.Join(dir, "run", "systemd", "system", "enginex-sshd.service.d", "51-port.conf")
 	defer func() { gen1SSHDropInPath, gen1SSHRunDropInPath = savedEtc, savedRun }()
 	s := New(Config{StateDir: t.TempDir(), UIDir: t.TempDir()}, nil)
 	if w := sshCall(s, http.MethodPost, `{"port":2222}`); w.Code != http.StatusOK {
 		t.Fatalf("%d %s", w.Code, w.Body.String())
 	}
 	b, err := os.ReadFile(gen1SSHRunDropInPath)
-	if err != nil || !strings.Contains(string(b), "-f /usr/share/sc5000-custom/sshd_config -p 2222") {
+	if err != nil || !strings.Contains(string(b), "-f /usr/share/enginex/sshd_config -p 2222") {
 		t.Fatalf("no /run port drop-in on a read-only /etc: %v %q", err, b)
 	}
-	if !u.ran("systemctl daemon-reload") || !u.ran("systemctl restart sc5000-custom-sshd") {
+	if !u.ran("systemctl daemon-reload") || !u.ran("systemctl restart enginex-sshd") {
 		t.Fatalf("the new port was not applied: %q", u.cmds)
 	}
 }
@@ -52,21 +52,21 @@ func TestSSHGen1SettingsSurviveAReboot(t *testing.T) {
 	if w := sshCall(s, http.MethodPost, `{"enabled":false}`); w.Code != http.StatusOK {
 		t.Fatalf("%d %s", w.Code, w.Body.String())
 	}
-	if !u.ran("systemctl stop sc5000-custom-sshd") || !u.ran("systemctl mask --runtime sc5000-custom-sshd") {
+	if !u.ran("systemctl stop enginex-sshd") || !u.ran("systemctl mask --runtime enginex-sshd") {
 		t.Fatalf("off: %q", u.cmds)
 	}
 	// The boot: /run is empty again and the unit was started on port 22.
 	os.RemoveAll(filepath.Dir(gen1SSHRunDropInPath))
 	u.cmds = nil
 	New(Config{StateDir: state, UIDir: t.TempDir()}, nil).RestoreSSH(context.Background())
-	if !u.ran("systemctl stop sc5000-custom-sshd") || !u.ran("systemctl mask --runtime sc5000-custom-sshd") {
+	if !u.ran("systemctl stop enginex-sshd") || !u.ran("systemctl mask --runtime enginex-sshd") {
 		t.Fatalf("off was not restored after a boot: %q", u.cmds)
 	}
 	// On again, on port 2200: after a boot the port comes back.
 	if w := sshCall(s, http.MethodPost, `{"enabled":true,"port":2200}`); w.Code != http.StatusOK {
 		t.Fatalf("%d %s", w.Code, w.Body.String())
 	}
-	if !u.ran("systemctl unmask --runtime sc5000-custom-sshd") {
+	if !u.ran("systemctl unmask --runtime enginex-sshd") {
 		t.Fatalf("on did not lift the runtime mask: %q", u.cmds)
 	}
 	os.Remove(gen1SSHDropInPath)
@@ -77,7 +77,7 @@ func TestSSHGen1SettingsSurviveAReboot(t *testing.T) {
 	if err != nil {
 		b, err = os.ReadFile(gen1SSHRunDropInPath)
 	}
-	if err != nil || !strings.Contains(string(b), "-p 2200") || !u.ran("systemctl restart sc5000-custom-sshd") {
+	if err != nil || !strings.Contains(string(b), "-p 2200") || !u.ran("systemctl restart enginex-sshd") {
 		t.Fatalf("the port was not restored after a boot: %v %q %q", err, b, u.cmds)
 	}
 	// Without saved settings a boot changes nothing (#46, #116).

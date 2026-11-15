@@ -17,8 +17,9 @@ import (
 
 // Services never include engine, rb-bridge, network, audio, Pro DJ Link or the
 // WebUI host. stream-sync also hosts control/bridge functionality, so pausing it
-// is unsafe. 1st-gen / 2nd-gen unit names.
-var Services = []string{"sc5000-deemixd.service", "enginex-sc5000-deemixd.service"}
+// is unsafe. The deemixd unit of 5.3.0.5 and later on both generations, then the 1st-gen /
+// 2nd-gen names of earlier releases (#234): a mod runs on any release.
+var Services = []string{"enginex-deemixd.service", "sc5000-deemixd.service", "enginex-sc5000-deemixd.service"}
 
 // Systemctl runs systemctl; tests replace it.
 var Systemctl = func(args ...string) (stdout, stderr string, code int) {
@@ -152,6 +153,7 @@ func (f *feature) Action(req map[string]any) (any, error) {
 		}
 		failed := []string{}
 		for _, unit := range pending {
+			unit = installedUnit(unit)
 			if _, _, code := Systemctl("start", unit); code != 0 || !isActive(unit) {
 				failed = append(failed, unit)
 			}
@@ -174,6 +176,20 @@ func (f *feature) Action(req map[string]any) (any, error) {
 
 // Close persists nothing: restarting the helper must not resume downloads.
 func (f *feature) Close() {}
+
+// installedUnit is the name the downloader a pause saved has on this release (#234): each
+// Services entry is the same deemixd under the name of one release and generation, and a pause
+// saved before an update or a downgrade is undone after it. The saved name when it is loaded,
+// else the one of this release; the saved name when none is (the start then reports it).
+func installedUnit(saved string) string {
+	for _, unit := range append([]string{saved}, Services...) {
+		out, _, code := Systemctl("show", unit, "--property=LoadState", "--value")
+		if code == 0 && strings.TrimSpace(out) == "loaded" {
+			return unit
+		}
+	}
+	return saved
+}
 
 func isActive(unit string) bool {
 	_, _, code := Systemctl("is-active", unit)

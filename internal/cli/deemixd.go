@@ -25,7 +25,7 @@ var (
 	deemixdPausedFlag = "/data/enginex/mods-state/minimal-club-mode/paused.json"
 )
 
-// sameDeemixd reports whether base names the address sc5000-deemixd binds.
+// sameDeemixd reports whether base names the address enginex-deemixd binds.
 func sameDeemixd(base string) bool {
 	u, err := url.Parse(base)
 	return err == nil && u.Scheme == "http" && (u.Host == deemixdAddr || u.Host == "localhost:6595")
@@ -65,7 +65,7 @@ func superviseDeemixd(ctx context.Context, addr, bin string, args ...string) {
 					return
 				}
 				if listening(addr) {
-					// systemd's sc5000-deemixd bound 127.0.0.1:6595 while this child started (#159).
+					// systemd's enginex-deemixd bound 127.0.0.1:6595 while this child started (#159).
 					backoff = deemixdPause
 					wait = deemixdPause
 				} else {
@@ -76,7 +76,7 @@ func superviseDeemixd(ctx context.Context, addr, bin string, args ...string) {
 						backoff = deemixdMaxBackoff
 					}
 					wait = backoff
-					log.Printf("stream-sync: sc5000-deemixd exited (%v); checking again in %s", err, wait)
+					log.Printf("stream-sync: enginex-deemixd exited (%v); checking again in %s", err, wait)
 				}
 			}
 		}
@@ -97,6 +97,6 @@ func runDeemixd(ctx context.Context, bin string, args []string) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	log.Printf("stream-sync: started sc5000-deemixd (pid %d)", cmd.Process.Pid)
+	log.Printf("stream-sync: started enginex-deemixd (pid %d)", cmd.Process.Pid)
 	return cmd.Wait()
 }

@@ -22,7 +22,7 @@ func standalone(t *testing.T, cfg Config, provider string) (*Server, *httptest.S
 	ui := New(cfg, nil)
 	srv := httptest.NewServer(ui)
 	t.Cleanup(srv.Close)
-	resp, err := http.Post(srv.URL+"/v1/sc5000/login?provider="+provider, "", nil)
+	resp, err := http.Post(srv.URL+"/v1/enginex/login?provider="+provider, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +98,7 @@ func TestConsoleStatusLoopbackOnly(t *testing.T) {
 		status  int
 		hasCode bool
 	}{{"127.0.0.1:1234", 200, true}, {"192.0.2.1:1234", 403, false}} {
-		r := httptest.NewRequest("GET", "/v1/sc5000/ui", nil)
+		r := httptest.NewRequest("GET", "/v1/enginex/ui", nil)
 		r.RemoteAddr = tc.addr
 		w := httptest.NewRecorder()
 		ui.ServeHTTP(w, r)
@@ -106,7 +106,7 @@ func TestConsoleStatusLoopbackOnly(t *testing.T) {
 			t.Fatalf("status %d: %s", w.Code, w.Body.String())
 		}
 	}
-	r := httptest.NewRequest("GET", "/v1/sc5000/ui", nil)
+	r := httptest.NewRequest("GET", "/v1/enginex/ui", nil)
 	r.RemoteAddr = "127.0.0.1:1"
 	w0 := httptest.NewRecorder()
 	ui.ServeHTTP(w0, r)
@@ -147,7 +147,7 @@ func TestPhonePagesDefaultToEnglishAndSwitchLanguage(t *testing.T) {
 	ui := New(Config{AccessToken: "c", UIDir: dir, StateDir: t.TempDir()}, nil)
 	srv := httptest.NewServer(ui)
 	defer srv.Close()
-	postPage(t, srv.URL+"/v1/sc5000/login?provider=deezer", nil)
+	postPage(t, srv.URL+"/v1/enginex/login?provider=deezer", nil)
 	if !strings.Contains(ui.logins["deezer"].Target, "lang=zh-Hant") {
 		t.Fatalf("QR code ignores the deck's language: %s", ui.logins["deezer"].Target)
 	}
@@ -208,7 +208,7 @@ func TestSoundCloudUsernameAloneOnAStandaloneDeck(t *testing.T) {
 	if p := ui.ownerSoundCloud(); p.UserID != 7 || p.ClientID != "" {
 		t.Fatalf("owner %+v", p)
 	}
-	if s := getPage(t, srv.URL+"/v1/sc5000/login?provider=soundcloud"); !strings.Contains(s, `"status":"done"`) {
+	if s := getPage(t, srv.URL+"/v1/enginex/login?provider=soundcloud"); !strings.Contains(s, `"status":"done"`) {
 		t.Fatalf("deck status %s", s)
 	}
 }

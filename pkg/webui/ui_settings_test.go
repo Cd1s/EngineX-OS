@@ -18,7 +18,7 @@ import (
 
 func uiPost(t *testing.T, base, query string) (int, uiSettings) {
 	t.Helper()
-	resp, err := http.Post(base+"/v1/sc5000/ui?"+query, "", nil)
+	resp, err := http.Post(base+"/v1/enginex/ui?"+query, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ func TestUISettingsRejectBadValues(t *testing.T) {
 func TestUISettingsConsoleNeedsLoginAndRemoteGatewayIsRefused(t *testing.T) {
 	ui := New(Config{AccessToken: "code", UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("POST", "/v1/sc5000/ui?lang=en&restart=1", nil)
+	r := httptest.NewRequest("POST", "/v1/enginex/ui?lang=en&restart=1", nil)
 	r.RemoteAddr = "192.0.2.10:4000"
 	ui.ServeHTTP(w, r)
 	if w.Code != 403 {
@@ -471,7 +471,7 @@ func TestFourDeckRole(t *testing.T) {
 	}
 	// The UI locks loading by the role the guard applied (auto resolved), with 4 decks on.
 	fourDeckRolePath = filepath.Join(t.TempDir(), "role")
-	defer func() { fourDeckRolePath = "/run/sc5000-assignments/role" }()
+	defer func() { fourDeckRolePath = "/run/enginex-assignments/role" }()
 	os.WriteFile(fourDeckRolePath, []byte("13\n"), 0o644)
 	if _, v := uiPost(t, srv.URL, "fourDeckWaveform=1"); v.FourDeckRoleActive != "13" {
 		t.Fatalf("active role: %q", v.FourDeckRoleActive)
@@ -501,7 +501,7 @@ func TestUIScale(t *testing.T) {
 	if code, v := uiPost(t, srv.URL, "uiScale=75"); code != 200 || v.UIScale != 75 {
 		t.Fatalf("scale 75: %d %d", code, v.UIScale)
 	}
-	if b, _ := os.ReadFile(uiScaleEnvPath); string(b) != "SC5000_UI_SCALE=0.75\n" {
+	if b, _ := os.ReadFile(uiScaleEnvPath); string(b) != "ENGINEX_UI_SCALE=0.75\nSC5000_UI_SCALE=0.75\n" {
 		t.Fatalf("env file: %q", b)
 	}
 	if c, _ := os.ReadFile(filepath.Join(dir, "settings.conf")); !strings.Contains(string(c), "ui_scale=75\n") {
@@ -510,7 +510,7 @@ func TestUIScale(t *testing.T) {
 	if code, v := uiPost(t, srv.URL, "uiScale=105"); code != 200 || v.UIScale != 105 {
 		t.Fatalf("scale 105: %d %d", code, v.UIScale)
 	}
-	if b, _ := os.ReadFile(uiScaleEnvPath); string(b) != "SC5000_UI_SCALE=1.05\n" {
+	if b, _ := os.ReadFile(uiScaleEnvPath); string(b) != "ENGINEX_UI_SCALE=1.05\nSC5000_UI_SCALE=1.05\n" {
 		t.Fatalf("env file: %q", b)
 	}
 	if c, _ := os.ReadFile(filepath.Join(dir, "settings.conf")); !strings.Contains(string(c), "ui_scale=105\n") {
@@ -519,7 +519,7 @@ func TestUIScale(t *testing.T) {
 	if code, v := uiPost(t, srv.URL, "uiScale=110"); code != 200 || v.UIScale != 110 {
 		t.Fatalf("scale 110: %d %d", code, v.UIScale)
 	}
-	if b, _ := os.ReadFile(uiScaleEnvPath); string(b) != "SC5000_UI_SCALE=1.1\n" {
+	if b, _ := os.ReadFile(uiScaleEnvPath); string(b) != "ENGINEX_UI_SCALE=1.1\nSC5000_UI_SCALE=1.1\n" {
 		t.Fatalf("env file: %q", b)
 	}
 	if c, _ := os.ReadFile(filepath.Join(dir, "settings.conf")); !strings.Contains(string(c), "ui_scale=110\n") {
@@ -534,7 +534,7 @@ func TestUIScale(t *testing.T) {
 	// A server started over reads the saved scale back from disk.
 	srv2 := httptest.NewServer(New(Config{UIDir: dir, StateDir: t.TempDir()}, nil))
 	defer srv2.Close()
-	resp, err := http.Get(srv2.URL + "/v1/sc5000/ui")
+	resp, err := http.Get(srv2.URL + "/v1/enginex/ui")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -726,7 +726,7 @@ func TestUIStatusDigestFollowsTheBody(t *testing.T) {
 	defer srv.Close()
 	get := func() (string, string) {
 		t.Helper()
-		r, err := http.Get(srv.URL + "/v1/sc5000/ui")
+		r, err := http.Get(srv.URL + "/v1/enginex/ui")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1023,7 +1023,7 @@ func TestEngineLightingDefaultOffAndPersistence(t *testing.T) {
 		if got, ok := loaded["engineLighting"]; !ok || got != want {
 			t.Errorf("loadUI engineLighting: got %v (present=%v), want %v", got, ok, want)
 		}
-		resp, err := http.Get(srv.URL + "/v1/sc5000/ui")
+		resp, err := http.Get(srv.URL + "/v1/enginex/ui")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1050,7 +1050,7 @@ func TestEngineLightingDefaultOffAndPersistence(t *testing.T) {
 			t.Errorf("%s did not preserve engine_lighting=1", query)
 		}
 	}
-	resp, err := http.Post(srv.URL+"/v1/sc5000/ui", "application/json", strings.NewReader(`{"engineLighting":false}`))
+	resp, err := http.Post(srv.URL+"/v1/enginex/ui", "application/json", strings.NewReader(`{"engineLighting":false}`))
 	if err != nil {
 		t.Fatal(err)
 	}

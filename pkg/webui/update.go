@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -18,6 +19,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Cd1s/EngineX-OS/internal/leave"
+	"github.com/Cd1s/EngineX-OS/internal/release"
 	"github.com/Cd1s/EngineX-OS/internal/releasesig"
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
 )
@@ -48,8 +51,11 @@ const (
 const bundleInstallPeak = 2 * bundleMaxUnpack
 
 var (
+	// versionFile: a second-generation deck whose bundle predates 5.3.0.3 still has the real
+	// /data/sc5000-custom (#103).
 	versionFile = "/data/sc5000-custom/version.txt"
-	// imageVersionFile is written by az01_packer.py patch-rootfs --set-version.
+	// imageVersionFile is where images before 5.3.0.5 keep the version az01_packer.py
+	// patch-rootfs --set-version writes (/etc/sc5000; newImageDir since, #234).
 	imageVersionFile      = "/etc/sc5000/version.txt"
 	bundleCustomDir       = realDeckCustomDir
 	legacyBundleCustomDir = realLegacyCustomDir
@@ -83,7 +89,7 @@ func currentVersion(path string) string {
 	return "dev"
 }
 
-// update answers GET /v1/sc5000/update with the newest release of the repo.
+// update answers GET /v1/enginex/update with the newest release of the repo.
 func (s *Server) update(w http.ResponseWriter, r *http.Request) {
 	s.uiMu.Lock()
 	repo := s.loadUI().GitHubRepo
@@ -95,7 +101,7 @@ func (s *Server) update(w http.ResponseWriter, r *http.Request) {
 			// Detached: a deck page closing mid-check must not cache "unreachable" (#13).
 			s.updateCache = s.checkRelease(context.WithoutCancel(r.Context()), repo)
 		}
-		if strings.HasPrefix(r.URL.Path, "/v1/sc5000/update") && r.URL.Query().Get("apply") == "1" &&
+		if strings.HasPrefix(r.URL.Path, "/v1/enginex/update") && r.URL.Query().Get("apply") == "1" &&
 			s.updateCache.UpdateAvailable && s.updateCache.DownloadURL != "" {
 			s.updateCache.Updating = true
 			s.updateCache.Progress = 0.05
@@ -355,8 +361,8 @@ func (s *Server) installedVersion() string {
 		return currentVersion(s.cfg.VersionFile)
 	}
 	current := "dev"
-	// The newest installed runtime or flashed image release (#13, #218); a later release
-	// keeps its image version in /etc/enginex (rename compatibility).
+	// The newest installed runtime or flashed image release (#13, #218); the image's version is
+	// in /etc/enginex since 5.3.0.5, in /etc/sc5000 before (#234).
 	for _, p := range []string{filepath.Join(s.customDir(), "version.txt"), versionFile, filepath.Join(newImageDir, "version.txt"), imageVersionFile} {
 		if v := currentVersion(p); v != "dev" && (current == "dev" || releasesig.NewerVersion(v, current)) {
 			current = v
@@ -365,13 +371,11 @@ func (s *Server) installedVersion() string {
 	return current
 }
 
-// imageReleaseTagFile is the first-generation image's release tag.
+// imageReleaseTagFile is the release tag of a first-generation image before 5.3.0.5.
 var imageReleaseTagFile = "/etc/sc5000/" + releaseTagName
 
-// newImageDir is where releases after 5.3.0.4 keep version.txt and release-tag
-// (they say enginex where this one says sc5000). This release writes neither, but
-// it is the one that updates to them and the one users roll back to, so it reads
-// the new directory first wherever it reads the old one.
+// newImageDir is where first-generation images keep version.txt and release-tag since
+// 5.3.0.5 (#234); /etc/sc5000 is a link to it there. Read first, then the old directory.
 var newImageDir = "/etc/enginex"
 
 // installedRelease is what a release tag is compared with: the tag baked into the
@@ -537,7 +541,7 @@ func (s *Server) customDir() string {
 
 // isGen2Unlocked reports whether the *-Update.img upgrade path is open (#119, #215):
 // true whenever gen2-locked is absent and either customDir is the deck's /data runtime dir
-// or gen2-unlocked exists, keeping GET /v1/sc5000/unlock-gen2 consistent with checkRelease.
+// or gen2-unlocked exists, keeping GET /v1/enginex/unlock-gen2 consistent with checkRelease.
 func (s *Server) isGen2Unlocked() bool {
 	if s.isGen2Locked() {
 		return false
@@ -613,23 +617,37 @@ func (s *Server) installDataBundleReader(r io.Reader, work string) {
 		return
 	}
 	s.setUpdateProgress(0.90, "", false)
-	cmd := exec.Command("sh", filepath.Join(top, "install.sh"))
-	cmd.Env = os.Environ()
-	if !isDeckDataDir(customDir) { // sandbox / test: no /data to write the runtime dir or ALSA file to
-		// Both names: the install.sh of a later release reads ENGINEX_*.
-		alsa := filepath.Join(customDir, "alsa-conf.d")
-		cmd.Env = append(cmd.Env,
-			"SC5000_CUSTOM="+customDir, "ENGINEX_CUSTOM="+customDir,
-			"SC5000_ALSA_OVERLAY="+alsa, "ENGINEX_ALSA_OVERLAY="+alsa,
-		)
-	}
-	if out, err := cmd.CombinedOutput(); err != nil {
-		msg := strings.TrimSpace(string(out))
-		if msg == "" {
-			msg = err.Error()
+	// Decided before anything is written: an older release than the installed one is not
+	// activated in place (#234).
+	older := release.Older(s.installedVersion(), s.installedRelease(),
+		currentVersion(filepath.Join(top, "version.txt")), currentVersion(filepath.Join(top, releaseTagName)))
+	if older && activatesOnDeck(customDir) {
+		// The older release's install.sh never runs over /data (#234 review R1/R2): it fills a
+		// stage, and this release moves the result in with atomic swaps a power cut cannot
+		// break, handing a release before 5.3.0.3 its /data/sc5000-custom back (internal/leave).
+		if err := installOlder(top); err != nil {
+			fail("bundle install: " + err.Error())
+			return
 		}
-		fail("bundle install: " + msg)
-		return
+	} else {
+		cmd := exec.Command("sh", filepath.Join(top, "install.sh"))
+		cmd.Env = os.Environ()
+		if !isDeckDataDir(customDir) { // sandbox / test: no /data to write the runtime dir or ALSA file to
+			// Both names: the install.sh of a later release reads ENGINEX_*.
+			alsa := filepath.Join(customDir, "alsa-conf.d")
+			cmd.Env = append(cmd.Env,
+				"SC5000_CUSTOM="+customDir, "ENGINEX_CUSTOM="+customDir,
+				"SC5000_ALSA_OVERLAY="+alsa, "ENGINEX_ALSA_OVERLAY="+alsa,
+			)
+		}
+		if out, err := cmd.CombinedOutput(); err != nil {
+			msg := strings.TrimSpace(string(out))
+			if msg == "" {
+				msg = err.Error()
+			}
+			fail("bundle install: " + msg)
+			return
+		}
 	}
 	os.RemoveAll(work) // before reporting done: a client polling for Done must not see the scratch dir
 	customDir = s.customDir()
@@ -637,22 +655,8 @@ func (s *Server) installDataBundleReader(r io.Reader, work string) {
 	s.updateCache.Current = s.installedVersion()
 	s.updateCache.UpdateAvailable = false
 	s.updateMu.Unlock()
-	if isDeckDataDir(customDir) {
-		// Run boot-activate in a transient systemd service if available so killing
-		// stream-sync does not terminate the activation script along with stream-sync's cgroup.
-		script := `sleep 2; pkill -f '[s]c5000-suite (stream-sync|rb-bridge|sc5000-deemixd)'; sleep 1; exec sh ` + customDir + `/bundle/boot-activate.sh`
-		launched := false
-		if guardHostCommand("systemd-run") != nil {
-			log.Printf("stream-sync: %v", guardHostCommand("systemd-run"))
-		} else if _, err := exec.LookPath("systemd-run"); err == nil {
-			// systemd-run submits the transient unit to PID 1 and returns immediately.
-			if out, err := exec.Command("systemd-run", "--description=EngineX OTA Activation", "sh", "-c", script).CombinedOutput(); err == nil {
-				launched = true
-			} else {
-				log.Printf("stream-sync: systemd-run ota activation failed: %v (%s)", err, strings.TrimSpace(string(out)))
-			}
-		}
-		if launched {
+	if activatesOnDeck(customDir) {
+		if launchActivation(activationScript(customDir, older)) {
 			s.setUpdateProgress(1.0, "", true)
 		} else {
 			// systemd-run unavailable/failed: do not kill stream-sync in a shared cgroup.
@@ -663,6 +667,55 @@ func (s *Server) installDataBundleReader(r io.Reader, work string) {
 		s.setUpdateProgress(1.0, "", true)
 	}
 }
+
+// leaveScript is the leave step boot-activate.sh of 5.3.0.5 and later writes at every boot (#234).
+var leaveScript = "/run/enginex/leave.sh"
+
+// activationScript is what runs after a bundle went in: its boot-activate.sh in place, after
+// the daemons of this release (or, updated in place before, of one before 5.3.0.5) end, or, for
+// an older release than the installed one (#234, put in by installOlder), this release's leave
+// step: it takes its own units out of /run and reboots, and the older release starts clean. The
+// older one's boot-activate.sh never runs over this release's units, and no daemon runs twice.
+func activationScript(customDir string, older bool) string {
+	if older {
+		return `sleep 2; [ ! -f ` + leaveScript + ` ] || exec sh ` + leaveScript + `; sync; exec systemctl reboot`
+	}
+	return `sleep 2; pkill -f '[e]nginex-suite (stream-sync|rb-bridge|enginex-deemixd)|[s]c5000-suite (stream-sync|rb-bridge|sc5000-deemixd)'; sleep 1; exec sh ` +
+		customDir + `/bundle/boot-activate.sh`
+}
+
+var (
+	// installOlder puts an older release in on the deck (internal/leave); tests replace it.
+	installOlder = func(top string) error {
+		var out bytes.Buffer
+		if err := (leave.Deck{Stdout: &out, Stderr: &out}).Install(top); err != nil {
+			if msg := strings.TrimSpace(out.String()); msg != "" {
+				return fmt.Errorf("%w: %s", err, msg)
+			}
+			return err
+		}
+		return nil
+	}
+	// activatesOnDeck: only the deck's own /data install is activated; tests replace it.
+	activatesOnDeck = isDeckDataDir
+	// launchActivation runs script in a transient systemd service, so ending stream-sync does not
+	// end the activation along with stream-sync's cgroup; false when it could not. Tests replace it.
+	launchActivation = func(script string) bool {
+		if err := guardHostCommand("systemd-run"); err != nil {
+			log.Printf("stream-sync: %v", err)
+			return false
+		}
+		if _, err := exec.LookPath("systemd-run"); err != nil {
+			return false
+		}
+		// systemd-run submits the transient unit to PID 1 and returns immediately.
+		if out, err := exec.Command("systemd-run", "--description=EngineX OTA Activation", "sh", "-c", script).CombinedOutput(); err != nil {
+			log.Printf("stream-sync: systemd-run ota activation failed: %v (%s)", err, strings.TrimSpace(string(out)))
+			return false
+		}
+		return true
+	}
+)
 
 // downloadBundle fetches url into dest, at most bundleMaxDown bytes, and checks that its
 // SHA-256 is want (from the signed SHA256SUMS.txt); it returns an error message or "".

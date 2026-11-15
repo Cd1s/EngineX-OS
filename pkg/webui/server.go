@@ -153,7 +153,7 @@ func New(cfg Config, jobs *Jobs) *Server {
 	}
 	s := &Server{cfg: cfg, jobs: jobs, sessions: map[string]*Session{}, pending: map[string]pending{}, mux: http.NewServeMux(), ownerDeleted: map[string]bool{}, logins: map[string]*loginFlow{}, authFails: map[string]*authStrike{}}
 	s.shadow = newShadowState()
-	if cfg.StateDir == "/data/sc5000-custom/state" { // on the deck, not in tests
+	if isDeckStateDir(cfg.StateDir) { // on the deck, not in tests
 		go ensureSpotifyConnectService("/etc/avahi/services")
 	}
 	exportCfg := cfg.ProlinkExport
@@ -193,7 +193,7 @@ func New(cfg Config, jobs *Jobs) *Server {
 	}
 	s.prolinkExport = prolink.NewExporter(exportCfg)
 	s.closed = make(chan struct{})
-	if cfg.StateDir == "/data/sc5000-custom/state" { // on the deck, not in tests
+	if isDeckStateDir(cfg.StateDir) { // on the deck, not in tests
 		go serveSpotifyConnectMDNS(s.closed)
 	}
 	go s.retryExport(10 * time.Second)
@@ -268,38 +268,38 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.mux.HandleFunc("POST /api/relocate", s.relocate)
 	s.mux.HandleFunc("GET /api/bluetooth", s.handleBluetooth)
 	s.mux.HandleFunc("POST /api/bluetooth", s.handleBluetooth)
-	s.mux.HandleFunc("GET /v1/sc5000/bluetooth", s.handleBluetooth)
-	s.mux.HandleFunc("POST /v1/sc5000/bluetooth", s.handleBluetooth)
+	s.mux.HandleFunc("GET /v1/enginex/bluetooth", s.handleBluetooth)
+	s.mux.HandleFunc("POST /v1/enginex/bluetooth", s.handleBluetooth)
 	s.mux.HandleFunc("GET /api/nas", s.handleNASConfig)
 	s.mux.HandleFunc("POST /api/nas", s.handleNASConfig)
 	s.mux.HandleFunc("POST /api/nas/test", s.handleNASTest)
-	s.mux.HandleFunc("GET /v1/sc5000/nas", s.handleNASConfig)
-	s.mux.HandleFunc("POST /v1/sc5000/nas", s.handleNASConfig)
-	s.mux.HandleFunc("POST /v1/sc5000/nas/test", s.handleNASTest)
+	s.mux.HandleFunc("GET /v1/enginex/nas", s.handleNASConfig)
+	s.mux.HandleFunc("POST /v1/enginex/nas", s.handleNASConfig)
+	s.mux.HandleFunc("POST /v1/enginex/nas/test", s.handleNASTest)
 	s.mux.HandleFunc("GET /api/mods", s.handleMods)
 	s.mux.HandleFunc("POST /api/mods", s.handleMods)
 	s.mux.HandleFunc("POST /api/mods/upload", s.handleModsUpload)
-	s.mux.HandleFunc("GET /v1/sc5000/mods", s.handleMods)
-	s.mux.HandleFunc("POST /v1/sc5000/mods", s.handleMods)
-	s.mux.HandleFunc("POST /v1/sc5000/mods/upload", s.handleModsUpload)
+	s.mux.HandleFunc("GET /v1/enginex/mods", s.handleMods)
+	s.mux.HandleFunc("POST /v1/enginex/mods", s.handleMods)
+	s.mux.HandleFunc("POST /v1/enginex/mods/upload", s.handleModsUpload)
 	s.mux.HandleFunc("GET /api/hotcues", s.handleHotCues)
 	s.mux.HandleFunc("POST /api/hotcues", s.handleHotCues)
-	s.mux.HandleFunc("GET /v1/sc5000/hotcues", s.handleHotCues)
-	s.mux.HandleFunc("POST /v1/sc5000/hotcues", s.handleHotCues)
+	s.mux.HandleFunc("GET /v1/enginex/hotcues", s.handleHotCues)
+	s.mux.HandleFunc("POST /v1/enginex/hotcues", s.handleHotCues)
 	s.mux.HandleFunc("GET /api/ssh", s.handleSSH)
 	s.mux.HandleFunc("POST /api/ssh", s.handleSSH)
-	s.mux.HandleFunc("GET /v1/sc5000/ssh", s.handleSSH)
-	s.mux.HandleFunc("POST /v1/sc5000/ssh", s.handleSSH)
-	s.mux.HandleFunc("GET /v1/sc5000/unlock-gen2", s.handleUnlockGen2)
-	s.mux.HandleFunc("POST /v1/sc5000/unlock-gen2", s.handleUnlockGen2)
+	s.mux.HandleFunc("GET /v1/enginex/ssh", s.handleSSH)
+	s.mux.HandleFunc("POST /v1/enginex/ssh", s.handleSSH)
+	s.mux.HandleFunc("GET /v1/enginex/unlock-gen2", s.handleUnlockGen2)
+	s.mux.HandleFunc("POST /v1/enginex/unlock-gen2", s.handleUnlockGen2)
 	s.mux.HandleFunc("GET /api/unlock-gen2", s.handleUnlockGen2)
 	s.mux.HandleFunc("POST /api/unlock-gen2", s.handleUnlockGen2)
-	s.mux.HandleFunc("POST /v1/sc5000/uninstall-gen2", s.handleUninstallGen2)
+	s.mux.HandleFunc("POST /v1/enginex/uninstall-gen2", s.handleUninstallGen2)
 	s.mux.HandleFunc("POST /api/uninstall-gen2", s.handleUninstallGen2)
 	s.mux.HandleFunc("GET /api/tailscale", s.handleTailscale)
 	s.mux.HandleFunc("POST /api/tailscale", s.handleTailscale)
-	s.mux.HandleFunc("GET /v1/sc5000/tailscale", s.handleTailscale)
-	s.mux.HandleFunc("POST /v1/sc5000/tailscale", s.handleTailscale)
+	s.mux.HandleFunc("GET /v1/enginex/tailscale", s.handleTailscale)
+	s.mux.HandleFunc("POST /v1/enginex/tailscale", s.handleTailscale)
 	// Decide whether to resume before publishing the server. A delayed startup
 	// goroutine must not treat the first user's enable request as saved boot state
 	// and start that service a second time.
@@ -311,16 +311,16 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.mux.HandleFunc("POST /api/mounts", s.handleMounts)
 	s.mux.HandleFunc("DELETE /api/mounts", s.handleMounts)
 	s.mux.HandleFunc("DELETE /api/mounts/{id}", s.handleMounts)
-	s.mux.HandleFunc("GET /v1/sc5000/mounts", s.handleMounts)
-	s.mux.HandleFunc("POST /v1/sc5000/mounts", s.handleMounts)
-	s.mux.HandleFunc("DELETE /v1/sc5000/mounts", s.handleMounts)
-	s.mux.HandleFunc("DELETE /v1/sc5000/mounts/{id}", s.handleMounts)
+	s.mux.HandleFunc("GET /v1/enginex/mounts", s.handleMounts)
+	s.mux.HandleFunc("POST /v1/enginex/mounts", s.handleMounts)
+	s.mux.HandleFunc("DELETE /v1/enginex/mounts", s.handleMounts)
+	s.mux.HandleFunc("DELETE /v1/enginex/mounts/{id}", s.handleMounts)
 	s.mux.HandleFunc("GET /api/automix", s.handleAutomix)
 	s.mux.HandleFunc("POST /api/automix", s.handleAutomix)
-	s.mux.HandleFunc("GET /v1/sc5000/automix", s.handleAutomix)
-	s.mux.HandleFunc("POST /v1/sc5000/automix", s.handleAutomix)
+	s.mux.HandleFunc("GET /v1/enginex/automix", s.handleAutomix)
+	s.mux.HandleFunc("POST /v1/enginex/automix", s.handleAutomix)
 	s.mux.HandleFunc("POST /api/sampler/loop-to-pad", s.handleSamplerLoopToPad)
-	s.mux.HandleFunc("POST /v1/sc5000/sampler/loop-to-pad", s.handleSamplerLoopToPad)
+	s.mux.HandleFunc("POST /v1/enginex/sampler/loop-to-pad", s.handleSamplerLoopToPad)
 	s.automix = newAutomixManager(s.automixConfigPath())
 	s.soundCloudAuth = &providers.SoundCloudAuth{TokenURL: cfg.SoundCloudTokenURL, Path: filepath.Join(cfg.StateDir, "soundcloud-token.json"), HTTP: cfg.HTTP}
 	if cfg.BPM != nil {
@@ -410,10 +410,16 @@ func (s *Server) Close() {
 	s.httpsWG.Wait()
 }
 
+// isDeckStateDir reports whether dir is the deck's own state dir (not a test's): the default,
+// or the same dir through the /data/sc5000-custom compat link an older unit passes (#234).
+func isDeckStateDir(dir string) bool {
+	return dir == "/data/enginex/state" || dir == "/data/sc5000-custom/state"
+}
+
 // DefaultStateDir keeps logins on the deck's writable partition; its home is read-only.
 func DefaultStateDir(home string) string {
-	if _, err := os.Stat("/data/sc5000-custom"); err == nil {
-		return "/data/sc5000-custom/state"
+	if _, err := os.Stat("/data/enginex"); err == nil {
+		return "/data/enginex/state"
 	}
 	return filepath.Join(home, ".config/stream-sync")
 }
@@ -439,9 +445,10 @@ func LoadAccessToken(dir string) (token string, created bool, err error) {
 	return token, true, nil
 }
 
-// qrTarget keeps an explicitly configured public URL; the built-in sc5000.lan default is not one.
+// qrTarget keeps an explicitly configured public URL; the built-in enginex.lan default is not
+// one, nor sc5000.lan, the default before 5.3.0.5 a saved setting may still hold (#234).
 func (s *Server) qrTarget(r *http.Request) string {
-	if u := s.cfg.PublicURL; u != "" && !strings.Contains(u, "sc5000.lan") {
+	if u := s.cfg.PublicURL; u != "" && !strings.Contains(u, "enginex.lan") && !strings.Contains(u, "sc5000.lan") {
 		return u
 	}
 	target := consoleURL(r)
@@ -455,7 +462,7 @@ func (s *Server) qrTarget(r *http.Request) string {
 			name = r.Host
 		}
 		host := strings.Trim(name, "[]")
-		if ip := net.ParseIP(host); host == "" || host == "localhost" || host == "sc5000.lan" || (ip != nil && ip.IsLoopback()) {
+		if ip := net.ParseIP(host); host == "" || host == "localhost" || host == "enginex.lan" || host == "sc5000.lan" || (ip != nil && ip.IsLoopback()) {
 			return "https://" + net.JoinHostPort(lanHost(), port)
 		}
 		return target
@@ -488,14 +495,15 @@ func (s *Server) consoleQR(w http.ResponseWriter, r *http.Request) {
 
 // consoleURL is the console address a phone on the same network can open: the host
 // this browser reached the console by, unless that only works on this machine. Most
-// routers do not resolve sc5000.lan, so a QR code pointing there opened a blank page (#218).
+// routers do not resolve sc5000.lan (enginex.lan since 5.3.0.5), so a QR code pointing there
+// opened a blank page (#218).
 func consoleURL(r *http.Request) string {
 	name, _, err := net.SplitHostPort(r.Host)
 	if err != nil {
 		name = r.Host
 	}
 	host := strings.Trim(name, "[]")
-	if ip := net.ParseIP(host); host == "" || host == "localhost" || host == "sc5000.lan" || (ip != nil && ip.IsLoopback()) {
+	if ip := net.ParseIP(host); host == "" || host == "localhost" || host == "enginex.lan" || host == "sc5000.lan" || (ip != nil && ip.IsLoopback()) {
 		return "http://" + lanHost() + ":8080"
 	}
 	proto, _, _ := strings.Cut(r.Header.Get("X-Forwarded-Proto"), ",")

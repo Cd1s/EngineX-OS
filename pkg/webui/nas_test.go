@@ -32,7 +32,7 @@ func TestNASConfigCRUD(t *testing.T) {
 	s, dir := newTestServerWithUIDir(t)
 
 	// 1. Initial GET - empty config
-	req := httptest.NewRequest(http.MethodGet, "/v1/sc5000/nas", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/enginex/nas", nil)
 	w := httptest.NewRecorder()
 	s.handleNASConfig(w, req)
 
@@ -49,7 +49,7 @@ func TestNASConfigCRUD(t *testing.T) {
 
 	// 2. POST invalid protocol
 	badBody := []byte(`{"protocol":"ftp","url":"http://192.168.1.10:4533"}`)
-	req = httptest.NewRequest(http.MethodPost, "/v1/sc5000/nas", bytes.NewReader(badBody))
+	req = httptest.NewRequest(http.MethodPost, "/v1/enginex/nas", bytes.NewReader(badBody))
 	w = httptest.NewRecorder()
 	s.handleNASConfig(w, req)
 	if w.Code != http.StatusBadRequest {
@@ -58,7 +58,7 @@ func TestNASConfigCRUD(t *testing.T) {
 
 	// 3. POST invalid URL
 	badURLBody := []byte(`{"protocol":"subsonic","url":"not-a-url"}`)
-	req = httptest.NewRequest(http.MethodPost, "/v1/sc5000/nas", bytes.NewReader(badURLBody))
+	req = httptest.NewRequest(http.MethodPost, "/v1/enginex/nas", bytes.NewReader(badURLBody))
 	w = httptest.NewRecorder()
 	s.handleNASConfig(w, req)
 	if w.Code != http.StatusBadRequest {
@@ -74,7 +74,7 @@ func TestNASConfigCRUD(t *testing.T) {
 		"token": "secrettoken",
 		"enabled": true
 	}`)
-	req = httptest.NewRequest(http.MethodPost, "/v1/sc5000/nas", bytes.NewReader(validBody))
+	req = httptest.NewRequest(http.MethodPost, "/v1/enginex/nas", bytes.NewReader(validBody))
 	w = httptest.NewRecorder()
 	s.handleNASConfig(w, req)
 	if w.Code != http.StatusOK {
@@ -115,7 +115,7 @@ func TestNASConfigCRUD(t *testing.T) {
 		"token": "",
 		"enabled": true
 	}`)
-	req = httptest.NewRequest(http.MethodPost, "/v1/sc5000/nas", bytes.NewReader(updateBody))
+	req = httptest.NewRequest(http.MethodPost, "/v1/enginex/nas", bytes.NewReader(updateBody))
 	w = httptest.NewRecorder()
 	s.handleNASConfig(w, req)
 	if w.Code != http.StatusOK {
@@ -130,7 +130,7 @@ func TestNASConfigCRUD(t *testing.T) {
 	}
 
 	// 6. Method not allowed
-	req = httptest.NewRequest(http.MethodDelete, "/v1/sc5000/nas", nil)
+	req = httptest.NewRequest(http.MethodDelete, "/v1/enginex/nas", nil)
 	w = httptest.NewRecorder()
 	s.handleNASConfig(w, req)
 	if w.Code != http.StatusMethodNotAllowed {
@@ -170,7 +170,7 @@ func TestNASTestAndPlaylists(t *testing.T) {
 		"enabled": true
 	}`, mockBackend.URL)
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/sc5000/nas/test", bytes.NewReader([]byte(testBody)))
+	req := httptest.NewRequest(http.MethodPost, "/v1/enginex/nas/test", bytes.NewReader([]byte(testBody)))
 	w := httptest.NewRecorder()
 	s.handleNASTest(w, req)
 	if w.Code != http.StatusOK {
@@ -183,14 +183,14 @@ func TestNASTestAndPlaylists(t *testing.T) {
 	}
 
 	// 2. Save config and test using saved config
-	reqSave := httptest.NewRequest(http.MethodPost, "/v1/sc5000/nas", bytes.NewReader([]byte(testBody)))
+	reqSave := httptest.NewRequest(http.MethodPost, "/v1/enginex/nas", bytes.NewReader([]byte(testBody)))
 	wSave := httptest.NewRecorder()
 	s.handleNASConfig(wSave, reqSave)
 	if wSave.Code != http.StatusOK {
 		t.Fatalf("save failed: %s", wSave.Body.String())
 	}
 
-	reqSavedTest := httptest.NewRequest(http.MethodPost, "/v1/sc5000/nas/test", nil)
+	reqSavedTest := httptest.NewRequest(http.MethodPost, "/v1/enginex/nas/test", nil)
 	wSavedTest := httptest.NewRecorder()
 	s.handleNASTest(wSavedTest, reqSavedTest)
 	if wSavedTest.Code != http.StatusOK {
@@ -212,7 +212,7 @@ func TestNASTestAndPlaylists(t *testing.T) {
 		"url": %q,
 		"enabled": false
 	}`, mockBackend.URL)
-	reqDisable := httptest.NewRequest(http.MethodPost, "/v1/sc5000/nas", bytes.NewReader([]byte(disabledBody)))
+	reqDisable := httptest.NewRequest(http.MethodPost, "/v1/enginex/nas", bytes.NewReader([]byte(disabledBody)))
 	wDisable := httptest.NewRecorder()
 	s.handleNASConfig(wDisable, reqDisable)
 
@@ -236,14 +236,14 @@ func TestNASConfigAndProbeRejectLoopbackAndLinkLocal(t *testing.T) {
 		"http://169.254.169.254/latest/meta-data",
 	} {
 		body := fmt.Sprintf(`{"protocol":"webdav","url":%q,"enabled":true}`, target)
-		reqSave := httptest.NewRequest(http.MethodPost, "/v1/sc5000/nas", bytes.NewReader([]byte(body)))
+		reqSave := httptest.NewRequest(http.MethodPost, "/v1/enginex/nas", bytes.NewReader([]byte(body)))
 		wSave := httptest.NewRecorder()
 		s.handleNASConfig(wSave, reqSave)
 		if wSave.Code != http.StatusBadRequest {
 			t.Fatalf("expected 400 saving %s, got %d: %s", target, wSave.Code, wSave.Body.String())
 		}
 
-		reqTest := httptest.NewRequest(http.MethodPost, "/v1/sc5000/nas/test", bytes.NewReader([]byte(body)))
+		reqTest := httptest.NewRequest(http.MethodPost, "/v1/enginex/nas/test", bytes.NewReader([]byte(body)))
 		wTest := httptest.NewRecorder()
 		s.handleNASTest(wTest, reqTest)
 		if wTest.Code != http.StatusBadRequest {
@@ -287,7 +287,7 @@ func TestOmniSourceNASPlaylistsBrowseAndStream(t *testing.T) {
 
 	cfgBody := fmt.Sprintf(`{"protocol":"subsonic","url":%q,"username":"dj","password":"pw","enabled":true}`, nasSrv.URL)
 	wCfg := httptest.NewRecorder()
-	s.handleNASConfig(wCfg, httptest.NewRequest(http.MethodPost, "/v1/sc5000/nas", strings.NewReader(cfgBody)))
+	s.handleNASConfig(wCfg, httptest.NewRequest(http.MethodPost, "/v1/enginex/nas", strings.NewReader(cfgBody)))
 	if wCfg.Code != http.StatusOK {
 		t.Fatalf("save NAS config failed (%d): %s", wCfg.Code, wCfg.Body.String())
 	}

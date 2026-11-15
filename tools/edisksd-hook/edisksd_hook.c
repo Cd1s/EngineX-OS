@@ -37,7 +37,12 @@
 #define PREPARE_STATE_PATH "/run/enginex-usb-preparing"
 #endif
 #ifndef RUN_ROOT
-#define RUN_ROOT "/run/sc5000-hfs-views"
+#define RUN_ROOT "/run/enginex-hfs-views"
+#endif
+// Where a hook before 5.3.0.5 (#234) kept its helper mounts. Hidden as well: an in-place update
+// restarts edisksd under this hook while views the old one mounted are still there.
+#ifndef LEGACY_RUN_ROOT
+#define LEGACY_RUN_ROOT "/run/sc5000-hfs-views"
 #endif
 #ifndef MEDIA_ROOT
 #define MEDIA_ROOT "/media"
@@ -674,7 +679,7 @@ static int prepare_view(const char *target,const char *identity,int64_t deadline
     if(path_join(backing,sizeof backing,v->anchor,"backing")||path_join(view,sizeof view,v->anchor,"view")||path_join(rescue,sizeof rescue,v->anchor,"rescue")||
        mkdir(backing,0700)||mkdir(view,0700)||mkdir(rescue,0700))goto done;
     if(bind_checked(target,backing,MS_BIND|MS_REC)||mount(NULL,backing,NULL,MS_PRIVATE|MS_REC,NULL)||
-       mount("sc5000-hfs-view",view,"tmpfs",MS_NODEV|MS_NOSUID|MS_NOEXEC,"mode=0755,size=16m"))goto done;
+       mount("enginex-hfs-view",view,"tmpfs",MS_NODEV|MS_NOSUID|MS_NOEXEC,"mode=0755,size=16m"))goto done;
     DIR *d=opendir(backing);if(!d)goto done;
     struct dirent *e;int scan_error=0;
     for(;;) {
@@ -854,7 +859,7 @@ static __thread int in_hook,holding_post;
 static void release_post(void){if(holding_post){holding_post=0;pthread_mutex_unlock(&post_lock);}}
 static int starts_dir(const char *s,const char *dir,size_t n){return !strncmp(s,dir,n)&&s[n]=='/';}
 // A memfd with filename's mountinfo lines minus RUN_ROOT helper mounts, the view
-// overlays (tmpfs "sc5000-hfs-view") and everything mounted inside one; the
+// overlays (tmpfs "enginex-hfs-view", "sc5000-hfs-view" before 5.3.0.5) and everything mounted inside one; the
 // device mount underneath stays. -1: nothing to hide, or parse the file as is.
 static int hide_views(const char *filename) {
     FILE *f=fopen(filename,"re");if(!f)return -1;
@@ -863,6 +868,7 @@ static int hide_views(const char *filename) {
     int bad=ferror(f);fclose(f);if(!buf||bad){free(buf);return -1;}
     buf[len]=0;
     char run[PATH_MAX];int runlen=snprintf(run,sizeof run,"%s",RUN_ROOT);
+    char legacy[PATH_MAX];int legacylen=snprintf(legacy,sizeof legacy,"%s",LEGACY_RUN_ROOT);
     const char *views[64];size_t vlen[64];unsigned nv=0;int hidden=0;
     for(int pass=0;pass<2;pass++) {
         int fd=-1;
@@ -876,8 +882,9 @@ static int hide_views(const char *filename) {
             int hide=0;
             if(mpe&&sep) {
                 size_t ml=(size_t)(mpe-mp);
-                int overlay=!strncmp(sep+3,"tmpfs sc5000-hfs-view ",22);
-                int helper=ml>(size_t)runlen&&starts_dir(mp,run,(size_t)runlen);
+                int overlay=!strncmp(sep+3,"tmpfs enginex-hfs-view ",23)||!strncmp(sep+3,"tmpfs sc5000-hfs-view ",22);
+                int helper=(ml>(size_t)runlen&&starts_dir(mp,run,(size_t)runlen))||
+                           (legacylen>0&&ml>(size_t)legacylen&&starts_dir(mp,legacy,(size_t)legacylen));
                 if(!pass&&overlay&&!helper&&nv<64){views[nv]=mp;vlen[nv++]=ml;}
                 hide=helper||overlay;
                 for(unsigned i=0;i<nv&&!hide;i++)hide=ml>vlen[i]&&starts_dir(mp,views[i],vlen[i]);

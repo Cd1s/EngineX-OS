@@ -113,12 +113,12 @@ func (s *Server) ProlinkStatePath() string {
 }
 
 // liveProlinkStatePath is where rb-bridge --prolink keeps the live CDJ/DJM state
-// (its --state-file default, SC5000_PROLINK_STATE in its unit).
+// (its --state-file default, ENGINEX_PROLINK_STATE in its unit).
 func liveProlinkStatePath() string {
-	if env := os.Getenv("SC5000_PROLINK_STATE"); env != "" {
+	if env := os.Getenv("ENGINEX_PROLINK_STATE"); env != "" {
 		return env
 	}
-	return "/tmp/sc5000-prolink.json"
+	return "/tmp/enginex-prolink.json"
 }
 
 // postedDeviceTTL: a posted report older than this no longer stands for a deck (prolink.
@@ -320,8 +320,8 @@ func (s *Server) prolinkPost(w http.ResponseWriter, r *http.Request) {
 	s.prolinkGet(w, r)
 }
 
-// prolinkToggle is POST /v1/sc5000/prolink?share=0|1, the same setting as
-// /v1/sc5000/ui?prolinkShare=.
+// prolinkToggle is POST /v1/enginex/prolink?share=0|1, the same setting as
+// /v1/enginex/ui?prolinkShare=.
 func (s *Server) prolinkToggle(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	if !q.Has("share") && !q.Has("export") {
