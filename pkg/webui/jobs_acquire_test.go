@@ -305,7 +305,7 @@ func TestSpotifyMatchesBeatportAndAppleMusic(t *testing.T) {
 	}
 }
 
-func TestSpotifyLossyCacheUpgradeAndFallback(t *testing.T) {
+func TestSpotifyLossyCacheReusedWithOtherServices(t *testing.T) {
 	j, dir, deezer := cacheTestJobs(t)
 	tr := deezer
 	tr.Provider, tr.ID = "spotify", "upgrade"
@@ -314,15 +314,15 @@ func TestSpotifyLossyCacheUpgradeAndFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	j.p.Deemix.AllowLossy = true
-	// Without any logged-in service, a failed upgrade preserves playback.
+	// A warm lossy file remains playable regardless of current logins or preference.
 	_, dl, err := j.acquire(context.Background(), "s", tr, false, nil)
 	if err != nil || dl.Path != lossy {
 		t.Fatalf("lossy fallback: %+v %v", dl, err)
 	}
 	j.deezerReady = func() bool { return true }
 	_, dl, err = j.acquire(context.Background(), "s", tr, false, nil)
-	if err != nil || filepath.Base(dl.Path) != "spotify-upgrade.flac" || !dl.Quality.Lossless {
-		t.Fatalf("lossless upgrade: %+v %v", dl, err)
+	if err != nil || dl.Path != lossy || dl.Quality.Lossless {
+		t.Fatalf("warm lossy cache was replaced: %+v %v", dl, err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "123.flac")); err != nil {
 		t.Fatal("shared Deezer cache was consumed")
