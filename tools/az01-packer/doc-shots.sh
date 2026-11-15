@@ -334,6 +334,38 @@ Item {
 }
 QML
 
+# Settings -> Device and Settings -> Services in the three languages (06b, 13).
+if [ "${DOC_SHOT_SETTINGS_PAGES:-0}" = 1 ]; then
+    for spec in en:en zh-Hans:zh-CN zh-Hant:zh-TW; do
+        pack=${spec%%:*}; language=${spec#*:}
+        for page in device services; do
+            if [ "$page" = device ]; then
+                tabs='["Device", "设备", "裝置"]'; rows='["High-speed SD card", "高速 SD 卡模式"]'
+            else
+                tabs='["Services", "服务", "服務"]'; rows='["Remote Load (LAN API)", "远程加载（局域网 API）", "遠端載入（區域網路 API）"]'
+            fi
+            python3 -I - "$REPO/tools/az01-packer/settings-pages-shot.qml" "$W/probe.qml" "$tabs" "$rows" <<'PY'
+import sys
+src, dst, tabs, rows = sys.argv[1:]
+open(dst, "w", encoding="utf-8").write(open(src, encoding="utf-8").read().replace("@TABS@", tabs).replace("@ROWS@", rows))
+PY
+            unshare -m -n -p -f --kill-child bash "$0" --render-one "$W" "$IMG_EXT2" "$pack" "$pack" "v$CURR_VERSION" "$W/raw/$language-$page.png"
+        done
+    done
+    python3 - "$W/raw" "$OUT_REPO" <<'PY'
+from pathlib import Path
+from PIL import Image
+import sys
+raw, repo = map(Path, sys.argv[1:])
+for language in ('en', 'zh-CN', 'zh-TW'):
+    for page, name in (('device', '06b-preferences-device.png'), ('services', '13-preferences-services.png')):
+        out = repo/'docs/assets/screenshots'/language/name
+        out.parent.mkdir(parents=True, exist_ok=True)
+        Image.open(raw/f'{language}-{page}.png').convert('RGB').save(out)
+PY
+    exit
+fi
+
 if [ "${DOC_SHOT_SETTINGS_COPY:-0}" = 1 ]; then
     cp "$REPO/tools/az01-packer/settings-copy-shot.qml" "$W/probe.qml"
     for spec in en:en zh-Hans:zh-CN zh-Hant:zh-TW; do
