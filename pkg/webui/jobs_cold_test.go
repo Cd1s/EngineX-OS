@@ -32,7 +32,7 @@ func TestColdFetchDiscoversFinishedProviderFileWithoutNetwork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, provider := range []string{"deezer", "netease", "spotify", "beatport"} {
+	for _, provider := range []string{"deezer", "netease", "spotify", "beatport", "applemusic"} {
 		t.Run(provider, func(t *testing.T) {
 			dir := t.TempDir()
 			name := provider + "-42.flac"
@@ -81,11 +81,15 @@ func TestColdFileDiscoveryKeepsProviderIsolationAndFinalNames(t *testing.T) {
 	j := NewJobs(Pipeline{Catalog: noCatalog{}, Deemix: &deemixclient.Client{DownloadDir: dir}})
 	defer j.Close()
 	j.neteaseDirect = func() bool { return true }
-	for _, tr := range []providers.Track{{ID: "42", Provider: "netease"}, {ID: "42", Provider: "spotify"}, {ID: "42", Provider: "beatport"}, {ID: "42", Provider: "soundcloud"}, {ID: "99", Provider: "deezer"}, {ID: "13", Provider: "deezer"}, {ID: "14", Provider: "deezer"}, {ID: "13", Provider: "spotify"}, {ID: "../42", Provider: "netease"}, {ID: "18446744073709551616", Provider: "deezer"}} {
+	for _, tr := range []providers.Track{{ID: "42", Provider: "netease"}, {ID: "42", Provider: "spotify"}, {ID: "42", Provider: "beatport"}, {ID: "42", Provider: "soundcloud"}, {ID: "99", Provider: "deezer"}, {ID: "13", Provider: "deezer"}, {ID: "14", Provider: "deezer"}, {ID: "42", Provider: "applemusic"}, {ID: "../42", Provider: "netease"}, {ID: "18446744073709551616", Provider: "deezer"}} {
 		if path := j.File(tr); path != "" {
 			t.Fatalf("%s:%s crossed cache boundary: %q", tr.Provider, tr.ID, path)
 		}
 	}
+	if got := j.File(providers.Track{ID: "13", Provider: "spotify"}); got != filepath.Join(dir, "spotify-13.flac") {
+		t.Fatalf("matched Spotify FLAC cache missing: %q", got)
+	}
+
 }
 
 func TestColdBeatportDiscoveryPreservesLosslessUpgrade(t *testing.T) {

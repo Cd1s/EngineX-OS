@@ -140,7 +140,7 @@ func StreamSync(args []string) error {
 			return err
 		}
 	}
-	ui := webui.New(webui.Config{AccessToken: *token, PublicURL: *public, HTTPSAddr: *httpsListen, SpotifyClientID: *clientID, SpotifyRedirectURL: *redirect, SpotifyTokenPath: *spotifyToken, NeteaseURL: *netease, StateDir: *state, RelayURL: *relay, BPM: bpm}, jobs)
+	ui := webui.New(webui.Config{AccessToken: *token, PublicURL: *public, HTTPSAddr: *httpsListen, SpotifyClientID: *clientID, SpotifyRedirectURL: *redirect, SpotifyTokenPath: *spotifyToken, NeteaseURL: *netease, StateDir: *state, RelayURL: *relay, BPM: bpm, AppleMusicHelperURL: os.Getenv("ENGINEX_AM_HELPER"), AppleMusicHelperToken: os.Getenv("ENGINEX_AM_TOKEN")}, jobs)
 	defer ui.Close()
 	// This is the one intentional local credential output: the operator needs
 	// it to pair the touch/phone console. No provider credentials are logged.

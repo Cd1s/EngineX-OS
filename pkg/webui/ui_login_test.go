@@ -555,10 +555,10 @@ func TestFetchPrefersLocalDeemixThenFallsBackToNetease(t *testing.T) {
 	if p, err := jobs.Fetch(ctx, "s", own, false); err != nil || filepath.Base(p) != "netease-77.flac" {
 		t.Fatalf("%q %v", p, err)
 	}
-	// Another service's track is never matched on NetEase.
+	// Spotify can match on an already logged-in NetEase account.
 	other := providers.Track{ID: "abc", Provider: "spotify", Title: "Song", Artist: "Artist", DurationMS: 200000}
-	if p, err := jobs.Fetch(ctx, "s", other, false); err == nil {
-		t.Fatalf("spotify track played from %q", p)
+	if p, err := jobs.Fetch(ctx, "s", other, false); err != nil || filepath.Base(p) != "spotify-abc.flac" {
+		t.Fatalf("Spotify NetEase match: %q %v", p, err)
 	}
 	// A saved NetEase file is reused without asking anyone.
 	jobs2 := NewJobs(Pipeline{Guard: resourceguard.New(resourceguard.Config{Disabled: true}), Catalog: catalog, Deemix: &deemixclient.Client{BaseURL: bridge.URL, DownloadDir: dir, AllowLossy: true}})

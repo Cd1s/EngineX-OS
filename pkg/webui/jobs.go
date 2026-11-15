@@ -88,12 +88,14 @@ type Jobs struct {
 	// neteaseDirect reports whether NetEase tracks skip Deemix; nil tries Deemix first.
 	neteaseDirect func() bool
 	// deezerReady reports whether a Deezer ARL is saved; nil skips the hint.
-	deezerReady func() bool
-	soundcloud  func() *providers.SoundCloud
-	beatport    func() *providers.Beatport
-	spotify     func() *providers.Spotify
-	selfHosted  func() *providers.SelfHostedProvider
-	bpm         *providers.BPMStore
+	deezerReady   func() bool
+	spotifySource func() string
+	soundcloud    func() *providers.SoundCloud
+	beatport      func() *providers.Beatport
+	spotify       func() *providers.Spotify
+	applemusic    func() *providers.AppleMusic
+	selfHosted    func() *providers.SelfHostedProvider
+	bpm           *providers.BPMStore
 }
 type fetched struct {
 	matched providers.Track
@@ -154,16 +156,16 @@ func (j *Jobs) File(t providers.Track) string {
 			if id, err := strconv.ParseUint(t.ID, 10, 64); err == nil && id > 0 {
 				name = t.ID
 			}
-		case "spotify", "beatport", "netease":
+		case "spotify", "beatport", "netease", "applemusic":
 			name = t.Provider + "-" + t.ID
 		}
 		if name == "" || t.ID == "" || filepath.Base(name) != name || strings.ContainsAny(name, `/\\`) {
 			return ""
 		}
 		if dl := c.Cached(name); dl != nil {
-			// Beatport may upgrade an earlier AAC stream to the subscription's
-			// lossless file. Leave that decision to fromBeatport, as before.
-			if t.Provider == "beatport" && c.Lossless() && !dl.Quality.Lossless {
+			// Beatport and Spotify may upgrade earlier lossy files.
+			// Leave that decision to acquisition.
+			if (t.Provider == "beatport" || t.Provider == "spotify") && c.Lossless() && !dl.Quality.Lossless {
 				return ""
 			}
 			now := time.Now()
@@ -181,16 +183,15 @@ func (j *Jobs) File(t providers.Track) string {
 }
 
 // reusable tells whether an earlier file may stand in for t. Every service keeps
-// its own files, except that Deezer and NetEase in Deemix mode share the Deezer
-// download (<Deezer ID>.flac). Spotify, Beatport, SoundCloud and NetEase official
-// mode only take their own prefix, so a file saved for another service is ignored
-// and the track is fetched again from its own service.
+// its own names, except that Deezer and NetEase in Deemix mode share the Deezer
+// download (<Deezer ID>.flac). Matched Spotify and SoundCloud downloads keep
+// their requesting provider prefix, as do Apple Music and Beatport files.
 func (j *Jobs) reusable(t providers.Track, path string) bool {
 	base := filepath.Base(path)
 	switch t.Provider {
 	case "spotify":
-		return strings.HasPrefix(base, "spotify-") && strings.EqualFold(filepath.Ext(base), ".ogg")
-	case "beatport", "soundcloud":
+		return strings.HasPrefix(base, "spotify-")
+	case "beatport", "soundcloud", "applemusic":
 		return strings.HasPrefix(base, t.Provider+"-")
 	case "netease":
 		j.mu.Lock()
@@ -344,8 +345,7 @@ func (j *Jobs) putFile(key string, f fetched) {
 // straight to NetEase unless the owner chose Deemix first. All audio lands on
 // the deck.
 func (j *Jobs) acquire(ctx context.Context, session string, t providers.Track, guest bool, progress func(deemixclient.QueueStatus)) (providers.Track, *deemixclient.Download, error) {
-	// Each service plays from itself: no track is matched on another service
-	// without the user asking for it. Only NetEase has a Deemix mode (below).
+	// Spotify and SoundCloud may match other connected services.
 	switch t.Provider {
 	case "soundcloud":
 		dl, err := j.acquireSoundCloud(ctx, session, t, guest, progress)
@@ -354,7 +354,10 @@ func (j *Jobs) acquire(ctx context.Context, session string, t providers.Track, g
 		dl, err := j.fromBeatport(ctx, t)
 		return t, dl, err
 	case "spotify":
-		dl, err := j.fromSpotify(ctx, session, t, guest)
+		dl, err := j.acquireSpotify(ctx, session, t, guest, progress)
+		return t, dl, err
+	case "applemusic":
+		dl, err := j.fromAppleMusic(ctx, t)
 		return t, dl, err
 	case "deezer":
 		matched, err := deemixclient.Resolve(ctx, j.p.Catalog, t)
@@ -421,41 +424,36 @@ func (j *Jobs) fromNeteaseMode(ctx context.Context, session string, t providers.
 	return providers.Track{}, nil, errors.Join(append(failures, err)...)
 }
 
-// fromSpotify fetches track t via the owner's logged-in Spotify provider.
-func (j *Jobs) fromSpotify(ctx context.Context, session string, t providers.Track, guest bool) (*deemixclient.Download, error) {
-	if j.p.Deemix != nil {
-		if cached := j.p.Deemix.Cached("spotify-" + t.ID); cached != nil && strings.EqualFold(filepath.Ext(cached.Path), ".ogg") {
-			if q, err := deemixclient.Inspect(cached.Path); err == nil {
-				cached.Quality = q
-			} else {
-				cached.Quality = deemixclient.Quality{Label: "[320k]", Format: "ogg", SampleRate: 44100, Lossless: false}
-			}
-			return cached, nil
-		}
+const spotifyPlaybackHint = "spotify: direct Spotify playback is temporarily disabled; please log in to another streaming service (Deezer, NetEase, Beatport, Apple Music, or SoundCloud) on the deck to play Spotify tracks / Spotify 原生播放暂不可用，请先在碟机登录其他流媒体账号（Deezer、网易云、Beatport、Apple Music 或 SoundCloud）后再匹配播放"
+
+func (j *Jobs) fromAppleMusic(ctx context.Context, t providers.Track) (*deemixclient.Download, error) {
+	name := "applemusic-" + t.ID
+	if cached := j.p.Deemix.Cached(name); cached != nil {
+		return cached, nil
 	}
 	j.mu.Lock()
-	lookup := j.spotify
+	lookup := j.applemusic
 	j.mu.Unlock()
-	var sp *providers.Spotify
 	if lookup != nil {
-		sp = lookup()
+		if am := lookup(); am != nil && am.HelperConfig().URL != "" {
+			return j.downloadAppleMusic(ctx, am, t, name)
+		}
 	}
-	if sp == nil {
-		return nil, errors.New("spotify: please log in via Spotify Connect or QR code on the deck first")
-	}
-	if j.p.Deemix == nil {
-		return nil, errors.New("deemix: pipeline download directory is not configured")
-	}
-	path, err := sp.DownloadAudio(ctx, t.ID, j.p.Deemix.DownloadDir)
+	return nil, errors.New("applemusic: download helper is not configured")
+}
+
+func (j *Jobs) downloadAppleMusic(ctx context.Context, am *providers.AppleMusic, t providers.Track, name string) (*deemixclient.Download, error) {
+	audio, err := am.DownloadTo(ctx, t, j.p.Deemix.DownloadDir, name)
 	if err != nil {
 		return nil, err
 	}
-	j.p.Deemix.Trim(path)
-	q, err := deemixclient.Inspect(path)
+	q, err := deemixclient.Inspect(audio.Path)
 	if err != nil {
-		q = deemixclient.Quality{Label: "[320k]", Format: "ogg", SampleRate: 44100, Lossless: false}
+		os.Remove(audio.Path)
+		return nil, err
 	}
-	return &deemixclient.Download{Path: path, Quality: q}, nil
+	j.p.Deemix.Trim(audio.Path)
+	return &deemixclient.Download{Path: audio.Path, Quality: q}, nil
 }
 
 // isSoundCloudSet tells a DJ set, podcast or radio show (played from SoundCloud,
@@ -500,12 +498,12 @@ func (j *Jobs) acquireSoundCloud(ctx context.Context, session string, t provider
 		if err == nil {
 			return dl, nil
 		}
-		if other, oerr := j.fromLoggedInServicesForSoundCloud(ctx, session, t, guest, progress); oerr == nil {
+		if other, oerr := j.fromLoggedInServices(ctx, session, t, guest, "soundcloud-"+t.ID, progress); oerr == nil {
 			return other, nil
 		}
 		return nil, err
 	}
-	if dl, err := j.fromLoggedInServicesForSoundCloud(ctx, session, t, guest, progress); err == nil {
+	if dl, err := j.fromLoggedInServices(ctx, session, t, guest, "soundcloud-"+t.ID, progress); err == nil {
 		return dl, nil
 	}
 	dl, err := j.fromSoundCloud(ctx, t)
@@ -515,41 +513,139 @@ func (j *Jobs) acquireSoundCloud(ctx context.Context, session string, t provider
 	return dl, err
 }
 
-var errNoOtherService = errors.New("soundcloud: no other logged-in service has this track")
+var errNoOtherService = errors.New("no other logged-in service has this track")
 
-// fromLoggedInServicesForSoundCloud looks for t on Deezer, then NetEase, then
-// Beatport, whichever the owner is logged in to, and saves it as soundcloud-<id>.
-func (j *Jobs) fromLoggedInServicesForSoundCloud(ctx context.Context, session string, t providers.Track, guest bool, progress func(deemixclient.QueueStatus)) (*deemixclient.Download, error) {
-	name := "soundcloud-" + t.ID
+// fromLoggedInServices matches only services the user has connected, keeping
+// the requesting provider's cache identity.
+func (j *Jobs) fromLoggedInServices(ctx context.Context, session string, t providers.Track, guest bool, name string, progress func(deemixclient.QueueStatus)) (*deemixclient.Download, error) {
+	for _, source := range []string{"deezer", "netease", "beatport", "applemusic"} {
+		if dl, err := j.matchAudioSource(ctx, session, t, guest, name, source, progress); err == nil {
+			return dl, nil
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+	}
+	return nil, errNoOtherService
+}
+
+// acquireSpotify keeps Spotify's cache identity across all matching services.
+func (j *Jobs) acquireSpotify(ctx context.Context, session string, t providers.Track, guest bool, progress func(deemixclient.QueueStatus)) (*deemixclient.Download, error) {
+	name := "spotify-" + t.ID
+	cached := j.p.Deemix.Cached(name)
+	if cached != nil && (cached.Quality.Lossless || !j.p.Deemix.Lossless()) {
+		return cached, nil
+	}
 	j.mu.Lock()
-	deezerReady, lookup, beatport := j.deezerReady, j.netease, j.beatport
+	sourceLookup := j.spotifySource
 	j.mu.Unlock()
-	if deezerReady != nil && deezerReady() && j.p.Catalog != nil {
-		if matched, err := deemixclient.Resolve(ctx, j.p.Catalog, t); err == nil {
-			if dl, err := j.p.Deemix.DownloadAs(ctx, matched, name, progress); err == nil {
-				return dl, nil
-			}
+	source := "auto"
+	if sourceLookup != nil {
+		source = sourceLookup()
+	}
+	if source == "" {
+		source = "auto"
+	}
+	sources := []string{source}
+	if source == "auto" {
+		sources = []string{"deezer", "netease", "beatport", "applemusic", "soundcloud"}
+	}
+	var failure error
+	for _, service := range sources {
+		dl, err := j.matchAudioSource(ctx, session, t, guest, name, service, progress)
+		if err == nil {
+			return dl, nil
+		}
+		failure = err
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
 	}
-	if lookup != nil {
-		if n := lookup(session, guest); n != nil {
-			if _, dl, err := j.fromNetease(ctx, n, t); err == nil {
-				if dl, err = j.p.Deemix.LinkAs(dl, name); err == nil {
-					return dl, nil
+	if cached != nil {
+		return cached, nil
+	}
+	if source != "auto" {
+		return nil, fmt.Errorf("spotify: %s is not logged in or has no playable match / 所选音源 %s 未登录或没有可播放的匹配曲目: %w", source, source, failure)
+	}
+	return nil, errors.New(spotifyPlaybackHint)
+}
+
+// matchAudioSource never falls back outside the selected service.
+func (j *Jobs) matchAudioSource(ctx context.Context, session string, t providers.Track, guest bool, name, source string, progress func(deemixclient.QueueStatus)) (*deemixclient.Download, error) {
+	j.mu.Lock()
+	deezerReady, netease, beatport, apple, soundcloud := j.deezerReady, j.netease, j.beatport, j.applemusic, j.soundcloud
+	j.mu.Unlock()
+	switch source {
+	case "deezer":
+		if deezerReady != nil && deezerReady() && j.p.Catalog != nil {
+			matched, err := deemixclient.Resolve(ctx, j.p.Catalog, t)
+			if err != nil {
+				return nil, err
+			}
+			dl, err := j.p.Deemix.DownloadAs(ctx, matched, name, progress)
+			if err == nil {
+				j.p.Deemix.Trim(dl.Path)
+			}
+			return dl, err
+		}
+	case "netease":
+		if netease != nil {
+			if n := netease(session, guest); n != nil {
+				_, dl, err := j.fromNetease(ctx, n, t)
+				if err != nil {
+					return nil, err
 				}
+				return j.p.Deemix.LinkAs(dl, name)
 			}
 		}
-	}
-	if beatport != nil {
-		if b := beatport(); b != nil {
-			if found, err := b.Search(ctx, soundCloudSearch(t)); err == nil {
-				if matched, err := deemixclient.MatchNearby(t, found, neteaseMatchToleranceMS); err == nil {
-					if dl, err := j.fromBeatport(ctx, matched); err == nil {
-						if dl, err = j.p.Deemix.LinkAs(dl, name); err == nil {
-							return dl, nil
-						}
-					}
+	case "beatport":
+		if beatport != nil {
+			if b := beatport(); b != nil {
+				found, err := b.Search(ctx, soundCloudSearch(t))
+				if err != nil {
+					return nil, err
 				}
+				matched, err := deemixclient.MatchNearby(t, found, neteaseMatchToleranceMS)
+				if err != nil {
+					return nil, err
+				}
+				dl, err := j.fromBeatport(ctx, matched)
+				if err != nil {
+					return nil, err
+				}
+				return j.p.Deemix.LinkAs(dl, name)
+			}
+		}
+	case "applemusic":
+		if apple != nil {
+			if am := apple(); am != nil && am.HelperConfig().URL != "" {
+				found, err := am.Search(ctx, soundCloudSearch(t))
+				if err != nil {
+					return nil, err
+				}
+				matched, err := deemixclient.MatchNearby(t, found, neteaseMatchToleranceMS)
+				if err != nil {
+					return nil, err
+				}
+				return j.downloadAppleMusic(ctx, am, matched, name)
+			}
+		}
+	case "soundcloud":
+		if soundcloud != nil {
+			if sc := soundcloud(); sc != nil && (sc.UserID != 0 || sc.Username != "" || sc.Token != "" || sc.Auth != nil && sc.Auth.HasUser()) {
+				found, err := sc.Search(ctx, soundCloudSearch(t))
+				if err != nil {
+					return nil, err
+				}
+				matched, err := deemixclient.MatchNearby(t, found, neteaseMatchToleranceMS)
+				if err != nil {
+					return nil, err
+				}
+				dl, err := j.fromSoundCloud(ctx, matched)
+				if err != nil {
+					return nil, err
+				}
+				return j.p.Deemix.LinkAs(dl, name)
 			}
 		}
 	}

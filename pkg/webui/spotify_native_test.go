@@ -2,8 +2,6 @@ package webui
 
 import (
 	"bytes"
-	"crypto/aes"
-	"crypto/cipher"
 	"encoding/json"
 	"errors"
 	"io"
@@ -17,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Cd1s/EngineX-OS/internal/testaudio"
 	"github.com/Cd1s/EngineX-OS/internal/testlibrary"
 	"github.com/Cd1s/EngineX-OS/pkg/analyzer"
 	"github.com/Cd1s/EngineX-OS/pkg/deemixclient"
@@ -182,53 +179,54 @@ func TestSpotifyBuiltinGrantSurvivesSavedLegacyClientID(t *testing.T) {
 	}
 }
 
-// #210 joins native decryption, real Vorbis inspection/analysis and Engine SQL
-// import. The fixture is original 44.1-kHz stereo C-major audio with 120-BPM
-// onsets, encoded once as Vorbis; this test needs neither ffmpeg nor Spotify.
+// Matching keeps the original Spotify identity through analysis and Engine import.
+// Original generated Vorbis, FLAC and MP3 fixtures require no live service.
 func TestSpotifyDownloadAnalyzeImportEndToEnd(t *testing.T) {
-	fixture, err := os.ReadFile("testdata/spotify-native-44100.ogg")
+	for _, format := range []string{"ogg", "flac", "mp3"} {
+		t.Run(format, func(t *testing.T) { testSpotifyMatchedImport(t, format) })
+	}
+}
+
+func testSpotifyMatchedImport(t *testing.T, format string) {
+	var fixture []byte
+	var err error
+	switch format {
+	case "ogg":
+		fixture, err = os.ReadFile("testdata/spotify-native-44100.ogg")
+	case "mp3":
+		fixture, err = os.ReadFile("testdata/spotify-matched-44100.mp3")
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
-	key := []byte("0123456789abcdef")
-	iv := []byte{0x72, 0xe0, 0x67, 0xfb, 0xdd, 0xcb, 0xcf, 0x77, 0xeb, 0xe8, 0xbc, 0x64, 0x3f, 0x63, 0x0d, 0x93}
-	plain := append(testaudio.SpotifyOggMetadataPage(139), fixture...)
-	encrypted := make([]byte, len(plain))
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cipher.NewCTR(block, iv).XORKeyStream(encrypted, plain)
-	var requests atomic.Int32
-	stream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests.Add(1)
-		if r.URL.Path != "/encrypted-vorbis" || r.Header.Get("Authorization") != "Bearer fixture-token" {
-			t.Error("unexpected Spotify mock request")
-			w.WriteHeader(400)
-			return
-		}
-		w.Write(encrypted)
-	}))
-	defer stream.Close()
 	dbPath, root, db := testlibrary.Create(t)
 	lib, err := analyzer.OpenLibrary(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer lib.Close()
-	var catalogCalls, bridgeCalls atomic.Int32
-	bridge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { bridgeCalls.Add(1); w.WriteHeader(500) }))
-	defer bridge.Close()
-	jobs := NewJobs(Pipeline{
-		Guard:   resourceguard.New(resourceguard.Config{Disabled: true}),
-		Catalog: forbiddenSpotifyCatalog{calls: &catalogCalls},
-		Deemix:  &deemixclient.Client{DownloadDir: root, BaseURL: bridge.URL}, Library: lib,
-	})
+	source := filepath.Join(root, "123."+format)
+	if format == "flac" {
+		writeTestFLAC(t, source)
+		fixture, err = os.ReadFile(source)
+	} else {
+		err = os.WriteFile(source, fixture, 0o644)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	var nativeCalls atomic.Int32
+	native := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { nativeCalls.Add(1); w.WriteHeader(500) }))
+	defer native.Close()
+	track := providers.Track{ID: "4uLU6hMCjMI75M1A2tKUQC", Provider: "spotify", Title: "Matched fixture", Artist: "EngineX fixture", ISRC: "FIXTURE", DurationMS: 8000}
+	matched := track
+	matched.ID, matched.Provider = "123", "deezer"
+	jobs := NewJobs(Pipeline{Guard: resourceguard.New(resourceguard.Config{Disabled: true}), Catalog: isrcCatalog{matched}, Deemix: &deemixclient.Client{DownloadDir: root, AllowLossy: true, PreferMP3: func() bool { return format != "flac" }}, Library: lib})
 	defer jobs.Close()
-	sp := &providers.Spotify{StreamURL: stream.URL + "/encrypted-vorbis", AudioKey: key, Token: providers.Token{AccessToken: "fixture-token"}}
+	sp := &providers.Spotify{StreamURL: native.URL, Token: providers.Token{AccessToken: "fixture-token"}}
 	defer sp.Close()
 	jobs.spotify = func() *providers.Spotify { return sp }
-	track := providers.Track{ID: "4uLU6hMCjMI75M1A2tKUQC", Provider: "spotify", Title: "Native Vorbis fixture", Artist: "EngineX fixture", DurationMS: 8000, CoverURL: bridge.URL + "/cover"}
+	jobs.deezerReady = func() bool { return true }
 	submitted, err := jobs.Submit("spotify-owner", track, false)
 	if err != nil {
 		t.Fatal(err)
@@ -245,32 +243,39 @@ func TestSpotifyDownloadAnalyzeImportEndToEnd(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("Spotify job timed out in state %s", completed.State)
+			t.Fatalf("job timed out: %s", completed.State)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	if completed.State != "done" || completed.TrackID <= 0 || completed.Progress != 1 {
-		t.Fatalf("Spotify job failed: state=%s error=%s", completed.State, completed.Error)
+		t.Fatalf("job failed: %s %s", completed.State, completed.Error)
 	}
-	path := filepath.Join(root, "spotify-"+track.ID+".ogg")
+	path := filepath.Join(root, "spotify-"+track.ID+"."+format)
 	saved, err := os.ReadFile(path)
 	if err != nil || !bytes.Equal(saved, fixture) {
-		t.Fatal("AES decryption, Spotify header stripping, or cover handling changed Vorbis data")
+		t.Fatal("matched source content changed")
 	}
 	quality, err := deemixclient.Inspect(path)
-	if err != nil || quality.Format != "ogg" || quality.SampleRate != 44100 || quality.Bitrate != 320000 || quality.Lossless {
-		t.Fatalf("incorrect Vorbis inspection: %+v, %v", quality, err)
+	rate := 44100
+	if format == "flac" {
+		rate = 22050
+	}
+	if err != nil || quality.Format != format || quality.SampleRate != rate || quality.Lossless != (format == "flac") {
+		t.Fatalf("quality: %+v %v", quality, err)
 	}
 	audio, analysis, err := analyzer.AnalyzeFile(path, analyzer.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if audio.Format != quality.Format || audio.SampleRate != quality.SampleRate || audio.Channels != 2 || audio.BitsPerSample != 16 {
-		t.Fatal("decoded audio and inspected quality disagree")
+	if audio.Format != format || audio.SampleRate != quality.SampleRate {
+		t.Fatal("decoded and inspected formats disagree")
 	}
 	for _, result := range []*analyzer.Result{analysis, jobs.Result(submitted.ID)} {
-		if result == nil || math.Abs(result.BPM-120) > 3 || result.Key.Camelot == "" || len(result.Waveform) == 0 || len(result.Overview) != analyzer.OverviewEntries || len(result.Beatgrid) < 2 {
-			t.Fatal("BPM, key, beatgrid or waveform missing from full analysis")
+		if result == nil || result.Key.Camelot == "" || len(result.Waveform) == 0 || len(result.Overview) != analyzer.OverviewEntries || len(result.Beatgrid) < 2 {
+			t.Fatal("analysis missing")
+		}
+		if format == "ogg" && math.Abs(result.BPM-120) > 3 {
+			t.Fatal("Vorbis BPM changed")
 		}
 	}
 	var filename, fileType, comment, playlist string
@@ -280,10 +285,10 @@ func TestSpotifyDownloadAnalyzeImportEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if filename != filepath.Base(path) || fileType != "ogg" || !strings.Contains(comment, "OGG 44100 Hz") || strings.Contains(comment, "MP3") || playlist != providers.OwnerPlaylist || analyzed != 1 || len(overview) == 0 || len(beats) == 0 || len(trackData) == 0 {
-		t.Fatal("Vorbis import did not persist verified Engine analysis and playlist membership")
+	if filename != filepath.Base(path) || fileType != format || !strings.Contains(comment, quality.Comment()) || playlist != providers.OwnerPlaylist || analyzed != 1 || len(overview) == 0 || len(beats) == 0 || len(trackData) == 0 {
+		t.Fatalf("Engine import lost format or analysis: %s %s %s", filename, fileType, comment)
 	}
-	if requests.Load() != 1 || catalogCalls.Load() != 0 || bridgeCalls.Load() != 0 {
-		t.Fatal("Spotify job downloaded twice or used another service")
+	if nativeCalls.Load() != 0 {
+		t.Fatal("native Spotify audio was requested")
 	}
 }

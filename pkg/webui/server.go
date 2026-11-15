@@ -54,6 +54,7 @@ type Config struct {
 	SoundCloudURL, SoundCloudTokenURL                                     string
 	BeatportURL                                                           string // tests; empty is Beatport's API
 	AppleMusicURL, AppleMusicWebURL                                       string // tests; empty is Apple's API and web player
+	AppleMusicHelperURL, AppleMusicHelperToken                            string // enginex-amd helper; empty disables Apple Music downloads
 	HTTP                                                                  *http.Client
 	GitHubURL, VersionFile                                                string // tests; defaults are api.github.com and versionFile
 	// UIDir holds the deck UI settings; empty means the on-device default.
@@ -123,9 +124,12 @@ type Server struct {
 
 	soundCloudAuth *providers.SoundCloudAuth
 	// beatport is the owner's account, shared because each refresh rotates its token.
-	beatport *providers.Beatport
-	shadow   *shadowState // #49 shadow decks
-	remote   *remoteLoader
+	beatport                     *providers.Beatport
+	appleMusic                   *providers.AppleMusic
+	appleMusicHelperMu           sync.Mutex
+	appleMusicHelperTokenCleared bool
+	shadow                       *shadowState // #49 shadow decks
+	remote                       *remoteLoader
 
 	automixMu sync.Mutex
 	automix   *AutomixManager
@@ -258,6 +262,8 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.mux.HandleFunc("GET /api/bpm", s.bpmConfigGet)
 	s.mux.HandleFunc("POST /api/bpm", s.bpmConfigPost)
 	s.mux.HandleFunc("GET /api/relay", s.relayConfigGet)
+	s.registerAppleMusicHelper(s.mux, "/api/applemusic")
+	s.mux.HandleFunc("GET /m/applemusic/helper-qr", s.appleMusicPhoneHelperQR)
 	s.mux.HandleFunc("GET /api/spotify", s.spotifyClientGet)
 	s.mux.HandleFunc("POST /api/spotify", s.spotifyClientPost)
 	s.mux.HandleFunc("GET /spotify-connect", s.spotifyConnectGet)
@@ -339,6 +345,10 @@ func New(cfg Config, jobs *Jobs) *Server {
 		cfg.BPM.Spotify = s.ownerSpotify
 	}
 	s.beatport = &providers.Beatport{BaseURL: cfg.BeatportURL, HTTP: cfg.HTTP, Path: filepath.Join(cfg.StateDir, "beatport-owner.json")}
+	s.appleMusic = &providers.AppleMusic{BaseURL: cfg.AppleMusicURL, WebURL: cfg.AppleMusicWebURL, HTTP: cfg.HTTP, HelperURL: cfg.AppleMusicHelperURL, HelperToken: cfg.AppleMusicHelperToken}
+	s.loadAppleMusicHelper()
+	s.appleMusic.OwnerPath = filepath.Join(cfg.StateDir, "applemusic-owner.json")
+	_ = s.appleMusic.Load()
 	s.tidal = newTidalGateway(s)
 	s.RegisterTunnelRoutes()
 	// Resume before accepting requests: a delayed resume could see a newly
@@ -348,10 +358,12 @@ func New(cfg Config, jobs *Jobs) *Server {
 		jobs.mu.Lock()
 		jobs.netease = s.neteaseFor
 		jobs.neteaseDirect = s.neteaseDirect
+		jobs.spotifySource = s.spotifySource
 		jobs.deezerReady = func() bool { return s.savedDeezerOwner().ARL != "" }
 		jobs.soundcloud = s.ownerSoundCloud
 		jobs.beatport = s.ownerBeatport
 		jobs.spotify = s.ownerSpotify
+		jobs.applemusic = func() *providers.AppleMusic { return s.appleMusic }
 		jobs.selfHosted = s.ownerSelfHosted
 		jobs.bpm = cfg.BPM
 		if jobs.p.Deemix != nil {
@@ -779,14 +791,10 @@ func (s *Server) makeProvider(name string, guest bool, user string) (providers.P
 		}
 		return n, nil
 	case "applemusic":
-		p := &providers.AppleMusic{BaseURL: s.cfg.AppleMusicURL, WebURL: s.cfg.AppleMusicWebURL, HTTP: s.cfg.HTTP}
 		if !guest {
-			p.OwnerPath = filepath.Join(s.cfg.StateDir, "applemusic-owner.json")
-			if err := p.Load(); err != nil && !os.IsNotExist(err) {
-				return nil, err
-			}
+			return s.appleMusic, nil
 		}
-		return p, nil
+		return &providers.AppleMusic{BaseURL: s.cfg.AppleMusicURL, WebURL: s.cfg.AppleMusicWebURL, HTTP: s.cfg.HTTP}, nil
 	case "spotify":
 		deviceID, err := providers.LoadSpotifyDeviceID(s.cfg.StateDir)
 		if err != nil {

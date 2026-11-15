@@ -65,6 +65,7 @@ func TestEvictableSpotifyOgg(t *testing.T) {
 		{"spotify-4uLU6hMCjMI75M1A2tKUQC.ogg", true},
 		{"spotify-ABCxyz012.ogg", true},
 		{"123.mp3", true}, {"netease-123.flac", true}, {"soundcloud-123.mp4", true}, {"beatport-123.flac", true},
+		{"applemusic-123.flac", true}, {"applemusic-i.library.flac", true}, {"applemusic-.flac", false}, {"spotify-abc.mp4", true},
 		{"my-song.ogg", false}, {"123.ogg", false}, {"spotify-.ogg", false}, {"spotify-abc-def.ogg", false},
 		{"spotify-abc.ogg.part", false}, {"prefix-spotify-abc.ogg", false}, {"spotify-abc.mp3", true}, {"spotify-abc.flac", true},
 	} {

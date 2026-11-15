@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -60,7 +61,8 @@ func spotifyManifest(t *testing.T, data []byte) string {
 }
 
 // #269: key/CDN failures belong to the media download, never to the carrier's
-// playback API. Both Engine API variants must return the known native codec.
+// playback API. Both Engine API variants return the carrier codec without fetching
+// audio; with direct Spotify audio disabled, no Spotify audio request is made.
 func TestSpotifyFetchFailureIsTrackLoadFailure269(t *testing.T) {
 	for _, endpoint := range []string{"playbackinfopostpaywall", "streamurl"} {
 		t.Run(endpoint, func(t *testing.T) {
@@ -94,7 +96,7 @@ func TestSpotifyFetchFailureIsTrackLoadFailure269(t *testing.T) {
 			}
 			body, err := io.ReadAll(resp.Body)
 			resp.Body.Close()
-			if err != nil || resp.StatusCode < 400 || resp.StatusCode == 401 || resp.StatusCode == 403 || len(body) == 0 || calls.Load() != 1 {
+			if err != nil || resp.StatusCode < 400 || resp.StatusCode == 401 || resp.StatusCode == 403 || len(body) == 0 || calls.Load() != 0 || !bytes.Contains(body, []byte("Spotify 原生播放暂不可用")) {
 				t.Fatalf("media failure: HTTP %d, calls=%d, %q (%v)", resp.StatusCode, calls.Load(), body, err)
 			}
 			after, err := os.ReadFile(s.tidal.authPath())
@@ -143,10 +145,11 @@ func TestSpotifyManifestLoadsNativeOgg269(t *testing.T) {
 		t.Fatal(err)
 	}
 	var calls atomic.Int32
-	_, srv, track := spotifyLoadGateway(t, func(w http.ResponseWriter, r *http.Request) {
+	s, srv, track := spotifyLoadGateway(t, func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		w.Write(fixture)
 	})
+	seedSpotifyOggCache(t, s, fixture)
 	address := spotifyManifest(t, tidalGet(t, srv.URL, track+"playbackinfopostpaywall", http.StatusOK, nil))
 	if calls.Load() != 0 {
 		t.Fatal("manifest fetched audio")
@@ -163,7 +166,7 @@ func TestSpotifyManifestLoadsNativeOgg269(t *testing.T) {
 		}
 		body, err := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		if err != nil || resp.StatusCode != http.StatusPartialContent || resp.Header.Get("Content-Type") != "audio/ogg" || !bytes.Equal(body, fixture[:32]) || calls.Load() != 1 {
+		if err != nil || resp.StatusCode != http.StatusPartialContent || resp.Header.Get("Content-Type") != "audio/ogg" || !bytes.Equal(body, fixture[:32]) || calls.Load() != 0 {
 			t.Fatalf("native Ogg Range: HTTP %d, calls=%d (%v)", resp.StatusCode, calls.Load(), err)
 		}
 	}
@@ -177,7 +180,11 @@ func TestSpotifyEngineDownloadNameKeepsNativeMedia277(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, srv, track := spotifyLoadGateway(t, func(w http.ResponseWriter, r *http.Request) { w.Write(fixture) })
+	s, srv, track := spotifyLoadGateway(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Error("cached playback requested Spotify audio")
+		w.Write(fixture)
+	})
+	seedSpotifyOggCache(t, s, fixture)
 	address := spotifyManifest(t, tidalGet(t, srv.URL, track+"playbackinfopostpaywall", http.StatusOK, nil))
 	resp, err := http.Get(address)
 	if err != nil {
@@ -247,5 +254,15 @@ func TestSpotifyUnpairedTrackAvoidsTidalAuthFailure269(t *testing.T) {
 				t.Fatal("real-TIDAL login-required response was masked")
 			}
 		})
+	}
+}
+
+// Downloads made before native playback was paused remain playable without login.
+func seedSpotifyOggCache(t *testing.T, s *Server, fixture []byte) {
+	t.Helper()
+	s.jobs.p.Deemix.AllowLossy = true
+	s.jobs.p.Deemix.PreferMP3 = func() bool { return true }
+	if err := os.WriteFile(filepath.Join(s.jobs.p.Deemix.DownloadDir, "spotify-4uLU6hMCjMI75M1A2tKUQC.ogg"), fixture, 0o644); err != nil {
+		t.Fatal(err)
 	}
 }

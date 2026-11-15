@@ -4276,6 +4276,7 @@ SOURCE_ENTER = """
         const model = available ? sources.availableSourceModel() : sources.connectedSourceModel()
         const row = available ? nav.availableSourceIndex : nav.connectedSourceIndex
         const name = row >= 0 ? String(model.data(model.index(row, 0), root.scSourceNameRole)).trim() : ""
+        if (name === "Apple Music") { root.scOpen("applemusic"); return }
         if (["TIDAL", "Tidal", "SoundCloud", "Beatport LINK"].indexOf(name) >= 0) {
             if (root.scScope && root.scSources.indexOf(root.scScope) >= 0) root.scOpen(root.scScope)
             return
@@ -4292,7 +4293,7 @@ SOURCE_FOOTER = """
 	readonly property var pScSourceIndex: Planck.getProperty("/Qml/ControlFocus/ScSourceIndex")
 	readonly property var pScSourceSelect: Planck.getProperty("/Qml/ControlFocus/ScSourceSelect")
 	function scHiddenSourceName(name) {
-		return ["TIDAL", "Tidal", "SoundCloud", "Beatport", "Beatport LINK"].indexOf(String(name || "")) >= 0
+		return ["TIDAL", "Tidal", "SoundCloud", "Beatport", "Beatport LINK", "Apple Music"].indexOf(String(name || "")) >= 0
 	}
 	function scFindAvailableSource() {
 		let p = connectedSource.parent
@@ -4511,7 +4512,7 @@ Grid {
 		id: scRepeater
 		model: Planck.librarianController.browserSourceControllerPtr().availableSourceModel()
 		delegate: AvailableSourceDelegate {
-			visible: ["TIDAL", "Tidal", "SoundCloud", "Beatport LINK"].indexOf(model.name) < 0
+			visible: ["TIDAL", "Tidal", "SoundCloud", "Beatport LINK", "Apple Music"].indexOf(model.name) < 0
 			width: availableSource.cellWidth
 			height: availableSource.cellHeight
 			cellContentWidth: availableSource.cellWidth - availableSource.cellPadding * 2
@@ -6670,13 +6671,13 @@ def edits(dev: bool):
         ],
         **({v + "Bluetooth/BluetoothSelect.qml": BLUETOOTH_SELECT} if v53() else {}),
         prefs + "Entries/StreamingServices.qml": [
-            ("		visible: !isCloudService && !isEaasService\n", '		visible: !isCloudService && !isEaasService && ["TIDAL", "Tidal", "SoundCloud", "Beatport LINK"].indexOf(provider.name) < 0\n'),
+            ("		visible: !isCloudService && !isEaasService\n", '		visible: !isCloudService && !isEaasService && ["TIDAL", "Tidal", "SoundCloud", "Beatport LINK", "Apple Music"].indexOf(provider.name) < 0\n'),
             ('import "Base"\n', 'import QtQuick.Layouts 1.12\nimport "Base"\n'),
             ('	label: "Streaming"\n', '	label: "Streaming"\n' + STREAM_SWITCHES),
         ],
         v + "BrowserSource/ConnectedSource.qml": [
             ("	currentIndex: -1\n", "	currentIndex: -1\n" + SOURCE_FOOTER),
-            ("		height: 108\n		leftPadding", '		height: ["TIDAL", "Tidal", "SoundCloud", "Beatport LINK"].indexOf(model.name) >= 0 ? 0 : 108\n		visible: ["TIDAL", "Tidal", "SoundCloud", "Beatport LINK"].indexOf(model.name) < 0\n		Component.onCompleted: if (model.name === "TIDAL" || model.name === "Tidal") connectedSource.scTidalRow = this\n		Component.onDestruction: if (connectedSource.scTidalRow === this) connectedSource.scTidalRow = null\n		leftPadding'),
+            ("		height: 108\n		leftPadding", '		height: ["TIDAL", "Tidal", "SoundCloud", "Beatport LINK", "Apple Music"].indexOf(model.name) >= 0 ? 0 : 108\n		visible: ["TIDAL", "Tidal", "SoundCloud", "Beatport LINK", "Apple Music"].indexOf(model.name) < 0\n		Component.onCompleted: if (model.name === "TIDAL" || model.name === "Tidal") connectedSource.scTidalRow = this\n		Component.onDestruction: if (connectedSource.scTidalRow === this) connectedSource.scTidalRow = null\n		leftPadding'),
             # Hidden stock streaming rows (e.g. "Tidal" at index 0, height 0) leave a
             # zero-height first section above "Demo" / "Cloud" sources; ListView then
             # oscillates currentSection <-> section.delegate.height inside updatePolish()

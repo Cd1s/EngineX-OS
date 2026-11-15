@@ -1,6 +1,7 @@
 package providers
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -10,21 +11,23 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
 // AppleMusic reads playlists from Apple Music's catalog (public playlist and
 // album links, no account) and, with the owner's media-user-token, from their
-// library (#65). Apple Music audio is FairPlay-protected and is never fetched:
-// its tracks play through the deck's ISRC / artist + title matching, as
-// Spotify's do.
+// library (#65). Audio downloads are supplied by the enginex-amd helper.
 type AppleMusic struct {
 	BaseURL, WebURL string // api.music.apple.com and music.apple.com; tests override
 	HTTP            *http.Client
 	OwnerPath       string // where the owner's links and token are saved, mode 0600
+	// HelperURL is the enginex-amd helper (LAN/VPS); empty disables downloads.
+	HelperURL, HelperLoginURL, HelperToken string
 
 	mu    sync.Mutex
 	owner AppleMusicOwner
@@ -149,6 +152,168 @@ func (a *AppleMusic) SetOwner(ctx context.Context, o AppleMusicOwner) error {
 	a.owner = o
 	a.mu.Unlock()
 	return nil
+}
+
+// Download asks the enginex-amd helper for a FLAC of t. The helper owns the
+// Apple Music session; the deck only receives the finished file.
+// AppleMusicAudio is the helper's finished file and quality.
+type AppleMusicAudio struct {
+	Path       string
+	SampleRate int
+	Channels   int
+	Bits       int
+	Lossless   bool
+}
+
+func (a *AppleMusic) Download(ctx context.Context, t Track) (*AppleMusicAudio, error) {
+	return a.DownloadTo(ctx, t, "", "")
+}
+
+// DownloadTo writes on the destination filesystem and publishes only a complete file.
+func (a *AppleMusic) DownloadTo(ctx context.Context, t Track, dstDir, name string) (*AppleMusicAudio, error) {
+	cfg := a.HelperConfig()
+	if cfg.URL == "" {
+		return nil, errors.New("applemusic: download helper is not configured")
+	}
+	if dstDir != "" && (name == "" || name == "." || name == ".." || filepath.Base(name) != name || strings.ContainsAny(name, `/\`)) {
+		return nil, errors.New("applemusic: invalid cache name")
+	}
+	songID := t.CatalogID
+	if songID == "" {
+		songID = t.ID
+	}
+	if strings.HasPrefix(songID, "i.") {
+		var catalog amPage
+		if err := a.get(ctx, "/v1/me/library/songs/"+url.PathEscape(songID)+"/catalog", true, &catalog); err != nil {
+			return nil, errors.New("applemusic: could not resolve library song catalog ID")
+		}
+		if len(catalog.Data) == 0 || catalog.Data[0].ID == "" {
+			return nil, errors.New("applemusic: library song has no catalog recording")
+		}
+		songID = catalog.Data[0].ID
+	}
+	if songID == "" {
+		return nil, errors.New("applemusic: song ID is missing")
+	}
+	hc := a.HTTP
+	if hc == nil {
+		hc = &http.Client{Timeout: 5 * time.Minute}
+	}
+	// Never forward the helper credential across redirects.
+	copyClient := *hc
+	copyClient.CheckRedirect = func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse }
+	hc = &copyClient
+	storefront := strings.ToLower(a.state().Storefront)
+	if storefront == "" {
+		storefront = "us"
+	}
+	payload, err := json.Marshal(map[string]string{"url": "https://music.apple.com/" + storefront + "/song/" + url.PathEscape(songID)})
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, "POST", strings.TrimRight(cfg.URL, "/")+"/v1/download", bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if cfg.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+cfg.Token)
+	}
+	resp, err := hc.Do(req)
+	if err != nil {
+		return nil, errors.New("applemusic: download helper unreachable")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("applemusic: download helper HTTP %d", resp.StatusCode)
+	}
+	var out struct {
+		File    string `json:"file"`
+		Quality struct {
+			SampleRate int  `json:"sampleRate"`
+			Channels   int  `json:"channels"`
+			Bits       int  `json:"bits"`
+			Lossless   bool `json:"lossless"`
+		} `json:"quality"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil || out.File == "" {
+		return nil, errors.New("applemusic: download helper returned no file")
+	}
+	base, _ := url.Parse(strings.TrimRight(cfg.URL, "/") + "/")
+	file, parseErr := url.Parse(out.File)
+	if parseErr != nil || base == nil {
+		return nil, errors.New("applemusic: invalid helper file URL")
+	}
+	file = base.ResolveReference(file)
+	if file.Scheme != base.Scheme || file.Host != base.Host || file.User != nil {
+		return nil, errors.New("applemusic: helper file must use the configured helper origin")
+	}
+	fileURL := file.String()
+	freq, err := http.NewRequestWithContext(ctx, "GET", fileURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.Token != "" {
+		freq.Header.Set("Authorization", "Bearer "+cfg.Token)
+	}
+	fresp, err := hc.Do(freq)
+	if err != nil {
+		return nil, errors.New("applemusic: helper file unreachable")
+	}
+	defer fresp.Body.Close()
+	if fresp.StatusCode != 200 {
+		return nil, fmt.Errorf("applemusic: helper file HTTP %d", fresp.StatusCode)
+	}
+	if dstDir != "" {
+		if err := os.MkdirAll(dstDir, 0o755); err != nil {
+			return nil, err
+		}
+	}
+	f, err := os.CreateTemp(dstDir, ".part-am-*.flac")
+	if err != nil {
+		return nil, err
+	}
+	tempName := f.Name()
+	defer os.Remove(tempName)
+	finalName := tempName
+	if dstDir != "" {
+		finalName = filepath.Join(dstDir, name+".flac")
+	}
+	var size int64
+	if size, err = io.Copy(f, io.LimitReader(fresp.Body, (1<<30)+1)); err == nil {
+		err = f.Sync()
+	}
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err == nil && size > 1<<30 {
+		err = errors.New("applemusic: helper file exceeds size limit")
+	}
+	if err == nil && ctx.Err() != nil {
+		err = ctx.Err()
+	}
+	if err == nil {
+		chmodErr := os.Chmod(tempName, 0o644)
+		// FAT/exFAT cache volumes may not implement Unix permission changes.
+		if !errors.Is(chmodErr, syscall.EPERM) && !errors.Is(chmodErr, syscall.EOPNOTSUPP) && !errors.Is(chmodErr, syscall.ENOSYS) {
+			err = chmodErr
+		}
+	}
+	if err == nil && dstDir != "" {
+		err = os.Rename(tempName, finalName)
+	}
+	if err != nil {
+		return nil, err
+	}
+	// Download without a destination transfers ownership of its temporary file.
+	if dstDir == "" {
+		keep := tempName + ".flac"
+		if err := os.Rename(tempName, keep); err != nil {
+			return nil, err
+		}
+		finalName = keep
+	}
+	return &AppleMusicAudio{Path: finalName, SampleRate: out.Quality.SampleRate, Channels: out.Quality.Channels, Bits: out.Quality.Bits, Lossless: out.Quality.Lossless}, nil
 }
 
 // Ready reports whether there is anything to show: a link or a library login.
@@ -442,6 +607,12 @@ func (r amResource) track() (Track, bool) {
 		return Track{}, false // music videos and unavailable rows
 	}
 	t := Track{ID: r.ID, Title: at.Name, Artist: at.ArtistName, Album: at.AlbumName, ISRC: at.ISRC, DurationMS: at.DurationInMillis, Provider: "applemusic"}
+	if r.Type == "library-songs" {
+		t.CatalogID = at.PlayParams.CatalogID
+		if t.CatalogID == "" && len(r.Relationships.Catalog.Data) > 0 {
+			t.CatalogID = r.Relationships.Catalog.Data[0].ID
+		}
+	}
 	if at.ArtistName != "" {
 		t.Artists = []string{at.ArtistName}
 	}

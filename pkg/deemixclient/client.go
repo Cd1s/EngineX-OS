@@ -237,7 +237,7 @@ func (c *Client) DownloadAs(ctx context.Context, t providers.Track, name string,
 	if name == "" || filepath.Base(name) != name || strings.HasPrefix(name, ".") {
 		return nil, errors.New("deemix: invalid file name")
 	}
-	if dl := c.Cached(name); dl != nil {
+	if dl := c.Cached(name); dl != nil && (dl.Quality.Lossless || !c.Lossless()) {
 		return dl, nil
 	}
 	src, err := c.Download(ctx, t, progress)
