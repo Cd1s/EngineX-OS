@@ -9,7 +9,8 @@ Run this service on a Mac or PC on the same Wi-Fi / LAN as your deck for high-qu
    - **macOS**: double-click `stems/run-home-worker.command` in Finder (or run `./stems/run-home-worker.sh` in a terminal)
    - **Linux**: `./stems/run-home-worker.sh`
    - **Windows (PowerShell)**: `powershell -ExecutionPolicy Bypass -File .\stems\run-home-worker.ps1`
-   - *(Optional lightweight spectral mode without PyTorch)*: pass `hpss` at the end of the command.
+   - *(Optional lightweight spectral mode without PyTorch)*: pass `hpss` at the end of the command. It is basic quality, not a neural network. Decks on EngineX OS 5.3.0.5 or later do not use it: their own separator scored higher in our tests, so they separate the track themselves and say so on the Stems status line.
+3. A GPU is recommended for `htdemucs` (NVIDIA CUDA or Apple Silicon); without one it runs on the CPU and takes longer.
 
 ---
 
@@ -22,7 +23,8 @@ Run this service on a Mac or PC on the same Wi-Fi / LAN as your deck for high-qu
    - **macOS**：在访达双击 `stems/run-home-worker.command`（或在终端运行 `./stems/run-home-worker.sh`）
    - **Linux**：`./stems/run-home-worker.sh`
    - **Windows（PowerShell）**：`powershell -ExecutionPolicy Bypass -File .\stems\run-home-worker.ps1`
-   - *（可选轻量频谱模式，免装 PyTorch）*：在命令末尾加 `hpss`。
+   - *（可选轻量频谱模式，免装 PyTorch）*：在命令末尾加 `hpss`。它是基础音质，不是神经网络。EngineX OS 5.3.0.5 及以后的碟机不会使用它：碟机自己的分离在我们的测试里得分更高，所以改由碟机本机分轨，并在 Stems 状态行写明。
+3. `htdemucs` 建议使用显卡（NVIDIA CUDA 或 Apple Silicon）；没有显卡时用 CPU 运行，耗时更长。
 
 ---
 
@@ -35,4 +37,5 @@ Run this service on a Mac or PC on the same Wi-Fi / LAN as your deck for high-qu
    - **macOS**：在 Finder 雙擊 `stems/run-home-worker.command`（或在終端機執行 `./stems/run-home-worker.sh`）
    - **Linux**：`./stems/run-home-worker.sh`
    - **Windows（PowerShell）**：`powershell -ExecutionPolicy Bypass -File .\stems\run-home-worker.ps1`
-   - *（可選輕量頻譜模式，免裝 PyTorch）*：在指令末尾加上 `hpss`。
+   - *（可選輕量頻譜模式，免裝 PyTorch）*：在指令末尾加上 `hpss`。它是基礎音質，不是神經網路。EngineX OS 5.3.0.5 及以後的播放機不會使用它：播放機自己的分離在我們的測試裡得分更高，所以改由播放機本機分軌，並在 Stems 狀態列寫明。
+3. `htdemucs` 建議使用顯示卡（NVIDIA CUDA 或 Apple Silicon）；沒有顯示卡時以 CPU 執行，耗時更長。

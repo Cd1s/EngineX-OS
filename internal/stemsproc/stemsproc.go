@@ -3,11 +3,13 @@
 // remote renderer, by default through the cloud relay the deck already uses
 // for logins (see internal/stems.ResolveClient for the override variables).
 // With no relay set up, or one it cannot reach, it looks for sc5000-stemsd
-// on a computer in the same LAN (stems.FindLAN); failing that the deck
-// splits stems itself (stems.LocalRender). enginex-suite runs Main.
+// on a computer in the same LAN (stems.FindLAN); failing that, or when the
+// renderer it found has no neural model, the deck separates the stems itself
+// (stems.LocalRender). enginex-suite runs Main.
 package stemsproc
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -52,20 +54,22 @@ func Main(args []string) int {
 // TCP/HTTP handshake jitter on Wi-Fi-only decks such as PRIME GO and Mixstream Pro Go.
 const lanDiscoveryTimeout = 1200 * time.Millisecond
 
-func defaultFindLAN(ctx context.Context) (string, bool) {
+func defaultFindLAN(ctx context.Context) (stems.LANState, bool) {
 	return findLANAt(ctx, stems.DefaultLANState)
 }
 
-func findLANAt(ctx context.Context, statePath string) (string, bool) {
-	return stems.FindLAN(ctx, statePath, lanDiscoveryTimeout)
+func findLANAt(ctx context.Context, statePath string) (stems.LANState, bool) {
+	return stems.FindLANRenderer(ctx, statePath, lanDiscoveryTimeout)
 }
 
-// run tries the configured renderer, then a LAN renderer, then local. It moves
+// run tries the configured renderer, then a LAN renderer, then local. A
+// renderer is used only when it offers the neural model: the deck's own
+// separator measured better than a renderer's hpss (#238). It moves
 // on only while the next renderer can still be given the whole stream: the
 // renderer could not be dialled, or answered 502/503/504 having read no more than
 // the replayable prefix (the greeting header, #41). So the stream is never split
 // between two renderers.
-func run(ctx context.Context, client stems.Client, findLAN func(context.Context) (string, bool), local func(io.Reader, io.Writer) error, in io.Reader, out io.Writer) error {
+func run(ctx context.Context, client stems.Client, findLAN func(context.Context) (stems.LANState, bool), local func(io.Reader, io.Writer) error, in io.Reader, out io.Writer) error {
 	src := newStdinMux(in)
 	next := func(err error, v *view) bool {
 		v.abandon()
@@ -77,27 +81,42 @@ func run(ctx context.Context, client stems.Client, findLAN func(context.Context)
 		}
 		return errors.Is(err, stems.ErrUnavailable) || strings.HasPrefix(err.Error(), "backend status ") || err.Error() == "backend protocol mismatch"
 	}
-	if client.Endpoint != "" {
-		v := src.view()
-		err := stems.Proxy(ctx, client.Endpoint, client.Secret, v, out)
-		if !next(err, v) {
-			if err != nil {
-				return fmt.Errorf("remote stems (%s): %w", client.Source, err)
-			}
+	basic := func(backend string) error {
+		if backend == stems.Neural {
 			return nil
+		}
+		return fmt.Errorf("it only offers %s, the deck's own separator is better", cmp.Or(backend, "hpss"))
+	}
+	if client.Endpoint != "" {
+		backend, err := client.Offers(ctx)
+		if err == nil {
+			err = basic(backend)
+		} else if ctx.Err() != nil {
+			return fmt.Errorf("remote stems (%s): %w", client.Source, err)
+		}
+		if err == nil {
+			v := src.view()
+			if err = stems.Proxy(ctx, client.Endpoint, client.Secret, v, out); !next(err, v) {
+				if err != nil {
+					return fmt.Errorf("remote stems (%s): %w", client.Source, err)
+				}
+				return nil
+			}
 		}
 		fmt.Fprintf(os.Stderr, "remote stems (%s): %v; trying the LAN\n", client.Source, err)
 	}
-	if endpoint, ok := findLAN(ctx); ok {
-		v := src.view()
-		err := stems.Proxy(ctx, endpoint, "", v, out)
-		if !next(err, v) {
-			if err != nil {
-				return fmt.Errorf("LAN stems (%s): %w", endpoint, err)
+	if st, ok := findLAN(ctx); ok {
+		err := basic(st.Backend)
+		if err == nil {
+			v := src.view()
+			if err = stems.Proxy(ctx, st.Endpoint, "", v, out); !next(err, v) {
+				if err != nil {
+					return fmt.Errorf("LAN stems (%s): %w", st.Endpoint, err)
+				}
+				return nil
 			}
-			return nil
 		}
-		fmt.Fprintf(os.Stderr, "LAN stems (%s): %v; rendering locally\n", endpoint, err)
+		fmt.Fprintf(os.Stderr, "LAN stems (%s): %v; rendering locally\n", st.Endpoint, err)
 	}
 	if err := local(src.view(), out); err != nil {
 		return fmt.Errorf("local stems: %w", err)

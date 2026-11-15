@@ -496,28 +496,51 @@ func discoverLANServers(ctx context.Context, timeout time.Duration, accept func(
 // in statePath if its /healthz still answers, else whatever answers a probe.
 // It records the outcome in statePath and spends at most about 3×timeout.
 func FindLAN(ctx context.Context, statePath string, timeout time.Duration) (string, bool) {
+	st, ok := FindLANRenderer(ctx, statePath, timeout)
+	return st.Endpoint, ok
+}
+
+// chooseLAN picks a home renderer: the cached one at once if it is up and has
+// the neural model, else what discovery finds, one with the neural model
+// before any other (#238: the cached or first renderer to answer may only
+// have hpss while another computer has the model). skip is true for an
+// endpoint that is not a home renderer.
+func chooseLAN(ctx context.Context, cached string, skip func(endpoint string) bool, timeout time.Duration) (LANState, bool) {
+	st, ok := LANState{}, false
+	if cached != "" {
+		st, ok = lanHealth(ctx, cached, timeout)
+	}
+	if ok && st.Backend == Neural {
+		return st, true
+	}
+	_ = discoverLANServers(ctx, timeout, func(endpoint string, _ Beacon) bool {
+		if (skip != nil && skip(endpoint)) || (ok && sameEndpoint(endpoint, st.Endpoint)) {
+			return false
+		}
+		if got, up := lanHealth(ctx, endpoint, timeout); up && (!ok || got.Backend == Neural) {
+			st, ok = got, true
+		}
+		return ok && st.Backend == Neural
+	})
+	return st, ok
+}
+
+// FindLANRenderer is FindLAN with what the renderer said about itself.
+func FindLANRenderer(ctx context.Context, statePath string, timeout time.Duration) (LANState, bool) {
 	var last LANState
 	if b, err := os.ReadFile(statePath); err == nil {
 		json.Unmarshal(b, &last)
 	}
 	relayCfg := configuredRelayEndpoint(statePath)
 	isRelay := last.Relay || (relayCfg != "" && last.Endpoint != "" && sameEndpoint(last.Endpoint, relayCfg))
-	st, ok := LANState{}, false
+	cached := ""
 	if !isRelay && last.Endpoint != "" && lanEndpoint(last.Endpoint) {
-		st, ok = lanHealth(ctx, last.Endpoint, timeout)
+		cached = last.Endpoint
 	}
-	if !ok {
-		_ = discoverLANServers(ctx, timeout, func(endpoint string, _ Beacon) bool {
-			if relayCfg != "" && sameEndpoint(endpoint, relayCfg) {
-				return false
-			}
-			st, ok = lanHealth(ctx, endpoint, timeout)
-			return ok
-		})
-	}
+	st, ok := chooseLAN(ctx, cached, func(endpoint string) bool { return relayCfg != "" && sameEndpoint(endpoint, relayCfg) }, timeout)
 	if !ok {
 		if isRelay || (last.Endpoint != "" && !lanEndpoint(last.Endpoint)) {
-			return "", false
+			return LANState{}, false
 		}
 		st = last // keep the last renderer for the console and the next quick check
 	}
@@ -527,7 +550,7 @@ func FindLAN(ctx context.Context, statePath string, timeout time.Duration) (stri
 			os.Rename(statePath+".tmp", statePath)
 		}
 	}
-	return st.Endpoint, ok
+	return st, ok
 }
 
 // ProbeLANState discovers or refreshes the LAN Stems renderer for the deck UI

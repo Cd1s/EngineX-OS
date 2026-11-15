@@ -74,7 +74,9 @@ func TestOffloadsToLANRenderer(t *testing.T) {
 	defer cancel()
 	in := engineInput(12)
 	var out bytes.Buffer
-	find := func(context.Context) (string, bool) { return srv.URL, true }
+	find := func(context.Context) (stems.LANState, bool) {
+		return stems.LANState{Endpoint: srv.URL, Backend: stems.Neural}, true
+	}
 	if err := run(ctx, stems.Client{Source: "standalone"}, find, noLocal(t), strings.NewReader(in), &out); err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +94,7 @@ func TestFallsBackToLocalRender(t *testing.T) {
 	in := engineInput(3)
 	var out bytes.Buffer
 	asked := false
-	find := func(context.Context) (string, bool) { asked = true; return "", false }
+	find := func(context.Context) (stems.LANState, bool) { asked = true; return stems.LANState{}, false }
 	client := stems.Client{Endpoint: dead, Secret: "pw", Source: "test relay"}
 	if err := run(context.Background(), client, find, stems.LocalRender, strings.NewReader(in), &out); err != nil {
 		t.Fatal(err)
@@ -118,13 +120,16 @@ func (g gated) Read(p []byte) (int, error) {
 // given-up upload read later still reach the next renderer in order.
 func TestBusyRelayFallsBackWithoutSplittingTheStream(t *testing.T) {
 	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if neuralHealth(w, r) { // free when asked, taken when the session arrives
+			return
+		}
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}))
 	defer relay.Close()
 	in := engineInput(3)
 	g := gated{open: make(chan struct{}), r: strings.NewReader(in)}
 	var out bytes.Buffer
-	find := func(context.Context) (string, bool) { return "", false }
+	find := func(context.Context) (stems.LANState, bool) { return stems.LANState{}, false }
 	local := func(r io.Reader, w io.Writer) error {
 		close(g.open)
 		return stems.LocalRender(r, w)
@@ -166,6 +171,9 @@ func TestMuxReplaysPrefixUntilCommitted(t *testing.T) {
 func TestRelayAuthOrStatusFailureFallsBackToLANAndLocal(t *testing.T) {
 	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusInternalServerError} {
 		relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if neuralHealth(w, r) { // the session itself is what fails
+				return
+			}
 			w.WriteHeader(status)
 		}))
 		defer relay.Close()
@@ -173,9 +181,9 @@ func TestRelayAuthOrStatusFailureFallsBackToLANAndLocal(t *testing.T) {
 		in := engineInput(2)
 		var out bytes.Buffer
 		askedLAN := false
-		find := func(context.Context) (string, bool) {
+		find := func(context.Context) (stems.LANState, bool) {
 			askedLAN = true
-			return "", false
+			return stems.LANState{}, false
 		}
 		client := stems.Client{Endpoint: relay.URL, Secret: "stale-password", Source: "deemix-config"}
 		if err := run(context.Background(), client, find, stems.LocalRender, strings.NewReader(in), &out); err != nil {
@@ -204,8 +212,85 @@ func TestDefaultFindLANToleratesWiFiHealthLatency(t *testing.T) {
 	if err := os.WriteFile(stateFile, []byte(`{"endpoint":"`+srv.URL+`","online":true}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	endpoint, ok := findLANAt(context.Background(), stateFile)
-	if !ok || endpoint != srv.URL {
+	st, ok := findLANAt(context.Background(), stateFile)
+	if endpoint := st.Endpoint; !ok || endpoint != srv.URL {
 		t.Fatalf("findLANAt over simulated 500 ms Wi-Fi = (%q, %v), want (%q, true)", endpoint, ok, srv.URL)
+	}
+}
+
+// neuralHealth answers a relay's health question as a free renderer with the
+// neural model, and reports whether r was that question.
+func neuralHealth(w http.ResponseWriter, r *http.Request) bool {
+	if r.URL.Path != "/healthz/stems" {
+		return false
+	}
+	io.WriteString(w, `{"ok":true,"backend":"htdemucs"}`)
+	return true
+}
+
+// The deck's own separator measured better than a renderer's hpss (#238): a
+// renderer gets the track only when it offers the neural model. One that
+// offers hpss, or does not say what it offers, is not even sent the session.
+func TestOnlyANeuralRendererGetsTheTrack(t *testing.T) {
+	exe, _ := os.Executable()
+	t.Setenv("STEMS_TEST_WORKER", "1")
+	for _, tc := range []struct {
+		name, relay, lan string // what each offers; "-" is none, "?" does not say
+		sessions         int32  // sessions the renderers must see
+	}{
+		{"relay htdemucs", "htdemucs", "-", 1},
+		{"relay hpss", "hpss", "-", 0},
+		{"relay does not say", "?", "-", 0},
+		{"LAN htdemucs", "-", "htdemucs", 1},
+		{"LAN hpss", "-", "hpss", 0},
+		{"relay hpss, LAN htdemucs", "hpss", "htdemucs", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var sessions atomic.Int32
+			renderer := func(offers string) string {
+				b := &stems.Backend{Worker: []string{exe}, Slot: make(chan struct{}, 1), Log: os.Stderr}
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch r.URL.Path {
+					case "/healthz/stems":
+						if offers == "?" {
+							io.WriteString(w, `{"ok":true}`)
+						} else {
+							io.WriteString(w, `{"ok":true,"backend":"`+offers+`"}`)
+						}
+						return
+					case "/v1/engine":
+						sessions.Add(1)
+					}
+					b.ServeHTTP(w, r)
+				}))
+				t.Cleanup(srv.Close)
+				return srv.URL
+			}
+			client := stems.Client{Source: "standalone"}
+			if tc.relay != "-" {
+				client = stems.Client{Endpoint: renderer(tc.relay), Secret: "pw", Source: "test relay"}
+			}
+			find := func(context.Context) (stems.LANState, bool) { return stems.LANState{}, false }
+			if tc.lan != "-" {
+				st := stems.LANState{Endpoint: renderer(tc.lan), Backend: tc.lan}
+				find = func(context.Context) (stems.LANState, bool) { return st, true }
+			}
+			rendered := false
+			local := func(r io.Reader, w io.Writer) error {
+				rendered = true
+				return stems.LocalRender(r, w)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			in := engineInput(4)
+			var out bytes.Buffer
+			if err := run(ctx, client, find, local, strings.NewReader(in), &out); err != nil {
+				t.Fatal(err)
+			}
+			if got := sessions.Load(); got != tc.sessions || rendered != (tc.sessions == 0) {
+				t.Fatalf("%d renderer sessions (want %d), rendered on the deck: %v", got, tc.sessions, rendered)
+			}
+			checkSession(t, in, out.Bytes())
+		})
 	}
 }

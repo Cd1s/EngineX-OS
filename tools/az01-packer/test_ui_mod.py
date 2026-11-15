@@ -5660,6 +5660,12 @@ class StemsHqHintAndInstallerTest(unittest.TestCase):
         rows = bp.load_dict()
         offline_en = "On-deck stems (basic quality). For high-quality stems, run the EngineX Stems service on a computer on the same network."
         online_prefix = "High-quality stems:"
+        basic_hint = "For high-quality stems, that computer needs the htdemucs model."
+        on_deck = "On-deck stems (basic quality): %1 only offers hpss, which is not used."
+        for lang in ("zh-Hans", "zh-Hant"):
+            self.assertIn("%1", rows[on_deck][lang])
+            self.assertIn("hpss", rows[on_deck][lang])
+        self.assertIn("htdemucs", rows[basic_hint]["zh-Hans"])
         self.assertIn(offline_en, rows)
         self.assertIn(online_prefix, rows)
         self.assertIn("EngineX Stems", rows[offline_en]["zh-Hans"])
@@ -5681,13 +5687,32 @@ function scT(s) {{
 assert.equal(scLanStemsLine(null, 'en'), {json.dumps(offline_en)});
 assert.equal(scLanStemsLine({{online: false, hostname: 'studio-mac', backend: 'htdemucs'}}, 'en'), {json.dumps(offline_en)});
 assert.equal(scLanStemsLine({{online: true, hostname: 'studio-mac', backend: 'htdemucs'}}, 'en'), 'High-quality stems: studio-mac (htdemucs)');
-assert.equal(scLanStemsLine({{online: true, endpoint: 'http://192.168.1.9:17890'}}, 'en'), 'High-quality stems: http://192.168.1.9:17890 (htdemucs)');
+// #238: hpss, and a service that does not name its backend (it ran hpss), are not "high quality",
+// and stems-processor does not use them: the line says the deck separates itself.
+assert.equal(scLanStemsLine({{online: true, endpoint: 'http://192.168.1.9:17890'}}, 'en'), 'On-deck stems (basic quality): http://192.168.1.9:17890 only offers hpss, which is not used. ' + {json.dumps(basic_hint)});
+assert.equal(scLanStemsLine({{online: true, hostname: 'studio-mac', backend: 'hpss'}}, 'en'), 'On-deck stems (basic quality): studio-mac only offers hpss, which is not used. ' + {json.dumps(basic_hint)});
+assert.equal(scLanStemsLine({{online: true, hostname: 'a$&b', backend: 'hpss'}}, 'en').indexOf('a$&b only offers'), 31);
 scLang = 'zh-Hans';
 assert.equal(scLanStemsLine(null, scLang), rows[{json.dumps(offline_en)}]['zh-Hans']);
 assert.equal(scLanStemsLine({{online: true, hostname: 'studio-mac', backend: 'htdemucs'}}, scLang), '高音质分轨：studio-mac (htdemucs)');
 scLang = 'zh-Hant';
 assert.equal(scLanStemsLine(null, scLang), rows[{json.dumps(offline_en)}]['zh-Hant']);
-assert.equal(scLanStemsLine({{online: true, hostname: 'studio-mac', backend: 'hpss'}}, scLang), '高音質分軌：studio-mac (hpss)');
+assert.equal(scLanStemsLine({{online: true, hostname: 'studio-mac', backend: 'htdemucs'}}, scLang), '高音質分軌：studio-mac (htdemucs)');
+assert.equal(scLanStemsLine({{online: true, hostname: 'studio-mac', backend: 'hpss'}}, scLang), '本機分軌（基礎音質）：studio-mac 只提供 hpss，不會使用。如需高音質分軌，該電腦需要安裝 htdemucs 模型。');
+// #238 review: a relay that only offers hpss plus a home computer with the neural model.
+// The deck is told about the renderer the track goes to (pkg/webui
+// TestStemsStatusShowsTheRendererInUse): the computer, and only the relay when it is alone.
+const computer = {{online: true, endpoint: 'http://192.168.1.51:17890', hostname: 'studio-pc', backend: 'htdemucs'}};
+const relayOnly = {{online: true, endpoint: 'https://relay.example', hostname: 'relay-box', backend: 'hpss', relay: true}};
+for (const [lang, used, notUsed] of [
+    ['en', 'High-quality stems: studio-pc (htdemucs)', 'On-deck stems (basic quality): relay-box only offers hpss, which is not used. For high-quality stems, that computer needs the htdemucs model.'],
+    ['zh-Hans', '高音质分轨：studio-pc (htdemucs)', '本机分轨（基础音质）：relay-box 只提供 hpss，不会使用。如需高音质分轨，该电脑需要安装 htdemucs 模型。'],
+    ['zh-Hant', '高音質分軌：studio-pc (htdemucs)', '本機分軌（基礎音質）：relay-box 只提供 hpss，不會使用。如需高音質分軌，該電腦需要安裝 htdemucs 模型。'],
+]) {{
+    scLang = lang;
+    assert.equal(scLanStemsLine(computer, lang), used);
+    assert.equal(scLanStemsLine(relayOnly, lang), notUsed);
+}}
 """
         r = subprocess.run(["node", "-e", script], capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)

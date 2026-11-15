@@ -237,8 +237,23 @@ type UploadTracker struct {
 	s        stream
 	init     bool
 	channels int
+	rate     float64 // Hz, at least the lowest a renderer accepts
+	payload  int64   // PCM bytes received
 	done     bool
 	bad      bool
+}
+
+// Audio is the length in seconds of the PCM received so far. A block that was
+// announced counts only as far as its bytes have arrived.
+func (u *UploadTracker) Audio() float64 {
+	if !u.init {
+		return 0
+	}
+	bps := 4
+	if u.Packed {
+		bps = 2
+	}
+	return float64(u.payload) / (float64(u.channels*bps) * u.rate)
 }
 
 // Feed advances the tracker with upload wire bytes and returns true once
@@ -246,6 +261,9 @@ type UploadTracker struct {
 func (u *UploadTracker) Feed(p []byte) bool {
 	if u.done || u.bad {
 		return u.done
+	}
+	if u.s.data == nil {
+		u.s.data = func(p []byte) { u.payload += int64(len(p)) }
 	}
 	err := u.s.feed(p, func(f map[string]string) (int64, error) {
 		if !u.init {
@@ -257,6 +275,9 @@ func (u *UploadTracker) Feed(p []byte) bool {
 				return 0, errors.New("bad init")
 			}
 			u.init, u.channels = true, int(c)
+			if u.rate, _ = strconv.ParseFloat(f["sampleRate"], 64); !(u.rate >= 8000) {
+				u.rate = 8000 // a lower claim must not lower the floor on progress
+			}
 			return 0, nil
 		}
 		switch f["action"] {

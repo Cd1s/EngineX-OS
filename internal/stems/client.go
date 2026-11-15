@@ -5,14 +5,61 @@ package stems
 // needs no extra address, port or key file. Environment variables override it.
 
 import (
+	"cmp"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"strings"
+	"time"
 )
+
+// Neural is the separator worth leaving the deck for. The deck's own
+// measured better than a renderer's hpss (#238).
+const Neural = "htdemucs"
+
+// Offers asks the renderer which separator it has free: Neural or "hpss"
+// (also when it does not say: such a renderer only had hpss). A relay answers
+// on /healthz/stems, a renderer addressed directly on /healthz.
+func (c Client) Offers(ctx context.Context) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	for path := "/healthz/stems"; ; {
+		req, err := http.NewRequestWithContext(ctx, "GET", strings.TrimRight(c.Endpoint, "/")+path, nil)
+		if err != nil {
+			return "", err
+		}
+		req.Header.Set("Authorization", "Bearer "+c.Secret)
+		// One-shot probe: no keep-alive, so no idle socket outlives it (#42).
+		resp, err := (&http.Client{Transport: &http.Transport{Proxy: nil, DisableKeepAlives: true}}).Do(req)
+		if err != nil {
+			return "", err
+		}
+		var h struct {
+			OK      bool   `json:"ok"`
+			Backend string `json:"backend"`
+			Busy    bool   `json:"busy"`
+		}
+		err = json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&h)
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusNotFound && path != "/healthz" {
+			path = "/healthz"
+			continue
+		}
+		if resp.StatusCode != http.StatusOK || err != nil || !h.OK {
+			return "", fmt.Errorf("backend status %d", resp.StatusCode)
+		}
+		if h.Busy {
+			return "", errors.New("renderer busy")
+		}
+		return cmp.Or(h.Backend, "hpss"), nil
+	}
+}
 
 const (
 	// DefaultRelayURL is empty: operators configure their own self-hosted relay
