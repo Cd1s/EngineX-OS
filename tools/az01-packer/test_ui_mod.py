@@ -838,7 +838,8 @@ for (const amt of [1/63, 2/63, 4/63, 5/63, 8/63, 1.0]) {{
             'visible: root.scHasStemsEq',
             'visible: root.scIsMixstream',
             'visible: root.scHasAutoLoopKnob',
-            'visible: root.scCanFourDeck',
+            'visible: root.scIsPlayerBoard',
+            'readonly property bool scCanFourDeck',
         ):
             self.assertIn(expr, SRC)
         self.assertIn('root.scHasMixer', bp.UPFADER_ECHO_TILE)
@@ -846,7 +847,7 @@ for (const amt of [1/63, 2/63, 4/63, 5/63, 8/63, 1.0]) {{
         self.assertIn('root.scHasStemsEq', bp.PLAYBACK_ENTRIES)
         self.assertIn('root.scIsMixstream', bp.BEAT_JUMP_ENTRIES)
         self.assertIn('root.scHasAutoLoopKnob', bp.BEAT_JUMP_ENTRIES)
-        self.assertIn('root.scCanFourDeck', bp.FOUR_DECK_ENTRIES)
+        self.assertIn('root.scIsPlayerBoard', bp.FOUR_DECK_ENTRIES)
         # Never rely on Config.device.isPlayer for our custom visibility gates.
         self.assertNotIn("Config.device.isPlayer", bp.UPFADER_ECHO_TILE + bp.PLAYBACK_ENTRIES + bp.BEAT_JUMP_ENTRIES + bp.FOUR_DECK_ENTRIES)
         # Stock TransitionFxEnable stays untouched in Control Center, UPFADER_ECHO_TILE hides where
@@ -1062,7 +1063,7 @@ assert.strictEqual(vfx.enabled, false);
         self.assertIn('"34"', bp.FOUR_DECK_ENTRIES)
         self.assertIn('"3+4"', bp.FOUR_DECK_ENTRIES)
         self.assertNotIn("visible: root.scPlayer", bp.FOUR_DECK_ENTRIES)
-        self.assertIn("scFourDeckRole = v.fourDeckWaveform ? (v.fourDeckRoleActive || \"\") : \"\"", bp.SERVICES_MAIN)
+        self.assertIn("scFourDeckRole = scIsPlayerBoard && v.fourDeckWaveform ? (v.fourDeckRoleActive || \"\") : \"\"", bp.SERVICES_MAIN)
 
     def test_splash_and_shutdown_scaling_175(self):
         # #175: SplashScreen images and shutdown overlay Rectangle must fill
@@ -2295,7 +2296,7 @@ assert.deepStrictEqual(run(false, false, false, 1).calls, ['restart fourDeckWave
     def test_paired_player_entry_and_lane_order_201(self):
         self.assertIn('values: root.scIsPlayerBoard ? ["Stock", "Paired Player", "4 Decks"] : ["Stock", "4 Decks"]', bp.FOUR_DECK_ENTRIES)
         self.assertIn("visible: root.scIsPlayerBoard", bp.FOUR_DECK_ENTRIES)
-        self.assertIn("scPairedSetting = !!v.fourDeckWaveform && !!v.pairedView", bp.SERVICES_MAIN)
+        self.assertIn("scPairedSetting = scIsPlayerBoard && !!v.fourDeckWaveform && !!v.pairedView", bp.SERVICES_MAIN)
         self.assertIn("if (scPairedOn) scPairedFollow(decks)", bp.SERVICES_MAIN)
         # Both hint lines go through translate(): no comparison on their text line.
         hint = next(l for l in bp.FOUR_DECK_ENTRIES.splitlines() if "Paired Player needs" in l)
@@ -7485,6 +7486,188 @@ props[1].loaded.state = true; props[1].net.string = 'net://1/USB/Mix %41.mp3';
 now += 500; scRemoteCheck(now);
 assert.deepEqual(scRemoteUpdates, [{id: 'r1', status: 'loaded', reason: ''}]);
 """)
+
+
+class Prime4ViewsTests(unittest.TestCase):
+    def test_all_in_one_unsaved_views_keep_stock_and_shift_view_cycles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "packs"
+            subprocess.run(
+                ["python3", str(BUILD_PACKS), "--qrc", str(LAB / "5.3.0" / "qrc"), "--out", str(out)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            em = (out / "en/Skins/Embedded/EmbeddedMain.qml").read_text(encoding="utf-8")
+            self.assertIn("function scViewApplySlot(n)", em)
+            self.assertIn("function scViewReset()", em)
+            self.assertIn("resetToDefault(", em)
+            self.assertIn("function onCurrentViewChanged()", em)
+            lvt = (out / "en/Skins/Embedded/Views/ControlCenter/Tabs/Preferences/Entries/LayoutViewTab.qml").read_text(encoding="utf-8")
+            self.assertIn("onClicked: root.scViewReset()", lvt)
+
+        if shutil.which("node"):
+            m_of = re.search(r"(?m)^\tfunction scViewOf\(n\) \{[\s\S]*?\n\t\}", bp.SERVICES_MAIN)
+            m_slot = re.search(r"(?m)^\tfunction scViewApplySlot\(n\) \{[\s\S]*?\n\t\}", bp.SERVICES_MAIN)
+            m_sel = re.search(r"(?m)^\tfunction scViewSelect\(n\) \{[\s\S]*?\n\t\}", bp.SERVICES_MAIN)
+            m_chg = re.search(r"(?m)^\t\tfunction onCurrentViewChanged\(\) \{[\s\S]*?\n\t\t\}", bp.SERVICES_MAIN)
+            for m in (m_of, m_slot, m_sel, m_chg):
+                self.assertIsNotNone(m)
+            js = f"""
+const assert = require('node:assert/strict');
+let resets = [], applied = [], stored = 0;
+let scIsPlayerBoard = false, scFourDeckRole = "", scPairedOn = false;
+let scViews = {{}}, scViewActive = 1, scViewReady = true, scViewSyncing = false;
+let scViewQuiet = 0, scViewLast = "", scViewDirty = false;
+const vsc = {{
+    currentView: 0,
+    resetToDefault(idx) {{ resets.push(idx); }}
+}};
+globalThis.PlanckGUI = {{ views: {{ performanceViewController: {{ viewStateController: vsc }} }} }};
+globalThis.root = {{
+    get scIsPlayerBoard() {{ return scIsPlayerBoard; }},
+    get scViewReady() {{ return scViewReady; }},
+    get scViewSyncing() {{ return scViewSyncing; }},
+    set scViewSyncing(v) {{ scViewSyncing = v; }},
+    get scViewCtrl() {{ return vsc; }},
+    get scViewActive() {{ return scViewActive; }},
+    set scViewActive(v) {{ scViewActive = v; }},
+    get scViews() {{ return scViews; }},
+    get scViewQuiet() {{ return scViewQuiet; }},
+    set scViewQuiet(v) {{ scViewQuiet = v; }},
+    get scViewLast() {{ return scViewLast; }},
+    set scViewLast(v) {{ scViewLast = v; }},
+    get scViewDirty() {{ return scViewDirty; }},
+    set scViewDirty(v) {{ scViewDirty = v; }},
+    scViewApply(s) {{ applied.push(s); return true; }},
+    scViewStore() {{ stored++; }},
+}};
+function scViewApply(s) {{ return globalThis.root.scViewApply(s); }}
+function scViewStore() {{ return globalThis.root.scViewStore(); }}
+{m_of.group(0)}
+{m_slot.group(0)}
+{m_sel.group(0)}
+{m_chg.group(0).replace(chr(9)+chr(9), chr(9))}
+
+// JC11: unsaved slots 1..3 reset stock C++ presets; View 2 is NOT wiped to {{pads: false}}
+assert.equal(scViewApplySlot(1), true);
+assert.deepEqual(resets, [0]);
+assert.deepEqual(applied, []);
+scViewSelect(2);
+assert.equal(vsc.currentView, 1);
+assert.deepEqual(resets, [0, 1]);
+assert.deepEqual(applied, []);
+// SHIFT+VIEW cycles to View 3 (unsaved -> stock preset 2)
+vsc.currentView = 2;
+onCurrentViewChanged();
+assert.equal(scViewActive, 3);
+assert.deepEqual(resets, [0, 1, 2]);
+// User-saved View 2 keeps top priority over stock preset
+scViews["2"] = {{ waveformOrientation: "Horizontal", library: false, pads: false }};
+vsc.currentView = 1;
+onCurrentViewChanged();
+assert.equal(scViewActive, 2);
+assert.deepEqual(resets, [0, 1, 2]);
+assert.deepEqual(applied, [scViews["2"]]);
+// Unsaved View 4 falls back to {{pads: false}} without touching vsc
+scViewSelect(4);
+assert.deepEqual(applied[1], {{ pads: false }});
+// Standalone player (JP07) stays untouched
+resets = []; applied = []; scIsPlayerBoard = true; scFourDeckRole = "13"; scViews = {{}};
+assert.equal(scViewApplySlot(2), true);
+assert.deepEqual(resets, []);
+assert.deepEqual(applied, [{{ pads: false, deckCount: "4 Decks", waveformCount: "4 Waveforms" }}]);
+"""
+            res = subprocess.run(["node", "-e", js], capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0, res.stderr)
+
+    def test_load_enabled_with_horizontal_library_in_global_assignment_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "packs"
+            subprocess.run(
+                ["python3", str(BUILD_PACKS), "--qrc", str(LAB / "5.3.0" / "qrc"), "--out", str(out)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            gcfg = (out / "en/ControlSurfaceModules/ControlSurfaceModules/GlobalAssignmentConfig.qml").read_text(encoding="utf-8")
+            em = (out / "en/Skins/Embedded/EmbeddedMain.qml").read_text(encoding="utf-8")
+            self.assertNotIn("PlanckGUI", gcfg)
+            self.assertIn('/GUI/Scripted/EngineXPerfLibVisible', gcfg)
+            self.assertIn("EngineXPerfLibVisible", em)
+            self.assertIn("scPerformanceLibraryVisible", gcfg)
+            self.assertIn(
+                "readonly property bool compactBrowserVisible: waveformIsForeground && (waveformsAreVertical || scPerformanceLibraryVisible)",
+                gcfg,
+            )
+
+        if shutil.which("node"):
+            js = r"""
+const assert = require('node:assert/strict');
+function evalLoad({showBrowseView, areDialogsOpen, waveformsAreVertical, perfLibVisible, focusArea}) {
+    const waveformIsForeground = !(showBrowseView || areDialogsOpen);
+    const trackSelectedInBrowseView = focusArea === "Tracklist" || focusArea === "Prepare";
+    const compactBrowserVisible = waveformIsForeground && (waveformsAreVertical || perfLibVisible);
+    const canLoad = trackSelectedInBrowseView || compactBrowserVisible;
+    return { compactBrowserVisible, canLoad };
+}
+// Horizontal + Library visible in foreground -> LOAD enabled
+assert.deepEqual(evalLoad({showBrowseView: false, areDialogsOpen: false, waveformsAreVertical: false, perfLibVisible: true, focusArea: ""}),
+    { compactBrowserVisible: true, canLoad: true });
+// Horizontal + Library hidden -> LOAD disabled
+assert.deepEqual(evalLoad({showBrowseView: false, areDialogsOpen: false, waveformsAreVertical: false, perfLibVisible: false, focusArea: ""}),
+    { compactBrowserVisible: false, canLoad: false });
+// Full-screen browse unchanged
+assert.deepEqual(evalLoad({showBrowseView: true, areDialogsOpen: false, waveformsAreVertical: false, perfLibVisible: true, focusArea: "Tracklist"}),
+    { compactBrowserVisible: false, canLoad: true });
+assert.deepEqual(evalLoad({showBrowseView: true, areDialogsOpen: false, waveformsAreVertical: false, perfLibVisible: true, focusArea: "Collections"}),
+    { compactBrowserVisible: false, canLoad: false });
+// Dialogs open unchanged
+assert.deepEqual(evalLoad({showBrowseView: false, areDialogsOpen: true, waveformsAreVertical: false, perfLibVisible: true, focusArea: ""}),
+    { compactBrowserVisible: false, canLoad: false });
+// Vertical waveforms preserved
+assert.deepEqual(evalLoad({showBrowseView: false, areDialogsOpen: false, waveformsAreVertical: true, perfLibVisible: false, focusArea: ""}),
+    { compactBrowserVisible: true, canLoad: true });
+"""
+            res = subprocess.run(["node", "-e", js], capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0, res.stderr)
+
+    def test_linked_view_hidden_and_ignored_on_all_in_ones(self):
+        self.assertNotIn("visible: root.scCanFourDeck", bp.FOUR_DECK_ENTRIES)
+        self.assertIn("visible: root.scIsPlayerBoard", bp.FOUR_DECK_ENTRIES)
+        self.assertIn("scFourDeckRole = scIsPlayerBoard && v.fourDeckWaveform ?", bp.SERVICES_MAIN)
+        self.assertIn("scFourDeckOn = scIsPlayerBoard && !!v.fourDeckWaveform", bp.SERVICES_MAIN)
+        self.assertIn("scPairedSetting = scIsPlayerBoard && !!v.fourDeckWaveform && !!v.pairedView", bp.SERVICES_MAIN)
+        if shutil.which("node"):
+            m_lock = re.search(r"(?m)^\tfunction scDeckLocked\(deck\) \{[^\n]+\}", bp.SERVICES_MAIN)
+            self.assertIsNotNone(m_lock)
+            js = f"""
+const assert = require('node:assert/strict');
+function runBoard(board, v) {{
+    const scBoard = String(board || "");
+    const scIsPlayerBoard = ["JP07", "JP08", "JP13", "JP14"].indexOf(scBoard) >= 0;
+    const scFourDeckRole = scIsPlayerBoard && v.fourDeckWaveform ? (v.fourDeckRoleActive || "") : "";
+    const scFourDeckOn = scIsPlayerBoard && !!v.fourDeckWaveform;
+    const scPairedSetting = scIsPlayerBoard && !!v.fourDeckWaveform && !!v.pairedView;
+    const scPlayer = scIsPlayerBoard, scShadowDisplay = {{}}, scShadowEngineMask = 0, scShadowAt = {{}};
+    function scShadowData() {{ return null; }}
+    {m_lock.group(0)}
+    return {{ scFourDeckRole, scFourDeckOn, scPairedSetting, locked: [1, 2, 3, 4].map(d => scDeckLocked(d)) }};
+}}
+for (const b of ["JC11", "JC11S", "JP21", "JP24", "JC16", "JP11", "JP11S", "JP20", "NH08", "NH08S", "NH10"]) {{
+    assert.deepEqual(
+        runBoard(b, {{ fourDeckWaveform: true, fourDeckRoleActive: "12", pairedView: true }}),
+        {{ scFourDeckRole: "", scFourDeckOn: false, scPairedSetting: false, locked: [false, false, false, false] }},
+        b
+    );
+}}
+assert.deepEqual(
+    runBoard("JP07", {{ fourDeckWaveform: true, fourDeckRoleActive: "13", pairedView: true }}),
+    {{ scFourDeckRole: "13", scFourDeckOn: true, scPairedSetting: true, locked: [false, true, false, true] }}
+);
+"""
+            res = subprocess.run(["node", "-e", js], capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0, res.stderr)
 
 
 if __name__ == "__main__":

@@ -998,8 +998,78 @@ SERVICES_MAIN = """
 		scViewLast = ""; scViewDirty = true
 		return true
 	}
+	property bool scViewSyncing: false
+	readonly property var scViewCtrl: typeof PlanckGUI !== "undefined" && PlanckGUI && PlanckGUI.views && PlanckGUI.views.performanceViewController ? (PlanckGUI.views.performanceViewController.viewStateController || null) : null
+	Connections {
+		target: !root.scIsPlayerBoard && root.scViewReady ? root.scViewCtrl : null
+		ignoreUnknownSignals: true
+		function onCurrentViewChanged() {
+			if (root.scViewSyncing || !root.scViewCtrl) return
+			const idx = root.scViewCtrl.currentView
+			if (idx < 0 || idx > 2) return
+			const n = idx + 1
+			root.scViewActive = n
+			if (root.scViews[String(n)]) {
+				root.scViewApply(root.scViews[String(n)])
+			} else {
+				root.scViewSyncing = true
+				try {
+					root.scViewCtrl.resetToDefault(idx)
+				} finally {
+					root.scViewSyncing = false
+				}
+				root.scViewQuiet = Date.now() + 3000
+				root.scViewLast = ""; root.scViewDirty = true
+			}
+			root.scViewStore()
+		}
+	}
 	function scViewOf(n) {
 		return scViews[String(n)] || (scFourDeckRole !== "" ? {pads: false, deckCount: scPairedOn ? "2 Decks" : "4 Decks", waveformCount: scPairedOn ? "2 Waveforms" : "4 Waveforms"} : {pads: false})
+	}
+	function scViewApplySlot(n) {
+		const saved = scViews[String(n)]
+		const c = PlanckGUI.views.performanceViewController
+		if (!scIsPlayerBoard) {
+			const vsc = c && c.viewStateController
+			if (!vsc) return false
+			if (!saved && n >= 1 && n <= 3) {
+				scViewSyncing = true
+				try {
+					if (vsc.currentView !== n - 1) vsc.currentView = n - 1
+					vsc.resetToDefault(n - 1)
+				} finally {
+					scViewSyncing = false
+				}
+				scViewQuiet = Date.now() + 3000
+				scViewLast = ""; scViewDirty = true
+				return true
+			}
+			if (saved && n >= 1 && n <= 3 && vsc.currentView !== n - 1) {
+				scViewSyncing = true
+				try {
+					vsc.currentView = n - 1
+				} finally {
+					scViewSyncing = false
+				}
+			}
+		}
+		return scViewApply(scViewOf(n))
+	}
+	function scViewReset() {
+		const c = PlanckGUI.views.performanceViewController
+		const vsc = c && c.viewStateController
+		if (scIsPlayerBoard) {
+			if (vsc) vsc.resetToDefault(vsc.currentView)
+			return
+		}
+		if (scViews[String(scViewActive)]) {
+			const v = Object.assign({}, scViews)
+			delete v[String(scViewActive)]
+			scViews = v
+			scViewStore()
+		}
+		scViewApplySlot(scViewActive)
 	}
 	function scViewStore() {
 		const x = new XMLHttpRequest()
@@ -1018,7 +1088,7 @@ SERVICES_MAIN = """
 	function scViewSelect(n) {
 		if (n === scViewActive) return
 		scViewActive = n
-		scViewApply(scViewOf(n))
+		scViewApplySlot(n)
 		scViewStore()
 	}
 	Timer {
@@ -1048,7 +1118,7 @@ SERVICES_MAIN = """
 					if (!lb || !lb.translator) return
 					if (!lb.translator.state) lb.translator.state = true
 				}
-				root.scViewReady = root.scViewApply(root.scViewOf(root.scViewActive))
+				root.scViewReady = root.scViewApplySlot(root.scViewActive)
 				return
 			}
 			if (root.scPairedDirty) root.scPairedDirty = !root.scPairedApplyLayout() // #201: after a saved view
@@ -2790,6 +2860,22 @@ SERVICES_MAIN = """
 		interval: 250; running: root.scUiLoaded && !root.scReverseJogSynced; repeat: true
 		onTriggered: root.scSyncReverseJog(true)
 	}
+	readonly property var scPerfLibPropRef: Planck.createProperty("EngineXPerfLibVisible", false, 1)
+	readonly property var scPerfLibStateProp: scPerfLibPropRef && Planck.getProperty("/GUI/Scripted/EngineXPerfLibVisible")
+	readonly property var scPerfViewCtrl: typeof PlanckGUI !== "undefined" && PlanckGUI && PlanckGUI.views ? PlanckGUI.views.performanceViewController : null
+	readonly property bool scPerfLibShown: !!(scPerfViewCtrl && scPerfViewCtrl.visible && scPerfViewCtrl.libraryView && scPerfViewCtrl.libraryView.visible)
+	property bool scPerfLibSynced: false
+	function scSyncPerfLib() {
+		const p = scPerfLibStateProp && scPerfLibStateProp.translator ? scPerfLibStateProp : Planck.getProperty("/GUI/Scripted/EngineXPerfLibVisible")
+		if (!p || !p.translator) { scPerfLibSynced = false; return }
+		p.translator.state = scPerfLibShown
+		scPerfLibSynced = true
+	}
+	onScPerfLibShownChanged: scSyncPerfLib()
+	Timer {
+		interval: 250; running: !root.scPerfLibSynced; repeat: true; triggeredOnStart: true
+		onTriggered: root.scSyncPerfLib()
+	}
 	property int scLedBrightness: 100
 	property int scUIScale: 100
 	property bool scStemsEqMode: false
@@ -3401,9 +3487,9 @@ SERVICES_MAIN = """
 		scProlinkExport = !!v.prolinkExport
 		scPlayer = !!v.player
 		scDeckClock = !!v.deckClock
-		scFourDeckRole = v.fourDeckWaveform ? (v.fourDeckRoleActive || "") : ""
-		scFourDeckOn = !!v.fourDeckWaveform
-		scPairedSetting = !!v.fourDeckWaveform && !!v.pairedView
+		scFourDeckRole = scIsPlayerBoard && v.fourDeckWaveform ? (v.fourDeckRoleActive || "") : ""
+		scFourDeckOn = scIsPlayerBoard && !!v.fourDeckWaveform
+		scPairedSetting = scIsPlayerBoard && !!v.fourDeckWaveform && !!v.pairedView
 		scFourDeckRoleSetting = v.fourDeckRole || "auto"
 		scShadowMode = v.shadowMode || "auto"
 		scKeepPlayhead(v.playhead || 0)
@@ -4581,7 +4667,7 @@ FOUR_DECK_ENTRIES = """
 			id: scLinkedViewEntry
 			text: "Linked View"
 			entryWidth: 176 // "Paired Player" does not fit the stock 136
-			visible: root.scCanFourDeck
+			visible: root.scIsPlayerBoard
 			readonly property int at: !root.scFourDeckOn ? 0 : root.scIsPlayerBoard && root.scPairedSetting ? 1 : values.length - 1
 			values: root.scIsPlayerBoard ? ["Stock", "Paired Player", "4 Decks"] : ["Stock", "4 Decks"]
 			currentValue: values[at]
@@ -4614,7 +4700,7 @@ FOUR_DECK_ENTRIES = """
 		EntryBase.ListEntry {
 			text: "4-Deck Role"
 			entryWidth: 104
-			visible: root.scCanFourDeck && root.scFourDeckOn
+			visible: root.scIsPlayerBoard && root.scFourDeckOn
 			readonly property var ids: ["auto", "13", "24", "12", "34", "1", "2"]
 			values: ["Auto", "1+3", "2+4", "1+2", "3+4", "1", "2"]
 			currentValue: values[Math.max(0, ids.indexOf(root.scFourDeckRoleSetting))]
@@ -4625,7 +4711,7 @@ FOUR_DECK_ENTRIES = """
 			readonly property var ids: ["auto", "engine", "cdj"]
 			readonly property int at: Math.max(0, ids.indexOf(root.scShadowMode))
 			text: "Shadow Deck Mode"
-			visible: root.scCanFourDeck && root.scFourDeckOn
+			visible: root.scIsPlayerBoard && root.scFourDeckOn
 			entryWidth: 176 // "All Engine Mode" does not fit the stock 136
 			values: ["Auto", "All Engine Mode", "All CDJ Mode"]
 			currentValue: values[at]
@@ -4633,7 +4719,7 @@ FOUR_DECK_ENTRIES = """
 			onSelected: function(index) { if (index !== at) root.scCall("shadowMode=" + ids[index]) }
 		},
 		@HEADLINE@ { // one sentence on the selected mode; too long for the row itself
-			visible: root.scCanFourDeck && root.scFourDeckOn
+			visible: root.scIsPlayerBoard && root.scFourDeckOn
 			leftPadding: 24; rightPadding: 24
 			wrapMode: Text.WordWrap
 			Layout.preferredHeight: implicitHeight
@@ -6826,6 +6912,7 @@ def edits(dev: bool):
             ("            Layout.preferredWidth: 120\n", "            Layout.preferredWidth: 100\n"),
             ("            property bool isSelected: modelData === control.currentView\n", "            property bool isSelected: index + 1 === root.scViewActive\n"),
             ("            onClicked: control.currentView = modelData\n", "            onClicked: root.scViewSelect(index + 1)\n"),
+            ("        onClicked: control.resetToDefault(control.currentView)\n", "        onClicked: root.scViewReset()\n"),
             ('    FlatButton {\n        objectName: "ResetCurrentViewButton"\n', '    FlatButton {\n        objectName: "SaveCurrentViewButton"\n        Layout.preferredHeight: 50\n        Layout.alignment: Qt.AlignVCenter | Qt.AlignRight\n        text: "Save View"\n        onClicked: root.scViewSave()\n        background: Rectangle {\n            color: Style.surface03Color\n        }\n    }\n\n    FlatButton {\n        objectName: "ResetCurrentViewButton"\n'),
         ]
         # #49: Engine's own load filter (all load paths: menu, direct, browse knob) also
@@ -7240,6 +7327,8 @@ def edits(dev: bool):
             '    property var pReverseJogLeft: Planck.getProperty("/GUI/Scripted/EngineXJogInvertLeft")\n'
             '    property var pReverseJogRight: Planck.getProperty("/GUI/Scripted/EngineXJogInvertRight")\n'
             '    property var pReverseJogReady: Planck.getProperty("/GUI/Scripted/EngineXJogInvertReady")\n'
+            '    property var pPerfLibVisible: Planck.getProperty("/GUI/Scripted/EngineXPerfLibVisible")\n'
+            '    readonly property bool scPerformanceLibraryVisible: !!(pPerfLibVisible && pPerfLibVisible.translator && pPerfLibVisible.translator.state)\n'
             '    readonly property bool scReverseJogLeftEffective: (pReverseJogReady && pReverseJogReady.translator && pReverseJogReady.translator.state && pReverseJogLeft && pReverseJogLeft.translator) ? !!pReverseJogLeft.translator.state : scReverseJogLeft\n'
             '    readonly property bool scReverseJogRightEffective: (pReverseJogReady && pReverseJogReady.translator && pReverseJogReady.translator.state && pReverseJogRight && pReverseJogRight.translator) ? !!pReverseJogRight.translator.state : scReverseJogRight\n'
             '    function scIsReverseJog(deckName) {\n'
@@ -7247,7 +7336,7 @@ def edits(dev: bool):
             '    }\n'
             '    Timer {\n'
             '        interval: 500\n'
-            '        running: !scGlobalConfig.pReverseJogReady || !scGlobalConfig.pReverseJogReady.translator || !scGlobalConfig.pReverseJogLeft || !scGlobalConfig.pReverseJogLeft.translator || !scGlobalConfig.pReverseJogRight || !scGlobalConfig.pReverseJogRight.translator\n'
+            '        running: !scGlobalConfig.pReverseJogReady || !scGlobalConfig.pReverseJogReady.translator || !scGlobalConfig.pReverseJogLeft || !scGlobalConfig.pReverseJogLeft.translator || !scGlobalConfig.pReverseJogRight || !scGlobalConfig.pReverseJogRight.translator || !scGlobalConfig.pPerfLibVisible || !scGlobalConfig.pPerfLibVisible.translator\n'
             '        repeat: true\n'
             '        onTriggered: {\n'
             '            if (!scGlobalConfig.pReverseJogLeft || !scGlobalConfig.pReverseJogLeft.translator)\n'
@@ -7256,6 +7345,8 @@ def edits(dev: bool):
             '                scGlobalConfig.pReverseJogRight = Planck.getProperty("/GUI/Scripted/EngineXJogInvertRight")\n'
             '            if (!scGlobalConfig.pReverseJogReady || !scGlobalConfig.pReverseJogReady.translator)\n'
             '                scGlobalConfig.pReverseJogReady = Planck.getProperty("/GUI/Scripted/EngineXJogInvertReady")\n'
+            '            if (!scGlobalConfig.pPerfLibVisible || !scGlobalConfig.pPerfLibVisible.translator)\n'
+            '                scGlobalConfig.pPerfLibVisible = Planck.getProperty("/GUI/Scripted/EngineXPerfLibVisible")\n'
             '        }\n'
             '    }\n'
             '    Timer {\n'
@@ -7276,7 +7367,10 @@ def edits(dev: bool):
             '            x.open("GET", "http://127.0.0.1:8080/v1/enginex/ui")\n'
             '            x.send()\n'
             '        }\n'
-            '    }\n')]
+            '    }\n'),
+            ('    readonly property bool compactBrowserVisible: waveformIsForeground && waveformsAreVertical\n',
+             '    readonly property bool compactBrowserVisible: waveformIsForeground && (waveformsAreVertical || scPerformanceLibraryVisible)\n'),
+        ]
         # #213: per-deck jog wheel inversion using stock HighSpeedJogWheelAssignment.invert
         # (and swapped Shift+Jog track-search targets on models with hasTrackSearch).
         scaled["ControlSurfaceModules/ControlSurfaceModules/JogWheel.qml"] = [
