@@ -17,7 +17,13 @@ Thanks for helping. EngineX OS runs on decks that people play live on, so the ba
 
 ### Ground rules
 
-- **Real-time audio**: the 96 kHz `SCHED_RR 49` audio thread must never block, wait on a lock, allocate or use a large stack frame.
+- **Real-time audio** (#237): everything that runs in Engine's audio callback or on its `SCHED_RR 49` render threads must finish in a bounded time and wait for nothing. That is every `hook_*` DSP function in `tools/ui-mod/engine_ui_hook.c` and the headers they call (`dsp_smooth.h`, `master_limiter.h`, `echo_out.h`, `pioneer_*.h`, `fx_selector.h`, `sc_tap_push` in `live_tap.h`). In that code:
+  - no allocation, no lock, no wait and no call that can block or enter the kernel: `malloc` / `free`, mutexes and condition variables, file, socket and log output, `usleep`, `dlsym`. The one such call in the tree is `clock_gettime(CLOCK_MONOTONIC)`, once per master block;
+  - a loop runs once per frame of the block, or a small fixed number of times. Nothing whose size does not come from the block is cleared, copied or searched there: prepare and clear state on the polling worker and hand it over with one atomic word (`sc_pfx_instance_prepare`, `sc_ms_prepare`);
+  - other threads are reached through atomics only, and a slot that is taken is skipped, never waited for (`sc_dsp_chain_enter`, `sc_pfx_enter_input`);
+  - state lives in static storage, which is resident because Engine locks its memory; the stack takes a few KB at most;
+  - `tools/ui-mod/test_rt_budget.c` and `test_rt_callback.c` pass natively and as armhf. The first times the DSP headers block by block and compiles them with those calls poisoned; the second runs the hook's real audio functions with everything switched on and fails when one of those calls is reached from them. A new audio-path function is added to `audio_block()` there, and `test_dsp_smooth.c` runs under TSan when state is shared between threads;
+  - known exception, until that effect is reworked: the frozen master Pioneer FX (`pioneer_fx_legacy.h`) clears 488 KB per stereo pair in the block where its mode changes.
 - **All models**: the same image group serves several models (see the table below). Check every model of the group, or limit the change explicitly.
 - **Destructive operations**: Factory Reset, `az01-update --erase-data` and boots with a blank `/data` are tested in a sandbox or VM (`unshare -m` + `qemu-arm` with the unpacked rootfs), never on a real deck.
 - **Engine databases**: while Engine has a library open, no other process may write `m.db` / `hm.db`.
@@ -40,6 +46,8 @@ python3 -m unittest discover -s tools/az01-packer
 python3 -m unittest discover -s tools/stems
 # C compatibility adapters: build commands are in the header of each file
 #   tools/ui-mod/test_dsp_smooth.c   (also with ASan/UBSan and TSan)
+#   tools/ui-mod/test_rt_budget.c    (real-time budget of the audio-path DSP; native and armhf)
+#   tools/ui-mod/test_rt_callback.c  (the hook's audio functions: no blocking call, block budget; then `selftest`)
 #   tools/ui-mod/test_stems_feature.c (armhf native on the build host)
 #   tools/edisksd-hook/test_edisksd_hook.c
 #   tools/ui-mod/test_az04_hook.c
