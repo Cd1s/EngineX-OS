@@ -7024,7 +7024,7 @@ class RemoteLoadUiTest(unittest.TestCase):
                   'root.scTr("/Engine/Deck" + deck + "/PlayState")', "deck playing", "other track loaded"):
             self.assertIn(s, SRC)
         lines = (REPO / "tools/ui-mod/i18n.tsv").read_text(encoding="utf-8").splitlines()
-        self.assertIn("Remote Load (LAN API)\t远程加载（局域网 API）\t遠端載入（區域網路 API）", lines)
+        self.assertIn("Remote Load (LAN API)\t远程加载（局域网 API）\t遠端載入（區域網路 API）\tCarga remota (API LAN)", lines)
 
     def test_remote_load_reads_lock_playing_deck(self):
         # The path and value stock Engine QML reads (docs/re-report/rea-evidence/observations.jsonl).
@@ -7461,6 +7461,49 @@ props[1].loaded.state = true; props[1].net.string = 'net://1/USB/Mix %41.mp3';
 now += 500; scRemoteCheck(now);
 assert.deepEqual(scRemoteUpdates, [{id: 'r1', status: 'loaded', reason: ''}]);
 """)
+
+
+@unittest.skipUnless(shutil.which("gcc"), "gcc needed for pack_dir test")
+class LanguagePackSelectionTest(unittest.TestCase):
+    """Rule 23: a deck whose Engine language is Spanish gets the es pack;
+    zh-Hans, zh-Hant and en still get theirs; an unknown language falls back to en."""
+
+    def test_pack_dir_selects_es_and_falls_back(self):
+        hook_c = (REPO / "tools/ui-mod/engine_ui_hook.c").read_text(encoding="utf-8")
+        m = re.search(r"(static void pack_dir\(char \*out, size_t size\)\s*\{[\s\S]*?\n\})", hook_c)
+        self.assertIsNotNone(m, "pack_dir not found in engine_ui_hook.c")
+        pack_dir_code = m.group(1)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            test_c = f"""#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <assert.h>
+
+#define UI_ROOT "{tmp}"
+
+{pack_dir_code}
+
+int main(void) {{
+    char out[256];
+    pack_dir(out, sizeof(out));
+    printf("%s\\n", out);
+    return 0;
+}}
+"""
+            src = Path(tmp) / "test.c"
+            bin_path = Path(tmp) / "test_bin"
+            src.write_text(test_c, encoding="utf-8")
+            subprocess.check_call(["gcc", str(src), "-o", str(bin_path)])
+
+            for lang, want in [("es", "es"), ("zh-Hans", "zh-Hans"), ("zh-Hant", "zh-Hant"),
+                               ("en", "en"), ("fr", "en"), ("unknown", "en")]:
+                with self.subTest(lang=lang):
+                    conf = Path(tmp) / "settings.conf"
+                    conf.write_text(f"lang={lang}\n", encoding="utf-8")
+                    out = subprocess.check_output([str(bin_path)]).decode().strip()
+                    expected = f"{tmp}/packs/{want}"
+                    self.assertEqual(out, expected, f"lang={lang} got {out}, want {expected}")
 
 
 if __name__ == "__main__":
