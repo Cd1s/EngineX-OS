@@ -1,7 +1,13 @@
 package webui
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
+	"fmt"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -42,14 +48,26 @@ func TestRemoteLoadSettingLoopbackOnly(t *testing.T) {
 	if w := do("POST", "/api/ui?remoteLoad=0", "192.0.2.1:1", ""); w.Code != 403 {
 		t.Fatalf("external query = %d", w.Code)
 	}
+	if w := do("POST", "/api/ui?remote_load=0", "192.0.2.1:1", ""); w.Code != 403 {
+		t.Fatalf("external query remote_load = %d", w.Code)
+	}
 	if w := do("POST", "/api/ui", "192.0.2.1:1", `{"remoteLoad":0}`); w.Code != 403 {
 		t.Fatalf("external json = %d", w.Code)
+	}
+	if w := do("POST", "/api/ui", "192.0.2.1:1", `{"remote_load":0}`); w.Code != 403 {
+		t.Fatalf("external json remote_load = %d", w.Code)
 	}
 	if !s.remoteLoadEnabled() {
 		t.Fatal("external request changed the setting")
 	}
 	if w := do("POST", "/v1/sc5000/ui?remoteLoad=0", "127.0.0.1:1", ""); w.Code != 200 || s.remoteLoadEnabled() {
 		t.Fatalf("loopback off = %d", w.Code)
+	}
+	if w := do("POST", "/v1/sc5000/ui?remote_load=1", "127.0.0.1:1", ""); w.Code != 200 || !s.remoteLoadEnabled() {
+		t.Fatalf("loopback remote_load on = %d", w.Code)
+	}
+	if w := do("POST", "/v1/enginex/ui?remote_load=0", "127.0.0.1:1", ""); w.Code != 200 || s.remoteLoadEnabled() {
+		t.Fatalf("enginex loopback remote_load off = %d", w.Code)
 	}
 }
 
@@ -604,5 +622,326 @@ func TestRemoteLoadBoardReadOnce(t *testing.T) {
 	}
 	if out.Board != "SCLIVE4" || len(out.Decks) != 2 || out.Decks[0].Side != "left" || out.Decks[1].Side != "right" {
 		t.Fatalf("board read again after start: %s", w.Body.String())
+	}
+}
+
+func TestRemoteLoadRateLimiting(t *testing.T) {
+	s, _ := remoteRouteServer(t)
+	for i := 1; i <= 4; i++ {
+		r := httptest.NewRequest("GET", "/api/remote-load", nil)
+		r.RemoteAddr = "192.0.2.100:1234"
+		r.Header.Set("Authorization", "Bearer wrong-code")
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, r)
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d code %d want 401", i, w.Code)
+		}
+	}
+	// 5th wrong attempt triggers rate limiting lockout
+	r5 := httptest.NewRequest("GET", "/api/remote-load", nil)
+	r5.RemoteAddr = "192.0.2.100:1234"
+	r5.Header.Set("Authorization", "Bearer wrong-code")
+	w5 := httptest.NewRecorder()
+	s.ServeHTTP(w5, r5)
+	if w5.Code != http.StatusTooManyRequests {
+		t.Fatalf("attempt 5 code %d want 429", w5.Code)
+	}
+	if !strings.Contains(w5.Body.String(), "too many wrong access codes") {
+		t.Fatalf("attempt 5 body %s", w5.Body.String())
+	}
+	// Even with correct code, the locked IP gets 429
+	rLocked := httptest.NewRequest("POST", "/api/remote-load", strings.NewReader(`{"deck":1,"path":"Music/a.mp3"}`))
+	rLocked.RemoteAddr = "192.0.2.100:1234"
+	rLocked.Header.Set("Authorization", "Bearer code")
+	wLocked := httptest.NewRecorder()
+	s.ServeHTTP(wLocked, rLocked)
+	if wLocked.Code != http.StatusTooManyRequests {
+		t.Fatalf("locked IP with correct code: %d want 429", wLocked.Code)
+	}
+}
+
+func TestRemoteLoadPathSafetyAndDriveIsolation(t *testing.T) {
+	root := t.TempDir()
+	driveDevs := map[string]string{
+		"STICK":    "/dev/sda1",
+		"SD":       "/dev/mmcblk1p1",
+		"LOOP":     "/dev/loop0",
+		"ROOT":     "/dev/root",
+		"DM":       "/dev/dm-0",
+		"INTERNAL": "/dev/mmcblk0p5",
+	}
+	devs := map[string]string{}
+	for name, dev := range driveDevs {
+		if err := os.MkdirAll(filepath.Join(root, name, "Music"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		devs[filepath.Join(root, name)] = dev
+	}
+	old := remoteMountDevices
+	remoteMountDevices = func() map[string]string { return devs }
+	defer func() { remoteMountDevices = old }()
+
+	s := New(Config{AccessToken: "code", UIDir: t.TempDir(), StateDir: t.TempDir(), MediaRoot: root}, nil)
+	drives := s.remoteDrives()
+	if _, ok := drives["STICK"]; !ok {
+		t.Fatal("STICK missing from remoteDrives")
+	}
+	if _, ok := drives["SD"]; !ok {
+		t.Fatal("SD missing from remoteDrives")
+	}
+	for _, bad := range []string{"LOOP", "ROOT", "DM", "INTERNAL"} {
+		if _, ok := drives[bad]; ok {
+			t.Fatalf("%s should not be in remoteDrives", bad)
+		}
+	}
+
+	// Symlink to /data
+	dataDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dataDir, "secret.mp3"), []byte("audio"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(dataDir, "secret.mp3"), filepath.Join(root, "STICK", "Music", "data_symlink.mp3")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Test resolveRemoteFile checks
+	for _, c := range []struct {
+		rel  string
+		want int
+	}{
+		{"..\\Music\\a.mp3", 400},
+		{"Music\\a.mp3", 400},
+		{"foo\\..\\bar.mp3", 400},
+		{"/data/secret.mp3", 400},
+		{"../../data/secret.mp3", 400},
+		{"Music/data_symlink.mp3", 404},
+	} {
+		if _, _, _, _, code, err := s.resolveRemoteFile(c.rel, ""); code != c.want || err == nil {
+			t.Errorf("path %q: code %d err %v, want %d", c.rel, code, err, c.want)
+		}
+	}
+}
+
+func TestRemoteLoadV1EngineXParity(t *testing.T) {
+	s, do := remoteRouteServer(t)
+	// Enable via /v1/enginex/ui
+	if w := do("POST", "/v1/enginex/ui?remoteLoad=1", "127.0.0.1:1", ""); w.Code != 200 || !s.remoteLoadEnabled() {
+		t.Fatalf("enable via /v1/enginex/ui: %d %s", w.Code, w.Body.String())
+	}
+
+	// Poll via /v1/enginex/remote-load
+	report := `{"decks":[{"deck":1,"local":true,"loaded":true,"playing":false},{"deck":2,"local":true}]}`
+	w := do("POST", "/v1/enginex/remote-load", "127.0.0.1:1", report)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"request":null`) {
+		t.Fatalf("poll /v1/enginex/remote-load: %d %s", w.Code, w.Body.String())
+	}
+
+	// Submit a request via LAN API
+	w = do("POST", "/api/remote-load", "192.0.2.1:1", `{"deck":1,"path":"Music/a.mp3"}`)
+	var acc struct{ ID string }
+	if w.Code != 202 || json.Unmarshal(w.Body.Bytes(), &acc) != nil || acc.ID == "" {
+		t.Fatalf("submit: %d %s", w.Code, w.Body.String())
+	}
+
+	// Next poll via /v1/enginex/remote-load must hand out the request
+	w = do("POST", "/v1/enginex/remote-load", "127.0.0.1:1", `{}`)
+	var poll struct {
+		Request *struct {
+			ID   string
+			Deck int
+			File string
+		}
+	}
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &poll) != nil || poll.Request == nil {
+		t.Fatalf("enginex poll: %d %s", w.Code, w.Body.String())
+	}
+	if poll.Request.ID != acc.ID || poll.Request.Deck != 1 {
+		t.Fatalf("enginex poll request: %+v", poll.Request)
+	}
+
+	// Update via /v1/enginex/remote-load
+	w = do("POST", "/v1/enginex/remote-load", "127.0.0.1:1", `{"updates":[{"id":"`+acc.ID+`","status":"loaded"}]}`)
+	if w.Code != 200 {
+		t.Fatalf("enginex update: %d %s", w.Code, w.Body.String())
+	}
+	req, ok := s.remote.get(acc.ID, true)
+	if !ok || req.Status != "loaded" {
+		t.Fatalf("status after enginex update: %+v", req)
+	}
+
+	// External / non-loopback calls to /v1/enginex/remote-load must be rejected with 403
+	if w := do("POST", "/v1/enginex/remote-load", "192.0.2.1:1", `{}`); w.Code != 403 {
+		t.Fatalf("external enginex poll: %d", w.Code)
+	}
+
+	// Tunnel headers to /v1/enginex/remote-load must be rejected with 403
+	for _, h := range []string{"Cf-Connecting-Ip", "Cf-Ray", "Cdn-Loop", "Tailscale-User-Login"} {
+		if w := do("POST", "/v1/enginex/remote-load", "127.0.0.1:1", `{}`, h, "val"); w.Code != 403 {
+			t.Fatalf("enginex poll via %s: %d", h, w.Code)
+		}
+	}
+}
+
+func TestRemoteLoadOverHTTPS(t *testing.T) {
+	uiDir := t.TempDir()
+	stateDir := t.TempDir()
+	certDir := t.TempDir()
+	mediaDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(mediaDir, "STICK", "Music"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mediaDir, "STICK", "Music", "song.mp3"), []byte("audio"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldDevs := remoteMountDevices
+	remoteMountDevices = func() map[string]string {
+		return map[string]string{filepath.Join(mediaDir, "STICK"): "/dev/sda1"}
+	}
+	defer func() { remoteMountDevices = oldDevs }()
+
+	// Enable console_https and remote_load in settings.conf
+	conf := "console_https=1\nremote_load=1\n"
+	if err := os.WriteFile(filepath.Join(uiDir, "settings.conf"), []byte(conf), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := New(Config{
+		AccessToken: "access-code-1234",
+		UIDir:       uiDir,
+		StateDir:    stateDir,
+		MediaRoot:   mediaDir,
+		HTTPSAddr:   "127.0.0.1:0",
+		TLSCertDir:  certDir,
+	}, nil)
+	defer s.Close()
+
+	if !s.httpsActive() {
+		t.Fatal("HTTPS listener did not start")
+	}
+
+	// Load certificate for client root trust
+	certPath := filepath.Join(certDir, httpsCertFile)
+	certBytes, err := os.ReadFile(certPath)
+	if err != nil {
+		t.Fatalf("read cert: %v", err)
+	}
+	block, _ := pem.Decode(certBytes)
+	if block == nil {
+		t.Fatal("failed to decode cert PEM")
+	}
+	leaf, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatalf("parse cert: %v", err)
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(leaf)
+
+	httpsClient := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				RootCAs: roots,
+			},
+		},
+	}
+	baseURL := fmt.Sprintf("https://127.0.0.1:%d", s.httpsPort)
+
+	// Seed deck state via loopback poll
+	pollBody := `{"decks":[{"deck":1,"local":true,"loaded":true,"playing":false},{"deck":2,"local":true}]}`
+	reqPoll, _ := http.NewRequest("POST", baseURL+"/v1/sc5000/remote-load", strings.NewReader(pollBody))
+	reqPoll.Header.Set("Content-Type", "application/json")
+	respPoll, err := httpsClient.Do(reqPoll)
+	if err != nil {
+		t.Fatalf("poll over HTTPS: %v", err)
+	}
+	respPoll.Body.Close()
+	if respPoll.StatusCode != 200 {
+		t.Fatalf("poll status: %d", respPoll.StatusCode)
+	}
+
+	// 1. GET without auth over HTTPS -> 401
+	respNoAuth, err := httpsClient.Get(baseURL + "/api/remote-load")
+	if err != nil {
+		t.Fatal(err)
+	}
+	respNoAuth.Body.Close()
+	if respNoAuth.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("GET without auth: %d want 401", respNoAuth.StatusCode)
+	}
+
+	// 2. 5 wrong access codes over HTTPS -> 429
+	for i := 1; i <= 5; i++ {
+		reqBad, _ := http.NewRequest("GET", baseURL+"/api/remote-load", nil)
+		reqBad.Header.Set("Authorization", "Bearer wrong")
+		respBad, err := httpsClient.Do(reqBad)
+		if err != nil {
+			t.Fatal(err)
+		}
+		respBad.Body.Close()
+		if i < 5 && respBad.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("attempt %d: %d want 401", i, respBad.StatusCode)
+		}
+		if i == 5 && respBad.StatusCode != http.StatusTooManyRequests {
+			t.Fatalf("attempt 5: %d want 429", respBad.StatusCode)
+		}
+	}
+
+	// Reset strikes for testing legitimate access
+	s.authMu.Lock()
+	s.authFails = map[string]*authStrike{}
+	s.authMu.Unlock()
+
+	// 3. GET with valid access code over HTTPS -> 200
+	reqValid, _ := http.NewRequest("GET", baseURL+"/api/remote-load", nil)
+	reqValid.Header.Set("Authorization", "Bearer access-code-1234")
+	respValid, err := httpsClient.Do(reqValid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bodyBytes, _ := io.ReadAll(respValid.Body)
+	respValid.Body.Close()
+	if respValid.StatusCode != 200 || !strings.Contains(string(bodyBytes), `"enabled":true`) {
+		t.Fatalf("GET with code: %d %s", respValid.StatusCode, string(bodyBytes))
+	}
+
+	// 4. POST with valid access code over HTTPS -> 202
+	reqPost, _ := http.NewRequest("POST", baseURL+"/api/remote-load", strings.NewReader(`{"deck":2,"path":"Music/song.mp3"}`))
+	reqPost.Header.Set("Authorization", "Bearer access-code-1234")
+	reqPost.Header.Set("Content-Type", "application/json")
+	respPost, err := httpsClient.Do(reqPost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var acc struct{ ID string }
+	postBytes, _ := io.ReadAll(respPost.Body)
+	respPost.Body.Close()
+	if respPost.StatusCode != 202 || json.Unmarshal(postBytes, &acc) != nil || acc.ID == "" {
+		t.Fatalf("POST over HTTPS: %d %s", respPost.StatusCode, string(postBytes))
+	}
+
+	// 5. GET request by ID over HTTPS
+	reqGetID, _ := http.NewRequest("GET", baseURL+"/api/remote-load/"+acc.ID, nil)
+	reqGetID.Header.Set("Authorization", "Bearer access-code-1234")
+	respGetID, err := httpsClient.Do(reqGetID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idBytes, _ := io.ReadAll(respGetID.Body)
+	respGetID.Body.Close()
+	if respGetID.StatusCode != 200 || !strings.Contains(string(idBytes), acc.ID) {
+		t.Fatalf("GET ID over HTTPS: %d %s", respGetID.StatusCode, string(idBytes))
+	}
+
+	// 6. Tunnel headers over HTTPS are refused with 403
+	reqTunnel, _ := http.NewRequest("GET", baseURL+"/api/remote-load", nil)
+	reqTunnel.Header.Set("Authorization", "Bearer access-code-1234")
+	reqTunnel.Header.Set("Cf-Connecting-Ip", "203.0.113.1")
+	respTunnel, err := httpsClient.Do(reqTunnel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	respTunnel.Body.Close()
+	if respTunnel.StatusCode != http.StatusForbidden {
+		t.Fatalf("tunnel over HTTPS: %d want 403", respTunnel.StatusCode)
 	}
 }

@@ -10,7 +10,7 @@ While the switch is off, `POST` returns `403 remote load is switched off`. A `pe
 
 ## Authentication and network
 
-All routes are on the web console port (`:8080`) and need the 8-character access code shown on the deck under `Settings -> About / Update`:
+All routes are on the web console port (`:8080`, or `:8443` over HTTPS when optional console HTTPS #242 is enabled) and need the 8-character access code shown on the deck under `Settings -> About / Update`:
 
 ```
 Authorization: Bearer XXXX-XXXX

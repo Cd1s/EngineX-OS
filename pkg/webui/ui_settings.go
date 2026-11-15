@@ -866,7 +866,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	// The switch belongs to the deck: not from the LAN console API. Tunnels
 	// never reach /v1 (the gateway refuses relayed requests, ForwardHandler).
-	if q.Has("remoteLoad") && strings.HasPrefix(r.URL.Path, "/api/") {
+	if (q.Has("remoteLoad") || q.Has("remote_load")) && strings.HasPrefix(r.URL.Path, "/api/") {
 		fail(w, 403, errors.New("remoteLoad can only be changed on the deck"))
 		return
 	}
@@ -1180,8 +1180,11 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 		v.OmniSource = on == "1"
 	}
-	if q.Has("remoteLoad") {
+	if q.Has("remoteLoad") || q.Has("remote_load") {
 		on := q.Get("remoteLoad")
+		if !q.Has("remoteLoad") {
+			on = q.Get("remote_load")
+		}
 		if on != "0" && on != "1" {
 			s.uiMu.Unlock()
 			fail(w, 400, errors.New("invalid setting"))

@@ -268,6 +268,9 @@ func (s *Server) remoteDrives() map[string]string {
 		if !strings.HasPrefix(dev, "/dev/") {
 			continue
 		}
+		if !strings.HasPrefix(dev, "/dev/sd") && (!strings.HasPrefix(dev, "/dev/mmcblk") || strings.HasPrefix(dev, "/dev/mmcblk0")) {
+			continue
+		}
 		sys, _ := filepath.EvalSymlinks(filepath.Join("/sys/class/block", filepath.Base(dev)))
 		if driveKind(dev, sys) == "internal" {
 			continue
@@ -281,7 +284,7 @@ func (s *Server) remoteDrives() map[string]string {
 // file relative to its drive's resolved root. status is the HTTP code for err;
 // candidates names the drives when rel is ambiguous.
 func (s *Server) resolveRemoteFile(rel, driveName string) (file, drive, driveRel string, candidates []string, status int, err error) {
-	if rel == "" || strings.HasPrefix(rel, "/") || filepath.IsAbs(rel) || strings.ContainsRune(rel, 0) {
+	if rel == "" || strings.HasPrefix(rel, "/") || filepath.IsAbs(rel) || strings.ContainsRune(rel, 0) || strings.ContainsRune(rel, '\\') {
 		return "", "", "", nil, http.StatusBadRequest, errors.New("path must be relative")
 	}
 	for _, part := range strings.Split(rel, "/") {
@@ -290,7 +293,7 @@ func (s *Server) resolveRemoteFile(rel, driveName string) (file, drive, driveRel
 		}
 	}
 	clean := filepath.Clean(rel)
-	if clean == "." {
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
 		return "", "", "", nil, http.StatusBadRequest, errors.New("path must name a file")
 	}
 	drives := s.remoteDrives()

@@ -28,7 +28,7 @@ class OnOffSwitchCompatibilityTest(unittest.TestCase):
             "scStemsEqMode": "stemsEqMode", "scBeatJumpPads": "beatJumpPads",
             "scSwapLoopOrder": "swapLoopOrder", "scDualColumn": "browserDualColumn",
             "scTracklistWaveform": "tracklistWaveform", "scOmniSource": "omniSource",
-            "scCueCountdown": "cueCountdown",
+            "scCueCountdown": "cueCountdown", "scRemoteLoad": "remoteLoad",
         }
         for version, skin in (("5.0.4", "EmbeddedCommon"), ("5.3.0", "Embedded")):
             qrc = LAB / version / "qrc"
@@ -913,6 +913,7 @@ assert.strictEqual(vfx.enabled, false);
             "Live Stream": ("scBroadcastOn", "broadcast", bp.SERVICES_ENTRIES),
             "Pro DJ Link Library": ("scProlinkShare", "prolinkShare", bp.SERVICES_ENTRIES),
             "Pro DJ Link Export to CDJ (Beta)": ("scProlinkExport", "prolinkExport", bp.SERVICES_ENTRIES),
+            "Remote Load (LAN API)": ("scRemoteLoad", "remoteLoad", bp.SERVICES_ENTRIES),
             "Master Soft Clipper": ("scMasterLimiter", "masterLimiter", bp.PLAYBACK_ENTRIES),
             "Auto-Gain (0 dB Normalize)": ("scAutoGain", "autoGain", bp.PLAYBACK_ENTRIES),
             "Echo Out": ("scUpfaderEcho", "upfaderEcho", bp.PLAYBACK_ENTRIES),
@@ -6946,7 +6947,7 @@ class RemoteLoadUiTest(unittest.TestCase):
     def test_remote_load_ui(self):
         self.assertIn('text: "Remote Load (LAN API)"', bp.SERVICES_ENTRIES)
         self.assertIn("remoteLoad=", bp.SERVICES_ENTRIES)
-        self.assertIn('currentValue: values[root.scRemoteLoad ? 1 : 0]', bp.SERVICES_ENTRIES)
+        self.assertIn('checkedExternally: !!root.scRemoteLoad', bp.SERVICES_ENTRIES)
         for s in ("property bool scRemoteLoad: false", "scRemoteLoad = !!v.remoteLoad", "running: root.scRemoteLoad",
                   "/v1/sc5000/remote-load", "AddToDatabaseAndLoadToDeck\" + deck",
                   'root.scTr("/Engine/Deck" + deck + "/PlayState")', "deck playing", "other track loaded"):

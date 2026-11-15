@@ -4412,14 +4412,7 @@ SERVICES_ENTRIES = (QUALITY_ENTRY
     + switch_entry("Live Stream", "scBroadcastOn", "broadcast", '\t\t\tobjectName: "ControlCenter_LiveStream"\n')
     + switch_entry("Pro DJ Link Library", "scProlinkShare", "prolinkShare")
     + switch_entry("Pro DJ Link Export to CDJ (Beta)", "scProlinkExport", "prolinkExport")
-    + """
-		EntryBase.ListEntry {
-			text: "Remote Load (LAN API)"
-			values: ["Off", "On"]
-			currentValue: values[root.scRemoteLoad ? 1 : 0]
-			onSelected: function(index) { root.scCall("remoteLoad=" + index) }
-		},
-""")
+    + switch_entry("Remote Load (LAN API)", "scRemoteLoad", "remoteLoad"))
 
 # User Profile -> Display: deck BPM decimal places (#229).
 DISPLAY_ENTRIES = """
