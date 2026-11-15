@@ -1105,7 +1105,12 @@ def main(argv=None):
                 expected, got = original_fs.geometry(), candidate_fs.geometry()
                 if args.grow:  # only the size fields of a growth to GEN1_ROOTFS_KIB may differ
                     keep = lambda g: {k: v for k, v in g.items() if k not in GROWN_FIELDS}
-                    require(got['image_size'] == GEN1_ROOTFS_KIB * 1024 and keep(got) == keep(expected),
+                    # The file system itself, not only its file: a padded file or a shrunk file
+                    # system in a file of the right length is no growth.
+                    fs, stock_fs = candidate_fs.room(), original_fs.room()
+                    require(got['image_size'] == GEN1_ROOTFS_KIB * 1024 and keep(got) == keep(expected) and
+                            fs['blocks'] * fs['block_size'] == GEN1_ROOTFS_KIB * 1024 and
+                            fs['blocks'] >= stock_fs['blocks'],
                             f'rootfs is not the stock one grown to {GEN1_ROOTFS_KIB} KiB')
                 else:
                     require(got == expected, 'rootfs size/geometry/UUID/features changed; partition resize forbidden')

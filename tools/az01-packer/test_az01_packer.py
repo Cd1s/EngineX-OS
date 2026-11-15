@@ -949,6 +949,47 @@ class FilesystemTests(unittest.TestCase):
         self.assertFalse(out.exists())
 
     @unittest.skipUnless(shutil.which('resize2fs'), 'resize2fs required')
+    def test_repack_grow_refuses_a_padded_file_whose_file_system_did_not_grow(self):
+        # Review of b6f868f8: repack --grow checked only the file length, so padding passed as growth.
+        original = self.root/'original.img'
+        original.write_bytes(fixture(lzma.compress(self.disk.read_bytes())))
+        padded = self.root/'padded.ext2'
+        shutil.copyfile(self.disk, padded)
+        with padded.open('r+b') as f:
+            f.truncate(20480 * 1024)  # the file reaches the target; its file system stays 16 MiB
+        az.check_fs(padded)
+        self.assertEqual(az.ExtFS(padded).room()['blocks'], self.fs.room()['blocks'])
+        out = self.root/'must-not-exist.img'
+        with unittest.mock.patch.object(az, 'GEN1_ROOTFS_KIB', 20480), self.assertRaises(SystemExit) as exc:
+            az.main(['repack', str(original), '--rootfs', str(padded), '--grow', '--output', str(out)])
+        self.assertEqual(exc.exception.code, 2)
+        self.assertFalse(out.exists())
+
+    @unittest.skipUnless(shutil.which('resize2fs'), 'resize2fs required')
+    def test_repack_grow_refuses_a_shrunk_file_system(self):
+        # Review of b6f868f8: a real shrink in a file of the target length passed as growth.
+        big = self.root/'big.ext2'
+        shutil.copyfile(self.disk, big)
+        with big.open('r+b') as f:
+            f.truncate(24576 * 1024)
+        subprocess.run(['resize2fs', '-f', str(big), '24576K'], check=True, capture_output=True)
+        original = self.root/'original.img'
+        original.write_bytes(fixture(lzma.compress(big.read_bytes())))
+        shrunk = self.root/'shrunk.ext2'
+        shutil.copyfile(big, shrunk)
+        subprocess.run(['resize2fs', '-f', str(shrunk), '20480K'], check=True, capture_output=True)
+        with shrunk.open('r+b') as f:
+            f.truncate(20480 * 1024)
+        az.check_fs(shrunk)
+        self.assertEqual(az.ExtFS(shrunk).room()['blocks'], 20480)
+        self.assertEqual(az.ExtFS(shrunk).snapshot(), az.ExtFS(big).snapshot())  # only the size differs
+        out = self.root/'must-not-exist.img'
+        with unittest.mock.patch.object(az, 'GEN1_ROOTFS_KIB', 20480), self.assertRaises(SystemExit) as exc:
+            az.main(['repack', str(original), '--rootfs', str(shrunk), '--grow', '--output', str(out)])
+        self.assertEqual(exc.exception.code, 2)
+        self.assertFalse(out.exists())
+
+    @unittest.skipUnless(shutil.which('resize2fs'), 'resize2fs required')
     def test_grow_never_shrinks_or_passes_the_proven_partition_size(self):
         size = self.disk.stat().st_size // 1024
         with self.assertRaisesRegex(az.SafetyError, 'growth past'):
