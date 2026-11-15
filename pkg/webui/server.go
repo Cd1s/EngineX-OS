@@ -456,14 +456,19 @@ func LoadAccessToken(dir string) (token string, created bool, err error) {
 	return token, true, nil
 }
 
-// qrTarget keeps an explicitly configured public URL; the built-in enginex.lan default is not
-// one, nor sc5000.lan, the default before 5.3.0.5 a saved setting may still hold (#234).
-func (s *Server) qrTarget(r *http.Request) string {
-	if u := s.cfg.PublicURL; u != "" && !strings.Contains(u, "enginex.lan") && !strings.Contains(u, "sc5000.lan") {
-		return u
+// publicConsoleURL shares the public target between QR images and the About URL.
+// Only the address/path belongs in a QR: never userinfo, query credentials or a fragment.
+func (s *Server) publicConsoleURL() string {
+	u, err := url.Parse(s.cfg.PublicURL)
+	if err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != "" && u.Hostname() != "enginex.lan" && u.Hostname() != "sc5000.lan" {
+		return (&url.URL{Scheme: u.Scheme, Host: u.Host, Path: u.Path, RawPath: u.RawPath}).String()
 	}
-	if pub := s.PublicTunnelURL(); pub != "" {
-		return strings.TrimRight(pub, "/")
+	return s.PublicTunnelURL()
+}
+
+func (s *Server) qrTarget(r *http.Request) string {
+	if public := s.publicConsoleURL(); public != "" {
+		return public
 	}
 	target := consoleURL(r)
 	if !s.httpsOffered() {

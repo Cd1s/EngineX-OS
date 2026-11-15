@@ -450,13 +450,17 @@ func (m *TunnelManager) Status(accessCode string) TunnelStatus {
 	if st == "" {
 		st = "stopped"
 	}
+	lastErr := m.lastErr
+	if m.token != "" {
+		lastErr = strings.ReplaceAll(lastErr, m.token, "[redacted]")
+	}
 	return TunnelStatus{
 		Enabled:    m.enabled,
 		Status:     st,
 		PublicURL:  m.publicURL,
 		AccessCode: accessCode,
 		HasToken:   m.token != "",
-		Error:      m.lastErr,
+		Error:      lastErr,
 	}
 }
 

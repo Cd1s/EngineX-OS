@@ -54,24 +54,11 @@ class OnOffSwitchCompatibilityTest(unittest.TestCase):
                             self.assertIsNotNone(binding, block)
                             expression, flag = binding.groups()
                             handler = re.search(r"onClicked:\s*([^\n]+)", block).group(1)
-                            if flag == "scRemoteAccess":
-                                actual[flag] = "remoteAccess"
-                                script = """
+                            key = "remoteAccess" if flag == "scRemoteAccess" else re.search(r'scCall\("(\w+)=', handler).group(1)
+                            actual[flag] = key
+                            script = """
 const assert = require('assert');
-const calls = [], root = {scTunnelToggle: next => calls.push(next)};
-for (const state of [false, true, true, false]) {
-    root.scRemoteAccess = state;
-    assert.equal(EXPRESSION, !!state);
-    HANDLER;
-    assert.equal(calls.pop(), !state);
-}
-""".replace("EXPRESSION", expression).replace("HANDLER", handler)
-                            else:
-                                key = re.search(r'scCall\("(\w+)=', handler).group(1)
-                                actual[flag] = key
-                                script = """
-const assert = require('assert');
-const calls = [], root = {scCall: q => calls.push(q)};
+const calls = [], root = {scCall: q => calls.push(q), scTunnelToggle: next => calls.push('remoteAccess=' + Number(next))};
 // Click, external change, then click again: each request uses the latest setting.
 for (const state of [0, 1, 1, 0]) {
     root[FLAG] = state;
@@ -1381,14 +1368,54 @@ assert.strictEqual(evalIsLead({{ master: false }}), false);
                             for en in strings:
                                 self.assertIn(rows[en][idx], dev_qml)
 
+    def test_remote_access_state_keeps_console_target_and_refresh_is_visibility_bound(self):
+        self.assertIn("if (v.tunnel) scTunnelApply(v.tunnel)", bp.SERVICES_MAIN)
+        self.assertNotIn("scTunnelFetch", bp.SERVICES_MAIN)
+        fn = re.search(r"function scTunnelApply\([^)]*\)\s*\{[\s\S]*?\n\t\}", bp.SERVICES_MAIN).group(0)
+        fn += "\n" + re.search(r"function scTunnelHost\([^)]*\)\s*\{[\s\S]*?\n\t\}", bp.SERVICES_MAIN).group(0)
+        fn += "\n" + re.search(r"function scRemoteAccessLine\([^)]*\)\s*\{[\s\S]*?\n\t\}", bp.SERVICES_MAIN).group(0)
+        rows = bp.load_dict()
+        labels = {lang: {key: key if lang == "en" else rows[key][lang] for key in ("On", "Off", "Starting…", "Error")} for lang in ("en", "zh-Hans", "zh-Hant", "es")}
+        script = """
+const assert = require('assert');
+let scConsoleUrl = 'https://configured.example.org', scConsoleQrLastUrl = '';
+let scRemoteAccess = false, scRemoteAccessStatus = 'stopped', scRemoteAccessUrl = '', scRemoteAccessError = '';
+let refreshed = 0;
+function scRefreshConsoleQr() { refreshed++; }
+function scCall() {}
+const labels = LABELS;
+let lang = 'en';
+const root = {scT: key => labels[lang][key]};
+FUNCTION
+for (const status of ['starting', 'running', 'stopped', 'error']) {
+    scTunnelApply({enabled: status !== 'stopped', status, publicUrl: 'https://fixture.trycloudflare.com', error: ''});
+    assert.equal(scRemoteAccessStatus, status);
+    assert.equal(scRemoteAccess, status !== 'stopped');
+    assert.equal(scConsoleUrl, 'https://configured.example.org');
+    assert.equal(refreshed, 0);
+}
+for (lang of Object.keys(labels)) {
+    scTunnelApply({enabled: false, status: 'stopped'});
+    assert.equal(scRemoteAccessLine(), labels[lang]['Off']);
+    for (const status of ['installing', 'starting']) {
+        scTunnelApply({enabled: true, status});
+        assert.equal(scRemoteAccessLine(), labels[lang]['Starting…']);
+    }
+    scTunnelApply({enabled: true, status: 'running', publicUrl: 'https://fixture.trycloudflare.com'});
+    assert.equal(scRemoteAccessLine(), labels[lang]['On'] + ' · fixture.trycloudflare.com');
+    scTunnelApply({enabled: true, status: 'error', error: 'fixture failure'});
+    assert.equal(scRemoteAccessLine(), 'fixture failure');
+}
+""".replace("FUNCTION", fn).replace("LABELS", json.dumps(labels, ensure_ascii=False))
+        result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_remote_access_toggle_and_about_console_qr_four_languages(self):
         self.assertIn("property bool scRemoteAccess: false", bp.SERVICES_MAIN)
         self.assertIn("function scTunnelToggle(next)", bp.SERVICES_MAIN)
-        self.assertIn("function scTunnelFetch()", bp.SERVICES_MAIN)
         self.assertIn('/v1/enginex/tunnel"', bp.SERVICES_MAIN)
-        self.assertIn("property int scConsoleQrSerial:", bp.SERVICES_MAIN)
         # Never show or accept named-tunnel tokens on the deck UI.
-        self.assertNotIn("hasToken", bp.DEVICE_REMOTE_ACCESS_ENTRIES if hasattr(bp, "DEVICE_REMOTE_ACCESS_ENTRIES") else "")
+        self.assertNotIn("hasToken", bp.DEVICE_REMOTE_ACCESS_ENTRIES)
         rows = {
             l.split("\t")[0]: l.split("\t")[1:]
             for l in (REPO / "tools/ui-mod/i18n.tsv").read_text(encoding="utf-8").splitlines()
@@ -1432,7 +1459,7 @@ assert.strictEqual(evalIsLead({{ master: false }}), false);
                         self.assertIn("checkedExternally: !!root.scRemoteAccess", dev_qml)
                         self.assertIn("root.scTunnelToggle(!root.scRemoteAccess)", dev_qml)
                         self.assertIn('objectName: "EngineX_RemoteAccessStatus"', dev_qml)
-                        self.assertIn("running: scRemoteAccessRow.visible", dev_qml)
+                        self.assertNotIn("Timer", bp.DEVICE_REMOTE_ACCESS_ENTRIES)
                         # Available on every model with the console (Gen-1, Gen-2 armhf, AZ04): not hidden by scIsAZ04.
                         ra_block = dev_qml[dev_qml.index('objectName: "EngineX_RemoteAccess"'):dev_qml.index('objectName: "EngineX_RemoteAccessStatus"')]
                         self.assertNotIn("scIsAZ04", ra_block)
@@ -1441,11 +1468,23 @@ assert.strictEqual(evalIsLead({{ master: false }}), false);
                         self.assertIn('objectName: "EngineX_AboutConsoleQR"', about_qml)
                         self.assertIn('objectName: "EngineX_AboutConsoleQRImage"', about_qml)
                         self.assertIn('objectName: "EngineX_AboutConsoleQRUrl"', about_qml)
-                        self.assertIn("http://127.0.0.1:8080/v1/enginex/console-qr?n=", about_qml)
+                        self.assertIn("http://127.0.0.1:8080/v1/enginex/console-qr?url=", about_qml)
                         self.assertIn("scAboutConsoleQr.visible ?", about_qml)
-                        self.assertIn("running: scAboutConsoleQr.visible", about_qml)
+                        self.assertNotIn("Timer", bp.ABOUT_CONSOLE_QR)
                         self.assertIn("text: root.scConsoleUrl", about_qml)
                         self.assertNotIn("scAccessCode", about_qml)
+                        source = re.search(r"source: (scAboutConsoleQr.visible \?[^\n]+)", about_qml).group(1)
+                        script = """
+const assert = require('assert');
+const root = {scConsoleUrl: 'http://192.0.2.1:8080'}, scAboutConsoleQr = {visible: false};
+assert.equal(SOURCE, '');
+root.scConsoleUrl = 'https://fixture.trycloudflare.com';
+assert.equal(SOURCE, '');
+scAboutConsoleQr.visible = true;
+assert.equal(SOURCE, 'http://127.0.0.1:8080/v1/enginex/console-qr?url=' + encodeURIComponent(root.scConsoleUrl));
+""".replace("SOURCE", source)
+                        result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+                        self.assertEqual(result.returncode, 0, result.stderr)
                         if lang != "en":
                             idx = ("zh-Hans", "zh-Hant", "es").index(lang)
                             self.assertIn(expected_i18n["Remote access"][idx], dev_qml)
