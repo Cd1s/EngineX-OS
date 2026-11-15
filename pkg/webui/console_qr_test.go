@@ -269,12 +269,7 @@ func TestConsoleQRAndTunnelPrecedence(t *testing.T) {
 	if wHTTPS.Code != http.StatusOK {
 		t.Fatalf("enable HTTPS failed: %d %s", wHTTPS.Code, wHTTPS.Body.String())
 	}
-	var uiResp struct {
-		HTTPSPort  int    `json:"httpsPort"`
-		ConsoleURL string `json:"consoleUrl"`
-	}
-	_ = json.Unmarshal(wHTTPS.Body.Bytes(), &uiResp)
-	wantHTTPS := "https://" + lanHost() + ":" + strings.Split(uiResp.ConsoleURL, ":")[len(strings.Split(uiResp.ConsoleURL, ":"))-1]
+	wantHTTPS := "https://" + lanHost() + ":" + s.httpsPortStr()
 	rLAN := httptest.NewRequest(http.MethodGet, "/v1/enginex/console-qr", nil)
 	rLAN.Host = "127.0.0.1:8080"
 	if got := s.qrTarget(rLAN); got != wantHTTPS {
@@ -329,6 +324,10 @@ func TestConsoleQRAndTunnelPrecedence(t *testing.T) {
 	if wUI.Code != http.StatusOK || !strings.Contains(wUI.Body.String(), `"consoleUrl":"`+wantTunnelURL+`"`) {
 		t.Fatalf("/v1/enginex/ui consoleUrl did not follow tunnel: %d %s", wUI.Code, wUI.Body.String())
 	}
+	var view struct { Tunnel TunnelStatus `json:"tunnel"` }
+	if json.Unmarshal(wUI.Body.Bytes(), &view) != nil || !view.Tunnel.Enabled || view.Tunnel.Status != "running" {
+		t.Fatal("existing UI polling does not carry the shared tunnel state")
+	}
 
 	// 4. Explicit PublicURL wins over active tunnel.
 	sWithPublic := &Server{cfg: Config{PublicURL: "https://deck.example.org", StateDir: stateDir, AccessToken: "K7M9-P4X2"}}
@@ -358,4 +357,29 @@ func TestConsoleQRAndTunnelPrecedence(t *testing.T) {
 	if wAfterStop.Code != http.StatusOK || !bytes.Equal(wAfterStop.Body.Bytes(), wantHTTPSPNG) {
 		t.Fatalf("post-stop /v1/enginex/console-qr mismatch (code=%d)", wAfterStop.Code)
 	}
+}
+
+func TestConsoleQRPublicURLNeverCarriesCredentials(t *testing.T) {
+	s := New(Config{StateDir: t.TempDir(), UIDir: t.TempDir(), AccessToken: "fixture-access-code",
+		PublicURL: "https://user:fixture-password@deck.example.org/console?token=fixture-token&cookie=fixture-cookie#fixture-access-code"}, nil)
+	defer s.Close()
+	want := "https://deck.example.org/console"
+	r := httptest.NewRequest("GET", "/v1/enginex/console-qr?token=ignored-request-token", nil)
+	r.RemoteAddr = "127.0.0.1:1234"
+	if got := s.qrTarget(r); got != want { t.Fatalf("unsafe QR target: %q", got) }
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, r)
+	png, _ := qrcode.Encode(want, qrcode.Medium, 320)
+	if w.Code != 200 || !bytes.Equal(w.Body.Bytes(), png) { t.Fatal("deck QR does not encode the safe console URL") }
+	w = httptest.NewRecorder()
+	r = httptest.NewRequest("GET", "/v1/enginex/ui", nil)
+	r.RemoteAddr = "127.0.0.1:1234"
+	s.ServeHTTP(w, r)
+	var body struct { ConsoleURL string `json:"consoleUrl"` }
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &body) != nil || body.ConsoleURL != want { t.Fatalf("unsafe About URL: %q", body.ConsoleURL) }
+}
+
+func TestDeckTunnelStatusRedactsNamedCredential(t *testing.T) {
+	m := &TunnelManager{enabled: true, status: "error", token: "fixture-named-token", lastErr: "failure: fixture-named-token"}
+	if strings.Contains(m.Status("").Error, "fixture-named-token") { t.Fatal("named credential appears in deck error text") }
 }

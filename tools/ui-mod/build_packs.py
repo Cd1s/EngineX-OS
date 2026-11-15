@@ -2819,42 +2819,16 @@ SERVICES_MAIN = """
 	// #79: only GET /v1/enginex/ui (loopback) carries these; shown in Settings -> About.
 	property string scConsoleUrl: ""
 	property string scAccessCode: ""
-	property int scConsoleQrSerial: 1
-	property string scConsoleQrLastUrl: ""
 	property bool scRemoteAccess: false
 	property string scRemoteAccessStatus: "stopped"
 	property string scRemoteAccessUrl: ""
 	property string scRemoteAccessError: ""
-	function scRefreshConsoleQr(url) {
-		const next = String(url || "")
-		if (next && next !== scConsoleQrLastUrl) {
-			scConsoleQrLastUrl = next
-			scConsoleQrSerial++
-		}
-	}
 	function scTunnelApply(v) {
 		if (!v) return
-		const prevStatus = scRemoteAccessStatus
 		scRemoteAccess = !!v.enabled
 		scRemoteAccessStatus = String(v.status || "stopped")
 		scRemoteAccessUrl = String(v.publicUrl || "")
 		scRemoteAccessError = String(v.error || "")
-		if (scRemoteAccessStatus === "running" && scRemoteAccessUrl) {
-			scConsoleUrl = scRemoteAccessUrl
-			scRefreshConsoleQr(scConsoleUrl)
-		} else if (scRemoteAccessStatus === "stopped" && (prevStatus === "running" || scConsoleQrLastUrl.indexOf(".trycloudflare.com") >= 0)) {
-			scCall("")
-		}
-	}
-	function scTunnelFetch() {
-		const x = new XMLHttpRequest()
-		x.open("GET", "http://127.0.0.1:8080/v1/enginex/tunnel")
-		x.onreadystatechange = function() {
-			if (x.readyState === 4 && x.status === 200) {
-				try { root.scTunnelApply(JSON.parse(x.responseText)) } catch (e) {}
-			}
-		}
-		x.send()
 	}
 	function scTunnelToggle(next) {
 		const x = new XMLHttpRequest()
@@ -2864,7 +2838,7 @@ SERVICES_MAIN = """
 			if (x.readyState !== 4) return
 			try {
 				const v = JSON.parse(x.responseText)
-				if (x.status === 200) root.scTunnelApply(v)
+				if (x.status === 200) { root.scTunnelApply(v); root.scCall("") }
 				else if (v && v.error) { root.scRemoteAccessStatus = "error"; root.scRemoteAccessError = String(v.error) }
 			} catch (e) {}
 		}
@@ -3555,8 +3529,9 @@ SERVICES_MAIN = """
 		scQuality = v.quality || "flac"
 		scNeteaseMode = v.neteaseMode || "official"
 		scUpdateRepo = v.githubRepo || scUpdateRepo
-		if (v.accessCode) { scAccessCode = v.accessCode; scConsoleUrl = v.consoleUrl || ""; scRefreshConsoleQr(scConsoleUrl) }
-		else if (v.consoleUrl !== undefined) { scConsoleUrl = v.consoleUrl || ""; scRefreshConsoleQr(scConsoleUrl) }
+		if (v.accessCode) scAccessCode = v.accessCode
+		if (v.consoleUrl !== undefined) scConsoleUrl = v.consoleUrl || ""
+		if (v.tunnel) scTunnelApply(v.tunnel)
 		if (v.accessCode || v.lanStems !== undefined) root.scLanStemsInfo = v.lanStems || null
 		scLanStems = root.scLanStemsLine ? root.scLanStemsLine(root.scLanStemsInfo, scLang) : ""
 		scMasterLimiter = !!v.masterLimiter
@@ -4757,8 +4732,6 @@ DEVICE_REMOTE_ACCESS_ENTRIES = """
 \t\t\ttext: "Remote access"
 \t\t\tcheckedExternally: !!root.scRemoteAccess
 \t\t\tonClicked: root.scTunnelToggle(!root.scRemoteAccess)
-\t\t\tonVisibleChanged: if (visible) root.scTunnelFetch()
-\t\t\tComponent.onCompleted: if (visible) root.scTunnelFetch()
 \t\t},
 \t\tText {
 \t\t\tobjectName: "EngineX_RemoteAccessStatus"
@@ -4769,12 +4742,7 @@ DEVICE_REMOTE_ACCESS_ENTRIES = """
 \t\t\tcolor: root.scRemoteAccessStatus === "error" ? "#ff6b6b" : "#9a9a9a"
 \t\t\tfont.pixelSize: 16
 \t\t\ttext: root.scRemoteAccessLine()
-\t\t\tTimer {
-\t\t\t\tinterval: 1500
-\t\t\t\trepeat: true
-\t\t\t\trunning: scRemoteAccessRow.visible && (root.scRemoteAccessStatus === "installing" || root.scRemoteAccessStatus === "starting")
-\t\t\t\tonTriggered: root.scTunnelFetch()
-\t\t\t}
+\t\t\ttextFormat: Text.PlainText
 \t\t},
 """
 
@@ -4787,14 +4755,6 @@ ABOUT_CONSOLE_QR = """
 \t\t\tLayout.bottomMargin: 8
 \t\t\tspacing: 8
 \t\t\tvisible: !!root.scConsoleUrl
-\t\t\tonVisibleChanged: if (visible) root.scTunnelFetch()
-\t\t\tComponent.onCompleted: if (visible) root.scTunnelFetch()
-\t\t\tTimer {
-\t\t\t\tinterval: 2000
-\t\t\t\trepeat: true
-\t\t\t\trunning: scAboutConsoleQr.visible && (root.scRemoteAccessStatus === "installing" || root.scRemoteAccessStatus === "starting")
-\t\t\t\tonTriggered: root.scTunnelFetch()
-\t\t\t}
 \t\t\tText {
 \t\t\t\tLayout.alignment: Qt.AlignHCenter
 \t\t\t\tcolor: "#ffffff"
@@ -4817,7 +4777,7 @@ ABOUT_CONSOLE_QR = """
 \t\t\t\t\tsmooth: false
 \t\t\t\t\tcache: false
 \t\t\t\t\tfillMode: Image.PreserveAspectFit
-\t\t\t\t\tsource: scAboutConsoleQr.visible ? ("http://127.0.0.1:8080/v1/enginex/console-qr?n=" + root.scConsoleQrSerial) : ""
+\t\t\t\t\tsource: scAboutConsoleQr.visible ? ("http://127.0.0.1:8080/v1/enginex/console-qr?url=" + encodeURIComponent(root.scConsoleUrl)) : ""
 \t\t\t\t}
 \t\t\t}
 \t\t\tText {
@@ -4830,6 +4790,7 @@ ABOUT_CONSOLE_QR = """
 \t\t\t\tcolor: "#9a9a9a"
 \t\t\t\tfont.pixelSize: 15
 \t\t\t\ttext: root.scConsoleUrl
+\t\t\t\ttextFormat: Text.PlainText
 \t\t\t}
 \t\t},
 """
