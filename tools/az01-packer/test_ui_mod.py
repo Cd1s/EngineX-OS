@@ -1371,7 +1371,9 @@ assert.strictEqual(evalIsLead({{ master: false }}), false);
     def test_remote_access_state_keeps_console_target_and_refresh_is_visibility_bound(self):
         self.assertIn("if (v.tunnel) scTunnelApply(v.tunnel)", bp.SERVICES_MAIN)
         self.assertNotIn("scTunnelFetch", bp.SERVICES_MAIN)
-        fn = re.search(r"function scTunnelApply\([^)]*\)\s*\{[\s\S]*?\n\t\}", bp.SERVICES_MAIN).group(0)
+        apply = re.search(r"function scTunnelApply\([^)]*\)\s*\{[\s\S]*?\n\t\}", bp.SERVICES_MAIN)
+        self.assertIsNotNone(apply)
+        fn = apply.group(0)
         fn += "\n" + re.search(r"function scTunnelHost\([^)]*\)\s*\{[\s\S]*?\n\t\}", bp.SERVICES_MAIN).group(0)
         fn += "\n" + re.search(r"function scRemoteAccessLine\([^)]*\)\s*\{[\s\S]*?\n\t\}", bp.SERVICES_MAIN).group(0)
         rows = bp.load_dict()
