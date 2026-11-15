@@ -44,6 +44,10 @@
 | **#215**（屏幕 OTA 只提供 `*-Update.img`） | `pkg/webui/update*.go`<br>`tools/az01-packer/release-gate.sh` | **原因**：5.3.0.5 之后旧版 `*-Data-Bundle.tar.gz` 只应服务仍在旧版本的碟机。<br>**修法**：5.3.0.5 的碟机更新器只发现 `*-Update.img`（包括未解锁的二代机），Release 里仍保留 8 个 Data-Bundle 供旧更新器使用；安装器保留对本地 / 显式旧数据包的兼容；门禁文档覆盖 r5 旧路线与更新的签名更新器。`#244`（AZ04 分区大小）**未**随本次合入。 | 检验：`TestUpdateNeverOffersLegacyBundles`、`TestUpdatePicksGen2ImgWhenUnlocked`、重发与签名 OTA 套件；真机重启与进度待做（行 242）。 |
 | **#273 / #253**（压缩分析数据与重复插盘识别） | `pkg/enginedb/`<br>`pkg/bridge/` | **原因**：21,352 首曲目的 FAT32 U 盘上，未压缩的 `BridgeAnalysis` 行平均约 337 KB、共约 7.2 GB；重复插盘为匹配已有曲目而重读每个已存的波形。<br>**修法**：`sourceJSON` / `audioJSON` 用复用的 `gzip.BestSpeed` 写入压缩，`enginedb.UnpackAnalysis` 同时读压缩行与旧版明文行并拒绝超过限制的行；唯一来源 ID 加匹配路径时只用身份元数据，旧共享键、移动 / 互换 / 删除只读有界的 `Track.ID` 前缀，绝不读分析尾部。 | 检验：`pkg/enginedb`（`TestBridgeAnalysisRowsAreCompressedAndLossless` 等）、`pkg/bridge` 大 PDB 重复挂载计时；大 U 盘实际识别速度仍需维护者验收（行 240、241）。 |
 | **#237 / #245**（音频审计、Live Stream 保存不断听众） | `tools/ui-mod/test_rt_budget.c`<br>`tools/ui-mod/test_rt_callback.c`<br>`pkg/broadcast/` | **原因**：保存任一 `直播推流` 设置会同时重启采集、推流与局域网流，OBS、VLC 要重连；音频路径代码缺少统一的实时性检查（首次切换主 Pioneer FX 模式时清零 488 KB 未触碰的 BSS 并触发缺页，767 µs 超过 667 µs 的块时间）。<br>**修法**：采集与本地听众继续，只重启外部推流和局域网流；测试在计时前先触碰状态，并取三次相同运行里最短的块时间，预算不变；新增检查钩子音频线程函数不做分配、加锁、等待或 I/O 调用。 | 检验：`pkg/broadcast` `TestSettingsChangeKeepsLocalListeners`、`test_rt_budget.c` 与 `test_rt_callback.c`（本机与 armhf，`banned=0 misses=0`）；真机 `/live.wav` 在 VLC 中改设置不重连待做（行 228–230）。 |
+| **#285 / PR #287**（PRIME 4 效果选择） | `tools/ui-mod/build_packs.py`<br>`tools/ui-mod/` 效果选择器 | **原因**：连续转动旋钮浏览效果时选择窗口会关闭，通道 OLED 无法对应所选效果，旋钮每格移动的效果数不是一个。<br>**修法**：连续转动重启 600 ms 自动确认计时，原厂到原厂的选择走原生快速路径，OLED 按发布的 Planck 索引显示全部 31 个原厂与 PX 名称；旋钮每个有效格只发一个 `Plus` / `Minus`，与原厂 `incValue` / `decValue` 一致。 | 检验：`UiModSourceTest.test_prime4_fx_selector_browsing_and_oled_mapping_issue285`、`test_prime4_fx_knob_moves_one_effect_per_detent`、`test_fx_selector_sandbox.sh`；真机 PRIME 4 待验（行 246、247）。 |
+| **PR #282**（西班牙语界面，作者 Javier Saenz） | `tools/ui-mod/`<br>`pkg/webui/` | **需求**：没有西班牙语。<br>**修法**：`设置 → 设备 → 语言` 新增 `Español`，`lang=es` 选用西班牙语钩子包，控制台与手机页全部文字有西班牙语，未知语言回退英文。 | 检验：`LanguagePackSelectionTest`、`TestConsoleIsFullyTranslated`、`TestEveryPhoneTextHasEveryLanguage`；真机选 Español 重启后查看菜单重音与排版待做（行 248）。 |
+| **一体机原厂视图**（#285 后续） | `tools/ui-mod/build_packs.py` | **原因**：一体机上未保存的视图 1–3 被 `{pads: false}` 覆盖，`SHIFT + VIEW` 不再循环；横向波形旁显示曲库时 `LOAD` 不可用；`联机视图` 锁住通道。<br>**修法**：未保存的视图 1–3 交给原厂 `ViewStateController.resetToDefault`，已保存的视图优先；`compactBrowserVisible` 在横向波形加曲库时保持为真；`联机视图` 只在独立播放器（JP07/08/13/14）上提供并生效。 | 检验：`Prime4ViewsTests`（三项）、`test_prime4_views_sandbox.sh`；真机 PRIME 4 / SC LIVE 4 / Mixstream 待验（行 249–251）。 |
+| **高速 SD 卡**（实验性，默认关） | `rootfs-overlay/usr/local/bin/enginex-sd-highspeed`<br>`rootfs-overlay/etc/systemd/system/`<br>`pkg/webui/`<br>`tools/ui-mod/build_packs.py` | **需求**：SD 卡槽以 25 MHz 默认速度运行（最高 12.5 MB/s）。<br>**修法**：`设置 → 设备 → 高速 SD 卡模式`（网页控制台「碟机显示与音频」同一开关）打开后，在开机早于 `edisksd` / `engine` 时以及现场切换时，只对 `ff0c0000` 的 SD 控制器置位 caps 的 `0x4`，空闲时只读地重新初始化，碟机播放时延后并提示「将在下次启动或重新插入 SD 卡时生效」，`dmesg` 出现 mmc 错误或卡消失时撤回；PRIME 4 G2 / SYSTEM ONE 不显示。最高 25 MB/s，SC5000 上实测 23 MB/s。 | 检验：`tests/test_rootfs_overlay.sh`、`TestSdHighSpeedDefaultsOffPersistsAndApplies`、`test_sd_high_speed_switch_rk3288_only_and_four_languages`、数据包测试；真机 RK3288 读速与重启后验证待做（行 252）。 |
 | **其他** | `pkg/audioheader/`、`pkg/compat/`、`docs/mods/src/`、`pkg/rekordbox/`、`pkg/stems/` | 带 ID3 的 FLAC / WAV / AIFF 与 VBR MP3 元数据；官方 Mod 在无 FFmpeg 的碟机上可用；OneLibrary Cue 位置溢出；Stems 在网络盘上的开关与原厂一致；回到原厂时不再复用 EngineX 的 QML 字节码。 | 检验：各包 Go 套件（含 armhf）。 |
 
 ---
@@ -62,6 +66,9 @@
 - **碟机本机 Stems**（行 222）：播放中的耗时（未测）。`【待填】`
 - **签名更新与安装器**（行 215、216、218）：屏幕从 r5 更新到已签名发布、拒绝未签名测试发布；WinUSB 绑定与 USB 传输；双击安装。`【待填】`
 - **恢复官方固件**（行 201、217）：真实 SC5000 官方刷入并回到 EngineX。`【待填】`
+- **PRIME 4 效果选择与视图**（行 246、247、249–251）：PRIME 4 连续浏览效果、旋钮一格一个效果；`SHIFT + VIEW`、`LOAD` 与 `联机视图` 的显示。`【待填】`
+- **西班牙语**（行 248）：选 Español 重启 Engine，检查菜单重音与排版、控制台和手机页切换。`【待填】`
+- **高速 SD 卡**（行 252）：RK3288 机型上 `caps`、`ios` 的 `timing spec: 2 (sd high-speed)`、约 23 MB/s 读速，播放中切换的提示，开着重启后的状态。`【待填】`
 - **U 盘**（行 209、211、212、214、224、225、226）：HFS+ 弹出与更新、暂存库占用、对方盘无 Stems、SD 重插与用户数据恢复、NH08 Spotify。`【待填】`
 - **SC LIVE 4**：Remote Library 封面（行 185）、演出曲目表导出与原厂 History 对照（行 206）。`【待填】`
 
@@ -151,6 +158,6 @@
 
 ## 6. 本次修复的 Issue 清单
 
-#205、#213、#214（PR）、#216、#222（BH-GF3-12 / BH-GC2-10）、#223、#233、#237、#238、#239、#242、#243、#246、#245、#247、#248、#252、#253（识别速度待实机验收）、#255、#258、#261、#263、#264、#266（PR）、#268（仅导出已有历史）、#269、#272、#273（PR）、#274、#277、#279、#281、#283。同时合入 `#234` 更名、`#215` 的 OTA 桥接（不含 `#244`）和 `#236` 的后台负载收敛。
+#205、#213、#214（PR）、#216、#222（BH-GF3-12 / BH-GC2-10）、#223、#233、#237、#238、#239、#242、#243、#246、#245、#247、#248、#252、#253（识别速度待实机验收）、#285、#287（PR）、#282（PR，Javier Saenz）、#255、#258、#261、#263、#264、#266（PR）、#268（仅导出已有历史）、#269、#272、#273（PR）、#274、#277、#279、#281、#283。同时合入 `#234` 更名、`#215` 的 OTA 桥接（不含 `#244`）和 `#236` 的后台负载收敛。
 
 部分完成或待实机验收的 Issue 不应在发布时直接关闭：`#247`、`#252`、`#268`、`#253`；`#244` 保持打开。
