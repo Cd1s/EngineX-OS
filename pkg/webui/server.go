@@ -462,7 +462,7 @@ func (s *Server) qrTarget(r *http.Request) string {
 			name = r.Host
 		}
 		host := strings.Trim(name, "[]")
-		if ip := net.ParseIP(host); host == "" || host == "localhost" || host == "sc5000.lan" || (ip != nil && ip.IsLoopback()) {
+		if ip := net.ParseIP(host); host == "" || host == "localhost" || host == "enginex.lan" || host == "sc5000.lan" || (ip != nil && ip.IsLoopback()) {
 			return "https://" + net.JoinHostPort(lanHost(), port)
 		}
 		return target

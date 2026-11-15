@@ -1056,7 +1056,9 @@ class Rename234UpgradeTests(unittest.TestCase):
             data = Path(tmp) / 'data'
             old, new = data / 'sc5000-custom', data / 'enginex'
             saved = {
-                'ui/settings.conf': b'lang=zh-TW\nfour_deck_role=24\nunknown=keep\n',
+                'ui/settings.conf': b'lang=zh-TW\nfour_deck_role=24\nconsole_https=1\nunknown=keep\n',
+                'console-cert.pem': b'test-console-cert\n',
+                'console-key.pem': b'test-console-key\n',
                 'state/access-token': b'test-access-code\n',
                 'state/deemix-config.json': b'{"quality":"flac"}\n',
                 'ui/packs/en/Skins/Main.qml': b'// installed pack\n',

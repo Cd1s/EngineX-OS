@@ -6,7 +6,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 
 ---
 
-## Regression Table (232 Rows)
+## Regression Table (233 Rows)
 
 | # | Behaviour that must keep working | Issue / commit that fixed it | How it is checked (automated test name, or exact real-deck / sandbox step) | Release gate / deck acceptance / recording coverage |
 | --- | --- | --- | --- | --- |
@@ -243,6 +243,8 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 | 230 | **A Minimal Club Mode pause saved on one release is undone on the next** (#234 review R3): a saved `sc5000-deemixd.service` or `enginex-sc5000-deemixd.service` starts `enginex-deemixd.service` after an update, and the other way round after a downgrade; the pause ends instead of staying `restore-needed` | #234 review | `docs/mods/src/minimal-club-mode/feature_test.go::TestRename234PauseSavedUnderAnotherReleasesUnitIsUndone` | Release workflow Step 2 Go suites, `build_official_mods.py --check` |
 | 231 | **Live Stream keeps the deck's audio when a saved configuration names the hook's feed under its old name** (#234 review R4): `/tmp/sc5000-broadcast.pcm` reads as this release's `/tmp/enginex-broadcast.pcm`, and the built-in feed is never saved by name, so a downgrade reads it under its own; a custom input path is kept | #234 review | `pkg/broadcast::TestRename234BuiltinInputUnderTheOldNameIsThisReleasesFeed`, `pkg/webui::TestRename234BuiltinInputIsNotSaved` | Release workflow Step 2 Go suites |
 | 232 | **The release gate takes a 5.3.0.2 baseline** (#234 review R5): the old phase writes its language setting and reads its version and SSH host key where its prepare left the data (the real `/data/sc5000-custom` before 5.3.0.3), the new boots in `/data/enginex` | #234 review | `test_az01_packer.py::test_234_release_gate_reads_an_old_release_where_its_prepare_left_the_data` | `release-gate.sh` with a 5.3.0.2 baseline |
+
+| 233 | **Synthetic TIDAL accounts remain synthetic after a downgrade** (#234 review): the token endpoint keeps issuing the frozen `sc5000-token` / `sc5000-refresh` wire values recognized by 5.3.0.2–r5; both old values and candidate `enginex-*` tokens remain accepted by 5.3.0.5, so a saved synthetic account never becomes real upstream credentials | #234 review | `pkg/webui::TestRename234IssuedTidalTokensRemainSyntheticOnR5` (fails on `22d61569`), `TestRename234SyntheticTidalAccountsStayLocal`; HTTPS certificate/QR tests cover both console host names; r5 migration preserves `console_https` and certificate/key bytes and modes | Release workflow Step 2 Go/packer suites; physical downgrade remains deck acceptance |
 
 ## Automated Test Gaps (`[NO AUTOMATED TEST]`)
 
