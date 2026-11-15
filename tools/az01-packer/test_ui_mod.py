@@ -29,7 +29,7 @@ class OnOffSwitchCompatibilityTest(unittest.TestCase):
             "scSwapLoopOrder": "swapLoopOrder", "scDualColumn": "browserDualColumn",
             "scTracklistWaveform": "tracklistWaveform", "scOmniSource": "omniSource",
             "scCueCountdown": "cueCountdown", "scRemoteLoad": "remoteLoad",
-            "scSdHighSpeed": "sdHighSpeed",
+            "scSdHighSpeed": "sdHighSpeed", "scRemoteAccess": "remoteAccess",
         }
         for version, skin in (("5.0.4", "EmbeddedCommon"), ("5.3.0", "Embedded")):
             qrc = LAB / version / "qrc"
@@ -54,9 +54,22 @@ class OnOffSwitchCompatibilityTest(unittest.TestCase):
                             self.assertIsNotNone(binding, block)
                             expression, flag = binding.groups()
                             handler = re.search(r"onClicked:\s*([^\n]+)", block).group(1)
-                            key = re.search(r'scCall\("(\w+)=', handler).group(1)
-                            actual[flag] = key
-                            script = """
+                            if flag == "scRemoteAccess":
+                                actual[flag] = "remoteAccess"
+                                script = """
+const assert = require('assert');
+const calls = [], root = {scTunnelToggle: next => calls.push(next)};
+for (const state of [false, true, true, false]) {
+    root.scRemoteAccess = state;
+    assert.equal(EXPRESSION, !!state);
+    HANDLER;
+    assert.equal(calls.pop(), !state);
+}
+""".replace("EXPRESSION", expression).replace("HANDLER", handler)
+                            else:
+                                key = re.search(r'scCall\("(\w+)=', handler).group(1)
+                                actual[flag] = key
+                                script = """
 const assert = require('assert');
 const calls = [], root = {scCall: q => calls.push(q)};
 // Click, external change, then click again: each request uses the latest setting.
@@ -1367,6 +1380,77 @@ assert.strictEqual(evalIsLead({{ master: false }}), false);
                             idx = ("zh-Hans", "zh-Hant", "es").index(lang)
                             for en in strings:
                                 self.assertIn(rows[en][idx], dev_qml)
+
+    def test_remote_access_toggle_and_about_console_qr_four_languages(self):
+        self.assertIn("property bool scRemoteAccess: false", bp.SERVICES_MAIN)
+        self.assertIn("function scTunnelToggle(next)", bp.SERVICES_MAIN)
+        self.assertIn("function scTunnelFetch()", bp.SERVICES_MAIN)
+        self.assertIn('/v1/enginex/tunnel"', bp.SERVICES_MAIN)
+        self.assertIn("property int scConsoleQrSerial:", bp.SERVICES_MAIN)
+        # Never show or accept named-tunnel tokens on the deck UI.
+        self.assertNotIn("hasToken", bp.DEVICE_REMOTE_ACCESS_ENTRIES if hasattr(bp, "DEVICE_REMOTE_ACCESS_ENTRIES") else "")
+        rows = {
+            l.split("\t")[0]: l.split("\t")[1:]
+            for l in (REPO / "tools/ui-mod/i18n.tsv").read_text(encoding="utf-8").splitlines()
+            if l and not l.startswith("#")
+        }
+        expected_i18n = {
+            "Remote access": ("远程访问", "遠端存取", "Acceso remoto"),
+            "Scan to open the console": ("扫码打开控制台", "掃碼開啟控制台", "Escanea para abrir la consola"),
+            "Starting…": ("正在启动…", "正在啟動…", "Iniciando…"),
+            "Error": ("错误", "錯誤", "Error"),
+            "On": ("开", "開", "Activado"),
+            "Off": ("关", "關", "Desactivado"),
+        }
+        for en, want_vals in expected_i18n.items():
+            self.assertIn(en, rows, f"missing i18n row: {en!r}")
+            self.assertEqual(tuple(rows[en]), want_vals, en)
+        for version, dev_rel, about_rel in (
+            (
+                "5.0.4",
+                "Skins/EmbeddedCommon/Views/ControlCenter/Tabs/Preferences/TabContents/DeviceTabContent.qml",
+                "Skins/EmbeddedCommon/Views/ControlCenter/Tabs/Preferences/TabContents/AboutTabContent.qml",
+            ),
+            (
+                "5.3.0",
+                "Skins/Embedded/Views/ControlCenter/Tabs/Preferences/DeviceTabContent.qml",
+                "Skins/Embedded/Views/ControlCenter/Tabs/Preferences/AboutTabContent.qml",
+            ),
+        ):
+            qrc = LAB / version / "qrc"
+            with tempfile.TemporaryDirectory() as tmp:
+                out = Path(tmp) / "packs"
+                built = subprocess.run(
+                    ["python3", str(BUILD_PACKS), "--qrc", str(qrc), "--out", str(out)],
+                    capture_output=True, text=True,
+                )
+                self.assertEqual(built.returncode, 0, built.stderr)
+                for lang in ("en", "zh-Hans", "zh-Hant", "es"):
+                    with self.subTest(version=version, lang=lang):
+                        dev_qml = (out / lang / dev_rel).read_text(encoding="utf-8")
+                        self.assertIn('objectName: "EngineX_RemoteAccess"', dev_qml)
+                        self.assertIn("checkedExternally: !!root.scRemoteAccess", dev_qml)
+                        self.assertIn("root.scTunnelToggle(!root.scRemoteAccess)", dev_qml)
+                        self.assertIn('objectName: "EngineX_RemoteAccessStatus"', dev_qml)
+                        self.assertIn("running: scRemoteAccessRow.visible", dev_qml)
+                        # Available on every model with the console (Gen-1, Gen-2 armhf, AZ04): not hidden by scIsAZ04.
+                        ra_block = dev_qml[dev_qml.index('objectName: "EngineX_RemoteAccess"'):dev_qml.index('objectName: "EngineX_RemoteAccessStatus"')]
+                        self.assertNotIn("scIsAZ04", ra_block)
+
+                        about_qml = (out / lang / about_rel).read_text(encoding="utf-8")
+                        self.assertIn('objectName: "EngineX_AboutConsoleQR"', about_qml)
+                        self.assertIn('objectName: "EngineX_AboutConsoleQRImage"', about_qml)
+                        self.assertIn('objectName: "EngineX_AboutConsoleQRUrl"', about_qml)
+                        self.assertIn("http://127.0.0.1:8080/v1/enginex/console-qr?n=", about_qml)
+                        self.assertIn("scAboutConsoleQr.visible ?", about_qml)
+                        self.assertIn("running: scAboutConsoleQr.visible", about_qml)
+                        self.assertIn("text: root.scConsoleUrl", about_qml)
+                        self.assertNotIn("scAccessCode", about_qml)
+                        if lang != "en":
+                            idx = ("zh-Hans", "zh-Hant", "es").index(lang)
+                            self.assertIn(expected_i18n["Remote access"][idx], dev_qml)
+                            self.assertIn(expected_i18n["Scan to open the console"][idx], about_qml)
+
 
 
     def test_display_only_shadow_lane_and_overview_match_stock(self):

@@ -462,6 +462,9 @@ func (s *Server) qrTarget(r *http.Request) string {
 	if u := s.cfg.PublicURL; u != "" && !strings.Contains(u, "enginex.lan") && !strings.Contains(u, "sc5000.lan") {
 		return u
 	}
+	if pub := s.PublicTunnelURL(); pub != "" {
+		return strings.TrimRight(pub, "/")
+	}
 	target := consoleURL(r)
 	if !s.httpsOffered() {
 		return target
