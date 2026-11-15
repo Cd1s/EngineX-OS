@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"encoding/json"
 	"errors"
 	"net/http/httptest"
 	"os"
@@ -270,5 +271,31 @@ func TestRename234SyntheticTidalAccountsStayLocal(t *testing.T) {
 			}
 			g.Close()
 		})
+	}
+}
+
+// Engine persists these wire values; r5 must still recognize them after a downgrade.
+func TestRename234IssuedTidalTokensRemainSyntheticOnR5(t *testing.T) {
+	s := New(Config{StateDir: t.TempDir(), UIDir: t.TempDir()}, nil)
+	defer s.Close()
+	r := httptest.NewRequest("POST", "/au/oauth2/token", strings.NewReader("grant_type=refresh_token&refresh_token=enginex-refresh"))
+	r.RemoteAddr = "127.0.0.1:1234"
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, r)
+	if w.Code != 200 {
+		t.Fatalf("token endpoint: %d %s", w.Code, w.Body.String())
+	}
+	var tokens map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &tokens); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"access_token", "refresh_token"} {
+		// Frozen r5 set, excluding the empty value: do not use this release's classifier.
+		switch tokens[key] {
+		case "enginex", "sc5000-token", "sc5000-refresh":
+		default:
+			t.Errorf("%s = %q is not a synthetic token recognized by r5", key, tokens[key])
+		}
 	}
 }

@@ -538,7 +538,7 @@ func (g *tidalGateway) deviceAuthorization(w http.ResponseWriter, r *http.Reques
 	respond(w, map[string]any{"deviceCode": "enginex-local", "userCode": "ENGINEX", "verificationUri": lanHost() + ":8080", "verificationUriComplete": "http://" + lanHost() + ":8080", "expiresIn": 600, "interval": 1})
 }
 func (g *tidalGateway) token(w http.ResponseWriter, r *http.Request) {
-	respond(w, map[string]any{"access_token": "enginex-token", "refresh_token": "enginex-refresh", "token_type": "Bearer", "expires_in": 86400, "user": map[string]any{"userId": 1, "countryCode": "US"}})
+	respond(w, map[string]any{"access_token": "sc5000-token", "refresh_token": "sc5000-refresh", "token_type": "Bearer", "expires_in": 86400, "user": map[string]any{"userId": 1, "countryCode": "US"}})
 }
 func (g *tidalGateway) session(w http.ResponseWriter, r *http.Request) {
 	respond(w, map[string]any{"sessionId": "enginex-session", "userId": 1, "countryCode": "US"})

@@ -32,6 +32,7 @@ These keep their sc5000 names, because every installed deck loads Engine through
 - the ALSA file `99-sc5000-custom.conf`;
 - the ALSA hook symbol `sc5000_alsa_boot_hook`;
 - the library path `/data/sc5000-custom/bundle/lib/libengine-ui-hook.so` the ALSA file names.
+- synthetic TIDAL wire tokens `sc5000-token` / `sc5000-refresh`, so older releases still recognize the saved account after a downgrade; this release also accepts the candidate `enginex-*` tokens.
 
 ## Upgrades and downgrades
 
@@ -57,6 +58,7 @@ These keep their sc5000 names, because every installed deck loads Engine through
   instead moves it forward again (prepare's migration).
 - The next upgrade from a handed-back layout moves it forward again: the migration takes
   `/data/enginex` back from a link to `sc5000-custom` (or, cut half-way, to itself).
+- After handing the layout back to ≤5.3.0.2, upgrade straight to 5.3.0.5 or newer: 5.3.0.3/5.3.0.4 refuse a symlinked `/data/enginex`.
 
 ## Where sc5000 is left
 
