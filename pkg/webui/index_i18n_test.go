@@ -84,3 +84,30 @@ func TestServiceIcons(t *testing.T) {
 		}
 	}
 }
+
+// Console redesign: the nav has one link per section, in page order, and the phone QR sits
+// in the same row as the Remote access control that makes it work from other networks.
+func TestConsoleNavReachesEverySection(t *testing.T) {
+	b, err := assets.ReadFile("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(b)
+	links := regexp.MustCompile(`href="#([\w-]+)"`).FindAllStringSubmatch(page, -1)
+	sections := regexp.MustCompile(`<section class="sec" id="([\w-]+)"`).FindAllStringSubmatch(page, -1)
+	if len(links) == 0 || len(links) != len(sections) {
+		t.Fatalf("%d nav links for %d sections", len(links), len(sections))
+	}
+	for i, m := range links {
+		if sections[i][1] != m[1] {
+			t.Errorf("nav link %d goes to %q, section %d is %q", i, m[1], i, sections[i][1])
+		}
+	}
+	_, row, _ := strings.Cut(page, `<div class="grid pair">`)
+	row, _, _ = strings.Cut(row, `<div class="grid">`)
+	for _, id := range []string{`id="cfCard"`, `id="consoleQr"`} {
+		if !strings.Contains(row, id) {
+			t.Errorf("%s is not in the Remote access row", id)
+		}
+	}
+}
