@@ -821,14 +821,18 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 	if httpsOn {
 		consoleLink = "https://" + net.JoinHostPort(lanHost(), s.httpsPortStr())
 	}
+	if public := s.publicConsoleURL(); public != "" {
+		consoleLink = public
+	}
 	if r.Method == http.MethodGet && r.URL.Path == "/v1/enginex/ui" {
 		body, err := json.Marshal(struct {
 			uiSettings
-			AccessCode string `json:"accessCode"`
-			ConsoleURL string `json:"consoleUrl"`
+			AccessCode string       `json:"accessCode"`
+			ConsoleURL string       `json:"consoleUrl"`
+			Tunnel     TunnelStatus `json:"tunnel"`
 			// LANStems: the home sc5000-stemsd last seen, for Settings -> About (#148).
 			LANStems *stems.LANState `json:"lanStems,omitempty"`
-		}{v, s.cfg.AccessToken, consoleLink, relay.LANStems})
+		}{v, s.cfg.AccessToken, consoleLink, s.TunnelManager().Status(""), relay.LANStems})
 		if err != nil {
 			fail(w, http.StatusInternalServerError, err)
 			return

@@ -2819,6 +2819,46 @@ SERVICES_MAIN = """
 	// #79: only GET /v1/enginex/ui (loopback) carries these; shown in Settings -> About.
 	property string scConsoleUrl: ""
 	property string scAccessCode: ""
+	property bool scRemoteAccess: false
+	property string scRemoteAccessStatus: "stopped"
+	property string scRemoteAccessUrl: ""
+	property string scRemoteAccessError: ""
+	function scTunnelApply(v) {
+		if (!v) return
+		scRemoteAccess = !!v.enabled
+		scRemoteAccessStatus = String(v.status || "stopped")
+		scRemoteAccessUrl = String(v.publicUrl || "")
+		scRemoteAccessError = String(v.error || "")
+	}
+	function scTunnelToggle(next) {
+		const x = new XMLHttpRequest()
+		x.open("POST", "http://127.0.0.1:8080/v1/enginex/tunnel")
+		x.setRequestHeader("Content-Type", "application/json")
+		x.onreadystatechange = function() {
+			if (x.readyState !== 4) return
+			try {
+				const v = JSON.parse(x.responseText)
+				if (x.status === 200) { root.scTunnelApply(v); root.scCall("") }
+				else if (v && v.error) { root.scRemoteAccessStatus = "error"; root.scRemoteAccessError = String(v.error) }
+			} catch (e) {}
+		}
+		x.send(JSON.stringify({enabled: !!next}))
+	}
+	function scTunnelHost(u) {
+		return String(u || "").split("://").pop().split("/")[0]
+	}
+	function scRemoteAccessLine() {
+		if (!scRemoteAccess && scRemoteAccessStatus !== "error") return root.scT("Off")
+		if (scRemoteAccessStatus === "running") {
+			const host = scTunnelHost(scRemoteAccessUrl)
+			return host ? root.scT("On") + " · " + host : root.scT("On")
+		}
+		if (scRemoteAccessStatus === "installing" || scRemoteAccessStatus === "starting")
+			return root.scT("Starting…")
+		if (scRemoteAccessStatus === "error")
+			return scRemoteAccessError ? scRemoteAccessError : root.scT("Error")
+		return scRemoteAccess ? root.scT("Starting…") : root.scT("Off")
+	}
 	// #148: home enginex-stemsd / remote Stems status from stems-lan.json.
 	property var scLanStemsInfo: null
 	property string scLanStems: ""
@@ -3489,7 +3529,9 @@ SERVICES_MAIN = """
 		scQuality = v.quality || "flac"
 		scNeteaseMode = v.neteaseMode || "official"
 		scUpdateRepo = v.githubRepo || scUpdateRepo
-		if (v.accessCode) { scAccessCode = v.accessCode; scConsoleUrl = v.consoleUrl || "" }
+		if (v.accessCode) scAccessCode = v.accessCode
+		if (v.consoleUrl !== undefined) scConsoleUrl = v.consoleUrl || ""
+		if (v.tunnel) scTunnelApply(v.tunnel)
 		if (v.accessCode || v.lanStems !== undefined) root.scLanStemsInfo = v.lanStems || null
 		scLanStems = root.scLanStemsLine ? root.scLanStemsLine(root.scLanStemsInfo, scLang) : ""
 		scMasterLimiter = !!v.masterLimiter
@@ -4680,6 +4722,76 @@ SD_HIGH_SPEED_ENTRIES = switch_entry(
 \t\t\tcolor: "#ffb74d"
 \t\t\tfont.pixelSize: 16
 \t\t\ttext: "Applies at next start or SD insert"
+\t\t},
+"""
+
+DEVICE_REMOTE_ACCESS_ENTRIES = """
+\t\tEntryBase.SwitchEntry {
+\t\t\tid: scRemoteAccessRow
+\t\t\tobjectName: "EngineX_RemoteAccess"
+\t\t\ttext: "Remote access"
+\t\t\tcheckedExternally: !!root.scRemoteAccess
+\t\t\tonClicked: root.scTunnelToggle(!root.scRemoteAccess)
+\t\t},
+\t\tText {
+\t\t\tobjectName: "EngineX_RemoteAccessStatus"
+\t\t\tLayout.fillWidth: true
+\t\t\tLayout.preferredHeight: implicitHeight
+\t\t\tleftPadding: 24; rightPadding: 24
+\t\t\twrapMode: Text.WordWrap
+\t\t\tcolor: root.scRemoteAccessStatus === "error" ? "#ff6b6b" : "#9a9a9a"
+\t\t\tfont.pixelSize: 16
+\t\t\ttext: root.scRemoteAccessLine()
+\t\t\ttextFormat: Text.PlainText
+\t\t},
+"""
+
+ABOUT_CONSOLE_QR = """
+\t\tColumnLayout {
+\t\t\tid: scAboutConsoleQr
+\t\t\tobjectName: "EngineX_AboutConsoleQR"
+\t\t\tLayout.fillWidth: true
+\t\t\tLayout.topMargin: 8
+\t\t\tLayout.bottomMargin: 8
+\t\t\tspacing: 8
+\t\t\tvisible: !!root.scConsoleUrl
+\t\t\tText {
+\t\t\t\tLayout.alignment: Qt.AlignHCenter
+\t\t\t\tcolor: "#ffffff"
+\t\t\t\tfont.pixelSize: 18
+\t\t\t\tfont.bold: true
+\t\t\t\ttext: "Scan to open the console"
+\t\t\t}
+\t\t\tRectangle {
+\t\t\t\tLayout.alignment: Qt.AlignHCenter
+\t\t\t\twidth: 196
+\t\t\t\theight: 196
+\t\t\t\tradius: 10
+\t\t\t\tcolor: "#ffffff"
+\t\t\t\tImage {
+\t\t\t\t\tid: scAboutQrImage
+\t\t\t\t\tobjectName: "EngineX_AboutConsoleQRImage"
+\t\t\t\t\tanchors.centerIn: parent
+\t\t\t\t\twidth: 180
+\t\t\t\t\theight: 180
+\t\t\t\t\tsmooth: false
+\t\t\t\t\tcache: false
+\t\t\t\t\tfillMode: Image.PreserveAspectFit
+\t\t\t\t\tsource: scAboutConsoleQr.visible ? ("http://127.0.0.1:8080/v1/enginex/console-qr?url=" + encodeURIComponent(root.scConsoleUrl)) : ""
+\t\t\t\t}
+\t\t\t}
+\t\t\tText {
+\t\t\t\tobjectName: "EngineX_AboutConsoleQRUrl"
+\t\t\t\tLayout.alignment: Qt.AlignHCenter
+\t\t\t\tLayout.fillWidth: true
+\t\t\t\tleftPadding: 24; rightPadding: 24
+\t\t\t\thorizontalAlignment: Text.AlignHCenter
+\t\t\t\twrapMode: Text.WrapAnywhere
+\t\t\t\tcolor: "#9a9a9a"
+\t\t\t\tfont.pixelSize: 15
+\t\t\t\ttext: root.scConsoleUrl
+\t\t\t\ttextFormat: Text.PlainText
+\t\t\t}
 \t\t},
 """
 
@@ -6516,8 +6628,11 @@ def edits(dev: bool):
         # 5.3.0 moved it up from TabContents/, so its imports lost the "../".
         prefs + ("" if v53() else "TabContents/") + "DeviceTabContent.qml": [
             (f'import "{"" if v53() else "../"}Entries"\n', f'import QtQuick.Layouts 1.12\nimport "{"" if v53() else "../"}Entries"\nimport "{"" if v53() else "../"}Entries/Base" as EntryBase\nimport Planck 1.0\n'),
-            ("		PlayerNumber { },\n", LANGUAGE_ENTRY + LED_ENTRY + (POWER_ENTRY + SETTINGS_COPY_ENTRIES if v53() else "") + SD_HIGH_SPEED_ENTRIES + "		PlayerNumber { },\n"),
+            ("		PlayerNumber { },\n", LANGUAGE_ENTRY + LED_ENTRY + (POWER_ENTRY + SETTINGS_COPY_ENTRIES if v53() else "") + SD_HIGH_SPEED_ENTRIES + DEVICE_REMOTE_ACCESS_ENTRIES + "		PlayerNumber { },\n"),
             *([("        PlatterCalibration {},\n", "        PlatterCalibration {},\n" + JOG_INVERT_ENTRIES)] if v53() else []),
+        ],
+        prefs + ("" if v53() else "TabContents/") + "AboutTabContent.qml": [
+            ("        Update { },\n", "        Update { },\n" + ABOUT_CONSOLE_QR),
         ],
         **{prefs + ("" if v53() else "TabContents/") + f"{name}TabContent.qml": [
             (f'import "{"" if v53() else "../"}Entries"\n', f'import QtQuick.Layouts 1.12\nimport "{"" if v53() else "../"}Entries"\nimport "{"" if v53() else "../"}Entries/Base" as EntryBase\nimport Planck 1.0\n'),
