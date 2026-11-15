@@ -137,6 +137,11 @@ PY
     printf 'lang=%s\n' "$LANG_SETTING" > "$R/data/enginex/ui/settings.conf"
     printf '{\n    "TIDAL": "{\\"provider\\":\\"TIDAL\\",\\"providerType\\":\\"TIDAL\\",\\"accessToken\\":\\"enginex\\",\\"refreshToken\\":\\"enginex\\"}"\n}\n' > "$R/data/StreamingAccounts.json"
 
+    # Console shots: serve the console of the suite built from this checkout.
+    if [ -n "${DOC_SHOT_SUITE:-}" ]; then
+        mount --bind "$DOC_SHOT_SUITE" "$R/usr/local/bin/stream-sync"
+    fi
+
     # Start stream-sync
     mkdir -p "$R/tmp/home"
     chroot "$R" /usr/local/bin/stream-sync --listen :8080 --cpu 3 > "$W/stream-sync.log" 2>&1 &
@@ -149,6 +154,44 @@ PY
         fi
         sleep 0.1
     done
+
+    if [ -n "${DOC_SHOT_CONSOLE_LANG:-}" ]; then
+        # A tiny proxy adds the console access code (read from the sandbox, never printed);
+        # headless Chromium shares this network namespace and shoots a tall window.
+        TOKEN_FILE=$(find "$R/tmp/home" "$R/root" "$R/data" -maxdepth 4 -name access-token 2>/dev/null | head -1)
+        [ -n "$TOKEN_FILE" ] || { echo "FAIL: no console access code in the sandbox" >&2; exit 1; }
+        python3 -I - "$TOKEN_FILE" <<'PY' 2> "$W/console-proxy.log" &
+import http.client, http.server, socketserver, sys
+code = open(sys.argv[1], encoding="utf-8").read().strip()
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        c = http.client.HTTPConnection("127.0.0.1", 8080, timeout=20)
+        c.request("GET", self.path, headers={"Authorization": "Bearer " + code})
+        r = c.getresponse(); body = r.read()
+        self.send_response(r.status)
+        for k, v in r.getheaders():
+            if k.lower() not in ("transfer-encoding", "connection", "content-length", "set-cookie"):
+                self.send_header(k, v)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers(); self.wfile.write(body)
+    do_HEAD = do_GET
+    def log_message(self, *a): pass
+class S(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    daemon_threads = True
+S(("127.0.0.1", 8081), H).serve_forever()
+PY
+        PROXY_PID=$!
+        sleep 1
+        timeout 90 chromium-headless-shell --no-sandbox --disable-gpu --hide-scrollbars \
+            --user-data-dir="$W/chrome-$DOC_SHOT_CONSOLE_LANG" --force-device-scale-factor=2 \
+            --window-size=1280,3600 --virtual-time-budget=12000 \
+            --screenshot="$OUT_PNG" "http://127.0.0.1:8081/?lang=$DOC_SHOT_CONSOLE_LANG" > "$W/chromium.log" 2>&1 || true
+        kill "$PROXY_PID" "$SYNC_PID" "$MOCK_PID" 2>/dev/null || true
+        trap - EXIT
+        [ -s "$OUT_PNG" ] || { echo "FAIL: $OUT_PNG not generated" >&2; exit 1; }
+        echo "PASS: $OUT_PNG rendered successfully"
+        exit 0
+    fi
 
     # Run Engine
     timeout --kill-after=5s 35s chroot "$R" /usr/bin/env -i \
@@ -333,6 +376,29 @@ Item {
     }
 }
 QML
+
+# Web console (14, 15) in the three languages. DOC_SHOT_SUITE is the enginex-suite built from this
+# checkout (GOARCH=arm), so the page is the one this release ships.
+if [ "${DOC_SHOT_CONSOLE:-0}" = 1 ]; then
+    : "${DOC_SHOT_SUITE:?set DOC_SHOT_SUITE to the enginex-suite binary built from this checkout}"
+    export DOC_SHOT_SUITE
+    for spec in en:en zh-Hans:zh-CN zh-Hant:zh-TW; do
+        pack=${spec%%:*}; language=${spec#*:}
+        DOC_SHOT_CONSOLE_LANG=$pack unshare -m -n -p -f --kill-child bash "$0" --render-one "$W" "$IMG_EXT2" "$pack" "$pack" "v$CURR_VERSION" "$W/raw/$language-console.png"
+    done
+    [ -z "${DOC_SHOT_RAW_DIR:-}" ] || { mkdir -p "$DOC_SHOT_RAW_DIR"; cp "$W"/raw/*-console.png "$DOC_SHOT_RAW_DIR"/; }
+    python3 - "$W/raw" "$OUT_REPO" <<'PY'
+from pathlib import Path
+from PIL import Image
+import sys
+raw, repo = map(Path, sys.argv[1:])
+for language in ('en', 'zh-CN', 'zh-TW'):
+    img = Image.open(raw/f'{language}-console.png').convert('RGB')
+    out = repo/'docs/assets/screenshots'/language
+    img.crop((0, 0, 2560, 2700)).save(out/'14-webui-console.png')
+PY
+    exit
+fi
 
 # Settings -> Device and Settings -> Services in the three languages (06b, 13).
 if [ "${DOC_SHOT_SETTINGS_PAGES:-0}" = 1 ]; then
