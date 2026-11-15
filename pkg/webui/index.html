@@ -2,57 +2,66 @@
 <html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>EngineX OS · Console</title>
 <style>
-:root{color-scheme:dark;--bg:#07090d;--card:rgba(22,27,36,.72);--line:rgba(255,255,255,.07);--text:#e8edf4;--dim:#8c97a8;--accent:#2ee6d6;--accent2:#34d399;--warn:#f6c453;--bad:#ff6b6b;--field:#121820;font:16px/1.45 -apple-system,"SF Pro Text","PingFang SC","PingFang TC","Microsoft YaHei",system-ui,sans-serif;background:var(--bg);color:var(--text)}
-*{box-sizing:border-box}[hidden]{display:none!important}body{margin:0;min-height:100vh;background:radial-gradient(1200px 600px at 10% -10%,rgba(46,230,214,.10),transparent 60%),radial-gradient(900px 500px at 110% 10%,rgba(124,92,255,.10),transparent 60%),var(--bg)}
-.wrap{max-width:1180px;margin:auto;padding:16px 18px 80px}
-header{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:12px 18px;background:rgba(7,9,13,.78);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-bottom:1px solid var(--line)}
-.brand{display:flex;align-items:center;gap:10px;font-weight:800;letter-spacing:.04em;font-size:18px}.brand svg{flex:none}
-.pill{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:999px;font-size:12.5px;border:1px solid var(--line);background:rgba(255,255,255,.04);color:var(--dim);white-space:nowrap}
-.pill.ver{color:var(--accent);border-color:rgba(46,230,214,.35)}.dot{width:8px;height:8px;border-radius:50%;background:var(--accent2);box-shadow:0 0 8px var(--accent2)}
+:root{color-scheme:dark;--bg:#0b0d10;--panel:#13161b;--raise:#1a1e25;--line:#272c35;--soft:#39414d;--edge:#5f6a7a;--text:#e7eaef;--dim:#a3acb9;--accent:#2ee6d6;--ink:#04211e;--accent2:#34d399;--warn:#f6c453;--bad:#ff7a7a;--field:#0b0d10;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font:16px/1.5 -apple-system,"SF Pro Text","PingFang SC","PingFang TC","Microsoft YaHei",system-ui,sans-serif;background:var(--bg);color:var(--text)}
+*{box-sizing:border-box}[hidden]{display:none!important}body{margin:0;min-height:100vh}
+header{display:flex;align-items:center;gap:8px 14px;flex-wrap:wrap;padding:14px max(20px,50vw - 570px) 12px}
+.brand{display:flex;align-items:center;gap:10px;margin:0;font-size:18px;font-weight:700;letter-spacing:.02em}.brand svg{flex:none}
+.pill{display:inline-flex;align-items:center;gap:7px;font-size:13px;color:var(--dim);white-space:nowrap;min-width:0}
+.pill.ver{font-family:var(--mono);font-size:12.5px;color:var(--accent);padding:2px 7px;border:1px solid #1f6f69;border-radius:5px}.dot{flex:none;width:7px;height:7px;border-radius:50%;background:var(--accent2)}
 #guard{overflow:hidden;text-overflow:ellipsis;max-width:42vw}.spacer{flex:1}
-.langs{display:inline-flex;padding:3px;border-radius:999px;background:rgba(255,255,255,.05);border:1px solid var(--line)}
-.langs button{border:0;background:none;color:var(--dim);padding:6px 12px;border-radius:999px;font:inherit;font-size:13.5px;cursor:pointer;min-height:0}.langs button.on{background:var(--accent);color:#04201d;font-weight:700}
-.grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;align-items:start}.col{display:grid;gap:16px;min-width:0}.grid>*{min-width:0}.full{grid-column:1/-1}
-@media(max-width:880px){.grid{grid-template-columns:minmax(0,1fr)}#guard{max-width:60vw}}@media(max-width:560px){.wrap{padding:12px 10px 80px}.card{padding:14px}.setting{flex-wrap:wrap}.setting .seg{width:100%}.seg button{flex:1}.bar>input,.bar>select{min-width:0}}
-.card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:18px;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);box-shadow:0 10px 30px rgba(0,0,0,.25)}
-.card h2{display:flex;align-items:center;gap:10px;margin:0 0 14px;font-size:16px;letter-spacing:.02em}.card h2 .ic{display:grid;place-items:center;width:30px;height:30px;border-radius:9px;background:rgba(46,230,214,.12);color:var(--accent);font-size:16px}
+.langs,.seg{display:inline-flex;flex-wrap:wrap;padding:3px;border-radius:9px;background:var(--field);border:1px solid var(--edge)}
+.langs button,.seg button{border:0;background:none;color:var(--dim);min-height:36px;padding:6px 12px;border-radius:6px;font:inherit;font-size:14px;cursor:pointer}.langs button:hover,.seg button:hover{color:var(--text)}.langs button.on,.seg button.on{background:rgba(46,230,214,.14);color:var(--accent);font-weight:650;box-shadow:inset 0 0 0 1px rgba(46,230,214,.5)}
+.nav{position:sticky;top:0;z-index:5;display:flex;gap:2px;padding:0 max(10px,50vw - 580px);overflow-x:auto;scrollbar-width:none;background:var(--bg);border-bottom:1px solid var(--line)}.nav::-webkit-scrollbar{display:none}
+.nav a{flex:none;padding:11px 10px;color:var(--dim);font-size:14px;text-decoration:none;white-space:nowrap;border-bottom:2px solid transparent;margin-bottom:-1px}.nav a:hover{color:var(--text);border-color:var(--accent)}
+.wrap{max-width:1180px;margin:auto;padding:4px 20px 88px}
+.sec{scroll-margin-top:50px;padding-top:26px}.sech{display:flex;align-items:center;gap:14px;margin:0 0 12px;font-size:12.5px;font-weight:650;letter-spacing:.14em;text-transform:uppercase;color:var(--dim)}.sech::after{content:"";flex:1;height:1px;background:var(--line)}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;align-items:start}.grid+.grid{margin-top:14px}.pair{align-items:stretch}.col{display:grid;gap:14px;min-width:0}.grid>*{min-width:0}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px}
+.card h3,details.card>summary{display:flex;align-items:center;gap:10px;margin:0;font-size:15.5px;font-weight:650;line-height:1.3}.card h3{margin-bottom:14px}.card h3::before,details.card>summary::before{content:"";flex:none;width:3px;height:15px;border-radius:2px;background:var(--accent)}
 button,select,input{font:inherit;color:inherit}
-.btn{min-height:42px;padding:9px 14px;border-radius:11px;border:1px solid var(--line);background:rgba(255,255,255,.05);cursor:pointer;transition:.15s}.btn:hover{border-color:rgba(46,230,214,.5)}.btn:disabled{opacity:.5;cursor:default}
-.btn.primary{background:linear-gradient(135deg,#2ee6d6,#34d399);border:0;color:#04201d;font-weight:700}
-input,select{min-height:42px;padding:9px 12px;border-radius:11px;border:1px solid var(--line);background:var(--field);width:100%}input:focus,select:focus,.btn:focus-visible,.langs button:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
-.bar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:10px 0}.bar>input,.bar>select{flex:1;min-width:160px}
-small,.sub{display:block;color:var(--dim);font-size:13px;line-height:1.4}
-.providers{display:grid;grid-template-columns:repeat(auto-fill,minmax(132px,1fr));gap:8px}
-.prov{display:flex;align-items:center;gap:8px;min-height:44px;padding:8px 12px;border-radius:12px;border:1px solid var(--line);background:rgba(255,255,255,.04);cursor:pointer;text-align:left;transition:.15s}.prov:hover{transform:translateY(-1px);border-color:var(--c)}.prov img{width:24px;height:24px;border-radius:7px;flex:none}.prov.ok{border-color:var(--c)}.prov.off{opacity:.55;cursor:default;transform:none}
-.setting{display:flex;align-items:center;gap:14px;padding:12px 0;border-top:1px solid var(--line)}.setting:first-of-type{border-top:0}.setting .txt{flex:1;min-width:0}.setting.warn b,.setting.warn #spState{color:#ff9f43}.setting b{display:block;font-weight:600;font-size:14.5px}
-.sw{position:relative;width:50px;height:28px;flex:none}.sw input{position:absolute;opacity:0;width:100%;height:100%;margin:0;cursor:pointer;min-height:0}.sw span{position:absolute;inset:0;border-radius:999px;background:#2a313d;transition:.2s;pointer-events:none}.sw span::after{content:"";position:absolute;top:3px;left:3px;width:22px;height:22px;border-radius:50%;background:#cfd6e0;transition:.2s}
-.sw input:checked+span{background:linear-gradient(135deg,#14b8a6,#34d399);box-shadow:0 0 14px rgba(46,230,214,.55)}.sw input:checked+span::after{transform:translateX(22px);background:#fff}.sw input:focus-visible+span{outline:2px solid var(--accent);outline-offset:2px}.sw input:disabled+span{opacity:.5}
-.seg{display:inline-flex;flex-wrap:wrap;padding:3px;border-radius:12px;background:var(--field);border:1px solid var(--line)}.seg button{border:0;background:none;color:var(--dim);min-height:34px;padding:6px 12px;border-radius:9px;cursor:pointer;font-size:14px}.seg button.on{background:rgba(46,230,214,.16);color:var(--accent);font-weight:700;box-shadow:inset 0 0 0 1px rgba(46,230,214,.4)}
-.setting .why{color:var(--warn)}.tag{font-size:11px;padding:1px 6px;border-radius:6px;background:rgba(246,196,83,.15);color:var(--warn);margin-left:6px;vertical-align:middle;font-weight:600}
-.rows{display:grid;gap:8px;max-height:46vh;overflow:auto;margin-top:8px}.row{display:flex;gap:12px;align-items:center;justify-content:space-between;padding:10px 12px;background:rgba(255,255,255,.035);border:1px solid var(--line);border-radius:12px}.row span{flex:1;overflow-wrap:anywhere}
-.store{height:8px;border-radius:99px;background:#1d2430;overflow:hidden;margin:4px 0 2px}.store i{display:block;height:100%;background:linear-gradient(90deg,#14b8a6,#34d399)}.store.full i{background:linear-gradient(90deg,#f59e0b,#ef4444)}
-#dropZone{display:grid;place-items:center;gap:6px;padding:26px 14px;border:2px dashed #2f3a4a;border-radius:16px;text-align:center;cursor:pointer;transition:.15s;background:rgba(255,255,255,.02)}#dropZone:hover,#dropZone.over{border-color:var(--accent);background:rgba(46,230,214,.06)}#dropZone .big{font-size:28px}
-progress{width:100%;height:8px;border-radius:99px;overflow:hidden;accent-color:var(--accent);appearance:none}progress::-webkit-progress-bar{background:#1d2430}progress::-webkit-progress-value{background:linear-gradient(90deg,#14b8a6,#34d399)}
-.job{padding:10px 12px;border:1px solid var(--line);border-radius:12px;margin:8px 0;background:rgba(255,255,255,.03)}
-canvas{width:100%;height:70px;border-radius:10px;background:#05070a;margin-top:8px}
-details.card{padding:0}details.card>summary{list-style:none;cursor:pointer;padding:16px 18px;display:flex;align-items:center;gap:10px;font-weight:600}details.card>summary::-webkit-details-marker{display:none}details.card>summary::after{content:"›";margin-left:auto;color:var(--dim);transition:.2s;font-size:20px}details.card[open]>summary::after{transform:rotate(90deg)}details.card>.in{padding:0 18px 18px}
-#notice{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);max-width:92vw;padding:10px 16px;border-radius:12px;background:rgba(40,30,8,.92);border:1px solid rgba(246,196,83,.4);color:var(--warn);font-size:14px;z-index:9}#notice:empty{display:none}
-#login{display:none;margin-top:12px;padding:14px;border-radius:14px;background:rgba(255,255,255,.03);border:1px solid var(--line)}#qr{width:200px;max-width:60vw;background:#fff;border-radius:10px;padding:6px}
+.btn{display:inline-flex;align-items:center;justify-content:center;min-height:42px;padding:8px 14px;border-radius:8px;border:1px solid var(--soft);background:var(--raise);color:var(--text);font-weight:500;text-decoration:none;cursor:pointer;transition:border-color .15s,background-color .15s}.btn:hover{border-color:var(--accent)}.btn:disabled{opacity:.45;cursor:default;border-color:var(--soft)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--ink);font-weight:650}.btn.primary:hover{background:#6df0e4}
+input,select{min-height:42px;padding:8px 12px;border-radius:8px;border:1px solid var(--edge);background:var(--field);width:100%;font-size:16px}input::placeholder{color:#8d97a5;opacity:1}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}input:focus,select:focus{outline:2px solid var(--accent);outline-offset:0}
+.bar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:10px 0}.bar>input,.bar>select{flex:1;min-width:160px}.bar:last-child{margin-bottom:0}
+small,.sub{display:block;color:var(--dim);font-size:13px;line-height:1.45}.in>small{margin-bottom:6px}#uiState{font-family:var(--mono);font-size:12.5px;padding-top:10px}
+.providers{display:grid;grid-template-columns:repeat(auto-fill,minmax(138px,1fr));gap:8px;margin-bottom:6px}
+.prov{display:flex;align-items:center;gap:9px;min-height:46px;padding:8px 12px;border-radius:8px;border:1px solid var(--soft);background:var(--raise);cursor:pointer;text-align:left;transition:border-color .15s}.prov:hover{border-color:var(--c)}.prov img{width:24px;height:24px;border-radius:6px;flex:none}.prov.ok{border-color:var(--c)}.prov.ok::after{content:"";margin-left:auto;flex:none;width:7px;height:7px;border-radius:50%;background:var(--c)}.prov.off{opacity:.5;cursor:default;border-color:var(--line)}
+.setting{display:flex;align-items:center;gap:14px;padding:13px 0;border-top:1px solid var(--line)}.setting:first-of-type{border-top:0}h3+.setting{padding-top:0}.setting:last-child{padding-bottom:0}.setting .txt{flex:1;min-width:0}.setting.warn b,.setting.warn #spState{color:#ffab5e}.setting b{display:block;font-weight:600;font-size:14.5px}.setting select{width:auto;min-width:150px}
+.sw{position:relative;width:46px;height:26px;flex:none}.sw input{position:absolute;inset:-8px -4px;opacity:0;width:auto;height:auto;margin:0;cursor:pointer;min-height:0}.sw span{position:absolute;inset:0;border-radius:99px;background:#242a33;border:1px solid var(--edge);transition:background-color .15s,border-color .15s;pointer-events:none}.sw span::after{content:"";position:absolute;top:2px;left:2px;width:20px;height:20px;border-radius:50%;background:#c9d0da;transition:transform .15s,background-color .15s}
+.sw input:checked+span{background:var(--accent);border-color:var(--accent)}.sw input:checked+span::after{transform:translateX(20px);background:var(--ink)}.sw input:focus-visible+span{outline:2px solid var(--accent);outline-offset:2px}.sw input:disabled+span{opacity:.45}
+.setting .why{color:var(--warn)}.tag{font:600 10.5px var(--mono);letter-spacing:.06em;text-transform:uppercase;padding:2px 6px;border-radius:4px;border:1px solid #7a6124;color:var(--warn);margin-left:8px;vertical-align:middle;display:inline-block;white-space:nowrap}
+.rows{display:grid;gap:8px;max-height:46vh;overflow:auto;margin-top:8px}.rows:empty{margin:0}.row{display:flex;gap:12px;align-items:center;justify-content:space-between;padding:9px 12px;background:var(--raise);border:1px solid var(--line);border-radius:8px}.row span{flex:1;overflow-wrap:anywhere}
+.store{height:6px;border-radius:99px;background:#242a33;overflow:hidden;margin:4px 0}.store i{display:block;height:100%;background:var(--accent)}.store.full i{background:#f59e0b}
+#dropZone,#modDrop{display:grid;place-items:center;gap:6px;padding:24px 14px;border:1.5px dashed var(--edge);border-radius:10px;text-align:center;cursor:pointer;margin:10px 0 8px;transition:border-color .15s,background-color .15s}#dropZone:hover,#dropZone.over,#modDrop:hover{border-color:var(--accent);background:rgba(46,230,214,.05)}#dropZone .big{font-size:26px;line-height:1;color:var(--accent)}
+progress{width:100%;height:6px;border:0;border-radius:99px;overflow:hidden;accent-color:var(--accent);appearance:none}progress::-webkit-progress-bar{background:#242a33}progress::-webkit-progress-value{background:var(--accent)}progress::-moz-progress-bar{background:var(--accent)}
+.job{padding:10px 12px;border:1px solid var(--line);border-radius:8px;margin:8px 0;background:var(--raise)}.job:last-child{margin-bottom:0}#jobs:empty::after{content:"—";color:var(--dim)}
+canvas{width:100%;height:70px;border-radius:8px;background:#07090c;margin-top:8px}
+details.card{padding:0}details.card>summary{list-style:none;cursor:pointer;padding:15px 18px;border-radius:10px}details.card>summary::-webkit-details-marker{display:none}details.card>summary::after{content:"›";margin-left:auto;color:var(--dim);transition:transform .15s;font-size:20px;line-height:1}details.card[open]>summary::after{transform:rotate(90deg)}details.card>.in{padding:0 18px 18px}
+#bootFallback,#notice{padding:10px 14px;border-radius:8px;background:#2a2110;border:1px solid #7a6124;color:var(--warn);font-size:14px}#bootFallback{margin:16px 0 0}
+#notice{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);max-width:92vw;z-index:9}#notice:empty{display:none}
+#login{display:none;margin-top:12px;padding:14px;border-radius:8px;background:var(--raise);border:1px solid var(--line)}#qr{width:200px;max-width:60vw;background:#fff;border-radius:8px;padding:6px}#consoleQr{display:block;margin-bottom:10px;max-width:60vw;height:auto}
 a{color:var(--accent)}label.chk{display:flex;align-items:center;gap:10px;cursor:pointer}
+@media(max-width:880px){.grid{grid-template-columns:minmax(0,1fr)}#guard{max-width:70vw}.langs button,.seg button{min-height:40px}}
+@media(max-width:560px){header{padding:12px 14px 10px}.nav{padding:0 6px}.wrap{padding:0 12px 88px}.sec{padding-top:22px}.card{padding:14px}details.card>summary{padding:14px}details.card>.in{padding:0 14px 14px}.spacer{display:none}.langs{width:100%}.langs button{flex:1;padding:6px 4px}.setting{flex-wrap:wrap}.setting .txt{flex:1 1 60%}.setting .seg,.setting select{width:100%}.seg button{flex:1}.bar>input{min-width:55%}.bar>select{flex:1 1 100%}.row{flex-wrap:wrap}.row span{flex:1 1 200px}}
+@media(pointer:coarse){.langs button,.seg button{min-height:40px}}
+@media(prefers-reduced-motion:no-preference){html{scroll-behavior:smooth}}@media(prefers-reduced-motion:reduce){*,::after{transition:none!important}}
 </style>
 <header>
- <div class="brand"><svg width="26" height="26" viewBox="0 0 26 26" aria-hidden="true"><circle cx="13" cy="13" r="11.5" fill="none" stroke="#2ee6d6" stroke-width="2"/><path d="M6 13h2l2-5 3 10 2-7 2 4h3" fill="none" stroke="#34d399" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>EngineX OS</div>
+ <h1 class="brand"><svg width="26" height="26" viewBox="0 0 26 26" aria-hidden="true"><circle cx="13" cy="13" r="11.5" fill="none" stroke="#2ee6d6" stroke-width="2"/><path d="M6 13h2l2-5 3 10 2-7 2 4h3" fill="none" stroke="#34d399" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>EngineX OS</h1>
  <span class="pill ver" id="version" hidden></span>
  <span class="pill"><span class="dot"></span><span id="guard" data-i18n="queueIdle"></span></span>
  <span class="spacer"></span>
  <div class="langs" role="group" aria-label="Language"><button data-lang="en">EN</button><button data-lang="zh-Hans">简体中文</button><button data-lang="zh-Hant">繁體中文</button><button data-lang="es">ES</button></div>
 </header>
+<nav class="nav" data-i18n-aria="navAria"><a href="#s-music" data-i18n="navMusic"></a><a href="#s-files" data-i18n="navFiles"></a><a href="#s-deck" data-i18n="navDeck"></a><a href="#s-remote" data-i18n="navRemote"></a><a href="#s-more" data-i18n="navMore"></a></nav>
 <div class="wrap">
 <p id="bootFallback" role="status" hidden></p>
+<section class="sec" id="s-music"><h2 class="sech" data-i18n="navMusic"></h2>
 <div class="grid">
 <div class="col">
  <section class="card">
-  <h2><span class="ic">♫</span><span data-i18n="streaming"></span></h2>
+  <h3><span data-i18n="streaming"></span></h3>
   <div class="providers">
    <button class="prov" data-provider="netease" style="--c:#e60026"><img src="/icons/netease" alt=""><span data-i18n="pNetease"></span></button>
    <button class="prov" data-provider="spotify" style="--c:#1ed760"><img src="/icons/spotify" alt="">Spotify</button>
@@ -70,13 +79,19 @@ a{color:var(--accent)}label.chk{display:flex;align-items:center;gap:10px;cursor:
   <div class="bar"><button class="btn primary" id="browse" data-i18n="browse"></button><button class="btn" id="relogin" data-i18n="relogin"></button><button class="btn" id="logout" data-i18n="logout"></button></div>
   <div id="login"><img id="qr" data-i18n-alt="loginQr"><p><a id="auth" target="_blank" rel="noreferrer" data-i18n="openOnPhone"></a></p><button class="btn" id="check" data-i18n="checkNetease"></button><small id="loginStatus"></small></div>
  </section>
+</div>
+<div class="col">
  <section class="card">
-  <h2><span class="ic">≡</span><span id="heading" data-i18n="playlists"></span></h2>
+  <h3><span id="heading" data-i18n="playlists"></span></h3>
   <div class="bar"><input id="playlistID" data-i18n-ph="playlistId" data-i18n-aria="playlistId"><button class="btn" id="open" data-i18n="openId"></button></div>
   <div id="rows" class="rows"></div>
  </section>
  <section class="card">
-  <h2><span class="ic">⇪</span><span data-i18n="drop"></span></h2>
+  <h3><span data-i18n="jobsTitle"></span></h3>
+  <div id="jobs"></div><canvas id="wave" width="1024" height="70" data-i18n-aria="waveAria" hidden></canvas>
+ </section>
+ <section class="card">
+  <h3><span data-i18n="drop"></span></h3>
   <div class="bar"><select id="dropDrive" data-i18n-aria="dropDrive"></select></div>
   <div class="store" id="dropStore"><i style="width:0"></i></div><small id="dropStoreText"></small>
   <div class="bar"><input id="dropPlaylist" placeholder="Wi-Fi Drop" data-i18n-aria="dropFolder"></div>
@@ -84,23 +99,31 @@ a{color:var(--accent)}label.chk{display:flex;align-items:center;gap:10px;cursor:
   <progress id="dropProgress" max="1" value="0" hidden></progress>
   <small id="dropState" role="status" data-i18n="dropHint"></small>
  </section>
+</div>
+</div>
+</section>
+<section class="sec" id="s-files"><h2 class="sech" data-i18n="navFiles"></h2>
+<div class="grid">
  <section class="card">
-  <h2><span class="ic">⌕</span><span data-i18n="relocate"></span></h2>
+  <h3><span data-i18n="relocate"></span></h3>
   <small data-i18n="relocateHint"></small>
   <div class="bar"><button class="btn" id="relScan" data-i18n="relScan"></button><button class="btn" id="relApply" data-i18n="relApply" disabled></button></div>
   <small id="relState" role="status"></small>
   <div id="relRows" class="rows"></div>
  </section>
  <section class="card">
-  <h2><span class="ic">≡</span><span data-i18n="tlTitle"></span></h2>
+  <h3><span data-i18n="tlTitle"></span></h3>
   <small data-i18n="tlHint"></small><small id="tracklistState" role="status"></small>
   <div class="bar"><button class="btn" onclick="action(showTracklists)" data-i18n="tlLoad"></button><select id="tracklistSet" data-i18n-aria="tlSet"></select></div>
   <div class="bar"><button class="btn" id="tracklistTxt" onclick="downloadTracklist('txt')" data-i18n="tlText" disabled></button><button class="btn" id="tracklistCsv" onclick="downloadTracklist('csv')" disabled>CSV</button></div>
  </section>
 </div>
+</section>
+<section class="sec" id="s-deck"><h2 class="sech" data-i18n="navDeck"></h2>
+<div class="grid">
 <div class="col">
  <section class="card">
-  <h2><span class="ic">◐</span><span data-i18n="deck"></span></h2>
+  <h3><span data-i18n="deck"></span></h3>
   <div class="setting"><div class="txt"><b data-i18n="quality"></b><span class="sub" data-i18n="qualitySub"></span></div><div class="seg" data-seg="quality"><button data-v="flac">FLAC</button><button data-v="320k">320 kbps</button></div></div>
   <div class="setting"><div class="txt"><b data-i18n="deckLang"></b><span class="sub" data-i18n="deckLangSub"></span></div><div class="seg" data-seg="lang"><button data-v="en">English</button><button data-v="zh-Hans">简体中文</button><button data-v="zh-Hant">繁體中文</button><button data-v="es">Español</button></div></div>
   <div class="setting"><div class="txt"><b data-i18n="tEcho"></b><span class="sub" data-i18n="sEcho"></span></div><label class="sw"><input type="checkbox" data-toggle="upfaderEcho"><span></span></label></div>
@@ -109,35 +132,55 @@ a{color:var(--accent)}label.chk{display:flex;align-items:center;gap:10px;cursor:
   <div class="setting"><div class="txt"><b data-i18n="tJogInvertLeft"></b><span class="sub" data-i18n="sJogInvert"></span></div><label class="sw"><input type="checkbox" data-toggle="jogInvertLeft"><span></span></label></div>
   <div class="setting"><div class="txt"><b data-i18n="tJogInvertRight"></b><span class="sub" data-i18n="sJogInvert"></span></div><label class="sw"><input type="checkbox" data-toggle="jogInvertRight"><span></span></label></div>
   <div class="setting"><div class="txt"><b data-i18n="tFxTimeMode"></b><span class="sub" data-i18n="sFxTimeMode"></span></div><div class="seg" data-seg="fxTimeMode"><button data-v="beats" data-i18n="fxBeats"></button><button data-v="ms">ms</button></div></div>
+  <div class="setting"><div class="txt"><b data-i18n="tBtOut"></b><span class="sub" data-i18n="sBtOut"></span></div><select id="btOut" aria-label="Bluetooth"></select></div>
+  <small id="uiState"></small>
+ </section>
+</div>
+<div class="col">
+ <section class="card">
+  <h3><span data-i18n="deckSys"></span></h3>
   <div class="setting"><div class="txt"><b data-i18n="tOmni"></b><span class="sub" data-i18n="sOmni"></span></div><label class="sw"><input type="checkbox" data-toggle="omniSource"><span></span></label></div>
   <div class="setting"><div class="txt"><b data-i18n="tShare"></b><span class="sub" data-i18n="sShare"></span></div><label class="sw"><input type="checkbox" data-toggle="prolinkShare"><span></span></label></div>
   <div class="setting"><div class="txt"><b><span data-i18n="tExport"></span><span class="tag" data-i18n="beta"></span></b><span class="sub" data-i18n="sExport"></span></div><label class="sw"><input type="checkbox" data-toggle="prolinkExport"><span></span></label></div>
-  <div class="setting"><div class="txt"><b data-i18n="tBtOut"></b><span class="sub" data-i18n="sBtOut"></span></div><select id="btOut" aria-label="Bluetooth" style="width:auto;min-width:150px"></select></div>
   <div class="setting"><div class="txt"><b data-i18n="tHttps"></b><span class="sub" data-i18n="sHttps"></span></div><label class="sw"><input type="checkbox" data-toggle="consoleHttps"><span></span></label></div>
   <div class="setting"><div class="txt"><b data-i18n="tSdHighSpeed"></b><span class="sub" data-i18n="sSdHighSpeed"></span></div><label class="sw"><input type="checkbox" data-toggle="sdHighSpeed"><span></span></label></div>
   <div class="setting"><div class="txt"><b data-i18n="verboseLog"></b><span class="sub" data-i18n="verboseLogSub"></span></div><label class="sw"><input type="checkbox" data-toggle="verboseLog"><span></span></label><a class="btn" href="/api/logs" download="enginex-logs.txt" data-i18n="downloadLogs"></a></div>
-  <small id="uiState"></small>
   <div id="bootRetryActions" hidden><button class="btn" id="bootRetry" data-i18n="bootRetry"></button> <a class="btn" href="/api/boot-report" download data-i18n="bootReport"></a></div>
  </section>
- <section class="card">
-  <h2><span class="ic">↧</span><span data-i18n="jobsTitle"></span></h2>
-  <div id="jobs"></div><canvas id="wave" width="1024" height="70" data-i18n-aria="waveAria" hidden></canvas>
- </section>
 </div>
-<details class="card"><summary><span class="ic">📡</span><span data-i18n="bcTitle"></span></summary><div class="in"><small data-i18n="bcLive"></small><small data-i18n="bcRelay"></small><small data-i18n="bcIntro"></small><small data-i18n="bcFormat"></small><small id="bcState"></small><div class="bar"><input id="bcUrl" data-i18n-ph="bcUrl" autocomplete="off" style="flex:2"><input id="bcMount" placeholder="/live" autocomplete="off"></div><div class="bar"><input id="bcUser" placeholder="source" data-i18n-ph="bcUser" autocomplete="off"><input id="bcPass" type="password" data-i18n-ph="bcPass" autocomplete="off"></div><div class="bar"><button class="btn" onclick="action(saveBroadcast)" data-i18n="bcSave"></button><button class="btn primary" id="bcToggle" onclick="action(toggleBroadcast)" data-i18n="bcStart"></button></div></div></details>
-<details class="card"><summary><span class="ic">☁</span><span data-i18n="relayTitle"></span></summary><div class="in"><small id="relayState"></small><div class="bar"><input id="relayUrl" data-i18n-ph="relayUrl" autocomplete="off"></div><div class="bar"><input id="relayPassword" type="password" data-i18n-ph="newPassword" autocomplete="off"></div><button class="btn" onclick="action(saveRelay)" data-i18n="save"></button></div></details>
-<details class="card" id="cfCard"><summary><span class="ic">🌐</span><span data-i18n="cfTitle"></span></summary><div class="in"><small data-i18n="cfHint"></small><small id="cfState"></small><div class="bar" id="cfUrlRow" hidden><a id="cfUrl" target="_blank" rel="noopener noreferrer" style="flex:1;overflow-wrap:anywhere;font-weight:700"></a><button class="btn" id="cfCopy" type="button" data-i18n="cfCopy"></button></div><small id="cfMobileHint" data-i18n="cfMobileHint" hidden></small><div class="bar"><button class="btn primary" id="cfToggle" type="button" data-i18n="cfStart"></button></div><details style="margin-top:8px"><summary style="cursor:pointer;color:var(--dim);font-size:13px" data-i18n="cfNamedToggle"></summary><div class="bar"><input id="cfToken" type="password" data-i18n-ph="cfTokenPh" autocomplete="off" spellcheck="false"><button class="btn" id="cfSaveToken" type="button" data-i18n="save"></button></div></details></div></details>
-<section class="card full" id="modHub"><h2><span class="ic">🧩</span><span data-i18n="modTitle"></span></h2><small data-i18n="modArch"></small>
+</div>
+</section>
+<section class="sec" id="s-remote"><h2 class="sech" data-i18n="navRemote"></h2>
+<div class="grid pair">
+<details class="card" id="cfCard" open><summary><span data-i18n="cfTitle"></span></summary><div class="in"><small data-i18n="cfHint"></small><small id="cfState"></small><div class="bar" id="cfUrlRow" hidden><a id="cfUrl" target="_blank" rel="noopener noreferrer" style="flex:1;overflow-wrap:anywhere;font-weight:700"></a><button class="btn" id="cfCopy" type="button" data-i18n="cfCopy"></button></div><small id="cfMobileHint" data-i18n="cfMobileHint" hidden></small><div class="bar"><button class="btn primary" id="cfToggle" type="button" data-i18n="cfStart"></button></div><details style="margin-top:8px"><summary style="cursor:pointer;color:var(--dim);font-size:13px" data-i18n="cfNamedToggle"></summary><div class="bar"><input id="cfToken" type="password" data-i18n-ph="cfTokenPh" autocomplete="off" spellcheck="false"><button class="btn" id="cfSaveToken" type="button" data-i18n="save"></button></div></details></div></details>
+<details class="card" open><summary><span data-i18n="qrTitle"></span></summary><div class="in"><img id="consoleQr" src="/api/console-qr" width="200" data-i18n-alt="qrAlt" style="background:#fff;border-radius:10px;padding:6px"><a id="consoleHttpsLink" hidden target="_blank" rel="noopener noreferrer" style="font-weight:700;overflow-wrap:anywhere"></a><small data-i18n="qrHint"></small></div></details>
+</div>
+<div class="grid">
+<div class="col">
+<details class="card"><summary><span data-i18n="bcTitle"></span></summary><div class="in"><small data-i18n="bcLive"></small><small data-i18n="bcRelay"></small><small data-i18n="bcIntro"></small><small data-i18n="bcFormat"></small><small id="bcState"></small><div class="bar"><input id="bcUrl" data-i18n-ph="bcUrl" autocomplete="off" style="flex:2"><input id="bcMount" placeholder="/live" autocomplete="off"></div><div class="bar"><input id="bcUser" placeholder="source" data-i18n-ph="bcUser" autocomplete="off"><input id="bcPass" type="password" data-i18n-ph="bcPass" autocomplete="off"></div><div class="bar"><button class="btn" onclick="action(saveBroadcast)" data-i18n="bcSave"></button><button class="btn primary" id="bcToggle" onclick="action(toggleBroadcast)" data-i18n="bcStart"></button></div></div></details>
+<details class="card"><summary><span data-i18n="tsTitle"></span></summary><div class="in"><small data-i18n="tsHint"></small><small id="tsState"></small><div class="bar"><input id="tsServer" data-i18n-ph="tsServer" autocomplete="off" spellcheck="false"></div><div class="bar"><input id="tsName" data-i18n-ph="tsName" autocomplete="off" spellcheck="false"><input id="tsKey" type="password" data-i18n-ph="tsKey" autocomplete="off"></div><div class="setting"><div class="txt"><b data-i18n="tsFwSsh"></b></div><label class="sw"><input type="checkbox" id="tsSsh"><span></span></label></div><div class="setting"><div class="txt"><b data-i18n="tsFwWeb"></b></div><label class="sw"><input type="checkbox" id="tsWeb"><span></span></label></div><div class="bar"><button class="btn primary" id="tsInstall" data-i18n="tsInstall" hidden></button><button class="btn" id="tsToggle" hidden></button><button class="btn" id="tsLogin" data-i18n="tsLogin" hidden></button><button class="btn" id="tsLogout" data-i18n="tsLogout" hidden></button></div><a id="tsLink" target="_blank" rel="noopener noreferrer" data-i18n="tsOpenLink" hidden></a></div></details>
+</div>
+<div class="col">
+<details class="card"><summary><span data-i18n="relayTitle"></span></summary><div class="in"><small id="relayState"></small><div class="bar"><input id="relayUrl" data-i18n-ph="relayUrl" autocomplete="off"></div><div class="bar"><input id="relayPassword" type="password" data-i18n-ph="newPassword" autocomplete="off"></div><button class="btn" onclick="action(saveRelay)" data-i18n="save"></button></div></details>
+<details class="card"><summary><span data-i18n="sshTitle"></span></summary><div class="in"><small data-i18n="sshHint"></small><small id="sshState"></small><div class="setting"><div class="txt"><b data-i18n="sshEnabled"></b></div><label class="sw"><input type="checkbox" id="sshEnabled"><span></span></label></div><div class="bar"><input id="sshPort" type="number" min="1" max="65535" value="22" data-i18n-ph="sshPort" autocomplete="off"><input id="sshPass" type="password" data-i18n-ph="sshPass" autocomplete="new-password"></div><div class="bar"><input id="sshKey" data-i18n-ph="sshKey" autocomplete="off" spellcheck="false"></div><div class="bar"><button class="btn primary" id="sshSave" data-i18n="save"></button></div></div></details>
+</div>
+</div>
+</section>
+<section class="sec" id="s-more"><h2 class="sech" data-i18n="navMore"></h2>
+<div class="grid">
+<div class="col">
+<section class="card" id="modHub"><h3><span data-i18n="modTitle"></span></h3><small data-i18n="modArch"></small>
 <div class="bar"><a class="btn" href="https://enginexdj.com/#mods" target="_blank" rel="noopener" data-i18n="modBrowse"></a></div>
 <div id="modQuar" class="setting warn" hidden><div class="txt"><b data-i18n="modQuarMsg"></b></div><button class="btn" id="modQuarReset" data-i18n="modQuarBtn"></button></div>
 <div id="modRows" class="rows"></div>
-<label id="modDrop" for="modFile" style="display:block;margin-top:10px;padding:18px 14px;border:2px dashed #2f3a4a;border-radius:16px;text-align:center;cursor:pointer"><span data-i18n="modDrop"></span><input id="modFile" type="file" accept=".tar.gz,.tgz,application/gzip" hidden></label><small id="modUp"></small></section>
-<details class="card"><summary><span class="ic">⛓</span><span data-i18n="tsTitle"></span></summary><div class="in"><small data-i18n="tsHint"></small><small id="tsState"></small><div class="bar"><input id="tsServer" data-i18n-ph="tsServer" autocomplete="off" spellcheck="false"></div><div class="bar"><input id="tsName" data-i18n-ph="tsName" autocomplete="off" spellcheck="false"><input id="tsKey" type="password" data-i18n-ph="tsKey" autocomplete="off"></div><div class="setting"><div class="txt"><b data-i18n="tsFwSsh"></b></div><label class="sw"><input type="checkbox" id="tsSsh"><span></span></label></div><div class="setting"><div class="txt"><b data-i18n="tsFwWeb"></b></div><label class="sw"><input type="checkbox" id="tsWeb"><span></span></label></div><div class="bar"><button class="btn primary" id="tsInstall" data-i18n="tsInstall" hidden></button><button class="btn" id="tsToggle" hidden></button><button class="btn" id="tsLogin" data-i18n="tsLogin" hidden></button><button class="btn" id="tsLogout" data-i18n="tsLogout" hidden></button></div><a id="tsLink" target="_blank" rel="noopener noreferrer" data-i18n="tsOpenLink" hidden></a></div></details>
-<details class="card" id="gen2Card" hidden><summary><span class="ic">⚡</span><span data-i18n="gen2Title"></span></summary><div class="in"><small data-i18n="gen2Hint"></small><small id="gen2State"></small><div class="bar"><button class="btn primary" id="gen2Unlock" data-i18n="gen2Unlock"></button><button class="btn" id="gen2Uninstall" data-i18n="gen2Uninstall"></button></div></div></details>
-<details class="card"><summary><span class="ic">⌨</span><span data-i18n="sshTitle"></span></summary><div class="in"><small data-i18n="sshHint"></small><small id="sshState"></small><div class="setting"><div class="txt"><b data-i18n="sshEnabled"></b></div><label class="sw"><input type="checkbox" id="sshEnabled"><span></span></label></div><div class="bar"><input id="sshPort" type="number" min="1" max="65535" value="22" data-i18n-ph="sshPort" autocomplete="off"><input id="sshPass" type="password" data-i18n-ph="sshPass" autocomplete="new-password"></div><div class="bar"><input id="sshKey" data-i18n-ph="sshKey" autocomplete="off" spellcheck="false"></div><div class="bar"><button class="btn primary" id="sshSave" data-i18n="save"></button></div></div></details>
-<details class="card"><summary><span class="ic">♩</span><span data-i18n="bpmTitle"></span></summary><div class="in"><small id="bpmState"></small><div class="bar"><input id="scClient" data-i18n-ph="scClient" autocomplete="off"></div><div class="bar"><input id="scSecret" type="password" data-i18n-ph="scSecret" autocomplete="off"></div><div class="bar"><input id="scToken" type="password" data-i18n-ph="scToken" autocomplete="off"></div><div class="bar"><input id="gsbKey" type="password" data-i18n-ph="gsbKey" autocomplete="off"></div><button class="btn" onclick="action(saveBpm)" data-i18n="save"></button><small><a href="https://getsongbpm.com" target="_blank" rel="noreferrer">BPM data by GetSongBPM</a></small></div></details>
-<details class="card"><summary><span class="ic">▣</span><span data-i18n="qrTitle"></span></summary><div class="in"><img id="consoleQr" src="/api/console-qr" width="200" data-i18n-alt="qrAlt" style="background:#fff;border-radius:10px;padding:6px"><a id="consoleHttpsLink" hidden target="_blank" rel="noopener noreferrer" style="font-weight:700;overflow-wrap:anywhere"></a><small data-i18n="qrHint"></small></div></details>
+<label id="modDrop" for="modFile"><span data-i18n="modDrop"></span><input id="modFile" type="file" accept=".tar.gz,.tgz,application/gzip" hidden></label><small id="modUp"></small></section>
 </div>
+<div class="col">
+<details class="card"><summary><span data-i18n="bpmTitle"></span></summary><div class="in"><small id="bpmState"></small><div class="bar"><input id="scClient" data-i18n-ph="scClient" autocomplete="off"></div><div class="bar"><input id="scSecret" type="password" data-i18n-ph="scSecret" autocomplete="off"></div><div class="bar"><input id="scToken" type="password" data-i18n-ph="scToken" autocomplete="off"></div><div class="bar"><input id="gsbKey" type="password" data-i18n-ph="gsbKey" autocomplete="off"></div><button class="btn" onclick="action(saveBpm)" data-i18n="save"></button><small><a href="https://getsongbpm.com" target="_blank" rel="noreferrer">BPM data by GetSongBPM</a></small></div></details>
+<details class="card" id="gen2Card" hidden><summary><span data-i18n="gen2Title"></span></summary><div class="in"><small data-i18n="gen2Hint"></small><small id="gen2State"></small><div class="bar"><button class="btn primary" id="gen2Unlock" data-i18n="gen2Unlock"></button><button class="btn" id="gen2Uninstall" data-i18n="gen2Uninstall"></button></div></div></details>
+</div>
+</div>
+</section>
 </div>
 <div id="notice" role="status"></div>
 <script>
@@ -156,6 +199,13 @@ verboseLog:['Verbose logging','详细日志','詳細日誌','Registro detallado'
 verboseLogSub:['Off by default. Engine will restart; playback will stop.','默认关闭。Engine 会重启，播放会中断。','預設關閉。Engine 會重新啟動，播放會中斷。','Desactivado por defecto. Engine se reiniciará; la reproducción se detendrá.'],
 downloadLogs:['Download logs','下载日志','下載日誌','Descargar registros'],
 queueIdle:['Background queue','后台工作队列','背景工作佇列','Cola en segundo plano'],
+navAria:['Sections','页面分区','頁面分區','Secciones'],
+navMusic:['Music','音乐','音樂','Música'],
+navFiles:['Library','曲库','曲庫','Biblioteca'],
+navDeck:['Deck','碟机','碟機','Deck'],
+navRemote:['Remote & live','远程与直播','遠端與直播','Remoto y directo'],
+navMore:['Extras','扩展','擴充','Extras'],
+deckSys:['Library, network & system','曲库、网络与系统','曲庫、網路與系統','Biblioteca, red y sistema'],
 streaming:['Streaming & accounts','流媒体与账号','串流與帳號','Streaming y cuentas'],
 pNetease:['NetEase','网易云','網易雲','NetEase'],
 guest:['Guest mode','访客临时加歌','訪客臨時加歌','Modo invitado'],
@@ -247,11 +297,11 @@ spUnset:['Not set (using built-in Spotify Connect / QR login). OAuth Redirect UR
 relayUrl:['https://relay.example.com (your enginex-relay)','https://relay.example.com（自建 enginex-relay 地址）','https://relay.example.com（自建 enginex-relay 位址）','https://relay.example.com (tu enginex-relay)'],
 newPassword:['New password (empty keeps it)','新密码（留空不改）','新密碼（留空不改）','Nueva contraseña (vacía = no cambia)'],
 save:['Save','保存','儲存','Guardar'],
-cfTitle:['Domain-free public access (Cloudflare Tunnel)','免域名公网连接 (Cloudflare Tunnel)','免網域公網連線 (Cloudflare Tunnel)','Acceso público sin dominio (Cloudflare Tunnel)'],
-cfHint:['Zero-config Quick Tunnel gives this deck an instant https://*.trycloudflare.com public URL without a domain, account or cloud server.','零配置免域名穿透：无需域名、无需账号、无需云服务器，一键生成 https://*.trycloudflare.com 公网加密地址。','零設定免網域穿透：無需網域、無需帳號、無需雲端伺服器，一鍵產生 https://*.trycloudflare.com 公網加密位址。','Quick Tunnel, sin configuración, da a este deck al momento una URL pública https://*.trycloudflare.com sin dominio, cuenta ni servidor en la nube.'],
+cfTitle:['Remote access','远程访问','遠端存取','Acceso remoto'],
+cfHint:['Gives the deck a temporary trycloudflare.com address, so this console and the streaming QR logins work from any network, including a phone on mobile data. The address changes each time it is turned on.','给碟机一个临时的 trycloudflare.com 地址，在任何网络（包括手机流量）下都能打开控制台、扫码登录流媒体。每次开启，地址都会变。','給碟機一個臨時的 trycloudflare.com 位址，在任何網路（包括手機行動數據）下都能開啟控制台、掃碼登入串流服務。每次開啟，位址都會變。','Da al deck una dirección temporal de trycloudflare.com, para que esta consola y los inicios de sesión por QR funcionen desde cualquier red, también con datos móviles. La dirección cambia cada vez que se activa.'],
 cfMobileHint:['Phones on 4G/5G can open this console directly and scan QR codes to log in to streaming services.','手机用 4G/5G 也可直接访问控制台与扫码登录。','手機用 4G/5G 也可直接存取控制台與掃碼登入。','Los teléfonos con 4G/5G pueden abrir esta consola directamente y escanear los códigos QR para iniciar sesión en los servicios de streaming.'],
-cfStart:['Start domain-free public tunnel (Quick Tunnel)','开启免域名公网隧道 (Quick Tunnel)','開啟免網域公網隧道 (Quick Tunnel)','Iniciar túnel público sin dominio (Quick Tunnel)'],
-cfStop:['Stop public tunnel','关闭公网隧道','關閉公網隧道','Detener túnel público'],
+cfStart:['Turn on Remote access','开启远程访问','開啟遠端存取','Activar el acceso remoto'],
+cfStop:['Turn off Remote access','关闭远程访问','關閉遠端存取','Desactivar el acceso remoto'],
 cfCopy:['Copy URL','一键复制','一鍵複製','Copiar URL'],
 cfCopied:['Public URL copied to clipboard','已复制公网地址','已複製公網位址','URL pública copiada al portapapeles'],
 cfNamedToggle:['Optional: Use a fixed Cloudflare Named Tunnel Token','可选：填入固定 Cloudflare Tunnel Token','可選：填入固定 Cloudflare Tunnel Token','Opcional: usar un token fijo de Cloudflare Named Tunnel'],
@@ -283,7 +333,7 @@ modAuthor:['by','作者','作者','de'],
 modQml:['QML','QML 数','QML 數','QML'],
 qrTitle:['Open this console on a phone','手机扫码打开控制台','手機掃碼開啟控制台','Abrir esta consola en un teléfono'],
 qrAlt:['QR code of this console','局域网控制台二维码','區域網路控制台 QR Code','Código QR de esta consola'],
-qrHint:['Same network only; log in with the console code shown on the deck.','需在同一局域网；用碟机显示的控制台访问码登录。','需在同一區域網路；用碟機顯示的控制台存取碼登入。','Solo en la misma red; inicia sesión con el código de consola que muestra el deck.'],
+qrHint:['On the same network, scan it directly. With Remote access on, the code works from any network. Log in with the console code shown on the deck.','在同一网络下直接扫码；开启远程访问后，在任何网络下都能扫。用碟机上显示的控制台访问码登录。','在同一網路下直接掃碼；開啟遠端存取後，在任何網路下都能掃。用碟機上顯示的控制台存取碼登入。','En la misma red, escanéalo directamente. Con el acceso remoto activado, el código funciona desde cualquier red. Inicia sesión con el código de consola que muestra el deck.'],
 tHttps:['HTTPS console (:8443)','启用控制台 HTTPS (:8443)','啟用主控台 HTTPS (:8443)','Consola HTTPS (:8443)'],
 sHttps:['Optional self-signed TLS on a separate port; HTTP (:8080) stays enabled','在独立端口开启自签名 HTTPS；原有 HTTP (:8080) 保持可用','於獨立連接埠開啟自簽名 HTTPS；原有 HTTP (:8080) 維持可用','TLS autofirmado opcional en un puerto independiente; HTTP (:8080) sigue habilitado'],
 set:['set','已设置','已設定','configurado'],
@@ -368,7 +418,7 @@ sshKey:['ssh-ed25519 ... / ssh-rsa ...','ssh-ed25519 ... / ssh-rsa ...','ssh-ed2
 sshRunning:['SSH is running','SSH 运行中','SSH 執行中','SSH en marcha'],
 sshStopped:['SSH is stopped','SSH 已停止','SSH 已停止','SSH detenido'],
 sshKeySet:['public key set','已设置公钥','已設定公鑰','clave pública configurada'],
-tsTitle:['Remote access (Tailscale / Headscale)','远程访问（Tailscale / Headscale）','遠端存取（Tailscale / Headscale）','Acceso remoto (Tailscale / Headscale)'],
+tsTitle:['Private network (Tailscale / Headscale)','私有网络（Tailscale / Headscale）','私有網路（Tailscale / Headscale）','Red privada (Tailscale / Headscale)'],
 tsHint:['Reach this deck from anywhere through your own tailnet, no public IP needed. Runs in userspace mode and only the services ticked below are forwarded. Needs internet on the deck.','通过你自己的 tailnet 从任何地方访问碟机，不需要公网 IP。以用户态模式运行，只转发下面勾选的服务。碟机需要联网。','透過你自己的 tailnet 從任何地方存取碟機，不需要公網 IP。以使用者態模式執行，只轉發下面勾選的服務。碟機需要連網。','Accede a este deck desde cualquier lugar a través de tu propia tailnet, sin IP pública. Funciona en modo userspace y solo se reenvían los servicios marcados abajo. El deck necesita conexión a internet.'],
 tsServer:['Control server (empty = Tailscale, or https://your-headscale)','控制服务器（留空 = Tailscale，或填 https://你的-headscale）','控制伺服器（留空 = Tailscale，或填 https://你的-headscale）','Servidor de control (vacío = Tailscale, o https://tu-headscale)'],
 tsName:['Device name (optional)','设备名（可选）','裝置名稱（可選）','Nombre del dispositivo (opcional)'],
