@@ -3,6 +3,7 @@ package enginedb
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -215,7 +216,7 @@ func stageOwnedMoves(ctx context.Context, tx *sql.Tx, prepared []preparedTrack, 
 	}
 	// Legacy rows can share one import-wide pdbImportKey value. Our saved
 	// source record retains the per-track ID, including across moves/swaps.
-	rows, e := tx.QueryContext(ctx, `SELECT s.trackId,t.pdbImportKey,s.path,s.fingerprint,CASE WHEN json_valid(CAST(a.sourceJSON AS TEXT)) THEN json_extract(CAST(a.sourceJSON AS TEXT),'$.Track.ID') END FROM BridgeState s JOIN Track t ON t.id=s.trackId LEFT JOIN BridgeAnalysis a ON a.trackId=s.trackId`)
+	rows, e := tx.QueryContext(ctx, `SELECT s.trackId,t.pdbImportKey,s.path,s.fingerprint,substr(a.sourceJSON,1,67108865) FROM BridgeState s JOIN Track t ON t.id=s.trackId LEFT JOIN BridgeAnalysis a ON a.trackId=s.trackId`)
 	if e != nil {
 		return nil, e
 	}
@@ -236,9 +237,19 @@ func stageOwnedMoves(ctx context.Context, tx *sql.Tx, prepared []preparedTrack, 
 	counts := map[uint32]int{}
 	for rows.Next() {
 		var t ownedTrack
-		if e = rows.Scan(&t.id, &t.source, &t.oldPath, &t.fp, &t.recorded); e != nil {
+		var packed []byte
+		if e = rows.Scan(&t.id, &t.source, &t.oldPath, &t.fp, &packed); e != nil {
 			rows.Close()
 			return nil, e
+		}
+		plain, err := UnpackAnalysis(packed, 64<<20)
+		if err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("source record for track %d: %w", t.id, err)
+		}
+		var record struct{ Track struct{ ID uint32 } }
+		if json.Unmarshal(plain, &record) == nil && record.Track.ID != 0 {
+			t.recorded = sql.NullInt64{Int64: int64(record.Track.ID), Valid: true}
 		}
 		if t.recorded.Valid {
 			t.source = uint32(t.recorded.Int64)

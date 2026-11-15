@@ -257,7 +257,11 @@ func TestEndToEndPDBAnalysisNFDIncrementalSmartMatch(t *testing.T) {
 		t.Fatal("H or main memory cue missing", cues, main)
 	}
 	var source struct{ Analysis rekordbox.Analysis }
-	if e := json.Unmarshal(scalar[[]byte](t, db, `SELECT sourceJSON FROM BridgeAnalysis WHERE trackId=1`), &source); e != nil {
+	sourceJSON, e := enginedb.UnpackAnalysis(scalar[[]byte](t, db, `SELECT sourceJSON FROM BridgeAnalysis WHERE trackId=1`), 64<<20)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e := json.Unmarshal(sourceJSON, &source); e != nil {
 		t.Fatal(e)
 	}
 	if source.Analysis.Structure == nil || len(source.Analysis.Structure.Phrases) != 1 || len(source.Analysis.Waveforms) != 3 {
