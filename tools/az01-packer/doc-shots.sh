@@ -166,7 +166,7 @@ code = open(sys.argv[1], encoding="utf-8").read().strip()
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         c = http.client.HTTPConnection("127.0.0.1", 8080, timeout=20)
-        c.request("GET", self.path, headers={"Authorization": "Bearer " + code})
+        c.request("GET", self.path, headers={"Cookie": "stream_sync=" + code})
         r = c.getresponse(); body = r.read()
         self.send_response(r.status)
         for k, v in r.getheaders():
