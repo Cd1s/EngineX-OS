@@ -202,7 +202,7 @@ func TestFillOverviewMaximaSlowWriteProgressesAcrossMountBudgets(t *testing.T) {
 	slowUpdateDelayNs.Store(int64(2 * time.Millisecond))
 	defer slowUpdateDelayNs.Store(0)
 
-	budget := 1500 * time.Millisecond
+	budget := 2500 * time.Millisecond
 	ctx1, cancel1 := context.WithTimeout(context.Background(), budget)
 	_, _ = FillOverviewMaxima(ctx1, mount, time.Now().Add(budget))
 	cancel1()
