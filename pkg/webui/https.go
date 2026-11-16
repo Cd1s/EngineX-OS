@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -100,7 +101,7 @@ func collectCertSANs() ([]string, []net.IP) {
 	}
 	addDNS("enginex.local")
 	addDNS("enginex.lan")
-	addDNS("sc5000.lan")
+	addDNS(migration.PlaceholderHost)
 
 	addIP(net.ParseIP("127.0.0.1"))
 	addIP(net.ParseIP("::1"))

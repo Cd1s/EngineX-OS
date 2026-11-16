@@ -165,12 +165,12 @@ sub("/run/enginex", f"{tmp}/run-enginex")
 sub("accounts=${ENGINEX_STREAMING_ACCOUNTS:-/data/StreamingAccounts.json}", f"accounts={tmp}/data/StreamingAccounts.json")
 sub("systemctl restart --no-block enginex-stream-sync.service enginex-rb-bridge.service enginex-deemixd.service engine-guardian.service || :", ":")
 sub('[ "$timesyncd_changed" = 0 ] || systemctl restart --no-block systemd-timesyncd.service || :', ":")
-sub("pgrep -x 'enginex-suite|sc5000-suite' 2>/dev/null", ":")
+sub("pgrep -x 'enginex-suite|enginex-suite' 2>/dev/null", ":")
 sub("engine.service", unit)
 # What may still reach the host's systemd: the reload, the restart of our unit, and two
 # branches this fixture never enters (no SSH key and no edisksd hook in the bundle).
 allowed = ("systemctl daemon-reload", f"systemctl restart --no-block {unit}",
-           "systemctl stop enginex-sc5000-deemixd.service", "systemctl reset-failed enginex-sc5000-deemixd.service",
+           "systemctl stop enginex-enginex-deemixd.service", "systemctl reset-failed enginex-enginex-deemixd.service",
            "systemctl start --no-block sshd.service", "systemctl restart edisksd.service")
 for line in s.splitlines():
     if "systemctl " in line and not line.lstrip().startswith("#") and not any(a in line for a in allowed):

@@ -1,13 +1,13 @@
 [Unit]
-Description=SC5000 remote Stems renderer (spectral HPSS approximation; public entry is sc5000-relay)
+Description=EngineX remote Stems renderer (spectral HPSS approximation; public entry is enginex-relay)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 DynamicUser=yes
-LoadCredential=token:/etc/sc5000-stems/token
-ExecStart=/opt/sc5000-stems/sc5000-stemsd -listen 127.0.0.1:6596 -token-file %d/token -worker /opt/sc5000-stems/worker.py
+LoadCredential=token:/etc/enginex-stems/token
+ExecStart=/opt/enginex-stems/enginex-stemsd -listen 127.0.0.1:6596 -token-file %d/token -worker /opt/enginex-stems/worker.py
 Restart=always
 RestartSec=3
 TimeoutStopSec=10

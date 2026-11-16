@@ -17,8 +17,8 @@ Python 3 标准库实现容器解析；文件系统操作需要 `debugfs`、`e2f
 整套发布镜像用 `build-release.sh` 生成（在编译机上、仓库根目录执行）：它把五个工具编成一个 ARMv7 静态 `enginex-suite.xz`（rb-bridge、stream-sync、engine-guardian、stems-processor、enginex-deemixd），把 UI 包打成 `ui-packs.tar.xz`，与 `rootfs-overlay` 和 `fsck.hfsplus` 组成 overlay。每组底包只打一次，然后按 `<型号前缀>-<版本>-EngineX-OS-<品牌型号>-Update.img` 复制成各型号的文件名（Engine 在 U 盘上按 `<前缀>-<数字和点>-…Update.img` 找包）。最后逐个 `info` 校验，并生成 `SHA256SUMS.txt`。
 
 ```bash
-sh tools/az01-packer/build-release.sh 5.3.0.4 /root/build/sc5000-lab/fw-5.3.0 \
-  /path/to/one_key.pub /path/to/fsck.hfsplus /root/build/sc5000-lab/release-5.3.0.4
+sh tools/az01-packer/build-release.sh 5.3.0.4 <firmware-lab>/fw-5.3.0 \
+  /path/to/one_key.pub /path/to/fsck.hfsplus <firmware-lab>/release-5.3.0.4
 ```
 
 公开发布的最后两步：`build-installer.sh <版本> <输出目录>` 把 4 个安装器加进 `SHA256SUMS.txt`，然后 `ENGINEX_RELEASE_KEY=<发布私钥文件> sh tools/az01-packer/sign-release.sh <输出目录>` 用 Ed25519 发布密钥签名，写出 `SHA256SUMS.txt.sig`（#239，5.3.0.5 起碟机和安装器都要求签名有效；必须在 `build-installer.sh` 之后，因为它会重写清单）。仓库里没有内置发布公钥时 `build-release.sh`（第 3 个参数 `none`）直接停止。
@@ -32,29 +32,29 @@ sh tools/az01-packer/build-release.sh 5.3.0.4 /root/build/sc5000-lab/fw-5.3.0 \
 ```bash
 set -o pipefail
 python3 tools/az01-packer/az01_packer.py info \
-  /root/build/sc5000-lab/fw/SC5000-5.0.4-Update.img \
+  <firmware-lab>/fw/SC5000-5.0.4-Update.img \
   | cut -c1-200 | head -40
 
 python3 tools/az01-packer/az01_packer.py unpack \
-  /root/build/sc5000-lab/fw/SC5000-5.0.4-Update.img \
-  --output /root/build/sc5000-lab/unpacked-5.0.4 \
+  <firmware-lab>/fw/SC5000-5.0.4-Update.img \
+  --output <firmware-lab>/unpacked-5.0.4 \
   | cut -c1-200 | head -40
 
 # 首先将官方原包存入远端备份库，并确认返回完整 backup id。
-agent-backup put /root/build/sc5000-lab/fw/SC5000-5.0.4-Update.img \
+agent-backup put <firmware-lab>/fw/SC5000-5.0.4-Update.img \
   --label enginex-before-offline-customization | cut -c1-200 | head -40
 
 # 使用你自己的公钥路径；不传入私钥。所有操作产生新文件。
 python3 tools/az01-packer/az01_packer.py patch-rootfs \
-  /root/build/sc5000-lab/fw/SC5000-5.0.4-Update.img \
+  <firmware-lab>/fw/SC5000-5.0.4-Update.img \
   --ssh-public-key /path/to/id_ed25519.pub \
-  --output /root/build/sc5000-lab/custom-rootfs.ext2 \
+  --output <firmware-lab>/custom-rootfs.ext2 \
   | cut -c1-200 | head -40
 
 python3 tools/az01-packer/az01_packer.py repack \
-  /root/build/sc5000-lab/fw/SC5000-5.0.4-Update.img \
-  --rootfs /root/build/sc5000-lab/custom-rootfs.ext2 \
-  --output /root/build/sc5000-lab/SC5000-custom-test.img \
+  <firmware-lab>/fw/SC5000-5.0.4-Update.img \
+  --rootfs <firmware-lab>/custom-rootfs.ext2 \
+  --output <firmware-lab>/SC5000-custom-test.img \
   | cut -c1-200 | head -40
 ```
 

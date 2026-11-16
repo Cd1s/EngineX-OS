@@ -12,7 +12,7 @@ First-generation JP07/JP13/JC11 image groups include
 execute that path directly. Second-generation data-bundle installations keep
 the stock root partition read-only: the processor wrapper is instead at
 `/data/enginex/bundle/bin/stems-processor`, also reachable through the
-`/data/sc5000-custom` compatibility link. Passing a first-generation gate does
+`/data/enginex-custom` compatibility link. Passing a first-generation gate does
 not prove second-generation processor detection.
 
 ## Cause and fix
@@ -77,7 +77,7 @@ armhf stand-in named `Engine` (time64 `stat()` → `__stat64_time64`, then
 `execv`, as in the launcher) printed `stat=-1` and "could not find" with the r2
 hook, so the stems-probe child never got a reply. With the new hook it got
 `stat=0`, and stems-probe completed a 3 s render: handshake `ok`, 132300 frames
-in and out, through the bundle wrapper and `sc5000-suite stems-processor`. On
+in and out, through the bundle wrapper and `enginex-suite stems-processor`. On
 the AZ04 rootfs, a native stand-in that calls the real
 `std::filesystem::status()` through the stock libstdc++ showed the same result
 with the r2 and new PRIME4G2 hooks. `Config[0x2a7]`

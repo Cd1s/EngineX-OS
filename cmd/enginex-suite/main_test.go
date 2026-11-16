@@ -1,6 +1,7 @@
 package main
 
 import (
+"github.com/Cd1s/EngineX-OS/internal/migration"
 	"reflect"
 	"testing"
 )
@@ -13,11 +14,11 @@ func TestAppletAcceptsNewAndOldNames(t *testing.T) {
 		args, rest []string
 	}{
 		{"enginex-suite", "stream-sync", []string{"stream-sync", "--listen", ":8080"}, []string{"--listen", ":8080"}},
-		{"sc5000-suite", "stream-sync", []string{"stream-sync", "--listen", ":8080"}, []string{"--listen", ":8080"}},
-		{"enginex-suite", "enginex-deemixd", []string{"sc5000-deemixd", "-state-dir", "/x"}, []string{"-state-dir", "/x"}},
-		{"sc5000-suite", "enginex-deemixd", []string{"enginex-deemixd"}, []string{}},
+		{migration.Suite, "stream-sync", []string{"stream-sync", "--listen", ":8080"}, []string{"--listen", ":8080"}},
+		{"enginex-suite", "enginex-deemixd", []string{migration.Deemix, "-state-dir", "/x"}, []string{"-state-dir", "/x"}},
+		{migration.Suite, "enginex-deemixd", []string{"enginex-deemixd"}, []string{}},
 		{"enginex-deemixd", "enginex-deemixd", []string{"-state-dir", "/x"}, []string{"-state-dir", "/x"}},
-		{"sc5000-deemixd", "enginex-deemixd", []string{"-state-dir", "/x"}, []string{"-state-dir", "/x"}},
+		{migration.Deemix, "enginex-deemixd", []string{"-state-dir", "/x"}, []string{"-state-dir", "/x"}},
 		{"rb-bridge", "rb-bridge", []string{"--prolink"}, []string{"--prolink"}},
 		{"enginex-suite", "enginex-suite", nil, nil},
 	} {

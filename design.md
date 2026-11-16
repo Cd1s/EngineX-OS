@@ -43,7 +43,7 @@ beatData contain nonempty qCompress data. This also fixes the legacy `/perf`
 readiness check. Missing analysis is retryable, not an invitation to decode on
 the receiver or generate another beatgrid.
 
-Measured formats, confirmed by `runs/20261109-sc5000-grid/README.md`:
+Measured formats, confirmed by `runs/20261109-enginex-grid/README.md`:
 
 | Data | Format and handling |
 | --- | --- |
@@ -211,7 +211,7 @@ restart, unload, setting/database change or flash is performed by this task.
 ## 后续：原厂 Hybrid Mode
 
 The F1/craft-anything investigation is recorded in
-`runs/20261109-sc5000-shadow-arch/re-findings.md`. JP07 Engine 5.3.0 contains
+`runs/20261109-enginex-shadow-arch/re-findings.md`. JP07 Engine 5.3.0 contains
 the full RemoteHostScreen ServicesController/Service/DeckController/TrackData
 receive/render stack, including PositionItem/ZoomItem and the remotehostscreen.v1
 protobuf UpdateWaveformChunk / SetDeckOverviewWaveform messages. Its QML binds

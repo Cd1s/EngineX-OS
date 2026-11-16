@@ -116,7 +116,7 @@ func shadowReviewPost(t *testing.T, s *Server, np string) deckState {
 	t.Helper()
 	body, _ := json.Marshal([]deckState{{Deck: 1, Net: np}})
 	w := httptest.NewRecorder()
-	s.decksPost(w, httptest.NewRequest("POST", "/v1/sc5000/decks", bytes.NewReader(body)))
+	s.decksPost(w, httptest.NewRequest("POST", "/v1/enginex/decks", bytes.NewReader(body)))
 	if w.Code != http.StatusOK {
 		t.Fatalf("decksPost %d", w.Code)
 	}

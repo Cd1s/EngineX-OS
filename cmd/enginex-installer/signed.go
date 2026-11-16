@@ -1,6 +1,7 @@
 package main
 
 import (
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"context"
 	"crypto/ed25519"
 	"errors"
@@ -197,9 +198,9 @@ func verifyCached(path string) (tag string, err error) {
 // for each release-tag file. A file that is not there is skipped (older releases have no tag file);
 // one that is there and cannot be read fails the command, so that refuseOlder never compares with
 // part of the answer.
-const installedReleaseCmd = `for f in ` + customDirSh + `/version.txt /data/sc5000-custom/version.txt /etc/enginex/version.txt /etc/sc5000/version.txt; do ` +
+const installedReleaseCmd = `for f in ` + customDirSh + `/version.txt ` + migration.DataDir + `/version.txt /etc/enginex/version.txt ` + migration.ImageDir + `/version.txt; do ` +
 	`[ -e "$f" ] || continue; v=$(cat "$f") || { echo "cannot read $f" >&2; exit 1; }; printf 'V %s\n' "$v"; done; ` +
-	`for f in /etc/enginex/release-tag /etc/sc5000/release-tag ` + customDirSh + `/bundle/release-tag /data/sc5000-custom/bundle/release-tag; do ` +
+	`for f in /etc/enginex/release-tag ` + migration.ImageDir + `/release-tag ` + customDirSh + `/bundle/release-tag ` + migration.DataDir + `/bundle/release-tag; do ` +
 	`[ -e "$f" ] || continue; v=$(cat "$f") || { echo "cannot read $f" >&2; exit 1; }; printf 'T %s\n' "$v"; done`
 
 func readInstalledRelease(ctx context.Context, cl *ssh.Client, label string) (string, error) {

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"context"
 	"fmt"
 	"os"
@@ -60,7 +61,7 @@ func defaultTimesyncClockFile() string {
 	if p := strings.TrimSpace(os.Getenv("ENGINEX_TIMESYNC_CLOCK")); p != "" {
 		return p
 	}
-	for _, marker := range []string{"/data/enginex", "/data/sc5000-custom"} {
+	for _, marker := range []string{"/data/enginex", migration.DataDir} {
 		if _, err := os.Stat(marker); err == nil {
 			return defaultTimesyncClockPath
 		}

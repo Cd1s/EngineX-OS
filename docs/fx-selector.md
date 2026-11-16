@@ -48,7 +48,7 @@ The earlier RE report mixed file offsets and virtual addresses in some Flanger-v
 
 ## Reproducible validation
 
-All compilation, testing and sandbox work for this task runs on the build host through remote-build, under `/root/build/sc5000-f4-20261109`. The shared `/root/build/sc5000-lab` remains read only. No deck connection is used.
+All compilation, testing and sandbox work for this task runs on the build host through remote-build, under `/root/build/enginex-f4-20261109`. The shared `<firmware-lab>` remains read only. No deck connection is used.
 
 - `bash tools/ui-mod/test_fx_selector.sh`: existing DSP regressions and the new control/mapping matrix, each plain, ASan/UBSan and TSan. The new suite covers all five modes, time/parameter/wet values, finite bounded output, literal wet bypass, mode crossfades, ownership contention, challenge ordering, unbind/destruction and concurrent control/render activity.
 - `bash tools/az01-packer/test_fx_selector_sandbox.sh`: private JC11 PRIME4 5.3.0 image, unshare mount/network/PID namespaces, real rootfs and native armhf Engine; no qemu. The UI uses the production Go UI handlers, production hook and generated packs. A private import directory supplies the original assignment modules to the UI engine for the real knob-component probe.

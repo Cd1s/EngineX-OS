@@ -22,7 +22,7 @@ import (
 
 // Downloads go to the front SD when present, otherwise to internal storage.
 const (
-	defaultDownloads  = "/media/sc5000-sd-cache/Music/Stream"
+	defaultDownloads  = "/media/enginex-sd-cache/Music/Stream"
 	fallbackDownloads = "/data/enginex/Stream"
 	// Internal storage is shared with Engine; the SD card has room to spare.
 	maxInternalCache = 3 << 30

@@ -1,4 +1,4 @@
-// Command sc5000-relay (enginex-relay) relays Spotify/Deezer/SoundCloud/Beatport
+// Command enginex-relay relays Spotify/Deezer/SoundCloud/Beatport
 // QR login credentials to EngineX OS decks and is the single public entry point
 // for remote Stems rendering.
 package main
@@ -51,10 +51,7 @@ func defaultRelayStateDir() string {
 	if v := strings.TrimSpace(os.Getenv("ENGINEX_RELAY_STATE")); v != "" {
 		return v
 	}
-	if _, err := os.Stat("/var/lib/enginex-relay"); err == nil {
-		return "/var/lib/enginex-relay"
-	}
-	return "/var/lib/sc5000-relay"
+	return "/var/lib/enginex-relay"
 }
 
 func main() {
@@ -115,10 +112,10 @@ func main() {
 		go func() {
 			u, err := startQuickTunnel(tunnelCtx, *listen, *stateDir, func(url string) {
 				s.setPublicURL(url)
-				log.Printf("enginex-relay (sc5000-relay) quick tunnel active: %s", url)
+				log.Printf("enginex-relay quick tunnel active: %s", url)
 			})
 			if err != nil && tunnelCtx.Err() == nil {
-				log.Printf("enginex-relay (sc5000-relay) quick tunnel error: %v", err)
+				log.Printf("enginex-relay quick tunnel error: %v", err)
 				return
 			}
 			if u != "" {
@@ -148,7 +145,7 @@ func main() {
 	if pubLabel == "" {
 		pubLabel = "auto-quick-tunnel"
 	}
-	log.Printf("enginex-relay (sc5000-relay) listening on %s (public %s)", *listen, pubLabel)
+	log.Printf("enginex-relay listening on %s (public %s)", *listen, pubLabel)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
@@ -188,13 +185,13 @@ func (s *server) routes() http.Handler {
 	return withLog(stripPrefix(mux))
 }
 
-// stripPrefix serves /sc5000/... with the same handlers as /...
+// stripPrefix serves /enginex/... with the same handlers as /...
 func stripPrefix(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := r.URL.Path
-		if p == "/sc5000" || strings.HasPrefix(p, "/sc5000/") {
+		if p == "/enginex" || strings.HasPrefix(p, "/enginex/") {
 			r2 := r.Clone(r.Context())
-			r2.URL.Path = strings.TrimPrefix(p, "/sc5000")
+			r2.URL.Path = strings.TrimPrefix(p, "/enginex")
 			if r2.URL.Path == "" {
 				r2.URL.Path = "/"
 			}

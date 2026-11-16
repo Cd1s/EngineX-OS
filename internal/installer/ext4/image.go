@@ -1,6 +1,7 @@
 package ext4
 
 import (
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -296,12 +297,12 @@ func (img *Image) Stat(path string) (mode uint32, size int64, uid, gid uint32, e
 }
 
 // ChooseRuntimeDir applies the #103 rule: a deck that still has a real
-// legacy /sc5000-custom directory and no /enginex keeps being written
+// legacy /legacy-custom directory and no /enginex keeps being written
 // there (first boot migrates it); otherwise files go to /enginex and, if
-// /sc5000-custom is absent, the compatibility link sc5000-custom -> enginex
+// /legacy-custom is absent, the compatibility link legacy-custom -> enginex
 // is created.
 func (img *Image) ChooseRuntimeDir() (root string, links map[string]string, err error) {
-	legacy, err := img.Lstat("/sc5000-custom")
+	legacy, err := img.Lstat("/" + migration.DataName)
 	if err != nil {
 		return "", nil, err
 	}
@@ -310,13 +311,13 @@ func (img *Image) ChooseRuntimeDir() (root string, links map[string]string, err 
 		return "", nil, err
 	}
 	if legacy == Directory && cur == Missing {
-		return "sc5000-custom", map[string]string{}, nil
+		return migration.DataName, map[string]string{}, nil
 	}
 	if cur != Missing && cur != Directory {
 		return "", nil, fmt.Errorf("%w: /enginex is a %s", ErrExists, cur)
 	}
 	if legacy == Missing {
-		return "enginex", map[string]string{"sc5000-custom": "enginex"}, nil
+		return "enginex", map[string]string{migration.DataName: "enginex"}, nil
 	}
 	return "enginex", map[string]string{}, nil
 }

@@ -220,7 +220,7 @@ class AZ0xPackerTests(unittest.TestCase):
             self.assertEqual(az0x_packer.main(['info', str(img)]), 1)
 
     def test_real_sclive2_header_if_present(self):
-        real_path = Path('/root/build/sc5000-lab/fw-5.3.0/SCLIVE2-5.3.0-Update.img')
+        real_path = Path('/root/build/enginex-lab/fw-5.3.0/SCLIVE2-5.3.0-Update.img')
         if not real_path.exists():
             self.skipTest('Real SCLIVE2 firmware not present in test lab')
 

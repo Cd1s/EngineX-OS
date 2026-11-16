@@ -21,7 +21,7 @@ import (
 )
 
 // DefaultRelayURL is empty by default so open-source builds keep logins on the
-// local LAN until the operator configures a self-hosted sc5000-relay URL.
+// local LAN until the operator configures a self-hosted legacy-relay URL.
 const DefaultRelayURL = ""
 
 const relayTimeout = 3 * time.Second

@@ -189,8 +189,8 @@ def main():
     if not prime:
         prime = next(iter(sorted(other_src.get(51337, set()) | other_src.get(11224, set()))), None)
     if prime:
-        say("Denon %-15s web console: %s; /v1/sc5000/ui: %s" % (
-            prime, http_title("http://%s:8080/" % prime), http_title("http://%s:8080/v1/sc5000/ui" % prime)))
+        say("Denon %-15s web console: %s; /v1/enginex/ui: %s" % (
+            prime, http_title("http://%s:8080/" % prime), http_title("http://%s:8080/v1/enginex/ui" % prime)))
     else:
         say("Denon: not found (pass --prime4 <IP> to check its web console)")
 

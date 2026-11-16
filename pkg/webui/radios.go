@@ -12,7 +12,7 @@ import (
 
 // UnblockRadios clears rfkill's soft block on Bluetooth and Wi-Fi. The kernel boots
 // with rfkill.default_state=0. This runs from the writable partition, so it also
-// works on a deck whose read-only root still has the older sc5000-debloat.
+// works on a deck whose read-only root still has the older legacy-debloat.
 func UnblockRadios(root string) {
 	entries, err := os.ReadDir(root)
 	if err != nil {

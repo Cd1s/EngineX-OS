@@ -1,6 +1,7 @@
 package leave
 
 import (
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"bytes"
 	"errors"
 	"fmt"
@@ -30,11 +31,11 @@ func auditText(p string) string {
 	return strings.TrimSpace(string(b))
 }
 func auditState(root string) string {
-	base := filepath.Join(root, "data/sc5000-custom")
+	base := filepath.Join(root, migration.DataRelative)
 	return fmt.Sprintf("journal=%v version=%q pack=%q icon=%q hook=%q unlocked=%v enginex-real=%v legacy-real=%v", auditExists(filepath.Join(root, "data", journalName)), auditText(filepath.Join(base, "version.txt")), auditText(filepath.Join(base, "ui/packs/en/Deck.qml")), auditText(filepath.Join(base, "ui/icons/a.png")), auditText(filepath.Join(base, "bundle/lib/libengine-ui-hook.so")), auditExists(filepath.Join(base, "gen2-unlocked")), auditDir(filepath.Join(root, "data/enginex")), auditDir(base))
 }
 func auditWholeCurrent(root string) bool {
-	base := filepath.Join(root, "data/sc5000-custom")
+	base := filepath.Join(root, migration.DataRelative)
 	return auditText(filepath.Join(base, "version.txt")) == "5.3.0.5" && auditText(filepath.Join(base, "ui/packs/en/Deck.qml")) == "5.3.0.5 pack" && auditText(filepath.Join(base, "ui/icons/a.png")) == "5.3.0.5 icon" && auditText(filepath.Join(base, "bundle/lib/libengine-ui-hook.so")) == "hook 5.3.0.5"
 }
 
@@ -106,7 +107,7 @@ func TestLeaveIORecoveryDecisionMatrix(t *testing.T) {
 		{name: "saved-version-read", kind: "read", relative: "journal/old/version.txt", when: 1},
 		{name: "saved-absence-stat", kind: "stat", relative: "journal/old/gen2-unlocked.absent", noUnlock: true, when: 1},
 		{name: "layout-record-stat", kind: "stat", relative: "journal/layout", legacy: true, when: 1},
-		{name: "layout-directory-stat", kind: "stat", relative: "sc5000-custom", legacy: true, when: 2},
+		{name: "layout-directory-stat", kind: "stat", relative: migration.DataName, legacy: true, when: 2},
 		{name: "layout-readlink", kind: "readlink", relative: "enginex", legacy: true, when: 1},
 		{name: "rollback-remove-error", kind: "remove", relative: "live/gen2-unlocked", noUnlock: true, when: 1},
 		{name: "absent-packs-stat-still-errors", kind: "stat", relative: "journal/absent-packs", noPacks: true, when: 1},
@@ -126,7 +127,7 @@ func TestLeaveIORecoveryDecisionMatrix(t *testing.T) {
 			}
 			version, liveName := "5.3.0.3", "enginex"
 			if c.legacy {
-				version, liveName = "5.3.0.2", "sc5000-custom"
+				version, liveName = "5.3.0.2", migration.DataName
 			}
 			cutAt(t, d, legacyBundle(t, version), "bundle")
 			before := snapshot(t, root)
@@ -243,7 +244,7 @@ func TestLeaveIOLayoutFlagCannotSkipPendingDataSync(t *testing.T) {
 	d, root := newDeck(t)
 	cutAt(t, d, legacyBundle(t, "5.3.0.2"), "bundle")
 	journal := filepath.Join(root, "data", journalName)
-	fault := injectSyncFault(t, "/data/sc5000-custom", filepath.Join(root, "data"))
+	fault := injectSyncFault(t, migration.DataDir, filepath.Join(root, "data"))
 	if err := d.Recover(); err == nil || !auditExists(journal) {
 		t.Fatal("fixture did not retain failed layout sync")
 	}
@@ -458,7 +459,7 @@ func TestLeaveIOCleanupStopsOnError(t *testing.T) {
 			if point == "cache" {
 				version = "5.3.0.5"
 			}
-			if got := auditText(d.data("sc5000-custom/bundle/lib/libengine-ui-hook.so")); got != "hook "+version {
+			if got := auditText(d.data(migration.DataName + "/bundle/lib/libengine-ui-hook.so")); got != "hook "+version {
 				t.Fatalf("retry changed the generation: %s", got)
 			}
 		})

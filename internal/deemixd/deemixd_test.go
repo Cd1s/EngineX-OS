@@ -112,13 +112,13 @@ func TestCredentialSyncAndPreservation(t *testing.T) {
 			calls := 0
 			relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				calls++
-				if r.URL.Path != "/sc5000/api/config" || r.URL.RawQuery != "secrets=1" || r.Header.Get("X-Deemix-Password") != "custom-password" {
+				if r.URL.Path != "/enginex/api/config" || r.URL.RawQuery != "secrets=1" || r.Header.Get("X-Deemix-Password") != "custom-password" {
 					t.Error("incorrect relay request")
 				}
 				_ = json.NewEncoder(w).Encode(map[string]any{"config": map[string]string{"deezerArl": arl, "deezerUserId": "6850245583"}})
 			}))
 			defer relay.Close()
-			writeState(t, filepath.Join(d.stateDir, "deemix-config.json"), `{"deemixUrl":"`+relay.URL+`/sc5000","deemixPassword":"custom-password"}`)
+			writeState(t, filepath.Join(d.stateDir, "deemix-config.json"), `{"deemixUrl":"`+relay.URL+`/enginex","deemixPassword":"custom-password"}`)
 			owner := filepath.Join(d.stateDir, "deezer-owner.json")
 			if empty {
 				writeState(t, owner, `{"UserID":"local-id","ARL":"","extra":{"keep":true}}`)

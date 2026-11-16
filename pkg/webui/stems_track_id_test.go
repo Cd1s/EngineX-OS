@@ -22,7 +22,7 @@ func TestStemsTrackID(t *testing.T) {
 	}
 	for _, q := range []string{
 		`CREATE TABLE Track (id INTEGER PRIMARY KEY, path TEXT, filename TEXT)`,
-		`INSERT INTO Track VALUES (5, '../../../../sc5000-custom/Stream/netease-1.flac', 'netease-1.flac'), (86, '../../../../sc5000-custom/Stream/netease-1.flac', 'netease-1.flac')`,
+		`INSERT INTO Track VALUES (5, '../../../../enginex-custom/Stream/netease-1.flac', 'netease-1.flac'), (86, '../../../../enginex-custom/Stream/netease-1.flac', 'netease-1.flac')`,
 	} {
 		if _, err := db.Exec(q); err != nil {
 			t.Fatal(err)
@@ -33,7 +33,7 @@ func TestStemsTrackID(t *testing.T) {
 	defer srv.Close()
 	var got struct{ TrackID int64 }
 	// The file is named by its path: the library row is the one whose own path it is.
-	tidalGet(t, srv.URL, "/v1/enginex/stems/track-id?path="+url.QueryEscape(filepath.Join(data, "sc5000-custom/Stream/netease-1.flac")), 200, &got)
+	tidalGet(t, srv.URL, "/v1/enginex/stems/track-id?path="+url.QueryEscape(filepath.Join(data, "enginex-custom/Stream/netease-1.flac")), 200, &got)
 	if got.TrackID != 86 {
 		t.Fatalf("trackId %d, want newest 86", got.TrackID)
 	}

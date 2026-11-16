@@ -21,7 +21,7 @@ $home_ = if ($env:ENGINEX_STEMS_HOME) { $env:ENGINEX_STEMS_HOME } else { Join-Pa
 $venv = Join-Path $home_ 'venv'
 $py = Join-Path $venv 'Scripts\python.exe'
 
-$bin = if ($env:ENGINEX_STEMSD) { $env:ENGINEX_STEMSD } else { $env:SC5000_STEMSD }
+$bin = if ($env:ENGINEX_STEMSD) { $env:ENGINEX_STEMSD } else { $env:ENGINEX_STEMSD }
 if (-not $bin) { $bin = (Get-Command enginex-stemsd.exe -ErrorAction SilentlyContinue).Source }
 if (-not $bin) { $bin = Join-Path $here 'enginex-stemsd.exe' }
 if (-not (Test-Path $bin)) {

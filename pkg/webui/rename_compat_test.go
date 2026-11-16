@@ -1,6 +1,7 @@
 package webui
 
 import (
+"github.com/Cd1s/EngineX-OS/internal/migration"
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
@@ -15,7 +16,7 @@ import (
 
 // A release after 5.3.0.4 keeps version.txt and release-tag in /etc/enginex. This
 // release is the one that updates to it and the one users roll back to: it reads
-// the new directory first and /etc/sc5000 when the new one is not there.
+// the new directory first and /etc/legacy when the new one is not there.
 func TestVersionAndReleaseTagAreReadFromEitherImageDir(t *testing.T) {
 	defer func(d, i string) { newImageDir, imageReleaseTagFile = d, i }(newImageDir, imageReleaseTagFile)
 	dir := t.TempDir()
@@ -23,13 +24,13 @@ func TestVersionAndReleaseTagAreReadFromEitherImageDir(t *testing.T) {
 	os.MkdirAll(filepath.Join(custom, "bundle"), 0o700)
 	os.WriteFile(filepath.Join(custom, "version.txt"), []byte("5.3.0.4\n"), 0o644)
 	newImageDir = filepath.Join(dir, "etc-enginex")
-	imageReleaseTagFile = filepath.Join(dir, "etc-sc5000", releaseTagName)
+	imageReleaseTagFile = filepath.Join(dir, "etc-" + migration.ProjectName, releaseTagName)
 	os.MkdirAll(filepath.Dir(imageReleaseTagFile), 0o755)
 	s := New(Config{AccessToken: "c", UIDir: t.TempDir(), StateDir: dir, VersionFile: filepath.Join(custom, "version.txt")}, nil)
 
 	os.WriteFile(imageReleaseTagFile, []byte("v5.3.0.4-r3\n"), 0o644)
 	if got := s.installedRelease(); got != "v5.3.0.4-r3" {
-		t.Fatalf("only /etc/sc5000 has a tag: release %q, want v5.3.0.4-r3", got)
+		t.Fatalf("only " + migration.ImageDir + " has a tag: release %q, want v5.3.0.4-r3", got)
 	}
 	os.MkdirAll(newImageDir, 0o755)
 	os.WriteFile(filepath.Join(newImageDir, releaseTagName), []byte("v5.3.0.4-r4\n"), 0o644)

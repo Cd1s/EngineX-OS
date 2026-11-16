@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
@@ -38,7 +39,7 @@ const (
 
 	bundleSuffix        = "-EngineX-OS-Data-Bundle.tar.gz"
 	realDeckCustomDir   = "/data/enginex"
-	realLegacyCustomDir = "/data/sc5000-custom"
+	realLegacyCustomDir = migration.DataDir
 	bundleMaxDown       = 64 << 20  // compressed download
 	bundleMaxUnpack     = 128 << 20 // all extracted files together
 	gen2ImgPrefix       = "ENGINEX_DATA_BUNDLE"
@@ -52,11 +53,11 @@ const bundleInstallPeak = 2 * bundleMaxUnpack
 
 var (
 	// versionFile: a second-generation deck whose bundle predates 5.3.0.3 still has the real
-	// /data/sc5000-custom (#103).
-	versionFile = "/data/sc5000-custom/version.txt"
+	// /data/legacy-custom (#103).
+	versionFile = migration.DataDir + "/version.txt"
 	// imageVersionFile is where images before 5.3.0.5 keep the version az01_packer.py
-	// patch-rootfs --set-version writes (/etc/sc5000; newImageDir since, #234).
-	imageVersionFile      = "/etc/sc5000/version.txt"
+	// patch-rootfs --set-version writes (/etc/legacy; newImageDir since, #234).
+	imageVersionFile      = migration.ImageDir + "/version.txt"
 	bundleCustomDir       = realDeckCustomDir
 	legacyBundleCustomDir = realLegacyCustomDir
 )
@@ -362,7 +363,7 @@ func (s *Server) installedVersion() string {
 	}
 	current := "dev"
 	// The newest installed runtime or flashed image release (#13, #218); the image's version is
-	// in /etc/enginex since 5.3.0.5, in /etc/sc5000 before (#234).
+	// in /etc/enginex since 5.3.0.5, in /etc/legacy before (#234).
 	for _, p := range []string{filepath.Join(s.customDir(), "version.txt"), versionFile, filepath.Join(newImageDir, "version.txt"), imageVersionFile} {
 		if v := currentVersion(p); v != "dev" && (current == "dev" || releasesig.NewerVersion(v, current)) {
 			current = v
@@ -372,10 +373,10 @@ func (s *Server) installedVersion() string {
 }
 
 // imageReleaseTagFile is the release tag of a first-generation image before 5.3.0.5.
-var imageReleaseTagFile = "/etc/sc5000/" + releaseTagName
+var imageReleaseTagFile = migration.ImageDir + "/" + releaseTagName
 
 // newImageDir is where first-generation images keep version.txt and release-tag since
-// 5.3.0.5 (#234); /etc/sc5000 is a link to it there. Read first, then the old directory.
+// 5.3.0.5 (#234); /etc/legacy is a link to it there. Read first, then the old directory.
 var newImageDir = "/etc/enginex"
 
 // installedRelease is what a release tag is compared with: the tag baked into the
@@ -613,7 +614,7 @@ func (s *Server) installDataBundleReader(r io.Reader, work string) {
 	if older && activatesOnDeck(customDir) {
 		// The older release's install.sh never runs over /data (#234 review R1/R2): it fills a
 		// stage, and this release moves the result in with atomic swaps a power cut cannot
-		// break, handing a release before 5.3.0.3 its /data/sc5000-custom back (internal/leave).
+		// break, handing a release before 5.3.0.3 its /data/legacy-custom back (internal/leave).
 		if err := installOlder(top); err != nil {
 			fail("bundle install: " + err.Error())
 			return
@@ -625,8 +626,8 @@ func (s *Server) installDataBundleReader(r io.Reader, work string) {
 			// Both names: the install.sh of a later release reads ENGINEX_*.
 			alsa := filepath.Join(customDir, "alsa-conf.d")
 			cmd.Env = append(cmd.Env,
-				"SC5000_CUSTOM="+customDir, "ENGINEX_CUSTOM="+customDir,
-				"SC5000_ALSA_OVERLAY="+alsa, "ENGINEX_ALSA_OVERLAY="+alsa,
+				migration.CustomEnv + "="+customDir, "ENGINEX_CUSTOM="+customDir,
+				migration.AlsaEnv + "="+alsa, "ENGINEX_ALSA_OVERLAY="+alsa,
 			)
 		}
 		if out, err := cmd.CombinedOutput(); err != nil {
@@ -669,7 +670,7 @@ func activationScript(customDir string, older bool) string {
 	if older {
 		return `sleep 2; [ ! -f ` + leaveScript + ` ] || exec sh ` + leaveScript + `; sync; exec systemctl reboot`
 	}
-	return `sleep 2; pkill -f '[e]nginex-suite (stream-sync|rb-bridge|enginex-deemixd)|[s]c5000-suite (stream-sync|rb-bridge|sc5000-deemixd)'; sleep 1; exec sh ` +
+	return `sleep 2; pkill -f '[e]nginex-suite (stream-sync|rb-bridge|enginex-deemixd)|` + migration.SuitePattern + ` (stream-sync|rb-bridge|` + migration.Deemix + `)'; sleep 1; exec sh ` +
 		customDir + `/bundle/boot-activate.sh`
 }
 

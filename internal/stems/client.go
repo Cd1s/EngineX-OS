@@ -5,6 +5,7 @@ package stems
 // needs no extra address, port or key file. Environment variables override it.
 
 import (
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"cmp"
 	"context"
 	"encoding/json"
@@ -68,7 +69,7 @@ const (
 	// DefaultRelayConfig is stream-sync's relay settings file on the deck.
 	DefaultRelayConfig = "/data/enginex/state/deemix-config.json"
 	// DefaultTokenFile holds the renderer's internal token for direct mode.
-	DefaultTokenFile = "/etc/sc5000-stems/token"
+	DefaultTokenFile = "/etc/enginex-stems/token"
 )
 
 // Client is a resolved backend: the base URL Proxy posts /v1/engine to and
@@ -86,13 +87,13 @@ type Client struct {
 //
 //  1. ENGINEX_STEMS_URL set: talk to that address directly. The credential is
 //     ENGINEX_STEMS_TOKEN, else the token file (ENGINEX_STEMS_TOKEN_FILE,
-//     default /etc/sc5000-stems/token).
+//     default /etc/legacy-stems/token).
 //  2. Otherwise the relay from deemix-config.json (ENGINEX_STEMS_CONFIG,
 //     default /data/enginex/state/deemix-config.json): relayUrl and the
 //     console password deemixPassword. ENGINEX_STEMS_TOKEN overrides the
 //     password.
 //
-// Each ENGINEX_STEMS_* name is also read as SC5000_STEMS_*, its name before 5.3.0.5 (#234).
+// Each ENGINEX_STEMS_* name is also read as legacy environment STEMS_*, its name before 5.3.0.5 (#234).
 func ResolveClient(getenv func(string) string) (Client, error) {
 	getenv = withLegacyStemsEnv(getenv)
 	override := strings.TrimSpace(getenv("ENGINEX_STEMS_TOKEN"))
@@ -108,6 +109,9 @@ func ResolveClient(getenv func(string) string) (Client, error) {
 			path = DefaultTokenFile
 		}
 		secret, err := Secret(path)
+        if os.IsNotExist(err) && path == DefaultTokenFile {
+            secret, err = Secret(migration.StemsTokenFile)
+        }
 		if err != nil {
 			return Client{}, fmt.Errorf("token for ENGINEX_STEMS_URL: %w", err)
 		}
@@ -145,7 +149,7 @@ func readRelayConfig(path string) (relay, password string, err error) {
 	}
 	var v struct {
 		RelayURL  string `json:"relayUrl"`
-		DeemixURL string `json:"deemixUrl"` // older sc5000-deemixd name
+		DeemixURL string `json:"deemixUrl"` // older legacy-deemixd name
 		Password  string `json:"deemixPassword"`
 	}
 	if err := json.Unmarshal(b, &v); err != nil {
@@ -205,14 +209,14 @@ func validEndpoint(raw string) bool {
 
 var cgnat = &net.IPNet{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)}
 
-// withLegacyStemsEnv falls back to SC5000_STEMS_<x> when ENGINEX_STEMS_<x> is not set (#234).
+// withLegacyStemsEnv falls back to legacy environment STEMS_<x> when ENGINEX_STEMS_<x> is not set (#234).
 func withLegacyStemsEnv(getenv func(string) string) func(string) string {
 	return func(name string) string {
 		if v := getenv(name); v != "" {
 			return v
 		}
 		if rest, ok := strings.CutPrefix(name, "ENGINEX_STEMS_"); ok {
-			return getenv("SC5000_STEMS_" + rest)
+			return getenv(migration.StemsEnvPrefix + rest)
 		}
 		return ""
 	}

@@ -1,6 +1,7 @@
 package webui
 
 import (
+"github.com/Cd1s/EngineX-OS/internal/migration"
 	"bytes"
 	"crypto/tls"
 	"encoding/json"
@@ -14,7 +15,7 @@ import (
 	"github.com/skip2/go-qrcode"
 )
 
-// #218: the console QR code pointed at sc5000.lan (enginex.lan since 5.3.0.5, #234), which most
+// #218: the console QR code pointed at legacy.lan (enginex.lan since 5.3.0.5, #234), which most
 // routers do not resolve, so phones opened a blank page.
 func TestConsoleQRPointsWherePhonesCanReach(t *testing.T) {
 	lan := "http://" + lanHost() + ":8080"
@@ -24,7 +25,7 @@ func TestConsoleQRPointsWherePhonesCanReach(t *testing.T) {
 		"127.0.0.1:8080":            lan,
 		"localhost:8080":            lan,
 		"enginex.lan:8080":          lan,
-		"sc5000.lan:8080":           lan,
+		migration.PlaceholderHost + ":8080":           lan,
 		"[::1]:8080":                lan,
 		"abc-def.trycloudflare.com": "https://abc-def.trycloudflare.com",
 	} {
@@ -36,7 +37,7 @@ func TestConsoleQRPointsWherePhonesCanReach(t *testing.T) {
 	}
 	r := httptest.NewRequest("GET", "/api/console-qr", nil)
 	r.Host = "192.168.5.34:8080"
-	for _, def := range []string{"http://enginex.lan:8080", "http://sc5000.lan:8080"} { // a saved one from before 5.3.0.5 too
+	for _, def := range []string{"http://enginex.lan:8080", "http://" + migration.PlaceholderHost + ":8080"} { // a saved one from before 5.3.0.5 too
 		if got := (&Server{cfg: Config{PublicURL: def}}).qrTarget(r); got != "http://192.168.5.34:8080" {
 			t.Errorf("default public URL %s: %s", def, got)
 		}
@@ -216,7 +217,7 @@ func TestConsoleQRAndTunnelPrecedence(t *testing.T) {
 	wantTokenLeakPNG, _ := qrcode.Encode(wantTunnelURL+"?token=K7M9-P4X2", qrcode.Medium, 320)
 
 	// 1. Tunnel off: deck-local /v1/enginex/console-qr answers locally and encodes LAN URL without token.
-	for _, path := range []string{"/v1/enginex/console-qr", "/v1/sc5000/console-qr"} {
+	for _, path := range []string{"/v1/enginex/console-qr", migration.APIPrefix + "/console-qr"} {
 		w := httptest.NewRecorder()
 		r := httptest.NewRequest(http.MethodGet, path, nil)
 		r.Host = "127.0.0.1:8080"

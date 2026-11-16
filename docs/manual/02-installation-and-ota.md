@@ -58,9 +58,9 @@
 - 請認準對應二代機型前綴（`SCLIVE4` / `SCLIVE2` / `PRIME4PLUS` / `PRIMEGOPLUS` / `MIXSTREAMPROPLUS` / `MIXSTREAMPROGO` / `PRIME4G2` / `SYSTEMONE`）的 `*-Update.img`，或直接使用 `EngineX-Installer` 自動識別。
 
 > **运行目录 / Runtime directory / 執行目錄（#103）**
-> 简体中文：标准运行目录统一为 **`/data/enginex/`**。旧版使用的 `/data/sc5000-custom` 会在开机时**自动无损迁移**到 `/data/enginex`，并保留软链接 `ln -sfn /data/enginex /data/sc5000-custom`，旧路径、旧脚本和旧教程继续可用。本文所有路径均以 `/data/enginex/` 为准；若你的碟机还是旧版，看到的是 `/data/sc5000-custom` 属正常现象。
-> English: The standard runtime directory is now **`/data/enginex/`**. The old `/data/sc5000-custom` is **migrated losslessly at boot** and kept as a symlink (`ln -sfn /data/enginex /data/sc5000-custom`), so old paths, scripts and guides keep working. All paths here use `/data/enginex/`; on a deck still running an older release you will see `/data/sc5000-custom`, which is expected.
-> 繁體中文：標準執行目錄統一為 **`/data/enginex/`**。舊版使用的 `/data/sc5000-custom` 會在開機時**自動無損遷移**至 `/data/enginex`，並保留符號連結 `ln -sfn /data/enginex /data/sc5000-custom`，舊路徑、舊腳本與舊教學仍可使用。本文所有路徑以 `/data/enginex/` 為準；若碟機仍是舊版，看到 `/data/sc5000-custom` 屬正常現象。
+> 简体中文：标准运行目录统一为 **`/data/enginex/`**。旧版使用的 `/data/enginex-custom` 会在开机时**自动无损迁移**到 `/data/enginex`，并保留软链接 `ln -sfn /data/enginex /data/enginex-custom`，旧路径、旧脚本和旧教程继续可用。本文所有路径均以 `/data/enginex/` 为准；若你的碟机还是旧版，看到的是 `/data/enginex-custom` 属正常现象。
+> English: The standard runtime directory is now **`/data/enginex/`**. The old `/data/enginex-custom` is **migrated losslessly at boot** and kept as a symlink (`ln -sfn /data/enginex /data/enginex-custom`), so old paths, scripts and guides keep working. All paths here use `/data/enginex/`; on a deck still running an older release you will see `/data/enginex-custom`, which is expected.
+> 繁體中文：標準執行目錄統一為 **`/data/enginex/`**。舊版使用的 `/data/enginex-custom` 會在開機時**自動無損遷移**至 `/data/enginex`，並保留符號連結 `ln -sfn /data/enginex /data/enginex-custom`，舊路徑、舊腳本與舊教學仍可使用。本文所有路徑以 `/data/enginex/` 為準；若碟機仍是舊版，看到 `/data/enginex-custom` 屬正常現象。
 
 ---
 
@@ -132,7 +132,7 @@ Deck powered on, same router as the computer, and root SSH is available (or Engi
 
 1. **找碟机**（不用你查 IP）：
    - 监听 **StageLinQ（UDP 51337）**广播约 1.5 秒，碟机会把自己的板号作为软件名广播出来；
-   - 同时扫描电脑所在的 **/24 网段**，找响应 `http://<IP>:8080/v1/sc5000/ui` 的 EngineX Web UI。
+   - 同时扫描电脑所在的 **/24 网段**，找响应 `http://<IP>:8080/v1/enginex/ui` 的 EngineX Web UI。
    - 其它 StageLinQ 设备（如调音台、软件）会被跳过。
 2. 通过 SSH（用户 `root`）登录：依次尝试 `~/.ssh/id_ed25519`、`id_rsa`、`id_ecdsa`，再试密码（`--password` 指定的，以及 `denon`——用于已被 FreeMyPrime 解锁的机器）。
 3. 读取 `/sys/firmware/devicetree/base/compatible` 得到板号，判断型号和代别。
@@ -141,7 +141,7 @@ Deck powered on, same router as the computer, and root SSH is available (or Engi
 
 **English: what it does**
 
-1. **Find the deck** (no IP lookup): it listens for **StageLinQ (UDP 51337)** for about 1.5 s (decks announce their board code as the software name) and in parallel scans the computer's **/24 subnet** for the EngineX Web UI at `http://<IP>:8080/v1/sc5000/ui`. Other StageLinQ devices are skipped.
+1. **Find the deck** (no IP lookup): it listens for **StageLinQ (UDP 51337)** for about 1.5 s (decks announce their board code as the software name) and in parallel scans the computer's **/24 subnet** for the EngineX Web UI at `http://<IP>:8080/v1/enginex/ui`. Other StageLinQ devices are skipped.
 2. It logs in over SSH as `root`: keys `~/.ssh/id_ed25519`, `id_rsa`, `id_ecdsa`, then passwords (`--password`, and `denon` for FreeMyPrime-unlocked decks).
 3. It reads `/sys/firmware/devicetree/base/compatible` to get the board and generation.
 4. **2nd generation**: downloads the model's `<PREFIX>-<VERSION>-EngineX-OS-<Model>-Update.img` (checking GitHub's SHA-256, the 128-byte `ENGINEX_DATA_BUNDLE_IMG_V1` SHA-256 header, and the payload's `SHA256SUMS`), runs **`[1/2] Unlocking 2nd-gen .img update chain`** and **`[2/2] Flashing *-Update.img`** over SSH into `/data/enginex`, reads `version.txt` back, and runs `boot-activate.sh`; Engine restarts as EngineX OS. **Music, library and settings stay.**
@@ -149,7 +149,7 @@ Deck powered on, same router as the computer, and root SSH is available (or Engi
 
 **繁體中文：它做了什麼**
 
-1. **找碟機**（不必查 IP）：監聽 **StageLinQ（UDP 51337）**約 1.5 秒，碟機會以板號作為軟體名稱廣播；同時掃描電腦所在 **/24 網段**，尋找回應 `http://<IP>:8080/v1/sc5000/ui` 的 EngineX Web UI。其他 StageLinQ 裝置會被略過。
+1. **找碟機**（不必查 IP）：監聽 **StageLinQ（UDP 51337）**約 1.5 秒，碟機會以板號作為軟體名稱廣播；同時掃描電腦所在 **/24 網段**，尋找回應 `http://<IP>:8080/v1/enginex/ui` 的 EngineX Web UI。其他 StageLinQ 裝置會被略過。
 2. 以 `root` 透過 SSH 登入：依序嘗試 `~/.ssh/id_ed25519`、`id_rsa`、`id_ecdsa`，再試密碼（`--password` 指定者，以及用於 FreeMyPrime 已解鎖機器的 `denon`）。
 3. 讀取 `/sys/firmware/devicetree/base/compatible` 取得板號，判斷機型與世代。
 4. **第二代**：自動發現並下載該機型的 `<PREFIX>-<VERSION>-EngineX-OS-<Model>-Update.img`（核對 GitHub SHA-256、128 位元組 `ENGINEX_DATA_BUNDLE_IMG_V1` SHA-256 標頭與包內 `SHA256SUMS`），執行 **`[1/2] 解鎖二代 .img 升級鏈`** 與 **`[2/2] 刷入 *-Update.img`**，經 SSH 串流部署到 `/data/enginex`、讀回 `version.txt` 核對版本並執行 `boot-activate.sh`；Engine 重啟後即為 EngineX OS。**音樂、曲庫、設定保留。**

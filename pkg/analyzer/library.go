@@ -18,7 +18,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const DefaultDatabase = "/media/sc5000-sd-cache/Engine Library/Database2/m.db"
+const DefaultDatabase = "/media/enginex-sd-cache/Engine Library/Database2/m.db"
 
 // Library opens an existing Engine 5.0.4 SD library. It never replaces a live
 // database or invents a new schema/identity. SQLite transactions cooperate with

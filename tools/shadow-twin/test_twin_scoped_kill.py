@@ -74,7 +74,7 @@ class TestTwinScopedKill(unittest.TestCase):
                     os.link(cand_dir / "base/image/rootfs.ext2", work / "base/image/rootfs.ext2")
                 except OSError:
                     pass
-            for suite in ("bin/enginex-suite", "bin/sc5000-suite"):  # caches from before #234: old name
+            for suite in ("bin/enginex-suite", "bin/enginex-suite"):  # caches from before #234: old name
                 if (cand_dir / suite).is_file() and not (work / "bin/enginex-suite").is_file():
                     (work / "bin").mkdir(parents=True, exist_ok=True)
                     shutil.copy2(cand_dir / suite, work / "bin/enginex-suite")

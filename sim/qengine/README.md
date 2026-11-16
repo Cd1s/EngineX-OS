@@ -5,9 +5,9 @@ Automated full-system emulation test tier for Engine OS and EngineX firmware ima
 ## Overview
 
 Unlike chroot and unshare container sandboxes, the QEngine tier boots the complete Linux kernel and systemd (PID 1) in QEMU to verify:
-- live systemd unit startup ordering, dependencies, and critical chains (`sc5000-custom-prepare`, `engine-guardian`, `stream-sync`, `engine`);
+- live systemd unit startup ordering, dependencies, and critical chains (`enginex-custom-prepare`, `engine-guardian`, `stream-sync`, `engine`);
 - UI hook injection and QML pack replacement under live `engine.service`;
-- HTTP API health (`stream-sync` UI endpoint at `127.0.0.1:8080/v1/sc5000/ui`);
+- HTTP API health (`stream-sync` UI endpoint at `127.0.0.1:8080/v1/enginex/ui`);
 - absence of failed systemd units and unit journal errors.
 
 Upstream is [Peyton-C/QEngine](https://github.com/Peyton-C/QEngine) (pinned at `9c2dfd6f206c2e2c3d77cfd1ac483350c68a77c8`), cloned on demand at runtime and not vendored.

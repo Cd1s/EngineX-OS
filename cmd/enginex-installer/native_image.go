@@ -1,6 +1,7 @@
 package main
 
 import (
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -110,12 +111,12 @@ func imageChanges(ctx context.Context, o *options, b *bundleInfo, fs *ext4.Image
 		return ext4.ChangeSet{}, err
 	}
 	if root == "enginex" {
-		legacy, err := fs.Lstat("sc5000-custom")
+		legacy, err := fs.Lstat(migration.DataName)
 		if err != nil {
 			return ext4.ChangeSet{}, err
 		}
 		if legacy == ext4.Directory {
-			return ext4.ChangeSet{}, errors.New("legacy /sc5000-custom directory conflicts with /enginex; nothing flashed")
+			return ext4.ChangeSet{}, errors.New("legacy /" + migration.DataName + " directory conflicts with /enginex; nothing flashed")
 		}
 	}
 	cs := ext4.ChangeSet{
@@ -125,10 +126,10 @@ func imageChanges(ctx context.Context, o *options, b *bundleInfo, fs *ext4.Image
 	add := func(e azimg.Entry, path string, mode uint32) {
 		cs.Files = append(cs.Files, ext4.Entry{Path: path, Mode: mode, Size: e.Size, SHA256: e.SHA256, Open: e.Open})
 	}
-	missing := map[string]bool{"bin/enginex-suite": true, "lib/libengine-ui-hook.so": true, "boot-activate.sh": true, "99-sc5000-custom.conf": true}
+	missing := map[string]bool{"bin/enginex-suite": true, "lib/libengine-ui-hook.so": true, "boot-activate.sh": true, migration.AlsaFile: true}
 	err = b.bundle.Walk(ctx, func(e azimg.Entry) error {
 		delete(missing, e.Path)
-		if e.Path == "bin/sc5000-suite" {
+		if e.Path == "bin/" + migration.Suite {
 			delete(missing, "bin/enginex-suite") // A bundle installed before the rename.
 		}
 		mode := uint32(0o644)
@@ -138,8 +139,8 @@ func imageChanges(ctx context.Context, o *options, b *bundleInfo, fs *ext4.Image
 		case e.Path == "boot-activate.sh", e.Path == "install.sh", e.Path == "uninstall.sh":
 			mode = 0o755
 		case e.Path == "version.txt", e.Path == "release-tag", e.Path == "model", e.Path == "alsa-dir", e.Path == "SHA256SUMS":
-		case e.Path == "99-sc5000-custom.conf", e.Path == "99-enginex.conf":
-			delete(missing, "99-sc5000-custom.conf")
+		case e.Path == migration.AlsaFile, e.Path == "99-enginex.conf":
+			delete(missing, migration.AlsaFile)
 			for _, dir := range []string{"system/var/overlay/lib/alsa/conf.d", "system/var-lib/alsa/conf.d"} {
 				add(e, dir+"/"+e.Path, mode)
 			}

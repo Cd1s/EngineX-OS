@@ -44,7 +44,7 @@ git grep -n "<OLD>" -- README.md README.zh-CN.md README.zh-TW.md rootfs-overlay 
 
 ## 2. 测试（只在编译机上跑，本机不编译）
 
-本项目的编译、单测、门禁、打包与组件实验分析都在**编译机**上做（aarch64，支持 32 位 EL0，碟机的 armhf 程序原生运行）。`remote-build` 默认连的是另一台机器，所以每次都写 `REMOTE_BUILD_HOST=<build host> remote-build ...`（主机别名和 `REMOTE_BUILD_HOST` 的取值见私有开发者手册）。实验与组件结构分析统一使用 **`craft-anything`**（`craft-anything` skill / `craft-anything-cli`）配合 **Gemini 3.8 Flash** 模型（2026-11-13 起，DeepSeek 已无额度）在编译机上进行。机器上的固定材料在 `/root/build/sc5000-lab/`：`fw/`（5.0.4 官方底包）、`fw-5.3.0/`、`fw-5.3.0-gen2/`、`5.0.4/qrc`、`5.3.0/qrc`、`5.0.4|5.3.0/tree/usr/Engine/Engine`、`systemone-analysis/`、`deps-sqlite/`（armhf `sqlite3.o`）、`sbin/fsck.hfsplus`、`release-<OLD>/`（上一版 3 个代表 `.img`，供门禁用）。Go 1.27.1 在 `/etc/profile.d/buildtools.sh`。
+本项目的编译、单测、门禁、打包与组件实验分析都在**编译机**上做（aarch64，支持 32 位 EL0，碟机的 armhf 程序原生运行）。`remote-build` 默认连的是另一台机器，所以每次都写 `REMOTE_BUILD_HOST=<build host> remote-build ...`（主机别名和 `REMOTE_BUILD_HOST` 的取值见私有开发者手册）。实验与组件结构分析统一使用 **`craft-anything`**（`craft-anything` skill / `craft-anything-cli`）配合 **Gemini 3.8 Flash** 模型（2026-11-13 起，DeepSeek 已无额度）在编译机上进行。机器上的固定材料在 `<firmware-lab>/`：`fw/`（5.0.4 官方底包）、`fw-5.3.0/`、`fw-5.3.0-gen2/`、`5.0.4/qrc`、`5.3.0/qrc`、`5.0.4|5.3.0/tree/usr/Engine/Engine`、`systemone-analysis/`、`deps-sqlite/`（armhf `sqlite3.o`）、`sbin/fsck.hfsplus`、`release-<OLD>/`（上一版 3 个代表 `.img`，供门禁用）。Go 1.27.1 在 `/etc/profile.d/buildtools.sh`。
 
 ```sh
 gofmt -l . && go vet ./... && go test -race ./...
@@ -68,7 +68,7 @@ JC11S fixture 是独立的官方 PRIME4PLUS rootfs，不能用 SC LIVE 4 或 PRI
 自建的目录后设置 `JC11S_ROOTFS`；不要写入只读的固定实验材料目录。普通 SC LIVE 4
 单独检查不设置此变量时会明确 WARN 跳过 JC11S，**发版不得跳过**。若要同时回归真实
 发布包的安装器回读，设置 `JC11S_RELEASE_BUNDLE` 为已校验 SHA-256 的 PRIME4PLUS
-`*-Update.img`（或旧版 `Data-Bundle.tar.gz` 夹具）后运行 Go 测试；该 fixture 测试覆盖新目录与旧 `sc5000-custom` 目录。
+`*-Update.img`（或旧版 `Data-Bundle.tar.gz` 夹具）后运行 Go 测试；该 fixture 测试覆盖新目录与旧 `enginex-custom` 目录。
 
 涉及 Factory Reset、`az01-update --erase-data`、空白 `/data` 首次启动的改动，只在编译机的 `unshare -m` + chroot 沙箱里用解包出的 rootfs 测，**绝不在实机触发**。
 
@@ -87,7 +87,7 @@ REMOTE_BUILD_HOST=<build host> remote-build --name enginex-release-<短说明> -
   '. /etc/profile.d/buildtools.sh
    OUT=/var/tmp/enginex-release-<VERSION>
    rm -rf "$OUT"
-   sh tools/az01-packer/build-release.sh <VERSION> /root/build/sc5000-lab/fw-5.3.0 none /root/build/sc5000-lab/sbin/fsck.hfsplus "$OUT"
+   sh tools/az01-packer/build-release.sh <VERSION> <firmware-lab>/fw-5.3.0 none <firmware-lab>/sbin/fsck.hfsplus "$OUT"
    sh tools/az01-packer/build-installer.sh <VERSION> "$OUT"
    sh tools/az01-packer/sign-release.sh "$OUT"'
 ```
@@ -151,10 +151,10 @@ bash tools/az01-packer/release-gate.sh \
 | 阶段 | 检查 |
 | --- | --- |
 | 静态审计 | 新 rootfs 里所有自定义 unit 的 `Requires/BindsTo/Wants/After/Slice` 目标、`Exec*` 与 `EnvironmentFile`、脚本解释器和脚本里的绝对路径工具、suite 直接调用的工具（`exec.Command`）是否真实存在；`command -v` 可选工具缺失记为 WARN（例如 `iw` 缺失时，关闭 Wi-Fi 省电的分支从不执行）；宿主 systemd 再用 `systemd-analyze verify --root` 把所有自定义 unit 和带 drop-in 的官方 unit 解析一遍（5.3.0.1 第一次构建时它报出了 `Unit var.mount not found`），输出必须为空；overlay 里每个动态 ELF 跑 `ld.so --list`；engine 脚本不再强制 100 Mbps；所有 Engine 脚本过 `sh -n` |
-| 上一版在线升级 | 旧 rootfs + 空 `/data`：etc-reset → prepare → stream-sync + Engine（带 UI hook）；本地 TLS GitHub mock 发布新版；`/v1/sc5000/update` 发现新版 → `?apply=1` → Engine 以 `UpdateFromUrl` 退出 → 官方 engine 脚本 → `az01-update --net` 下载并校验新镜像，并进入 Applying；作为对照，翻转一个字节的镜像必须在 Verifying 阶段被拒绝 |
+| 上一版在线升级 | 旧 rootfs + 空 `/data`：etc-reset → prepare → stream-sync + Engine（带 UI hook）；本地 TLS GitHub mock 发布新版；`/v1/enginex/update` 发现新版 → `?apply=1` → Engine 以 `UpdateFromUrl` 退出 → 官方 engine 脚本 → `az01-update --net` 下载并校验新镜像，并进入 Applying；作为对照，翻转一个字节的镜像必须在 Verifying 阶段被拒绝 |
 | 新版开机 | 同一个 `/data` 换成新 rootfs：etc-reset → prepare（检查版本号、UI 包、SSH host key 保留）→ `enginex-debloat --apply-runtime` → `enginex-perf-tune` → `sshd -t` → safe-mode 下先跑一次原厂 Engine，在 `/data` 留下原厂 QML 缓存（复现 5.3.0.1 实机故障）→ stream-sync / deemixd / rb-bridge / engine-guardian / storage-discover / edisksd + hook → Engine + UI hook |
 | 签名（#239） | 门禁按上一版镜像是否带验签（二进制里有 `SHA256SUMS.txt.sig`）选择它的更新方式：5.3.0.4 及更早走原厂更新器，5.3.0.5 及以后走签名路径并在沙箱里换上一次性公钥。镜像里的 `enginex-suite` 内嵌了仓库里的发布公钥（门禁在沙箱的二进制副本里把它换成一次性公钥，其余字节不变，所以测的是真实发布的二进制）；`build-release.sh` 后的清单由 `enginex-sign` 用一次性私钥签名，模拟发布的 Release 带 `SHA256SUMS.txt` 和 `.sig`：上一版（不验签）照旧装得上带签名文件的 Release；新版下一次在线更新验签通过、下载并按签名清单核对后进入 `az01-update --file`；无签名、他人签名、签名后改过的清单、镜像被改一个字节、真实签名的 r1 清单放在 r3 标签下，这五种发布各自被拒绝，屏幕给出对应提示，`az01-update` 一次也没被调用 |
-| 新版功能 | QML 替换数等于 UI 包文件数 + 1（门禁探针）；探针 `tools/az01-packer/gate-ui-probe.qml`（只在沙箱里替换原厂 `QmlWarnings.qml`，不进镜像）读取 Engine 实际渲染的节点：Settings → Services → Streaming 显示包里的 Deezer、SoundCloud 和 Beatport 各一行、原厂 Tidal 隐藏，About 显示 `EngineX OS <VERSION>`，控制中心有波形磁贴；Engine 补丁 16 处（TidalAPI 网关、Stems 等），21 个 DSP guard（含 Flanger 补偿 #54、主输出软限幅 #58），SQLite hook 已装，无 QML 加载错误、无崩溃，各守护进程存活；`/v1/sc5000/ui`、`POST /au/oauth2/token`、deemixd `/healthz` 正常；stems-probe 与 `stems-processor` 完成握手和分轨；rb-bridge 转换 Rekordbox 导出；fsck.hfsplus 可执行；下一次在线升级（mock 发布 `<VERSION>` 末位 +1）同样走通 |
+| 新版功能 | QML 替换数等于 UI 包文件数 + 1（门禁探针）；探针 `tools/az01-packer/gate-ui-probe.qml`（只在沙箱里替换原厂 `QmlWarnings.qml`，不进镜像）读取 Engine 实际渲染的节点：Settings → Services → Streaming 显示包里的 Deezer、SoundCloud 和 Beatport 各一行、原厂 Tidal 隐藏，About 显示 `EngineX OS <VERSION>`，控制中心有波形磁贴；Engine 补丁 16 处（TidalAPI 网关、Stems 等），21 个 DSP guard（含 Flanger 补偿 #54、主输出软限幅 #58），SQLite hook 已装，无 QML 加载错误、无崩溃，各守护进程存活；`/v1/enginex/ui`、`POST /au/oauth2/token`、deemixd `/healthz` 正常；stems-probe 与 `stems-processor` 完成握手和分轨；rb-bridge 转换 Rekordbox 导出；fsck.hfsplus 可执行；下一次在线升级（mock 发布 `<VERSION>` 末位 +1）同样走通 |
 
 - 预期值随底包变：`GATE_EXPECT_APPLIED`（默认：独立播放器 20、一体机 29，后者多 8 处 #206 录音补丁和 1 处 #207 Reverb 衰减补丁）、`GATE_EXPECT_DSP`（默认 21）、`GATE_LANG`（默认 `zh-Hans`）。一代 5.3.0 的常驻 hook 站点表增加到 20 项，因此同步更新补丁数默认值。只有底包或 hook 站点表变了才改，并写进变更记录。
 - 沙箱里不真正执行、而是由记录 shim 代替的命令：`kexec`、`systemctl`、`reboot`、`encrypt-fs.sh`（对 `/data` 做 fscrypt，失败时会触发 Factory Reset）、`az01-update --erase-data`。`planck-remote-screen` 在沙箱里没有显示，它的 shim 改调 `az01-update --net`，两者用的是同一个 libaz01-prog 下载与校验代码。沙箱里没有 eMMC，`Applying` 之后会报 `unsupported operation`，这是预期结果，记为 INFO。真实刷写和重启仍需按第 8 步在实机上抽查。
@@ -206,26 +206,26 @@ gh release view v<VERSION> --repo Cd1s/EngineX-OS --json assets -q '.assets[] | 
 
 ## 9. 发版后与日常编译垃圾清理（必做，防磁盘与 tmpfs 爆满）
 
-每次发版上传完成后（或大规模沙箱/门禁测试结束后），**必须立即清理编译机（及 x86 编译机、本机 `/tmp`）上的编译、门禁、解包临时目录与 Go 缓存**，只保留 `/root/build/sc5000-lab/` 固定实验材料与当前最新版的 3 个门禁基准 `.img`：
+每次发版上传完成后（或大规模沙箱/门禁测试结束后），**必须立即清理编译机（及 x86 编译机、本机 `/tmp`）上的编译、门禁、解包临时目录与 Go 缓存**，只保留 `<firmware-lab>/` 固定实验材料与当前最新版的 3 个门禁基准 `.img`：
 
 ```sh
 sshctl run "${BUILD_HOST:?set BUILD_HOST to the build host alias}" --no-stdin --argv sh -c '
 set -eu
-# 1. 将本次发布的 3 个代表镜像（JP07、JP13、JC11）存入 sc5000-lab/release-<VERSION> 供下次门禁作 <OLD> 基准，并删除旧版 release-* / databundle-*
-mkdir -p /root/build/sc5000-lab/release-<VERSION>
+# 1. 将本次发布的 3 个代表镜像（JP07、JP13、JC11）存入 enginex-lab/release-<VERSION> 供下次门禁作 <OLD> 基准，并删除旧版 release-* / databundle-*
+mkdir -p <firmware-lab>/release-<VERSION>
 cp -f <新输出目录>/SC5000-<VERSION>-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img \
       <新输出目录>/SC6000-<VERSION>-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img \
       <新输出目录>/PRIME4-<VERSION>-EngineX-OS-Denon-PRIME-4-JC11-Update.img \
       <新输出目录>/SHA256SUMS.txt \
-      /root/build/sc5000-lab/release-<VERSION>/
-for r in /root/build/sc5000-lab/release-* /root/build/sc5000-lab/databundle-*; do
-  [ "$r" = "/root/build/sc5000-lab/release-<VERSION>" ] && continue
+      <firmware-lab>/release-<VERSION>/
+for r in <firmware-lab>/release-* <firmware-lab>/databundle-*; do
+  [ "$r" = "<firmware-lab>/release-<VERSION>" ] && continue
   rm -rf "$r"
 done
 
-# 2. 清理 /root/build 下除 sc5000-lab 外的所有 remote-build 临时工作区
+# 2. 清理 /root/build 下除 enginex-lab 外的所有 remote-build 临时工作区
 for d in /root/build/*; do
-  [ "$d" = "/root/build/sc5000-lab" ] && continue
+  [ "$d" = "<firmware-lab>" ] && continue
   rm -rf "$d"
 done
 
@@ -249,4 +249,4 @@ df -h / /tmp /var/tmp
 '
 ```
 
-- **禁止删除的固定实验目录（`/root/build/sc5000-lab/`）**：`fw/`、`fw-5.3.0/`、`fw-5.3.0-gen2/`、`5.0.4/`、`5.3.0/`、`sclive-5.0.4/`、`sclive4-rea61-followup/`、`systemone-analysis/`（含已解包的 `rootfs/`）、`deps-sqlite/`、`sbin/`、`deep-symmetry-archive/` 以及当前最新版的 `release-<VERSION>/`。
+- **禁止删除的固定实验目录（`<firmware-lab>/`）**：`fw/`、`fw-5.3.0/`、`fw-5.3.0-gen2/`、`5.0.4/`、`5.3.0/`、`sclive-5.0.4/`、`sclive4-rea61-followup/`、`systemone-analysis/`（含已解包的 `rootfs/`）、`deps-sqlite/`、`sbin/`、`deep-symmetry-archive/` 以及当前最新版的 `release-<VERSION>/`。

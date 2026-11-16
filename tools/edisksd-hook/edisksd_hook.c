@@ -1,3 +1,4 @@
+#include "../legacy_names.h"
 // Writable HFS library presentation without using HFS as an overlayfs lower.
 // All mount changes occur before Engine attaches. Only recorded mount IDs may
 // be removed; a failed eject restores the preallocated private view tree.
@@ -31,7 +32,7 @@
 #define LIB_ROOT "/data/enginex/hfs-libraries"
 #endif
 #ifndef LEGACY_LIB_ROOT
-#define LEGACY_LIB_ROOT "/data/sc5000-custom/hfs-libraries"
+#define LEGACY_LIB_ROOT LEGACY_HFS_LIB_ROOT
 #endif
 #ifndef PREPARE_STATE_PATH
 #define PREPARE_STATE_PATH "/run/enginex-usb-preparing"
@@ -42,7 +43,7 @@
 // Where a hook before 5.3.0.5 (#234) kept its helper mounts. Hidden as well: an in-place update
 // restarts edisksd under this hook while views the old one mounted are still there.
 #ifndef LEGACY_RUN_ROOT
-#define LEGACY_RUN_ROOT "/run/sc5000-hfs-views"
+#define LEGACY_RUN_ROOT LEGACY_HFS_RUN_ROOT
 #endif
 #ifndef MEDIA_ROOT
 #define MEDIA_ROOT "/media"
@@ -182,7 +183,7 @@ static int make_dirs(const char *path) {
         *p=saved; if (!saved) return 0;
     }
 }
-// The HFS library cache lives in /data/enginex. Since #103 /data/sc5000-custom is
+// The HFS library cache lives in /data/enginex. Since #103 /data/enginex-custom is
 // a relative symlink to that sibling, and safe_path refuses every symlink, so a
 // cache path through it failed with ELOOP for every read-only HFS+ stick before
 // rb-bridge ran. Use the first configured root whose parent is a real directory,
@@ -880,7 +881,7 @@ static __thread int in_hook,holding_post;
 static void release_post(void){if(holding_post){holding_post=0;pthread_mutex_unlock(&post_lock);}}
 static int starts_dir(const char *s,const char *dir,size_t n){return !strncmp(s,dir,n)&&s[n]=='/';}
 // A memfd with filename's mountinfo lines minus RUN_ROOT helper mounts, the view
-// overlays (tmpfs "enginex-hfs-view", "sc5000-hfs-view" before 5.3.0.5) and everything mounted inside one; the
+// overlays (tmpfs "enginex-hfs-view", "enginex-hfs-view" before 5.3.0.5) and everything mounted inside one; the
 // device mount underneath stays. -1: nothing to hide, or parse the file as is.
 static int hide_views(const char *filename) {
     FILE *f=fopen(filename,"re");if(!f)return -1;
@@ -903,7 +904,7 @@ static int hide_views(const char *filename) {
             int hide=0;
             if(mpe&&sep) {
                 size_t ml=(size_t)(mpe-mp);
-                int overlay=!strncmp(sep+3,"tmpfs enginex-hfs-view ",23)||!strncmp(sep+3,"tmpfs sc5000-hfs-view ",22);
+                int overlay=!strncmp(sep+3,"tmpfs enginex-hfs-view ",23)||!strncmp(sep+3,LEGACY_HFS_MOUNT,22);
                 int helper=(ml>(size_t)runlen&&starts_dir(mp,run,(size_t)runlen))||
                            (legacylen>0&&ml>(size_t)legacylen&&starts_dir(mp,legacy,(size_t)legacylen));
                 if(!pass&&overlay&&!helper&&nv<64){views[nv]=mp;vlen[nv++]=ml;}

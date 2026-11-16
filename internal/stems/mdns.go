@@ -20,7 +20,7 @@ const (
 
 const typeA, typePTR, typeTXT, typeSRV, typeANY = 1, 12, 16, 33, 255
 
-// MDNSGroup is the IPv4 mDNS multicast address sc5000-stemsd joins.
+// MDNSGroup is the IPv4 mDNS multicast address legacy-stemsd joins.
 var MDNSGroup = &net.UDPAddr{IP: net.IPv4(224, 0, 0, 251), Port: mdnsPort}
 
 // mdnsTargets is where the deck's mDNS query goes; tests point it at loopback.

@@ -10,7 +10,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 ALLOW = json.loads((Path(__file__).with_name('rename234_allowlist.json')).read_text())
 OLD = 'sc' + '5000'
-MODEL = re.compile(r'\bSC5000M?\b')  # Denon hardware and official image prefixes.
+MODEL = re.compile(r'\bSC' + r'5000M?\b')  # Denon hardware and official image prefixes.
 
 
 def findings(repo, paths=None):
@@ -18,7 +18,7 @@ def findings(repo, paths=None):
         paths = subprocess.check_output(
             ['git', '-C', str(repo), 'ls-files', '-co', '--exclude-standard', '-z']).decode().split('\0')
     out = []
-    allowed = [pattern for group in ALLOW.values() for pattern in group]
+    allowed = [pattern for name, group in ALLOW.items() if name != 'history_sections' for pattern in group]
     for rel in sorted(set(paths) - {''}):
         if any(fnmatch.fnmatch(rel, p) for p in allowed):
             continue
@@ -31,6 +31,9 @@ def findings(repo, paths=None):
             text = path.read_text() if not path.is_symlink() else str(path.readlink())
         except (UnicodeError, OSError):
             continue
+        marker = ALLOW.get('history_sections', {}).get(rel)
+        if marker:
+            text = text.split(marker, 1)[0]
         for n, line in enumerate(text.splitlines(), 1):
             if OLD in MODEL.sub('', line).lower():
                 out.append(f'{rel}:{n}: {line.strip()[:160]}')

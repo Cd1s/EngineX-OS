@@ -1,3 +1,7 @@
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'tools/az01-packer'))
+import legacy_names as legacy
 import subprocess
 import tempfile
 import unittest
@@ -6,7 +10,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 BUILD_PACKS = REPO / "tools" / "ui-mod" / "build_packs.py"
-LAB = Path("/root/build/sc5000-lab")
+LAB = Path(legacy.LAB)
 
 
 class WifiSuppressionTest(unittest.TestCase):

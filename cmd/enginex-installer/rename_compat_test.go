@@ -1,6 +1,7 @@
 package main
 
 import (
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
@@ -15,7 +16,7 @@ import (
 
 func TestActivationFilesAcceptEitherAlsaName(t *testing.T) {
 	bundle := buildBundle(t, "PRIME4PLUS", "5.3.0.5")
-	for _, name := range []string{"99-sc5000-custom.conf", "99-enginex.conf"} {
+	for _, name := range []string{migration.AlsaFile, "99-enginex.conf"} {
 		t.Run(name, func(t *testing.T) {
 			f, err := os.Open(bundle.Path)
 			if err != nil {
@@ -43,9 +44,9 @@ func TestActivationFilesAcceptEitherAlsaName(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				h.Name = strings.ReplaceAll(h.Name, "99-sc5000-custom.conf", name)
+				h.Name = strings.ReplaceAll(h.Name, "99-enginex.conf", name)
 				if strings.HasSuffix(h.Name, "/SHA256SUMS") {
-					data = bytes.ReplaceAll(data, []byte("99-sc5000-custom.conf"), []byte(name))
+					data = bytes.ReplaceAll(data, []byte("99-enginex.conf"), []byte(name))
 					h.Size = int64(len(data))
 				}
 				if err := tw.WriteHeader(h); err != nil {
@@ -85,7 +86,7 @@ func TestActivationFilesAcceptEitherAlsaName(t *testing.T) {
 					t.Fatalf("%s: %v", dir, err)
 				}
 			}
-			if target, err := fs.Readlink("sc5000-custom"); err != nil || target != "enginex" {
+			if target, err := fs.Readlink(migration.DataName); err != nil || target != "enginex" {
 				t.Fatalf("compatibility link: %q, %v", target, err)
 			}
 		})

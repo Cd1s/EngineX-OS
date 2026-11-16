@@ -24,7 +24,7 @@ Both committed armhf hook copies have SHA256:
 d5970f5227e9d65c9150d14596845a495ef00364a871645e6468ef3f2ca1087d
 ```
 
-Paths: `rootfs-overlay/etc/sc5000/libengine-ui-hook.so` and `rootfs-overlay/usr/local/lib/sc5000/libengine-ui-hook.so`.
+Paths: `rootfs-overlay/etc/enginex/libengine-ui-hook.so` and `rootfs-overlay/usr/local/lib/enginex/libengine-ui-hook.so`.
 
 ## Review coverage
 

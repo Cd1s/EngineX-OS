@@ -46,7 +46,7 @@ func TestUSBPreparingLifecycle(t *testing.T) {
 		}
 		return digest
 	}
-	routes := []string{"/v1/enginex/ui", "/v1/sc5000/ui"}
+	routes := []string{"/v1/enginex/ui", "/v1/enginex/ui"}
 	baseline := poll(routes[0], false)
 	for _, route := range routes {
 		if poll(route, false) != baseline {

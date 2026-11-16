@@ -155,7 +155,7 @@ func TestPhonePagesDefaultToEnglishAndSwitchLanguage(t *testing.T) {
 		t.Fatalf("QR code ignores the deck's language: %s", ui.logins["deezer"].Target)
 	}
 	os.WriteFile(filepath.Join(dir, "settings.conf"), []byte("lang=es\n"), 0o644)
-	postPage(t, srv.URL+"/v1/sc5000/login?provider=deezer", nil)
+	postPage(t, srv.URL+"/v1/enginex/login?provider=deezer", nil)
 	if !strings.Contains(ui.logins["deezer"].Target, "lang=es") {
 		t.Fatalf("QR code ignores Spanish: %s", ui.logins["deezer"].Target)
 	}

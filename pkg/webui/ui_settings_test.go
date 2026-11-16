@@ -509,7 +509,7 @@ func TestUIScale(t *testing.T) {
 	if code, v := uiPost(t, srv.URL, "uiScale=75"); code != 200 || v.UIScale != 75 {
 		t.Fatalf("scale 75: %d %d", code, v.UIScale)
 	}
-	if b, _ := os.ReadFile(uiScaleEnvPath); string(b) != "ENGINEX_UI_SCALE=0.75\nSC5000_UI_SCALE=0.75\n" {
+	if b, _ := os.ReadFile(uiScaleEnvPath); string(b) != "ENGINEX_UI_SCALE=0.75\nENGINEX_UI_SCALE=0.75\n" {
 		t.Fatalf("env file: %q", b)
 	}
 	if c, _ := os.ReadFile(filepath.Join(dir, "settings.conf")); !strings.Contains(string(c), "ui_scale=75\n") {
@@ -518,7 +518,7 @@ func TestUIScale(t *testing.T) {
 	if code, v := uiPost(t, srv.URL, "uiScale=105"); code != 200 || v.UIScale != 105 {
 		t.Fatalf("scale 105: %d %d", code, v.UIScale)
 	}
-	if b, _ := os.ReadFile(uiScaleEnvPath); string(b) != "ENGINEX_UI_SCALE=1.05\nSC5000_UI_SCALE=1.05\n" {
+	if b, _ := os.ReadFile(uiScaleEnvPath); string(b) != "ENGINEX_UI_SCALE=1.05\nENGINEX_UI_SCALE=1.05\n" {
 		t.Fatalf("env file: %q", b)
 	}
 	if c, _ := os.ReadFile(filepath.Join(dir, "settings.conf")); !strings.Contains(string(c), "ui_scale=105\n") {
@@ -527,7 +527,7 @@ func TestUIScale(t *testing.T) {
 	if code, v := uiPost(t, srv.URL, "uiScale=110"); code != 200 || v.UIScale != 110 {
 		t.Fatalf("scale 110: %d %d", code, v.UIScale)
 	}
-	if b, _ := os.ReadFile(uiScaleEnvPath); string(b) != "ENGINEX_UI_SCALE=1.1\nSC5000_UI_SCALE=1.1\n" {
+	if b, _ := os.ReadFile(uiScaleEnvPath); string(b) != "ENGINEX_UI_SCALE=1.1\nENGINEX_UI_SCALE=1.1\n" {
 		t.Fatalf("env file: %q", b)
 	}
 	if c, _ := os.ReadFile(filepath.Join(dir, "settings.conf")); !strings.Contains(string(c), "ui_scale=110\n") {
@@ -1155,13 +1155,13 @@ func TestTidalDisabledClearsScope(t *testing.T) {
 				t.Errorf("stale scope persisted: %v", err)
 			}
 			var status map[string]any
-			tidalGet(t, srv.URL, "/v1/sc5000/ui", 200, &status)
+			tidalGet(t, srv.URL, "/v1/enginex/ui", 200, &status)
 			if status["scope"] != "" {
 				t.Errorf("GET stale scope = %v", status["scope"])
 			}
 			// A settings file written before this fix must also read safely.
 			os.WriteFile(filepath.Join(dir, "settings.conf"), []byte("scope=tidal\nsources=spotify,netease\n"), 0600)
-			tidalGet(t, srv.URL, "/v1/sc5000/ui", 200, &status)
+			tidalGet(t, srv.URL, "/v1/enginex/ui", 200, &status)
 			if status["scope"] != "" {
 				t.Errorf("legacy scope = %v", status["scope"])
 			}
@@ -1387,7 +1387,7 @@ func TestSpotifySourceSettingsPersistenceAndWiring(t *testing.T) {
 	}
 	for _, source := range []string{"auto", "deezer", "netease", "beatport", "applemusic", "soundcloud"} {
 		t.Run(source, func(t *testing.T) {
-			for _, path := range []string{"/api/ui", "/v1/enginex/ui", "/v1/sc5000/ui"} {
+			for _, path := range []string{"/api/ui", "/v1/enginex/ui", "/v1/enginex/ui"} {
 				req := httptest.NewRequest("POST", path+"?spotifySource="+source, nil)
 				req.RemoteAddr = "127.0.0.1:1234"
 				req.Header.Set("Authorization", "Bearer fixture")

@@ -37,7 +37,7 @@
             try { value = JSON.parse(x.responseText) } catch (e) {}
             if (done) done(x.status === 200 ? value : null, value && value.error ? String(value.error) : scT("Settings request failed"))
         }
-        x.open(action ? "POST" : "GET", "http://127.0.0.1:8080/v1/sc5000/settings-copy")
+        x.open(action ? "POST" : "GET", "http://127.0.0.1:8080/v1/enginex/settings-copy")
         if (action) {
             x.setRequestHeader("Content-Type", "application/json")
             x.setRequestHeader("Authorization", "Bearer " + root.scAccessCode)

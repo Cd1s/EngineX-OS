@@ -72,7 +72,7 @@ func TestSettingsCopySourceConsentPeerBindingAndOneUse(t *testing.T) {
 		t.Fatalf("settings escaped before Allow: %d %s", w.Code, w.Body.String())
 	}
 	body := `{"action":"allow","token":"` + token + `","native":{"DisplayFileName":{"type":1,"state":false}}}`
-	w = copyTestRequest(s, "POST", "/v1/sc5000/settings-copy", body, "127.0.0.1:1234", "Bearer TEST-CODE")
+	w = copyTestRequest(s, "POST", "/v1/enginex/settings-copy", body, "127.0.0.1:1234", "Bearer TEST-CODE")
 	if w.Code != 200 {
 		t.Fatalf("allow: %d %s", w.Code, w.Body.String())
 	}
@@ -108,12 +108,12 @@ func TestSettingsCopyRestartConsentAndByteExactUndo(t *testing.T) {
 	s.copyReceived = &copyBundle{Version: 1, ReceivedAt: time.Now(), Native: map[string]json.RawMessage{"DisplayFileName": json.RawMessage(`{"type":1,"state":true}`)}, UI: map[string]json.RawMessage{"waveform": json.RawMessage(`"rgb"`), "uiScale": json.RawMessage(`85`)}}
 	base := `"bundleHash":"` + copyBundleHash(*s.copyReceived) + `","native":{"DisplayFileName":{"type":1,"state":false}},"entries":{"DisplayFileName":[]}`
 	for _, body := range []string{`{"action":"apply","confirmed":false,"playing":false,` + base + `}`, `{"action":"apply","confirmed":true,"playing":true,` + base + `}`} {
-		w := copyTestRequest(s, "POST", "/v1/sc5000/settings-copy", body, "127.0.0.1:1234", "")
+		w := copyTestRequest(s, "POST", "/v1/enginex/settings-copy", body, "127.0.0.1:1234", "")
 		if w.Code == 200 {
 			t.Fatal("copy bypassed confirmation/playback refusal")
 		}
 	}
-	w := copyTestRequest(s, "POST", "/v1/sc5000/settings-copy", `{"action":"apply","confirmed":true,"playing":false,`+base+`}`, "127.0.0.1:1234", "")
+	w := copyTestRequest(s, "POST", "/v1/enginex/settings-copy", `{"action":"apply","confirmed":true,"playing":false,`+base+`}`, "127.0.0.1:1234", "")
 	if w.Code != 200 {
 		t.Fatalf("prepare: %d %s", w.Code, w.Body.String())
 	}
@@ -121,7 +121,7 @@ func TestSettingsCopyRestartConsentAndByteExactUndo(t *testing.T) {
 	if !bytes.Equal(got, original) {
 		t.Fatal("confirmation wrote settings before Engine exit")
 	}
-	w = copyTestRequest(s, "POST", "/v1/sc5000/settings-copy/prestart", `{}`, "127.0.0.1:1234", "")
+	w = copyTestRequest(s, "POST", "/v1/enginex/settings-copy/prestart", `{}`, "127.0.0.1:1234", "")
 	if w.Code != 200 {
 		t.Fatalf("prestart: %d %s", w.Code, w.Body.String())
 	}
@@ -131,7 +131,7 @@ func TestSettingsCopyRestartConsentAndByteExactUndo(t *testing.T) {
 	if changed.Waveform != "rgb" || changed.FourDeckRole != "24" || changed.UIScale != 85 {
 		t.Fatalf("wrong applied settings: %+v", changed)
 	}
-	w = copyTestRequest(s, "POST", "/v1/sc5000/settings-copy", `{"action":"finish","id":"`+copyTestOpID(t, s)+`","native":{"DisplayFileName":{"type":1,"state":true}}}`, "127.0.0.1:1234", "")
+	w = copyTestRequest(s, "POST", "/v1/enginex/settings-copy", `{"action":"finish","id":"`+copyTestOpID(t, s)+`","native":{"DisplayFileName":{"type":1,"state":true}}}`, "127.0.0.1:1234", "")
 	if w.Code != 200 {
 		t.Fatalf("finish: %d %s", w.Code, w.Body.String())
 	}
@@ -139,11 +139,11 @@ func TestSettingsCopyRestartConsentAndByteExactUndo(t *testing.T) {
 	if err := s.readCopyJSON("undo.json", &undo); err != nil {
 		t.Fatal(err)
 	}
-	w = copyTestRequest(s, "POST", "/v1/sc5000/settings-copy", `{"action":"undo","confirmed":true,"playing":false}`, "127.0.0.1:1234", "")
+	w = copyTestRequest(s, "POST", "/v1/enginex/settings-copy", `{"action":"undo","confirmed":true,"playing":false}`, "127.0.0.1:1234", "")
 	if w.Code != 200 {
 		t.Fatalf("undo consent: %d %s", w.Code, w.Body.String())
 	}
-	w = copyTestRequest(s, "POST", "/v1/sc5000/settings-copy/prestart", `{}`, "127.0.0.1:1234", "")
+	w = copyTestRequest(s, "POST", "/v1/enginex/settings-copy/prestart", `{}`, "127.0.0.1:1234", "")
 	if w.Code != 200 {
 		t.Fatalf("undo prestart: %d %s", w.Code, w.Body.String())
 	}
@@ -255,7 +255,7 @@ func TestSettingsCopyTwoServersTransferOnlyAfterSourceAllow(t *testing.T) {
 	token := source.copyIncoming.Token
 	source.copyMu.Unlock()
 	body := `{"action":"allow","token":"` + token + `","native":{"DisplayFileName":{"type":1,"state":true}}}`
-	w := copyTestRequest(source, "POST", "/v1/sc5000/settings-copy", body, "127.0.0.1:1234", "Bearer TEST-CODE")
+	w := copyTestRequest(source, "POST", "/v1/enginex/settings-copy", body, "127.0.0.1:1234", "Bearer TEST-CODE")
 	if w.Code != 200 {
 		t.Fatalf("source Allow: %d %s", w.Code, w.Body.String())
 	}
@@ -291,7 +291,7 @@ func TestSettingsCopyExpiryAndSnapshotBinding(t *testing.T) {
 	if err := s.writeCopyJSON("candidate-undo.json", copyUndo{OpID: "older"}); err != nil {
 		t.Fatal(err)
 	}
-	w := copyTestRequest(s, "GET", "/v1/sc5000/settings-copy", "", "127.0.0.1:1", "")
+	w := copyTestRequest(s, "GET", "/v1/enginex/settings-copy", "", "127.0.0.1:1", "")
 	if w.Code != 200 || !strings.Contains(w.Body.String(), `"phase":"failed"`) || !strings.Contains(w.Body.String(), `"rollback":false`) {
 		t.Fatalf("stale USB operation: %s", w.Body.String())
 	}
@@ -303,7 +303,7 @@ func TestSettingsCopyExpiryAndSnapshotBinding(t *testing.T) {
 	if err := s.writeCopyJSON("operation.json", old); err != nil {
 		t.Fatal(err)
 	}
-	w = copyTestRequest(s, "POST", "/v1/sc5000/settings-copy", `{"action":"failed","id":"old"}`, "127.0.0.1:1", "")
+	w = copyTestRequest(s, "POST", "/v1/enginex/settings-copy", `{"action":"failed","id":"old"}`, "127.0.0.1:1", "")
 	if w.Code == 200 {
 		t.Fatal("late failure overwrote a finished operation")
 	}
@@ -311,7 +311,7 @@ func TestSettingsCopyExpiryAndSnapshotBinding(t *testing.T) {
 
 func TestSettingsCopyScreenActionsRejectRelayAndConsole(t *testing.T) {
 	s, _ := copyTestServer(t)
-	for _, path := range []string{"/api/settings-copy", "/v1/sc5000/settings-copy"} {
+	for _, path := range []string{"/api/settings-copy", "/v1/enginex/settings-copy"} {
 		req := httptest.NewRequest("POST", path, strings.NewReader(`{"action":"usb-export","drive":"/media/test"}`))
 		req.RemoteAddr = "127.0.0.1:1"
 		req.Header.Set("Authorization", "Bearer TEST-CODE")
@@ -389,7 +389,7 @@ func TestSettingsCopyPrestartReentryKeepsOriginalSnapshot(t *testing.T) {
 	if err := s.writeCopyJSON("operation.json", op); err != nil {
 		t.Fatal(err)
 	}
-	w := copyTestRequest(s, "POST", "/v1/sc5000/settings-copy/prestart", `{}`, "127.0.0.1:1", "")
+	w := copyTestRequest(s, "POST", "/v1/enginex/settings-copy/prestart", `{}`, "127.0.0.1:1", "")
 	if w.Code != 200 {
 		t.Fatalf("prestart: %d %s", w.Code, w.Body.String())
 	}
@@ -407,11 +407,11 @@ func TestSettingsCopyDenyExpiryAndNoSourceCode(t *testing.T) {
 	token := "11111111111111111111111111111111"
 	s.copyIncoming = &copyPeerRequest{Token: token, Peer: "192.0.2.20", Expires: time.Now().Add(time.Minute)}
 	body := `{"action":"deny","token":"` + token + `"}`
-	w := copyTestRequest(s, "POST", "/v1/sc5000/settings-copy", body, "127.0.0.1:1", "")
+	w := copyTestRequest(s, "POST", "/v1/enginex/settings-copy", body, "127.0.0.1:1", "")
 	if w.Code == 200 {
 		t.Fatal("source consent accepted without its access code")
 	}
-	w = copyTestRequest(s, "POST", "/v1/sc5000/settings-copy", body, "127.0.0.1:1", "Bearer TEST-CODE")
+	w = copyTestRequest(s, "POST", "/v1/enginex/settings-copy", body, "127.0.0.1:1", "Bearer TEST-CODE")
 	if w.Code != 200 {
 		t.Fatalf("deny: %d %s", w.Code, w.Body.String())
 	}
@@ -470,14 +470,14 @@ func TestSettingsCopyFailedUSBReadCleanupWaitsForNativeLoad(t *testing.T) {
 	if err := os.WriteFile(marker, []byte("fixture"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	w := copyTestRequest(s, "POST", "/v1/sc5000/settings-copy", `{"action":"failed","id":"failure","loading":true}`, "127.0.0.1:1", "")
+	w := copyTestRequest(s, "POST", "/v1/enginex/settings-copy", `{"action":"failed","id":"failure","loading":true}`, "127.0.0.1:1", "")
 	if w.Code != 200 {
 		t.Fatalf("failure: %d %s", w.Code, w.Body.String())
 	}
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatal("in-flight load lost identity filtering")
 	}
-	w = copyTestRequest(s, "POST", "/v1/sc5000/settings-copy", `{"action":"failed","id":"failure","loading":false}`, "127.0.0.1:1", "")
+	w = copyTestRequest(s, "POST", "/v1/enginex/settings-copy", `{"action":"failed","id":"failure","loading":false}`, "127.0.0.1:1", "")
 	if w.Code != 200 {
 		t.Fatalf("cleanup: %d %s", w.Code, w.Body.String())
 	}
