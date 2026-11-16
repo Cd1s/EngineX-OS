@@ -555,34 +555,53 @@ done
 has 'feature_disable=0x82004' "$ROOT/rootfs-overlay/usr/lib/modprobe.d/brcmfmac.conf"
 ok 'stock connman online check, read-only HFS+, rootfs brcmfmac options'
 
-# 5.3.0.5-beta1: the brcmfmac workaround is the BCM4339's only (SDIO 02d0:4335 or 02d0:4339,
-# the SC5000's chip). The Gen-1 images also ship BCM43455 and BCM43456 firmware: those load as stock.
+# 5.3.0.5-beta1: the brcmfmac workaround is the BCM4339's (SDIO 02d0:4335 or 02d0:4339, the
+# SC5000's chip). Only a chip the SDIO IDs show is another Broadcom/Cypress one loads as stock
+# (the Gen-1 images also ship BCM43455 and BCM43456 firmware); with no readable ID it stays on.
 brcm_conf=$ROOT/rootfs-overlay/usr/lib/modprobe.d/brcmfmac.conf
 if grep -Eq '^[[:space:]]*options[[:space:]]+brcmfmac([[:space:]]|$)' "$brcm_conf"; then fail 'brcmfmac options reach every Wi-Fi chip'; fi
 brcm_install=$(sed -n 's/^install brcmfmac //p' "$brcm_conf")
 [[ -n $brcm_install ]] || fail 'brcmfmac has no install command'
 printf '#!/bin/sh\necho "$*"\n' > "$TMP/brcm-modprobe"; chmod +x "$TMP/brcm-modprobe"
-brcm_load() { # vendor device ... of the SDIO functions -> the modprobe call the install command makes
-    local sdio=$TMP/brcm-sdio i=0 cmd
-    rm -rf "$sdio"; mkdir -p "$sdio"
-    while (($#)); do
-        i=$((i + 1)); mkdir -p "$sdio/mmc2:0001:$i"
-        printf '%s\n' "$1" > "$sdio/mmc2:0001:$i/vendor"; printf '%s\n' "$2" > "$sdio/mmc2:0001:$i/device"; shift 2
-    done
-    cmd=${brcm_install//\/sys\/bus\/sdio\/devices/$sdio}; cmd=${cmd//\/sbin\/modprobe/$TMP/brcm-modprobe}
+brcm_sdio=$TMP/brcm-sdio
+brcm_run() { # the modprobe call the install command makes, with $brcm_sdio as /sys/bus/sdio/devices
+    local cmd=${brcm_install//\/sys\/bus\/sdio\/devices/$brcm_sdio}
+    cmd=${cmd//\/sbin\/modprobe/$TMP/brcm-modprobe}
     sh -c "${cmd//\$CMDLINE_OPTS/$brcm_opts}"
 }
+brcm_fixture() { # vendor device ... of the SDIO functions
+    local i=0
+    rm -rf "$brcm_sdio"; mkdir -p "$brcm_sdio"
+    while (($#)); do
+        i=$((i + 1)); mkdir -p "$brcm_sdio/mmc2:0001:$i"
+        printf '%s\n' "$1" > "$brcm_sdio/mmc2:0001:$i/vendor"; printf '%s\n' "$2" > "$brcm_sdio/mmc2:0001:$i/device"; shift 2
+    done
+}
+brcm_load() { brcm_fixture "$@"; brcm_run; }
 brcm_fixed='--ignore-install brcmfmac feature_disable=0x82004' brcm_stock='--ignore-install brcmfmac' brcm_opts=
 [[ $(brcm_load 0x02d0 0x4335 0x02d0 0x4335 0x02d0 0x4335) == "$brcm_fixed" ]] || fail 'BCM4339 (SDIO 4335) lost its brcmfmac workaround'
 [[ $(brcm_load 0x02d0 0x4339) == "$brcm_fixed" ]] || fail 'BCM4339 (SDIO 4339) lost its brcmfmac workaround'
 [[ $(brcm_load 0x02d0 0x4345 0x02d0 0x4345) == "$brcm_stock" ]] || fail 'BCM43455/43456 (SDIO 4345) must load brcmfmac as stock'
 [[ $(brcm_load 0x02d0 0xa9bf) == "$brcm_stock" ]] || fail 'BCM43455 (SDIO a9bf) must load brcmfmac as stock'
-[[ $(brcm_load 0x04b4 0x4335) == "$brcm_stock" ]] || fail 'another vendor must load brcmfmac as stock'
-[[ $(brcm_load) == "$brcm_stock" ]] || fail 'no SDIO function must load brcmfmac as stock'
+[[ $(brcm_load 0x04b4 0x4335) == "$brcm_stock" ]] || fail 'a Cypress-vendor chip must load brcmfmac as stock'
+# Fail-safe: without a readable Broadcom/Cypress ID the chip may be the BCM4339, so the workaround stays.
+[[ $(brcm_load) == "$brcm_fixed" ]] || fail 'no SDIO function must keep the brcmfmac workaround'
+rm -rf "$brcm_sdio"
+[[ $(brcm_run) == "$brcm_fixed" ]] || fail 'no SDIO bus must keep the brcmfmac workaround'
+[[ $(brcm_load 0x024c 0xb723) == "$brcm_fixed" ]] || fail 'a non-Broadcom SDIO function alone must keep the brcmfmac workaround'
+brcm_fixture 0x02d0 0x4345; rm "$brcm_sdio/mmc2:0001:1/vendor"
+[[ $(brcm_run) == "$brcm_fixed" ]] || fail 'a missing SDIO vendor ID must keep the brcmfmac workaround'
+brcm_fixture 0x02d0 0x4345; : > "$brcm_sdio/mmc2:0001:1/device"
+[[ $(brcm_run) == "$brcm_fixed" ]] || fail 'an empty SDIO device ID must keep the brcmfmac workaround'
+brcm_fixture 0x02d0 0x4345; rm "$brcm_sdio/mmc2:0001:1/device"; mkdir "$brcm_sdio/mmc2:0001:1/device"
+[[ $(brcm_run) == "$brcm_fixed" ]] || fail 'an unreadable SDIO device ID must keep the brcmfmac workaround'
+brcm_fixture 0x02d0 0x4345; mkdir "$brcm_sdio/mmc2:0001:2"
+[[ $(brcm_run) == "$brcm_stock" ]] || fail 'an identified BCM4345 must load as stock beside an unreadable function'
 brcm_opts='debug=1'
 [[ $(brcm_load 0x02d0 0x4335) == "$brcm_fixed debug=1" ]] || fail 'brcmfmac options from the command line lost on BCM4339'
 [[ $(brcm_load 0x02d0 0x4345) == "$brcm_stock debug=1" ]] || fail 'brcmfmac options from the command line lost on other chips'
-ok 'brcmfmac workaround only on BCM4339, every other Wi-Fi chip loads as stock'
+[[ $(brcm_load) == "$brcm_fixed debug=1" ]] || fail 'brcmfmac options from the command line lost without a chip ID'
+ok 'brcmfmac workaround on BCM4339 and whenever no chip is identified, stock only on an identified other chip'
 
 GUARD=$ROOT/rootfs-overlay/etc/enginex/engine-ui-guard
 export ENGINEX_UI_DIR=$TMP/ui-guard ENGINEX_STREAMING_ACCOUNTS=$TMP/StreamingAccounts.json
