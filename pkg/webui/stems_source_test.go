@@ -132,9 +132,10 @@ func TestStemsListSaysWhenStemsAreNotReady(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Engine keeps a row's path relative to the library directory.
 	for _, q := range []string{
 		`CREATE TABLE Track (id INTEGER PRIMARY KEY, path TEXT, filename TEXT)`,
-		`INSERT INTO Track VALUES (86, 'x', 'Done - Song.flac'), (258, 'x', '刀郎 - 冲动的惩罚.flac')`,
+		`INSERT INTO Track VALUES (86, '../../../../enginex/Stream/Stems/2/Done - Song.flac', 'Done - Song.flac'), (258, '../../../../enginex/Stream/Stems/3123276661/刀郎 - 冲动的惩罚.flac', '刀郎 - 冲动的惩罚.flac')`,
 	} {
 		if _, err := db.Exec(q); err != nil {
 			t.Fatal(err)
@@ -142,13 +143,15 @@ func TestStemsListSaysWhenStemsAreNotReady(t *testing.T) {
 	}
 	db.Close()
 	os.WriteFile(filepath.Join(lib, "Stems", "86 ad42124b.stems"), []byte("stems"), 0o644)
+	done := filepath.Join(data, "enginex/Stream/Stems/2/Done - Song.flac")
+	rendering := filepath.Join(data, "enginex/Stream/Stems/3123276661/刀郎 - 冲动的惩罚.flac")
 
 	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
 	t.Cleanup(s.Close)
 	for _, e := range []stemmedTrack{
 		{Track: providers.Track{ID: "3", Title: "Elsewhere", Provider: "netease"}, Path: "/sd/Stream/Stems/3/Not In This Library.flac"},
-		{Track: providers.Track{ID: "2", Title: "Song", Provider: "netease"}, Path: "/data/enginex/Stream/Stems/2/Done - Song.flac"},
-		{Track: providers.Track{ID: "77004", Title: "冲动的惩罚", Provider: "netease"}, Path: "/data/enginex/Stream/Stems/3123276661/刀郎 - 冲动的惩罚.flac"},
+		{Track: providers.Track{ID: "2", Title: "Song", Provider: "netease"}, Path: done},
+		{Track: providers.Track{ID: "77004", Title: "冲动的惩罚", Provider: "netease"}, Path: rendering},
 	} {
 		if err := s.addStemmed("netease", e); err != nil {
 			t.Fatal(err)

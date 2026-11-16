@@ -1772,21 +1772,21 @@ func (g *tidalGateway) stemsSource(w http.ResponseWriter, r *http.Request) {
 	respond(w, map[string]any{"path": p})
 }
 
-// stemsTrackID answers the internal library id of an imported file, by file name.
+// stemsTrackID answers the internal library id of an imported file.
 // The UI cannot resolve it itself: while a streaming collection is open, its
 // collectionController does not see the internal m.db. Read-only (#49); 0 = not imported yet.
 func (g *tidalGateway) stemsTrackID(w http.ResponseWriter, r *http.Request) {
-	name := filepath.Base(r.URL.Query().Get("path"))
-	if name == "." || name == string(filepath.Separator) {
+	p := r.URL.Query().Get("path")
+	if !filepath.IsAbs(p) || filepath.Base(p) == string(filepath.Separator) {
 		fail(w, 400, errors.New("path required"))
 		return
 	}
-	ids, err := internalTrackIDs(r.Context(), name)
+	ids, err := internalTrackIDs(r.Context(), p)
 	if err != nil {
 		fail(w, 500, err)
 		return
 	}
-	respond(w, map[string]any{"trackId": ids[name]})
+	respond(w, map[string]any{"trackId": ids[p]})
 }
 
 // internalLibrary is Engine's library on the deck's own storage: a file under
@@ -1795,47 +1795,74 @@ func internalLibrary() string {
 	return filepath.Join(shadowDataRoot, "AppDataUser/AIR Music Technology/Engine/Engine Library")
 }
 
-// internalTrackIDs looks up the newest internal library row of each file name.
-// Read-only (#49); a name that was not imported is absent from the answer.
-func internalTrackIDs(ctx context.Context, names ...string) (map[string]int64, error) {
-	mdb := filepath.Join(internalLibrary(), "Database2/m.db")
+// internalTrackIDs looks up the internal library row of each imported file:
+// the newest row whose own path is that file. A file name alone does not say
+// which track it is, since two imports can both be "Artist - Title.flac" in
+// different directories. Engine keeps a row's path relative to the library
+// directory. Read-only (#49); a file that was not imported is absent from the
+// answer.
+func internalTrackIDs(ctx context.Context, paths ...string) (map[string]int64, error) {
+	lib := internalLibrary()
+	mdb := filepath.Join(lib, "Database2/m.db")
 	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: mdb}).String()+"?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(500)")
 	if err != nil {
 		return nil, err
 	}
 	defer db.Close()
 	ids := map[string]int64{}
-	for _, name := range names {
-		var id int64
-		err = db.QueryRowContext(ctx, `SELECT id FROM Track WHERE filename = ? ORDER BY id DESC LIMIT 1`, name).Scan(&id)
-		if err == nil {
-			ids[name] = id
-		} else if !errors.Is(err, sql.ErrNoRows) {
+	for _, p := range paths {
+		id, err := internalTrackID(ctx, db, lib, p)
+		if err != nil {
 			return nil, err
+		}
+		if id != 0 {
+			ids[p] = id
 		}
 	}
 	return ids, nil
 }
 
+func internalTrackID(ctx context.Context, db *sql.DB, lib, p string) (int64, error) {
+	rows, err := db.QueryContext(ctx, `SELECT id, path FROM Track WHERE filename = ? ORDER BY id DESC`, filepath.Base(p))
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	want, wantErr := os.Stat(p)
+	for rows.Next() {
+		var id int64
+		var rel sql.NullString
+		if err = rows.Scan(&id, &rel); err != nil {
+			return 0, err
+		}
+		file := rel.String
+		if !filepath.IsAbs(file) {
+			file = filepath.Join(lib, file)
+		}
+		if file == filepath.Clean(p) {
+			return id, nil
+		}
+		// The same file reached through a link in the path.
+		if st, err := os.Stat(file); err == nil && wantErr == nil && os.SameFile(want, st) {
+			return id, nil
+		}
+	}
+	return 0, rows.Err()
+}
+
 // stemsPending tells which of the imported files have no Stems yet: Engine has
-// the track in its internal library and has not written "<id> <library>.stems"
-// for it. A file it cannot find out about counts as done, so a deck whose
+// that file in its internal library and has not written "<id> <library>.stems"
+// for its row. A file it cannot find out about counts as done, so a deck whose
 // library it cannot read keeps the list it had.
 func stemsPending(ctx context.Context, paths []string) map[string]bool {
-	names := make([]string, len(paths))
-	for i, p := range paths {
-		names[i] = filepath.Base(p)
-	}
-	ids, err := internalTrackIDs(ctx, names...)
+	ids, err := internalTrackIDs(ctx, paths...)
 	pending := map[string]bool{}
 	if err != nil {
 		return pending
 	}
-	for i, p := range paths {
-		if id, ok := ids[names[i]]; ok {
-			done, _ := filepath.Glob(filepath.Join(internalLibrary(), "Stems", fmt.Sprintf("%d *.stems", id)))
-			pending[p] = len(done) == 0
-		}
+	for p, id := range ids {
+		done, _ := filepath.Glob(filepath.Join(internalLibrary(), "Stems", fmt.Sprintf("%d *.stems", id)))
+		pending[p] = len(done) == 0
 	}
 	return pending
 }
