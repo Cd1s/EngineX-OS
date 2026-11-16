@@ -4177,7 +4177,9 @@ SERVICES_MAIN = """
 		const m = /uri=streaming:\\/\\/TIDAL\\/Track\\/(\\d+)/.exec(lib.getTrackUrisFromUniversalIds([uid]) || "")
 		if (!m) return false
 		const deck = root.scDeckList().slice().reverse().find(d => !root.scDeckLocked(d) && !Planck.getProperty("/Engine/Deck%1/PlayState".arg(d)).translator.state)
-		if (!deck) return true // all decks playing: never interrupt playback
+		// Every deck is playing: playback is never interrupted for the import, so
+		// nothing is started. The swipe says so where it would have said "Stems".
+		if (!deck) { console.warn("EngineX stems step=busy"); return "busy" }
 		const gid = m[1]
 		root.scStemMark([gid], "wait")
 		const x = new XMLHttpRequest()
@@ -7318,7 +7320,9 @@ def edits(dev: bool):
                 (f"        {a}[actionIndex].trigger(row.index)\n",
                  "        if (actionIndex >= leftActions.length || /stem/i.test(String(leftActions[actionIndex].display && leftActions[actionIndex].display.label || \"\"))) {\n"
                  "            // streamed rows go through the gateway; local USB/SD tracks are rendered by Engine itself (also via the stock Stem entry)\n"
-                 "            if (!root.scStemStream(row.modelData.trackId)) Planck.librarianController.stemsQueueManager.startRenderTracks(String(row.modelData.trackId))\n"
+                 "            const scStemmed = root.scStemStream(row.modelData.trackId)\n"
+                 "            if (!scStemmed) Planck.librarianController.stemsQueueManager.startRenderTracks(String(row.modelData.trackId))\n"
+                 "            else if (scStemmed === \"busy\") textCommitValid = root.scT(\"Both decks are playing. Free one deck, then tap Stems again\")\n"
                  f"        }} else if (scDeck > 0 && /\\d/.test({a}[actionIndex].display.label)) {{\n"
                  "            trackList.pCurrentIndex.translator.unnormalized = row.index\n"
                  "            Planck.getProperty(\"/Client/Librarian/LoadToDeck%1\".arg(scDeck)).translator.state = true\n"

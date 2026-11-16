@@ -8180,6 +8180,53 @@ for (const [lang, waiting, rendering, nearly] of [
         ended = main.split("onScStemRenderingChanged: {", 1)[1].split("\n\t}", 1)[0]
         self.assertIn('if (!scStemRendering) scStemMark(Object.keys(scStemRows).filter(id => scStemRows[id] === "render"), "")', ended)
 
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_a_tap_with_every_deck_playing_says_so(self):
+        """The import needs a deck that is not playing. With none, the tap
+        started nothing and showed nothing, which looked broken."""
+        stream = re.search(r"function scStemStream\(uid\) \{[\s\S]*?\n\t\}", bp.SERVICES_MAIN).group(0)
+        self.assertIn('if (!deck) { console.warn("EngineX stems step=busy"); return "busy" }', stream)
+        # Nothing is marked, requested or loaded before that answer.
+        for later in ('root.scStemMark([gid], "wait")', "new XMLHttpRequest()", "AddToDatabaseAndLoadToDeck"):
+            self.assertLess(stream.index('return "busy"'), stream.index(later))
+        hint = "Both decks are playing. Free one deck, then tap Stems again"
+        rows = {l.split("\t")[0]: l.split("\t") for l in
+                (REPO / "tools/ui-mod/i18n.tsv").read_text(encoding="utf-8").splitlines() if l and not l.startswith("#")}
+        self.assertEqual(len(rows[hint]), 4)
+        for text in rows[hint]:
+            self.assertIn("Stems", text)
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            edits = bp.edits(False)
+        finally:
+            bp.ROOT = old_root
+        for side in ("Left", "Right"):
+            with self.subTest(side=side):
+                path = "Skins/Embedded/Views/BrowseView/Components/Components/Swipe" + side + "Item.qml"
+                body = next(new for _, new in edits[path] if "root.scStemStream(row.modelData.trackId)" in new)
+                script = f"""
+const assert = require('assert');
+function commit(answer) {{
+    const calls = [];
+    const root = {{scT: s => 'T:' + s, scStemStream: id => {{ calls.push(['stream', id]); return answer; }}}};
+    const Planck = {{librarianController: {{stemsQueueManager: {{startRenderTracks: id => calls.push(['render', id])}}}}}};
+    const row = {{index: 3, modelData: {{trackId: 99}}}}, scDeck = 0, trackList = {{}};
+    const leftActions = [], rightActions = [], actionIndex = 0;
+    let textCommitValid = 'Stems'; // stock has just put the action's own message there
+{body}
+    return [textCommitValid, calls];
+}}
+// Started: the swipe says "Stems", as before.
+assert.deepStrictEqual(commit(true), ['Stems', [['stream', 99]]]);
+// Not a streamed row: Engine renders the local track itself.
+assert.deepStrictEqual(commit(false), ['Stems', [['stream', 99], ['render', '99']]]);
+// Every deck is playing: nothing is started, and the swipe says why.
+assert.deepStrictEqual(commit('busy'), ['T:' + {json.dumps(hint)}, [['stream', 99]]]);
+"""
+                res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+                self.assertEqual(res.returncode, 0, res.stderr)
+
     def test_row_edits_are_in_the_patch_table_without_lab(self):
         old_root = bp.ROOT
         try:
