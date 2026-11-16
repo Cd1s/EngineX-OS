@@ -20,11 +20,11 @@
 
 **EngineX OS 5.3.0.5** 是基于官方 Engine OS 5.3.0+ 底层重构的定制系统，支持天龙 Denon DJ、Numark 与 Rane 全系 16 款独立设备：
 
-| 世代 | 架构 | Linux | 机型（板号） |
-| :--- | :--- | :--- | :--- |
-| 一代机，8 款 | 32 位（ARM） | 6.6.119-rt | `SC5000 Prime`（JP07）· `SC5000M Prime`（JP08）· `PRIME GO`（JP11）· `SC6000 Prime`（JP13）· `SC6000M Prime`（JP14）· `PRIME 4`（JC11）· `PRIME 2`（JC16）· `Mixstream Pro`（NH08） |
-| 二代机，6 款 | 32 位（ARM） | 6.18-rt | `PRIME 4+`（JC11S）· `PRIME GO+`（JP11S）· `SC LIVE 2`（JP20）· `SC LIVE 4`（JP21）· `Mixstream Pro Go`（NH10）· `Mixstream Pro+`（NH08S） |
-| 二代机，2 款 | 64 位（ARM64） | 6.18-rt | `PRIME 4 G2`（JP24）· `Rane SYSTEM ONE`（RMZ2） |
+| 世代 | 架构 | 机型（板号） |
+| :--- | :--- | :--- |
+| 一代机，8 款 | 32 位（ARM） | `SC5000 Prime`（JP07）· `SC5000M Prime`（JP08）· `PRIME GO`（JP11）· `SC6000 Prime`（JP13）· `SC6000M Prime`（JP14）· `PRIME 4`（JC11）· `PRIME 2`（JC16）· `Mixstream Pro`（NH08） |
+| 二代机，6 款 | 32 位（ARM） | `PRIME 4+`（JC11S）· `PRIME GO+`（JP11S）· `SC LIVE 2`（JP20）· `SC LIVE 4`（JP21）· `Mixstream Pro Go`（NH10）· `Mixstream Pro+`（NH08S） |
+| 二代机，2 款 | 64 位（ARM64） | `PRIME 4 G2`（JP24）· `Rane SYSTEM ONE`（RMZ2） |
 
 全系 16 款机型现统一使用 `*-Update.img` 升级包：前八款一代机直接用 U 盘免电脑刷入；后八款二代机首次连接电脑运行一次 `EngineX-Installer` 自动完成**一键解锁 `.img` 升级链并刷入**，之后即可像一代机一样直接用 U 盘或屏幕一键在线升级（见[如何安装与升级](#install)）。
 
