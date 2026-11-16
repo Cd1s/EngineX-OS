@@ -198,7 +198,7 @@ static void test_erase(void) {
     for (size_t i = 0; i < sizeof wiped / sizeof *wiped; i++) put(root, wiped[i], "x");
     for (size_t i = 0; i < sizeof kept / sizeof *kept; i++) put(root, kept[i], "x");
     char link[PATH_MAX];
-    snprintf(link, sizeof link, "%s/enginex-custom", root);
+    snprintf(link, sizeof link, "%s/" LEGACY_DATA_NAME, root);
     assert(symlink("enginex", link) == 0);
     snprintf(link, sizeof link, "%s/AppDataUser/out", root);  // a symlink out of /data is removed, never followed
     char outside[] = "/tmp/gen2-outside-XXXXXX";

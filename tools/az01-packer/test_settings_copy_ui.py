@@ -1,4 +1,8 @@
 """Settings copy keeps native USB consent and explicitly confirms Engine restarts."""
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import legacy_names as legacy
 import importlib.util
 import json
 from pathlib import Path
@@ -11,7 +15,7 @@ import unittest
 REPO = Path(__file__).resolve().parents[2]
 UI = REPO / "tools/ui-mod/settings_copy.qml"
 BUILD = REPO / "tools/ui-mod/build_packs.py"
-LAB = Path("/root/build/enginex-lab/5.3.0/qrc")
+LAB = Path(legacy.LAB + '/5.3.0/qrc')
 
 
 def js_function(name):

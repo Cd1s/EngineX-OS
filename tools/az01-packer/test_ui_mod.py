@@ -1084,8 +1084,8 @@ for (const amt of [1/63, 2/63, 4/63, 5/63, 8/63, 1.0]) {{
             bp.ROOT = "Skins/Embedded/"
             edits = bp.edits(False)
             cs_patches = edits["Skins/Embedded/Views/BrowserSource/ConnectedSource.qml"]
-            stock_cs = (Path("/root/build/enginex-lab/5.3.0/qrc/Skins/Embedded/Views/BrowserSource/ConnectedSource.qml").read_text()
-                        if Path("/root/build/enginex-lab/5.3.0/qrc/Skins/Embedded/Views/BrowserSource/ConnectedSource.qml").is_file()
+            stock_cs = (Path(legacy.LAB + '/5.3.0/qrc/Skins/Embedded/Views/BrowserSource/ConnectedSource.qml').read_text()
+                        if Path(legacy.LAB + '/5.3.0/qrc/Skins/Embedded/Views/BrowserSource/ConnectedSource.qml').is_file()
                         else "ListView {\n    currentIndex: -1\n    delegate: ConnectedSourceDelegate {\n        height: 108\n        leftPadding: 8\n    }\n    section.property: \"typeText\"\n}\n")
             patched = stock_cs
             for old, new in cs_patches:

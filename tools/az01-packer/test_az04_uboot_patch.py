@@ -1,4 +1,8 @@
 """Tests of real AZ04 5.3.0 boot FITs; no firmware is modified."""
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import legacy_names as legacy
 import hashlib
 import struct
 import sys
@@ -8,7 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import az04_uboot_patch as patcher
 
-FIRMWARE = Path('/root/build/enginex-lab/fw-5.3.0-gen2/SYSTEMONE-5.3.0-Update.img')
+FIRMWARE = Path(legacy.LAB + '/fw-5.3.0-gen2/SYSTEMONE-5.3.0-Update.img')
 
 
 @unittest.skipUnless(FIRMWARE.is_file(), 'SYSTEMONE 5.3.0 firmware not available')
