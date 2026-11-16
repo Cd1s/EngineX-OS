@@ -1,4 +1,6 @@
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -38,6 +40,13 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(ra.resolve(str(self.root), '/sbin/sshd'), str(self.root) + '/usr/sbin/sshd')
         self.assertEqual(ra.resolve(str(self.root), '/bin/sh'), str(self.root) + '/usr/bin/sh')
         self.assertIsNone(ra.resolve(str(self.root), '/bin/iw'))
+
+    def test_cli_runs_with_isolated_python(self):
+        self.ship('usr/lib/systemd/system/enginex-prepare.service', '[Service]\nExecStart=/bin/sh\n')
+        result = subprocess.run([sys.executable, '-I', ra.__file__, str(self.root),
+                                 '--overlay', str(self.overlay)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('0 FAIL', result.stdout)
 
     def test_hard_requires_on_a_vendor_mount_fails(self):
         # The 5.3.0.1 upgrade bug: 5.3.0 has no etc.mount, so prepare and SSH never ran.
