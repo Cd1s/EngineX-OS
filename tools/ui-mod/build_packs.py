@@ -679,7 +679,7 @@ SERVICES_MAIN = """
 	readonly property bool scIsMixstream: typeof Config !== "undefined" && Config && Config.audio && Config.audio.fx && Config.audio.fx.hasNHFx !== undefined ? !!Config.audio.fx.hasNHFx : ["NH08", "NH08S", "NH10"].indexOf(scBoard) >= 0
 	readonly property bool scHasStemsEq: scHasMixer && (typeof Config !== "undefined" && Config && Config.audio ? !!Config.audio.hasStemsLevel : false)
 	readonly property bool scIsAZ04: ["JP24", "RMZ2"].indexOf(scBoard) >= 0
-	readonly property bool scHasJogWheel: !(typeof Config !== "undefined" && Config && Config.device && Config.device.hasMotorizedPlatters) && ["JP08", "JP14", "RMZ2"].indexOf(scBoard) < 0
+	readonly property bool scHasJogWheel: !scIsPlayerBoard && !(typeof Config !== "undefined" && Config && Config.device && Config.device.hasMotorizedPlatters) && ["JP08", "JP14", "RMZ2"].indexOf(scBoard) < 0
 	readonly property var scTransitionFxView: typeof PlanckGUI !== "undefined" && PlanckGUI && PlanckGUI.views ? (PlanckGUI.views.transitionFx || null) : null
 	readonly property bool scHasStockTransitionTile: typeof Config !== "undefined" && Config && Config.audio && Config.audio.fx && Config.device
 		? (!!Config.audio.fx.hasTransitionFx && !Config.device.hasHardwareFaderFxButtons && !!scTransitionFxView)
@@ -3017,8 +3017,8 @@ SERVICES_MAIN = """
 			scReverseJogSynced = false
 			return
 		}
-		pL.translator.state = scReverseJogLeft
-		pR.translator.state = scReverseJogRight
+		pL.translator.state = scHasJogWheel && scReverseJogLeft
+		pR.translator.state = scHasJogWheel && scReverseJogRight
 		if (ready && pReady && pReady.translator) {
 			pReady.translator.state = true
 			scReverseJogSynced = true
@@ -7901,25 +7901,29 @@ def edits(dev: bool):
             '    property var pReverseJogReady: Planck.getProperty("/GUI/Scripted/EngineXJogInvertReady")\n'
             '    property var pPerfLibVisible: Planck.getProperty("/GUI/Scripted/EngineXPerfLibVisible")\n'
             '    readonly property bool scPerformanceLibraryVisible: !!(pPerfLibVisible && pPerfLibVisible.translator && pPerfLibVisible.translator.state)\n'
-            '    readonly property bool scReverseJogLeftEffective: (pReverseJogReady && pReverseJogReady.translator && pReverseJogReady.translator.state && pReverseJogLeft && pReverseJogLeft.translator) ? !!pReverseJogLeft.translator.state : scReverseJogLeft\n'
-            '    readonly property bool scReverseJogRightEffective: (pReverseJogReady && pReverseJogReady.translator && pReverseJogReady.translator.state && pReverseJogRight && pReverseJogRight.translator) ? !!pReverseJogRight.translator.state : scReverseJogRight\n'
+            '    property bool scReverseJogLeftEffective: false\n'
+            '    property bool scReverseJogRightEffective: false\n'
             '    function scIsReverseJog(deckName) {\n'
             '        return deckName === "Right" ? scReverseJogRightEffective : scReverseJogLeftEffective\n'
             '    }\n'
+            '    function scSyncReverseJogFromState() {\n'
+            '        if (!scGlobalConfig.pReverseJogLeft || !scGlobalConfig.pReverseJogLeft.translator)\n'
+            '            scGlobalConfig.pReverseJogLeft = Planck.getProperty("/GUI/Scripted/EngineXJogInvertLeft")\n'
+            '        if (!scGlobalConfig.pReverseJogRight || !scGlobalConfig.pReverseJogRight.translator)\n'
+            '            scGlobalConfig.pReverseJogRight = Planck.getProperty("/GUI/Scripted/EngineXJogInvertRight")\n'
+            '        if (!scGlobalConfig.pReverseJogReady || !scGlobalConfig.pReverseJogReady.translator)\n'
+            '            scGlobalConfig.pReverseJogReady = Planck.getProperty("/GUI/Scripted/EngineXJogInvertReady")\n'
+            '        if (!scGlobalConfig.pPerfLibVisible || !scGlobalConfig.pPerfLibVisible.translator)\n'
+            '            scGlobalConfig.pPerfLibVisible = Planck.getProperty("/GUI/Scripted/EngineXPerfLibVisible")\n'
+            '        const ready = !!(scGlobalConfig.pReverseJogReady && scGlobalConfig.pReverseJogReady.translator && scGlobalConfig.pReverseJogReady.translator.state)\n'
+            '        const nextL = (ready && scGlobalConfig.pReverseJogLeft && scGlobalConfig.pReverseJogLeft.translator) ? !!scGlobalConfig.pReverseJogLeft.translator.state : scGlobalConfig.scReverseJogLeft\n'
+            '        const nextR = (ready && scGlobalConfig.pReverseJogRight && scGlobalConfig.pReverseJogRight.translator) ? !!scGlobalConfig.pReverseJogRight.translator.state : scGlobalConfig.scReverseJogRight\n'
+            '        if (scGlobalConfig.scReverseJogLeftEffective !== nextL) scGlobalConfig.scReverseJogLeftEffective = nextL\n'
+            '        if (scGlobalConfig.scReverseJogRightEffective !== nextR) scGlobalConfig.scReverseJogRightEffective = nextR\n'
+            '    }\n'
             '    Timer {\n'
-            '        interval: 500\n'
-            '        running: !scGlobalConfig.pReverseJogReady || !scGlobalConfig.pReverseJogReady.translator || !scGlobalConfig.pReverseJogLeft || !scGlobalConfig.pReverseJogLeft.translator || !scGlobalConfig.pReverseJogRight || !scGlobalConfig.pReverseJogRight.translator || !scGlobalConfig.pPerfLibVisible || !scGlobalConfig.pPerfLibVisible.translator\n'
-            '        repeat: true\n'
-            '        onTriggered: {\n'
-            '            if (!scGlobalConfig.pReverseJogLeft || !scGlobalConfig.pReverseJogLeft.translator)\n'
-            '                scGlobalConfig.pReverseJogLeft = Planck.getProperty("/GUI/Scripted/EngineXJogInvertLeft")\n'
-            '            if (!scGlobalConfig.pReverseJogRight || !scGlobalConfig.pReverseJogRight.translator)\n'
-            '                scGlobalConfig.pReverseJogRight = Planck.getProperty("/GUI/Scripted/EngineXJogInvertRight")\n'
-            '            if (!scGlobalConfig.pReverseJogReady || !scGlobalConfig.pReverseJogReady.translator)\n'
-            '                scGlobalConfig.pReverseJogReady = Planck.getProperty("/GUI/Scripted/EngineXJogInvertReady")\n'
-            '            if (!scGlobalConfig.pPerfLibVisible || !scGlobalConfig.pPerfLibVisible.translator)\n'
-            '                scGlobalConfig.pPerfLibVisible = Planck.getProperty("/GUI/Scripted/EngineXPerfLibVisible")\n'
-            '        }\n'
+            '        interval: 500; running: true; repeat: true; triggeredOnStart: true\n'
+            '        onTriggered: scGlobalConfig.scSyncReverseJogFromState()\n'
             '    }\n'
             '    Timer {\n'
             '        interval: 10000; running: true; repeat: true; triggeredOnStart: true\n'
@@ -7934,6 +7938,7 @@ def edits(dev: bool):
             '                    scGlobalConfig.scSwapLoopOrder = !!j.swapLoopOrder\n'
             '                    scGlobalConfig.scReverseJogLeft = !!j.jogInvertLeft\n'
             '                    scGlobalConfig.scReverseJogRight = !!j.jogInvertRight\n'
+            '                    scGlobalConfig.scSyncReverseJogFromState()\n'
             '                } catch (e) {}\n'
             '            }\n'
             '            x.open("GET", "http://127.0.0.1:8080/v1/enginex/ui")\n'

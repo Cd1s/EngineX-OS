@@ -7522,15 +7522,15 @@ const assert = require('node:assert/strict');
 function uiCaps(board, scPlayer, hasMotorizedPlatters) {{
     const scBoard = String(board || "");
     const scIsPlayerBoard = !!scPlayer || ["JP07", "JP08", "JP13", "JP14"].indexOf(scBoard) >= 0;
-    const scHasJogWheel = !hasMotorizedPlatters && ["JP08", "JP14", "RMZ2"].indexOf(scBoard) < 0;
+    const scHasJogWheel = !scIsPlayerBoard && !hasMotorizedPlatters && ["JP08", "JP14", "RMZ2"].indexOf(scBoard) < 0;
     const showLeft = scHasJogWheel;
     const showRight = scHasJogWheel && !scIsPlayerBoard;
     const leftTitle = scIsPlayerBoard ? "Reverse Jog Wheel" : "Reverse Left Jog Wheel";
     return {{ showLeft, showRight, leftTitle }};
 }}
-// 1-jog players keep 1 row even when #49 4-deck hook clears Config.device.isPlayer
-assert.deepEqual(uiCaps("JP07", true, false), {{ showLeft: true, showRight: false, leftTitle: "Reverse Jog Wheel" }});
-assert.deepEqual(uiCaps("JP13", false, false), {{ showLeft: true, showRight: false, leftTitle: "Reverse Jog Wheel" }});
+// Standalone players (SC5000/SC5000M/SC6000/SC6000M) hide Reverse Jog Wheel even when #49 clears Config.device.isPlayer
+assert.deepEqual(uiCaps("JP07", true, false), {{ showLeft: false, showRight: false, leftTitle: "Reverse Jog Wheel" }});
+assert.deepEqual(uiCaps("JP13", false, false), {{ showLeft: false, showRight: false, leftTitle: "Reverse Jog Wheel" }});
 // 2-jog consoles (including SC LIVE 4 JP21, PRIME 4 JC11, Mixstream NH08, PRIME 4 G2 JP24) show both Left & Right
 for (const b of ["JP21", "JP20", "JC11", "JC11S", "JC16", "JP11", "JP11S", "NH08", "NH08S", "NH10", "JP24"]) {{
     assert.deepEqual(uiCaps(b, false, false), {{ showLeft: true, showRight: true, leftTitle: "Reverse Left Jog Wheel" }}, b);
@@ -7569,6 +7569,7 @@ globalThis.root = {{
 const scReverseJogLeftProp = Planck.getProperty("/GUI/Scripted/EngineXJogInvertLeft");
 const scReverseJogRightProp = Planck.getProperty("/GUI/Scripted/EngineXJogInvertRight");
 const scReverseJogReadyProp = Planck.getProperty("/GUI/Scripted/EngineXJogInvertReady");
+let scHasJogWheel = true;
 function scFxMsInteger(v) {{ return parseInt(v) || 500; }}
 function scFxMsApply(m, v) {{ scFxTimeMode = m; scFxTimeMs = v; }}
 {fn_sync}
@@ -7613,9 +7614,94 @@ assert.equal(planck["/GUI/Scripted/EngineXJogInvertLeft"].translator.state, fals
 assert.equal(planck["/GUI/Scripted/EngineXJogInvertRight"].translator.state, false);
 assert.equal(effective(true, true, "Left"), false);
 assert.equal(effective(true, true, "Right"), false);
+
+// On standalone players (scHasJogWheel=false), stored jog_invert_* never reaches the controller binding
+scHasJogWheel = false;
+scParseSettingsConf("jog_invert_left=1\\njog_invert_right=1\\n");
+assert.equal(planck["/GUI/Scripted/EngineXJogInvertLeft"].translator.state, false);
+assert.equal(planck["/GUI/Scripted/EngineXJogInvertRight"].translator.state, false);
+assert.equal(effective(false, false, "Left"), false);
+assert.equal(effective(false, false, ""), false);
 """
         res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
         self.assertEqual(res.returncode, 0, res.stderr)
+
+    def test_cross_engine_polling_and_player_board_assignments(self):
+        qrc = LAB / "5.3.0" / "qrc"
+        if not qrc.is_dir():
+            self.skipTest(f"{qrc} not found")
+        with tempfile.TemporaryDirectory(prefix="ui-reverse-jog-ctrl-") as tmp:
+            out = Path(tmp) / "packs"
+            res = subprocess.run(["python3", str(BUILD_PACKS), "--qrc", str(qrc), "--out", str(out), "--release"],
+                                 capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0, res.stderr)
+            gcfg = (out / "en" / "ControlSurfaceModules/ControlSurfaceModules/GlobalAssignmentConfig.qml").read_text(encoding="utf-8")
+            self.assertIn("function scSyncReverseJogFromState()", gcfg)
+            self.assertIn("running: true; repeat: true; triggeredOnStart: true", gcfg)
+            self.assertIn("onTriggered: scGlobalConfig.scSyncReverseJogFromState()", gcfg)
+            self.assertNotIn("readonly property bool scReverseJogLeftEffective:", gcfg)
+
+            if shutil.which("node"):
+                m_fn = re.search(r"function scSyncReverseJogFromState\(\)\s*\{[\s\S]*?\n    \}", gcfg)
+                self.assertIsNotNone(m_fn)
+                sync_fn = m_fn.group(0)
+                js = f"""
+const assert = require('node:assert/strict');
+const shared = {{
+    "/GUI/Scripted/EngineXJogInvertLeft": false,
+    "/GUI/Scripted/EngineXJogInvertRight": false,
+    "/GUI/Scripted/EngineXJogInvertReady": false,
+    "/GUI/Scripted/EngineXPerfLibVisible": false,
+}};
+// Controller QML engine gets its own PropertyWrapper objects; signals are object-local
+// so UI writes to shared state do NOT fire notifications in the controller engine.
+globalThis.Planck = {{
+    getProperty: (p) => ({{ translator: {{ get state() {{ return shared[p]; }} }} }})
+}};
+const scGlobalConfig = {{
+    scReverseJogLeft: false,
+    scReverseJogRight: false,
+    scReverseJogLeftEffective: false,
+    scReverseJogRightEffective: false,
+    pReverseJogLeft: Planck.getProperty("/GUI/Scripted/EngineXJogInvertLeft"),
+    pReverseJogRight: Planck.getProperty("/GUI/Scripted/EngineXJogInvertRight"),
+    pReverseJogReady: Planck.getProperty("/GUI/Scripted/EngineXJogInvertReady"),
+    pPerfLibVisible: Planck.getProperty("/GUI/Scripted/EngineXPerfLibVisible"),
+}};
+{sync_fn}
+function scIsReverseJog(deckName) {{
+    return deckName === "Right" ? scGlobalConfig.scReverseJogRightEffective : scGlobalConfig.scReverseJogLeftEffective;
+}}
+shared["/GUI/Scripted/EngineXJogInvertReady"] = true;
+scSyncReverseJogFromState();
+assert.equal(scIsReverseJog(""), false);
+
+// Simulate UI engine toggling Left invert ON (e.g. SC5000 JP07) with no cross-engine signal
+shared["/GUI/Scripted/EngineXJogInvertLeft"] = true;
+scSyncReverseJogFromState();
+assert.equal(scIsReverseJog(""), true);
+assert.equal(scIsReverseJog("Left"), true);
+assert.equal(scIsReverseJog("Right"), false);
+
+// Simulate UI engine toggling Left invert OFF
+shared["/GUI/Scripted/EngineXJogInvertLeft"] = false;
+scSyncReverseJogFromState();
+assert.equal(scIsReverseJog(""), false);
+"""
+                nres = subprocess.run(["node", "-e", js], capture_output=True, text=True)
+                self.assertEqual(nres.returncode, 0, nres.stdout + nres.stderr)
+
+        preset_dir = LAB / "sclive4-rea61-followup" / "rootfs" / "usr" / "Engine" / "AssignmentFiles" / "PresetAssignmentFiles"
+        if preset_dir.is_dir():
+            for board in ("JP07", "JP11", "JP13", "JP21"):
+                q = preset_dir / board / f"{board}_Controller_Assignments.qml"
+                txt = q.read_text(encoding="utf-8")
+                self.assertIn("GlobalAssignmentConfig", txt, board)
+                self.assertIn("JogWheel {", txt, board)
+            for motorized in ("JP08", "JP14"):
+                q = preset_dir / motorized / f"{motorized}_Controller_Assignments.qml"
+                txt = q.read_text(encoding="utf-8")
+                self.assertNotIn("JogWheel {", txt, motorized)
 
 
 class RemoteLoadUiTest(unittest.TestCase):

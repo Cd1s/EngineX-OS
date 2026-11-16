@@ -599,7 +599,7 @@ function showUI(v){lastUI=v;
  setVal('spotifySource',v.spotifySource||'auto');
  const caps=v.capabilities||{};
  tg('upfaderEcho').closest('.setting').hidden=caps.mixer!==undefined?!caps.mixer:!!v.player; // #52: players have no channel faders
- const hasJog=caps.jogWheel!==undefined?!!caps.jogWheel:true;
+ const hasJog=caps.jogWheel!==undefined?!!caps.jogWheel:!v.player;
  const hasDualJog=hasJog&&(caps.mixer!==undefined?!!caps.mixer:!v.player);
  const jLeft=tg('jogInvertLeft'),jRight=tg('jogInvertRight');
  jLeft.closest('.setting').hidden=!hasJog;
