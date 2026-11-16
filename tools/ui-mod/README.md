@@ -233,8 +233,10 @@ Sender entry per build: Gen-1 5.3.0 `0xf56034`, Gen-2 armhf `0xf629b0`, AZ04 `0x
 5.0.4 has none).
 
 The stock libsbc A2DP parser leaves bitpool at its default 32 despite a higher negotiated maximum. The
-`sbc_reinit_a2dp` interposer sets the highest legal bitpool in the negotiated range before Engine calculates the
-encoded frame length. The speaker's limit is never exceeded; a lower limit is respected too. With a 44.1 kHz,
+`sbc_reinit_a2dp` interposer sets the high-quality default of phone stacks (BlueZ's `a2dp_default_bitpool`: 53 up to
+44.1 kHz, 51 at 48 kHz, 31 / 29 in mono and dual channel) before Engine calculates the encoded frame length, and logs
+the choice (`engine-ui-hook: SBC bitpool 53 (sink offers 2..53)`). A sink's lower maximum wins and a minimum above the
+default is honoured; a sink that offers up to 250 is not given 250 (about 1.4 Mb/s at 44.1 kHz). With a 44.1 kHz,
 16-block, 8-subband stereo stream, bitpool 32 is 209.5 kb/s and 53 is 325.2 kb/s. Channel mode, transport batching
 and the stock ring size stay as negotiated. Dual channel SBC-XQ is not forced: it requires renegotiation and
 roughly doubles the payload at the same bitpool. The Tribit tested here does not report its playback delay;

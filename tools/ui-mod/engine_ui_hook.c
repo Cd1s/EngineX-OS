@@ -966,8 +966,11 @@ static unsigned bt_render, bt_cand;            // the callback's rate, measured 
 static unsigned long long bt_m_ns, bt_m_frames; // that window: its start, and the frames of the callbacks after the first
 static unsigned stream_rate;                   // SBC rate of the A2DP stream: 0 until the first encode, then 16, 32, 44.1 or 48 kHz
 
-// libsbc reinitialises bitpool to 32; its A2DP parser sets the format but ignores
-// the negotiated bitpool range. Set it before Engine asks for the encoded frame length.
+// libsbc reinitialises bitpool to 32; its A2DP parser sets the format but ignores the negotiated bitpool
+// range. Set it before Engine asks for the encoded frame length: the high-quality default a phone stack
+// streams (BlueZ's a2dp_default_bitpool: 53 up to 44.1 kHz, 51 at 48 kHz, 31 / 29 in mono and dual channel,
+// where the bitpool is per channel), not the sink's maximum, which can be 250 (1.4 Mbit/s at 44.1 kHz).
+// A lower sink maximum wins, and so does a minimum above the default.
 int sbc_reinit_a2dp(void *sbc, unsigned long flags, const void *config, size_t len) {
     static void *cache;
     int (*real)(void *, unsigned long, const void *, size_t) = next_symbol(&cache, "sbc_reinit_a2dp");
@@ -977,7 +980,11 @@ int sbc_reinit_a2dp(void *sbc, unsigned long flags, const void *config, size_t l
         const uint8_t *c = config; // real validates the four-byte SBC format
         unsigned limit = (c[0] & 0x0c ? 16u : 32u) * (c[1] & 0x08 ? 4u : 8u);
         if (c[2] < 2 || c[2] > c[3] || c[3] > 250 || c[2] > limit) return -EINVAL;
-        ((uint8_t *)sbc)[sizeof(unsigned long) + 5] = c[3] < limit ? c[3] : limit;
+        unsigned hq = c[0] & 0x10 ? (c[0] & 0x0c ? 29u : 51u) : (c[0] & 0x20 && c[0] & 0x0c ? 31u : 53u);
+        unsigned bitpool = c[3] < hq ? c[3] : hq;
+        if (bitpool < c[2]) bitpool = c[2];
+        ((uint8_t *)sbc)[sizeof(unsigned long) + 5] = (uint8_t)bitpool;
+        fprintf(stderr, "engine-ui-hook: SBC bitpool %u (sink offers %u..%u)\n", bitpool, c[2], c[3]);
     }
     return rc;
 }
