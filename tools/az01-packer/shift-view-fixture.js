@@ -43,13 +43,13 @@ const boards = ['JP07', 'JP08', 'JP13', 'JP14', 'JC11', 'JC16', 'JP11', 'NH08',
     'JP21', 'JP20', 'JC11S', 'JP11S', 'NH08S', 'NH10', 'JP24', 'RMZ2'];
 
 // A controller module's queue of presses the GUI has not taken yet (scCyclePending
-// and its Timer), run as QML runs it: while presses wait, at once when started.
+// and its Timer), run as QML runs it: while its `running` holds, at once when started.
 function queueTimer(text) {
     const at = text.indexOf('property int scCyclePending: 0');
     if (at < 0) return null;
     const t = body(text, text.indexOf('Timer {', at));
     return { interval: +t.match(/interval:\s*(\d+)/)[1], tick: body(t, t.indexOf('onTriggered:')),
-        atOnce: /triggeredOnStart:\s*true/.test(t) };
+        running: t.match(/running:\s*([^\n]+)/)[1], atOnce: /triggeredOnStart:\s*true/.test(t) };
 }
 
 // `delay`: how late the GUI engine handles a state change the controller made (0: at once).
@@ -84,7 +84,7 @@ function fixture(board, mode, orientation, saved, delay = 0) {
         scTracklistWaveform: false, scDualColumn: false, scCueCountdown: false,
         scBeatJumpPads: false, scSwapLoopOrder: false,
         globalConfig: { shift: true },
-        module: { basePath: '/Client/Librarian/NavigationButtons/', scCyclePending: 0 },
+        module: { basePath: '/Client/Librarian/NavigationButtons/', scCyclePending: 0, scCycleLatched: false, scCycleSince: 0 },
         navigationButton: { primaryPath: 'MenuButtonPress', secondaryPath: 'CycleViewPress' },
         PlanckGUI: { views: { performanceViewController: c, isPortrait: board === 'JP13' || board === 'JP14' } },
         scCall(query) {
@@ -126,6 +126,7 @@ function fixture(board, mode, orientation, saved, delay = 0) {
     // SC5000: nothing happened). state = true, as stock's GlobalAction sets
     // /GUI/CloseDialogs, stays true until the notifier resets it. The GUI handles the
     // controller's state changes `delay` ms late, reading the state as it is then.
+    let lag = delay;
     const later = (ms, fn) => pending.push({ at: now + ms, timer: { running: true, at: now + ms }, action: fn });
     const shared = {};
     const object = (path, gui) => {
@@ -149,7 +150,7 @@ function fixture(board, mode, orientation, saved, delay = 0) {
                 const was = st.state;
                 set(!!value);
                 if (st.state !== was) {
-                    if (delay && !gui) later(delay, notify);
+                    if (lag && !gui) later(lag, notify);
                     else notify();
                 }
             },
@@ -207,12 +208,13 @@ function fixture(board, mode, orientation, saved, delay = 0) {
     ctx.holdEnabled = true;
     const queue = queueTimer(board === 'RMZ2' ? source.navigation : source.view);
     let ticking = false;
+    const runs = () => !!vm.runInContext(queue.running, ctx);
     function kick() {
-        if (!queue || ticking || !(ctx.module.scCyclePending > 0)) return;
+        if (!queue || ticking || !runs()) return;
         ticking = true;
         const tick = () => {
-            if (ctx.module.scCyclePending > 0) run('(function() {' + queue.tick + '})()');
-            if (ctx.module.scCyclePending > 0) later(queue.interval, tick);
+            if (runs()) run('(function() {' + queue.tick + '})()');
+            if (runs()) later(queue.interval, tick);
             else ticking = false;
         };
         if (queue.atOnce) tick(); else later(queue.interval, tick);
@@ -226,7 +228,7 @@ function fixture(board, mode, orientation, saved, delay = 0) {
     run('function setValue(channel, value, assignmentEnabled) {' +
         body(source.combo, source.combo.indexOf('function setValue(')) + '}');
     start();
-    return { ctx, run, events, resets, persisted: () => persisted, gui,
+    return { ctx, run, events, resets, persisted: () => persisted, gui, lag(ms) { lag = ms; },
         // What the controller reads back: the state its last press set.
         latched: () => (controller['/GUI/Scripted/EngineXCycleView'] || gui).translator.state,
         restart() {
@@ -313,6 +315,27 @@ for (const board of ['JP07', 'JP13', 'JC11', 'RMZ2']) for (const presses of [2, 
     f.clock(3000);
     f.gui.notify();
     assert.equal(f.ctx.scViewActive, want, label + ' no repeat');
+    cases++;
+}
+// Review 7b of 058163f2: the GUI stalls for 10 s after two presses. The controller
+// withdraws the press it latched and drops the waiting one after 1.5 s, so no step
+// comes when the GUI runs again; the next press after that is one step.
+for (const board of ['JP07', 'JP13', 'JC11', 'RMZ2']) {
+    const f = fixture(board, '4-deck', 'Horizontal', { active: 1, views: {} }, 10000);
+    f.press(50); f.press(50);
+    f.clock(1200);                                   // about 1.4 s after the first press
+    assert.equal(f.latched(), true, board + ' still waiting before 1.5 s');
+    f.clock(12000);
+    const label = `${board}/stalled`;
+    assert.equal(f.ctx.scViewActive, 1, label + ': no late step');
+    assert.equal(f.latched(), false, label + ': withdrawn');
+    assert.equal(f.ctx.module.scCyclePending, 0, label + ': none waiting');
+    f.gui.notify();
+    assert.equal(f.ctx.scViewActive, 1, label + ': no step on a repeated change');
+    f.lag(120);
+    f.press(50); f.clock(1000);
+    assert.equal(f.ctx.scViewActive, 2, label + ': next press');
+    assert.equal(f.latched(), false, label + ': next press reset');
     cases++;
 }
 console.log(`PASS ${cases} board/mode/orientation/timing/restart cases`);
