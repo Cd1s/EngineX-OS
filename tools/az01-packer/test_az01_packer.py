@@ -1238,6 +1238,8 @@ class Gen1RootfsRoomTests(unittest.TestCase):
         flags = {cmd: args.split() for cmd, args in calls}
         self.assertIn('--grow', flags['patch-rootfs'], 'the release build does not grow the rootfs')
         self.assertIn('--grow', flags['repack'], 'the release build repacks without --grow')
+        self.assertNotIn('$STAGE/lib/modules', script, 'Gen-1 /lib is a symlink to usr/lib')
+        self.assertIn('$STAGE/usr/lib/modules/$krel/extra', script)
         overlay = Path(__file__).resolve().parents[2]/'rootfs-overlay'
         with tempfile.TemporaryDirectory(prefix='az01-room-', dir=TEST_TMPDIR) as tmp:
             # The stage build-release.sh makes, its generated files at d40ad7b2's sizes plus headroom
@@ -1252,6 +1254,9 @@ class Gen1RootfsRoomTests(unittest.TestCase):
             (share/'ui-packs.tar.xz').write_bytes(os.urandom(1 << 20))
             (stage/'usr/sbin').mkdir(parents=True, exist_ok=True)
             (stage/'usr/sbin/fsck.hfsplus').write_bytes(os.urandom(768 << 10))
+            moddir = stage/'usr/lib/modules/6.18.57-az01-2026-10-15-rt6/extra'
+            moddir.mkdir(parents=True, exist_ok=True)
+            (moddir/'hfsplusx.ko').write_bytes(os.urandom(256 << 10))
             for image in STOCK_530:
                 with self.subTest(image=image.name):
                     out = Path(tmp)/(image.stem + '.ext2')

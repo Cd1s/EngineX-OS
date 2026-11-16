@@ -1298,24 +1298,25 @@ static int check_ko_vermagic(int fd,const char *release) {
     if(!vermagic_ok||!name_ok){errno=ENOEXEC;return -1;}
     return 0;
 }
+// LoadPin on Gen-1 enforces rootfs-only module loading: read only from /lib/modules/<rel>/extra/
+// (never fall back to /data or /etc/enginex).
+#ifndef HFSPLUSX_MODULES_ROOT
+#define HFSPLUSX_MODULES_ROOT "/lib/modules"
+#endif
 static int hfs_ensure_hfsplusx(void) {
     if(fs_supported("hfsplusx"))return 0;
     struct utsname u;if(HOOK_UNAME(&u))return -1;
-    char paths[2][PATH_MAX];unsigned npaths=0;
-#ifdef HFSPLUSX_MODULE_PATH
-    snprintf(paths[npaths++],PATH_MAX,"%s",HFSPLUSX_MODULE_PATH);
-#else
-    if(snprintf(paths[npaths++],PATH_MAX,"/lib/modules/%s/extra/hfsplusx.ko",u.release)>=PATH_MAX)npaths--;
-    snprintf(paths[npaths++],PATH_MAX,"/etc/enginex/hfsplusx.ko");
-#endif
-    int fd=-1;const char *chosen=NULL;
-    for(unsigned i=0;i<npaths;i++){fd=open(paths[i],O_RDONLY|O_NOFOLLOW|O_CLOEXEC);if(fd>=0){chosen=paths[i];break;}}
+    char path[PATH_MAX];
+    const char *mroot=HFSPLUSX_MODULES_ROOT;
+    if(!mroot||!*mroot||!u.release[0]||strchr(u.release,'/')||!strcmp(u.release,".")||!strcmp(u.release,"..")){errno=ENOENT;return -1;}
+    if(snprintf(path,sizeof path,"%s/%s/extra/hfsplusx.ko",mroot,u.release)>=(int)sizeof path){errno=ENAMETOOLONG;return -1;}
+    int fd=open(path,O_RDONLY|O_NOFOLLOW|O_CLOEXEC);
     if(fd<0)return -1;
-    if(check_ko_vermagic(fd,u.release)){int saved=errno;close(fd);note("hfsplusx vermagic mismatch on",chosen,saved);errno=saved;return -1;}
+    if(check_ko_vermagic(fd,u.release)){int saved=errno;close(fd);note("hfsplusx vermagic mismatch on",path,saved);errno=saved;return -1;}
     if(FINIT_MODULE(fd)!=0) {
         int saved=errno;close(fd);
         if(saved==EEXIST&&fs_supported("hfsplusx"))return 0;
-        note("insmod hfsplusx failed on",chosen,saved);errno=saved;return -1;
+        note("insmod hfsplusx failed on",path,saved);errno=saved;return -1;
     }
     close(fd);return 0;
 }

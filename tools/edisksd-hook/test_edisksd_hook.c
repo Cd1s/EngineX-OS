@@ -76,14 +76,14 @@ static int test_sys_fsconfig(int fd,unsigned int cmd,const char *key,const void 
 static int test_platform_mode_val = 0;
 #define HFS_PLATFORM_MODE() test_platform_mode_val
 static char test_fsck_bin[PATH_MAX],test_gen1_marker[PATH_MAX],test_az04_dt[PATH_MAX];
-static char test_proc_fs[PATH_MAX],test_proc_mi[PATH_MAX],test_ko_path[PATH_MAX],test_hfs_rw_target[PATH_MAX];
+static char test_proc_fs[PATH_MAX],test_proc_mi[PATH_MAX],test_modules_root[PATH_MAX],test_hfs_rw_target[PATH_MAX];
 static const char *test_fsck_path(void){return *test_fsck_bin&&!access(test_fsck_bin,X_OK)?test_fsck_bin:NULL;}
 #define FSCK_HFSPLUS_PATH test_fsck_path
 #define GEN1_ROOTFS_MARKER test_gen1_marker
 #define AZ04_UFSD_DT_PATH test_az04_dt
 #define PROC_FILESYSTEMS_PATH test_proc_fs
 #define PROC_MOUNTINFO_PATH test_proc_mi
-#define HFSPLUSX_MODULE_PATH test_ko_path
+#define HFSPLUSX_MODULES_ROOT test_modules_root
 static char test_uname_release[65] = "6.18.57-az01-2026-10-15-rt6";
 static int test_uname(struct utsname *u){memset(u,0,sizeof *u);snprintf(u->release,sizeof u->release,"%s",test_uname_release);return 0;}
 #define HOOK_UNAME test_uname
@@ -1300,6 +1300,29 @@ static void test_hfs_rw_unit(const char *root) {
     join(ko,root,"prefixtrap.ko");write_fake_ko(ko,EM_ARM,"6.18.57-az01-2026-10-15-rt6-extra SMP ","hfsplusx");
     fd=open(ko,O_RDONLY);assert(fd>=0);assert(check_ko_vermagic(fd,"6.18.57-az01-2026-10-15-rt6")!=0);close(fd);
 
+    // LoadPin: hfs_ensure_hfsplusx loads only <modules_root>/<release>/extra/hfsplusx.ko (no flat/symlink/traversal fallback).
+    char mroot[PATH_MAX],extra[PATH_MAX],ko_target[PATH_MAX],procfs[PATH_MAX];
+    join(mroot,root,"unit-mods");assert(!make_dirs(mroot));
+    snprintf(test_modules_root,sizeof test_modules_root,"%s",mroot);
+    join(procfs,root,"unit-procfs");write_file(procfs,"nodev\ttmpfs\n"); // no hfsplusx loaded yet
+    snprintf(test_proc_fs,sizeof test_proc_fs,"%s",procfs);
+    join(ko_target,mroot,"hfsplusx.ko");
+    write_fake_ko(ko_target,EM_ARM,"6.18.57-az01-2026-10-15-rt6 SMP preempt_rt ARMv7 p2v8 ","hfsplusx");
+    join(extra,mroot,"6.18.57-other/extra");assert(!make_dirs(extra));
+    join(ko,extra,"hfsplusx.ko");write_fake_ko(ko,EM_ARM,"6.18.57-other SMP preempt_rt ARMv7 p2v8 ","hfsplusx");
+    test_finit_rc=0;test_finit_calls=0;
+    errno=0;assert(hfs_ensure_hfsplusx()==-1&&errno==ENOENT&&test_finit_calls==0);
+    join(extra,mroot,"6.18.57-az01-2026-10-15-rt6/extra");assert(!make_dirs(extra));
+    join(ko,extra,"hfsplusx.ko");assert(!symlink(ko_target,ko));
+    errno=0;assert(hfs_ensure_hfsplusx()==-1&&errno==ELOOP&&test_finit_calls==0);
+    assert(!unlink(ko));
+    write_fake_ko(ko,EM_ARM,"6.18.57-az01-2026-10-15-rt6 SMP preempt_rt ARMv7 p2v8 ","hfsplusx");
+    snprintf(test_uname_release,sizeof test_uname_release,"../evil");
+    errno=0;assert(hfs_ensure_hfsplusx()==-1&&errno==ENOENT&&test_finit_calls==0);
+    snprintf(test_uname_release,sizeof test_uname_release,"6.18.57-az01-2026-10-15-rt6");
+    assert(!hfs_ensure_hfsplusx()&&test_finit_calls==1);
+    test_modules_root[0]=0;test_proc_fs[0]=0;test_finit_calls=0;
+
     assert(!build_hfs_opts(opts,sizeof opts,"nosuid,ro,utf8,nodev",1,0)&&!strcmp(opts,"nosuid,nodev,rw"));
     assert(!build_hfs_opts(opts,sizeof opts,"nosuid,nodev",1,1)&&!strcmp(opts,"nosuid,nodev,force,rw"));
     assert(!build_hfs_opts(opts,sizeof opts,"nosuid,force,rw",0,0)&&!strcmp(opts,"nosuid,ro"));
@@ -1329,16 +1352,18 @@ static void test_hfs_rw_unit(const char *root) {
 
 static void test_hfs_rw_policy(const char *root) {
     assert(!mount(NULL,"/",NULL,MS_REC|MS_PRIVATE,NULL));
-    char disk[PATH_MAX],target[PATH_MAX],img[PATH_MAX],fsck[PATH_MAX],ko[PATH_MAX],marker[PATH_MAX],procfs[PATH_MAX],dt[PATH_MAX],p[PATH_MAX];
+    char disk[PATH_MAX],target[PATH_MAX],img[PATH_MAX],fsck[PATH_MAX],mroot[PATH_MAX],extra[PATH_MAX],ko[PATH_MAX],flat_ko[PATH_MAX],marker[PATH_MAX],procfs[PATH_MAX],dt[PATH_MAX],p[PATH_MAX];
     join(disk,root,"hfspol-disk");join(p,disk,"PIONEER/rekordbox");assert(!make_dirs(p));
     join(p,disk,"PIONEER/rekordbox/export.pdb");write_file(p,"pdb\n");
     join(target,MEDIA_ROOT,"HFSPOL");assert(!make_dirs(target));
     join(test_rb_bridge,root,"hfspol-bridge");write_file(test_rb_bridge,"#!/bin/sh\nexit 0\n");assert(!chmod(test_rb_bridge,0700));
-    join(fsck,root,"hfspol-fsck");join(ko,root,"hfspol-ko");join(marker,root,"hfspol-gen1");
+    join(fsck,root,"hfspol-fsck");join(mroot,root,"hfspol-mods");join(extra,mroot,"6.18.57-az01-2026-10-15-rt6/extra");assert(!make_dirs(extra));
+    join(ko,extra,"hfsplusx.ko");join(flat_ko,mroot,"hfsplusx.ko");
+    join(marker,root,"hfspol-gen1");
     join(procfs,root,"hfspol-procfs");join(dt,root,"hfspol-dt");
     snprintf(test_disk,sizeof test_disk,"%s",disk);
     snprintf(test_fsck_bin,sizeof test_fsck_bin,"%s",fsck);
-    snprintf(test_ko_path,sizeof test_ko_path,"%s",ko);
+    snprintf(test_modules_root,sizeof test_modules_root,"%s",mroot);
     snprintf(test_gen1_marker,sizeof test_gen1_marker,"%s",marker);
     snprintf(test_proc_fs,sizeof test_proc_fs,"%s",procfs);
     snprintf(test_az04_dt,sizeof test_az04_dt,"%s",dt);
@@ -1366,12 +1391,12 @@ static void test_hfs_rw_policy(const char *root) {
     c.fail=0;test_hfs_rw_target[0]=0;mnt_free_context(&c);
 
     // 2. Gen-1 already-loaded hfsplusx (e.g. insmod /tmp/hfsplusx.ko) works without another finit_module.
-    test_ko_path[0]=0;
+    test_modules_root[0]=0;
     memset(&c,0,sizeof c);c.target=target;c.source=img;
     mnt_context_set_fstype_pattern(&c,"hfsplus");mnt_context_set_options(&c,"nosuid");
     assert(!mnt_context_mount(&c)&&c.status==1&&test_finit_calls==1&&!strcmp(c.last_mount_fstype,"hfsplusx"));
     assert(!unmount_dispatch(&c,real_unmount));mnt_free_context(&c);
-    snprintf(test_ko_path,sizeof test_ko_path,"%s",ko);
+    snprintf(test_modules_root,sizeof test_modules_root,"%s",mroot);
 
     // 3. Gen-1 vermagic mismatch & insmod failure both fail closed to ro view.
     write_file(procfs,"nodev\ttmpfs\n");
@@ -1471,8 +1496,10 @@ static void test_hfs_rw_policy(const char *root) {
     assert(test_finit_calls==finit_before);
     assert(!unmount_dispatch(&c,real_unmount));mnt_free_context(&c);
 
-    // 8. Gen-1 without hfsplusx also forces MS_RDONLY on non-journaled HFS+ (never leaves built-in hfsplus rw).
-    write_file(marker,"v5.3.0.5\n");write_file(procfs,"nodev\ttmpfs\n");test_ko_path[0]=0;
+    // 8. Gen-1 without <modules_root>/<rel>/extra/hfsplusx.ko (even if a flat hfsplusx.ko exists) forces MS_RDONLY.
+    write_file(marker,"v5.3.0.5\n");write_file(procfs,"nodev\ttmpfs\n");
+    assert(!unlink(ko));
+    write_fake_ko(flat_ko,EM_ARM,"6.18.57-az01-2026-10-15-rt6 SMP preempt_rt ARMv7 p2v8 ","hfsplusx");
     write_file(fsck,"#!/bin/sh\necho '** The volume TEST appears to be OK.'\nexit 0\n");
     memset(&c,0,sizeof c);c.target=target;c.source=img;c.invoke_sys_mount=1;
     mnt_context_set_fstype_pattern(&c,"hfsplus");mnt_context_set_options(&c,"nosuid");
@@ -1481,7 +1508,7 @@ static void test_hfs_rw_policy(const char *root) {
     assert(!statvfs(target,&sv)&&(sv.f_flag&ST_RDONLY));
     assert(!unmount_dispatch(&c,real_unmount));mnt_free_context(&c);
 
-    test_platform_mode_val=0;test_fsck_bin[0]=0;test_ko_path[0]=0;test_gen1_marker[0]=0;
+    test_platform_mode_val=0;test_fsck_bin[0]=0;test_modules_root[0]=0;test_gen1_marker[0]=0;
     test_proc_fs[0]=0;test_az04_dt[0]=0;test_rb_bridge[0]=0;test_disk[0]=0;
     puts("HFS+ RW policy (Gen-1 hfsplusx, AZ04 hfsplus+ufsd, Gen-2 ro, fsck/journal/eject): PASS");
 }

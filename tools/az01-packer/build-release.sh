@@ -79,8 +79,8 @@ if [ -n "$HFSPLUSX" ]; then
     PATH="$PATH:/usr/sbin:/sbin" modinfo -F name "$HFSPLUSX" | grep -qx hfsplusx || { echo "unexpected module name in $HFSPLUSX" >&2; exit 2; }
     krel=$(PATH="$PATH:/usr/sbin:/sbin" modinfo -F vermagic "$HFSPLUSX" | awk '{print $1}')
     [ -n "$krel" ] || { echo "missing vermagic in $HFSPLUSX" >&2; exit 2; }
-    mkdir -p "$STAGE/lib/modules/$krel/extra"
-    install -m 0644 "$HFSPLUSX" "$STAGE/lib/modules/$krel/extra/hfsplusx.ko"
+    mkdir -p "$STAGE/usr/lib/modules/$krel/extra"
+    install -m 0644 "$HFSPLUSX" "$STAGE/usr/lib/modules/$krel/extra/hfsplusx.ko"
 fi
 chmod 0644 "$STAGE/usr/share/enginex/"*
 
