@@ -8349,7 +8349,7 @@ class StreamingStemsProgressTest(unittest.TestCase):
     def test_row_state_time_left_and_wording_in_four_languages(self):
         rows = {l.split("\t")[0]: dict(zip(bp.LANGUAGES, l.split("\t"))) for l in
                 (REPO / "tools/ui-mod/i18n.tsv").read_text(encoding="utf-8").splitlines() if l and not l.startswith("#")}
-        for key in ("~%1 min", "<1 min"):
+        for key in ("~%1 min", "<1 min", "Download failed"):
             self.assertEqual(len(rows[key]), 4, key)
             for lang in bp.LANGUAGES:
                 self.assertTrue(rows[key][lang].strip(), (key, lang))
@@ -8357,6 +8357,7 @@ class StreamingStemsProgressTest(unittest.TestCase):
         main = bp.SERVICES_MAIN
         ended = main.split("onScStemRenderingChanged: {", 1)[1].split("\n\t}", 1)[0]
         refused = re.search(r"id: scStemRefused\n\t\tinterval: 30000\n\t\tonTriggered: (.*)", main).group(1)
+        failed = re.search(r"id: scStemFailed\n\t\tinterval: 10000\n\t\tonTriggered: (.*)", main).group(1)
         streamed = re.search(r"readonly property bool scStemStreamed: (.*)", main).group(1)
         script = f"""
 const assert = require('assert');
@@ -8375,6 +8376,7 @@ function queue(left, total) {{
     if (rendering !== scStemRendering) {{ scStemRendering = rendering; {ended} }}
 }}
 function refusedTimer() {{ {refused} }}
+function failedTimer() {{ {failed} }}
 const streamed = () => {streamed};
 const states = (...ids) => ids.map(id => scStemState(id));
 // Engine's ids of the rows: track A's tapped row and its "Stems not ready" row, another
@@ -8449,6 +8451,20 @@ queue(1, 1); queue(0, 0); refusedTimer();
 assert.deepEqual(scStemRows, {{41: 'wait'}});
 scStemMark(['41'], '');
 
+// The download failed (NetEase only previews this track for the account): the tapped
+// row says so instead of going quiet, takes no place in Engine's queue, and after
+// a while shows its length again; a row still downloading is left alone.
+scStemMark(['42'], 'wait');
+scStemMark(['41'], 'fail');
+assert.deepEqual(states(7, 11), ['fail', 'wait']);
+assert.equal(streamed(), false);
+scStemHand(['56']);
+assert.deepEqual(scStemRows, {{41: 'fail', 42: 'wait', 56: 1}});
+scStemMark(['56'], '');
+failedTimer();
+assert.deepEqual(scStemRows, {{42: 'wait'}});
+scStemMark(['42'], '');
+
 // Time left at the speed seen so far: a quarter in one minute leaves three.
 assert.equal(scStemEta(0.25, 60, 0.75), '~3 min');
 assert.equal(scStemEta(0.5, 300, 0.02), '<1 min');
@@ -8463,13 +8479,15 @@ assert.equal(scStemText('render', 0.001, ''), '0%');
 assert.equal(scStemText('render', 0.447, ''), '45%');
 // Rendered with other tracks in the queue: Engine's one number is not this track's.
 assert.equal(scStemText('render', -1, '~3 min'), 'Stems…');
-for (const [lang, waiting, rendering, nearly] of [
-    ['en', 'Stems…', '45% · ~3 min', '98% · <1 min'],
-    ['zh-Hans', '分轨 Stems…', '45% · 约 3 分钟', '98% · 不到 1 分钟'],
-    ['zh-Hant', '分軌 Stems…', '45% · 約 3 分鐘', '98% · 不到 1 分鐘'],
-    ['es', 'Stems…', '45% · ~3 min', '98% · <1 min'],
+for (const [lang, waiting, rendering, nearly, failed] of [
+    ['en', 'Stems…', '45% · ~3 min', '98% · <1 min', 'Download failed'],
+    ['zh-Hans', '分轨 Stems…', '45% · 约 3 分钟', '98% · 不到 1 分钟', '下载失败'],
+    ['zh-Hant', '分軌 Stems…', '45% · 約 3 分鐘', '98% · 不到 1 分鐘', '下載失敗'],
+    ['es', 'Stems…', '45% · ~3 min', '98% · <1 min', 'Descarga fallida'],
 ]) {{
     scLang = lang;
+    assert.equal(scStemText('fail', -1, ''), failed, lang);
+    assert.ok(failed.length <= 'Downloading 100%'.length, lang);
     assert.equal(scStemText('wait', 0, ''), waiting, lang);
     assert.equal(scStemText('render', 0.45, scStemEta(0.25, 60, 0.75)), rendering, lang);
     assert.equal(scStemText('render', 0.98, scStemEta(0.5, 300, 0.02)), nearly, lang);
@@ -8492,10 +8510,14 @@ for (const [lang, waiting, rendering, nearly] of [
         self.assertIn("readonly property bool scStemAlone: scStemTotal === 1", main)
         self.assertIn("if (!(p > 0) || !scStemAlone) { scStemSeen = null; scStemLeft = \"\"; return }", main)
         stream = re.search(r"function scStemStream\(uid\) \{[\s\S]*?\n\t\}", main).group(0)
-        # Tapped: marked at once; a failed download or a deck that started playing forgets it.
+        # Tapped: marked at once. A failed download says so on the row for a while;
+        # a deck that started playing meanwhile forgets it.
         self.assertIn('root.scStemMark([gid], "wait")', stream)
-        self.assertIn('if (x.status !== 200) { root.scStemMark([gid], ""); return }', stream)
-        self.assertEqual(stream.count('root.scStemMark([gid], "")'), 2)
+        failure = stream.split("if (x.status !== 200) {", 1)[1].split("\n\t\t\t}", 1)[0]
+        self.assertIn('root.scStemMark([gid], "fail")', failure)
+        self.assertIn("scStemFailed.restart()", failure)
+        self.assertIn("return", failure)
+        self.assertEqual(stream.count('root.scStemMark([gid], "")'), 1)
         # The reply names the "Stems not ready" row: both rows wait for the import.
         self.assertIn('scStemImport.rows = [gid, reply.row ? String(reply.row) : ""]', stream)
         self.assertIn('root.scStemMark(scStemImport.rows, "wait")', stream)

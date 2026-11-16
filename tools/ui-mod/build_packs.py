@@ -4172,9 +4172,10 @@ SERVICES_MAIN = """
 		scStemMark(Object.keys(scStemRows).filter(id => scStemRows[id] > total), "")
 		scStemMark(ids, total + 1)
 	}
-	// What a mark means now: "" (nothing, or its track is over), "wait" or "render".
+	// What a mark means now: "" (nothing, or its track is over), "wait", "render" or
+	// "fail" (the file could not be downloaded).
 	function scStemPlace(mark, total, left) {
-		if (mark === "wait") return "wait"
+		if (mark === "wait" || mark === "fail") return mark
 		if (!(mark >= 1)) return ""
 		if (!(total > 0)) return "wait" // Engine's queue has not started
 		const done = total - left
@@ -4196,6 +4197,7 @@ SERVICES_MAIN = """
 	// The length cell of such a row. Without a progress of its own (waiting, or
 	// rendered with other tracks in the queue: progress -1) it says "Stems…".
 	function scStemText(state, progress, left) {
+		if (state === "fail") return scT("Download failed")
 		if (state !== "render" || !(progress >= 0)) return scT("Stems") + "…"
 		return Math.round(progress * 100) + "%" + (left ? " · " + left : "")
 	}
@@ -4213,6 +4215,12 @@ SERVICES_MAIN = """
 		console.warn("EngineX stems step=" + (scStemRendering ? "render" : "idle") + " queue=" + scStemCount + "/" + scStemTotal + " rows=" + Object.keys(scStemRows).length)
 		// The queue is empty: every place in it is over (rendered, cleared or failed).
 		if (!scStemRendering) scStemMark(Object.keys(scStemRows).filter(id => scStemRows[id] !== "wait"), "")
+	}
+	// The tapped row says the download failed for a while, then shows its length again.
+	Timer {
+		id: scStemFailed
+		interval: 10000
+		onTriggered: root.scStemMark(Object.keys(root.scStemRows).filter(id => root.scStemRows[id] === "fail"), "")
 	}
 	// A track Engine never took has a place beyond the queue's size: forget it.
 	Timer {
@@ -4234,7 +4242,14 @@ SERVICES_MAIN = """
 		x.open("GET", "http://127.0.0.1:8080/v1/enginex/stems/source?id=" + gid)
 		x.onreadystatechange = function() {
 			if (x.readyState !== 4) return
-			if (x.status !== 200) { root.scStemMark([gid], ""); return }
+			// The service gave no full file (a NetEase track this account only previews,
+			// no match, no network): say so on the row instead of dropping the tap.
+			if (x.status !== 200) {
+				console.warn("EngineX stems step=source-failed status=" + x.status)
+				root.scStemMark([gid], "fail")
+				scStemFailed.restart()
+				return
+			}
 			if (Planck.getProperty("/Engine/Deck%1/PlayState".arg(deck)).translator.state) { root.scStemMark([gid], ""); return } // started playing while we waited
 			const reply = JSON.parse(x.responseText)
 			const url = "file://" + encodeURI(reply.path)
