@@ -4,12 +4,16 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
+	"modernc.org/sqlite"
 )
 
 // Engine scales each overview band by the band maxima in the last three bytes. rb-bridge
@@ -27,8 +31,8 @@ func TestOverviewEndsWithBandMaxima(t *testing.T) {
 }
 
 func TestOverviewMaximaHelper(t *testing.T) {
-	if overviewBatch < 2048 {
-		t.Fatalf("overviewBatch = %d, want >= 2048 so multi-thousand-track sticks finish without stalling at 256", overviewBatch)
+	if overviewBatch <= 0 || overviewBatch > 256 {
+		t.Fatalf("overviewBatch = %d, want in (0, 256] so slow sticks commit within mount budget", overviewBatch)
 	}
 	raw := make([]byte, 24+6+3)
 	copy(raw[24:], []byte{10, 200, 30, 150, 50, 90, 0, 0, 0})
@@ -138,5 +142,82 @@ func TestFillOverviewMaximaKeepsWhatItCompletedBeforeTheDeadline(t *testing.T) {
 	}
 	if through, err := FillOverviewMaxima(context.Background(), mount, time.Time{}); err != nil || !through || left() != 0 {
 		t.Fatal("the next mount:", through, err, left())
+	}
+}
+
+var (
+	registerSlowUpdateOnce sync.Once
+	slowUpdateDelayNs      atomic.Int64
+)
+
+func ensureSlowUpdateSQLiteFunc(t *testing.T) {
+	t.Helper()
+	var regErr error
+	registerSlowUpdateOnce.Do(func() {
+		regErr = sqlite.RegisterScalarFunction("test_overview_update_delay", 0, func(ctx *sqlite.FunctionContext, args []driver.Value) (driver.Value, error) {
+			if d := time.Duration(slowUpdateDelayNs.Load()); d > 0 {
+				time.Sleep(d)
+			}
+			return int64(1), nil
+		})
+	})
+	if regErr != nil {
+		t.Fatal(regErr)
+	}
+}
+
+// Regression test for P2: with a slow write path (2 ms/row) and a mount budget shorter than
+// a 2048-row transaction, 256-row batches must commit and advance the checkpoint across
+// repeated mount attempts rather than rolling back with zero progress.
+func TestFillOverviewMaximaSlowWriteProgressesAcrossMountBudgets(t *testing.T) {
+	ensureSlowUpdateSQLiteFunc(t)
+	mount, db, overview := overviewLibrary(t)
+	old := overview(0, 0, 0)
+
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stmt, err := tx.Prepare(`INSERT INTO PerformanceData VALUES (?, ?, 1)`)
+	if err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	for id := 1; id <= 2048; id++ {
+		if _, err := stmt.Exec(id, old); err != nil {
+			_ = stmt.Close()
+			_ = tx.Rollback()
+			t.Fatal(err)
+		}
+	}
+	_ = stmt.Close()
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := db.Exec(`CREATE TRIGGER slow_overview_update AFTER UPDATE ON PerformanceData BEGIN SELECT test_overview_update_delay(); END;`); err != nil {
+		t.Fatal(err)
+	}
+
+	slowUpdateDelayNs.Store(int64(2 * time.Millisecond))
+	defer slowUpdateDelayNs.Store(0)
+
+	budget := 1500 * time.Millisecond
+	ctx1, cancel1 := context.WithTimeout(context.Background(), budget)
+	_, _ = FillOverviewMaxima(ctx1, mount, time.Now().Add(budget))
+	cancel1()
+
+	p1 := ReadOverviewProgress(mount)
+	if p1.after < 256 {
+		t.Fatalf("attempt 1 committed checkpoint=%d, want >= 256 (batch too large for mount budget?)", p1.after)
+	}
+
+	ctx2, cancel2 := context.WithTimeout(context.Background(), budget)
+	_, _ = FillOverviewMaxima(ctx2, mount, time.Now().Add(budget))
+	cancel2()
+
+	p2 := ReadOverviewProgress(mount)
+	if p2.after <= p1.after {
+		t.Fatalf("attempt 2 did not advance checkpoint: p1=%d p2=%d", p1.after, p2.after)
 	}
 }

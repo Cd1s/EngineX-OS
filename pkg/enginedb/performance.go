@@ -170,7 +170,7 @@ func TrackDataPeaks(track, overview []byte) []byte {
 
 // overviewBatch is how many overviews FillOverviewMaxima reads and commits at a time. A
 // variable only for tests.
-var overviewBatch = 2048
+var overviewBatch = 256
 
 // OverviewMaxima returns raw overviewWaveFormData with its 3-byte band-maxima
 // trailer populated if the trailer was zero and the waveform has non-zero bins.
