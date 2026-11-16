@@ -1068,9 +1068,12 @@ SERVICES_MAIN = """
 	// rather than through the stock policy's three-view/focus-dependent action.
 	readonly property var scViewCycleRef: Planck.createProperty("EngineXCycleView", false, 3)
 	readonly property var scViewCycleProperty: scViewCycleRef && Planck.getProperty("/GUI/Scripted/EngineXCycleView")
-	// An action property has no "triggered" signal: a trigger, from this engine or the
-	// controller's, raises stateTrueCount and stateChanged. Stock's notifier counts
-	// those and resets the state (a Connections on onTriggered never ran on a deck).
+	// The button triggers this action from the controller's QML engine, through its
+	// own property object. What reaches this engine is the property's state:
+	// stateTrueCount and stateChanged, which stock's notifier counts (stock receives
+	// hardware actions only this way). A Connections on the translator's own
+	// "triggered" ran for a trigger from this engine (sandbox) but not for the
+	// button on the left SC5000.
 	ActionTranslatorStateChangeNotifier {
 		prop: root.scViewCycleProperty || null
 		onChanged: root.scViewSelect(root.scViewActive % 5 + 1)
