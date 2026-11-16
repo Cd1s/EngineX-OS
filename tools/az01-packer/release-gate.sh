@@ -564,6 +564,7 @@ inner() {
     names "$R"
     check "image: $N_ETC/version.txt is $NEWV" grep -qx "$NEWV" "$R$N_ETC/version.txt"
     check "image: $N_ETC/release-tag is $RELTAG" grep -qx "$RELTAG" "$R$N_ETC/release-tag"
+    check "image: hfsplusx.ko at the LoadPin path, built for the image's kernel" sh "$REPO/tools/az01-packer/check-hfsplusx.sh" "$W/new-img/rootfs.ext2"
     if [ "$N_ETC" = /etc/enginex ]; then # #234: what an older installer or gate reads, and the names it enables
         check "image: /etc/sc5000 is the compatibility link to enginex" test "$(readlink "$R/etc/sc5000")" = enginex
         check "image: /etc/sc5000/version.txt reads $NEWV through it" grep -qx "$NEWV" "$R/etc/sc5000/version.txt"

@@ -74,14 +74,14 @@ if [ -z "$HFSPLUSX" ]; then
         break
     done
 fi
-if [ -n "$HFSPLUSX" ]; then
-    readelf -h "$HFSPLUSX" | grep -q 'Machine:.*ARM' || { echo "expected 32-bit ARM module: $HFSPLUSX" >&2; exit 2; }
-    PATH="$PATH:/usr/sbin:/sbin" modinfo -F name "$HFSPLUSX" | grep -qx hfsplusx || { echo "unexpected module name in $HFSPLUSX" >&2; exit 2; }
-    krel=$(PATH="$PATH:/usr/sbin:/sbin" modinfo -F vermagic "$HFSPLUSX" | awk '{print $1}')
-    [ -n "$krel" ] || { echo "missing vermagic in $HFSPLUSX" >&2; exit 2; }
-    mkdir -p "$STAGE/usr/lib/modules/$krel/extra"
-    install -m 0644 "$HFSPLUSX" "$STAGE/usr/lib/modules/$krel/extra/hfsplusx.ko"
-fi
+# Gen-1 LoadPin loads modules only from the rootfs: without hfsplusx.ko every HFS+ stick stays read-only.
+[ -n "$HFSPLUSX" ] || { echo "hfsplusx.ko not found: build it (kernel-modules/build_modules.sh) and set HFSPLUSX_KO" >&2; exit 2; }
+readelf -h "$HFSPLUSX" | grep -q 'Machine:.*ARM' || { echo "expected 32-bit ARM module: $HFSPLUSX" >&2; exit 2; }
+PATH="$PATH:/usr/sbin:/sbin" modinfo -F name "$HFSPLUSX" | grep -qx hfsplusx || { echo "unexpected module name in $HFSPLUSX" >&2; exit 2; }
+krel=$(PATH="$PATH:/usr/sbin:/sbin" modinfo -F vermagic "$HFSPLUSX" | awk '{print $1}')
+[ -n "$krel" ] || { echo "missing vermagic in $HFSPLUSX" >&2; exit 2; }
+mkdir -p "$STAGE/usr/lib/modules/$krel/extra"
+install -m 0644 "$HFSPLUSX" "$STAGE/usr/lib/modules/$krel/extra/hfsplusx.ko"
 chmod 0644 "$STAGE/usr/share/enginex/"*
 
 # 1b. Second generation: /data bundles. 6 armhf models share the 32-bit suite and hooks, AZ04 (PRIME 4 G2, SYSTEM ONE) needs arm64 ones.
@@ -132,6 +132,7 @@ build() { # <official image prefix> <model prefix> <release name>...
     # build stops if it ever keeps less than its margin free (az01_packer.py GEN1_ROOTFS_KIB).
     python3 tools/az01-packer/az01_packer.py patch-rootfs "$FW/$base-$BASE-Update.img" \
         ${KEYARG:+--ssh-public-key "$KEYARG"} --overlay "$STAGE" --set-version "$VERSION" --grow --output "$WORK/$base.ext2" >/dev/null
+    sh tools/az01-packer/check-hfsplusx.sh "$WORK/$base.ext2"
     python3 tools/az01-packer/az01_packer.py repack "$FW/$base-$BASE-Update.img" \
         --rootfs "$WORK/$base.ext2" --grow --splash "$WORK/$base-splash.bin" --output "$WORK/$base.img" >/dev/null
     rm -f "$WORK/$base.ext2" "$WORK/$base-stock-splash.bin" "$WORK/$base-splash.bin"

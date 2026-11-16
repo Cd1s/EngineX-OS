@@ -1224,6 +1224,60 @@ class Rename234UpgradeTests(unittest.TestCase):
                     self.assertEqual((new / rel).stat().st_mode & 0o777, 0o600, rel)
 
 
+MODINFO = shutil.which('modinfo', path=os.environ.get('PATH', '') + ':/usr/sbin:/sbin')
+
+
+@unittest.skipUnless(MODINFO and all(shutil.which(t) for t in ('mke2fs', 'debugfs', 'objcopy')), 'mke2fs, debugfs, objcopy and modinfo needed')
+class CheckHfsplusxTests(unittest.TestCase):
+    """Gen-1 LoadPin loads kernel modules only from the rootfs: a release with no hfsplusx.ko there, or one
+    built for another kernel, left every HFS+ stick read-only without a word (hfs-rw-deck.md). The
+    build and the release gate check each 1st-gen rootfs with check-hfsplusx.sh."""
+
+    KERNEL = '6.18.57-az01-2026-10-15-rt6'
+    VERMAGIC = KERNEL + ' SMP preempt_rt ARMv7 p2v8 '
+
+    def module(self, path, vermagic, name):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        info = Path(str(path) + '.modinfo')
+        info.write_bytes(f'vermagic={vermagic}\0name={name}\0'.encode())
+        subprocess.run(['objcopy', '--add-section', f'.modinfo={info}', shutil.which('true'), str(path)], check=True)
+        info.unlink()
+
+    def check(self, tmp, modules):
+        root = Path(tmp)/'root'
+        shutil.rmtree(root, ignore_errors=True)
+        for kernel, vermagic in modules.items():
+            moddir = root/'usr/lib/modules'/kernel
+            if kernel == self.KERNEL:
+                self.module(moddir/'kernel/net/wireless/cfg80211.ko', self.VERMAGIC, 'cfg80211')
+                (moddir/'modules.dep').write_text('kernel/net/wireless/cfg80211.ko:\n')
+            if vermagic:
+                self.module(moddir/'extra/hfsplusx.ko', vermagic, 'hfsplusx')
+        fs = Path(tmp)/'rootfs.ext2'
+        fs.unlink(missing_ok=True)
+        subprocess.run(['mke2fs', '-q', '-F', '-t', 'ext2', '-d', str(root), str(fs), '8M'], check=True)
+        return subprocess.run(['sh', str(Path(__file__).resolve().with_name('check-hfsplusx.sh')), str(fs)], capture_output=True, text=True)
+
+    def test_the_module_must_be_at_the_loadpin_path_for_the_images_kernel(self):
+        with tempfile.TemporaryDirectory(prefix='hfsplusx-', dir=TEST_TMPDIR) as tmp:
+            self.assertEqual(self.check(tmp, {self.KERNEL: self.VERMAGIC}).returncode, 0)
+            for case, modules, why in [
+                    ('missing', {self.KERNEL: None}, 'no /usr/lib/modules/'),
+                    ('another build', {self.KERNEL: self.KERNEL + ' SMP ARMv7 p2v8 '}, 'vermagic'),
+                    ('another kernel', {self.KERNEL: None, '6.18.58-az01': '6.18.58-az01 SMP preempt_rt ARMv7 p2v8 '}, 'want one kernel')]:
+                with self.subTest(case):
+                    r = self.check(tmp, modules)
+                    self.assertNotEqual(r.returncode, 0, r.stderr)
+                    self.assertIn(why, r.stderr)
+
+    def test_the_release_build_needs_the_module_and_checks_every_group(self):
+        script = Path(__file__).resolve().with_name('build-release.sh').read_text()
+        self.assertIn('[ -n "$HFSPLUSX" ] || { echo "hfsplusx.ko not found', script)
+        self.assertIn('sh tools/az01-packer/check-hfsplusx.sh "$WORK/$base.ext2"', script)
+        gate = Path(__file__).resolve().with_name('release-gate.sh').read_text()
+        self.assertIn('check-hfsplusx.sh" "$W/new-img/rootfs.ext2"', gate)
+
+
 @unittest.skipUnless(all(shutil.which(x) for x in ('debugfs', 'e2fsck', 'resize2fs')),
                      'needs e2fsprogs (debugfs, e2fsck, resize2fs)')
 class Gen1RootfsRoomTests(unittest.TestCase):
