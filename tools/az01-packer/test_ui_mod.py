@@ -8583,7 +8583,7 @@ const assert = require('assert');
 String.prototype.arg = function(n) {{ return this.replace('%1', n); }};
 console.warn = () => {{}};
 const dict = {json.dumps(rows, ensure_ascii=False)};
-let scLang = 'en', scStemRows = {{}}, scStemAsked = {{}}, scStemClaim = null, scStemNext = [], scStemDone = 0, scStemSize = 0, scStemHeard = 0;
+let scLang = 'en', scStemRows = {{}}, scStemFailAt = {{}}, scStemAsked = {{}}, scStemClaim = null, scStemNext = [], scStemDone = 0, scStemSize = 0, scStemHeard = 0;
 let scStemTotal = 0, scStemCount = 0, scStemProgress = 0, uris = {{}}, asked = 0, deferred = [], sent = [], reactions = {{}};
 const Qt = {{callLater: fn => {{ if (!deferred.includes(fn)) deferred.push(fn); }}}};
 function scT(s) {{ return (dict[s] && dict[s][scLang]) || s; }}
@@ -8595,12 +8595,12 @@ const scStemQueue = {{
     startRenderTracks(id) {{ sent.push(id); (reactions[id] || (() => {{}}))(); }},
 }};
 let steadyArmed = false;
-const scStemRefused = {{restart() {{}}}}, scStemSteady = {{restart() {{ steadyArmed = true; }}}};
-{self.functions("scStemMark", "scStemHand", "scStemSend", "scStemQueued", "scStemSettle", "scStemFinished", "scStemPlace", "scStemState", "scStemEta", "scStemText")}
+const scStemRefused = {{restart() {{}}}}, scStemFailed = {{interval: 10000, restart() {{}}}}, scStemSteady = {{restart() {{ steadyArmed = true; }}}};
+{self.functions("scStemMark", "scStemFailSweep", "scStemHand", "scStemSend", "scStemQueued", "scStemSettle", "scStemFinished", "scStemPlace", "scStemState", "scStemEta", "scStemText")}
 const root = {{
     get scStemRows() {{ return scStemRows; }}, get scStemTotal() {{ return scStemTotal; }}, get scStemCount() {{ return scStemCount; }},
     get scStemSize() {{ return scStemSize; }}, get scStemAsked() {{ return scStemAsked; }}, get scStemClaim() {{ return scStemClaim; }}, set scStemClaim(v) {{ scStemClaim = v; }},
-    scStemMark, scStemSend, scStemFinished,
+    scStemMark, scStemFailSweep, scStemSend, scStemFinished,
 }};
 // Engine answers with renderStemsQueueChanged, the signal behind both counters; the
 // pack reads them once Engine is done (Qt.callLater, which coalesces). `answer`
@@ -8616,9 +8616,9 @@ function take(id, left, total, lib) {{ answer(left, total); scStemQueued((lib ||
 function steadyTimer() {{ steadyArmed = false; {steady} }}
 // The hand-over as scStemImport does it; `engine` is Engine's answer inside the call.
 function hand(id, rows, engine) {{ if (engine) reactions[id] = engine; scStemHand(id, rows); settle(); }}
-function reset() {{ queue(0, 0); scStemRows = {{}}; scStemAsked = {{}}; scStemClaim = null; scStemNext = []; sent = []; reactions = {{}}; }}
+function reset() {{ queue(0, 0); scStemRows = {{}}; scStemFailAt = {{}}; scStemAsked = {{}}; scStemClaim = null; scStemNext = []; sent = []; reactions = {{}}; }}
 function refusedTimer() {{ {refused} }}
-function failedTimer() {{ {failed} }}
+function failedTimer() {{ for (const k of Object.keys(scStemFailAt)) scStemFailAt[k] -= 10000; {failed} }}
 const streamed = () => {streamed};
 const own = () => {own};
 const states = (...ids) => ids.map(id => scStemState(id));
@@ -8953,23 +8953,29 @@ for (const [lang, waiting, rendering, nearly, failed] of [
         for side in ("Left", "Right"):
             with self.subTest(side=side):
                 path = "Skins/Embedded/Views/BrowseView/Components/Components/Swipe" + side + "Item.qml"
+                msgs_expr = next(
+                    re.search(r"readonly property list<string> actionCommitMessages: (.*)", new).group(1)
+                    for _, new in edits[path] if "actionCommitMessages:" in new
+                )
                 body = next(new for _, new in edits[path] if "root.scStemStream(row.modelData.trackId)" in new)
                 script = f"""
 const assert = require('assert');
+const msgsExpr = {json.dumps(msgs_expr)};
 function commit(answer) {{
     const calls = [];
-    const root = {{scT: s => 'T:' + s, scStemStream: id => {{ calls.push(['stream', id]); return answer; }}}};
+    let scStemBusy = false;
+    const scLabel = s => s, scStem = true;
+    const root = {{scT: s => 'T:' + s, scDeckList: () => [1, 2], scStemStream: id => {{ calls.push(['stream', id]); return answer; }}}};
     const Planck = {{librarianController: {{stemsQueueManager: {{startRenderTracks: id => calls.push(['render', id])}}}}}};
     const row = {{index: 3, modelData: {{trackId: 99}}}}, scDeck = 0, trackList = {{}};
     const leftActions = [], rightActions = [], actionIndex = 0;
-    let textCommitValid = 'Stems'; // stock has just put the action's own message there
 {body}
-    return [textCommitValid, calls];
+    return [eval(msgsExpr)[0], calls];
 }}
 // Started: the swipe says "Stems", as before.
-assert.deepStrictEqual(commit(true), ['Stems', [['stream', 99]]]);
+assert.deepStrictEqual(commit(true), ['T:Stems', [['stream', 99]]]);
 // Not a streamed row: Engine renders the local track itself.
-assert.deepStrictEqual(commit(false), ['Stems', [['stream', 99], ['render', '99']]]);
+assert.deepStrictEqual(commit(false), ['T:Stems', [['stream', 99], ['render', '99']]]);
 // Every deck is playing: nothing is started, and the swipe says why.
 assert.deepStrictEqual(commit('busy'), ['T:' + {json.dumps(hint)}, [['stream', 99]]]);
 """
