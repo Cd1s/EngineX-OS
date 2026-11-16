@@ -366,7 +366,7 @@ func TestPipelineCompleteReportsRecordedPipelineError(t *testing.T) {
 	p.unpacked()
 	p.Write([]byte("numReturnChannels=8\n\nreturnFrames=0\n\nreturnFrames=0\n\n"))
 	err := p.Complete()
-	if err == nil || !bytes.Contains([]byte(err.Error()), []byte("cannot unpack")) {
+	if err == nil || !bytes.Contains([]byte(err.Error()), []byte("cannot unpack")) || !bytes.Contains([]byte(err.Error()), []byte("update enginex-stemsd")) {
 		t.Fatalf("Complete masked p.err: got %v", err)
 	}
 }
