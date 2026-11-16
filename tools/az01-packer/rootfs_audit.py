@@ -14,6 +14,7 @@ import argparse
 import os
 import re
 import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import legacy_names as legacy
 
 UNIT_DIRS = ('/etc/systemd/system', '/usr/lib/systemd/system', '/lib/systemd/system')
