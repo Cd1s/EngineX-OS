@@ -1289,7 +1289,7 @@ static void test_shadow_replay(void) {
 }
 
 // BH-GF4-4: the bundle is in /data/enginex; the processor there is found without
-// the /data/enginex-custom compat link, and wins over a legacy copy.
+// the legacy data compat link, and wins over a legacy copy.
 static void test_stems_processor_prefers_enginex(void) {
     char dir[] = "/tmp/stems-enginex-XXXXXX", p[PATH_MAX];
     assert(mkdtemp(dir));
@@ -1317,7 +1317,7 @@ static void test_stems_processor_prefers_enginex(void) {
     assert(snprintf(p, sizeof p, "%s/enginex/bin", dir) > 0 && !rmdir(p));
     assert(snprintf(p, sizeof p, "%s/enginex", dir) > 0 && !rmdir(p));
     assert(snprintf(p, sizeof p, "%s/legacy", dir) > 0 && !rmdir(p) && !rmdir(dir));
-    puts("stems-processor (BH-GF4-4): /data/enginex first, then the legacy /data/enginex-custom: PASS");
+    puts("stems-processor (BH-GF4-4): /data/enginex first, then the legacy data directory: PASS");
 }
 
 static void test_stems_processor_fallback(void) {

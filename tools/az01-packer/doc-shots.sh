@@ -131,7 +131,7 @@ PY
 
     # /data setup
     mkdir -p "$R/data/enginex/ui/packs"
-    ln -sf enginex "$R/data/enginex-custom"
+    ln -sf enginex "$R$legacy_data"
     cp -a "$W/packs/$LANG_PACK" "$R/data/enginex/ui/packs/"
     mkdir -p "$R/data/enginex/ui/packs/$LANG_PACK/Skins/Common/Items"
     cp "$W/probe.qml" "$R/data/enginex/ui/packs/$LANG_PACK/Skins/Common/Items/QmlWarnings.qml"

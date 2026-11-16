@@ -183,7 +183,7 @@ static int make_dirs(const char *path) {
         *p=saved; if (!saved) return 0;
     }
 }
-// The HFS library cache lives in /data/enginex. Since #103 /data/enginex-custom is
+// The HFS library cache lives in /data/enginex. Since #103 the legacy data directory is
 // a relative symlink to that sibling, and safe_path refuses every symlink, so a
 // cache path through it failed with ELOOP for every read-only HFS+ stick before
 // rb-bridge ran. Use the first configured root whose parent is a real directory,

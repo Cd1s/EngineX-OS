@@ -58,9 +58,9 @@
 - 請認準對應二代機型前綴（`SCLIVE4` / `SCLIVE2` / `PRIME4PLUS` / `PRIMEGOPLUS` / `MIXSTREAMPROPLUS` / `MIXSTREAMPROGO` / `PRIME4G2` / `SYSTEMONE`）的 `*-Update.img`，或直接使用 `EngineX-Installer` 自動識別。
 
 > **运行目录 / Runtime directory / 執行目錄（#103）**
-> 简体中文：标准运行目录统一为 **`/data/enginex/`**。旧版使用的 `/data/enginex-custom` 会在开机时**自动无损迁移**到 `/data/enginex`，并保留软链接 `ln -sfn /data/enginex /data/enginex-custom`，旧路径、旧脚本和旧教程继续可用。本文所有路径均以 `/data/enginex/` 为准；若你的碟机还是旧版，看到的是 `/data/enginex-custom` 属正常现象。
-> English: The standard runtime directory is now **`/data/enginex/`**. The old `/data/enginex-custom` is **migrated losslessly at boot** and kept as a symlink (`ln -sfn /data/enginex /data/enginex-custom`), so old paths, scripts and guides keep working. All paths here use `/data/enginex/`; on a deck still running an older release you will see `/data/enginex-custom`, which is expected.
-> 繁體中文：標準執行目錄統一為 **`/data/enginex/`**。舊版使用的 `/data/enginex-custom` 會在開機時**自動無損遷移**至 `/data/enginex`，並保留符號連結 `ln -sfn /data/enginex /data/enginex-custom`，舊路徑、舊腳本與舊教學仍可使用。本文所有路徑以 `/data/enginex/` 為準；若碟機仍是舊版，看到 `/data/enginex-custom` 屬正常現象。
+> 简体中文：标准运行目录统一为 **`/data/enginex/`**。旧版数据目录会在开机时自动无损迁移，并保留兼容软链接。本文所有路径均以 `/data/enginex/` 为准。
+> English: The standard runtime directory is **`/data/enginex/`**. The old data directory migrates losslessly at boot and keeps a compatibility symlink. All paths here use `/data/enginex/`.
+> 繁體中文：標準執行目錄統一為 **`/data/enginex/`**。舊版資料目錄會在開機時自動無損遷移，並保留相容符號連結。本文所有路徑均以 `/data/enginex/` 為準。
 
 ---
 

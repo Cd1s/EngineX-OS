@@ -38,7 +38,7 @@ read-only.
 The route is `15e4:d007` → `jc11s` → wait for Firmware Update Mode / fastboot →
 `modeB`. The bundle is `PRIME4PLUS-…-EngineX-OS-Data-Bundle.tar.gz`; its contents
 are injected into an ext4 image labelled `az01-data` with the `encrypt` feature.
-The host injector writes `/enginex`, the compatibility symlink `/enginex-custom`,
+The host injector writes `/enginex`, the legacy data compatibility symlink,
 and ALSA configurations inside that image. Fastboot writes the entire selected
 partition, not just `/data/enginex`.
 
@@ -79,9 +79,9 @@ its own loop device, allocated from the host's loop pool and detached on exit;
 Reporter, reset and reboot paths are blocked.
 
 ALSA loads `/var/lib/alsa/conf.d/99-enginex.conf`, which loads the hook via
-`/data/enginex-custom/bundle/lib/libengine-ui-hook.so`. Its one-shot callback runs
+`/data/enginex/bundle/lib/libengine-ui-hook.so`. Its one-shot callback runs
 `boot-activate.sh`. That writes the runtime Engine drop-in with `LD_PRELOAD` and
-`Wants=enginex-stream-sync.service enginex-rb-bridge.service enginex-enginex-deemixd.service`.
+`Wants=enginex-stream-sync.service enginex-rb-bridge.service enginex-deemixd.service`.
 The sandbox verifies these files, the one-shot marker and the subsequent native
 Engine's hook application and UI-pack loading. There is no evidence here of a
 JC11S-specific missing path or destructive first-boot migration.
@@ -95,7 +95,7 @@ partition-UUID getvar, so this verifies the documented partition name/type, not
 the live GPT UUID. Unknown responses stop before writing.
 
 After injection, the installer finds the real installation directory (`enginex`
-or the legacy `enginex-custom` retained until first boot), reads both version markers and compares the
+or the legacy data directory retained until first boot), reads both version markers and compares the
 activator, hook library (including their legacy paths) and active ALSA config
 byte-for-byte with the checked bundle. Missing or stale data causes a clear
 `nothing flashed` error. This also works with an older bundle injector, which

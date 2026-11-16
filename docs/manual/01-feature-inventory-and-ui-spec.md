@@ -6,9 +6,8 @@
 
 ## 0. 约定与必须先读的更正
 
-**路径约定（Issue #103）**：运行目录主路径写作 **`/data/enginex/`**，兼容旧路径 `/data/enginex-custom/`（开机迁移后留软链接 `ln -sfn /data/enginex /data/enginex-custom`）。配置目录 `/etc/enginex`、接口 `/v1/enginex/*` 同步提供别名，旧的 `/etc/enginex`、`/v1/enginex/*` 继续可用。本文下面凡写 `<DATA>`，指 `/data/enginex/`。
+**Path convention (#103/#234)**: `<DATA>` means `/data/enginex/`. Boot migrates the old data directory losslessly and retains its compatibility link. Current configuration lives under `/etc/enginex`; API callers use `/v1/enginex/*`. The legacy data name and API alias are isolated in the migration readers listed in `docs/RENAME-234.md`.
 
-> 现状：`b5a4ba8` 的代码仍然写死 `/data/enginex-custom` 和 `/v1/enginex/*`，共 28 个文件含 `enginex-custom`（Go、Python、sh、C 都有）。#103 落地之前，本文里的 `<DATA>`、`/v1/enginex/*` 在实机上还不存在。
 
 **对任务描述的三处更正**（照任务原文写会出错）：
 
@@ -369,14 +368,14 @@ beta:      ['Beta', '测试版', '測試版']
 
 | 项 | 现路径 | 目标 |
 |---|---|---|
-| 运行目录 | `/data/enginex-custom/` | `/data/enginex/`；旧路径保留软链接 |
+| 运行目录 | Legacy data directory | `/data/enginex/`；旧路径保留软链接 |
 | UI 包与设置 | `<DATA>/ui/{packs,icons,settings.conf,safe-mode,boot-count}` | 随运行目录迁移 |
 | 状态与密钥 | `<DATA>/state/{access-token,broadcast-config.json,spotify-token.json,gateway-tracks.json}`、`authorized_keys`、`ssh_host_ed25519_key` | 随运行目录；权限（0600）、软链接拒绝逻辑要保留 |
 | 数据包 | `<DATA>/bundle/`、`<DATA>/version.txt` | `uninstall.sh` 里的 `ENGINEX_CUSTOM` 默认值要同步改 |
 | 配置目录 | `/etc/enginex/`（`engine-ui-guard`、两个 `.so`、`version.txt`） | 增加 `/etc/enginex` 别名 |
 | 本机接口 | `/v1/enginex/*` | 增加 `/v1/enginex/*`，`index.html` 与 `build_packs.py` 里写死的 `http://127.0.0.1:8080/v1/enginex/...` 逐步切到新路径 |
 
-迁移要避免的坑：`engine-ui-guard`、`edisksd` 钩子、`rb-bridge`、发版门禁（`release-gate.sh`、`rootfs_audit.py`）、`tests/test_rootfs_overlay.sh` 都硬编码旧路径；开机迁移要放在 `enginex-custom-prepare` 里、早于 Engine 和 stream-sync 启动；二代机数据包的 `boot-activate.sh` 与 `uninstall.sh` 在旧版本 bundle 上要同时识别两条路径。
+迁移要避免的坑：`engine-ui-guard`、`edisksd` 钩子、`rb-bridge`、发版门禁（`release-gate.sh`、`rootfs_audit.py`）、`tests/test_rootfs_overlay.sh` 都硬编码旧路径；开机迁移要放在 `enginex-prepare` 里、早于 Engine 和 stream-sync 启动；二代机数据包的 `boot-activate.sh` 与 `uninstall.sh` 在旧版本 bundle 上要同时识别两条路径。
 
 ## 8. 附：`settings.conf` 键全表
 
