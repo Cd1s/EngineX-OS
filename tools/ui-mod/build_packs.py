@@ -3090,6 +3090,8 @@ SERVICES_MAIN = """
 		}
 	}
 	property bool scBeatJumpPads: false
+	property bool scPitchBendBeatJump: false
+	property var scMixstreamFx: ["Echo", "Flanger", "Delay", "Phaser"]
 	property bool scMixstreamSweepOpen: false
 	property string scPioneerFx: "off"
 	property string scFxTimeMode: "beats"
@@ -3734,6 +3736,13 @@ SERVICES_MAIN = """
 			else if (v.stems_eq_mode !== undefined) scStemsEqMode = v.stems_eq_mode === "1" || v.stems_eq_mode === 1 || v.stems_eq_mode === true
 			if (v.beatJumpPads !== undefined) scBeatJumpPads = !!v.beatJumpPads
 			else if (v.beat_jump_pads !== undefined) scBeatJumpPads = v.beat_jump_pads === "1" || v.beat_jump_pads === 1 || v.beat_jump_pads === true
+			if (v.pitchBendBeatJump !== undefined) scPitchBendBeatJump = !!v.pitchBendBeatJump
+			else if (v.pitch_bend_beat_jump !== undefined) scPitchBendBeatJump = v.pitch_bend_beat_jump === "1" || v.pitch_bend_beat_jump === 1 || v.pitch_bend_beat_jump === true
+			if (v.mixstreamFx && typeof v.mixstreamFx !== "string" && v.mixstreamFx.length === 4) scMixstreamFx = v.mixstreamFx
+			else if (typeof v.mixstream_fx === "string") {
+				const fx = v.mixstream_fx.split(",").map(s => s.trim()).filter(Boolean)
+				if (fx.length === 4) scMixstreamFx = fx
+			}
 			scFxMsApply(v.fxTimeMode !== undefined ? v.fxTimeMode : v.fx_time_mode,
 			            v.fxTimeMs !== undefined ? v.fxTimeMs : v.fx_time_ms)
 			if (v.pioneerFx !== undefined) scPioneerFx = v.pioneerFx || "off"
@@ -3822,6 +3831,11 @@ SERVICES_MAIN = """
 			else if (key === "ui_scale") root.scUIScale = parseInt(val) || 100
 			else if (key === "stems_eq_mode") root.scStemsEqMode = val === "1"
 			else if (key === "beat_jump_pads") root.scBeatJumpPads = val === "1"
+			else if (key === "pitch_bend_beat_jump") root.scPitchBendBeatJump = val === "1" || val === "true"
+			else if (key === "mixstream_fx") {
+				const fx = val.split(",").map(s => s.trim()).filter(Boolean)
+				if (fx.length === 4) root.scMixstreamFx = fx
+			}
 			else if (key === "fx_time_mode" && line.trim().indexOf("fx_time_mode=") === 0) fxMode = line.trim().slice(13) === "ms" ? "ms" : "beats"
 			else if (key === "fx_time_ms" && line.trim().indexOf("fx_time_ms=") === 0) fxMs = scFxMsInteger(line.trim().slice(11))
 			else if (key === "pioneer_fx") root.scPioneerFx = val || "off"
@@ -5033,7 +5047,22 @@ PLAYBACK_ENTRIES = (switch_entry("Master Soft Clipper", "scMasterLimiter", "mast
 		},
 """)
 
+def mixstream_fx_entries():
+    defaults = ("Echo", "Flanger", "Delay", "Phaser")
+    out = []
+    for i, label in enumerate(("FX Slot 1", "FX Slot 2", "FX Slot 3", "FX Slot 4")):
+        out.append(f"""\t\t\tEntryBase.ListEntry {{
+\t\t\t\tvisible: root.scIsMixstream
+\t\t\t\ttext: "{label}"
+\t\t\t\tvalues: ["Echo", "Flanger", "Delay", "Phaser"]
+\t\t\t\tcurrentValue: (root.scMixstreamFx && root.scMixstreamFx[{i}]) || "{defaults[i]}"
+\t\t\t\tonSelected: function(index) {{ root.scCall("mixstreamFx{i + 1}=" + values[index]) }}
+\t\t\t}},""")
+    return "\n".join(out) + "\n"
+
 BEAT_JUMP_ENTRIES = (switch_entry("Beat Jump Pad Bank", "scBeatJumpPads", "beatJumpPads", "\t\t\tvisible: root.scIsMixstream\n")
+    + switch_entry("Pitch Bend → Beat Jump", "scPitchBendBeatJump", "pitchBendBeatJump", "\t\t\tvisible: root.scIsMixstream\n")
+    + mixstream_fx_entries()
     + switch_entry("Swap Loop / Beat Jump", "scSwapLoopOrder", "swapLoopOrder", "\t\t\tvisible: root.scHasAutoLoopKnob\n"))
 
 SAFETY_ENTRIES = """
@@ -7938,6 +7967,8 @@ def edits(dev: bool):
             '    objectName: "Global Assignment Config"\n'
             '    property real scPadBrightness: 1\n'
             '    property bool scSwapLoopOrder: false\n'
+            '    property bool scPitchBendBeatJump: false\n'
+            '    property var scMixstreamFx: ["Echo", "Flanger", "Delay", "Phaser"]\n'
             '    property bool scReverseJogLeft: false\n'
             '    property bool scReverseJogRight: false\n'
             '    property var pReverseJogLeft: Planck.getProperty("/GUI/Scripted/EngineXJogInvertLeft")\n'
@@ -7982,6 +8013,9 @@ def edits(dev: bool):
             '                    scGlobalConfig.scSwapLoopOrder = !!j.swapLoopOrder\n'
             '                    scGlobalConfig.scReverseJogLeft = !!j.jogInvertLeft\n'
             '                    scGlobalConfig.scReverseJogRight = !!j.jogInvertRight\n'
+            '                    scGlobalConfig.scPitchBendBeatJump = !!j.pitchBendBeatJump\n'
+            '                    if (Array.isArray(j.mixstreamFx) && j.mixstreamFx.length === 4)\n'
+            '                        scGlobalConfig.scMixstreamFx = j.mixstreamFx\n'
             '                    scGlobalConfig.scSyncReverseJogFromState()\n'
             '                } catch (e) {}\n'
             '            }\n'
@@ -8011,6 +8045,30 @@ def edits(dev: bool):
             # JP07's AutoLoop has no loopInactiveShiftTurnAction (default None), so the swapped turn did nothing.
             ("        readonly property bool beatJumpEnabled: module.loopInactiveShiftTurnAction === Action.BeatJump &&",
              '        readonly property bool beatJumpEnabled: (module.loopInactiveShiftTurnAction === Action.BeatJump || (typeof globalConfig !== "undefined" && globalConfig && !!globalConfig.scSwapLoopOrder)) &&')]
+        # #286: allow Mixstream pitch-bend - / + buttons to trigger Beat Jump back/forward (Shift keeps Speed Range).
+        scaled["ControlSurfaceModules/ControlSurfaceModules/PitchBend.qml"] = [
+            ('    readonly property bool isShiftAction: globalConfig.pitchBendActionIsNormal === globalConfig.shift\n',
+             '    readonly property bool isShiftAction: globalConfig.pitchBendActionIsNormal === globalConfig.shift\n'
+             '    readonly property bool scBeatJumpActive: typeof globalConfig !== "undefined" && globalConfig && !!globalConfig.scPitchBendBeatJump\n'),
+            ('                    direction: "Backward",\n',
+             '                    direction: "Backward",\n                    jumpAction: "JumpBack",\n'),
+            ('                    direction: "Forward",\n',
+             '                    direction: "Forward",\n                    jumpAction: "JumpForward",\n'),
+            ('                        path: deckConfig.activeDeckTrackPath + "Nudge%1".arg(model.direction)\n',
+             '                        path: deckConfig.activeDeckTrackPath + (module.scBeatJumpActive ? ("BeatJump/" + model.jumpAction) : ("Nudge%1".arg(model.direction)))\n'),
+            ('                        deckConfig.activeDeckTrackPath + "Nudge%1".arg(model.direction)\n',
+             '                        deckConfig.activeDeckTrackPath + (module.scBeatJumpActive ? ("BeatJump/" + model.jumpAction) : ("Nudge%1".arg(model.direction)))\n'),
+        ]
+        # #286: allow Mixstream hardware FX buttons (slots 1-4) to select any stock Mixstream effect.
+        scaled["ControlSurfaceModules/ControlSurfaceModules/private/DJFxSelectButtons.qml"] = [
+            ('        Item {\n',
+             '        Item {\n'
+             '            readonly property string scSlotFx: (typeof globalConfig !== "undefined" && globalConfig && globalConfig.scMixstreamFx && index >= 0 && index < globalConfig.scMixstreamFx.length) ? globalConfig.scMixstreamFx[index] : model.fxName\n'),
+            ('                            fxConfig.channel[name].pFxType.translator.string = model.fxName\n',
+             '                            fxConfig.channel[name].pFxType.translator.string = scSlotFx\n'),
+            ('                readonly property bool assigned: fxConfig.channel[fxConfig.channelNames[0]].fxType === model.fxName\n',
+             '                readonly property bool assigned: fxConfig.channel[fxConfig.channelNames[0]].fxType === scSlotFx\n'),
+        ]
         # #152: unlock Shift + Cue (PFL) channel-strip mode toggle (EQ <-> Stems Level) on all
         # mixer boards, and prevent rapid double-tapping Hot Cue from bouncing STEMS back to CUES.
         scaled["ControlSurfaceModules/ControlSurfaceModules/MixerChannelCore.qml"] = [(

@@ -136,7 +136,25 @@ var (
 	uiPioneerFxModes = []string{"off", "spiral", "pitch_echo", "slip_roll", "dub_echo", "space"}
 	uiShadowModes    = []string{"auto", "engine", "cdj"}
 	uiFxTimeModes    = []string{"beats", "ms"}
+	uiMixstreamFxDefaults = []string{"Echo", "Flanger", "Delay", "Phaser"}
+	uiMixstreamFxChoices  = []string{"Echo", "Flanger", "Delay", "Phaser"}
 )
+
+func parseMixstreamFx(val string) ([]string, bool) {
+	parts := strings.Split(val, ",")
+	if len(parts) != len(uiMixstreamFxDefaults) {
+		return nil, false
+	}
+	out := make([]string, len(parts))
+	for i, p := range parts {
+		p = strings.TrimSpace(p)
+		if !slices.Contains(uiMixstreamFxChoices, p) {
+			return nil, false
+		}
+		out[i] = p
+	}
+	return out, true
+}
 
 const (
 	qualityFLAC = "flac"
@@ -224,9 +242,11 @@ type uiSettings struct {
 	// UIScale enlarges or shrinks Engine's whole interface; it takes effect at the next
 	// Engine start, so the Control Center row asks before applying it.
 	UIScale             int    `json:"uiScale"`
-	StemsEqMode         bool   `json:"stemsEqMode"`
-	BeatJumpPads        bool   `json:"beatJumpPads"`
-	JogInvertLeft       bool   `json:"jogInvertLeft"`
+	StemsEqMode         bool     `json:"stemsEqMode"`
+	BeatJumpPads        bool     `json:"beatJumpPads"`
+	PitchBendBeatJump   bool     `json:"pitchBendBeatJump"`
+	MixstreamFx         []string `json:"mixstreamFx"`
+	JogInvertLeft       bool     `json:"jogInvertLeft"`
 	JogInvertRight      bool   `json:"jogInvertRight"`
 	SdHighSpeed         bool   `json:"sdHighSpeed"`
 	SdHighSpeedPending  bool   `json:"sdHighSpeedPending,omitempty"`
@@ -345,7 +365,7 @@ func (s *Server) loadUI() uiSettings {
 		Language: "en", Waveform: "denon", Sources: slices.Clone(uiServices), Scope: "deezer", Quality: qualityFLAC, NeteaseMode: neteaseOfficial, SpotifySource: "auto", GitHubRepo: defaultGitHubRepo, FourDeckWaveform: false, FourDeckRole: "auto", ShadowMode: "auto", ProlinkWaveform: true,
 		TracklistWaveform: true, CueCountdown: true, BpmDecimals: 2,
 		StreamSortRole: "default", StreamSortOrder: "asc", LedBrightness: 100, PioneerFx: "off", UIScale: 100,
-		FxTimeMode: "beats", FxTimeMs: 500,
+		FxTimeMode: "beats", FxTimeMs: 500, MixstreamFx: slices.Clone(uiMixstreamFxDefaults),
 	}
 	b, _ := os.ReadFile(filepath.Join(s.uiDir(), "settings.conf"))
 	for _, line := range strings.Split(string(b), "\n") {
@@ -490,6 +510,12 @@ func (s *Server) loadUI() uiSettings {
 			v.StemsEqMode = val == "1" || strings.EqualFold(val, "true")
 		case "beat_jump_pads":
 			v.BeatJumpPads = val == "1" || strings.EqualFold(val, "true")
+		case "pitch_bend_beat_jump":
+			v.PitchBendBeatJump = val == "1" || strings.EqualFold(val, "true")
+		case "mixstream_fx":
+			if fx, ok := parseMixstreamFx(val); ok {
+				v.MixstreamFx = fx
+			}
 		case "jog_invert_left":
 			v.JogInvertLeft = val == "1" || strings.EqualFold(val, "true")
 		case "jog_invert_right":
@@ -656,6 +682,12 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	}
 	if v.BeatJumpPads {
 		text += "beat_jump_pads=1\n"
+	}
+	if v.PitchBendBeatJump {
+		text += "pitch_bend_beat_jump=1\n"
+	}
+	if len(v.MixstreamFx) == len(uiMixstreamFxDefaults) && !slices.Equal(v.MixstreamFx, uiMixstreamFxDefaults) {
+		text += "mixstream_fx=" + strings.Join(v.MixstreamFx, ",") + "\n"
 	}
 	if v.JogInvertLeft {
 		text += "jog_invert_left=1\n"
@@ -1114,6 +1146,41 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		v.BeatJumpPads = b
+	}
+	if q.Has("pitchBendBeatJump") {
+		b, ok := parseBoolParam(q.Get("pitchBendBeatJump"))
+		if !ok {
+			s.uiMu.Unlock()
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+		v.PitchBendBeatJump = b
+	}
+	if len(v.MixstreamFx) != len(uiMixstreamFxDefaults) {
+		v.MixstreamFx = slices.Clone(uiMixstreamFxDefaults)
+	} else {
+		v.MixstreamFx = slices.Clone(v.MixstreamFx)
+	}
+	if q.Has("mixstreamFx") {
+		fx, ok := parseMixstreamFx(q.Get("mixstreamFx"))
+		if !ok {
+			s.uiMu.Unlock()
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+		v.MixstreamFx = fx
+	}
+	for i := range uiMixstreamFxDefaults {
+		key := "mixstreamFx" + strconv.Itoa(i+1)
+		if q.Has(key) {
+			fx := strings.TrimSpace(q.Get(key))
+			if !slices.Contains(uiMixstreamFxChoices, fx) {
+				s.uiMu.Unlock()
+				fail(w, 400, errors.New("invalid setting"))
+				return
+			}
+			v.MixstreamFx[i] = fx
+		}
 	}
 	jogSupported := boardCapabilities(imagePrefix(deviceCompatible())).JogWheel && !s.isLegacy504Pack()
 	if q.Has("jogInvertLeft") {
