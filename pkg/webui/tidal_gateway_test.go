@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"github.com/Cd1s/EngineX-OS/internal/testaudio"
 	"github.com/Cd1s/EngineX-OS/internal/testlibrary"
 	"github.com/Cd1s/EngineX-OS/pkg/analyzer"
@@ -1042,7 +1043,7 @@ func TestHTTPSCover(t *testing.T) {
 // local so a placeholder credential reaching it is observable without a login.
 func TestTidalSyntheticCredentialsNeverReachUpstream(t *testing.T) {
 	for _, disabled := range []bool{false, true} {
-		for _, tok := range []string{"enginex", "enginex-token", "enginex-refresh", "enginex-token", "enginex-refresh", ""} {
+		for _, tok := range []string{"enginex", migration.Token, migration.RefreshToken, "enginex-token", "enginex-refresh", ""} {
 			t.Run(strconv.FormatBool(disabled)+"/"+tok, func(t *testing.T) {
 				var calls atomic.Int32
 				up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1); w.WriteHeader(418) }))

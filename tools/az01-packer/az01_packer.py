@@ -873,7 +873,7 @@ DEBLOAT_INPUTS = ('/usr/Engine/Scripts/engine', '/usr/Engine/Scripts/setup-prere
 
 def offline_debloat(fs, script):
     with tempfile.TemporaryDirectory(prefix='az01-debloat-', dir=fs.path.parent) as tmp:
-        root = Path(tmp)
+        root = Path(tmp) / 'root'
         (root/'usr/Engine/Scripts').mkdir(parents=True)
         (root/'etc').mkdir()
         before = {}
@@ -884,8 +884,9 @@ def offline_debloat(fs, script):
                 continue
             (root/path[1:]).write_bytes(data)
             before[path] = data
-        script_path = root.parent/'enginex-debloat'
+        script_path = Path(tmp) / 'enginex-debloat'
         script_path.write_bytes(script)
+        (Path(tmp) / 'enginex-migration').write_text(LEGACY_SHELL)
         p = subprocess.run(['sh', str(script_path), '--root', str(root)], capture_output=True, text=True)
         require(p.returncode == 0, 'enginex-debloat --root failed: ' + (p.stdout + p.stderr)[-800:])
         for source in sorted(root.rglob('*')):

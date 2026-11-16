@@ -126,7 +126,7 @@ if real_dir "$units"; then
         ! real_dir "$units/$d" || rm -f "$root$units/$d/99-enginex.conf"
     done
 fi
-if [ -z "$root" ] && grep -q " $legacy_engine_mount /usr/Engine/Scripts/engine " /proc/self/mountinfo 2>/dev/null; then
+if [ -z "$root" ] && grep -q ' /enginex-engine-script /usr/Engine/Scripts/engine ' /proc/self/mountinfo 2>/dev/null; then
     umount /usr/Engine/Scripts/engine 2>/dev/null || :
 fi
 ! real_dir /run || rm -f "$root/run/enginex-engine-script"

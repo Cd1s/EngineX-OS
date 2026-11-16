@@ -408,7 +408,7 @@ class FilesystemTests(unittest.TestCase):
         self.assertTrue(old.is_symlink())
         self.assertEqual((new/'settings.conf').read_text(), 's')
         self.assertEqual((new/'extra').read_text(), 'e')
-        aside = list(new.glob('legacy-' + legacy.DATA_NAME + '.*'))
+        aside = list(new.glob('legacy-data.*'))
         self.assertEqual([(a/'settings.conf').read_text() for a in aside], ['older'])
 
     def test_234_prepare_takes_back_the_layout_a_downgrade_to_5302_handed_back(self):
@@ -732,7 +732,8 @@ class FilesystemTests(unittest.TestCase):
         overlay = Path(__file__).resolve().parents[2]/'rootfs-overlay'
         self.fs.write('/usr/Engine/Scripts/engine', b'#!/bin/sh\n/usr/bin/az01-ethernet-speed 100\n'
                       b'\t\t\tUPDATE_FILE=$(cat /tmp/update-file-path)\n', 0o755)
-        az.inject(self.fs, b'key', overlay=overlay)
+        with unittest.mock.patch.dict(os.environ, {'ENGINEX_MIGRATION': ''}):
+            az.inject(self.fs, b'key', overlay=overlay)
         self.assertIn(b'az01-ethernet-speed 1000', self.fs.read('/usr/Engine/Scripts/engine'))
         self.assertIn(b'\t\t\t' + GUARDED_UPDATE_FILE, self.fs.read('/usr/Engine/Scripts/engine'))
         self.assertIn(b'0.0.0.0 telemetry.inmusicbrands.com', self.fs.read('/etc/hosts'))

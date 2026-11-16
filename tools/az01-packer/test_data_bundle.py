@@ -761,7 +761,7 @@ exec REAL "$@"
         self.assertTrue((data / (legacy.DATA_NAME)).is_symlink())
         self.assertEqual((new / 'authorized_keys').read_text(), 'new')  # enginex wins
         self.assertEqual((new / 'a.txt').read_text(), 'A')
-        leftovers = list(new.glob(('legacy-' + legacy.DATA_NAME + '.*')))
+        leftovers = list(new.glob('legacy-data.*'))
         self.assertEqual(len(leftovers), 1)
         self.assertEqual((leftovers[0] / 'authorized_keys').read_text(), 'old')
 
@@ -1069,6 +1069,27 @@ pkill() { printf 'pkill %s\\n' "$*" >> "$KILLED"; }
         self.assertFalse((run_dir / 'systemd/system/engine.service.d/99-enginex.conf').exists())
         self.assertFalse(run_dir.exists() and any(run_dir.rglob('*.service')))
         self.assertEqual(self.host_commands.read_text(), '')
+
+    def test_234_leave_unmounts_only_this_releases_engine_script(self):
+        root = self.tmp / 'leave-mount'
+        (root / 'run/systemd/system').mkdir(parents=True)
+        engine = root / 'Engine-script'
+        mounts = root / 'mountinfo'
+        leave = root / 'leave.sh'
+        leave.write_text(bdb.LEAVE_SH.replace('/run', str(root / 'run'))
+                         .replace('/data/enginex', str(root / 'data/enginex'))
+                         .replace('/usr/Engine/Scripts/engine', str(engine))
+                         .replace('/proc/self/mountinfo', str(mounts))
+                         .replace('/proc/1/comm', str(self.pid1_systemd())))
+        for source, unmount in [('/enginex-engine-script', True), ('/foreign-engine-script', False)]:
+            with self.subTest(source=source):
+                mounts.write_text(f'1 0 0:1 {source} {engine} rw - tmpfs tmpfs rw\n')
+                res = subprocess.run(['sh', str(leave), '--no-reboot'], env=self.env,
+                                     capture_output=True, text=True)
+                commands = self.host_commands.read_text()
+                self.host_commands.write_text('')
+                self.assertEqual(res.returncode, 0, res.stderr)
+                self.assertEqual(f'umount {engine}' in commands, unmount, commands)
 
     def test_234_leave_step_removes_only_this_releases_units(self):
         """#234: the leave step before an older release is applied removes this release's enginex units,

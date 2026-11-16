@@ -46,7 +46,7 @@ if [ -d "$old" ] && [ ! -L "$old" ]; then
             [ -e "$e" ] || [ -L "$e" ] || continue
             [ -e "$new/${e##*/}" ] || [ -L "$new/${e##*/}" ] || mv "$e" "$new/"
         done
-        rmdir "$old" 2>/dev/null || mv "$old" "$new/legacy-sc5000-custom.$$"
+        rmdir "$old" 2>/dev/null || mv "$old" "$new/legacy-data.$$"
     fi
 fi
 [ -e "$new" ] || [ -L "$new" ] || mkdir -p "$new"
