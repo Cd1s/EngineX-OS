@@ -84,6 +84,9 @@ func id3Frames(t *testing.T, file []byte) (version byte, frames map[string][]byt
 		if tag.version == 4 {
 			size = int(f[4])<<21 | int(f[5])<<14 | int(f[6])<<7 | int(f[7])
 		}
+		if size > len(f)-10 {
+			t.Fatalf("frame %q says %d bytes, the tag has %d left: frames %q", f[:4], size, len(f)-10, frames)
+		}
 		frames[string(f[:4])] = f[10 : 10+size]
 		f = f[10+size:]
 	}
@@ -143,5 +146,68 @@ func TestCopyTaggedMP3(t *testing.T) {
 	}
 	if left, _ := filepath.Glob(filepath.Join(dir, ".part-*")); len(left) != 0 {
 		t.Fatalf("temporary files left: %s", strings.Join(left, ", "))
+	}
+}
+
+// A frame's own last byte can be zero: UTF-16 text ends in one. The writer cut
+// every zero from the end of the tag as padding, so the frame added behind it
+// started inside the old frame's body and could not be read. The frames are
+// now walked: what is added goes behind the last whole frame, the padding
+// goes, and the audio stays byte for byte.
+func TestCopyTaggedKeepsEveryByte(t *testing.T) {
+	dir := t.TempDir()
+	audio := []byte{0xff, 0xfb, 0x90, 0x00, 'm', 'p', '3', 0, 0}
+	artist := id3Frame(3, "TPE1", id3Text(3, "DJ")) // 01 ff fe 'D' 00 'J' 00
+	for name, padding := range map[string]int{"no padding": 0, "padding": 64} {
+		frames := append(append([]byte{}, artist...), bytes.Repeat([]byte{0}, padding)...)
+		src := filepath.Join(dir, "in.mp3")
+		os.WriteFile(src, append(append(append([]byte{'I', 'D', '3', 3, 0, 0}, synchsafe(len(frames))...), frames...), audio...), 0o644)
+		dst := filepath.Join(dir, "out.mp3")
+		os.Remove(dst)
+		if tagged, err := CopyTagged(src, dst, "Song", "ignored: the file has an artist", ""); err != nil || !tagged {
+			t.Fatalf("%s: CopyTagged = %v, %v", name, tagged, err)
+		}
+		file, _ := os.ReadFile(dst)
+		version, got, rest := id3Frames(t, file)
+		if version != 3 || !bytes.Equal(got["TPE1"], id3Text(3, "DJ")) || !bytes.Equal(got["TIT2"], id3Text(3, "Song")) {
+			t.Fatalf("%s: frames %q", name, got)
+		}
+		if !bytes.Equal(rest, audio) {
+			t.Fatalf("%s: audio %x, want %x", name, rest, audio)
+		}
+	}
+	// The cover writer shares the code.
+	var out bytes.Buffer
+	in := append(append(append([]byte{'I', 'D', '3', 3, 0, 0}, synchsafe(len(artist))...), artist...), audio...)
+	if err := insertAPIC(bytes.NewReader(in), &out, []byte("jpeg"), "image/jpeg"); err != nil {
+		t.Fatal(err)
+	}
+	if _, got, rest := id3Frames(t, out.Bytes()); !bytes.Equal(got["TPE1"], id3Text(3, "DJ")) || !bytes.HasSuffix(got["APIC"], []byte("jpeg")) || !bytes.Equal(rest, audio) {
+		t.Fatalf("cover: frames %q rest %x", got, rest)
+	}
+	// A frame that runs past its tag is not written behind: no file at all.
+	broken := append([]byte{'I', 'D', '3', 3, 0, 0, 0, 0, 0, 12}, append([]byte("TPE1\x00\x00\x00\x63\x00\x00ab"), audio...)...)
+	src := filepath.Join(dir, "broken.mp3")
+	os.WriteFile(src, broken, 0o644)
+	if tagged, err := CopyTagged(src, filepath.Join(dir, "broken-out.mp3"), "Song", "", ""); err == nil {
+		t.Fatalf("a broken tag was written to: tagged %v", tagged)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "broken-out.mp3")); err == nil {
+		t.Fatal("a file was left for a broken tag")
+	}
+
+	// FLAC: the audio and every other block come through unchanged, zeros included.
+	info := bytes.Repeat([]byte{7}, 34)
+	flacAudio := "\xff\xf8AUDIO\x00\x00\x00"
+	src = filepath.Join(dir, "in.flac")
+	os.WriteFile(src, flacFile(flacAudio, flacMeta{0, info}, flacMeta{4, vorbis("libFLAC", "ARTIST=DJ\x00")}, flacMeta{1, bytes.Repeat([]byte{0}, 16)}), 0o644)
+	dst := filepath.Join(dir, "out.flac")
+	if tagged, err := CopyTagged(src, dst, "Song", "DJ", ""); err != nil || !tagged {
+		t.Fatalf("FLAC: CopyTagged = %v, %v", tagged, err)
+	}
+	file, _ := os.ReadFile(dst)
+	want := flacFile(flacAudio, flacMeta{0, info}, flacMeta{4, vorbis("EngineX", "TITLE=Song", "ARTIST=DJ")}, flacMeta{1, bytes.Repeat([]byte{0}, 16)})
+	if !bytes.Equal(file, want) {
+		t.Fatalf("FLAC copy:\n got %q\nwant %q", file, want)
 	}
 }

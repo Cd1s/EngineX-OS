@@ -335,5 +335,5 @@ func insertAPIC(in io.Reader, out io.Writer, cover []byte, mime string) error {
 	body.WriteByte(3) // front cover
 	body.WriteByte(0) // no description
 	body.Write(cover)
-	return appendID3(in, out, func(version byte) []byte { return id3Frame(version, "APIC", body.Bytes()) })
+	return appendID3(in, out, func(tag id3Tag) []byte { return id3Frame(tag.version, "APIC", body.Bytes()) })
 }

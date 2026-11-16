@@ -57,11 +57,12 @@ func CopyTagged(src, dst, title, artist, album string) (bool, error) {
 		return true, rewriteFile(src, dst, func(in io.Reader, out io.Writer) error { return tagFLAC(in, out, fields) })
 	}
 	return true, rewriteFile(src, dst, func(in io.Reader, out io.Writer) error {
-		return appendID3(in, out, func(version byte) []byte {
+		return appendID3(in, out, func(tag id3Tag) []byte {
 			var frames []byte
 			for i, id := range []string{"TIT2", "TPE1", "TALB"} {
-				if v := fields[i][1]; v != "" {
-					frames = append(frames, id3Frame(version, id, id3Text(version, v))...)
+				// A frame the file has is kept: a tag holds one of each.
+				if v := fields[i][1]; v != "" && !id3HasFrame(tag, id) {
+					frames = append(frames, id3Frame(tag.version, id, id3Text(tag.version, v))...)
 				}
 			}
 			return frames
@@ -213,8 +214,29 @@ func id3Frame(version byte, id string, body []byte) []byte {
 	return append(append(frame, 0, 0), body...)
 }
 
+// id3FramesEnd is where the tag's frames end and its padding starts, found by
+// walking whole frames: a frame's own last bytes may be zero (UTF-16 text ends
+// in one), so zeros cut from the end of the tag are not all padding.
+func id3FramesEnd(tag id3Tag) (int, error) {
+	f, end := tag.frames, 0
+	for end < len(f) && f[end] != 0 {
+		if len(f)-end < 10 {
+			return 0, errors.New("tags: a broken ID3 frame header")
+		}
+		size := int(binary.BigEndian.Uint32(f[end+4 : end+8]))
+		if tag.version == 4 {
+			size = int(f[end+4]&0x7f)<<21 | int(f[end+5]&0x7f)<<14 | int(f[end+6]&0x7f)<<7 | int(f[end+7]&0x7f)
+		}
+		if size < 0 || size > len(f)-end-10 {
+			return 0, errors.New("tags: an ID3 frame runs past its tag")
+		}
+		end += 10 + size
+	}
+	return end, nil
+}
+
 // appendID3 adds frames to the file's ID3v2 tag, or gives it a new tag.
-func appendID3(in io.Reader, out io.Writer, frames func(version byte) []byte) error {
+func appendID3(in io.Reader, out io.Writer, frames func(tag id3Tag) []byte) error {
 	r := bufio.NewReader(in)
 	tag := id3Tag{version: 3}
 	if head, err := r.Peek(3); err == nil && string(head) == "ID3" {
@@ -223,7 +245,11 @@ func appendID3(in io.Reader, out io.Writer, frames func(version byte) []byte) er
 		}
 	}
 	// Padding after the old frames would swallow a frame added behind it.
-	old, added := bytes.TrimRight(tag.frames, "\x00"), frames(tag.version)
+	end, err := id3FramesEnd(tag)
+	if err != nil {
+		return err
+	}
+	old, added := tag.frames[:end], frames(tag)
 	if len(old)+len(added) >= 1<<28 {
 		return errors.New("tags: tag too large")
 	}
@@ -232,6 +258,6 @@ func appendID3(in io.Reader, out io.Writer, frames func(version byte) []byte) er
 			return err
 		}
 	}
-	_, err := io.Copy(out, r)
+	_, err = io.Copy(out, r)
 	return err
 }
