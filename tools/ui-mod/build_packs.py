@@ -1054,12 +1054,13 @@ SERVICES_MAIN = """
 	// rather than through the stock policy's three-view/focus-dependent action.
 	readonly property var scViewCycleRef: Planck.createProperty("EngineXCycleView", false, 3)
 	readonly property var scViewCycleProperty: scViewCycleRef && Planck.getProperty("/GUI/Scripted/EngineXCycleView")
-	// The button triggers this action from the controller's QML engine, through its
-	// own property object. What reaches this engine is the property's state:
-	// stateTrueCount and stateChanged, which stock's notifier counts (stock receives
-	// hardware actions only this way). A Connections on the translator's own
-	// "triggered" ran for a trigger from this engine (sandbox) but not for the
-	// button on the left SC5000.
+	// The button sets this action's state from the controller's QML engine (the MIDI
+	// thread, its own property object), as stock's GlobalAction sets /GUI/CloseDialogs:
+	// state = true stays latched until stock's notifier, enabled only while the state
+	// is true, counts it and resets it, so one press is one step. A trigger() from
+	// there is a pulse that is over before this engine reads the state, and its
+	// "triggered" fires only on the calling object: neither reached this engine on
+	// the left SC5000. The keyboard's trigger() runs in this engine and is seen.
 	ActionTranslatorStateChangeNotifier {
 		prop: root.scViewCycleProperty || null
 		onChanged: root.scViewSelect(root.scViewActive % 5 + 1)
@@ -7221,12 +7222,14 @@ def edits(dev: bool):
         # #99: five views kept by stream-sync (scView* in EmbeddedMain) and Save View.
         out["ControlSurfaceModules/ControlSurfaceModules/View.qml"] = [
             ('doubleEnabled: true', 'doubleEnabled: !globalConfig.shift'),
-            ('"/Engine/ShiftViewBehaviour/Shift/SinglePress"', '"/GUI/Scripted/EngineXCycleView"'),
+            ('Planck.getProperty("/Engine/ShiftViewBehaviour/Shift/SinglePress").translator.trigger()',
+             'Planck.getProperty("/GUI/Scripted/EngineXCycleView").translator.state = true'),
         ]
         # SYSTEM ONE assigns Shift+Menu to Navigation's CycleView action.
         out["ControlSurfaceModules/ControlSurfaceModules/Navigation.qml"] = [(
             'Planck.getProperty(module.basePath + navigationButton.secondaryPath).translator.trigger()',
-            'Planck.getProperty(navigationButton.secondaryPath === "CycleViewPress" ? "/GUI/Scripted/EngineXCycleView" : module.basePath + navigationButton.secondaryPath).translator.trigger()',
+            'if (navigationButton.secondaryPath === "CycleViewPress") Planck.getProperty("/GUI/Scripted/EngineXCycleView").translator.state = true\n'
+            '                            else Planck.getProperty(module.basePath + navigationButton.secondaryPath).translator.trigger()',
         )]
         out[ROOT + "EmbeddedMain.qml"].append((
             'onTriggered: Planck.getProperty("/Engine/ShiftViewBehaviour/Shift/SinglePress").translator.trigger()',

@@ -20,16 +20,22 @@ function action(text, name) {
 const functions = [...source.main.matchAll(/^\tfunction (scView\w+)\([^\n]*\) \{[\s\S]*?^\t\}/gm)]
     .map(m => m[0]).join('\n');
 const changed = source.main.match(/^\t\tfunction onCurrentViewChanged\(\) \{[\s\S]*?^\t\t\}/m)[0];
-// The View button triggers from the controller's QML engine, through its own
-// property object: the GUI engine sees only the property's state (stateTrueCount,
-// stateChanged), which stock's ActionTranslatorStateChangeNotifier turns into
-// changed(). A "triggered" signal fires only on the object trigger() was called on,
-// so the fixture gives the controller its own object (`controller` below).
+// The View button acts from the controller's QML engine (the MIDI thread), through
+// its own property object: the GUI engine sees only the property's state, which
+// stock's ActionTranslatorStateChangeNotifier turns into changed(). A "triggered"
+// signal fires only on the object trigger() was called on, so the fixture gives the
+// controller its own object (`controller` below).
 const cycle = source.main.match(/ActionTranslatorStateChangeNotifier \{\n\t\tprop: root\.scViewCycleProperty \|\| null\n\t\tonChanged: (root\.scViewSelect\([^\n]+)\n/);
 // A receiver on the GUI object's own "triggered" (before the fix).
 const ownTriggered = source.main.match(/function onTriggered\(\) \{ (root\.scViewSelect\([^\n]+) \}/);
 const timerStart = source.main.indexOf('\tTimer {', source.main.indexOf('function scViewSelect('));
 const timer = body(source.main, source.main.indexOf('onTriggered:', timerStart));
+// Stock's notifier, as the model below runs it: enabled only while the state is
+// true, one changed() per new stateTrueCount, then it resets the state.
+for (const line of ['enabled: prop && prop.translator && prop.translator.state',
+    'prop.translatorType === 3', 'if (previousStateTrueCount !== stateTrueCount) {',
+    'previousStateTrueCount = stateTrueCount', 'prop.translator.state = false'])
+    assert.ok(source.notifier.includes(line), line);
 const keyboard = source.main.match(/shortcut: "Shift\+V"\s+onTriggered: ([^\n]+)/)[1];
 const prefs = source.main.match(/readonly property var scViewPrefs:\s*(\[\[[\s\S]*?\]\])/)[1];
 const names = ['deckStyle', 'deckLayout', 'deckCount', 'waveformCount', 'waveformOrientation'];
@@ -101,29 +107,56 @@ function fixture(board, mode, orientation, saved) {
     c.viewStateController = vsc;
     ctx.scViewCtrl = vsc;
     ctx.root = ctx;
-    // One state per property, shared by every engine's object for it.
+    // One state per property, shared by every engine's object for it; each object has
+    // its own translator. trigger() is a pulse on the caller's translator: its
+    // "triggered" and its true state exist only inside the call, in the caller's
+    // thread. The GUI's notifier sees such a pulse from its own engine (the keyboard),
+    // but one from the MIDI thread is over before the GUI reads the state (left
+    // SC5000: nothing happened). state = true, as stock's GlobalAction sets
+    // /GUI/CloseDialogs, stays true until the notifier resets it.
     const shared = {};
-    const object = (path, gui) => ({ translatorType: 3, translator: { trigger() {
-        events.push(path);
-        const st = shared[path] ||= { stateTrueCount: 0, seen: 0 };
-        st.stateTrueCount++;
-        if (path === '/GUI/Scripted/EngineXCycleView') {
-            // "triggered" on the object trigger() was called on: only the GUI's own.
-            if (gui && ownTriggered) vm.runInContext(ownTriggered[1], ctx);
-            // The shared state reaches the GUI's notifier, whichever engine triggered.
-            if (cycle && st.seen !== st.stateTrueCount) {
-                st.seen = st.stateTrueCount;
-                vm.runInContext(cycle[1], ctx);
-            }
-        } else if (path.endsWith('/Shift/SinglePress') || path.endsWith('/CycleViewPress')) {
-            // Stock policy has only three presets; it does not know views.json.
-            vsc.currentView = (vsc.currentView + 1) % 3;
-        }
-    } } });
+    const object = (path, gui) => {
+        const st = shared[path] ||= { state: false, stateTrueCount: 0, previous: 0 };
+        const set = value => {
+            if (value && !st.state) st.stateTrueCount++;
+            st.state = value;
+        };
+        // Stock's notifier in the GUI engine, on a state change it reads.
+        const notify = () => {
+            if (path !== '/GUI/Scripted/EngineXCycleView' || !cycle || !st.state) return;
+            if (st.previous === st.stateTrueCount) return;
+            st.previous = st.stateTrueCount;
+            vm.runInContext(cycle[1], ctx);
+            set(false);
+        };
+        return { translatorType: 3, notify, translator: {
+            get state() { return st.state; },
+            set state(value) {
+                events.push(path);
+                const was = st.state;
+                set(!!value);
+                if (st.state !== was) notify();
+            },
+            trigger() {
+                events.push(path);
+                if (path === '/GUI/Scripted/EngineXCycleView') {
+                    if (gui && ownTriggered) vm.runInContext(ownTriggered[1], ctx);
+                    set(true);
+                    if (gui) notify();
+                    set(false);
+                    if (!gui) notify();
+                } else if (path.endsWith('/Shift/SinglePress') || path.endsWith('/CycleViewPress')) {
+                    // Stock policy has only three presets; it does not know views.json.
+                    vsc.currentView = (vsc.currentView + 1) % 3;
+                }
+            },
+        } };
+    };
     // The controller's assignment QML gets its own objects (`controller`).
     const controller = {};
     ctx.Planck = { getProperty(path) { return controller[path] ||= object(path, false); } };
-    ctx.scViewCycleProperty = object('/GUI/Scripted/EngineXCycleView', true);
+    const gui = object('/GUI/Scripted/EngineXCycleView', true);
+    ctx.scViewCycleProperty = gui;
     vm.createContext(ctx);
     vm.runInContext(functions + '\n' + changed + '\nscViewPrefs = ' + prefs, ctx);
     function run(code) { vm.runInContext(code, ctx); }
@@ -165,7 +198,9 @@ function fixture(board, mode, orientation, saved) {
     run('function setValue(channel, value, assignmentEnabled) {' +
         body(source.combo, source.combo.indexOf('function setValue(')) + '}');
     start();
-    return { ctx, run, events, resets, persisted: () => persisted,
+    return { ctx, run, events, resets, persisted: () => persisted, gui,
+        // What the controller reads back: the state its last press set.
+        latched: () => (controller['/GUI/Scripted/EngineXCycleView'] || gui).translator.state,
         restart() {
             ctx.scViewActive = 1; ctx.scViews = {}; ctx.scViewsRead = false; ctx.scViewReady = false;
             start();
@@ -198,6 +233,11 @@ for (const board of boards) {
                 assert.equal(f.ctx.scViewActive, want, label);
                 assert.equal(String(f.ctx.scUIScale), String(80 + want * 5), label + ' layout');
                 assert.equal(f.persisted().active, want, label + ' persisted');
+                // The notifier reset the state: the next press latches it again. A
+                // repeated state change for the same press is not another step.
+                assert.equal(f.latched(), false, label + ' reset');
+                f.gui.notify();
+                assert.equal(f.ctx.scViewActive, want, label + ' one step');
             }
             const active = f.ctx.scViewActive;
             f.restart();

@@ -31,6 +31,7 @@ class ShiftViewTest(unittest.TestCase):
                         'navigation': (root / modules / 'Navigation.qml').read_text()
                         if (root / modules / 'Navigation.qml').exists() else (QRC / modules / 'Navigation.qml').read_text(),
                         'combo': (QRC / 'airAssignments/InputAssignment/ComboActionOutput.qml').read_text(),
+                        'notifier': (QRC / 'Skins/Common/Items/ActionTranslatorStateChangeNotifier.qml').read_text(),
                     }
                     result = subprocess.run([
                         'node', str(Path(__file__).with_name('shift-view-fixture.js')),
