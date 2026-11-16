@@ -19,7 +19,12 @@
 <br>
 
 **EngineX OS 5.3.0.5** is a custom system rebuilt on the official Engine OS 5.3.0+ base for all 16 Denon DJ, Numark, and Rane standalone units:
-`SC5000` · `SC5000M` · `SC6000` · `SC6000M` · `PRIME 4` · `PRIME 2` · `PRIME GO` · `Mixstream Pro` · `SC LIVE 4` · `SC LIVE 2` · `PRIME 4+` · `PRIME GO+` · `Mixstream Pro+` · `Mixstream Pro Go` · `PRIME 4 G2` · `Rane SYSTEM ONE`.
+
+| Generation | Architecture | Linux | Models (board) |
+| :--- | :--- | :--- | :--- |
+| First generation, 8 models | 32-bit (ARM) | 6.6.119-rt | `SC5000 Prime` (JP07) · `SC5000M Prime` (JP08) · `PRIME GO` (JP11) · `SC6000 Prime` (JP13) · `SC6000M Prime` (JP14) · `PRIME 4` (JC11) · `PRIME 2` (JC16) · `Mixstream Pro` (NH08) |
+| Second generation, 6 models | 32-bit (ARM) | 6.18-rt | `PRIME 4+` (JC11S) · `PRIME GO+` (JP11S) · `SC LIVE 2` (JP20) · `SC LIVE 4` (JP21) · `Mixstream Pro Go` (NH10) · `Mixstream Pro+` (NH08S) |
+| Second generation, 2 models | 64-bit (ARM64) | 6.18-rt | `PRIME 4 G2` (JP24) · `Rane SYSTEM ONE` (RMZ2) |
 
 All 16 models now use unified `*-Update.img` packages: the 8 first-generation units flash directly from a USB stick, while the 8 second-generation units connect to a computer once with `EngineX-Installer` for a **one-click `.img` update-chain unlock + flash** and update from a USB stick or on-screen OTA just like 1st-gen units from then on (see [How to Install & Update](#install)).
 
