@@ -7,6 +7,7 @@ import (
 	"crypto/cipher"
 	"crypto/hmac"
 	"crypto/pbkdf2"
+	"crypto/rand"
 	"crypto/sha512"
 	"encoding/binary"
 	"errors"
@@ -298,4 +299,114 @@ func decryptSQLCipher4ToTemp(ctx context.Context, srcPath string, passphrase []b
 	}
 	ok = true
 	return tmpName, nil
+}
+
+// ReadSQLCipherSalt reads the 16-byte page-1 salt from an existing SQLCipher database.
+func ReadSQLCipherSalt(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	salt := make([]byte, sqlcipherSaltSize)
+	if _, err := io.ReadFull(f, salt); err != nil {
+		return nil, fmt.Errorf("sqlcipher: read salt: %w", err)
+	}
+	return salt, nil
+}
+
+// EncryptSQLCipher4 encrypts a plaintext SQLite database (with 4096-byte pages
+// and 80-byte reserve space) using SQLCipher 4 defaults (PBKDF2-HMAC-SHA512,
+// 256000 iterations, AES-256-CBC, per-page random IV + HMAC-SHA512 trailer).
+func EncryptSQLCipher4(ctx context.Context, r io.Reader, size int64, w io.Writer, salt []byte, passphrase []byte) error {
+	if size < sqlcipherPageSize || size%sqlcipherPageSize != 0 {
+		return fmt.Errorf("sqlcipher: invalid database size %d (must be a positive multiple of %d)", size, sqlcipherPageSize)
+	}
+	if size > MaxSQLCipherBytes {
+		return fmt.Errorf("sqlcipher: database size %d exceeds %d-byte limit", size, MaxSQLCipherBytes)
+	}
+	if len(salt) != sqlcipherSaltSize {
+		return fmt.Errorf("sqlcipher: invalid salt length %d", len(salt))
+	}
+	if len(passphrase) == 0 {
+		return errors.New("sqlcipher: empty passphrase")
+	}
+
+	encKey, err := pbkdf2.Key(sha512.New, string(passphrase), salt, sqlcipherKDFIter, 32)
+	if err != nil {
+		return fmt.Errorf("sqlcipher: derive encryption key: %w", err)
+	}
+	defer clear(encKey)
+
+	var macSalt [sqlcipherSaltSize]byte
+	for i := 0; i < sqlcipherSaltSize; i++ {
+		macSalt[i] = salt[i] ^ sqlcipherHMACSaltMask
+	}
+	macKey, err := pbkdf2.Key(sha512.New, string(encKey), macSalt[:], sqlcipherFastKDFIter, 32)
+	if err != nil {
+		return fmt.Errorf("sqlcipher: derive HMAC key: %w", err)
+	}
+	defer clear(macKey)
+
+	block, err := aes.NewCipher(encKey)
+	if err != nil {
+		return fmt.Errorf("sqlcipher: init AES-256: %w", err)
+	}
+
+	mac := hmac.New(sha512.New, macKey)
+	var inPage, outPage [sqlcipherPageSize]byte
+	var sumBuf [sqlcipherHMACSize]byte
+	var pgLE [4]byte
+	autoVacuum := false
+
+	totalPages := uint32(size / sqlcipherPageSize)
+	const usableEnd = sqlcipherPageSize - sqlcipherReserveSize // 4016
+	const ivEnd = usableEnd + sqlcipherIVSize                  // 4032
+
+	for pgno := uint32(1); pgno <= totalPages; pgno++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if _, err := io.ReadFull(r, inPage[:]); err != nil {
+			return fmt.Errorf("sqlcipher: read plaintext page %d: %w", pgno, err)
+		}
+
+		clear(outPage[:])
+		off := 0
+		if pgno == 1 {
+			if string(inPage[:sqlcipherSaltSize]) != sqliteHeaderMagic {
+				return errors.New("sqlcipher: plaintext page 1 missing SQLite header")
+			}
+			if rawPageSz := binary.BigEndian.Uint16(inPage[16:18]); rawPageSz != sqlcipherPageSize {
+				return fmt.Errorf("sqlcipher: unsupported SQLite page size %d", rawPageSz)
+			}
+			if inPage[20] != sqlcipherReserveSize {
+				return fmt.Errorf("sqlcipher: unsupported SQLite reserve size %d (want %d)", inPage[20], sqlcipherReserveSize)
+			}
+			autoVacuum = binary.BigEndian.Uint32(inPage[52:56]) != 0
+			copy(outPage[:sqlcipherSaltSize], salt)
+			off = sqlcipherSaltSize
+		} else if autoVacuum && isAllZero(inPage[:]) {
+			if _, err := w.Write(outPage[:]); err != nil {
+				return fmt.Errorf("sqlcipher: write page %d: %w", pgno, err)
+			}
+			continue
+		}
+
+		if _, err := rand.Read(outPage[usableEnd:ivEnd]); err != nil {
+			return fmt.Errorf("sqlcipher: generate IV for page %d: %w", pgno, err)
+		}
+		cipher.NewCBCEncrypter(block, outPage[usableEnd:ivEnd]).CryptBlocks(outPage[off:usableEnd], inPage[off:usableEnd])
+
+		mac.Reset()
+		_, _ = mac.Write(outPage[off:ivEnd])
+		binary.LittleEndian.PutUint32(pgLE[:], pgno)
+		_, _ = mac.Write(pgLE[:])
+		copy(outPage[ivEnd:sqlcipherPageSize], mac.Sum(sumBuf[:0]))
+
+		if _, err := w.Write(outPage[:]); err != nil {
+			return fmt.Errorf("sqlcipher: write page %d: %w", pgno, err)
+		}
+	}
+	return nil
 }
