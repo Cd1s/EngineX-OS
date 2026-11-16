@@ -4114,33 +4114,64 @@ SERVICES_MAIN = """
 	// Progress for a streamed row's Stems. Engine renders them from the imported
 	// local copy and shows that render on the copy's own row only, so the row
 	// that was tapped and the "Stems not ready" row of the service's Stems list
-	// said nothing for minutes. scStemRows maps the gateway ids of those two
-	// rows to "wait" (download and import) or "render"; the track list then
+	// said nothing for minutes. scStemRows marks the gateway ids of those two
+	// rows: "wait" while the file is downloaded and imported, then the track's
+	// place (1, 2, ...) in this run of Engine's render queue. The track list
 	// draws Engine's own queued icon, spinner, progress bar and percentage on
-	// them, from the progress of Engine's own render queue. Nothing is polled.
+	// them from Engine's own queue counters. Nothing is polled.
+	//
+	// Each track is followed by its own place. Engine's queue runs in order:
+	// totalRenderStemsQueueCount is how many tracks this run has taken and
+	// renderStemsQueueCount how many of them are left, the one being rendered
+	// included (left deck: 1/1 while a single track rendered, 0/0 after). So
+	// total - left tracks are over: a row at a place up to that is finished
+	// (or failed) and shows nothing, the next place is being rendered, later
+	// places wait. A finished row never takes another track's progress.
 	property var scStemRows: ({})
 	readonly property var scStemQueue: Planck.librarianController.stemsQueueManager || null
-	readonly property bool scStemRendering: !!scStemQueue && scStemQueue.totalRenderStemsQueueCount > 0
+	readonly property int scStemTotal: scStemQueue ? scStemQueue.totalRenderStemsQueueCount : 0
+	readonly property int scStemCount: scStemQueue ? scStemQueue.renderStemsQueueCount : 0
+	readonly property bool scStemRendering: scStemTotal > 0
 	readonly property real scStemProgress: scStemRendering ? (scStemQueue.renderProgress || 0) : 0
+	// Engine's progress value is one number for its queue. It is a track's own
+	// progress while that track is alone in the queue, the only case seen on a
+	// deck: only then a row gets a percentage and a time.
+	readonly property bool scStemAlone: scStemTotal === 1
+	// A streamed row's Stems are in Engine's queue: rendered now, or waiting in it.
+	readonly property bool scStemStreamed: Object.keys(scStemRows).some(id => scStemRows[id] >= 1 && scStemRows[id] <= scStemTotal && scStemPlace(scStemRows[id], scStemTotal, scStemCount) !== "")
 	property var scStemSeen: null // when and where this queue's progress was first seen
 	property string scStemLeft: ""
-	function scStemMark(ids, state) {
+	function scStemMark(ids, mark) {
 		const rows = Object.assign({}, scStemRows)
 		for (const id of ids) {
 			if (!id) continue
-			if (state) rows[id] = state
+			if (mark) rows[id] = mark
 			else delete rows[id]
 		}
 		scStemRows = rows
 	}
+	// Handed to Engine: the track is the next one in this run of the queue. A
+	// mark beyond the queue's size is a track Engine never took (refused at its
+	// own check): it is forgotten, or it would share this track's place.
+	function scStemHand(ids) {
+		const total = scStemTotal > 0 ? scStemTotal : 0
+		scStemMark(Object.keys(scStemRows).filter(id => scStemRows[id] > total), "")
+		scStemMark(ids, total + 1)
+	}
+	// What a mark means now: "" (nothing, or its track is over), "wait" or "render".
+	function scStemPlace(mark, total, left) {
+		if (mark === "wait") return "wait"
+		if (!(mark >= 1)) return ""
+		if (!(total > 0)) return "wait" // Engine's queue has not started
+		const done = total - left
+		return mark <= done ? "" : mark === done + 1 ? "render" : "wait"
+	}
 	// A track list row's state, by Engine's id for the row.
 	function scStemState(uid) {
-		const rows = scStemRows, rendering = scStemRendering
+		const rows = scStemRows, total = scStemTotal, left = scStemCount
 		if (!uid || !Object.keys(rows).length) return ""
 		const m = /uri=streaming:\\/\\/TIDAL\\/Track\\/(\\d+)/.exec(Planck.librarianController.collectionController.getTrackUrisFromUniversalIds([uid]) || "")
-		const state = m && rows[m[1]] || ""
-		// Handed to Engine, whose queue has not started (or has just ended): still waiting.
-		return state === "render" && !rendering ? "wait" : state
+		return m ? scStemPlace(rows[m[1]], total, left) : ""
 	}
 	// What is left at the speed seen so far; nothing before 10 s and 1 % of it.
 	function scStemEta(done, seconds, left) {
@@ -4148,29 +4179,32 @@ SERVICES_MAIN = """
 		const minutes = Math.round(left * seconds / done / 60)
 		return minutes < 1 ? scT("<1 min") : scT("~%1 min").arg(minutes)
 	}
-	// The length cell of such a row.
+	// The length cell of such a row. Without a progress of its own (waiting, or
+	// rendered with other tracks in the queue: progress -1) it says "Stems…".
 	function scStemText(state, progress, left) {
-		if (state !== "render") return scT("Stems") + "…"
+		if (state !== "render" || !(progress >= 0)) return scT("Stems") + "…"
 		return Math.round(progress * 100) + "%" + (left ? " · " + left : "")
 	}
 	onScStemProgressChanged: {
 		const p = scStemProgress, now = Date.now()
-		if (!(p > 0)) { scStemSeen = null; scStemLeft = ""; return }
+		if (!(p > 0) || !scStemAlone) { scStemSeen = null; scStemLeft = ""; return }
 		if (!scStemSeen || p < scStemSeen.p) { scStemSeen = {t: now, p: p, step: -1}; scStemLeft = "" }
 		else scStemLeft = scStemEta(p - scStemSeen.p, (now - scStemSeen.t) / 1000, 1 - p)
 		const step = Math.floor(p * 4) // one journal line per quarter
 		if (step !== scStemSeen.step) { scStemSeen.step = step; console.warn("EngineX stems progress=" + Math.round(p * 100) + "% left=" + scStemLeft) }
 	}
+	// One journal line per change of the queue: what Engine reported, and the places.
+	onScStemCountChanged: console.warn("EngineX stems queue=" + scStemCount + "/" + scStemTotal + " progress=" + Math.round(scStemProgress * 100) + "% rows=" + JSON.stringify(scStemRows))
 	onScStemRenderingChanged: {
-		console.warn("EngineX stems step=" + (scStemRendering ? "render" : "idle") + " queue=" + (scStemQueue ? scStemQueue.renderStemsQueueCount + "/" + scStemQueue.totalRenderStemsQueueCount : "none") + " rows=" + Object.keys(scStemRows).length)
-		// The queue is empty: rendered, cleared by the user, or refused by Engine.
-		if (!scStemRendering) scStemMark(Object.keys(scStemRows).filter(id => scStemRows[id] === "render"), "")
+		console.warn("EngineX stems step=" + (scStemRendering ? "render" : "idle") + " queue=" + scStemCount + "/" + scStemTotal + " rows=" + Object.keys(scStemRows).length)
+		// The queue is empty: every place in it is over (rendered, cleared or failed).
+		if (!scStemRendering) scStemMark(Object.keys(scStemRows).filter(id => scStemRows[id] !== "wait"), "")
 	}
-	// A render Engine never started leaves no queue to end: forget it.
+	// A track Engine never took has a place beyond the queue's size: forget it.
 	Timer {
 		id: scStemRefused
 		interval: 30000
-		onTriggered: if (!root.scStemRendering) root.scStemMark(Object.keys(root.scStemRows).filter(id => root.scStemRows[id] === "render"), "")
+		onTriggered: root.scStemMark(Object.keys(root.scStemRows).filter(id => root.scStemRows[id] > (root.scStemTotal > 0 ? root.scStemTotal : 0)), "")
 	}
 	function scStemStream(uid) {
 		const lib = Planck.librarianController.collectionController
@@ -4222,7 +4256,7 @@ SERVICES_MAIN = """
 		function render(id) {
 			if (!running) return // a slower reply after the render already started
 			Planck.librarianController.stemsQueueManager.startRenderTracks(String(id))
-			root.scStemMark(rows, "render")
+			root.scStemHand(rows)
 			scStemRefused.restart()
 			if (scStemUnload.armed) {
 				scStemUnload.name = path.slice(path.lastIndexOf("/") + 1)
@@ -8573,7 +8607,7 @@ def edits(dev: bool):
         "\t\t\t\treadonly property real stemsRenderProgress: modelData.stemsRenderProgress || 0.0\n",
         '\t\t\t\treadonly property string scStem: typeof root !== "undefined" && root && root.scStemState ? root.scStemState(modelData.trackId) : ""\n'
         '\t\t\t\treadonly property int stemState: scStem === "render" ? 2 : scStem === "wait" ? 1 : (modelData.stems || 0)\n'
-        '\t\t\t\treadonly property real stemsRenderProgress: scStem === "render" ? Math.max(root.scStemProgress, 0.001) : (modelData.stemsRenderProgress || 0.0)\n',
+        '\t\t\t\treadonly property real stemsRenderProgress: scStem === "render" ? Math.max(root.scStemAlone ? root.scStemProgress : 0, 0.001) : (modelData.stemsRenderProgress || 0.0)\n',
     )])
     out.setdefault(row_parts + "PreviewProgress.qml", []).extend([
         ("row.modelData.stems === 2 ? Qt.darker(Style.systemBlue01Color, 1.2)", "row.stemState === 2 ? Qt.darker(Style.systemBlue01Color, 1.2)"),
@@ -8590,16 +8624,18 @@ def edits(dev: bool):
     out.setdefault(row_parts + "Length.qml", []).extend([(
         "else if (row.isRenderingStems) {",
         "else if (row.scStem) {\n"
-        "\t\t\troot.scStemText(row.scStem, row.stemsRenderProgress, root.scStemLeft)\n"
+        "\t\t\troot.scStemText(row.scStem, root.scStemAlone ? row.stemsRenderProgress : -1, root.scStemLeft)\n"
         "\t\t} else if (row.isRenderingStems) {",
     )])
     if v53():
         # Stock's pulsing Stems icon in the browse status bar says a render is
         # running whatever list is open. Stock shows it on units with side
-        # screens only; AZ04 keeps that.
+        # screens only, and that stays so for a local track's render: it is
+        # added only while a streamed row's Stems are in Engine's queue (the
+        # row may be in a list that is not open). AZ04 keeps stock.
         out.setdefault(v + "EmbeddedView.qml", []).extend([(
             "showBrowerViewStemsRenderIndicator: Config.device.hasSideScreens\n",
-            'showBrowerViewStemsRenderIndicator: Config.device.hasSideScreens || !(typeof root !== "undefined" && root && root.scIsAZ04)\n',
+            'showBrowerViewStemsRenderIndicator: Config.device.hasSideScreens || (typeof root !== "undefined" && !!root && !root.scIsAZ04 && !!root.scStemStreamed)\n',
         )])
     if v53():
         out.setdefault(v + "Profiles/ProfilesLogin.qml", []).extend([
