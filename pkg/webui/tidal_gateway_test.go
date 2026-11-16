@@ -242,9 +242,16 @@ func TestTidalGatewayPlaylistStreamAndImport(t *testing.T) {
 	if body := tidalGet(t, srv.URL, "/v1/stream/"+id+".flac", 200, nil); !bytes.Equal(body, audio) {
 		t.Fatal("stream body differs from download")
 	}
+	// Engine imports a copy named after the track, in the track's own directory,
+	// not the cache's "42.flac": the library showed that number as the title.
 	var src struct{ Path string }
-	if tidalGet(t, srv.URL, "/v1/enginex/stems/source?id="+id, 200, &src); src.Path != file {
-		t.Fatalf("stems source %q, want %q", src.Path, file)
+	tidalGet(t, srv.URL, "/v1/enginex/stems/source?id="+id, 200, &src)
+	named := src.Path
+	if filepath.Dir(named) != filepath.Join(root, "Stems", "42") || filepath.Ext(named) != ".flac" || filepath.Base(named) == "42.flac" {
+		t.Fatalf("stems source %q, want a named copy in %q", named, filepath.Join(root, "Stems", "42"))
+	}
+	if st, err := os.Stat(named); err != nil || !st.Mode().IsRegular() {
+		t.Fatalf("stems source file: %v", err)
 	}
 	tidalGet(t, srv.URL, "/v1/enginex/stems/source?id=999999", 404, nil)
 	// The stemmed row heads netease's own Stems list and no other service's.
@@ -262,8 +269,8 @@ func TestTidalGatewayPlaylistStreamAndImport(t *testing.T) {
 	if len(ui.stemmed("deezer")) != 0 || len(ui.stemmed("spotify")) != 0 {
 		t.Fatal("stems list leaked into another service")
 	}
-	if tidalGet(t, srv.URL, "/v1/enginex/stems/local?id="+id, 200, &src); src.Path != file {
-		t.Fatalf("stems local %q", src.Path)
+	if tidalGet(t, srv.URL, "/v1/enginex/stems/local?id="+id, 200, &src); src.Path != named {
+		t.Fatalf("stems local %q, want the file Engine imported %q", src.Path, named)
 	}
 	r, _ := http.NewRequest("GET", stream, nil)
 	r.Header.Set("Range", "bytes=0-3")
