@@ -2145,6 +2145,7 @@ SERVICES_MAIN = """
 		const at = scShadowAt[d] || (scShadowAt[d] = {path: ""})
 		at.landing = undefined
 		scShadowScratchRelease(d, at)
+		scShadowNudgeDrop(at, now)
 		// On an all-in-one console (#160), leave Decks 3/4 alone unless a shadow peer loaded them.
 		if (!root.scPlayer && !at.path) return
 		const pPlay = root.scTr("/Engine/Deck" + d + "/Play")
@@ -2177,6 +2178,7 @@ SERVICES_MAIN = """
 		const id = e.id || e.path
 		if (at.path !== e.path || at.id !== id) {
 			scShadowScratchRelease(d, at)
+			scShadowNudgeDrop(at, now)
 			at = scShadowAt[d] = {path: e.path, id: id, tries: 0, seekAt: 0, seeks: 0, loads: at.loads || 0, jumps: e.jumps, nativeSync: !!at.nativeSync, mirror: at.mirror}
 			root.scShadowLoad(d, at, e, now)
 			return
@@ -2570,16 +2572,14 @@ SERVICES_MAIN = """
 		for (const d in scShadowAt) {
 			const at = scShadowAt[d], m = at.nudgeMirror, l = at.line
 			let n = at.nudge
-			if (!m || !at.ready || !at.sourcePlaying || at.sourceSync || at.scratch || at.landing || scShadowDisplayOnly ||
-				!(at.rate > 0) || !(at.sampleRate > 0) || !l || !l.play.state || now - at.seekAt < 300) {
-				if (n && n.dir) scShadowNudgeEnd(at, n, now)
-				at.nudge = undefined
-				continue
-			}
-			live = true
 			let raw = -1
-			try { raw = m.value } catch (err) {}
-			if (!(typeof raw === "number" && isFinite(raw) && raw >= 0)) continue
+			if (m && at.ready && at.sourcePlaying && !at.sourceSync && !at.scratch && !at.landing && !scShadowDisplayOnly &&
+				at.rate > 0 && at.sampleRate > 0 && l && l.play.state && now - at.seekAt >= 300) {
+				live = true
+				try { raw = m.value } catch (err) {}
+			}
+			// A lost mirror (-1, NaN, a throw) can no longer tell when a bend has gone far enough.
+			if (!(typeof raw === "number" && isFinite(raw) && raw >= 0)) { scShadowNudgeDrop(at, now); continue }
 			const pos = raw / at.sampleRate * 1000
 			if (!n || n.rate !== at.rate) {
 				if (n && n.dir) scShadowNudgeEnd(at, n, now)
@@ -2625,6 +2625,10 @@ SERVICES_MAIN = """
 			} else if (!n.dir && now - n.quiet > 500 && Math.abs(owe) < 1) { n.extra = n.done = 0; n.active = false }
 		}
 		if (!live) scShadowNudgeTimer.stop()
+	}
+	function scShadowNudgeDrop(at, now) {
+		if (at.nudge && at.nudge.dir) scShadowNudgeEnd(at, at.nudge, now)
+		at.nudge = undefined
 	}
 	function scShadowNudgeEnd(at, n, now) {
 		if (n.prop) n.prop.state = false
