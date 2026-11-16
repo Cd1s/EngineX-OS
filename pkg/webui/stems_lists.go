@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -70,7 +71,13 @@ func (s *Server) stemmed(scope string) []stemmedTrack {
 // eviction does not look at. One made earlier is kept: Engine's library row
 // and its Stems belong to that file. When anything fails Engine gets the
 // cache file, as before.
-func stemsImportFile(cache string, t providers.Track) string {
+//
+// The stream cache keeps reserve bytes of its volume free by evicting its own
+// files. Nothing may evict a file Engine has imported, so none is added that
+// would leave less: no copy that does not fit above the reserve (the name is
+// then a link, without tags), and below the reserve not even a link, which
+// would keep a download's bytes after the cache has dropped it.
+func stemsImportFile(cache string, t providers.Track, reserve int64) string {
 	artist := t.Artist
 	if artist == "" {
 		artist = strings.Join(t.Artists, ", ")
@@ -85,21 +92,91 @@ func stemsImportFile(cache string, t providers.Track) string {
 	if st, err := os.Stat(named); err == nil && st.Mode().IsRegular() {
 		return named
 	}
+	room := func(need int64) bool {
+		free, _, _, err := stemsFreeSpace(filepath.Dir(cache))
+		return reserve <= 0 || err != nil || free-need >= reserve
+	}
+	if !room(0) {
+		return cache
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return cache
 	}
-	tagged, err := deemixclient.CopyTagged(cache, named, t.Title, artist, t.Album)
-	if err != nil {
-		log.Printf("stream-sync: stems source tags: %v", err)
+	if st, err := os.Stat(cache); err == nil && room(st.Size()) {
+		tagged, err := deemixclient.CopyTagged(cache, named, t.Title, artist, t.Album)
+		if err != nil {
+			log.Printf("stream-sync: stems source tags: %v", err)
+		}
+		if tagged && err == nil {
+			return named
+		}
 	}
-	if tagged && err == nil {
-		return named
-	}
-	if err = os.Link(cache, named); err != nil {
+	if err := os.Link(cache, named); err != nil {
 		log.Printf("stream-sync: stems source name: %v", err)
+		os.Remove(dir) // only when nothing is in it
 		return cache
 	}
 	return named
+}
+
+var stemsFreeSpace = freeSpace
+
+// sweepStemsSources removes the imported files under root that nothing refers
+// to any more: in no service's Stems list (the record dropped off the end of
+// its list, the track was imported again under another name, or a copy was
+// left half written) and not a track in Engine's library. A file Engine has
+// as a track stays, whatever the lists say: its library row and its Stems
+// belong to it.
+//
+// It only looks at regular files one directory below root, which is the tree
+// stemsImportFile writes, and only on the deck's own storage: a file there is
+// in the internal library, while a file on a drive is in that drive's library,
+// which is not read here. When the library cannot be read nothing is removed.
+func (s *Server) sweepStemsSources(ctx context.Context, root string) {
+	if rel, err := filepath.Rel(shadowDataRoot, root); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return
+	}
+	recorded := map[string]bool{}
+	s.stemsMu.Lock()
+	for _, list := range s.loadStemmed() {
+		for _, e := range list {
+			recorded[e.Path] = true
+			if real, err := filepath.EvalSymlinks(e.Path); err == nil {
+				recorded[real] = true
+			}
+		}
+	}
+	s.stemsMu.Unlock()
+	var loose []string
+	dirs, _ := os.ReadDir(root)
+	for _, d := range dirs {
+		if !d.IsDir() {
+			continue
+		}
+		files, _ := os.ReadDir(filepath.Join(root, d.Name()))
+		for _, f := range files {
+			p := filepath.Join(root, d.Name(), f.Name())
+			if real, err := filepath.EvalSymlinks(p); f.Type().IsRegular() && !recorded[p] && (err != nil || !recorded[real]) {
+				loose = append(loose, p)
+			}
+		}
+	}
+	if len(loose) == 0 {
+		return
+	}
+	tracks, err := internalTrackIDs(ctx, loose...)
+	if err != nil {
+		return
+	}
+	for _, p := range loose {
+		if _, imported := tracks[p]; imported {
+			continue
+		}
+		if err := os.Remove(p); err == nil {
+			log.Printf("stream-sync: removed a stems source nothing refers to: %s", filepath.Base(filepath.Dir(p)))
+			os.Remove(filepath.Dir(p)) // only when it is empty now
+		}
+	}
 }
 
 // stemsFileName is "Artist - Title" as a file name the UI can put in a file:

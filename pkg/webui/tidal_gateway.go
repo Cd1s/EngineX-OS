@@ -1756,7 +1756,16 @@ func (g *tidalGateway) stemsSource(w http.ResponseWriter, r *http.Request) {
 		fail(w, 502, err)
 		return
 	}
-	p = stemsImportFile(p, ref.track)
+	// One import at a time: the sweep below must not meet another request's
+	// file before its record is written.
+	g.s.stemsImportMu.Lock()
+	defer g.s.stemsImportMu.Unlock()
+	cacheDir := filepath.Dir(p)
+	var reserve int64
+	if d := g.s.jobs.p.Deemix; d != nil {
+		reserve = d.MinFree
+	}
+	p = stemsImportFile(p, ref.track, reserve)
 	// The row joins the Stems list of the service it was stemmed from.
 	stemsScope := ref.track.Provider
 	if v := g.sessionByID(ref.session); v != nil && v.Provider != "" {
@@ -1769,6 +1778,7 @@ func (g *tidalGateway) stemsSource(w http.ResponseWriter, r *http.Request) {
 		fail(w, 500, err)
 		return
 	}
+	g.s.sweepStemsSources(r.Context(), filepath.Join(cacheDir, "Stems"))
 	respond(w, map[string]any{"path": p})
 }
 
