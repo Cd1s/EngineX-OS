@@ -3253,6 +3253,7 @@ SERVICES_MAIN = """
 	property bool scTidalLoggedIn: false
 	property bool scTidalSynthetic: false
 	property string scScope: ""
+	property string scRekordboxName: "" // the computer with rekordbox on Pro DJ Link, while there is one
 	readonly property var scServices: [
 		{ id: "tidal", name: "TIDAL" },
 		{ id: "netease", name: scT("NetEase Cloud Music") },
@@ -3260,7 +3261,8 @@ SERVICES_MAIN = """
 		{ id: "deezer", name: "Deezer" },
 		{ id: "soundcloud", name: "SoundCloud" },
 		{ id: "beatport", name: "Beatport" },
-		{ id: "applemusic", name: "Apple Music" }
+		{ id: "applemusic", name: "Apple Music" },
+		{ id: "rekordbox", name: scRekordboxName ? "rekordbox (" + scRekordboxName + ")" : "rekordbox" }
 	]
 	// Keep inactive dictionaries as scalar JSON strings. Only the selected language
 	// becomes a JS object/GC root; retain all spellings for live language switching.
@@ -3278,6 +3280,7 @@ SERVICES_MAIN = """
 		if (id === "tidal") return "qrc:/@ICONS@/SourceTIDALColored.png"
 		if (id === "soundcloud") return "qrc:/@ICONS@/SourceSoundCloudColored.png"
 		if (id === "beatport") return "qrc:/@ICONS@/SourceBeatport%20LINKColored.png"
+		if (id === "rekordbox") return "qrc:/@ICONS@/SourceEngineRemoteLibrary.png"
 		return "file:///data/enginex/ui/icons/" + id + ".png"
 	}
 	// The gateway appends " [128 BPM 8A]" to a row's label; see labelWithBPM. A value
@@ -3708,6 +3711,7 @@ SERVICES_MAIN = """
 		scTidalLoggedIn = !!v.tidalLoggedIn
 		scTidalSynthetic = !!v.tidalSynthetic
 		if (v.scope !== undefined) scScope = v.scope
+		scRekordboxName = v.rekordboxName || ""
 		scBroadcastOn = !!v.broadcastEnabled
 		const prevUpfaderEcho = scUpfaderEcho
 		scUpfaderEcho = !!v.upfaderEcho
@@ -4851,7 +4855,7 @@ SOURCE_FOOTER = """
 				MouseArea {
 					anchors { right: parent.right; top: parent.top; bottom: parent.bottom }
 					width: 140
-					visible: modelData.id !== "tidal"
+					visible: modelData.id !== "tidal" && modelData.id !== "rekordbox"
 					onClicked: root.scLoginBegin(modelData.id)
 					Text {
 						anchors.centerIn: parent
@@ -4936,7 +4940,7 @@ BLUETOOTH_SELECT = [
 
 STREAM_SWITCHES = """
 	Repeater {
-		model: root.scServices
+		model: root.scServices.filter(s => s.id !== "rekordbox") // a computer on the link, not a service to switch
 		SwitchEntry {
 			text: modelData.name
 			icon.source: root.scIcon(modelData.id)

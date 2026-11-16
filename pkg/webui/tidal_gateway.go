@@ -929,8 +929,8 @@ func playlistJSON(id, title, description string, count int) map[string]any {
 	return map[string]any{"uuid": id, "title": title, "numberOfTracks": count, "numberOfVideos": 0, "description": description, "duration": 0, "lastUpdated": now, "created": now, "type": "USER", "publicPlaylist": false, "url": "http://enginex.lan:8080", "image": "", "squareImage": "", "popularity": 0}
 }
 func (g *tidalGateway) refJSON(id string, ref playlistRef) map[string]any {
-	if ref.provider == listNoticeProvider {
-		return playlistJSON(id, ref.list.Title, "", 0)
+	if ref.provider == listNoticeProvider || ref.provider == rekordboxScope {
+		return playlistJSON(id, ref.list.Title, "", ref.list.Count)
 	}
 	label := providerLabels[ref.provider]
 	return playlistJSON(id, ref.list.Title, label+" 歌单，经 EngineX OS 下载播放", ref.list.Count)
@@ -984,6 +984,11 @@ func (g *tidalGateway) playlists(w http.ResponseWriter, r *http.Request) {
 			v = flat
 		}
 		items = append(items, v)
+	}
+	if scope == rekordboxScope {
+		g.rbxPlaylists(r.Context(), add)
+		respond(w, page(r, 100, items))
+		return
 	}
 	if n := len(g.s.stemmed(scope)); n > 0 {
 		add(playlistJSON(stemsListID(scope), "Stems", "", n))
@@ -1325,6 +1330,10 @@ func (g *tidalGateway) playlistTracks(w http.ResponseWriter, r *http.Request) {
 		respond(w, page(r, 500, []any{}))
 		return
 	}
+	if ref.provider == rekordboxScope {
+		g.rbxTracks(w, r, ref)
+		return
+	}
 
 	q := r.URL.Query()
 	sortParam := strings.ToLower(q.Get("sort"))
@@ -1631,6 +1640,21 @@ func (g *tidalGateway) streamedFile(net string) string {
 	}
 	return ""
 }
+
+// playable is lookup for a row about to play: a rekordbox row first gets its audio file on
+// the deck, which can take a while (a copy over the network), then it is a drive row.
+func (g *tidalGateway) playable(w http.ResponseWriter, r *http.Request, raw string) (int64, trackRef, bool) {
+	id, ref, ok := g.lookup(w, raw)
+	if ok && ref.track.Provider == rekordboxScope {
+		http.NewResponseController(w).SetWriteDeadline(time.Time{})
+		var err error
+		if ref, err = g.rbxPrepare(r.Context(), id, ref); err != nil {
+			fail(w, 502, err)
+			return 0, trackRef{}, false
+		}
+	}
+	return id, ref, ok
+}
 func (g *tidalGateway) trackInfo(w http.ResponseWriter, r *http.Request) {
 	if id, ref, ok := g.lookup(w, r.PathValue("id")); ok {
 		// Lists preview a catalog tempo. A track on a deck is Engine's to analyse.
@@ -1707,7 +1731,7 @@ func (g *tidalGateway) knownCodec(w http.ResponseWriter, r *http.Request, ref tr
 	return true
 }
 func (g *tidalGateway) playbackInfo(w http.ResponseWriter, r *http.Request) {
-	id, ref, ok := g.lookup(w, r.PathValue("id"))
+	id, ref, ok := g.playable(w, r, r.PathValue("id"))
 	if !ok {
 		return
 	}
@@ -1732,7 +1756,7 @@ func (g *tidalGateway) playbackInfo(w http.ResponseWriter, r *http.Request) {
 	respond(w, map[string]any{"trackId": id, "assetPresentation": "FULL", "audioMode": "STEREO", "audioQuality": "LOSSLESS", "manifestMimeType": "application/vnd.tidal.bts", "manifestHash": "", "manifest": base64.StdEncoding.EncodeToString(manifest), "albumReplayGain": 0, "albumPeakAmplitude": 1, "trackReplayGain": 0, "trackPeakAmplitude": 1})
 }
 func (g *tidalGateway) streamURL(w http.ResponseWriter, r *http.Request) {
-	if id, ref, ok := g.lookup(w, r.PathValue("id")); ok && g.knownCodec(w, r, ref) {
+	if id, ref, ok := g.playable(w, r, r.PathValue("id")); ok && g.knownCodec(w, r, ref) {
 		address, codec := g.streamTarget(r, id, ref)
 		log.Printf("stream-sync: load track=%d provider=%s scope=%s step=manifest api=streamurl codec=%s", id, ref.track.Provider, g.s.scope(), codec)
 		respond(w, map[string]any{"url": address, "codec": codec, "soundQuality": "LOSSLESS", "trackId": id})
@@ -1743,7 +1767,7 @@ func (g *tidalGateway) streamURL(w http.ResponseWriter, r *http.Request) {
 // so the deck can stem it as a local track. Only a Stems request calls this;
 // playback keeps using stream.
 func (g *tidalGateway) stemsSource(w http.ResponseWriter, r *http.Request) {
-	_, ref, ok := g.lookup(w, r.URL.Query().Get("id"))
+	_, ref, ok := g.playable(w, r, r.URL.Query().Get("id"))
 	if !ok {
 		return
 	}
@@ -1898,7 +1922,7 @@ func (g *tidalGateway) stream(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	id, ref, ok := g.lookup(w, raw)
+	id, ref, ok := g.playable(w, r, raw)
 	if !ok {
 		return
 	}

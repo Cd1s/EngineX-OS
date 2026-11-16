@@ -185,7 +185,12 @@ type uiSettings struct {
 	// ProlinkShare enables Pro DJ Link: announces this deck, lets rb-bridge read
 	// Pioneer/rekordbox libraries on the LAN, and exports this deck's drives (#59, #63).
 	// Off by default.
-	ProlinkShare     bool     `json:"prolinkShare"`
+	ProlinkShare bool `json:"prolinkShare"`
+	// RekordboxShare is the folder of the computer with rekordbox that a mounted network
+	// share shows (/Users/dj/Music), so its tracks are found inside the share. Empty:
+	// the share shows the computer's whole disk.
+	RekordboxShare   string   `json:"rekordboxShare"`
+	RekordboxName    string   `json:"rekordboxName,omitempty"` // status only: the computer on the link, for the source's name
 	Language         string   `json:"language"`
 	Waveform         string   `json:"waveform"`
 	Sources          []string `json:"sources"`
@@ -369,7 +374,7 @@ func (s *Server) loadUI() uiSettings {
 				v.GitHubRepo = val
 			}
 		case "scope":
-			if val == "" || slices.Contains(uiServices, val) {
+			if val == "" || slices.Contains(uiScopes, val) {
 				v.Scope = val
 			}
 		case "quality":
@@ -402,6 +407,10 @@ func (s *Server) loadUI() uiSettings {
 			v.OmniSource = val == "1"
 		case "remote_load":
 			v.RemoteLoad = val == "1"
+		case "rekordbox_share":
+			if validRekordboxShare(val) {
+				v.RekordboxShare = val
+			}
 		case "prolink_share", "prolink_export":
 			if val == "1" {
 				v.ProlinkShare = true
@@ -614,6 +623,9 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	}
 	if v.ProlinkShare {
 		text += "prolink_share=1\n"
+	}
+	if v.RekordboxShare != "" {
+		text += "rekordbox_share=" + v.RekordboxShare + "\n"
 	}
 	if v.StreamSortRole != "" && v.StreamSortRole != "default" {
 		text += "stream_sort_role=" + v.StreamSortRole + "\n"
@@ -848,6 +860,11 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 			v.LoggedIn = append(v.LoggedIn, session.Provider)
 		}
 	}
+	if host := s.rekordboxHost(); host != nil { // not saved: the source is there while the computer is
+		v.Sources = append(slices.Clone(v.Sources), rekordboxScope)
+		v.LoggedIn = append(v.LoggedIn, rekordboxScope)
+		v.RekordboxName = host.Name
+	}
 	relay := s.relayStatusView()
 	v.RelayURL, v.DeemixPasswordSet = relay.RelayURL, relay.PasswordSet
 	v.ProlinkExportActive = s.prolinkExport != nil && s.prolinkExport.Status().Enabled
@@ -956,7 +973,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	bad := func(field, val string, allowed []string) bool {
 		return q.Has(field) && !slices.Contains(allowed, val)
 	}
-	if bad("spotifySource", q.Get("spotifySource"), uiSpotifySources) || bad("lang", q.Get("lang"), uiLanguages) || bad("waveform", q.Get("waveform"), uiWaveforms) || bad("scope", q.Get("scope"), uiServices) || bad("quality", q.Get("quality"), uiQualities) || bad("neteaseMode", q.Get("neteaseMode"), uiNeteaseModes) || bad("fourDeckRole", q.Get("fourDeckRole"), uiFourDeckRoles) || bad("streamSortRole", q.Get("streamSortRole"), uiStreamSortRoles) || bad("streamSortOrder", q.Get("streamSortOrder"), uiStreamSortOrders) || bad("pioneerFx", q.Get("pioneerFx"), uiPioneerFxModes) || bad("shadowMode", q.Get("shadowMode"), uiShadowModes) || bad("fxTimeMode", q.Get("fxTimeMode"), uiFxTimeModes) {
+	if bad("spotifySource", q.Get("spotifySource"), uiSpotifySources) || bad("lang", q.Get("lang"), uiLanguages) || bad("waveform", q.Get("waveform"), uiWaveforms) || bad("scope", q.Get("scope"), uiScopes) || bad("quality", q.Get("quality"), uiQualities) || bad("neteaseMode", q.Get("neteaseMode"), uiNeteaseModes) || bad("fourDeckRole", q.Get("fourDeckRole"), uiFourDeckRoles) || bad("streamSortRole", q.Get("streamSortRole"), uiStreamSortRoles) || bad("streamSortOrder", q.Get("streamSortOrder"), uiStreamSortOrders) || bad("pioneerFx", q.Get("pioneerFx"), uiPioneerFxModes) || bad("shadowMode", q.Get("shadowMode"), uiShadowModes) || bad("fxTimeMode", q.Get("fxTimeMode"), uiFxTimeModes) {
 		s.uiMu.Unlock()
 		fail(w, 400, errors.New("invalid setting"))
 		return
@@ -1270,6 +1287,14 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		v.AutoGain = on == "1"
+	}
+	if q.Has("rekordboxShare") {
+		if !validRekordboxShare(q.Get("rekordboxShare")) {
+			s.uiMu.Unlock()
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+		v.RekordboxShare = strings.TrimSpace(q.Get("rekordboxShare"))
 	}
 	if q.Has("omniSource") {
 		on := q.Get("omniSource")
