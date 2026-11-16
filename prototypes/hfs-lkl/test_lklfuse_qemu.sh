@@ -193,7 +193,7 @@ static void clean_eject_lklfuse(pid_t pid, const char *tag) {
 }
 
 static void do_stress(int rounds) {
-    char path[512], path2[512];
+    char path[512], path2[600];
     long total_ops = 0;
     pid_t pid = mount_lklfuse("type=hfsplus,mb=64");
     report_rss(pid, "stress_idle");
@@ -320,7 +320,7 @@ static void bench_dir_scan(const char *label) {
     if (!root) die("opendir /mnt");
     int dirs = 0, files = 0;
     struct dirent *de;
-    char dpath[256];
+    char dpath[320];
     while ((de = readdir(root)) != NULL) {
         if (strncmp(de->d_name, "dir_", 4) != 0) continue;
         dirs++;
@@ -442,6 +442,17 @@ static void do_eject(void) {
     umount("/mnt");
     if (rtot != 8388608ULL || rhash != hash) die("eject data integrity mismatch");
     printf("EJECT_DATA_VERIFIED bytes=%zu hash=0x%016llx\n", rtot, (unsigned long long)rhash);
+
+    /* Replug (2nd RW mount) must succeed RW when HFSPLUS_VOL_UNMNT was written on eject */
+    pid_t pid2 = mount_lklfuse("type=hfsplus,mb=64");
+    int rfd2 = open("/mnt/replug_rw.txt", O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (rfd2 < 0) die("replug 2nd mount RW open");
+    if (write(rfd2, "replug-ok", 9) != 9) die("replug write");
+    close(rfd2);
+    clean_eject_lklfuse(pid2, "replug_rw");
+    frc = run_cmd(fsck_argv);
+    printf("REPLUG_FSCK_RC=%d\n", frc);
+    if (frc != 0) die("fsck failed after replug eject");
     printf("QEMU_LKL_EJECT_PASS\n");
 }
 
@@ -535,7 +546,24 @@ run_qemu "$TDIR/disk-eject.img" eject "" "$TDIR/eject.log"
 grep -q 'QEMU_LKL_EJECT_PASS' "$TDIR/eject.log" || die "eject failed (see $TDIR/eject.log)"
 fsck.hfsplus -n -f "$TDIR/disk-eject.img" > "$TDIR/eject-host-fsck.log" 2>&1 || die "host fsck eject failed"
 
+if grep -q 'not cleanly unmounted' "$TDIR/stress.log" "$TDIR/prepop.log" "$TDIR/bench.log" "$TDIR/eject.log"; then
+    die "unclean HFS+ unmount warning detected in QEMU logs"
+fi
+python3 - "$TDIR/disk-stress.img" "$TDIR/disk-bench.img" "$TDIR/disk-eject.img" <<'VHCHECK'
+import struct, sys
+for img in sys.argv[1:]:
+    with open(img, "rb") as f:
+        f.seek(1024)
+        vh = f.read(512)
+    sig, ver, attrs = struct.unpack(">HHI", vh[:8])
+    unmnt = bool(attrs & (1 << 8))
+    incnstnt = bool(attrs & (1 << 11))
+    print(f"VHDR[{img.rsplit('/', 1)[-1]}] sig=0x{sig:04x} attrs=0x{attrs:08x} UNMNT={unmnt} INCNSTNT={incnstnt}")
+    if sig != 0x482b or not unmnt or incnstnt:
+        raise SystemExit(f"dirty volume header on {img}")
+VHCHECK
+
 echo "=== SUMMARY ==="
 grep -E '^(QEMU_BOOT|Node| *managed|RSS|EJECT|STRESS_FSCK|QEMU_LKL_)' "$TDIR/stress.log" | tr -d '\r'
 grep -E '^(BENCH_|RSS|EJECT|QEMU_LKL_)' "$TDIR/bench.log" | tr -d '\r'
-grep -E '^(RSS|EJECT|EJECT_FSCK|EJECT_DATA|QEMU_LKL_)' "$TDIR/eject.log" | tr -d '\r'
+grep -E '^(RSS|EJECT|EJECT_FSCK|EJECT_DATA|REPLUG_FSCK|QEMU_LKL_)' "$TDIR/eject.log" | tr -d '\r'
