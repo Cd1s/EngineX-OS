@@ -294,3 +294,74 @@ func TestBuildVirtualCDJKeepAlive(t *testing.T) {
 		t.Fatalf("unexpected tail bytes: %x", pkt[0x30:0x36])
 	}
 }
+
+func TestDecodeDBMsgCompactTagListAndSetupServerPlayer(t *testing.T) {
+	// Exact rekordbox 7 setup-ack framing observed live: argc=2 with 2-byte tag list (not 12).
+	var buf bytes.Buffer
+	buf.Write(dbMagic)
+	buf.WriteByte(0x11)
+	_ = binary.Write(&buf, binary.BigEndian, uint32(0xfffffffe))
+	buf.WriteByte(0x10)
+	_ = binary.Write(&buf, binary.BigEndian, uint16(kindSetupAck))
+	buf.WriteByte(0x0f)
+	buf.WriteByte(2)
+	buf.Write([]byte{0x14, 0, 0, 0, 2})
+	buf.Write([]byte{0x06, 0x06})
+	buf.Write([]byte{0x11, 0, 0, 0, 0})
+	buf.Write([]byte{0x11, 0, 0, 0, 17})
+
+	msg, err := decodeDBMsg(&buf)
+	if err != nil {
+		t.Fatalf("decodeDBMsg compact setup ack failed: %v", err)
+	}
+	if msg.tx != 0xfffffffe || msg.kind != kindSetupAck || len(msg.args) != 2 {
+		t.Fatalf("unexpected decoded msg: %+v", msg)
+	}
+	if got := setupServerPlayer(msg); got != 17 {
+		t.Fatalf("setupServerPlayer() = %d, want 17", got)
+	}
+
+	oneArg := &dbMsg{kind: kindSetupAck, args: []dbField{{tag: 0x06, num: 41}}}
+	if got := setupServerPlayer(oneArg); got != 41 {
+		t.Fatalf("setupServerPlayer(1-arg) = %d, want 41", got)
+	}
+
+	// Reject malformed header where tag list is shorter than argc.
+	bad := []byte{
+		0x11, 0x87, 0x23, 0x49, 0xae,
+		0x11, 0xff, 0xff, 0xff, 0xfe,
+		0x10, 0x40, 0x00,
+		0x0f, 0x02,
+		0x14, 0, 0, 0, 1,
+		0x06,
+	}
+	if _, err := decodeDBMsg(bytes.NewReader(bad)); err == nil {
+		t.Fatalf("expected error for tagLen < argc")
+	}
+}
+
+func TestRenderMenuHandlesNoResultsSentinel(t *testing.T) {
+	if got := fmtCount(0xffffffff); got != "0xffffffff (none)" {
+		t.Fatalf("fmtCount(0xffffffff) = %q", got)
+	}
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+
+	wrote := make(chan int, 1)
+	go func() {
+		var buf [16]byte
+		n, _ := c2.Read(buf[:])
+		wrote <- n
+	}()
+
+	dc := &dbConn{c: c1}
+	rows, err := dc.renderMenu(1, 1, 4, 1, dmst(1, 1, 4, 1), 0xffffffff, 32, 200*time.Millisecond)
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("renderMenu(0xffffffff) = (%v, %v), want empty nil", rows, err)
+	}
+	_ = c1.Close()
+	if n := <-wrote; n != 0 {
+		t.Fatalf("renderMenu(0xffffffff) wrote %d bytes to wire, want 0", n)
+	}
+}

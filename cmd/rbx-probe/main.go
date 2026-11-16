@@ -777,22 +777,27 @@ func tagLE(s string) uint32 {
 	return binary.LittleEndian.Uint32(b[:])
 }
 
+const maxDBArgs = 32
+
 func decodeDBMsg(r io.Reader) (*dbMsg, error) {
-	var hdr [32]byte
+	var hdr [20]byte
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {
 		return nil, err
 	}
-	if !bytes.Equal(hdr[:5], dbMagic) || hdr[5] != 0x11 || hdr[10] != 0x10 || hdr[13] != 0x0f ||
-		hdr[15] != 0x14 || binary.BigEndian.Uint32(hdr[16:20]) != 12 {
-		return nil, fmt.Errorf("bad dbserver header %x", hdr[:20])
+	if !bytes.Equal(hdr[:5], dbMagic) || hdr[5] != 0x11 || hdr[10] != 0x10 || hdr[13] != 0x0f || hdr[15] != 0x14 {
+		return nil, fmt.Errorf("bad dbserver header %x", hdr[:])
 	}
 	tx := binary.BigEndian.Uint32(hdr[6:10])
 	kind := binary.BigEndian.Uint16(hdr[11:13])
 	argc := int(hdr[14])
-	if argc > 12 {
-		return nil, fmt.Errorf("bad argc %d", argc)
+	tagLen := int(binary.BigEndian.Uint32(hdr[16:20]))
+	if argc > maxDBArgs || tagLen < argc || tagLen > maxDBArgs {
+		return nil, fmt.Errorf("bad dbserver header %x (argc=%d tagLen=%d)", hdr[:], argc, tagLen)
 	}
-	argTags := hdr[20:32]
+	argTags := make([]byte, tagLen)
+	if _, err := io.ReadFull(r, argTags); err != nil {
+		return nil, err
+	}
 	msg := &dbMsg{tx: tx, kind: kind, args: make([]dbField, 0, argc)}
 	for i := 0; i < argc; i++ {
 		if argTags[i] == 0x03 && i > 0 && msg.args[i-1].tag == 0x06 && msg.args[i-1].num == 0 {
@@ -804,25 +809,26 @@ func decodeDBMsg(r io.Reader) (*dbMsg, error) {
 		if _, err := io.ReadFull(r, tag[:]); err != nil {
 			return nil, err
 		}
+		var f dbField
 		switch tag[0] {
 		case 0x0f:
 			var b [1]byte
 			if _, err := io.ReadFull(r, b[:]); err != nil {
 				return nil, err
 			}
-			msg.args = append(msg.args, dbField{tag: 0x06, num: uint32(b[0])})
+			f = dbField{tag: 0x06, num: uint32(b[0])}
 		case 0x10:
 			var b [2]byte
 			if _, err := io.ReadFull(r, b[:]); err != nil {
 				return nil, err
 			}
-			msg.args = append(msg.args, dbField{tag: 0x06, num: uint32(binary.BigEndian.Uint16(b[:]))})
+			f = dbField{tag: 0x06, num: uint32(binary.BigEndian.Uint16(b[:]))}
 		case 0x11:
 			var b [4]byte
 			if _, err := io.ReadFull(r, b[:]); err != nil {
 				return nil, err
 			}
-			msg.args = append(msg.args, dbField{tag: 0x06, num: binary.BigEndian.Uint32(b[:])})
+			f = dbField{tag: 0x06, num: binary.BigEndian.Uint32(b[:])}
 		case 0x26:
 			var b [4]byte
 			if _, err := io.ReadFull(r, b[:]); err != nil {
@@ -836,7 +842,7 @@ func decodeDBMsg(r io.Reader) (*dbMsg, error) {
 			if _, err := io.ReadFull(r, raw); err != nil {
 				return nil, err
 			}
-			msg.args = append(msg.args, dbField{tag: 0x02, str: decodeUTF16BEString(raw)})
+			f = dbField{tag: 0x02, str: decodeUTF16BEString(raw)}
 		case 0x14:
 			var b [4]byte
 			if _, err := io.ReadFull(r, b[:]); err != nil {
@@ -850,12 +856,26 @@ func decodeDBMsg(r io.Reader) (*dbMsg, error) {
 			if _, err := io.ReadFull(r, blob); err != nil {
 				return nil, err
 			}
-			msg.args = append(msg.args, dbField{tag: 0x03, blob: blob})
+			f = dbField{tag: 0x03, blob: blob}
 		default:
 			return nil, fmt.Errorf("unknown field marker 0x%02x", tag[0])
 		}
+		if f.tag != argTags[i] {
+			return nil, fmt.Errorf("arg %d tag mismatch: header=0x%02x field=0x%02x", i, argTags[i], f.tag)
+		}
+		msg.args = append(msg.args, f)
 	}
 	return msg, nil
+}
+
+func setupServerPlayer(ack *dbMsg) uint32 {
+	if len(ack.args) > 1 {
+		return ack.args[1].num
+	}
+	if len(ack.args) > 0 {
+		return ack.args[0].num
+	}
+	return 0
 }
 
 func decodeUTF16BEString(b []byte) string {
@@ -902,11 +922,7 @@ func dialDB(ip net.IP, port int, asPlayer byte, timeout time.Duration) (*dbConn,
 		c.Close()
 		return nil, 0, fmt.Errorf("setup got kind 0x%04x", ack.kind)
 	}
-	var srvNum uint32
-	if len(ack.args) > 0 {
-		srvNum = ack.args[0].num
-	}
-	return d, srvNum, nil
+	return d, setupServerPlayer(ack), nil
 }
 
 func (d *dbConn) Close() { _ = d.c.Close() }
@@ -929,10 +945,18 @@ type menuRow struct {
 	flags  uint32
 	artID  uint32
 	pos    uint32
+	arg12  uint32
+}
+
+func fmtCount(n uint32) string {
+	if n == 0xffffffff {
+		return "0xffffffff (none)"
+	}
+	return strconv.FormatUint(uint64(n), 10)
 }
 
 func (d *dbConn) renderMenu(player, menu, slot, trackType byte, dmstArg uint32, count uint32, limit uint32, timeout time.Duration) ([]menuRow, error) {
-	if count == 0 {
+	if count == 0 || count == 0xffffffff {
 		return nil, nil
 	}
 	var rows []menuRow
@@ -982,6 +1006,9 @@ func (d *dbConn) renderMenu(player, menu, slot, trackType byte, dmstArg uint32, 
 			}
 			if len(it.args) > 9 {
 				row.pos = it.args[9].num
+			}
+			if len(it.args) > 12 {
+				row.arg12 = it.args[12].num
 			}
 			rows = append(rows, row)
 		}
@@ -1079,11 +1106,7 @@ func probeDirectDBPort(ip net.IP, port int, asPlayer byte, timeout time.Duration
 		fmt.Printf("tcp %d direct dbserver: greeting OK, setup ERROR: %s\n", port, red.err(err))
 		return true, true
 	}
-	var srvNum uint32
-	if len(ack.args) > 0 {
-		srvNum = ack.args[0].num
-	}
-	fmt.Printf("tcp %d direct dbserver: greeting OK, setup as=%d kind=0x%04x server_player=%d\n", port, asPlayer, ack.kind, srvNum)
+	fmt.Printf("tcp %d direct dbserver: greeting OK, setup as=%d kind=0x%04x server_player=%d\n", port, asPlayer, ack.kind, setupServerPlayer(ack))
 	return true, true
 }
 
@@ -1168,7 +1191,7 @@ func probeDBServer(ip net.IP, asPlayer byte, maxTracks int, specificTrack uint32
 				if len(rm.args) >= 2 {
 					cnt = rm.args[1].num
 				}
-				fmt.Printf("browse_check as=%d slot=%d 0x1000: kind=0x%04x count=%d\n", testAs, slot, rm.kind, cnt)
+				fmt.Printf("browse_check as=%d slot=%d 0x1000: kind=0x%04x count=%s\n", testAs, slot, rm.kind, fmtCount(cnt))
 			}
 			hdc.Close()
 			break
@@ -1226,7 +1249,7 @@ func probeDBServer(ip net.IP, asPlayer byte, maxTracks int, specificTrack uint32
 			fmt.Printf("  0x1000 root_menu: reply kind=0x%04x argc=%d\n", rm.kind, len(rm.args))
 		} else {
 			cnt := rm.args[1].num
-			fmt.Printf("  0x1000 root_menu: count=%d\n", cnt)
+			fmt.Printf("  0x1000 root_menu: count=%s\n", fmtCount(cnt))
 			items, err := dc.renderMenu(asPlayer, 1, slot, 1, d, cnt, 32, timeout)
 			if err != nil {
 				fmt.Printf("    render error: %s\n", red.err(err))
@@ -1240,6 +1263,16 @@ func probeDBServer(ip net.IP, asPlayer byte, maxTracks int, specificTrack uint32
 		// 2. All tracks 0x1004
 		var trackIDs []uint32
 		var trackArts = map[uint32]uint32{}
+		seenTrack := map[uint32]bool{}
+		addTrackID := func(id uint32) {
+			if id != 0 && !seenTrack[id] && len(trackIDs) < maxTracks {
+				seenTrack[id] = true
+				trackIDs = append(trackIDs, id)
+			}
+		}
+		if specificTrack != 0 {
+			addTrackID(specificTrack)
+		}
 		tm, err := dc.req(kindAllTracks, timeout, dbNum(d), dbNum(0))
 		if err != nil {
 			fmt.Printf("  0x1004 all_tracks: ERROR: %s\n", red.err(err))
@@ -1248,8 +1281,8 @@ func probeDBServer(ip net.IP, asPlayer byte, maxTracks int, specificTrack uint32
 			fmt.Printf("  0x1004 all_tracks: reply kind=0x%04x\n", tm.kind)
 		} else {
 			cnt := tm.args[1].num
-			fmt.Printf("  0x1004 all_tracks: count=%d\n", cnt)
-			if cnt > 0 && workingSlot == 0 {
+			fmt.Printf("  0x1004 all_tracks: count=%s\n", fmtCount(cnt))
+			if cnt > 0 && cnt != 0xffffffff && workingSlot == 0 {
 				workingSlot = slot
 			}
 			limit := cnt
@@ -1283,15 +1316,10 @@ func probeDBServer(ip net.IP, asPlayer byte, maxTracks int, specificTrack uint32
 				for i := len(rows) - 2; i < len(rows); i++ {
 					addPick(i)
 				}
-				if specificTrack != 0 {
-					trackIDs = append(trackIDs, specificTrack)
-				}
 				for _, idx := range picks {
 					r := rows[idx]
 					trackArts[r.id] = r.artID
-					if len(trackIDs) < maxTracks {
-						trackIDs = append(trackIDs, r.id)
-					}
+					addTrackID(r.id)
 					fmt.Printf("    sample_track[%d]: id=%d parent=%d kind=0x%04x art=%d pos=%d title_len=%d artist_len=%d\n",
 						idx, r.id, r.parent, r.kind, r.artID, r.pos, len(r.label), len(r.sec))
 				}
@@ -1310,7 +1338,7 @@ func probeDBServer(ip net.IP, asPlayer byte, maxTracks int, specificTrack uint32
 			fmt.Printf("  0x1105 playlists_root: reply kind=0x%04x\n", pm.kind)
 		} else {
 			cnt := pm.args[1].num
-			fmt.Printf("  0x1105 playlists_root: count=%d\n", cnt)
+			fmt.Printf("  0x1105 playlists_root: count=%s\n", fmtCount(cnt))
 			rows, err := dc.renderMenu(asPlayer, 1, slot, 1, d, cnt, 16, timeout)
 			if err != nil {
 				fmt.Printf("    render error: %s\n", red.err(err))
@@ -1333,7 +1361,7 @@ func probeDBServer(ip net.IP, asPlayer byte, maxTracks int, specificTrack uint32
 					_ = redial()
 				} else if fm.kind == kindSetupAck && len(fm.args) >= 2 {
 					fc := fm.args[1].num
-					fmt.Printf("  0x1105 subfolder(%d): count=%d\n", firstFolderID, fc)
+					fmt.Printf("  0x1105 subfolder(%d): count=%s\n", firstFolderID, fmtCount(fc))
 					frows, rerr := dc.renderMenu(asPlayer, 1, slot, 1, d, fc, 8, timeout)
 					if rerr != nil {
 						fmt.Printf("    render error: %s\n", red.err(rerr))
@@ -1354,7 +1382,7 @@ func probeDBServer(ip net.IP, asPlayer byte, maxTracks int, specificTrack uint32
 					_ = redial()
 				} else if plm.kind == kindSetupAck && len(plm.args) >= 2 {
 					pc := plm.args[1].num
-					fmt.Printf("  0x1105 playlist_tracks(%d): count=%d\n", firstPlaylistID, pc)
+					fmt.Printf("  0x1105 playlist_tracks(%d): count=%s\n", firstPlaylistID, fmtCount(pc))
 					prows, rerr := dc.renderMenu(asPlayer, 1, slot, 1, d, pc, 5, timeout)
 					if rerr != nil {
 						fmt.Printf("    render error: %s\n", red.err(rerr))
@@ -1363,6 +1391,12 @@ func probeDBServer(ip net.IP, asPlayer byte, maxTracks int, specificTrack uint32
 					for _, r := range prows {
 						fmt.Printf("    pl_track id=%d parent=%d kind=0x%04x pos=%d title_len=%d artist_len=%d\n",
 							r.id, r.parent, r.kind, r.pos, len(r.label), len(r.sec))
+						if len(trackIDs) == 0 {
+							if _, ok := trackArts[r.id]; !ok {
+								trackArts[r.id] = r.artID
+							}
+							addTrackID(r.id)
+						}
 					}
 				}
 			}
@@ -1430,12 +1464,16 @@ func probeTrackDetails(ip net.IP, dbPort int, asPlayer, slot byte, tid, hintArt 
 		rows, rerr := dc.renderMenu(asPlayer, 1, slot, 1, d1, mm.args[1].num, 32, timeout)
 		var kinds []string
 		for _, r := range rows {
-			kinds = append(kinds, fmt.Sprintf("0x%04x(id=%d,art=%d,len=%d)", r.kind, r.id, r.artID, len(r.label)))
+			extra := ""
+			if r.arg12 != 0 {
+				extra = fmt.Sprintf(",a12=%d", r.arg12)
+			}
+			kinds = append(kinds, fmt.Sprintf("0x%04x(id=%d,art=%d%s,len=%d)", r.kind, r.id, r.artID, extra, len(r.label)))
 			if r.kind == 0x04 && r.artID != 0 {
 				artID = r.artID
 			}
 		}
-		fmt.Printf("    0x2002 metadata: count=%d err=%s items=[%s]\n", mm.args[1].num, red.err(rerr), strings.Join(kinds, ", "))
+		fmt.Printf("    0x2002 metadata: count=%s err=%s items=[%s]\n", fmtCount(mm.args[1].num), red.err(rerr), strings.Join(kinds, ", "))
 		if rerr != nil && !redial() {
 			return nil
 		}
@@ -1459,7 +1497,7 @@ func probeTrackDetails(ip net.IP, dbPort int, asPlayer, slot byte, tid, hintArt 
 			return
 		}
 		rows, rerr := dc.renderMenu(asPlayer, menu, slot, 1, dval, im.args[1].num, 16, timeout)
-		fmt.Printf("    %s: count=%d err=%s\n", lbl, im.args[1].num, red.err(rerr))
+		fmt.Printf("    %s: count=%s err=%s\n", lbl, fmtCount(im.args[1].num), red.err(rerr))
 		for _, r := range rows {
 			secInfo := fmt.Sprintf("sec_len=%d", len(r.sec))
 			if strings.ContainsAny(r.sec, "/\\") {
@@ -1725,18 +1763,19 @@ func rpcCallUDP(ip net.IP, port, srcPort int, prog, vers, proc uint32, authUnix 
 	return nil, fmt.Errorf("no UDP reply from %s:%d", ip, port)
 }
 
-func probeRPCNull(ip net.IP, label string, port, srcPort int, prog, vers uint32, authUnix bool, timeout time.Duration, red *redactor) {
+func probeRPCNull(ip net.IP, label string, port, srcPort int, prog, vers uint32, authUnix bool, timeout time.Duration, red *redactor) bool {
 	if _, err := rpcCallUDP(ip, port, srcPort, prog, vers, 0, authUnix, nil, timeout); err != nil {
 		if authUnix {
 			if _, err2 := rpcCallUDP(ip, port, srcPort, prog, vers, 0, false, nil, timeout); err2 == nil {
 				fmt.Printf("%s NULL (proc 0) udp/%d: OK ONLY with AUTH_NULL!\n", label, port)
-				return
+				return true
 			}
 		}
 		fmt.Printf("%s NULL (proc 0) udp/%d: ERROR: %s\n", label, port, red.err(err))
-		return
+		return false
 	}
 	fmt.Printf("%s NULL (proc 0) udp/%d (authUnix=%v): OK\n", label, port, authUnix)
+	return true
 }
 
 func probeNFS(ip net.IP, trackPaths []string, srcPort int, timeout time.Duration, red *redactor) {
@@ -1826,8 +1865,11 @@ func probeNFS(ip net.IP, trackPaths []string, srcPort int, timeout time.Duration
 		if nullTimeout > 800*time.Millisecond {
 			nullTimeout = 800 * time.Millisecond
 		}
-		probeRPCNull(ip, "MOUNT", mountPort, srcPort, rpcMount, 1, authUnix, nullTimeout, red)
-		probeRPCNull(ip, "NFS", nfsPort, srcPort, rpcNFS, 2, authUnix, nullTimeout, red)
+		okM := probeRPCNull(ip, "MOUNT", mountPort, srcPort, rpcMount, 1, authUnix, nullTimeout, red)
+		okN := probeRPCNull(ip, "NFS", nfsPort, srcPort, rpcNFS, 2, authUnix, nullTimeout, red)
+		if !okM && !okN {
+			fmt.Println("  note: mountd/nfsd gave no UDP reply while portmap answered (rekordbox may ignore loopback/self-IP or require another LAN peer / -src <1024)")
+		}
 	} else {
 		for rExp.err == nil && rExp.u32() == 1 {
 			raw := append([]byte(nil), rExp.opaque(4096)...)
