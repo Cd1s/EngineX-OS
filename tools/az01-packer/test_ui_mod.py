@@ -7453,6 +7453,83 @@ assert.equal(effective(true, true, "Right"), false);
         res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
         self.assertEqual(res.returncode, 0, res.stderr)
 
+    def test_cross_engine_polling_and_player_board_assignments(self):
+        qrc = LAB / "5.3.0" / "qrc"
+        if not qrc.is_dir():
+            self.skipTest(f"{qrc} not found")
+        with tempfile.TemporaryDirectory(prefix="ui-reverse-jog-ctrl-") as tmp:
+            out = Path(tmp) / "packs"
+            res = subprocess.run(["python3", str(BUILD_PACKS), "--qrc", str(qrc), "--out", str(out), "--release"],
+                                 capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0, res.stderr)
+            gcfg = (out / "en" / "ControlSurfaceModules/ControlSurfaceModules/GlobalAssignmentConfig.qml").read_text(encoding="utf-8")
+            self.assertIn("function scSyncReverseJogFromState()", gcfg)
+            self.assertIn("running: true; repeat: true; triggeredOnStart: true", gcfg)
+            self.assertIn("onTriggered: scGlobalConfig.scSyncReverseJogFromState()", gcfg)
+            self.assertNotIn("readonly property bool scReverseJogLeftEffective:", gcfg)
+
+            if shutil.which("node"):
+                m_fn = re.search(r"function scSyncReverseJogFromState\(\)\s*\{[\s\S]*?\n    \}", gcfg)
+                self.assertIsNotNone(m_fn)
+                sync_fn = m_fn.group(0)
+                js = f"""
+const assert = require('node:assert/strict');
+const shared = {{
+    "/GUI/Scripted/EngineXJogInvertLeft": false,
+    "/GUI/Scripted/EngineXJogInvertRight": false,
+    "/GUI/Scripted/EngineXJogInvertReady": false,
+    "/GUI/Scripted/EngineXPerfLibVisible": false,
+}};
+// Controller QML engine gets its own PropertyWrapper objects; signals are object-local
+// so UI writes to shared state do NOT fire notifications in the controller engine.
+globalThis.Planck = {{
+    getProperty: (p) => ({{ translator: {{ get state() {{ return shared[p]; }} }} }})
+}};
+const scGlobalConfig = {{
+    scReverseJogLeft: false,
+    scReverseJogRight: false,
+    scReverseJogLeftEffective: false,
+    scReverseJogRightEffective: false,
+    pReverseJogLeft: Planck.getProperty("/GUI/Scripted/EngineXJogInvertLeft"),
+    pReverseJogRight: Planck.getProperty("/GUI/Scripted/EngineXJogInvertRight"),
+    pReverseJogReady: Planck.getProperty("/GUI/Scripted/EngineXJogInvertReady"),
+    pPerfLibVisible: Planck.getProperty("/GUI/Scripted/EngineXPerfLibVisible"),
+}};
+{sync_fn}
+function scIsReverseJog(deckName) {{
+    return deckName === "Right" ? scGlobalConfig.scReverseJogRightEffective : scGlobalConfig.scReverseJogLeftEffective;
+}}
+shared["/GUI/Scripted/EngineXJogInvertReady"] = true;
+scSyncReverseJogFromState();
+assert.equal(scIsReverseJog(""), false);
+
+// Simulate UI engine toggling Left invert ON (e.g. SC5000 JP07) with no cross-engine signal
+shared["/GUI/Scripted/EngineXJogInvertLeft"] = true;
+scSyncReverseJogFromState();
+assert.equal(scIsReverseJog(""), true);
+assert.equal(scIsReverseJog("Left"), true);
+assert.equal(scIsReverseJog("Right"), false);
+
+// Simulate UI engine toggling Left invert OFF
+shared["/GUI/Scripted/EngineXJogInvertLeft"] = false;
+scSyncReverseJogFromState();
+assert.equal(scIsReverseJog(""), false);
+"""
+                nres = subprocess.run(["node", "-e", js], capture_output=True, text=True)
+                self.assertEqual(nres.returncode, 0, nres.stdout + nres.stderr)
+
+        preset_dir = LAB / "sclive4-rea61-followup" / "rootfs" / "usr" / "Engine" / "AssignmentFiles" / "PresetAssignmentFiles"
+        if preset_dir.is_dir():
+            for board in ("JP07", "JP11", "JP13", "JP21"):
+                q = preset_dir / board / f"{board}_Controller_Assignments.qml"
+                txt = q.read_text(encoding="utf-8")
+                self.assertIn("GlobalAssignmentConfig", txt, board)
+                self.assertIn("JogWheel {", txt, board)
+            for motorized in ("JP08", "JP14"):
+                q = preset_dir / motorized / f"{motorized}_Controller_Assignments.qml"
+                txt = q.read_text(encoding="utf-8")
+                self.assertNotIn("JogWheel {", txt, motorized)
+
 
 class RemoteLoadUiTest(unittest.TestCase):
     def test_remote_load_ui(self):
