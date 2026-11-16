@@ -988,6 +988,17 @@ class UiModSourceTest(unittest.TestCase):
         finally:
             bp.ROOT = old_root
 
+    def test_px_name_on_the_fx_bar_fits_the_name_column(self):
+        # "Jet Flanger (PX)" at 21 px ran into the BEATS column of the 160 px name button.
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            edits = bp.edits(False)
+        finally:
+            bp.ROOT = old_root
+        bar = "".join(rep for _, rep in edits["Skins/Embedded/Views/MainView/Fx/DJFx.qml"])
+        self.assertIn('djFx.scFxNames[djFx.scFxSelected].replace(" (PX)", "")', bar)
+
     def test_prime4_fx_knob_moves_one_effect_per_detent(self):
         old_root = bp.ROOT
         try:

@@ -8914,7 +8914,7 @@ def edits(dev: bool):
             ("index: djFxView ? djFxView.selectionIndex : 0", "index: djFx.scFxIndex >= 0 ? djFx.scFxIndex : (djFxView ? djFxView.selectionIndex : 0)"),
             ("onAccepted: result => djFxView.selectEffect(result)", "onAccepted: result => djFx.scFxAccept(result)"),
             ("onRejected: djFxView.abortSelecting()", "onRejected: djFx.scFxAbort()"),
-            ("parameter: djFxView ? djFxView.selectParameter : null", "parameter: djFxView ? djFxView.selectParameter : null\n            text: djFx.scFxSelected >= 0 ? djFx.scFxNames[djFx.scFxSelected] : (parameter ? parameter.valueText : \"\")"),
+            ("parameter: djFxView ? djFxView.selectParameter : null", "parameter: djFxView ? djFxView.selectParameter : null\n            text: djFx.scFxSelected >= 0 ? djFx.scFxNames[djFx.scFxSelected].replace(\" (PX)\", \"\") : (parameter ? parameter.valueText : \"\")"),
         ]
         out["ControlSurfaceModules/ControlSurfaceModules/DJFxSelect.qml"] = [
             ("import QtQuick 2.12", "import QtQuick 2.12\nimport Planck 1.0"),
