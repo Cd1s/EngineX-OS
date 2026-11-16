@@ -273,7 +273,8 @@ func (e *Exporter) SetEnabled(on bool) error {
 }
 func (e *Exporter) Close() { _ = e.SetEnabled(false) }
 
-// Rebind restarts a running export when the players moved to another interface.
+// Rebind restarts a running export when the players moved to another interface,
+// or when the auto-selected library root or export.pdb changed.
 func (e *Exporter) Rebind() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -281,8 +282,23 @@ func (e *Exporter) Rebind() error {
 		return nil
 	}
 	ip, _, _, _, err := exportIdentity(e.cfg)
-	if err != nil || ip.Equal(e.run.ip) {
+	ipChanged := err == nil && !ip.Equal(e.run.ip)
+	e.run.mu.Lock()
+	mounted := e.run.mounted
+	e.run.mu.Unlock()
+	if !ipChanged && mounted && e.cfg.Root != "" {
 		return nil
+	}
+	if e.cfg.Root == "" {
+		roots := MountedExports()
+		if len(roots) == 0 {
+			e.run.close()
+			e.run = nil
+			return nil
+		}
+		if !ipChanged && mounted && roots[0] == e.run.nfs.Root {
+			return nil
+		}
 	}
 	e.run.close()
 	e.run = nil

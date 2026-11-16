@@ -1458,3 +1458,36 @@ func TestExportTakesVacantMasterBack(t *testing.T) {
 		t.Fatal("ClaimMaster left the master given away")
 	}
 }
+
+func TestExportRebindWhenPDBChanges(t *testing.T) {
+	root := t.TempDir()
+	testfixture.Export(t, root)
+	cfg := testExportConfig(root)
+	e := NewExporter(cfg)
+	defer e.Close()
+	if err := e.SetEnabled(true); err != nil {
+		t.Fatal(err)
+	}
+	first := e.run
+	if err := e.Rebind(); err != nil {
+		t.Fatal(err)
+	}
+	if e.run != first {
+		t.Fatal("Rebind restarted unchanged export")
+	}
+	first.mu.Lock()
+	first.mounted = false
+	first.mu.Unlock()
+	if err := e.Rebind(); err != nil {
+		t.Fatal(err)
+	}
+	if e.run == nil || e.run == first {
+		t.Fatal("Rebind did not restart unmounted/stale export")
+	}
+	e.run.mu.Lock()
+	mounted := e.run.mounted
+	e.run.mu.Unlock()
+	if !mounted {
+		t.Fatal("restarted export not marked mounted")
+	}
+}
