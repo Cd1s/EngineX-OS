@@ -242,8 +242,8 @@ ln -s /usr/Engine/Engine "$ENGINEX_PROC_ROOT/100/exe"
 printf 'EMain\n' > "$ENGINEX_PROC_ROOT/100/comm"
 printf '/usr/Engine/Engine\n' > "$ENGINEX_PROC_ROOT/100/cmdline"
 printf 'irq/42-i2s\n' > "$ENGINEX_PROC_ROOT/200/comm"
-mkdir -p "$ENGINEX_PROC_ROOT/100/task/"{103,104,105,106,107,108,110}
-for tid in 100 101 102 103 104 105 106 107 108 110; do
+mkdir -p "$ENGINEX_PROC_ROOT/100/task/"{103,104,105,106,107,108,109,110}
+for tid in 100 101 102 103 104 105 106 107 108 109 110; do
     policy=0; name=GUI
     if [[ $tid == 101 ]]; then policy=1; name=AudioRT; fi
     if [[ $tid == 102 ]]; then name=AudioHelper; fi
@@ -253,10 +253,11 @@ for tid in 100 101 102 103 104 105 106 107 108 110; do
     if [[ $tid == 106 ]]; then policy=2; name=AudioRenderer3; fi
     if [[ $tid == 107 ]]; then name=J:I:Takingfreez; fi
     if [[ $tid == 108 ]]; then name=QQmlThread; fi
+    if [[ $tid == 109 ]]; then name=TrackLoad1; fi
     if [[ $tid == 110 ]]; then name=AudioOut; fi # named before its RT policy is set
     if (( tid >= 103 )); then printf 'Cpus_allowed_list:\t1\n' > "$ENGINEX_PROC_ROOT/100/task/$tid/status"; fi
     if [[ $tid == 107 ]]; then printf 'Cpus_allowed_list:\t0-3\n' > "$ENGINEX_PROC_ROOT/100/task/$tid/status"; fi
-    if [[ $tid == 108 ]]; then printf 'Cpus_allowed_list:\t2\n' > "$ENGINEX_PROC_ROOT/100/task/$tid/status"; fi
+    if [[ $tid == 108 || $tid == 109 ]]; then printf 'Cpus_allowed_list:\t2\n' > "$ENGINEX_PROC_ROOT/100/task/$tid/status"; fi
     printf '%s\n' "$name" > "$ENGINEX_PROC_ROOT/100/task/$tid/comm"
     {
         printf '%s (name with spaces) S' "$tid"
@@ -300,7 +301,9 @@ lacks 'taskset <-pc> <0> <101>' "$MOCK_ROOT/log"
 lacks 'taskset <-pc> <1-2> <100>' "$MOCK_ROOT/log"
 has 'taskset <-pc> <1> <100>' "$MOCK_ROOT/log"
 has 'taskset <-pc> <2> <103>' "$MOCK_ROOT/log"
-has 'taskset <-pc> <0,3> <104>' "$MOCK_ROOT/log"
+# #298: Engine pins each deck's stream decoder (Streamer2 on 1 here) and loader (TrackLoad1 on 2) itself.
+lacks '> <104>' "$MOCK_ROOT/log"
+lacks '> <109>' "$MOCK_ROOT/log"
 has 'taskset <-pc> <0,3> <105>' "$MOCK_ROOT/log"
 has 'taskset <-pc> <0,3> <107>' "$MOCK_ROOT/log"
 has 'taskset <-pc> <0,3> <108>' "$MOCK_ROOT/log"

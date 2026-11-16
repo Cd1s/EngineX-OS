@@ -185,8 +185,10 @@ engine_threads() {
             thread="${p##*/}/${task##*/}=$name"
             sweeping="$sweeping|$thread|"
             case $swept in *"|$thread|"*) continue ;; esac
-            # An audio thread can be named before Engine promotes it to RT.
-            case $name in AudioOut|AudioRenderer*|AudioWatcher) continue ;; esac
+            # An audio thread can be named before Engine promotes it to RT. Engine pins each deck's
+            # stream decoders and loaders to a core of their own: a load moved onto the playing
+            # deck's core made it stutter (#298).
+            case $name in AudioOut|AudioRenderer*|AudioWatcher|Streamer[1-4]|TrackLoad[1-4]) continue ;; esac
             read -r stat 2>/dev/null <"$task/stat" || continue
             # policy is field 41: 39th after the ") " that ends comm (comm may hold spaces)
             set -- ${stat##*) }
