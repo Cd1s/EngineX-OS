@@ -1068,12 +1068,14 @@ SERVICES_MAIN = """
 	// rather than through the stock policy's three-view/focus-dependent action.
 	readonly property var scViewCycleRef: Planck.createProperty("EngineXCycleView", false, 3)
 	readonly property var scViewCycleProperty: scViewCycleRef && Planck.getProperty("/GUI/Scripted/EngineXCycleView")
-	// The button triggers this action from the controller's QML engine, through its
-	// own property object. What reaches this engine is the property's state:
-	// stateTrueCount and stateChanged, which stock's notifier counts (stock receives
-	// hardware actions only this way). A Connections on the translator's own
-	// "triggered" ran for a trigger from this engine (sandbox) but not for the
-	// button on the left SC5000.
+	// The button sets this action's state from the controller's QML engine (the MIDI
+	// thread, its own property object), as stock's GlobalAction sets /GUI/CloseDialogs:
+	// state = true stays latched until stock's notifier, enabled only while the state
+	// is true, counts it and resets it. Presses made before that wait in the module
+	// (scCyclePending) and are latched one by one, so each press is one step. A trigger() from
+	// there is a pulse that is over before this engine reads the state, and its
+	// "triggered" fires only on the calling object: neither reached this engine on
+	// the left SC5000. The keyboard's trigger() runs in this engine and is seen.
 	ActionTranslatorStateChangeNotifier {
 		prop: root.scViewCycleProperty || null
 		onChanged: root.scViewSelect(root.scViewActive % 5 + 1)
@@ -7464,15 +7466,57 @@ def edits(dev: bool):
             "    }\n",
         )]
         # #99: five views kept by stream-sync (scView* in EmbeddedMain) and Save View.
+        # The GUI takes one latched press at a time (scViewCycleProperty); presses
+        # made before it ran wait in the module, so each press is one step.
+        cycle_queue = (
+            "\n"
+            "    // EngineX (#99): Shift+View presses for the GUI's five-view cycle. The GUI\n"
+            "    // takes one latched press at a time and resets the state; presses made\n"
+            "    // before that wait here, so every press is one step however late it runs.\n"
+            "    // A press the GUI has not taken within 1.5 s is withdrawn with the ones\n"
+            "    // waiting, so no step comes long after the press.\n"
+            "    property int scCyclePending: 0\n"
+            "    property bool scCycleLatched: false\n"
+            "    property real scCycleSince: 0\n"
+            "    Timer {\n"
+            "        interval: 20\n"
+            "        repeat: true\n"
+            "        triggeredOnStart: true\n"
+            "        running: module.scCyclePending > 0 || module.scCycleLatched\n"
+            "        onTriggered: {\n"
+            '            const p = Planck.getProperty("/GUI/Scripted/EngineXCycleView")\n'
+            "            if (!p || !p.translator) {\n"
+            "                module.scCyclePending = 0\n"
+            "                module.scCycleLatched = false\n"
+            "            } else if (p.translator.state) {\n"
+            "                if (Date.now() - module.scCycleSince < 1500) return\n"
+            "                p.translator.state = false\n"
+            "                module.scCyclePending = 0\n"
+            "                module.scCycleLatched = false\n"
+            "            } else if (module.scCyclePending > 0) {\n"
+            "                module.scCyclePending--\n"
+            "                module.scCycleSince = Date.now()\n"
+            "                module.scCycleLatched = true\n"
+            "                p.translator.state = true\n"
+            "            } else {\n"
+            "                module.scCycleLatched = false\n"
+            "            }\n"
+            "        }\n"
+            "    }\n"
+        )
         out["ControlSurfaceModules/ControlSurfaceModules/View.qml"] = [
+            ("    property int ledType: LedType.None\n", "    property int ledType: LedType.None\n" + cycle_queue),
             ('doubleEnabled: true', 'doubleEnabled: !globalConfig.shift'),
-            ('"/Engine/ShiftViewBehaviour/Shift/SinglePress"', '"/GUI/Scripted/EngineXCycleView"'),
+            ('Planck.getProperty("/Engine/ShiftViewBehaviour/Shift/SinglePress").translator.trigger()',
+             'module.scCyclePending++'),
         ]
         # SYSTEM ONE assigns Shift+Menu to Navigation's CycleView action.
-        out["ControlSurfaceModules/ControlSurfaceModules/Navigation.qml"] = [(
-            'Planck.getProperty(module.basePath + navigationButton.secondaryPath).translator.trigger()',
-            'Planck.getProperty(navigationButton.secondaryPath === "CycleViewPress" ? "/GUI/Scripted/EngineXCycleView" : module.basePath + navigationButton.secondaryPath).translator.trigger()',
-        )]
+        out["ControlSurfaceModules/ControlSurfaceModules/Navigation.qml"] = [
+            ("    property bool ledAlwaysLit: false\n", "    property bool ledAlwaysLit: false\n" + cycle_queue),
+            ('Planck.getProperty(module.basePath + navigationButton.secondaryPath).translator.trigger()',
+             'if (navigationButton.secondaryPath === "CycleViewPress") module.scCyclePending++\n'
+             '                            else Planck.getProperty(module.basePath + navigationButton.secondaryPath).translator.trigger()'),
+        ]
         out[ROOT + "EmbeddedMain.qml"].append((
             'onTriggered: Planck.getProperty("/Engine/ShiftViewBehaviour/Shift/SinglePress").translator.trigger()',
             'onTriggered: root.scViewCycleProperty.translator.trigger()',
