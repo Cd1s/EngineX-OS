@@ -4123,7 +4123,7 @@ class ShadowMirrorNudgeTest(unittest.TestCase):
     def test_nudges_are_followed_within_a_few_periods_and_steady_play_is_left_alone(self):
         ShadowDisplayTest.js(self, r"""
 const T0 = now, props = new Map(), histA = [];
-let seeks = 0, a = 5000, b = 5000, mirror = 5000, bShown = 5000, nextBlock = T0, blocks = 0;
+let seeks = 0, a = 5000, b = 5000, mirror = 5000, bShown = 5000, nextBlock = T0, blocks = 0, irregular = false, nextMirror = 0;
 globalThis.scShadowBent = null;
 globalThis.scShadowBendTimer = {interval: 0, running: false, restart() { this.running = true }, stop() { this.running = false }};
 globalThis.scTr = path => {
@@ -4154,7 +4154,8 @@ const run = (ms, rate) => { for (let i = 0; i < ms; i++) {
     const bRate = 1 + (state('Forward') ? 0.07 : state('Backward') ? -0.07 : 0);
     a += rate || 1; b += bRate; histA[t] = a;
     // at the period's own instant, as Engine counts it in audio blocks
-    if (now - nextBlock >= 34.8) { nextBlock += 34.8; if (++blocks % 50) mirror = a - (now - nextBlock) * (rate || 1); bShown = b - (now - nextBlock) * bRate }
+    if (now - nextBlock >= 34.8) { nextBlock += 34.8; if (!irregular && ++blocks % 50) mirror = a - (now - nextBlock) * (rate || 1); bShown = b - (now - nextBlock) * bRate }
+    if (irregular && now >= nextMirror) { mirror = a; nextMirror = now + 65 + (++blocks * 37) % 48 } // the sandbox's null audio clock
     if (t % 16 === 0 && scShadowNudgeTimer.running) scShadowNudgeTick(now);
     if (t % 80 === 0) scShadowLine(now);
     if (t % 520 === 0) apply();
@@ -4180,6 +4181,10 @@ mine = marks.filter(m => m[0] >= t0);
 assert.ok(mine.length && mine[0][1] === 'B' && mine[0][0] - t0 <= 250, 'brake followed at once ' + JSON.stringify(mine));
 assert.ok(mine.every(m => m[1] !== 'F'), 'no bend forward ' + JSON.stringify(mine));
 assert.ok(Math.abs(b - a) <= 3, 'followed: ' + (b - a).toFixed(2) + ' ms');
+// A mirror that does not come once a period (65-112 ms apart) is not read for nudges at all.
+irregular = true; run(6000);
+t0 = now - T0; run(600, 1.03); run(400);
+assert.equal(marks.filter(m => m[0] >= t0 - 6000).length, 0, 'irregular mirror: no nudge bend ' + JSON.stringify(marks.slice(-4)));
 assert.equal(seeks, 0, 'a nudge is never a seek');
 """)
 

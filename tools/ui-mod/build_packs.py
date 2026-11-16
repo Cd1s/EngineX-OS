@@ -2583,7 +2583,7 @@ SERVICES_MAIN = """
 			const pos = raw / at.sampleRate * 1000
 			if (!n || n.rate !== at.rate) {
 				if (n && n.dir) scShadowNudgeEnd(at, n, now)
-				at.nudge = {raw: pos, seen: now, rate: at.rate, period: 0, step: 0, extra: 0, done: 0, dir: 0, prop: null, at: now, quiet: now}
+				at.nudge = {raw: pos, seen: now, rate: at.rate, period: 0, step: 0, extra: 0, done: 0, dir: 0, prop: null, at: now, quiet: now, run: 0, active: false}
 				continue
 			}
 			if (n.dir) n.done += n.dir * 0.07 * at.rate * (now - n.at)
@@ -2597,13 +2597,19 @@ SERVICES_MAIN = """
 				n.raw = pos; n.seen = now
 				if (!n.step || travel < n.step * 0.75 || Math.abs(r - 1) > 0.25 || (n.period && Math.abs(k - gap / n.period) > Math.max(1, k * 0.5))) {
 					if (n.dir) scShadowNudgeEnd(at, n, now)
-					n.step = travel > 0 && gap < 200 ? travel : 0; n.period = 0; n.extra = n.done = 0
+					n.step = travel > 0 && gap < 200 ? travel : 0; n.period = 0; n.extra = n.done = 0; n.run = 0; n.active = false
 					continue
 				}
 				n.period = n.period ? n.period + (gap / k - n.period) * 0.1 : gap / k
-				if (Math.abs(r - 1) >= 0.01) { n.quiet = now; n.extra += travel - k * n.step }
-				else if (!n.dir && Math.abs(n.extra - n.done) < 1) n.step += (travel / k - n.step) * 0.05
-				else n.extra += travel - k * n.step
+				// A JP07 sends every third audio block: steady periods travel alike to a sample. A
+				// stream that does not (the sandbox's null audio clock) is never taken for a nudge:
+				// one counts only after 8 alike periods, and lasts until they are alike again.
+				if (Math.abs(r - 1) < 0.005) {
+					if (++n.run === 8 && root.scShadowDebug) root.scShadowDbg({deck: Number(d), act: "nudge-ready", step: n.step, period: n.period})
+					if (!n.dir && Math.abs(n.extra - n.done) < 1) n.step += (travel / k - n.step) * 0.05
+				} else if (n.active || n.run >= 8) { n.active = true; n.run = 0; n.quiet = now }
+				else { n.run = 0; continue }
+				if (n.active) n.extra += travel - k * n.step
 			}
 			const owe = n.extra - n.done
 			if (n.dir && owe * n.dir <= 0) scShadowNudgeEnd(at, n, now)
@@ -2614,8 +2620,9 @@ SERVICES_MAIN = """
 					p.state = true
 					n.prop = p; n.dir = owe > 0 ? 1 : -1
 					at.nudgeUntil = now + 2000
+					if (root.scShadowDebug) root.scShadowDbg({deck: Number(d), act: "nudge", extra: n.extra, done: n.done})
 				}
-			} else if (!n.dir && now - n.quiet > 500 && Math.abs(owe) < 1) n.extra = n.done = 0
+			} else if (!n.dir && now - n.quiet > 500 && Math.abs(owe) < 1) { n.extra = n.done = 0; n.active = false }
 		}
 		if (!live) scShadowNudgeTimer.stop()
 	}
