@@ -458,6 +458,13 @@ static void do_eject(void) {
 
 int main(void) {
     mount("devtmpfs", "/dev", "devtmpfs", 0, NULL);
+    int cfd_con = open("/dev/console", O_RDWR);
+    if (cfd_con >= 0) {
+        dup2(cfd_con, 0);
+        dup2(cfd_con, 1);
+        dup2(cfd_con, 2);
+        if (cfd_con > 2) close(cfd_con);
+    }
     mount("proc", "/proc", "proc", 0, NULL);
     mount("sysfs", "/sys", "sysfs", 0, NULL);
 
