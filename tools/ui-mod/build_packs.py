@@ -665,7 +665,7 @@ SERVICES_MAIN = """
 	readonly property bool scIsMixstream: typeof Config !== "undefined" && Config && Config.audio && Config.audio.fx && Config.audio.fx.hasNHFx !== undefined ? !!Config.audio.fx.hasNHFx : ["NH08", "NH08S", "NH10"].indexOf(scBoard) >= 0
 	readonly property bool scHasStemsEq: scHasMixer && (typeof Config !== "undefined" && Config && Config.audio ? !!Config.audio.hasStemsLevel : false)
 	readonly property bool scIsAZ04: ["JP24", "RMZ2"].indexOf(scBoard) >= 0
-	readonly property bool scHasJogWheel: !(typeof Config !== "undefined" && Config && Config.device && Config.device.hasMotorizedPlatters) && ["JP08", "JP14", "RMZ2"].indexOf(scBoard) < 0
+	readonly property bool scHasJogWheel: !scIsPlayerBoard && !(typeof Config !== "undefined" && Config && Config.device && Config.device.hasMotorizedPlatters) && ["JP08", "JP14", "RMZ2"].indexOf(scBoard) < 0
 	readonly property var scTransitionFxView: typeof PlanckGUI !== "undefined" && PlanckGUI && PlanckGUI.views ? (PlanckGUI.views.transitionFx || null) : null
 	readonly property bool scHasStockTransitionTile: typeof Config !== "undefined" && Config && Config.audio && Config.audio.fx && Config.device
 		? (!!Config.audio.fx.hasTransitionFx && !Config.device.hasHardwareFaderFxButtons && !!scTransitionFxView)
@@ -3003,8 +3003,8 @@ SERVICES_MAIN = """
 			scReverseJogSynced = false
 			return
 		}
-		pL.translator.state = scReverseJogLeft
-		pR.translator.state = scReverseJogRight
+		pL.translator.state = scHasJogWheel && scReverseJogLeft
+		pR.translator.state = scHasJogWheel && scReverseJogRight
 		if (ready && pReady && pReady.translator) {
 			pReady.translator.state = true
 			scReverseJogSynced = true

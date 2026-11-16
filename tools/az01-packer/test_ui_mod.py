@@ -7358,15 +7358,15 @@ const assert = require('node:assert/strict');
 function uiCaps(board, scPlayer, hasMotorizedPlatters) {{
     const scBoard = String(board || "");
     const scIsPlayerBoard = !!scPlayer || ["JP07", "JP08", "JP13", "JP14"].indexOf(scBoard) >= 0;
-    const scHasJogWheel = !hasMotorizedPlatters && ["JP08", "JP14", "RMZ2"].indexOf(scBoard) < 0;
+    const scHasJogWheel = !scIsPlayerBoard && !hasMotorizedPlatters && ["JP08", "JP14", "RMZ2"].indexOf(scBoard) < 0;
     const showLeft = scHasJogWheel;
     const showRight = scHasJogWheel && !scIsPlayerBoard;
     const leftTitle = scIsPlayerBoard ? "Reverse Jog Wheel" : "Reverse Left Jog Wheel";
     return {{ showLeft, showRight, leftTitle }};
 }}
-// 1-jog players keep 1 row even when #49 4-deck hook clears Config.device.isPlayer
-assert.deepEqual(uiCaps("JP07", true, false), {{ showLeft: true, showRight: false, leftTitle: "Reverse Jog Wheel" }});
-assert.deepEqual(uiCaps("JP13", false, false), {{ showLeft: true, showRight: false, leftTitle: "Reverse Jog Wheel" }});
+// Standalone players (SC5000/SC5000M/SC6000/SC6000M) hide Reverse Jog Wheel even when #49 clears Config.device.isPlayer
+assert.deepEqual(uiCaps("JP07", true, false), {{ showLeft: false, showRight: false, leftTitle: "Reverse Jog Wheel" }});
+assert.deepEqual(uiCaps("JP13", false, false), {{ showLeft: false, showRight: false, leftTitle: "Reverse Jog Wheel" }});
 // 2-jog consoles (including SC LIVE 4 JP21, PRIME 4 JC11, Mixstream NH08, PRIME 4 G2 JP24) show both Left & Right
 for (const b of ["JP21", "JP20", "JC11", "JC11S", "JC16", "JP11", "JP11S", "NH08", "NH08S", "NH10", "JP24"]) {{
     assert.deepEqual(uiCaps(b, false, false), {{ showLeft: true, showRight: true, leftTitle: "Reverse Left Jog Wheel" }}, b);
@@ -7405,6 +7405,7 @@ globalThis.root = {{
 const scReverseJogLeftProp = Planck.getProperty("/GUI/Scripted/EngineXJogInvertLeft");
 const scReverseJogRightProp = Planck.getProperty("/GUI/Scripted/EngineXJogInvertRight");
 const scReverseJogReadyProp = Planck.getProperty("/GUI/Scripted/EngineXJogInvertReady");
+let scHasJogWheel = true;
 function scFxMsInteger(v) {{ return parseInt(v) || 500; }}
 function scFxMsApply(m, v) {{ scFxTimeMode = m; scFxTimeMs = v; }}
 {fn_sync}
@@ -7449,6 +7450,14 @@ assert.equal(planck["/GUI/Scripted/EngineXJogInvertLeft"].translator.state, fals
 assert.equal(planck["/GUI/Scripted/EngineXJogInvertRight"].translator.state, false);
 assert.equal(effective(true, true, "Left"), false);
 assert.equal(effective(true, true, "Right"), false);
+
+// On standalone players (scHasJogWheel=false), stored jog_invert_* never reaches the controller binding
+scHasJogWheel = false;
+scParseSettingsConf("jog_invert_left=1\\njog_invert_right=1\\n");
+assert.equal(planck["/GUI/Scripted/EngineXJogInvertLeft"].translator.state, false);
+assert.equal(planck["/GUI/Scripted/EngineXJogInvertRight"].translator.state, false);
+assert.equal(effective(false, false, "Left"), false);
+assert.equal(effective(false, false, ""), false);
 """
         res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
         self.assertEqual(res.returncode, 0, res.stderr)

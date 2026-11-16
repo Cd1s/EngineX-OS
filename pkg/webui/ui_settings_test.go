@@ -778,7 +778,7 @@ func TestBoardCapabilitiesAndSettingsCompatJP07vsJC11(t *testing.T) {
 			player:    true,
 			caps: uiCapabilities{
 				Mixer: false, FourDeck: true, AutoLoopKnob: true, BeatJumpPads: false,
-				TrackSkipKeys: true, StemsEq: false, LineInAux: false, Gen2: false, RemoteStems: true, JogWheel: true, SDHighSpeed: true,
+				TrackSkipKeys: true, StemsEq: false, LineInAux: false, Gen2: false, RemoteStems: true, JogWheel: false, SDHighSpeed: true,
 			},
 		},
 		{
@@ -1251,6 +1251,25 @@ func TestUISettingsJogInvert(t *testing.T) {
 	}
 	if code, v := uiPost(t, srv.URL, ""); code != 200 || !v.Capabilities.JogWheel {
 		t.Fatalf("expected JogWheel=true when 5.3.0 JogWheel.qml is present, got code=%d %+v", code, v.Capabilities)
+	}
+
+	// 6. Standalone players (JP07 SC5000, JP13 SC6000, JP08/JP14) hide JogWheel and ignore stored jog_invert_*
+	oldCompat := deviceCompatiblePath
+	defer func() { deviceCompatiblePath = oldCompat }()
+	compatFile := filepath.Join(t.TempDir(), "compatible")
+	if err := os.WriteFile(compatFile, []byte("inmusic,jp07\x00rockchip,rk3288\x00"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	deviceCompatiblePath = compatFile
+	if err := os.WriteFile(filepath.Join(dir, "settings.conf"), []byte("jog_invert_left=1\njog_invert_right=1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code, v := uiPost(t, srv.URL, ""); code != 200 || v.Capabilities.JogWheel || v.JogInvertLeft || v.JogInvertRight {
+		t.Fatalf("expected player JP07 to hide JogWheel and ignore stored jog_invert_*, got code=%d caps=%+v left=%v right=%v",
+			code, v.Capabilities, v.JogInvertLeft, v.JogInvertRight)
+	}
+	if code, v := uiPost(t, srv.URL, "jogInvertLeft=1&jogInvertRight=1"); code != 200 || v.JogInvertLeft || v.JogInvertRight {
+		t.Fatalf("expected player JP07 POST jogInvert* to stay false, got code=%d left=%v right=%v", code, v.JogInvertLeft, v.JogInvertRight)
 	}
 }
 
