@@ -20,10 +20,14 @@ function action(text, name) {
 const functions = [...source.main.matchAll(/^\tfunction (scView\w+)\([^\n]*\) \{[\s\S]*?^\t\}/gm)]
     .map(m => m[0]).join('\n');
 const changed = source.main.match(/^\t\tfunction onCurrentViewChanged\(\) \{[\s\S]*?^\t\t\}/m)[0];
-// Engine's action translators have no "triggered" signal: trigger() raises
-// stateTrueCount and emits stateChanged, which stock's ActionTranslatorStateChangeNotifier
-// (the receiver below, when the generated QML has one) turns into changed().
+// The View button triggers from the controller's QML engine, through its own
+// property object: the GUI engine sees only the property's state (stateTrueCount,
+// stateChanged), which stock's ActionTranslatorStateChangeNotifier turns into
+// changed(). A "triggered" signal fires only on the object trigger() was called on,
+// so the fixture gives the controller its own object (`controller` below).
 const cycle = source.main.match(/ActionTranslatorStateChangeNotifier \{\n\t\tprop: root\.scViewCycleProperty \|\| null\n\t\tonChanged: (root\.scViewSelect\([^\n]+)\n/);
+// A receiver on the GUI object's own "triggered" (before the fix).
+const ownTriggered = source.main.match(/function onTriggered\(\) \{ (root\.scViewSelect\([^\n]+) \}/);
 const timerStart = source.main.indexOf('\tTimer {', source.main.indexOf('function scViewSelect('));
 const timer = body(source.main, source.main.indexOf('onTriggered:', timerStart));
 const keyboard = source.main.match(/shortcut: "Shift\+V"\s+onTriggered: ([^\n]+)/)[1];
@@ -54,7 +58,6 @@ function fixture(board, mode, orientation, saved) {
     Object.assign(c.waveformController, { waveformCountSetting: settings.waveformCount,
         waveformOrientationSetting: settings.waveformOrientation });
     c.layoutController.layoutSetting = settings.deckLayout;
-    const p = {};
     const ctx = { console, Date: { now: () => now },
         scIsPlayerBoard: player, scFourDeckRole: player && mode !== 'stock' ? '13' : '',
         scPairedOn: mode === 'paired', scPairedDirty: false,
@@ -98,25 +101,29 @@ function fixture(board, mode, orientation, saved) {
     c.viewStateController = vsc;
     ctx.scViewCtrl = vsc;
     ctx.root = ctx;
-    ctx.Planck = { getProperty(path) {
-        return p[path] ||= { translatorType: 3, translator: { state: false, stateTrueCount: 0, seen: 0, trigger() {
-            events.push(path);
-            this.stateTrueCount++;
-            this.state = true;
-            // stateChanged reaches the GUI's notifier, whichever engine triggered.
-            if (path === '/GUI/Scripted/EngineXCycleView') {
-                if (cycle && this.seen !== this.stateTrueCount) {
-                    this.seen = this.stateTrueCount;
-                    vm.runInContext(cycle[1], ctx);
-                    this.state = false;
-                }
-            } else if (path.endsWith('/Shift/SinglePress') || path.endsWith('/CycleViewPress')) {
-                // Stock policy has only three presets; it does not know views.json.
-                vsc.currentView = (vsc.currentView + 1) % 3;
+    // One state per property, shared by every engine's object for it.
+    const shared = {};
+    const object = (path, gui) => ({ translatorType: 3, translator: { trigger() {
+        events.push(path);
+        const st = shared[path] ||= { stateTrueCount: 0, seen: 0 };
+        st.stateTrueCount++;
+        if (path === '/GUI/Scripted/EngineXCycleView') {
+            // "triggered" on the object trigger() was called on: only the GUI's own.
+            if (gui && ownTriggered) vm.runInContext(ownTriggered[1], ctx);
+            // The shared state reaches the GUI's notifier, whichever engine triggered.
+            if (cycle && st.seen !== st.stateTrueCount) {
+                st.seen = st.stateTrueCount;
+                vm.runInContext(cycle[1], ctx);
             }
-        } } };
-    } };
-    ctx.scViewCycleProperty = ctx.Planck.getProperty('/GUI/Scripted/EngineXCycleView');
+        } else if (path.endsWith('/Shift/SinglePress') || path.endsWith('/CycleViewPress')) {
+            // Stock policy has only three presets; it does not know views.json.
+            vsc.currentView = (vsc.currentView + 1) % 3;
+        }
+    } } });
+    // The controller's assignment QML gets its own objects (`controller`).
+    const controller = {};
+    ctx.Planck = { getProperty(path) { return controller[path] ||= object(path, false); } };
+    ctx.scViewCycleProperty = object('/GUI/Scripted/EngineXCycleView', true);
     vm.createContext(ctx);
     vm.runInContext(functions + '\n' + changed + '\nscViewPrefs = ' + prefs, ctx);
     function run(code) { vm.runInContext(code, ctx); }
