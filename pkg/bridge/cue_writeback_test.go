@@ -214,3 +214,48 @@ func TestWriteBackCuesPullOutMidWriteLeavesOriginalIntact(t *testing.T) {
 		t.Fatalf("original DAT was modified after aborted write")
 	}
 }
+
+func TestWriteBackCuesReadsUncheckpointedWAL(t *testing.T) {
+	ctx := context.Background()
+	stick := setupWriteBackStick(t, false)
+	if _, err := bridge.Convert(ctx, stick, enginedb.Options{}); err != nil {
+		t.Fatal(err)
+	}
+
+	mPath := filepath.Join(stick, "Engine Library", "Database2", "m.db")
+	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: mPath}).String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	perf, err := enginedb.EncodePerformance(rekordbox.Track{Duration: 4, SampleRate: 44100}, &rekordbox.Analysis{
+		Beats: []rekordbox.Beat{{TimeMS: 250, BPM: 128, Number: 1}},
+		Cues: []rekordbox.Cue{
+			{HotCue: 1, TimeMS: 1000, Name: "WALCue", Color: [4]byte{255, 0x30, 0x5a, 0xff}, ColorCode: 1},
+			{HotCue: 3, TimeMS: 1500, Name: "WALCue3", Color: [4]byte{255, 0x30, 0x5a, 0xff}, ColorCode: 1},
+		},
+	})
+	if err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE PerformanceData SET trackData=?, quickCues=?, loops=? WHERE trackId = 1`, perf.TrackData, perf.QuickCues, perf.Loops); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	res, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{
+		DateDir:            "2026-11-17",
+		SkipPreparingCheck: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.TracksChanged != 1 {
+		t.Fatalf("TracksChanged = %d, want 1 (uncheckpointed WAL edit missed)", res.TracksChanged)
+	}
+}

@@ -94,7 +94,7 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 		}
 	}
 
-	mURI := url.URL{Scheme: "file", Path: mDBPath, RawQuery: "mode=ro&immutable=1"}
+	mURI := url.URL{Scheme: "file", Path: mDBPath, RawQuery: "mode=ro&_pragma=busy_timeout(5000)"}
 	db, err := sql.Open("sqlite", mURI.String())
 	if err != nil {
 		return res, err
@@ -102,7 +102,8 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 	defer db.Close()
 	db.SetMaxOpenConns(1)
 
-	if _, err := db.ExecContext(ctx, `ATTACH DATABASE ? AS bridge`, "file:"+stateDBPath+"?mode=ro&immutable=1"); err != nil {
+	stateURI := url.URL{Scheme: "file", Path: stateDBPath, RawQuery: "mode=ro&_pragma=busy_timeout(5000)"}
+	if _, err := db.ExecContext(ctx, `ATTACH DATABASE ? AS bridge`, stateURI.String()); err != nil {
 		return res, fmt.Errorf("writeback: attach bridge state: %w", err)
 	}
 
