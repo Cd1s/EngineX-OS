@@ -610,8 +610,11 @@ STREAMING_INTERNAL_SAVE = """
             scInternalSelected = current === path
             scInternalReady = scSourceDrive
             if (scInternalSelected && scInternalReady) scFinishInternal()
-            else if (scInternalSelected) librarian.streamingInterfaceController.checkSourceDriveAvailability()
-            else librarian.browserSourceControllerPtr().select(path)
+            else {
+                if (scInternalSelected && librarian.streamingInterfaceController && librarian.streamingInterfaceController.checkSourceDriveAvailability)
+                    librarian.streamingInterfaceController.checkSourceDriveAvailability()
+                librarian.browserSourceControllerPtr().select(path)
+            }
         })
         return true
     }

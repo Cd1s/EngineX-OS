@@ -9210,7 +9210,8 @@ assert.equal(scStemRows['22'], undefined);
     @unittest.skipUnless(shutil.which("node"), "Node is required")
     def test_no_source_dialog_rechecks_when_internal_already_selected_after_usb_eject(self):
         """After USB eject while internal save drive is already selected, re-check availability instead of no-op select()."""
-        self.assertIn("else if (scInternalSelected) librarian.streamingInterfaceController.checkSourceDriveAvailability()", bp.STREAMING_INTERNAL_SAVE)
+        self.assertIn("if (scInternalSelected && librarian.streamingInterfaceController && librarian.streamingInterfaceController.checkSourceDriveAvailability)", bp.STREAMING_INTERNAL_SAVE)
+        self.assertIn("librarian.streamingInterfaceController.checkSourceDriveAvailability()", bp.STREAMING_INTERNAL_SAVE)
         self.assertIn("scRestoreSource(scOriginalSource || scLastSource)", bp.STREAMING_INTERNAL_SAVE)
 
     @staticmethod
