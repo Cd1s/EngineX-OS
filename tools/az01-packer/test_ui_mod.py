@@ -8864,7 +8864,7 @@ const assert = require('assert');
 String.prototype.arg = function(n) {{ return this.replace('%1', n); }};
 console.warn = () => {{}};
 const dict = {json.dumps(rows, ensure_ascii=False)};
-let scLang = 'en', scStemRows = {{}}, scStemAsked = {{}}, scStemClaim = null, scStemNext = [], scStemDone = 0, scStemSize = 0, scStemHeard = 0;
+let scLang = 'en', scStemRows = {{}}, scStemFailAt = {{}}, scStemAsked = {{}}, scStemClaim = null, scStemNext = [], scStemDone = 0, scStemSize = 0, scStemHeard = 0;
 let scStemTotal = 0, scStemCount = 0, scStemProgress = 0, uris = {{}}, asked = 0, deferred = [], sent = [], reactions = {{}};
 const Qt = {{callLater: fn => {{ if (!deferred.includes(fn)) deferred.push(fn); }}}};
 function scT(s) {{ return (dict[s] && dict[s][scLang]) || s; }}
@@ -8876,12 +8876,12 @@ const scStemQueue = {{
     startRenderTracks(id) {{ sent.push(id); (reactions[id] || (() => {{}}))(); }},
 }};
 let steadyArmed = false;
-const scStemRefused = {{restart() {{}}}}, scStemSteady = {{restart() {{ steadyArmed = true; }}}};
-{self.functions("scStemMark", "scStemHand", "scStemSend", "scStemQueued", "scStemSettle", "scStemFinished", "scStemPlace", "scStemState", "scStemEta", "scStemText")}
+const scStemRefused = {{restart() {{}}}}, scStemFailed = {{interval: 10000, restart() {{}}}}, scStemSteady = {{restart() {{ steadyArmed = true; }}}};
+{self.functions("scStemMark", "scStemFailSweep", "scStemHand", "scStemSend", "scStemQueued", "scStemSettle", "scStemFinished", "scStemPlace", "scStemState", "scStemEta", "scStemText")}
 const root = {{
     get scStemRows() {{ return scStemRows; }}, get scStemTotal() {{ return scStemTotal; }}, get scStemCount() {{ return scStemCount; }},
     get scStemSize() {{ return scStemSize; }}, get scStemAsked() {{ return scStemAsked; }}, get scStemClaim() {{ return scStemClaim; }}, set scStemClaim(v) {{ scStemClaim = v; }},
-    scStemMark, scStemSend, scStemFinished,
+    scStemMark, scStemFailSweep, scStemSend, scStemFinished,
 }};
 // Engine answers with renderStemsQueueChanged, the signal behind both counters; the
 // pack reads them once Engine is done (Qt.callLater, which coalesces). `answer`
@@ -8897,9 +8897,9 @@ function take(id, left, total, lib) {{ answer(left, total); scStemQueued((lib ||
 function steadyTimer() {{ steadyArmed = false; {steady} }}
 // The hand-over as scStemImport does it; `engine` is Engine's answer inside the call.
 function hand(id, rows, engine) {{ if (engine) reactions[id] = engine; scStemHand(id, rows); settle(); }}
-function reset() {{ queue(0, 0); scStemRows = {{}}; scStemAsked = {{}}; scStemClaim = null; scStemNext = []; sent = []; reactions = {{}}; }}
+function reset() {{ queue(0, 0); scStemRows = {{}}; scStemFailAt = {{}}; scStemAsked = {{}}; scStemClaim = null; scStemNext = []; sent = []; reactions = {{}}; }}
 function refusedTimer() {{ {refused} }}
-function failedTimer() {{ {failed} }}
+function failedTimer() {{ for (const k of Object.keys(scStemFailAt)) scStemFailAt[k] -= 10000; {failed} }}
 const streamed = () => {streamed};
 const own = () => {own};
 const states = (...ids) => ids.map(id => scStemState(id));
@@ -9234,23 +9234,29 @@ for (const [lang, waiting, rendering, nearly, failed] of [
         for side in ("Left", "Right"):
             with self.subTest(side=side):
                 path = "Skins/Embedded/Views/BrowseView/Components/Components/Swipe" + side + "Item.qml"
+                msgs_expr = next(
+                    re.search(r"readonly property list<string> actionCommitMessages: (.*)", new).group(1)
+                    for _, new in edits[path] if "actionCommitMessages:" in new
+                )
                 body = next(new for _, new in edits[path] if "root.scStemStream(row.modelData.trackId)" in new)
                 script = f"""
 const assert = require('assert');
+const msgsExpr = {json.dumps(msgs_expr)};
 function commit(answer) {{
     const calls = [];
-    const root = {{scT: s => 'T:' + s, scStemStream: id => {{ calls.push(['stream', id]); return answer; }}}};
+    let scStemBusy = false;
+    const scLabel = s => s, scStem = true;
+    const root = {{scT: s => 'T:' + s, scDeckList: () => [1, 2], scStemStream: id => {{ calls.push(['stream', id]); return answer; }}}};
     const Planck = {{librarianController: {{stemsQueueManager: {{startRenderTracks: id => calls.push(['render', id])}}}}}};
     const row = {{index: 3, modelData: {{trackId: 99}}}}, scDeck = 0, trackList = {{}};
     const leftActions = [], rightActions = [], actionIndex = 0;
-    let textCommitValid = 'Stems'; // stock has just put the action's own message there
 {body}
-    return [textCommitValid, calls];
+    return [eval(msgsExpr)[0], calls];
 }}
 // Started: the swipe says "Stems", as before.
-assert.deepStrictEqual(commit(true), ['Stems', [['stream', 99]]]);
+assert.deepStrictEqual(commit(true), ['T:Stems', [['stream', 99]]]);
 // Not a streamed row: Engine renders the local track itself.
-assert.deepStrictEqual(commit(false), ['Stems', [['stream', 99], ['render', '99']]]);
+assert.deepStrictEqual(commit(false), ['T:Stems', [['stream', 99], ['render', '99']]]);
 // Every deck is playing: nothing is started, and the swipe says why.
 assert.deepStrictEqual(commit('busy'), ['T:' + {json.dumps(hint)}, [['stream', 99]]]);
 """
@@ -9351,6 +9357,220 @@ assert.equal(shown(true, true, false), true);
 """
                             res = subprocess.run(["node", "-e", indicator], capture_output=True, text=True)
                             self.assertEqual(res.returncode, 0, res.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_stems_busy_4deck_and_preserves_textCommitValid_binding(self):
+        """L5-1: 4-deck units say All decks are playing, and textCommitValid binding is never overwritten."""
+        hint2 = "Both decks are playing. Free one deck, then tap Stems again"
+        hint4 = "All decks are playing. Free one deck, then tap Stems again"
+        rows = {l.split("\t")[0]: l.split("\t") for l in
+                (REPO / "tools/ui-mod/i18n.tsv").read_text(encoding="utf-8").splitlines() if l and not l.startswith("#")}
+        self.assertIn(hint4, rows)
+        self.assertEqual(len(rows[hint4]), 4)
+        for text in rows[hint4]:
+            self.assertIn("Stems", text)
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            edits = bp.edits(False)
+        finally:
+            bp.ROOT = old_root
+        for side in ("Left", "Right"):
+            with self.subTest(side=side):
+                path = "Skins/Embedded/Views/BrowseView/Components/Components/Swipe" + side + "Item.qml"
+                joined = "\n".join(new for _, new in edits[path])
+                self.assertNotIn("textCommitValid =", joined)
+                msgs_expr = next(
+                    re.search(r"readonly property list<string> actionCommitMessages: (.*)", new).group(1)
+                    for _, new in edits[path] if "actionCommitMessages:" in new
+                )
+                body = next(new for _, new in edits[path] if "root.scStemStream(row.modelData.trackId)" in new)
+                script = f"""
+const assert = require('assert');
+const msgsExpr = {json.dumps(msgs_expr)};
+function runFor(decks) {{
+    let scStemBusy = false;
+    const scLabel = s => s;
+    const root = {{
+        scT: s => 'T:' + s,
+        scDeckList: () => decks,
+        scStemStream: id => id === 99 ? 'busy' : true,
+    }};
+    const Planck = {{
+        librarianController: {{
+            stemsQueueManager: {{startRenderTracks: () => {{}}}},
+            devicesController: {{isCurrentDeviceNetworkDrive: false}},
+        }},
+        getProperty: () => ({{translator: {{state: false, unnormalized: 0}}}}),
+    }};
+    const leftActions = [], rightActions = [], actionIndex = 0, scDeck = 0, scStem = true;
+    const trackList = {{pCurrentIndex: {{translator: {{unnormalized: 0}}}}}};
+    const evalMsgs = () => eval(msgsExpr);
+    // Busy tap updates actionCommitMessages for the unit's deck count.
+    let row = {{index: 0, modelData: {{trackId: 99}}}};
+    {body}
+    const busyMsg = evalMsgs()[0];
+    // Subsequent non-busy tap on the recycled delegate restores Stems.
+    row = {{index: 1, modelData: {{trackId: 100}}}};
+    {body}
+    const nextMsg = evalMsgs()[0];
+    return [busyMsg, nextMsg];
+}}
+assert.deepStrictEqual(runFor([1, 2]), ['T:' + {json.dumps(hint2)}, 'T:Stems']);
+assert.deepStrictEqual(runFor([1, 2, 3, 4]), ['T:' + {json.dumps(hint4)}, 'T:Stems']);
+"""
+                res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+                self.assertEqual(res.returncode, 0, res.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_stems_failed_timer_expires_each_track_independently(self):
+        """L5-3: each failed Stems download clears after 10s without being extended by later failures."""
+        mark_fn = re.search(r"function scStemMark\(ids, mark\) \{[\s\S]*?\n\t\}", bp.SERVICES_MAIN).group(0)
+        sweep_match = re.search(r"function scStemFailSweep\(\) \{[\s\S]*?\n\t\}", bp.SERVICES_MAIN)
+        self.assertIsNotNone(sweep_match, "scStemFailSweep missing")
+        stream_fn = re.search(r"function scStemStream\(uid\) \{[\s\S]*?\n\t\}", bp.SERVICES_MAIN).group(0)
+        script = f"""
+const assert = require('assert');
+String.prototype.arg = function(v) {{ return this.replace(/%1/g, v); }};
+let now = 0;
+Date.now = () => now;
+const xhrs = [];
+class XMLHttpRequest {{
+    open(m, u) {{ this.url = u; }}
+    send() {{ xhrs.push(this); }}
+}}
+let scStemRows = {{}};
+const scStemFailAt = {{}};
+const scStemFailed = {{
+    interval: 10000,
+    running: false,
+    restart() {{ this.running = true; this.due = now + this.interval; }},
+}};
+const Planck = {{
+    librarianController: {{
+        collectionController: {{
+            getTrackUrisFromUniversalIds: ids => 'uri=streaming://TIDAL/Track/' + String(ids[0]).replace(/^u/, ''),
+        }},
+    }},
+    getProperty: () => ({{translator: {{state: false}}}}),
+}};
+const root = {{
+    scDeckList: () => [1, 2],
+    scDeckLocked: () => false,
+    scStemMark: (ids, mark) => scStemMark(ids, mark),
+    scStemFailSweep: () => scStemFailSweep(),
+    scStemFailAt,
+}};
+{mark_fn}
+{sweep_match.group(0)}
+{stream_fn}
+// Track 11 fails at t=0, track 22 fails at t=9000.
+scStemStream('u11');
+xhrs[0].readyState = 4; xhrs[0].status = 502; xhrs[0].onreadystatechange();
+assert.equal(scStemRows['11'], 'fail');
+now = 9000;
+scStemStream('u22');
+xhrs[1].readyState = 4; xhrs[1].status = 502; xhrs[1].onreadystatechange();
+assert.equal(scStemRows['11'], 'fail');
+assert.equal(scStemRows['22'], 'fail');
+// Timer must fire at t=10000 (not t=19000) and clear only track 11.
+assert.equal(scStemFailed.due, 10000);
+now = 10000;
+scStemFailSweep();
+assert.equal(scStemRows['11'], undefined);
+assert.equal(scStemRows['22'], 'fail');
+// Remaining track 22 expires at t=19000.
+assert.equal(scStemFailed.due, 19000);
+now = 19000;
+scStemFailSweep();
+assert.equal(scStemRows['22'], undefined);
+"""
+        res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_no_source_dialog_rechecks_when_internal_already_selected_after_usb_eject(self):
+        """After USB eject while internal save drive is already selected, re-check availability instead of no-op select()."""
+        self.assertIn("if (scInternalSelected && librarian.streamingInterfaceController && librarian.streamingInterfaceController.checkSourceDriveAvailability)", bp.STREAMING_INTERNAL_SAVE)
+        self.assertIn("librarian.streamingInterfaceController.checkSourceDriveAvailability()", bp.STREAMING_INTERNAL_SAVE)
+        self.assertIn("scRestoreSource(scOriginalSource || scLastSource)", bp.STREAMING_INTERNAL_SAVE)
+
+    @staticmethod
+    def _js_fn(src, name):
+        start = src.index("function " + name + "(")
+        depth = 0
+        for i in range(start, len(src)):
+            if src[i] == "{":
+                depth += 1
+            elif src[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    return src[start:i + 1]
+        raise AssertionError("unclosed " + name)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_switching_services_mid_browse_keeps_latest_scope(self):
+        """Out-of-order scCall / scUiPoll replies never revert scScope after rapid service switches."""
+        call_fn = self._js_fn(bp.SERVICES_MAIN, "scCall")
+        poll_fn = self._js_fn(bp.SERVICES_MAIN, "scUiPollReply")
+        script = f"""
+const assert = require('assert');
+const xhrs = [];
+class XMLHttpRequest {{
+    constructor() {{ this.readyState = 0; this.status = 0; this.responseText = ''; }}
+    open(m, u) {{ this.method = m; this.url = u; }}
+    send() {{ xhrs.push(this); }}
+    getResponseHeader() {{ return ''; }}
+}}
+let scScope = 'netease', scScopePending = 0, scUiPoll = null, scUiPollScope = '', scUiPollAt = 0, scUiDigest = '', scUiAppliedAt = 0;
+const applied = [];
+function scApply(v) {{ if (v.scope) scScope = v.scope; applied.push(v.scope || 'kept'); }}
+function scEnsureTidal() {{}}
+function scOpen(s) {{ scScope = s; }}
+{call_fn}
+{poll_fn}
+// In-flight poll started under netease, then user rapidly switches spotify -> deezer.
+scCall('');
+scScope = 'spotify'; scCall('scope=spotify');
+scScope = 'deezer'; scCall('scope=deezer');
+// Stale poll reply arrives: must be ignored while scScopePending > 0 and scope mismatch.
+xhrs[0].readyState = 4; xhrs[0].status = 200; xhrs[0].responseText = JSON.stringify({{scope: 'netease'}});
+xhrs[0].onreadystatechange();
+assert.equal(scScope, 'deezer');
+// Out-of-order spotify reply arrives: scope must stay deezer.
+xhrs[1].readyState = 4; xhrs[1].status = 200; xhrs[1].responseText = JSON.stringify({{scope: 'spotify'}});
+xhrs[1].onreadystatechange();
+assert.equal(scScope, 'deezer');
+// Final deezer reply arrives.
+xhrs[2].readyState = 4; xhrs[2].status = 200; xhrs[2].responseText = JSON.stringify({{scope: 'deezer'}});
+xhrs[2].onreadystatechange();
+assert.equal(scScope, 'deezer');
+assert.equal(scScopePending, 0);
+"""
+        res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_stems_four_deck_progress_and_failed_states(self):
+        """4-deck Stems queue + Download failed states render independently without interfering."""
+        place_fn = self._js_fn(bp.SERVICES_MAIN, "scStemPlace")
+        text_fn = self._js_fn(bp.SERVICES_MAIN, "scStemText")
+        script = f"""
+const assert = require('assert');
+const scT = s => s;
+{place_fn}
+{text_fn}
+// Queue of 4 tracks (done=1): track 1 done, track 2 rendering (55%), track 3 waiting, tracks 4 & 5 failed.
+assert.equal(scStemPlace(1, 4, 1), '');
+assert.equal(scStemPlace(2, 4, 1), 'render');
+assert.equal(scStemPlace(3, 4, 1), 'wait');
+assert.equal(scStemPlace('fail', 4, 1), 'fail');
+assert.equal(scStemText('render', 0.55, '<1 min'), '55% · <1 min');
+assert.equal(scStemText('wait', 0, ''), 'Stems…');
+assert.equal(scStemText('fail', 0, ''), 'Download failed');
+"""
+        res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
 
 
 if __name__ == "__main__":

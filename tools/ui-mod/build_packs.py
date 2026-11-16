@@ -610,7 +610,11 @@ STREAMING_INTERNAL_SAVE = """
             scInternalSelected = current === path
             scInternalReady = scSourceDrive
             if (scInternalSelected && scInternalReady) scFinishInternal()
-            else librarian.browserSourceControllerPtr().select(path)
+            else {
+                if (scInternalSelected && librarian.streamingInterfaceController && librarian.streamingInterfaceController.checkSourceDriveAvailability)
+                    librarian.streamingInterfaceController.checkSourceDriveAvailability()
+                librarian.browserSourceControllerPtr().select(path)
+            }
         })
         return true
     }
@@ -4359,14 +4363,33 @@ SERVICES_MAIN = """
 	readonly property bool scStemStreamed: Object.keys(scStemRows).some(id => scStemRows[id] >= 1 && scStemPlace(scStemRows[id], scStemTotal, scStemDone) !== "")
 	property var scStemSeen: null // when and where the rendering track's progress was first seen
 	property string scStemLeft: ""
+	property var scStemFailAt: ({})
 	function scStemMark(ids, mark) {
 		const rows = Object.assign({}, scStemRows)
 		for (const id of ids) {
 			if (!id) continue
 			if (mark) rows[id] = mark
 			else delete rows[id]
+			if (mark === "fail") scStemFailAt[id] = Date.now()
+			else delete scStemFailAt[id]
 		}
 		scStemRows = rows
+	}
+	function scStemFailSweep() {
+		const now = Date.now()
+		const expired = []
+		let next = null
+		for (const id of Object.keys(scStemFailAt)) {
+			if (now - scStemFailAt[id] >= 10000) expired.push(id)
+			else if (next === null || scStemFailAt[id] < next) next = scStemFailAt[id]
+		}
+		if (expired.length) scStemMark(expired, "")
+		if (next !== null) {
+			scStemFailed.interval = Math.max(1, 10000 - (now - next))
+			scStemFailed.restart()
+		} else {
+			scStemFailed.interval = 10000
+		}
 	}
 	// A streamed track's Stems for Engine's queue, `rows` its marked rows.
 	function scStemHand(id, rows) {
@@ -4485,7 +4508,7 @@ SERVICES_MAIN = """
 	Timer {
 		id: scStemFailed
 		interval: 10000
-		onTriggered: root.scStemMark(Object.keys(root.scStemRows).filter(id => root.scStemRows[id] === "fail"), "")
+		onTriggered: root.scStemFailSweep()
 	}
 	// No answer from Engine at all: the rows stop waiting, the next track goes.
 	Timer {
@@ -4516,7 +4539,7 @@ SERVICES_MAIN = """
 			if (x.status !== 200) {
 				console.warn("EngineX stems step=source-failed status=" + x.status)
 				root.scStemMark([gid], "fail")
-				scStemFailed.restart()
+				if (!scStemFailed.running) { scStemFailed.interval = 10000; scStemFailed.restart() }
 				return
 			}
 			if (Planck.getProperty("/Engine/Deck%1/PlayState".arg(deck)).translator.state) { root.scStemMark([gid], ""); return } // started playing while we waited
@@ -7724,20 +7747,22 @@ def edits(dev: bool):
             # #224: share the left-action template with Deck 2, including Stems-list exclusion.
             swipe_edits = [
                 (f"    readonly property list<string> actionLabels: {a}.map(action => action.display.label)\n",
+                 '    property bool scStemBusy: false\n'
                  '    readonly property bool scStem: !(typeof root !== "undefined" && root && root.scIsAZ04) && !(typeof trackList !== "undefined" && trackList && trackList.isStemsList) && !Planck.librarianController.devicesController.isCurrentDeviceNetworkDrive && !!(row.isStreamingTrack || row.streamingProviderName || String(row.modelData && row.modelData.uri || "").startsWith("streaming://TIDAL/Track/") || (row.modelData && row.modelData.trackId > 0)) && !leftActions.some(action => /stem/i.test(String(action.display && action.display.label || "")))\n'
                  f"    readonly property int scDeck: root.scSwipeDeck({right})\n"
                  "    function scLabel(s) { return scDeck > 0 ? String(s).replace(/\\d+/, scDeck) : s }\n"
                  f"    readonly property list<string> actionLabels: {a}.map(action => /^stems?$/i.test(String(action.display && action.display.label || \"\")) ? root.scT(\"Stems\") : scLabel(action.display.label)).concat(scStem ? [root.scT(\"Stems\")] : [])\n"),
                 (f"    readonly property list<string> actionCommitMessages: {a}.map(action => action.display.commitMessage)\n",
-                 f"    readonly property list<string> actionCommitMessages: {a}.map(action => /^stems?$/i.test(String(action.display && action.display.label || \"\")) ? root.scT(\"Stems\") : scLabel(action.display.commitMessage)).concat(scStem ? [root.scT(\"Stems\")] : [])\n"),
+                 f"    readonly property list<string> actionCommitMessages: {a}.map(action => /^stems?$/i.test(String(action.display && action.display.label || \"\")) ? (scStemBusy ? root.scT(root.scDeckList().length > 2 ? \"All decks are playing. Free one deck, then tap Stems again\" : \"Both decks are playing. Free one deck, then tap Stems again\") : root.scT(\"Stems\")) : scLabel(action.display.commitMessage)).concat(scStem ? [scStemBusy ? root.scT(root.scDeckList().length > 2 ? \"All decks are playing. Free one deck, then tap Stems again\" : \"Both decks are playing. Free one deck, then tap Stems again\") : root.scT(\"Stems\")] : [])\n"),
                 (f"    readonly property list<color> actionColors: {a}.map(action => action.display.color)\n",
                  f"    readonly property list<color> actionColors: {a}.map(action => action.display.color).concat(scStem ? [Style.systemBlue01Color] : [])\n"),
                 (f"        {a}[actionIndex].trigger(row.index)\n",
                  "        if (actionIndex >= leftActions.length || /stem/i.test(String(leftActions[actionIndex].display && leftActions[actionIndex].display.label || \"\"))) {\n"
                  "            // streamed rows go through the gateway; local USB/SD tracks are rendered by Engine itself (also via the stock Stem entry)\n"
+                 "            scStemBusy = false\n"
                  "            const scStemmed = root.scStemStream(row.modelData.trackId)\n"
+                 "            scStemBusy = scStemmed === \"busy\"\n"
                  "            if (!scStemmed) Planck.librarianController.stemsQueueManager.startRenderTracks(String(row.modelData.trackId))\n"
-                 "            else if (scStemmed === \"busy\") textCommitValid = root.scT(\"Both decks are playing. Free one deck, then tap Stems again\")\n"
                  f"        }} else if (scDeck > 0 && /\\d/.test({a}[actionIndex].display.label)) {{\n"
                  "            trackList.pCurrentIndex.translator.unnormalized = row.index\n"
                  "            Planck.getProperty(\"/Client/Librarian/LoadToDeck%1\".arg(scDeck)).translator.state = true\n"
