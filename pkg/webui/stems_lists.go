@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"unicode/utf8"
 
 	"github.com/Cd1s/EngineX-OS/pkg/deemixclient"
@@ -129,11 +130,13 @@ var stemsFreeSpace = freeSpace
 // belong to it.
 //
 // It only looks at regular files one directory below root, which is the tree
-// stemsImportFile writes, and only on the deck's own storage: a file there is
-// in the internal library, while a file on a drive is in that drive's library,
-// which is not read here. When the library cannot be read nothing is removed.
+// stemsImportFile writes, and only on the deck's own file system (deckStorage):
+// a file there is in the internal library, while a file on a drive is in that
+// drive's library, which is not read here. When the library cannot be read
+// nothing is removed.
 func (s *Server) sweepStemsSources(ctx context.Context, root string) {
-	if rel, err := filepath.Rel(shadowDataRoot, root); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+	dev, ok := deckStorage(root)
+	if !ok {
 		return
 	}
 	recorded := map[string]bool{}
@@ -150,13 +153,17 @@ func (s *Server) sweepStemsSources(ctx context.Context, root string) {
 	var loose []string
 	dirs, _ := os.ReadDir(root)
 	for _, d := range dirs {
-		if !d.IsDir() {
+		dir := filepath.Join(root, d.Name())
+		if !d.IsDir() || !onDevice(dir, dev) {
 			continue
 		}
-		files, _ := os.ReadDir(filepath.Join(root, d.Name()))
+		files, _ := os.ReadDir(dir)
 		for _, f := range files {
-			p := filepath.Join(root, d.Name(), f.Name())
-			if real, err := filepath.EvalSymlinks(p); f.Type().IsRegular() && !recorded[p] && (err != nil || !recorded[real]) {
+			p := filepath.Join(dir, f.Name())
+			if !f.Type().IsRegular() || !onDevice(p, dev) {
+				continue
+			}
+			if real, err := filepath.EvalSymlinks(p); !recorded[p] && (err != nil || !recorded[real]) {
 				loose = append(loose, p)
 			}
 		}
@@ -177,6 +184,47 @@ func (s *Server) sweepStemsSources(ctx context.Context, root string) {
 			os.Remove(filepath.Dir(p)) // only when it is empty now
 		}
 	}
+}
+
+// deckStorage tells whether dir is really on the deck's own file system, and
+// gives that file system's device. A download directory whose path is under
+// /data can be a link to a drive, or have a drive mounted on it: the files
+// there are tracks in that drive's library, not in the internal one. So the
+// path is resolved first and must still be under the data root, and it must be
+// on the data root's device, which a mount is not. When either cannot be told
+// the answer is no.
+func deckStorage(dir string) (uint64, bool) {
+	data, err := filepath.EvalSymlinks(shadowDataRoot)
+	if err != nil {
+		return 0, false
+	}
+	real, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return 0, false
+	}
+	if rel, err := filepath.Rel(data, real); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return 0, false
+	}
+	dev, ok := deviceOf(data)
+	return dev, ok && onDevice(real, dev)
+}
+
+// deviceOf is the device of the file system p itself is on (a link is not followed).
+func deviceOf(p string) (uint64, bool) {
+	st, err := os.Lstat(p)
+	if err != nil {
+		return 0, false
+	}
+	sys, ok := st.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, false
+	}
+	return uint64(sys.Dev), true
+}
+
+func onDevice(p string, dev uint64) bool {
+	d, ok := deviceOf(p)
+	return ok && d == dev
 }
 
 // stemsFileName is "Artist - Title" as a file name the UI can put in a file:

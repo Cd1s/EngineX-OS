@@ -398,3 +398,56 @@ func TestStemsSourcesNothingRefersToAreRemoved(t *testing.T) {
 		t.Fatal("a file was removed while the library could not be read")
 	}
 }
+
+// A download directory whose path is under /data can be a link to a drive.
+// The files there are tracks in that drive's library, which the cleanup does
+// not read: asking the internal library about them proves nothing, and they
+// were removed. (A drive mounted on the directory: stems_sweep_linux_test.go.)
+func TestStemsSweepLeavesADriveBehindALinkAlone(t *testing.T) {
+	data, drive := t.TempDir(), t.TempDir()
+	shadowDataRoot = data
+	defer func() { shadowDataRoot = "/data" }()
+	stemsSweepLibrary(t, data)
+	os.MkdirAll(filepath.Join(drive, "Stream"), 0o755)
+	os.MkdirAll(filepath.Join(data, "enginex"), 0o755)
+	dl := filepath.Join(data, "enginex/Stream")
+	if err := os.Symlink(filepath.Join(drive, "Stream"), dl); err != nil {
+		t.Fatal(err)
+	}
+	stemsSweepKeeps(t, dl)
+}
+
+// stemsSweepLibrary is an internal library that has no track at all.
+func stemsSweepLibrary(t *testing.T, data string) {
+	t.Helper()
+	dir := filepath.Join(data, "AppDataUser/AIR Music Technology/Engine/Engine Library/Database2")
+	os.MkdirAll(dir, 0o755)
+	db, err := sql.Open("sqlite", filepath.Join(dir, "m.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE Track (id INTEGER PRIMARY KEY, path TEXT, filename TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// stemsSweepKeeps imports a row into the download directory dl, which is not
+// on the deck's own file system, and wants a file there that no list has
+// (that drive's library may have it as a track) to be left alone.
+func stemsSweepKeeps(t *testing.T, dl string) {
+	t.Helper()
+	for _, p := range []string{filepath.Join(dl, "spotify-a.ogg"), filepath.Join(dl, "Stems/spotify-k/DJ - Kept.ogg")} {
+		os.MkdirAll(filepath.Dir(p), 0o755)
+		if err := os.WriteFile(p, []byte("OggS"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, source := stemsSourceServer(t, dl, 0)
+	if got := source("a", "One"); got != filepath.Join(dl, "Stems/spotify-a/DJ - One.ogg") {
+		t.Fatalf("import %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(dl, "Stems/spotify-k/DJ - Kept.ogg")); err != nil {
+		t.Fatalf("a file that is not on the deck's own file system was removed: %v", err)
+	}
+}
