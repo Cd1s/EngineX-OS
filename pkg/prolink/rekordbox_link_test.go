@@ -120,7 +120,7 @@ func TestRekordboxLinkBrowsesAndReadsThePath(t *testing.T) {
 		// What rekordbox lists for a track; the row of kind 0 is the audio path.
 		0x2102: {{id: 1, kind: 4}, {id: 392, kind: 0xb}, {id: 5, kind: 0, label: "/Users/dj/Music/A B/ü.mp3"}, {id: 1, kind: 0x2f}},
 	})
-	l, err := dialRekordbox(context.Background(), net.IPv4(127, 0, 0, 1), f.port())
+	l, err := dialRekordbox(context.Background(), net.IPv4(127, 0, 0, 1), f.port(), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +162,7 @@ func TestRekordboxLinkBrowsesAndReadsThePath(t *testing.T) {
 func TestRekordboxLinkNoResultsAndLinkOff(t *testing.T) {
 	f := newFakeRekordbox(t, nil)
 	f.none = 0x1004
-	l, err := dialRekordbox(context.Background(), net.IPv4(127, 0, 0, 1), f.port())
+	l, err := dialRekordbox(context.Background(), net.IPv4(127, 0, 0, 1), f.port(), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +182,7 @@ func TestRekordboxLinkNoResultsAndLinkOff(t *testing.T) {
 		c.Write([]byte{0xff, 0xff})
 		c.Close()
 	}()
-	if _, err := dialRekordbox(context.Background(), net.IPv4(127, 0, 0, 1), off.Addr().(*net.TCPAddr).Port); err == nil {
+	if _, err := dialRekordbox(context.Background(), net.IPv4(127, 0, 0, 1), off.Addr().(*net.TCPAddr).Port, 0); err == nil {
 		t.Fatal("LINK off accepted")
 	}
 }
@@ -219,7 +219,7 @@ func TestRekordboxLinkReadsAnalysisBlobs(t *testing.T) {
 	big := bytes.Repeat([]byte{7}, 200000) // PWV7 of a long track: more than a menu field may hold
 	f := newFakeRekordbox(t, nil)
 	f.blobs = map[uint16][]byte{0x2204: {1, 2, 3}, 0x2c04: big, 0x2104: nil}
-	l, err := dialRekordbox(context.Background(), net.IPv4(127, 0, 0, 1), f.port())
+	l, err := dialRekordbox(context.Background(), net.IPv4(127, 0, 0, 1), f.port(), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,5 +246,26 @@ func TestRekordboxLinkReadsAnalysisBlobs(t *testing.T) {
 		if m.kind == 0x2204 && m.args[0].n != 5<<24|8<<16|4<<8|1 {
 			t.Fatalf("beat grid asks on menu %#x", m.args[0].n)
 		}
+	}
+}
+
+func TestRekordboxLinkAsksAsTheDecksOwnPlayer(t *testing.T) {
+	for player, want := range map[byte]uint32{0: 5, 2: 2, 4: 4} { // a deck with no number asks as 5
+		f := newFakeRekordbox(t, map[uint16][]dbItem{0x1004: {{id: 1, kind: 4, label: "One"}}})
+		l, err := dialRekordbox(context.Background(), net.IPv4(127, 0, 0, 1), f.port(), player)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := l.Tracks(); err != nil {
+			t.Fatal(err)
+		}
+		l.Close()
+		f.mu.Lock()
+		for _, m := range f.seen {
+			if m.kind == 0 && m.args[0].n != want || m.kind == 0x1004 && m.args[0].n>>24 != want {
+				t.Fatalf("player %d: 0x%04x asks as %#x, want %d", player, m.kind, m.args[0].n, want)
+			}
+		}
+		f.mu.Unlock()
 	}
 }

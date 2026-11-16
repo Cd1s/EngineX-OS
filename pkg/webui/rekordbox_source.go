@@ -55,11 +55,16 @@ type rbxLink interface {
 
 // Hooks for the tests.
 var (
-	dialRekordbox = func(ctx context.Context, ip net.IP) (rbxLink, error) { return prolink.DialRekordbox(ctx, ip) }
-	lookupAddr    = net.DefaultResolver.LookupAddr
-	rbxExport     = "/"
-	rbxRoom       = prolink.StageRoom
-	rbxNFS        = func(ip net.IP) *prolink.NFSClient {
+	dialRekordbox = func(ctx context.Context, ip net.IP, player byte) (rbxLink, error) {
+		return prolink.DialRekordbox(ctx, ip, player)
+	}
+	// deckPlayer is the deck's own Pro DJ Link player number, so two decks ask the computer as
+	// two players; 0 while it has none (not announcing), and the client then asks as 5.
+	deckPlayer = func(s *Server) byte { return s.prolinkExport.Status().Number }
+	lookupAddr = net.DefaultResolver.LookupAddr
+	rbxExport  = "/"
+	rbxRoom    = prolink.StageRoom
+	rbxNFS     = func(ip net.IP) *prolink.NFSClient {
 		c := &prolink.NFSClient{IP: ip, Portmap: rbxPortmap, Timeout: 400 * time.Millisecond}
 		if os.Geteuid() == 0 {
 			c.SourcePort = 1023 // some NFS servers only answer privileged ports
@@ -162,7 +167,7 @@ func (g *tidalGateway) rbxPlaylists(ctx context.Context, add func(map[string]any
 	}
 	rbxSession.Lock()
 	defer rbxSession.Unlock()
-	link, err := dialRekordbox(ctx, net.ParseIP(host.IP))
+	link, err := dialRekordbox(ctx, net.ParseIP(host.IP), deckPlayer(g.s))
 	if err != nil {
 		notice("unreadable")
 		return
@@ -195,7 +200,7 @@ func (g *tidalGateway) rbxPlaylists(ctx context.Context, add func(map[string]any
 func (g *tidalGateway) rbxRows(ctx context.Context, ip, list string) ([]prolink.RekordboxItem, string, error) {
 	rbxSession.Lock()
 	defer rbxSession.Unlock()
-	link, err := dialRekordbox(ctx, net.ParseIP(ip))
+	link, err := dialRekordbox(ctx, net.ParseIP(ip), deckPlayer(g.s))
 	if err != nil {
 		return nil, "", err
 	}
@@ -306,7 +311,7 @@ func (g *tidalGateway) rbxPrepare(ctx context.Context, id int64, ref trackRef) (
 		return ref, errors.New("rekordbox: bad track")
 	}
 	rbxSession.Lock()
-	link, err := dialRekordbox(ctx, net.ParseIP(parts[1]))
+	link, err := dialRekordbox(ctx, net.ParseIP(parts[1]), deckPlayer(g.s))
 	var rbPath string
 	if err == nil {
 		rbPath, err = link.Path(uint32(tid))

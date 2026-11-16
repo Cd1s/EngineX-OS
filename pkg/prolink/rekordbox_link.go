@@ -21,7 +21,7 @@ import (
 
 const (
 	rekordboxQueryPort = 12523
-	rekordboxPlayer    = 5 // an asking player number rekordbox accepts (1, 4, 5 and 7 do, 41 does not)
+	rekordboxPlayer    = 5 // the asking player number when a deck has none of its own (rekordbox accepts 1, 4, 5 and 7, not 41)
 	rbxCollection      = 4
 	rbxMainMenu        = 1
 	rbxDataMenu        = 8
@@ -47,18 +47,23 @@ type RekordboxItem struct {
 // RekordboxLink is one dbserver session with a computer running rekordbox. Not for
 // concurrent use: the computer serves one session per asking player at a time.
 type RekordboxLink struct {
-	c    net.Conn
-	r    *bufio.Reader
-	tx   uint32
-	stop func() bool
+	c      net.Conn
+	r      *bufio.Reader
+	tx     uint32
+	player byte
+	stop   func() bool
 }
 
-// DialRekordbox opens a session with the rekordbox computer at ip. Close it when done.
-func DialRekordbox(ctx context.Context, ip net.IP) (*RekordboxLink, error) {
-	return dialRekordbox(ctx, ip, rekordboxQueryPort)
+// DialRekordbox opens a session with the rekordbox computer at ip, asking as the deck's own
+// Pro DJ Link player number (0: the deck has none, and 5 is used). Close it when done.
+func DialRekordbox(ctx context.Context, ip net.IP, player byte) (*RekordboxLink, error) {
+	return dialRekordbox(ctx, ip, rekordboxQueryPort, player)
 }
 
-func dialRekordbox(ctx context.Context, ip net.IP, queryPort int) (*RekordboxLink, error) {
+func dialRekordbox(ctx context.Context, ip net.IP, queryPort int, player byte) (*RekordboxLink, error) {
+	if player == 0 {
+		player = rekordboxPlayer
+	}
 	var d net.Dialer
 	q, err := d.DialContext(ctx, "tcp4", net.JoinHostPort(ip.String(), strconv.Itoa(queryPort)))
 	if err != nil {
@@ -82,7 +87,7 @@ func dialRekordbox(ctx context.Context, ip net.IP, queryPort int) (*RekordboxLin
 	if err != nil {
 		return nil, err
 	}
-	l := &RekordboxLink{c: c, r: bufio.NewReader(c), stop: context.AfterFunc(ctx, func() { c.Close() })}
+	l := &RekordboxLink{c: c, r: bufio.NewReader(c), player: player, stop: context.AfterFunc(ctx, func() { c.Close() })}
 	hello := dbNumber(1).appendTo(nil)
 	_ = c.SetDeadline(time.Now().Add(rbxTimeout))
 	got := make([]byte, len(hello))
@@ -94,7 +99,7 @@ func dialRekordbox(ctx context.Context, ip net.IP, queryPort int) (*RekordboxLin
 	}
 	if err == nil {
 		var ack dbMessage
-		if ack, err = l.exchange(dbMessage{0xfffffffe, 0, []dbField{dbNumber(rekordboxPlayer)}}); err == nil && ack.kind != 0x4000 {
+		if ack, err = l.exchange(dbMessage{0xfffffffe, 0, []dbField{dbNumber(uint32(player))}}); err == nil && ack.kind != 0x4000 {
 			err = fmt.Errorf("prolink: rekordbox refused the session (0x%04x)", ack.kind)
 		}
 	}
@@ -130,14 +135,14 @@ func (l *RekordboxLink) call(kind uint16, args ...dbField) (dbMessage, error) {
 	return l.exchange(dbMessage{l.tx, kind, args})
 }
 
-// rbxWhere is the first argument of a request: asking player, menu, slot 4, track type 1 (rekordbox).
-func rbxWhere(menu byte) uint32 {
-	return rekordboxPlayer<<24 | uint32(menu)<<16 | rbxCollection<<8 | 1
+// where is the first argument of a request: asking player, menu, slot 4, track type 1 (rekordbox).
+func (l *RekordboxLink) where(menu byte) uint32 {
+	return uint32(l.player)<<24 | uint32(menu)<<16 | rbxCollection<<8 | 1
 }
 
 // menu runs a request on the collection's main menu and reads every row it lists.
 func (l *RekordboxLink) menu(kind uint16, args ...uint32) ([]RekordboxItem, error) {
-	where := rbxWhere(rbxMainMenu)
+	where := l.where(rbxMainMenu)
 	fields := []dbField{dbNumber(where)}
 	for _, a := range args {
 		fields = append(fields, dbNumber(a))
@@ -217,7 +222,7 @@ func (l *RekordboxLink) Metadata(id uint32) ([]RekordboxItem, error) { return l.
 // blob asks for analysis data, which rekordbox answers as: request, status (0 ok, 50 none),
 // length, bytes. nil means it has none for the track.
 func (l *RekordboxLink) blob(kind uint16, menu byte, args ...uint32) ([]byte, error) {
-	fields := []dbField{dbNumber(rbxWhere(menu))}
+	fields := []dbField{dbNumber(l.where(menu))}
 	for _, a := range args {
 		fields = append(fields, dbNumber(a))
 	}

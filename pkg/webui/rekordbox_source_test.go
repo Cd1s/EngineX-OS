@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -23,6 +24,12 @@ import (
 
 // fakeRbxLink is the library of the computer with rekordbox: two tracks, one folder with a playlist.
 type fakeRbxLink struct{ paths map[uint32]string }
+
+// rbxAsked records the asking player each session was opened as.
+var rbxAsked struct {
+	sync.Mutex
+	players []byte
+}
 
 func (f fakeRbxLink) Tracks() ([]prolink.RekordboxItem, error) {
 	return []prolink.RekordboxItem{{ID: 1, Kind: 4, Label: "First"}, {ID: 2, Kind: 4, Label: "Second"}}, nil
@@ -73,7 +80,12 @@ func newRbxEnv(t *testing.T, paths map[uint32]string) *rbxEnv {
 
 	oldDial, oldMounted, oldLookup, oldNFS := dialRekordbox, mountedAt, lookupAddr, rbxNFS
 	t.Cleanup(func() { dialRekordbox, mountedAt, lookupAddr, rbxNFS = oldDial, oldMounted, oldLookup, oldNFS })
-	dialRekordbox = func(context.Context, net.IP) (rbxLink, error) { return fakeRbxLink{paths}, nil }
+	dialRekordbox = func(_ context.Context, _ net.IP, player byte) (rbxLink, error) {
+		rbxAsked.Lock()
+		rbxAsked.players = append(rbxAsked.players, player)
+		rbxAsked.Unlock()
+		return fakeRbxLink{paths}, nil
+	}
 	mountedAt = func(p string) bool { return p == e.share }
 	lookupAddr = func(context.Context, string) ([]string, error) { return []string{"dj-macbook.lan."}, nil }
 	silent, _ := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)}) // a computer whose NFS server never answers
@@ -277,5 +289,29 @@ func TestRekordboxShareSettingIsValidatedAndKept(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(filepath.Join(e.s.cfg.UIDir, "settings.conf")); !strings.Contains(string(b), "rekordbox_share=/Volumes/DJ Music\n") {
 		t.Fatalf("settings.conf: %s", b)
+	}
+}
+
+func TestRekordboxSessionsAskAsTheDecksOwnPlayer(t *testing.T) {
+	e := newRbxEnv(t, map[uint32]string{1: "/Users/dj/Music/a.mp3"})
+	oldPlayer := deckPlayer
+	t.Cleanup(func() { deckPlayer = oldPlayer })
+	asked := func() []byte {
+		rbxAsked.Lock()
+		defer rbxAsked.Unlock()
+		got := rbxAsked.players
+		rbxAsked.players = nil
+		return got
+	}
+	asked()
+	e.trackIDs(t, "Tracks")
+	// Not announcing: the exporter has no number, the client is told 0 and falls back to 5.
+	if got := asked(); len(got) == 0 || got[0] != 0 {
+		t.Fatalf("a deck with no number: %v", got)
+	}
+	deckPlayer = func(*Server) byte { return 2 }
+	e.trackIDs(t, "Tracks")
+	if got := asked(); len(got) == 0 || got[0] != 2 {
+		t.Fatalf("the deck is player 2: %v", got)
 	}
 }
