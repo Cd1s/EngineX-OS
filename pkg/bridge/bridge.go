@@ -389,7 +389,30 @@ func ConvertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 	}
 	applyPendingAtMount(ctx, mount)
 	fixMP3GridsAtMount(ctx, mount, opts.Deadline)
+	if err == nil {
+		shrinkBridgeAnalysisAtMount(ctx, mount, opts)
+	}
 	return r, err
+}
+
+func shrinkBridgeAnalysisAtMount(ctx context.Context, mount string, opts enginedb.Options) {
+	if ctx.Err() != nil || !writable(mount) {
+		return
+	}
+	if !opts.Deadline.IsZero() && !time.Now().Before(opts.Deadline) {
+		return
+	}
+	r, err := enginedb.ShrinkBridgeAnalysis(ctx, mount, enginedb.ShrinkOptions{
+		Deadline:            opts.Deadline,
+		MaxBridgeStateBytes: opts.MaxBridgeStateBytes,
+	})
+	if err != nil && !errors.Is(err, context.DeadlineExceeded) {
+		log.Printf("rb-bridge: bridge analysis shrink not finished: %v", err)
+		return
+	}
+	if r.Rewritten > 0 || r.Compacted || r.Marked > 0 {
+		log.Printf("rb-bridge: bridge analysis shrink: rewritten=%d compacted=%v marked=%d done=%v", r.Rewritten, r.Compacted, r.Marked, r.Done)
+	}
 }
 
 func fixMP3GridsAtMount(ctx context.Context, mount string, deadline time.Time) {

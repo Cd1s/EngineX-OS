@@ -195,12 +195,14 @@ func open(ctx context.Context, p string) (*sql.DB, *sql.Tx, error) {
 	if e = tx.QueryRowContext(ctx, `SELECT count(*) FROM bridge.sqlite_master WHERE name='BridgeState'`).Scan(&n); e != nil {
 		return nil, nil, e
 	}
-	if n == 0 {
+	createdBridge := n == 0
+	if createdBridge {
 		if _, e = tx.ExecContext(ctx, bridgeSchema); e != nil {
 			return nil, nil, e
 		}
 	}
 	// Libraries from earlier builds kept this state in m.db, not yet dropped by Engine.
+	var migratedAnalysis bool
 	for _, table := range bridgeTables {
 		if e = tx.QueryRowContext(ctx, `SELECT count(*) FROM main.sqlite_master WHERE type='table' AND name=?`, table).Scan(&n); e != nil {
 			return nil, nil, e
@@ -208,12 +210,20 @@ func open(ctx context.Context, p string) (*sql.DB, *sql.Tx, error) {
 		if n == 0 {
 			continue
 		}
+		if table == "BridgeAnalysis" {
+			migratedAnalysis = true
+		}
 		if _, e = tx.ExecContext(ctx, fmt.Sprintf(`INSERT OR REPLACE INTO bridge.%[1]s SELECT * FROM main.%[1]s; DROP TABLE main.%[1]s`, table)); e != nil {
 			return nil, nil, e
 		}
 	}
 	if _, e = tx.ExecContext(ctx, `INSERT OR IGNORE INTO BridgeLibrary(key,value) VALUES('version','1')`); e != nil {
 		return nil, nil, e
+	}
+	if createdBridge && !migratedAnalysis {
+		if _, e = tx.ExecContext(ctx, `INSERT OR IGNORE INTO BridgeLibrary(key,value) VALUES('analysis_format','rba1'),('rba1_backfill_checked','1')`); e != nil {
+			return nil, nil, e
+		}
 	}
 	for _, index := range []string{
 		`CREATE INDEX IF NOT EXISTS index_PlaylistEntity_trackId ON PlaylistEntity(trackId)`,
