@@ -962,6 +962,14 @@ SERVICES_MAIN = """
 	property bool scViewReady: false // the active view applied after this start
 	property real scViewQuiet: 0 // no autosave until an applied view has settled
 	property string scViewLast: ""
+	// Assignment modules run in a separate QML engine. Send the shortcut here,
+	// rather than through the stock policy's three-view/focus-dependent action.
+	readonly property var scViewCycleRef: Planck.createProperty("EngineXCycleView", false, 3)
+	readonly property var scViewCycleProperty: scViewCycleRef && Planck.getProperty("/GUI/Scripted/EngineXCycleView")
+	Connections {
+		target: root.scViewCycleProperty ? root.scViewCycleProperty.translator : null
+		function onTriggered() { root.scViewSelect(root.scViewActive % 5 + 1) }
+	}
 	function scViewControls() {
 		const c = PlanckGUI.views.performanceViewController
 		if (!c || !c.deckController || !c.waveformController) return null
@@ -7071,6 +7079,19 @@ def edits(dev: bool):
             "    }\n",
         )]
         # #99: five views kept by stream-sync (scView* in EmbeddedMain) and Save View.
+        out["ControlSurfaceModules/ControlSurfaceModules/View.qml"] = [
+            ('doubleEnabled: true', 'doubleEnabled: !globalConfig.shift'),
+            ('"/Engine/ShiftViewBehaviour/Shift/SinglePress"', '"/GUI/Scripted/EngineXCycleView"'),
+        ]
+        # SYSTEM ONE assigns Shift+Menu to Navigation's CycleView action.
+        out["ControlSurfaceModules/ControlSurfaceModules/Navigation.qml"] = [(
+            'Planck.getProperty(module.basePath + navigationButton.secondaryPath).translator.trigger()',
+            'Planck.getProperty(navigationButton.secondaryPath === "CycleViewPress" ? "/GUI/Scripted/EngineXCycleView" : module.basePath + navigationButton.secondaryPath).translator.trigger()',
+        )]
+        out[ROOT + "EmbeddedMain.qml"].append((
+            'onTriggered: Planck.getProperty("/Engine/ShiftViewBehaviour/Shift/SinglePress").translator.trigger()',
+            'onTriggered: root.scViewCycleProperty.translator.trigger()',
+        ))
         out[ROOT + "Views/ControlCenter/Tabs/Preferences/Entries/LayoutViewTab.qml"] = [
             ("        model: [\n            ViewStateControllerInterface.View.View1,\n            ViewStateControllerInterface.View.View2,\n            ViewStateControllerInterface.View.View3,\n        ]\n", "        model: 5\n"),
             ("            Layout.preferredWidth: 120\n", "            Layout.preferredWidth: 100\n"),

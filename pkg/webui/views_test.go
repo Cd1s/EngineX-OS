@@ -26,6 +26,9 @@ func TestViewsRoundTrip(t *testing.T) {
 	if code := post(good); code != 200 {
 		t.Fatalf("save: %d", code)
 	}
+	s.Close()
+	s = New(s.cfg, nil)
+	defer s.Close()
 	for _, bad := range []string{
 		`{"active":6,"views":{}}`,
 		`{"active":1,"views":{"01":{}}}`,

@@ -258,9 +258,9 @@
 
         { k: "h", id: "layout", x: L("2. 布局（Layout，顶部第 2 页）", "2. 版面（Layout，頂部第 2 頁）", "2. Layout (top tab 2)"), nav: L("2. 布局（Layout）", "2. 版面（Layout）", "2. Layout") },
         { k: "ul", x: [
-          L("顶部 **`视图 1` – `视图 5`**（`View 1` – `View 5`）：五组独立布局预设，点一下切换；右侧 **`保存视图`**（`Save View`）把当前布局存进选中的视图，重启后保留；**`重置当前视图`**（`Reset Current View`）恢复该预设默认。",
-            "頂部 **`視圖 1` – `視圖 5`**（`View 1` – `View 5`）：五組獨立版面預設，點一下切換；右側 **`儲存視圖`**（`Save View`）把目前版面存進選中的視圖，重啟後保留；**`重設目前視圖`**（`Reset Current View`）恢復該預設值。",
-            "Top row **`View 1` – `View 5`**: five independent layout presets, one tap to switch; **`Save View`** stores the current layout into the selected view across reboots, and **`Reset Current View`** restores its default."),
+          L("顶部 **`视图 1` – `视图 5`**（`View 1` – `View 5`）：五组独立布局预设，点一下切换，或按 **Shift + View** 依次循环 `1 → 2 → 3 → 4 → 5 → 1`，无需先切回原厂模式（SYSTEM ONE 为 **Shift + Menu**）；右侧 **`保存视图`**（`Save View`）把当前布局存进选中的视图，重启后保留；**`重置当前视图`**（`Reset Current View`）恢复该预设默认。",
+            "頂部 **`視圖 1` – `視圖 5`**（`View 1` – `View 5`）：五組獨立版面預設，點一下切換，或按 **Shift + View** 依次循環 `1 → 2 → 3 → 4 → 5 → 1`，無需先切回原廠模式（SYSTEM ONE 為 **Shift + Menu**）；右側 **`儲存視圖`**（`Save View`）把目前版面存進選中的視圖，重啟後保留；**`重設目前視圖`**（`Reset Current View`）恢復該預設值。",
+            "Top row **`View 1` – `View 5`**: five independent layout presets, one tap to switch, or **Shift + View** to cycle `1 → 2 → 3 → 4 → 5 → 1` directly in any mode (**Shift + Menu** on SYSTEM ONE); **`Save View`** stores the current layout into the selected view across reboots, and **`Reset Current View`** restores its default."),
           L("原厂分组 **`演出布局`**（`PERFORMANCE LAYOUT`：含 `碟机排列` / `碟机` / `波形` / `波形方向` / `演奏打击垫` / `同屏曲库` / `显示专辑封面` / `主效果栏`）与 **`碟机行为`**（`DECK BEHAVIOR`：独立播放器上的 `Layer B`——开启四轨后仍保留，关闭时提示 `启用双层播放`——及 `左右层互换` / `Deck Swap`）。",
             "原廠分組 **`演出配置`**（`PERFORMANCE LAYOUT`：含 `碟機排列` / `碟機` / `波形` / `波形方向` / `演奏打擊墊` / `同屏曲庫` / `顯示專輯封面` / `主效果欄`）與 **`碟機行為`**（`DECK BEHAVIOR`：獨立播放機上的 `Layer B`——開啟四軌後仍保留，關閉時提示 `啟用雙層播放`——及 `左右層互換` / `Deck Swap`）。",
             "Stock sections **`PERFORMANCE LAYOUT`** (`Deck Layout` / `Decks` / `Waveforms` / `Waveform Orientation` / `Performance Pads` / `Performance Library` / `Display Album Art` / `Main FX`) and **`DECK BEHAVIOR`** (`Layer B` on standalone players — retained in 4-deck mode, showing `Enable for Dual Deck` when off — and `Deck Swap`)."),
