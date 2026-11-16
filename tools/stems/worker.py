@@ -278,9 +278,13 @@ def cuda_check():
     try:
         (torch.ones(1, device='cuda') + 1).item()
     except Exception as exc:
-        major, minor = torch.cuda.get_device_capability(0)
-        return 'PyTorch %s (CUDA %s) cannot run on this GPU (sm_%d%d): %s' % (
-            torch.__version__, torch.version.cuda, major, minor, (str(exc).splitlines() or [''])[0])
+        # The GPU's capability, when a broken CUDA context still answers.
+        try:
+            gpu = ' (sm_%d%d)' % torch.cuda.get_device_capability(0)
+        except Exception:
+            gpu = ''
+        return 'PyTorch %s (CUDA %s) cannot run on this GPU%s: %s' % (
+            torch.__version__, torch.version.cuda, gpu, (str(exc).splitlines() or [''])[0])
     return 'ok'
 
 
@@ -470,13 +474,17 @@ def main():
     parser.add_argument('--print-backend', action='store_true', help='print hpss or htdemucs and exit')
     parser.add_argument('--torch-index', metavar='CAPS',
                         help="print the PyTorch CUDA wheel indexes for nvidia-smi's compute_cap output and exit")
-    parser.add_argument('--cuda-check', action='store_true', help="print 'ok' or why PyTorch cannot use CUDA, and exit")
+    parser.add_argument('--cuda-check', action='store_true',
+                        help="print 'ok' or, in one line, why PyTorch cannot use CUDA; exit 0")
     args = parser.parse_args()
     if args.torch_index is not None:
         print(' '.join(torch_cuda_indexes(args.torch_index)))
         return 0
     if args.cuda_check:
-        print(cuda_check())
+        try:
+            print(cuda_check())
+        except Exception as exc:
+            print('the CUDA check failed: %s' % (str(exc).splitlines() or [''])[0])
         return 0
     try:
         backend = resolve_backend(args.backend)

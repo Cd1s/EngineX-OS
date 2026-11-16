@@ -285,11 +285,32 @@ class TorchCudaTests(unittest.TestCase):
              'PyTorch 2.7.1 (CUDA 12.6) cannot run on this GPU (sm_120): CUDA error: no kernel image is available for execution on the device'),
             (fake(cuda='12.8'), 'ok'),
         )
+        # Review 9 of 555722d3: a broken CUDA context also fails the capability query;
+        # the reason still comes, without the capability.
+        broken = fake(fails=RuntimeError('CUDA initialization error'))
+        broken.cuda.get_device_capability = mock.Mock(side_effect=RuntimeError('CUDA initialization error'))
+        cases += ((broken, 'PyTorch 2.7.1 (CUDA 12.6) cannot run on this GPU: CUDA initialization error'),)
         for torch, want in cases:
             with mock.patch.dict(sys.modules, {'torch': torch}):
                 self.assertEqual(worker.cuda_check(), want)
         with mock.patch.dict(sys.modules, {'torch': None}):
             self.assertEqual(worker.cuda_check(), 'PyTorch is not installed')
+        # The CLI, with a torch that fails everywhere: one line, exit 0, so the
+        # launchers (sh under set -e) go on to print their warning.
+        fakes = {
+            'broken': "ones = None\nclass cuda:\n    is_available = staticmethod(lambda: True)\n"
+                      "    def get_device_capability(i): raise RuntimeError('CUDA initialization error')\n"
+                      "def ones(*a, **k): raise RuntimeError('CUDA initialization error')\n",
+            'raising': "class cuda:\n    def is_available(): raise RuntimeError('driver gone')\n",
+        }
+        wants = {'broken': 'PyTorch 2.7.1 (CUDA 12.6) cannot run on this GPU: CUDA initialization error',
+                 'raising': 'the CUDA check failed: driver gone'}
+        for name, body in fakes.items():
+            with tempfile.TemporaryDirectory() as td:
+                Path(td, 'torch.py').write_text("__version__ = '2.7.1'\nclass version:\n    cuda = '12.6'\n" + body)
+                env = dict(os.environ, PYTHONPATH=td)
+                res = subprocess.run([sys.executable, WORKER_PY, '--cuda-check'], capture_output=True, text=True, env=env)
+                self.assertEqual((res.returncode, res.stdout.splitlines()), (0, [wants[name]]), res.stderr)
 
     def test_home_worker_scripts_pick_the_wheel_and_say_when_the_gpu_is_unused(self):
         here = Path(__file__).resolve().parent

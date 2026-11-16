@@ -69,10 +69,11 @@ if ($resolvedBackend -eq 'htdemucs') {
     Invoke-Checked $py -c "from demucs.pretrained import get_model; get_model('htdemucs')"
     # An NVIDIA GPU that PyTorch cannot use means rendering on the CPU: say so.
     if ($hasNvidia) {
-        $cuda = (& $py $worker --cuda-check)
+        $cuda = (& $py $worker --cuda-check) | Select-Object -Last 1
+        if (-not $cuda) { $cuda = 'the CUDA check failed' }
         if ($cuda -ne 'ok') {
             Write-Host "EngineX OS: WARNING: this PC has an NVIDIA GPU, but PyTorch cannot use it: $cuda" -ForegroundColor Red
-            Write-Host "EngineX OS: Stems will render on the CPU, many times slower. Fix: delete $venv and run this script again, or install torch torchaudio from https://download.pytorch.org/whl/$($torchIndexes[0]) into it." -ForegroundColor Red
+            Write-Host "EngineX OS: Stems will not use the GPU: they render on the CPU, many times slower, or fail. Fix: delete $venv and run this script again, or install torch torchaudio from https://download.pytorch.org/whl/$($torchIndexes[0]) into it." -ForegroundColor Red
         }
     }
 }
