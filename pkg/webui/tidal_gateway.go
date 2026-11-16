@@ -1787,7 +1787,10 @@ func (g *tidalGateway) stemsSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	g.s.sweepStemsSources(r.Context(), filepath.Join(cacheDir, "Stems"))
-	respond(w, map[string]any{"path": p})
+	// "row" is the id of this track's "Stems not ready" row in its service's
+	// Stems list: the UI draws the render's progress on that row and on the
+	// row that was tapped.
+	respond(w, map[string]any{"path": p, "row": g.addTrack(trackRef{track: g.stemsNotice(ref.track)})})
 }
 
 // stemsTrackID answers the internal library id of an imported file.

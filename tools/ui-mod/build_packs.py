@@ -4111,26 +4111,95 @@ SERVICES_MAIN = """
 	// Engine renders Stems only for library tracks and silently skips streamed rows.
 	// A streamed row dropped on the Stems list is imported by Engine itself from the
 	// file stream-sync downloaded, onto a deck that is not playing, then queued.
+	// Progress for a streamed row's Stems. Engine renders them from the imported
+	// local copy and shows that render on the copy's own row only, so the row
+	// that was tapped and the "Stems not ready" row of the service's Stems list
+	// said nothing for minutes. scStemRows maps the gateway ids of those two
+	// rows to "wait" (download and import) or "render"; the track list then
+	// draws Engine's own queued icon, spinner, progress bar and percentage on
+	// them, from the progress of Engine's own render queue. Nothing is polled.
+	property var scStemRows: ({})
+	readonly property var scStemQueue: Planck.librarianController.stemsQueueManager || null
+	readonly property bool scStemRendering: !!scStemQueue && scStemQueue.totalRenderStemsQueueCount > 0
+	readonly property real scStemProgress: scStemRendering ? (scStemQueue.renderProgress || 0) : 0
+	property var scStemSeen: null // when and where this queue's progress was first seen
+	property string scStemLeft: ""
+	function scStemMark(ids, state) {
+		const rows = Object.assign({}, scStemRows)
+		for (const id of ids) {
+			if (!id) continue
+			if (state) rows[id] = state
+			else delete rows[id]
+		}
+		scStemRows = rows
+	}
+	// A track list row's state, by Engine's id for the row.
+	function scStemState(uid) {
+		const rows = scStemRows, rendering = scStemRendering
+		if (!uid || !Object.keys(rows).length) return ""
+		const m = /uri=streaming:\\/\\/TIDAL\\/Track\\/(\\d+)/.exec(Planck.librarianController.collectionController.getTrackUrisFromUniversalIds([uid]) || "")
+		const state = m && rows[m[1]] || ""
+		// Handed to Engine, whose queue has not started (or has just ended): still waiting.
+		return state === "render" && !rendering ? "wait" : state
+	}
+	// What is left at the speed seen so far; nothing before 10 s and 1 % of it.
+	function scStemEta(done, seconds, left) {
+		if (!(done >= 0.01) || !(seconds >= 10)) return ""
+		const minutes = Math.round(left * seconds / done / 60)
+		return minutes < 1 ? scT("<1 min") : scT("~%1 min").arg(minutes)
+	}
+	// The length cell of such a row.
+	function scStemText(state, progress, left) {
+		if (state !== "render") return scT("Stems") + "…"
+		return Math.round(progress * 100) + "%" + (left ? " · " + left : "")
+	}
+	onScStemProgressChanged: {
+		const p = scStemProgress, now = Date.now()
+		if (!(p > 0)) { scStemSeen = null; scStemLeft = ""; return }
+		if (!scStemSeen || p < scStemSeen.p) { scStemSeen = {t: now, p: p, step: -1}; scStemLeft = "" }
+		else scStemLeft = scStemEta(p - scStemSeen.p, (now - scStemSeen.t) / 1000, 1 - p)
+		const step = Math.floor(p * 4) // one journal line per quarter
+		if (step !== scStemSeen.step) { scStemSeen.step = step; console.warn("EngineX stems progress=" + Math.round(p * 100) + "% left=" + scStemLeft) }
+	}
+	onScStemRenderingChanged: {
+		console.warn("EngineX stems step=" + (scStemRendering ? "render" : "idle") + " queue=" + (scStemQueue ? scStemQueue.renderStemsQueueCount + "/" + scStemQueue.totalRenderStemsQueueCount : "none") + " rows=" + Object.keys(scStemRows).length)
+		// The queue is empty: rendered, cleared by the user, or refused by Engine.
+		if (!scStemRendering) scStemMark(Object.keys(scStemRows).filter(id => scStemRows[id] === "render"), "")
+	}
+	// A render Engine never started leaves no queue to end: forget it.
+	Timer {
+		id: scStemRefused
+		interval: 30000
+		onTriggered: if (!root.scStemRendering) root.scStemMark(Object.keys(root.scStemRows).filter(id => root.scStemRows[id] === "render"), "")
+	}
 	function scStemStream(uid) {
 		const lib = Planck.librarianController.collectionController
 		const m = /uri=streaming:\\/\\/TIDAL\\/Track\\/(\\d+)/.exec(lib.getTrackUrisFromUniversalIds([uid]) || "")
 		if (!m) return false
 		const deck = root.scDeckList().slice().reverse().find(d => !root.scDeckLocked(d) && !Planck.getProperty("/Engine/Deck%1/PlayState".arg(d)).translator.state)
 		if (!deck) return true // all decks playing: never interrupt playback
+		const gid = m[1]
+		root.scStemMark([gid], "wait")
 		const x = new XMLHttpRequest()
-		x.open("GET", "http://127.0.0.1:8080/v1/enginex/stems/source?id=" + m[1])
+		x.open("GET", "http://127.0.0.1:8080/v1/enginex/stems/source?id=" + gid)
 		x.onreadystatechange = function() {
-			if (x.readyState !== 4 || x.status !== 200) return
-			if (Planck.getProperty("/Engine/Deck%1/PlayState".arg(deck)).translator.state) return // started playing while we waited
-			const url = "file://" + encodeURI(JSON.parse(x.responseText).path)
+			if (x.readyState !== 4) return
+			if (x.status !== 200) { root.scStemMark([gid], ""); return }
+			if (Planck.getProperty("/Engine/Deck%1/PlayState".arg(deck)).translator.state) { root.scStemMark([gid], ""); return } // started playing while we waited
+			const reply = JSON.parse(x.responseText)
+			const url = "file://" + encodeURI(reply.path)
 			// Engine imports a file only through a deck load, so load it on an empty deck
 			// and eject it again once the Stems render is queued (scStemUnload).
 			const song = Planck.getProperty("/Engine/Deck%1/Track/SongLoaded".arg(deck))
 			scStemUnload.deck = deck
 			scStemUnload.armed = !(song && song.translator && song.translator.state)
 			Planck.getProperty("/Client/Librarian/AddToDatabaseAndLoadToDeck%1".arg(deck)).translator.url = url
+			// One import at a time: an earlier one this replaces is not rendered.
+			if (scStemImport.running && scStemImport.rows.indexOf(gid) < 0) root.scStemMark(scStemImport.rows, "")
+			scStemImport.rows = [gid, reply.row ? String(reply.row) : ""]
+			root.scStemMark(scStemImport.rows, "wait")
 			scStemImport.url = url
-			scStemImport.path = JSON.parse(x.responseText).path
+			scStemImport.path = reply.path
 			scStemImport.tries = 20
 			scStemImport.restart()
 		}
@@ -4146,10 +4215,13 @@ SERVICES_MAIN = """
 		property string path: ""
 		property int tries: 0
 		property var trackIds: null
+		property var rows: [] // the gateway ids of the rows this import is for (root.scStemRows)
 		interval: 500; repeat: true
 		function render(id) {
 			if (!running) return // a slower reply after the render already started
 			Planck.librarianController.stemsQueueManager.startRenderTracks(String(id))
+			root.scStemMark(rows, "render")
+			scStemRefused.restart()
 			if (scStemUnload.armed) {
 				scStemUnload.name = path.slice(path.lastIndexOf("/") + 1)
 				scStemUnload.tries = 20
@@ -4158,7 +4230,7 @@ SERVICES_MAIN = """
 			stop()
 		}
 		onTriggered: {
-			if (tries-- <= 0) { stop(); return }
+			if (tries-- <= 0) { root.scStemMark(rows, ""); stop(); return } // Engine did not import the file
 			const x = new XMLHttpRequest()
 			x.open("GET", "http://127.0.0.1:8080/v1/enginex/stems/track-id?path=" + encodeURIComponent(path))
 			x.onreadystatechange = function() {
@@ -8486,6 +8558,45 @@ def edits(dev: bool):
     for rel, fixes in legacy_qml_fixes().items():
         assert not isinstance(out.get(rel), str), rel  # a whole-file replacement already owns it
         out.setdefault(rel, []).extend(fixes)
+    # Stock draws a Stems render on the track's own row: a queued icon, a
+    # spinner, a progress bar across the row and the percentage. A streamed
+    # row's Stems are rendered from its imported copy, so the streamed row had
+    # none of that. The same row elements now also follow root.scStemRows (the
+    # row that was tapped and its "Stems not ready" row; see scStemStream).
+    row_parts = v + "BrowseView/Components/Components/"
+    out.setdefault(v + "BrowseView/Components/TrackList.qml", []).extend([(
+        "\t\t\t\treadonly property int stemState: modelData.stems || 0\n"
+        "\t\t\t\treadonly property real stemsRenderProgress: modelData.stemsRenderProgress || 0.0\n",
+        '\t\t\t\treadonly property string scStem: typeof root !== "undefined" && root && root.scStemState ? root.scStemState(modelData.trackId) : ""\n'
+        '\t\t\t\treadonly property int stemState: scStem === "render" ? 2 : scStem === "wait" ? 1 : (modelData.stems || 0)\n'
+        '\t\t\t\treadonly property real stemsRenderProgress: scStem === "render" ? Math.max(root.scStemProgress, 0.001) : (modelData.stemsRenderProgress || 0.0)\n',
+    )])
+    out.setdefault(row_parts + "PreviewProgress.qml", []).extend([
+        ("row.modelData.stems === 2 ? Qt.darker(Style.systemBlue01Color, 1.2)", "row.stemState === 2 ? Qt.darker(Style.systemBlue01Color, 1.2)"),
+        ("row.isDownloading || row.modelData.stems === 2", "row.isDownloading || row.stemState === 2"),
+    ])
+    out.setdefault(row_parts + "StemsIcon.qml", []).extend([
+        ("readonly property bool isStemmed: row.modelData.stems === 3\n",
+         "readonly property int scStems: row.stemState !== undefined ? row.stemState : (row.modelData.stems || 0)\n"
+         "\treadonly property bool isStemmed: scStems === 3\n"),
+        ("readonly property bool renderingInProgress: row.modelData.stems === 2", "readonly property bool renderingInProgress: scStems === 2"),
+        ("readonly property bool inStemsQueue: row.modelData.stems === 1", "readonly property bool inStemsQueue: scStems === 1"),
+        ("&& row.modelData.stems !== 0", "&& scStems !== 0"),
+    ])
+    out.setdefault(row_parts + "Length.qml", []).extend([(
+        "else if (row.isRenderingStems) {",
+        "else if (row.scStem) {\n"
+        "\t\t\troot.scStemText(row.scStem, row.stemsRenderProgress, root.scStemLeft)\n"
+        "\t\t} else if (row.isRenderingStems) {",
+    )])
+    if v53():
+        # Stock's pulsing Stems icon in the browse status bar says a render is
+        # running whatever list is open. Stock shows it on units with side
+        # screens only; AZ04 keeps that.
+        out.setdefault(v + "EmbeddedView.qml", []).extend([(
+            "showBrowerViewStemsRenderIndicator: Config.device.hasSideScreens\n",
+            'showBrowerViewStemsRenderIndicator: Config.device.hasSideScreens || !(typeof root !== "undefined" && root && root.scIsAZ04)\n',
+        )])
     if v53():
         out.setdefault(v + "Profiles/ProfilesLogin.qml", []).extend([
             ('    shown: controller.showDialog\n', """    readonly property bool scSuppressTidalPairing:
