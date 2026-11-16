@@ -1096,7 +1096,7 @@ def is_static_elf(data):
                for i in range(phnum))
 
 
-def build(version, suite, hook, ui_packs, out, prefix='SCLIVE4', edisksd_hook=None, release_tag=None, fsck_hfsplus=None):
+def build(version, suite, hook, ui_packs, out, prefix='SCLIVE4', edisksd_hook=None, release_tag=None, fsck_hfsplus=None, lklfuse=None, require_lklfuse=False):
     if prefix not in PREFIXES:
         fail(f'prefix must be one of {PREFIXES}, got {prefix!r}')
     if not VERSION_RE.match(version):
@@ -1112,11 +1112,21 @@ def build(version, suite, hook, ui_packs, out, prefix='SCLIVE4', edisksd_hook=No
         edisksd_hook = Path(hook).parent / 'libedisksd-hook.so'
     if fsck_hfsplus is None and prefix in AZ04 and (Path(hook).parent / 'fsck.hfsplus').is_file():
         fsck_hfsplus = Path(hook).parent / 'fsck.hfsplus'
+    if lklfuse is not None and prefix in AZ04:
+        fail(f'--lklfuse is only supported for armhf Gen-2 models, not {prefix}')
+    if lklfuse is None and prefix not in AZ04 and (Path(hook).parent / 'lklfuse').is_file():
+        lklfuse = Path(hook).parent / 'lklfuse'
+    if require_lklfuse and prefix not in AZ04 and not lklfuse:
+        fail(f'missing lklfuse for armhf Gen-2 bundle {prefix}')
     parts = [(suite, 'bin/enginex-suite'), (hook, 'lib/libengine-ui-hook.so')]
     if edisksd_hook:
         parts.append((edisksd_hook, 'lib/libedisksd-hook.so'))
     if fsck_hfsplus:
         parts.append((fsck_hfsplus, 'bin/fsck.hfsplus'))
+    if lklfuse:
+        if not Path(lklfuse).is_file():
+            fail(f'missing lklfuse binary: {lklfuse}')
+        parts.append((lklfuse, 'bin/lklfuse'))
     for path, name in parts:
         data = Path(path).read_bytes()
         if data[:4] != b'\x7fELF':
@@ -1126,6 +1136,8 @@ def build(version, suite, hook, ui_packs, out, prefix='SCLIVE4', edisksd_hook=No
             fail(f'{path} is not a {"AArch64" if machine == EM_AARCH64 else "32-bit ARM"} ELF, needed for {prefix}')
         if name == 'bin/fsck.hfsplus' and not is_static_elf(data):
             fail(f'{path} must be statically linked for {prefix}')
+        if name == 'bin/lklfuse' and b'libfuse3.so' in data:
+            fail(f'{path} must link libfuse3 statically for {prefix}')
         files[name] = (data, 0o755)
     for applet in APPLETS:
         files[f'bin/{applet}'] = (WRAPPER.format(applet).encode(), 0o755)
@@ -1189,12 +1201,14 @@ def main(argv=None):
     p.add_argument('--hook', required=True, type=Path, help='libengine-ui-hook.so')
     p.add_argument('--edisksd-hook', type=Path, help='libedisksd-hook.so (default: next to --hook, if present)')
     p.add_argument('--fsck-hfsplus', type=Path, help='static fsck.hfsplus (AZ04 default: next to --hook, if present)')
+    p.add_argument('--lklfuse', type=Path, help='static-libfuse lklfuse for armhf Gen-2 (default: next to --hook, if present)')
+    p.add_argument('--require-lklfuse', action='store_true', help='fail if lklfuse is missing for armhf Gen-2 models')
     p.add_argument('--ui-packs', required=True, type=Path, help='build_packs.py packs.tar(.gz)')
     p.add_argument('--out', required=True, type=Path, help='new output directory')
     p.add_argument('--prefix', default='SCLIVE4', choices=PREFIXES, help='model prefix in the file name')
     p.add_argument('--release-tag', help='tag of the release, default v<version>; v<version>-rN for a same-version re-release')
     a = p.parse_args(argv)
-    json.dump(build(a.version, a.suite, a.hook, a.ui_packs, a.out, a.prefix, a.edisksd_hook, a.release_tag, a.fsck_hfsplus), sys.stdout, indent=2)
+    json.dump(build(a.version, a.suite, a.hook, a.ui_packs, a.out, a.prefix, a.edisksd_hook, a.release_tag, a.fsck_hfsplus, a.lklfuse, a.require_lklfuse), sys.stdout, indent=2)
     print()
 
 

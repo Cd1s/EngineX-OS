@@ -246,6 +246,52 @@ class DataBundleTest(unittest.TestCase):
         src32 = self.extract(self.build('out-sclive4-no-fsck', prefix='SCLIVE4'))
         self.assertFalse((src32 / 'bin/fsck.hfsplus').exists())
 
+    def test_gen2_armhf_lklfuse_is_packaged(self):
+        lkl = self.tmp / 'lklfuse'
+        lkl.write_bytes(fake_elf(bdb.EM_ARM, b'lklfuse'))
+        for prefix in ('SCLIVE4', 'SCLIVE2', 'PRIME4PLUS', 'PRIMEGOPLUS', 'MIXSTREAMPROPLUS', 'MIXSTREAMPROGO'):
+            with self.subTest(prefix=prefix):
+                src = self.extract(self.build(f'out-lkl-{prefix}', prefix=prefix))
+                self.assertEqual((src / 'bin/lklfuse').read_bytes(), lkl.read_bytes())
+                self.assertTrue((src / 'bin/lklfuse').stat().st_mode & 0o100)
+                self.assertIn('bin/lklfuse', (src / 'SHA256SUMS').read_text())
+
+        # AZ04 ignores lklfuse next to --hook and rejects explicit --lklfuse.
+        h64_dir = self.tmp / 'h64-lkl'
+        h64_dir.mkdir()
+        suite64 = h64_dir / 'suite64'
+        hook64 = h64_dir / 'libengine-ui-hook.so'
+        suite64.write_bytes(fake_elf(bdb.EM_AARCH64, b'suite'))
+        hook64.write_bytes(fake_elf(bdb.EM_AARCH64, b'hook'))
+        (h64_dir / 'lklfuse').write_bytes(fake_elf(bdb.EM_AARCH64, b'lkl64'))
+        src64 = self.extract(self.build('out-az04-no-lkl', prefix='PRIME4G2', suite=suite64, hook=hook64))
+        self.assertFalse((src64 / 'bin/lklfuse').exists())
+        with self.assertRaises(SystemExit):
+            self.build('out-az04-bad-lkl', prefix='PRIME4G2', suite=suite64, hook=hook64, lklfuse=lkl)
+
+        # Wrong architecture or dynamic libfuse3 must be rejected; --require-lklfuse fails when missing.
+        lkl.write_bytes(fake_elf(bdb.EM_AARCH64, b'lkl64'))
+        with self.assertRaises(SystemExit):
+            self.build('out-bad-arch-lkl', prefix='SCLIVE4')
+        lkl.write_bytes(fake_elf(bdb.EM_ARM, b'lklfuse\x00libfuse3.so.3'))
+        with self.assertRaises(SystemExit):
+            self.build('out-dyn-lkl', prefix='SCLIVE4')
+        lkl.unlink()
+        with self.assertRaises(SystemExit):
+            self.build('out-req-lkl', prefix='SCLIVE4', require_lklfuse=True)
+
+        # build-release.sh wires lklfuse and fsck.hfsplus for armhf Gen-2 and fails fast on missing LKLFUSE.
+        release_sh = (bdb.Path(__file__).resolve().parent / 'build-release.sh').read_text()
+        self.assertIn('prototypes/hfs-lkl/build_lklfuse.sh', release_sh)
+        self.assertIn('--require-lklfuse', release_sh)
+        self.assertIn('--fsck-hfsplus "$FSCK"', release_sh)
+        bad_env = dict(os.environ, LKLFUSE=str(self.tmp / 'nonexistent-lklfuse'))
+        r = subprocess.run(['sh', str(bdb.Path(__file__).resolve().parent / 'build-release.sh'),
+                            '5.3.0.5', str(self.tmp), 'none', '/bin/true', str(self.tmp / 'rel-out')],
+                           env=bad_env, capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('LKLFUSE', r.stderr)
+
     def test_rebuild_is_identical(self):
         a, b = self.build('a'), self.build('b')
         self.assertEqual(a['sha256'], b['sha256'])
