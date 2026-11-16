@@ -251,6 +251,21 @@ class QMLCacheCompatibilityTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
 
 
+class OverviewMaximaHookTest(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("cc"), "A C compiler is required for the overview maxima hook test")
+    def test_zero_band_maxima_are_filled_where_engine_decompresses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = Path(tmp) / "test-overview-maxima"
+            source = REPO / "tools/ui-mod/test_overview_maxima.c"
+            compiled = subprocess.run(
+                ["cc", "-O2", "-I" + str(source.parent), str(source),
+                 "-ldl", "-lpthread", "-lm", "-o", str(binary)],
+                capture_output=True, text=True)
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            result = subprocess.run([str(binary)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+
 class NativeRestartCompatibilityTest(unittest.TestCase):
     @unittest.skipUnless(shutil.which("node"), "Node is required for native restart ordering")
     def test_restart_saves_settings_then_uses_the_native_exit_path(self):
