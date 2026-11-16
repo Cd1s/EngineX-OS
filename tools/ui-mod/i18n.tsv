@@ -346,6 +346,10 @@ On-deck stems (basic quality). For high-quality stems, run the EngineX Stems ser
 High-quality stems:	高音质分轨：	高音質分軌：	Stems de alta calidad:
 On-deck stems (basic quality): %1 only offers hpss, which is not used.	本机分轨（基础音质）：%1 只提供 hpss，不会使用。	本機分軌（基礎音質）：%1 只提供 hpss，不會使用。	Stems en el deck (calidad básica): %1 solo ofrece hpss, que no se utiliza.
 For high-quality stems, that computer needs the htdemucs model.	如需高音质分轨，该电脑需要安装 htdemucs 模型。	如需高音質分軌，該電腦需要安裝 htdemucs 模型。	Para stems de alta calidad, ese ordenador necesita el modelo htdemucs.
+~%1 min	约 %1 分钟	約 %1 分鐘	~%1 min
+<1 min	不到 1 分钟	不到 1 分鐘	<1 min
+Both decks are playing. Free one deck, then tap Stems again	两台都在播放，空出一台再点 Stems	兩台都在播放，空出一台再點 Stems	Los dos decks están sonando. Libera uno y vuelve a pulsar Stems
+Download failed	下载失败	下載失敗	Descarga fallida
 Stem	分轨 Stems	分軌 Stems	Separar
 Cue Countdown	热标拍数倒数	熱標拍數倒數	Cuenta atrás de Cue
 Mixer Menu	混音台菜单	混音器選單	Menú del mezclador
