@@ -15,3 +15,9 @@ user data untouched. Regression tests assert this contract instead of the
 retired downgrade restore. Gen-1 r5 image OTA and Gen-2 r5 Data-Bundle OTA must
 remain green. The Mods tree is handled by `agent/5305-mods-293`; its single
 temporary guard exception must be removed at integration.
+
+Upgrade cleanup runs after the new generation commits. Invalid input and
+failed or interrupted upgrades keep the original ALSA loader, library and
+existing data layout usable. Forward-upgrade rollback preserves its input
+bytes; this does not restore the retired downgrade/layout operation. A cold
+boot completes a committed loader-name migration without recreating a link.

@@ -89,3 +89,17 @@ class UpgradeContractTest(unittest.TestCase):
             self.assertEqual((new / 'music.flac').read_bytes(), b'current recording')
             self.assertEqual([p.read_bytes() for p in new.glob('legacy-data.*/music.flac')], [b'old recording'])
             self.assertFalse(os.path.lexists(old))
+
+    def test_finishes_the_loader_name_after_a_committed_upgrade(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp) / 'data'; new = data / 'enginex'
+            new.mkdir(parents=True)
+            (data / legacy.DATA_NAME).symlink_to('enginex')
+            alsa = data / 'system/var/overlay/lib/alsa/conf.d'
+            alsa.mkdir(parents=True)
+            contents = 'lib "' + str(new) + '/bundle/lib/libengine-ui-hook.so"\nfunc enginex_alsa_boot_hook\n'
+            (alsa / legacy.ALSA_FILE).write_text(contents)
+            for _ in range(2): self.migrate(data)
+            self.assertEqual((alsa / '99-enginex.conf').read_text(), contents)
+            self.assertFalse((alsa / legacy.ALSA_FILE).exists())
+            self.assertFalse(os.path.lexists(data / legacy.DATA_NAME))

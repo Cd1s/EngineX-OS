@@ -657,6 +657,64 @@ exec REAL "$@"
         subprocess.run(['mkfs.ext4', '-F', str(img)], check=True, capture_output=True)
         self.assertEqual(hmod.inject(img, r['bundle'])['status'], 'ok')
 
+    def test_r5_loader_survives_refused_and_interrupted_upgrades(self):
+        result = self.build(version='5.3.0.5')
+        old_func = legacy.PROJECT + '_alsa_boot_hook'
+        for layout in ('alias', 'directory'):
+            for fault in ('checksum', 'copy', 'metadata', 'power-cut'):
+                with self.subTest(layout=layout, fault=fault), tempfile.TemporaryDirectory(dir=self.tmp) as tmp:
+                    root = Path(tmp); data = root / 'data'
+                    current, previous = data / 'enginex', data / legacy.DATA_NAME
+                    live = current if layout == 'alias' else previous
+                    (live / 'bundle/lib').mkdir(parents=True)
+                    (live / 'ui/packs').mkdir(parents=True)
+                    (live / 'version.txt').write_text('5.3.0.4\n')
+                    hook = live / 'bundle/lib/libengine-ui-hook.so'
+                    hook.write_bytes(fake_elf(bdb.EM_ARM, old_func.encode()))
+                    (live / 'bundle/boot-activate.sh').write_text('exit 0\n')
+                    if layout == 'alias': previous.symlink_to('enginex')
+                    alsa = data / 'system/var/overlay/lib/alsa/conf.d'
+                    alsa.mkdir(parents=True)
+                    config = alsa / legacy.ALSA_FILE
+                    original = 'lib "' + str(previous / 'bundle/lib/libengine-ui-hook.so') + '"\nfunc ' + old_func + '\n'
+                    config.write_text(original)
+                    source = root / 'source'
+                    with tarfile.open(result['bundle']) as archive:
+                        archive.extractall(source, **({'filter': 'data'} if hasattr(tarfile, 'data_filter') else {}))
+                    source = next(source.iterdir())
+                    script = source / 'install.sh'
+                    script.write_text(script.read_text().replace('/data', str(data)))
+                    sums = source / 'SHA256SUMS'
+                    sums.write_text(''.join((hashlib.sha256(script.read_bytes()).hexdigest() + '  install.sh'
+                                            if line.endswith('  install.sh') else line) + '\n'
+                                           for line in sums.read_text().splitlines()))
+                    if fault == 'checksum': (source / 'version.txt').write_text('damaged\n')
+                    shims = root / 'bin'; shims.mkdir()
+                    (shims / 'cp').write_text('#!/bin/sh\ncase "$FAULT:$1" in copy:-R|metadata:version.txt) exit 17 ;; esac\nexec ' + shutil.which('cp') + ' "$@"\n')
+                    (shims / 'mv').write_text('#!/bin/sh\nif [ "$FAULT" = power-cut ]; then case "$1" in */.bundle.*/ui/packs) kill -KILL "$PPID"; exit 1 ;; esac; fi\nexec ' + shutil.which('mv') + ' "$@"\n')
+                    for shim in shims.iterdir(): shim.chmod(0o755)
+                    env = {**self.env, 'PATH': str(shims) + ':' + self.env['PATH'], 'FAULT': fault}
+                    proc = subprocess.run(['sh', str(script)], env=env, capture_output=True, text=True)
+                    self.assertNotEqual(proc.returncode, 0, proc.stdout)
+                    if fault != 'checksum': self.assertNotIn('SHA256SUMS mismatch', proc.stderr)
+                    if fault == 'power-cut':
+                        self.assertEqual(proc.returncode, -9, proc.stderr)
+                        self.assertTrue((current / '.install-old').is_dir())
+                        recovery = root / 'recover.sh'
+                        recovery.write_text((source / 'boot-activate.sh').read_text().replace('/data', str(data))
+                                            .replace('/run', str(root / 'run'))
+                                            .replace('/var/lib', str(root / 'var-lib'))
+                                            .replace('/etc/enginex', str(root / 'etc-current'))
+                                            .replace(legacy.IMAGE_DIR, str(root / 'etc-previous'))
+                                            .replace('/usr/Engine/Scripts/engine', str(root / 'no-engine-script')))
+                        proc = subprocess.run(['sh', str(recovery)], env={**env, 'ENGINEX_LEAVE_LOCKED': '1'}, capture_output=True, text=True)
+                        self.assertEqual(proc.returncode, 0, proc.stderr)
+                    self.assertEqual(config.read_text() if config.exists() else '', original)
+                    self.assertTrue((previous / 'bundle/lib/libengine-ui-hook.so').is_file())
+                    self.assertEqual((previous / 'bundle/lib/libengine-ui-hook.so').read_bytes(), fake_elf(bdb.EM_ARM, old_func.encode()))
+                    if layout == 'alias': self.assertEqual(os.readlink(previous), 'enginex')
+                    else: self.assertTrue(previous.is_dir() and not previous.is_symlink())
+
     def install_ab(self, mv_on_packs):
         """Install version A, then version B with an mv that does `mv_on_packs` (shell) when B's staged
         ui/packs is moved into place, i.e. after B's bundle is already active (BH-G2-4)."""

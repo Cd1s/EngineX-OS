@@ -79,7 +79,7 @@ migrate_values() {
     for mv_dir in /data/system/var/overlay/lib/alsa/conf.d /data/system/var-lib/alsa/conf.d; do
         mv_old="$mv_dir/$legacy_alsa"
         [ -d "$mv_dir" ] && [ ! -L "$mv_dir" ] && [ -f "$mv_old" ] && [ ! -L "$mv_old" ] || continue
-        grep -q "$legacy_unit" "$mv_old" || continue
+        grep -Eq "$legacy_unit|enginex_alsa_boot_hook" "$mv_old" || continue
         mv_tmp="$mv_dir/.enginex-alsa.$$"
         cp -p "$mv_old" "$mv_tmp" || return 1
         sed -e "s|$legacy_data|/data/enginex|g" -e "s|$legacy_unit|enginex|g" "$mv_old" > "$mv_tmp" || return 1

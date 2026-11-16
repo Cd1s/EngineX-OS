@@ -68,9 +68,8 @@ swap_undo() {
         done
         if [ -f "$su_old/alsa-path" ]; then
             su_alsa=$(cat "$su_old/alsa-path")
-            case "$su_alsa" in */"$legacy_alsa") su_alsa="${su_alsa%/*}/99-enginex.conf" ;; esac
             if [ -f "$su_old/files/alsa.conf" ]; then
-                sed -e "s|$legacy_data|/data/enginex|g" -e "s|$legacy_unit|enginex|g" "$su_old/files/alsa.conf" > "$su_alsa"
+                cp -p "$su_old/files/alsa.conf" "$su_alsa"
             elif [ -e "$su_old/files/alsa.absent" ]; then
                 rm -f "$su_alsa"
             fi
@@ -102,7 +101,6 @@ if [ "${ENGINEX_LEAVE_LOCKED:-}" != 1 ] && { [ -z "$ENGINEX_CUSTOM" ] || [ "$ENG
     fi
     exit 0
 fi
-@MIGRATE_IF_DEFAULT@
 dest="${ENGINEX_CUSTOM:-/data/enginex}"
 bundle_dir="$dest/bundle"
 bin_dir="$bundle_dir/bin"
@@ -117,6 +115,7 @@ if [ "$#" = 0 ] && [ -d "$dest/.install-old" ] && [ ! -L "$dest/.install-old" ];
     [ ! -f "$bundle_dir/boot-activate.sh" ] || exec sh "$bundle_dir/boot-activate.sh"
     exit 0
 fi
+@MIGRATE_IF_DEFAULT@
 # The guard belongs to this invocation; daemons it starts must take their own lock later.
 unset ENGINEX_LEAVE_LOCKED ENGINEX_LEAVE_PID
 
@@ -666,8 +665,8 @@ if [ "$#" -gt 0 ] && [ -f "$1" ] && [ "$(dd if="$1" bs=27 count=1 2>/dev/null)" 
     exit 0
 fi
 src=$(cd "$(dirname "$0")" && pwd)
-@MIGRATE_IF_DEFAULT@
 dest=${ENGINEX_CUSTOM:-/data/enginex}
+[ "$dest" != /data/enginex ] || [ ! -L "$dest" ] || { echo "refusing symlink: $dest" >&2; exit 1; }
 if [ -L "$dest" ]; then
     dest=$(readlink -f "$dest" 2>/dev/null || readlink "$dest")
 fi
@@ -729,9 +728,14 @@ mkdir -p "$old/ui" "$old/files/ui"
 for f in version.txt ui/.pack-version ui/.pack-id gen2-unlocked; do
     if [ -f "$dest/$f" ]; then cp -p "$dest/$f" "$old/files/$f"; else : > "$old/files/$f.absent"; fi
 done
-printf '%s\n' "$alsa_dest/99-enginex.conf" > "$old/alsa-path"
-if [ -f "$alsa_dest/99-enginex.conf" ]; then
-    cp -p "$alsa_dest/99-enginex.conf" "$old/files/alsa.conf"
+# Keep an existing upgrade hook usable until this generation commits.
+alsa_file="$alsa_dest/99-enginex.conf"
+if [ ! -e "$alsa_file" ] && [ -f "$alsa_dest/$legacy_alsa" ] && [ ! -L "$alsa_dest/$legacy_alsa" ]; then
+    alsa_file="$alsa_dest/$legacy_alsa"
+fi
+printf '%s\n' "$alsa_file" > "$old/alsa-path"
+if [ -f "$alsa_file" ]; then
+    cp -p "$alsa_file" "$old/files/alsa.conf"
 else
     : > "$old/files/alsa.absent"
 fi
@@ -742,7 +746,7 @@ for part in bundle ui/packs ui/icons; do
 done
 mkdir -p "$alsa_dest"
 cp 99-enginex.conf "$alsa_dest/.99-enginex.conf.new"
-mv "$alsa_dest/.99-enginex.conf.new" "$alsa_dest/99-enginex.conf"
+mv "$alsa_dest/.99-enginex.conf.new" "$alsa_file"
 # Same-version repairs preserve fallback. A newly installed version gets one try.
 if [ "$(cat "$dest/ui/.pack-version" 2>/dev/null)" != "$(cat version.txt)" ]; then
     rm -f "$dest/ui/safe-mode" "$dest/ui/mods-quarantined" "$dest/ui/boot-count" "$dest/ui/boot-token" "$dest/ui/boot-ready" \
@@ -759,7 +763,9 @@ printf '1\n' > "$dest/gen2-unlocked"
 mv "$old" "$dest/.install-done"  # commit: from here the new generation stays
 trap 'rm -rf "$stage"' 0
 rm -rf "$dest/.install-done"
+[ "$alsa_file" = "$alsa_dest/99-enginex.conf" ] || mv "$alsa_file" "$alsa_dest/99-enginex.conf"
 rm -f "$alsa_dest/$legacy_alsa"
+@MIGRATE_IF_DEFAULT@
 echo "EngineX OS $(cat version.txt) installed in $dest"
 '''
 
