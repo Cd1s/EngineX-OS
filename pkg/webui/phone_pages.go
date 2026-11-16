@@ -276,5 +276,8 @@ func appleMusicHelperPhonePage(lang int, action string, status providers.AppleMu
 		qr := strings.Replace(action, "/m/applemusic?", "/m/applemusic/helper-qr?", 1)
 		body += `<details><summary>` + tr(lang, "amHelperOpen") + `</summary><a class="b" target="_blank" rel="noreferrer" href="` + html.EscapeString(loginURL) + `">` + tr(lang, "amHelperOpen") + `</a><img class="helper-qr" alt="QR" src="` + html.EscapeString(qr) + `"></details>`
 	}
+	if status.Online && !status.SignedIn && status.LoginState == "logging-in" {
+		body += `<script>setTimeout(function(){location.reload()},1500)</script>`
+	}
 	return body
 }

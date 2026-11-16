@@ -346,6 +346,10 @@ On-deck stems (basic quality). For high-quality stems, run the EngineX Stems ser
 High-quality stems:	高音质分轨：	高音質分軌：	Stems de alta calidad:
 On-deck stems (basic quality): %1 only offers hpss, which is not used.	本机分轨（基础音质）：%1 只提供 hpss，不会使用。	本機分軌（基礎音質）：%1 只提供 hpss，不會使用。	Stems en el deck (calidad básica): %1 solo ofrece hpss, que no se utiliza.
 For high-quality stems, that computer needs the htdemucs model.	如需高音质分轨，该电脑需要安装 htdemucs 模型。	如需高音質分軌，該電腦需要安裝 htdemucs 模型。	Para stems de alta calidad, ese ordenador necesita el modelo htdemucs.
+~%1 min	约 %1 分钟	約 %1 分鐘	~%1 min
+<1 min	不到 1 分钟	不到 1 分鐘	<1 min
+Both decks are playing. Free one deck, then tap Stems again	两台都在播放，空出一台再点 Stems	兩台都在播放，空出一台再點 Stems	Los dos decks están sonando. Libera uno y vuelve a pulsar Stems
+Download failed	下载失败	下載失敗	Descarga fallida
 Stem	分轨 Stems	分軌 Stems	Separar
 Cue Countdown	热标拍数倒数	熱標拍數倒數	Cuenta atrás de Cue
 Mixer Menu	混音台菜单	混音器選單	Menú del mezclador
@@ -769,5 +773,6 @@ Experimental: faster SD card reading (about 2x). Turn off if the SD card is not 
 Applies at next start or SD insert	将在下次启动或重新插入 SD 卡时生效	將在下次啟動或重新插入 SD 卡時生效	Se aplicará al próximo inicio o al insertar la tarjeta SD
 Remote access	远程访问	遠端存取	Acceso remoto
 Scan to open the console	扫码打开控制台	掃碼開啟控制台	Escanea para abrir la consola
+Scan the QR code at the bottom of About / Update to open the console	可在「关于 / 更新」最下方扫码进入控制台	可在「關於 / 更新」最下方掃碼進入控制台	Escanea el código QR al final de Acerca de / Actualizar para abrir la consola
 Starting…	正在启动…	正在啟動…	Iniciando…
 Error	错误	錯誤	Error

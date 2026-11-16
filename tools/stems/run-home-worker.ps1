@@ -37,16 +37,24 @@ if (-not (Test-Path $py)) {
 }
 & $py -c 'import numpy, scipy' 2>$null
 if ($LASTEXITCODE) { Invoke-Checked $py -m pip install -q numpy scipy }
+$worker = Join-Path $here 'worker.py'
+$smi = (Get-Command nvidia-smi.exe -ErrorAction SilentlyContinue).Source
+if (-not $smi -and (Test-Path (Join-Path $env:SystemRoot 'System32\nvidia-smi.exe'))) { $smi = Join-Path $env:SystemRoot 'System32\nvidia-smi.exe' }
+$hasNvidia = [bool]$smi
+# The CUDA builds this GPU runs on: an RTX 50 series (Blackwell) needs CUDA 12.8.
+$torchIndexes = @()
+if ($hasNvidia) {
+    $caps = (& $smi --query-gpu=compute_cap --format=csv,noheader 2>$null) -join ' '
+    # One token: Windows PowerShell drops an empty argument to a program.
+    $torchIndexes = @((& $py $worker "--torch-index=$caps") -split ' ' | Where-Object { $_ })
+}
 if ($Backend -in 'auto', 'demucs', 'htdemucs') {
-    $hasNvidia = [bool](Get-Command nvidia-smi.exe -ErrorAction SilentlyContinue) -or (Test-Path (Join-Path $env:SystemRoot 'System32\nvidia-smi.exe'))
     & $py -c 'import demucs' 2>$null
     if ($LASTEXITCODE) {
         # pip's default Windows torch is CPU-only; an NVIDIA card wants the CUDA build.
-        if ($hasNvidia) {
-            & $py -m pip install -q torch torchaudio --index-url https://download.pytorch.org/whl/cu126 2>$null
-            if ($LASTEXITCODE) {
-                & $py -m pip install -q torch torchaudio --index-url https://download.pytorch.org/whl/cu124 2>$null
-            }
+        foreach ($index in $torchIndexes) {
+            & $py -m pip install -q torch torchaudio --index-url "https://download.pytorch.org/whl/$index" 2>$null
+            if (-not $LASTEXITCODE) { break }
         }
         if ($Backend -eq 'auto') {
             & $py -m pip install -q demucs # best effort: auto falls back to hpss
@@ -55,11 +63,19 @@ if ($Backend -in 'auto', 'demucs', 'htdemucs') {
         }
     }
 }
-$worker = Join-Path $here 'worker.py'
 $resolvedBackend = (& $py $worker --backend $Backend --print-backend)
 if ($resolvedBackend -eq 'htdemucs') {
     # Fetch the model weights now, not during a deck's first session.
     Invoke-Checked $py -c "from demucs.pretrained import get_model; get_model('htdemucs')"
+    # An NVIDIA GPU that PyTorch cannot use means rendering on the CPU: say so.
+    if ($hasNvidia) {
+        $cuda = (& $py $worker --cuda-check) | Select-Object -Last 1
+        if (-not $cuda) { $cuda = 'the CUDA check failed' }
+        if ($cuda -ne 'ok') {
+            Write-Host "EngineX OS: WARNING: this PC has an NVIDIA GPU, but PyTorch cannot use it: $cuda" -ForegroundColor Red
+            Write-Host "EngineX OS: Stems will not use the GPU: they render on the CPU, many times slower, or fail. Fix: delete $venv and run this script again, or install torch torchaudio from https://download.pytorch.org/whl/$($torchIndexes[0]) into it." -ForegroundColor Red
+        }
+    }
 }
 
 # Ensure Windows Defender Firewall allows UDP 17891 / TCP 17890 on Domain,Private LocalSubnet (Public requires -AllowPublicFirewall).

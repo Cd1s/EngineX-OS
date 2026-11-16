@@ -254,4 +254,76 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(res_fail.returncode, 2)
             self.assertIn('Press Enter to close...', res_fail.stdout)
 
+
+class TorchCudaTests(unittest.TestCase):
+    """A tester's RTX 5090 Laptop (Blackwell, compute capability 12.0) got the
+    CUDA 12.6 wheels, which cannot run on it, and the worker rendered on the CPU
+    without a word."""
+
+    def test_wheel_index_follows_the_gpu(self):
+        for caps in ('12.0', '10.0', '8.6 12.0', '8.6, 12.0'):
+            self.assertEqual(worker.torch_cuda_indexes(caps), ['cu128'], caps)
+        # Older cards, and a driver too old to report the capability, keep 12.6 then 12.4.
+        for caps in ('9.0', '8.9', '8.6', '7.5', '6.1', '', None,
+                     'Field "compute_cap" is not a valid field to query.'):
+            self.assertEqual(worker.torch_cuda_indexes(caps), ['cu126', 'cu124'], caps)
+        for arg, out in (('--torch-index=12.0', 'cu128'), ('--torch-index=8.6', 'cu126 cu124'),
+                         ('--torch-index=', 'cu126 cu124')):
+            res = subprocess.run([sys.executable, WORKER_PY, arg], capture_output=True, text=True)
+            self.assertEqual((res.returncode, res.stdout.strip()), (0, out), arg)
+
+    def test_cuda_check_says_why_the_gpu_is_not_used(self):
+        def fake(cuda='12.6', available=True, fails=None):
+            ones = mock.Mock(side_effect=fails) if fails else mock.Mock(return_value=mock.MagicMock())
+            return mock.Mock(__version__='2.7.1', version=mock.Mock(cuda=cuda), ones=ones,
+                             cuda=mock.Mock(is_available=lambda: available,
+                                            get_device_capability=lambda i: (12, 0)))
+        cases = (
+            (fake(cuda=None), 'PyTorch 2.7.1 is a CPU-only build'),
+            (fake(available=False), 'PyTorch 2.7.1 (CUDA 12.6) finds no usable CUDA device'),
+            (fake(fails=RuntimeError('CUDA error: no kernel image is available for execution on the device\nmore')),
+             'PyTorch 2.7.1 (CUDA 12.6) cannot run on this GPU (sm_120): CUDA error: no kernel image is available for execution on the device'),
+            (fake(cuda='12.8'), 'ok'),
+        )
+        # Review 9 of 555722d3: a broken CUDA context also fails the capability query;
+        # the reason still comes, without the capability.
+        broken = fake(fails=RuntimeError('CUDA initialization error'))
+        broken.cuda.get_device_capability = mock.Mock(side_effect=RuntimeError('CUDA initialization error'))
+        cases += ((broken, 'PyTorch 2.7.1 (CUDA 12.6) cannot run on this GPU: CUDA initialization error'),)
+        for torch, want in cases:
+            with mock.patch.dict(sys.modules, {'torch': torch}):
+                self.assertEqual(worker.cuda_check(), want)
+        with mock.patch.dict(sys.modules, {'torch': None}):
+            self.assertEqual(worker.cuda_check(), 'PyTorch is not installed')
+        # The CLI, with a torch that fails everywhere: one line, exit 0, so the
+        # launchers (sh under set -e) go on to print their warning.
+        fakes = {
+            'broken': "ones = None\nclass cuda:\n    is_available = staticmethod(lambda: True)\n"
+                      "    def get_device_capability(i): raise RuntimeError('CUDA initialization error')\n"
+                      "def ones(*a, **k): raise RuntimeError('CUDA initialization error')\n",
+            'raising': "class cuda:\n    def is_available(): raise RuntimeError('driver gone')\n",
+        }
+        wants = {'broken': 'PyTorch 2.7.1 (CUDA 12.6) cannot run on this GPU: CUDA initialization error',
+                 'raising': 'the CUDA check failed: driver gone'}
+        for name, body in fakes.items():
+            with tempfile.TemporaryDirectory() as td:
+                Path(td, 'torch.py').write_text("__version__ = '2.7.1'\nclass version:\n    cuda = '12.6'\n" + body)
+                env = dict(os.environ, PYTHONPATH=td)
+                res = subprocess.run([sys.executable, WORKER_PY, '--cuda-check'], capture_output=True, text=True, env=env)
+                self.assertEqual((res.returncode, res.stdout.splitlines()), (0, [wants[name]]), res.stderr)
+
+    def test_home_worker_scripts_pick_the_wheel_and_say_when_the_gpu_is_unused(self):
+        here = Path(__file__).resolve().parent
+        ps1 = (here / 'run-home-worker.ps1').read_text()
+        # The index comes from the GPU, one token so an empty value survives Windows PowerShell.
+        self.assertIn('--query-gpu=compute_cap', ps1)
+        self.assertIn('"--torch-index=$caps"', ps1)
+        self.assertNotRegex(ps1, r'whl/cu12\d')
+        self.assertIn('--index-url "https://download.pytorch.org/whl/$index"', ps1)
+        sh = (here / 'run-home-worker.sh').read_text()
+        for script in (ps1, sh):
+            self.assertIn('--cuda-check', script)
+            self.assertIn('WARNING', script)
+            self.assertLess(script.index('get_model'), script.index('--cuda-check'))
+
 if __name__=='__main__':unittest.main()

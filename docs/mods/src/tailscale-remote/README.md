@@ -4,10 +4,12 @@ Official MIT-licensed status/diagnostic Mod for the existing EngineX OS
 [Tailscale integration (#130)](https://github.com/Cd1s/EngineX-OS/issues/130).
 
 `sh tailscale-helper.sh status` checks and calls
-`/data/enginex/tailscale/bin/tailscale --socket=/run/enginex-tailscaled.sock status` (`/run/sc5000-tailscaled.sock` before 5.3.0.5);
+`/data/enginex/tailscale/bin/tailscale --socket=/run/enginex-tailscaled.sock status`;
 `json` requests structured status. A missing binary returns a diagnostic and exit
 code 3. Loader start/stop actions are intentionally no-ops: enabling this status
 card never starts a VPN or changes service exposure.
+
+Requires EngineX OS `5.3.0.5` or later.
 
 The QML card uses the existing system API at
 `http://127.0.0.1:8080/v1/enginex/tailscale` and links to the Web Console's Remote

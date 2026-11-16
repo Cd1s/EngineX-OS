@@ -47,11 +47,11 @@ static void test_impulses(void) {
 }
 static void test_off_and_neighbours(void) {
     fresh(); static struct sc_pfx_ms before; memcpy(&before, &state, sizeof state);
-    for (unsigned mode = 0; mode <= 5; ++mode) {
+    for (unsigned mode = 0; mode <= 6; ++mode) { /* 6: #195 Jet Flanger, no millisecond mode */
         float l = 0.125f, r = -0.25f;
         sc_ms_mix(&state, 0.1f, -0.2f, &l, &r, (int)mode, 0, 0.5f, 0);
         assert(l == 0.125f && r == -0.25f && !memcmp(&before, &state, sizeof state));
-        if (mode == 0 || mode == 3 || mode == 5) {
+        if (mode == 0 || mode == 3 || mode >= 5) {
             sc_ms_mix(&state, 0.1f, -0.2f, &l, &r, (int)mode, 4000, 0.5f, 0);
             assert(l == 0.125f && r == -0.25f && !memcmp(&before, &state, sizeof state));
         }

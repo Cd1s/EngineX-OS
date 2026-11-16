@@ -1,7 +1,8 @@
 /* #237: the hook's own audio-thread functions call nothing that allocates, locks, waits or
  * does I/O, and each block stays inside its real-time duration with everything switched on:
  * the four-deck pad, Echo Out, the master effects with their mode changing, auto gain, the
- * limiter, the live tap, a Bluetooth speaker, and the DSP guards and event hooks around them.
+ * limiter, the live tap, a Bluetooth speaker, and the DSP guards and event hooks around them
+ * (armhf also: an FX unit playing the selector's Jet Flanger, #195).
  *
  * test_rt_budget.c bans those calls in the DSP headers at build time. engine_ui_hook.c uses
  * them outside the audio path, so here the linker wraps them and a wrapper reached while an
@@ -82,6 +83,9 @@ static unsigned char sender_self[128], owner[0x400], handler[64], event[64];
 static unsigned long long clock_ns = 1;
 static unsigned phase;
 static int trip; /* selftest: make one banned call inside an audio block */
+#if !defined(__aarch64__)
+static int px_owner, px_effect; /* #195: an FX unit whose selector plays the Jet Flanger */
+#endif
 
 static unsigned long long fake_clock(void) { return clock_ns; }
 static void fake_sender(void *self, const float *const *in, int frames) { (void)self; (void)in; (void)frames; }
@@ -106,6 +110,9 @@ static void audio_block(int channels, int frames) {
     hook_dub_echo(owner, pair, pair, (uint32_t)frames);
     hook_wash(owner, pair, pair, (uint32_t)frames);
     hook_flanger(owner, pair, pair, (uint32_t)frames);
+#if !defined(__aarch64__)
+    hook_flanger(&px_effect, pair, (float *const *)2, (uint32_t)frames);
+#endif
     hook_fx_common_chain(owner, pair, pair, (uint32_t)frames);
     hook_fx_turn_off(handler, event); hook_fx_turn_on(handler, event); hook_fx_switch(handler, event);
     hook_fx_change(handler, event); hook_fx_enable(handler, event);
@@ -144,6 +151,15 @@ int main(int argc, char **argv) {
     echo_enabled = gain_enabled = lim_enabled = 1;
     live_tap.on = 1;
     for (unsigned p = 0; p < 4; p++) sc_ms_prepare(&master_ms[p]); /* the polling worker's part */
+#if !defined(__aarch64__)
+    fx_selector_supported = 1;
+    sc_pfx_select(0, SC_PFX_FLANGER);
+    assert(sc_pfx_bind(0, &px_owner, &px_effect));
+    sc_pfx_control(&px_owner, 0, 1.0f); sc_pfx_control(&px_owner, 1, 1.0f); sc_pfx_control(&px_owner, 2, 0.0f);
+    sc_pfx_routes[0].input_a = pair;
+    sc_pfx_activate(&sc_pfx_routes[0]);
+    sc_pfx_instance_prepare(&sc_pfx_routes[0].dsp); /* the worker's part as well */
+#endif
 
     static const int sizes[] = {64, 225, 256, MAX_FRAMES};
     enum { SIZES = sizeof sizes / sizeof *sizes, LAYOUTS = 3, BLOCKS = 700, PASSES = 4 };
@@ -174,6 +190,9 @@ int main(int argc, char **argv) {
                 }
             }
     assert(bt_render == 48000 && bt_idle < BT_IDLE); /* the Bluetooth path really ran */
+#if !defined(__aarch64__)
+    assert(sc_pfx_routes[0].dsp.mode == SC_PFX_FLANGER && sc_pfx_routes[0].dsp.wet > 0.99f); /* and so did the Jet Flanger */
+#endif
     printf("rt-callback blocks=%u misses=%u worst_ns=%llu of budget_ns=%llu banned=%u %s\n", blocks, misses, worst, worst_budget, banned, banned_name);
     if (trip) return banned && !strcmp(banned_name, "usleep") ? EXIT_SUCCESS : EXIT_FAILURE;
     return banned || misses ? EXIT_FAILURE : EXIT_SUCCESS;

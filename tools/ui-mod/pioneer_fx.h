@@ -7,6 +7,7 @@
  *  - Slip Roll: beat-slice circular loop repeater with 64-frame crossfade & background timeline
  *  - Dub Echo: Sound Color FX resonant bandpass + analog tape saturation echo
  *  - Space: Sound Color FX multi-tap delay + 3-stage allpass diffuser reverb
+ *  - Jet Flanger (#195): swept comb with regeneration, see SC_PFX_FLANGER below
  */
 #ifndef SC_PIONEER_FX_H
 #define SC_PIONEER_FX_H
@@ -22,7 +23,8 @@ enum sc_pioneer_fx_mode {
     SC_PFX_PITCH_ECHO = 2, /* Pioneer Pitch Echo: harmonic pitch-shifted recirculation delay */
     SC_PFX_SLIP_ROLL = 3,  /* Pioneer Slip Roll: beat-slice circular loop repeater */
     SC_PFX_DUB_ECHO = 4,   /* Pioneer Sound Color FX Dub Echo: resonant band-pass + tape saturation echo */
-    SC_PFX_SPACE = 5       /* Pioneer Sound Color FX Space: lush multi-tap allpass reverb + delay */
+    SC_PFX_SPACE = 5,      /* Pioneer Sound Color FX Space: lush multi-tap allpass reverb + delay */
+    SC_PFX_FLANGER = 6     /* #195 Jet Flanger: selector only, the master menu and its parser do not list it */
 };
 
 #define SC_PFX_RING_SIZE 48000u
@@ -68,6 +70,10 @@ struct sc_pioneer_fx {
     float ap3_l[541], ap3_r[541];
     uint32_t ap3_pos_l, ap3_pos_r;
     float space_lp_l, space_lp_r;
+
+    /* Jet Flanger: sweep phase 0..1 and the low-pass that keeps bass out of the comb */
+    float fl_phase;
+    float fl_lp_l, fl_lp_r;
 };
 
 static inline int sc_pioneer_fx_parse(const char *val)
@@ -129,6 +135,46 @@ static inline float sc_pfx_soft_sat(float x)
     return x / (1.0f + a);
 }
 
+/* 2^x for 0 <= x < 16 without libm; the polynomial is within 0.01% on the fraction. */
+static inline float sc_pfx_exp2(float x)
+{
+    if (!(x > 0.0f)) return 1.0f;
+    if (x > 15.0f) x = 15.0f;
+    unsigned whole = (unsigned)x;
+    float f = x - (float)whole;
+    return (float)(1u << whole) * (1.0f + f * (0.6931472f + f * (0.2402265f + f * (0.0555041f + f * 0.0096181f + f * f * 0.0014444f))));
+}
+
+/* #195 Jet Flanger. What the request asks of a flanger, and how each part is met:
+ *  - resonance: the delayed signal is fed back (0.30 at Parameter 0 to 0.93 at 1) through the
+ *    soft saturation, so the comb's peaks are sharp and a held note cannot run away;
+ *  - an exponential sweep: the delay is 2 samples * 2^(7 * triangle), so the comb moves the
+ *    same number of octaves each second instead of crowding the top;
+ *  - "it does not suck the tone out": the comb sees nothing below about 120 Hz, and the wet
+ *    level falls as the feedback rises (sqrt(1 - g^2)), so loudness stays near the dry level.
+ * Time is the sweep period, 0.25 s at 0 to 16 s at 1 (the Rate steps are positions, not beats).
+ * Rates assume Engine's 48 kHz mixer (the master callback measured on a deck runs at 48 kHz);
+ * at another rate the sweep and the low cut move in proportion, nothing else changes.
+ * The shortest delay is 2 samples: the first notch leaves the audio band there. A true
+ * through-zero flanger delays the dry signal as well, which would comb against the unit's
+ * own dry path at any Wet below full, so it is not done. */
+#define SC_PFX_FLANGER_MIN 2.0f
+#define SC_PFX_FLANGER_OCTAVES 7.0f
+static inline float sc_pfx_flanger_feedback(float param) { return 0.30f + 0.63f * param; }
+static inline float sc_pfx_flanger_step(float time) { return 8.3333e-5f / sc_pfx_exp2(6.0f * time); } /* 1 / (0.25 s * 48000) */
+static inline float sc_pfx_flanger_delay(float phase)
+{
+    float tri = phase < 0.5f ? phase * 2.0f : 2.0f - phase * 2.0f;
+    return SC_PFX_FLANGER_MIN * sc_pfx_exp2(SC_PFX_FLANGER_OCTAVES * tri);
+}
+/* sqrt(1 - g^2) for g in 0.30..0.93, from two Newton steps (no libm). */
+static inline float sc_pfx_flanger_level(float g)
+{
+    float x = 1.0f - g * g, y = 0.5f + 0.5f * x;
+    y = 0.5f * (y + x / y);
+    return 0.5f * (y + x / y);
+}
+
 /* Linear interpolation read from ring buffer */
 static inline float sc_pfx_read_ring(const float *buf, float fpos)
 {
@@ -184,6 +230,7 @@ static inline void sc_pioneer_fx_planar(struct sc_pioneer_fx *s, float *l, float
         s->dub_hp_l = s->dub_hp_r = 0.0f;
         s->dub_lp_l = s->dub_lp_r = 0.0f;
         s->space_lp_l = s->space_lp_r = 0.0f;
+        s->fl_phase = s->fl_lp_l = s->fl_lp_r = 0.0f;
         s->ap1_pos_l = s->ap1_pos_r = 0;
         s->ap2_pos_l = s->ap2_pos_r = 0;
         s->ap3_pos_l = s->ap3_pos_r = 0;
@@ -425,6 +472,30 @@ static inline void sc_pioneer_fx_planar(struct sc_pioneer_fx *s, float *l, float
             break;
         }
 
+        case SC_PFX_FLANGER: {
+            const float g = sc_pfx_flanger_feedback(param);
+            const float level = sc_pfx_flanger_level(g);
+            const float at = (float)wpos - sc_pfx_flanger_delay(s->fl_phase);
+            float dl = sc_pfx_read_ring(s->buf_l, at);
+            float dr = sc_pfx_read_ring(s->buf_r, at);
+            s->fl_phase += sc_pfx_flanger_step(time);
+            if (s->fl_phase >= 1.0f) s->fl_phase -= 1.0f;
+
+            /* one pole at about 120 Hz at 48 kHz: what is below it stays out of the comb */
+            s->fl_lp_l = sc_pfx_state(s->fl_lp_l + 0.0156f * (dl - s->fl_lp_l));
+            s->fl_lp_r = sc_pfx_state(s->fl_lp_r + 0.0156f * (dr - s->fl_lp_r));
+            dl -= s->fl_lp_l;
+            dr -= s->fl_lp_r;
+
+            s->buf_l[wpos] = sc_pfx_state(in_l + sc_pfx_soft_sat(dl * g));
+            s->buf_r[wpos] = sc_pfx_state(in_r + sc_pfx_soft_sat(dr * g));
+
+            /* The whole flanged signal, not a part to add: see sc_pfx_replaces_dry. */
+            out_l = 0.75f * (in_l + dl * level);
+            out_r = 0.75f * (in_r + dr * level);
+            break;
+        }
+
         default:
             break;
         }
@@ -482,12 +553,15 @@ static inline void sc_pfx_instance_reset(struct sc_pfx_instance *s) {
     s->wet = s->time = s->parameter = 0;
 }
 
+/* Slip Roll and the Jet Flanger put out the whole signal; the others add to the dry one. */
+static inline int sc_pfx_replaces_dry(int mode) { return mode == SC_PFX_SLIP_ROLL || mode == SC_PFX_FLANGER; }
+
 /* Zero means no prepared bank: input is unchanged; override callers keep it dry. */
 static inline int sc_pfx_process(struct sc_pfx_instance *s, float *l, float *r,
                                 unsigned frames, int mode, float time, float param, float wet) {
     if (!s || !l || !r) return 0;
     time = sc_pfx_unit(time); param = sc_pfx_unit(param); wet = sc_pfx_unit(wet);
-    if (mode < SC_PFX_OFF || mode > SC_PFX_SPACE) mode = SC_PFX_OFF;
+    if (mode < SC_PFX_OFF || mode > SC_PFX_FLANGER) mode = SC_PFX_OFF;
     if (mode == SC_PFX_OFF) wet = 0.0f;
     if ((mode != s->mode || !s->current) && !s->fade) {
         for (unsigned i = 0; i < 2; ++i) {
@@ -513,14 +587,14 @@ static inline int sc_pfx_process(struct sc_pfx_instance *s, float *l, float *r,
         struct sc_pioneer_fx *n = &s->bank[current], *o = &s->bank[previous];
         n->time = s->time; n->parameter = s->parameter;
         sc_pioneer_fx_planar(n, &nl, &nr, 1, mode);
-        if (mode != SC_PFX_SLIP_ROLL) { nl -= dl; nr -= dr; }
+        if (!sc_pfx_replaces_dry(mode)) { nl -= dl; nr -= dr; }
         if (!mode) nl = nr = 0.0f;
         sc_ms_mix(&s->ms, dl, dr, &nl, &nr, mode, s->time_ms, s->parameter, 0);
         if (s->fade) {
             int old_mode = __atomic_load_n(&s->bank_state[previous], __ATOMIC_RELAXED) == SC_PFX_LIVE ? o->active_mode : 0;
             if (old_mode) {
                 sc_pioneer_fx_planar(o, &ol, &or_, 1, old_mode);
-                if (old_mode != SC_PFX_SLIP_ROLL) { ol -= dl; or_ -= dr; }
+                if (!sc_pfx_replaces_dry(old_mode)) { ol -= dl; or_ -= dr; }
             } else ol = or_ = 0.0f;
             float a = (float)(256 - s->fade) / 256.0f;
             float old_l = old_mode ? s->from_l + a * (ol - s->from_l) : dl;

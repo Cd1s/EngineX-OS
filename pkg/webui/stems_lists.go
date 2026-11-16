@@ -300,6 +300,13 @@ func (g *tidalGateway) stemsListTracks(w http.ResponseWriter, r *http.Request, s
 }
 
 func (g *tidalGateway) stemsPendingRow(t providers.Track) any {
+	return g.trackItems("", false, []providers.Track{g.stemsNotice(t)})[0]
+}
+
+// stemsNotice is the row shown for t until its Stems exist. Its id is the
+// same every time, so the UI can be told which row that is (stemsSource) and
+// draw the render's progress on it.
+func (g *tidalGateway) stemsNotice(t providers.Track) providers.Track {
 	title, hint := "Stems not ready", "Rendering can take as long as the track. Go back and reopen this list."
 	g.s.uiMu.Lock()
 	lang := g.s.loadUI().Language
@@ -309,8 +316,10 @@ func (g *tidalGateway) stemsPendingRow(t providers.Track) any {
 		title, hint = "Stems 尚未完成", "分轨耗时可能与曲长相当，请稍后返回并重新打开此列表。"
 	case "zh-Hant":
 		title, hint = "Stems 尚未完成", "分軌耗時可能與曲長相當，請稍後返回並重新開啟此清單。"
+	case "es":
+		title, hint = "Stems aún no listos", "El renderizado puede tardar tanto como la pista. Vuelve atrás y abre de nuevo esta lista."
 	}
-	return g.trackItems("", false, []providers.Track{{Provider: listNoticeProvider, ID: "stems-" + t.Provider + "-" + t.ID, Title: title + " — " + t.Title, Artist: hint}})[0]
+	return providers.Track{Provider: listNoticeProvider, ID: "stems-" + t.Provider + "-" + t.ID, Title: title + " — " + t.Title, Artist: hint}
 }
 
 // stemsLocal answers whether a streamed row has a stemmed local copy.

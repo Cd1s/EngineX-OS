@@ -111,7 +111,7 @@ func boardCapabilities(board string) uiCapabilities {
 		LineInAux:     board == "SCLIVE4",
 		Gen2:          dataBundleBoards[board],
 		RemoteStems:   !isAZ04,
-		JogWheel:      !motorizedBoards[board],
+		JogWheel:      !isPlayer && !motorizedBoards[board],
 		SDHighSpeed:   !isAZ04,
 	}
 }
@@ -862,6 +862,10 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 	if s.isLegacy504Pack() {
 		v.Capabilities.JogWheel = false
 	}
+	if !v.Capabilities.JogWheel {
+		v.JogInvertLeft = false
+		v.JogInvertRight = false
+	}
 	v.SdHighSpeedPending = s.sdHighSpeedPending(v.SdHighSpeed)
 	v.FourDeckRoleActive = s.activeRole(v)
 	v.TimeZone = s.savedTimeZone()
@@ -1111,6 +1115,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 		v.BeatJumpPads = b
 	}
+	jogSupported := boardCapabilities(imagePrefix(deviceCompatible())).JogWheel && !s.isLegacy504Pack()
 	if q.Has("jogInvertLeft") {
 		b, ok := parseBoolParam(q.Get("jogInvertLeft"))
 		if !ok {
@@ -1118,7 +1123,11 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 			fail(w, 400, errors.New("invalid setting"))
 			return
 		}
-		v.JogInvertLeft = b
+		if jogSupported {
+			v.JogInvertLeft = b
+		} else {
+			v.JogInvertLeft = false
+		}
 	}
 	if q.Has("jogInvertRight") {
 		b, ok := parseBoolParam(q.Get("jogInvertRight"))
@@ -1127,7 +1136,11 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 			fail(w, 400, errors.New("invalid setting"))
 			return
 		}
-		v.JogInvertRight = b
+		if jogSupported {
+			v.JogInvertRight = b
+		} else {
+			v.JogInvertRight = false
+		}
 	}
 	if q.Has("sdHighSpeed") || q.Has("sd_high_speed") {
 		param := q.Get("sdHighSpeed")

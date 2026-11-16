@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
@@ -146,8 +147,8 @@ func TestAppleMusicHelperAPIPersistenceAndAccess(t *testing.T) {
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	w := httptest.NewRecorder()
 	ui.ServeHTTP(w, r)
-	if w.Code != 303 || w.Header().Get("Location") != action+"&lang=en" && w.Header().Get("Location") != "/m/applemusic?lang=en&t="+url.QueryEscape(flow.token) {
-		t.Fatalf("phone redirect: %d", w.Code)
+	if w.Code != 200 {
+		t.Fatalf("phone finish: %d", w.Code)
 	}
 	if ui.appleMusic.HelperConfig() != before {
 		t.Fatal("phone token changed helper configuration")
@@ -213,5 +214,80 @@ func TestAppleMusicHelperDefaults(t *testing.T) {
 	defer ui.Close()
 	if cfg := ui.appleMusic.HelperConfig(); cfg.URL != "http://helper.invalid" || cfg.Token != "environment-default" {
 		t.Fatal("missing helper fields did not use environment defaults")
+	}
+}
+
+func TestAppleMusicHelperPhoneLoginCompletesAndPolls(t *testing.T) {
+	var mu sync.Mutex
+	loginState := "sign-in"
+	helper := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch r.URL.Path {
+		case "/healthz":
+			w.WriteHeader(200)
+		case "/v1/login/status":
+			json.NewEncoder(w).Encode(map[string]any{"state": loginState, "signedIn": loginState == "ready"})
+		case "/v1/login":
+			loginState = "2fa"
+			json.NewEncoder(w).Encode(map[string]any{"state": loginState, "signedIn": false})
+		case "/v1/2fa":
+			loginState = "logging-in"
+			json.NewEncoder(w).Encode(map[string]any{"state": loginState, "signedIn": false})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer helper.Close()
+
+	ui := New(Config{StateDir: t.TempDir(), UIDir: t.TempDir(), AppleMusicHelperURL: helper.URL}, nil)
+	defer ui.Close()
+
+	startReq := httptest.NewRequest("POST", "/v1/sc5000/login?provider=applemusic", nil)
+	startReq.RemoteAddr = "127.0.0.1:41001"
+	startRec := httptest.NewRecorder()
+	ui.ServeHTTP(startRec, startReq)
+	if startRec.Code != 200 {
+		t.Fatalf("start login: %d", startRec.Code)
+	}
+	flow := ui.loginFlow("applemusic")
+	action := "/m/applemusic?t=" + url.QueryEscape(flow.token)
+
+	postForm := func(body string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("POST", action, strings.NewReader(body))
+		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rec := httptest.NewRecorder()
+		ui.ServeHTTP(rec, r)
+		return rec
+	}
+
+	// Step 1: Apple ID + password moves helper to 2FA and redirects back to phone page.
+	if rec := postForm("helperAction=login&username=user@example.com&password=secret"); rec.Code != 303 {
+		t.Fatalf("login step: %d", rec.Code)
+	}
+
+	// Step 2: 2FA returns logging-in (>2.5s async), so phone page shows auto-refresh.
+	if rec := postForm("helperAction=2fa&code=123456"); rec.Code != 303 {
+		t.Fatalf("2fa step: %d", rec.Code)
+	}
+	getRec := httptest.NewRecorder()
+	ui.ServeHTTP(getRec, httptest.NewRequest("GET", action, nil))
+	if getRec.Code != 200 || !strings.Contains(getRec.Body.String(), "location.reload()") {
+		t.Fatalf("expected auto-refresh while logging-in: code=%d", getRec.Code)
+	}
+
+	// Step 3: Helper finishes async sign-in; deck poll transitions flow to done.
+	mu.Lock()
+	loginState = "ready"
+	mu.Unlock()
+	pollReq := httptest.NewRequest("GET", "/v1/sc5000/login?provider=applemusic", nil)
+	pollReq.RemoteAddr = "127.0.0.1:41001"
+	pollRec := httptest.NewRecorder()
+	ui.ServeHTTP(pollRec, pollReq)
+	if pollRec.Code != 200 || !strings.Contains(pollRec.Body.String(), `"status":"done"`) {
+		t.Fatalf("expected done after async helper sign-in: code=%d body=%s", pollRec.Code, pollRec.Body.String())
+	}
+	if !ui.appleMusic.Ready() {
+		t.Fatal("expected AppleMusic.Ready() to be true after helper sign-in")
 	}
 }

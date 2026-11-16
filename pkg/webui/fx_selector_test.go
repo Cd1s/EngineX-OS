@@ -53,7 +53,8 @@ func TestFXSelectorRejectsMissingHookAndInvalidUnits(t *testing.T) {
 		code  int
 	}{
 		{"fxUnit=0&fxMode=1", 400}, {"fxUnit=7&fxMode=1", 400},
-		{"fxUnit=1&fxMode=6", 400}, {"fxUnit=1&fxMode=1", 503},
+		{"fxUnit=1&fxMode=7", 400}, {"fxUnit=1&fxMode=1", 503},
+		{"fxUnit=1&fxMode=6", 503}, // #195 Jet Flanger is the sixth mode
 	} {
 		w := httptest.NewRecorder()
 		s.uiUpdate(w, httptest.NewRequest("POST", "/v1/enginex/ui?"+tc.query, nil))

@@ -74,7 +74,8 @@ class InternalStreamingStorageTest(unittest.TestCase):
         script = r"""
 const assert = require('node:assert/strict');
 const internal = '/data/enginex/stream-save';
-let scInternalAttempted = false, scInternalPending = false, scInternalReady = false;
+let scInternalPending = false, scInternalReady = false, scInternalEnded = 0, scSourceDrive = false;
+let clock = 1e6; Date.now = () => clock; // a later request: clock += 5000
 let scInternalSelected = false, scOriginalSource = '';
 let scInternalExpired = false;
 const scSelectingDevice = {state: false};
@@ -122,7 +123,7 @@ assert.equal(prompts.length, 0);
 selections = []; restores = [];
 onHasSourceDriveChanged(true); flush();
 assert.deepEqual(selections, []);
-scInternalAttempted = false; selected = 'TIDAL';
+clock += 5000; selected = 'TIDAL';
 onShowNoSourceAvailableDialog(); flush();
 selected = '/media/SD'; onCurrentChanged(ids.indexOf(selected));
 ids.reverse();
@@ -134,7 +135,7 @@ assert.deepEqual(restores, ['/media/SD']);
 // directory nor a read-only device is silently accepted.
 for (const state of [[false, true], [true, false]]) {
     [registered, eligible] = state;
-    scInternalAttempted = false; selections = []; prompts = [];
+    clock += 5000; selections = []; prompts = [];
     onShowNoSourceAvailableDialog(); flush();
     assert.deepEqual(selections, []);
     assert.equal(prompts.length, 1);
@@ -143,7 +144,8 @@ for (const state of [[false, true], [true, false]]) {
 
 // A failed native switch must still show the original warning, without
 // looping, logging the carrier out or changing a later user selection.
-registered = eligible = true; scInternalAttempted = false;
+registered = eligible = true; clock += 5000;
+onHasSourceDriveChanged(false); // the save drive went away
 selections = []; restores = []; prompts = []; selected = 'TIDAL';
 onShowNoSourceAvailableDialog(); flush();
 selected = internal; onCurrentChanged(ids.indexOf(internal)); flush();
@@ -159,7 +161,8 @@ assert.equal(selected, 'TIDAL');
 // must still restore the carrier, while a finished failure releases the guard
 // so a later manual selection of the internal library remains the user's choice.
 for (const lateSuccess of [true, false]) {
-    scInternalAttempted = false; scInternalExpired = false; selected = 'TIDAL';
+    clock += 5000; scInternalExpired = false; selected = 'TIDAL';
+    onCurrentChanged(ids.indexOf('TIDAL')); flush();
     restores = []; prompts = [];
     onShowNoSourceAvailableDialog(); flush();
     scSelectingDevice.state = true;
@@ -172,14 +175,225 @@ for (const lateSuccess of [true, false]) {
         assert.deepEqual(restores, ['TIDAL']);
     } else {
         onStateChanged(); flush();
+        // Engine's switch arrives after all: the internal drive is never left
+        // browsed (it is hidden from the Sources list), the carrier comes back.
         selected = internal; onCurrentChanged(ids.indexOf(internal)); flush();
-        assert.deepEqual(restores, []);
-        assert.equal(selected, internal);
+        assert.deepEqual(restores, ['TIDAL']);
+        assert.equal(selected, 'TIDAL');
     }
 }
+
+// Left SC5000, 2026-11-16: NetEase used several times in one Engine run, and the
+// warning came back after the first use. Every request gets its own attempt.
+function freshRequest() {
+    clock += 5000; selections = []; restores = []; prompts = [];
+    scSelectingDevice.state = false; scInternalExpired = false;
+}
+freshRequest(); onHasSourceDriveChanged(false); selected = 'TIDAL';
+for (const n of [1, 2, 3]) {
+    if (n > 1) { clock += 5000; onHasSourceDriveChanged(false); engineCarrier(); }
+    onShowNoSourceAvailableDialog(); flush();
+    selected = internal; onCurrentChanged(ids.indexOf(internal));
+    onHasSourceDriveChanged(true); flush();
+    assert.equal(prompts.length, 0, 'request ' + n);
+    assert.equal(selected, 'TIDAL', 'request ' + n);
+}
+assert.deepEqual(selections, [internal, internal, internal]);
+function engineCarrier() { selected = 'TIDAL'; onCurrentChanged(ids.indexOf('TIDAL')); flush(); }
+
+// Engine already browses the internal drive: no browser change will come. It is
+// accepted after the select, and the browser goes back to the last source shown.
+freshRequest(); onHasSourceDriveChanged(false);
+engineCarrier(); selected = internal;
+onShowNoSourceAvailableDialog(); flush();
+assert.deepEqual(selections, [internal]);
+onHasSourceDriveChanged(true); flush();
+assert.equal(scInternalPending, false);
+assert.deepEqual(restores, ['TIDAL']);
+assert.equal(prompts.length, 0);
+// Already browsed and already accepted: nothing to wait for, nothing selected.
+freshRequest(); selected = internal;
+onShowNoSourceAvailableDialog(); flush();
+assert.deepEqual(selections, []);
+assert.equal(scInternalPending, false);
+assert.deepEqual(restores, ['TIDAL']);
+assert.equal(prompts.length, 0);
+
+// Engine already accepted a save drive: no hasSourceDriveChanged will come. The
+// switch to the internal drive completes the attempt and the carrier comes back.
+freshRequest(); engineCarrier();
+onShowNoSourceAvailableDialog(); flush();
+selected = internal; onCurrentChanged(ids.indexOf(internal)); flush();
+assert.equal(scInternalPending, false);
+assert.deepEqual(restores, ['TIDAL']);
+assert.equal(prompts.length, 0);
+
+// A request right after an attempt ended is that attempt's outcome: the stock
+// warning, no second selection.
+onShowNoSourceAvailableDialog(); flush();
+assert.equal(prompts.length, 1);
+assert.deepEqual(selections, [internal]);
+
+// A real timeout (Engine neither switches nor accepts) still shows the stock
+// warning once, with one selection and no loop.
+freshRequest(); onHasSourceDriveChanged(false); engineCarrier();
+onShowNoSourceAvailableDialog(); flush();
+assert.equal(prompts.length, 0);
+scInternalFailed(); flush();
+assert.equal(prompts.length, 1);
+assert.equal(prompts[0].id, 'StreamingNoSourceAvailableDialog');
+assert.deepEqual(selections, [internal]);
+assert.equal(selected, 'TIDAL');
 """.replace("FUNCTIONS", functions)
         result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required for the Sources list filter")
+    def test_internal_save_drive_is_in_no_sources_list_by_its_path(self):
+        # The maintainer saw the internal drive as a USB stick named `stream-save` in
+        # the Sources list, from boot. It is Engine's save drive only: never listed,
+        # whatever its name, and a user's drive with that name still is.
+        for root in ("Skins/Embedded/", "Skins/EmbeddedCommon/"):
+            old_root = bp.ROOT
+            try:
+                bp.ROOT = root
+                edits = bp.edits(False)
+            finally:
+                bp.ROOT = old_root
+            conn = "\n".join(new for _old, new in edits[root + "Views/BrowserSource/ConnectedSource.qml"])
+            row = "connectedSource.scHiddenSource(connectedSource.model.data(modelIndex, root.scSourceNameRole), model.name, model.typeText)"
+            self.assertIn("height: " + row + " ? 0 : 108", conn, root)
+            self.assertIn("visible: !" + row, conn, root)
+        body = bp.SOURCE_FOOTER.split("function scHiddenSourceName(name, typeText) {", 1)[1].split("\tConnections {\n\t\ttarget: PlanckGUI", 1)[0]
+        script = """
+const assert = require('node:assert/strict');
+const internal = '/data/enginex/stream-save';
+let scFocusKind = '', scFocusRow = -1, scFocusService = '';
+const selected = [];
+const connectedSource = {expanded: true, parent: null, itemAtIndex: () => null, footerItem: null};
+const root = {
+  scSourceNameRole: 257,
+  scSourceTypeText: (model, row) => model.rows[row][1],
+  scServices: [], scSources: [], scOpen() {},
+};
+// Role 257 is a row's identifier: a drive's path, a service's name.
+const model = rows => ({rows, rowCount: () => rows.length, index: r => r, data: (r, role) => role === 257 ? rows[r][0] : undefined});
+const cm = model([['/media/SD', 'Storage'], [internal, 'Storage'], ['/media/sda1', 'Storage']]);
+const am = model([[internal, 'Storage'], ['Dropbox', 'Cloud']]);
+const Planck = {librarianController: {browserSourceControllerPtr: () => ({
+  connectedSourceModel: () => cm, availableSourceModel: () => am, select: i => selected.push(i)})}};
+function scHiddenSourceName(name, typeText) {
+""" + body + """
+// By the path, whatever the drive is called; a user's drive named stream-save stays.
+assert.equal(scHiddenSource(internal, 'stream-save', 'Storage'), true);
+assert.equal(scHiddenSource(internal, 'Internal', 'Storage'), true);
+assert.equal(scHiddenSource('/media/sda1', 'stream-save', 'Storage'), false);
+assert.equal(scHiddenSource('/media/SD', 'SD', 'Storage'), false);
+// Engine Link offers the other deck's internal drive (sandbox: net://<uuid>/stream-save);
+// that deck's other drives stay.
+assert.equal(scHiddenSource('net://cb6580d2-8a13-4e67-946e-6039dc115724/stream-save', 'stream-save', 'Remote Library'), true);
+assert.equal(scHiddenSource('net://cb6580d2-8a13-4e67-946e-6039dc115724/USB 1', 'USB 1', 'Remote Library'), false);
+// The streaming rows stream-sync replaces stay hidden as before.
+assert.equal(scHiddenSource('TIDAL', 'TIDAL', 'Streaming'), true);
+// The browse knob never stops on it.
+assert.deepEqual(scEntries().map(e => e.kind + e.row), ['conn0', 'conn2', 'avail1']);
+scStep(1); scStep(1);
+assert.equal(scFocusRow, 2);
+scActivate();
+assert.deepEqual(selected, [2]);
+"""
+        result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required for source selection handlers")
+    def test_browser_never_stays_on_the_internal_save_drive(self):
+        rel = "Skins/Embedded/Views/Streaming/StreamingNoSourceAvailableDialog.qml"
+        qml = (LAB / "5.3.0/qrc" / rel).read_text()
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            for old, new in bp.edits(False).get(rel, []):
+                qml = bp.patch(qml, old, new, rel)
+        finally:
+            bp.ROOT = old_root
+        functions = "\n".join(PrimeGoTidalQRTest.function(qml, name)
+                              for name in re.findall(r"function (\w+)\(", qml))
+        script = r"""
+const assert = require('node:assert/strict');
+const internal = '/data/enginex/stream-save';
+let scInternalPending = false, scInternalReady = false, scInternalEnded = 0, scSourceDrive = false;
+let clock = 1e6; Date.now = () => clock; // a later request: clock += 5000
+let scInternalSelected = false, scOriginalSource = '', scLastSource = '';
+let scInternalExpired = false;
+const scSelectingDevice = {state: false};
+let selected = '', restores = [], selections = [], prompts = [], deferred = [], opened = 0;
+const ids = ['TIDAL', internal, '/media/SD'];
+const model = {
+    rowCount: () => ids.length, index: row => row,
+    data: (row, role) => role === 257 ? ids[row] : role === 265 ? ids[row] === selected : undefined,
+};
+const sources = {
+    model: () => model,
+    select: id => selections.push(id),
+    forceSelect: row => { restores.push(ids[row]); selected = ids[row]; },
+};
+const target = sources;
+const Planck = {librarianController: {
+    isDeviceRegistered: () => true, isStreamingStorageCandidate: () => true,
+    browserSourceControllerPtr: () => sources,
+    streamingInterfaceController: {checkSourceDriveAvailability() {}},
+}};
+const Prompt = {Ok: 1};
+const sourceScreenView = {visible: false, onQuickSourceButtonClicked() { opened++; this.visible = true; }};
+const PlanckGUI = {views: {prompts: {post: value => prompts.push(value)}, sourceScreenView}};
+const Qt = {callLater: fn => deferred.push(fn)};
+const scSaveTimeout = {start() {}, stop() {}};
+function flush() { while (deferred.length) deferred.shift()(); }
+function engineBrowses(id) { selected = id; onCurrentChanged(ids.indexOf(id)); flush(); }
+FUNCTIONS
+
+// Start-up: Engine browses the internal drive (it remembered it) before anything else
+// was shown. Nothing to go back to: the Sources list opens, as with no source.
+selected = internal; scLeaveInternal(); flush();
+assert.equal(opened, 1);
+assert.deepEqual(restores, []);
+
+// The user browses the SD; Engine later lands on the internal drive by itself
+// (a drive went away, a device auto-selection): the SD comes back.
+sourceScreenView.visible = false; opened = 0;
+engineBrowses('/media/SD');
+engineBrowses(internal);
+assert.deepEqual(restores, ['/media/SD']);
+assert.equal(selected, '/media/SD');
+
+// The automatic selection with nothing browsed before it: accepted as the save drive,
+// then the browser does not stay on it.
+scLastSource = ''; restores = []; selected = '';
+onShowNoSourceAvailableDialog(); flush();
+assert.deepEqual(selections, [internal]);
+engineBrowses(internal);
+onHasSourceDriveChanged(true); flush();
+assert.equal(scInternalPending, false);
+assert.equal(opened, 1);
+assert.equal(prompts.length, 0);
+
+// While our own selection runs, Engine browsing the internal drive is expected and
+// nothing is restored early (the carrier comes back once Engine accepted it).
+sourceScreenView.visible = false; opened = 0; restores = []; selections = [];
+clock += 5000; onHasSourceDriveChanged(false); engineBrowses('TIDAL');
+onShowNoSourceAvailableDialog(); flush();
+engineBrowses(internal);
+assert.deepEqual(restores, []);
+onHasSourceDriveChanged(true); flush();
+assert.deepEqual(restores, ['TIDAL']);
+assert.equal(opened, 0);
+""".replace("FUNCTIONS", functions)
+        result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # Engine may already browse it when the item is created (start-up).
+        completed = qml.split("Component.onCompleted: {", 1)[1].split("\n    }", 1)[0]
+        self.assertIn("checkSourceDriveAvailability()", completed)
+        self.assertIn("Qt.callLater(scLeaveInternal)", completed)
 
 
 class OnOffSwitchCompatibilityTest(unittest.TestCase):
@@ -242,6 +456,21 @@ class QMLCacheCompatibilityTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             binary = Path(tmp) / "test-qml-cache"
             source = REPO / "tools/ui-mod/test_qml_cache.c"
+            compiled = subprocess.run(
+                ["cc", "-O2", "-I" + str(source.parent), str(source),
+                 "-ldl", "-lpthread", "-lm", "-o", str(binary)],
+                capture_output=True, text=True)
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            result = subprocess.run([str(binary)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+
+class OverviewMaximaHookTest(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("cc"), "A C compiler is required for the overview maxima hook test")
+    def test_zero_band_maxima_are_filled_where_engine_decompresses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = Path(tmp) / "test-overview-maxima"
+            source = REPO / "tools/ui-mod/test_overview_maxima.c"
             compiled = subprocess.run(
                 ["cc", "-O2", "-I" + str(source.parent), str(source),
                  "-ldl", "-lpthread", "-lm", "-o", str(binary)],
@@ -711,7 +940,7 @@ class UiModSourceTest(unittest.TestCase):
                 bp.verify_boot_ready_loader(source)
 
     def test_px_selector_maps_before_selecting_stock_carrier(self):
-        for name in ("Spiral", "Pitch Echo", "Slip Roll", "Dub Echo", "Space"):
+        for name in ("Spiral", "Pitch Echo", "Slip Roll", "Dub Echo", "Space", "Jet Flanger"):
             self.assertIn(name + " (PX)", bp.FX_CONTROLLER)
         qml = bp.FX_CONTROLLER
         selection = qml.split("function scFxAccept(index) {", 1)[1].split("property var scFxMix", 1)[0]
@@ -752,7 +981,7 @@ class UiModSourceTest(unittest.TestCase):
             self.assertIn("ControlSurfaceModules/ControlSurfaceModules/DJFxSelect.qml", edits)
             oled_edits = edits["ControlSurfaceModules/ControlSurfaceModules/DJFxSelect.qml"]
             oled_code = "".join(rep for _, rep in oled_edits)
-            for px_name in ("SPIRAL", "PITCH ECHO", "SLIP ROLL", "DUB ECHO", "SPACE"):
+            for px_name in ("SPIRAL", "PITCH ECHO", "SLIP ROLL", "DUB ECHO", "SPACE", "JET FLANGER"):
                 self.assertIn(px_name, oled_code)
             self.assertIn("/GUI/Scripted/EngineXFx", oled_code)
             self.assertIn("scPxIndex < scAllNames.length", oled_code)
@@ -841,7 +1070,8 @@ for (const amt of [1/63, 2/63, 4/63, 5/63, 8/63, 1.0]) {{
         # #206: the gate proves streaming loads under an active recorder on all-in-ones.
         self.assertIn("SCPROBE recstream|", probe)
         self.assertIn("SCPROBE recstream|1|1|1|0|0|", gate)
-        self.assertIn("case $PRODUCT in JP07|JP08|JP13|JP14) applied=20 ;; *) applied=28 ;; esac", gate)
+        # all-in-ones: + 8 #206 recording sites + the #207 Reverb decay site
+        self.assertIn("case $PRODUCT in JP07|JP08|JP13|JP14) applied=20 ;; *) applied=29 ;; esac", gate)
         self.assertIn("powercut-truncated.qmlc", gate)
 
     def test_connected_source_disables_listview_sections_to_prevent_demo_polish_loop(self):
@@ -1590,6 +1820,11 @@ for (lang of Object.keys(labels)) {
         expected_i18n = {
             "Remote access": ("远程访问", "遠端存取", "Acceso remoto"),
             "Scan to open the console": ("扫码打开控制台", "掃碼開啟控制台", "Escanea para abrir la consola"),
+            "Scan the QR code at the bottom of About / Update to open the console": (
+                "可在「关于 / 更新」最下方扫码进入控制台",
+                "可在「關於 / 更新」最下方掃碼進入控制台",
+                "Escanea el código QR al final de Acerca de / Actualizar para abrir la consola",
+            ),
             "Starting…": ("正在启动…", "正在啟動…", "Iniciando…"),
             "Error": ("错误", "錯誤", "Error"),
             "On": ("开", "開", "Activado"),
@@ -1629,6 +1864,15 @@ for (lang of Object.keys(labels)) {
                         # Available on every model with the console (Gen-1, Gen-2 armhf, AZ04): not hidden by scIsAZ04.
                         ra_block = dev_qml[dev_qml.index('objectName: "EngineX_RemoteAccess"'):dev_qml.index('objectName: "EngineX_RemoteAccessStatus"')]
                         self.assertNotIn("scIsAZ04", ra_block)
+                        self.assertIn('objectName: "EngineX_RemoteAccessHint"', dev_qml)
+                        self.assertLess(
+                            dev_qml.index('objectName: "EngineX_RemoteAccess"'),
+                            dev_qml.index('objectName: "EngineX_RemoteAccessHint"'),
+                        )
+                        self.assertLess(
+                            dev_qml.index('objectName: "EngineX_RemoteAccessStatus"'),
+                            dev_qml.index('objectName: "EngineX_RemoteAccessHint"'),
+                        )
 
                         about_qml = (out / lang / about_rel).read_text(encoding="utf-8")
                         self.assertIn('objectName: "EngineX_AboutConsoleQR"', about_qml)
@@ -1639,6 +1883,10 @@ for (lang of Object.keys(labels)) {
                         self.assertNotIn("Timer", bp.ABOUT_CONSOLE_QR)
                         self.assertIn("text: root.scConsoleUrl", about_qml)
                         self.assertNotIn("scAccessCode", about_qml)
+                        self.assertLess(
+                            about_qml.index("FactoryReset"),
+                            about_qml.index('objectName: "EngineX_AboutConsoleQR"'),
+                        )
                         source = re.search(r"source: (scAboutConsoleQr.visible \?[^\n]+)", about_qml).group(1)
                         script = """
 const assert = require('assert');
@@ -1655,6 +1903,9 @@ assert.equal(SOURCE, 'http://127.0.0.1:8080/v1/enginex/console-qr?url=' + encode
                             idx = ("zh-Hans", "zh-Hant", "es").index(lang)
                             self.assertIn(expected_i18n["Remote access"][idx], dev_qml)
                             self.assertIn(expected_i18n["Scan to open the console"][idx], about_qml)
+                            self.assertIn(expected_i18n["Scan the QR code at the bottom of About / Update to open the console"][idx], dev_qml)
+                        else:
+                            self.assertIn("Scan the QR code at the bottom of About / Update to open the console", dev_qml)
 
 
 
@@ -7336,15 +7587,15 @@ const assert = require('node:assert/strict');
 function uiCaps(board, scPlayer, hasMotorizedPlatters) {{
     const scBoard = String(board || "");
     const scIsPlayerBoard = !!scPlayer || ["JP07", "JP08", "JP13", "JP14"].indexOf(scBoard) >= 0;
-    const scHasJogWheel = !hasMotorizedPlatters && ["JP08", "JP14", "RMZ2"].indexOf(scBoard) < 0;
+    const scHasJogWheel = !scIsPlayerBoard && !hasMotorizedPlatters && ["JP08", "JP14", "RMZ2"].indexOf(scBoard) < 0;
     const showLeft = scHasJogWheel;
     const showRight = scHasJogWheel && !scIsPlayerBoard;
     const leftTitle = scIsPlayerBoard ? "Reverse Jog Wheel" : "Reverse Left Jog Wheel";
     return {{ showLeft, showRight, leftTitle }};
 }}
-// 1-jog players keep 1 row even when #49 4-deck hook clears Config.device.isPlayer
-assert.deepEqual(uiCaps("JP07", true, false), {{ showLeft: true, showRight: false, leftTitle: "Reverse Jog Wheel" }});
-assert.deepEqual(uiCaps("JP13", false, false), {{ showLeft: true, showRight: false, leftTitle: "Reverse Jog Wheel" }});
+// Standalone players (SC5000/SC5000M/SC6000/SC6000M) hide Reverse Jog Wheel even when #49 clears Config.device.isPlayer
+assert.deepEqual(uiCaps("JP07", true, false), {{ showLeft: false, showRight: false, leftTitle: "Reverse Jog Wheel" }});
+assert.deepEqual(uiCaps("JP13", false, false), {{ showLeft: false, showRight: false, leftTitle: "Reverse Jog Wheel" }});
 // 2-jog consoles (including SC LIVE 4 JP21, PRIME 4 JC11, Mixstream NH08, PRIME 4 G2 JP24) show both Left & Right
 for (const b of ["JP21", "JP20", "JC11", "JC11S", "JC16", "JP11", "JP11S", "NH08", "NH08S", "NH10", "JP24"]) {{
     assert.deepEqual(uiCaps(b, false, false), {{ showLeft: true, showRight: true, leftTitle: "Reverse Left Jog Wheel" }}, b);
@@ -7383,6 +7634,7 @@ globalThis.root = {{
 const scReverseJogLeftProp = Planck.getProperty("/GUI/Scripted/EngineXJogInvertLeft");
 const scReverseJogRightProp = Planck.getProperty("/GUI/Scripted/EngineXJogInvertRight");
 const scReverseJogReadyProp = Planck.getProperty("/GUI/Scripted/EngineXJogInvertReady");
+let scHasJogWheel = true;
 function scFxMsInteger(v) {{ return parseInt(v) || 500; }}
 function scFxMsApply(m, v) {{ scFxTimeMode = m; scFxTimeMs = v; }}
 {fn_sync}
@@ -7427,9 +7679,94 @@ assert.equal(planck["/GUI/Scripted/EngineXJogInvertLeft"].translator.state, fals
 assert.equal(planck["/GUI/Scripted/EngineXJogInvertRight"].translator.state, false);
 assert.equal(effective(true, true, "Left"), false);
 assert.equal(effective(true, true, "Right"), false);
+
+// On standalone players (scHasJogWheel=false), stored jog_invert_* never reaches the controller binding
+scHasJogWheel = false;
+scParseSettingsConf("jog_invert_left=1\\njog_invert_right=1\\n");
+assert.equal(planck["/GUI/Scripted/EngineXJogInvertLeft"].translator.state, false);
+assert.equal(planck["/GUI/Scripted/EngineXJogInvertRight"].translator.state, false);
+assert.equal(effective(false, false, "Left"), false);
+assert.equal(effective(false, false, ""), false);
 """
         res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
         self.assertEqual(res.returncode, 0, res.stderr)
+
+    def test_cross_engine_polling_and_player_board_assignments(self):
+        qrc = LAB / "5.3.0" / "qrc"
+        if not qrc.is_dir():
+            self.skipTest(f"{qrc} not found")
+        with tempfile.TemporaryDirectory(prefix="ui-reverse-jog-ctrl-") as tmp:
+            out = Path(tmp) / "packs"
+            res = subprocess.run(["python3", str(BUILD_PACKS), "--qrc", str(qrc), "--out", str(out), "--release"],
+                                 capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0, res.stderr)
+            gcfg = (out / "en" / "ControlSurfaceModules/ControlSurfaceModules/GlobalAssignmentConfig.qml").read_text(encoding="utf-8")
+            self.assertIn("function scSyncReverseJogFromState()", gcfg)
+            self.assertIn("running: true; repeat: true; triggeredOnStart: true", gcfg)
+            self.assertIn("onTriggered: scGlobalConfig.scSyncReverseJogFromState()", gcfg)
+            self.assertNotIn("readonly property bool scReverseJogLeftEffective:", gcfg)
+
+            if shutil.which("node"):
+                m_fn = re.search(r"function scSyncReverseJogFromState\(\)\s*\{[\s\S]*?\n    \}", gcfg)
+                self.assertIsNotNone(m_fn)
+                sync_fn = m_fn.group(0)
+                js = f"""
+const assert = require('node:assert/strict');
+const shared = {{
+    "/GUI/Scripted/EngineXJogInvertLeft": false,
+    "/GUI/Scripted/EngineXJogInvertRight": false,
+    "/GUI/Scripted/EngineXJogInvertReady": false,
+    "/GUI/Scripted/EngineXPerfLibVisible": false,
+}};
+// Controller QML engine gets its own PropertyWrapper objects; signals are object-local
+// so UI writes to shared state do NOT fire notifications in the controller engine.
+globalThis.Planck = {{
+    getProperty: (p) => ({{ translator: {{ get state() {{ return shared[p]; }} }} }})
+}};
+const scGlobalConfig = {{
+    scReverseJogLeft: false,
+    scReverseJogRight: false,
+    scReverseJogLeftEffective: false,
+    scReverseJogRightEffective: false,
+    pReverseJogLeft: Planck.getProperty("/GUI/Scripted/EngineXJogInvertLeft"),
+    pReverseJogRight: Planck.getProperty("/GUI/Scripted/EngineXJogInvertRight"),
+    pReverseJogReady: Planck.getProperty("/GUI/Scripted/EngineXJogInvertReady"),
+    pPerfLibVisible: Planck.getProperty("/GUI/Scripted/EngineXPerfLibVisible"),
+}};
+{sync_fn}
+function scIsReverseJog(deckName) {{
+    return deckName === "Right" ? scGlobalConfig.scReverseJogRightEffective : scGlobalConfig.scReverseJogLeftEffective;
+}}
+shared["/GUI/Scripted/EngineXJogInvertReady"] = true;
+scSyncReverseJogFromState();
+assert.equal(scIsReverseJog(""), false);
+
+// Simulate UI engine toggling Left invert ON (e.g. SC5000 JP07) with no cross-engine signal
+shared["/GUI/Scripted/EngineXJogInvertLeft"] = true;
+scSyncReverseJogFromState();
+assert.equal(scIsReverseJog(""), true);
+assert.equal(scIsReverseJog("Left"), true);
+assert.equal(scIsReverseJog("Right"), false);
+
+// Simulate UI engine toggling Left invert OFF
+shared["/GUI/Scripted/EngineXJogInvertLeft"] = false;
+scSyncReverseJogFromState();
+assert.equal(scIsReverseJog(""), false);
+"""
+                nres = subprocess.run(["node", "-e", js], capture_output=True, text=True)
+                self.assertEqual(nres.returncode, 0, nres.stdout + nres.stderr)
+
+        preset_dir = LAB / "sclive4-rea61-followup" / "rootfs" / "usr" / "Engine" / "AssignmentFiles" / "PresetAssignmentFiles"
+        if preset_dir.is_dir():
+            for board in ("JP07", "JP11", "JP13", "JP21"):
+                q = preset_dir / board / f"{board}_Controller_Assignments.qml"
+                txt = q.read_text(encoding="utf-8")
+                self.assertIn("GlobalAssignmentConfig", txt, board)
+                self.assertIn("JogWheel {", txt, board)
+            for motorized in ("JP08", "JP14"):
+                q = preset_dir / motorized / f"{motorized}_Controller_Assignments.qml"
+                txt = q.read_text(encoding="utf-8")
+                self.assertNotIn("JogWheel {", txt, motorized)
 
 
 class RemoteLoadUiTest(unittest.TestCase):
@@ -8211,6 +8548,528 @@ assert.equal(previewItem.scPendingSeek, -1);
 """
         res = subprocess.run(["node", "-e", js], capture_output=True, text=True)
         self.assertEqual(res.returncode, 0, res.stderr)
+
+
+class StreamingStemsProgressTest(unittest.TestCase):
+    """Left deck, 2026-11-16: Stems tapped on a streamed row, and nothing on
+    screen for the minutes the render took. Engine draws a render on the row
+    of the track it renders, which for a streamed row is its imported copy in
+    the internal library. The streamed row itself and its "Stems not ready"
+    row now get the same stock row elements, from Engine's own queue progress."""
+
+    ROW = "Views/BrowseView/Components/"
+
+    def functions(self, *names):
+        return "\n".join(
+            re.search(r"function " + name + r"\([^)]*\)\s*\{[\s\S]*?\n\t\}", bp.SERVICES_MAIN).group(0) for name in names)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_row_state_time_left_and_wording_in_four_languages(self):
+        rows = {l.split("\t")[0]: dict(zip(bp.LANGUAGES, l.split("\t"))) for l in
+                (REPO / "tools/ui-mod/i18n.tsv").read_text(encoding="utf-8").splitlines() if l and not l.startswith("#")}
+        for key in ("~%1 min", "<1 min", "Download failed"):
+            self.assertEqual(len(rows[key]), 4, key)
+            for lang in bp.LANGUAGES:
+                self.assertTrue(rows[key][lang].strip(), (key, lang))
+            self.assertTrue(all("%1" in rows["~%1 min"][lang] for lang in bp.LANGUAGES))
+        main = bp.SERVICES_MAIN
+        refused = re.search(r"id: scStemRefused\n\t\tinterval: 30000\n\t\tonTriggered: \{([\s\S]*?)\n\t\t\}", main).group(1)
+        steady = re.search(r"id: scStemSteady\n\t\tinterval: 1000\n\t\tonTriggered: (.*)", main).group(1)
+        failed = re.search(r"id: scStemFailed\n\t\tinterval: 10000\n\t\tonTriggered: (.*)", main).group(1)
+        streamed = re.search(r"readonly property bool scStemStreamed: (.*)", main).group(1)
+        own = re.search(r"readonly property real scStemOwn: (.*)", main).group(1)
+        script = f"""
+const assert = require('assert');
+String.prototype.arg = function(n) {{ return this.replace('%1', n); }};
+console.warn = () => {{}};
+const dict = {json.dumps(rows, ensure_ascii=False)};
+let scLang = 'en', scStemRows = {{}}, scStemAsked = {{}}, scStemClaim = null, scStemNext = [], scStemDone = 0, scStemSize = 0, scStemHeard = 0;
+let scStemTotal = 0, scStemCount = 0, scStemProgress = 0, uris = {{}}, asked = 0, deferred = [], sent = [], reactions = {{}};
+const Qt = {{callLater: fn => {{ if (!deferred.includes(fn)) deferred.push(fn); }}}};
+function scT(s) {{ return (dict[s] && dict[s][scLang]) || s; }}
+const Planck = {{librarianController: {{collectionController: {{getTrackUrisFromUniversalIds: ids => {{ asked++; return uris[ids[0]] || ''; }}}}}}}};
+// Engine's queue: startRenderTracks may answer inside the call (reactions[id]).
+const scStemQueue = {{
+    get totalRenderStemsQueueCount() {{ return scStemTotal; }},
+    get renderStemsQueueCount() {{ return scStemCount; }},
+    startRenderTracks(id) {{ sent.push(id); (reactions[id] || (() => {{}}))(); }},
+}};
+let steadyArmed = false;
+const scStemRefused = {{restart() {{}}}}, scStemSteady = {{restart() {{ steadyArmed = true; }}}};
+{self.functions("scStemMark", "scStemHand", "scStemSend", "scStemQueued", "scStemSettle", "scStemFinished", "scStemPlace", "scStemState", "scStemEta", "scStemText")}
+const root = {{
+    get scStemRows() {{ return scStemRows; }}, get scStemTotal() {{ return scStemTotal; }}, get scStemCount() {{ return scStemCount; }},
+    get scStemSize() {{ return scStemSize; }}, get scStemAsked() {{ return scStemAsked; }}, get scStemClaim() {{ return scStemClaim; }}, set scStemClaim(v) {{ scStemClaim = v; }},
+    scStemMark, scStemSend, scStemFinished,
+}};
+// Engine answers with renderStemsQueueChanged, the signal behind both counters; the
+// pack reads them once Engine is done (Qt.callLater, which coalesces). `answer`
+// without `settle` is an answer the pack has not read yet.
+function answer(left, total) {{ scStemCount = left; scStemTotal = total; scStemHeard++; Qt.callLater(scStemSettle); }}
+function settle() {{ while (deferred.length) deferred.shift()(); }}
+function queue(left, total) {{ answer(left, total); settle(); }}
+// Engine queues a track: both counters grow, then it names the track
+// (enqueueTrackRenderJob, "<library>/<track id> <library uuid>"; sandbox).
+const LIB = '/data/AppDataUser/AIR Music Technology/Engine/Engine Library/';
+function take(id, left, total, lib) {{ answer(left, total); scStemQueued((lib || LIB) + id + ' 49870d09-176c-405c-93e8-cb253c5ebaa9'); }}
+// The reading in which the run grew has held for a second.
+function steadyTimer() {{ steadyArmed = false; {steady} }}
+// The hand-over as scStemImport does it; `engine` is Engine's answer inside the call.
+function hand(id, rows, engine) {{ if (engine) reactions[id] = engine; scStemHand(id, rows); settle(); }}
+function reset() {{ queue(0, 0); scStemRows = {{}}; scStemAsked = {{}}; scStemClaim = null; scStemNext = []; sent = []; reactions = {{}}; }}
+function refusedTimer() {{ {refused} }}
+function failedTimer() {{ {failed} }}
+const streamed = () => {streamed};
+const own = () => {own};
+const states = (...ids) => ids.map(id => scStemState(id));
+const scStemRendering = () => scStemTotal > 0;
+// Engine's ids of the rows: track A's tapped row and its "Stems not ready" row, another
+// streamed row, a local file, track B's two rows, track C's two rows.
+uris = {{7: 'uri=streaming://TIDAL/Track/41', 8: 'uri=streaming://TIDAL/Track/55', 9: 'uri=streaming://TIDAL/Track/900',
+        10: 'uri=file:///x/41.flac?trackId=41', 11: 'uri=streaming://TIDAL/Track/42', 12: 'uri=streaming://TIDAL/Track/56',
+        13: 'uri=streaming://TIDAL/Track/43', 14: 'uri=streaming://TIDAL/Track/57'}};
+// No Stems asked for: no row is looked up at all.
+assert.equal(scStemState(7), '');
+assert.equal(asked, 0);
+// Tapped: the row waits while the file is downloaded and imported.
+scStemMark(['41'], 'wait');
+assert.deepEqual(states(7, 8, 9, 10, 0), ['wait', '', '', '', '']);
+// The source request named the "Stems not ready" row; an empty id is not a row.
+scStemMark(['41', '55', ''], 'wait');
+assert.deepEqual(Object.keys(scStemRows).sort(), ['41', '55']);
+assert.deepEqual(states(7, 8, 9, 10), ['wait', 'wait', '', '']);
+assert.equal(streamed(), false);
+
+// Engine may answer inside startRenderTracks. The track's place is the run's size
+// when Engine names it as queued: the first track renders, it does not wait.
+hand('901', ['41', '55'], () => take('901', 1, 1));
+assert.deepEqual(sent, ['901']);
+assert.deepEqual(scStemRows, {{41: 1, 55: 1}});
+assert.deepEqual(states(7, 8, 9, 10), ['render', 'render', '', '']);
+assert.equal(streamed(), true);
+// Alone in the queue, Engine's one progress number is the track's own.
+scStemProgress = 0.4;
+assert.equal(own(), 0.4);
+
+// A second track while the first renders has its own place and waits. Engine
+// answers later this time.
+scStemMark(['42', '56'], 'wait');
+hand('902', ['42', '56']);
+assert.deepEqual(states(11, 12), ['wait', 'wait']);
+take('902', 2, 2); settle();
+assert.deepEqual(scStemRows, {{41: 1, 55: 1, 42: 2, 56: 2}});
+assert.deepEqual(states(7, 8, 11, 12), ['render', 'render', 'wait', 'wait']);
+// Engine's number covers the whole queue (left deck, two tracks: the first ended
+// at 50 %): the first track at 40 % is 20 % of the queue.
+scStemProgress = 0.2;
+assert.ok(Math.abs(own() - 0.4) < 1e-9);
+// The first is over (rendered or failed): its rows show nothing while the queue
+// goes on, and the second shows its own render from its own start.
+queue(1, 2);
+assert.deepEqual(states(7, 8, 11, 12), ['', '', 'render', 'render']);
+scStemProgress = 0.75;
+assert.ok(Math.abs(own() - 0.5) < 1e-9);
+assert.equal(streamed(), true);
+// The queue ends: every place in it is over, and the marks go.
+queue(0, 0);
+assert.deepEqual(scStemRows, {{}});
+assert.deepEqual(states(7, 8, 11, 12), ['', '', '', '']);
+assert.equal(streamed(), false);
+assert.equal(own(), 0);
+
+// One counter may be read before the other. In either order the first track keeps
+// rendering and the second keeps its place, also when the reading in which the run
+// grew holds for a second.
+for (const order of ['total first', 'left first']) {{
+    reset();
+    scStemMark(['41', '55'], 'wait'); hand('901', ['41', '55'], () => take('901', 1, 1));
+    scStemMark(['42', '56'], 'wait'); hand('902', ['42', '56']);
+    if (order === 'total first') queue(1, 2); else queue(2, 1);
+    assert.deepEqual(states(7, 8), ['render', 'render'], order);
+    assert.deepEqual(states(11, 12), ['wait', 'wait'], order);
+    take('902', 2, 2); settle();
+    steadyTimer();
+    assert.deepEqual(scStemRows, {{41: 1, 55: 1, 42: 2, 56: 2}}, order);
+    assert.deepEqual(states(7, 8, 11, 12), ['render', 'render', 'wait', 'wait'], order);
+    // The first ends: only the count of tracks left moves.
+    queue(1, 2);
+    assert.deepEqual(states(7, 8, 11, 12), ['', '', 'render', 'render'], order);
+}}
+
+// Review of 9391dac8, trace 1: the second track is added while the first ends, and
+// Engine's two answers reach the pack as one reading (2/1). The run's size changed
+// in it, so it counts once it has held: the first track is over, the second renders.
+reset();
+scStemMark(['41', '55'], 'wait'); hand('901', ['41', '55'], () => take('901', 1, 1));
+scStemMark(['42', '56'], 'wait'); hand('902', ['42', '56']);
+take('902', 2, 2); answer(1, 2); settle();
+assert.deepEqual(scStemRows, {{41: 1, 55: 1, 42: 2, 56: 2}});
+assert.ok(steadyArmed);
+steadyTimer();
+assert.deepEqual(states(7, 8, 11, 12), ['', '', 'render', 'render']);
+scStemProgress = 0.75;
+assert.ok(Math.abs(own() - 0.5) < 1e-9);
+
+// Two streamed tracks are handed over one at a time: the second waits until Engine
+// has answered the first.
+reset();
+queue(1, 1);                                       // a local track renders
+scStemMark(['42', '56'], 'wait'); hand('902', ['42', '56']);
+scStemMark(['43', '57'], 'wait'); hand('903', ['43', '57']);
+assert.deepEqual(sent, ['902']);
+take('902', 2, 2); settle();
+assert.deepEqual(sent, ['902', '903']);
+take('903', 3, 3); settle();
+assert.deepEqual(scStemRows, {{42: 2, 56: 2, 43: 3, 57: 3}});
+queue(2, 3);
+assert.deepEqual(states(11, 13), ['render', 'wait']);
+
+// Review of 9391dac8, trace 2: B refused (1/1) and C accepted (2/2) before the pack
+// reads either. B's answer is read before C is handed over, so B takes no place and
+// C gets its own.
+reset();
+queue(1, 1);                                       // a local track renders
+scStemMark(['42', '56'], 'wait'); hand('902', ['42', '56']);
+scStemMark(['43', '57'], 'wait'); hand('903', ['43', '57'], () => take('903', 2, 2));
+answer(1, 1);                                      // Engine refuses B
+settle();
+assert.deepEqual(sent, ['902', '903']);
+assert.deepEqual(scStemRows, {{43: 2, 57: 2}});
+assert.deepEqual(states(11, 12, 13, 14), ['', '', 'wait', 'wait']);
+queue(1, 2);                                       // the local track ends
+assert.deepEqual(states(11, 12, 13, 14), ['', '', 'render', 'render']);
+
+// Review of 9391dac8: a local track that ends while a streamed track waits for its
+// answer is not that track's refusal; its answer later still places it.
+reset();
+queue(1, 1);                                       // a local track renders
+scStemMark(['42', '56'], 'wait'); hand('902', ['42', '56']);
+queue(0, 0);                                       // the local track ends
+assert.deepEqual(states(11, 12), ['wait', 'wait']);
+take('902', 1, 1); settle();                       // Engine takes B
+assert.deepEqual(scStemRows, {{42: 1, 56: 1}});
+assert.deepEqual(states(11, 12), ['render', 'render']);
+
+// A track Engine refuses (it answers, nothing moves) takes no place, not even the
+// place of a local track added afterwards, whether Engine answers inside the call or
+// later, and whether the 30 s timer runs before or after that addition.
+for (const inCall of [true, false]) {{
+    for (const timerFirst of [true, false]) {{
+        reset();
+        queue(1, 1);                               // a local track renders
+        scStemMark(['42', '56'], 'wait');
+        hand('902', ['42', '56'], inCall ? () => answer(1, 1) : null);
+        if (!inCall) {{
+            assert.deepEqual(states(11, 12), ['wait', 'wait']);
+            queue(1, 1);                           // Engine's answer: refused
+        }}
+        assert.deepEqual(states(11, 12), ['', ''], 'refused, in call: ' + inCall);
+        if (timerFirst) refusedTimer();
+        take('5', 2, 2); settle();                 // a local track is added
+        if (!timerFirst) refusedTimer();
+        assert.deepEqual(states(11, 12), ['', '']);
+        assert.equal(streamed(), false);
+        queue(1, 2);
+        assert.deepEqual(states(11, 12), ['', '']);
+        assert.equal(streamed(), false);
+    }}
+}}
+// Review of 47196c08: local track A renders (1/1) and streamed B waits for its
+// answer when a local track C is queued (2/2). That growth is C's, not B's: Engine
+// names C, from a stick whose library has a track with B's number, and B keeps
+// waiting. B's refusal leaves 2/2 as it was: B takes no place, and A's end later
+// does not make C's render B's.
+reset();
+queue(1, 1);                                       // local A renders
+scStemMark(['42', '56'], 'wait'); hand('902', ['42', '56']);
+take('902', 2, 2, '/media/sda1/Engine Library/'); settle(); // local C
+assert.deepEqual(states(11, 12), ['wait', 'wait']);
+assert.equal(streamed(), false);
+queue(2, 2);                                       // Engine refuses B
+assert.deepEqual(states(11, 12), ['', '']);
+refusedTimer(); settle();
+queue(1, 2);                                       // A ends, C renders
+assert.deepEqual(states(11, 12), ['', '']);
+assert.equal(streamed(), false);
+// The same, but Engine takes B after C: B's place is behind C's.
+reset();
+queue(1, 1);                                       // local A renders
+scStemMark(['42', '56'], 'wait'); hand('902', ['42', '56']);
+take('5', 2, 2); settle();                         // local C, internal library
+assert.deepEqual(states(11, 12), ['wait', 'wait']);
+take('902', 3, 3); settle();                       // Engine takes B
+assert.deepEqual(scStemRows, {{42: 3, 56: 3}});
+queue(2, 3);                                       // A ends, C renders
+assert.deepEqual(states(11, 12), ['wait', 'wait']);
+queue(1, 3);                                       // C ends, B renders
+assert.deepEqual(states(11, 12), ['render', 'render']);
+// A local request Engine refuses while B waits reads as B's refusal. Engine naming
+// B as queued afterwards still gives B its place.
+reset();
+queue(1, 1);                                       // local A renders
+scStemMark(['42', '56'], 'wait'); hand('902', ['42', '56']);
+queue(1, 1);                                       // a local request refused
+assert.deepEqual(states(11, 12), ['', '']);
+take('902', 2, 2); settle();                       // Engine takes B
+assert.deepEqual(scStemRows, {{42: 2, 56: 2}});
+assert.deepEqual(states(11, 12), ['wait', 'wait']);
+queue(1, 2);                                       // A ends, B renders
+assert.deepEqual(states(11, 12), ['render', 'render']);
+
+// No answer from Engine at all: the timer ends the wait and the next track goes.
+reset();
+scStemMark(['42', '56'], 'wait'); hand('902', ['42', '56']);
+scStemMark(['43', '57'], 'wait'); hand('903', ['43', '57']);
+assert.deepEqual(sent, ['902']);
+refusedTimer(); settle();
+assert.deepEqual(sent, ['902', '903']);
+assert.deepEqual(states(11, 13), ['', 'wait']);
+// A row still being downloaded is not touched by the queue's end or the timer.
+reset();
+scStemMark(['41'], 'wait');
+queue(1, 1); queue(0, 0); refusedTimer();
+assert.deepEqual(scStemRows, {{41: 'wait'}});
+scStemMark(['41'], '');
+
+// The download failed (NetEase only previews this track for the account): the tapped
+// row says so instead of going quiet, takes no place in Engine's queue, and after
+// a while shows its length again; a row still downloading is left alone.
+scStemMark(['42'], 'wait');
+scStemMark(['41'], 'fail');
+assert.deepEqual(states(7, 11), ['fail', 'wait']);
+assert.equal(streamed(), false);
+hand('956', ['56'], () => take('956', 1, 1));
+assert.deepEqual(scStemRows, {{41: 'fail', 42: 'wait', 56: 1}});
+queue(0, 0);
+assert.deepEqual(scStemRows, {{41: 'fail', 42: 'wait'}});
+failedTimer();
+assert.deepEqual(scStemRows, {{42: 'wait'}});
+scStemMark(['42'], '');
+
+// Time left at the speed seen so far: a quarter in one minute leaves three.
+assert.equal(scStemEta(0.25, 60, 0.75), '~3 min');
+assert.equal(scStemEta(0.5, 300, 0.02), '<1 min');
+assert.equal(scStemEta(0.5, 300, 0.1), '~1 min');
+// Too little seen to say anything.
+assert.equal(scStemEta(0.005, 60, 0.9), '');
+assert.equal(scStemEta(0.25, 9, 0.75), '');
+assert.equal(scStemEta(0, 60, 1), '');
+
+assert.equal(scStemText('wait', 0, ''), 'Stems…');
+assert.equal(scStemText('render', 0.001, ''), '0%');
+assert.equal(scStemText('render', 0.447, ''), '45%');
+// Rendered with other tracks in the queue: Engine's one number is not this track's.
+assert.equal(scStemText('render', -1, '~3 min'), 'Stems…');
+for (const [lang, waiting, rendering, nearly, failed] of [
+    ['en', 'Stems…', '45% · ~3 min', '98% · <1 min', 'Download failed'],
+    ['zh-Hans', '分轨 Stems…', '45% · 约 3 分钟', '98% · 不到 1 分钟', '下载失败'],
+    ['zh-Hant', '分軌 Stems…', '45% · 約 3 分鐘', '98% · 不到 1 分鐘', '下載失敗'],
+    ['es', 'Stems…', '45% · ~3 min', '98% · <1 min', 'Descarga fallida'],
+]) {{
+    scLang = lang;
+    assert.equal(scStemText('fail', -1, ''), failed, lang);
+    assert.ok(failed.length <= 'Downloading 100%'.length, lang);
+    assert.equal(scStemText('wait', 0, ''), waiting, lang);
+    assert.equal(scStemText('render', 0.45, scStemEta(0.25, 60, 0.75)), rendering, lang);
+    assert.equal(scStemText('render', 0.98, scStemEta(0.5, 300, 0.02)), nearly, lang);
+    // The cell is as wide as stock needs for its own longest text, "Downloading 100%".
+    assert.ok(scStemText('render', 1, scStemEta(0.01, 600, 0.99)).length <= 'Downloading 100%'.length, lang);
+}}
+"""
+        res = subprocess.run(["node", "-"], input=script, capture_output=True, text=True)  # too long for one argument
+        self.assertEqual(res.returncode, 0, res.stderr)
+
+    def test_the_request_marks_its_rows_and_engine_progress_drives_them(self):
+        main = bp.SERVICES_MAIN
+        # Engine's own queue counters and progress, the values behind stock's ring: nothing is polled.
+        self.assertIn("readonly property var scStemQueue: Planck.librarianController.stemsQueueManager || null", main)
+        self.assertIn("readonly property int scStemTotal: scStemQueue ? scStemQueue.totalRenderStemsQueueCount : 0", main)
+        self.assertIn("readonly property int scStemCount: scStemQueue ? scStemQueue.renderStemsQueueCount : 0", main)
+        self.assertIn("readonly property bool scStemRendering: scStemTotal > 0", main)
+        self.assertIn("readonly property real scStemProgress: scStemRendering ? (scStemQueue.renderProgress || 0) : 0", main)
+        # Engine's progress covers the whole queue: the rendering track's own share,
+        # with the time left measured on it.
+        self.assertIn("readonly property real scStemOwn: scStemRendering ? Math.max(0, Math.min(1, scStemProgress * scStemTotal - scStemDone)) : 0", main)
+        self.assertIn("const p = scStemOwn, now = Date.now()", main)
+        # Both counters are read once Engine is done with them, on every answer of its queue.
+        self.assertIn("onScStemTotalChanged: Qt.callLater(scStemSettle)", main)
+        answer = main.split("function onRenderStemsQueueChanged() {", 1)[1].split("\n\t\t}", 1)[0]
+        self.assertIn("root.scStemHeard++", answer)
+        self.assertIn("Qt.callLater(root.scStemSettle)", answer)
+        stream = re.search(r"function scStemStream\(uid\) \{[\s\S]*?\n\t\}", main).group(0)
+        # Tapped: marked at once. A failed download says so on the row for a while;
+        # a deck that started playing meanwhile forgets it.
+        self.assertIn('root.scStemMark([gid], "wait")', stream)
+        failure = stream.split("if (x.status !== 200) {", 1)[1].split("\n\t\t\t}", 1)[0]
+        self.assertIn('root.scStemMark([gid], "fail")', failure)
+        self.assertIn("scStemFailed.restart()", failure)
+        self.assertIn("return", failure)
+        self.assertEqual(stream.count('root.scStemMark([gid], "")'), 1)
+        # The reply names the "Stems not ready" row: both rows wait for the import.
+        self.assertIn('scStemImport.rows = [gid, reply.row ? String(reply.row) : ""]', stream)
+        self.assertIn('root.scStemMark(scStemImport.rows, "wait")', stream)
+        importer = main.split("id: scStemImport", 1)[1].split("id: scStemUnload", 1)[0]
+        render = importer.split("function render(id) {", 1)[1].split("onTriggered", 1)[0]
+        # Handed to Engine one track at a time (its answer names no track): its queue
+        # is read before the call (Engine may answer inside it), and the rows get the
+        # track's own place once Engine confirms it.
+        self.assertIn("root.scStemHand(id, rows)", render)
+        send = re.search(r"function scStemSend\(\) \{[\s\S]*?\n\t\}", main).group(0)
+        self.assertIn("if (scStemClaim || !scStemNext.length || !scStemQueue) return", send)
+        self.assertLess(send.index("scStemClaim = {id: next.id, total: total, left: left, heard: scStemHeard}"), send.index("scStemQueue.startRenderTracks(next.id)"))
+        self.assertLess(send.index("scStemAsked[next.id] = next.rows"), send.index("scStemQueue.startRenderTracks(next.id)"))
+        # Placed only when Engine names the track as queued, in the internal library
+        # the import went to; queue growth alone may be a local track's (review of 47196c08).
+        self.assertIn("function onEnqueueTrackRenderJob(track) { root.scStemQueued(String(track)) }", main)
+        queued = re.search(r"function scStemQueued\(track\) \{[\s\S]*?\n\t\}", main).group(0)
+        self.assertIn('const lib = "/data/AppDataUser/AIR Music Technology/Engine/Engine Library/"', queued)
+        settle = re.search(r"function scStemSettle\(\) \{[\s\S]*?\n\t\}", main).group(0)
+        self.assertNotIn("total > c.total", settle)
+        self.assertIn("scStemRefused.restart()", send)
+        # Engine never imported the file: the rows stop waiting.
+        self.assertIn('if (tries-- <= 0) { root.scStemMark(rows, ""); stop(); return }', importer)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_a_tap_with_every_deck_playing_says_so(self):
+        """The import needs a deck that is not playing. With none, the tap
+        started nothing and showed nothing, which looked broken."""
+        stream = re.search(r"function scStemStream\(uid\) \{[\s\S]*?\n\t\}", bp.SERVICES_MAIN).group(0)
+        self.assertIn('if (!deck) { console.warn("EngineX stems step=busy"); return "busy" }', stream)
+        # Nothing is marked, requested or loaded before that answer.
+        for later in ('root.scStemMark([gid], "wait")', "new XMLHttpRequest()", "AddToDatabaseAndLoadToDeck"):
+            self.assertLess(stream.index('return "busy"'), stream.index(later))
+        hint = "Both decks are playing. Free one deck, then tap Stems again"
+        rows = {l.split("\t")[0]: l.split("\t") for l in
+                (REPO / "tools/ui-mod/i18n.tsv").read_text(encoding="utf-8").splitlines() if l and not l.startswith("#")}
+        self.assertEqual(len(rows[hint]), 4)
+        for text in rows[hint]:
+            self.assertIn("Stems", text)
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            edits = bp.edits(False)
+        finally:
+            bp.ROOT = old_root
+        for side in ("Left", "Right"):
+            with self.subTest(side=side):
+                path = "Skins/Embedded/Views/BrowseView/Components/Components/Swipe" + side + "Item.qml"
+                body = next(new for _, new in edits[path] if "root.scStemStream(row.modelData.trackId)" in new)
+                script = f"""
+const assert = require('assert');
+function commit(answer) {{
+    const calls = [];
+    const root = {{scT: s => 'T:' + s, scStemStream: id => {{ calls.push(['stream', id]); return answer; }}}};
+    const Planck = {{librarianController: {{stemsQueueManager: {{startRenderTracks: id => calls.push(['render', id])}}}}}};
+    const row = {{index: 3, modelData: {{trackId: 99}}}}, scDeck = 0, trackList = {{}};
+    const leftActions = [], rightActions = [], actionIndex = 0;
+    let textCommitValid = 'Stems'; // stock has just put the action's own message there
+{body}
+    return [textCommitValid, calls];
+}}
+// Started: the swipe says "Stems", as before.
+assert.deepStrictEqual(commit(true), ['Stems', [['stream', 99]]]);
+// Not a streamed row: Engine renders the local track itself.
+assert.deepStrictEqual(commit(false), ['Stems', [['stream', 99], ['render', '99']]]);
+// Every deck is playing: nothing is started, and the swipe says why.
+assert.deepStrictEqual(commit('busy'), ['T:' + {json.dumps(hint)}, [['stream', 99]]]);
+"""
+                res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+                self.assertEqual(res.returncode, 0, res.stderr)
+
+    def test_row_edits_are_in_the_patch_table_without_lab(self):
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            edits = bp.edits(False)
+            parts = bp.ROOT + self.ROW + "Components/"
+            track_list = "".join(new for _, new in edits[bp.ROOT + self.ROW + "TrackList.qml"])
+            self.assertIn("root.scStemState(modelData.trackId)", track_list)
+            self.assertIn('readonly property int stemState: scStem === "render" ? 2 : scStem === "wait" ? 1 : (modelData.stems || 0)', track_list)
+            self.assertIn("row.stemState === 2", "".join(new for _, new in edits[parts + "PreviewProgress.qml"]))
+            self.assertIn("scStems === 2", "".join(new for _, new in edits[parts + "StemsIcon.qml"]))
+            self.assertIn("root.scStemText(row.scStem, row.stemsRenderProgress, root.scStemLeft)", "".join(new for _, new in edits[parts + "Length.qml"]))
+        finally:
+            bp.ROOT = old_root
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_stock_row_elements_follow_the_streamed_row(self):
+        for version, skin in (("5.0.4", "EmbeddedCommon"), ("5.3.0", "Embedded")):
+            qrc = LAB / version / "qrc"
+            if not qrc.is_dir():
+                if version == "5.0.4":
+                    continue
+                self.skipTest(f"{qrc} not found (run on the build host)")
+            with tempfile.TemporaryDirectory() as tmp:
+                out = Path(tmp) / "packs"
+                built = subprocess.run(["python3", str(BUILD_PACKS), "--qrc", str(qrc), "--out", str(out)], capture_output=True, text=True)
+                self.assertEqual(built.returncode, 0, built.stderr)
+                for lang in bp.LANGUAGES:
+                    with self.subTest(version=version, lang=lang):
+                        views = out / lang / "Skins" / skin
+                        track_list = (views / self.ROW / "TrackList.qml").read_text()
+                        props = {name: re.search(r"readonly property \w+ " + name + r": (.*)", track_list).group(1)
+                                 for name in ("scStem", "stemState", "stemsRenderProgress", "isRenderingStems")}
+                        script = f"""
+const assert = require('assert');
+const props = {json.dumps(props)};
+function row(state, modelData, progress) {{
+    const root = {{scStemOwn: progress, scStemState: uid => uid === 7 ? state : ''}};
+    const scStem = eval(props.scStem);
+    const stemState = eval(props.stemState);
+    const stemsRenderProgress = eval(props.stemsRenderProgress);
+    return [scStem, stemState, stemsRenderProgress, eval(props.isRenderingStems)];
+}}
+// A streamed row has no Stems state of its own: Engine's model says 0.
+assert.deepEqual(row('', {{trackId: 7}}, 0.4), ['', 0, 0, false]);
+// Tapped: stock's queued icon. Rendering: stock's spinner, bar and percentage, from the
+// rendering track's own share of Engine's queue progress.
+assert.deepEqual(row('wait', {{trackId: 7}}, 0), ['wait', 1, 0, false]);
+assert.deepEqual(row('render', {{trackId: 7}}, 0.4), ['render', 2, 0.4, true]);
+// The render has started but Engine has not reported progress yet: the row already shows it.
+assert.deepEqual(row('render', {{trackId: 7}}, 0), ['render', 2, 0.001, true]);
+// A failed download keeps stock's own Stems state on the row.
+assert.deepEqual(row('fail', {{trackId: 7}}, 0.4), ['fail', 0, 0, false]);
+// Local rows keep Engine's own state, whatever the queue is doing.
+assert.deepEqual(row('render', {{trackId: 8, stems: 3}}, 0.4), ['', 3, 0, false]);
+assert.deepEqual(row('', {{trackId: 8, stems: 2, stemsRenderProgress: 0.7}}, 0.4), ['', 2, 0.7, true]);
+"""
+                        res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+                        self.assertEqual(res.returncode, 0, res.stderr)
+                        parts = views / self.ROW / "Components"
+                        bar = (parts / "PreviewProgress.qml").read_text()
+                        self.assertNotIn("row.modelData.stems", bar)
+                        self.assertEqual(bar.count("row.stemState === 2"), 2)
+                        self.assertIn("percentage = row.stemsRenderProgress", bar)
+                        icon = (parts / "StemsIcon.qml").read_text()
+                        self.assertIn("readonly property int scStems: row.stemState !== undefined ? row.stemState : (row.modelData.stems || 0)", icon)
+                        for line in ("isStemmed: scStems === 3", "renderingInProgress: scStems === 2", "inStemsQueue: scStems === 1", "&& scStems !== 0"):
+                            self.assertIn(line, icon)
+                        length = (parts / "Length.qml").read_text()
+                        ours = length.index("root.scStemText(row.scStem, row.stemsRenderProgress, root.scStemLeft)")
+                        self.assertLess(length.index("row.scStem)"), ours)
+                        # Stock's own text for a local track stays, after ours.
+                        self.assertLess(ours, length.index("row.isRenderingStems"))
+                        self.assertRegex(length, r"""["']Rendering ["'] \+ String\(Math\.round\(row\.stemsRenderProgress \* 100\)\)""")
+                        if version == "5.3.0":
+                            view = (views / "Views/EmbeddedView.qml").read_text()
+                            shown = re.search(r"showBrowerViewStemsRenderIndicator: (.*)", view).group(1)
+                            indicator = f"""
+const assert = require('assert');
+const shown = (sideScreens, az04, streamed) => {{
+    const Config = {{device: {{hasSideScreens: sideScreens}}}}, root = {{scIsAZ04: az04, scStemStreamed: streamed}};
+    return !!({shown});
+}};
+// Review: a local track's render keeps stock's behaviour, the indicator only on units with side screens.
+assert.equal(shown(false, false, false), false);
+assert.equal(shown(true, false, false), true);
+// A streamed row's Stems in Engine's queue: shown on first-generation units, whatever list is open.
+assert.equal(shown(false, false, true), true);
+// AZ04 keeps stock in every case.
+assert.equal(shown(false, true, true), false);
+assert.equal(shown(true, true, false), true);
+"""
+                            res = subprocess.run(["node", "-e", indicator], capture_output=True, text=True)
+                            self.assertEqual(res.returncode, 0, res.stderr)
 
 
 if __name__ == "__main__":

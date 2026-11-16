@@ -48,6 +48,7 @@ type loginFlow struct {
 	// address that lost its state.
 	spotifyState  string
 	spotifyDevice *providers.SpotifyDeviceAuth
+	helperPending bool
 	UserCode      string `json:"userCode,omitempty"`
 	Error         string `json:"error,omitempty"`
 }
@@ -445,6 +446,7 @@ func (s *Server) loginStatus(w http.ResponseWriter, r *http.Request) {
 	status, key, token, viaRelay := flow.Status, flow.key, flow.token, flow.viaRelay
 	expired := time.Now().After(flow.expires)
 	device := flow.spotifyDevice
+	helperPending := flow.helperPending
 	initialStatus := status
 	var loginError string
 	s.mu.Unlock()
@@ -480,6 +482,23 @@ func (s *Server) loginStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	case viaRelay && status != "done" && status != "linked":
 		status = s.relayStatus(r.Context(), session, token, status)
+	case helperPending && flow.Provider == "applemusic" && status != "done" && status != "linked":
+		if am, ok := session.p.(*providers.AppleMusic); ok {
+			ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+			st := am.HelperStatus(ctx)
+			cancel()
+			if st.SignedIn && ready(session.p) {
+				s.mu.Lock()
+				flow.helperPending = false
+				s.mu.Unlock()
+				status = "done"
+			} else if st.LoginState == "failed" {
+				s.mu.Lock()
+				flow.helperPending = false
+				s.mu.Unlock()
+				loginError = tr(0, "amHelperRetry")
+			}
+		}
 	case ready(session.p):
 		// A phone page finished. A deck already logged in reaches this too, which
 		// is why the deck only offers the QR code after asking for a new login.
@@ -547,6 +566,28 @@ func (s *Server) phoneGet(w http.ResponseWriter, r *http.Request) {
 	case "beatport":
 		phonePage(w, r, beatportPhonePage(lang, action))
 	case "applemusic":
+		s.mu.Lock()
+		pendingHelper := flow.helperPending
+		s.mu.Unlock()
+		if pendingHelper {
+			ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+			st := s.appleMusic.HelperStatus(ctx)
+			cancel()
+			if st.SignedIn && s.appleMusic.Ready() {
+				s.mu.Lock()
+				flow.helperPending = false
+				s.mu.Unlock()
+				s.finishPhoneLogin(w, r, flow)
+				return
+			}
+			if st.LoginState == "failed" {
+				s.mu.Lock()
+				flow.helperPending = false
+				s.mu.Unlock()
+				phoneMessage(w, r, flow, tr(lang, "amFailed"), tr(lang, "amHelperRetry"))
+				return
+			}
+		}
 		dev := ""
 		if v := s.sessionOf(flow); v != nil {
 			if am, ok := v.p.(*providers.AppleMusic); ok {
@@ -716,14 +757,23 @@ func (s *Server) phonePost(w http.ResponseWriter, r *http.Request) {
 				refuse("badForm", "")
 				return
 			}
-			if err != nil {
+			if err != nil || status.LoginState == "failed" {
+				s.mu.Lock()
+				flow.helperPending = false
+				s.mu.Unlock()
 				refuse("amFailed", tr(lang, "amHelperRetry"))
 				return
 			}
 			if status.SignedIn && p.Ready() {
+				s.mu.Lock()
+				flow.helperPending = false
+				s.mu.Unlock()
 				s.finishPhoneLogin(w, r, flow)
 				return
 			}
+			s.mu.Lock()
+			flow.helperPending = status.LoginState == "logging-in"
+			s.mu.Unlock()
 			http.Redirect(w, r, phoneAction(r, flow), http.StatusSeeOther)
 			return
 		}

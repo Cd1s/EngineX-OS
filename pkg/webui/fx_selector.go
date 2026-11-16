@@ -61,7 +61,7 @@ func (s *Server) lockFXSelector(ctx context.Context) bool {
 func (s *Server) fxSelectorUpdate(w http.ResponseWriter, r *http.Request, q url.Values) {
 	u, ue := strconv.Atoi(q.Get("fxUnit"))
 	m, me := strconv.Atoi(q.Get("fxMode"))
-	if ue != nil || me != nil || u < 1 || u > 6 || m < 0 || m > 5 {
+	if ue != nil || me != nil || u < 1 || u > 6 || m < 0 || m > 6 {
 		fail(w, http.StatusBadRequest, errors.New("invalid FX unit or mode"))
 		return
 	}

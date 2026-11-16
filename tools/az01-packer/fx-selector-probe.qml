@@ -102,7 +102,7 @@ Item {
             if (probe.phase === 0) {
                 if (!a || !b || !a.scFxEnabled || !b.scFxEnabled) return
                 probe.check(root.scFxMasterBypassed, "legacy-master-menu-hidden")
-                probe.check(a.scFxNames.length === a.scFxStock.length + 5 && b.scFxNames.length === b.scFxStock.length + 5, "appended-list")
+                probe.check(a.scFxNames.length === a.scFxStock.length + 6 && b.scFxNames.length === b.scFxStock.length + 6, "appended-list")
                 for (let i = a.scFxStock.length; i < a.scFxNames.length; ++i) console.warn("FXPROBE name|" + a.scFxNames[i])
                 probe.fxConfig.channel = {"1": probe.channel(1), "2": probe.channel(2)}
                 const c = Qt.createComponent("qrc:/ControlSurfaceModules/ControlSurfaceModules/private/DJFxSelectKnob.qml")

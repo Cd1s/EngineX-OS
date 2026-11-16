@@ -451,3 +451,84 @@ func stemsSweepKeeps(t *testing.T, dl string) {
 		t.Fatalf("a file that is not on the deck's own file system was removed: %v", err)
 	}
 }
+
+// The render's progress is drawn on the "Stems not ready" row of the service's
+// Stems list. The UI can only find that row if the source request says which
+// one it is: the same id the list then uses. The row's words follow the UI
+// language, all four.
+func TestStemsSourceNamesItsNotReadyRow(t *testing.T) {
+	data := t.TempDir()
+	shadowDataRoot = data
+	defer func() { shadowDataRoot = "/data" }()
+	lib := filepath.Join(data, "AppDataUser/AIR Music Technology/Engine/Engine Library")
+	os.MkdirAll(filepath.Join(lib, "Database2"), 0o755)
+	dl := filepath.Join(data, "enginex/Stream")
+	os.MkdirAll(dl, 0o755)
+	if err := os.WriteFile(filepath.Join(dl, "spotify-a.ogg"), []byte("OggS-a"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Engine has imported the file and has not written its Stems yet.
+	db, err := sql.Open("sqlite", filepath.Join(lib, "Database2/m.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		`CREATE TABLE Track (id INTEGER PRIMARY KEY, path TEXT, filename TEXT)`,
+		`INSERT INTO Track VALUES (9, '../../../../enginex/Stream/Stems/spotify-a/DJ - One.ogg', 'DJ - One.ogg')`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.Close()
+	s, _ := stemsSourceServer(t, dl, 0)
+	gid := s.tidal.addTrack(trackRef{track: providers.Track{ID: "a", Title: "One", Artist: "DJ", Provider: "spotify"}})
+	req := httptest.NewRequest("GET", "/v1/enginex/stems/source?id="+strconv.FormatInt(gid, 10), nil)
+	req.RemoteAddr = "127.0.0.1:41000"
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, req)
+	var src struct {
+		Path string
+		Row  int64
+	}
+	if json.Unmarshal(w.Body.Bytes(), &src); w.Code != 200 || src.Row == 0 || src.Row == gid {
+		t.Fatalf("stems source: %d %s: want the id of the not-ready row", w.Code, w.Body.String())
+	}
+	row := func() (int64, string, bool) {
+		t.Helper()
+		w := httptest.NewRecorder()
+		s.tidal.stemsListTracks(w, httptest.NewRequest("GET", "/v1/playlists/x/tracks", nil), "spotify")
+		var list struct {
+			Items []struct {
+				Item struct {
+					ID             int64  `json:"id"`
+					Title          string `json:"title"`
+					AllowStreaming bool   `json:"allowStreaming"`
+				} `json:"item"`
+			} `json:"items"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &list); err != nil || len(list.Items) != 1 {
+			t.Fatalf("list %s (%v)", w.Body.String(), err)
+		}
+		return list.Items[0].Item.ID, list.Items[0].Item.Title, list.Items[0].Item.AllowStreaming
+	}
+	for _, c := range [][2]string{{"en", "Stems not ready — One"}, {"zh-Hans", "Stems 尚未完成 — One"}, {"zh-Hant", "Stems 尚未完成 — One"}, {"es", "Stems aún no listos — One"}} {
+		s.uiMu.Lock()
+		v := s.loadUI()
+		v.Language = c[0]
+		err := s.saveUI(v)
+		s.uiMu.Unlock()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if id, title, loadable := row(); id != src.Row || title != c[1] || loadable {
+			t.Fatalf("%s: row %d %q loadable %v, want row %d %q", c[0], id, title, loadable, src.Row, c[1])
+		}
+	}
+	// Rendered: the row is the track itself again, under its own id.
+	os.MkdirAll(filepath.Join(lib, "Stems"), 0o755)
+	os.WriteFile(filepath.Join(lib, "Stems", "9 library.stems"), []byte("stems"), 0o644)
+	if id, title, loadable := row(); id != gid || title != "One" || !loadable {
+		t.Fatalf("after the render: row %d %q loadable %v", id, title, loadable)
+	}
+}

@@ -20,7 +20,7 @@ class ModTests(unittest.TestCase):
     def test_registry_and_archive_members(self):
         registry = json.loads((BASE / "registry.json").read_text())
         self.assertEqual(registry["updatedAt"], "2026-11-12")
-        self.assertEqual(len(registry["mods"]), 6)
+        self.assertEqual(len(registry["mods"]), 7)
         for mod in registry["mods"]:
             blob = (BASE / "packages" / Path(mod["downloadUrl"]).name).read_bytes()
             self.assertEqual(len(blob), mod["size"])

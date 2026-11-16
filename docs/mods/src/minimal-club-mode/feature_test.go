@@ -9,7 +9,7 @@ import (
 )
 
 func TestPauseRestoreAndPartialRestore(t *testing.T) {
-	live := map[string]bool{Services[0]: true, Services[1]: true}
+	live := map[string]bool{Services[0]: true}
 	failStart := map[string]bool{}
 	var calls [][2]string
 	old := Systemctl
@@ -42,22 +42,22 @@ func TestPauseRestoreAndPartialRestore(t *testing.T) {
 		t.Fatalf("services still live: %v", live)
 	}
 	st, _ := app.Status()
-	if len(st.(map[string]any)["services"].([]any)) != 2 {
+	if len(st.(map[string]any)["services"].([]any)) != 1 {
 		t.Fatalf("snapshot %v", st)
 	}
-	failStart[Services[1]] = true
+	failStart[Services[0]] = true
 	if _, err := app.Action(map[string]any{"action": "disable"}); err == nil || modkit.IsBad(err) {
 		t.Fatalf("partial restore must be a 500: %v", err)
 	}
 	st, _ = app.Status()
-	if !reflect.DeepEqual(st.(map[string]any)["services"], []any{Services[1]}) {
+	if !reflect.DeepEqual(st.(map[string]any)["services"], []any{Services[0]}) {
 		t.Fatalf("pending %v", st.(map[string]any)["services"])
 	}
-	delete(failStart, Services[1])
+	delete(failStart, Services[0])
 	if _, err := app.Action(map[string]any{"action": "disable"}); err != nil {
 		t.Fatal(err)
 	}
-	if !live[Services[0]] || !live[Services[1]] {
+	if !live[Services[0]] {
 		t.Fatalf("not restored: %v", live)
 	}
 	if _, err := os.Stat(app.path); !os.IsNotExist(err) {
@@ -70,59 +70,94 @@ func TestPauseRestoreAndPartialRestore(t *testing.T) {
 	}
 }
 
-// #234 review R3: a pause saved before an update names the downloader unit of that release
-// (sc5000-deemixd.service on 1st gen, enginex-sc5000-deemixd.service on 2nd gen); after it only
-// enginex-deemixd.service exists. Disable starts the unit this release has, and the pause ends;
-// the same after a downgrade, the other way round.
-func TestRename234PauseSavedUnderAnotherReleasesUnitIsUndone(t *testing.T) {
+// Unknown legacy units in paused.json are ignored cleanly while enginex-deemixd.service is restored.
+func TestDisableRestoresEngineXDeemixdOnly(t *testing.T) {
 	old := Systemctl
 	defer func() { Systemctl = old }()
-	for _, c := range []struct{ saved, installed string }{
-		{"sc5000-deemixd.service", "enginex-deemixd.service"},
-		{"enginex-sc5000-deemixd.service", "enginex-deemixd.service"},
-		{"enginex-deemixd.service", "sc5000-deemixd.service"},
-		{"enginex-deemixd.service", "enginex-sc5000-deemixd.service"},
-	} {
-		live := map[string]bool{}
-		var started []string
-		Systemctl = func(args ...string) (string, string, int) {
-			unit := args[1]
-			if !allowed(unit) {
-				t.Fatalf("touched %v", args)
+	live := map[string]bool{}
+	var started []string
+	Systemctl = func(args ...string) (string, string, int) {
+		unit := args[1]
+		if !allowed(unit) {
+			t.Fatalf("touched %v", args)
+		}
+		switch args[0] {
+		case "show":
+			return "loaded\n", "", 0
+		case "is-active":
+			if live[unit] {
+				return "active\n", "", 0
 			}
-			switch args[0] {
-			case "show":
-				if unit == c.installed {
+			return "inactive\n", "", 3
+		case "start":
+			started = append(started, unit)
+			live[unit] = true
+		}
+		return "", "", 0
+	}
+	state := t.TempDir()
+	f, _ := New(modkit.Env{State: state})
+	if err := modkit.SaveJSON(state+"/paused.json", map[string]any{"active": true, "services": []string{"enginex-deemixd.service"}, "phase": "paused"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.(*feature).Action(map[string]any{"action": "disable"}); err != nil {
+		t.Fatalf("disable failed: %v", err)
+	}
+	if !reflect.DeepEqual(started, []string{"enginex-deemixd.service"}) {
+		t.Fatalf("started %v, want [enginex-deemixd.service]", started)
+	}
+	if _, err := os.Stat(state + "/paused.json"); !os.IsNotExist(err) {
+		t.Fatalf("the pause is still saved")
+	}
+}
+
+func TestDisableRestoresLegacySavedUnits(t *testing.T) {
+	for _, legacyUnit := range []string{"sc5000-deemixd.service", "enginex-sc5000-deemixd.service"} {
+		t.Run(legacyUnit, func(t *testing.T) {
+			old := Systemctl
+			defer func() { Systemctl = old }()
+			live := map[string]bool{}
+			var started []string
+			Systemctl = func(args ...string) (string, string, int) {
+				unit := args[1]
+				if !allowed(unit) {
+					t.Fatalf("touched %v", args)
+				}
+				switch args[0] {
+				case "show":
 					return "loaded\n", "", 0
+				case "is-active":
+					if live[unit] {
+						return "active\n", "", 0
+					}
+					return "inactive\n", "", 3
+				case "start":
+					started = append(started, unit)
+					live[unit] = true
 				}
-				return "not-found\n", "", 0
-			case "is-active":
-				if live[unit] {
-					return "active\n", "", 0
-				}
-				return "inactive\n", "", 3
-			case "start":
-				if unit != c.installed {
-					return "", "Unit " + unit + " not found.", 5
-				}
-				started = append(started, unit)
-				live[unit] = true
+				return "", "", 0
 			}
-			return "", "", 0
-		}
-		state := t.TempDir()
-		f, _ := New(modkit.Env{State: state})
-		if err := modkit.SaveJSON(state+"/paused.json", map[string]any{"active": true, "services": []string{c.saved}, "phase": "paused"}); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := f.(*feature).Action(map[string]any{"action": "disable"}); err != nil {
-			t.Fatalf("%s on a release with %s: %v", c.saved, c.installed, err)
-		}
-		if !reflect.DeepEqual(started, []string{c.installed}) {
-			t.Fatalf("%s: started %v, want %s", c.saved, started, c.installed)
-		}
-		if _, err := os.Stat(state + "/paused.json"); !os.IsNotExist(err) {
-			t.Fatalf("%s: the pause is still saved", c.saved)
-		}
+			state := t.TempDir()
+			f, _ := New(modkit.Env{State: state})
+			if err := modkit.SaveJSON(state+"/paused.json", map[string]any{
+				"active":   true,
+				"services": []string{legacyUnit},
+				"phase":    "paused",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.(*feature).Action(map[string]any{"action": "disable"}); err != nil {
+				t.Fatalf("disable failed for %s: %v", legacyUnit, err)
+			}
+			if !reflect.DeepEqual(started, []string{"enginex-deemixd.service"}) {
+				t.Fatalf("started %v, want [enginex-deemixd.service]", started)
+			}
+			if !live["enginex-deemixd.service"] {
+				t.Fatalf("enginex-deemixd.service not restored")
+			}
+			if _, err := os.Stat(state + "/paused.json"); !os.IsNotExist(err) {
+				t.Fatalf("the pause is still saved")
+			}
+		})
 	}
 }

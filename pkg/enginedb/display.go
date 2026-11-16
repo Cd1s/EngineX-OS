@@ -153,6 +153,35 @@ func ParseDisplayPerformance(track, overview, beats, cues, loops []byte) (Displa
 	return out, nil
 }
 
+// ParseDisplayCuesAndLoops extracts only cues and loops from PerformanceData blobs.
+func ParseDisplayCuesAndLoops(track, cues, loops []byte) ([]DisplayCue, []DisplayLoop, error) {
+	raw, err := QUncompress(track, 4096)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(raw) != 44 && len(raw) != 68 {
+		return nil, nil, fmt.Errorf("display: unknown trackData length")
+	}
+	rate := displayFloat(raw, big)
+	samples := big.Uint64(raw[8:])
+	if !displayFinite(rate) || rate < 8000 || rate > 384000 || samples == 0 || samples > uint64(rate*86400) {
+		return nil, nil, fmt.Errorf("display: invalid trackData")
+	}
+	var outCues []DisplayCue
+	var outLoops []DisplayLoop
+	if len(cues) != 0 {
+		if outCues, err = parseDisplayCues(cues, rate, float64(samples)); err != nil {
+			return nil, nil, err
+		}
+	}
+	if len(loops) != 0 {
+		if outLoops, err = parseDisplayLoops(loops, rate, float64(samples)); err != nil {
+			return nil, nil, err
+		}
+	}
+	return outCues, outLoops, nil
+}
+
 func parseDisplayBeats(blob []byte, rate, samples float64) ([]DisplayBeat, error) {
 	raw, err := QUncompress(blob, 8<<20)
 	if err != nil {

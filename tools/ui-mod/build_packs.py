@@ -171,7 +171,7 @@ FX_CONTROLLER = r'''
     readonly property var scFxStock: djFxView ? Array.from(djFxView.effectsNames) : []
     readonly property bool scFxEnabled: !!root.scFxSelectorAvailable && scFxStock.indexOf("Flanger") >= 0
     readonly property var scFxNames: scFxEnabled ? scFxStock.concat([
-        "Spiral (PX)", "Pitch Echo (PX)", "Slip Roll (PX)", "Dub Echo (PX)", "Space (PX)"]) : scFxStock
+        "Spiral (PX)", "Pitch Echo (PX)", "Slip Roll (PX)", "Dub Echo (PX)", "Space (PX)", "Jet Flanger (PX)"]) : scFxStock
     readonly property var scFxTimeParameter: djFxView && djFxView.variantParameters.length ? djFxView.variantParameters[0] : null
     Connections {
         target: scCtrl.scFxTimeParameter
@@ -526,12 +526,15 @@ TIDAL_PAIRING_530 = """			// logoutOfProvider finishes asynchronously. Wait befo
 """
 
 STREAMING_INTERNAL_SAVE = """
-    property bool scInternalAttempted: false
     property bool scInternalPending: false
     property bool scInternalReady: false
     property bool scInternalSelected: false
     property bool scInternalExpired: false
     property string scOriginalSource: ""
+    property real scInternalEnded: 0 // when the last attempt ended
+    property bool scSourceDrive: false // Engine's last hasSourceDriveChanged
+    // The last source the browser showed other than the internal drive.
+    property string scLastSource: ""
     readonly property var scSelectingDevice: Planck.getProperty("/Client/Librarian/DevicesController/IsSelectingDevice").translator
     function scCurrentSource() {
         const model = Planck.librarianController.browserSourceControllerPtr().model()
@@ -542,50 +545,72 @@ STREAMING_INTERNAL_SAVE = """
         }
         return ""
     }
-    function scRestoreSource() {
-        if (!scOriginalSource || scCurrentSource() !== "/data/enginex/stream-save") return
+    // The internal drive is Engine's save drive only: it holds nothing to browse and
+    // is hidden from the Sources list. The browser goes back to the source it showed
+    // before; with none left (start-up, that drive removed) the Sources list opens,
+    // as when nothing is selected, and the user picks one.
+    function scRestoreSource(back) {
+        if (scCurrentSource() !== "/data/enginex/stream-save") return
         const sources = Planck.librarianController.browserSourceControllerPtr()
         const model = sources.model()
-        for (let row = 0; row < model.rowCount(); row++) {
+        for (let row = 0; back && row < model.rowCount(); row++) {
             const index = model.index(row, 0)
-            if (model.data(index, 257) === scOriginalSource) {
+            if (model.data(index, 257) === back) {
                 sources.forceSelect(index)
                 return
             }
         }
+        if (!PlanckGUI.views.sourceScreenView.visible) PlanckGUI.views.sourceScreenView.onQuickSourceButtonClicked()
+    }
+    // Engine itself browses the internal drive (it remembered it at start-up, or the
+    // drive being browsed went away): leave it unless our own selection is running.
+    function scLeaveInternal() {
+        if (!scInternalPending) scRestoreSource(scLastSource)
     }
     function scFinishInternal() {
         if (!scInternalPending) return
         if (!(scInternalReady && scInternalSelected) && (!scInternalExpired || scSelectingDevice.state)) return
         scSaveTimeout.stop()
-        scRestoreSource()
+        scRestoreSource(scOriginalSource || scLastSource)
         scInternalPending = false
+        scInternalEnded = Date.now()
     }
     function scInternalFailed() {
         if (!scInternalPending) return
         scInternalExpired = true
-        scRestoreSource()
+        scRestoreSource(scOriginalSource || scLastSource)
         // Expiry cannot cancel a native job. Keep its restore target until
         // completion, while allowing the stock warning to report the failure.
         scInternalPending = scSelectingDevice.state
+        scInternalEnded = Date.now()
         Planck.librarianController.streamingInterfaceController.checkSourceDriveAvailability()
     }
+    // Every request Engine makes gets one attempt (NetEase opened several times in one
+    // Engine run asks again each time the save drive was lost). A request within 3 s
+    // of the last attempt's end is that attempt's own outcome, the warning raised
+    // again after a failure or a drive that did not hold, and shows the stock warning
+    // instead of trying again.
     function scTryInternalSave() {
         if (scInternalPending) return !scInternalExpired
-        if (scInternalAttempted) return false
+        if (Date.now() - scInternalEnded < 3000) return false
         const librarian = Planck.librarianController
         const path = "/data/enginex/stream-save"
         if (!librarian.isDeviceRegistered(path) || !librarian.isStreamingStorageCandidate(path)) return false
-        scInternalAttempted = true
         scInternalPending = true
         scInternalReady = false
         scInternalSelected = false
         scInternalExpired = false
         // Provider selection can emit no-source before its browser change completes.
         Qt.callLater(function() {
-            scOriginalSource = scCurrentSource()
+            const current = scCurrentSource()
+            scOriginalSource = current === path ? "" : current
             scSaveTimeout.start()
-            librarian.browserSourceControllerPtr().select(path)
+            // Engine reports no change for what already holds: the drive browsed now,
+            // or a save drive it has already accepted.
+            scInternalSelected = current === path
+            scInternalReady = scSourceDrive
+            if (scInternalSelected && scInternalReady) scFinishInternal()
+            else librarian.browserSourceControllerPtr().select(path)
         })
         return true
     }
@@ -603,12 +628,14 @@ STREAMING_INTERNAL_SAVE = """
     Connections {
         target: Planck.librarianController.browserSourceControllerPtr()
         function onCurrentChanged(index) {
-            if (!scInternalPending) return
             const id = target.model().data(index, 257)
-            if (id === "/data/enginex/stream-save") {
+            if (id !== "/data/enginex/stream-save") {
+                if (id) scLastSource = id
+                if (scInternalPending) scOriginalSource = id
+            } else if (scInternalPending) {
                 scInternalSelected = true
                 Qt.callLater(scFinishInternal)
-            } else scOriginalSource = id
+            } else Qt.callLater(scLeaveInternal)
         }
     }
 """
@@ -665,7 +692,7 @@ SERVICES_MAIN = """
 	readonly property bool scIsMixstream: typeof Config !== "undefined" && Config && Config.audio && Config.audio.fx && Config.audio.fx.hasNHFx !== undefined ? !!Config.audio.fx.hasNHFx : ["NH08", "NH08S", "NH10"].indexOf(scBoard) >= 0
 	readonly property bool scHasStemsEq: scHasMixer && (typeof Config !== "undefined" && Config && Config.audio ? !!Config.audio.hasStemsLevel : false)
 	readonly property bool scIsAZ04: ["JP24", "RMZ2"].indexOf(scBoard) >= 0
-	readonly property bool scHasJogWheel: !(typeof Config !== "undefined" && Config && Config.device && Config.device.hasMotorizedPlatters) && ["JP08", "JP14", "RMZ2"].indexOf(scBoard) < 0
+	readonly property bool scHasJogWheel: !scIsPlayerBoard && !(typeof Config !== "undefined" && Config && Config.device && Config.device.hasMotorizedPlatters) && ["JP08", "JP14", "RMZ2"].indexOf(scBoard) < 0
 	readonly property var scTransitionFxView: typeof PlanckGUI !== "undefined" && PlanckGUI && PlanckGUI.views ? (PlanckGUI.views.transitionFx || null) : null
 	readonly property bool scHasStockTransitionTile: typeof Config !== "undefined" && Config && Config.audio && Config.audio.fx && Config.device
 		? (!!Config.audio.fx.hasTransitionFx && !Config.device.hasHardwareFaderFxButtons && !!scTransitionFxView)
@@ -1054,9 +1081,17 @@ SERVICES_MAIN = """
 	// rather than through the stock policy's three-view/focus-dependent action.
 	readonly property var scViewCycleRef: Planck.createProperty("EngineXCycleView", false, 3)
 	readonly property var scViewCycleProperty: scViewCycleRef && Planck.getProperty("/GUI/Scripted/EngineXCycleView")
-	Connections {
-		target: root.scViewCycleProperty ? root.scViewCycleProperty.translator : null
-		function onTriggered() { root.scViewSelect(root.scViewActive % 5 + 1) }
+	// The button sets this action's state from the controller's QML engine (the MIDI
+	// thread, its own property object), as stock's GlobalAction sets /GUI/CloseDialogs:
+	// state = true stays latched until stock's notifier, enabled only while the state
+	// is true, counts it and resets it. Presses made before that wait in the module
+	// (scCyclePending) and are latched one by one, so each press is one step. A trigger() from
+	// there is a pulse that is over before this engine reads the state, and its
+	// "triggered" fires only on the calling object: neither reached this engine on
+	// the left SC5000. The keyboard's trigger() runs in this engine and is seen.
+	ActionTranslatorStateChangeNotifier {
+		prop: root.scViewCycleProperty || null
+		onChanged: root.scViewSelect(root.scViewActive % 5 + 1)
 	}
 	function scViewControls() {
 		const c = PlanckGUI.views.performanceViewController
@@ -2997,8 +3032,8 @@ SERVICES_MAIN = """
 			scReverseJogSynced = false
 			return
 		}
-		pL.translator.state = scReverseJogLeft
-		pR.translator.state = scReverseJogRight
+		pL.translator.state = scHasJogWheel && scReverseJogLeft
+		pR.translator.state = scHasJogWheel && scReverseJogRight
 		if (ready && pReady && pReady.translator) {
 			pReady.translator.state = true
 			scReverseJogSynced = true
@@ -4136,26 +4171,232 @@ SERVICES_MAIN = """
 	// Engine renders Stems only for library tracks and silently skips streamed rows.
 	// A streamed row dropped on the Stems list is imported by Engine itself from the
 	// file stream-sync downloaded, onto a deck that is not playing, then queued.
+	// Progress for a streamed row's Stems. Engine renders them from the imported
+	// local copy and shows that render on the copy's own row only, so the row
+	// that was tapped and the "Stems not ready" row of the service's Stems list
+	// said nothing for minutes. scStemRows marks the gateway ids of those two
+	// rows: "wait" while the file is downloaded and imported, "fail" when it
+	// could not be downloaded, then the track's place (1, 2, ...) in this run of
+	// Engine's render queue. The track list draws Engine's own queued icon,
+	// spinner, progress bar and percentage on them from Engine's own queue
+	// counters. Nothing is polled.
+	//
+	// Engine's queue runs in order: totalRenderStemsQueueCount is how many
+	// tracks this run has taken, renderStemsQueueCount how many are left, the
+	// one being rendered included (left deck: 1/1 while one track rendered, 0/0
+	// after). Places up to scStemDone are over (rendered or failed) and show
+	// nothing, the next one is rendered, later ones wait. The two counters are
+	// read together once Engine is done (scStemSettle, Qt.callLater). A reading
+	// in which the run's size did not change counts finished tracks at once; one
+	// in which it changed counts them once it has held for a moment
+	// (scStemSteady), so one counter published before the other never ends a
+	// row, and a track that ended while another was added is still counted.
+	//
+	// Engine names each track it queues (enqueueTrackRenderJob: "<library>/<track
+	// id> <library uuid>"), after both counters have grown. Only that makes a
+	// streamed track placed: the queue can also grow for a local track queued in
+	// the same moment. Its place is the run's size then. A refusal names no track,
+	// so one streamed track at a time is handed over (scStemClaim) and the others
+	// wait in scStemNext until Engine has answered it. Engine answers every
+	// startRenderTracks, also a refusal (sandbox: an unknown id, counters
+	// unchanged). An answer that left both counters as they were: refused, no
+	// place. Any other answer (another track queued or ended) is not this one's:
+	// its counters become the new reference. A track later named as queued gets
+	// its place even so (scStemAsked).
+	property var scStemRows: ({})
+	property var scStemAsked: ({}) // handed over, not named as queued yet: track id -> rows
+	property var scStemClaim: null // handed over, not answered yet: {id, total, left, heard}
+	property var scStemNext: [] // waiting to be handed over: {id, rows}
+	property int scStemHeard: 0 // Engine's queue answers so far
+	property int scStemDone: 0 // tracks of this run that are over
+	property int scStemSize: 0 // the run's size at the last reading
+	readonly property var scStemQueue: Planck.librarianController.stemsQueueManager || null
+	readonly property int scStemTotal: scStemQueue ? scStemQueue.totalRenderStemsQueueCount : 0
+	readonly property int scStemCount: scStemQueue ? scStemQueue.renderStemsQueueCount : 0
+	readonly property bool scStemRendering: scStemTotal > 0
+	readonly property real scStemProgress: scStemRendering ? (scStemQueue.renderProgress || 0) : 0
+	// Engine's progress is one number for its whole queue (left deck, two tracks:
+	// the first ended at 50 %). The track being rendered has done the rest.
+	readonly property real scStemOwn: scStemRendering ? Math.max(0, Math.min(1, scStemProgress * scStemTotal - scStemDone)) : 0
+	// A streamed row's Stems are in Engine's queue: rendered now, or waiting in it.
+	readonly property bool scStemStreamed: Object.keys(scStemRows).some(id => scStemRows[id] >= 1 && scStemPlace(scStemRows[id], scStemTotal, scStemDone) !== "")
+	property var scStemSeen: null // when and where the rendering track's progress was first seen
+	property string scStemLeft: ""
+	function scStemMark(ids, mark) {
+		const rows = Object.assign({}, scStemRows)
+		for (const id of ids) {
+			if (!id) continue
+			if (mark) rows[id] = mark
+			else delete rows[id]
+		}
+		scStemRows = rows
+	}
+	// A streamed track's Stems for Engine's queue, `rows` its marked rows.
+	function scStemHand(id, rows) {
+		scStemNext = scStemNext.concat([{id: String(id), rows: rows}])
+		scStemSend()
+	}
+	function scStemSend() {
+		if (scStemClaim || !scStemNext.length || !scStemQueue) return
+		const next = scStemNext[0]
+		scStemNext = scStemNext.slice(1)
+		// Read before Engine can change them: it may answer inside the call.
+		const total = scStemQueue.totalRenderStemsQueueCount || 0, left = scStemQueue.renderStemsQueueCount || 0
+		scStemAsked[next.id] = next.rows
+		scStemClaim = {id: next.id, total: total, left: left, heard: scStemHeard}
+		scStemQueue.startRenderTracks(next.id)
+		scStemRefused.restart()
+		Qt.callLater(scStemSettle)
+	}
+	Connections {
+		target: root.scStemQueue
+		function onRenderStemsQueueChanged() {
+			root.scStemHeard++
+			Qt.callLater(root.scStemSettle)
+		}
+		function onEnqueueTrackRenderJob(track) { root.scStemQueued(String(track)) }
+	}
+	// Our tracks are imported into the internal library (scStemImport).
+	function scStemQueued(track) {
+		const lib = "/data/AppDataUser/AIR Music Technology/Engine/Engine Library/"
+		const id = track.indexOf(lib) === 0 ? (/^\\d+/.exec(track.slice(lib.length)) || [""])[0] : ""
+		if (!(id in scStemAsked)) return
+		scStemMark(scStemAsked[id], scStemQueue.totalRenderStemsQueueCount || 1)
+		delete scStemAsked[id]
+		if (scStemClaim && scStemClaim.id === id) {
+			scStemClaim = null
+			Qt.callLater(scStemSend)
+		}
+	}
+	// Reads Engine's two counters together, after Engine has updated both.
+	function scStemSettle() {
+		const total = scStemTotal, left = scStemCount
+		if (!(total > 0)) {
+			// The queue is empty: every place of the run is over (rendered, cleared or
+			// failed). A track not placed yet counts from an empty queue.
+			scStemMark(Object.keys(scStemRows).filter(id => scStemRows[id] >= 1), "")
+			scStemDone = 0
+			scStemSize = 0
+		} else {
+			if (total === scStemSize) scStemFinished(total, left)
+			else if (total - left > scStemDone) scStemSteady.restart()
+			scStemSize = total
+		}
+		const c = scStemClaim
+		if (!c || scStemHeard === c.heard) return // not answered yet
+		if (total !== c.total || left !== c.left) {
+			// Another track's answer: wait for this one's against the new counters.
+			scStemClaim = {id: c.id, total: total, left: left, heard: scStemHeard}
+			return
+		}
+		scStemMark(scStemAsked[c.id] || [], "")
+		scStemClaim = null
+		scStemSend()
+	}
+	// Finished tracks of the run from a reading of both counters.
+	function scStemFinished(total, left) {
+		if (left >= 0 && left <= total && total - left > scStemDone) scStemDone = total - left
+	}
+	// A reading in which the run grew has held: count what ended in it.
+	Timer {
+		id: scStemSteady
+		interval: 1000
+		onTriggered: if (root.scStemTotal === root.scStemSize) root.scStemFinished(root.scStemTotal, root.scStemCount)
+	}
+	onScStemTotalChanged: Qt.callLater(scStemSettle)
+	// What a mark means now: "" (nothing, or its track is over), "wait", "render" or
+	// "fail" (the file could not be downloaded).
+	function scStemPlace(mark, total, done) {
+		if (mark === "wait" || mark === "fail") return mark
+		if (!(mark >= 1) || !(total > 0) || mark <= done) return ""
+		return mark === done + 1 ? "render" : "wait"
+	}
+	// A track list row's state, by Engine's id for the row.
+	function scStemState(uid) {
+		const rows = scStemRows, total = scStemTotal, done = scStemDone
+		if (!uid || !Object.keys(rows).length) return ""
+		const m = /uri=streaming:\\/\\/TIDAL\\/Track\\/(\\d+)/.exec(Planck.librarianController.collectionController.getTrackUrisFromUniversalIds([uid]) || "")
+		return m ? scStemPlace(rows[m[1]], total, done) : ""
+	}
+	// What is left at the speed seen so far; nothing before 10 s and 1 % of it.
+	function scStemEta(done, seconds, left) {
+		if (!(done >= 0.01) || !(seconds >= 10)) return ""
+		const minutes = Math.round(left * seconds / done / 60)
+		return minutes < 1 ? scT("<1 min") : scT("~%1 min").arg(minutes)
+	}
+	// The length cell of such a row: the rendering track's own percentage and time left.
+	function scStemText(state, progress, left) {
+		if (state === "fail") return scT("Download failed")
+		if (state !== "render" || !(progress >= 0)) return scT("Stems") + "…"
+		return Math.round(progress * 100) + "%" + (left ? " · " + left : "")
+	}
+	onScStemOwnChanged: {
+		const p = scStemOwn, now = Date.now()
+		if (!(p > 0)) { scStemSeen = null; scStemLeft = ""; return }
+		if (!scStemSeen || p < scStemSeen.p) { scStemSeen = {t: now, p: p, step: -1}; scStemLeft = "" }
+		else scStemLeft = scStemEta(p - scStemSeen.p, (now - scStemSeen.t) / 1000, 1 - p)
+		const step = Math.floor(p * 4) // one journal line per quarter
+		if (step !== scStemSeen.step) { scStemSeen.step = step; console.warn("EngineX stems progress=" + Math.round(p * 100) + "% left=" + scStemLeft) }
+	}
+	// One journal line per change of the queue: what Engine reported, and the places.
+	onScStemCountChanged: {
+		console.warn("EngineX stems queue=" + scStemCount + "/" + scStemTotal + " progress=" + Math.round(scStemProgress * 100) + "% rows=" + JSON.stringify(scStemRows))
+		Qt.callLater(scStemSettle)
+	}
+	onScStemRenderingChanged: console.warn("EngineX stems step=" + (scStemRendering ? "render" : "idle") + " queue=" + scStemCount + "/" + scStemTotal + " rows=" + Object.keys(scStemRows).length)
+	// The tapped row says the download failed for a while, then shows its length again.
+	Timer {
+		id: scStemFailed
+		interval: 10000
+		onTriggered: root.scStemMark(Object.keys(root.scStemRows).filter(id => root.scStemRows[id] === "fail"), "")
+	}
+	// No answer from Engine at all: the rows stop waiting, the next track goes.
+	Timer {
+		id: scStemRefused
+		interval: 30000
+		onTriggered: {
+			if (root.scStemClaim) root.scStemMark(root.scStemAsked[root.scStemClaim.id] || [], "")
+			root.scStemClaim = null
+			root.scStemSend()
+		}
+	}
 	function scStemStream(uid) {
 		const lib = Planck.librarianController.collectionController
 		const m = /uri=streaming:\\/\\/TIDAL\\/Track\\/(\\d+)/.exec(lib.getTrackUrisFromUniversalIds([uid]) || "")
 		if (!m) return false
 		const deck = root.scDeckList().slice().reverse().find(d => !root.scDeckLocked(d) && !Planck.getProperty("/Engine/Deck%1/PlayState".arg(d)).translator.state)
-		if (!deck) return true // all decks playing: never interrupt playback
+		// Every deck is playing: playback is never interrupted for the import, so
+		// nothing is started. The swipe says so where it would have said "Stems".
+		if (!deck) { console.warn("EngineX stems step=busy"); return "busy" }
+		const gid = m[1]
+		root.scStemMark([gid], "wait")
 		const x = new XMLHttpRequest()
-		x.open("GET", "http://127.0.0.1:8080/v1/enginex/stems/source?id=" + m[1])
+		x.open("GET", "http://127.0.0.1:8080/v1/enginex/stems/source?id=" + gid)
 		x.onreadystatechange = function() {
-			if (x.readyState !== 4 || x.status !== 200) return
-			if (Planck.getProperty("/Engine/Deck%1/PlayState".arg(deck)).translator.state) return // started playing while we waited
-			const url = "file://" + encodeURI(JSON.parse(x.responseText).path)
+			if (x.readyState !== 4) return
+			// The service gave no full file (a NetEase track this account only previews,
+			// no match, no network): say so on the row instead of dropping the tap.
+			if (x.status !== 200) {
+				console.warn("EngineX stems step=source-failed status=" + x.status)
+				root.scStemMark([gid], "fail")
+				scStemFailed.restart()
+				return
+			}
+			if (Planck.getProperty("/Engine/Deck%1/PlayState".arg(deck)).translator.state) { root.scStemMark([gid], ""); return } // started playing while we waited
+			const reply = JSON.parse(x.responseText)
+			const url = "file://" + encodeURI(reply.path)
 			// Engine imports a file only through a deck load, so load it on an empty deck
 			// and eject it again once the Stems render is queued (scStemUnload).
 			const song = Planck.getProperty("/Engine/Deck%1/Track/SongLoaded".arg(deck))
 			scStemUnload.deck = deck
 			scStemUnload.armed = !(song && song.translator && song.translator.state)
 			Planck.getProperty("/Client/Librarian/AddToDatabaseAndLoadToDeck%1".arg(deck)).translator.url = url
+			// One import at a time: an earlier one this replaces is not rendered.
+			if (scStemImport.running && scStemImport.rows.indexOf(gid) < 0) root.scStemMark(scStemImport.rows, "")
+			scStemImport.rows = [gid, reply.row ? String(reply.row) : ""]
+			root.scStemMark(scStemImport.rows, "wait")
 			scStemImport.url = url
-			scStemImport.path = JSON.parse(x.responseText).path
+			scStemImport.path = reply.path
 			scStemImport.tries = 20
 			scStemImport.restart()
 		}
@@ -4171,10 +4412,11 @@ SERVICES_MAIN = """
 		property string path: ""
 		property int tries: 0
 		property var trackIds: null
+		property var rows: [] // the gateway ids of the rows this import is for (root.scStemRows)
 		interval: 500; repeat: true
 		function render(id) {
 			if (!running) return // a slower reply after the render already started
-			Planck.librarianController.stemsQueueManager.startRenderTracks(String(id))
+			root.scStemHand(id, rows)
 			if (scStemUnload.armed) {
 				scStemUnload.name = path.slice(path.lastIndexOf("/") + 1)
 				scStemUnload.tries = 20
@@ -4183,7 +4425,7 @@ SERVICES_MAIN = """
 			stop()
 		}
 		onTriggered: {
-			if (tries-- <= 0) { stop(); return }
+			if (tries-- <= 0) { root.scStemMark(rows, ""); stop(); return } // Engine did not import the file
 			const x = new XMLHttpRequest()
 			x.open("GET", "http://127.0.0.1:8080/v1/enginex/stems/track-id?path=" + encodeURIComponent(path))
 			x.onreadystatechange = function() {
@@ -4424,6 +4666,14 @@ SOURCE_FOOTER = """
 	function scHiddenSourceName(name, typeText) {
 		return typeText === "Streaming" && ["TIDAL", "Tidal", "SoundCloud", "Beatport", "Beatport LINK", "Apple Music"].indexOf(String(name || "")) >= 0
 	}
+	// EngineX's internal save drive (engine-ui-guard registers it with -extraDriveDir):
+	// Engine keeps streamed tracks' cues, loops and grids there and has nothing on it
+	// to browse, so it is never listed. Known by its path, a user's drive can have any
+	// name; Engine Link offers the other deck's as net://<that deck>/stream-save.
+	function scHiddenSource(id, name, typeText) {
+		const path = String(id || "")
+		return path === "/data/enginex/stream-save" || (path.startsWith("net://") && path.endsWith("/stream-save")) || scHiddenSourceName(name, typeText)
+	}
 	function scFindAvailableSource() {
 		let p = connectedSource.parent
 		while (p && p.objectName !== "SourceScreenContentColumn" && p.parent) p = p.parent
@@ -4452,7 +4702,7 @@ SOURCE_FOOTER = """
 		const cm = sources.connectedSourceModel()
 		for (let i = 0; cm && i < cm.rowCount(); i++) {
 			const nm = cm.data(cm.index(i, 0), root.scSourceNameRole)
-			if (!scHiddenSourceName(nm, root.scSourceTypeText(cm, i))) list.push({ kind: "conn", row: i, id: "" })
+			if (!scHiddenSource(nm, nm, root.scSourceTypeText(cm, i))) list.push({ kind: "conn", row: i, id: "" })
 		}
 		const svcs = root.scServices.filter(s => root.scSources.indexOf(s.id) >= 0)
 		for (let i = 0; i < svcs.length; i++) {
@@ -4462,7 +4712,7 @@ SOURCE_FOOTER = """
 			const am = sources.availableSourceModel()
 			for (let i = 0; am && i < am.rowCount(); i++) {
 				const nm = am.data(am.index(i, 0), root.scSourceNameRole)
-				if (!scHiddenSourceName(nm, root.scSourceTypeText(am, i))) list.push({ kind: "avail", row: i, id: "" })
+				if (!scHiddenSource(nm, nm, root.scSourceTypeText(am, i))) list.push({ kind: "avail", row: i, id: "" })
 			}
 		}
 		return list
@@ -4875,6 +5125,16 @@ DEVICE_REMOTE_ACCESS_ENTRIES = """
 \t\t\tfont.pixelSize: 16
 \t\t\ttext: root.scRemoteAccessLine()
 \t\t\ttextFormat: Text.PlainText
+\t\t},
+\t\tText {
+\t\t\tobjectName: "EngineX_RemoteAccessHint"
+\t\t\tLayout.fillWidth: true
+\t\t\tLayout.preferredHeight: implicitHeight
+\t\t\tleftPadding: 24; rightPadding: 24
+\t\t\twrapMode: Text.WordWrap
+\t\t\tcolor: "#9a9a9a"
+\t\t\tfont.pixelSize: 16
+\t\t\ttext: "Scan the QR code at the bottom of About / Update to open the console"
 \t\t},
 """
 
@@ -6764,7 +7024,7 @@ def edits(dev: bool):
             *([("        PlatterCalibration {},\n", "        PlatterCalibration {},\n" + JOG_INVERT_ENTRIES)] if v53() else []),
         ],
         prefs + ("" if v53() else "TabContents/") + "AboutTabContent.qml": [
-            ("        Update { },\n", "        Update { },\n" + ABOUT_CONSOLE_QR),
+            ("        FactoryReset {}\n", "        FactoryReset {},\n" + ABOUT_CONSOLE_QR.rstrip().rstrip(",") + "\n"),
         ],
         **{prefs + ("" if v53() else "TabContents/") + f"{name}TabContent.qml": [
             (f'import "{"" if v53() else "../"}Entries"\n', f'import QtQuick.Layouts 1.12\nimport "{"" if v53() else "../"}Entries"\nimport "{"" if v53() else "../"}Entries/Base" as EntryBase\nimport Planck 1.0\n'),
@@ -6808,7 +7068,7 @@ def edits(dev: bool):
         ],
         v + "BrowserSource/ConnectedSource.qml": [
             ("	currentIndex: -1\n", "	currentIndex: -1\n" + SOURCE_FOOTER),
-            ("		height: 108\n		leftPadding", '		height: connectedSource.scHiddenSourceName(model.name, model.typeText) ? 0 : 108\n		visible: !connectedSource.scHiddenSourceName(model.name, model.typeText)\n		Component.onCompleted: if (model.typeText === "Streaming" && (model.name === "TIDAL" || model.name === "Tidal")) connectedSource.scTidalRow = this\n		Component.onDestruction: if (connectedSource.scTidalRow === this) connectedSource.scTidalRow = null\n		leftPadding'),
+            ("		height: 108\n		leftPadding", '		height: connectedSource.scHiddenSource(connectedSource.model.data(modelIndex, root.scSourceNameRole), model.name, model.typeText) ? 0 : 108\n		visible: !connectedSource.scHiddenSource(connectedSource.model.data(modelIndex, root.scSourceNameRole), model.name, model.typeText)\n		Component.onCompleted: if (model.typeText === "Streaming" && (model.name === "TIDAL" || model.name === "Tidal")) connectedSource.scTidalRow = this\n		Component.onDestruction: if (connectedSource.scTidalRow === this) connectedSource.scTidalRow = null\n		leftPadding'),
             # Hidden stock streaming rows (e.g. "Tidal" at index 0, height 0) leave a
             # zero-height first section above "Demo" / "Cloud" sources; ListView then
             # oscillates currentSection <-> section.delegate.height inside updatePolish()
@@ -7141,8 +7401,15 @@ def edits(dev: bool):
     if v53():
         out[v + "Streaming/StreamingNoSourceAvailableDialog.qml"] = [
             ("Item {\n", "Item {\n" + STREAMING_INTERNAL_SAVE),
+            # Engine may already browse the internal drive when this item is created.
+            ("    Component.onCompleted: Planck.librarianController.streamingInterfaceController.checkSourceDriveAvailability()\n",
+             "    Component.onCompleted: {\n"
+             "        Planck.librarianController.streamingInterfaceController.checkSourceDriveAvailability()\n"
+             "        Qt.callLater(scLeaveInternal)\n"
+             "    }\n"),
             ("        function onShowNoSourceAvailableDialog() {\n",
              "        function onHasSourceDriveChanged(available) {\n"
+             "            scSourceDrive = available\n"
              "            if (!scInternalPending) return\n"
              "            scInternalReady = available\n"
              "            Qt.callLater(scFinishInternal)\n"
@@ -7213,15 +7480,57 @@ def edits(dev: bool):
             "    }\n",
         )]
         # #99: five views kept by stream-sync (scView* in EmbeddedMain) and Save View.
+        # The GUI takes one latched press at a time (scViewCycleProperty); presses
+        # made before it ran wait in the module, so each press is one step.
+        cycle_queue = (
+            "\n"
+            "    // EngineX (#99): Shift+View presses for the GUI's five-view cycle. The GUI\n"
+            "    // takes one latched press at a time and resets the state; presses made\n"
+            "    // before that wait here, so every press is one step however late it runs.\n"
+            "    // A press the GUI has not taken within 1.5 s is withdrawn with the ones\n"
+            "    // waiting, so no step comes long after the press.\n"
+            "    property int scCyclePending: 0\n"
+            "    property bool scCycleLatched: false\n"
+            "    property real scCycleSince: 0\n"
+            "    Timer {\n"
+            "        interval: 20\n"
+            "        repeat: true\n"
+            "        triggeredOnStart: true\n"
+            "        running: module.scCyclePending > 0 || module.scCycleLatched\n"
+            "        onTriggered: {\n"
+            '            const p = Planck.getProperty("/GUI/Scripted/EngineXCycleView")\n'
+            "            if (!p || !p.translator) {\n"
+            "                module.scCyclePending = 0\n"
+            "                module.scCycleLatched = false\n"
+            "            } else if (p.translator.state) {\n"
+            "                if (Date.now() - module.scCycleSince < 1500) return\n"
+            "                p.translator.state = false\n"
+            "                module.scCyclePending = 0\n"
+            "                module.scCycleLatched = false\n"
+            "            } else if (module.scCyclePending > 0) {\n"
+            "                module.scCyclePending--\n"
+            "                module.scCycleSince = Date.now()\n"
+            "                module.scCycleLatched = true\n"
+            "                p.translator.state = true\n"
+            "            } else {\n"
+            "                module.scCycleLatched = false\n"
+            "            }\n"
+            "        }\n"
+            "    }\n"
+        )
         out["ControlSurfaceModules/ControlSurfaceModules/View.qml"] = [
+            ("    property int ledType: LedType.None\n", "    property int ledType: LedType.None\n" + cycle_queue),
             ('doubleEnabled: true', 'doubleEnabled: !globalConfig.shift'),
-            ('"/Engine/ShiftViewBehaviour/Shift/SinglePress"', '"/GUI/Scripted/EngineXCycleView"'),
+            ('Planck.getProperty("/Engine/ShiftViewBehaviour/Shift/SinglePress").translator.trigger()',
+             'module.scCyclePending++'),
         ]
         # SYSTEM ONE assigns Shift+Menu to Navigation's CycleView action.
-        out["ControlSurfaceModules/ControlSurfaceModules/Navigation.qml"] = [(
-            'Planck.getProperty(module.basePath + navigationButton.secondaryPath).translator.trigger()',
-            'Planck.getProperty(navigationButton.secondaryPath === "CycleViewPress" ? "/GUI/Scripted/EngineXCycleView" : module.basePath + navigationButton.secondaryPath).translator.trigger()',
-        )]
+        out["ControlSurfaceModules/ControlSurfaceModules/Navigation.qml"] = [
+            ("    property bool ledAlwaysLit: false\n", "    property bool ledAlwaysLit: false\n" + cycle_queue),
+            ('Planck.getProperty(module.basePath + navigationButton.secondaryPath).translator.trigger()',
+             'if (navigationButton.secondaryPath === "CycleViewPress") module.scCyclePending++\n'
+             '                            else Planck.getProperty(module.basePath + navigationButton.secondaryPath).translator.trigger()'),
+        ]
         out[ROOT + "EmbeddedMain.qml"].append((
             'onTriggered: Planck.getProperty("/Engine/ShiftViewBehaviour/Shift/SinglePress").translator.trigger()',
             'onTriggered: root.scViewCycleProperty.translator.trigger()',
@@ -7275,7 +7584,9 @@ def edits(dev: bool):
                 (f"        {a}[actionIndex].trigger(row.index)\n",
                  "        if (actionIndex >= leftActions.length || /stem/i.test(String(leftActions[actionIndex].display && leftActions[actionIndex].display.label || \"\"))) {\n"
                  "            // streamed rows go through the gateway; local USB/SD tracks are rendered by Engine itself (also via the stock Stem entry)\n"
-                 "            if (!root.scStemStream(row.modelData.trackId)) Planck.librarianController.stemsQueueManager.startRenderTracks(String(row.modelData.trackId))\n"
+                 "            const scStemmed = root.scStemStream(row.modelData.trackId)\n"
+                 "            if (!scStemmed) Planck.librarianController.stemsQueueManager.startRenderTracks(String(row.modelData.trackId))\n"
+                 "            else if (scStemmed === \"busy\") textCommitValid = root.scT(\"Both decks are playing. Free one deck, then tap Stems again\")\n"
                  f"        }} else if (scDeck > 0 && /\\d/.test({a}[actionIndex].display.label)) {{\n"
                  "            trackList.pCurrentIndex.translator.unnormalized = row.index\n"
                  "            Planck.getProperty(\"/Client/Librarian/LoadToDeck%1\".arg(scDeck)).translator.state = true\n"
@@ -7648,25 +7959,29 @@ def edits(dev: bool):
             '    property var pReverseJogReady: Planck.getProperty("/GUI/Scripted/EngineXJogInvertReady")\n'
             '    property var pPerfLibVisible: Planck.getProperty("/GUI/Scripted/EngineXPerfLibVisible")\n'
             '    readonly property bool scPerformanceLibraryVisible: !!(pPerfLibVisible && pPerfLibVisible.translator && pPerfLibVisible.translator.state)\n'
-            '    readonly property bool scReverseJogLeftEffective: (pReverseJogReady && pReverseJogReady.translator && pReverseJogReady.translator.state && pReverseJogLeft && pReverseJogLeft.translator) ? !!pReverseJogLeft.translator.state : scReverseJogLeft\n'
-            '    readonly property bool scReverseJogRightEffective: (pReverseJogReady && pReverseJogReady.translator && pReverseJogReady.translator.state && pReverseJogRight && pReverseJogRight.translator) ? !!pReverseJogRight.translator.state : scReverseJogRight\n'
+            '    property bool scReverseJogLeftEffective: false\n'
+            '    property bool scReverseJogRightEffective: false\n'
             '    function scIsReverseJog(deckName) {\n'
             '        return deckName === "Right" ? scReverseJogRightEffective : scReverseJogLeftEffective\n'
             '    }\n'
+            '    function scSyncReverseJogFromState() {\n'
+            '        if (!scGlobalConfig.pReverseJogLeft || !scGlobalConfig.pReverseJogLeft.translator)\n'
+            '            scGlobalConfig.pReverseJogLeft = Planck.getProperty("/GUI/Scripted/EngineXJogInvertLeft")\n'
+            '        if (!scGlobalConfig.pReverseJogRight || !scGlobalConfig.pReverseJogRight.translator)\n'
+            '            scGlobalConfig.pReverseJogRight = Planck.getProperty("/GUI/Scripted/EngineXJogInvertRight")\n'
+            '        if (!scGlobalConfig.pReverseJogReady || !scGlobalConfig.pReverseJogReady.translator)\n'
+            '            scGlobalConfig.pReverseJogReady = Planck.getProperty("/GUI/Scripted/EngineXJogInvertReady")\n'
+            '        if (!scGlobalConfig.pPerfLibVisible || !scGlobalConfig.pPerfLibVisible.translator)\n'
+            '            scGlobalConfig.pPerfLibVisible = Planck.getProperty("/GUI/Scripted/EngineXPerfLibVisible")\n'
+            '        const ready = !!(scGlobalConfig.pReverseJogReady && scGlobalConfig.pReverseJogReady.translator && scGlobalConfig.pReverseJogReady.translator.state)\n'
+            '        const nextL = (ready && scGlobalConfig.pReverseJogLeft && scGlobalConfig.pReverseJogLeft.translator) ? !!scGlobalConfig.pReverseJogLeft.translator.state : scGlobalConfig.scReverseJogLeft\n'
+            '        const nextR = (ready && scGlobalConfig.pReverseJogRight && scGlobalConfig.pReverseJogRight.translator) ? !!scGlobalConfig.pReverseJogRight.translator.state : scGlobalConfig.scReverseJogRight\n'
+            '        if (scGlobalConfig.scReverseJogLeftEffective !== nextL) scGlobalConfig.scReverseJogLeftEffective = nextL\n'
+            '        if (scGlobalConfig.scReverseJogRightEffective !== nextR) scGlobalConfig.scReverseJogRightEffective = nextR\n'
+            '    }\n'
             '    Timer {\n'
-            '        interval: 500\n'
-            '        running: !scGlobalConfig.pReverseJogReady || !scGlobalConfig.pReverseJogReady.translator || !scGlobalConfig.pReverseJogLeft || !scGlobalConfig.pReverseJogLeft.translator || !scGlobalConfig.pReverseJogRight || !scGlobalConfig.pReverseJogRight.translator || !scGlobalConfig.pPerfLibVisible || !scGlobalConfig.pPerfLibVisible.translator\n'
-            '        repeat: true\n'
-            '        onTriggered: {\n'
-            '            if (!scGlobalConfig.pReverseJogLeft || !scGlobalConfig.pReverseJogLeft.translator)\n'
-            '                scGlobalConfig.pReverseJogLeft = Planck.getProperty("/GUI/Scripted/EngineXJogInvertLeft")\n'
-            '            if (!scGlobalConfig.pReverseJogRight || !scGlobalConfig.pReverseJogRight.translator)\n'
-            '                scGlobalConfig.pReverseJogRight = Planck.getProperty("/GUI/Scripted/EngineXJogInvertRight")\n'
-            '            if (!scGlobalConfig.pReverseJogReady || !scGlobalConfig.pReverseJogReady.translator)\n'
-            '                scGlobalConfig.pReverseJogReady = Planck.getProperty("/GUI/Scripted/EngineXJogInvertReady")\n'
-            '            if (!scGlobalConfig.pPerfLibVisible || !scGlobalConfig.pPerfLibVisible.translator)\n'
-            '                scGlobalConfig.pPerfLibVisible = Planck.getProperty("/GUI/Scripted/EngineXPerfLibVisible")\n'
-            '        }\n'
+            '        interval: 500; running: true; repeat: true; triggeredOnStart: true\n'
+            '        onTriggered: scGlobalConfig.scSyncReverseJogFromState()\n'
             '    }\n'
             '    Timer {\n'
             '        interval: 10000; running: true; repeat: true; triggeredOnStart: true\n'
@@ -7681,6 +7996,7 @@ def edits(dev: bool):
             '                    scGlobalConfig.scSwapLoopOrder = !!j.swapLoopOrder\n'
             '                    scGlobalConfig.scReverseJogLeft = !!j.jogInvertLeft\n'
             '                    scGlobalConfig.scReverseJogRight = !!j.jogInvertRight\n'
+            '                    scGlobalConfig.scSyncReverseJogFromState()\n'
             '                } catch (e) {}\n'
             '            }\n'
             '            x.open("GET", "http://127.0.0.1:8080/v1/enginex/ui")\n'
@@ -8515,6 +8831,47 @@ def edits(dev: bool):
     for rel, fixes in legacy_qml_fixes().items():
         assert not isinstance(out.get(rel), str), rel  # a whole-file replacement already owns it
         out.setdefault(rel, []).extend(fixes)
+    # Stock draws a Stems render on the track's own row: a queued icon, a
+    # spinner, a progress bar across the row and the percentage. A streamed
+    # row's Stems are rendered from its imported copy, so the streamed row had
+    # none of that. The same row elements now also follow root.scStemRows (the
+    # row that was tapped and its "Stems not ready" row; see scStemStream).
+    row_parts = v + "BrowseView/Components/Components/"
+    out.setdefault(v + "BrowseView/Components/TrackList.qml", []).extend([(
+        "\t\t\t\treadonly property int stemState: modelData.stems || 0\n"
+        "\t\t\t\treadonly property real stemsRenderProgress: modelData.stemsRenderProgress || 0.0\n",
+        '\t\t\t\treadonly property string scStem: typeof root !== "undefined" && root && root.scStemState ? root.scStemState(modelData.trackId) : ""\n'
+        '\t\t\t\treadonly property int stemState: scStem === "render" ? 2 : scStem === "wait" ? 1 : (modelData.stems || 0)\n'
+        '\t\t\t\treadonly property real stemsRenderProgress: scStem === "render" ? Math.max(root.scStemOwn, 0.001) : (modelData.stemsRenderProgress || 0.0)\n',
+    )])
+    out.setdefault(row_parts + "PreviewProgress.qml", []).extend([
+        ("row.modelData.stems === 2 ? Qt.darker(Style.systemBlue01Color, 1.2)", "row.stemState === 2 ? Qt.darker(Style.systemBlue01Color, 1.2)"),
+        ("row.isDownloading || row.modelData.stems === 2", "row.isDownloading || row.stemState === 2"),
+    ])
+    out.setdefault(row_parts + "StemsIcon.qml", []).extend([
+        ("readonly property bool isStemmed: row.modelData.stems === 3\n",
+         "readonly property int scStems: row.stemState !== undefined ? row.stemState : (row.modelData.stems || 0)\n"
+         "\treadonly property bool isStemmed: scStems === 3\n"),
+        ("readonly property bool renderingInProgress: row.modelData.stems === 2", "readonly property bool renderingInProgress: scStems === 2"),
+        ("readonly property bool inStemsQueue: row.modelData.stems === 1", "readonly property bool inStemsQueue: scStems === 1"),
+        ("&& row.modelData.stems !== 0", "&& scStems !== 0"),
+    ])
+    out.setdefault(row_parts + "Length.qml", []).extend([(
+        "else if (row.isRenderingStems) {",
+        "else if (row.scStem) {\n"
+        "\t\t\troot.scStemText(row.scStem, row.stemsRenderProgress, root.scStemLeft)\n"
+        "\t\t} else if (row.isRenderingStems) {",
+    )])
+    if v53():
+        # Stock's pulsing Stems icon in the browse status bar says a render is
+        # running whatever list is open. Stock shows it on units with side
+        # screens only, and that stays so for a local track's render: it is
+        # added only while a streamed row's Stems are in Engine's queue (the
+        # row may be in a list that is not open). AZ04 keeps stock.
+        out.setdefault(v + "EmbeddedView.qml", []).extend([(
+            "showBrowerViewStemsRenderIndicator: Config.device.hasSideScreens\n",
+            'showBrowerViewStemsRenderIndicator: Config.device.hasSideScreens || (typeof root !== "undefined" && !!root && !root.scIsAZ04 && !!root.scStemStreamed)\n',
+        )])
     if v53():
         out.setdefault(v + "Profiles/ProfilesLogin.qml", []).extend([
             ('    shown: controller.showDialog\n', """    readonly property bool scSuppressTidalPairing:
@@ -8570,7 +8927,7 @@ def edits(dev: bool):
                     "SCALE DOWN", "REVERB", "LFO VERB", "REVERB DROP", "REVERSE VERB",
                     "REVERB RISE", "FLANGER (-)", "FLEX GATE", "BEATBREAK", "LFO FILTER",
                     "BACKSPIN", "BRAKE", "CRUSH",
-                    "SPIRAL", "PITCH ECHO", "SLIP ROLL", "DUB ECHO", "SPACE"
+                    "SPIRAL", "PITCH ECHO", "SLIP ROLL", "DUB ECHO", "SPACE", "JET FLANGER"
                 ]
                 readonly property string scCustomName: scPxIndex >= 0 && scPxIndex < scAllNames.length ? scAllNames[scPxIndex] : ""
                 readonly property string fxType: scCustomName !== "" ? scCustomName : fxConfig.channel[modelData].fxType"""),

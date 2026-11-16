@@ -19,8 +19,7 @@ control helper; **club mode itself requires an explicit button press**.
 
 Enable records which optional units are currently active before stopping them:
 
-- enginex-deemixd.service (5.3.0.5 and later)
-- sc5000-deemixd.service, enginex-sc5000-deemixd.service (earlier releases)
+- enginex-deemixd.service
 - stems-processor.service
 - icecast-stream.service
 - enginex-download-queue.service

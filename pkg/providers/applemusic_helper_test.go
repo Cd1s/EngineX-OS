@@ -147,7 +147,7 @@ func TestAppleMusicHelperStatusLoginAndRedaction(t *testing.T) {
 		t.Fatal("2FA transition", err)
 	}
 	status, err = am.HelperLogin2FA(context.Background(), "123456")
-	if err != nil || !status.SignedIn || !am.HelperStatus(context.Background()).SignedIn {
+	if err != nil || !status.SignedIn || !am.Ready() || !am.HelperStatus(context.Background()).SignedIn {
 		t.Fatal("ready transition", err)
 	}
 	if _, err = am.HelperLogin2FA(context.Background(), "abcdef"); err == nil {
@@ -158,7 +158,7 @@ func TestAppleMusicHelperStatusLoginAndRedaction(t *testing.T) {
 		t.Fatal("helper echoed credentials")
 	}
 	helper.Close()
-	if am.HelperStatus(context.Background()).Online {
+	if am.HelperStatus(context.Background()).Online || am.Ready() {
 		t.Fatal("offline status")
 	}
 }
