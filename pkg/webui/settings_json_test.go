@@ -44,3 +44,26 @@ func TestJSONSettingsDispatchSpecialFields(t *testing.T) {
 		})
 	}
 }
+
+func TestMalformedJSONSettingsDoNotApplyOrRestart(t *testing.T) {
+	dir, restarts := t.TempDir(), 0
+	s := New(Config{UIDir: dir, StateDir: t.TempDir(), RestartEngine: func() error { restarts++; return nil }}, nil)
+	defer s.Close()
+	before := []byte("lang=en\nwaveform=rgb\n")
+	path := filepath.Join(dir, "settings.conf")
+	if err := os.WriteFile(path, before, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, body := range []string{`{"lang":`, `{"junk":"` + strings.Repeat("x", 2*jsonBodyLimit)} {
+		r := httptest.NewRequest("POST", "/api/ui?lang=es&restart=1", strings.NewReader(body))
+		r.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		s.uiUpdate(w, r)
+		if w.Code != 400 {
+			t.Errorf("malformed JSON status = %d, want 400", w.Code)
+		}
+		if b, err := os.ReadFile(path); err != nil || string(b) != string(before) || restarts != 0 {
+			t.Errorf("invalid request changed settings or restarted Engine: unchanged=%t, restarts=%d, error=%v", string(b) == string(before), restarts, err)
+		}
+	}
+}
