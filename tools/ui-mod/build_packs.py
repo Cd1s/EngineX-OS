@@ -525,6 +525,81 @@ TIDAL_PAIRING_530 = """			// logoutOfProvider finishes asynchronously. Wait befo
 			}
 """
 
+STREAMING_INTERNAL_SAVE = """
+    property bool scInternalAttempted: false
+    property bool scInternalPending: false
+    property bool scInternalReady: false
+    property bool scInternalSelected: false
+    property string scOriginalSource: ""
+    function scCurrentSource() {
+        const model = Planck.librarianController.browserSourceControllerPtr().model()
+        // Native BrowserSource roles: Identifier = 257, IsCurrent = 265.
+        for (let row = 0; row < model.rowCount(); row++) {
+            const index = model.index(row, 0)
+            if (model.data(index, 265)) return model.data(index, 257)
+        }
+        return ""
+    }
+    function scRestoreSource() {
+        if (!scOriginalSource || scCurrentSource() !== "/data/enginex/stream-save") return
+        const sources = Planck.librarianController.browserSourceControllerPtr()
+        const model = sources.model()
+        for (let row = 0; row < model.rowCount(); row++) {
+            const index = model.index(row, 0)
+            if (model.data(index, 257) === scOriginalSource) {
+                sources.forceSelect(index)
+                return
+            }
+        }
+    }
+    function scFinishInternal() {
+        if (!scInternalPending || !scInternalReady || !scInternalSelected) return
+        scSaveTimeout.stop()
+        scRestoreSource()
+        scInternalPending = false
+    }
+    function scInternalFailed() {
+        if (!scInternalPending) return
+        scRestoreSource()
+        scInternalPending = false
+        Planck.librarianController.streamingInterfaceController.checkSourceDriveAvailability()
+    }
+    function scTryInternalSave() {
+        if (scInternalPending) return true
+        if (scInternalAttempted) return false
+        const librarian = Planck.librarianController
+        const path = "/data/enginex/stream-save"
+        if (!librarian.isDeviceRegistered(path) || !librarian.isStreamingStorageCandidate(path)) return false
+        scInternalAttempted = true
+        scInternalPending = true
+        scInternalReady = false
+        scInternalSelected = false
+        // Provider selection can emit no-source before its browser change completes.
+        Qt.callLater(function() {
+            scOriginalSource = scCurrentSource()
+            scSaveTimeout.start()
+            librarian.browserSourceControllerPtr().select(path)
+        })
+        return true
+    }
+    Timer {
+        id: scSaveTimeout
+        interval: 10000
+        onTriggered: scInternalFailed()
+    }
+    Connections {
+        target: Planck.librarianController.browserSourceControllerPtr()
+        function onCurrentChanged(index) {
+            if (!scInternalPending) return
+            const id = target.model().data(index, 257)
+            if (id === "/data/enginex/stream-save") {
+                scInternalSelected = true
+                Qt.callLater(scFinishInternal)
+            } else scOriginalSource = id
+        }
+    }
+"""
+
 SERVICES_MAIN = """
     property var scLightingBackend: null
     Item {
@@ -7008,6 +7083,17 @@ def edits(dev: bool):
 \t\t},""",
     ))
     if v53():
+        out[v + "Streaming/StreamingNoSourceAvailableDialog.qml"] = [
+            ("Item {\n", "Item {\n" + STREAMING_INTERNAL_SAVE),
+            ("        function onShowNoSourceAvailableDialog() {\n",
+             "        function onHasSourceDriveChanged(available) {\n"
+             "            if (!scInternalPending) return\n"
+             "            scInternalReady = available\n"
+             "            Qt.callLater(scFinishInternal)\n"
+             "        }\n"
+             "        function onShowNoSourceAvailableDialog() {\n"
+             "            if (scTryInternalSave()) return\n"),
+        ]
         # The stock "Stems Support" row downloads Denon's stems-child-process; EngineX OS ships
         # and mounts its own, and an Install there could replace that mount.
         out[prefs + "Entries/StemsDownload.qml"] = [("active: manager && manager.canModifyInstall", "active: false")]

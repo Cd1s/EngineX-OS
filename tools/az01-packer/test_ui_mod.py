@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -16,6 +17,144 @@ spec = importlib.util.spec_from_file_location("build_packs", BUILD_PACKS)
 bp = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(bp)
 SRC = BUILD_PACKS.read_text()
+
+
+class InternalStreamingStorageTest(unittest.TestCase):
+    def test_launch_registers_private_internal_library_without_changing_other_drives(self):
+        guard = REPO / "rootfs-overlay/etc/enginex/engine-ui-guard"
+        for mode in ("normal", "safe", "unavailable"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+                task = Path(tmp)
+                ui = task / "ui"
+                ui.mkdir()
+                internal = task / "stream-save"
+                copy = task / "settings-copy"
+                copy.mkdir()
+                (copy / "active-drive").touch()
+                if mode == "safe":
+                    (ui / "safe-mode").touch()
+                elif mode == "unavailable":
+                    internal.write_text("leave existing files alone")
+                engine = task / "Engine"
+                engine.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$TEST_ARGS"\n')
+                engine.chmod(0o700)
+                args = task / "args"
+                env = dict(os.environ, ENGINEX_PRIMARY_UI_DIR=str(ui),
+                           ENGINEX_UI_DIR=str(ui), TEST_ARGS=str(args))
+                result = subprocess.run(["sh", str(guard), "launch", str(engine),
+                                         "-d0", "-extraDriveDir=/existing drive"],
+                                        env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                expected = ["-d0", "-extraDriveDir=/existing drive"]
+                if mode != "safe":
+                    expected.append(f"-extraDriveDir={copy}/EngineX-Settings")
+                if mode == "normal":
+                    expected.append(f"-extraDriveDir={internal}")
+                    self.assertTrue(internal.is_dir(), "Engine has no private internal save directory")
+                    self.assertEqual(list(internal.iterdir()), [])
+                elif mode == "safe":
+                    self.assertFalse(internal.exists())
+                else:
+                    self.assertEqual(internal.read_text(), "leave existing files alone")
+                self.assertEqual(args.read_text().splitlines(), expected)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required for source selection handlers")
+    def test_missing_save_drive_uses_internal_storage_then_restores_the_carrier(self):
+        rel = "Skins/Embedded/Views/Streaming/StreamingNoSourceAvailableDialog.qml"
+        qml = (LAB / "5.3.0/qrc" / rel).read_text()
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            for old, new in bp.edits(False).get(rel, []):
+                qml = bp.patch(qml, old, new, rel)
+        finally:
+            bp.ROOT = old_root
+        functions = "\n".join(PrimeGoTidalQRTest.function(qml, name)
+                              for name in re.findall(r"function (\w+)\(", qml))
+        script = r"""
+const assert = require('node:assert/strict');
+const internal = '/data/enginex/stream-save';
+let scInternalAttempted = false, scInternalPending = false, scInternalReady = false;
+let scInternalSelected = false, scOriginalSource = '';
+let registered = true, eligible = true, selected = 'TIDAL';
+let selections = [], restores = [], prompts = [], deferred = [], checks = 0;
+let ids = ['TIDAL', internal, '/media/SD'];
+const model = {
+    rowCount: () => ids.length, index: row => row,
+    data: (row, role) => role === 257 ? ids[row] : role === 265 ? ids[row] === selected : undefined,
+};
+const sources = {
+    model: () => model,
+    select: id => selections.push(id),
+    forceSelect: row => { restores.push(ids[row]); selected = ids[row]; },
+};
+const target = sources;
+const streaming = {checkSourceDriveAvailability() {checks++; onShowNoSourceAvailableDialog();}};
+const Planck = {librarianController: {
+    isDeviceRegistered: path => { assert.equal(path, internal); return registered; },
+    isStreamingStorageCandidate: path => { assert.equal(path, internal); return eligible; },
+    browserSourceControllerPtr: () => sources, streamingInterfaceController: streaming,
+}};
+const Prompt = {Ok: 1};
+const PlanckGUI = {views: {prompts: {post: value => prompts.push(value)}}};
+const Qt = {callLater: fn => deferred.push(fn)};
+const scSaveTimeout = {start() {}, stop() {}};
+function flush() { while (deferred.length) deferred.shift()(); }
+FUNCTIONS
+
+// A carrier request exposes no save source. Wait for both native acceptance
+// and completion of the source switch before restoring the carrier.
+onShowNoSourceAvailableDialog(); flush();
+assert.deepEqual(selections, [internal]);
+assert.equal(prompts.length, 0);
+onShowNoSourceAvailableDialog(); flush();
+assert.deepEqual(selections, [internal]);
+onHasSourceDriveChanged(true); flush();
+assert.deepEqual(restores, []);
+selected = internal; onCurrentChanged(ids.indexOf(internal)); flush();
+assert.deepEqual(restores, ['TIDAL']);
+assert.equal(prompts.length, 0);
+
+// An existing accepted source never invokes the fallback. Source model
+// reordering and a user's intervening choice must not restore a stale row.
+selections = []; restores = [];
+onHasSourceDriveChanged(true); flush();
+assert.deepEqual(selections, []);
+scInternalAttempted = false; selected = 'TIDAL';
+onShowNoSourceAvailableDialog(); flush();
+selected = '/media/SD'; onCurrentChanged(ids.indexOf(selected));
+ids.reverse();
+selected = internal; onCurrentChanged(ids.indexOf(internal));
+onHasSourceDriveChanged(true); flush();
+assert.deepEqual(restores, ['/media/SD']);
+
+// Registration and native eligibility are required; neither an unknown
+// directory nor a read-only device is silently accepted.
+for (const state of [[false, true], [true, false]]) {
+    [registered, eligible] = state;
+    scInternalAttempted = false; selections = []; prompts = [];
+    onShowNoSourceAvailableDialog(); flush();
+    assert.deepEqual(selections, []);
+    assert.equal(prompts.length, 1);
+    assert.equal(prompts[0].id, 'StreamingNoSourceAvailableDialog');
+}
+
+// A failed native switch must still show the original warning, without
+// looping, logging the carrier out or changing a later user selection.
+registered = eligible = true; scInternalAttempted = false;
+selections = []; restores = []; prompts = []; selected = 'TIDAL';
+onShowNoSourceAvailableDialog(); flush();
+selected = internal; onCurrentChanged(ids.indexOf(internal)); flush();
+assert.equal(prompts.length, 0);
+scInternalFailed(); flush();
+assert.equal(checks, 1);
+assert.equal(prompts.length, 1);
+assert.deepEqual(selections, [internal]);
+assert.deepEqual(restores, ['TIDAL']);
+assert.equal(selected, 'TIDAL');
+""".replace("FUNCTIONS", functions)
+        result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 class OnOffSwitchCompatibilityTest(unittest.TestCase):
