@@ -571,6 +571,14 @@ int main(int argc, char **argv) {
     for (int i = 0; i < 2; i++) block(4, 480);
     drain();
     assert(stock_calls == 0 && got_n == 960 && got[0][959] == 0.1f && got[1][959] == -0.1f);
+    /* A hand-edited bt_out=1073741829 or 2147483647: pair * 2 wrapped negative and indexed out[] far below the array. */
+    for (int i = 0; i < 2; i++) {
+        reset(48000, 48000);
+        bt_out_pair = i ? 0x7fffffff : 0x40000005;
+        for (int j = 0; j < 2; j++) block(4, 480);
+        drain();
+        assert(stock_calls == 0 && got_n == 960 && got[0][959] == 0.1f && got[1][959] == -0.1f);
+    }
 
     /* A stream whose rate libsbc does not have is no speaker: Engine's own feed goes through. */
     reset(48000, 48000);

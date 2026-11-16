@@ -1126,7 +1126,7 @@ static unsigned bt_measure(int frames) {
 // After the master callback: the pair bt_out= picks, brought to the stream rate and appended to bt_buf.
 static void bt_capture(int channels, float *const *out, int frames, unsigned render) {
     int pair = __atomic_load_n(&bt_out_pair, __ATOMIC_RELAXED);
-    if (pair * 2 + 1 >= channels) pair = 0; // a pair this output does not have: the first (bt_out= is never negative)
+    if (pair >= channels / 2) pair = 0; // a pair this output does not have: the first (bt_out= is never negative; pair * 2 would overflow)
     if (channels < 2 || frames <= 0 || frames > BT_BLOCK || !out[pair * 2] || !out[pair * 2 + 1]) {
         bt_rate = 0; // a block is missing: start over, with a fade, at the next one
         return;
