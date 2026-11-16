@@ -210,6 +210,9 @@ func (f fbShim) Flashed() []string {
 }
 
 func TestNativeUSBSelection(t *testing.T) {
+	saved := goos
+	goos = "linux"
+	t.Cleanup(func() { goos = saved })
 	deck := usbInfo(0x18d1, 0x4ee0, "SC LIVE 4", false)
 	normal := usbInfo(0x15e4, 0xd012, "SC LIVE 4", false)
 	normal.Interfaces[0].Class = 1
@@ -233,6 +236,25 @@ func TestNativeUSBSelection(t *testing.T) {
 				t.Fatalf("found=%t err=%v opens=%d", found, err, d.opens)
 			}
 		})
+	}
+}
+
+func TestWindowsLoaderSetupDoesNotFlash(t *testing.T) {
+	saved := goos
+	goos = "windows"
+	t.Cleanup(func() { goos = saved })
+	for _, pid := range []uint16{0x320a, 0x350b} {
+		d := &testUSB{info: usbInfo(0x2207, pid, "Rockchip", false), dir: t.TempDir()}
+		o := testOpts(t)
+		o.USB = d
+		o.defaults()
+		found, err := tryUSB(ctxT(t), o, "")
+		if !found || err == nil || !strings.Contains(err.Error(), "writes remain disabled") || d.opens != 1 || d.closes != 1 {
+			t.Fatalf("loader %04x: found=%t err=%v opens=%d closes=%d", pid, found, err, d.opens, d.closes)
+		}
+		if _, err := os.Stat(filepath.Join(d.dir, "calls.log")); !os.IsNotExist(err) {
+			t.Fatal("sent a protocol command to the loader")
+		}
 	}
 }
 

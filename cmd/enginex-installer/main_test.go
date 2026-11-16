@@ -1291,6 +1291,11 @@ func TestModeBAsksBeforeFlashing(t *testing.T) {
 	if !strings.Contains(o.Out.(*bytes.Buffer).String(), "ALL music, library and settings") {
 		t.Error("did not ask about erasing the data partition")
 	}
+	for _, want := range []string{"bootloader cannot", "cannot back up first", "OTA", "引导程序无法", "无法先备份"} {
+		if !strings.Contains(o.Out.(*bytes.Buffer).String(), want) {
+			t.Errorf("missing warning %q", want)
+		}
+	}
 	if dirs, _ := filepath.Glob(filepath.Join(o.WorkDir, ".enginex-image-*")); len(dirs) != 0 {
 		t.Errorf("cancelled images left behind: %v", dirs)
 	}
@@ -1494,6 +1499,14 @@ func TestDiagnoseUSB(t *testing.T) {
 	diagnoseUSB(ctxT(t), o)
 	if out := o.Out.(*bytes.Buffer).String(); out != "" {
 		t.Errorf("no deck on USB, yet:\n%s", out)
+	}
+	saved := goos
+	goos = "windows"
+	t.Cleanup(func() { goos = saved })
+	o.ListUSB = func(context.Context) string { return "15e4:2059 Numark Mixstream Pro Go\n" }
+	diagnoseUSB(ctxT(t), o)
+	if out := o.Out.(*bytes.Buffer).String(); !strings.Contains(out, "automatically") || !strings.Contains(out, "管理员") || strings.Contains(out, "does not change drivers") {
+		t.Errorf("Windows driver setup guidance:\n%s", out)
 	}
 }
 

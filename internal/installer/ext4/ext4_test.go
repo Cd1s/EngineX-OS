@@ -35,6 +35,7 @@ func newImage(t *testing.T, size int64, label string) (*Image, string) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
+	t.Cleanup(func() { img.Close() })
 	return img, p
 }
 
@@ -176,13 +177,20 @@ func openRW(t *testing.T, p string) *Image {
 	if err != nil {
 		t.Fatal(err)
 	}
-	st, _ := fh.Stat()
+	st, err := fh.Stat()
+	if err != nil {
+		fh.Close()
+		t.Fatal(err)
+	}
 	f, err := openFS(fh, st.Size(), true)
 	if err != nil {
+		fh.Close()
 		t.Fatal(err)
 	}
 	f.now = fixedNow
-	return &Image{path: p, file: fh, fs: f}
+	img := &Image{path: p, file: fh, fs: f}
+	t.Cleanup(func() { img.Close() })
+	return img
 }
 
 func fileHash(t *testing.T, p string) [32]byte {

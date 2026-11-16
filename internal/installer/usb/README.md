@@ -6,8 +6,13 @@ Linux amd64/arm64, Windows amd64, and macOS amd64/arm64. Other targets return
 an `Unsupported` error. All release targets compile with `CGO_ENABLED=0`.
 
 The caller selects the model/protocol, attachment ID, interface number and
-alternate setting. The package never downloads files, launches host commands,
-installs drivers, rebinds interfaces, or selects a protocol from product text.
+alternate setting. On Windows, Open configures Microsoft's signed in-box WinUSB
+driver and interface registration for supported update interfaces when needed.
+Only its setup helper requests elevation; working bindings need none. No driver
+package or unsigned kernel driver is added, and test-signing stays disabled.
+To undo: uninstall that update device in Device Manager, then disconnect and
+reconnect USB; leave the Microsoft driver package installed.
+The package never downloads firmware or selects a protocol from product text.
 `Open` accepts only a vendor-specific interface (`class = 0xff`) and validates
 the actual native identity. An audio, HID, or mass-storage interface is not
 an update interface.
@@ -104,9 +109,10 @@ Still required for hardware qualification:
 
 * Native Linux, Windows and macOS update-interface open/close, bulk/control
   transfers, short responses, unplug/cancel and observed final ZLP.
-* Clean Windows automatic WinUSB binding for each relevant device family.
-  No INF, driver installer, test-signing change or automatic rebinding is
-  implemented. Unsupported binding remains a release qualification blocker.
+* Clean Windows automatic WinUSB binding and interface registration for each
+  relevant device family (Rockchip loader, fastboot, and AZ04 `1cc5:2027`),
+  including UAC refusal and disconnect/reconnect after setup. Unit tests and
+  read-only in-box driver-list checks do not qualify physical binding.
 * Actual Darwin USB userclient creation, QueryInterface, claim and transfers
   on both CPU architectures. Rosetta execution is not native Intel evidence.
 * Each model/protocol family's physical qualification, scheduled separately
