@@ -14,6 +14,7 @@ import (
 	"crypto/sha1"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -320,13 +321,16 @@ func (g *tidalGateway) rbxPrepare(ctx context.Context, id int64, ref trackRef) (
 	}
 	file, root, nfs, err := g.rbxFind(ctx, parts[1], rbPath)
 	if err != nil {
+		log.Printf("stream-sync: load track=%d provider=rekordbox step=find result=unreachable nfs=%v", id, err)
 		return ref, errors.New(g.s.rbxText("noshare"))
 	}
 	if nfs != nil {
 		if file, root, err = g.rbxStage(ctx, nfs, parts[1], rbPath); err != nil {
+			log.Printf("stream-sync: load track=%d provider=rekordbox step=copy result=failed error=%v", id, err)
 			return ref, err
 		}
 	}
+	log.Printf("stream-sync: load track=%d provider=rekordbox step=find result=ready via=%s", id, map[bool]string{true: "nfs", false: "share"}[nfs != nil])
 	ref.file, ref.drive = file, root
 	g.mu.Lock()
 	g.tracks[id] = ref
