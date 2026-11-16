@@ -566,3 +566,18 @@ func TestSortSummaryShowsASecondColumn(t *testing.T) {
 		t.Fatal("no rows")
 	}
 }
+
+func TestSortDetailShowsTempoAndKeyTextOnly(t *testing.T) {
+	rows := []menuRow{
+		{kind: 0x0704, label: "secret title", sec: "secret artist", secRaw: "secret artist"},
+		{kind: 0x0d04, secRaw: "\ufffa128.00\ufffb", parent: 12800, id: 7},
+		{kind: 0x0f04, secRaw: "8A", flags: 3},
+	}
+	got := sortDetail(rows)
+	if strings.Contains(got, "secret") || !strings.Contains(got, `second="\ufffa128.00\ufffb" parent=12800`) || !strings.Contains(got, `kind=0x0f04 second="8A" parent=0 flags=3`) {
+		t.Fatal(got)
+	}
+	if sortDetail(rows[:1]) != "" {
+		t.Fatal("artist text printed")
+	}
+}

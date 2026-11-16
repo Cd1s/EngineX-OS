@@ -973,6 +973,7 @@ type menuRow struct {
 	id     uint32
 	label  string
 	sec    string
+	secRaw string // the second text as sent, markers included
 	kind   uint32
 	flags  uint32
 	artID  uint32
@@ -1028,6 +1029,7 @@ func (d *dbConn) renderMenu(player, menu, slot, trackType byte, dmstArg uint32, 
 				id:     it.args[1].num,
 				label:  cleanMenuLabel(it.args[3].str),
 				sec:    cleanMenuLabel(it.args[5].str),
+				secRaw: it.args[5].str,
 				kind:   it.args[6].num,
 			}
 			if len(it.args) > 7 {
@@ -1055,6 +1057,40 @@ func (d *dbConn) renderMenu(player, menu, slot, trackType byte, dmstArg uint32, 
 		off += n
 	}
 	return rows, nil
+}
+
+// probeSortList asks a track list with a sort order and prints what its first rows carry.
+func (d *dbConn) probeSortList(name string, kind uint16, dmstArg, sortOrder uint32, tail []uint32, timeout time.Duration, red *redactor) error {
+	args := []dbField{dbNum(dmstArg), dbNum(sortOrder)}
+	for _, v := range tail {
+		args = append(args, dbNum(v))
+	}
+	sm, err := d.req(kind, timeout, args...)
+	if err != nil {
+		return err
+	}
+	if sm.kind != kindSetupAck || len(sm.args) < 2 {
+		fmt.Printf("  %s sort=%d: reply kind=0x%04x\n", name, sortOrder, sm.kind)
+		return nil
+	}
+	rows, rerr := d.renderMenu(0, 0, 0, 0, dmstArg, sm.args[1].num, 3, timeout)
+	fmt.Printf("  %s sort=%d: count=%s %s%s err=%s\n", name, sortOrder, fmtCount(sm.args[1].num), sortSummary(rows), sortDetail(rows), red.err(rerr))
+	return rerr
+}
+
+// sortDetail prints, for the tempo and key columns only (never titles or artists), the second
+// text as sent and the row's numbers: how those columns are encoded.
+func sortDetail(rows []menuRow) string {
+	var parts []string
+	for _, r := range rows {
+		if k := r.kind >> 8; k == 0x0d || k == 0x0f {
+			parts = append(parts, fmt.Sprintf("kind=0x%04x second=%q parent=%d flags=%d art=%d pos=%d a12=%d", r.kind, r.secRaw, r.parent, r.flags, r.artID, r.pos, r.arg12))
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " detail=[" + strings.Join(parts, "; ") + "]"
 }
 
 // sortSummary says what the first rows of a track list carry: their kind, and how long the
@@ -1384,18 +1420,11 @@ func probeDBSession(ip net.IP, dbPort int, asPlayer byte, maxTracks int, specifi
 		// row kinds and text lengths are printed.
 		if workingSlot == slot && dc != nil {
 			for sortOrder := uint32(1); sortOrder <= 20; sortOrder++ {
-				sm, serr := dc.req(kindAllTracks, timeout, dbNum(d), dbNum(sortOrder))
-				if serr != nil || sm.kind != kindSetupAck || len(sm.args) < 2 {
+				if serr := dc.probeSortList("0x1004", kindAllTracks, d, sortOrder, nil, timeout, red); serr != nil {
 					fmt.Printf("  0x1004 sort=%d: no list (%s)\n", sortOrder, red.err(serr))
 					if !redial() {
 						break
 					}
-					continue
-				}
-				rows, rerr := dc.renderMenu(asPlayer, 1, slot, 1, d, sm.args[1].num, 3, timeout)
-				fmt.Printf("  0x1004 sort=%d: count=%s %s err=%s\n", sortOrder, fmtCount(sm.args[1].num), sortSummary(rows), red.err(rerr))
-				if rerr != nil && !redial() {
-					break
 				}
 			}
 		}
@@ -1470,6 +1499,15 @@ func probeDBSession(ip net.IP, dbPort int, asPlayer byte, maxTracks int, specifi
 								trackArts[r.id] = r.artID
 							}
 							addTrackID(r.id)
+						}
+					}
+					// Does a playlist's track list take the same sort orders (artist, tempo, key)?
+					for _, sortOrder := range []uint32{2, 4, 12} {
+						if serr := dc.probeSortList("0x1105 playlist_tracks", kindPlaylist, d, sortOrder, []uint32{firstPlaylistID, 0}, timeout, red); serr != nil {
+							fmt.Printf("  0x1105 playlist_tracks sort=%d: no list (%s)\n", sortOrder, red.err(serr))
+							if !redial() {
+								break
+							}
 						}
 					}
 				}
