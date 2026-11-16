@@ -1802,6 +1802,7 @@ SERVICES_MAIN = """
 			// known, the upper envelope of position - speed * time is the newest block:
 			// post that line (noise of a few ms), decaying 0.5 ms/s to follow pitch rounding.
 			const speed = 1 + s.pitch / 100, raw = s.posMs - speed * now
+			s.rise = false
 			if (s.phaseHold || s.scratch) s.env = s.avg = raw
 			else if (syncMoving) {
 				// Native Sync pulls phase by changing the transport's instantaneous
@@ -1819,7 +1820,12 @@ SERVICES_MAIN = """
 				// position from a busy GUI thread costs a few ms, not a slip.
 				s.avg = p.avg + (raw - p.avg) * 0.2
 				const slow = p.env - s.avg - 25 * speed
-				s.env = Math.max(raw, p.env - (slow > 0 ? slow * 0.2 : 0.0005 * (now - p.at)))
+				// One read in sixty comes 13 ms ahead of its block. Taken alone it held the line
+				// up for the 26 s the decay needs, and the peer bent its copy ~12 ms ahead of
+				// this deck: a lone rise lifts the line 2 ms, one the next read confirms (a jog
+				// push) counts in full.
+				s.rise = raw - p.env > 2
+				s.env = Math.max(s.rise && !p.rise ? p.env + 2 : raw, p.env - (slow > 0 ? slow * 0.2 : 0.0005 * (now - p.at)))
 			} else s.env = s.avg = raw
 			s.lineMs = s.ps ? s.env + speed * now : s.posMs
 			// A jog nudge moves the line off the one the peer carries on: post it at once,
@@ -2183,6 +2189,9 @@ SERVICES_MAIN = """
 		at.link = e.link || ""
 		at.rate = scShadowRate(e)
 		scShadowMirror(d, at, now)
+		const nudgePath = at.link ? "/Engine/BeatInfoSenderControl/" + at.link + "/PositionInSamples" + (e.src >= 1 && e.src <= 4 ? e.src : d) : ""
+		if (at.nudgePath !== nudgePath) { at.nudgePath = nudgePath; at.nudgeMirror = nudgePath ? root.scTr(nudgePath) : null }
+		if (at.nudgeMirror && e.playing && !e.scratch && !e.sync && !scShadowNudgeTimer.running) scShadowNudgeTimer.start()
 		scShadowCues(d, at, e, now)
 		// Updates sent before an Engine Link edge arrive after it: skip them, or
 		// they would undo the edge for a moment.
@@ -2417,6 +2426,8 @@ SERVICES_MAIN = """
 		if (wantSync && synced && !at.nativeSync) return dbg("sync")
 		if (at.landing) return dbg("landing")
 		if (now - at.seekAt < 300) return dbg("settle")
+		// A nudge the mirror has shown (scShadowNudgeTick) reaches this line seconds later.
+		if (now < (at.nudgeUntil || 0)) return dbg("nudge")
 		at.sd = at.sd === undefined ? drift : at.sd * 0.85 + drift * 0.15
 		at.pll = 0
 		if (scShadowBent && scShadowBent.at === at) return dbg("bending")
@@ -2545,6 +2556,73 @@ SERVICES_MAIN = """
 		scShadowBendTimer.stop()
 		b.p.state = false
 		b.at.env = undefined
+	}
+	// A jog nudge on the source (its platter's edge turned while it plays) took seconds to show:
+	// the sender posts it past 15 ms, Go wakes the peer past 12 ms (1 s poll), and the line above
+	// is a 5 s mean bent past an 8 s average. Stock's mirror (scShadowMirror) has the source's
+	// exact position every period. Read every frame, each period is seen with its own travel;
+	// what the source travels past its fader line is bent into the shadow deck at once with
+	// the PITCH BEND of scShadowBend (7 %) until it has gone as far, and the line holds off 2 s.
+	// Travel more than a quarter off its periods' (a jump, a loop, a scratch, a stall) starts it anew.
+	Timer { id: scShadowNudgeTimer; interval: 16; repeat: true; onTriggered: root.scShadowNudgeTick(Date.now()) }
+	function scShadowNudgeTick(now) {
+		let live = false
+		for (const d in scShadowAt) {
+			const at = scShadowAt[d], m = at.nudgeMirror, l = at.line
+			let n = at.nudge
+			if (!m || !at.ready || !at.sourcePlaying || at.sourceSync || at.scratch || at.landing || scShadowDisplayOnly ||
+				!(at.rate > 0) || !(at.sampleRate > 0) || !l || !l.play.state || now - at.seekAt < 300) {
+				if (n && n.dir) scShadowNudgeEnd(at, n, now)
+				at.nudge = undefined
+				continue
+			}
+			live = true
+			let raw = -1
+			try { raw = m.value } catch (err) {}
+			if (!(typeof raw === "number" && isFinite(raw) && raw >= 0)) continue
+			const pos = raw / at.sampleRate * 1000
+			if (!n || n.rate !== at.rate) {
+				if (n && n.dir) scShadowNudgeEnd(at, n, now)
+				at.nudge = {raw: pos, seen: now, rate: at.rate, period: 0, step: 0, extra: 0, done: 0, dir: 0, prop: null, at: now, quiet: now}
+				continue
+			}
+			if (n.dir) n.done += n.dir * 0.07 * at.rate * (now - n.at)
+			n.at = now
+			if (pos !== n.raw) {
+				// Engine counts the source's position in audio blocks: each change is a whole number of
+				// periods, told by the travel and checked against the time (34.8 ms a period on a JP07).
+				const gap = now - n.seen, travel = pos - n.raw
+				const k = n.step ? Math.max(1, Math.round(travel / n.step)) : 1
+				const r = n.step ? travel / k / n.step : 0
+				n.raw = pos; n.seen = now
+				if (!n.step || travel < n.step * 0.75 || Math.abs(r - 1) > 0.25 || (n.period && Math.abs(k - gap / n.period) > Math.max(1, k * 0.5))) {
+					if (n.dir) scShadowNudgeEnd(at, n, now)
+					n.step = travel > 0 && gap < 200 ? travel : 0; n.period = 0; n.extra = n.done = 0
+					continue
+				}
+				n.period = n.period ? n.period + (gap / k - n.period) * 0.1 : gap / k
+				if (Math.abs(r - 1) >= 0.01) { n.quiet = now; n.extra += travel - k * n.step }
+				else if (!n.dir && Math.abs(n.extra - n.done) < 1) n.step += (travel / k - n.step) * 0.05
+				else n.extra += travel - k * n.step
+			}
+			const owe = n.extra - n.done
+			if (n.dir && owe * n.dir <= 0) scShadowNudgeEnd(at, n, now)
+			else if (!n.dir && Math.abs(owe) > 3) {
+				const p = root.scTr("/Engine/Deck" + d + "/Track/Nudge" + (owe > 0 ? "Forward" : "Backward"))
+				if (p) {
+					if (scShadowBent && scShadowBent.at === at) scShadowBendEnd()
+					p.state = true
+					n.prop = p; n.dir = owe > 0 ? 1 : -1
+					at.nudgeUntil = now + 2000
+				}
+			} else if (!n.dir && now - n.quiet > 500 && Math.abs(owe) < 1) n.extra = n.done = 0
+		}
+		if (!live) scShadowNudgeTimer.stop()
+	}
+	function scShadowNudgeEnd(at, n, now) {
+		if (n.prop) n.prop.state = false
+		n.prop = null; n.dir = 0
+		at.env = undefined; at.fine = undefined; at.nudgeUntil = now + 2000
 	}
 	// Scratch follow, one step a frame. The source's playhead is stock's mirror (scShadowMirror)
 	// and, until that runs or without Engine Link (a CDJ), our own update. The deck is moved with

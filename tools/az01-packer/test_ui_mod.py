@@ -1949,7 +1949,7 @@ class ShadowDisplayTest(unittest.TestCase):
                  "scShadowApply", "scShadowEmpty", "scShadowScratchLine", "scShadowScratchRelease", "scShadowSpeed", "scShadowCues", "scShadowBeat",
                  "scShadowLoad", "scShadowWrong", "scShadowHolds", "scShadowEndGap", "scShadowEnd",
                  "scShadowSeek", "scShadowMirror", "scShadowMirrorOff", "scShadowLink", "scShadowLinkEdge", "scPress", "scGcCheck", "scShadowWake", "scShadowAnyPlaying",
-                 "scShadowLine", "scShadowLandingSeek", "scShadowLandingTick", "scShadowBend", "scShadowBendEnd", "scShadowMasterBack", "scPressWrite", "scMasterPresses",
+                 "scShadowLine", "scShadowLandingSeek", "scShadowLandingTick", "scShadowBend", "scShadowBendEnd", "scShadowNudgeTick", "scShadowNudgeEnd", "scShadowMasterBack", "scPressWrite", "scMasterPresses",
                  "scLayerPath", "scPairedLanes", "scPairedFollow", "scShadowHeldBy", "scShadowEngineHeld")
         functions = []
         for name in names:
@@ -1976,6 +1976,7 @@ Object.assign(globalThis, {
     scShadowLinkId: '', scShadowLinkAt: -Infinity, scShadowTextAt: {},
     scShadowSent: [], scShadowFullAt: 0, scShadowPostFull: true, scShadowLive: {seen: 0},
     scShadowScratchTimer: {running: false, start() {this.running=true}, stop() {this.running=false}, tick() {}},
+    scShadowNudgeTimer: {running: false, start() {this.running=true}, stop() {this.running=false}},
     scShadowTickTimer: {interval: 40}, scShadowBusyAt: 0, scShadowRoleDirty: true,
     scGcLoadSeq: 0, scGcRuns: 0, scGcLastMs: 0, scGcProps: null,
     scGcState: {armed: true, quietSince: 0, lastRun: -Infinity, loadSig: 0, loadSeq: 0, loadAt: 0, followAt: 0},
@@ -3354,6 +3355,21 @@ assert(ahead()>=0&&ahead()<60,'brake '+ahead()); // of 100 ms; these positions h
 rate=1; run(3000); assert(Math.abs(ahead())<60); assert.equal(bodies[bodies.length-1][0].jumps,0,'a nudge is not a jump');
 """)
 
+    def test_sender_line_ignores_a_lone_early_read(self):
+        # Engine moves TrackPosition every 34.8 ms (a JP07's 29 Hz) and one read in sixty comes
+        # 13 ms ahead of its block. The posted line is the newest block's: the early read held
+        # it ~12 ms ahead for seconds, and the peer bent its copy ahead of this deck.
+        self.js(self.SENDER + r"""
+const T0=now; let tick=0; const errs=[];
+for(let i=0;i<500;i++){
+    now+=scShadowTickTimer.interval; const blk=Math.floor((now-T0)/34.8)*34.8; pos=(5000+blk+(++tick%60===0?13:0))*48; scShadowTick();
+    if(now-T0>20000)errs.push(scShadowPrev[1].lineMs-(5000+now-T0)); // what the next post carries, against the newest block's line
+}
+const mean=errs.reduce((a,e)=>a+e,0)/errs.length;
+assert(errs.length>=200,'ticks '+errs.length);
+assert(Math.abs(mean)<=1.5&&Math.max(...errs)<=3,'mean '+mean.toFixed(2)+' max '+Math.max(...errs).toFixed(2));
+""")
+
     def test_sender_line_moves_without_steps(self):
         # The line closes in on a slower deck a little per tick: every post is one slip of
         # 15 ms, and a position that arrives one tick late does not move the line at all.
@@ -4097,6 +4113,74 @@ ahead = -40; run(5200);
 assert.equal(fwd.state, true, '40 ms behind: bend forward');
 scShadowApplyAll([{deck: 2, path: '/data/enginex/shadow-v3/peer-1/a.flac', playing: false, link: '{l}', positionMs: now - T0 + 5000, at: now, pitch: 0.01, bpm: 138, currentBpm: 138.0089, jumps: 0, seq: ++seq}], false);
 assert.equal(fwd.state, false, 'a pause releases the bend');
+""")
+
+
+@unittest.skipUnless(shutil.which("node"), "node needed for the shadow-deck behavioral checks")
+class ShadowMirrorNudgeTest(unittest.TestCase):
+    """A jog nudge on the source reaches the shadow deck through stock's mirror at once, by PITCH BEND."""
+
+    def test_nudges_are_followed_within_a_few_periods_and_steady_play_is_left_alone(self):
+        ShadowDisplayTest.js(self, r"""
+const T0 = now, props = new Map(), histA = [];
+let seeks = 0, a = 5000, b = 5000, mirror = 5000, bShown = 5000, nextBlock = T0, blocks = 0;
+globalThis.scShadowBent = null;
+globalThis.scShadowBendTimer = {interval: 0, running: false, restart() { this.running = true }, stop() { this.running = false }};
+globalThis.scTr = path => {
+    let p = props.get(path);
+    if (p) return p;
+    const deck2 = path.startsWith('/Engine/Deck2/');
+    p = {state: deck2 && (path.endsWith('/SongLoaded') || path.endsWith('/PlayState')), string: path.endsWith('/SpeedRange') ? '8' : path.endsWith('/SyncMode') ? 'Off' : '',
+        entries: ['4', '8', '10', '20', '50', '100'], index: 1, url: '',
+        _v: path.endsWith('/SampleRate') ? 44100 : path.endsWith('/Speed') ? 0.5 : 0,
+        // the source's samples in stock's mirror; the shadow deck's own position as Engine shows it
+        get value() { return path.endsWith('/PositionInSamples1') ? mirror * 44.1 : this._v },
+        set value(v) { this._v = v; if (path.endsWith('/SetSongPosition')) seeks++ },
+        get unnormalized() { return path.endsWith('/TrackLength') ? 44100 * 400 : path.endsWith('/TrackPosition') ? bShown * 44.1 : 0 }};
+    props.set(path, p);
+    return p;
+};
+const state = n => !!(props.get('/Engine/Deck2/Track/Nudge' + n) || {}).state;
+let seq = 0;
+// The source posts its line; it reaches us 700 ms late (edge, Go, poll): a nudge shows here only after that.
+const apply = () => { const t = Math.max(0, now - T0 - 700);
+    scShadowApplyAll([{deck: 2, src: 1, path: '/data/enginex/shadow-v3/peer-1/a.flac', playing: true, link: '{l}', sync: false,
+        positionMs: histA[t] + (now - T0 - t), at: now, pitch: 0, bpm: 128, currentBpm: 128, jumps: 0, seq: ++seq}], false); };
+const marks = []; let last = '-';
+// 1 ms steps: the source runs at its rate, the shadow deck at 1 +- 7 % while bent; Engine shows both
+// and the mirror sends the source every 34.8 ms (one period in fifty lost on the way).
+const run = (ms, rate) => { for (let i = 0; i < ms; i++) {
+    now++; const t = now - T0;
+    const bRate = 1 + (state('Forward') ? 0.07 : state('Backward') ? -0.07 : 0);
+    a += rate || 1; b += bRate; histA[t] = a;
+    // at the period's own instant, as Engine counts it in audio blocks
+    if (now - nextBlock >= 34.8) { nextBlock += 34.8; if (++blocks % 50) mirror = a - (now - nextBlock) * (rate || 1); bShown = b - (now - nextBlock) * bRate }
+    if (t % 16 === 0 && scShadowNudgeTimer.running) scShadowNudgeTick(now);
+    if (t % 80 === 0) scShadowLine(now);
+    if (t % 520 === 0) apply();
+    const st = state('Forward') ? 'F' : state('Backward') ? 'B' : '-';
+    if (st !== last) { marks.push([t, st]); last = st }
+} };
+histA[0] = a; apply();
+run(12000);
+assert.equal(marks.length, 0, 'steady play: no bend ' + JSON.stringify(marks));
+assert.ok(scShadowNudgeTimer.running, 'the mirror is read in steady play');
+// +3 % for 600 ms: 18 ms ahead of the fader line.
+let t0 = now - T0; run(600, 1.03); run(2400);
+let mine = marks.filter(m => m[0] >= t0);
+assert.ok(mine.length && mine[0][1] === 'F' && mine[0][0] - t0 <= 200, 'push followed at once ' + JSON.stringify(mine));
+assert.ok(mine.every(m => m[1] !== 'B'), 'no bend back ' + JSON.stringify(mine));
+assert.ok(mine[mine.length - 1][1] === '-' && mine[mine.length - 1][0] - t0 <= 900, 'bend ends with the push ' + JSON.stringify(mine));
+assert.ok(Math.abs(b - a) <= 3, 'followed: ' + (b - a).toFixed(2) + ' ms');
+run(4000);
+assert.equal(marks.filter(m => m[0] >= t0 + 3000).length, 0, 'the late line changes nothing');
+// -2 % for 400 ms: 8 ms behind.
+t0 = now - T0; run(400, 0.98); run(2600);
+mine = marks.filter(m => m[0] >= t0);
+assert.ok(mine.length && mine[0][1] === 'B' && mine[0][0] - t0 <= 250, 'brake followed at once ' + JSON.stringify(mine));
+assert.ok(mine.every(m => m[1] !== 'F'), 'no bend forward ' + JSON.stringify(mine));
+assert.ok(Math.abs(b - a) <= 3, 'followed: ' + (b - a).toFixed(2) + ' ms');
+assert.equal(seeks, 0, 'a nudge is never a seek');
 """)
 
 
