@@ -163,9 +163,9 @@ func (j *Jobs) File(t providers.Track) string {
 			return ""
 		}
 		if dl := c.Cached(name); dl != nil {
-			// Beatport and Spotify may upgrade earlier lossy files.
+			// Beatport may upgrade an earlier lossy file.
 			// Leave that decision to acquisition.
-			if (t.Provider == "beatport" || t.Provider == "spotify") && c.Lossless() && !dl.Quality.Lossless {
+			if t.Provider == "beatport" && c.Lossless() && !dl.Quality.Lossless {
 				return ""
 			}
 			now := time.Now()
@@ -533,7 +533,7 @@ func (j *Jobs) fromLoggedInServices(ctx context.Context, session string, t provi
 func (j *Jobs) acquireSpotify(ctx context.Context, session string, t providers.Track, guest bool, progress func(deemixclient.QueueStatus)) (*deemixclient.Download, error) {
 	name := "spotify-" + t.ID
 	cached := j.p.Deemix.Cached(name)
-	if cached != nil && (cached.Quality.Lossless || !j.p.Deemix.Lossless()) {
+	if cached != nil {
 		return cached, nil
 	}
 	j.mu.Lock()
@@ -560,9 +560,6 @@ func (j *Jobs) acquireSpotify(ctx context.Context, session string, t providers.T
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-	}
-	if cached != nil {
-		return cached, nil
 	}
 	if source != "auto" {
 		return nil, fmt.Errorf("spotify: %s is not logged in or has no playable match / 所选音源 %s 未登录或没有可播放的匹配曲目: %w", source, source, failure)
@@ -591,7 +588,15 @@ func (j *Jobs) matchAudioSource(ctx context.Context, session string, t providers
 	case "netease":
 		if netease != nil {
 			if n := netease(session, guest); n != nil {
-				_, dl, err := j.fromNetease(ctx, n, t)
+				matched := t
+				if t.Provider == "spotify" {
+					var err error
+					matched, err = spotifySearchRecording(ctx, n.Search, t)
+					if err != nil {
+						return nil, err
+					}
+				}
+				_, dl, err := j.fromNetease(ctx, n, matched)
 				if err != nil {
 					return nil, err
 				}
@@ -601,11 +606,17 @@ func (j *Jobs) matchAudioSource(ctx context.Context, session string, t providers
 	case "beatport":
 		if beatport != nil {
 			if b := beatport(); b != nil {
-				found, err := b.Search(ctx, soundCloudSearch(t))
-				if err != nil {
-					return nil, err
+				var matched providers.Track
+				var err error
+				if t.Provider == "spotify" {
+					matched, err = spotifySearchRecording(ctx, b.Search, t)
+				} else {
+					var found []providers.Track
+					found, err = b.Search(ctx, soundCloudSearch(t))
+					if err == nil {
+						matched, err = deemixclient.MatchNearby(t, found, neteaseMatchToleranceMS)
+					}
 				}
-				matched, err := deemixclient.MatchNearby(t, found, neteaseMatchToleranceMS)
 				if err != nil {
 					return nil, err
 				}
@@ -633,11 +644,17 @@ func (j *Jobs) matchAudioSource(ctx context.Context, session string, t providers
 	case "soundcloud":
 		if soundcloud != nil {
 			if sc := soundcloud(); sc != nil && (sc.UserID != 0 || sc.Username != "" || sc.Token != "" || sc.Auth != nil && sc.Auth.HasUser()) {
-				found, err := sc.Search(ctx, soundCloudSearch(t))
-				if err != nil {
-					return nil, err
+				var matched providers.Track
+				var err error
+				if t.Provider == "spotify" {
+					matched, err = spotifySearchRecording(ctx, sc.Search, t)
+				} else {
+					var found []providers.Track
+					found, err = sc.Search(ctx, soundCloudSearch(t))
+					if err == nil {
+						matched, err = deemixclient.MatchNearby(t, found, neteaseMatchToleranceMS)
+					}
 				}
-				matched, err := deemixclient.MatchNearby(t, found, neteaseMatchToleranceMS)
 				if err != nil {
 					return nil, err
 				}
@@ -650,6 +667,45 @@ func (j *Jobs) matchAudioSource(ctx context.Context, session string, t providers
 		}
 	}
 	return nil, errNoOtherService
+}
+
+// Spotify carries ISRC identity across services before trying metadata. A known
+// conflicting recording is never a title fallback, even if its duration is closer.
+func spotifySearchRecording(ctx context.Context, search func(context.Context, string) ([]providers.Track, error), source providers.Track) (providers.Track, error) {
+	if source.ISRC != "" {
+		found, err := search(ctx, source.ISRC)
+		if err == nil {
+			identified := found[:0]
+			for _, candidate := range found {
+				if candidate.ISRC != "" {
+					identified = append(identified, candidate)
+				}
+			}
+			if matched, err := deemixclient.Match(source, identified); err == nil {
+				return matched, nil
+			}
+		}
+		if err := ctx.Err(); err != nil {
+			return providers.Track{}, err
+		}
+	}
+	found, err := search(ctx, soundCloudSearch(source))
+	if err != nil {
+		return providers.Track{}, err
+	}
+	if matched, err := deemixclient.Match(source, found); err == nil {
+		return matched, nil
+	}
+	if source.ISRC != "" {
+		unknown := found[:0]
+		for _, candidate := range found {
+			if candidate.ISRC == "" {
+				unknown = append(unknown, candidate)
+			}
+		}
+		found = unknown
+	}
+	return deemixclient.MatchNearby(source, found, neteaseMatchToleranceMS)
 }
 
 // soundCloudSearch is "artist title" as the other services' search wants it.

@@ -40,7 +40,11 @@ func spotifyLoadGateway(t *testing.T, audio http.HandlerFunc) (*Server, *httptes
 	return s, srv, fmt.Sprintf("/v1/tracks/%d/", id)
 }
 
-func spotifyManifest(t *testing.T, data []byte) string {
+func spotifyManifest(t *testing.T, data []byte, expectedMIME ...string) string {
+	mime := "audio/ogg"
+	if len(expectedMIME) > 0 {
+		mime = expectedMIME[0]
+	}
 	t.Helper()
 	var info struct{ Manifest string }
 	if err := json.Unmarshal(data, &info); err != nil {
@@ -54,7 +58,7 @@ func spotifyManifest(t *testing.T, data []byte) string {
 		MimeType, Codecs, EncryptionType string
 		URLs                             []string
 	}
-	if err := json.Unmarshal(raw, &manifest); err != nil || manifest.MimeType != "audio/ogg" || manifest.Codecs != "mp3" || manifest.EncryptionType != "NONE" || len(manifest.URLs) != 1 || !strings.HasSuffix(manifest.URLs[0], ".mp3") {
+	if err := json.Unmarshal(raw, &manifest); err != nil || manifest.MimeType != mime || manifest.Codecs != "mp3" || manifest.EncryptionType != "NONE" || len(manifest.URLs) != 1 || !strings.HasSuffix(manifest.URLs[0], ".mp3") {
 		t.Fatalf("Spotify manifest: %s (%v)", raw, err)
 	}
 	return manifest.URLs[0]
@@ -79,7 +83,7 @@ func TestSpotifyFetchFailureIsTrackLoadFailure269(t *testing.T) {
 			data := tidalGet(t, srv.URL, track+endpoint, http.StatusOK, nil)
 			var address string
 			if endpoint == "playbackinfopostpaywall" {
-				address = spotifyManifest(t, data)
+				address = spotifyManifest(t, data, "audio/mpeg")
 			} else {
 				var v struct{ URL, Codec string }
 				if err := json.Unmarshal(data, &v); err != nil || v.Codec != "mp3" || !strings.HasSuffix(v.URL, ".mp3") {
@@ -133,7 +137,7 @@ func TestSpotifyManifestPrecedesSlowFetch269(t *testing.T) {
 	if err != nil || resp.StatusCode != http.StatusOK {
 		t.Fatalf("manifest HTTP %d: %v", resp.StatusCode, err)
 	}
-	spotifyManifest(t, body)
+	spotifyManifest(t, body, "audio/mpeg")
 	if calls.Load() != 0 {
 		t.Fatal("manifest started a speculative audio fetch")
 	}
@@ -230,7 +234,7 @@ func TestSpotifyUnpairedTrackAvoidsTidalAuthFailure269(t *testing.T) {
 			}
 			data := tidalGet(t, srv.URL, track+"playbackinfopostpaywall", want, nil)
 			if !realLogin {
-				spotifyManifest(t, data)
+				spotifyManifest(t, data, "audio/mpeg")
 			}
 			tidalGet(t, srv.URL, strings.TrimSuffix(track, "/"), want, nil)
 			tidalGet(t, srv.URL, track+"streamurl", want, nil)

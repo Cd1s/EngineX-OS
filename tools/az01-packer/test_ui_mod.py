@@ -7022,21 +7022,22 @@ if (v53) {
 """)
 
     def test_source_enter_preserves_visible_stock_services(self):
-        hidden = re.search(r'visible: (\[[^\n]+?\])\.indexOf\(model.name\) < 0', bp.AVAILABLE_SOURCE)
+        hidden = re.search(r'visible: model\.typeText !== "Streaming" \|\| (\[[^\n]+?\])\.indexOf\(model.name\) < 0', bp.AVAILABLE_SOURCE)
         self.assertIsNotNone(hidden)
         hidden_names = json.loads(hidden[1])
         self.assertEqual(hidden_names, ["TIDAL", "Tidal", "SoundCloud", "Beatport LINK", "Apple Music"])
         self.run_js("""
-let name='', enters=0, opens=0, last='';
-const model={index(i) {return i;},data() {return name;}};
+let name='', typeText='Streaming', enters=0, opens=0, last='';
+const model={roles() {return {typeText:273};},index(i) {return i;},data(i,role) {return role===257 ? name : typeText;}};
 const nav={availableSourceIndex:0,connectedSourceIndex:0,enter() {enters++;}};
 const controller={navigation() {return nav;}};
 const root={scSourceNameRole:257,scScope:'spotify',scSources:['spotify'],scOpen(id) {opens++; last=id;}};
 const Planck={librarianController:{browserSourceControllerPtr() {return {
     availableSourceModel() {return model;},connectedSourceModel() {return model;}
 };}}};
-""" + self.function(bp.SOURCE_ENTER, "scSourceEnter") + "\nconst hiddenNames=" + json.dumps(hidden_names) + ";\n" + """
-for (const available of [false,true]) {
+""" + "root.scSourceTypeText=" + self.function(bp.SERVICES_MAIN, "scSourceTypeText") + ";\n" + self.function(bp.SOURCE_ENTER, "scSourceEnter") + "\nconst hiddenNames=" + json.dumps(hidden_names) + ";\n" + """
+for (const kind of ['Streaming','Storage','Remote Library']) for (const available of [false,true]) {
+    typeText=kind;
     nav.availableSourceIndex=available ? 0 : -1;
     for (const visible of ['Beatport','BEATPORT','Beatsource','Amazon Music','Dropbox','USB 1','SD Card','SoundCloud GO+']) {
         name=visible; enters=0; opens=0; scSourceEnter();
@@ -7044,8 +7045,8 @@ for (const available of [false,true]) {
     }
     for (const hidden of hiddenNames) {
         name=hidden; enters=0; opens=0; scSourceEnter();
-        assert.equal(enters,0,hidden); assert.equal(opens,1,hidden);
-        if (hidden === "Apple Music") assert.equal(last,"applemusic");
+        assert.equal(enters,Number(kind!=="Streaming"),hidden+" / "+kind); assert.equal(opens,Number(kind==="Streaming"),hidden+" / "+kind);
+        if (kind === "Streaming" && hidden === "Apple Music") assert.equal(last,"applemusic");
     }
 }
 """)
@@ -7152,7 +7153,8 @@ assert.equal(tp.loggedIn,true); assert.equal(scTidalLogoutPending,false);
                     self.assertIn('{ id: "applemusic", name: "Apple Music" }', main)
                     self.assertIn('"applemusic"]', main)
                     self.assertTrue((out / "icons/applemusic.png").is_file())
-                    self.assertIn('if (name === "Apple Music") { root.scOpen("applemusic"); return }', source)
+                    self.assertIn('const streaming = root.scSourceTypeText(model, row) === "Streaming"', source)
+                    self.assertIn('if (streaming && name === "Apple Music") { root.scOpen("applemusic"); return }', source)
                     self.assertIn('root.scLoginBegin(modelData.id)', bp.SOURCE_FOOTER)
                     self.assertIn('model: root.scServices', bp.STREAM_SWITCHES)
                     self.assertIn('"Apple Music"', bp.AVAILABLE_SOURCE)

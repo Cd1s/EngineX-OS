@@ -3900,6 +3900,11 @@ SERVICES_MAIN = """
 		return false
 	}
 	readonly property int scSourceNameRole: 257
+	function scSourceTypeText(model, row) {
+		const roles = model && model.roles ? model.roles() : null
+		if (row < 0 || !roles || roles.typeText === undefined) return ""
+		return String(model.data(model.index(row, 0), roles.typeText) || "")
+	}
 	// Every service depends on Engine's TIDAL provider. A saved profile can turn it
 	// off, which would leave all four service rows doing nothing.
 	function scEnsureTidal() {
@@ -4364,8 +4369,9 @@ SOURCE_ENTER = """
         const model = available ? sources.availableSourceModel() : sources.connectedSourceModel()
         const row = available ? nav.availableSourceIndex : nav.connectedSourceIndex
         const name = row >= 0 ? String(model.data(model.index(row, 0), root.scSourceNameRole)).trim() : ""
-        if (name === "Apple Music") { root.scOpen("applemusic"); return }
-        if (["TIDAL", "Tidal", "SoundCloud", "Beatport LINK"].indexOf(name) >= 0) {
+        const streaming = root.scSourceTypeText(model, row) === "Streaming"
+        if (streaming && name === "Apple Music") { root.scOpen("applemusic"); return }
+        if (streaming && ["TIDAL", "Tidal", "SoundCloud", "Beatport LINK"].indexOf(name) >= 0) {
             if (root.scScope && root.scSources.indexOf(root.scScope) >= 0) root.scOpen(root.scScope)
             return
         }
@@ -4380,8 +4386,8 @@ SOURCE_FOOTER = """
 	property string scFocusService: ""
 	readonly property var pScSourceIndex: Planck.getProperty("/Qml/ControlFocus/ScSourceIndex")
 	readonly property var pScSourceSelect: Planck.getProperty("/Qml/ControlFocus/ScSourceSelect")
-	function scHiddenSourceName(name) {
-		return ["TIDAL", "Tidal", "SoundCloud", "Beatport", "Beatport LINK", "Apple Music"].indexOf(String(name || "")) >= 0
+	function scHiddenSourceName(name, typeText) {
+		return typeText === "Streaming" && ["TIDAL", "Tidal", "SoundCloud", "Beatport", "Beatport LINK", "Apple Music"].indexOf(String(name || "")) >= 0
 	}
 	function scFindAvailableSource() {
 		let p = connectedSource.parent
@@ -4411,7 +4417,7 @@ SOURCE_FOOTER = """
 		const cm = sources.connectedSourceModel()
 		for (let i = 0; cm && i < cm.rowCount(); i++) {
 			const nm = cm.data(cm.index(i, 0), root.scSourceNameRole)
-			if (!scHiddenSourceName(nm)) list.push({ kind: "conn", row: i, id: "" })
+			if (!scHiddenSourceName(nm, root.scSourceTypeText(cm, i))) list.push({ kind: "conn", row: i, id: "" })
 		}
 		const svcs = root.scServices.filter(s => root.scSources.indexOf(s.id) >= 0)
 		for (let i = 0; i < svcs.length; i++) {
@@ -4421,7 +4427,7 @@ SOURCE_FOOTER = """
 			const am = sources.availableSourceModel()
 			for (let i = 0; am && i < am.rowCount(); i++) {
 				const nm = am.data(am.index(i, 0), root.scSourceNameRole)
-				if (!scHiddenSourceName(nm)) list.push({ kind: "avail", row: i, id: "" })
+				if (!scHiddenSourceName(nm, root.scSourceTypeText(am, i))) list.push({ kind: "avail", row: i, id: "" })
 			}
 		}
 		return list
@@ -4600,7 +4606,7 @@ Grid {
 		id: scRepeater
 		model: Planck.librarianController.browserSourceControllerPtr().availableSourceModel()
 		delegate: AvailableSourceDelegate {
-			visible: ["TIDAL", "Tidal", "SoundCloud", "Beatport LINK", "Apple Music"].indexOf(model.name) < 0
+			visible: model.typeText !== "Streaming" || ["TIDAL", "Tidal", "SoundCloud", "Beatport LINK", "Apple Music"].indexOf(model.name) < 0
 			width: availableSource.cellWidth
 			height: availableSource.cellHeight
 			cellContentWidth: availableSource.cellWidth - availableSource.cellPadding * 2
@@ -6765,7 +6771,7 @@ def edits(dev: bool):
         ],
         v + "BrowserSource/ConnectedSource.qml": [
             ("	currentIndex: -1\n", "	currentIndex: -1\n" + SOURCE_FOOTER),
-            ("		height: 108\n		leftPadding", '		height: ["TIDAL", "Tidal", "SoundCloud", "Beatport LINK", "Apple Music"].indexOf(model.name) >= 0 ? 0 : 108\n		visible: ["TIDAL", "Tidal", "SoundCloud", "Beatport LINK", "Apple Music"].indexOf(model.name) < 0\n		Component.onCompleted: if (model.name === "TIDAL" || model.name === "Tidal") connectedSource.scTidalRow = this\n		Component.onDestruction: if (connectedSource.scTidalRow === this) connectedSource.scTidalRow = null\n		leftPadding'),
+            ("		height: 108\n		leftPadding", '		height: connectedSource.scHiddenSourceName(model.name, model.typeText) ? 0 : 108\n		visible: !connectedSource.scHiddenSourceName(model.name, model.typeText)\n		Component.onCompleted: if (model.typeText === "Streaming" && (model.name === "TIDAL" || model.name === "Tidal")) connectedSource.scTidalRow = this\n		Component.onDestruction: if (connectedSource.scTidalRow === this) connectedSource.scTidalRow = null\n		leftPadding'),
             # Hidden stock streaming rows (e.g. "Tidal" at index 0, height 0) leave a
             # zero-height first section above "Demo" / "Cloud" sources; ListView then
             # oscillates currentSection <-> section.delegate.height inside updatePolish()

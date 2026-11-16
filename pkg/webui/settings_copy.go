@@ -22,6 +22,7 @@ var copyUIBools = []string{
 var copyUIEnums = map[string][]string{
 	"language": uiLanguages, "waveform": uiWaveforms, "shadowMode": uiShadowModes,
 	"quality":        uiQualities,
+	"spotifySource":  uiSpotifySources,
 	"streamSortRole": uiStreamSortRoles, "streamSortOrder": uiStreamSortOrders,
 	"pioneerFx": uiPioneerFxModes, "fxTimeMode": uiFxTimeModes,
 }

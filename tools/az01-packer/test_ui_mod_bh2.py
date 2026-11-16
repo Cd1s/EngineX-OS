@@ -135,7 +135,7 @@ row=null; tick(); assert.equal(pushed,1); assert.equal(stopped,1); assert.equal(
             self.assertIn("function scActivate()", conn_joined)
             self.assertIn('connectedSource.scFocusKind === "footer"', conn_joined)
 
-        js_body = bp.SOURCE_FOOTER.split("function scHiddenSourceName(name) {", 1)[1].split("\tConnections {\n\t\ttarget: PlanckGUI", 1)[0]
+        js_body = bp.SOURCE_FOOTER.split("function scHiddenSourceName(name, typeText) {", 1)[1].split("\tConnections {\n\t\ttarget: PlanckGUI", 1)[0]
         script = """
 const assert = require("assert");
 let scFocusKind = "", scFocusRow = -1, scFocusService = "";
@@ -145,6 +145,7 @@ let footerRows = [];
 const connectedSource = { expanded: false, parent: null, itemAtIndex: () => null, footerItem: { scRepeater: { itemAt: r => { footerRows.push(r); return null } } } };
 const root = {
   scSourceNameRole: 257,
+  scSourceTypeText: (model, row) => row < 2 ? "Streaming" : "Storage",
   scServices: [{ id: "tidal", name: "TIDAL" }, { id: "spotify", name: "Spotify" }, { id: "deezer", name: "Deezer" }],
   scSources: ["tidal", "spotify", "deezer"],
   scOpen: id => opened.push(id),
@@ -152,7 +153,7 @@ const root = {
 const connRows = ["TIDAL", "SoundCloud", "USB 1"];
 const cm = { rowCount: () => connRows.length, index: r => r, data: r => connRows[r] };
 const Planck = { librarianController: { browserSourceControllerPtr: () => ({ connectedSourceModel: () => cm, availableSourceModel: () => null, select: idx => selectedConn.push(idx) }) } };
-function scHiddenSourceName(name) {
+function scHiddenSourceName(name, typeText) {
 """ + js_body + """
 scStep(1);
 assert.strictEqual(scFocusKind, "conn");

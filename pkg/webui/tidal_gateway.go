@@ -1644,6 +1644,11 @@ func (g *tidalGateway) trackInfo(w http.ResponseWriter, r *http.Request) {
 func (g *tidalGateway) streamTarget(r *http.Request, id int64, ref trackRef) (address, codec string) {
 	codec = "flac"
 	ext := "flac"
+	// A cold Spotify match has no known format yet. Keep #269's nonblocking
+	// carrier filename; once cached, advertise the actual file format.
+	if ref.track.Provider == "spotify" {
+		codec, ext = "mp3", "mp3"
+	}
 	if ref.file != "" {
 		codec = localCodecs[strings.ToLower(path.Ext(ref.file))]
 		if codec == "mp3" {
@@ -1651,16 +1656,19 @@ func (g *tidalGateway) streamTarget(r *http.Request, id int64, ref trackRef) (ad
 		} else if codec != "flac" {
 			ext = "mp4"
 		}
-	} else if ref.track.Provider == "spotify" {
-		// TIDAL's codec tag chooses the downloaded filename. Its patched mp3
-		// tag keeps an extension; NH08's FFmpeg reader probes the native Ogg.
-		codec, ext = "mp3", "mp3"
 	} else if g.s.jobs != nil {
 		switch strings.ToLower(path.Ext(g.s.jobs.File(ref.track))) {
+		case ".flac":
+			codec, ext = "flac", "flac"
 		case ".mp3":
 			codec, ext = "mp3", "mp3"
 		case ".ogg":
 			codec, ext = "vorbis", "ogg"
+			if ref.track.Provider == "spotify" {
+				// #277: the recognized mp3 naming tag retains a filename; the
+				// native reader still probes the legacy Vorbis bytes.
+				codec, ext = "mp3", "mp3"
+			}
 		case ".mp4", ".m4a", ".aac":
 			// Engine saves this codec as .mp4, which its AAC reader opens.
 			codec, ext = "mp4a.40.2", "mp4"
@@ -1675,8 +1683,8 @@ func (g *tidalGateway) streamTarget(r *http.Request, id int64, ref trackRef) (ad
 	return "http://" + host + "/v1/stream/" + strconv.FormatInt(id, 10) + "." + ext, codec
 }
 
-// Spotify always delivers native Vorbis. Other variable-codec sources download
-// first; otherwise Deemix delivers FLAC or fails.
+// Spotify defers a cold match to the media request to preserve #269 carrier
+// isolation. Other variable-codec sources download before returning a manifest.
 func (g *tidalGateway) knownCodec(w http.ResponseWriter, r *http.Request, ref trackRef) bool {
 	j := g.s.jobs
 	if ref.file != "" || ref.track.Provider == "spotify" || j == nil || j.File(ref.track) != "" {
@@ -1715,8 +1723,8 @@ func (g *tidalGateway) playbackInfo(w http.ResponseWriter, r *http.Request) {
 	} else if ext == ".ogg" {
 		mime = "audio/ogg"
 	}
-	if ref.track.Provider == "spotify" {
-		mime = "audio/ogg" // The naming tag above does not change the media bytes.
+	if ref.track.Provider == "spotify" && g.s.jobs != nil && strings.EqualFold(path.Ext(g.s.jobs.File(ref.track)), ".ogg") {
+		mime = "audio/ogg" // #277: the naming tag does not change legacy Ogg bytes.
 	}
 	manifest, _ := json.Marshal(map[string]any{"mimeType": mime, "codecs": codec, "encryptionType": "NONE", "urls": []string{address}})
 	log.Printf("stream-sync: load track=%d provider=%s step=manifest codec=%s", id, ref.track.Provider, codec)
