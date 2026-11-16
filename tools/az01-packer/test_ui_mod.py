@@ -76,6 +76,8 @@ const assert = require('node:assert/strict');
 const internal = '/data/enginex/stream-save';
 let scInternalAttempted = false, scInternalPending = false, scInternalReady = false;
 let scInternalSelected = false, scOriginalSource = '';
+let scInternalExpired = false;
+const scSelectingDevice = {state: false};
 let registered = true, eligible = true, selected = 'TIDAL';
 let selections = [], restores = [], prompts = [], deferred = [], checks = 0;
 let ids = ['TIDAL', internal, '/media/SD'];
@@ -152,6 +154,29 @@ assert.equal(prompts.length, 1);
 assert.deepEqual(selections, [internal]);
 assert.deepEqual(restores, ['TIDAL']);
 assert.equal(selected, 'TIDAL');
+
+// Expiry does not cancel Engine's asynchronous selection. A late completion
+// must still restore the carrier, while a finished failure releases the guard
+// so a later manual selection of the internal library remains the user's choice.
+for (const lateSuccess of [true, false]) {
+    scInternalAttempted = false; scInternalExpired = false; selected = 'TIDAL';
+    restores = []; prompts = [];
+    onShowNoSourceAvailableDialog(); flush();
+    scSelectingDevice.state = true;
+    scInternalFailed(); flush();
+    assert.equal(prompts.length, 1);
+    scSelectingDevice.state = false;
+    if (lateSuccess) {
+        selected = internal; onCurrentChanged(ids.indexOf(internal));
+        onHasSourceDriveChanged(true); flush();
+        assert.deepEqual(restores, ['TIDAL']);
+    } else {
+        onStateChanged(); flush();
+        selected = internal; onCurrentChanged(ids.indexOf(internal)); flush();
+        assert.deepEqual(restores, []);
+        assert.equal(selected, internal);
+    }
+}
 """.replace("FUNCTIONS", functions)
         result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)

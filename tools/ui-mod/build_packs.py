@@ -530,7 +530,9 @@ STREAMING_INTERNAL_SAVE = """
     property bool scInternalPending: false
     property bool scInternalReady: false
     property bool scInternalSelected: false
+    property bool scInternalExpired: false
     property string scOriginalSource: ""
+    readonly property var scSelectingDevice: Planck.getProperty("/Client/Librarian/DevicesController/IsSelectingDevice").translator
     function scCurrentSource() {
         const model = Planck.librarianController.browserSourceControllerPtr().model()
         // Native BrowserSource roles: Identifier = 257, IsCurrent = 265.
@@ -553,19 +555,23 @@ STREAMING_INTERNAL_SAVE = """
         }
     }
     function scFinishInternal() {
-        if (!scInternalPending || !scInternalReady || !scInternalSelected) return
+        if (!scInternalPending) return
+        if (!(scInternalReady && scInternalSelected) && (!scInternalExpired || scSelectingDevice.state)) return
         scSaveTimeout.stop()
         scRestoreSource()
         scInternalPending = false
     }
     function scInternalFailed() {
         if (!scInternalPending) return
+        scInternalExpired = true
         scRestoreSource()
-        scInternalPending = false
+        // Expiry cannot cancel a native job. Keep its restore target until
+        // completion, while allowing the stock warning to report the failure.
+        scInternalPending = scSelectingDevice.state
         Planck.librarianController.streamingInterfaceController.checkSourceDriveAvailability()
     }
     function scTryInternalSave() {
-        if (scInternalPending) return true
+        if (scInternalPending) return !scInternalExpired
         if (scInternalAttempted) return false
         const librarian = Planck.librarianController
         const path = "/data/enginex/stream-save"
@@ -574,6 +580,7 @@ STREAMING_INTERNAL_SAVE = """
         scInternalPending = true
         scInternalReady = false
         scInternalSelected = false
+        scInternalExpired = false
         // Provider selection can emit no-source before its browser change completes.
         Qt.callLater(function() {
             scOriginalSource = scCurrentSource()
@@ -586,6 +593,12 @@ STREAMING_INTERNAL_SAVE = """
         id: scSaveTimeout
         interval: 10000
         onTriggered: scInternalFailed()
+    }
+    Connections {
+        target: scSelectingDevice
+        function onStateChanged() {
+            if (!scSelectingDevice.state) Qt.callLater(scFinishInternal)
+        }
     }
     Connections {
         target: Planck.librarianController.browserSourceControllerPtr()
