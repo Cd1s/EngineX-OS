@@ -48,12 +48,16 @@ cat > "$TDIR/init.c" <<'INIT_C'
 #include <sys/stat.h>
 #include <sys/utsname.h>
 #include <sys/wait.h>
+#include <termios.h>
 #include <time.h>
 #include <unistd.h>
 
 static void die(const char *msg) {
     printf("FAIL: %s (errno=%d %s)\n", msg, errno, strerror(errno));
     fflush(stdout);
+    fflush(stderr);
+    tcdrain(1);
+    usleep(100000);
     sync();
     reboot(RB_POWER_OFF);
     for (;;) pause();
@@ -492,6 +496,9 @@ int main(void) {
     else die("unknown lkl_mode");
 
     fflush(stdout);
+    fflush(stderr);
+    tcdrain(1);
+    usleep(100000);
     sync();
     reboot(RB_POWER_OFF);
     for (;;) pause();
