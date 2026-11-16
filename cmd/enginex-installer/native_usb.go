@@ -45,12 +45,14 @@ func tryUSB(ctx context.Context, o *options, board string) (found bool, err erro
 		info usb.DeviceInfo
 		it   usb.Interface
 		az   bool
+		rock bool
 	}
 	var candidates []candidate
 	for _, info := range devices {
 		id := fmt.Sprintf("%04x:%04x", info.VID, info.PID)
 		az := id == azID
-		if !az && gen1USB[id] == "" && gen2USB[id] == "" && id != "18d1:4ee0" {
+		rock := goos == "windows" && (id == "2207:320a" || id == "2207:350b")
+		if !az && !rock && gen1USB[id] == "" && gen2USB[id] == "" && id != "18d1:4ee0" && !(goos == "windows" && id == "2207:0006") {
 			continue
 		}
 		interfaces := info.Interfaces
@@ -62,10 +64,10 @@ func tryUSB(ctx context.Context, o *options, board string) (found bool, err erro
 			interfaces = []usb.Interface{{}}
 		}
 		for _, it := range interfaces {
-			if len(info.Interfaces) != 0 && !updateInterface(it, az) {
+			if len(info.Interfaces) != 0 && !(rock && it.Class == 0xff) && !updateInterface(it, az) {
 				continue
 			}
-			candidates = append(candidates, candidate{info: info, it: it, az: az})
+			candidates = append(candidates, candidate{info: info, it: it, az: az, rock: rock})
 		}
 	}
 	if len(candidates) == 0 {
@@ -84,6 +86,9 @@ func tryUSB(ctx context.Context, o *options, board string) (found bool, err erro
 		return false, err
 	}
 	defer func() { err = errors.Join(err, dev.Close()) }()
+	if c.rock {
+		return true, errors.New("Rockchip 恢复模式的写入仍禁用，请使用 Firmware Update Mode；没有刷写任何东西 / Rockchip loader writes remain disabled; use Firmware Update Mode; nothing flashed")
+	}
 	s := &updateSession{device: dev}
 	var eps proto.Endpoints
 	for _, it := range dev.Info().Interfaces {

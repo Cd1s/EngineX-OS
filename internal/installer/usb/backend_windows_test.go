@@ -135,7 +135,10 @@ func TestWindowsOpenUnicodeAndResourceCleanup(t *testing.T) {
 		currentAlternate: func(uintptr) (uint8, error) { return 0, nil },
 		close:            func(handle windows.Handle) error { closes++; return windows.CloseHandle(handle) },
 	}
-	b := &windowsBackend{calls: calls, attachments: map[DeviceID]winAttachment{"one": a}, scan: func(context.Context) ([]winAttachment, error) {
+	b := &windowsBackend{calls: calls, prepare: func(context.Context, winAttachment) (winAttachment, error) {
+		t.Fatal("a working WinUSB binding must not request driver setup or elevation")
+		return a, nil
+	}, attachments: map[DeviceID]winAttachment{"one": a}, scan: func(context.Context) ([]winAttachment, error) {
 		other := a
 		other.instance = "fixture-b"
 		other.devinst = 2
@@ -172,6 +175,45 @@ func TestWindowsOpenUnicodeAndResourceCleanup(t *testing.T) {
 	}
 	if _, err := b.Open(context.Background(), "one", 3, 0); err == nil {
 		t.Fatal("opened replaced attachment")
+	}
+}
+
+func TestWindowsOpenRepairsMissingInterfaceRegistration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "update-interface")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := winAttachment{info: DeviceInfo{ID: "one", VID: 0x15e4, PID: 0xd007, Driver: "WinUSB"}, instance: "selected-update-interface", devinst: 1, arrival: "one-arrival"}
+	it, _ := parseConfiguration(configurationFixture())
+	prepared := 0
+	b := &windowsBackend{attachments: map[DeviceID]winAttachment{"one": a}, scan: func(context.Context) ([]winAttachment, error) { return []winAttachment{a}, nil },
+		prepare: func(_ context.Context, selected winAttachment) (winAttachment, error) {
+			if selected.instance != a.instance || selected.arrival != a.arrival {
+				t.Fatal("setup selected another attachment")
+			}
+			prepared++
+			selected.paths = []string{path}
+			return selected, nil
+		},
+		calls: winCalls{initialize: func(windows.Handle) (uintptr, error) { return 20, nil }, free: func(uintptr) error { return nil },
+			query: func(uintptr, uint8) (Interface, error) { return it[0], nil }, descriptor: func(uintptr) (uint16, uint16, error) { return a.info.VID, a.info.PID, nil },
+			currentAlternate: func(uintptr) (uint8, error) { return 0, nil }, close: windows.CloseHandle},
+	}
+	d, err := b.Open(context.Background(), "one", it[0].Number, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Close()
+	if prepared != 1 {
+		t.Fatalf("setup called %d times", prepared)
+	}
+	b.prepare = func(context.Context, winAttachment) (winAttachment, error) { return a, windows.ERROR_CANCELLED }
+	b.calls.initialize = func(windows.Handle) (uintptr, error) {
+		t.Fatal("declined driver setup must not open USB")
+		return 0, nil
+	}
+	if _, err := b.Open(context.Background(), "one", it[0].Number, 0); !errors.Is(err, windows.ERROR_CANCELLED) {
+		t.Fatalf("declined setup: %v", err)
 	}
 }
 func TestWindowsBindingDiagnostics(t *testing.T) {

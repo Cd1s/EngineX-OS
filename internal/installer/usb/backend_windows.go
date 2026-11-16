@@ -183,6 +183,7 @@ type windowsBackend struct {
 	attachments map[DeviceID]winAttachment
 	calls       winCalls
 	scan        func(context.Context) ([]winAttachment, error)
+	prepare     func(context.Context, winAttachment) (winAttachment, error)
 }
 
 func NewBackend() (Backend, error) {
@@ -190,7 +191,7 @@ func NewBackend() (Backend, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &windowsBackend{calls: calls, scan: scanWindows}, nil
+	return &windowsBackend{calls: calls, scan: scanWindows, prepare: prepareWindows}, nil
 }
 
 func usbHardwareID(ids []string) (uint16, uint16, bool) {
@@ -351,6 +352,7 @@ func scanWindows(ctx context.Context) ([]winAttachment, error) {
 			return nil, winError("device instance", err, false)
 		}
 		service, _ := property(device, windows.SPDRP_SERVICE).(string)
+		compatible, _ := property(device, windows.SPDRP_COMPATIBLEIDS).([]string)
 		product, _ := property(device, windows.SPDRP_DEVICEDESC).(string)
 		capabilities, _ := property(device, windows.SPDRP_CAPABILITIES).(uint32)
 		serial := ""
@@ -368,7 +370,7 @@ func scanWindows(ctx context.Context) ([]winAttachment, error) {
 			return nil, fault("enumerate interface paths", System, false, err)
 		}
 		arrival := winArrival(set, device)
-		result = append(result, winAttachment{info: DeviceInfo{VID: vid, PID: pid, Product: product, Driver: service, Location: location, Serial: serial}, instance: instance, devinst: uint32(device.DevInst), arrival: arrival, paths: paths})
+		result = append(result, winAttachment{info: DeviceInfo{VID: vid, PID: pid, Product: product, Driver: service, Location: location, Serial: serial, Interfaces: windowsCompatibleInterface(instance, compatible)}, instance: instance, devinst: uint32(device.DevInst), arrival: arrival, paths: paths})
 	}
 	parentProc := cfgmgrDLL.NewProc("CM_Get_Parent")
 	physical := make(map[uint32]DeviceInfo, len(result))
@@ -431,6 +433,16 @@ func (b *windowsBackend) Open(ctx context.Context, id DeviceID, number, alt uint
 	b.mu.Unlock()
 	if !ok {
 		return nil, fault("open", Disconnected, false, errors.New("unknown or stale enumeration identity"))
+	}
+	if b.prepare != nil && (!strings.EqualFold(a.info.Driver, "WinUSB") || len(a.paths) == 0) {
+		if err := b.revalidate(ctx, a); err != nil {
+			return nil, err
+		}
+		var err error
+		a, err = b.prepare(ctx, a)
+		if err != nil {
+			return nil, fault("configure WinUSB", Binding, false, err)
+		}
 	}
 	if !strings.EqualFold(a.info.Driver, "WinUSB") {
 		driver := a.info.Driver

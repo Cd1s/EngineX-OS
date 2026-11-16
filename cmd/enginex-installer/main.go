@@ -1182,8 +1182,8 @@ func diagnoseUSB(ctx context.Context, o *options) {
 	zh, en := "碟机已连接（"+dev+"），但更新协议尚不可用。请在碟机上选择 Firmware Update Mode，保持 USB 连接。",
 		"The deck is connected ("+dev+") but the update protocol is not available. Select Firmware Update Mode on the deck and keep USB connected."
 	if goos == "windows" {
-		zh += "更新接口需要绑定系统内置的 WinUSB 驱动；本工具不会更改驱动。"
-		en += " The update interface must use the in-box WinUSB driver; this tool does not change drivers."
+		zh += "本工具会自动为支持的更新接口配置 Windows 内置 WinUSB 驱动，需要时请批准管理员授权。"
+		en += " This tool automatically configures the in-box WinUSB driver for supported update interfaces; approve administrator access if requested."
 	} else if goos == "linux" && geteuid() != 0 {
 		zh += "若提示权限不足，请用 sudo 运行本工具。"
 		en += " For a permission error, run this tool with sudo."
@@ -1311,6 +1311,11 @@ func confirm(o *options, zh, en string) error {
 	return nil
 }
 
+func confirmFreshData(o *options, partition string) error {
+	return confirm(o, "即将刷写全新的 "+partition+" 分区：碟机内置存储上的所有音乐、曲库和设置将被清空（外接 U 盘/SD 卡不受影响）。引导程序无法读取备份，本工具无法先备份；如需保留数据，请取消并在碟机正常开机时备份。解锁后后续升级请使用 OTA，保留数据。",
+		"This flashes a brand-new "+partition+" partition: ALL music, library and settings on the deck's internal storage are erased (USB drives and SD cards are not). The bootloader cannot read a backup; this tool cannot back up first. Cancel and back up from the running deck if you need to keep them. After unlocking, use OTA for later updates to keep your data.")
+}
+
 func modeB(ctx context.Context, o *options, session *updateSession) error {
 	board := session.board
 	m, gen2, ok := lookupBoard(board)
@@ -1351,7 +1356,7 @@ func modeB(ctx context.Context, o *options, session *updateSession) error {
 	}
 	defer os.RemoveAll(filepath.Dir(img))
 	if fresh {
-		err = confirm(o, "即将刷写全新的 "+part+" 分区：碟机上的音乐、曲库和设置会全部清空！", "This flashes a brand-new "+part+" partition: ALL music, library and settings on the deck are erased!")
+		err = confirmFreshData(o, part)
 	} else {
 		err = confirm(o, "即将把 "+img+" 刷入 "+part+" 分区，必须是这台碟机的 data 备份。", "This flashes "+img+" to "+part+"; it must be a backup of this deck's data.")
 	}
@@ -1598,8 +1603,7 @@ func modeAZ(ctx context.Context, o *options, session *updateSession, board, line
 	}
 	defer os.RemoveAll(filepath.Dir(img))
 	if fresh {
-		err = confirm(o, "即将刷写全新的 data 分区：碟机内置存储上的音乐、曲库和设置会全部清空（外接 U 盘/SD 卡不受影响）！",
-			"This flashes a brand-new data partition: ALL music, library and settings on the deck's internal storage are erased (USB drives and SD cards are not)!")
+		err = confirmFreshData(o, "data")
 	} else {
 		err = confirm(o, "即将把 "+img+" 刷入 data 分区，必须是这台碟机的 data 备份。", "This flashes "+img+" to data; it must be a backup of this deck's data.")
 	}
