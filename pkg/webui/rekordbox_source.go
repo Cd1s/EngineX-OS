@@ -14,6 +14,7 @@ import (
 	"crypto/sha1"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -38,6 +39,7 @@ const (
 	rbxCacheDir    = ".rekordbox-cache"
 	rbxMaxFile     = 1 << 30
 	rbxProbeTime   = 3 * time.Second
+	rbxCopyTime    = 15 * time.Minute
 	rbxPortmap     = 50111
 )
 
@@ -343,8 +345,9 @@ func (g *tidalGateway) rbxPrepare(ctx context.Context, id int64, ref trackRef) (
 	return ref, nil
 }
 
-// rbxStage copies a track from the computer's NFS export to a drive's cache folder, within
-// the Pro DJ Link staging budget; the oldest copies make room.
+// rbxStage starts the copy of a track from the computer's NFS export into a drive's cache
+// folder, within the Pro DJ Link staging budget (the oldest copies make room), and returns
+// the file it will be: the copy goes on while the manifest and stream requests are answered.
 func (g *tidalGateway) rbxStage(ctx context.Context, c *prolink.NFSClient, ip, rbPath string) (file, root string, err error) {
 	p := rbxPath(rbPath)
 	_, info, err := c.Lookup(ctx, rbxExport, p)
@@ -377,24 +380,159 @@ func (g *tidalGateway) rbxStage(ctx context.Context, c *prolink.NFSClient, ip, r
 		}
 		name := fmt.Sprintf("%x%s", sha1.Sum(fmt.Appendf(nil, "%s %s %d %d", ip, p, info.Size, info.MTime)), strings.ToLower(path.Ext(p)))
 		file = filepath.Join(cache, name)
-		if st, err := os.Stat(file); err == nil && st.Size() == int64(info.Size) {
-			return file, dir, nil
+		// A copy that finished is a file; one that runs is joined. Both are decided under the lock
+		// a finishing copy takes to leave the table, after it has moved its file into place.
+		rbxCopies.Lock()
+		if rbxCopies.m[file] == nil {
+			if st, err := os.Stat(file); err == nil && st.Size() == int64(info.Size) {
+				rbxCopies.Unlock()
+				return file, dir, nil
+			}
+			tmp, err := os.CreateTemp(cache, ".fetch-*")
+			if err != nil {
+				rbxCopies.Unlock()
+				continue
+			}
+			cp := &rbxCopy{file: file, tmp: tmp.Name(), size: int64(info.Size)}
+			cp.more = sync.NewCond(&cp.mu)
+			rbxCopies.m[file] = cp
+			go cp.run(c, p, tmp)
 		}
-		tmp, err := os.CreateTemp(cache, ".fetch-*")
-		if err != nil {
-			continue
-		}
-		defer os.Remove(tmp.Name())
-		_, err = c.FetchTo(ctx, rbxExport, p, tmp, rbxMaxFile)
-		if cerr := tmp.Close(); err == nil {
-			err = cerr
-		}
-		if err != nil {
-			return "", "", err
-		}
-		return file, dir, os.Rename(tmp.Name(), file)
+		rbxCopies.Unlock()
+		return file, dir, nil
 	}
 	return "", "", errors.New(g.s.rbxText("noroom"))
+}
+
+// rbxCopy is a track being copied from the computer's NFS export into the cache. It goes on
+// when the request that started it gives up (the next try finds the file there), and a stream
+// request is answered from what has arrived while the rest comes.
+type rbxCopy struct {
+	file, tmp string
+	size      int64
+	mu        sync.Mutex
+	more      *sync.Cond
+	got       int64
+	done      bool
+	err       error
+}
+
+var rbxCopies = struct {
+	sync.Mutex
+	m map[string]*rbxCopy
+}{m: map[string]*rbxCopy{}}
+
+// rbxRunning is the copy still running into file, or nil.
+func rbxRunning(file string) *rbxCopy {
+	rbxCopies.Lock()
+	defer rbxCopies.Unlock()
+	return rbxCopies.m[file]
+}
+
+// rbxWriter counts what reached the file, for the readers waiting on it.
+type rbxWriter struct {
+	cp *rbxCopy
+	f  *os.File
+}
+
+func (w rbxWriter) Write(b []byte) (int, error) {
+	n, err := w.f.Write(b)
+	w.cp.mu.Lock()
+	w.cp.got += int64(n)
+	w.cp.mu.Unlock()
+	w.cp.more.Broadcast()
+	return n, err
+}
+
+func (cp *rbxCopy) run(c *prolink.NFSClient, p string, tmp *os.File) {
+	started := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), rbxCopyTime)
+	defer cancel()
+	_, err := c.FetchTo(ctx, rbxExport, p, rbxWriter{cp, tmp}, rbxMaxFile)
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(cp.tmp, cp.file)
+	}
+	if err != nil {
+		os.Remove(cp.tmp)
+	}
+	cp.mu.Lock()
+	cp.done, cp.err = true, err
+	got := cp.got
+	cp.mu.Unlock()
+	cp.more.Broadcast()
+	log.Printf("stream-sync: provider=rekordbox step=copy ok=%t bytes=%d of=%d elapsed=%s", err == nil, got, cp.size, time.Since(started).Round(time.Millisecond))
+	rbxCopies.Lock()
+	delete(rbxCopies.m, cp.file)
+	rbxCopies.Unlock()
+}
+
+// serve answers a stream request, Range included, as bytes arrive.
+func (cp *rbxCopy) serve(w http.ResponseWriter, r *http.Request) {
+	f, err := os.Open(cp.tmp)
+	if err != nil { // it finished and moved into place meanwhile
+		http.ServeFile(w, r, cp.file)
+		return
+	}
+	defer f.Close()
+	defer context.AfterFunc(r.Context(), func() {
+		cp.mu.Lock() // a reader is before its check or already waiting, never between
+		cp.mu.Unlock()
+		cp.more.Broadcast()
+	})()
+	http.ServeContent(w, r, "", time.Time{}, &rbxReader{cp: cp, f: f, ctx: r.Context()})
+}
+
+// rbxReader reads a copy that is still running: a read past what has arrived waits for it.
+type rbxReader struct {
+	cp  *rbxCopy
+	f   *os.File
+	ctx context.Context
+	pos int64
+}
+
+func (r *rbxReader) Read(p []byte) (int, error) {
+	cp := r.cp
+	if r.pos >= cp.size {
+		return 0, io.EOF
+	}
+	cp.mu.Lock()
+	for r.pos >= cp.got && !cp.done && r.ctx.Err() == nil {
+		cp.more.Wait()
+	}
+	got, err := cp.got, cp.err
+	cp.mu.Unlock()
+	if r.pos >= got {
+		if err == nil {
+			err = r.ctx.Err()
+		}
+		if err == nil {
+			err = io.ErrUnexpectedEOF
+		}
+		return 0, err
+	}
+	n, err := r.f.ReadAt(p[:min(int64(len(p)), got-r.pos)], r.pos)
+	r.pos += int64(n)
+	if n > 0 {
+		err = nil
+	}
+	return n, err
+}
+
+func (r *rbxReader) Seek(off int64, whence int) (int64, error) {
+	switch whence {
+	case io.SeekCurrent:
+		off += r.pos
+	case io.SeekEnd:
+		off += r.cp.size
+	}
+	if off < 0 {
+		return 0, errors.New("negative position")
+	}
+	r.pos = off
+	return off, nil
 }
 
 // dropOldest removes the oldest copy in cache; false when there is none.
@@ -403,7 +541,8 @@ func dropOldest(cache string) bool {
 	var oldest string
 	var at time.Time
 	for _, e := range entries {
-		if st, err := e.Info(); err == nil && e.Type().IsRegular() && (oldest == "" || st.ModTime().Before(at)) {
+		// A copy still running is not the oldest of anything.
+		if st, err := e.Info(); err == nil && e.Type().IsRegular() && !strings.HasPrefix(e.Name(), ".fetch-") && (oldest == "" || st.ModTime().Before(at)) {
 			oldest, at = filepath.Join(cache, e.Name()), st.ModTime()
 		}
 	}

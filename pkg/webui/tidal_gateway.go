@@ -1928,16 +1928,20 @@ func (g *tidalGateway) stream(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 	log.Printf("stream-sync: load track=%d provider=%s scope=%s step=stream result=request", id, ref.track.Provider, g.s.scope())
 	if ref.file != "" { // OmniSource: straight from the drive, with Range
+		mime := map[string]string{"flac": "audio/flac", "mp3": "audio/mpeg"}[localCodecs[strings.ToLower(path.Ext(ref.file))]]
+		if mime == "" {
+			mime = "audio/mp4"
+		}
+		w.Header().Set("Content-Type", mime)
+		if cp := rbxRunning(ref.file); cp != nil { // a rekordbox track still being copied
+			cp.serve(w, r)
+			return
+		}
 		p, err := localFile(ref)
 		if err != nil {
 			fail(w, 404, err)
 			return
 		}
-		mime := map[string]string{"flac": "audio/flac", "mp3": "audio/mpeg"}[localCodecs[strings.ToLower(path.Ext(p))]]
-		if mime == "" {
-			mime = "audio/mp4"
-		}
-		w.Header().Set("Content-Type", mime)
 		http.ServeFile(w, r, p)
 		return
 	}
