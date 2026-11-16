@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/Cd1s/EngineX-OS/pkg/deemixclient"
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
@@ -74,11 +75,11 @@ func stemsImportFile(cache string, t providers.Track) string {
 	if artist == "" {
 		artist = strings.Join(t.Artists, ", ")
 	}
-	name := stemsFileName(artist, t.Title)
+	ext := filepath.Ext(cache)
+	name := stemsFileName(artist, t.Title, ext)
 	if name == "" {
 		return cache
 	}
-	ext := filepath.Ext(cache)
 	dir := filepath.Join(filepath.Dir(cache), "Stems", strings.TrimSuffix(filepath.Base(cache), ext))
 	named := filepath.Join(dir, name+ext)
 	if st, err := os.Stat(named); err == nil && st.Mode().IsRegular() {
@@ -103,8 +104,10 @@ func stemsImportFile(cache string, t providers.Track) string {
 
 // stemsFileName is "Artist - Title" as a file name the UI can put in a file:
 // URL as it is: no path separator, and none of '#', '?' and '%', which
-// encodeURI leaves alone or which would start a fragment or query.
-func stemsFileName(artist, title string) string {
+// encodeURI leaves alone or which would start a fragment or query. With ext it
+// is at most 255 bytes, the longest name a file system takes, and it is cut
+// between characters: 80 emoji are 320 bytes, and the link then failed.
+func stemsFileName(artist, title, ext string) string {
 	clean := func(s string) string {
 		s = strings.Map(func(r rune) rune {
 			if r < 0x20 || r == 0x7f || strings.ContainsRune(`/\#?%`, r) {
@@ -118,8 +121,11 @@ func stemsFileName(artist, title string) string {
 	if a := clean(artist); a != "" && name != "" {
 		name = a + " - " + name
 	}
-	if r := []rune(name); len(r) > 80 {
-		name = strings.TrimSpace(string(r[:80]))
+	if limit := max(255-len(ext), 0); len(name) > limit {
+		for limit > 0 && !utf8.RuneStart(name[limit]) {
+			limit--
+		}
+		name = name[:limit]
 	}
 	return strings.Trim(name, ". ")
 }

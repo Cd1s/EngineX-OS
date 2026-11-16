@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/Cd1s/EngineX-OS/pkg/deemixclient"
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
@@ -190,5 +191,43 @@ func TestStemsListSaysWhenStemsAreNotReady(t *testing.T) {
 	os.WriteFile(filepath.Join(lib, "Stems", "258 ad42124b.stems"), []byte("stems"), 0o644)
 	if got = titles(); got[0] != "冲动的惩罚|true" {
 		t.Fatalf("after the render: %q", got[0])
+	}
+}
+
+// A file name is at most 255 bytes, not 255 characters: a title of 80 emoji
+// is 320 bytes. The name was cut by characters, the link failed with "name
+// too long" and Engine got the id-named download again.
+func TestStemsSourceNameFitsAFileName(t *testing.T) {
+	uiDir, stateDir, dl := t.TempDir(), t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(dl, "spotify-long.ogg"), []byte("OggS-fake-vorbis"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dl, "spotify-cjk.ogg"), []byte("OggS-fake-vorbis"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	jobs := NewJobs(Pipeline{Catalog: noCatalog{}, Deemix: &deemixclient.Client{DownloadDir: dl, AllowLossy: true}})
+	t.Cleanup(jobs.Close)
+	s := New(Config{AccessToken: "code", UIDir: uiDir, StateDir: stateDir}, jobs)
+	t.Cleanup(s.Close)
+	for id, title := range map[string]string{"long": strings.Repeat("\U0001F3B5", 80), "cjk": strings.Repeat("冲动的惩罚", 30)} {
+		gid := strconv.FormatInt(s.tidal.addTrack(trackRef{track: providers.Track{ID: id, Title: title, Artist: "刀郎", Provider: "spotify"}}), 10)
+		req := httptest.NewRequest("GET", "/v1/enginex/stems/source?id="+gid, nil)
+		req.RemoteAddr = "127.0.0.1:41000"
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, req)
+		var src struct{ Path string }
+		if json.Unmarshal(w.Body.Bytes(), &src); w.Code != 200 || src.Path == "" {
+			t.Fatalf("%s: %d %s", id, w.Code, w.Body.String())
+		}
+		name := filepath.Base(src.Path)
+		if filepath.Dir(src.Path) != filepath.Join(dl, "Stems", "spotify-"+id) || !strings.HasPrefix(name, "刀郎 - ") || !strings.HasSuffix(name, ".ogg") {
+			t.Fatalf("%s: Engine gets %q, not a named file", id, src.Path)
+		}
+		if len(name) > 255 || len(name) < 240 || !utf8.ValidString(name) {
+			t.Fatalf("%s: name of %d bytes, valid UTF-8 %v", id, len(name), utf8.ValidString(name))
+		}
+		if st, err := os.Stat(src.Path); err != nil || !st.Mode().IsRegular() {
+			t.Fatalf("%s: %v", id, err)
+		}
 	}
 }
