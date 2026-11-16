@@ -20,10 +20,10 @@ const (
 )
 
 type patternState struct {
-	BPM        float64                `json:"bpm"`
-	Division   string                 `json:"division"`
-	Swing      int                    `json:"swing"`
-	FollowDeck bool                   `json:"followDeck"`
+	BPM        float64                  `json:"bpm"`
+	Division   string                   `json:"division"`
+	Swing      int                      `json:"swing"`
+	FollowDeck bool                     `json:"followDeck"`
 	Steps      [numSlots][numSteps]bool `json:"steps"`
 }
 
