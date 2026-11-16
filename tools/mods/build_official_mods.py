@@ -78,6 +78,13 @@ MODS = [
          description=tri("低优先级 (nice 19) ALSA Sequencer helper 与按需 60 Hz QML 桥接（未启用时零轮询），将外部 USB MIDI 控制器直接映射到四轨模式下的内部 Deck 3/4，无需切换硬件 Layer。含 CDJ-400 连续速度转盘积分器 (64=停止)、带 ▲▼ 指示的变速推子软接管、热拔插与 MIDI 风暴自动停用保护。CDJ-400 标准 USB MIDI 模式不接收外部 Note/CC LED 回传，状态与 ▲▼ 指示显示在屏幕上。需实机验证。", "低優先級 (nice 19) ALSA Sequencer helper 與按需 60 Hz QML 橋接（未啟用時零輪詢），將外部 USB MIDI 控制器直接映射至四軌模式下的內部 Deck 3/4，無須切換硬體 Layer。含 CDJ-400 連續速度轉盤積分器 (64=停止)、帶 ▲▼ 指示的變速推桿軟接管、熱拔插與 MIDI 風暴自動停用保護。CDJ-400 標準 USB MIDI 模式不接收外部 Note/CC LED 回傳，狀態與 ▲▼ 指示顯示於螢幕上。須實機驗證。", "Low-priority (nice 19) ALSA Sequencer helper and on-demand 60 Hz QML bridge (zero polling when disabled) mapping external USB MIDI controllers directly to internal Deck 3/4 in 4-deck mode without switching hardware layers. Includes CDJ-400 continuous velocity jog time-integration (64=stop), tempo slider soft takeover with ▲▼ indicators, and hot-unplug/storm auto-disable. CDJ-400 in standard USB MIDI mode does not accept external MIDI Note/CC LED feedback; status and ▲▼ indicators are shown on screen. Hardware validation pending."),
          initialComments=[comment("Djpd66", "connect a USB MIDI controller (Pioneer CDJ-400) to control Deck 3/4", 137, "", "2026-11-10")],
          ),
+    dict(id="sampler-sequencer", version="1.0.0", category="sampler", issueNumber=293,
+         author="EngineX Official", tags=["Sampler", "Sequencer", "8-Step", "Clock"],
+         name=tri("8 步采样步进音序器", "8 步取樣步進音序器", "8-Step Sampler Sequencer"),
+         summary=tri("8×8 采样步进音序器，支持 1/4·1/8·1/16 分频、摇摆与 MASTER 跟随。", "8×8 取樣步進音序器，支援 1/4·1/8·1/16 分頻、搖擺與 MASTER 跟隨。", "8×8 step sequencer for built-in sampler slots with 1/4·1/8·1/16 division, swing, and MASTER clock follow."),
+         description=tri("基于公开 /Engine/Sampler<N>/Triggered 与 Loaded/Playing 状态的 8 步×8 槽采样步进音序器。支持 Play/Stop、1/4·1/8·1/16 步进分频、摇摆、跟随 MASTER 碟机节拍（/v1/enginex/clock，自动回退 /v1/sc5000/clock）与手动 BPM 回退，并将音序样式持久化在 Mod 自有状态目录中。不触碰音频线程。", "基於公開 /Engine/Sampler<N>/Triggered 與 Loaded/Playing 狀態的 8 步×8 槽取樣步進音序器。支援 Play/Stop、1/4·1/8·1/16 步進分頻、搖擺、跟隨 MASTER 播放機節拍（/v1/enginex/clock，自動回退 /v1/sc5000/clock）與手動 BPM 回退，並將音序樣式持久化於 Mod 自有狀態目錄中。不觸碰音訊執行緒。", "8-step × 8-slot pattern sequencer using public /Engine/Sampler<N>/Triggered, Loaded, and Playing state. Supports Play/Stop, 1/4·1/8·1/16 division, swing, MASTER deck tempo following (/v1/enginex/clock with /v1/sc5000/clock fallback) plus manual BPM fallback, and persists the pattern in the Mod's own state directory without touching the audio thread."),
+         initialComments=[],
+         ),
 ]
 
 

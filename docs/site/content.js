@@ -701,6 +701,10 @@
             "校驗通過後，點擊 **「提交到 GitHub 開源 Mod 倉庫」** 即可一鍵發佈並開啟社群打星與評論。",
             "Once validated, click **Submit to the GitHub mod repo** to publish and open community ratings and comments."),
         ] },
+        { k: "h", id: "sampler-trigger", x: L("公开采样器触发路径（供 Mod 开发者参考）", "公開取樣器觸發路徑（供 Mod 開發者參考）", "Public Sampler Trigger Path (for Mod Authors)") },
+        { k: "p", x: L("内置采样器 1–8 号槽位在 QML 中通过公开 Planck/StateMap 属性暴露（已在 `5.0.4` Gen-1、`5.3.0` Gen-2 与 `AZ04` / SC LIVE 4 上验证，无需 hook 音频线程）：读取 `/Engine/Sampler<N>/Loaded` 与 `/Engine/Sampler<N>/Playing`（`translator.state`）判断槽位是否已加载与正在播放；写入 `/Engine/Sampler<N>/Triggered`（`translator.state = true`）即可触发播放，写入 `/Engine/Sampler<N>/Stop`（`translator.state = true`）可停止播放。如需跟随 MASTER 节拍，请优先请求 `/v1/enginex/clock`，仅在 HTTP 404 时回退 `/v1/sc5000/clock`（5.3.0.4 旧版本兼容）。",
+          "內建取樣器 1–8 號槽位在 QML 中透過公開 Planck/StateMap 屬性暴露（已在 `5.0.4` Gen-1、`5.3.0` Gen-2 與 `AZ04` / SC LIVE 4 上驗證，無須 hook 音訊執行緒）：讀取 `/Engine/Sampler<N>/Loaded` 與 `/Engine/Sampler<N>/Playing`（`translator.state`）判斷槽位是否已載入與正在播放；寫入 `/Engine/Sampler<N>/Triggered`（`translator.state = true`）即可觸發播放，寫入 `/Engine/Sampler<N>/Stop`（`translator.state = true`）可停止播放。如需跟隨 MASTER 節拍，請優先請求 `/v1/enginex/clock`，僅在 HTTP 404 時回退 `/v1/sc5000/clock`（5.3.0.4 舊版本相容）。",
+          "Built-in sampler slots `1..8` are exposed to QML via public Planck/StateMap properties (verified on `5.0.4` Gen-1, `5.3.0` Gen-2, and `AZ04` / SC LIVE 4 without audio-thread hooks): read `/Engine/Sampler<N>/Loaded` and `/Engine/Sampler<N>/Playing` (`translator.state`) for slot state, write `/Engine/Sampler<N>/Triggered` (`translator.state = true`) to trigger playback, and write `/Engine/Sampler<N>/Stop` (`translator.state = true`) to stop. For MASTER tempo following, call `/v1/enginex/clock` first and fall back to `/v1/sc5000/clock` on HTTP 404 (for `5.3.0.4` decks).") },
       ],
     },
 

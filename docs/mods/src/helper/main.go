@@ -34,7 +34,7 @@ import (
 // Ports are fixed: each Panel.qml talks to its own.
 var ports = map[string]int{"dmx-studio": 17834, "jog-logo-studio": 17835,
 	"sampler-pad-studio": 17836, "minimal-club-mode": 17837,
-	"midi-controller-mapper": 17838}
+	"midi-controller-mapper": 17838, "sampler-sequencer": 17839}
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stderr))
