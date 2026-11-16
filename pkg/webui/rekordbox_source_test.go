@@ -32,8 +32,8 @@ var rbxAsked struct {
 	players []byte
 }
 
-func (f fakeRbxLink) Tracks() ([]prolink.RekordboxItem, error) {
-	return []prolink.RekordboxItem{{ID: 1, Kind: 4, Label: "First"}, {ID: 2, Kind: 4, Label: "Second"}}, nil
+func (f fakeRbxLink) Tracks() ([]prolink.RekordboxTrack, error) {
+	return []prolink.RekordboxTrack{{ID: 1, Title: "First", Artist: "Artist One", BPM: 128, Key: "Am"}, {ID: 2, Title: "Second", Key: "odd key"}}, nil
 }
 func (f fakeRbxLink) Playlists(folder uint32) ([]prolink.RekordboxItem, error) {
 	if folder == 7 {
@@ -41,8 +41,8 @@ func (f fakeRbxLink) Playlists(folder uint32) ([]prolink.RekordboxItem, error) {
 	}
 	return []prolink.RekordboxItem{{ID: 7, Kind: prolink.RekordboxFolder, Label: "Sets"}}, nil
 }
-func (f fakeRbxLink) PlaylistTracks(id uint32) ([]prolink.RekordboxItem, error) {
-	return []prolink.RekordboxItem{{ID: 2, Kind: 4, Label: "Second"}}, nil
+func (f fakeRbxLink) PlaylistTracks(id uint32) ([]prolink.RekordboxTrack, error) {
+	return []prolink.RekordboxTrack{{ID: 2, Title: "Second"}}, nil
 }
 func (f fakeRbxLink) Path(id uint32) (string, error) {
 	if p, ok := f.paths[id]; ok {
@@ -462,5 +462,33 @@ func TestRekordboxServeAnswersFromTheCopyAsBytesArrive(t *testing.T) {
 		if rec.Code != want || rec.Body.String() != tc.body || rec.Header().Get("Content-Length") != strconv.Itoa(len(tc.body)) {
 			t.Fatalf("%q: %d %q length %s", tc.rng, rec.Code, rec.Body.String(), rec.Header().Get("Content-Length"))
 		}
+	}
+}
+
+func TestRekordboxRowsShowArtistTempoAndKey(t *testing.T) {
+	e := newRbxEnv(t, nil)
+	var lists tidalList
+	tidalGet(t, e.base, "/v1/users/1/playlists", 200, &lists)
+	var all tidalPlaylist
+	json.Unmarshal(lists.Items[0], &all)
+	var tracks struct {
+		Items []struct {
+			Item struct {
+				Title     string
+				BPM       int
+				Copyright string
+				Artist    struct{ Name string }
+			}
+		}
+	}
+	tidalGet(t, e.base, "/v1/playlists/"+all.UUID+"/tracks", 200, &tracks)
+	first, second := tracks.Items[0].Item, tracks.Items[1].Item
+	// Am is 8A on the wheel; the label is what the deck's list moves into its BPM and Key columns.
+	if first.Artist.Name != "Artist One" || first.BPM != 128 || first.Copyright != " [128 BPM 8A]" {
+		t.Fatalf("first row: %+v", first)
+	}
+	// A key the wheel does not know is left out, and with no tempo there is no label at all.
+	if second.Artist.Name != "" || second.BPM != 0 || second.Copyright != "" {
+		t.Fatalf("second row: %+v", second)
 	}
 }

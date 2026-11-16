@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"io"
 	"net"
+	"reflect"
 	"strconv"
 	"sync"
 	"testing"
@@ -20,10 +21,14 @@ type fakeRekordbox struct {
 	rows  map[uint16][]dbItem
 	none  uint16 // a request answered with "no results"
 	blobs map[uint16][]byte
-	mu    sync.Mutex
-	seen  []dbMessage
-	bye   chan struct{}
-	query net.Listener
+	// sorted is what a track list answers to a sort order (the second request argument), and
+	// failing sort orders are answered "unavailable".
+	sorted map[uint32][]dbItem
+	failed map[uint32]bool
+	mu     sync.Mutex
+	seen   []dbMessage
+	bye    chan struct{}
+	query  net.Listener
 }
 
 func newFakeRekordbox(t *testing.T, rows map[uint16][]dbItem) *fakeRekordbox {
@@ -100,6 +105,14 @@ func (f *fakeRekordbox) serve(c net.Conn) {
 			c.Write(compactWire(m.tx, reply, dbNumber(uint32(m.kind)), dbNumber(status), dbNumber(uint32(len(blob))), dbField{tag: 0x14, data: blob}, dbNumber(1)))
 		default:
 			pending = f.rows[m.kind]
+			if sort := uint32(0); len(m.args) > 1 && (m.kind == 0x1004 || m.kind == 0x1105) && m.args[1].n != 0 {
+				sort = m.args[1].n
+				if f.failed[sort] {
+					c.Write(compactWire(m.tx, 0x4003, dbNumber(uint32(m.kind))))
+					continue
+				}
+				pending = f.sorted[sort]
+			}
 			if m.kind == f.none {
 				c.Write(compactWire(m.tx, 0x4000, dbNumber(uint32(m.kind)), dbNumber(0xffffffff)))
 				continue
@@ -125,7 +138,7 @@ func TestRekordboxLinkBrowsesAndReadsThePath(t *testing.T) {
 		t.Fatal(err)
 	}
 	all, err := l.Tracks()
-	if err != nil || len(all) != 150 || all[149].ID != 150 || all[0].Label != "Track 1" {
+	if err != nil || len(all) != 150 || all[149].ID != 150 || all[0].Title != "Track 1" {
 		t.Fatalf("tracks: %d %v", len(all), err)
 	}
 	lists, err := l.Playlists(0)
@@ -267,5 +280,63 @@ func TestRekordboxLinkAsksAsTheDecksOwnPlayer(t *testing.T) {
 			}
 		}
 		f.mu.Unlock()
+	}
+}
+
+func TestRekordboxTracksJoinArtistTempoAndKeyByIDInTheListsOrder(t *testing.T) {
+	// The plain list is B, A, C. Each sort order lists the tracks in its own order and puts its
+	// column in the second text, named by the kind's high byte; A has no tempo row.
+	f := newFakeRekordbox(t, map[uint16][]dbItem{0x1004: {{id: 2, kind: 4, label: "B"}, {id: 1, kind: 4, label: "A"}, {id: 3, kind: 4, label: "C"}}})
+	f.sorted = map[uint32][]dbItem{
+		2:  {{id: 1, kind: 0x0704, label: "A", secondary: "Artist One"}, {id: 2, kind: 0x0704, label: "B", secondary: "Artist Two"}, {id: 3, kind: 0x0704, label: "C"}},
+		4:  {{id: 3, kind: 0x0d04, label: "C", secondary: "\ufffa95.50\ufffb"}, {id: 2, kind: 0x0d04, label: "B", secondary: "128.00"}},
+		12: {{id: 2, kind: 0x0f04, label: "B", secondary: " 8A "}, {id: 1, kind: 0x0004, label: "A", secondary: "stays unread"}},
+	}
+	l, err := dialRekordbox(context.Background(), net.IPv4(127, 0, 0, 1), f.port(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	got, err := l.Tracks()
+	want := []RekordboxTrack{{ID: 2, Title: "B", Artist: "Artist Two", BPM: 128, Key: "8A"}, {ID: 1, Title: "A", Artist: "Artist One"}, {ID: 3, Title: "C", BPM: 95.5}}
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("joined rows: %+v %v", got, err)
+	}
+	lists := 0
+	f.mu.Lock()
+	for _, m := range f.seen {
+		if m.kind == 0x1004 {
+			lists++
+		}
+	}
+	f.mu.Unlock()
+	if lists != 4 { // the plain list and three sort orders, never one request per row
+		t.Fatalf("%d track list requests", lists)
+	}
+}
+
+func TestRekordboxPlaylistTracksJoinAndATrackTwice(t *testing.T) {
+	f := newFakeRekordbox(t, map[uint16][]dbItem{0x1105: {{id: 5, kind: 4, label: "Loop"}, {id: 6, kind: 4, label: "Tune"}, {id: 5, kind: 4, label: "Loop"}}})
+	f.sorted = map[uint32][]dbItem{4: {{id: 5, kind: 0x0d04, secondary: "120.00"}, {id: 6, kind: 0x0d04, secondary: "no number"}}}
+	f.failed = map[uint32]bool{12: true} // a column rekordbox will not give: the others stay
+	l, err := dialRekordbox(context.Background(), net.IPv4(127, 0, 0, 1), f.port(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	got, err := l.PlaylistTracks(9)
+	if err == nil {
+		t.Fatal("the refused sort order is not reported")
+	}
+	if len(got) != 3 || got[0].BPM != 120 || got[1].BPM != 0 || got[2].BPM != 120 || got[2].Title != "Loop" {
+		t.Fatalf("the same track twice, and no tempo where the text has no number: %+v", got)
+	}
+}
+
+func TestRbxTempoReadsTheFirstNumberThatIsATempo(t *testing.T) {
+	for in, want := range map[string]float64{"128.00": 128, "\ufffa174.5\ufffb": 174.5, "98": 98, "": 0, "--": 0, "0.00": 0, "12800": 0} {
+		if got := rbxTempo(in); got != want {
+			t.Errorf("%q: %v, want %v", in, got, want)
+		}
 	}
 }

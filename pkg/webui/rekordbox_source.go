@@ -29,6 +29,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 	"github.com/Cd1s/EngineX-OS/pkg/prolink"
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
 	"golang.org/x/text/unicode/norm"
@@ -48,9 +49,9 @@ const (
 var uiScopes = append(slices.Clone(uiServices), rekordboxScope)
 
 type rbxLink interface {
-	Tracks() ([]prolink.RekordboxItem, error)
+	Tracks() ([]prolink.RekordboxTrack, error)
 	Playlists(uint32) ([]prolink.RekordboxItem, error)
-	PlaylistTracks(uint32) ([]prolink.RekordboxItem, error)
+	PlaylistTracks(uint32) ([]prolink.RekordboxTrack, error)
 	Path(uint32) (string, error)
 	Close()
 }
@@ -199,7 +200,7 @@ func (g *tidalGateway) rbxPlaylists(ctx context.Context, add func(map[string]any
 }
 
 // rbxRows reads a list of the computer's tracks, and where the first one's file is.
-func (g *tidalGateway) rbxRows(ctx context.Context, ip, list string) ([]prolink.RekordboxItem, string, error) {
+func (g *tidalGateway) rbxRows(ctx context.Context, ip, list string) ([]prolink.RekordboxTrack, string, error) {
 	rbxSession.Lock()
 	defer rbxSession.Unlock()
 	link, err := dialRekordbox(ctx, net.ParseIP(ip), deckPlayer(g.s))
@@ -207,7 +208,7 @@ func (g *tidalGateway) rbxRows(ctx context.Context, ip, list string) ([]prolink.
 		return nil, "", err
 	}
 	defer link.Close()
-	var rows []prolink.RekordboxItem
+	var rows []prolink.RekordboxTrack
 	if list == "all" {
 		rows, err = link.Tracks()
 	} else {
@@ -232,8 +233,13 @@ func (g *tidalGateway) rbxTracks(w http.ResponseWriter, r *http.Request, ref pla
 		return
 	}
 	refs := make([]trackRef, len(rows))
-	for i, it := range rows {
-		refs[i] = trackRef{track: providers.Track{ID: "rbx\x00" + ip + "\x00" + strconv.FormatUint(uint64(it.ID), 10), Title: it.Label, Provider: rekordboxScope}}
+	for i, t := range rows {
+		// The list shows the key as the wheel notation or not at all: its tempo column reads nothing else.
+		key := ""
+		if n, mode, ok := enginedb.Camelot(t.Key); ok {
+			key = fmt.Sprintf("%d%c", n, mode)
+		}
+		refs[i] = trackRef{track: providers.Track{ID: "rbx\x00" + ip + "\x00" + strconv.FormatUint(uint64(t.ID), 10), Title: t.Title, Artist: t.Artist, BPM: t.BPM, Key: key, Provider: rekordboxScope}}
 	}
 	items := g.refItems(refs)
 	if first != "" {

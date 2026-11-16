@@ -38,10 +38,20 @@ const (
 	rbxPath           = 0
 )
 
-// RekordboxItem is one menu row: a track, a playlist or a folder.
+// RekordboxItem is one menu row: a track, a playlist or a folder. Second is the row's second
+// text, which a track list's sort order turns into the artist, the tempo or the key.
 type RekordboxItem struct {
-	ID, Kind uint32
-	Label    string
+	ID, Kind      uint32
+	Label, Second string
+}
+
+// RekordboxTrack is a row of a track list with its artist, tempo and key. Artist and key are
+// empty and BPM 0 where rekordbox has none, or did not say.
+type RekordboxTrack struct {
+	ID            uint32
+	Title, Artist string
+	BPM           float64
+	Key           string
 }
 
 // RekordboxLink is one dbserver session with a computer running rekordbox. Not for
@@ -181,15 +191,21 @@ func (l *RekordboxLink) menu(kind uint16, args ...uint32) ([]RekordboxItem, erro
 			if i == n || m.kind != 0x4101 || len(m.args) < 7 || m.args[3].tag != 0x26 {
 				return items, errors.New("prolink: malformed rekordbox menu row")
 			}
-			label := strings.TrimSuffix(strings.TrimPrefix(m.args[3].text(), "\ufffa"), "\ufffb")
-			items = append(items, RekordboxItem{ID: m.args[1].n, Kind: m.args[6].n, Label: label})
+			clean := func(f dbField) string { return strings.TrimSuffix(strings.TrimPrefix(f.text(), "\ufffa"), "\ufffb") }
+			item := RekordboxItem{ID: m.args[1].n, Kind: m.args[6].n, Label: clean(m.args[3])}
+			if len(m.args) > 5 && m.args[5].tag == 0x26 {
+				item.Second = clean(m.args[5])
+			}
+			items = append(items, item)
 		}
 	}
 	return items, nil
 }
 
-// Tracks lists every track of the collection.
-func (l *RekordboxLink) Tracks() ([]RekordboxItem, error) { return l.menu(0x1004, 0) }
+// Tracks lists every track of the collection, in rekordbox's own order.
+func (l *RekordboxLink) Tracks() ([]RekordboxTrack, error) {
+	return l.trackList(0x1004, func(sort uint32) []uint32 { return []uint32{sort} })
+}
 
 // Playlists lists the folders and playlists inside folder (0 is the top).
 func (l *RekordboxLink) Playlists(folder uint32) ([]RekordboxItem, error) {
@@ -197,8 +213,66 @@ func (l *RekordboxLink) Playlists(folder uint32) ([]RekordboxItem, error) {
 }
 
 // PlaylistTracks lists the tracks of a playlist, in its order.
-func (l *RekordboxLink) PlaylistTracks(id uint32) ([]RekordboxItem, error) {
-	return l.menu(0x1105, 0, id, 0)
+func (l *RekordboxLink) PlaylistTracks(id uint32) ([]RekordboxTrack, error) {
+	return l.trackList(0x1105, func(sort uint32) []uint32 { return []uint32{sort, id, 0} })
+}
+
+// rbxColumns are the sort orders that give track rows a second text: artist, tempo, key.
+// rekordbox names the column in the high byte of the row's kind (0x0704 title and artist,
+// 0x0d04 title and tempo, 0x0f04 title and key).
+var rbxColumns = []struct {
+	sort, kind uint32
+	set        func(*RekordboxTrack, string)
+}{
+	{2, 0x07, func(t *RekordboxTrack, s string) { t.Artist = s }},
+	{4, 0x0d, func(t *RekordboxTrack, s string) { t.BPM = rbxTempo(s) }},
+	{12, 0x0f, func(t *RekordboxTrack, s string) { t.Key = strings.TrimSpace(s) }},
+}
+
+// trackList asks a track list in the plain order, then three times more with the sort orders
+// that carry artist, tempo and key, and joins the rows by track id: three more requests per
+// list, never one per row. The plain order is the result's order.
+func (l *RekordboxLink) trackList(kind uint16, args func(sort uint32) []uint32) ([]RekordboxTrack, error) {
+	plain, err := l.menu(kind, args(0)...)
+	tracks := make([]RekordboxTrack, len(plain))
+	at := map[uint32][]int{} // a playlist may hold a track twice
+	for i, it := range plain {
+		tracks[i] = RekordboxTrack{ID: it.ID, Title: it.Label}
+		at[it.ID] = append(at[it.ID], i)
+	}
+	if err != nil || len(plain) == 0 {
+		return tracks, err
+	}
+	for _, c := range rbxColumns {
+		rows, err := l.menu(kind, args(c.sort)...)
+		for _, r := range rows {
+			if r.Kind>>8 == c.kind {
+				for _, i := range at[r.ID] {
+					c.set(&tracks[i], r.Second)
+				}
+			}
+		}
+		if err != nil {
+			return tracks, err
+		}
+	}
+	return tracks, nil
+}
+
+// rbxTempo reads the tempo from a row's second text: its first number, which must be a tempo.
+func rbxTempo(s string) float64 {
+	start := strings.IndexAny(s, "0123456789")
+	if start < 0 {
+		return 0
+	}
+	end := start
+	for end < len(s) && (s[end] >= '0' && s[end] <= '9' || s[end] == '.') {
+		end++
+	}
+	if f, err := strconv.ParseFloat(s[start:end], 64); err == nil && f > 0 && f < 1000 {
+		return f
+	}
+	return 0
 }
 
 // Path asks where a track's audio file is on the computer.
