@@ -1278,25 +1278,31 @@ static void write_fake_ko(const char *path,uint16_t machine,const char *vermagic
 
 static void test_hfs_rw_unit(const char *root) {
     char img[PATH_MAX],ko[PATH_MAX],mi[PATH_MAX],opts[128],ft[64];
-    int jnl=99;
+    int jnl=99,nc=99;
     join(img,root,"unit-clean.img");write_hfs_img(img,(1u<<8),0,0,0,0,0);
-    assert(!hfs_check_volume_and_journal(img,&jnl)&&jnl==0);
+    assert(!hfs_check_volume_and_journal(img,&jnl,0,&nc)&&jnl==0&&nc==0);
     join(img,root,"unit-jnl-empty-le.img");write_hfs_img(img,(1u<<8)|(1u<<13),1,0,4096,4096,0);
-    assert(!hfs_check_volume_and_journal(img,&jnl)&&jnl==1);
+    assert(!hfs_check_volume_and_journal(img,&jnl,0,&nc)&&jnl==1&&nc==0);
     join(img,root,"unit-jnl-empty-be.img");write_hfs_img(img,(1u<<8)|(1u<<13),1,1,4096,4096,0);
-    assert(!hfs_check_volume_and_journal(img,&jnl)&&jnl==1);
+    assert(!hfs_check_volume_and_journal(img,&jnl,0,&nc)&&jnl==1&&nc==0);
     join(img,root,"unit-jnl-needinit.img");write_hfs_img(img,(1u<<8)|(1u<<13),5,0,0,0,0);
-    assert(!hfs_check_volume_and_journal(img,&jnl)&&jnl==1);
+    assert(!hfs_check_volume_and_journal(img,&jnl,0,&nc)&&jnl==1&&nc==0);
     join(img,root,"unit-jnl-needinit-dirty.img");write_hfs_img(img,(1u<<8)|(1u<<13),5,0,0,0,1);
-    assert(hfs_check_volume_and_journal(img,&jnl)!=0);
+    assert(hfs_check_volume_and_journal(img,&jnl,1,&nc)!=0);
     join(img,root,"unit-jnl-dirty.img");write_hfs_img(img,(1u<<8)|(1u<<13),1,0,4096,8192,0);
-    assert(hfs_check_volume_and_journal(img,&jnl)!=0);
+    assert(hfs_check_volume_and_journal(img,&jnl,1,&nc)!=0);
     join(img,root,"unit-jnl-ext.img");write_hfs_img(img,(1u<<8)|(1u<<13),3,0,4096,4096,0);
-    assert(hfs_check_volume_and_journal(img,&jnl)!=0);
-    join(img,root,"unit-unclean.img");write_hfs_img(img,0,0,0,0,0,0);
-    assert(hfs_check_volume_and_journal(img,&jnl)!=0);
+    assert(hfs_check_volume_and_journal(img,&jnl,1,&nc)!=0);
+    join(img,root,"unit-unclean.img");write_hfs_img(img,(1u<<11),0,0,0,0,0);
+    assert(hfs_check_volume_and_journal(img,&jnl,0,&nc)!=0);
+    assert(!hfs_check_volume_and_journal(img,&jnl,1,&nc)&&jnl==0&&nc==1);
+    join(img,root,"unit-b14.img");write_hfs_img(img,(1u<<8)|(1u<<14),0,0,0,0,0);
+    assert(hfs_check_volume_and_journal(img,&jnl,0,&nc)!=0);
+    assert(!hfs_check_volume_and_journal(img,&jnl,1,&nc)&&jnl==0&&nc==1);
+    join(img,root,"unit-linux-fscked.img");write_hfs_img(img,(1u<<8)|(1u<<11),0,0,0,0,0);
+    assert(!hfs_check_volume_and_journal(img,&jnl,0,&nc)&&jnl==0&&nc==0);
     join(img,root,"unit-softlock.img");write_hfs_img(img,(1u<<8)|(1u<<15),0,0,0,0,0);
-    assert(hfs_check_volume_and_journal(img,&jnl)!=0);
+    assert(hfs_check_volume_and_journal(img,&jnl,1,&nc)!=0);
 
     join(ko,root,"ok.ko");write_fake_ko(ko,EM_ARM,"6.18.57-az01-2026-10-15-rt6 SMP preempt_rt ARMv7 p2v8 ","hfsplusx");
     int fd=open(ko,O_RDONLY);assert(fd>=0);assert(!check_ko_vermagic(fd,"6.18.57-az01-2026-10-15-rt6"));close(fd);
@@ -1494,6 +1500,67 @@ static void test_hfs_rw_policy(const char *root) {
     mnt_context_set_fstype_pattern(&c,"ext4");mnt_context_set_options(&c,"nosuid");
     assert(!mnt_context_mount(&c)&&c.status==1&&!strcmp(c.last_mount_fstype,"ext4")&&!strcmp(c.last_mount_opts,"nosuid"));
     assert(!unmount_dispatch(&c,real_unmount));mnt_free_context(&c);
+
+    // 5b. Unclean pull (UNMNT=0, bit 11=1): if -n -f is OK and journal is clean, mark clean (-y -f), re-check (-n -f), mount rw.
+    //     If -n -f finds any error or journal is dirty, never attempt -y -f and stay ro.
+    char fsck_log[PATH_MAX],fsck_sh[PATH_MAX*2];
+    join(fsck_log,root,"hfspol-fsck.log");
+    snprintf(fsck_sh,sizeof fsck_sh,
+             "#!/bin/sh\necho \"$1 $2\" >> '%s'\n"
+             "if [ \"$1\" = -y ] && [ \"$2\" = -f ]; then printf '\\011' | dd of=\"$3\" bs=1 seek=1030 count=1 conv=notrunc 2>/dev/null; fi\n"
+             "echo '** The volume TEST appears to be OK.'\nexit 0\n",fsck_log);
+    write_file(fsck,fsck_sh);
+    join(img,root,"pol-pulled.img");write_hfs_img(img,(1u<<11),0,0,0,0,0);
+    unlink(fsck_log);
+    test_platform_mode_val=1;
+    memset(&c,0,sizeof c);c.target=target;c.source=img;c.invoke_sys_mount=1;
+    mnt_context_set_fstype_pattern(&c,"hfsplus");mnt_context_set_options(&c,"nosuid");
+    assert(!mnt_context_mount(&c)&&!strcmp(c.last_mount_fstype,"hfsplusx")&&has_opt_token(c.last_mount_opts,"rw")&&!(test_last_sys_flags&MS_RDONLY));
+    expect_file(fsck_log,"-n -f\n-y -f\n-n -f\n");
+    assert(!unmount_dispatch(&c,real_unmount));mnt_free_context(&c);
+
+    // Corrupt volume with UNMNT=0: -n -f reports repair needed -> never runs -y -f, stays ro.
+    snprintf(fsck_sh,sizeof fsck_sh,
+             "#!/bin/sh\necho \"$1 $2\" >> '%s'\n"
+             "echo '** The volume TEST was found corrupt and needs to be repaired.'\nexit 0\n",fsck_log);
+    write_file(fsck,fsck_sh);
+    write_hfs_img(img,(1u<<11),0,0,0,0,0);
+    unlink(fsck_log);
+    memset(&c,0,sizeof c);c.target=target;c.source=img;c.invoke_sys_mount=1;
+    mnt_context_set_fstype_pattern(&c,"hfsplus");mnt_context_set_options(&c,"nosuid");
+    assert(!mnt_context_mount(&c)&&has_opt_token(c.last_mount_opts,"ro")&&(test_last_sys_flags&MS_RDONLY));
+    expect_file(fsck_log,"-n -f\n");
+    assert(!unmount_dispatch(&c,real_unmount));mnt_free_context(&c);
+
+    // Unclean pull with dirty journal (start != end): even if -n -f prints OK, never runs -y -f, stays ro.
+    snprintf(fsck_sh,sizeof fsck_sh,
+             "#!/bin/sh\necho \"$1 $2\" >> '%s'\necho '** The volume TEST appears to be OK.'\nexit 0\n",fsck_log);
+    write_file(fsck,fsck_sh);
+    write_hfs_img(img,(1u<<13),1,0,4096,8192,0);
+    unlink(fsck_log);
+    memset(&c,0,sizeof c);c.target=target;c.source=img;c.invoke_sys_mount=1;
+    mnt_context_set_fstype_pattern(&c,"hfsplus");mnt_context_set_options(&c,"nosuid");
+    assert(!mnt_context_mount(&c)&&has_opt_token(c.last_mount_opts,"ro")&&(test_last_sys_flags&MS_RDONLY));
+    expect_file(fsck_log,"-n -f\n");
+    assert(!unmount_dispatch(&c,real_unmount));mnt_free_context(&c);
+
+    // Failed mark-clean (e.g. write-protected device): -y -f fails -> stays ro.
+    snprintf(fsck_sh,sizeof fsck_sh,
+             "#!/bin/sh\necho \"$1 $2\" >> '%s'\n"
+             "[ \"$1\" = -y ] && exit 8\necho '** The volume TEST appears to be OK.'\nexit 0\n",fsck_log);
+    write_file(fsck,fsck_sh);
+    write_hfs_img(img,(1u<<11),0,0,0,0,0);
+    unlink(fsck_log);
+    memset(&c,0,sizeof c);c.target=target;c.source=img;c.invoke_sys_mount=1;
+    mnt_context_set_fstype_pattern(&c,"hfsplus");mnt_context_set_options(&c,"nosuid");
+    assert(!mnt_context_mount(&c)&&has_opt_token(c.last_mount_opts,"ro")&&(test_last_sys_flags&MS_RDONLY));
+    expect_file(fsck_log,"-n -f\n-y -f\n");
+    assert(!unmount_dispatch(&c,real_unmount));mnt_free_context(&c);
+
+    // Restore clean image & fsck mock for sections 6-8.
+    join(img,root,"pol-clean.img");
+    write_file(fsck,"#!/bin/sh\necho '** The volume TEST appears to be OK.'\nexit 0\n");
+    test_platform_mode_val=2;
 
     // 6. AZ04 DT flag coexistence: ufsd mounts stay untouched; hfsplus still mounts stock rw.
     write_file(dt,"1\n");

@@ -1216,19 +1216,24 @@ static int hfs_probe_source_signature(const char *source) {
     }
     close(fd);return is_hfs;
 }
-static int hfs_check_volume_and_journal(const char *source,int *is_journaled) {
+static int hfs_check_volume_and_journal(const char *source,int *is_journaled,int allow_unclean,int *needs_clean) {
     *is_journaled=0;
+    if(needs_clean)*needs_clean=0;
     int fd=open(source,O_RDONLY|O_CLOEXEC);if(fd<0)return -1;
     struct stat st;
     if(fstat(fd,&st)||(!S_ISBLK(st.st_mode)&&!S_ISREG(st.st_mode))){close(fd);errno=EINVAL;return -1;}
     uint8_t vh[512];uint64_t emb_off=0,emb_limit=0;
     if(hfs_find_volume_header(fd,vh,&emb_off,&emb_limit)){close(fd);return -1;}
     uint32_t attr=hfs_be32(vh+4),jinfo_blk=hfs_be32(vh+12),bs=hfs_be32(vh+40),tb=hfs_be32(vh+44);
-    if(!(attr&(1u<<8))||(attr&(1u<<11))||(attr&(1u<<15))){close(fd);errno=EIO;return -1;} // require UNMNT, !INCNSTNT, !SOFTLOCK
+    if(attr&(1u<<15)){close(fd);errno=EIO;return -1;} // always reject SOFTLOCK
+    // UNMNT (bit 8) cleared or Apple INCNSTNT (bit 14) set means unclean; Linux bit 11 is ignored by kernel mount and untouched by fsck.hfsplus.
+    int unclean=!(attr&(1u<<8))||(attr&(1u<<14));
+    if(needs_clean)*needs_clean=unclean;
+    if(!allow_unclean&&unclean){close(fd);errno=EIO;return -1;}
     if(bs<512||bs>(1u<<20)||(bs&(bs-1))||!tb){close(fd);errno=EINVAL;return -1;}
     uint64_t vol_bytes=(uint64_t)tb*(uint64_t)bs;
     if(emb_limit&&vol_bytes>emb_limit){close(fd);errno=EINVAL;return -1;}
-    if(!(attr&(1u<<13))){close(fd);return 0;} // non-journaled clean HFS+
+    if(!(attr&(1u<<13))){close(fd);return 0;} // non-journaled HFS+
     *is_journaled=1;
     if(!jinfo_blk||jinfo_blk>=tb){close(fd);errno=EIO;return -1;}
     uint8_t jib[64];
@@ -1258,14 +1263,14 @@ static int hfs_check_volume_and_journal(const char *source,int *is_journaled) {
     }
     return 0;
 }
-static int run_fsck_hfsplus(const char *fsck_bin,const char *source,int64_t deadline) {
+static int run_fsck_hfsplus(const char *fsck_bin,const char *source,int mark_clean,int64_t deadline) {
     if(!fsck_bin||!source||budget(deadline))return -1;
     int pfd[2];if(pipe2(pfd,O_CLOEXEC|O_NONBLOCK))return -1;
     pid_t pid=fork();if(pid<0){close(pfd[0]);close(pfd[1]);return -1;}
     if(!pid) {
         setpgid(0,0);unsetenv("LD_PRELOAD");setenv("PATH","/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",1);
         dup2(pfd[1],1);dup2(pfd[1],2);close(pfd[0]);if(pfd[1]>2)close(pfd[1]);
-        char *const argv[]={(char *)fsck_bin,"-n","-f",(char *)source,NULL};
+        char *const argv[]={(char *)fsck_bin,mark_clean?"-y":"-n","-f",(char *)source,NULL};
         execv(argv[0],argv);_exit(127);
     }
     setpgid(pid,pid);close(pfd[1]);
@@ -1297,7 +1302,8 @@ static int run_fsck_hfsplus(const char *fsck_bin,const char *source,int64_t dead
     if(!WIFEXITED(status)||WEXITSTATUS(status)!=0||overflow){errno=EIO;return -1;}
     if(!strstr(buf,"appears to be OK.")||strstr(buf,"No checking performed")||
        strstr(buf,"needs to be repaired")||strstr(buf,"could not be verified")||
-       strstr(buf,"Journal need to be replayed")){errno=EIO;return -1;}
+       strstr(buf,"Journal need to be replayed")||strstr(buf,"Repairing volume")||
+       strstr(buf,"was repaired")){errno=EIO;return -1;}
     return 0;
 }
 static int fs_supported(const char *fsname) {
@@ -1470,10 +1476,23 @@ static int hfs_prepare_mount(struct libmnt_context *ctx,struct hfs_ctx_backup *b
     (void)AZ04_UFSD_DT_PATH;
     set_preparing(target,1);
     const char *fsck=FSCK_HFSPLUS_PATH();
-    int is_journaled=0;
-    if(!fsck||run_fsck_hfsplus(fsck,source,deadline)||hfs_check_volume_and_journal(source,&is_journaled)) {
-        note("HFS+ pre-mount check failed, keeping read-only view on",target,errno);
+    int is_journaled=0,needs_clean=0;
+    if(!fsck||run_fsck_hfsplus(fsck,source,0,deadline)) {
+        note("HFS+ fsck -n -f failed, keeping read-only view on",target,errno);
         hfs_apply_ro(ctx,orig_ft,set_by_fstype,orig_opts);return HFS_RW_NONE;
+    }
+    if(hfs_check_volume_and_journal(source,&is_journaled,1,&needs_clean)) {
+        note("HFS+ volume/journal check failed, keeping read-only view on",target,errno);
+        hfs_apply_ro(ctx,orig_ft,set_by_fstype,orig_opts);return HFS_RW_NONE;
+    }
+    if(needs_clean) {
+        note("HFS+ volume unclean after clean fsck -n -f, marking clean on",source,0);
+        if(run_fsck_hfsplus(fsck,source,1,deadline)||
+           run_fsck_hfsplus(fsck,source,0,deadline)||
+           hfs_check_volume_and_journal(source,&is_journaled,0,NULL)) {
+            note("HFS+ mark-clean or re-check failed, keeping read-only view on",target,errno);
+            hfs_apply_ro(ctx,orig_ft,set_by_fstype,orig_opts);return HFS_RW_NONE;
+        }
     }
     const char *target_fs="hfsplus";
     if(mode==1) {
