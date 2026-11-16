@@ -854,6 +854,9 @@ static const char *fsck_hfsplus_path(void) {
 #ifndef PROC_MOUNTINFO_PATH
 #define PROC_MOUNTINFO_PATH "/proc/self/mountinfo"
 #endif
+#ifndef SYS_DEV_BLOCK_DIR
+#define SYS_DEV_BLOCK_DIR "/sys/dev/block"
+#endif
 #ifndef HOOK_UNAME
 #define HOOK_UNAME uname
 #endif
@@ -1068,25 +1071,67 @@ static void unescape_mountinfo_path(const char *src,char *dst,size_t dstsz) {
     }
     dst[j]=0;
 }
-static int mountinfo_fstype(const char *target,char *out,size_t outsz) {
-    if(!target||!out||!outsz)return -1;
+static int mountinfo_lookup(const char *target,char *fstype,size_t ftsz,char *majmin,size_t mmsz,char *source,size_t srcsz) {
+    if(!target)return -1;
     FILE *f=fopen(PROC_MOUNTINFO_PATH,"re");if(!f)return -1;
     char *line=NULL;size_t cap=0;int found=-1;
     while(getline(&line,&cap,f)>0) {
         char *sp[5]={0};char *p=line;int idx=0;
         for(;idx<5;idx++){sp[idx]=p;char *q=strchr(p,' ');if(!q)break;p=q+1;}
         if(idx<5)continue;
-        char *mp_end=strchr(sp[4],' ');if(!mp_end)continue;
+        char *mm_end=strchr(sp[2],' ');
+        char *mp_end=strchr(sp[4],' ');if(!mm_end||!mp_end)continue;
         *mp_end=0;
         char mp[PATH_MAX];unescape_mountinfo_path(sp[4],mp,sizeof mp);
         if(strcmp(mp,target))continue;
         char *sep=strstr(mp_end+1," - ");if(!sep)continue;
         char *ft=sep+3;char *ft_end=strpbrk(ft," \t\r\n");
-        if(ft_end)*ft_end=0;
-        if(*ft){snprintf(out,outsz,"%s",ft);found=0;}
+        char *src=NULL;
+        if(ft_end) {
+            char sep_ch=*ft_end;*ft_end=0;
+            if(sep_ch==' '||sep_ch=='\t') {
+                src=ft_end+1;src+=strspn(src," \t");
+                char *src_end=strpbrk(src," \t\r\n");if(src_end)*src_end=0;
+            }
+        }
+        if(*ft) {
+            if(fstype&&ftsz)snprintf(fstype,ftsz,"%s",ft);
+            if(majmin&&mmsz){size_t ml=(size_t)(mm_end-sp[2]);if(ml>=mmsz)ml=mmsz-1;memcpy(majmin,sp[2],ml);majmin[ml]=0;}
+            if(source&&srcsz){if(src&&*src)unescape_mountinfo_path(src,source,srcsz);else source[0]=0;}
+            found=0;
+        }
     }
     free(line);fclose(f);return found;
 }
+static int mountinfo_fstype(const char *target,char *out,size_t outsz) {
+    return mountinfo_lookup(target,out,outsz,NULL,0,NULL,0);
+}
+static int hfs_dev_present_probe(const char *target,const char *ctx_source) {
+    char ft[64]="",majmin[32]="",msrc[PATH_MAX]="";
+    if(!target||mountinfo_lookup(target,ft,sizeof ft,majmin,sizeof majmin,msrc,sizeof msrc))return 0;
+    unsigned maj=0,min=0;
+    if(sscanf(majmin,"%u:%u",&maj,&min)!=2)return 0;
+    if(maj>0) {
+        char sysblk[PATH_MAX];
+        if(snprintf(sysblk,sizeof sysblk,"%s/%u:%u",SYS_DEV_BLOCK_DIR,maj,min)>=(int)sizeof sysblk)return 0;
+        struct stat sst;
+        if(lstat(sysblk,&sst))return 0;
+    }
+    const char *src=(msrc[0]=='/')?msrc:(ctx_source&&ctx_source[0]=='/')?ctx_source:NULL;
+    if(!src)return maj>0?1:0;
+    struct stat st;
+    if(stat(src,&st))return 0;
+    if(maj>0) {
+        if(!S_ISBLK(st.st_mode)||major(st.st_rdev)!=maj||minor(st.st_rdev)!=min)return 0;
+        int fd=open(src,O_RDONLY|O_CLOEXEC);
+        if(fd<0)return 0;
+        close(fd);
+    }
+    return 1;
+}
+#ifndef HFS_DEV_PRESENT
+#define HFS_DEV_PRESENT hfs_dev_present_probe
+#endif
 // The mount tests replace these; a bind mount is never HFS+ nor a block device.
 #ifndef HFS_READONLY
 static int hfs_readonly(const char *target) {
@@ -1111,7 +1156,7 @@ int mnt_context_enable_lazy(struct libmnt_context *ctx,int enable) {
     int (*real)(struct libmnt_context *,int)=REAL_MNT_CONTEXT_ENABLE_LAZY();
     if(!real)return -ENOSYS;
     const char *target=mnt_context_get_target(ctx);
-    if(enable&&target&&HFS_RW_MOUNTED(target)) {
+    if(enable&&target&&HFS_RW_MOUNTED(target)&&HFS_DEV_PRESENT(target,mnt_context_get_source(ctx))) {
         note("disabling lazy unmount (MNT_DETACH) for rw HFS+ volume",target,0);
         enable=0;
     }
@@ -1797,14 +1842,18 @@ static int unmount_dispatch(struct libmnt_context *ctx,int (*real)(struct libmnt
     struct owned_view *v=load_view(target);
     if(!v) {
         if(HFS_RW_MOUNTED(target)) {
-            int fd=open(target,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
-            if(fd>=0){syncfs(fd);close(fd);}
-            int (*set_lazy)(struct libmnt_context *,int)=REAL_MNT_CONTEXT_ENABLE_LAZY();
-            if(set_lazy)set_lazy(ctx,0);
-            pthread_mutex_lock(&ctx_lock);
-            struct hfs_ctx_state *s=ctx_slot(ctx,0);
-            if(s){s->has_lazy=1;s->lazy=0;}
-            pthread_mutex_unlock(&ctx_lock);
+            if(HFS_DEV_PRESENT(target,mnt_context_get_source(ctx))) {
+                int fd=open(target,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
+                if(fd>=0){syncfs(fd);close(fd);}
+                int (*set_lazy)(struct libmnt_context *,int)=REAL_MNT_CONTEXT_ENABLE_LAZY();
+                if(set_lazy)set_lazy(ctx,0);
+                pthread_mutex_lock(&ctx_lock);
+                struct hfs_ctx_state *s=ctx_slot(ctx,0);
+                if(s){s->has_lazy=1;s->lazy=0;}
+                pthread_mutex_unlock(&ctx_lock);
+            } else {
+                note("device gone, keeping lazy unmount for rw HFS+ volume",target,0);
+            }
         }
         in_hook=1;int rc=real(ctx),saved=errno;in_hook=0;errno=saved;return rc;
     }

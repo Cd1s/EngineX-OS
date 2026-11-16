@@ -83,6 +83,8 @@ static const char *test_fsck_path(void){return *test_fsck_bin&&!access(test_fsck
 #define AZ04_UFSD_DT_PATH test_az04_dt
 #define PROC_FILESYSTEMS_PATH test_proc_fs
 #define PROC_MOUNTINFO_PATH test_proc_mi
+static char test_sys_dev_block[PATH_MAX];
+#define SYS_DEV_BLOCK_DIR test_sys_dev_block
 #define HFSPLUSX_MODULES_ROOT test_modules_root
 static char test_uname_release[65] = "6.18.57-az01-2026-10-15-rt6";
 static int test_uname(struct utsname *u){memset(u,0,sizeof *u);snprintf(u->release,sizeof u->release,"%s",test_uname_release);return 0;}
@@ -97,6 +99,9 @@ static int test_finit_module(int fd){
 #define FINIT_MODULE(fd) test_finit_module(fd)
 static int test_hfs_rw_mounted(const char *target){return *test_hfs_rw_target&&target&&!strcmp(target,test_hfs_rw_target);}
 #define HFS_RW_MOUNTED test_hfs_rw_mounted
+static int test_dev_present_val = 1;
+static int test_hfs_dev_present(const char *target,const char *src){(void)target;(void)src;return test_dev_present_val;}
+#define HFS_DEV_PRESENT test_hfs_dev_present
 #include "edisksd_hook.c"
 #include <assert.h>
 #include <ftw.h>
@@ -1330,12 +1335,26 @@ static void test_hfs_rw_unit(const char *root) {
     assert(has_opt_token("nosuid,ro,nodev","ro"));
 
     join(mi,root,"unit-mountinfo");
-    write_file(mi,"10 1 8:1 / /media/My\\040Stick rw,nosuid - ufsd /dev/sda1 rw\n"
-                  "11 1 8:2 / /media/Other rw,nosuid - hfsplusx /dev/sdb1 rw\n");
+    char sdb[PATH_MAX],devfile[PATH_MAX],devblk[PATH_MAX];
+    join(sdb,root,"unit-sysblk");assert(!make_dirs(sdb));
+    join(devfile,root,"unit-devfile");write_file(devfile,"dev\n");
+    snprintf(test_sys_dev_block,sizeof test_sys_dev_block,"%s",sdb);
+    FILE *mif=fopen(mi,"w");assert(mif);
+    fprintf(mif,"10 1 8:1 / /media/My\\040Stick rw,nosuid - ufsd /dev/nonexistent-hfs-dev rw\n"
+                "11 1 8:2 / /media/Other rw,nosuid - hfsplusx %s rw\n"
+                "12 1 0:99 / /media/Virt rw,nosuid - hfsplusx %s rw\n",devfile,devfile);
+    fclose(mif);
     snprintf(test_proc_mi,sizeof test_proc_mi,"%s",mi);
     assert(!mountinfo_fstype("/media/My Stick",ft,sizeof ft)&&!strcmp(ft,"ufsd"));
     assert(!mountinfo_fstype("/media/Other",ft,sizeof ft)&&!strcmp(ft,"hfsplusx"));
-    test_proc_mi[0]=0;
+    assert(hfs_dev_present_probe("/media/Missing",NULL)==0);
+    assert(hfs_dev_present_probe("/media/Other",NULL)==0); // missing /sys/dev/block/8:2
+    join(devblk,sdb,"8:2");write_file(devblk,"1\n");
+    assert(hfs_dev_present_probe("/media/Other",NULL)==0); // devfile is regular file, not S_ISBLK
+    join(devblk,sdb,"8:1");write_file(devblk,"1\n");
+    assert(hfs_dev_present_probe("/media/My Stick",NULL)==0); // missing device node /dev/nonexistent-hfs-dev
+    assert(hfs_dev_present_probe("/media/Virt",NULL)==1); // mountinfo parsed maj:min & source
+    test_proc_mi[0]=0;test_sys_dev_block[0]=0;
     test_mock_hfs_syscalls=1;test_last_sys_flags=0;test_fsconfig_ro_seen=0;test_fsconfig_rw_seen=0;
     assert(!mount("/dev/sda1","/media/X","hfsplus",0,NULL));
     assert((test_last_sys_flags&MS_RDONLY)&&!strcmp(test_last_sys_fstype,"hfsplus"));
@@ -1383,19 +1402,25 @@ static void test_hfs_rw_policy(const char *root) {
     assert(!(c.last_mount_mflags&MS_RDONLY)&&!(test_last_sys_flags&MS_RDONLY)&&test_fsconfig_ro_seen==0);
     assert(test_finit_calls==1&&observed_prepare_views==before_views);
     expect_not_preparing();
-    // Clean eject on RW HFS+: MNT_DETACH / lazy is forced off even if edisksd enables lazy.
+    // Clean eject on RW HFS+ (device present): MNT_DETACH / lazy is forced off even if edisksd enables lazy.
+    test_dev_present_val=1;
     snprintf(test_hfs_rw_target,sizeof test_hfs_rw_target,"%s",target);
     mnt_context_enable_lazy(&c,1);assert(c.lazy==0);
-    c.lazy=1;assert(!unmount_dispatch(&c,real_unmount)&&c.last_umount_lazy==0);
     c.lazy=1;c.fail=1;assert(unmount_dispatch(&c,real_unmount)==-EBUSY&&c.last_umount_lazy==0);
-    c.fail=0;test_hfs_rw_target[0]=0;mnt_free_context(&c);
+    c.fail=0;c.lazy=1;assert(!unmount_dispatch(&c,real_unmount)&&c.last_umount_lazy==0);
+    test_hfs_rw_target[0]=0;mnt_free_context(&c);
 
-    // 2. Gen-1 already-loaded hfsplusx (e.g. insmod /tmp/hfsplusx.ko) works without another finit_module.
+    // 2. Gen-1 already-loaded hfsplusx (e.g. insmod /tmp/hfsplusx.ko) works without another finit_module,
+    //    and device removal while rw (stick pulled, device gone) keeps lazy unmount so stale mount clears.
     test_modules_root[0]=0;
     memset(&c,0,sizeof c);c.target=target;c.source=img;
     mnt_context_set_fstype_pattern(&c,"hfsplus");mnt_context_set_options(&c,"nosuid");
     assert(!mnt_context_mount(&c)&&c.status==1&&test_finit_calls==1&&!strcmp(c.last_mount_fstype,"hfsplusx"));
-    assert(!unmount_dispatch(&c,real_unmount));mnt_free_context(&c);
+    test_dev_present_val=0;
+    snprintf(test_hfs_rw_target,sizeof test_hfs_rw_target,"%s",target);
+    mnt_context_enable_lazy(&c,1);assert(c.lazy==1);
+    assert(!unmount_dispatch(&c,real_unmount)&&c.last_umount_lazy==1);
+    test_hfs_rw_target[0]=0;test_dev_present_val=1;mnt_free_context(&c);
     snprintf(test_modules_root,sizeof test_modules_root,"%s",mroot);
 
     // 3. Gen-1 vermagic mismatch & insmod failure both fail closed to ro view.
