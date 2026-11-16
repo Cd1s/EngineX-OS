@@ -20,6 +20,20 @@ import (
 // is unsafe. The deemixd unit uses the unified enginex-deemixd.service name (#234).
 var Services = []string{"enginex-deemixd.service"}
 
+// legacyUnitAliases maps pre-rename 5.3.0.4 service names in saved pause
+// records to their unified 5.3.0.5+ unit names (#234).
+var legacyUnitAliases = map[string]string{
+	"sc5000-deemixd.service":         "enginex-deemixd.service",
+	"enginex-sc5000-deemixd.service": "enginex-deemixd.service",
+}
+
+func normalizeSavedUnit(unit string) string {
+	if mapped, ok := legacyUnitAliases[unit]; ok {
+		return mapped
+	}
+	return unit
+}
+
 // Systemctl runs systemctl; tests replace it.
 var Systemctl = func(args ...string) (stdout, stderr string, code int) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -145,7 +159,11 @@ func (f *feature) Action(req map[string]any) (any, error) {
 		pending := []string{}
 		for _, v := range list {
 			unit, ok := v.(string)
-			if !ok || !allowed(unit) {
+			if !ok {
+				return nil, modkit.Bad("invalid saved service list")
+			}
+			unit = normalizeSavedUnit(unit)
+			if !allowed(unit) {
 				return nil, modkit.Bad("invalid saved service list")
 			}
 			pending = append(pending, unit)
