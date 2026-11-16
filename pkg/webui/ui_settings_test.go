@@ -1490,3 +1490,60 @@ func TestSpotifySourceSettingsPersistenceAndWiring(t *testing.T) {
 		t.Fatalf("invalid saved source %q", got)
 	}
 }
+
+func TestMixstreamPitchBendBeatJumpAndFxSlots(t *testing.T) {
+	dir := t.TempDir()
+	srv := httptest.NewServer(New(Config{UIDir: dir, StateDir: t.TempDir()}, nil))
+	defer srv.Close()
+
+	// Defaults: PitchBendBeatJump off, MixstreamFx = [Echo, Flanger, Delay, Phaser].
+	code, def := uiPost(t, srv.URL, "")
+	if code != 200 {
+		t.Fatalf("GET-like empty POST failed: %d", code)
+	}
+	if def.PitchBendBeatJump {
+		t.Fatalf("expected PitchBendBeatJump false by default, got true")
+	}
+	wantDefaultFx := []string{"Echo", "Flanger", "Delay", "Phaser"}
+	if !slices.Equal(def.MixstreamFx, wantDefaultFx) {
+		t.Fatalf("default MixstreamFx = %v, want %v", def.MixstreamFx, wantDefaultFx)
+	}
+
+	// Update PitchBendBeatJump and individual FX slots.
+	code, updated := uiPost(t, srv.URL, "pitchBendBeatJump=1&mixstreamFx1=Phaser&mixstreamFx3=Echo")
+	if code != 200 || !updated.PitchBendBeatJump {
+		t.Fatalf("update failed: code=%d %+v", code, updated)
+	}
+	wantUpdatedFx := []string{"Phaser", "Flanger", "Echo", "Phaser"}
+	if !slices.Equal(updated.MixstreamFx, wantUpdatedFx) {
+		t.Fatalf("updated MixstreamFx = %v, want %v", updated.MixstreamFx, wantUpdatedFx)
+	}
+
+	// Reload from settings.conf on a fresh server.
+	srv2 := httptest.NewServer(New(Config{UIDir: dir, StateDir: t.TempDir()}, nil))
+	defer srv2.Close()
+	code, reloaded := uiPost(t, srv2.URL, "")
+	if code != 200 || !reloaded.PitchBendBeatJump || !slices.Equal(reloaded.MixstreamFx, wantUpdatedFx) {
+		t.Fatalf("reloaded mismatch: code=%d pitchBend=%v fx=%v", code, reloaded.PitchBendBeatJump, reloaded.MixstreamFx)
+	}
+
+	// Reject invalid FX effect name or invalid boolean.
+	for _, bad := range []string{"mixstreamFx2=Reverb", "mixstreamFx1=BadFx", "pitchBendBeatJump=maybe"} {
+		code, _ = uiPost(t, srv.URL, bad)
+		if code != 400 {
+			t.Fatalf("expected 400 for %q, got %d", bad, code)
+		}
+	}
+
+	// Verify index.html exposes the controls gated by Mixstream capability.
+	b, err := assets.ReadFile("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(b)
+	for _, want := range []string{"pitchBendBeatJump", "mixstreamFx1", "mixstreamFx4", "caps.beatJumpPads"} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("index.html missing %q", want)
+		}
+	}
+}

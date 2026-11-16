@@ -404,6 +404,7 @@ class OnOffSwitchCompatibilityTest(unittest.TestCase):
             "scMasterLimiter": "masterLimiter",
             "scAutoGain": "autoGain", "scUpfaderEcho": "upfaderEcho",
             "scStemsEqMode": "stemsEqMode", "scBeatJumpPads": "beatJumpPads",
+            "scPitchBendBeatJump": "pitchBendBeatJump",
             "scSwapLoopOrder": "swapLoopOrder", "scDualColumn": "browserDualColumn",
             "scTracklistWaveform": "tracklistWaveform", "scOmniSource": "omniSource",
             "scCueCountdown": "cueCountdown", "scRemoteLoad": "remoteLoad",
@@ -7707,6 +7708,99 @@ class MixstreamPadsLayoutTest(unittest.TestCase):
         self.assertIn('color: parent.down ?', pads_content)
         self.assertIn('color: parent.highlighted ?', pads_content)
         self.assertIn('border.color: parent.highlighted ?', pads_content)
+
+    def test_mixstream_pitch_bend_beat_jump_and_fx_slots(self):
+        rows = bp.load_dict()
+        for key in ("Pitch Bend → Beat Jump", "FX Slot 1", "FX Slot 2", "FX Slot 3", "FX Slot 4"):
+            self.assertIn(key, rows)
+            for lang in ("zh-Hans", "zh-Hant", "es"):
+                self.assertTrue(rows[key].get(lang), f"missing {lang} for {key}")
+
+        self.assertIn('text: "Pitch Bend → Beat Jump"', bp.BEAT_JUMP_ENTRIES)
+        self.assertIn('root.scCall("pitchBendBeatJump="', bp.BEAT_JUMP_ENTRIES)
+        for i in range(1, 5):
+            self.assertIn(f'text: "FX Slot {i}"', bp.BEAT_JUMP_ENTRIES)
+            self.assertIn(f'root.scCall("mixstreamFx{i}="', bp.BEAT_JUMP_ENTRIES)
+            self.assertIn('values: ["Echo", "Flanger", "Delay", "Phaser"]', bp.BEAT_JUMP_ENTRIES)
+
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            edits = bp.edits(False)
+        finally:
+            bp.ROOT = old_root
+        pb_stock = (
+            'Item {\n'
+            '    readonly property bool isShiftAction: globalConfig.pitchBendActionIsNormal === globalConfig.shift\n'
+            '    Repeater {\n'
+            '        model: ListModel {\n'
+            '            Component.onCompleted: {\n'
+            '                append({\n'
+            '                    note: module.minusNote,\n'
+            '                    sign: "-",\n'
+            '                    direction: "Backward",\n'
+            '                })\n'
+            '                append({\n'
+            '                    note: module.plusNote,\n'
+            '                    sign: "+",\n'
+            '                    direction: "Forward",\n'
+            '                })\n'
+            '            }\n'
+            '        }\n'
+            '        Item {\n'
+            '            ValueNoteAssignment {\n'
+            '                output: ActionOutput {\n'
+            '                    target: PropertyTarget {\n'
+            '                        path: deckConfig.activeDeckTrackPath + "Nudge%1".arg(model.direction)\n'
+            '                    }\n'
+            '                }\n'
+            '            }\n'
+            '            Loader {\n'
+            '                sourceComponent: OutputAssignment {\n'
+            '                    readonly property bool pitchButtonActive: Planck.getProperty(\n'
+            '                        deckConfig.activeDeckTrackPath + "Nudge%1".arg(model.direction)\n'
+            '                    ).translator.state\n'
+            '                }\n'
+            '            }\n'
+            '        }\n'
+            '    }\n'
+            '}\n'
+        )
+        pb_patched = pb_stock
+        for old, new in edits["ControlSurfaceModules/ControlSurfaceModules/PitchBend.qml"]:
+            pb_patched = bp.patch(pb_patched, old, new, "PitchBend.qml")
+        self.assertIn('scBeatJumpActive', pb_patched)
+        self.assertIn('jumpAction: "JumpBack"', pb_patched)
+        self.assertIn('jumpAction: "JumpForward"', pb_patched)
+        self.assertIn('"BeatJump/" + model.jumpAction', pb_patched)
+
+        fx_stock = (
+            'Item {\n'
+            '    Repeater {\n'
+            '        model: buttonsModel\n'
+            '        Item {\n'
+            '            ValueNoteAssignment {\n'
+            '                output: QtObject {\n'
+            '                    function setValue(channel, value, assignmentEnabled) {\n'
+            '                        for (const name of fxConfig.channelNames) {\n'
+            '                            fxConfig.channel[name].pFxType.translator.string = model.fxName\n'
+            '                        }\n'
+            '                    }\n'
+            '                }\n'
+            '            }\n'
+            '            OutputAssignment {\n'
+            '                readonly property bool assigned: fxConfig.channel[fxConfig.channelNames[0]].fxType === model.fxName\n'
+            '            }\n'
+            '        }\n'
+            '    }\n'
+            '}\n'
+        )
+        fx_patched = fx_stock
+        for old, new in edits["ControlSurfaceModules/ControlSurfaceModules/private/DJFxSelectButtons.qml"]:
+            fx_patched = bp.patch(fx_patched, old, new, "DJFxSelectButtons.qml")
+        self.assertIn('scSlotFx', fx_patched)
+        self.assertIn('pFxType.translator.string = scSlotFx', fx_patched)
+        self.assertIn('fxType === scSlotFx', fx_patched)
 
 
 class ReverseJogWheelTest(unittest.TestCase):

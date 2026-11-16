@@ -148,6 +148,11 @@ a{color:var(--accent)}label.chk{display:flex;align-items:center;gap:10px;cursor:
   <div class="setting"><div class="txt"><b data-i18n="tJogInvertLeft"></b><span class="sub" data-i18n="sJogInvert"></span></div><label class="sw"><input type="checkbox" data-toggle="jogInvertLeft"><span></span></label></div>
   <div class="setting"><div class="txt"><b data-i18n="tJogInvertRight"></b><span class="sub" data-i18n="sJogInvert"></span></div><label class="sw"><input type="checkbox" data-toggle="jogInvertRight"><span></span></label></div>
   <div class="setting"><div class="txt"><b data-i18n="tFxTimeMode"></b><span class="sub" data-i18n="sFxTimeMode"></span></div><div class="seg" data-seg="fxTimeMode"><button data-v="beats" data-i18n="fxBeats"></button><button data-v="ms">ms</button></div></div>
+  <div class="setting"><div class="txt"><b data-i18n="tPitchBendBeatJump"></b><span class="sub" data-i18n="sPitchBendBeatJump"></span></div><label class="sw"><input type="checkbox" data-toggle="pitchBendBeatJump"><span></span></label></div>
+  <div class="setting"><div class="txt"><b data-i18n="tMixstreamFx1"></b><span class="sub" data-i18n="sMixstreamFx"></span></div><select id="mixstreamFx1" aria-label="FX 1"><option value="Echo">Echo</option><option value="Flanger">Flanger</option><option value="Delay">Delay</option><option value="Phaser">Phaser</option></select></div>
+  <div class="setting"><div class="txt"><b data-i18n="tMixstreamFx2"></b><span class="sub" data-i18n="sMixstreamFx"></span></div><select id="mixstreamFx2" aria-label="FX 2"><option value="Echo">Echo</option><option value="Flanger">Flanger</option><option value="Delay">Delay</option><option value="Phaser">Phaser</option></select></div>
+  <div class="setting"><div class="txt"><b data-i18n="tMixstreamFx3"></b><span class="sub" data-i18n="sMixstreamFx"></span></div><select id="mixstreamFx3" aria-label="FX 3"><option value="Echo">Echo</option><option value="Flanger">Flanger</option><option value="Delay">Delay</option><option value="Phaser">Phaser</option></select></div>
+  <div class="setting"><div class="txt"><b data-i18n="tMixstreamFx4"></b><span class="sub" data-i18n="sMixstreamFx"></span></div><select id="mixstreamFx4" aria-label="FX 4"><option value="Echo">Echo</option><option value="Flanger">Flanger</option><option value="Delay">Delay</option><option value="Phaser">Phaser</option></select></div>
   <div class="setting"><div class="txt"><b data-i18n="tBtOut"></b><span class="sub" data-i18n="sBtOut"></span></div><select id="btOut" aria-label="Bluetooth"></select></div>
   <small id="uiState"></small>
  </section>
@@ -296,6 +301,13 @@ sdHighSpeedPending:['Applies at next start or SD insert','将在下次启动或�
 tFxTimeMode:['PX delay time mode','先锋效果延时模式 (PX)','先鋒效果延遲模式 (PX)','Modo de tiempo de delay PX'],
 sFxTimeMode:['Spiral / Pitch Echo / Dub Echo only: default timing or 10–4000 ms; stock FX stay in beats','仅作用于 Spiral / Pitch Echo / Dub Echo（默认或 10–4000 ms）；原厂效果仍按节拍同步','僅作用於 Spiral / Pitch Echo / Dub Echo（預設或 10–4000 ms）；原廠效果仍依節拍同步','Solo Spiral / Pitch Echo / Dub Echo: tiempo predeterminado o 10–4000 ms; los FX originales siguen en beats'],
 fxBeats:['Default (Off)','默认（关闭）','預設（關閉）','Predeterminado (desactivado)'],
+tPitchBendBeatJump:['Pitch Bend → Beat Jump','Pitch Bend 按键改为 Beat Jump','Pitch Bend 按鍵改為 Beat Jump','Pitch Bend → Beat Jump'],
+sPitchBendBeatJump:['Mixstream: - / + pitch-bend buttons trigger Beat Jump back/forward (Shift keeps Speed Range)','Mixstream：- / + 推音按键改为前后 Beat Jump（按住 Shift 仍调速度范围）','Mixstream：- / + 推音按鍵改為前後 Beat Jump（按住 Shift 仍調速度範圍）','Mixstream: los botones - / + de pitch bend hacen Beat Jump atrás/adelante (Shift mantiene Speed Range)'],
+tMixstreamFx1:['FX slot 1 (Echo key)','FX 槽位 1（Echo 键）','FX 槽位 1（Echo 鍵）','Ranura FX 1 (tecla Echo)'],
+tMixstreamFx2:['FX slot 2 (Flanger key)','FX 槽位 2（Flanger 键）','FX 槽位 2（Flanger 鍵）','Ranura FX 2 (tecla Flanger)'],
+tMixstreamFx3:['FX slot 3 (Delay key)','FX 槽位 3（Delay 键）','FX 槽位 3（Delay 鍵）','Ranura FX 3 (tecla Delay)'],
+tMixstreamFx4:['FX slot 4 (Phaser key)','FX 槽位 4（Phaser 键）','FX 槽位 4（Phaser 鍵）','Ranura FX 4 (tecla Phaser)'],
+sMixstreamFx:['Choose which stock Mixstream effect this hardware FX button selects','选择该实体 FX 按键切换的原厂 Mixstream 效果','選擇該實體 FX 按鍵切換的原廠 Mixstream 效果','Elige qué efecto original de Mixstream selecciona este botón FX'],
 tBtOut:['Bluetooth speaker output','蓝牙音箱输出','藍牙喇叭輸出','Salida para altavoz Bluetooth'],
 sBtOut:['What the deck sends to a speaker connected in its Bluetooth list. Adds about 150–250 ms: for monitoring or a second room, not for beatmatching','碟机发给已连接蓝牙音箱的声音。会多出约 150–250 ms 延迟：用于监听或另一个房间，不能用来对拍','碟機傳給已連線藍牙喇叭的聲音。會多出約 150–250 ms 延遲：用於監聽或另一個房間，不能用來對拍','Lo que el deck envía a un altavoz conectado en su lista Bluetooth. Añade unos 150–250 ms: para monitorización o una segunda sala, no para beatmatching'],
 btMaster:['Master','Master 主输出','Master 主輸出','Salida principal (Master)'],
@@ -603,6 +615,10 @@ function showUI(v){lastUI=v;
  jLeftTitle.dataset.i18n=hasDualJog?'tJogInvertLeft':'tJogInvert';
  jLeftTitle.textContent=hasDualJog?t('tJogInvertLeft'):t('tJogInvert');
  jRight.closest('.setting').hidden=!hasDualJog;
+ const isMixstream=!!caps.beatJumpPads;
+ tg('pitchBendBeatJump').closest('.setting').hidden=!isMixstream;
+ const fxList=Array.isArray(v.mixstreamFx)&&v.mixstreamFx.length===4?v.mixstreamFx:['Echo','Flanger','Delay','Phaser'];
+ for(let i=1;i<=4;i++){const el=$('mixstreamFx'+i);el.closest('.setting').hidden=!isMixstream;el.value=fxList[i-1]||'Echo'}
  const sdEl=tg('sdHighSpeed');
  sdEl.closest('.setting').hidden=caps.sdHighSpeed===false;
  why(sdEl,v.sdHighSpeedPending?t('sdHighSpeedPending'):'');
@@ -618,6 +634,7 @@ $('bootRetry').onclick=()=>action(async()=>{if(!confirm(t('restartAsk')))return;
 async function showBootStatus(){try{const r=await fetch('/boot-status',{cache:'no-store'});if(!r.ok)return;const v=await r.json();$('bootFallback').hidden=!v.fallback;$('bootFallback').textContent=t(v.driveAvailable?'bootFallbackSaved':v.reportSaved?'bootFallbackNoDrive':'bootFallbackNoReport')}catch{}}
 showBootStatus();setInterval(showBootStatus,5000);
 for(const e of document.querySelectorAll('[data-toggle]'))e.onchange=async()=>{const restart=e.dataset.toggle==='verboseLog';if(restart&&!confirm(t('restartAsk'))){e.checked=!e.checked;return}e.disabled=true;try{why(e);showUI(await post('ui?'+e.dataset.toggle+'='+(e.checked?1:0)+(restart?'&restart=1':'')))}catch(err){e.checked=!e.checked;why(e,err.message)}finally{e.disabled=false}};
+for(let i=1;i<=4;i++){const el=$('mixstreamFx'+i);el.onchange=()=>action(async()=>showUI(await post('ui?mixstreamFx'+i+'='+encodeURIComponent(el.value))))}
 for(const g of document.querySelectorAll('[data-seg]'))for(const b of g.querySelectorAll('button'))b.onclick=()=>action(async()=>{let q=g.dataset.seg+'='+b.dataset.v;if(g.dataset.seg==='lang'){if(!confirm(t('restartAsk')))return;q+='&restart=1'}showUI(await post('ui?'+q))});
 const kinds={internal:'kInternal',hd:'kHd',sd:'kSd',usb:'kUsb',drive:'kDrive'},gb=n=>(n/2**30).toFixed(1);
 function renderDrives(){for(const id of ['dropDrive','rbWbDrive']){const sel=$(id);if(!sel)continue;const keep=sel.value;sel.replaceChildren();for(const d of lastDrives){const o=document.createElement('option');o.value=d.name;o.textContent=t(kinds[d.kind]||'kDrive')+' · '+d.name+' · '+t('free',gb(d.free));sel.append(o)}if(!lastDrives.length){const o=document.createElement('option');o.textContent=t('noDrive');o.disabled=true;o.selected=true;sel.append(o)}if(lastDrives.some(d=>d.name===keep))sel.value=keep}showStore()}
