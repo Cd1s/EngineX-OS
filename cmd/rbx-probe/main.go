@@ -67,11 +67,17 @@ func main() {
 	maxTracks := flag.Int("tracks", 5, "max sample tracks to inspect")
 	specificTrack := flag.Uint("track", 0, "optional specific track ID to include in deep probe")
 	listenDur := flag.Duration("listen", 2500*time.Millisecond, "passive UDP 50000/50002 listen duration (0 to skip)")
+	srcPort := flag.Int("src", 0, "optional local UDP source port for RPC/MOUNT/NFS calls (0 = ephemeral; <1024 requires root)")
+	wake := flag.Bool("wake", false, "opt-in: send virtual CDJ-3000 keepalive (0x06) to target:50000 and wait up to 10s for LINK")
 	timeout := flag.Duration("timeout", 3*time.Second, "per-request network timeout")
 	flag.Parse()
 
 	if *asPlayer < 1 || *asPlayer > 255 {
 		fmt.Fprintf(os.Stderr, "invalid -as player number %d\n", *asPlayer)
+		os.Exit(2)
+	}
+	if *srcPort < 0 || *srcPort > 65535 {
+		fmt.Fprintf(os.Stderr, "invalid -src port %d\n", *srcPort)
 		os.Exit(2)
 	}
 
@@ -88,6 +94,14 @@ func main() {
 		targetLabels[i] = red.ip(ip)
 	}
 	fmt.Printf("targets: %s\n", strings.Join(targetLabels, ", "))
+	if *srcPort > 0 {
+		fmt.Printf("rpc_src_port: %d\n", *srcPort)
+	}
+
+	if *wake {
+		stopWake := wakeTargets(targets, byte(*asPlayer), red)
+		defer stopWake()
+	}
 
 	var seenNums map[string]byte
 	if *listenDur > 0 {
@@ -99,7 +113,7 @@ func main() {
 		fmt.Printf("TARGET: %s\n", red.ip(ip))
 		fmt.Printf("========================================\n")
 		paths := probeDBServer(ip, byte(*asPlayer), *maxTracks, uint32(*specificTrack), *timeout, seenNums[ip.String()] == 0, red)
-		probeNFS(ip, paths, *timeout, red)
+		probeNFS(ip, paths, *srcPort, *timeout, red)
 	}
 }
 
@@ -597,6 +611,105 @@ func buildMediaQuery(asPlayer byte, replyIP net.IP, targetPlayer, targetSlot byt
 	return b
 }
 
+func buildVirtualCDJKeepAlive(asPlayer byte, ip net.IP, mac [6]byte) []byte {
+	b := make([]byte, 0x36)
+	copy(b[0:], prolinkMagic)
+	b[0x0a] = 0x06
+	copy(b[0x0c:0x20], "CDJ-3000")
+	b[0x20] = 0x01
+	b[0x21] = 0x03 // generation 3 (CDJ-3000 class)
+	binary.BigEndian.PutUint16(b[0x22:], 0x0036)
+	b[0x24] = asPlayer
+	b[0x25] = 0x01
+	copy(b[0x26:0x2c], mac[:])
+	if v4 := ip.To4(); v4 != nil {
+		copy(b[0x2c:0x30], v4)
+	}
+	b[0x30] = 0x01 // peers
+	b[0x34] = 0x01 // DeviceType::Cdj
+	b[0x35] = 0x64 // CDJ-3000
+	return b
+}
+
+func wakeTargets(targets []net.IP, asPlayer byte, red *redactor) func() {
+	fmt.Printf("\n--- Wake (sending virtual CDJ-3000 0x06 keepalive as player %d to *:50000; waiting up to 10s for TCP %d) ---\n", asPlayer, portDBQuery)
+	mac := [6]byte{0x02, 0x52, 0x42, 0x58, 0x00, asPlayer}
+	var sameHostIPs []string
+	sendOnce := func(recordSameHost bool) {
+		for _, ip := range targets {
+			c, err := net.DialUDP("udp4", nil, &net.UDPAddr{IP: ip, Port: portAnnounce})
+			if err != nil {
+				continue
+			}
+			pktIP := ip
+			if la, ok := c.LocalAddr().(*net.UDPAddr); ok && la.IP.To4() != nil {
+				pktIP = la.IP.To4()
+			}
+			if recordSameHost && pktIP.Equal(ip) && !ip.IsLoopback() {
+				sameHostIPs = append(sameHostIPs, red.ip(ip))
+			}
+			_, _ = c.Write(buildVirtualCDJKeepAlive(asPlayer, pktIP, mac))
+			_ = c.Close()
+		}
+	}
+
+	sendOnce(true)
+	sameHostSummary := strings.Join(sameHostIPs, ", ")
+	stopCh := make(chan struct{})
+	doneCh := make(chan struct{})
+	go func() {
+		defer close(doneCh)
+		t := time.NewTicker(1 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-stopCh:
+				return
+			case <-t.C:
+				sendOnce(false)
+			}
+		}
+	}()
+
+	start := time.Now()
+	deadline := start.Add(10 * time.Second)
+	ready := false
+	seenNotReady := map[string]bool{}
+	for !ready && time.Now().Before(deadline) {
+		for _, ip := range targets {
+			if dbPort, err := queryDBPort(ip, 250*time.Millisecond); err == nil {
+				if dbPort > 0 && dbPort < 0xffff {
+					fmt.Printf("wake: %s TCP %d ready (RemoteDBServer port=%d) after %s\n",
+						red.ip(ip), portDBQuery, dbPort, time.Since(start).Round(time.Millisecond))
+					ready = true
+					break
+				}
+				if !seenNotReady[ip.String()] {
+					seenNotReady[ip.String()] = true
+					fmt.Printf("wake: %s TCP %d returned port=%d (LINK not yet active)\n", red.ip(ip), portDBQuery, dbPort)
+				}
+			}
+		}
+		if !ready {
+			time.Sleep(250 * time.Millisecond)
+		}
+	}
+	if !ready {
+		fmt.Printf("wake: TCP %d still closed/not ready after 10s (proceeding with probe anyway)\n", portDBQuery)
+		if sameHostSummary != "" {
+			fmt.Printf("wake: note: source IP equals target (%s); rekordbox may ignore own-IP 0x06 keepalives — test -wake from another LAN host/deck if LINK stays closed\n", sameHostSummary)
+		}
+	}
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			close(stopCh)
+			<-doneCh
+		})
+	}
+}
+
 // --- dbserver client ---
 
 type dbField struct {
@@ -891,8 +1004,10 @@ func cleanMenuLabel(s string) string {
 	return s
 }
 
-func queryDBPort(ip net.IP, timeout time.Duration) (int, error) {
-	c, err := net.DialTimeout("tcp4", net.JoinHostPort(ip.String(), strconv.Itoa(portDBQuery)), timeout)
+var fallbackDBPorts = []int{55000, 55002, 50000}
+
+func queryDBPortOn(ip net.IP, port int, timeout time.Duration) (int, error) {
+	c, err := net.DialTimeout("tcp4", net.JoinHostPort(ip.String(), strconv.Itoa(port)), timeout)
 	if err != nil {
 		return 0, err
 	}
@@ -902,11 +1017,100 @@ func queryDBPort(ip net.IP, timeout time.Duration) (int, error) {
 	if _, err := c.Write(ask); err != nil {
 		return 0, err
 	}
-	var port [2]byte
-	if _, err := io.ReadFull(c, port[:]); err != nil {
+	var buf [64]byte
+	n, err := c.Read(buf[:])
+	if err == nil && n == 1 {
+		var second [1]byte
+		if _, err2 := io.ReadFull(c, second[:]); err2 == nil {
+			buf[1] = second[0]
+			n = 2
+		}
+	}
+	if err != nil && n == 0 {
 		return 0, err
 	}
-	return int(binary.BigEndian.Uint16(port[:])), nil
+	if n != 2 {
+		return 0, fmt.Errorf("unexpected %d-byte reply hex=%s ascii=%q",
+			n, hex.EncodeToString(buf[:min(n, 16)]), printableASCII(buf[:min(n, 16)]))
+	}
+	return int(binary.BigEndian.Uint16(buf[:2])), nil
+}
+
+func queryDBPort(ip net.IP, timeout time.Duration) (int, error) {
+	return queryDBPortOn(ip, portDBQuery, timeout)
+}
+
+func probeDirectDBPort(ip net.IP, port int, asPlayer byte, timeout time.Duration, red *redactor) (bool, bool) {
+	c, err := net.DialTimeout("tcp4", net.JoinHostPort(ip.String(), strconv.Itoa(port)), timeout)
+	if err != nil {
+		fmt.Printf("tcp %d direct dbserver: dial ERROR: %s\n", port, red.err(err))
+		return false, false
+	}
+	defer c.Close()
+	_ = c.SetDeadline(time.Now().Add(timeout))
+	hello := []byte{0x11, 0, 0, 0, 1}
+	if _, err := c.Write(hello); err != nil {
+		fmt.Printf("tcp %d direct dbserver: write ERROR: %s\n", port, red.err(err))
+		return false, true
+	}
+	var buf [64]byte
+	n, err := c.Read(buf[:])
+	if err == nil && n > 0 && n < len(hello) {
+		if _, err2 := io.ReadFull(c, buf[n:len(hello)]); err2 == nil {
+			n = len(hello)
+		}
+	}
+	if n == 0 {
+		fmt.Printf("tcp %d direct dbserver: greeting ERROR: %s\n", port, red.err(err))
+		return false, true
+	}
+	if n != len(hello) || !bytes.Equal(buf[:len(hello)], hello) {
+		fmt.Printf("tcp %d direct dbserver: unexpected greeting len=%d hex=%s ascii=%q\n",
+			port, n, hex.EncodeToString(buf[:min(n, 16)]), red.sanitizeGeneric(printableASCII(buf[:min(n, 16)])))
+		return false, true
+	}
+	d := &dbConn{c: c, r: bufio.NewReader(c)}
+	if _, err := c.Write(encodeDBReq(0xfffffffe, kindSetup, dbNum(uint32(asPlayer)))); err != nil {
+		fmt.Printf("tcp %d direct dbserver: greeting OK, setup write ERROR: %s\n", port, red.err(err))
+		return true, true
+	}
+	ack, err := decodeDBMsg(d.r)
+	if err != nil {
+		fmt.Printf("tcp %d direct dbserver: greeting OK, setup ERROR: %s\n", port, red.err(err))
+		return true, true
+	}
+	var srvNum uint32
+	if len(ack.args) > 0 {
+		srvNum = ack.args[0].num
+	}
+	fmt.Printf("tcp %d direct dbserver: greeting OK, setup as=%d kind=0x%04x server_player=%d\n", port, asPlayer, ack.kind, srvNum)
+	return true, true
+}
+
+func probeDBFallback(ip net.IP, asPlayer byte, ports []int, timeout time.Duration, red *redactor) int {
+	fbTimeout := timeout
+	if fbTimeout > 750*time.Millisecond {
+		fbTimeout = 750 * time.Millisecond
+	}
+	for _, cand := range ports {
+		isDB, dialed := probeDirectDBPort(ip, cand, asPlayer, fbTimeout, red)
+		if isDB {
+			return cand
+		}
+		if !dialed {
+			continue
+		}
+		qp, qerr := queryDBPortOn(ip, cand, fbTimeout)
+		if qerr != nil {
+			fmt.Printf("tcp %d RemoteDBServer query: ERROR: %s\n", cand, red.err(qerr))
+			continue
+		}
+		fmt.Printf("tcp %d RemoteDBServer port=%d\n", cand, qp)
+		if qp > 0 && qp < 0xffff {
+			return qp
+		}
+	}
+	return 0
 }
 
 func probeDBServer(ip net.IP, asPlayer byte, maxTracks int, specificTrack uint32, timeout time.Duration, needMediaQuery bool, red *redactor) []string {
@@ -914,9 +1118,18 @@ func probeDBServer(ip net.IP, asPlayer byte, maxTracks int, specificTrack uint32
 	dbPort, err := queryDBPort(ip, timeout)
 	if err != nil {
 		fmt.Printf("tcp %d RemoteDBServer query: ERROR: %s\n", portDBQuery, red.err(err))
-		return nil
+	} else if dbPort == 0 || dbPort == 0xffff {
+		fmt.Printf("tcp %d RemoteDBServer port=%d (LINK not active)\n", portDBQuery, dbPort)
+		dbPort = 0
+	} else {
+		fmt.Printf("tcp %d RemoteDBServer port=%d\n", portDBQuery, dbPort)
 	}
-	fmt.Printf("tcp %d RemoteDBServer port=%d\n", portDBQuery, dbPort)
+	if dbPort == 0 {
+		dbPort = probeDBFallback(ip, asPlayer, fallbackDBPorts, timeout, red)
+		if dbPort == 0 {
+			return nil
+		}
+	}
 
 	// Test asking player numbers 1, 4, 5, 7, 41.
 	var okPlayers []byte
@@ -1444,7 +1657,7 @@ func decodeWireName(b []byte) (string, string) {
 	return string(bytes.TrimRight(b, "\x00")), "utf8"
 }
 
-func rpcCallUDP(ip net.IP, port int, prog, vers, proc uint32, authUnix bool, args []byte, timeout time.Duration) (*xdrReader, error) {
+func rpcCallUDP(ip net.IP, port, srcPort int, prog, vers, proc uint32, authUnix bool, args []byte, timeout time.Duration) (*xdrReader, error) {
 	var id [4]byte
 	_, _ = rand.Read(id[:])
 	xid := binary.BigEndian.Uint32(id[:])
@@ -1459,7 +1672,11 @@ func rpcCallUDP(ip net.IP, port int, prog, vers, proc uint32, authUnix bool, arg
 	}
 	msg.Write(args)
 
-	conn, err := net.DialUDP("udp4", nil, &net.UDPAddr{IP: ip, Port: port})
+	var laddr *net.UDPAddr
+	if srcPort > 0 {
+		laddr = &net.UDPAddr{IP: net.IPv4zero, Port: srcPort}
+	}
+	conn, err := net.DialUDP("udp4", laddr, &net.UDPAddr{IP: ip, Port: port})
 	if err != nil {
 		return nil, err
 	}
@@ -1508,12 +1725,26 @@ func rpcCallUDP(ip net.IP, port int, prog, vers, proc uint32, authUnix bool, arg
 	return nil, fmt.Errorf("no UDP reply from %s:%d", ip, port)
 }
 
-func probeNFS(ip net.IP, trackPaths []string, timeout time.Duration, red *redactor) {
+func probeRPCNull(ip net.IP, label string, port, srcPort int, prog, vers uint32, authUnix bool, timeout time.Duration, red *redactor) {
+	if _, err := rpcCallUDP(ip, port, srcPort, prog, vers, 0, authUnix, nil, timeout); err != nil {
+		if authUnix {
+			if _, err2 := rpcCallUDP(ip, port, srcPort, prog, vers, 0, false, nil, timeout); err2 == nil {
+				fmt.Printf("%s NULL (proc 0) udp/%d: OK ONLY with AUTH_NULL!\n", label, port)
+				return
+			}
+		}
+		fmt.Printf("%s NULL (proc 0) udp/%d: ERROR: %s\n", label, port, red.err(err))
+		return
+	}
+	fmt.Printf("%s NULL (proc 0) udp/%d (authUnix=%v): OK\n", label, port, authUnix)
+}
+
+func probeNFS(ip net.IP, trackPaths []string, srcPort int, timeout time.Duration, red *redactor) {
 	fmt.Printf("\n--- UDP Portmap / MOUNT / NFSv2 Probe (%s) ---\n", red.ip(ip))
 
 	// Check standard portmap 111 briefly, and rekordbox portmap 50111.
 	short := 400 * time.Millisecond
-	if r111, err := rpcCallUDP(ip, portmapStd, rpcPortmap, 2, 4, true, nil, short); err != nil {
+	if r111, err := rpcCallUDP(ip, portmapStd, srcPort, rpcPortmap, 2, 4, true, nil, short); err != nil {
 		fmt.Printf("portmap udp/%d DUMP: %s\n", portmapStd, red.err(err))
 	} else {
 		fmt.Printf("portmap udp/%d DUMP: responded (%d bytes)\n", portmapStd, len(r111.b))
@@ -1521,10 +1752,10 @@ func probeNFS(ip net.IP, trackPaths []string, timeout time.Duration, red *redact
 
 	pmPort := portmapRB
 	authUnix := true
-	rDump, err := rpcCallUDP(ip, pmPort, rpcPortmap, 2, 4, true, nil, timeout)
+	rDump, err := rpcCallUDP(ip, pmPort, srcPort, rpcPortmap, 2, 4, true, nil, timeout)
 	if err != nil {
 		fmt.Printf("portmap udp/%d DUMP (AUTH_UNIX): %s\n", pmPort, red.err(err))
-		rDump, err = rpcCallUDP(ip, pmPort, rpcPortmap, 2, 4, false, nil, timeout)
+		rDump, err = rpcCallUDP(ip, pmPort, srcPort, rpcPortmap, 2, 4, false, nil, timeout)
 		if err != nil {
 			fmt.Printf("portmap udp/%d DUMP (AUTH_NULL): %s\n", pmPort, red.err(err))
 		} else {
@@ -1546,7 +1777,7 @@ func probeNFS(ip net.IP, trackPaths []string, timeout time.Duration, red *redact
 
 	getPort := func(prog, vers uint32) (int, error) {
 		args := (&xdrBuf{}).u32(prog).u32(vers).u32(17).u32(0).Bytes()
-		r, err := rpcCallUDP(ip, pmPort, rpcPortmap, 2, 3, authUnix, args, timeout)
+		r, err := rpcCallUDP(ip, pmPort, srcPort, rpcPortmap, 2, 3, authUnix, args, timeout)
 		if err != nil {
 			return 0, err
 		}
@@ -1576,9 +1807,27 @@ func probeNFS(ip net.IP, trackPaths []string, timeout time.Duration, red *redact
 		enc     string
 	}
 	var exports []exportEntry
-	rExp, err := rpcCallUDP(ip, mountPort, rpcMount, 1, 5, authUnix, nil, timeout)
+	rExp, err := rpcCallUDP(ip, mountPort, srcPort, rpcMount, 1, 5, authUnix, nil, timeout)
 	if err != nil {
-		fmt.Printf("MOUNT EXPORT (proc 5): ERROR: %s\n", red.err(err))
+		fmt.Printf("MOUNT EXPORT (proc 5, authUnix=%v): ERROR: %s\n", authUnix, red.err(err))
+		if authUnix {
+			if r2, err2 := rpcCallUDP(ip, mountPort, srcPort, rpcMount, 1, 5, false, nil, timeout); err2 == nil {
+				rExp = r2
+				err = nil
+				authUnix = false
+				fmt.Printf("MOUNT EXPORT (proc 5): succeeded ONLY with AUTH_NULL!\n")
+			} else {
+				fmt.Printf("MOUNT EXPORT (proc 5, AUTH_NULL): ERROR: %s\n", red.err(err2))
+			}
+		}
+	}
+	if err != nil {
+		nullTimeout := timeout
+		if nullTimeout > 800*time.Millisecond {
+			nullTimeout = 800 * time.Millisecond
+		}
+		probeRPCNull(ip, "MOUNT", mountPort, srcPort, rpcMount, 1, authUnix, nullTimeout, red)
+		probeRPCNull(ip, "NFS", nfsPort, srcPort, rpcNFS, 2, authUnix, nullTimeout, red)
 	} else {
 		for rExp.err == nil && rExp.u32() == 1 {
 			raw := append([]byte(nil), rExp.opaque(4096)...)
@@ -1631,14 +1880,16 @@ func probeNFS(ip net.IP, trackPaths []string, timeout time.Duration, red *redact
 	var mountedExport string
 	for _, cand := range mntCandidates {
 		args := (&xdrBuf{}).opaque(cand.raw).Bytes()
-		rMnt, err := rpcCallUDP(ip, mountPort, rpcMount, 1, 1, authUnix, args, timeout)
+		rMnt, err := rpcCallUDP(ip, mountPort, srcPort, rpcMount, 1, 1, authUnix, args, timeout)
 		if err != nil {
 			fmt.Printf("MOUNT MNT %s (authUnix=%v): ERROR: %s\n", cand.label, authUnix, red.err(err))
 			if authUnix {
-				if r2, err2 := rpcCallUDP(ip, mountPort, rpcMount, 1, 1, false, args, timeout); err2 == nil {
+				if r2, err2 := rpcCallUDP(ip, mountPort, srcPort, rpcMount, 1, 1, false, args, timeout); err2 == nil {
 					rMnt = r2
 					authUnix = false
 					fmt.Printf("MOUNT MNT %s retried with AUTH_NULL!\n", cand.label)
+				} else {
+					fmt.Printf("MOUNT MNT %s (AUTH_NULL): ERROR: %s\n", cand.label, red.err(err2))
 				}
 			}
 		}
@@ -1669,7 +1920,7 @@ func probeNFS(ip net.IP, trackPaths []string, timeout time.Duration, red *redact
 	rdArgs.Reset()
 	rdArgs.Write(rootFH)
 	rdArgs.u32(0).u32(1400)
-	if rDir, err := rpcCallUDP(ip, nfsPort, rpcNFS, 2, 16, authUnix, rdArgs.Bytes(), timeout); err != nil {
+	if rDir, err := rpcCallUDP(ip, nfsPort, srcPort, rpcNFS, 2, 16, authUnix, rdArgs.Bytes(), timeout); err != nil {
 		fmt.Printf("NFS READDIR /: ERROR: %s\n", red.err(err))
 	} else if st := rDir.u32(); st != 0 {
 		fmt.Printf("NFS READDIR /: status=%d\n", st)
@@ -1705,7 +1956,7 @@ func probeNFS(ip net.IP, trackPaths []string, timeout time.Duration, red *redact
 			} else {
 				args.opaque([]byte(comp))
 			}
-			r, err := rpcCallUDP(ip, nfsPort, rpcNFS, 2, 4, authUnix, args.Bytes(), timeout)
+			r, err := rpcCallUDP(ip, nfsPort, srcPort, rpcNFS, 2, 4, authUnix, args.Bytes(), timeout)
 			if err != nil {
 				return nil, 0, 0, 0, err
 			}
@@ -1784,7 +2035,7 @@ func probeNFS(ip net.IP, trackPaths []string, timeout time.Duration, red *redact
 		readArgs := &xdrBuf{}
 		readArgs.Write(fh)
 		readArgs.u32(0).u32(64).u32(0)
-		rr, err := rpcCallUDP(ip, nfsPort, rpcNFS, 2, 6, authUnix, readArgs.Bytes(), timeout)
+		rr, err := rpcCallUDP(ip, nfsPort, srcPort, rpcNFS, 2, 6, authUnix, readArgs.Bytes(), timeout)
 		if err != nil {
 			fmt.Printf("NFS READ(0, 64): ERROR: %s\n", red.err(err))
 			continue
