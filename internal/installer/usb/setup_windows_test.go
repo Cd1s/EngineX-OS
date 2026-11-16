@@ -42,6 +42,9 @@ func TestWindowsSetupTargetsOnlyUpdateInterfaces(t *testing.T) {
 }
 
 func TestWindowsInboxWinUSBDriverSelection(t *testing.T) {
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		t.Skip("creating an unregistered test element requires administrator rights")
+	}
 	set, err := windows.SetupDiCreateDeviceInfoListEx(nil, 0, "")
 	if err != nil {
 		t.Fatal(err)
