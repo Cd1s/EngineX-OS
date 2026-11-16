@@ -147,7 +147,8 @@ func readDBMessage(r io.Reader) (dbMessage, error) {
 		}
 		h[i] = f
 	}
-	if h[0].tag != 0x11 || h[0].n != dbMagic || h[1].tag != 0x11 || h[2].tag != 0x10 || h[3].tag != 0x0f || h[3].n > 12 || h[4].tag != 0x14 || len(h[4].data) != 12 {
+	// Players pad the tag list to 12; rekordbox sends exactly one tag per argument.
+	if h[0].tag != 0x11 || h[0].n != dbMagic || h[1].tag != 0x11 || h[2].tag != 0x10 || h[3].tag != 0x0f || h[4].tag != 0x14 || len(h[4].data) < int(h[3].n) || len(h[4].data) > 32 {
 		return dbMessage{}, errors.New("prolink: invalid dbserver header")
 	}
 	m := dbMessage{tx: h[1].n, kind: uint16(h[2].n)}
