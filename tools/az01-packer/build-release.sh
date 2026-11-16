@@ -66,6 +66,22 @@ mkdir -p "$STAGE/usr/share/enginex" "$STAGE/usr/sbin"
 xz -T0 --check=crc32 --lzma2=preset=9e,dict=8MiB,lc=0,lp=2,pb=2 -c "$WORK/enginex-suite" > "$STAGE/usr/share/enginex/enginex-suite.xz"
 gzip -dc "$WORK/packs.tar.gz" | xz -T0 --check=crc32 --lzma2=preset=9e,dict=8MiB -c > "$STAGE/usr/share/enginex/ui-packs.tar.xz"
 install -m 0755 "$FSCK" "$STAGE/usr/sbin/fsck.hfsplus"
+HFSPLUSX=${HFSPLUSX_KO:-}
+if [ -z "$HFSPLUSX" ]; then
+    for candidate in "$(dirname "$FSCK")/../lib/modules/"*/extra/hfsplusx.ko kernel-modules/out/lib/modules/*/extra/hfsplusx.ko; do
+        [ -f "$candidate" ] || continue
+        HFSPLUSX=$candidate
+        break
+    done
+fi
+if [ -n "$HFSPLUSX" ]; then
+    readelf -h "$HFSPLUSX" | grep -q 'Machine:.*ARM' || { echo "expected 32-bit ARM module: $HFSPLUSX" >&2; exit 2; }
+    PATH="$PATH:/usr/sbin:/sbin" modinfo -F name "$HFSPLUSX" | grep -qx hfsplusx || { echo "unexpected module name in $HFSPLUSX" >&2; exit 2; }
+    krel=$(PATH="$PATH:/usr/sbin:/sbin" modinfo -F vermagic "$HFSPLUSX" | awk '{print $1}')
+    [ -n "$krel" ] || { echo "missing vermagic in $HFSPLUSX" >&2; exit 2; }
+    mkdir -p "$STAGE/lib/modules/$krel/extra"
+    install -m 0644 "$HFSPLUSX" "$STAGE/lib/modules/$krel/extra/hfsplusx.ko"
+fi
 chmod 0644 "$STAGE/usr/share/enginex/"*
 
 # 1b. Second generation: /data bundles. 6 armhf models share the 32-bit suite and hooks, AZ04 (PRIME 4 G2, SYSTEM ONE) needs arm64 ones.
@@ -79,6 +95,25 @@ GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X gith
 CROSS64=aarch64-linux-gnu-; [ "$(uname -m)" != aarch64 ] || CROSS64=
 CROSS=$CROSS64 OUT=$WORK/hooks64/libengine-ui-hook.so sh tools/ui-mod/build.sh
 CROSS=$CROSS64 OUT=$WORK/hooks64/libedisksd-hook.so sh tools/edisksd-hook/build.sh
+FSCK64_PATH=${FSCK64:-}
+if [ -z "$FSCK64_PATH" ]; then
+    for candidate in "$(dirname "$FSCK")/fsck.hfsplus-arm64" kernel-modules/out-arm64/sbin/fsck.hfsplus; do
+        [ -x "$candidate" ] || continue
+        FSCK64_PATH=$candidate
+        break
+    done
+fi
+if [ -z "$FSCK64_PATH" ]; then
+    mkdir -p "$WORK/hfs64-build"
+    if [ -d kernel-modules/.build/hfsprogs ]; then
+        cp -a kernel-modules/.build/hfsprogs "$WORK/hfs64-src"
+        CROSS_COMPILE=$CROSS64 BUILD_ROOT=$WORK/hfs64-build OUTPUT_ROOT=$WORK/hfs64-out HFS_TOOLS_SRC=$WORK/hfs64-src bash kernel-modules/build_modules.sh tools >/dev/null
+    else
+        CROSS_COMPILE=$CROSS64 BUILD_ROOT=$WORK/hfs64-build OUTPUT_ROOT=$WORK/hfs64-out bash kernel-modules/build_modules.sh tools >/dev/null
+    fi
+    FSCK64_PATH=$WORK/hfs64-out/sbin/fsck.hfsplus
+fi
+install -m 0755 "$FSCK64_PATH" "$WORK/hooks64/fsck.hfsplus"
 
 # 1c. EngineX boot splash (#118, #226). The firmware splash partition shows before Linux starts,
 # and every update rewrites it, so an image carrying the stock one puts the stock picture back on
@@ -135,7 +170,7 @@ for m in SCLIVE4 SCLIVE2 PRIME4PLUS PRIMEGOPLUS MIXSTREAMPROPLUS MIXSTREAMPROGO;
 done
 for m in PRIME4G2 SYSTEMONE; do
     python3 tools/az01-packer/build-data-bundle.py "$VERSION" --release-tag "$TAG" --prefix "$m" --suite "$WORK/enginex-suite-arm64" \
-        --hook "$WORK/hooks64/libengine-ui-hook.so" --ui-packs "$WORK/packs.tar.gz" --out "$WORK/bundle-$m" >/dev/null
+        --hook "$WORK/hooks64/libengine-ui-hook.so" --fsck-hfsplus "$WORK/hooks64/fsck.hfsplus" --ui-packs "$WORK/packs.tar.gz" --out "$WORK/bundle-$m" >/dev/null
     cp "$WORK/bundle-$m/$m-$VERSION-EngineX-OS-Data-Bundle.tar.gz" "$WORK/bundle-$m/$m-$VERSION-EngineX-OS-"*-Update.img "$OUT/"
 done
 
