@@ -188,6 +188,8 @@ grep -Fq 'UPDATE_FILE=\$(/data/enginex/bundle/bin/engine-ui-guard update-file >/
 grep -Fq 'env LD_PRELOAD=\"/data/enginex/bundle/lib/libengine-ui-hook.so\" /usr/sbin/az01-update --file' '$TARGET/usr/Engine/Scripts/engine'
 grep -Fq 'env LD_PRELOAD=\"/data/enginex/bundle/lib/libengine-ui-hook.so\" /usr/bin/planck-remote-screen --update' '$TARGET/usr/Engine/Scripts/engine'
 grep -Fq 'env LD_PRELOAD=\"/data/enginex/bundle/lib/libengine-ui-hook.so\" /usr/sbin/az01-update --erase-data' '$TARGET/usr/Engine/Scripts/engine'
+grep -q '/usr/bin/az01-ethernet-speed 1000' '$TARGET/usr/Engine/Scripts/engine'
+! grep -E 'az01-ethernet-speed[[:space:]]+100([[:space:]]|$)' '$TARGET/usr/Engine/Scripts/engine'
 grep -q 'engine-ui-guard service /usr/Engine/Scripts/runengine' '$TARGET/run/systemd/system/engine.service.d/99-enginex.conf'
 # Repeated activation in one boot must not truncate its own bound input, and restores gen2-unlocked if absent.
 rm -f '$TARGET/data/enginex/gen2-unlocked'
