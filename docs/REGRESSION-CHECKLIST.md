@@ -6,7 +6,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 
 ---
 
-## Regression Table (264 Rows)
+## Regression Table (265 Rows)
 
 | # | Behaviour that must keep working | Issue / commit that fixed it | How it is checked (automated test name, or exact real-deck / sandbox step) | Release gate / deck acceptance / recording coverage |
 | --- | --- | --- | --- | --- |
@@ -274,6 +274,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 | 262 | **A 21,352-track rekordbox FAT32 export keeps all scrolling detail below the 3 GiB sidecar cap**: source rows store only the source ID and the same valid PWV7/PWV5 section the display reads, with raw waveform bytes; bounded readers accept compact and legacy plain/gzip JSON; identity scans read only the ID prefix, and Engine cues/loops/grids remain in m.db | #272 final size fix | `enginedb::TestIssue272CompactRowSize`, `TestIssue272CompactLibraryFitsCap`, `TestIssue272CompactConsumerFields`, `TestIssue272CompactPWV5FallbackAndEmpty`, `TestIssue272CompactLegacyAndBounds`; `webui::TestBridgeDetailsReadCompactRows`; existing #272 cap/resume and bridge end-to-end tests | Go race suites and AMD/native armhf encode benchmarks; real 21k-stick acceptance pending |
 | 263 | **Tapping the browser preview waveform starts and seeks prelisten in one tap** (#270): `TrackList.qml` (`scPendingSeek` on `previewItem`) starts preview on `!inAlbumArt` when idle and seeks `/Client/Librarian/Preview/Position` once `isListening` becomes true (synchronous or async), seeks immediately on subsequent taps, clears pending seek on album-art toggle or browser hide, and leaves deck audio untouched | `test_ui_mod.py` (`test_preview_waveform_tap_seek_270`) + Bogota armhf QML load check | Preview starts & seeks at tapped position on first tap, moves on second tap, stops on browser close |
 | 264 | **Mount-time Rekordbox conversion (`rb-bridge`) shows a 4-language loading indicator (`Loading USB…` / `Loading SD card…` + `done / total`) and error text, polled at most every 2 s only while the browser is visible** (`internal/cli/rbbridge_status.go`, `pkg/enginedb/sync.go`, `pkg/webui/ui_settings.go`, `tools/ui-mod/build_packs.py`, `tools/ui-mod/i18n.tsv`). | PASS (`go test ./pkg/webui -run TestUSBPreparing`, `go test ./internal/cli -run TestRBBridgeUSBLoadingStatusLifecycle`, `unittest UsbPreparingFeedbackTest`) |
+| 265 | **Shift+View on the real controller reaches the five-view cycle**: the GUI receives `/GUI/Scripted/EngineXCycleView` through stock's `ActionTranslatorStateChangeNotifier` (action translators have no `triggered` signal; a trigger raises `stateTrueCount` and `stateChanged`, from the GUI engine or the controller's); plain View, double and hold keep their stock paths | left SC5000 2026-11-16 (pack with #99 `4dd3204f`): Shift+View did nothing; a 5.3.0.4-r5 deck still switched | `test_ui_mod_shift_view.py` (the fixture's translator has only `stateChanged`/`stateTrueCount`, as Engine's) | SC5000 JP07: Shift+View six times after a cold boot, slow and rapid: views 1→2→3→4→5→1; plain View, double View, hold View unchanged |
 
 ## Automated Test Gaps (`[NO AUTOMATED TEST]`)
 

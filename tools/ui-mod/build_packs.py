@@ -1054,9 +1054,12 @@ SERVICES_MAIN = """
 	// rather than through the stock policy's three-view/focus-dependent action.
 	readonly property var scViewCycleRef: Planck.createProperty("EngineXCycleView", false, 3)
 	readonly property var scViewCycleProperty: scViewCycleRef && Planck.getProperty("/GUI/Scripted/EngineXCycleView")
-	Connections {
-		target: root.scViewCycleProperty ? root.scViewCycleProperty.translator : null
-		function onTriggered() { root.scViewSelect(root.scViewActive % 5 + 1) }
+	// An action property has no "triggered" signal: a trigger, from this engine or the
+	// controller's, raises stateTrueCount and stateChanged. Stock's notifier counts
+	// those and resets the state (a Connections on onTriggered never ran on a deck).
+	ActionTranslatorStateChangeNotifier {
+		prop: root.scViewCycleProperty || null
+		onChanged: root.scViewSelect(root.scViewActive % 5 + 1)
 	}
 	function scViewControls() {
 		const c = PlanckGUI.views.performanceViewController
