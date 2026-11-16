@@ -49,6 +49,13 @@ class UpgradeContractTest(unittest.TestCase):
             (new / 'state').mkdir()
             socket = new / 'state/socket.json'
             socket.write_text(json.dumps({'socket': '/run/' + legacy.PROJECT + '-tailscaled.sock'}))
+            paused = new / 'mods-state/club/.paused'
+            paused.parent.mkdir(parents=True)
+            paused.write_text(legacy.DEEMIX + '.service\n' + legacy.DEEMIX_UNIT + '\nforeign.service\n')
+            foreign = data / 'Music'
+            foreign.mkdir()
+            (foreign / '.paused').write_text(legacy.DEEMIX + '.service\n')
+            (new / 'mods-state/foreign').symlink_to(foreign)
             alsa = data / 'system/var/overlay/lib/alsa/conf.d'
             alsa.mkdir(parents=True)
             (alsa / legacy.ALSA_FILE).write_text('lib "' + str(data / legacy.DATA_NAME) + '/bundle/lib/libengine-ui-hook.so"\nfunc ' + legacy.PROJECT + '_alsa_boot_hook\n')
@@ -59,6 +66,8 @@ class UpgradeContractTest(unittest.TestCase):
             self.assertEqual(settings.read_text(), 'console_url=http://enginex.lan:8080\nname=SC5000\nfour_deck_role=24\n')
             self.assertEqual((new / 'ui-scale.env').read_text(), 'ENGINEX_UI_SCALE=0.75\n')
             self.assertEqual(json.loads(socket.read_text()), {'socket': '/run/enginex-tailscaled.sock'})
+            self.assertEqual(paused.read_text(), 'enginex-deemixd.service\nenginex-deemixd.service\nforeign.service\n')
+            self.assertEqual((foreign / '.paused').read_text(), legacy.DEEMIX + '.service\n')
             self.assertFalse((alsa / legacy.ALSA_FILE).exists())
             self.assertEqual((alsa / '99-enginex.conf').read_text(), 'lib "' + str(new) + '/bundle/lib/libengine-ui-hook.so"\nfunc enginex_alsa_boot_hook\n')
             migrated = json.loads(accounts.read_text())
