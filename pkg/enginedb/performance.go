@@ -170,7 +170,30 @@ func TrackDataPeaks(track, overview []byte) []byte {
 
 // overviewBatch is how many overviews FillOverviewMaxima reads and commits at a time. A
 // variable only for tests.
-var overviewBatch = 256
+var overviewBatch = 2048
+
+// OverviewMaxima returns raw overviewWaveFormData with its 3-byte band-maxima
+// trailer populated if the trailer was zero and the waveform has non-zero bins.
+func OverviewMaxima(raw []byte) []byte {
+	if len(raw) < 27 || len(raw)%3 != 0 {
+		return raw
+	}
+	top := raw[len(raw)-3:]
+	if top[0]|top[1]|top[2] != 0 {
+		return raw
+	}
+	var maxima [3]byte
+	for i, v := range raw[24 : len(raw)-3] {
+		maxima[i%3] = max(maxima[i%3], v)
+	}
+	if maxima[0]|maxima[1]|maxima[2] == 0 {
+		return raw
+	}
+	out := make([]byte, len(raw))
+	copy(out, raw)
+	copy(out[len(out)-3:], maxima[:])
+	return out
+}
 
 // FillOverviewMaxima completes the overviews that end in a zero triple where Engine expects
 // each band's maximum, the value it scales that band by. An earlier build imported them so,
@@ -243,15 +266,9 @@ func fillOverviewBatch(ctx context.Context, db *sql.DB, after int64) (n int, las
 		if err != nil || len(raw) < 27 || len(raw)%3 != 0 {
 			continue
 		}
-		top := raw[len(raw)-3:]
-		if top[0]|top[1]|top[2] != 0 {
-			continue
-		}
-		for i, v := range raw[24 : len(raw)-3] {
-			top[i%3] = max(top[i%3], v)
-		}
-		if top[0]|top[1]|top[2] != 0 {
-			if fixed[last], err = QCompress(raw); err != nil {
+		updated := OverviewMaxima(raw)
+		if &updated[0] != &raw[0] {
+			if fixed[last], err = QCompress(updated); err != nil {
 				return 0, 0, err
 			}
 		}

@@ -1362,6 +1362,7 @@ func perfFromBlobs(bpm float64, track, beats, overview []byte) ([]byte, error) {
 			return nil, err
 		}
 	}
+	raw[2] = enginedb.OverviewMaxima(raw[2])
 	raw[0] = enginedb.TrackDataPeaks(raw[0], raw[2])
 	var b bytes.Buffer
 	b.WriteString("EXPF")

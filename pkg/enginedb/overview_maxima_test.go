@@ -26,6 +26,26 @@ func TestOverviewEndsWithBandMaxima(t *testing.T) {
 	}
 }
 
+func TestOverviewMaximaHelper(t *testing.T) {
+	if overviewBatch < 2048 {
+		t.Fatalf("overviewBatch = %d, want >= 2048 so multi-thousand-track sticks finish without stalling at 256", overviewBatch)
+	}
+	raw := make([]byte, 24+6+3)
+	copy(raw[24:], []byte{10, 200, 30, 150, 50, 90, 0, 0, 0})
+	got := OverviewMaxima(raw)
+	if !bytes.Equal(got[len(got)-3:], []byte{150, 200, 90}) {
+		t.Fatalf("trailer = %v, want [150 200 90]", got[len(got)-3:])
+	}
+	raw[len(raw)-1] = 1
+	if got2 := OverviewMaxima(raw); !bytes.Equal(got2, raw) {
+		t.Fatalf("expected non-zero trailer to remain unchanged")
+	}
+	zeros := make([]byte, 24+6+3)
+	if got3 := OverviewMaxima(zeros); !bytes.Equal(got3, zeros) {
+		t.Fatalf("expected all-zero overview to remain unchanged")
+	}
+}
+
 // overviewLibrary is a volume whose library has only the table of overviews, and an
 // overview of two bins that ends in trailer.
 func overviewLibrary(t *testing.T) (mount string, db *sql.DB, overview func(trailer ...byte) []byte) {
