@@ -1057,6 +1057,16 @@ func (d *dbConn) renderMenu(player, menu, slot, trackType byte, dmstArg uint32, 
 	return rows, nil
 }
 
+// sortSummary says what the first rows of a track list carry: their kind, and how long the
+// title and the second text are. A second text that is not empty is a second column.
+func sortSummary(rows []menuRow) string {
+	var parts []string
+	for _, r := range rows {
+		parts = append(parts, fmt.Sprintf("kind=0x%04x title_len=%d second_len=%d", r.kind, len(r.label), len(r.sec)))
+	}
+	return "rows=[" + strings.Join(parts, "; ") + "]"
+}
+
 func cleanMenuLabel(s string) string {
 	s = strings.TrimPrefix(s, "￺")
 	s = strings.TrimSuffix(s, "￻")
@@ -1366,6 +1376,26 @@ func probeDBSession(ip net.IP, dbPort int, asPlayer byte, maxTracks int, specifi
 					addTrackID(r.id)
 					fmt.Printf("    sample_track[%d]: id=%d parent=%d kind=0x%04x art=%d pos=%d title_len=%d artist_len=%d\n",
 						idx, r.id, r.parent, r.kind, r.artID, r.pos, len(r.label), len(r.sec))
+				}
+			}
+		}
+
+		// 2b. Does another sort order give the track rows a second column (artist, BPM, key)? Only
+		// row kinds and text lengths are printed.
+		if workingSlot == slot && dc != nil {
+			for sortOrder := uint32(1); sortOrder <= 20; sortOrder++ {
+				sm, serr := dc.req(kindAllTracks, timeout, dbNum(d), dbNum(sortOrder))
+				if serr != nil || sm.kind != kindSetupAck || len(sm.args) < 2 {
+					fmt.Printf("  0x1004 sort=%d: no list (%s)\n", sortOrder, red.err(serr))
+					if !redial() {
+						break
+					}
+					continue
+				}
+				rows, rerr := dc.renderMenu(asPlayer, 1, slot, 1, d, sm.args[1].num, 3, timeout)
+				fmt.Printf("  0x1004 sort=%d: count=%s %s err=%s\n", sortOrder, fmtCount(sm.args[1].num), sortSummary(rows), red.err(rerr))
+				if rerr != nil && !redial() {
+					break
 				}
 			}
 		}

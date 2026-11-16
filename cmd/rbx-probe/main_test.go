@@ -556,3 +556,13 @@ func TestProbeDBSessionSequentialAndTeardown(t *testing.T) {
 		t.Fatalf("paths=%v, want /Music/test.flac", paths)
 	}
 }
+
+func TestSortSummaryShowsASecondColumn(t *testing.T) {
+	got := sortSummary([]menuRow{{kind: 4, label: "abc"}, {kind: 0x704, label: "de", sec: "xyz"}})
+	if got != "rows=[kind=0x0004 title_len=3 second_len=0; kind=0x0704 title_len=2 second_len=3]" {
+		t.Fatal(got)
+	}
+	if sortSummary(nil) != "rows=[]" {
+		t.Fatal("no rows")
+	}
+}
