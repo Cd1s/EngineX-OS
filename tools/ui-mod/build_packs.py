@@ -3594,7 +3594,27 @@ SERVICES_MAIN = """
 		x.send()
 	}
 	property bool scUsbPreparing: false
-	Timer { interval: 1000; repeat: true; running: root.scUsbPreparing; onTriggered: root.scCall() }
+	property string scUsbPrepareKind: "usb"
+	property int scUsbPrepareDone: 0
+	property int scUsbPrepareTotal: 0
+	property string scUsbPrepareError: ""
+	readonly property var scBrowseProp: Planck.getProperty("/GUI/ShowBrowseView")
+	function scBrowserVisible() {
+		return !!(root.scBrowseProp && root.scBrowseProp.translator && root.scBrowseProp.translator.state) ||
+			!!(typeof PlanckGUI !== "undefined" && PlanckGUI.views && PlanckGUI.views.sourceScreenView && PlanckGUI.views.sourceScreenView.visible)
+	}
+	function scFormatCount(n) {
+		const v = n > 0 ? (n - (n % 1)) : 0
+		const s = "" + v
+		return s.replace(/\\B(?=(\\d{3})+(?!\\d))/g, ",")
+	}
+	function scUsbLoadingText() {
+		if (root.scUsbPrepareError) return root.scT(root.scUsbPrepareError)
+		const base = root.scUsbPrepareKind === "sd" ? root.scT("Loading SD card…") : root.scT("Loading USB…")
+		if (root.scUsbPrepareTotal > 0) return base + " (" + root.scFormatCount(root.scUsbPrepareDone) + " / " + root.scFormatCount(root.scUsbPrepareTotal) + ")"
+		return base
+	}
+	Timer { interval: 2000; repeat: true; running: root.scUsbPreparing && root.scBrowserVisible(); onTriggered: root.scCall() }
 	property var scUiPoll: null
 	property int scScopePending: 0
 	property bool scTidalLogoutPending: false
@@ -3613,6 +3633,11 @@ SERVICES_MAIN = """
 	}
 	function scApply(v) {
 		scUsbPreparing = !!v.usbPreparing
+		const up = v.usbPrepare || null
+		scUsbPrepareKind = (up && up.kind) ? String(up.kind) : "usb"
+		scUsbPrepareDone = (up && up.done) ? Number(up.done) : 0
+		scUsbPrepareTotal = (up && up.total) ? Number(up.total) : 0
+		scUsbPrepareError = (up && up.state === "error" && up.error) ? String(up.error) : ""
 		if (v.fxSelectorAvailable !== undefined) {
 			scFxMasterBypassed = !!v.fxSelectorAvailable
 			scFxSelectorAvailable = scFxMasterBypassed && (Config.audio.fx.hasDJFx || Config.audio.fx.hasNHFx)
@@ -4256,20 +4281,22 @@ USB_PREPARING_BANNER = """
 		Rectangle {
 			objectName: "EngineX_UsbPreparingBanner"
 			enabled: false
-			visible: root.scUsbPreparing
+			visible: root.scUsbPreparing || root.scUsbPrepareError !== ""
 			z: 900
 			anchors.horizontalCenter: parent.horizontalCenter
 			y: 16
 			height: 46
-			width: scUsbPreparingLabel.implicitWidth + 36
+			width: Math.min(parent.width - 32, scUsbPreparingLabel.implicitWidth + 36)
 			radius: 8
 			color: Style.surface03Color
 			border.width: 1
-			border.color: Style.active01Color
+			border.color: root.scUsbPrepareError !== "" ? (Style.errorColor || "#e05050") : Style.active01Color
 			Text {
 				id: scUsbPreparingLabel
 				anchors.centerIn: parent
-				text: root.scT("Preparing USB…")
+				width: Math.min(implicitWidth, parent.width - 24)
+				elide: Text.ElideRight
+				text: root.scUsbLoadingText()
 				color: Style.font02Color
 				font.pixelSize: 22
 				font.family: root.robotoMediumFontLoader.name
@@ -4537,8 +4564,10 @@ SOURCE_FOOTER = """
 			color: Style.surface02Color
 			Text {
 				x: connectedSource.delegateLeftPadding + 80
+				width: parent.width - (connectedSource.delegateLeftPadding + 96)
 				anchors.verticalCenter: parent.verticalCenter
-				text: root.scT("Preparing USB…")
+				elide: Text.ElideRight
+				text: root.scUsbLoadingText()
 				color: Style.font02Color
 				font: Style.fontH1
 			}

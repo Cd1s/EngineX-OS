@@ -1026,11 +1026,28 @@ static void test_prepare_state_lifecycle(const char *root) {
     int64_t start=now_ms();c.status=0;assert(!hooked_mount(&c,test_real_mount));
     assert(now_ms()-start>=1000&&now_ms()-start<3500);
     expect_file(marker,"ready\n");expect_not_preparing();
+    char err_path[PATH_MAX];assert(!prepare_err_path(err_path));
+    expect_file(err_path,"{\"state\":\"error\",\"kind\":\"usb\",\"error\":\"USB conversion timed out\"}\n");
     assert(snprintf(p,sizeof p,"%s.pid",marker)<(int)sizeof p);
     FILE *pf=fopen(p,"r");long killed;assert(pf&&fscanf(pf,"%ld",&killed)==1);fclose(pf);
     errno=0;assert(kill((pid_t)killed,0)==-1&&errno==ESRCH);assert(!unlink(p));
     assert(!slow_marker(target,p));assert(!access(p,F_OK));assert(!unlink(p)); // created only for ETIMEDOUT
     assert(!umount2(target,UMOUNT_NOFOLLOW));assert(!unlink(marker));
+    // A crashed bridge without its own .err also publishes a failure state, and the next insert clears it.
+    join(disk,root,"prep-crash");join(p,disk,"PIONEER/rekordbox");assert(!make_dirs(p));join(p,disk,"PIONEER/rekordbox/export.pdb");write_file(p,"export");
+    snprintf(test_disk,sizeof test_disk,"%s",disk);
+    snprintf(exit_line,(size_t)(script+sizeof script-exit_line),"kill -SEGV $$\n");write_file(test_rb_bridge,script);
+    c.status=0;assert(!hooked_mount(&c,test_real_mount));
+    expect_file(marker,"ready\n");expect_not_preparing();
+    expect_file(err_path,"{\"state\":\"error\",\"kind\":\"usb\",\"error\":\"USB conversion failed\"}\n");
+    assert(!unlink(marker));assert(!umount2(target,UMOUNT_NOFOLLOW));
+    snprintf(exit_line,(size_t)(script+sizeof script-exit_line),"exit 0\n");write_file(test_rb_bridge,script);
+    join(disk,root,"prep-ok-after");join(p,disk,"PIONEER/rekordbox");assert(!make_dirs(p));join(p,disk,"PIONEER/rekordbox/export.pdb");write_file(p,"export");
+    snprintf(test_disk,sizeof test_disk,"%s",disk);
+    c.status=0;assert(!hooked_mount(&c,test_real_mount));
+    expect_file(marker,"ready\n");expect_not_preparing();
+    struct stat err_st;assert(lstat(err_path,&err_st)==-1&&errno==ENOENT);
+    assert(!unlink(marker));assert(!umount2(target,UMOUNT_NOFOLLOW));
 
     // HFS without export or DB prepares a writable view on the visible mount.
     join(disk,root,"prep-hfs-empty");assert(!make_dirs(disk));

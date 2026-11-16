@@ -81,6 +81,8 @@ type Options struct {
 	// Now is the clock Deadline is checked against; nil means time.Now. Tests
 	// use it to put the deadline inside a library whatever the host's load.
 	Now func() time.Time `json:"-"`
+	// OnProgress, if non-nil, reports (done, total) tracks processed during SyncResolved.
+	OnProgress func(done, total int) `json:"-"`
 }
 type Result struct {
 	Added, Updated, Unchanged int
@@ -479,9 +481,15 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 	if artErr != nil {
 		log.Printf("rb-bridge: no Artwork directory, covers will not reach other decks: %v", artErr)
 	}
+	if opts.OnProgress != nil && len(prepared) > 0 {
+		opts.OnProgress(0, len(prepared))
+	}
 	for i, preparedTrack := range prepared {
 		if err = ctx.Err(); err != nil {
 			return result, err
+		}
+		if opts.OnProgress != nil {
+			opts.OnProgress(i+1, len(prepared))
 		}
 		// Time left after the tracks prepared up front: prepare the next one now.
 		if preparedTrack.late && !opts.Deadline.IsZero() && !past() {
