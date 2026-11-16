@@ -4177,16 +4177,20 @@ SERVICES_MAIN = """
 	// (scStemSteady), so one counter published before the other never ends a
 	// row, and a track that ended while another was added is still counted.
 	//
-	// Engine's answer (renderStemsQueueChanged) names no track, so one streamed
-	// track at a time is handed over (scStemClaim) and the others wait in
-	// scStemNext until Engine has answered it. Engine answers every
+	// Engine names each track it queues (enqueueTrackRenderJob: "<library>/<track
+	// id> <library uuid>"), after both counters have grown. Only that makes a
+	// streamed track placed: the queue can also grow for a local track queued in
+	// the same moment. Its place is the run's size then. A refusal names no track,
+	// so one streamed track at a time is handed over (scStemClaim) and the others
+	// wait in scStemNext until Engine has answered it. Engine answers every
 	// startRenderTracks, also a refusal (sandbox: an unknown id, counters
-	// unchanged). The run grown past its size at the hand-over: the track has the
-	// next place. An answer that left both counters as they were: refused, no
-	// place. Any other answer (a track ended meanwhile) is not this one's: its
-	// counters become the new reference.
+	// unchanged). An answer that left both counters as they were: refused, no
+	// place. Any other answer (another track queued or ended) is not this one's:
+	// its counters become the new reference. A track later named as queued gets
+	// its place even so (scStemAsked).
 	property var scStemRows: ({})
-	property var scStemClaim: null // handed over, not answered yet: {rows, total, left, heard}
+	property var scStemAsked: ({}) // handed over, not named as queued yet: track id -> rows
+	property var scStemClaim: null // handed over, not answered yet: {id, total, left, heard}
 	property var scStemNext: [] // waiting to be handed over: {id, rows}
 	property int scStemHeard: 0 // Engine's queue answers so far
 	property int scStemDone: 0 // tracks of this run that are over
@@ -4223,7 +4227,8 @@ SERVICES_MAIN = """
 		scStemNext = scStemNext.slice(1)
 		// Read before Engine can change them: it may answer inside the call.
 		const total = scStemQueue.totalRenderStemsQueueCount || 0, left = scStemQueue.renderStemsQueueCount || 0
-		scStemClaim = {rows: next.rows, total: total, left: left, heard: scStemHeard}
+		scStemAsked[next.id] = next.rows
+		scStemClaim = {id: next.id, total: total, left: left, heard: scStemHeard}
 		scStemQueue.startRenderTracks(next.id)
 		scStemRefused.restart()
 		Qt.callLater(scStemSettle)
@@ -4233,6 +4238,19 @@ SERVICES_MAIN = """
 		function onRenderStemsQueueChanged() {
 			root.scStemHeard++
 			Qt.callLater(root.scStemSettle)
+		}
+		function onEnqueueTrackRenderJob(track) { root.scStemQueued(String(track)) }
+	}
+	// Our tracks are imported into the internal library (scStemImport).
+	function scStemQueued(track) {
+		const lib = "/data/AppDataUser/AIR Music Technology/Engine/Engine Library/"
+		const id = track.indexOf(lib) === 0 ? (/^\\d+/.exec(track.slice(lib.length)) || [""])[0] : ""
+		if (!(id in scStemAsked)) return
+		scStemMark(scStemAsked[id], scStemQueue.totalRenderStemsQueueCount || 1)
+		delete scStemAsked[id]
+		if (scStemClaim && scStemClaim.id === id) {
+			scStemClaim = null
+			Qt.callLater(scStemSend)
 		}
 	}
 	// Reads Engine's two counters together, after Engine has updated both.
@@ -4250,15 +4268,13 @@ SERVICES_MAIN = """
 			scStemSize = total
 		}
 		const c = scStemClaim
-		if (!c) return
-		if (total > c.total) scStemMark(c.rows, c.total + 1)
-		else if (scStemHeard === c.heard) return // not answered yet
-		else if (total === c.total && left === c.left) scStemMark(c.rows, "")
-		else {
+		if (!c || scStemHeard === c.heard) return // not answered yet
+		if (total !== c.total || left !== c.left) {
 			// Another track's answer: wait for this one's against the new counters.
-			scStemClaim = {rows: c.rows, total: total, left: left, heard: scStemHeard}
+			scStemClaim = {id: c.id, total: total, left: left, heard: scStemHeard}
 			return
 		}
+		scStemMark(scStemAsked[c.id] || [], "")
 		scStemClaim = null
 		scStemSend()
 	}
@@ -4324,7 +4340,7 @@ SERVICES_MAIN = """
 		id: scStemRefused
 		interval: 30000
 		onTriggered: {
-			if (root.scStemClaim) root.scStemMark(root.scStemClaim.rows, "")
+			if (root.scStemClaim) root.scStemMark(root.scStemAsked[root.scStemClaim.id] || [], "")
 			root.scStemClaim = null
 			root.scStemSend()
 		}
