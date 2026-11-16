@@ -14,7 +14,6 @@ package stems
 import (
 	"encoding/binary"
 	"fmt"
-	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"io"
 	"math"
 	"slices"
@@ -81,7 +80,7 @@ func (p *pipeline) decide(packed bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if !packed && p.packed && p.blocks > 0 {
-		p.err = fmt.Errorf("stems pipeline: renderer cannot unpack blocks already sent; update " + migration.Stemsd)
+		p.err = fmt.Errorf("stems pipeline: renderer cannot unpack blocks already sent; update enginex-stemsd")
 	}
 	if p.packed = packed; !packed {
 		p.input = nil
