@@ -198,6 +198,10 @@ func TestParsePacketRekordboxStatus(t *testing.T) {
 		t.Fatalf("rekordbox 0x29: %+v %v", d, err)
 	}
 	copy(b[11:], "DJM-900NXS2\x00\x00\x00\x00\x00\x00\x00\x00\x00")
+	if d, err = ParsePacket(b, 50002, nil); err != nil || d.Number != 17 {
+		t.Fatalf("a computer's own number is enough where its name is not rekordbox: %+v %v", d, err)
+	}
+	b[0x21] = 33
 	if _, err := ParsePacket(b, 50002, nil); err == nil {
 		t.Fatal("a mixer's 0x29 was not accepted before and must not start to be")
 	}

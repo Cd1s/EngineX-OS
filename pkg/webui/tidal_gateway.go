@@ -948,6 +948,10 @@ func page(r *http.Request, def int, items []any) map[string]any {
 }
 func (g *tidalGateway) playlists(w http.ResponseWriter, r *http.Request) {
 	scope := g.s.scope()
+	if scope == rekordboxScope { // a computer on the link: no service login to restore first
+		g.rbxPlaylistsPage(w, r)
+		return
+	}
 	sessions := []*Session{}
 	for _, v := range g.sources() {
 		if v.Provider == scope {
@@ -984,11 +988,6 @@ func (g *tidalGateway) playlists(w http.ResponseWriter, r *http.Request) {
 			v = flat
 		}
 		items = append(items, v)
-	}
-	if scope == rekordboxScope {
-		g.rbxPlaylists(r.Context(), add)
-		respond(w, page(r, 100, items))
-		return
 	}
 	if n := len(g.s.stemmed(scope)); n > 0 {
 		add(playlistJSON(stemsListID(scope), "Stems", "", n))

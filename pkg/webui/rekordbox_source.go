@@ -130,6 +130,23 @@ func rbxName(ip string) string {
 
 func rbxListID(ip, list string) string { return "rbx\x00" + ip + "\x00" + list }
 
+// rbxPlaylistsPage answers a playlists request while the deck shows rekordbox.
+func (g *tidalGateway) rbxPlaylistsPage(w http.ResponseWriter, r *http.Request) {
+	favorites := strings.HasSuffix(r.URL.Path, "/favorites/playlists")
+	items := []any{}
+	g.rbxPlaylists(r.Context(), func(v map[string]any) {
+		if favorites { // as for the services: the playlist wrapped in "item", its fields repeated flat
+			flat := map[string]any{"item": v}
+			for k, f := range v {
+				flat[k] = f
+			}
+			v = flat
+		}
+		items = append(items, v)
+	})
+	respond(w, page(r, 100, items))
+}
+
 // rbxPlaylists lists the computer's tracks and playlists. Folders are flattened:
 // "Folder / Playlist".
 func (g *tidalGateway) rbxPlaylists(ctx context.Context, add func(map[string]any)) {
