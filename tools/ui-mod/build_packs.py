@@ -691,7 +691,7 @@ SERVICES_MAIN = """
 	readonly property bool scHasAutoLoopKnob: typeof Config !== "undefined" && Config && Config.device && Config.device.hasAutoLoopKnob !== undefined ? !!Config.device.hasAutoLoopKnob : ["NH08", "NH08S", "NH10"].indexOf(scBoard) < 0
 	readonly property bool scIsMixstream: typeof Config !== "undefined" && Config && Config.audio && Config.audio.fx && Config.audio.fx.hasNHFx !== undefined ? !!Config.audio.fx.hasNHFx : ["NH08", "NH08S", "NH10"].indexOf(scBoard) >= 0
 	readonly property bool scHasStemsEq: scHasMixer && (typeof Config !== "undefined" && Config && Config.audio ? !!Config.audio.hasStemsLevel : false)
-	readonly property bool scIsAZ04: ["JP24", "RMZ2"].indexOf(scBoard) >= 0
+	readonly property bool scIsAZ04: ["JP24", "RMZ2", "PRIME4G2", "SYSTEMONE"].indexOf(scBoard) >= 0
 	readonly property bool scHasJogWheel: !scIsPlayerBoard && !(typeof Config !== "undefined" && Config && Config.device && Config.device.hasMotorizedPlatters) && ["JP08", "JP14", "RMZ2"].indexOf(scBoard) < 0
 	readonly property var scTransitionFxView: typeof PlanckGUI !== "undefined" && PlanckGUI && PlanckGUI.views ? (PlanckGUI.views.transitionFx || null) : null
 	readonly property bool scHasStockTransitionTile: typeof Config !== "undefined" && Config && Config.audio && Config.audio.fx && Config.device
