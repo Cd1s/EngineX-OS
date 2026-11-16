@@ -87,9 +87,8 @@ func label(b *bytes.Buffer, s string) { // Engine uses an 8-bit UTF-8 byte lengt
 }
 
 // EncodePerformance never synthesizes cues. Missing hot slots have position -1;
-// memory cues stay in BridgeAnalysis, with the first used as main cue. Engine's
-// native quickCues has exactly eight slots; appending memory cues would produce
-// an unsupported blob. BridgeAnalysis also retains labels beyond 255 UTF-8 bytes.
+// the first memory cue is used as main cue. Engine's native quickCues has
+// exactly eight slots; appending memory cues would produce an unsupported blob.
 // beatPositions returns each beat's sample offset. PQTZ times are whole
 // milliseconds, so using them directly gives a 130 BPM track spacings of 461 and
 // 462 ms, and Engine's per-beat BPM then jumps between 130.15 and 129.87. Beats in

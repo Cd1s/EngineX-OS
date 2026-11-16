@@ -742,16 +742,12 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 			if bridgeBytes >= maxBytes {
 				result.AnalysisSkipped++
 			} else {
-				sourceJSON, _ := json.Marshal(struct {
-					Track    rekordbox.Track
-					Analysis *rekordbox.Analysis
-				}{original, a})
-				audioJSON, _ := json.Marshal(audio)
-				packedSource, e := packAnalysis(sourceJSON)
+				packedSource, e := packBridgeSource(original.ID, a)
 				if e != nil {
 					return result, e
 				}
-				packedAudio, e := packAnalysis(audioJSON)
+				// No consumer reads the old audio-header archive; retain the column/schema.
+				packedAudio, e := packAnalysis([]byte("{}"))
 				if e != nil {
 					return result, e
 				}
