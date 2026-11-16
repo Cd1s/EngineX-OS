@@ -146,11 +146,13 @@ static void write_run_atomic(const char *dst,const char *body) {
         break;
     }
 }
-static void set_preparing(const char *target) {
+static void set_preparing(const char *target,int clear_err) {
     if(!volume(target))return;
     int saved=errno;
-    char err_path[PATH_MAX];
-    if(!prepare_err_path(err_path))unlink(err_path);
+    if(clear_err) {
+        char err_path[PATH_MAX];
+        if(!prepare_err_path(err_path))unlink(err_path);
+    }
     write_run_atomic(PREPARE_STATE_PATH,"1\n");
     errno=saved;
 }
@@ -937,7 +939,7 @@ static int after_mount(struct libmnt_context *ctx,int mode,int64_t deadline) {
     struct stat existing;
     int hfs_ro=HFS_READONLY(target);
     if(!pioneer&&!heal&&mode==MOUNT_PRE)return 0; // nothing to convert or heal: the visible mount does the rest
-    if(hfs_ro||(pioneer&&mode!=MOUNT_POST)||heal)set_preparing(target);
+    if(hfs_ro||(pioneer&&mode!=MOUNT_POST)||heal)set_preparing(target,mode!=MOUNT_POST);
     // The walk guards the tool run on the library below; after the private
     // conversion or heal (MOUNT_POST) none follows, so it is skipped.
     // An HFS+ view is validated by prepare_view.
