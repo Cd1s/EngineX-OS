@@ -238,7 +238,7 @@ func refuseOlder(ctx context.Context, o *options, cl *ssh.Client, label string) 
 		return err
 	}
 	if releasesig.NewerVersion(installed, o.release) {
-		return fmt.Errorf("%s 已经是 %s，比要安装的 %s 新，拒绝回退（要回退请用 --image 或 --bundle 指定旧文件）/ %s already runs %s, newer than %s; refusing to go back (to do that on purpose, name the older file with --image or --bundle)",
+		return fmt.Errorf("%s 已经是 %s，比要安装的 %s 新，拒绝回退；请升级到最新版本/ %s already runs %s, newer than %s; refusing to go back; upgrade to the latest EngineX OS",
 			label, installed, o.release, label, installed, o.release)
 	}
 	return nil

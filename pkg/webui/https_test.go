@@ -76,7 +76,7 @@ func TestConsoleHTTPSCertGeneratedOnceMode0600AndReused(t *testing.T) {
 		t.Fatalf("self-signed verify with pinned root failed: %v", err)
 	}
 
-	for _, name := range []string{"localhost", "enginex.lan", migration.PlaceholderHost} {
+	for _, name := range []string{"localhost", "enginex.lan"} {
 		if !slices.Contains(leaf1.DNSNames, name) {
 			ui1.Close()
 			t.Fatalf("DNSNames %v missing %s", leaf1.DNSNames, name)
@@ -181,9 +181,9 @@ func TestConsoleHTTPSToggleLifecycleAndBothListeners(t *testing.T) {
 		return resp.StatusCode, string(b), resp.Header
 	}
 
-	code, body, _ := get(httpClient, httpSrv.URL, migration.APIPrefix+"/ui", nil)
+	code, body, _ := get(httpClient, httpSrv.URL, "/v1/enginex"+"/ui", nil)
 	if code != 200 || !strings.Contains(body, `"consoleHttps":false`) || !strings.Contains(body, `"consoleUrl":"http://`) {
-		t.Fatalf("off state "+migration.APIPrefix+"/ui: %d %s", code, body)
+		t.Fatalf("off state "+"/v1/enginex"+"/ui: %d %s", code, body)
 	}
 	lanReq := httptest.NewRequest(http.MethodGet, "/api/console-qr", nil)
 	lanReq.Host = "192.168.5.34:8080"
@@ -248,9 +248,9 @@ func TestConsoleHTTPSToggleLifecycleAndBothListeners(t *testing.T) {
 	}
 
 	// Both HTTP and HTTPS serve the legacy API prefix and /v1/enginex identically.
-	httpCodeSC, httpBodySC, httpHdrSC := get(httpClient, httpSrv.URL, migration.APIPrefix+"/ui", nil)
+	httpCodeSC, httpBodySC, httpHdrSC := get(httpClient, httpSrv.URL, "/v1/enginex"+"/ui", nil)
 	httpCodeEX, httpBodyEX, httpHdrEX := get(httpClient, httpSrv.URL, "/v1/enginex/ui", nil)
-	httpsCodeSC, httpsBodySC, httpsHdrSC := get(tlsClient, httpsBase, migration.APIPrefix+"/ui", nil)
+	httpsCodeSC, httpsBodySC, httpsHdrSC := get(tlsClient, httpsBase, "/v1/enginex"+"/ui", nil)
 	httpsCodeEX, httpsBodyEX, httpsHdrEX := get(tlsClient, httpsBase, "/v1/enginex/ui", nil)
 	if httpCodeSC != 200 || httpCodeEX != 200 || httpsCodeSC != 200 || httpsCodeEX != 200 {
 		t.Fatalf("status codes http=(%d,%d) https=(%d,%d)", httpCodeSC, httpCodeEX, httpsCodeSC, httpsCodeEX)
@@ -265,7 +265,7 @@ func TestConsoleHTTPSToggleLifecycleAndBothListeners(t *testing.T) {
 		t.Fatalf("consoleUrl did not switch to https: %s", httpsBodyEX)
 	}
 
-	for _, prefix := range []string{migration.APIPrefix, "/v1/enginex"} {
+	for _, prefix := range []string{"/v1/enginex"} {
 		for _, p := range []string{"/ssh", "/mounts", "/automix"} {
 			hc, hb, _ := get(httpClient, httpSrv.URL, prefix+p, nil)
 			tc, tb, _ := get(tlsClient, httpsBase, prefix+p, nil)
@@ -322,9 +322,9 @@ func TestConsoleHTTPSToggleLifecycleAndBothListeners(t *testing.T) {
 	}
 
 	// HTTP listener keeps working unchanged and reverts QR / consoleUrl to http://.
-	code, body, _ = get(httpClient, httpSrv.URL, migration.APIPrefix+"/ui", nil)
+	code, body, _ = get(httpClient, httpSrv.URL, "/v1/enginex"+"/ui", nil)
 	if code != 200 || !strings.Contains(body, `"consoleHttps":false`) || !strings.Contains(body, `"consoleUrl":"http://`) {
-		t.Fatalf("after off "+migration.APIPrefix+"/ui: %d %s", code, body)
+		t.Fatalf("after off "+"/v1/enginex"+"/ui: %d %s", code, body)
 	}
 	if got := ui.qrTarget(lanReq); got != "http://192.168.5.34:8080" {
 		t.Fatalf("after off qrTarget = %q, want http://192.168.5.34:8080", got)

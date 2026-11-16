@@ -5,7 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
-	"errors"
+
 	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"net/http/httptest"
 	"os"
@@ -16,7 +16,7 @@ import (
 )
 
 // #234: the deck's state dir is recognised under the new path and through the
-// the legacy data directory compat link an older unit still passes during an update;
+// real pre-5.3.0.5 data directory an older unit passes during an upgrade;
 // a test's own dir is not the deck's.
 func TestRename234DeckStateDirUnderBothNames(t *testing.T) {
 	for dir, want := range map[string]bool{
@@ -53,41 +53,42 @@ func TestRename234ShadowDebugFlagUnderBothNames(t *testing.T) {
 	}
 }
 
-// #234: a Tailscale Remote Mod installed before 5.3.0.5 asks the old socket name; the console
-// links it to the new socket, replaces its own stale link, and never touches a real socket file.
-func TestRename234LegacyTailscaleSocketLink(t *testing.T) {
-	dir := t.TempDir()
+// Only owned socket aliases are removed; real sockets and unrelated links survive.
+func TestRename234RemovesLegacySocketAlias(t *testing.T) {
 	old := legacyTailscaleSocket
 	defer func() { legacyTailscaleSocket = old }()
-	legacyTailscaleSocket = filepath.Join(dir, migration.TailscaleUnit+".sock")
-	for i := 0; i < 2; i++ {
-		linkLegacyTailscaleSocket()
-		if got, err := os.Readlink(legacyTailscaleSocket); err != nil || got != "enginex-tailscaled.sock" {
-			t.Fatalf("run %d: link %q %v", i, got, err)
+	legacyTailscaleSocket = filepath.Join(t.TempDir(), "old.sock")
+	for _, target := range []string{"enginex-tailscaled.sock", "/run/enginex-tailscaled.sock", "foreign.sock"} {
+		if err := os.Symlink(target, legacyTailscaleSocket); err != nil {
+			t.Fatal(err)
+		}
+		removeLegacyTailscaleSocket()
+		_, err := os.Lstat(legacyTailscaleSocket)
+		if target == "foreign.sock" {
+			if err != nil {
+				t.Fatal("unrelated link removed")
+			}
+			os.Remove(legacyTailscaleSocket)
+		} else if !os.IsNotExist(err) {
+			t.Fatal("owned alias remains")
 		}
 	}
-	os.Remove(legacyTailscaleSocket)
-	if err := os.WriteFile(legacyTailscaleSocket, []byte("old daemon"), 0o600); err != nil {
+	if err := os.WriteFile(legacyTailscaleSocket, []byte("old daemon"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	linkLegacyTailscaleSocket()
+	removeLegacyTailscaleSocket()
 	if b, err := os.ReadFile(legacyTailscaleSocket); err != nil || string(b) != "old daemon" {
-		t.Fatalf("an old daemon's socket was replaced: %q %v", b, err)
-	}
-	if old != migration.TailscaleSocket || tailscaleSocket != "/run/enginex-tailscaled.sock" || legacyTailscaleUnit != migration.TailscaleUnit {
-		t.Errorf("deck names %q %q %q", old, tailscaleSocket, legacyTailscaleUnit)
+		t.Fatal("real socket placeholder changed")
 	}
 }
 
-// #234: /v1/enginex is the deck API's primary prefix. No route is registered under the old
-// one, and every route answers under the legacy API prefix too, through the one canonicalV1 mapping
-// (the retained alias for installed clients, pending the maintainer's decision).
-func TestRename234EveryRouteUnderBothPrefixes(t *testing.T) {
+// Every local API route is registered under the current namespace only.
+func TestRename234EveryRouteUsesCurrentPrefix(t *testing.T) {
 	files, _ := filepath.Glob("*.go")
-	route := regexp.MustCompile(`"((?:GET|POST|PUT|DELETE) )?(/v1/[a-z0-9]+/[^"]*)"`)
-	registered := regexp.MustCompile(`(?:HandleFunc|safeRegisterRoute)\([^"]*"([A-Z]+) (/v1/[^"]+)"`)
-	type r struct{ method, path string }
-	var routes []r
+	registered := regexp.MustCompile(`(?:HandleFunc|safeRegisterRoute)\([^"]*"([A-Z]+) (/v1/enginex/[^"]+)"`)
+	s := New(Config{StateDir: t.TempDir(), UIDir: t.TempDir()}, nil)
+	defer s.Close()
+	count := 0
 	for _, f := range files {
 		if strings.HasSuffix(f, "_test.go") {
 			continue
@@ -97,39 +98,15 @@ func TestRename234EveryRouteUnderBothPrefixes(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, m := range registered.FindAllSubmatch(b, -1) {
-			routes = append(routes, r{string(m[1]), string(m[2])})
-		}
-		for _, m := range route.FindAllSubmatch(b, -1) {
-			if strings.HasPrefix(string(m[2]), migration.APIPrefix+"/") {
-				t.Errorf("%s still names %s", f, m[2])
+			count++
+			route := regexp.MustCompile(`\{[^}]+\}`).ReplaceAllString(string(m[2]), "x")
+			if _, pattern := s.tidal.mux.Handler(httptest.NewRequest(string(m[1]), route, nil)); pattern == "" {
+				t.Errorf("missing current route %s", route)
 			}
 		}
 	}
-	if len(routes) < 40 {
-		t.Fatalf("found only %d /v1 routes", len(routes))
-	}
-	s := New(Config{StateDir: t.TempDir(), UIDir: t.TempDir()}, nil)
-	defer s.Close()
-	for _, rt := range routes {
-		rest, ok := strings.CutPrefix(rt.path, "/v1/enginex/")
-		if !ok {
-			continue // the TIDAL-compatible gateway's own /v1 paths
-		}
-		concrete := regexp.MustCompile(`\{[^}]+\}`).ReplaceAllString(rest, "x")
-		if got := canonicalV1(migration.APIPrefix + "/" + concrete); got != "/v1/enginex/"+concrete {
-			t.Errorf("canonicalV1("+migration.APIPrefix+"/%s) = %s", concrete, got)
-		}
-		if _, pattern := s.tidal.mux.Handler(httptest.NewRequest(rt.method, "/v1/enginex/"+concrete, nil)); pattern == "" {
-			t.Errorf("%s /v1/enginex/%s is not served by the gateway", rt.method, concrete)
-		}
-	}
-	for _, p := range []string{migration.APIPrefix + "x/ui", migration.APIPrefix + "0/ui", "/v1/enginexx/ui", "/v2/" + migration.ProjectName + "/ui"} {
-		if got := canonicalV1(p); got != p {
-			t.Errorf("canonicalV1(%s) = %s; only the exact old prefix maps", p, got)
-		}
-	}
-	if canonicalV1(migration.APIPrefix) != "/v1/enginex" || canonicalV1("/v1/enginex/ui") != "/v1/enginex/ui" {
-		t.Error("prefix itself or the new prefix mapped wrongly")
+	if count < 40 {
+		t.Fatalf("found only %d current routes", count)
 	}
 }
 
@@ -158,89 +135,39 @@ func rename234Bundle(t *testing.T, version, tag string) []byte {
 	return b.Bytes()
 }
 
-// #234: a bundle of an older release than the installed one (a downgrade by upload) never runs
-// its install.sh over /data (review R1/R2): installOlder stages it and swaps it in
-// (internal/leave), and this release's leave step takes its units out of /run and reboots. A
-// refusal reaches the screen and changes nothing. A newer one is installed and activated in place
-// as before, after the daemons under either suite name have ended.
-func TestRename234OlderBundleLeavesAndRebootsInsteadOfActivating(t *testing.T) {
-	defer func(a func(string) bool, l func(string) bool, i func(string) error) {
-		activatesOnDeck, launchActivation, installOlder = a, l, i
-	}(activatesOnDeck, launchActivation, installOlder)
-	var scripts, staged []string
-	var refuse error
-	activatesOnDeck = func(string) bool { return true }
-	launchActivation = func(script string) bool { scripts = append(scripts, script); return true }
-	for _, c := range []struct {
-		version, tag string
-		older        bool
-		refused      bool
-	}{
-		{"5.3.0.4", "v5.3.0.4-r5", true, false},
-		{"5.3.0.2", "", true, true},
-		{"5.3.0.5", "v5.3.0.5-r1", true, false},
-		{"5.3.0.5", "v5.3.0.5-r2", false, false},
-		{"5.3.0.6", "", false, false},
-	} {
-		custom := filepath.Join(t.TempDir(), "enginex")
-		os.MkdirAll(filepath.Join(custom, "bundle"), 0o700)
-		os.WriteFile(filepath.Join(custom, "version.txt"), []byte("5.3.0.5\n"), 0o644)
-		os.WriteFile(filepath.Join(custom, "bundle", releaseTagName), []byte("v5.3.0.5-r2\n"), 0o644)
-		installOlder = func(top string) error {
-			b, _ := os.ReadFile(filepath.Join(top, "version.txt"))
-			staged = append(staged, strings.TrimSpace(string(b)))
-			if refuse != nil {
-				return refuse
+// Uploading a downgrade is refused before its installer or activation can run.
+func TestRename234OlderBundleIsRefused(t *testing.T) {
+	original := launchActivation
+	defer func() { launchActivation = original }()
+	launched := false
+	launchActivation = func(string) bool { launched = true; return true }
+	for _, version := range []string{"5.3.0.2", "5.3.0.4"} {
+		t.Run(version, func(t *testing.T) {
+			custom := filepath.Join(t.TempDir(), "enginex")
+			os.MkdirAll(filepath.Join(custom, "bundle"), 0700)
+			os.WriteFile(filepath.Join(custom, "version.txt"), []byte("5.3.0.5\n"), 0600)
+			s := New(Config{StateDir: t.TempDir(), UIDir: t.TempDir(), VersionFile: filepath.Join(custom, "version.txt")}, nil)
+			defer s.Close()
+			s.applyDataBundleFromReader(bytes.NewReader(rename234Bundle(t, version, "v"+version)))
+			if !strings.Contains(s.updateCache.Error, "downgrade") {
+				t.Fatalf("refusal: %s", s.updateCache.Error)
 			}
-			return os.WriteFile(filepath.Join(custom, "version.txt"), b, 0o644)
-		}
-		refuse = nil
-		if c.refused {
-			refuse = errors.New("this deck cannot swap directories atomically")
-		}
-		s := New(Config{AccessToken: "c", UIDir: t.TempDir(), StateDir: t.TempDir(), VersionFile: filepath.Join(custom, "version.txt")}, nil)
-		scripts, staged = nil, nil
-		s.applyDataBundleFromReader(bytes.NewReader(rename234Bundle(t, c.version, c.tag)))
-		s.Close()
-		_, err := os.Stat(filepath.Join(custom, "in-place"))
-		inPlace := err == nil
-		want := c.version
-		if c.refused {
-			want = "5.3.0.5"
-		}
-		if b, _ := os.ReadFile(filepath.Join(custom, "version.txt")); strings.TrimSpace(string(b)) != want {
-			t.Fatalf("%s %s: version %q, want %s (%+v)", c.version, c.tag, b, want, s.updateCache)
-		}
-		if c.older && (inPlace || len(staged) != 1 || staged[0] != c.version) {
-			t.Fatalf("older %s %s: install.sh in place %v, staged %q", c.version, c.tag, inPlace, staged)
-		}
-		if !c.older && (!inPlace || len(staged) != 0) {
-			t.Fatalf("newer %s %s: install.sh in place %v, staged %q", c.version, c.tag, inPlace, staged)
-		}
-		if c.refused {
-			if len(scripts) != 0 || !strings.Contains(s.updateCache.Error, "cannot swap directories atomically") {
-				t.Errorf("refused %s: activations %q, error %q", c.version, scripts, s.updateCache.Error)
+			if launched {
+				t.Fatal("downgrade activated")
 			}
-			continue
-		}
-		if len(scripts) != 1 {
-			t.Fatalf("%s %s: %d activations", c.version, c.tag, len(scripts))
-		}
-		leaves := strings.Contains(scripts[0], "exec sh /run/enginex/leave.sh") && strings.Contains(scripts[0], "systemctl reboot")
-		activates := strings.Contains(scripts[0], "/bundle/boot-activate.sh")
-		if c.older && (!leaves || activates) {
-			t.Errorf("older %s %s: %q, want the leave step and a reboot, no boot-activate.sh", c.version, c.tag, scripts[0])
-		}
-		if !c.older && (leaves || !activates || !strings.Contains(scripts[0], "[e]nginex-suite (stream-sync|rb-bridge|enginex-deemixd)") ||
-			!strings.Contains(scripts[0], migration.SuitePattern+" (stream-sync|rb-bridge|"+migration.Deemix+")")) {
-			t.Errorf("newer %s %s: %q, want boot-activate.sh after ending both suite names", c.version, c.tag, scripts[0])
-		}
+			if b, _ := os.ReadFile(filepath.Join(custom, "version.txt")); string(b) != "5.3.0.5\n" {
+				t.Fatal("live version changed")
+			}
+			if _, err := os.Stat(filepath.Join(custom, "in-place")); !os.IsNotExist(err) {
+				t.Fatal("old installer ran")
+			}
+		})
 	}
 }
 
-// Settings copy authorizes the same local screen after the gateway canonicalizes the old prefix.
+// Settings copy authorizes only the current local screen namespace.
 func TestRename234SettingsCopyLocalScreen(t *testing.T) {
-	for _, prefix := range []string{"/v1/enginex/", migration.APIPrefix + "/"} {
+	for _, prefix := range []string{"/v1/enginex/"} {
 		t.Run(prefix, func(t *testing.T) {
 			r := httptest.NewRequest("POST", prefix+"settings-copy", nil)
 			r.RemoteAddr = "127.0.0.1:1234"
@@ -275,8 +202,8 @@ func TestRename234SyntheticTidalAccountsStayLocal(t *testing.T) {
 	}
 }
 
-// Engine persists these wire values; r5 must still recognize them after a downgrade.
-func TestRename234IssuedTidalTokensRemainSyntheticOnR5(t *testing.T) {
+// Engine persists these wire values; current output stays synthetic on upgrade.
+func TestRename234IssuedTidalTokensStaySynthetic(t *testing.T) {
 	s := New(Config{StateDir: t.TempDir(), UIDir: t.TempDir()}, nil)
 	defer s.Close()
 	r := httptest.NewRequest("POST", "/au/oauth2/token", strings.NewReader("grant_type=refresh_token&refresh_token=enginex-refresh"))
@@ -292,11 +219,8 @@ func TestRename234IssuedTidalTokensRemainSyntheticOnR5(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, key := range []string{"access_token", "refresh_token"} {
-		// Frozen r5 set, excluding the empty value: do not use this release's classifier.
-		switch tokens[key] {
-		case "enginex", migration.Token, migration.RefreshToken:
-		default:
-			t.Errorf("%s = %q is not a synthetic token recognized by r5", key, tokens[key])
+		if tokens[key] != "enginex" {
+			t.Errorf("%s = %q, want current synthetic output", key, tokens[key])
 		}
 	}
 }

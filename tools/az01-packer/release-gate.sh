@@ -400,9 +400,8 @@ SH
         check "new: edisksd starts with the hook preloaded (LD_BIND_NOW)" bash -c "grep -aq 'Loaded configuration' '$W/new-edisksd.log' && ! grep -aiE 'symbol lookup error|undefined symbol|cannot open shared object|cannot be preloaded' '$W/new-edisksd.log'"
         curl -sf http://127.0.0.1:8080$N_API/ui > "$W/new-ui.json" || :
         check "new: GET $N_API/ui reports $NEWV" json "$W/new-ui.json" "j.get('version') == '$NEWV'"
-        # #234: the retained alias still serves installed clients pending maintainer removal.
-        curl -sf http://127.0.0.1:8080${legacy_api}/ui > "$W/new-ui-alias.json" || :
-        check "new: GET ${legacy_api}/ui (alias) reports $NEWV" json "$W/new-ui-alias.json" "j.get('version') == '$NEWV'"
+        check "new: retired API namespace returns 404" test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080${legacy_api}/ui)" = 404
+        check "new: no compatibility data link" test ! -e "$W${legacy_data}" -a ! -L "$W${legacy_data}"
         curl -sf -X POST "http://127.0.0.1:8080$N_API/ui?upfaderEcho=1" > "$W/new-ui-echo.json" || :
         check "new: POST $N_API/ui?upfaderEcho=1 returns upfaderEcho: true" json "$W/new-ui-echo.json" "j.get('upfaderEcho') is True"
         curl -sf -X POST http://127.0.0.1:8080/au/oauth2/token > "$W/new-token.json" || :

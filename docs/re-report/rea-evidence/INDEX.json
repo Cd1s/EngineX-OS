@@ -1,5 +1,5 @@
 {
-  "source": "/root/build/sc5000-lab/rea-results",
+  "source": "<firmware-lab>/rea-results",
   "count": 268,
   "unique_evidence_ids": 231,
   "source_index_sha256": "0b2594eba0753e017e9effd27ecdf48ebf8ab4312192bac704903d87d224c395",

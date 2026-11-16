@@ -14,7 +14,7 @@ import (
 	"github.com/Cd1s/EngineX-OS/internal/installer/ext4"
 )
 
-func TestActivationFilesAcceptEitherAlsaName(t *testing.T) {
+func TestActivationFilesRequireCurrentNames(t *testing.T) {
 	bundle := buildBundle(t, "PRIME4PLUS", "5.3.0.5")
 	for _, name := range []string{migration.AlsaFile, "99-enginex.conf"} {
 		t.Run(name, func(t *testing.T) {
@@ -72,6 +72,12 @@ func TestActivationFilesAcceptEitherAlsaName(t *testing.T) {
 			}
 			o := testOpts(t)
 			image, _, err := buildImage(ctxT(t), o, b, 64<<20, "data.img", "az01-data")
+			if name == migration.AlsaFile {
+				if err == nil {
+					t.Fatal("legacy activation input was accepted")
+				}
+				return
+			}
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -82,12 +88,12 @@ func TestActivationFilesAcceptEitherAlsaName(t *testing.T) {
 			}
 			defer fs.Close()
 			for _, dir := range []string{"system/var/overlay/lib/alsa/conf.d", "system/var-lib/alsa/conf.d", "enginex/bundle"} {
-				if data, err := fs.ReadFile(dir+"/"+name, 1<<20); err != nil || len(data) == 0 {
+				if data, err := fs.ReadFile(dir+"/99-enginex.conf", 1<<20); err != nil || len(data) == 0 {
 					t.Fatalf("%s: %v", dir, err)
 				}
 			}
-			if target, err := fs.Readlink(migration.DataName); err != nil || target != "enginex" {
-				t.Fatalf("compatibility link: %q, %v", target, err)
+			if kind, err := fs.Lstat(migration.DataName); err != nil || kind != ext4.Missing {
+				t.Fatalf("legacy link written: %v %v", kind, err)
 			}
 		})
 	}

@@ -556,10 +556,11 @@ class DataBundleTest(unittest.TestCase):
 
         suite_out = subprocess.run(['debugfs', '-R', 'stat /enginex/bundle/bin/enginex-suite', str(img)], capture_output=True, text=True).stdout
         self.assertIn('0755', suite_out)
-        # #103: the old path is a symlink, and the ALSA hook's old-path library resolves through it.
-        for rel, kind in ((('/' + legacy.DATA_NAME), 'symlink'), (('/' + legacy.DATA_NAME + '/bundle/lib/libengine-ui-hook.so'), 'regular')):
-            out = subprocess.run(['debugfs', '-R', f'stat {rel}', str(img)], capture_output=True, text=True).stdout
-            self.assertIn(f'Type: {kind}', out, rel)
+        # Fresh images write only the current data and ALSA paths.
+        out = subprocess.run(['debugfs', '-R', 'stat /' + legacy.DATA_NAME, str(img)], capture_output=True, text=True).stdout
+        self.assertNotIn('Type:', out)
+        out = subprocess.run(['debugfs', '-R', 'stat /enginex/bundle/lib/libengine-ui-hook.so', str(img)], capture_output=True, text=True).stdout
+        self.assertIn('Type: regular', out)
 
         # AZ04 (#76): the ALSA file goes where its var-lib.mount reads /var/lib from.
         for part in ('suite64', 'hook64'):
@@ -614,8 +615,9 @@ class DataBundleTest(unittest.TestCase):
         hspec.loader.exec_module(hmod)
         hmod.inject(img, r['bundle'])
         stat = lambda rel: subprocess.run(['debugfs', '-R', f'stat {rel}', str(img)], capture_output=True, text=True).stdout
-        self.assertIn('Type: regular', stat(('/' + legacy.DATA_NAME + '/version.txt')))
-        self.assertNotIn('Type:', stat('/enginex'))
+        self.assertIn('Type: directory', stat('/' + legacy.DATA_NAME))
+        self.assertNotIn('Type:', stat('/' + legacy.DATA_NAME + '/version.txt'))
+        self.assertIn('Type: regular', stat('/enginex/version.txt'))
 
     def test_host_install_fails_when_a_write_did_not_land(self):
         """BH-G2-3: debugfs exits 0 when a write fails and the readback only looked at three files,
@@ -745,30 +747,30 @@ exec REAL "$@"
         self.assertEqual(r.returncode, 0, r.stderr)
         return data
 
-    def test_install_renames_legacy_dir_and_leaves_a_symlink(self):
+    def test_install_migrates_legacy_dir_without_a_symlink(self):
         data = self.migrate({'authorized_keys': 'key', 'Stream/song.flac': 'x', 'settings.conf': 's'})
         old, new = data / (legacy.DATA_NAME), data / 'enginex'
-        self.assertTrue(old.is_symlink() and os.readlink(old) == 'enginex')
+        self.assertFalse(os.path.lexists(old))
         self.assertEqual((new / 'authorized_keys').read_text(), 'key')
         self.assertEqual((new / 'Stream/song.flac').read_text(), 'x')
-        self.assertTrue((old / 'bundle/boot-activate.sh').exists())  # old path still reaches it
-        self.assertEqual((old / 'version.txt').read_text(), '5.3.0.1.1\n')
+        self.assertTrue((new / 'bundle/boot-activate.sh').exists())
+        self.assertEqual((new / 'version.txt').read_text(), '5.3.0.1.1\n')
 
     def test_install_merges_when_both_dirs_are_real_and_loses_nothing(self):
         data = self.migrate({'authorized_keys': 'old', 'a.txt': 'A', 'ui/x': 'old-ui'},
                             {'authorized_keys': 'new'})
         new = data / 'enginex'
-        self.assertTrue((data / (legacy.DATA_NAME)).is_symlink())
+        self.assertFalse(os.path.lexists(data / legacy.DATA_NAME))
         self.assertEqual((new / 'authorized_keys').read_text(), 'new')  # enginex wins
         self.assertEqual((new / 'a.txt').read_text(), 'A')
         leftovers = list(new.glob('legacy-data.*'))
         self.assertEqual(len(leftovers), 1)
         self.assertEqual((leftovers[0] / 'authorized_keys').read_text(), 'old')
 
-    def test_fresh_install_creates_enginex_and_the_old_path(self):
+    def test_fresh_install_creates_only_current_paths(self):
         data = self.migrate({})
         self.assertTrue((data / 'enginex/bundle').is_dir())
-        self.assertTrue((data / (legacy.DATA_NAME + '/version.txt')).exists())
+        self.assertFalse(os.path.lexists(data / legacy.DATA_NAME))
 
     def test_boot_activate_skips_missing_lib_uses_execstartpre_restore_tz_and_respects_newer_conf(self):
         r = self.build()
@@ -915,39 +917,16 @@ exec REAL "$@"
         drop = (units / 'engine.service.d/99-enginex.conf').read_text()
         self.assertNotIn((legacy.PROJECT), drop.replace((legacy.DATA_DIR), ''))
         self.assertIn('Wants=enginex-stream-sync.service enginex-rb-bridge.service enginex-deemixd.service', drop)
-        # The leave step is in place for a later downgrade, outside /data.
-        leave = run_dir / 'enginex/leave.sh'
-        self.assertTrue(leave.is_file() and os.access(leave, os.X_OK))
+        # Downgrade restoration is retired; no leave script is emitted.
+        self.assertFalse((run_dir / 'enginex/leave.sh').exists())
         # A second run (the next boot) has nothing old left to stop.
         res = subprocess.run(['sh', str(ba)], env=env, capture_output=True, text=True)
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertNotIn(('enginex-' + legacy.DEEMIX), self.host_commands.read_text())
         self.host_commands.write_text('')
 
-    def test_234_leave_step_installs_the_bundle_through_the_suite_first(self):
-        """#234 review R1/R2: leave.sh --install hands the unpacked bundle to this release's suite (an
-        older one goes in through a stage and atomic swaps, internal/leave) before anything else;
-        when that fails this release keeps its units and nothing reboots."""
-        root = self.tmp / 'leave-install'
-        unit = root / 'run/systemd/system/enginex-deemixd.service'
-        unit.parent.mkdir(parents=True)
-        unit.write_text('unit')
-        calls = self.tmp / 'suite.calls'
-        suite = self.tmp / 'fake-suite'
-        leave = self.tmp / 'leave.sh'
-        leave.write_text(bdb.LEAVE_SH)
-        env = {**self.env, 'ENGINEX_LEAVE_ROOT': str(root), 'ENGINEX_LEAVE_SUITE': str(suite)}
-        for code in (1, 0):
-            suite.write_text(f'#!/bin/sh\necho "$*" >> {calls}\nexit {code}\n')
-            suite.chmod(0o755)
-            res = subprocess.run(['sh', str(leave), '--install', '/data/.enginex-leave.incoming/b', '--no-reboot'],
-                                 env=env, capture_output=True, text=True)
-            self.assertEqual(res.returncode, code, res.stderr)
-            self.assertEqual(unit.exists(), code == 1)
-        self.assertEqual(calls.read_text().splitlines(), ['leave install /data/.enginex-leave.incoming/b'] * 2)
-
-    def test_234_only_the_boot_run_puts_back_an_interrupted_downgrade(self):
-        ("#234 review R2: boot-activate.sh's boot run first asks the suite to put back a downgrade a\n        power cut interrupted, from the directory it was started from (the hook's fallback is\n        /data/" + legacy.DATA_NAME + '/bundle); every call delegates to the blocking activation guard, but\n        Engine-start calls do not run recovery.')
+    def test_234_boot_activation_uses_the_upgrade_lock(self):
+        """Every activation delegates to the blocking guard; Engine-start only restores TZ."""
         src = self.extract(self.build())
         dest = self.tmp / 'recover' / 'enginex'
         (dest / 'bundle/bin').mkdir(parents=True)
@@ -1048,7 +1027,7 @@ pkill() { printf 'pkill %s\\n' "$*" >> "$KILLED"; }
                 self.assertEqual(calls.read_text().strip(), 'leave activate')
 
     def test_234_a_failed_recovery_stops_the_boot_run_before_activation(self):
-        """#234 review round 3: when putting back an interrupted downgrade fails, the boot run stops
+        """#234 review round 3: when the upgrade guard reports a metadata error, the boot run stops
         there and says why: no migration, no Engine drop-in, no unit started. The deck keeps the
         generation it has and the journal stays for the next boot."""
         src = self.extract(self.build())
@@ -1070,75 +1049,9 @@ pkill() { printf 'pkill %s\\n' "$*" >> "$KILLED"; }
         self.assertFalse(run_dir.exists() and any(run_dir.rglob('*.service')))
         self.assertEqual(self.host_commands.read_text(), '')
 
-    def test_234_leave_unmounts_only_this_releases_engine_script(self):
-        root = self.tmp / 'leave-mount'
-        (root / 'run/systemd/system').mkdir(parents=True)
-        engine = root / 'Engine-script'
-        mounts = root / 'mountinfo'
-        leave = root / 'leave.sh'
-        leave.write_text(bdb.LEAVE_SH.replace('/run', str(root / 'run'))
-                         .replace('/data/enginex', str(root / 'data/enginex'))
-                         .replace('/usr/Engine/Scripts/engine', str(engine))
-                         .replace('/proc/self/mountinfo', str(mounts))
-                         .replace('/proc/1/comm', str(self.pid1_systemd())))
-        for source, unmount in [('/enginex-engine-script', True), ('/foreign-engine-script', False)]:
-            with self.subTest(source=source):
-                mounts.write_text(f'1 0 0:1 {source} {engine} rw - tmpfs tmpfs rw\n')
-                res = subprocess.run(['sh', str(leave), '--no-reboot'], env=self.env,
-                                     capture_output=True, text=True)
-                commands = self.host_commands.read_text()
-                self.host_commands.write_text('')
-                self.assertEqual(res.returncode, 0, res.stderr)
-                self.assertEqual(f'umount {engine}' in commands, unmount, commands)
-
-    def test_234_leave_step_removes_only_this_releases_units(self):
-        """#234: the leave step before an older release is applied removes this release's enginex units,
-        its 99-enginex.conf drop-ins, the bound Engine script and the suite cache, nothing else, and
-        follows no symlinked directory (a units dir that points at /data/Music loses nothing)."""
-        root = self.tmp / 'leave-root'
-        units = root / 'run/systemd/system'
-        ours = ['enginex-deemixd.service', 'enginex-stream-sync.service', 'enginex-rb-bridge.service',
-                'engine.service.d/99-enginex.conf', 'edisksd.service.d/99-enginex.conf']
-        theirs = ['engine-guardian.service', 'foreign.service', 'engine.service.d/50-user.conf',
-                  'sshd.service.d/51-port.conf']
-        for name in ours + theirs:
-            (units / name).parent.mkdir(parents=True, exist_ok=True)
-            (units / name).write_text(name)
-        (units / 'enginex-masked.service').symlink_to('/dev/null')
-        (root / 'run/enginex-engine-script').write_text('#!/bin/sh\n')
-        (root / 'data/enginex/bin').mkdir(parents=True)
-        for f in ('enginex-suite', 'enginex-suite.id', 'keep'):
-            (root / 'data/enginex/bin' / f).write_text(f)
-        leave = self.tmp / 'leave.sh'
-        leave.write_text(bdb.LEAVE_SH)
-        env = {**self.env, 'ENGINEX_LEAVE_ROOT': str(root)}
-        res = subprocess.run(['sh', str(leave)], env=env, capture_output=True, text=True)
-        self.assertEqual(res.returncode, 0, res.stderr)
-        for name in ours + ['enginex-masked.service']:
-            self.assertFalse(os.path.lexists(units / name), name)
-        for name in theirs:
-            self.assertEqual((units / name).read_text(), name)
-        self.assertFalse((root / 'run/enginex-engine-script').exists())
-        self.assertEqual(sorted(p.name for p in (root / 'data/enginex/bin').iterdir()), ['keep'])
-        # Symlinked directories on the way are never followed.
-        music = self.tmp / 'Music'
-        (music / 'engine.service.d').mkdir(parents=True)
-        for name in ('enginex-song.service', 'engine.service.d/99-enginex.conf'):
-            (music / name).write_text('a song')
-        shutil.rmtree(root / 'run/systemd')
-        (root / 'run/systemd').mkdir()
-        (root / 'run/systemd/system').symlink_to(music)
-        res = subprocess.run(['sh', str(leave)], env=env, capture_output=True, text=True)
-        self.assertEqual(res.returncode, 0, res.stderr)
-        (root / 'run/systemd/system').unlink()
-        (root / 'run/systemd/system').mkdir()
-        (root / 'run/systemd/system/engine.service.d').symlink_to(music / 'engine.service.d')
-        res = subprocess.run(['sh', str(leave)], env=env, capture_output=True, text=True)
-        self.assertEqual(res.returncode, 0, res.stderr)
-        self.assertEqual((music / 'enginex-song.service').read_text(), 'a song')
-        self.assertEqual((music / 'engine.service.d/99-enginex.conf').read_text(), 'a song')
-        # boot-activate.sh carries this very script.
-        self.assertIn(bdb.LEAVE_SH, bdb.BOOT_ACTIVATE)
+    def test_234_no_downgrade_script_is_written(self):
+        src = self.extract(self.build())
+        self.assertNotIn('/run/enginex/leave.sh.new', (src / 'boot-activate.sh').read_text())
 
     def pid1_systemd(self):
         comm = self.tmp / 'pid1-comm'

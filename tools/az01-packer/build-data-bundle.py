@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from az01_packer import MIGRATE, LEGACY_SHELL  # one migration snippet for the image and the bundle
 
 # ENGINEX_CUSTOM is only set by tests: then dest is not the deck's /data, nothing to migrate.
-MIGRATE_IF_DEFAULT = 'if [ -z "${ENGINEX_CUSTOM:-}" ]; then\n' + MIGRATE + '\nfi'
+MIGRATE_IF_DEFAULT = 'if [ -z "${ENGINEX_CUSTOM:-}" ] || [ "$ENGINEX_CUSTOM" = /data/enginex ]; then\n' + MIGRATE + '\nfi'
 
 VERSION_RE = re.compile(r'^\d+(\.\d+){2,4}$')  # same range as az01_packer.py
 APPLETS = ('stream-sync', 'rb-bridge', 'enginex-deemixd', 'stems-processor', 'engine-guardian')
@@ -68,8 +68,9 @@ swap_undo() {
         done
         if [ -f "$su_old/alsa-path" ]; then
             su_alsa=$(cat "$su_old/alsa-path")
+            case "$su_alsa" in */"$legacy_alsa") su_alsa="${su_alsa%/*}/99-enginex.conf" ;; esac
             if [ -f "$su_old/files/alsa.conf" ]; then
-                cp -p "$su_old/files/alsa.conf" "$su_alsa"
+                sed -e "s|$legacy_data|/data/enginex|g" -e "s|$legacy_unit|enginex|g" "$su_old/files/alsa.conf" > "$su_alsa"
             elif [ -e "$su_old/files/alsa.absent" ]; then
                 rm -f "$su_alsa"
             fi
@@ -79,76 +80,13 @@ swap_undo() {
     rm -rf "$dest/.install-done"
 }"""
 
-LEAVE_SH = r'''#!/bin/sh
-# The downgrade "leave" step of EngineX OS 5.3.0.5 and later (#234), written by boot-activate.sh
-# to /run/enginex/leave.sh at every boot, outside /data, so an older bundle's install.sh cannot
-# replace it. The screen updater, the USB az01-update hook and EngineX-Installer run it after an
-# OLDER bundle was installed, instead of that bundle's boot-activate.sh: it takes this release's
-# own enginex-named units and drop-ins out of /run, so nothing of it runs next to the older
-# release, and reboots (--no-reboot: the caller reboots). The older release starts clean at the
-# next boot; an older boot-activate.sh never runs over this release's units.
-# Touches only EngineX names: /run/systemd/system/enginex-*.service, the 99-enginex.conf drop-ins,
-# the patched Engine script it bound, and the first-generation suite cache in /data/enginex/bin.
-# A directory on the way that is a symlink (to /data/Music, say) is left alone, never followed.
-set -u
-root=${ENGINEX_LEAVE_ROOT:-} # tests: a stand-in for /
-reboot=1 target=
-while [ "$#" -gt 0 ]; do
-    case $1 in
-    --no-reboot) reboot= ;;
-    --install) target=${2:?--install needs the unpacked bundle}; shift ;;
-    esac
-    shift
-done
-# --install <unpacked bundle>: that bundle goes in first. An older release's install.sh only fills
-# a stage, and this release's suite moves it in with atomic swaps, the bundle last; a power cut is
-# put back by this release's boot-activate.sh (internal/leave). A newer one installs in place.
-# A failure leaves this release as it is, units and all.
-if [ -n "$target" ]; then
-    "${ENGINEX_LEAVE_SUITE:-/data/enginex/bundle/bin/enginex-suite}" leave install "$target" || exit 1
-fi
-real_dir() { # every level of $1 below $root is a real directory, not a symlink
-    rd_p=$root
-    rd_rest=${1#/}
-    while [ -n "$rd_rest" ]; do
-        rd_p="$rd_p/${rd_rest%%/*}"
-        case $rd_rest in */*) rd_rest=${rd_rest#*/} ;; *) rd_rest= ;; esac
-        [ -d "$rd_p" ] && [ ! -L "$rd_p" ] || return 1
-    done
-}
-units=/run/systemd/system
-if real_dir "$units"; then
-    for u in "$root$units"/enginex-*.service; do
-        [ -f "$u" ] || [ -L "$u" ] || continue
-        rm -f "$u"
-    done
-    for d in engine.service.d edisksd.service.d; do
-        ! real_dir "$units/$d" || rm -f "$root$units/$d/99-enginex.conf"
-    done
-fi
-if [ -z "$root" ] && grep -q ' /enginex-engine-script /usr/Engine/Scripts/engine ' /proc/self/mountinfo 2>/dev/null; then
-    umount /usr/Engine/Scripts/engine 2>/dev/null || :
-fi
-! real_dir /run || rm -f "$root/run/enginex-engine-script"
-! real_dir /data/enginex/bin || rm -f "$root/data/enginex/bin/enginex-suite" "$root/data/enginex/bin/enginex-suite.id"
-[ -z "$root" ] || exit 0
-if [ "$(cat /proc/1/comm 2>/dev/null)" = systemd ]; then
-    systemctl daemon-reload 2>/dev/null || :
-    [ -z "$reboot" ] || { sync; systemctl reboot || reboot; }
-elif [ -n "$reboot" ]; then
-    sync; reboot
-fi
-exit 0
-'''
-
 BOOT_ACTIVATE = r'''#!/bin/sh
 # One-shot boot activator for SC LIVE 4 (inmusic,jp21) and read-only root decks (#61).
 set -eu
 @LEGACY_SHELL@
 
-# The suite holds a blocking leave lock through this script's migration and activation. Its boot
-# run first puts back an interrupted downgrade; Engine-start calls only take the lock. The child
-# marker avoids entering the suite twice. A failure runs nothing below and preserves the journal.
+# The suite holds the upgrade lock through migration and activation. The child marker
+# avoids entering the suite twice; a lock or metadata error stops activation.
 if [ "${ENGINEX_LEAVE_LOCKED:-}" != 1 ] && { [ -z "$ENGINEX_CUSTOM" ] || [ "$ENGINEX_CUSTOM" = /data/enginex ] ||
     [ "$ENGINEX_CUSTOM" = ${legacy_data} ] || [ -n "${ENGINEX_LEAVE_ROOT:-}" ]; }; then
     leave_suite="$(dirname "$0")/bin/enginex-suite"
@@ -379,15 +317,6 @@ leave_old_names() {
     [ -L ${legacy_run} ] || rm -rf ${legacy_run}
 }
 leave_old_names
-
-# The leave step an older bundle's install is followed by (see leave.sh).
-if [ -d /run ] && [ ! -L /run/enginex ]; then
-    mkdir -p /run/enginex
-    cat <<'LEAVE_EOF' > /run/enginex/leave.sh.new
-@LEAVE_SH@LEAVE_EOF
-    chmod 755 /run/enginex/leave.sh.new
-    mv -f /run/enginex/leave.sh.new /run/enginex/leave.sh
-fi
 
 mkdir -p /run/systemd/system/engine.service.d
 
@@ -698,7 +627,6 @@ else
 fi
 '''
 
-BOOT_ACTIVATE = BOOT_ACTIVATE.replace('@LEAVE_SH@', LEAVE_SH)
 
 ALSA_CONF = r'''hook_func.enginex_alsa_boot_hook {
 	lib "/data/enginex/bundle/lib/libengine-ui-hook.so"
@@ -714,7 +642,7 @@ ALSA_CONF = r'''hook_func.enginex_alsa_boot_hook {
 '''
 
 INSTALL = r'''#!/bin/sh
-# Installs this bundle under /data/enginex (${legacy_data} stays as a symlink). Checks SHA256SUMS first and
+# Installs this bundle under /data/enginex (the pre-5.3.0.5 data directory migrates once). Checks SHA256SUMS first and
 # keeps the previous generation until every part is in place, so a failed or interrupted install leaves the old one.
 set -eu
 @LEGACY_SHELL@
@@ -1041,7 +969,7 @@ Needs a root shell on the device. Copy this .tar.gz to the device, then:
     sh /tmp/{top}/install.sh
     reboot
 
-install.sh only writes /data/enginex (preserving the legacy compatibility link) and one ALSA file
+install.sh only writes /data/enginex (removing its owned legacy link) and one ALSA file
 (/data/{alsa}/99-enginex.conf). Music,
 settings and the Engine library are left alone.
 

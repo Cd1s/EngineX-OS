@@ -498,16 +498,6 @@ func tidalNumericID(name string) uint32 { return crc32.ChecksumIEEE([]byte(name)
 
 func isTidal(p string) bool { return strings.HasPrefix(p, "/v1/") || strings.HasPrefix(p, "/au/") }
 
-// canonicalV1 maps the legacy API prefix onto the current routes (#234).
-// Both prefixes reach the same handlers and access rules. The alias remains
-// pending the maintainer's removal decision for installed clients.
-func canonicalV1(p string) string {
-	if rest, ok := strings.CutPrefix(p, migration.APIPrefix); ok && (rest == "" || rest[0] == '/') {
-		return "/v1/enginex" + rest
-	}
-	return p
-}
-
 // relayedFromOutside reports a request a tunnel on the deck carried in from elsewhere: it
 // arrives from loopback, but with headers the tunnel's edge always adds and a caller cannot
 // remove. Engine and the deck's own tools never send them.
@@ -528,7 +518,11 @@ func (g *tidalGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(w, 403, errors.New("the streaming gateway is local to the deck"))
 		return
 	}
-	clean := canonicalV1(path.Clean(r.URL.Path))
+	clean := path.Clean(r.URL.Path)
+	if clean == migration.APIPrefix || strings.HasPrefix(clean, migration.APIPrefix+"/") {
+		http.NotFound(w, r)
+		return
+	}
 	if !isTidal(clean + "/") {
 		http.NotFound(w, r)
 		return

@@ -438,7 +438,7 @@ func (s *Server) Close() {
 }
 
 // isDeckStateDir reports whether dir is the deck's own state dir (not a test's): the default,
-// or the same dir through the the legacy data directory compat link an older unit passes (#234).
+// or a pre-5.3.0.5 data directory while its upgrade is being identified (#234).
 func isDeckStateDir(dir string) bool {
 	return dir == "/data/enginex/state" || dir == migration.DataDir+"/state"
 }

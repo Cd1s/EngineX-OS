@@ -11,8 +11,8 @@ First-generation JP07/JP13/JC11 image groups include
 `/usr/local/bin/stems-processor` in `rootfs-overlay`. Their release gates can
 execute that path directly. Second-generation data-bundle installations keep
 the stock root partition read-only: the processor wrapper is instead at
-`/data/enginex/bundle/bin/stems-processor`, also reachable through the
-`the legacy data path` compatibility link. Passing a first-generation gate does
+`/data/enginex/bundle/bin/stems-processor`. Pre-5.3.0.5 data migrates there once.
+Passing a first-generation gate does
 not prove second-generation processor detection.
 
 ## Cause and fix

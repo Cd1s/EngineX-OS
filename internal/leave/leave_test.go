@@ -1,681 +1,148 @@
 package leave
 
 import (
-	"archive/tar"
 	"bytes"
-	"crypto/sha256"
-	"errors"
-	"fmt"
-	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
-	"syscall"
 	"testing"
+	"time"
+
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 )
 
-func testExists(p string) bool {
-	_, err := os.Lstat(p)
-	return err == nil
+func write(t *testing.T, path, text string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(text), 0600); err != nil {
+		t.Fatal(err)
+	}
 }
-
-// A deck on 5.3.0.5 (the migrated layout of #103) with settings, keys and downloads.
 func newDeck(t *testing.T) (Deck, string) {
 	t.Helper()
 	root := t.TempDir()
-	d := filepath.Join(root, "data/enginex")
-	for p, c := range map[string]string{
-		"version.txt": "5.3.0.5\n", "gen2-unlocked": "1\n",
-		"bundle/version.txt": "5.3.0.5\n", "bundle/release-tag": "v5.3.0.5-r1\n",
-		"bundle/boot-activate.sh": "# 5.3.0.5\n", "bundle/lib/libengine-ui-hook.so": "hook 5.3.0.5",
-		"ui/packs/en/Deck.qml": "5.3.0.5 pack", "ui/icons/a.png": "5.3.0.5 icon",
-		"ui/.pack-version": "5.3.0.5\n", "ui/.pack-id": "id-5.3.0.5\n", "ui/settings.conf": "lang=en\n",
-		"ui/safe-mode": "1\n", "state/accounts.json": "{}", "ssh_host_ed25519_key": "key", "Stream/song.flac": "music",
-	} {
-		write(t, filepath.Join(d, p), c)
-	}
-	if err := os.Symlink("enginex", filepath.Join(root, migration.DataRelative)); err != nil {
-		t.Fatal(err)
-	}
-	write(t, filepath.Join(root, "data/AppDataUser/AIR Music Technology/Engine/.cache/qml/x.qmlc"), "stale")
+	write(t, filepath.Join(root, "data/enginex/version.txt"), "5.3.0.5\n")
+	write(t, filepath.Join(root, "data/enginex/bundle/release-tag"), "v5.3.0.5-r1\n")
+	write(t, filepath.Join(root, "data/enginex/Stream/song.flac"), "user music")
 	return Deck{Root: root, Stdout: io.Discard, Stderr: io.Discard}, root
 }
-
-func write(t *testing.T, p, c string) {
+func targetBundle(t *testing.T, version, tag string) string {
 	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(p, []byte(c), 0o644); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// legacyBundle unpacks a bundle of an older release around its genuine scripts (testdata).
-func legacyBundle(t *testing.T, version string) string {
-	t.Helper()
-	dir := filepath.Join(t.TempDir(), "SCLIVE4-"+version+"-EngineX-OS-Data-Bundle")
-	for _, s := range []string{"install.sh", "uninstall.sh", "boot-activate.sh"} {
-		b, err := os.ReadFile(filepath.Join("testdata", "v"+version, s))
-		if err != nil {
-			t.Fatal(err)
-		}
-		write(t, filepath.Join(dir, s), string(b))
-	}
+	dir := t.TempDir()
 	write(t, filepath.Join(dir, "version.txt"), version+"\n")
-	write(t, filepath.Join(dir, "alsa-dir"), "system/var/overlay/lib/alsa/conf.d\n")
-	write(t, filepath.Join(dir, migration.AlsaFile), "alsa conf\n")
-	write(t, filepath.Join(dir, "bin/stream-sync"), "suite "+version)
-	write(t, filepath.Join(dir, "lib/libengine-ui-hook.so"), "hook "+version)
-	var b bytes.Buffer
-	tw := tar.NewWriter(&b)
-	for n, c := range map[string]string{"packs/en/Deck.qml": version + " pack", "icons/a.png": version + " icon"} {
-		tw.WriteHeader(&tar.Header{Name: n, Mode: 0o644, Size: int64(len(c)), Typeflag: tar.TypeReg})
-		tw.Write([]byte(c))
-	}
-	tw.Close()
-	write(t, filepath.Join(dir, "ui-packs.tar"), b.String())
-	var sums []string
-	filepath.Walk(dir, func(p string, fi os.FileInfo, err error) error {
-		if err == nil && fi.Mode().IsRegular() {
-			c, _ := os.ReadFile(p)
-			rel, _ := filepath.Rel(dir, p)
-			sums = append(sums, fmt.Sprintf("%x  %s", sha256.Sum256(c), rel))
-		}
-		return nil
-	})
-	sort.Strings(sums)
-	write(t, filepath.Join(dir, "SHA256SUMS"), strings.Join(sums, "\n")+"\n")
+	write(t, filepath.Join(dir, "release-tag"), tag+"\n")
+	write(t, filepath.Join(dir, "install.sh"), "#!/bin/sh\nset -eu\nmkdir -p \"$ENGINEX_CUSTOM\"\ncp version.txt \"$ENGINEX_CUSTOM/version.txt\"\n")
 	return dir
 }
-
-func read(t *testing.T, p string) string {
-	t.Helper()
-	b, err := os.ReadFile(p)
-	if err != nil {
-		t.Fatalf("%v", err)
-	}
-	return string(b)
-}
-
-// snapshot is every file under /data (through the data link), for before/after comparisons.
-func snapshot(t *testing.T, root string) map[string]string {
-	t.Helper()
-	out := map[string]string{}
-	base := filepath.Join(root, "data")
-	filepath.Walk(base, func(p string, fi os.FileInfo, err error) error {
-		if err != nil {
-			return nil
-		}
-		rel, _ := filepath.Rel(base, p)
-		if strings.HasPrefix(rel, journalName) || strings.HasPrefix(rel, "AppDataUser") {
-			return nil
-		}
-		switch {
-		case fi.Mode()&os.ModeSymlink != 0:
-			l, _ := os.Readlink(p)
-			out[rel] = "-> " + l
-		case fi.Mode().IsRegular():
-			out[rel] = read(t, p)
-		}
-		return nil
-	})
-	return out
-}
-
-func diff(a, b map[string]string) string {
-	var out []string
-	for k, v := range a {
-		if b[k] != v {
-			out = append(out, fmt.Sprintf("%s: %q -> %q", k, v, b[k]))
-		}
-	}
-	for k, v := range b {
-		if _, ok := a[k]; !ok {
-			out = append(out, fmt.Sprintf("%s: new %q", k, v))
-		}
-	}
-	sort.Strings(out)
-	return strings.Join(out, "\n")
-}
-
-// #234 review R1: the published 5.3.0.2 install.sh refuses the the legacy data directory link every
-// release since 5.3.0.3 keeps. The older release now gets its layout back: the real
-// the legacy data directory with every file, /data/enginex the link, and its own installer accepts it.
-func TestLeaveInstallsGenuine5302AndHandsBackItsLayout(t *testing.T) {
-	d, root := newDeck(t)
-	target := legacyBundle(t, "5.3.0.2")
-	if older, _, err := d.Older(target); err != nil || !older {
-		t.Fatalf("5.3.0.2 under 5.3.0.5: older=%v err=%v", older, err)
-	}
-	if err := d.Install(target); err != nil {
-		t.Fatal(err)
-	}
-	old := filepath.Join(root, migration.DataRelative)
-	if st, err := os.Lstat(old); err != nil || !st.IsDir() {
-		t.Fatalf(migration.DataDir+" is not the real directory: %v", err)
-	}
-	if l, err := os.Readlink(filepath.Join(root, "data/enginex")); err != nil || l != migration.DataName {
-		t.Fatalf("/data/enginex: %q %v, want the link to "+migration.DataName, l, err)
-	}
-	for p, want := range map[string]string{
-		"version.txt": "5.3.0.2\n", "bundle/version.txt": "5.3.0.2\n", "bundle/lib/libengine-ui-hook.so": "hook 5.3.0.2",
-		"ui/packs/en/Deck.qml": "5.3.0.2 pack", "ui/icons/a.png": "5.3.0.2 icon", "ui/.pack-version": "5.3.0.2\n",
-		"ui/settings.conf": "lang=en\n", "state/accounts.json": "{}", "ssh_host_ed25519_key": "key", "Stream/song.flac": "music",
-	} {
-		if got := read(t, filepath.Join(old, p)); got != want {
-			t.Errorf("%s = %q, want %q", p, got, want)
-		}
-	}
-	for _, p := range []string{"gen2-unlocked", "ui/safe-mode", "bundle/" + markerName, "ui/packs/" + markerName, "bundle/release-tag"} {
-		if testExists(filepath.Join(old, p)) {
-			t.Errorf("%s is left", p)
-		}
-	}
-	if testExists(filepath.Join(root, "data", journalName)) || testExists(filepath.Join(root, "data/AppDataUser/AIR Music Technology/Engine/.cache/qml")) {
-		t.Error("journal or the stale QML cache is left")
-	}
-	// The release's own scripts run on what it got: install.sh again, then its uninstall.sh.
-	for _, s := range []string{"install.sh", "bundle/uninstall.sh"} {
-		dir := target
-		if s != "install.sh" {
-			dir = old
-		}
-		cmd := exec.Command("sh", filepath.Join(dir, s))
-		cmd.Dir = target
-		cmd.Env = append(os.Environ(), migration.CustomEnv+"="+old, migration.AlsaEnv+"="+filepath.Join(root, "alsa"))
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("genuine 5.3.0.2 %s on the handed-back layout: %v\n%s", s, err, out)
-		}
-	}
-}
-
-// The published 5.3.0.3 install.sh already knows /data/enginex: the layout stays.
-func TestLeaveInstallsGenuine5303InTheEnginexLayout(t *testing.T) {
-	d, root := newDeck(t)
-	if err := d.Install(legacyBundle(t, "5.3.0.3")); err != nil {
-		t.Fatal(err)
-	}
-	if l, err := os.Readlink(filepath.Join(root, migration.DataRelative)); err != nil || l != "enginex" {
-		t.Fatalf(migration.DataDir+": %q %v", l, err)
-	}
-	live := filepath.Join(root, "data/enginex")
-	for p, want := range map[string]string{"version.txt": "5.3.0.3\n", "bundle/version.txt": "5.3.0.3\n",
-		"ui/packs/en/Deck.qml": "5.3.0.3 pack", "gen2-unlocked": "1\n", "Stream/song.flac": "music"} {
-		if got := read(t, filepath.Join(live, p)); got != want {
-			t.Errorf("%s = %q, want %q", p, got, want)
-		}
-	}
-}
-
-var errCut = errors.New("power cut")
-
-// cutAt runs Install and stops it, like a power cut, right before step.
-func cutAt(t *testing.T, d Deck, target, step string) {
-	t.Helper()
-	defer func() { crash = func(string) {} }()
-	crash = func(s string) {
-		if s == step {
-			panic(errCut)
-		}
-	}
-	defer func() {
-		if r := recover(); r != errCut {
-			t.Fatalf("not cut at %s: %v", step, r)
-		}
-	}()
-	d.Install(target)
-}
-
-// #234 review R2: the published installers of 5.3.0.2 and 5.3.0.3 park the bundle and move the
-// new one in with two renames, and nothing can put it back after a cut between them. Now the
-// older installer only fills a stage. A cut at any step leaves a whole bundle at the path ALSA
-// loads (the legacy data directory/bundle/lib) and a boot-activate.sh the hook can start; before the
-// commit, this release's boot-activate.sh puts every part back (Recover) and the deck is as it was.
-func TestLeaveCutAtEveryStepLeavesOneWholeRelease(t *testing.T) {
-	for _, version := range []string{"5.3.0.2", "5.3.0.3"} {
-		steps := []string{"ui/packs", "ui/icons", "files", "bundle", "committed"}
-		if version == "5.3.0.2" {
-			steps = append([]string{"layout", "layout-exchanged"}, steps...)
-		}
-		for _, step := range steps {
-			t.Run(version+"/"+step, func(t *testing.T) {
-				d, root := newDeck(t)
-				before := snapshot(t, root)
-				delete(before, "enginex/ui/safe-mode") // the older release gets one fresh try either way
-				cutAt(t, d, legacyBundle(t, version), step)
-				hook := read(t, filepath.Join(root, migration.DataRelative+"/bundle/lib/libengine-ui-hook.so"))
-				boot := filepath.Join(root, "data/enginex/bundle/boot-activate.sh")
-				if !testExists(boot) {
-					boot = filepath.Join(root, migration.DataRelative+"/bundle/boot-activate.sh") // the hook's fallback
-				}
-				if !testExists(boot) {
-					t.Fatalf("no boot-activate.sh the hook can start")
-				}
-				if step == "committed" {
-					if hook != "hook "+version {
-						t.Fatalf("after the commit ALSA loads %q", hook)
-					}
-					return // the older release runs; its next update clears the journal
-				}
-				if hook != "hook 5.3.0.5" {
-					t.Fatalf("before the commit ALSA loads %q", hook)
-				}
-				// The next boot: this release's boot-activate.sh, twice (a cut during recovery).
-				for i := 0; i < 2; i++ {
-					if err := d.Recover(); err != nil {
-						t.Fatal(err)
-					}
-				}
-				after := snapshot(t, root)
-				delete(after, "enginex/ui/safe-mode")
-				if dd := diff(before, after); dd != "" {
-					t.Fatalf("not put back:\n%s", dd)
-				}
-				if testExists(filepath.Join(root, "data", journalName)) {
-					t.Fatal("journal left")
-				}
-			})
-		}
-	}
-}
-
-// A committed install leaves the journal (with this release's parts) only on a cut; the next
-// release's boot clears it without touching the older release's files.
-func TestLeaveRecoverAfterTheCommitOnlyClears(t *testing.T) {
-	d, root := newDeck(t)
-	cutAt(t, d, legacyBundle(t, "5.3.0.3"), "committed")
-	before := snapshot(t, root)
-	if err := d.Recover(); err != nil {
-		t.Fatal(err)
-	}
-	after := snapshot(t, root)
-	delete(before, "enginex/bundle/"+markerName)
-	delete(before, "enginex/ui/packs/"+markerName)
-	delete(before, "enginex/ui/icons/"+markerName)
-	if dd := diff(before, after); dd != "" || testExists(filepath.Join(root, "data", journalName)) {
-		t.Fatalf("recover after the commit changed:\n%s", dd)
-	}
-}
-
-// Without an atomic exchange (an old kernel, another file system) nothing is touched.
-func TestLeaveRefusesWithoutAtomicExchange(t *testing.T) {
-	defer func(e func(a, b string) error) { Exchange = e }(Exchange)
-	Exchange = func(a, b string) error { return syscall.EINVAL }
-	d, root := newDeck(t)
-	before := snapshot(t, root)
-	if err := d.Install(legacyBundle(t, "5.3.0.2")); !errors.Is(err, ErrNoExchange) {
-		t.Fatalf("err = %v, want ErrNoExchange", err)
-	}
-	if dd := diff(before, snapshot(t, root)); dd != "" || testExists(filepath.Join(root, "data", journalName)) {
-		t.Fatalf("changed:\n%s", dd)
-	}
-}
-
-// A damaged older bundle fails in its own install.sh, in the stage: the deck keeps this release.
-func TestLeaveFailedOlderInstallChangesNothing(t *testing.T) {
-	d, root := newDeck(t)
-	target := legacyBundle(t, "5.3.0.2")
-	write(t, filepath.Join(target, "lib/libengine-ui-hook.so"), "damaged")
-	before := snapshot(t, root)
-	if err := d.Install(target); err == nil {
-		t.Fatal("a damaged bundle installed")
-	}
-	if dd := diff(before, snapshot(t, root)); dd != "" || testExists(filepath.Join(root, "data", journalName)) {
-		t.Fatalf("changed:\n%s", dd)
-	}
-}
-
-// An exchange that fails half-way through the commit is put back at once, not at the next boot.
-func TestLeaveErrorDuringTheCommitPutsBack(t *testing.T) {
-	defer func(e func(a, b string) error) { Exchange = e }(Exchange)
-	real := Exchange
-	Exchange = func(a, b string) error {
-		if strings.HasSuffix(a, "/bundle") && strings.Contains(a, journalName) {
-			return syscall.EIO
-		}
-		return real(a, b)
-	}
-	d, root := newDeck(t)
-	before := snapshot(t, root)
-	delete(before, "enginex/ui/safe-mode")
-	if err := d.Install(legacyBundle(t, "5.3.0.2")); err == nil {
-		t.Fatal("no error")
-	}
-	after := snapshot(t, root)
-	delete(after, "enginex/ui/safe-mode")
-	if dd := diff(before, after); dd != "" || testExists(filepath.Join(root, "data", journalName)) {
-		t.Fatalf("not put back:\n%s", dd)
-	}
-}
-
-// The applet: a bundle that is not older is installed in place by its own install.sh, as before.
-func TestLeaveAppletInstallsNewerInPlace(t *testing.T) {
-	_, root := newDeck(t)
-	target := filepath.Join(t.TempDir(), "b")
-	write(t, filepath.Join(target, "version.txt"), "5.3.0.6\n")
-	write(t, filepath.Join(target, "install.sh"), "echo in-place > \"$ENGINEX_LEAVE_ROOT/ran\"\n")
-	t.Setenv("ENGINEX_LEAVE_ROOT", root)
-	var out, errb bytes.Buffer
-	if code := Main([]string{"install", target}, &out, &errb); code != 0 {
-		t.Fatalf("code %d: %s", code, errb.String())
-	}
-	if got := read(t, filepath.Join(root, "ran")); got != "in-place\n" {
-		t.Fatalf("ran = %q", got)
-	}
-}
-
-// #234 review R1, first generation: Firmware Update Mode flashes 5.3.0.2 with nothing of this
-// release running, and that release's prepare refuses the the legacy data directory link. The hand-run
-// layout step gives it the real directory first; run twice it changes nothing more.
-func TestLeaveLayoutHandsBackWithoutInstalling(t *testing.T) {
-	_, root := newDeck(t)
-	before := snapshot(t, root)
-	var out bytes.Buffer
-	t.Setenv("ENGINEX_LEAVE_ROOT", root)
-	for i := 0; i < 2; i++ {
-		if code := Main([]string{"layout"}, &out, &out); code != 0 {
-			t.Fatalf("code %d: %s", code, out.String())
-		}
-	}
-	if l, err := os.Readlink(filepath.Join(root, "data/enginex")); err != nil || l != migration.DataName {
-		t.Fatalf("/data/enginex: %q %v", l, err)
-	}
-	after := map[string]string{}
-	for k, v := range snapshot(t, root) {
-		after[strings.Replace(k, migration.DataName+"/", "enginex/", 1)] = v
-	}
-	delete(before, migration.DataName)
-	delete(after, "enginex")
-	if dd := diff(before, after); dd != "" {
-		t.Fatalf("files changed:\n%s", dd)
-	}
-	// The prepare of 5.3.0.2 refuses exactly this: a link at the legacy data directory.
-	if st, err := os.Lstat(filepath.Join(root, migration.DataRelative)); err != nil || !st.IsDir() {
-		t.Fatal(migration.DataDir + " is not a real directory")
-	}
-}
-
-// #234 review round 2 (R2): the older installers write the stage with cp and tar and never sync;
-// a swap is atomic, but orders no file contents before it. Every staged file and directory is
-// synced before the first swap of a part.
-func TestLeaveStagedPayloadIsDurableBeforeTheFirstSwap(t *testing.T) {
-	defer func(e func(a, b string) error, s func(string) error) { Exchange, syncPath = e, s }(Exchange, syncPath)
-	synced := map[string]bool{}
-	realSync, realExchange := syncPath, Exchange
-	syncPath = func(p string) error { synced[p] = true; return realSync(p) }
-	d, root := newDeck(t)
-	stage := filepath.Join(root, "data", journalName, "stage")
-	var unsynced []string
-	swaps := 0
-	Exchange = func(a, b string) error {
-		if !strings.Contains(a, "/probe-") {
-			if swaps++; swaps == 1 {
-				filepath.Walk(stage, func(p string, fi os.FileInfo, err error) error {
-					if err == nil && (fi.Mode().IsRegular() || fi.IsDir()) && !synced[p] {
-						unsynced = append(unsynced, p)
-					}
-					return nil
-				})
-			}
-		}
-		return realExchange(a, b)
-	}
-	if err := d.Install(legacyBundle(t, "5.3.0.2")); err != nil {
-		t.Fatal(err)
-	}
-	if swaps == 0 || len(unsynced) > 0 {
-		t.Fatalf("%d swaps; not synced before the first: %q", swaps, unsynced)
-	}
-}
-
-// swapLog follows every exchange: its two directories must be synced before the next exchange,
-// and while the journal still exists, so before cleanup removes it and the other side.
-type swapLog struct {
-	journal  string
-	pending  map[string]bool
-	problems []string
-}
-
-func (l *swapLog) install(t *testing.T) {
-	realSync, realExchange := syncPath, Exchange
-	t.Cleanup(func() { syncPath, Exchange = realSync, realExchange })
-	syncPath = func(p string) error {
-		if l.pending[p] {
-			delete(l.pending, p)
-			if len(l.pending) == 0 && !testExists(l.journal) {
-				l.problems = append(l.problems, "synced only after the journal was removed: "+p)
-			}
-		}
-		return realSync(p)
-	}
-	Exchange = func(a, b string) error {
-		if strings.Contains(a, "/probe-") {
-			return realExchange(a, b)
-		}
-		if len(l.pending) > 0 {
-			l.problems = append(l.problems, fmt.Sprintf("exchanging %s while %v is not synced", a, l.pending))
-		}
-		err := realExchange(a, b)
-		l.pending = map[string]bool{filepath.Dir(a): true, filepath.Dir(b): true}
-		return err
-	}
-}
-
-func (l *swapLog) check(t *testing.T, what string) {
-	t.Helper()
-	if len(l.pending) > 0 {
-		l.problems = append(l.problems, fmt.Sprintf("never synced: %v", l.pending))
-	}
-	if len(l.problems) > 0 {
-		t.Fatalf("%s:\n%s", what, strings.Join(l.problems, "\n"))
-	}
-}
-
-// #234 review round 3 (R2): an exchange is atomic but not yet durable. The layout, UI and bundle
-// exchanges of an install and the exchanges back of a rollback each have their two directories
-// synced before the next one and before cleanup; so is the journal's own entry in /data.
-func TestLeaveSwapsAreDurableBeforeTheNextStepAndCleanup(t *testing.T) {
-	d, root := newDeck(t)
-	l := &swapLog{journal: filepath.Join(root, "data", journalName)}
-	l.install(t)
-	dataSynced := false
-	inner := syncPath
-	syncPath = func(p string) error {
-		if p == filepath.Join(root, "data") && testExists(filepath.Join(l.journal, "stage")) && !testExists(filepath.Join(l.journal, "id")) {
-			dataSynced = true
-		}
-		return inner(p)
-	}
-	if err := d.Install(legacyBundle(t, "5.3.0.2")); err != nil {
-		t.Fatal(err)
-	}
-	l.check(t, "install")
-	if !dataSynced {
-		t.Fatal("/data (the journal's entry) not synced before the journal id")
-	}
-	// A rollback: cut right before the bundle, then this release's next boot.
-	d, root = newDeck(t)
-	l = &swapLog{journal: filepath.Join(root, "data", journalName)}
-	l.install(t)
-	cutAt(t, d, legacyBundle(t, "5.3.0.2"), "bundle")
-	l.pending, l.problems = nil, nil // the cut install itself is checked above
-	if err := d.Recover(); err != nil {
-		t.Fatal(err)
-	}
-	l.check(t, "rollback")
-}
-
-// syncFault fails the sync of one directory with EIO, persistently, once an exchange whose source
-// ends in after has happened: a disk that stops writing.
-type syncFault struct {
-	armed bool
-	fails int
-}
-
-func injectSyncFault(t *testing.T, after, path string) *syncFault {
-	t.Helper()
-	f := &syncFault{}
-	realSync, realExchange := syncPath, Exchange
-	t.Cleanup(func() { syncPath, Exchange = realSync, realExchange })
-	Exchange = func(a, b string) error {
-		err := realExchange(a, b)
-		if err == nil && strings.HasSuffix(a, after) {
-			f.armed = true
-		}
-		return err
-	}
-	syncPath = func(p string) error {
-		if f.armed && p == path {
-			f.fails++
-			return syscall.EIO
-		}
-		return realSync(p)
-	}
-	return f
-}
-
-// #234 review round 4 (R2): when the sync after the bundle exchange fails (the stage's directory,
-// or the live one), cleanup must not run: the journal and this release's parked bundle stay, also
-// through a retry while the fault lasts, and the next boot's leave recover finishes once it syncs.
-func TestLeaveFailedSyncAfterTheCommitKeepsTheJournalAndTheParkedBundle(t *testing.T) {
-	for _, side := range []string{"stage", "live"} {
-		t.Run(side, func(t *testing.T) {
+func TestInstallRefusesDowngradesWithoutLegacyWrites(t *testing.T) {
+	for _, version := range []string{"5.3.0.2", "5.3.0.4"} {
+		t.Run(version, func(t *testing.T) {
 			d, root := newDeck(t)
-			journal := filepath.Join(root, "data", journalName)
-			dir := filepath.Join(journal, "stage/root")
-			if side == "live" {
-				dir = filepath.Join(root, "data/enginex")
+			target := targetBundle(t, version, "v"+version+"-r5")
+			err := d.Install(target)
+			if err == nil || !strings.Contains(err.Error(), "upgrade to the latest") {
+				t.Fatalf("downgrade result: %v", err)
 			}
-			fault := injectSyncFault(t, "/stage/root/bundle", dir)
-			if err := d.Install(legacyBundle(t, "5.3.0.3")); !errors.Is(err, syscall.EIO) {
-				t.Fatalf("install: %v, want EIO", err)
+			b, _ := os.ReadFile(d.data("enginex/version.txt"))
+			if string(b) != "5.3.0.5\n" {
+				t.Fatalf("installed version changed: %q", b)
 			}
-			parked := filepath.Join(journal, "stage/root/bundle/lib/libengine-ui-hook.so")
-			for i := 0; i < 2; i++ {
-				if !testExists(parked) || read(t, parked) != "hook 5.3.0.5" {
-					t.Fatalf("the parked bundle of this release is gone (try %d)", i)
-				}
-				if i == 0 {
-					if err := d.Recover(); !errors.Is(err, syscall.EIO) {
-						t.Fatalf("recover while the fault lasts: %v, want EIO", err)
-					}
-				}
+			b, _ = os.ReadFile(d.data("enginex/Stream/song.flac"))
+			if string(b) != "user music" {
+				t.Fatal("music changed")
 			}
-			if fault.fails < 3 {
-				t.Fatalf("the failed sync was tried %d times: once more before every cleanup expected", fault.fails)
+			if _, err := os.Lstat(filepath.Join(root, migration.DataRelative)); !os.IsNotExist(err) {
+				t.Fatalf("legacy path was written: %v", err)
 			}
-			fault.armed = false
-			if err := d.Recover(); err != nil {
-				t.Fatal(err)
-			}
-			if testExists(journal) || read(t, filepath.Join(root, "data/enginex/bundle/lib/libengine-ui-hook.so")) != "hook 5.3.0.3" {
-				t.Fatal("not finished once the sync worked")
+			if _, err := os.Lstat(d.data(journalName)); !os.IsNotExist(err) {
+				t.Fatalf("restore journal was written: %v", err)
 			}
 		})
 	}
 }
-
-// #234 review round 4 (R2): a rollback whose /data sync failed after the layout went back is
-// retried at the next boot; the retry finds the layout already back and must still sync /data
-// before it removes the journal, and fail as long as that sync fails.
-func TestLeaveRollbackRetryDoesNotSkipAFailedSync(t *testing.T) {
-	d, root := newDeck(t)
-	before := snapshot(t, root)
-	delete(before, "enginex/ui/safe-mode")
-	journal := filepath.Join(root, "data", journalName)
-	cutAt(t, d, legacyBundle(t, "5.3.0.2"), "bundle")
-	fault := injectSyncFault(t, migration.DataDir, filepath.Join(root, "data"))
-	for i := 0; i < 2; i++ {
-		if err := d.Recover(); !errors.Is(err, syscall.EIO) || !testExists(journal) {
-			t.Fatalf("recover %d while /data does not sync: err %v, journal kept %v", i, err, testExists(journal))
-		}
-	}
-	fault.armed = false
-	if err := d.Recover(); err != nil {
-		t.Fatal(err)
-	}
-	after := snapshot(t, root)
-	delete(after, "enginex/ui/safe-mode")
-	if dd := diff(before, after); dd != "" || testExists(journal) {
-		t.Fatalf("not put back:\n%s", dd)
+func TestInstallRepairsAndUpgradesCurrentNames(t *testing.T) {
+	for _, version := range []string{"5.3.0.5", "5.3.0.6"} {
+		t.Run(version, func(t *testing.T) {
+			d, root := newDeck(t)
+			target := targetBundle(t, version, "v"+version+"-r1")
+			if err := d.Install(target); err != nil {
+				t.Fatal(err)
+			}
+			b, _ := os.ReadFile(d.data("enginex/version.txt"))
+			if string(b) != version+"\n" {
+				t.Fatalf("version %q", b)
+			}
+			if _, err := os.Lstat(filepath.Join(root, migration.DataRelative)); !os.IsNotExist(err) {
+				t.Fatal("legacy directory created")
+			}
+		})
 	}
 }
-
-// #234 review round 5 (R2): a lookup that fails with an I/O error is not a missing directory.
-// After the sync of the committed bundle's live directory failed (and keeps failing), recovery
-// cannot look that directory up: right before its sync (the reviewer's injection), or at all.
-// Either way it returns an error and keeps the journal and the parked bundle; once the faults are
-// gone it finishes.
-func TestLeaveFailedLookupIsNotAMissingDirectory(t *testing.T) {
+func TestUpgradeReadsAnOlderRealDirectory(t *testing.T) {
 	d, root := newDeck(t)
-	journal := filepath.Join(root, "data", journalName)
-	live := filepath.Join(root, "data/enginex")
-	fault := injectSyncFault(t, "/stage/root/bundle", live)
-	if err := d.Install(legacyBundle(t, "5.3.0.3")); !errors.Is(err, syscall.EIO) {
-		t.Fatalf("install: %v, want EIO", err)
-	}
-	defer func(l func(string) (os.FileInfo, error)) { lstat = l }(lstat)
-	for _, from := range []int{2, 1} { // fail the live directory's lookups from this one on
-		n := 0
-		lstat = func(p string) (os.FileInfo, error) {
-			if p == live {
-				if n++; n >= from {
-					return nil, syscall.EIO
-				}
-			}
-			return os.Lstat(p)
-		}
-		if err := d.Recover(); err == nil {
-			t.Fatalf("recover with lookup %d of the live directory failing: no error", from)
-		}
-		if !testExists(filepath.Join(journal, "stage/root/bundle/lib/libengine-ui-hook.so")) {
-			t.Fatalf("the journal or the parked bundle is gone (lookup %d failing)", from)
-		}
-	}
-	lstat, fault.armed = os.Lstat, false
-	if err := d.Recover(); err != nil || testExists(journal) {
-		t.Fatalf("not finished once the faults are gone: %v", err)
-	}
-}
-
-// #234 review round 6 (R2): an I/O error on the first lookup of the journal is not "no journal".
-// A 5.3.0.3 downgrade cut before its bundle leaves the live UI on 5.3.0.3 and this release's packs
-// parked in the journal. Then neither Recover nor a new install (here of a damaged 5.3.0.2 bundle)
-// may go on as if there were none: before, the failed install removed the journal and with it the
-// only copy of this release's packs. Both return the error; the next recovery puts the deck back.
-func TestLeaveFailedJournalLookupStopsRecoverAndInstall(t *testing.T) {
-	d, root := newDeck(t)
-	journal := filepath.Join(root, "data", journalName)
-	cutAt(t, d, legacyBundle(t, "5.3.0.3"), "bundle")
-	parked := filepath.Join(journal, "stage/root/ui/packs/en/Deck.qml")
-	damaged := legacyBundle(t, "5.3.0.2")
-	write(t, filepath.Join(damaged, "lib/libengine-ui-hook.so"), "damaged")
-	defer func(l func(string) (os.FileInfo, error)) { lstat = l }(lstat)
-	for _, run := range []func() error{d.Recover, func() error { return d.Install(damaged) }} {
-		failed := false
-		lstat = func(p string) (os.FileInfo, error) {
-			if p == journal && !failed {
-				failed = true
-				return nil, syscall.EIO
-			}
-			return os.Lstat(p)
-		}
-		if err := run(); !errors.Is(err, syscall.EIO) {
-			t.Fatalf("with the journal lookup failing: %v, want EIO", err)
-		}
-		if read(t, parked) != "5.3.0.5 pack" {
-			t.Fatal("this release's parked packs are gone")
-		}
-	}
-	lstat = os.Lstat
-	if err := d.Recover(); err != nil {
+	if err := os.Rename(d.data("enginex"), filepath.Join(root, migration.DataRelative)); err != nil {
 		t.Fatal(err)
 	}
-	if got := read(t, filepath.Join(root, "data/enginex/ui/packs/en/Deck.qml")); got != "5.3.0.5 pack" || testExists(journal) {
-		t.Fatalf("not put back: live packs %q, journal kept %v", got, testExists(journal))
+	write(t, filepath.Join(root, migration.DataRelative, "version.txt"), "5.3.0.4\n")
+	target := targetBundle(t, "5.3.0.5", "v5.3.0.5-r1")
+	if older, version, err := d.Older(target); err != nil || older || version != "5.3.0.5" {
+		t.Fatalf("upgrade read: %v %s %v", older, version, err)
+	}
+}
+func TestRetiredLayoutAndJournalLeaveDataUntouched(t *testing.T) {
+	d, _ := newDeck(t)
+	if err := d.Handback(); err == nil {
+		t.Fatal("retired layout operation succeeded")
+	}
+	write(t, d.data(journalName, "stage/user-data"), "parked user data")
+	if err := d.Recover(); err == nil {
+		t.Fatal("retired restore journal was applied")
+	}
+	b, err := os.ReadFile(d.data(journalName, "stage/user-data"))
+	if err != nil || string(b) != "parked user data" {
+		t.Fatalf("parked data changed: %q %v", b, err)
+	}
+	var out, errout bytes.Buffer
+	t.Setenv("ENGINEX_LEAVE_ROOT", d.Root)
+	if code := Main([]string{"layout"}, &out, &errout); code == 0 || out.Len() != 0 {
+		t.Fatalf("retired CLI: %d %s", code, out.String())
+	}
+}
+func TestActivationWaitsForTheUpgradeLock(t *testing.T) {
+	d, _ := newDeck(t)
+	script := filepath.Join(t.TempDir(), "activate.sh")
+	marker := script + ".ran"
+	write(t, script, "test \"$ENGINEX_LEAVE_LOCKED\" = 1\nprintf ready > \"$1\"\n")
+	unlock, err := d.lock(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- d.activate([]string{script, marker}) }()
+	select {
+	case err := <-done:
+		unlock()
+		t.Fatalf("activation bypassed lock: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		unlock()
+		t.Fatal("activation ran before lock release")
+	}
+	unlock()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("activation did not resume")
+	}
+	b, _ := os.ReadFile(marker)
+	if string(b) != "ready" {
+		t.Fatalf("marker %q", b)
 	}
 }

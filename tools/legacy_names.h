@@ -1,20 +1,18 @@
 #ifndef ENGINEX_LEGACY_NAMES_H
 #define ENGINEX_LEGACY_NAMES_H
-// Old bundle lookup during a staged downgrade.
+// Old bundle lookup before one-time upgrade migration.
 #define LEGACY_BUNDLE_PROCESSOR "/data/sc5000-custom/bundle/stems-processor"
 // Old multi-call bundle layout.
 #define LEGACY_BUNDLE_BIN_PROCESSOR "/data/sc5000-custom/bundle/bin/stems-processor"
-// Old boot activator while the canonical link is being exchanged.
+// Old boot activator before one-time upgrade migration.
 #define LEGACY_BOOT_ACTIVATE "/data/sc5000-custom/bundle/boot-activate.sh"
-// Data directory retained by the downgrade transaction.
+// Data directory read during one-time upgrade migration.
 #define LEGACY_DATA_NAME "sc5000-custom"
 // HFS cache and views mounted by an older release.
 #define LEGACY_HFS_LIB_ROOT "/data/sc5000-custom/hfs-libraries"
 #define LEGACY_HFS_RUN_ROOT "/run/sc5000-hfs-views"
 #define LEGACY_HFS_VIEW_NAME "sc5000-hfs-view"
 #define LEGACY_HFS_MOUNT "tmpfs sc5000-hfs-view "
-// Older installers receive these overrides only when they fill a test/staging root.
-#define LEGACY_INSTALL_ENV " SC5000_CUSTOM=\"$d\" SC5000_ALSA_OVERLAY=\"$d/alsa-conf.d\"; "
 #endif
 
 #ifdef ENGINEX_EXPORT_LEGACY_ALSA

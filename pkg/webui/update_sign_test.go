@@ -257,6 +257,16 @@ func TestUpdateRefusesWhatDoesNotVerify(t *testing.T) {
 // not take a deck that runs r2 back to r1 (the review of #239: it did), and r3 itself installs.
 func TestUpdateRefusesAnEarlierRevisionShownAsALaterOne(t *testing.T) {
 	for _, k := range updateKinds(t) {
+		if !k.gen1 {
+			k.asset = strings.ReplaceAll(k.asset, "5.3.0.3", "5.3.0.5")
+			k.content = rename234Bundle(t, "5.3.0.5", "v5.3.0.5-r3")
+			if !strings.HasSuffix(k.asset, bundleSuffix) {
+				sum := sha256.Sum256(k.content)
+				var head [gen2ImgHeader]byte
+				copy(head[:], fmt.Sprintf("%s%x\nSCLIVE4\n5.3.0.5\n", gen2ImgMagic, sum))
+				k.content = append(head[:], k.content...)
+			}
+		}
 		t.Run(k.name, func(t *testing.T) {
 			deck := releaseFault{installed: "5.3.0.5", installTag: "v5.3.0.5-r2"}
 			// Control: the genuine r3 is offered and installs.

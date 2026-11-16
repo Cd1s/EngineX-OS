@@ -16,4 +16,4 @@
 
 REA复核确认签名槽、Offline入口与六float序列化、PerformanceData迁移链、重叠扫描窗口及PIONEER路径发现的证据边界，报告中的10个完整Evidence ID均可检索。两个P3已由主任务修正：原ELF的PT_LOAD映射独立保存为 [地址核查](ENGINE-5.0.4-ELF-ADDRESS-MAP.json)，不再把文件偏移归为REA字符串观察；`trp.db` 改为字节候选，未读取helper比较对象，分类分支仍未知。修订由主任务验证，未声称严DE重新复核了新增映射文件。
 
-复核原始记录在lab的 `sc5000-qa-final.txt` 与 `sc5000-qa-rea-result.txt`。严DE披露其只读复现脚本写在远端复核目录的 `review/repro-scripts/`，超出任务书“仅写rea子目录”的字面范围；没有修改厂商输入。REA首次npm默认cache的范围偏差及共享cache无法完全恢复的限制，另见REA报告末尾审计。
+复核原始记录在lab的 `enginex-qa-final.txt` 与 `enginex-qa-rea-result.txt`。严DE披露其只读复现脚本写在远端复核目录的 `review/repro-scripts/`，超出任务书“仅写rea子目录”的字面范围；没有修改厂商输入。REA首次npm默认cache的范围偏差及共享cache无法完全恢复的限制，另见REA报告末尾审计。

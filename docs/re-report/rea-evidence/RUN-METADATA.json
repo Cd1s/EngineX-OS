@@ -14,13 +14,13 @@
     "agent_id": "f2b652a9-dc5f-4c7d-b398-a5747e50d61e",
     "workspace_id": "wks_47ec13a6655df8ca",
     "codex_session_id": "01a19804-d418-7270-8276-22f1e2bc6073",
-    "cwd": "/root/build/sc5000-lab/rea"
+    "cwd": "<firmware-lab>/rea"
   },
   "target_execution": false,
   "input_modification": false,
   "targets": [
     {
-      "path": "/root/build/sc5000-lab/5.0.4/tree/usr/Engine/Engine",
+      "path": "<firmware-lab>/5.0.4/tree/usr/Engine/Engine",
       "sha256": "e1eb0e2b858880016daa3ad14538426204f8e698d855a274aebc924a5f9a5caa",
       "unique_evidence_records": 79,
       "observed_operations": [
@@ -39,7 +39,7 @@
       ]
     },
     {
-      "path": "/root/build/sc5000-lab/5.0.4/tree/usr/Engine/OfflineAnalyzer",
+      "path": "<firmware-lab>/5.0.4/tree/usr/Engine/OfflineAnalyzer",
       "sha256": "fb4871f11f5969e7dea848192735aed8c29d021aa6ff187ee4e4144113597bab",
       "unique_evidence_records": 88,
       "observed_operations": [
@@ -60,7 +60,7 @@
       ]
     },
     {
-      "path": "/root/build/sc5000-lab/5.0.4/tree/usr/Engine/MidiDeviceScanner",
+      "path": "<firmware-lab>/5.0.4/tree/usr/Engine/MidiDeviceScanner",
       "sha256": "b65c82063a7c414be7b06f5160488426215badff32cdedea404939a3f03a63ea",
       "unique_evidence_records": 13,
       "observed_operations": [
@@ -75,7 +75,7 @@
       ]
     },
     {
-      "path": "/root/build/sc5000-lab/5.0.4/tree/usr/lib/libaz01-prog.so.1.3",
+      "path": "<firmware-lab>/5.0.4/tree/usr/lib/libaz01-prog.so.1.3",
       "sha256": "5cac6b2aa1f6f748d38b1439275667227b5f8f806b06320e63ea1bd507b80dbf",
       "unique_evidence_records": 31,
       "observed_operations": [
@@ -89,7 +89,7 @@
       ]
     },
     {
-      "path": "/root/build/sc5000-lab/5.0.4/tree/usr/lib/libaz0x-info.so.0.8",
+      "path": "<firmware-lab>/5.0.4/tree/usr/lib/libaz0x-info.so.0.8",
       "sha256": "62b88d1d0694dc1bdde68f2a2ca714ab0ca044f0ba17c6e006ba9163d4e6acc2",
       "unique_evidence_records": 20,
       "observed_operations": [
@@ -115,7 +115,7 @@
       "verified": true
     }
   },
-  "intended_scope": "Only /root/build/sc5000-lab writes; static analysis of caller-selected files",
+  "intended_scope": "Only <firmware-lab> writes; static analysis of caller-selected files",
   "scope_exception": "Initial npm view used default npm cache; known new task log moved into lab; shared cache state not restored without baseline. See npm-default-cache-audit.json.",
   "status": "bounded static investigation completed; explicit unknowns retained",
   "executed_npm_package_source_commit": "NOT_ENOUGH_INFO: npm 6.8.0 metadata does not advertise gitHead; repository commit is separately pinned reference source",

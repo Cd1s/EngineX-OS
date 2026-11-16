@@ -6,7 +6,7 @@
 
 ## 0. 约定与必须先读的更正
 
-**Path convention (#103/#234)**: `<DATA>` means `/data/enginex/`. Boot migrates the old data directory losslessly and retains its compatibility link. Current configuration lives under `/etc/enginex`; API callers use `/v1/enginex/*`. The legacy data name and API alias are isolated in the migration readers listed in `docs/RENAME-234.md`.
+**Path convention (#103/#234)**: `<DATA>` means `/data/enginex/`. Boot migrates the old data directory losslessly and removes its owned compatibility link. Current configuration lives under `/etc/enginex`; API callers use `/v1/enginex/*`. Pre-5.3.0.5 inputs are isolated in the migration readers listed in `docs/RENAME-234.md`.
 
 
 **对任务描述的三处更正**（照任务原文写会出错）：

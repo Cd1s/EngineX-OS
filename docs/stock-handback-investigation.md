@@ -67,11 +67,11 @@ down normally, then install the official image for the exact model. The fixed
 Gen-2 installer/web-console uninstall also clears the QML caches. Gen-1 web
 uninstall still refuses: returning to its stock rootfs requires a firmware flash.
 
-The #234 `leave` transaction already removes the shared QML cache when installing
-a bundle, including a downgrade. A stock firmware flash does not execute it.
-`leave layout` only restores the directory layout for older EngineX releases;
-it does not clear caches or uninstall a Gen-1 rootfs. Neither transaction needs
-to rewrite Planck state or library databases for this cache fix.
+Current boot and uninstall paths remove stale shared QML bytecode. A stock
+firmware flash does not execute those paths. The former #234 downgrade
+transaction and `leave layout` operation were retired on 2026-11-16. Returning
+to stock requires the fixed EngineX boot or uninstall cleanup described above;
+Planck state and library databases do not need rewriting for this cache fix.
 
 ## Player number, profiles and layers
 

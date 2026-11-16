@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"log"
 	"net"
 	"net/http"
@@ -261,8 +260,7 @@ var uiFourDeckRoles = []string{"auto", "13", "24", "12", "34", "1", "2"}
 // fourDeckRolePath is where engine-ui-guard leaves the role it applied.
 var fourDeckRolePath = "/run/enginex-assignments/role"
 
-// uiScaleEnvPath records the scale as ENGINEX_UI_SCALE, and as legacy environment UI_SCALE for a release
-// before 5.3.0.5 after a downgrade (#234), for Engine's unit (the
+// uiScaleEnvPath records ENGINEX_UI_SCALE for Engine's unit (the
 // engine.service.d/70-ui-scale.conf drop-in). It is deliberately not QT_SCALE_FACTOR,
 // which leaves a black band under EGLFS. A package var so tests can point it at a temp dir.
 var (
@@ -287,7 +285,7 @@ func writeUIScaleEnv(pct int) error {
 		return err
 	}
 	scale := strconv.FormatFloat(float64(pct)/100, 'f', -1, 64)
-	text := "ENGINEX_UI_SCALE=" + scale + "\n" + migration.ScaleEnv + "=" + scale + "\n"
+	text := "ENGINEX_UI_SCALE=" + scale + "\n"
 	tmp, err := os.CreateTemp(dir, ".ui-scale-*")
 	if err != nil {
 		return err
@@ -311,11 +309,6 @@ func writeUIScaleEnv(pct int) error {
 func (s *Server) uiDir() string {
 	if s.cfg.UIDir != "" {
 		return s.cfg.UIDir
-	}
-	if _, err := os.Stat(defaultUIDir); os.IsNotExist(err) {
-		if _, legacyErr := os.Stat(migration.DataDir + "/ui"); legacyErr == nil {
-			return migration.DataDir + "/ui"
-		}
 	}
 	return defaultUIDir
 }

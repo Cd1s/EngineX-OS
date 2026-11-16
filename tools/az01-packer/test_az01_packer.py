@@ -379,7 +379,7 @@ class FilesystemTests(unittest.TestCase):
             keep.unlink()
 
     def test_prepare_and_etc_reset_rename_the_legacy_dir_losslessly(self):
-        # #103: /data/enginex -> /data/enginex with a symlink left behind; run twice, idempotent.
+        # Upgrade migration moves the real data directory once; no alias is written.
         seed, data = self.root/'seed', self.root/'data'
         seed.mkdir()
         old, new = data/legacy.DATA_NAME, data/'enginex'
@@ -394,28 +394,25 @@ class FilesystemTests(unittest.TestCase):
             for _ in range(2):
                 p = subprocess.run(['sh', '-s'], input=script, capture_output=True)
                 self.assertEqual(p.returncode, 0, p.stderr)
-            self.assertTrue(old.is_symlink() and os.readlink(old) == 'enginex')
+            self.assertFalse(os.path.lexists(old))
             self.assertEqual((new/'Stream/song.flac').read_text(), 'x')
             self.assertEqual((new/'settings.conf').read_text(), 's')
-            self.assertEqual((old/'authorized_keys').read_bytes(), own)
+            self.assertEqual((new/'authorized_keys').read_bytes(), own)
         # Both real (a rollback image recreated the old one): enginex wins, the old content is kept aside.
-        old.unlink()
         old.mkdir()
         (old/'settings.conf').write_text('older')
         (old/'extra').write_text('e')
         p = subprocess.run(['sh', '-s'], input=script, capture_output=True)
         self.assertEqual(p.returncode, 0, p.stderr)
-        self.assertTrue(old.is_symlink())
+        self.assertFalse(os.path.lexists(old))
         self.assertEqual((new/'settings.conf').read_text(), 's')
         self.assertEqual((new/'extra').read_text(), 'e')
         aside = list(new.glob('legacy-data.*'))
         self.assertEqual([(a/'settings.conf').read_text() for a in aside], ['older'])
 
-    def test_234_prepare_takes_back_the_layout_a_downgrade_to_5302_handed_back(self):
-        # #234 review R1: a downgrade to 5.3.0.2 hands the real /data/enginex back and leaves
-        # /data/enginex as the link to it (or, cut half-way, a link to itself). The next upgrade
-        # moves it forward again; before, prepare refused the /data/enginex link and SSH and the
-        # UI packs stayed off.
+    def test_234_prepare_migrates_an_existing_reverse_alias_once(self):
+        # A pre-5.3.0.5 layout may have a reverse or dangling current alias.
+        # Upgrading repairs it, preserves data and leaves only the current directory.
         seed, data = self.root/'seed', self.root/'data'
         seed.mkdir()
         old, new = data/legacy.DATA_NAME, data/'enginex'
@@ -432,7 +429,7 @@ class FilesystemTests(unittest.TestCase):
                 p = subprocess.run(['sh', '-s'], input=script, capture_output=True)
                 self.assertEqual(p.returncode, 0, (link, p.stderr))
                 self.assertTrue(new.is_dir() and not new.is_symlink(), link)
-                self.assertTrue(old.is_symlink() and os.readlink(old) == 'enginex', link)
+                self.assertFalse(os.path.lexists(old), link)
                 self.assertEqual((new/'Stream/song.flac').read_text(), 'x')
         # A link anywhere else is not EngineX's: prepare still refuses it.
         shutil.rmtree(data)
@@ -1202,12 +1199,11 @@ class Rename234UpgradeTests(unittest.TestCase):
                 result = subprocess.run(['sh', '-eu', '-c', script], capture_output=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertTrue(new.is_dir() and not new.is_symlink())
-                self.assertEqual(os.readlink(old), 'enginex')
+                self.assertFalse(os.path.lexists(old))
                 for rel, content in native.items():
                     self.assertEqual((data / rel).read_bytes(), content, rel)
                 for rel, content in saved.items():
                     self.assertEqual((new / rel).read_bytes(), content, (boot, rel))
-                    self.assertEqual((old / rel).read_bytes(), content, (boot, rel))
                     self.assertEqual((new / rel).stat().st_mode & 0o777, 0o600, rel)
 
 

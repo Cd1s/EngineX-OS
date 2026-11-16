@@ -1,5 +1,5 @@
 {
-  "database": "/root/build/sc5000-lab/5.0.4/tree/usr/Engine/Content/DemoDevice/Engine Library/Database2/m.db",
+  "database": "<firmware-lab>/5.0.4/tree/usr/Engine/Content/DemoDevice/Engine Library/Database2/m.db",
   "database_sha256": "3a54126c9d62f1f59c98548ed9f672fa61463a73b1be849fe451449865405593",
   "scope": "shipped demo samples, observed layouts only",
   "records": [

@@ -98,11 +98,11 @@ func TestCreateFreshProfile(t *testing.T) {
 }
 
 func TestApplyVerifyRoundTrip(t *testing.T) {
-	for _, alsa := range []string{migration.AlsaFile, "99-enginex.conf"} {
+	for _, alsa := range []string{"99-enginex.conf"} {
 		t.Run(alsa, func(t *testing.T) {
 			img, p := newImage(t, 64<<20, "data")
 			root, links, err := img.ChooseRuntimeDir()
-			if err != nil || root != "enginex" || links[migration.DataName] != "enginex" {
+			if err != nil || root != "enginex" || len(links) != 0 {
 				t.Fatalf("ChooseRuntimeDir = %q %v %v", root, links, err)
 			}
 			cs := bundleChangeSet(root, "5.3.0.5", alsa)

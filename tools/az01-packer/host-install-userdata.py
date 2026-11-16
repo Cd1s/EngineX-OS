@@ -142,11 +142,8 @@ def inject(img_path, bundle_tar, check=True, ssh_key=None):
             fail(f'{bundle} does not contain an EngineX-OS-Data-Bundle directory')
         broot = bundle_roots[0]
 
-        # #103: runtime dir is enginex, with its legacy compatibility link. A deck
-        # that still has the real legacy dir keeps being written there: the first boot renames it.
-        legacy, new = image_kind(img, legacy_names.DATA_NAME), image_kind(img, 'enginex')
-        root = legacy_names.DATA_NAME if legacy == 'directory' and new is None else 'enginex'
-        links = [('/' + legacy_names.DATA_NAME, 'enginex')] if legacy is None and root == 'enginex' else []
+        # A real pre-5.3.0.5 directory is retained for first-boot migration.
+        root, links = 'enginex', []
 
         sums_file = broot / 'SHA256SUMS'
         if not sums_file.is_file():
@@ -262,7 +259,12 @@ def inject(img_path, bundle_tar, check=True, ssh_key=None):
                 if str(parent) != '.':
                     all_dirs.add(parent)
 
-        script = generate_debugfs_script(files, all_dirs, links, removes=(Path(root) / 'gen2-locked',))
+        removes = [Path(root) / 'gen2-locked']
+        for directory in alsa_rels:
+            old = directory / legacy_names.ALSA_FILE
+            if image_kind(img, str(old)) in ('regular', 'symlink'):
+                removes.append(old)
+        script = generate_debugfs_script(files, all_dirs, links, removes=removes)
         script_file = tmp / 'debugfs_script.txt'
         script_file.write_text(script)
 
@@ -272,9 +274,7 @@ def inject(img_path, bundle_tar, check=True, ssh_key=None):
         if wr.returncode != 0:
             fail(f'debugfs failed with code {wr.returncode} on {img}:\n' + '\n'.join(notes[-20:]))
         # debugfs exits 0 even when a write failed (full image, bad path): read back.
-        # The suite is enginex-suite since 5.3.0.5 (#234), enginex-suite in older bundles.
-        suite = 'enginex-suite' if (broot / 'bin/enginex-suite').is_file() else 'enginex-suite'
-        for rel in (f'{root}/version.txt', f'{root}/bundle/bin/{suite}', f'{root}/gen2-unlocked'):
+        for rel in (f'{root}/version.txt', f'{root}/bundle/bin/enginex-suite', f'{root}/gen2-unlocked'):
             st = subprocess.run(['debugfs', '-R', f'stat /{rel}', str(img)], capture_output=True, text=True).stdout
             if 'Type: regular' not in st:
                 fail(f'/{rel} is not in {img} after writing (image full?)')

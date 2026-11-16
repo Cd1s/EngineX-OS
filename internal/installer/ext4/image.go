@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
-	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"io"
 	"os"
 	"sort"
@@ -296,28 +295,15 @@ func (img *Image) Stat(path string) (mode uint32, size int64, uid, gid uint32, e
 	return uint32(in.mode()), int64(in.size()), in.uid(), in.gid(), nil
 }
 
-// ChooseRuntimeDir applies the #103 rule: a deck that still has a real
-// legacy /legacy-custom directory and no /enginex keeps being written
-// there (first boot migrates it); otherwise files go to /enginex and, if
-// /legacy-custom is absent, the compatibility link legacy-custom -> enginex
-// is created.
+// ChooseRuntimeDir always writes current names. A real pre-5.3.0.5 directory
+// is preserved for the one-time first-boot migration; no compatibility link is created.
 func (img *Image) ChooseRuntimeDir() (root string, links map[string]string, err error) {
-	legacy, err := img.Lstat("/" + migration.DataName)
-	if err != nil {
-		return "", nil, err
-	}
 	cur, err := img.Lstat("/enginex")
 	if err != nil {
 		return "", nil, err
 	}
-	if legacy == Directory && cur == Missing {
-		return migration.DataName, map[string]string{}, nil
-	}
 	if cur != Missing && cur != Directory {
 		return "", nil, fmt.Errorf("%w: /enginex is a %s", ErrExists, cur)
-	}
-	if legacy == Missing {
-		return "enginex", map[string]string{migration.DataName: "enginex"}, nil
 	}
 	return "enginex", map[string]string{}, nil
 }
