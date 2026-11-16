@@ -66,16 +66,15 @@ mkdir -p "$STAGE/usr/share/enginex" "$STAGE/usr/sbin"
 xz -T0 --check=crc32 --lzma2=preset=9e,dict=8MiB,lc=0,lp=2,pb=2 -c "$WORK/enginex-suite" > "$STAGE/usr/share/enginex/enginex-suite.xz"
 gzip -dc "$WORK/packs.tar.gz" | xz -T0 --check=crc32 --lzma2=preset=9e,dict=8MiB -c > "$STAGE/usr/share/enginex/ui-packs.tar.xz"
 install -m 0755 "$FSCK" "$STAGE/usr/sbin/fsck.hfsplus"
+# Gen-1 LoadPin loads modules only from the rootfs: without hfsplusx.ko every HFS+ stick stays read-only.
+# Built here for the base image's own kernel (cached across builds) unless HFSPLUSX_KO names one.
 HFSPLUSX=${HFSPLUSX_KO:-}
 if [ -z "$HFSPLUSX" ]; then
-    for candidate in "$(dirname "$FSCK")/../lib/modules/"*/extra/hfsplusx.ko kernel-modules/out/lib/modules/*/extra/hfsplusx.ko; do
-        [ -f "$candidate" ] || continue
-        HFSPLUSX=$candidate
-        break
-    done
+    python3 tools/az01-packer/az01_packer.py unpack "$FW/SC5000-$BASE-Update.img" --output "$WORK/stock-sc5000" >/dev/null
+    bash kernel-modules/build-release-module.sh "$WORK/stock-sc5000/rootfs.ext2" "$WORK/hfsplusx.ko"
+    rm -rf "$WORK/stock-sc5000"
+    HFSPLUSX=$WORK/hfsplusx.ko
 fi
-# Gen-1 LoadPin loads modules only from the rootfs: without hfsplusx.ko every HFS+ stick stays read-only.
-[ -n "$HFSPLUSX" ] || { echo "hfsplusx.ko not found: build it (kernel-modules/build_modules.sh) and set HFSPLUSX_KO" >&2; exit 2; }
 readelf -h "$HFSPLUSX" | grep -q 'Machine:.*ARM' || { echo "expected 32-bit ARM module: $HFSPLUSX" >&2; exit 2; }
 PATH="$PATH:/usr/sbin:/sbin" modinfo -F name "$HFSPLUSX" | grep -qx hfsplusx || { echo "unexpected module name in $HFSPLUSX" >&2; exit 2; }
 krel=$(PATH="$PATH:/usr/sbin:/sbin" modinfo -F vermagic "$HFSPLUSX" | awk '{print $1}')

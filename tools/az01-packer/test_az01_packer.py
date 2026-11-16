@@ -1243,7 +1243,7 @@ class CheckHfsplusxTests(unittest.TestCase):
         subprocess.run(['objcopy', '--add-section', f'.modinfo={info}', shutil.which('true'), str(path)], check=True)
         info.unlink()
 
-    def check(self, tmp, modules):
+    def check(self, tmp, modules, script='check-hfsplusx.sh', *args):
         root = Path(tmp)/'root'
         shutil.rmtree(root, ignore_errors=True)
         for kernel, vermagic in modules.items():
@@ -1256,7 +1256,8 @@ class CheckHfsplusxTests(unittest.TestCase):
         fs = Path(tmp)/'rootfs.ext2'
         fs.unlink(missing_ok=True)
         subprocess.run(['mke2fs', '-q', '-F', '-t', 'ext2', '-d', str(root), str(fs), '8M'], check=True)
-        return subprocess.run(['sh', str(Path(__file__).resolve().with_name('check-hfsplusx.sh')), str(fs)], capture_output=True, text=True)
+        return subprocess.run(['bash', str(Path(__file__).resolve().parents[2]/script if '/' in script else Path(__file__).resolve().with_name(script)), str(fs), *args],
+                              capture_output=True, text=True)
 
     def test_the_module_must_be_at_the_loadpin_path_for_the_images_kernel(self):
         with tempfile.TemporaryDirectory(prefix='hfsplusx-', dir=TEST_TMPDIR) as tmp:
@@ -1270,12 +1271,21 @@ class CheckHfsplusxTests(unittest.TestCase):
                     self.assertNotEqual(r.returncode, 0, r.stderr)
                     self.assertIn(why, r.stderr)
 
-    def test_the_release_build_needs_the_module_and_checks_every_group(self):
+    def test_the_release_build_builds_the_module_and_checks_every_group(self):
         script = Path(__file__).resolve().with_name('build-release.sh').read_text()
-        self.assertIn('[ -n "$HFSPLUSX" ] || { echo "hfsplusx.ko not found', script)
+        # No hand-placed module (the lab directory, kernel-modules/out): built from the pinned sources unless HFSPLUSX_KO is set.
+        self.assertIn('bash kernel-modules/build-release-module.sh "$WORK/stock-sc5000/rootfs.ext2" "$WORK/hfsplusx.ko"', script)
+        self.assertNotIn('/lib/modules/"*/extra/hfsplusx.ko', script)
         self.assertIn('sh tools/az01-packer/check-hfsplusx.sh "$WORK/$base.ext2"', script)
         gate = Path(__file__).resolve().with_name('release-gate.sh').read_text()
         self.assertIn('check-hfsplusx.sh" "$W/new-img/rootfs.ext2"', gate)
+
+    def test_the_module_build_refuses_a_kernel_its_sources_are_not_pinned_for(self):
+        with tempfile.TemporaryDirectory(prefix='hfsplusx-', dir=TEST_TMPDIR) as tmp:
+            r = self.check(tmp, {'6.18.58-az01': '6.18.58-az01 SMP preempt_rt ARMv7 p2v8 '}, 'kernel-modules/build-release-module.sh', str(Path(tmp)/'out.ko'))
+            self.assertEqual(r.returncode, 1, r.stderr)
+            self.assertIn("the rootfs kernel '6.18.58-az01' is not 6.18.57-*", r.stderr)
+            self.assertFalse((Path(tmp)/'out.ko').exists())
 
 
 @unittest.skipUnless(all(shutil.which(x) for x in ('debugfs', 'e2fsck', 'resize2fs')),

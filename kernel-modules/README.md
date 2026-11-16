@@ -75,6 +75,17 @@ Outputs under `out/`:
 - `sbin/{fsck.hfsplus,mount.hfsplus}`
 - `modules-build-manifest.txt` and `tools-build-manifest.txt` with input/patch/artifact hashes
 
+## Release builds
+
+`tools/az01-packer/build-release.sh` builds the module itself through
+`build-release-module.sh <stock Gen-1 rootfs.ext2> <out.ko>`: pinned
+`linux-6.18.57.tar.xz` and `patch-6.18.57-rt8.patch.xz` (sha256-checked), the
+stock kernel's own config (`extract-ikconfig` on its `/boot/zImage-<release>`,
+`CONFIG_LOCALVERSION` set to the release suffix), GCC 13, `vmlinux.symvers` from
+a full `vmlinux` build, then `build_modules.sh modules`. The result is cached by
+the sha256 of every input in `$HFSPLUSX_CACHE` (default
+`~/.cache/enginex-hfsplusx`); set `HFSPLUSX_KO` to use a module built elsewhere.
+
 ## QEMU `HIGHMEM` stress harness
 
 `test_hfsplusx_qemu.sh` boots an ARMv7 `virt` guest with 2 GiB RAM (`HighMem`
