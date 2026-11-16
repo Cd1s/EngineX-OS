@@ -125,6 +125,12 @@ launch)
         quarantine
         exec "$@"
     fi
+    # Stock folder drives can hold streaming metadata without removable media.
+    # Engine creates its own library; never copy a user's library into this one.
+    stream_dir=${primary_ui%/*}/stream-save
+    if (umask 077; mkdir -p "$stream_dir") && [ -w "$stream_dir" ]; then
+        set -- "$@" "-extraDriveDir=$stream_dir"
+    fi
     begin_attempt
     LD_PRELOAD=${ENGINEX_UI_HOOK:-/etc/enginex/libengine-ui-hook.so} "$@" &
     child=$!
