@@ -142,7 +142,7 @@ EOF
     # shellcheck disable=SC2016
     check 'etc-reset executed successfully' guest /bin/sh -c 'test "$(systemctl show -p ExecMainStatus --value "$1")" = 0 && test "$(systemctl show -p ExecMainStartTimestampMonotonic --value "$1")" -gt 0' sh "$reset_unit"
     # Same model defaults and QML failure expressions as release-gate.sh.
-    case $PRODUCT in JP07|JP08|JP13|JP14) expected=20 ;; *) expected=28 ;; esac
+    case $PRODUCT in JP07|JP08|JP13|JP14) expected=20 ;; *) expected=29 ;; esac
     applied=$(grep -ac 'engine-ui-hook: applied 0x' "$W/engine.log" || :)
     if [ "${NSPAWN_SETTINGS_COPY_FLOW:-0}" = 1 ]; then
         check "hook applied on each Engine start ($applied)" test "$applied" -ge "$expected"
