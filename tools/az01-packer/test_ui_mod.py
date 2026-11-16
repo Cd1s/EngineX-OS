@@ -7627,6 +7627,12 @@ assert.equal(tp.loggedIn,true); assert.equal(scTidalLogoutPending,false);
                     self.assertIn('root.scLoginBegin(modelData.id)', bp.SOURCE_FOOTER)
                     self.assertIn('model: root.scServices', bp.STREAM_SWITCHES)
                     self.assertIn('"Apple Music"', bp.AVAILABLE_SOURCE)
+                    # The computer with rekordbox is a source of the list while it is on Pro DJ Link,
+                    # named after the computer, with no login and no switch among the services.
+                    self.assertIn('{ id: "rekordbox", name: scRekordboxName ? "rekordbox (" + scRekordboxName + ")" : "rekordbox" }', main)
+                    self.assertIn('scRekordboxName = v.rekordboxName || ""', main)
+                    self.assertIn('visible: modelData.id !== "tidal" && modelData.id !== "rekordbox"', bp.SOURCE_FOOTER)
+                    self.assertIn('model: root.scServices.filter(s => s.id !== "rekordbox")', bp.STREAM_SWITCHES)
                     self.assertIn('scSources.indexOf("tidal") < 0 ||', main)
                     self.assertIn("scTidalLoggedIn = !!v.tidalLoggedIn", main)
                     self.assertIn("property bool scTidalSynthetic: false", main)

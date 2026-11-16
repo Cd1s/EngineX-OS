@@ -1,6 +1,7 @@
 package prolink_test
 
 import (
+	"context"
 	"net"
 	"os"
 	"path/filepath"
@@ -255,5 +256,31 @@ func TestMediaCacheSameTrackIDDiscSwap(t *testing.T) {
 	}
 	if a, _, _ := d.CachedAnalysis(second); a == nil || len(a.Waveforms) != 0 {
 		t.Fatal("cached analysis borrowed previous disc")
+	}
+}
+
+func TestNFSClientCallsFromItsSourcePort(t *testing.T) {
+	server, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	free, _ := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	port := free.LocalAddr().(*net.UDPAddr).Port
+	free.Close()
+	askFrom := func(source int) int {
+		c := &prolink.NFSClient{IP: net.IPv4(127, 0, 0, 1), Portmap: server.LocalAddr().(*net.UDPAddr).Port, SourcePort: source, Timeout: 50 * time.Millisecond}
+		done := make(chan struct{})
+		go func() { c.NFSPort(context.Background()); close(done) }() // never answered: only where the call came from matters
+		_ = server.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_, from, err := server.ReadFromUDP(make([]byte, 512))
+		if err != nil {
+			t.Fatal(err)
+		}
+		<-done
+		return from.Port
+	}
+	if got := askFrom(port); got != port {
+		t.Fatalf("called from %d, want %d", got, port)
 	}
 }

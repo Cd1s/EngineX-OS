@@ -159,6 +159,12 @@ type DeckSyncInfo struct {
 	SameTrack     bool    `json:"same_track"`
 }
 
+// IsRekordbox reports whether d is a computer running rekordbox rather than a player or a
+// mixer: it names itself so, or has one of the device numbers 16-31 computers use.
+func IsRekordbox(d Device) bool {
+	return strings.HasPrefix(strings.ToLower(d.Name), "rekordbox") || d.Number >= 0x10 && d.Number < 0x20
+}
+
 // ParsePacket only accepts known packet shapes on their corresponding ports.
 // Packet offsets follow Deep Symmetry's DJ Link protocol analysis.
 func ParsePacket(b []byte, port int, remote net.IP) (Device, error) {
@@ -186,6 +192,13 @@ func ParsePacket(b []byte, port int, remote net.IP) (Device, error) {
 			return d, fmt.Errorf("prolink: truncated announcement")
 		}
 		d.Number = b[0x24]
+	case port == 50002 && b[10] == 0x29 && len(b) > 0x21:
+		// rekordbox does not always send the 0x06 keepalive; its 0x29 is how a computer shows on
+		// the link. A mixer's 0x29 is not read here.
+		d.Number = b[0x21]
+		if !IsRekordbox(d) {
+			return d, fmt.Errorf("prolink: unsupported packet type/port")
+		}
 	case port == 50001 && b[10] == 0x0b:
 		if len(b) < 0x3c {
 			return d, fmt.Errorf("prolink: truncated absolute position packet")
