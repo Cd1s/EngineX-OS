@@ -142,7 +142,7 @@ def inject(img_path, bundle_tar, check=True, ssh_key=None):
             fail(f'{bundle} does not contain an EngineX-OS-Data-Bundle directory')
         broot = bundle_roots[0]
 
-        # #103: runtime dir is enginex, with enginex-custom -> enginex for older code. A deck
+        # #103: runtime dir is enginex, with its legacy compatibility link. A deck
         # that still has the real legacy dir keeps being written there: the first boot renames it.
         legacy, new = image_kind(img, legacy_names.DATA_NAME), image_kind(img, 'enginex')
         root = legacy_names.DATA_NAME if legacy == 'directory' and new is None else 'enginex'

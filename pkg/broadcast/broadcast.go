@@ -1,7 +1,6 @@
 package broadcast
 
 import (
-	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"bufio"
 	"context"
 	"crypto/tls"
@@ -9,6 +8,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"io"
 	"math"
 	"net"

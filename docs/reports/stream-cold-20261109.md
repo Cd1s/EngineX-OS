@@ -1,6 +1,6 @@
 # 流媒体第二轮：列表冷启动与点歌等待（2026-11-09）
 
-基线 `origin/agent/integration3-20261109` / `dfdef97`；交付分支 `agent/stream-cold-20261109`。本轮没有部署、没有访问碟机，没有在碟机下载、播放或测量。构建/测试全部在编译机的独占任务目录 `/root/build/enginex-s2-20261109` 运行。
+基线 `origin/agent/integration3-20261109` / `dfdef97`；交付分支 `agent/stream-cold-20261109`。本轮没有部署、没有访问碟机，没有在碟机下载、播放或测量。构建/测试全部在编译机的独占任务目录 `/root/build/sc5000-s2-20261109` 运行。
 
 ## 实现与边界
 
@@ -54,7 +54,7 @@ R=一次上游请求耗时；P=该接口页数；B=详情批次数；L=Apple 已
 
 1. Engine 对本地 TIDAL 兼容网关请求 `playbackInfo` 或 `streamUrl`。`knownCodec` 对 Spotify/SoundCloud/Beatport、或允许有损回退的曲目先 `Jobs.Fetch`，完整文件出来后才确定 manifest codec/扩展名；已知固定 FLAC 的路径可以先给 manifest，但随后 `/v1/stream/...` 仍等完整文件。
 2. `Jobs.Fetch` 查内存/持久来源索引，现在也查合法的 provider 完成文件；同 provider+track 的请求共享 flight。调用方取消不会终止已启动的下载。网易云 Deemix 模式先匹配 Deezer，其他模式遵循原 provider 获取/回退规则。
-3. Deezer 经本机 deemixclient `POST /api/queue` → enginex-deemixd 单下载槽 → 登录/媒体地址/CDN 流式解密到 `.deemix-<id>-*.part` → 非空/格式检查 → rename 为最终音频 → completed。client 默认每 1 s poll，看到完成后 SafePath/Inspect。directory 适配器还有两次稳定检查，不能直接暴露未完成文件。
+3. Deezer 经本机 deemixclient `POST /api/queue` → sc5000-deemixd 单下载槽 → 登录/媒体地址/CDN 流式解密到 `.deemix-<id>-*.part` → 非空/格式检查 → rename 为最终音频 → completed。client 默认每 1 s poll，看到完成后 SafePath/Inspect。directory 适配器还有两次稳定检查，不能直接暴露未完成文件。
 4. 网易云 official 先 AudioURL，再下载到临时文件；Spotify/Beatport/SoundCloud 原下载器也先完成并检查，再发布缓存名。SoundCloud 长音频已有分段/Range 并行下载，不再额外叠加推测性音频并发。
 5. `Fetch` 同步补封面、记录来源，排队分析/导入（播放不等分析），然后网关 `http.ServeFile` 提供已完成文件、Content-Length/Range。Engine 还会在 `/data/inMusicTempFiles` 写自己的副本；“服务端文件可用”不是“Engine UI 已可播放”。
 
@@ -75,9 +75,9 @@ R=一次上游请求耗时；P=该接口页数；B=详情批次数；L=Apple 已
 
 - `20261109T072451Z-arm-host-3-stream-cold-20261109-before-cf8725988902-providers.tar.gz`
 - `20261109T072452Z-arm-host-3-stream-cold-20261109-before-4ca309497f7d-jobs.go`
-- `20261109T073112Z-arm-host-3-stream-cold-remote-before-3b387a71a183-enginex-s2-20261109-remote-before.txt`（远端任务目录原本不存在）
+- `20261109T073112Z-arm-host-3-stream-cold-remote-before-3b387a71a183-sc5000-s2-20261109-remote-before.txt`（远端任务目录原本不存在）
 
-无需修改配置、服务、数据库。PM 若以后部署，回滚到基线二进制即可；元数据缓存格式没变，不必清缓存。远端只删除本任务创建的 `/root/build/enginex-s2-20261109`，不触碰其他 agent 目录或固定实验材料。
+无需修改配置、服务、数据库。PM 若以后部署，回滚到基线二进制即可；元数据缓存格式没变，不必清缓存。远端只删除本任务创建的 `/root/build/sc5000-s2-20261109`，不触碰其他 agent 目录或固定实验材料。
 
 ## PM 空出碟机后执行
 

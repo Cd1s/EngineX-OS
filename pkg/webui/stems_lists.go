@@ -2,9 +2,9 @@ package webui
 
 import (
 	"context"
-	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"encoding/json"
 	"log"
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -33,7 +33,7 @@ const maxStemmed = 500
 func stemsListID(scope string) string { return "enginex-stems-" + scope }
 
 func isStemsListID(id, scope string) bool {
-return id == stemsListID(scope) || id == migration.StemsListPrefix + scope
+	return id == stemsListID(scope) || id == migration.StemsListPrefix+scope
 }
 
 func (s *Server) stemsFile() string {

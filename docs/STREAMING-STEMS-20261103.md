@@ -17,7 +17,7 @@
 
 | 来源（界面上） | 实际下载器 | 音频来自 | 碟机上的文件 |
 |---|---|---|---|
-| Deezer | 碟机 `enginex-deemixd`（127.0.0.1:6595） | Deezer 媒体 CDN，碟机本地解密（`internal/deezer`） | `<DeezerID>.flac/.mp3` |
+| Deezer | 碟机 `sc5000-deemixd`（127.0.0.1:6595） | Deezer 媒体 CDN，碟机本地解密（`internal/deezer`） | `<DeezerID>.flac/.mp3` |
 | Spotify | 同上，用 Spotify 歌单和元数据去匹配 Deezer：先按 ISRC，再按「标题+艺人+时长 ±2s+版本词，且结果唯一」 | 匹配到的 Deezer 曲目；Deezer 失败时，如果有网易云登录，就回退到网易云 official | `<DeezerID>.*`，不保存 Spotify ID |
 | 网易云（当前 `deemix` 模式） | 同上，先匹配 Deezer | 匹配到的 Deezer 曲目；失败时回退到网易云 official 直链 | `<DeezerID>.*` 或 `netease-<id>.*` |
 | SoundCloud | 碟机 stream-sync 进程内 | 官方 `api.soundcloud.com`（可下载的原文件，或 mp3/aac 串流） | `soundcloud-<id>.*` |
@@ -48,9 +48,9 @@
 
 按用户和主控的指示，本线不再推进原生 Stems 入口，也不做许可相关修改。远端结果是独立的四轨文件，**不等于原厂 Stems 模式可播**。
 
-## 5. 实现（隔离 worktree `../enginex-streaming-stems`，在 IN 构建测试，未部署）
+## 5. 实现（隔离 worktree `../sc5000-streaming-stems`，在 IN 构建测试，未部署）
 
-- `enginex-stemsd` 新增离线任务：
+- `sc5000-stemsd` 新增离线任务：
   - `POST /v1/jobs`：上传文件，可带 `X-Stems-Sha256` 期望值，不符就拒绝。
   - `GET /v1/jobs/{id}`：查询状态 `queued / running / done / failed / canceled` 和进度。
   - `DELETE /v1/jobs/{id}`：取消。
@@ -66,8 +66,8 @@
 
 | 产物 | sha |
 |---|---|
-| `enginex-stemsd` | `6909443b…` |
-| `enginex-relay` | `f2e13c8c…` |
+| `sc5000-stemsd` | `6909443b…` |
+| `sc5000-relay` | `f2e13c8c…` |
 | `separate_file.py` | `a288f864…` |
 | `worker.py` | `56e5119d…`（未改） |
 
@@ -95,7 +95,7 @@ IN 和中继主机的 ffmpeg（7.1.5）、numpy（2.2.4）、scipy（1.15.3）�
 - Python `test_separate_file`（真实 ffmpeg）：左右声道内容不同的立体声、单声道、坏输入；四轨相加还原原曲（误差 < 1e-4），总帧数一致。`test_worker` 照旧通过。
 
 **未做与限制**：
-- 未部署到中继主机。部署需要改 unit：加 `StateDirectory=enginex-stems` 和 `-jobs-dir %S/enginex-stems`，`TasksMax` 提到 64（一次运行会起 5 个 ffmpeg 加 FFT 线程）。部署前先备份。
+- 未部署到中继主机。部署需要改 unit：加 `StateDirectory=sc5000-stems` 和 `-jobs-dir %S/sc5000-stems`，`TasksMax` 提到 64（一次运行会起 5 个 ffmpeg 加 FFT 线程）。部署前先备份。
 - 碟机侧未接入：下载完成后谁来上传、四轨放在哪里、界面怎么呈现，都需要改共享的 `pkg/webui/jobs.go` 或 UI，方案先交主控。
 - URL 拉取暂不做。
 - 结果是独立的四轨文件，**不是原厂 Stems 模式**。

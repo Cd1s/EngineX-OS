@@ -5,7 +5,7 @@ remote-access toggle and About console QR added after the initial `7dff8af7` bas
 Source commits: `4a872984`, `a09c4be7`, `c1a194b5`.
 
 The port retains the EngineX runtime paths and canonical `/v1/enginex/` routes
-with the permanent `/v1/enginex/` alias. All console and phone strings have
+with the permanent `/v1/sc5000/` alias. All console and phone strings have
 English, Simplified Chinese, Traditional Chinese and Spanish entries. The new
 Apple Music helper card lives in the redesigned Music section alongside the
 existing accounts, playlists, downloads and Wi-Fi upload cards.

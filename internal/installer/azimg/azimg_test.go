@@ -1,7 +1,6 @@
 package azimg_test
 
 import (
-"github.com/Cd1s/EngineX-OS/internal/migration"
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
@@ -13,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -561,10 +561,10 @@ func buildTestBundleTarGz(t *testing.T, o bundleBuildOpts) []byte {
 		alsa = "system/var-lib/alsa/conf.d\n"
 	}
 	files := map[string][]byte{
-		"bin/enginex-suite":         []byte("suite-bin-PAYLOAD-0123456789"),
+		"bin/enginex-suite":        []byte("suite-bin-PAYLOAD-0123456789"),
 		"lib/libengine-ui-hook.so": []byte("hook-so"),
 		"boot-activate.sh":         []byte("#!/bin/sh\n"),
-		"99-enginex.conf":    []byte("pcm.!default {}\n"),
+		"99-enginex.conf":          []byte("pcm.!default {}\n"),
 		"alsa-dir":                 []byte(alsa),
 		"version.txt":              []byte(version + "\n"),
 		"release-tag":              []byte("v" + version + "-r4\n"),

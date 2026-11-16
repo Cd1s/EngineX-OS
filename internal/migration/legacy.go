@@ -2,12 +2,12 @@
 package migration
 
 const (
-// Saved playlist IDs from releases before the rename.
-StemsListPrefix = "sc5000-stems-"
-// Older renderer credentials, read only when the current file is missing.
-StemsTokenFile = "/etc/sc5000-stems/token"
-// Read-only fixture path on the build hosts.
-LabDir = "/root/build/sc5000-lab"
+	// Saved playlist IDs from releases before the rename.
+	StemsListPrefix = "sc5000-stems-"
+	// Older renderer credentials, read only when the current file is missing.
+	StemsTokenFile = "/etc/sc5000-stems/token"
+	// Read-only fixture path on the build hosts.
+	LabDir = "/root/build/sc5000-lab"
 	// Legacy release reader or rollback contract.
 	DataDir = "/data/sc5000-custom"
 	// Legacy release reader or rollback contract.

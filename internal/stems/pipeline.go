@@ -12,9 +12,9 @@ package stems
 // queued per plane and every reply to Engine is reassembled plane by plane.
 
 import (
-	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"encoding/binary"
 	"fmt"
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"io"
 	"math"
 	"slices"

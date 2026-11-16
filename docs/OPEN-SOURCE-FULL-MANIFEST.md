@@ -60,7 +60,7 @@
 
 ### 2. `/usr/libexec/edisksd` 挂载拦截器（`libedisksd-hook.so`）
 Engine 打开外接存储后，任何外部进程写其 `m.db` / `hm.db` 都会导致 SQLite 锁冲突与删库。因此我们通过 `LD_PRELOAD=/etc/enginex/libedisksd-hook.so` 拦截 `edisksd` 的 `mnt_context_mount` 与 `mnt_context_umount`，在 20 秒预算内完成预处理；rekordbox 盘先在私有 mount 命名空间里挂载并转换，之后才做 Engine 能看到的真正挂载（edisksd 的挂载表监视器一见到挂载就会通知 Engine，#182）：
-1. 若检测到只读 HFS+ 盘且含 `PIONEER` / `.PIONEER`，自动在 `<mount>/Engine Library` 上绑定 `/data/enginex/hfs-libraries/<卷 ID>` 作为可写视图（只跟随 `/data/enginex-custom -> enginex` 这一条兼容软链）；
+1. 若检测到只读 HFS+ 盘且含 `PIONEER` / `.PIONEER`，自动在 `<mount>/Engine Library` 上绑定 `/data/enginex/hfs-libraries/<卷 ID>` 作为可写视图（只跟随 `the data compatibility link` 这一条兼容软链）；
 2. 若含先锋导出库，同步调用 `/usr/local/bin/rb-bridge --mount-path <mount>` 完成秒级转换；
 3. 若为原生 Engine U 盘（含 `Engine Library/Database2/m.db`），同步调用 `/usr/local/bin/engine-guardian --heal-mount <mount> --data-only` 完成链表与数据自愈；
 4. 退盘（`mnt_context_umount`）前自动卸下 HFS+ 视图的子挂载点（失败时恢复原视图），杜绝退盘报 `EBUSY`。

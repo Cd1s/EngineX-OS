@@ -82,7 +82,7 @@ func TestTidalGatewayLoginAndHint(t *testing.T) {
 		}
 		data, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		if resp.StatusCode != 200 || !(bytes.Contains(data, []byte(`"deviceCode":"enginex-local"`)) || bytes.Contains(data, []byte(`"access_token":"enginex-token"`))) {
+		if resp.StatusCode != 200 || !(bytes.Contains(data, []byte(`"deviceCode":"enginex-local"`)) || bytes.Contains(data, []byte(`"access_token":"enginex"`))) {
 			t.Fatalf("%s: %d %s", path, resp.StatusCode, data)
 		}
 	}
@@ -1144,7 +1144,7 @@ func TestTidalRealLoginSurvivesScopeSwitch(t *testing.T) {
 		t.Errorf("auth permissions = %o", st.Mode().Perm())
 	}
 	uiPost(t, srv.URL, "scope=spotify")
-	if b := post("/au//oauth2/token", "grant_type=refresh_token&refresh_token=test-real-refresh"); !bytes.Contains(b, []byte("enginex-refresh")) {
+	if b := post("/au//oauth2/token", "grant_type=refresh_token&refresh_token=test-real-refresh"); !bytes.Contains(b, []byte(`"refresh_token":"enginex"`)) {
 		t.Error("Spotify needs the local token")
 	}
 	// Reconstruct the gateway, as after a reboot; real auth must survive on disk.

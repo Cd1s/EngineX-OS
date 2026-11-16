@@ -439,7 +439,7 @@ def write_instance_configs(side: str, mode: str, src_dir: Path, ver_info: dict) 
     (sdir / "tmp").mkdir(parents=True, exist_ok=True)
     (sdir / "run").mkdir(parents=True, exist_ok=True)
 
-    sc_link = sdir / "data/enginex-custom"  # the compat link a deck carries (#234)
+    sc_link = sdir / ("data/" + legacy.DATA_NAME)  # the compat link a deck carries (#234)
     if not sc_link.exists() and not sc_link.is_symlink():
         sc_link.symlink_to("enginex")
 

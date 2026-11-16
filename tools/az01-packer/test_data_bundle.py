@@ -255,7 +255,7 @@ class DataBundleTest(unittest.TestCase):
         suite64 = self.tmp / 'suite64'
         suite64.write_bytes(fake_elf(bdb.EM_AARCH64, b'suite'))
         r = self.build(prefix='PRIME4G2', suite=suite64, hook=hook64)
-        dest = self.tmp / 'root/enginex-custom'  # no /data on the test host: relative to dest
+        dest = self.tmp / ('root/' + legacy.DATA_NAME)  # no /data on the test host: relative to dest
         with tarfile.open(r['bundle']) as t:
             t.extractall(self.tmp / 'x', **({'filter': 'data'} if hasattr(tarfile, 'data_filter') else {}))
         src = self.tmp / 'x/PRIME4G2-5.3.0.1.1-EngineX-OS-Data-Bundle'
@@ -372,7 +372,7 @@ class DataBundleTest(unittest.TestCase):
         shutil.rmtree(self.tmp / 'x')
         src = self.extract(r)
         self.assertEqual((src / 'install.sh').read_bytes(), install)
-        dest = self.tmp / 'data/enginex-custom'
+        dest = self.tmp / ('data/' + legacy.DATA_NAME)
         self.sh(src / 'install.sh', dest, alsa_dest=self.tmp / 'data/system/var/overlay/lib/alsa/conf.d')
         self.assertEqual((dest / 'bundle/release-tag').read_text(), 'v5.3.0.1.1-r2\n')
         self.assertEqual((dest / 'version.txt').read_text(), '5.3.0.1.1\n')
@@ -408,7 +408,7 @@ class DataBundleTest(unittest.TestCase):
 
     def test_install_then_uninstall_keeps_user_data(self):
         src = self.extract(self.build())
-        dest = self.tmp / 'data/enginex-custom'
+        dest = self.tmp / ('data/' + legacy.DATA_NAME)
         alsa_dest = self.tmp / 'data/system/var/overlay/lib/alsa/conf.d'
         dest.mkdir(parents=True)
         (dest / 'authorized_keys').write_text('ssh-ed25519 AAAA test\n')
@@ -557,7 +557,7 @@ class DataBundleTest(unittest.TestCase):
         suite_out = subprocess.run(['debugfs', '-R', 'stat /enginex/bundle/bin/enginex-suite', str(img)], capture_output=True, text=True).stdout
         self.assertIn('0755', suite_out)
         # #103: the old path is a symlink, and the ALSA hook's old-path library resolves through it.
-        for rel, kind in (('/enginex-custom', 'symlink'), ('/enginex-custom/bundle/lib/libengine-ui-hook.so', 'regular')):
+        for rel, kind in ((('/' + legacy.DATA_NAME), 'symlink'), (('/' + legacy.DATA_NAME + '/bundle/lib/libengine-ui-hook.so'), 'regular')):
             out = subprocess.run(['debugfs', '-R', f'stat {rel}', str(img)], capture_output=True, text=True).stdout
             self.assertIn(f'Type: {kind}', out, rel)
 
@@ -879,7 +879,7 @@ exec REAL "$@"
         r4 = {  # what r4's boot-activate.sh left loaded
             ('systemd/system/' + legacy.DEEMIX_UNIT): ('[Service]\nExecStart=/data/enginex/bundle/bin/' + legacy.DEEMIX + '\n'),
             'systemd/system/enginex-stream-sync.service': '[Service]\nExecStart=old\n',
-            ('systemd/system/engine.service.d/' + legacy.DROPIN): ('[Service]\nEnvironment=SC5000_UI_HOOK=x\n'),
+            ('systemd/system/engine.service.d/' + legacy.DROPIN): ('[Service]\nEnvironment=' + legacy.UI_HOOK_ENV + '=x\n'),
             ('systemd/system/edisksd.service.d/' + legacy.DROPIN): '[Service]\nEnvironment=LD_PRELOAD=x\n',
             'systemd/system/foreign.service': 'not ours\n',
             (legacy.ENGINE_SCRIPT): '#!/bin/sh\n', (legacy.ASSIGNMENTS + '/role'): '13\n', (legacy.PROJECT + '/version.txt'): '5.3.0.4\n',
@@ -947,10 +947,7 @@ exec REAL "$@"
         self.assertEqual(calls.read_text().splitlines(), ['leave install /data/.enginex-leave.incoming/b'] * 2)
 
     def test_234_only_the_boot_run_puts_back_an_interrupted_downgrade(self):
-        """#234 review R2: boot-activate.sh's boot run first asks the suite to put back a downgrade a
-        power cut interrupted, from the directory it was started from (the hook's fallback is
-        /data/enginex-custom/bundle); every call delegates to the blocking activation guard, but
-        Engine-start calls do not run recovery."""
+        ("#234 review R2: boot-activate.sh's boot run first asks the suite to put back a downgrade a\n        power cut interrupted, from the directory it was started from (the hook's fallback is\n        /data/" + legacy.DATA_NAME + '/bundle); every call delegates to the blocking activation guard, but\n        Engine-start calls do not run recovery.')
         src = self.extract(self.build())
         dest = self.tmp / 'recover' / 'enginex'
         (dest / 'bundle/bin').mkdir(parents=True)

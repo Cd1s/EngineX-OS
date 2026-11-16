@@ -7,7 +7,6 @@
 package main
 
 import (
-	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"bufio"
 	"bytes"
 	"context"
@@ -18,6 +17,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"io"
 	"net"
 	"net/http"
@@ -363,11 +363,11 @@ func localSubnets() []string {
 	return out
 }
 
-// isDeckUI is true when host is EngineX's web UI: /v1/legacy/ui answers with a JSON object, or
+// isDeckUI is true when host is EngineX's web UI: the legacy UI endpoint answers with a JSON object, or
 // (403/401 when the console asks for its access code) the login page on / is the Stream Sync one (#164).
-// It keeps the /v1/legacy/ prefix on purpose: every release answers it, /v1/enginex/ only newer ones.
+// It keeps the the legacy API prefix prefix on purpose: every release answers it, /v1/enginex/ only newer ones.
 func isDeckUI(c *http.Client, host string, port int) bool {
-	resp, err := c.Get(fmt.Sprintf("http://%s:%d" + migration.APIPrefix + "/ui", host, port))
+	resp, err := c.Get(fmt.Sprintf("http://%s:%d"+migration.APIPrefix+"/ui", host, port))
 	if err != nil {
 		return false
 	}
@@ -990,7 +990,7 @@ func modeA(ctx context.Context, o *options, d deck) error {
 			return err
 		}
 		// A deck whose bundle predates 5.3.0.3 never ran the #103 migration: its install is still
-		// the real /data/legacy-custom, and there is no /data/enginex to run uninstall.sh from.
+		// the real the legacy data directory, and there is no /data/enginex to run uninstall.sh from.
 		uninstallCmd := `d=` + customDirSh + `; [ -f "$d/bundle/uninstall.sh" ] || d=$(dirname "$d")/` + migration.DataName + `; ` +
 			`sh "$d/bundle/uninstall.sh" && (systemctl reboot || reboot || :)`
 		if out, err := sshRun(ctx, cl, uninstallCmd, nil); err != nil {

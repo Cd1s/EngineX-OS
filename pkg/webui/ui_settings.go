@@ -4,11 +4,11 @@ package webui
 // engine_ui_hook.c, which only understands this key=value file.
 
 import (
-	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"log"
 	"net"
 	"net/http"
@@ -180,7 +180,7 @@ type uiSettings struct {
 	// services' playlists, to the streaming browser (#62). Off by default.
 	OmniSource bool `json:"omniSource"`
 	// RemoteLoad lets a LAN client load a track into an idle deck from an
-	// external drive. Deck-only: loopback POST /v1/legacy/ui sets it, /api/ui
+	// external drive. Deck-only: loopback POST the legacy UI endpoint sets it, /api/ui
 	// refuses it. Off by default.
 	RemoteLoad bool `json:"remoteLoad"`
 	// ProlinkShare lets rb-bridge read the Rekordbox library of Pioneer

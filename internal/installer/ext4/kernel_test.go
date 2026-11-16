@@ -7,11 +7,11 @@ package ext4
 // (unshare -m with a private tmpfs /data), as on the ARM build hosts.
 
 import (
-	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"bytes"
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -84,7 +84,7 @@ func TestKernelReadsFreshAndInjected(t *testing.T) {
 	mnt := mountImage(t, p, true)
 	kernelMatches(t, mnt, cs)
 	// The compatibility link resolves for the deck's legacy paths.
-	if b, err := os.ReadFile(filepath.Join(mnt, migration.DataName + "/bundle/boot-activate.sh")); err != nil || !bytes.HasPrefix(b, []byte("#!/bin/sh")) {
+	if b, err := os.ReadFile(filepath.Join(mnt, migration.DataName+"/bundle/boot-activate.sh")); err != nil || !bytes.HasPrefix(b, []byte("#!/bin/sh")) {
 		t.Errorf("legacy path through the link: %v", err)
 	}
 	umount(t, mnt)
@@ -231,7 +231,7 @@ func TestKernelWrittenBackup(t *testing.T) {
 	if err := unix.Setxattr(filepath.Join(mnt, "Music/set.flac"), "user.deck", []byte("cue-points"), 0); err != nil {
 		t.Fatal(err)
 	}
-	os.WriteFile(filepath.Join(mnt, "enginex/bundle/bin/" + migration.Suite), pattern(1<<20, 1), 0o755)
+	os.WriteFile(filepath.Join(mnt, "enginex/bundle/bin/"+migration.Suite), pattern(1<<20, 1), 0o755)
 	os.WriteFile(filepath.Join(mnt, "enginex/gen2-locked"), []byte("1\n"), 0o644)
 	os.Symlink("enginex", filepath.Join(mnt, migration.DataName))
 	umount(t, mnt)

@@ -40,7 +40,7 @@ qt.*.debug=false
 
 **读取时机实证：** Engine PID 53 于 02:12:37.959 UTC 尝试读取 `logging.ini`（当时不存在）。02:12:45 写入文件、02:12:53 删除文件，现有 Engine/分析器没有重新打开配置，也没有给配置增加 inotify 监听；02:13:03 结束时新启动的辅助进程另行读取。结论限定为这次 25 秒跟踪：现有进程不热加载，必须重启 Engine；新进程可以读到当时的配置。
 
-**真实设置接口联调：** 构建本分支 armhf `enginex-suite`，在同一隔离 rootfs 运行 `stream-sync`，经 `/api/ui?verboseLog=1&restart=1` 打开、`verboseLog=0&restart=1` 关闭。验证配置内容、设置持久化、文件删除，以及两次 `systemctl restart --no-block engine.service` 调用。和现有门禁一样，systemctl 使用沙箱记录桩；实验控制器收到重启请求后停止该次 Engine 的独立进程组并重新启动。
+**真实设置接口联调：** 构建本分支 armhf `sc5000-suite`，在同一隔离 rootfs 运行 `stream-sync`，经 `/api/ui?verboseLog=1&restart=1` 打开、`verboseLog=0&restart=1` 关闭。验证配置内容、设置持久化、文件删除，以及两次 `systemctl restart --no-block engine.service` 调用。和现有门禁一样，systemctl 使用沙箱记录桩；实验控制器收到重启请求后停止该次 Engine 的独立进程组并重新启动。
 
 | HTTP 联调阶段 | 新 Engine PID | 12 秒日志行数 |
 | --- | ---: | ---: |
@@ -66,7 +66,7 @@ qt.*.debug=false
 
 ## journal 存储与边界
 
-- 一代 EngineX 已有 `rootfs-overlay/etc/systemd/journald.conf.d/enginex.conf`：`Storage=volatile`、`RuntimeMaxUse=16M`；离线 debloat 也写相同配置，不需要再加一份。
+- 一代 EngineX 已有 `rootfs-overlay/etc/systemd/journald.conf.d/sc5000.conf`：`Storage=volatile`、`RuntimeMaxUse=16M`；离线 debloat 也写相同配置，不需要再加一份。
 - 实测读取 SC LIVE 4 与 AZ04 原厂配置，已有 `RuntimeMaxUse=64M`。AZ04 `/var/log -> volatile/log`，`/var/volatile`、`/run` 按原厂 fstab 为 tmpfs，未预建 `/var/log/journal`，默认 journal 使用 `/run/log/journal`。
 - 详细日志可能更快轮换记录，但已有容量上限。systemd 的上限按 journal 文件轮换执行，活跃文件可能令磁盘占用略超设定值；它不是整个进程的内存硬限。
 - 网页接口 `GET /api/logs` 沿用控制台访问码/严格 SameSite cookie 校验。只读本次启动最近 30 分钟、最近 5,000 条，按新到旧输出；覆盖 `engine.service`、`stream-sync.service` 及二代的 `enginex-stream-sync.service`。

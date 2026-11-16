@@ -30,7 +30,6 @@ var (
 	// relayCloudflaredSearchPaths lists candidate locations checked before PATH.
 	relayCloudflaredSearchPaths = []string{
 		"/data/enginex/bin/cloudflared",
-		"/data/enginex-custom/bin/cloudflared",
 		"/usr/local/bin/cloudflared",
 	}
 

@@ -3,6 +3,7 @@
 set -euo pipefail
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 export ENGINEX_MIGRATION=$ROOT/rootfs-overlay/usr/libexec/enginex-migration
+. "$ENGINEX_MIGRATION"
 TMP=$(mktemp -d "$ROOT/tests/.tmp.XXXXXX")
 trap 'rm -rf -- "$TMP"' EXIT
 STORAGE=$ROOT/rootfs-overlay/usr/local/bin/enginex-storage-mount
@@ -514,18 +515,18 @@ touch "$suite_dir/enginex-deemixd" "$suite_dir/stems-processor" "$suite_dir/engi
 [[ ! -e $suite_dir/enginex-deemixd && ! -e $suite_dir/stems-processor && ! -e $suite_dir/enginex-suite.prev && ! -e $suite_dir/enginex-suite.pre-x && -e $suite_dir/drmgrab ]] ||
     fail 'a new image removes the replaced standalone binaries and backups only'
 ok 'suite binary follows the image archive content, not mtime'
-# #234: the first start after an update from 5.3.0.4 (enginex-suite in the same /data bin dir)
+# #234: the first start after an update from 5.3.0.4 (the legacy suite in the same /data bin dir)
 # removes the old-named suite, its id and temporaries, and leaves only the new one.
 printf '#!/bin/sh\necho image-3 "$@"\n' | gzip -c > "$suite_share/enginex-suite.gz"
-printf '#!/bin/sh\necho old\n' > "$suite_dir/enginex-suite"
-printf 'old-id\n' > "$suite_dir/enginex-suite.id"
-touch "$suite_dir/enginex-suite.123.tmp" "$suite_dir/enginex-deemixd"
+printf '#!/bin/sh\necho old\n' > "$suite_dir/$legacy_suite"
+printf 'old-id\n' > "$suite_dir/$legacy_suite.id"
+touch "$suite_dir/$legacy_suite.123.tmp" "$suite_dir/$legacy_deemix"
 [[ $(run_suite) == 'image-3 x' ]] || fail 'the renamed suite is unpacked next to an old-named one'
-for f in enginex-suite enginex-suite.id enginex-suite.123.tmp enginex-deemixd; do
+for f in "$legacy_suite" "$legacy_suite.id" "$legacy_suite.123.tmp" "$legacy_deemix"; do
     [[ ! -e $suite_dir/$f ]] || fail "update from an older release leaves $f in the suite dir"
 done
 [[ -x $suite_dir/enginex-suite && -e $suite_dir/drmgrab ]] || fail 'old-name cleanup removed the new suite or a foreign file'
-ok 'suite unpack removes the binaries an older release unpacked as enginex-suite (#234)'
+ok 'suite unpack removes the binaries an older release unpacked under its old name (#234)'
 
 fixture
 expect_fail env TARGET_CONFIG= TARGET_SYMVERS= bash "$ROOT/kernel-modules/build_modules.sh" modules

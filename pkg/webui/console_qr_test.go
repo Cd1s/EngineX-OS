@@ -1,10 +1,10 @@
 package webui
 
 import (
-"github.com/Cd1s/EngineX-OS/internal/migration"
 	"bytes"
 	"crypto/tls"
 	"encoding/json"
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,19 +15,19 @@ import (
 	"github.com/skip2/go-qrcode"
 )
 
-// #218: the console QR code pointed at legacy.lan (enginex.lan since 5.3.0.5, #234), which most
+// #218: the console QR code pointed at the legacy placeholder host (enginex.lan since 5.3.0.5, #234), which most
 // routers do not resolve, so phones opened a blank page.
 func TestConsoleQRPointsWherePhonesCanReach(t *testing.T) {
 	lan := "http://" + lanHost() + ":8080"
 	for host, want := range map[string]string{
-		"192.168.5.34:8080":         "http://192.168.5.34:8080",
-		"enginex.local:8080":        "http://enginex.local:8080",
-		"127.0.0.1:8080":            lan,
-		"localhost:8080":            lan,
-		"enginex.lan:8080":          lan,
-		migration.PlaceholderHost + ":8080":           lan,
-		"[::1]:8080":                lan,
-		"abc-def.trycloudflare.com": "https://abc-def.trycloudflare.com",
+		"192.168.5.34:8080":                 "http://192.168.5.34:8080",
+		"enginex.local:8080":                "http://enginex.local:8080",
+		"127.0.0.1:8080":                    lan,
+		"localhost:8080":                    lan,
+		"enginex.lan:8080":                  lan,
+		migration.PlaceholderHost + ":8080": lan,
+		"[::1]:8080":                        lan,
+		"abc-def.trycloudflare.com":         "https://abc-def.trycloudflare.com",
 	} {
 		r := httptest.NewRequest("GET", "/api/console-qr", nil)
 		r.Host = host

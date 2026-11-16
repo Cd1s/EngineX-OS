@@ -1,12 +1,12 @@
 package ext4
 
 import (
-	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"io"
 	"os"
 	"path/filepath"
@@ -65,7 +65,7 @@ func bundleChangeSet(root, version string, alsaName string) ChangeSet {
 	add := func(p string, mode uint32, data []byte) { cs.Files = append(cs.Files, memEntry(p, mode, data)) }
 	cs.Directories = []string{root, root + "/bundle", root + "/bundle/bin", root + "/bundle/lib", root + "/ui",
 		"system/var/overlay/lib/alsa/conf.d", "system/var-lib/alsa/conf.d"}
-	add(root+"/bundle/bin/" + migration.Suite, 0o755, pattern(3<<20+123, 1))
+	add(root+"/bundle/bin/"+migration.Suite, 0o755, pattern(3<<20+123, 1))
 	add(root+"/bundle/lib/libengine-ui-hook.so", 0o755, pattern(400<<10, 2))
 	add(root+"/bundle/boot-activate.sh", 0o755, []byte("#!/bin/sh\necho activate\n"))
 	add(root+"/bundle/version.txt", 0o644, []byte(version+"\n"))
