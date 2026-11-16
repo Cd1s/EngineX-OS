@@ -1949,7 +1949,7 @@ class ShadowDisplayTest(unittest.TestCase):
                  "scShadowApply", "scShadowEmpty", "scShadowScratchLine", "scShadowScratchRelease", "scShadowSpeed", "scShadowCues", "scShadowBeat",
                  "scShadowLoad", "scShadowWrong", "scShadowHolds", "scShadowEndGap", "scShadowEnd",
                  "scShadowSeek", "scShadowMirror", "scShadowMirrorOff", "scShadowLink", "scShadowLinkEdge", "scPress", "scGcCheck", "scShadowWake", "scShadowAnyPlaying",
-                 "scShadowLine", "scShadowLandingSeek", "scShadowLandingTick", "scShadowBend", "scShadowBendEnd", "scShadowNudgeTick", "scShadowNudgeDrop", "scShadowNudgeEnd", "scShadowMasterBack", "scPressWrite", "scMasterPresses",
+                 "scShadowLine", "scShadowLandingSeek", "scShadowLandingTick", "scShadowBend", "scShadowBendEnd", "scShadowNudgeTick", "scShadowNudgeDrop", "scShadowNudgeEnd", "scShadowLoopTick", "scShadowMasterBack", "scPressWrite", "scMasterPresses",
                  "scLayerPath", "scPairedLanes", "scPairedFollow", "scShadowHeldBy", "scShadowEngineHeld")
         functions = []
         for name in names:
@@ -1977,6 +1977,7 @@ Object.assign(globalThis, {
     scShadowSent: [], scShadowFullAt: 0, scShadowPostFull: true, scShadowLive: {seen: 0},
     scShadowScratchTimer: {running: false, start() {this.running=true}, stop() {this.running=false}, tick() {}},
     scShadowNudgeTimer: {running: false, start() {this.running=true}, stop() {this.running=false}},
+    scShadowLoopTimer: {running: false, start() {this.running=true}, stop() {this.running=false}},
     scShadowTickTimer: {interval: 40}, scShadowBusyAt: 0, scShadowRoleDirty: true,
     scGcLoadSeq: 0, scGcRuns: 0, scGcLastMs: 0, scGcProps: null,
     scGcState: {armed: true, quietSince: 0, lastRun: -Infinity, loadSig: 0, loadSeq: 0, loadAt: 0, followAt: 0},
@@ -4218,6 +4219,68 @@ gone = true; apply();
 assert.ok(!state(dir), 'released on unload');
 run(1000, rate);
 assert.ok(!state('Forward') && !state('Backward'), 'no bend while the slot empties');
+""")
+
+
+@unittest.skipUnless(shutil.which("node"), "node needed for the shadow-deck behavioral checks")
+class ShadowLoopTest(unittest.TestCase):
+    """L4-2: the source's loop turns its shadow deck at the loop out, not an update late."""
+
+    def test_shadow_turns_at_the_loop_out_and_runs_on_once_the_loop_ends(self):
+        ShadowDisplayTest.js(self, r"""
+const T0 = now, props = new Map(), hist = [], LAT = 150; // an update shows the source as it was 150 ms ago
+let seeks = 0, a = 5000, b = 5000, bShown = 5000, nextBlock = T0, mirror = 5000, wraps = 0, loopOn = false, IN = 0, OUT = 0, seq = 0, over = -1e9, far = 0, bends = 0;
+globalThis.scShadowBent = null;
+globalThis.scShadowBendTimer = {interval: 0, running: false, restart() { this.running = true; this.due = now + this.interval }, stop() { this.running = false }};
+globalThis.scTr = path => {
+    let p = props.get(path);
+    if (p) return p;
+    const deck2 = path.startsWith('/Engine/Deck2/');
+    p = {state: deck2 && (path.endsWith('/SongLoaded') || path.endsWith('/PlayState')), string: path.endsWith('/SpeedRange') ? '8' : path.endsWith('/SyncMode') ? 'Off' : '',
+        entries: ['4', '8', '10', '20', '50', '100'], index: 1, url: '',
+        _v: path.endsWith('/SampleRate') ? 44100 : path.endsWith('/Speed') ? 0.5 : 0,
+        get value() { return path.endsWith('/PositionInSamples1') ? mirror * 44.1 : this._v },
+        set value(v) { this._v = v; if (path.endsWith('/SetSongPosition')) { seeks++; b = v * 400000 } },
+        get unnormalized() { return path.endsWith('/TrackLength') ? 44100 * 400 : path.endsWith('/TrackPosition') ? bShown * 44.1 : 0 }};
+    props.set(path, p);
+    return p;
+};
+const state = n => !!(props.get('/Engine/Deck2/Track/Nudge' + n) || {}).state;
+const apply = () => { const h = hist[Math.max(0, now - T0 - LAT)];
+    scShadowApplyAll([{deck: 2, src: 1, path: '/data/enginex/shadow-v3/peer-1/a.flac', playing: true, link: '{l}', sync: false,
+        positionMs: h.a + (now - T0 - h.t), at: now, pitch: 0, bpm: 128, currentBpm: 128, jumps: h.wraps, seq: ++seq,
+        loop: h.loop, loopIn: h.loop ? h.in : 0, loopOut: h.loop ? h.out : 0}], false); };
+// The loop's distance between the two decks: a turn a few ms apart is not a lane apart.
+const gap = () => { const d = Math.abs(b - a), len = OUT - IN; return loopOn && len > 0 ? Math.min(d, Math.abs(len - d)) : d };
+const run = (ms, check) => { for (let i = 0; i < ms; i++) {
+    now++; const t = now - T0;
+    a += 1; if (loopOn && a >= OUT) { a -= OUT - IN; wraps++ }
+    const bRate = 1 + (state('Forward') ? 0.07 : state('Backward') ? -0.07 : 0);
+    b += bRate;
+    // Engine shows its position a block at a time; stock's mirror sends the source's every third block.
+    if (now - nextBlock >= 34.8) { nextBlock += 34.8; bShown = b - (now - nextBlock) * bRate; mirror = a - (now - nextBlock) }
+    if (scShadowBendTimer.running && now >= scShadowBendTimer.due) { scShadowBendTimer.running = false; scShadowBendEnd() }
+    hist[t] = {t, a, wraps, loop: loopOn, in: IN, out: OUT};
+    if (t % 16 === 0 && scShadowLoopTimer.running) scShadowLoopTick();
+    if (t % 16 === 8 && scShadowNudgeTimer.running) scShadowNudgeTick(now);
+    if (t % 80 === 0) scShadowLine(now);
+    if (t % 100 === 0) apply();
+    if (state('Forward') || state('Backward')) bends++;
+    if (check) { over = Math.max(over, b - OUT); far = Math.max(far, gap()) }
+} };
+hist[0] = {t: 0, a, wraps, loop: false, in: 0, out: 0}; apply();
+run(3000);
+// LOOP OUT pressed: a 2-beat loop that ends here, the source back at its in at once.
+OUT = a; IN = a - 937.5; a = IN; wraps++; loopOn = true;
+run(2000); const s0 = seeks; run(30000, true);
+const turns = wraps - 1;
+assert.ok(over <= 25, 'past the loop out by ' + over.toFixed(1) + ' ms');
+assert.ok(far <= 10, 'the decks ' + far.toFixed(1) + ' ms apart in the loop');
+assert.ok(seeks - s0 <= turns + 2, (seeks - s0) + ' seeks for ' + turns + ' turns: the late update seeked again');
+assert.equal(bends, 0, 'the loop turns are no nudge');
+// The loop ends: the deck plays on through the loop out.
+loopOn = false; run(4000);
+assert.ok(b > OUT + 3000 && Math.abs(b - a) <= 20, 'runs on after the loop: b ' + b.toFixed(1) + ' a ' + a.toFixed(1) + ' out ' + OUT);
 """)
 
 

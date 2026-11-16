@@ -1664,6 +1664,7 @@ SERVICES_MAIN = """
 			["trackName", "/Track/TrackName"], ["artist", "/Track/ArtistName"], ["length", "/Track/TrackLength"],
 			["range", "/SpeedRange"], ["keylock", "/Track/KeyLock"], ["currentKey", "/Track/CurrentKey"],
 			["loop", "/Track/LoopEnableState"], ["keyOffset", "/Track/KeyOffset"], ["stemmed", "/Track/Stemmed"],
+			["loopIn", "/Track/CurrentLoopInPosition"], ["loopOut", "/Track/CurrentLoopOutPosition"],
 			["slip", "/Track/SlipModeActive"], ["slipPosition", "/Track/SlipModePosition"], ["requestMaster", "/RequestMaster"],
 			["touch", "/ExternalScratchWheelTouch"], ["platterTouch", "/PlatterUserAction"]])
 			p[pair[0]] = root.scTr(prefix + pair[1]) || scShadowEmptyObject
@@ -1926,6 +1927,10 @@ SERVICES_MAIN = """
 			o.range = s.range; o.keylock = s.keylock // the peer's shadow deck shows the same range and key lock
 			// What this deck's header and overview show beside the track; the peer's shadow deck shows them, its copy takes none.
 			o.loop = !!g.loop.state; o.keyOffset = shift; o.stems = !!g.stemmed.state
+			// The loop's ends (track ms): the peer's shadow deck turns where this one does (L4-2).
+			const lsr = o.loop ? g.rate.value : 0
+			o.loopIn = lsr > 0 ? Math.round(g.loopIn.value / lsr * 1e6) / 1e3 : 0
+			o.loopOut = lsr > 0 ? Math.round(g.loopOut.value / lsr * 1e6) / 1e3 : 0
 			o.slip = g.slip.state ? Math.max(1, g.slipPosition.unnormalized || 0) : 0 // slip active: its timeline, in samples
 			o.shadowMaster = scShadowLead
 			// Titles arrive after the load: re-read on a new track and every 2 s.
@@ -1955,7 +1960,7 @@ SERVICES_MAIN = """
 			}
 			if (!onLine || sent.cue !== o.cue || sent.master !== o.master || sent.masterPress !== o.masterPress || sent.lead !== o.lead || sent.sync !== o.sync || sent.cuePos !== o.cuePos ||
 				sent.title !== o.title || sent.artist !== o.artist || sent.keyName !== o.keyName || sent.durationMs !== o.durationMs || sent.link !== o.link || sent.bpm !== o.bpm || sent.currentBpm !== o.currentBpm || sent.range !== o.range || sent.keylock !== o.keylock || sent.cuesRev !== cc.rev || sent.active !== o.active ||
-				sent.loop !== o.loop || sent.keyOffset !== o.keyOffset || sent.stems !== o.stems || sent.slip !== o.slip) edge = true // slip's timeline runs on: in full at every heartbeat while it is active
+				sent.loop !== o.loop || sent.loopIn !== o.loopIn || sent.loopOut !== o.loopOut || sent.keyOffset !== o.keyOffset || sent.stems !== o.stems || sent.slip !== o.slip) edge = true // slip's timeline runs on: in full at every heartbeat while it is active
 		}
 		scShadowPostAt = now; scShadowPostPending = false
 		// Nothing the peer shows changed: ping instead of serialising the decks again
@@ -1969,7 +1974,7 @@ SERVICES_MAIN = """
 			const o = own[n], sent = scShadowSent[n]
 			sent.deck = o.deck; sent.net = o.net; sent.playing = o.playing; sent.cue = o.cue; sent.scratch = o.scratch; sent.jumps = o.jumps; sent.pitch = o.pitch
 			sent.master = o.master; sent.masterPress = o.masterPress; sent.lead = o.lead; sent.sync = o.sync; sent.cuePos = o.cuePos; sent.title = o.title; sent.artist = o.artist; sent.keyName = o.keyName; sent.durationMs = o.durationMs
-			sent.link = o.link; sent.bpm = o.bpm; sent.currentBpm = o.currentBpm; sent.range = o.range; sent.keylock = o.keylock; sent.loop = o.loop; sent.keyOffset = o.keyOffset; sent.stems = o.stems; sent.slip = o.slip; sent.cuesRev = scShadowCueCache[o.deck].rev; sent.positionMs = o.positionMs; sent.at = o.at; sent.active = o.active
+			sent.link = o.link; sent.bpm = o.bpm; sent.currentBpm = o.currentBpm; sent.range = o.range; sent.keylock = o.keylock; sent.loop = o.loop; sent.loopIn = o.loopIn; sent.loopOut = o.loopOut; sent.keyOffset = o.keyOffset; sent.stems = o.stems; sent.slip = o.slip; sent.cuesRev = scShadowCueCache[o.deck].rev; sent.positionMs = o.positionMs; sent.at = o.at; sent.active = o.active
 		}
 		scShadowSent.length = own.length
 		scShadowFullAt = now; scShadowPostFull = false
@@ -2194,6 +2199,10 @@ SERVICES_MAIN = """
 		const nudgePath = at.link ? "/Engine/BeatInfoSenderControl/" + at.link + "/PositionInSamples" + (e.src >= 1 && e.src <= 4 ? e.src : d) : ""
 		if (at.nudgePath !== nudgePath) { at.nudgePath = nudgePath; at.nudgeMirror = nudgePath ? root.scTr(nudgePath) : null }
 		if (at.nudgeMirror && e.playing && !e.scratch && !e.sync && !scShadowNudgeTimer.running) scShadowNudgeTimer.start()
+		at.loop = e.loop && e.loopOut > e.loopIn && e.loopIn >= 0 ? {in: e.loopIn, out: e.loopOut, pos: e.positionMs, at: e.at || now} : null
+		if (at.loop && e.playing && !scShadowLoopTimer.running) scShadowLoopTimer.start()
+		// In the source's loop its line runs on past the loop out: it is back at the loop in.
+		const loopWrap = ms => at.loop && ms > at.loop.out ? at.loop.in + (ms - at.loop.in) % (at.loop.out - at.loop.in) : ms
 		scShadowCues(d, at, e, now)
 		// Updates sent before an Engine Link edge arrive after it: skip them, or
 		// they would undo the edge for a moment.
@@ -2202,7 +2211,7 @@ SERVICES_MAIN = """
 		const local = !!g("/PlayState").state
 		// Heartbeats can keep the same sequence. The landing observer still
 		// needs their liveness and carried source line on every delivery.
-		at.sourceTarget = e.positionMs + (e.playing && !e.scratch && e.at ? Math.max(0, now - e.at) * at.rate : 0)
+		at.sourceTarget = loopWrap(e.positionMs + (e.playing && !e.scratch && e.at ? Math.max(0, now - e.at) * at.rate : 0))
 		at.sourceAt = now; at.sourcePlaying = !!e.playing && !e.stale
 		if (!at.sourcePlaying || !e.sync || !e.link || !root.scPlayer || at.nativeSync || (e.sync && e.pitch > 100)) at.landing = undefined
 		if (e.seq && e.seq === at.lastSeq && e.playing === local && !at.wantMaster && !at.check && !at.nativeSync && !e.scratch && !wasScratch) return
@@ -2226,7 +2235,7 @@ SERVICES_MAIN = """
 		const seek = ms => root.scShadowSeek(d, at, ms)
 		// e.at is when Go extrapolated e.positionMs; this runs later on a busy GUI
 		// thread, so carry the target to now before comparing.
-		const target = e.positionMs + (e.playing && !e.scratch && e.at ? Math.max(0, now - e.at) * scShadowRate(e) : 0)
+		const target = loopWrap(e.positionMs + (e.playing && !e.scratch && e.at ? Math.max(0, now - e.at) * scShadowRate(e) : 0))
 		const posMs = g("/Track/TrackPosition").unnormalized / sr * 1000
 		const drift = target - posMs // > 0: behind
 		const meanReady = at.env !== undefined && now - at.envT0 >= 300
@@ -2625,6 +2634,33 @@ SERVICES_MAIN = """
 			} else if (!n.dir && now - n.quiet > 500 && Math.abs(owe) < 1) { n.extra = n.done = 0; n.active = false }
 		}
 		if (!live) scShadowNudgeTimer.stop()
+	}
+	// The source's loop on its shadow deck (L4-2). Stock places a loop only at the playhead (LoopIn,
+	// LoopOut, AutoLoop; CurrentLoopIn/OutPosition and LoopEnableState do not take writes), and a loop
+	// pressed a frame off would drift a frame each pass. So the deck turns at the source's loop out by
+	// one seek, by the sample the source does, not when an update shows the source back at the loop in
+	// (up to 200 ms past it). The nudge fast path stays on inside a loop: each turn starts it anew.
+	Timer { id: scShadowLoopTimer; interval: 16; repeat: true; onTriggered: root.scShadowLoopTick() }
+	function scShadowLoopTick() {
+		let live = false
+		for (const d in scShadowAt) {
+			const at = scShadowAt[d], lp = at.loop, l = at.line
+			if (!lp || !at.ready || !at.sourcePlaying || at.scratch || scShadowDisplayOnly || !l || !l.play.state || !(l.sr.value > 0)) continue
+			live = true
+			// TrackPosition moves a block of audio at a time (35 ms on a JP07): carry it on from its last step.
+			const raw = l.pos.unnormalized / l.sr.value * 1000, now = Date.now()
+			if (raw !== at.loopRaw) { at.loopRaw = raw; at.loopRawAt = now }
+			const pos = raw + (now - at.loopRawAt) * at.rate
+			// Half a tick early: it lands within 8 ms either side of the source's turn.
+			if (pos >= lp.out - 8 * at.rate && pos < lp.out + 1000 && now - at.seekAt >= 80) {
+				// It lands where the source's line is (carried round its loop), not on its own phase:
+				// a frame lost each pass would add up.
+				const src = lp.pos + (now - lp.at) * at.rate
+				root.scShadowSeek(Number(d), at, src > lp.out ? lp.in + (src - lp.in) % (lp.out - lp.in) : lp.in + pos - lp.out)
+				if (root.scShadowDebug) root.scShadowDbg({deck: Number(d), act: "loop", posMs: Math.round(pos), out: lp.out})
+			}
+		}
+		if (!live) scShadowLoopTimer.stop()
 	}
 	function scShadowNudgeDrop(at, now) {
 		if (at.nudge && at.nudge.dir) scShadowNudgeEnd(at, at.nudge, now)
