@@ -1040,6 +1040,9 @@ static void test_patch_files(const char *filename) {
     if (build->bt_send) {
         static const uint32_t sender_prologue[] = {0xe16d42f4, 0xe1a04001}; // strd r4,[sp,#-36]!; mov r4,r1
         assert((size_t)size >= build->bt_send + sizeof sender_prologue && !memcmp(image + build->bt_send, sender_prologue, sizeof sender_prologue));
+        // bt_ring_room reads the ring's write index and size from the sender object: here are the two loads, in both armhf builds
+        const uint32_t ring_loads[] = {0xe5970000u | 5u << 12 | BT_RING_WR, 0xe5970000u | 10u << 12 | BT_RING_SIZE}; // ldr r5, [r7, #0x34]; ldr sl, [r7, #0x2c]
+        assert(!memcmp(image + build->bt_send + 0xa8, ring_loads, sizeof ring_loads));
     }
     if (!strcmp(build->name, "5.0.4")) assert(build->edit_count == 17); // +1: #207 Reverb decay
     if (!strcmp(build->name, "5.3.0")) {

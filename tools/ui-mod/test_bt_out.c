@@ -255,6 +255,21 @@ static void test_quality(const char *path) {
         fprintf(stderr, "SBC cap %u: packet bitpool %u, frame %zu bytes\n", caps[i], packet[2], frame);
         assert(packet[0] == 0x9c && packet[2] == caps[i] && written == (ssize_t)frame);
     }
+    /* A sink that offers more than the phone-stack default gets the default (53 up to 44.1 kHz, 51 at 48 kHz, 31 / 29
+     * in mono and dual channel); a lower maximum is kept, and a minimum above the default is honoured. */
+    static const struct { uint8_t mode, min, max, want; } hq[] = {
+        {0x22, 2, 250, 53}, {0x22, 2, 64, 53}, {0x12, 2, 250, 51}, {0x12, 2, 53, 51}, {0x12, 2, 40, 40}, {0x22, 60, 100, 60},
+        {0x82, 2, 250, 53}, {0x42, 2, 250, 53}, {0x28, 2, 250, 31}, {0x14, 2, 250, 29}, {0x24, 2, 250, 31}, {0x18, 2, 250, 29},
+    };
+    for (unsigned i = 0; i < sizeof hq / sizeof *hq; i++) {
+        config[0] = hq[i].mode; config[2] = hq[i].min; config[3] = hq[i].max;
+        assert(reinit(sbc, 0, config, sizeof config) == 0);
+        ssize_t written = 0;
+        assert(sbc_encode(sbc, pcm, sizeof pcm, packet, sizeof packet, &written) > 0);
+        fprintf(stderr, "SBC mode %02x %u..%u: packet bitpool %u\n", hq[i].mode, hq[i].min, hq[i].max, packet[2]);
+        assert(packet[2] == hq[i].want && written == (ssize_t)length(sbc));
+    }
+    config[0] = 0x22; config[2] = 2; config[3] = 53;
     hook_test_engine = 0;
     assert(reinit(sbc, 0, config, sizeof config) == 0);
     assert(((uint8_t *)sbc)[sizeof(unsigned long) + 5] == 32);
@@ -266,11 +281,11 @@ static void test_quality(const char *path) {
     assert(reinit(sbc, 0, config, sizeof config) == -EINVAL);
     config[2] = 2; config[3] = 251;
     assert(reinit(sbc, 0, config, sizeof config) == -EINVAL);
-    config[0] = 0x28; config[1] = 0x19; config[3] = 100; // mono, 4 subbands: legal ceiling 64
+    config[0] = 0x28; config[1] = 0x19; config[3] = 100; // mono, 4 subbands: the default (31) is far below the legal ceiling 64
     assert(reinit(sbc, 0, config, sizeof config) == 0);
     ssize_t written = 0;
     assert(sbc_encode(sbc, pcm, 128, packet, sizeof packet, &written) == 128);
-    assert(packet[2] == 64 && written == (ssize_t)length(sbc));
+    assert(packet[2] == 31 && written == (ssize_t)length(sbc));
     config[2] = 65;
     assert(reinit(sbc, 0, config, sizeof config) == -EINVAL);
     finish(sbc);
@@ -571,6 +586,14 @@ int main(int argc, char **argv) {
     for (int i = 0; i < 2; i++) block(4, 480);
     drain();
     assert(stock_calls == 0 && got_n == 960 && got[0][959] == 0.1f && got[1][959] == -0.1f);
+    /* A hand-edited bt_out=1073741829 or 2147483647: pair * 2 wrapped negative and indexed out[] far below the array. */
+    for (int i = 0; i < 2; i++) {
+        reset(48000, 48000);
+        bt_out_pair = i ? 0x7fffffff : 0x40000005;
+        for (int j = 0; j < 2; j++) block(4, 480);
+        drain();
+        assert(stock_calls == 0 && got_n == 960 && got[0][959] == 0.1f && got[1][959] == -0.1f);
+    }
 
     /* A stream whose rate libsbc does not have is no speaker: Engine's own feed goes through. */
     reset(48000, 48000);
