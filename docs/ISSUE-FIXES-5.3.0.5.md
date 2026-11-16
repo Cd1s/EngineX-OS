@@ -6,7 +6,7 @@
 - **范围**：`v5.3.0.4-r5`（`9e827205`）→ `v5.3.0.5`（版本号 `5.3.0.5`，tag `v5.3.0.5`），内容来自集成分支 `agent/5305-integration`。
 - **构建提交**：`【待填】`
 - **回滚点**：tag `v5.3.0.4-r5`（`9e827205`）；一代机与二代机刷回该 Release 的 `*-Update.img`。更早的回滚点见 `ISSUE-FIXES-5.3.0.4.md`。
-- **覆盖机型与产物（28 个发布资产 + `SHA256SUMS.txt` + `SHA256SUMS.txt.sig`）**：
+- **覆盖机型与产物（28 个发布资产 + `RELEASE-TAG.txt` + `SHA256SUMS.txt` + `SHA256SUMS.txt.sig` = 31 个上传文件）**：
   - 8 款一代机 `*-Update.img`、8 款二代机 `*-Update.img`、4 个平台的 `EngineX-Installer-5.3.0.5-*`；
   - 8 个 `*-Data-Bundle.tar.gz` **最后一次**随 Release 提供，仅供 `5.3.0.2` / `5.3.0.3` 二代机的屏幕 OTA 过渡（#215）；`5.3.0.6` 起退役。
 - **签名**：从 5.3.0.5 起每个 Release 附 `SHA256SUMS.txt.sig`（Ed25519，私钥只在编译机上）；5.3.0.4 及更早的碟机不验签，需先更新到 5.3.0.5。
@@ -89,7 +89,7 @@
 ## 4. 发布产物与 SHA-256 校验表（v5.3.0.5 全量 28 产物清单）
 
 - **说明**：下表 SHA-256 全部是占位符 `【待填】`，由构建出的 `SHA256SUMS.txt` 逐行填入，**不要**在构建前使用。
-- **产物目录**：`【待填】`；`SHA256SUMS.txt` 共 **28 行**（16 个 `*-Update.img` + 8 个 `*-Data-Bundle.tar.gz` + 4 个 `EngineX-Installer-5.3.0.5-*`），连同 `SHA256SUMS.txt` 与 `SHA256SUMS.txt.sig` 共 30 个上传文件。
+- **产物目录**：`【待填】`；`SHA256SUMS.txt` 共 **29 行**（16 个 `*-Update.img` + 8 个 `*-Data-Bundle.tar.gz` + 4 个 `EngineX-Installer-5.3.0.5-*` + `RELEASE-TAG.txt`），连同 `SHA256SUMS.txt` 与 `SHA256SUMS.txt.sig` 共 **31** 个上传文件。
 - **回滚点**：tag `v5.3.0.4-r5`（`9e827205`）。
 
 ### 一代机型完整固件（`*-Update.img`）
