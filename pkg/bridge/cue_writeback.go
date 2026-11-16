@@ -80,7 +80,7 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 		return res, fmt.Errorf("writeback: bridge state not found: %w", err)
 	}
 
-	rbLib, err := readStickRekordboxLibrary(ctx, absMount)
+	rbLib, oneLibOK, err := readStickRekordboxLibrary(ctx, absMount)
 	if err != nil {
 		return res, err
 	}
@@ -94,7 +94,7 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 		}
 	}
 
-	mURI := url.URL{Scheme: "file", Path: mDBPath, RawQuery: "mode=ro&immutable=1"}
+	mURI := url.URL{Scheme: "file", Path: mDBPath, RawQuery: "mode=ro&_pragma=busy_timeout(5000)"}
 	db, err := sql.Open("sqlite", mURI.String())
 	if err != nil {
 		return res, err
@@ -102,7 +102,8 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 	defer db.Close()
 	db.SetMaxOpenConns(1)
 
-	if _, err := db.ExecContext(ctx, `ATTACH DATABASE ? AS bridge`, "file:"+stateDBPath+"?mode=ro&immutable=1"); err != nil {
+	stateURI := url.URL{Scheme: "file", Path: stateDBPath, RawQuery: "mode=ro&_pragma=busy_timeout(5000)"}
+	if _, err := db.ExecContext(ctx, `ATTACH DATABASE ? AS bridge`, stateURI.String()); err != nil {
 		return res, fmt.Errorf("writeback: attach bridge state: %w", err)
 	}
 
@@ -225,7 +226,7 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 
 	oneLibRel := "PIONEER/rekordbox/exportLibrary.db"
 	oneLibFull := filepath.Join(absMount, filepath.FromSlash(oneLibRel))
-	if len(oneLibUpdates) > 0 {
+	if oneLibOK && len(oneLibUpdates) > 0 {
 		if _, err := os.Stat(oneLibFull); err == nil {
 			if err := ensureFirstOriginalBackup(absMount, backupRoot, dateDir, oneLibRel); err != nil {
 				return res, err
@@ -262,16 +263,28 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 	return res, nil
 }
 
-func readStickRekordboxLibrary(ctx context.Context, mountPath string) (*rekordbox.Library, error) {
+func readStickRekordboxLibrary(ctx context.Context, mountPath string) (*rekordbox.Library, bool, error) {
+	var errs []error
 	oneLibPath := filepath.Join(mountPath, "PIONEER", "rekordbox", "exportLibrary.db")
 	if _, err := os.Stat(oneLibPath); err == nil {
-		return rekordbox.ReadSQLite(ctx, oneLibPath, nil)
+		lib, err := rekordbox.ReadSQLite(ctx, oneLibPath, nil)
+		if err == nil {
+			return lib, true, nil
+		}
+		errs = append(errs, err)
 	}
 	pdbPath := filepath.Join(mountPath, "PIONEER", "rekordbox", "export.pdb")
 	if _, err := os.Stat(pdbPath); err == nil {
-		return rekordbox.ReadPDB(pdbPath)
+		lib, err := rekordbox.ReadPDB(pdbPath)
+		if err == nil {
+			return lib, false, nil
+		}
+		errs = append(errs, err)
 	}
-	return nil, fmt.Errorf("writeback: no rekordbox export found on %s", mountPath)
+	if len(errs) > 0 {
+		return nil, false, errors.Join(errs...)
+	}
+	return nil, false, fmt.Errorf("writeback: no rekordbox export found on %s", mountPath)
 }
 
 func resolveRekordboxTrack(srcJSON []byte, enginePath string, byID map[uint32]rekordbox.Track, byPath map[string]rekordbox.Track) (rekordbox.Track, bool) {
