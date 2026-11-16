@@ -420,10 +420,10 @@
           "**一體機 Line In 映射 CDJ 波形（待實機驗證）**：在 PRIME 4 等一體機上將通道切至 Line In 後，Pro DJ Link 連接的 CDJ-3000 波形與播放進度會直接顯示在該 Line In 通道上（依播放機編號從小到大對應 Line 通道從小到大），不再顯示靜態佔位；SC5000 / SC6000 獨立播放機行為不變。",
           "**All-in-one console CDJ waveforms via Line In (hardware validation pending)**: on all-in-one consoles like PRIME 4, switching a mixer channel to Line In maps connected Pioneer CDJ-3000 waveforms and playback positions directly onto that channel (in player-number order to Line channel order), replacing the static placeholder; SC5000 / SC6000 standalone players are unchanged.") },
         { k: "ul", x: [
-          L("通过局域网 / Wi-Fi 读取 CDJ 上 Rekordbox U 盘的曲库（`设置 → 服务 → Pro DJ Link 曲库`）。", "透過區域網路 / Wi-Fi 讀取 CDJ 上 Rekordbox 隨身碟的曲庫（`設定 → 服務 → Pro DJ Link 曲庫`）。", "Browse the Rekordbox stick in a CDJ over LAN / Wi-Fi (`Settings → Services → Pro DJ Link Library`)."),
-          L("也能把本机曲库（含天龙 U 盘与 EngineX 流媒体歌单）共享给 CDJ（`设置 → 服务 → Pro DJ Link 导出至 CDJ（测试版）`）。", "也能將本機曲庫（含天龍隨身碟與 EngineX 串流歌單）共享給 CDJ（`設定 → 服務 → Pro DJ Link 匯出至 CDJ（測試版）`）。", "Share this deck's library (including Denon sticks and EngineX streaming playlists) to the CDJ (`Settings → Services → Pro DJ Link Export to CDJ (Beta)`)."),
+          L("通过局域网 / Wi-Fi 读取 CDJ 上 Rekordbox U 盘的曲库。", "透過區域網路 / Wi-Fi 讀取 CDJ 上 Rekordbox 隨身碟的曲庫。", "Browse the Rekordbox stick in a CDJ over LAN / Wi-Fi."),
+          L("也能把本机曲库（含天龙 U 盘与 EngineX 流媒体歌单）共享给 CDJ（导出至 CDJ 为测试版）。", "也能將本機曲庫（含天龍隨身碟與 EngineX 串流歌單）共享給 CDJ（匯出至 CDJ 為測試版）。", "Share this deck's library (including Denon sticks and EngineX streaming playlists) to the CDJ (export is Beta)."),
           L("SC5000 与 CDJ 之间始终只有一个 Master，MASTER 可双向交接；本机当 Master 时发出 BPM 和拍点，供 CDJ 的 BEAT SYNC 对拍。", "SC5000 與 CDJ 之間始終只有一個 Master，MASTER 可雙向交接；本機當 Master 時發出 BPM 與拍點，供 CDJ 的 BEAT SYNC 對拍。", "There is always exactly one Master between the SC5000 and the CDJ and MASTER can be handed over both ways; as Master the deck sends BPM and beat position for the CDJ's BEAT SYNC."),
-          L("以上两项均默认关闭，需在 `设置 → 服务` 里手动开启。", "以上兩項皆預設關閉，需在 `設定 → 服務` 中手動開啟。", "Both options are off by default under `Settings → Services`."),
+          L("以上功能由单一开关控制，默认关闭，需在 `设置 → 服务 → Pro DJ Link` 中手动开启。", "以上功能由單一開關控制，預設關閉，需在 `設定 → 服務 → Pro DJ Link` 中手動開啟。", "All of this is controlled by a single switch, off by default under `Settings → Services → Pro DJ Link`."),
         ] },
       ],
     },
@@ -580,7 +580,7 @@
         { k: "shot", name: "17-profile-display.png", cap: L("配置 → 显示：曲目标题（内嵌标签 / 文件名）、时间格式、曲目结束提醒、同步指示与波形样式（Denon / RGB / 3-Band）", "設定檔 → 顯示：曲目標題（內嵌標籤 / 檔案名稱）、時間格式、曲目結束提醒、同步指示與波形樣式（Denon / RGB / 3-Band）", "Profile → Display: Track Title (Metadata / Filename), Time Format, Track End Warning, Sync Indicator, and Waveform Style (Denon / RGB / 3-Band)") },
         { k: "shot", name: "06b-preferences-device.png", cap: L("设置 → 设备：语言、打击垫亮度、电源、碟机编号 #、Wi-Fi、蓝牙与同步时间", "設定 → 裝置：語言、打擊墊亮度、電源、碟機編號 #、Wi-Fi、藍牙與同步時間", "Settings → Device: Language, Pad LED Brightness, Power, Player #, Wi-Fi, Bluetooth, and Sync Time") },
         { k: "shot", name: "28-settings-fx.png", cap: L("设置 → 效果：效果切换行为（保持设置 / 恢复默认）", "設定 → 效果：效果切換行為（保留設定 / 恢復預設）", "Settings → FX: Effect Select Behavior (Recall / Default)") },
-        { k: "shot", name: "13-preferences-services.png", cap: L("设置 → 服务：Dropbox 云盘、流媒体音质、网易云下载方式、直播推流，以及 Pro DJ Link 曲库与导出至 CDJ", "設定 → 服務：Dropbox 雲端硬碟、串流音質、網易雲下載方式、直播推流，以及 Pro DJ Link 曲庫與匯出至 CDJ", "Settings → Services: Dropbox cloud, Streaming Quality, NetEase Download, Live Stream, and Pro DJ Link Library / Export to CDJ") },
+        { k: "shot", name: "13-preferences-services.png", cap: L("设置 → 服务：Dropbox 云盘、流媒体音质、网易云下载方式、直播推流，以及 Pro DJ Link", "設定 → 服務：Dropbox 雲端硬碟、串流音質、網易雲下載方式、直播推流，以及 Pro DJ Link", "Settings → Services: Dropbox cloud, Streaming Quality, NetEase Download, Live Stream, and Pro DJ Link") },
       ],
     },
 

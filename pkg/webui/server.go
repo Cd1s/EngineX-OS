@@ -210,7 +210,7 @@ func New(cfg Config, jobs *Jobs) *Server {
 		go serveSpotifyConnectMDNS(s.closed)
 	}
 	go s.retryExport(10 * time.Second)
-	if s.loadUI().ProlinkExport {
+	if s.loadUI().ProlinkShare {
 		// A missing drive or occupied port must not prevent the normal console
 		// from starting. The export status reports whether it actually started.
 		if err := s.prolinkExport.SetEnabled(true); err != nil {
@@ -393,7 +393,7 @@ func (s *Server) retryExport(every time.Duration) {
 
 func (s *Server) tryExport() {
 	s.uiMu.Lock()
-	on := s.loadUI().ProlinkExport
+	on := s.loadUI().ProlinkShare
 	s.uiMu.Unlock()
 	if !on {
 		return

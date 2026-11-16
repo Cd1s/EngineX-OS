@@ -36,30 +36,30 @@ func TestProlinkExportSettingLifecycle(t *testing.T) {
 		_ = json.NewDecoder(resp.Body).Decode(&result)
 		return resp.StatusCode, result
 	}
-	if ui.loadUI().ProlinkExport || ui.prolinkExport.Status().Enabled {
+	if ui.loadUI().ProlinkShare || ui.prolinkExport.Status().Enabled {
 		t.Fatal("export must default OFF")
 	}
-	if code, _ := uiPost(t, srv.URL, "prolinkExport=yes"); code != 400 {
+	if code, _ := uiPost(t, srv.URL, "prolinkShare=yes"); code != 400 {
 		t.Fatal("invalid toggle accepted")
 	}
 	if ui.prolinkExport.Status().Enabled {
 		t.Fatal("invalid toggle started exporter")
 	}
-	if code, v := request("export=1&share=0"); code != 200 || !v.Export || !v.ExportState.Enabled || v.Share {
+	if code, v := request("share=1"); code != 200 || !v.Share || !v.ExportState.Enabled {
 		t.Fatalf("enable: %d %+v", code, v)
 	}
 	state := ui.prolinkExport.Status()
-	if b, _ := os.ReadFile(filepath.Join(dir, "settings.conf")); !strings.Contains(string(b), "prolink_export=1\n") {
-		t.Fatalf("toggle not persisted: %s", b)
+	if b, _ := os.ReadFile(filepath.Join(dir, "settings.conf")); !strings.Contains(string(b), "prolink_share=1\n") || strings.Contains(string(b), "prolink_export=1") {
+		t.Fatalf("toggle not persisted as prolink_share only: %s", b)
 	}
 	// Saving unrelated preferences must preserve the running export.
-	if code, v := uiPost(t, srv.URL, "waveform=rgb"); code != 200 || !v.ProlinkExport || ui.prolinkExport.Status().DBAddress != state.DBAddress {
+	if code, v := uiPost(t, srv.URL, "waveform=rgb"); code != 200 || !v.ProlinkShare || ui.prolinkExport.Status().DBAddress != state.DBAddress {
 		t.Fatal("unrelated preference restarted/dropped export")
 	}
-	if code, _ := request("export=0&share=invalid"); code != 400 || !ui.prolinkExport.Status().Enabled {
+	if code, _ := request("share=invalid"); code != 400 || !ui.prolinkExport.Status().Enabled {
 		t.Fatal("partially applied invalid settings")
 	}
-	if code, v := uiPost(t, srv.URL, "prolinkExport=0"); code != 200 || v.ProlinkExport || ui.prolinkExport.Status().Enabled {
+	if code, v := uiPost(t, srv.URL, "prolinkShare=0"); code != 200 || v.ProlinkShare || ui.prolinkExport.Status().Enabled {
 		t.Fatal("UI toggle did not stop export")
 	}
 	l, err := net.Listen("tcp4", state.DBAddress)
@@ -67,14 +67,14 @@ func TestProlinkExportSettingLifecycle(t *testing.T) {
 		t.Fatalf("OFF retained port: %v", err)
 	}
 	l.Close()
-	if code, v := request("export=1"); code != 200 || !v.ExportState.Enabled {
+	if code, v := request("share=1"); code != 200 || !v.ExportState.Enabled {
 		t.Fatal("prolink endpoint failed to reenable")
 	}
 	ui.Close()
 	// settings.conf's explicit opt-in is restored on process startup.
 	restored := New(cfg, nil)
 	defer restored.Close()
-	if !restored.prolinkExport.Status().Enabled || !restored.loadUI().ProlinkExport {
+	if !restored.prolinkExport.Status().Enabled || !restored.loadUI().ProlinkShare {
 		t.Fatal("saved opt-in not restored")
 	}
 	if err := restored.saveUI(uiSettings{}); err != nil {
@@ -83,7 +83,7 @@ func TestProlinkExportSettingLifecycle(t *testing.T) {
 	if restored.prolinkExport.Status().Enabled {
 		t.Fatal("OFF not applied")
 	}
-	if b, _ := os.ReadFile(filepath.Join(dir, "settings.conf")); strings.Contains(string(b), "prolink_export=1") {
+	if b, _ := os.ReadFile(filepath.Join(dir, "settings.conf")); strings.Contains(string(b), "prolink_share=1") || strings.Contains(string(b), "prolink_export=1") {
 		t.Fatalf("ON survived OFF: %s", b)
 	}
 }
@@ -95,11 +95,11 @@ func TestProlinkExportOnWithoutUSBStaysOnAndWaits(t *testing.T) {
 	defer ui.Close()
 	srv := httptest.NewServer(ui)
 	defer srv.Close()
-	code, v := uiPost(t, srv.URL, "prolinkExport=1")
-	if code != 200 || !v.ProlinkExport || v.ProlinkExportActive {
+	code, v := uiPost(t, srv.URL, "prolinkShare=1")
+	if code != 200 || !v.ProlinkShare || v.ProlinkExportActive {
 		t.Fatalf("ON without USB: %d %+v", code, v)
 	}
-	if !ui.loadUI().ProlinkExport || ui.prolinkExport.Status().Enabled {
+	if !ui.loadUI().ProlinkShare || ui.prolinkExport.Status().Enabled {
 		t.Fatal("ON was not kept, or the export started without a USB")
 	}
 }
@@ -113,16 +113,16 @@ func TestProlinkSavedOnWithoutUSBDoesNotBlockOtherSettings(t *testing.T) {
 	defer ui.Close()
 	srv := httptest.NewServer(ui)
 	defer srv.Close()
-	if code, v := uiPost(t, srv.URL, "waveform=rgb"); code != 200 || !v.ProlinkExport {
+	if code, v := uiPost(t, srv.URL, "waveform=rgb"); code != 200 || !v.ProlinkShare {
 		t.Fatal("missing USB blocked unrelated preference")
 	}
 	if ui.prolinkExport.Status().Enabled {
 		t.Fatal("missing USB started export")
 	}
-	if code, v := uiPost(t, srv.URL, "prolinkExport=1"); code != 200 || !v.ProlinkExport || v.ProlinkExportActive {
+	if code, v := uiPost(t, srv.URL, "prolinkShare=1"); code != 200 || !v.ProlinkShare || v.ProlinkExportActive {
 		t.Fatal("explicit ON must stay ON and report that it waits for a USB")
 	}
-	if code, _ := uiPost(t, srv.URL, "prolinkExport=0"); code != 200 {
+	if code, _ := uiPost(t, srv.URL, "prolinkShare=0"); code != 200 {
 		t.Fatal("OFF failed")
 	}
 }
@@ -135,7 +135,7 @@ func TestProlinkExportStartsWhenUSBArrives(t *testing.T) {
 	defer ui.Close()
 	srv := httptest.NewServer(ui)
 	defer srv.Close()
-	if code, v := uiPost(t, srv.URL, "prolinkExport=1"); code != 200 || v.ProlinkExportActive {
+	if code, v := uiPost(t, srv.URL, "prolinkShare=1"); code != 200 || v.ProlinkExportActive {
 		t.Fatalf("ON without USB: %d %+v", code, v)
 	}
 	testfixture.Export(t, root)

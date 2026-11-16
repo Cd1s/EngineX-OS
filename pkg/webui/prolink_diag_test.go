@@ -79,13 +79,13 @@ func TestProlinkDiag(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &d); err != nil {
 		t.Fatal(err)
 	}
-	if !d.Settings.ProlinkShare || d.Settings.ProlinkExport || len(d.Peers) != 1 || d.Peers[0].Name != "CDJ-3000" || d.Peers[0].BPM != 128 {
+	if !d.Settings.ProlinkShare || len(d.Peers) != 1 || d.Peers[0].Name != "CDJ-3000" || d.Peers[0].BPM != 128 {
 		t.Fatalf("diag %+v", d)
 	}
 	if d.Peers[0].NFS == "" {
 		t.Fatal("the CDJ's NFS server was not probed")
 	}
-	want := map[string]string{"udp 50000": "FAIL", "Pro DJ Link Export to CDJ (Beta)": "WARN", "Pro DJ Link Library": "PASS", "Peer 3 CDJ-3000": "FAIL"}
+	want := map[string]string{"udp 50000": "FAIL", "Pro DJ Link": "PASS", "Peer 3 CDJ-3000": "FAIL"}
 	for _, c := range d.Checks {
 		if lvl, ok := want[c.Item]; ok {
 			if c.Level != lvl {
