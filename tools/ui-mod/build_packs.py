@@ -4170,20 +4170,24 @@ SERVICES_MAIN = """
 	// tracks this run has taken, renderStemsQueueCount how many are left, the
 	// one being rendered included (left deck: 1/1 while one track rendered, 0/0
 	// after). Places up to scStemDone are over (rendered or failed) and show
-	// nothing, the next one is rendered, later ones wait. Engine may publish
-	// one counter before the other, so they are read together once Engine is
-	// done (scStemSettle, Qt.callLater), and a track is counted as over only
-	// from a reading in which the run's size did not change: one counter
-	// moving alone never ends or drops a row.
+	// nothing, the next one is rendered, later ones wait. The two counters are
+	// read together once Engine is done (scStemSettle, Qt.callLater). A reading
+	// in which the run's size did not change counts finished tracks at once; one
+	// in which it changed counts them once it has held for a moment
+	// (scStemSteady), so one counter published before the other never ends a
+	// row, and a track that ended while another was added is still counted.
 	//
-	// A track handed over takes a place only when the run has grown past the
-	// size it had just before the hand-over (scStemClaims). Engine answers every
-	// startRenderTracks with renderStemsQueueChanged, also when it refuses the
-	// track (sandbox: an unknown id, counters unchanged): an answer after the
-	// hand-over in which neither counter grew means refused, and the track
-	// takes no place.
+	// Engine's answer (renderStemsQueueChanged) names no track, so one streamed
+	// track at a time is handed over (scStemClaim) and the others wait in
+	// scStemNext until Engine has answered it. Engine answers every
+	// startRenderTracks, also a refusal (sandbox: an unknown id, counters
+	// unchanged). The run grown past its size at the hand-over: the track has the
+	// next place. An answer that left both counters as they were: refused, no
+	// place. Any other answer (a track ended meanwhile) is not this one's: its
+	// counters become the new reference.
 	property var scStemRows: ({})
-	property var scStemClaims: [] // handed over, not yet seen in Engine's queue: {rows, total, left, heard}
+	property var scStemClaim: null // handed over, not answered yet: {rows, total, left, heard}
+	property var scStemNext: [] // waiting to be handed over: {id, rows}
 	property int scStemHeard: 0 // Engine's queue answers so far
 	property int scStemDone: 0 // tracks of this run that are over
 	property int scStemSize: 0 // the run's size at the last reading
@@ -4208,9 +4212,20 @@ SERVICES_MAIN = """
 		}
 		scStemRows = rows
 	}
-	// Handed to Engine; `seen` is Engine's queue read just before the hand-over.
-	function scStemHand(ids, seen) {
-		scStemClaims = scStemClaims.concat([{rows: ids, total: seen.total > 0 ? seen.total : 0, left: seen.left > 0 ? seen.left : 0, heard: seen.heard}])
+	// A streamed track's Stems for Engine's queue, `rows` its marked rows.
+	function scStemHand(id, rows) {
+		scStemNext = scStemNext.concat([{id: String(id), rows: rows}])
+		scStemSend()
+	}
+	function scStemSend() {
+		if (scStemClaim || !scStemNext.length || !scStemQueue) return
+		const next = scStemNext[0]
+		scStemNext = scStemNext.slice(1)
+		// Read before Engine can change them: it may answer inside the call.
+		const total = scStemQueue.totalRenderStemsQueueCount || 0, left = scStemQueue.renderStemsQueueCount || 0
+		scStemClaim = {rows: next.rows, total: total, left: left, heard: scStemHeard}
+		scStemQueue.startRenderTracks(next.id)
+		scStemRefused.restart()
 		Qt.callLater(scStemSettle)
 	}
 	Connections {
@@ -4230,25 +4245,32 @@ SERVICES_MAIN = """
 			scStemDone = 0
 			scStemSize = 0
 		} else {
-			if (total === scStemSize && left >= 0 && left <= total && total - left > scStemDone) scStemDone = total - left
+			if (total === scStemSize) scStemFinished(total, left)
+			else if (total - left > scStemDone) scStemSteady.restart()
 			scStemSize = total
 		}
-		// Tracks handed over take, in order, the places the run has grown by. The
-		// oldest one that Engine answered without either counter growing was
-		// refused. Each answer settles one track: the next waits for its own.
-		let last = Object.keys(scStemRows).reduce((m, id) => scStemRows[id] >= 1 ? Math.max(m, scStemRows[id]) : m, 0)
-		const claims = scStemClaims.map(c => total > 0 ? Object.assign({}, c) : {rows: c.rows, total: 0, left: 0, heard: c.heard})
-		while (claims.length) {
-			const c = claims[0], place = Math.max(c.total, last) + 1
-			if (total >= place) {
-				scStemMark(c.rows, place)
-				last = place
-			} else if (scStemHeard > c.heard && !(left > c.left)) scStemMark(c.rows, "")
-			else break
-			claims.shift()
-			for (const next of claims) next.heard = Math.max(next.heard, scStemHeard)
+		const c = scStemClaim
+		if (!c) return
+		if (total > c.total) scStemMark(c.rows, c.total + 1)
+		else if (scStemHeard === c.heard) return // not answered yet
+		else if (total === c.total && left === c.left) scStemMark(c.rows, "")
+		else {
+			// Another track's answer: wait for this one's against the new counters.
+			scStemClaim = {rows: c.rows, total: total, left: left, heard: scStemHeard}
+			return
 		}
-		scStemClaims = claims
+		scStemClaim = null
+		scStemSend()
+	}
+	// Finished tracks of the run from a reading of both counters.
+	function scStemFinished(total, left) {
+		if (left >= 0 && left <= total && total - left > scStemDone) scStemDone = total - left
+	}
+	// A reading in which the run grew has held: count what ended in it.
+	Timer {
+		id: scStemSteady
+		interval: 1000
+		onTriggered: if (root.scStemTotal === root.scStemSize) root.scStemFinished(root.scStemTotal, root.scStemCount)
 	}
 	onScStemTotalChanged: Qt.callLater(scStemSettle)
 	// What a mark means now: "" (nothing, or its track is over), "wait", "render" or
@@ -4297,13 +4319,14 @@ SERVICES_MAIN = """
 		interval: 10000
 		onTriggered: root.scStemMark(Object.keys(root.scStemRows).filter(id => root.scStemRows[id] === "fail"), "")
 	}
-	// No answer from Engine at all: the rows stop waiting after a while.
+	// No answer from Engine at all: the rows stop waiting, the next track goes.
 	Timer {
 		id: scStemRefused
 		interval: 30000
 		onTriggered: {
-			for (const c of root.scStemClaims) root.scStemMark(c.rows, "")
-			root.scStemClaims = []
+			if (root.scStemClaim) root.scStemMark(root.scStemClaim.rows, "")
+			root.scStemClaim = null
+			root.scStemSend()
 		}
 	}
 	function scStemStream(uid) {
@@ -4362,11 +4385,7 @@ SERVICES_MAIN = """
 		interval: 500; repeat: true
 		function render(id) {
 			if (!running) return // a slower reply after the render already started
-			// Read before Engine can change them: it may answer inside the call.
-			const seen = {total: root.scStemTotal, left: root.scStemCount, heard: root.scStemHeard}
-			Planck.librarianController.stemsQueueManager.startRenderTracks(String(id))
-			root.scStemHand(rows, seen)
-			scStemRefused.restart()
+			root.scStemHand(id, rows)
 			if (scStemUnload.armed) {
 				scStemUnload.name = path.slice(path.lastIndexOf("/") + 1)
 				scStemUnload.tries = 20

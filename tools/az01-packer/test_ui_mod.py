@@ -8386,6 +8386,7 @@ class StreamingStemsProgressTest(unittest.TestCase):
             self.assertTrue(all("%1" in rows["~%1 min"][lang] for lang in bp.LANGUAGES))
         main = bp.SERVICES_MAIN
         refused = re.search(r"id: scStemRefused\n\t\tinterval: 30000\n\t\tonTriggered: \{([\s\S]*?)\n\t\t\}", main).group(1)
+        steady = re.search(r"id: scStemSteady\n\t\tinterval: 1000\n\t\tonTriggered: (.*)", main).group(1)
         failed = re.search(r"id: scStemFailed\n\t\tinterval: 10000\n\t\tonTriggered: (.*)", main).group(1)
         streamed = re.search(r"readonly property bool scStemStreamed: (.*)", main).group(1)
         own = re.search(r"readonly property real scStemOwn: (.*)", main).group(1)
@@ -8394,27 +8395,36 @@ const assert = require('assert');
 String.prototype.arg = function(n) {{ return this.replace('%1', n); }};
 console.warn = () => {{}};
 const dict = {json.dumps(rows, ensure_ascii=False)};
-let scLang = 'en', scStemRows = {{}}, scStemClaims = [], scStemDone = 0, scStemSize = 0, scStemHeard = 0;
-let scStemTotal = 0, scStemCount = 0, scStemProgress = 0, uris = {{}}, asked = 0, deferred = [];
+let scLang = 'en', scStemRows = {{}}, scStemClaim = null, scStemNext = [], scStemDone = 0, scStemSize = 0, scStemHeard = 0;
+let scStemTotal = 0, scStemCount = 0, scStemProgress = 0, uris = {{}}, asked = 0, deferred = [], sent = [], reactions = {{}};
 const Qt = {{callLater: fn => {{ if (!deferred.includes(fn)) deferred.push(fn); }}}};
 function scT(s) {{ return (dict[s] && dict[s][scLang]) || s; }}
 const Planck = {{librarianController: {{collectionController: {{getTrackUrisFromUniversalIds: ids => {{ asked++; return uris[ids[0]] || ''; }}}}}}}};
-{self.functions("scStemMark", "scStemHand", "scStemSettle", "scStemPlace", "scStemState", "scStemEta", "scStemText")}
-const root = {{get scStemRows() {{ return scStemRows; }}, set scStemClaims(v) {{ scStemClaims = v; }}, get scStemClaims() {{ return scStemClaims; }}, scStemMark}};
+// Engine's queue: startRenderTracks may answer inside the call (reactions[id]).
+const scStemQueue = {{
+    get totalRenderStemsQueueCount() {{ return scStemTotal; }},
+    get renderStemsQueueCount() {{ return scStemCount; }},
+    startRenderTracks(id) {{ sent.push(id); (reactions[id] || (() => {{}}))(); }},
+}};
+let steadyArmed = false;
+const scStemRefused = {{restart() {{}}}}, scStemSteady = {{restart() {{ steadyArmed = true; }}}};
+{self.functions("scStemMark", "scStemHand", "scStemSend", "scStemSettle", "scStemFinished", "scStemPlace", "scStemState", "scStemEta", "scStemText")}
+const root = {{
+    get scStemRows() {{ return scStemRows; }}, get scStemTotal() {{ return scStemTotal; }}, get scStemCount() {{ return scStemCount; }},
+    get scStemSize() {{ return scStemSize; }}, get scStemClaim() {{ return scStemClaim; }}, set scStemClaim(v) {{ scStemClaim = v; }},
+    scStemMark, scStemSend, scStemFinished,
+}};
 // Engine answers with renderStemsQueueChanged, the signal behind both counters; the
-// pack reads them once Engine is done (Qt.callLater). `answer` without `settle` is
-// a reading Engine has not finished yet.
+// pack reads them once Engine is done (Qt.callLater, which coalesces). `answer`
+// without `settle` is an answer the pack has not read yet.
 function answer(left, total) {{ scStemCount = left; scStemTotal = total; scStemHeard++; Qt.callLater(scStemSettle); }}
 function settle() {{ while (deferred.length) deferred.shift()(); }}
 function queue(left, total) {{ answer(left, total); settle(); }}
-// The hand-over as scStemImport does it: Engine's queue read before the call.
-function hand(rows, engine = () => {{}}) {{
-    const seen = {{total: scStemTotal, left: scStemCount, heard: scStemHeard}};
-    engine();
-    scStemHand(rows, seen);
-    settle();
-}}
-function reset() {{ queue(0, 0); scStemRows = {{}}; scStemClaims = []; }}
+// The reading in which the run grew has held for a second.
+function steadyTimer() {{ steadyArmed = false; {steady} }}
+// The hand-over as scStemImport does it; `engine` is Engine's answer inside the call.
+function hand(id, rows, engine) {{ if (engine) reactions[id] = engine; scStemHand(id, rows); settle(); }}
+function reset() {{ queue(0, 0); scStemRows = {{}}; scStemClaim = null; scStemNext = []; sent = []; reactions = {{}}; }}
 function refusedTimer() {{ {refused} }}
 function failedTimer() {{ {failed} }}
 const streamed = () => {streamed};
@@ -8438,9 +8448,10 @@ assert.deepEqual(Object.keys(scStemRows).sort(), ['41', '55']);
 assert.deepEqual(states(7, 8, 9, 10), ['wait', 'wait', '', '']);
 assert.equal(streamed(), false);
 
-// Review: Engine may update its counters inside startRenderTracks. The place comes
-// from the queue read before the call: the first track renders, it does not wait.
-hand(['41', '55'], () => answer(1, 1));
+// Engine may update its counters inside startRenderTracks. The place comes from
+// the queue read before the call: the first track renders, it does not wait.
+hand('901', ['41', '55'], () => answer(1, 1));
+assert.deepEqual(sent, ['901']);
 assert.deepEqual(scStemRows, {{41: 1, 55: 1}});
 assert.deepEqual(states(7, 8, 9, 10), ['render', 'render', '', '']);
 assert.equal(streamed(), true);
@@ -8451,7 +8462,7 @@ assert.equal(own(), 0.4);
 // A second track while the first renders has its own place and waits. Engine
 // answers later this time.
 scStemMark(['42', '56'], 'wait');
-hand(['42', '56']);
+hand('902', ['42', '56']);
 assert.deepEqual(states(11, 12), ['wait', 'wait']);
 queue(2, 2);
 assert.deepEqual(scStemRows, {{41: 1, 55: 1, 42: 2, 56: 2}});
@@ -8474,16 +8485,18 @@ assert.deepEqual(states(7, 8, 11, 12), ['', '', '', '']);
 assert.equal(streamed(), false);
 assert.equal(own(), 0);
 
-// Review: one counter may be read before the other. In either order the first
-// track keeps rendering and the second keeps its place.
+// One counter may be read before the other. In either order the first track keeps
+// rendering and the second keeps its place, also when the reading in which the run
+// grew holds for a second.
 for (const order of ['total first', 'left first']) {{
     reset();
-    scStemMark(['41', '55'], 'wait'); hand(['41', '55'], () => answer(1, 1));
-    scStemMark(['42', '56'], 'wait'); hand(['42', '56']);
+    scStemMark(['41', '55'], 'wait'); hand('901', ['41', '55'], () => answer(1, 1));
+    scStemMark(['42', '56'], 'wait'); hand('902', ['42', '56']);
     if (order === 'total first') queue(1, 2); else queue(2, 1);
-    assert.deepEqual(states(7, 8, 11, 12).slice(0, 2), ['render', 'render'], order);
+    assert.deepEqual(states(7, 8), ['render', 'render'], order);
     assert.deepEqual(states(11, 12), ['wait', 'wait'], order);
     queue(2, 2);
+    steadyTimer();
     assert.deepEqual(scStemRows, {{41: 1, 55: 1, 42: 2, 56: 2}}, order);
     assert.deepEqual(states(7, 8, 11, 12), ['render', 'render', 'wait', 'wait'], order);
     // The first ends: only the count of tracks left moves.
@@ -8491,35 +8504,76 @@ for (const order of ['total first', 'left first']) {{
     assert.deepEqual(states(7, 8, 11, 12), ['', '', 'render', 'render'], order);
 }}
 
-// Review: a hand-over before Engine answered the one before it: both keep a place,
-// in order.
+// Review of 9391dac8, trace 1: the second track is added while the first ends, and
+// Engine's two answers reach the pack as one reading (2/1). The run's size changed
+// in it, so it counts once it has held: the first track is over, the second renders.
 reset();
-scStemMark(['41', '55'], 'wait'); hand(['41', '55'], () => answer(1, 1));
-scStemMark(['42', '56'], 'wait'); hand(['42', '56']);
-scStemMark(['43', '57'], 'wait'); hand(['43', '57']);
-assert.deepEqual(states(11, 13), ['wait', 'wait']);
-queue(2, 2);
-queue(3, 3);
-assert.deepEqual(scStemRows, {{41: 1, 55: 1, 42: 2, 56: 2, 43: 3, 57: 3}});
-queue(2, 3);
-assert.deepEqual(states(7, 11, 13), ['', 'render', 'wait']);
+scStemMark(['41', '55'], 'wait'); hand('901', ['41', '55'], () => answer(1, 1));
+scStemMark(['42', '56'], 'wait'); hand('902', ['42', '56']);
+answer(2, 2); answer(1, 2); settle();
+assert.deepEqual(scStemRows, {{41: 1, 55: 1, 42: 2, 56: 2}});
+assert.ok(steadyArmed);
+steadyTimer();
+assert.deepEqual(states(7, 8, 11, 12), ['', '', 'render', 'render']);
+scStemProgress = 0.75;
+assert.ok(Math.abs(own() - 0.5) < 1e-9);
 
-// Review: a track Engine refuses (it answers, nothing grows) takes no place, not
-// even the place of a local track added afterwards, whether Engine answers inside
-// the call or later, and whether the 30 s timer runs before or after that addition.
+// Two streamed tracks are handed over one at a time: the second waits until Engine
+// has answered the first.
+reset();
+queue(1, 1);                                       // a local track renders
+scStemMark(['42', '56'], 'wait'); hand('902', ['42', '56']);
+scStemMark(['43', '57'], 'wait'); hand('903', ['43', '57']);
+assert.deepEqual(sent, ['902']);
+queue(2, 2);
+assert.deepEqual(sent, ['902', '903']);
+queue(3, 3);
+assert.deepEqual(scStemRows, {{42: 2, 56: 2, 43: 3, 57: 3}});
+queue(2, 3);
+assert.deepEqual(states(11, 13), ['render', 'wait']);
+
+// Review of 9391dac8, trace 2: B refused (1/1) and C accepted (2/2) before the pack
+// reads either. B's answer is read before C is handed over, so B takes no place and
+// C gets its own.
+reset();
+queue(1, 1);                                       // a local track renders
+scStemMark(['42', '56'], 'wait'); hand('902', ['42', '56']);
+scStemMark(['43', '57'], 'wait'); hand('903', ['43', '57'], () => answer(2, 2));
+answer(1, 1);                                      // Engine refuses B
+settle();
+assert.deepEqual(sent, ['902', '903']);
+assert.deepEqual(scStemRows, {{43: 2, 57: 2}});
+assert.deepEqual(states(11, 12, 13, 14), ['', '', 'wait', 'wait']);
+queue(1, 2);                                       // the local track ends
+assert.deepEqual(states(11, 12, 13, 14), ['', '', 'render', 'render']);
+
+// Review of 9391dac8: a local track that ends while a streamed track waits for its
+// answer is not that track's refusal; its answer later still places it.
+reset();
+queue(1, 1);                                       // a local track renders
+scStemMark(['42', '56'], 'wait'); hand('902', ['42', '56']);
+queue(0, 0);                                       // the local track ends
+assert.deepEqual(states(11, 12), ['wait', 'wait']);
+queue(1, 1);                                       // Engine takes B
+assert.deepEqual(scStemRows, {{42: 1, 56: 1}});
+assert.deepEqual(states(11, 12), ['render', 'render']);
+
+// A track Engine refuses (it answers, nothing moves) takes no place, not even the
+// place of a local track added afterwards, whether Engine answers inside the call or
+// later, and whether the 30 s timer runs before or after that addition.
 for (const inCall of [true, false]) {{
     for (const timerFirst of [true, false]) {{
         reset();
-        queue(1, 1);                                   // a local track renders
+        queue(1, 1);                               // a local track renders
         scStemMark(['42', '56'], 'wait');
-        hand(['42', '56'], inCall ? () => answer(1, 1) : () => {{}});
+        hand('902', ['42', '56'], inCall ? () => answer(1, 1) : null);
         if (!inCall) {{
             assert.deepEqual(states(11, 12), ['wait', 'wait']);
-            queue(1, 1);                               // Engine's answer: refused
+            queue(1, 1);                           // Engine's answer: refused
         }}
         assert.deepEqual(states(11, 12), ['', ''], 'refused, in call: ' + inCall);
         if (timerFirst) refusedTimer();
-        queue(2, 2);                                   // a local track is added
+        queue(2, 2);                               // a local track is added
         if (!timerFirst) refusedTimer();
         assert.deepEqual(states(11, 12), ['', '']);
         assert.equal(streamed(), false);
@@ -8528,15 +8582,16 @@ for (const inCall of [true, false]) {{
         assert.equal(streamed(), false);
     }}
 }}
-// No answer from Engine at all: the timer ends the wait.
+// No answer from Engine at all: the timer ends the wait and the next track goes.
 reset();
-scStemMark(['42', '56'], 'wait');
-hand(['42', '56']);
-assert.deepEqual(states(11, 12), ['wait', 'wait']);
+scStemMark(['42', '56'], 'wait'); hand('902', ['42', '56']);
+scStemMark(['43', '57'], 'wait'); hand('903', ['43', '57']);
+assert.deepEqual(sent, ['902']);
 refusedTimer(); settle();
-assert.deepEqual(scStemRows, {{}});
-assert.deepEqual(scStemClaims, []);
+assert.deepEqual(sent, ['902', '903']);
+assert.deepEqual(states(11, 13), ['', 'wait']);
 // A row still being downloaded is not touched by the queue's end or the timer.
+reset();
 scStemMark(['41'], 'wait');
 queue(1, 1); queue(0, 0); refusedTimer();
 assert.deepEqual(scStemRows, {{41: 'wait'}});
@@ -8549,7 +8604,7 @@ scStemMark(['42'], 'wait');
 scStemMark(['41'], 'fail');
 assert.deepEqual(states(7, 11), ['fail', 'wait']);
 assert.equal(streamed(), false);
-hand(['56'], () => answer(1, 1));
+hand('956', ['56'], () => answer(1, 1));
 assert.deepEqual(scStemRows, {{41: 'fail', 42: 'wait', 56: 1}});
 queue(0, 0);
 assert.deepEqual(scStemRows, {{41: 'fail', 42: 'wait'}});
@@ -8587,7 +8642,7 @@ for (const [lang, waiting, rendering, nearly, failed] of [
     assert.ok(scStemText('render', 1, scStemEta(0.01, 600, 0.99)).length <= 'Downloading 100%'.length, lang);
 }}
 """
-        res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        res = subprocess.run(["node", "-"], input=script, capture_output=True, text=True)  # too long for one argument
         self.assertEqual(res.returncode, 0, res.stderr)
 
     def test_the_request_marks_its_rows_and_engine_progress_drives_them(self):
@@ -8621,12 +8676,14 @@ for (const [lang, waiting, rendering, nearly, failed] of [
         self.assertIn('root.scStemMark(scStemImport.rows, "wait")', stream)
         importer = main.split("id: scStemImport", 1)[1].split("id: scStemUnload", 1)[0]
         render = importer.split("function render(id) {", 1)[1].split("onTriggered", 1)[0]
-        # Handed to Engine: its queue is read before the call (Engine may answer inside
-        # it), and the rows get the track's own place once Engine confirms it.
-        seen = render.index("const seen = {total: root.scStemTotal, left: root.scStemCount, heard: root.scStemHeard}")
-        self.assertLess(seen, render.index("startRenderTracks(String(id))"))
-        self.assertLess(render.index("startRenderTracks(String(id))"), render.index("root.scStemHand(rows, seen)"))
-        self.assertIn("scStemRefused.restart()", render)
+        # Handed to Engine one track at a time (its answer names no track): its queue
+        # is read before the call (Engine may answer inside it), and the rows get the
+        # track's own place once Engine confirms it.
+        self.assertIn("root.scStemHand(id, rows)", render)
+        send = re.search(r"function scStemSend\(\) \{[\s\S]*?\n\t\}", main).group(0)
+        self.assertIn("if (scStemClaim || !scStemNext.length || !scStemQueue) return", send)
+        self.assertLess(send.index("scStemClaim = {rows: next.rows, total: total, left: left, heard: scStemHeard}"), send.index("scStemQueue.startRenderTracks(next.id)"))
+        self.assertIn("scStemRefused.restart()", send)
         # Engine never imported the file: the rows stop waiting.
         self.assertIn('if (tries-- <= 0) { root.scStemMark(rows, ""); stop(); return }', importer)
 
