@@ -339,6 +339,7 @@ class OnOffSwitchCompatibilityTest(unittest.TestCase):
             "scProlinkExport": "prolinkExport", "scMasterLimiter": "masterLimiter",
             "scAutoGain": "autoGain", "scUpfaderEcho": "upfaderEcho",
             "scStemsEqMode": "stemsEqMode", "scBeatJumpPads": "beatJumpPads",
+            "scPitchBendBeatJump": "pitchBendBeatJump",
             "scSwapLoopOrder": "swapLoopOrder", "scDualColumn": "browserDualColumn",
             "scTracklistWaveform": "tracklistWaveform", "scOmniSource": "omniSource",
             "scCueCountdown": "cueCountdown", "scRemoteLoad": "remoteLoad",
