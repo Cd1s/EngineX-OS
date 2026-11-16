@@ -624,6 +624,12 @@ Linked View	联机视图	聯機視圖	Vista vinculada
 Single / Dual layer: Shift + Layer, or Layout > PERFORMANCE LAYOUT > Deck Layout	单层 / 双层：Shift + Layer，或 布局 > 演出布局 > 碟机排列	單層 / 雙層：Shift + Layer，或 版面 > 演出配置 > 碟機排列	Simple / Doble: Shift + Layer, o Disposición > DISPOSICIÓN DE ACTUACIÓN > Disposición de decks
 Stock	原厂	原廠	Original
 Preparing USB…	正在准备 USB…	正在準備 USB…	Preparando el USB…
+Loading USB…	U盘载入中…	隨身碟載入中…	Cargando USB…
+Loading SD card…	SD 卡载入中…	SD 卡載入中…	Cargando tarjeta SD…
+USB conversion timed out	U盘载入超时	隨身碟載入逾時	Tiempo de espera de carga USB agotado
+USB conversion failed	U盘载入失败	隨身碟載入失敗	Error al cargar el USB
+SD card conversion timed out	SD 卡载入超时	SD 卡載入逾時	Tiempo de espera de carga de tarjeta SD agotado
+SD card conversion failed	SD 卡载入失败	SD 卡載入失敗	Error al cargar la tarjeta SD
 Output Source	输出来源	輸出來源	Fuente de salida
 Settings copy	复制设置	複製設定	Copia de ajustes
 Copy settings from another deck	从另一台设备复制设置	從另一台裝置複製設定	Copiar ajustes de otro deck

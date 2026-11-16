@@ -81,6 +81,8 @@ type Options struct {
 	// Now is the clock Deadline is checked against; nil means time.Now. Tests
 	// use it to put the deadline inside a library whatever the host's load.
 	Now func() time.Time `json:"-"`
+	// OnProgress, if non-nil, reports (done, total) tracks processed during SyncResolved.
+	OnProgress func(done, total int) `json:"-"`
 }
 type Result struct {
 	Added, Updated, Unchanged int
@@ -195,12 +197,14 @@ func open(ctx context.Context, p string) (*sql.DB, *sql.Tx, error) {
 	if e = tx.QueryRowContext(ctx, `SELECT count(*) FROM bridge.sqlite_master WHERE name='BridgeState'`).Scan(&n); e != nil {
 		return nil, nil, e
 	}
-	if n == 0 {
+	createdBridge := n == 0
+	if createdBridge {
 		if _, e = tx.ExecContext(ctx, bridgeSchema); e != nil {
 			return nil, nil, e
 		}
 	}
 	// Libraries from earlier builds kept this state in m.db, not yet dropped by Engine.
+	var migratedAnalysis bool
 	for _, table := range bridgeTables {
 		if e = tx.QueryRowContext(ctx, `SELECT count(*) FROM main.sqlite_master WHERE type='table' AND name=?`, table).Scan(&n); e != nil {
 			return nil, nil, e
@@ -208,12 +212,20 @@ func open(ctx context.Context, p string) (*sql.DB, *sql.Tx, error) {
 		if n == 0 {
 			continue
 		}
+		if table == "BridgeAnalysis" {
+			migratedAnalysis = true
+		}
 		if _, e = tx.ExecContext(ctx, fmt.Sprintf(`INSERT OR REPLACE INTO bridge.%[1]s SELECT * FROM main.%[1]s; DROP TABLE main.%[1]s`, table)); e != nil {
 			return nil, nil, e
 		}
 	}
 	if _, e = tx.ExecContext(ctx, `INSERT OR IGNORE INTO BridgeLibrary(key,value) VALUES('version','1')`); e != nil {
 		return nil, nil, e
+	}
+	if createdBridge && !migratedAnalysis {
+		if _, e = tx.ExecContext(ctx, `INSERT OR IGNORE INTO BridgeLibrary(key,value) VALUES('analysis_format','rba1'),('rba1_backfill_checked','1')`); e != nil {
+			return nil, nil, e
+		}
 	}
 	for _, index := range []string{
 		`CREATE INDEX IF NOT EXISTS index_PlaylistEntity_trackId ON PlaylistEntity(trackId)`,
@@ -479,9 +491,15 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 	if artErr != nil {
 		log.Printf("rb-bridge: no Artwork directory, covers will not reach other decks: %v", artErr)
 	}
+	if opts.OnProgress != nil && len(prepared) > 0 {
+		opts.OnProgress(0, len(prepared))
+	}
 	for i, preparedTrack := range prepared {
 		if err = ctx.Err(); err != nil {
 			return result, err
+		}
+		if opts.OnProgress != nil {
+			opts.OnProgress(i+1, len(prepared))
 		}
 		// Time left after the tracks prepared up front: prepare the next one now.
 		if preparedTrack.late && !opts.Deadline.IsZero() && !past() {

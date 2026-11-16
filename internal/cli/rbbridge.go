@@ -89,11 +89,19 @@ func RBBridge(args []string, stdout io.Writer) error {
 	}
 	if *mount != "" {
 		_ = syncDjayLibrary(*mount)
-		opts := enginedb.Options{SmartMatch: *smart != 0, CurrentTrack: uint32(*smart)}
+		rep := newUSBLoadingReporter(usbLoadingStatusPath(), detectMediaKind(*mount, ""))
+		rep.Start()
+		opts := enginedb.Options{
+			SmartMatch:   *smart != 0,
+			CurrentTrack: uint32(*smart),
+			OnProgress:   func(done, total int) { rep.Report(done, total, false) },
+		}
 		r, err := bridge.ConvertAtMount(ctx, *mount, opts, *full)
 		if err != nil {
+			rep.Fail(err)
 			return err
 		}
+		rep.Done()
 		emit(r)
 	}
 	if !*link {

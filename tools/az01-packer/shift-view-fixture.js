@@ -20,7 +20,10 @@ function action(text, name) {
 const functions = [...source.main.matchAll(/^\tfunction (scView\w+)\([^\n]*\) \{[\s\S]*?^\t\}/gm)]
     .map(m => m[0]).join('\n');
 const changed = source.main.match(/^\t\tfunction onCurrentViewChanged\(\) \{[\s\S]*?^\t\t\}/m)[0];
-const cycle = source.main.match(/function onTriggered\(\) \{ (root\.scViewSelect\([^\n]+) \}/);
+// Engine's action translators have no "triggered" signal: trigger() raises
+// stateTrueCount and emits stateChanged, which stock's ActionTranslatorStateChangeNotifier
+// (the receiver below, when the generated QML has one) turns into changed().
+const cycle = source.main.match(/ActionTranslatorStateChangeNotifier \{\n\t\tprop: root\.scViewCycleProperty \|\| null\n\t\tonChanged: (root\.scViewSelect\([^\n]+)\n/);
 const timerStart = source.main.indexOf('\tTimer {', source.main.indexOf('function scViewSelect('));
 const timer = body(source.main, source.main.indexOf('onTriggered:', timerStart));
 const keyboard = source.main.match(/shortcut: "Shift\+V"\s+onTriggered: ([^\n]+)/)[1];
@@ -96,10 +99,18 @@ function fixture(board, mode, orientation, saved) {
     ctx.scViewCtrl = vsc;
     ctx.root = ctx;
     ctx.Planck = { getProperty(path) {
-        return p[path] ||= { translator: { state: false, trigger() {
+        return p[path] ||= { translatorType: 3, translator: { state: false, stateTrueCount: 0, seen: 0, trigger() {
             events.push(path);
-            if (path === '/GUI/Scripted/EngineXCycleView' && cycle) vm.runInContext(cycle[1], ctx);
-            else if (path.endsWith('/Shift/SinglePress') || path.endsWith('/CycleViewPress')) {
+            this.stateTrueCount++;
+            this.state = true;
+            // stateChanged reaches the GUI's notifier, whichever engine triggered.
+            if (path === '/GUI/Scripted/EngineXCycleView') {
+                if (cycle && this.seen !== this.stateTrueCount) {
+                    this.seen = this.stateTrueCount;
+                    vm.runInContext(cycle[1], ctx);
+                    this.state = false;
+                }
+            } else if (path.endsWith('/Shift/SinglePress') || path.endsWith('/CycleViewPress')) {
                 // Stock policy has only three presets; it does not know views.json.
                 vsc.currentView = (vsc.currentView + 1) % 3;
             }

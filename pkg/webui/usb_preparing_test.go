@@ -114,3 +114,72 @@ func TestUSBPreparingLifecycle(t *testing.T) {
 		poll(route, false)
 	}
 }
+
+func TestUSBPreparingStatusAndErrorLifecycle(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "preparing")
+	errPath := path + ".err"
+	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir(), USBPreparingPath: path}, nil)
+	defer s.Close()
+
+	get := func(route string) (map[string]any, string) {
+		t.Helper()
+		r := httptest.NewRequest("GET", route, nil)
+		r.RemoteAddr = "127.0.0.1:1234"
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, r)
+		if w.Code != 200 {
+			t.Fatalf("%s: %d %s", route, w.Code, w.Body.String())
+		}
+		var v map[string]any
+		if err := json.Unmarshal(w.Body.Bytes(), &v); err != nil {
+			t.Fatal(err)
+		}
+		return v, w.Header().Get("X-UI-Digest")
+	}
+
+	base, baseDigest := get("/v1/enginex/ui")
+	if _, ok := base["usbPrepare"]; ok {
+		t.Fatalf("unexpected usbPrepare when idle: %v", base)
+	}
+
+	if err := os.WriteFile(path, []byte(`{"state":"loading","kind":"sd","done":1200,"total":21352}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, route := range []string{"/v1/enginex/ui", "/v1/sc5000/ui"} {
+		v, d := get(route)
+		if v["usbPreparing"] != true {
+			t.Fatalf("%s: want usbPreparing=true, got %v", route, v["usbPreparing"])
+		}
+		if d == baseDigest {
+			t.Fatalf("%s: digest did not change", route)
+		}
+		up, ok := v["usbPrepare"].(map[string]any)
+		if !ok || up["state"] != "loading" || up["kind"] != "sd" || up["done"] != float64(1200) || up["total"] != float64(21352) {
+			t.Fatalf("%s: unexpected usbPrepare=%v", route, v["usbPrepare"])
+		}
+	}
+
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(errPath, []byte(`{"state":"error","kind":"usb","error":"bridge failed: corrupt pdb"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	v, _ := get("/v1/enginex/ui")
+	if _, ok := v["usbPreparing"]; ok {
+		t.Fatalf("error state must not set usbPreparing: %v", v)
+	}
+	up, ok := v["usbPrepare"].(map[string]any)
+	if !ok || up["state"] != "error" || up["kind"] != "usb" || up["error"] != "bridge failed: corrupt pdb" {
+		t.Fatalf("unexpected error usbPrepare=%v", v["usbPrepare"])
+	}
+
+	expired := time.Now().Add(-9 * time.Second)
+	if err := os.Chtimes(errPath, expired, expired); err != nil {
+		t.Fatal(err)
+	}
+	v, d := get("/v1/enginex/ui")
+	if _, ok := v["usbPrepare"]; ok || d != baseDigest {
+		t.Fatalf("expired error must disappear (got %v)", v["usbPrepare"])
+	}
+}
