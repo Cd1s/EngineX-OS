@@ -404,3 +404,28 @@ func TestGuardianFixMP3GridsFlagsAndExecution(t *testing.T) {
 		t.Fatalf("--status modified beat0=%v, want 5000.0", got)
 	}
 }
+
+// The mount hook's carry-over check (edisksd_hook.c carry_library): exit 0 accepts the copy, 1
+// refuses it, 2 is a usage error.
+func TestGuardianCheckCopy(t *testing.T) {
+	lib := filepath.Join(mountFixture(t), "Engine Library") // its one track: "music.mp3", not there yet
+	var out, errOut bytes.Buffer
+	if code := Guardian([]string{"--check-copy", lib}, &out, &errOut); code != 1 || !strings.Contains(errOut.String(), "copied library refused") {
+		t.Fatalf("no track found: code=%d err=%s", code, &errOut)
+	}
+	if err := os.WriteFile(filepath.Join(lib, "music.mp3"), []byte("audio"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := Guardian([]string{"--check-copy", lib}, &out, &errOut); code != 0 {
+		t.Fatalf("code=%d err=%s", code, &errOut)
+	}
+	var r struct{ Tracks, Missing int }
+	if err := json.Unmarshal(out.Bytes(), &r); err != nil || r.Tracks != 1 || r.Missing != 0 {
+		t.Fatalf("report %s: %+v %v", &out, r, err)
+	}
+	if code := Guardian([]string{"--check-copy", lib, "--heal-mount", lib}, &out, &errOut); code != 2 {
+		t.Fatalf("combined with --heal-mount: code=%d", code)
+	}
+}

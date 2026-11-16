@@ -36,6 +36,9 @@ static int64_t test_post_reserve=18500;
 // Free space kept on the cache filesystem: none, except in the test that sets it.
 static uint64_t test_cache_reserve;
 #define HFS_CACHE_RESERVE test_cache_reserve
+// Free space left on a stick after a carry-over: none, so a tiny tmpfs stick fills up mid-copy.
+static uint64_t test_carry_slack;
+#define CARRY_SLACK test_carry_slack
 #include <errno.h>
 #include <sys/stat.h>
 static char test_eio_path[PATH_MAX];
@@ -1400,6 +1403,117 @@ static void test_hfs_rw_unit(const char *root) {
     puts("HFS+ RW unit checks (journal/header/vermagic/opts/mountinfo/MS_RDONLY): PASS");
 }
 
+// 5d. A stick whose only library is the one Engine built for it in /data while it was read-only
+//     (seed_library's zero-signature generation, in use) gets that library carried over, whole or not
+//     at all, before its first rw mount. Called from test_hfs_rw_policy with its Gen-1 fixtures in place.
+static struct libmnt_context carry_ctx;
+static int carry_mount(const char *target,const char *img,const char *disk,const char *notes) {
+    memset(&carry_ctx,0,sizeof carry_ctx);carry_ctx.target=target;carry_ctx.source=img;carry_ctx.disk=disk;carry_ctx.invoke_sys_mount=1;
+    mnt_context_set_fstype_pattern(&carry_ctx,"hfsplus");mnt_context_set_options(&carry_ctx,"nosuid");
+    int saved=notes_to(notes);
+    assert(!mnt_context_mount(&carry_ctx)&&carry_ctx.status==1);
+    notes_done(saved);
+    int rw=has_opt_token(carry_ctx.last_mount_opts,"rw")&&!(test_last_sys_flags&MS_RDONLY);
+    assert(rw||(has_opt_token(carry_ctx.last_mount_opts,"ro")&&(test_last_sys_flags&MS_RDONLY)));
+    struct statvfs v;assert(!statvfs(target,&v)&&(!(v.f_flag&ST_RDONLY))==rw);
+    return rw;
+}
+static void carry_unmount(void){assert(!unmount_dispatch(&carry_ctx,real_unmount));mnt_free_context(&carry_ctx);}
+static unsigned carry_stages(const char *disk) {
+    DIR *d=opendir(disk);assert(d);unsigned n=0;struct dirent *e;
+    while((e=readdir(d)))n+=!strncmp(e->d_name,CARRY_STAGE,strlen(CARRY_STAGE));
+    closedir(d);return n;
+}
+// Read-only with the /data library in the view, nothing left on the stick.
+static void expect_kept_read_only(const char *target,const char *disk,const char *db) {
+    char p[PATH_MAX];
+    join(p,target,"Engine Library/Database2/m.db");expect_file(p,"deck-authored library");
+    carry_unmount();
+    join(p,disk,"Engine Library");assert(access(p,F_OK)&&errno==ENOENT);
+    assert(carry_stages(disk)==0);expect_file(db,"deck-authored library");
+}
+static void test_hfs_carry_over(const char *root,const char *target,const char *img) {
+    char disk[PATH_MAX],small[PATH_MAX],lib[PATH_MAX],db[PATH_MAX],p[PATH_MAX],log[PATH_MAX],notes[PATH_MAX],refuse[PATH_MAX],slow[PATH_MAX],script[PATH_MAX*4];
+    join(disk,root,"carry-disk");join(p,disk,"Music");assert(!make_dirs(p));join(p,disk,"Music/a.mp3");write_file(p,"audio");
+    join(lib,LIB_ROOT,"uuid-hfs-stick/library-0000000000000000");join(p,lib,"Database2");assert(!make_dirs(p));
+    join(db,lib,"Database2/m.db");write_file(db,"deck-authored library");
+    join(p,lib,"Artwork");assert(!make_dirs(p));join(p,lib,"Artwork/cover.jpg");write_file(p,"cover");
+    assert(!utimensat(AT_FDCWD,lib,NULL,0)); // the generation in use
+    join(log,root,"carry-guardian.log");join(refuse,root,"carry-refuse");join(slow,root,"carry-slow");join(notes,root,"carry-notes.log");
+    join(test_guardian_system,root,"carry-guardian");
+    snprintf(script,sizeof script,"#!/bin/sh\necho \"$*\" >> '%s'\n[ \"$1\" = --check-copy ] || exit 0\n[ -f \"$2/Database2/m.db\" ] || exit 3\n"
+                                  "[ -e '%s' ] && exit 1\n[ -e '%s' ] && sleep 3\nexit 0\n",log,refuse,slow);
+    write_file(test_guardian_system,script);assert(!chmod(test_guardian_system,0700));
+    char want[PATH_MAX+32];snprintf(want,sizeof want,"--check-copy %s/" CARRY_STAGE,target);
+
+    // The check refuses the copy: read-only, the /data library in the view, no stage, nothing renamed.
+    write_file(refuse,"");snprintf(test_hfs_target,sizeof test_hfs_target,"%s",target);
+    assert(!carry_mount(target,img,disk,notes));
+    assert(count_notes(log,want)==1&&count_notes(notes,"copy refused by engine-guardian --check-copy")==1&&
+           count_notes(notes,"carry-over failed, keeping read-only view on")==1);
+    expect_kept_read_only(target,disk,db);
+    assert(!unlink(refuse));test_hfs_target[0]=0;
+
+    // Carried over: rw, the whole library on the stick under its own name, the /data copy kept.
+    assert(carry_mount(target,img,disk,notes));
+    assert(count_notes(log,want)==2&&count_notes(notes,"library Engine built on /data carried over to")==1);
+    carry_unmount();
+    join(p,disk,"Engine Library/Database2/m.db");expect_file(p,"deck-authored library");
+    join(p,disk,"Engine Library/Artwork/cover.jpg");expect_file(p,"cover");
+    assert(carry_stages(disk)==0);expect_file(db,"deck-authored library");
+
+    // The stick has an Engine Library: never overwritten, nothing copied, rw.
+    write_file(db,"newer deck library");
+    assert(carry_mount(target,img,disk,notes));
+    assert(count_notes(log,want)==2&&count_notes(notes,"stick has an Engine Library of its own")==1);
+    carry_unmount();
+    join(p,disk,"Engine Library/Database2/m.db");expect_file(p,"deck-authored library");
+    write_file(db,"deck-authored library");
+    int dfd=open(disk,O_RDONLY|O_DIRECTORY);assert(dfd>=0);remove_tree(dfd,"Engine Library");close(dfd);
+
+    // No room on the stick: refused before anything is written.
+    join(small,root,"carry-small");assert(!make_dirs(small));
+    assert(!mount("carry-small",small,"tmpfs",0,"size=256k"));
+    join(p,small,"Music");assert(!make_dirs(p));join(p,small,"Music/a.mp3");write_file(p,"audio");
+    char big[PATH_MAX];join(big,lib,"Database2/big.bin");write_bytes(big,1u<<20);
+    snprintf(test_hfs_target,sizeof test_hfs_target,"%s",target);
+    assert(!carry_mount(target,img,small,notes));
+    assert(count_notes(log,want)==2&&count_notes(notes,"no room on the stick")==1);
+    expect_kept_read_only(target,small,db);
+    assert(!unlink(big));
+
+    // The stick fills up mid-copy (each small file takes a page): the partial stage goes.
+    assert(!umount2(small,0));assert(!mount("carry-small",small,"tmpfs",0,"size=64k"));
+    join(p,small,"Music");assert(!make_dirs(p));join(p,small,"Music/a.mp3");write_file(p,"audio");
+    join(p,lib,"OverviewData");assert(!make_dirs(p));
+    for(int i=0;i<40;i++){char f[64];snprintf(f,sizeof f,"OverviewData/%02d.dat",i);join(p,lib,f);write_file(p,"w");}
+    assert(!carry_mount(target,img,small,notes));
+    assert(count_notes(log,want)==2&&count_notes(notes,"cannot copy the library onto the stick")==1);
+    expect_kept_read_only(target,small,db);
+    assert(!umount2(small,0));
+    int lfd=open(lib,O_RDONLY|O_DIRECTORY);assert(lfd>=0);remove_tree(lfd,"OverviewData");close(lfd);
+
+    // Out of the mount budget: read-only, and not tried again until reboot.
+    write_file(slow,"");
+    assert(!carry_mount(target,img,disk,notes));
+    assert(count_notes(log,want)==3);
+    expect_kept_read_only(target,disk,db);
+    assert(!carry_mount(target,img,disk,notes));
+    assert(count_notes(log,want)==3&&count_notes(notes,"too large to carry over at mount")==1);
+    expect_kept_read_only(target,disk,db);
+    char marker[PATH_MAX];assert(!carry_marker(lib,marker)&&!unlink(marker));
+    assert(!unlink(slow));test_hfs_target[0]=0;
+
+    // No library left in /data: a plain rw mount, nothing carried.
+    assert(!unlink(db));
+    assert(carry_mount(target,img,disk,notes));
+    assert(count_notes(log,want)==3);
+    carry_unmount();
+    join(p,disk,"Engine Library");assert(access(p,F_OK));
+    join(p,lib,"Artwork/cover.jpg");assert(!unlink(p));join(p,lib,"Artwork");assert(!rmdir(p));
+    unlink(log);test_guardian_system[0]=0;
+    puts("HFS+ carry-over of the library Engine built in /data: refused copy, carried whole, own library never overwritten, no room, full mid-copy, out of budget: PASS");
+}
 static void test_hfs_rw_policy(const char *root) {
     assert(!mount(NULL,"/",NULL,MS_REC|MS_PRIVATE,NULL));
     char disk[PATH_MAX],target[PATH_MAX],img[PATH_MAX],fsck[PATH_MAX],mroot[PATH_MAX],extra[PATH_MAX],ko[PATH_MAX],flat_ko[PATH_MAX],marker[PATH_MAX],procfs[PATH_MAX],dt[PATH_MAX],p[PATH_MAX];
@@ -1594,31 +1708,10 @@ static void test_hfs_rw_policy(const char *root) {
     expect_file(fsck_log,"-n -f\n");
     assert(!unmount_dispatch(&c,real_unmount));mnt_free_context(&c);
 
-    // 5d. A stick whose only library is the one Engine built for it in /data while it was read-only
-    //     (seed_library's zero-signature generation, in use) stays read-only with it: no fsck, no rw.
-    //     Once a newer generation is in use (the stick got its own library) or none is left, it mounts rw.
     snprintf(fsck_sh,sizeof fsck_sh,"#!/bin/sh\necho \"$1 $2\" >> '%s'\necho '** The volume TEST appears to be OK.'\nexit 0\n",fsck_log);
     write_file(fsck,fsck_sh);
     join(img,root,"pol-clean.img");
-    char deck_db[PATH_MAX];join(deck_db,LIB_ROOT,"uuid-hfs-stick/library-0000000000000000/Database2");assert(!make_dirs(deck_db));
-    join(deck_db,LIB_ROOT,"uuid-hfs-stick/library-0000000000000000/Database2/m.db");write_file(deck_db,"deck-authored library");
-    unlink(fsck_log);
-    memset(&c,0,sizeof c);c.target=target;c.source=img;c.invoke_sys_mount=1;
-    mnt_context_set_fstype_pattern(&c,"hfsplus");mnt_context_set_options(&c,"nosuid");
-    assert(!mnt_context_mount(&c)&&has_opt_token(c.last_mount_opts,"ro")&&(test_last_sys_flags&MS_RDONLY));
-    assert(access(fsck_log,F_OK));expect_file(deck_db,"deck-authored library");
-    assert(!unmount_dispatch(&c,real_unmount));mnt_free_context(&c);
-    char native_gen[PATH_MAX];join(native_gen,LIB_ROOT,"uuid-hfs-stick/library-00000000000000a1");assert(!make_dirs(native_gen));
-    struct timespec later[2]={{.tv_nsec=UTIME_NOW},{.tv_sec=time(NULL)+60}};assert(!utimensat(AT_FDCWD,native_gen,later,0));
-    memset(&c,0,sizeof c);c.target=target;c.source=img;c.invoke_sys_mount=1;
-    mnt_context_set_fstype_pattern(&c,"hfsplus");mnt_context_set_options(&c,"nosuid");
-    assert(!mnt_context_mount(&c)&&has_opt_token(c.last_mount_opts,"rw")&&!(test_last_sys_flags&MS_RDONLY));
-    assert(!unmount_dispatch(&c,real_unmount));mnt_free_context(&c);
-    assert(!rmdir(native_gen));assert(!unlink(deck_db));
-    memset(&c,0,sizeof c);c.target=target;c.source=img;c.invoke_sys_mount=1;
-    mnt_context_set_fstype_pattern(&c,"hfsplus");mnt_context_set_options(&c,"nosuid");
-    assert(!mnt_context_mount(&c)&&has_opt_token(c.last_mount_opts,"rw")&&!(test_last_sys_flags&MS_RDONLY));
-    assert(!unmount_dispatch(&c,real_unmount));mnt_free_context(&c);
+    test_hfs_carry_over(root,target,img);
 
     // Restore clean image & fsck mock for sections 6-8.
     join(img,root,"pol-clean.img");

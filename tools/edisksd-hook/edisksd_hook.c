@@ -1461,10 +1461,12 @@ static void hfs_restore_ro(struct libmnt_context *ctx,const struct hfs_ctx_backu
 }
 // A stick read-only until now and with no Engine Library of its own has the library Engine built
 // for it only in /data: the generation in use (seed_library touches it) is library-<zero signature>.
-// Read-write, Engine would start an empty library on the stick and no longer show that one, so it
-// stays read-only with it. Once the stick has a library of its own, a newer generation is in use.
-static int deck_library_only(const char *source) {
-    char identity[80],cache[PATH_MAX],root[PATH_MAX],lib[PATH_MAX],db[PATH_MAX],newest[NAME_MAX+1]="";struct stat st,best={0};
+// Read-write, Engine would start an empty library on the stick and no longer show that one, so
+// carry_library moves it onto the stick first. Its path goes to out. Once the stick has a library
+// of its own, a newer generation is in use.
+static char carry_from[PATH_MAX];
+static int deck_library_only(const char *source,char out[PATH_MAX]) {
+    char identity[80],cache[PATH_MAX],root[PATH_MAX],db[PATH_MAX],newest[NAME_MAX+1]="";struct stat st,best={0};
     if(VOLUME_IDENTITY(source,identity)||lib_root(cache)||path_join(root,sizeof root,cache,identity))return 0;
     DIR *d=opendir(root);if(!d)return 0;
     struct dirent *e;
@@ -1473,8 +1475,15 @@ static int deck_library_only(const char *source) {
             best=st;snprintf(newest,sizeof newest,"%s",e->d_name);
         }
     closedir(d);
-    return !strcmp(newest,"library-0000000000000000")&&!path_join(lib,sizeof lib,root,newest)&&!path_join(db,sizeof db,lib,"Database2/m.db")&&
+    return !strcmp(newest,"library-0000000000000000")&&!path_join(out,PATH_MAX,root,newest)&&!path_join(db,sizeof db,out,"Database2/m.db")&&
            !lstat(db,&st)&&S_ISREG(st.st_mode)&&st.st_size>0;
+}
+// A carry-over that ran out of the mount budget is not tried again until reboot: each insert would
+// wait the whole budget for it and end read-only anyway.
+static int carry_marker(const char *library,char out[PATH_MAX]) {
+    uint64_t h=hash_bytes(UINT64_C(14695981039346656037),library,strlen(library));
+    if(snprintf(out,PATH_MAX,"%s/slowcarry-%016llx",RUN_ROOT,(unsigned long long)h)>=PATH_MAX){errno=ENAMETOOLONG;return -1;}
+    return 0;
 }
 static int hfs_prepare_mount(struct libmnt_context *ctx,struct hfs_ctx_backup *bk,int64_t deadline) {
     memset(bk,0,sizeof *bk);
@@ -1512,9 +1521,11 @@ static int hfs_prepare_mount(struct libmnt_context *ctx,struct hfs_ctx_backup *b
     // AZ04 (mode == 2) uses stock hfsplus; Gen-1 (mode == 1) uses hfsplusx.
     // Even if AZ04_UFSD_DT_PATH exists, hfsplus mounts stay on stock hfsplus rw while ufsd mounts above pass untouched.
     (void)AZ04_UFSD_DT_PATH;
-    if(deck_library_only(source)) {
-        note("HFS+ stick has only the library Engine built for it on /data, keeping read-only view on",target,0);
-        hfs_apply_ro(ctx,orig_ft,set_by_fstype,orig_opts);return HFS_RW_NONE;
+    char marker[PATH_MAX];
+    if(!deck_library_only(source,carry_from))carry_from[0]=0;
+    else if(!carry_marker(carry_from,marker)&&!access(marker,F_OK)) {
+        note("HFS+ stick's library on /data too large to carry over at mount, keeping read-only view on",target,0);
+        carry_from[0]=0;hfs_apply_ro(ctx,orig_ft,set_by_fstype,orig_opts);return HFS_RW_NONE;
     }
     set_preparing(target,1);
     const char *fsck=FSCK_HFSPLUS_PATH();
@@ -1771,6 +1782,18 @@ static int heal_marker(const char *target,char out[PATH_MAX]) {
 // A mount that waited longer than this for view_lock (another stick was being
 // converted) did not get its whole conversion window.
 #define LOCK_WAIT_SLACK_MS INT64_C(1000)
+// In a forked child: the volume mounted in a mount namespace of its own. Nothing mounted
+// here reaches edisksd's (and Engine's) namespace.
+static int private_mount(struct libmnt_context *ctx,int (*real)(struct libmnt_context *),const char *target) {
+    private_ns=1;
+    if(unshare(CLONE_NEWNS)||mount(NULL,"/",NULL,MS_REC|MS_PRIVATE,NULL))return -1;
+    // libmount writes the mount (edisksd passes uhelper=edisksd) into
+    // /run/mount/utab, a file the mount namespace does not separate, and this
+    // mount ends without libmount. Its record goes to a utab of its own.
+    mkdir(UTAB_DIR,0755);
+    if(mount("edisksd-hook",UTAB_DIR,"tmpfs",MS_NODEV|MS_NOSUID|MS_NOEXEC,"mode=0755,size=64k"))note("no private utab for the pre-mount of",target,errno);
+    return real(ctx)||mnt_context_get_status(ctx)!=1?-1:0;
+}
 // Mount the volume in a private namespace and convert (or heal) it there.
 // Returns 1 when the stick held a rekordbox export and rb-bridge finished, 2
 // when it held one but the conversion did not finish (or is known not to) or no
@@ -1787,15 +1810,8 @@ static int premount(struct libmnt_context *ctx,int (*real)(struct libmnt_context
     int up[2]={-1,-1};if(pipe2(up,O_CLOEXEC|O_NONBLOCK))up[0]=up[1]=-1;
     pid_t pid=fork();if(pid<0){close(up[0]);close(up[1]);return 0;}
     if(!pid) {
-        seeded_as[0]=0;private_ns=1;
-        // Nothing mounted here reaches edisksd's (and Engine's) namespace.
-        if(unshare(CLONE_NEWNS)||mount(NULL,"/",NULL,MS_REC|MS_PRIVATE,NULL))_exit(0);
-        // libmount writes the mount (edisksd passes uhelper=edisksd) into
-        // /run/mount/utab, a file the mount namespace does not separate, and this
-        // mount ends without libmount. Its record goes to a utab of its own.
-        mkdir(UTAB_DIR,0755);
-        if(mount("edisksd-hook",UTAB_DIR,"tmpfs",MS_NODEV|MS_NOSUID|MS_NOEXEC,"mode=0755,size=64k"))note("no private utab for the pre-mount of",target,errno);
-        if(real(ctx)||mnt_context_get_status(ctx)!=1)_exit(0);
+        seeded_as[0]=0;
+        if(private_mount(ctx,real,target))_exit(0);
         // A stick without a rekordbox export costs one look at its root directory:
         // no statvfs (a FAT32 free-space scan) and no library walk, both of which
         // the visible mount would repeat on a cold cache inside the same budget.
@@ -1833,13 +1849,86 @@ static int premount(struct libmnt_context *ctx,int (*real)(struct libmnt_context
     }
     close(up[0]);return result;
 }
+// Free space left on the stick after a carry-over.
+#ifndef CARRY_SLACK
+#define CARRY_SLACK (UINT64_C(16)<<20)
+#endif
+#define CARRY_STAGE ".enginex-carry-"
+// The library Engine built in /data for a stick that was read-only goes onto the stick, whole or not
+// at all: copied into a stage beside where it goes, synced, checked by engine-guardian (m.db's
+// integrity, and its tracks' paths, which Engine keeps relative to the library folder, resolve on
+// this stick), then renamed to "Engine Library". An Engine Library already on the stick is never
+// overwritten: it wins, as it does in seed_library. On any failure the stage goes, the stick stays
+// read-only and the library stays in /data. The /data copy also stays after a carry-over, for a
+// rollback, until the cache's own rules reclaim it.
+static int carry_library(const char *target,const char *from,int64_t deadline) {
+    char stage[PATH_MAX]="";const char *why="cannot read the library on /data";struct stat st;uint64_t bytes=0;
+    int root=open(target,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC),src=-1,dst=-1,rc=-1;
+    if(root<0){note("library carry-over: cannot open",target,errno);return -1;}
+    if(!fstatat(root,"Engine Library",&st,AT_SYMLINK_NOFOLLOW)){close(root);note("stick has an Engine Library of its own, library on /data left there for",target,0);return 0;}
+    if(errno!=ENOENT){why="cannot look for Engine Library";goto done;}
+    // A stage left by an attempt killed at its deadline (or by a power cut) goes first.
+    int dup=fcntl(root,F_DUPFD_CLOEXEC,0);DIR *d=dup<0?NULL:fdopendir(dup);struct dirent *e;
+    if(!d&&dup>=0)close(dup);
+    while(d&&(e=readdir(d)))if(!strncmp(e->d_name,CARRY_STAGE,strlen(CARRY_STAGE)))remove_tree(root,e->d_name);
+    if(d)closedir(d);
+    if((src=open(from,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC))<0||copy_tree(src,-1,deadline,0,&bytes))goto done;
+    struct statvfs v;
+    if(fstatvfs(root,&v)){why="cannot read the stick's free space";goto done;}
+    if((uint64_t)v.f_bavail*(uint64_t)v.f_frsize<bytes+CARRY_SLACK){errno=ENOSPC;why="no room on the stick";goto done;}
+    why="cannot copy the library onto the stick";
+    if(path_join(stage,sizeof stage,target,CARRY_STAGE "XXXXXX")||!mkdtemp(stage)){stage[0]=0;goto done;}
+    if((dst=open(stage,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC))<0||copy_tree(src,dst,deadline,0,NULL)||fsync(dst))goto done;
+    char *const check[]={(char *)GUARDIAN_PATH,"--check-copy",stage,NULL};
+    why="copy refused by engine-guardian --check-copy";
+    if(run(check,deadline))goto done;
+    why="cannot rename the copy to Engine Library";
+    if(renameat2(root,strrchr(stage,'/')+1,root,"Engine Library",RENAME_NOREPLACE)||fsync(root))goto done;
+    stage[0]=0;rc=0;note("library Engine built on /data carried over to",target,0);
+ done: {
+        int saved=errno;
+        if(rc)note(why,target,saved);
+        if(*stage){remove_tree(root,strrchr(stage,'/')+1);fsync(root);}
+        if(dst>=0)close(dst);
+        if(src>=0)close(src);
+        close(root);errno=saved;return rc;
+    }
+}
+// carry_library in a private rw mount before any other: 0 when the stick may be mounted rw, -1
+// when it stays read-only with its library in /data.
+static int carry_premount(struct libmnt_context *ctx,int (*real)(struct libmnt_context *),int64_t deadline) {
+    const char *target=mnt_context_get_target(ctx);
+    pid_t pid=fork();if(pid<0)return -1;
+    if(!pid) {
+        struct statvfs v;
+        if(private_mount(ctx,real,target)||statvfs(target,&v)||(v.f_flag&ST_RDONLY))_exit(1);
+        int rc=carry_library(target,carry_from,deadline),err=errno;
+        umount2(target,UMOUNT_NOFOLLOW);
+        _exit(!rc?0:err==ETIMEDOUT?2:1);
+    }
+    int result=1;
+    for(;;) {
+        int status;pid_t r=waitpid(pid,&status,WNOHANG);
+        if(r==pid){result=WIFEXITED(status)?WEXITSTATUS(status):1;break;}
+        if(r<0&&errno!=EINTR)break;
+        if(now_ms()>=deadline+1000){kill(pid,SIGKILL);while(waitpid(pid,&status,0)<0&&errno==EINTR){}result=2;break;}
+        usleep(20000);
+    }
+    char marker[PATH_MAX];
+    if(result==2&&!secure_runtime()&&!carry_marker(carry_from,marker)){int fd=open(marker,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);if(fd>=0)close(fd);}
+    return result?-1:0;
+}
 static int hooked_mount(struct libmnt_context *ctx,int (*real)(struct libmnt_context *)) {
     int64_t start=now_ms(),deadline=deadline_from(start);
     pthread_mutex_lock(&view_lock);
-    seeded_hint[0]=0;
+    seeded_hint[0]=0;carry_from[0]=0;
     in_hook=1;
     struct hfs_ctx_backup hfs_bk={0};
     hfs_rw_approved=hfs_prepare_mount(ctx,&hfs_bk,deadline-POST_RESERVE_MS);
+    if(hfs_bk.tried_rw&&*carry_from&&carry_premount(ctx,real,deadline-POST_RESERVE_MS)) {
+        note("HFS+ library carry-over failed, keeping read-only view on",mnt_context_get_target(ctx),0);
+        hfs_rw_approved=HFS_RW_NONE;hfs_restore_ro(ctx,&hfs_bk);hfs_bk.tried_rw=0;
+    }
     int pre=premount(ctx,real,deadline-POST_RESERVE_MS,now_ms()-start<LOCK_WAIT_SLACK_MS);
     pthread_mutex_lock(&post_lock);holding_post=1; // after_mount releases it once the visible tree is final
     int rc=real(ctx),saved=errno;

@@ -61,6 +61,7 @@ func Guardian(args []string, out, errOut io.Writer) int {
 	bootReport := fs.Bool("boot-report", false, "save and export a sanitized boot report without touching libraries")
 	uiDir := fs.String("ui-dir", "/data/enginex/ui", "boot safety state directory")
 	deadline := fs.Duration("timeout", 0, "maximum command runtime; 0 disables the deadline")
+	checkCopy := fs.String("check-copy", "", "check a library the mount hook copied onto a stick before it becomes its Engine Library; exit 1 when refused")
 	watch := fs.Bool("watch", false, "retired; exits at once")
 	fs.Duration("interval", 0, "retired")
 	fs.Duration("quiet-for", 0, "retired")
@@ -80,6 +81,23 @@ func Guardian(args []string, out, errOut io.Writer) int {
 		// This CLI-only deadline also bounds a locked repair before Engine starts.
 		timer := time.AfterFunc(*deadline, func() { os.Exit(124) })
 		defer timer.Stop()
+	}
+	if *checkCopy != "" {
+		if fs.NArg() != 0 || *mount != "" || *status || *dataOnly || *reserve || *fixGrids || *bootReport {
+			fmt.Fprintln(errOut, "--check-copy cannot be combined with other operations")
+			return 2
+		}
+		r, err := dbhealer.CheckCopy(*checkCopy)
+		code := 0
+		if err != nil {
+			fmt.Fprintln(errOut, "engine-guardian: copied library refused:", err)
+			code = 1
+		}
+		if e := json.NewEncoder(out).Encode(r); e != nil {
+			fmt.Fprintln(errOut, e)
+			return 1
+		}
+		return code
 	}
 	if *bootReport {
 		if fs.NArg() != 0 || *mount != "" || *status || *dataOnly || *reserve || *fixGrids {
