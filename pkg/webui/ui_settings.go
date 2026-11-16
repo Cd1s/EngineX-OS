@@ -182,10 +182,10 @@ type uiSettings struct {
 	// external drive. Deck-only: loopback POST /v1/sc5000/ui sets it, /api/ui
 	// refuses it. Off by default.
 	RemoteLoad bool `json:"remoteLoad"`
-	// ProlinkShare lets rb-bridge read the Rekordbox library of Pioneer
-	// players on the LAN (#59). Off by default.
+	// ProlinkShare enables Pro DJ Link: announces this deck, lets rb-bridge read
+	// Pioneer/rekordbox libraries on the LAN, and exports this deck's drives (#59, #63).
+	// Off by default.
 	ProlinkShare     bool     `json:"prolinkShare"`
-	ProlinkExport    bool     `json:"prolinkExport"` // experimental Denon -> CDJ export; default OFF
 	Language         string   `json:"language"`
 	Waveform         string   `json:"waveform"`
 	Sources          []string `json:"sources"`
@@ -402,10 +402,10 @@ func (s *Server) loadUI() uiSettings {
 			v.OmniSource = val == "1"
 		case "remote_load":
 			v.RemoteLoad = val == "1"
-		case "prolink_share":
-			v.ProlinkShare = val == "1"
-		case "prolink_export":
-			v.ProlinkExport = val == "1"
+		case "prolink_share", "prolink_export":
+			if val == "1" {
+				v.ProlinkShare = true
+			}
 		case "known":
 			known = strings.Split(val, ",")
 		case "four_deck_role":
@@ -549,10 +549,10 @@ func parseUISources(val string) ([]string, error) {
 
 func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	was := false
-	if s.prolinkExport != nil && (v.ProlinkExport != s.loadUI().ProlinkExport || len(exportRequested) > 0 && exportRequested[0]) {
+	if s.prolinkExport != nil && (v.ProlinkShare != s.loadUI().ProlinkShare || len(exportRequested) > 0 && exportRequested[0]) {
 		was = s.prolinkExport.Status().Enabled
-		if err = s.prolinkExport.SetEnabled(v.ProlinkExport); err != nil {
-			if !v.ProlinkExport {
+		if err = s.prolinkExport.SetEnabled(v.ProlinkShare); err != nil {
+			if !v.ProlinkShare {
 				return err
 			}
 			// ON stays ON without a Rekordbox USB; retryExport starts it once one is mounted.
@@ -560,7 +560,7 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 			err = nil
 		}
 		defer func() {
-			if err != nil && was != v.ProlinkExport {
+			if err != nil && was != v.ProlinkShare {
 				_ = s.prolinkExport.SetEnabled(was)
 			}
 		}()
@@ -614,9 +614,6 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	}
 	if v.ProlinkShare {
 		text += "prolink_share=1\n"
-	}
-	if v.ProlinkExport {
-		text += "prolink_export=1\n"
 	}
 	if v.StreamSortRole != "" && v.StreamSortRole != "default" {
 		text += "stream_sort_role=" + v.StreamSortRole + "\n"
@@ -1304,15 +1301,6 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 		v.ProlinkShare = on == "1"
 	}
-	if q.Has("prolinkExport") {
-		on := q.Get("prolinkExport")
-		if on != "0" && on != "1" {
-			s.uiMu.Unlock()
-			fail(w, 400, errors.New("invalid setting"))
-			return
-		}
-		v.ProlinkExport = on == "1"
-	}
 	if q.Has("sources") {
 		list, err := parseUISources(q.Get("sources"))
 		if err != nil {
@@ -1348,7 +1336,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	if v.Scope == "tidal" && !slices.Contains(v.Sources, "tidal") {
 		v.Scope = ""
 	}
-	err := s.saveUI(v, q.Has("prolinkExport"))
+	err := s.saveUI(v, q.Has("prolinkShare"))
 	if err != nil && q.Has("verboseLog") {
 		_ = writeVerboseLog(previousVerbose)
 	}

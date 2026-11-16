@@ -401,7 +401,7 @@ class OnOffSwitchCompatibilityTest(unittest.TestCase):
     def test_both_bases_follow_external_state_after_clicks_in_all_languages(self):
         expected = {
             "scBroadcastOn": "broadcast", "scProlinkShare": "prolinkShare",
-            "scProlinkExport": "prolinkExport", "scMasterLimiter": "masterLimiter",
+            "scMasterLimiter": "masterLimiter",
             "scAutoGain": "autoGain", "scUpfaderEcho": "upfaderEcho",
             "scStemsEqMode": "stemsEqMode", "scBeatJumpPads": "beatJumpPads",
             "scSwapLoopOrder": "swapLoopOrder", "scDualColumn": "browserDualColumn",
@@ -1219,7 +1219,7 @@ for (const amt of [1/63, 2/63, 4/63, 5/63, 8/63, 1.0]) {{
         # "Static" (Display -> Time Format) and "Fast" (Mic -> Talkover Resume) are stock Engine translator options.
         for removed in ("Jog Light Mode", "Jog Light", "Psy Rainbow", "Psy Fast", "Psy BPM Sync", "Rainbow"):
             self.assertNotIn(removed, keys)
-        for added in ("ENGINEX VIEW PRESET", "Shadow Deck Mode", "Pro DJ Link Export to CDJ (Beta)", "Fader Echo: Up", "Fader Echo: All", "Restart Engine to apply? Playback will stop."):
+        for added in ("ENGINEX VIEW PRESET", "Shadow Deck Mode", "Pro DJ Link", "Fader Echo: Up", "Fader Echo: All", "Restart Engine to apply? Playback will stop."):
             self.assertIn(added, keys)
         self.assertFalse([k for k in keys if "Legacy Shadow Engine" in k], "the Legacy Shadow Engine row was replaced by Shadow Deck Mode")
         self.assertNotIn("scShadowLegacyEngine", bp.SERVICES_MAIN + bp.FOUR_DECK_ENTRIES)
@@ -1377,8 +1377,7 @@ assert.strictEqual(vfx.enabled, false);
         # two-state preferences, not an "Off" / "On" list.
         rows = {
             "Live Stream": ("scBroadcastOn", "broadcast", bp.SERVICES_ENTRIES),
-            "Pro DJ Link Library": ("scProlinkShare", "prolinkShare", bp.SERVICES_ENTRIES),
-            "Pro DJ Link Export to CDJ (Beta)": ("scProlinkExport", "prolinkExport", bp.SERVICES_ENTRIES),
+            "Pro DJ Link": ("scProlinkShare", "prolinkShare", bp.SERVICES_ENTRIES),
             "Remote Load (LAN API)": ("scRemoteLoad", "remoteLoad", bp.SERVICES_ENTRIES),
             "Master Soft Clipper": ("scMasterLimiter", "masterLimiter", bp.PLAYBACK_ENTRIES),
             "Auto-Gain (0 dB Normalize)": ("scAutoGain", "autoGain", bp.PLAYBACK_ENTRIES),

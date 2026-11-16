@@ -227,8 +227,7 @@ func (s *Server) writeProlinkSnapshot(snap prolink.Snapshot) error {
 
 type prolinkResponse struct {
 	Enabled     bool                      `json:"enabled"`
-	Share       bool                      `json:"share"`  // reads players' media over the LAN (#59)
-	Export      bool                      `json:"export"` // experimental export to CDJs (#63)
+	Share       bool                      `json:"share"` // Pro DJ Link: announce + browse + export (#59, #63)
 	ExportState prolink.ExportStatus      `json:"exportState"`
 	UpdatedAt   time.Time                 `json:"updatedAt"`
 	Devices     []prolink.Device          `json:"devices"`
@@ -250,7 +249,6 @@ func (s *Server) prolinkGet(w http.ResponseWriter, r *http.Request) {
 	resp := prolinkResponse{
 		Enabled:   settings.ProlinkWaveform,
 		Share:     settings.ProlinkShare,
-		Export:    settings.ProlinkExport,
 		UpdatedAt: snap.UpdatedAt,
 		Devices:   snap.Devices,
 		Decks:     snap.Decks,
@@ -321,28 +319,17 @@ func (s *Server) prolinkPost(w http.ResponseWriter, r *http.Request) {
 }
 
 // prolinkToggle is POST /v1/enginex/prolink?share=0|1, the same setting as
-// /v1/enginex/ui?prolinkShare=.
+// /v1/enginex/prolink?share=1|0 toggles Pro DJ Link (announce + browse + export).
 func (s *Server) prolinkToggle(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	if !q.Has("share") && !q.Has("export") {
+	if !q.Has("share") || (q.Get("share") != "0" && q.Get("share") != "1") {
 		fail(w, 400, errors.New("invalid setting"))
 		return
 	}
-	for _, key := range []string{"share", "export"} {
-		if q.Has(key) && q.Get(key) != "0" && q.Get(key) != "1" {
-			fail(w, 400, errors.New("invalid setting"))
-			return
-		}
-	}
 	s.uiMu.Lock()
 	v := s.loadUI()
-	if q.Has("share") {
-		v.ProlinkShare = q.Get("share") == "1"
-	}
-	if q.Has("export") {
-		v.ProlinkExport = q.Get("export") == "1"
-	}
-	err := s.saveUI(v, q.Has("export"))
+	v.ProlinkShare = q.Get("share") == "1"
+	err := s.saveUI(v, true)
 	s.uiMu.Unlock()
 	if err != nil {
 		fail(w, 500, err)

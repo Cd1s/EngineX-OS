@@ -51,7 +51,7 @@ func RBBridge(args []string, stdout io.Writer) error {
 	stateFile := fs.String("state-file", defaultStateFile, "path to write Pro DJ Link snapshot state JSON")
 	anlzRoot := fs.String("anlz-root", "/media", "root directory to scan for Rekordbox ANLZ analysis files")
 	mediaCache := fs.String("media-cache", prolink.SharedMediaCacheDir(), "where tracks read from Pioneer players over the network are kept (#59)")
-	uiSettings := fs.String("ui-settings", "/data/enginex/ui/settings.conf", "deck settings; prolink_share=1 enables reading players' media")
+	uiSettings := fs.String("ui-settings", "/data/enginex/ui/settings.conf", "deck settings; prolink_share=1 (or legacy prolink_export=1) enables Pro DJ Link")
 	watch := fs.Bool("watch", false, "retired; exits at once")
 	fs.String("watch-roots", "", "retired")
 	fs.Duration("poll-interval", 0, "retired")
@@ -123,7 +123,7 @@ func RBBridge(args []string, stdout io.Writer) error {
 		discovery.SetANLZRoot(*anlzRoot)
 	}
 	if *mediaCache != "" {
-		discovery.SetMediaCache(&prolink.MediaCache{Dir: *mediaCache, Enabled: func() bool { return settingOn(*uiSettings, "prolink_share") }})
+		discovery.SetMediaCache(&prolink.MediaCache{Dir: *mediaCache, Enabled: func() bool { return prolinkSettingOn(*uiSettings) }})
 	}
 
 	var stateMu sync.Mutex
@@ -180,7 +180,7 @@ func RBBridge(args []string, stdout io.Writer) error {
 	}
 	err := discovery.Listen(ctx, ip, func(d prolink.Device) {
 		emit(d)
-		if d.PacketType == 6 && d.Number >= 1 && d.Number <= 6 && settingOn(*uiSettings, "prolink_share") {
+		if d.PacketType == 6 && d.Number >= 1 && d.Number <= 6 && prolinkSettingOn(*uiSettings) {
 			st.observe(ctx, d)
 		}
 		dirty.Store(true)
@@ -189,6 +189,13 @@ func RBBridge(args []string, stdout io.Writer) error {
 		return nil
 	}
 	return err
+}
+
+// prolinkSettingOn reports whether Pro DJ Link is enabled in settings.conf,
+// honouring both the current key (prolink_share=1) and the legacy 5.3.0.4 key
+// (prolink_export=1).
+func prolinkSettingOn(path string) bool {
+	return settingOn(path, "prolink_share") || settingOn(path, "prolink_export")
 }
 
 // settingOn reports whether key=1 is in a key=value settings file.

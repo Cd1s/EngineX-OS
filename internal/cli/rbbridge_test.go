@@ -91,3 +91,27 @@ func TestRBBridgeProlinkFlags(t *testing.T) {
 		t.Fatalf("expected bind error, got %v", err)
 	}
 }
+
+func TestProlinkSettingOnMigration(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		conf string
+		want bool
+	}{
+		{"only_share", "prolink_share=1\n", true},
+		{"only_export", "prolink_export=1\n", true},
+		{"both", "prolink_share=1\nprolink_export=1\n", true},
+		{"neither", "waveform=rgb\n", false},
+		{"both_off", "prolink_share=0\nprolink_export=0\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "settings.conf")
+			if err := os.WriteFile(path, []byte(tc.conf), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if got := prolinkSettingOn(path); got != tc.want {
+				t.Fatalf("prolinkSettingOn(%q) = %v, want %v", tc.conf, got, tc.want)
+			}
+		})
+	}
+}

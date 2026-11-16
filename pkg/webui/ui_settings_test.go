@@ -457,6 +457,64 @@ func TestProlinkShareSetting(t *testing.T) {
 	}
 }
 
+func TestProlinkSwitchMigration(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		conf string
+		want bool
+	}{
+		{"only_share", "prolink_share=1\n", true},
+		{"only_export", "prolink_export=1\n", true},
+		{"both", "prolink_share=1\nprolink_export=1\n", true},
+		{"share_off_export_on", "prolink_share=0\nprolink_export=1\n", true},
+		{"export_on_share_off", "prolink_export=1\nprolink_share=0\n", true},
+		{"neither", "", false},
+		{"both_off", "prolink_share=0\nprolink_export=0\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tc.conf != "" {
+				if err := os.WriteFile(filepath.Join(dir, "settings.conf"), []byte(tc.conf), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ui := New(Config{UIDir: dir, StateDir: t.TempDir()}, nil)
+			defer ui.Close()
+			v := ui.loadUI()
+			if v.ProlinkShare != tc.want {
+				t.Fatalf("loadUI(%q).ProlinkShare = %v, want %v", tc.conf, v.ProlinkShare, tc.want)
+			}
+			if err := ui.saveUI(v); err != nil {
+				t.Fatal(err)
+			}
+			b, _ := os.ReadFile(filepath.Join(dir, "settings.conf"))
+			if strings.Contains(string(b), "prolink_export") {
+				t.Fatalf("saveUI wrote legacy prolink_export: %q", b)
+			}
+			if tc.want != strings.Contains(string(b), "prolink_share=1\n") {
+				t.Fatalf("saveUI prolink_share=%v mismatch: %q", tc.want, b)
+			}
+		})
+	}
+}
+
+func TestWebConsoleSingleProlinkSwitch(t *testing.T) {
+	b, err := os.ReadFile("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(b)
+	if !strings.Contains(html, `data-toggle="prolinkShare"`) {
+		t.Fatal("missing prolinkShare toggle in index.html")
+	}
+	if strings.Contains(html, `data-toggle="prolinkExport"`) {
+		t.Fatal("legacy prolinkExport toggle still present in index.html")
+	}
+	if !strings.Contains(html, `tShare:['Pro DJ Link','Pro DJ Link','Pro DJ Link','Pro DJ Link']`) {
+		t.Fatal("tShare must be named Pro DJ Link in all 4 languages")
+	}
+}
+
 // #49: the 4-deck role is saved only when it is not the default, and checked.
 func TestFourDeckRole(t *testing.T) {
 	dir := t.TempDir()
