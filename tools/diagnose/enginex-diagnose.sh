@@ -72,8 +72,8 @@ http() { # <path> -> "HTTP <code>" and the page title if any
                 if nc -z -w 2 "$DECK" "$port" >/dev/null 2>&1; then echo "tcp $port: open"; else echo "tcp $port: closed or filtered"; fi
             fi
         done
-        if have curl; then http /; http /v1/sc5000/ui; else echo "curl is not installed: HTTP probes skipped"; fi
-        echo "(a 403 on /v1/sc5000/ui with a 'Stream Sync' title means EngineX is running and asks for its access code)"
+        if have curl; then http /; http /v1/enginex/ui; http /v1/sc5000/ui; else echo "curl is not installed: HTTP probes skipped"; fi
+        echo "(a 403 on /v1/enginex/ui — or /v1/sc5000/ui on 5.3.0.4 — with a 'Stream Sync' title means EngineX is running and asks for its access code)"
     else
         sec "Deck"
         echo "no deck IP given; run again as: sh enginex-diagnose.sh 192.168.x.y  (Settings → About on the deck shows it)"

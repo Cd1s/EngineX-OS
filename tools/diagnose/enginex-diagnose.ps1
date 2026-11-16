@@ -88,7 +88,7 @@ if (-not $Deck) {
             $tcp.Close()
             Add-Line ("tcp {0}: {1}" -f $port, $(if ($ok) { "open" } else { "closed or filtered" }))
         }
-        foreach ($path in "/", "/v1/sc5000/ui") {
+        foreach ($path in "/", "/v1/enginex/ui", "/v1/sc5000/ui") {
             $code = "none"; $title = ""
             try {
                 $r = Invoke-WebRequest -UseBasicParsing -TimeoutSec 4 -Uri ("http://" + $Deck + ":8080" + $path)
@@ -99,7 +99,7 @@ if (-not $Deck) {
             }
             Add-Line ("{0} -> HTTP {1}{2}" -f $path, $code, $(if ($title) { "  title: " + $title } else { "" }))
         }
-        Add-Line "(a 403 on /v1/sc5000/ui with a 'Stream Sync' title means EngineX is running and asks for its access code)"
+        Add-Line "(a 403 on /v1/enginex/ui — or /v1/sc5000/ui on 5.3.0.4 — with a 'Stream Sync' title means EngineX is running and asks for its access code)"
     }
 }
 
