@@ -70,9 +70,9 @@ install -m 0755 "$FSCK" "$STAGE/usr/sbin/fsck.hfsplus"
 # Built here for the base image's own kernel (cached across builds) unless HFSPLUSX_KO names one.
 HFSPLUSX=${HFSPLUSX_KO:-}
 if [ -z "$HFSPLUSX" ]; then
-    python3 tools/az01-packer/az01_packer.py unpack "$FW/SC5000-$BASE-Update.img" --output "$WORK/stock-sc5000" >/dev/null
-    bash kernel-modules/build-release-module.sh "$WORK/stock-sc5000/rootfs.ext2" "$WORK/hfsplusx.ko"
-    rm -rf "$WORK/stock-sc5000"
+    python3 tools/az01-packer/az01_packer.py unpack "$FW/SC5000-$BASE-Update.img" --output "$WORK/stock-SC5000" >/dev/null
+    bash kernel-modules/build-release-module.sh "$WORK/stock-SC5000/rootfs.ext2" "$WORK/hfsplusx.ko"
+    rm -rf "$WORK/stock-SC5000"
     HFSPLUSX=$WORK/hfsplusx.ko
 fi
 readelf -h "$HFSPLUSX" | grep -q 'Machine:.*ARM' || { echo "expected 32-bit ARM module: $HFSPLUSX" >&2; exit 2; }

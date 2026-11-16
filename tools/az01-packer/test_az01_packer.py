@@ -1257,7 +1257,7 @@ class CheckHfsplusxTests(unittest.TestCase):
     def test_the_release_build_builds_the_module_and_checks_every_group(self):
         script = Path(__file__).resolve().with_name('build-release.sh').read_text()
         # No hand-placed module (the lab directory, kernel-modules/out): built from the pinned sources unless HFSPLUSX_KO is set.
-        self.assertIn('bash kernel-modules/build-release-module.sh "$WORK/stock-sc5000/rootfs.ext2" "$WORK/hfsplusx.ko"', script)
+        self.assertIn('bash kernel-modules/build-release-module.sh "$WORK/stock-SC5000/rootfs.ext2" "$WORK/hfsplusx.ko"', script)
         self.assertNotIn('/lib/modules/"*/extra/hfsplusx.ko', script)
         self.assertIn('sh tools/az01-packer/check-hfsplusx.sh "$WORK/$base.ext2"', script)
         gate = Path(__file__).resolve().with_name('release-gate.sh').read_text()
