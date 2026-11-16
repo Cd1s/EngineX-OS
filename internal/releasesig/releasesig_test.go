@@ -11,6 +11,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -113,20 +114,25 @@ func TestSignVerifyAndRotation(t *testing.T) {
 
 func TestLoadPrivateKeyFilePermissionsAndFormat(t *testing.T) {
 	_, _, _, privPEM := testKeyPair(t)
-	dir := t.TempDir()
-	keyPath := filepath.Join(dir, "release.key")
-	if err := os.WriteFile(keyPath, []byte(privPEM), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := LoadPrivateKeyFile(keyPath); err == nil {
-		t.Fatal("0644 private key file must be refused")
-	}
-	if err := os.Chmod(keyPath, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := LoadPrivateKeyFile(keyPath); err != nil {
-		t.Fatalf("0600 private key file rejected: %v", err)
-	}
+	t.Run("Unix owner-only file mode", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("Windows does not expose Unix 0600 modes; release signing runs on the Unix build host")
+		}
+		dir := t.TempDir()
+		keyPath := filepath.Join(dir, "release.key")
+		if err := os.WriteFile(keyPath, []byte(privPEM), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadPrivateKeyFile(keyPath); err == nil {
+			t.Fatal("0644 private key file must be refused")
+		}
+		if err := os.Chmod(keyPath, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadPrivateKeyFile(keyPath); err != nil {
+			t.Fatalf("0600 private key file rejected: %v", err)
+		}
+	})
 
 	// Non-Ed25519 PKCS#8 key must be rejected without leaking key bytes.
 	ecPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
