@@ -6,7 +6,7 @@ import (
 )
 
 // compactWire frames a dbserver message the way rekordbox 7 does: its tag list is exactly
-// as long as the argument list, where players pad it to 12.
+// as long as the argument list, where players pad it to 12, and an empty blob is not sent.
 func compactWire(tx uint32, kind uint16, args ...dbField) []byte {
 	b := dbNumber(dbMagic).appendTo(nil)
 	b = dbNumber(tx).appendTo(b)
@@ -17,7 +17,10 @@ func compactWire(tx uint32, kind uint16, args ...dbField) []byte {
 		tags[i] = f.argumentTag()
 	}
 	b = (dbField{tag: 0x14, data: tags}).appendTo(b)
-	for _, f := range args {
+	for i, f := range args {
+		if f.tag == 0x14 && len(f.data) == 0 && i > 0 && args[i-1].tag == 0x11 && args[i-1].n == 0 {
+			continue // rekordbox leaves an empty blob off the wire, after its zero length
+		}
 		b = f.appendTo(b)
 	}
 	return b
@@ -37,5 +40,19 @@ func TestReadDBMessageCompactTagList(t *testing.T) {
 		if _, err := readDBMessage(bytes.NewReader(raw)); err == nil {
 			t.Fatalf("%s tag list accepted", name)
 		}
+	}
+}
+
+func TestReadDBMessageEmptyBlobIsLeftOffTheWire(t *testing.T) {
+	// A cue list rekordbox answers for a track without cues: request, status, length 0 and
+	// no blob, then an entry size and a second length 0 with no blob.
+	raw := compactWire(3, 0x4702, dbNumber(0x2104), dbNumber(1), dbNumber(0), dbField{tag: 0x14}, dbNumber(36), dbNumber(0), dbNumber(0), dbNumber(0), dbNumber(0), dbField{tag: 0x14})
+	r := bytes.NewReader(append(raw, compactWire(4, 0x4000, dbNumber(1))...))
+	m, err := readDBMessage(r)
+	if err != nil || len(m.args) != 10 || m.args[3].tag != 0x14 || len(m.args[3].data) != 0 || m.args[4].n != 36 || m.args[9].tag != 0x14 {
+		t.Fatalf("%+v %v", m, err)
+	}
+	if next, err := readDBMessage(r); err != nil || next.tx != 4 {
+		t.Fatalf("framing lost after the empty blobs: %+v %v", next, err)
 	}
 }

@@ -8,12 +8,46 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
 
 const maxAudio = 1 << 30
+
+// A drive keeps a tenth of itself free, and at least StageReserve: the 2 GiB an earlier
+// build left were less than Engine wants for one track's Stems. All staged libraries on a
+// drive together take at most a tenth of it, and never more than StageMax.
+const (
+	StageReserve = 4 << 30
+	StageMax     = 8 << 30
+)
+
+// StageRoom is how many more bytes may be staged on a drive that holds staged bytes of
+// them already. A drive whose size statfs does not tell keeps the two fixed limits.
+func StageRoom(fs *syscall.Statfs_t, staged int64) int64 {
+	free, size := int64(fs.Bavail)*int64(fs.Bsize), int64(fs.Blocks)*int64(fs.Bsize)
+	reserve, limit := int64(StageReserve), int64(StageMax)
+	if size > 0 {
+		reserve, limit = max(reserve, size/10), min(limit, size/10)
+	}
+	return min(free-reserve, limit-staged)
+}
+
+// DirSize is the bytes of the regular files under dir.
+func DirSize(dir string) int64 {
+	var n int64
+	_ = filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
+		if err == nil && d.Type().IsRegular() {
+			if info, err := d.Info(); err == nil {
+				n += info.Size()
+			}
+		}
+		return nil
+	})
+	return n
+}
 
 // StagedDir is where Stage puts players' libraries on a Denon drive; bridge
 // imports what it finds there, under a "[Pro DJ Link: <name>]" folder (#59).

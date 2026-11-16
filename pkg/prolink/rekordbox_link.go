@@ -23,9 +23,12 @@ const (
 	rekordboxQueryPort = 12523
 	rekordboxPlayer    = 5 // an asking player number rekordbox accepts (1, 4, 5 and 7 do, 41 does not)
 	rbxCollection      = 4
+	rbxMainMenu        = 1
+	rbxDataMenu        = 8
 	rbxTimeout         = 5 * time.Second
 	rbxChunk           = 64
 	rbxMaxRows         = 1 << 16
+	rbxMaxBlob         = 16 << 20
 )
 
 // Menu row kinds of a rekordbox collection.
@@ -35,11 +38,10 @@ const (
 	rbxPath           = 0
 )
 
-// RekordboxItem is one menu row: a track, a playlist or a folder. For the audio path
-// row of a track, Parent is the file's size in bytes.
+// RekordboxItem is one menu row: a track, a playlist or a folder.
 type RekordboxItem struct {
-	Parent, ID, Kind uint32
-	Label            string
+	ID, Kind uint32
+	Label    string
 }
 
 // RekordboxLink is one dbserver session with a computer running rekordbox. Not for
@@ -120,7 +122,7 @@ func (l *RekordboxLink) exchange(m dbMessage) (dbMessage, error) {
 	if _, err := l.c.Write(m.bytes()); err != nil {
 		return dbMessage{}, err
 	}
-	return readDBMessage(l.r)
+	return readDBMessageMax(l.r, rbxMaxBlob)
 }
 
 func (l *RekordboxLink) call(kind uint16, args ...dbField) (dbMessage, error) {
@@ -128,10 +130,14 @@ func (l *RekordboxLink) call(kind uint16, args ...dbField) (dbMessage, error) {
 	return l.exchange(dbMessage{l.tx, kind, args})
 }
 
+// rbxWhere is the first argument of a request: asking player, menu, slot 4, track type 1 (rekordbox).
+func rbxWhere(menu byte) uint32 {
+	return rekordboxPlayer<<24 | uint32(menu)<<16 | rbxCollection<<8 | 1
+}
+
 // menu runs a request on the collection's main menu and reads every row it lists.
 func (l *RekordboxLink) menu(kind uint16, args ...uint32) ([]RekordboxItem, error) {
-	// asking player, menu 1, slot 4, track type 1 (rekordbox)
-	where := uint32(rekordboxPlayer)<<24 | 1<<16 | rbxCollection<<8 | 1
+	where := rbxWhere(rbxMainMenu)
 	fields := []dbField{dbNumber(where)}
 	for _, a := range args {
 		fields = append(fields, dbNumber(a))
@@ -160,7 +166,7 @@ func (l *RekordboxLink) menu(kind uint16, args ...uint32) ([]RekordboxItem, erro
 		}
 		for i := uint32(0); ; i++ {
 			_ = l.c.SetReadDeadline(time.Now().Add(rbxTimeout))
-			m, err := readDBMessage(l.r)
+			m, err := readDBMessageMax(l.r, rbxMaxBlob)
 			if err != nil {
 				return items, err
 			}
@@ -171,7 +177,7 @@ func (l *RekordboxLink) menu(kind uint16, args ...uint32) ([]RekordboxItem, erro
 				return items, errors.New("prolink: malformed rekordbox menu row")
 			}
 			label := strings.TrimSuffix(strings.TrimPrefix(m.args[3].text(), "\ufffa"), "\ufffb")
-			items = append(items, RekordboxItem{Parent: m.args[0].n, ID: m.args[1].n, Kind: m.args[6].n, Label: label})
+			items = append(items, RekordboxItem{ID: m.args[1].n, Kind: m.args[6].n, Label: label})
 		}
 	}
 	return items, nil
@@ -190,16 +196,63 @@ func (l *RekordboxLink) PlaylistTracks(id uint32) ([]RekordboxItem, error) {
 	return l.menu(0x1105, 0, id, 0)
 }
 
-// Path asks where a track's audio file is on the computer, and its size in bytes.
-func (l *RekordboxLink) Path(id uint32) (string, uint32, error) {
+// Path asks where a track's audio file is on the computer.
+func (l *RekordboxLink) Path(id uint32) (string, error) {
 	rows, err := l.menu(0x2102, id)
 	for _, r := range rows {
 		if r.Kind&0xffff == rbxPath && r.Label != "" {
-			return r.Label, r.Parent, nil
+			return r.Label, nil
 		}
 	}
 	if err == nil {
 		err = errors.New("prolink: rekordbox gave no file path for the track")
 	}
-	return "", 0, err
+	return "", err
+}
+
+// Metadata lists a track's facts as rows: kind 4 title, 7 artist, 2 album, 0xb length in
+// seconds, 0xd tempo times 100, 0xf key.
+func (l *RekordboxLink) Metadata(id uint32) ([]RekordboxItem, error) { return l.menu(0x2002, id) }
+
+// blob asks for analysis data, which rekordbox answers as: request, status (0 ok, 50 none),
+// length, bytes. nil means it has none for the track.
+func (l *RekordboxLink) blob(kind uint16, menu byte, args ...uint32) ([]byte, error) {
+	fields := []dbField{dbNumber(rbxWhere(menu))}
+	for _, a := range args {
+		fields = append(fields, dbNumber(a))
+	}
+	r, err := l.call(kind, fields...)
+	if err != nil {
+		return nil, err
+	}
+	if len(r.args) < 4 || r.args[3].tag != 0x14 {
+		return nil, fmt.Errorf("prolink: rekordbox answered 0x%04x to 0x%04x without data", r.kind, kind)
+	}
+	return r.args[3].data, nil
+}
+
+// BeatGrid is the track's beat grid, as 0x2204 gives it.
+func (l *RekordboxLink) BeatGrid(id uint32) ([]byte, error) { return l.blob(0x2204, rbxDataMenu, id) }
+
+// WaveformPreview is the track's overview waveform (0x2004).
+func (l *RekordboxLink) WaveformPreview(id uint32) ([]byte, error) {
+	return l.blob(0x2004, rbxDataMenu, 4, id, 0)
+}
+
+// WaveformDetail is the track's scrolling waveform (0x2904).
+func (l *RekordboxLink) WaveformDetail(id uint32) ([]byte, error) {
+	return l.blob(0x2904, rbxMainMenu, id, 0)
+}
+
+// Cues are the track's memory and hot cues (0x2104), CuesExtended their coloured form (0x2b04).
+func (l *RekordboxLink) Cues(id uint32) ([]byte, error) { return l.blob(0x2104, rbxDataMenu, id) }
+func (l *RekordboxLink) CuesExtended(id uint32) ([]byte, error) {
+	return l.blob(0x2b04, rbxDataMenu, id, 0)
+}
+
+// Analysis is one tag of the track's ANLZ files, e.g. ("PWV5", "EXT"): 0x2c04 hands the
+// tag out alone, in the file's own byte layout.
+func (l *RekordboxLink) Analysis(id uint32, tag, file string) ([]byte, error) {
+	le := func(s string) uint32 { return binary.LittleEndian.Uint32(append([]byte(s), 0, 0, 0, 0)[:4]) }
+	return l.blob(0x2c04, rbxMainMenu, id, le(tag), le(file))
 }

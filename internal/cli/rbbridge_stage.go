@@ -22,13 +22,11 @@ import (
 
 const (
 	stageEvery = 10 * time.Minute
-	// A drive keeps a tenth of itself free, and at least stageReserve: the 2 GiB an
-	// earlier build left were less than Engine wants for one track's Stems.
-	stageReserve = 4 << 30
-	// All staged libraries on a drive together take at most a tenth of it, and never more
-	// than stageMax. It was 32 GiB for each slot of each player, and nothing was ever
-	// removed: an SD card of 58 GiB ended with 50 GiB of them and 2 GiB free.
-	stageMax = 8 << 30
+	// The budget a drive gives staged libraries is prolink.StageRoom's. It was 32 GiB for
+	// each slot of each player, and nothing was ever removed: an SD card of 58 GiB ended
+	// with 50 GiB of them and 2 GiB free.
+	stageReserve = prolink.StageReserve
+	stageMax     = prolink.StageMax
 	// A player not copied for this long gives up its staged library when room is needed.
 	stageKeep = 14 * 24 * time.Hour
 )
@@ -147,29 +145,10 @@ func (s *stager) observe(ctx context.Context, d prolink.Device) {
 	}()
 }
 
-// stageRoom is how many more bytes may be staged on a drive that holds staged bytes of
-// them already. A drive whose size statfs does not tell keeps the two fixed limits.
-func stageRoom(fs *syscall.Statfs_t, staged int64) int64 {
-	free, size := int64(fs.Bavail)*int64(fs.Bsize), int64(fs.Blocks)*int64(fs.Bsize)
-	reserve, limit := int64(stageReserve), int64(stageMax)
-	if size > 0 {
-		reserve, limit = max(reserve, size/10), min(limit, size/10)
-	}
-	return min(free-reserve, limit-staged)
-}
-
-func dirSize(dir string) int64 {
-	var n int64
-	_ = filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
-		if err == nil && d.Type().IsRegular() {
-			if info, err := d.Info(); err == nil {
-				n += info.Size()
-			}
-		}
-		return nil
-	})
-	return n
-}
+var (
+	stageRoom = prolink.StageRoom
+	dirSize   = prolink.DirSize
+)
 
 // waiting reports whether a copy into the folder name is running or queued.
 func (s *stager) waiting(name string) bool {

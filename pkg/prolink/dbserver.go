@@ -75,7 +75,11 @@ func (f dbField) appendTo(b []byte) []byte {
 		return append(b, f.data...)
 	}
 }
-func readDBField(r io.Reader) (dbField, error) {
+func readDBField(r io.Reader) (dbField, error) { return readDBFieldMax(r, 65536) }
+
+// readDBFieldMax reads a field whose blob may hold up to maxBlob bytes: rekordbox sends
+// analysis data of hundreds of KiB, where a deck's client has no reason to send more than 64 KiB.
+func readDBFieldMax(r io.Reader, maxBlob uint32) (dbField, error) {
 	var head [5]byte
 	if _, err := io.ReadFull(r, head[:1]); err != nil {
 		return dbField{}, err
@@ -99,7 +103,7 @@ func readDBField(r io.Reader) (dbField, error) {
 	}
 	if f.tag == 0x14 || f.tag == 0x26 {
 		// Bound untrusted lengths before multiplying or allocating.
-		if f.n > 65536 {
+		if f.n > 65536 && (f.tag == 0x26 || f.n > maxBlob) {
 			return f, errors.New("prolink: dbserver field too large")
 		}
 		n = int(f.n)
@@ -138,10 +142,12 @@ func (m dbMessage) bytes() []byte {
 	}
 	return b
 }
-func readDBMessage(r io.Reader) (dbMessage, error) {
+func readDBMessage(r io.Reader) (dbMessage, error) { return readDBMessageMax(r, 65536) }
+
+func readDBMessageMax(r io.Reader, maxBlob uint32) (dbMessage, error) {
 	var h [5]dbField
 	for i := range h {
-		f, err := readDBField(r)
+		f, err := readDBFieldMax(r, maxBlob)
 		if err != nil {
 			return dbMessage{}, err
 		}
@@ -153,7 +159,11 @@ func readDBMessage(r io.Reader) (dbMessage, error) {
 	}
 	m := dbMessage{tx: h[1].n, kind: uint16(h[2].n)}
 	for i := uint32(0); i < h[3].n; i++ {
-		f, err := readDBField(r)
+		if h[4].data[i] == 3 && i > 0 && m.args[i-1].tag == 0x11 && m.args[i-1].n == 0 {
+			m.args = append(m.args, dbField{tag: 0x14}) // an empty blob is left off the wire
+			continue
+		}
+		f, err := readDBFieldMax(r, maxBlob)
 		if err != nil {
 			return m, err
 		}

@@ -2,6 +2,7 @@ package prolink
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/binary"
 	"io"
@@ -18,6 +19,7 @@ type fakeRekordbox struct {
 	t     *testing.T
 	rows  map[uint16][]dbItem
 	none  uint16 // a request answered with "no results"
+	blobs map[uint16][]byte
 	mu    sync.Mutex
 	seen  []dbMessage
 	bye   chan struct{}
@@ -88,6 +90,14 @@ func (f *fakeRekordbox) serve(c net.Conn) {
 				c.Write(compactWire(m.tx, 0x4101, it.fields()...))
 			}
 			c.Write(compactWire(m.tx, 0x4201, dbNumber(0x3000), dbNumber(0)))
+		case 0x2204, 0x2004, 0x2904, 0x2104, 0x2b04, 0x2c04:
+			blob := f.blobs[m.kind]
+			reply := map[uint16]uint16{0x2204: 0x4602, 0x2004: 0x4402, 0x2904: 0x4a02, 0x2104: 0x4702, 0x2b04: 0x4e02, 0x2c04: 0x4f02}[m.kind]
+			status := uint32(0)
+			if len(blob) == 0 {
+				status = 50 // not available
+			}
+			c.Write(compactWire(m.tx, reply, dbNumber(uint32(m.kind)), dbNumber(status), dbNumber(uint32(len(blob))), dbField{tag: 0x14, data: blob}, dbNumber(1)))
 		default:
 			pending = f.rows[m.kind]
 			if m.kind == f.none {
@@ -107,8 +117,8 @@ func TestRekordboxLinkBrowsesAndReadsThePath(t *testing.T) {
 	f := newFakeRekordbox(t, map[uint16][]dbItem{
 		0x1004: tracks,
 		0x1105: {{id: 7, kind: RekordboxFolder, label: "Sets"}, {id: 9, kind: RekordboxPlaylist, label: "\ufffaWarm up\ufffb"}},
-		// What rekordbox lists for a track: the audio path row has the file size as its parent.
-		0x2102: {{id: 1, kind: 4}, {id: 392, kind: 0xb}, {parent: 15701725, id: 5, kind: 0, label: "/Users/dj/Music/A B/ü.mp3"}, {id: 1, kind: 0x2f}},
+		// What rekordbox lists for a track; the row of kind 0 is the audio path.
+		0x2102: {{id: 1, kind: 4}, {id: 392, kind: 0xb}, {id: 5, kind: 0, label: "/Users/dj/Music/A B/ü.mp3"}, {id: 1, kind: 0x2f}},
 	})
 	l, err := dialRekordbox(context.Background(), net.IPv4(127, 0, 0, 1), f.port())
 	if err != nil {
@@ -122,9 +132,9 @@ func TestRekordboxLinkBrowsesAndReadsThePath(t *testing.T) {
 	if err != nil || len(lists) != 2 || lists[0].Kind != RekordboxFolder || lists[1].Label != "Warm up" || lists[1].ID != 9 {
 		t.Fatalf("playlists: %+v %v", lists, err)
 	}
-	path, size, err := l.Path(5)
-	if err != nil || path != "/Users/dj/Music/A B/ü.mp3" || size != 15701725 {
-		t.Fatalf("path: %q %d %v", path, size, err)
+	path, err := l.Path(5)
+	if err != nil || path != "/Users/dj/Music/A B/ü.mp3" {
+		t.Fatalf("path: %q %v", path, err)
 	}
 	l.Close()
 	select {
@@ -160,7 +170,7 @@ func TestRekordboxLinkNoResultsAndLinkOff(t *testing.T) {
 	if all, err := l.Tracks(); err != nil || len(all) != 0 {
 		t.Fatalf("no results: %v %v", all, err)
 	}
-	if _, _, err := l.Path(5); err == nil {
+	if _, err := l.Path(5); err == nil {
 		t.Fatal("a track with no path rows has a path")
 	}
 
@@ -198,5 +208,39 @@ func TestParsePacketRekordboxStatus(t *testing.T) {
 	keep[0x24] = 17
 	if d, err = ParsePacket(keep, 50000, nil); err != nil || !IsRekordbox(d) || d.Number != 17 {
 		t.Fatalf("rekordbox keepalive: %+v %v", d, err)
+	}
+}
+
+func TestRekordboxLinkReadsAnalysisBlobs(t *testing.T) {
+	big := bytes.Repeat([]byte{7}, 200000) // PWV7 of a long track: more than a menu field may hold
+	f := newFakeRekordbox(t, nil)
+	f.blobs = map[uint16][]byte{0x2204: {1, 2, 3}, 0x2c04: big, 0x2104: nil}
+	l, err := dialRekordbox(context.Background(), net.IPv4(127, 0, 0, 1), f.port())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	if b, err := l.BeatGrid(5); err != nil || !bytes.Equal(b, []byte{1, 2, 3}) {
+		t.Fatalf("beat grid: %v %v", b, err)
+	}
+	if b, err := l.Analysis(5, "PWV7", "2EX"); err != nil || !bytes.Equal(b, big) {
+		t.Fatalf("PWV7: %d bytes %v", len(b), err)
+	}
+	// Nothing for the track: no data and no error, and the session goes on.
+	if b, err := l.Cues(5); err != nil || len(b) != 0 {
+		t.Fatalf("no cues: %v %v", b, err)
+	}
+	if b, err := l.BeatGrid(5); err != nil || len(b) != 3 {
+		t.Fatalf("after the empty answer: %v %v", b, err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, m := range f.seen {
+		if m.kind == 0x2c04 && (m.args[2].n != 0x37565750 || m.args[3].n != 0x00584532) { // "PWV7", "2EX" little-endian
+			t.Fatalf("ANLZ tag request: %+v", m.args)
+		}
+		if m.kind == 0x2204 && m.args[0].n != 5<<24|8<<16|4<<8|1 {
+			t.Fatalf("beat grid asks on menu %#x", m.args[0].n)
+		}
 	}
 }

@@ -46,13 +46,16 @@ type NFSFile struct {
 	MTime uint32 // seconds
 }
 
-// NFSClient reads files from one player. The zero Portmap means UDP 111.
+// NFSClient reads files from one player. The zero Portmap means UDP 111. A nonzero
+// SourcePort is the local UDP port calls are sent from (a computer's NFS server may
+// want a privileged one); another is used when it is taken.
 type NFSClient struct {
-	IP      net.IP
-	Portmap int
-	Timeout time.Duration // per RPC attempt; default 1 s, three attempts
-	portsMu sync.Mutex
-	ports   map[uint32]int
+	IP         net.IP
+	Portmap    int
+	SourcePort int
+	Timeout    time.Duration // per RPC attempt; default 1 s, three attempts
+	portsMu    sync.Mutex
+	ports      map[uint32]int
 }
 
 // pioneerName encodes a path the way the players expect it.
@@ -137,7 +140,11 @@ func (c *NFSClient) call(ctx context.Context, port int, prog, vers, proc uint32,
 	cred.u32(0).opaque(nil).u32(0).u32(0).u32(0)
 	msg.u32(1).opaque(cred.Bytes()).u32(0).u32(0)
 	msg.Write(args)
-	conn, err := net.DialUDP("udp4", nil, &net.UDPAddr{IP: c.IP, Port: port})
+	remote := &net.UDPAddr{IP: c.IP, Port: port}
+	conn, err := net.DialUDP("udp4", &net.UDPAddr{Port: c.SourcePort}, remote)
+	if err != nil && c.SourcePort != 0 {
+		conn, err = net.DialUDP("udp4", nil, remote)
+	}
 	if err != nil {
 		return nil, err
 	}
