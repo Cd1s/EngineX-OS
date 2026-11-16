@@ -1,7 +1,7 @@
 #!/bin/sh
 # Legacy release readers and rollback support; source without changing the deck.
 legacy_data='/data/sc5000-custom' # Legacy release reader.
-legacy_ui='/data/sc5000-custom/ui' # Legacy release reader.
+legacy_ui=$legacy_data/ui # Legacy UI settings reader.
 legacy_hfs='/run/sc5000-hfs-views' # Legacy release reader.
 legacy_suite='sc5000-suite' # Legacy release reader.
 legacy_deemix='sc5000-deemixd' # Legacy release reader.
@@ -16,7 +16,6 @@ legacy_boot_converted='/run/sc5000-boot-converted' # Legacy release reader.
 legacy_tz_newer='/run/sc5000-tz-newer' # Legacy release reader.
 legacy_assignments='/run/sc5000-assignments' # Legacy release reader.
 legacy_stemsd='sc5000-stemsd' # Legacy release reader.
-legacy_relay='sc5000-relay' # Legacy release reader.
 legacy_lab='/root/build/sc5000-lab' # Legacy release reader.
 legacy_api='/v1/sc5000' # Legacy release reader.
 legacy_share='/usr/share/sc5000-custom' # Legacy release reader.
@@ -27,8 +26,6 @@ legacy_packer='sc5000-custom*' # Legacy release reader.
 # Read environment overrides passed by older updaters.
 ENGINEX_CUSTOM=${ENGINEX_CUSTOM:-${SC5000_CUSTOM:-}}
 ENGINEX_ALSA_OVERLAY=${ENGINEX_ALSA_OVERLAY:-${SC5000_ALSA_OVERLAY:-}}
-legacy_stemsd_override=${SC5000_STEMSD:-}
-legacy_relay_override=${SC5000_RELAY:-}
 
 migrate_data() {
 # /data/sc5000-custom became /data/enginex (#103): one rename keeps every file, and a
@@ -61,3 +58,8 @@ legacy_relay_unit='sc5000-deemix-relay.service'
 legacy_relay_state='/var/lib/sc5000-relay'
 legacy_stems_config='/etc/sc5000-stems'
 legacy_stems_code='/opt/sc5000-stems'
+
+# Previous image units, read by the boot sandbox only.
+legacy_prepare_unit='sc5000-custom-prepare.service'
+legacy_reset_unit='sc5000-custom-etc-reset.service'
+legacy_image_deemix_unit='sc5000-deemixd.service'

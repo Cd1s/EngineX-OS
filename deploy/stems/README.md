@@ -120,6 +120,9 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now enginex-stemsd.service enginex-deemix-relay.service
 ```
 
+If the configured relay URL includes the former project prefix, update it to
+`/enginex` or the service root when switching the host.
+
 Run only the steps for services present on that host. Preserve the existing
 relay `-public`, console password and renderer token. The new relay's
 `50-stems.conf` reads `/etc/enginex-stems/token`. Keep the backed-up unit and

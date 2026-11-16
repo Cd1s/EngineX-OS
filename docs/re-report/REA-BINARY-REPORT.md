@@ -2,14 +2,14 @@
 
 **状态：已收尾。五个目标均取得真实 REA 静态产物；Engine 为精选覆盖。模块 mask 消费语义、schema 数组边界、rbp 实体 schema、USBANLZ 和 JP07 精确映射等未闭合项明确保留为未知。**
 
-原始证据位于 `<firmware-lab>/rea-results`。本仓附 [完整归一化文本与索引](rea-evidence/README.md)，保留成功结果、参数、Evidence ID和原始文件SHA-256；长日志、原始信封、snapshot和厂商二进制留在lab。本文的 `NNNN-*.evidence.json` 引用按索引的 `source_file` 定位。
+原始证据位于 `/root/build/sc5000-lab/rea-results`。本仓附 [完整归一化文本与索引](rea-evidence/README.md)，保留成功结果、参数、Evidence ID和原始文件SHA-256；长日志、原始信封、snapshot和厂商二进制留在lab。本文的 `NNNN-*.evidence.json` 引用按索引的 `source_file` 定位。
 
 ## 工具、身份与输入
 
 - 源码仓库：`morluto/rea`，commit `1d343a88e53af51101a408d437641c60b7bb34e4`，package 6.8.0；npm 实际查询的 latest 同为 6.8.0。本次执行的是该 npm 发布包，而非声称已构建仓库。
 - 实际运行：lab 内 Node 22.23.4、rea-agents 6.8.0、Ghidra 12.1.4、Temurin 完整 JDK 21.0.13+9。工具包均位于 `../rea-tools/`；Ghidra／JDK 下载分别与官方发布元数据 SHA-256 比对成功。
 - 主机 Node 22.23.2 补丁版本不足；主机 Java 21 是 runtime-only，首次 REA 返回 `provider_unavailable`，见 `0004-open_binary.json`。随后只在 lab 内补齐工具。没有运行 `rea setup`，没有修改系统或用户级配置。
-- Agent `f2b652a9-dc5f-4c7d-b398-a5747e50d61e`；workspace `wks_47ec13a6655df8ca`；Codex session `01a19804-d418-7270-8276-22f1e2bc6073`；cwd `<firmware-lab>/rea`。没有派生子 agent。
+- Agent `f2b652a9-dc5f-4c7d-b398-a5747e50d61e`；workspace `wks_47ec13a6655df8ca`；Codex session `01a19804-d418-7270-8276-22f1e2bc6073`；cwd `/root/build/sc5000-lab/rea`。没有派生子 agent。
 - 所有分析是静态的。没有执行厂商 ARM 程序、操作 bootloader／MCU、修改输入、接触密钥或提交代码。
 
 | 输入（相对 `5.0.4/tree/usr/`） | SHA-256 |

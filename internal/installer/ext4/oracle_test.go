@@ -7,11 +7,11 @@ package ext4
 // armhf mke2fs/e2fsck run natively through the rootfs loader.
 
 import (
-	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"bytes"
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -199,12 +199,12 @@ func populate(t *testing.T, img string, legacyDir bool) map[string][32]byte {
 	if legacyDir {
 		w("mkdir /" + migration.DataName)
 		w("mkdir /" + migration.DataName + "/bundle")
-		file("/" + migration.DataName + "/settings.json", []byte(`{"user":"setting"}`))
+		file("/"+migration.DataName+"/settings.json", []byte(`{"user":"setting"}`))
 	} else {
 		w("mkdir /enginex")
 		w("mkdir /enginex/bundle")
 		w("mkdir /enginex/bundle/bin")
-		file("/enginex/bundle/bin/" + migration.Suite, pattern(2<<20, 7)) // old version, replaced
+		file("/enginex/bundle/bin/"+migration.Suite, pattern(2<<20, 7)) // old version, replaced
 		file("/enginex/gen2-locked", []byte("1\n"))
 		file("/enginex/settings.json", []byte(`{"user":"setting"}`))
 		w("symlink /" + migration.DataName + " enginex")
@@ -221,7 +221,7 @@ func populate(t *testing.T, img string, legacyDir bool) map[string][32]byte {
 		!strings.Contains(debugfs(t, img, "htree /system/var-lib/alsa/conf.d"), "Root node dump") {
 		t.Fatalf("fixture directory is not indexed:\n%s", debugfs(t, img, "stat /system/var-lib/alsa/conf.d"))
 	}
-	delete(sentinels, "/enginex/bundle/bin/" + migration.Suite)
+	delete(sentinels, "/enginex/bundle/bin/"+migration.Suite)
 	delete(sentinels, "/enginex/gen2-locked")
 	return sentinels
 }

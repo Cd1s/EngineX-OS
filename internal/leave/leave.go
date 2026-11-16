@@ -5,18 +5,18 @@
 // /data/.enginex-leave. This release then moves the staged parts in with atomic exchanges
 // (renameat2 RENAME_EXCHANGE): the UI packs and icons, the version files and last the bundle.
 // A release older than 5.3.0.3 (#103) also gets its data directory back as the real
-// /data/legacy-custom, with /data/enginex as the link. Up to the bundle exchange the live
+// the legacy data directory, with /data/enginex as the link. Up to the bundle exchange the live
 // bundle is this release's, and its boot-activate.sh runs Recover at the next boot: a power
 // cut puts back whatever had been swapped. After it the older release is whole.
 // A deck that cannot exchange atomically is not downgraded: nothing is changed.
 package leave
 
 import (
-	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"io"
 	"io/fs"
 	"os"
@@ -32,7 +32,7 @@ import (
 const (
 	journalName = ".enginex-leave"    // under /data: the stage and what a rollback needs
 	markerName  = ".enginex-leave-id" // in each staged part: whose it is, wherever it ends up
-	// Releases before 5.3.0.3 keep their data in the real /data/legacy-custom (#103).
+	// Releases before 5.3.0.3 keep their data in the real the legacy data directory (#103).
 	firstEnginexLayout = "5.3.0.3"
 )
 
@@ -105,7 +105,7 @@ func readLine(p string) (string, error) {
 	return strings.TrimSpace(line), nil
 }
 
-// live is the real data directory: /data/enginex since #103, /data/legacy-custom before.
+// live is the real data directory: /data/enginex since #103, the legacy data directory before.
 func (d Deck) live() (string, error) {
 	for _, n := range []string{"enginex", migration.DataName} {
 		if ok, err := realDir(d.data(n)); err != nil {
@@ -326,7 +326,7 @@ func (d Deck) install(target, targetVersion string) error {
 	cmd.Dir = target
 	cmd.Stdout, cmd.Stderr = d.Stdout, d.Stderr
 	cmd.Env = append(withoutDest(os.Environ()),
-		migration.CustomEnv + "="+stage, "ENGINEX_CUSTOM="+stage, migration.AlsaEnv + "="+alsa, "ENGINEX_ALSA_OVERLAY="+alsa)
+		migration.CustomEnv+"="+stage, "ENGINEX_CUSTOM="+stage, migration.AlsaEnv+"="+alsa, "ENGINEX_ALSA_OVERLAY="+alsa)
 	if err := cmd.Run(); err != nil {
 		return fail(fmt.Errorf("the older release's install.sh failed: %w", err))
 	}
@@ -428,7 +428,7 @@ func (d Deck) install(target, targetVersion string) error {
 		}
 	}
 
-	// 3. Before 5.3.0.3 the data directory is the real /data/legacy-custom (#103).
+	// 3. Before 5.3.0.3 the data directory is the real the legacy data directory (#103).
 	if layout {
 		crash("layout")
 		link := d.data(migration.DataName)
@@ -714,7 +714,7 @@ func (d Deck) recover() error {
 }
 
 // Handback gives the data directory the layout of releases before 5.3.0.3 (the real
-// /data/legacy-custom, /data/enginex the link to it) and installs nothing. A first-generation
+// the legacy data directory, /data/enginex the link to it) and installs nothing. A first-generation
 // deck is flashed in Firmware Update Mode, where nothing of this release runs, and the prepare
 // of 5.3.0.2 refuses the link: run by hand before such a flash (enginex-suite-exec leave layout).
 // Booting this release again instead takes it back (prepare's migration, #234). Each step is
@@ -751,7 +751,7 @@ func (d Deck) Handback() error {
 			return err
 		}
 		if target != "enginex" {
-			return fmt.Errorf(migration.DataDir + " is not EngineX's link (%q), left alone", target)
+			return fmt.Errorf(migration.DataDir+" is not EngineX's link (%q), left alone", target)
 		}
 	}
 	if err := Exchange(enginex, link); err != nil {
@@ -781,7 +781,7 @@ func Main(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, "leave: layout:", err)
 			return 1
 		}
-		fmt.Fprintln(stdout, migration.DataDir + " is the data directory again: a release before 5.3.0.3 can be flashed now")
+		fmt.Fprintln(stdout, migration.DataDir+" is the data directory again: a release before 5.3.0.3 can be flashed now")
 		return 0
 	case len(args) == 2 && args[0] == "install":
 		target := args[1]

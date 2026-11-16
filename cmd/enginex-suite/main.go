@@ -5,10 +5,10 @@
 package main
 
 import (
-	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"log"
 	"os"
 	"path/filepath"

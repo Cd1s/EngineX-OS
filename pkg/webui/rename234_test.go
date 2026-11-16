@@ -1,12 +1,12 @@
 package webui
 
 import (
-"github.com/Cd1s/EngineX-OS/internal/migration"
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
 	"errors"
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -16,15 +16,15 @@ import (
 )
 
 // #234: the deck's state dir is recognised under the new path and through the
-// /data/legacy-custom compat link an older unit still passes during an update;
+// the legacy data directory compat link an older unit still passes during an update;
 // a test's own dir is not the deck's.
 func TestRename234DeckStateDirUnderBothNames(t *testing.T) {
 	for dir, want := range map[string]bool{
-		"/data/enginex/state":       true,
+		"/data/enginex/state":        true,
 		migration.DataDir + "/state": true,
-		"/data/enginex":             false,
-		t.TempDir():                 false,
-		"":                          false,
+		"/data/enginex":              false,
+		t.TempDir():                  false,
+		"":                           false,
 	} {
 		if got := isDeckStateDir(dir); got != want {
 			t.Errorf("isDeckStateDir(%q) = %v, want %v", dir, got, want)
@@ -38,7 +38,7 @@ func TestRename234ShadowDebugFlagUnderBothNames(t *testing.T) {
 		t.Errorf("deck flag files %q", shadowDebugFlags)
 	}
 	dir := t.TempDir()
-	flags := []string{filepath.Join(dir, "enginex-debug"), filepath.Join(dir, migration.ProjectName + "-debug")}
+	flags := []string{filepath.Join(dir, "enginex-debug"), filepath.Join(dir, migration.ProjectName+"-debug")}
 	if anyFileExists(flags) {
 		t.Fatal("telemetry on without a flag file")
 	}
@@ -59,7 +59,7 @@ func TestRename234LegacyTailscaleSocketLink(t *testing.T) {
 	dir := t.TempDir()
 	old := legacyTailscaleSocket
 	defer func() { legacyTailscaleSocket = old }()
-	legacyTailscaleSocket = filepath.Join(dir, migration.TailscaleUnit + ".sock")
+	legacyTailscaleSocket = filepath.Join(dir, migration.TailscaleUnit+".sock")
 	for i := 0; i < 2; i++ {
 		linkLegacyTailscaleSocket()
 		if got, err := os.Readlink(legacyTailscaleSocket); err != nil || got != "enginex-tailscaled.sock" {
@@ -80,8 +80,8 @@ func TestRename234LegacyTailscaleSocketLink(t *testing.T) {
 }
 
 // #234: /v1/enginex is the deck API's primary prefix. No route is registered under the old
-// one, and every route answers under /v1/legacy too, through the one canonicalV1 mapping
-// (the permanent alias for installers, UI packs, Mods and scripts of every release).
+// one, and every route answers under the legacy API prefix too, through the one canonicalV1 mapping
+// (the retained alias for installed clients, pending the maintainer's decision).
 func TestRename234EveryRouteUnderBothPrefixes(t *testing.T) {
 	files, _ := filepath.Glob("*.go")
 	route := regexp.MustCompile(`"((?:GET|POST|PUT|DELETE) )?(/v1/[a-z0-9]+/[^"]*)"`)
@@ -100,7 +100,7 @@ func TestRename234EveryRouteUnderBothPrefixes(t *testing.T) {
 			routes = append(routes, r{string(m[1]), string(m[2])})
 		}
 		for _, m := range route.FindAllSubmatch(b, -1) {
-			if strings.HasPrefix(string(m[2]), migration.APIPrefix + "/") {
+			if strings.HasPrefix(string(m[2]), migration.APIPrefix+"/") {
 				t.Errorf("%s still names %s", f, m[2])
 			}
 		}
@@ -117,7 +117,7 @@ func TestRename234EveryRouteUnderBothPrefixes(t *testing.T) {
 		}
 		concrete := regexp.MustCompile(`\{[^}]+\}`).ReplaceAllString(rest, "x")
 		if got := canonicalV1(migration.APIPrefix + "/" + concrete); got != "/v1/enginex/"+concrete {
-			t.Errorf("canonicalV1(" + migration.APIPrefix + "/%s) = %s", concrete, got)
+			t.Errorf("canonicalV1("+migration.APIPrefix+"/%s) = %s", concrete, got)
 		}
 		if _, pattern := s.tidal.mux.Handler(httptest.NewRequest(rt.method, "/v1/enginex/"+concrete, nil)); pattern == "" {
 			t.Errorf("%s /v1/enginex/%s is not served by the gateway", rt.method, concrete)
@@ -232,7 +232,7 @@ func TestRename234OlderBundleLeavesAndRebootsInsteadOfActivating(t *testing.T) {
 			t.Errorf("older %s %s: %q, want the leave step and a reboot, no boot-activate.sh", c.version, c.tag, scripts[0])
 		}
 		if !c.older && (leaves || !activates || !strings.Contains(scripts[0], "[e]nginex-suite (stream-sync|rb-bridge|enginex-deemixd)") ||
-			!strings.Contains(scripts[0], migration.SuitePattern + " (stream-sync|rb-bridge|" + migration.Deemix + ")")) {
+			!strings.Contains(scripts[0], migration.SuitePattern+" (stream-sync|rb-bridge|"+migration.Deemix+")")) {
 			t.Errorf("newer %s %s: %q, want boot-activate.sh after ending both suite names", c.version, c.tag, scripts[0])
 		}
 	}

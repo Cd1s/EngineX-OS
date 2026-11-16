@@ -1,12 +1,12 @@
 package leave
 
 import (
-	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"archive/tar"
 	"bytes"
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"io"
 	"os"
 	"os/exec"
@@ -142,9 +142,9 @@ func diff(a, b map[string]string) string {
 	return strings.Join(out, "\n")
 }
 
-// #234 review R1: the published 5.3.0.2 install.sh refuses the /data/legacy-custom link every
+// #234 review R1: the published 5.3.0.2 install.sh refuses the the legacy data directory link every
 // release since 5.3.0.3 keeps. The older release now gets its layout back: the real
-// /data/legacy-custom with every file, /data/enginex the link, and its own installer accepts it.
+// the legacy data directory with every file, /data/enginex the link, and its own installer accepts it.
 func TestLeaveInstallsGenuine5302AndHandsBackItsLayout(t *testing.T) {
 	d, root := newDeck(t)
 	target := legacyBundle(t, "5.3.0.2")
@@ -156,10 +156,10 @@ func TestLeaveInstallsGenuine5302AndHandsBackItsLayout(t *testing.T) {
 	}
 	old := filepath.Join(root, migration.DataRelative)
 	if st, err := os.Lstat(old); err != nil || !st.IsDir() {
-		t.Fatalf(migration.DataDir + " is not the real directory: %v", err)
+		t.Fatalf(migration.DataDir+" is not the real directory: %v", err)
 	}
 	if l, err := os.Readlink(filepath.Join(root, "data/enginex")); err != nil || l != migration.DataName {
-		t.Fatalf("/data/enginex: %q %v, want the link to " + migration.DataName, l, err)
+		t.Fatalf("/data/enginex: %q %v, want the link to "+migration.DataName, l, err)
 	}
 	for p, want := range map[string]string{
 		"version.txt": "5.3.0.2\n", "bundle/version.txt": "5.3.0.2\n", "bundle/lib/libengine-ui-hook.so": "hook 5.3.0.2",
@@ -186,7 +186,7 @@ func TestLeaveInstallsGenuine5302AndHandsBackItsLayout(t *testing.T) {
 		}
 		cmd := exec.Command("sh", filepath.Join(dir, s))
 		cmd.Dir = target
-		cmd.Env = append(os.Environ(), migration.CustomEnv + "="+old, migration.AlsaEnv + "="+filepath.Join(root, "alsa"))
+		cmd.Env = append(os.Environ(), migration.CustomEnv+"="+old, migration.AlsaEnv+"="+filepath.Join(root, "alsa"))
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("genuine 5.3.0.2 %s on the handed-back layout: %v\n%s", s, err, out)
 		}
@@ -200,7 +200,7 @@ func TestLeaveInstallsGenuine5303InTheEnginexLayout(t *testing.T) {
 		t.Fatal(err)
 	}
 	if l, err := os.Readlink(filepath.Join(root, migration.DataRelative)); err != nil || l != "enginex" {
-		t.Fatalf(migration.DataDir + ": %q %v", l, err)
+		t.Fatalf(migration.DataDir+": %q %v", l, err)
 	}
 	live := filepath.Join(root, "data/enginex")
 	for p, want := range map[string]string{"version.txt": "5.3.0.3\n", "bundle/version.txt": "5.3.0.3\n",
@@ -233,7 +233,7 @@ func cutAt(t *testing.T, d Deck, target, step string) {
 // #234 review R2: the published installers of 5.3.0.2 and 5.3.0.3 park the bundle and move the
 // new one in with two renames, and nothing can put it back after a cut between them. Now the
 // older installer only fills a stage. A cut at any step leaves a whole bundle at the path ALSA
-// loads (/data/legacy-custom/bundle/lib) and a boot-activate.sh the hook can start; before the
+// loads (the legacy data directory/bundle/lib) and a boot-activate.sh the hook can start; before the
 // commit, this release's boot-activate.sh puts every part back (Recover) and the deck is as it was.
 func TestLeaveCutAtEveryStepLeavesOneWholeRelease(t *testing.T) {
 	for _, version := range []string{"5.3.0.2", "5.3.0.3"} {
@@ -247,10 +247,10 @@ func TestLeaveCutAtEveryStepLeavesOneWholeRelease(t *testing.T) {
 				before := snapshot(t, root)
 				delete(before, "enginex/ui/safe-mode") // the older release gets one fresh try either way
 				cutAt(t, d, legacyBundle(t, version), step)
-				hook := read(t, filepath.Join(root, migration.DataRelative + "/bundle/lib/libengine-ui-hook.so"))
+				hook := read(t, filepath.Join(root, migration.DataRelative+"/bundle/lib/libengine-ui-hook.so"))
 				boot := filepath.Join(root, "data/enginex/bundle/boot-activate.sh")
 				if !testExists(boot) {
-					boot = filepath.Join(root, migration.DataRelative + "/bundle/boot-activate.sh") // the hook's fallback
+					boot = filepath.Join(root, migration.DataRelative+"/bundle/boot-activate.sh") // the hook's fallback
 				}
 				if !testExists(boot) {
 					t.Fatalf("no boot-activate.sh the hook can start")
@@ -369,7 +369,7 @@ func TestLeaveAppletInstallsNewerInPlace(t *testing.T) {
 }
 
 // #234 review R1, first generation: Firmware Update Mode flashes 5.3.0.2 with nothing of this
-// release running, and that release's prepare refuses the /data/legacy-custom link. The hand-run
+// release running, and that release's prepare refuses the the legacy data directory link. The hand-run
 // layout step gives it the real directory first; run twice it changes nothing more.
 func TestLeaveLayoutHandsBackWithoutInstalling(t *testing.T) {
 	_, root := newDeck(t)
@@ -386,14 +386,14 @@ func TestLeaveLayoutHandsBackWithoutInstalling(t *testing.T) {
 	}
 	after := map[string]string{}
 	for k, v := range snapshot(t, root) {
-		after[strings.Replace(k, migration.DataName + "/", "enginex/", 1)] = v
+		after[strings.Replace(k, migration.DataName+"/", "enginex/", 1)] = v
 	}
 	delete(before, migration.DataName)
 	delete(after, "enginex")
 	if dd := diff(before, after); dd != "" {
 		t.Fatalf("files changed:\n%s", dd)
 	}
-	// The prepare of 5.3.0.2 refuses exactly this: a link at /data/legacy-custom.
+	// The prepare of 5.3.0.2 refuses exactly this: a link at the legacy data directory.
 	if st, err := os.Lstat(filepath.Join(root, migration.DataRelative)); err != nil || !st.IsDir() {
 		t.Fatal(migration.DataDir + " is not a real directory")
 	}

@@ -12,7 +12,7 @@ First-generation JP07/JP13/JC11 image groups include
 execute that path directly. Second-generation data-bundle installations keep
 the stock root partition read-only: the processor wrapper is instead at
 `/data/enginex/bundle/bin/stems-processor`, also reachable through the
-`/data/enginex-custom` compatibility link. Passing a first-generation gate does
+`the legacy data path` compatibility link. Passing a first-generation gate does
 not prove second-generation processor detection.
 
 ## Cause and fix

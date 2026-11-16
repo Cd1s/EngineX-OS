@@ -5,12 +5,12 @@ package stems
 // needs no extra address, port or key file. Environment variables override it.
 
 import (
-	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"io"
 	"net"
 	"net/http"
@@ -87,7 +87,7 @@ type Client struct {
 //
 //  1. ENGINEX_STEMS_URL set: talk to that address directly. The credential is
 //     ENGINEX_STEMS_TOKEN, else the token file (ENGINEX_STEMS_TOKEN_FILE,
-//     default /etc/legacy-stems/token).
+//     default the legacy image config directory-stems/token).
 //  2. Otherwise the relay from deemix-config.json (ENGINEX_STEMS_CONFIG,
 //     default /data/enginex/state/deemix-config.json): relayUrl and the
 //     console password deemixPassword. ENGINEX_STEMS_TOKEN overrides the
@@ -109,9 +109,9 @@ func ResolveClient(getenv func(string) string) (Client, error) {
 			path = DefaultTokenFile
 		}
 		secret, err := Secret(path)
-        if os.IsNotExist(err) && path == DefaultTokenFile {
-            secret, err = Secret(migration.StemsTokenFile)
-        }
+		if os.IsNotExist(err) && path == DefaultTokenFile {
+			secret, err = Secret(migration.StemsTokenFile)
+		}
 		if err != nil {
 			return Client{}, fmt.Errorf("token for ENGINEX_STEMS_URL: %w", err)
 		}

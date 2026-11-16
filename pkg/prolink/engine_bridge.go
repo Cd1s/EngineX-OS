@@ -1,7 +1,6 @@
 package prolink
 
 import (
-	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"bytes"
 	"database/sql"
 	"encoding/base64"
@@ -9,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"hash/fnv"
 	"image"
 	"image/jpeg"

@@ -14,9 +14,9 @@
 ### 2.1 UI 与操作
 
 - 当前「曲庫」标题栏的蓝框 Stems 入口是**上一轮自定义加上去的**（`build_packs.py` 中的 `STEMS_HEADER_ENTRY`）：点按只是按 stems 列排序，拖放是加入原厂渲染队列。它不是原厂的 Stems 列表，也不是旧版 UI 导致的。
-  恢复方案：IN Opus 删除这个假入口，改用 REA 定位的原厂列表分支（file `0x6d3e00`，`beq` 改为 `b`，见 IN `/root/build/enginex-compat-20261103-rea-stems/out/STEMS-HANDOFF.md`）。**截至本文，碟机尚未部署这个改动。**
+  恢复方案：IN Opus 删除这个假入口，改用 REA 定位的原厂列表分支（file `0x6d3e00`，`beq` 改为 `b`，见 IN `/root/build/sc5000-compat-20261103-rea-stems/out/STEMS-HANDOFF.md`）。**截至本文，碟机尚未部署这个改动。**
 - 原厂列表的筛选条件是 `stemsStatus != 0`，包括排队（1）、处理中（2）和完成（3）。所以列表里出现某首曲目，不代表它已经算完或能播放。
-- HOT CUE 二次按键（代码证据，IN `<firmware-lab>/5.0.4/tree/usr/Engine/AssignmentFiles/PresetAssignmentFiles/JP07/JP07_Controller_Assignments.qml:154`）：JP07 的 `PadModeSelect` 只登记 4 个模式键（note 27/30/28/29），每个键的 primary/secondary 模式表在 C++ 设备配置里。REA 已证实（STEMS-CONTROL-HANDOFF，进行中）：再按一次同一个 primary 键时会查 secondary 并做资格检查；只有 `STEMS/CUES_STEMS/AUTO_STEMS` 多一道检查，读 `DeckStemsModeHandler+0x134`，它调用的 feature 接口与 `hasStemsPreRenderedPlayback` 相同。JP07 secondary 数组的取值仍在补证。
+- HOT CUE 二次按键（代码证据，IN `/root/build/sc5000-lab/5.0.4/tree/usr/Engine/AssignmentFiles/PresetAssignmentFiles/JP07/JP07_Controller_Assignments.qml:154`）：JP07 的 `PadModeSelect` 只登记 4 个模式键（note 27/30/28/29），每个键的 primary/secondary 模式表在 C++ 设备配置里。REA 已证实（STEMS-CONTROL-HANDOFF，进行中）：再按一次同一个 primary 键时会查 secondary 并做资格检查；只有 `STEMS/CUES_STEMS/AUTO_STEMS` 多一道检查，读 `DeckStemsModeHandler+0x134`，它调用的 feature 接口与 `hasStemsPreRenderedPlayback` 相同。JP07 secondary 数组的取值仍在补证。
   **REA 已闭合（2026-11-03 晚，IN `…/out/STEMS-CONTROL-HANDOFF.md`）**：JP07 设备配置 `FUN_00f7586c`（file `0xf6586c`）中，primary 为 `[CUES, LOOPS, ROLL, SLICER]`，secondary 为 `[STEMS, AUTO, SAMPLER, FIXED]`，`padModeSelectType=3`（Rgb）。所以 HOT CUE 键原厂就映射到 STEMS，硬件和映射都没有缺口，**不能另造映射**。剩下要查的是当前曲目的 `Stemmed`、资格检查与 feature 门，以及 `.stems` 是否有效。
   实机要读的只读状态：`/Engine/DeckN/Track/SongLoaded`、`/Track/Stemmed`、`/Engine/DeckN/Pads/View`、`Planck.hasStemsPreRenderedPlayback()`。原调试通道已撤，播放中不为读这些状态重启 Engine。**HOT CUE 双击无反应的根因尚未闭合。**
 
@@ -24,7 +24,7 @@
 
 | 段 | 设计 | 实际部署 / 实测 |
 |---|---|---|
-| 在线曲下载 | 用户期望在中继主机下载 | **未实现**。relay 从第一次提交 c24a140（11-02）起对 `/api/audio` 等一律返回 410；在线曲由碟机本机的 `enginex-deemixd` 下载。git 里从来没有远端缓存方案 |
+| 在线曲下载 | 用户期望在中继主机下载 | **未实现**。relay 从第一次提交 c24a140（11-02）起对 `/api/audio` 等一律返回 410；在线曲由碟机本机的 `sc5000-deemixd` 下载。git 里从来没有远端缓存方案 |
 | 分轨输入 | — | Engine 在碟机上解码，float32 PCM 实时逐块上传：deck → `relay.example.com`（碟机上解析为 192.168.1.6:443，即路由器边缘）→ 中继主机 relay :6595 → stemsd :6596 → `worker.py` |
 | 分离器 | — | numpy/scipy 频谱 HPSS / 声像近似，**不是神经网络模型**（中继主机上没有 torch/demucs）。四轨相加等于原曲 |
 | 打包 | — | Engine 在碟机上自行编码并加密，写入 U 盘 `Engine Library/Stems/<trackId> <uuid>.stems` |
@@ -55,9 +55,9 @@
 - 成功时客户端往 stderr 写一行汇总，Engine 日志会收录：`remote stems: ok <帧> frames at <Hz> in <块数> blocks (max <maxBlockSize>), <秒>`。第一次真实渲染就能拿到 Engine 实际的块大小和逐块耗时。
 - `cmd/stems-probe`：在任意机器上扮演 Engine，lockstep 发块，done 之后**保持 stdin 打开**，计时子进程何时退出，再用 `Session` 校验。
 
-改动文件：`internal/stems/{stems.go,protocol.go,protocol_test.go,stems_test.go}`、`cmd/enginex-relay/{stems.go,stems_test.go}`、`cmd/stems-probe/main.go`。
+改动文件：`internal/stems/{stems.go,protocol.go,protocol_test.go,stems_test.go}`、`cmd/sc5000-relay/{stems.go,stems_test.go}`、`cmd/stems-probe/main.go`。
 
-**测试**（IN，`/root/build/enginex-stems-remote-20261103`）：`gofmt`、`go vet`；`go test -race -count=5 ./internal/stems`、`go test -race ./cmd/enginex-relay` 全部通过。覆盖的情形：
+**测试**（IN，`/root/build/sc5000-stems-remote-20261103`）：`gofmt`、`go vet`；`go test -race -count=5 ./internal/stems`、`go test -race ./cmd/sc5000-relay` 全部通过。覆盖的情形：
 
 - 一个 HTTP/1.1 边缘：上传不 EOF 就不结束回复；Engine 端 done 之后 stdin 不关。新客户端照样立即完成，而且边缘这时仍挂着。
 - worker 退出码 1、结尾缺 `returnFrames=0`，都判为失败。
@@ -70,8 +70,8 @@ IN 上用真实 `worker.py` 跑 20 s：新、旧客户端都在 done 之后 0.05
 
 | 时间（UTC） | 目标 | 内容 | 备份 / 回滚 |
 |---|---|---|---|
-| 15:04 | <relay-host> | `/opt/enginex-stems/enginex-stemsd` 换成 sha `4dff3c2d…`，`/usr/local/bin/enginex-relay` 换成 sha `095de783…`；重启这两个服务，单元和 worker 未改 | 前置备份 `20261103T150337Z-<workstation>-before-stems-framing-20261103-38aa93e7f6a8-<relay-host>-enginex-stems-relay-prestate.tar.gz`（sha `38aa93e7…`，已 get 回来核对 sha 和归档成员）。部署前确认没有 worker 在跑。部署后两个服务都是 active，`/healthz` 和 stemsd `healthz` 正常 |
-| 15:11 | 碟机 | `/data/enginex-custom/bin/stems-processor` 换成 sha `77c1948a…`（第一版） | 前置备份 `20261103T151048Z-<workstation>-before-stems-client-framing-20261103-fa60a01e684f-enginex-stems-processor-3044ec.tar.gz`（tar sha `fa60a01e…`，内含旧客户端 sha `3044ec15…`，已 get 回来核对） |
+| 15:04 | <relay-host> | `/opt/sc5000-stems/sc5000-stemsd` 换成 sha `4dff3c2d…`，`/usr/local/bin/sc5000-relay` 换成 sha `095de783…`；重启这两个服务，单元和 worker 未改 | 前置备份 `20261103T150337Z-<workstation>-before-stems-framing-20261103-38aa93e7f6a8-<relay-host>-sc5000-stems-relay-prestate.tar.gz`（sha `38aa93e7…`，已 get 回来核对 sha 和归档成员）。部署前确认没有 worker 在跑。部署后两个服务都是 active，`/healthz` 和 stemsd `healthz` 正常 |
+| 15:11 | 碟机 | `/data/sc5000-custom/bin/stems-processor` 换成 sha `77c1948a…`（第一版） | 前置备份 `20261103T151048Z-<workstation>-before-stems-client-framing-20261103-fa60a01e684f-sc5000-stems-processor-3044ec.tar.gz`（tar sha `fa60a01e…`，内含旧客户端 sha `3044ec15…`，已 get 回来核对） |
 | 15:14 | 碟机 | 换成 sha `6c5d3397…`（v2：Engine 一个字节都没发就关 stdin 时，按握手处理，返回 0） | 同上。中间版本 `77c1948a…` 可从源码重建，不单独备份 |
 
 碟机替换步骤：确认没有 `stems-processor` 进程 → 复制到同目录临时文件 → `chmod 755` → `sync` → `mv -f` 原子替换 → 读回 sha。`/usr/local/bin/stems-processor` 仍是指向它的链接，sha 一致。Engine 未重启（PID 25208 前后相同），DB、U 盘 `.stems` 和路由器都没动。
@@ -80,19 +80,19 @@ IN 上用真实 `worker.py` 跑 20 s：新、旧客户端都在 done 之后 0.05
 碟机回滚（可独立执行）：
 
 ```sh
-agent-backup get 20261103T151048Z-<workstation>-before-stems-client-framing-20261103-fa60a01e684f-enginex-stems-processor-3044ec.tar.gz --output pre.tar.gz
-tar -xzf pre.tar.gz   # 得到 data/enginex-custom/bin/stems-processor，sha 3044ec15…
+agent-backup get 20261103T151048Z-<workstation>-before-stems-client-framing-20261103-fa60a01e684f-sc5000-stems-processor-3044ec.tar.gz --output pre.tar.gz
+tar -xzf pre.tar.gz   # 得到 data/sc5000-custom/bin/stems-processor，sha 3044ec15…
 # 传到碟机 /tmp 后，在没有 stems-processor 进程时执行：
-cp /tmp/stems-processor /data/enginex-custom/bin/.stems-processor.new && chmod 755 /data/enginex-custom/bin/.stems-processor.new && mv -f /data/enginex-custom/bin/.stems-processor.new /data/enginex-custom/bin/stems-processor
+cp /tmp/stems-processor /data/sc5000-custom/bin/.stems-processor.new && chmod 755 /data/sc5000-custom/bin/.stems-processor.new && mv -f /data/sc5000-custom/bin/.stems-processor.new /data/sc5000-custom/bin/stems-processor
 ```
 
 中继主机回滚（可独立执行）：
 
 ```sh
-agent-backup get 20261103T150337Z-<workstation>-before-stems-framing-20261103-38aa93e7f6a8-<relay-host>-enginex-stems-relay-prestate.tar.gz --output pre.tar.gz
+agent-backup get 20261103T150337Z-<workstation>-before-stems-framing-20261103-38aa93e7f6a8-<relay-host>-sc5000-stems-relay-prestate.tar.gz --output pre.tar.gz
 # 传到 <relay-host> 后：
-tar -C / -xzf pre.tar.gz usr/local/bin/enginex-relay opt/enginex-stems/enginex-stemsd
-systemctl restart enginex-stemsd enginex-deemix-relay
+tar -C / -xzf pre.tar.gz usr/local/bin/sc5000-relay opt/sc5000-stems/sc5000-stemsd
+systemctl restart sc5000-stemsd sc5000-deemix-relay
 ```
 
 新后端向后兼容，碟机现有客户端不受影响，所以回滚只在后端本身出问题时才需要。
@@ -124,7 +124,7 @@ systemctl restart enginex-stemsd enginex-deemix-relay
 - relay 在 25 s 时已经结束会话，旧客户端仍要再等 120 s，所以卡住的地方在 relay 之后，即边缘到碟机这一段。新协议不依赖这一段转发结尾。
 - 速度：真实路径每块往返约 27.5 ms，而 1024 帧只有 23.2 ms 音频，所以在 lockstep 下只能到 0.77× 实时。中继主机回环约 3.8 ms/块（5.7× 实时）。这和 11-03 实机会话的 0.5–0.6× 吻合，Engine 实际块大小待 A2 的汇总日志确认。
 - IN 测试（同一份代码）：worker 退出码 1 → 失败；缺结束帧 → 失败；正常流程 → 成功。另有 `TestFramedSessionFailures`、`TestFramedSessionEndsWithUploadOpen`、`TestSessionRejectsBadStreams`、`TestReadFramesSizesAndShortWrites`，`-race` 全部通过。
-- **A1 用的是 v1 `77c1948a…`，现在部署的是 v2 `6c5d3397…`，v2 没有在真实链路上重跑 A1。** v2 相对 v1 只改了 `Session.Complete()` 的一个分支：Engine 一个字节都没发（`!init` 且输入流空闲）、后端又发了 `E=ok` 时，按握手返回成功。只要会话里有任何输入字节，判定就和 v1 完全一样；发了半个 init 头的情况仍然判失败，有反例测试。v2 在 IN 上 `go test -race -count=3 ./internal/stems`、`-race ./cmd/enginex-relay` 都通过。碟机冒烟：`</dev/null` 返回 0、输出 26 字节。
+- **A1 用的是 v1 `77c1948a…`，现在部署的是 v2 `6c5d3397…`，v2 没有在真实链路上重跑 A1。** v2 相对 v1 只改了 `Session.Complete()` 的一个分支：Engine 一个字节都没发（`!init` 且输入流空闲）、后端又发了 `E=ok` 时，按握手返回成功。只要会话里有任何输入字节，判定就和 v1 完全一样；发了半个 init 头的情况仍然判失败，有反例测试。v2 在 IN 上 `go test -race -count=3 ./internal/stems`、`-race ./cmd/sc5000-relay` 都通过。碟机冒烟：`</dev/null` 返回 0、输出 26 字节。
 - **这是合成音频的链路验收，不等于真实 Engine 短曲渲染（A2）和四轨播放（A3）通过。**
 
 ### 5.2 A2 实测：真实 Engine 渲染（2026-11-03 22:16–22:23 +07，客户端 v2 `6c5d3397…`）

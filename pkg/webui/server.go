@@ -3,13 +3,13 @@
 package webui
 
 import (
-	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"embed"
 	"encoding/json"
 	"errors"
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"io"
 	"log"
 	"net"
@@ -438,9 +438,9 @@ func (s *Server) Close() {
 }
 
 // isDeckStateDir reports whether dir is the deck's own state dir (not a test's): the default,
-// or the same dir through the /data/legacy-custom compat link an older unit passes (#234).
+// or the same dir through the the legacy data directory compat link an older unit passes (#234).
 func isDeckStateDir(dir string) bool {
-	return dir == "/data/enginex/state" || dir == migration.DataDir + "/state"
+	return dir == "/data/enginex/state" || dir == migration.DataDir+"/state"
 }
 
 // DefaultStateDir keeps logins on the deck's writable partition; its home is read-only.
@@ -530,7 +530,7 @@ func (s *Server) consoleQR(w http.ResponseWriter, r *http.Request) {
 
 // consoleURL is the console address a phone on the same network can open: the host
 // this browser reached the console by, unless that only works on this machine. Most
-// routers do not resolve legacy.lan (enginex.lan since 5.3.0.5), so a QR code pointing there
+// routers do not resolve the legacy placeholder host (enginex.lan since 5.3.0.5), so a QR code pointing there
 // opened a blank page (#218).
 func consoleURL(r *http.Request) string {
 	name, _, err := net.SplitHostPort(r.Host)

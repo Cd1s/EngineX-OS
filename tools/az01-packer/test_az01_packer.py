@@ -379,10 +379,10 @@ class FilesystemTests(unittest.TestCase):
             keep.unlink()
 
     def test_prepare_and_etc_reset_rename_the_legacy_dir_losslessly(self):
-        # #103: /data/enginex-custom -> /data/enginex with a symlink left behind; run twice, idempotent.
+        # #103: /data/enginex -> /data/enginex with a symlink left behind; run twice, idempotent.
         seed, data = self.root/'seed', self.root/'data'
         seed.mkdir()
-        old, new = data/'enginex-custom', data/'enginex'
+        old, new = data/legacy.DATA_NAME, data/'enginex'
         (old/'Stream').mkdir(parents=True)
         (old/'Stream/song.flac').write_text('x')
         (old/'settings.conf').write_text('s')
@@ -408,19 +408,19 @@ class FilesystemTests(unittest.TestCase):
         self.assertTrue(old.is_symlink())
         self.assertEqual((new/'settings.conf').read_text(), 's')
         self.assertEqual((new/'extra').read_text(), 'e')
-        aside = list(new.glob('legacy-enginex-custom.*'))
+        aside = list(new.glob('legacy-' + legacy.DATA_NAME + '.*'))
         self.assertEqual([(a/'settings.conf').read_text() for a in aside], ['older'])
 
     def test_234_prepare_takes_back_the_layout_a_downgrade_to_5302_handed_back(self):
-        # #234 review R1: a downgrade to 5.3.0.2 hands the real /data/enginex-custom back and leaves
+        # #234 review R1: a downgrade to 5.3.0.2 hands the real /data/enginex back and leaves
         # /data/enginex as the link to it (or, cut half-way, a link to itself). The next upgrade
         # moves it forward again; before, prepare refused the /data/enginex link and SSH and the
         # UI packs stayed off.
         seed, data = self.root/'seed', self.root/'data'
         seed.mkdir()
-        old, new = data/'enginex-custom', data/'enginex'
+        old, new = data/legacy.DATA_NAME, data/'enginex'
         own = self.key.with_suffix('.pub').read_bytes()
-        for link in ('enginex-custom', 'enginex'):
+        for link in (legacy.DATA_NAME, 'enginex'):
             for template in (az.ETC_RESET, az.PREPARE):
                 shutil.rmtree(data, ignore_errors=True)
                 (old/'Stream').mkdir(parents=True)
@@ -445,20 +445,20 @@ class FilesystemTests(unittest.TestCase):
         self.assertTrue(new.is_symlink() and old.is_dir())
 
     def test_234_release_gate_reads_an_old_release_where_its_prepare_left_the_data(self):
-        # #234 review R5: a 5.3.0.2 baseline keeps its data in the real /data/enginex-custom; the old
+        # #234 review R5: a 5.3.0.2 baseline keeps its data in the real /data/enginex; the old
         # phase wrote its language setting and read its version and host key in /data/enginex.
         gate = (Path(__file__).resolve().parent / 'release-gate.sh').read_text()
         func = re.search(r'^data_dir\(\) \{.*?^\}', gate, re.M | re.S)
         self.assertIsNotNone(func, 'release-gate.sh has no data_dir()')
-        for layout, want in (('5.3.0.2', 'enginex-custom'), ('5.3.0.3', 'enginex')):
+        for layout, want in (('5.3.0.2', legacy.DATA_NAME), ('5.3.0.3', 'enginex')):
             w = self.root / f'gate-{layout}'
             shutil.rmtree(w, ignore_errors=True)
             if layout == '5.3.0.2':
-                (w/'data/enginex-custom').mkdir(parents=True)
+                (w/'data'/legacy.DATA_NAME).mkdir(parents=True)
             else:
                 (w/'data/enginex').mkdir(parents=True)
-                (w/'data/enginex-custom').symlink_to('enginex')
-            out = subprocess.run(['bash', '-c', func.group(0) + '\ndata_dir'], env={**os.environ, 'W': str(w)},
+                (w/'data'/legacy.DATA_NAME).symlink_to('enginex')
+            out = subprocess.run(['bash', '-c', func.group(0) + '\ndata_dir'], env={**os.environ, 'W': str(w), 'legacy_data': legacy.DATA_DIR},
                                  capture_output=True, text=True)
             self.assertEqual(out.stdout.strip(), str(w/'data'/want), layout)
         # The old phase's setting, version and host key, and the phase's UI dir, go through it.
@@ -472,7 +472,7 @@ class FilesystemTests(unittest.TestCase):
         # RC 2026-11-15: the gate's work dir is /var/tmp/enginex-gate-*, and `ls` of several dirs
         # printed their paths, so a clean image failed "no unit named enginex is enabled".
         gate = (Path(__file__).resolve().parent / 'release-gate.sh').read_text()
-        m = re.search(r'check "image: no unit named enginex is enabled" bash -c "(.*)"$', gate, re.M)
+        m = re.search(r'check "image: no unit under the old project name is enabled" bash -c "(.*)"$', gate, re.M)
         self.assertIsNotNone(m, 'release-gate.sh has no enginex unit check')
         root = self.root / 'enginex-gate-unitcheck' / 'new'
         wants = [root/'usr/lib/systemd/system/multi-user.target.wants',
@@ -480,10 +480,10 @@ class FilesystemTests(unittest.TestCase):
         for d in wants:
             d.mkdir(parents=True, exist_ok=True)
         (wants[1]/'enginex-prepare.service').touch()
-        cmd = m.group(1).replace('$R', str(root))
+        cmd = m.group(1).replace('$R', str(root)).replace('$legacy_unit', legacy.PROJECT)
         self.assertEqual(subprocess.run(['bash', '-c', cmd]).returncode, 0, 'a clean image must pass')
-        (wants[0]/'enginex-prepare.service').touch()
-        self.assertNotEqual(subprocess.run(['bash', '-c', cmd]).returncode, 0, 'an enginex unit must fail')
+        (wants[0]/(legacy.PROJECT+'-prepare.service')).touch()
+        self.assertNotEqual(subprocess.run(['bash', '-c', cmd]).returncode, 0, 'an old unit must fail')
 
     def test_etc_reset_drops_stale_434_overlay_once(self):
         data = self.root/'data'
@@ -681,33 +681,15 @@ class FilesystemTests(unittest.TestCase):
         self.assertTrue(az.VERSION_RE.fullmatch('5.3.0.1.1'))
         self.assertIsNone(az.VERSION_RE.fullmatch('5.3.0.1.1.1'))
 
-    # #234: names an image of 5.3.0.5 may still carry under enginex (compatibility links only).
-    RENAME_234_LINKS = {
-        '/etc/enginex': 'enginex',
-        '/usr/local/lib/enginex': 'enginex',
-        '/usr/share/enginex-custom': 'enginex',
-        '/usr/local/bin/enginex-debloat': 'enginex-debloat',
-        '/usr/local/bin/enginex-perf-tune': 'enginex-perf-tune',
-        '/usr/local/bin/enginex-prolink-diag': 'enginex-prolink-diag',
-        '/usr/local/bin/enginex-storage-mount': 'enginex-storage-mount',
-        '/usr/sbin/enginex-usb-audio': 'enginex-usb-audio',
-    }
-
-    def test_234_image_has_enginex_names_and_only_compat_links_named_enginex(self):
+    def test_234_image_has_enginex_names_and_no_obsolete_overlay_links(self):
         overlay = Path(__file__).resolve().parents[2]/'rootfs-overlay'
         az.inject(self.fs, None, overlay=overlay, version='5.3.0.5')
         entries = dict(self.fs.walk())
-        old = {p: m for p, m in entries.items() if 'enginex' in p}
-        self.assertEqual(sorted(old), sorted(self.RENAME_234_LINKS))
-        for path, target in self.RENAME_234_LINKS.items():
-            self.assertTrue(stat.S_ISLNK(old[path][1]), path)
-            self.assertIn('Fast link dest: "%s"' % target, self.fs.cmd(f'stat "{path}"'))
-        # The real directory carries the version; older installers and gates read it through the link.
+        self.assertFalse([p for p in entries if legacy.PROJECT in p])
         self.assertEqual(self.fs.read('/etc/enginex/version.txt'), b'5.3.0.5\n')
-        self.assertEqual(az.ExtFS.validate_link(self.fs, '/etc/enginex', 'enginex'), '/etc/enginex')
         for wants in ('/usr/lib/systemd/system/multi-user.target.wants', '/etc/systemd/system/multi-user.target.wants'):
             names = self.fs.entries(wants)
-            self.assertFalse([n for n in names if 'enginex' in n], wants)
+            self.assertFalse([n for n in names if legacy.PROJECT in n], wants)
         self.assertIn('enginex.target', self.fs.entries('/usr/lib/systemd/system/multi-user.target.wants'))
         self.assertTrue({'enginex-debloat.service', 'enginex-deemixd.service', 'enginex-perf-tune.service',
                          'enginex-storage-discover.service'} <= set(self.fs.entries('/etc/systemd/system/multi-user.target.wants')))
@@ -715,7 +697,7 @@ class FilesystemTests(unittest.TestCase):
         for path, meta in entries.items():
             if stat.S_ISREG(meta[1]) and re.search(r'/systemd/system/.*\.(service|target|slice|conf)$', path):
                 body = b'\n'.join(l for l in self.fs.read(path).splitlines() if not l.lstrip().startswith(b'#'))
-                self.assertNotRegex(body, rb'enginex-(custom|background|engine\.slice|storage|deemixd|debloat|perf)', path)
+                self.assertNotRegex(body, legacy.PROJECT.encode() + rb'-(custom|background|engine\.slice|storage|deemixd|debloat|perf)', path)
                 self.assertNotRegex(body, rb'(?m)^Description=.*SC5000', path)
         az.check_fs(self.disk)
 
@@ -724,24 +706,24 @@ class FilesystemTests(unittest.TestCase):
         az.inject(self.fs, None, overlay=overlay, version='5.3.0.5')
         data = self.root/'data'
         upper = data/'system/etc/overlay'
-        stale = ['enginex/libengine-ui-hook.so', 'enginex/version.txt', 'enginex/release-tag',
-                 'systemd/system/enginex-deemixd.service', 'systemd/system/enginex-background.slice',
-                 'systemd/system/stream-sync.service.d/50-enginex-background.conf',
-                 'systemd/system/edisksd.service.d/50-enginex-hook.conf', 'default/enginex-perf',
-                 'udev/rules.d/60-enginex-storage.rules', 'systemd/journald.conf.d/enginex.conf',
-                 'dnsmasq.d/enginex-telemetry.conf', 'systemd/system/enginex-deemixd.service']
+        stale = [(legacy.PROJECT + '/libengine-ui-hook.so'), (legacy.PROJECT + '/version.txt'), (legacy.PROJECT + '/release-tag'),
+                 ('systemd/system/' + legacy.DEEMIX + '.service'), ('systemd/system/' + legacy.PROJECT + '-background.slice'),
+                 ('systemd/system/stream-sync.service.d/50-' + legacy.PROJECT + '-background.conf'),
+                 ('systemd/system/edisksd.service.d/50-' + legacy.PROJECT + '-hook.conf'), ('default/' + legacy.PROJECT + '-perf'),
+                 ('udev/rules.d/60-' + legacy.PROJECT + '-storage.rules'), ('systemd/journald.conf.d/' + legacy.PROJECT + '.conf'),
+                 ('dnsmasq.d/' + legacy.PROJECT + '-telemetry.conf'), 'systemd/system/enginex-deemixd.service']
         for name in stale + ['keep.conf', 'systemd/system/user-own.service']:
             (upper/name).parent.mkdir(parents=True, exist_ok=True)
             (upper/name).write_text('r4')
         (upper/'systemd/system/multi-user.target.wants').mkdir(parents=True)
-        (upper/'systemd/system/multi-user.target.wants/enginex-deemixd.service').symlink_to('../enginex-deemixd.service')
-        # An r4 prepare on a 5.0.4 image linked /etc/enginex -> enginex in the upper layer: over the
-        # image's /etc/enginex -> enginex link that is a loop, and the hook would never load.
-        (upper/'enginex').symlink_to('enginex')
+        (upper/('systemd/system/multi-user.target.wants/' + legacy.DEEMIX + '.service')).symlink_to(('../' + legacy.DEEMIX + '.service'))
+        # An r4 prepare on a 5.0.4 image linked /etc/enginex -> legacy in the upper layer: over the
+        # image's /etc/legacy -> enginex link that is a loop, and the hook would never load.
+        (upper/'enginex').symlink_to((legacy.PROJECT))
         script = self.fs.read('/usr/libexec/enginex-etc-reset').replace(b'/data', str(data).encode())
         p = subprocess.run(['sh', '-s'], input=script, capture_output=True)
         self.assertEqual(p.returncode, 0, p.stderr)
-        for name in stale + ['enginex', 'systemd/system/multi-user.target.wants/enginex-deemixd.service']:
+        for name in stale + ['enginex', ('systemd/system/multi-user.target.wants/' + legacy.DEEMIX + '.service')]:
             self.assertFalse(os.path.lexists(upper/name), name)
         self.assertEqual((upper/'keep.conf').read_text(), 'r4')
         self.assertEqual((upper/'systemd/system/user-own.service').read_text(), 'r4')
@@ -1140,15 +1122,15 @@ class OverlayOrderingTests(unittest.TestCase):
             text = unit.read_text() + ''.join(p.read_text() for p in sorted(unit.parent.glob(unit.name+'.d/*.conf')))
             progs = {re.sub(r'^[-+@!:]*', '', line.split('=', 1)[1]).split(' ')[0]
                      for line in text.splitlines() if re.match(r'Exec\w*=\S', line)}
-            if progs & (suite | {'/etc/enginex/engine-ui-guard'}) or re.search(r'/data/(enginex-custom|enginex)\b', text):
+            if progs & (suite | {'/etc/enginex/engine-ui-guard'}) or re.search(('/data/(' + legacy.DATA_NAME + '|enginex)\\b'), text):
                 units[unit.name] = text
         return units
 
     def test_runtime_dir_writers_start_after_prepare_migrated_it(self):
-        # #103: prepare renames /data/enginex-custom to /data/enginex and then links the old name.
+        # #103: prepare renames /data/enginex to /data/enginex and then links the old name.
         # rb-bridge and enginex-deemixd started beside it on a blank /data or the first boot after
-        # an update: enginex-suite-exec's mkdir -p /data/enginex-custom/bin between the two steps
-        # left a real old dir, so the UI hook's /data/enginex-custom/ui was gone for that boot and
+        # an update: enginex-suite-exec's mkdir -p /data/enginex/bin between the two steps
+        # left a real old dir, so the UI hook's /data/enginex/ui was gone for that boot and
         # the next boot's merge set its writes aside.
         prepare = az.UNITS['enginex-prepare.service']
         before = set(re.search(r'^Before=(.*)$', prepare, re.M).group(1).split())
@@ -1186,7 +1168,7 @@ class Rename234UpgradeTests(unittest.TestCase):
     def test_234_r5_data_survives_migration_and_repeated_boot(self):
         with tempfile.TemporaryDirectory() as tmp:
             data = Path(tmp) / 'data'
-            old, new = data / 'enginex-custom', data / 'enginex'
+            old, new = data / legacy.DATA_NAME, data / 'enginex'
             saved = {
                 'ui/settings.conf': b'lang=zh-TW\nfour_deck_role=24\nconsole_https=1\nunknown=keep\n',
                 'console-cert.pem': b'test-console-cert\n',

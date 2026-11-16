@@ -1,7 +1,7 @@
 package webui
 
 import (
-"github.com/Cd1s/EngineX-OS/internal/migration"
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-// /v1/enginex/ is the deck API under the product's name; /v1/legacy/ stays for older installers,
+// /v1/enginex/ is the deck API under the product's name; the legacy API prefix stays for older installers,
 // UI packs and scripts. Both reach the same handlers behind the same rules.
 func TestEngineXPrefixReachesTheSameRoutes(t *testing.T) {
 	mockRunner := &mockSystemRunner{outputs: make(map[string][]byte)}
@@ -34,10 +34,10 @@ func TestEngineXPrefixReachesTheSameRoutes(t *testing.T) {
 	}
 
 	// The UI status Engine polls: the same answer, digest included.
-	oldCode, oldBody, oldHdr := do("GET", migration.APIPrefix + "/ui", "", nil)
+	oldCode, oldBody, oldHdr := do("GET", migration.APIPrefix+"/ui", "", nil)
 	newCode, newBody, newHdr := do("GET", "/v1/enginex/ui", "", nil)
 	if oldCode != 200 || newCode != 200 || newBody != oldBody || newHdr.Get("X-UI-Digest") != oldHdr.Get("X-UI-Digest") || !strings.Contains(newBody, `"accessCode":"code-1234"`) {
-		t.Fatalf("/v1/enginex/ui: %d %q (digest %s), " + migration.APIPrefix + "/ui: %d (digest %s)", newCode, newBody, newHdr.Get("X-UI-Digest"), oldCode, oldHdr.Get("X-UI-Digest"))
+		t.Fatalf("/v1/enginex/ui: %d %q (digest %s), "+migration.APIPrefix+"/ui: %d (digest %s)", newCode, newBody, newHdr.Get("X-UI-Digest"), oldCode, oldHdr.Get("X-UI-Digest"))
 	}
 	// Admin routes registered on the gateway, and a handler's own validation.
 	for path, key := range map[string]string{"/ssh": `"enabled"`, "/mounts": `[]`, "/automix": `"enabled"`} {
@@ -93,7 +93,7 @@ func TestEngineXPrefixKeepsTheLocalOnlyRules(t *testing.T) {
 	}
 	oc, ob := bare(migration.APIPrefix)
 	if nc, nb := bare("/v1/enginex"); nc != oc || nb != ob {
-		t.Fatalf("/v1/enginex: %d %q; " + migration.APIPrefix + ": %d %q", nc, nb, oc, ob)
+		t.Fatalf("/v1/enginex: %d %q; "+migration.APIPrefix+": %d %q", nc, nb, oc, ob)
 	}
 	// The remote console forward has no route to either prefix.
 	fw := httptest.NewServer(ui.ForwardHandler())

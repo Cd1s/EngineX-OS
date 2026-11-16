@@ -275,16 +275,16 @@ if [ "$IS_ENGINEX" -eq 1 ]; then
     fi
 
     # Strip UsePAM from sshd configs: az0x OpenSSH is built without PAM and fails rexec if UsePAM is present
-    for cfg in "$MNT_DIR/usr/share/enginex-custom/sshd_config" "$MNT_DIR/etc/ssh/sshd_config"; do
+    for cfg in "$MNT_DIR/usr/share/enginex/sshd_config" "$MNT_DIR/etc/ssh/sshd_config"; do
         if [ -f "$cfg" ]; then
             sed -i '/UsePAM/d' "$cfg"
         fi
     done
 
-    # Seed automated public key into enginex-custom seed location so prepare copies it to /data
-    if [ -d "$MNT_DIR/usr/share/enginex-custom" ]; then
-        echo "$SSH_PUB_CONTENT" > "$MNT_DIR/usr/share/enginex-custom/authorized_keys"
-        chmod 600 "$MNT_DIR/usr/share/enginex-custom/authorized_keys"
+    # Seed automated public key into enginex seed location so prepare copies it to /data
+    if [ -d "$MNT_DIR/usr/share/enginex" ]; then
+        echo "$SSH_PUB_CONTENT" > "$MNT_DIR/usr/share/enginex/authorized_keys"
+        chmod 600 "$MNT_DIR/usr/share/enginex/authorized_keys"
     fi
 
     # Mask hardware-only services that cannot succeed in QEMU (avoids systemctl --failed noise)
@@ -294,7 +294,7 @@ if [ "$IS_ENGINEX" -eq 1 ]; then
     rm -f "$MNT_DIR/etc/ssh/ssh_host_rsa_key"
     rm -f "$MNT_DIR/etc/systemd/system/multi-user.target.wants/sshd.service"
     mkdir -p "$MNT_DIR/etc/systemd/system/multi-user.target.wants"
-    ln -sf /usr/lib/systemd/system/enginex-custom-sshd.service "$MNT_DIR/etc/systemd/system/multi-user.target.wants/enginex-custom-sshd.service"
+    ln -sf /usr/lib/systemd/system/enginex-sshd.service "$MNT_DIR/etc/systemd/system/multi-user.target.wants/enginex-sshd.service"
 else
     # Stock inMusic firmware uses stock sshd.service
     mkdir -p "$MNT_DIR/etc/systemd/system/multi-user.target.wants"
@@ -439,8 +439,8 @@ else
             report FAIL "systemctl --failed has failures: $(echo "$FAILED_UNITS" | awk '{print $1}' | tr '\n' ' ')"
         fi
 
-        # Check 2: enginex-custom-prepare, stream-sync, rb-bridge, enginex-deemixd, engine-guardian, engine active
-        for unit in enginex-custom-prepare.service stream-sync.service rb-bridge.service enginex-deemixd.service engine-guardian.service engine.service; do
+        # Check 2: enginex-prepare, stream-sync, rb-bridge, enginex-deemixd, engine-guardian, engine active
+        for unit in enginex-prepare.service stream-sync.service rb-bridge.service enginex-deemixd.service engine-guardian.service engine.service; do
             u_state="$(guest_exec "systemctl is-active $unit 2>/dev/null || true" | tr -d '\r\n')"
             if [ "$u_state" = "active" ]; then
                 report PASS "Unit $unit is active"
@@ -458,12 +458,12 @@ else
             report FAIL "UI hook did not report QML replacement count"
         fi
 
-        # Check 4: enginex-custom-prepare before engine
+        # Check 4: enginex-prepare before engine
         ORDER_CHECK="$(guest_exec 'systemd-analyze critical-chain engine.service 2>/dev/null || systemctl show engine.service -p After 2>/dev/null || true')"
-        if echo "$ORDER_CHECK" | grep -q "enginex-custom-prepare"; then
-            report PASS "enginex-custom-prepare is ordered before engine"
+        if echo "$ORDER_CHECK" | grep -q "enginex-prepare"; then
+            report PASS "enginex-prepare is ordered before engine"
         else
-            report FAIL "enginex-custom-prepare is not ordered before engine"
+            report FAIL "enginex-prepare is not ordered before engine"
         fi
 
         # Check 5: curl 127.0.0.1:8080/v1/enginex/ui returns 200
@@ -475,7 +475,7 @@ else
         fi
 
         # Check 6: journal has no errors from our units
-        if JOURNAL_OUT="$(guest_exec 'journalctl --no-pager -p err..emerg -u enginex-custom-prepare -u stream-sync -u rb-bridge -u enginex-deemixd -u engine-guardian -u engine 2>&1')"; then
+        if JOURNAL_OUT="$(guest_exec 'journalctl --no-pager -p err..emerg -u enginex-prepare -u stream-sync -u rb-bridge -u enginex-deemixd -u engine-guardian -u engine 2>&1')"; then
             ERR_LINES="$(echo "$JOURNAL_OUT" | tr -d '\r' | grep -v '^\s*$' | grep -v -- '-- No entries --' || true)"
             if [ -z "$ERR_LINES" ]; then
                 report PASS "Journal has no errors from EngineX units"

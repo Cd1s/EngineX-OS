@@ -959,8 +959,8 @@ def inject(fs, key=None, services=(), overlay=None, version=None):
     if etc:
         managed += sorted(p[len('/etc/'):] for p in links if p.startswith('/etc/'))
         # Up to 5.3.0.4 the same files had legacy names (#234), and an image of that time could
-        # leave copies (and an /etc/enginex -> legacy link) in the upper layer: whole old and new
-        # directories go, since the image ships /etc/enginex and the /etc/legacy link to it.
+        # leave copies and an old image-config link in the upper layer: whole old and new
+        # directories go, since the image ships the canonical /etc/enginex directory.
         managed = legacy.managed_paths(managed)
     fs.write('/usr/libexec/enginex-etc-reset', etc_reset(epoch, managed), 0o755)
     # A locked root account is rejected even for public-key auth with UsePAM=no.

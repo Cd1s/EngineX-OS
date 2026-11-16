@@ -1,9 +1,9 @@
 package cli
 
 import (
-	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"context"
 	"fmt"
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"os"
 	"path/filepath"
 	"strconv"

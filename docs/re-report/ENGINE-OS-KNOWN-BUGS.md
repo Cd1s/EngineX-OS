@@ -77,7 +77,7 @@
   - 5.0.0 把封面从 `AlbumArt` 大字段迁到独立目录。迁移中断时，应用层可能重建空 `Playlist`，而不是保留旧链表。
 - 链接与日期：
   - [I’m Done With Engine DJ OS. Total Disaster](https://community.enginedj.com/t/i-m-done-with-engine-dj-os-total-disaster/71200)，2026-10-09，Prime GO+，当时设备 5.0.4，随后桌面/设备都试过 5.1.0，歌单仍是 0。
-  - [SC5000 ISSUES: Freezing, slow database loading, streaming quality mismatch, corrupt databases](https://community.enginedj.com/t/enginex-issues-freezing-slow-database-loading-streaming-quality-mismatch-issue-corrupt-databases/51261)，2023-09-08。新硬盘、新库，SC5000 仍报 corrupt，Prime GO 不报。
+  - [SC5000 ISSUES: Freezing, slow database loading, streaming quality mismatch, corrupt databases](https://community.enginedj.com/t/sc5000-issues-freezing-slow-database-loading-streaming-quality-mismatch-issue-corrupt-databases/51261)，2023-09-08。新硬盘、新库，SC5000 仍报 corrupt，Prime GO 不报。
   - [DB is corrupt. Please reformat and rebuild this drive](https://community.enginedj.com/t/db-is-corrupt-please-reformat-and-rebuild-this-drive/5022)，2017-07-29 开帖，2021-06-15 仍有回复。这是同一句错误的老帖。
 - 固件 / 数据库层怎么修：
   1. 把「schema 较新」「Playlist 行数为 0 但 Track 还有几千行」「integrity_check 失败」分成三个不同对话框。只有第三种才允许提示格式化。
@@ -95,7 +95,7 @@
   - `PerformanceData.overviewWaveFormData` 是 Qt `qCompress` 格式（4 字节原始长度 + zlib）。解压失败、长度为 0、或 RGB 三色缓冲和三频缓冲尺寸不一致时，如果渲染器把失败当成「空纹理」而不是回退到 RMS，用户看到的就是黑底加拍线。
   - 本仓库 `Engine-Library-Format.md` 仍把 `highResolutionWaveFormData` / `overviewWaveFormData` 标为 TODO。5.0 的 RGB 缓冲布局不能假设和 4.3.4 的三频缓冲相同。
 - 链接与日期：
-  - [Engine OS 5.0.2 - SC5000 Prime intermittent blank waveform](https://community.enginedj.com/t/engine-os-5-0-2-enginex-prime-intermittent-blank-waveform-after-update-worked-correctly-on-5-0-1/69726)，2026-06-26，2 帖，未关闭。第二帖 2026-06-27 补充 4.3.4 SC6000 也有局部空白。
+  - [Engine OS 5.0.2 - SC5000 Prime intermittent blank waveform](https://community.enginedj.com/t/engine-os-5-0-2-sc5000-prime-intermittent-blank-waveform-after-update-worked-correctly-on-5-0-1/69726)，2026-06-26，2 帖，未关闭。第二帖 2026-06-27 补充 4.3.4 SC6000 也有局部空白。
 - 固件 / 数据库层怎么修：
   1. 解压 `overviewWaveFormData` 失败时，异步用 `WaveformBuilder` 在设备上重算，先画三频 RMS，不要画空纹理。重算不要占音频回调。
   2. RGB shader 编译或上屏超时则本曲回退三频，并记住这个回退，避免每帧重试。
@@ -111,7 +111,7 @@
   - 触盘无响应而 pitch 仍有效，像是主线程在等数据库或波形，音频时钟还在跑。
   - Wi-Fi 栈在库扫描期间被饿死，表现为关联断开，不一定是射频问题。
 - 链接与日期：
-  - [SC5000 Extremely SLOW after latest firmware update](https://community.enginedj.com/t/enginex-extremely-slow-after-latest-firmware-update/69462)，2026-06-06 开帖，2026-06-23 最后回复，7 帖，未关闭。楼主写的是 5.0.1。
+  - [SC5000 Extremely SLOW after latest firmware update](https://community.enginedj.com/t/sc5000-extremely-slow-after-latest-firmware-update/69462)，2026-06-06 开帖，2026-06-23 最后回复，7 帖，未关闭。楼主写的是 5.0.1。
 - 固件 / 数据库层怎么修：
   1. 列表预听走独立解码器，限制优先级低于正在播放的盘，并且不要在预听开始时同步刷新 RGB 波形。
   2. 歌单树不要每次展开都跑 `PlaylistPath`。开库时把 `(id, parentListId, nextListId, position)` 物化成普通表，只在歌单编辑后重建。
@@ -244,7 +244,7 @@
 - 触发条件：多年份的 `hm.db`，里面有大量重复历史列表；5.0.1 的同步和设备浏览会读这张库。
 - 底层原因推断（中）：`hm.db` 里有完整的 `Track`、`PerformanceData`、`Playlist`、`PlaylistEntity`，另外还有 `Historylist` / `HistorylistEntity`。设备若在开机或每次插入时把历史和主库做一次匹配，行数上去之后主线程会冻住。清理历史能好转，说明缺的是设备侧的上限和后台化，不是某一首曲目的解码。
 - 链接与日期：
-  - [Engine DJ 5.0.1 – Severe Sync Manager Slowdown, Library Performance Issues & SC5000 Freezes](https://community.enginedj.com/t/bug-report-engine-dj-5-0-1-severe-sync-manager-slowdown-library-performance-issues-enginex-freezes/69200)，2026-05-20。2026-05-25 管理员写发帖人已靠他人协助解决。这不能当成固件已修。
+  - [Engine DJ 5.0.1 – Severe Sync Manager Slowdown, Library Performance Issues & SC5000 Freezes](https://community.enginedj.com/t/bug-report-engine-dj-5-0-1-severe-sync-manager-slowdown-library-performance-issues-sc5000-freezes/69200)，2026-05-20。2026-05-25 管理员写发帖人已靠他人协助解决。这不能当成固件已修。
   - 同周还有 [SC Live 4 Engine 5.0.1 Random Freeze](https://community.enginedj.com/t/sc-live-4-engine-5-0-1-random-freeze/69257)，2026-05-24，5 帖，未关闭。5.0.2–5.0.4 没有「随机冻结」这一条。
 - 固件 / 数据库层怎么修：
   1. 播放和浏览只打开 `m.db`。`hm.db` 延后打开，并且只追加当前场次。
@@ -257,7 +257,7 @@
 - 触发条件：SC5000 使用流媒体；与另一台 Engine 设备的音质设置不同。5.0.x 发行说明没有这条。
 - 底层原因推断（低）：设备把可播放的音质档位存在本地设置里，Link 或 instant double 时要求两边档位相同，不一致就弹错并中止，而不是降到两边都支持的档位。证据只有一个帖子标题和一张没摘录下来的截图，修的时候要先复现对话框。
 - 链接与日期：
-  - [51261](https://community.enginedj.com/t/enginex-issues-freezing-slow-database-loading-streaming-quality-mismatch-issue-corrupt-databases/51261)，2023-09-08。
+  - [51261](https://community.enginedj.com/t/sc5000-issues-freezing-slow-database-loading-streaming-quality-mismatch-issue-corrupt-databases/51261)，2023-09-08。
 - 固件 / 数据库层怎么修：
   1. 音质不一致时自动选两边都有的最高档，只在确实没有共同档位时才报错。
   2. 这个报错不能走 EOS-02 的 corrupt 对话框。

@@ -1,7 +1,6 @@
 package webui
 
 import (
-	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
@@ -10,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"io"
 	"log"
 	"net/http"
@@ -53,10 +53,10 @@ const bundleInstallPeak = 2 * bundleMaxUnpack
 
 var (
 	// versionFile: a second-generation deck whose bundle predates 5.3.0.3 still has the real
-	// /data/legacy-custom (#103).
+	// the legacy data directory (#103).
 	versionFile = migration.DataDir + "/version.txt"
 	// imageVersionFile is where images before 5.3.0.5 keep the version az01_packer.py
-	// patch-rootfs --set-version writes (/etc/legacy; newImageDir since, #234).
+	// patch-rootfs --set-version writes (the legacy image config directory; newImageDir since, #234).
 	imageVersionFile      = migration.ImageDir + "/version.txt"
 	bundleCustomDir       = realDeckCustomDir
 	legacyBundleCustomDir = realLegacyCustomDir
@@ -363,7 +363,7 @@ func (s *Server) installedVersion() string {
 	}
 	current := "dev"
 	// The newest installed runtime or flashed image release (#13, #218); the image's version is
-	// in /etc/enginex since 5.3.0.5, in /etc/legacy before (#234).
+	// in /etc/enginex since 5.3.0.5, in the legacy image config directory before (#234).
 	for _, p := range []string{filepath.Join(s.customDir(), "version.txt"), versionFile, filepath.Join(newImageDir, "version.txt"), imageVersionFile} {
 		if v := currentVersion(p); v != "dev" && (current == "dev" || releasesig.NewerVersion(v, current)) {
 			current = v
@@ -376,7 +376,7 @@ func (s *Server) installedVersion() string {
 var imageReleaseTagFile = migration.ImageDir + "/" + releaseTagName
 
 // newImageDir is where first-generation images keep version.txt and release-tag since
-// 5.3.0.5 (#234); /etc/legacy is a link to it there. Read first, then the old directory.
+// 5.3.0.5 (#234); the legacy image config directory is a link to it there. Read first, then the old directory.
 var newImageDir = "/etc/enginex"
 
 // installedRelease is what a release tag is compared with: the tag baked into the
@@ -614,7 +614,7 @@ func (s *Server) installDataBundleReader(r io.Reader, work string) {
 	if older && activatesOnDeck(customDir) {
 		// The older release's install.sh never runs over /data (#234 review R1/R2): it fills a
 		// stage, and this release moves the result in with atomic swaps a power cut cannot
-		// break, handing a release before 5.3.0.3 its /data/legacy-custom back (internal/leave).
+		// break, handing a release before 5.3.0.3 its the legacy data directory back (internal/leave).
 		if err := installOlder(top); err != nil {
 			fail("bundle install: " + err.Error())
 			return
@@ -626,8 +626,8 @@ func (s *Server) installDataBundleReader(r io.Reader, work string) {
 			// Both names: the install.sh of a later release reads ENGINEX_*.
 			alsa := filepath.Join(customDir, "alsa-conf.d")
 			cmd.Env = append(cmd.Env,
-				migration.CustomEnv + "="+customDir, "ENGINEX_CUSTOM="+customDir,
-				migration.AlsaEnv + "="+alsa, "ENGINEX_ALSA_OVERLAY="+alsa,
+				migration.CustomEnv+"="+customDir, "ENGINEX_CUSTOM="+customDir,
+				migration.AlsaEnv+"="+alsa, "ENGINEX_ALSA_OVERLAY="+alsa,
 			)
 		}
 		if out, err := cmd.CombinedOutput(); err != nil {

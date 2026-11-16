@@ -6,7 +6,7 @@
     "passed": 24,
     "failed": 0,
     "skipped": 0,
-    "log": "<firmware-lab>/az01-unit-final.log"
+    "log": "/root/build/sc5000-lab/az01-unit-final.log"
   },
   "qengine": {
     "bash_syntax": "passed",
@@ -34,7 +34,7 @@
     "recarved_rootfs_sha256": "1cf128df871a2c5f95a795203e3f7c880c68890e4099cce7655b0feb5cf34fbc",
     "patched_image_sha256": "dcaf736bc2ccc201c05e4bd5c7d31fd9ca35a06f59e612a33974a657e8e57629",
     "e2fsck_fn": "passed",
-    "artifact": "<firmware-lab>/5.0.4/patched-current.img",
+    "artifact": "/root/build/sc5000-lab/5.0.4/patched-current.img",
     "ssh_key_scope": "temporary validation public key, not a production image",
     "stock_geometry_uuid_features_equal": true
   },
@@ -107,7 +107,7 @@
         "trp.db is a byte candidate; classifier helper object remains unverified"
       ],
       "fix_verification": "primary agent, not an additional reviewer pass",
-      "log": "<firmware-lab>/enginex-qa-rea-result.txt",
+      "log": "/root/build/sc5000-lab/sc5000-qa-rea-result.txt",
       "log_sha256": "456c44f0b1d2ef166a6a32eae9c2a1d77a84f7e5fc5200edfba98611cb0b605f",
       "reviewer_scope_deviation": "Read-only reproduction scripts placed in remote review/repro-scripts rather than requested rea subdirectory"
     }

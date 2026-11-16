@@ -10,7 +10,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 ALLOW = json.loads((Path(__file__).with_name('rename234_allowlist.json')).read_text())
 OLD = 'sc' + '5000'
-MODEL = re.compile(r'\bSC' + r'5000M?\b')  # Denon hardware and official image prefixes.
+MODEL = re.compile(r'(?<![A-Za-z_])SC' + r'5000M?(?![A-Za-z_0-9])')  # Denon hardware and official image prefixes.
 
 
 def findings(repo, paths=None):

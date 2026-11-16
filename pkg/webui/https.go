@@ -1,7 +1,6 @@
 package webui
 
 import (
-	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -11,6 +10,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"log"
 	"math/big"
 	"net"

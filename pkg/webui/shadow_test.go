@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"io"
 	"net"
 	"net/http"
@@ -25,12 +26,12 @@ import (
 
 func TestNetPathFile(t *testing.T) {
 	for in, want := range map[string]string{
-		"net://7022/(Unknown)/enginex-custom/Stream/1.mp3": "/data/enginex-custom/Stream/1.mp3",
-		"net://7022/KDATA KF328/Contents/a b.flac":        "/media/KDATA KF328/Contents/a b.flac",
-		"net://7022/(Unknown)/../etc/passwd":              "",
-		"net://7022/../x/y.mp3":                           "",
-		"file:///data/x.mp3":                              "",
-		"net://7022/(Unknown)":                            "",
+		"net://7022/(Unknown)/" + migration.DataName + "/Stream/1.mp3": "/data/" + migration.DataName + "/Stream/1.mp3",
+		"net://7022/KDATA KF328/Contents/a b.flac":                     "/media/KDATA KF328/Contents/a b.flac",
+		"net://7022/(Unknown)/../etc/passwd":                           "",
+		"net://7022/../x/y.mp3":                                        "",
+		"file:///data/x.mp3":                                           "",
+		"net://7022/(Unknown)":                                         "",
 	} {
 		if got := netPathFile(in, "/data", "/media"); got != want {
 			t.Errorf("%s: %q, want %q", in, got, want)
@@ -101,12 +102,12 @@ func TestShadowDeckFromPeer(t *testing.T) {
 	data := t.TempDir()
 	shadowDataRoot = data
 	defer func() { shadowDataRoot, shadowBeaconOn = "/data", true }()
-	os.MkdirAll(filepath.Join(data, "enginex-custom/Stream"), 0o755)
-	os.WriteFile(filepath.Join(data, "enginex-custom/Stream/a.mp3"), []byte("AUDIO"), 0o644)
+	os.MkdirAll(filepath.Join(data, migration.DataName+"/Stream"), 0o755)
+	os.WriteFile(filepath.Join(data, migration.DataName+"/Stream/a.mp3"), []byte("AUDIO"), 0o644)
 
 	a := httptest.NewServer(New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil))
 	defer a.Close()
-	body := `[{"deck":2,"net":"net://u/(Unknown)/enginex-custom/Stream/a.mp3","playing":true,"positionMs":1000,"pitch":2},{"deck":4,"net":"net://u/(Unknown)/../etc/passwd"}]`
+	body := `[{"deck":2,"net":"net://u/(Unknown)/` + migration.DataName + `/Stream/a.mp3","playing":true,"positionMs":1000,"pitch":2},{"deck":4,"net":"net://u/(Unknown)/../etc/passwd"}]`
 	if resp, err := http.Post(a.URL+"/v1/enginex/decks", "application/json", strings.NewReader(body)); err != nil || resp.StatusCode != 200 {
 		t.Fatalf("post: %v %v", resp, err)
 	}

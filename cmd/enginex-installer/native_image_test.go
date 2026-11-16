@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"io"
 	"os"
 	"path/filepath"
@@ -109,10 +110,10 @@ func TestNativeImageRefusesConflictingLegacyDirectory(t *testing.T) {
 	}
 	defer fs.Close()
 	if err := fs.Apply(ctx, ext4.ChangeSet{
-		Directories: []string{"enginex", "enginex-custom"},
+		Directories: []string{"enginex", migration.DataName},
 		Files: []ext4.Entry{
-			imageBytes("enginex-custom/bundle/boot-activate.sh", []byte("stale"), 0o755),
-			imageBytes("enginex-custom/bundle/lib/libengine-ui-hook.so", []byte("stale"), 0o755),
+			imageBytes(migration.DataName+"/bundle/boot-activate.sh", []byte("stale"), 0o755),
+			imageBytes(migration.DataName+"/bundle/lib/libengine-ui-hook.so", []byte("stale"), 0o755),
 		},
 	}); err != nil {
 		t.Fatal(err)
@@ -124,7 +125,7 @@ func TestNativeImageRefusesConflictingLegacyDirectory(t *testing.T) {
 	o := testOpts(t)
 	o.USB, o.Bundle, o.Backup = fb.Bin, bundle.Path, backup
 	err = run(ctx, o)
-	if err == nil || !strings.Contains(err.Error(), "legacy /enginex-custom") || !strings.HasSuffix(err.Error(), "nothing flashed") {
+	if err == nil || !strings.Contains(err.Error(), "legacy /"+migration.DataName) || !strings.HasSuffix(err.Error(), "nothing flashed") {
 		t.Fatalf("conflicting directories: %v", err)
 	}
 	if flashed := fb.Flashed(); len(flashed) != 0 {

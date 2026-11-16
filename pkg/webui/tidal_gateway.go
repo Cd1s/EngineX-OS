@@ -6,7 +6,6 @@ package webui
 // native TIDAL browser plays them. Audio comes from the Deemix pipeline.
 
 import (
-	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"context"
 	"crypto/sha1"
 	"database/sql"
@@ -14,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"hash/crc32"
 	"io"
 	"log"
@@ -498,11 +498,9 @@ func tidalNumericID(name string) uint32 { return crc32.ChecksumIEEE([]byte(name)
 
 func isTidal(p string) bool { return strings.HasPrefix(p, "/v1/") || strings.HasPrefix(p, "/au/") }
 
-// canonicalV1 maps /v1/legacy/..., the deck API's name before 5.3.0.5 (#234), onto the
-// /v1/enginex/... routes. Both prefixes reach the same handlers behind the same rules (the
-// loopback check above runs first); /v1/legacy/ stays for good, since installers, UI packs,
-// Mods and users' scripts of any release call it. One mapping here, not a second copy of
-// each route.
+// canonicalV1 maps the legacy API prefix onto the current routes (#234).
+// Both prefixes reach the same handlers and access rules. The alias remains
+// pending the maintainer's removal decision for installed clients.
 func canonicalV1(p string) string {
 	if rest, ok := strings.CutPrefix(p, migration.APIPrefix); ok && (rest == "" || rest[0] == '/') {
 		return "/v1/enginex" + rest

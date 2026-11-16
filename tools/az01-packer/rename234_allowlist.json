@@ -9,7 +9,27 @@
     "internal/leave/testdata/**": "Unmodified published installers used by the downgrade fault matrix",
     "docs/ISSUE-FIXES-*": "Released-version records",
     "docs/re-report/rea-evidence/**": "Immutable firmware evidence",
-    "docs/REGRESSION-5.3.0.3-to-5.3.0.4.md": "Released-version regression record"
+    "docs/REGRESSION-5.3.0.3-to-5.3.0.4.md": "Released-version regression record",
+    "docs/ISSUE-FIXES-2026-11-04.md": "Dated investigation or firmware analysis; recorded paths and evidence stay unchanged",
+    "docs/STEMS-HOTCUE-LIVE-20261103.md": "Dated investigation or firmware analysis; recorded paths and evidence stay unchanged",
+    "docs/STEMS-REMOTE-ACCEPTANCE-20261103.md": "Dated investigation or firmware analysis; recorded paths and evidence stay unchanged",
+    "docs/STREAMING-STEMS-20261103.md": "Dated investigation or firmware analysis; recorded paths and evidence stay unchanged",
+    "docs/re-report/ENGINE-5.0.4-ANALYSIS.md": "Dated investigation or firmware analysis; recorded paths and evidence stay unchanged",
+    "docs/re-report/ENGINE-5.0.4-ELF-ADDRESS-MAP.json": "Dated investigation or firmware analysis; recorded paths and evidence stay unchanged",
+    "docs/re-report/ENGINE-5.0.4-performance-samples.json": "Dated investigation or firmware analysis; recorded paths and evidence stay unchanged",
+    "docs/re-report/ENGINE-OS-KNOWN-BUGS.md": "Dated investigation or firmware analysis; recorded paths and evidence stay unchanged",
+    "docs/re-report/FIRMWARE-BUGS-AND-DEBLOAT.md": "Dated investigation or firmware analysis; recorded paths and evidence stay unchanged",
+    "docs/re-report/ISSUE-140-PRIME4-BOOT-20261111.md": "Dated investigation or firmware analysis; recorded paths and evidence stay unchanged",
+    "docs/re-report/REA-BINARY-REPORT.md": "Dated investigation or firmware analysis; recorded paths and evidence stay unchanged",
+    "docs/re-report/REVIEW.md": "Dated investigation or firmware analysis; recorded paths and evidence stay unchanged",
+    "docs/re-report/SC5000-PERF-GC-AFFINITY-20261109.md": "Dated investigation or firmware analysis; recorded paths and evidence stay unchanged",
+    "docs/re-report/SC5000-R2-FREEZE-PERF-20261109.md": "Dated investigation or firmware analysis; recorded paths and evidence stay unchanged",
+    "docs/re-report/VALIDATION.json": "Dated investigation or firmware analysis; recorded paths and evidence stay unchanged",
+    "docs/re-report/verbose-logging-20261110.md": "Dated investigation or firmware analysis; recorded paths and evidence stay unchanged",
+    "docs/reports/5305-applemusic-spotify-integration.md": "Dated investigation or firmware analysis; recorded paths and evidence stay unchanged",
+    "docs/reports/applemusic-spotify-integration-20261115.md": "Dated investigation or firmware analysis; recorded paths and evidence stay unchanged",
+    "docs/reports/stream-cold-20261109.md": "Dated investigation or firmware analysis; recorded paths and evidence stay unchanged",
+    "docs/reports/stream-perf-20261109.md": "Dated investigation or firmware analysis; recorded paths and evidence stay unchanged"
   },
   "delegated": {
     "docs/mods/**": "Owned by the Mods rename lane"

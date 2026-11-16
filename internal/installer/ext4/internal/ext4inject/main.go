@@ -10,7 +10,6 @@
 package main
 
 import (
-	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
@@ -19,6 +18,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"io"
 	"os"
 	"path"

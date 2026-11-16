@@ -23,17 +23,17 @@ func writeFile(t *testing.T, dir, name, body string) string {
 
 func TestResolveClientFromRelayConfig(t *testing.T) {
 	dir := t.TempDir()
-	cfg := writeFile(t, dir, "deemix-config.json", `{"relayUrl":"https://relay.example/` + migration.ProjectName + `/","deemixPassword":" console-pass "}`)
+	cfg := writeFile(t, dir, "deemix-config.json", `{"relayUrl":"https://relay.example/`+migration.ProjectName+`/","deemixPassword":" console-pass "}`)
 	c, err := ResolveClient(envOf(map[string]string{"ENGINEX_STEMS_CONFIG": cfg}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Endpoint != "https://relay.example/" + migration.ProjectName + "/" || c.Secret != "console-pass" || c.Source != cfg {
+	if c.Endpoint != "https://relay.example/"+migration.ProjectName+"/" || c.Secret != "console-pass" || c.Source != cfg {
 		t.Fatalf("%+v", c)
 	}
 	// ENGINEX_STEMS_TOKEN replaces only the password.
 	c, err = ResolveClient(envOf(map[string]string{"ENGINEX_STEMS_CONFIG": cfg, "ENGINEX_STEMS_TOKEN": "other"}))
-	if err != nil || c.Endpoint != "https://relay.example/" + migration.ProjectName + "/" || c.Secret != "other" {
+	if err != nil || c.Endpoint != "https://relay.example/"+migration.ProjectName+"/" || c.Secret != "other" {
 		t.Fatalf("%+v %v", c, err)
 	}
 }
@@ -145,7 +145,7 @@ func TestResolveClientReadsPre5305Names(t *testing.T) {
 	token := writeFile(t, dir, "token", strings.Repeat("o", 32)+"\n")
 	c, err := ResolveClient(envOf(map[string]string{migration.StemsEnvPrefix + "URL": "http://192.0.2.1:6596", migration.StemsEnvPrefix + "TOKEN_FILE": token}))
 	if err == nil || !strings.Contains(err.Error(), "private network") {
-		t.Fatalf("a public " + migration.StemsEnvPrefix + "URL is not checked like the new name: %+v %v", c, err)
+		t.Fatalf("a public "+migration.StemsEnvPrefix+"URL is not checked like the new name: %+v %v", c, err)
 	}
 	c, err = ResolveClient(envOf(map[string]string{migration.StemsEnvPrefix + "URL": "http://127.0.0.1:6596", migration.StemsEnvPrefix + "TOKEN_FILE": token}))
 	if err != nil || c.Endpoint != "http://127.0.0.1:6596" || c.Secret != strings.Repeat("o", 32) {
@@ -158,6 +158,6 @@ func TestResolveClientReadsPre5305Names(t *testing.T) {
 	}
 	cfg := writeFile(t, dir, "deemix-config.json", `{"relayUrl":"https://relay.example","deemixPassword":"console"}`)
 	if c, err = ResolveClient(envOf(map[string]string{migration.StemsEnvPrefix + "CONFIG": cfg})); err != nil || c.Endpoint == "" {
-		t.Fatalf(migration.StemsEnvPrefix + "CONFIG: %+v %v", c, err)
+		t.Fatalf(migration.StemsEnvPrefix+"CONFIG: %+v %v", c, err)
 	}
 }

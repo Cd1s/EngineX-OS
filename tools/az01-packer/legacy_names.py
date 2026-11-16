@@ -25,3 +25,4 @@ ASSIGNMENTS = 'sc5000-assignments'  # Legacy migration fixture or reader.
 BOOT_CONVERTED = 'sc5000-boot-converted'  # Legacy migration fixture or reader.
 TZ_NEWER = 'sc5000-tz-newer'  # Legacy migration fixture or reader.
 PROJECT = 'sc5000'  # Legacy migration fixture or reader.
+UI_HOOK_ENV = 'SC5000_UI_HOOK'  # Environment carried by an older runtime unit.

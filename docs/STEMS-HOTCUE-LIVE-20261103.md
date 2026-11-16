@@ -55,12 +55,12 @@ Stemmed仍为false、Pad仍为CUES。没有把这些普通音频加载成功当�
 IN上使用实际探针函数检查缺失属性与false的区分，以及无属性赋值；实机加载正常。
 
 前置远端备份：
-`20261103T155517Z-<workstation>-enginex-before-readonly-hotcue-probe-20261103-23c9b8938eeb-enginex-hotcue-diagnostic-ui-prestate.tar.gz`。
+`20261103T155517Z-<workstation>-sc5000-before-readonly-hotcue-probe-20261103-23c9b8938eeb-sc5000-hotcue-diagnostic-ui-prestate.tar.gz`。
 
 存盘UI现已恢复原SHA-256：
 `d0d405f9f9ce96b95d14a263c795dc4c3662b36799ac641674d700f9d543d095`。
 恢复时未再次重启，Engine仍为5952，NRestarts=0；当前内存中的探针会按180秒期限停下。
-原始日志和完整状态快照暂存 `/tmp/enginex-hotcue-diagnostic-20261103/`，没有写入用户曲库。
+原始日志和完整状态快照暂存 `/tmp/sc5000-hotcue-diagnostic-20261103/`，没有写入用户曲库。
 
 旧Opus报告的20分钟播放基线涵盖此次有意重启。t≈983秒的XRUN/CLOSED/OPEN及PID切换
 必须标成维护中断；不能把它当自然卡音。其他时间的欠载报告仍需单独分析。
@@ -68,9 +68,9 @@ IN上使用实际探针函数检查缺失属性与false的区分，以及无属�
 ## 在执行的工作
 
 - Sol设备分析：IN agent `e098b37e-f903-40f7-b5db-2e003edbd872`，独立目录
-  `/root/build/enginex-compat-20261103-rea-stems`。
+  `/root/build/sc5000-compat-20261103-rea-stems`。
 - 远端Deemix准备API草案：IN agent `6ef79e59-8efc-4b32-ad28-bf0e17a41737`，
-  `/root/build/enginex-online-stems-20261103`，尚未部署。
+  `/root/build/sc5000-online-stems-20261103`，尚未部署。
 - 用户指定的新Opus5.5开发agent：`f36a7737-18c5-4acf-8eb0-57a1fcf894bf`，
   Paseo workspace `wks_9afea3bdd0d9c240`，独立分支 `feat/stems-developer-20261103`。
   已交付现有协议/离线Jobs代码与真实运行值，先做部署准备和确定的问题修复，后续按冻结接口集成。
@@ -82,7 +82,7 @@ IN上使用实际探针函数检查缺失属性与false的区分，以及无属�
 Deemix准备API草案已完成受影响包race与5个程序ARMv7交叉编译。
 包含鉴权后的远端取音、分析、分轨、SHA校验、取消和碟机导入调用，未部署。
 14个源码/测试文件及交接记录已冻结提取到
-`/tmp/enginex-online-source-20261103`，交给新Opus在独立工作树合并，保留其已做的Jobs容量/淘汰修复。
+`/tmp/sc5000-online-source-20261103`，交给新Opus在独立工作树合并，保留其已做的Jobs容量/淘汰修复。
 
 合并前已发现的产品问题：草案会让普通acquire等待分轨并下载六个文件，
 既拖慢普通播放，也可能使超出分析上限的长曲无法沿用原播放链。

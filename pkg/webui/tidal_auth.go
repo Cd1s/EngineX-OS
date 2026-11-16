@@ -3,11 +3,11 @@ package webui
 // Real TIDAL credentials live independently of Engine's shared gateway account.
 // Engine may replace that account with local tokens when another source opens.
 import (
-	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"io"
 	"log"
 	"net/http"

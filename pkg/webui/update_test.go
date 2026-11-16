@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -101,6 +102,11 @@ func bundleInstallScript(t *testing.T) []byte {
 	// The packer expands @MIGRATE_IF_DEFAULT@ into the /data migration; the test deck is not
 	// a real /data (ENGINEX_CUSTOM is set), so there is nothing to migrate.
 	script := bytes.ReplaceAll(m[1], []byte("@MIGRATE_IF_DEFAULT@"), []byte(":"))
+	legacyShell, err := os.ReadFile("../../rootfs-overlay/usr/libexec/enginex-migration")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script = bytes.ReplaceAll(script, []byte("@LEGACY_SHELL@"), legacyShell)
 	// @SWAP_UNDO@ is the real rollback of an interrupted install (BH-G2-4).
 	undo := regexp.MustCompile(`(?s)\nSWAP_UNDO = r"""(.*?)"""`).FindSubmatch(src)
 	if undo == nil {
@@ -195,7 +201,7 @@ func bundleDeckWith(t *testing.T, compatible string, assets func(base string) st
 	t.Cleanup(gh.Close)
 	base = gh.URL
 	state := t.TempDir()
-	custom := filepath.Join(state, "enginex-custom")
+	custom := filepath.Join(state, migration.DataName)
 	os.MkdirAll(custom, 0o700)
 	os.WriteFile(filepath.Join(custom, "version.txt"), []byte(fault.installedVersion()+"\n"), 0o644)
 	if fault.installTag != "" { // a bundle install carries the release tag it came from
@@ -597,7 +603,7 @@ func TestSameVersionReRelease(t *testing.T) {
 // #218: end-to-end 2nd-gen PRIME 4 G2 (AZ04, arm64) re-release flow with real deck path
 // resolution (Config.VersionFile == ""). Covers plain 5.3.0.4 -> v5.3.0.4-r3 apply via both
 // *-Update.img and *-Data-Bundle.tar.gz, restart into a fresh Server, v5.3.0.5 still offered,
-// and missing/unmigrated /data/enginex-custom alongside /data/enginex.
+// and missing/unmigrated /data/the legacy data name alongside /data/enginex.
 func TestGen2EndToEndReReleaseApplyAndCustomDirResolution(t *testing.T) {
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skip("python3 not installed")
@@ -650,14 +656,14 @@ func TestGen2EndToEndReReleaseApplyAndCustomDirResolution(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			root := t.TempDir()
 			bundleCustomDir = filepath.Join(root, "enginex")
-			legacyBundleCustomDir = filepath.Join(root, "enginex-custom")
+			legacyBundleCustomDir = filepath.Join(root, migration.DataName)
 			versionFile = filepath.Join(legacyBundleCustomDir, "version.txt")
 			imageVersionFile = filepath.Join(root, "no-etc-version")
 			imageReleaseTagFile = filepath.Join(root, "no-etc-release-tag")
 			deviceCompatiblePath = filepath.Join(root, "compatible")
 			os.WriteFile(deviceCompatiblePath, []byte("inmusic,jp24\x00inmusic,az04\x00"), 0o644)
 
-			// Seed initial plain 5.3.0.4 install under /data/enginex + /data/enginex-custom -> enginex.
+			// Seed initial plain 5.3.0.4 install under /data/enginex + /data/the legacy data name -> enginex.
 			unpackDir := filepath.Join(root, "seed")
 			top, err := unpackBundleReader(bytes.NewReader(plainTar), unpackDir)
 			if err != nil {
@@ -739,10 +745,10 @@ func TestGen2EndToEndReReleaseApplyAndCustomDirResolution(t *testing.T) {
 		})
 	}
 
-	t.Run("missing-or-unmigrated-enginex-custom-still-reads-enginex-release-tag", func(t *testing.T) {
+	t.Run("missing-or-unmigrated-"+migration.DataName+"-still-reads-enginex-release-tag", func(t *testing.T) {
 		root := t.TempDir()
 		bundleCustomDir = filepath.Join(root, "enginex")
-		legacyBundleCustomDir = filepath.Join(root, "enginex-custom")
+		legacyBundleCustomDir = filepath.Join(root, migration.DataName)
 		versionFile = filepath.Join(legacyBundleCustomDir, "version.txt")
 		imageVersionFile = filepath.Join(root, "no-etc-version")
 		imageReleaseTagFile = filepath.Join(root, "no-etc-release-tag")
@@ -768,16 +774,16 @@ func TestGen2EndToEndReReleaseApplyAndCustomDirResolution(t *testing.T) {
 			return New(Config{AccessToken: "c", UIDir: t.TempDir(), StateDir: filepath.Join(root, "state"), GitHubURL: gh.URL}, nil)
 		}
 
-		// Case A: /data/enginex-custom symlink missing on 2nd-gen deck (no /etc/enginex/version.txt).
+		// Case A: /data/the legacy data name symlink missing on 2nd-gen deck (no /etc/enginex/version.txt).
 		if u := getUpdate(newSrv(), ""); u.UpdateAvailable || u.Current != "5.3.0.4" {
-			t.Errorf("missing enginex-custom symlink: got %+v, want Current=5.3.0.4 UpdateAvailable=false", u)
+			t.Errorf("missing "+migration.DataName+" symlink: got %+v, want Current=5.3.0.4 UpdateAvailable=false", u)
 		}
 
-		// Case B: leftover real /data/enginex-custom directory (old 5.3.0.4 without release-tag) alongside /data/enginex (r3).
+		// Case B: leftover real /data/the legacy data name directory (old 5.3.0.4 without release-tag) alongside /data/enginex (r3).
 		os.MkdirAll(filepath.Join(legacyBundleCustomDir, "bundle"), 0o700)
 		os.WriteFile(filepath.Join(legacyBundleCustomDir, "version.txt"), []byte("5.3.0.4\n"), 0o644)
 		if u := getUpdate(newSrv(), ""); u.UpdateAvailable || u.Current != "5.3.0.4" {
-			t.Errorf("coexisting legacy enginex-custom dir: got %+v, want Current=5.3.0.4 UpdateAvailable=false", u)
+			t.Errorf("coexisting legacy "+migration.DataName+" dir: got %+v, want Current=5.3.0.4 UpdateAvailable=false", u)
 		}
 		curTag = "v5.3.0.5"
 		if u := getUpdate(newSrv(), ""); !u.UpdateAvailable || u.Latest != "v5.3.0.5" {
