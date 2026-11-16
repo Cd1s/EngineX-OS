@@ -1314,7 +1314,9 @@ static int run_fsck_hfsplus(const char *fsck_bin,const char *source,int mark_cle
         pid_t r=waitpid(pid,&status,WNOHANG);
         if(r==pid)reaped=1;
         else if(r<0&&errno!=EINTR){close(pfd[0]);return -1;}
-        if(!reaped&&budget(deadline)){kill(-pid,SIGKILL);while(waitpid(pid,&status,0)<0&&errno==EINTR){}close(pfd[0]);errno=ETIMEDOUT;return -1;}
+        // -y writes the stick: killed mid-write it could leave it worse than it found it (hfs_prepare_mount
+        // starts one only with the time for it).
+        if(!reaped&&!mark_clean&&budget(deadline)){kill(-pid,SIGKILL);while(waitpid(pid,&status,0)<0&&errno==EINTR){}close(pfd[0]);errno=ETIMEDOUT;return -1;}
         if(eof&&!reaped)usleep(20000);
     }
     close(pfd[0]);buf[len]=0;
@@ -1457,6 +1459,23 @@ static void hfs_restore_ro(struct libmnt_context *ctx,const struct hfs_ctx_backu
     }
     hfs_apply_ro(ctx,bk->orig_fstype,bk->set_by_fstype,bk->orig_opts);
 }
+// A stick read-only until now and with no Engine Library of its own has the library Engine built
+// for it only in /data: the generation in use (seed_library touches it) is library-<zero signature>.
+// Read-write, Engine would start an empty library on the stick and no longer show that one, so it
+// stays read-only with it. Once the stick has a library of its own, a newer generation is in use.
+static int deck_library_only(const char *source) {
+    char identity[80],cache[PATH_MAX],root[PATH_MAX],lib[PATH_MAX],db[PATH_MAX],newest[NAME_MAX+1]="";struct stat st,best={0};
+    if(VOLUME_IDENTITY(source,identity)||lib_root(cache)||path_join(root,sizeof root,cache,identity))return 0;
+    DIR *d=opendir(root);if(!d)return 0;
+    struct dirent *e;
+    while((e=readdir(d)))
+        if(seeded_ok(e->d_name)&&!fstatat(dirfd(d),e->d_name,&st,AT_SYMLINK_NOFOLLOW)&&S_ISDIR(st.st_mode)&&(!*newest||newer(&st,&best))) {
+            best=st;snprintf(newest,sizeof newest,"%s",e->d_name);
+        }
+    closedir(d);
+    return !strcmp(newest,"library-0000000000000000")&&!path_join(lib,sizeof lib,root,newest)&&!path_join(db,sizeof db,lib,"Database2/m.db")&&
+           !lstat(db,&st)&&S_ISREG(st.st_mode)&&st.st_size>0;
+}
 static int hfs_prepare_mount(struct libmnt_context *ctx,struct hfs_ctx_backup *bk,int64_t deadline) {
     memset(bk,0,sizeof *bk);
     const char *target=mnt_context_get_target(ctx),*source=mnt_context_get_source(ctx);
@@ -1493,15 +1512,25 @@ static int hfs_prepare_mount(struct libmnt_context *ctx,struct hfs_ctx_backup *b
     // AZ04 (mode == 2) uses stock hfsplus; Gen-1 (mode == 1) uses hfsplusx.
     // Even if AZ04_UFSD_DT_PATH exists, hfsplus mounts stay on stock hfsplus rw while ufsd mounts above pass untouched.
     (void)AZ04_UFSD_DT_PATH;
+    if(deck_library_only(source)) {
+        note("HFS+ stick has only the library Engine built for it on /data, keeping read-only view on",target,0);
+        hfs_apply_ro(ctx,orig_ft,set_by_fstype,orig_opts);return HFS_RW_NONE;
+    }
     set_preparing(target,1);
     const char *fsck=FSCK_HFSPLUS_PATH();
     int is_journaled=0,needs_clean=0;
+    int64_t checked=now_ms();
     if(!fsck||run_fsck_hfsplus(fsck,source,0,deadline)) {
         note("HFS+ fsck -n -f failed, keeping read-only view on",target,errno);
         hfs_apply_ro(ctx,orig_ft,set_by_fstype,orig_opts);return HFS_RW_NONE;
     }
     if(hfs_check_volume_and_journal(source,&is_journaled,1,&needs_clean)) {
         note("HFS+ volume/journal check failed, keeping read-only view on",target,errno);
+        hfs_apply_ro(ctx,orig_ft,set_by_fstype,orig_opts);return HFS_RW_NONE;
+    }
+    int64_t now=now_ms();
+    if(needs_clean&&now+2*(now-checked)>deadline) { // -y and the check after it each take about as long
+        note("HFS+ volume unclean, no time left to mark it clean, keeping read-only view on",target,ETIMEDOUT);
         hfs_apply_ro(ctx,orig_ft,set_by_fstype,orig_opts);return HFS_RW_NONE;
     }
     if(needs_clean) {

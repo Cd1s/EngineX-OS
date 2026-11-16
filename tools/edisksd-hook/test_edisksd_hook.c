@@ -1295,6 +1295,15 @@ static void write_fake_ko(const char *path,uint16_t machine,const char *vermagic
 static void test_hfs_rw_unit(const char *root) {
     char img[PATH_MAX],ko[PATH_MAX],mi[PATH_MAX],opts[128],ft[64];
     int jnl=99,nc=99;
+    { // fsck -y writes the stick: past the deadline it is waited for, never killed; -n still is.
+        char fsck[PATH_MAX],done[PATH_MAX],sh[PATH_MAX*2];
+        join(fsck,root,"unit-slow-fsck");join(done,root,"unit-slow-fsck.done");unlink(done);
+        snprintf(sh,sizeof sh,"#!/bin/sh\nsleep 0.5\ntouch '%s'\necho '** The volume TEST appears to be OK.'\nexit 0\n",done);
+        write_file(fsck,sh);assert(!chmod(fsck,0700));
+        join(img,root,"unit-slow.img");write_hfs_img(img,(1u<<8),0,0,0,0,0);
+        assert(!run_fsck_hfsplus(fsck,img,1,now_ms()+100)&&!access(done,F_OK));
+        unlink(done);assert(run_fsck_hfsplus(fsck,img,0,now_ms()+100)==-1&&errno==ETIMEDOUT&&access(done,F_OK));
+    }
     join(img,root,"unit-clean.img");write_hfs_img(img,(1u<<8),0,0,0,0,0);
     assert(!hfs_check_volume_and_journal(img,&jnl,0,&nc)&&jnl==0&&nc==0);
     join(img,root,"unit-jnl-empty-le.img");write_hfs_img(img,(1u<<8)|(1u<<13),1,0,4096,4096,0);
@@ -1571,6 +1580,44 @@ static void test_hfs_rw_policy(const char *root) {
     mnt_context_set_fstype_pattern(&c,"hfsplus");mnt_context_set_options(&c,"nosuid");
     assert(!mnt_context_mount(&c)&&has_opt_token(c.last_mount_opts,"ro")&&(test_last_sys_flags&MS_RDONLY));
     expect_file(fsck_log,"-n -f\n-y -f\n");
+    assert(!unmount_dispatch(&c,real_unmount));mnt_free_context(&c);
+
+    // 5c. The -n -f check took most of the budget: -y -f (and the check after it) would not fit, so it
+    //     is not started; the stick stays ro and is marked clean on an insert with the time for it.
+    snprintf(fsck_sh,sizeof fsck_sh,"#!/bin/sh\necho \"$1 $2\" >> '%s'\nsleep 0.6\necho '** The volume TEST appears to be OK.'\nexit 0\n",fsck_log);
+    write_file(fsck,fsck_sh);
+    write_hfs_img(img,(1u<<11),0,0,0,0,0);
+    unlink(fsck_log);
+    memset(&c,0,sizeof c);c.target=target;c.source=img;c.invoke_sys_mount=1;
+    mnt_context_set_fstype_pattern(&c,"hfsplus");mnt_context_set_options(&c,"nosuid");
+    assert(!mnt_context_mount(&c)&&has_opt_token(c.last_mount_opts,"ro")&&(test_last_sys_flags&MS_RDONLY));
+    expect_file(fsck_log,"-n -f\n");
+    assert(!unmount_dispatch(&c,real_unmount));mnt_free_context(&c);
+
+    // 5d. A stick whose only library is the one Engine built for it in /data while it was read-only
+    //     (seed_library's zero-signature generation, in use) stays read-only with it: no fsck, no rw.
+    //     Once a newer generation is in use (the stick got its own library) or none is left, it mounts rw.
+    snprintf(fsck_sh,sizeof fsck_sh,"#!/bin/sh\necho \"$1 $2\" >> '%s'\necho '** The volume TEST appears to be OK.'\nexit 0\n",fsck_log);
+    write_file(fsck,fsck_sh);
+    join(img,root,"pol-clean.img");
+    char deck_db[PATH_MAX];join(deck_db,LIB_ROOT,"uuid-hfs-stick/library-0000000000000000/Database2");assert(!make_dirs(deck_db));
+    join(deck_db,LIB_ROOT,"uuid-hfs-stick/library-0000000000000000/Database2/m.db");write_file(deck_db,"deck-authored library");
+    unlink(fsck_log);
+    memset(&c,0,sizeof c);c.target=target;c.source=img;c.invoke_sys_mount=1;
+    mnt_context_set_fstype_pattern(&c,"hfsplus");mnt_context_set_options(&c,"nosuid");
+    assert(!mnt_context_mount(&c)&&has_opt_token(c.last_mount_opts,"ro")&&(test_last_sys_flags&MS_RDONLY));
+    assert(access(fsck_log,F_OK));expect_file(deck_db,"deck-authored library");
+    assert(!unmount_dispatch(&c,real_unmount));mnt_free_context(&c);
+    char native_gen[PATH_MAX];join(native_gen,LIB_ROOT,"uuid-hfs-stick/library-00000000000000a1");assert(!make_dirs(native_gen));
+    struct timespec later[2]={{.tv_nsec=UTIME_NOW},{.tv_sec=time(NULL)+60}};assert(!utimensat(AT_FDCWD,native_gen,later,0));
+    memset(&c,0,sizeof c);c.target=target;c.source=img;c.invoke_sys_mount=1;
+    mnt_context_set_fstype_pattern(&c,"hfsplus");mnt_context_set_options(&c,"nosuid");
+    assert(!mnt_context_mount(&c)&&has_opt_token(c.last_mount_opts,"rw")&&!(test_last_sys_flags&MS_RDONLY));
+    assert(!unmount_dispatch(&c,real_unmount));mnt_free_context(&c);
+    assert(!rmdir(native_gen));assert(!unlink(deck_db));
+    memset(&c,0,sizeof c);c.target=target;c.source=img;c.invoke_sys_mount=1;
+    mnt_context_set_fstype_pattern(&c,"hfsplus");mnt_context_set_options(&c,"nosuid");
+    assert(!mnt_context_mount(&c)&&has_opt_token(c.last_mount_opts,"rw")&&!(test_last_sys_flags&MS_RDONLY));
     assert(!unmount_dispatch(&c,real_unmount));mnt_free_context(&c);
 
     // Restore clean image & fsck mock for sections 6-8.
