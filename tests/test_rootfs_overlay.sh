@@ -555,6 +555,35 @@ done
 has 'feature_disable=0x82004' "$ROOT/rootfs-overlay/usr/lib/modprobe.d/brcmfmac.conf"
 ok 'stock connman online check, read-only HFS+, rootfs brcmfmac options'
 
+# 5.3.0.5-beta1: the brcmfmac workaround is the BCM4339's only (SDIO 02d0:4335 or 02d0:4339,
+# the SC5000's chip). The Gen-1 images also ship BCM43455 and BCM43456 firmware: those load as stock.
+brcm_conf=$ROOT/rootfs-overlay/usr/lib/modprobe.d/brcmfmac.conf
+if grep -Eq '^[[:space:]]*options[[:space:]]+brcmfmac([[:space:]]|$)' "$brcm_conf"; then fail 'brcmfmac options reach every Wi-Fi chip'; fi
+brcm_install=$(sed -n 's/^install brcmfmac //p' "$brcm_conf")
+[[ -n $brcm_install ]] || fail 'brcmfmac has no install command'
+printf '#!/bin/sh\necho "$*"\n' > "$TMP/brcm-modprobe"; chmod +x "$TMP/brcm-modprobe"
+brcm_load() { # vendor device ... of the SDIO functions -> the modprobe call the install command makes
+    local sdio=$TMP/brcm-sdio i=0 cmd
+    rm -rf "$sdio"; mkdir -p "$sdio"
+    while (($#)); do
+        i=$((i + 1)); mkdir -p "$sdio/mmc2:0001:$i"
+        printf '%s\n' "$1" > "$sdio/mmc2:0001:$i/vendor"; printf '%s\n' "$2" > "$sdio/mmc2:0001:$i/device"; shift 2
+    done
+    cmd=${brcm_install//\/sys\/bus\/sdio\/devices/$sdio}; cmd=${cmd//\/sbin\/modprobe/$TMP/brcm-modprobe}
+    sh -c "${cmd//\$CMDLINE_OPTS/$brcm_opts}"
+}
+brcm_fixed='--ignore-install brcmfmac feature_disable=0x82004' brcm_stock='--ignore-install brcmfmac' brcm_opts=
+[[ $(brcm_load 0x02d0 0x4335 0x02d0 0x4335 0x02d0 0x4335) == "$brcm_fixed" ]] || fail 'BCM4339 (SDIO 4335) lost its brcmfmac workaround'
+[[ $(brcm_load 0x02d0 0x4339) == "$brcm_fixed" ]] || fail 'BCM4339 (SDIO 4339) lost its brcmfmac workaround'
+[[ $(brcm_load 0x02d0 0x4345 0x02d0 0x4345) == "$brcm_stock" ]] || fail 'BCM43455/43456 (SDIO 4345) must load brcmfmac as stock'
+[[ $(brcm_load 0x02d0 0xa9bf) == "$brcm_stock" ]] || fail 'BCM43455 (SDIO a9bf) must load brcmfmac as stock'
+[[ $(brcm_load 0x04b4 0x4335) == "$brcm_stock" ]] || fail 'another vendor must load brcmfmac as stock'
+[[ $(brcm_load) == "$brcm_stock" ]] || fail 'no SDIO function must load brcmfmac as stock'
+brcm_opts='debug=1'
+[[ $(brcm_load 0x02d0 0x4335) == "$brcm_fixed debug=1" ]] || fail 'brcmfmac options from the command line lost on BCM4339'
+[[ $(brcm_load 0x02d0 0x4345) == "$brcm_stock debug=1" ]] || fail 'brcmfmac options from the command line lost on other chips'
+ok 'brcmfmac workaround only on BCM4339, every other Wi-Fi chip loads as stock'
+
 GUARD=$ROOT/rootfs-overlay/etc/enginex/engine-ui-guard
 export ENGINEX_UI_DIR=$TMP/ui-guard ENGINEX_STREAMING_ACCOUNTS=$TMP/StreamingAccounts.json
 export ENGINEX_ENGINE_DATA_DIR=$TMP/engine-data ENGINEX_GUARD_PRE_MARK=$TMP/guard-pre-mark
