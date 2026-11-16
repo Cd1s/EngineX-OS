@@ -25,7 +25,7 @@ import (
 
 func TestNetPathFile(t *testing.T) {
 	for in, want := range map[string]string{
-		"net://7022/(Unknown)/sc5000-custom/Stream/1.mp3": "/data/sc5000-custom/Stream/1.mp3",
+		"net://7022/(Unknown)/enginex-custom/Stream/1.mp3": "/data/enginex-custom/Stream/1.mp3",
 		"net://7022/KDATA KF328/Contents/a b.flac":        "/media/KDATA KF328/Contents/a b.flac",
 		"net://7022/(Unknown)/../etc/passwd":              "",
 		"net://7022/../x/y.mp3":                           "",
@@ -101,12 +101,12 @@ func TestShadowDeckFromPeer(t *testing.T) {
 	data := t.TempDir()
 	shadowDataRoot = data
 	defer func() { shadowDataRoot, shadowBeaconOn = "/data", true }()
-	os.MkdirAll(filepath.Join(data, "sc5000-custom/Stream"), 0o755)
-	os.WriteFile(filepath.Join(data, "sc5000-custom/Stream/a.mp3"), []byte("AUDIO"), 0o644)
+	os.MkdirAll(filepath.Join(data, "enginex-custom/Stream"), 0o755)
+	os.WriteFile(filepath.Join(data, "enginex-custom/Stream/a.mp3"), []byte("AUDIO"), 0o644)
 
 	a := httptest.NewServer(New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil))
 	defer a.Close()
-	body := `[{"deck":2,"net":"net://u/(Unknown)/sc5000-custom/Stream/a.mp3","playing":true,"positionMs":1000,"pitch":2},{"deck":4,"net":"net://u/(Unknown)/../etc/passwd"}]`
+	body := `[{"deck":2,"net":"net://u/(Unknown)/enginex-custom/Stream/a.mp3","playing":true,"positionMs":1000,"pitch":2},{"deck":4,"net":"net://u/(Unknown)/../etc/passwd"}]`
 	if resp, err := http.Post(a.URL+"/v1/enginex/decks", "application/json", strings.NewReader(body)); err != nil || resp.StatusCode != 200 {
 		t.Fatalf("post: %v %v", resp, err)
 	}
@@ -775,7 +775,7 @@ func TestShadowComposeMarksLoadingAndUnloads(t *testing.T) {
 	s.shadow.mu.Lock()
 	delete(s.shadow.peerDecks, 3)
 	delete(s.shadow.peerDecks, 4)
-	s.shadow.peerDecks[1] = peerDeck{deckState: deckState{Deck: 1, Key: "k1", Ext: ".flac", Name: "sc5000.flac", Playing: true}, ip: "192.0.2.8", at: now}
+	s.shadow.peerDecks[1] = peerDeck{deckState: deckState{Deck: 1, Key: "k1", Ext: ".flac", Name: "enginex.flac", Playing: true}, ip: "192.0.2.8", at: now}
 	s.shadow.mu.Unlock()
 	out = s.shadowComposeLegacy("12", now)
 	if len(out) != 1 || out[0].Deck != 3 || !out[0].Loading || !out[0].Playing {

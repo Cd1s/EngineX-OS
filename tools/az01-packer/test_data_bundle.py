@@ -1,3 +1,7 @@
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'tools/az01-packer'))
+import legacy_names as legacy
 import hashlib
 import importlib.util
 import io
@@ -20,7 +24,7 @@ spec.loader.exec_module(bdb)
 TOP = 'SCLIVE4-5.3.0.1.1-EngineX-OS-Data-Bundle'
 # Stock engine scripts of second-generation decks, as kept in the build host's lab:
 # SC LIVE 4 (armhf) and SYSTEM ONE (AZ04).
-LAB = Path(os.environ.get('ENGINEX_LAB_DIR', '/root/build/sc5000-lab'))
+LAB = Path(os.environ.get('ENGINEX_LAB_DIR', legacy.LAB))
 STOCK_GEN2 = [LAB / 'sclive4-rea61-followup/rootfs/usr/Engine/Scripts/engine',
               LAB / 'systemone-analysis/rootfs/usr/Engine/Scripts/engine']
 
@@ -114,7 +118,7 @@ class DataBundleTest(unittest.TestCase):
         self.assertIn(overlay_ntp, (src / 'boot-activate.sh').read_text())
         self.assertIn('systemctl restart --no-block systemd-timesyncd.service', (src / 'boot-activate.sh').read_text())
         self.assertIn('/run/systemd/timesyncd.conf.d/10-enginex-ntp.conf', (src / 'uninstall.sh').read_text())
-        self.assertTrue((src / '99-sc5000-custom.conf').exists())
+        self.assertTrue((src / '99-enginex.conf').exists())
         self.assertTrue((src / 'host-install-userdata.py').exists())
         self.assertTrue((src / 'host-install-fastboot.sh').exists())
         self.assertTrue((src / 'host-install-usbupdate.py').stat().st_mode & 0o100)
@@ -237,7 +241,7 @@ class DataBundleTest(unittest.TestCase):
                 with tarfile.open(r['bundle']) as t:
                     self.assertEqual(t.extractfile(f'{top}/alsa-dir').read(), b'system/var-lib/alsa/conf.d\n')
                     readme = t.extractfile(f'{top}/README-INSTALL.txt').read().decode()
-                self.assertIn('/data/system/var-lib/alsa/conf.d/99-sc5000-custom.conf', readme)
+                self.assertIn('/data/system/var-lib/alsa/conf.d/99-enginex.conf', readme)
                 self.assertIn('64-bit (AZ04)', readme)
         with self.assertRaises(SystemExit):  # 64-bit parts in an armhf bundle
             self.build(out='bad-sclive4', **a64)
@@ -251,14 +255,14 @@ class DataBundleTest(unittest.TestCase):
         suite64 = self.tmp / 'suite64'
         suite64.write_bytes(fake_elf(bdb.EM_AARCH64, b'suite'))
         r = self.build(prefix='PRIME4G2', suite=suite64, hook=hook64)
-        dest = self.tmp / 'root/sc5000-custom'  # no /data on the test host: relative to dest
+        dest = self.tmp / 'root/enginex-custom'  # no /data on the test host: relative to dest
         with tarfile.open(r['bundle']) as t:
             t.extractall(self.tmp / 'x', **({'filter': 'data'} if hasattr(tarfile, 'data_filter') else {}))
         src = self.tmp / 'x/PRIME4G2-5.3.0.1.1-EngineX-OS-Data-Bundle'
         if Path('/data').is_dir():
             self.skipTest('/data exists on this host')
         self.sh(src / 'install.sh', dest)
-        conf = self.tmp / 'root/system/var-lib/alsa/conf.d/99-sc5000-custom.conf'
+        conf = self.tmp / 'root/system/var-lib/alsa/conf.d/99-enginex.conf'
         self.assertTrue(conf.exists())
         self.sh(dest / 'bundle/uninstall.sh', dest)
         self.assertFalse(conf.exists())
@@ -281,23 +285,22 @@ class DataBundleTest(unittest.TestCase):
                               capture_output=True, text=True, check=check)
 
     def test_234_scripts_take_the_env_names_of_older_updaters(self):
-        """#234: the updater, installer and USB hook of a release before 5.3.0.5 run this bundle's
-        scripts with SC5000_CUSTOM / SC5000_ALSA_OVERLAY only; the new names win when both are set."""
+        """Older updater environment names remain readable; current names take precedence."""
         src = self.extract(self.build())
         dest, alsa = self.tmp / 'old-env/enginex', self.tmp / 'old-env-alsa'
-        old = {**self.env, 'SC5000_CUSTOM': str(dest), 'SC5000_ALSA_OVERLAY': str(alsa)}
+        old = {**self.env, (legacy.CUSTOM_ENV): str(dest), (legacy.ALSA_ENV): str(alsa)}
         res = subprocess.run(['sh', str(src / 'install.sh')], env=old, capture_output=True, text=True)
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertEqual((dest / 'version.txt').read_text(), '5.3.0.1.1\n')
-        self.assertTrue((alsa / '99-sc5000-custom.conf').is_file())
+        self.assertTrue((alsa / '99-enginex.conf').is_file())
         self.assertFalse((self.tmp / 'data').exists())  # never the default /data of a deck
         res = subprocess.run(['sh', str(dest / 'bundle/uninstall.sh')], env=old, capture_output=True, text=True)
         self.assertEqual(res.returncode, 0, res.stderr)
-        self.assertFalse((alsa / '99-sc5000-custom.conf').exists())
+        self.assertFalse((alsa / '99-enginex.conf').exists())
         both = {**old, 'ENGINEX_CUSTOM': str(self.tmp / 'new-env'), 'ENGINEX_ALSA_OVERLAY': str(self.tmp / 'new-env-alsa')}
         res = subprocess.run(['sh', str(src / 'install.sh')], env=both, capture_output=True, text=True)
         self.assertEqual(res.returncode, 0, res.stderr)
-        self.assertTrue((self.tmp / 'new-env/version.txt').is_file() and (self.tmp / 'new-env-alsa/99-sc5000-custom.conf').is_file())
+        self.assertTrue((self.tmp / 'new-env/version.txt').is_file() and (self.tmp / 'new-env-alsa/99-enginex.conf').is_file())
         self.assertFalse((dest / 'bundle').exists())
 
     def test_install_refuses_a_bundle_for_another_cpu_or_model(self):
@@ -369,7 +372,7 @@ class DataBundleTest(unittest.TestCase):
         shutil.rmtree(self.tmp / 'x')
         src = self.extract(r)
         self.assertEqual((src / 'install.sh').read_bytes(), install)
-        dest = self.tmp / 'data/sc5000-custom'
+        dest = self.tmp / 'data/enginex-custom'
         self.sh(src / 'install.sh', dest, alsa_dest=self.tmp / 'data/system/var/overlay/lib/alsa/conf.d')
         self.assertEqual((dest / 'bundle/release-tag').read_text(), 'v5.3.0.1.1-r2\n')
         self.assertEqual((dest / 'version.txt').read_text(), '5.3.0.1.1\n')
@@ -405,7 +408,7 @@ class DataBundleTest(unittest.TestCase):
 
     def test_install_then_uninstall_keeps_user_data(self):
         src = self.extract(self.build())
-        dest = self.tmp / 'data/sc5000-custom'
+        dest = self.tmp / 'data/enginex-custom'
         alsa_dest = self.tmp / 'data/system/var/overlay/lib/alsa/conf.d'
         dest.mkdir(parents=True)
         (dest / 'authorized_keys').write_text('ssh-ed25519 AAAA test\n')
@@ -418,8 +421,8 @@ class DataBundleTest(unittest.TestCase):
         self.assertFalse((dest / 'ui/safe-mode').exists())
         self.assertTrue((dest / 'bundle/boot-activate.sh').exists())
         self.assertTrue((dest / 'bundle/boot-activate.sh').stat().st_mode & 0o100)
-        self.assertTrue((dest / 'bundle/99-sc5000-custom.conf').exists())
-        self.assertTrue((alsa_dest / '99-sc5000-custom.conf').exists())
+        self.assertTrue((dest / 'bundle/99-enginex.conf').exists())
+        self.assertTrue((alsa_dest / '99-enginex.conf').exists())
         self.assertEqual((dest / 'version.txt').read_text(), '5.3.0.1.1\n')
         self.assertEqual(oct(dest.stat().st_mode & 0o777), '0o700')
         self.assertEqual([p.name for p in dest.glob('.bundle.*')], [])
@@ -427,7 +430,7 @@ class DataBundleTest(unittest.TestCase):
         self.sh(dest / 'bundle/uninstall.sh', dest, alsa_dest=alsa_dest)
         self.assertEqual(sorted(p.name for p in dest.iterdir()), ['authorized_keys', 'ui'])
         self.assertEqual(list((dest / 'ui').iterdir()), [])
-        self.assertFalse((alsa_dest / '99-sc5000-custom.conf').exists())
+        self.assertFalse((alsa_dest / '99-enginex.conf').exists())
         self.assertNotEqual(self.sh(src / 'uninstall.sh', dest, alsa_dest=alsa_dest, check=False).returncode, 0)
 
     def test_uninstall_removes_qml_bytecode_without_changing_user_data(self):
@@ -445,7 +448,7 @@ class DataBundleTest(unittest.TestCase):
         for path, data in keep.items():
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(data)
-        env = {**self.env, 'SC5000_CUSTOM': str(dest), 'SC5000_ALSA_OVERLAY': str(alsa),
+        env = {**self.env, 'ENGINEX_CUSTOM': str(dest), 'ENGINEX_ALSA_OVERLAY': str(alsa),
                'ENGINEX_ENGINE_DATA_DIR': str(engine)}
         subprocess.run(['sh', str(dest / 'bundle/uninstall.sh')], env=env,
                        capture_output=True, text=True, check=True)
@@ -494,7 +497,7 @@ class DataBundleTest(unittest.TestCase):
                 unused = root / 'system/var-lib/alsa/conf.d'
                 self.sh(src / 'install.sh', dest, alsa_dest=used)
                 unused.mkdir(parents=True)
-                shutil.copy(used / '99-sc5000-custom.conf', unused / '99-sc5000-custom.conf')
+                shutil.copy(used / '99-enginex.conf', unused / '99-enginex.conf')
                 accounts = root / 'StreamingAccounts.json'
                 accounts.write_text(text)
                 env = {**self.env, 'ENGINEX_CUSTOM': str(dest), 'ENGINEX_ALSA_OVERLAY': str(used),
@@ -506,8 +509,8 @@ class DataBundleTest(unittest.TestCase):
                     self.assertIn('a-real-token', left['TIDAL'])
                 if name in ('real-login', 'no-tidal'):
                     self.assertEqual(accounts.read_text(), text)
-                self.assertFalse((used / '99-sc5000-custom.conf').exists())
-                self.assertFalse((unused / '99-sc5000-custom.conf').exists(), 'the ALSA file of the unused directory stayed')
+                self.assertFalse((used / '99-enginex.conf').exists())
+                self.assertFalse((unused / '99-enginex.conf').exists(), 'the ALSA file of the unused directory stayed')
                 self.assertFalse((root / 'StreamingAccounts.json.tmp').exists())
         self.assertEqual(self.host_commands.read_text(), '')
 
@@ -547,14 +550,14 @@ class DataBundleTest(unittest.TestCase):
         stat_out = subprocess.run(['debugfs', '-R', 'stat /Music/my_track.mp3', str(img)], capture_output=True, text=True).stdout
         self.assertIn('regular', stat_out)
 
-        hook_out = subprocess.run(['debugfs', '-R', 'stat /system/var/overlay/lib/alsa/conf.d/99-sc5000-custom.conf', str(img)], capture_output=True, text=True).stdout
+        hook_out = subprocess.run(['debugfs', '-R', 'stat /system/var/overlay/lib/alsa/conf.d/99-enginex.conf', str(img)], capture_output=True, text=True).stdout
         self.assertIn('regular', hook_out)
         self.assertIn('0644', hook_out)
 
         suite_out = subprocess.run(['debugfs', '-R', 'stat /enginex/bundle/bin/enginex-suite', str(img)], capture_output=True, text=True).stdout
         self.assertIn('0755', suite_out)
         # #103: the old path is a symlink, and the ALSA hook's old-path library resolves through it.
-        for rel, kind in (('/sc5000-custom', 'symlink'), ('/sc5000-custom/bundle/lib/libengine-ui-hook.so', 'regular')):
+        for rel, kind in (('/enginex-custom', 'symlink'), ('/enginex-custom/bundle/lib/libengine-ui-hook.so', 'regular')):
             out = subprocess.run(['debugfs', '-R', f'stat {rel}', str(img)], capture_output=True, text=True).stdout
             self.assertIn(f'Type: {kind}', out, rel)
 
@@ -566,7 +569,7 @@ class DataBundleTest(unittest.TestCase):
         subprocess.run(['dd', 'if=/dev/zero', f'of={img64}', 'bs=1M', 'count=32'], check=True, capture_output=True)
         subprocess.run(['mkfs.ext4', '-F', str(img64)], check=True, capture_output=True)
         hmod.inject(img64, r64['bundle'])
-        hook_out = subprocess.run(['debugfs', '-R', 'stat /system/var-lib/alsa/conf.d/99-sc5000-custom.conf', str(img64)], capture_output=True, text=True).stdout
+        hook_out = subprocess.run(['debugfs', '-R', 'stat /system/var-lib/alsa/conf.d/99-enginex.conf', str(img64)], capture_output=True, text=True).stdout
         self.assertIn('regular', hook_out)
 
         # #116: --ssh-key lands as /enginex/authorized_keys, 0600; a missing or empty key injects nothing.
@@ -605,13 +608,13 @@ class DataBundleTest(unittest.TestCase):
         img = self.tmp / 'legacy.img'
         subprocess.run(['dd', 'if=/dev/zero', f'of={img}', 'bs=1M', 'count=32'], check=True, capture_output=True)
         subprocess.run(['mkfs.ext4', '-F', str(img)], check=True, capture_output=True)
-        subprocess.run(['debugfs', '-w', '-R', 'mkdir /sc5000-custom', str(img)], check=True, capture_output=True)
+        subprocess.run(['debugfs', '-w', '-R', ('mkdir /' + legacy.DATA_NAME), str(img)], check=True, capture_output=True)
         hspec = importlib.util.spec_from_file_location('host_install_userdata', HERE / 'host-install-userdata.py')
         hmod = importlib.util.module_from_spec(hspec)
         hspec.loader.exec_module(hmod)
         hmod.inject(img, r['bundle'])
         stat = lambda rel: subprocess.run(['debugfs', '-R', f'stat {rel}', str(img)], capture_output=True, text=True).stdout
-        self.assertIn('Type: regular', stat('/sc5000-custom/version.txt'))
+        self.assertIn('Type: regular', stat(('/' + legacy.DATA_NAME + '/version.txt')))
         self.assertNotIn('Type:', stat('/enginex'))
 
     def test_host_install_fails_when_a_write_did_not_land(self):
@@ -684,7 +687,7 @@ exec REAL "$@"
         self.assertEqual((dest / 'ui/.pack-version').read_text(), '5.3.0.1.1\n')
         self.assertEqual((dest / 'version.txt').read_text(), '5.3.0.1.1\n')
         self.assertEqual((dest / 'gen2-unlocked').read_text(), '1\n')
-        self.assertTrue((alsa / '99-sc5000-custom.conf').is_file())
+        self.assertTrue((alsa / '99-enginex.conf').is_file())
         left = sorted(str(p.relative_to(dest)) for p in dest.rglob('*')
                       if p.name.startswith(('.install-', '.bundle.')) or p.name.endswith(('.replaced', '.undo')))
         self.assertEqual(left, [])
@@ -727,7 +730,7 @@ exec REAL "$@"
         """Run the bundle's install.sh with /data pointed at a scratch dir."""
         src = self.extract(self.build())
         data = self.tmp / 'data'
-        for name, files in (('sc5000-custom', legacy_files), ('enginex', new_files)):
+        for name, files in (((legacy.DATA_NAME), legacy_files), ('enginex', new_files)):
             for rel, text in (files or {}).items():
                 (data / name / rel).parent.mkdir(parents=True, exist_ok=True)
                 (data / name / rel).write_text(text)
@@ -744,7 +747,7 @@ exec REAL "$@"
 
     def test_install_renames_legacy_dir_and_leaves_a_symlink(self):
         data = self.migrate({'authorized_keys': 'key', 'Stream/song.flac': 'x', 'settings.conf': 's'})
-        old, new = data / 'sc5000-custom', data / 'enginex'
+        old, new = data / (legacy.DATA_NAME), data / 'enginex'
         self.assertTrue(old.is_symlink() and os.readlink(old) == 'enginex')
         self.assertEqual((new / 'authorized_keys').read_text(), 'key')
         self.assertEqual((new / 'Stream/song.flac').read_text(), 'x')
@@ -755,17 +758,17 @@ exec REAL "$@"
         data = self.migrate({'authorized_keys': 'old', 'a.txt': 'A', 'ui/x': 'old-ui'},
                             {'authorized_keys': 'new'})
         new = data / 'enginex'
-        self.assertTrue((data / 'sc5000-custom').is_symlink())
+        self.assertTrue((data / (legacy.DATA_NAME)).is_symlink())
         self.assertEqual((new / 'authorized_keys').read_text(), 'new')  # enginex wins
         self.assertEqual((new / 'a.txt').read_text(), 'A')
-        leftovers = list(new.glob('legacy-sc5000-custom.*'))
+        leftovers = list(new.glob(('legacy-' + legacy.DATA_NAME + '.*')))
         self.assertEqual(len(leftovers), 1)
         self.assertEqual((leftovers[0] / 'authorized_keys').read_text(), 'old')
 
     def test_fresh_install_creates_enginex_and_the_old_path(self):
         data = self.migrate({})
         self.assertTrue((data / 'enginex/bundle').is_dir())
-        self.assertTrue((data / 'sc5000-custom/version.txt').exists())
+        self.assertTrue((data / (legacy.DATA_NAME + '/version.txt')).exists())
 
     def test_boot_activate_skips_missing_lib_uses_execstartpre_restore_tz_and_respects_newer_conf(self):
         r = self.build()
@@ -874,13 +877,13 @@ exec REAL "$@"
         run_dir = self.tmp / 'run-inplace'
         units = run_dir / 'systemd/system'
         r4 = {  # what r4's boot-activate.sh left loaded
-            'systemd/system/enginex-sc5000-deemixd.service': '[Service]\nExecStart=/data/enginex/bundle/bin/sc5000-deemixd\n',
+            ('systemd/system/' + legacy.DEEMIX_UNIT): ('[Service]\nExecStart=/data/enginex/bundle/bin/' + legacy.DEEMIX + '\n'),
             'systemd/system/enginex-stream-sync.service': '[Service]\nExecStart=old\n',
-            'systemd/system/engine.service.d/99-sc5000.conf': '[Service]\nEnvironment=SC5000_UI_HOOK=x\n',
-            'systemd/system/edisksd.service.d/99-sc5000.conf': '[Service]\nEnvironment=LD_PRELOAD=x\n',
+            ('systemd/system/engine.service.d/' + legacy.DROPIN): ('[Service]\nEnvironment=SC5000_UI_HOOK=x\n'),
+            ('systemd/system/edisksd.service.d/' + legacy.DROPIN): '[Service]\nEnvironment=LD_PRELOAD=x\n',
             'systemd/system/foreign.service': 'not ours\n',
-            'sc5000-engine-script': '#!/bin/sh\n', 'sc5000-assignments/role': '13\n', 'sc5000/version.txt': '5.3.0.4\n',
-            'sc5000-boot-converted': '', 'sc5000-tz-newer': '',
+            (legacy.ENGINE_SCRIPT): '#!/bin/sh\n', (legacy.ASSIGNMENTS + '/role'): '13\n', (legacy.PROJECT + '/version.txt'): '5.3.0.4\n',
+            (legacy.BOOT_CONVERTED): '', (legacy.TZ_NEWER): '',
         }
         for name, text in r4.items():
             (run_dir / name).parent.mkdir(parents=True, exist_ok=True)
@@ -895,9 +898,9 @@ exec REAL "$@"
         self.assertEqual(res.returncode, 0, res.stderr)
         cmds = self.host_commands.read_text()
         self.host_commands.write_text('')
-        for gone in ('systemd/system/enginex-sc5000-deemixd.service', 'systemd/system/engine.service.d/99-sc5000.conf',
-                     'systemd/system/edisksd.service.d/99-sc5000.conf', 'sc5000-engine-script', 'sc5000-assignments',
-                     'sc5000', 'sc5000-boot-converted', 'sc5000-tz-newer'):
+        for gone in (('systemd/system/' + legacy.DEEMIX_UNIT), ('systemd/system/engine.service.d/' + legacy.DROPIN),
+                     ('systemd/system/edisksd.service.d/' + legacy.DROPIN), (legacy.ENGINE_SCRIPT), (legacy.ASSIGNMENTS),
+                     (legacy.PROJECT), (legacy.BOOT_CONVERTED), (legacy.TZ_NEWER)):
             self.assertFalse(os.path.lexists(run_dir / gone), gone)
         self.assertEqual(sorted(p.name for p in units.glob('enginex-*.service')),
                          ['enginex-deemixd.service', 'enginex-rb-bridge.service', 'enginex-stream-sync.service'])
@@ -906,11 +909,11 @@ exec REAL "$@"
         self.assertEqual([p.name for p in (units / 'engine.service.d').iterdir()], ['99-enginex.conf'])
         self.assertEqual((units / 'foreign.service').read_text(), 'not ours\n')
         self.assertTrue((run_dir / 'enginex-boot-converted').exists() and (run_dir / 'enginex-tz-newer').exists())
-        self.assertIn('stop enginex-sc5000-deemixd.service', cmds)
-        self.assertIn('reset-failed enginex-sc5000-deemixd.service', cmds)
+        self.assertIn(('stop ' + legacy.DEEMIX_UNIT), cmds)
+        self.assertIn(('reset-failed ' + legacy.DEEMIX_UNIT), cmds)
         self.assertIn('restart --no-block enginex-stream-sync.service enginex-rb-bridge.service enginex-deemixd.service', cmds)
         drop = (units / 'engine.service.d/99-enginex.conf').read_text()
-        self.assertNotIn('sc5000', drop.replace('/data/sc5000-custom', ''))
+        self.assertNotIn((legacy.PROJECT), drop.replace((legacy.DATA_DIR), ''))
         self.assertIn('Wants=enginex-stream-sync.service enginex-rb-bridge.service enginex-deemixd.service', drop)
         # The leave step is in place for a later downgrade, outside /data.
         leave = run_dir / 'enginex/leave.sh'
@@ -918,7 +921,7 @@ exec REAL "$@"
         # A second run (the next boot) has nothing old left to stop.
         res = subprocess.run(['sh', str(ba)], env=env, capture_output=True, text=True)
         self.assertEqual(res.returncode, 0, res.stderr)
-        self.assertNotIn('enginex-sc5000-deemixd', self.host_commands.read_text())
+        self.assertNotIn(('enginex-' + legacy.DEEMIX), self.host_commands.read_text())
         self.host_commands.write_text('')
 
     def test_234_leave_step_installs_the_bundle_through_the_suite_first(self):
@@ -946,7 +949,7 @@ exec REAL "$@"
     def test_234_only_the_boot_run_puts_back_an_interrupted_downgrade(self):
         """#234 review R2: boot-activate.sh's boot run first asks the suite to put back a downgrade a
         power cut interrupted, from the directory it was started from (the hook's fallback is
-        /data/sc5000-custom/bundle); every call delegates to the blocking activation guard, but
+        /data/enginex-custom/bundle); every call delegates to the blocking activation guard, but
         Engine-start calls do not run recovery."""
         src = self.extract(self.build())
         dest = self.tmp / 'recover' / 'enginex'
@@ -982,12 +985,12 @@ exec REAL "$@"
             104: ['/data/EngineX copy/enginex-suite', 'stream-sync', '--listen', ':8080'],
             105: ['enginex-suite', 'rb-bridge', '--prolink'],
             106: ['enginex-suite', 'enginex-deemixd', '-state-dir', '/data/enginex/state'],
-            107: ['sc5000-suite', 'sc5000-deemixd'],
+            107: [(legacy.SUITE), (legacy.DEEMIX)],
             108: ['enginex-suite', 'engine-guardian'],
             109: ['enginex-suite', 'stems-processor'],
             110: ['enginex-suite'],
             111: [],
-            112: ['sc5000-suite', 'leave', 'activate', 'boot-activate.sh'],
+            112: [(legacy.SUITE), 'leave', 'activate', 'boot-activate.sh'],
         }
         proc = self.tmp / 'proc'
         for pid, argv in commands.items():
@@ -1003,7 +1006,7 @@ convert_mounted() { :; }
 pgrep() { printf '%s\\n' $TEST_PIDS; }
 kill() { printf '%s\\n' "$1" >> "$KILLED"; }
 pkill() { printf 'pkill %s\\n' "$*" >> "$KILLED"; }
-''' + fallback
+''' + bdb.LEGACY_SHELL + fallback
         env = dict(self.env, ssh_start='', leave_pid='101', bin_dir=str(self.tmp / 'no-bin'),
                    TEST_PIDS=' '.join(map(str, commands)) + ' 113', KILLED=str(killed))
         res = subprocess.run(['sh', '-c', script], env=env, capture_output=True, text=True)
@@ -1020,7 +1023,7 @@ pkill() { printf 'pkill %s\\n' "$*" >> "$KILLED"; }
         # Stop before any migration even when the guard is broken.
         ba.write_text(bdb.BOOT_ACTIVATE.split('@MIGRATE_IF_DEFAULT@', 1)[0] + 'exit 29\n')
         for variable, dest in [('ENGINEX_CUSTOM', '/data/enginex'),
-                               ('SC5000_CUSTOM', '/data/sc5000-custom')]:
+                               ((legacy.CUSTOM_ENV), (legacy.DATA_DIR))]:
             with self.subTest(variable=variable):
                 calls.unlink(missing_ok=True)
                 res = subprocess.run(['sh', str(ba)], env={**self.env, variable: dest},

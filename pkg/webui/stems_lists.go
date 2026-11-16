@@ -2,6 +2,7 @@ package webui
 
 import (
 	"context"
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -29,7 +30,11 @@ type stemmedTrack struct {
 
 const maxStemmed = 500
 
-func stemsListID(scope string) string { return "sc5000-stems-" + scope }
+func stemsListID(scope string) string { return "enginex-stems-" + scope }
+
+func isStemsListID(id, scope string) bool {
+return id == stemsListID(scope) || id == migration.StemsListPrefix + scope
+}
 
 func (s *Server) stemsFile() string {
 	if s.cfg.StateDir == "" {

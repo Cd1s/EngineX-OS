@@ -15,7 +15,7 @@ combo is checked against a real deck.
 
 ## Inputs
 
-* SYSTEM ONE 5.3.0 AZ04: `/root/build/sc5000-lab/uboot-re-125/s1/u-boot0.bin`,
+* SYSTEM ONE 5.3.0 AZ04: `<firmware-lab>/uboot-re-125/s1/u-boot0.bin`,
   SHA-256 `393f3c8e45bf5f626eec628c827b49fc9b18e835b34fc13b94edbddc973d287a`;
   disassembly `s1/u0.dis`. DTB `s1/fdt0b.dtb`, SHA-256
   `7d4e6e85f1bfd29329e1cfaab56d241d0905f73e7e1df42786defaf8a793472e`.

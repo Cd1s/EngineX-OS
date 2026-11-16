@@ -1,6 +1,7 @@
 package webui
 
 import (
+"github.com/Cd1s/EngineX-OS/internal/migration"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -8,7 +9,7 @@ import (
 	"testing"
 )
 
-// /v1/enginex/ is the deck API under the product's name; /v1/sc5000/ stays for older installers,
+// /v1/enginex/ is the deck API under the product's name; /v1/legacy/ stays for older installers,
 // UI packs and scripts. Both reach the same handlers behind the same rules.
 func TestEngineXPrefixReachesTheSameRoutes(t *testing.T) {
 	mockRunner := &mockSystemRunner{outputs: make(map[string][]byte)}
@@ -33,14 +34,14 @@ func TestEngineXPrefixReachesTheSameRoutes(t *testing.T) {
 	}
 
 	// The UI status Engine polls: the same answer, digest included.
-	oldCode, oldBody, oldHdr := do("GET", "/v1/sc5000/ui", "", nil)
+	oldCode, oldBody, oldHdr := do("GET", migration.APIPrefix + "/ui", "", nil)
 	newCode, newBody, newHdr := do("GET", "/v1/enginex/ui", "", nil)
 	if oldCode != 200 || newCode != 200 || newBody != oldBody || newHdr.Get("X-UI-Digest") != oldHdr.Get("X-UI-Digest") || !strings.Contains(newBody, `"accessCode":"code-1234"`) {
-		t.Fatalf("/v1/enginex/ui: %d %q (digest %s), /v1/sc5000/ui: %d (digest %s)", newCode, newBody, newHdr.Get("X-UI-Digest"), oldCode, oldHdr.Get("X-UI-Digest"))
+		t.Fatalf("/v1/enginex/ui: %d %q (digest %s), " + migration.APIPrefix + "/ui: %d (digest %s)", newCode, newBody, newHdr.Get("X-UI-Digest"), oldCode, oldHdr.Get("X-UI-Digest"))
 	}
 	// Admin routes registered on the gateway, and a handler's own validation.
 	for path, key := range map[string]string{"/ssh": `"enabled"`, "/mounts": `[]`, "/automix": `"enabled"`} {
-		for _, prefix := range []string{"/v1/sc5000", "/v1/enginex"} {
+		for _, prefix := range []string{migration.APIPrefix, "/v1/enginex"} {
 			code, body, _ := do("GET", prefix+path, "", nil)
 			if code != 200 || !strings.Contains(body, key) || strings.Contains(body, "totalNumberOfItems") {
 				t.Fatalf("GET %s%s: %d %s", prefix, path, code, body)
@@ -51,7 +52,7 @@ func TestEngineXPrefixReachesTheSameRoutes(t *testing.T) {
 		t.Fatalf("loop-to-pad under /v1/enginex: %d %s", code, body)
 	}
 	// Only the deck itself: a tunnel edge's headers are refused under both prefixes.
-	for _, prefix := range []string{"/v1/sc5000", "/v1/enginex"} {
+	for _, prefix := range []string{migration.APIPrefix, "/v1/enginex"} {
 		if code, body, _ := do("GET", prefix+"/ui", "", map[string]string{"Cf-Connecting-Ip": "198.51.100.1"}); code != 403 || strings.Contains(body, "code-1234") {
 			t.Fatalf("%s/ui through a tunnel: %d", prefix, code)
 		}
@@ -70,7 +71,7 @@ func TestEngineXPrefixKeepsTheLocalOnlyRules(t *testing.T) {
 		code         int
 	}{
 		{"192.0.2.9:7", "/v1/enginex/ui", 403},
-		{"192.0.2.9:7", "/v1/sc5000/ui", 403},
+		{"192.0.2.9:7", migration.APIPrefix + "/ui", 403},
 		{"[2001:db8::1]:7", "/v1/enginex/clock", 403},
 		{"127.0.0.1:7", "/v1/enginex/ui", 200},
 	} {
@@ -90,14 +91,14 @@ func TestEngineXPrefixKeepsTheLocalOnlyRules(t *testing.T) {
 		ui.ServeHTTP(w, r)
 		return w.Code, w.Body.String()
 	}
-	oc, ob := bare("/v1/sc5000")
+	oc, ob := bare(migration.APIPrefix)
 	if nc, nb := bare("/v1/enginex"); nc != oc || nb != ob {
-		t.Fatalf("/v1/enginex: %d %q; /v1/sc5000: %d %q", nc, nb, oc, ob)
+		t.Fatalf("/v1/enginex: %d %q; " + migration.APIPrefix + ": %d %q", nc, nb, oc, ob)
 	}
 	// The remote console forward has no route to either prefix.
 	fw := httptest.NewServer(ui.ForwardHandler())
 	defer fw.Close()
-	for _, p := range []string{"/v1/enginex/ui", "/v1/enginex/../sc5000/ui", "//v1/enginex/ui"} {
+	for _, p := range []string{"/v1/enginex/ui", "/v1/enginex/../" + migration.ProjectName + "/ui", "//v1/enginex/ui"} {
 		resp, err := http.Get(fw.URL + p)
 		if err != nil {
 			t.Fatal(err)

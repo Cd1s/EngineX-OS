@@ -1,6 +1,7 @@
 package prolink
 
 import (
+"github.com/Cd1s/EngineX-OS/internal/migration"
 	"bytes"
 	"testing"
 
@@ -14,7 +15,7 @@ import (
 // (mid, high, low) in both directions, so a CDJ's waveform reached the deck's display with
 // its bands swapped, and so did the deck's overview on a CDJ.
 func TestPWV7KeepsItsBandsOnRekordboxDemoTrack(t *testing.T) {
-	detail, err := rekordbox.ReadAnalysis("/root/build/sc5000-lab/deep-symmetry-archive/pyrekordbox/.testdata/export/PIONEER/USBANLZ/P016/0000875E/ANLZ0000.2EX")
+	detail, err := rekordbox.ReadAnalysis(migration.LabDir + "/deep-symmetry-archive/pyrekordbox/.testdata/export/PIONEER/USBANLZ/P016/0000875E/ANLZ0000.2EX")
 	if err != nil {
 		t.Skip("lab fixture:", err)
 	}

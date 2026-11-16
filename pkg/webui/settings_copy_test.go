@@ -85,7 +85,7 @@ func TestSettingsCopySnapshotRestoresBytesModeAndAbsence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = os.WriteFile(missing, []byte("SC5000_UI_SCALE=0.85\n"), 0o644)
+	_ = os.WriteFile(missing, []byte("ENGINEX_UI_SCALE=0.85\n"), 0o644)
 	if err := restoreCopyFile(missing, absent); err != nil {
 		t.Fatal(err)
 	}

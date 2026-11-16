@@ -11,6 +11,10 @@ OpenGL rendering (1280x800) and a CLOCK_MONOTONIC-paced ALSA null audio clock.
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'tools/az01-packer'))
+import legacy_names as legacy
 import argparse
 import concurrent.futures
 import datetime
@@ -27,7 +31,7 @@ from PIL import Image, ImageDraw, ImageFont
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
 WORK = Path(os.environ.get("SHADOW_TWIN_WORK", "/var/tmp/shadow-twin"))
-LAB = Path(os.environ.get("SHADOW_TWIN_LAB", "/root/build/sc5000-lab"))
+LAB = Path(os.environ.get("SHADOW_TWIN_LAB", legacy.LAB))
 FW_IMG = LAB / "fw-5.3.0/SC5000-5.3.0-Update.img"
 QRC_DIR = LAB / "5.3.0/qrc"
 
@@ -357,7 +361,7 @@ def ensure_base_artifacts(
         # A shared cache from before 5.3.0.5 (#234) holds the suite under its old name.
         default_suite = Path("/var/tmp/shadow-twin/bin/enginex-suite")
         if not default_suite.is_file():
-            default_suite = Path("/var/tmp/shadow-twin/bin/sc5000-suite")
+            default_suite = Path("/var/tmp/shadow-twin/bin/enginex-suite")
         if default_suite.is_file() and not commit_changed:
             try:
                 shutil.copy2(default_suite, suite_bin)
@@ -435,7 +439,7 @@ def write_instance_configs(side: str, mode: str, src_dir: Path, ver_info: dict) 
     (sdir / "tmp").mkdir(parents=True, exist_ok=True)
     (sdir / "run").mkdir(parents=True, exist_ok=True)
 
-    sc_link = sdir / "data/sc5000-custom"  # the compat link a deck carries (#234)
+    sc_link = sdir / "data/enginex-custom"  # the compat link a deck carries (#234)
     if not sc_link.exists() and not sc_link.is_symlink():
         sc_link.symlink_to("enginex")
 
@@ -660,7 +664,7 @@ def start_services(side: str, src_dir: Path | None = None) -> None:
         ns_chroot_cmd(
             side,
             "pkill -TERM -f '^/usr/Engine/Engine' 2>/dev/null || true; "
-            "pkill -TERM -f '/tmp/stream-sync|shadow-twin-sync|enginex-suite|sc5000-suite' 2>/dev/null || true",
+            "pkill -TERM -f '/tmp/stream-sync|shadow-twin-sync|enginex-suite|enginex-suite' 2>/dev/null || true",
         ),
         check=False,
     )
@@ -678,7 +682,7 @@ def start_services(side: str, src_dir: Path | None = None) -> None:
         ns_chroot_cmd(
             side,
             "pkill -KILL -f '^/usr/Engine/Engine' 2>/dev/null || true; "
-            "pkill -KILL -f '/tmp/stream-sync|shadow-twin-sync|enginex-suite|sc5000-suite' 2>/dev/null || true",
+            "pkill -KILL -f '/tmp/stream-sync|shadow-twin-sync|enginex-suite|enginex-suite' 2>/dev/null || true",
         ),
         check=False,
     )

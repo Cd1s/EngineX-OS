@@ -538,7 +538,7 @@ func TestDeezerBrowserSlowPhoneDoesNotBlockDisposal(t *testing.T) {
 }
 
 func TestDeezerBrowserStatelessQRBothPrefixes(t *testing.T) {
-	for _, prefix := range []string{"", "/sc5000"} {
+	for _, prefix := range []string{"", "/enginex"} {
 		t.Run(prefix, func(t *testing.T) {
 			s, f := browserFixture(t)
 			token := "testtoken1234567890"

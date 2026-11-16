@@ -11,7 +11,7 @@ import unittest
 REPO = Path(__file__).resolve().parents[2]
 UI = REPO / "tools/ui-mod/settings_copy.qml"
 BUILD = REPO / "tools/ui-mod/build_packs.py"
-LAB = Path("/root/build/sc5000-lab/5.3.0/qrc")
+LAB = Path("/root/build/enginex-lab/5.3.0/qrc")
 
 
 def js_function(name):

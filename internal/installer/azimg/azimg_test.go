@@ -1,6 +1,7 @@
 package azimg_test
 
 import (
+"github.com/Cd1s/EngineX-OS/internal/migration"
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
@@ -560,10 +561,10 @@ func buildTestBundleTarGz(t *testing.T, o bundleBuildOpts) []byte {
 		alsa = "system/var-lib/alsa/conf.d\n"
 	}
 	files := map[string][]byte{
-		"bin/sc5000-suite":         []byte("suite-bin-PAYLOAD-0123456789"),
+		"bin/enginex-suite":         []byte("suite-bin-PAYLOAD-0123456789"),
 		"lib/libengine-ui-hook.so": []byte("hook-so"),
 		"boot-activate.sh":         []byte("#!/bin/sh\n"),
-		"99-sc5000-custom.conf":    []byte("pcm.!default {}\n"),
+		"99-enginex.conf":    []byte("pcm.!default {}\n"),
 		"alsa-dir":                 []byte(alsa),
 		"version.txt":              []byte(version + "\n"),
 		"release-tag":              []byte("v" + version + "-r4\n"),
@@ -660,7 +661,7 @@ func (r *mutatingReaderAt) ReadAt(p []byte, off int64) (int, error) {
 func TestGen2ImageAndBundleValidWalkAndOpen(t *testing.T) {
 	ctx := context.Background()
 	tarGz := buildTestBundleTarGz(t, bundleBuildOpts{
-		modes: map[string]int64{"bin/sc5000-suite": 0o6755},
+		modes: map[string]int64{"bin/enginex-suite": 0o6755},
 	})
 	imgBytes := wrapGen2Image(tarGz, "SCLIVE4", "5.3.0.4")
 
@@ -716,7 +717,7 @@ func TestGen2ImageAndBundleValidWalkAndOpen(t *testing.T) {
 				t.Fatalf("too few bundle entries: %d", len(entries))
 			}
 			for _, e := range entries {
-				if e.Path == "bin/sc5000-suite" && e.Mode != 0o755 {
+				if e.Path == "bin/enginex-suite" && e.Mode != 0o755 {
 					t.Fatalf("Entry.Mode = %#o, want 0755 (setuid/setgid masked)", e.Mode)
 				}
 				rc, err := e.Open()
@@ -795,7 +796,7 @@ func TestGen2EntryOpenVerifiesOnExactSizeRead(t *testing.T) {
 
 	var target azimg.Entry
 	_ = b.Walk(ctx, func(e azimg.Entry) error {
-		if e.Path == "bin/sc5000-suite" {
+		if e.Path == "bin/enginex-suite" {
 			target = e
 		}
 		return nil
@@ -1363,7 +1364,7 @@ func TestRealFixturesParity(t *testing.T) {
 
 	labDir := os.Getenv("ENGINEX_LAB_DIR")
 	if labDir == "" {
-		labDir = "/root/build/sc5000-lab"
+		labDir = migration.LabDir
 	}
 	packer := filepath.Join("..", "..", "..", "tools", "az01-packer", "az01_packer.py")
 	if _, err := os.Stat(packer); err != nil {

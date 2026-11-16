@@ -83,7 +83,7 @@ func rewriteBundleFile(t *testing.T, src, member, replacement string) string {
 
 func TestNativeImageRequiresCompleteBundle(t *testing.T) {
 	bundle := buildBundle(t, "SCLIVE4", "5.3.0.5")
-	for _, member := range []string{"bin/enginex-suite", "lib/libengine-ui-hook.so", "boot-activate.sh", "99-sc5000-custom.conf"} {
+	for _, member := range []string{"bin/enginex-suite", "lib/libengine-ui-hook.so", "boot-activate.sh", "99-enginex.conf"} {
 		t.Run(member, func(t *testing.T) {
 			fb := newFastboot(t, "jp21", true)
 			o := testOpts(t)
@@ -109,10 +109,10 @@ func TestNativeImageRefusesConflictingLegacyDirectory(t *testing.T) {
 	}
 	defer fs.Close()
 	if err := fs.Apply(ctx, ext4.ChangeSet{
-		Directories: []string{"enginex", "sc5000-custom"},
+		Directories: []string{"enginex", "enginex-custom"},
 		Files: []ext4.Entry{
-			imageBytes("sc5000-custom/bundle/boot-activate.sh", []byte("stale"), 0o755),
-			imageBytes("sc5000-custom/bundle/lib/libengine-ui-hook.so", []byte("stale"), 0o755),
+			imageBytes("enginex-custom/bundle/boot-activate.sh", []byte("stale"), 0o755),
+			imageBytes("enginex-custom/bundle/lib/libengine-ui-hook.so", []byte("stale"), 0o755),
 		},
 	}); err != nil {
 		t.Fatal(err)
@@ -124,7 +124,7 @@ func TestNativeImageRefusesConflictingLegacyDirectory(t *testing.T) {
 	o := testOpts(t)
 	o.USB, o.Bundle, o.Backup = fb.Bin, bundle.Path, backup
 	err = run(ctx, o)
-	if err == nil || !strings.Contains(err.Error(), "legacy /sc5000-custom") || !strings.HasSuffix(err.Error(), "nothing flashed") {
+	if err == nil || !strings.Contains(err.Error(), "legacy /enginex-custom") || !strings.HasSuffix(err.Error(), "nothing flashed") {
 		t.Fatalf("conflicting directories: %v", err)
 	}
 	if flashed := fb.Flashed(); len(flashed) != 0 {
@@ -190,7 +190,7 @@ func TestNativeImageWithoutHostTools(t *testing.T) {
 // Native image installation must accept a renamed bundle and an explicitly selected older bundle.
 func TestRename234NativeImageAcceptsBothSuiteNames(t *testing.T) {
 	bundle := buildBundle(t, "SCLIVE4", "5.3.0.5")
-	for _, suite := range []string{"bin/enginex-suite", "bin/sc5000-suite"} {
+	for _, suite := range []string{"bin/enginex-suite", "bin/enginex-suite"} {
 		t.Run(suite, func(t *testing.T) {
 			path := bundle.Path
 			if suite != "bin/enginex-suite" {

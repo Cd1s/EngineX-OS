@@ -1289,7 +1289,7 @@ static void test_shadow_replay(void) {
 }
 
 // BH-GF4-4: the bundle is in /data/enginex; the processor there is found without
-// the /data/sc5000-custom compat link, and wins over a legacy copy.
+// the /data/enginex-custom compat link, and wins over a legacy copy.
 static void test_stems_processor_prefers_enginex(void) {
     char dir[] = "/tmp/stems-enginex-XXXXXX", p[PATH_MAX];
     assert(mkdtemp(dir));
@@ -1317,7 +1317,7 @@ static void test_stems_processor_prefers_enginex(void) {
     assert(snprintf(p, sizeof p, "%s/enginex/bin", dir) > 0 && !rmdir(p));
     assert(snprintf(p, sizeof p, "%s/enginex", dir) > 0 && !rmdir(p));
     assert(snprintf(p, sizeof p, "%s/legacy", dir) > 0 && !rmdir(p) && !rmdir(dir));
-    puts("stems-processor (BH-GF4-4): /data/enginex first, then the legacy /data/sc5000-custom: PASS");
+    puts("stems-processor (BH-GF4-4): /data/enginex first, then the legacy /data/enginex-custom: PASS");
 }
 
 static void test_stems_processor_fallback(void) {
@@ -1377,20 +1377,20 @@ static void test_alsa_boot_hook(void) {
     hook_test_engine = 1;
     g_hook_initialized = 1;
     void *dst = (void *)0x1234;
-    assert(sc5000_alsa_boot_hook(NULL, NULL, &dst, NULL) == 0);
+    assert(enginex_alsa_boot_hook(NULL, NULL, &dst, NULL) == 0);
     assert(dst == NULL);
     dst = (void *)0x1234;
-    assert(snd_config_hook_sc5000_alsa_boot_hook(NULL, NULL, &dst, NULL) == 0);
+    assert(snd_config_hook_enginex_alsa_boot_hook(NULL, NULL, &dst, NULL) == 0);
     assert(dst == NULL);
 
     g_hook_initialized = 0;
     system("mkdir -p /run 2>/dev/null; touch /run/enginex-alsa-reexec.once");
-    assert(sc5000_alsa_boot_hook(NULL, NULL, &dst, NULL) == 0);
+    assert(enginex_alsa_boot_hook(NULL, NULL, &dst, NULL) == 0);
     unlink("/run/enginex-alsa-reexec.once");
 
     g_hook_initialized = 1;
     hook_test_engine = 0;
-    puts("sc5000_alsa_boot_hook: no-op when initialized or reexec marker exists, resets dst: PASS");
+    puts("enginex_alsa_boot_hook: no-op when initialized or reexec marker exists, resets dst: PASS");
 }
 
 

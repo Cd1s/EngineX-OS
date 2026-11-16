@@ -1,6 +1,7 @@
 package webui
 
 import (
+"github.com/Cd1s/EngineX-OS/internal/migration"
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
@@ -15,12 +16,12 @@ import (
 )
 
 // #234: the deck's state dir is recognised under the new path and through the
-// /data/sc5000-custom compat link an older unit still passes during an update;
+// /data/legacy-custom compat link an older unit still passes during an update;
 // a test's own dir is not the deck's.
 func TestRename234DeckStateDirUnderBothNames(t *testing.T) {
 	for dir, want := range map[string]bool{
 		"/data/enginex/state":       true,
-		"/data/sc5000-custom/state": true,
+		migration.DataDir + "/state": true,
 		"/data/enginex":             false,
 		t.TempDir():                 false,
 		"":                          false,
@@ -33,11 +34,11 @@ func TestRename234DeckStateDirUnderBothNames(t *testing.T) {
 
 // #234: shadow telemetry turns on with the new hand flag and, for two releases, the old one.
 func TestRename234ShadowDebugFlagUnderBothNames(t *testing.T) {
-	if shadowDebugFlags != [...]string{"/tmp/enginex-debug", "/tmp/sc5000-debug"} {
+	if shadowDebugFlags != [...]string{"/tmp/enginex-debug", migration.DebugFlag} {
 		t.Errorf("deck flag files %q", shadowDebugFlags)
 	}
 	dir := t.TempDir()
-	flags := []string{filepath.Join(dir, "enginex-debug"), filepath.Join(dir, "sc5000-debug")}
+	flags := []string{filepath.Join(dir, "enginex-debug"), filepath.Join(dir, migration.ProjectName + "-debug")}
 	if anyFileExists(flags) {
 		t.Fatal("telemetry on without a flag file")
 	}
@@ -58,7 +59,7 @@ func TestRename234LegacyTailscaleSocketLink(t *testing.T) {
 	dir := t.TempDir()
 	old := legacyTailscaleSocket
 	defer func() { legacyTailscaleSocket = old }()
-	legacyTailscaleSocket = filepath.Join(dir, "sc5000-tailscaled.sock")
+	legacyTailscaleSocket = filepath.Join(dir, migration.TailscaleUnit + ".sock")
 	for i := 0; i < 2; i++ {
 		linkLegacyTailscaleSocket()
 		if got, err := os.Readlink(legacyTailscaleSocket); err != nil || got != "enginex-tailscaled.sock" {
@@ -73,13 +74,13 @@ func TestRename234LegacyTailscaleSocketLink(t *testing.T) {
 	if b, err := os.ReadFile(legacyTailscaleSocket); err != nil || string(b) != "old daemon" {
 		t.Fatalf("an old daemon's socket was replaced: %q %v", b, err)
 	}
-	if old != "/run/sc5000-tailscaled.sock" || tailscaleSocket != "/run/enginex-tailscaled.sock" || legacyTailscaleUnit != "sc5000-tailscaled" {
+	if old != migration.TailscaleSocket || tailscaleSocket != "/run/enginex-tailscaled.sock" || legacyTailscaleUnit != migration.TailscaleUnit {
 		t.Errorf("deck names %q %q %q", old, tailscaleSocket, legacyTailscaleUnit)
 	}
 }
 
 // #234: /v1/enginex is the deck API's primary prefix. No route is registered under the old
-// one, and every route answers under /v1/sc5000 too, through the one canonicalV1 mapping
+// one, and every route answers under /v1/legacy too, through the one canonicalV1 mapping
 // (the permanent alias for installers, UI packs, Mods and scripts of every release).
 func TestRename234EveryRouteUnderBothPrefixes(t *testing.T) {
 	files, _ := filepath.Glob("*.go")
@@ -99,7 +100,7 @@ func TestRename234EveryRouteUnderBothPrefixes(t *testing.T) {
 			routes = append(routes, r{string(m[1]), string(m[2])})
 		}
 		for _, m := range route.FindAllSubmatch(b, -1) {
-			if strings.HasPrefix(string(m[2]), "/v1/sc5000/") {
+			if strings.HasPrefix(string(m[2]), migration.APIPrefix + "/") {
 				t.Errorf("%s still names %s", f, m[2])
 			}
 		}
@@ -115,19 +116,19 @@ func TestRename234EveryRouteUnderBothPrefixes(t *testing.T) {
 			continue // the TIDAL-compatible gateway's own /v1 paths
 		}
 		concrete := regexp.MustCompile(`\{[^}]+\}`).ReplaceAllString(rest, "x")
-		if got := canonicalV1("/v1/sc5000/" + concrete); got != "/v1/enginex/"+concrete {
-			t.Errorf("canonicalV1(/v1/sc5000/%s) = %s", concrete, got)
+		if got := canonicalV1(migration.APIPrefix + "/" + concrete); got != "/v1/enginex/"+concrete {
+			t.Errorf("canonicalV1(" + migration.APIPrefix + "/%s) = %s", concrete, got)
 		}
 		if _, pattern := s.tidal.mux.Handler(httptest.NewRequest(rt.method, "/v1/enginex/"+concrete, nil)); pattern == "" {
 			t.Errorf("%s /v1/enginex/%s is not served by the gateway", rt.method, concrete)
 		}
 	}
-	for _, p := range []string{"/v1/sc5000x/ui", "/v1/sc50000/ui", "/v1/enginexx/ui", "/v2/sc5000/ui"} {
+	for _, p := range []string{migration.APIPrefix + "x/ui", migration.APIPrefix + "0/ui", "/v1/enginexx/ui", "/v2/" + migration.ProjectName + "/ui"} {
 		if got := canonicalV1(p); got != p {
 			t.Errorf("canonicalV1(%s) = %s; only the exact old prefix maps", p, got)
 		}
 	}
-	if canonicalV1("/v1/sc5000") != "/v1/enginex" || canonicalV1("/v1/enginex/ui") != "/v1/enginex/ui" {
+	if canonicalV1(migration.APIPrefix) != "/v1/enginex" || canonicalV1("/v1/enginex/ui") != "/v1/enginex/ui" {
 		t.Error("prefix itself or the new prefix mapped wrongly")
 	}
 }
@@ -231,7 +232,7 @@ func TestRename234OlderBundleLeavesAndRebootsInsteadOfActivating(t *testing.T) {
 			t.Errorf("older %s %s: %q, want the leave step and a reboot, no boot-activate.sh", c.version, c.tag, scripts[0])
 		}
 		if !c.older && (leaves || !activates || !strings.Contains(scripts[0], "[e]nginex-suite (stream-sync|rb-bridge|enginex-deemixd)") ||
-			!strings.Contains(scripts[0], "[s]c5000-suite (stream-sync|rb-bridge|sc5000-deemixd)")) {
+			!strings.Contains(scripts[0], migration.SuitePattern + " (stream-sync|rb-bridge|" + migration.Deemix + ")")) {
 			t.Errorf("newer %s %s: %q, want boot-activate.sh after ending both suite names", c.version, c.tag, scripts[0])
 		}
 	}
@@ -239,7 +240,7 @@ func TestRename234OlderBundleLeavesAndRebootsInsteadOfActivating(t *testing.T) {
 
 // Settings copy authorizes the same local screen after the gateway canonicalizes the old prefix.
 func TestRename234SettingsCopyLocalScreen(t *testing.T) {
-	for _, prefix := range []string{"/v1/enginex/", "/v1/sc5000/"} {
+	for _, prefix := range []string{"/v1/enginex/", migration.APIPrefix + "/"} {
 		t.Run(prefix, func(t *testing.T) {
 			r := httptest.NewRequest("POST", prefix+"settings-copy", nil)
 			r.RemoteAddr = "127.0.0.1:1234"
@@ -260,7 +261,7 @@ func TestRename234SettingsCopyLocalScreen(t *testing.T) {
 }
 
 func TestRename234SyntheticTidalAccountsStayLocal(t *testing.T) {
-	for _, token := range []string{"enginex-token", "enginex-refresh", "sc5000-token", "sc5000-refresh"} {
+	for _, token := range []string{"enginex-token", "enginex-refresh", migration.Token, migration.RefreshToken} {
 		t.Run(token, func(t *testing.T) {
 			g := New(Config{StateDir: t.TempDir(), UIDir: t.TempDir()}, nil)
 			if err := g.tidal.saveRealAuth(tidalAuth{AccessToken: token, RefreshToken: token}); err != nil {
@@ -293,9 +294,20 @@ func TestRename234IssuedTidalTokensRemainSyntheticOnR5(t *testing.T) {
 	for _, key := range []string{"access_token", "refresh_token"} {
 		// Frozen r5 set, excluding the empty value: do not use this release's classifier.
 		switch tokens[key] {
-		case "enginex", "sc5000-token", "sc5000-refresh":
+		case "enginex", migration.Token, migration.RefreshToken:
 		default:
 			t.Errorf("%s = %q is not a synthetic token recognized by r5", key, tokens[key])
+		}
+	}
+}
+
+func TestRename234StemsListWritesCurrentIDAndReadsSavedLegacyID(t *testing.T) {
+	if got := stemsListID("deezer"); got != "enginex-stems-deezer" {
+		t.Fatalf("current list ID: %q", got)
+	}
+	for _, id := range []string{"enginex-stems-deezer", migration.StemsListPrefix + "deezer"} {
+		if !isStemsListID(id, "deezer") || isStemsListID(id, "spotify") {
+			t.Errorf("list scope mismatch for %q", id)
 		}
 	}
 }

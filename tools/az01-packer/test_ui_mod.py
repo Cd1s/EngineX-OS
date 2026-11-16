@@ -1,3 +1,7 @@
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'tools/az01-packer'))
+import legacy_names as legacy
 import importlib.util
 import json
 import os
@@ -11,7 +15,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent.parent
 BUILD_PACKS = REPO / "tools" / "ui-mod" / "build_packs.py"
-LAB = Path("/root/build/sc5000-lab")
+LAB = Path(legacy.LAB)
 
 spec = importlib.util.spec_from_file_location("build_packs", BUILD_PACKS)
 bp = importlib.util.module_from_spec(spec)
@@ -1015,8 +1019,8 @@ for (const amt of [1/63, 2/63, 4/63, 5/63, 8/63, 1.0]) {{
             bp.ROOT = "Skins/Embedded/"
             edits = bp.edits(False)
             cs_patches = edits["Skins/Embedded/Views/BrowserSource/ConnectedSource.qml"]
-            stock_cs = (Path("/root/build/sc5000-lab/5.3.0/qrc/Skins/Embedded/Views/BrowserSource/ConnectedSource.qml").read_text()
-                        if Path("/root/build/sc5000-lab/5.3.0/qrc/Skins/Embedded/Views/BrowserSource/ConnectedSource.qml").is_file()
+            stock_cs = (Path("/root/build/enginex-lab/5.3.0/qrc/Skins/Embedded/Views/BrowserSource/ConnectedSource.qml").read_text()
+                        if Path("/root/build/enginex-lab/5.3.0/qrc/Skins/Embedded/Views/BrowserSource/ConnectedSource.qml").is_file()
                         else "ListView {\n    currentIndex: -1\n    delegate: ConnectedSourceDelegate {\n        height: 108\n        leftPadding: 8\n    }\n    section.property: \"typeText\"\n}\n")
             patched = stock_cs
             for old, new in cs_patches:
@@ -4806,7 +4810,7 @@ run(2000, src(S2, {id: 'k2'})); settle(); run(1500, src(S2, {id: 'k2'}));
 assert.equal(eng.held, S2); assert.equal(scShadowAt[2].ready, true);
 // The data directory under its old name is the same file.
 eng.held = S2; assert.equal(scShadowWrong(2, src(S2)), '');
-assert.equal(scShadowWrong(2, Object.assign(src(S2), {path: '/data/sc5000-custom/shadow-v3/peer-2/same.flac'})), '');
+assert.equal(scShadowWrong(2, Object.assign(src(S2), {path: '/data/enginex-custom/shadow-v3/peer-2/same.flac'})), '');
 """)
 
     def test_engine_load_failure_is_asked_again_with_backoff_and_never_steered(self):

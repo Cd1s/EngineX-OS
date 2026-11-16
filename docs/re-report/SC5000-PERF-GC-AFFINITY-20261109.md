@@ -2,7 +2,7 @@
 
 分支：`agent/perf-gc-affinity-20261109`。基线：`de0f64d2aa9c54ee26f6e31aa151f0e557402fdb`（`origin/agent/merge-latest-20261109`）。
 
-本报告描述源码修复和构建验证，尚未部署到碟机；部署及性能复测由 PM 统一安排。依据为 `fleet-share` 的 `runs/20261109-sc5000-stutter/report-DA-full.txt`「结论与根因总览」及根因 1–3 的因果链，并在编译机经 `deck L/R` 补充只读核对。
+本报告描述源码修复和构建验证，尚未部署到碟机；部署及性能复测由 PM 统一安排。依据为 `fleet-share` 的 `runs/20261109-enginex-stutter/report-DA-full.txt`「结论与根因总览」及根因 1–3 的因果链，并在编译机经 `deck L/R` 补充只读核对。
 
 ## 根因 1：减少 QML GC 根和无效绑定刷新
 
@@ -59,11 +59,11 @@ L 主 PID 6642，另两个同名 EMain 是 6904、6915；R 主 PID 1258，另两
 
 实现位置：
 
-- `rootfs-overlay/usr/local/bin/sc5000-perf-tune:classify`：音频 IRQ→0，GPU/VOP→2，其它可移动 IRQ→3；同时设置 IRQ 掩码和 PREEMPT_RT IRQ 线程亲和度。音频 IRQ 仍 FIFO 99，非音频 IRQ FIFO 40，低于 45/49 的 RT 音频。
+- `rootfs-overlay/usr/local/bin/enginex-perf-tune:classify`：音频 IRQ→0，GPU/VOP→2，其它可移动 IRQ→3；同时设置 IRQ 掩码和 PREEMPT_RT IRQ 线程亲和度。音频 IRQ 仍 FIFO 99，非音频 IRQ FIFO 40，低于 45/49 的 RT 音频。
 - 同文件 `engine_threads`：用 TID==PID 识别真正 GUI 主线程并固定到 1；SceneGraph→2；所有策略为 OTHER/BATCH/IDLE 的辅助线程→0,3，不再只处理原来在 CPU1 的线程，也不因 comm 同为 EMain 而漏掉。FIFO/RR 等实时线程跳过；AudioOut/AudioRenderer*/AudioWatcher 即使仍处于初始化的普通策略也跳过。OfflineAnalyzer 进程及其子线程也覆盖到 0,3。启动及延迟扫描后，每 30 s 继续扫描晚生线程；worker 自身也限制到 0,3，并在 Engine 退出后结束，在 engine.service 的控制组内随服务停止。
 - 同文件 workqueue 设置：`cpumask=9`，避开 GUI/SceneGraph 的 1/2。
-- `rootfs-overlay/etc/default/sc5000-perf`：补齐 `panfrost` 名称，写明四核分配和 IRQ 优先级；`SC5000_THREAD_INTERVAL=30` 控制持续重扫间隔，设为 0 可只保留启动扫描。
-- `rootfs-overlay/etc/systemd/system/engine.service.d/60-ui-hook.conf`：加载同一份 `/etc/default/sc5000-perf`，确保 Engine 的 ExecStartPost 调优也继承 IRQ 规则和重扫间隔，而非仅独立的 perf-tune oneshot 服务读取配置。
+- `rootfs-overlay/etc/default/enginex-perf`：补齐 `panfrost` 名称，写明四核分配和 IRQ 优先级；`ENGINEX_THREAD_INTERVAL=30` 控制持续重扫间隔，设为 0 可只保留启动扫描。
+- `rootfs-overlay/etc/systemd/system/engine.service.d/60-ui-hook.conf`：加载同一份 `/etc/default/enginex-perf`，确保 Engine 的 ExecStartPost 调优也继承 IRQ 规则和重扫间隔，而非仅独立的 perf-tune oneshot 服务读取配置。
 - `tools/ui-mod/engine_ui_hook.c:guard_affinity`：后台类也避开 1/2，防止后续命名或设置亲和度重新放回 GUI/GL 核。
 - 同文件 `lower_offline_analyzer`：从在线 CPU 集合选择非 GUI/GL 核，四核机为 0,3；即使从 EMain 继承单核 CPU1 也可以移开，保留 SCHED_IDLE / nice19 / idle I/O。
 - `tests/test_rootfs_overlay.sh`：同步真实 IRQ 名称、mask9、主/同名辅助 EMain、其它核的普通工作线程、OfflineAnalyzer 主/子线程，以及 RT/初始化中音频线程不动和非音频 IRQ 40 的断言；模拟启动阶段之后才出现的 event_engine 线程，验证它被移开，Engine 退出后 worker 确实结束。
@@ -79,7 +79,7 @@ L 主 PID 6642，另两个同名 EMain 是 6904、6915；R 主 PID 1258，另两
 | `go test -race ./...` | PASS，24 个有测试包 |
 | `bash tests/test_rootfs_overlay.sh` | PASS，18 项模拟存储/硬件测试 |
 | `python3 -m unittest discover -s tools/az01-packer` | PASS，118 项，1 项安全跳过（宿主已有 `/data`，不在共享主机上运行对应真实目标路径安装测试） |
-| 完整 `build_packs.py --qrc /root/build/sc5000-lab/5.3.0/qrc` | PASS；en 279 文件、简/繁各 283 文件；每包 924/2772 活跃词典条目；临时 packs 和 tar.gz 已清理 |
+| 完整 `build_packs.py --qrc <firmware-lab>/5.3.0/qrc` | PASS；en 279 文件、简/繁各 283 文件；每包 924/2772 活跃词典条目；临时 packs 和 tar.gz 已清理 |
 | `tools/ui-mod/build.sh`，默认 armhf 交叉编译 | PASS，含目标 glibc 符号版本检查 |
 | `CROSS= tools/ui-mod/build.sh`，arm64 shared hook | PASS |
 | `gcc -O2 ... test_az04_hook.c -ldl -lpthread` 后运行，输入 SYSTEMONE 5.3.0 实体 Engine | PASS：新增 JobController 策略保护、资源映射/碰撞、LED、BuildID/18 编辑点、SQLite/DSP trampoline 验证 |
@@ -99,7 +99,7 @@ L 主 PID 6642，另两个同名 EMain 是 6904、6915；R 主 PID 1258，另两
 
 ## PM 部署后复测
 
-由查ID 使用原 `runs/20261109-sc5000-stutter/` 的同一套采样脚本，在 L/R 相同固件、曲目、播放状态、时长和操作顺序下对比：
+由查ID 使用原 `runs/20261109-enginex-stutter/` 的同一套采样脚本，在 L/R 相同固件、曲目、播放状态、时长和操作顺序下对比：
 
 - **GC**：EMain 的 `QV4::MemoryManager::runGC` 样本占比、尖峰间隔、每次停顿时长、p95/p99。基线 L 7.75 s / R 9.85 s，约 110–150 ms；分别测全暂停、单轨播放和多轨播放。预期尖峰变少/变短，数值以复测为准。
 - **调度**：EMain/SceneGraph 的 `Δnonvoluntary_ctxt_switches / Δ秒`，与原 0.25 s/60 s 窗口及抢占分析对齐；另看 GUI 帧间隔和 SceneGraph 离开 CPU 的时长，不能把切换计数直接等同于耗时。预期删除无效 EMain 辅助线程和外设竞争后下降。
@@ -110,9 +110,9 @@ L 主 PID 6642，另两个同名 EMain 是 6904、6915；R 主 PID 1258，另两
 
 修改前 WebDAV 备份：
 
-- `20261108T220823Z-build-host-before-perf-gc-affinity-20261109-83f83cb5d516-sc5000-perf-20261109-before.tar.gz`
+- `20261108T220823Z-build-host-before-perf-gc-affinity-20261109-83f83cb5d516-enginex-perf-20261109-before.tar.gz`
 - `20261108T221613Z-build-host-before-perf-ui-assertions-20261109-4e895fc658da-test_ui_mod.py`
-- `20261108T223612Z-build-host-before-perf-late-threads-20261109-54ec26a019b4-sc5000-perf-qa-followup-before.tar.gz`
+- `20261108T223612Z-build-host-before-perf-late-threads-20261109-54ec26a019b4-enginex-perf-qa-followup-before.tar.gz`
 - `20261108T224744Z-build-host-before-perf-env-wiring-20261109-2d9dedae7c0f-60-ui-hook.conf`
 
-本任务只读采样、验证摘要和审查结果交付到 `fleet-share` 的 `runs/20261109-sc5000-perf-fix/`。没有推送 main、创建 tag/Release/评论、刷机或向碟机部署。
+本任务只读采样、验证摘要和审查结果交付到 `fleet-share` 的 `runs/20261109-enginex-perf-fix/`。没有推送 main、创建 tag/Release/评论、刷机或向碟机部署。

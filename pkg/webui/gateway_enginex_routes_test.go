@@ -8,10 +8,10 @@ import (
 	"testing"
 )
 
-// The gateway takes every /v1/ path before the console mux, so the /v1/sc5000
+// The gateway takes every /v1/ path before the console mux, so the /v1/enginex
 // admin routes must be registered on the gateway mux (loopback only), or they
 // fall through to a Tidal-style empty list (#114, #120).
-func TestGatewayServesSC5000AdminRoutes(t *testing.T) {
+func TestGatewayServesEngineXAdminRoutes(t *testing.T) {
 	mockRunner := &mockSystemRunner{outputs: make(map[string][]byte)}
 	SetSystemRunner(mockRunner.Run)
 	defer SetSystemRunner(nil)
@@ -28,14 +28,14 @@ func TestGatewayServesSC5000AdminRoutes(t *testing.T) {
 		b, _ := io.ReadAll(resp.Body)
 		return resp.StatusCode, string(b)
 	}
-	for path, key := range map[string]string{"/v1/sc5000/ssh": `"enabled"`, "/v1/sc5000/mounts": `[]`, "/v1/sc5000/automix": `"enabled"`} {
+	for path, key := range map[string]string{"/v1/enginex/ssh": `"enabled"`, "/v1/enginex/mounts": `[]`, "/v1/enginex/automix": `"enabled"`} {
 		code, body := do("GET", path, "")
 		if code != 200 || !strings.Contains(body, key) || strings.Contains(body, "totalNumberOfItems") {
 			t.Fatalf("GET %s: %d %s", path, code, body)
 		}
 	}
 	// A bad deck must reach the handler's validation (400), not the gateway's 200/404.
-	code, body := do("POST", "/v1/sc5000/sampler/loop-to-pad", `{"deck":0,"pad":1,"trackPath":"/tmp/x.wav","inSample":0,"outSample":100}`)
+	code, body := do("POST", "/v1/enginex/sampler/loop-to-pad", `{"deck":0,"pad":1,"trackPath":"/tmp/x.wav","inSample":0,"outSample":100}`)
 	if code != http.StatusBadRequest || !strings.Contains(body, "error") {
 		t.Fatalf("loop-to-pad: %d %s", code, body)
 	}

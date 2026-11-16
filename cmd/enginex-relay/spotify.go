@@ -24,7 +24,7 @@ const (
 	spotifyLoopbackURI   = "http://127.0.0.1:8080/oauth/spotify/callback"
 	spotifyDesktopURI    = "http://127.0.0.1:4381/login"
 	spotifyScopes        = "streaming user-read-private user-library-read playlist-read-private playlist-read-collaborative"
-	spotifyProbeControl  = "https://redirect-probe.invalid/sc5000/callback"
+	spotifyProbeControl  = "https://redirect-probe.invalid/enginex/callback"
 	spotifyProbeCacheTTL = 30 * time.Minute
 )
 

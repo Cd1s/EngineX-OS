@@ -1,6 +1,6 @@
 package stems
 
-// Zero-config home renderer. sc5000-stemsd on a computer in the deck's LAN
+// Zero-config home renderer. legacy-stemsd on a computer in the deck's LAN
 // answers a UDP broadcast probe and mDNS (mdns.go); a deck with no relay (or an unreachable one)
 // offloads Stems there and renders locally when nothing answers in time.
 // Discovered renderers never receive the deck's relay password: a LAN
@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	// DiscoveryPort is the UDP port sc5000-stemsd answers probes on.
+	// DiscoveryPort is the UDP port legacy-stemsd answers probes on.
 	DiscoveryPort = 17891
 	discoverProbe = "ENGINEX_STEMS_DISCOVER_V1"
 	beaconService = "enginex-stemsd"

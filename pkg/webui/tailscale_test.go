@@ -268,7 +268,7 @@ func TestTailscaleLoginServeAndStop(t *testing.T) {
 		t.Fatalf("login URL flow: %d %s", code, out)
 	}
 	// #234: the daemon an older release started under its old unit name stops first.
-	if !f.has("systemctl stop sc5000-tailscaled") {
+	if !f.has("systemctl stop enginex-tailscaled") {
 		t.Fatal("the pre-5.3.0.5 tailscaled unit is not stopped before the new one starts")
 	}
 	if !f.has("systemd-run --unit=enginex-tailscaled") || !f.has("--tun=userspace-networking") || !f.has("--login-server=https://hs.example ") && !f.has("--login-server=https://hs.example") {

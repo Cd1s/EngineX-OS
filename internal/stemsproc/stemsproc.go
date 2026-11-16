@@ -2,7 +2,7 @@
 // process on SC5000. It forwards the child's stdin/stdout byte stream to a
 // remote renderer, by default through the cloud relay the deck already uses
 // for logins (see internal/stems.ResolveClient for the override variables).
-// With no relay set up, or one it cannot reach, it looks for sc5000-stemsd
+// With no relay set up, or one it cannot reach, it looks for legacy-stemsd
 // on a computer in the same LAN (stems.FindLAN); failing that, or when the
 // renderer it found has no neural model, the deck separates the stems itself
 // (stems.LocalRender). enginex-suite runs Main.

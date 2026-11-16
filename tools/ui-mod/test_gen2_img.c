@@ -1,3 +1,4 @@
+#include "../legacy_names.h"
 // Checks for the second-generation *-Update.img hooks and the Factory Reset keep-EngineX erase (#119).
 // Native on the build host (needs sha256sum):
 //   gcc -O2 -Wall -o test_gen2_img test_gen2_img.c -ldl -lpthread && ./test_gen2_img
@@ -193,11 +194,11 @@ static void test_erase(void) {
     static const char *const kept[] = {
         "enginex/bundle/boot-activate.sh", "enginex/bundle/bin/enginex-suite", "enginex/ui/packs/a/Main.qml", "enginex/ui/icons/x.svg",
         "enginex/version.txt", "enginex/gen2-unlocked", "enginex/authorized_keys", "enginex/ssh_host_ed25519_key",
-        "system/var-lib/alsa/conf.d/99-sc5000-custom.conf"};
+        "system/var-lib/alsa/conf.d/99-enginex.conf"};
     for (size_t i = 0; i < sizeof wiped / sizeof *wiped; i++) put(root, wiped[i], "x");
     for (size_t i = 0; i < sizeof kept / sizeof *kept; i++) put(root, kept[i], "x");
     char link[PATH_MAX];
-    snprintf(link, sizeof link, "%s/sc5000-custom", root);
+    snprintf(link, sizeof link, "%s/enginex-custom", root);
     assert(symlink("enginex", link) == 0);
     snprintf(link, sizeof link, "%s/AppDataUser/out", root);  // a symlink out of /data is removed, never followed
     char outside[] = "/tmp/gen2-outside-XXXXXX";
@@ -213,7 +214,7 @@ static void test_erase(void) {
     assert(az01_erase_data_partition() == 0);
     for (size_t i = 0; i < sizeof wiped / sizeof *wiped; i++) assert(!exists(root, wiped[i]));
     for (size_t i = 0; i < sizeof kept / sizeof *kept; i++) assert(exists(root, kept[i]));
-    assert(exists(root, "sc5000-custom") && exists(root, "enginex/state") && exists(root, "enginex/mods"));
+    assert(exists(root, LEGACY_DATA_NAME) && exists(root, "enginex/state") && exists(root, "enginex/mods"));
     assert(exists(outside, "precious"));
 
     // a 1st-gen layout (no bundle/install.sh) is handed to the stock function

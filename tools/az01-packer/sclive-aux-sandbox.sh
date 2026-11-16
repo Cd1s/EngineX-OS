@@ -1,9 +1,11 @@
 #!/bin/bash
+. "${ENGINEX_MIGRATION:-$(git rev-parse --show-toplevel)/rootfs-overlay/usr/libexec/enginex-migration}"
+ENGINEX_LAB=${ENGINEX_LAB:-$legacy_lab}
 # Build host, native armhf, isolated official SCLIVE4 rootfs; never connects to a deck.
 set -euo pipefail
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 W=$(realpath -m "${1:?new private sandbox directory required}")
-LAB=/root/build/sc5000-lab
+LAB=${ENGINEX_LAB}
 if [ "${2:-}" != --inner ]; then
     [ "$(uname -m)" = aarch64 ]
     [ ! -e "$W" ] || { echo "refusing existing sandbox $W" >&2; exit 1; }

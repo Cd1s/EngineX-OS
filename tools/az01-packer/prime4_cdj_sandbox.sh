@@ -1,4 +1,6 @@
 #!/bin/bash
+. "${ENGINEX_MIGRATION:-$(git rev-parse --show-toplevel)/rootfs-overlay/usr/libexec/enginex-migration}"
+ENGINEX_LAB=${ENGINEX_LAB:-$legacy_lab}
 # Build host only. Private JC11 rootfs, native armhf; no hardware or shared lab writes.
 set -euo pipefail
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
@@ -6,9 +8,9 @@ W=$REPO/out/prime4-cdj-sandbox
 if [ "${1:-}" != --inner ]; then
     mkdir -p "$W"
     if [ ! -e "$W/image/rootfs.ext2" ]; then
-        python3 "$REPO/tools/az01-packer/az01_packer.py" unpack /root/build/sc5000-lab/fw-5.3.0/PRIME4-5.3.0-Update.img --output "$W/image" > "$W/unpack.json"
+        python3 "$REPO/tools/az01-packer/az01_packer.py" unpack ${ENGINEX_LAB}/fw-5.3.0/PRIME4-5.3.0-Update.img --output "$W/image" > "$W/unpack.json"
     fi
-    python3 "$REPO/tools/ui-mod/build_packs.py" --qrc /root/build/sc5000-lab/5.3.0/qrc --out "$W/packs" > "$W/packs.log"
+    python3 "$REPO/tools/ui-mod/build_packs.py" --qrc ${ENGINEX_LAB}/5.3.0/qrc --out "$W/packs" > "$W/packs.log"
     unshare -m -n -p -f --kill-child "$0" --inner
     exit
 fi

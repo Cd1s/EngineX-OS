@@ -1,4 +1,7 @@
 #!/bin/sh
+migration=${ENGINEX_MIGRATION:-/usr/libexec/enginex-migration}
+[ -f "$migration" ] || migration=$(dirname "$0")/enginex-migration
+. "$migration"
 # Opt-in RK3288 SD High Speed (50 MHz) helper.
 # Sets or clears MMC_CAP_SD_HIGHSPEED (0x4) in /sys/kernel/debug/mmcN/caps
 # for the removable SD card slot (never eMMC or SDIO) and, when a card is
@@ -13,7 +16,7 @@ DBG=${ENGINEX_DEBUGFS_ROOT:-/sys/kernel/debug}
 DEV=${ENGINEX_DEV_ROOT:-/dev}
 RUN=${ENGINEX_RUN_ROOT:-/run/enginex}
 primary_ui=${ENGINEX_PRIMARY_UI_DIR:-/data/enginex/ui}
-legacy_ui=${ENGINEX_LEGACY_UI_DIR:-/data/sc5000-custom/ui}
+legacy_ui=${ENGINEX_LEGACY_UI_DIR:-$legacy_ui}
 UI=${ENGINEX_UI_DIR:-$primary_ui}
 [ -d "$UI" ] || [ ! -d "$legacy_ui" ] || UI=$legacy_ui
 COMPAT=${ENGINEX_DT_COMPAT:-/sys/firmware/devicetree/base/compatible}

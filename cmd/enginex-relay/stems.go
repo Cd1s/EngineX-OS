@@ -2,7 +2,7 @@ package main
 
 // Public entry point for remote Stems rendering. A deck authenticates with the
 // console password; the relay forwards the full-duplex Engine byte stream to
-// the local sc5000-stemsd and presents that daemon's own internal token, which
+// the local enginex-stemsd and presents that daemon's own internal token, which
 // therefore never leaves this host.
 
 import (
@@ -26,9 +26,9 @@ import (
 const (
 	stemsProtocol      = "engine-5.0.4"
 	stemsStatusTrailer = "X-Stems-Status"
-	stemsTokenFile     = "/etc/sc5000-stems/token"
+	stemsTokenFile     = "/etc/enginex-stems/token"
 	// stemsFramingHeader matches internal/stems.FramingHeader: the deck asks
-	// sc5000-stemsd for an in-body closing frame, so it need not see the trailer.
+	// enginex-stemsd for an in-body closing frame, so it need not see the trailer.
 	stemsFramingHeader = "X-Stems-Framing"
 	// stemsCredential is the LoadCredential= name in the systemd drop-in.
 	stemsCredential = "stems-token"
@@ -41,7 +41,7 @@ var (
 )
 
 type stemsProxy struct {
-	target    *url.URL // base URL of sc5000-stemsd, no trailing slash
+	target    *url.URL // base URL of enginex-stemsd, no trailing slash
 	tokenFile string
 	transport http.RoundTripper
 }

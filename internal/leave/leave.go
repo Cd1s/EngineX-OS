@@ -5,13 +5,14 @@
 // /data/.enginex-leave. This release then moves the staged parts in with atomic exchanges
 // (renameat2 RENAME_EXCHANGE): the UI packs and icons, the version files and last the bundle.
 // A release older than 5.3.0.3 (#103) also gets its data directory back as the real
-// /data/sc5000-custom, with /data/enginex as the link. Up to the bundle exchange the live
+// /data/legacy-custom, with /data/enginex as the link. Up to the bundle exchange the live
 // bundle is this release's, and its boot-activate.sh runs Recover at the next boot: a power
 // cut puts back whatever had been swapped. After it the older release is whole.
 // A deck that cannot exchange atomically is not downgraded: nothing is changed.
 package leave
 
 import (
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -31,7 +32,7 @@ import (
 const (
 	journalName = ".enginex-leave"    // under /data: the stage and what a rollback needs
 	markerName  = ".enginex-leave-id" // in each staged part: whose it is, wherever it ends up
-	// Releases before 5.3.0.3 keep their data in the real /data/sc5000-custom (#103).
+	// Releases before 5.3.0.3 keep their data in the real /data/legacy-custom (#103).
 	firstEnginexLayout = "5.3.0.3"
 )
 
@@ -104,9 +105,9 @@ func readLine(p string) (string, error) {
 	return strings.TrimSpace(line), nil
 }
 
-// live is the real data directory: /data/enginex since #103, /data/sc5000-custom before.
+// live is the real data directory: /data/enginex since #103, /data/legacy-custom before.
 func (d Deck) live() (string, error) {
-	for _, n := range []string{"enginex", "sc5000-custom"} {
+	for _, n := range []string{"enginex", migration.DataName} {
 		if ok, err := realDir(d.data(n)); err != nil {
 			return "", err
 		} else if ok {
@@ -325,7 +326,7 @@ func (d Deck) install(target, targetVersion string) error {
 	cmd.Dir = target
 	cmd.Stdout, cmd.Stderr = d.Stdout, d.Stderr
 	cmd.Env = append(withoutDest(os.Environ()),
-		"SC5000_CUSTOM="+stage, "ENGINEX_CUSTOM="+stage, "SC5000_ALSA_OVERLAY="+alsa, "ENGINEX_ALSA_OVERLAY="+alsa)
+		migration.CustomEnv + "="+stage, "ENGINEX_CUSTOM="+stage, migration.AlsaEnv + "="+alsa, "ENGINEX_ALSA_OVERLAY="+alsa)
 	if err := cmd.Run(); err != nil {
 		return fail(fmt.Errorf("the older release's install.sh failed: %w", err))
 	}
@@ -380,7 +381,7 @@ func (d Deck) install(target, targetVersion string) error {
 	// Read the complete commit state before publishing the id or changing live files.
 	linkPresent := false
 	if layout {
-		linkPresent, err = exists(d.data("sc5000-custom"))
+		linkPresent, err = exists(d.data(migration.DataName))
 		if err != nil {
 			return fail(err)
 		}
@@ -427,10 +428,10 @@ func (d Deck) install(target, targetVersion string) error {
 		}
 	}
 
-	// 3. Before 5.3.0.3 the data directory is the real /data/sc5000-custom (#103).
+	// 3. Before 5.3.0.3 the data directory is the real /data/legacy-custom (#103).
 	if layout {
 		crash("layout")
-		link := d.data("sc5000-custom")
+		link := d.data(migration.DataName)
 		if !linkPresent {
 			if err := os.Symlink("enginex", link); err != nil {
 				return err
@@ -443,7 +444,7 @@ func (d Deck) install(target, targetVersion string) error {
 			return putBack(err)
 		}
 		crash("layout-exchanged")
-		if err := relink(d.data("enginex"), "sc5000-custom"); err != nil {
+		if err := relink(d.data("enginex"), migration.DataName); err != nil {
 			return err
 		}
 		live = link
@@ -516,7 +517,7 @@ func withoutDest(env []string) []string {
 	for _, e := range env {
 		k, _, _ := strings.Cut(e, "=")
 		switch k {
-		case "SC5000_CUSTOM", "ENGINEX_CUSTOM", "SC5000_ALSA_OVERLAY", "ENGINEX_ALSA_OVERLAY":
+		case migration.CustomEnv, "ENGINEX_CUSTOM", migration.AlsaEnv, "ENGINEX_ALSA_OVERLAY":
 			continue
 		}
 		out = append(out, e)
@@ -630,7 +631,7 @@ func (d Deck) recover() error {
 	if err != nil {
 		return err
 	}
-	enginex, link := d.data("enginex"), d.data("sc5000-custom")
+	enginex, link := d.data("enginex"), d.data(migration.DataName)
 	reverse, enginePresent := false, false
 	var linkTarget string
 	if layout {
@@ -713,7 +714,7 @@ func (d Deck) recover() error {
 }
 
 // Handback gives the data directory the layout of releases before 5.3.0.3 (the real
-// /data/sc5000-custom, /data/enginex the link to it) and installs nothing. A first-generation
+// /data/legacy-custom, /data/enginex the link to it) and installs nothing. A first-generation
 // deck is flashed in Firmware Update Mode, where nothing of this release runs, and the prepare
 // of 5.3.0.2 refuses the link: run by hand before such a flash (enginex-suite-exec leave layout).
 // Booting this release again instead takes it back (prepare's migration, #234). Each step is
@@ -727,7 +728,7 @@ func (d Deck) Handback() error {
 	if err := d.recover(); err != nil {
 		return err
 	}
-	enginex, link := d.data("enginex"), d.data("sc5000-custom")
+	enginex, link := d.data("enginex"), d.data(migration.DataName)
 	if ok, err := realDir(link); err != nil {
 		return err
 	} else if ok {
@@ -750,13 +751,13 @@ func (d Deck) Handback() error {
 			return err
 		}
 		if target != "enginex" {
-			return fmt.Errorf("/data/sc5000-custom is not EngineX's link (%q), left alone", target)
+			return fmt.Errorf(migration.DataDir + " is not EngineX's link (%q), left alone", target)
 		}
 	}
 	if err := Exchange(enginex, link); err != nil {
 		return ErrNoExchange
 	}
-	return relink(enginex, "sc5000-custom")
+	return relink(enginex, migration.DataName)
 }
 
 // Main is the enginex-suite applet "leave": install <unpacked bundle> | recover | layout.
@@ -780,7 +781,7 @@ func Main(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, "leave: layout:", err)
 			return 1
 		}
-		fmt.Fprintln(stdout, "/data/sc5000-custom is the data directory again: a release before 5.3.0.3 can be flashed now")
+		fmt.Fprintln(stdout, migration.DataDir + " is the data directory again: a release before 5.3.0.3 can be flashed now")
 		return 0
 	case len(args) == 2 && args[0] == "install":
 		target := args[1]

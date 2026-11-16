@@ -274,7 +274,7 @@ func TestEmptyTokenFileFlagEnablesZeroConfigLANListen(t *testing.T) {
 func TestResolveWorkerPathKeepsLegacyInstallation(t *testing.T) {
 	root := t.TempDir()
 	current := filepath.Join(root, "enginex-stems", "worker.py")
-	legacy := filepath.Join(root, "sc5000-stems", "worker.py")
+	legacy := filepath.Join(root, "enginex-stems", "worker.py")
 	for _, path := range []string{legacy, current} {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatal(err)

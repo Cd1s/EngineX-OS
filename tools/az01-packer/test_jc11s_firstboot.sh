@@ -52,7 +52,7 @@ chroot "$TARGET" /sbin/az0x-data-mkfs > "$WORK/jc11s-existing.log" 2>&1
 mount "$LOOP" "$TARGET/data"
 test -f "$TARGET/data/Music/user_track.flac"
 test -f "$TARGET/data/enginex/bundle/boot-activate.sh"
-test -f "$TARGET/data/system/var/overlay/lib/alsa/conf.d/99-sc5000-custom.conf"
+test -f "$TARGET/data/system/var/overlay/lib/alsa/conf.d/99-enginex.conf"
 
 # Run the actual stock fscrypt implementation and encrypt-fs.sh. Reset/reboot
 # paths are blocked in this namespace, including Reporter's absolute path.
@@ -63,6 +63,6 @@ for name in downloads stems; do
     chroot "$TARGET" /bin/sh -c 'fscryptctl get_policy "$1"' sh "/data/$name" >> "$WORK/jc11s-encrypt.log"
 done
 test -f "$TARGET/data/Music/user_track.flac"
-test -f "$TARGET/data/sc5000-custom/bundle/boot-activate.sh"
-test -f "$TARGET/data/system/var/overlay/lib/alsa/conf.d/99-sc5000-custom.conf"
+test -f "$TARGET/data/enginex-custom/bundle/boot-activate.sh"
+test -f "$TARGET/data/system/var/overlay/lib/alsa/conf.d/99-enginex.conf"
 echo '  JC11S stock mkfs (blank/existing) and fscrypt first boot: PASS'

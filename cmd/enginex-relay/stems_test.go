@@ -35,7 +35,7 @@ func TestStemsWorker(t *testing.T) {
 	os.Exit(0)
 }
 
-// stemsFixture is deck client -> relay -> sc5000-stemsd -> worker.
+// stemsFixture is deck client -> relay -> enginex-stemsd -> worker.
 type stemsFixture struct {
 	relay   *httptest.Server
 	backend *stems.Backend
@@ -88,7 +88,7 @@ printf 'returnFrames=0\n\n'`}
 // then the closing frame, through both URL prefixes, without the upload ending.
 func TestStemsRelayFullDuplex(t *testing.T) {
 	f := newStemsFixture(t, shellProtocolWorker)
-	for i, base := range []string{f.relay.URL, f.relay.URL + "/sc5000/"} {
+	for i, base := range []string{f.relay.URL, f.relay.URL + "/enginex/"} {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		in, send := io.Pipe()
 		out, receive := io.Pipe()

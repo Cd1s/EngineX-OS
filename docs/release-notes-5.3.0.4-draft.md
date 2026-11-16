@@ -82,7 +82,7 @@ Custom system rebuilt on the official Engine OS 5.3.0+ base for all 16 Denon DJ,
 - **`Waveform Style` `3-Band` and `Layer A / Layer B` stay in English**: Displayed as `3-Band`, `Layer A`, and `Layer B` in Simplified Chinese, Traditional Chinese, and English.
 - **Standalone DMX512 moved out of core OS (`#134`)**: Multi-universe USB / Art-Net / sACN DMX lighting now ships as the optional `dmx-studio` Mod (`1.1.0`, zero memory or background processes when disabled). Stock **Engine Lighting** remains untouched and off by default.
 - **Python removed from official Mods (`#208`)**: Official Mods (`1.1.0`) use static Go helpers instead of Python; custom Mods with helpers must ship static `armv7` / `arm64` binaries.
-- **Menu & runtime tidy-up**: `Live Stream` lives under `Settings → Services` (removed from the Control Center to prevent accidental mid-set taps), `Waveform Style` is no longer duplicated under `Layout`, and runtime files live under `/data/enginex` (with `/data/sc5000-custom` kept as a compatibility symlink).
+- **Menu & runtime tidy-up**: `Live Stream` lives under `Settings → Services` (removed from the Control Center to prevent accidental mid-set taps), `Waveform Style` is no longer duplicated under `Layout`, and runtime files live under `/data/enginex` (with `/data/enginex-custom` kept as a compatibility symlink).
 
 ---
 

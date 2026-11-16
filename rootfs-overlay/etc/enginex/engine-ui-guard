@@ -1,8 +1,11 @@
 #!/bin/sh
+migration=${ENGINEX_MIGRATION:-/usr/libexec/enginex-migration}
+[ -f "$migration" ] || migration=$(dirname "$0")/enginex-migration
+. "$migration"
 # The existing safe-mode marker now means a persistent, hook-free stock boot.
 # Only a rendered main view may acknowledge an attempt; uptime is not health.
 primary_ui=${ENGINEX_PRIMARY_UI_DIR:-/data/enginex/ui}
-legacy_ui=${ENGINEX_LEGACY_UI_DIR:-/data/sc5000-custom/ui}
+legacy_ui=${ENGINEX_LEGACY_UI_DIR:-$legacy_ui}
 UI=${ENGINEX_UI_DIR:-$primary_ui}
 [ -d "$UI" ] || [ ! -d "$legacy_ui" ] || UI=$legacy_ui
 guardian=${ENGINEX_ENGINE_GUARDIAN:-/usr/local/bin/engine-guardian}
@@ -68,7 +71,7 @@ begin_attempt() {
 stick_path() {
     file=$(cat "$1" 2>/dev/null) || return 0
     for view in "${ENGINEX_HFS_VIEWS:-/run/enginex-hfs-views}"/view-*/view \
-        "${ENGINEX_LEGACY_HFS_VIEWS:-/run/sc5000-hfs-views}"/view-*/view; do
+        "${ENGINEX_LEGACY_HFS_VIEWS:-$legacy_hfs}"/view-*/view; do
         dir=$file
         while [ "$dir" != "${dir%/*}" ]; do
             dir=${dir%/*}

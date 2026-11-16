@@ -1,4 +1,6 @@
 #!/bin/bash
+. "${ENGINEX_MIGRATION:-$(git rev-parse --show-toplevel)/rootfs-overlay/usr/libexec/enginex-migration}"
+ENGINEX_LAB=${ENGINEX_LAB:-$legacy_lab}
 # Sandbox boot test for NTP sync (with Google NTP unreachable), persistent clock
 # floor + daemon advancement outside Engine, and QML + stream-sync + prepare
 # time zone capture/retention across both auto-detected and manual changes,
@@ -10,7 +12,7 @@ export LC_ALL=C
 
 SELF=$(realpath "$0")
 REPO=$(cd "$(dirname "$SELF")/../.." && pwd)
-LAB=${ENGINEX_LAB_DIR:-/root/build/sc5000-lab}
+LAB=${ENGINEX_LAB_DIR:-${ENGINEX_LAB}}
 IMG=${ENGINEX_530_IMAGE:-$LAB/fw-5.3.0/SC5000-5.3.0-Update.img}
 TARGET_EPOCH=1805112000 # 2027-03-15T12:00:00Z (> host clock & > 2026-10-30 build date)
 BUILD_EPOCH=1793360489  # 2026-10-30T11:41:29Z (/etc/timestamp in SC5000 5.3.0)
@@ -37,7 +39,7 @@ CAPPY
     R=$W/root
     DATA=$W/data
     mkdir -p "$R" "$DATA/system/var/overlay/lib" "$DATA/enginex/ui/packs" "$DATA/enginex/state"
-    ln -sfn enginex "$DATA/sc5000-custom"
+    ln -sfn enginex "$DATA/enginex-custom"
     mount -o loop,ro "$W/rootfs.ext2" "$R"
 
     ACTUAL_TS=$(stat -c %Y "$R/etc/timestamp")

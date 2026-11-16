@@ -18,7 +18,7 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	at := func(parts ...string) string { return filepath.Join(append([]string{dir}, parts...)...) }
-	uiScaleEnvPath = at("data", "sc5000-custom", "ui-scale.env")
+	uiScaleEnvPath = at("data", "enginex-custom", "ui-scale.env")
 	sshPortDropInPath = at("etc", "systemd", "system", "sshd.service.d", "51-port.conf")
 	sshRunDropInPath = at("run", "systemd", "system", "sshd.service.d", "51-port.conf")
 	gen1SSHDropInPath = at("etc", "systemd", "system", "enginex-sshd.service.d", "51-port.conf")

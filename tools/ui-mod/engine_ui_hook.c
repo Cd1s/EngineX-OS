@@ -1,3 +1,4 @@
+#include "../legacy_names.h"
 // LD_PRELOAD hook for /usr/Engine/Engine.
 //
 // Engine registers its QML through qRegisterResourceData. This hook swaps
@@ -3279,7 +3280,7 @@ static int raw_access(const char *path, int mode) {
     return real ? real(path, mode) : -1;
 }
 
-// The bundle lives in /data/enginex (#103); /data/sc5000-custom is the compat link to it, or
+// The bundle lives in /data/enginex (#103); /data/enginex-custom is the compat link to it, or
 // the real directory on a deck the first boot has not migrated yet (BH-GF4-4).
 #ifndef STEMS_ENGINEX_PROCESSOR
 #define STEMS_ENGINEX_PROCESSOR "/data/enginex/bundle/stems-processor"
@@ -3288,10 +3289,10 @@ static int raw_access(const char *path, int mode) {
 #define STEMS_ENGINEX_BIN_PROCESSOR "/data/enginex/bundle/bin/stems-processor"
 #endif
 #ifndef STEMS_BUNDLE_PROCESSOR
-#define STEMS_BUNDLE_PROCESSOR "/data/sc5000-custom/bundle/stems-processor"
+#define STEMS_BUNDLE_PROCESSOR LEGACY_BUNDLE_PROCESSOR
 #endif
 #ifndef STEMS_BUNDLE_BIN_PROCESSOR
-#define STEMS_BUNDLE_BIN_PROCESSOR "/data/sc5000-custom/bundle/bin/stems-processor"
+#define STEMS_BUNDLE_BIN_PROCESSOR LEGACY_BUNDLE_BIN_PROCESSOR
 #endif
 
 static const char *stems_processor_path(const char *path) {
@@ -3405,7 +3406,7 @@ int pthread_getaffinity_np(pthread_t thread, size_t cpusetsize, cpu_set_t *cpuse
 // #61 / #67: One-shot ALSA boot loader for SC LIVE 4 (inmusic,jp21) and devices
 // with read-only root filesystems where LD_PRELOAD cannot be placed in rootfs.
 __attribute__((visibility("default")))
-int sc5000_alsa_boot_hook(void *root, void *config, void **dst, void *private_data) {
+int enginex_alsa_boot_hook(void *root, void *config, void **dst, void *private_data) {
     (void)root;
     (void)config;
     (void)private_data;
@@ -3429,11 +3430,11 @@ int sc5000_alsa_boot_hook(void *root, void *config, void **dst, void *private_da
             if (devnull > 2) close(devnull);
         }
         unsetenv("LD_PRELOAD");
-        // The ALSA file loaded this hook through /data/sc5000-custom: its boot-activate.sh is
+        // The ALSA file loaded this hook through /data/enginex-custom: its boot-activate.sh is
         // reachable there too while /data/enginex is a dangling link, for the moment a downgrade
         // to a release before 5.3.0.3 hands the directory back (#234, internal/leave).
         const char *activate = "/data/enginex/bundle/boot-activate.sh";
-        if (access(activate, R_OK) != 0) activate = "/data/sc5000-custom/bundle/boot-activate.sh";
+        if (access(activate, R_OK) != 0) activate = LEGACY_BOOT_ACTIVATE;
         char *const argv[] = {"/bin/sh", (char *)activate, NULL};
         execv("/bin/sh", argv);
         _exit(1);
@@ -3442,14 +3443,14 @@ int sc5000_alsa_boot_hook(void *root, void *config, void **dst, void *private_da
 }
 
 __attribute__((visibility("default")))
-int snd_config_hook_sc5000_alsa_boot_hook(void *root, void *config, void **dst, void *private_data) {
-    return sc5000_alsa_boot_hook(root, config, dst, private_data);
+int snd_config_hook_enginex_alsa_boot_hook(void *root, void *config, void **dst, void *private_data) {
+    return enginex_alsa_boot_hook(root, config, dst, private_data);
 }
 
 __attribute__((used, visibility("default")))
-const char _sc5000_alsa_boot_hook_dlsym_config_hook_001[] = "ALSA_0.9";
+const char _enginex_alsa_boot_hook_dlsym_config_hook_001[] = "ALSA_0.9";
 __attribute__((used, visibility("default")))
-const char _snd_config_hook_sc5000_alsa_boot_hook_dlsym_config_hook_001[] = "ALSA_0.9";
+const char _snd_config_hook_enginex_alsa_boot_hook_dlsym_config_hook_001[] = "ALSA_0.9";
 
 // ---- #119: second-generation *-Update.img (EngineX data bundle in an image-shaped file) ----
 //
@@ -3725,7 +3726,7 @@ int az01_apply_image(const char *path, int flags) {
         // Without the step (a release before 5.3.0.5 runs this hook) the bundle installs in place.
         static const char script[] =
             "set -e; d=\"${2:-" ENGINEX_DATA_DIR "}\"; "
-            "[ -z \"$2\" ] || export ENGINEX_CUSTOM=\"$d\" ENGINEX_ALSA_OVERLAY=\"$d/alsa-conf.d\" SC5000_CUSTOM=\"$d\" SC5000_ALSA_OVERLAY=\"$d/alsa-conf.d\"; "
+            "[ -z \"$2\" ] || export ENGINEX_CUSTOM=\"$d\" ENGINEX_ALSA_OVERLAY=\"$d/alsa-conf.d\"" LEGACY_INSTALL_ENV ""
             "mkdir -p \"$d\"; w=$(mktemp -d \"$d/.ota-img.XXXXXX\"); trap 'rm -rf \"$w\"' 0; "
             "tail -c +129 \"$1\" | tar -xzf - -C \"$w\"; t=$(echo \"$w\"/*); "
             "if [ -f \"$3\" ]; then sh \"$3\" --install \"$t\" --no-reboot; else sh \"$t\"/install.sh; fi";
@@ -3789,7 +3790,7 @@ static int rm_tree(int parent, const char *name, dev_t root_dev) {
 
 // Factory Reset on a /data-bundle deck: wipes the user's data and EngineX's own settings but keeps
 // the installed bundle, UI packs, version, unlock flag, SSH keys and /data/system, so EngineX OS
-// survives. /data/enginex and the /data/sc5000-custom compat symlink are never removed.
+// survives. /data/enginex and the /data/enginex-custom compat symlink are never removed.
 // ENGINEX_TEST_DATA_ROOT redirects /data (and skips the reboot) for the unit test.
 __attribute__((visibility("default")))
 int az01_erase_data_partition(void) {
@@ -3813,7 +3814,7 @@ int az01_erase_data_partition(void) {
     if (fstat(rootfd, &root_st) != 0) { close(rootfd); return -1; }
     DIR *d = fdopendir(rootfd);
     if (!d) { close(rootfd); return -1; }
-    static const char *const keep[] = {"enginex", "system", "sc5000-custom", "lost+found"};
+    static const char *const keep[] = {"enginex", "system", LEGACY_DATA_NAME, "lost+found"};
     int failed = 0;
     struct dirent *e;
     while ((e = readdir(d)) != NULL) {
@@ -3846,3 +3847,6 @@ int az01_erase_data_partition(void) {
     else sync();
     return 0;
 }
+
+#define ENGINEX_EXPORT_LEGACY_ALSA
+#include "../legacy_names.h"

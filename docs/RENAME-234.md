@@ -1,3 +1,28 @@
+# EngineX naming (#234, 5.3.0.5)
+
+Current commands, units, environment variables, host names and API callers use
+`enginex` / `ENGINEX_*`. The relay command is `cmd/enginex-relay`; deployments
+use the units documented under `deploy/`. Current clients use `/v1/enginex/`.
+
+Compatibility readers are isolated in `internal/migration/legacy.go`,
+`rootfs-overlay/usr/libexec/enginex-migration`,
+`tools/az01-packer/legacy_names.py` and `tools/legacy_names.h`.
+The old API alias and data compatibility link remain pending a maintainer
+choice. Their exact names appear only in the migration readers below.
+
+`tools/az01-packer/test_rename234_names.py` checks all tracked text and paths,
+including tests and current documentation, against
+`tools/az01-packer/rename234_allowlist.json`. Hardware model names, frozen
+historical records and the separately owned Mods tree have explicit reasons.
+
+The data transaction and power-loss guarantees described below remain in force.
+
+## History (initial rename)
+
+This section records the initial sweep's compatibility inventory; current
+writers use the names above. Historical references below are retained pending
+the maintainer's decision.
+
 # sc5000 → enginex rename (#234, 5.3.0.5)
 
 From 5.3.0.5 everything EngineX OS installs or runs carries the EngineX name. Old names keep

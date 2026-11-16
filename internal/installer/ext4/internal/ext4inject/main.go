@@ -10,6 +10,7 @@
 package main
 
 import (
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
@@ -233,7 +234,7 @@ func inject(args []string) error {
 	for _, f := range []struct {
 		name string
 		mode uint32
-	}{{"boot-activate.sh", 0o755}, {"99-sc5000-custom.conf", 0o644}, {"99-enginex.conf", 0o644},
+	}{{"boot-activate.sh", 0o755}, {migration.AlsaFile, 0o644}, {"99-enginex.conf", 0o644},
 		{"install.sh", 0o755}, {"uninstall.sh", 0o755}, {"version.txt", 0o644}, {"release-tag", 0o644},
 		{"model", 0o644}, {"alsa-dir", 0o644}, {"SHA256SUMS", 0o644}} {
 		if b, ok := get(f.name); ok {
@@ -269,7 +270,7 @@ func inject(args []string) error {
 		}
 		cs.Files = append(cs.Files, entry(root+"/authorized_keys", 0o600, b))
 	}
-	for _, name := range []string{"99-sc5000-custom.conf", "99-enginex.conf"} {
+	for _, name := range []string{migration.AlsaFile, "99-enginex.conf"} {
 		if b, ok := get(name); ok {
 			for _, d := range alsaDirs {
 				cs.Files = append(cs.Files, entry(d+"/"+name, 0o644, b))

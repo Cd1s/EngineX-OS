@@ -32,8 +32,8 @@ func mdnsLabels(b []byte, labels ...string) []byte {
 }
 
 // spotifyMDNSHost is the SRV target and A record name: never the system host
-// name, which avahi-daemon owns. Every deck is "sc5000", and our cache-flush A
-// record for sc5000.local made avahi on both decks loop on "Host name conflict"
+// name, which avahi-daemon owns. Every deck is "legacy", and our cache-flush A
+// record for legacy.local made avahi on both decks loop on "Host name conflict"
 // (every 20 s), which also broke Engine Link's discovery. One per deck, by MAC.
 func spotifyMDNSHost() string {
 	ifs, _ := net.Interfaces()

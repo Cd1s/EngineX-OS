@@ -3,6 +3,7 @@ package webui
 // Real TIDAL credentials live independently of Engine's shared gateway account.
 // Engine may replace that account with local tokens when another source opens.
 import (
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -27,7 +28,7 @@ type tidalAuth struct {
 
 func isSyntheticTidalToken(tok string) bool {
 	switch strings.TrimSpace(tok) {
-	case "", "enginex", "enginex-token", "enginex-refresh", "sc5000-token", "sc5000-refresh":
+	case "", "enginex", "enginex-token", "enginex-refresh", migration.Token, migration.RefreshToken:
 		return true
 	}
 	return false

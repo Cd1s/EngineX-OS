@@ -1,6 +1,6 @@
 {
   "provenance": "Independent read-only ELF32 program-header inspection, not an REA observation",
-  "source_file": "/root/build/sc5000-lab/5.0.4/tree/usr/Engine/Engine",
+  "source_file": "<firmware-lab>/5.0.4/tree/usr/Engine/Engine",
   "source_sha256": "e1eb0e2b858880016daa3ad14538426204f8e698d855a274aebc924a5f9a5caa",
   "ghidra_session_image_base": "0x10000",
   "original_elf_image_base": "0x0",

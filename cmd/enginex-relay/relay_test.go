@@ -70,7 +70,7 @@ func do(h http.Handler, method, target string, body string, hdr map[string]strin
 
 func TestCredentialOnlyEndpoints(t *testing.T) {
 	h := newTestServer(t).routes()
-	for _, prefix := range []string{"", "/sc5000"} {
+	for _, prefix := range []string{"", "/enginex"} {
 		for _, p := range []string{"/api/audio", "/api/download", "/api/download-stream", "/api/queue", "/api/download/job"} {
 			for _, method := range []string{"GET", "POST", "PUT"} {
 				w := do(h, method, prefix+p, "", nil)
@@ -128,8 +128,8 @@ func TestLoginCookieAndPasswordChange(t *testing.T) {
 	if w := do(h, "GET", "/api/config", "", hdr); w.Code != 200 || !strings.Contains(w.Body.String(), `"passwordIsDefault":false`) {
 		t.Fatalf("cookie auth: %d %s", w.Code, w.Body)
 	}
-	if w := do(h, "GET", "/sc5000/", "", hdr); !strings.Contains(w.Body.String(), "EngineX OS 控制台") {
-		t.Fatal("panel expected under /sc5000/")
+	if w := do(h, "GET", "/enginex/", "", hdr); !strings.Contains(w.Body.String(), "EngineX OS 控制台") {
+		t.Fatal("panel expected under /enginex/")
 	}
 	hdr["Content-Type"] = "application/json"
 	if w := do(h, "POST", "/api/config", `{"currentPassword":"nope","newPassword":"another-pass-1"}`, hdr); w.Code != 403 {
@@ -164,7 +164,7 @@ func TestSessionFlowBothPrefixes(t *testing.T) {
 	s := newTestServer(t)
 	h := s.routes()
 	tok := "abcdefghijklmnop1234"
-	w := do(h, "POST", "/sc5000/api/relay/session", `{"token":"`+tok+`","provider":"spotify","spotifyClientId":""}`, nil)
+	w := do(h, "POST", "/enginex/api/relay/session", `{"token":"`+tok+`","provider":"spotify","spotifyClientId":""}`, nil)
 	var cr struct {
 		OK  bool
 		URL string
@@ -186,11 +186,11 @@ func TestSessionFlowBothPrefixes(t *testing.T) {
 		!strings.Contains(w.Body.String(), "127.0.0.1%3a8080") && !strings.Contains(w.Body.String(), "127.0.0.1%3A8080") {
 		t.Fatalf("spotify page: %d", w.Code)
 	}
-	if pr := poll("/sc5000"); pr.Status != "scanned" {
+	if pr := poll("/enginex"); pr.Status != "scanned" {
 		t.Fatalf("after scan: %+v", pr)
 	}
 	// Stateless fallback: unregistered token opened by phone.
-	if w := do(h, "GET", "/sc5000/m/spotify?manual=1&t=testtoken1234567890", "", nil); w.Code != 200 || !strings.Contains(w.Body.String(), testSpotifyClientID) {
+	if w := do(h, "GET", "/enginex/m/spotify?manual=1&t=testtoken1234567890", "", nil); w.Code != 200 || !strings.Contains(w.Body.String(), testSpotifyClientID) {
 		t.Fatalf("fallback page: %d", w.Code)
 	}
 	if w := do(h, "GET", "/m/deezer?t=short", "", nil); w.Code != 400 {

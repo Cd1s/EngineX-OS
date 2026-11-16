@@ -31,7 +31,7 @@ import (
 const (
 	defaultStateDir    = "/data/enginex/state"
 	defaultDownloadDir = "/data/enginex/Stream"
-	sdDownloadDir      = "/media/sc5000-sd-cache/Music/Stream"
+	sdDownloadDir      = "/media/enginex-sd-cache/Music/Stream"
 	defaultRelay       = ""
 	defaultPassword    = "change-me-in-config"
 	maxJobs            = 200

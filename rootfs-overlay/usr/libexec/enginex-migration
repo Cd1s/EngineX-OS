@@ -1,0 +1,63 @@
+#!/bin/sh
+# Legacy release readers and rollback support; source without changing the deck.
+legacy_data='/data/sc5000-custom' # Legacy release reader.
+legacy_ui='/data/sc5000-custom/ui' # Legacy release reader.
+legacy_hfs='/run/sc5000-hfs-views' # Legacy release reader.
+legacy_suite='sc5000-suite' # Legacy release reader.
+legacy_deemix='sc5000-deemixd' # Legacy release reader.
+legacy_alsa='99-sc5000-custom.conf' # Legacy release reader.
+legacy_dropin='99-sc5000.conf' # Legacy release reader.
+legacy_deemix_unit='enginex-sc5000-deemixd.service' # Legacy release reader.
+legacy_etc='/etc/sc5000' # Legacy release reader.
+legacy_run='/run/sc5000' # Legacy release reader.
+legacy_engine_mount='/sc5000-engine-script' # Old Engine-script bind source.
+legacy_engine_script='/run/sc5000-engine-script' # Legacy release reader.
+legacy_boot_converted='/run/sc5000-boot-converted' # Legacy release reader.
+legacy_tz_newer='/run/sc5000-tz-newer' # Legacy release reader.
+legacy_assignments='/run/sc5000-assignments' # Legacy release reader.
+legacy_stemsd='sc5000-stemsd' # Legacy release reader.
+legacy_relay='sc5000-relay' # Legacy release reader.
+legacy_lab='/root/build/sc5000-lab' # Legacy release reader.
+legacy_api='/v1/sc5000' # Legacy release reader.
+legacy_share='/usr/share/sc5000-custom' # Legacy release reader.
+legacy_libexec='/usr/libexec/sc5000-custom' # Legacy release reader.
+legacy_bin='/usr/local/bin/sc5000' # Legacy release reader.
+legacy_unit='sc5000' # Legacy release reader.
+legacy_packer='sc5000-custom*' # Legacy release reader.
+# Read environment overrides passed by older updaters.
+ENGINEX_CUSTOM=${ENGINEX_CUSTOM:-${SC5000_CUSTOM:-}}
+ENGINEX_ALSA_OVERLAY=${ENGINEX_ALSA_OVERLAY:-${SC5000_ALSA_OVERLAY:-}}
+legacy_stemsd_override=${SC5000_STEMSD:-}
+legacy_relay_override=${SC5000_RELAY:-}
+
+migrate_data() {
+# /data/sc5000-custom became /data/enginex (#103): one rename keeps every file, and a
+# symlink keeps the old path working for older scripts and for a rollback.
+old=$legacy_data
+new=/data/enginex
+if [ -d "$old" ] && [ ! -L "$old" ]; then
+    # A downgrade to a release before 5.3.0.3 handed the real directory back and left enginex as
+    # the link to it (#234, internal/leave): that link goes, the directory moves back.
+    case $(readlink "$new" 2>/dev/null) in
+    "${legacy_data##*/}" | "$legacy_data" | enginex) rm -f "$new" ;;
+    esac
+    if [ ! -e "$new" ] && [ ! -L "$new" ]; then
+        mv "$old" "$new"
+    elif [ -d "$new" ] && [ ! -L "$new" ]; then
+        # Both are real: move over what enginex lacks, set the remainder aside.
+        for e in "$old"/* "$old"/.[!.]*; do
+            [ -e "$e" ] || [ -L "$e" ] || continue
+            [ -e "$new/${e##*/}" ] || [ -L "$new/${e##*/}" ] || mv "$e" "$new/"
+        done
+        rmdir "$old" 2>/dev/null || mv "$old" "$new/legacy-sc5000-custom.$$"
+    fi
+fi
+[ -e "$new" ] || [ -L "$new" ] || mkdir -p "$new"
+{ [ -d "$old" ] && [ ! -L "$old" ]; } || ln -sfn enginex "$old"
+}
+
+# Server migration inputs; read only by the documented operator procedure.
+legacy_relay_unit='sc5000-deemix-relay.service'
+legacy_relay_state='/var/lib/sc5000-relay'
+legacy_stems_config='/etc/sc5000-stems'
+legacy_stems_code='/opt/sc5000-stems'

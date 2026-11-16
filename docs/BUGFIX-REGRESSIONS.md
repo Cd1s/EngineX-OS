@@ -1,6 +1,6 @@
 # 17 项 Bug 修复与回归验收
 
-所有验证在 IN 的 `/root/build/sc5000-custom-os` 执行；未读取禁止访问的固件树，未 push。
+所有验证在 IN 的 `/root/build/enginex-custom-os` 执行；未读取禁止访问的固件树，未 push。
 
 | 项 | 修复 | 回归覆盖 |
 | --- | --- | --- |

@@ -1,6 +1,7 @@
 package leave
 
 import (
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"archive/tar"
 	"bytes"
 	"crypto/sha256"
@@ -36,7 +37,7 @@ func newDeck(t *testing.T) (Deck, string) {
 	} {
 		write(t, filepath.Join(d, p), c)
 	}
-	if err := os.Symlink("enginex", filepath.Join(root, "data/sc5000-custom")); err != nil {
+	if err := os.Symlink("enginex", filepath.Join(root, migration.DataRelative)); err != nil {
 		t.Fatal(err)
 	}
 	write(t, filepath.Join(root, "data/AppDataUser/AIR Music Technology/Engine/.cache/qml/x.qmlc"), "stale")
@@ -66,7 +67,7 @@ func legacyBundle(t *testing.T, version string) string {
 	}
 	write(t, filepath.Join(dir, "version.txt"), version+"\n")
 	write(t, filepath.Join(dir, "alsa-dir"), "system/var/overlay/lib/alsa/conf.d\n")
-	write(t, filepath.Join(dir, "99-sc5000-custom.conf"), "alsa conf\n")
+	write(t, filepath.Join(dir, migration.AlsaFile), "alsa conf\n")
 	write(t, filepath.Join(dir, "bin/stream-sync"), "suite "+version)
 	write(t, filepath.Join(dir, "lib/libengine-ui-hook.so"), "hook "+version)
 	var b bytes.Buffer
@@ -141,9 +142,9 @@ func diff(a, b map[string]string) string {
 	return strings.Join(out, "\n")
 }
 
-// #234 review R1: the published 5.3.0.2 install.sh refuses the /data/sc5000-custom link every
+// #234 review R1: the published 5.3.0.2 install.sh refuses the /data/legacy-custom link every
 // release since 5.3.0.3 keeps. The older release now gets its layout back: the real
-// /data/sc5000-custom with every file, /data/enginex the link, and its own installer accepts it.
+// /data/legacy-custom with every file, /data/enginex the link, and its own installer accepts it.
 func TestLeaveInstallsGenuine5302AndHandsBackItsLayout(t *testing.T) {
 	d, root := newDeck(t)
 	target := legacyBundle(t, "5.3.0.2")
@@ -153,12 +154,12 @@ func TestLeaveInstallsGenuine5302AndHandsBackItsLayout(t *testing.T) {
 	if err := d.Install(target); err != nil {
 		t.Fatal(err)
 	}
-	old := filepath.Join(root, "data/sc5000-custom")
+	old := filepath.Join(root, migration.DataRelative)
 	if st, err := os.Lstat(old); err != nil || !st.IsDir() {
-		t.Fatalf("/data/sc5000-custom is not the real directory: %v", err)
+		t.Fatalf(migration.DataDir + " is not the real directory: %v", err)
 	}
-	if l, err := os.Readlink(filepath.Join(root, "data/enginex")); err != nil || l != "sc5000-custom" {
-		t.Fatalf("/data/enginex: %q %v, want the link to sc5000-custom", l, err)
+	if l, err := os.Readlink(filepath.Join(root, "data/enginex")); err != nil || l != migration.DataName {
+		t.Fatalf("/data/enginex: %q %v, want the link to " + migration.DataName, l, err)
 	}
 	for p, want := range map[string]string{
 		"version.txt": "5.3.0.2\n", "bundle/version.txt": "5.3.0.2\n", "bundle/lib/libengine-ui-hook.so": "hook 5.3.0.2",
@@ -185,7 +186,7 @@ func TestLeaveInstallsGenuine5302AndHandsBackItsLayout(t *testing.T) {
 		}
 		cmd := exec.Command("sh", filepath.Join(dir, s))
 		cmd.Dir = target
-		cmd.Env = append(os.Environ(), "SC5000_CUSTOM="+old, "SC5000_ALSA_OVERLAY="+filepath.Join(root, "alsa"))
+		cmd.Env = append(os.Environ(), migration.CustomEnv + "="+old, migration.AlsaEnv + "="+filepath.Join(root, "alsa"))
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("genuine 5.3.0.2 %s on the handed-back layout: %v\n%s", s, err, out)
 		}
@@ -198,8 +199,8 @@ func TestLeaveInstallsGenuine5303InTheEnginexLayout(t *testing.T) {
 	if err := d.Install(legacyBundle(t, "5.3.0.3")); err != nil {
 		t.Fatal(err)
 	}
-	if l, err := os.Readlink(filepath.Join(root, "data/sc5000-custom")); err != nil || l != "enginex" {
-		t.Fatalf("/data/sc5000-custom: %q %v", l, err)
+	if l, err := os.Readlink(filepath.Join(root, migration.DataRelative)); err != nil || l != "enginex" {
+		t.Fatalf(migration.DataDir + ": %q %v", l, err)
 	}
 	live := filepath.Join(root, "data/enginex")
 	for p, want := range map[string]string{"version.txt": "5.3.0.3\n", "bundle/version.txt": "5.3.0.3\n",
@@ -232,7 +233,7 @@ func cutAt(t *testing.T, d Deck, target, step string) {
 // #234 review R2: the published installers of 5.3.0.2 and 5.3.0.3 park the bundle and move the
 // new one in with two renames, and nothing can put it back after a cut between them. Now the
 // older installer only fills a stage. A cut at any step leaves a whole bundle at the path ALSA
-// loads (/data/sc5000-custom/bundle/lib) and a boot-activate.sh the hook can start; before the
+// loads (/data/legacy-custom/bundle/lib) and a boot-activate.sh the hook can start; before the
 // commit, this release's boot-activate.sh puts every part back (Recover) and the deck is as it was.
 func TestLeaveCutAtEveryStepLeavesOneWholeRelease(t *testing.T) {
 	for _, version := range []string{"5.3.0.2", "5.3.0.3"} {
@@ -246,10 +247,10 @@ func TestLeaveCutAtEveryStepLeavesOneWholeRelease(t *testing.T) {
 				before := snapshot(t, root)
 				delete(before, "enginex/ui/safe-mode") // the older release gets one fresh try either way
 				cutAt(t, d, legacyBundle(t, version), step)
-				hook := read(t, filepath.Join(root, "data/sc5000-custom/bundle/lib/libengine-ui-hook.so"))
+				hook := read(t, filepath.Join(root, migration.DataRelative + "/bundle/lib/libengine-ui-hook.so"))
 				boot := filepath.Join(root, "data/enginex/bundle/boot-activate.sh")
 				if !testExists(boot) {
-					boot = filepath.Join(root, "data/sc5000-custom/bundle/boot-activate.sh") // the hook's fallback
+					boot = filepath.Join(root, migration.DataRelative + "/bundle/boot-activate.sh") // the hook's fallback
 				}
 				if !testExists(boot) {
 					t.Fatalf("no boot-activate.sh the hook can start")
@@ -368,7 +369,7 @@ func TestLeaveAppletInstallsNewerInPlace(t *testing.T) {
 }
 
 // #234 review R1, first generation: Firmware Update Mode flashes 5.3.0.2 with nothing of this
-// release running, and that release's prepare refuses the /data/sc5000-custom link. The hand-run
+// release running, and that release's prepare refuses the /data/legacy-custom link. The hand-run
 // layout step gives it the real directory first; run twice it changes nothing more.
 func TestLeaveLayoutHandsBackWithoutInstalling(t *testing.T) {
 	_, root := newDeck(t)
@@ -380,21 +381,21 @@ func TestLeaveLayoutHandsBackWithoutInstalling(t *testing.T) {
 			t.Fatalf("code %d: %s", code, out.String())
 		}
 	}
-	if l, err := os.Readlink(filepath.Join(root, "data/enginex")); err != nil || l != "sc5000-custom" {
+	if l, err := os.Readlink(filepath.Join(root, "data/enginex")); err != nil || l != migration.DataName {
 		t.Fatalf("/data/enginex: %q %v", l, err)
 	}
 	after := map[string]string{}
 	for k, v := range snapshot(t, root) {
-		after[strings.Replace(k, "sc5000-custom/", "enginex/", 1)] = v
+		after[strings.Replace(k, migration.DataName + "/", "enginex/", 1)] = v
 	}
-	delete(before, "sc5000-custom")
+	delete(before, migration.DataName)
 	delete(after, "enginex")
 	if dd := diff(before, after); dd != "" {
 		t.Fatalf("files changed:\n%s", dd)
 	}
-	// The prepare of 5.3.0.2 refuses exactly this: a link at /data/sc5000-custom.
-	if st, err := os.Lstat(filepath.Join(root, "data/sc5000-custom")); err != nil || !st.IsDir() {
-		t.Fatal("/data/sc5000-custom is not a real directory")
+	// The prepare of 5.3.0.2 refuses exactly this: a link at /data/legacy-custom.
+	if st, err := os.Lstat(filepath.Join(root, migration.DataRelative)); err != nil || !st.IsDir() {
+		t.Fatal(migration.DataDir + " is not a real directory")
 	}
 }
 
@@ -587,7 +588,7 @@ func TestLeaveRollbackRetryDoesNotSkipAFailedSync(t *testing.T) {
 	delete(before, "enginex/ui/safe-mode")
 	journal := filepath.Join(root, "data", journalName)
 	cutAt(t, d, legacyBundle(t, "5.3.0.2"), "bundle")
-	fault := injectSyncFault(t, "/data/sc5000-custom", filepath.Join(root, "data"))
+	fault := injectSyncFault(t, migration.DataDir, filepath.Join(root, "data"))
 	for i := 0; i < 2; i++ {
 		if err := d.Recover(); !errors.Is(err, syscall.EIO) || !testExists(journal) {
 			t.Fatalf("recover %d while /data does not sync: err %v, journal kept %v", i, err, testExists(journal))

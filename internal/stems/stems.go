@@ -1,5 +1,5 @@
 // Package stems tunnels the native Engine 5.0.4 Stems child-process byte stream
-// unchanged between the deck (stems-processor) and the renderer (sc5000-stemsd).
+// unchanged between the deck (stems-processor) and the renderer (legacy-stemsd).
 package stems
 
 import (
@@ -61,7 +61,7 @@ func Secret(path string) (string, error) {
 
 // Proxy streams in to the backend's /v1/engine and the reply to out. It needs a
 // streaming HTTP/1.1 connection: the child speaks first. endpoint is a base URL
-// (a path prefix such as https://relay.example/sc5000 is kept).
+// (a path prefix such as https://relay.example/legacy is kept).
 func Proxy(ctx context.Context, endpoint, secret string, in io.Reader, out io.Writer) error {
 	u, e := url.Parse(endpoint)
 	if e != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil {

@@ -1,6 +1,7 @@
 package broadcast
 
 import (
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"bufio"
 	"context"
 	"crypto/tls"
@@ -33,7 +34,7 @@ const (
 	DefaultStreamName = "EngineX OS Live Mix"
 	DefaultInputPath  = "/tmp/enginex-broadcast.pcm"
 	// legacyInputPath is where the Engine hook wrote the feed before 5.3.0.5 (#234).
-	legacyInputPath = "/tmp/sc5000-broadcast.pcm"
+	legacyInputPath = migration.BroadcastInput
 )
 
 // BuiltinInput reports whether path is the Engine hook's feed under this release's name or an

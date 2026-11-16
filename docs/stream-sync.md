@@ -28,8 +28,8 @@ SQLite 测试使用本工作树捕获的完整原厂 SQL，包含触发器和链
 
 ```sh
 ./stream-sync-armv7 \
-  --database '/media/sc5000-sd-cache/Engine Library/Database2/m.db' \
-  --downloads /media/sc5000-sd-cache/Music/Stream \
+  --database '/media/enginex-sd-cache/Engine Library/Database2/m.db' \
+  --downloads /media/enginex-sd-cache/Music/Stream \
   --deemix-url http://127.0.0.1:6595 \
   --deemix-pid <本地下载进程PID> --strict-cpu \
   --spotify-client-id <注册的公开PKCE客户端ID> \
@@ -137,7 +137,7 @@ stream-sync 不做音频解密，解密只发生在 `enginex-deemixd` 里。
 `Download` 先查盘上已校验的文件，命中就不再下载。下载目录里的 `.sources.json` 记着
 `平台:曲目 id → 文件名`，重启后 `File`/`Fetch` 直接命中，连 Deezer 匹配搜索都不做。
 
-没有 SD 库时落在内部存储 `/data/enginex/Stream`（`/media/sc5000-sd-cache` 自 8856176
+没有 SD 库时落在内部存储 `/data/enginex/Stream`（`/media/enginex-sd-cache` 自 8856176
 起不再挂载；前置 SD 由 edisksd 按卷标挂在 `/media/SD`，Engine 开着它的库，不往上写）。
 总量上限 3 GiB，`/data` 剩余不足 1 GiB 时也继续淘汰，按最近使用时间（命中会刷新 mtime）
 先删最久未用的（只动 `<id>.*`、`netease-<id>.*`、`soundcloud-<id>.*`）。

@@ -7,6 +7,7 @@ package webui
 // live state. Off by default: release images never write it.
 
 import (
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"encoding/json"
 	"io"
 	"maps"
@@ -18,9 +19,9 @@ import (
 	"time"
 )
 
-// shadowDebugFlags turn the telemetry on by hand; /tmp/sc5000-debug is the name before
+// shadowDebugFlags turn the telemetry on by hand; /tmp/legacy-debug is the name before
 // 5.3.0.5 (#234), still accepted in 5.3.0.5 and 5.3.0.6.
-var shadowDebugFlags = [...]string{"/tmp/enginex-debug", "/tmp/sc5000-debug"}
+var shadowDebugFlags = [...]string{"/tmp/enginex-debug", migration.DebugFlag}
 
 func shadowDebugFlagged() bool { return anyFileExists(shadowDebugFlags[:]) }
 

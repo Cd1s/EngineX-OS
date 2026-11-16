@@ -5,6 +5,9 @@ Only the inspected unsigned AZ01 layout is writable. FIT, unknown versions,
 unknown records, trailing data and signed layouts fail closed.
 """
 import argparse
+import sys
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
+import legacy_names as legacy
 import base64
 import hashlib
 import json
@@ -522,29 +525,10 @@ class ExtFS:
         self.cmd(f'symlink "{path}" "{target}"', True)
 
 
-MIGRATE = r'''# /data/sc5000-custom became /data/enginex (#103): one rename keeps every file, and a
-# symlink keeps the old path working for older scripts and for a rollback.
-old=/data/sc5000-custom
-new=/data/enginex
-if [ -d "$old" ] && [ ! -L "$old" ]; then
-    # A downgrade to a release before 5.3.0.3 handed the real directory back and left enginex as
-    # the link to it (#234, internal/leave): that link goes, the directory moves back.
-    case $(readlink "$new" 2>/dev/null) in
-    sc5000-custom | /data/sc5000-custom | enginex) rm -f "$new" ;;
-    esac
-    if [ ! -e "$new" ] && [ ! -L "$new" ]; then
-        mv "$old" "$new"
-    elif [ -d "$new" ] && [ ! -L "$new" ]; then
-        # Both are real: move over what enginex lacks, set the remainder aside.
-        for e in "$old"/* "$old"/.[!.]*; do
-            [ -e "$e" ] || [ -L "$e" ] || continue
-            [ -e "$new/${e##*/}" ] || [ -L "$new/${e##*/}" ] || mv "$e" "$new/"
-        done
-        rmdir "$old" 2>/dev/null || mv "$old" "$new/legacy-sc5000-custom.$$"
-    fi
-fi
-[ -e "$new" ] || [ -L "$new" ] || mkdir -p "$new"
-{ [ -d "$old" ] && [ ! -L "$old" ]; } || ln -sfn enginex "$old"'''
+MIGRATION_SOURCE = Path(__file__).resolve().parents[2] / 'rootfs-overlay/usr/libexec/enginex-migration'
+LEGACY_SHELL = MIGRATION_SOURCE.read_text()
+MIGRATE = LEGACY_SHELL + '\nmigrate_data\n'
+
 
 
 PREPARE = b'''#!/bin/sh
@@ -968,18 +952,16 @@ def inject(fs, key=None, services=(), overlay=None, version=None):
         fs.write('/usr/share/enginex/authorized_keys', key, 0o600)
     fs.write('/usr/share/enginex/sshd_config', SSHD_CONFIG)
     fs.write('/usr/libexec/enginex-prepare', PREPARE, 0o755)
-    # sc5000/stems-runtime-prepare: the live Stems deployment of 2026-11-03 put it
+    # legacy/stems-runtime-prepare: the live Stems deployment of 2026-11-03 put it
     # in the /etc upper layer; its /usr/local/bin overlay would shadow the image's
     # stems-processor wrapper.
     managed = [p[len('/etc/'):] for p in etc]
     if etc:
         managed += sorted(p[len('/etc/'):] for p in links if p.startswith('/etc/'))
-        # Up to 5.3.0.4 the same files had sc5000 names (#234), and an image of that time could
-        # leave copies (and an /etc/enginex -> sc5000 link) in the upper layer: whole old and new
-        # directories go, since the image ships /etc/enginex and the /etc/sc5000 link to it.
-        managed += sorted({p.replace('enginex', 'sc5000') for p in managed} - set(managed))
-        managed = sorted(set(managed) | {'sc5000', 'sc5000/stems-runtime-prepare', 'enginex',
-                                         'dnsmasq.d/sc5000-telemetry.conf'})
+        # Up to 5.3.0.4 the same files had legacy names (#234), and an image of that time could
+        # leave copies (and an /etc/enginex -> legacy link) in the upper layer: whole old and new
+        # directories go, since the image ships /etc/enginex and the /etc/legacy link to it.
+        managed = legacy.managed_paths(managed)
     fs.write('/usr/libexec/enginex-etc-reset', etc_reset(epoch, managed), 0o755)
     # A locked root account is rejected even for public-key auth with UsePAM=no.
     # A fresh random unreachable password hash unlocks the account; SSH password

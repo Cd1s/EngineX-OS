@@ -9,7 +9,7 @@
 #   tools/stems/run-home-worker.sh --with-tunnel [hpss]   # also launch domain-free Cloudflare Quick Tunnel
 #
 # Needs python3 and the enginex-stemsd binary (in PATH, next to this script, or
-# ENGINEX_STEMSD=/path; SC5000_STEMSD is also accepted for compatibility).
+# ENGINEX_STEMSD=/path).
 # Python packages go into ~/.enginex-stems/venv.
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
@@ -30,9 +30,9 @@ for arg in "$@"; do
 done
 backend=${backend:-${ENGINEX_STEMS_BACKEND:-demucs}}
 
-bin=${ENGINEX_STEMSD:-${SC5000_STEMSD:-$(command -v enginex-stemsd || command -v sc5000-stemsd || echo "$here/enginex-stemsd")}}
-if [ ! -x "$bin" ] && [ -x "$here/sc5000-stemsd" ]; then
-  bin="$here/sc5000-stemsd"
+bin=${ENGINEX_STEMSD:-$(command -v enginex-stemsd || echo "$here/enginex-stemsd")}
+if [ ! -x "$bin" ] && [ -x "$here/enginex-stemsd" ]; then
+  bin="$here/enginex-stemsd"
 fi
 if [ ! -x "$bin" ]; then
   echo "EngineX OS: enginex-stemsd not found: put the release binary next to this script or build it with 'go build ./cmd/enginex-stemsd'" >&2
@@ -50,12 +50,10 @@ if [ "$("$py" "$here/worker.py" --backend "$backend" --print-backend)" = htdemuc
   "$py" -c 'from demucs.pretrained import get_model; get_model("htdemucs")'
 fi
 
-relay_bin=${ENGINEX_RELAY:-${SC5000_RELAY:-$(command -v enginex-relay || command -v sc5000-relay || true)}}
+relay_bin=${ENGINEX_RELAY:-$(command -v enginex-relay || true)}
 if [ -z "$relay_bin" ]; then
   if [ -x "$here/enginex-relay" ]; then
     relay_bin="$here/enginex-relay"
-  elif [ -x "$here/sc5000-relay" ]; then
-    relay_bin="$here/sc5000-relay"
   fi
 fi
 

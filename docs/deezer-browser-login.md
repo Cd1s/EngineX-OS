@@ -23,11 +23,11 @@
 ## 验证和构建（IN）
 
 ```sh
-cd /root/build/sc5000
+cd /root/build/enginex
 go test ./...
-go test -race ./cmd/sc5000-relay
-go vet ./cmd/sc5000-relay
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o /tmp/sc5000-relay-amd64 ./cmd/sc5000-relay
+go test -race ./cmd/enginex-relay
+go vet ./cmd/enginex-relay
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o /tmp/enginex-relay-amd64 ./cmd/enginex-relay
 ```
 
 新增测试使用模拟 CDP WebSocket 和 Deezer 身份 API，无需真实账号；覆盖隔离、并发、操作转发、Cookie 域和身份校验、trusted 同步、超时回收、失败清理、慢截图客户端及 Spotify 默认 HTTPS 回调和授权范围。
@@ -36,32 +36,32 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o /tm
 
 部署前的原二进制备份：
 
-`20261102T174024Z-<relay-host>-before-deezer-browser-login-7597eeb45476-sc5000-relay`
+`20261102T174024Z-<relay-host>-before-deezer-browser-login-7597eeb45476-enginex-relay`
 
 原二进制 SHA-256：`7597eeb4547678c51372184a54ab79f116b4a521cb815243b7586f0c8ce6d2ec`。
 
 在 <relay-host> 上恢复（先下载并校验成功，再替换）：
 
 ```sh
-agent-backup get 20261102T174024Z-<relay-host>-before-deezer-browser-login-7597eeb45476-sc5000-relay --output /tmp/sc5000-relay-rollback
-chmod 755 /tmp/sc5000-relay-rollback
-chown root:root /tmp/sc5000-relay-rollback
-mv /tmp/sc5000-relay-rollback /usr/local/bin/sc5000-relay
-systemctl restart sc5000-deemix-relay.service
-systemctl is-active sc5000-deemix-relay.service
+agent-backup get 20261102T174024Z-<relay-host>-before-deezer-browser-login-7597eeb45476-enginex-relay --output /tmp/enginex-relay-rollback
+chmod 755 /tmp/enginex-relay-rollback
+chown root:root /tmp/enginex-relay-rollback
+mv /tmp/enginex-relay-rollback /usr/local/bin/enginex-relay
+systemctl restart enginex-deemix-relay.service
+systemctl is-active enginex-deemix-relay.service
 curl -fsS http://127.0.0.1:6595/healthz
 ```
 
 部署前的状态目录备份（保留现有二维码和配置）：
 
-`20261102T174854Z-<relay-host>-before-deezer-browser-deploy-state-a36a51a27752-sc5000-relay.tar.gz`
+`20261102T174854Z-<relay-host>-before-deezer-browser-deploy-state-a36a51a27752-enginex-relay.tar.gz`
 
 Spotify 不再内置 Client ID：每位碟机主人在 /ui 控制台填自己的 Client ID（中继优先用碟机发来的那个），它只在该应用注册过的回调上可用（`relay.example.com` 是文档占位符）。中继按当前 `-public` 生成 `<public>/oauth/spotify/callback`，首次使用会探测 Spotify 是否接受这个回调：接受就走自动 HTTPS 回调，并按“Client ID + 回调地址”记住；不接受或探测无结论就退回粘贴 127.0.0.1 地址的流程。授权范围为 `user-library-read playlist-read-private playlist-read-collaborative`。
 
 ## 本次部署验收
 
 - 线上二进制 SHA-256：`59aae060670dbe54c89570e9a05c8e229e85095d08e7092a32f10359181cdd38`。
-- `sc5000-deemix-relay.service` active，`/healthz` 正常。
+- `enginex-deemix-relay.service` active，`/healthz` 正常。
 - 指定测试 token 原先属于已过期的 SoundCloud 会话；通过原有 `POST /api/relay/session` 将该测试 token 重新注册为 Deezer 后，公开 `/m/deezer` 返回 HTTP 200，`/m/deezer/frame` 返回 HTTP 200、`image/jpeg`，截图为 390 × 680。
 - 真实登录页面会自动跳转至 `account.deezer.com/en-us/login/`。已看到邮箱和密码表单，已通过点击操作关闭 Cookie 提示。
 - 测试窗口关闭后，CDP 检查确认无痕 context 为 0、Deezer 标签页为 0。

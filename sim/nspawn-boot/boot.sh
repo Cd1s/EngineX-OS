@@ -51,7 +51,7 @@ StandardError=journal
 EOF
     local prepare_unit=enginex-prepare.service reset_unit=enginex-etc-reset.service deemix_unit=enginex-deemixd.service
     if [ ! -f "$R/usr/libexec/enginex-prepare" ]; then
-        prepare_unit=sc5000-custom-prepare.service reset_unit=sc5000-custom-etc-reset.service deemix_unit=sc5000-deemixd.service
+        prepare_unit=enginex-custom-prepare.service reset_unit=enginex-custom-etc-reset.service deemix_unit=enginex-deemixd.service
     fi
     # etc-reset was attached to etc.mount on older images. Enable it explicitly
     # before prepare when testing the 5.3 rootfs without that mount unit.

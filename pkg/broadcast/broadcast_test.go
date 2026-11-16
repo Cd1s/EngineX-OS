@@ -1,6 +1,7 @@
 package broadcast
 
 import (
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"bufio"
 	"bytes"
 	"context"
@@ -1155,8 +1156,8 @@ func TestParseServerTargetIPv6WithoutPort(t *testing.T) {
 // under either name, and any other path is kept as the user set it.
 func TestRename234BuiltinInputUnderTheOldNameIsThisReleasesFeed(t *testing.T) {
 	for in, want := range map[string]string{
-		"/tmp/sc5000-broadcast.pcm":  DefaultInputPath,
-		" /tmp/sc5000-broadcast.pcm": DefaultInputPath,
+		migration.BroadcastInput:  DefaultInputPath,
+		" " + migration.BroadcastInput: DefaultInputPath,
 		"":                           DefaultInputPath,
 		"/tmp/my-mix.pcm":            "/tmp/my-mix.pcm",
 	} {

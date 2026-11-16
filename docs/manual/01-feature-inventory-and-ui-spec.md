@@ -6,9 +6,9 @@
 
 ## 0. 约定与必须先读的更正
 
-**路径约定（Issue #103）**：运行目录主路径写作 **`/data/enginex/`**，兼容旧路径 `/data/sc5000-custom/`（开机迁移后留软链接 `ln -sfn /data/enginex /data/sc5000-custom`）。配置目录 `/etc/enginex`、接口 `/v1/enginex/*` 同步提供别名，旧的 `/etc/sc5000`、`/v1/sc5000/*` 继续可用。本文下面凡写 `<DATA>`，指 `/data/enginex/`。
+**路径约定（Issue #103）**：运行目录主路径写作 **`/data/enginex/`**，兼容旧路径 `/data/enginex-custom/`（开机迁移后留软链接 `ln -sfn /data/enginex /data/enginex-custom`）。配置目录 `/etc/enginex`、接口 `/v1/enginex/*` 同步提供别名，旧的 `/etc/enginex`、`/v1/enginex/*` 继续可用。本文下面凡写 `<DATA>`，指 `/data/enginex/`。
 
-> 现状：`b5a4ba8` 的代码仍然写死 `/data/sc5000-custom` 和 `/v1/sc5000/*`，共 28 个文件含 `sc5000-custom`（Go、Python、sh、C 都有）。#103 落地之前，本文里的 `<DATA>`、`/v1/enginex/*` 在实机上还不存在。
+> 现状：`b5a4ba8` 的代码仍然写死 `/data/enginex-custom` 和 `/v1/enginex/*`，共 28 个文件含 `enginex-custom`（Go、Python、sh、C 都有）。#103 落地之前，本文里的 `<DATA>`、`/v1/enginex/*` 在实机上还不存在。
 
 **对任务描述的三处更正**（照任务原文写会出错）：
 
@@ -86,7 +86,7 @@
 
 ### 2.2 各菜单页 EngineX 条目明细（5.3.0.4）
 
-`<DATA>/ui/settings.conf` 简称 conf。接口 `POST /v1/enginex/ui?<参数>`（别名 `/v1/sc5000/ui`）仅接受本机回环调用，Web 控制台用 `POST /api/ui`，参数相同。默认值是"conf 里没有这个键"时的取值。
+`<DATA>/ui/settings.conf` 简称 conf。接口 `POST /v1/enginex/ui?<参数>`（别名 `/v1/enginex/ui`）仅接受本机回环调用，Web 控制台用 `POST /api/ui`，参数相同。默认值是"conf 里没有这个键"时的取值。
 
 | # | 所属菜单页 | 英文 / 简中 / 繁中 | 作用 | 默认 | 接口参数 | conf 键 | 备注 |
 |---|---|---|---|---|---|---|---|
@@ -181,7 +181,7 @@
 
 - 未登录显示登录页（标题 "Stream Sync"，按浏览器语言显示 英 / 简 / 繁）。访问码保存在 `<DATA>/state/access-token`（0600），**碟机屏幕 设置 → 关于 能看到**；删掉文件再重启即换新码。
 - `POST /login` 校验后下发 Cookie `stream_sync`（HttpOnly、SameSite=Strict）；`/api/*` 另接受 `Authorization: Bearer`。写请求要求同源。
-- `/v1/enginex/*`（别名 `/v1/sc5000/*`）和 TIDAL 网关只接受本机 `127.0.0.1`，同网的人调不了。
+- `/v1/enginex/*`（别名 `/v1/enginex/*`）和 TIDAL 网关只接受本机 `127.0.0.1`，同网的人调不了。
 - 流媒体手机页 `/m/<服务>` 用一次性令牌，不是 Cookie，不能进控制台。
 
 ### 3.2 页面模块逐个清点（`index.html`，三语切换在右上角 EN / 简体中文 / 繁體中文）
@@ -221,7 +221,7 @@
 
 | 能力 | 载体 | 说明 |
 |---|---|---|
-| 五合一静态二进制 | `enginex-suite`（兼容旧名 `sc5000-suite`，多入口：`rb-bridge`、`stream-sync`、`engine-guardian`、`stems-processor`、`enginex-deemixd`） | 为塞进固定几何的 5.0.4 rootfs，`enginex-suite-exec` 首次从 `.xz` 解到 `<DATA>/bin`，按内容哈希刷新 |
+| 五合一静态二进制 | `enginex-suite`（兼容旧名 `enginex-suite`，多入口：`rb-bridge`、`stream-sync`、`engine-guardian`、`stems-processor`、`enginex-deemixd`） | 为塞进固定几何的 5.0.4 rootfs，`enginex-suite-exec` 首次从 `.xz` 解到 `<DATA>/bin`，按内容哈希刷新 |
 | `stream-sync` | `stream-sync.service`，`:8080`，CPU3 | Web 控制台、流媒体网关（假装 TIDAL 的本机网关，`/au/oauth2/*`、`/v1/*`）、下载 / 分析队列、OTA、设置接口、影子轨道、Wi-Fi 传歌、重定位 |
 | `enginex-deemixd` | `127.0.0.1:6595` | Deezer 直连下载队列（无损 FLAC / 320k），Deezer 曲目和网易云「Deemix 优先」通道使用；Spotify 走原生直连，不经过它 |
 | `rb-bridge` | 挂载钩子 + `rb-bridge.service --prolink` | 挂载时 2 秒内转换 Rekordbox 导出（歌单、Hot Cue、Memory Cue、Loop、拍线）；`--prolink` 只收 Pro DJ Link，不写库；`--watch` 已退役（立即退出） |
@@ -315,7 +315,7 @@ APFS 备注：不支持。固件只加载 `hfsplus` 和 `overlay`（`rootfs-over
 
 控制中心磁贴保留 4 个（Waveform Style、Live Stream、Upfader Echo Out、Smart Sync），它们是演出中要快速点的，不动。
 
-约束：改动只重排 / 改名，不改 conf 键名和接口参数名，所以旧版本和 Web 的调用不会断；`/v1/enginex/*` 与 `/v1/sc5000/*` 两套别名参数保持一致（#103）。
+约束：改动只重排 / 改名，不改 conf 键名和接口参数名，所以旧版本和 Web 的调用不会断；`/v1/enginex/*` 与 `/v1/enginex/*` 两套别名参数保持一致（#103）。
 
 ## 6. 精确改动补丁建议（供各负责人落地，本任务没改任何文件）
 
@@ -369,14 +369,14 @@ beta:      ['Beta', '测试版', '測試版']
 
 | 项 | 现路径 | 目标 |
 |---|---|---|
-| 运行目录 | `/data/sc5000-custom/` | `/data/enginex/`；旧路径保留软链接 |
+| 运行目录 | `/data/enginex-custom/` | `/data/enginex/`；旧路径保留软链接 |
 | UI 包与设置 | `<DATA>/ui/{packs,icons,settings.conf,safe-mode,boot-count}` | 随运行目录迁移 |
 | 状态与密钥 | `<DATA>/state/{access-token,broadcast-config.json,spotify-token.json,gateway-tracks.json}`、`authorized_keys`、`ssh_host_ed25519_key` | 随运行目录；权限（0600）、软链接拒绝逻辑要保留 |
-| 数据包 | `<DATA>/bundle/`、`<DATA>/version.txt` | `uninstall.sh` 里的 `SC5000_CUSTOM` 默认值要同步改 |
-| 配置目录 | `/etc/sc5000/`（`engine-ui-guard`、两个 `.so`、`version.txt`） | 增加 `/etc/enginex` 别名 |
-| 本机接口 | `/v1/sc5000/*` | 增加 `/v1/enginex/*`，`index.html` 与 `build_packs.py` 里写死的 `http://127.0.0.1:8080/v1/sc5000/...` 逐步切到新路径 |
+| 数据包 | `<DATA>/bundle/`、`<DATA>/version.txt` | `uninstall.sh` 里的 `ENGINEX_CUSTOM` 默认值要同步改 |
+| 配置目录 | `/etc/enginex/`（`engine-ui-guard`、两个 `.so`、`version.txt`） | 增加 `/etc/enginex` 别名 |
+| 本机接口 | `/v1/enginex/*` | 增加 `/v1/enginex/*`，`index.html` 与 `build_packs.py` 里写死的 `http://127.0.0.1:8080/v1/enginex/...` 逐步切到新路径 |
 
-迁移要避免的坑：`engine-ui-guard`、`edisksd` 钩子、`rb-bridge`、发版门禁（`release-gate.sh`、`rootfs_audit.py`）、`tests/test_rootfs_overlay.sh` 都硬编码旧路径；开机迁移要放在 `sc5000-custom-prepare` 里、早于 Engine 和 stream-sync 启动；二代机数据包的 `boot-activate.sh` 与 `uninstall.sh` 在旧版本 bundle 上要同时识别两条路径。
+迁移要避免的坑：`engine-ui-guard`、`edisksd` 钩子、`rb-bridge`、发版门禁（`release-gate.sh`、`rootfs_audit.py`）、`tests/test_rootfs_overlay.sh` 都硬编码旧路径；开机迁移要放在 `enginex-custom-prepare` 里、早于 Engine 和 stream-sync 启动；二代机数据包的 `boot-activate.sh` 与 `uninstall.sh` 在旧版本 bundle 上要同时识别两条路径。
 
 ## 8. 附：`settings.conf` 键全表
 
