@@ -4876,6 +4876,16 @@ DEVICE_REMOTE_ACCESS_ENTRIES = """
 \t\t\ttext: root.scRemoteAccessLine()
 \t\t\ttextFormat: Text.PlainText
 \t\t},
+\t\tText {
+\t\t\tobjectName: "EngineX_RemoteAccessHint"
+\t\t\tLayout.fillWidth: true
+\t\t\tLayout.preferredHeight: implicitHeight
+\t\t\tleftPadding: 24; rightPadding: 24
+\t\t\twrapMode: Text.WordWrap
+\t\t\tcolor: "#9a9a9a"
+\t\t\tfont.pixelSize: 16
+\t\t\ttext: "Scan the QR code at the bottom of About / Update to open the console"
+\t\t},
 """
 
 ABOUT_CONSOLE_QR = """
@@ -6764,7 +6774,7 @@ def edits(dev: bool):
             *([("        PlatterCalibration {},\n", "        PlatterCalibration {},\n" + JOG_INVERT_ENTRIES)] if v53() else []),
         ],
         prefs + ("" if v53() else "TabContents/") + "AboutTabContent.qml": [
-            ("        Update { },\n", "        Update { },\n" + ABOUT_CONSOLE_QR),
+            ("        FactoryReset {}\n", "        FactoryReset {},\n" + ABOUT_CONSOLE_QR.rstrip().rstrip(",") + "\n"),
         ],
         **{prefs + ("" if v53() else "TabContents/") + f"{name}TabContent.qml": [
             (f'import "{"" if v53() else "../"}Entries"\n', f'import QtQuick.Layouts 1.12\nimport "{"" if v53() else "../"}Entries"\nimport "{"" if v53() else "../"}Entries/Base" as EntryBase\nimport Planck 1.0\n'),

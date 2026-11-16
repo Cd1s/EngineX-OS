@@ -769,5 +769,6 @@ Experimental: faster SD card reading (about 2x). Turn off if the SD card is not 
 Applies at next start or SD insert	将在下次启动或重新插入 SD 卡时生效	將在下次啟動或重新插入 SD 卡時生效	Se aplicará al próximo inicio o al insertar la tarjeta SD
 Remote access	远程访问	遠端存取	Acceso remoto
 Scan to open the console	扫码打开控制台	掃碼開啟控制台	Escanea para abrir la consola
+Scan the QR code at the bottom of About / Update to open the console	可在「关于 / 更新」最下方扫码进入控制台	可在「關於 / 更新」最下方掃碼進入控制台	Escanea el código QR al final de Acerca de / Actualizar para abrir la consola
 Starting…	正在启动…	正在啟動…	Iniciando…
 Error	错误	錯誤	Error

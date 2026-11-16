@@ -1590,6 +1590,11 @@ for (lang of Object.keys(labels)) {
         expected_i18n = {
             "Remote access": ("远程访问", "遠端存取", "Acceso remoto"),
             "Scan to open the console": ("扫码打开控制台", "掃碼開啟控制台", "Escanea para abrir la consola"),
+            "Scan the QR code at the bottom of About / Update to open the console": (
+                "可在「关于 / 更新」最下方扫码进入控制台",
+                "可在「關於 / 更新」最下方掃碼進入控制台",
+                "Escanea el código QR al final de Acerca de / Actualizar para abrir la consola",
+            ),
             "Starting…": ("正在启动…", "正在啟動…", "Iniciando…"),
             "Error": ("错误", "錯誤", "Error"),
             "On": ("开", "開", "Activado"),
@@ -1629,6 +1634,15 @@ for (lang of Object.keys(labels)) {
                         # Available on every model with the console (Gen-1, Gen-2 armhf, AZ04): not hidden by scIsAZ04.
                         ra_block = dev_qml[dev_qml.index('objectName: "EngineX_RemoteAccess"'):dev_qml.index('objectName: "EngineX_RemoteAccessStatus"')]
                         self.assertNotIn("scIsAZ04", ra_block)
+                        self.assertIn('objectName: "EngineX_RemoteAccessHint"', dev_qml)
+                        self.assertLess(
+                            dev_qml.index('objectName: "EngineX_RemoteAccess"'),
+                            dev_qml.index('objectName: "EngineX_RemoteAccessHint"'),
+                        )
+                        self.assertLess(
+                            dev_qml.index('objectName: "EngineX_RemoteAccessStatus"'),
+                            dev_qml.index('objectName: "EngineX_RemoteAccessHint"'),
+                        )
 
                         about_qml = (out / lang / about_rel).read_text(encoding="utf-8")
                         self.assertIn('objectName: "EngineX_AboutConsoleQR"', about_qml)
@@ -1639,6 +1653,10 @@ for (lang of Object.keys(labels)) {
                         self.assertNotIn("Timer", bp.ABOUT_CONSOLE_QR)
                         self.assertIn("text: root.scConsoleUrl", about_qml)
                         self.assertNotIn("scAccessCode", about_qml)
+                        self.assertLess(
+                            about_qml.index("FactoryReset"),
+                            about_qml.index('objectName: "EngineX_AboutConsoleQR"'),
+                        )
                         source = re.search(r"source: (scAboutConsoleQr.visible \?[^\n]+)", about_qml).group(1)
                         script = """
 const assert = require('assert');
@@ -1655,6 +1673,9 @@ assert.equal(SOURCE, 'http://127.0.0.1:8080/v1/enginex/console-qr?url=' + encode
                             idx = ("zh-Hans", "zh-Hant", "es").index(lang)
                             self.assertIn(expected_i18n["Remote access"][idx], dev_qml)
                             self.assertIn(expected_i18n["Scan to open the console"][idx], about_qml)
+                            self.assertIn(expected_i18n["Scan the QR code at the bottom of About / Update to open the console"][idx], dev_qml)
+                        else:
+                            self.assertIn("Scan the QR code at the bottom of About / Update to open the console", dev_qml)
 
 
 
