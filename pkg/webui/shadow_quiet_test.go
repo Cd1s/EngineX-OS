@@ -709,6 +709,8 @@ func TestShadowReplyTellsDeckDisplayState(t *testing.T) {
 		{Deck: 2, Key: "a", Loop: true, KeyOffset: -2, Stems: true},
 		{Deck: 2, Key: "a", Loop: true, KeyOffset: -2, Stems: true, Slip: 44100},
 		{Deck: 2, Key: "a", Loop: true, KeyOffset: -2, Stems: true, Slip: 55125},
+		{Deck: 2, Key: "a", Loop: true, KeyOffset: -2, Stems: true, Slip: 55125, LoopIn: 1000, LoopOut: 2875},
+		{Deck: 2, Key: "a", Loop: true, KeyOffset: -2, Stems: true, Slip: 55125, LoopIn: 1000, LoopOut: 1937.5},
 	}
 	s.shadow.mu.Lock()
 	for i, d := range steps {
@@ -730,7 +732,7 @@ func TestShadowReplyTellsDeckDisplayState(t *testing.T) {
 	if err := json.NewDecoder(r.Body).Decode(&v); err != nil || len(v.Decks) != 1 {
 		t.Fatalf("%v %+v", err, v.Decks)
 	}
-	if d := v.Decks[0]; !d.Loop || d.KeyOffset != -2 || !d.Stems || d.Slip != 55125 {
+	if d := v.Decks[0]; !d.Loop || d.KeyOffset != -2 || !d.Stems || d.Slip != 55125 || d.LoopIn != 1000 || d.LoopOut != 1937.5 {
 		t.Fatalf("shadow reply: %+v", d)
 	}
 }
