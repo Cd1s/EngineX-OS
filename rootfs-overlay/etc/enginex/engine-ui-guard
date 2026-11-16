@@ -133,6 +133,10 @@ launch)
     stream_dir=${primary_ui%/*}/stream-save
     if (umask 077; mkdir -p "$stream_dir") && [ -w "$stream_dir" ]; then
         set -- "$@" "-extraDriveDir=$stream_dir"
+        # The extra drive replaces Engine's implicit Demo source.
+        if [ -d /usr/Engine/Content/DemoDevice ]; then
+            set -- "$@" "-demoDriveDir=/usr/Engine/Content/DemoDevice"
+        fi
     fi
     begin_attempt
     LD_PRELOAD=${ENGINEX_UI_HOOK:-/etc/enginex/libengine-ui-hook.so} "$@" &

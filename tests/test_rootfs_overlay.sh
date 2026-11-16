@@ -729,6 +729,33 @@ for case in 'FactoryReset running 1' 'FactoryReset degraded 1' 'FactoryReset sto
     if [[ $3 == 1 && -e $ENGINEX_QUIT_REASON_FILE ]]; then fail "guard must consume quit reason $1"; fi
 done
 unset ENGINEX_QUIT_REASON_FILE GUARD_LOG
+# The hidden save drive must not replace stock Demo content. Redirect only the
+# external content directory in this copy; the launch logic runs unchanged.
+sed "s|/usr/Engine/Content/DemoDevice|$TMP/stock-demo|g" "$GUARD" > "$TMP/demo-guard"
+chmod +x "$TMP/demo-guard"
+printf '#!/bin/sh\nprintf "%%s\\n" "$@" > "$DEMO_ARGS"\n' > "$TMP/demo-engine"
+chmod +x "$TMP/demo-engine"
+for content in present missing blocked; do
+    demo_root=$TMP/demo-$content
+    mkdir -p "$demo_root/ui"
+    rm -rf "$TMP/stock-demo"
+    [[ $content == missing ]] || mkdir "$TMP/stock-demo"
+    [[ $content != blocked ]] || : > "$demo_root/stream-save"
+    DEMO_ARGS=$demo_root/args ENGINEX_PRIMARY_UI_DIR=$demo_root/ui ENGINEX_UI_DIR=$demo_root/ui \
+        sh "$TMP/demo-guard" launch "$TMP/demo-engine" -d0 2> "$demo_root/launch.err"
+    has '-d0' "$demo_root/args"
+    if [[ $content == blocked ]]; then
+        lacks '-extraDriveDir=' "$demo_root/args"
+    else
+        has "-extraDriveDir=$demo_root/stream-save" "$demo_root/args"
+    fi
+    if [[ $content == present ]]; then
+        has "-demoDriveDir=$TMP/stock-demo" "$demo_root/args"
+    else
+        lacks '-demoDriveDir=' "$demo_root/args"
+    fi
+done
+ok 'the streaming save drive retains stock Demo content when present and preserves the launch without it'
 # #49: in the 4-deck layout the guard binds, per start, a player's assignment file for
 # its role (bindings only: the assignment loader rejects handlers); off, the stock file.
 assign=$TMP/assign; mkdir -p "$assign/JP07" "$assign/JP13" "$TMP/ui-roles"
