@@ -1,0 +1,15 @@
+{
+  "migration": {
+    "internal/migration/legacy.go": "Readers and rollback contracts for releases before the rename",
+    "rootfs-overlay/usr/libexec/enginex-migration": "Shell migration readers, cleanup and the pending data compatibility link",
+    "tools/az01-packer/legacy_names.py": "Build-time migration readers and unchanged legacy shell fragments",
+    "tools/legacy_names.h": "C readers and ABI entry points used by already-installed ALSA configurations"
+  },
+  "history": {
+    "internal/leave/testdata/**": "Unmodified published installers used by the downgrade fault matrix",
+    "docs/ISSUE-FIXES-*": "Released-version records",
+    "docs/re-report/rea-evidence/**": "Immutable firmware evidence",
+    "docs/REGRESSION-5.3.0.3-to-5.3.0.4.md": "Released-version regression record"
+  },
+  "delegated": {"docs/mods/**": "Owned by the Mods rename lane"}
+}
