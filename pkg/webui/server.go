@@ -339,6 +339,8 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.mux.HandleFunc("POST /v1/enginex/automix", s.handleAutomix)
 	s.mux.HandleFunc("POST /api/sampler/loop-to-pad", s.handleSamplerLoopToPad)
 	s.mux.HandleFunc("POST /v1/enginex/sampler/loop-to-pad", s.handleSamplerLoopToPad)
+	s.mux.HandleFunc("POST /api/rekordbox/writeback", s.handleRekordboxWriteback)
+	s.mux.HandleFunc("POST /v1/enginex/rekordbox/writeback", s.handleRekordboxWriteback)
 	s.automix = newAutomixManager(s.automixConfigPath())
 	s.soundCloudAuth = &providers.SoundCloudAuth{TokenURL: cfg.SoundCloudTokenURL, Path: filepath.Join(cfg.StateDir, "soundcloud-token.json"), HTTP: cfg.HTTP}
 	if cfg.BPM != nil {

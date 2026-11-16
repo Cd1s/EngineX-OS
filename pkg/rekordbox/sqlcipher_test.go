@@ -12,6 +12,7 @@ import (
 	"crypto/sha512"
 	"database/sql"
 	"encoding/binary"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -79,7 +80,7 @@ func encryptSQLCipher4ForTest(t *testing.T, plain []byte, passphrase []byte) []b
 
 func listTempOneLibraryFiles(t *testing.T) map[string]bool {
 	t.Helper()
-	matches, err := filepath.Glob(filepath.Join(oneLibraryTempDir(), "rb-onelibrary-*.db"))
+	matches, err := filepath.Glob(filepath.Join(oneLibraryTempDir(), fmt.Sprintf("%s%d-*.db", oneLibraryTempPrefix, os.Getpid())))
 	if err != nil {
 		t.Fatal(err)
 	}
