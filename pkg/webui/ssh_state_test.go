@@ -105,3 +105,57 @@ func TestSSHGen1ManagesEngineXsKeyOnlyUnit(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// #299: on second-generation decks /etc is mounted read-only (5.3.0 removed etc.mount)
+// and stock sshd enforces PasswordAuthentication no (10-az0x.conf). The console
+// previously treated these boards as taking passwords and invoked chpasswd on /etc/shadow,
+// failing with HTTP 500. It must refuse password submissions with HTTP 400 across all
+// second-generation board prefixes and never run chpasswd.
+func TestSSHGen2RefusesPasswordOnReadOnlyEtc(t *testing.T) {
+	boards := []string{
+		"inmusic,jp21",  // SCLIVE4
+		"inmusic,jp20",  // SCLIVE2
+		"inmusic,jc11s", // PRIME4PLUS
+		"inmusic,jp11s", // PRIMEGOPLUS
+		"inmusic,nh08s", // MIXSTREAMPROPLUS
+		"inmusic,nh10",  // MIXSTREAMPROGO
+		"inmusic,jp24",  // PRIME4G2
+		"inmusic,rmz2",  // SYSTEMONE
+	}
+	for _, b := range boards {
+		t.Run(b, func(t *testing.T) {
+			asDeck(t, b)
+			u := &unitRunner{state: "active"}
+			SetSystemRunner(u.run)
+			defer SetSystemRunner(nil)
+
+			s := New(Config{StateDir: t.TempDir(), UIDir: t.TempDir()}, nil)
+
+			// GET reports sshd unit and hasPassword false
+			if w := sshCall(s, http.MethodGet, ""); !strings.Contains(w.Body.String(), `"hasPassword":false`) {
+				t.Fatalf("%s: expected hasPassword:false, got: %s", b, w.Body.String())
+			}
+
+			// POST with password must fail with 400 "takes public keys only"
+			if w := sshCall(s, http.MethodPost, `{"password":"secret"}`); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "takes public keys only") {
+				t.Fatalf("%s: expected 400 takes public keys only, got %d: %s", b, w.Code, w.Body.String())
+			}
+
+			// Ensure chpasswd / sh was NEVER called
+			for _, cmd := range u.cmds {
+				if strings.Contains(cmd, "chpasswd") {
+					t.Fatalf("%s: chpasswd must not be called on read-only /etc: %s", b, cmd)
+				}
+			}
+
+			// Key upload succeeds and manages sshd
+			u.cmds = nil
+			if w := sshCall(s, http.MethodPost, `{"authorizedKey":"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEngineXTestKey test"}`); w.Code != http.StatusOK {
+				t.Fatalf("%s: key upload failed: %d %s", b, w.Code, w.Body.String())
+			}
+			if !u.ran("systemctl restart sshd") && !u.ran("systemctl start sshd") {
+				t.Fatalf("%s: key upload did not restart/start sshd: %q", b, u.cmds)
+			}
+		})
+	}
+}

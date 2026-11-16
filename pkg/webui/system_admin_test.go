@@ -59,7 +59,7 @@ func (m *mockSystemRunner) hasCommand(prefix ...string) bool {
 }
 
 func TestSSHManagement(t *testing.T) {
-	asDeck(t, "inmusic,jp21") // stock sshd with a root password: a second-generation deck; the SSH settings act only on a deck (r3)
+	asDeck(t, "inmusic,jp21") // stock sshd on a second-generation deck; both generations are key-only (r3, #299)
 	mockRunner := &mockSystemRunner{outputs: make(map[string][]byte)}
 	SetSystemRunner(mockRunner.Run)
 	defer SetSystemRunner(nil)
@@ -104,8 +104,8 @@ func TestSSHManagement(t *testing.T) {
 		t.Fatalf("expected 400 for port 0, got %d", w.Code)
 	}
 
-	// Reserved EngineX ports and multi-line passwords are refused before anything runs.
-	for _, bad := range []string{`{"port": 8080}`, `{"port": 6595}`, `{"port": 13579}`, `{"password": "a\nroot:b"}`, `{"password": "a\u0000b"}`} {
+	// Reserved EngineX ports are refused before anything runs.
+	for _, bad := range []string{`{"port": 8080}`, `{"port": 6595}`, `{"port": 13579}`} {
 		req = httptest.NewRequest(http.MethodPost, "/api/ssh", strings.NewReader(bad))
 		w = httptest.NewRecorder()
 		s.handleSSH(w, req)
@@ -113,12 +113,25 @@ func TestSSHManagement(t *testing.T) {
 			t.Fatalf("%s: expected 400, got %d", bad, w.Code)
 		}
 	}
+
+	// Both Gen-1 and Gen-2 decks refuse passwords with HTTP 400 (#299).
+	for _, badPass := range []string{`{"password": "secret"}`, `{"port": 2222, "password": "$(touch /tmp/pwn)` + "`id`" + `\"x"}`} {
+		req = httptest.NewRequest(http.MethodPost, "/api/ssh", strings.NewReader(badPass))
+		w = httptest.NewRecorder()
+		s.handleSSH(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("%s: expected 400, got %d", badPass, w.Code)
+		}
+		if !strings.Contains(w.Body.String(), "takes public keys only") {
+			t.Fatalf("expected takes public keys only error, got: %s", w.Body.String())
+		}
+	}
 	if mockRunner.hasCommand("sh") || mockRunner.hasCommand("systemctl", "daemon-reload") {
 		t.Fatal("a rejected request must not run commands")
 	}
 
-	// 3. Update port and password
-	postBody := `{"port": 2222, "password": "$(touch /tmp/pwn)` + "`id`" + `\"x"}`
+	// 3. Update port (valid key-only update)
+	postBody := `{"port": 2222}`
 	req = httptest.NewRequest(http.MethodPost, "/api/ssh", bytes.NewReader([]byte(postBody)))
 	w = httptest.NewRecorder()
 	s.handleSSH(w, req)
@@ -128,38 +141,25 @@ func TestSSHManagement(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &view); err != nil {
 		t.Fatalf("unmarshal error: %v", err)
 	}
-	if view.Port != 2222 || !view.HasPassword {
-		t.Fatalf("expected port 2222 and hasPassword true, got: %+v", view)
+	if view.Port != 2222 || view.HasPassword {
+		t.Fatalf("expected port 2222 and hasPassword false, got: %+v", view)
 	}
 	if !mockRunner.hasCommand("systemctl", "restart", "sshd") || !mockRunner.hasCommand("systemctl", "daemon-reload") {
 		t.Fatalf("expected daemon-reload and restart sshd")
 	}
-	// The password reaches chpasswd as $1, never inside the shell script text.
-	found := false
-	for _, c := range mockRunner.commands {
-		if c[0] == "sh" {
-			found = true
-			if len(c) != 5 || strings.Contains(c[2], "touch") || c[4] != "$(touch /tmp/pwn)`id`\"x" {
-				t.Fatalf("unsafe chpasswd command: %q", c)
-			}
-		}
-	}
-	if !found {
-		t.Fatal("chpasswd was not run")
-	}
-	if b, _ := os.ReadFile(filepath.Join(stateDir, "ssh-config.json")); strings.Contains(string(b), "touch") || !strings.Contains(string(b), `"hasPassword": true`) && !strings.Contains(string(b), `"hasPassword":true`) {
-		t.Fatalf("password persisted or hasPassword lost: %s", b)
-	}
 
-	// 4. Verify password is saved to disk but not in GET
+	// 4. Verify password is not saved and GET reflects updated port
 	req = httptest.NewRequest(http.MethodGet, "/api/ssh", nil)
 	w = httptest.NewRecorder()
 	s.handleSSH(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
-	if strings.Contains(w.Body.String(), "enginex_secret") {
-		t.Fatalf("plaintext password leaked in GET response: %s", w.Body.String())
+	if err := json.Unmarshal(w.Body.Bytes(), &view); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	if view.Port != 2222 || view.HasPassword {
+		t.Fatalf("expected port 2222 and key-only view in GET, got: %+v", view)
 	}
 
 	// 5. Disable SSH
@@ -177,7 +177,7 @@ func TestSSHManagement(t *testing.T) {
 	// 6. Persistence across restart
 	s2 := New(Config{StateDir: stateDir, UIDir: uiDir}, nil)
 	savedCfg := s2.loadSSHConfig()
-	if savedCfg.Enabled || savedCfg.Port != 2222 || !savedCfg.HasPassword || savedCfg.Password != "" {
+	if savedCfg.Enabled || savedCfg.Port != 2222 || savedCfg.HasPassword || savedCfg.Password != "" {
 		t.Fatalf("persisted config mismatch: %+v", savedCfg)
 	}
 }

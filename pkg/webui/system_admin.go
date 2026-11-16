@@ -148,9 +148,13 @@ func (s *Server) RestoreSSH(ctx context.Context) {
 }
 
 // sshUnit is the SSH unit this deck runs, and whether it takes passwords.
+// Both generations are key-only: first generation uses sc5000-custom-sshd
+// (PasswordAuthentication no); second generation uses stock sshd with read-only
+// /etc (no etc.mount in 5.3.0) and 10-az0x.conf (PasswordAuthentication no,
+// PermitRootLogin prohibit-password), where chpasswd cannot write /etc/shadow (#299).
 func sshUnit() (unit string, passwords bool) {
 	if dataBundleBoards[imagePrefix(deviceCompatible())] {
-		return "sshd", true
+		return "sshd", false
 	}
 	return gen1SSHUnit, false
 }
