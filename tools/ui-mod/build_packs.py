@@ -4157,31 +4157,44 @@ SERVICES_MAIN = """
 	// local copy and shows that render on the copy's own row only, so the row
 	// that was tapped and the "Stems not ready" row of the service's Stems list
 	// said nothing for minutes. scStemRows marks the gateway ids of those two
-	// rows: "wait" while the file is downloaded and imported, then the track's
-	// place (1, 2, ...) in this run of Engine's render queue. The track list
-	// draws Engine's own queued icon, spinner, progress bar and percentage on
-	// them from Engine's own queue counters. Nothing is polled.
+	// rows: "wait" while the file is downloaded and imported, "fail" when it
+	// could not be downloaded, then the track's place (1, 2, ...) in this run of
+	// Engine's render queue. The track list draws Engine's own queued icon,
+	// spinner, progress bar and percentage on them from Engine's own queue
+	// counters. Nothing is polled.
 	//
-	// Each track is followed by its own place. Engine's queue runs in order:
-	// totalRenderStemsQueueCount is how many tracks this run has taken and
-	// renderStemsQueueCount how many of them are left, the one being rendered
-	// included (left deck: 1/1 while a single track rendered, 0/0 after). So
-	// total - left tracks are over: a row at a place up to that is finished
-	// (or failed) and shows nothing, the next place is being rendered, later
-	// places wait. A finished row never takes another track's progress.
+	// Engine's queue runs in order: totalRenderStemsQueueCount is how many
+	// tracks this run has taken, renderStemsQueueCount how many are left, the
+	// one being rendered included (left deck: 1/1 while one track rendered, 0/0
+	// after). Places up to scStemDone are over (rendered or failed) and show
+	// nothing, the next one is rendered, later ones wait. Engine may publish
+	// one counter before the other, so they are read together once Engine is
+	// done (scStemSettle, Qt.callLater), and a track is counted as over only
+	// from a reading in which the run's size did not change: one counter
+	// moving alone never ends or drops a row.
+	//
+	// A track handed over takes a place only when the run has grown past the
+	// size it had just before the hand-over (scStemClaims). Engine answers every
+	// startRenderTracks with renderStemsQueueChanged, also when it refuses the
+	// track (sandbox: an unknown id, counters unchanged): an answer after the
+	// hand-over in which neither counter grew means refused, and the track
+	// takes no place.
 	property var scStemRows: ({})
+	property var scStemClaims: [] // handed over, not yet seen in Engine's queue: {rows, total, left, heard}
+	property int scStemHeard: 0 // Engine's queue answers so far
+	property int scStemDone: 0 // tracks of this run that are over
+	property int scStemSize: 0 // the run's size at the last reading
 	readonly property var scStemQueue: Planck.librarianController.stemsQueueManager || null
 	readonly property int scStemTotal: scStemQueue ? scStemQueue.totalRenderStemsQueueCount : 0
 	readonly property int scStemCount: scStemQueue ? scStemQueue.renderStemsQueueCount : 0
 	readonly property bool scStemRendering: scStemTotal > 0
 	readonly property real scStemProgress: scStemRendering ? (scStemQueue.renderProgress || 0) : 0
-	// Engine's progress value is one number for its queue. It is a track's own
-	// progress while that track is alone in the queue, the only case seen on a
-	// deck: only then a row gets a percentage and a time.
-	readonly property bool scStemAlone: scStemTotal === 1
+	// Engine's progress is one number for its whole queue (left deck, two tracks:
+	// the first ended at 50 %). The track being rendered has done the rest.
+	readonly property real scStemOwn: scStemRendering ? Math.max(0, Math.min(1, scStemProgress * scStemTotal - scStemDone)) : 0
 	// A streamed row's Stems are in Engine's queue: rendered now, or waiting in it.
-	readonly property bool scStemStreamed: Object.keys(scStemRows).some(id => scStemRows[id] >= 1 && scStemRows[id] <= scStemTotal && scStemPlace(scStemRows[id], scStemTotal, scStemCount) !== "")
-	property var scStemSeen: null // when and where this queue's progress was first seen
+	readonly property bool scStemStreamed: Object.keys(scStemRows).some(id => scStemRows[id] >= 1 && scStemPlace(scStemRows[id], scStemTotal, scStemDone) !== "")
+	property var scStemSeen: null // when and where the rendering track's progress was first seen
 	property string scStemLeft: ""
 	function scStemMark(ids, mark) {
 		const rows = Object.assign({}, scStemRows)
@@ -4192,29 +4205,62 @@ SERVICES_MAIN = """
 		}
 		scStemRows = rows
 	}
-	// Handed to Engine: the track is the next one in this run of the queue. A
-	// mark beyond the queue's size is a track Engine never took (refused at its
-	// own check): it is forgotten, or it would share this track's place.
-	function scStemHand(ids) {
-		const total = scStemTotal > 0 ? scStemTotal : 0
-		scStemMark(Object.keys(scStemRows).filter(id => scStemRows[id] > total), "")
-		scStemMark(ids, total + 1)
+	// Handed to Engine; `seen` is Engine's queue read just before the hand-over.
+	function scStemHand(ids, seen) {
+		scStemClaims = scStemClaims.concat([{rows: ids, total: seen.total > 0 ? seen.total : 0, left: seen.left > 0 ? seen.left : 0, heard: seen.heard}])
+		Qt.callLater(scStemSettle)
 	}
+	Connections {
+		target: root.scStemQueue
+		function onRenderStemsQueueChanged() {
+			root.scStemHeard++
+			Qt.callLater(root.scStemSettle)
+		}
+	}
+	// Reads Engine's two counters together, after Engine has updated both.
+	function scStemSettle() {
+		const total = scStemTotal, left = scStemCount
+		if (!(total > 0)) {
+			// The queue is empty: every place of the run is over (rendered, cleared or
+			// failed). A track not placed yet counts from an empty queue.
+			scStemMark(Object.keys(scStemRows).filter(id => scStemRows[id] >= 1), "")
+			scStemDone = 0
+			scStemSize = 0
+		} else {
+			if (total === scStemSize && left >= 0 && left <= total && total - left > scStemDone) scStemDone = total - left
+			scStemSize = total
+		}
+		// Tracks handed over take, in order, the places the run has grown by. The
+		// oldest one that Engine answered without either counter growing was
+		// refused. Each answer settles one track: the next waits for its own.
+		let last = Object.keys(scStemRows).reduce((m, id) => scStemRows[id] >= 1 ? Math.max(m, scStemRows[id]) : m, 0)
+		const claims = scStemClaims.map(c => total > 0 ? Object.assign({}, c) : {rows: c.rows, total: 0, left: 0, heard: c.heard})
+		while (claims.length) {
+			const c = claims[0], place = Math.max(c.total, last) + 1
+			if (total >= place) {
+				scStemMark(c.rows, place)
+				last = place
+			} else if (scStemHeard > c.heard && !(left > c.left)) scStemMark(c.rows, "")
+			else break
+			claims.shift()
+			for (const next of claims) next.heard = Math.max(next.heard, scStemHeard)
+		}
+		scStemClaims = claims
+	}
+	onScStemTotalChanged: Qt.callLater(scStemSettle)
 	// What a mark means now: "" (nothing, or its track is over), "wait", "render" or
 	// "fail" (the file could not be downloaded).
-	function scStemPlace(mark, total, left) {
+	function scStemPlace(mark, total, done) {
 		if (mark === "wait" || mark === "fail") return mark
-		if (!(mark >= 1)) return ""
-		if (!(total > 0)) return "wait" // Engine's queue has not started
-		const done = total - left
-		return mark <= done ? "" : mark === done + 1 ? "render" : "wait"
+		if (!(mark >= 1) || !(total > 0) || mark <= done) return ""
+		return mark === done + 1 ? "render" : "wait"
 	}
 	// A track list row's state, by Engine's id for the row.
 	function scStemState(uid) {
-		const rows = scStemRows, total = scStemTotal, left = scStemCount
+		const rows = scStemRows, total = scStemTotal, done = scStemDone
 		if (!uid || !Object.keys(rows).length) return ""
 		const m = /uri=streaming:\\/\\/TIDAL\\/Track\\/(\\d+)/.exec(Planck.librarianController.collectionController.getTrackUrisFromUniversalIds([uid]) || "")
-		return m ? scStemPlace(rows[m[1]], total, left) : ""
+		return m ? scStemPlace(rows[m[1]], total, done) : ""
 	}
 	// What is left at the speed seen so far; nothing before 10 s and 1 % of it.
 	function scStemEta(done, seconds, left) {
@@ -4222,39 +4268,40 @@ SERVICES_MAIN = """
 		const minutes = Math.round(left * seconds / done / 60)
 		return minutes < 1 ? scT("<1 min") : scT("~%1 min").arg(minutes)
 	}
-	// The length cell of such a row. Without a progress of its own (waiting, or
-	// rendered with other tracks in the queue: progress -1) it says "Stems…".
+	// The length cell of such a row: the rendering track's own percentage and time left.
 	function scStemText(state, progress, left) {
 		if (state === "fail") return scT("Download failed")
 		if (state !== "render" || !(progress >= 0)) return scT("Stems") + "…"
 		return Math.round(progress * 100) + "%" + (left ? " · " + left : "")
 	}
-	onScStemProgressChanged: {
-		const p = scStemProgress, now = Date.now()
-		if (!(p > 0) || !scStemAlone) { scStemSeen = null; scStemLeft = ""; return }
+	onScStemOwnChanged: {
+		const p = scStemOwn, now = Date.now()
+		if (!(p > 0)) { scStemSeen = null; scStemLeft = ""; return }
 		if (!scStemSeen || p < scStemSeen.p) { scStemSeen = {t: now, p: p, step: -1}; scStemLeft = "" }
 		else scStemLeft = scStemEta(p - scStemSeen.p, (now - scStemSeen.t) / 1000, 1 - p)
 		const step = Math.floor(p * 4) // one journal line per quarter
 		if (step !== scStemSeen.step) { scStemSeen.step = step; console.warn("EngineX stems progress=" + Math.round(p * 100) + "% left=" + scStemLeft) }
 	}
 	// One journal line per change of the queue: what Engine reported, and the places.
-	onScStemCountChanged: console.warn("EngineX stems queue=" + scStemCount + "/" + scStemTotal + " progress=" + Math.round(scStemProgress * 100) + "% rows=" + JSON.stringify(scStemRows))
-	onScStemRenderingChanged: {
-		console.warn("EngineX stems step=" + (scStemRendering ? "render" : "idle") + " queue=" + scStemCount + "/" + scStemTotal + " rows=" + Object.keys(scStemRows).length)
-		// The queue is empty: every place in it is over (rendered, cleared or failed).
-		if (!scStemRendering) scStemMark(Object.keys(scStemRows).filter(id => scStemRows[id] !== "wait"), "")
+	onScStemCountChanged: {
+		console.warn("EngineX stems queue=" + scStemCount + "/" + scStemTotal + " progress=" + Math.round(scStemProgress * 100) + "% rows=" + JSON.stringify(scStemRows))
+		Qt.callLater(scStemSettle)
 	}
+	onScStemRenderingChanged: console.warn("EngineX stems step=" + (scStemRendering ? "render" : "idle") + " queue=" + scStemCount + "/" + scStemTotal + " rows=" + Object.keys(scStemRows).length)
 	// The tapped row says the download failed for a while, then shows its length again.
 	Timer {
 		id: scStemFailed
 		interval: 10000
 		onTriggered: root.scStemMark(Object.keys(root.scStemRows).filter(id => root.scStemRows[id] === "fail"), "")
 	}
-	// A track Engine never took has a place beyond the queue's size: forget it.
+	// No answer from Engine at all: the rows stop waiting after a while.
 	Timer {
 		id: scStemRefused
 		interval: 30000
-		onTriggered: root.scStemMark(Object.keys(root.scStemRows).filter(id => root.scStemRows[id] > (root.scStemTotal > 0 ? root.scStemTotal : 0)), "")
+		onTriggered: {
+			for (const c of root.scStemClaims) root.scStemMark(c.rows, "")
+			root.scStemClaims = []
+		}
 	}
 	function scStemStream(uid) {
 		const lib = Planck.librarianController.collectionController
@@ -4312,8 +4359,10 @@ SERVICES_MAIN = """
 		interval: 500; repeat: true
 		function render(id) {
 			if (!running) return // a slower reply after the render already started
+			// Read before Engine can change them: it may answer inside the call.
+			const seen = {total: root.scStemTotal, left: root.scStemCount, heard: root.scStemHeard}
 			Planck.librarianController.stemsQueueManager.startRenderTracks(String(id))
-			root.scStemHand(rows)
+			root.scStemHand(rows, seen)
 			scStemRefused.restart()
 			if (scStemUnload.armed) {
 				scStemUnload.name = path.slice(path.lastIndexOf("/") + 1)
@@ -8682,7 +8731,7 @@ def edits(dev: bool):
         "\t\t\t\treadonly property real stemsRenderProgress: modelData.stemsRenderProgress || 0.0\n",
         '\t\t\t\treadonly property string scStem: typeof root !== "undefined" && root && root.scStemState ? root.scStemState(modelData.trackId) : ""\n'
         '\t\t\t\treadonly property int stemState: scStem === "render" ? 2 : scStem === "wait" ? 1 : (modelData.stems || 0)\n'
-        '\t\t\t\treadonly property real stemsRenderProgress: scStem === "render" ? Math.max(root.scStemAlone ? root.scStemProgress : 0, 0.001) : (modelData.stemsRenderProgress || 0.0)\n',
+        '\t\t\t\treadonly property real stemsRenderProgress: scStem === "render" ? Math.max(root.scStemOwn, 0.001) : (modelData.stemsRenderProgress || 0.0)\n',
     )])
     out.setdefault(row_parts + "PreviewProgress.qml", []).extend([
         ("row.modelData.stems === 2 ? Qt.darker(Style.systemBlue01Color, 1.2)", "row.stemState === 2 ? Qt.darker(Style.systemBlue01Color, 1.2)"),
@@ -8699,7 +8748,7 @@ def edits(dev: bool):
     out.setdefault(row_parts + "Length.qml", []).extend([(
         "else if (row.isRenderingStems) {",
         "else if (row.scStem) {\n"
-        "\t\t\troot.scStemText(row.scStem, root.scStemAlone ? row.stemsRenderProgress : -1, root.scStemLeft)\n"
+        "\t\t\troot.scStemText(row.scStem, row.stemsRenderProgress, root.scStemLeft)\n"
         "\t\t} else if (row.isRenderingStems) {",
     )])
     if v53():
