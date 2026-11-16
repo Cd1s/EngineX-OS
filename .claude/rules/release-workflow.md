@@ -68,7 +68,7 @@ JC11S fixture 是独立的官方 PRIME4PLUS rootfs，不能用 SC LIVE 4 或 PRI
 自建的目录后设置 `JC11S_ROOTFS`；不要写入只读的固定实验材料目录。普通 SC LIVE 4
 单独检查不设置此变量时会明确 WARN 跳过 JC11S，**发版不得跳过**。若要同时回归真实
 发布包的安装器回读，设置 `JC11S_RELEASE_BUNDLE` 为已校验 SHA-256 的 PRIME4PLUS
-`*-Update.img`（或旧版 `Data-Bundle.tar.gz` 夹具）后运行 Go 测试；该 fixture 测试覆盖新目录与旧 `enginex-custom` 目录。
+`*-Update.img`（或旧版 `Data-Bundle.tar.gz` 夹具）后运行 Go 测试；该 fixture 测试覆盖新目录与旧数据目录。
 
 涉及 Factory Reset、`az01-update --erase-data`、空白 `/data` 首次启动的改动，只在编译机的 `unshare -m` + chroot 沙箱里用解包出的 rootfs 测，**绝不在实机触发**。
 
