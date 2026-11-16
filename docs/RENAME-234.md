@@ -18,6 +18,10 @@ or old certificate domain is created. A stored certificate containing the
 retired domain is replaced once before it is served. Current certificates and
 private settings otherwise keep their existing behavior.
 
+Name cleanup follows the upgrade commit. Before it, a refusal or interrupted
+upgrade preserves the original loader and data layout; a committed update
+finishes the loader rename at its next boot.
+
 Downgrade restoration and the manual layout handoff are retired. Older bundle
 installs are refused without modifying the live generation. An existing
 retired transaction journal is left intact and reported for manual recovery;
