@@ -7,10 +7,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 )
 
 func TestJSONSettingsDispatchSpecialFields(t *testing.T) {
-	for _, prefix := range []string{"/api", "/v1/enginex", "/v1/sc5000"} {
+	for _, prefix := range []string{"/api", "/v1/enginex", migration.APIPrefix} {
 		t.Run(prefix, func(t *testing.T) {
 			state, ui := t.TempDir(), t.TempDir()
 			s := New(Config{AccessToken: "test-code", StateDir: state, UIDir: ui, ZoneinfoDir: seedZoneinfoFixture(t)}, nil)
@@ -25,6 +27,20 @@ func TestJSONSettingsDispatchSpecialFields(t *testing.T) {
 				return w
 			}
 			w := post(`{"timezone":"Asia/Tokyo"}`)
+			if prefix == migration.APIPrefix {
+				if w.Code != 404 {
+					t.Errorf("retired timezone endpoint: %d %s", w.Code, w.Body.String())
+				}
+				if w := post(`{"fxUnit":1,"fxMode":2}`); w.Code != 404 {
+					t.Errorf("retired FX endpoint: %d %s", w.Code, w.Body.String())
+				}
+				for _, path := range []string{filepath.Join(state, "timezone"), filepath.Join(ui, "settings.conf")} {
+					if _, err := os.Stat(path); !os.IsNotExist(err) {
+						t.Errorf("retired request changed state: %s: %v", path, err)
+					}
+				}
+				return
+			}
 			var result struct {
 				Saved bool `json:"timezoneSaved"`
 			}
