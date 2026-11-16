@@ -841,7 +841,8 @@ for (const amt of [1/63, 2/63, 4/63, 5/63, 8/63, 1.0]) {{
         # #206: the gate proves streaming loads under an active recorder on all-in-ones.
         self.assertIn("SCPROBE recstream|", probe)
         self.assertIn("SCPROBE recstream|1|1|1|0|0|", gate)
-        self.assertIn("case $PRODUCT in JP07|JP08|JP13|JP14) applied=20 ;; *) applied=28 ;; esac", gate)
+        # all-in-ones: + 8 #206 recording sites + the #207 Reverb decay site
+        self.assertIn("case $PRODUCT in JP07|JP08|JP13|JP14) applied=20 ;; *) applied=29 ;; esac", gate)
         self.assertIn("powercut-truncated.qmlc", gate)
 
     def test_connected_source_disables_listview_sections_to_prevent_demo_polish_loop(self):

@@ -21,6 +21,9 @@ arm-linux-gnueabihf-gcc -O2 -Wall -Wextra -Werror -Wl,-z,max-page-size=4096 \
     "$repo/tools/ui-mod/test_flanger_scope.c" -ldl -lpthread -o "$work/test_flanger_scope"
 "$work/test_flanger_scope" > "$work/test_flanger_scope.log" 2>&1
 echo "test_flanger_scope armhf PASS"
+arm-linux-gnueabihf-gcc -O2 -mfpu=neon-vfpv4 -Wall -Wextra -Werror "$repo/tools/ui-mod/test_reverb_time.c" -o "$work/test_reverb_time"
+"$work/test_reverb_time" > "$work/test_reverb_time.log" 2>&1
+echo "test_reverb_time armhf PASS"
 for arch in AZ04 armhf; do
     compiler=gcc; if [ "$arch" = armhf ]; then compiler=arm-linux-gnueabihf-gcc; fi
     "$compiler" -O2 "$repo/tools/ui-mod/test_ms_master_hook.c" -ldl -lpthread -lm -o "$work/test_ms_master_hook-$arch"

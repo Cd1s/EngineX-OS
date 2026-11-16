@@ -39,6 +39,7 @@
 #include "pioneer_master.h"
 #include "pioneer_ms.h"
 #include "live_tap.h"
+#include "reverb_time.h"
 #ifndef SC_TAP_PATH
 #define SC_TAP_PATH "/tmp/enginex-broadcast.pcm" // pkg/broadcast DefaultInputPath
 #endif
@@ -521,7 +522,7 @@ struct engine_edit {
     uint32_t size;
     int group; // all sites of a group are applied together or not at all
 };
-enum { EDIT_ONE, EDIT_STEMS, EDIT_GATEWAY, EDIT_AUX, EDIT_REC_STREAM, EDIT_GROUP_COUNT };
+enum { EDIT_ONE, EDIT_STEMS, EDIT_GATEWAY, EDIT_AUX, EDIT_REC_STREAM, EDIT_REVERB, EDIT_GROUP_COUNT };
 
 // Everything that differs between Engine builds. The hook only patches a build
 // listed here (exact GNU BuildID), and every site is checked byte for byte first.
@@ -553,6 +554,7 @@ static const struct engine_build *build;
 static uint32_t stems_feature_jump[2];
 static uint32_t config_jump[2];
 static uint32_t shadow_sync_play_jump[2];
+static uint32_t reverb_time_jump[2]; // #207, see reverb_time.h
 
 static void *rx_code(const void *code, size_t size, size_t page) {
     void *stub = mmap(NULL, page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -1822,6 +1824,19 @@ A32_ONLY static void prepare_shadow_sync_play(uintptr_t base, size_t page) {
     shadow_sync_play_jump[1] = (uint32_t)(uintptr_t)shadow_sync_play_code(site + 8, page);
 }
 
+// #207: the build's edit table names the site; a build without one keeps the stock decay.
+A32_ONLY static void prepare_reverb_time(uintptr_t base, size_t page) {
+    for (unsigned i = 0; i < build->edit_count; i++) {
+        if (build->edits[i].replacement != (const char *)reverb_time_jump) continue;
+        if (!sc_reverb_time_context((const void *)(base + build->edits[i].offset))) return;
+        uint32_t code[SC_REVERB_CODE_WORDS];
+        sc_reverb_time_code(code, (uint32_t)(base + build->edits[i].offset + 8));
+        reverb_time_jump[0] = 0xe51ff004; // ldr pc, [pc, #-4]
+        reverb_time_jump[1] = (uint32_t)(uintptr_t)rx_code(code, sizeof code, page);
+        return;
+    }
+}
+
 A32_ONLY static void prepare_config(uintptr_t base, size_t page) {
     // getConfig's common return path runs after every model's constructor.
     uint32_t code[] = {
@@ -2030,6 +2045,8 @@ static const struct engine_edit edits_504[] = {
     {0x167295cu, "\x1c\x00\xd4\xe5", "\x00\x00\xa0\xe3", 4, EDIT_ONE},
     // DeviceManager::isReadOnly QFileInfo -> false
     {0x16728c0u, "\x01\x00\x24\xe2", "\x00\x00\xa0\xe3", 4, EDIT_ONE},
+    // #207 Reverb (Classic) decay formula: vsub s14, s14, s15; vldr s16, =0.65
+    {0x1639278u, "\x67\x7a\x37\xee\x5f\x8a\x9f\xed", (const char *)reverb_time_jump, 8, EDIT_REVERB},
 };
 
 // 5.3.0 (BuildID be537e90...): sites found by RTTI/vtable slots (DSP), the QML
@@ -2071,6 +2088,8 @@ static const struct engine_edit edits_530[] = {
     // non-console fallback (0x193f6cc, reached only when isConsole +0x23a == 0)
     // still needs the Layer A / Layer B branch instead of an empty map.
     {0x193f6d8u, "\x4e\x01\x00\x1a", "\x4e\x01\x00\xea", 4, EDIT_ONE},
+    // #207 Reverb (Classic) decay formula: vsub s14, s14, s15; vldr s16, =0.65
+    {0x1725630u, "\x67\x7a\x37\xee\x5f\x8a\x9f\xed", (const char *)reverb_time_jump, 8, EDIT_REVERB},
     // #206 Recording with streaming tracks (all-in-ones only; the group is never ready on
     // the JP07/JP08/JP13/JP14 players, which have no recorder). All 8 sites or none.
     // AbstractCollectionModel streamingFlags: skip BlocksRecording (0x20) bit
@@ -2116,6 +2135,8 @@ static const struct engine_edit edits_sclive[] = {
     // #159 StreamingProviderInterface::connectedSSO() -> true, isDisconnectedFromProfile() -> false
     {0xbf91d8u, "\xc2\x05\xd0\xe5", "\x01\x00\xa0\xe3", 4, EDIT_ONE},
     {0xbf9234u, "\x01\x00\x20\xe2", "\x00\x00\xa0\xe3", 4, EDIT_ONE},
+    // #207 Reverb (Classic) decay formula: vsub s14, s14, s15; vldr s16, =0.65
+    {0x177b088u, "\x67\x7a\x37\xee\x5f\x8a\x9f\xed", (const char *)reverb_time_jump, 8, EDIT_REVERB},
     // #206 Recording with streaming tracks (all-in-ones only; the group is never ready on
     // the JP07/JP08/JP13/JP14 players, which have no recorder). All 8 sites or none.
     // AbstractCollectionModel streamingFlags: skip BlocksRecording (0x20) bit
@@ -2210,6 +2231,7 @@ static void apply_engine_edits(uintptr_t base, size_t page) {
     for (unsigned i = 0; i < EDIT_GROUP_COUNT; i++) ready[i] = 1;
     ready[EDIT_AUX] = aux_ready;
     ready[EDIT_REC_STREAM] = !player_board();
+    ready[EDIT_REVERB] = !player_board(); // a player has no FX units
     for (unsigned i = 0; i < build->edit_count; i++)
         if (!edit_state(base, &build->edits[i])) ready[build->edits[i].group] = 0;
     for (unsigned i = 0; i < build->edit_count; i++) {
@@ -2218,6 +2240,7 @@ static void apply_engine_edits(uintptr_t base, size_t page) {
         // An unprepared trampoline is all zero: never write it.
         if (e->replacement == (const char *)stems_feature_jump && !stems_feature_jump[1]) continue;
         if (e->replacement == (const char *)shadow_sync_play_jump && !shadow_sync_play_jump[1]) continue;
+        if (e->replacement == (const char *)reverb_time_jump && !reverb_time_jump[1]) continue;
         char *at = (char *)(base + e->offset);
         if (edit_state(base, e) != 1) continue;
         uintptr_t first = (uintptr_t)at - (uintptr_t)at % page;
@@ -2269,6 +2292,7 @@ __attribute__((constructor)) static void edit_engine(void) {
     prepare_aux(base, page);
     prepare_config(base, page);
     prepare_shadow_sync_play(base, page);
+    prepare_reverb_time(base, page);
     uint32_t expected_feature[2] = {build->feature_displaced ? build->feature_displaced : 0xe51b3340, 0xe3540000};
     if (build->feature_true && !memcmp((const void *)(base + build->feature_site), expected_feature, 8))
         prepare_stems_feature(base, page);

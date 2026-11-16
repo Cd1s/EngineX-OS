@@ -4,7 +4,9 @@ set -euo pipefail
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 PRODUCT=${FX_PRODUCT:-JC11}
 case "$PRODUCT" in JP07|JC11) ;; *) exit 2 ;; esac
-W=${FX_SANDBOX_DIR:-/var/tmp/fx-selector-native-$PRODUCT}
+# FX_DRIVER=<file.c> FX_DRIVER_TAG=<log tag>: run that offline driver alone, without the selector's QML probe.
+DRIVER=${FX_DRIVER:-$REPO/tools/az01-packer/test_fx_selector_native.c}
+W=${FX_SANDBOX_DIR:-/var/tmp/fx-selector-native-$PRODUCT${FX_DRIVER:+-$(basename "$FX_DRIVER" .c)}}
 if [ "${FX_READY_READONLY:-0}" = 1 ]; then W=$W-readonly; fi
 if [ "${1:-}" != --inner ]; then
     test "$(uname -m)" = aarch64
@@ -12,8 +14,8 @@ if [ "${1:-}" != --inner ]; then
     exec 9> "$W/sandbox.lock"
     flock -n 9 || { echo "FX sandbox already in use" >&2; exit 1; }
     CGO_ENABLED=0 go build -o "$W/ui-server" "$REPO/tools/az01-packer/fx_selector_server.go"
-    arm-linux-gnueabihf-gcc -O2 -shared -fPIC -Wall -Wextra -Werror -Wl,-z,max-page-size=4096 \
-        "$REPO/tools/az01-packer/test_fx_selector_native.c" -ldl -lpthread -lm -o "$W/libfx-native-test.so"
+    arm-linux-gnueabihf-gcc -O2 -shared -fPIC -Wall -Wextra -Werror -Wl,-z,max-page-size=4096 -I "$REPO/tools/ui-mod" \
+        "$DRIVER" -ldl -lpthread -lm -o "$W/libfx-native-test.so"
     if [ ! -e "$W/image/rootfs.ext2" ]; then
         image=/root/build/sc5000-lab/fw-5.3.0/PRIME4-5.3.0-Update.img
         if [ "$PRODUCT" = JP07 ]; then image=/root/build/sc5000-lab/fw-5.3.0/SC5000-5.3.0-Update.img; fi
@@ -54,6 +56,9 @@ cp "$W/libfx-native-test.so" "$R/tmp/libfx-native-test.so"
 cp -a "$W/packs/en" "$R/data/enginex/ui/packs/"
 mkdir -p "$R/data/enginex/ui/packs/en/Skins/Common/Items"
 cp "$REPO/tools/az01-packer/fx-selector-probe.qml" "$R/data/enginex/ui/packs/en/Skins/Common/Items/QmlWarnings.qml"
+if [ -n "${FX_DRIVER:-}" ]; then
+    printf 'import QtQuick 2.12\nItem {}\n' > "$R/data/enginex/ui/packs/en/Skins/Common/Items/QmlWarnings.qml"
+fi
 if [ "${FX_CONFIG_ONLY:-0}" = 1 ]; then
     cat > "$R/data/enginex/ui/packs/en/Skins/Common/Items/QmlWarnings.qml" <<'QML'
 import QtQuick 2.12
@@ -72,7 +77,7 @@ trap 'kill "$server" 2>/dev/null || true' EXIT
 preload=/etc/enginex/libengine-ui-hook.so:/tmp/libfx-native-test.so
 if [ "${FX_CONFIG_ONLY:-0}" = 1 ]; then preload=/etc/enginex/libengine-ui-hook.so; fi
 set +e
-timeout --kill-after=5s 40s chroot "$R" /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/tmp/home LD_LIBRARY_PATH=/usr/qt/lib \
+timeout --kill-after=5s "${FX_TIMEOUT:-40}s" chroot "$R" /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/tmp/home LD_LIBRARY_PATH=/usr/qt/lib \
     LD_PRELOAD="$preload" QT_QPA_PLATFORM=offscreen \
     QML_IMPORT_PATH=/tmp/fx-qml-imports QML2_IMPORT_PATH=/tmp/fx-qml-imports \
     QML_XHR_ALLOW_FILE_READ=1 \
@@ -82,6 +87,12 @@ set -e
 printf '%s\n' "$engine_rc" > "$W/engine-exit.txt"
 if [ -f "$R/tmp/fx-ms-spinner.png" ]; then cp "$R/tmp/fx-ms-spinner.png" "$W/fx-ms-spinner.png"; fi
 case "$engine_rc" in 0|124|137) ;; *) echo "Engine exited $engine_rc" >&2; exit 1 ;; esac
+if [ -n "${FX_DRIVER:-}" ]; then
+    grep -a "^${FX_DRIVER_TAG:?} " "$W/engine.log" | cut -c1-200
+    grep -aq "^$FX_DRIVER_TAG done|PASS" "$W/engine.log"
+    ! grep -aq "^$FX_DRIVER_TAG FAIL" "$W/engine.log"
+    exit
+fi
 grep -a -m 40 -E 'FXCONFIG|FXPROBE|FXNATIVE|engine-ui-hook: PX' "$W/engine.log" | cut -c1-200 | head -n 40
 if [ "$PRODUCT" = JC11 ] && [ "${FX_READY_READONLY:-0}" != 1 ]; then
     grep -aq "PX product=JC11 master-bypass=1 installed" "$W/engine.log"
