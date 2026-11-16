@@ -2899,6 +2899,57 @@ __attribute__((constructor)) static void lower_offline_analyzer(void) {
     oa_install();
 }
 
+// Overview band maxima. overviewWaveFormData, uncompressed, is >Q length, >Q bins, >d samples
+// per bin, bins x 3 bytes (low, mid, high) and then each band's maximum. Denon and 3-Band scale
+// a band by its maximum and draw a track whose maxima are zero at about a third of the stock
+// height (Half 30 px instead of 54); RGB ignores them. Earlier rb-bridge imports, and the rows
+// Engine wrote back from them, end in zeros, and the mount backfill reaches only a few hundred
+// rows per mount. So the maxima are filled in where Engine decompresses the blob: every source
+// at once (stick, card, peer, internal), with no database write. Returns 1 if it filled them.
+static int overview_fill_maxima(uchar *raw, size_t len) {
+    if (len < 27 || (len - 27) % 3 || raw[len - 3] | raw[len - 2] | raw[len - 1]) return 0;
+    uint64_t length = 0, bins = 0, step_bits = 0;
+    for (int i = 0; i < 8; i++)
+        length = length << 8 | raw[i], bins = bins << 8 | raw[8 + i], step_bits = step_bits << 8 | raw[16 + i];
+    double step;
+    memcpy(&step, &step_bits, 8);
+    // pkg/enginedb ParseDisplayWave's checks: any other blob is left alone.
+    if (bins != (len - 27) / 3 || !bins || length < bins || !(step > 0 && step < 1e12)) return 0;
+    uchar top[3] = {0};
+    for (size_t i = 24; i < len - 3; i += 3)
+        for (int c = 0; c < 3; c++)
+            if (raw[i + c] > top[c]) top[c] = raw[i + c];
+    if (!(top[0] | top[1] | top[2])) return 0; // a silent track keeps its zeros
+    memcpy(raw + len - 3, top, 3);
+    return 1;
+}
+
+#if defined(__aarch64__)
+#define Q_UNCOMPRESS "_Z11qUncompressPKhx"
+#else
+#define Q_UNCOMPRESS "_Z11qUncompressPKhi"
+#endif
+static void *q_uncompress_cache;
+static int overview_filled;
+// QByteArray qUncompress(const uchar *, qsizetype). The class comes back through the address in
+// r0 (armhf) / x8 (AArch64), as this struct does: Engine's 17 call sites in each build set it so.
+struct oa_bytes q_uncompress(const uchar *data, ssize_t size) __asm__(Q_UNCOMPRESS);
+struct oa_bytes q_uncompress(const uchar *data, ssize_t size) {
+    struct oa_bytes (*real)(const uchar *, ssize_t) = next_symbol(&q_uncompress_cache, Q_UNCOMPRESS);
+    struct oa_bytes out = {0};
+    if (!real) return out;
+    out = real(data, size);
+    // Only Engine 5.3.0, 5.3.0-sclive4 and AZ04, and only a fresh result nothing else shares.
+    if (out.size >= 27 && out.d && __atomic_load_n(out.d, __ATOMIC_RELAXED) == 1 && build &&
+        strcmp(build->name, "5.0.4") && overview_fill_maxima((uchar *)out.ptr, (size_t)out.size) &&
+        !__atomic_exchange_n(&overview_filled, 1, __ATOMIC_RELAXED)) {
+        char thread[16] = "";
+        pthread_getname_np(pthread_self(), thread, sizeof thread);
+        fprintf(stderr, "engine-ui-hook: filled overview band maxima (%ld bytes, thread %s)\n", (long)out.size, thread);
+    }
+    return out;
+}
+
 // Engine itself raises its analyzers to nice -5 / SCHED_OTHER once they connect
 // (seen on 5.3.0): keep them in the fair background class (#55).
 static int offline_analyzer(pid_t pid) {
