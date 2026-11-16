@@ -582,6 +582,7 @@ static void *px_rate_original;
  * value per live owner, including while a stock effect is selected. */
 static struct { void *owner; unsigned value; } px_rates[SC_PFX_UNITS];
 static float px_rate_value(void *owner) {
+    if (!owner) return 0.5f;
     for (unsigned i = 0; i < SC_PFX_UNITS; ++i)
         if (__atomic_load_n(&px_rates[i].owner, __ATOMIC_ACQUIRE) == owner)
             return sc_pfx_float(__atomic_load_n(&px_rates[i].value, __ATOMIC_ACQUIRE));
@@ -607,10 +608,12 @@ static void px_rate_remember(void *owner, float value) {
     }
 }
 static void hook_px_destroy(void *self) {
-    sc_pfx_forget_owner(self);
-    for (unsigned i = 0; i < SC_PFX_UNITS; ++i)
-        if (__atomic_load_n(&px_rates[i].owner, __ATOMIC_ACQUIRE) == self)
-            __atomic_store_n(&px_rates[i].owner, NULL, __ATOMIC_RELEASE);
+    if (self) {
+        sc_pfx_forget_owner(self);
+        for (unsigned i = 0; i < SC_PFX_UNITS; ++i)
+            if (__atomic_load_n(&px_rates[i].owner, __ATOMIC_ACQUIRE) == self)
+                __atomic_store_n(&px_rates[i].owner, NULL, __ATOMIC_RELEASE);
+    }
     ((void (*)(void *))px_destructor_original)(self);
 }
 
@@ -645,7 +648,7 @@ static void *px_carrier(void *owner) {
 
 static int px_is_carrier(void *owner) {
     if (!owner) return 0;
-    const char *name; uint32_t length;
+    const char *name = NULL; uint32_t length;
     memcpy(&name, (char *)owner + 0x294, 4);
     memcpy(&length, (char *)owner + 0x298, 4);
     return length == 7 && name && !memcmp(name, "Flanger", 7);
@@ -663,6 +666,7 @@ static void px_restore(struct sc_pfx_route *r) {
 }
 
 static void px_restore_owner(void *owner) {
+    if (!owner) return;
     for (unsigned i = 0; i < SC_PFX_UNITS; ++i)
         if (__atomic_load_n(&sc_pfx_routes[i].native_owner, __ATOMIC_ACQUIRE) == owner)
             px_restore(&sc_pfx_routes[i]);
@@ -670,11 +674,12 @@ static void px_restore_owner(void *owner) {
 #endif
 
 static void *dsp_bound_owner(void *handler) {
+    if (!handler) return NULL;
     // MemberFunctionHandler owns a bound object and a two-word member pointer.
     // r0 at this entry is the handler, not the bound object. Keep it intact for
     // the original dispatcher, including its virtual-function/this-adjustment path.
-#if defined(__aarch64__)
-    uint64_t owner; // AZ04: owner +24, adjustment +40 (x5 + (x3 >> 1) in the thunks)
+#if defined(__aarch64__) || UINTPTR_MAX == UINT64_MAX
+    uint64_t owner; // AZ04 / 64-bit host: owner +24, adjustment +40 (x5 + (x3 >> 1) in the thunks)
     int64_t adjustment;
     memcpy(&owner, (char *)handler + 24, sizeof owner);
     memcpy(&adjustment, (char *)handler + 40, sizeof adjustment);
@@ -684,6 +689,7 @@ static void *dsp_bound_owner(void *handler) {
     memcpy(&owner, (char *)handler + 0x0c, sizeof owner);
     memcpy(&adjustment, (char *)handler + 0x14, sizeof adjustment);
 #endif
+    if (!owner) return NULL;
     return (void *)((uintptr_t)owner + (adjustment >> 1));
 }
 
@@ -693,7 +699,7 @@ static void hook_px_rate(void *handler, const void *event) {
      * Rate range. This dispatcher is installed only in the verified PX scope. */
     ((dsp_event_fn)px_rate_original)(handler, event);
     if (!fx_selector_supported || !event) return;
-    const char *name; uint32_t length, index;
+    const char *name = NULL; uint32_t length, index;
     memcpy(&name, (const char *)event + 8, 4);
     memcpy(&length, (const char *)event + 12, 4);
     memcpy(&index, (const char *)event + 0x24, 4);
@@ -765,7 +771,7 @@ static void dsp_finite_event(unsigned slot, size_t offset, int is_double,
             }
             int target_parameter = 1;
             if (slot == DSP_PARAMETER) {
-                const char *name; uint32_t length;
+                const char *name = NULL; uint32_t length;
                 memcpy(&name, (const char *)event + 8, 4);
                 memcpy(&length, (const char *)event + 12, 4);
                 target_parameter = length == 7 && name && !memcmp(name, "Flanger", 7);

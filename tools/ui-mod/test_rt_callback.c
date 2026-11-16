@@ -158,6 +158,11 @@ int main(int argc, char **argv) {
     sc_pfx_control(&px_owner, 0, 1.0f); sc_pfx_control(&px_owner, 1, 1.0f); sc_pfx_control(&px_owner, 2, 0.0f);
     sc_pfx_routes[0].input_a = pair;
     sc_pfx_activate(&sc_pfx_routes[0]);
+    /* Unbound/null handlers must not clear an active route's native_override. */
+    static unsigned char zero_handler[64];
+    hook_fx_switch(zero_handler, event);
+    hook_fx_switch(NULL, event);
+    assert(__atomic_load_n(&sc_pfx_routes[0].native_override, __ATOMIC_ACQUIRE) == 1);
     sc_pfx_instance_prepare(&sc_pfx_routes[0].dsp); /* the worker's part as well */
 #endif
 

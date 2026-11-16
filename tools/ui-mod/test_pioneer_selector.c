@@ -257,6 +257,31 @@ static void test_routes(void) {
     sc_pfx_select(0, 0);
 }
 
+static void test_null_owner(void) {
+    int owner, effect;
+    unsigned mode = 0;
+    unsigned a = 0x35812340, b = 0x36045670;
+    memset(sc_pfx_routes, 0, sizeof sc_pfx_routes);
+    CHECK(!sc_pfx_arm(0, 1, a, b));
+    CHECK(!sc_pfx_challenge(NULL, sc_pfx_float(a)));
+    CHECK(!sc_pfx_challenge(NULL, sc_pfx_float(b)));
+    CHECK(!sc_pfx_bind_context(NULL, &effect));
+    CHECK(!sc_pfx_enter(NULL, &mode));
+    CHECK(sc_pfx_challenge(&owner, sc_pfx_float(a)));
+    CHECK(sc_pfx_challenge(&owner, sc_pfx_float(b)));
+    CHECK(sc_pfx_bind_context(&owner, &effect));
+    sc_pfx_control(&owner, 0, 0.42f);
+    sc_pfx_control(NULL, 0, 0.99f);
+    sc_pfx_unbind_owner(NULL);
+    sc_pfx_forget_owner(NULL);
+    struct sc_pfx_route *r = sc_pfx_enter(&effect, &mode);
+    CHECK(r == &sc_pfx_routes[0] && mode == 1);
+    CHECK(sc_pfx_float(__atomic_load_n(&r->mix, __ATOMIC_ACQUIRE)) == 0.42f);
+    if (r) sc_pfx_leave(r);
+    sc_pfx_forget_owner(&owner);
+    sc_pfx_select(0, 0);
+}
+
 static int concurrent_owner, concurrent_effect;
 static pthread_barrier_t route_start;
 static void *route_writer(void *unused) {
@@ -302,7 +327,7 @@ static void test_concurrent_routes(void) {
 
 int main(void) {
     test_wet_zero_fade(); test_worker_banks(); test_double_reset_no_prepare(); test_smoother_denormals(); test_arm_arm();
-    test_modes(); test_switch(); test_roll_time_increase(); test_routes(); test_concurrent_routes();
+    test_modes(); test_switch(); test_roll_time_increase(); test_routes(); test_null_owner(); test_concurrent_routes();
     pthread_t a, b;
     CHECK(!pthread_create(&a, NULL, independent, &fx[1]));
     CHECK(!pthread_create(&b, NULL, independent, &fx[2]));
