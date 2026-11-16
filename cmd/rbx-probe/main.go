@@ -39,6 +39,7 @@ const (
 	fhSize     = 32
 
 	kindSetup       = 0x0000
+	kindTeardown    = 0x0100
 	kindRootMenu    = 0x1000
 	kindAllTracks   = 0x1004
 	kindPlaylist    = 0x1105
@@ -58,6 +59,12 @@ const (
 	kindUnavailable = 0x4003
 	kindRenderItem  = 0x4101
 	kindRenderFoot  = 0x4201
+
+	menuMain           = byte(1)
+	menuSub            = byte(2)
+	menuData           = byte(8)
+	slotCollection     = byte(4)
+	trackTypeRekordbox = byte(1)
 )
 
 var dbMagic = []byte{0x11, 0x87, 0x23, 0x49, 0xae}
@@ -771,6 +778,14 @@ func dmst(player, menu, slot, trackType byte) uint32 {
 	return uint32(player)<<24 | uint32(menu)<<16 | uint32(slot)<<8 | uint32(trackType)
 }
 
+func buildTeardownReq() []byte {
+	return encodeDBReq(0xfffffffe, kindTeardown)
+}
+
+func buildMetadataReq(tx uint32, player, menu, slot, trackType byte, trackID uint32) []byte {
+	return encodeDBReq(tx, kindMetadata, dbNum(dmst(player, menu, slot, trackType)), dbNum(trackID))
+}
+
 func tagLE(s string) uint32 {
 	var b [4]byte
 	copy(b[:], s)
@@ -925,15 +940,32 @@ func dialDB(ip net.IP, port int, asPlayer byte, timeout time.Duration) (*dbConn,
 	return d, setupServerPlayer(ack), nil
 }
 
-func (d *dbConn) Close() { _ = d.c.Close() }
+func (d *dbConn) Close() {
+	if d == nil || d.c == nil {
+		return
+	}
+	_ = d.c.SetWriteDeadline(time.Now().Add(250 * time.Millisecond))
+	if _, err := d.c.Write(buildTeardownReq()); err == nil {
+		// Let the peer observe 0x0100 and close its side before we redial with the same player number.
+		_ = d.c.SetReadDeadline(time.Now().Add(25 * time.Millisecond))
+		var b [1]byte
+		_, _ = d.c.Read(b[:])
+	}
+	_ = d.c.Close()
+	d.c = nil
+}
 
-func (d *dbConn) req(kind uint16, timeout time.Duration, args ...dbField) (*dbMsg, error) {
+func (d *dbConn) reqRaw(raw []byte, timeout time.Duration) (*dbMsg, error) {
 	d.tx++
 	_ = d.c.SetDeadline(time.Now().Add(timeout))
-	if _, err := d.c.Write(encodeDBReq(d.tx, kind, args...)); err != nil {
+	if _, err := d.c.Write(raw); err != nil {
 		return nil, err
 	}
 	return decodeDBMsg(d.r)
+}
+
+func (d *dbConn) req(kind uint16, timeout time.Duration, args ...dbField) (*dbMsg, error) {
+	return d.reqRaw(encodeDBReq(d.tx+1, kind, args...), timeout)
 }
 
 type menuRow struct {
@@ -1107,6 +1139,10 @@ func probeDirectDBPort(ip net.IP, port int, asPlayer byte, timeout time.Duration
 		return true, true
 	}
 	fmt.Printf("tcp %d direct dbserver: greeting OK, setup as=%d kind=0x%04x server_player=%d\n", port, asPlayer, ack.kind, setupServerPlayer(ack))
+	if ack.kind != kindTeardown {
+		_ = c.SetWriteDeadline(time.Now().Add(250 * time.Millisecond))
+		_, _ = c.Write(buildTeardownReq())
+	}
 	return true, true
 }
 
@@ -1153,6 +1189,10 @@ func probeDBServer(ip net.IP, asPlayer byte, maxTracks int, specificTrack uint32
 			return nil
 		}
 	}
+	return probeDBSession(ip, dbPort, asPlayer, maxTracks, specificTrack, timeout, needMediaQuery, red)
+}
+
+func probeDBSession(ip net.IP, dbPort int, asPlayer byte, maxTracks int, specificTrack uint32, timeout time.Duration, needMediaQuery bool, red *redactor) []string {
 
 	// Test asking player numbers 1, 4, 5, 7, 41.
 	var okPlayers []byte
@@ -1214,7 +1254,11 @@ func probeDBServer(ip net.IP, asPlayer byte, maxTracks int, specificTrack uint32
 			return nil
 		}
 	}
-	defer dc.Close()
+	defer func() {
+		if dc != nil {
+			dc.Close()
+		}
+	}()
 	redial := func() bool {
 		if dc != nil {
 			dc.Close()
@@ -1231,12 +1275,12 @@ func probeDBServer(ip net.IP, asPlayer byte, maxTracks int, specificTrack uint32
 
 	var realPaths []string
 	var workingSlot byte
-	for _, slot := range []byte{4, 5} {
+	for _, slot := range []byte{slotCollection, 5} {
 		if dc == nil && !redial() {
 			break
 		}
 		fmt.Printf("\n[slot=%d (as=%d)]\n", slot, asPlayer)
-		d := dmst(asPlayer, 1, slot, 1)
+		d := dmst(asPlayer, menuMain, slot, trackTypeRekordbox)
 
 		// 1. Root menu 0x1000
 		rm, err := dc.req(kindRootMenu, timeout, dbNum(d), dbNum(0), dbNum(0xffffff))
@@ -1402,8 +1446,12 @@ func probeDBServer(ip net.IP, asPlayer byte, maxTracks int, specificTrack uint32
 			}
 		}
 
-		// 4. Deep track probes for sampled tracks (if slot returned tracks; for slot!=workingSlot, test only 1 track if any).
+		// 4. Deep track probes for sampled tracks (close main browse session first so only one session per asking player is open).
 		if len(trackIDs) > 0 {
+			if dc != nil {
+				dc.Close()
+				dc = nil
+			}
 			probeIDs := trackIDs
 			if workingSlot != 0 && slot != workingSlot && len(probeIDs) > 1 {
 				probeIDs = probeIDs[:1]
@@ -1447,21 +1495,31 @@ func probeTrackDetails(ip net.IP, dbPort int, asPlayer, slot byte, tid, hintArt 
 		return true
 	}
 
-	d1 := dmst(asPlayer, 1, slot, 1)
-	d8 := dmst(asPlayer, 8, slot, 1)
+	d1 := dmst(asPlayer, menuMain, slot, trackTypeRekordbox)
+	d8 := dmst(asPlayer, menuData, slot, trackTypeRekordbox)
 
 	// 0x2002 Track Metadata
 	artID := hintArt
-	mm, err := dc.req(kindMetadata, timeout, dbNum(d1), dbNum(tid))
-	if err != nil {
-		fmt.Printf("    0x2002 metadata: ERROR: %s\n", red.err(err))
-		if !redial() {
-			return nil
+	probe2002 := func(menu byte) bool {
+		if dc == nil && !redial() {
+			return false
 		}
-	} else if mm.kind != kindSetupAck || len(mm.args) < 2 {
-		fmt.Printf("    0x2002 metadata: kind=0x%04x\n", mm.kind)
-	} else {
-		rows, rerr := dc.renderMenu(asPlayer, 1, slot, 1, d1, mm.args[1].num, 32, timeout)
+		lbl := "0x2002 metadata"
+		if menu != menuMain {
+			lbl = fmt.Sprintf("0x2002 metadata(m=%d)", menu)
+		}
+		mm, err := dc.reqRaw(buildMetadataReq(dc.tx+1, asPlayer, menu, slot, trackTypeRekordbox, tid), timeout)
+		if err != nil {
+			fmt.Printf("    %s: ERROR: %s\n", lbl, red.err(err))
+			_ = redial()
+			return false
+		}
+		if mm.kind != kindSetupAck || len(mm.args) < 2 {
+			fmt.Printf("    %s: kind=0x%04x\n", lbl, mm.kind)
+			return false
+		}
+		dval := dmst(asPlayer, menu, slot, trackTypeRekordbox)
+		rows, rerr := dc.renderMenu(asPlayer, menu, slot, trackTypeRekordbox, dval, mm.args[1].num, 32, timeout)
 		var kinds []string
 		for _, r := range rows {
 			extra := ""
@@ -1473,9 +1531,22 @@ func probeTrackDetails(ip net.IP, dbPort int, asPlayer, slot byte, tid, hintArt 
 				artID = r.artID
 			}
 		}
-		fmt.Printf("    0x2002 metadata: count=%s err=%s items=[%s]\n", fmtCount(mm.args[1].num), red.err(rerr), strings.Join(kinds, ", "))
-		if rerr != nil && !redial() {
+		fmt.Printf("    %s: count=%s err=%s items=[%s]\n", lbl, fmtCount(mm.args[1].num), red.err(rerr), strings.Join(kinds, ", "))
+		if rerr != nil {
+			_ = redial()
+			return false
+		}
+		return len(rows) > 0
+	}
+	if !probe2002(menuMain) {
+		if dc == nil {
 			return nil
+		}
+		if checkAlt {
+			probe2002(menuSub)
+			if dc == nil {
+				return nil
+			}
 		}
 	}
 

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -363,5 +364,195 @@ func TestRenderMenuHandlesNoResultsSentinel(t *testing.T) {
 	_ = c1.Close()
 	if n := <-wrote; n != 0 {
 		t.Fatalf("renderMenu(0xffffffff) wrote %d bytes to wire, want 0", n)
+	}
+}
+
+func TestBuildMetadataAndTeardownReqBytes(t *testing.T) {
+	if got := dmst(1, menuMain, slotCollection, trackTypeRekordbox); got != 0x01010401 {
+		t.Fatalf("dmst(collection rekordbox) = 0x%08x, want 0x01010401", got)
+	}
+
+	gotMeta := buildMetadataReq(1, 1, menuMain, slotCollection, trackTypeRekordbox, 0x004f2a9b)
+	wantMeta := []byte{
+		0x11, 0x87, 0x23, 0x49, 0xae,
+		0x11, 0x00, 0x00, 0x00, 0x01,
+		0x10, 0x20, 0x02,
+		0x0f, 0x02,
+		0x14, 0x00, 0x00, 0x00, 0x0c,
+		0x06, 0x06, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+		0x11, 0x01, 0x01, 0x04, 0x01,
+		0x11, 0x00, 0x4f, 0x2a, 0x9b,
+	}
+	if !bytes.Equal(gotMeta, wantMeta) {
+		t.Fatalf("buildMetadataReq bytes mismatch:\n got=%x\nwant=%x", gotMeta, wantMeta)
+	}
+	decMeta, err := decodeDBMsg(bytes.NewReader(gotMeta))
+	if err != nil {
+		t.Fatalf("decodeDBMsg(meta): %v", err)
+	}
+	if decMeta.tx != 1 || decMeta.kind != kindMetadata || len(decMeta.args) != 2 ||
+		decMeta.args[0].num != 0x01010401 || decMeta.args[1].num != 0x004f2a9b {
+		t.Fatalf("unexpected decoded meta request: %+v", decMeta)
+	}
+
+	gotTD := buildTeardownReq()
+	wantTD := []byte{
+		0x11, 0x87, 0x23, 0x49, 0xae,
+		0x11, 0xff, 0xff, 0xff, 0xfe,
+		0x10, 0x01, 0x00,
+		0x0f, 0x00,
+		0x14, 0x00, 0x00, 0x00, 0x0c,
+		0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	}
+	if !bytes.Equal(gotTD, wantTD) {
+		t.Fatalf("buildTeardownReq bytes mismatch:\n got=%x\nwant=%x", gotTD, wantTD)
+	}
+	decTD, err := decodeDBMsg(bytes.NewReader(gotTD))
+	if err != nil {
+		t.Fatalf("decodeDBMsg(teardown): %v", err)
+	}
+	if decTD.tx != 0xfffffffe || decTD.kind != kindTeardown || len(decTD.args) != 0 {
+		t.Fatalf("unexpected decoded teardown: %+v", decTD)
+	}
+}
+
+func TestProbeDBSessionSequentialAndTeardown(t *testing.T) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	var mu sync.Mutex
+	active := map[byte]int{}
+	var sessions, teardowns, concurrentErrs, metadataCalls int
+	var errMsgs []string
+
+	dbStr := func(s string) dbField { return dbField{tag: 0x02, str: s} }
+	makeItem := func(parent, id uint32, label string, kind, artID, pos uint32) []dbField {
+		return []dbField{
+			dbNum(parent), dbNum(id),
+			dbNum(uint32(len(label)*2 + 2)), dbStr(label),
+			dbNum(2), dbStr(""),
+			dbNum(kind), dbNum(0), dbNum(artID), dbNum(pos),
+		}
+	}
+
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				var hello [5]byte
+				if _, err := io.ReadFull(c, hello[:]); err != nil {
+					_ = c.Close()
+					return
+				}
+				_, _ = c.Write(hello[:])
+
+				var player byte
+				var registered, sawTeardown bool
+				defer func() {
+					mu.Lock()
+					if registered {
+						active[player]--
+						if !sawTeardown {
+							errMsgs = append(errMsgs, "session closed without 0x0100 teardown")
+						}
+					}
+					mu.Unlock()
+					_ = c.Close()
+				}()
+
+				var rendered [][]dbField
+				for {
+					msg, err := decodeDBMsg(c)
+					if err != nil {
+						return
+					}
+					switch msg.kind {
+					case kindSetup:
+						as := byte(msg.args[0].num)
+						if as == 41 {
+							_, _ = c.Write(encodeDBReq(msg.tx, kindTeardown))
+							return
+						}
+						mu.Lock()
+						if active[as] > 0 {
+							concurrentErrs++
+							errMsgs = append(errMsgs, "concurrent session for same asking player")
+						}
+						active[as]++
+						sessions++
+						mu.Unlock()
+						player, registered = as, true
+						_, _ = c.Write(encodeDBReq(msg.tx, kindSetupAck, dbNum(0), dbNum(17)))
+					case kindTeardown:
+						mu.Lock()
+						sawTeardown = true
+						teardowns++
+						mu.Unlock()
+						return
+					case kindRootMenu:
+						rendered = [][]dbField{makeItem(0, 4, "TRACK", 0x0083, 0, 1)}
+						_, _ = c.Write(encodeDBReq(msg.tx, kindSetupAck, dbNum(uint32(msg.kind)), dbNum(uint32(len(rendered)))))
+					case kindAllTracks:
+						slot := byte(msg.args[0].num >> 8)
+						if slot == slotCollection {
+							rendered = [][]dbField{makeItem(0, 5188251, "Test Track", 0x0004, 5188251, 1)}
+						} else {
+							rendered = nil
+						}
+						_, _ = c.Write(encodeDBReq(msg.tx, kindSetupAck, dbNum(uint32(msg.kind)), dbNum(uint32(len(rendered)))))
+					case kindPlaylist:
+						rendered = nil
+						_, _ = c.Write(encodeDBReq(msg.tx, kindSetupAck, dbNum(uint32(msg.kind)), dbNum(0xffffffff)))
+					case kindMetadata:
+						mu.Lock()
+						metadataCalls++
+						mu.Unlock()
+						if msg.args[0].num != dmst(1, menuMain, slotCollection, trackTypeRekordbox) {
+							mu.Lock()
+							errMsgs = append(errMsgs, "unexpected 0x2002 dmst")
+							mu.Unlock()
+							_, _ = c.Write(encodeDBReq(msg.tx, kindUnavailable, dbNum(uint32(msg.kind))))
+							continue
+						}
+						rendered = [][]dbField{makeItem(0, 5188251, "Test Track", 0x0004, 5188251, 0)}
+						_, _ = c.Write(encodeDBReq(msg.tx, kindSetupAck, dbNum(uint32(msg.kind)), dbNum(uint32(len(rendered)))))
+					case kindTrackInfo:
+						rendered = [][]dbField{makeItem(0, 5188251, "/Music/test.flac", 0x0000, 0, 0)}
+						_, _ = c.Write(encodeDBReq(msg.tx, kindSetupAck, dbNum(uint32(msg.kind)), dbNum(uint32(len(rendered)))))
+					case kindRender:
+						_, _ = c.Write(encodeDBReq(msg.tx, kindRenderHdr, dbNum(1), dbNum(0)))
+						for _, fields := range rendered {
+							_, _ = c.Write(encodeDBReq(msg.tx, kindRenderItem, fields...))
+						}
+						_, _ = c.Write(encodeDBReq(msg.tx, kindRenderFoot))
+					default:
+						_, _ = c.Write(encodeDBReq(msg.tx, kindUnavailable, dbNum(uint32(msg.kind))))
+					}
+				}
+			}(c)
+		}
+	}()
+
+	port := ln.Addr().(*net.TCPAddr).Port
+	paths := probeDBSession(net.IPv4(127, 0, 0, 1), port, 1, 2, 0, time.Second, false, newRedactor())
+	mu.Lock()
+	defer mu.Unlock()
+	if concurrentErrs > 0 || len(errMsgs) > 0 {
+		t.Fatalf("protocol errors: concurrent=%d msgs=%v", concurrentErrs, errMsgs)
+	}
+	if sessions == 0 || teardowns != sessions {
+		t.Fatalf("teardowns=%d sessions=%d, want equal and >0", teardowns, sessions)
+	}
+	if metadataCalls != 1 {
+		t.Fatalf("metadataCalls=%d, want 1", metadataCalls)
+	}
+	if len(paths) == 0 || paths[0] != "/Music/test.flac" {
+		t.Fatalf("paths=%v, want /Music/test.flac", paths)
 	}
 }
