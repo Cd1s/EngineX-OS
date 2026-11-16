@@ -249,6 +249,41 @@ def demucs_available():
     return all(importlib.util.find_spec(m) for m in ('torch', 'demucs', 'julius'))
 
 
+def torch_cuda_indexes(compute_caps):
+    """PyTorch wheel indexes to try, in order, for this machine's NVIDIA GPUs, from
+    `nvidia-smi --query-gpu=compute_cap --format=csv,noheader` ("12.0" per GPU).
+    Blackwell and newer (10.0 and up, an RTX 50 series is 12.0) run only on CUDA
+    12.8 builds; older cards keep the 12.6 build, then 12.4. A driver too old to
+    report the capability belongs to an older card."""
+    majors = []
+    for word in str(compute_caps or '').replace(',', ' ').split():
+        try:
+            majors.append(int(float(word)))
+        except ValueError:
+            pass
+    return ['cu128'] if majors and max(majors) >= 10 else ['cu126', 'cu124']
+
+
+def cuda_check():
+    """'ok' when PyTorch runs a CUDA op here, else why not, in one line. A build
+    for an older CUDA can report the device and still have no kernel for it."""
+    try:
+        import torch
+    except ImportError:
+        return 'PyTorch is not installed'
+    if not torch.version.cuda:
+        return 'PyTorch %s is a CPU-only build' % torch.__version__
+    if not torch.cuda.is_available():
+        return 'PyTorch %s (CUDA %s) finds no usable CUDA device' % (torch.__version__, torch.version.cuda)
+    try:
+        (torch.ones(1, device='cuda') + 1).item()
+    except Exception as exc:
+        major, minor = torch.cuda.get_device_capability(0)
+        return 'PyTorch %s (CUDA %s) cannot run on this GPU (sm_%d%d): %s' % (
+            torch.__version__, torch.version.cuda, major, minor, (str(exc).splitlines() or [''])[0])
+    return 'ok'
+
+
 def resolve_backend(name):
     """auto|hpss|demucs|htdemucs -> hpss or htdemucs."""
     if name == 'hpss' or (name == 'auto' and not demucs_available()):
@@ -433,7 +468,16 @@ def main():
     parser.add_argument('--backend', default=os.environ.get('ENGINEX_STEMS_BACKEND', 'hpss'),
                         choices=('auto', 'hpss', 'demucs', 'htdemucs'))
     parser.add_argument('--print-backend', action='store_true', help='print hpss or htdemucs and exit')
+    parser.add_argument('--torch-index', metavar='CAPS',
+                        help="print the PyTorch CUDA wheel indexes for nvidia-smi's compute_cap output and exit")
+    parser.add_argument('--cuda-check', action='store_true', help="print 'ok' or why PyTorch cannot use CUDA, and exit")
     args = parser.parse_args()
+    if args.torch_index is not None:
+        print(' '.join(torch_cuda_indexes(args.torch_index)))
+        return 0
+    if args.cuda_check:
+        print(cuda_check())
+        return 0
     try:
         backend = resolve_backend(args.backend)
         if args.print_backend:

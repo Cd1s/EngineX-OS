@@ -48,6 +48,15 @@ esac
 if [ "$("$py" "$here/worker.py" --backend "$backend" --print-backend)" = htdemucs ]; then
   # Fetch the model weights now, not during a deck's first session.
   "$py" -c 'from demucs.pretrained import get_model; get_model("htdemucs")'
+  # An NVIDIA GPU that PyTorch cannot use means rendering on the CPU: say so.
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    cuda=$("$py" "$here/worker.py" --cuda-check)
+    if [ "$cuda" != ok ]; then
+      index=$("$py" "$here/worker.py" --torch-index "$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null)" | cut -d' ' -f1)
+      echo "EngineX OS: WARNING: this computer has an NVIDIA GPU, but PyTorch cannot use it: $cuda" >&2
+      echo "EngineX OS: Stems will render on the CPU, many times slower. Fix: $py -m pip install --force-reinstall torch torchaudio --index-url https://download.pytorch.org/whl/$index" >&2
+    fi
+  fi
 fi
 
 relay_bin=${ENGINEX_RELAY:-${SC5000_RELAY:-$(command -v enginex-relay || command -v sc5000-relay || true)}}
