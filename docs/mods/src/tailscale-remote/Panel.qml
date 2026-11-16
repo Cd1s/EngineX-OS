@@ -10,10 +10,13 @@ Rectangle {
     property var status: ({})
     function refresh() {
         var xhr = new XMLHttpRequest()
-        xhr.open("GET", apiBase + "/v1/sc5000/tailscale")
+        xhr.open("GET", apiBase + "/v1/enginex/tailscale")
         xhr.onreadystatechange = function() {
             if (xhr.readyState !== XMLHttpRequest.DONE) return
-            if (xhr.status !== 200) { message = "System API unavailable or authentication required. Open Remote access in the Web Console."; return }
+            if (xhr.status !== 200) {
+                message = "System API unavailable or authentication required. Open Remote access in the Web Console."
+                return
+            }
             status = JSON.parse(xhr.responseText)
             message = status.running ? "Tailscale daemon running" : "Tailscale daemon stopped"
         }

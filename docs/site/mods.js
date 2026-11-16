@@ -40,6 +40,11 @@
         "外部 USB MIDI 控制器映射器（首發支援 Pioneer CDJ-400）：在四軌模式下免切換硬體 Layer 直接操控內部 Deck 3/4，內建連續速度轉盤控制、帶螢幕 ▲▼ 指示的變速推桿軟接管及拔線自動停用保護。",
         "External USB MIDI controller mapper (Pioneer CDJ-400 preset included): controls internal Deck 3/4 directly in 4-deck mode without switching hardware layers, with smooth velocity jog control, tempo soft takeover with on-screen ▲▼ arrows, and unplug auto-stop."),
       models: ALL16, packages: [pkg("midi-controller-mapper", "1.2.0")] },
+    { id: "sampler-sequencer", name: "8-Step Sampler Sequencer", version: "1.0.0", author: "EngineX OS", category: "audio", issues: [293],
+      description: L("8 步 × 8 槽采样步进音序器：支持 Play/Stop、1/4·1/8·1/16 分频、摇摆与 MASTER 碟机节拍跟随，并保存音序样式。",
+        "8 步 × 8 槽取樣步進音序器：支援 Play/Stop、1/4·1/8·1/16 分頻、搖擺與 MASTER 播放機節拍跟隨，並保存音序樣式。",
+        "8-step × 8-slot sampler pattern sequencer: Play/Stop, 1/4·1/8·1/16 division, swing, MASTER deck tempo follow, and persistent pattern storage."),
+      models: ALL16, packages: [pkg("sampler-sequencer", "1.0.0")] },
   ].map((m) => ({ ...m, official: true }));
 
   const UI = {
