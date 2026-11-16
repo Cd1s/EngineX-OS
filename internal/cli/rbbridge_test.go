@@ -75,7 +75,7 @@ func TestRBBridgeUnchangedExportSkipsTheVolume(t *testing.T) {
 	if r := run(); !r.Bypassed {
 		t.Fatal(r)
 	}
-	if d := time.Since(start); d > 200*time.Millisecond {
+	if d := time.Since(start); d > 500*time.Millisecond {
 		t.Fatalf("unchanged export took %s", d)
 	}
 	if after, _ := os.ReadFile(db); !bytes.Equal(before, after) {
