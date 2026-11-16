@@ -41,14 +41,122 @@ static uint64_t test_cache_reserve;
 static char test_eio_path[PATH_MAX];
 static int test_lstat(const char *path,struct stat *st){if(*test_eio_path&&!strcmp(path,test_eio_path)){errno=EIO;return -1;}return lstat(path,st);}
 #define LSTAT test_lstat
+#include <sys/utsname.h>
+#include <unistd.h>
+struct libmnt_context;
+static int test_real_mount(struct libmnt_context *c);
+static int test_reset_context(struct libmnt_context *c);
+static int test_set_source(struct libmnt_context *c,const char *src);
+static int test_set_target(struct libmnt_context *c,const char *tgt);
+static int test_disable_helpers(struct libmnt_context *c,int disable);
+static int test_set_fstype_pattern(struct libmnt_context *c,const char *pat);
+static int test_set_fstype(struct libmnt_context *c,const char *ft);
+static int test_set_options(struct libmnt_context *c,const char *opts);
+static int test_enable_lazy(struct libmnt_context *c,int enable);
+static int test_get_mflags(struct libmnt_context *c,unsigned long *flags);
+static int test_set_mflags(struct libmnt_context *c,unsigned long flags);
+static void test_free_context(struct libmnt_context *c);
+static int test_sys_mount(const char *src,const char *tgt,const char *ft,unsigned long flags,const void *data);
+static int test_sys_fsopen(const char *fsname,unsigned int flags);
+static int test_sys_fsconfig(int fd,unsigned int cmd,const char *key,const void *val,int aux);
+#define REAL_MNT_RESET_CONTEXT() test_reset_context
+#define REAL_MNT_CONTEXT_SET_SOURCE() test_set_source
+#define REAL_MNT_CONTEXT_SET_TARGET() test_set_target
+#define REAL_MNT_CONTEXT_DISABLE_HELPERS() test_disable_helpers
+#define REAL_MNT_CONTEXT_SET_FSTYPE_PATTERN() test_set_fstype_pattern
+#define REAL_MNT_CONTEXT_SET_FSTYPE() test_set_fstype
+#define REAL_MNT_CONTEXT_SET_OPTIONS() test_set_options
+#define REAL_MNT_CONTEXT_ENABLE_LAZY() test_enable_lazy
+#define REAL_MNT_CONTEXT_GET_MFLAGS() test_get_mflags
+#define REAL_MNT_CONTEXT_SET_MFLAGS() test_set_mflags
+#define REAL_MNT_FREE_CONTEXT() test_free_context
+#define REAL_MOUNT() test_sys_mount
+#define REAL_FSOPEN() test_sys_fsopen
+#define REAL_FSCONFIG() test_sys_fsconfig
+static int test_platform_mode_val = 0;
+#define HFS_PLATFORM_MODE() test_platform_mode_val
+static char test_fsck_bin[PATH_MAX],test_gen1_marker[PATH_MAX],test_az04_dt[PATH_MAX];
+static char test_proc_fs[PATH_MAX],test_proc_mi[PATH_MAX],test_ko_path[PATH_MAX],test_hfs_rw_target[PATH_MAX];
+static const char *test_fsck_path(void){return *test_fsck_bin&&!access(test_fsck_bin,X_OK)?test_fsck_bin:NULL;}
+#define FSCK_HFSPLUS_PATH test_fsck_path
+#define GEN1_ROOTFS_MARKER test_gen1_marker
+#define AZ04_UFSD_DT_PATH test_az04_dt
+#define PROC_FILESYSTEMS_PATH test_proc_fs
+#define PROC_MOUNTINFO_PATH test_proc_mi
+#define HFSPLUSX_MODULE_PATH test_ko_path
+static char test_uname_release[65] = "6.18.57-az01-2026-10-15-rt6";
+static int test_uname(struct utsname *u){memset(u,0,sizeof *u);snprintf(u->release,sizeof u->release,"%s",test_uname_release);return 0;}
+#define HOOK_UNAME test_uname
+static int test_finit_rc = 0, test_finit_errno = 0, test_finit_calls = 0;
+static int test_finit_module(int fd){
+    (void)fd;test_finit_calls++;
+    if(test_finit_rc){errno=test_finit_errno?test_finit_errno:ENOEXEC;return -1;}
+    if(*test_proc_fs){FILE *f=fopen(test_proc_fs,"a");if(f){fprintf(f,"\thfsplusx\n");fclose(f);}}
+    return 0;
+}
+#define FINIT_MODULE(fd) test_finit_module(fd)
+static int test_hfs_rw_mounted(const char *target){return *test_hfs_rw_target&&target&&!strcmp(target,test_hfs_rw_target);}
+#define HFS_RW_MOUNTED test_hfs_rw_mounted
 #include "edisksd_hook.c"
 #include <assert.h>
 #include <ftw.h>
-struct libmnt_context { const char *target,*source; int status,fail; const char *disk; };
+static int test_mock_hfs_syscalls,test_fsconfig_ro_seen,test_fsconfig_rw_seen;
+static unsigned long test_last_sys_flags;
+static char test_last_sys_fstype[64];
+static int test_sys_mount(const char *src,const char *tgt,const char *ft,unsigned long flags,const void *data){
+    if(test_mock_hfs_syscalls&&ft&&(!strcmp(ft,"hfsplus")||!strcmp(ft,"hfsplusx"))){
+        test_last_sys_flags=flags;
+        snprintf(test_last_sys_fstype,sizeof test_last_sys_fstype,"%s",ft);
+        return 0;
+    }
+    int (*real)(const char *,const char *,const char *,unsigned long,const void *)=dlsym(RTLD_NEXT,"mount");
+    return real?real(src,tgt,ft,flags,data):-1;
+}
+static int test_sys_fsopen(const char *fsname,unsigned int flags){
+    if(test_mock_hfs_syscalls){(void)fsname;(void)flags;return 777;}
+    int (*real)(const char *,unsigned int)=dlsym(RTLD_NEXT,"fsopen");
+    return real?real(fsname,flags):-1;
+}
+static int test_sys_fsconfig(int fd,unsigned int cmd,const char *key,const void *val,int aux){
+    if(test_mock_hfs_syscalls&&fd==777){
+        if(cmd==FSCONFIG_SET_FLAG&&key&&!strcmp(key,"ro"))test_fsconfig_ro_seen++;
+        if(cmd==FSCONFIG_SET_FLAG&&key&&!strcmp(key,"rw"))test_fsconfig_rw_seen++;
+        return 0;
+    }
+    int (*real)(int,unsigned int,const char *,const void *,int)=dlsym(RTLD_NEXT,"fsconfig");
+    return real?real(fd,cmd,key,val,aux):-1;
+}
+struct libmnt_context {
+    const char *target,*source;
+    char target_buf[PATH_MAX],source_buf[PATH_MAX];
+    int status,fail,fail_rw_once,lazy,disable_helpers,mount_failed,invoke_sys_mount;
+    unsigned long mflags,last_mount_mflags;
+    const char *disk;
+    char fstype_pattern[64],fstype[64],options[512];
+    char last_mount_fstype[64],last_mount_opts[512];
+    int last_umount_lazy,last_mount_disable_helpers;
+    unsigned mount_calls;
+};
 const char *mnt_context_get_target(struct libmnt_context *c){return c->target;}
 const char *mnt_context_get_source(struct libmnt_context *c){return c->source;}
 int mnt_context_get_status(struct libmnt_context *c){return c->status;}
 int mnt_context_set_syscall_status(struct libmnt_context *c,int status){c->status=status;return 0;}
+static int test_reset_context(struct libmnt_context *c){
+    c->target=NULL;c->source=NULL;c->target_buf[0]=0;c->source_buf[0]=0;
+    c->fstype_pattern[0]=0;c->fstype[0]=0;c->options[0]=0;
+    c->status=0;c->lazy=0;c->disable_helpers=0;c->mflags=0;c->mount_failed=0;
+    return 0;
+}
+static int test_set_source(struct libmnt_context *c,const char *src){snprintf(c->source_buf,sizeof c->source_buf,"%s",src?src:"");c->source=src?c->source_buf:NULL;return 0;}
+static int test_set_target(struct libmnt_context *c,const char *tgt){snprintf(c->target_buf,sizeof c->target_buf,"%s",tgt?tgt:"");c->target=tgt?c->target_buf:NULL;return 0;}
+static int test_disable_helpers(struct libmnt_context *c,int disable){c->disable_helpers=disable;return 0;}
+static int test_set_fstype_pattern(struct libmnt_context *c,const char *pat){snprintf(c->fstype_pattern,sizeof c->fstype_pattern,"%s",pat?pat:"");return 0;}
+static int test_set_fstype(struct libmnt_context *c,const char *ft){snprintf(c->fstype,sizeof c->fstype,"%s",ft?ft:"");return 0;}
+static int test_set_options(struct libmnt_context *c,const char *opts){snprintf(c->options,sizeof c->options,"%s",opts?opts:"");return 0;}
+static int test_enable_lazy(struct libmnt_context *c,int enable){c->lazy=enable;return 0;}
+static int test_get_mflags(struct libmnt_context *c,unsigned long *flags){*flags=c->mflags;return 0;}
+static int test_set_mflags(struct libmnt_context *c,unsigned long flags){c->mflags=flags;return 0;}
+static void test_free_context(struct libmnt_context *c){(void)c;}
 static const char *test_rb_bridge_path(void){while(test_bridge_hangs)pause();return test_rb_bridge;}
 static char test_disk[PATH_MAX];static int test_disk_ro;
 // Set around a plain empty stick's mount: the flag must stay unpublished while it runs.
@@ -56,17 +164,32 @@ static int observing_not_preparing;
 static void expect_not_preparing(void);
 static int test_real_mount(struct libmnt_context *c) {
     if(observing_not_preparing)expect_not_preparing();
-    if(mount(c->disk?c->disk:test_disk,c->target,NULL,MS_BIND,NULL))return -errno;
+    c->mount_calls++;
+    if(c->mount_failed){c->status=0;return 0;} // real libmount skips mounting if context was not reset after a failed mount
+    snprintf(c->last_mount_fstype,sizeof c->last_mount_fstype,"%s",*c->fstype?c->fstype:c->fstype_pattern);
+    snprintf(c->last_mount_opts,sizeof c->last_mount_opts,"%s",c->options);
+    c->last_mount_disable_helpers=c->disable_helpers;
+    c->last_mount_mflags=c->mflags;
+    if(c->fail_rw_once&&has_opt_token(c->options,"rw")){c->fail_rw_once--;c->mount_failed=1;c->status=0;errno=EINVAL;return -EINVAL;}
+    if(c->invoke_sys_mount) {
+        test_mock_hfs_syscalls=1;test_fsconfig_ro_seen=0;test_fsconfig_rw_seen=0;test_last_sys_flags=0;test_last_sys_fstype[0]=0;
+        mount(c->source,c->target,c->last_mount_fstype,c->mflags,c->options);
+        int fd=fsopen(c->last_mount_fstype,FSOPEN_CLOEXEC);
+        if(fd>=0){fsconfig(fd,FSCONFIG_SET_FLAG,"rw",NULL,0);fsconfig(fd,FSCONFIG_CMD_CREATE,NULL,NULL,0);}
+        test_mock_hfs_syscalls=0;
+    }
+    if(mount(c->disk?c->disk:test_disk,c->target,NULL,MS_BIND,NULL)){c->mount_failed=1;return -errno;}
     // As libmount does for a mount with a userspace option: a line in <UTAB_DIR>/utab.
     char utab[PATH_MAX+8];snprintf(utab,sizeof utab,"%s/utab",test_utab);
     int fd=open(utab,O_WRONLY|O_CREAT|O_APPEND|O_CLOEXEC,0600);
     if(fd>=0){if(write(fd,c->target,strlen(c->target))<0||write(fd,"\n",1)<0){}close(fd);}
-    if(test_disk_ro&&mount(NULL,c->target,NULL,MS_BIND|MS_REMOUNT|MS_RDONLY,NULL))return -errno;
+    if((test_disk_ro||has_opt_token(c->options,"ro"))&&mount(NULL,c->target,NULL,MS_BIND|MS_REMOUNT|MS_RDONLY,NULL))return -errno;
     c->status=1;return 0;
 }
 static unsigned real_calls;
 static int real_unmount(struct libmnt_context *c) {
     real_calls++;
+    c->last_umount_lazy=c->lazy;
     if(c->fail){errno=EBUSY;return -EBUSY;}
     return umount2(c->target,UMOUNT_NOFOLLOW);
 }
@@ -1092,13 +1215,284 @@ static void test_prepare_state_lifecycle(const char *root) {
     puts("USB preparing: conversion, failed heal, SIGKILL timeout, empty HFS view and empty stick: PASS");
 }
 
+static void put_be16(uint8_t *p,uint16_t v){p[0]=(uint8_t)(v>>8);p[1]=(uint8_t)v;}
+static void put_be32(uint8_t *p,uint32_t v){p[0]=(uint8_t)(v>>24);p[1]=(uint8_t)(v>>16);p[2]=(uint8_t)(v>>8);p[3]=(uint8_t)v;}
+static void put_be64(uint8_t *p,uint64_t v){put_be32(p,(uint32_t)(v>>32));put_be32(p+4,(uint32_t)v);}
+static void put_le32(uint8_t *p,uint32_t v){p[0]=(uint8_t)v;p[1]=(uint8_t)(v>>8);p[2]=(uint8_t)(v>>16);p[3]=(uint8_t)(v>>24);}
+static void put_le64(uint8_t *p,uint64_t v){put_le32(p,(uint32_t)v);put_le32(p+4,(uint32_t)(v>>32));}
+
+static void write_hfs_img(const char *path,uint32_t attr,uint32_t jflags,int be_jh,uint64_t j_start,uint64_t j_end,int dirty_needinit) {
+    uint8_t *img=calloc(65536,1);assert(img);
+    uint8_t *vh=img+1024;
+    put_be16(vh+0,0x482b);put_be16(vh+2,4);put_be32(vh+4,attr);
+    put_be32(vh+12,(attr&(1u<<13))?2:0); // jinfo_blk=2 -> 8192
+    put_be32(vh+40,4096);put_be32(vh+44,16); // blocksize=4096, total_blocks=16 (64 KiB)
+    if(attr&(1u<<13)) {
+        uint8_t *jib=img+8192;
+        put_be32(jib+0,jflags);
+        put_be64(jib+36,12288); // joff=12288
+        put_be64(jib+44,8192);  // jsize=8192
+        uint8_t *jh=img+12288;
+        if(jflags&4u) {
+            if(dirty_needinit)jh[0]=0xaa;
+        } else if(be_jh) {
+            put_be32(jh+0,0x4a4e4c78u);put_be32(jh+4,0x12345678u);
+            put_be64(jh+8,j_start);put_be64(jh+16,j_end);put_be64(jh+24,8192);put_be32(jh+40,4096);
+        } else {
+            put_le32(jh+0,0x4a4e4c78u);put_le32(jh+4,0x12345678u);
+            put_le64(jh+8,j_start);put_le64(jh+16,j_end);put_le64(jh+24,8192);put_le32(jh+40,4096);
+        }
+    }
+    int fd=open(path,O_WRONLY|O_CREAT|O_TRUNC|O_NOFOLLOW|O_CLOEXEC,0600);assert(fd>=0);
+    assert(write(fd,img,65536)==65536);close(fd);free(img);
+}
+
+static void write_fake_ko(const char *path,uint16_t machine,const char *vermagic,const char *modname) {
+    char shstr[32]="\0.shstrtab\0.modinfo";
+    char modinfo[256];size_t mi_len=0;
+    if(vermagic){int n=snprintf(modinfo+mi_len,sizeof modinfo-mi_len,"vermagic=%s",vermagic);assert(n>0);mi_len+=(size_t)n+1;}
+    if(modname){int n=snprintf(modinfo+mi_len,sizeof modinfo-mi_len,"name=%s",modname);assert(n>0);mi_len+=(size_t)n+1;}
+    if(!mi_len){modinfo[0]=0;mi_len=1;}
+    Elf32_Ehdr eh={0};
+    memcpy(eh.e_ident,ELFMAG,SELFMAG);
+    eh.e_ident[EI_CLASS]=ELFCLASS32;eh.e_ident[EI_DATA]=ELFDATA2LSB;eh.e_ident[EI_VERSION]=EV_CURRENT;
+    eh.e_type=ET_REL;eh.e_machine=machine;eh.e_version=EV_CURRENT;
+    eh.e_shentsize=sizeof(Elf32_Shdr);eh.e_shnum=3;eh.e_shstrndx=1;
+    uint32_t off_str=sizeof eh,off_mi=off_str+sizeof shstr,off_sh=(off_mi+(uint32_t)mi_len+3u)&~3u;
+    eh.e_shoff=off_sh;
+    Elf32_Shdr sh[3]={0};
+    sh[1].sh_name=1;sh[1].sh_type=SHT_STRTAB;sh[1].sh_offset=off_str;sh[1].sh_size=sizeof shstr;
+    sh[2].sh_name=11;sh[2].sh_type=SHT_PROGBITS;sh[2].sh_offset=off_mi;sh[2].sh_size=(uint32_t)mi_len;
+    uint8_t buf[1024]={0};
+    memcpy(buf,&eh,sizeof eh);memcpy(buf+off_str,shstr,sizeof shstr);
+    memcpy(buf+off_mi,modinfo,mi_len);memcpy(buf+off_sh,sh,sizeof sh);
+    int fd=open(path,O_WRONLY|O_CREAT|O_TRUNC|O_NOFOLLOW|O_CLOEXEC,0600);assert(fd>=0);
+    size_t total=off_sh+sizeof sh;
+    assert(write(fd,buf,total)==(ssize_t)total);close(fd);
+}
+
+static void test_hfs_rw_unit(const char *root) {
+    char img[PATH_MAX],ko[PATH_MAX],mi[PATH_MAX],opts[128],ft[64];
+    int jnl=99;
+    join(img,root,"unit-clean.img");write_hfs_img(img,(1u<<8),0,0,0,0,0);
+    assert(!hfs_check_volume_and_journal(img,&jnl)&&jnl==0);
+    join(img,root,"unit-jnl-empty-le.img");write_hfs_img(img,(1u<<8)|(1u<<13),1,0,4096,4096,0);
+    assert(!hfs_check_volume_and_journal(img,&jnl)&&jnl==1);
+    join(img,root,"unit-jnl-empty-be.img");write_hfs_img(img,(1u<<8)|(1u<<13),1,1,4096,4096,0);
+    assert(!hfs_check_volume_and_journal(img,&jnl)&&jnl==1);
+    join(img,root,"unit-jnl-needinit.img");write_hfs_img(img,(1u<<8)|(1u<<13),5,0,0,0,0);
+    assert(!hfs_check_volume_and_journal(img,&jnl)&&jnl==1);
+    join(img,root,"unit-jnl-needinit-dirty.img");write_hfs_img(img,(1u<<8)|(1u<<13),5,0,0,0,1);
+    assert(hfs_check_volume_and_journal(img,&jnl)!=0);
+    join(img,root,"unit-jnl-dirty.img");write_hfs_img(img,(1u<<8)|(1u<<13),1,0,4096,8192,0);
+    assert(hfs_check_volume_and_journal(img,&jnl)!=0);
+    join(img,root,"unit-jnl-ext.img");write_hfs_img(img,(1u<<8)|(1u<<13),3,0,4096,4096,0);
+    assert(hfs_check_volume_and_journal(img,&jnl)!=0);
+    join(img,root,"unit-unclean.img");write_hfs_img(img,0,0,0,0,0,0);
+    assert(hfs_check_volume_and_journal(img,&jnl)!=0);
+    join(img,root,"unit-softlock.img");write_hfs_img(img,(1u<<8)|(1u<<15),0,0,0,0,0);
+    assert(hfs_check_volume_and_journal(img,&jnl)!=0);
+
+    join(ko,root,"ok.ko");write_fake_ko(ko,EM_ARM,"6.18.57-az01-2026-10-15-rt6 SMP preempt_rt ARMv7 p2v8 ","hfsplusx");
+    int fd=open(ko,O_RDONLY);assert(fd>=0);assert(!check_ko_vermagic(fd,"6.18.57-az01-2026-10-15-rt6"));close(fd);
+    join(ko,root,"badver.ko");write_fake_ko(ko,EM_ARM,"6.18.57-az01-other SMP preempt_rt ARMv7 p2v8 ","hfsplusx");
+    fd=open(ko,O_RDONLY);assert(fd>=0);assert(check_ko_vermagic(fd,"6.18.57-az01-2026-10-15-rt6")!=0);close(fd);
+    join(ko,root,"prefixtrap.ko");write_fake_ko(ko,EM_ARM,"6.18.57-az01-2026-10-15-rt6-extra SMP ","hfsplusx");
+    fd=open(ko,O_RDONLY);assert(fd>=0);assert(check_ko_vermagic(fd,"6.18.57-az01-2026-10-15-rt6")!=0);close(fd);
+
+    assert(!build_hfs_opts(opts,sizeof opts,"nosuid,ro,utf8,nodev",1,0)&&!strcmp(opts,"nosuid,nodev,rw"));
+    assert(!build_hfs_opts(opts,sizeof opts,"nosuid,nodev",1,1)&&!strcmp(opts,"nosuid,nodev,force,rw"));
+    assert(!build_hfs_opts(opts,sizeof opts,"nosuid,force,rw",0,0)&&!strcmp(opts,"nosuid,ro"));
+    assert(!has_opt_token("errors=remount-ro,nosuid","ro"));
+    assert(has_opt_token("nosuid,ro,nodev","ro"));
+
+    join(mi,root,"unit-mountinfo");
+    write_file(mi,"10 1 8:1 / /media/My\\040Stick rw,nosuid - ufsd /dev/sda1 rw\n"
+                  "11 1 8:2 / /media/Other rw,nosuid - hfsplusx /dev/sdb1 rw\n");
+    snprintf(test_proc_mi,sizeof test_proc_mi,"%s",mi);
+    assert(!mountinfo_fstype("/media/My Stick",ft,sizeof ft)&&!strcmp(ft,"ufsd"));
+    assert(!mountinfo_fstype("/media/Other",ft,sizeof ft)&&!strcmp(ft,"hfsplusx"));
+    test_proc_mi[0]=0;
+    test_mock_hfs_syscalls=1;test_last_sys_flags=0;test_fsconfig_ro_seen=0;test_fsconfig_rw_seen=0;
+    assert(!mount("/dev/sda1","/media/X","hfsplus",0,NULL));
+    assert((test_last_sys_flags&MS_RDONLY)&&!strcmp(test_last_sys_fstype,"hfsplus"));
+    test_last_sys_flags=0;
+    assert(!mount("/dev/sda1","/media/X","hfsplusx",0,NULL));
+    assert((test_last_sys_flags&MS_RDONLY)&&!strcmp(test_last_sys_fstype,"hfsplusx"));
+    int ffd=fsopen("hfsplus",FSOPEN_CLOEXEC);assert(ffd>=0);
+    assert(!fsconfig(ffd,FSCONFIG_SET_FLAG,"rw",NULL,0));
+    assert(!fsconfig(ffd,FSCONFIG_CMD_CREATE,NULL,NULL,0));
+    assert(test_fsconfig_rw_seen==0&&test_fsconfig_ro_seen==2);
+    test_mock_hfs_syscalls=0;
+    puts("HFS+ RW unit checks (journal/header/vermagic/opts/mountinfo/MS_RDONLY): PASS");
+}
+
+static void test_hfs_rw_policy(const char *root) {
+    assert(!mount(NULL,"/",NULL,MS_REC|MS_PRIVATE,NULL));
+    char disk[PATH_MAX],target[PATH_MAX],img[PATH_MAX],fsck[PATH_MAX],ko[PATH_MAX],marker[PATH_MAX],procfs[PATH_MAX],dt[PATH_MAX],p[PATH_MAX];
+    join(disk,root,"hfspol-disk");join(p,disk,"PIONEER/rekordbox");assert(!make_dirs(p));
+    join(p,disk,"PIONEER/rekordbox/export.pdb");write_file(p,"pdb\n");
+    join(target,MEDIA_ROOT,"HFSPOL");assert(!make_dirs(target));
+    join(test_rb_bridge,root,"hfspol-bridge");write_file(test_rb_bridge,"#!/bin/sh\nexit 0\n");assert(!chmod(test_rb_bridge,0700));
+    join(fsck,root,"hfspol-fsck");join(ko,root,"hfspol-ko");join(marker,root,"hfspol-gen1");
+    join(procfs,root,"hfspol-procfs");join(dt,root,"hfspol-dt");
+    snprintf(test_disk,sizeof test_disk,"%s",disk);
+    snprintf(test_fsck_bin,sizeof test_fsck_bin,"%s",fsck);
+    snprintf(test_ko_path,sizeof test_ko_path,"%s",ko);
+    snprintf(test_gen1_marker,sizeof test_gen1_marker,"%s",marker);
+    snprintf(test_proc_fs,sizeof test_proc_fs,"%s",procfs);
+    snprintf(test_az04_dt,sizeof test_az04_dt,"%s",dt);
+
+    // 1. Gen-1 clean non-journaled HFS+: fsck -n -f passes -> loads hfsplusx.ko (matching vermagic) -> mounts hfsplusx rw without view.
+    write_file(marker,"v5.3.0.5\n");write_file(procfs,"nodev\ttmpfs\n\text4\n");
+    write_file(fsck,"#!/bin/sh\n[ \"$1\" = -n ] && [ \"$2\" = -f ] || exit 9\necho '** The volume TEST appears to be OK.'\nexit 0\n");
+    assert(!chmod(fsck,0700));
+    write_fake_ko(ko,EM_ARM,"6.18.57-az01-2026-10-15-rt6 SMP preempt_rt ARMv7 p2v8 ","hfsplusx");
+    join(img,root,"pol-clean.img");write_hfs_img(img,(1u<<8),0,0,0,0,0);
+    test_platform_mode_val=1;test_finit_rc=0;test_finit_calls=0;test_disk_ro=0;test_hfs_target[0]=0;
+    struct libmnt_context c={.target=target,.source=img,.invoke_sys_mount=1};
+    mnt_context_set_fstype_pattern(&c,"hfsplus");mnt_context_set_options(&c,"nosuid,nodev,uhelper=edisksd");
+    unsigned before_views=observed_prepare_views;
+    assert(!mnt_context_mount(&c)&&c.status==1);
+    assert(!strcmp(c.last_mount_fstype,"hfsplusx")&&has_opt_token(c.last_mount_opts,"rw")&&!has_opt_token(c.last_mount_opts,"force"));
+    assert(!(c.last_mount_mflags&MS_RDONLY)&&!(test_last_sys_flags&MS_RDONLY)&&test_fsconfig_ro_seen==0);
+    assert(test_finit_calls==1&&observed_prepare_views==before_views);
+    expect_not_preparing();
+    // Clean eject on RW HFS+: MNT_DETACH / lazy is forced off even if edisksd enables lazy.
+    snprintf(test_hfs_rw_target,sizeof test_hfs_rw_target,"%s",target);
+    mnt_context_enable_lazy(&c,1);assert(c.lazy==0);
+    c.lazy=1;assert(!unmount_dispatch(&c,real_unmount)&&c.last_umount_lazy==0);
+    c.lazy=1;c.fail=1;assert(unmount_dispatch(&c,real_unmount)==-EBUSY&&c.last_umount_lazy==0);
+    c.fail=0;test_hfs_rw_target[0]=0;mnt_free_context(&c);
+
+    // 2. Gen-1 already-loaded hfsplusx (e.g. insmod /tmp/hfsplusx.ko) works without another finit_module.
+    test_ko_path[0]=0;
+    memset(&c,0,sizeof c);c.target=target;c.source=img;
+    mnt_context_set_fstype_pattern(&c,"hfsplus");mnt_context_set_options(&c,"nosuid");
+    assert(!mnt_context_mount(&c)&&c.status==1&&test_finit_calls==1&&!strcmp(c.last_mount_fstype,"hfsplusx"));
+    assert(!unmount_dispatch(&c,real_unmount));mnt_free_context(&c);
+    snprintf(test_ko_path,sizeof test_ko_path,"%s",ko);
+
+    // 3. Gen-1 vermagic mismatch & insmod failure both fail closed to ro view.
+    write_file(procfs,"nodev\ttmpfs\n");
+    write_fake_ko(ko,EM_ARM,"6.18.57-mismatch SMP ARMv7 ","hfsplusx");
+    memset(&c,0,sizeof c);c.target=target;c.source=img;
+    mnt_context_set_fstype_pattern(&c,"hfsplus");mnt_context_set_options(&c,"nosuid");
+    snprintf(test_hfs_target,sizeof test_hfs_target,"%s",target);
+    assert(!mnt_context_mount(&c)&&c.status==1&&test_finit_calls==1);
+    assert(!strcmp(c.last_mount_fstype,"hfsplus")&&has_opt_token(c.last_mount_opts,"ro"));
+    assert(!unmount_dispatch(&c,real_unmount));mnt_free_context(&c);
+
+    write_fake_ko(ko,EM_ARM,"6.18.57-az01-2026-10-15-rt6 SMP preempt_rt ARMv7 p2v8 ","hfsplusx");
+    test_finit_rc=-1;test_finit_errno=ENOEXEC;
+    memset(&c,0,sizeof c);c.target=target;c.source=img;
+    mnt_context_set_fstype_pattern(&c,"hfsplus");mnt_context_set_options(&c,"nosuid");
+    assert(!mnt_context_mount(&c)&&c.status==1&&test_finit_calls==2);
+    assert(!strcmp(c.last_mount_fstype,"hfsplus")&&has_opt_token(c.last_mount_opts,"ro"));
+    assert(!unmount_dispatch(&c,real_unmount));mnt_free_context(&c);
+    test_finit_rc=0;test_hfs_target[0]=0;
+
+    // 4. fsck non-zero exit, abnormal exit-0 output, and missing fsck binary all fail closed to ro.
+    write_file(fsck,"#!/bin/sh\necho 'Volume corrupt'\nexit 8\n");
+    test_platform_mode_val=2;
+    memset(&c,0,sizeof c);c.target=target;c.source=img;
+    mnt_context_set_fstype_pattern(&c,"hfsplus");mnt_context_set_options(&c,"nosuid");
+    assert(!mnt_context_mount(&c)&&has_opt_token(c.last_mount_opts,"ro"));
+    assert(!unmount_dispatch(&c,real_unmount));mnt_free_context(&c);
+
+    write_file(fsck,"#!/bin/sh\necho 'fsck_hfs: Volume is journaled.  No checking performed.'\nexit 0\n");
+    memset(&c,0,sizeof c);c.target=target;c.source=img;
+    mnt_context_set_fstype_pattern(&c,"hfsplus");mnt_context_set_options(&c,"nosuid");
+    assert(!mnt_context_mount(&c)&&has_opt_token(c.last_mount_opts,"ro"));
+    assert(!unmount_dispatch(&c,real_unmount));mnt_free_context(&c);
+
+    test_fsck_bin[0]=0;
+    memset(&c,0,sizeof c);c.target=target;c.source=img;
+    mnt_context_set_fstype_pattern(&c,"hfsplus");mnt_context_set_options(&c,"nosuid");
+    assert(!mnt_context_mount(&c)&&has_opt_token(c.last_mount_opts,"ro"));
+    assert(!unmount_dispatch(&c,real_unmount));mnt_free_context(&c);
+
+    // 5. AZ04 journaled empty -> force,rw; journaled non-empty -> ro; rw mount failure -> ro fallback.
+    snprintf(test_fsck_bin,sizeof test_fsck_bin,"%s",fsck);
+    write_file(fsck,"#!/bin/sh\necho '** The volume TEST appears to be OK.'\nexit 0\n");
+    join(img,root,"pol-jnl-empty.img");write_hfs_img(img,(1u<<8)|(1u<<13),1,0,4096,4096,0);
+    memset(&c,0,sizeof c);c.target=target;c.source=img;
+    mnt_context_set_fstype_pattern(&c,"hfsplus");mnt_context_set_options(&c,"nosuid");
+    assert(!mnt_context_mount(&c)&&!strcmp(c.last_mount_fstype,"hfsplus")&&
+           has_opt_token(c.last_mount_opts,"force")&&has_opt_token(c.last_mount_opts,"rw"));
+    assert(!unmount_dispatch(&c,real_unmount));mnt_free_context(&c);
+
+    join(img,root,"pol-jnl-dirty.img");write_hfs_img(img,(1u<<8)|(1u<<13),1,0,4096,8192,0);
+    memset(&c,0,sizeof c);c.target=target;c.source=img;
+    mnt_context_set_fstype_pattern(&c,"hfsplus");mnt_context_set_options(&c,"nosuid");
+    assert(!mnt_context_mount(&c)&&has_opt_token(c.last_mount_opts,"ro")&&!has_opt_token(c.last_mount_opts,"force"));
+    assert(!unmount_dispatch(&c,real_unmount));mnt_free_context(&c);
+
+    join(img,root,"pol-clean.img");
+    memset(&c,0,sizeof c);c.fail_rw_once=1;c.invoke_sys_mount=1;
+    test_set_source(&c,img);test_set_target(&c,target);
+    mnt_context_disable_helpers(&c,1);
+    mnt_context_set_fstype_pattern(&c,"hfsplus");mnt_context_set_options(&c,"nosuid");
+    assert(!mnt_context_mount(&c)&&c.status==1&&c.mount_calls>=2&&
+           has_opt_token(c.last_mount_opts,"ro")&&(c.last_mount_mflags&MS_RDONLY)&&
+           (test_last_sys_flags&MS_RDONLY)&&test_fsconfig_rw_seen==0&&test_fsconfig_ro_seen>=2&&
+           c.last_mount_disable_helpers==1&&c.source&&!strcmp(c.source,img)&&c.target&&!strcmp(c.target,target));
+    assert(!unmount_dispatch(&c,real_unmount));
+    // Reusing the same context via mnt_reset_context must drop prior HFS+ fstype/options state.
+    mnt_reset_context(&c);
+    test_set_source(&c,img);test_set_target(&c,target);
+    mnt_context_set_fstype_pattern(&c,"ext4");mnt_context_set_options(&c,"nosuid");
+    assert(!mnt_context_mount(&c)&&c.status==1&&!strcmp(c.last_mount_fstype,"ext4")&&!strcmp(c.last_mount_opts,"nosuid"));
+    assert(!unmount_dispatch(&c,real_unmount));mnt_free_context(&c);
+
+    // 6. AZ04 DT flag coexistence: ufsd mounts stay untouched; hfsplus still mounts stock rw.
+    write_file(dt,"1\n");
+    memset(&c,0,sizeof c);c.target=target;c.source=img;c.invoke_sys_mount=1;
+    mnt_context_set_fstype_pattern(&c,"ufsd");mnt_context_set_options(&c,"utf8,nosuid");
+    assert(!mnt_context_mount(&c)&&!strcmp(c.last_mount_fstype,"ufsd")&&!strcmp(c.last_mount_opts,"utf8,nosuid"));
+    assert(!unmount_dispatch(&c,real_unmount));mnt_free_context(&c);
+    memset(&c,0,sizeof c);c.target=target;c.source=img;c.invoke_sys_mount=1;
+    mnt_context_set_fstype_pattern(&c,"hfsplus");mnt_context_set_options(&c,"nosuid");
+    assert(!mnt_context_mount(&c)&&!strcmp(c.last_mount_fstype,"hfsplus")&&has_opt_token(c.last_mount_opts,"rw")&&
+           !(c.last_mount_mflags&MS_RDONLY)&&!(test_last_sys_flags&MS_RDONLY));
+    assert(!unmount_dispatch(&c,real_unmount));mnt_free_context(&c);
+
+    // 7. Gen-2 armhf (no GEN1_ROOTFS_MARKER) forces MS_RDONLY on non-journaled HFS+ without calling fsck or insmod.
+    unlink(marker);
+    write_file(fsck,"#!/bin/sh\nexit 99\n");
+    test_platform_mode_val=1;int finit_before=test_finit_calls;
+    memset(&c,0,sizeof c);c.target=target;c.source=img;c.invoke_sys_mount=1;
+    mnt_context_set_fstype_pattern(&c,"hfsplus");mnt_context_set_options(&c,"nosuid");
+    assert(!mnt_context_mount(&c)&&!strcmp(c.last_mount_fstype,"hfsplus")&&
+           has_opt_token(c.last_mount_opts,"ro")&&!has_opt_token(c.last_mount_opts,"rw")&&
+           (c.last_mount_mflags&MS_RDONLY)&&(test_last_sys_flags&MS_RDONLY)&&
+           test_fsconfig_rw_seen==0&&test_fsconfig_ro_seen>=2);
+    struct statvfs sv;assert(!statvfs(target,&sv)&&(sv.f_flag&ST_RDONLY));
+    assert(test_finit_calls==finit_before);
+    assert(!unmount_dispatch(&c,real_unmount));mnt_free_context(&c);
+
+    // 8. Gen-1 without hfsplusx also forces MS_RDONLY on non-journaled HFS+ (never leaves built-in hfsplus rw).
+    write_file(marker,"v5.3.0.5\n");write_file(procfs,"nodev\ttmpfs\n");test_ko_path[0]=0;
+    write_file(fsck,"#!/bin/sh\necho '** The volume TEST appears to be OK.'\nexit 0\n");
+    memset(&c,0,sizeof c);c.target=target;c.source=img;c.invoke_sys_mount=1;
+    mnt_context_set_fstype_pattern(&c,"hfsplus");mnt_context_set_options(&c,"nosuid");
+    assert(!mnt_context_mount(&c)&&!strcmp(c.last_mount_fstype,"hfsplus")&&
+           has_opt_token(c.last_mount_opts,"ro")&&(c.last_mount_mflags&MS_RDONLY)&&(test_last_sys_flags&MS_RDONLY));
+    assert(!statvfs(target,&sv)&&(sv.f_flag&ST_RDONLY));
+    assert(!unmount_dispatch(&c,real_unmount));mnt_free_context(&c);
+
+    test_platform_mode_val=0;test_fsck_bin[0]=0;test_ko_path[0]=0;test_gen1_marker[0]=0;
+    test_proc_fs[0]=0;test_az04_dt[0]=0;test_rb_bridge[0]=0;test_disk[0]=0;
+    puts("HFS+ RW policy (Gen-1 hfsplusx, AZ04 hfsplus+ufsd, Gen-2 ro, fsck/journal/eject): PASS");
+}
+
 int main(int argc,char **argv) {
     char root[]="/tmp/enginex-edisks-tests-XXXXXX";assert(mkdtemp(root));
     join(test_prepare_state,root,"run/enginex-usb-preparing");char prep_run[PATH_MAX];join(prep_run,root,"run");assert(!make_dirs(prep_run));
     join(test_media,root,"media");join(test_library,root,"libraries");join(test_runtime,root,"runtime");
     join(test_legacy_library,root,"legacy-libraries");join(test_utab,root,"utab");assert(!make_dirs(test_utab));
-    assert(!make_dirs(test_media));test_paths_and_copy(root);test_compat_symlink_root(root);test_time();test_slow_marker_follows_every_export_file(root);test_only_an_export_makes_a_rekordbox_stick(root);test_monitor_sees_plain_device_mount(root);test_monitor_hides_new_and_old_view_names(root);
-    if(argc>1&&!strcmp(argv[1],"--mounts")){test_prepare_state_lifecycle(root);test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);test_library_is_walked_once(root);test_two_sticks_at_once(root);test_hfs_visible_mount_reuses_the_converted_library(root);test_private_mount_leaves_nothing_behind(root);test_hfs_view_copies_only_metadata(root);test_heal_before_visible(root);test_eject_while_another_stick_converts(root);test_eject_of_a_pulled_stick(root);test_heal_marker_survives_another_port(root);test_hfs_view_with_a_long_entry_name(root);test_hfs_view_artwork_is_writable(root);test_seed_keeps_its_own_previous_generation(root);test_view_binds_stay_out_of_a_shared_data(root);test_guardian_from_the_data_bundle(root);test_slow_marker_survives_another_port(root);}
+    assert(!make_dirs(test_media));test_paths_and_copy(root);test_compat_symlink_root(root);test_time();test_slow_marker_follows_every_export_file(root);test_only_an_export_makes_a_rekordbox_stick(root);test_monitor_sees_plain_device_mount(root);test_monitor_hides_new_and_old_view_names(root);test_hfs_rw_unit(root);
+    if(argc>1&&!strcmp(argv[1],"--mounts")){test_prepare_state_lifecycle(root);test_hfs_rw_policy(root);test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);test_library_is_walked_once(root);test_two_sticks_at_once(root);test_hfs_visible_mount_reuses_the_converted_library(root);test_private_mount_leaves_nothing_behind(root);test_hfs_view_copies_only_metadata(root);test_heal_before_visible(root);test_eject_while_another_stick_converts(root);test_eject_of_a_pulled_stick(root);test_heal_marker_survives_another_port(root);test_hfs_view_with_a_long_entry_name(root);test_hfs_view_artwork_is_writable(root);test_seed_keeps_its_own_previous_generation(root);test_view_binds_stay_out_of_a_shared_data(root);test_guardian_from_the_data_bundle(root);test_slow_marker_survives_another_port(root);}
     // Mount tests have removed all namespace mounts before deleting fixtures.
     int tmp=open("/tmp",O_RDONLY|O_DIRECTORY);assert(tmp>=0);remove_tree(tmp,strrchr(root,'/')+1);close(tmp);
     puts("edisksd-hook: all requested tests passed");return 0;

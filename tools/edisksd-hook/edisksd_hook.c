@@ -4,9 +4,11 @@
 #define _GNU_SOURCE
 #include <dirent.h>
 #include <dlfcn.h>
+#include <elf.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <poll.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
@@ -21,7 +23,9 @@
 #include <sys/random.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
+#include <sys/syscall.h>
 #include <sys/sysmacros.h>
+#include <sys/utsname.h>
 #include <sys/vfs.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -824,14 +828,641 @@ static int run(char *const argv[],int64_t deadline) {
         if(budget(deadline)){kill(-pid,SIGKILL);while(waitpid(pid,&status,0)<0&&errno==EINTR){}errno=ETIMEDOUT;return -1;}usleep(20000);
     }
 }
+#ifndef FSCK_HFSPLUS_SYSTEM
+#define FSCK_HFSPLUS_SYSTEM "/usr/sbin/fsck.hfsplus"
+#endif
+#ifndef FSCK_HFSPLUS_BUNDLE
+#define FSCK_HFSPLUS_BUNDLE "/data/enginex/bundle/bin/fsck.hfsplus"
+#endif
+#ifndef FSCK_HFSPLUS_PATH
+static const char *fsck_hfsplus_path(void) {
+    if(!access(FSCK_HFSPLUS_SYSTEM,X_OK))return FSCK_HFSPLUS_SYSTEM;
+    if(!access(FSCK_HFSPLUS_BUNDLE,X_OK))return FSCK_HFSPLUS_BUNDLE;
+    return NULL;
+}
+#define FSCK_HFSPLUS_PATH fsck_hfsplus_path
+#endif
+#ifndef GEN1_ROOTFS_MARKER
+#define GEN1_ROOTFS_MARKER "/etc/enginex/release-tag"
+#endif
+#ifndef AZ04_UFSD_DT_PATH
+#define AZ04_UFSD_DT_PATH "/sys/firmware/devicetree/base/chosen/inmusic,hfsplus-rw"
+#endif
+#ifndef PROC_FILESYSTEMS_PATH
+#define PROC_FILESYSTEMS_PATH "/proc/filesystems"
+#endif
+#ifndef PROC_MOUNTINFO_PATH
+#define PROC_MOUNTINFO_PATH "/proc/self/mountinfo"
+#endif
+#ifndef HOOK_UNAME
+#define HOOK_UNAME uname
+#endif
+#ifndef FINIT_MODULE
+#define FINIT_MODULE(fd) ((int)syscall(__NR_finit_module,(fd),"",0))
+#endif
+#ifndef HFS_PLATFORM_MODE
+#if defined(__aarch64__)
+#define HFS_PLATFORM_MODE() 2 // AZ04: stock hfsplus rw
+#elif defined(__arm__)
+#define HFS_PLATFORM_MODE() 1 // ARMv7: Gen-1 hfsplusx; Gen-2 armhf stays read-only
+#else
+#define HFS_PLATFORM_MODE() 0
+#endif
+#endif
+
+#ifndef REAL_MNT_RESET_CONTEXT
+#define REAL_MNT_RESET_CONTEXT() ((int (*)(struct libmnt_context *))dlsym(RTLD_NEXT,"mnt_reset_context"))
+#endif
+#ifndef REAL_MNT_CONTEXT_SET_SOURCE
+#define REAL_MNT_CONTEXT_SET_SOURCE() ((int (*)(struct libmnt_context *,const char *))dlsym(RTLD_NEXT,"mnt_context_set_source"))
+#endif
+#ifndef REAL_MNT_CONTEXT_SET_TARGET
+#define REAL_MNT_CONTEXT_SET_TARGET() ((int (*)(struct libmnt_context *,const char *))dlsym(RTLD_NEXT,"mnt_context_set_target"))
+#endif
+#ifndef REAL_MNT_CONTEXT_DISABLE_HELPERS
+#define REAL_MNT_CONTEXT_DISABLE_HELPERS() ((int (*)(struct libmnt_context *,int))dlsym(RTLD_NEXT,"mnt_context_disable_helpers"))
+#endif
+#ifndef REAL_MNT_CONTEXT_SET_FSTYPE_PATTERN
+#define REAL_MNT_CONTEXT_SET_FSTYPE_PATTERN() ((int (*)(struct libmnt_context *,const char *))dlsym(RTLD_NEXT,"mnt_context_set_fstype_pattern"))
+#endif
+#ifndef REAL_MNT_CONTEXT_SET_FSTYPE
+#define REAL_MNT_CONTEXT_SET_FSTYPE() ((int (*)(struct libmnt_context *,const char *))dlsym(RTLD_NEXT,"mnt_context_set_fstype"))
+#endif
+#ifndef REAL_MNT_CONTEXT_SET_OPTIONS
+#define REAL_MNT_CONTEXT_SET_OPTIONS() ((int (*)(struct libmnt_context *,const char *))dlsym(RTLD_NEXT,"mnt_context_set_options"))
+#endif
+#ifndef REAL_MNT_CONTEXT_ENABLE_LAZY
+#define REAL_MNT_CONTEXT_ENABLE_LAZY() ((int (*)(struct libmnt_context *,int))dlsym(RTLD_NEXT,"mnt_context_enable_lazy"))
+#endif
+#ifndef REAL_MNT_CONTEXT_GET_MFLAGS
+#define REAL_MNT_CONTEXT_GET_MFLAGS() ((int (*)(struct libmnt_context *,unsigned long *))dlsym(RTLD_NEXT,"mnt_context_get_mflags"))
+#endif
+#ifndef REAL_MNT_CONTEXT_SET_MFLAGS
+#define REAL_MNT_CONTEXT_SET_MFLAGS() ((int (*)(struct libmnt_context *,unsigned long))dlsym(RTLD_NEXT,"mnt_context_set_mflags"))
+#endif
+#ifndef REAL_MNT_FREE_CONTEXT
+#define REAL_MNT_FREE_CONTEXT() ((void (*)(struct libmnt_context *))dlsym(RTLD_NEXT,"mnt_free_context"))
+#endif
+#ifndef REAL_MOUNT
+#define REAL_MOUNT() ((int (*)(const char *,const char *,const char *,unsigned long,const void *))dlsym(RTLD_NEXT,"mount"))
+#endif
+#ifndef REAL_FSOPEN
+#define REAL_FSOPEN() ((int (*)(const char *,unsigned int))dlsym(RTLD_NEXT,"fsopen"))
+#endif
+#ifndef REAL_FSCONFIG
+#define REAL_FSCONFIG() ((int (*)(int,unsigned int,const char *,const void *,int))dlsym(RTLD_NEXT,"fsconfig"))
+#endif
+
+enum hfs_rw_policy { HFS_RW_NONE = 0, HFS_RW_HFSPLUSX = 1, HFS_RW_STOCK = 2 };
+static __thread int hfs_rw_approved = HFS_RW_NONE;
+static int hfs_fs_is_rw_approved(const char *fstype) {
+    if(!fstype)return 0;
+    if(!strcmp(fstype,"hfsplusx"))return hfs_rw_approved==HFS_RW_HFSPLUSX;
+    if(!strcmp(fstype,"hfsplus"))return hfs_rw_approved==HFS_RW_STOCK;
+    return 1;
+}
+static pthread_mutex_t fs_fd_lock=PTHREAD_MUTEX_INITIALIZER;
+static int forced_ro_fds[64];
+static int fs_fd_mark(int fd,int force_ro) {
+    if(fd<0)return fd;
+    pthread_mutex_lock(&fs_fd_lock);
+    int empty=-1;
+    for(unsigned i=0;i<64;i++) {
+        if(forced_ro_fds[i]==fd+1){if(!force_ro)forced_ro_fds[i]=0;pthread_mutex_unlock(&fs_fd_lock);return fd;}
+        if(empty<0&&!forced_ro_fds[i])empty=(int)i;
+    }
+    if(force_ro) {
+        if(empty>=0)forced_ro_fds[empty]=fd+1;
+        else{pthread_mutex_unlock(&fs_fd_lock);close(fd);errno=EMFILE;return -1;}
+    }
+    pthread_mutex_unlock(&fs_fd_lock);
+    return fd;
+}
+static int fs_fd_take(int fd,int remove) {
+    pthread_mutex_lock(&fs_fd_lock);
+    int found=0;
+    for(unsigned i=0;i<64;i++)if(forced_ro_fds[i]==fd+1){found=1;if(remove)forced_ro_fds[i]=0;break;}
+    pthread_mutex_unlock(&fs_fd_lock);
+    return found;
+}
+int mount(const char *source,const char *target,const char *filesystemtype,unsigned long mountflags,const void *data) {
+    int (*real)(const char *,const char *,const char *,unsigned long,const void *)=REAL_MOUNT();
+    if(!real){errno=ENOSYS;return -1;}
+    if(filesystemtype&&(!strcmp(filesystemtype,"hfsplus")||!strcmp(filesystemtype,"hfsplusx"))&&!hfs_fs_is_rw_approved(filesystemtype)) {
+        if(!(mountflags&MS_RDONLY))note("forcing MS_RDONLY on unapproved HFS+ mount",target?target:filesystemtype,0);
+        mountflags|=MS_RDONLY;
+    }
+    return real(source,target,filesystemtype,mountflags,data);
+}
+int fsopen(const char *fsname,unsigned int flags) {
+    int (*real)(const char *,unsigned int)=REAL_FSOPEN();
+    if(!real){errno=ENOSYS;return -1;}
+    int fd=real(fsname,flags);
+    if(fd>=0) {
+        int is_hfs=fsname&&(!strcmp(fsname,"hfsplus")||!strcmp(fsname,"hfsplusx"));
+        int force_ro=is_hfs&&!hfs_fs_is_rw_approved(fsname);
+        if(force_ro)note("forcing ro via fsopen/fsconfig on unapproved HFS+ fs",fsname,0);
+        fd=fs_fd_mark(fd,force_ro);
+    }
+    return fd;
+}
+int fsconfig(int fd,unsigned int cmd,const char *key,const void *value,int aux) {
+    int (*real)(int,unsigned int,const char *,const void *,int)=REAL_FSCONFIG();
+    if(!real){errno=ENOSYS;return -1;}
+    int remove=(cmd==FSCONFIG_CMD_CREATE);
+#ifdef FSCONFIG_CMD_CREATE_EXCL
+    if(cmd==FSCONFIG_CMD_CREATE_EXCL)remove=1;
+#endif
+    int forced=fs_fd_take(fd,remove);
+    if(forced) {
+        if(cmd==FSCONFIG_SET_FLAG&&key&&!strcmp(key,"rw"))return real(fd,FSCONFIG_SET_FLAG,"ro",NULL,0);
+        if(remove) {
+            int rc=real(fd,FSCONFIG_SET_FLAG,"ro",NULL,0);
+            if(rc)return rc;
+        }
+    }
+    return real(fd,cmd,key,value,aux);
+}
+
+struct hfs_ctx_state {
+    struct libmnt_context *ctx;
+    char fstype[64];
+    char opts[512];
+    int has_fstype,set_by_fstype,has_opts,lazy,has_lazy,disable_helpers,has_disable_helpers;
+};
+static pthread_mutex_t ctx_lock=PTHREAD_MUTEX_INITIALIZER;
+static struct hfs_ctx_state ctx_states[64];
+static unsigned ctx_next_evict;
+
+static struct hfs_ctx_state *ctx_slot(struct libmnt_context *ctx,int create) {
+    if(!ctx)return NULL;
+    for(unsigned i=0;i<64;i++)if(ctx_states[i].ctx==ctx)return &ctx_states[i];
+    if(!create)return NULL;
+    for(unsigned i=0;i<64;i++)if(!ctx_states[i].ctx){memset(&ctx_states[i],0,sizeof ctx_states[i]);ctx_states[i].ctx=ctx;return &ctx_states[i];}
+    struct hfs_ctx_state *s=&ctx_states[ctx_next_evict++%64];
+    memset(s,0,sizeof *s);s->ctx=ctx;return s;
+}
+int mnt_reset_context(struct libmnt_context *ctx) {
+    int (*real)(struct libmnt_context *)=REAL_MNT_RESET_CONTEXT();
+    if(!real)return -ENOSYS;
+    pthread_mutex_lock(&ctx_lock);
+    struct hfs_ctx_state *s=ctx_slot(ctx,0);
+    if(s){memset(s,0,sizeof *s);s->ctx=ctx;}
+    pthread_mutex_unlock(&ctx_lock);
+    return real(ctx);
+}
+int mnt_context_disable_helpers(struct libmnt_context *ctx,int disable) {
+    int (*real)(struct libmnt_context *,int)=REAL_MNT_CONTEXT_DISABLE_HELPERS();
+    if(!real)return -ENOSYS;
+    pthread_mutex_lock(&ctx_lock);
+    struct hfs_ctx_state *s=ctx_slot(ctx,1);
+    if(s){s->has_disable_helpers=1;s->disable_helpers=disable;}
+    pthread_mutex_unlock(&ctx_lock);
+    return real(ctx,disable);
+}
+int mnt_context_set_fstype_pattern(struct libmnt_context *ctx,const char *pattern) {
+    int (*real)(struct libmnt_context *,const char *)=REAL_MNT_CONTEXT_SET_FSTYPE_PATTERN();
+    if(!real)return -ENOSYS;
+    pthread_mutex_lock(&ctx_lock);
+    struct hfs_ctx_state *s=ctx_slot(ctx,1);
+    if(s){s->has_fstype=1;s->set_by_fstype=0;snprintf(s->fstype,sizeof s->fstype,"%s",pattern?pattern:"");}
+    pthread_mutex_unlock(&ctx_lock);
+    return real(ctx,pattern);
+}
+int mnt_context_set_fstype(struct libmnt_context *ctx,const char *fstype) {
+    int (*real)(struct libmnt_context *,const char *)=REAL_MNT_CONTEXT_SET_FSTYPE();
+    if(!real)return -ENOSYS;
+    pthread_mutex_lock(&ctx_lock);
+    struct hfs_ctx_state *s=ctx_slot(ctx,1);
+    if(s){s->has_fstype=1;s->set_by_fstype=1;snprintf(s->fstype,sizeof s->fstype,"%s",fstype?fstype:"");}
+    pthread_mutex_unlock(&ctx_lock);
+    return real(ctx,fstype);
+}
+int mnt_context_set_options(struct libmnt_context *ctx,const char *optstr) {
+    int (*real)(struct libmnt_context *,const char *)=REAL_MNT_CONTEXT_SET_OPTIONS();
+    if(!real)return -ENOSYS;
+    pthread_mutex_lock(&ctx_lock);
+    struct hfs_ctx_state *s=ctx_slot(ctx,1);
+    if(s){s->has_opts=1;snprintf(s->opts,sizeof s->opts,"%s",optstr?optstr:"");}
+    pthread_mutex_unlock(&ctx_lock);
+    return real(ctx,optstr);
+}
+void mnt_free_context(struct libmnt_context *ctx) {
+    void (*real)(struct libmnt_context *)=REAL_MNT_FREE_CONTEXT();
+    pthread_mutex_lock(&ctx_lock);
+    struct hfs_ctx_state *s=ctx_slot(ctx,0);
+    if(s)memset(s,0,sizeof *s);
+    pthread_mutex_unlock(&ctx_lock);
+    if(real)real(ctx);
+}
+
+static void unescape_mountinfo_path(const char *src,char *dst,size_t dstsz) {
+    size_t j=0;
+    while(*src&&j+1<dstsz) {
+        if(src[0]=='\\'&&src[1]>='0'&&src[1]<='7'&&src[2]>='0'&&src[2]<='7'&&src[3]>='0'&&src[3]<='7') {
+            dst[j++]=(char)(((src[1]-'0')<<6)|((src[2]-'0')<<3)|(src[3]-'0'));
+            src+=4;
+        } else {
+            dst[j++]=*src++;
+        }
+    }
+    dst[j]=0;
+}
+static int mountinfo_fstype(const char *target,char *out,size_t outsz) {
+    if(!target||!out||!outsz)return -1;
+    FILE *f=fopen(PROC_MOUNTINFO_PATH,"re");if(!f)return -1;
+    char *line=NULL;size_t cap=0;int found=-1;
+    while(getline(&line,&cap,f)>0) {
+        char *sp[5]={0};char *p=line;int idx=0;
+        for(;idx<5;idx++){sp[idx]=p;char *q=strchr(p,' ');if(!q)break;p=q+1;}
+        if(idx<5)continue;
+        char *mp_end=strchr(sp[4],' ');if(!mp_end)continue;
+        *mp_end=0;
+        char mp[PATH_MAX];unescape_mountinfo_path(sp[4],mp,sizeof mp);
+        if(strcmp(mp,target))continue;
+        char *sep=strstr(mp_end+1," - ");if(!sep)continue;
+        char *ft=sep+3;char *ft_end=strpbrk(ft," \t\r\n");
+        if(ft_end)*ft_end=0;
+        if(*ft){snprintf(out,outsz,"%s",ft);found=0;}
+    }
+    free(line);fclose(f);return found;
+}
 // The mount tests replace these; a bind mount is never HFS+ nor a block device.
 #ifndef HFS_READONLY
 static int hfs_readonly(const char *target) {
-    struct statfs f;struct statvfs v;
-    return !statfs(target,&f)&&f.f_type==HFSPLUS_MAGIC&&!statvfs(target,&v)&&(v.f_flag&ST_RDONLY);
+    struct statfs f;struct statvfs v;char ft[64]="";
+    if(statfs(target,&f)||f.f_type!=HFSPLUS_MAGIC||statvfs(target,&v)||!(v.f_flag&ST_RDONLY))return 0;
+    if(!mountinfo_fstype(target,ft,sizeof ft)&&!strcmp(ft,"ufsd"))return 0;
+    return 1;
 }
 #define HFS_READONLY hfs_readonly
 #endif
+#ifndef HFS_RW_MOUNTED
+static int hfs_rw_mounted(const char *target) {
+    struct statfs f;struct statvfs v;char ft[64]="";
+    if(!target||statfs(target,&f)||f.f_type!=HFSPLUS_MAGIC||statvfs(target,&v)||(v.f_flag&ST_RDONLY))return 0;
+    if(!mountinfo_fstype(target,ft,sizeof ft))return !strcmp(ft,"hfsplus")||!strcmp(ft,"hfsplusx");
+    return 1;
+}
+#define HFS_RW_MOUNTED hfs_rw_mounted
+#endif
+
+int mnt_context_enable_lazy(struct libmnt_context *ctx,int enable) {
+    int (*real)(struct libmnt_context *,int)=REAL_MNT_CONTEXT_ENABLE_LAZY();
+    if(!real)return -ENOSYS;
+    const char *target=mnt_context_get_target(ctx);
+    if(enable&&target&&HFS_RW_MOUNTED(target)) {
+        note("disabling lazy unmount (MNT_DETACH) for rw HFS+ volume",target,0);
+        enable=0;
+    }
+    pthread_mutex_lock(&ctx_lock);
+    struct hfs_ctx_state *s=ctx_slot(ctx,1);
+    if(s){s->has_lazy=1;s->lazy=enable;}
+    pthread_mutex_unlock(&ctx_lock);
+    return real(ctx,enable);
+}
+
+static uint16_t hfs_be16(const uint8_t *p){return (uint16_t)(((uint16_t)p[0]<<8)|p[1]);}
+static uint32_t hfs_be32(const uint8_t *p){return ((uint32_t)p[0]<<24)|((uint32_t)p[1]<<16)|((uint32_t)p[2]<<8)|p[3];}
+static uint64_t hfs_be64(const uint8_t *p){return ((uint64_t)hfs_be32(p)<<32)|hfs_be32(p+4);}
+static uint32_t hfs_le32(const uint8_t *p){return ((uint32_t)p[3]<<24)|((uint32_t)p[2]<<16)|((uint32_t)p[1]<<8)|p[0];}
+static uint64_t hfs_le64(const uint8_t *p){return ((uint64_t)hfs_le32(p+4)<<32)|hfs_le32(p);}
+static int pread_full(int fd,void *buf,size_t n,off_t off) {
+    uint8_t *p=buf;size_t got=0;
+    while(got<n) {
+        ssize_t r=pread(fd,p+got,n-got,off+(off_t)got);
+        if(r>0){got+=(size_t)r;continue;}
+        if(r<0&&errno==EINTR)continue;
+        if(r==0)errno=EIO;
+        return -1;
+    }
+    return 0;
+}
+static int hfs_find_volume_header(int fd,uint8_t vh[512],uint64_t *emb_off_out,uint64_t *emb_limit_out) {
+    uint8_t buf[512];
+    if(pread_full(fd,buf,sizeof buf,1024))return -1;
+    uint16_t sig=hfs_be16(buf);
+    uint64_t emb_off=0,emb_limit=0;
+    if(sig==0x4244) {
+        uint32_t hfs_bs=hfs_be32(buf+20);
+        uint16_t hfs_ab_st=hfs_be16(buf+28);
+        uint16_t emb_sig=hfs_be16(buf+124),emb_st=hfs_be16(buf+126),emb_cnt=hfs_be16(buf+128);
+        if(emb_sig!=0x482b||hfs_bs<512||(hfs_bs&(hfs_bs-1))||!emb_cnt){errno=EINVAL;return -1;}
+        emb_off=(uint64_t)hfs_ab_st*512ULL+(uint64_t)emb_st*(uint64_t)hfs_bs;
+        emb_limit=(uint64_t)emb_cnt*(uint64_t)hfs_bs;
+        if(pread_full(fd,buf,sizeof buf,(off_t)(emb_off+1024)))return -1;
+        sig=hfs_be16(buf);
+    }
+    uint16_t ver=hfs_be16(buf+2);
+    if(!((sig==0x482b&&ver==4)||(sig==0x4858&&ver==5))){errno=EINVAL;return -1;}
+    memcpy(vh,buf,512);
+    if(emb_off_out)*emb_off_out=emb_off;
+    if(emb_limit_out)*emb_limit_out=emb_limit;
+    return 0;
+}
+static int hfs_probe_source_signature(const char *source) {
+    if(!source||!*source)return 0;
+    struct stat st;
+    int fd=open(source,O_RDONLY|O_CLOEXEC);if(fd<0)return 0;
+    int is_hfs=0;
+    if(!fstat(fd,&st)&&(S_ISBLK(st.st_mode)||S_ISREG(st.st_mode))) {
+        uint8_t vh[512];
+        if(!hfs_find_volume_header(fd,vh,NULL,NULL))is_hfs=1;
+    }
+    close(fd);return is_hfs;
+}
+static int hfs_check_volume_and_journal(const char *source,int *is_journaled) {
+    *is_journaled=0;
+    int fd=open(source,O_RDONLY|O_CLOEXEC);if(fd<0)return -1;
+    struct stat st;
+    if(fstat(fd,&st)||(!S_ISBLK(st.st_mode)&&!S_ISREG(st.st_mode))){close(fd);errno=EINVAL;return -1;}
+    uint8_t vh[512];uint64_t emb_off=0,emb_limit=0;
+    if(hfs_find_volume_header(fd,vh,&emb_off,&emb_limit)){close(fd);return -1;}
+    uint32_t attr=hfs_be32(vh+4),jinfo_blk=hfs_be32(vh+12),bs=hfs_be32(vh+40),tb=hfs_be32(vh+44);
+    if(!(attr&(1u<<8))||(attr&(1u<<11))||(attr&(1u<<15))){close(fd);errno=EIO;return -1;} // require UNMNT, !INCNSTNT, !SOFTLOCK
+    if(bs<512||bs>(1u<<20)||(bs&(bs-1))||!tb){close(fd);errno=EINVAL;return -1;}
+    uint64_t vol_bytes=(uint64_t)tb*(uint64_t)bs;
+    if(emb_limit&&vol_bytes>emb_limit){close(fd);errno=EINVAL;return -1;}
+    if(!(attr&(1u<<13))){close(fd);return 0;} // non-journaled clean HFS+
+    *is_journaled=1;
+    if(!jinfo_blk||jinfo_blk>=tb){close(fd);errno=EIO;return -1;}
+    uint8_t jib[64];
+    if(pread_full(fd,jib,sizeof jib,(off_t)(emb_off+(uint64_t)jinfo_blk*bs))){close(fd);return -1;}
+    uint32_t jflags=hfs_be32(jib);
+    if(!(jflags&1u)||(jflags&2u)){close(fd);errno=EIO;return -1;} // require kJIJournalInFSMask, !kJIJournalOnOtherDeviceMask
+    uint64_t joff=hfs_be64(jib+36),jsize=hfs_be64(jib+44);
+    if(joff<bs||jsize<4096||joff>vol_bytes||jsize>vol_bytes-joff){close(fd);errno=EIO;return -1;}
+    uint8_t jh[44];
+    if(pread_full(fd,jh,sizeof jh,(off_t)(emb_off+joff))){close(fd);return -1;}
+    close(fd);
+    if(jflags&4u) { // kJIJournalNeedInitMask: allowed only if journal header is uninitialized zeros
+        for(size_t i=0;i<sizeof jh;i++)if(jh[i]){errno=EIO;return -1;}
+        return 0;
+    }
+    uint32_t magic,jhdr_size;uint64_t start,end,jh_size;
+    if(hfs_le32(jh+4)==0x12345678u) {
+        magic=hfs_le32(jh);start=hfs_le64(jh+8);end=hfs_le64(jh+16);jh_size=hfs_le64(jh+24);jhdr_size=hfs_le32(jh+40);
+    } else if(hfs_be32(jh+4)==0x12345678u) {
+        magic=hfs_be32(jh);start=hfs_be64(jh+8);end=hfs_be64(jh+16);jh_size=hfs_be64(jh+24);jhdr_size=hfs_be32(jh+40);
+    } else {
+        errno=EIO;return -1;
+    }
+    if(magic!=0x4a4e4c78u||jh_size!=jsize||jhdr_size<44||jhdr_size>jsize||
+       start<jhdr_size||start>=jsize||end<jhdr_size||end>=jsize||start!=end) {
+        errno=EIO;return -1;
+    }
+    return 0;
+}
+static int run_fsck_hfsplus(const char *fsck_bin,const char *source,int64_t deadline) {
+    if(!fsck_bin||!source||budget(deadline))return -1;
+    int pfd[2];if(pipe2(pfd,O_CLOEXEC|O_NONBLOCK))return -1;
+    pid_t pid=fork();if(pid<0){close(pfd[0]);close(pfd[1]);return -1;}
+    if(!pid) {
+        setpgid(0,0);unsetenv("LD_PRELOAD");setenv("PATH","/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",1);
+        dup2(pfd[1],1);dup2(pfd[1],2);close(pfd[0]);if(pfd[1]>2)close(pfd[1]);
+        char *const argv[]={(char *)fsck_bin,"-n","-f",(char *)source,NULL};
+        execv(argv[0],argv);_exit(127);
+    }
+    setpgid(pid,pid);close(pfd[1]);
+    char buf[8192];size_t len=0;int overflow=0,eof=0,status=0,reaped=0;
+    while(!eof||!reaped) {
+        if(!eof) {
+            struct pollfd pf={.fd=pfd[0],.events=POLLIN};
+            (void)poll(&pf,1,20);
+            for(;;) {
+                char tmp[512];ssize_t n=read(pfd[0],tmp,sizeof tmp);
+                if(n>0) {
+                    size_t avail=(sizeof buf-1)-len,cp=(size_t)n<=avail?(size_t)n:avail;
+                    if(cp){memcpy(buf+len,tmp,cp);len+=cp;}
+                    if((size_t)n>avail)overflow=1;
+                } else if(n==0){eof=1;break;}
+                else if(errno==EINTR)continue;
+                else if(errno==EAGAIN||errno==EWOULDBLOCK)break;
+                else{eof=1;break;}
+            }
+        }
+        if(reaped)break;
+        pid_t r=waitpid(pid,&status,WNOHANG);
+        if(r==pid)reaped=1;
+        else if(r<0&&errno!=EINTR){close(pfd[0]);return -1;}
+        if(!reaped&&budget(deadline)){kill(-pid,SIGKILL);while(waitpid(pid,&status,0)<0&&errno==EINTR){}close(pfd[0]);errno=ETIMEDOUT;return -1;}
+        if(eof&&!reaped)usleep(20000);
+    }
+    close(pfd[0]);buf[len]=0;
+    if(!WIFEXITED(status)||WEXITSTATUS(status)!=0||overflow){errno=EIO;return -1;}
+    if(!strstr(buf,"appears to be OK.")||strstr(buf,"No checking performed")||
+       strstr(buf,"needs to be repaired")||strstr(buf,"could not be verified")||
+       strstr(buf,"Journal need to be replayed")){errno=EIO;return -1;}
+    return 0;
+}
+static int fs_supported(const char *fsname) {
+    FILE *f=fopen(PROC_FILESYSTEMS_PATH,"re");if(!f)return 0;
+    char line[256];int ok=0;
+    while(fgets(line,sizeof line,f)) {
+        char *tab=strchr(line,'\t');char *name=tab?tab+1:line;
+        char *end=strpbrk(name," \t\r\n");if(end)*end=0;
+        if(!strcmp(name,fsname)){ok=1;break;}
+    }
+    fclose(f);return ok;
+}
+static int check_ko_vermagic(int fd,const char *release) {
+    struct stat st;
+    if(fstat(fd,&st)||!S_ISREG(st.st_mode)||st.st_size<(off_t)sizeof(Elf32_Ehdr)||st.st_size>8*1024*1024)return -1;
+    Elf32_Ehdr eh;if(pread_full(fd,&eh,sizeof eh,0))return -1;
+    if(memcmp(eh.e_ident,ELFMAG,SELFMAG)||eh.e_ident[EI_CLASS]!=ELFCLASS32||eh.e_ident[EI_DATA]!=ELFDATA2LSB||
+       eh.e_type!=ET_REL||eh.e_machine!=EM_ARM||eh.e_shentsize!=sizeof(Elf32_Shdr)||
+       !eh.e_shnum||eh.e_shnum>4096||eh.e_shstrndx>=eh.e_shnum||
+       (uint64_t)eh.e_shoff+(uint64_t)eh.e_shnum*sizeof(Elf32_Shdr)>(uint64_t)st.st_size){errno=ENOEXEC;return -1;}
+    Elf32_Shdr *sh=calloc(eh.e_shnum,sizeof *sh);if(!sh)return -1;
+    if(pread_full(fd,sh,eh.e_shnum*sizeof *sh,(off_t)eh.e_shoff)){free(sh);return -1;}
+    uint64_t str_off=sh[eh.e_shstrndx].sh_offset,str_sz=sh[eh.e_shstrndx].sh_size;
+    if(!str_sz||str_sz>256*1024||str_off+str_sz>(uint64_t)st.st_size){free(sh);errno=ENOEXEC;return -1;}
+    char *strtab=calloc((size_t)str_sz+1,1);
+    if(!strtab||pread_full(fd,strtab,(size_t)str_sz,(off_t)str_off)){free(strtab);free(sh);return -1;}
+    int vermagic_ok=0,name_ok=1;size_t rlen=strlen(release);
+    for(unsigned i=0;i<eh.e_shnum;i++) {
+        if(sh[i].sh_name>=str_sz||strcmp(strtab+sh[i].sh_name,".modinfo"))continue;
+        uint64_t m_off=sh[i].sh_offset,m_sz=sh[i].sh_size;
+        if(!m_sz||m_sz>256*1024||m_off+m_sz>(uint64_t)st.st_size)break;
+        char *mi=calloc((size_t)m_sz+1,1);
+        if(!mi||pread_full(fd,mi,(size_t)m_sz,(off_t)m_off)){free(mi);break;}
+        for(size_t off=0;off<(size_t)m_sz;) {
+            char *entry=mi+off;size_t elen=strlen(entry);
+            if(!strncmp(entry,"vermagic=",9)){const char *v=entry+9;if(!strncmp(v,release,rlen)&&v[rlen]==' ')vermagic_ok=1;}
+            else if(!strncmp(entry,"name=",5)){if(strcmp(entry+5,"hfsplusx"))name_ok=0;}
+            off+=elen+1;
+        }
+        free(mi);break;
+    }
+    free(strtab);free(sh);
+    if(!vermagic_ok||!name_ok){errno=ENOEXEC;return -1;}
+    return 0;
+}
+static int hfs_ensure_hfsplusx(void) {
+    if(fs_supported("hfsplusx"))return 0;
+    struct utsname u;if(HOOK_UNAME(&u))return -1;
+    char paths[2][PATH_MAX];unsigned npaths=0;
+#ifdef HFSPLUSX_MODULE_PATH
+    snprintf(paths[npaths++],PATH_MAX,"%s",HFSPLUSX_MODULE_PATH);
+#else
+    if(snprintf(paths[npaths++],PATH_MAX,"/lib/modules/%s/extra/hfsplusx.ko",u.release)>=PATH_MAX)npaths--;
+    snprintf(paths[npaths++],PATH_MAX,"/etc/enginex/hfsplusx.ko");
+#endif
+    int fd=-1;const char *chosen=NULL;
+    for(unsigned i=0;i<npaths;i++){fd=open(paths[i],O_RDONLY|O_NOFOLLOW|O_CLOEXEC);if(fd>=0){chosen=paths[i];break;}}
+    if(fd<0)return -1;
+    if(check_ko_vermagic(fd,u.release)){int saved=errno;close(fd);note("hfsplusx vermagic mismatch on",chosen,saved);errno=saved;return -1;}
+    if(FINIT_MODULE(fd)!=0) {
+        int saved=errno;close(fd);
+        if(saved==EEXIST&&fs_supported("hfsplusx"))return 0;
+        note("insmod hfsplusx failed on",chosen,saved);errno=saved;return -1;
+    }
+    close(fd);return 0;
+}
+static int has_opt_token(const char *opts,const char *tok) {
+    if(!opts)return 0;
+    size_t tlen=strlen(tok);const char *p=opts;
+    while(*p) {
+        const char *comma=strchr(p,',');size_t len=comma?(size_t)(comma-p):strlen(p);
+        if(len==tlen&&!strncmp(p,tok,tlen))return 1;
+        if(!comma)break;
+        p=comma+1;
+    }
+    return 0;
+}
+static int build_hfs_opts(char *out,size_t outsz,const char *orig,int rw,int force) {
+    size_t used=0;out[0]=0;
+    const char *p=orig?orig:"";
+    while(*p) {
+        const char *comma=strchr(p,',');size_t len=comma?(size_t)(comma-p):strlen(p);
+        if(len&&!((len==2&&(!strncmp(p,"ro",2)||!strncmp(p,"rw",2)))||
+                  (len==5&&!strncmp(p,"force",5))||(len==4&&!strncmp(p,"utf8",4)))) {
+            if(used+len+(used?1:0)>=outsz){errno=ENAMETOOLONG;return -1;}
+            if(used)out[used++]=',';
+            memcpy(out+used,p,len);used+=len;out[used]=0;
+        }
+        if(!comma)break;
+        p=comma+1;
+    }
+    const char *tail=rw?(force?"force,rw":"rw"):"ro";
+    size_t tlen=strlen(tail);
+    if(used+tlen+(used?1:0)>=outsz){errno=ENAMETOOLONG;return -1;}
+    if(used)out[used++]=',';
+    memcpy(out+used,tail,tlen+1);
+    return 0;
+}
+struct hfs_ctx_backup {
+    int tried_rw,set_by_fstype,has_disable_helpers,disable_helpers,has_lazy,lazy;
+    unsigned long orig_mflags;
+    char orig_source[PATH_MAX],orig_target[PATH_MAX],orig_fstype[64],orig_opts[512];
+};
+static void hfs_apply_ro(struct libmnt_context *ctx,const char *orig_fstype,int set_by_fstype,const char *orig_opts) {
+    int (*set_pat)(struct libmnt_context *,const char *)=REAL_MNT_CONTEXT_SET_FSTYPE_PATTERN();
+    int (*set_ft)(struct libmnt_context *,const char *)=REAL_MNT_CONTEXT_SET_FSTYPE();
+    int (*set_opt)(struct libmnt_context *,const char *)=REAL_MNT_CONTEXT_SET_OPTIONS();
+    int (*get_mf)(struct libmnt_context *,unsigned long *)=REAL_MNT_CONTEXT_GET_MFLAGS();
+    int (*set_mf)(struct libmnt_context *,unsigned long)=REAL_MNT_CONTEXT_SET_MFLAGS();
+    char ro_opts[512];
+    if(!build_hfs_opts(ro_opts,sizeof ro_opts,orig_opts,0,0)&&set_opt)set_opt(ctx,ro_opts);
+    unsigned long mf=0;
+    if(get_mf&&set_mf&&!get_mf(ctx,&mf))set_mf(ctx,mf|MS_RDONLY);
+    const char *ft=(orig_fstype&&*orig_fstype&&strcmp(orig_fstype,"hfsplusx"))?orig_fstype:"hfsplus";
+    if(set_by_fstype&&set_ft)set_ft(ctx,ft);
+    else if(set_pat)set_pat(ctx,ft);
+}
+static void hfs_restore_ro(struct libmnt_context *ctx,const struct hfs_ctx_backup *bk) {
+    int (*reset_ctx)(struct libmnt_context *)=REAL_MNT_RESET_CONTEXT();
+    int (*set_src)(struct libmnt_context *,const char *)=REAL_MNT_CONTEXT_SET_SOURCE();
+    int (*set_tgt)(struct libmnt_context *,const char *)=REAL_MNT_CONTEXT_SET_TARGET();
+    int (*dis_hlp)(struct libmnt_context *,int)=REAL_MNT_CONTEXT_DISABLE_HELPERS();
+    int (*set_lazy)(struct libmnt_context *,int)=REAL_MNT_CONTEXT_ENABLE_LAZY();
+    int (*set_mf)(struct libmnt_context *,unsigned long)=REAL_MNT_CONTEXT_SET_MFLAGS();
+    if(reset_ctx&&set_src&&set_tgt&&!reset_ctx(ctx)) {
+        if(*bk->orig_source)set_src(ctx,bk->orig_source);
+        if(*bk->orig_target)set_tgt(ctx,bk->orig_target);
+        if(bk->has_disable_helpers&&dis_hlp)dis_hlp(ctx,bk->disable_helpers);
+        if(bk->has_lazy&&set_lazy)set_lazy(ctx,bk->lazy);
+        if(set_mf&&bk->orig_mflags)set_mf(ctx,bk->orig_mflags|MS_RDONLY);
+    }
+    hfs_apply_ro(ctx,bk->orig_fstype,bk->set_by_fstype,bk->orig_opts);
+}
+static int hfs_prepare_mount(struct libmnt_context *ctx,struct hfs_ctx_backup *bk,int64_t deadline) {
+    memset(bk,0,sizeof *bk);
+    const char *target=mnt_context_get_target(ctx),*source=mnt_context_get_source(ctx);
+    if(!target||!source||volume(target)==NULL||safe_path(target,0))return HFS_RW_NONE;
+    char orig_ft[64]="",orig_opts[512]="";int has_ft=0,set_by_fstype=0,has_dis=0,dis=0,has_lazy=0,lazy=0;
+    pthread_mutex_lock(&ctx_lock);
+    struct hfs_ctx_state *s=ctx_slot(ctx,0);
+    if(s){has_ft=s->has_fstype;set_by_fstype=s->set_by_fstype;has_dis=s->has_disable_helpers;dis=s->disable_helpers;has_lazy=s->has_lazy;lazy=s->lazy;snprintf(orig_ft,sizeof orig_ft,"%s",s->fstype);snprintf(orig_opts,sizeof orig_opts,"%s",s->opts);}
+    pthread_mutex_unlock(&ctx_lock);
+    if(has_ft&&*orig_ft) {
+        if(!strcmp(orig_ft,"ufsd")||strstr(orig_ft,"ufsd"))return HFS_RW_NONE; // coexist with stock ufsd when AZ04 DT flag is present
+        if(strcmp(orig_ft,"hfsplus")&&strcmp(orig_ft,"hfsplusx"))return HFS_RW_NONE;
+    } else if(!hfs_probe_source_signature(source)) {
+        return HFS_RW_NONE;
+    }
+    unsigned long orig_mflags=0;
+    int (*get_mf)(struct libmnt_context *,unsigned long *)=REAL_MNT_CONTEXT_GET_MFLAGS();
+    if(get_mf&&get_mf(ctx,&orig_mflags))orig_mflags=0;
+    if(has_opt_token(orig_opts,"ro")||(orig_mflags&MS_RDONLY)) {
+        hfs_apply_ro(ctx,orig_ft,set_by_fstype,orig_opts);
+        return HFS_RW_NONE;
+    }
+    int mode=HFS_PLATFORM_MODE();
+    // Gen-2 armhf safety net: kernel hfsplus stays forced MS_RDONLY until LKL/FUSE (#46b1af31) plugs in here.
+    if(mode==1&&access(GEN1_ROOTFS_MARKER,F_OK)!=0) {
+#ifdef HFS_GEN2_PREPARE
+        int gen2_rc=HFS_GEN2_PREPARE(ctx,bk,deadline);
+        if(gen2_rc>=0)return gen2_rc;
+#endif
+        hfs_apply_ro(ctx,orig_ft,set_by_fstype,orig_opts);
+        return HFS_RW_NONE;
+    }
+    if(mode!=1&&mode!=2){hfs_apply_ro(ctx,orig_ft,set_by_fstype,orig_opts);return HFS_RW_NONE;}
+    // AZ04 (mode == 2) uses stock hfsplus; Gen-1 (mode == 1) uses hfsplusx.
+    // Even if AZ04_UFSD_DT_PATH exists, hfsplus mounts stay on stock hfsplus rw while ufsd mounts above pass untouched.
+    (void)AZ04_UFSD_DT_PATH;
+    set_preparing(target,1);
+    const char *fsck=FSCK_HFSPLUS_PATH();
+    int is_journaled=0;
+    if(!fsck||run_fsck_hfsplus(fsck,source,deadline)||hfs_check_volume_and_journal(source,&is_journaled)) {
+        note("HFS+ pre-mount check failed, keeping read-only view on",target,errno);
+        hfs_apply_ro(ctx,orig_ft,set_by_fstype,orig_opts);return HFS_RW_NONE;
+    }
+    const char *target_fs="hfsplus";
+    if(mode==1) {
+        if(hfs_ensure_hfsplusx()) {
+            note("hfsplusx load unavailable, keeping read-only view on",target,errno);
+            hfs_apply_ro(ctx,orig_ft,set_by_fstype,orig_opts);return HFS_RW_NONE;
+        }
+        target_fs="hfsplusx";
+    }
+    char rw_opts[512];
+    if(build_hfs_opts(rw_opts,sizeof rw_opts,orig_opts,1,is_journaled)) {
+        hfs_apply_ro(ctx,orig_ft,set_by_fstype,orig_opts);return HFS_RW_NONE;
+    }
+    int (*set_pat)(struct libmnt_context *,const char *)=REAL_MNT_CONTEXT_SET_FSTYPE_PATTERN();
+    int (*set_ft)(struct libmnt_context *,const char *)=REAL_MNT_CONTEXT_SET_FSTYPE();
+    int (*set_opt)(struct libmnt_context *,const char *)=REAL_MNT_CONTEXT_SET_OPTIONS();
+    if((set_by_fstype?!set_ft:!set_pat)||!set_opt) {
+        hfs_apply_ro(ctx,orig_ft,set_by_fstype,orig_opts);return HFS_RW_NONE;
+    }
+    if(snprintf(bk->orig_source,sizeof bk->orig_source,"%s",source)>=(int)sizeof bk->orig_source||
+       snprintf(bk->orig_target,sizeof bk->orig_target,"%s",target)>=(int)sizeof bk->orig_target) {
+        hfs_apply_ro(ctx,orig_ft,set_by_fstype,orig_opts);return HFS_RW_NONE;
+    }
+    snprintf(bk->orig_fstype,sizeof bk->orig_fstype,"%s",(*orig_ft&&strcmp(orig_ft,"hfsplusx"))?orig_ft:"hfsplus");
+    snprintf(bk->orig_opts,sizeof bk->orig_opts,"%s",orig_opts);
+    bk->set_by_fstype=set_by_fstype;
+    bk->has_disable_helpers=has_dis;bk->disable_helpers=dis;
+    bk->has_lazy=has_lazy;bk->lazy=lazy;
+    bk->orig_mflags=orig_mflags;
+    if((set_by_fstype?set_ft(ctx,target_fs):set_pat(ctx,target_fs))||set_opt(ctx,rw_opts)) {
+        hfs_apply_ro(ctx,bk->orig_fstype,bk->set_by_fstype,bk->orig_opts);return HFS_RW_NONE;
+    }
+    bk->tried_rw=1;
+    return mode==1?HFS_RW_HFSPLUSX:HFS_RW_STOCK;
+}
 #ifndef RB_BRIDGE_PATH
 static const char *rb_bridge_path(void) {
     return access("/usr/local/bin/rb-bridge",X_OK)?"/data/enginex/bundle/bin/rb-bridge":"/usr/local/bin/rb-bridge";
@@ -1075,9 +1706,18 @@ static int hooked_mount(struct libmnt_context *ctx,int (*real)(struct libmnt_con
     pthread_mutex_lock(&view_lock);
     seeded_hint[0]=0;
     in_hook=1;
+    struct hfs_ctx_backup hfs_bk={0};
+    hfs_rw_approved=hfs_prepare_mount(ctx,&hfs_bk,deadline-POST_RESERVE_MS);
     int pre=premount(ctx,real,deadline-POST_RESERVE_MS,now_ms()-start<LOCK_WAIT_SLACK_MS);
     pthread_mutex_lock(&post_lock);holding_post=1; // after_mount releases it once the visible tree is final
     int rc=real(ctx),saved=errno;
+    if((rc||mnt_context_get_status(ctx)!=1)&&hfs_bk.tried_rw) {
+        note("HFS+ rw mount failed, falling back to ro on",mnt_context_get_target(ctx),saved);
+        hfs_rw_approved=HFS_RW_NONE;
+        hfs_restore_ro(ctx,&hfs_bk);
+        rc=real(ctx);saved=errno;
+    }
+    hfs_rw_approved=HFS_RW_NONE;
     if(!rc&&mnt_context_get_status(ctx)==1){after_mount(ctx,pre?MOUNT_POST:MOUNT_FULL,deadline);errno=saved;}
     release_post();clear_preparing();in_hook=0;
     seeded_hint[0]=0;
@@ -1154,7 +1794,19 @@ static int unmount_dispatch(struct libmnt_context *ctx,int (*real)(struct libmnt
     // is the stock umount and does not wait for view_lock, which another stick's
     // conversion holds for up to its whole budget (BH-O55-3).
     struct owned_view *v=load_view(target);
-    if(!v){in_hook=1;int rc=real(ctx),saved=errno;in_hook=0;errno=saved;return rc;}
+    if(!v) {
+        if(HFS_RW_MOUNTED(target)) {
+            int fd=open(target,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
+            if(fd>=0){syncfs(fd);close(fd);}
+            int (*set_lazy)(struct libmnt_context *,int)=REAL_MNT_CONTEXT_ENABLE_LAZY();
+            if(set_lazy)set_lazy(ctx,0);
+            pthread_mutex_lock(&ctx_lock);
+            struct hfs_ctx_state *s=ctx_slot(ctx,0);
+            if(s){s->has_lazy=1;s->lazy=0;}
+            pthread_mutex_unlock(&ctx_lock);
+        }
+        in_hook=1;int rc=real(ctx),saved=errno;in_hook=0;errno=saved;return rc;
+    }
     free(v);
     pthread_mutex_lock(&view_lock);in_hook=1;pthread_mutex_lock(&post_lock);v=load_view(target);
     int rc=v?unmount_view(ctx,v,real):real(ctx);int saved=errno;free(v);
