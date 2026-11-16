@@ -3,12 +3,13 @@ package webui
 import (
 	"context"
 	"database/sql"
-	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 )
 
 func TestStemsTrackID(t *testing.T) {
@@ -93,11 +94,11 @@ func TestStemsRowIsFoundByItsFileNotItsName(t *testing.T) {
 		}
 	}
 	// A path that is the same file through a link in a directory name (the
-	// old /data/sc5000-custom name) is still that row.
-	if err := os.Symlink(filepath.Join(data, "enginex"), filepath.Join(data, "sc5000-custom")); err != nil {
+	// pre-5.3.0.5 data name) is still that row.
+	if err := os.Symlink(filepath.Join(data, "enginex"), filepath.Join(data, migration.DataName)); err != nil {
 		t.Fatal(err)
 	}
-	linked := filepath.Join(data, "sc5000-custom/Stream/Stems/a/A - Song.flac")
+	linked := filepath.Join(data, migration.DataName, "Stream/Stems/a/A - Song.flac")
 	if ids, err := internalTrackIDs(context.Background(), linked); err != nil || ids[linked] != 11 {
 		t.Fatalf("through the link: %v, %v", ids, err)
 	}

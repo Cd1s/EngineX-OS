@@ -243,7 +243,7 @@ func TestAppleMusicHelperPhoneLoginCompletesAndPolls(t *testing.T) {
 	ui := New(Config{StateDir: t.TempDir(), UIDir: t.TempDir(), AppleMusicHelperURL: helper.URL}, nil)
 	defer ui.Close()
 
-	startReq := httptest.NewRequest("POST", "/v1/sc5000/login?provider=applemusic", nil)
+	startReq := httptest.NewRequest("POST", "/v1/enginex/login?provider=applemusic", nil)
 	startReq.RemoteAddr = "127.0.0.1:41001"
 	startRec := httptest.NewRecorder()
 	ui.ServeHTTP(startRec, startReq)
@@ -280,7 +280,7 @@ func TestAppleMusicHelperPhoneLoginCompletesAndPolls(t *testing.T) {
 	mu.Lock()
 	loginState = "ready"
 	mu.Unlock()
-	pollReq := httptest.NewRequest("GET", "/v1/sc5000/login?provider=applemusic", nil)
+	pollReq := httptest.NewRequest("GET", "/v1/enginex/login?provider=applemusic", nil)
 	pollReq.RemoteAddr = "127.0.0.1:41001"
 	pollRec := httptest.NewRecorder()
 	ui.ServeHTTP(pollRec, pollReq)

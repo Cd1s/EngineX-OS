@@ -1,5 +1,6 @@
 """#99: exercise the generated hardware handlers and five saved views together."""
 import json
+import legacy_names as legacy
 from pathlib import Path
 import shutil
 import subprocess
@@ -7,7 +8,7 @@ import tempfile
 import unittest
 
 REPO = Path(__file__).resolve().parents[2]
-QRC = Path('/root/build/sc5000-lab/5.3.0/qrc')
+QRC = Path(legacy.LAB) / '5.3.0/qrc'
 
 
 class ShiftViewTest(unittest.TestCase):

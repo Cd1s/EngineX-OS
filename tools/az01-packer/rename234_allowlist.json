@@ -3,9 +3,8 @@
     "internal/migration/legacy.go": "One-time upgrade readers for pre-5.3.0.5 decks",
     "rootfs-overlay/usr/libexec/enginex-migration": "One-time data/configuration migration and old-name cleanup",
     "tools/az01-packer/legacy_names.py": "Build and test readers of pre-5.3.0.5 inputs",
-    "tools/legacy_names.h": "One-time boot readers for installed pre-5.3.0.5 configurations"
-  },
-  "temporary": {
-    "docs/mods/**": "remove when agent/5305-mods-293 merges"
+    "tools/legacy_names.h": "One-time boot readers for installed pre-5.3.0.5 configurations",
+    "docs/mods/src/minimal-club-mode/feature.go": "Normalize old unit names read from saved pause records",
+    "docs/mods/src/minimal-club-mode/feature_test.go": "Regression fixtures for saved pause record migration"
   }
 }

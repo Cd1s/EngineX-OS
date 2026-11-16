@@ -1,6 +1,7 @@
 """PR #294: source filtering uses the stock model's source kind, not its label."""
 import importlib.util
 import json
+import legacy_names as legacy
 import os
 from pathlib import Path
 import re
@@ -26,7 +27,7 @@ def function(source, name):
 
 class SpotifyReviewTest(unittest.TestCase):
     def test_same_named_storage_rows_remain_visible_and_enter_normally(self):
-        fixtures = json.loads(os.environ.get("SPOTIFY_REVIEW_QRC_ROOTS", '["/root/build/sc5000-lab/5.3.0/qrc"]'))
+        fixtures = json.loads(os.environ.get("SPOTIFY_REVIEW_QRC_ROOTS", json.dumps([legacy.LAB + "/5.3.0/qrc"])))
         for fixture in fixtures:
             with self.subTest(fixture=fixture):
                 qrc = Path(fixture)

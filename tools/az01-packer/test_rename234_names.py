@@ -51,13 +51,20 @@ class Rename234NamesTest(unittest.TestCase):
                      'docs/ISSUE-FIXES-5.3.0.4.md': OLD + '\n',
                      'docs/re-report/evidence.json': '{"path": "' + OLD + '"}\n',
                      'docs/RENAME-234.md': '## History (initial rename)\n' + OLD + '\n',
-                     'internal/migration/legacy.go': '// ' + OLD + '\n'}
+                     'internal/migration/legacy.go': '// ' + OLD + '\n',
+                     'docs/mods/src/minimal-club-mode/feature.go': '// ' + OLD + '\n',
+                     'docs/mods/src/minimal-club-mode/feature_test.go': '// ' + OLD + '\n',
+                     'docs/mods/src/minimal-club-mode/README.md': OLD + '\n',
+                     'docs/mods/src/dmx-studio/source.go': '// ' + OLD + '\n'}
             for rel, text in files.items():
                 p = root / rel
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_text(text)
             self.assertEqual([f.split(':')[0] for f in findings(root, files)],
-                             ['docs/ISSUE-FIXES-5.3.0.4.md', 'docs/RENAME-234.md', 'docs/re-report/evidence.json', 'guide.md', 'pkg/x_test.go', OLD + '-tool'])
+                             ['docs/ISSUE-FIXES-5.3.0.4.md', 'docs/RENAME-234.md',
+                              'docs/mods/src/dmx-studio/source.go',
+                              'docs/mods/src/minimal-club-mode/README.md',
+                              'docs/re-report/evidence.json', 'guide.md', 'pkg/x_test.go', OLD + '-tool'])
 
 
 if __name__ == '__main__':
