@@ -114,7 +114,7 @@ static void test_paths_and_copy(const char *root) {
     assert(make_dirs(p)==-1&&errno==ELOOP);
     puts("#20/#21/#22/#37: missing library, lossless seed/reuse, changed native DB, identity separation, all symlink components: PASS");
 }
-// 5.3.0.3 made /data/enginex-custom a symlink to enginex (#103). The cache path
+// 5.3.0.3 made /data/legacy data a symlink to enginex (#103). The cache path
 // through it failed with ELOOP, so no read-only HFS+ stick got a view or rb-bridge.
 static void test_compat_symlink_root(const char *root) {
     char data[PATH_MAX],enginex[PATH_MAX],legacy[PATH_MAX],p[PATH_MAX],seeded[PATH_MAX],volume_path[PATH_MAX];
@@ -136,7 +136,7 @@ static void test_compat_symlink_root(const char *root) {
     assert(!seed_library(volume_path,"uuid-a",again,deadline_from(now_ms())));join(p,old_real,"hfs-libraries");assert(!strncmp(again,p,strlen(p)));
     // A blank /data: neither directory exists yet, so the primary one is created 0700.
     char blank[PATH_MAX];join(blank,root,"blank-data");assert(!make_dirs(blank));
-    join(test_library,blank,"enginex/hfs-libraries");join(test_legacy_library,blank,"enginex-custom/hfs-libraries");
+    join(test_library,blank,"enginex/hfs-libraries");join(test_legacy_library,blank,LEGACY_DATA_NAME "/hfs-libraries");
     assert(!seed_library(volume_path,"uuid-a",again,deadline_from(now_ms())));
     join(p,blank,"enginex/hfs-libraries");assert(!strncmp(again,p,strlen(p)));
     join(p,blank,"enginex");assert(!lstat(p,&st)&&S_ISDIR(st.st_mode)&&(st.st_mode&0777)==0700);
@@ -144,7 +144,7 @@ static void test_compat_symlink_root(const char *root) {
     // A dangling compat link is not a blank /data.
     char dangling[PATH_MAX];join(dangling,root,"dangling-data");assert(!make_dirs(dangling));
     join(p,dangling,LEGACY_DATA_NAME);assert(!symlink("enginex",p));
-    join(test_library,dangling,"enginex/hfs-libraries");join(test_legacy_library,dangling,"enginex-custom/hfs-libraries");errno=0;
+    join(test_library,dangling,"enginex/hfs-libraries");join(test_legacy_library,dangling,LEGACY_DATA_NAME "/hfs-libraries");errno=0;
     assert(seed_library(volume_path,"uuid-a",again,deadline_from(now_ms()))==-1&&errno==ELOOP);
     join(p,dangling,"enginex");assert(access(p,F_OK)==-1&&errno==ENOENT);
     // r2 left-deck bug: an older build made hfs-libraries 0755 and every HFS+ stick failed EACCES (no playlists).
@@ -172,7 +172,7 @@ static void test_compat_symlink_root(const char *root) {
     assert(seed_library(volume_path,"uuid-a",again,deadline_from(now_ms()))==-1&&errno==ELOOP);
     join(p,outside,"hfs-libraries");assert(access(p,F_OK)==-1&&errno==ENOENT);
     snprintf(test_library,sizeof test_library,"%s",saved_lib);snprintf(test_legacy_library,sizeof test_legacy_library,"%s",saved_legacy);
-    puts("#103 HFS: cache root through the /data/enginex-custom -> enginex compat link, legacy-only deck, blank /data, dangling link and writable root, foreign links refused: PASS");
+    puts("#103 HFS: cache root through the /data/" LEGACY_DATA_NAME " -> enginex compat link, legacy-only deck, blank /data, dangling link and writable root, foreign links refused: PASS");
 }
 // #182 review: the "too large, skip until re-exported" record is keyed by the
 // export files. exportOneLibrary.db, which rb-bridge also converts from, was not
@@ -295,7 +295,7 @@ static void test_mounts(const char *root) {
     puts("REAL PRIVATE NAMESPACE #20/#21/#22/#23/#37: fresh/existing RO volumes, persistent isolation, busy child/root/parent rollback, restart record, outside mount preserved: PASS");
 }
 // The deck's layout end to end: a read-only HFS+ rekordbox stick with a hidden
-// .PIONEER export on a deck whose /data/enginex-custom is the compat symlink.
+// .PIONEER export on a deck whose /data/legacy data is the compat symlink.
 // The view must be prepared and rb-bridge launched on it (#103 regression,
 // found on a rekordbox 7 macOS stick, #216).
 static void test_foreign_owned_root(const char *root) {
@@ -330,7 +330,7 @@ static void test_hfs_mount_runs_bridge(const char *root) {
     join(p,disk,"Engine Library");assert(access(p,F_OK)==-1&&errno==ENOENT); // nothing written to the stick
     join(p,enginex,"hfs-libraries");assert(!access(p,F_OK));
     assert(!unmount_dispatch(&c,real_unmount));test_hfs_target[0]=0;
-    puts("REAL PRIVATE NAMESPACE #103: read-only HFS+ .PIONEER stick with the enginex-custom compat link gets its view and rb-bridge: PASS");
+    puts("REAL PRIVATE NAMESPACE #103: read-only HFS+ .PIONEER stick with the " LEGACY_DATA_NAME " compat link gets its view and rb-bridge: PASS");
 }
 static unsigned count_mounts(const char *target) {
     FILE *f=fopen("/proc/self/mountinfo","r");assert(f);char line[4096];unsigned n=0;size_t len=strlen(target);
@@ -650,9 +650,9 @@ static void test_monitor_hides_new_and_old_view_names(const char *root) {
     fprintf(f,"269 260 0:46 / %s/view-AAAAAA/view ro,nosuid - tmpfs enginex-hfs-view ro,size=16384k,mode=755\n",test_runtime);
     fprintf(f,"304 78 0:46 / /media/vivi ro,nosuid,nodev,noexec,relatime shared:272 - tmpfs enginex-hfs-view ro,size=16384k,mode=755\n");
     fprintf(f,"309 304 8:1 /.PIONEER /media/vivi/.PIONEER rw,nosuid shared:277 - hfsplus /dev/sda1 ro,umask=22\n");
-    fprintf(f,"360 25 0:22 /x/view-BBBBBB /run/enginex-hfs-views/view-BBBBBB rw,nosuid,nodev - tmpfs tmpfs rw,mode=755\n");
-    fprintf(f,"361 360 8:17 / /run/enginex-hfs-views/view-BBBBBB/backing rw,nosuid - hfsplus /dev/sdb1 ro,umask=22\n");
-    fprintf(f,"362 79 0:47 / /media/old ro,nosuid,nodev,noexec,relatime shared:273 - tmpfs enginex-hfs-view ro,size=16384k,mode=755\n");
+    fprintf(f,"360 25 0:22 /x/view-BBBBBB " LEGACY_HFS_RUN_ROOT "/view-BBBBBB rw,nosuid,nodev - tmpfs tmpfs rw,mode=755\n");
+    fprintf(f,"361 360 8:17 / " LEGACY_HFS_RUN_ROOT "/view-BBBBBB/backing rw,nosuid - hfsplus /dev/sdb1 ro,umask=22\n");
+    fprintf(f,"362 79 0:47 / /media/old ro,nosuid,nodev,noexec,relatime shared:273 - " LEGACY_HFS_MOUNT "ro,size=16384k,mode=755\n");
     fprintf(f,"363 362 8:17 /.PIONEER /media/old/.PIONEER rw,nosuid shared:278 - hfsplus /dev/sdb1 ro,umask=22\n");
     fclose(f);
     int fd=hide_views(path);assert(fd>=0);

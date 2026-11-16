@@ -1010,6 +1010,25 @@ pkill() { printf 'pkill %s\\n' "$*" >> "$KILLED"; }
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertEqual(killed.read_text().splitlines(), ['104', '105', '106', '107'])
 
+    def test_234_systemd_fixture_still_isolates_the_generated_activator(self):
+        """Validate the real-systemd fixture without running a host service."""
+        src = self.extract(self.build())
+        fixture = (HERE / 'test_gen2_systemd_activate.sh').read_text()
+        start = fixture.index('import pathlib, re, sys\nsrc, dst, unit, dropin_dir, tmp = sys.argv[1:]')
+        code = fixture[start:fixture.index('\nPY\n', start)]
+        out = self.tmp / 'isolated-activate.sh'
+        unit = 'enginex-fixture-test.service'
+        dropin = '/run/systemd/system/' + unit + '.d'
+        result = subprocess.run(
+            [sys.executable, '-I', '-', str(src / 'boot-activate.sh'), str(out),
+             unit, dropin, str(self.tmp)], input=code, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        text = out.read_text()
+        self.assertNotIn('\nleave_old_names\n', text)
+        self.assertIn('systemctl restart --no-block ' + unit, text)
+        self.assertIn(str(self.tmp / 'units'), text)
+        self.assertIn(dropin, text)
+
     def test_234_explicit_data_paths_share_the_activation_lock(self):
         suite = self.tmp / 'bin/enginex-suite'
         suite.parent.mkdir()

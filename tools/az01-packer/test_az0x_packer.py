@@ -1,4 +1,8 @@
 """Unit tests for az0x_packer.py (#119)."""
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import legacy_names as legacy
 import contextlib
 import hashlib
 import io
@@ -220,7 +224,7 @@ class AZ0xPackerTests(unittest.TestCase):
             self.assertEqual(az0x_packer.main(['info', str(img)]), 1)
 
     def test_real_sclive2_header_if_present(self):
-        real_path = Path('/root/build/enginex-lab/fw-5.3.0/SCLIVE2-5.3.0-Update.img')
+        real_path = Path(legacy.LAB + '/fw-5.3.0/SCLIVE2-5.3.0-Update.img')
         if not real_path.exists():
             self.skipTest('Real SCLIVE2 firmware not present in test lab')
 

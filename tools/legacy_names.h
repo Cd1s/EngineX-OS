@@ -11,6 +11,7 @@
 // HFS cache and views mounted by an older release.
 #define LEGACY_HFS_LIB_ROOT "/data/sc5000-custom/hfs-libraries"
 #define LEGACY_HFS_RUN_ROOT "/run/sc5000-hfs-views"
+#define LEGACY_HFS_VIEW_NAME "sc5000-hfs-view"
 #define LEGACY_HFS_MOUNT "tmpfs sc5000-hfs-view "
 // Older installers receive these overrides only when they fill a test/staging root.
 #define LEGACY_INSTALL_ENV " SC5000_CUSTOM=\"$d\" SC5000_ALSA_OVERLAY=\"$d/alsa-conf.d\"; "

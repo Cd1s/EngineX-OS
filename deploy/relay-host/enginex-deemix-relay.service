@@ -1,5 +1,5 @@
 [Unit]
-Description=EngineX Deemix relay (credential relay only; downloads run on SC5000)
+Description=EngineX Deemix relay (credential relay only; downloads run on the deck)
 Documentation=https://relay.example.com/
 After=network-online.target
 Wants=network-online.target
