@@ -951,6 +951,19 @@ func parseBoolParam(val string) (bool, bool) {
 // safe mode: the user has asked for the UI to be tried again.
 func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
+	if r.Body != nil && strings.Contains(r.Header.Get("Content-Type"), "application/json") {
+		var body map[string]any
+		r.Body = http.MaxBytesReader(w, r.Body, jsonBodyLimit)
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			fail(w, http.StatusBadRequest, errors.New("invalid settings JSON"))
+			return
+		}
+		for k, v := range body {
+			if !q.Has(k) {
+				q.Set(k, fmt.Sprint(v))
+			}
+		}
+	}
 	if q.Has("fxUnit") || q.Has("fxMode") {
 		s.fxSelectorUpdate(w, r, q)
 		return
@@ -958,17 +971,6 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	if q.Has("timezone") && len(q) == 1 {
 		s.timezoneUpdate(w, q.Get("timezone"))
 		return
-	}
-	if r.Body != nil && strings.Contains(r.Header.Get("Content-Type"), "application/json") {
-		var body map[string]any
-		r.Body = http.MaxBytesReader(w, r.Body, jsonBodyLimit)
-		if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
-			for k, v := range body {
-				if !q.Has(k) {
-					q.Set(k, fmt.Sprint(v))
-				}
-			}
-		}
 	}
 	// The switch belongs to the deck: not from the LAN console API. Tunnels
 	// never reach /v1 (the gateway refuses relayed requests, ForwardHandler).
