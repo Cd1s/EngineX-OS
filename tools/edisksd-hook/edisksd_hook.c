@@ -550,16 +550,21 @@ static void cleanup_anchor(const char *anchor) {
     rmdir(anchor);
 }
 static void cleanup_view(struct owned_view *v) { cleanup_anchor(v->anchor); }
-static int add_child(struct owned_view *v,const char *name,const char *source,int isdir) {
+static int bind_view_child(struct owned_view *v,const char *name,const char *source,int isdir,int create) {
     if(v->count==MAX_VIEW_ENTRIES){errno=E2BIG;return -1;}
     char root[PATH_MAX],dest[PATH_MAX];
     if(path_join(root,sizeof root,v->anchor,"view")||path_join(dest,sizeof dest,root,name))return -1;
-    if(isdir){if(mkdir(dest,0700))return -1;}
-    else {int fd=open(dest,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);if(fd<0)return -1;close(fd);}
+    if(create) {
+        if(isdir){if(mkdir(dest,0700))return -1;}
+        else {int fd=open(dest,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);if(fd<0)return -1;close(fd);}
+    }
     // A bind of a shared mount (systemd makes /data MS_SHARED) is that mount's peer:
     // bind_native's binds inside it would propagate into /data. Private first.
     if(bind_checked(source,dest,MS_BIND|MS_REC)||mount(NULL,dest,NULL,MS_PRIVATE|MS_REC,NULL))return -1;
     snprintf(v->child[v->count++].name,NAME_MAX+1,"%s",name);return 0;
+}
+static int add_child(struct owned_view *v,const char *name,const char *source,int isdir) {
+    return bind_view_child(v,name,source,isdir,1);
 }
 static int update_public_ids(struct owned_view *v) {
     v->public_id=mount_id(v->target);if(!v->public_id)return -1;
@@ -703,21 +708,35 @@ static int prepare_view(const char *target,const char *identity,int64_t deadline
     if(bind_checked(v->anchor,v->anchor,MS_BIND)||mount(NULL,v->anchor,NULL,MS_PRIVATE|MS_REC,NULL))goto done;
     if(path_join(backing,sizeof backing,v->anchor,"backing")||path_join(view,sizeof view,v->anchor,"view")||path_join(rescue,sizeof rescue,v->anchor,"rescue")||
        mkdir(backing,0700)||mkdir(view,0700)||mkdir(rescue,0700))goto done;
-    if(bind_checked(target,backing,MS_BIND|MS_REC)||mount(NULL,backing,NULL,MS_PRIVATE|MS_REC,NULL)||
-       mount("enginex-hfs-view",view,"tmpfs",MS_NODEV|MS_NOSUID|MS_NOEXEC,"mode=0755,size=16m"))goto done;
-    DIR *d=opendir(backing);if(!d)goto done;
-    struct dirent *e;int scan_error=0;
-    for(;;) {
-        errno=0;e=readdir(d);if(!e){if(errno)scan_error=1;break;}
-        if(!strcmp(e->d_name,".")||!strcmp(e->d_name,"..")||!strcmp(e->d_name,"Engine Library"))continue;
-        char source[PATH_MAX];struct stat st;
-        if(budget(deadline)||path_join(source,sizeof source,backing,e->d_name)||lstat(source,&st)||S_ISLNK(st.st_mode)||
-           (!S_ISDIR(st.st_mode)&&!S_ISREG(st.st_mode))||add_child(v,e->d_name,source,S_ISDIR(st.st_mode))){if(!errno)errno=ELOOP;scan_error=1;break;}
+    if(bind_checked(target,backing,MS_BIND|MS_REC)||mount(NULL,backing,NULL,MS_PRIVATE|MS_REC,NULL))goto done;
+    char native[PATH_MAX];struct stat el_st;int has_native_el=0;
+    if(path_join(native,sizeof native,backing,"Engine Library"))goto done;
+    if(!lstat(native,&el_st)) {
+        if(S_ISLNK(el_st.st_mode)){errno=ELOOP;goto done;}
+        if(!S_ISDIR(el_st.st_mode)){errno=ENOTDIR;goto done;}
+        has_native_el=1;
+    } else if(errno!=ENOENT)goto done;
+    if(has_native_el) {
+        // Bind the volume root once instead of per-root-entry binds, then overlay Engine Library.
+        if(bind_checked(backing,view,MS_BIND)||mount(NULL,view,NULL,MS_PRIVATE|MS_REC,NULL)||
+           bind_view_child(v,"Engine Library",library,1,0)||bind_native(v,backing,library,deadline)||
+           budget(deadline)||bind_checked(view,target,MS_BIND|MS_REC))goto done;
+    } else {
+        if(mount("enginex-hfs-view",view,"tmpfs",MS_NODEV|MS_NOSUID|MS_NOEXEC,"mode=0755,size=16m"))goto done;
+        DIR *d=opendir(backing);if(!d)goto done;
+        struct dirent *e;int scan_error=0;
+        for(;;) {
+            errno=0;e=readdir(d);if(!e){if(errno)scan_error=1;break;}
+            if(!strcmp(e->d_name,".")||!strcmp(e->d_name,"..")||!strcmp(e->d_name,"Engine Library"))continue;
+            char source[PATH_MAX];struct stat st;
+            if(budget(deadline)||path_join(source,sizeof source,backing,e->d_name)||lstat(source,&st)||S_ISLNK(st.st_mode)||
+               (!S_ISDIR(st.st_mode)&&!S_ISREG(st.st_mode))||add_child(v,e->d_name,source,S_ISDIR(st.st_mode))){if(!errno)errno=ELOOP;scan_error=1;break;}
+        }
+        closedir(d);if(scan_error||add_child(v,"Engine Library",library,1)||bind_native(v,backing,library,deadline))goto done;
+        // Make the synthetic root read-only, while the separate library bind stays rw.
+        if(mount(NULL,view,"tmpfs",MS_REMOUNT|MS_RDONLY|MS_NODEV|MS_NOSUID|MS_NOEXEC,"mode=0755,size=16m")||
+           budget(deadline)||bind_checked(view,target,MS_BIND|MS_REC))goto done;
     }
-    closedir(d);if(scan_error||add_child(v,"Engine Library",library,1)||bind_native(v,backing,library,deadline))goto done;
-    // Make the synthetic root read-only, while the separate library bind stays rw.
-    if(mount(NULL,view,"tmpfs",MS_REMOUNT|MS_RDONLY|MS_NODEV|MS_NOSUID|MS_NOEXEC,"mode=0755,size=16m")||
-       budget(deadline)||bind_checked(view,target,MS_BIND|MS_REC))goto done;
     if(update_public_ids(v)) {
         int saved=errno;umount2(target,MNT_DETACH|UMOUNT_NOFOLLOW);errno=saved;goto done;
     }
@@ -1575,9 +1594,14 @@ static pthread_mutex_t post_lock=PTHREAD_MUTEX_INITIALIZER;
 static __thread int in_hook,holding_post;
 static void release_post(void){if(holding_post){holding_post=0;pthread_mutex_unlock(&post_lock);}}
 static int starts_dir(const char *s,const char *dir,size_t n){return !strncmp(s,dir,n)&&s[n]=='/';}
+static int is_vol_mp(const char *mp,size_t ml,const char *root,size_t rlen) {
+    if(!rlen||ml<=rlen+1||!starts_dir(mp,root,rlen))return 0;
+    return memchr(mp+rlen+1,'/',ml-(rlen+1))==NULL;
+}
 // A memfd with filename's mountinfo lines minus RUN_ROOT helper mounts, the view
-// overlays (tmpfs "enginex-hfs-view", "sc5000-hfs-view" before 5.3.0.5) and everything mounted inside one; the
-// device mount underneath stays. -1: nothing to hide, or parse the file as is.
+// overlays (tmpfs "enginex-hfs-view", "sc5000-hfs-view" before 5.3.0.5, or stacked
+// volume-root binds) and everything mounted inside one; the device mount underneath
+// stays. -1: nothing to hide, or parse the file as is.
 static int hide_views(const char *filename) {
     FILE *f=fopen(filename,"re");if(!f)return -1;
     size_t cap=65536,len=0;char *buf=malloc(cap+1);
@@ -1586,12 +1610,17 @@ static int hide_views(const char *filename) {
     buf[len]=0;
     char run[PATH_MAX];int runlen=snprintf(run,sizeof run,"%s",RUN_ROOT);
     char legacy[PATH_MAX];int legacylen=snprintf(legacy,sizeof legacy,"%s",LEGACY_RUN_ROOT);
-    const char *views[64];size_t vlen[64];unsigned nv=0;int hidden=0;
+    char media[PATH_MAX];int medialen=snprintf(media,sizeof media,"%s",MEDIA_ROOT);
+    struct {unsigned long long id;const char *mp;size_t ml;} seen[64];unsigned nseen=0;
+    const char *views[64];size_t vlen[64];unsigned long long stacked_ids[64];unsigned nv=0;int hidden=0;
     for(int pass=0;pass<2;pass++) {
         int fd=-1;
         if(pass){if(!hidden){free(buf);return -1;}fd=memfd_create("mountinfo",MFD_CLOEXEC);if(fd<0){free(buf);return -1;}}
         for(char *line=buf;*line;) {
             char *end=strchr(line,'\n');size_t ll=end?(size_t)(end-line+1):strlen(line);
+            char *ep1=NULL,*ep2=NULL;
+            unsigned long long mid=strtoull(line,&ep1,10),mpid=(ep1&&*ep1==' ')?strtoull(ep1+1,&ep2,10):0;
+            int have_ids=(ep1&&*ep1==' '&&ep2&&*ep2==' '&&mid>0);
             // fields: id parent maj:min root mountpoint ... " - " fstype source
             const char *mp=line;for(int i=0;i<4&&mp;i++){mp=memchr(mp,' ',ll-(size_t)(mp-line));if(mp)mp++;}
             const char *mpe=mp?memchr(mp,' ',ll-(size_t)(mp-line)):NULL;
@@ -1600,11 +1629,20 @@ static int hide_views(const char *filename) {
             if(mpe&&sep) {
                 size_t ml=(size_t)(mpe-mp);
                 int overlay=!strncmp(sep+3,"tmpfs enginex-hfs-view ",23)||!strncmp(sep+3,"tmpfs sc5000-hfs-view ",22);
-                int helper=(ml>(size_t)runlen&&starts_dir(mp,run,(size_t)runlen))||
+                int helper=(runlen>0&&ml>(size_t)runlen&&starts_dir(mp,run,(size_t)runlen))||
                            (legacylen>0&&ml>(size_t)legacylen&&starts_dir(mp,legacy,(size_t)legacylen));
-                if(!pass&&overlay&&!helper&&nv<64){views[nv]=mp;vlen[nv++]=ml;}
-                hide=helper||overlay;
-                for(unsigned i=0;i<nv&&!hide;i++)hide=ml>vlen[i]&&starts_dir(mp,views[i],vlen[i]);
+                int stacked=0;
+                if(!pass&&!helper&&!overlay&&have_ids&&
+                   (is_vol_mp(mp,ml,media,medialen>0?(size_t)medialen:0)||is_vol_mp(mp,ml,"/media",6))) {
+                    unsigned j=0;
+                    for(;j<nseen;j++)if(seen[j].ml==ml&&!memcmp(seen[j].mp,mp,ml))break;
+                    if(j<nseen&&seen[j].id==mpid){stacked=1;seen[j].id=mid;}
+                    else if(j==nseen&&nseen<64){seen[nseen].id=mid;seen[nseen].mp=mp;seen[nseen].ml=ml;nseen++;}
+                }
+                if(!pass&&(overlay||stacked)&&!helper&&nv<64){views[nv]=mp;vlen[nv]=ml;stacked_ids[nv++]=stacked?mid:0;}
+                hide=helper||overlay||stacked;
+                for(unsigned i=0;i<nv&&!hide;i++)
+                    hide=(stacked_ids[i]&&have_ids&&mid==stacked_ids[i])||(ml>vlen[i]&&starts_dir(mp,views[i],vlen[i]));
             }
             if(!pass)hidden|=hide;
             else if(!hide) {

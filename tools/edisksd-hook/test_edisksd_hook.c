@@ -787,6 +787,22 @@ static void test_monitor_hides_new_and_old_view_names(const char *root) {
     assert(strstr(out,"78 33 8:1 / /media/vivi rw")&&strstr(out,"79 33 8:17 / /media/old rw"));
     assert(!strstr(out,"hfs-view")&&!strstr(out,"view-AAAAAA")&&!strstr(out,"view-BBBBBB")&&!strstr(out,"/.PIONEER"));
     int lines=0;for(char *p=out;*p;p++)lines+=*p=='\n';assert(lines==2);
+    // Stacked direct root-bind overlay (constant-mount RO view) is also hidden while the base device mount stays.
+    f=fopen(path,"w");assert(f);
+    fprintf(f,"78 33 8:1 / /media/vivi rw,nosuid,nodev,noexec,relatime,nosymfollow shared:239 - hfsplus /dev/sda1 ro,umask=22\n");
+    fprintf(f,"79 33 8:17 / /media/vivid rw,relatime shared:240 - vfat /dev/sdb1 rw\n");
+    fprintf(f,"260 25 0:21 /x/view-CCCCCC %s/view-CCCCCC rw,nosuid,nodev - tmpfs tmpfs rw,mode=755\n",test_runtime);
+    fprintf(f,"268 260 8:1 / %s/view-CCCCCC/backing rw,nosuid - hfsplus /dev/sda1 ro,umask=22\n",test_runtime);
+    fprintf(f,"269 260 8:1 / %s/view-CCCCCC/view rw,nosuid - hfsplus /dev/sda1 ro,umask=22\n",test_runtime);
+    fprintf(f,"304 78 8:1 / /media/vivi rw,nosuid - hfsplus /dev/sda1 ro,umask=22\n");
+    fprintf(f,"305 304 179:39 /enginex/hfs-libraries/u/library-0 /media/vivi/Engine\\040Library rw - ext4 /dev/mmcblk0p7 rw\n");
+    fprintf(f,"306 305 8:1 /Engine\\040Library/Music /media/vivi/Engine\\040Library/Music rw,nosuid - hfsplus /dev/sda1 ro\n");
+    fclose(f);
+    fd=hide_views(path);assert(fd>=0);
+    n=pread(fd,out,sizeof out-1,0);assert(n>0);out[n]=0;close(fd);
+    assert(strstr(out,"78 33 8:1 / /media/vivi rw")&&strstr(out,"79 33 8:17 / /media/vivid rw"));
+    assert(!strstr(out,"304 78")&&!strstr(out,"view-CCCCCC")&&!strstr(out,"Engine\\040Library")&&!strstr(out,"mmcblk0p7"));
+    lines=0;for(char *p=out;*p;p++)lines+=*p=='\n';assert(lines==2);
     puts("#234 HFS view: the monitor hides views under the new and the pre-5.3.0.5 name: PASS");
 }
 static void write_bytes(const char *path,size_t n) {
@@ -1605,13 +1621,66 @@ static void test_hfs_rw_policy(const char *root) {
     puts("HFS+ RW policy (Gen-1 hfsplusx, AZ04 hfsplus+ufsd, Gen-2 ro, fsck/journal/eject): PASS");
 }
 
+static void test_hfs_view_scale_and_47879b10_253(const char *root) {
+    assert(!mount(NULL,"/",NULL,MS_REC|MS_PRIVATE,NULL));
+    char disk[PATH_MAX],target[PATH_MAX],p[PATH_MAX],track[PATH_MAX],db[PATH_MAX],err_path[PATH_MAX];
+    join(disk,root,"scale-disk");
+    join(p,disk,"PIONEER/rekordbox");assert(!make_dirs(p));
+    join(p,disk,"PIONEER/rekordbox/export.pdb");write_file(p,"pdb-scale\n");
+    join(p,disk,"Engine Library/Database2");assert(!make_dirs(p));
+    join(p,disk,"Engine Library/Database2/m.db");write_file(p,"native scale db\n");
+    join(p,disk,"Engine Library/Music");assert(!make_dirs(p));
+    join(p,disk,"Engine Library/Music/native.mp3");write_file(p,"native audio\n");
+    for(int i=0;i<1300;i++) {
+        char d[64];snprintf(d,sizeof d,"dir-%04d",i);
+        join(p,disk,d);assert(!mkdir(p,0700));
+    }
+    join(track,disk,"dir-0500/track.mp3");write_file(track,"root audio\n");
+    join(target,MEDIA_ROOT,"SCALE");assert(!make_dirs(target));
+    join(test_rb_bridge,root,"scale-bridge");
+    write_file(test_rb_bridge,"#!/bin/sh\nexit 1\n");assert(!chmod(test_rb_bridge,0700));
+    snprintf(test_disk,sizeof test_disk,"%s",disk);test_disk_ro=1;
+    snprintf(test_hfs_target,sizeof test_hfs_target,"%s",target);
+    struct libmnt_context c={.target=target,.source="/dev/sdscale1"};
+    // #253: bridge failure in MOUNT_PRE publishes .err, surviving MOUNT_POST prepare_view; state clears on exit.
+    assert(!hooked_mount(&c,test_real_mount));
+    expect_not_preparing();
+    assert(!prepare_err_path(err_path));
+    expect_file(err_path,"{\"state\":\"error\",\"kind\":\"usb\",\"error\":\"USB conversion failed\"}\n");
+    assert(!unlink(err_path));
+    // Constant mount count regardless of 1300 root folders.
+    assert(count_mounts(target)<=6&&count_mounts(test_runtime)<=8);
+    // hide_views hides stacked overlay + Engine Library + helper mounts, keeping only the base mount.
+    int hfd=hide_views("/proc/self/mountinfo");assert(hfd>=0);
+    char *mbuf=malloc(65536);assert(mbuf);
+    ssize_t mn=pread(hfd,mbuf,65535,0);assert(mn>0);mbuf[mn]=0;close(hfd);
+    unsigned hits=0;for(char *pos=mbuf;(pos=strstr(pos,target));pos+=strlen(target))hits++;
+    assert(hits==1&&!strstr(mbuf,test_runtime)&&!strstr(mbuf,"Engine\\040Library"));
+    free(mbuf);
+    // Root track is readable and read-only; Engine Library/Database2/m.db is writable; native.mp3 is RO.
+    join(p,target,"dir-0500/track.mp3");expect_file(p,"root audio\n");
+    assert(open(p,O_WRONLY)<0&&errno==EROFS);
+    int held=open(p,O_RDONLY);assert(held>=0);
+    assert(unmount_dispatch(&c,real_unmount)==-EBUSY&&errno==EBUSY);
+    close(held);
+    join(p,target,"Engine Library/Music/native.mp3");expect_file(p,"native audio\n");
+    assert(open(p,O_WRONLY)<0&&errno==EROFS);
+    join(db,target,"Engine Library/Database2/m.db");write_file(db,"updated cue\n");
+    // 47879b10: open database on /data does not block eject.
+    held=open(db,O_RDONLY);assert(held>=0);
+    assert(!unmount_dispatch(&c,real_unmount)&&count_mounts(target)==0);
+    close(held);
+    test_hfs_target[0]=0;test_disk_ro=0;test_disk[0]=0;test_rb_bridge[0]=0;
+    puts("REAL PRIVATE NAMESPACE Scale + 47879b10 + #253: 1300 root folders use O(1) mounts, hide_views/eject/errors intact: PASS");
+}
+
 int main(int argc,char **argv) {
     char root[]="/tmp/enginex-edisks-tests-XXXXXX";assert(mkdtemp(root));
     join(test_prepare_state,root,"run/enginex-usb-preparing");char prep_run[PATH_MAX];join(prep_run,root,"run");assert(!make_dirs(prep_run));
     join(test_media,root,"media");join(test_library,root,"libraries");join(test_runtime,root,"runtime");
     join(test_legacy_library,root,"legacy-libraries");join(test_utab,root,"utab");assert(!make_dirs(test_utab));
     assert(!make_dirs(test_media));test_paths_and_copy(root);test_compat_symlink_root(root);test_time();test_slow_marker_follows_every_export_file(root);test_only_an_export_makes_a_rekordbox_stick(root);test_monitor_sees_plain_device_mount(root);test_monitor_hides_new_and_old_view_names(root);test_hfs_rw_unit(root);
-    if(argc>1&&!strcmp(argv[1],"--mounts")){test_prepare_state_lifecycle(root);test_hfs_rw_policy(root);test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);test_library_is_walked_once(root);test_two_sticks_at_once(root);test_hfs_visible_mount_reuses_the_converted_library(root);test_private_mount_leaves_nothing_behind(root);test_hfs_view_copies_only_metadata(root);test_heal_before_visible(root);test_eject_while_another_stick_converts(root);test_eject_of_a_pulled_stick(root);test_heal_marker_survives_another_port(root);test_hfs_view_with_a_long_entry_name(root);test_hfs_view_artwork_is_writable(root);test_seed_keeps_its_own_previous_generation(root);test_view_binds_stay_out_of_a_shared_data(root);test_guardian_from_the_data_bundle(root);test_slow_marker_survives_another_port(root);}
+    if(argc>1&&!strcmp(argv[1],"--mounts")){test_prepare_state_lifecycle(root);test_hfs_rw_policy(root);test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);test_library_is_walked_once(root);test_two_sticks_at_once(root);test_hfs_visible_mount_reuses_the_converted_library(root);test_private_mount_leaves_nothing_behind(root);test_hfs_view_copies_only_metadata(root);test_heal_before_visible(root);test_eject_while_another_stick_converts(root);test_eject_of_a_pulled_stick(root);test_heal_marker_survives_another_port(root);test_hfs_view_with_a_long_entry_name(root);test_hfs_view_artwork_is_writable(root);test_seed_keeps_its_own_previous_generation(root);test_view_binds_stay_out_of_a_shared_data(root);test_guardian_from_the_data_bundle(root);test_slow_marker_survives_another_port(root);test_hfs_view_scale_and_47879b10_253(root);}
     // Mount tests have removed all namespace mounts before deleting fixtures.
     int tmp=open("/tmp",O_RDONLY|O_DIRECTORY);assert(tmp>=0);remove_tree(tmp,strrchr(root,'/')+1);close(tmp);
     puts("edisksd-hook: all requested tests passed");return 0;
