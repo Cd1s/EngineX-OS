@@ -2,11 +2,14 @@ package webui
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 
+	"github.com/Cd1s/EngineX-OS/pkg/deemixclient"
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
 )
 
@@ -58,6 +61,69 @@ func (s *Server) stemmed(scope string) []stemmedTrack {
 	return s.loadStemmed()[scope]
 }
 
+// stemsImportFile is the file Engine imports for a streamed row's Stems: the
+// download under a name that says what it is, with its tags. The cache names
+// files by id and services send audio without tags, so the internal library
+// showed the row as "<digits>.flac". The file is a tagged copy (FLAC, MP3) or
+// a hard link (anything else) in a directory of its own per track, which cache
+// eviction does not look at. One made earlier is kept: Engine's library row
+// and its Stems belong to that file. When anything fails Engine gets the
+// cache file, as before.
+func stemsImportFile(cache string, t providers.Track) string {
+	artist := t.Artist
+	if artist == "" {
+		artist = strings.Join(t.Artists, ", ")
+	}
+	name := stemsFileName(artist, t.Title)
+	if name == "" {
+		return cache
+	}
+	ext := filepath.Ext(cache)
+	dir := filepath.Join(filepath.Dir(cache), "Stems", strings.TrimSuffix(filepath.Base(cache), ext))
+	named := filepath.Join(dir, name+ext)
+	if st, err := os.Stat(named); err == nil && st.Mode().IsRegular() {
+		return named
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return cache
+	}
+	tagged, err := deemixclient.CopyTagged(cache, named, t.Title, artist, t.Album)
+	if err != nil {
+		log.Printf("stream-sync: stems source tags: %v", err)
+	}
+	if tagged && err == nil {
+		return named
+	}
+	if err = os.Link(cache, named); err != nil {
+		log.Printf("stream-sync: stems source name: %v", err)
+		return cache
+	}
+	return named
+}
+
+// stemsFileName is "Artist - Title" as a file name the UI can put in a file:
+// URL as it is: no path separator, and none of '#', '?' and '%', which
+// encodeURI leaves alone or which would start a fragment or query.
+func stemsFileName(artist, title string) string {
+	clean := func(s string) string {
+		s = strings.Map(func(r rune) rune {
+			if r < 0x20 || r == 0x7f || strings.ContainsRune(`/\#?%`, r) {
+				return ' '
+			}
+			return r
+		}, s)
+		return strings.Join(strings.Fields(s), " ")
+	}
+	name := clean(title)
+	if a := clean(artist); a != "" && name != "" {
+		name = a + " - " + name
+	}
+	if r := []rune(name); len(r) > 80 {
+		name = strings.TrimSpace(string(r[:80]))
+	}
+	return strings.Trim(name, ". ")
+}
+
 var statStemmedPath = os.Stat
 
 // stemmedPath is the stemmed local copy of t, if it is still on disk.
@@ -80,12 +146,40 @@ func (s *Server) stemmedPath(t providers.Track) string {
 	return ""
 }
 
+// A row joins the list when its download is handed to Engine, and Engine then
+// needs about as long as the track to render the Stems on the deck. Until they
+// exist the row is shown as stock shows an unavailable track, saying so:
+// loaded as a track it had no Stems, and nothing said why.
 func (g *tidalGateway) stemsListTracks(w http.ResponseWriter, r *http.Request, scope string) {
+	list := g.s.stemmed(scope)
+	paths := make([]string, len(list))
+	for i, e := range list {
+		paths[i] = e.Path
+	}
+	pending := stemsPending(r.Context(), paths)
 	items := []any{}
-	for _, e := range g.s.stemmed(scope) {
+	for _, e := range list {
+		if pending[e.Path] {
+			items = append(items, g.stemsPendingRow(e.Track))
+			continue
+		}
 		items = append(items, g.trackItems(e.Session, e.Guest, []providers.Track{e.Track})...)
 	}
 	respond(w, page(r, 500, items))
+}
+
+func (g *tidalGateway) stemsPendingRow(t providers.Track) any {
+	title, hint := "Stems not ready", "Rendering can take as long as the track. Go back and reopen this list."
+	g.s.uiMu.Lock()
+	lang := g.s.loadUI().Language
+	g.s.uiMu.Unlock()
+	switch lang {
+	case "zh-Hans":
+		title, hint = "Stems 尚未完成", "分轨耗时可能与曲长相当，请稍后返回并重新打开此列表。"
+	case "zh-Hant":
+		title, hint = "Stems 尚未完成", "分軌耗時可能與曲長相當，請稍後返回並重新開啟此清單。"
+	}
+	return g.trackItems("", false, []providers.Track{{Provider: listNoticeProvider, ID: "stems-" + t.Provider + "-" + t.ID, Title: title + " — " + t.Title, Artist: hint}})[0]
 }
 
 // stemsLocal answers whether a streamed row has a stemmed local copy.

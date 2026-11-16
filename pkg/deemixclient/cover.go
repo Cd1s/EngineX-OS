@@ -154,7 +154,12 @@ func (c *Client) fetchCover(ctx context.Context, address string) ([]byte, string
 }
 
 func replaceFile(path string, rewrite func(io.Reader, io.Writer) error) error {
-	in, err := os.Open(path)
+	return rewriteFile(path, path, rewrite)
+}
+
+// rewriteFile writes dst as what rewrite makes of src, in one step.
+func rewriteFile(src, dst string, rewrite func(io.Reader, io.Writer) error) error {
+	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
@@ -163,7 +168,7 @@ func replaceFile(path string, rewrite func(io.Reader, io.Writer) error) error {
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".part-*")
+	tmp, err := os.CreateTemp(filepath.Dir(dst), ".part-*")
 	if err != nil {
 		return err
 	}
@@ -182,7 +187,7 @@ func replaceFile(path string, rewrite func(io.Reader, io.Writer) error) error {
 	if err != nil {
 		return err
 	}
-	return os.Rename(tmp.Name(), path)
+	return os.Rename(tmp.Name(), dst)
 }
 
 // hasPicture reads only the headers. A file it cannot read counts as having one, so
@@ -323,13 +328,6 @@ func synchsafe(n int) []byte {
 
 // insertAPIC adds an APIC frame to the file's ID3v2 tag, or gives it a new tag.
 func insertAPIC(in io.Reader, out io.Writer, cover []byte, mime string) error {
-	r := bufio.NewReader(in)
-	tag := id3Tag{version: 3}
-	if head, err := r.Peek(3); err == nil && string(head) == "ID3" {
-		if tag, _, err = readID3(r); err != nil {
-			return err
-		}
-	}
 	var body bytes.Buffer
 	body.WriteByte(0) // text encoding of the description
 	body.WriteString(mime)
@@ -337,24 +335,5 @@ func insertAPIC(in io.Reader, out io.Writer, cover []byte, mime string) error {
 	body.WriteByte(3) // front cover
 	body.WriteByte(0) // no description
 	body.Write(cover)
-	frame := []byte("APIC")
-	if tag.version == 4 {
-		frame = append(frame, synchsafe(body.Len())...)
-	} else {
-		frame = binary.BigEndian.AppendUint32(frame, uint32(body.Len()))
-	}
-	frame = append(frame, 0, 0)
-	// Padding after the old frames would swallow a frame added behind it.
-	frames := bytes.TrimRight(tag.frames, "\x00")
-	total := len(frames) + len(frame) + body.Len()
-	if total >= 1<<28 {
-		return errors.New("cover: tag too large")
-	}
-	for _, part := range [][]byte{{'I', 'D', '3', tag.version, 0, 0}, synchsafe(total), frames, frame, body.Bytes()} {
-		if _, err := out.Write(part); err != nil {
-			return err
-		}
-	}
-	_, err := io.Copy(out, r)
-	return err
+	return appendID3(in, out, func(version byte) []byte { return id3Frame(version, "APIC", body.Bytes()) })
 }

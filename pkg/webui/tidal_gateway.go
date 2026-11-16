@@ -1756,6 +1756,7 @@ func (g *tidalGateway) stemsSource(w http.ResponseWriter, r *http.Request) {
 		fail(w, 502, err)
 		return
 	}
+	p = stemsImportFile(p, ref.track)
 	// The row joins the Stems list of the service it was stemmed from.
 	stemsScope := ref.track.Provider
 	if v := g.sessionByID(ref.session); v != nil && v.Provider != "" {
@@ -1780,20 +1781,63 @@ func (g *tidalGateway) stemsTrackID(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, errors.New("path required"))
 		return
 	}
-	mdb := filepath.Join(shadowDataRoot, "AppDataUser/AIR Music Technology/Engine/Engine Library/Database2/m.db")
-	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: mdb}).String()+"?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(500)")
+	ids, err := internalTrackIDs(r.Context(), name)
 	if err != nil {
 		fail(w, 500, err)
 		return
 	}
-	defer db.Close()
-	var id int64
-	err = db.QueryRowContext(r.Context(), `SELECT id FROM Track WHERE filename = ? ORDER BY id DESC LIMIT 1`, name).Scan(&id)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		fail(w, 500, err)
-		return
+	respond(w, map[string]any{"trackId": ids[name]})
+}
+
+// internalLibrary is Engine's library on the deck's own storage: a file under
+// /data is imported there, and its Stems are written next to it.
+func internalLibrary() string {
+	return filepath.Join(shadowDataRoot, "AppDataUser/AIR Music Technology/Engine/Engine Library")
+}
+
+// internalTrackIDs looks up the newest internal library row of each file name.
+// Read-only (#49); a name that was not imported is absent from the answer.
+func internalTrackIDs(ctx context.Context, names ...string) (map[string]int64, error) {
+	mdb := filepath.Join(internalLibrary(), "Database2/m.db")
+	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: mdb}).String()+"?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(500)")
+	if err != nil {
+		return nil, err
 	}
-	respond(w, map[string]any{"trackId": id})
+	defer db.Close()
+	ids := map[string]int64{}
+	for _, name := range names {
+		var id int64
+		err = db.QueryRowContext(ctx, `SELECT id FROM Track WHERE filename = ? ORDER BY id DESC LIMIT 1`, name).Scan(&id)
+		if err == nil {
+			ids[name] = id
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return nil, err
+		}
+	}
+	return ids, nil
+}
+
+// stemsPending tells which of the imported files have no Stems yet: Engine has
+// the track in its internal library and has not written "<id> <library>.stems"
+// for it. A file it cannot find out about counts as done, so a deck whose
+// library it cannot read keeps the list it had.
+func stemsPending(ctx context.Context, paths []string) map[string]bool {
+	names := make([]string, len(paths))
+	for i, p := range paths {
+		names[i] = filepath.Base(p)
+	}
+	ids, err := internalTrackIDs(ctx, names...)
+	pending := map[string]bool{}
+	if err != nil {
+		return pending
+	}
+	for i, p := range paths {
+		if id, ok := ids[names[i]]; ok {
+			done, _ := filepath.Glob(filepath.Join(internalLibrary(), "Stems", fmt.Sprintf("%d *.stems", id)))
+			pending[p] = len(done) == 0
+		}
+	}
+	return pending
 }
 
 // stream serves a finished download (with Range support) or downloads it now;
