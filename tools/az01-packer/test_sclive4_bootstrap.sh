@@ -336,7 +336,7 @@ rm -rf '$TARGET/data/enginex/bundle'
 mv '$TARGET/data/enginex' '$TARGET$legacy_data'
 mkdir -p '$TARGET$legacy_data/Stream'
 echo keep > '$TARGET$legacy_data/Stream/song.flac'
-echo ssh-key > '$TARGET/data/enginex/authorized_keys'
+echo ssh-key > '$TARGET$legacy_data/authorized_keys'
 mkdir -p '$TARGET/tmp/installer'
 tar -xzf '$BUNDLE' -C '$TARGET/tmp/installer'
 chroot '$TARGET' /bin/sh /tmp/installer/$PREFIX-5.3.0.5-EngineX-OS-Data-Bundle/install.sh >/dev/null
