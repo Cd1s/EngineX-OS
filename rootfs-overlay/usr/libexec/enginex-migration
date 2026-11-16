@@ -19,9 +19,9 @@ legacy_stemsd='sc5000-stemsd' # Legacy release reader.
 legacy_lab='/root/build/sc5000-lab' # Legacy release reader.
 legacy_api='/v1/sc5000' # Legacy release reader.
 legacy_share='/usr/share/sc5000-custom' # Legacy release reader.
-legacy_libexec='/usr/libexec/sc5000-custom' # Legacy release reader.
-legacy_bin='/usr/local/bin/sc5000' # Legacy release reader.
 legacy_unit='sc5000' # Legacy release reader.
+legacy_libexec="/usr/libexec/${legacy_data##*/}" # Legacy release reader.
+legacy_bin="/usr/local/bin/$legacy_unit" # Legacy release reader.
 legacy_packer='sc5000-custom*' # Legacy release reader.
 # Read environment overrides passed by older updaters.
 ENGINEX_CUSTOM=${ENGINEX_CUSTOM:-${SC5000_CUSTOM:-}}

@@ -48,6 +48,21 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('0 FAIL', result.stdout)
 
+    def test_migration_prefixes_pass_but_a_missing_command_still_fails(self):
+        source = Path(__file__).resolve().parents[2] / 'rootfs-overlay/usr/libexec/enginex-migration'
+        script = source.read_text()
+        self.ship('usr/libexec/enginex-migration', script)
+        ok, a = self.audit()
+        self.assertTrue(ok, a.fails)
+        prefixes = subprocess.check_output(['sh', '-c',
+            '. "$1"; printf "%s\\n" "$legacy_libexec" "$legacy_bin"', 'sh', str(source)], text=True)
+        self.assertEqual(prefixes.splitlines(), ['/usr/libexec/' + legacy.DATA_NAME,
+                                                '/usr/local/bin/' + legacy.PROJECT])
+        self.ship('usr/libexec/enginex-migration', script + '\n/usr/bin/gone\n')
+        ok, a = self.audit()
+        self.assertFalse(ok)
+        self.assertIn('/usr/libexec/enginex-migration: calls /usr/bin/gone, not in this rootfs', a.fails)
+
     def test_hard_requires_on_a_vendor_mount_fails(self):
         # The 5.3.0.1 upgrade bug: 5.3.0 has no etc.mount, so prepare and SSH never ran.
         self.ship('etc/systemd/system/x.service', '[Unit]\nRequires=etc.mount\n[Service]\nExecStart=/bin/sh\n')
