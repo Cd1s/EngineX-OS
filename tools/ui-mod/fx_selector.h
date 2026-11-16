@@ -63,6 +63,7 @@ static inline int sc_pfx_arm(unsigned unit, unsigned mode, unsigned a, unsigned 
  * ChannelDJFx owner. Both must arrive on the same owner in the same generation.
  * Consumed messages never reach stock Mix, so the handshake cannot duck audio. */
 static inline int sc_pfx_challenge(void *owner, float value) {
+    if (!owner) return 0;
     unsigned bits = sc_pfx_bits(value);
     for (unsigned i = 0; i < SC_PFX_UNITS; ++i) {
         struct sc_pfx_route *r = &sc_pfx_routes[i];
@@ -87,6 +88,7 @@ static inline int sc_pfx_challenge(void *owner, float value) {
 }
 
 static inline int sc_pfx_bind_context(void *owner, void *effect) {
+    if (!owner || !effect) return 0;
     unsigned found = SC_PFX_UNITS;
     for (unsigned i = 0; i < SC_PFX_UNITS; ++i) {
         struct sc_pfx_route *r = &sc_pfx_routes[i];
@@ -115,6 +117,7 @@ static inline int sc_pfx_bind(unsigned unit, void *owner, void *effect) {
 }
 
 static inline void sc_pfx_unbind_owner(void *owner) {
+    if (!owner) return;
     for (unsigned i = 0; i < SC_PFX_UNITS; ++i)
         if (__atomic_load_n(&sc_pfx_routes[i].owner, __ATOMIC_ACQUIRE) == owner) {
             __atomic_store_n(&sc_pfx_routes[i].bound, 0, __ATOMIC_RELEASE);
@@ -123,6 +126,7 @@ static inline void sc_pfx_unbind_owner(void *owner) {
 }
 
 static inline void sc_pfx_forget_owner(void *owner) {
+    if (!owner) return;
     for (unsigned i = 0; i < SC_PFX_UNITS; ++i) {
         struct sc_pfx_route *r = &sc_pfx_routes[i];
         if (__atomic_load_n(&r->owner, __ATOMIC_ACQUIRE) == owner ||
@@ -157,7 +161,7 @@ static inline void sc_pfx_activate(struct sc_pfx_route *r) {
 }
 
 static inline void sc_pfx_control(void *owner, unsigned kind, float value) {
-    if (!(value >= 0 && value <= 1)) return;
+    if (!owner || !(value >= 0 && value <= 1)) return;
     for (unsigned i = 0; i < SC_PFX_UNITS; ++i) {
         struct sc_pfx_route *r = &sc_pfx_routes[i];
         if (__atomic_load_n(&r->owner, __ATOMIC_ACQUIRE) != owner) continue;
@@ -167,6 +171,7 @@ static inline void sc_pfx_control(void *owner, unsigned kind, float value) {
 }
 
 static inline struct sc_pfx_route *sc_pfx_enter_input(void *effect, void *buffers, unsigned *mode) {
+    if (!effect) return NULL;
     struct sc_pfx_route *found = NULL;
     unsigned generation = 0;
     for (unsigned i = 0; i < SC_PFX_UNITS; ++i) {
