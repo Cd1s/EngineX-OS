@@ -284,13 +284,13 @@ func TestRekordboxLinkAsksAsTheDecksOwnPlayer(t *testing.T) {
 }
 
 func TestRekordboxTracksJoinArtistTempoAndKeyByIDInTheListsOrder(t *testing.T) {
-	// The plain list is B, A, C. Each sort order lists the tracks in its own order and puts its
-	// column in the second text, named by the kind's high byte; A has no tempo row.
+	// The plain list is B, A, C. Sorted by artist or by tempo the lists come in those orders,
+	// with the artist, or "<tempo> bpm - <key>" and the tempo times 100 as the row's parent, as
+	// rekordbox 7 sent them. A has no tempo row; C has a tempo and no key.
 	f := newFakeRekordbox(t, map[uint16][]dbItem{0x1004: {{id: 2, kind: 4, label: "B"}, {id: 1, kind: 4, label: "A"}, {id: 3, kind: 4, label: "C"}}})
 	f.sorted = map[uint32][]dbItem{
-		2:  {{id: 1, kind: 0x0704, label: "A", secondary: "Artist One"}, {id: 2, kind: 0x0704, label: "B", secondary: "Artist Two"}, {id: 3, kind: 0x0704, label: "C"}},
-		4:  {{id: 3, kind: 0x0d04, label: "C", secondary: "\ufffa95.50\ufffb"}, {id: 2, kind: 0x0d04, label: "B", secondary: "128.00"}},
-		12: {{id: 2, kind: 0x0f04, label: "B", secondary: " 8A "}, {id: 1, kind: 0x0004, label: "A", secondary: "stays unread"}},
+		2: {{id: 1, kind: 0x0704, label: "A", secondary: "Artist One"}, {id: 2, kind: 0x0704, label: "B", secondary: "Artist Two"}, {id: 3, kind: 0x0704, label: "C"}},
+		4: {{parent: 9550, id: 3, kind: 0x0d04, label: "C", secondary: "95.5 bpm"}, {parent: 12800, id: 2, kind: 0x0d04, label: "B", secondary: "128.0 bpm - Abm"}, {id: 1, kind: 0x0004, label: "A", secondary: "stays unread"}},
 	}
 	l, err := dialRekordbox(context.Background(), net.IPv4(127, 0, 0, 1), f.port(), 0)
 	if err != nil {
@@ -298,7 +298,7 @@ func TestRekordboxTracksJoinArtistTempoAndKeyByIDInTheListsOrder(t *testing.T) {
 	}
 	defer l.Close()
 	got, err := l.Tracks()
-	want := []RekordboxTrack{{ID: 2, Title: "B", Artist: "Artist Two", BPM: 128, Key: "8A"}, {ID: 1, Title: "A", Artist: "Artist One"}, {ID: 3, Title: "C", BPM: 95.5}}
+	want := []RekordboxTrack{{ID: 2, Title: "B", Artist: "Artist Two", BPM: 128, Key: "Abm"}, {ID: 1, Title: "A", Artist: "Artist One"}, {ID: 3, Title: "C", BPM: 95.5}}
 	if err != nil || !reflect.DeepEqual(got, want) {
 		t.Fatalf("joined rows: %+v %v", got, err)
 	}
@@ -310,15 +310,15 @@ func TestRekordboxTracksJoinArtistTempoAndKeyByIDInTheListsOrder(t *testing.T) {
 		}
 	}
 	f.mu.Unlock()
-	if lists != 4 { // the plain list and three sort orders, never one request per row
+	if lists != 3 { // the plain list, by artist and by tempo: never one request per row
 		t.Fatalf("%d track list requests", lists)
 	}
 }
 
 func TestRekordboxPlaylistTracksJoinAndATrackTwice(t *testing.T) {
 	f := newFakeRekordbox(t, map[uint16][]dbItem{0x1105: {{id: 5, kind: 4, label: "Loop"}, {id: 6, kind: 4, label: "Tune"}, {id: 5, kind: 4, label: "Loop"}}})
-	f.sorted = map[uint32][]dbItem{4: {{id: 5, kind: 0x0d04, secondary: "120.00"}, {id: 6, kind: 0x0d04, secondary: "no number"}}}
-	f.failed = map[uint32]bool{12: true} // a column rekordbox will not give: the others stay
+	f.sorted = map[uint32][]dbItem{2: {{id: 6, kind: 0x0704, secondary: "Other"}, {id: 5, kind: 0x0704, secondary: "Artist"}}}
+	f.failed = map[uint32]bool{4: true} // a column rekordbox will not give: what came before it stays
 	l, err := dialRekordbox(context.Background(), net.IPv4(127, 0, 0, 1), f.port(), 0)
 	if err != nil {
 		t.Fatal(err)
@@ -328,15 +328,30 @@ func TestRekordboxPlaylistTracksJoinAndATrackTwice(t *testing.T) {
 	if err == nil {
 		t.Fatal("the refused sort order is not reported")
 	}
-	if len(got) != 3 || got[0].BPM != 120 || got[1].BPM != 0 || got[2].BPM != 120 || got[2].Title != "Loop" {
-		t.Fatalf("the same track twice, and no tempo where the text has no number: %+v", got)
+	if len(got) != 3 || got[0].Artist != "Artist" || got[1].Artist != "Other" || got[2].Artist != "Artist" || got[2].Title != "Loop" || got[0].BPM != 0 {
+		t.Fatalf("the same track twice, in the playlist's order: %+v", got)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, m := range f.seen {
+		if m.kind == 0x1105 && (m.args[2].n != 9 || m.args[3].n != 0) {
+			t.Fatalf("a playlist's tracks are asked as (sort, id, 0): %+v", m.args)
+		}
 	}
 }
 
-func TestRbxTempoReadsTheFirstNumberThatIsATempo(t *testing.T) {
-	for in, want := range map[string]float64{"128.00": 128, "\ufffa174.5\ufffb": 174.5, "98": 98, "": 0, "--": 0, "0.00": 0, "12800": 0} {
-		if got := rbxTempo(in); got != want {
-			t.Errorf("%q: %v, want %v", in, got, want)
+func TestRekordboxTempoRowGivesTempoFromTheParentAndKeyFromTheText(t *testing.T) {
+	// Rows as rekordbox 7 sent them sorted by tempo (mac-run-6): the tempo times 100 is the parent.
+	for _, tc := range []struct {
+		parent uint32
+		second string
+		bpm    float64
+		key    string
+	}{{8000, "80.0 bpm - Fm", 80, "Fm"}, {8200, "82.0 bpm - Db", 82, "Db"}, {12600, "126.0 bpm - Abm", 126, "Abm"}, {14210, "142.1 bpm", 142.1, ""}, {0, "", 0, ""}} {
+		var tr RekordboxTrack
+		rbxColumns[1].set(&tr, RekordboxItem{Parent: tc.parent, Second: tc.second})
+		if tr.BPM != tc.bpm || tr.Key != tc.key {
+			t.Errorf("%q: %v %q, want %v %q", tc.second, tr.BPM, tr.Key, tc.bpm, tc.key)
 		}
 	}
 }

@@ -39,10 +39,11 @@ const (
 )
 
 // RekordboxItem is one menu row: a track, a playlist or a folder. Second is the row's second
-// text, which a track list's sort order turns into the artist, the tempo or the key.
+// text, which a track list's sort order turns into the artist, or the tempo and key; Parent is
+// then the tempo times 100.
 type RekordboxItem struct {
-	ID, Kind      uint32
-	Label, Second string
+	Parent, ID, Kind uint32
+	Label, Second    string
 }
 
 // RekordboxTrack is a row of a track list with its artist, tempo and key. Artist and key are
@@ -192,7 +193,7 @@ func (l *RekordboxLink) menu(kind uint16, args ...uint32) ([]RekordboxItem, erro
 				return items, errors.New("prolink: malformed rekordbox menu row")
 			}
 			clean := func(f dbField) string { return strings.TrimSuffix(strings.TrimPrefix(f.text(), "\ufffa"), "\ufffb") }
-			item := RekordboxItem{ID: m.args[1].n, Kind: m.args[6].n, Label: clean(m.args[3])}
+			item := RekordboxItem{Parent: m.args[0].n, ID: m.args[1].n, Kind: m.args[6].n, Label: clean(m.args[3])}
 			if len(m.args) > 5 && m.args[5].tag == 0x26 {
 				item.Second = clean(m.args[5])
 			}
@@ -217,21 +218,26 @@ func (l *RekordboxLink) PlaylistTracks(id uint32) ([]RekordboxTrack, error) {
 	return l.trackList(0x1105, func(sort uint32) []uint32 { return []uint32{sort, id, 0} })
 }
 
-// rbxColumns are the sort orders that give track rows a second text: artist, tempo, key.
-// rekordbox names the column in the high byte of the row's kind (0x0704 title and artist,
-// 0x0d04 title and tempo, 0x0f04 title and key).
+// rbxColumns are the sort orders that give track rows a second text. rekordbox names the
+// column in the high byte of the row's kind: 0x0704 title and artist (sort 2), 0x0d04 title and
+// tempo (sort 4: second text "126.0 bpm - Cm", and the row's Parent is 12600). Sorted by key
+// (12) it only says the same again, "Cm - 126.0 bpm", so the tempo order gives both.
 var rbxColumns = []struct {
 	sort, kind uint32
-	set        func(*RekordboxTrack, string)
+	set        func(*RekordboxTrack, RekordboxItem)
 }{
-	{2, 0x07, func(t *RekordboxTrack, s string) { t.Artist = s }},
-	{4, 0x0d, func(t *RekordboxTrack, s string) { t.BPM = rbxTempo(s) }},
-	{12, 0x0f, func(t *RekordboxTrack, s string) { t.Key = strings.TrimSpace(s) }},
+	{2, 0x07, func(t *RekordboxTrack, r RekordboxItem) { t.Artist = r.Second }},
+	{4, 0x0d, func(t *RekordboxTrack, r RekordboxItem) {
+		t.BPM = float64(r.Parent) / 100
+		_, key, _ := strings.Cut(r.Second, " - ")
+		t.Key = strings.TrimSpace(key)
+	}},
 }
 
-// trackList asks a track list in the plain order, then three times more with the sort orders
-// that carry artist, tempo and key, and joins the rows by track id: three more requests per
-// list, never one per row. The plain order is the result's order.
+// trackList asks a track list in the plain order, then twice more with the sort orders that
+// carry the artist, and the tempo and key, and joins the rows by track id: two more requests per
+// list, never one per row. Those orders reorder the rows (by artist, by tempo), so the plain
+// order is the result's order.
 func (l *RekordboxLink) trackList(kind uint16, args func(sort uint32) []uint32) ([]RekordboxTrack, error) {
 	plain, err := l.menu(kind, args(0)...)
 	tracks := make([]RekordboxTrack, len(plain))
@@ -248,7 +254,7 @@ func (l *RekordboxLink) trackList(kind uint16, args func(sort uint32) []uint32) 
 		for _, r := range rows {
 			if r.Kind>>8 == c.kind {
 				for _, i := range at[r.ID] {
-					c.set(&tracks[i], r.Second)
+					c.set(&tracks[i], r)
 				}
 			}
 		}
@@ -257,22 +263,6 @@ func (l *RekordboxLink) trackList(kind uint16, args func(sort uint32) []uint32) 
 		}
 	}
 	return tracks, nil
-}
-
-// rbxTempo reads the tempo from a row's second text: its first number, which must be a tempo.
-func rbxTempo(s string) float64 {
-	start := strings.IndexAny(s, "0123456789")
-	if start < 0 {
-		return 0
-	}
-	end := start
-	for end < len(s) && (s[end] >= '0' && s[end] <= '9' || s[end] == '.') {
-		end++
-	}
-	if f, err := strconv.ParseFloat(s[start:end], 64); err == nil && f > 0 && f < 1000 {
-		return f
-	}
-	return 0
 }
 
 // Path asks where a track's audio file is on the computer.
