@@ -1024,15 +1024,26 @@ static void test_patch_files(const char *filename) {
         image[e->offset] ^= 0xff;
         assert(edit_state((uintptr_t)image, e) == 0);
     }
+    unsigned reverb_sites = 0; // #207: one site per build, in the function the trampoline expects
+    for (size_t i = 0; i < build->edit_count; i++)
+        if (build->edits[i].replacement == (const char *)reverb_time_jump) {
+            assert(build->edits[i].group == EDIT_REVERB && build->edits[i].size == 8);
+            assert(sc_reverb_time_context(image + build->edits[i].offset));
+            float value; // the displaced vldr s16, [pc, #380] loads 0.65
+            memcpy(&value, image + build->edits[i].offset + 4 + 8 + 380, 4);
+            assert(value == 0.65f);
+            reverb_sites++;
+        }
+    assert(reverb_sites == 1);
     // Engine's A2DP sender is where install_bt_send looks for it (5.0.4 has none)
     assert(!!build->bt_send == !!strcmp(build->name, "5.0.4"));
     if (build->bt_send) {
         static const uint32_t sender_prologue[] = {0xe16d42f4, 0xe1a04001}; // strd r4,[sp,#-36]!; mov r4,r1
         assert((size_t)size >= build->bt_send + sizeof sender_prologue && !memcmp(image + build->bt_send, sender_prologue, sizeof sender_prologue));
     }
-    if (!strcmp(build->name, "5.0.4")) assert(build->edit_count == 16);
+    if (!strcmp(build->name, "5.0.4")) assert(build->edit_count == 17); // +1: #207 Reverb decay
     if (!strcmp(build->name, "5.3.0")) {
-        assert(build->edit_count == 29);
+        assert(build->edit_count == 30);
         // #49: consoles (isConsole +0x23a != 0) skip 0x193f6cc; players have
         // isConsole == 0, and when four_deck_waveform=1 clears isPlayer (+0x239),
         // 0x193f6d8 must still branch unconditionally to Layer A / Layer B (0x193fc18).
@@ -1054,7 +1065,7 @@ static void test_patch_files(const char *filename) {
         }
         assert(sampler_patched);
     }
-    if (!strcmp(build->name, "5.3.0-sclive4")) assert(build->edit_count == 31);
+    if (!strcmp(build->name, "5.3.0-sclive4")) assert(build->edit_count == 32);
     for (unsigned i = 0; i < DSP_HOOK_COUNT; i++) {
         size_t bytes;
         const void *expected = dsp_expected(i, &bytes);

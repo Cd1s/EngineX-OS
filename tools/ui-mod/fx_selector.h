@@ -25,7 +25,7 @@ static inline unsigned sc_pfx_bits(float f) { unsigned n; memcpy(&n, &f, 4); ret
 static inline float sc_pfx_float(unsigned n) { float f; memcpy(&f, &n, 4); return f; }
 
 static inline void sc_pfx_select(unsigned unit, unsigned mode) {
-    if (unit >= SC_PFX_UNITS || mode > 5) return;
+    if (unit >= SC_PFX_UNITS || mode > SC_PFX_FLANGER) return;
     struct sc_pfx_route *r = &sc_pfx_routes[unit];
     unsigned old = __atomic_load_n(&r->route, __ATOMIC_RELAXED);
     unsigned bound = __atomic_load_n(&r->bound, __ATOMIC_ACQUIRE);

@@ -171,7 +171,7 @@ FX_CONTROLLER = r'''
     readonly property var scFxStock: djFxView ? Array.from(djFxView.effectsNames) : []
     readonly property bool scFxEnabled: !!root.scFxSelectorAvailable && scFxStock.indexOf("Flanger") >= 0
     readonly property var scFxNames: scFxEnabled ? scFxStock.concat([
-        "Spiral (PX)", "Pitch Echo (PX)", "Slip Roll (PX)", "Dub Echo (PX)", "Space (PX)"]) : scFxStock
+        "Spiral (PX)", "Pitch Echo (PX)", "Slip Roll (PX)", "Dub Echo (PX)", "Space (PX)", "Jet Flanger (PX)"]) : scFxStock
     readonly property var scFxTimeParameter: djFxView && djFxView.variantParameters.length ? djFxView.variantParameters[0] : null
     Connections {
         target: scCtrl.scFxTimeParameter
@@ -8580,7 +8580,7 @@ def edits(dev: bool):
                     "SCALE DOWN", "REVERB", "LFO VERB", "REVERB DROP", "REVERSE VERB",
                     "REVERB RISE", "FLANGER (-)", "FLEX GATE", "BEATBREAK", "LFO FILTER",
                     "BACKSPIN", "BRAKE", "CRUSH",
-                    "SPIRAL", "PITCH ECHO", "SLIP ROLL", "DUB ECHO", "SPACE"
+                    "SPIRAL", "PITCH ECHO", "SLIP ROLL", "DUB ECHO", "SPACE", "JET FLANGER"
                 ]
                 readonly property string scCustomName: scPxIndex >= 0 && scPxIndex < scAllNames.length ? scAllNames[scPxIndex] : ""
                 readonly property string fxType: scCustomName !== "" ? scCustomName : fxConfig.channel[modelData].fxType"""),

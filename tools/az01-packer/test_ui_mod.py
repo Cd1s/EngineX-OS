@@ -711,7 +711,7 @@ class UiModSourceTest(unittest.TestCase):
                 bp.verify_boot_ready_loader(source)
 
     def test_px_selector_maps_before_selecting_stock_carrier(self):
-        for name in ("Spiral", "Pitch Echo", "Slip Roll", "Dub Echo", "Space"):
+        for name in ("Spiral", "Pitch Echo", "Slip Roll", "Dub Echo", "Space", "Jet Flanger"):
             self.assertIn(name + " (PX)", bp.FX_CONTROLLER)
         qml = bp.FX_CONTROLLER
         selection = qml.split("function scFxAccept(index) {", 1)[1].split("property var scFxMix", 1)[0]
@@ -752,7 +752,7 @@ class UiModSourceTest(unittest.TestCase):
             self.assertIn("ControlSurfaceModules/ControlSurfaceModules/DJFxSelect.qml", edits)
             oled_edits = edits["ControlSurfaceModules/ControlSurfaceModules/DJFxSelect.qml"]
             oled_code = "".join(rep for _, rep in oled_edits)
-            for px_name in ("SPIRAL", "PITCH ECHO", "SLIP ROLL", "DUB ECHO", "SPACE"):
+            for px_name in ("SPIRAL", "PITCH ECHO", "SLIP ROLL", "DUB ECHO", "SPACE", "JET FLANGER"):
                 self.assertIn(px_name, oled_code)
             self.assertIn("/GUI/Scripted/EngineXFx", oled_code)
             self.assertIn("scPxIndex < scAllNames.length", oled_code)
@@ -841,7 +841,8 @@ for (const amt of [1/63, 2/63, 4/63, 5/63, 8/63, 1.0]) {{
         # #206: the gate proves streaming loads under an active recorder on all-in-ones.
         self.assertIn("SCPROBE recstream|", probe)
         self.assertIn("SCPROBE recstream|1|1|1|0|0|", gate)
-        self.assertIn("case $PRODUCT in JP07|JP08|JP13|JP14) applied=20 ;; *) applied=28 ;; esac", gate)
+        # all-in-ones: + 8 #206 recording sites + the #207 Reverb decay site
+        self.assertIn("case $PRODUCT in JP07|JP08|JP13|JP14) applied=20 ;; *) applied=29 ;; esac", gate)
         self.assertIn("powercut-truncated.qmlc", gate)
 
     def test_connected_source_disables_listview_sections_to_prevent_demo_polish_loop(self):
