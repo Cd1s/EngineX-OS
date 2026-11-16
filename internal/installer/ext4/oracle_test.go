@@ -11,6 +11,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -138,7 +139,7 @@ func TestOracleFreshImages(t *testing.T) {
 			}
 			img = openRW(t, p)
 			root, links, _ := img.ChooseRuntimeDir()
-			cs := bundleChangeSet(root, "5.3.0.5", "99-sc5000-custom.conf")
+			cs := bundleChangeSet(root, "5.3.0.5", migration.AlsaFile)
 			cs.Links = links
 			if err := img.Apply(context.Background(), cs); err != nil {
 				t.Fatal(err)
@@ -196,17 +197,17 @@ func populate(t *testing.T, img string, legacyDir bool) map[string][32]byte {
 		file(fmt.Sprintf("/system/var-lib/alsa/conf.d/%03d-user-%s.conf", i, strings.Repeat("x", 20)), []byte(fmt.Sprintf("# %d\n", i)))
 	}
 	if legacyDir {
-		w("mkdir /sc5000-custom")
-		w("mkdir /sc5000-custom/bundle")
-		file("/sc5000-custom/settings.json", []byte(`{"user":"setting"}`))
+		w("mkdir /" + migration.DataName)
+		w("mkdir /" + migration.DataName + "/bundle")
+		file("/"+migration.DataName+"/settings.json", []byte(`{"user":"setting"}`))
 	} else {
 		w("mkdir /enginex")
 		w("mkdir /enginex/bundle")
 		w("mkdir /enginex/bundle/bin")
-		file("/enginex/bundle/bin/sc5000-suite", pattern(2<<20, 7)) // old version, replaced
+		file("/enginex/bundle/bin/"+migration.Suite, pattern(2<<20, 7)) // old version, replaced
 		file("/enginex/gen2-locked", []byte("1\n"))
 		file("/enginex/settings.json", []byte(`{"user":"setting"}`))
-		w("symlink /sc5000-custom enginex")
+		w("symlink /" + migration.DataName + " enginex")
 	}
 	sf := filepath.Join(dir, "populate")
 	os.WriteFile(sf, []byte(s.String()), 0o600)
@@ -220,7 +221,7 @@ func populate(t *testing.T, img string, legacyDir bool) map[string][32]byte {
 		!strings.Contains(debugfs(t, img, "htree /system/var-lib/alsa/conf.d"), "Root node dump") {
 		t.Fatalf("fixture directory is not indexed:\n%s", debugfs(t, img, "stat /system/var-lib/alsa/conf.d"))
 	}
-	delete(sentinels, "/enginex/bundle/bin/sc5000-suite")
+	delete(sentinels, "/enginex/bundle/bin/"+migration.Suite)
 	delete(sentinels, "/enginex/gen2-locked")
 	return sentinels
 }
@@ -273,7 +274,7 @@ func testInjectBackup(t *testing.T, backup string, sentinels map[string][32]byte
 	if err != nil {
 		t.Fatal(err)
 	}
-	if legacy && (root != "sc5000-custom" || len(links) != 0) || !legacy && (root != "enginex" || len(links) != 0) {
+	if root != "enginex" || len(links) != 0 {
 		t.Fatalf("ChooseRuntimeDir = %q %v", root, links)
 	}
 	cs := bundleChangeSet(root, "5.3.0.5", "99-enginex.conf")
@@ -390,8 +391,8 @@ func TestOracleStockDeckTools(t *testing.T) {
 		}
 	}
 	img, p := newImage(t, 512<<20, "az01-data")
-	cs := bundleChangeSet("enginex", "5.3.0.5", "99-sc5000-custom.conf")
-	cs.Links = map[string]string{"sc5000-custom": "enginex"}
+	cs := bundleChangeSet("enginex", "5.3.0.5", migration.AlsaFile)
+	cs.Links = map[string]string{migration.DataName: "enginex"}
 	if err := img.Apply(context.Background(), cs); err != nil {
 		t.Fatal(err)
 	}

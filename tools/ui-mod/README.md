@@ -149,12 +149,12 @@ retries, zero flash writes by all processes, or fixes for CF003/N001/N002/N006.
 
 ## Verification and deployment status
 
-Build only on IN in `/root/build/sc5000-hook-universal-20261104`. The ARM tests
+Build only on IN in `/root/build/enginex-hook-universal-20261104`. The ARM tests
 link the official SQLite 3.45.3 amalgamation, kept only in that remote directory:
 
     arm-linux-gnueabihf-gcc -O2 -DSQLITE_THREADSAFE=1 -c deps/sqlite3.c -o deps/sqlite3.o
     arm-linux-gnueabihf-gcc -O2 -Wall -Wextra -Werror -Ideps -o out/test_stems_feature tools/ui-mod/test_stems_feature.c deps/sqlite3.o -ldl -lpthread -lm
-    qemu-arm -L /usr/arm-linux-gnueabihf out/test_stems_feature /root/build/sc5000-lab/5.0.4/tree/usr/Engine/Engine /root/build/sc5000-lab/out/Engine.unlocked17
+    qemu-arm -L /usr/arm-linux-gnueabihf out/test_stems_feature <firmware-lab>/5.0.4/tree/usr/Engine/Engine <firmware-lab>/out/Engine.unlocked17
 
 The tests execute installed ARM SQLite redirects and original-function
 trampolines, read back all three real PRAGMAs, open/query a real database, check
@@ -339,7 +339,7 @@ on separate MCUs; only their host-side events are guarded. A guard keeps bad
 values out; it does not prove a symptom is gone by ear.
 
 The client additionally requires the separately provisioned private
-`/etc/sc5000-stems/token` and the LAN backend. Installing the client and seeing
+`/etc/enginex-stems/token` and the LAN backend. Installing the client and seeing
 Engine load the hook does not establish that a track can be separated. Full
 acceptance requires a real short track, successful `.stems` output, and playback
 of each stem. Do not use Engine's "Remove Stems Support" button: the stock

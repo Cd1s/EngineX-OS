@@ -579,7 +579,7 @@ func (s *Server) settingsCopyControl(w http.ResponseWriter, r *http.Request) {
 
 func copyLocalScreen(r *http.Request) bool {
 	ip := net.ParseIP(copyRemoteIP(r))
-	return ip != nil && ip.IsLoopback() && !relayedFromOutside(r) && strings.HasPrefix(canonicalV1(r.URL.Path), "/v1/enginex/")
+	return ip != nil && ip.IsLoopback() && !relayedFromOutside(r) && strings.HasPrefix(r.URL.Path, "/v1/enginex/")
 }
 
 func copyBundleHash(bundle copyBundle) string {

@@ -10,7 +10,7 @@
 #  2. the previous release boots (prepare, stream-sync, Engine) with a populated
 #     internal Engine library (/media/az01-internal), finds the new release on a
 #     local TLS GitHub mock and runs the deck's online update:
-#     r5: /v1/sc5000/update?apply=1 (/v1/enginex since 5.3.0.5) -> Engine quits with UpdateFromUrl -> the stock
+#     r5: ${legacy_api}/update?apply=1 (/v1/enginex since 5.3.0.5) -> Engine quits with UpdateFromUrl -> the stock
 #     engine script -> az01-update downloads and verifies the new image. A previous
 #     signed release instead verifies and applies the file through its own updater;
 #  3. the new rootfs boots on the same /data (boot 1): etc-reset, prepare, debloat,
@@ -42,6 +42,7 @@ set -euo pipefail
 export LC_ALL=C
 SELF=$(realpath "$0")
 REPO=$(cd "$(dirname "$SELF")/../.." && pwd)
+. "$REPO/rootfs-overlay/usr/libexec/enginex-migration"
 PATH_DECK=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 pass() { echo "PASS $*" | tee -a "$W/results.txt"; }
@@ -62,15 +63,15 @@ in_root() { chroot "$R" /usr/bin/env -i PATH=$PATH_DECK "$@"; }
 unit_exec() { # ExecStart of a unit as the image ships it (last one wins)
     sed -n 's/^ExecStart=//p' "$R/etc/systemd/system/$1" "$R/usr/lib/systemd/system/$1" 2>/dev/null | tail -1
 }
-# Names by rootfs (#234): the previous release may predate 5.3.0.5, which renamed sc5000 to
+# Names by rootfs (#234): the previous release may predate 5.3.0.5, which renamed the project to
 # enginex (units, scripts, /etc and /usr dirs, the API prefix). /data/enginex is both.
 names() { # <rootfs>
     if [ -e "$1/usr/libexec/enginex-prepare" ]; then
         N_ETC=/etc/enginex N_SHARE=/usr/share/enginex N_LIBEXEC=/usr/libexec/enginex N_BIN=/usr/local/bin/enginex
         N_UNIT=enginex N_API=/v1/enginex N_PACKER='enginex*'
     else
-        N_ETC=/etc/sc5000 N_SHARE=/usr/share/sc5000-custom N_LIBEXEC=/usr/libexec/sc5000-custom N_BIN=/usr/local/bin/sc5000
-        N_UNIT=sc5000 N_API=/v1/sc5000 N_PACKER='sc5000-custom*'
+        N_ETC=${legacy_etc} N_SHARE=${legacy_share} N_LIBEXEC=${legacy_libexec} N_BIN=${legacy_bin}
+        N_UNIT=$legacy_unit N_API=${legacy_api} N_PACKER='${legacy_packer}'
     fi
 }
 
@@ -139,10 +140,10 @@ refusal() { # <suffix of the mock repo / release> <message the deck shows>
 }
 
 # The deck's data directory after prepare ran: /data/enginex since 5.3.0.3 (#103), the real
-# /data/sc5000-custom on an older previous release (#234 review R5). Not the rootfs names above:
+# ${legacy_data} on an older previous release (#234 review R5). Not the rootfs names above:
 # a 5.3.0.2 or older baseline has not migrated it, and the new boot moves it over.
 data_dir() {
-    if [ -d "$W/data/enginex" ] && [ ! -L "$W/data/enginex" ]; then echo "$W/data/enginex"; else echo "$W/data/sc5000-custom"; fi
+    if [ -d "$W/data/enginex" ] && [ ! -L "$W/data/enginex" ]; then echo "$W/data/enginex"; else echo "$W${legacy_data}"; fi
 }
 
 # --- phase: one boot of one rootfs, PID 1 of its own pid + mount namespace ---
@@ -399,9 +400,8 @@ SH
         check "new: edisksd starts with the hook preloaded (LD_BIND_NOW)" bash -c "grep -aq 'Loaded configuration' '$W/new-edisksd.log' && ! grep -aiE 'symbol lookup error|undefined symbol|cannot open shared object|cannot be preloaded' '$W/new-edisksd.log'"
         curl -sf http://127.0.0.1:8080$N_API/ui > "$W/new-ui.json" || :
         check "new: GET $N_API/ui reports $NEWV" json "$W/new-ui.json" "j.get('version') == '$NEWV'"
-        # #234: /v1/sc5000 stays the permanent alias older installers, UI packs and Mods call.
-        curl -sf http://127.0.0.1:8080/v1/sc5000/ui > "$W/new-ui-alias.json" || :
-        check "new: GET /v1/sc5000/ui (alias) reports $NEWV" json "$W/new-ui-alias.json" "j.get('version') == '$NEWV'"
+        check "new: retired API namespace returns 404" test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080${legacy_api}/ui)" = 404
+        check "new: no compatibility data link" test ! -e "$W${legacy_data}" -a ! -L "$W${legacy_data}"
         curl -sf -X POST "http://127.0.0.1:8080$N_API/ui?upfaderEcho=1" > "$W/new-ui-echo.json" || :
         check "new: POST $N_API/ui?upfaderEcho=1 returns upfaderEcho: true" json "$W/new-ui-echo.json" "j.get('upfaderEcho') is True"
         curl -sf -X POST http://127.0.0.1:8080/au/oauth2/token > "$W/new-token.json" || :
@@ -565,10 +565,8 @@ inner() {
     check "image: $N_ETC/version.txt is $NEWV" grep -qx "$NEWV" "$R$N_ETC/version.txt"
     check "image: $N_ETC/release-tag is $RELTAG" grep -qx "$RELTAG" "$R$N_ETC/release-tag"
     if [ "$N_ETC" = /etc/enginex ]; then # #234: what an older installer or gate reads, and the names it enables
-        check "image: /etc/sc5000 is the compatibility link to enginex" test "$(readlink "$R/etc/sc5000")" = enginex
-        check "image: /etc/sc5000/version.txt reads $NEWV through it" grep -qx "$NEWV" "$R/etc/sc5000/version.txt"
-        # Match unit names only: ls of several dirs prints their paths, and a /var/tmp/sc5000-gate-* work dir matched.
-        check "image: no unit named sc5000 is enabled" bash -c "! find '$R/usr/lib/systemd/system/multi-user.target.wants' '$R/etc/systemd/system/multi-user.target.wants' '$R/usr/lib/systemd/system/enginex.target.wants' -mindepth 1 -maxdepth 1 -name '*sc5000*' 2>/dev/null | grep -q ."
+        # Match unit names only: ls of several dirs prints their paths, and a /var/tmp/enginex-gate-* work dir matched.
+        check "image: no unit under the old project name is enabled" bash -c "! find '$R/usr/lib/systemd/system/multi-user.target.wants' '$R/etc/systemd/system/multi-user.target.wants' '$R/usr/lib/systemd/system/enginex.target.wants' -mindepth 1 -maxdepth 1 -name '*$legacy_unit*' 2>/dev/null | grep -q ."
     fi
     if python3 -I "$REPO/tools/az01-packer/rootfs_audit.py" "$R" --overlay "$REPO/rootfs-overlay" \
         $(for c in $SUITE_CMDS; do printf -- '--require-cmd %s ' "$c"; done) > "$W/audit.txt" 2>&1

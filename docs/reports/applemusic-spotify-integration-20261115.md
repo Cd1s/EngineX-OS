@@ -62,8 +62,8 @@ playback, desktop/non-Docker and Gen-2 helper options, and Spotify matching.
 | `bash tests/test_rootfs_overlay.sh` | PASS: 27/27 |
 | `python3 -m unittest discover -s tools/az01-packer` | PASS: 340 run, 339 passed, 1 skipped, 0 failed; exit 0 |
 | `python3 -m unittest discover -s tools/stems` | PASS: 14/14 |
-| `GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -o out/arm64/sc5000-suite ./cmd/sc5000-suite` | PASS: ELF64 AArch64, 33560984 bytes |
-| `python3 tools/ui-mod/build_packs.py --qrc /root/build/sc5000-lab/5.3.0/qrc --out out/packs_test` | PASS: en 414 files, zh-Hans 419 files, zh-Hant 419 files |
+| `GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -o out/arm64/enginex-suite ./cmd/enginex-suite` | PASS: ELF64 AArch64, 33560984 bytes |
+| `python3 tools/ui-mod/build_packs.py --qrc <firmware-lab>/5.3.0/qrc --out out/packs_test` | PASS: en 414 files, zh-Hans 419 files, zh-Hant 419 files |
 | `node --check` for extracted console JS and `docs/site/content.js` | PASS: 2/2 |
 
 The final full Go run and the final streaming-focused race run both exited 0.

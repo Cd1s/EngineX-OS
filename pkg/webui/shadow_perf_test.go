@@ -195,7 +195,7 @@ func TestShadowInMusicTempFilesPreservesKeyAndPerf(t *testing.T) {
 
 	post := func(netPath string) deckState {
 		body, _ := json.Marshal([]deckState{{Deck: 1, Net: netPath, Playing: false}})
-		req := httptest.NewRequest("POST", "/v1/sc5000/decks", bytes.NewReader(body))
+		req := httptest.NewRequest("POST", "/v1/enginex/decks", bytes.NewReader(body))
 		w := httptest.NewRecorder()
 		s.decksPost(w, req)
 		if w.Code != http.StatusOK {

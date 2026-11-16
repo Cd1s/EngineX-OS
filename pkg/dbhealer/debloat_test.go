@@ -29,6 +29,11 @@ func read(t *testing.T, root, path string) string {
 	return string(blob)
 }
 func TestDebloatScriptCompleteOfflineAndIdempotent(t *testing.T) {
+	migration, err := filepath.Abs("../../rootfs-overlay/usr/libexec/enginex-migration")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ENGINEX_MIGRATION", migration)
 	script, err := filepath.Abs("../../rootfs-overlay/usr/local/bin/enginex-debloat")
 	if err != nil {
 		t.Fatal(err)
@@ -170,7 +175,7 @@ func TestDebloatRuntimeIRQWiFiAndEthernetFallback(t *testing.T) {
 	}
 	root := t.TempDir()
 	block := strings.ReplaceAll(script[start:], "/proc/", filepath.Join(root, "proc")+"/")
-	put(t, root, "runtime.sh", "#!/bin/sh\nset -eu\nruntime=1\n"+block)
+	put(t, root, "runtime.sh", "#!/bin/sh\n"+read(t, "../../rootfs-overlay", "usr/libexec/enginex-migration")+"\nset -eu\nruntime=1\n"+block)
 	put(t, root, "proc/interrupts", ` 32: 1 0 0 0 GIC ffb20000
  33: 0 1 0 0 GIC ffa30000
  34: 0 1 0 0 GIC ehci_hcd

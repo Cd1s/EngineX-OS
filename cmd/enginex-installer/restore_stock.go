@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"path/filepath"
 	"strings"
 	"time"
@@ -28,7 +29,7 @@ var stockFirmware = map[string]struct{ URL, SHA256 string }{
 	"MIXSTREAMPRO": {stockReleaseURL + "MIXSTREAMPRO-5.3.0-Update.img", "8e49313be0ef338d5452631c5772ee5b1d72e076cae65bf69a6df8b5b210029f"},
 }
 
-const stockEngineXCmd = "test -f /etc/enginex/version.txt || test -f /etc/sc5000/version.txt"
+const stockEngineXCmd = "test -f /etc/enginex/version.txt || test -f " + migration.ImageDir + "/version.txt"
 
 var stockCacheDirs = []string{"/data/AppDataUser/AIR Music Technology/Engine/.cache/qml"}
 

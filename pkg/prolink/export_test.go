@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"fmt"
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"io"
 	"math"
 	"net"
@@ -933,7 +934,7 @@ func TestExportStreamingWithoutUSB(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = engine.Exec(`CREATE TABLE Track (id INTEGER PRIMARY KEY, title TEXT, artist TEXT, bpm INTEGER, bpmAnalyzed REAL, length INTEGER, path TEXT, filename TEXT);
-		INSERT INTO Track VALUES(1, '网易云曲目', '云音乐', 126, 126.5, 200, '../../../../sc5000-custom/Stream/Netease Track.mp3', 'Netease Track.mp3');`)
+		INSERT INTO Track VALUES(1, '网易云曲目', '云音乐', 126, 126.5, 200, '../../../../` + migration.DataName + `/Stream/Netease Track.mp3', 'Netease Track.mp3');`)
 	engine.Close()
 	if err != nil {
 		t.Fatal(err)

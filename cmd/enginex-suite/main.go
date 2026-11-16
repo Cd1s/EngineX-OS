@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"log"
 	"os"
 	"path/filepath"
@@ -50,13 +51,13 @@ func main() {
 }
 
 // applet picks the tool from the binary's name or, for the suite itself, its first argument.
-// sc5000-suite and sc5000-deemixd are the names before 5.3.0.5 (#234): a unit or wrapper
+// legacy-suite and legacy-deemixd are the names before 5.3.0.5 (#234): a unit or wrapper
 // of an older release that is still loaded while an update replaces the binary runs them.
 func applet(prog string, args []string) (string, []string) {
-	if (prog == "enginex-suite" || prog == "sc5000-suite") && len(args) > 0 {
+	if (prog == "enginex-suite" || prog == migration.Suite) && len(args) > 0 {
 		prog, args = args[0], args[1:]
 	}
-	if prog == "sc5000-deemixd" {
+	if prog == migration.Deemix {
 		prog = "enginex-deemixd"
 	}
 	return prog, args

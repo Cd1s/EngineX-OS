@@ -37,7 +37,7 @@ i=0
 while [ "$i" -lt SAMPLES ]; do
   stamp=$(cut -d ' ' -f 1 /proc/uptime)
   printf 'uptime_s=%s stream_files:bytes=' "$stamp"
-  sizes /data/sc5000-custom/Stream
+  sizes /data/enginex/Stream
   printf ' engine_temp_files:bytes='
   sizes /data/inMusicTempFiles
   printf '\n'

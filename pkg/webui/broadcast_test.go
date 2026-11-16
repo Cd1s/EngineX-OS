@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"io"
 	"net"
 	"net/http"
@@ -806,7 +807,7 @@ func TestLiveWAVFallbackSetsAPerWriteDeadline(t *testing.T) {
 func TestRename234BuiltinInputIsNotSaved(t *testing.T) {
 	for in, saved := range map[string]string{
 		"/tmp/enginex-broadcast.pcm": "",
-		"/tmp/sc5000-broadcast.pcm":  "",
+		migration.BroadcastInput:     "",
 		"/tmp/my-mix.pcm":            "/tmp/my-mix.pcm",
 	} {
 		s, stateDir := newTestServer(t)

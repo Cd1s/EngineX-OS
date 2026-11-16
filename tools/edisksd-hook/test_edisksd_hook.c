@@ -1,3 +1,4 @@
+#include "../legacy_names.h"
 // Unit tests run unprivileged; --mounts is used ONLY under unshare -m on the build host.
 #define _GNU_SOURCE
 #include <limits.h>
@@ -113,14 +114,14 @@ static void test_paths_and_copy(const char *root) {
     assert(make_dirs(p)==-1&&errno==ELOOP);
     puts("#20/#21/#22/#37: missing library, lossless seed/reuse, changed native DB, identity separation, all symlink components: PASS");
 }
-// 5.3.0.3 made /data/sc5000-custom a symlink to enginex (#103). The cache path
+// 5.3.0.3 made /data/legacy data a symlink to enginex (#103). The cache path
 // through it failed with ELOOP, so no read-only HFS+ stick got a view or rb-bridge.
 static void test_compat_symlink_root(const char *root) {
     char data[PATH_MAX],enginex[PATH_MAX],legacy[PATH_MAX],p[PATH_MAX],seeded[PATH_MAX],volume_path[PATH_MAX];
     char saved_lib[PATH_MAX],saved_legacy[PATH_MAX];
     snprintf(saved_lib,sizeof saved_lib,"%s",test_library);snprintf(saved_legacy,sizeof saved_legacy,"%s",test_legacy_library);
     join(data,root,"data");join(enginex,data,"enginex");assert(!make_dirs(enginex));
-    join(legacy,data,"sc5000-custom");assert(!symlink("enginex",legacy));
+    join(legacy,data,LEGACY_DATA_NAME);assert(!symlink("enginex",legacy));
     join(volume_path,MEDIA_ROOT,"HFS-STICK");assert(!make_dirs(volume_path));
     // The hook's old cache path, through the compat link.
     join(test_library,legacy,"hfs-libraries");test_legacy_library[0]=0;
@@ -130,20 +131,20 @@ static void test_compat_symlink_root(const char *root) {
     // The default: /data/enginex first, the legacy root only when enginex is missing.
     join(test_library,enginex,"hfs-libraries");join(test_legacy_library,legacy,"hfs-libraries");
     char again[PATH_MAX];assert(!seed_library(volume_path,"uuid-a",again,deadline_from(now_ms()))&&!strcmp(again,seeded));
-    char old_data[PATH_MAX],old_real[PATH_MAX];join(old_data,root,"old-data");join(old_real,old_data,"sc5000-custom");assert(!make_dirs(old_real));
+    char old_data[PATH_MAX],old_real[PATH_MAX];join(old_data,root,"old-data");join(old_real,old_data,LEGACY_DATA_NAME);assert(!make_dirs(old_real));
     join(test_library,old_data,"enginex/hfs-libraries");join(test_legacy_library,old_real,"hfs-libraries");
     assert(!seed_library(volume_path,"uuid-a",again,deadline_from(now_ms())));join(p,old_real,"hfs-libraries");assert(!strncmp(again,p,strlen(p)));
     // A blank /data: neither directory exists yet, so the primary one is created 0700.
     char blank[PATH_MAX];join(blank,root,"blank-data");assert(!make_dirs(blank));
-    join(test_library,blank,"enginex/hfs-libraries");join(test_legacy_library,blank,"sc5000-custom/hfs-libraries");
+    join(test_library,blank,"enginex/hfs-libraries");join(test_legacy_library,blank,LEGACY_DATA_NAME "/hfs-libraries");
     assert(!seed_library(volume_path,"uuid-a",again,deadline_from(now_ms())));
     join(p,blank,"enginex/hfs-libraries");assert(!strncmp(again,p,strlen(p)));
     join(p,blank,"enginex");assert(!lstat(p,&st)&&S_ISDIR(st.st_mode)&&(st.st_mode&0777)==0700);
-    join(p,blank,"sc5000-custom");assert(access(p,F_OK)==-1&&errno==ENOENT);
+    join(p,blank,LEGACY_DATA_NAME);assert(access(p,F_OK)==-1&&errno==ENOENT);
     // A dangling compat link is not a blank /data.
     char dangling[PATH_MAX];join(dangling,root,"dangling-data");assert(!make_dirs(dangling));
-    join(p,dangling,"sc5000-custom");assert(!symlink("enginex",p));
-    join(test_library,dangling,"enginex/hfs-libraries");join(test_legacy_library,dangling,"sc5000-custom/hfs-libraries");errno=0;
+    join(p,dangling,LEGACY_DATA_NAME);assert(!symlink("enginex",p));
+    join(test_library,dangling,"enginex/hfs-libraries");join(test_legacy_library,dangling,LEGACY_DATA_NAME "/hfs-libraries");errno=0;
     assert(seed_library(volume_path,"uuid-a",again,deadline_from(now_ms()))==-1&&errno==ELOOP);
     join(p,dangling,"enginex");assert(access(p,F_OK)==-1&&errno==ENOENT);
     // r2 left-deck bug: an older build made hfs-libraries 0755 and every HFS+ stick failed EACCES (no playlists).
@@ -166,12 +167,12 @@ static void test_compat_symlink_root(const char *root) {
     char shared[PATH_MAX];join(shared,data,"shared");assert(!make_dirs(shared));assert(!chmod(shared,0777));
     unlink(bad);assert(!symlink("shared",bad));join(test_library,bad,"hfs-libraries");errno=0;
     assert(seed_library(volume_path,"uuid-a",again,deadline_from(now_ms()))==-1&&errno==ELOOP);
-    char chained[PATH_MAX];join(chained,data,"chained");assert(!symlink("sc5000-custom",chained));
+    char chained[PATH_MAX];join(chained,data,"chained");assert(!symlink(LEGACY_DATA_NAME,chained));
     join(test_library,chained,"hfs-libraries");errno=0;
     assert(seed_library(volume_path,"uuid-a",again,deadline_from(now_ms()))==-1&&errno==ELOOP);
     join(p,outside,"hfs-libraries");assert(access(p,F_OK)==-1&&errno==ENOENT);
     snprintf(test_library,sizeof test_library,"%s",saved_lib);snprintf(test_legacy_library,sizeof test_legacy_library,"%s",saved_legacy);
-    puts("#103 HFS: cache root through the /data/sc5000-custom -> enginex compat link, legacy-only deck, blank /data, dangling link and writable root, foreign links refused: PASS");
+    puts("#103 HFS: cache root through the /data/" LEGACY_DATA_NAME " -> enginex compat link, legacy-only deck, blank /data, dangling link and writable root, foreign links refused: PASS");
 }
 // #182 review: the "too large, skip until re-exported" record is keyed by the
 // export files. exportOneLibrary.db, which rb-bridge also converts from, was not
@@ -294,7 +295,7 @@ static void test_mounts(const char *root) {
     puts("REAL PRIVATE NAMESPACE #20/#21/#22/#23/#37: fresh/existing RO volumes, persistent isolation, busy child/root/parent rollback, restart record, outside mount preserved: PASS");
 }
 // The deck's layout end to end: a read-only HFS+ rekordbox stick with a hidden
-// .PIONEER export on a deck whose /data/sc5000-custom is the compat symlink.
+// .PIONEER export on a deck whose /data/legacy data is the compat symlink.
 // The view must be prepared and rb-bridge launched on it (#103 regression,
 // found on a rekordbox 7 macOS stick, #216).
 static void test_foreign_owned_root(const char *root) {
@@ -312,7 +313,7 @@ static void test_hfs_mount_runs_bridge(const char *root) {
     assert(!mount(NULL,"/",NULL,MS_REC|MS_PRIVATE,NULL));
     char data[PATH_MAX],enginex[PATH_MAX],legacy[PATH_MAX],disk[PATH_MAX],target[PATH_MAX],p[PATH_MAX],log[PATH_MAX];
     join(data,root,"deck-data");join(enginex,data,"enginex");assert(!make_dirs(enginex));
-    join(legacy,data,"sc5000-custom");assert(!symlink("enginex",legacy));
+    join(legacy,data,LEGACY_DATA_NAME);assert(!symlink("enginex",legacy));
     join(test_library,legacy,"hfs-libraries");test_legacy_library[0]=0;
     join(disk,root,"hfs-disk");assert(!make_dirs(disk));join(p,disk,".PIONEER/rekordbox");assert(!make_dirs(p));join(p,disk,".PIONEER/rekordbox/export.pdb");write_file(p,"library");
     join(p,disk,".PIONEER/rekordbox/exportLibrary.db");write_file(p,"rekordbox 7");
@@ -329,7 +330,7 @@ static void test_hfs_mount_runs_bridge(const char *root) {
     join(p,disk,"Engine Library");assert(access(p,F_OK)==-1&&errno==ENOENT); // nothing written to the stick
     join(p,enginex,"hfs-libraries");assert(!access(p,F_OK));
     assert(!unmount_dispatch(&c,real_unmount));test_hfs_target[0]=0;
-    puts("REAL PRIVATE NAMESPACE #103: read-only HFS+ .PIONEER stick with the sc5000-custom compat link gets its view and rb-bridge: PASS");
+    puts("REAL PRIVATE NAMESPACE #103: read-only HFS+ .PIONEER stick with the " LEGACY_DATA_NAME " compat link gets its view and rb-bridge: PASS");
 }
 static unsigned count_mounts(const char *target) {
     FILE *f=fopen("/proc/self/mountinfo","r");assert(f);char line[4096];unsigned n=0;size_t len=strlen(target);
@@ -616,10 +617,10 @@ static void test_monitor_sees_plain_device_mount(const char *root) {
     fprintf(f,"79 33 8:17 / /media/vivid rw,relatime shared:240 - vfat /dev/sdb1 rw\n");
     fprintf(f,"260 25 0:21 /x/view-M8w87C %s/view-M8w87C rw,nosuid,nodev - tmpfs tmpfs rw,mode=755\n",test_runtime);
     fprintf(f,"268 260 8:1 / %s/view-M8w87C/backing rw,nosuid - hfsplus /dev/sda1 ro,umask=22\n",test_runtime);
-    fprintf(f,"269 260 0:46 / %s/view-M8w87C/view ro,nosuid - tmpfs sc5000-hfs-view ro,size=16384k,mode=755\n",test_runtime);
+    fprintf(f,"269 260 0:46 / %s/view-M8w87C/view ro,nosuid - tmpfs enginex-hfs-view ro,size=16384k,mode=755\n",test_runtime);
     fprintf(f,"274 269 8:1 /.PIONEER %s/view-M8w87C/view/.PIONEER rw,nosuid - hfsplus /dev/sda1 ro,umask=22\n",test_runtime);
     fprintf(f,"303 269 179:39 /enginex/hfs-libraries/u/library-0 %s/view-M8w87C/view/Engine\\040Library rw,relatime shared:43 - ext4 /dev/mmcblk0p7 rw\n",test_runtime);
-    fprintf(f,"304 78 0:46 / /media/vivi ro,nosuid,nodev,noexec,relatime shared:272 - tmpfs sc5000-hfs-view ro,size=16384k,mode=755\n");
+    fprintf(f,"304 78 0:46 / /media/vivi ro,nosuid,nodev,noexec,relatime shared:272 - tmpfs enginex-hfs-view ro,size=16384k,mode=755\n");
     fprintf(f,"309 304 8:1 /.PIONEER /media/vivi/.PIONEER rw,nosuid shared:277 - hfsplus /dev/sda1 ro,umask=22\n");
     fprintf(f,"311 304 179:39 /enginex/hfs-libraries/u/library-0 /media/vivi/Engine\\040Library rw,relatime shared:43 - ext4 /dev/mmcblk0p7 rw\n");
     fclose(f);
@@ -628,7 +629,7 @@ static void test_monitor_sees_plain_device_mount(const char *root) {
     assert(strstr(out,"78 33 8:1 / /media/vivi rw"));   // the device mount Engine expects
     assert(strstr(out,"79 33 8:17 / /media/vivid "));    // a sibling whose name extends the target is kept
     assert(strstr(out,"25 1 0:21 / /run "));
-    assert(!strstr(out,"sc5000-hfs-view")&&!strstr(out,"view-M8w87C")&&!strstr(out,"/media/vivi/"));
+    assert(!strstr(out,"enginex-hfs-view")&&!strstr(out,"view-M8w87C")&&!strstr(out,"/media/vivi/"));
     assert(!strstr(out,"mmcblk0p7"));                   // /data never appears as the stick's library mount
     int lines=0;for(char *p=out;*p;p++)lines+=*p=='\n';assert(lines==3);
     // Nothing to hide: the monitor parses the kernel's file itself.
@@ -638,8 +639,8 @@ static void test_monitor_sees_plain_device_mount(const char *root) {
     puts("r2 HFS view: edisksd's monitor sees only the plain device mount, never the bare mount before the view: PASS");
 }
 // #234: this hook names its view tmpfs enginex-hfs-view; an in-place update from an older release
-// can restart edisksd under it while views the old hook mounted (sc5000-hfs-view, helper mounts in
-// /run/sc5000-hfs-views) are still there. The monitor sees neither name, only the device mounts.
+// can restart edisksd under it while views the old hook mounted (enginex-hfs-view, helper mounts in
+// /run/enginex-hfs-views) are still there. The monitor sees neither name, only the device mounts.
 static void test_monitor_hides_new_and_old_view_names(const char *root) {
     char path[PATH_MAX],out[16384];join(path,root,"mountinfo-234");
     FILE *f=fopen(path,"w");assert(f);
@@ -649,9 +650,9 @@ static void test_monitor_hides_new_and_old_view_names(const char *root) {
     fprintf(f,"269 260 0:46 / %s/view-AAAAAA/view ro,nosuid - tmpfs enginex-hfs-view ro,size=16384k,mode=755\n",test_runtime);
     fprintf(f,"304 78 0:46 / /media/vivi ro,nosuid,nodev,noexec,relatime shared:272 - tmpfs enginex-hfs-view ro,size=16384k,mode=755\n");
     fprintf(f,"309 304 8:1 /.PIONEER /media/vivi/.PIONEER rw,nosuid shared:277 - hfsplus /dev/sda1 ro,umask=22\n");
-    fprintf(f,"360 25 0:22 /x/view-BBBBBB /run/sc5000-hfs-views/view-BBBBBB rw,nosuid,nodev - tmpfs tmpfs rw,mode=755\n");
-    fprintf(f,"361 360 8:17 / /run/sc5000-hfs-views/view-BBBBBB/backing rw,nosuid - hfsplus /dev/sdb1 ro,umask=22\n");
-    fprintf(f,"362 79 0:47 / /media/old ro,nosuid,nodev,noexec,relatime shared:273 - tmpfs sc5000-hfs-view ro,size=16384k,mode=755\n");
+    fprintf(f,"360 25 0:22 /x/view-BBBBBB " LEGACY_HFS_RUN_ROOT "/view-BBBBBB rw,nosuid,nodev - tmpfs tmpfs rw,mode=755\n");
+    fprintf(f,"361 360 8:17 / " LEGACY_HFS_RUN_ROOT "/view-BBBBBB/backing rw,nosuid - hfsplus /dev/sdb1 ro,umask=22\n");
+    fprintf(f,"362 79 0:47 / /media/old ro,nosuid,nodev,noexec,relatime shared:273 - " LEGACY_HFS_MOUNT "ro,size=16384k,mode=755\n");
     fprintf(f,"363 362 8:17 /.PIONEER /media/old/.PIONEER rw,nosuid shared:278 - hfsplus /dev/sdb1 ro,umask=22\n");
     fclose(f);
     int fd=hide_views(path);assert(fd>=0);

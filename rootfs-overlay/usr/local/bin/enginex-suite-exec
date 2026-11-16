@@ -1,4 +1,7 @@
 #!/bin/sh
+migration=${ENGINEX_MIGRATION:-/usr/libexec/enginex-migration}
+[ -f "$migration" ] || migration=$(dirname "$0")/enginex-migration
+. "$migration"
 # Stock Engine OS has no xz(1); BusyBox provides xzcat. A .gz archive is also
 # accepted. Concurrent service starts unpack once under a lock.
 set -eu
@@ -37,11 +40,11 @@ if stale; then
     fi
     # Earlier releases leaked one empty temporary per failed start and left
     # standalone binaries and hand-made backups that this suite replaces (#44).
-    # Releases before 5.3.0.5 unpacked the same suite as sc5000-suite (#234).
+    # Releases before 5.3.0.5 unpacked the same suite as enginex-suite (#234).
     rm -f "$TARGET_DIR"/enginex-suite.*.tmp "$TARGET_DIR"/*.pre-* "$TARGET_DIR"/*.prev \
         "$TARGET_DIR"/*.o55prev "$TARGET_DIR/enginex-deemixd" "$TARGET_DIR/stems-processor" \
-        "$TARGET_DIR/sc5000-suite" "$TARGET_DIR/sc5000-suite.id" "$TARGET_DIR"/sc5000-suite.*.tmp \
-        "$TARGET_DIR/sc5000-deemixd"
+        "$TARGET_DIR/$legacy_suite" "$TARGET_DIR/$legacy_suite.id" "$TARGET_DIR"/"$legacy_suite".*.tmp \
+        "$TARGET_DIR/$legacy_deemix"
     # The service must not keep holding the unpack lock.
     exec 9>&-
 fi

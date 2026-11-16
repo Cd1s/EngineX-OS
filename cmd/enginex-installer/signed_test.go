@@ -562,18 +562,16 @@ func TestInstallerDoesNotGoBackToAnOlderRelease(t *testing.T) {
 			notInstalled(t, deck)
 		})
 	}
-	t.Run("a file the user names is installed", func(t *testing.T) {
+	t.Run("an explicit older file is refused", func(t *testing.T) {
 		b := buildBundle(t, "PRIME4PLUS", "5.3.0.5", "v5.3.0.5-r1")
 		o := testOpts(t)
 		o.Bundle = b.ImagePath
 		useRelease(o, offlineRelease(t))
 		deck := prepare(t, o)
-		if err := run(ctxT(t), o); err != nil {
-			t.Fatalf("%v\n%s", err, o.Out)
+		if err := run(ctxT(t), o); err == nil || !strings.Contains(err.Error(), "downgrade") {
+			t.Fatalf("explicit downgrade: %v", err)
 		}
-		if got := installedTag(deck); got != "v5.3.0.5-r1" {
-			t.Fatalf("the deck runs %s", got)
-		}
+		notInstalled(t, deck)
 	})
 	// GitHub cannot be read and the older package is in the work folder with its signed list.
 	for _, c := range []struct{ name, tag, refused string }{

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"io"
 	"net/http"
 	"net/url"
@@ -39,12 +40,12 @@ const (
 	// legacyTailscaleUnit is the transient unit's name before 5.3.0.5 (#234). An in-place
 	// update of a /data bundle keeps it running, and a second daemon on the same state dir
 	// would fight it, so it is stopped before this one starts.
-	legacyTailscaleUnit = "sc5000-tailscaled"
+	legacyTailscaleUnit = migration.TailscaleUnit
 )
 
 // legacyTailscaleSocket points at the daemon's socket under its name before 5.3.0.5 (#234),
-// for a Tailscale Remote Mod installed earlier that still asks there; tests move it.
-var legacyTailscaleSocket = "/run/sc5000-tailscaled.sock"
+// for one-time cleanup after an upgrade; tests move it.
+var legacyTailscaleSocket = migration.TailscaleSocket
 
 // tailscaleReleaseURL hosts tailscaled-<arch> and SHA256SUMS; tests point it at httptest.
 var tailscaleReleaseURL = "https://github.com/Cd1s/EngineX-OS/releases/download/tailscale-v" + tailscaleVersion
@@ -177,21 +178,17 @@ func (s *Server) tailscaleStart(ctx context.Context) error {
 		return fmt.Errorf("start tailscaled: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 	if isDeckStateDir(s.cfg.StateDir) { // never the build host's /run in tests
-		linkLegacyTailscaleSocket()
+		removeLegacyTailscaleSocket()
 	}
 	return nil
 }
 
-// linkLegacyTailscaleSocket points the old socket name at the new one, unless something
-// that is not a symlink (an old daemon's own socket) is there.
-func linkLegacyTailscaleSocket() {
-	if fi, err := os.Lstat(legacyTailscaleSocket); err == nil {
-		if fi.Mode()&os.ModeSymlink == 0 {
-			return
-		}
-		os.Remove(legacyTailscaleSocket)
+// removeLegacyTailscaleSocket removes only the alias this release used to create.
+func removeLegacyTailscaleSocket() {
+	target, err := os.Readlink(legacyTailscaleSocket)
+	if err == nil && (target == filepath.Base(tailscaleSocket) || target == tailscaleSocket) {
+		_ = os.Remove(legacyTailscaleSocket)
 	}
-	_ = os.Symlink(filepath.Base(tailscaleSocket), legacyTailscaleSocket)
 }
 
 func (s *Server) tailscaleStop(ctx context.Context) {

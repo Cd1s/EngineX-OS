@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "${ENGINEX_MIGRATION:-$(git rev-parse --show-toplevel)/rootfs-overlay/usr/libexec/enginex-migration}"
 # Native full-userspace boot. Mounts exist only in the private mount namespace.
 set -euo pipefail
 export LC_ALL=C
@@ -51,7 +52,7 @@ StandardError=journal
 EOF
     local prepare_unit=enginex-prepare.service reset_unit=enginex-etc-reset.service deemix_unit=enginex-deemixd.service
     if [ ! -f "$R/usr/libexec/enginex-prepare" ]; then
-        prepare_unit=sc5000-custom-prepare.service reset_unit=sc5000-custom-etc-reset.service deemix_unit=sc5000-deemixd.service
+        prepare_unit=$legacy_prepare_unit reset_unit=$legacy_reset_unit deemix_unit=$legacy_image_deemix_unit
     fi
     # etc-reset was attached to etc.mount on older images. Enable it explicitly
     # before prepare when testing the 5.3 rootfs without that mount unit.

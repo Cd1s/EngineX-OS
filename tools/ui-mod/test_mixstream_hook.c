@@ -1,3 +1,4 @@
+#include "../legacy_names.h"
 // Native armhf on the build host (no qemu):
 // arm-linux-gnueabihf-gcc -O2 -o test_mixstream_hook test_mixstream_hook.c -ldl -lpthread
 // ./test_mixstream_hook <5.3.0>/usr/Engine/Engine <5.3.0-sclive4>/usr/Engine/Engine
@@ -15,14 +16,14 @@ static uint32_t word(const void *p) { uint32_t v; memcpy(&v, p, sizeof v); retur
 static int stock_processor;
 static int fake_access(const char *path, int mode) {
     assert(mode == X_OK);
-    return !strcmp(path, "/data/sc5000-custom/bundle/bin/stems-processor") ||
+    return !strcmp(path, LEGACY_BUNDLE_BIN_PROCESSOR) ||
            (stock_processor && !strcmp(path, "/usr/local/bin/stems-processor")) ? 0 : -1;
 }
 
 static void test_processor_delivery(void) {
     access_cache = (void *)fake_access;
     assert(!strcmp(stems_processor_path("/usr/local/bin/stems-processor"),
-                   "/data/sc5000-custom/bundle/bin/stems-processor"));
+                   LEGACY_BUNDLE_BIN_PROCESSOR));
     stock_processor = 1;
     assert(!strcmp(stems_processor_path("/usr/local/bin/stems-processor"), "/usr/local/bin/stems-processor"));
     assert(!strcmp(stems_processor_path("/usr/bin/other"), "/usr/bin/other"));

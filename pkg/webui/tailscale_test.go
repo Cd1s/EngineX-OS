@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -268,7 +269,7 @@ func TestTailscaleLoginServeAndStop(t *testing.T) {
 		t.Fatalf("login URL flow: %d %s", code, out)
 	}
 	// #234: the daemon an older release started under its old unit name stops first.
-	if !f.has("systemctl stop sc5000-tailscaled") {
+	if !f.has("systemctl stop " + migration.TailscaleUnit) {
 		t.Fatal("the pre-5.3.0.5 tailscaled unit is not stopped before the new one starts")
 	}
 	if !f.has("systemd-run --unit=enginex-tailscaled") || !f.has("--tun=userspace-networking") || !f.has("--login-server=https://hs.example ") && !f.has("--login-server=https://hs.example") {
@@ -306,7 +307,7 @@ func TestTailscaleLoginServeAndStop(t *testing.T) {
 
 	// Off stops the daemon but keeps the login state and settings.
 	code, v, _ = tsPost(t, s, `{"enabled":false}`)
-	if code != http.StatusOK || v.Running || v.Enabled || !f.has("systemctl stop enginex-tailscaled") {
+	if code != http.StatusOK || v.Running || v.Enabled || !f.has("systemctl stop "+migration.TailscaleUnit) {
 		t.Fatalf("disable: %d %+v", code, v)
 	}
 	if v.LoginServer != "https://hs.example" || !v.Forward.SSH {

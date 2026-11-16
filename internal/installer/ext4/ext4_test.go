@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"io"
 	"os"
 	"path/filepath"
@@ -65,7 +66,7 @@ func bundleChangeSet(root, version string, alsaName string) ChangeSet {
 	add := func(p string, mode uint32, data []byte) { cs.Files = append(cs.Files, memEntry(p, mode, data)) }
 	cs.Directories = []string{root, root + "/bundle", root + "/bundle/bin", root + "/bundle/lib", root + "/ui",
 		"system/var/overlay/lib/alsa/conf.d", "system/var-lib/alsa/conf.d"}
-	add(root+"/bundle/bin/sc5000-suite", 0o755, pattern(3<<20+123, 1))
+	add(root+"/bundle/bin/"+migration.Suite, 0o755, pattern(3<<20+123, 1))
 	add(root+"/bundle/lib/libengine-ui-hook.so", 0o755, pattern(400<<10, 2))
 	add(root+"/bundle/boot-activate.sh", 0o755, []byte("#!/bin/sh\necho activate\n"))
 	add(root+"/bundle/version.txt", 0o644, []byte(version+"\n"))
@@ -98,11 +99,11 @@ func TestCreateFreshProfile(t *testing.T) {
 }
 
 func TestApplyVerifyRoundTrip(t *testing.T) {
-	for _, alsa := range []string{"99-sc5000-custom.conf", "99-enginex.conf"} {
+	for _, alsa := range []string{"99-enginex.conf"} {
 		t.Run(alsa, func(t *testing.T) {
 			img, p := newImage(t, 64<<20, "data")
 			root, links, err := img.ChooseRuntimeDir()
-			if err != nil || root != "enginex" || links["sc5000-custom"] != "enginex" {
+			if err != nil || root != "enginex" || len(links) != 0 {
 				t.Fatalf("ChooseRuntimeDir = %q %v %v", root, links, err)
 			}
 			cs := bundleChangeSet(root, "5.3.0.5", alsa)
@@ -131,12 +132,12 @@ func TestApplyVerifyRoundTrip(t *testing.T) {
 
 func TestRepeatedInjectionReplacesAndFrees(t *testing.T) {
 	img, p := newImage(t, 64<<20, "az01-data")
-	cs1 := bundleChangeSet("enginex", "5.3.0.4", "99-sc5000-custom.conf")
+	cs1 := bundleChangeSet("enginex", "5.3.0.4", migration.AlsaFile)
 	if err := img.Apply(context.Background(), cs1); err != nil {
 		t.Fatal(err)
 	}
 	free1 := img.Profile().FreeBlocks
-	cs2 := bundleChangeSet("enginex", "5.3.0.5", "99-sc5000-custom.conf")
+	cs2 := bundleChangeSet("enginex", "5.3.0.5", migration.AlsaFile)
 	if err := img.Apply(context.Background(), cs2); err != nil {
 		t.Fatal(err)
 	}

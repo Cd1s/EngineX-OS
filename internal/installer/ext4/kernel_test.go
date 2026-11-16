@@ -11,6 +11,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -74,8 +75,8 @@ func kernelMatches(t *testing.T, mnt string, cs ChangeSet) {
 func TestKernelReadsFreshAndInjected(t *testing.T) {
 	needKernelMount(t)
 	img, p := newImage(t, 256<<20, "az01-data")
-	cs := bundleChangeSet("enginex", "5.3.0.5", "99-sc5000-custom.conf")
-	cs.Links = map[string]string{"sc5000-custom": "enginex"}
+	cs := bundleChangeSet("enginex", "5.3.0.5", migration.AlsaFile)
+	cs.Links = map[string]string{migration.DataName: "enginex"}
 	if err := img.Apply(context.Background(), cs); err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +84,7 @@ func TestKernelReadsFreshAndInjected(t *testing.T) {
 	mnt := mountImage(t, p, true)
 	kernelMatches(t, mnt, cs)
 	// The compatibility link resolves for the deck's legacy paths.
-	if b, err := os.ReadFile(filepath.Join(mnt, "sc5000-custom/bundle/boot-activate.sh")); err != nil || !bytes.HasPrefix(b, []byte("#!/bin/sh")) {
+	if b, err := os.ReadFile(filepath.Join(mnt, migration.DataName+"/bundle/boot-activate.sh")); err != nil || !bytes.HasPrefix(b, []byte("#!/bin/sh")) {
 		t.Errorf("legacy path through the link: %v", err)
 	}
 	umount(t, mnt)
@@ -230,9 +231,9 @@ func TestKernelWrittenBackup(t *testing.T) {
 	if err := unix.Setxattr(filepath.Join(mnt, "Music/set.flac"), "user.deck", []byte("cue-points"), 0); err != nil {
 		t.Fatal(err)
 	}
-	os.WriteFile(filepath.Join(mnt, "enginex/bundle/bin/sc5000-suite"), pattern(1<<20, 1), 0o755)
+	os.WriteFile(filepath.Join(mnt, "enginex/bundle/bin/"+migration.Suite), pattern(1<<20, 1), 0o755)
 	os.WriteFile(filepath.Join(mnt, "enginex/gen2-locked"), []byte("1\n"), 0o644)
-	os.Symlink("enginex", filepath.Join(mnt, "sc5000-custom"))
+	os.Symlink("enginex", filepath.Join(mnt, migration.DataName))
 	umount(t, mnt)
 	e2fsckClean(t, backup)
 	if out := debugfs(t, backup, "stat /system/var-lib/alsa/conf.d"); !strings.Contains(out, "Flags: 0x81000") {

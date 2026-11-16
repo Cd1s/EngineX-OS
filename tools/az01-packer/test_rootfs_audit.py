@@ -1,9 +1,12 @@
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 import rootfs_audit as ra
+import legacy_names as legacy
 
 
 class AuditTests(unittest.TestCase):
@@ -38,12 +41,42 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(ra.resolve(str(self.root), '/bin/sh'), str(self.root) + '/usr/bin/sh')
         self.assertIsNone(ra.resolve(str(self.root), '/bin/iw'))
 
+    def test_cli_runs_with_isolated_python(self):
+        self.ship('usr/lib/systemd/system/enginex-prepare.service', '[Service]\nExecStart=/bin/sh\n')
+        result = subprocess.run([sys.executable, '-I', ra.__file__, str(self.root),
+                                 '--overlay', str(self.overlay)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('0 FAIL', result.stdout)
+
+    def test_migration_prefixes_pass_but_a_missing_command_still_fails(self):
+        source = Path(__file__).resolve().parents[2] / 'rootfs-overlay/usr/libexec/enginex-migration'
+        script = source.read_text()
+        self.ship('usr/libexec/enginex-migration', script)
+        ok, a = self.audit()
+        self.assertTrue(ok, a.fails)
+        prefixes = subprocess.check_output(['sh', '-c',
+            '. "$1"; printf "%s\\n" "$legacy_libexec" "$legacy_bin"', 'sh', str(source)], text=True)
+        self.assertEqual(prefixes.splitlines(), ['/usr/libexec/' + legacy.DATA_NAME,
+                                                '/usr/local/bin/' + legacy.PROJECT])
+        self.ship('usr/libexec/enginex-migration', script + '\n/usr/bin/gone\n')
+        ok, a = self.audit()
+        self.assertFalse(ok)
+        self.assertIn('/usr/libexec/enginex-migration: calls /usr/bin/gone, not in this rootfs', a.fails)
+
     def test_hard_requires_on_a_vendor_mount_fails(self):
         # The 5.3.0.1 upgrade bug: 5.3.0 has no etc.mount, so prepare and SSH never ran.
         self.ship('etc/systemd/system/x.service', '[Unit]\nRequires=etc.mount\n[Service]\nExecStart=/bin/sh\n')
         ok, a = self.audit()
         self.assertFalse(ok)
         self.assertTrue(any('Requires=etc.mount is a vendor unit' in m for m in a.fails), a.fails)
+
+    def test_legacy_image_units_are_still_audited(self):
+        self.overlay.mkdir()
+        unit = 'usr/lib/systemd/system/' + legacy.PROJECT + '-custom-prepare.service'
+        (self.root / unit).write_text('[Service]\nExecStart=/usr/bin/gone\n')
+        ok, a = self.audit()
+        self.assertFalse(ok)
+        self.assertIn('/' + unit + ': ExecStart command /usr/bin/gone not found', a.fails)
 
     def test_soft_and_mount_dependencies_pass(self):
         self.ship('etc/systemd/system/x.service', '[Unit]\nRequiresMountsFor=/data /etc\nWants=etc.mount var-lib.mount\n'

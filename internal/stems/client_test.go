@@ -1,6 +1,7 @@
 package stems
 
 import (
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,17 +23,17 @@ func writeFile(t *testing.T, dir, name, body string) string {
 
 func TestResolveClientFromRelayConfig(t *testing.T) {
 	dir := t.TempDir()
-	cfg := writeFile(t, dir, "deemix-config.json", `{"relayUrl":"https://relay.example/sc5000/","deemixPassword":" console-pass "}`)
+	cfg := writeFile(t, dir, "deemix-config.json", `{"relayUrl":"https://relay.example/`+migration.ProjectName+`/","deemixPassword":" console-pass "}`)
 	c, err := ResolveClient(envOf(map[string]string{"ENGINEX_STEMS_CONFIG": cfg}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Endpoint != "https://relay.example/sc5000/" || c.Secret != "console-pass" || c.Source != cfg {
+	if c.Endpoint != "https://relay.example/"+migration.ProjectName+"/" || c.Secret != "console-pass" || c.Source != cfg {
 		t.Fatalf("%+v", c)
 	}
 	// ENGINEX_STEMS_TOKEN replaces only the password.
 	c, err = ResolveClient(envOf(map[string]string{"ENGINEX_STEMS_CONFIG": cfg, "ENGINEX_STEMS_TOKEN": "other"}))
-	if err != nil || c.Endpoint != "https://relay.example/sc5000/" || c.Secret != "other" {
+	if err != nil || c.Endpoint != "https://relay.example/"+migration.ProjectName+"/" || c.Secret != "other" {
 		t.Fatalf("%+v %v", c, err)
 	}
 }
@@ -137,26 +138,26 @@ func TestResolveClientAcceptsMDNSAndLANHostnames(t *testing.T) {
 	}
 }
 
-// #234: a deck configured before 5.3.0.5 (SC5000_STEMS_* in its environment) keeps its backend;
+// #234: a deck configured before 5.3.0.5 (legacy environment STEMS_* in its environment) keeps its backend;
 // the new name wins when both are set.
 func TestResolveClientReadsPre5305Names(t *testing.T) {
 	dir := t.TempDir()
 	token := writeFile(t, dir, "token", strings.Repeat("o", 32)+"\n")
-	c, err := ResolveClient(envOf(map[string]string{"SC5000_STEMS_URL": "http://192.0.2.1:6596", "SC5000_STEMS_TOKEN_FILE": token}))
+	c, err := ResolveClient(envOf(map[string]string{migration.StemsEnvPrefix + "URL": "http://192.0.2.1:6596", migration.StemsEnvPrefix + "TOKEN_FILE": token}))
 	if err == nil || !strings.Contains(err.Error(), "private network") {
-		t.Fatalf("a public SC5000_STEMS_URL is not checked like the new name: %+v %v", c, err)
+		t.Fatalf("a public "+migration.StemsEnvPrefix+"URL is not checked like the new name: %+v %v", c, err)
 	}
-	c, err = ResolveClient(envOf(map[string]string{"SC5000_STEMS_URL": "http://127.0.0.1:6596", "SC5000_STEMS_TOKEN_FILE": token}))
+	c, err = ResolveClient(envOf(map[string]string{migration.StemsEnvPrefix + "URL": "http://127.0.0.1:6596", migration.StemsEnvPrefix + "TOKEN_FILE": token}))
 	if err != nil || c.Endpoint != "http://127.0.0.1:6596" || c.Secret != strings.Repeat("o", 32) {
 		t.Fatalf("old names: %+v %v", c, err)
 	}
-	c, err = ResolveClient(envOf(map[string]string{"SC5000_STEMS_URL": "http://127.0.0.1:6596", "SC5000_STEMS_TOKEN": "old",
+	c, err = ResolveClient(envOf(map[string]string{migration.StemsEnvPrefix + "URL": "http://127.0.0.1:6596", migration.StemsEnvPrefix + "TOKEN": "old",
 		"ENGINEX_STEMS_URL": "http://127.0.0.2:6596", "ENGINEX_STEMS_TOKEN": "new"}))
 	if err != nil || c.Endpoint != "http://127.0.0.2:6596" || c.Secret != "new" {
 		t.Fatalf("new names must win: %+v %v", c, err)
 	}
 	cfg := writeFile(t, dir, "deemix-config.json", `{"relayUrl":"https://relay.example","deemixPassword":"console"}`)
-	if c, err = ResolveClient(envOf(map[string]string{"SC5000_STEMS_CONFIG": cfg})); err != nil || c.Endpoint == "" {
-		t.Fatalf("SC5000_STEMS_CONFIG: %+v %v", c, err)
+	if c, err = ResolveClient(envOf(map[string]string{migration.StemsEnvPrefix + "CONFIG": cfg})); err != nil || c.Endpoint == "" {
+		t.Fatalf(migration.StemsEnvPrefix+"CONFIG: %+v %v", c, err)
 	}
 }

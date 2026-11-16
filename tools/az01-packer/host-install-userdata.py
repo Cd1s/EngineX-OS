@@ -8,6 +8,9 @@ image without wiping user files, music, settings, or database.
 Usage:
     host-install-userdata.py <userdata.img> --bundle <bundle.tar.gz> [--ssh-key ~/.ssh/id_ed25519.pub]
 """
+import sys
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
+import legacy_names
 import argparse
 import hashlib
 import io
@@ -139,11 +142,8 @@ def inject(img_path, bundle_tar, check=True, ssh_key=None):
             fail(f'{bundle} does not contain an EngineX-OS-Data-Bundle directory')
         broot = bundle_roots[0]
 
-        # #103: runtime dir is enginex, with sc5000-custom -> enginex for older code. A deck
-        # that still has the real legacy dir keeps being written there: the first boot renames it.
-        legacy, new = image_kind(img, 'sc5000-custom'), image_kind(img, 'enginex')
-        root = 'sc5000-custom' if legacy == 'directory' and new is None else 'enginex'
-        links = [('/sc5000-custom', 'enginex')] if legacy is None and root == 'enginex' else []
+        # A real pre-5.3.0.5 directory is retained for first-boot migration.
+        root, links = 'enginex', []
 
         sums_file = broot / 'SHA256SUMS'
         if not sums_file.is_file():
@@ -204,7 +204,7 @@ def inject(img_path, bundle_tar, check=True, ssh_key=None):
 
         for name, mode in [
             ('boot-activate.sh', 0o100755),
-            ('99-sc5000-custom.conf', 0o100644),
+            ('99-enginex.conf', 0o100644),
             ('install.sh', 0o100755),
             ('uninstall.sh', 0o100755),
             ('version.txt', 0o100644),
@@ -249,9 +249,9 @@ def inject(img_path, bundle_tar, check=True, ssh_key=None):
             files.append((Path(ssh_key), Path(root) / 'authorized_keys', 0o100600))
 
         # 3. ALSA hook configuration
-        alsa_conf_f = broot / '99-sc5000-custom.conf'
+        alsa_conf_f = broot / '99-enginex.conf'
         if alsa_conf_f.is_file():
-            files.extend((alsa_conf_f, d / '99-sc5000-custom.conf', 0o100644) for d in alsa_rels)
+            files.extend((alsa_conf_f, d / '99-enginex.conf', 0o100644) for d in alsa_rels)
 
         all_dirs = set(dirs)
         for d in dirs:
@@ -259,7 +259,12 @@ def inject(img_path, bundle_tar, check=True, ssh_key=None):
                 if str(parent) != '.':
                     all_dirs.add(parent)
 
-        script = generate_debugfs_script(files, all_dirs, links, removes=(Path(root) / 'gen2-locked',))
+        removes = [Path(root) / 'gen2-locked']
+        for directory in alsa_rels:
+            old = directory / legacy_names.ALSA_FILE
+            if image_kind(img, str(old)) in ('regular', 'symlink'):
+                removes.append(old)
+        script = generate_debugfs_script(files, all_dirs, links, removes=removes)
         script_file = tmp / 'debugfs_script.txt'
         script_file.write_text(script)
 
@@ -269,9 +274,7 @@ def inject(img_path, bundle_tar, check=True, ssh_key=None):
         if wr.returncode != 0:
             fail(f'debugfs failed with code {wr.returncode} on {img}:\n' + '\n'.join(notes[-20:]))
         # debugfs exits 0 even when a write failed (full image, bad path): read back.
-        # The suite is enginex-suite since 5.3.0.5 (#234), sc5000-suite in older bundles.
-        suite = 'enginex-suite' if (broot / 'bin/enginex-suite').is_file() else 'sc5000-suite'
-        for rel in (f'{root}/version.txt', f'{root}/bundle/bin/{suite}', f'{root}/gen2-unlocked'):
+        for rel in (f'{root}/version.txt', f'{root}/bundle/bin/enginex-suite', f'{root}/gen2-unlocked'):
             st = subprocess.run(['debugfs', '-R', f'stat /{rel}', str(img)], capture_output=True, text=True).stdout
             if 'Type: regular' not in st:
                 fail(f'/{rel} is not in {img} after writing (image full?)')

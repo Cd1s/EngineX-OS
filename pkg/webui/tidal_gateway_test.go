@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"github.com/Cd1s/EngineX-OS/internal/testaudio"
 	"github.com/Cd1s/EngineX-OS/internal/testlibrary"
 	"github.com/Cd1s/EngineX-OS/pkg/analyzer"
@@ -82,7 +83,7 @@ func TestTidalGatewayLoginAndHint(t *testing.T) {
 		}
 		data, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		if resp.StatusCode != 200 || !(bytes.Contains(data, []byte(`"deviceCode":"enginex-local"`)) || bytes.Contains(data, []byte(`"access_token":"sc5000-token"`))) {
+		if resp.StatusCode != 200 || !(bytes.Contains(data, []byte(`"deviceCode":"enginex-local"`)) || bytes.Contains(data, []byte(`"access_token":"enginex"`))) {
 			t.Fatalf("%s: %d %s", path, resp.StatusCode, data)
 		}
 	}
@@ -1042,7 +1043,7 @@ func TestHTTPSCover(t *testing.T) {
 // local so a placeholder credential reaching it is observable without a login.
 func TestTidalSyntheticCredentialsNeverReachUpstream(t *testing.T) {
 	for _, disabled := range []bool{false, true} {
-		for _, tok := range []string{"enginex", "enginex-token", "enginex-refresh", "sc5000-token", "sc5000-refresh", ""} {
+		for _, tok := range []string{"enginex", migration.Token, migration.RefreshToken, "enginex-token", "enginex-refresh", ""} {
 			t.Run(strconv.FormatBool(disabled)+"/"+tok, func(t *testing.T) {
 				var calls atomic.Int32
 				up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1); w.WriteHeader(418) }))
@@ -1126,7 +1127,7 @@ func TestTidalRealLoginSurvivesScopeSwitch(t *testing.T) {
 	status := func(want bool) {
 		t.Helper()
 		var v map[string]any
-		tidalGet(t, srv.URL, "/v1/sc5000/ui", 200, &v)
+		tidalGet(t, srv.URL, "/v1/enginex/ui", 200, &v)
 		if v["tidalLoggedIn"] != want {
 			t.Errorf("tidalLoggedIn = %v, want %v", v["tidalLoggedIn"], want)
 		}
@@ -1144,7 +1145,7 @@ func TestTidalRealLoginSurvivesScopeSwitch(t *testing.T) {
 		t.Errorf("auth permissions = %o", st.Mode().Perm())
 	}
 	uiPost(t, srv.URL, "scope=spotify")
-	if b := post("/au//oauth2/token", "grant_type=refresh_token&refresh_token=test-real-refresh"); !bytes.Contains(b, []byte("sc5000-refresh")) {
+	if b := post("/au//oauth2/token", "grant_type=refresh_token&refresh_token=test-real-refresh"); !bytes.Contains(b, []byte(`"refresh_token":"enginex"`)) {
 		t.Error("Spotify needs the local token")
 	}
 	// Reconstruct the gateway, as after a reboot; real auth must survive on disk.
@@ -1152,7 +1153,7 @@ func TestTidalRealLoginSurvivesScopeSwitch(t *testing.T) {
 	srv2 := httptest.NewServer(s2)
 	defer srv2.Close()
 	uiPost(t, srv.URL, "scope=tidal")
-	post("/au//oauth2/token", "grant_type=refresh_token&refresh_token=sc5000-refresh")
+	post("/au//oauth2/token", "grant_type=refresh_token&refresh_token=enginex-refresh")
 	if refreshes.Load() != 1 {
 		t.Error("saved real refresh token was not used")
 	}
@@ -1186,7 +1187,7 @@ func TestTidalCaptureBeforeSyntheticReplyAndInvalidGrant(t *testing.T) {
 	}
 	resp.Body.Close()
 	var v map[string]any
-	tidalGet(t, srv.URL, "/v1/sc5000/ui", 200, &v)
+	tidalGet(t, srv.URL, "/v1/enginex/ui", 200, &v)
 	if v["tidalLoggedIn"] != true {
 		t.Error("real Engine refresh token lost during scope switch")
 	}
@@ -1199,7 +1200,7 @@ func TestTidalCaptureBeforeSyntheticReplyAndInvalidGrant(t *testing.T) {
 	if resp.StatusCode != 400 {
 		t.Errorf("invalid grant response=%d", resp.StatusCode)
 	}
-	tidalGet(t, srv.URL, "/v1/sc5000/ui", 200, &v)
+	tidalGet(t, srv.URL, "/v1/enginex/ui", 200, &v)
 	if v["tidalLoggedIn"] != false {
 		t.Error("invalid real auth not cleared")
 	}
@@ -1239,7 +1240,7 @@ func TestTidalExpiredBearerRefreshesOnce(t *testing.T) {
 	defer srv.Close()
 	uiPost(t, srv.URL, "scope=tidal")
 	r, _ := http.NewRequest("GET", srv.URL+"/v1/sessions", nil)
-	r.Header.Set("Authorization", "Bearer sc5000-token")
+	r.Header.Set("Authorization", "Bearer enginex-token")
 	resp, err := http.DefaultClient.Do(r)
 	if err != nil {
 		t.Fatal(err)
@@ -1264,7 +1265,7 @@ func TestTidalBearerCapturedOutsideTidalScope(t *testing.T) {
 	}
 	resp.Body.Close()
 	var v map[string]any
-	tidalGet(t, srv.URL, "/v1/sc5000/ui", 200, &v)
+	tidalGet(t, srv.URL, "/v1/enginex/ui", 200, &v)
 	if v["tidalLoggedIn"] != true {
 		t.Error("Engine's real bearer was lost outside TIDAL scope")
 	}
@@ -1282,7 +1283,7 @@ func TestTidalRefreshOnlyStoreWithSyntheticBearer(t *testing.T) {
 		if r.Form.Get("refresh_token") != "fixture-refresh-only" {
 			t.Error("real refresh token not restored")
 		}
-		if strings.Contains(r.Header.Get("Authorization"), "sc5000") {
+		if strings.Contains(r.Header.Get("Authorization"), "enginex") {
 			t.Error("synthetic bearer reached token endpoint")
 		}
 		io.WriteString(w, `{"access_token":"fixture-real-access","refresh_token":"fixture-rotated-refresh"}`)
@@ -1293,9 +1294,9 @@ func TestTidalRefreshOnlyStoreWithSyntheticBearer(t *testing.T) {
 	srv := httptest.NewServer(New(Config{AccessToken: "code", UIDir: t.TempDir(), StateDir: dir, TidalAuthURL: up.URL}, nil))
 	defer srv.Close()
 	uiPost(t, srv.URL, "scope=tidal")
-	r, _ := http.NewRequest("POST", srv.URL+"/au//oauth2/token", strings.NewReader("grant_type=refresh_token&refresh_token=sc5000-refresh"))
+	r, _ := http.NewRequest("POST", srv.URL+"/au//oauth2/token", strings.NewReader("grant_type=refresh_token&refresh_token=enginex-refresh"))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	r.Header.Set("Authorization", "Bearer sc5000-token")
+	r.Header.Set("Authorization", "Bearer enginex-token")
 	resp, err := http.DefaultClient.Do(r)
 	if err != nil {
 		t.Fatal(err)
@@ -1335,7 +1336,7 @@ func TestTidalSeedsRealAuthFromStreamingAccountsOnUpgrade(t *testing.T) {
 			srv := httptest.NewServer(New(cfg, nil))
 			defer srv.Close()
 			var status map[string]any
-			tidalGet(t, srv.URL, "/v1/sc5000/ui", 200, &status)
+			tidalGet(t, srv.URL, "/v1/enginex/ui", 200, &status)
 			if status["tidalLoggedIn"] != tc.loggedIn || status["tidalSynthetic"] != tc.synthetic {
 				t.Errorf("login=%v synthetic=%v; want %v/%v", status["tidalLoggedIn"], status["tidalSynthetic"], tc.loggedIn, tc.synthetic)
 			}
@@ -1410,7 +1411,7 @@ func TestTidalConcurrent401RefreshesOnce(t *testing.T) {
 		go func() {
 			client := &http.Client{Timeout: 5 * time.Second}
 			r, _ := http.NewRequest("GET", srv.URL+"/v1/sessions", nil)
-			r.Header.Set("Authorization", "Bearer sc5000-token")
+			r.Header.Set("Authorization", "Bearer enginex-token")
 			resp, err := client.Do(r)
 			if err != nil {
 				results <- 0

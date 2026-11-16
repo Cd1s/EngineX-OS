@@ -2,6 +2,8 @@
 # No root, real block device, mount, sysctl, or host service changes required.
 set -euo pipefail
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+export ENGINEX_MIGRATION=$ROOT/rootfs-overlay/usr/libexec/enginex-migration
+. "$ENGINEX_MIGRATION"
 TMP=$(mktemp -d "$ROOT/tests/.tmp.XXXXXX")
 trap 'rm -rf -- "$TMP"' EXIT
 STORAGE=$ROOT/rootfs-overlay/usr/local/bin/enginex-storage-mount
@@ -29,7 +31,7 @@ case $tool in
             awk -F '|' -v dev="$dev" -v col="$col" '$1==dev {print $col; found=1} END {exit !found}' "$MOCK_ROOT/mounts"
         else
             path=$5
-            if [[ $path == "$ENGINEX_MEDIA_ROOT/sc5000-sd-cache" ]]; then
+            if [[ $path == "$ENGINEX_MEDIA_ROOT/enginex-sd-cache" ]]; then
                 cat "$MOCK_ROOT/sd-type"
             else
                 cat "$MOCK_ROOT/internal-type"
@@ -511,23 +513,23 @@ touch -t 200001010000 "$suite_dir/enginex-suite"
 [[ $(run_suite) == 'hand x' ]] || fail 'a hand-deployed suite survives restarts of the same image'
 printf '#!/bin/sh\necho image-2 "$@"\n' | gzip -c > "$suite_share/enginex-suite.gz"
 touch -t 200001010000 "$suite_share/enginex-suite.gz"
-touch "$suite_dir/sc5000-deemixd" "$suite_dir/stems-processor" "$suite_dir/sc5000-suite.prev" "$suite_dir/sc5000-suite.pre-x" "$suite_dir/drmgrab"
+touch "$suite_dir/enginex-deemixd" "$suite_dir/stems-processor" "$suite_dir/enginex-suite.prev" "$suite_dir/enginex-suite.pre-x" "$suite_dir/drmgrab"
 [[ $(run_suite) == 'image-2 x' ]] || fail 'a new image archive replaces the suite even with an older mtime'
-[[ ! -e $suite_dir/sc5000-deemixd && ! -e $suite_dir/stems-processor && ! -e $suite_dir/sc5000-suite.prev && ! -e $suite_dir/sc5000-suite.pre-x && -e $suite_dir/drmgrab ]] ||
+[[ ! -e $suite_dir/enginex-deemixd && ! -e $suite_dir/stems-processor && ! -e $suite_dir/enginex-suite.prev && ! -e $suite_dir/enginex-suite.pre-x && -e $suite_dir/drmgrab ]] ||
     fail 'a new image removes the replaced standalone binaries and backups only'
 ok 'suite binary follows the image archive content, not mtime'
-# #234: the first start after an update from 5.3.0.4 (sc5000-suite in the same /data bin dir)
+# #234: the first start after an update from 5.3.0.4 (the legacy suite in the same /data bin dir)
 # removes the old-named suite, its id and temporaries, and leaves only the new one.
 printf '#!/bin/sh\necho image-3 "$@"\n' | gzip -c > "$suite_share/enginex-suite.gz"
-printf '#!/bin/sh\necho old\n' > "$suite_dir/sc5000-suite"
-printf 'old-id\n' > "$suite_dir/sc5000-suite.id"
-touch "$suite_dir/sc5000-suite.123.tmp" "$suite_dir/enginex-deemixd"
+printf '#!/bin/sh\necho old\n' > "$suite_dir/$legacy_suite"
+printf 'old-id\n' > "$suite_dir/$legacy_suite.id"
+touch "$suite_dir/$legacy_suite.123.tmp" "$suite_dir/$legacy_deemix"
 [[ $(run_suite) == 'image-3 x' ]] || fail 'the renamed suite is unpacked next to an old-named one'
-for f in sc5000-suite sc5000-suite.id sc5000-suite.123.tmp enginex-deemixd; do
+for f in "$legacy_suite" "$legacy_suite.id" "$legacy_suite.123.tmp" "$legacy_deemix"; do
     [[ ! -e $suite_dir/$f ]] || fail "update from an older release leaves $f in the suite dir"
 done
 [[ -x $suite_dir/enginex-suite && -e $suite_dir/drmgrab ]] || fail 'old-name cleanup removed the new suite or a foreign file'
-ok 'suite unpack removes the binaries an older release unpacked as sc5000-suite (#234)'
+ok 'suite unpack removes the binaries an older release unpacked under its old name (#234)'
 
 fixture
 expect_fail env TARGET_CONFIG= TARGET_SYMVERS= bash "$ROOT/kernel-modules/build_modules.sh" modules
@@ -730,6 +732,33 @@ for case in 'FactoryReset running 1' 'FactoryReset degraded 1' 'FactoryReset sto
     if [[ $3 == 1 && -e $ENGINEX_QUIT_REASON_FILE ]]; then fail "guard must consume quit reason $1"; fi
 done
 unset ENGINEX_QUIT_REASON_FILE GUARD_LOG
+# The hidden save drive must not replace stock Demo content. Redirect only the
+# external content directory in this copy; the launch logic runs unchanged.
+sed "s|/usr/Engine/Content/DemoDevice|$TMP/stock-demo|g" "$GUARD" > "$TMP/demo-guard"
+chmod +x "$TMP/demo-guard"
+printf '#!/bin/sh\nprintf "%%s\\n" "$@" > "$DEMO_ARGS"\n' > "$TMP/demo-engine"
+chmod +x "$TMP/demo-engine"
+for content in present missing blocked; do
+    demo_root=$TMP/demo-$content
+    mkdir -p "$demo_root/ui"
+    rm -rf "$TMP/stock-demo"
+    [[ $content == missing ]] || mkdir "$TMP/stock-demo"
+    [[ $content != blocked ]] || : > "$demo_root/stream-save"
+    DEMO_ARGS=$demo_root/args ENGINEX_PRIMARY_UI_DIR=$demo_root/ui ENGINEX_UI_DIR=$demo_root/ui \
+        sh "$TMP/demo-guard" launch "$TMP/demo-engine" -d0 2> "$demo_root/launch.err"
+    has '-d0' "$demo_root/args"
+    if [[ $content == blocked ]]; then
+        lacks '-extraDriveDir=' "$demo_root/args"
+    else
+        has "-extraDriveDir=$demo_root/stream-save" "$demo_root/args"
+    fi
+    if [[ $content == present ]]; then
+        has "-demoDriveDir=$TMP/stock-demo" "$demo_root/args"
+    else
+        lacks '-demoDriveDir=' "$demo_root/args"
+    fi
+done
+ok 'the streaming save drive retains stock Demo content when present and preserves the launch without it'
 # #49: in the 4-deck layout the guard binds, per start, a player's assignment file for
 # its role (bindings only: the assignment loader rejects handlers); off, the stock file.
 assign=$TMP/assign; mkdir -p "$assign/JP07" "$assign/JP13" "$TMP/ui-roles"

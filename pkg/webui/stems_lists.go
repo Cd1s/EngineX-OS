@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"unicode/utf8"
 
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"github.com/Cd1s/EngineX-OS/pkg/deemixclient"
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
 )
@@ -29,7 +30,11 @@ type stemmedTrack struct {
 
 const maxStemmed = 500
 
-func stemsListID(scope string) string { return "sc5000-stems-" + scope }
+func stemsListID(scope string) string { return "enginex-stems-" + scope }
+
+func isStemsListID(id, scope string) bool {
+	return id == stemsListID(scope) || id == migration.StemsListPrefix+scope
+}
 
 func (s *Server) stemsFile() string {
 	if s.cfg.StateDir == "" {

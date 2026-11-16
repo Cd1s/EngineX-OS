@@ -1,6 +1,5 @@
 # Remote Stems renderer (`enginex-stemsd`)
 
-> `enginex-stemsd` was called `sc5000-stemsd`; the old name, `sc5000-stemsd.service`, `/opt/sc5000-stems/` and the `cmd/sc5000-*` directories remain valid. `enginex-relay` was `sc5000-relay`, `enginex-suite` was `sc5000-suite`.
 
 Engine 5.0.4 runs its Stems separator as a child process. On SC5000 that child
 is `stems-processor`, which forwards the child's byte stream unchanged to a
@@ -22,8 +21,8 @@ default) and an optional HTDemucs 4-stem neural GPU/CPU separator
 |---|---|
 | `internal/stems` | Wire protocol: client `Proxy`, renderer `Backend`, LAN mDNS/UDP discovery (`FindLAN`), on-deck `RenderLocal` |
 | `internal/stemsproc` | Deck client, run as `enginex-suite stems-processor` (`/usr/local/bin/stems-processor`) |
-| `cmd/sc5000-stemsd` | Renderer HTTP service with multi-session support and LAN mDNS/UDP responder |
-| `cmd/sc5000-relay` | Public entry point (`POST /v1/engine`, `GET /healthz/stems`) |
+| `cmd/enginex-stemsd` | Renderer HTTP service with multi-session support and LAN mDNS/UDP responder |
+| `cmd/enginex-relay` | Public entry point (`POST /v1/engine`, `GET /healthz/stems`) |
 | `tools/stems` | `worker.py`, `run-home-worker.sh`, `run-home-worker.ps1`, `render.py`, `test_worker.py` |
 
 ## Deck client settings
@@ -38,19 +37,19 @@ UDP broadcast (`17891`), or falls back to on-deck `RenderLocal` (`CPU3`).
 
 | Variable | Effect |
 |---|---|
-| `SC5000_STEMS_URL` | Talk to this renderer or relay directly instead |
-| `SC5000_STEMS_TOKEN` | Credential to present (replaces the config password, or the token file in direct mode) |
-| `SC5000_STEMS_TOKEN_FILE` | Direct-mode token file, default `/etc/sc5000-stems/token` |
-| `SC5000_STEMS_CONFIG` | Alternative relay settings file |
+| `ENGINEX_STEMS_URL` | Talk to this renderer or relay directly instead |
+| `ENGINEX_STEMS_TOKEN` | Credential to present (replaces the config password, or the token file in direct mode) |
+| `ENGINEX_STEMS_TOKEN_FILE` | Direct-mode token file, default `/etc/enginex-stems/token` |
+| `ENGINEX_STEMS_CONFIG` | Alternative relay settings file |
 
 Addresses must be `https`, or `http` to a loopback, private or tailnet address.
 
 ## Build and test (on the build host, never on the Mac)
 
 ```sh
-remote-build -- '. /etc/profile.d/buildtools.sh; go test -race ./internal/stems ./cmd/sc5000-relay && (cd tools/stems && python3 -m unittest test_worker)'
-remote-build -- '. /etc/profile.d/buildtools.sh; CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o out/sc5000-stemsd ./cmd/sc5000-stemsd'
-remote-build -- '. /etc/profile.d/buildtools.sh; GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o out/sc5000-suite ./cmd/sc5000-suite'
+remote-build -- '. /etc/profile.d/buildtools.sh; go test -race ./internal/stems ./cmd/enginex-relay && (cd tools/stems && python3 -m unittest test_worker)'
+remote-build -- '. /etc/profile.d/buildtools.sh; CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o out/enginex-stemsd ./cmd/enginex-stemsd'
+remote-build -- '. /etc/profile.d/buildtools.sh; GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o out/enginex-suite ./cmd/enginex-suite'
 ```
 
 `render.py in.wav outdir --client <stems-processor>` runs a real WAV through
@@ -73,18 +72,18 @@ long the child took to exit. See `docs/STEMS-REMOTE-ACCEPTANCE-20261103.md`.
 
 ## Deploy
 
-1. Back up the deployed relay binary, unit, `/opt/sc5000-stems`, the stemsd
-   unit and `/etc/sc5000-stems` to agent-backup first.
+1. Back up the deployed relay binary, unit, `/opt/enginex-stems`, the stemsd
+   unit and `/etc/enginex-stems` to agent-backup first.
 2. Renderer: fresh installs use `install-backend.sh <staging-dir>` (refuses to
-   overwrite). It generates `/etc/sc5000-stems/token` (0600) and starts
-   [`sc5000-stemsd.service`](sc5000-stemsd.service) on `127.0.0.1:6596`. The
+   overwrite). It generates `/etc/enginex-stems/token` (0600) and starts
+   [`enginex-stemsd.service`](enginex-stemsd.service) on `127.0.0.1:6596`. The
    worker needs system `python3` with NumPy and SciPy.
 3. Relay: install the new `enginex-relay` binary and the credential drop-in
    [`../relay-host/50-stems.conf`](../relay-host/50-stems.conf); restart it and check
    `GET /healthz/stems` with the console password from a program that reads it
    from a file (not on a command line).
 4. Deck: install the new `stems-processor`. The old client posted straight to
-   the renderer's LAN address with `/etc/sc5000-stems/token`; that token file is
+   the renderer's LAN address with `/etc/enginex-stems/token`; that token file is
    no longer needed on the deck.
 
 Upgrade order matters on a host still running the old LAN listener
@@ -97,3 +96,34 @@ until old deck clients are replaced.
 Restore the previous relay binary/unit and remove the drop-in; restore the
 previous stemsd unit (LAN listener) and the previous deck client plus its
 token file from the backup. Keep user audio and databases untouched.
+
+## Switching an existing host
+
+Back up the deployed unit, credential and state before running any command.
+The source and target names are defined by the migration reader, so this note
+stays usable while legacy spellings are isolated there. From a checkout:
+
+```sh
+. rootfs-overlay/usr/libexec/enginex-migration
+printf 'Previous units: %s.service, %s\n' "$legacy_stemsd" "$legacy_relay_unit"
+printf 'Current units: enginex-stemsd.service, enginex-deemix-relay.service\n'
+sudo systemctl disable --now "$legacy_stemsd.service" "$legacy_relay_unit"
+# Move state only if the current destination does not exist; keep a backup.
+sudo test ! -e /var/lib/enginex-relay
+sudo mv "$legacy_relay_state" /var/lib/enginex-relay
+sudo test ! -e /etc/enginex-stems
+sudo mv "$legacy_stems_config" /etc/enginex-stems
+sudo test ! -e /opt/enginex-stems
+sudo mv "$legacy_stems_code" /opt/enginex-stems
+# Install freshly built enginex-relay / enginex-stemsd and the current units.
+sudo systemctl daemon-reload
+sudo systemctl enable --now enginex-stemsd.service enginex-deemix-relay.service
+```
+
+If the configured relay URL includes the former project prefix, update it to
+`/enginex` or the service root when switching the host.
+
+Run only the steps for services present on that host. Preserve the existing
+relay `-public`, console password and renderer token. The new relay's
+`50-stems.conf` reads `/etc/enginex-stems/token`. Keep the backed-up unit and
+binary for rollback; no server is changed by this repository update.

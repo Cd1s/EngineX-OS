@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"hash/crc32"
 	"io"
 	"log"
@@ -497,18 +498,6 @@ func tidalNumericID(name string) uint32 { return crc32.ChecksumIEEE([]byte(name)
 
 func isTidal(p string) bool { return strings.HasPrefix(p, "/v1/") || strings.HasPrefix(p, "/au/") }
 
-// canonicalV1 maps /v1/sc5000/..., the deck API's name before 5.3.0.5 (#234), onto the
-// /v1/enginex/... routes. Both prefixes reach the same handlers behind the same rules (the
-// loopback check above runs first); /v1/sc5000/ stays for good, since installers, UI packs,
-// Mods and users' scripts of any release call it. One mapping here, not a second copy of
-// each route.
-func canonicalV1(p string) string {
-	if rest, ok := strings.CutPrefix(p, "/v1/sc5000"); ok && (rest == "" || rest[0] == '/') {
-		return "/v1/enginex" + rest
-	}
-	return p
-}
-
 // relayedFromOutside reports a request a tunnel on the deck carried in from elsewhere: it
 // arrives from loopback, but with headers the tunnel's edge always adds and a caller cannot
 // remove. Engine and the deck's own tools never send them.
@@ -529,7 +518,11 @@ func (g *tidalGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(w, 403, errors.New("the streaming gateway is local to the deck"))
 		return
 	}
-	clean := canonicalV1(path.Clean(r.URL.Path))
+	clean := path.Clean(r.URL.Path)
+	if clean == migration.APIPrefix || strings.HasPrefix(clean, migration.APIPrefix+"/") {
+		http.NotFound(w, r)
+		return
+	}
 	if !isTidal(clean + "/") {
 		http.NotFound(w, r)
 		return
@@ -589,7 +582,7 @@ func (g *tidalGateway) deviceAuthorization(w http.ResponseWriter, r *http.Reques
 	respond(w, map[string]any{"deviceCode": "enginex-local", "userCode": "ENGINEX", "verificationUri": lanHost() + ":8080", "verificationUriComplete": "http://" + lanHost() + ":8080", "expiresIn": 600, "interval": 1})
 }
 func (g *tidalGateway) token(w http.ResponseWriter, r *http.Request) {
-	respond(w, map[string]any{"access_token": "sc5000-token", "refresh_token": "sc5000-refresh", "token_type": "Bearer", "expires_in": 86400, "user": map[string]any{"userId": 1, "countryCode": "US"}})
+	respond(w, map[string]any{"access_token": "enginex", "refresh_token": "enginex", "token_type": "Bearer", "expires_in": 86400, "user": map[string]any{"userId": 1, "countryCode": "US"}})
 }
 func (g *tidalGateway) session(w http.ResponseWriter, r *http.Request) {
 	respond(w, map[string]any{"sessionId": "enginex-session", "userId": 1, "countryCode": "US"})
@@ -870,7 +863,7 @@ func (g *tidalGateway) prewarmArt(refs []trackRef) {
 // cover. Engine writes it as hash "image://streaming/" with no image, never reads
 // the file's embedded picture for a row that already has an AlbumArt id, and so the
 // jog wheel (GET_ALBUM_ART) shows nothing. Writing Engine's live database is how
-// m.db got corrupted before (sc5000-shadow-decks), so this stays one UPDATE on a
+// m.db got corrupted before (legacy-shadow-decks), so this stays one UPDATE on a
 // PERSIST-journal connection: the default DELETE mode unlinks the stm.db-journal
 // Engine keeps open. Only a still-empty row is touched.
 func (g *tidalGateway) syncStmAlbumArt(ctx context.Context, id int64, t providers.Track) {
@@ -1040,7 +1033,7 @@ func (g *tidalGateway) playlist(w http.ResponseWriter, r *http.Request) {
 		respond(w, playlistJSON(hintPlaylist, hintTitle(g.s.scope()), "", 0))
 		return
 	}
-	if scope := g.s.scope(); id == stemsListID(scope) {
+	if scope := g.s.scope(); isStemsListID(id, scope) {
 		respond(w, playlistJSON(id, "Stems", "", len(g.s.stemmed(scope))))
 		return
 	}
@@ -1312,7 +1305,7 @@ func (g *tidalGateway) playlistTracks(w http.ResponseWriter, r *http.Request) {
 		respond(w, page(r, 500, []any{}))
 		return
 	}
-	if scope := g.s.scope(); id == stemsListID(scope) {
+	if scope := g.s.scope(); isStemsListID(id, scope) {
 		g.stemsListTracks(w, r, scope)
 		return
 	}

@@ -1,5 +1,5 @@
 #!/bin/sh
-# SC5000 storage discovery: discover mounts and scan for EngineX mods.
+# EngineX storage discovery: discover mounts and scan for EngineX mods.
 set -eu
 
 MEDIA_ROOT=${ENGINEX_MEDIA_ROOT:-/media}

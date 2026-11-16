@@ -4,7 +4,7 @@
     rootfs_audit.py <rootfs tree> --overlay rootfs-overlay [--require-cmd NAME]...
 
 Checks everything EngineX adds (the overlay and the packer's enginex* units and
-scripts, sc5000-custom-* before 5.3.0.5) against what the vendor base really ships: hard unit
+scripts, including legacy unit names) against what the vendor base really ships: hard unit
 dependencies, Exec*= commands, EnvironmentFile=, script interpreters and the
 absolute tool paths scripts call. 5.3.0 dropped etc.mount/var.mount; a hard
 Requires= on them silently disabled prepare, the UI packs and SSH.
@@ -14,6 +14,8 @@ import argparse
 import os
 import re
 import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import legacy_names as legacy
 
 UNIT_DIRS = ('/etc/systemd/system', '/usr/lib/systemd/system', '/lib/systemd/system')
 PATH = ('/usr/local/sbin', '/usr/local/bin', '/usr/sbin', '/usr/bin', '/sbin', '/bin')
@@ -55,7 +57,7 @@ class Audit:
         for d in ('/usr/lib/systemd/system', '/usr/libexec'):
             host = resolve(self.root, d)
             for f in sorted(os.listdir(host)) if host else ():
-                if f.startswith(('enginex', 'sc5000-custom')):
+                if f.startswith(('enginex', legacy.PROJECT)):
                     self.ours.add(d + '/' + f)
         self.our_units = {os.path.basename(p) for p in self.ours if p.endswith(UNIT_SUFFIX)}
         self.fstab = set()

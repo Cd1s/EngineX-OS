@@ -1,6 +1,5 @@
 # enginex-relay self-hosted deployment
 
-> `enginex-relay` was called `sc5000-relay`; the old name, the `cmd/sc5000-relay` source directory, the `/var/lib/sc5000-relay` state directory and the `sc5000-deemix-relay.service` unit keep working unchanged.
 
 `https://relay.example.com` below is a placeholder: set `-public` in the unit to
 this relay's real public URL before the first install. `install.sh` refuses the
@@ -8,7 +7,7 @@ placeholder on a fresh host and keeps an installed unit's `-public` on upgrade.
 
 The web service handles Spotify/Deezer QR login and credential transfer. It
 never downloads or stores music. SC5000 downloads directly from Deezer using
-its loopback-only `sc5000-deemixd` service.
+its loopback-only `enginex-deemixd` service.
 
 It is also the single public entry point for remote Stems rendering: the deck
 streams PCM to `POST /v1/engine` with the console password and the relay
@@ -17,20 +16,20 @@ forwards it, unstored, to the loopback `enginex-stemsd` (see
 
 The existing edge reverse proxy and public URL stay in use. The relay listens
 on `0.0.0.0:6595` with DynamicUser and persistent configuration at
-`/var/lib/sc5000-relay/config.json`. Preserve this file during upgrades.
+`/var/lib/enginex-relay/config.json`. Preserve this file during upgrades.
 
 ## Build and upgrade
 
 ```sh
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o bin/sc5000-relay-amd64 ./cmd/sc5000-relay
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o bin/enginex-relay-amd64 ./cmd/enginex-relay
 # Back up the deployed binary, unit, state and old cache to agent-backup first.
 # Copy the binary, unit and installer to the host, then run as root:
-sh install.sh ./sc5000-relay-amd64 ./sc5000-deemix-relay.service
+sh install.sh ./enginex-relay-amd64 ./enginex-deemix-relay.service
 # Stop the previous audio process before clearing the legacy cache; with
-# DynamicUser the backing directory may be /var/cache/private/sc5000-relay.
+# DynamicUser the backing directory may be /var/cache/private/enginex-relay.
 ```
 
-## Routes (also served under `/sc5000/...`)
+## Routes (also served under `/enginex/...`)
 
 | Route | Behavior |
 |---|---|
@@ -49,7 +48,7 @@ sh install.sh ./sc5000-relay-amd64 ./sc5000-deemix-relay.service
 Password authentication supports `X-Deemix-Password`, `Authorization: Bearer`,
 or the console cookie; the password is no longer accepted in the URL query.
 On first start the relay writes a random password to
-`/var/lib/sc5000-relay/initial-password` (0600) and logs only that path. Change
+`/var/lib/enginex-relay/initial-password` (0600) and logs only that path. Change
 it in the web console and update the deck's `deemix-config.json` to match. A
 config still using the old fixed default may log in but gets 403 for
 `?secrets=1` and Stems until the password is changed.
@@ -65,11 +64,11 @@ own address.
 | Flag | Default | Meaning |
 |---|---|---|
 | `-stems-target` | `http://127.0.0.1:6596` | `enginex-stemsd` base URL; `host:port` and a trailing `/v1/engine` are accepted |
-| `-stems-token-file` | `$CREDENTIALS_DIRECTORY/stems-token` if present, else `/etc/sc5000-stems/token` | Daemon token, re-read per session; a missing file sends no token |
+| `-stems-token-file` | `$CREDENTIALS_DIRECTORY/stems-token` if present, else `/etc/enginex-stems/token` | Daemon token, re-read per session; a missing file sends no token |
 
 The relay runs as a DynamicUser and cannot read the root-only token itself.
 Install [`50-stems.conf`](50-stems.conf) as
-`/etc/systemd/system/sc5000-deemix-relay.service.d/50-stems.conf`, then
+`/etc/systemd/system/enginex-deemix-relay.service.d/50-stems.conf`, then
 `systemctl daemon-reload` and restart the relay.
 
 The edge reverse proxy in front of the relay must stream request bodies
@@ -80,6 +79,37 @@ no greeting or reports `remote renderer did not finish successfully`.
 
 Use `agent-backup get <backup-id> --output <archive>` to restore the previous
 binary and service unit, run `systemctl daemon-reload`, then restart
-`sc5000-deemix-relay.service`. Leave the current state/configuration in place
+`enginex-deemix-relay.service`. Leave the current state/configuration in place
 unless the state itself needs recovery. Restoring the previous binary also
 restores its cloud audio behavior.
+
+## Switching an existing host
+
+Back up the deployed unit, credential and state before running any command.
+The source and target names are defined by the migration reader, so this note
+stays usable while legacy spellings are isolated there. From a checkout:
+
+```sh
+. rootfs-overlay/usr/libexec/enginex-migration
+printf 'Previous units: %s.service, %s\n' "$legacy_stemsd" "$legacy_relay_unit"
+printf 'Current units: enginex-stemsd.service, enginex-deemix-relay.service\n'
+sudo systemctl disable --now "$legacy_stemsd.service" "$legacy_relay_unit"
+# Move state only if the current destination does not exist; keep a backup.
+sudo test ! -e /var/lib/enginex-relay
+sudo mv "$legacy_relay_state" /var/lib/enginex-relay
+sudo test ! -e /etc/enginex-stems
+sudo mv "$legacy_stems_config" /etc/enginex-stems
+sudo test ! -e /opt/enginex-stems
+sudo mv "$legacy_stems_code" /opt/enginex-stems
+# Install freshly built enginex-relay / enginex-stemsd and the current units.
+sudo systemctl daemon-reload
+sudo systemctl enable --now enginex-stemsd.service enginex-deemix-relay.service
+```
+
+If the configured relay URL includes the former project prefix, update it to
+`/enginex` or the service root when switching the host.
+
+Run only the steps for services present on that host. Preserve the existing
+relay `-public`, console password and renderer token. The new relay's
+`50-stems.conf` reads `/etc/enginex-stems/token`. Keep the backed-up unit and
+binary for rollback; no server is changed by this repository update.

@@ -80,7 +80,7 @@ func (p *pipeline) decide(packed bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if !packed && p.packed && p.blocks > 0 {
-		p.err = fmt.Errorf("stems pipeline: renderer cannot unpack blocks already sent; update sc5000-stemsd")
+		p.err = fmt.Errorf("stems pipeline: renderer cannot unpack blocks already sent; update enginex-stemsd")
 	}
 	if p.packed = packed; !packed {
 		p.input = nil

@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 )
 
 func TestStemsTrackID(t *testing.T) {
@@ -22,7 +24,7 @@ func TestStemsTrackID(t *testing.T) {
 	}
 	for _, q := range []string{
 		`CREATE TABLE Track (id INTEGER PRIMARY KEY, path TEXT, filename TEXT)`,
-		`INSERT INTO Track VALUES (5, '../../../../sc5000-custom/Stream/netease-1.flac', 'netease-1.flac'), (86, '../../../../sc5000-custom/Stream/netease-1.flac', 'netease-1.flac')`,
+		`INSERT INTO Track VALUES (5, '../../../../` + migration.DataName + `/Stream/netease-1.flac', 'netease-1.flac'), (86, '../../../../` + migration.DataName + `/Stream/netease-1.flac', 'netease-1.flac')`,
 	} {
 		if _, err := db.Exec(q); err != nil {
 			t.Fatal(err)
@@ -33,7 +35,7 @@ func TestStemsTrackID(t *testing.T) {
 	defer srv.Close()
 	var got struct{ TrackID int64 }
 	// The file is named by its path: the library row is the one whose own path it is.
-	tidalGet(t, srv.URL, "/v1/enginex/stems/track-id?path="+url.QueryEscape(filepath.Join(data, "sc5000-custom/Stream/netease-1.flac")), 200, &got)
+	tidalGet(t, srv.URL, "/v1/enginex/stems/track-id?path="+url.QueryEscape(filepath.Join(data, migration.DataName, "Stream/netease-1.flac")), 200, &got)
 	if got.TrackID != 86 {
 		t.Fatalf("trackId %d, want newest 86", got.TrackID)
 	}
@@ -92,11 +94,11 @@ func TestStemsRowIsFoundByItsFileNotItsName(t *testing.T) {
 		}
 	}
 	// A path that is the same file through a link in a directory name (the
-	// old /data/sc5000-custom name) is still that row.
-	if err := os.Symlink(filepath.Join(data, "enginex"), filepath.Join(data, "sc5000-custom")); err != nil {
+	// pre-5.3.0.5 data name) is still that row.
+	if err := os.Symlink(filepath.Join(data, "enginex"), filepath.Join(data, migration.DataName)); err != nil {
 		t.Fatal(err)
 	}
-	linked := filepath.Join(data, "sc5000-custom/Stream/Stems/a/A - Song.flac")
+	linked := filepath.Join(data, migration.DataName, "Stream/Stems/a/A - Song.flac")
 	if ids, err := internalTrackIDs(context.Background(), linked); err != nil || ids[linked] != 11 {
 		t.Fatalf("through the link: %v, %v", ids, err)
 	}

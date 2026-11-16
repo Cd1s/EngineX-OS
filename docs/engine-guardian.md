@@ -96,7 +96,7 @@ This patches the original engine/prerequisite scripts, fixes `shift1`, disables
 explicit automatic `az01-update --erase-data` calls, installs the cleanup link,
 limits core dumps and volatile journal size, and adds telemetry hosts entries.
 It preserves existing hosts entries and does not erase downloads or stems.
-Persistent downloaded music should live under `/media/sc5000-sd-cache/Downloads`;
+Persistent downloaded music should live under `/media/enginex-sd-cache/Downloads`;
 the vendor's remaining encryption/storage behavior is not replaced here.
 
 The overlay enables both systemd units through relative wants links. The engine

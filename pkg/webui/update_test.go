@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -31,7 +32,7 @@ func TestUpdateChecksTheConfiguredGitHubRepo(t *testing.T) {
 		}
 		w.Write([]byte(`{"tag_name":"v2","html_url":"https://github.com/me/fork/releases/v2","assets":[
 			{"name":"SC5000M-2-EngineX-OS-Update.img","browser_download_url":"https://example.invalid/m.img"},
-			{"name":"SC5000-2-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img","browser_download_url":"https://example.invalid/sc5000.img"},
+			{"name":"SC5000-2-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img","browser_download_url":"https://example.invalid/enginex.img"},
 			{"name":"SHA256SUMS.txt","browser_download_url":"https://example.invalid/sums"}]}`))
 	}))
 	defer gh.Close()
@@ -62,7 +63,7 @@ func TestUpdateChecksTheConfiguredGitHubRepo(t *testing.T) {
 	if err := s.saveUI(s.loadUI()); err != nil || s.loadUI().GitHubRepo != "me/fork" {
 		t.Fatal("github_repo lost on save")
 	}
-	if v := get(); asked != "/repos/me/fork/releases/latest" || v.Current != "v1" || v.Latest != "v2" || !v.UpdateAvailable || v.Error != "" || v.DownloadURL != "https://example.invalid/sc5000.img" {
+	if v := get(); asked != "/repos/me/fork/releases/latest" || v.Current != "v1" || v.Latest != "v2" || !v.UpdateAvailable || v.Error != "" || v.DownloadURL != "https://example.invalid/enginex.img" {
 		t.Fatalf("update %+v (asked %s)", v, asked)
 	}
 }
@@ -101,6 +102,11 @@ func bundleInstallScript(t *testing.T) []byte {
 	// The packer expands @MIGRATE_IF_DEFAULT@ into the /data migration; the test deck is not
 	// a real /data (ENGINEX_CUSTOM is set), so there is nothing to migrate.
 	script := bytes.ReplaceAll(m[1], []byte("@MIGRATE_IF_DEFAULT@"), []byte(":"))
+	legacyShell, err := os.ReadFile("../../rootfs-overlay/usr/libexec/enginex-migration")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script = bytes.ReplaceAll(script, []byte("@LEGACY_SHELL@"), legacyShell)
 	// @SWAP_UNDO@ is the real rollback of an interrupted install (BH-G2-4).
 	undo := regexp.MustCompile(`(?s)\nSWAP_UNDO = r"""(.*?)"""`).FindSubmatch(src)
 	if undo == nil {
@@ -124,10 +130,10 @@ func tarOf(t *testing.T, files map[string]string) []byte {
 // testBundle builds a Data-Bundle.tar.gz with the real layout; badSums breaks SHA256SUMS.
 func testBundle(t *testing.T, prefix, version string, badSums bool) []byte {
 	files := map[string][]byte{
-		"bin/sc5000-suite": []byte("\x7fELF"), "bin/stream-sync": []byte("#!/bin/sh\n"),
+		"bin/enginex-suite": []byte("\x7fELF"), "bin/stream-sync": []byte("#!/bin/sh\n"),
 		"lib/libengine-ui-hook.so": []byte("\x7fELF"), "ui-packs.tar": tarOf(t, map[string]string{"packs/a.txt": version}),
 		"version.txt": []byte(version + "\n"), "alsa-dir": []byte("system/var-lib/alsa/conf.d\n"),
-		"boot-activate.sh": []byte("#!/bin/sh\n"), "99-sc5000-custom.conf": []byte("x\n"),
+		"boot-activate.sh": []byte("#!/bin/sh\n"), "99-enginex.conf": []byte("x\n"),
 		"uninstall.sh": []byte("#!/bin/sh\n"), "install.sh": bundleInstallScript(t),
 	}
 	var names []string
@@ -195,7 +201,7 @@ func bundleDeckWith(t *testing.T, compatible string, assets func(base string) st
 	t.Cleanup(gh.Close)
 	base = gh.URL
 	state := t.TempDir()
-	custom := filepath.Join(state, "sc5000-custom")
+	custom := filepath.Join(state, migration.DataName)
 	os.MkdirAll(custom, 0o700)
 	os.WriteFile(filepath.Join(custom, "version.txt"), []byte(fault.installedVersion()+"\n"), 0o644)
 	if fault.installTag != "" { // a bundle install carries the release tag it came from
@@ -597,7 +603,7 @@ func TestSameVersionReRelease(t *testing.T) {
 // #218: end-to-end 2nd-gen PRIME 4 G2 (AZ04, arm64) re-release flow with real deck path
 // resolution (Config.VersionFile == ""). Covers plain 5.3.0.4 -> v5.3.0.4-r3 apply via both
 // *-Update.img and *-Data-Bundle.tar.gz, restart into a fresh Server, v5.3.0.5 still offered,
-// and missing/unmigrated /data/sc5000-custom alongside /data/enginex.
+// and missing/unmigrated /data/the legacy data name alongside /data/enginex.
 func TestGen2EndToEndReReleaseApplyAndCustomDirResolution(t *testing.T) {
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skip("python3 not installed")
@@ -608,7 +614,7 @@ func TestGen2EndToEndReReleaseApplyAndCustomDirResolution(t *testing.T) {
 		elf := make([]byte, 64)
 		copy(elf, "\x7fELF\x02\x01\x01")
 		elf[16], elf[18] = 2, 183 // ET_EXEC, EM_AARCH64
-		suite := filepath.Join(dir, "sc5000-suite")
+		suite := filepath.Join(dir, "enginex-suite")
 		hook := filepath.Join(dir, "libengine-ui-hook.so")
 		os.WriteFile(suite, append(elf, []byte("suite-"+relTag)...), 0o755)
 		os.WriteFile(hook, append(elf, []byte("hook-"+relTag)...), 0o755)
@@ -650,14 +656,14 @@ func TestGen2EndToEndReReleaseApplyAndCustomDirResolution(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			root := t.TempDir()
 			bundleCustomDir = filepath.Join(root, "enginex")
-			legacyBundleCustomDir = filepath.Join(root, "sc5000-custom")
+			legacyBundleCustomDir = filepath.Join(root, migration.DataName)
 			versionFile = filepath.Join(legacyBundleCustomDir, "version.txt")
 			imageVersionFile = filepath.Join(root, "no-etc-version")
 			imageReleaseTagFile = filepath.Join(root, "no-etc-release-tag")
 			deviceCompatiblePath = filepath.Join(root, "compatible")
 			os.WriteFile(deviceCompatiblePath, []byte("inmusic,jp24\x00inmusic,az04\x00"), 0o644)
 
-			// Seed initial plain 5.3.0.4 install under /data/enginex + /data/sc5000-custom -> enginex.
+			// Seed initial plain 5.3.0.4 install under /data/enginex + /data/the legacy data name -> enginex.
 			unpackDir := filepath.Join(root, "seed")
 			top, err := unpackBundleReader(bytes.NewReader(plainTar), unpackDir)
 			if err != nil {
@@ -739,10 +745,10 @@ func TestGen2EndToEndReReleaseApplyAndCustomDirResolution(t *testing.T) {
 		})
 	}
 
-	t.Run("missing-or-unmigrated-sc5000-custom-still-reads-enginex-release-tag", func(t *testing.T) {
+	t.Run("missing-or-unmigrated-"+migration.DataName+"-still-reads-enginex-release-tag", func(t *testing.T) {
 		root := t.TempDir()
 		bundleCustomDir = filepath.Join(root, "enginex")
-		legacyBundleCustomDir = filepath.Join(root, "sc5000-custom")
+		legacyBundleCustomDir = filepath.Join(root, migration.DataName)
 		versionFile = filepath.Join(legacyBundleCustomDir, "version.txt")
 		imageVersionFile = filepath.Join(root, "no-etc-version")
 		imageReleaseTagFile = filepath.Join(root, "no-etc-release-tag")
@@ -768,16 +774,16 @@ func TestGen2EndToEndReReleaseApplyAndCustomDirResolution(t *testing.T) {
 			return New(Config{AccessToken: "c", UIDir: t.TempDir(), StateDir: filepath.Join(root, "state"), GitHubURL: gh.URL}, nil)
 		}
 
-		// Case A: /data/sc5000-custom symlink missing on 2nd-gen deck (no /etc/sc5000/version.txt).
+		// Case A: /data/the legacy data name symlink missing on 2nd-gen deck (no /etc/enginex/version.txt).
 		if u := getUpdate(newSrv(), ""); u.UpdateAvailable || u.Current != "5.3.0.4" {
-			t.Errorf("missing sc5000-custom symlink: got %+v, want Current=5.3.0.4 UpdateAvailable=false", u)
+			t.Errorf("missing "+migration.DataName+" symlink: got %+v, want Current=5.3.0.4 UpdateAvailable=false", u)
 		}
 
-		// Case B: leftover real /data/sc5000-custom directory (old 5.3.0.4 without release-tag) alongside /data/enginex (r3).
+		// Case B: leftover real /data/the legacy data name directory (old 5.3.0.4 without release-tag) alongside /data/enginex (r3).
 		os.MkdirAll(filepath.Join(legacyBundleCustomDir, "bundle"), 0o700)
 		os.WriteFile(filepath.Join(legacyBundleCustomDir, "version.txt"), []byte("5.3.0.4\n"), 0o644)
 		if u := getUpdate(newSrv(), ""); u.UpdateAvailable || u.Current != "5.3.0.4" {
-			t.Errorf("coexisting legacy sc5000-custom dir: got %+v, want Current=5.3.0.4 UpdateAvailable=false", u)
+			t.Errorf("coexisting legacy "+migration.DataName+" dir: got %+v, want Current=5.3.0.4 UpdateAvailable=false", u)
 		}
 		curTag = "v5.3.0.5"
 		if u := getUpdate(newSrv(), ""); !u.UpdateAvailable || u.Latest != "v5.3.0.5" {

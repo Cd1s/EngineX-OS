@@ -1,4 +1,6 @@
 #!/bin/bash
+. "${ENGINEX_MIGRATION:-$(git rev-parse --show-toplevel)/rootfs-overlay/usr/libexec/enginex-migration}"
+ENGINEX_LAB=${ENGINEX_LAB:-$legacy_lab}
 # Re-render documentation screenshots for EngineX OS using eglfs KMS on the build host.
 #
 # Usage:
@@ -129,7 +131,7 @@ PY
 
     # /data setup
     mkdir -p "$R/data/enginex/ui/packs"
-    ln -sf enginex "$R/data/sc5000-custom"
+    ln -sf enginex "$R$legacy_data"
     cp -a "$W/packs/$LANG_PACK" "$R/data/enginex/ui/packs/"
     mkdir -p "$R/data/enginex/ui/packs/$LANG_PACK/Skins/Common/Items"
     cp "$W/probe.qml" "$R/data/enginex/ui/packs/$LANG_PACK/Skins/Common/Items/QmlWarnings.qml"
@@ -190,13 +192,13 @@ python3 "$REPO/tools/az01-packer/az01_packer.py" unpack "$IMG" --output "$W/imag
 IMG_EXT2=$W/image/rootfs.ext2
 [ -f "$IMG_EXT2" ] || { echo "Error: unpacked rootfs.ext2 not found" >&2; exit 1; }
 
-# /etc/enginex since 5.3.0.5 (#234); older images keep it in /etc/sc5000.
+# /etc/enginex since 5.3.0.5 (#234); older images keep it in /etc/enginex.
 CURR_VERSION=$(debugfs -R "cat /etc/enginex/version.txt" "$IMG_EXT2" 2>/dev/null | grep -E '^[0-9]' | head -1)
-[ -n "$CURR_VERSION" ] || CURR_VERSION=$(debugfs -R "cat /etc/sc5000/version.txt" "$IMG_EXT2" 2>/dev/null | grep -E '^[0-9]' | head -1)
+[ -n "$CURR_VERSION" ] || CURR_VERSION=$(debugfs -R "cat /etc/enginex/version.txt" "$IMG_EXT2" 2>/dev/null | grep -E '^[0-9]' | head -1)
 echo "Detected current version in image: $CURR_VERSION (mock next: $NEXTV)"
 
 echo "==> Building language packs..."
-QRC_SRC=/root/build/sc5000-lab/5.3.0/qrc
+QRC_SRC=${ENGINEX_LAB}/5.3.0/qrc
 python3 "$REPO/tools/ui-mod/build_packs.py" --qrc "$QRC_SRC" --out "$W/packs" > "$W/packs.log"
 
 # Setup shared fixtures

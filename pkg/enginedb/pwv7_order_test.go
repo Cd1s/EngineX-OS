@@ -1,6 +1,7 @@
 package enginedb
 
 import (
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"sort"
 	"testing"
 
@@ -13,7 +14,7 @@ import (
 // the highs of a hat are gone at once. Deep Symmetry documents the bytes as mid, high,
 // low; read that way, the "lows" of both tracks would last under a tenth of a beat.
 func TestPWV7BandsAreLowMidHighOnRekordboxDemoTracks(t *testing.T) {
-	const export = "/root/build/sc5000-lab/deep-symmetry-archive/pyrekordbox/.testdata/export/PIONEER/USBANLZ/"
+	const export = migration.LabDir + "/deep-symmetry-archive/pyrekordbox/.testdata/export/PIONEER/USBANLZ/"
 	for _, dir := range []string{"P016/0000875E", "P053/0001D21F"} { // Demo Track 1, Demo Track 2
 		grid, err := rekordbox.ReadAnalysis(export + dir + "/ANLZ0000.DAT")
 		if err != nil {

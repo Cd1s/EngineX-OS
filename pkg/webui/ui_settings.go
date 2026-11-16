@@ -197,7 +197,7 @@ type uiSettings struct {
 	// services' playlists, to the streaming browser (#62). Off by default.
 	OmniSource bool `json:"omniSource"`
 	// RemoteLoad lets a LAN client load a track into an idle deck from an
-	// external drive. Deck-only: loopback POST /v1/sc5000/ui sets it, /api/ui
+	// external drive. Deck-only: loopback POST the legacy UI endpoint sets it, /api/ui
 	// refuses it. Off by default.
 	RemoteLoad bool `json:"remoteLoad"`
 	// ProlinkShare enables Pro DJ Link: announces this deck, lets rb-bridge read
@@ -280,8 +280,7 @@ var uiFourDeckRoles = []string{"auto", "13", "24", "12", "34", "1", "2"}
 // fourDeckRolePath is where engine-ui-guard leaves the role it applied.
 var fourDeckRolePath = "/run/enginex-assignments/role"
 
-// uiScaleEnvPath records the scale as ENGINEX_UI_SCALE, and as SC5000_UI_SCALE for a release
-// before 5.3.0.5 after a downgrade (#234), for Engine's unit (the
+// uiScaleEnvPath records ENGINEX_UI_SCALE for Engine's unit (the
 // engine.service.d/70-ui-scale.conf drop-in). It is deliberately not QT_SCALE_FACTOR,
 // which leaves a black band under EGLFS. A package var so tests can point it at a temp dir.
 var (
@@ -306,7 +305,7 @@ func writeUIScaleEnv(pct int) error {
 		return err
 	}
 	scale := strconv.FormatFloat(float64(pct)/100, 'f', -1, 64)
-	text := "ENGINEX_UI_SCALE=" + scale + "\nSC5000_UI_SCALE=" + scale + "\n"
+	text := "ENGINEX_UI_SCALE=" + scale + "\n"
 	tmp, err := os.CreateTemp(dir, ".ui-scale-*")
 	if err != nil {
 		return err
@@ -330,11 +329,6 @@ func writeUIScaleEnv(pct int) error {
 func (s *Server) uiDir() string {
 	if s.cfg.UIDir != "" {
 		return s.cfg.UIDir
-	}
-	if _, err := os.Stat(defaultUIDir); os.IsNotExist(err) {
-		if _, legacyErr := os.Stat("/data/sc5000-custom/ui"); legacyErr == nil {
-			return "/data/sc5000-custom/ui"
-		}
 	}
 	return defaultUIDir
 }
@@ -918,7 +912,7 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 			AccessCode string       `json:"accessCode"`
 			ConsoleURL string       `json:"consoleUrl"`
 			Tunnel     TunnelStatus `json:"tunnel"`
-			// LANStems: the home sc5000-stemsd last seen, for Settings -> About (#148).
+			// LANStems: the home legacy-stemsd last seen, for Settings -> About (#148).
 			LANStems *stems.LANState `json:"lanStems,omitempty"`
 		}{v, s.cfg.AccessToken, consoleLink, s.TunnelManager().Status(""), relay.LANStems})
 		if err != nil {

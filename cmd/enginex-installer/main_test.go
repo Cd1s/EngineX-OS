@@ -18,6 +18,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"io"
 	"net"
 	"net/http"
@@ -251,7 +252,7 @@ func TestDiscoverFindsDecksWithoutAnIP(t *testing.T) {
 
 	// A deck's web UI on 127.0.0.2, and a web server that answers 200 to anything on .5.
 	serveHTTP(t, fmt.Sprintf("127.0.0.2:%d", o.UIPort), func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/sc5000/ui" {
+		if r.URL.Path == migration.APIPrefix+"/ui" {
 			w.Write([]byte(`{"ok":true}`))
 			return
 		}
@@ -649,7 +650,7 @@ func TestModeAInstallsBundleOverSSH(t *testing.T) {
 	if v, _ := os.ReadFile(filepath.Join(custom, "version.txt")); strings.TrimSpace(string(v)) != "5.3.0.2" {
 		t.Errorf("version.txt = %q", v)
 	}
-	if _, err := os.Stat(filepath.Join(deck.Data, "system/var/overlay/lib/alsa/conf.d/99-sc5000-custom.conf")); err != nil {
+	if _, err := os.Stat(filepath.Join(deck.Data, "system/var/overlay/lib/alsa/conf.d/"+"99-enginex.conf")); err != nil {
 		t.Errorf("ALSA hook not installed: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(custom, "bundle/boot-activate.sh")); err != nil {
@@ -676,7 +677,7 @@ func TestModeAUninstallsSecondGenBundle(t *testing.T) {
 	o1.Uninstall = true
 	o1.Yes = true
 	o1.SSHPort = p1
-	err := modeA(ctxT(t), o1, deck{IP: "127.0.0.1", Name: "sc5000-lab"})
+	err := modeA(ctxT(t), o1, deck{IP: "127.0.0.1", Name: migration.ProjectName + "-lab"})
 	if err == nil || (!strings.Contains(err.Error(), "一代机") && !strings.Contains(err.Error(), "1st-generation")) {
 		t.Fatalf("expected error indicating 1st-gen deck, got: %v", err)
 	}
@@ -728,13 +729,13 @@ func TestModeAUninstallsSecondGenBundle(t *testing.T) {
 	}
 }
 
-// #103: a 2nd-gen deck still on a bundle before 5.3.0.3 has only the real /data/sc5000-custom;
+// #103: a 2nd-gen deck still on a bundle before 5.3.0.3 has only the real the legacy data directory;
 // --uninstall ran /data/enginex/bundle/uninstall.sh there and failed without removing anything.
-func TestModeAUninstallsALegacySc5000CustomBundle(t *testing.T) {
+func TestModeAUninstallsALegacyLegacyCustomBundle(t *testing.T) {
 	need(t, "unshare")
 	p := freeTCP(t)
 	d := startSSHDeck(t, p, "inmusic,jc11s\x00nxp,imx8mm\x00")
-	legacy := filepath.Join(d.Data, "sc5000-custom", "bundle")
+	legacy := filepath.Join(d.Data, migration.DataName, "bundle")
 	if err := os.MkdirAll(legacy, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -851,7 +852,7 @@ func checkImage(t *testing.T, img string, suitePath string) {
 	if sha(t, out) != sha(t, suitePath) {
 		t.Error("suite in the image differs from the bundle's")
 	}
-	for _, p := range []string{"/system/var/overlay/lib/alsa/conf.d/99-sc5000-custom.conf", "/system/var-lib/alsa/conf.d/99-sc5000-custom.conf", "/enginex/version.txt"} {
+	for _, p := range []string{"/system/var/overlay/lib/alsa/conf.d/" + "99-enginex.conf", "/system/var-lib/alsa/conf.d/" + "99-enginex.conf", "/enginex/version.txt"} {
 		if s := sh(t, "debugfs", "-R", "stat "+p, img); !strings.Contains(s, "Type: regular") || !strings.Contains(s, "Mode:  0644") {
 			t.Errorf("%s:\n%s", p, s)
 		}
@@ -953,8 +954,7 @@ func TestNativeReadbackRefusesUnverifiableActivation(t *testing.T) {
 	for _, path := range []string{
 		"enginex/version.txt", "enginex/bundle/version.txt",
 		"enginex/bundle/boot-activate.sh", "enginex/bundle/lib/libengine-ui-hook.so",
-		"sc5000-custom/bundle/boot-activate.sh", "sc5000-custom/bundle/lib/libengine-ui-hook.so",
-		"system/var/overlay/lib/alsa/conf.d/99-sc5000-custom.conf",
+		"system/var/overlay/lib/alsa/conf.d/" + "99-enginex.conf",
 	} {
 		t.Run(path, func(t *testing.T) {
 			verifyImage = func(ctx context.Context, image string, changes ext4.ChangeSet) error {
@@ -980,7 +980,7 @@ func jc11sLegacyBackup(t *testing.T) string {
 	img := filepath.Join(t.TempDir(), "legacy-data.img")
 	sh(t, "truncate", "-s", "64M", img)
 	sh(t, "mke2fs", "-t", "ext4", "-O", "encrypt", "-L", "az01-data", "-F", img)
-	sh(t, "debugfs", "-w", "-R", "mkdir /sc5000-custom", img)
+	sh(t, "debugfs", "-w", "-R", "mkdir /"+migration.DataName, img)
 	sh(t, "debugfs", "-w", "-R", "mkdir /Music", img)
 	sh(t, "debugfs", "-w", "-R", "write /etc/hostname /Music/keep.mp3", img)
 	return img
@@ -998,13 +998,13 @@ func TestModeBJC11SLegacyBackup(t *testing.T) {
 	}
 	img := filepath.Join(fb.Dir, "flashed-data.img")
 	sh(t, "e2fsck", "-fn", img)
-	for _, path := range []string{"/sc5000-custom/bundle/boot-activate.sh", "/Music/keep.mp3"} {
+	for _, path := range []string{"/enginex/bundle/boot-activate.sh", "/Music/keep.mp3"} {
 		if out := sh(t, "debugfs", "-R", "stat "+path, img); !strings.Contains(out, "Type: regular") {
 			t.Fatalf("missing %s: %s", path, out)
 		}
 	}
-	if out := sh(t, "debugfs", "-R", "stat /enginex", img); strings.Contains(out, "Type: directory") {
-		t.Fatal("fixture did not exercise a real legacy installation directory")
+	if out := sh(t, "debugfs", "-R", "stat /"+migration.DataName, img); !strings.Contains(out, "Type: directory") {
+		t.Fatal("real legacy directory was removed before migration")
 	}
 }
 
@@ -1827,7 +1827,7 @@ func TestUSBUpdateModeFlashesA64MiBDataImage(t *testing.T) {
 	if sha(t, out) != sha(t, b.SuitePath) {
 		t.Error("suite in the image differs from the bundle's")
 	}
-	if s := sh(t, "debugfs", "-R", "stat /system/var-lib/alsa/conf.d/99-sc5000-custom.conf", shim.img); !strings.Contains(s, "Type: regular") {
+	if s := sh(t, "debugfs", "-R", "stat /system/var-lib/alsa/conf.d/"+"99-enginex.conf", shim.img); !strings.Contains(s, "Type: regular") {
 		t.Errorf("AZ04 ALSA hook missing:\n%s", s)
 	}
 	if s := o.Out.(*bytes.Buffer).String(); !strings.Contains(s, "Rane SYSTEM ONE") || !strings.Contains(s, "100%") || !strings.Contains(s, "power button") {
@@ -1877,7 +1877,7 @@ func TestUSBUpdateModeRefusals(t *testing.T) {
 	}
 }
 
-// #164: an installed deck asks for its access code (403 on /v1/sc5000/ui) and must still be recognised;
+// #164: an installed deck asks for its access code (403 on the legacy UI endpoint) and must still be recognised;
 // a bare 403 from some other web server must not be.
 func TestIsDeckUIRecognisesTheLoginPage(t *testing.T) {
 	login := `<!doctype html><title>Stream Sync</title><h1>Stream Sync</h1>`
@@ -1896,7 +1896,7 @@ func TestIsDeckUIRecognisesTheLoginPage(t *testing.T) {
 	}
 	for _, c := range cases {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path == "/v1/sc5000/ui" {
+			if r.URL.Path == migration.APIPrefix+"/ui" {
 				c.ui(w)
 				return
 			}

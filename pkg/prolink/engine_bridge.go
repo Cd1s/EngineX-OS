@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"hash/fnv"
 	"image"
 	"image/jpeg"
@@ -1873,7 +1874,7 @@ func buildPDB(tracks []rekordbox.Track, playlists []rekordbox.Playlist) ([]byte,
 // Where EngineX OS keeps streaming downloads; CDJs see them as /EngineX_Stream/<name>.
 // Variables so tests can point them at a temporary tree.
 var (
-	StreamDirs       = []string{"/data/enginex/Stream", "/media/sc5000-sd-cache/Music/Stream"}
+	StreamDirs       = []string{"/data/enginex/Stream", migration.MediaCache + "/Music/Stream"}
 	InternalEngineDB = "/data/AppDataUser/AIR Music Technology/Engine/Engine Library/Database2/m.db"
 	// StreamExportRoot holds the export.pdb of a deck with no USB library, so its
 	// streaming downloads still reach the CDJs.

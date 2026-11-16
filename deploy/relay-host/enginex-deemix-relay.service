@@ -1,13 +1,13 @@
 [Unit]
-Description=SC5000 Deemix relay (credential relay only; downloads run on SC5000)
+Description=EngineX Deemix relay (credential relay only; downloads run on the deck)
 Documentation=https://relay.example.com/
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=/usr/local/bin/sc5000-relay -listen 0.0.0.0:6595 -public https://relay.example.com -state /var/lib/sc5000-relay
+ExecStart=/usr/local/bin/enginex-relay -listen 0.0.0.0:6595 -public https://relay.example.com -state /var/lib/enginex-relay
 DynamicUser=yes
-StateDirectory=sc5000-relay
+StateDirectory=enginex-relay
 StateDirectoryMode=0700
 Restart=on-failure
 RestartSec=3

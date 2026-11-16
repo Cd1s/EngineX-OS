@@ -10,6 +10,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"log"
 	"math/big"
 	"net"
@@ -63,6 +64,9 @@ func collectCertSANs() ([]string, []net.IP) {
 	seenDNS := map[string]bool{}
 	addDNS := func(name string) {
 		name = strings.TrimSpace(strings.TrimSuffix(name, "."))
+		if name == migration.PlaceholderHost {
+			name = "enginex.lan"
+		}
 		if name == "" || net.ParseIP(name) != nil || seenDNS[name] {
 			return
 		}
@@ -100,7 +104,6 @@ func collectCertSANs() ([]string, []net.IP) {
 	}
 	addDNS("enginex.local")
 	addDNS("enginex.lan")
-	addDNS("sc5000.lan")
 
 	addIP(net.ParseIP("127.0.0.1"))
 	addIP(net.ParseIP("::1"))
@@ -146,15 +149,28 @@ func writeSecretFile(path string, data []byte) error {
 func loadOrCreateConsoleCert(dir string) (tls.Certificate, error) {
 	certPath := filepath.Join(dir, httpsCertFile)
 	keyPath := filepath.Join(dir, httpsKeyFile)
+	var priv *ecdsa.PrivateKey
 	if cert, err := tls.LoadX509KeyPair(certPath, keyPath); err == nil && len(cert.Certificate) > 0 {
 		if leaf, err := x509.ParseCertificate(cert.Certificate[0]); err == nil {
-			if time.Now().Before(leaf.NotAfter) {
+			retired := false
+			for _, name := range leaf.DNSNames {
+				if name == migration.PlaceholderHost {
+					retired = true
+				}
+			}
+			if time.Now().Before(leaf.NotAfter) && !retired {
 				return cert, nil
+			}
+			if retired {
+				priv, _ = cert.PrivateKey.(*ecdsa.PrivateKey)
 			}
 		}
 	}
 
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	var err error
+	if priv == nil {
+		priv, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	}
 	if err != nil {
 		return tls.Certificate{}, err
 	}
@@ -167,6 +183,9 @@ func loadOrCreateConsoleCert(dir string) (tls.Certificate, error) {
 	cn := "EngineX OS"
 	if h, err := os.Hostname(); err == nil && strings.TrimSpace(h) != "" {
 		cn = strings.TrimSpace(h)
+		if cn == migration.PlaceholderHost {
+			cn = "enginex.lan"
+		}
 	}
 	now := time.Now()
 	notBefore := now.Add(-24 * time.Hour)

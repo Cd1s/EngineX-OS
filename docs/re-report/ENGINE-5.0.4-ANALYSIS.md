@@ -1,6 +1,6 @@
 # SC5000 Engine OS 5.0.4 / 4.3.4 离线架构分析
 
-分析日期：2026-11-02。设备：SC5000 / JP07 / RK3288 / ARMv7 hard-float。本报告区分镜像实测、公开参考与尚未验证的推断；没有连接或刷写实机。所有固件、解包树、模拟盘及外部仓库在 `/root/build/sc5000-lab`，不进入 git。
+分析日期：2026-11-02。设备：SC5000 / JP07 / RK3288 / ARMv7 hard-float。本报告区分镜像实测、公开参考与尚未验证的推断；没有连接或刷写实机。所有固件、解包树、模拟盘及外部仓库在 `<firmware-lab>`，不进入 git。
 
 REA 关键二进制分析见 [REA-BINARY-REPORT.md](REA-BINARY-REPORT.md)。本报告的 SQLite、容器与启动脚本结论来自直接读取官方镜像，不以参考仓库的其他型号分析替代 SC5000 实测。
 
@@ -183,10 +183,10 @@ flowchart TD
   B --> C[overlayfs-setup.service]
   C --> D[etc.mount]
   C --> E[var.mount]
-  D --> F[sc5000-custom-prepare.service]
+  D --> F[enginex-prepare.service]
   E --> F
   B --> F
-  F --> G[sc5000-custom-sshd.service]
+  F --> G[enginex-sshd.service]
 ```
 
 `data.mount` 挂载 `PARTUUID=931ad49d-ad59-0849-833a-9bf00af5b60e` 到 `/data`。不要因为路径叫 `/data` 就认为它是外接 SD 卡；此处是固件配置指定的独立持久化分区。不要重新运行 mkfs 单元或改其 PARTUUID。
@@ -221,11 +221,11 @@ R /data/system/var/overlay/run
 
 工具选定的准确布局：
 
-- `/usr/lib/systemd/system/sc5000-custom.target` 及 `multi-user.target.wants/sc5000-custom.target`：下层注册。
-- `sc5000-custom-prepare.service`：等待 `/etc`、`/var` 和 `/data`；不篡改厂商 overlay 清理规则。
-- `/usr/share/sc5000-custom/authorized_keys`：下层公钥种子；`/data/sc5000-custom/authorized_keys`：持久化授权文件。
-- `/data/sc5000-custom/ssh_host_ed25519_key`：设备首次启动生成的主机私钥，不共享打包密钥。
-- `/usr/share/sc5000-custom/sshd_config`：独立配置，启用 root 公钥认证，禁用密码/交互认证；独立 sshd 服务避免与原厂服务同时占用端口。
+- `/usr/lib/systemd/system/enginex.target` 及 `multi-user.target.wants/enginex.target`：下层注册。
+- `enginex-prepare.service`：等待 `/etc`、`/var` 和 `/data`；不篡改厂商 overlay 清理规则。
+- `/usr/share/enginex/authorized_keys`：下层公钥种子；`/data/enginex/authorized_keys`：持久化授权文件。
+- `/data/enginex/ssh_host_ed25519_key`：设备首次启动生成的主机私钥，不共享打包密钥。
+- `/usr/share/enginex/sshd_config`：独立配置，启用 root 公钥认证，禁用密码/交互认证；独立 sshd 服务避免与原厂服务同时占用端口。
 - 下层 `/etc/shadow`：随机不可知密码哈希解除 root 账号锁定；启动清理 upper 后仍显露此下层状态。不会为 root 设置通用已知密码。
 
 首次引导生成持久化密钥；后续不会自动覆盖已有 authorized_keys。OTA 重新替换原厂 rootfs 后，下层的自定义 unit 和 shadow 会消失，`/data` 留存文件本身不能保证 SSH 仍能启动。**本实现不声称跨原厂 OTA 自动存活。** 服务实际启动、overlay whiteout 与既有 upper 层优先级仍需 QEMU/实机日志验证。
@@ -443,7 +443,7 @@ QEngine 是通用 QEMU virt 环境配合构建后的 ARMv7 rootfs、fake device-
 修改前的官方5.0.4原包已获得远端备份ID：
 
 ```text
-20261101T164023Z-<build-host>-sc5000-5.0.4-official-before-offline-patch-52e8526bbfd2-SC5000-5.0.4-Update.img
+20261101T164023Z-<build-host>-enginex-5.0.4-official-before-offline-patch-52e8526bbfd2-SC5000-5.0.4-Update.img
 ```
 
 本地完成不包含 git push、实机刷写、bootloader/MCU 改动，也不表示 OTA 接受性、设备音频时序或触摸/电机行为已验证。
@@ -453,7 +453,7 @@ QEngine 是通用 QEMU virt 环境配合构建后的 ARMv7 rootfs、fake device-
 - **曲库桥**：以 Database2 schema3.0.2 和实际触发器/链表规则为基础；Demo只作结构与样本，不能复制UUID。rbm/rbp常量的运行时映射必须沿REA引用继续核实，不替换或执行 FirmwareUpdater。
 - **PerformanceData 转换**：先支持可识别版本并保留未知尾部；44字节Demo与当前分析器六float的IPC输出分别建模。RGB输出与先锋ANLZ帧格式不是同一编码，不可按字节照搬。
 - **后台音频分析**：先复现 OfflineAnalyzer 的本机TCP帧协议及信号对应关系，再进行受控模拟；不要臆造文件参数CLI或向生产Engine试发未验证帧。
-- **SSH/自定义服务**：服务置下层 `/usr/lib/systemd/system/`，持久化数据置 `/data/sc5000-custom/`；以 `--service` 注册依赖准备服务的单元，考虑已有upper层优先级及原厂OTA替换下层。
+- **SSH/自定义服务**：服务置下层 `/usr/lib/systemd/system/`，持久化数据置 `/data/enginex/`；以 `--service` 注册依赖准备服务的单元，考虑已有upper层优先级及原厂OTA替换下层。
 - **文件系统/性能模块**：复用lab内已提取完整 kernel.config 与对应release；HFS+ 已builtin。先确认原厂IRQ脚本时序，再设置自己的调优服务顺序。
 - **证据定位**：本报告的偏移表为文件偏移；REA调用图默认是分析VA。必须按每个会话image_base映射，不能把库上的`+0x10000`规律盲套主程序或运行时ASLR地址。
 - Engine SQL常量与注册表窗口的具体地址映射另以原始ELF的PT_LOAD独立核查，见 [地址映射证据](ENGINE-5.0.4-ELF-ADDRESS-MAP.json)。两个rodata常量的原ELF VA恰好等于文件偏移；数据段窗口则相差`0x1000`。此核查不冒充REA输出。

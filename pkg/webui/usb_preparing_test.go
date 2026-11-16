@@ -46,7 +46,7 @@ func TestUSBPreparingLifecycle(t *testing.T) {
 		}
 		return digest
 	}
-	routes := []string{"/v1/enginex/ui", "/v1/sc5000/ui"}
+	routes := []string{"/v1/enginex/ui"}
 	baseline := poll(routes[0], false)
 	for _, route := range routes {
 		if poll(route, false) != baseline {
@@ -145,7 +145,7 @@ func TestUSBPreparingStatusAndErrorLifecycle(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"state":"loading","kind":"sd","done":1200,"total":21352}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	for _, route := range []string{"/v1/enginex/ui", "/v1/sc5000/ui"} {
+	for _, route := range []string{"/v1/enginex/ui"} {
 		v, d := get(route)
 		if v["usbPreparing"] != true {
 			t.Fatalf("%s: want usbPreparing=true, got %v", route, v["usbPreparing"])

@@ -60,7 +60,7 @@
 
 ### 2. `/usr/libexec/edisksd` 挂载拦截器（`libedisksd-hook.so`）
 Engine 打开外接存储后，任何外部进程写其 `m.db` / `hm.db` 都会导致 SQLite 锁冲突与删库。因此我们通过 `LD_PRELOAD=/etc/enginex/libedisksd-hook.so` 拦截 `edisksd` 的 `mnt_context_mount` 与 `mnt_context_umount`，在 20 秒预算内完成预处理；rekordbox 盘先在私有 mount 命名空间里挂载并转换，之后才做 Engine 能看到的真正挂载（edisksd 的挂载表监视器一见到挂载就会通知 Engine，#182）：
-1. 若检测到只读 HFS+ 盘且含 `PIONEER` / `.PIONEER`，自动在 `<mount>/Engine Library` 上绑定 `/data/enginex/hfs-libraries/<卷 ID>` 作为可写视图（只跟随 `/data/sc5000-custom -> enginex` 这一条兼容软链）；
+1. 若检测到只读 HFS+ 盘且含 `PIONEER` / `.PIONEER`，自动在 `<mount>/Engine Library` 上绑定 `/data/enginex/hfs-libraries/<卷 ID>` 作为可写视图（只跟随 `the data compatibility link` 这一条兼容软链）；
 2. 若含先锋导出库，同步调用 `/usr/local/bin/rb-bridge --mount-path <mount>` 完成秒级转换；
 3. 若为原生 Engine U 盘（含 `Engine Library/Database2/m.db`），同步调用 `/usr/local/bin/engine-guardian --heal-mount <mount> --data-only` 完成链表与数据自愈；
 4. 退盘（`mnt_context_umount`）前自动卸下 HFS+ 视图的子挂载点（失败时恢复原视图），杜绝退盘报 `EBUSY`。
@@ -156,15 +156,15 @@ Engine 打开外接存储后，任何外部进程写其 `m.db` / `hm.db` 都会�
 
 ### 2. 流媒体无损下载与远程 Stems 分轨组件
 - **`enginex-suite enginex-deemixd` (`internal/deemixd`, `internal/deezer`)**：本地 `127.0.0.1:6595` 守护进程，支持 Deezer Blowfish CBC 条带解密、无损 FLAC / 320k MP3 下载、WAV/AIFF 转 FLAC、多段并发分片拉取与 `<=512x512` 封面内嵌 (`pkg/deemixclient/cover.go`)。
-- **`enginex-suite stems-processor` (`internal/stemsproc`) + `cmd/sc5000-stemsd` + `cmd/sc5000-relay` + `tools/stems/worker.py` (`internal/stems`)**：
+- **`enginex-suite stems-processor` (`internal/stemsproc`) + `cmd/enginex-stemsd` + `cmd/enginex-relay` + `tools/stems/worker.py` (`internal/stems`)**：
   - 碟机端 `stems-processor` 伪装为原厂分轨器，采用本地流水线即时应答 Engine `action=block`，并通过 `X-Stems-Framing: 2` 将输入块转为 `int16` 流式上传；
-  - 远端 `sc5000-stemsd` 驱动 `worker.py`（基于 2048 点 STFT 与一维拼接中值滤波的 4 轨分离器：Vocals / Melody / Bass / Drums），将前三轨以 `int16` 帧流式回传，碟机端用原始 `float32` 减去前三轨无损还原第 4 轨。
+  - 远端 `enginex-stemsd` 驱动 `worker.py`（基于 2048 点 STFT 与一维拼接中值滤波的 4 轨分离器：Vocals / Melody / Bass / Drums），将前三轨以 `int16` 帧流式回传，碟机端用原始 `float32` 减去前三轨无损还原第 4 轨。
   - **GitHub Issue #1：零配置局域网家用电脑算力卸载**：
     - 三级回退：已配置云端中继 → 局域网家用电脑 → 碟机 `CPU3` 本机 `LocalRender`。只有前一级连接都建立不起来（尚未读取 Engine 任何数据）时才换下一级，同一会话绝不拆到两台机器；
-    - 发现：`internal/stems/discovery.go` + `mdns.go`（纯标准库）。碟机同时发送 UDP 17891 广播探针 `ENGINEX_STEMS_DISCOVER_V1` 与 mDNS `_enginex-stems._tcp.local.` PTR 查询，350 ms 内取最先应答者；`sc5000-stemsd` 应答 JSON 信标与 PTR / SRV / TXT / A 记录（`dns-sd -B`、`avahi-browse` 也能看到）。服务端只应答局域网来源，避免被用作反射放大；
+    - 发现：`internal/stems/discovery.go` + `mdns.go`（纯标准库）。碟机同时发送 UDP 17891 广播探针 `ENGINEX_STEMS_DISCOVER_V1` 与 mDNS `_enginex-stems._tcp.local.` PTR 查询，350 ms 内取最先应答者；`enginex-stemsd` 应答 JSON 信标与 PTR / SRV / TXT / A 记录（`dns-sd -B`、`avahi-browse` 也能看到）。服务端只应答局域网来源，避免被用作反射放大；
     - 缓存与状态：找到的电脑写入 `/data/enginex/state/stems-lan.json`，下次先快速 `GET /healthz` 探活；网页控制台 `GET /api/relay` 的 `lanStems` 字段显示电脑名称、后端与是否在线；
     - 安全：家用电脑以 `-token-file=` 免密运行，只接受局域网来源；碟机绝不把中继密码发给自动发现的电脑；忙碌的电脑被跳过；
-    - 后端：`worker.py --backend auto|hpss|demucs`（或 `ENGINEX_STEMS_BACKEND`）。`htdemucs` 使用 CUDA / Apple MPS / CPU，按 10 秒分段、1 秒线性交叉淡化，旋律仍取余量，传输协议不变；`auto` 未安装 demucs 时回退 `hpss`；`sc5000-stemsd` 启动时探测一次后端，旧版 `worker.py` 不支持探测时记录警告并按 `hpss` 运行；
+    - 后端：`worker.py --backend auto|hpss|demucs`（或 `ENGINEX_STEMS_BACKEND`）。`htdemucs` 使用 CUDA / Apple MPS / CPU，按 10 秒分段、1 秒线性交叉淡化，旋律仍取余量，传输协议不变；`auto` 未安装 demucs 时回退 `hpss`；`enginex-stemsd` 启动时探测一次后端，旧版 `worker.py` 不支持探测时记录警告并按 `hpss` 运行；
     - 一键启动：`tools/stems/run-home-worker.sh`（macOS / Linux）与 `run-home-worker.ps1`（Windows，NVIDIA 显卡自动安装 CUDA 版 torch）。
 
 ### 3. Linux 系统服务与调优脚本 (`rootfs-overlay/`)
@@ -269,7 +269,7 @@ Engine 打开外接存储后，任何外部进程写其 `m.db` / `hm.db` 都会�
 1. **不含任何私钥或账号凭据**：
    - 全仓已通过检查：所有的 Deezer ARL、网易云 Cookie、Spotify Token、SoundCloud Secret、Relay 密码均只存在于碟机运行时的 `/data/enginex/state/` 目录下（不在 Git 仓库中）。
 2. **自建后端地址完全解耦（零硬编码个人域名）**：
-   - `pkg/webui/relay.go` (`DefaultRelayURL = ""`)、`internal/stems/client.go` (`DefaultRelayURL = ""`)、`internal/deemixd/deemixd.go` (`defaultRelay = ""`) 与 `cmd/sc5000-relay/main.go` (`--public https://relay.example.com`) 已彻底移除任何个人域名；
-   - 未配置云端 Relay 时，碟机扫码登录默认走本机局域网（`http://enginex.lan:8080`），外部用户可在碟机网页控制台（`http://enginex.lan:8080` $\rightarrow$「云端登录服务」）或环境变量 `ENGINEX_STEMS_URL` / `--relay-url` 中自由填入自己部署的 `sc5000-relay` / `sc5000-stemsd` 后端地址。
+   - `pkg/webui/relay.go` (`DefaultRelayURL = ""`)、`internal/stems/client.go` (`DefaultRelayURL = ""`)、`internal/deemixd/deemixd.go` (`defaultRelay = ""`) 与 `cmd/enginex-relay/main.go` (`--public https://relay.example.com`) 已彻底移除任何个人域名；
+   - 未配置云端 Relay 时，碟机扫码登录默认走本机局域网（`http://enginex.lan:8080`），外部用户可在碟机网页控制台（`http://enginex.lan:8080` $\rightarrow$「云端登录服务」）或环境变量 `ENGINEX_STEMS_URL` / `--relay-url` 中自由填入自己部署的 `enginex-relay` / `enginex-stemsd` 后端地址。
 3. **不分发受版权保护的原厂二进制**：
    - 仓库中只包含我们自研的 Go 源码（`cmd/`、`pkg/`、`internal/`）、C Hook 源码（`tools/ui-mod/engine_ui_hook.c`、`tools/edisksd-hook/edisksd_hook.c`）、Python 打包/补丁脚本（`tools/az01-packer/`、`tools/ui-mod/build_packs.py`、`tools/stems/worker.py`）与系统配置层（`rootfs-overlay/`），不包含天龙原厂 `/usr/Engine/Engine` 二进制或原厂 QML 源码包。

@@ -1,5 +1,5 @@
-// Package stemsd is enginex-stemsd (alias sc5000-stemsd): it runs the Engine 5.0.4 Stems worker for remote decks.
-// It listens on loopback by default; sc5000-relay is the public entry point
+// Package stemsd is enginex-stemsd (alias legacy-stemsd): it runs the Engine 5.0.4 Stems worker for remote decks.
+// It listens on loopback by default; legacy-relay is the public entry point
 // and forwards authenticated /v1/engine sessions here.
 //
 // As a home renderer (tools/stems/run-home-worker.sh) it listens on the LAN
@@ -13,6 +13,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"io"
 	"net"
 	"net/http"
@@ -30,13 +31,13 @@ import (
 )
 
 const defaultWorkerPath = "/opt/enginex-stems/worker.py"
-const legacyWorkerPath = "/opt/sc5000-stems/worker.py"
+const legacyWorkerPath = migration.WorkerPath
 
 func defaultBackend() string {
 	return cmp.Or(os.Getenv("ENGINEX_STEMS_BACKEND"), "htdemucs")
 }
 
-// Main runs the daemon; both cmd/enginex-stemsd and the sc5000-stemsd alias call it.
+// Main runs the daemon; both cmd/enginex-stemsd and the legacy-stemsd alias call it.
 func Main() {
 	listen := flag.String("listen", "127.0.0.1:6596", "listen address")
 	token := flag.String("token-file", defaultToken(), `internal credential file; "" serves LAN callers without one`)

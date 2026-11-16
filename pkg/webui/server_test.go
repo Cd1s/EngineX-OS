@@ -243,7 +243,7 @@ func TestLANCannotDriveTheDeck(t *testing.T) {
 		{"GET", "/v1/search?query=x", 403},
 		{"GET", "/v1/stream/1", 403},
 		{"GET", "/v1/ping", 403},
-		{"POST", "/v1//sc5000/ui?restart=1", 403},
+		{"POST", "/v1//enginex/ui?restart=1", 403},
 		{"POST", "/api/ui", 401},
 		{"GET", "/api/update?apply=1", 401},
 		{"GET", "/api/mods", 401},

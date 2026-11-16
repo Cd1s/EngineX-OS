@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+. "${ENGINEX_MIGRATION:-$(git rev-parse --show-toplevel)/rootfs-overlay/usr/libexec/enginex-migration}"
+ENGINEX_LAB=${ENGINEX_LAB:-$legacy_lab}
+legacy_data_name=${legacy_data##*/}
+export legacy_data legacy_data_name
 # End-to-end sandbox verification for SC LIVE 4 (inmusic,jp21) (#61).
 # Verifies Method A (host-side ext4 debugfs injection), Method B (on-device install.sh),
 # ALSA-to-LD_PRELOAD one-shot boot hook, and Engine 5.3.0-sclive4 full hook application.
@@ -17,13 +21,13 @@ if [ "$BOOTSTRAP_MODEL" = PRIME4PLUS ]; then
     # JC11S uses the same Engine/edit table as SC LIVE 4, including #166 SweepFX.
     PREFIX=PRIME4PLUS VARLIB=data/system/var/overlay/lib PROFILE=5.3.0-sclive4 EDITS=29
 elif [ "$AZ04" = 1 ]; then
-    ROOTFS="${ROOTFS:-/root/build/sc5000-lab/systemone-analysis/rootfs}"
+    ROOTFS="${ROOTFS:-${ENGINEX_LAB}/systemone-analysis/rootfs}"
     PREFIX=PRIME4G2 VARLIB=data/system/var-lib PROFILE=5.3.0-az04 EDITS=26
 else
-    ROOTFS="${ROOTFS:-/root/build/sc5000-lab/sclive4-rea61-followup/rootfs}"  # or another unpacked gen2 rootfs
+    ROOTFS="${ROOTFS:-${ENGINEX_LAB}/sclive4-rea61-followup/rootfs}"  # or another unpacked gen2 rootfs
     PREFIX=SCLIVE4 VARLIB=data/system/var/overlay/lib PROFILE=5.3.0-sclive4 EDITS=29
 fi
-QRC="${QRC:-/root/build/sc5000-lab/5.3.0/qrc}"  # AZ04's QML is byte-identical to it
+QRC="${QRC:-${ENGINEX_LAB}/5.3.0/qrc}"  # AZ04's QML is byte-identical to it
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
@@ -70,7 +74,7 @@ if [ "$AZ04" = 1 ]; then
         > "$TMP/alsa-probe.c"
     gcc -O2 -o "$PROBE" "$TMP/alsa-probe.c" -ldl
 else
-    PROBE=/root/build/sc5000-lab/sclive4-rea61-followup/stock-alsa-probe
+    PROBE=${ENGINEX_LAB}/sclive4-rea61-followup/stock-alsa-probe
     (cd "$REPO/tools/ui-mod" && sh build.sh)
     (cd "$REPO/tools/edisksd-hook" && sh build.sh)
     HOOK="$REPO/rootfs-overlay/etc/enginex/libengine-ui-hook.so"
@@ -89,14 +93,14 @@ cp -a "$TMP/packs_raw/en" "$TMP/packs_raw/zh-Hans" "$TMP/packs_raw/zh-Hant" "$TM
 cp -a "$TMP/packs_raw/icons" "$TMP/ui_bundle/"
 tar -C "$TMP/ui_bundle" -czf "$TMP/ui-packs.tar.gz" packs icons
 
-python3 "$REPO/tools/az01-packer/build-data-bundle.py" 5.3.0.1.1 \
+python3 "$REPO/tools/az01-packer/build-data-bundle.py" 5.3.0.5 \
     --suite "$SUITE" \
     --hook "$HOOK" \
     --ui-packs "$TMP/ui-packs.tar.gz" \
     --prefix "$PREFIX" \
     --out "$TMP/bundle_out" >/dev/null
 
-BUNDLE="$TMP/bundle_out/$PREFIX-5.3.0.1.1-EngineX-OS-Data-Bundle.tar.gz"
+BUNDLE="$TMP/bundle_out/$PREFIX-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz"
 test -f "$BUNDLE"
 echo "  Data bundle: $BUNDLE"
 
@@ -117,14 +121,13 @@ python3 "$REPO/tools/az01-packer/host-install-userdata.py" "$IMG" --bundle "$BUN
 # Verify filesystem integrity
 e2fsck -f -y "$IMG" >/dev/null
 debugfs -R "stat /Music/user_track.flac" "$IMG" 2>&1 | grep -q "regular"
-debugfs -R "stat /${VARLIB#data/}/alsa/conf.d/99-sc5000-custom.conf" "$IMG" 2>&1 | grep -q "regular"
+debugfs -R "stat /${VARLIB#data/}/alsa/conf.d/99-enginex.conf" "$IMG" 2>&1 | grep -q "regular"
 debugfs -R "stat /enginex/bundle/lib/libengine-ui-hook.so" "$IMG" 2>&1 | grep -q "regular"
 debugfs -R "stat /enginex/bundle/lib/libedisksd-hook.so" "$IMG" 2>&1 | grep -q "regular"
 debugfs -R "stat /enginex/bundle/boot-activate.sh" "$IMG" 2>&1 | grep -q "regular"
-test "$(debugfs -R "cat /enginex/version.txt" "$IMG" 2>/dev/null | tr -d '\r\n')" = "5.3.0.1.1"
-# #103: the old path stays reachable (the ALSA hook and older scripts use it)
-debugfs -R "stat /sc5000-custom" "$IMG" 2>&1 | grep -q "symlink"
-debugfs -R "stat /sc5000-custom/bundle/boot-activate.sh" "$IMG" 2>&1 | grep -q "regular"
+test "$(debugfs -R "cat /enginex/version.txt" "$IMG" 2>/dev/null | tr -d '\r\n')" = "5.3.0.5"
+# The current bundle is reachable only by its current data path.
+! debugfs -R "stat /$legacy_data_name" "$IMG" 2>&1 | grep -q 'Inode:'
 debugfs -R "stat /enginex/authorized_keys" "$IMG" 2>&1 | grep -q "Mode:  0600"
 echo "  Method A ext4 userdata injection: PASS"
 
@@ -163,7 +166,7 @@ if touch '$TARGET/etc/ro_test' 2>/dev/null; then
 fi
 
 # Verify ALSA overlay conf exists
-test -f '$TARGET/var/lib/alsa/conf.d/99-sc5000-custom.conf'
+test -f '$TARGET/var/lib/alsa/conf.d/99-enginex.conf'
 
 # Stage 1 trigger: run probe named Engine (simulating stock un-preloaded Engine audio open)
 cp '$PROBE' '$TARGET/tmp/Engine'
@@ -244,7 +247,7 @@ mkdir -p -m 0700 '$TARGET/tmp/enginex-engine-home'
 # Launch real SC LIVE 4 Engine with LD_PRELOAD
 timeout 8 chroot '$TARGET' /usr/bin/env -i \
     HOME=/tmp/enginex-engine-home \
-    LD_PRELOAD=/data/sc5000-custom/bundle/lib/libengine-ui-hook.so \
+    LD_PRELOAD=/data/enginex/bundle/lib/libengine-ui-hook.so \
     QT_QPA_PLATFORM=offscreen \
     LD_LIBRARY_PATH=/usr/qt/lib \
     /usr/Engine/Engine -d0 > '$TMP/stage2.log' 2>&1 || true
@@ -279,11 +282,12 @@ mount -t sysfs sysfs '$TARGET/sys'
 
 mkdir -p '$TARGET/tmp/installer'
 tar -xzf '$BUNDLE' -C '$TARGET/tmp/installer'
-chroot '$TARGET' /bin/sh /tmp/installer/$PREFIX-5.3.0.1.1-EngineX-OS-Data-Bundle/install.sh >/dev/null
+chroot '$TARGET' /bin/sh /tmp/installer/$PREFIX-5.3.0.5-EngineX-OS-Data-Bundle/install.sh >/dev/null
 
-test -f '$TARGET/$VARLIB/alsa/conf.d/99-sc5000-custom.conf'
+test -f '$TARGET/$VARLIB/alsa/conf.d/99-enginex.conf'
 test -f '$TARGET/data/enginex/version.txt'
-test -L '$TARGET/data/sc5000-custom'
+test ! -e '$TARGET$legacy_data'
+test ! -L '$TARGET$legacy_data'
 
 # Run boot-activate.sh to verify service unit creation and subsequent cleanup
 chroot '$TARGET' /bin/sh /data/enginex/bundle/boot-activate.sh >/dev/null 2>&1 || true
@@ -299,7 +303,7 @@ chroot '$TARGET' pgrep -x enginex-suite >/dev/null 2>&1
 
 chroot '$TARGET' /bin/sh /data/enginex/bundle/uninstall.sh >/dev/null
 
-test ! -f '$TARGET/$VARLIB/alsa/conf.d/99-sc5000-custom.conf'
+test ! -f '$TARGET/$VARLIB/alsa/conf.d/99-enginex.conf'
 test ! -d '$TARGET/data/enginex/bundle'
 test -f '$TARGET/data/Music/user_track.flac'
 test ! -f '$TARGET/run/systemd/system/enginex-stream-sync.service'
@@ -315,8 +319,8 @@ if chroot '$TARGET' pgrep -x enginex-suite >/dev/null 2>&1; then exit 1; fi
 "
 echo "  Method B on-device install & uninstall: PASS"
 
-# 5b. #103 upgrade: a deck still on the real /data/sc5000-custom keeps every file when install.sh runs
-echo "[5b] Testing upgrade from the legacy /data/sc5000-custom directory..."
+# 5b. #103 upgrade: a deck still on the real $legacy_data keeps every file when install.sh runs
+echo "[5b] Testing upgrade from the legacy $legacy_data directory..."
 unshare -m -n -p -f bash -c "
 set -euo pipefail
 mount --bind '$ROOTFS' '$TARGET'
@@ -327,21 +331,21 @@ mount -t tmpfs tmpfs '$TARGET/run'
 mount -t tmpfs tmpfs '$TARGET/tmp'
 mount --bind /dev '$TARGET/dev'
 
-rm -f '$TARGET/data/sc5000-custom'
+rm -f '$TARGET$legacy_data'
 rm -rf '$TARGET/data/enginex/bundle'
-mv '$TARGET/data/enginex' '$TARGET/data/sc5000-custom'
-mkdir -p '$TARGET/data/sc5000-custom/Stream'
-echo keep > '$TARGET/data/sc5000-custom/Stream/song.flac'
-echo ssh-key > '$TARGET/data/sc5000-custom/authorized_keys'
+mv '$TARGET/data/enginex' '$TARGET$legacy_data'
+mkdir -p '$TARGET$legacy_data/Stream'
+echo keep > '$TARGET$legacy_data/Stream/song.flac'
+echo ssh-key > '$TARGET$legacy_data/authorized_keys'
 mkdir -p '$TARGET/tmp/installer'
 tar -xzf '$BUNDLE' -C '$TARGET/tmp/installer'
-chroot '$TARGET' /bin/sh /tmp/installer/$PREFIX-5.3.0.1.1-EngineX-OS-Data-Bundle/install.sh >/dev/null
+chroot '$TARGET' /bin/sh /tmp/installer/$PREFIX-5.3.0.5-EngineX-OS-Data-Bundle/install.sh >/dev/null
 
-test -L '$TARGET/data/sc5000-custom'
-test \"\$(readlink '$TARGET/data/sc5000-custom')\" = enginex
+test ! -e '$TARGET$legacy_data'
+test ! -L '$TARGET$legacy_data'
 test \"\$(cat '$TARGET/data/enginex/Stream/song.flac')\" = keep
-test \"\$(cat '$TARGET/data/sc5000-custom/authorized_keys')\" = ssh-key
-test -f '$TARGET/data/sc5000-custom/bundle/boot-activate.sh'
+test \"\$(cat '$TARGET/data/enginex/authorized_keys')\" = ssh-key
+test -f '$TARGET/data/enginex/bundle/boot-activate.sh'
 "
 echo "  Legacy directory upgrade: PASS"
 
@@ -351,14 +355,14 @@ if [ "$AZ04" = 1 ]; then
     UPDATE_PREFIX=SYSTEMONE
 fi
 echo "[5c] Testing Gen-2 *-Update.img via preloaded /usr/sbin/az01-update ($UPDATE_PREFIX)..."
-python3 "$REPO/tools/az01-packer/build-data-bundle.py" 5.3.0.2 \
+python3 "$REPO/tools/az01-packer/build-data-bundle.py" 5.3.0.6 \
     --suite "$SUITE" \
     --hook "$HOOK" \
     --ui-packs "$TMP/ui-packs.tar.gz" \
     --prefix "$UPDATE_PREFIX" \
-    --release-tag v5.3.0.2-r3 \
+    --release-tag v5.3.0.6-r3 \
     --out "$TMP/bundle_out_5302" >/dev/null
-NEXT_IMG=$(ls "$TMP/bundle_out_5302/$UPDATE_PREFIX-5.3.0.2-EngineX-OS-"*-Update.img)
+NEXT_IMG=$(ls "$TMP/bundle_out_5302/$UPDATE_PREFIX-5.3.0.6-EngineX-OS-"*-Update.img)
 BAD_IMG="$TMP/corrupt-$UPDATE_PREFIX-Update.img"
 python3 -c '
 import pathlib, sys
@@ -405,7 +409,7 @@ if grep -q 'intercepted az01_apply_image' "$TMP/az01-bad.log"; then
     echo 'FAIL: corrupted Gen-2 Update.img passed SHA-256 check' >&2
     exit 1
 fi
-test "$(tr -d '\r\n' < "$TARGET/data/enginex/version.txt")" = '5.3.0.1.1'
+test "$(tr -d '\r\n' < "$TARGET/data/enginex/version.txt")" = '5.3.0.5'
 test ! -s "$TARGET/tmp/systemctl-shim.log"
 
 IMG_BASE=$(basename "$NEXT_IMG")
@@ -414,9 +418,9 @@ chroot "$TARGET" /usr/bin/env LD_PRELOAD=/data/enginex/bundle/lib/libengine-ui-h
     /usr/sbin/az01-update --file "/tmp/$IMG_BASE" > "$TMP/az01-good.log" 2>&1 || true
 
 grep -q 'engine-ui-hook: intercepted az01_apply_image with an EngineX data bundle image' "$TMP/az01-good.log"
-test "$(tr -d '\r\n' < "$TARGET/data/enginex/version.txt")" = '5.3.0.2'
-test "$(tr -d '\r\n' < "$TARGET/data/enginex/bundle/version.txt")" = '5.3.0.2'
-test "$(tr -d '\r\n' < "$TARGET/data/enginex/bundle/release-tag")" = 'v5.3.0.2-r3'
+test "$(tr -d '\r\n' < "$TARGET/data/enginex/version.txt")" = '5.3.0.6'
+test "$(tr -d '\r\n' < "$TARGET/data/enginex/bundle/version.txt")" = '5.3.0.6'
+test "$(tr -d '\r\n' < "$TARGET/data/enginex/bundle/release-tag")" = 'v5.3.0.6-r3'
 test "$(tr -d '\r\n' < "$TARGET/data/enginex/gen2-unlocked")" = '1'
 grep -q '^reboot$' "$TARGET/tmp/systemctl-shim.log"
 EOF

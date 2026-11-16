@@ -3,7 +3,7 @@
 适用版本：EngineX OS 5.3.0.2 及以后（带 `#99`、`#100` 的开发中功能会单独标注）。
 适用机型：SC5000 / SC5000M / SC6000 / SC6000M / PRIME 4 / PRIME 2 / PRIME GO / Mixstream Pro 等一代机，二代机（`/data` 数据包）功能略有差异，见各节说明。
 
-> **关于路径**：EngineX 的运行目录标准写法是 `/data/enginex/`（`#103`）。旧版本的 `/data/sc5000-custom/` 会在开机时自动迁移，并保留软链接 `/data/sc5000-custom -> /data/enginex`，所以旧路径依然可用。本手册所有路径一律写 `/data/enginex/`。
+> **关于路径**：EngineX 的运行目录是 `/data/enginex/`（`#103`）。旧版数据目录会在开机时自动迁移，并保留兼容软链接。本手册所有路径均写 `/data/enginex/`。
 >
 > **关于 Beta**：标「测试版」的功能没有在所有真机上验证过，上台前先在家里试一遍。
 
@@ -276,7 +276,7 @@
 没有域名的普通用户**不需要买域名，也不用配置反向代理**：
 
 1. **碟机端一键开启**：在碟机 `:8080` 控制台直接点「开启免域名公网隧道 (Cloudflare Quick Tunnel)」，系统会按架构自动安装并启动 `cloudflared`，秒级生成 `https://*.trycloudflare.com` 公网 HTTPS 地址。手机用 4G/5G 流量即可远程打开控制台，碟机屏幕上的流媒体登录二维码也会自动使用该公网地址回调。
-2. **自建 `enginex-relay`（兼容旧名 `sc5000-relay`）免域名启动**：运行 `enginex-relay -public auto`（或 `run-home-worker.sh --with-tunnel`），自动通过 Cloudflare Quick Tunnel 生成免域名公网 HTTPS 中继地址，并汇总管理多台碟机。
+2. **自建 `enginex-relay`（兼容旧名 `enginex-relay`）免域名启动**：运行 `enginex-relay -public auto`（或 `run-home-worker.sh --with-tunnel`），自动通过 Cloudflare Quick Tunnel 生成免域名公网 HTTPS 中继地址，并汇总管理多台碟机。
 
 注意：`trycloudflare.com` 地址在隧道重启后会变化；公网访问仍需要控制台访问码，需要固定地址请改用自己的域名。
 
@@ -412,7 +412,7 @@ CDJ 不通过 Pro DJ Link 报告 Hot Cue。跟另一台 EngineX 碟机时有。
 地址和访问码在 `设置 → 关于`。碟机和浏览器要在同一网络，端口是 8080。
 
 **33. 怎么用 SSH？**
-默认没有 SSH 密码，公开固件也不内置任何公钥。把你自己的公钥放进 `/data/enginex/authorized_keys`（旧路径 `/data/sc5000-custom/authorized_keys` 因软链接同样有效），重启后生效，只能用密钥登录。
+默认没有 SSH 密码，公开固件也不内置任何公钥。把你自己的公钥放进 `/data/enginex/authorized_keys`，重启后生效，只能用密钥登录。
 
 **34. 怎么在屏幕上关机？**
 `设置 → 设备 → 电源 → 关机`（`#78`），会弹出原厂的「关机」确认框。

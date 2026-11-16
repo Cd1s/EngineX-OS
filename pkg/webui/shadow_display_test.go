@@ -155,7 +155,7 @@ func TestCDJDisplayWithoutANLZIsMetadataOnly(t *testing.T) {
 	}
 	assertNoShadowAudioFetch(t, s)
 }
-func TestJC11DisplayRoleWithSC5000AndCDJ(t *testing.T) {
+func TestJC11DisplayRoleWithEngineXAndCDJ(t *testing.T) {
 	cache, dev := cachedDisplayCDJ(t)
 	oldRole, oldCompatible := fourDeckRolePath, deviceCompatiblePath
 	fourDeckRolePath = filepath.Join(t.TempDir(), "missing-role")

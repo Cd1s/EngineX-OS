@@ -8,6 +8,7 @@ package webui
 
 import (
 	"encoding/json"
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"io"
 	"maps"
 	"net/http"
@@ -18,9 +19,9 @@ import (
 	"time"
 )
 
-// shadowDebugFlags turn the telemetry on by hand; /tmp/sc5000-debug is the name before
+// shadowDebugFlags turn the telemetry on by hand; the legacy debug flag is the name before
 // 5.3.0.5 (#234), still accepted in 5.3.0.5 and 5.3.0.6.
-var shadowDebugFlags = [...]string{"/tmp/enginex-debug", "/tmp/sc5000-debug"}
+var shadowDebugFlags = [...]string{"/tmp/enginex-debug", migration.DebugFlag}
 
 func shadowDebugFlagged() bool { return anyFileExists(shadowDebugFlags[:]) }
 

@@ -295,28 +295,15 @@ func (img *Image) Stat(path string) (mode uint32, size int64, uid, gid uint32, e
 	return uint32(in.mode()), int64(in.size()), in.uid(), in.gid(), nil
 }
 
-// ChooseRuntimeDir applies the #103 rule: a deck that still has a real
-// legacy /sc5000-custom directory and no /enginex keeps being written
-// there (first boot migrates it); otherwise files go to /enginex and, if
-// /sc5000-custom is absent, the compatibility link sc5000-custom -> enginex
-// is created.
+// ChooseRuntimeDir always writes current names. A real pre-5.3.0.5 directory
+// is preserved for the one-time first-boot migration; no compatibility link is created.
 func (img *Image) ChooseRuntimeDir() (root string, links map[string]string, err error) {
-	legacy, err := img.Lstat("/sc5000-custom")
-	if err != nil {
-		return "", nil, err
-	}
 	cur, err := img.Lstat("/enginex")
 	if err != nil {
 		return "", nil, err
 	}
-	if legacy == Directory && cur == Missing {
-		return "sc5000-custom", map[string]string{}, nil
-	}
 	if cur != Missing && cur != Directory {
 		return "", nil, fmt.Errorf("%w: /enginex is a %s", ErrExists, cur)
-	}
-	if legacy == Missing {
-		return "enginex", map[string]string{"sc5000-custom": "enginex"}, nil
 	}
 	return "enginex", map[string]string{}, nil
 }

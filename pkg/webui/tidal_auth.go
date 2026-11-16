@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"io"
 	"log"
 	"net/http"
@@ -27,7 +28,7 @@ type tidalAuth struct {
 
 func isSyntheticTidalToken(tok string) bool {
 	switch strings.TrimSpace(tok) {
-	case "", "enginex", "enginex-token", "enginex-refresh", "sc5000-token", "sc5000-refresh":
+	case "", "enginex", "enginex-token", "enginex-refresh", migration.Token, migration.RefreshToken:
 		return true
 	}
 	return false

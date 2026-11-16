@@ -188,7 +188,7 @@ class WorkerTests(unittest.TestCase):
             env['ENGINEX_STEMS_HOME'] = str(home)
             env['ENGINEX_STEMSD'] = str(stemsd)
             env['ENGINEX_RELAY'] = ''
-            env['SC5000_RELAY'] = ''
+            env['ENGINEX_RELAY'] = ''
             env['PATH'] = f"{bin_dir}:/usr/bin:/bin"
 
             res = subprocess.run(['/bin/sh', str(script), '--with-tunnel', 'hpss'],

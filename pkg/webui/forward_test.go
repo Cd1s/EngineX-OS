@@ -45,7 +45,7 @@ func TestRemoteConsoleForwardHasNoGateway(t *testing.T) {
 		}
 		return resp.StatusCode, b.String()
 	}
-	for _, p := range []string{"/v1/enginex/ui", "//v1/enginex/ui", "/v1/../v1/enginex/ui", "/%76%31/sc5000/ui", "/v1", "/au/oauth2/token", "/v1/enginex/boot"} {
+	for _, p := range []string{"/v1/enginex/ui", "//v1/enginex/ui", "/v1/../v1/enginex/ui", "/%76%31/enginex/ui", "/v1", "/au/oauth2/token", "/v1/enginex/boot"} {
 		status, body := get(forward.URL, p, nil)
 		if status != http.StatusNotFound || strings.Contains(body, code) {
 			t.Fatalf("forwarded GET %s: %d %q, want 404 without the access code", p, status, body)

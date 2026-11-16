@@ -97,7 +97,7 @@ func TestAppleMusicHelperAPIPersistenceAndAccess(t *testing.T) {
 			t.Fatalf("unprotected %s: %d", path, got.Code)
 		}
 	}
-	if got := request("GET", "/v1/sc5000/applemusic", "", "", false); got.Code != 403 {
+	if got := request("GET", "/v1/enginex/applemusic", "", "", false); got.Code != 403 {
 		t.Fatal("LAN reached loopback API")
 	}
 	payload, _ := json.Marshal(map[string]string{"helperUrl": helper.URL, "helperToken": "private-helper-fixture"})
@@ -118,7 +118,7 @@ func TestAppleMusicHelperAPIPersistenceAndAccess(t *testing.T) {
 	if qr.Code != 200 || qr.Header().Get("Content-Type") != "image/png" {
 		t.Fatal("console QR")
 	}
-	if got := request("POST", "/v1/sc5000/applemusic/login", `{"username":"fixture","password":"fixture"}`, "", true); got.Code != 200 {
+	if got := request("POST", "/v1/enginex/applemusic/login", `{"username":"fixture","password":"fixture"}`, "", true); got.Code != 200 {
 		t.Fatal("loopback login route")
 	}
 	if got := request("POST", "/api/applemusic/2fa", `{"code":"123456"}`, "console-fixture", false); got.Code != 200 {
@@ -133,7 +133,7 @@ func TestAppleMusicHelperAPIPersistenceAndAccess(t *testing.T) {
 	if got := request("GET", "/m/applemusic/helper-qr?t=invalid", "", "", false); got.Code != 403 {
 		t.Fatal("phone QR accepted missing flow")
 	}
-	start := request("POST", "/v1/sc5000/login?provider=applemusic", "", "", true)
+	start := request("POST", "/v1/enginex/login?provider=applemusic", "", "", true)
 	if start.Code != 200 {
 		t.Fatal("start phone login")
 	}
@@ -243,7 +243,7 @@ func TestAppleMusicHelperPhoneLoginCompletesAndPolls(t *testing.T) {
 	ui := New(Config{StateDir: t.TempDir(), UIDir: t.TempDir(), AppleMusicHelperURL: helper.URL}, nil)
 	defer ui.Close()
 
-	startReq := httptest.NewRequest("POST", "/v1/sc5000/login?provider=applemusic", nil)
+	startReq := httptest.NewRequest("POST", "/v1/enginex/login?provider=applemusic", nil)
 	startReq.RemoteAddr = "127.0.0.1:41001"
 	startRec := httptest.NewRecorder()
 	ui.ServeHTTP(startRec, startReq)
@@ -280,7 +280,7 @@ func TestAppleMusicHelperPhoneLoginCompletesAndPolls(t *testing.T) {
 	mu.Lock()
 	loginState = "ready"
 	mu.Unlock()
-	pollReq := httptest.NewRequest("GET", "/v1/sc5000/login?provider=applemusic", nil)
+	pollReq := httptest.NewRequest("GET", "/v1/enginex/login?provider=applemusic", nil)
 	pollReq.RemoteAddr = "127.0.0.1:41001"
 	pollRec := httptest.NewRecorder()
 	ui.ServeHTTP(pollRec, pollReq)

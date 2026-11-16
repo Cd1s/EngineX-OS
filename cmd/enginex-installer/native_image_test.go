@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"io"
 	"os"
 	"path/filepath"
@@ -83,7 +84,7 @@ func rewriteBundleFile(t *testing.T, src, member, replacement string) string {
 
 func TestNativeImageRequiresCompleteBundle(t *testing.T) {
 	bundle := buildBundle(t, "SCLIVE4", "5.3.0.5")
-	for _, member := range []string{"bin/enginex-suite", "lib/libengine-ui-hook.so", "boot-activate.sh", "99-sc5000-custom.conf"} {
+	for _, member := range []string{"bin/enginex-suite", "lib/libengine-ui-hook.so", "boot-activate.sh", "99-enginex.conf"} {
 		t.Run(member, func(t *testing.T) {
 			fb := newFastboot(t, "jp21", true)
 			o := testOpts(t)
@@ -99,7 +100,7 @@ func TestNativeImageRequiresCompleteBundle(t *testing.T) {
 	}
 }
 
-func TestNativeImageRefusesConflictingLegacyDirectory(t *testing.T) {
+func TestNativeImagePreservesLegacyDirectoryForMigration(t *testing.T) {
 	bundle := buildBundle(t, "PRIME4PLUS", "5.3.0.5")
 	ctx := ctxT(t)
 	backup := filepath.Join(t.TempDir(), "backup.img")
@@ -109,10 +110,10 @@ func TestNativeImageRefusesConflictingLegacyDirectory(t *testing.T) {
 	}
 	defer fs.Close()
 	if err := fs.Apply(ctx, ext4.ChangeSet{
-		Directories: []string{"enginex", "sc5000-custom"},
+		Directories: []string{"enginex", migration.DataName},
 		Files: []ext4.Entry{
-			imageBytes("sc5000-custom/bundle/boot-activate.sh", []byte("stale"), 0o755),
-			imageBytes("sc5000-custom/bundle/lib/libengine-ui-hook.so", []byte("stale"), 0o755),
+			imageBytes(migration.DataName+"/bundle/boot-activate.sh", []byte("stale"), 0o755),
+			imageBytes(migration.DataName+"/bundle/lib/libengine-ui-hook.so", []byte("stale"), 0o755),
 		},
 	}); err != nil {
 		t.Fatal(err)
@@ -123,13 +124,21 @@ func TestNativeImageRefusesConflictingLegacyDirectory(t *testing.T) {
 	fb := newFastboot(t, "JC11S", true)
 	o := testOpts(t)
 	o.USB, o.Bundle, o.Backup = fb.Bin, bundle.Path, backup
-	err = run(ctx, o)
-	if err == nil || !strings.Contains(err.Error(), "legacy /sc5000-custom") || !strings.HasSuffix(err.Error(), "nothing flashed") {
-		t.Fatalf("conflicting directories: %v", err)
+	if err = run(ctx, o); err != nil {
+		t.Fatal(err)
 	}
-	if flashed := fb.Flashed(); len(flashed) != 0 {
-		t.Fatalf("flashed with stale legacy hook: %v", flashed)
+	prepared, err := ext4.Open(filepath.Join(fb.Dir, "flashed-data.img"))
+	if err != nil {
+		t.Fatal(err)
 	}
+	defer prepared.Close()
+	if b, err := prepared.ReadFile(migration.DataName+"/bundle/boot-activate.sh", 1<<20); err != nil || string(b) != "stale" {
+		t.Fatal("legacy user data changed")
+	}
+	if b, err := prepared.ReadFile("enginex/bundle/boot-activate.sh", 1<<20); err != nil || len(b) == 0 {
+		t.Fatal("new activation missing")
+	}
+
 }
 
 func TestNativeImageRefusesOversizedBackup(t *testing.T) {
@@ -190,7 +199,7 @@ func TestNativeImageWithoutHostTools(t *testing.T) {
 // Native image installation must accept a renamed bundle and an explicitly selected older bundle.
 func TestRename234NativeImageAcceptsBothSuiteNames(t *testing.T) {
 	bundle := buildBundle(t, "SCLIVE4", "5.3.0.5")
-	for _, suite := range []string{"bin/enginex-suite", "bin/sc5000-suite"} {
+	for _, suite := range []string{"bin/enginex-suite", "bin/enginex-suite"} {
 		t.Run(suite, func(t *testing.T) {
 			path := bundle.Path
 			if suite != "bin/enginex-suite" {

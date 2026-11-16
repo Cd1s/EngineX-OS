@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -579,7 +580,7 @@ func TestDownloadReusesTheFileOnDisk(t *testing.T) {
 	}
 }
 
-// #103: without an SD card the download dir is /data/sc5000-custom/Stream, a symlink to
+// #103: without an SD card the download dir is /data/the legacy data name/Stream, a symlink to
 // /data/enginex/Stream, and a finished download comes back symlink-resolved (SafePath).
 // Trim compared the two spellings and evicted the track it had just saved.
 func TestTrimKeepsTheResolvedDownloadUnderALinkedDir(t *testing.T) {
@@ -587,10 +588,10 @@ func TestTrimKeepsTheResolvedDownloadUnderALinkedDir(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(data, "enginex", "Stream"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink("enginex", filepath.Join(data, "sc5000-custom")); err != nil {
+	if err := os.Symlink("enginex", filepath.Join(data, migration.DataName)); err != nil {
 		t.Fatal(err)
 	}
-	c := &Client{DownloadDir: filepath.Join(data, "sc5000-custom", "Stream"), MaxCache: 1 << 40, MinFree: 1 << 62}
+	c := &Client{DownloadDir: filepath.Join(data, migration.DataName, "Stream"), MaxCache: 1 << 40, MinFree: 1 << 62}
 	for i, name := range []string{"1.flac", "2.flac"} {
 		path := filepath.Join(c.DownloadDir, name)
 		os.WriteFile(path, make([]byte, 100), 0o600)
