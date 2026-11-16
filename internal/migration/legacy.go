@@ -53,7 +53,5 @@ const (
 	// Pre-5.3.0.5 upgrade input.
 	PlaceholderHost = "sc5000.lan"
 	// Pre-5.3.0.5 upgrade input.
-	Stemsd = "sc5000-stemsd"
-	// Pre-5.3.0.5 upgrade input.
 	ProjectName = "sc5000"
 )
