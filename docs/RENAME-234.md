@@ -38,8 +38,9 @@ Installed ALSA configurations can enter the migration ABI once, then use the
 current `99-enginex.conf` / `enginex_alsa_boot_hook` configuration.
 
 `tools/az01-packer/test_rename234_names.py` checks paths and all current and
-historical text. Its explicit allow-list contains only migration files and a
-temporary Mods exception, to be removed when `agent/5305-mods-293` merges.
+historical text. Its explicit allow-list contains only the four migration files
+and the exact Minimal Club Mode implementation/test paths that migrate saved
+pause records. The rest of `docs/mods/` follows the current naming contract.
 Denon hardware model names and official image prefixes remain unchanged.
 
 ## History
