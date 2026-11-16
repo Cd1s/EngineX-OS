@@ -132,10 +132,10 @@ var (
 	uiStreamSortOrders = []string{"asc", "desc"}
 	uiSyncGuardPcts    = []int{0, 10, 15, 20}
 	// UI Scale presets: the QML mod scales the loaded UI live (EmbeddedMain uiLoader).
-	uiUIScales       = []int{110, 105, 100, 95, 90, 85, 80, 75}
-	uiPioneerFxModes = []string{"off", "spiral", "pitch_echo", "slip_roll", "dub_echo", "space"}
-	uiShadowModes    = []string{"auto", "engine", "cdj"}
-	uiFxTimeModes    = []string{"beats", "ms"}
+	uiUIScales            = []int{110, 105, 100, 95, 90, 85, 80, 75}
+	uiPioneerFxModes      = []string{"off", "spiral", "pitch_echo", "slip_roll", "dub_echo", "space"}
+	uiShadowModes         = []string{"auto", "engine", "cdj"}
+	uiFxTimeModes         = []string{"beats", "ms"}
 	uiMixstreamFxDefaults = []string{"Echo", "Flanger", "Delay", "Phaser"}
 	uiMixstreamFxChoices  = []string{"Echo", "Flanger", "Delay", "Phaser"}
 )
@@ -241,19 +241,19 @@ type uiSettings struct {
 	LedBrightness     int    `json:"ledBrightness"`
 	// UIScale enlarges or shrinks Engine's whole interface; it takes effect at the next
 	// Engine start, so the Control Center row asks before applying it.
-	UIScale             int    `json:"uiScale"`
+	UIScale             int      `json:"uiScale"`
 	StemsEqMode         bool     `json:"stemsEqMode"`
 	BeatJumpPads        bool     `json:"beatJumpPads"`
 	PitchBendBeatJump   bool     `json:"pitchBendBeatJump"`
 	MixstreamFx         []string `json:"mixstreamFx"`
 	JogInvertLeft       bool     `json:"jogInvertLeft"`
-	JogInvertRight      bool   `json:"jogInvertRight"`
-	SdHighSpeed         bool   `json:"sdHighSpeed"`
-	SdHighSpeedPending  bool   `json:"sdHighSpeedPending,omitempty"`
-	PioneerFx           string `json:"pioneerFx"`
-	FXSelectorAvailable bool   `json:"fxSelectorAvailable"`
-	FxTimeMode          string `json:"fxTimeMode"`
-	FxTimeMs            int    `json:"fxTimeMs"`
+	JogInvertRight      bool     `json:"jogInvertRight"`
+	SdHighSpeed         bool     `json:"sdHighSpeed"`
+	SdHighSpeedPending  bool     `json:"sdHighSpeedPending,omitempty"`
+	PioneerFx           string   `json:"pioneerFx"`
+	FXSelectorAvailable bool     `json:"fxSelectorAvailable"`
+	FxTimeMode          string   `json:"fxTimeMode"`
+	FxTimeMs            int      `json:"fxTimeMs"`
 
 	RelayURL          string `json:"relayUrl"`
 	DeemixPasswordSet bool   `json:"deemixPasswordSet"`
