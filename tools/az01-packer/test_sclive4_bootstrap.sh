@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 . "${ENGINEX_MIGRATION:-$(git rev-parse --show-toplevel)/rootfs-overlay/usr/libexec/enginex-migration}"
 ENGINEX_LAB=${ENGINEX_LAB:-$legacy_lab}
+legacy_data_name=${legacy_data##*/}
+export legacy_data legacy_data_name
 # End-to-end sandbox verification for SC LIVE 4 (inmusic,jp21) (#61).
 # Verifies Method A (host-side ext4 debugfs injection), Method B (on-device install.sh),
 # ALSA-to-LD_PRELOAD one-shot boot hook, and Engine 5.3.0-sclive4 full hook application.
@@ -125,8 +127,8 @@ debugfs -R "stat /enginex/bundle/lib/libedisksd-hook.so" "$IMG" 2>&1 | grep -q "
 debugfs -R "stat /enginex/bundle/boot-activate.sh" "$IMG" 2>&1 | grep -q "regular"
 test "$(debugfs -R "cat /enginex/version.txt" "$IMG" 2>/dev/null | tr -d '\r\n')" = "5.3.0.1.1"
 # #103: the old path stays reachable (the ALSA hook and older scripts use it)
-debugfs -R "stat /enginex-custom" "$IMG" 2>&1 | grep -q "symlink"
-debugfs -R "stat /enginex-custom/bundle/boot-activate.sh" "$IMG" 2>&1 | grep -q "regular"
+debugfs -R "stat /$legacy_data_name" "$IMG" 2>&1 | grep -q "symlink"
+debugfs -R "stat /$legacy_data_name/bundle/boot-activate.sh" "$IMG" 2>&1 | grep -q "regular"
 debugfs -R "stat /enginex/authorized_keys" "$IMG" 2>&1 | grep -q "Mode:  0600"
 echo "  Method A ext4 userdata injection: PASS"
 
@@ -246,7 +248,7 @@ mkdir -p -m 0700 '$TARGET/tmp/enginex-engine-home'
 # Launch real SC LIVE 4 Engine with LD_PRELOAD
 timeout 8 chroot '$TARGET' /usr/bin/env -i \
     HOME=/tmp/enginex-engine-home \
-    LD_PRELOAD=/data/enginex-custom/bundle/lib/libengine-ui-hook.so \
+    LD_PRELOAD=/data/enginex/bundle/lib/libengine-ui-hook.so \
     QT_QPA_PLATFORM=offscreen \
     LD_LIBRARY_PATH=/usr/qt/lib \
     /usr/Engine/Engine -d0 > '$TMP/stage2.log' 2>&1 || true
@@ -285,7 +287,7 @@ chroot '$TARGET' /bin/sh /tmp/installer/$PREFIX-5.3.0.1.1-EngineX-OS-Data-Bundle
 
 test -f '$TARGET/$VARLIB/alsa/conf.d/99-enginex.conf'
 test -f '$TARGET/data/enginex/version.txt'
-test -L '$TARGET/data/enginex-custom'
+test -L '$TARGET$legacy_data'
 
 # Run boot-activate.sh to verify service unit creation and subsequent cleanup
 chroot '$TARGET' /bin/sh /data/enginex/bundle/boot-activate.sh >/dev/null 2>&1 || true
@@ -317,8 +319,8 @@ if chroot '$TARGET' pgrep -x enginex-suite >/dev/null 2>&1; then exit 1; fi
 "
 echo "  Method B on-device install & uninstall: PASS"
 
-# 5b. #103 upgrade: a deck still on the real /data/enginex-custom keeps every file when install.sh runs
-echo "[5b] Testing upgrade from the legacy /data/enginex-custom directory..."
+# 5b. #103 upgrade: a deck still on the real $legacy_data keeps every file when install.sh runs
+echo "[5b] Testing upgrade from the legacy $legacy_data directory..."
 unshare -m -n -p -f bash -c "
 set -euo pipefail
 mount --bind '$ROOTFS' '$TARGET'
@@ -329,21 +331,21 @@ mount -t tmpfs tmpfs '$TARGET/run'
 mount -t tmpfs tmpfs '$TARGET/tmp'
 mount --bind /dev '$TARGET/dev'
 
-rm -f '$TARGET/data/enginex-custom'
+rm -f '$TARGET$legacy_data'
 rm -rf '$TARGET/data/enginex/bundle'
-mv '$TARGET/data/enginex' '$TARGET/data/enginex-custom'
-mkdir -p '$TARGET/data/enginex-custom/Stream'
-echo keep > '$TARGET/data/enginex-custom/Stream/song.flac'
-echo ssh-key > '$TARGET/data/enginex-custom/authorized_keys'
+mv '$TARGET/data/enginex' '$TARGET$legacy_data'
+mkdir -p '$TARGET$legacy_data/Stream'
+echo keep > '$TARGET$legacy_data/Stream/song.flac'
+echo ssh-key > '$TARGET$legacy_data/authorized_keys'
 mkdir -p '$TARGET/tmp/installer'
 tar -xzf '$BUNDLE' -C '$TARGET/tmp/installer'
 chroot '$TARGET' /bin/sh /tmp/installer/$PREFIX-5.3.0.1.1-EngineX-OS-Data-Bundle/install.sh >/dev/null
 
-test -L '$TARGET/data/enginex-custom'
-test \"\$(readlink '$TARGET/data/enginex-custom')\" = enginex
+test -L '$TARGET$legacy_data'
+test \"\$(readlink '$TARGET$legacy_data')\" = enginex
 test \"\$(cat '$TARGET/data/enginex/Stream/song.flac')\" = keep
-test \"\$(cat '$TARGET/data/enginex-custom/authorized_keys')\" = ssh-key
-test -f '$TARGET/data/enginex-custom/bundle/boot-activate.sh'
+test \"\$(cat '$TARGET$legacy_data/authorized_keys')\" = ssh-key
+test -f '$TARGET$legacy_data/bundle/boot-activate.sh'
 "
 echo "  Legacy directory upgrade: PASS"
 
