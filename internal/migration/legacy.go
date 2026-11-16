@@ -8,52 +8,52 @@ const (
 	StemsTokenFile = "/etc/sc5000-stems/token"
 	// Read-only fixture path on the build hosts.
 	LabDir = "/root/build/sc5000-lab"
-	// Legacy release reader or rollback contract.
+	// Pre-5.3.0.5 upgrade input.
 	DataDir = "/data/sc5000-custom"
-	// Legacy release reader or rollback contract.
+	// Pre-5.3.0.5 upgrade input.
 	DataRelative = "data/sc5000-custom"
-	// Legacy release reader or rollback contract.
+	// Pre-5.3.0.5 upgrade input.
 	WorkerPath = "/opt/sc5000-stems/worker.py"
-	// Legacy release reader or rollback contract.
+	// Pre-5.3.0.5 upgrade input.
 	ImageDir = "/etc/sc5000"
-	// Legacy release reader or rollback contract.
+	// Pre-5.3.0.5 upgrade input.
 	MediaCache = "/media/sc5000-sd-cache"
-	// Legacy release reader or rollback contract.
+	// Pre-5.3.0.5 upgrade input.
 	BroadcastInput = "/tmp/sc5000-broadcast.pcm"
-	// Legacy release reader or rollback contract.
+	// Pre-5.3.0.5 upgrade input.
 	TailscaleSocket = "/run/sc5000-tailscaled.sock"
-	// Legacy release reader or rollback contract.
+	// Pre-5.3.0.5 upgrade input.
 	DebugFlag = "/tmp/sc5000-debug"
-	// Pending removal: API alias used by installed clients.
+	// Pre-5.3.0.5 device detection and retired-namespace rejection.
 	APIPrefix = "/v1/sc5000"
-	// Legacy release reader or rollback contract.
+	// Pre-5.3.0.5 upgrade input.
 	SuitePattern = "[s]c5000-suite"
-	// Legacy release reader or rollback contract.
+	// Pre-5.3.0.5 upgrade input.
 	AlsaFile = "99-sc5000-custom.conf"
-	// Legacy release reader or rollback contract.
+	// Pre-5.3.0.5 upgrade input.
 	StemsEnvPrefix = "SC5000_STEMS_"
-	// Legacy release reader or rollback contract.
+	// Pre-5.3.0.5 upgrade input.
 	CustomEnv = "SC5000_CUSTOM"
-	// Legacy release reader or rollback contract.
+	// Pre-5.3.0.5 upgrade input.
 	AlsaEnv = "SC5000_ALSA_OVERLAY"
-	// Legacy release reader or rollback contract.
+	// Pre-5.3.0.5 upgrade input.
 	ScaleEnv = "SC5000_UI_SCALE"
-	// Legacy release reader or rollback contract.
+	// Pre-5.3.0.5 upgrade input.
 	DataName = "sc5000-custom"
-	// Legacy release reader or rollback contract.
+	// Pre-5.3.0.5 upgrade input.
 	Suite = "sc5000-suite"
-	// Legacy release reader or rollback contract.
+	// Pre-5.3.0.5 upgrade input.
 	Deemix = "sc5000-deemixd"
-	// Legacy release reader or rollback contract.
+	// Pre-5.3.0.5 upgrade input.
 	TailscaleUnit = "sc5000-tailscaled"
-	// Legacy release reader or rollback contract.
+	// Pre-5.3.0.5 upgrade input.
 	Token = "sc5000-token"
-	// Legacy release reader or rollback contract.
+	// Pre-5.3.0.5 upgrade input.
 	RefreshToken = "sc5000-refresh"
-	// Legacy release reader or rollback contract.
+	// Pre-5.3.0.5 upgrade input.
 	PlaceholderHost = "sc5000.lan"
-	// Legacy release reader or rollback contract.
+	// Pre-5.3.0.5 upgrade input.
 	Stemsd = "sc5000-stemsd"
-	// Legacy release reader or rollback contract.
+	// Pre-5.3.0.5 upgrade input.
 	ProjectName = "sc5000"
 )

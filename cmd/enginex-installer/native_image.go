@@ -110,15 +110,7 @@ func imageChanges(ctx context.Context, o *options, b *bundleInfo, fs *ext4.Image
 	if err != nil {
 		return ext4.ChangeSet{}, err
 	}
-	if root == "enginex" {
-		legacy, err := fs.Lstat(migration.DataName)
-		if err != nil {
-			return ext4.ChangeSet{}, err
-		}
-		if legacy == ext4.Directory {
-			return ext4.ChangeSet{}, errors.New("legacy /" + migration.DataName + " directory conflicts with /enginex; nothing flashed")
-		}
-	}
+
 	cs := ext4.ChangeSet{
 		Directories: []string{root + "/bundle/bin", root + "/bundle/lib", root + "/ui"},
 		Links:       links, Remove: []string{root + "/gen2-locked"},
@@ -139,7 +131,7 @@ func imageChanges(ctx context.Context, o *options, b *bundleInfo, fs *ext4.Image
 		case e.Path == "boot-activate.sh", e.Path == "install.sh", e.Path == "uninstall.sh":
 			mode = 0o755
 		case e.Path == "version.txt", e.Path == "release-tag", e.Path == "model", e.Path == "alsa-dir", e.Path == "SHA256SUMS":
-		case e.Path == migration.AlsaFile, e.Path == "99-enginex.conf":
+		case e.Path == "99-enginex.conf":
 			delete(missing, "99-enginex.conf")
 			for _, dir := range []string{"system/var/overlay/lib/alsa/conf.d", "system/var-lib/alsa/conf.d"} {
 				add(e, dir+"/"+e.Path, mode)
@@ -155,6 +147,14 @@ func imageChanges(ctx context.Context, o *options, b *bundleInfo, fs *ext4.Image
 	}
 	for path := range missing {
 		return cs, fmt.Errorf("bundle lacks %s; nothing flashed", path)
+	}
+	for _, dir := range []string{"system/var/overlay/lib/alsa/conf.d", "system/var-lib/alsa/conf.d"} {
+		path := dir + "/" + migration.AlsaFile
+		if kind, err := fs.Lstat(path); err != nil {
+			return cs, err
+		} else if kind == ext4.Regular || kind == ext4.Symlink {
+			cs.Remove = append(cs.Remove, path)
+		}
 	}
 	for _, dir := range b.bundle.UIDirs() {
 		cs.Directories = append(cs.Directories, root+"/ui/"+dir)

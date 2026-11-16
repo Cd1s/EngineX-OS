@@ -1,6 +1,6 @@
 # REA 可携带文本证据
 
-原始证据根目录是 `/root/build/sc5000-lab/rea-results`。厂商二进制、Ghidra临时项目、原始MCP信封/日志和完整snapshot均留在lab。这里保留本次证据文件的成功归一化结果及失败摘要，数量以INDEX为准，供报告引用和模块开发检索，不包含固件镜像。
+原始证据根目录是 `<firmware-lab>/rea-results`。厂商二进制、Ghidra临时项目、原始MCP信封/日志和完整snapshot均留在lab。这里保留本次证据文件的成功归一化结果及失败摘要，数量以INDEX为准，供报告引用和模块开发检索，不包含固件镜像。
 
 - [INDEX.json](INDEX.json)：按原始相对文件名定位 `observations.jsonl` 的行号、原文件SHA-256、REA Evidence ID和操作名。
 - [EVIDENCE-INDEX.json](EVIDENCE-INDEX.json) 是最终原始索引（267项、231个唯一Evidence ID）；[EVIDENCE-CONSISTENCY.json](EVIDENCE-CONSISTENCY.json) 和 [ARTIFACT-MANIFEST.sha256](ARTIFACT-MANIFEST.sha256) 保留lab端一致性结果与逐文件摘要。manifest中的路径相对lab证据目录，不表示原始大文件已纳入git。
@@ -17,7 +17,7 @@
 
 ```bash
 python3 docs/re-report/rea-evidence/curate_evidence.py \
-  /root/build/sc5000-lab/rea-results docs/re-report/rea-evidence \
+  <firmware-lab>/rea-results docs/re-report/rea-evidence \
   | cut -c1-200 | head -40
 ```
 

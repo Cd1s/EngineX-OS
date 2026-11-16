@@ -1,5 +1,5 @@
 #!/bin/sh
-# Legacy release readers and rollback support; source without changing the deck.
+# One-time readers for upgrading pre-5.3.0.5 data to the current names.
 legacy_data='/data/sc5000-custom' # Legacy release reader.
 legacy_ui=$legacy_data/ui # Legacy UI settings reader.
 legacy_hfs='/run/sc5000-hfs-views' # Legacy release reader.
@@ -26,31 +26,94 @@ legacy_packer='sc5000-custom*' # Legacy release reader.
 # Read environment overrides passed by older updaters.
 ENGINEX_CUSTOM=${ENGINEX_CUSTOM:-${SC5000_CUSTOM:-}}
 ENGINEX_ALSA_OVERLAY=${ENGINEX_ALSA_OVERLAY:-${SC5000_ALSA_OVERLAY:-}}
+ENGINEX_UI_SCALE=${ENGINEX_UI_SCALE:-${SC5000_UI_SCALE:-}}
+unset SC5000_CUSTOM SC5000_ALSA_OVERLAY SC5000_UI_SCALE
+export ENGINEX_UI_SCALE
+[ "$ENGINEX_CUSTOM" != "$legacy_data" ] || ENGINEX_CUSTOM=
+
+
+# Rewrites managed configuration bytes without changing JSON syntax or file modes.
+migrate_file() {
+    mf_file=$1
+    [ -f "$mf_file" ] && [ ! -L "$mf_file" ] || return 0
+    grep -q "$legacy_unit" "$mf_file" || grep -q 'SC5000_' "$mf_file" || return 0
+    mf_tmp="${mf_file%/*}/.enginex-migrate.$$"
+    cp -p "$mf_file" "$mf_tmp" || return 1
+    sed -e "s|$legacy_data|/data/enginex|g" \
+        -e "s|$legacy_deemix_unit|enginex-deemixd.service|g" \
+        -e "s|/run/$legacy_unit|/run/enginex|g" \
+        -e "s|/tmp/$legacy_unit|/tmp/enginex|g" \
+        -e "s|/etc/$legacy_unit|/etc/enginex|g" \
+        -e "s|/v1/$legacy_unit|/v1/enginex|g" \
+        -e "s|$legacy_unit\\.lan|enginex.lan|g" \
+        -e "s|$legacy_unit-stems-|enginex-stems-|g" \
+        -e 's|SC5000_UI_SCALE=|ENGINEX_UI_SCALE=|g' "$mf_file" > "$mf_tmp" || return 1
+    if cmp -s "$mf_file" "$mf_tmp"; then rm -f "$mf_tmp"; else mv "$mf_tmp" "$mf_file"; fi
+}
+
+migrate_values() {
+    [ ! -e "$new/.migrated-5.3.0.5" ] || return 0
+    for mv_dir in "$new" "$new/ui" "$new/state" "$new/tailscale"; do
+        [ -d "$mv_dir" ] && [ ! -L "$mv_dir" ] || continue
+        for mv_file in "$mv_dir"/*.json "$mv_dir"/*.conf "$mv_dir"/*.env; do
+            migrate_file "$mv_file" || return 1
+        done
+    done
+    mv_accounts=/data/StreamingAccounts.json
+    if [ -f "$mv_accounts" ] && [ ! -L "$mv_accounts" ]; then
+        mv_tmp=/data/.enginex-accounts.$$
+        cp -p "$mv_accounts" "$mv_tmp" || return 1
+        # Only complete synthetic credential values are changed, including nested JSON strings.
+        sed -e 's|\(["\\]\)'"$legacy_unit"'-token\(["\\]\)|\1enginex\2|g' \
+            -e 's|\(["\\]\)'"$legacy_unit"'-refresh\(["\\]\)|\1enginex\2|g' "$mv_accounts" > "$mv_tmp" || return 1
+        if cmp -s "$mv_accounts" "$mv_tmp"; then rm -f "$mv_tmp"; else mv "$mv_tmp" "$mv_accounts"; fi
+    fi
+    # Installed ALSA configuration is converted before the data alias disappears.
+    for mv_dir in /data/system/var/overlay/lib/alsa/conf.d /data/system/var-lib/alsa/conf.d; do
+        mv_old="$mv_dir/$legacy_alsa"
+        [ -d "$mv_dir" ] && [ ! -L "$mv_dir" ] && [ -f "$mv_old" ] && [ ! -L "$mv_old" ] || continue
+        grep -q "$legacy_unit" "$mv_old" || continue
+        mv_tmp="$mv_dir/.enginex-alsa.$$"
+        cp -p "$mv_old" "$mv_tmp" || return 1
+        sed -e "s|$legacy_data|/data/enginex|g" -e "s|$legacy_unit|enginex|g" "$mv_old" > "$mv_tmp" || return 1
+        [ -e "$mv_dir/99-enginex.conf" ] || mv "$mv_tmp" "$mv_dir/99-enginex.conf"
+        rm -f "$mv_tmp" "$mv_old"
+    done
+    : > "$new/.migrated-5.3.0.5"
+}
 
 migrate_data() {
-# /data/sc5000-custom became /data/enginex (#103): one rename keeps every file, and a
-# symlink keeps the old path working for older scripts and for a rollback.
 old=$legacy_data
 new=/data/enginex
 if [ -d "$old" ] && [ ! -L "$old" ]; then
-    # A downgrade to a release before 5.3.0.3 handed the real directory back and left enginex as
-    # the link to it (#234, internal/leave): that link goes, the directory moves back.
     case $(readlink "$new" 2>/dev/null) in
     "${legacy_data##*/}" | "$legacy_data" | enginex) rm -f "$new" ;;
     esac
     if [ ! -e "$new" ] && [ ! -L "$new" ]; then
         mv "$old" "$new"
     elif [ -d "$new" ] && [ ! -L "$new" ]; then
-        # Both are real: move over what enginex lacks, set the remainder aside.
+        if [ -d "$old/ui" ] && [ ! -L "$old/ui" ] && [ -d "$new/ui" ] && [ ! -L "$new/ui" ]; then
+            for e in "$old/ui"/*.conf "$old/ui"/*.json "$old/ui"/*.env; do
+                [ -f "$e" ] && [ ! -L "$e" ] || continue
+                [ -e "$new/ui/${e##*/}" ] || [ -L "$new/ui/${e##*/}" ] || mv "$e" "$new/ui/"
+            done
+        fi
         for e in "$old"/* "$old"/.[!.]*; do
             [ -e "$e" ] || [ -L "$e" ] || continue
             [ -e "$new/${e##*/}" ] || [ -L "$new/${e##*/}" ] || mv "$e" "$new/"
         done
         rmdir "$old" 2>/dev/null || mv "$old" "$new/legacy-data.$$"
+    else
+        echo 'migration: refusing an unrelated current data symlink' >&2
+        return 1
     fi
 fi
 [ -e "$new" ] || [ -L "$new" ] || mkdir -p "$new"
-{ [ -d "$old" ] && [ ! -L "$old" ]; } || ln -sfn enginex "$old"
+[ -d "$new" ] && [ ! -L "$new" ] || return 1
+migrate_values || return 1
+if [ -L "$old" ]; then
+    case $(readlink "$old") in enginex|"$new") rm -f "$old" ;; esac
+fi
 }
 
 # Server migration inputs; read only by the documented operator procedure.

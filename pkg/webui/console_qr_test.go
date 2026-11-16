@@ -217,7 +217,7 @@ func TestConsoleQRAndTunnelPrecedence(t *testing.T) {
 	wantTokenLeakPNG, _ := qrcode.Encode(wantTunnelURL+"?token=K7M9-P4X2", qrcode.Medium, 320)
 
 	// 1. Tunnel off: deck-local /v1/enginex/console-qr answers locally and encodes LAN URL without token.
-	for _, path := range []string{"/v1/enginex/console-qr", migration.APIPrefix + "/console-qr"} {
+	for _, path := range []string{"/v1/enginex/console-qr"} {
 		w := httptest.NewRecorder()
 		r := httptest.NewRequest(http.MethodGet, path, nil)
 		r.Host = "127.0.0.1:8080"

@@ -16,7 +16,7 @@
   /usr/bin/az01-ethernet-speed 1000
   ```
 - **后果**：正常打碟模式下，SC5000 的千兆以太网被原厂脚本硬生生锁死在 **100Mbps**，导致局域网曲库加载、Engine DJ 同步、Pro DJ Link 传输速度被砍掉 90%！
-- **修复**：在 `rootfs-overlay` 及 `sc5000-debloat` 中将正常模式的网口速率恢复为 `1000`（支持自适应回退）。
+- **修复**：在 `rootfs-overlay` 及 `enginex-debloat` 中将正常模式的网口速率恢复为 `1000`（支持自适应回退）。
 
 ### 2. `/usr/Engine/Scripts/setup-prerequisites.sh` 的灾难级中断亲和性（IRQ Affinity）分配
 - **原厂代码**：
@@ -35,7 +35,7 @@
   1. 原厂把 **Mali GPU (`ffa30000`)、以太网 (`eth0`)、USB 控制器 (`ehci_hcd` / `ff540000`，同时跑 U 盘读写和面板控制器)** 全部塞在同一颗核心 **`CPU 1`** 上！一旦边读取 U 盘大文件或网络同步，一边滑动 60fps 波形，GPU 和 USB 中断在 `CPU 1` 上激烈抢占，直接导致触盘卡顿与波形掉帧（对应 `EOS-04` / `EOS-05`）。
   2. 原厂把 **音频 I2S (`ffb20000`)** 放在了 `CPU 3`！如果不修正这一条，后台任务绑在 `CPU 3` 就会与实时音频中断相撞。
 - **修复**：
-  - 在 `sc5000-perf-tune`（设为 `After=engine.service`）及覆盖脚本中重排 4 核分工：
+  - 在 `enginex-perf-tune`（设为 `After=engine.service`）及覆盖脚本中重排 4 核分工：
     - `CPU 0`：**独占实时音频 (`ffb20000`，`chrt -f -p 99`)**；
     - `CPU 1`：**独占 Mali GPU (`ffa30000`) + Qt6 渲染线程**；
     - `CPU 2`：**独占 USB 存储/控制面板 (`ehci_hcd`, `ff540000`) 与千兆网络 (`eth0`)**；
@@ -52,7 +52,7 @@
     fscryptctl set_policy "$key" "$dir"
   ```
   且每次开机用 `/dev/urandom` 生成一次性随机密钥，加密失败还会调 `/usr/Engine/Reporter` 甚至触发 `az01-update --erase-data`（恢复出厂清空数据）！同时在 `#!/bin/sh` 下混用 `function` 和 `[[ ]]` 非 POSIX 语法。
-- **修复**：在 `sc5000-debloat` 中移除自动触发 `--erase-data` 的危险分支，并将我们的流媒体常驻下载仓指向 `/media/sc5000-sd-cache/Downloads`（避免被原厂 `/data/downloads` 每次重启清空）。
+- **修复**：在 `enginex-debloat` 中移除自动触发 `--erase-data` 的危险分支，并将我们的流媒体常驻下载仓指向 `/media/enginex-sd-cache/Downloads`（避免被原厂 `/data/downloads` 每次重启清空）。
 
 ### 4. `/usr/Engine/Scripts/engine.service` 缺失脚本、无限 Core Dump 写盘与死循环失效
 - **原厂代码**：

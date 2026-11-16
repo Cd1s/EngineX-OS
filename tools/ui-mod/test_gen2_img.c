@@ -109,6 +109,10 @@ static void test_open_verify(void) {
     FILE *f = fopen(img, "wb"); assert(f && fwrite(head, 1, sizeof head, f) == sizeof head && !fclose(f));
     snprintf(cmd, sizeof cmd, "cat %s/bundle.tar.gz >> %s/apply.img", dir, dir);
     assert(system(cmd) == 0);
+    put(dir, "enginex/bundle/bin/enginex-suite",
+        "#!/bin/sh\n[ \"$1 $2\" = 'leave install' ] || exit 2\nexec sh \"$3/install.sh\"\n");
+    snprintf(cmd, sizeof cmd, "chmod +x %s/enginex/bundle/bin/enginex-suite", dir);
+    assert(system(cmd) == 0);
     assert(az01_apply_image(img, 1) == 0);
     assert(!exists(dir, "apply.img") && exists(dir, "enginex/applied-version.txt"));
     unsetenv("ENGINEX_TEST_DATA_ROOT");
@@ -257,9 +261,7 @@ static void test_erase_reports_failure(void) {
     puts("Factory Reset on a /data it cannot write reports failure, keeps the files, does not reboot (BH-G2-6): PASS");
 }
 
-// #234: after a good install from a USB image, this release's leave step (/run/enginex/leave.sh,
-// written by its boot-activate.sh) runs before the reboot, with --no-reboot: the hook reboots.
-// A failed install leaves the running release alone: no leave step.
+// USB image apply delegates to the installed upgrade guard before any installer runs.
 static void apply_with(const char *dir, const char *install, int want) {
     char cmd[PATH_MAX * 3], img[PATH_MAX], hex[65] = {0};
     snprintf(cmd, sizeof cmd, "rm -rf %s/pkg %s/bundle.tar.gz", dir, dir);
@@ -277,39 +279,35 @@ static void apply_with(const char *dir, const char *install, int want) {
     assert(system(cmd) == 0);
     assert(az01_apply_image(img, 0) == want);
 }
-static void test_apply_runs_the_leave_step(void) {
-    char dir[] = "/tmp/gen2-leave-XXXXXX", cmd[PATH_MAX];
-    const char *inst = "#!/bin/sh\nprintf '5.3.0.4\\n' > \"$ENGINEX_CUSTOM/applied-version.txt\"\n";
+static void test_apply_uses_the_upgrade_guard(void) {
+    char dir[] = "/tmp/gen2-upgrade-XXXXXX", cmd[PATH_MAX];
+    const char *inst = "#!/bin/sh\nprintf applied > \"$ENGINEX_CUSTOM/applied-version.txt\"\n";
     assert(mkdtemp(dir));
     board(dir, "inmusic,jp21");
     setenv("ENGINEX_TEST_DATA_ROOT", dir, 1);
-    // A release before 5.3.0.5 has no leave step: the bundle's own install.sh, in place.
+    // No guard, or a guard refusing the bundle: its installer must not run.
+    apply_with(dir, inst, -1);
+    assert(!exists(dir, "enginex/applied-version.txt"));
+    put(dir, "enginex/bundle/bin/enginex-suite", "#!/bin/sh\nexit 1\n");
+    snprintf(cmd, sizeof cmd, "chmod +x %s/enginex/bundle/bin/enginex-suite", dir);
+    assert(system(cmd) == 0);
+    apply_with(dir, inst, -1);
+    assert(!exists(dir, "enginex/applied-version.txt"));
+    put(dir, "enginex/bundle/bin/enginex-suite",
+        "#!/bin/sh\n[ \"$1 $2\" = 'leave install' ] || exit 2\nexec sh \"$3/install.sh\"\n");
+    assert(system(cmd) == 0);
     apply_with(dir, inst, 0);
     assert(exists(dir, "enginex/applied-version.txt"));
-    snprintf(cmd, sizeof cmd, "rm -f %s/enginex/applied-version.txt", dir);
-    assert(system(cmd) == 0);
-    // The step gets the unpacked bundle and puts it in (an older one through its stage, #234
-    // review); the hook does not run install.sh itself, and the caller reboots.
-    put(dir, "run/enginex/leave.sh",
-        "[ \"$1\" = --install ] && [ -f \"$2/install.sh\" ] && printf '%s\\n' \"$3\" > \"$(dirname \"$0\")/left\"\n");
-    apply_with(dir, inst, 0);
-    assert(!exists(dir, "enginex/applied-version.txt") && exists(dir, "run/enginex/left"));
-    FILE *f = fopen(strcat(strcpy(cmd, dir), "/run/enginex/left"), "r");
-    char args[64] = {0};
-    assert(f && fgets(args, sizeof args, f) && !fclose(f) && !strcmp(args, "--no-reboot\n"));
-    // A step that fails (a bad bundle, a deck that cannot swap atomically) fails the apply.
-    put(dir, "run/enginex/leave.sh", "exit 1\n");
-    apply_with(dir, inst, -1);
     unsetenv("ENGINEX_TEST_DATA_ROOT");
     snprintf(cmd, sizeof cmd, "rm -rf %s", dir);
     assert(system(cmd) == 0);
-    puts("#234: a USB image install goes through this release's leave step (--install, --no-reboot), in place without one, and fails with it: PASS");
+    puts("#234: USB image apply uses the upgrade guard and a refusal leaves data unchanged: PASS");
 }
 
 int main(void) {
     test_sha256();
     test_open_verify();
-    test_apply_runs_the_leave_step();
+    test_apply_uses_the_upgrade_guard();
     test_other_model_refused();
     test_erase();
     test_erase_reports_failure();

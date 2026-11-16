@@ -13,22 +13,22 @@
 Inspecting the AZ01 update containers proves which stage painted the stuck screen:
 
 - Both stock `PRIME4-5.3.0-Update.img` and `PRIME4-5.3.0.3-EngineX-OS-Denon-PRIME-4-JC11-Update.img` carry the identical 4,096,000-byte raw U-Boot `splash` partition (`SHA-1: 67551db23cde78946fd7636449a2874ba3469869`), which renders `"engine dj"` + `"5.3.0"` into the framebuffer before Linux starts.
-- By contrast, `SplashScreen.png` inside `5.3.0.3`'s `/usr/share/sc5000-custom/ui-packs.tar.xz` (`12,698` bytes) renders `"engine X"` + `"5.3.0.3"` once Qt/QML paints frame 1.
+- By contrast, `SplashScreen.png` inside `5.3.0.3`'s `/usr/share/enginex/ui-packs.tar.xz` (`12,698` bytes) renders `"engine X"` + `"5.3.0.3"` once Qt/QML paints frame 1.
 - Combined with the pre-Engine MCU LED pattern and live `:8080` `stream-sync` daemon, Linux `multi-user.target` is up, but `/usr/Engine/Engine` on the affected physical `JC11` stalls or fails before committing its first QML frame to DRM/KMS.
 
-## 3. Why Re-Flashing `5.3.0.2` After `5.3.0.3` Fails `sc5000-custom-prepare`
+## 3. Why Re-Flashing `5.3.0.2` After `5.3.0.3` Fails `enginex-prepare`
 
-In `5.3.0.3`, `sc5000-custom-prepare` (`MIGRATE` in `tools/az01-packer/az01_packer.py`) renames `/data/sc5000-custom` to `/data/enginex` and creates the compatibility symlink `/data/sc5000-custom -> enginex`.
+In `5.3.0.3`, `enginex-prepare` (`MIGRATE` in `tools/az01-packer/az01_packer.py`) renames `/data/enginex` to `/data/enginex` and creates the compatibility symlink `/data/enginex -> enginex`.
 
-When `5.3.0.2` is subsequently flashed without erasing `/data`, `5.3.0.2`'s older `sc5000-custom-prepare` executes:
+When `5.3.0.2` is subsequently flashed without erasing `/data`, `5.3.0.2`'s older `enginex-prepare` executes:
 
 ```sh
-for path in /data/sc5000-custom ...; do
+for path in /data/enginex ...; do
     [ ! -L "$path" ] || { echo "Refusing persistent SSH symlink: $path" >&2; exit 1; }
 done
 ```
 
-`sc5000-custom-prepare.service` exits `1` on `/data/sc5000-custom` being a symlink, so `5.3.0.2` never unpacks its `5.3.0.2` UI packs and instead boots `5.3.0.2`'s hook/rootfs against `5.3.0.3`'s `/data/enginex` directory. Stock `5.3.0` ignores `/data/enginex` and `/data/sc5000-custom` completely.
+`enginex-prepare.service` exits `1` on `/data/enginex` being a symlink, so `5.3.0.2` never unpacks its `5.3.0.2` UI packs and instead boots `5.3.0.2`'s hook/rootfs against `5.3.0.3`'s `/data/enginex` directory. Stock `5.3.0` ignores `/data/enginex` and `/data/enginex` completely.
 
 ## 4. Multi-Boot + Power-Cut Sandbox Matrix
 
@@ -59,6 +59,6 @@ Because both `offscreen` and `eglfs_kms` complete Boot 2 cleanly on the identica
 
 To ensure no `/data` or internal-drive state regression can ever slip past single-boot testing:
 
-- `internal/testlibrary.ExportDrive` (`SC5000_GATE_LIBRARY`) populates an `Engine Library/Database2/m.db` (`3.0.2`) + WAV fixture bind-mounted at `/media/az01-internal` in every release-gate phase.
+- `internal/testlibrary.ExportDrive` (`ENGINEX_GATE_LIBRARY`) populates an `Engine Library/Database2/m.db` (`3.0.2`) + WAV fixture bind-mounted at `/media/az01-internal` in every release-gate phase.
 - `tools/az01-packer/gate-ui-probe.qml` waits for `splashScreenController.viewModel.isUnlocked` before opening Control Center and emits `SCPROBE splash|<active>|<unlocked>|`, asserted as `SCPROBE splash|0|1|` on both boots.
 - `tools/az01-packer/release-gate.sh` starts both new-release boots through `engine-ui-guard service` with the boot watch (`engine-guardian.service`) and requires the main UI to acknowledge the current boot attempt (UI-ready replaced the 15 s uptime window), drops `CAP_SYS_TIME` via `setpriv`, kills `--phase new` with `SIGKILL` while `Engine` and daemons are live, verifies `running-sentinel` survival and dirty `.cache/qml` purge, and runs `--phase boot2` (`second boot after power cut on the same /data`) across all three 1st-gen image groups (`JP07`, `JP13`, `JC11`).

@@ -1,40 +1,11 @@
 {
   "migration": {
-    "internal/migration/legacy.go": "Readers and rollback contracts for releases before the rename",
-    "rootfs-overlay/usr/libexec/enginex-migration": "Shell migration readers, cleanup and the pending data compatibility link",
-    "tools/az01-packer/legacy_names.py": "Build-time migration readers and unchanged legacy shell fragments",
-    "tools/legacy_names.h": "C readers and ABI entry points used by already-installed ALSA configurations"
+    "internal/migration/legacy.go": "One-time upgrade readers for pre-5.3.0.5 decks",
+    "rootfs-overlay/usr/libexec/enginex-migration": "One-time data/configuration migration and old-name cleanup",
+    "tools/az01-packer/legacy_names.py": "Build and test readers of pre-5.3.0.5 inputs",
+    "tools/legacy_names.h": "One-time boot readers for installed pre-5.3.0.5 configurations"
   },
-  "history": {
-    "internal/leave/testdata/**": "Unmodified published installers used by the downgrade fault matrix",
-    "docs/ISSUE-FIXES-*": "Released-version records",
-    "docs/re-report/rea-evidence/**": "Immutable firmware evidence",
-    "docs/REGRESSION-5.3.0.3-to-5.3.0.4.md": "Released-version regression record",
-    "docs/ISSUE-FIXES-2026-11-04.md": "Dated investigation or firmware analysis; recorded paths and evidence stay unchanged",
-    "docs/STEMS-HOTCUE-LIVE-20261103.md": "Dated investigation or firmware analysis; recorded paths and evidence stay unchanged",
-    "docs/STEMS-REMOTE-ACCEPTANCE-20261103.md": "Dated investigation or firmware analysis; recorded paths and evidence stay unchanged",
-    "docs/STREAMING-STEMS-20261103.md": "Dated investigation or firmware analysis; recorded paths and evidence stay unchanged",
-    "docs/re-report/ENGINE-5.0.4-ANALYSIS.md": "Dated investigation or firmware analysis; recorded paths and evidence stay unchanged",
-    "docs/re-report/ENGINE-5.0.4-ELF-ADDRESS-MAP.json": "Dated investigation or firmware analysis; recorded paths and evidence stay unchanged",
-    "docs/re-report/ENGINE-5.0.4-performance-samples.json": "Dated investigation or firmware analysis; recorded paths and evidence stay unchanged",
-    "docs/re-report/ENGINE-OS-KNOWN-BUGS.md": "Dated investigation or firmware analysis; recorded paths and evidence stay unchanged",
-    "docs/re-report/FIRMWARE-BUGS-AND-DEBLOAT.md": "Dated investigation or firmware analysis; recorded paths and evidence stay unchanged",
-    "docs/re-report/ISSUE-140-PRIME4-BOOT-20261111.md": "Dated investigation or firmware analysis; recorded paths and evidence stay unchanged",
-    "docs/re-report/REA-BINARY-REPORT.md": "Dated investigation or firmware analysis; recorded paths and evidence stay unchanged",
-    "docs/re-report/REVIEW.md": "Dated investigation or firmware analysis; recorded paths and evidence stay unchanged",
-    "docs/re-report/SC5000-PERF-GC-AFFINITY-20261109.md": "Dated investigation or firmware analysis; recorded paths and evidence stay unchanged",
-    "docs/re-report/SC5000-R2-FREEZE-PERF-20261109.md": "Dated investigation or firmware analysis; recorded paths and evidence stay unchanged",
-    "docs/re-report/VALIDATION.json": "Dated investigation or firmware analysis; recorded paths and evidence stay unchanged",
-    "docs/re-report/verbose-logging-20261110.md": "Dated investigation or firmware analysis; recorded paths and evidence stay unchanged",
-    "docs/reports/5305-applemusic-spotify-integration.md": "Dated investigation or firmware analysis; recorded paths and evidence stay unchanged",
-    "docs/reports/applemusic-spotify-integration-20261115.md": "Dated investigation or firmware analysis; recorded paths and evidence stay unchanged",
-    "docs/reports/stream-cold-20261109.md": "Dated investigation or firmware analysis; recorded paths and evidence stay unchanged",
-    "docs/reports/stream-perf-20261109.md": "Dated investigation or firmware analysis; recorded paths and evidence stay unchanged"
-  },
-  "delegated": {
-    "docs/mods/**": "Owned by the Mods rename lane"
-  },
-  "history_sections": {
-    "docs/RENAME-234.md": "## History (initial rename)"
+  "temporary": {
+    "docs/mods/**": "remove when agent/5305-mods-293 merges"
   }
 }

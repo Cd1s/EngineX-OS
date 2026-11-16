@@ -954,7 +954,6 @@ func TestNativeReadbackRefusesUnverifiableActivation(t *testing.T) {
 	for _, path := range []string{
 		"enginex/version.txt", "enginex/bundle/version.txt",
 		"enginex/bundle/boot-activate.sh", "enginex/bundle/lib/libengine-ui-hook.so",
-		migration.DataName + "/bundle/boot-activate.sh", migration.DataName + "/bundle/lib/libengine-ui-hook.so",
 		"system/var/overlay/lib/alsa/conf.d/" + "99-enginex.conf",
 	} {
 		t.Run(path, func(t *testing.T) {
@@ -999,13 +998,13 @@ func TestModeBJC11SLegacyBackup(t *testing.T) {
 	}
 	img := filepath.Join(fb.Dir, "flashed-data.img")
 	sh(t, "e2fsck", "-fn", img)
-	for _, path := range []string{"/" + migration.DataName + "/bundle/boot-activate.sh", "/Music/keep.mp3"} {
+	for _, path := range []string{"/enginex/bundle/boot-activate.sh", "/Music/keep.mp3"} {
 		if out := sh(t, "debugfs", "-R", "stat "+path, img); !strings.Contains(out, "Type: regular") {
 			t.Fatalf("missing %s: %s", path, out)
 		}
 	}
-	if out := sh(t, "debugfs", "-R", "stat /enginex", img); strings.Contains(out, "Type: directory") {
-		t.Fatal("fixture did not exercise a real legacy installation directory")
+	if out := sh(t, "debugfs", "-R", "stat /"+migration.DataName, img); !strings.Contains(out, "Type: directory") {
+		t.Fatal("real legacy directory was removed before migration")
 	}
 }
 

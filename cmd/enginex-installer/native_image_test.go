@@ -100,7 +100,7 @@ func TestNativeImageRequiresCompleteBundle(t *testing.T) {
 	}
 }
 
-func TestNativeImageRefusesConflictingLegacyDirectory(t *testing.T) {
+func TestNativeImagePreservesLegacyDirectoryForMigration(t *testing.T) {
 	bundle := buildBundle(t, "PRIME4PLUS", "5.3.0.5")
 	ctx := ctxT(t)
 	backup := filepath.Join(t.TempDir(), "backup.img")
@@ -124,13 +124,21 @@ func TestNativeImageRefusesConflictingLegacyDirectory(t *testing.T) {
 	fb := newFastboot(t, "JC11S", true)
 	o := testOpts(t)
 	o.USB, o.Bundle, o.Backup = fb.Bin, bundle.Path, backup
-	err = run(ctx, o)
-	if err == nil || !strings.Contains(err.Error(), "legacy /"+migration.DataName) || !strings.HasSuffix(err.Error(), "nothing flashed") {
-		t.Fatalf("conflicting directories: %v", err)
+	if err = run(ctx, o); err != nil {
+		t.Fatal(err)
 	}
-	if flashed := fb.Flashed(); len(flashed) != 0 {
-		t.Fatalf("flashed with stale legacy hook: %v", flashed)
+	prepared, err := ext4.Open(filepath.Join(fb.Dir, "flashed-data.img"))
+	if err != nil {
+		t.Fatal(err)
 	}
+	defer prepared.Close()
+	if b, err := prepared.ReadFile(migration.DataName+"/bundle/boot-activate.sh", 1<<20); err != nil || string(b) != "stale" {
+		t.Fatal("legacy user data changed")
+	}
+	if b, err := prepared.ReadFile("enginex/bundle/boot-activate.sh", 1<<20); err != nil || len(b) == 0 {
+		t.Fatal("new activation missing")
+	}
+
 }
 
 func TestNativeImageRefusesOversizedBackup(t *testing.T) {

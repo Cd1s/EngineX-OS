@@ -1,13 +1,13 @@
 # 实际操作及复现入口
 
-工作目录和分析输出均在 `/root/build/sc5000-lab`；首次 `npm view` 意外使用默认 npm 缓存的例外及处理见末节。没有运行 `rea setup`、厂商 ARM 程序、bootloader 或 MCU 操作；未修改系统/用户配置、服务或数据库；未提交或推送。
+工作目录和分析输出均在 `<firmware-lab>`；首次 `npm view` 意外使用默认 npm 缓存的例外及处理见末节。没有运行 `rea setup`、厂商 ARM 程序、bootloader 或 MCU 操作；未修改系统/用户配置、服务或数据库；未提交或推送。
 
 ## 工具取得
 
 执行过 `npm view rea-agents version engines dist.unpackedSize`，返回最新版 6.8.0，要求 Node `^22.23.4 || ^24.22.1 || >=26.12.1`。
 
 ```bash
-PATH="/usr/local/bin:$PATH" npm_config_cache=/root/build/sc5000-lab/rea-tools/npm-cache npm install --prefix /root/build/sc5000-lab/rea-tools --no-audit --no-fund node@22.23.4 rea-agents@6.8.0
+PATH="/usr/local/bin:$PATH" npm_config_cache=<firmware-lab>/rea-tools/npm-cache npm install --prefix <firmware-lab>/rea-tools --no-audit --no-fund node@22.23.4 rea-agents@6.8.0
 ```
 
 实际安装完整输出在 `install.log`。安装命令使用主机 Node 22.23.2，npm 曾输出版本警告；后续所有 REA 分析都显式使用下载的 Node 22.23.4。
@@ -23,10 +23,10 @@ PATH="/usr/local/bin:$PATH" npm_config_cache=/root/build/sc5000-lab/rea-tools/np
 实际启动入口（先后重启过：缺少 JDK、补齐 JDK、带 ops 种子、普通分析）为：
 
 ```bash
-python3 /root/build/sc5000-lab/rea-results/rea_rpc.py serve
-REA_GHIDRA_SEED_FILE=/root/build/sc5000-lab/rea-results/libaz01-seeds.tsv python3 /root/build/sc5000-lab/rea-results/rea_rpc.py serve
-GHIDRA_HEADLESS_MAXMEM=4G python3 /root/build/sc5000-lab/rea-results/rea_rpc.py serve
-SC5000_REA_OUTPUT=/root/build/sc5000-lab/rea-results/offline python3 /root/build/sc5000-lab/rea-results/rea_rpc.py serve
+python3 <firmware-lab>/rea-results/rea_rpc.py serve
+REA_GHIDRA_SEED_FILE=<firmware-lab>/rea-results/libaz01-seeds.tsv python3 <firmware-lab>/rea-results/rea_rpc.py serve
+GHIDRA_HEADLESS_MAXMEM=4G python3 <firmware-lab>/rea-results/rea_rpc.py serve
+ENGINEX_REA_OUTPUT=<firmware-lab>/rea-results/offline python3 <firmware-lab>/rea-results/rea_rpc.py serve
 ```
 
 所有服务均是本任务临时前台进程及 lab 内 Unix socket，不注册系统服务，不对网络监听。OfflineAnalyzer 用独立连接，避免重复导入 Engine。没有创建子 agent。
@@ -34,9 +34,9 @@ SC5000_REA_OUTPUT=/root/build/sc5000-lab/rea-results/offline python3 /root/build
 每条调用的**精确参数、顺序、时间及完整返回值**见两份 `mcp-transcript.jsonl`，例如：
 
 ```bash
-python3 /root/build/sc5000-lab/rea-results/query.py open_binary '{"path":"/root/build/sc5000-lab/5.0.4/tree/usr/Engine/Engine","provider_id":"ghidra"}'
-python3 /root/build/sc5000-lab/rea-results/query.py list_procedures '{"detail":"complete"}'
-python3 /root/build/sc5000-lab/rea-results/query.py xrefs '{"address":"0x14348"}'
+python3 <firmware-lab>/rea-results/query.py open_binary '{"path":"<firmware-lab>/5.0.4/tree/usr/Engine/Engine","provider_id":"ghidra"}'
+python3 <firmware-lab>/rea-results/query.py list_procedures '{"detail":"complete"}'
+python3 <firmware-lab>/rea-results/query.py xrefs '{"address":"0x14348"}'
 ```
 
 种子文件完全由 `0043/0044/0045-read_bytes.evidence.json` 的 LE32 函数指针派生，去重后 28 个地址；使用 `function` 类型，不人为添加厂商符号名。种子改变的是 Ghidra 的临时分析数据库，不改输入字节。
@@ -46,9 +46,9 @@ python3 /root/build/sc5000-lab/rea-results/query.py xrefs '{"address":"0x14348"}
 以下命令使用共同前缀环境 `TMPDIR=.../rea-tools/tmp JAVA_HOME=.../rea-tools/jdk-21.0.13+9 GHIDRA_INSTALL_DIR=.../rea-tools/ghidra_12.1.4_PUBLIC REA_GHIDRA_STARTUP_TIMEOUT_MS=300000`，`rea` 展开为绝对 Node 与 `rea-agents/scripts/rea.mjs`：
 
 ```bash
-rea decompile /root/build/sc5000-lab/5.0.4/tree/usr/lib/libaz01-prog.so.1.3 0x1779c --provider ghidra --json
-rea decompile /root/build/sc5000-lab/5.0.4/tree/usr/Engine/MidiDeviceScanner 0x1dba8 --provider ghidra --json
-rea inspect-binary-layout /root/build/sc5000-lab/5.0.4/tree/usr/Engine/Engine --detail summary --json
+rea decompile <firmware-lab>/5.0.4/tree/usr/lib/libaz01-prog.so.1.3 0x1779c --provider ghidra --json
+rea decompile <firmware-lab>/5.0.4/tree/usr/Engine/MidiDeviceScanner 0x1dba8 --provider ghidra --json
+rea inspect-binary-layout <firmware-lab>/5.0.4/tree/usr/Engine/Engine --detail summary --json
 ```
 
 分别保存为 `libaz01-signature-wrapper.cli.json`、`MidiDeviceScanner-amidi-parser.cli.json`、`Engine-layout.cli.json` 及对应 `.log`。前两个成功返回 REA Evidence；第三个因 CLI 不支持 `--detail` 而在解析参数阶段返回 `Unknown flag: --detail`，未执行分析。随后查询实际 `--help` 确认，Engine 地址映射改由 MCP `inspect_native_load_image` 获取。没有用 strings/readelf 替代 REA。
@@ -64,7 +64,7 @@ python3 rea-results/derive_arm_exidx.py 5.0.4/tree/usr/Engine/OfflineAnalyzer re
 python3 rea-results/derive_arm_exidx.py 5.0.4/tree/usr/Engine/Engine rea-results/Engine-exidx-derived.json
 ```
 
-这里路径在实际命令中均为 `/root/build/sc5000-lab` 下绝对路径。脚本解析标准 ELF32 LE `.ARM.exidx` PREL31（不是 REA Evidence），固定源文件哈希和每条记录的文件偏移／ELF VA／Ghidra VA；生成的入口 TSV 作为 REA 官方 `REA_GHIDRA_SEED_FILE` 输入。尾部展开表结束记录保守排除，去重后 Offline 1,733、Engine 46,501 个种子。种子结果不等于全部成功，实际 created／failed 计数见 profile 和 Ghidra 日志。
+这里路径在实际命令中均为 `<firmware-lab>` 下绝对路径。脚本解析标准 ELF32 LE `.ARM.exidx` PREL31（不是 REA Evidence），固定源文件哈希和每条记录的文件偏移／ELF VA／Ghidra VA；生成的入口 TSV 作为 REA 官方 `REA_GHIDRA_SEED_FILE` 输入。尾部展开表结束记录保守排除，去重后 Offline 1,733、Engine 46,501 个种子。种子结果不等于全部成功，实际 created／failed 计数见 profile 和 Ghidra 日志。
 
 后续独立连接设置 `REA_GHIDRA_DISABLED_ANALYZERS='Decompiler Switch Analysis'`，明确减少全局 switch 识别覆盖；仍使用 Ghidra 原生导入、分析、xref、伪代码和调用边。Engine 默认长分析没有为此中断。新连接输出为 `engine-focused/`；Offline 默认结果先正常导出／关闭，再在 `offline/` 启动带种子连接。全部参数及返回保留在对应 JSON-RPC 日志。
 
@@ -79,7 +79,7 @@ Engine 默认 `list_procedures` 实际返回 `provider_timeout`，完整错误�
 最终成功的是另一个只有两个精选入口的连接：
 
 ```bash
-SC5000_REA_OUTPUT=/root/build/sc5000-lab/rea-results/engine-targeted REA_GHIDRA_DISABLED_ANALYZERS='Decompiler Switch Analysis,ARM Constant Reference Analyzer' REA_GHIDRA_SEED_FILE=/root/build/sc5000-lab/rea-results/engine-targeted/selected-seeds.tsv GHIDRA_HEADLESS_MAXMEM=4G python3 /root/build/sc5000-lab/rea-results/rea_rpc.py serve
+ENGINEX_REA_OUTPUT=<firmware-lab>/rea-results/engine-targeted REA_GHIDRA_DISABLED_ANALYZERS='Decompiler Switch Analysis,ARM Constant Reference Analyzer' REA_GHIDRA_SEED_FILE=<firmware-lab>/rea-results/engine-targeted/selected-seeds.tsv GHIDRA_HEADLESS_MAXMEM=4G python3 <firmware-lab>/rea-results/rea_rpc.py serve
 ```
 
 `derive_arm_literal_refs.py` 先对只读 Engine 的 ARM32 LDR-literal／ADD-PC 形成候选，按 ELF LOAD 和 `.ARM.exidx` 派生入口。最终脚本范围是 32 指令窗口、两种 ADD 操作数顺序；未证明中间寄存器／分支条件，不覆盖 Thumb，因此只用于选点，不能当作 REA xref。两条输入种子 `0x1274568`、`0x130de4c` 经真实 REA 反编译确认后才用于结论。后续均为此已打开会话中的精选查询，没有进一步全局分析。

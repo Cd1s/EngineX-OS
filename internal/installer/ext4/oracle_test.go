@@ -274,7 +274,7 @@ func testInjectBackup(t *testing.T, backup string, sentinels map[string][32]byte
 	if err != nil {
 		t.Fatal(err)
 	}
-	if legacy && (root != migration.DataName || len(links) != 0) || !legacy && (root != "enginex" || len(links) != 0) {
+	if root != "enginex" || len(links) != 0 {
 		t.Fatalf("ChooseRuntimeDir = %q %v", root, links)
 	}
 	cs := bundleChangeSet(root, "5.3.0.5", "99-enginex.conf")

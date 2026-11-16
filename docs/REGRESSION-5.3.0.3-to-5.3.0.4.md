@@ -79,7 +79,7 @@
 | **FX-5303-21** (#100) | 碟机流媒体缓存曲目经 Pro DJ Link 共享给同局域网的先锋 CDJ-3000 播放 | `pkg/prolink` 单测 `TestEngineBridgeStreamingExport` | 需报告人 / 先锋 CDJ-3000 | 自动化通过 |
 | **FX-5303-22** (#101) | 修复 Rekordbox U 盘导入曲目波形偏矮问题，精确填入三频段峰值归一化高度 | `pkg/enginedb` 单测 `TestPerformanceDataPeaks` | SC5000 插入 Rekordbox U 盘加载曲目，观察波形高度饱满正常 | 自动化通过 |
 | **FX-5303-23** (#102) | 上线简/繁/英三语官方文档站 enginexdj.com，包含机型刷机与交互式菜单地图 | 静态资源完整性与多语言检查 | 浏览器访问 enginexdj.com 验证 | 自动化通过 |
-| **FX-5303-24** (#103) | 运行时目录平滑迁移至 `/data/enginex`，保留 `/data/sc5000-custom` 兼容软链接 | `tests/test_rootfs_overlay.sh` (ok 10)、`test_sclive4_bootstrap.sh` | SC5000 终端核验软链接与各配置文件完整性 | 自动化通过 |
+| **FX-5303-24** (#103) | 运行时目录平滑迁移至 `/data/enginex`，保留 `/data/enginex` 兼容软链接 | `tests/test_rootfs_overlay.sh` (ok 10)、`test_sclive4_bootstrap.sh` | SC5000 终端核验软链接与各配置文件完整性 | 自动化通过 |
 | **FX-5303-25** (#104) | 推子后 Echo Out 尾音、Smart Sync 谐波 BPM 匹配、动态语言切换无需重启 | `tools/ui-mod/test_dsp_smooth.c`、`pkg/webui` 单测 `TestStemsTrackID` | SC5000 快速拉下通道推子听衰减尾音；设置动态切语言免重启 | 自动化通过 |
 | **FX-5303-26** (#105) | Spotify 双模登录（Spotify Connect 局域网配对 + 手机扫码）与下载容灾回退 | `pkg/providers` 单测 `TestSpotifyConnectAndFallback` | 手机 Spotify 列表中出现 EngineX OS 并可直连推流 | 自动化通过 |
 | **FX-5303-27** (#106) | Deezer 独立用户 ARL 扫码登录并与本地 deemixd 下载通道自动同步 | `pkg/webui` 单测 `TestDeezerLoginSyncsDeemix` | 手机打开 `/m/deezer` 输入 ARL 保存，流媒体服务变绿 | 自动化通过 |
@@ -89,13 +89,13 @@
 | **FX-5303-31** (#110/#111) | 修复 PRIME GO+ fastboot product 前缀解析失败，并提供免 fetch 刷机引导 | `cmd/enginex-installer` 单测 `TestParseFastbootProductWithPrefix` | 需报告人 / PRIME GO+ (JP11S) | 自动化通过 |
 | **FX-5303-32** (#112) | OmniSource 原生解析外置存储中的 Algoriddim djay 数据库与歌单 | `pkg/djay` / `pkg/webui` 单测 `TestOmniSourceDjayLibrary` | 插入 djay 格式 U 盘在流媒体界面直接浏览播放 | 自动化通过 |
 | **FX-5303-33** (#113) | USB 数字音频输出支持（识别外接免驱 UAC1/UAC2 DAC 声卡） | `pkg/webui` 单测 `TestSystemAdminAudioRoutes` | SC5000 插入 USB DAC 观察音频路由输出 | 自动化通过 |
-| **FX-5303-34** (#114) | 远程网络盘挂载（SMB/SFTP/WebDAV）、SSH 服务开关、Automix 与 4TB 目录缓存优化 | `pkg/webui` 单测 `TestGatewayServesSC5000AdminRoutes` 等 | SC5000 控制台配置挂载远程 SMB 并在曲库浏览 | 自动化通过 |
-| **FX-5303-35** (#115) | 硬件测试者协作套件与 Pro DJ Link 一键诊断工具 `sc5000-prolink-diag` | `pkg/webui` 单测 `TestProlinkDiag` | SC5000 运行 `sc5000-prolink-diag` 自检网络与端口状态 | 自动化通过 |
+| **FX-5303-34** (#114) | 远程网络盘挂载（SMB/SFTP/WebDAV）、SSH 服务开关、Automix 与 4TB 目录缓存优化 | `pkg/webui` 单测 `TestGatewayServesENGINEXAdminRoutes` 等 | SC5000 控制台配置挂载远程 SMB 并在曲库浏览 | 自动化通过 |
+| **FX-5303-35** (#115) | 硬件测试者协作套件与 Pro DJ Link 一键诊断工具 `enginex-prolink-diag` | `pkg/webui` 单测 `TestProlinkDiag` | SC5000 运行 `enginex-prolink-diag` 自检网络与端口状态 | 自动化通过 |
 | **FX-5303-36** (#116) | SYSTEM ONE / PRIME 4 G2 固件更新模式（1cc5:2027）逆向与文档化 | `tools/az01-packer/test_az0x_packer.py`、`test_az04_packer.py` | 需报告人 / SYSTEM ONE / PRIME 4 G2 | 自动化通过 |
 | **FX-5303-37** (#117) | 全局界面缩放 UI Scale（110%~75%）中心缩放，彻底消除 EGLFS 黑边与弹窗截断 | `pkg/webui` 单测 `TestUIScale`、`TestUIScaleConcurrentWrites` | SC5000 设置 UI Scale 85%/75%，确认控制中心与弹窗全屏贴边居中 | 自动化通过 |
 | **FX-5303-38** (#118) | 全系 16 款机型开机第一屏定制与转换工具链（对齐官方 5.3.0 扁平白色风格） | `tools/splash/test_splash_tool.py` | SC5000 开机观察第一屏官方扁平白色 UI 画面 | 自动化通过 |
 | **FX-5303-39** (#119) | 二代机 AZ0x 签名容器解析、自签名重打包与镜像校验工具链 | `test_az0x_packer.py` | 无需实机 | 自动化通过 |
-| **FX-5303-40** (#120) | 将当前轨道的活动 Loop 一键发送到采样器打击垫（`/v1/sc5000/sampler/loop-to-pad`） | `pkg/webui` 单测 `TestSamplerLoopToPad` | SC5000 打出 Loop 后触发发送，核验 Sampler Pad 载入该切片 | 自动化通过 |
+| **FX-5303-40** (#120) | 将当前轨道的活动 Loop 一键发送到采样器打击垫（`/v1/enginex/sampler/loop-to-pad`） | `pkg/webui` 单测 `TestSamplerLoopToPad` | SC5000 打出 Loop 后触发发送，核验 Sampler Pad 载入该切片 | 自动化通过 |
 | **FX-5303-41** (#121) | ReccoBeats 曲目音频特征（能量度 Energy、舞曲度、情绪价）集成 | `pkg/providers` 单测 `TestFetchReccoBeatsAudioFeatures` | SC5000 浏览流媒体曲目查看特征标签 | 自动化通过 |
 | **FX-5303-42** (#122) | Rekordbox 内嵌高清封面提取与先锋 DJM 混音台 On-Air 状态包解析 | `pkg/enginedb` 单测 `TestExtractEmbeddedArtwork` 等 | SC5000 插入无封面缓存的 Rekordbox U 盘，确认转盘屏高清封面 | 自动化通过 |
 | **FX-5303-43** (#123) | 单机双层四轨模式（1+2）与 `four_deck_role=auto` 角色防呆保护，防止双机互抢 | `pkg/webui` 单测 `TestFourDeckRoleAutoInvariant` | SC5000 单机选择 Role 1+2 显双层两轨波形；双机时不抢角色 | 自动化通过 |
@@ -135,7 +135,7 @@
 | **FX-5304-16** | 搜索工作线程池上限控制与繁忙重试机制，防止快速输入导致线程耗尽卡死界面 | `pkg/providers` 单测 `TestSearchWorkerPoolAndThrottling` | SC5000 曲库搜索栏快速连续输入/删除字符，界面响应流畅不卡死 | 自动化通过 |
 | **FX-5304-17** | 挂起不安全的批量曲库后台自动分析，防止多核资源饥饿导致打碟卡顿 | `tests/test_rootfs_overlay.sh` (ok 06) | 插入包含数千首未分析曲目的 U 盘，打碟操作流畅不受后台分析阻塞 | 自动化通过 |
 | **FX-5304-18** | Beatport 冷缓存查找保留无损升级格式，防止冷启动降级为压缩音质 | `pkg/providers` 单测 `TestBeatportLosslessUpgradeOnColdCache` | SC5000 冷启动后点播 Beatport 曲目，核验下载为无损格式 | 自动化通过 |
-| **FX-5304-19** | deemixd 在 stream-sync 已监听 6595 端口时正常退出（退出码 0），消除冲突假告警 | `internal/cli` 单测 `TestDeemixdExitsZeroWhenPortOccupied` | SC5000 查看 sc5000-deemixd 状态为正常 inactive，无红色报错 | 自动化通过 |
+| **FX-5304-19** | deemixd 在 stream-sync 已监听 6595 端口时正常退出（退出码 0），消除冲突假告警 | `internal/cli` 单测 `TestDeemixdExitsZeroWhenPortOccupied` | SC5000 查看 enginex-deemixd 状态为正常 inactive，无红色报错 | 自动化通过 |
 | **FX-5304-20** | 核心服务彻底剥离内置 DMX 代码，灯光功能完全模块化迁移至 dmx-studio mod | `go test -race ./...`、`pkg/mods` 单测 | 开启原厂 SoundSwitch 确认不受影响；安装 dmx-studio 验证独立工作 | 自动化通过 |
 | **FX-5304-21** | 封面重试逻辑移出 QML 状态机，检测到加载失败立即标记，避免 GUI 死循环卡死 | `tools/az01-packer/test_ui_mod.py` | SC5000 浏览含损坏封面图片的曲目，列表快速划过不卡死 | 自动化通过 |
 | **FX-5304-22** | 限制极端节拍锚点坐标在安全范围内，防止极端 BPM 导致内存分配异常 | `pkg/analyzer` 单测 | 无需实机 | 自动化通过 |

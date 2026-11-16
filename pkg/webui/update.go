@@ -8,7 +8,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"io"
 	"log"
@@ -20,7 +19,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Cd1s/EngineX-OS/internal/leave"
 	"github.com/Cd1s/EngineX-OS/internal/release"
 	"github.com/Cd1s/EngineX-OS/internal/releasesig"
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
@@ -611,33 +609,26 @@ func (s *Server) installDataBundleReader(r io.Reader, work string) {
 	// activated in place (#234).
 	older := release.Older(s.installedVersion(), s.installedRelease(),
 		currentVersion(filepath.Join(top, "version.txt")), currentVersion(filepath.Join(top, releaseTagName)))
-	if older && activatesOnDeck(customDir) {
-		// The older release's install.sh never runs over /data (#234 review R1/R2): it fills a
-		// stage, and this release moves the result in with atomic swaps a power cut cannot
-		// break, handing a release before 5.3.0.3 its the legacy data directory back (internal/leave).
-		if err := installOlder(top); err != nil {
-			fail("bundle install: " + err.Error())
-			return
+	if older {
+		fail("bundle downgrade is no longer supported; upgrade to the latest EngineX OS")
+		return
+	}
+	cmd := exec.Command("sh", filepath.Join(top, "install.sh"))
+	cmd.Env = os.Environ()
+	if !isDeckDataDir(customDir) { // sandbox / test: no /data to write the runtime dir or ALSA file to
+		// Tests install outside the deck's /data.
+		alsa := filepath.Join(customDir, "alsa-conf.d")
+		cmd.Env = append(cmd.Env,
+			"ENGINEX_CUSTOM="+customDir, "ENGINEX_ALSA_OVERLAY="+alsa,
+		)
+	}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg == "" {
+			msg = err.Error()
 		}
-	} else {
-		cmd := exec.Command("sh", filepath.Join(top, "install.sh"))
-		cmd.Env = os.Environ()
-		if !isDeckDataDir(customDir) { // sandbox / test: no /data to write the runtime dir or ALSA file to
-			// Both names: the install.sh of a later release reads ENGINEX_*.
-			alsa := filepath.Join(customDir, "alsa-conf.d")
-			cmd.Env = append(cmd.Env,
-				migration.CustomEnv+"="+customDir, "ENGINEX_CUSTOM="+customDir,
-				migration.AlsaEnv+"="+alsa, "ENGINEX_ALSA_OVERLAY="+alsa,
-			)
-		}
-		if out, err := cmd.CombinedOutput(); err != nil {
-			msg := strings.TrimSpace(string(out))
-			if msg == "" {
-				msg = err.Error()
-			}
-			fail("bundle install: " + msg)
-			return
-		}
+		fail("bundle install: " + msg)
+		return
 	}
 	os.RemoveAll(work) // before reporting done: a client polling for Done must not see the scratch dir
 	customDir = s.customDir()
@@ -646,7 +637,7 @@ func (s *Server) installDataBundleReader(r io.Reader, work string) {
 	s.updateCache.UpdateAvailable = false
 	s.updateMu.Unlock()
 	if activatesOnDeck(customDir) {
-		if launchActivation(activationScript(customDir, older)) {
+		if launchActivation(activationScript(customDir)) {
 			s.setUpdateProgress(1.0, "", true)
 		} else {
 			// systemd-run unavailable/failed: do not kill stream-sync in a shared cgroup.
@@ -658,34 +649,13 @@ func (s *Server) installDataBundleReader(r io.Reader, work string) {
 	}
 }
 
-// leaveScript is the leave step boot-activate.sh of 5.3.0.5 and later writes at every boot (#234).
-var leaveScript = "/run/enginex/leave.sh"
-
-// activationScript is what runs after a bundle went in: its boot-activate.sh in place, after
-// the daemons of this release (or, updated in place before, of one before 5.3.0.5) end, or, for
-// an older release than the installed one (#234, put in by installOlder), this release's leave
-// step: it takes its own units out of /run and reboots, and the older release starts clean. The
-// older one's boot-activate.sh never runs over this release's units, and no daemon runs twice.
-func activationScript(customDir string, older bool) string {
-	if older {
-		return `sleep 2; [ ! -f ` + leaveScript + ` ] || exec sh ` + leaveScript + `; sync; exec systemctl reboot`
-	}
+// activationScript restarts the current services after a repair or upgrade.
+func activationScript(customDir string) string {
 	return `sleep 2; pkill -f '[e]nginex-suite (stream-sync|rb-bridge|enginex-deemixd)|` + migration.SuitePattern + ` (stream-sync|rb-bridge|` + migration.Deemix + `)'; sleep 1; exec sh ` +
 		customDir + `/bundle/boot-activate.sh`
 }
 
 var (
-	// installOlder puts an older release in on the deck (internal/leave); tests replace it.
-	installOlder = func(top string) error {
-		var out bytes.Buffer
-		if err := (leave.Deck{Stdout: &out, Stderr: &out}).Install(top); err != nil {
-			if msg := strings.TrimSpace(out.String()); msg != "" {
-				return fmt.Errorf("%w: %s", err, msg)
-			}
-			return err
-		}
-		return nil
-	}
 	// activatesOnDeck: only the deck's own /data install is activated; tests replace it.
 	activatesOnDeck = isDeckDataDir
 	// launchActivation runs script in a transient systemd service, so ending stream-sync does not
