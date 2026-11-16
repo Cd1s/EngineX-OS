@@ -15,7 +15,7 @@ import (
 
 // A 21,352-track FAT32 stick needed a 7.2 GB .rb-bridge-state.db, almost all
 // of it plain JSON in BridgeAnalysis (#272): rows must be stored compressed,
-// and still decode to the full source (every waveform section included).
+// and still decode the selected scrolling waveform byte-for-byte.
 func TestBridgeAnalysisRowsAreCompressedAndLossless(t *testing.T) {
 	mount := t.TempDir()
 	testfixture.Export(t, mount)
@@ -55,7 +55,7 @@ func TestBridgeAnalysisRowsAreCompressedAndLossless(t *testing.T) {
 	if err = json.Unmarshal(plain, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Track.ID != 1 || got.Analysis == nil || len(got.Analysis.Waveforms) != 3 || got.Analysis.Structure == nil {
+	if got.Track.ID != 1 || got.Analysis == nil || len(got.Analysis.Waveforms) != 1 || got.Analysis.Waveforms[0].Tag != "PWV7" || got.Analysis.Waveforms[0].EntryBytes != 3 || !bytes.Equal(got.Analysis.Waveforms[0].Data, []byte{10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120}) {
 		t.Fatalf("source lost in compression: %+v", got)
 	}
 	if b, err := UnpackAnalysis(audio, 1<<20); err != nil || !json.Valid(b) {

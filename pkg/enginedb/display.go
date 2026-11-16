@@ -49,6 +49,21 @@ type DisplayPerformance struct {
 // DisplayWaveFromRekordbox preserves persisted 150 Hz PWV7/PWV5 detail. It
 // never decodes the song and never mistakes a 1024-bin overview for detail.
 func DisplayWaveFromRekordbox(a *rekordbox.Analysis, sampleRate float64) *DisplayWave {
+	best := displayAnalysisWaveform(a)
+	if best == nil {
+		return nil
+	}
+	n := len(best.Data) / int(best.EntryBytes)
+	w := &DisplayWave{Bands: make([]byte, n*3), SamplesPerBin: sampleRate / 150}
+	for i := 0; i < n; i++ {
+		v := WaveRGB(*best, i)
+		copy(w.Bands[i*3:], v[:])
+	}
+	return w
+}
+
+// Storage and rendering must choose the same valid detail section.
+func displayAnalysisWaveform(a *rekordbox.Analysis) *rekordbox.Waveform {
 	if a == nil {
 		return nil
 	}
@@ -65,16 +80,7 @@ func DisplayWaveFromRekordbox(a *rekordbox.Analysis, sampleRate float64) *Displa
 			best = w
 		}
 	}
-	if best == nil {
-		return nil
-	}
-	n := len(best.Data) / int(best.EntryBytes)
-	w := &DisplayWave{Bands: make([]byte, n*3), SamplesPerBin: sampleRate / 150}
-	for i := 0; i < n; i++ {
-		v := WaveRGB(*best, i)
-		copy(w.Bands[i*3:], v[:])
-	}
-	return w
+	return best
 }
 
 func displayFinite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }

@@ -8763,6 +8763,90 @@ def legacy_qml_fixes():
                 "id: disableRecordOfStreaming\n            visible: trackList.recording && trackList.isStreamingCollection\n",
                 "id: disableRecordOfStreaming\n            visible: false\n",
             ),
+            (
+                "                    Preview {\n                        id: previewItem\n                    }\n" if v53() else
+                "\t\t\t\t\tPreview { id: previewItem }\n",
+                "                    Preview {\n"
+                "                        id: previewItem\n"
+                "                        property real scPendingSeek: -1\n"
+                "                        onIsListeningChanged: {\n"
+                "                            if (isListening && scPendingSeek >= 0) {\n"
+                "                                const pos = scPendingSeek\n"
+                "                                scPendingSeek = -1\n"
+                "                                Planck.getProperty(\"/Client/Librarian/Preview/Position\").translator.value = pos\n"
+                "                            }\n"
+                "                        }\n"
+                "                        onVisibleChanged: if (!visible) scPendingSeek = -1\n"
+                "                    }\n" if v53() else
+                "\t\t\t\t\tPreview {\n"
+                "\t\t\t\t\t\tid: previewItem\n"
+                "\t\t\t\t\t\tproperty real scPendingSeek: -1\n"
+                "\t\t\t\t\t\tonIsListeningChanged: {\n"
+                "\t\t\t\t\t\t\tif (isListening && scPendingSeek >= 0) {\n"
+                "\t\t\t\t\t\t\t\tconst pos = scPendingSeek\n"
+                "\t\t\t\t\t\t\t\tscPendingSeek = -1\n"
+                "\t\t\t\t\t\t\t\tPlanck.getProperty(\"/Client/Librarian/Preview/Position\").translator.value = pos\n"
+                "\t\t\t\t\t\t\t}\n"
+                "\t\t\t\t\t\t}\n"
+                "\t\t\t\t\t\tonVisibleChanged: if (!visible) scPendingSeek = -1\n"
+                "\t\t\t\t\t}\n",
+            ),
+            (
+                "                        if (point && inAlbumArt) {\n"
+                "                            previewItem.pressed()\n"
+                "                        }\n\n"
+                "                        if (previewItem.isListening && !inAlbumArt) {\n"
+                "                            const barLength = mainInfo.width - albumArtImageItem.width\n"
+                "                            const mousePos = mouse.x - albumArtImageItem.width\n"
+                "                            const positionToSet = mousePos / barLength\n"
+                "                            Planck.getProperty(\"/Client/Librarian/Preview/Position\").translator.value = positionToSet\n"
+                "                        }\n" if v53() else
+                "\t\t\t\t\t\tif(point && inAlbumArt) {\n"
+                "\t\t\t\t\t\t\tpreviewItem.pressed()\n"
+                "\t\t\t\t\t\t}\n\n"
+                "\t\t\t\t\t\tif(previewItem.isListening && !inAlbumArt) {\n"
+                "\t\t\t\t\t\t\tconst barLength = mainInfo.width - albumArtImageItem.width\n"
+                "\t\t\t\t\t\t\tconst mousePos = mouse.x - albumArtImageItem.width\n"
+                "\t\t\t\t\t\t\tconst positionToSet = mousePos / barLength\n"
+                "\t\t\t\t\t\t\tPlanck.getProperty(\"/Client/Librarian/Preview/Position\").translator.value = positionToSet\n"
+                "\t\t\t\t\t\t}\n",
+                "                        if (point && inAlbumArt) {\n"
+                "                            previewItem.scPendingSeek = -1\n"
+                "                            previewItem.pressed()\n"
+                "                        }\n\n"
+                "                        if (!inAlbumArt) {\n"
+                "                            const barLength = mainInfo.width - albumArtImageItem.width\n"
+                "                            if (barLength > 0) {\n"
+                "                                const positionToSet = Math.max(0, Math.min(1, (mouse.x - albumArtImageItem.width) / barLength))\n"
+                "                                if (!previewItem.isListening) {\n"
+                "                                    previewItem.scPendingSeek = positionToSet\n"
+                "                                    previewItem.pressed()\n"
+                "                                }\n"
+                "                                if (previewItem.isListening) {\n"
+                "                                    previewItem.scPendingSeek = -1\n"
+                "                                    Planck.getProperty(\"/Client/Librarian/Preview/Position\").translator.value = positionToSet\n"
+                "                                }\n"
+                "                            }\n"
+                "                        }\n" if v53() else
+                "\t\t\t\t\t\tif(point && inAlbumArt) {\n"
+                "\t\t\t\t\t\t\tpreviewItem.scPendingSeek = -1\n"
+                "\t\t\t\t\t\t\tpreviewItem.pressed()\n"
+                "\t\t\t\t\t\t}\n\n"
+                "\t\t\t\t\t\tif(!inAlbumArt) {\n"
+                "\t\t\t\t\t\t\tconst barLength = mainInfo.width - albumArtImageItem.width\n"
+                "\t\t\t\t\t\t\tif(barLength > 0) {\n"
+                "\t\t\t\t\t\t\t\tconst positionToSet = Math.max(0, Math.min(1, (mouse.x - albumArtImageItem.width) / barLength))\n"
+                "\t\t\t\t\t\t\t\tif(!previewItem.isListening) {\n"
+                "\t\t\t\t\t\t\t\t\tpreviewItem.scPendingSeek = positionToSet\n"
+                "\t\t\t\t\t\t\t\t\tpreviewItem.pressed()\n"
+                "\t\t\t\t\t\t\t\t}\n"
+                "\t\t\t\t\t\t\t\tif(previewItem.isListening) {\n"
+                "\t\t\t\t\t\t\t\t\tpreviewItem.scPendingSeek = -1\n"
+                "\t\t\t\t\t\t\t\t\tPlanck.getProperty(\"/Client/Librarian/Preview/Position\").translator.value = positionToSet\n"
+                "\t\t\t\t\t\t\t\t}\n"
+                "\t\t\t\t\t\t\t}\n"
+                "\t\t\t\t\t\t}\n",
+            ),
         ],
         v + "BrowseView/Components/BreadcrumbView/BreadcrumbStackView.qml": [(
             "						contentView.currentRowIndex = index\n					}\n					breadcrumbView.push()\n				}\n",
