@@ -564,6 +564,7 @@ inner() {
     names "$R"
     check "image: $N_ETC/version.txt is $NEWV" grep -qx "$NEWV" "$R$N_ETC/version.txt"
     check "image: $N_ETC/release-tag is $RELTAG" grep -qx "$RELTAG" "$R$N_ETC/release-tag"
+    check "image: hfsplusx.ko at the LoadPin path, built for the image's kernel" sh "$REPO/tools/az01-packer/check-hfsplusx.sh" "$W/new-img/rootfs.ext2"
     if [ "$N_ETC" = /etc/enginex ]; then # #234: what an older installer or gate reads, and the names it enables
         # Match unit names only: ls of several dirs prints their paths, and a /var/tmp/enginex-gate-* work dir matched.
         check "image: no unit under the old project name is enabled" bash -c "! find '$R/usr/lib/systemd/system/multi-user.target.wants' '$R/etc/systemd/system/multi-user.target.wants' '$R/usr/lib/systemd/system/enginex.target.wants' -mindepth 1 -maxdepth 1 -name '*$legacy_unit*' 2>/dev/null | grep -q ."

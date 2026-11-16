@@ -92,6 +92,8 @@ REMOTE_BUILD_HOST=<build host> remote-build --name enginex-release-<短说明> -
    sh tools/az01-packer/sign-release.sh "$OUT"'
 ```
 
+**HFS+ 读写模块（5.3.0.5 起）**：一代机的 LoadPin 只从 rootfs 加载内核模块，所以每个一代镜像都要带 `hfsplusx.ko`。`build-release.sh` 自己编：没设 `HFSPLUSX_KO` 时调用 `kernel-modules/build-release-module.sh`，用固定版本的源码（Linux 6.18.57 tarball 与 RT 补丁，按 sha256 校验）、官方 SC5000 底包内核自带的配置和 GCC 13 编出模块（编译机要装 `flex bison bc libssl-dev libelf-dev gcc-13-arm-linux-gnueabihf`）。第一次要联网下载约 150 MB、编译约 10 分钟，结果按全部输入的 sha256 缓存在编译机的 `~/.cache/enginex-hfsplusx/`（不在 `sc5000-lab`，也不在发布输出目录），之后的构建直接复用，第 9 步的清理不要删它。要用现成的模块就设 `HFSPLUSX_KO`（写在远端脚本里，紧贴 `build-release.sh`）。每个一代 rootfs 打包后都会跑 `check-hfsplusx.sh`：模块必须在 `/usr/lib/modules/<镜像内核>/extra/hfsplusx.ko`，且 vermagic 与镜像自带模块一致；门禁的静态审计也会检查同一项。
+
 **签名（#239，5.3.0.5 起）**：每个 Release 的 `SHA256SUMS.txt` 都用发布密钥（Ed25519）签名，签名文件是 `SHA256SUMS.txt.sig`（对 `SHA256SUMS.txt` 原字节的签名，64 字节的标准 base64 加换行）。
 
 - 签名一定是最后一步：`build-installer.sh` 会重写 `SHA256SUMS.txt`（加入 4 个安装器），所以 `sign-release.sh` 必须在它之后跑。它先跑 `check-release-manifest.sh`：`sha256sum -c` 校验清单；清单每一行都是 `<sha256>  <单个文件名>`，名字完整比对（`X-Update.img.bak` 不算 `X-Update.img`），只允许 `*-Update.img`、`*-Data-Bundle.tar.gz`、`EngineX-Installer-*`、`RELEASE-TAG.txt`，不许重复；目录里每个这类文件都必须在清单里；数量必须是 16 个 `*-Update.img`、8 个 `*-Data-Bundle.tar.gz`、4 个安装器（5.3.0.6 起退役数据包：`ENGINEX_EXPECT_BUNDLES=0`）；文件名里的版本必须与发布 tag 一致。然后拒绝仓库里没有内置公钥的密钥、签名，再用内置公钥并按发布 tag 验一遍。

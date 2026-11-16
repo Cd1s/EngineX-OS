@@ -1,5 +1,5 @@
 #!/bin/bash
-# Engine OS 5.0.4 / RK3288. This builds artifacts; it never installs on the host.
+# Engine OS 5.3.0+ (AZ01 / ARMv7, Linux 6.18.57-az01). This builds artifacts; it never installs on the host.
 set -euo pipefail
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 BUILD=${BUILD_ROOT:-$HERE/.build}
@@ -8,11 +8,11 @@ KERNEL_SRC=${KERNEL_SRC:-$BUILD/linux}
 KERNEL_BUILD=${KERNEL_BUILD:-$BUILD/kernel}
 APFS_SRC=${APFS_SRC:-$BUILD/linux-apfs-rw}
 HFS_TOOLS_SRC=${HFS_TOOLS_SRC:-$BUILD/hfsprogs}
-EXPECTED_RELEASE=${EXPECTED_RELEASE:-6.6.119-rt}
-CROSS_COMPILE=${CROSS_COMPILE:-arm-linux-gnueabihf-}
+EXPECTED_RELEASE=${EXPECTED_RELEASE:-6.18.57-az01-2026-10-15-rt6}
+CROSS_COMPILE=${CROSS_COMPILE-arm-linux-gnueabihf-}
 JOBS=${JOBS:-$(getconf _NPROCESSORS_ONLN)}
 APFS_REF=${APFS_REF:-cb9c0a0681923eaa090026b4c9357e139dfb355b}
-KERNEL_REF=${KERNEL_REF:-v6.6.119}
+KERNEL_REF=${KERNEL_REF:-v6.18.57}
 HFS_URL=https://deb.debian.org/debian/pool/non-free/h/hfsprogs
 HFS_SHA=b01b203a97f9a3bf36a027c13ddfc59292730552e62722d690d33bd5c24f5497
 HFS_PATCH_SHA=a2752fc536c0b982f0f7b3cf24808a4e7b0f599ed0763f30e0913e015b75c46a
@@ -20,9 +20,9 @@ die() { printf 'build_modules: %s\n' "$*" >&2; exit 1; }
 usage() {
     cat <<'EOF'
 Usage: build_modules.sh [all|fetch|modules|tools|--help]
-  fetch    Fetch pinned Linux 6.6.119, linux-apfs-rw and patched hfsprogs.
-  modules  Require target kernel source/config/Module.symvers; build ARM .ko.
-  tools    Cross-build fsck.hfsplus and stage mount.hfsplus helper.
+  fetch    Fetch pinned Linux 6.18.57, linux-apfs-rw and patched hfsprogs.
+  modules  Require target kernel source/config/Module.symvers; build ARM hfsplusx.ko.
+  tools    Cross-build static ARMv7 fsck.hfsplus and stage mount.hfsplus helper.
   all      Fetch missing sources and build both (default).
 
 Required for modules: TARGET_CONFIG, TARGET_SYMVERS, an exact vendor/RT kernel
@@ -34,11 +34,14 @@ EOF
 }
 mode=${1:-all}
 case $mode in --help|-h) usage; exit 0 ;; all|fetch|modules|tools) ;; *) usage >&2; exit 2 ;; esac
-[[ $EXPECTED_RELEASE == 6.6.119-rt* && $EXPECTED_RELEASE != */* ]] || die 'expected a 6.6.119-rt release'
+[[ $EXPECTED_RELEASE == 6.18.57-az01* && $EXPECTED_RELEASE != */* ]] || die 'expected a 6.18.57-az01 release'
 [[ $JOBS =~ ^[1-9][0-9]*$ ]] || die 'invalid JOBS'
-mkdir -p "$BUILD" "$OUT"
-BUILD=$(cd "$BUILD" && pwd)
-OUT=$(cd "$OUT" && pwd)
+
+prepare_dirs() {
+    mkdir -p "$BUILD" "$OUT"
+    BUILD=$(cd "$BUILD" && pwd)
+    OUT=$(cd "$OUT" && pwd)
+}
 
 fetch_git() {
     local url=$1 ref=$2 dest=$3
@@ -62,6 +65,7 @@ download() {
 }
 fetch_tools() {
     [[ -d $HFS_TOOLS_SRC ]] && return 0
+    prepare_dirs
     download "$HFS_URL/hfsprogs_540.1.linux3.orig.tar.gz" "$BUILD/hfsprogs.tar.gz" "$HFS_SHA"
     download "$HFS_URL/hfsprogs_540.1.linux3-6.debian.tar.xz" "$BUILD/hfsprogs-debian.tar.xz" "$HFS_PATCH_SHA"
     local staging=$BUILD/hfsprogs-unpack patch
@@ -78,6 +82,7 @@ fetch_tools() {
 }
 fetch_modules() {
     local patch
+    prepare_dirs
     if [[ ! -d $KERNEL_SRC ]]; then
         fetch_git https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git "$KERNEL_REF" "$KERNEL_SRC"
         if [[ -n ${KERNEL_PATCH_DIR:-} ]]; then
@@ -95,20 +100,24 @@ check_compiler() {
     command -v "${CROSS_COMPILE}gcc" >/dev/null || die "missing compiler: ${CROSS_COMPILE}gcc"
     local triple
     triple=$("${CROSS_COMPILE}gcc" -dumpmachine)
-    [[ $triple == arm*-linux-* ]] || die "expected ARM Linux compiler, got $triple"
+    if [[ ${1:-arm} == tools ]]; then
+        [[ $triple == arm*-linux-* || $triple == aarch64*-linux-* ]] || die "expected ARM/AArch64 Linux compiler, got $triple"
+    else
+        [[ $triple == arm*-linux-* ]] || die "expected ARM Linux compiler, got $triple"
+    fi
 }
 build_modules() {
     [[ -f ${TARGET_CONFIG:-} ]] || die 'TARGET_CONFIG must be the firmware kernel .config'
     [[ -s ${TARGET_SYMVERS:-} ]] || die 'TARGET_SYMVERS must be the firmware Module.symvers (modules_prepare cannot generate it)'
-    [[ -f $KERNEL_SRC/Makefile && -f $APFS_SRC/Makefile ]] || die 'missing sources; use fetch first'
+    [[ -f $KERNEL_SRC/Makefile ]] || die 'missing kernel source; supply KERNEL_SRC or use fetch first'
     check_compiler
     command -v modinfo >/dev/null || die 'install host kmod (modinfo)'
+    prepare_dirs
     mkdir -p "$KERNEL_BUILD"
     KERNEL_SRC=$(cd "$KERNEL_SRC" && pwd)
     KERNEL_BUILD=$(cd "$KERNEL_BUILD" && pwd)
     cp "$TARGET_CONFIG" "$KERNEL_BUILD/.config"
-    # Change only the filesystem module selection, preserving the target ABI.
-    "$KERNEL_SRC/scripts/config" --file "$KERNEL_BUILD/.config" --module HFSPLUS_FS
+    # Preserve target config unchanged; stock 5.3.0 AZ01 keeps CONFIG_HFSPLUS_FS=y while hfsplusx.ko loads alongside it.
     local -a kmake=(make -C "$KERNEL_SRC" "O=$KERNEL_BUILD" ARCH=arm "CROSS_COMPILE=$CROSS_COMPILE")
     "${kmake[@]}" olddefconfig
     grep -qx 'CONFIG_ARM=y' "$KERNEL_BUILD/.config" || die 'target config is not ARM'
@@ -122,17 +131,30 @@ build_modules() {
     [[ $release == "$EXPECTED_RELEASE" ]] || die "ABI release mismatch: $release != $EXPECTED_RELEASE"
     "${kmake[@]}" -j"$JOBS" modules_prepare
     cp "$TARGET_SYMVERS" "$KERNEL_BUILD/Module.symvers"
-    local hfs=$BUILD/hfsplus-module apfs=$BUILD/apfs-module
-    mkdir -p "$hfs" "$apfs"
+    local hfs=$BUILD/hfsplusx-module patch
+    local -a hfs_patches=("$HERE/patches"/hfsplusx-*.patch)
+    [[ -f ${hfs_patches[0]:-} ]] || die 'missing hfsplusx patches'
+    rm -rf "$hfs"
+    mkdir -p "$hfs"
     cp -a "$KERNEL_SRC/fs/hfsplus/." "$hfs/"
-    tar -C "$APFS_SRC" --exclude=.git -cf - . | tar -C "$apfs" -xf -
-    (cd "$apfs" && sh ./genver.sh)
-    # APFS_CONFIG is explicitly empty: never compile in default-write mode.
+    for patch in "${hfs_patches[@]}"; do
+        patch -d "$hfs" -p1 < "$patch"
+    done
     "${kmake[@]}" -j"$JOBS" "M=$hfs" modules
-    "${kmake[@]}" -j"$JOBS" "M=$apfs" APFS_CONFIG= modules
+    local -a built_modules=("$hfs/hfsplusx.ko")
+    if [[ -f $APFS_SRC/Makefile ]]; then
+        local apfs=$BUILD/apfs-module
+        rm -rf "$apfs"
+        mkdir -p "$apfs"
+        tar -C "$APFS_SRC" --exclude=.git -cf - . | tar -C "$apfs" -xf -
+        (cd "$apfs" && sh ./genver.sh)
+        # APFS_CONFIG is explicitly empty: never compile in default-write mode.
+        "${kmake[@]}" -j"$JOBS" "M=$apfs" APFS_CONFIG= modules
+        built_modules+=("$apfs/apfs.ko")
+    fi
     local dest=$OUT/lib/modules/$release/extra module vermagic
     mkdir -p "$dest"
-    for module in "$hfs/hfsplus.ko" "$apfs/apfs.ko"; do
+    for module in "${built_modules[@]}"; do
         "${CROSS_COMPILE}readelf" -h "$module" | grep -q 'Machine:.*ARM' || die "not ARM: $module"
         vermagic=$(modinfo -F vermagic "$module")
         [[ $vermagic == "$release "* ]] || die "bad vermagic: $vermagic"
@@ -142,10 +164,12 @@ build_modules() {
         printf 'release=%s\narch=arm\ncross_compile=%s\n' "$release" "$CROSS_COMPILE"
         if [[ -e $APFS_SRC/.git ]]; then
             printf 'apfs_commit=%s\n' "$(git -C "$APFS_SRC" rev-parse HEAD)"
-        else
+        elif [[ -f $APFS_SRC/Makefile ]]; then
             printf 'apfs_commit=supplied-source-without-git\n'
+        else
+            printf 'apfs_commit=skipped\n'
         fi
-        sha256sum "$TARGET_CONFIG" "$TARGET_SYMVERS" "$KERNEL_BUILD/.config" "$dest/"*.ko
+        sha256sum "$TARGET_CONFIG" "$TARGET_SYMVERS" "$KERNEL_BUILD/.config" "${hfs_patches[@]}" "$dest/"*.ko
         if [[ -e $KERNEL_SRC/.git ]]; then
             git -C "$KERNEL_SRC" rev-parse HEAD
             git -C "$KERNEL_SRC" diff --binary | sha256sum
@@ -157,22 +181,45 @@ build_modules() {
 }
 build_tools() {
     [[ -f $HFS_TOOLS_SRC/Makefile ]] || die 'missing hfsprogs; use fetch first'
-    check_compiler
+    check_compiler tools
+    prepare_dirs
+    local triple default_cflags='-O2 -march=armv7-a -mfpu=neon' machine_re='Machine:.*ARM'
+    triple=$("${CROSS_COMPILE}gcc" -dumpmachine)
+    if [[ $triple == aarch64*-linux-* ]]; then
+        default_cflags='-O2'
+        machine_re='Machine:.*AArch64'
+    fi
     local -a cc=("${CROSS_COMPILE}gcc")
     [[ -z ${HFS_SYSROOT:-} ]] || cc+=("--sysroot=$HFS_SYSROOT")
+    local stub_inc=$BUILD/hfsprogs-stub-inc
+    mkdir -p "$stub_inc/uuid"
+    # hfs_format.h includes <uuid/uuid.h>, which fsck_hfs does not use; -idirafter
+    # lets any real sysroot header win while keeping cross builds self-contained.
+    : > "$stub_inc/uuid/uuid.h"
     # Debian patches remove clang Blocks and fix ARM stdarg/glibc compatibility.
     # Set CFLAGS in the environment so upstream's include/defines are appended.
-    make -C "$HFS_TOOLS_SRC" clean
-    CFLAGS="${HFS_CFLAGS:--O2 -march=armv7-a -mfpu=neon}" \
-        make -C "$HFS_TOOLS_SRC" -j"$JOBS" "CC=${cc[*]}" "AR=${CROSS_COMPILE}ar" \
-        "LDFLAGS=${HFS_LDFLAGS:--Wl,--build-id}"
+    make -C "$HFS_TOOLS_SRC" SUBDIRS=fsck_hfs.tproj clean
+    CFLAGS="${HFS_CFLAGS:-$default_cflags} -idirafter $stub_inc" \
+        make -C "$HFS_TOOLS_SRC" -j"$JOBS" SUBDIRS=fsck_hfs.tproj \
+        "CC=${cc[*]}" "AR=${CROSS_COMPILE}ar" \
+        "LDFLAGS=${HFS_LDFLAGS:--static -Wl,--build-id}"
     local fsck=$HFS_TOOLS_SRC/fsck_hfs.tproj/fsck_hfs
-    "${CROSS_COMPILE}readelf" -h "$fsck" | grep -q 'Machine:.*ARM' || die 'fsck is not ARM'
+    "${CROSS_COMPILE}readelf" -h "$fsck" | grep -q "$machine_re" || die "unexpected ELF machine for $triple"
+    if [[ -z ${HFS_LDFLAGS:-} || ${HFS_LDFLAGS:-} == *-static* ]]; then
+        ! "${CROSS_COMPILE}readelf" -l "$fsck" | grep -q 'INTERP' || die 'fsck is not static'
+    fi
     mkdir -p "$OUT/sbin"
     install -m 0755 "$fsck" "$OUT/sbin/fsck.hfsplus"
+    if command -v "${CROSS_COMPILE}strip" >/dev/null; then
+        "${CROSS_COMPILE}strip" "$OUT/sbin/fsck.hfsplus"
+    fi
     install -m 0755 "$HERE/mount.hfsplus" "$OUT/sbin/mount.hfsplus"
     sha256sum "$OUT/sbin/"* > "$OUT/tools-build-manifest.txt"
 }
+if [[ $mode == modules || $mode == all ]]; then
+    [[ -f ${TARGET_CONFIG:-} ]] || die 'TARGET_CONFIG must be the firmware kernel .config'
+    [[ -s ${TARGET_SYMVERS:-} ]] || die 'TARGET_SYMVERS must be the firmware Module.symvers (modules_prepare cannot generate it)'
+fi
 case $mode in
     fetch) fetch_modules; fetch_tools ;;
     modules) build_modules ;;

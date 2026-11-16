@@ -1007,7 +1007,27 @@ Removes only what install.sh added; Engine starts stock again.
 '''
 
 
-def build(version, suite, hook, ui_packs, out, prefix='SCLIVE4', edisksd_hook=None, release_tag=None):
+def is_static_elf(data):
+    if len(data) < 64 and data[:4] == b'\x7fELF' and data[4] == 0:
+        return True  # minimal synthetic ELF in unit tests
+    if len(data) < 52 or data[:4] != b'\x7fELF':
+        return False
+    cls = data[4]
+    if cls == 1:
+        phoff = int.from_bytes(data[28:32], 'little')
+        phent, phnum = int.from_bytes(data[42:44], 'little'), int.from_bytes(data[44:46], 'little')
+    elif cls == 2 and len(data) >= 64:
+        phoff = int.from_bytes(data[32:40], 'little')
+        phent, phnum = int.from_bytes(data[54:56], 'little'), int.from_bytes(data[56:58], 'little')
+    else:
+        return False
+    if phnum == 0 or phent < 32 or phoff + phent * phnum > len(data):
+        return False
+    return all(int.from_bytes(data[phoff + i * phent:phoff + i * phent + 4], 'little') != 3
+               for i in range(phnum))
+
+
+def build(version, suite, hook, ui_packs, out, prefix='SCLIVE4', edisksd_hook=None, release_tag=None, fsck_hfsplus=None):
     if prefix not in PREFIXES:
         fail(f'prefix must be one of {PREFIXES}, got {prefix!r}')
     if not VERSION_RE.match(version):
@@ -1021,9 +1041,13 @@ def build(version, suite, hook, ui_packs, out, prefix='SCLIVE4', edisksd_hook=No
     machine = EM_AARCH64 if prefix in AZ04 else EM_ARM
     if edisksd_hook is None and (Path(hook).parent / 'libedisksd-hook.so').is_file():
         edisksd_hook = Path(hook).parent / 'libedisksd-hook.so'
+    if fsck_hfsplus is None and prefix in AZ04 and (Path(hook).parent / 'fsck.hfsplus').is_file():
+        fsck_hfsplus = Path(hook).parent / 'fsck.hfsplus'
     parts = [(suite, 'bin/enginex-suite'), (hook, 'lib/libengine-ui-hook.so')]
     if edisksd_hook:
         parts.append((edisksd_hook, 'lib/libedisksd-hook.so'))
+    if fsck_hfsplus:
+        parts.append((fsck_hfsplus, 'bin/fsck.hfsplus'))
     for path, name in parts:
         data = Path(path).read_bytes()
         if data[:4] != b'\x7fELF':
@@ -1031,6 +1055,8 @@ def build(version, suite, hook, ui_packs, out, prefix='SCLIVE4', edisksd_hook=No
         # An armhf hook in a 64-bit Engine (or the reverse) is never loaded: refuse it here.
         if int.from_bytes(data[18:20], 'little') != machine:
             fail(f'{path} is not a {"AArch64" if machine == EM_AARCH64 else "32-bit ARM"} ELF, needed for {prefix}')
+        if name == 'bin/fsck.hfsplus' and not is_static_elf(data):
+            fail(f'{path} must be statically linked for {prefix}')
         files[name] = (data, 0o755)
     for applet in APPLETS:
         files[f'bin/{applet}'] = (WRAPPER.format(applet).encode(), 0o755)
@@ -1094,12 +1120,13 @@ def main(argv=None):
     p.add_argument('--suite', required=True, type=Path, help='static enginex-suite (ARMv7, arm64 for AZ04)')
     p.add_argument('--hook', required=True, type=Path, help='libengine-ui-hook.so')
     p.add_argument('--edisksd-hook', type=Path, help='libedisksd-hook.so (default: next to --hook, if present)')
+    p.add_argument('--fsck-hfsplus', type=Path, help='static fsck.hfsplus (AZ04 default: next to --hook, if present)')
     p.add_argument('--ui-packs', required=True, type=Path, help='build_packs.py packs.tar(.gz)')
     p.add_argument('--out', required=True, type=Path, help='new output directory')
     p.add_argument('--prefix', default='SCLIVE4', choices=PREFIXES, help='model prefix in the file name')
     p.add_argument('--release-tag', help='tag of the release, default v<version>; v<version>-rN for a same-version re-release')
     a = p.parse_args(argv)
-    json.dump(build(a.version, a.suite, a.hook, a.ui_packs, a.out, a.prefix, a.edisksd_hook, a.release_tag), sys.stdout, indent=2)
+    json.dump(build(a.version, a.suite, a.hook, a.ui_packs, a.out, a.prefix, a.edisksd_hook, a.release_tag, a.fsck_hfsplus), sys.stdout, indent=2)
     print()
 
 

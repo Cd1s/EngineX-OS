@@ -534,7 +534,10 @@ ok 'suite unpack removes the binaries an older release unpacked under its old na
 fixture
 expect_fail env TARGET_CONFIG= TARGET_SYMVERS= bash "$ROOT/kernel-modules/build_modules.sh" modules
 has 'TARGET_CONFIG' "$MOCK_ROOT/output"
-ok 'module build refuses missing target ABI inputs before building'
+expect_fail env EXPECTED_RELEASE=6.6.119-rt TARGET_CONFIG= TARGET_SYMVERS= bash "$ROOT/kernel-modules/build_modules.sh" modules
+has '6.18.57-az01' "$MOCK_ROOT/output"
+expect_fail env QEMU_ZIMAGE= HFSPLUSX_KO= KERNEL_SRC= FSCK_HFSPLUS=/nonexistent bash "$ROOT/kernel-modules/test_hfsplusx_qemu.sh"
+ok 'module build and QEMU harness refuse missing or stale ABI inputs before building'
 debloat_root=$TMP/debloat-root
 mkdir -p "$debloat_root/etc"
 printf '127.0.0.1 localhost\n0.0.0.0 inmusicbrands.com\n' > "$debloat_root/etc/hosts"

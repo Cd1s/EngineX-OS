@@ -76,12 +76,13 @@ class DataBundleTest(unittest.TestCase):
 
     def extract(self, result):
         dest = self.tmp / 'x'
+        shutil.rmtree(dest, ignore_errors=True)
         with tarfile.open(result['bundle']) as t:
             if hasattr(tarfile, 'data_filter'):
                 t.extractall(dest, filter='data')
             else:
                 t.extractall(dest)
-        return dest / TOP
+        return dest / Path(result['bundle']).name[:-len('.tar.gz')]
 
     def test_bundle_layout_and_manifest(self):
         r = self.build()
@@ -209,6 +210,45 @@ class DataBundleTest(unittest.TestCase):
         edisksd.write_bytes(fake_elf(bdb.EM_AARCH64, b'edisksd'))
         with self.assertRaises(SystemExit):
             self.build('out-wrong-arch')
+
+    def test_az04_static_fsck_hfsplus_is_packaged(self):
+        # Construct minimal valid 64-bit static vs dynamic (PT_INTERP) ELF images.
+        def elf64(machine, dynamic=False):
+            hdr = bytearray(64 + 56)
+            hdr[0:4] = b'\x7fELF'
+            hdr[4], hdr[5], hdr[6] = 2, 1, 1  # ELF64, LE, v1
+            hdr[16:18] = (2).to_bytes(2, 'little')
+            hdr[18:20] = machine.to_bytes(2, 'little')
+            hdr[32:40] = (64).to_bytes(8, 'little')  # e_phoff
+            hdr[54:56] = (56).to_bytes(2, 'little')  # e_phentsize
+            hdr[56:58] = (1).to_bytes(2, 'little')   # e_phnum
+            hdr[64:68] = (3 if dynamic else 1).to_bytes(4, 'little')  # PT_INTERP vs PT_LOAD
+            return bytes(hdr)
+
+        h64_dir = self.tmp / 'h64'
+        h64_dir.mkdir()
+        suite64 = h64_dir / 'suite64'
+        hook64 = h64_dir / 'libengine-ui-hook.so'
+        fsck64 = h64_dir / 'fsck.hfsplus'
+        suite64.write_bytes(fake_elf(bdb.EM_AARCH64, b'suite'))
+        hook64.write_bytes(fake_elf(bdb.EM_AARCH64, b'hook'))
+        fsck64.write_bytes(elf64(bdb.EM_AARCH64, dynamic=False))
+        src = self.extract(self.build('out-az04-fsck', prefix='SYSTEMONE', suite=suite64, hook=hook64))
+        self.assertEqual((src / 'bin/fsck.hfsplus').read_bytes(), fsck64.read_bytes())
+        self.assertTrue((src / 'bin/fsck.hfsplus').stat().st_mode & 0o100)
+        self.assertIn('bin/fsck.hfsplus', (src / 'SHA256SUMS').read_text())
+        # Dynamic AArch64 ELF (PT_INTERP) and wrong-arch ARMv7 ELF must both be rejected.
+        fsck64.write_bytes(elf64(bdb.EM_AARCH64, dynamic=True))
+        with self.assertRaises(SystemExit):
+            self.build('out-az04-dyn-fsck', prefix='SYSTEMONE', suite=suite64, hook=hook64)
+        fsck64.write_bytes(elf64(bdb.EM_ARM, dynamic=False))
+        with self.assertRaises(SystemExit):
+            self.build('out-az04-arm32-fsck', prefix='SYSTEMONE', suite=suite64, hook=hook64)
+        # Gen-2 armhf does not auto-pick fsck.hfsplus next to --hook.
+        fsck_next = self.tmp / 'fsck.hfsplus'
+        fsck_next.write_bytes(elf64(bdb.EM_AARCH64, dynamic=False))
+        src32 = self.extract(self.build('out-sclive4-no-fsck', prefix='SCLIVE4'))
+        self.assertFalse((src32 / 'bin/fsck.hfsplus').exists())
 
     def test_rebuild_is_identical(self):
         a, b = self.build('a'), self.build('b')
