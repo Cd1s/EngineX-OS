@@ -41,6 +41,7 @@ migrate_file() {
     cp -p "$mf_file" "$mf_tmp" || return 1
     sed -e "s|$legacy_data|/data/enginex|g" \
         -e "s|$legacy_deemix_unit|enginex-deemixd.service|g" \
+        -e "s|$legacy_deemix\.service|enginex-deemixd.service|g" \
         -e "s|/run/$legacy_unit|/run/enginex|g" \
         -e "s|/tmp/$legacy_unit|/tmp/enginex|g" \
         -e "s|/etc/$legacy_unit|/etc/enginex|g" \
@@ -59,6 +60,12 @@ migrate_values() {
             migrate_file "$mv_file" || return 1
         done
     done
+    if [ -d "$new/mods-state" ] && [ ! -L "$new/mods-state" ]; then
+        for mv_dir in "$new"/mods-state/*; do
+            [ -d "$mv_dir" ] && [ ! -L "$mv_dir" ] || continue
+            migrate_file "$mv_dir/.paused" || return 1
+        done
+    fi
     mv_accounts=/data/StreamingAccounts.json
     if [ -f "$mv_accounts" ] && [ ! -L "$mv_accounts" ]; then
         mv_tmp=/data/.enginex-accounts.$$
