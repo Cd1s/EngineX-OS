@@ -8075,6 +8075,113 @@ assert.deepEqual(
             res = subprocess.run(["node", "-e", js], capture_output=True, text=True)
             self.assertEqual(res.returncode, 0, res.stderr)
 
+    def test_preview_waveform_tap_seek_270(self):
+        """#270: tapping preview waveform starts+seeks when idle, seeks on second tap, clears on hide."""
+        for ver, rel in [
+            ("5.3.0", "Skins/Embedded/Views/BrowseView/Components/TrackList.qml"),
+            ("5.0.4", "Skins/EmbeddedCommon/Views/BrowseView/Components/TrackList.qml"),
+        ]:
+            qrc = LAB / ver / "qrc"
+            if not qrc.is_dir():
+                continue
+            with tempfile.TemporaryDirectory(prefix=f"preview-seek-{ver}-") as tmp:
+                res = subprocess.run(
+                    ["python3", str(BUILD_PACKS), "--qrc", str(qrc), "--out", str(Path(tmp) / "packs")],
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(res.returncode, 0, res.stderr)
+                tl = (Path(tmp) / "packs" / "en" / rel).read_text()
+                self.assertIn("property real scPendingSeek: -1", tl)
+                self.assertIn("onIsListeningChanged:", tl)
+                self.assertIn("onVisibleChanged: if (!visible) scPendingSeek = -1", tl)
+                self.assertIn("previewItem.scPendingSeek = positionToSet", tl)
+                self.assertIn("Math.max(0, Math.min(1, (mouse.x - albumArtImageItem.width) / barLength))", tl)
+
+        # Verify the actual JS logic for first tap (start+seek), second tap (seek), album-art tap, and hide.
+        js = """
+const assert = require('node:assert/strict');
+let positions = [];
+let pressedCount = 0;
+const Planck = {
+    getProperty(path) {
+        assert.equal(path, "/Client/Librarian/Preview/Position");
+        return { translator: { set value(v) { positions.push(v); } } };
+    }
+};
+const mainInfo = { width: 500 };
+const albumArtImageItem = { width: 100 };
+const previewItem = {
+    isListening: false,
+    visible: true,
+    scPendingSeek: -1,
+    pressed() { pressedCount++; },
+    onIsListeningChanged() {
+        if (this.isListening && this.scPendingSeek >= 0) {
+            const pos = this.scPendingSeek;
+            this.scPendingSeek = -1;
+            Planck.getProperty("/Client/Librarian/Preview/Position").translator.value = pos;
+        }
+    },
+    onVisibleChanged() {
+        if (!this.visible) this.scPendingSeek = -1;
+    }
+};
+function handleClick(mouseX, inAlbumArt) {
+    const point = { x: mouseX, y: 10 };
+    if (point && inAlbumArt) {
+        previewItem.scPendingSeek = -1;
+        previewItem.pressed();
+    }
+    if (!inAlbumArt) {
+        const barLength = mainInfo.width - albumArtImageItem.width;
+        if (barLength > 0) {
+            const positionToSet = Math.max(0, Math.min(1, (mouseX - albumArtImageItem.width) / barLength));
+            if (!previewItem.isListening) {
+                previewItem.scPendingSeek = positionToSet;
+                previewItem.pressed();
+            }
+            if (previewItem.isListening) {
+                previewItem.scPendingSeek = -1;
+                Planck.getProperty("/Client/Librarian/Preview/Position").translator.value = positionToSet;
+            }
+        }
+    }
+}
+// 1. First tap on preview waveform at 50% (x=300 in [100..500]): starts preview and queues seek.
+handleClick(300, false);
+assert.equal(pressedCount, 1);
+assert.equal(previewItem.scPendingSeek, 0.5);
+assert.deepEqual(positions, []);
+// Engine starts preview -> onIsListeningChanged applies pending seek.
+previewItem.isListening = true;
+previewItem.onIsListeningChanged();
+assert.equal(previewItem.scPendingSeek, -1);
+assert.deepEqual(positions, [0.5]);
+// 2. Second tap at 75% (x=400): seeks directly without toggling preview.
+handleClick(400, false);
+assert.equal(pressedCount, 1);
+assert.deepEqual(positions, [0.5, 0.75]);
+// 3. Clamp out-of-bounds tap (x=600 -> 1.0).
+handleClick(600, false);
+assert.deepEqual(positions, [0.5, 0.75, 1]);
+// 4. Tap album art clears pending seek and toggles preview.
+previewItem.isListening = false;
+handleClick(200, false);
+assert.equal(previewItem.scPendingSeek, 0.25);
+handleClick(50, true);
+assert.equal(previewItem.scPendingSeek, -1);
+assert.equal(pressedCount, 3);
+// 5. Hiding previewItem (closing browser / changing row) clears pending seek.
+handleClick(200, false);
+assert.equal(previewItem.scPendingSeek, 0.25);
+previewItem.visible = false;
+previewItem.onVisibleChanged();
+assert.equal(previewItem.scPendingSeek, -1);
+"""
+        res = subprocess.run(["node", "-e", js], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
