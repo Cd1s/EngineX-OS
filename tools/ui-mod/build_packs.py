@@ -526,12 +526,13 @@ TIDAL_PAIRING_530 = """			// logoutOfProvider finishes asynchronously. Wait befo
 """
 
 STREAMING_INTERNAL_SAVE = """
-    property bool scInternalAttempted: false
     property bool scInternalPending: false
     property bool scInternalReady: false
     property bool scInternalSelected: false
     property bool scInternalExpired: false
     property string scOriginalSource: ""
+    property real scInternalEnded: 0 // when the last attempt ended
+    property bool scSourceDrive: false // Engine's last hasSourceDriveChanged
     // The last source the browser showed other than the internal drive.
     property string scLastSource: ""
     readonly property var scSelectingDevice: Planck.getProperty("/Client/Librarian/DevicesController/IsSelectingDevice").translator
@@ -572,6 +573,7 @@ STREAMING_INTERNAL_SAVE = """
         scSaveTimeout.stop()
         scRestoreSource(scOriginalSource || scLastSource)
         scInternalPending = false
+        scInternalEnded = Date.now()
     }
     function scInternalFailed() {
         if (!scInternalPending) return
@@ -580,24 +582,35 @@ STREAMING_INTERNAL_SAVE = """
         // Expiry cannot cancel a native job. Keep its restore target until
         // completion, while allowing the stock warning to report the failure.
         scInternalPending = scSelectingDevice.state
+        scInternalEnded = Date.now()
         Planck.librarianController.streamingInterfaceController.checkSourceDriveAvailability()
     }
+    // Every request Engine makes gets one attempt (NetEase opened several times in one
+    // Engine run asks again each time the save drive was lost). A request within 3 s
+    // of the last attempt's end is that attempt's own outcome, the warning raised
+    // again after a failure or a drive that did not hold, and shows the stock warning
+    // instead of trying again.
     function scTryInternalSave() {
         if (scInternalPending) return !scInternalExpired
-        if (scInternalAttempted) return false
+        if (Date.now() - scInternalEnded < 3000) return false
         const librarian = Planck.librarianController
         const path = "/data/enginex/stream-save"
         if (!librarian.isDeviceRegistered(path) || !librarian.isStreamingStorageCandidate(path)) return false
-        scInternalAttempted = true
         scInternalPending = true
         scInternalReady = false
         scInternalSelected = false
         scInternalExpired = false
         // Provider selection can emit no-source before its browser change completes.
         Qt.callLater(function() {
-            scOriginalSource = scCurrentSource()
+            const current = scCurrentSource()
+            scOriginalSource = current === path ? "" : current
             scSaveTimeout.start()
-            librarian.browserSourceControllerPtr().select(path)
+            // Engine reports no change for what already holds: the drive browsed now,
+            // or a save drive it has already accepted.
+            scInternalSelected = current === path
+            scInternalReady = scSourceDrive
+            if (scInternalSelected && scInternalReady) scFinishInternal()
+            else librarian.browserSourceControllerPtr().select(path)
         })
         return true
     }
@@ -7384,6 +7397,7 @@ def edits(dev: bool):
              "    }\n"),
             ("        function onShowNoSourceAvailableDialog() {\n",
              "        function onHasSourceDriveChanged(available) {\n"
+             "            scSourceDrive = available\n"
              "            if (!scInternalPending) return\n"
              "            scInternalReady = available\n"
              "            Qt.callLater(scFinishInternal)\n"
