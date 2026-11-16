@@ -74,7 +74,8 @@ class InternalStreamingStorageTest(unittest.TestCase):
         script = r"""
 const assert = require('node:assert/strict');
 const internal = '/data/enginex/stream-save';
-let scInternalAttempted = false, scInternalPending = false, scInternalReady = false;
+let scInternalPending = false, scInternalReady = false, scInternalEnded = 0, scSourceDrive = false;
+let clock = 1e6; Date.now = () => clock; // a later request: clock += 5000
 let scInternalSelected = false, scOriginalSource = '';
 let scInternalExpired = false;
 const scSelectingDevice = {state: false};
@@ -122,7 +123,7 @@ assert.equal(prompts.length, 0);
 selections = []; restores = [];
 onHasSourceDriveChanged(true); flush();
 assert.deepEqual(selections, []);
-scInternalAttempted = false; selected = 'TIDAL';
+clock += 5000; selected = 'TIDAL';
 onShowNoSourceAvailableDialog(); flush();
 selected = '/media/SD'; onCurrentChanged(ids.indexOf(selected));
 ids.reverse();
@@ -134,7 +135,7 @@ assert.deepEqual(restores, ['/media/SD']);
 // directory nor a read-only device is silently accepted.
 for (const state of [[false, true], [true, false]]) {
     [registered, eligible] = state;
-    scInternalAttempted = false; selections = []; prompts = [];
+    clock += 5000; selections = []; prompts = [];
     onShowNoSourceAvailableDialog(); flush();
     assert.deepEqual(selections, []);
     assert.equal(prompts.length, 1);
@@ -143,7 +144,8 @@ for (const state of [[false, true], [true, false]]) {
 
 // A failed native switch must still show the original warning, without
 // looping, logging the carrier out or changing a later user selection.
-registered = eligible = true; scInternalAttempted = false;
+registered = eligible = true; clock += 5000;
+onHasSourceDriveChanged(false); // the save drive went away
 selections = []; restores = []; prompts = []; selected = 'TIDAL';
 onShowNoSourceAvailableDialog(); flush();
 selected = internal; onCurrentChanged(ids.indexOf(internal)); flush();
@@ -159,7 +161,7 @@ assert.equal(selected, 'TIDAL');
 // must still restore the carrier, while a finished failure releases the guard
 // so a later manual selection of the internal library remains the user's choice.
 for (const lateSuccess of [true, false]) {
-    scInternalAttempted = false; scInternalExpired = false; selected = 'TIDAL';
+    clock += 5000; scInternalExpired = false; selected = 'TIDAL';
     onCurrentChanged(ids.indexOf('TIDAL')); flush();
     restores = []; prompts = [];
     onShowNoSourceAvailableDialog(); flush();
@@ -180,6 +182,68 @@ for (const lateSuccess of [true, false]) {
         assert.equal(selected, 'TIDAL');
     }
 }
+
+// Left SC5000, 2026-11-16: NetEase used several times in one Engine run, and the
+// warning came back after the first use. Every request gets its own attempt.
+function freshRequest() {
+    clock += 5000; selections = []; restores = []; prompts = [];
+    scSelectingDevice.state = false; scInternalExpired = false;
+}
+freshRequest(); onHasSourceDriveChanged(false); selected = 'TIDAL';
+for (const n of [1, 2, 3]) {
+    if (n > 1) { clock += 5000; onHasSourceDriveChanged(false); engineCarrier(); }
+    onShowNoSourceAvailableDialog(); flush();
+    selected = internal; onCurrentChanged(ids.indexOf(internal));
+    onHasSourceDriveChanged(true); flush();
+    assert.equal(prompts.length, 0, 'request ' + n);
+    assert.equal(selected, 'TIDAL', 'request ' + n);
+}
+assert.deepEqual(selections, [internal, internal, internal]);
+function engineCarrier() { selected = 'TIDAL'; onCurrentChanged(ids.indexOf('TIDAL')); flush(); }
+
+// Engine already browses the internal drive: no browser change will come. It is
+// accepted after the select, and the browser goes back to the last source shown.
+freshRequest(); onHasSourceDriveChanged(false);
+engineCarrier(); selected = internal;
+onShowNoSourceAvailableDialog(); flush();
+assert.deepEqual(selections, [internal]);
+onHasSourceDriveChanged(true); flush();
+assert.equal(scInternalPending, false);
+assert.deepEqual(restores, ['TIDAL']);
+assert.equal(prompts.length, 0);
+// Already browsed and already accepted: nothing to wait for, nothing selected.
+freshRequest(); selected = internal;
+onShowNoSourceAvailableDialog(); flush();
+assert.deepEqual(selections, []);
+assert.equal(scInternalPending, false);
+assert.deepEqual(restores, ['TIDAL']);
+assert.equal(prompts.length, 0);
+
+// Engine already accepted a save drive: no hasSourceDriveChanged will come. The
+// switch to the internal drive completes the attempt and the carrier comes back.
+freshRequest(); engineCarrier();
+onShowNoSourceAvailableDialog(); flush();
+selected = internal; onCurrentChanged(ids.indexOf(internal)); flush();
+assert.equal(scInternalPending, false);
+assert.deepEqual(restores, ['TIDAL']);
+assert.equal(prompts.length, 0);
+
+// A request right after an attempt ended is that attempt's outcome: the stock
+// warning, no second selection.
+onShowNoSourceAvailableDialog(); flush();
+assert.equal(prompts.length, 1);
+assert.deepEqual(selections, [internal]);
+
+// A real timeout (Engine neither switches nor accepts) still shows the stock
+// warning once, with one selection and no loop.
+freshRequest(); onHasSourceDriveChanged(false); engineCarrier();
+onShowNoSourceAvailableDialog(); flush();
+assert.equal(prompts.length, 0);
+scInternalFailed(); flush();
+assert.equal(prompts.length, 1);
+assert.equal(prompts[0].id, 'StreamingNoSourceAvailableDialog');
+assert.deepEqual(selections, [internal]);
+assert.equal(selected, 'TIDAL');
 """.replace("FUNCTIONS", functions)
         result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -257,7 +321,8 @@ assert.deepEqual(selected, [2]);
         script = r"""
 const assert = require('node:assert/strict');
 const internal = '/data/enginex/stream-save';
-let scInternalAttempted = false, scInternalPending = false, scInternalReady = false;
+let scInternalPending = false, scInternalReady = false, scInternalEnded = 0, scSourceDrive = false;
+let clock = 1e6; Date.now = () => clock; // a later request: clock += 5000
 let scInternalSelected = false, scOriginalSource = '', scLastSource = '';
 let scInternalExpired = false;
 const scSelectingDevice = {state: false};
@@ -315,7 +380,7 @@ assert.equal(prompts.length, 0);
 // While our own selection runs, Engine browsing the internal drive is expected and
 // nothing is restored early (the carrier comes back once Engine accepted it).
 sourceScreenView.visible = false; opened = 0; restores = []; selections = [];
-scInternalAttempted = false; engineBrowses('TIDAL');
+clock += 5000; onHasSourceDriveChanged(false); engineBrowses('TIDAL');
 onShowNoSourceAvailableDialog(); flush();
 engineBrowses(internal);
 assert.deepEqual(restores, []);
