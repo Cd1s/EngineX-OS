@@ -4810,8 +4810,8 @@ run(2000, src(S2, {id: 'k2'})); settle(); run(1500, src(S2, {id: 'k2'}));
 assert.equal(eng.held, S2); assert.equal(scShadowAt[2].ready, true);
 // The data directory under its old name is the same file.
 eng.held = S2; assert.equal(scShadowWrong(2, src(S2)), '');
-assert.equal(scShadowWrong(2, Object.assign(src(S2), {path: '/data/enginex-custom/shadow-v3/peer-2/same.flac'})), '');
-""")
+assert.equal(scShadowWrong(2, Object.assign(src(S2), {path: '@LEGACY_DATA@/shadow-v3/peer-2/same.flac'})), '');
+""".replace('@LEGACY_DATA@', legacy.DATA_DIR))
 
     def test_engine_load_failure_is_asked_again_with_backoff_and_never_steered(self):
         self.js(self.ENGINE + r"""

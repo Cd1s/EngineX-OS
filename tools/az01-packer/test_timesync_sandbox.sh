@@ -39,7 +39,7 @@ CAPPY
     R=$W/root
     DATA=$W/data
     mkdir -p "$R" "$DATA/system/var/overlay/lib" "$DATA/enginex/ui/packs" "$DATA/enginex/state"
-    ln -sfn enginex "$DATA/enginex-custom"
+    ln -sfn enginex "$DATA/${legacy_data##*/}"
     mount -o loop,ro "$W/rootfs.ext2" "$R"
 
     ACTUAL_TS=$(stat -c %Y "$R/etc/timestamp")

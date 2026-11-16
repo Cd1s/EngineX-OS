@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 import rootfs_audit as ra
+import legacy_names as legacy
 
 
 class AuditTests(unittest.TestCase):
@@ -44,6 +45,14 @@ class AuditTests(unittest.TestCase):
         ok, a = self.audit()
         self.assertFalse(ok)
         self.assertTrue(any('Requires=etc.mount is a vendor unit' in m for m in a.fails), a.fails)
+
+    def test_legacy_image_units_are_still_audited(self):
+        self.overlay.mkdir()
+        unit = 'usr/lib/systemd/system/' + legacy.PROJECT + '-custom-prepare.service'
+        (self.root / unit).write_text('[Service]\nExecStart=/usr/bin/gone\n')
+        ok, a = self.audit()
+        self.assertFalse(ok)
+        self.assertIn('/' + unit + ': ExecStart command /usr/bin/gone not found', a.fails)
 
     def test_soft_and_mount_dependencies_pass(self):
         self.ship('etc/systemd/system/x.service', '[Unit]\nRequiresMountsFor=/data /etc\nWants=etc.mount var-lib.mount\n'

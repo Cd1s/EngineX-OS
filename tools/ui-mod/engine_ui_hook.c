@@ -3280,7 +3280,7 @@ static int raw_access(const char *path, int mode) {
     return real ? real(path, mode) : -1;
 }
 
-// The bundle lives in /data/enginex (#103); /data/enginex-custom is the compat link to it, or
+// The bundle lives in /data/enginex (#103); the legacy data directory is the compat link to it, or
 // the real directory on a deck the first boot has not migrated yet (BH-GF4-4).
 #ifndef STEMS_ENGINEX_PROCESSOR
 #define STEMS_ENGINEX_PROCESSOR "/data/enginex/bundle/stems-processor"
@@ -3430,7 +3430,7 @@ int enginex_alsa_boot_hook(void *root, void *config, void **dst, void *private_d
             if (devnull > 2) close(devnull);
         }
         unsetenv("LD_PRELOAD");
-        // The ALSA file loaded this hook through /data/enginex-custom: its boot-activate.sh is
+        // The ALSA file loaded this hook through the legacy data directory: its boot-activate.sh is
         // reachable there too while /data/enginex is a dangling link, for the moment a downgrade
         // to a release before 5.3.0.3 hands the directory back (#234, internal/leave).
         const char *activate = "/data/enginex/bundle/boot-activate.sh";
@@ -3790,7 +3790,7 @@ static int rm_tree(int parent, const char *name, dev_t root_dev) {
 
 // Factory Reset on a /data-bundle deck: wipes the user's data and EngineX's own settings but keeps
 // the installed bundle, UI packs, version, unlock flag, SSH keys and /data/system, so EngineX OS
-// survives. /data/enginex and the /data/enginex-custom compat symlink are never removed.
+// survives. /data/enginex and the legacy data compat symlink are never removed.
 // ENGINEX_TEST_DATA_ROOT redirects /data (and skips the reboot) for the unit test.
 __attribute__((visibility("default")))
 int az01_erase_data_partition(void) {

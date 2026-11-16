@@ -1,4 +1,4 @@
-# Denon SC5000 Prime (Engine OS 5.0.4) 深度定制系统 (`enginex-custom-os`) 需求与架构方案
+# Denon SC5000 Prime (Engine OS 5.0.4) 深度定制系统 (`EngineX-OS`) 需求与架构方案
 
 > 状态：**原始需求蓝图；当前进度见 [变更记录](docs/ISSUE-FIXES-2026-11-04.md)**。
 > 本文中的秒读、完整 Cue/波形兼容和功能描述是目标，不代表均已通过实机验收。
