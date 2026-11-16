@@ -922,14 +922,6 @@ func parseBoolParam(val string) (bool, bool) {
 // safe mode: the user has asked for the UI to be tried again.
 func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	if q.Has("fxUnit") || q.Has("fxMode") {
-		s.fxSelectorUpdate(w, r, q)
-		return
-	}
-	if q.Has("timezone") && len(q) == 1 {
-		s.timezoneUpdate(w, q.Get("timezone"))
-		return
-	}
 	if r.Body != nil && strings.Contains(r.Header.Get("Content-Type"), "application/json") {
 		var body map[string]any
 		r.Body = http.MaxBytesReader(w, r.Body, jsonBodyLimit)
@@ -940,6 +932,14 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+	}
+	if q.Has("fxUnit") || q.Has("fxMode") {
+		s.fxSelectorUpdate(w, r, q)
+		return
+	}
+	if q.Has("timezone") && len(q) == 1 {
+		s.timezoneUpdate(w, q.Get("timezone"))
+		return
 	}
 	// The switch belongs to the deck: not from the LAN console API. Tunnels
 	// never reach /v1 (the gateway refuses relayed requests, ForwardHandler).
