@@ -532,6 +532,8 @@ STREAMING_INTERNAL_SAVE = """
     property bool scInternalSelected: false
     property bool scInternalExpired: false
     property string scOriginalSource: ""
+    // The last source the browser showed other than the internal drive.
+    property string scLastSource: ""
     readonly property var scSelectingDevice: Planck.getProperty("/Client/Librarian/DevicesController/IsSelectingDevice").translator
     function scCurrentSource() {
         const model = Planck.librarianController.browserSourceControllerPtr().model()
@@ -542,29 +544,39 @@ STREAMING_INTERNAL_SAVE = """
         }
         return ""
     }
-    function scRestoreSource() {
-        if (!scOriginalSource || scCurrentSource() !== "/data/enginex/stream-save") return
+    // The internal drive is Engine's save drive only: it holds nothing to browse and
+    // is hidden from the Sources list. The browser goes back to the source it showed
+    // before; with none left (start-up, that drive removed) the Sources list opens,
+    // as when nothing is selected, and the user picks one.
+    function scRestoreSource(back) {
+        if (scCurrentSource() !== "/data/enginex/stream-save") return
         const sources = Planck.librarianController.browserSourceControllerPtr()
         const model = sources.model()
-        for (let row = 0; row < model.rowCount(); row++) {
+        for (let row = 0; back && row < model.rowCount(); row++) {
             const index = model.index(row, 0)
-            if (model.data(index, 257) === scOriginalSource) {
+            if (model.data(index, 257) === back) {
                 sources.forceSelect(index)
                 return
             }
         }
+        if (!PlanckGUI.views.sourceScreenView.visible) PlanckGUI.views.sourceScreenView.onQuickSourceButtonClicked()
+    }
+    // Engine itself browses the internal drive (it remembered it at start-up, or the
+    // drive being browsed went away): leave it unless our own selection is running.
+    function scLeaveInternal() {
+        if (!scInternalPending) scRestoreSource(scLastSource)
     }
     function scFinishInternal() {
         if (!scInternalPending) return
         if (!(scInternalReady && scInternalSelected) && (!scInternalExpired || scSelectingDevice.state)) return
         scSaveTimeout.stop()
-        scRestoreSource()
+        scRestoreSource(scOriginalSource || scLastSource)
         scInternalPending = false
     }
     function scInternalFailed() {
         if (!scInternalPending) return
         scInternalExpired = true
-        scRestoreSource()
+        scRestoreSource(scOriginalSource || scLastSource)
         // Expiry cannot cancel a native job. Keep its restore target until
         // completion, while allowing the stock warning to report the failure.
         scInternalPending = scSelectingDevice.state
@@ -603,12 +615,14 @@ STREAMING_INTERNAL_SAVE = """
     Connections {
         target: Planck.librarianController.browserSourceControllerPtr()
         function onCurrentChanged(index) {
-            if (!scInternalPending) return
             const id = target.model().data(index, 257)
-            if (id === "/data/enginex/stream-save") {
+            if (id !== "/data/enginex/stream-save") {
+                if (id) scLastSource = id
+                if (scInternalPending) scOriginalSource = id
+            } else if (scInternalPending) {
                 scInternalSelected = true
                 Qt.callLater(scFinishInternal)
-            } else scOriginalSource = id
+            } else Qt.callLater(scLeaveInternal)
         }
     }
 """
@@ -4505,6 +4519,14 @@ SOURCE_FOOTER = """
 	function scHiddenSourceName(name, typeText) {
 		return typeText === "Streaming" && ["TIDAL", "Tidal", "SoundCloud", "Beatport", "Beatport LINK", "Apple Music"].indexOf(String(name || "")) >= 0
 	}
+	// EngineX's internal save drive (engine-ui-guard registers it with -extraDriveDir):
+	// Engine keeps streamed tracks' cues, loops and grids there and has nothing on it
+	// to browse, so it is never listed. Known by its path, a user's drive can have any
+	// name; Engine Link offers the other deck's as net://<that deck>/stream-save.
+	function scHiddenSource(id, name, typeText) {
+		const path = String(id || "")
+		return path === "/data/enginex/stream-save" || (path.startsWith("net://") && path.endsWith("/stream-save")) || scHiddenSourceName(name, typeText)
+	}
 	function scFindAvailableSource() {
 		let p = connectedSource.parent
 		while (p && p.objectName !== "SourceScreenContentColumn" && p.parent) p = p.parent
@@ -4533,7 +4555,7 @@ SOURCE_FOOTER = """
 		const cm = sources.connectedSourceModel()
 		for (let i = 0; cm && i < cm.rowCount(); i++) {
 			const nm = cm.data(cm.index(i, 0), root.scSourceNameRole)
-			if (!scHiddenSourceName(nm, root.scSourceTypeText(cm, i))) list.push({ kind: "conn", row: i, id: "" })
+			if (!scHiddenSource(nm, nm, root.scSourceTypeText(cm, i))) list.push({ kind: "conn", row: i, id: "" })
 		}
 		const svcs = root.scServices.filter(s => root.scSources.indexOf(s.id) >= 0)
 		for (let i = 0; i < svcs.length; i++) {
@@ -4543,7 +4565,7 @@ SOURCE_FOOTER = """
 			const am = sources.availableSourceModel()
 			for (let i = 0; am && i < am.rowCount(); i++) {
 				const nm = am.data(am.index(i, 0), root.scSourceNameRole)
-				if (!scHiddenSourceName(nm, root.scSourceTypeText(am, i))) list.push({ kind: "avail", row: i, id: "" })
+				if (!scHiddenSource(nm, nm, root.scSourceTypeText(am, i))) list.push({ kind: "avail", row: i, id: "" })
 			}
 		}
 		return list
@@ -6887,7 +6909,7 @@ def edits(dev: bool):
         ],
         v + "BrowserSource/ConnectedSource.qml": [
             ("	currentIndex: -1\n", "	currentIndex: -1\n" + SOURCE_FOOTER),
-            ("		height: 108\n		leftPadding", '		height: connectedSource.scHiddenSourceName(model.name, model.typeText) ? 0 : 108\n		visible: !connectedSource.scHiddenSourceName(model.name, model.typeText)\n		Component.onCompleted: if (model.typeText === "Streaming" && (model.name === "TIDAL" || model.name === "Tidal")) connectedSource.scTidalRow = this\n		Component.onDestruction: if (connectedSource.scTidalRow === this) connectedSource.scTidalRow = null\n		leftPadding'),
+            ("		height: 108\n		leftPadding", '		height: connectedSource.scHiddenSource(connectedSource.model.data(modelIndex, root.scSourceNameRole), model.name, model.typeText) ? 0 : 108\n		visible: !connectedSource.scHiddenSource(connectedSource.model.data(modelIndex, root.scSourceNameRole), model.name, model.typeText)\n		Component.onCompleted: if (model.typeText === "Streaming" && (model.name === "TIDAL" || model.name === "Tidal")) connectedSource.scTidalRow = this\n		Component.onDestruction: if (connectedSource.scTidalRow === this) connectedSource.scTidalRow = null\n		leftPadding'),
             # Hidden stock streaming rows (e.g. "Tidal" at index 0, height 0) leave a
             # zero-height first section above "Demo" / "Cloud" sources; ListView then
             # oscillates currentSection <-> section.delegate.height inside updatePolish()
@@ -7220,6 +7242,12 @@ def edits(dev: bool):
     if v53():
         out[v + "Streaming/StreamingNoSourceAvailableDialog.qml"] = [
             ("Item {\n", "Item {\n" + STREAMING_INTERNAL_SAVE),
+            # Engine may already browse the internal drive when this item is created.
+            ("    Component.onCompleted: Planck.librarianController.streamingInterfaceController.checkSourceDriveAvailability()\n",
+             "    Component.onCompleted: {\n"
+             "        Planck.librarianController.streamingInterfaceController.checkSourceDriveAvailability()\n"
+             "        Qt.callLater(scLeaveInternal)\n"
+             "    }\n"),
             ("        function onShowNoSourceAvailableDialog() {\n",
              "        function onHasSourceDriveChanged(available) {\n"
              "            if (!scInternalPending) return\n"

@@ -42,7 +42,7 @@ class SpotifyReviewTest(unittest.TestCase):
                 visible = re.search(r"visible: (.*)\n\s*Component.onCompleted:", patched).group(1)
                 available = re.search(r"visible: (.*)", bp.AVAILABLE_SOURCE).group(1)
                 kind = function(bp.SERVICES_MAIN, "scSourceTypeText") if "function scSourceTypeText(" in bp.SERVICES_MAIN else ""
-                hidden = function(bp.SOURCE_FOOTER, "scHiddenSourceName")
+                hidden = function(bp.SOURCE_FOOTER, "scHiddenSourceName") + "\n" + function(bp.SOURCE_FOOTER, "scHiddenSource")
                 entries = function(bp.SOURCE_FOOTER, "scEntries")
                 enter = bp.SOURCE_ENTER
                 script = r'''
@@ -62,6 +62,8 @@ HIDDEN
 ENTRIES
 ENTER
 connectedSource.scHiddenSourceName=scHiddenSourceName;
+// The row's identifier (role 257) is read from the list's model; the internal save drive is hidden by it.
+connectedSource.scHiddenSource=scHiddenSource; connectedSource.model=model; const modelIndex=0;
 for(const name of names) {
  for(const typeText of ['Storage','Remote Library','Cloud','Streaming']) {
   const row={name,typeText}; rows=[row];

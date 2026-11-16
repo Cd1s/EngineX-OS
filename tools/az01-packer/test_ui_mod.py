@@ -160,6 +160,7 @@ assert.equal(selected, 'TIDAL');
 // so a later manual selection of the internal library remains the user's choice.
 for (const lateSuccess of [true, false]) {
     scInternalAttempted = false; scInternalExpired = false; selected = 'TIDAL';
+    onCurrentChanged(ids.indexOf('TIDAL')); flush();
     restores = []; prompts = [];
     onShowNoSourceAvailableDialog(); flush();
     scSelectingDevice.state = true;
@@ -172,14 +173,162 @@ for (const lateSuccess of [true, false]) {
         assert.deepEqual(restores, ['TIDAL']);
     } else {
         onStateChanged(); flush();
+        // Engine's switch arrives after all: the internal drive is never left
+        // browsed (it is hidden from the Sources list), the carrier comes back.
         selected = internal; onCurrentChanged(ids.indexOf(internal)); flush();
-        assert.deepEqual(restores, []);
-        assert.equal(selected, internal);
+        assert.deepEqual(restores, ['TIDAL']);
+        assert.equal(selected, 'TIDAL');
     }
 }
 """.replace("FUNCTIONS", functions)
         result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required for the Sources list filter")
+    def test_internal_save_drive_is_in_no_sources_list_by_its_path(self):
+        # The maintainer saw the internal drive as a USB stick named `stream-save` in
+        # the Sources list, from boot. It is Engine's save drive only: never listed,
+        # whatever its name, and a user's drive with that name still is.
+        for root in ("Skins/Embedded/", "Skins/EmbeddedCommon/"):
+            old_root = bp.ROOT
+            try:
+                bp.ROOT = root
+                edits = bp.edits(False)
+            finally:
+                bp.ROOT = old_root
+            conn = "\n".join(new for _old, new in edits[root + "Views/BrowserSource/ConnectedSource.qml"])
+            row = "connectedSource.scHiddenSource(connectedSource.model.data(modelIndex, root.scSourceNameRole), model.name, model.typeText)"
+            self.assertIn("height: " + row + " ? 0 : 108", conn, root)
+            self.assertIn("visible: !" + row, conn, root)
+        body = bp.SOURCE_FOOTER.split("function scHiddenSourceName(name, typeText) {", 1)[1].split("\tConnections {\n\t\ttarget: PlanckGUI", 1)[0]
+        script = """
+const assert = require('node:assert/strict');
+const internal = '/data/enginex/stream-save';
+let scFocusKind = '', scFocusRow = -1, scFocusService = '';
+const selected = [];
+const connectedSource = {expanded: true, parent: null, itemAtIndex: () => null, footerItem: null};
+const root = {
+  scSourceNameRole: 257,
+  scSourceTypeText: (model, row) => model.rows[row][1],
+  scServices: [], scSources: [], scOpen() {},
+};
+// Role 257 is a row's identifier: a drive's path, a service's name.
+const model = rows => ({rows, rowCount: () => rows.length, index: r => r, data: (r, role) => role === 257 ? rows[r][0] : undefined});
+const cm = model([['/media/SD', 'Storage'], [internal, 'Storage'], ['/media/sda1', 'Storage']]);
+const am = model([[internal, 'Storage'], ['Dropbox', 'Cloud']]);
+const Planck = {librarianController: {browserSourceControllerPtr: () => ({
+  connectedSourceModel: () => cm, availableSourceModel: () => am, select: i => selected.push(i)})}};
+function scHiddenSourceName(name, typeText) {
+""" + body + """
+// By the path, whatever the drive is called; a user's drive named stream-save stays.
+assert.equal(scHiddenSource(internal, 'stream-save', 'Storage'), true);
+assert.equal(scHiddenSource(internal, 'Internal', 'Storage'), true);
+assert.equal(scHiddenSource('/media/sda1', 'stream-save', 'Storage'), false);
+assert.equal(scHiddenSource('/media/SD', 'SD', 'Storage'), false);
+// Engine Link offers the other deck's internal drive (sandbox: net://<uuid>/stream-save);
+// that deck's other drives stay.
+assert.equal(scHiddenSource('net://cb6580d2-8a13-4e67-946e-6039dc115724/stream-save', 'stream-save', 'Remote Library'), true);
+assert.equal(scHiddenSource('net://cb6580d2-8a13-4e67-946e-6039dc115724/USB 1', 'USB 1', 'Remote Library'), false);
+// The streaming rows stream-sync replaces stay hidden as before.
+assert.equal(scHiddenSource('TIDAL', 'TIDAL', 'Streaming'), true);
+// The browse knob never stops on it.
+assert.deepEqual(scEntries().map(e => e.kind + e.row), ['conn0', 'conn2', 'avail1']);
+scStep(1); scStep(1);
+assert.equal(scFocusRow, 2);
+scActivate();
+assert.deepEqual(selected, [2]);
+"""
+        result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required for source selection handlers")
+    def test_browser_never_stays_on_the_internal_save_drive(self):
+        rel = "Skins/Embedded/Views/Streaming/StreamingNoSourceAvailableDialog.qml"
+        qml = (LAB / "5.3.0/qrc" / rel).read_text()
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            for old, new in bp.edits(False).get(rel, []):
+                qml = bp.patch(qml, old, new, rel)
+        finally:
+            bp.ROOT = old_root
+        functions = "\n".join(PrimeGoTidalQRTest.function(qml, name)
+                              for name in re.findall(r"function (\w+)\(", qml))
+        script = r"""
+const assert = require('node:assert/strict');
+const internal = '/data/enginex/stream-save';
+let scInternalAttempted = false, scInternalPending = false, scInternalReady = false;
+let scInternalSelected = false, scOriginalSource = '', scLastSource = '';
+let scInternalExpired = false;
+const scSelectingDevice = {state: false};
+let selected = '', restores = [], selections = [], prompts = [], deferred = [], opened = 0;
+const ids = ['TIDAL', internal, '/media/SD'];
+const model = {
+    rowCount: () => ids.length, index: row => row,
+    data: (row, role) => role === 257 ? ids[row] : role === 265 ? ids[row] === selected : undefined,
+};
+const sources = {
+    model: () => model,
+    select: id => selections.push(id),
+    forceSelect: row => { restores.push(ids[row]); selected = ids[row]; },
+};
+const target = sources;
+const Planck = {librarianController: {
+    isDeviceRegistered: () => true, isStreamingStorageCandidate: () => true,
+    browserSourceControllerPtr: () => sources,
+    streamingInterfaceController: {checkSourceDriveAvailability() {}},
+}};
+const Prompt = {Ok: 1};
+const sourceScreenView = {visible: false, onQuickSourceButtonClicked() { opened++; this.visible = true; }};
+const PlanckGUI = {views: {prompts: {post: value => prompts.push(value)}, sourceScreenView}};
+const Qt = {callLater: fn => deferred.push(fn)};
+const scSaveTimeout = {start() {}, stop() {}};
+function flush() { while (deferred.length) deferred.shift()(); }
+function engineBrowses(id) { selected = id; onCurrentChanged(ids.indexOf(id)); flush(); }
+FUNCTIONS
+
+// Start-up: Engine browses the internal drive (it remembered it) before anything else
+// was shown. Nothing to go back to: the Sources list opens, as with no source.
+selected = internal; scLeaveInternal(); flush();
+assert.equal(opened, 1);
+assert.deepEqual(restores, []);
+
+// The user browses the SD; Engine later lands on the internal drive by itself
+// (a drive went away, a device auto-selection): the SD comes back.
+sourceScreenView.visible = false; opened = 0;
+engineBrowses('/media/SD');
+engineBrowses(internal);
+assert.deepEqual(restores, ['/media/SD']);
+assert.equal(selected, '/media/SD');
+
+// The automatic selection with nothing browsed before it: accepted as the save drive,
+// then the browser does not stay on it.
+scLastSource = ''; restores = []; selected = '';
+onShowNoSourceAvailableDialog(); flush();
+assert.deepEqual(selections, [internal]);
+engineBrowses(internal);
+onHasSourceDriveChanged(true); flush();
+assert.equal(scInternalPending, false);
+assert.equal(opened, 1);
+assert.equal(prompts.length, 0);
+
+// While our own selection runs, Engine browsing the internal drive is expected and
+// nothing is restored early (the carrier comes back once Engine accepted it).
+sourceScreenView.visible = false; opened = 0; restores = []; selections = [];
+scInternalAttempted = false; engineBrowses('TIDAL');
+onShowNoSourceAvailableDialog(); flush();
+engineBrowses(internal);
+assert.deepEqual(restores, []);
+onHasSourceDriveChanged(true); flush();
+assert.deepEqual(restores, ['TIDAL']);
+assert.equal(opened, 0);
+""".replace("FUNCTIONS", functions)
+        result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # Engine may already browse it when the item is created (start-up).
+        completed = qml.split("Component.onCompleted: {", 1)[1].split("\n    }", 1)[0]
+        self.assertIn("checkSourceDriveAvailability()", completed)
+        self.assertIn("Qt.callLater(scLeaveInternal)", completed)
 
 
 class OnOffSwitchCompatibilityTest(unittest.TestCase):
