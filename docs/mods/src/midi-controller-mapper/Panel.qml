@@ -142,7 +142,7 @@ Rectangle {
                         elide: Text.ElideRight; Layout.fillWidth: true
                     }
                     Label {
-                        text: "Drives internal Deck 3/4 directly via StateMap without switching the SC5000 hardware layer or stealing the active deck."
+                        text: "Drives internal Deck 3/4 directly via StateMap without switching the player hardware layer or stealing the active deck."
                         color: "#7f96b0"; font.pixelSize: 12; wrapMode: Text.Wrap; Layout.fillWidth: true
                     }
                 }
@@ -228,7 +228,7 @@ Rectangle {
                 Label {
                     text: (root.state && root.state.ledFeedbackNote)
                         ? root.state.ledFeedbackNote
-                        : "Pioneer CDJ-400 in standard USB MIDI mode (PC MODE) is transmit-only for button/LED states and does not illuminate hardware LEDs in response to incoming external MIDI Note/CC messages. Deck playback status, vinyl mode, and soft-takeover ▲▼ indicators are rendered directly on the SC5000 display."
+                        : "Pioneer CDJ-400 in standard USB MIDI mode (PC MODE) is transmit-only for button/LED states and does not illuminate hardware LEDs in response to incoming external MIDI Note/CC messages. Deck playback status, vinyl mode, and soft-takeover ▲▼ indicators are rendered directly on the EngineX display."
                     color: "#b8cae0"; font.pixelSize: 12; wrapMode: Text.Wrap; Layout.fillWidth: true
                 }
                 Label {

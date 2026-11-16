@@ -167,40 +167,73 @@ func (f *Feature) fetchDeckSnapshots() ([]deckSnapshot, error) {
 	return decks, err
 }
 
+// fetchLegacyV1 calls the /v1/sc5000/ fallback endpoint for older decks that
+// predate the /v1/enginex/ rename (#234).
+func (f *Feature) fetchLegacyV1(suffix string, out any) error {
+	return f.fetchJSON("/v1/sc5000/"+suffix, out)
+}
+
+func isMissingV1Error(err error) (bool, time.Duration) {
+	var hs httpStatusError
+	if errors.As(err, &hs) && (hs.status == "404" || hs.status == "501") {
+		return true, 30 * time.Second
+	}
+	return false, 0
+}
+
 func (f *Feature) fetchDeckSnapshotsMode() ([]deckSnapshot, bool, error) {
+	now := time.Now()
 	f.mu.Lock()
-	skipClockAPI := time.Now().Before(f.clockAPIAbsentUntil)
+	skipClockAPI := now.Before(f.clockAPIAbsentUntil)
+	skipEngineXAPI := now.Before(f.enginexAPIAbsentUntil)
 	f.mu.Unlock()
 	if !skipClockAPI {
-		var clockResp struct {
+		type clockPayload struct {
 			ClockAPI bool           `json:"clockApi"`
 			Now      int64          `json:"now"`
 			Decks    []deckSnapshot `json:"decks"`
 		}
-		err := f.fetchJSON("/v1/sc5000/clock", &clockResp)
-		if err == nil {
-			if clockResp.ClockAPI {
+		if !skipEngineXAPI {
+			var clockResp clockPayload
+			err := f.fetchJSON("/v1/enginex/clock", &clockResp)
+			if err == nil && clockResp.ClockAPI {
 				return clockResp.Decks, false, nil
 			}
-			// 5.3.0.4 gateway catch-all emptyPage answers 200 without clockApi and logs
-			// every unknown /v1/ hit; cache its absence for 60 s to stop log spam.
-			f.mu.Lock()
-			f.clockAPIAbsentUntil = time.Now().Add(60 * time.Second)
-			f.mu.Unlock()
-		} else {
-			var hs httpStatusError
-			if errors.As(err, &hs) && (hs.status == "404" || hs.status == "501") {
+			if err == nil {
+				// Older gateway catch-all emptyPage answers 200 without clockApi and logs
+				// every unknown /v1/ hit; cache its absence for 60 s to stop log spam.
 				f.mu.Lock()
-				f.clockAPIAbsentUntil = time.Now().Add(30 * time.Second)
+				f.enginexAPIAbsentUntil = now.Add(60 * time.Second)
+				f.mu.Unlock()
+			} else if missing, ttl := isMissingV1Error(err); missing {
+				f.mu.Lock()
+				f.enginexAPIAbsentUntil = now.Add(ttl)
 				f.mu.Unlock()
 			} else {
 				return nil, false, err
 			}
 		}
+
+		var legacyResp clockPayload
+		err := f.fetchLegacyV1("clock", &legacyResp)
+		if err == nil {
+			if legacyResp.ClockAPI {
+				return legacyResp.Decks, false, nil
+			}
+			f.mu.Lock()
+			f.clockAPIAbsentUntil = now.Add(60 * time.Second)
+			f.mu.Unlock()
+		} else if missing, ttl := isMissingV1Error(err); missing {
+			f.mu.Lock()
+			f.clockAPIAbsentUntil = now.Add(ttl)
+			f.mu.Unlock()
+		} else {
+			return nil, false, err
+		}
 	}
 
-	// Fallback for 5.3.0.4 stream-sync builds that expose /peer/decks and /v1/sc5000/prolink
-	// without /v1/sc5000/clock.
+	// Fallback for 5.3.0.4 stream-sync builds that expose /peer/decks and prolink
+	// without the clock endpoint.
 	var peerResp struct {
 		Decks []deckSnapshot `json:"decks"`
 	}
@@ -230,7 +263,13 @@ func (f *Feature) fetchDeckSnapshotsMode() ([]deckSnapshot, bool, error) {
 			LastSeen     string  `json:"last_seen"`
 		} `json:"devices"`
 	}
-	if err := f.fetchJSON("/v1/sc5000/prolink", &prolinkResp); err == nil {
+	var prolinkErr error
+	prolinkErr = f.fetchJSON("/v1/enginex/prolink", &prolinkResp)
+	if prolinkErr != nil || prolinkResp.Devices == nil {
+		prolinkResp.Devices = nil
+		prolinkErr = f.fetchLegacyV1("prolink", &prolinkResp)
+	}
+	if prolinkErr == nil {
 		now := time.Now()
 		for _, dev := range prolinkResp.Devices {
 			if dev.Number < 1 || dev.Number > 4 || strings.HasPrefix(dev.Name, "EngineX") {

@@ -1,6 +1,6 @@
 # Generic MIDI Controller Mapper (`midi-controller-mapper`) 1.1.0
 
-Maps external USB MIDI controllers (targeting the **Pioneer CDJ-400** in USB `PC MODE` first) directly to EngineX OS internal decks (`/Engine/Deck3/...` or `/Engine/Deck4/...` in SC5000 4-deck mode) without switching hardware layers or contending with the player's physical top panel.
+Maps external USB MIDI controllers (targeting the **Pioneer CDJ-400** in USB `PC MODE` first) directly to EngineX OS internal decks (`/Engine/Deck3/...` or `/Engine/Deck4/...` in 4-deck mode) without switching hardware layers or contending with the player's physical top panel.
 
 ## Runtime
 
@@ -41,4 +41,4 @@ The decks have no Python, compiler, or package manager ([#208](https://github.co
 
 ## Hardware LED Feedback Limitation
 
-In standard USB MIDI mode (`PC MODE`), the **Pioneer CDJ-400** is transmit-only for button/LED states and does not illuminate hardware LEDs in response to external MIDI Note/CC messages. Deck playback status, Vinyl/CDJ jog mode, and soft-takeover **`▲ UP` / `▼ DN` / `● NEUTRAL`** indicators are displayed directly on the SC5000 screen. The preset schema (`ledFeedback`) includes optional LED mapping definitions for controllers that support incoming MIDI LED feedback.
+In standard USB MIDI mode (`PC MODE`), the **Pioneer CDJ-400** is transmit-only for button/LED states and does not illuminate hardware LEDs in response to external MIDI Note/CC messages. Deck playback status, Vinyl/CDJ jog mode, and soft-takeover **`▲ UP` / `▼ DN` / `● NEUTRAL`** indicators are displayed directly on the EngineX screen. The preset schema (`ledFeedback`) includes optional LED mapping definitions for controllers that support incoming MIDI LED feedback.

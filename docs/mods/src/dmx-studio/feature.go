@@ -64,6 +64,7 @@ type Feature struct {
 	pollerActive        bool
 	lastExternalClock   float64
 	clockAPIAbsentUntil time.Time
+	enginexAPIAbsentUntil time.Time
 	midiMu              sync.Mutex
 	midiRunning         bool
 	midiStop            chan struct{}

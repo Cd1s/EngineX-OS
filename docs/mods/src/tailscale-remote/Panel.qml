@@ -8,16 +8,30 @@ Rectangle {
     property string apiBase: "http://127.0.0.1:8080"
     property string message: "Checking Tailscale status…"
     property var status: ({})
-    function refresh() {
+    // Legacy /v1/sc5000/ fallback for older decks that predate the /v1/enginex/ rename (#234).
+    function legacyTailscalePath() {
+        return "/v1/sc5000/tailscale"
+    }
+    function fetchTailscale(path, allowFallback) {
         var xhr = new XMLHttpRequest()
-        xhr.open("GET", apiBase + "/v1/sc5000/tailscale")
+        xhr.open("GET", apiBase + path)
         xhr.onreadystatechange = function() {
             if (xhr.readyState !== XMLHttpRequest.DONE) return
-            if (xhr.status !== 200) { message = "System API unavailable or authentication required. Open Remote access in the Web Console."; return }
+            if (xhr.status !== 200) {
+                if (allowFallback) {
+                    fetchTailscale(legacyTailscalePath(), false)
+                    return
+                }
+                message = "System API unavailable or authentication required. Open Remote access in the Web Console."
+                return
+            }
             status = JSON.parse(xhr.responseText)
             message = status.running ? "Tailscale daemon running" : "Tailscale daemon stopped"
         }
         xhr.send()
+    }
+    function refresh() {
+        fetchTailscale("/v1/enginex/tailscale", true)
     }
     Component.onCompleted: refresh()
     Timer { interval: 5000; running: root.visible; repeat: true; onTriggered: root.refresh() }

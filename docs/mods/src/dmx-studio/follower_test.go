@@ -122,11 +122,15 @@ func TestStreamSyncPollerWithoutDeckPanelAndFallback5304(t *testing.T) {
 		defer mu.Unlock()
 		nowMS := time.Now().UnixMilli()
 		switch r.URL.Path {
-		case "/v1/sc5000/clock":
+		case "/v1/enginex/clock", "/v1/sc5000/clock":
 			if mode5304 {
 				clockHits5304++
 				// Simulate 5.3.0.4 tidalGateway catch-all emptyPage (no clockApi field).
 				_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}})
+				return
+			}
+			if r.URL.Path == "/v1/sc5000/clock" {
+				http.NotFound(w, r)
 				return
 			}
 			out := make([]deckSnapshot, len(decks))
@@ -139,7 +143,7 @@ func TestStreamSyncPollerWithoutDeckPanelAndFallback5304(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"decks": []map[string]any{
 				{"deck": 2, "master": true, "playing": true, "bpm": 132, "currentBpm": 132, "beat": 2.25, "sent": nowMS},
 			}})
-		case "/v1/sc5000/prolink":
+		case "/v1/enginex/prolink", "/v1/sc5000/prolink":
 			_ = json.NewEncoder(w).Encode(map[string]any{"devices": []any{}})
 		default:
 			http.NotFound(w, r)
@@ -192,13 +196,13 @@ func TestStreamSyncPollerWithoutDeckPanelAndFallback5304(t *testing.T) {
 	if clk["deck"] != 2 || clk["bpm"] != 132.0 {
 		t.Fatalf("5.3.0.4 fallback did not switch to Deck 2: %+v", clk)
 	}
-	// Let several fallback polls run and confirm /v1/sc5000/clock was probed only once.
+	// Let several fallback polls run and confirm clock endpoints were probed only once each.
 	time.Sleep(600 * time.Millisecond)
 	mu.Lock()
 	hits := clockHits5304
 	mu.Unlock()
-	if hits != 1 {
-		t.Fatalf("5.3.0.4 mode hit /v1/sc5000/clock %d times, want 1 (must negative-cache)", hits)
+	if hits != 2 {
+		t.Fatalf("5.3.0.4 mode hit clock endpoints %d times, want 2 (1 enginex + 1 legacy, must negative-cache)", hits)
 	}
 
 	// Non-persisting follow toggle turns off deck following without writing show.json.
@@ -438,11 +442,11 @@ func TestProlinkFallbackCueStateAndExternalClockPrecedence(t *testing.T) {
 			return
 		}
 		switch r.URL.Path {
-		case "/v1/sc5000/clock":
+		case "/v1/enginex/clock", "/v1/sc5000/clock":
 			http.NotFound(w, r)
 		case "/peer/decks":
 			_ = json.NewEncoder(w).Encode(map[string]any{"decks": []any{}})
-		case "/v1/sc5000/prolink":
+		case "/v1/enginex/prolink", "/v1/sc5000/prolink":
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"devices": []any{
 					// EngineX self-echo ignored
@@ -511,6 +515,7 @@ func TestProlinkFallbackCueStateAndExternalClockPrecedence(t *testing.T) {
 		t.Fatalf("expected poller resume to CDJ deck 4 (128 BPM) after external clock expired, got deck=%d bpm=%v", f.clock.deck, f.clock.bpm)
 	}
 	f.clockAPIAbsentUntil = time.Time{}
+	f.enginexAPIAbsentUntil = time.Time{}
 	f.mu.Unlock()
 
 	// HTTP error path returns error cleanly.
@@ -518,7 +523,37 @@ func TestProlinkFallbackCueStateAndExternalClockPrecedence(t *testing.T) {
 	errMode = true
 	mu.Unlock()
 	var out any
-	if err := f.fetchJSON("/v1/sc5000/clock", &out); err == nil {
+	if err := f.fetchJSON("/v1/enginex/clock", &out); err == nil {
 		t.Fatal("expected HTTP 403 error from fetchJSON")
+	}
+}
+
+func TestLegacyV1Fallback(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		nowMS := time.Now().UnixMilli()
+		switch r.URL.Path {
+		case "/v1/sc5000/clock":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"clockApi": true,
+				"now":      nowMS,
+				"decks": []deckSnapshot{
+					{Deck: 1, Source: "local", SourceID: "local:1", Master: true, Playing: true, BPM: 125, CurrentBPM: 125, Beat: 1.0, At: nowMS},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	f, err := NewFeature(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	f.webUIURL = srv.URL
+	decks, fallback, err := f.fetchDeckSnapshotsMode()
+	if err != nil || fallback || len(decks) != 1 || decks[0].BPM != 125 {
+		t.Fatalf("expected legacy /v1/sc5000/clock fallback to succeed, got decks=%+v fallback=%v err=%v", decks, fallback, err)
 	}
 }
