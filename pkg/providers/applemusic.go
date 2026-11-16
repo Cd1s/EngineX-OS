@@ -29,10 +29,11 @@ type AppleMusic struct {
 	// HelperURL is the enginex-amd helper (LAN/VPS); empty disables downloads.
 	HelperURL, HelperLoginURL, HelperToken string
 
-	mu    sync.Mutex
-	owner AppleMusicOwner
-	web   string // developer token scraped from the web player
-	webAt time.Time
+	mu             sync.Mutex
+	owner          AppleMusicOwner
+	helperSignedIn bool
+	web            string // developer token scraped from the web player
+	webAt          time.Time
 }
 
 // AppleMusicOwner is what the phone page saves.
@@ -316,11 +317,11 @@ func (a *AppleMusic) DownloadTo(ctx context.Context, t Track, dstDir, name strin
 	return &AppleMusicAudio{Path: finalName, SampleRate: out.Quality.SampleRate, Channels: out.Quality.Channels, Bits: out.Quality.Bits, Lossless: out.Quality.Lossless}, nil
 }
 
-// Ready reports whether there is anything to show: a link or a library login.
+// Ready reports whether there is anything to show: a link, a library login, or an active helper session.
 func (a *AppleMusic) Ready() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return len(a.owner.Links) > 0 || a.owner.UserToken != ""
+	return len(a.owner.Links) > 0 || a.owner.UserToken != "" || a.helperSignedIn
 }
 
 // Owner is the saved login, for the phone page to amend.

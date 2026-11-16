@@ -29,6 +29,9 @@ func (a *AppleMusic) SetHelper(helperURL, loginURL, token string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.HelperURL, a.HelperLoginURL, a.HelperToken = strings.TrimRight(helperURL, "/"), loginURL, token
+	if a.HelperURL == "" {
+		a.helperSignedIn = false
+	}
 }
 
 type AppleMusicHelperStatus struct {
@@ -97,6 +100,9 @@ func (a *AppleMusic) helperLogin(ctx context.Context, cfg AppleMusicHelperConfig
 		status.LoginState = wire.LoginState
 	}
 	status.SignedIn = wire.SignedIn || status.LoginState == "ready"
+	a.mu.Lock()
+	a.helperSignedIn = status.SignedIn
+	a.mu.Unlock()
 	// Use an allowlisted message rather than exposing an upstream credential echo.
 	switch status.LoginState {
 	case "ready":
@@ -115,11 +121,17 @@ func (a *AppleMusic) HelperStatus(ctx context.Context) AppleMusicHelperStatus {
 	cfg := a.HelperConfig()
 	status := AppleMusicHelperStatus{Configured: cfg.URL != ""}
 	if !status.Configured {
+		a.mu.Lock()
+		a.helperSignedIn = false
+		a.mu.Unlock()
 		return status
 	}
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	if err := a.helperCall(ctx, cfg, "GET", "/healthz", nil, nil); err != nil {
+		a.mu.Lock()
+		a.helperSignedIn = false
+		a.mu.Unlock()
 		status.Error = err.Error()
 		return status
 	}
