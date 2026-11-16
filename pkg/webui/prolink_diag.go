@@ -68,7 +68,6 @@ type prolinkDiag struct {
 	Time     time.Time `json:"time"`
 	Settings struct {
 		ProlinkShare       bool   `json:"prolinkShare"`
-		ProlinkExport      bool   `json:"prolinkExport"`
 		FourDeckWaveform   bool   `json:"fourDeckWaveform"`
 		FourDeckRoleActive string `json:"fourDeckRoleActive"`
 	} `json:"settings"`
@@ -104,7 +103,7 @@ func (s *Server) prolinkDiag(ctx context.Context, now time.Time) prolinkDiag {
 	s.uiMu.Lock()
 	v := s.loadUI()
 	s.uiMu.Unlock()
-	d.Settings.ProlinkShare, d.Settings.ProlinkExport, d.Settings.FourDeckWaveform = v.ProlinkShare, v.ProlinkExport, v.FourDeckWaveform
+	d.Settings.ProlinkShare, d.Settings.FourDeckWaveform = v.ProlinkShare, v.FourDeckWaveform
 	d.Settings.FourDeckRoleActive = s.activeRole(v)
 	if s.prolinkExport != nil {
 		d.Export = s.prolinkExport.Status()
@@ -231,9 +230,8 @@ func (d prolinkDiag) checks() []diagCheck {
 			add("WARN", item, "Off: "+hint)
 		}
 	}
-	onOff(d.Settings.ProlinkShare, "Pro DJ Link Library", "turn on in Settings -> Services to browse CDJ media")
-	onOff(d.Settings.ProlinkExport, "Pro DJ Link Export to CDJ (Beta)", "turn on in Settings -> Services to show this deck's USB/SD on CDJs")
-	if d.Settings.ProlinkExport {
+	onOff(d.Settings.ProlinkShare, "Pro DJ Link", "turn on in Settings -> Services to connect with CDJs/rekordbox and share USB/SD")
+	if d.Settings.ProlinkShare {
 		if d.Export.Enabled {
 			add("PASS", "Export running", fmt.Sprintf("player %d, media %s, NFS %s", d.Export.Number, d.Export.Root, d.ExportNFS))
 		} else {
@@ -307,7 +305,7 @@ func (d prolinkDiag) markdown() string {
 	p := func(format string, a ...any) { fmt.Fprintf(&b, format, a...) }
 	p("### EngineX OS Pro DJ Link diagnostic\n\n")
 	p("| | |\n|---|---|\n| Version | %s |\n| Model / board | %s / %s |\n| Time (UTC) | %s |\n", d.Version, d.Model, d.Board, d.Time.Format(time.RFC3339))
-	p("| prolinkShare | %s |\n| prolinkExport | %s |\n| fourDeckWaveform | %s |\n| fourDeckRoleActive | %s |\n", yes(d.Settings.ProlinkShare), yes(d.Settings.ProlinkExport), yes(d.Settings.FourDeckWaveform), d.Settings.FourDeckRoleActive)
+	p("| prolinkShare | %s |\n| fourDeckWaveform | %s |\n| fourDeckRoleActive | %s |\n", yes(d.Settings.ProlinkShare), yes(d.Settings.FourDeckWaveform), d.Settings.FourDeckRoleActive)
 	p("| Export | running=%s player=%d NFS=%s |\n| Shadow decks | %d |\n\n", yes(d.Export.Enabled), d.Export.Number, d.ExportNFS, d.ShadowDecks)
 	p("#### Checks\n\n| Result | Item | Detail |\n|---|---|---|\n")
 	for _, c := range d.Checks {

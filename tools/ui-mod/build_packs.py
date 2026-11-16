@@ -674,8 +674,7 @@ SERVICES_MAIN = """
 	readonly property bool scAutoAnalyzeAvailable: false
 	property bool scOmniSource: false // #62, served by the streaming gateway
 	property bool scRemoteLoad: false // LAN API loads a track onto an idle deck (off by default)
-	property bool scProlinkShare: false // #59, read by rb-bridge
-	property bool scProlinkExport: false // #63, experimental export to CDJs
+	property bool scProlinkShare: false // #59/#63, Pro DJ Link (announce + browse + export)
 	property bool scSdHighSpeed: false // RK3288 SD High Speed (50 MHz), off by default
 	property bool scSdHighSpeedPending: false
 	// #49: the decks this player owns in the 4-deck layout ("13", "24", "12", "1", "2";
@@ -3696,7 +3695,6 @@ SERVICES_MAIN = """
 		scOmniSource = !!v.omniSource
 		scRemoteLoad = !!v.remoteLoad
 		scProlinkShare = !!v.prolinkShare
-		scProlinkExport = !!v.prolinkExport
 		scPlayer = !!v.player
 		scDeckClock = !!v.deckClock
 		scFourDeckRole = scIsPlayerBoard && v.fourDeckWaveform ? (v.fourDeckRoleActive || "") : ""
@@ -4992,8 +4990,7 @@ def switch_entry(text, flag, key, extra=""):
 # for objectName ControlCenter_LiveStream (it was a Control Center tile up to #50).
 SERVICES_ENTRIES = (QUALITY_ENTRY
     + switch_entry("Live Stream", "scBroadcastOn", "broadcast", '\t\t\tobjectName: "ControlCenter_LiveStream"\n')
-    + switch_entry("Pro DJ Link Library", "scProlinkShare", "prolinkShare")
-    + switch_entry("Pro DJ Link Export to CDJ (Beta)", "scProlinkExport", "prolinkExport")
+    + switch_entry("Pro DJ Link", "scProlinkShare", "prolinkShare")
     + switch_entry("Remote Load (LAN API)", "scRemoteLoad", "remoteLoad"))
 
 # User Profile -> Display: deck BPM decimal places (#229).
