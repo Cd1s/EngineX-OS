@@ -1,0 +1,195 @@
+diff --git a/fs/hfsplus/bitmap.c b/fs/hfsplus/bitmap.c
+index bd8dcea85..8856b9647 100644
+--- a/fs/hfsplus/bitmap.c
++++ b/fs/hfsplus/bitmap.c
+@@ -98,6 +98,7 @@ int hfsplus_block_allocate(struct super_block *sb, u32 size,
+ 	start = offset + (curr - pptr) * 32 + i;
+ 	if (start >= size) {
+ 		hfs_dbg(BITMAP, "bitmap full\n");
++		kunmap_local(pptr);
+ 		goto out;
+ 	}
+ 	/* do any partial u32 at the start */
+diff --git a/fs/hfsplus/bnode.c b/fs/hfsplus/bnode.c
+index 87974d5e6..41499d496 100644
+--- a/fs/hfsplus/bnode.c
++++ b/fs/hfsplus/bnode.c
+@@ -146,10 +146,13 @@ void hfs_bnode_copy(struct hfs_bnode *dst_node, int dst,
+ 		}
+ 	} else {
+ 		void *src_ptr, *dst_ptr;
++		void *src_base, *dst_base;
+ 
+ 		do {
+-			dst_ptr = kmap_local_page(*dst_page) + dst;
+-			src_ptr = kmap_local_page(*src_page) + src;
++			dst_base = kmap_local_page(*dst_page);
++			src_base = kmap_local_page(*src_page);
++			dst_ptr = dst_base + dst;
++			src_ptr = src_base + src;
+ 			if (PAGE_SIZE - src < PAGE_SIZE - dst) {
+ 				l = PAGE_SIZE - src;
+ 				src = 0;
+@@ -161,9 +164,9 @@ void hfs_bnode_copy(struct hfs_bnode *dst_node, int dst,
+ 			}
+ 			l = min(len, l);
+ 			memcpy(dst_ptr, src_ptr, l);
+-			kunmap_local(src_ptr);
++			kunmap_local(src_base);
+ 			set_page_dirty(*dst_page);
+-			kunmap_local(dst_ptr);
++			kunmap_local(dst_base);
+ 			if (!dst)
+ 				dst_page++;
+ 			else
+@@ -172,14 +175,28 @@ void hfs_bnode_copy(struct hfs_bnode *dst_node, int dst,
+ 	}
+ }
+ 
++static void hfs_bnode_move_pages(struct page *dst_page, u32 dst_off,
++				 struct page *src_page, u32 src_off, u32 len)
++{
++	void *dst_base = kmap_local_page(dst_page);
++	void *src_base = (dst_page == src_page) ? NULL : kmap_local_page(src_page);
++	void *src_ptr = (src_base ? src_base : dst_base) + src_off;
++
++	memmove(dst_base + dst_off, src_ptr, len);
++	if (src_base)
++		kunmap_local(src_base);
++	set_page_dirty(dst_page);
++	kunmap_local(dst_base);
++}
++
+ void hfs_bnode_move(struct hfs_bnode *node, int dst, int src, int len)
+ {
+ 	struct page **src_page, **dst_page;
+-	void *src_ptr, *dst_ptr;
+ 	int l;
++	u32 dst_off, src_off;
+ 
+ 	hfs_dbg(BNODE_MOD, "movebytes: %u,%u,%u\n", dst, src, len);
+-	if (!len)
++	if (!len || dst == src)
+ 		return;
+ 	src += node->page_offset;
+ 	dst += node->page_offset;
+@@ -193,28 +210,18 @@ void hfs_bnode_move(struct hfs_bnode *node, int dst, int src, int len)
+ 
+ 		if (src == dst) {
+ 			while (src < len) {
+-				dst_ptr = kmap_local_page(*dst_page);
+-				src_ptr = kmap_local_page(*src_page);
+-				memmove(dst_ptr, src_ptr, src);
+-				kunmap_local(src_ptr);
+-				set_page_dirty(*dst_page);
+-				kunmap_local(dst_ptr);
++				hfs_bnode_move_pages(*dst_page, 0, *src_page, 0, src);
+ 				len -= src;
+ 				src = PAGE_SIZE;
+ 				src_page--;
+ 				dst_page--;
+ 			}
+ 			src -= len;
+-			dst_ptr = kmap_local_page(*dst_page);
+-			src_ptr = kmap_local_page(*src_page);
+-			memmove(dst_ptr + src, src_ptr + src, len);
+-			kunmap_local(src_ptr);
+-			set_page_dirty(*dst_page);
+-			kunmap_local(dst_ptr);
++			hfs_bnode_move_pages(*dst_page, src, *src_page, src, len);
+ 		} else {
+ 			do {
+-				dst_ptr = kmap_local_page(*dst_page) + dst;
+-				src_ptr = kmap_local_page(*src_page) + src;
++				dst_off = dst;
++				src_off = src;
+ 				if (src < dst) {
+ 					l = src;
+ 					src = PAGE_SIZE;
+@@ -225,10 +232,8 @@ void hfs_bnode_move(struct hfs_bnode *node, int dst, int src, int len)
+ 					dst = PAGE_SIZE;
+ 				}
+ 				l = min(len, l);
+-				memmove(dst_ptr - l, src_ptr - l, l);
+-				kunmap_local(src_ptr);
+-				set_page_dirty(*dst_page);
+-				kunmap_local(dst_ptr);
++				hfs_bnode_move_pages(*dst_page, dst_off - l,
++						     *src_page, src_off - l, l);
+ 				if (dst == PAGE_SIZE)
+ 					dst_page--;
+ 				else
+@@ -243,29 +248,17 @@ void hfs_bnode_move(struct hfs_bnode *node, int dst, int src, int len)
+ 
+ 		if (src == dst) {
+ 			l = min_t(int, len, PAGE_SIZE - src);
+-
+-			dst_ptr = kmap_local_page(*dst_page) + src;
+-			src_ptr = kmap_local_page(*src_page) + src;
+-			memmove(dst_ptr, src_ptr, l);
+-			kunmap_local(src_ptr);
+-			set_page_dirty(*dst_page);
+-			kunmap_local(dst_ptr);
++			hfs_bnode_move_pages(*dst_page, src, *src_page, src, l);
+ 
+ 			while ((len -= l) != 0) {
+ 				l = min_t(int, len, PAGE_SIZE);
+-				dst_ptr = kmap_local_page(*++dst_page);
+-				src_ptr = kmap_local_page(*++src_page);
+-				memmove(dst_ptr, src_ptr, l);
+-				kunmap_local(src_ptr);
+-				set_page_dirty(*dst_page);
+-				kunmap_local(dst_ptr);
++				hfs_bnode_move_pages(*++dst_page, 0, *++src_page, 0, l);
+ 			}
+ 		} else {
+ 			do {
+-				dst_ptr = kmap_local_page(*dst_page) + dst;
+-				src_ptr = kmap_local_page(*src_page) + src;
+-				if (PAGE_SIZE - src <
+-						PAGE_SIZE - dst) {
++				dst_off = dst;
++				src_off = src;
++				if (PAGE_SIZE - src < PAGE_SIZE - dst) {
+ 					l = PAGE_SIZE - src;
+ 					src = 0;
+ 					dst += l;
+@@ -275,10 +268,8 @@ void hfs_bnode_move(struct hfs_bnode *node, int dst, int src, int len)
+ 					dst = 0;
+ 				}
+ 				l = min(len, l);
+-				memmove(dst_ptr, src_ptr, l);
+-				kunmap_local(src_ptr);
+-				set_page_dirty(*dst_page);
+-				kunmap_local(dst_ptr);
++				hfs_bnode_move_pages(*dst_page, dst_off,
++						     *src_page, src_off, l);
+ 				if (!dst)
+ 					dst_page++;
+ 				else
+@@ -491,14 +482,17 @@ struct hfs_bnode *hfs_bnode_find(struct hfs_btree *tree, u32 num)
+ 	if (!test_bit(HFS_BNODE_NEW, &node->flags))
+ 		return node;
+ 
+-	desc = (struct hfs_bnode_desc *)(kmap_local_page(node->page[0]) +
+-							 node->page_offset);
+-	node->prev = be32_to_cpu(desc->prev);
+-	node->next = be32_to_cpu(desc->next);
+-	node->num_recs = be16_to_cpu(desc->num_recs);
+-	node->type = desc->type;
+-	node->height = desc->height;
+-	kunmap_local(desc);
++	{
++		void *desc_base = kmap_local_page(node->page[0]);
++
++		desc = (struct hfs_bnode_desc *)(desc_base + node->page_offset);
++		node->prev = be32_to_cpu(desc->prev);
++		node->next = be32_to_cpu(desc->next);
++		node->num_recs = be16_to_cpu(desc->num_recs);
++		node->type = desc->type;
++		node->height = desc->height;
++		kunmap_local(desc_base);
++	}
+ 
+ 	switch (node->type) {
+ 	case HFS_NODE_HEADER:
