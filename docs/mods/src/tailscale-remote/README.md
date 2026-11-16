@@ -9,9 +9,10 @@ Official MIT-licensed status/diagnostic Mod for the existing EngineX OS
 code 3. Loader start/stop actions are intentionally no-ops: enabling this status
 card never starts a VPN or changes service exposure.
 
+Requires EngineX OS `5.3.0.5` or later.
+
 The QML card uses the existing system API at
-`http://127.0.0.1:8080/v1/enginex/tailscale` (falling back to `/v1/sc5000/tailscale`,
-which still works on older `5.3.0.4` decks) and links to the Web Console's Remote
+`http://127.0.0.1:8080/v1/enginex/tailscale` and links to the Web Console's Remote
 access controls. Host overlay component:
 `EngineXMods/tailscale-remote/Panel.qml`. The host UI must load this component.
 If authentication is required, use the Web Console; the card stores no token.

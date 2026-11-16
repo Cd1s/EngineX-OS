@@ -84,10 +84,8 @@ MASTER handoffs) slew smoothly in at half the tempo without frame jumps. CUE
 held with advancing `TrackPosition` counts as playing. The beat clock is kept
 strictly in memory and **never writes `show.json`** while running. Note that Pro
 DJ Link CDJ beat phase is approximate (`BeatInBar` + `PlayPositionMS` modulo beat
-duration, without beatgrid offset/pitch adjustment). On older `5.3.0.4` hosts
-without `/v1/enginex/clock`, `/v1/sc5000/clock` and `/v1/sc5000/prolink` still
-work (the helper falls back to `/v1/sc5000/...` on HTTP 404 and caches absence,
-and also falls back at 2–4 Hz to `/peer/decks` when clock endpoints are absent).
+duration, without beatgrid offset/pitch adjustment). Requires EngineX OS `5.3.0.5` or later for `/v1/enginex/clock` and
+`/v1/enginex/prolink` (with `/peer/decks` fallback).
 
 Optional **phrase awareness** (`phraseBeats`, 0–256, default `0` = off; optional
 `phraseScenes` array of scene overrides or built-in 4-color palette rotation)

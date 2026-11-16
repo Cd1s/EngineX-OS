@@ -182,40 +182,25 @@ func (f *Feature) fetchMasterClock() clockInfo {
 	}
 	now := f.now()
 	f.mu.Lock()
-	skipEngineX := now.Before(f.enginexAPIAbsentUntil)
-	skipLegacy := now.Before(f.clockAPIAbsentUntil)
+	skipClock := now.Before(f.clockAPIAbsentUntil)
 	f.mu.Unlock()
-
-	tryEndpoint := func(path, label string, absentUntil *time.Time) ([]deckSnapshot, bool) {
-		var resp clockPayload
-		err := f.fetchJSON(path, &resp)
-		if err == nil && resp.ClockAPI {
-			return resp.Decks, true
-		}
-		if err == nil {
-			f.mu.Lock()
-			*absentUntil = now.Add(60 * time.Second)
-			f.mu.Unlock()
-		} else if missing, ttl := isMissingV1Error(err); missing {
-			f.mu.Lock()
-			*absentUntil = now.Add(ttl)
-			f.mu.Unlock()
-		}
-		return nil, false
-	}
 
 	var decks []deckSnapshot
 	source := "manual"
-	if !skipEngineX {
-		if d, ok := tryEndpoint("/v1/enginex/clock", "enginex", &f.enginexAPIAbsentUntil); ok {
-			decks = d
+	if !skipClock {
+		var resp clockPayload
+		err := f.fetchJSON("/v1/enginex/clock", &resp)
+		if err == nil && resp.ClockAPI {
+			decks = resp.Decks
 			source = "enginex"
-		}
-	}
-	if source == "manual" && !skipLegacy {
-		if d, ok := tryEndpoint("/v1/sc5000/clock", "sc5000", &f.clockAPIAbsentUntil); ok {
-			decks = d
-			source = "sc5000"
+		} else if err == nil {
+			f.mu.Lock()
+			f.clockAPIAbsentUntil = now.Add(60 * time.Second)
+			f.mu.Unlock()
+		} else if missing, ttl := isMissingV1Error(err); missing {
+			f.mu.Lock()
+			f.clockAPIAbsentUntil = now.Add(ttl)
+			f.mu.Unlock()
 		}
 	}
 	if best := selectClockDeck(decks); best != nil {

@@ -5,8 +5,7 @@ built-in sampler ([#293](https://github.com/Cd1s/EngineX-OS/issues/293)).
 The decks have no Python, compiler, or package manager: this Mod ships a static
 Go helper (`bin/enginex-mod-helper-armv7` for `linux/arm` `GOARM=7` on all
 gen-1 and gen-2 armhf decks, and `bin/enginex-mod-helper-arm64` for PRIME 4 G2
-/ SYSTEM ONE), picked by busybox `sh` `start.sh` via `uname -m`. Requires Linux
-and QtQuick 2.12 / Controls 2.5 / Layouts 1.12.
+/ SYSTEM ONE), picked by busybox `sh` `start.sh` via `uname -m`. Requires EngineX OS `5.3.0.5` or later and QtQuick 2.12 / Controls 2.5 / Layouts 1.12.
 
 Loader lifecycle: `sh start.sh start` / `stop`. Manual foreground execution:
 `sh start.sh serve`. QML uses `127.0.0.1:17839`; host overlay component:
@@ -20,8 +19,7 @@ Loader lifecycle: `sh start.sh start` / `stop`. Manual foreground execution:
 - **Transport & groove**: Play/Stop, step division (`1/4`, `1/8`, `1/16`),
   swing (`0%`, `25%`, `50%`), and Clear.
 - **MASTER clock following**: Follows the MASTER deck BPM via
-  `http://127.0.0.1:8080/v1/enginex/clock` (falling back to `/v1/sc5000/clock`
-  on HTTP 404 for older `5.3.0.4` decks, with 60 s negative caching), with a
+  `http://127.0.0.1:8080/v1/enginex/clock`, with a
   manual BPM fallback (`40–240` BPM).
 - **Persistence**: Saves the active pattern and settings to
   `/data/enginex/mods-state/sampler-sequencer/pattern.json` (override parent

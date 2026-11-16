@@ -47,15 +47,14 @@ func validDivision(div string) bool {
 
 // Feature implements the sampler-sequencer Mod helper behind GET /status and
 // POST /action, persisting the 8x8 pattern in the Mod's own state directory
-// and following the MASTER deck clock with /v1/sc5000/clock fallback.
+// and following the MASTER deck clock via /v1/enginex/clock.
 type Feature struct {
-	mu                    sync.Mutex
-	statePath             string
-	webUIURL              string
-	now                   func() time.Time
-	enginexAPIAbsentUntil time.Time
-	clockAPIAbsentUntil   time.Time
-	state                 patternState
+	mu                  sync.Mutex
+	statePath           string
+	webUIURL            string
+	now                 func() time.Time
+	clockAPIAbsentUntil time.Time
+	state               patternState
 }
 
 // New constructs a sampler-sequencer Feature backed by env.State/pattern.json.

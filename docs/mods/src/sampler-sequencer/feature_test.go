@@ -75,15 +75,17 @@ func TestPatternPersistenceAndValidation(t *testing.T) {
 	}
 }
 
-func TestClockPrimaryAndLegacyFallback(t *testing.T) {
-	var enginexHits, legacyHits atomic.Int32
+func TestClockEndpointAndNegativeCache(t *testing.T) {
+	var enginexHits atomic.Int32
+	var return404 atomic.Bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/enginex/clock":
 			enginexHits.Add(1)
-			http.NotFound(w, r)
-		case "/v1/sc5000/clock":
-			legacyHits.Add(1)
+			if return404.Load() {
+				http.NotFound(w, r)
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"clockApi":true,"decks":[{"deck":2,"source":"local","master":true,"playing":true,"currentBpm":132.0,"beat":12.5}]}`))
 		default:
@@ -102,34 +104,47 @@ func TestClockPrimaryAndLegacyFallback(t *testing.T) {
 	f.webUIURL = srv.URL
 	f.now = func() time.Time { return now }
 
-	// First call tries /v1/enginex/clock, gets 404, falls back to /v1/sc5000/clock.
+	// First call uses /v1/enginex/clock.
 	st1Raw, err := f.Status()
 	if err != nil {
 		t.Fatalf("Status 1: %v", err)
 	}
 	clk1 := st1Raw.(map[string]any)["clock"].(clockInfo)
-	if clk1.Source != "sc5000" || clk1.Deck != 2 || clk1.BPM != 132.0 || !clk1.Playing {
+	if clk1.Source != "enginex" || clk1.Deck != 2 || clk1.BPM != 132.0 || !clk1.Playing {
 		t.Fatalf("unexpected clock 1: %+v", clk1)
 	}
-	if enginexHits.Load() != 1 || legacyHits.Load() != 1 {
-		t.Fatalf("expected 1 enginex + 1 legacy hit, got %d / %d", enginexHits.Load(), legacyHits.Load())
+	if enginexHits.Load() != 1 {
+		t.Fatalf("expected 1 enginex hit, got %d", enginexHits.Load())
 	}
 
-	// Second call within 60s negative cache skips /v1/enginex/clock.
-	now = now.Add(10 * time.Second)
-	if _, err := f.Status(); err != nil {
+	// If /v1/enginex/clock returns 404, fall back to manual and negative-cache for 60s.
+	return404.Store(true)
+	st2Raw, err := f.Status()
+	if err != nil {
 		t.Fatalf("Status 2: %v", err)
 	}
-	if enginexHits.Load() != 1 || legacyHits.Load() != 2 {
-		t.Fatalf("expected cached skip on enginex (1/%d) and legacy=2 (%d)", enginexHits.Load(), legacyHits.Load())
+	if clk2 := st2Raw.(map[string]any)["clock"].(clockInfo); clk2.Source != "manual" {
+		t.Fatalf("expected manual fallback on 404, got %+v", clk2)
 	}
-
-	// After 60s TTL expires, /v1/enginex/clock is probed again.
-	now = now.Add(61 * time.Second)
+	now = now.Add(10 * time.Second)
 	if _, err := f.Status(); err != nil {
 		t.Fatalf("Status 3: %v", err)
 	}
 	if enginexHits.Load() != 2 {
+		t.Fatalf("expected cached skip on enginex (2), got %d", enginexHits.Load())
+	}
+
+	// After 60s TTL expires, /v1/enginex/clock is probed again.
+	return404.Store(false)
+	now = now.Add(51 * time.Second)
+	st4Raw, err := f.Status()
+	if err != nil {
+		t.Fatalf("Status 4: %v", err)
+	}
+	if clk4 := st4Raw.(map[string]any)["clock"].(clockInfo); clk4.Source != "enginex" {
+		t.Fatalf("expected enginex recovery after TTL, got %+v", clk4)
+	}
+	if enginexHits.Load() != 3 {
 		t.Fatalf("expected enginex re-probe after TTL, got %d", enginexHits.Load())
 	}
 }

@@ -167,12 +167,6 @@ func (f *Feature) fetchDeckSnapshots() ([]deckSnapshot, error) {
 	return decks, err
 }
 
-// fetchLegacyV1 calls the /v1/sc5000/ fallback endpoint for older decks that
-// predate the /v1/enginex/ rename (#234).
-func (f *Feature) fetchLegacyV1(suffix string, out any) error {
-	return f.fetchJSON("/v1/sc5000/"+suffix, out)
-}
-
 func isMissingV1Error(err error) (bool, time.Duration) {
 	var hs httpStatusError
 	if errors.As(err, &hs) && (hs.status == "404" || hs.status == "501") {
@@ -185,7 +179,6 @@ func (f *Feature) fetchDeckSnapshotsMode() ([]deckSnapshot, bool, error) {
 	now := time.Now()
 	f.mu.Lock()
 	skipClockAPI := now.Before(f.clockAPIAbsentUntil)
-	skipEngineXAPI := now.Before(f.enginexAPIAbsentUntil)
 	f.mu.Unlock()
 	if !skipClockAPI {
 		type clockPayload struct {
@@ -193,33 +186,14 @@ func (f *Feature) fetchDeckSnapshotsMode() ([]deckSnapshot, bool, error) {
 			Now      int64          `json:"now"`
 			Decks    []deckSnapshot `json:"decks"`
 		}
-		if !skipEngineXAPI {
-			var clockResp clockPayload
-			err := f.fetchJSON("/v1/enginex/clock", &clockResp)
-			if err == nil && clockResp.ClockAPI {
-				return clockResp.Decks, false, nil
-			}
-			if err == nil {
-				// Older gateway catch-all emptyPage answers 200 without clockApi and logs
-				// every unknown /v1/ hit; cache its absence for 60 s to stop log spam.
-				f.mu.Lock()
-				f.enginexAPIAbsentUntil = now.Add(60 * time.Second)
-				f.mu.Unlock()
-			} else if missing, ttl := isMissingV1Error(err); missing {
-				f.mu.Lock()
-				f.enginexAPIAbsentUntil = now.Add(ttl)
-				f.mu.Unlock()
-			} else {
-				return nil, false, err
-			}
+		var clockResp clockPayload
+		err := f.fetchJSON("/v1/enginex/clock", &clockResp)
+		if err == nil && clockResp.ClockAPI {
+			return clockResp.Decks, false, nil
 		}
-
-		var legacyResp clockPayload
-		err := f.fetchLegacyV1("clock", &legacyResp)
 		if err == nil {
-			if legacyResp.ClockAPI {
-				return legacyResp.Decks, false, nil
-			}
+			// Older gateway catch-all emptyPage answers 200 without clockApi and logs
+			// every unknown /v1/ hit; cache its absence for 60 s to stop log spam.
 			f.mu.Lock()
 			f.clockAPIAbsentUntil = now.Add(60 * time.Second)
 			f.mu.Unlock()
@@ -265,10 +239,6 @@ func (f *Feature) fetchDeckSnapshotsMode() ([]deckSnapshot, bool, error) {
 	}
 	var prolinkErr error
 	prolinkErr = f.fetchJSON("/v1/enginex/prolink", &prolinkResp)
-	if prolinkErr != nil || prolinkResp.Devices == nil {
-		prolinkResp.Devices = nil
-		prolinkErr = f.fetchLegacyV1("prolink", &prolinkResp)
-	}
 	if prolinkErr == nil {
 		now := time.Now()
 		for _, dev := range prolinkResp.Devices {
