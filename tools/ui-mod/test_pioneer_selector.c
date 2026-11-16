@@ -45,7 +45,7 @@ static double render(int mode, float time, float param, float wet) {
 
 static void test_modes(void) {
     const float values[] = {0, 0.3f, 1};
-    for (int mode = 1; mode <= 5; ++mode) {
+    for (int mode = 1; mode <= SC_PFX_FLANGER; ++mode) {
         for (unsigned t = 0; t < 3; ++t)
             for (unsigned p = 0; p < 3; ++p)
                 for (unsigned w = 0; w < 3; ++w)
@@ -99,13 +99,13 @@ static void *independent(void *arg) {
     struct sc_pfx_instance *s = arg;
     for (unsigned n = 0; n < 1000; ++n) {
         float l[64] = {0.1f}, r[64] = {0.2f};
-        prepared_process(s, l, r, 64, 1 + n % 5, 0.5f, 0.5f, 0.5f);
+        prepared_process(s, l, r, 64, 1 + n % SC_PFX_FLANGER, 0.5f, 0.5f, 0.5f);
     }
     return NULL;
 }
 
 static void test_wet_zero_fade(void) {
-    for (int mode = 1; mode <= 5; ++mode) {
+    for (int mode = 1; mode <= SC_PFX_FLANGER; ++mode) {
         memset(&fx[0], 0, sizeof fx[0]);
         float previous = 0;
         for (unsigned n = 0; n < 120000; n += 128) {

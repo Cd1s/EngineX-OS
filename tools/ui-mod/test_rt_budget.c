@@ -141,7 +141,7 @@ int main(void)
                             samples[p][0][i] = x; samples[p][1][i] = -x;
                         }
                     }
-                    int mode = (int)((block / 8) % 6); /* OFF, all modes, transitions */
+                    int mode = (int)((block / 8) % (path == 2 ? 7 : 6)); /* OFF, all modes (the selector has a sixth, #195), transitions */
                     if (path == 2) {
                         selector.time_ms = ms;
                         sc_pfx_instance_prepare(&selector);

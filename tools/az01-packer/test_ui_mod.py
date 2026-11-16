@@ -711,7 +711,7 @@ class UiModSourceTest(unittest.TestCase):
                 bp.verify_boot_ready_loader(source)
 
     def test_px_selector_maps_before_selecting_stock_carrier(self):
-        for name in ("Spiral", "Pitch Echo", "Slip Roll", "Dub Echo", "Space"):
+        for name in ("Spiral", "Pitch Echo", "Slip Roll", "Dub Echo", "Space", "Jet Flanger"):
             self.assertIn(name + " (PX)", bp.FX_CONTROLLER)
         qml = bp.FX_CONTROLLER
         selection = qml.split("function scFxAccept(index) {", 1)[1].split("property var scFxMix", 1)[0]
@@ -752,7 +752,7 @@ class UiModSourceTest(unittest.TestCase):
             self.assertIn("ControlSurfaceModules/ControlSurfaceModules/DJFxSelect.qml", edits)
             oled_edits = edits["ControlSurfaceModules/ControlSurfaceModules/DJFxSelect.qml"]
             oled_code = "".join(rep for _, rep in oled_edits)
-            for px_name in ("SPIRAL", "PITCH ECHO", "SLIP ROLL", "DUB ECHO", "SPACE"):
+            for px_name in ("SPIRAL", "PITCH ECHO", "SLIP ROLL", "DUB ECHO", "SPACE", "JET FLANGER"):
                 self.assertIn(px_name, oled_code)
             self.assertIn("/GUI/Scripted/EngineXFx", oled_code)
             self.assertIn("scPxIndex < scAllNames.length", oled_code)

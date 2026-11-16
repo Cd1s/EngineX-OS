@@ -356,7 +356,7 @@ static void fx_selector_poll(void) {
     struct timespec wall; clock_gettime(CLOCK_REALTIME, &wall);
     unsigned long long millis = (unsigned long long)wall.tv_sec * 1000 + wall.tv_nsec / 1000000;
     if (f) fclose(f);
-    if (n == 6 && millis < expires && expires - millis <= 1000 && unit >= 1 && unit <= SC_PFX_UNITS && mode <= 5 && request != last_request &&
+    if (n == 6 && millis < expires && expires - millis <= 1000 && unit >= 1 && unit <= SC_PFX_UNITS && mode <= SC_PFX_FLANGER && request != last_request &&
         (a & 0x7f800007u) == (0x35800000u | (unit - 1)) &&
         (b & 0x7f800007u) == (0x36000000u | (unit - 1))) {
         int reused = sc_pfx_arm(unit - 1, mode, a, b);
