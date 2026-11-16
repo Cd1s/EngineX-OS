@@ -6840,24 +6840,24 @@ class UsbPreparingFeedbackTest(unittest.TestCase):
     def test_translations(self):
         rows = [line.split("\t") for line in (REPO / "tools/ui-mod/i18n.tsv").read_text().splitlines()]
         self.assertIn(["Preparing USB…", "正在准备 USB…", "正在準備 USB…", "Preparando el USB…"], rows)
+        self.assertIn(["Loading USB…", "U盘载入中…", "隨身碟載入中…", "Cargando USB…"], rows)
+        self.assertIn(["Loading SD card…", "SD 卡载入中…", "SD 卡載入中…", "Cargando tarjeta SD…"], rows)
 
-    def check_feedback(self, main, sources, label="Preparing USB…"):
+    def check_feedback(self, main, sources):
         for text in ('property bool scUsbPreparing: false', 'scUsbPreparing = !!v.usbPreparing',
-                     'interval: 1000', 'running: root.scUsbPreparing', 'onTriggered: root.scCall()',
+                     'interval: 2000', 'running: root.scUsbPreparing && root.scBrowserVisible()', 'onTriggered: root.scCall()',
                      'objectName: "EngineX_UsbPreparingBanner"', 'enabled: false',
-                     'visible: root.scUsbPreparing', 'Style.surface03Color', 'Style.active01Color',
+                     'visible: root.scUsbPreparing || root.scUsbPrepareError !== ""', 'Style.surface03Color', 'Style.active01Color',
                      'Style.font02Color', 'root.robotoMediumFontLoader.name', '#142',
-                     'text: root.scT('):
+                     'text: root.scUsbLoadingText()',
+                     'root.scT("Loading USB…")', 'root.scT("Loading SD card…")'):
             self.assertIn(text, main)
-        # Built packs wrap each literal in the existing live language translator.
-        self.assertRegex(main, r'text: root.scT\([^\n]*' + re.escape(label))
-        self.assertRegex(sources, r'text: root.scT\([^\n]*' + re.escape(label))
         banner = main.split('objectName: "EngineX_UsbPreparingBanner"' , 1)[1].split('\n\t\t}', 1)[0]
         self.assertNotIn('focus: true', banner)
         self.assertNotIn('prompts.post(', banner)
         for text in ('objectName: "EngineX_UsbPreparingRow"', 'visible: root.scUsbPreparing',
                      'height: root.scUsbPreparing ? 108 : 0', 'enabled: false',
-                     'width: connectedSource.width', 'Style.surface02Color', 'text: root.scT('):
+                     'width: connectedSource.width', 'Style.surface02Color', 'text: root.scUsbLoadingText()'):
             self.assertIn(text, sources)
         self.assertLess(sources.index('EngineX_UsbPreparingRow'), sources.index('Repeater {'))
 
@@ -6878,6 +6878,12 @@ class UsbPreparingFeedbackTest(unittest.TestCase):
 
     def test_built_packs_both_versions(self):
         built = 0
+        expected_usb = {'en': 'Loading USB…', 'zh-Hans': 'U盘载入中…', 'zh-Hant': '隨身碟載入中…', 'es': 'Cargando USB…'}
+        expected_sd = {'en': 'Loading SD card…', 'zh-Hans': 'SD 卡载入中…', 'zh-Hant': 'SD 卡載入中…', 'es': 'Cargando tarjeta SD…'}
+        expected_usb_to = {'en': 'USB conversion timed out', 'zh-Hans': 'U盘载入超时', 'zh-Hant': '隨身碟載入逾時', 'es': 'Tiempo de espera de carga USB agotado'}
+        expected_usb_fail = {'en': 'USB conversion failed', 'zh-Hans': 'U盘载入失败', 'zh-Hant': '隨身碟載入失敗', 'es': 'Error al cargar el USB'}
+        expected_sd_to = {'en': 'SD card conversion timed out', 'zh-Hans': 'SD 卡载入超时', 'zh-Hant': 'SD 卡載入逾時', 'es': 'Tiempo de espera de carga de tarjeta SD agotado'}
+        expected_sd_fail = {'en': 'SD card conversion failed', 'zh-Hans': 'SD 卡载入失败', 'zh-Hant': 'SD 卡載入失敗', 'es': 'Error al cargar la tarjeta SD'}
         for version, root in (("5.0.4", "Skins/EmbeddedCommon/"), ("5.3.0", "Skins/Embedded/")):
             qrc = LAB / version / "qrc"
             if not qrc.is_dir():
@@ -6889,9 +6895,17 @@ class UsbPreparingFeedbackTest(unittest.TestCase):
                 self.assertEqual(res.returncode, 0, res.stderr)
                 for lang in bp.LANGUAGES:
                     base = packs / lang / root
+                    main_text = (base / 'EmbeddedMain.qml').read_text()
                     source = next(base.rglob('ConnectedSource.qml'))
-                    self.check_feedback((base / 'EmbeddedMain.qml').read_text(), source.read_text(),
-                                        {'en': 'Preparing USB…', 'zh-Hans': '正在准备 USB…', 'zh-Hant': '正在準備 USB…', 'es': 'Preparando el USB…'}[lang])
+                    self.check_feedback(main_text, source.read_text())
+                    dictionaries = json.loads(re.search(r"readonly property var scDicts: \((.+)\)", main_text).group(1))
+                    lang_dict = json.loads(dictionaries[lang])
+                    self.assertEqual(lang_dict["Loading USB…"], expected_usb[lang])
+                    self.assertEqual(lang_dict["Loading SD card…"], expected_sd[lang])
+                    self.assertEqual(lang_dict["USB conversion timed out"], expected_usb_to[lang])
+                    self.assertEqual(lang_dict["USB conversion failed"], expected_usb_fail[lang])
+                    self.assertEqual(lang_dict["SD card conversion timed out"], expected_sd_to[lang])
+                    self.assertEqual(lang_dict["SD card conversion failed"], expected_sd_fail[lang])
         if not built:
             self.skipTest(f"{LAB} QRC fixtures not found")
 
@@ -6901,24 +6915,40 @@ class UsbPreparingFeedbackTest(unittest.TestCase):
         self.assertIsNotNone(apply)
         same = re.search(r'function scSameItems\(a, b\) \{.*?\n\t\}', bp.SERVICES_MAIN, re.S)
         self.assertIsNotNone(same)
+        helpers = re.search(r'function scFormatCount\(n\) \{.*?\n\t\}\n\tfunction scUsbLoadingText\(\) \{.*?\n\t\}', bp.SERVICES_MAIN, re.S)
+        self.assertIsNotNone(helpers)
         # Execute the complete production function with inert native collaborators.
         script = r"""
 const assert = require('assert/strict');
 const vm = require('vm');
 const noop = new Proxy(function() {}, {get: () => noop, apply: () => noop});
-const state = {scUsbPreparing: false, scSources: [], scLoggedIn: [], scHasMixer: false,
-    scHasStemsEq: false, scUiLoaded: true, scLastGoodTimeZone: '', root: noop,
+const state = {scUsbPreparing: false, scUsbPrepareKind: 'usb', scUsbPrepareDone: 0,
+    scUsbPrepareTotal: 0, scUsbPrepareError: '', scSources: [], scLoggedIn: [], scHasMixer: false,
+    scHasStemsEq: false, scUiLoaded: true, scLastGoodTimeZone: '',
+    Number, String,
+    scT: s => s,
     Planck: {getProperty: () => ({translator: {index: 0}})}, Config: noop};
+state.root = state;
 const context = new Proxy(state, {has: () => true, get: (o,k) => k in o ? o[k] : noop,
     set: (o,k,v) => {o[k]=v; return true;}});
 vm.createContext(context);
-""" + 'vm.runInContext(' + json.dumps(same.group(0)) + ', context);\n' + 'vm.runInContext(' + json.dumps(apply.group(0)) + ', context);\n' + r"""
+""" + 'vm.runInContext(' + json.dumps(same.group(0)) + ', context);\n' + 'vm.runInContext(' + json.dumps(helpers.group(0)) + ', context);\n' + 'vm.runInContext(' + json.dumps(apply.group(0)) + ', context);\n' + r"""
 assert.equal(state.scUsbPreparing, false);
 for (const [input, expected] of [[{usbPreparing: true}, true], [{usbPreparing: false}, false],
                                 [{usbPreparing: true}, true], [{}, false]]) {
     state.scApply(input);
     assert.equal(state.scUsbPreparing, expected);
 }
+state.scApply({usbPreparing: true, usbPrepare: {state: 'loading', kind: 'sd', done: 1200, total: 21352}});
+assert.equal(state.scUsbPreparing, true);
+assert.equal(state.scUsbLoadingText(), 'Loading SD card… (1,200 / 21,352)');
+state.scApply({usbPreparing: false, usbPrepare: {state: 'error', kind: 'usb', error: 'bridge failed'}});
+assert.equal(state.scUsbPreparing, false);
+assert.equal(state.scUsbPrepareError, 'bridge failed');
+assert.equal(state.scUsbLoadingText(), 'bridge failed');
+state.scApply({});
+assert.equal(state.scUsbPreparing, false);
+assert.equal(state.scUsbPrepareError, '');
 state.scApply({sources: ["tidal"], loggedIn: ["tidal"]});
 assert.deepEqual(Array.from(state.scSources), ["tidal"]);
 state.scApply({sources: [], loggedIn: []});

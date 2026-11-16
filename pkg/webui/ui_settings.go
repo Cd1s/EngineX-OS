@@ -149,14 +149,23 @@ const (
 	neteaseDeemix   = "deemix"
 )
 
+type usbPrepareStatus struct {
+	State string `json:"state,omitempty"`
+	Kind  string `json:"kind,omitempty"`
+	Done  int    `json:"done,omitempty"`
+	Total int    `json:"total,omitempty"`
+	Error string `json:"error,omitempty"`
+}
+
 type uiSettings struct {
-	SpotifySource  string  `json:"spotifySource"`
-	EngineLighting bool    `json:"engineLighting"` // Stock lighting switch; opt in, saved independently of Engine shutdown.
-	USBPreparing   bool    `json:"usbPreparing,omitempty"`
-	Version        string  `json:"version,omitempty"`
-	Quality        string  `json:"quality"`
-	NeteaseMode    string  `json:"neteaseMode"`
-	Playhead       float64 `json:"playhead"`
+	SpotifySource  string            `json:"spotifySource"`
+	EngineLighting bool              `json:"engineLighting"` // Stock lighting switch; opt in, saved independently of Engine shutdown.
+	USBPreparing   bool              `json:"usbPreparing,omitempty"`
+	USBPrepare     *usbPrepareStatus `json:"usbPrepare,omitempty"`
+	Version        string            `json:"version,omitempty"`
+	Quality        string            `json:"quality"`
+	NeteaseMode    string            `json:"neteaseMode"`
+	Playhead       float64           `json:"playhead"`
 	// AutoAnalyze retains the user's preference (#55). The UI pack currently
 	// fails closed: no automatic analysis until a bounded native adapter is verified.
 	AutoAnalyze bool `json:"autoAnalyze"`
@@ -756,17 +765,57 @@ func (s *Server) scope() string {
 }
 
 // One metadata lookup only: never follow symlinks or read USB contents here.
-func (s *Server) usbPreparingActive(now time.Time) bool {
+func (s *Server) usbPreparingState(now time.Time) (bool, *usbPrepareStatus) {
 	path := s.cfg.USBPreparingPath
 	if path == "" {
 		path = "/run/enginex-usb-preparing"
 	}
-	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() {
-		return false
+	readStatus := func(p string, maxAge time.Duration) (string, bool) {
+		info, err := os.Lstat(p)
+		if err != nil || !info.Mode().IsRegular() {
+			return "", false
+		}
+		age := now.Sub(info.ModTime())
+		if age > maxAge || age < -5*time.Second {
+			return "", false
+		}
+		if info.Size() <= 0 || info.Size() > 4096 {
+			return "", true
+		}
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return "", true
+		}
+		return strings.TrimSpace(string(data)), true
 	}
-	age := now.Sub(info.ModTime())
-	return age <= 30*time.Second && age >= -5*time.Second
+
+	if text, ok := readStatus(path, 30*time.Second); ok {
+		if strings.HasPrefix(text, "{") {
+			var st usbPrepareStatus
+			if json.Unmarshal([]byte(text), &st) == nil {
+				if st.State == "error" {
+					return false, &st
+				}
+				if st.State == "" {
+					st.State = "loading"
+				}
+				if st.Kind == "" {
+					st.Kind = "usb"
+				}
+				return true, &st
+			}
+		}
+		return true, nil
+	}
+
+	if text, ok := readStatus(path+".err", 8*time.Second); ok && strings.HasPrefix(text, "{") {
+		var st usbPrepareStatus
+		if json.Unmarshal([]byte(text), &st) == nil && st.Error != "" {
+			st.State = "error"
+			return false, &st
+		}
+	}
+	return false, nil
 }
 
 func (s *Server) isLegacy504Pack() bool {
@@ -818,7 +867,7 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 	v.TimeZone = s.savedTimeZone()
 	now := time.Now()
 	v.DeckClock = s.deckClockWanted(now)
-	v.USBPreparing = s.usbPreparingActive(now)
+	v.USBPreparing, v.USBPrepare = s.usbPreparingState(now)
 	httpsOn := s.httpsOfferedLocked(v.ConsoleHTTPS)
 	if httpsOn {
 		v.HTTPSPort = s.httpsPortNum()

@@ -1026,11 +1026,28 @@ static void test_prepare_state_lifecycle(const char *root) {
     int64_t start=now_ms();c.status=0;assert(!hooked_mount(&c,test_real_mount));
     assert(now_ms()-start>=1000&&now_ms()-start<3500);
     expect_file(marker,"ready\n");expect_not_preparing();
+    char err_path[PATH_MAX];assert(!prepare_err_path(err_path));
+    expect_file(err_path,"{\"state\":\"error\",\"kind\":\"usb\",\"error\":\"USB conversion timed out\"}\n");
     assert(snprintf(p,sizeof p,"%s.pid",marker)<(int)sizeof p);
     FILE *pf=fopen(p,"r");long killed;assert(pf&&fscanf(pf,"%ld",&killed)==1);fclose(pf);
     errno=0;assert(kill((pid_t)killed,0)==-1&&errno==ESRCH);assert(!unlink(p));
     assert(!slow_marker(target,p));assert(!access(p,F_OK));assert(!unlink(p)); // created only for ETIMEDOUT
     assert(!umount2(target,UMOUNT_NOFOLLOW));assert(!unlink(marker));
+    // A crashed bridge without its own .err also publishes a failure state, and the next insert clears it.
+    join(disk,root,"prep-crash");join(p,disk,"PIONEER/rekordbox");assert(!make_dirs(p));join(p,disk,"PIONEER/rekordbox/export.pdb");write_file(p,"export");
+    snprintf(test_disk,sizeof test_disk,"%s",disk);
+    snprintf(exit_line,(size_t)(script+sizeof script-exit_line),"kill -SEGV $$\n");write_file(test_rb_bridge,script);
+    c.status=0;assert(!hooked_mount(&c,test_real_mount));
+    expect_file(marker,"ready\n");expect_not_preparing();
+    expect_file(err_path,"{\"state\":\"error\",\"kind\":\"usb\",\"error\":\"USB conversion failed\"}\n");
+    assert(!unlink(marker));assert(!umount2(target,UMOUNT_NOFOLLOW));
+    snprintf(exit_line,(size_t)(script+sizeof script-exit_line),"exit 0\n");write_file(test_rb_bridge,script);
+    join(disk,root,"prep-ok-after");join(p,disk,"PIONEER/rekordbox");assert(!make_dirs(p));join(p,disk,"PIONEER/rekordbox/export.pdb");write_file(p,"export");
+    snprintf(test_disk,sizeof test_disk,"%s",disk);
+    c.status=0;assert(!hooked_mount(&c,test_real_mount));
+    expect_file(marker,"ready\n");expect_not_preparing();
+    struct stat err_st;assert(lstat(err_path,&err_st)==-1&&errno==ENOENT);
+    assert(!unlink(marker));assert(!umount2(target,UMOUNT_NOFOLLOW));
 
     // HFS without export or DB prepares a writable view on the visible mount.
     join(disk,root,"prep-hfs-empty");assert(!make_dirs(disk));
@@ -1039,7 +1056,37 @@ static void test_prepare_state_lifecycle(const char *root) {
     unsigned before=observed_prepare_views;c.status=0;assert(!hooked_mount(&c,test_real_mount));
     assert(observed_prepare_views>before);expect_not_preparing();observing_prepare_view=0;
     assert(!unmount_dispatch(&c,real_unmount));test_hfs_target[0]=0;test_disk_ro=0;
+
+    // Read-only HFS+ pioneer stick: timeout and crash errors published in MOUNT_PRE
+    // must survive MOUNT_POST prepare_view until the next insert of that drive.
+    join(disk,root,"prep-hfs-timeout");join(p,disk,"PIONEER/rekordbox");assert(!make_dirs(p));
+    join(p,disk,"PIONEER/rekordbox/export.pdb");write_file(p,"pdb\n");
+    snprintf(test_disk,sizeof test_disk,"%s",disk);test_disk_ro=1;
+    snprintf(test_hfs_target,sizeof test_hfs_target,"%s",target);
+    snprintf(exit_line,(size_t)(script+sizeof script-exit_line),"exec sleep 10\n");write_file(test_rb_bridge,script);
+    c.status=0;assert(!hooked_mount(&c,test_real_mount));
+    expect_not_preparing();
+    expect_file(err_path,"{\"state\":\"error\",\"kind\":\"usb\",\"error\":\"USB conversion timed out\"}\n");
+    if(!slow_marker(target,p))unlink(p);
+    assert(!unmount_dispatch(&c,real_unmount));
+    join(disk,root,"prep-hfs-crash");join(p,disk,"PIONEER/rekordbox");assert(!make_dirs(p));
+    join(p,disk,"PIONEER/rekordbox/export.pdb");write_file(p,"pdb-crash\n");
+    snprintf(test_disk,sizeof test_disk,"%s",disk);
+    snprintf(exit_line,(size_t)(script+sizeof script-exit_line),"kill -SEGV $$\n");write_file(test_rb_bridge,script);
+    c.status=0;assert(!hooked_mount(&c,test_real_mount));
+    expect_not_preparing();
+    expect_file(err_path,"{\"state\":\"error\",\"kind\":\"usb\",\"error\":\"USB conversion failed\"}\n");
+    assert(!unmount_dispatch(&c,real_unmount));
+    join(disk,root,"prep-hfs-ok");join(p,disk,"PIONEER/rekordbox");assert(!make_dirs(p));
+    join(p,disk,"PIONEER/rekordbox/export.pdb");write_file(p,"pdb-ok\n");
+    snprintf(test_disk,sizeof test_disk,"%s",disk);
+    snprintf(exit_line,(size_t)(script+sizeof script-exit_line),"exit 0\n");write_file(test_rb_bridge,script);
+    c.status=0;assert(!hooked_mount(&c,test_real_mount));
+    expect_not_preparing();
+    assert(lstat(err_path,&err_st)==-1&&errno==ENOENT);
+    assert(!unmount_dispatch(&c,real_unmount));test_hfs_target[0]=0;test_disk_ro=0;
     // A plain empty stick does not publish the flag even while the real mount runs.
+    join(disk,root,"prep-hfs-empty");snprintf(test_disk,sizeof test_disk,"%s",disk);
     observing_not_preparing=1;c.status=0;assert(!hooked_mount(&c,test_real_mount));observing_not_preparing=0;expect_not_preparing();
     assert(!umount2(target,UMOUNT_NOFOLLOW));
     puts("USB preparing: conversion, failed heal, SIGKILL timeout, empty HFS view and empty stick: PASS");

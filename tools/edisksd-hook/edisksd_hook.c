@@ -119,17 +119,19 @@ static int safe_path(const char *path, int missing_final) {
     }
 }
 // Status only: atomic publication on /run, with no durability work on the mount path.
-static void set_preparing(const char *target) {
-    if(!volume(target))return;
-    int saved=errno;
+static int prepare_err_path(char out[PATH_MAX]) {
+    return snprintf(out,PATH_MAX,"%s.err",PREPARE_STATE_PATH)>=PATH_MAX?-1:0;
+}
+static void write_run_atomic(const char *dst,const char *body) {
     char parent[PATH_MAX],tmp[PATH_MAX];
-    if(snprintf(parent,sizeof parent,"%s",PREPARE_STATE_PATH)>=(int)sizeof parent)goto out;
-    char *slash=strrchr(parent,'/');if(!slash||slash==parent)goto out;
+    if(snprintf(parent,sizeof parent,"%s",dst)>=(int)sizeof parent)return;
+    char *slash=strrchr(parent,'/');if(!slash||slash==parent)return;
     *slash=0;
     struct stat st;
-    if(safe_path(parent,0)||lstat(parent,&st)||!S_ISDIR(st.st_mode))goto out;
-    if(path_join(tmp,sizeof tmp,parent,".enginex-usb-prep.XXXXXX"))goto out;
+    if(safe_path(parent,0)||lstat(parent,&st)||!S_ISDIR(st.st_mode))return;
+    if(path_join(tmp,sizeof tmp,parent,".enginex-usb-prep.XXXXXX"))return;
     static const char alphabet[]="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    size_t len=strlen(body);
     for(int attempt=0;attempt<8;attempt++) {
         unsigned char random[6];
         if(getrandom(random,sizeof random,GRND_NONBLOCK)!=(ssize_t)sizeof random)break;
@@ -137,13 +139,32 @@ static void set_preparing(const char *target) {
         for(unsigned i=0;i<6;i++)suffix[i]=alphabet[random[i]%(sizeof alphabet-1)];
         int fd=open(tmp,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);
         if(fd<0){if(errno==EEXIST)continue;break;}
-        int ok=write(fd,"1\n",2)==2&&!fchmod(fd,0644);
+        int ok=write(fd,body,len)==(ssize_t)len&&!fchmod(fd,0644);
         if(close(fd))ok=0;
-        if(ok)rename(tmp,PREPARE_STATE_PATH);
+        if(ok)rename(tmp,dst);
         unlink(tmp);
         break;
     }
-out:
+}
+static void set_preparing(const char *target,int clear_err) {
+    if(!volume(target))return;
+    int saved=errno;
+    if(clear_err) {
+        char err_path[PATH_MAX];
+        if(!prepare_err_path(err_path))unlink(err_path);
+    }
+    write_run_atomic(PREPARE_STATE_PATH,"1\n");
+    errno=saved;
+}
+static void set_preparing_error(const char *target,const char *source,const char *err_msg) {
+    if(!err_msg||!*err_msg)return;
+    int saved=errno;
+    char err_path[PATH_MAX],body[512];
+    if(!prepare_err_path(err_path)&&access(err_path,F_OK)!=0) {
+        const char *kind=((target&&strstr(target,"mmcblk"))||(source&&strstr(source,"mmcblk")))?"sd":"usb";
+        if(snprintf(body,sizeof body,"{\"state\":\"error\",\"kind\":\"%s\",\"error\":\"%s\"}\n",kind,err_msg)<(int)sizeof body)
+            write_run_atomic(err_path,body);
+    }
     errno=saved;
 }
 static void clear_preparing(void) {
@@ -918,7 +939,7 @@ static int after_mount(struct libmnt_context *ctx,int mode,int64_t deadline) {
     struct stat existing;
     int hfs_ro=HFS_READONLY(target);
     if(!pioneer&&!heal&&mode==MOUNT_PRE)return 0; // nothing to convert or heal: the visible mount does the rest
-    if(hfs_ro||(pioneer&&mode!=MOUNT_POST)||heal)set_preparing(target);
+    if(hfs_ro||(pioneer&&mode!=MOUNT_POST)||heal)set_preparing(target,mode!=MOUNT_POST);
     // The walk guards the tool run on the library below; after the private
     // conversion or heal (MOUNT_POST) none follows, so it is skipped.
     // An HFS+ view is validated by prepare_view.
@@ -934,7 +955,7 @@ static int after_mount(struct libmnt_context *ctx,int mode,int64_t deadline) {
     }
     release_post(); // the visible tree is final; a bridge or guardian run below must not hold edisksd's monitor
     int done=0;
-    if(pioneer&&mode!=MOUNT_POST){const char *rb=RB_BRIDGE_PATH();char *const a[]={(char *)rb,"--mount-path",(char *)target,NULL};if(!run(a,deadline))done=CONVERTED;else{if(errno==ETIMEDOUT)done=TIMED_OUT;note("bridge failed on",target,errno);}}
+    if(pioneer&&mode!=MOUNT_POST){const char *rb=RB_BRIDGE_PATH();char *const a[]={(char *)rb,"--mount-path",(char *)target,NULL};if(!run(a,deadline))done=CONVERTED;else{const char *src=mnt_context_get_source(ctx);int is_sd=(target&&strstr(target,"mmcblk"))||(src&&strstr(src,"mmcblk"));if(errno==ETIMEDOUT){done=TIMED_OUT;set_preparing_error(target,src,is_sd?"SD card conversion timed out":"USB conversion timed out");}else{set_preparing_error(target,src,is_sd?"SD card conversion failed":"USB conversion failed");}note("bridge failed on",target,errno);}}
     if(heal) {
         char *const a[]={(char *)GUARDIAN_PATH,"--heal-mount",(char *)target,"--data-only",NULL};
         if(run(a,deadline)){if(errno==ETIMEDOUT)done=TIMED_OUT;note("guardian failed on",target,errno);}
@@ -1044,7 +1065,7 @@ static int premount(struct libmnt_context *ctx,int (*real)(struct libmnt_context
             break;
         }
         if(r<0&&errno!=EINTR){result=0;break;}
-        if(now_ms()>=deadline+1000){kill(pid,SIGKILL);while(waitpid(pid,&status,0)<0&&errno==EINTR){}drop_orphans();result=2;break;}
+        if(now_ms()>=deadline+1000){kill(pid,SIGKILL);while(waitpid(pid,&status,0)<0&&errno==EINTR){}drop_orphans();if(access(PREPARE_STATE_PATH,F_OK)==0){const char *tgt=mnt_context_get_target(ctx),*src=mnt_context_get_source(ctx);int is_sd=(tgt&&strstr(tgt,"mmcblk"))||(src&&strstr(src,"mmcblk"));set_preparing_error(tgt,src,is_sd?"SD card conversion timed out":"USB conversion timed out");}result=2;break;}
         usleep(20000);
     }
     close(up[0]);return result;
