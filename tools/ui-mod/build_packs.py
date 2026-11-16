@@ -5651,7 +5651,8 @@ SHADOW_LAYER = r"""
             while (p && (p instanceof RowLayout || p instanceof ColumnLayout || p instanceof GridLayout || p instanceof StackLayout || p instanceof Row || p instanceof Column || p instanceof Grid || p instanceof Flow)) p = p.parent
             return p
         }
-        readonly property int deck: typeof root !== "undefined" && root && root.scShadowDeckFor ? root.scShadowDeckFor(owner) : 0
+        property bool scReady: false
+        readonly property int deck: scReady && typeof root !== "undefined" && root && root.scShadowDeckFor ? root.scShadowDeckFor(owner) : 0
         readonly property bool active: typeof root !== "undefined" && root && root.scShadowVisible && root.scShadowVisible(deck)
         readonly property bool wave: "@KIND@" === "waveform"
         readonly property bool overview: "@KIND@" === "overview"
@@ -5876,7 +5877,7 @@ SHADOW_LAYER = r"""
         }
         onActiveChanged: refreshGeometry()
         onParentChanged: if (geometryWatches) watchGeometry()
-        Component.onCompleted: { watchGeometry(); paletteUpdate.restart() }
+        Component.onCompleted: { scReady = true; watchGeometry(); paletteUpdate.restart() }
         Component.onDestruction: unwatchGeometry()
         transform: Matrix4x4 { matrix: scDisplay.basis }
         z: {
