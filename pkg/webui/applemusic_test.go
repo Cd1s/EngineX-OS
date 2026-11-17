@@ -330,3 +330,32 @@ func TestAppleMusicPlaylistsExcludeOmniSources(t *testing.T) {
 		t.Fatalf("expected only 1 Apple Music playlist, got %d: %+v", len(lists.Items), lists.Items)
 	}
 }
+
+func TestPullRelayConfigSyncsAppleMusicHelper(t *testing.T) {
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/config" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok": true,
+			"config": map[string]any{
+				"appleMusicHelperUrl":      "http://192.168.6.104:12341",
+				"appleMusicHelperLoginUrl": "http://192.168.6.104:12342",
+				"appleMusicHelperToken":    "sync-tok",
+			},
+		})
+	}))
+	defer relay.Close()
+
+	usb := t.TempDir()
+	s, _ := omniServer(t, usb, true)
+	s.updateRelayConfig(&relay.URL, ptr("relay-pw"))
+	if err := s.pullRelayConfig(t.Context()); err != nil {
+		t.Fatalf("pullRelayConfig: %v", err)
+	}
+	got := s.appleMusic.HelperConfig()
+	if got.URL != "http://192.168.6.104:12341" || got.LoginURL != "http://192.168.6.104:12342" || got.Token != "sync-tok" {
+		t.Fatalf("unexpected synced helper config: %+v", got)
+	}
+}

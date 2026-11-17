@@ -21,6 +21,14 @@ func wantsJSON(r *http.Request) bool {
 	return ct == "application/json" || strings.Contains(r.Header.Get("Accept"), "application/json")
 }
 
+func validHelperURL(raw string) bool {
+	if raw == "" {
+		return true
+	}
+	u, err := url.Parse(raw)
+	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Hostname() != "" && u.User == nil && u.RawQuery == "" && u.Fragment == ""
+}
+
 // formValues reads an urlencoded/multipart form or a JSON object body.
 func formValues(w http.ResponseWriter, r *http.Request) url.Values {
 	r.Body = http.MaxBytesReader(w, r.Body, 256<<10)
@@ -390,12 +398,15 @@ func (s *server) configViewWithContext(ctx context.Context) map[string]any {
 		"passwordIsDefault": c.PasswordIsDefault,
 		"spotifyRedirect":   s.spotifyHTTPSRedirect(),
 
-		"soundcloudClientIdSet": c.SoundCloudClientID != "",
-		"soundcloudSecretSet":   c.SoundCloudSecret != "",
-		"soundcloudTokenSet":    c.SoundCloudToken != "",
-		"getSongBpmKeySet":      c.GetSongBPMKey != "",
-		"decks":                 decks,
-		"stems":                 stems,
+		"soundcloudClientIdSet":    c.SoundCloudClientID != "",
+		"soundcloudSecretSet":      c.SoundCloudSecret != "",
+		"soundcloudTokenSet":       c.SoundCloudToken != "",
+		"getSongBpmKeySet":         c.GetSongBPMKey != "",
+		"appleMusicHelperUrl":      c.AppleMusicHelperURL,
+		"appleMusicHelperLoginUrl": c.AppleMusicHelperLoginURL,
+		"appleMusicHelperTokenSet": c.AppleMusicHelperToken != "",
+		"decks":                    decks,
+		"stems":                    stems,
 	}
 	if c.DeezerARL != "" {
 		v["deezerArlMasked"] = maskSecret(c.DeezerARL)
@@ -424,6 +435,7 @@ func (s *server) handleConfigGet(w http.ResponseWriter, r *http.Request) {
 		view["soundcloudClientSecret"] = c.SoundCloudSecret
 		view["soundcloudToken"] = c.SoundCloudToken
 		view["getSongBpmKey"] = c.GetSongBPMKey
+		view["appleMusicHelperToken"] = c.AppleMusicHelperToken
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "config": view, "decks": view["decks"], "stems": view["stems"]})
 }
@@ -509,6 +521,39 @@ func (s *server) handleConfigPost(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		msgs = append(msgs, "BPM 服务密钥已保存，EngineX OS 碟机会在一小时内同步（重启 stream-sync 立即同步）")
+	}
+	if v.Get("clearAppleMusicHelper") == "1" || v.Get("clearAppleMusicHelper") == "true" {
+		if err := s.cfg.update(func(c *config) {
+			c.AppleMusicHelperURL, c.AppleMusicHelperLoginURL, c.AppleMusicHelperToken = "", "", ""
+		}); err != nil {
+			fail(500, err.Error())
+			return
+		}
+		msgs = append(msgs, "已清除 Apple Music 助手配置")
+	}
+	if v.Has("appleMusicHelperUrl") || v.Has("appleMusicHelperLoginUrl") || strings.TrimSpace(v.Get("appleMusicHelperToken")) != "" {
+		amURL := strings.TrimSpace(v.Get("appleMusicHelperUrl"))
+		amLoginURL := strings.TrimSpace(v.Get("appleMusicHelperLoginUrl"))
+		amTok := strings.TrimSpace(v.Get("appleMusicHelperToken"))
+		if (v.Has("appleMusicHelperUrl") && !validHelperURL(amURL)) || (v.Has("appleMusicHelperLoginUrl") && !validHelperURL(amLoginURL)) {
+			fail(400, "Apple Music 助手地址必须是有效的 http/https URL（不含查询参数或片段）")
+			return
+		}
+		if err := s.cfg.update(func(c *config) {
+			if v.Has("appleMusicHelperUrl") {
+				c.AppleMusicHelperURL = amURL
+			}
+			if v.Has("appleMusicHelperLoginUrl") {
+				c.AppleMusicHelperLoginURL = amLoginURL
+			}
+			if amTok != "" {
+				c.AppleMusicHelperToken = amTok
+			}
+		}); err != nil {
+			fail(500, err.Error())
+			return
+		}
+		msgs = append(msgs, "Apple Music 助手配置已保存，EngineX OS 碟机会在同步周期内自动生效")
 	}
 	if np := v.Get("newPassword"); np != "" {
 		cur := v.Get("currentPassword")

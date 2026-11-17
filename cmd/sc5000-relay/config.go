@@ -42,10 +42,13 @@ type config struct {
 	DeezerUserID      string    `json:"deezerUserId"`
 	SpotifyClientID   string    `json:"spotifyClientId"`
 
-	SoundCloudClientID string `json:"soundcloudClientId,omitempty"`
-	SoundCloudSecret   string `json:"soundcloudClientSecret,omitempty"`
-	SoundCloudToken    string `json:"soundcloudToken,omitempty"`
-	GetSongBPMKey      string `json:"getSongBpmKey,omitempty"`
+	SoundCloudClientID       string `json:"soundcloudClientId,omitempty"`
+	SoundCloudSecret         string `json:"soundcloudClientSecret,omitempty"`
+	SoundCloudToken          string `json:"soundcloudToken,omitempty"`
+	GetSongBPMKey            string `json:"getSongBpmKey,omitempty"`
+	AppleMusicHelperURL      string `json:"appleMusicHelperUrl,omitempty"`
+	AppleMusicHelperLoginURL string `json:"appleMusicHelperLoginUrl,omitempty"`
+	AppleMusicHelperToken    string `json:"appleMusicHelperToken,omitempty"`
 }
 
 // configStore persists config.json (0600) and verifies the access password.

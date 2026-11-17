@@ -32,7 +32,9 @@ var phoneText = map[string][4]string{
 	"amHelperTitle":   {"Download Helper Status", "下载助手状态", "下載助手狀態", "Estado del asistente de descarga"},
 	"amHelperReady":   {"Online · Signed in", "在线 · 已登录", "在線 · 已登入", "En línea · Sesión iniciada"},
 	"amHelperOffline": {"Offline — check the helper connection", "离线，请检查助手连接", "離線，請檢查助手連線", "Sin conexión; revisa la conexión del asistente"},
-	"amHelperSetup":   {"Not configured. Set the helper URL and token in the deck Web Console (:8080).", "尚未配置，请在碟机 Web 控制台（:8080）设置助手 URL 和令牌。", "尚未設定，請在碟機 Web 控制台（:8080）設定助手 URL 和權杖。", "Sin configurar. Indica la URL y el token del asistente en la consola web del deck (:8080)."},
+	"amHelperSetup":   {"Not configured. Enter your enginex-amd helper URL and token below.", "尚未配置下载助手，可在下方直接填写助手地址和 Token。", "尚未設定下載助手，可在下方直接填寫助手網址與 Token。", "Sin configurar. Introduce abajo la URL y el token del asistente enginex-amd."},
+	"amHelperTokPh":   {"Helper Token (optional)", "助手 Token（可选）", "助手 Token（選填）", "Token del asistente (opcional)"},
+	"amHelperSave":    {"Save Helper", "保存助手", "儲存助手", "Guardar asistente"},
 	"amHelperSignIn":  {"Online · Sign in required", "在线 · 需要登录", "在線 · 需要登入", "En línea · Se requiere iniciar sesión"},
 	"amHelperBusy":    {"Online · Signing in — refresh to check progress", "在线 · 正在登录，请刷新查看进度", "在線 · 正在登入，請重新整理查看進度", "En línea · Iniciando sesión; actualiza para ver el progreso"},
 	"amHelperCode":    {"Online · Enter your six-digit verification code", "在线 · 请输入六位验证码", "在線 · 請輸入六位驗證碼", "En línea · Introduce el código de verificación de seis dígitos"},
@@ -263,6 +265,12 @@ func appleMusicHelperPhonePage(lang int, action string, status providers.AppleMu
 		}
 	}
 	body := `<h3>` + tr(lang, "amHelperTitle") + `</h3><p class="` + badge + `" role="status">` + tr(lang, key) + `</p>`
+	if !status.Configured {
+		body += `<form method="post" action="` + html.EscapeString(action) + `"><input type="hidden" name="helperAction" value="setup">` +
+			`<input name="helperUrl" placeholder="http://192.168.1.x:12341" aria-label="Helper URL" autocomplete="off" autocapitalize="off" spellcheck="false" required>` +
+			`<input name="helperToken" type="password" placeholder="` + tr(lang, "amHelperTokPh") + `" aria-label="Helper Token" autocomplete="off">` +
+			`<button>` + tr(lang, "amHelperSave") + `</button></form>`
+	}
 	if status.Online && !status.SignedIn {
 		body += `<form method="post" action="` + html.EscapeString(action) + `">`
 		if status.LoginState == "2fa" {

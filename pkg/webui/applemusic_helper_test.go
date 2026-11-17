@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
 )
@@ -179,8 +180,14 @@ func TestAppleMusicHelperPhoneStates(t *testing.T) {
 			{providers.AppleMusicHelperStatus{Configured: true, Online: true, LoginState: "logging-in"}, "amHelperBusy", `name="username"`},
 		} {
 			page := appleMusicHelperPhonePage(lang, "/m/applemusic?t=fixture", state.status, "http://helper.invalid/?token=fixture")
-			if !strings.Contains(page, tr(lang, state.key)) || !strings.Contains(page, state.field) || strings.Contains(page, `name="helperUrl"`) {
+			if !strings.Contains(page, tr(lang, state.key)) || !strings.Contains(page, state.field) {
 				t.Fatal("helper phone state")
+			}
+			if state.status.Configured && strings.Contains(page, `name="helperUrl"`) {
+				t.Fatal("configured helper phone page should not expose helperUrl")
+			}
+			if !state.status.Configured && !strings.Contains(page, `name="helperUrl"`) {
+				t.Fatal("unconfigured helper phone page should expose setup form")
 			}
 			if !strings.Contains(page, "/m/applemusic/helper-qr?t=fixture") {
 				t.Fatal("phone QR flow lost")
@@ -289,5 +296,75 @@ func TestAppleMusicHelperPhoneLoginCompletesAndPolls(t *testing.T) {
 	}
 	if !ui.appleMusic.Ready() {
 		t.Fatal("expected AppleMusic.Ready() to be true after helper sign-in")
+	}
+}
+
+func TestAppleMusicHelperPhoneSetupWhenUnconfigured(t *testing.T) {
+	relayReceived := make(chan map[string]any, 1)
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/config" && r.Method == http.MethodPost {
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			relayReceived <- body
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}))
+	defer relay.Close()
+
+	state := t.TempDir()
+	ui := New(Config{
+		AccessToken: "console-fixture",
+		UIDir:       t.TempDir(),
+		StateDir:    state,
+		RelayURL:    relay.URL,
+	}, nil)
+	defer ui.Close()
+	ui.updateRelayConfig(&relay.URL, ptr("relay-pw"))
+
+	startReq := httptest.NewRequest("POST", "/v1/sc5000/login?provider=applemusic", nil)
+	startReq.RemoteAddr = "127.0.0.1:41002"
+	startRec := httptest.NewRecorder()
+	ui.ServeHTTP(startRec, startReq)
+	if startRec.Code != 200 {
+		t.Fatalf("start phone login: %d", startRec.Code)
+	}
+	flow := ui.loginFlow("applemusic")
+	action := "/m/applemusic?t=" + url.QueryEscape(flow.token)
+
+	// Unconfigured phone page renders the setup form.
+	getRec := httptest.NewRecorder()
+	ui.ServeHTTP(getRec, httptest.NewRequest("GET", action, nil))
+	if getRec.Code != 200 || !strings.Contains(getRec.Body.String(), `name="helperAction" value="setup"`) {
+		t.Fatalf("expected setup form on unconfigured phone page: code=%d", getRec.Code)
+	}
+
+	// Submitting setup configures helper and pushes to relay.
+	postReq := httptest.NewRequest("POST", action, strings.NewReader("helperAction=setup&helperUrl=http://192.168.6.104:12341&helperToken=tok-1"))
+	postReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	postRec := httptest.NewRecorder()
+	ui.ServeHTTP(postRec, postReq)
+	if postRec.Code != 303 {
+		t.Fatalf("setup post: %d %s", postRec.Code, postRec.Body.String())
+	}
+	cfg := ui.appleMusic.HelperConfig()
+	if cfg.URL != "http://192.168.6.104:12341" || cfg.Token != "tok-1" {
+		t.Fatalf("unexpected helper config after phone setup: %+v", cfg)
+	}
+	select {
+	case pushed := <-relayReceived:
+		if pushed["appleMusicHelperUrl"] != "http://192.168.6.104:12341" || pushed["appleMusicHelperToken"] != "tok-1" {
+			t.Fatalf("unexpected relay push payload: %+v", pushed)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for relay push")
+	}
+
+	// Once configured, phone setup cannot overwrite existing helperUrl.
+	overwriteReq := httptest.NewRequest("POST", action, strings.NewReader("helperAction=setup&helperUrl=http://attacker.invalid:12341&helperToken=evil"))
+	overwriteReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	overwriteRec := httptest.NewRecorder()
+	ui.ServeHTTP(overwriteRec, overwriteReq)
+	if overwriteRec.Code != 200 || ui.appleMusic.HelperConfig().URL != "http://192.168.6.104:12341" {
+		t.Fatalf("expected overwrite rejection, got code=%d cfg=%+v", overwriteRec.Code, ui.appleMusic.HelperConfig())
 	}
 }
