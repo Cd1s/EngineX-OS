@@ -41,8 +41,9 @@ func TestIssue301BackgroundImportOfANativeLibrary(t *testing.T) {
 	if got := scalar[int](t, live, `SELECT count(*) FROM Playlist WHERE title='Native set'`); got != 1 {
 		t.Fatal("the stick's own playlist was lost")
 	}
-	if n := scalar[int](t, live, `SELECT count(*) FROM Track WHERE pdbImportKey>0`); n != 20 {
-		t.Fatalf("published %d of 20 export tracks", n)
+	// As in issue301Updated's library: the fixture's track 1 is a row Engine already has.
+	if n := scalar[int](t, live, `SELECT count(*) FROM PerformanceData p JOIN Track t ON t.id=p.trackId WHERE t.pdbImportKey>0 AND beatData IS NOT NULL`); n != 19 {
+		t.Fatalf("published %d of 19 export tracks with their grid", n)
 	}
 	if got := scalar[string](t, live, `PRAGMA integrity_check`); got != "ok" {
 		t.Fatal(got)
