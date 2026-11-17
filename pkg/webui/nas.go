@@ -126,6 +126,16 @@ func (s *Server) loadNASConfigLocked() providers.NASConfig {
 	if b, err := os.ReadFile(s.nasConfigPath()); err == nil {
 		_ = json.Unmarshal(b, &cfg)
 	}
+	// Older configs could keep Basic Auth in the URL. Preserve that login without
+	// returning its credentials in a URL or overwriting explicit auth fields.
+	if u, err := url.Parse(cfg.URL); err == nil && u.User != nil {
+		if cfg.Username == "" {
+			cfg.Username = u.User.Username()
+			cfg.Password, _ = u.User.Password()
+		}
+		u.User = nil
+		cfg.URL = u.String()
+	}
 	return cfg
 }
 

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -66,5 +68,32 @@ func TestNASRejectsPasswordsInURLs(t *testing.T) {
 				t.Fatalf("URL credentials accepted or echoed: %d %s", w.Code, w.Body.String())
 			}
 		})
+	}
+}
+
+func TestNASLegacyURLLoginStaysPrivateAndWorking(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, password, ok := r.BasicAuth()
+		if !ok || user != "fixture-user" || password != "fixture-password" {
+			t.Error("legacy URL login was lost")
+			w.WriteHeader(401)
+			return
+		}
+		io.WriteString(w, `<multistatus xmlns="DAV:"><response><href>/music/a.mp3</href><propstat><prop><displayname>a.mp3</displayname></prop></propstat></response></multistatus>`)
+	}))
+	defer backend.Close()
+	s, _ := newTestServerWithUIDir(t)
+	cfg := providers.NASConfig{Protocol: "webdav", URL: strings.Replace(backend.URL, "://", "://fixture-user:fixture-password@", 1) + "/music", Enabled: true}
+	if err := providers.SaveJSON(s.nasConfigPath(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	s.handleNASConfig(w, httptest.NewRequest("GET", "/api/nas", nil))
+	if strings.Contains(w.Body.String(), "fixture-password") || !strings.Contains(w.Body.String(), `"hasPassword":true`) {
+		t.Fatalf("legacy credentials echoed or lost: %s", w.Body.String())
+	}
+	lists, provider := s.nasPlaylists(context.Background())
+	if provider == nil || len(lists) != 1 || lists[0].Count != 1 {
+		t.Fatalf("legacy source no longer works: %+v", lists)
 	}
 }
