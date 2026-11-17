@@ -38,7 +38,7 @@ class DictionaryTest(unittest.TestCase):
 @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise QML JavaScript")
 class HotPathTest(unittest.TestCase):
     def test_cue_bindings_and_status_polling(self):
-        names = ("scDeckLocked", "scShadowVisible", "scTr", "scCuePlaying", "scProbeCueClocks", "scCueProps", "scNextCueInfo", "scNextCueCompute", "scCueTickFor", "scSameItems", "scCall", "scUiPollReply")
+        names = ("scDeckLocked", "scShadowVisible", "scTr", "scCuePlaying", "scProbeCueClocks", "scCueProps", "scCueBeatsLeft", "scNextCueInfo", "scNextCueCompute", "scCueTickFor", "scSameItems", "scCall", "scUiPollReply")
         functions = []
         for name in names:
             start = re.search(r"(?m)^\tfunction " + name + r"\([^\n]*\) \{", packs.SERVICES_MAIN)
