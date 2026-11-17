@@ -69,10 +69,59 @@ func (s *Server) rbxPlayers() []prolink.Device {
 			continue
 		}
 		seen[d.Address] = true
-		out = append(out, d)
+		if rbxMediaReady(d.Address) {
+			out = append(out, d)
+		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Number < out[j].Number })
 	return out
+}
+
+// rbxMediaChecks: whether each player was last seen with a rekordbox export on its USB or SD.
+var rbxMediaChecks = struct {
+	sync.Mutex
+	m map[string]*rbxPresence
+}{m: map[string]*rbxPresence{}}
+
+// rbxMediaReady is whether the player at ip has a rekordbox export on a medium: checked in
+// the background at most every rbxPresenceEvery, never waited for, and good for the player
+// timeout, so a player without media, or gone, does not keep the source.
+func rbxMediaReady(ip string) bool {
+	rbxMediaChecks.Lock()
+	defer rbxMediaChecks.Unlock()
+	p := rbxMediaChecks.m[ip]
+	if p == nil {
+		if len(rbxMediaChecks.m) >= 16 {
+			clear(rbxMediaChecks.m)
+		}
+		p = &rbxPresence{ip: ip}
+		rbxMediaChecks.m[ip] = p
+	}
+	now := time.Now()
+	if !p.checking && now.Sub(p.checked) >= rbxPresenceEvery {
+		p.checked, p.checking = now, true
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), rbxProbeTime)
+			defer cancel()
+			c, found := rbxPlayerNFS(net.ParseIP(ip)), false
+			for _, slot := range []byte{3, 2} {
+				export, _ := prolink.SlotExport(slot)
+				for _, name := range []string{"/PIONEER/rekordbox/export.pdb", "/.PIONEER/rekordbox/export.pdb"} {
+					if !found {
+						_, _, err := c.Lookup(ctx, export, name)
+						found = err == nil
+					}
+				}
+			}
+			rbxMediaChecks.Lock()
+			defer rbxMediaChecks.Unlock()
+			if found {
+				p.seen = time.Now()
+			}
+			p.checking = false
+		}()
+	}
+	return !p.seen.IsZero() && now.Sub(p.seen) <= prolink.DeviceTimeout
 }
 
 // rbxDial opens a library: a dbserver session with the computer, or a player's medium.

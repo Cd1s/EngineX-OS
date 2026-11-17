@@ -142,7 +142,10 @@ func TestCDJMediaListsAndLoadsWithItsAnalysis(t *testing.T) {
 		Sources       []string
 		RekordboxName string
 	}
-	tidalGet(t, e.base, "/v1/enginex/ui", 200, &ui)
+	for i := 0; i < 200 && ui.RekordboxName == ""; i++ { // the player's media are checked in the background
+		tidalGet(t, e.base, "/v1/enginex/ui", 200, &ui)
+		time.Sleep(10 * time.Millisecond)
+	}
 	if !strings.Contains(strings.Join(ui.Sources, ","), rekordboxScope) || ui.RekordboxName != "CDJ-3000" {
 		t.Fatalf("source for the CDJ's media: %+v", ui)
 	}
