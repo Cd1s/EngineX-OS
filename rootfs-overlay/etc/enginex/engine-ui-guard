@@ -30,6 +30,11 @@ record() {
     (umask 077; printf '%s\n' "$2" > "$UI/.$1.$$" && mv -f "$UI/.$1.$$" "$UI/$1")
 }
 uptime_seconds() { cut -d. -f1 "${ENGINEX_BOOT_UPTIME:-/proc/uptime}"; }
+# feature_off NAME: the console switched NAME off in hook-disable.conf.
+feature_off() {
+    conf="${ENGINEX_CUSTOM:-/data/enginex}/hook-disable.conf"
+    [ -f "$conf" ] && sed 's/#.*//' "$conf" | tr ',\t\r ' '\n\n\n\n' | grep -qx "$1"
+}
 quarantine() {
     rm -rf "$UI/mods-overlay"
     : > "$UI/mods-quarantined"
@@ -209,7 +214,9 @@ watch)
                 esac
                 if [ $((now - since)) -ge "$limit" ] &&
                     [ "$(cat "$UI/boot-token" 2>/dev/null)" = "$token" ] &&
-                    [ "$(cat "$UI/boot-ready" 2>/dev/null)" != "$token" ]; then
+                    [ "$(cat "$UI/boot-ready" 2>/dev/null)" != "$token" ] &&
+                    # Only the EngineX interface acknowledges a start; the stock one never does.
+                    ! feature_off ui-packs; then
                     if fallback ui-ready-timeout; then
                         # Do not wait for report generation or restart a unit during shutdown.
                         if [ "$(systemctl is-system-running 2>/dev/null)" != stopping ]; then
@@ -372,8 +379,7 @@ pre|settings)
     # A huge or locked m.db must not hold the splash screen forever.
     t=; ! command -v timeout >/dev/null 2>&1 || t="timeout 10"
     # The console's internal-heal switch (hook-disable.conf) leaves the library alone.
-    heal_conf="${ENGINEX_CUSTOM:-/data/enginex}/hook-disable.conf"
-    if [ -f "$heal_conf" ] && sed 's/#.*//' "$heal_conf" | tr ',\t\r ' '\n\n\n\n' | grep -qx internal-heal; then
+    if feature_off internal-heal; then
         :
     elif [ -x "$guardian" ]; then
         $t "$guardian" --heal-mount "${ENGINEX_ENGINE_DATA_DIR:-/data/AppDataUser/AIR Music Technology/Engine}" --normalize-reserve --fix-mp3-grids --timeout 10s > /dev/null 2>&1 || :
