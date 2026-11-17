@@ -9257,6 +9257,8 @@ function commit(answer) {{
     const Planck = {{librarianController: {{stemsQueueManager: {{startRenderTracks: id => calls.push(['render', id])}}}}}};
     const row = {{index: 3, modelData: {{trackId: 99}}}}, scDeck = 0, trackList = {{}};
     const leftActions = [], rightActions = [], actionIndex = 0;
+    let textCommitValid; // the commit body reads the message list back into it
+    const actionCommitMessages = new Proxy([], {{get: (_, i) => eval(msgsExpr)[i]}});
 {body}
     return [eval(msgsExpr)[0], calls];
 }}
@@ -9367,7 +9369,7 @@ assert.equal(shown(true, true, false), true);
 
     @unittest.skipUnless(shutil.which("node"), "Node is required")
     def test_stems_busy_4deck_and_preserves_textCommitValid_binding(self):
-        """L5-1: 4-deck units say All decks are playing, and textCommitValid binding is never overwritten."""
+        """L5-1: 4-deck units say All decks are playing; textCommitValid only ever takes the message list's value."""
         hint2 = "Both decks are playing. Free one deck, then tap Stems again"
         hint4 = "All decks are playing. Free one deck, then tap Stems again"
         rows = {l.split("\t")[0]: l.split("\t") for l in
@@ -9386,7 +9388,8 @@ assert.equal(shown(true, true, false), true);
             with self.subTest(side=side):
                 path = "Skins/Embedded/Views/BrowseView/Components/Components/Swipe" + side + "Item.qml"
                 joined = "\n".join(new for _, new in edits[path])
-                self.assertNotIn("textCommitValid =", joined)
+                # The one assignment is the re-read of the message list after the busy answer.
+                self.assertEqual(re.findall(r"textCommitValid = [^\n]+", joined), ["textCommitValid = actionCommitMessages[actionIndex]"])
                 msgs_expr = next(
                     re.search(r"readonly property list<string> actionCommitMessages: (.*)", new).group(1)
                     for _, new in edits[path] if "actionCommitMessages:" in new
@@ -9413,6 +9416,8 @@ function runFor(decks) {{
     const leftActions = [], rightActions = [], actionIndex = 0, scDeck = 0, scStem = true;
     const trackList = {{pCurrentIndex: {{translator: {{unnormalized: 0}}}}}};
     const evalMsgs = () => eval(msgsExpr);
+    let textCommitValid; // the commit body reads the message list back into it
+    const actionCommitMessages = new Proxy([], {{get: (_, i) => evalMsgs()[i]}});
     // Busy tap updates actionCommitMessages for the unit's deck count.
     let row = {{index: 0, modelData: {{trackId: 99}}}};
     {body}
@@ -9425,6 +9430,55 @@ function runFor(decks) {{
 }}
 assert.deepStrictEqual(runFor([1, 2]), ['T:' + {json.dumps(hint2)}, 'T:Stems']);
 assert.deepStrictEqual(runFor([1, 2, 3, 4]), ['T:' + {json.dumps(hint4)}, 'T:Stems']);
+"""
+                res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+                self.assertEqual(res.returncode, 0, res.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_busy_message_shows_on_the_swipe_that_found_every_deck_playing(self):
+        """Stock's onCommit copies actionCommitMessages into textCommitValid, and only then triggers the
+        action (SwipeLeftItem.qml, SwipeRightItem.qml). The busy answer is found while triggering, so the
+        message has to be read again after it: it was one swipe late."""
+        hint2 = "Both decks are playing. Free one deck, then tap Stems again"
+        hint4 = "All decks are playing. Free one deck, then tap Stems again"
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            edits = bp.edits(False)
+        finally:
+            bp.ROOT = old_root
+        for side in ("Left", "Right"):
+            with self.subTest(side=side):
+                path = "Skins/Embedded/Views/BrowseView/Components/Components/Swipe" + side + "Item.qml"
+                msgs_expr = next(
+                    re.search(r"readonly property list<string> actionCommitMessages: (.*)", new).group(1)
+                    for _, new in edits[path] if "actionCommitMessages:" in new
+                )
+                body = next(new for _, new in edits[path] if "root.scStemStream(row.modelData.trackId)" in new)
+                script = f"""
+const assert = require('assert');
+const msgsExpr = {json.dumps(msgs_expr)};
+function taps(decks, answers) {{
+    let scStemBusy = false, textCommitValid, answer;
+    const scLabel = s => s, scStem = true;
+    const root = {{scT: s => 'T:' + s, scDeckList: () => decks, scStemStream: id => answer}};
+    const Planck = {{librarianController: {{stemsQueueManager: {{startRenderTracks: () => {{}}}}}}}};
+    const row = {{index: 3, modelData: {{trackId: 99}}}}, scDeck = 0, trackList = {{}};
+    const leftActions = [], rightActions = [], actionIndex = 0;
+    // A binding: every read sees the current scStemBusy.
+    const actionCommitMessages = new Proxy([], {{get: (_, i) => eval(msgsExpr)[i]}});
+    return answers.map(a => {{
+        answer = a;
+        textCommitValid = actionCommitMessages[actionIndex]; // stock's line, before the trigger
+{body}
+        return textCommitValid; // what the swipe shows
+    }});
+}}
+assert.deepStrictEqual(taps([1, 2], ['busy']), ['T:' + {json.dumps(hint2)}]);
+assert.deepStrictEqual(taps([1, 2, 3, 4], ['busy']), ['T:' + {json.dumps(hint4)}]);
+// The next tap, a deck free (streamed or local), says Stems at once, not the last answer.
+assert.deepStrictEqual(taps([1, 2], ['busy', true, 'busy', false]),
+    ['T:' + {json.dumps(hint2)}, 'T:Stems', 'T:' + {json.dumps(hint2)}, 'T:Stems']);
 """
                 res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
                 self.assertEqual(res.returncode, 0, res.stderr)
