@@ -7804,56 +7804,34 @@ class MixstreamPadsLayoutTest(unittest.TestCase):
             self.assertFalse(re.search(r'(?<!parent\.)\bhighlighted\b', block), f"Bare 'highlighted' found in background: {block}")
         self.assertIn('color: parent.down ?', pads_content)
 
-    def test_stems_eq_switch_is_a_control_center_tile_on_mixstream_only(self):
+    def test_stems_eq_switch_is_a_settings_playback_row_on_mixstream_only(self):
         rows = bp.load_dict()
         for key in ("Stems EQ", "Deck 1", "Deck 2"):
             self.assertIn(key, rows)
             for lang in ("zh-Hans", "zh-Hant", "es"):
                 self.assertTrue(rows[key].get(lang), f"missing {lang} for {key}")
-        tile = bp.STEMS_EQ_TILE
-        self.assertIn('objectName: "ControlCenter_StemsEq"', tile)
-        self.assertIn('visible: Config.audio.fx.hasNHFx && Config.audio.hasStemsLevel', tile)
-        self.assertIn('model: scStemsEqTile.visible ? ["Deck 1", "Deck 2"] : []', tile)
-        self.assertIn('"/Engine/Mixer/Channel" + (index + 1) + "/ChannelStrip/Mode"', tile)
+        row = bp.STEMS_EQ_DECKS_ENTRY
+        self.assertIn('EntryBase.ListEntry {', row)
+        self.assertIn('objectName: "EngineX_StemsEqDecks"', row)
+        self.assertIn('visible: root.scIsMixstream && root.scHasStemsEq', row)
+        self.assertIn('values: ["Deck 1", "Deck 2"]', row)
+        self.assertIn('"/Engine/Mixer/Channel" + ch + "/ChannelStrip/Mode"', row)
+        self.assertIn('currentValue: values.filter((name, i) => modes[i].index === 1)', row)  # each DECK lit on its own
+        self.assertIn('onSelected: function(index) { modes[index].index = modes[index].index === 1 ? 0 : 1 }', row)
         old_root = bp.ROOT
         try:
-            for root, present in (("Skins/Embedded/", True), ("Skins/EmbeddedCommon/", False)):
+            for root, tab, present in (("Skins/Embedded/", "Preferences/PlaybackTabContent.qml", True),
+                                       ("Skins/EmbeddedCommon/", "Preferences/TabContents/PlaybackTabContent.qml", False)):
                 bp.ROOT = root
-                injected = "".join(new for _, new in bp.edits(False)[root + "Views/ControlCenter/Tabs/ControlCenterTab.qml"])
-                self.assertEqual("ControlCenter_StemsEq" in injected, present, root)
+                edits = bp.edits(False)
+                injected = "".join(new for _, new in edits[root + "Views/ControlCenter/Tabs/" + tab])
+                self.assertEqual("EngineX_StemsEqDecks" in injected, present, root)
+                if present:  # right after the global "Stems EQ Mode" switch, before "Color FX Style"
+                    self.assertLess(injected.index('"Stems EQ Mode"'), injected.index("EngineX_StemsEqDecks"))
+                    self.assertLess(injected.index("EngineX_StemsEqDecks"), injected.index('"Color FX Style"'))
+                self.assertNotIn("ControlCenter_StemsEq", "".join(new for _, new in edits[root + "Views/ControlCenter/Tabs/ControlCenterTab.qml"]))
         finally:
             bp.ROOT = old_root
-
-    def test_stems_eq_strip_sits_above_the_tile_flow_and_takes_no_grid_slot(self):
-        """The Control Center tab does not scroll and its bottom row covers every tile past row 3, so the strip lives in the
-        free 64 px above the Flow (a Flow child would take a slot, and the last slot in the worst case is under that row)."""
-        qrc = LAB / "5.3.0/qrc"
-        if not qrc.is_dir():
-            self.skipTest(f"{LAB} 5.3.0 QRC not found")
-        rel = "Skins/Embedded/Views/ControlCenter/Tabs/ControlCenterTab.qml"
-        stock = (qrc / rel).read_text(encoding="utf-8")
-        text = stock
-        old_root = bp.ROOT
-        try:
-            bp.ROOT = "Skins/Embedded/"
-            for old, new in bp.edits(False)[rel]:
-                text = bp.patch(text, old, new, rel)
-        finally:
-            bp.ROOT = old_root
-        # End of the Flow: its matching closing brace.
-        depth, at = 0, text.index("Flow {") + len("Flow ")
-        for at, ch in enumerate(text[at:], at):
-            depth += (ch == "{") - (ch == "}")
-            if ch == "}" and depth == 0:
-                break
-        strip = text.index('objectName: "ControlCenter_StemsEq"')
-        self.assertGreater(strip, at, "the Stems EQ strip is a Flow child and would take a grid slot")
-        self.assertLess(strip, text.index("UberEntries {"))
-        self.assertEqual(text.count("ControlCenter_StemsEq\""), 1)
-        flow_y = int(re.search(r"Flow \{.*?\n\s*y: (\d+)", stock, re.S).group(1))
-        y = int(re.search(r"\n\t\ty: (\d+)\n", bp.STEMS_EQ_TILE).group(1))
-        height = int(re.search(r"\n\t\theight: (\d+)\n", bp.STEMS_EQ_TILE).group(1))
-        self.assertTrue(0 <= y and y + height <= flow_y, f"strip {y}+{height} must end above the Flow at {flow_y}")
 
     def test_mixstream_pitch_bend_beat_jump_and_fx_slots(self):
         rows = bp.load_dict()
@@ -7947,6 +7925,74 @@ class MixstreamPadsLayoutTest(unittest.TestCase):
         self.assertIn('scSlotFx', fx_patched)
         self.assertIn('pFxType.translator.string = scSlotFx', fx_patched)
         self.assertIn('fxType === scSlotFx', fx_patched)
+
+
+class ControlCenterFitTest(unittest.TestCase):
+    """The tab does not scroll and its Source / Wi-Fi / Bluetooth row is anchored at the bottom: a grid of more than three rows
+    ran under that row. The sandbox probe (cc-fit-sandbox.sh) lays the real tab out per model; this checks the patch itself."""
+    rel = "Views/ControlCenter/Tabs/ControlCenterTab.qml"
+
+    def tabs(self):
+        qrc = LAB / "5.3.0/qrc"
+        if not qrc.is_dir():
+            self.skipTest(f"{LAB} 5.3.0 QRC not found")
+        stock = (qrc / "Skins/Embedded" / self.rel).read_text(encoding="utf-8")
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            fitted = stock
+            for old, new in bp.edits(False)["Skins/Embedded/" + self.rel]:
+                fitted = bp.patch(fitted, old, new, self.rel)
+            bp.ROOT = "Skins/EmbeddedCommon/"
+            common = "".join(new for _, new in bp.edits(False)["Skins/EmbeddedCommon/" + self.rel])
+        finally:
+            bp.ROOT = old_root
+        return stock, fitted, common
+
+    def test_grid_is_fitted_above_the_bottom_row_on_5_3_0_only(self):
+        stock, fitted, common = self.tabs()
+        self.assertIn("readonly property int numColumns: parent.width / (tileWidth + spacing)", stock)
+        self.assertNotIn("parent.width / (tileWidth + spacing)", fitted)
+        self.assertIn("readonly property int numColumns: parent.width / scFit / (tileWidth + spacing)", fitted)
+        self.assertIn("scale: scFit", fitted)
+        self.assertIn("transformOrigin: Item.Top", fitted)  # the grid keeps its top edge and its centre
+        self.assertIn("const room = scUber.y - y - spacing", fitted)  # ends one gap above the bottom row
+        self.assertEqual(fitted.count("id: scUber"), 1)
+        self.assertLess(fitted.index("UberEntries {"), fitted.index("id: scUber"))
+        # a grid that already fits keeps stock's own step (1.0): no change there
+        self.assertIn("for (let f = 1; f > 0.5; f -= 0.01)", fitted)
+        self.assertNotIn("scFit", common)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required to run the grid fit rule")
+    def test_fit_rule_keeps_every_row_above_the_bottom_row_at_the_real_panel_size(self):
+        """Runs the patch's own scFit code for every tile count at 1280 x 800 (tab 640 px high, bottom row 104 px above a 32 px
+        margin): a grid that fits stock's way keeps scale 1, any other ends one gap above the bottom row."""
+        stock, fitted, _ = self.tabs()
+        self.assertIn("bottomMargin: 32", stock)
+        start = fitted.index("readonly property real scFit: {") + len("readonly property real scFit: ")
+        depth, end = 0, start
+        for end, ch in enumerate(fitted[start:], start):
+            depth += (ch == "{") - (ch == "}")
+            if depth == 0:
+                break
+        script = "const assert = require('node:assert/strict');\n" \
+            "const fit = (scUber, y, spacing, visibleChildren, parent) => " + fitted[start:end + 1] + ";\n" + r"""
+const width = 1280, tab = 800 - 160, uber = {y: tab - 32 - 104}, y = 64, spacing = 24, tileWidth = 256;
+const stockRows = n => Math.ceil(n / Math.floor(width / 280));
+let fitting = 0, shrunk = 0;
+for (let n = 1; n <= 54; n++) {
+    const f = fit(uber, y, spacing, {length: n}, {width});
+    const cols = Math.floor(width / f / 280), rows = Math.ceil(n / cols);
+    const bottom = y + (rows * 104 + (rows - 1) * spacing) * f;
+    assert.ok(f >= 0.5 && f <= 1, `n=${n} scale ${f}`);
+    assert.ok(bottom <= uber.y - spacing + 1e-9, `n=${n} ends at ${bottom}, bottom row starts at ${uber.y}`);
+    if (y + stockRows(n) * 104 + (stockRows(n) - 1) * spacing <= uber.y - spacing) { assert.equal(f, 1, `n=${n} already fits and must stay stock`); fitting++; }
+    else { assert.ok(f < 1, `n=${n} does not fit stock's way and must scale`); shrunk++; }
+}
+assert.equal(fitting, 12); // three rows of four
+assert.equal(shrunk, 54 - 12);
+"""
+        subprocess.run(["node", "-e", script], check=True)
 
 
 class ReverseJogWheelTest(unittest.TestCase):
