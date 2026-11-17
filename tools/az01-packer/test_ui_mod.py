@@ -1765,8 +1765,14 @@ assert.strictEqual(evalIsLead({{ master: false }}), false);
         # a label in front of six options ("Tamaño de loop predeterminado", 29, fitted)
         self.assertLessEqual(len(es("Default Beat Jump Size")), 29)
         self.assertLessEqual(len(es("Default Loop Size")), 29)
+        # options of a stock list row are 136 px buttons side by side: "Todos los faders" + "Solo upfaders" had no gap
+        self.assertLessEqual(len(es("All Faders")), 12)
+        self.assertLessEqual(len(es("Upfader Only")), 12)
         # the source list's right column
         self.assertLessEqual(len(es("Scan to log in")), 22)
+        # the pack's own PX Delay row holds two long labels ("Predeterminado (desactivado)" was 270 px wide in a
+        # 136 px button and ran over "Milisegundos (ms)"; the English pair touched): wider buttons, not shorter words
+        self.assertRegex(bp.PLAYBACK_ENTRIES, r'text: "PX Delay Time Mode"\n\t\t\tvisible: root.scHasPxDelay\n\t\t\tentryWidth: 2[0-9][0-9]')
         # one line with no wrapping: a longer one also widens the About page and pushes the Update button out
         stems = "On-deck stems (basic quality). For high-quality stems, run the EngineX Stems service on a computer on the same network."
         self.assertLessEqual(len(es(stems)), 118)

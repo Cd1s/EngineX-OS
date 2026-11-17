@@ -319,8 +319,8 @@ Trigger Source	触发来源	觸發來源	Fuente de disparo
 Fader Echo	推子回音	推桿回音	Fader Echo
 Fader Echo: Up	推子回音：仅竖推	推桿回音：僅豎推	Fader Echo: subir
 Fader Echo: All	推子回音：全部	推桿回音：全部	Fader Echo: todos
-All Faders	全部推子	全部推桿	Todos los faders
-Upfader Only	仅竖推	僅豎推	Solo upfaders
+All Faders	全部推子	全部推桿	Todos
+Upfader Only	仅竖推	僅豎推	Solo upfader
 Upfader	竖推	豎推	Upfader
 All	全部	全部	Todos
 Pad LED Brightness	打击垫亮度	打擊墊亮度	Brillo LED de pads
@@ -437,7 +437,7 @@ PX Delay Time Mode	先锋效果延时模式 (PX)	先鋒效果延遲模式 (PX)	M
 PX Delay Time (ms)	先锋效果延时 (ms)	先鋒效果延遲 (ms)	Tiempo de delay PX (ms)
 Spiral / Pitch Echo / Dub Echo only; stock Beat FX stay in beats	仅作用于 Spiral / Pitch Echo / Dub Echo；原厂效果仍按节拍同步	僅作用於 Spiral / Pitch Echo / Dub Echo；原廠效果仍依節拍同步	Solo Spiral / Pitch Echo / Dub Echo; los Beat FX originales siguen en beats
 Default (Off)	默认（关闭）	預設（關閉）	Predeterminado (desactivado)
-Milliseconds (ms)	毫秒（ms）	毫秒（ms）	Milisegundos (ms)
+Milliseconds (ms)	毫秒（ms）	毫秒（ms）	Milisegundos
 Time (ms)	时间（ms）	時間（ms）	Tiempo (ms)
 OFFLINE · 	离线 · 	離線 · 	SIN CONEXIÓN · 
 REMOTE	仅曲目信息	僅曲目資訊	REMOTO

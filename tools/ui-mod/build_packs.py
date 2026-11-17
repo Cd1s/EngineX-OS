@@ -5186,6 +5186,7 @@ PLAYBACK_ENTRIES = (switch_entry("Master Soft Clipper", "scMasterLimiter", "mast
 		EntryBase.ListEntry {
 			text: "PX Delay Time Mode"
 			visible: root.scHasPxDelay
+			entryWidth: 232 // two long labels in every language ("Predeterminado (desactivado)"): the 136 px default made them run into each other
 			values: ["Default (Off)", "Milliseconds (ms)"]
 			currentValue: values[root.scFxTimeMode === "ms" ? 1 : 0]
 			onSelected: function(index) { root.scCall("fxTimeMode=" + (index === 1 ? "ms" : "beats")) }
