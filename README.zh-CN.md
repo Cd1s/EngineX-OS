@@ -39,7 +39,8 @@
 ### 2. 内置 7 大流媒体音源（手机扫码与一键配对登录）
 - 音源菜单直接内置 **TIDAL、网易云音乐、Spotify、Deezer、SoundCloud、Beatport、Apple Music**，与 U 盘、SD 卡并列显示；
 - 手机扫描碟机屏幕二维码（或在 Spotify Connect 里点选 **`EngineX OS`**）即可登录账号，直接浏览红心歌单、收藏夹并按 BPM、调性、星级、歌名或歌手排序；
-- 支持 **无损 FLAC 与 320 kbps** 音质切换；播放过的曲目按平台各自独立缓存在碟机内部存储，再次加载直接秒开（网易云开启 `Deemix 优先` 时与 Deezer 共享无损缓存）；
+- **支持无损 FLAC 与 320 kbps** 音质切换；播放过的曲目按平台各自独立缓存在碟机内部存储，再次加载直接秒开（网易云开启 `Deemix 优先` 时与 Deezer 共享无损缓存）；
+- **Apple Music 原厂解锁与公开/个人歌单导入**：二代机与已解锁 Engine 5.3.0 原生播放 Apple Music；手机扫码即可直接粘贴 Apple Music 公开歌单/专辑链接或登录个人资料库，自动轮转提取 Web 开发者令牌，针对受保护音频通过 ISRC 与歌名精准智能回放，OmniSource 隔离保持 Apple Music 歌单纯净；
 - **OmniSource**（`配置 → 曲库 → OmniSource（在流媒体中显示 U 盘/SD）`，默认关闭）支持一次搜索同时查找各流媒体、U 盘 / SD 卡、djay 曲库与网络共享，同时保持各平台自己的歌单页干净不串歌单。
 
 ### 3. 先锋 Rekordbox U 盘即插即用与 CDJ 互联

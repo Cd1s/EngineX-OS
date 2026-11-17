@@ -40,6 +40,7 @@ Everything runs right inside the familiar Denon DJ interface — install it and 
 - **TIDAL, NetEase Cloud Music, Spotify, Deezer, SoundCloud, Beatport, and Apple Music** appear right alongside your USB and SD drives in the Source menu;
 - Scan the on-screen QR code with your phone (or pick **`EngineX OS`** in Spotify Connect) to browse playlists, liked songs, and search results, with sorting by BPM, key, rating, title, or artist;
 - Switch between **Lossless FLAC and 320 kbps** quality; played tracks are cached on the deck in separate per-service caches so reloading them is instant (when NetEase is set to `Deemix First`, NetEase and Deezer share lossless cached downloads);
+- **Native Apple Music & Public/Personal Playlist Import**: Gen-2 and unlocked Engine 5.3.0 hardware play Apple Music natively; scan the on-screen QR code on your phone to paste public playlist/album links or log in to your personal library with auto-rotating developer tokens, intelligent playback matching via ISRC and title for protected streams, and OmniSource isolation keeping Apple Music playlists clean;
 - **OmniSource** (`Profile → Library → OmniSource (Drives in Streaming)`, off by default) lets one search span your streaming services, USB/SD drives, djay libraries, and mounted network shares while keeping each service's own playlist page clean.
 
 ### 3. Pioneer Rekordbox USB Plug & Play & CDJ Link
