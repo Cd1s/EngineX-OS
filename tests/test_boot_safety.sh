@@ -53,6 +53,7 @@ fixture() {
     export ENGINEX_QUIT_REASON_FILE=$W/$1-reason
     export ENGINEX_PRIMARY_UI_DIR=$ENGINEX_UI_DIR ENGINEX_LEGACY_UI_DIR=$W/$1-legacy
     export ENGINEX_ASSIGNMENT_DIR=$W/$1-assignments ENGINEX_ASSIGNMENT_PATCHED=$W/$1-patched
+    export ENGINEX_CUSTOM=$W/$1-custom
     export ENGINEX_STATE_DIR=$W/$1-state ENGINEX_PLANCK_STATE=$W/$1-planck.json
     mkdir -p "$ENGINEX_UI_DIR"
     : > "$BOOT_TEST_LOG"
@@ -104,6 +105,24 @@ for step in 1 2 3 4; do
 done
 has_file "$ENGINEX_UI_DIR/safe-mode"
 echo 'PASS completed work extends deadline; stalled progress times out'
+
+# ui-packs switched off in hook-disable.conf: the stock interface never acknowledges the
+# attempt, so a timeout would force safe mode about three minutes after every start.
+fixture packs-off
+mkdir -p "$ENGINEX_CUSTOM"
+printf 'stems\nui-packs             # stock interface\n' > "$ENGINEX_CUSTOM/hook-disable.conf"
+sh "$GUARD" pre; launch
+has_file "$ENGINEX_UI_DIR/boot-token"; watch
+sleep 3.5
+[ ! -e "$ENGINEX_UI_DIR/safe-mode" ] || fail 'ui-packs off fell back to safe mode'
+! grep -q 'restart' "$BOOT_TEST_LOG" || fail 'ui-packs off restarted Engine'
+fixture packs-commented
+mkdir -p "$ENGINEX_CUSTOM"
+printf '# ui-packs           # stock interface\n' > "$ENGINEX_CUSTOM/hook-disable.conf"
+sh "$GUARD" pre; launch
+has_file "$ENGINEX_UI_DIR/boot-token"; watch
+has_file "$ENGINEX_UI_DIR/safe-mode"
+echo 'PASS ui-packs off never times out; a commented ui-packs line still does'
 
 fixture crashes
 sh "$GUARD" pre
