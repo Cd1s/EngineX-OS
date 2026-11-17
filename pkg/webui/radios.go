@@ -2,12 +2,16 @@ package webui
 
 import (
 	"context"
+	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/Cd1s/EngineX-OS/pkg/wifi"
 )
 
 // UnblockRadios clears rfkill's soft block on Bluetooth and Wi-Fi. The kernel boots
@@ -29,6 +33,54 @@ func UnblockRadios(root string) {
 			if err := os.WriteFile(filepath.Join(dir, "soft"), []byte("0"), 0o644); err != nil {
 				log.Printf("stream-sync: could not unblock %s: %v", e.Name(), err)
 			}
+		}
+	}
+}
+
+// DisableWiFiPowerSave waits for wlan0 to be up, then applies once. Announcing
+// routes or reconnecting is not evidence that this driver resets power saving.
+func DisableWiFiPowerSave(ctx context.Context) {
+	if guardHostCommand("iw") != nil {
+		return
+	}
+	disableWiFiPowerSave(ctx, 5*time.Second, func() bool {
+		iface, err := net.InterfaceByName("wlan0")
+		return err == nil && iface.Flags&net.FlagUp != 0
+	}, func() error { return setWiFiPowerSaveOff(ctx) })
+}
+
+func setWiFiPowerSaveOff(ctx context.Context) error {
+	if stock, err := exec.LookPath("iw"); err == nil {
+		c, cancel := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+		out, err := exec.CommandContext(c, stock, "dev", "wlan0", "set", "power_save", "off").CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("iw: %w: %s", err, strings.TrimSpace(string(out)))
+		}
+		return nil
+	}
+	return wifi.SetPowerSave("wlan0", false)
+}
+
+func disableWiFiPowerSave(ctx context.Context, every time.Duration, up func() bool, disable func() error) {
+	tick := time.NewTicker(every)
+	defer tick.Stop()
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		if up() {
+			if err := disable(); err != nil {
+				log.Printf("stream-sync: could not disable Wi-Fi power saving: %v", err)
+			} else {
+				log.Print("stream-sync: Wi-Fi power saving disabled on wlan0")
+			}
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
 		}
 	}
 }

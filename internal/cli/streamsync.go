@@ -157,6 +157,7 @@ func StreamSync(args []string) error {
 	go ui.SyncRelaySettings(ctx)
 	go ui.RestoreSSH(ctx) // first generation: the console's SSH settings after a boot
 	go webui.GuardRoutes(ctx)
+	go webui.DisableWiFiPowerSave(ctx)
 	dl.RemoveStaleParts()
 	dl.Trim("")
 	go watchEngineTemp(ctx)

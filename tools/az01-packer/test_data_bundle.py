@@ -34,6 +34,9 @@ def fake_elf(machine, tag):
 
 
 class DataBundleTest(unittest.TestCase):
+    def test_no_partial_iw_applet_over_stock(self):
+        self.assertNotIn('iw', bdb.APPLETS)  # #309: stock iw supports more than power_save.
+
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.host_commands = self.tmp / 'host-commands.log'
