@@ -66,13 +66,11 @@ The scripts are POSIX `sh`: the stock rootfs has BusyBox ash, no bash and no
 
 | Work | CPUs | Mechanism |
 | --- | --- | --- |
-| ALSA/I2S/SPDIF IRQs and their RT IRQ threads | 0 | IRQ mask `1`, task affinity |
-| Existing FIFO/RR Engine audio threads | 0 | comm-name match plus policy check |
-| Other `/usr/Engine/` threads, including GUI/waveform | 1-2 | per-thread affinity |
+| IRQs, IRQ threads, Engine's threads, unbound workqueues | as stock sets them | none (#298) |
 | Bridge, stream-sync, ssh/sshd and mount workers | 3 | service CPUAffinity, background slice |
 
 The background slice has `AllowedCPUs=3`, `CPUWeight=10`, `IOWeight=10`.
-The optional Engine slice has `AllowedCPUs=0-2` and higher foreground weights.
+No unit uses the Engine slice (`AllowedCPUs=0-2`); Engine keeps stock placement.
 Use cgroup v2 with cpuset/cpu/io controllers for these limits; weights depend
 on controller and device support. Affinity also works without weight support.
 These settings do not reserve CPU0 against every stock daemon or unmovable
@@ -80,25 +78,22 @@ kernel interrupt, and do not replace a verified RT kernel/boot policy.
 
 `enginex-perf-tune` sets CPU0-3 to `ondemand` with a 1.2 GHz minimum (lower
 clocks caused ALSA xruns), `up_threshold` 50 and `sampling_down_factor` 10, and the `ffa30000.gpu`
-devfreq to `simple_ondemand` from 300 MHz (its lowest clock on battery or above 85 C). IRQs:
-audio on CPU0, GPU/VOP/HDMI on CPU1 (Engine's GUI core), everything else (touch I2C, MMC, USB,
-eth0) on CPU2. Engine's SceneGraph thread moves to CPU2 and its normal-priority helpers on CPU1
-to CPUs 0 and 3 (again 20 s and 60 s after each Engine start); EMain and real-time threads stay. It writes sysctl
+devfreq to `simple_ondemand` from 300 MHz (its lowest clock on battery or above 85 C). It writes sysctl
 values (swappiness 10, dirty background 5, dirty ratio 15, file-max 1048576),
 and selects `mq-deadline`, otherwise `none`, when advertised, except on devices
-where Engine already chose `bfq`. USB and SD devices read ahead 1 MiB (LC003). Movable IRQs and their
-PREEMPT_RT threads are placed by name; `/etc/default/enginex-perf` holds the
-patterns.
+where Engine already chose `bfq`. USB and SD devices read ahead 1 MiB (LC003), and USB/SATA
+autosuspend and link power saving are off (CF018/CF001/LC001). IRQs, IRQ threads, Engine's
+threads and the workqueue mask are left as stock sets them: Engine pins one RT audio thread and
+one stream decoder per core, and moving them made a playing deck stutter while another loaded (#298).
 
 The service runs at boot and after each Engine start, because Engine's setup
 script sets the GPU back to `performance`. Missing,
-read-only or disappearing knobs and exited threads are nonfatal. The service
-conflicts with irqbalance to prevent it from undoing the IRQ policy. Enable
+read-only or disappearing knobs are nonfatal. Enable
 symlinks for discovery and tuning are included in this tree.
 
 ## Dependencies and validation
 
-Runtime: BusyBox sh, systemd/udev, util-linux findmnt/flock/taskset and
+Runtime: BusyBox sh, systemd/udev, util-linux findmnt/flock and
 edisksd from the stock image. Stock kernel exFAT/NTFS3 and
 SD filesystem support must also be present. The internal cache must have
 enough persistent free space and OverlayFS-compatible xattrs/d_type.

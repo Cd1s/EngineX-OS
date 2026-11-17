@@ -32,7 +32,7 @@
 | **官方遥测、Sentry 与冻结探针** | 每次触摸/按键写 `/data/.../analytics/posthog.db` 与 `events.db`；后台常驻 `crashpad_handler` 与 4 个 `J:I:Takingfreez` 探针线程 | `posthog.db` / `events.db` 在 SQLite 层直接重定向为 `":memory:"`（文件层兜底至 `/tmp` tmpfs）；`crashpad_handler` 派生在 `posix_spawn`/`execve` 层直接短路返回 `ENOENT`；瞬时 `J:*` 作业名与 `Freeze Checker` 保留继承的调度策略；专用 `sentry*`/`CrashHandler*` 线程避开 `CPU1/2`，使用 `SCHED_OTHER` + `nice 10` + best-effort I/O 7；`/etc/hosts` 与 `dnsmasq` 屏蔽遥测域名（保留 `ipv4.connman.inmusicbrands.com` 在线检测） |
 | **Engine 内部后台分析与封面解码线程** | `Analysis Queue`、`QQuickPixmapRea`、`FileInfoThread`、`Dropbox*`、`Beatport*` 与实时音频混跑，大图解码易打断 `CPU0` 音频中断 | 拦截 `pthread_setname_np`、`prctl`/`__prctl_time64(PR_SET_NAME)` 与调度/亲和性设置：专用后台分析、云服务及崩溃处理线程避开 `CPU1/2`，使用 `SCHED_OTHER` + `nice 10` + best-effort 最低 I/O 优先级 7；Qt 全局封面读取线程 `QQuickPixmapRea` 仅避开 `CPU1/2`，保留调用方的正常 nice/I/O 优先级；文件夹浏览器 USB 扫描线程 `FileInfoThread` 避开 `CPU1/2`，保持 `nice 10` 和原 I/O 优先级，为同盘播放保留余量 |
 | **文件系统与只读盘支持** | HFS+ 被错误改写为不存在的 `ufsd` 驱动导致挂载失败；只读盘挂载后被 `handleReadOnlyDeviceEjected` 自动弹出 | 解锁原生 `hfsplus` 驱动与未知文件系统支持位；禁止只读盘自动弹出；对只读 HFS+ Rekordbox 盘自动把 `/data/enginex/hfs-libraries/<卷 ID>` 绑定为可写 `Engine Library` 视图，退盘时自动 `MNT_DETACH` |
-| **Linux 内核与硬件实时调优** | CPU 最低频 126MHz（落入 408MHz 区间易发生 ALSA XRUN）；GPU 锁最高频发热；USB/SATA 启用自动休眠 | CPU `ondemand` 保底 **1.2 GHz**（`up_threshold=50`, `sampling_down_factor=10`，实测 ~72°C 不降频）；GPU `simple_ondemand` 低频让出热设计功耗；ALSA `ffb20000` 硬中断锁 `CPU0` (`FIFO 99`)；内核 `workqueue/cpumask=6` 移出 `CPU0`；USB/SATA/JMicron 禁用休眠 (`autosuspend=-1`)；千兆网卡协商 + Wi-Fi 禁用省电与漫游 |
+| **Linux 内核与硬件实时调优** | CPU 最低频 126MHz（落入 408MHz 区间易发生 ALSA XRUN）；GPU 锁最高频发热；USB/SATA 启用自动休眠 | CPU `ondemand` 保底 **1.2 GHz**（`up_threshold=50`, `sampling_down_factor=10`，实测 ~72°C 不降频）；GPU `simple_ondemand` 低频让出热设计功耗；中断、中断线程与内核 `workqueue/cpumask` 按原厂摆放（5.3.0.5 起，#298）；USB/SATA/JMicron 禁用休眠 (`autosuspend=-1`)；千兆网卡协商 + Wi-Fi 禁用省电与漫游 |
 
 ---
 
@@ -168,7 +168,7 @@ Engine 打开外接存储后，任何外部进程写其 `m.db` / `hm.db` 都会�
     - 一键启动：`tools/stems/run-home-worker.sh`（macOS / Linux）与 `run-home-worker.ps1`（Windows，NVIDIA 显卡自动安装 CUDA 版 torch）。
 
 ### 3. Linux 系统服务与调优脚本 (`rootfs-overlay/`)
-- `usr/local/bin/enginex-perf-tune`：每次 Engine 启动后执行，设置 CPU `1.2GHz` 下限、GPU `simple_ondemand`、内核 `vm`/`fs` 参数、保留 `bfq` 调度器、关闭 USB/SATA 休眠 (`autosuspend=-1`, `link_power_management_policy=max_performance`)、将 `workqueue/cpumask` 设为 `6`（避开 `CPU0`）、并将 `ffb20000` (ALSA) 锁 `CPU0` (`FIFO 99`)、`ffa30000` (GPU) 锁 `CPU1`、`ehci`/`xhci`/`dwc2`/`ff500000`/`ff540000`/`dwmmc`/`sata`/`eth0` 锁 `CPU2`。
+- `usr/local/bin/enginex-perf-tune`：开机和每次 Engine 启动后执行，设置 CPU `ondemand` 与 `1.2GHz` 下限、GPU `simple_ondemand`、内核 `vm`/`fs`/网络缓冲参数、U 盘与 SD 预读、保留 `bfq` 调度器、关闭 USB/SATA 休眠 (`autosuspend=-1`, `link_power_management_policy=max_performance`)。中断、中断线程、Engine 线程与 `workqueue/cpumask` 从 5.3.0.5 起交还原厂（#298：重新绑核会让一台碟机载歌时另一台卡顿）。
 - `usr/local/bin/enginex-debloat`：开机/离线幂等补丁，开启千兆网口 (`az01-ethernet-speed 1000`)、禁用 `encrypt-fs.sh` 中的危险自动擦除 (`az01-update --erase-data`)、修正 `setup-usb-gadget.sh` 语法错误 (`shift1` $\rightarrow$ `shift 1`)、将 `journald` 设为 `volatile` (RAM 16M)、屏蔽 PostHog/Logstash 遥测域名、关闭 `wlan0` 省电模式、开启 `ntfs3` `force` 挂载。
 - `usr/lib/modprobe.d/brcmfmac.conf`：设置 `options brcmfmac roamoff=1 feature_disable=0x82000` 根治博通 Wi-Fi 漫游断流。
 
@@ -241,7 +241,7 @@ Engine 打开外接存储后，任何外部进程写其 `m.db` / `hm.db` 都会�
 | **H055** | 1.x | 32 位 WAV（含 IEEE Float 32/64-bit 与 `WAVEFORMATEXTENSIBLE`）无法加载或时长错乱 | ✅ **已根治** | `pkg/compat/audio.go` (`wavHeader`) 与 `pkg/analyzer/decode.go` (`DecodeWAV`) 完整支持 PCM 8/16/24/32-bit、IEEE Float 32/64-bit、`RF64` (`ds64`) 与 `0xFFFE` 扩展头 (`TestWAVContainer32Valid24`) |
 | **2.2.x / 2.3.x** | 2.x | 损坏音频文件导致整机冻结；FAT32 扩展 Unicode 字符（macOS NFD/NFC）文件名报丢失；不兼容文件系统报错 | ✅ **已根治** | 1) `pkg/compat/path.go` 全路径 Unicode NFC + Case-Fold 归一化解决 macOS NFD 丢歌；<br>2) `pkg/compat/audio.go` 与 `pkg/analyzer/decode.go` 严格校验容器边界与 `MaxDecodedSamples` 内存上限；<br>3) `engine_ui_hook.c` 解锁 `0x1897e70`/`0x1897dcc` 全文件系统兼容位 |
 | **H129 / H132 / EOS-01 / EOS-02** | 1.x–3.x | 大数据库误报 Corrupted、第三方编辑曲库触发断链或删库、迁移卡死 | ✅ **已根治** | `edisksd_hook.so` + `dbhealer` 挂载前原子修复链表与 schema，桥接状态外置至 `.rb-bridge-state.db`，彻底规避 Engine 的未知表删库机制 |
-| **LC001** | 3.x | 拔插 SoundSwitch DMX USB 适配器（FTDI `ftdi_sio`）时音频卡顿/降速 | ✅ **已根治** | `enginex-perf-tune` 将 `ff500000`、`ff540000`、`ehci`、`xhci`、`dwc2` 中断全部绑定至 `CPU2`，并设置 `workqueue/cpumask=6` 禁止 USB 枚举 `kworker` 在 `CPU0`（ALSA 核心）上运行 |
+| **LC001** | 3.x | 拔插 SoundSwitch DMX USB 适配器（FTDI `ftdi_sio`）时音频卡顿/降速 | 🟡 **待实机复核** | `enginex-perf-tune` 关闭 USB 休眠，适配器不会因休眠反复重新枚举。原先把 USB 中断绑到 `CPU2`、`workqueue/cpumask=6` 的做法在 5.3.0.5 交还原厂（#298：重新绑核会让播放中的碟机卡顿）；演出中拔插 DMX 适配器的实机复核排在最终实机推送 |
 | **LC003** | 3.x | 播放约 2 小时大 MP3/Set，提前跳到较远 Cue 后约 0.5–0.8 秒静音 | ✅ **已缓解** | `enginex-perf-tune` 将 USB / SD 块设备 `read_ahead_kb` 提升至 `1024` KiB（2026-11-04 实机读回 `sda` / `mmcblk1` 均为 1024） |
 | **LA-020** | 1.x–3.x | Auto Gate 混入旧 FX | ✅ **已实机部署 / 已防御** | `Effects::AutoGate::process` `0xe3a598` 跳板调用 `sc_dsp_autogate_pre_process`，FX 切换后清零 AutoGate 相位 |
 | **H130 / LA-018** | 1.x–3.x | 开关 Key Lock 金属失真 | 🟢 **5.0.4 原厂已逐帧步进** | 反汇编确认 `ElastiqueFader`（`0x1534398`）已按 `step = 1/(rate × 0.001)` 逐采样帧步进，不挂载重混 Hook；仅对 `TimeStretchingModifier::PlaybackTempoChange` `0x153312c` 做正有限值守卫 |

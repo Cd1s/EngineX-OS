@@ -11,12 +11,8 @@ legacy_ui=${ENGINEX_LEGACY_UI_DIR:-$legacy_ui}
 [ ! -e "$boot_ui/safe-mode" ] || exit 0
 SYS=${ENGINEX_SYS_ROOT:-/sys}
 PROC=${ENGINEX_PROC_ROOT:-/proc}
-AUDIO_IRQ=${ENGINEX_AUDIO_IRQ_PATTERN:-ffb20000|snd|alsa|i2s|spdif|audio}
-GPU_IRQ=${ENGINEX_GPU_IRQ_PATTERN:-ffa30000|panfrost|vop|hdmi}
 export LC_ALL=C
 log() { printf 'enginex-perf: %s\n' "$*" >&2; }
-# Case-insensitive extended-regex match of $1 against pattern $2.
-matches() { printf '%s\n' "$1" | grep -Eiq -- "$2"; }
 write_knob() {
     [ -e "$1" ] || return 0
     if [ -w "$1" ] && { printf '%s\n' "$2" > "$1"; } 2>/dev/null; then return 0; fi
@@ -100,9 +96,7 @@ for scheduler in "$SYS"/block/*/queue/scheduler; do
         *[\ \[]none[\ \]]*) write_knob "$scheduler" none ;;
     esac
 done
-# CF018/CF001/LC001: Keep PRIME 4 JMicron USB-SATA, USB SSDs and lighting Mod adapters from autosuspending,
-# and keep unbound kernel workqueues off the GUI (1) and SceneGraph (2) cores.
-write_knob "$SYS/devices/virtual/workqueue/cpumask" 9 quiet
+# CF018/CF001/LC001: Keep PRIME 4 JMicron USB-SATA, USB SSDs and lighting Mod adapters from autosuspending.
 write_knob "$SYS/module/usbcore/parameters/autosuspend" -1 quiet
 for lpm in "$SYS"/class/scsi_host/host*/link_power_management_policy; do
     [ -e "$lpm" ] && write_knob "$lpm" max_performance quiet
@@ -114,128 +108,7 @@ for dly in "$SYS"/block/sd*/device/power/autosuspend_delay_ms; do
     [ -e "$dly" ] && write_knob "$dly" -1 quiet
 done
 
-# CPU 1 GUI, CPU 2 SceneGraph + GPU/VOP, CPU 3 peripheral IRQs,
-# CPU 0 audio DMA. Helpers/workqueues use 0,3. Engine's RT audio threads keep
-# their separate original cores and priorities: all four cores already host RT
-# audio, so complete audio/IRQ isolation is impossible without moving them.
-# Keep non-audio IRQ threads below AudioWatcher (45) and render/output (49).
-classify() {
-    if matches "$1" "$AUDIO_IRQ"; then echo 0
-    elif matches "$1" "$GPU_IRQ"; then echo 2
-    else echo 3
-    fi
-}
-# Route movable non-audio interrupts away from CPU0. Per-CPU/managed IRQs may
-# reject writes, which is expected. PREEMPT_RT IRQ threads are pinned below too.
-irq_map=
-if [ -r "$PROC/interrupts" ]; then
-    while IFS= read -r line; do
-        irq=$(printf '%s\n' "$line" | sed -n 's/^[[:space:]]*\([0-9][0-9]*\):.*/\1/p')
-        [ -n "$irq" ] || continue
-        cpu=$(classify "$line")
-        case $cpu in 0) mask=1 ;; 2) mask=4 ;; *) mask=8 ;; esac
-        irq_map="$irq_map $irq=$cpu"
-        write_knob "$PROC/irq/$irq/smp_affinity" "$mask" quiet
-    done < "$PROC/interrupts"
-fi
-
-# PREEMPT_RT IRQ threads follow their IRQ. This runs once per Engine start.
-for process in "$PROC"/[0-9]*; do
-    comm=$(cat "$process/comm" 2>/dev/null) || continue
-    case $comm in irq/*) ;; *) continue ;; esac
-    pid=${process##*/}
-    # comm is limited to 15 bytes: irq/148-ffb20000 loses its last digit.
-    # Use the IRQ number to recover the classification from interrupts.
-    cpu=
-    irq=$(printf '%s\n' "$comm" | sed -n 's|^irq/\([0-9][0-9]*\)-.*|\1|p')
-    if [ -n "$irq" ]; then
-        for entry in $irq_map; do
-            [ "${entry%%=*}" = "$irq" ] && cpu=${entry#*=}
-        done
-    fi
-    [ -n "$cpu" ] || cpu=$(classify "$comm")
-    taskset -pc "$cpu" "$pid" >/dev/null 2>&1 || log "thread exited or affinity unavailable: $pid"
-    if [ "$cpu" = 0 ]; then
-        chrt -f -p 99 "$pid" >/dev/null 2>&1 || log "IRQ priority unavailable: $pid"
-    else
-        chrt -f -p 40 "$pid" >/dev/null 2>&1 || log "IRQ priority unavailable: $pid"
-    fi
-done
-# Identify the GUI by TID == PID, not comm: 5.3.0 has two EMain helpers too.
-# Every non-RT helper (including JobController and OfflineAnalyzer) avoids 1/2,
-# regardless of its inherited mask. Never change RT audio/MIDI policy or mask.
-engine_path=
-swept=
-engine_threads() {
-    engine_path=
-    sweeping=
-    for p in "$PROC"/[0-9]*; do
-        analyzer=
-        # Builtins only below: a cat/sed/awk per thread made every 30 s sweep ~560
-        # forks over 3.5 s on the helpers' cores, and waveform frames 50-125 ms late.
-        cmdline=; read -r cmdline 2>/dev/null <"$p/cmdline"
-        # Every other program (a kernel thread has no command line): no readlink for those.
-        case $cmdline in *Engine*|*OfflineAnalyzer*) ;; *) continue ;; esac
-        case $(readlink "$p/exe" 2>/dev/null) in
-            */Engine/Engine) engine_path=$p ;;
-            */OfflineAnalyzer) analyzer=1 ;;
-            *) continue ;;
-        esac
-        for task in "$p"/task/[0-9]*; do
-            read -r name 2>/dev/null <"$task/comm" || continue
-            # A thread the last sweep saw under this name is placed already. The shell reads a
-            # status file a byte at a time: 110 000 reads a sweep for them all, 1.2% of a core.
-            thread="${p##*/}/${task##*/}=$name"
-            sweeping="$sweeping|$thread|"
-            case $swept in *"|$thread|"*) continue ;; esac
-            # An audio thread can be named before Engine promotes it to RT. Engine pins each deck's
-            # stream decoders and loaders to a core of their own: a load moved onto the playing
-            # deck's core made it stutter (#298).
-            case $name in AudioOut|AudioRenderer*|AudioWatcher|Streamer[1-4]|TrackLoad[1-4]) continue ;; esac
-            read -r stat 2>/dev/null <"$task/stat" || continue
-            # policy is field 41: 39th after the ") " that ends comm (comm may hold spaces)
-            set -- ${stat##*) }
-            policy=${39}
-            [ "$policy" = 0 ] || [ "$policy" = 3 ] || [ "$policy" = 5 ] || continue
-            cpus=
-            while read -r key value; do
-                [ "$key" = Cpus_allowed_list: ] && { cpus=$value; break; }
-            done 2>/dev/null <"$task/status"
-            if [ -n "$analyzer" ]; then want=0,3
-            elif [ "${task##*/}" = "${p##*/}" ]; then want=1
-            elif [ "$name" = SceneGraph ]; then want=2
-            else want=0,3
-            fi
-            [ "$cpus" = "$want" ] && continue
-            taskset -pc "$want" "${task##*/}" >/dev/null 2>&1 || log "thread exited or affinity unavailable: ${task##*/}"
-        done
-    done
-    swept=$sweeping
-}
-engine_alive() {
-    [ -n "$engine_path" ] || return 1
-    case $(readlink "$engine_path/exe" 2>/dev/null) in */Engine/Engine) return 0 ;; *) return 1 ;; esac
-}
-engine_threads
-# Engine starts most threads 10-20 s after its start; engine-ui-guard post runs
-# this inside engine.service, so the worker is stopped with Engine. Keep sweeping
-# late network/job threads too, rather than leaving them on an inherited GUI core.
-delays=${ENGINEX_THREAD_DELAYS-20 40}
-interval=${ENGINEX_THREAD_INTERVAL-30}
-case $interval in ''|*[!0-9]*) interval= ;; esac
-if [ -n "$interval" ] && ! [ "$interval" -gt 0 ] 2>/dev/null; then interval=; fi
-if [ -n "$delays" ]; then
-    (
-        for d in $delays; do sleep "$d" || exit; engine_threads; done
-        while [ -n "$interval" ] && engine_alive; do
-            sleep "$interval" || exit
-            # A fresh scan: the vendor script can restart Engine in its own loop under a new
-            # PID, and checking the old one stopped the sweeper for the rest of the run (BH-GC2-16).
-            engine_threads
-            engine_alive || break
-        done
-    ) </dev/null >/dev/null 2>&1 &
-    # The sweeper and its subprocesses must also stay off the two UI cores.
-    taskset -pc 0,3 "$!" >/dev/null 2>&1 || :
-fi
+# IRQs, IRQ threads, Engine's threads and the workqueue mask are left as stock sets them:
+# its setup script places the audio DMA IRQ and Engine pins one RT audio thread and one
+# stream decoder per core; moving them made a playing deck stutter while another loaded (#298).
 exit 0

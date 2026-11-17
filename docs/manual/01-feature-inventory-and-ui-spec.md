@@ -227,7 +227,7 @@
 | `engine-guardian` | 挂载钩子 `--heal-mount --data-only` | 修复异常拔盘损坏的库数据；`--watch` 已退役，服务不启用 |
 | `engine-ui-guard` | `engine.service` 的 pre / post / stop | 连续 3 次 15 s 内崩溃进安全模式；补写 TIDAL 账号条目（避免 5.3.0 的 "Connect to your Engine DJ Profile" 弹窗）；4 碟布局的手柄分配改写与角色解析；每次 Engine 启动后重跑 `enginex-perf-tune`；退出原因为 Analytics 变更或出厂重置失败时拉起 Engine |
 | `enginex-debloat` | `engine.service` ExecStartPre + 开机 | 有线网口 100 → 1000 Mbps、IRQ 亲和、关闭自动擦除、遥测屏蔽、修脚本 |
-| `enginex-perf-tune` | 开机 + 每次 Engine 启动后 | CPU 1.2 GHz 起 ondemand、GPU 降频、sysctl、I/O 调度、U 盘 SD 预读 1 MiB；IRQ / 音频线程固定 CPU0，UI 在 CPU1-2，后台在 CPU3 |
+| `enginex-perf-tune` | 开机 + 每次 Engine 启动后 | CPU 1.2 GHz 起 ondemand、GPU 降频、sysctl、I/O 调度、U 盘 SD 预读 1 MiB、USB/SATA 不休眠；中断与 Engine 线程按原厂摆放（#298） |
 | 存储 | `edisksd` 钩子 + `enginex-storage@.service`、`enginex-storage-discover` | exFAT / NTFS（内核自带）、HFS+（只读，只读盘上叠可写 overlay `Engine Library`）；HFS+ 绝不可写（内核 BUG 会重启并损坏盘）；去掉"未安全弹出"弹窗 |
 | SSH / SFTP | `sshd` drop-in，后台 slice | 没有默认密码，密码登录关闭，公开固件不带公钥；公钥放 `<DATA>/authorized_keys` |
 | 资源隔离 | `resourceguard`、`enginex-background.slice` | 后台工作 SCHED_IDLE + nice 19 + 空闲 I/O，不碰音频核 |

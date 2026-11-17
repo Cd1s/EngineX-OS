@@ -12,8 +12,9 @@ IMAGE_DIR = '/etc/sc5000'  # Version and release-tag reader.
 def managed_paths(managed):
     """Clear upper-layer files left by old released images before installing ours."""
     managed += sorted({p.replace('enginex', 'sc5000') for p in managed} - set(managed))
+    # default/*-perf is retired (5.3.0.5, #298): no image ships it, so name it to drop old copies.
     return sorted(set(managed) | {'sc5000', 'sc5000/stems-runtime-prepare', 'enginex',
-                                  'dnsmasq.d/sc5000-telemetry.conf'})
+                                  'dnsmasq.d/sc5000-telemetry.conf', 'default/sc5000-perf', 'default/enginex-perf'})
 DATA_DIR = '/data/sc5000-custom'  # Legacy migration fixture or reader.
 CUSTOM_ENV = 'SC5000_CUSTOM'  # Legacy migration fixture or reader.
 ALSA_ENV = 'SC5000_ALSA_OVERLAY'  # Legacy migration fixture or reader.

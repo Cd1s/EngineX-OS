@@ -75,7 +75,6 @@ case $tool in
     fsck.hfsplus) exit "${MOCK_FSCK_RC:-0}" ;;
     modprobe) [[ ${MOCK_MOD_FAIL:-} != "$1" ]] ;;
     taskset)
-        [[ ${MOCK_TASKSET_FAIL:-0} == 0 ]] || exit 1
         if [[ $1 == -c ]]; then shift 2; exec "$@"; fi ;;
     rb-bridge)
         [[ -z ${MOCK_BRIDGE_SLEEP:-} ]] || sleep "$MOCK_BRIDGE_SLEEP"
@@ -118,7 +117,6 @@ fixture() {
     export MOCK_ROOT=$TMP/case-$count
     mkdir -p "$MOCK_ROOT"/{types,uuid,sys/class/block,proc,media,internal,outside}
     export ENGINEX_SYS_ROOT=$MOCK_ROOT/sys ENGINEX_PROC_ROOT=$MOCK_ROOT/proc
-    export ENGINEX_THREAD_DELAYS= # no delayed Engine thread passes outliving a case
     export ENGINEX_RUN_ROOT=$MOCK_ROOT/run ENGINEX_MEDIA_ROOT=$MOCK_ROOT/media
     export ENGINEX_INTERNAL_CACHE=$MOCK_ROOT/internal
     export ENGINEX_UI_DIR=$MOCK_ROOT/ui ENGINEX_PRIMARY_UI_DIR=$MOCK_ROOT/ui ENGINEX_LEGACY_UI_DIR=$MOCK_ROOT/legacy-ui
@@ -132,7 +130,7 @@ fixture() {
     printf 'ext4\n' > "$MOCK_ROOT/internal-type"
     unset MOCK_FSCK_RC MOCK_MOUNT_FAIL MOCK_MOD_FAIL MOCK_BUSY_TARGET MOCK_PDB MOCK_FAKE_EXPORT
     unset MOCK_MOUNT_FAIL_TARGET MOCK_APFS_LIBRARY
-    unset MOCK_LIB_SYMLINK MOCK_BRIDGE_RC MOCK_BRIDGE_SLEEP MOCK_TASKSET_FAIL ENGINEX_FRONT_SD_DEVICE
+    unset MOCK_LIB_SYMLINK MOCK_BRIDGE_RC MOCK_BRIDGE_SLEEP ENGINEX_FRONT_SD_DEVICE
     unset ENGINEX_BRIDGE_TIMEOUT ENGINEX_GUARDIAN_TIMEOUT MOCK_ENGINE_DB MOCK_EXPORT_NAME MOCK_EXPORT_DIR MOCK_GUARDIAN_SLEEP MOCK_GUARDIAN_RC
 }
 device() {
@@ -296,175 +294,30 @@ has mq-deadline "$ENGINEX_SYS_ROOT/block/sda/queue/scheduler"
 has 1024 "$ENGINEX_SYS_ROOT/block/sda/queue/read_ahead_kb"
 has 2048 "$ENGINEX_SYS_ROOT/block/sdb/queue/read_ahead_kb"
 has none "$ENGINEX_SYS_ROOT/block/mmcblk1/queue/scheduler"
-has 9 "$ENGINEX_SYS_ROOT/devices/virtual/workqueue/cpumask"
-has 'EnvironmentFile=-/etc/default/enginex-perf' "$ROOT/rootfs-overlay/etc/systemd/system/engine.service.d/60-ui-hook.conf"
+# The env file only held the IRQ patterns and the sweep interval; both are gone.
+lacks 'EnvironmentFile=-/etc/default/enginex-perf' "$ROOT/rootfs-overlay/etc/systemd/system/engine.service.d/60-ui-hook.conf"
 has 'Environment=QT_LOGGING_CONF=/data/logging.ini' "$ROOT/rootfs-overlay/etc/systemd/system/engine.service.d/60-ui-hook.conf"
-lacks 'taskset <-pc> <0> <101>' "$MOCK_ROOT/log"
-lacks 'taskset <-pc> <1-2> <100>' "$MOCK_ROOT/log"
-has 'taskset <-pc> <1> <100>' "$MOCK_ROOT/log"
-has 'taskset <-pc> <2> <103>' "$MOCK_ROOT/log"
-# #298: Engine pins each deck's stream decoder (Streamer2 on 1 here) and loader (TrackLoad1 on 2) itself.
-lacks '> <104>' "$MOCK_ROOT/log"
-lacks '> <109>' "$MOCK_ROOT/log"
-has 'taskset <-pc> <0,3> <105>' "$MOCK_ROOT/log"
-has 'taskset <-pc> <0,3> <107>' "$MOCK_ROOT/log"
-has 'taskset <-pc> <0,3> <108>' "$MOCK_ROOT/log"
-has 'taskset <-pc> <0,3> <300>' "$MOCK_ROOT/log"
-has 'taskset <-pc> <0,3> <301>' "$MOCK_ROOT/log"
-lacks '> <106>' "$MOCK_ROOT/log"
-lacks '> <110>' "$MOCK_ROOT/log"
-lacks 'chrt <-f> <-p> <40> <106>' "$MOCK_ROOT/log"
-has 1 "$ENGINEX_PROC_ROOT/irq/42/smp_affinity"
-has 8 "$ENGINEX_PROC_ROOT/irq/43/smp_affinity"
-has 'taskset <-pc> <0> <200>' "$MOCK_ROOT/log"
-has 'chrt <-f> <-p> <99> <200>' "$MOCK_ROOT/log"
-has 4 "$ENGINEX_PROC_ROOT/irq/44/smp_affinity"
-has 8 "$ENGINEX_PROC_ROOT/irq/45/smp_affinity"
-has 1 "$ENGINEX_PROC_ROOT/irq/46/smp_affinity"
-has 'taskset <-pc> <2> <201>' "$MOCK_ROOT/log"
-has 'taskset <-pc> <3> <202>' "$MOCK_ROOT/log"
-has 'taskset <-pc> <3> <203>' "$MOCK_ROOT/log"
-has 'taskset <-pc> <3> <204>' "$MOCK_ROOT/log"
-has 'taskset <-pc> <2> <206>' "$MOCK_ROOT/log"
-has 'chrt <-f> <-p> <40> <201>' "$MOCK_ROOT/log"
-has 'chrt <-f> <-p> <40> <202>' "$MOCK_ROOT/log"
-has 'chrt <-f> <-p> <40> <206>' "$MOCK_ROOT/log"
-has 'taskset <-pc> <0> <205>' "$MOCK_ROOT/log"
-has 'chrt <-f> <-p> <99> <205>' "$MOCK_ROOT/log"
-has 1 "$ENGINEX_PROC_ROOT/irq/146/smp_affinity"
-has 4 "$ENGINEX_PROC_ROOT/irq/144/smp_affinity"
-has 8 "$ENGINEX_PROC_ROOT/irq/145/smp_affinity"
-for irq in 52 53 54; do has 4 "$ENGINEX_PROC_ROOT/irq/$irq/smp_affinity"; done
-for irq in 51 55 65; do has 8 "$ENGINEX_PROC_ROOT/irq/$irq/smp_affinity"; done
+# #298 and the perf-slim decision: stock already places the audio DMA IRQ and one RT audio
+# thread and one stream decoder per core; moving them made a playing deck stutter while another
+# loaded. IRQs, IRQ threads, Engine's (and its analyzer's) threads and the workqueue mask stay as found.
+has 6 "$ENGINEX_SYS_ROOT/devices/virtual/workqueue/cpumask"
+for irq in 42 43 44 45 46 51 52 53 54 55 65 144 145 146; do has f "$ENGINEX_PROC_ROOT/irq/$irq/smp_affinity"; done
+lacks 'taskset' "$MOCK_ROOT/log"
+lacks 'chrt' "$MOCK_ROOT/log"
 find "$ENGINEX_SYS_ROOT" "$ENGINEX_PROC_ROOT" -type f -exec sha256sum {} + | sort > "$MOCK_ROOT/before"
 sh "$PERF" > "$MOCK_ROOT/output" 2>&1
 find "$ENGINEX_SYS_ROOT" "$ENGINEX_PROC_ROOT" -type f -exec sha256sum {} + | sort > "$MOCK_ROOT/after"
 cmp -s "$MOCK_ROOT/before" "$MOCK_ROOT/after" || fail 'performance tuning is not idempotent'
-ok 'CPU/GPU, sysctl, schedulers, IRQs and RT-vs-GUI affinity are idempotent'
+ok 'CPU/GPU clocks, sysctl, read-ahead and schedulers are set and idempotent; IRQs, IRQ threads, Engine threads and the workqueue mask are left to stock'
 
-# A network helper born after the startup passes must leave CPU1 on a periodic
-# sweep. Fake sleep advances those phases deterministically, then ends Engine.
-cat > "$TMP/bin/sleep" <<'SLEEP'
-#!/bin/bash
-set -eu
-n=$(cat "$MOCK_ROOT/sleep-count" 2>/dev/null || printf 0)
-n=$((n + 1))
-printf '%s\n' "$n" > "$MOCK_ROOT/sleep-count"
-if [[ $n == 2 ]]; then
-    cp -r "$ENGINEX_PROC_ROOT/100/task/105" "$ENGINEX_PROC_ROOT/100/task/109"
-    printf 'event_engine\n' > "$ENGINEX_PROC_ROOT/100/task/109/comm"
-elif [[ $n == 3 ]]; then
-    printf '%s\n' "$PPID" > "$MOCK_ROOT/sweeper-pid"
-    unlink "$ENGINEX_PROC_ROOT/100/exe"
-    touch "$MOCK_ROOT/sweeper-done"
-fi
-SLEEP
+# No thread sweeper any more: the script leaves nothing running behind Engine.
+printf '#!/bin/sh\ntouch "$MOCK_ROOT/slept"\n' > "$TMP/bin/sleep"
 chmod +x "$TMP/bin/sleep"
-ENGINEX_THREAD_DELAYS=0 ENGINEX_THREAD_INTERVAL=30 sh "$PERF" > "$MOCK_ROOT/output" 2>&1
-for ((attempt=0; attempt<100; attempt++)); do
-    [[ ! -e $MOCK_ROOT/sweeper-done ]] || break
-    /bin/sleep 0.05
-done
-[[ -e $MOCK_ROOT/sweeper-done ]] || fail 'periodic sweeper did not stop with Engine'
-sweeper_pid=$(cat "$MOCK_ROOT/sweeper-pid")
-for ((attempt=0; attempt<100; attempt++)); do
-    sweeper_state=$(awk '{print $3}' "/proc/$sweeper_pid/stat" 2>/dev/null || true)
-    [[ -n $sweeper_state && $sweeper_state != Z ]] || break
-    /bin/sleep 0.05
-done
-[[ -z $sweeper_state || $sweeper_state == Z ]] || fail 'sweeper survived Engine exit'
-has 'taskset <-pc> <0,3> <109>' "$MOCK_ROOT/log"
-unlink "$TMP/bin/sleep"
-ln -s /usr/Engine/Engine "$ENGINEX_PROC_ROOT/100/exe"
-ok 'late helpers leave the GUI core and the sweeper stops with Engine'
-# BH-GC2-16: the vendor script restarts Engine in its own loop under a new PID. The sweeper kept
-# checking the old one and stopped; it must find the new Engine and keep sweeping its threads.
-rm -f "$MOCK_ROOT/sleep-count" "$MOCK_ROOT/sweeper-done"
-cat > "$TMP/bin/sleep" <<'SLEEP'
-#!/bin/bash
-set -eu
-n=$(cat "$MOCK_ROOT/sleep-count" 2>/dev/null || printf 0)
-n=$((n + 1))
-printf '%s\n' "$n" > "$MOCK_ROOT/sleep-count"
-if [[ $n == 2 ]]; then
-    unlink "$ENGINEX_PROC_ROOT/100/exe"
-    mkdir -p "$ENGINEX_PROC_ROOT/400/task"
-    ln -s /usr/Engine/Engine "$ENGINEX_PROC_ROOT/400/exe"
-    printf '/usr/Engine/Engine\n' > "$ENGINEX_PROC_ROOT/400/cmdline"
-    cp -r "$ENGINEX_PROC_ROOT/100/task/100" "$ENGINEX_PROC_ROOT/400/task/400"
-    cp -r "$ENGINEX_PROC_ROOT/100/task/105" "$ENGINEX_PROC_ROOT/400/task/401"
-    printf 'event_engine\n' > "$ENGINEX_PROC_ROOT/400/task/401/comm"
-elif [[ $n == 3 ]]; then
-    unlink "$ENGINEX_PROC_ROOT/400/exe"
-    touch "$MOCK_ROOT/sweeper-done"
-fi
-SLEEP
-chmod +x "$TMP/bin/sleep"
-ENGINEX_THREAD_DELAYS=0 ENGINEX_THREAD_INTERVAL=30 sh "$PERF" > "$MOCK_ROOT/output" 2>&1
-for ((attempt=0; attempt<60; attempt++)); do
-    [[ ! -e $MOCK_ROOT/sweeper-done ]] || break
-    /bin/sleep 0.05
-done
-unlink "$TMP/bin/sleep"
-rm -rf "$ENGINEX_PROC_ROOT/400"
-ln -s /usr/Engine/Engine "$ENGINEX_PROC_ROOT/100/exe"
-has 'taskset <-pc> <0,3> <401>' "$MOCK_ROOT/log"
-ok 'the thread sweeper follows Engine across an in-loop restart under a new PID (BH-GC2-16)'
-# A thread the last sweep saw under the same name is not read again: reading them all was
-# 110 000 one-byte reads every 30 s on a deck, 1.2% of a core. Engine's pooled threads come
-# and go, so only the new thread is read. The fake status files never change: a thread
-# that is looked at is placed again.
-rm -f "$MOCK_ROOT/sleep-count" "$MOCK_ROOT/sweeper-done"
-cat > "$TMP/bin/sleep" <<'SLEEP'
-#!/bin/bash
-set -eu
-n=$(cat "$MOCK_ROOT/sleep-count" 2>/dev/null || printf 0)
-n=$((n + 1))
-printf '%s\n' "$n" > "$MOCK_ROOT/sleep-count"
-if [[ $n == 1 ]]; then
-    : > "$MOCK_ROOT/log" # the start-up sweep is over
-elif [[ $n == 2 ]]; then
-    cp "$MOCK_ROOT/log" "$MOCK_ROOT/log-unchanged"
-    cp -r "$ENGINEX_PROC_ROOT/100/task/105" "$ENGINEX_PROC_ROOT/100/task/111"
-elif [[ $n == 3 ]]; then
-    unlink "$ENGINEX_PROC_ROOT/100/exe"
-    touch "$MOCK_ROOT/sweeper-done"
-fi
-SLEEP
-chmod +x "$TMP/bin/sleep"
-ENGINEX_THREAD_DELAYS=0 ENGINEX_THREAD_INTERVAL=30 sh "$PERF" > "$MOCK_ROOT/output" 2>&1
-for ((attempt=0; attempt<100; attempt++)); do
-    [[ ! -e $MOCK_ROOT/sweeper-done ]] || break
-    /bin/sleep 0.05
-done
-unlink "$TMP/bin/sleep"
-rm -rf "$ENGINEX_PROC_ROOT/100/task/111"
-ln -s /usr/Engine/Engine "$ENGINEX_PROC_ROOT/100/exe"
-[[ -e $MOCK_ROOT/log-unchanged ]] || fail 'the sweeper did not reach its second sweep'
-lacks '<103>' "$MOCK_ROOT/log-unchanged"
-has 'taskset <-pc> <0,3> <111>' "$MOCK_ROOT/log"
-lacks '<103>' "$MOCK_ROOT/log"
-ok 'a thread that is already placed is not read again; a new thread is placed'
-
-# The sweep runs beside playback every 30 s: no process per Engine thread, and none for a
-# program that is neither Engine nor its analyzer.
-mkdir -p "$ENGINEX_PROC_ROOT/500"
-ln -s /usr/local/bin/stream-sync "$ENGINEX_PROC_ROOT/500/exe"
-printf '/usr/local/bin/stream-sync\n' > "$ENGINEX_PROC_ROOT/500/cmdline"
-for tool in cat sed awk readlink; do
-    real=$(command -v "$tool")
-    printf '#!/bin/sh\nprintf "%%s\\n" "%s $*" >> "$MOCK_ROOT/forks"\nexec %s "$@"\n' "$tool" "$real" > "$TMP/bin/$tool"
-    chmod +x "$TMP/bin/$tool"
-done
-: > "$MOCK_ROOT/forks"; : > "$MOCK_ROOT/log"
 sh "$PERF" > "$MOCK_ROOT/output" 2>&1
-rm "$TMP/bin/cat" "$TMP/bin/sed" "$TMP/bin/awk" "$TMP/bin/readlink"
-rm -r "$ENGINEX_PROC_ROOT/500"
-lacks '/task/' "$MOCK_ROOT/forks"
-lacks '/500/exe' "$MOCK_ROOT/forks"
-has '/100/exe' "$MOCK_ROOT/forks"
-has 'taskset <-pc> <2> <103>' "$MOCK_ROOT/log"
-ok 'the Engine thread sweep reads /proc with shell builtins'
+unlink "$TMP/bin/sleep"
+[[ ! -e $MOCK_ROOT/slept ]] || fail 'perf-tune started a delayed or periodic job'
+lacks 'taskset' "$MOCK_ROOT/log"
+ok 'perf-tune starts no background thread sweeper'
 
 # Hot at Engine start: the GPU idles at its lowest clock.
 mkdir -p "$ENGINEX_SYS_ROOT/class/thermal/thermal_zone0"
@@ -473,15 +326,14 @@ sh "$PERF" > "$MOCK_ROOT/output" 2>&1
 has 100000000 "$gpu/min_freq"
 ok 'a hot deck keeps the lowest GPU clock'
 
-MOCK_TASKSET_FAIL=1 sh "$PERF" > "$MOCK_ROOT/output" 2>&1
 rm "$gpu/governor"
 ln -s /dev/full "$gpu/governor"
 sh "$PERF" > "$MOCK_ROOT/output" 2>&1
-ok 'thread exit/affinity failure and disappearing sysfs knobs are nonfatal'
+ok 'an unwritable sysfs knob is nonfatal'
 
 fixture
 sh "$PERF" > "$MOCK_ROOT/output" 2>&1
-ok 'missing cpufreq, GPU, IRQ and process facilities are nonfatal'
+ok 'missing cpufreq, GPU and block facilities are nonfatal'
 
 for service in enginex-storage@.service rb-bridge.service.d/50-enginex-background.conf \
     stream-sync.service.d/50-enginex-background.conf ssh.service.d/50-enginex-background.conf \
@@ -566,6 +418,8 @@ lacks '[hfsplus]' "$debloat_root/etc/edisksd/main.conf"
 # #60: Bluetooth stays on for every board (JC11, JC16, JP07, JP13); nothing masks it.
 grep -Eq '^ +if command -v rfkill .*; then rfkill unblock bluetooth' "$ROOT/rootfs-overlay/usr/local/bin/enginex-debloat" || fail 'debloat no longer unblocks Bluetooth'
 if grep -rEil 'bluetooth' "$debloat_root/etc/systemd" | grep -q .; then fail 'debloat touches a Bluetooth unit'; fi
+# #298: stock places the IRQs and their threads; debloat's runtime pass must not move them.
+for knob in smp_affinity taskset chrt; do lacks "$knob" "$ROOT/rootfs-overlay/usr/local/bin/enginex-debloat"; done
 for module in btbcm hci_uart; do
     if grep -qx "$module" "$ROOT/rootfs-overlay/etc/modules-load.d/enginex-filesystems.conf"; then fail "$module must not be force-loaded"; fi
 done

@@ -133,14 +133,14 @@ func TestDebloatScriptCompleteOfflineAndIdempotent(t *testing.T) {
 func TestOverlayUnitsAndRuntimePolicy(t *testing.T) {
 	root := "../../rootfs-overlay"
 	script := read(t, root, "usr/local/bin/enginex-debloat")
-	for _, text := range []string{"iw dev wlan0 set power_save off", "az01-ethernet-speed 1000 || az01-ethernet-speed 100", "chrt -f -p 99", "ffb20000:0 ffa30000:1 ehci_hcd:2 ff540000:2 eth0:2"} {
+	for _, text := range []string{"iw dev wlan0 set power_save off", "az01-ethernet-speed 1000 || az01-ethernet-speed 100"} {
 		if !strings.Contains(script, text) {
 			t.Fatal(text)
 		}
 	}
 	unit := read(t, root, "etc/systemd/system/enginex-debloat.service")
 	if !strings.Contains(unit, "After=engine.service") {
-		t.Fatal("vendor affinity would win")
+		t.Fatal("vendor setup would win")
 	}
 	guardian := read(t, root, "etc/systemd/system/engine-guardian.service")
 	// The retired database watch is now the boot watchdog. It must get a fair
@@ -165,9 +165,10 @@ func TestOverlayUnitsAndRuntimePolicy(t *testing.T) {
 	}
 }
 
-func TestDebloatRuntimeIRQWiFiAndEthernetFallback(t *testing.T) {
+func TestDebloatRuntimeLeavesIRQsAndSetsWiFiAndEthernet(t *testing.T) {
 	// Execute the production runtime block with /proc redirected into a fixture
 	// and hardware commands replaced by logging stubs. Never touch host IRQs.
+	// #298: stock places the IRQs and their threads, so the runtime pass leaves them.
 	script := read(t, "../../rootfs-overlay", "usr/local/bin/enginex-debloat")
 	start := strings.LastIndex(script, "if [ \"$runtime\" = 1 ]; then")
 	if start < 0 {
@@ -206,18 +207,18 @@ esac
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("%v: %s", err, out)
 	}
-	for _, spec := range []struct{ irq, leaf, want string }{{"32", "smp_affinity_list", "0\n"}, {"33", "smp_affinity_list", "1\n"}, {"34", "smp_affinity_list", "2\n"}, {"35", "smp_affinity_list", "2\n"}, {"36", "smp_affinity", "4\n"}} {
-		if got := read(t, root, "proc/irq/"+spec.irq+"/"+spec.leaf); got != spec.want {
-			t.Fatalf("IRQ %s: %q", spec.irq, got)
+	for _, spec := range []struct{ irq, leaf string }{{"32", "smp_affinity_list"}, {"33", "smp_affinity_list"}, {"34", "smp_affinity_list"}, {"35", "smp_affinity_list"}, {"36", "smp_affinity"}} {
+		if got := read(t, root, "proc/irq/"+spec.irq+"/"+spec.leaf); got != "old\n" {
+			t.Fatalf("IRQ %s moved: %q", spec.irq, got)
 		}
 	}
 	calls := read(t, root, "calls.log")
-	for _, want := range []string{"az01-ethernet-speed 1000\naz01-ethernet-speed 100\n", "iw dev wlan0 set power_save off", "taskset -pc 0 201", "taskset -pc 1 202", "taskset -pc 2 203", "taskset -pc 2 204", "taskset -pc 2 205", "chrt -f -p 99 201"} {
+	for _, want := range []string{"az01-ethernet-speed 1000\naz01-ethernet-speed 100\n", "iw dev wlan0 set power_save off"} {
 		if !strings.Contains(calls, want) {
 			t.Fatalf("missing %q in %s", want, calls)
 		}
 	}
-	if strings.Count(calls, "chrt ") != 1 {
-		t.Fatal("non-audio IRQ got realtime priority")
+	if strings.Contains(calls, "taskset") || strings.Contains(calls, "chrt") {
+		t.Fatalf("IRQ threads moved or reprioritised: %s", calls)
 	}
 }
