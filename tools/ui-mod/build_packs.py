@@ -5785,63 +5785,42 @@ SYNC_TILE = """
 		}
 """
 
-# Control Center (5.3.0 only, Mixstream Pro / Pro+ / Pro Go): the channel strip's
-# EQ / Stems switch (#286; it was the "EQ / STEMS" button on each deck's Pad bar), one
-# segment per channel, lit while that channel's EQ knobs control the Stems.
-# The tab is a fixed Flow of tiles that starts 64 px down and does not scroll, and
-# the Source / Wi-Fi / Bluetooth row at the bottom covers every tile past the third
-# row. So this is not a grid tile: it is a slim strip in the free 64 px above the
-# Flow, beside no stock tile, and is declared before UberEntries (see edits()).
-STEMS_EQ_TILE = """
-	Rectangle {
-		id: scStemsEqTile
-		objectName: "ControlCenter_StemsEq"
-		visible: Config.audio.fx.hasNHFx && Config.audio.hasStemsLevel
-		anchors.horizontalCenter: parent.horizontalCenter
-		y: 4
-		width: 272
-		height: 56
-		radius: 12
-		color: Style.surface03Color
-		Text {
-			x: 14
-			anchors.verticalCenter: parent.verticalCenter
-			text: root.scT("Stems EQ")
-			font: Style.fontH4
-			color: Style.font01Color
-		}
-		Row {
-			x: 122
-			y: 6
-			Repeater {
-				model: scStemsEqTile.visible ? ["Deck 1", "Deck 2"] : []
-				Rectangle {
-					readonly property var mode: Planck.getProperty("/Engine/Mixer/Channel" + (index + 1) + "/ChannelStrip/Mode").translator
-					readonly property bool selected: mode.index === 1
-					objectName: "ControlCenter_StemsEq_" + (index + 1)
-					width: 68
-					height: 44
-					color: selected ? "#00c3e3" : stemsEqTap.pressed ? "#6a6a6a" : "#4a4a4a"
-					border {
-						width: 1
-						color: "#a8a8a8"
-					}
-					Text {
-						anchors.centerIn: parent
-						text: root.scT(modelData).toUpperCase()
-						font: Style.fontH5
-						color: "#ffffff"
-					}
-					MouseArea {
-						id: stemsEqTap
-						anchors.fill: parent
-						onClicked: mode.index = selected ? 0 : 1
-					}
-				}
-			}
-		}
-	}
+# Settings -> Playback (5.3.0 only, Mixstream Pro / Pro+ / Pro Go): the channel strip's EQ / Stems switch (#286; it was the
+# "EQ / STEMS" button on each deck's Pad bar, then a Control Center tile and strip, which the tab has no room for). One stock
+# ListEntry row: each DECK segment is lit while that channel's EQ knobs control the Stems, and a tap flips only that channel.
+# The mode is Engine's own live property, like the buttons it replaces: nothing is stored, so the web console has no row.
+STEMS_EQ_DECKS_ENTRY = """
+		EntryBase.ListEntry {
+			objectName: "EngineX_StemsEqDecks"
+			text: "Stems EQ"
+			visible: root.scIsMixstream && root.scHasStemsEq
+			values: ["Deck 1", "Deck 2"]
+			readonly property var modes: [1, 2].map(ch => Planck.getProperty("/Engine/Mixer/Channel" + ch + "/ChannelStrip/Mode").translator)
+			currentValue: values.filter((name, i) => modes[i].index === 1)
+			onSelected: function(index) { modes[index].index = modes[index].index === 1 ? 0 : 1 }
+		},
 """
+
+# Control Center (5.3.0): the tab does not scroll, and the Source / Wi-Fi / Bluetooth row is anchored at its bottom. The grid is
+# 256 x 104 px tiles from y = 64 down, so a model that shows more than three rows of tiles (stock's own plus ours) ran under that
+# row and its last tiles could not be reached. When the grid would reach the row, shrink it, tiles and spacing together (the
+# Flow's scale, so touch follows), by the least that makes it end one gap above the row; more columns fit as it shrinks.
+# Where the grid already ends above the row the first step (1.0) wins and nothing differs from stock.
+CC_FIT_EDITS = [
+    ("\tUberEntries {\n", "\tUberEntries {\n\t\tid: scUber\n"),
+    ("        readonly property int numColumns: parent.width / (tileWidth + spacing)\n", """        readonly property real scFit: {
+            const room = scUber.y - y - spacing
+            for (let f = 1; f > 0.5; f -= 0.01) {
+                const rows = Math.ceil(visibleChildren.length / Math.floor(parent.width / f / (tileWidth + spacing)))
+                if ((rows * 104 + (rows - 1) * spacing) * f <= room) return f
+            }
+            return 0.5
+        }
+        readonly property int numColumns: parent.width / scFit / (tileWidth + spacing)
+        scale: scFit
+        transformOrigin: Item.Top
+"""),
+]
 
 # rekordbox / CDJ-3000 3-Band palette, taken from a rekordbox 6 screenshot: blue
 # lows, orange mids, white highs, and brown mids where the lows cover them. Engine
@@ -7279,7 +7258,7 @@ def edits(dev: bool):
             ("Display", "TrackOverviewStyle", DISPLAY_ENTRIES),
         ] if v53() else []) + [
             ("Services", "SpotifyEnable" if v53() else "CloudServices", SERVICES_ENTRIES),
-            ("Playback", "KeySyncMode", PLAYBACK_ENTRIES),
+            ("Playback", "KeySyncMode", PLAYBACK_ENTRIES.replace('\n\t\tEntryBase.ListEntry {\n\t\t\ttext: "Color FX Style"', STEMS_EQ_DECKS_ENTRY + '\n\t\tEntryBase.ListEntry {\n\t\t\ttext: "Color FX Style"', 1) if v53() else PLAYBACK_ENTRIES),
             ("Safety", "KeyAdjust", SAFETY_ENTRIES),
             ("Library", "CollectionBrowseBehavior", LIBRARY_ENTRIES),
         ]},
@@ -7324,7 +7303,7 @@ def edits(dev: bool):
         v + "ControlCenter/Tabs/ControlCenterTab.qml": [
             ("import QtQuick.Layouts 1.12\n", "import QtQuick.Layouts 1.12\nimport EngineOS.UI.Style 1.0\n"),
             ("		DayModeEnable { }\n", "		DayModeEnable { }\n" + WAVE_TILE.replace("@LOW@", BAND_COLORS["Low"]).replace("@MID@", BAND_COLORS["Mid"]).replace("@HIGH@", BAND_COLORS["High"]) + UPFADER_ECHO_TILE + (SYNC_TILE if v53() else "")),
-        ] + ([("\tUberEntries {\n", STEMS_EQ_TILE + "\tUberEntries {\n")] if v53() else []),
+        ] + (CC_FIT_EDITS if v53() else []),
         v + "ControlCenter/ControlCenterTabView.qml": [("text: tabView.hideTabButtonLabel ? \"\" : modelData", "text: tabView.hideTabButtonLabel ? \"\" : root.scT(modelData)")],
         prefs + "PreferencesTabView.qml": [("					text: modelData\n", "					text: root.scT(modelData)\n")],
         v + "BrowseView/Components/BreadcrumbView/BreadcrumbViewHeader.qml": [
@@ -8035,8 +8014,8 @@ def edits(dev: bool):
         # #166 / #261 / #286: compact Numark decks (NH08/NH08S/NH10) have four pads.
         # When Beat Jump bank is enabled, show performance pads (row 1) and Beat Jump (row 2)
         # simultaneously without sacrificing either. Sweep FX is a single "△" button that opens
-        # stock's Sweep FX popup when tapped; the Stems EQ switch is a Control Center tile
-        # (STEMS_EQ_TILE), so the Pad bar keeps only what the pads need.
+        # stock's Sweep FX popup when tapped; the Stems EQ switch is a Settings -> Playback row
+        # (STEMS_EQ_DECKS_ENTRY), so the Pad bar keeps only what the pads need.
         old_pads_layout = '''        GridLayout {
             id: padsLayout
             objectName: "Deck_Pads_Layout"

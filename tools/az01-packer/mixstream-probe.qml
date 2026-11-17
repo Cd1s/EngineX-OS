@@ -54,53 +54,48 @@ Item {
             }, Qt.size(pads.width * 2, pads.implicitHeight * 2))
         }
     }
-    // The Control Center's channel-strip EQ / Stems switch: one segment per channel, lit while that channel is in Stems.
-    function stemsEqTile() {
-        const component = Qt.createComponent("qrc:/Skins/Embedded/Views/ControlCenter/Tabs/ControlCenterTab.qml")
-        check(component.status === Component.Ready, "Control Center tab loads: " + component.errorString())
-        // Laid out as on the Pro+ / Pro Go panel: its device tree names the panel urt,umo-p076md-t (kernel mode 800 x 1280)
-        // with rotation 90, so the UI is 1280 x 800 (this sandbox's window is 800 x 800 for every board). The tab is 640 px high
-        // (800 less the 80 px tab bar and 80 px status bar) and does not scroll.
-        const backdrop = Qt.createQmlObject('import QtQuick 2.12; Rectangle { color: "#1c1c1c" }', probe.Window.window.contentItem)
-        backdrop.width = 1280; backdrop.height = 720; backdrop.z = 1000
-        const tab = component.createObject(backdrop, {width: 1280, height: 640})
-        check(!!tab, "create the Control Center tab")
-        const tile = find("ControlCenter_StemsEq", tab)
-        check(!!tile && tile.visible, "Stems EQ strip is in the Control Center")
-        // Worst case: every stock tile Mixstream can show is visible. The strip must sit in the room above them, cover none of
-        // them and not touch the Source / Wi-Fi / Bluetooth row at the bottom.
-        let flow = null
-        for (let i = 0; i < tab.children.length; i++) if (tab.children[i].numColumns !== undefined) flow = tab.children[i]
-        check(!!flow, "found the tile Flow")
-        const box = tile.mapToItem(tab, 0, 0)
-        function overlaps(item) {
-            const r = item.mapToItem(tab, 0, 0)
-            return r.x < box.x + tile.width && box.x < r.x + item.width && r.y < box.y + tile.height && box.y < r.y + item.height
+    function all(name, from) {
+        const found = [], seen = new Set()
+        function walk(o) {
+            if (!o || seen.has(o)) return
+            seen.add(o)
+            if (o.objectName === name) found.push(o)
+            if (o.children) for (let i = 0; i < o.children.length; i++) walk(o.children[i])
+            if (o.contentItem) walk(o.contentItem)
         }
-        let shown = 0
-        for (let i = 0; i < flow.children.length; i++) {
-            if (!flow.children[i].visible) continue
-            shown++
-            check(!overlaps(flow.children[i]), "Stems EQ strip covers no stock tile (child " + i + ")")
-        }
-        check(shown >= 17, "worst case: 15 stock tiles + Waveform Style + Smart Sync visible, got " + shown)
-        const bottomRow = find("ControlCenter_AdditionalControls", tab)
-        check(!!bottomRow && !overlaps(bottomRow), "Stems EQ strip leaves the bottom row alone")
-        check(box.y >= 0 && box.y + tile.height <= flow.y, "Stems EQ strip lies in the room above the tiles")
+        walk(from)
+        return found
+    }
+    // Settings -> Playback: the channel strip's EQ / Stems switch, one DECK segment per channel, lit while that channel is in Stems.
+    function stemsEqRow() {
+        const component = Qt.createComponent("qrc:/Skins/Embedded/Views/ControlCenter/Tabs/Preferences/PlaybackTabContent.qml")
+        check(component.status === Component.Ready, "Playback settings load: " + component.errorString())
+        const page = component.createObject(probe.Window.window.contentItem, {width: 1280, height: 640, z: 1000})
+        check(!!page, "create the Playback settings")
+        const row = find("EngineX_StemsEqDecks", page)
+        check(!!row && row.visible, "Stems EQ row is in Settings -> Playback")
+        const segments = all("ListEntryButton", row)
+        check(segments.length === 2, "one DECK segment per channel")
+        // The same kind of row as stock builds it, for the picture and the geometry to be compared with.
+        const stockButton = all("ListEntryButton", page).filter(b => segments.indexOf(b) < 0)[0]
+        let stockRow = stockButton
+        while (stockRow && stockRow.values === undefined) stockRow = stockRow.parent
+        if (stockRow) stockRow.grabToImage(function(r) { check(r.saveToFile("/tmp/mx-stock-playback-row.png"), "picture of a stock Playback row") }, Qt.size(stockRow.width * 2, stockRow.height * 2))
         for (let ch = 1; ch <= 2; ch++) {
-            const seg = find("ControlCenter_StemsEq_" + ch, tile)
-            check(!!seg && seg.width >= 44 && seg.height >= 44, "touch geometry of Stems EQ channel " + ch)
+            const seg = segments[ch - 1]
+            // Stock's own row buttons: same width as the entry says, same height as the buttons of the other rows.
+            console.warn("X166 STEMSEQ_GEOM|channel=" + ch + "|" + seg.width + "x" + seg.height + "|stock=" + (stockButton ? stockButton.width + "x" + stockButton.height : "none") + "|")
+            check(!!stockButton && seg.width === row.entryWidth && seg.height === stockButton.height, "Stems EQ channel " + ch + " is a stock-sized row button")
             const own = tr("/Engine/Mixer/Channel" + ch + "/ChannelStrip/Mode")
             const other = tr("/Engine/Mixer/Channel" + (3 - ch) + "/ChannelStrip/Mode")
             const before = other.index
-            for (let i = 0; i < seg.children.length; i++) if (typeof seg.children[i].clicked === "function") seg.children[i].clicked(null)
+            seg.clicked()
             // Native access filter can reject Stems without a stems track.
-            console.warn("X166 STEMSEQ|channel=" + ch + "|mode=" + own.index + "|selected=" + seg.selected + "|")
-            check(other.index === before, "Stems EQ tile keeps the other channel " + ch)
-            check(seg.selected === (own.index === 1), "Stems EQ highlight follows the actual mode " + ch)
+            console.warn("X166 STEMSEQ|channel=" + ch + "|mode=" + own.index + "|lit=" + seg.down + "|")
+            check(other.index === before, "Stems EQ row keeps the other channel " + ch)
+            check(seg.down === (own.index === 1), "Stems EQ highlight follows the actual mode " + ch)
         }
-        backdrop.grabToImage(function(r) { check(r.saveToFile("/tmp/mx-control-center.png"), "picture of the Control Center") })
-        tile.grabToImage(function(r) { check(r.saveToFile("/tmp/mx-stems-eq-tile.png"), "picture of the Stems EQ tile") }, Qt.size(tile.width * 2, tile.height * 2))
+        row.grabToImage(function(r) { check(r.saveToFile("/tmp/mx-stems-eq-row.png"), "picture of the Stems EQ row") }, Qt.size(row.width * 2, row.height * 2))
     }
     Timer {
         interval: 1500
@@ -154,7 +149,7 @@ Item {
                         probe.check(!probe.find("MixstreamStemsEq" + deck, probe.testPads[deck - 1]), "no EQ / STEMS button on the Pad bar deck " + deck)
                     }
                     probe.shoot("beat-jump-bank")
-                    probe.stemsEqTile()
+                    probe.stemsEqRow()
                     probe.find("MixstreamSweepFx1").clicked()
                     probe.stage++
                 } else if (probe.stage === 2) {
