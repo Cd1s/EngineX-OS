@@ -24,7 +24,9 @@ The canonical command/service/state are `enginex-relay`,
 stops/disables previous units, moves their state (including DynamicUser state),
 keeps the former state path as a symlink, and keeps command/service aliases for
 one release. It also accepts the intermediate `enginex-deemix-relay.service`
-name. Conflicting old/new state or overrides are refused rather than overwritten.
+name. The former public URL prefix also stays routable for that release, so
+existing proxy URLs and QR callbacks keep working. Conflicting old/new state or
+overrides are refused rather than overwritten.
 
 The web service handles Spotify/Deezer QR login and credential transfer. It
 never downloads or stores music. SC5000 downloads directly from Deezer using
