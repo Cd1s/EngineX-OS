@@ -135,7 +135,6 @@ bash "$repo/deploy/one-click-backend.sh" --relay-bin /data/relay --public https:
 grep -q -- '-public https://new.example' /etc/systemd/system/enginex-relay.service
 grep -q 'KEEP_UNIT_VALUE=yes' /etc/systemd/system/enginex-relay.service
 systemctl_fake=/data/bin/systemctl
-cp "$systemctl_fake" /data/systemctl-ok
 printf '#!/bin/sh\nexit 1\n' > "$systemctl_fake"
 if bash "$repo/deploy/one-click-backend.sh" --relay-bin /data/relay > /data/failed-summary 2>&1; then
   echo 'A failed service was reported as a successful deployment' >&2; exit 1
