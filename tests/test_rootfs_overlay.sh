@@ -492,10 +492,11 @@ lacks ', RUN+=' "$ROOT/rootfs-overlay/etc/udev/rules.d/60-enginex-storage.rules"
 has 'Restart=always' "$ROOT/rootfs-overlay/etc/systemd/system/rb-bridge.service"
 ok 'background service isolation and systemd udev handoff are installed'
 
-for script in "$STORAGE" "$PERF" "$ROOT/rootfs-overlay/usr/local/bin/enginex-suite-exec" "$ROOT/rootfs-overlay/etc/enginex/engine-ui-guard" "$ROOT/rootfs-overlay/usr/local/bin/enginex-sd-highspeed"; do
+for script in "$STORAGE" "$PERF" "$ROOT/rootfs-overlay/usr/local/bin/enginex-suite-exec" "$ROOT/rootfs-overlay/etc/enginex/engine-ui-guard" "$ROOT/rootfs-overlay/usr/local/bin/enginex-sd-highspeed" "$ROOT/rootfs-overlay/usr/local/bin/iw"; do
     [[ $(head -n 1 "$script") == '#!/bin/sh' ]] || fail "$script must use /bin/sh (no bash on Engine OS)"
     if command -v busybox >/dev/null; then busybox sh -n "$script" || fail "busybox sh syntax: $script"; else sh -n "$script"; fi
 done
+has 'enginex-suite-exec iw' "$ROOT/rootfs-overlay/usr/local/bin/iw"
 ok 'device scripts run under /bin/sh'
 
 suite_share=$TMP/suite-share suite_dir=$TMP/suite-bin
@@ -548,6 +549,7 @@ has '[ntfs3]' "$debloat_root/etc/edisksd/main.conf"
 lacks '[hfsplus]' "$debloat_root/etc/edisksd/main.conf"
 # #60: Bluetooth stays on for every board (JC11, JC16, JP07, JP13); nothing masks it.
 grep -Eq '^ +if command -v rfkill .*; then rfkill unblock bluetooth' "$ROOT/rootfs-overlay/usr/local/bin/enginex-debloat" || fail 'debloat no longer unblocks Bluetooth'
+grep -Eq '^ +if command -v iw .*; then iw dev wlan0 set power_save off' "$ROOT/rootfs-overlay/usr/local/bin/enginex-debloat" || fail 'debloat no longer switches off Wi-Fi power save'
 if grep -rEil 'bluetooth' "$debloat_root/etc/systemd" | grep -q .; then fail 'debloat touches a Bluetooth unit'; fi
 for module in btbcm hci_uart; do
     if grep -qx "$module" "$ROOT/rootfs-overlay/etc/modules-load.d/enginex-filesystems.conf"; then fail "$module must not be force-loaded"; fi

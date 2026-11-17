@@ -38,13 +38,15 @@ func main() {
 		os.Exit(stemsproc.Main(args))
 	case "leave":
 		os.Exit(leave.Main(args, os.Stdout, os.Stderr))
+	case "iw":
+		os.Exit(cli.IW(args, os.Stdout, os.Stderr))
 	case "enginex-deemixd":
 		if err = deemixd.Main(args); err != nil && !errors.Is(err, flag.ErrHelp) {
 			log.Print(err)
 			os.Exit(1)
 		}
 	default:
-		fmt.Fprintf(os.Stderr, "usage: enginex-suite {rb-bridge|stream-sync|engine-guardian|stems-processor|enginex-deemixd|leave} [args...]\n")
+		fmt.Fprintf(os.Stderr, "usage: enginex-suite {rb-bridge|stream-sync|engine-guardian|stems-processor|enginex-deemixd|leave|iw} [args...]\n")
 		os.Exit(2)
 	}
 }

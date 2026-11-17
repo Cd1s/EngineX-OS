@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/Cd1s/EngineX-OS/pkg/wifi"
 )
 
 // UnblockRadios clears rfkill's soft block on Bluetooth and Wi-Fi. The kernel boots
@@ -29,6 +31,11 @@ func UnblockRadios(root string) {
 			if err := os.WriteFile(filepath.Join(dir, "soft"), []byte("0"), 0o644); err != nil {
 				log.Printf("stream-sync: could not unblock %s: %v", e.Name(), err)
 			}
+		}
+	}
+	if root == "/sys/class/rfkill" {
+		if err := wifi.SetPowerSave("wlan0", false); err == nil {
+			log.Printf("stream-sync: disabled Wi-Fi 802.11 power saving on wlan0")
 		}
 	}
 }
@@ -155,6 +162,7 @@ func guardRoutes(ctx context.Context, conf string, every time.Duration) {
 	tick := time.NewTicker(every)
 	defer tick.Stop()
 	own, said := false, false
+	psOff := false
 	for {
 		// From the start, not from the first shared subnet on: a pass comes up to 5 s
 		// after the second address, and until then either interface asked and answered
@@ -169,6 +177,12 @@ func guardRoutes(ctx context.Context, conf string, every time.Duration) {
 			} else if !said {
 				said = true
 				log.Printf("stream-sync: eth0 and wlan0 keep the stock ARP settings for now: %v", err)
+			}
+		}
+		if !psOff {
+			if err := wifi.SetPowerSave("wlan0", false); err == nil {
+				psOff = true
+				log.Printf("stream-sync: disabled Wi-Fi 802.11 power saving on wlan0")
 			}
 		}
 		guardRoutesOnce(ctx, conf)

@@ -29,7 +29,7 @@ from az01_packer import MIGRATE  # one migration snippet for the image and the b
 MIGRATE_IF_DEFAULT = 'if [ -z "${ENGINEX_CUSTOM:-}" ]; then\n' + MIGRATE + '\nfi'
 
 VERSION_RE = re.compile(r'^\d+(\.\d+){2,4}$')  # same range as az01_packer.py
-APPLETS = ('stream-sync', 'rb-bridge', 'enginex-deemixd', 'stems-processor', 'engine-guardian')
+APPLETS = ('stream-sync', 'rb-bridge', 'enginex-deemixd', 'stems-processor', 'engine-guardian', 'iw')
 
 WRAPPER = '#!/bin/sh\nexec "$(dirname "$0")/enginex-suite" {} "$@"\n'
 
