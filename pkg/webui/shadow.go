@@ -695,7 +695,9 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 	// started again, not a press.
 	// A paused deck that became Engine's master without MASTER pressed (Engine started,
 	// a track loaded) does not take the link's master: a CDJ would not either.
-	claimed := ex.Master && (!s.shadow.ownMaster || masterDeck != s.shadow.ownMasterDeck || masterPress > s.shadow.ownMasterPress) && (masterPlaying || masterPress > s.shadow.ownMasterPress)
+	// The first post after we started only sets where the presses stand.
+	pressed := masterPress > s.shadow.ownMasterPress && !s.shadow.ownAt.IsZero()
+	claimed := ex.Master && (!s.shadow.ownMaster || masterDeck != s.shadow.ownMasterDeck || pressed) && (masterPlaying || pressed)
 	s.shadow.ownMaster, s.shadow.ownMasterDeck, s.shadow.ownMasterPress = ex.Master, masterDeck, masterPress
 	s.shadow.mu.Unlock()
 	if s.prolinkExport != nil {

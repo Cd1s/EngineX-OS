@@ -389,13 +389,13 @@ func TestLinkPlayersPerDeckAndPausedMaster(t *testing.T) {
 			t.Fatalf("asked the computer for master: %v (%v), want %v", got, err, want)
 		}
 	}
-	post(0)
+	post(3) // stream-sync started while Engine ran: presses made before are no press now
 	for until := time.Now().Add(2 * time.Second); s.prolinkExport.Status().Players != "1,3"; time.Sleep(5 * time.Millisecond) {
 		if time.Now().After(until) {
 			t.Fatalf("players %q, want 1,3", s.prolinkExport.Status().Players)
 		}
 	}
 	asked(false) // paused, nobody pressed MASTER: rekordbox keeps it
-	post(1)
+	post(4)
 	asked(true) // MASTER pressed on deck 1
 }
