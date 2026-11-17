@@ -74,8 +74,7 @@ long the child took to exit. See `docs/STEMS-REMOTE-ACCEPTANCE-20261103.md`.
 
 1. Back up the deployed relay binary, unit, `/opt/enginex-stems`, the stemsd
    unit and `/etc/enginex-stems` to agent-backup first.
-2. Renderer: fresh installs use `install-backend.sh <staging-dir>` (refuses to
-   overwrite). It generates `/etc/enginex-stems/token` (0600) and starts
+2. Renderer: use `install-backend.sh <staging-dir>` (reruns preserve the token). It generates `/etc/enginex-stems/token` (0600) and starts
    [`enginex-stemsd.service`](enginex-stemsd.service) on `127.0.0.1:6596`. The
    worker needs system `python3` with NumPy and SciPy.
 3. Relay: install the new `enginex-relay` binary and the credential drop-in
@@ -99,31 +98,8 @@ token file from the backup. Keep user audio and databases untouched.
 
 ## Switching an existing host
 
-Back up the deployed unit, credential and state before running any command.
-The source and target names are defined by the migration reader, so this note
-stays usable while legacy spellings are isolated there. From a checkout:
-
-```sh
-. rootfs-overlay/usr/libexec/enginex-migration
-printf 'Previous units: %s.service, %s\n' "$legacy_stemsd" "$legacy_relay_unit"
-printf 'Current units: enginex-stemsd.service, enginex-deemix-relay.service\n'
-sudo systemctl disable --now "$legacy_stemsd.service" "$legacy_relay_unit"
-# Move state only if the current destination does not exist; keep a backup.
-sudo test ! -e /var/lib/enginex-relay
-sudo mv "$legacy_relay_state" /var/lib/enginex-relay
-sudo test ! -e /etc/enginex-stems
-sudo mv "$legacy_stems_config" /etc/enginex-stems
-sudo test ! -e /opt/enginex-stems
-sudo mv "$legacy_stems_code" /opt/enginex-stems
-# Install freshly built enginex-relay / enginex-stemsd and the current units.
-sudo systemctl daemon-reload
-sudo systemctl enable --now enginex-stemsd.service enginex-deemix-relay.service
-```
-
-If the configured relay URL includes the former project prefix, update it to
-`/enginex` or the service root when switching the host.
-
-Run only the steps for services present on that host. Preserve the existing
-relay `-public`, console password and renderer token. The new relay's
-`50-stems.conf` reads `/etc/enginex-stems/token`. Keep the backed-up unit and
-binary for rollback; no server is changed by this repository update.
+Use `sudo bash deploy/one-click-backend.sh` from a current checkout for the relay
+and renderer together. Back up the existing state and renderer token first. The
+renderer installer preserves `/etc/enginex-stems/token` on rerun. See
+[`deploy/relay-host`](../relay-host/README.md) for relay compatibility names and
+backend setup on a flashed deck.

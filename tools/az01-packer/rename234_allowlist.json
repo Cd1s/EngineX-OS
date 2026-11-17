@@ -1,5 +1,6 @@
 {
   "migration": {
+    "deploy/relay-host/migrate.sh": "Operator-run backend migration and one-release command/service aliases",
     "internal/migration/legacy.go": "One-time upgrade readers for pre-5.3.0.5 decks",
     "rootfs-overlay/usr/libexec/enginex-migration": "One-time data/configuration migration and old-name cleanup",
     "tools/az01-packer/legacy_names.py": "Build and test readers of pre-5.3.0.5 inputs",

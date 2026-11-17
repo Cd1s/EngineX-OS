@@ -60,6 +60,7 @@ type options struct {
 	Yes                           bool
 	Uninstall                     bool
 	RestoreStock                  bool
+	SetupBackend                  bool
 	HTTP                          *http.Client
 	USB                           usb.Backend
 	AirDAddr, EAASAddr            string        // StageLinQ and EAAS UDP listen addresses
@@ -1601,6 +1602,9 @@ func modeAZ(ctx context.Context, o *options, session *updateSession, board, line
 func run(ctx context.Context, o *options) error {
 	ignoreSIGPIPE()
 	o.defaults()
+	if o.SetupBackend {
+		return setupBackend(ctx, o)
+	}
 	if o.RestoreStock {
 		o.say("恢复官方固件：请先让 EngineX 正常启动，并连接到电脑所在的网络。一代机会先清理共享 QML 缓存并关机，二代机使用网络卸载。", "Restore official firmware: first boot EngineX on the same LAN as this computer. First-gen decks clear their shared QML cache and power off; second-gen decks use LAN uninstall.")
 	} else {
@@ -1684,6 +1688,7 @@ func registerFlags(fs *flag.FlagSet, o *options) {
 	fs.StringVar(&o.Repo, "repo", "Cd1s/EngineX-OS", "GitHub repository to download from")
 	fs.BoolVar(&o.Yes, "yes", false, "do not ask before flashing")
 	fs.BoolVar(&o.RestoreStock, "restore-stock", false, "restore official Engine OS 5.3.0 on a 1st-gen deck; uninstall over LAN on 2nd-gen decks")
+	fs.BoolVar(&o.SetupBackend, "setup-backend", false, "set the backend address on a running deck (asks for its console code; no firmware write)")
 	fs.BoolVar(&o.Uninstall, "uninstall", false, "remove the EngineX data bundle from a 2nd-generation deck over SSH and return to stock")
 }
 
@@ -1694,6 +1699,9 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	err := run(ctx, o)
+	if err == nil && !o.SetupBackend && !o.Uninstall && !o.RestoreStock {
+		o.say("开机后可运行 --setup-backend 设置后端地址。", "After the deck boots, run --setup-backend to configure its backend address.")
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "错误 / Error:", err)
 	}

@@ -17,6 +17,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/Cd1s/EngineX-OS/internal/migration"
 )
 
 // defaultSpotifyClientID is the public Spotify Desktop identity; an explicitly
@@ -189,15 +191,18 @@ func (s *server) routes() http.Handler {
 func stripPrefix(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := r.URL.Path
-		if p == "/enginex" || strings.HasPrefix(p, "/enginex/") {
-			r2 := r.Clone(r.Context())
-			r2.URL.Path = strings.TrimPrefix(p, "/enginex")
-			if r2.URL.Path == "" {
-				r2.URL.Path = "/"
+		// Keep saved backend URLs working for the same release as command aliases.
+		for _, prefix := range []string{"/enginex", "/" + migration.ProjectName} {
+			if p == prefix || strings.HasPrefix(p, prefix+"/") {
+				r2 := r.Clone(r.Context())
+				r2.URL.Path = strings.TrimPrefix(p, prefix)
+				if r2.URL.Path == "" {
+					r2.URL.Path = "/"
+				}
+				r2.URL.RawPath = ""
+				h.ServeHTTP(w, r2)
+				return
 			}
-			r2.URL.RawPath = ""
-			h.ServeHTTP(w, r2)
-			return
 		}
 		h.ServeHTTP(w, r)
 	})
