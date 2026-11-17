@@ -17,6 +17,7 @@ case $VERSION in *[!0-9.]*|'') echo "version must be digits and dots" >&2; exit 
 TAG=${RELEASE_TAG:-v$VERSION}
 case $TAG in "v$VERSION"|"v$VERSION-r"[1-9]|"v$VERSION-r"[1-9][0-9]) ;; *) echo "RELEASE_TAG must be v$VERSION or v$VERSION-rN" >&2; exit 2 ;; esac
 [ ! -e "$OUT" ] || { echo "$OUT exists; refusing to overwrite" >&2; exit 2; }
+[ -z "${LKLFUSE:-}" ] || [ -x "$LKLFUSE" ] || { echo "missing executable LKLFUSE: $LKLFUSE" >&2; exit 2; }
 # A public release is signed (#239) and decks check the signature against the keys embedded in this
 # build: without one, every deck would refuse the update. Stop before the long build, not after it.
 if [ "$KEY" = none ]; then
@@ -87,6 +88,22 @@ chmod 0644 "$STAGE/usr/share/enginex/"*
 mkdir -p "$WORK/hooks32" "$WORK/hooks64"
 OUT=$WORK/hooks32/libengine-ui-hook.so sh tools/ui-mod/build.sh
 OUT=$WORK/hooks32/libedisksd-hook.so sh tools/edisksd-hook/build.sh
+LKLFUSE_PATH=${LKLFUSE:-}
+if [ -n "$LKLFUSE_PATH" ]; then
+    [ -x "$LKLFUSE_PATH" ] || { echo "missing executable LKLFUSE: $LKLFUSE_PATH" >&2; exit 2; }
+else
+    mkdir -p "$WORK/lklfuse-build"
+    if [ -d prototypes/hfs-lkl/.build/src ]; then
+        cp -a prototypes/hfs-lkl/.build/src "$WORK/lklfuse-build/src"
+    fi
+    BUILD_ROOT="$WORK/lklfuse-build" OUTPUT_ROOT="$WORK/lklfuse-out" bash prototypes/hfs-lkl/build_lklfuse.sh >/dev/null
+    LKLFUSE_PATH=$WORK/lklfuse-out/bin/lklfuse
+fi
+[ -x "$LKLFUSE_PATH" ] || { echo "missing armhf lklfuse for Gen-2: $LKLFUSE_PATH" >&2; exit 2; }
+readelf -h "$LKLFUSE_PATH" | grep -q 'Machine:.*ARM' || { echo "expected 32-bit ARM lklfuse: $LKLFUSE_PATH" >&2; exit 2; }
+if readelf -d "$LKLFUSE_PATH" | grep -q 'libfuse3'; then
+    echo "lklfuse must link libfuse3 statically: $LKLFUSE_PATH" >&2; exit 2
+fi
 install -m 0755 "$WORK/hooks32/libengine-ui-hook.so" "$STAGE/etc/enginex/libengine-ui-hook.so"
 install -m 0755 "$WORK/hooks32/libengine-ui-hook.so" "$STAGE/usr/local/lib/enginex/libengine-ui-hook.so"
 install -m 0755 "$WORK/hooks32/libedisksd-hook.so" "$STAGE/etc/enginex/libedisksd-hook.so"
@@ -165,7 +182,7 @@ done
 # This build's updater selects only *-Update.img; retire release bundles in 5.3.0.6.
 for m in SCLIVE4 SCLIVE2 PRIME4PLUS PRIMEGOPLUS MIXSTREAMPROPLUS MIXSTREAMPROGO; do
     python3 tools/az01-packer/build-data-bundle.py "$VERSION" --release-tag "$TAG" --prefix "$m" --suite "$WORK/enginex-suite" \
-        --hook "$WORK/hooks32/libengine-ui-hook.so" --ui-packs "$WORK/packs.tar.gz" --out "$WORK/bundle-$m" >/dev/null
+        --hook "$WORK/hooks32/libengine-ui-hook.so" --fsck-hfsplus "$FSCK" --lklfuse "$LKLFUSE_PATH" --require-lklfuse --ui-packs "$WORK/packs.tar.gz" --out "$WORK/bundle-$m" >/dev/null
     cp "$WORK/bundle-$m/$m-$VERSION-EngineX-OS-Data-Bundle.tar.gz" "$WORK/bundle-$m/$m-$VERSION-EngineX-OS-"*-Update.img "$OUT/"
 done
 for m in PRIME4G2 SYSTEMONE; do

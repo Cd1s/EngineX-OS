@@ -33,7 +33,9 @@ static int test_real_mount(struct libmnt_context *c);
 // Leaves 1.5 s of the 20 s budget for the private conversion.
 #include <stdint.h>
 static int64_t test_post_reserve=18500;
-#define POST_RESERVE_MS test_post_reserve
+static int test_expire_gen2_stage;
+static int64_t test_post_reserve_fn(void);
+#define POST_RESERVE_MS test_post_reserve_fn()
 // Free space kept on the cache filesystem: none, except in the test that sets it.
 static uint64_t test_cache_reserve;
 #define HFS_CACHE_RESERVE test_cache_reserve
@@ -43,7 +45,8 @@ static uint64_t test_carry_slack;
 #include <errno.h>
 #include <sys/stat.h>
 static char test_eio_path[PATH_MAX];
-static int test_lstat(const char *path,struct stat *st){if(*test_eio_path&&!strcmp(path,test_eio_path)){errno=EIO;return -1;}return lstat(path,st);}
+static int test_eio_err=EIO;
+static int test_lstat(const char *path,struct stat *st){if(*test_eio_path&&!strcmp(path,test_eio_path)){errno=test_eio_err;return -1;}return lstat(path,st);}
 #define LSTAT test_lstat
 #include <sys/utsname.h>
 #include <unistd.h>
@@ -79,14 +82,19 @@ static int test_sys_fsconfig(int fd,unsigned int cmd,const char *key,const void 
 #define REAL_FSCONFIG() test_sys_fsconfig
 static int test_platform_mode_val = 0;
 #define HFS_PLATFORM_MODE() test_platform_mode_val
-static char test_fsck_bin[PATH_MAX],test_gen1_marker[PATH_MAX],test_az04_dt[PATH_MAX];
+static char test_fsck_bin[PATH_MAX],test_lklfuse_bin[PATH_MAX],test_gen1_marker[PATH_MAX],test_az04_dt[PATH_MAX];
 static char test_proc_fs[PATH_MAX],test_proc_mi[PATH_MAX],test_modules_root[PATH_MAX],test_hfs_rw_target[PATH_MAX];
 static const char *test_fsck_path(void){return *test_fsck_bin&&!access(test_fsck_bin,X_OK)?test_fsck_bin:NULL;}
+static const char *test_lklfuse_path(void){return *test_lklfuse_bin&&!access(test_lklfuse_bin,X_OK)?test_lklfuse_bin:NULL;}
 #define FSCK_HFSPLUS_PATH test_fsck_path
+#define LKLFUSE_PATH test_lklfuse_path
+#ifdef __SANITIZE_ADDRESS__
+#define LKLFUSE_AS_LIMIT_BYTES 0
+#endif
 #define GEN1_ROOTFS_MARKER test_gen1_marker
 #define AZ04_UFSD_DT_PATH test_az04_dt
 #define PROC_FILESYSTEMS_PATH test_proc_fs
-#define PROC_MOUNTINFO_PATH test_proc_mi
+#define PROC_MOUNTINFO_PATH (*test_proc_mi?test_proc_mi:"/proc/self/mountinfo")
 static char test_sys_dev_block[PATH_MAX];
 #define SYS_DEV_BLOCK_DIR test_sys_dev_block
 #define HFSPLUSX_MODULES_ROOT test_modules_root
@@ -107,6 +115,20 @@ static int test_dev_present_val = 1;
 static int test_hfs_dev_present(const char *target,const char *src){(void)target;(void)src;return test_dev_present_val;}
 #define HFS_DEV_PRESENT test_hfs_dev_present
 #include "edisksd_hook.c"
+static int64_t test_post_reserve_fn(void) {
+    if(test_expire_gen2_stage) {
+        FILE *f=fopen("/proc/self/mountinfo","r");
+        if(f) {
+            char line[4096],needle[PATH_MAX+8];
+            snprintf(needle,sizeof needle,"%s/lkl-",test_runtime);
+            int staged=0;
+            while(fgets(line,sizeof line,f))if(strstr(line,needle)){staged=1;break;}
+            fclose(f);
+            if(staged)return HOOK_BUDGET_MS+1;
+        }
+    }
+    return test_post_reserve;
+}
 #include <assert.h>
 #include <ftw.h>
 static int test_mock_hfs_syscalls,test_fsconfig_ro_seen,test_fsconfig_rw_seen;
@@ -149,7 +171,7 @@ struct libmnt_context {
 const char *mnt_context_get_target(struct libmnt_context *c){return c->target;}
 const char *mnt_context_get_source(struct libmnt_context *c){return c->source;}
 int mnt_context_get_status(struct libmnt_context *c){return c->status;}
-int mnt_context_set_syscall_status(struct libmnt_context *c,int status){c->status=status;return 0;}
+int mnt_context_set_syscall_status(struct libmnt_context *c,int status){c->status=status==0?1:status;return 0;}
 static int test_reset_context(struct libmnt_context *c){
     c->target=NULL;c->source=NULL;c->target_buf[0]=0;c->source_buf[0]=0;
     c->fstype_pattern[0]=0;c->fstype[0]=0;c->options[0]=0;
@@ -199,8 +221,10 @@ static unsigned real_calls;
 static int real_unmount(struct libmnt_context *c) {
     real_calls++;
     c->last_umount_lazy=c->lazy;
-    if(c->fail){errno=EBUSY;return -EBUSY;}
-    return umount2(c->target,UMOUNT_NOFOLLOW);
+    if(c->fail){c->status=0;errno=EBUSY;return -EBUSY;}
+    int rc=umount2(c->target,UMOUNT_NOFOLLOW);
+    c->status=(rc==0)?1:0;
+    return rc;
 }
 static void join(char *out,const char *a,const char *b){assert(!path_join(out,PATH_MAX,a,b));}
 static void write_file(const char *path,const char *text) {
@@ -1815,13 +1839,331 @@ static void test_hfs_view_scale_and_47879b10_253(const char *root) {
     puts("REAL PRIVATE NAMESPACE Scale + 47879b10 + #253: 1300 root folders use O(1) mounts, hide_views/eject/errors intact: PASS");
 }
 
+static int mock_mount_present(const char *a,const char *b) {
+    FILE *f=fopen("/proc/self/mountinfo","r");if(!f)return 0;
+    char *line=NULL;size_t cap=0;int hit=0;
+    while(getline(&line,&cap,f)>0) {
+        char *sp[5]={0};char *p=line;int idx=0;
+        for(;idx<5;idx++){sp[idx]=p;char *q=strchr(p,' ');if(!q)break;p=q+1;}
+        if(idx<5)continue;
+        char *mpe=strchr(sp[4],' ');if(!mpe)continue;*mpe=0;
+        if((a&&!strcmp(sp[4],a))||(b&&*b&&!strcmp(sp[4],b))){hit=1;break;}
+    }
+    free(line);fclose(f);return hit;
+}
+static int run_mock_lklfuse(int argc,char **argv) {
+    if(argc<4)return 2;
+    const char *stage=argv[3];
+    const char *logf=getenv("TEST_LKL_LOG");
+    if(logf) {
+        FILE *f=fopen(logf,"w");
+        if(f) {
+            struct rlimit as_rl={0},st_rl={0};
+            getrlimit(RLIMIT_AS,&as_rl);getrlimit(RLIMIT_STACK,&st_rl);
+            const char *ma=getenv("MALLOC_ARENA_MAX");
+            fprintf(f,"sched=%d nice=%d arena=%s as=%llu stack=%llu",
+                    sched_getscheduler(0),getpriority(PRIO_PROCESS,0),ma?ma:"",
+                    (unsigned long long)as_rl.rlim_cur,(unsigned long long)st_rl.rlim_cur);
+            for(int i=1;i<argc;i++)fprintf(f," arg%d=%s",i,argv[i]);
+            fputc('\n',f);fclose(f);
+        }
+    }
+    const char *fail=getenv("TEST_LKL_FAIL");
+    if(fail&&!strcmp(fail,"1"))return 1;
+    const char *disk=getenv("TEST_LKL_DISK");
+    if(!disk||mount(disk,stage,NULL,MS_BIND,NULL))return 1;
+    const char *pidf=getenv("TEST_LKL_PIDFILE");
+    if(pidf){FILE *pf=fopen(pidf,"w");if(pf){fprintf(pf,"%d\n",(int)getpid());fclose(pf);}}
+    const char *tgt=getenv("TEST_LKL_TARGET");
+    while(mock_mount_present(stage,tgt))usleep(10000);
+    usleep(350000);
+    const char *exf=getenv("TEST_LKL_EXITED");
+    if(exf){FILE *ef=fopen(exf,"w");if(ef){fputs("exited\n",ef);fclose(ef);}}
+    return 0;
+}
+static void test_hfs_gen2_unit(const char *root) {
+    char img[PATH_MAX],mi[PATH_MAX],opts[1024],out[8192];
+    int jnl=99,unclean=99;
+    join(img,root,"g2-unclean.img");write_hfs_img(img,0u,0,0,0,0,0);
+    assert(hfs_check_volume_and_journal(img,&jnl,0,NULL)==-1&&errno==EIO);
+    assert(!hfs_check_volume_and_journal(img,&jnl,1,&unclean)&&jnl==0&&unclean==1);
+
+    join(img,root,"g2-unclean-jnl.img");write_hfs_img(img,(1u<<13),1,0,4096,4096,0);
+    assert(hfs_check_volume_and_journal(img,&jnl,0,NULL)==-1);
+    assert(!hfs_check_volume_and_journal(img,&jnl,1,&unclean)&&jnl==1&&unclean==1);
+
+    join(img,root,"g2-softlock.img");write_hfs_img(img,(1u<<15),0,0,0,0,0);
+    assert(hfs_check_volume_and_journal(img,&jnl,1,&unclean)==-1);
+
+    join(img,root,"g2-dirty-jnl.img");write_hfs_img(img,(1u<<13),1,0,4096,8192,0);
+    assert(hfs_check_volume_and_journal(img,&jnl,1,&unclean)==-1);
+
+    assert(!hfs_gen2_build_opts(opts,sizeof opts,"/dev/sda1","nosuid,nodev,uhelper=edisksd,ro",MS_RELATIME,0));
+    assert(has_opt_token(opts,"type=hfsplus")&&has_opt_token(opts,"mb=32")&&has_opt_token(opts,"fsname=/dev/sda1")&&
+           has_opt_token(opts,"subtype=hfsplus")&&has_opt_token(opts,"allow_other")&&has_opt_token(opts,"default_permissions")&&
+           has_opt_token(opts,"nosuid")&&has_opt_token(opts,"nodev")&&has_opt_token(opts,"relatime")&&
+           !has_opt_token(opts,"opts=force")&&!has_opt_token(opts,"uhelper=edisksd")&&!has_opt_token(opts,"ro"));
+    assert(!hfs_gen2_build_opts(opts,sizeof opts,"/dev/a,b","nosuid",0,1));
+    assert(strstr(opts,"fsname=/dev/a\\,b")&&has_opt_token(opts,"opts=force"));
+
+    // Verify hide_views rewrites 0:anon -> block dev major:minor for active lklfuse mounts.
+    assert(!make_dirs(RUN_ROOT));
+    struct hfs_gen2_mount rec={0};
+    rec.magic=HFS_GEN2_MAGIC;rec.dev_maj=8;rec.dev_min=1;rec.fuse_maj=0;rec.fuse_min=59;
+    join(rec.target,MEDIA_ROOT,"MY USB");
+    snprintf(rec.source,sizeof rec.source,"/dev/sda1");
+    assert(!hfs_gen2_save_record(&rec));
+    join(mi,root,"g2-mountinfo");
+    FILE *f=fopen(mi,"w");assert(f);
+    fprintf(f,"274 198 0:59 / %s/MY\\040USB rw,nosuid - fuse.hfsplus /dev/sda1 rw,allow_other\n",MEDIA_ROOT);
+    fprintf(f,"275 198 8:17 / %s/OTHER rw - vfat /dev/sdb1 rw\n",MEDIA_ROOT);
+    fclose(f);
+    int fd=hide_views(mi);assert(fd>=0);
+    ssize_t n=pread(fd,out,sizeof out-1,0);assert(n>0);out[n]=0;close(fd);
+    char expect[PATH_MAX*2];
+    snprintf(expect,sizeof expect,"274 198 8:1 / %s/MY\\040USB rw,nosuid - fuse.hfsplus /dev/sda1 rw",MEDIA_ROOT);
+    assert(strstr(out,expect));
+    assert(strstr(out,"275 198 8:17 / "));
+    hfs_gen2_remove_record(rec.target);
+    puts("Gen-2 HFS+ unit checks (unclean/journal/opts/mountinfo-devno): PASS");
+}
+struct gen2_unmount_args {
+    struct libmnt_context *ctx;
+    int rc;
+};
+static void *gen2_unmount_thread(void *arg) {
+    struct gen2_unmount_args *a=arg;
+    a->rc=unmount_dispatch(a->ctx,real_unmount);
+    return NULL;
+}
+static void test_hfs_gen2_lkl_policy(const char *root,const char *self_exe) {
+    assert(!mount(NULL,"/",NULL,MS_REC|MS_PRIVATE,NULL));
+    char disk[PATH_MAX],target[PATH_MAX],img[PATH_MAX],fsck[PATH_MAX],lkl[PATH_MAX],p[PATH_MAX];
+    char logf[PATH_MAX],pidf[PATH_MAX],exf[PATH_MAX];
+    join(disk,root,"g2-disk");join(p,disk,"PIONEER/rekordbox");assert(!make_dirs(p));
+    join(p,disk,"PIONEER/rekordbox/export.pdb");write_file(p,"pdb\n");
+    join(target,MEDIA_ROOT,"HFSG2");assert(!make_dirs(target));
+    join(test_rb_bridge,root,"g2-bridge");
+    char bsh[512];
+    snprintf(bsh,sizeof bsh,"#!/bin/sh\nmkdir -p \"$2/Engine Library/Database2\"\n: > \"$2/Engine Library/Database2/m.db\"\nexit 0\n");
+    write_file(test_rb_bridge,bsh);assert(!chmod(test_rb_bridge,0700));
+    join(fsck,root,"g2-fsck");join(lkl,root,"g2-lklfuse");
+    join(logf,root,"g2-lkl.log");join(pidf,root,"g2-lkl.pid");join(exf,root,"g2-lkl.exited");
+    char exe_real[PATH_MAX];ssize_t er=readlink("/proc/self/exe",exe_real,sizeof exe_real-1);
+    if(er>0)exe_real[er]=0;else snprintf(exe_real,sizeof exe_real,"%s",self_exe);
+    char lsh[PATH_MAX+128];
+    snprintf(lsh,sizeof lsh,"#!/bin/sh\nexec \"%s\" --mock-lklfuse \"$@\"\n",exe_real);
+    write_file(lkl,lsh);assert(!chmod(lkl,0700));
+    snprintf(test_disk,sizeof test_disk,"%s",disk);
+    snprintf(test_fsck_bin,sizeof test_fsck_bin,"%s",fsck);
+    snprintf(test_lklfuse_bin,sizeof test_lklfuse_bin,"%s",lkl);
+    test_gen1_marker[0]=0;test_proc_fs[0]=0;test_proc_mi[0]=0;test_az04_dt[0]=0;test_modules_root[0]=0;
+    test_platform_mode_val=1;test_disk_ro=0;
+    setenv("TEST_LKL_LOG",logf,1);setenv("TEST_LKL_DISK",disk,1);
+    setenv("TEST_LKL_TARGET",target,1);setenv("TEST_LKL_PIDFILE",pidf,1);setenv("TEST_LKL_EXITED",exf,1);
+    unsetenv("TEST_LKL_FAIL");
+
+    // 1. fsck fail -> kernel hfsplus stays RO, lklfuse never started.
+    unlink(logf);
+    write_file(fsck,"#!/bin/sh\necho 'Volume corrupt'\nexit 8\n");assert(!chmod(fsck,0700));
+    join(img,root,"g2-pol-clean.img");write_hfs_img(img,(1u<<8),0,0,0,0,0);
+    struct libmnt_context c={.target=target,.source=img,.invoke_sys_mount=1};
+    mnt_context_set_fstype_pattern(&c,"hfsplus");mnt_context_set_options(&c,"nosuid");
+    assert(!mnt_context_mount(&c)&&c.status==1&&!strcmp(c.last_mount_fstype,"hfsplus")&&
+           has_opt_token(c.last_mount_opts,"ro")&&(test_last_sys_flags&MS_RDONLY)&&access(logf,F_OK)==-1);
+    assert(!unmount_dispatch(&c,real_unmount));mnt_free_context(&c);
+
+    // 2. Clean HFS+ -> lklfuse RW + pre-visibility bridge + sched/mem limits + unmount waits for lklfuse exit.
+    write_file(fsck,"#!/bin/sh\n[ \"$1\" = -n ] && [ \"$2\" = -f ] || exit 9\necho '** The volume TEST appears to be OK.'\nexit 0\n");
+    unlink(exf);unlink(pidf);unlink(logf);
+    memset(&c,0,sizeof c);c.target=target;c.source=img;c.invoke_sys_mount=1;
+    mnt_context_set_fstype_pattern(&c,"hfsplus");mnt_context_set_options(&c,"nosuid,nodev,uhelper=edisksd");
+    assert(!mnt_context_mount(&c)&&c.status==1);
+    struct statvfs sv;assert(!statvfs(target,&sv)&&!(sv.f_flag&ST_RDONLY));
+    join(p,target,"Engine Library/Database2/m.db");assert(!access(p,F_OK));
+    char lbuf[2048];int lfd=open(logf,O_RDONLY);assert(lfd>=0);
+    ssize_t ln=read(lfd,lbuf,sizeof lbuf-1);assert(ln>0);lbuf[ln]=0;close(lfd);
+    assert(strstr(lbuf,"sched=0 ")&&strstr(lbuf,"nice=2 ")&&strstr(lbuf,"arena=1 ")&&
+           strstr(lbuf,"type=hfsplus,mb=32")&&strstr(lbuf,"subtype=hfsplus")&&strstr(lbuf,"nosuid,nodev"));
+#ifndef __SANITIZE_ADDRESS__
+    assert(strstr(lbuf,"as=134217728 stack=1048576"));
+#endif
+    char pbuf[64];int pfd=open(pidf,O_RDONLY);assert(pfd>=0);
+    ssize_t pn=read(pfd,pbuf,sizeof pbuf-1);assert(pn>0);pbuf[pn]=0;close(pfd);
+    pid_t lpid=(pid_t)atoi(pbuf);assert(lpid>0);
+    // Verify eject while another stick holds view_lock does not block (BH-O55-3).
+    pthread_mutex_lock(&view_lock);
+    struct gen2_unmount_args ua={.ctx=&c,.rc=-1};
+    pthread_t ut;assert(!pthread_create(&ut,NULL,gen2_unmount_thread,&ua));
+    int64_t u0=now_ms();
+    assert(!pthread_join(ut,NULL)&&ua.rc==0);
+    int64_t uel=now_ms()-u0;
+    pthread_mutex_unlock(&view_lock);
+    assert(uel>=280&&!access(exf,F_OK));
+    assert(kill(lpid,0)==-1&&errno==ESRCH);
+    mnt_free_context(&c);
+
+    // 2b. Clean eject while a track fd is open (not pulled) must fail EBUSY and keep lklfuse alive; closing fd then allows clean eject.
+    unlink(exf);unlink(pidf);unlink(logf);
+    memset(&c,0,sizeof c);c.target=target;c.source=img;
+    mnt_context_set_fstype_pattern(&c,"hfsplus");mnt_context_set_options(&c,"nosuid");
+    assert(!mnt_context_mount(&c)&&c.status==1);
+    pfd=open(pidf,O_RDONLY);assert(pfd>=0);pn=read(pfd,pbuf,sizeof pbuf-1);pbuf[pn]=0;close(pfd);
+    lpid=(pid_t)atoi(pbuf);assert(lpid>0);
+    int busy_fd=open(p,O_RDONLY);assert(busy_fd>=0);
+    assert(unmount_dispatch(&c,real_unmount)!=0);
+    assert(kill(lpid,0)==0&&access(exf,F_OK)==-1&&count_mounts(target)==1);
+    close(busy_fd);
+    u0=now_ms();assert(!unmount_dispatch(&c,real_unmount));uel=now_ms()-u0;
+    assert(uel>=280&&!access(exf,F_OK)&&kill(lpid,0)==-1&&errno==ESRCH);
+    mnt_free_context(&c);
+
+    // 2c. SOFTLOCK or dirty journal fails volume/journal check -> RO guard without calling fsck -y or lklfuse.
+    join(img,root,"g2-pol-dirty-jnl.img");write_hfs_img(img,(1u<<8)|(1u<<13),1,0,4096,8192,0);
+    unlink(logf);
+    memset(&c,0,sizeof c);c.target=target;c.source=img;c.invoke_sys_mount=1;
+    mnt_context_set_fstype_pattern(&c,"hfsplus");mnt_context_set_options(&c,"nosuid");
+    assert(!mnt_context_mount(&c)&&c.status==1&&has_opt_token(c.last_mount_opts,"ro")&&(test_last_sys_flags&MS_RDONLY)&&access(logf,F_OK)==-1);
+    assert(!unmount_dispatch(&c,real_unmount));mnt_free_context(&c);
+
+    // 3. Unclean (!UNMNT) but fsck-clean + journal-clean -> fsck -y marks clean, re-checks -n -f, then lklfuse RW (with opts=force for journaled).
+    join(img,root,"g2-pol-unclean-jnl.img");write_hfs_img(img,(1u<<13),1,0,4096,4096,0);
+    char ylog[PATH_MAX];join(ylog,root,"g2-y.log");
+    setenv("TEST_G2_YLOG",ylog,1);setenv("TEST_G2_YIMG",img,1);
+    const char *fsh="#!/bin/sh\necho \"$1 $2\" >> \"$TEST_G2_YLOG\"\nif [ \"$1\" = -y ]; then\n"
+                    "  python3 -c 'import os,struct; f=open(os.environ[\"TEST_G2_YIMG\"],\"r+b\"); f.seek(1028); a=struct.unpack(\">I\",f.read(4))[0]; f.seek(1028); f.write(struct.pack(\">I\",a|(1<<8)))'\n"
+                    "fi\necho '** The volume TEST appears to be OK.'\nexit 0\n";
+    write_file(fsck,fsh);assert(!chmod(fsck,0700));
+    unlink(exf);unlink(pidf);unlink(logf);unlink(ylog);
+    memset(&c,0,sizeof c);c.target=target;c.source=img;
+    mnt_context_set_fstype_pattern(&c,"hfsplus");mnt_context_set_options(&c,"nosuid");
+    assert(!mnt_context_mount(&c)&&c.status==1);
+    assert(!statvfs(target,&sv)&&!(sv.f_flag&ST_RDONLY));
+    lfd=open(logf,O_RDONLY);assert(lfd>=0);ln=read(lfd,lbuf,sizeof lbuf-1);lbuf[ln]=0;close(lfd);
+    assert(strstr(lbuf,"opts=force"));
+    expect_file(ylog,"-n -f\n-y -f\n-n -f\n");
+    assert(!unmount_dispatch(&c,real_unmount));mnt_free_context(&c);
+
+    // 4. Device pulled while mounted (open fd keeps normal umount EBUSY) -> lazy detach + kill lklfuse, no hang.
+    unlink(exf);unlink(pidf);unlink(logf);
+    memset(&c,0,sizeof c);c.target=target;c.source=img;
+    mnt_context_set_fstype_pattern(&c,"hfsplus");mnt_context_set_options(&c,"nosuid");
+    assert(!mnt_context_mount(&c)&&c.status==1);
+    pfd=open(pidf,O_RDONLY);assert(pfd>=0);pn=read(pfd,pbuf,sizeof pbuf-1);pbuf[pn]=0;close(pfd);
+    lpid=(pid_t)atoi(pbuf);assert(lpid>0);
+    int held=open(p,O_RDONLY);assert(held>=0);
+    unlink(img); // device node removed while mounted
+    u0=now_ms();
+    assert(!unmount_dispatch(&c,real_unmount));
+    uel=now_ms()-u0;
+    assert(uel<250&&count_mounts(target)==0&&access(exf,F_OK)==-1);
+    assert(kill(lpid,0)==-1&&errno==ESRCH);
+    close(held);mnt_free_context(&c);
+
+    // 4b. udev remove (enable_lazy=1 while node still exists and fd held) -> lazy detach + kill lklfuse, no hang.
+    join(img,root,"g2-pol-clean.img");
+    unlink(exf);unlink(pidf);unlink(logf);
+    memset(&c,0,sizeof c);c.target=target;c.source=img;
+    mnt_context_set_fstype_pattern(&c,"hfsplus");mnt_context_set_options(&c,"nosuid");
+    assert(!mnt_context_mount(&c)&&c.status==1);
+    pfd=open(pidf,O_RDONLY);assert(pfd>=0);pn=read(pfd,pbuf,sizeof pbuf-1);pbuf[pn]=0;close(pfd);
+    lpid=(pid_t)atoi(pbuf);assert(lpid>0);
+    held=open(p,O_RDONLY);assert(held>=0);
+    mnt_context_enable_lazy(&c,1);
+    u0=now_ms();assert(!unmount_dispatch(&c,real_unmount));uel=now_ms()-u0;
+    assert(uel<250&&count_mounts(target)==0&&access(exf,F_OK)==-1&&kill(lpid,0)==-1&&errno==ESRCH);
+    close(held);mnt_free_context(&c);
+
+    // 4c. Dead lklfuse (target lstat ENOTCONN while an fd is open) -> still detaches and cleans up record.
+    join(img,root,"g2-pol-clean.img");
+    unlink(exf);unlink(pidf);unlink(logf);
+    memset(&c,0,sizeof c);c.target=target;c.source=img;
+    mnt_context_set_fstype_pattern(&c,"hfsplus");mnt_context_set_options(&c,"nosuid");
+    assert(!mnt_context_mount(&c)&&c.status==1);
+    pfd=open(pidf,O_RDONLY);assert(pfd>=0);pn=read(pfd,pbuf,sizeof pbuf-1);pbuf[pn]=0;close(pfd);
+    lpid=(pid_t)atoi(pbuf);assert(lpid>0);
+    held=open(p,O_RDONLY);assert(held>=0);
+    assert(!kill(lpid,SIGKILL));
+    while(waitpid(lpid,NULL,0)<0&&errno==EINTR){}
+    snprintf(test_eio_path,sizeof test_eio_path,"%s",target);test_eio_err=ENOTCONN;
+    assert(!unmount_dispatch(&c,real_unmount));
+    test_eio_path[0]=0;test_eio_err=EIO;
+    assert(count_mounts(target)==0);
+    close(held);mnt_free_context(&c);
+
+    // 5. lklfuse failure -> clean RO fallback.
+    join(img,root,"g2-pol-clean.img");
+    setenv("TEST_LKL_FAIL","1",1);
+    memset(&c,0,sizeof c);c.target=target;c.source=img;c.invoke_sys_mount=1;
+    mnt_context_set_fstype_pattern(&c,"hfsplus");mnt_context_set_options(&c,"nosuid");
+    assert(!mnt_context_mount(&c)&&c.status==1&&!strcmp(c.last_mount_fstype,"hfsplus")&&
+           has_opt_token(c.last_mount_opts,"ro")&&(test_last_sys_flags&MS_RDONLY));
+    assert(!unmount_dispatch(&c,real_unmount));mnt_free_context(&c);
+
+    unsetenv("TEST_LKL_FAIL");
+    // 6. Gen-2 carry-over via lklfuse: refused copy cleanly tears down lklfuse and falls back RO; valid copy lands on stick RW.
+    char cdisk[PATH_MAX],clib[PATH_MAX],cdb[PATH_MAX],crefuse[PATH_MAX],cgsh[PATH_MAX*2];
+    join(cdisk,root,"g2-carry-disk");join(p,cdisk,"Music");assert(!make_dirs(p));
+    join(p,cdisk,"Music/a.mp3");write_file(p,"audio");
+    join(clib,LIB_ROOT,"uuid-hfs-stick/library-0000000000000000");
+    join(p,clib,"Database2");assert(!make_dirs(p));
+    join(cdb,clib,"Database2/m.db");write_file(cdb,"g2-deck-lib");
+    assert(!utimensat(AT_FDCWD,clib,NULL,0));
+    join(crefuse,root,"g2-carry-refuse");join(test_guardian_system,root,"g2-carry-guardian");
+    snprintf(cgsh,sizeof cgsh,"#!/bin/sh\n[ \"$1\" = --check-copy ] || exit 0\n[ -e '%s' ] && exit 1\nexit 0\n",crefuse);
+    write_file(test_guardian_system,cgsh);assert(!chmod(test_guardian_system,0700));
+    setenv("TEST_LKL_DISK",cdisk,1);snprintf(test_disk,sizeof test_disk,"%s",cdisk);
+    write_file(crefuse,"");snprintf(test_hfs_target,sizeof test_hfs_target,"%s",target);
+    unlink(exf);unlink(pidf);unlink(logf);
+    memset(&c,0,sizeof c);c.target=target;c.source=img;c.invoke_sys_mount=1;
+    mnt_context_set_fstype_pattern(&c,"hfsplus");mnt_context_set_options(&c,"nosuid");
+    assert(!mnt_context_mount(&c)&&c.status==1&&has_opt_token(c.last_mount_opts,"ro")&&(test_last_sys_flags&MS_RDONLY));
+    assert(!access(exf,F_OK));
+    join(p,cdisk,"Engine Library");assert(access(p,F_OK)&&errno==ENOENT);
+    assert(!unmount_dispatch(&c,real_unmount));mnt_free_context(&c);
+
+    assert(!unlink(crefuse));test_hfs_target[0]=0;unlink(exf);unlink(pidf);unlink(logf);
+    memset(&c,0,sizeof c);c.target=target;c.source=img;c.invoke_sys_mount=1;
+    mnt_context_set_fstype_pattern(&c,"hfsplus");mnt_context_set_options(&c,"nosuid");
+    assert(!mnt_context_mount(&c)&&c.status==1&&!statvfs(target,&sv)&&!(sv.f_flag&ST_RDONLY));
+    join(p,cdisk,"Engine Library/Database2/m.db");expect_file(p,"g2-deck-lib");
+    assert(!unmount_dispatch(&c,real_unmount)&&!access(exf,F_OK));mnt_free_context(&c);
+    assert(!unlink(cdb));
+
+    // 7. Out of budget once lklfuse has staged: mount RW succeeds without running rb-bridge or writing slow-.
+    char odisk[PATH_MAX];
+    join(odisk,root,"g2-oob-disk");join(p,odisk,"PIONEER/rekordbox");assert(!make_dirs(p));
+    join(p,odisk,"PIONEER/rekordbox/export.pdb");write_file(p,"pdb\n");
+    test_guardian_system[0]=0;
+    setenv("TEST_LKL_DISK",odisk,1);snprintf(test_disk,sizeof test_disk,"%s",odisk);
+    unsigned slow_before=count_runtime("slow-");
+    test_expire_gen2_stage=1;unlink(exf);unlink(pidf);unlink(logf);
+    memset(&c,0,sizeof c);c.target=target;c.source=img;c.invoke_sys_mount=1;
+    mnt_context_set_fstype_pattern(&c,"hfsplus");mnt_context_set_options(&c,"nosuid");
+    assert(!mnt_context_mount(&c)&&c.status==1&&!statvfs(target,&sv)&&!(sv.f_flag&ST_RDONLY));
+    join(p,odisk,"Engine Library");assert(access(p,F_OK)==-1&&errno==ENOENT);
+    assert(count_runtime("slow-")==slow_before);
+    assert(!unmount_dispatch(&c,real_unmount)&&!access(exf,F_OK));mnt_free_context(&c);
+    test_expire_gen2_stage=0;unlink(exf);unlink(pidf);unlink(logf);
+    memset(&c,0,sizeof c);c.target=target;c.source=img;c.invoke_sys_mount=1;
+    mnt_context_set_fstype_pattern(&c,"hfsplus");mnt_context_set_options(&c,"nosuid");
+    assert(!mnt_context_mount(&c)&&c.status==1&&!statvfs(target,&sv)&&!(sv.f_flag&ST_RDONLY));
+    join(p,odisk,"Engine Library/Database2/m.db");expect_file(p,"");
+    assert(!unmount_dispatch(&c,real_unmount)&&!access(exf,F_OK));mnt_free_context(&c);
+
+    unsetenv("TEST_LKL_FAIL");unsetenv("TEST_LKL_LOG");unsetenv("TEST_LKL_DISK");
+    unsetenv("TEST_LKL_TARGET");unsetenv("TEST_LKL_PIDFILE");unsetenv("TEST_LKL_EXITED");unsetenv("TEST_G2_YLOG");unsetenv("TEST_G2_YIMG");
+    test_platform_mode_val=0;test_fsck_bin[0]=0;test_lklfuse_bin[0]=0;test_rb_bridge[0]=0;test_guardian_system[0]=0;test_hfs_target[0]=0;test_disk[0]=0;test_modules_root[0]=0;
+    puts("Gen-2 lklfuse policy (fsck-fail->ro, clean->rw+wait, unclean->fsck-y->rw, pull->lazy+kill, lkl-fail->ro, carry-over): PASS");
+}
 int main(int argc,char **argv) {
+    if(argc>1&&!strcmp(argv[1],"--mock-lklfuse"))return run_mock_lklfuse(argc,argv);
     char root[]="/tmp/enginex-edisks-tests-XXXXXX";assert(mkdtemp(root));
     join(test_prepare_state,root,"run/enginex-usb-preparing");char prep_run[PATH_MAX];join(prep_run,root,"run");assert(!make_dirs(prep_run));
     join(test_media,root,"media");join(test_library,root,"libraries");join(test_runtime,root,"runtime");
     join(test_legacy_library,root,"legacy-libraries");join(test_utab,root,"utab");assert(!make_dirs(test_utab));
-    assert(!make_dirs(test_media));test_paths_and_copy(root);test_compat_symlink_root(root);test_time();test_slow_marker_follows_every_export_file(root);test_only_an_export_makes_a_rekordbox_stick(root);test_monitor_sees_plain_device_mount(root);test_monitor_hides_new_and_old_view_names(root);test_hfs_rw_unit(root);
-    if(argc>1&&!strcmp(argv[1],"--mounts")){test_prepare_state_lifecycle(root);test_hfs_rw_policy(root);test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);test_library_is_walked_once(root);test_two_sticks_at_once(root);test_hfs_visible_mount_reuses_the_converted_library(root);test_private_mount_leaves_nothing_behind(root);test_hfs_view_copies_only_metadata(root);test_heal_before_visible(root);test_eject_while_another_stick_converts(root);test_eject_of_a_pulled_stick(root);test_heal_marker_survives_another_port(root);test_hfs_view_with_a_long_entry_name(root);test_hfs_view_artwork_is_writable(root);test_seed_keeps_its_own_previous_generation(root);test_view_binds_stay_out_of_a_shared_data(root);test_guardian_from_the_data_bundle(root);test_slow_marker_survives_another_port(root);test_hfs_view_scale_and_47879b10_253(root);}
+    assert(!make_dirs(test_media));test_paths_and_copy(root);test_compat_symlink_root(root);test_time();test_slow_marker_follows_every_export_file(root);test_only_an_export_makes_a_rekordbox_stick(root);test_monitor_sees_plain_device_mount(root);test_monitor_hides_new_and_old_view_names(root);test_hfs_rw_unit(root);test_hfs_gen2_unit(root);
+    if(argc>1&&!strcmp(argv[1],"--mounts")){test_prepare_state_lifecycle(root);test_hfs_rw_policy(root);test_hfs_gen2_lkl_policy(root,argv[0]);test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);test_library_is_walked_once(root);test_two_sticks_at_once(root);test_hfs_visible_mount_reuses_the_converted_library(root);test_private_mount_leaves_nothing_behind(root);test_hfs_view_copies_only_metadata(root);test_heal_before_visible(root);test_eject_while_another_stick_converts(root);test_eject_of_a_pulled_stick(root);test_heal_marker_survives_another_port(root);test_hfs_view_with_a_long_entry_name(root);test_hfs_view_artwork_is_writable(root);test_seed_keeps_its_own_previous_generation(root);test_view_binds_stay_out_of_a_shared_data(root);test_guardian_from_the_data_bundle(root);test_slow_marker_survives_another_port(root);test_hfs_view_scale_and_47879b10_253(root);}
     // Mount tests have removed all namespace mounts before deleting fixtures.
     int tmp=open("/tmp",O_RDONLY|O_DIRECTORY);assert(tmp>=0);remove_tree(tmp,strrchr(root,'/')+1);close(tmp);
     puts("edisksd-hook: all requested tests passed");return 0;

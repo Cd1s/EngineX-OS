@@ -1,0 +1,13 @@
+diff --git a/arch/lkl/kernel/syscalls.c b/arch/lkl/kernel/syscalls.c
+index cd4431ff2..bf27935b8 100644
+--- a/arch/lkl/kernel/syscalls.c
++++ b/arch/lkl/kernel/syscalls.c
+@@ -68,7 +68,7 @@ static int new_host_task(struct task_struct **task, int new_tg_leader)
+ 	if (new_tg_leader)
+ 		flags &= ~CLONE_THREAD;
+ 
+-	pid = kernel_thread(host_task_stub, NULL, NULL, flags);
++	pid = user_mode_thread(host_task_stub, NULL, flags);
+ 	if (pid < 0)
+ 		return pid;
+ 
