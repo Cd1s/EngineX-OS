@@ -15,6 +15,8 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent.parent
 BUILD_PACKS = REPO / "tools" / "ui-mod" / "build_packs.py"
+# The guard looks for it at /usr/libexec first, which only a deck has: a test host names the overlay copy.
+MIGRATION = REPO / "rootfs-overlay/usr/libexec/enginex-migration"
 LAB = Path(legacy.LAB)
 
 spec = importlib.util.spec_from_file_location("build_packs", BUILD_PACKS)
@@ -43,7 +45,7 @@ class InternalStreamingStorageTest(unittest.TestCase):
                 engine.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$TEST_ARGS"\n')
                 engine.chmod(0o700)
                 args = task / "args"
-                env = dict(os.environ, ENGINEX_PRIMARY_UI_DIR=str(ui),
+                env = dict(os.environ, ENGINEX_PRIMARY_UI_DIR=str(ui), ENGINEX_MIGRATION=str(MIGRATION),
                            ENGINEX_UI_DIR=str(ui), TEST_ARGS=str(args))
                 result = subprocess.run(["sh", str(guard), "launch", str(engine),
                                          "-d0", "-extraDriveDir=/existing drive"],
@@ -7160,7 +7162,7 @@ class EngineLightingDefaultOffAndPersistTest(unittest.TestCase):
                         (bin_dir / "awk").symlink_to(binary)
                         path_env = str(bin_dir) + ":" + path_env
                     env = dict(os.environ, PATH=path_env, ENGINEX_UI_DIR=str(ui), ENGINEX_PRIMARY_UI_DIR=str(ui),
-                               ENGINEX_LEGACY_UI_DIR=str(ui), ENGINEX_STATE_DIR=str(state),
+                               ENGINEX_MIGRATION=str(MIGRATION), ENGINEX_LEGACY_UI_DIR=str(ui), ENGINEX_STATE_DIR=str(state),
                                ENGINEX_STREAMING_ACCOUNTS=str(root / "accounts"),
                                ENGINEX_ENGINE_DATA_DIR=str(root / "engine"),
                                ENGINEX_ASSIGNMENT_DIR=str(root / "assign"),
