@@ -348,3 +348,54 @@ func TestLinkMasterAskedAgainOnTheSameDeck(t *testing.T) {
 	asked(0, false) // Engine started again: its count starts over, nobody pressed
 	asked(1, true)
 }
+
+// The left deck runs EngineX decks 1 and 3; rekordbox's Link panel showed one
+// player for it. Each deck is now a player of its own number. A paused deck that
+// became Engine's master without MASTER pressed (the maintainer's paused deck was
+// MASTER next to rekordbox's own) does not ask the computer for the link's master;
+// MASTER pressed on it does.
+func TestLinkPlayersPerDeckAndPausedMaster(t *testing.T) {
+	root := t.TempDir()
+	testfixture.Export(t, root)
+	cfg := Config{UIDir: t.TempDir(), StateDir: t.TempDir(), ProlinkExport: prolink.ExportConfig{Root: root, IP: net.IPv4(127, 64, 0, 21), MAC: net.HardwareAddr{2, 0, 0, 0, 0, 21}, DBAddr: "127.64.0.21:0", PortmapAddr: "127.64.0.21:0", DiscoveryAddr: "127.64.0.21:0", StatusAddr: "127.64.0.21:0", AnnounceAddr: "127.64.0.21:9", ProbeDuration: 20 * time.Millisecond}}
+	s := New(cfg, nil)
+	defer s.Close()
+	computer, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 64, 0, 22), Port: 50001})
+	if err != nil {
+		t.Skip("beat port:", err)
+	}
+	defer computer.Close()
+	if err := s.prolinkExport.SetEnabled(true); err != nil {
+		t.Fatal(err)
+	}
+	prolinkMu.Lock()
+	postedDevices[s] = map[string]prolink.Device{"17": {Number: 17, Name: "rekordbox", Address: "127.64.0.22", Master: true, LastSeen: time.Now()}}
+	prolinkMu.Unlock()
+	post := func(press int) {
+		t.Helper()
+		body := fmt.Sprintf(`[{"deck":1,"playing":false,"bpm":120,"master":true,"masterPress":%d},{"deck":3,"playing":false,"bpm":124,"master":false}]`, press)
+		w := httptest.NewRecorder()
+		s.decksPost(w, httptest.NewRequest("POST", "/v1/enginex/decks", strings.NewReader(body)))
+		if w.Code != 200 {
+			t.Fatalf("decks: %d", w.Code)
+		}
+	}
+	asked := func(want bool) {
+		t.Helper()
+		computer.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+		b := make([]byte, 64)
+		n, _, err := computer.ReadFromUDP(b)
+		if got := err == nil && n == 0x28 && b[10] == 0x26; got != want {
+			t.Fatalf("asked the computer for master: %v (%v), want %v", got, err, want)
+		}
+	}
+	post(0)
+	for until := time.Now().Add(2 * time.Second); s.prolinkExport.Status().Players != "1,3"; time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(until) {
+			t.Fatalf("players %q, want 1,3", s.prolinkExport.Status().Players)
+		}
+	}
+	asked(false) // paused, nobody pressed MASTER: rekordbox keeps it
+	post(1)
+	asked(true) // MASTER pressed on deck 1
+}

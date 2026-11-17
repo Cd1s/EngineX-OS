@@ -330,10 +330,11 @@ type shadowState struct {
 	ownMaster      bool
 	ownMasterDeck  int
 	ownMasterPress int
-	ownAt          time.Time          // the newest post or alive ping
-	ownExport      prolink.ExportDeck // what the newest post told the Pro DJ Link export
-	ownPostAt      int64              // the QML's clock on the newest post
-	clockDecks     []deckState        // #209: lightweight local deck clock feed when 4-deck shadow is off
+	ownAt          time.Time            // the newest post or alive ping
+	ownExport      prolink.ExportDeck   // what the newest post told the Pro DJ Link export
+	ownDecks       []prolink.ExportDeck // and each deck: a Pro DJ Link player of its own
+	ownPostAt      int64                // the QML's clock on the newest post
+	clockDecks     []deckState          // #209: lightweight local deck clock feed when 4-deck shadow is off
 	clockAt        time.Time
 	clockPostAt    int64
 	clockPolled    time.Time
@@ -658,11 +659,13 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 	// Pro DJ Link players see these decks in our status: playing, tempo and
 	// master. Taking master asks a CDJ that still holds it to hand it over.
 	ex := prolink.ExportDeck{At: time.Now()}
-	masterDeck, masterPress := 0, 0
+	var players []prolink.ExportDeck
+	masterDeck, masterPress, masterPlaying := 0, 0, false
 	for i, d := range own {
 		master := d.Master != nil && *d.Master
+		players = append(players, prolink.ExportDeck{Number: byte(d.Deck), Playing: d.Playing, Master: master, BPM: d.BPM, Pitch: d.Pitch, Beat: d.Beat, At: ex.At})
 		if master {
-			masterDeck, masterPress = d.Deck, d.MasterPress
+			masterDeck, masterPress, masterPlaying = d.Deck, d.MasterPress, d.Playing
 		}
 		own[i].MasterPress = 0
 		if master || (d.Playing && !ex.Playing && !ex.Master) {
@@ -682,7 +685,7 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.shadow.ownPostAt = postAt
-	s.shadow.own, s.shadow.ownAt, s.shadow.ownExport = own, time.Now(), ex
+	s.shadow.own, s.shadow.ownAt, s.shadow.ownExport, s.shadow.ownDecks = own, time.Now(), ex, players
 	s.shadow.dbg.event("post", map[string]any{"decks": slimDecks(own)})
 	// Master on another of our decks is a claim too (#217): a console's Line In
 	// CDJ has no Engine deck that could take master from ours, so once the CDJ
@@ -690,11 +693,13 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 	// So is MASTER pressed again on the deck that has it: with one deck loaded
 	// there is no other deck to press it on. A count that fell is Engine
 	// started again, not a press.
-	claimed := ex.Master && (!s.shadow.ownMaster || masterDeck != s.shadow.ownMasterDeck || masterPress > s.shadow.ownMasterPress)
+	// A paused deck that became Engine's master without MASTER pressed (Engine started,
+	// a track loaded) does not take the link's master: a CDJ would not either.
+	claimed := ex.Master && (!s.shadow.ownMaster || masterDeck != s.shadow.ownMasterDeck || masterPress > s.shadow.ownMasterPress) && (masterPlaying || masterPress > s.shadow.ownMasterPress)
 	s.shadow.ownMaster, s.shadow.ownMasterDeck, s.shadow.ownMasterPress = ex.Master, masterDeck, masterPress
 	s.shadow.mu.Unlock()
 	if s.prolinkExport != nil {
-		s.prolinkExport.SetDeck(ex)
+		s.prolinkExport.SetDeck(ex, players...)
 		if claimed {
 			asked := map[string]bool{} // an all-in-one is one address for several players
 			for _, dev := range s.mergedDevices() {
@@ -735,9 +740,14 @@ func (s *Server) decksAlive(w http.ResponseWriter, r *http.Request) {
 	}
 	ex := sh.ownExport.Carried(now)
 	sh.ownExport = ex
+	decks := make([]prolink.ExportDeck, len(sh.ownDecks))
+	for i, d := range sh.ownDecks {
+		decks[i] = d.Carried(now)
+	}
+	sh.ownDecks = decks
 	sh.mu.Unlock()
 	if s.prolinkExport != nil {
-		s.prolinkExport.SetDeck(ex)
+		s.prolinkExport.SetDeck(ex, decks...)
 	}
 	s.shadowWake()
 	s.shadowPush()

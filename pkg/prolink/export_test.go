@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -1293,6 +1294,60 @@ func TestExportHandsMasterToRekordbox(t *testing.T) {
 	heard(status(0xc0, 0xff))
 	if master, _ := look(); !master {
 		t.Fatal("the computer let go and Engine's deck still leads: master is ours again")
+	}
+}
+
+// rekordbox's Link panel showed one player for the left deck, which runs EngineX
+// decks 1 and 3 (maintainer, 2026-11-17). Each deck is now a player of its own
+// number, as an XDJ-XZ shows two players from one address; a number a player
+// holds is not taken (#198).
+func TestExportOnePlayerPerDeck(t *testing.T) {
+	now := time.Now()
+	r := &exportRun{probed: true, mounted: true, peers: map[string]exportPeer{}, deck: ExportDeck{Master: true, Playing: true, BPM: 128},
+		decks: []ExportDeck{{Number: 3, Master: true, Playing: true, BPM: 128}, {Number: 1, BPM: 100}}}
+	r.chooseLocked(now)
+	if r.player != 1 || !slices.Equal(r.players, []byte{1, 3}) {
+		t.Fatalf("players %v (first %d), want 1 and 3", r.players, r.player)
+	}
+	bpm := func(b []byte) uint16 { return binary.BigEndian.Uint16(b[0x92:]) }
+	if b := r.statusPacket(); b[0x21] != 3 || b[0x24] != 3 || b[0x89]&0x60 != 0x60 || bpm(b) != 12800 || b[0x75] != 0 {
+		t.Fatalf("deck 3, master and playing: player %d F %x BPM %d LINK %d", b[0x21], b[0x89], bpm(b), b[0x75])
+	}
+	if b := r.statusFor(1, r.deckLocked(1), false); b[0x21] != 1 || b[0x89]&0x60 != 0 || bpm(b) != 0xffff || b[0x75] != 1 || b[0x6f] != 0 { // a paused deck sends no BPM
+		t.Fatalf("deck 1, paused, has the media: player %d F %x BPM %d LINK %d", b[0x21], b[0x89], bpm(b), b[0x75])
+	}
+	if b, h := r.beatPacket(r.deck, 0, 0), r.handoffPacket(0x26, 0x28); b[0x21] != 3 || h[0x21] != 3 {
+		t.Fatalf("beats and handoff come from the master deck's player: %d %d", b[0x21], h[0x21])
+	}
+	r.peers["cdj"] = exportPeer{number: 3, seen: now}
+	r.chooseLocked(now)
+	if r.player != 1 || !slices.Equal(r.players, []byte{1}) {
+		t.Fatalf("a CDJ holds 3: players %v, want 1 only", r.players)
+	}
+	if b := r.statusPacket(); b[0x21] != 1 || b[0x89]&0x20 == 0 || bpm(b) != 12800 {
+		t.Fatalf("player 1 speaks for the master deck: player %d F %x BPM %d", b[0x21], b[0x89], bpm(b))
+	}
+	r.peers["cdj1"] = exportPeer{number: 1, seen: now}
+	r.chooseLocked(now)
+	if r.player != 4 || !slices.Equal(r.players, []byte{4}) {
+		t.Fatalf("CDJs hold 1 and 3: players %v, want one free number (4)", r.players)
+	}
+}
+
+// A paused deck does not hold master beside a computer that holds it, as a CDJ
+// would not; a playing one keeps doing what #217 settled.
+func TestExportPausedDeckLeavesMasterToRekordbox(t *testing.T) {
+	computer := net.IPv4(127, 63, 0, 4)
+	status := make([]byte, 0x38)
+	copy(status, magic)
+	status[10], status[0x21], status[0x27], status[0x36] = 0x29, 17, 0xe0, 0xff
+	copy(status[11:], "rekordbox")
+	for _, playing := range []bool{false, true} {
+		r := &exportRun{player: 3, deck: ExportDeck{Master: true, Playing: playing, BPM: 120}}
+		r.heardLocked(computer, status)
+		if master := r.statusPacket()[0x89]&0x20 != 0; master != playing {
+			t.Fatalf("playing %v: our status claims master %v", playing, master)
+		}
 	}
 }
 
