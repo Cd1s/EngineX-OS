@@ -61,6 +61,43 @@ assert.equal(quits,1);
         subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
 
     @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_selecting_a_drive_never_opens_the_settings_copy_dialog(self):
+        script = r'''
+const assert = require('assert');
+const Prompt = {No: 1, Yes: 2, AcceptRole: 3};
+let notices, posts, reqs, cb, warned, answer, state;
+const scCopyEscape = s => s, scCopySummary = () => 'Stock preferences: 1', scCopyCapture = () => ({native: {}});
+const scCopyCurrentDrive = () => '/media/Stick';
+const scCopyNotice = m => notices.push(m);
+const scCopyRequest = (action, body, callback) => { reqs.push(action); cb = callback; };
+const PlanckGUI = {views: {prompts: {post: p => { posts.push(p); return {finished: {connect: f => { answer = f; }}}; }}}};
+console.warn = m => warned.push(m);
+let scCopyState, scCopyReturning = false, scCopyReturnUntil = 0, scCopyUSBLoading = false;
+FUNCTION
+function drive(operation) {
+    notices = []; posts = []; reqs = []; warned = []; scCopyState = {operation: operation || {}};
+    state = {show: {translator: {state: true}}, done: {translator: {state: false}}, dialog: {messageText: 'Load drive profile?'}, loads: 0};
+    scCopyUSBPrompt(state.dialog, state.show, state.done, () => state.loads++, null);
+}
+// Engine raised its stock "drive has a profile" prompt and the preview request fails: nothing may be shown.
+drive(); assert.deepEqual(reqs, ['usb-preview']);
+cb(null, 'Settings request failed');
+assert.equal(notices.length, 0); assert.equal(posts.length, 0); assert.equal(warned.length, 1);
+assert.equal(state.show.translator.state, false); assert.equal(state.done.translator.state, true); assert.equal(state.loads, 0);
+// A preview that works still asks, and No changes nothing.
+drive(); cb({includeEngineXAvailable: false});
+assert.equal(posts.length, 1); assert.equal(posts[0].id, 'LoadPreferencesDialog'); assert.equal(notices.length, 0);
+answer(Prompt.No); assert.deepEqual(reqs, ['usb-preview']); assert.equal(state.loads, 0); assert.equal(state.show.translator.state, false);
+// Yes starts an import: a failure after that is the user's own action and is still reported.
+drive(); cb({includeEngineXAvailable: false, profileHash: 'h'}); answer(Prompt.AcceptRole);
+assert.deepEqual(reqs, ['usb-preview', 'usb-prepare']);
+cb(null, 'drive profile changed'); assert.deepEqual(notices, ['drive profile changed']);
+// The deck's own staged load is not a user selection and asks nothing.
+drive({phase: 'load'}); assert.deepEqual(reqs, []); assert.equal(state.show.translator.state, false);
+'''.replace("FUNCTION", js_function("scCopyUSBPrompt"))
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
     def test_source_allows_only_after_its_own_prompt(self):
         script = r'''
 const assert=require('assert'); let finish, actions=[], captured=0, scCopySeenIncoming='';
