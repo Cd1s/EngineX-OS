@@ -229,7 +229,8 @@
         if (op.phase === "load" || (scCopyReturning && Date.now() < scCopyReturnUntil && drive === op.previousDrive)) { finish(); return }
         const body = scCopyCapture(); body.drive = drive
         scCopyRequest("usb-preview", body, function(preview, error) {
-            if (!preview) { finish(); scCopyNotice(error); return }
+            // Engine raised this because a drive was selected, not because the user asked for a copy: say nothing.
+            if (!preview) { console.warn("settings-copy: drive profile preview failed: " + error); finish(); return }
             dialog.scCopyIncludeAvailable = !!preview.includeEngineXAvailable
             dialog.scCopyInclude = dialog.scCopyIncludeAvailable
             const prompt = PlanckGUI.views.prompts.post({id: "LoadPreferencesDialog", title: dialog.messageText,
