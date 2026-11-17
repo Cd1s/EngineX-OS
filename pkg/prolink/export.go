@@ -403,9 +403,10 @@ type exportRun struct {
 	beat              *net.UDPConn // nil when the port is taken
 	statusCast        *net.UDPConn // the status port's broadcasts (rekordbox's 0x29); nil in tests
 	deck              ExportDeck
-	decks             []ExportDeck // each deck of this unit, a player of its own
-	players           []byte       // our player numbers, players[0] == player; empty while we have none
-	handoff           byte         // the player we agreed to hand master to
+	decks             []ExportDeck       // each deck of this unit, a player of its own
+	players           []byte             // our player numbers, players[0] == player; empty while we have none
+	given             map[byte]time.Time // numbers we gave way to a player claiming them, until then
+	handoff           byte               // the player we agreed to hand master to
 	// Tempo master on the link (#217). yielded: that player took it, so our
 	// status no longer claims it though Engine's own deck still leads our decks.
 	// asked, claimAt, askUntil: see RequestMaster. syncN is our sync counter
@@ -803,6 +804,13 @@ func (r *exportRun) chooseLocked(now time.Time) {
 			}
 		}
 	}
+	for n, until := range r.given {
+		if now.Before(until) {
+			used[n] = true // 1-4: only ours are given
+		} else {
+			delete(r.given, n)
+		}
+	}
 	r.first = len(r.peers) == 0
 	old := r.player
 	r.player, r.players = 0, nil
@@ -869,6 +877,15 @@ func (r *exportRun) receivePeers() {
 		if err != nil {
 			return
 		}
+		if n >= 0x26 && string(b[:10]) == magic && (b[10] == 0 || b[10] == 2 || b[10] == 4) && r.network.Contains(addr.IP) {
+			r.mu.Lock()
+			old, oldPlayers := r.player, r.players
+			r.claimLocked(b[:n], time.Now())
+			changed, moved := old != r.player, !slices.Equal(oldPlayers, r.players)
+			r.mu.Unlock()
+			r.renumbered(changed, moved)
+			continue
+		}
 		d, err := ParsePacket(b[:n], 50000, addr.IP)
 		// A computer with rekordbox is a peer too: it serves NFS only to a player whose
 		// status it gets (left deck, 2026-11-17), and its number (16-31) is not ours to avoid.
@@ -882,7 +899,9 @@ func (r *exportRun) receivePeers() {
 		if bytes.Equal(mac, r.mac) && d.Name == exportName {
 			continue
 		}
-		key := addr.IP.String() + "/" + net.HardwareAddr(mac).String()
+		// The number too: one unit can be several players from one address (an XDJ-XZ,
+		// our per-deck players on another deck).
+		key := addr.IP.String() + "/" + net.HardwareAddr(mac).String() + "/" + strconv.Itoa(int(d.Number))
 		r.mu.Lock()
 		if _, ok := r.peers[key]; !ok && len(r.peers) >= 64 {
 			r.player, r.players = 0, nil
@@ -905,16 +924,73 @@ func (r *exportRun) receivePeers() {
 		}
 		changed, moved := old != r.player, !slices.Equal(oldPlayers, r.players)
 		r.mu.Unlock()
-		if changed {
-			r.db.closeClients()
-		}
-		if moved {
-			select {
-			case r.wake <- struct{}{}:
-			default:
-			}
+		r.renumbered(changed, moved)
+	}
+}
+
+// renumbered ends dbserver sessions when our first number changed (they asked
+// that player) and announces at once when any of our numbers did.
+func (r *exportRun) renumbered(changed, moved bool) {
+	if changed {
+		r.db.closeClients()
+	}
+	if moved {
+		select {
+		case r.wake <- struct{}{}:
+		default:
 		}
 	}
+}
+
+// claimLocked: a player claims a device number (dysentery's startup: 0x00 stage 1,
+// 0x02 stage 2 with the number at 0x2e, 0x04 final with it at 0x24). Our per-deck
+// players give way, as we never defend a number: the number it claims is not ours
+// for 10 s (its keepalives hold it after that), and a player that finds no number
+// free (a CDJ-2000NXS2 knows 1-4, a CDJ-3000, 0x21 = 3, 1-6) gets one of ours, but
+// not our last. Its deck is then not on the link. Caller holds r.mu.
+func (r *exportRun) claimLocked(b []byte, now time.Time) {
+	var n byte
+	switch {
+	case b[10] == 0x02 && b[0x0b] == 0 && len(b) >= 0x32:
+		n = b[0x2e]
+	case b[10] == 0x04:
+		n = b[0x24]
+	case b[10] == 0x00 && b[0x25] == 1 && len(r.players) > 1: // a player's (a mixer's is 2)
+		top := byte(4)
+		if b[0x21] == 3 {
+			top = 6
+		}
+		for m := byte(1); m <= top; m++ {
+			if !r.oursLocked(m) && !r.peerHoldsLocked(m, now) {
+				return // it has a free number (one we gave way counts)
+			}
+		}
+		for _, m := range r.players {
+			if m != r.masterPlayerLocked() {
+				n = m // the highest that is not the master deck's
+			}
+		}
+	default:
+		return
+	}
+	if !r.oursLocked(n) {
+		return
+	}
+	if r.given == nil {
+		r.given = map[byte]time.Time{}
+	}
+	r.given[n] = now.Add(10 * time.Second)
+	r.chooseLocked(now)
+}
+
+// peerHoldsLocked: another player has number n. Caller holds r.mu.
+func (r *exportRun) peerHoldsLocked(n byte, now time.Time) bool {
+	for _, p := range r.peers {
+		if p.number == n && now.Sub(p.seen) <= 10*time.Second {
+			return true
+		}
+	}
+	return false
 }
 func (r *exportRun) receiveMedia(c *net.UDPConn) {
 	defer r.wg.Done()
