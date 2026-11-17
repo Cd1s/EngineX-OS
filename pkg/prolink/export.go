@@ -857,18 +857,26 @@ func (r *exportRun) heardLocked(ip net.IP, b []byte) {
 			r.peers[key] = p
 		}
 	}
-	if len(b) < 0x80 || b[10] != 0x0a {
+	var number, flags, to byte
+	switch {
+	case len(b) >= 0x38 && b[10] == 0x29 && IsRekordbox(Device{Number: b[0x21]}):
+		// A computer with rekordbox sends a mixer's status: the master flag at 0x27,
+		// the handoff at 0x36 (dysentery). It takes and hands over master as a player does.
+		number, flags, to = b[0x21], b[0x27], b[0x36]
+	case len(b) >= 0x80 && b[10] == 0x0a:
+		if fw := b[0x7c:0x80]; fw[1] == '.' && digit(fw[0]) && digit(fw[2]) && digit(fw[3]) && string(fw) > r.firmware {
+			r.firmware = string(fw)
+		}
+		if len(b) < 0xa0 {
+			return
+		}
+		r.syncMax = max(r.syncMax, binary.BigEndian.Uint32(b[0x84:]))
+		number, flags, to = b[0x21], b[0x89], b[0x9f]
+	default:
 		return
 	}
-	if fw := b[0x7c:0x80]; fw[1] == '.' && digit(fw[0]) && digit(fw[2]) && digit(fw[3]) && string(fw) > r.firmware {
-		r.firmware = string(fw)
-	}
-	if len(b) < 0xa0 {
-		return
-	}
-	r.syncMax = max(r.syncMax, binary.BigEndian.Uint32(b[0x84:]))
-	number, now := b[0x21], time.Now()
-	if b[0x89]&0x20 == 0 {
+	now := time.Now()
+	if flags&0x20 == 0 {
 		// A player let go of master. When no other player holds it either, the one
 		// we gave it to (or whoever got it after) has left it vacant, and it is
 		// ours again: Engine's deck led our decks all along.
@@ -890,7 +898,7 @@ func (r *exportRun) heardLocked(ip net.IP, b []byte) {
 	if len(r.masters) < 16 || !r.masters[number].IsZero() {
 		r.masters[number] = now
 	}
-	switch to := b[0x9f]; {
+	switch {
 	case to == r.player:
 		// It hands master to us: claim it now. The request is settled, so a late
 		// or repeated answer to it changes nothing any more.
@@ -943,7 +951,7 @@ func (r *exportRun) receiveBeats() {
 			// moves master to its shadow deck (SetDeck). Our own request, if one was
 			// still open, is over.
 			r.mu.Lock()
-			if asker := b[0x21]; r.player != 0 && r.masterLocked(time.Now()) && asker >= 1 && asker <= 6 && asker != r.player {
+			if asker := b[0x21]; r.player != 0 && r.masterLocked(time.Now()) && (asker >= 1 && asker <= 6 || IsRekordbox(Device{Number: asker})) && asker != r.player {
 				r.sendLocked(r.beat, r.handoffPacket(0x27, 0x2c), &net.UDPAddr{IP: addr.IP, Port: 50001})
 				r.handoff, r.askUntil = asker, time.Time{}
 			}
