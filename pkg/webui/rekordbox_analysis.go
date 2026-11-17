@@ -16,6 +16,7 @@ import (
 	"path"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/compat"
@@ -26,6 +27,12 @@ import (
 
 // rbxAnalysisDir is where the hook reads them (tmpfs). A variable for the tests.
 var rbxAnalysisDir = "/run/enginex-rbx-analysis"
+
+// rbxAnalysing are the tracks whose analysis is being read; rbxAnalysisJobs waits for them.
+var (
+	rbxAnalysing    sync.Map
+	rbxAnalysisJobs sync.WaitGroup
+)
 
 // rbxAnalysisMagic heads the file: then trackData, overviewWaveFormData, beatData,
 // quickCues and loops, each a little-endian uint32 length and its bytes.
@@ -47,10 +54,15 @@ func rbxMarkLoading() {
 // rbxWriteAnalysis writes track id's analysis (the gateway's id, the one in Engine's uri)
 // for rekordbox track tid of the library ip (a computer, or a player's medium), whose audio is file.
 func (g *tidalGateway) rbxWriteAnalysis(id int64, ip string, tid uint32, rbPath, file string) {
+	defer rbxAnalysisJobs.Done()
 	out := filepath.Join(rbxAnalysisDir, strconv.FormatInt(id, 10)+".bin")
 	if _, err := os.Stat(out); err == nil {
 		return
 	}
+	if _, running := rbxAnalysing.LoadOrStore(id, true); running {
+		return // a deck's request again while it is read
+	}
+	defer rbxAnalysing.Delete(id)
 	var meta []prolink.RekordboxItem
 	a := &rekordbox.Analysis{}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)

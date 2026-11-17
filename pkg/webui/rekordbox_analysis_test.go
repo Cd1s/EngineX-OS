@@ -86,6 +86,7 @@ func TestRekordboxLoadLeavesItsAnalysisForEngine(t *testing.T) {
 	old := rbxAnalysisDir
 	rbxAnalysisDir = t.TempDir()
 	t.Cleanup(func() { rbxAnalysisDir = old })
+	t.Cleanup(rbxAnalysisJobs.Wait) // before the fakes go
 	ids, _ := e.trackIDs(t, "Tracks")
 	tidalGet(t, e.base, "/v1/tracks/"+strconv.FormatInt(ids["First"], 10)+"/playbackinfopostpaywall", 200, nil)
 	var b []byte
@@ -133,6 +134,7 @@ func TestCDJMediaListsAndLoadsWithItsAnalysis(t *testing.T) {
 	}
 	rbxRoom = func(*syscall.Statfs_t, int64) int64 { return 1 << 30 }
 	rbxAnalysisDir = t.TempDir()
+	t.Cleanup(rbxAnalysisJobs.Wait) // before the fakes go
 	// The link has the CDJ and no computer.
 	snap, _ := json.Marshal(prolink.Snapshot{Devices: []prolink.Device{{Name: "CDJ-3000", Number: 2, Address: "127.63.0.7", PacketType: 0x06, LastSeen: time.Now()}}})
 	os.WriteFile(filepath.Join(e.s.cfg.StateDir, "prolink.json"), snap, 0o644)

@@ -477,6 +477,7 @@ func (g *tidalGateway) rbxPrepare(ctx context.Context, id int64, ref trackRef) (
 		}
 	}
 	log.Printf("stream-sync: load track=%d provider=rekordbox step=find result=ready via=%s", id, via)
+	rbxAnalysisJobs.Add(1)
 	go g.rbxWriteAnalysis(id, parts[1], uint32(tid), rbPath, file)
 	ref.file, ref.drive = file, root
 	g.mu.Lock()
