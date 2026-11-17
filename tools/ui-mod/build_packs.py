@@ -5879,7 +5879,8 @@ SHADOW_LAYER = r"""
             while (p && (p instanceof RowLayout || p instanceof ColumnLayout || p instanceof GridLayout || p instanceof StackLayout || p instanceof Row || p instanceof Column || p instanceof Grid || p instanceof Flow)) p = p.parent
             return p
         }
-        readonly property int deck: typeof root !== "undefined" && root && root.scShadowDeckFor ? root.scShadowDeckFor(owner) : 0
+        property bool scReady: false
+        readonly property int deck: scReady && typeof root !== "undefined" && root && root.scShadowDeckFor ? root.scShadowDeckFor(owner) : 0
         readonly property bool active: typeof root !== "undefined" && root && root.scShadowVisible && root.scShadowVisible(deck)
         readonly property bool wave: "@KIND@" === "waveform"
         readonly property bool overview: "@KIND@" === "overview"
@@ -6104,7 +6105,7 @@ SHADOW_LAYER = r"""
         }
         onActiveChanged: refreshGeometry()
         onParentChanged: if (geometryWatches) watchGeometry()
-        Component.onCompleted: { watchGeometry(); paletteUpdate.restart() }
+        Component.onCompleted: { scReady = true; watchGeometry(); paletteUpdate.restart() }
         Component.onDestruction: unwatchGeometry()
         transform: Matrix4x4 { matrix: scDisplay.basis }
         z: {
@@ -9155,7 +9156,7 @@ def edits(dev: bool):
             ("index: djFxView ? djFxView.selectionIndex : 0", "index: djFx.scFxIndex >= 0 ? djFx.scFxIndex : (djFxView ? djFxView.selectionIndex : 0)"),
             ("onAccepted: result => djFxView.selectEffect(result)", "onAccepted: result => djFx.scFxAccept(result)"),
             ("onRejected: djFxView.abortSelecting()", "onRejected: djFx.scFxAbort()"),
-            ("parameter: djFxView ? djFxView.selectParameter : null", "parameter: djFxView ? djFxView.selectParameter : null\n            text: djFx.scFxSelected >= 0 ? djFx.scFxNames[djFx.scFxSelected] : (parameter ? parameter.valueText : \"\")"),
+            ("parameter: djFxView ? djFxView.selectParameter : null", "parameter: djFxView ? djFxView.selectParameter : null\n            text: djFx.scFxSelected >= 0 ? djFx.scFxNames[djFx.scFxSelected].replace(\" (PX)\", \"\") : (parameter ? parameter.valueText : \"\")"),
         ]
         out["ControlSurfaceModules/ControlSurfaceModules/DJFxSelect.qml"] = [
             ("import QtQuick 2.12", "import QtQuick 2.12\nimport Planck 1.0"),

@@ -996,6 +996,24 @@ class UiModSourceTest(unittest.TestCase):
         finally:
             bp.ROOT = old_root
 
+    def test_shadow_layer_deck_binding_waits_for_construction(self):
+        # Walking the ancestors while parent/deckData were still being set up made Qt log
+        # 'Binding loop detected for property "deck"' for every track, performance and mini-deck layer.
+        self.assertIn("property bool scReady: false", bp.SHADOW_LAYER)
+        self.assertIn("readonly property int deck: scReady && ", bp.SHADOW_LAYER)
+        self.assertIn("Component.onCompleted: { scReady = true;", bp.SHADOW_LAYER)
+
+    def test_px_name_on_the_fx_bar_fits_the_name_column(self):
+        # "Jet Flanger (PX)" at 21 px ran into the BEATS column of the 160 px name button.
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            edits = bp.edits(False)
+        finally:
+            bp.ROOT = old_root
+        bar = "".join(rep for _, rep in edits["Skins/Embedded/Views/MainView/Fx/DJFx.qml"])
+        self.assertIn('djFx.scFxNames[djFx.scFxSelected].replace(" (PX)", "")', bar)
+
     def test_prime4_fx_knob_moves_one_effect_per_detent(self):
         old_root = bp.ROOT
         try:
