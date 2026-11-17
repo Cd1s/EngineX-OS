@@ -65,7 +65,7 @@ var sshReservedPorts = []int{8080, 8443, 6595, 13579}
 type SSHConfig struct {
 	Enabled          bool   `json:"enabled"`
 	Port             int    `json:"port"`
-	Password         string `json:"-"` // never persisted: chpasswd gets it once, HasPassword remembers that one was set
+	Password         string `json:"-"` // never persisted: only a password hash is stored on the deck
 	HasPassword      bool   `json:"hasPassword"`
 	HasAuthorizedKey bool   `json:"hasAuthorizedKey"`
 }
@@ -168,6 +168,20 @@ func sshRunning(ctx context.Context, runner SystemRunner) bool {
 
 // sshPersistKeyDir is where authorized_keys survives reboot; falls back to StateDir when absent.
 var sshPersistKeyDir = "/data/enginex"
+
+// chpasswd replaces files in /etc, which is read-only on Gen-2. Keep the shadow
+// copy on /data instead; openssl reads the password on stdin and produces crypt(3)'s SHA-512 hash.
+const sshSetPassword = `set -eu
+umask 077
+hash=$(printf '%s\n' "$1" | openssl passwd -6 -stdin)
+[ -f "$2" ] || cp "$3" "$2"
+awk -F: -v hash="$hash" -v day="$(($(date +%s)/86400))" '
+BEGIN { OFS=":" }
+$1 == "root" { $2=hash; $3=day; found=1 }
+{ print }
+END { if (!found) exit 1 }
+' "$2" > "$2.tmp"
+mv "$2.tmp" "$2"`
 
 func (s *Server) sshKeyStorePath() string {
 	if st, err := os.Stat(sshPersistKeyDir); err == nil && st.IsDir() {
@@ -344,6 +358,11 @@ func (s *Server) handleSSHPost(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, errors.New("invalid password: line breaks and NUL are not allowed"))
 		return
 	}
+	// OpenSSL passwd silently truncates stdin passwords after 256 bytes.
+	if setPassword && len(*in.Password) > 256 {
+		fail(w, http.StatusBadRequest, errors.New("invalid password: exceeds 256 bytes"))
+		return
+	}
 
 	setKey := in.AuthorizedKey != nil && strings.TrimSpace(*in.AuthorizedKey) != ""
 	if setKey && strings.ContainsRune(*in.AuthorizedKey, 0) {
@@ -382,31 +401,41 @@ func (s *Server) handleSSHPost(w http.ResponseWriter, r *http.Request) {
 	if in.Port != nil {
 		cfg.Port = *in.Port
 	}
+	shadowStore := filepath.Join(filepath.Dir(s.sshKeyStorePath()), "ssh-shadow")
+	if setPassword && deck {
+		if _, err := runner(r.Context(), "sh", "-c", sshSetPassword, "sh", *in.Password, shadowStore, "/etc/shadow"); err != nil {
+			fail(w, http.StatusInternalServerError, errors.New("could not set root password"))
+			return
+		}
+		cfg.HasPassword = true
+	}
 	if in.Port != nil && deck && unit == gen1SSHUnit {
 		if err := writeGen1SSHPort(cfg.Port); err != nil {
 			fail(w, http.StatusInternalServerError, errors.New("could not set the ssh port"))
 			return
 		}
 		_, _ = runner(r.Context(), "systemctl", "daemon-reload")
-	} else if in.Port != nil && deck {
-		// Apply port configuration drop-in if directory exists or via runner
-		portDropIn := fmt.Sprintf("[Service]\nExecStart=\nExecStart=/usr/sbin/sshd -D -e -p %d\n", cfg.Port)
+	} else if deck && unit != gen1SSHUnit && (in.Port != nil || setPassword || in.Enabled != nil && *in.Enabled) {
+		auth := ""
+		if _, err := os.Stat(shadowStore); cfg.HasPassword && err == nil {
+			if _, err := runner(r.Context(), "sh", "-c", `cmp -s "$1" "$2" || mount --bind "$1" "$2"`, "sh", shadowStore, "/etc/shadow"); err != nil {
+				fail(w, http.StatusInternalServerError, errors.New("could not activate root password"))
+				return
+			}
+			// Command-line options take precedence over stock 10-az0x.conf.
+			auth = " -o PasswordAuthentication=yes -o PermitRootLogin=yes"
+		}
+		portDropIn := fmt.Sprintf("[Service]\nExecStart=\nExecStart=/usr/sbin/sshd -D -e -p %d%s\n", cfg.Port, auth)
 		_ = os.MkdirAll(filepath.Dir(sshPortDropInPath), 0o755)
 		if err := os.WriteFile(sshPortDropInPath, []byte(portDropIn), 0o644); err != nil {
 			// read-only /etc (2nd-gen decks): /run is honoured by systemd until reboot
 			_ = os.MkdirAll(filepath.Dir(sshRunDropInPath), 0o755)
-			_ = os.WriteFile(sshRunDropInPath, []byte(portDropIn), 0o644)
+			if err := os.WriteFile(sshRunDropInPath, []byte(portDropIn), 0o644); err != nil {
+				fail(w, http.StatusInternalServerError, errors.New("could not configure SSH"))
+				return
+			}
 		}
 		_, _ = runner(r.Context(), "systemctl", "daemon-reload") // the drop-in is ignored until reloaded
-	}
-
-	if setPassword && deck {
-		// The password is a positional parameter, so the shell never expands it.
-		if _, err := runner(r.Context(), "sh", "-c", `printf 'root:%s\n' "$1" | chpasswd`, "sh", *in.Password); err != nil {
-			fail(w, http.StatusInternalServerError, errors.New("could not set root password"))
-			return
-		}
-		cfg.HasPassword = true
 	}
 
 	if in.Enabled != nil {
@@ -425,7 +454,7 @@ func (s *Server) handleSSHPost(w http.ResponseWriter, r *http.Request) {
 				_, _ = runner(r.Context(), "systemctl", "mask", "--runtime", unit)
 			}
 		}
-	} else if in.Port != nil && cfg.Enabled && deck {
+	} else if (in.Port != nil || setPassword) && cfg.Enabled && deck {
 		_, _ = runner(r.Context(), "systemctl", "restart", unit)
 	} else if setKey && cfg.Enabled && deck {
 		// A first key lets the key-only unit start (ConditionFileNotEmpty); it
