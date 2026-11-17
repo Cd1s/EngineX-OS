@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"io"
@@ -16,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -74,6 +76,7 @@ func newRbxEnv(t *testing.T, paths map[uint32]string) *rbxEnv {
 	snap, _ := json.Marshal(prolink.Snapshot{Devices: []prolink.Device{{Name: "rekordbox", Number: 17, Address: "127.0.0.1", PacketType: 0x29, LastSeen: time.Now()}}})
 	os.WriteFile(filepath.Join(state, "prolink.json"), snap, 0o644)
 	e.s = New(Config{AccessToken: "code", UIDir: ui, StateDir: state, MediaRoot: media, DeezerURL: fakeDeezer(t).URL}, nil)
+	e.s.rbxPresence = &rbxPresence{ip: "127.0.0.1", checked: time.Now(), seen: time.Now()}
 	mounts, _ := json.Marshal([]RemoteMount{{ID: "m", Name: "Music", MountPoint: e.share, Enabled: true}})
 	os.WriteFile(e.s.mountsConfigPath(), mounts, 0o644)
 	srv := httptest.NewServer(e.s)
@@ -210,6 +213,100 @@ func TestRekordboxPresenceUsesPlayerTimeout(t *testing.T) {
 				t.Error("return did not refresh UI digest")
 			}
 		})
+	}
+}
+
+// Announcements stay fresh with LINK off; only the database-port service
+// distinguishes an offered library. Nothing from disk may pre-confirm it at boot.
+func TestRekordboxPresenceRequiresAnOfferedLibrary(t *testing.T) {
+	e := newRbxEnv(t, nil)
+	t.Setenv("ENGINEX_PROLINK_STATE", filepath.Join(t.TempDir(), "missing.json"))
+	ln, err := net.Listen("tcp4", "127.0.0.23:12523")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var offered atomic.Uint32
+	var queries atomic.Int32
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			queries.Add(1)
+			c.SetDeadline(time.Now().Add(time.Second))
+			query := make([]byte, 19)
+			if _, err := io.ReadFull(c, query); err == nil && string(query) == "\x00\x00\x00\x0fRemoteDBServer\x00" {
+				var port [2]byte
+				binary.BigEndian.PutUint16(port[:], uint16(offered.Load()))
+				c.Write(port[:])
+			}
+			c.Close()
+		}
+	}()
+	t.Cleanup(func() { ln.Close(); <-done })
+	cfg := e.s.cfg
+	s := New(cfg, nil) // no confirmed library, as after boot or a suite restart
+	t.Cleanup(s.Close)
+	status := func(server *Server) bool {
+		t.Helper()
+		b, _ := json.Marshal(prolink.Snapshot{Devices: []prolink.Device{{Name: "rekordbox", Number: 17, Address: "127.0.0.23", PacketType: 0x29, LastSeen: time.Now()}}})
+		if err := os.WriteFile(filepath.Join(cfg.StateDir, "prolink.json"), b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		r := httptest.NewRequest("GET", "/v1/enginex/ui", nil)
+		r.RemoteAddr = "127.0.0.1:1234"
+		w := httptest.NewRecorder()
+		start := time.Now()
+		server.ServeHTTP(w, r)
+		if time.Since(start) > 500*time.Millisecond {
+			t.Error("presence blocked the UI request")
+		}
+		var v uiSettings
+		if w.Code != 200 {
+			t.Fatalf("UI status: %d", w.Code)
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &v); err != nil {
+			t.Fatal(err)
+		}
+		present := slices.Contains(v.Sources, rekordboxScope)
+		if slices.Contains(v.LoggedIn, rekordboxScope) != present || (v.RekordboxName != "") != present {
+			t.Error("source/name/login presence differ")
+		}
+		return present
+	}
+	wait := func(want bool, limit time.Duration) {
+		t.Helper()
+		end := time.Now().Add(limit)
+		for {
+			if status(s) == want {
+				return
+			}
+			if time.Now().After(end) {
+				t.Fatalf("presence did not become %t", want)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	started := time.Now()
+	if status(s) {
+		t.Fatal("announcements alone showed a source at boot with LINK off")
+	}
+	offered.Store(12524)
+	wait(true, 7*time.Second)
+	offered.Store(0) // LINK off, but every status call continues the UDP announcements
+	wait(false, 14*time.Second)
+	restarted := New(cfg, nil)
+	t.Cleanup(restarted.Close)
+	if status(restarted) {
+		t.Fatal("restart restored a source from the persisted host")
+	}
+	offered.Store(12524)
+	wait(true, 7*time.Second)
+	if queries.Load() > int32(time.Since(started)/rbxPresenceEvery)+2 {
+		t.Fatal("polled the computer on every UI request")
 	}
 }
 
