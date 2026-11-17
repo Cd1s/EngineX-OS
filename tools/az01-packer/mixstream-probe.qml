@@ -76,6 +76,11 @@ Item {
         check(!!row && row.visible, "Stems EQ row is in Settings -> Playback")
         const segments = all("ListEntryButton", row)
         check(segments.length === 2, "one DECK segment per channel")
+        // Without a Stems track the native access filter rejects mode 1. Test the
+        // shipped row's bindings and click handler with signal-emitting translators.
+        for (let ch = 0; ch < 2; ch++)
+            row.modes[ch] = Qt.createQmlObject('import QtQml; QtObject { property int index: 0 }', page)
+        row.values = row.values.slice() // refresh the binding's dependencies on the test translators
         // The same kind of row as stock builds it, for the picture and the geometry to be compared with.
         const stockButton = all("ListEntryButton", page).filter(b => segments.indexOf(b) < 0)[0]
         let stockRow = stockButton
@@ -86,14 +91,17 @@ Item {
             // Stock's own row buttons: same width as the entry says, same height as the buttons of the other rows.
             console.warn("X166 STEMSEQ_GEOM|channel=" + ch + "|" + seg.width + "x" + seg.height + "|stock=" + (stockButton ? stockButton.width + "x" + stockButton.height : "none") + "|")
             check(!!stockButton && seg.width === row.entryWidth && seg.height === stockButton.height, "Stems EQ channel " + ch + " is a stock-sized row button")
-            const own = tr("/Engine/Mixer/Channel" + ch + "/ChannelStrip/Mode")
-            const other = tr("/Engine/Mixer/Channel" + (3 - ch) + "/ChannelStrip/Mode")
+            const own = row.modes[ch - 1]
+            const other = row.modes[2 - ch]
             const before = other.index
+            check(own.index === 0 && !seg.down, "Stems EQ starts off " + ch)
             seg.clicked()
-            // Native access filter can reject Stems without a stems track.
-            console.warn("X166 STEMSEQ|channel=" + ch + "|mode=" + own.index + "|lit=" + seg.down + "|")
+            check(own.index === 1 && seg.down, "Stems EQ click turns on and highlights " + ch)
             check(other.index === before, "Stems EQ row keeps the other channel " + ch)
-            check(seg.down === (own.index === 1), "Stems EQ highlight follows the actual mode " + ch)
+            seg.clicked()
+            check(own.index === 0 && !seg.down, "Stems EQ click turns off and clears highlight " + ch)
+            check(other.index === before, "Stems EQ row keeps the other channel " + ch)
+            console.warn("X166 STEMSEQ|channel=" + ch + "|mock-mode-sequence=0,1,0|PASS|")
         }
         row.grabToImage(function(r) { check(r.saveToFile("/tmp/mx-stems-eq-row.png"), "picture of the Stems EQ row") }, Qt.size(row.width * 2, row.height * 2))
     }

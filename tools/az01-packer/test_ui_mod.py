@@ -7949,7 +7949,9 @@ class MixstreamPadsLayoutTest(unittest.TestCase):
         row = bp.STEMS_EQ_DECKS_ENTRY
         self.assertIn('EntryBase.ListEntry {', row)
         self.assertIn('objectName: "EngineX_StemsEqDecks"', row)
-        self.assertIn('visible: root.scIsMixstream && root.scHasStemsEq', row)
+        self.assertIn('EntryBase.PrefsConditionalEntry {', row)
+        self.assertIn('active: root.scIsMixstream && root.scHasStemsEq', row)
+        self.assertIn('sourceComponent: EntryBase.ListEntry {', row)
         self.assertIn('values: ["Deck 1", "Deck 2"]', row)
         self.assertIn('"/Engine/Mixer/Channel" + ch + "/ChannelStrip/Mode"', row)
         self.assertIn('currentValue: values.filter((name, i) => modes[i].index === 1)', row)  # each DECK lit on its own
@@ -7968,6 +7970,51 @@ class MixstreamPadsLayoutTest(unittest.TestCase):
                 self.assertNotIn("ControlCenter_StemsEq", "".join(new for _, new in edits[root + "Views/ControlCenter/Tabs/ControlCenterTab.qml"]))
         finally:
             bp.ROOT = old_root
+
+    def test_stems_eq_row_constructs_only_where_the_mixer_exists_and_toggles(self):
+        row = bp.STEMS_EQ_DECKS_ENTRY
+        active = re.search(r'^\s*active:\s*(.*)$', row, re.M)
+        # A plain hidden ListEntry still constructs its bindings; only the Loader gates construction.
+        gate = active.group(1) if 'sourceComponent: EntryBase.ListEntry {' in row and active else 'true'
+        values = re.search(r'^\s*values:\s*(.*)$', row, re.M).group(1)
+        modes = re.search(r'^\s*readonly property var modes:\s*(.*)$', row, re.M).group(1)
+        current = re.search(r'^\s*currentValue:\s*(.*)$', row, re.M).group(1)
+        selected = re.search(r'onSelected: function\(index\)\s*\{([^}]+)\}', row).group(1)
+        script = f"""
+const assert = require('assert');
+function construct(root, Planck) {{
+    if (!({gate})) return null;
+    const values = {values};
+    const modes = {modes};
+    return {{values, current: () => ({current}), select(index) {{{selected}}}}};
+}}
+for (const board of ['JP07', 'JP08', 'JP13', 'JP14']) {{
+    let reads = 0;
+    const page = construct({{scIsMixstream:false, scHasStemsEq:false}},
+        {{getProperty() {{ reads++; return null; }}}});
+    assert.equal(page, null, board); assert.equal(reads, 0, board+' read a missing mixer');
+}}
+let reads = [];
+const channels = [{{index:0}}, {{index:0}}];
+const Planck = {{getProperty(path) {{
+    reads.push(path); const ch = Number(path.match(/Channel([12])/)[1]);
+    return {{translator:channels[ch-1]}};
+}}}};
+assert.equal(construct({{scIsMixstream:true,scHasStemsEq:false}}, Planck), null);
+assert.deepEqual(reads, []);
+const page = construct({{scIsMixstream:true,scHasStemsEq:true}}, Planck);
+assert.deepEqual(reads, [1,2].map(ch=>'/Engine/Mixer/Channel'+ch+'/ChannelStrip/Mode'));
+assert.deepEqual(page.current(), []);
+for (let ch=0; ch<2; ch++) {{
+    page.select(ch); assert.equal(channels[ch].index,1);
+    assert.equal(channels[1-ch].index,0); assert.deepEqual(page.current(),[page.values[ch]]);
+    page.select(ch); assert.equal(channels[ch].index,0); assert.deepEqual(page.current(),[]);
+}}
+channels[0].index=1; assert.deepEqual(page.current(),[page.values[0]]);
+channels[1].index=1; assert.deepEqual(page.current(),page.values);
+"""
+        result = subprocess.run(['node', '-e', script], text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_mixstream_pitch_bend_beat_jump_and_fx_slots(self):
         rows = bp.load_dict()

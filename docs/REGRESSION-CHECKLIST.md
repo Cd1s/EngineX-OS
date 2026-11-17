@@ -6,7 +6,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 
 ---
 
-## Regression Table (316 Rows)
+## Regression Table (317 Rows)
 
 | # | Behaviour that must keep working | Issue / commit that fixed it | How it is checked (automated test name, or exact real-deck / sandbox step) | Release gate / deck acceptance / recording coverage |
 | --- | --- | --- | --- | --- |
@@ -327,6 +327,8 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 | 315 | **Selecting a USB drive never opens a Settings copy failure dialog**: a failed passive drive-profile preview only warns and dismisses the stock prompt; a valid preview still asks Yes/No, No changes nothing, and a failure after Yes or a user-started copy still reports an error; the staged native profile-load path sends no preview | `agent/5305-settings-copy-usb`, `2b85fd5e` | `test_settings_copy_ui.py::SettingsCopyUI::test_selecting_a_drive_never_opens_the_settings_copy_dialog`; source sandbox before/after on JC11 and JP07 | Select drives with and without valid profiles: no copy-failure modal on selection; valid profiles still ask before importing, user-started and peer copy dialogs remain |
 
 | 316 | **A layer switch costs the UI pack little more than stock: the Mixstream-only Pad controls (Sweep FX triangle, Beat Jump bank) are created only on Mixstream** (#222 follow-up, SC LIVE 4 user: a layer switch takes about a second with four decks playing. Stock rebuilds the active deck's Pads view and header at every switch, about 480 objects; the pack added five hidden Mixstream buttons to every Pads instance on every model, rebuilt with it. Sandbox, GUI-thread CPU per switch over stock: SC LIVE 4 17 ms → 7.5 ms, PRIME 4 15 → 5, SC5000 11 → 7; stock itself takes 45-110 ms there) | #222 | `tools/az01-packer/test_ui_mod.py` (`MixstreamPadsLayoutTest`, item 6); `tools/az01-packer/layer-switch-sandbox.sh` (JP21, JC11, JP07: stock vs pack); `mixstream-sandbox.sh` (NH08: bank and triangle still shown and working) | `[NO AUTOMATED TEST]` on hardware: an SC LIVE 4 with four decks playing switches layers about as fast as in safe mode (stock UI); on a Mixstream the Beat Jump bank and Sweep FX triangle still show and work |
+
+| 317 | **Settings > Playback never constructs Mixstream Stems EQ channel bindings on players without a software mixer**: the native conditional-entry Loader is active only when the Mixstream row is offered; both DECK segments follow live modes and independently toggle off/on/off | Combined delta review C (P1/P2/P3), batch16 | `test_ui_mod.py::MixstreamPadsLayoutTest::test_stems_eq_row_constructs_only_where_the_mixer_exists_and_toggles`; native NH08 `mixstream-probe.qml` uses signal-emitting test translators to prove both highlight states; JP07/JP13/JC11 gates | On JP07/JP08/JP13/JP14 open Playback without mixer TypeErrors; on Mixstream, with a playable Stems track, verify both channels switch independently |
 
 ## Automated Test Gaps (`[NO AUTOMATED TEST]`)
 

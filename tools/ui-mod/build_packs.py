@@ -5829,14 +5829,16 @@ SYNC_TILE = """
 # ListEntry row: each DECK segment is lit while that channel's EQ knobs control the Stems, and a tap flips only that channel.
 # The mode is Engine's own live property, like the buttons it replaces: nothing is stored, so the web console has no row.
 STEMS_EQ_DECKS_ENTRY = """
-		EntryBase.ListEntry {
-			objectName: "EngineX_StemsEqDecks"
-			text: "Stems EQ"
-			visible: root.scIsMixstream && root.scHasStemsEq
-			values: ["Deck 1", "Deck 2"]
-			readonly property var modes: [1, 2].map(ch => Planck.getProperty("/Engine/Mixer/Channel" + ch + "/ChannelStrip/Mode").translator)
-			currentValue: values.filter((name, i) => modes[i].index === 1)
-			onSelected: function(index) { modes[index].index = modes[index].index === 1 ? 0 : 1 }
+		EntryBase.PrefsConditionalEntry {
+			active: root.scIsMixstream && root.scHasStemsEq
+			sourceComponent: EntryBase.ListEntry {
+				objectName: "EngineX_StemsEqDecks"
+				text: "Stems EQ"
+				values: ["Deck 1", "Deck 2"]
+				readonly property var modes: [1, 2].map(ch => Planck.getProperty("/Engine/Mixer/Channel" + ch + "/ChannelStrip/Mode").translator)
+				currentValue: values.filter((name, i) => modes[i].index === 1)
+				onSelected: function(index) { modes[index].index = modes[index].index === 1 ? 0 : 1 }
+			}
 		},
 """
 
