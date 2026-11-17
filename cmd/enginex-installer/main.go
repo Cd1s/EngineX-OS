@@ -1693,7 +1693,12 @@ func main() {
 	flag.Parse()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	err := run(ctx, o)
+	var err error
+	if args := flag.Args(); len(args) > 0 && args[0] == "prepare-usb" {
+		err = prepareUSB(ctx, args[1:], os.Stdout)
+	} else {
+		err = run(ctx, o)
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "错误 / Error:", err)
 	}

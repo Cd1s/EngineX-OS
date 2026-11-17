@@ -51,7 +51,7 @@ func DirSize(dir string) int64 {
 
 // StagedDir is where Stage puts players' libraries on a Denon drive; bridge
 // imports what it finds there, under a "[Pro DJ Link: <name>]" folder (#59).
-const StagedDir = ".prolink-cache"
+const StagedDir = rekordbox.StagedDir
 
 // exportName is what a deck of ours calls itself on the link when it shares its library
 // as a player (export.go).
@@ -69,8 +69,7 @@ func StagedExport(dir string) string { return filepath.Join(dir, pdbPath) }
 
 // SafeRel turns a path from a remote export into one that stays inside its root.
 func SafeRel(p string) (string, bool) {
-	rel := filepath.Clean(strings.TrimPrefix(p, "/"))
-	return rel, p != "" && filepath.IsLocal(rel)
+	return rekordbox.SafeRel(p)
 }
 
 // Stage copies a player's Rekordbox library from one media slot into dst, in

@@ -789,17 +789,12 @@ func startEngineExportWorker(root, mdbPath, sourceStamp, stamp string, progress 
 }
 
 // generatedMarker holds the size and mtime of the export.pdb this bridge wrote.
-const generatedMarker = "PIONEER/rekordbox/.enginex-generated"
+const generatedMarker = rekordbox.GeneratedMarker
 
 // GeneratedExport reports whether root's export.pdb is the one this bridge wrote.
 // Once rekordbox exports to the stick again, the file is the DJ's again.
 func GeneratedExport(root string) bool {
-	st, err := os.Stat(filepath.Join(root, "PIONEER", "rekordbox", "export.pdb"))
-	if err != nil {
-		return false
-	}
-	b, err := os.ReadFile(filepath.Join(root, generatedMarker))
-	return err == nil && string(b) == pdbStamp(st)
+	return rekordbox.GeneratedExport(root)
 }
 
 func hasRegularFile(path string) bool {

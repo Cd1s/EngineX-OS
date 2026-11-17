@@ -17,7 +17,6 @@ import (
 
 	"github.com/Cd1s/EngineX-OS/pkg/compat"
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
-	"github.com/Cd1s/EngineX-OS/pkg/prolink"
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/unicode/norm"
@@ -105,7 +104,7 @@ func exportCandidates(r *compat.Resolver, mount string) ([]exportCandidate, erro
 	}
 
 	var pdb *exportCandidate
-	if !prolink.GeneratedExport(mount) {
+	if !rekordbox.GeneratedExport(mount) {
 		c, ok, err := resolve("PIONEER/rekordbox/export.pdb")
 		if err != nil {
 			return nil, err

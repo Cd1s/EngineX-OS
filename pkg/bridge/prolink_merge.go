@@ -9,7 +9,6 @@ import (
 	"sort"
 
 	"github.com/Cd1s/EngineX-OS/pkg/compat"
-	"github.com/Cd1s/EngineX-OS/pkg/prolink"
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
 
@@ -34,11 +33,11 @@ func stagedPDB(root string) string {
 // stagedExports lists the libraries rb-bridge staged from Pioneer players into
 // <mount>/.prolink-cache/<name>/ (#59), in name order.
 func stagedExports(mount string) []string {
-	dirs, _ := os.ReadDir(filepath.Join(mount, prolink.StagedDir))
+	dirs, _ := os.ReadDir(filepath.Join(mount, rekordbox.StagedDir))
 	var names []string
 	for _, d := range dirs {
 		if d.IsDir() && d.Type()&os.ModeSymlink == 0 {
-			if stagedPDB(filepath.Join(mount, prolink.StagedDir, d.Name())) != "" {
+			if stagedPDB(filepath.Join(mount, rekordbox.StagedDir, d.Name())) != "" {
 				names = append(names, d.Name())
 			}
 		}
@@ -51,7 +50,7 @@ func stagedExports(mount string) []string {
 func stagedStamp(mount string) string {
 	s := ""
 	for _, name := range stagedExports(mount) {
-		if st, err := os.Stat(stagedPDB(filepath.Join(mount, prolink.StagedDir, name))); err == nil {
+		if st, err := os.Stat(stagedPDB(filepath.Join(mount, rekordbox.StagedDir, name))); err == nil {
 			s += fmt.Sprintf(" %s:%d:%d", name, st.Size(), st.ModTime().UnixNano())
 		}
 	}
@@ -86,7 +85,7 @@ func mergeStaged(mount string, l *rekordbox.Library) {
 		if k+1 >= 1<<(32-stagedIDBits) {
 			break
 		}
-		staged, err := rekordbox.ReadPDB(stagedPDB(filepath.Join(mount, prolink.StagedDir, name)))
+		staged, err := rekordbox.ReadPDB(stagedPDB(filepath.Join(mount, rekordbox.StagedDir, name)))
 		if err != nil {
 			log.Printf("rb-bridge: staged %s: %v", name, err)
 			continue
@@ -96,12 +95,12 @@ func mergeStaged(mount string, l *rekordbox.Library) {
 		merged := *l
 		merged.Tracks = append([]rekordbox.Track(nil), l.Tracks...)
 		merged.Playlists = append([]rekordbox.Playlist(nil), l.Playlists...)
-		resolver, err := compat.NewResolver(filepath.Join(mount, prolink.StagedDir, name))
+		resolver, err := compat.NewResolver(filepath.Join(mount, rekordbox.StagedDir, name))
 		if err != nil {
 			continue
 		}
 		into := func(p string) string {
-			rel, ok := prolink.SafeRel(p)
+			rel, ok := rekordbox.SafeRel(p)
 			if !ok {
 				return ""
 			}
@@ -109,7 +108,7 @@ func mergeStaged(mount string, l *rekordbox.Library) {
 			if err != nil {
 				return ""
 			}
-			return "/" + path.Join(prolink.StagedDir, name, filepath.ToSlash(rel))
+			return "/" + path.Join(rekordbox.StagedDir, name, filepath.ToSlash(rel))
 		}
 		ids := map[uint32]bool{}
 		for _, t := range staged.Tracks {
