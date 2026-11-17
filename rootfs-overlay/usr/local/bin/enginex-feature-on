@@ -1,0 +1,13 @@
+#!/bin/sh
+# enginex-feature-on NAME...: exit 0 when no name is switched off in hook-disable.conf
+# (the console's Settings -> Features), else 1. Units use it as ExecCondition, so systemd
+# skips a service the DJ switched off (rb-bridge, deemixd).
+# The file: names separated by commas, blanks or lines, '#' starts a comment.
+conf="${ENGINEX_CUSTOM:-/data/enginex}/hook-disable.conf"
+[ -f "$conf" ] || exit 0
+for name in "$@"; do
+    if sed 's/#.*//' "$conf" | tr ',\t\r ' '\n\n\n\n' | grep -qx -- "$name"; then
+        exit 1
+    fi
+done
+exit 0

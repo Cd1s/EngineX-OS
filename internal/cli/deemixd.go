@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"syscall"
 	"time"
+
+	"github.com/Cd1s/EngineX-OS/pkg/webui"
 )
 
 const (
@@ -24,6 +26,16 @@ var (
 	// minimal-club-mode writes this to pause the downloader; a var so tests can point it elsewhere.
 	deemixdPausedFlag = "/data/enginex/mods-state/minimal-club-mode/paused.json"
 )
+
+// deemixdOff: the console switched the deemixd service off (hook-disable.conf). The
+// second generation leaves its unit out at boot; the first starts it here.
+var deemixdOff = func() bool { return webui.HookFeatureOff("deemixd") }
+
+// supervisesDeemixd reports whether stream-sync starts and keeps bin running: it is
+// set, no socket replaces it, base is its local address, and it is not switched off.
+func supervisesDeemixd(bin, socket, base string) bool {
+	return bin != "" && socket == "" && sameDeemixd(base) && !deemixdOff()
+}
 
 // sameDeemixd reports whether base names the address enginex-deemixd binds.
 func sameDeemixd(base string) bool {

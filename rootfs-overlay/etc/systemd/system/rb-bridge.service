@@ -11,6 +11,7 @@ Slice=enginex-background.slice
 CPUAffinity=3
 Nice=19
 IOSchedulingClass=idle
+ExecCondition=/usr/local/bin/enginex-feature-on rb-bridge
 ExecStart=/usr/local/bin/rb-bridge --prolink
 Restart=always
 RestartSec=3

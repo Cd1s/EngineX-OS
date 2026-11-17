@@ -690,6 +690,10 @@ SERVICES_MAIN = """
 	readonly property string scBoard: typeof Config !== "undefined" && Config && Config.device ? String(Config.device.name || "") : ""
 	readonly property bool scIsPlayerBoard: scPlayer || ["JP07", "JP08", "JP13", "JP14"].indexOf(scBoard) >= 0
 	readonly property bool scHasMixer: !scIsPlayerBoard
+	// Hook features the running Engine has off (hook-disable.conf): their rows hide.
+	// Empty when stream-sync does not know: every row stays.
+	property var scFeaturesOff: []
+	function scOff(name) { return scFeaturesOff.indexOf(name) >= 0 }
 	readonly property bool scCanFourDeck: scIsPlayerBoard || ["JC11", "JC11S", "JP21", "JP24"].indexOf(scBoard) >= 0
 	readonly property bool scHasAutoLoopKnob: typeof Config !== "undefined" && Config && Config.device && Config.device.hasAutoLoopKnob !== undefined ? !!Config.device.hasAutoLoopKnob : ["NH08", "NH08S", "NH10"].indexOf(scBoard) < 0
 	readonly property bool scIsMixstream: typeof Config !== "undefined" && Config && Config.audio && Config.audio.fx && Config.audio.fx.hasNHFx !== undefined ? !!Config.audio.fx.hasNHFx : ["NH08", "NH08S", "NH10"].indexOf(scBoard) >= 0
@@ -3871,6 +3875,7 @@ SERVICES_MAIN = """
 		scLanStems = root.scLanStemsLine ? root.scLanStemsLine(root.scLanStemsInfo, scLang) : ""
 		scMasterLimiter = !!v.masterLimiter
 		scAutoGain = !!v.autoGain
+		scFeaturesOff = Array.isArray(v.featuresOff) ? v.featuresOff : []
 		scAutoAnalyze = !!v.autoAnalyze
 		scOmniSource = !!v.omniSource
 		scRemoteLoad = !!v.remoteLoad
@@ -5153,6 +5158,7 @@ STREAM_SWITCHES = """
 		model: root.scServices.filter(s => s.id !== "rekordbox") // a computer on the link, not a service to switch
 		SwitchEntry {
 			text: modelData.name
+			visible: !root.scOff("gateway")
 			icon.source: root.scIcon(modelData.id)
 			icon.useOriginal: true
 			checked: root.scSources.indexOf(modelData.id) >= 0
@@ -5177,6 +5183,7 @@ ListEntry {
 QUALITY_ENTRY = """
 		EntryBase.ListEntry {
 			text: "Streaming Quality"
+			visible: !root.scOff("gateway")
 			readonly property var ids: ["flac", "320k"]
 			values: ["Lossless", "320kbps"]
 			currentValue: values[Math.max(0, ids.indexOf(root.scQuality))]
@@ -5184,6 +5191,7 @@ QUALITY_ENTRY = """
 		},
 		EntryBase.ListEntry {
 			text: "NetEase Download"
+			visible: !root.scOff("gateway")
 			readonly property var ids: ["official", "deemix"]
 			values: ["Official", "Deemix First"]
 			currentValue: values[Math.max(0, ids.indexOf(root.scNeteaseMode))]
@@ -5203,8 +5211,8 @@ def switch_entry(text, flag, key, extra=""):
 # Settings -> Services: streaming, live stream and Pro DJ Link. The gate probe looks
 # for objectName ControlCenter_LiveStream (it was a Control Center tile up to #50).
 SERVICES_ENTRIES = (QUALITY_ENTRY
-    + switch_entry("Live Stream", "scBroadcastOn", "broadcast", '\t\t\tobjectName: "ControlCenter_LiveStream"\n')
-    + switch_entry("Pro DJ Link", "scProlinkShare", "prolinkShare")
+    + switch_entry("Live Stream", "scBroadcastOn", "broadcast", '\t\t\tobjectName: "ControlCenter_LiveStream"\n\t\t\tvisible: !root.scOff("dsp-guards")\n')
+    + switch_entry("Pro DJ Link", "scProlinkShare", "prolinkShare", '\t\t\tvisible: !root.scOff("rb-bridge")\n')
     + switch_entry("Remote Load (LAN API)", "scRemoteLoad", "remoteLoad"))
 
 # User Profile -> Display: deck BPM decimal places (#229).
@@ -5218,14 +5226,14 @@ DISPLAY_ENTRIES = """
 """
 
 # User Profile -> Playback: audio DSP and playback.
-PLAYBACK_ENTRIES = (switch_entry("Master Soft Clipper", "scMasterLimiter", "masterLimiter")
-    + switch_entry("Auto-Gain (0 dB Normalize)", "scAutoGain", "autoGain")
-    + switch_entry("Echo Out", "scUpfaderEcho", "upfaderEcho", "\t\t\tvisible: root.scHasMixer\n")
+PLAYBACK_ENTRIES = (switch_entry("Master Soft Clipper", "scMasterLimiter", "masterLimiter", '\t\t\tvisible: !root.scOff("dsp-guards")\n')
+    + switch_entry("Auto-Gain (0 dB Normalize)", "scAutoGain", "autoGain", '\t\t\tvisible: !root.scOff("dsp-guards")\n')
+    + switch_entry("Echo Out", "scUpfaderEcho", "upfaderEcho", '\t\t\tvisible: root.scHasMixer && !root.scOff("dsp-guards")\n')
     + switch_entry("Stems EQ Mode", "scStemsEqMode", "stemsEqMode", "\t\t\tvisible: root.scHasStemsEq\n") + """
 		EntryBase.ListEntry {
 			text: "Color FX Style"
 			// Played by each channel's filter knob; shown only where the hook installed that (its ready marker).
-			visible: root.scColorFxAvailable
+			visible: root.scColorFxAvailable && !root.scOff("dsp-guards")
 			readonly property var ids: ["off", "spiral", "pitch_echo", "slip_roll", "dub_echo", "space"]
 			values: ["Off", "Spiral", "Pitch Echo", "Slip Roll", "Dub Echo", "Space"]
 			currentValue: values[Math.max(0, ids.indexOf(root.scPioneerFx))]
@@ -5233,14 +5241,14 @@ PLAYBACK_ENTRIES = (switch_entry("Master Soft Clipper", "scMasterLimiter", "mast
 		},
 		EntryBase.ListEntry {
 			text: "PX Delay Time Mode"
-			visible: root.scHasPxDelay
+			visible: root.scHasPxDelay && !root.scOff("dsp-guards")
 			entryWidth: 232 // two long labels in every language ("Predeterminado (desactivado)"): the 136 px default made them run into each other
 			values: ["Default (Off)", "Milliseconds (ms)"]
 			currentValue: values[root.scFxTimeMode === "ms" ? 1 : 0]
 			onSelected: function(index) { root.scCall("fxTimeMode=" + (index === 1 ? "ms" : "beats")) }
 		},
 		Text {
-			visible: root.scHasPxDelay
+			visible: root.scHasPxDelay && !root.scOff("dsp-guards")
 			Layout.fillWidth: true
 			leftPadding: 24; rightPadding: 24
 			wrapMode: Text.WordWrap
@@ -5250,7 +5258,7 @@ PLAYBACK_ENTRIES = (switch_entry("Master Soft Clipper", "scMasterLimiter", "mast
 		},
 		EntryBase.ListEntry {
 			text: "PX Delay Time (ms)"
-			visible: root.scHasPxDelay && root.scFxTimeMode === "ms"
+			visible: root.scHasPxDelay && root.scFxTimeMode === "ms" && !root.scOff("dsp-guards")
 			readonly property var times: [10, 18, 33, 60, 110, 200, 364, 500, 663, 1207, 2197, 4000]
 			values: times.map(n => String(n))
 			currentValue: String(root.scFxTimeMs)

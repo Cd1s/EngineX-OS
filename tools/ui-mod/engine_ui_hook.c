@@ -44,6 +44,7 @@
 #include "pioneer_ms.h"
 #include "live_tap.h"
 #include "reverb_time.h"
+#include "hook_features.h"
 #ifndef SC_TAP_PATH
 #define SC_TAP_PATH "/tmp/enginex-broadcast.pcm" // pkg/broadcast DefaultInputPath
 #endif
@@ -144,14 +145,14 @@ int snd_pcm_sw_params_set_tstamp_type(void *pcm, void *params, int type) {
     int (*real)(void *, void *, int) = next_symbol(&alsa_tstamp_set_cache, "snd_pcm_sw_params_set_tstamp_type");
     if (!real) return -ENOSYS;
     // Engine already requests RAW in ALSADevice; never change an explicit monotonic clock.
-    if (is_engine() && type == 0) type = 2; // GETTIMEOFDAY -> MONOTONIC_RAW
+    if (is_engine() && type == 0 && hf_on(HF_ALSA_TIMESTAMP)) type = 2; // GETTIMEOFDAY -> MONOTONIC_RAW
     return real(pcm, params, type);
 }
 
 int snd_pcm_sw_params(void *pcm, void *params) {
     int (*real)(void *, void *) = next_symbol(&alsa_sw_cache, "snd_pcm_sw_params");
     if (!real) return -ENOSYS;
-    if (is_engine()) {
+    if (is_engine() && hf_on(HF_ALSA_TIMESTAMP)) {
         int (*get)(const void *, int *) = next_symbol(&alsa_tstamp_get_cache, "snd_pcm_sw_params_get_tstamp_type");
         int type;
         if (get && !get(params, &type) && type == 0) {
@@ -587,7 +588,7 @@ int getaddrinfo(const char *node, const char *service, const struct addrinfo *hi
     // on 32-bit decks (AZ04 uses PrimeUpdates.xml on autoupdate.airmusictech.com to download
     // its signed onboard Stems addon stems-child-process.sqsh.signed).
 #if !defined(__aarch64__)
-    if (is_engine() && official_update_host(node)) {
+    if (is_engine() && official_update_host(node) && hf_on(HF_VENDOR_UPDATE_BLOCK)) {
         if (result) *result = NULL;
         return EAI_NONAME;
     }
@@ -609,6 +610,7 @@ struct engine_edit {
     const char *expected, *replacement;
     uint32_t size;
     int group; // all sites of a group are applied together or not at all
+    int feature; // hook_features.h: HF_ALWAYS, or the switch that can leave this site stock
 };
 enum { EDIT_ONE, EDIT_STEMS, EDIT_GATEWAY, EDIT_AUX, EDIT_REC_STREAM, EDIT_REVERB, EDIT_GROUP_COUNT };
 
@@ -1833,7 +1835,7 @@ static void sclive_aux_changed(void *control, void *property, uintptr_t a, uintp
 A32_ONLY static void prepare_aux(uintptr_t base, size_t page) {
     aux_ready = 0;
     aux_process_jump[1] = aux_control_jump[1] = aux_init_jump[1] = 0;
-    if (strcmp(build->name, "5.3.0-sclive4") || !sclive4_board()) return;
+    if (strcmp(build->name, "5.3.0-sclive4") || !sclive4_board() || !hf_on(HF_AUX_INPUT)) return;
     // The config and both routing sites are one prerequisite set. A mismatch
     // leaves the feature disabled, including hasSoftwareLineIn / Mixer Menu.
     for (unsigned i = 0; i < build->edit_count; i++) {
@@ -1998,12 +2000,19 @@ A32_ONLY static void prepare_config(uintptr_t base, size_t page) {
     };
     const unsigned at[] = {1, 2, 3, 4, 8};
     for (unsigned i = 0; i < 5; i++) code[at[i]] = (code[at[i]] & ~0xfffu) | build->config_field[i];
-    if (!build->bt_send) code[24] = code[25] = 0xe320f000;
+    // A switched-off feature keeps the nop in its slot: Engine's own value stays.
+    const uint32_t nop = 0xe320f000;
+    if (!hf_on(HF_STEMS)) code[1] = code[4] = nop;
+    if (!hf_on(HF_BLUETOOTH)) code[2] = code[3] = nop;
+    if (!hf_on(HF_FILESYSTEMS)) code[8] = nop;
+    if (!build->bt_send || !hf_on(HF_BLUETOOTH)) code[24] = code[25] = nop;
     if (!strcmp(build->name, "5.3.0"))
-        code[5] = 0xe5c022a7;
-    if (build->config_zoom == 0x52c) {
+        code[5] = hf_on(HF_STEMS) ? 0xe5c022a7 : nop;
+    if (build->config_zoom == 0x52c && hf_on(HF_STEMS_EQ)) {
         // #152: unlock native 3-band Stems Level EQ (ChannelStrip) on all 5.3.0 models.
         code[6] = 0xe5c02054;
+    }
+    if (build->config_zoom == 0x52c && hf_on(HF_SWEEP_FX)) {
         // Keep hasNHFx: Mixstream's Main FX switches still need Nh effects.
         // Only its channel Sweep FX collection changes; every non-NH config
         // retains these bytes, including models with Beat Jump disabled.
@@ -2013,13 +2022,13 @@ A32_ONLY static void prepare_config(uintptr_t base, size_t page) {
                                      0x15c020e1, 0x15c0219c, 0x15c0219d, 0x15c024cd};
         memcpy(code + 17, mixstream, sizeof mixstream);
     }
-    if (build->config_zoom) {
+    if (build->config_zoom && hf_on(HF_ZOOM30)) {
         // #77: the players' 30 s zoom-out limit on every model (same SoC; Engine
         // sets 10 s on the all-in-ones). No flags touched; never above 30 in 32-bit.
         code[15] = 0xe3a0201e;
         code[16] = 0xe5802000 | build->config_zoom;
     }
-    if (!strcmp(build->name, "5.3.0") && four_deck_layout() > 0) {
+    if (!strcmp(build->name, "5.3.0") && hf_on(HF_FOUR_DECK) && four_deck_layout() > 0) {
         const uint32_t unlock[] = {0xe5d02239, 0xe3520000, 0x13a02004, 0x15802090, 0x13a02000, 0x15c02239};
         memcpy(code + 9, unlock, sizeof unlock);
         four_deck_pad_on = player_board();
@@ -2066,55 +2075,55 @@ A32_ONLY static void prepare_stems_feature(uintptr_t base, size_t page) {
 // ported: they would write A32 code into an AArch64 Engine; the SQLite hook and
 // the DSP guards have AArch64 forms (function_trampoline, install_dsp_hooks).
 static const struct engine_edit edits_az04[] = {
-    {0x1d40f28u, "aac", "mp3", 4, EDIT_ONE},
+    {0x1d40f28u, "aac", "mp3", 4, EDIT_ONE, HF_GATEWAY},
     // TidalAPI base URL -> stream-sync /v1/
     {0x1dbff30u, "\x4c\x51\x52\x57\x5b\x13\x05\x04\x4d\x5d\x47\x01\x44\x58\x56\x52",
-        "\x4c\x51\x52\x57\x12\x06\x05\x1a\x1e\x1a\x00\x1f\x1e\x01\x1c\x02", 16, EDIT_GATEWAY},
-    {0x1dc0ee0u, "\x58\x1b\x55\x58\x55\x16\x4c\x0a", "\x0e\x0d\x06\x0f\x08\x16\x4c\x0a", 8, EDIT_GATEWAY},
+        "\x4c\x51\x52\x57\x12\x06\x05\x1a\x1e\x1a\x00\x1f\x1e\x01\x1c\x02", 16, EDIT_GATEWAY, HF_GATEWAY},
+    {0x1dc0ee0u, "\x58\x1b\x55\x58\x55\x16\x4c\x0a", "\x0e\x0d\x06\x0f\x08\x16\x4c\x0a", 8, EDIT_GATEWAY, HF_GATEWAY},
     // TidalAPI auth URL -> stream-sync /au//
     {0x1dbff40u, "\x3f\x2c\x2d\x2a\x28\x66\x72\x71\x3e\x15\x15\x0a\x4d\x10\x0c\x02",
-        "\x3f\x2c\x2d\x2a\x61\x73\x72\x6f\x6d\x57\x4f\x52\x4d\x54\x4b\x57", 16, EDIT_GATEWAY},
-    {0x1dc0ee8u, "\x06\x04\x47\x09\x04\x01\x42\x18", "\x5d\x50\x59\x52\x5b\x43\x0c\x1b", 8, EDIT_GATEWAY},
+        "\x3f\x2c\x2d\x2a\x61\x73\x72\x6f\x6d\x57\x4f\x52\x4d\x54\x4b\x57", 16, EDIT_GATEWAY, HF_GATEWAY},
+    {0x1dc0ee8u, "\x06\x04\x47\x09\x04\x01\x42\x18", "\x5d\x50\x59\x52\x5b\x43\x0c\x1b", 8, EDIT_GATEWAY, HF_GATEWAY},
     // TidalAPI auth URL suffix 1/ -> //: mov w0, #0x5f5e -> mov w0, #0x5f40
-    {0x4ecde0u, "\xc0\xeb\x8b\x52", "\x00\xe8\x8b\x52", 4, EDIT_GATEWAY},
+    {0x4ecde0u, "\xc0\xeb\x8b\x52", "\x00\xe8\x8b\x52", 4, EDIT_GATEWAY, HF_GATEWAY},
     // Native AppleMusicProvider (0x932f8c) is gated at 0x9334ac by tbz w0, #0, 0x933648: nop it.
-    {0x9334acu, "\xe0\x0c\x00\x36", "\x1f\x20\x03\xd5", 4, EDIT_ONE},
+    {0x9334acu, "\xe0\x0c\x00\x36", "\x1f\x20\x03\xd5", 4, EDIT_ONE, HF_APPLE_MUSIC},
     // unknown filesystem -> supported (mov w3, #0 -> #4)
-    {0x1a17c64u, "\x03\x00\x80\x52", "\x83\x00\x80\x52", 4, EDIT_ONE},
+    {0x1a17c64u, "\x03\x00\x80\x52", "\x83\x00\x80\x52", 4, EDIT_ONE, HF_FILESYSTEMS},
     // isSupportedFilesystem always true
-    {0x1a17db8u, "\xf3\x07\x9f\x1a", "\x33\x00\x80\x52", 4, EDIT_ONE},
+    {0x1a17db8u, "\xf3\x07\x9f\x1a", "\x33\x00\x80\x52", 4, EDIT_ONE, HF_FILESYSTEMS},
     // hfsplus not rewritten to ufsd
-    {0x1717e6cu, "\x00\x36\x00\x54", "\x1f\x20\x03\xd5", 4, EDIT_ONE},
+    {0x1717e6cu, "\x00\x36\x00\x54", "\x1f\x20\x03\xd5", 4, EDIT_ONE, HF_FILESYSTEMS},
     // read-only volume not auto-ejected
-    {0x752218u, "\x02\xa0\x4b\x39", "\x02\x00\x80\x52", 4, EDIT_ONE},
+    {0x752218u, "\x02\xa0\x4b\x39", "\x02\x00\x80\x52", 4, EDIT_ONE, HF_READONLY_STICKS},
     // DeviceManager::isReadOnly cache -> false
-    {0x1719718u, "\x60\xe2\x40\x39", "\x00\x00\x80\x52", 4, EDIT_ONE},
+    {0x1719718u, "\x60\xe2\x40\x39", "\x00\x00\x80\x52", 4, EDIT_ONE, HF_READONLY_STICKS},
     // DeviceManager::isReadOnly QFileInfo -> false
-    {0x17196b8u, "\x60\x02\x00\x52", "\x00\x00\x80\x52", 4, EDIT_ONE},
+    {0x17196b8u, "\x60\x02\x00\x52", "\x00\x00\x80\x52", 4, EDIT_ONE, HF_READONLY_STICKS},
     // Config.audio.hasLimiter (strb w20, [x19, #48])
-    {0x15f4090u, "\x74\xc2\x00\x39", "\x1f\x20\x03\xd5", 4, EDIT_ONE},
+    {0x15f4090u, "\x74\xc2\x00\x39", "\x1f\x20\x03\xd5", 4, EDIT_ONE, HF_LIMITER_MENU},
     // ShowStemsList gate: tbz -> b
-    {0x8732ccu, "\x00\x01\x00\x36", "\x08\x00\x00\x14", 4, EDIT_ONE},
+    {0x8732ccu, "\x00\x01\x00\x36", "\x08\x00\x00\x14", 4, EDIT_ONE, HF_STEMS},
     // #77 all-in-one maximumZoomSecs 10 -> 30
-    {0x15f4148u, "\x42\x01\x80\x52", "\xc2\x03\x80\x52", 4, EDIT_ONE},
+    {0x15f4148u, "\x42\x01\x80\x52", "\xc2\x03\x80\x52", 4, EDIT_ONE, HF_ZOOM30},
     // #159 StreamingProviderInterface::connectedSSO() -> true, isDisconnectedFromProfile() -> false
-    {0xc9cab4u, "\x00\x58\x64\x39", "\x20\x00\x80\x52", 4, EDIT_ONE},
-    {0xc9cb0cu, "\xe0\x03\x01\x2a", "\x00\x00\x80\x52", 4, EDIT_ONE},
+    {0xc9cab4u, "\x00\x58\x64\x39", "\x20\x00\x80\x52", 4, EDIT_ONE, HF_SSO},
+    {0xc9cb0cu, "\xe0\x03\x01\x2a", "\x00\x00\x80\x52", 4, EDIT_ONE, HF_SSO},
     // #206 Recording with streaming tracks (all-in-ones only; the group is never ready on
     // the JP07/JP08/JP13/JP14 players, which have no recorder). All 8 sites or none.
     // AbstractCollectionModel streamingFlags: skip BlocksRecording (0x20) bit
-    {0x810d28u, "\x00\x00\x7b\xb2", "\x1f\x20\x03\xd5", 4, EDIT_REC_STREAM},
+    {0x810d28u, "\x00\x00\x7b\xb2", "\x1f\x20\x03\xd5", 4, EDIT_REC_STREAM, HF_REC_STREAMING},
     // TrackLoadArbitrator leftBlockMsg / rightBlockMsg / deckBlockMsg / allowedDecksBitmask: Recorder/Active (+0x1c1) -> 0
-    {0x8ab74cu, "\x76\x06\x47\x39", "\x16\x00\x80\x52", 4, EDIT_REC_STREAM},
-    {0x8aba7cu, "\x76\x06\x47\x39", "\x16\x00\x80\x52", 4, EDIT_REC_STREAM},
-    {0x8b67c4u, "\x80\x06\x47\x39", "\x00\x00\x80\x52", 4, EDIT_REC_STREAM},
-    {0x8b6a20u, "\xdb\x06\x47\x39", "\x1b\x00\x80\x52", 4, EDIT_REC_STREAM},
+    {0x8ab74cu, "\x76\x06\x47\x39", "\x16\x00\x80\x52", 4, EDIT_REC_STREAM, HF_REC_STREAMING},
+    {0x8aba7cu, "\x76\x06\x47\x39", "\x16\x00\x80\x52", 4, EDIT_REC_STREAM, HF_REC_STREAMING},
+    {0x8b67c4u, "\x80\x06\x47\x39", "\x00\x00\x80\x52", 4, EDIT_REC_STREAM, HF_REC_STREAMING},
+    {0x8b6a20u, "\xdb\x06\x47\x39", "\x1b\x00\x80\x52", 4, EDIT_REC_STREAM, HF_REC_STREAMING},
     // Recorder streaming guard: skip BlockedByStreaming, DecksBlockedByStreaming, and /Engine/Mixer/Recorder/Abort
-    {0x97b444u, "\xe0\xda\x07\x36", "\xd7\xfe\xff\x17", 4, EDIT_REC_STREAM},
+    {0x97b444u, "\xe0\xda\x07\x36", "\xd7\xfe\xff\x17", 4, EDIT_REC_STREAM, HF_REC_STREAMING},
     // Streaming PreLoadCheck: always allow /GUI/ShowLoadToDeckMenu during active recording
-    {0x97f53cu, "\x20\x26\x00\x36", "\x31\x01\x00\x14", 4, EDIT_REC_STREAM},
+    {0x97f53cu, "\x20\x26\x00\x36", "\x31\x01\x00\x14", 4, EDIT_REC_STREAM, HF_REC_STREAMING},
     // TrackListModel: skip /Engine/Mixer/Recorder/Active load-disable override
-    {0xd7a2f8u, "\x60\x1f\x00\x37", "\x1f\x20\x03\xd5", 4, EDIT_REC_STREAM},
+    {0xd7a2f8u, "\x60\x1f\x00\x37", "\x1f\x20\x03\xd5", 4, EDIT_REC_STREAM, HF_REC_STREAMING},
 };
 
 static const struct engine_build engine_builds[] = {
@@ -2136,145 +2145,145 @@ static const struct engine_build engine_builds[] = {
 static const struct engine_edit edits_504[] = {
     // Stems remote processor: exact Engine build from the verified patch manifest.
     {0x85ef9cu, "\xbc\x26\x9f\xe5\xbc\x36\x9f\xe5\xf4\x42\x6d\xe1\xf8\xa1\xcd\xe1\xf8\x60\xcd\xe1\xf0\x81\xcd\xe1\x20\xe0\x8d\xe5\x20\xb0\x8d\xe2\xe4\xd0\x4d\xe2\x02\x20\x8f\xe0\x3c\x10\x91\xe5\x00\x01\x0b\xe5\x94\x46\x9f\xe5\x03\x30\x92\xe7\x00\x00\x51\xe3\x04\x40\x8f",
-        "\x10\x40\x2d\xe9\x00\x40\xa0\xe1\x1e\x10\xa0\xe3\x0c\x20\x8f\xe2\x04\xd5\xe3\xeb\x04\x00\xa0\xe1\x10\x80\xbd\xe8\x00\xf0\x20\xe3\x2f\x75\x73\x72\x2f\x6c\x6f\x63\x61\x6c\x2f\x62\x69\x6e\x2f\x73\x74\x65\x6d\x73\x2d\x70\x72\x6f\x63\x65\x73\x73\x6f\x72\x00", 63, EDIT_STEMS},
+        "\x10\x40\x2d\xe9\x00\x40\xa0\xe1\x1e\x10\xa0\xe3\x0c\x20\x8f\xe2\x04\xd5\xe3\xeb\x04\x00\xa0\xe1\x10\x80\xbd\xe8\x00\xf0\x20\xe3\x2f\x75\x73\x72\x2f\x6c\x6f\x63\x61\x6c\x2f\x62\x69\x6e\x2f\x73\x74\x65\x6d\x73\x2d\x70\x72\x6f\x63\x65\x73\x73\x6f\x72\x00", 63, EDIT_STEMS, HF_STEMS},
     {0x85e5f8u, "\x90\xc7\x9f\xe5",
-        "\x1e\xff\x2f\xe1", 4, EDIT_STEMS},
-    {0xf6303cu, "\xe0\x20\x9f\xe5\xd8\x30\x9f\xe5", (const char *)config_jump, 8, EDIT_STEMS},
+        "\x1e\xff\x2f\xe1", 4, EDIT_STEMS, HF_STEMS},
+    {0xf6303cu, "\xe0\x20\x9f\xe5\xd8\x30\x9f\xe5", (const char *)config_jump, 8, EDIT_STEMS, HF_ALWAYS},
     // TIDAL's client names a downloaded file after its codec and knows FLAC and AAC,
     // so an MP3 from the gateway would be saved with no extension and fail to load.
     // Its one "aac" string is both what it compares the codec with and the extension
     // it then uses. TIDAL's own AAC is labelled mp4a.40.x and keeps working.
-    {0x1DB8E90u, "aac", "mp3", 4, EDIT_ONE},
+    {0x1DB8E90u, "aac", "mp3", 4, EDIT_ONE, HF_GATEWAY},
     // Retain the pre-existing +0x24 capability patch.
-    {0xF659B8u, "\x24\x30\xc4\xe5", "\x00\xf0\x20\xe3", 4, EDIT_ONE},
-    {0x842644u, "\x40\x33\x1b\xe5\x00\x00\x54\xe3", (const char *)stems_feature_jump, 8, EDIT_ONE},
+    {0xF659B8u, "\x24\x30\xc4\xe5", "\x00\xf0\x20\xe3", 4, EDIT_ONE, HF_LIMITER_MENU},
+    {0x842644u, "\x40\x33\x1b\xe5\x00\x00\x54\xe3", (const char *)stems_feature_jump, 8, EDIT_ONE, HF_STEMS},
     // Preserve ShowStemsList eligibility in r8 across the extra device feature gate.
-    {0x6D3E00u, "\x07\x00\x00\x0a", "\x07\x00\x00\xea", 4, EDIT_ONE},
+    {0x6D3E00u, "\x07\x00\x00\x0a", "\x07\x00\x00\xea", 4, EDIT_ONE, HF_STEMS},
     // unknown filesystem -> supported
-    {0x1897e70u, "\x00\x60\xa0\xe3", "\x04\x60\xa0\xe3", 4, EDIT_ONE},
+    {0x1897e70u, "\x00\x60\xa0\xe3", "\x04\x60\xa0\xe3", 4, EDIT_ONE, HF_FILESYSTEMS},
     // isSupportedFilesystem always true
-    {0x1897dccu, "\x00\x40\xa0\x03", "\x01\x40\xa0\x03", 4, EDIT_ONE},
+    {0x1897dccu, "\x00\x40\xa0\x03", "\x01\x40\xa0\x03", 4, EDIT_ONE, HF_FILESYSTEMS},
     // hfsplus not rewritten to ufsd
-    {0x1678644u, "\xd1\x01\x00\x1a", "\x00\xf0\x20\xe3", 4, EDIT_ONE},
+    {0x1678644u, "\xd1\x01\x00\x1a", "\x00\xf0\x20\xe3", 4, EDIT_ONE, HF_FILESYSTEMS},
     // TidalAPI base URL -> stream-sync /v1/
-    {0x336740u, "\x69\x75\x75\x71\x74\x3b\x30\x30\x62\x71\x6a\x2f\x75\x6a\x65\x62\x6d\x2f\x64\x70\x6e\x30\x77\x32", "\x69\x75\x75\x71\x3b\x30\x30\x32\x33\x38\x2f\x31\x2f\x31\x2f\x32\x3b\x39\x31\x39\x31\x30\x77\x32", 24, EDIT_GATEWAY},
+    {0x336740u, "\x69\x75\x75\x71\x74\x3b\x30\x30\x62\x71\x6a\x2f\x75\x6a\x65\x62\x6d\x2f\x64\x70\x6e\x30\x77\x32", "\x69\x75\x75\x71\x3b\x30\x30\x32\x33\x38\x2f\x31\x2f\x31\x2f\x32\x3b\x39\x31\x39\x31\x30\x77\x32", 24, EDIT_GATEWAY, HF_GATEWAY},
     // TidalAPI auth URL -> stream-sync /au//
-    {0x336758u, "\x6f\x7b\x7b\x77\x7a\x41\x36\x36\x68\x7c\x7b\x6f\x35\x7b\x70\x6b\x68\x73\x35\x6a\x76\x74\x36\x7d", "\x6f\x7b\x7b\x77\x41\x36\x36\x38\x39\x3e\x35\x37\x35\x37\x35\x38\x41\x3f\x37\x3f\x37\x36\x68\x7c", 24, EDIT_GATEWAY},
+    {0x336758u, "\x6f\x7b\x7b\x77\x7a\x41\x36\x36\x68\x7c\x7b\x6f\x35\x7b\x70\x6b\x68\x73\x35\x6a\x76\x74\x36\x7d", "\x6f\x7b\x7b\x77\x41\x36\x36\x38\x39\x3e\x35\x37\x35\x37\x35\x38\x41\x3f\x37\x3f\x37\x36\x68\x7c", 24, EDIT_GATEWAY, HF_GATEWAY},
     // TidalAPI auth URL suffix 1/ -> //
-    {0x33652cu, "\x38\x36\x03\xe3", "\x36\x36\x03\xe3", 4, EDIT_GATEWAY},
+    {0x33652cu, "\x38\x36\x03\xe3", "\x36\x36\x03\xe3", 4, EDIT_GATEWAY, HF_GATEWAY},
     // read-only volume not auto-ejected
-    {0x58af34u, "\x30\x32\xd0\xe5", "\x00\x30\xa0\xe3", 4, EDIT_ONE},
+    {0x58af34u, "\x30\x32\xd0\xe5", "\x00\x30\xa0\xe3", 4, EDIT_ONE, HF_READONLY_STICKS},
     // DeviceManager::isReadOnly cache -> false
-    {0x167295cu, "\x1c\x00\xd4\xe5", "\x00\x00\xa0\xe3", 4, EDIT_ONE},
+    {0x167295cu, "\x1c\x00\xd4\xe5", "\x00\x00\xa0\xe3", 4, EDIT_ONE, HF_READONLY_STICKS},
     // DeviceManager::isReadOnly QFileInfo -> false
-    {0x16728c0u, "\x01\x00\x24\xe2", "\x00\x00\xa0\xe3", 4, EDIT_ONE},
+    {0x16728c0u, "\x01\x00\x24\xe2", "\x00\x00\xa0\xe3", 4, EDIT_ONE, HF_READONLY_STICKS},
     // #207 Reverb (Classic) decay formula: vsub s14, s14, s15; vldr s16, =0.65
-    {0x1639278u, "\x67\x7a\x37\xee\x5f\x8a\x9f\xed", (const char *)reverb_time_jump, 8, EDIT_REVERB},
+    {0x1639278u, "\x67\x7a\x37\xee\x5f\x8a\x9f\xed", (const char *)reverb_time_jump, 8, EDIT_REVERB, HF_ALWAYS},
 };
 
 // 5.3.0 (BuildID be537e90...): sites found by RTTI/vtable slots (DSP), the QML
 // property map (config fields), sqlite3_api_routines, and masked-context matches,
 // each checked against the 5.0.4 disassembly.
 static const struct engine_edit edits_530[] = {
-    {0x16fbc38u, "\x20\x20\xd0\xe5\x00\x00\x91\xe5", (const char *)shadow_sync_play_jump, 8, EDIT_ONE},
+    {0x16fbc38u, "\x20\x20\xd0\xe5\x00\x00\x91\xe5", (const char *)shadow_sync_play_jump, 8, EDIT_ONE, HF_FOUR_DECK},
     {0x8bf744u, "\xbc\x26\x9f\xe5\xbc\x36\x9f\xe5\xf4\x42\x6d\xe1\xf8\xa1\xcd\xe1\xf8\x60\xcd\xe1\xf0\x81\xcd\xe1\x20\xe0\x8d\xe5\x20\xb0\x8d\xe2\xe4\xd0\x4d\xe2\x02\x20\x8f\xe0\x3c\x10\x91\xe5\x00\x01\x0b\xe5\x94\x46\x9f\xe5\x03\x30\x92\xe7\x00\x00\x51\xe3\x04\x40\x8f",
         // As 5.0.4, with the BL re-encoded for QString::fromUtf8(QByteArrayView)@plt at 0x15f768.
-        "\x10\x40\x2d\xe9\x00\x40\xa0\xe1\x1e\x10\xa0\xe3\x0c\x20\x8f\xe2\x03\x80\xe2\xeb\x04\x00\xa0\xe1\x10\x80\xbd\xe8\x00\xf0\x20\xe3\x2f\x75\x73\x72\x2f\x6c\x6f\x63\x61\x6c\x2f\x62\x69\x6e\x2f\x73\x74\x65\x6d\x73\x2d\x70\x72\x6f\x63\x65\x73\x73\x6f\x72\x00", 63, EDIT_STEMS},
-    {0x8be39cu, "\x8c\xc7\x9f\xe5", "\x1e\xff\x2f\xe1", 4, EDIT_STEMS},
-    {0x1537148u, "\xe4\x20\x9f\xe5\xdc\x30\x9f\xe5", (const char *)config_jump, 8, EDIT_STEMS},
+        "\x10\x40\x2d\xe9\x00\x40\xa0\xe1\x1e\x10\xa0\xe3\x0c\x20\x8f\xe2\x03\x80\xe2\xeb\x04\x00\xa0\xe1\x10\x80\xbd\xe8\x00\xf0\x20\xe3\x2f\x75\x73\x72\x2f\x6c\x6f\x63\x61\x6c\x2f\x62\x69\x6e\x2f\x73\x74\x65\x6d\x73\x2d\x70\x72\x6f\x63\x65\x73\x73\x6f\x72\x00", 63, EDIT_STEMS, HF_STEMS},
+    {0x8be39cu, "\x8c\xc7\x9f\xe5", "\x1e\xff\x2f\xe1", 4, EDIT_STEMS, HF_STEMS},
+    {0x1537148u, "\xe4\x20\x9f\xe5\xdc\x30\x9f\xe5", (const char *)config_jump, 8, EDIT_STEMS, HF_ALWAYS},
     // #166 ChannelSweepFx: hasNHFx == 0 already takes the full collection.
     // Force that same native Filter/Dub Echo/Noise/Filter Roll/Wash path on NH.
-    {0xd1aaf4u, "\xbb\x03\x00\x0a", "\xbb\x03\x00\xea", 4, EDIT_STEMS},
-    {0x1efc6bcu, "aac", "mp3", 4, EDIT_ONE},
+    {0xd1aaf4u, "\xbb\x03\x00\x0a", "\xbb\x03\x00\xea", 4, EDIT_STEMS, HF_SWEEP_FX},
+    {0x1efc6bcu, "aac", "mp3", 4, EDIT_ONE, HF_GATEWAY},
     // Config.audio.hasLimiter (root +0x24), as the 5.0.4 +0x24 patch.
-    {0x153DDB0u, "\x24\x30\xc4\xe5", "\x00\xf0\x20\xe3", 4, EDIT_ONE},
-    {0x8a1eacu, "\x40\x33\x1b\xe5\x00\x00\x54\xe3", (const char *)stems_feature_jump, 8, EDIT_ONE},
+    {0x153DDB0u, "\x24\x30\xc4\xe5", "\x00\xf0\x20\xe3", 4, EDIT_ONE, HF_LIMITER_MENU},
+    {0x8a1eacu, "\x40\x33\x1b\xe5\x00\x00\x54\xe3", (const char *)stems_feature_jump, 8, EDIT_ONE, HF_STEMS},
     // ShowStemsList gate (eligibility is in r7 here, r8 in 5.0.4).
-    {0x7398FCu, "\x07\x00\x00\x0a", "\x07\x00\x00\xea", 4, EDIT_ONE},
-    {0x1a28ea8u, "\x00\x60\xa0\xe3", "\x04\x60\xa0\xe3", 4, EDIT_ONE},
-    {0x1a28e04u, "\x00\x40\xa0\x03", "\x01\x40\xa0\x03", 4, EDIT_ONE},
-    {0x167c6f8u, "\xfa\x01\x00\x1a", "\x00\xf0\x20\xe3", 4, EDIT_ONE},
+    {0x7398FCu, "\x07\x00\x00\x0a", "\x07\x00\x00\xea", 4, EDIT_ONE, HF_STEMS},
+    {0x1a28ea8u, "\x00\x60\xa0\xe3", "\x04\x60\xa0\xe3", 4, EDIT_ONE, HF_FILESYSTEMS},
+    {0x1a28e04u, "\x00\x40\xa0\x03", "\x01\x40\xa0\x03", 4, EDIT_ONE, HF_FILESYSTEMS},
+    {0x167c6f8u, "\xfa\x01\x00\x1a", "\x00\xf0\x20\xe3", 4, EDIT_ONE, HF_FILESYSTEMS},
     // TidalAPI base URL -> stream-sync /v1/ (5.3.0 XORs byte i with 0x24 + i)
-    {0x3155d0u, "\x4c\x51\x52\x57\x5b\x13\x05\x04\x4d\x5d\x47\x01\x44\x58\x56\x52\x58\x1b\x55\x58\x55\x16\x4c\x0a", "\x4c\x51\x52\x57\x12\x06\x05\x1a\x1e\x1a\x00\x1f\x1e\x01\x1c\x02\x0e\x0d\x06\x0f\x08\x16\x4c\x0a", 24, EDIT_GATEWAY},
+    {0x3155d0u, "\x4c\x51\x52\x57\x5b\x13\x05\x04\x4d\x5d\x47\x01\x44\x58\x56\x52\x58\x1b\x55\x58\x55\x16\x4c\x0a", "\x4c\x51\x52\x57\x12\x06\x05\x1a\x1e\x1a\x00\x1f\x1e\x01\x1c\x02\x0e\x0d\x06\x0f\x08\x16\x4c\x0a", 24, EDIT_GATEWAY, HF_GATEWAY},
     // TidalAPI auth URL -> stream-sync /au// (5.3.0 XORs byte i with 0x57 + i)
-    {0x3155e8u, "\x3f\x2c\x2d\x2a\x28\x66\x72\x71\x3e\x15\x15\x0a\x4d\x10\x0c\x02\x06\x04\x47\x09\x04\x01\x42\x18", "\x3f\x2c\x2d\x2a\x61\x73\x72\x6f\x6d\x57\x4f\x52\x4d\x54\x4b\x57\x5d\x50\x59\x52\x5b\x43\x0c\x1b", 24, EDIT_GATEWAY},
+    {0x3155e8u, "\x3f\x2c\x2d\x2a\x28\x66\x72\x71\x3e\x15\x15\x0a\x4d\x10\x0c\x02\x06\x04\x47\x09\x04\x01\x42\x18", "\x3f\x2c\x2d\x2a\x61\x73\x72\x6f\x6d\x57\x4f\x52\x4d\x54\x4b\x57\x5d\x50\x59\x52\x5b\x43\x0c\x1b", 24, EDIT_GATEWAY, HF_GATEWAY},
     // TidalAPI auth URL suffix 1/ -> //
-    {0x3153acu, "\x5e\x3f\x05\xe3", "\x40\x3f\x05\xe3", 4, EDIT_GATEWAY},
+    {0x3153acu, "\x5e\x3f\x05\xe3", "\x40\x3f\x05\xe3", 4, EDIT_GATEWAY, HF_GATEWAY},
     // The config field moved from 560 to 568.
-    {0x5e28ccu, "\x38\x32\xd0\xe5", "\x00\x30\xa0\xe3", 4, EDIT_ONE},
-    {0x167e32cu, "\x1c\x00\xd4\xe5", "\x00\x00\xa0\xe3", 4, EDIT_ONE},
-    {0x167e290u, "\x01\x00\x24\xe2", "\x00\x00\xa0\xe3", 4, EDIT_ONE},
+    {0x5e28ccu, "\x38\x32\xd0\xe5", "\x00\x30\xa0\xe3", 4, EDIT_ONE, HF_READONLY_STICKS},
+    {0x167e32cu, "\x1c\x00\xd4\xe5", "\x00\x00\xa0\xe3", 4, EDIT_ONE, HF_READONLY_STICKS},
+    {0x167e290u, "\x01\x00\x24\xe2", "\x00\x00\xa0\xe3", 4, EDIT_ONE, HF_READONLY_STICKS},
     // #159 StreamingProviderInterface::connectedSSO() -> true, isDisconnectedFromProfile() -> false
-    {0xbf59bcu, "\xc2\x05\xd0\xe5", "\x01\x00\xa0\xe3", 4, EDIT_ONE},
-    {0xbf5a18u, "\x01\x00\x20\xe2", "\x00\x00\xa0\xe3", 4, EDIT_ONE},
+    {0xbf59bcu, "\xc2\x05\xd0\xe5", "\x01\x00\xa0\xe3", 4, EDIT_ONE, HF_SSO},
+    {0xbf5a18u, "\x01\x00\x20\xe2", "\x00\x00\xa0\xe3", 4, EDIT_ONE, HF_SSO},
     // #49 clears isPlayer (+0x239) when four_deck_waveform=1; SamplerOutput's
     // non-console fallback (0x193f6cc, reached only when isConsole +0x23a == 0)
     // still needs the Layer A / Layer B branch instead of an empty map.
-    {0x193f6d8u, "\x4e\x01\x00\x1a", "\x4e\x01\x00\xea", 4, EDIT_ONE},
+    {0x193f6d8u, "\x4e\x01\x00\x1a", "\x4e\x01\x00\xea", 4, EDIT_ONE, HF_FOUR_DECK},
     // #207 Reverb (Classic) decay formula: vsub s14, s14, s15; vldr s16, =0.65
-    {0x1725630u, "\x67\x7a\x37\xee\x5f\x8a\x9f\xed", (const char *)reverb_time_jump, 8, EDIT_REVERB},
+    {0x1725630u, "\x67\x7a\x37\xee\x5f\x8a\x9f\xed", (const char *)reverb_time_jump, 8, EDIT_REVERB, HF_ALWAYS},
     // #206 Recording with streaming tracks (all-in-ones only; the group is never ready on
     // the JP07/JP08/JP13/JP14 players, which have no recorder). All 8 sites or none.
     // AbstractCollectionModel streamingFlags: skip BlocksRecording (0x20) bit
-    {0x6b683cu, "\x20\x30\x83\xe3", "\x00\xf0\x20\xe3", 4, EDIT_REC_STREAM},
+    {0x6b683cu, "\x20\x30\x83\xe3", "\x00\xf0\x20\xe3", 4, EDIT_REC_STREAM, HF_REC_STREAMING},
     // TrackLoadArbitrator leftBlockMsg / rightBlockMsg / deckBlockMsg / allowedDecksBitmask: Recorder/Active (+0xf1) -> 0
-    {0x752a38u, "\xf1\x70\xd4\x15", "\x00\x70\xa0\xe3", 4, EDIT_REC_STREAM},
-    {0x752ee4u, "\xf1\x70\xd4\x15", "\x00\x70\xa0\xe3", 4, EDIT_REC_STREAM},
-    {0x75dc44u, "\xf1\x30\xd6\xe5", "\x00\x30\xa0\xe3", 4, EDIT_REC_STREAM},
-    {0x75dfbcu, "\xf1\x30\xd7\xe5", "\x00\x30\xa0\xe3", 4, EDIT_REC_STREAM},
+    {0x752a38u, "\xf1\x70\xd4\x15", "\x00\x70\xa0\xe3", 4, EDIT_REC_STREAM, HF_REC_STREAMING},
+    {0x752ee4u, "\xf1\x70\xd4\x15", "\x00\x70\xa0\xe3", 4, EDIT_REC_STREAM, HF_REC_STREAMING},
+    {0x75dc44u, "\xf1\x30\xd6\xe5", "\x00\x30\xa0\xe3", 4, EDIT_REC_STREAM, HF_REC_STREAMING},
+    {0x75dfbcu, "\xf1\x30\xd7\xe5", "\x00\x30\xa0\xe3", 4, EDIT_REC_STREAM, HF_REC_STREAMING},
     // Recorder streaming guard: skip BlockedByStreaming, DecksBlockedByStreaming, and /Engine/Mixer/Recorder/Abort
-    {0x8475e4u, "\xa3\xfe\xff\x0a", "\xa3\xfe\xff\xea", 4, EDIT_REC_STREAM},
+    {0x8475e4u, "\xa3\xfe\xff\x0a", "\xa3\xfe\xff\xea", 4, EDIT_REC_STREAM, HF_REC_STREAMING},
     // Streaming PreLoadCheck: always allow /GUI/ShowLoadToDeckMenu during active recording
-    {0x847fa0u, "\x9b\xff\xff\x1a", "\x00\xf0\x20\xe3", 4, EDIT_REC_STREAM},
+    {0x847fa0u, "\x9b\xff\xff\x1a", "\x00\xf0\x20\xe3", 4, EDIT_REC_STREAM, HF_REC_STREAMING},
     // TrackListModel: skip /Engine/Mixer/Recorder/Active load-disable override
-    {0xcd1d68u, "\x4b\x00\x00\x1a", "\x00\xf0\x20\xe3", 4, EDIT_REC_STREAM},
+    {0xcd1d68u, "\x4b\x00\x00\x1a", "\x00\xf0\x20\xe3", 4, EDIT_REC_STREAM, HF_REC_STREAMING},
 };
 
 static const struct engine_edit edits_sclive[] = {
-    {0xcbd96cu, "\xf4\x42\x6d\xe1\xf8\x60\xcd\xe1", (const char *)aux_process_jump, 8, EDIT_AUX},
-    {0xdba454u, "\xf8\x41\x6d\xe1\xec\xc2\x9f\xe5", (const char *)aux_control_jump, 8, EDIT_AUX},
-    {0x1ba13c0u, "\xf4\x42\x6d\xe1\x00\x40\xa0\xe1", (const char *)aux_init_jump, 8, EDIT_AUX},
+    {0xcbd96cu, "\xf4\x42\x6d\xe1\xf8\x60\xcd\xe1", (const char *)aux_process_jump, 8, EDIT_AUX, HF_AUX_INPUT},
+    {0xdba454u, "\xf8\x41\x6d\xe1\xec\xc2\x9f\xe5", (const char *)aux_control_jump, 8, EDIT_AUX, HF_AUX_INPUT},
+    {0x1ba13c0u, "\xf4\x42\x6d\xe1\x00\x40\xa0\xe1", (const char *)aux_init_jump, 8, EDIT_AUX, HF_AUX_INPUT},
     {0x8ba000u, "\xc0\x26\x9f\xe5\xc0\x36\x9f\xe5\xf4\x42\x6d\xe1\xf8\xa1\xcd\xe1\xf8\x60\xcd\xe1\xf0\x81\xcd\xe1\x20\xe0\x8d\xe5\x20\xb0\x8d\xe2\xe4\xd0\x4d\xe2\x02\x20\x8f\xe0\x3c\x10\x91\xe5\x00\x01\x0b\xe5\x98\x46\x9f\xe5\x03\x30\x92\xe7\x00\x00\x51\xe3\x04\x40\x8f",
-        "\x10\x40\x2d\xe9\x00\x40\xa0\xe1\x1e\x10\xa0\xe3\x0c\x20\x8f\xe2\x47\x9c\xe2\xeb\x04\x00\xa0\xe1\x10\x80\xbd\xe8\x00\xf0\x20\xe3\x2f\x75\x73\x72\x2f\x6c\x6f\x63\x61\x6c\x2f\x62\x69\x6e\x2f\x73\x74\x65\x6d\x73\x2d\x70\x72\x6f\x63\x65\x73\x73\x6f\x72\x00", 63, EDIT_STEMS},
-    {0x8bbaa4u, "\x8c\xc7\x9f\xe5", "\x1e\xff\x2f\xe1", 4, EDIT_STEMS},
-    {0x159f4a8u, "\xe4\x20\x9f\xe5\xdc\x30\x9f\xe5", (const char *)config_jump, 8, EDIT_STEMS},
+        "\x10\x40\x2d\xe9\x00\x40\xa0\xe1\x1e\x10\xa0\xe3\x0c\x20\x8f\xe2\x47\x9c\xe2\xeb\x04\x00\xa0\xe1\x10\x80\xbd\xe8\x00\xf0\x20\xe3\x2f\x75\x73\x72\x2f\x6c\x6f\x63\x61\x6c\x2f\x62\x69\x6e\x2f\x73\x74\x65\x6d\x73\x2d\x70\x72\x6f\x63\x65\x73\x73\x6f\x72\x00", 63, EDIT_STEMS, HF_STEMS},
+    {0x8bbaa4u, "\x8c\xc7\x9f\xe5", "\x1e\xff\x2f\xe1", 4, EDIT_STEMS, HF_STEMS},
+    {0x159f4a8u, "\xe4\x20\x9f\xe5\xdc\x30\x9f\xe5", (const char *)config_jump, 8, EDIT_STEMS, HF_ALWAYS},
     // Same ChannelSweepFx constructor and hasNHFx gate in the gen-2 Engine.
-    {0xd27e14u, "\xbb\x03\x00\x0a", "\xbb\x03\x00\xea", 4, EDIT_STEMS},
-    {0x1f69520u, "aac", "mp3", 4, EDIT_ONE},
-    {0x15b6fb0u, "\x24\x30\xc4\xe5", "\x00\xf0\x20\xe3", 4, EDIT_ONE},
-    {0x89cd64u, "\x38\x33\x1b\xe5\x00\x00\x54\xe3", (const char *)stems_feature_jump, 8, EDIT_ONE},
-    {0x72c284u, "\x07\x00\x00\x0a", "\x07\x00\x00\xea", 4, EDIT_ONE},
-    {0x1a8dbc0u, "\x00\x60\xa0\xe3", "\x04\x60\xa0\xe3", 4, EDIT_ONE},
-    {0x1a8db1cu, "\x00\x40\xa0\x03", "\x01\x40\xa0\x03", 4, EDIT_ONE},
-    {0x16d2208u, "\xfa\x01\x00\x1a", "\x00\xf0\x20\xe3", 4, EDIT_ONE},
-    {0x31a880u, "\x4c\x51\x52\x57\x5b\x13\x05\x04\x4d\x5d\x47\x01\x44\x58\x56\x52\x58\x1b\x55\x58\x55\x16\x4c\x0a", "\x4c\x51\x52\x57\x12\x06\x05\x1a\x1e\x1a\x00\x1f\x1e\x01\x1c\x02\x0e\x0d\x06\x0f\x08\x16\x4c\x0a", 24, EDIT_GATEWAY},
-    {0x31a898u, "\x3f\x2c\x2d\x2a\x28\x66\x72\x71\x3e\x15\x15\x0a\x4d\x10\x0c\x02\x06\x04\x47\x09\x04\x01\x42\x18", "\x3f\x2c\x2d\x2a\x61\x73\x72\x6f\x6d\x57\x4f\x52\x4d\x54\x4b\x57\x5d\x50\x59\x52\x5b\x43\x0c\x1b", 24, EDIT_GATEWAY},
-    {0x31a65cu, "\x5e\x3f\x05\xe3", "\x40\x3f\x05\xe3", 4, EDIT_GATEWAY},
-    {0x5d5418u, "\x38\x32\xd0\xe5", "\x00\x30\xa0\xe3", 4, EDIT_ONE},
-    {0x16d3e3cu, "\x1c\x00\xd4\xe5", "\x00\x00\xa0\xe3", 4, EDIT_ONE},
-    {0x16d3da0u, "\x01\x00\x24\xe2", "\x00\x00\xa0\xe3", 4, EDIT_ONE},
+    {0xd27e14u, "\xbb\x03\x00\x0a", "\xbb\x03\x00\xea", 4, EDIT_STEMS, HF_SWEEP_FX},
+    {0x1f69520u, "aac", "mp3", 4, EDIT_ONE, HF_GATEWAY},
+    {0x15b6fb0u, "\x24\x30\xc4\xe5", "\x00\xf0\x20\xe3", 4, EDIT_ONE, HF_LIMITER_MENU},
+    {0x89cd64u, "\x38\x33\x1b\xe5\x00\x00\x54\xe3", (const char *)stems_feature_jump, 8, EDIT_ONE, HF_STEMS},
+    {0x72c284u, "\x07\x00\x00\x0a", "\x07\x00\x00\xea", 4, EDIT_ONE, HF_STEMS},
+    {0x1a8dbc0u, "\x00\x60\xa0\xe3", "\x04\x60\xa0\xe3", 4, EDIT_ONE, HF_FILESYSTEMS},
+    {0x1a8db1cu, "\x00\x40\xa0\x03", "\x01\x40\xa0\x03", 4, EDIT_ONE, HF_FILESYSTEMS},
+    {0x16d2208u, "\xfa\x01\x00\x1a", "\x00\xf0\x20\xe3", 4, EDIT_ONE, HF_FILESYSTEMS},
+    {0x31a880u, "\x4c\x51\x52\x57\x5b\x13\x05\x04\x4d\x5d\x47\x01\x44\x58\x56\x52\x58\x1b\x55\x58\x55\x16\x4c\x0a", "\x4c\x51\x52\x57\x12\x06\x05\x1a\x1e\x1a\x00\x1f\x1e\x01\x1c\x02\x0e\x0d\x06\x0f\x08\x16\x4c\x0a", 24, EDIT_GATEWAY, HF_GATEWAY},
+    {0x31a898u, "\x3f\x2c\x2d\x2a\x28\x66\x72\x71\x3e\x15\x15\x0a\x4d\x10\x0c\x02\x06\x04\x47\x09\x04\x01\x42\x18", "\x3f\x2c\x2d\x2a\x61\x73\x72\x6f\x6d\x57\x4f\x52\x4d\x54\x4b\x57\x5d\x50\x59\x52\x5b\x43\x0c\x1b", 24, EDIT_GATEWAY, HF_GATEWAY},
+    {0x31a65cu, "\x5e\x3f\x05\xe3", "\x40\x3f\x05\xe3", 4, EDIT_GATEWAY, HF_GATEWAY},
+    {0x5d5418u, "\x38\x32\xd0\xe5", "\x00\x30\xa0\xe3", 4, EDIT_ONE, HF_READONLY_STICKS},
+    {0x16d3e3cu, "\x1c\x00\xd4\xe5", "\x00\x00\xa0\xe3", 4, EDIT_ONE, HF_READONLY_STICKS},
+    {0x16d3da0u, "\x01\x00\x24\xe2", "\x00\x00\xa0\xe3", 4, EDIT_ONE, HF_READONLY_STICKS},
     // Native AppleMusicProvider gate: beq 0x7f13dc -> nop (AZ04: 0x9334ac)
-    {0x7f11b4u, "\x88\x00\x00\x0a", "\x00\xf0\x20\xe3", 4, EDIT_ONE},
+    {0x7f11b4u, "\x88\x00\x00\x0a", "\x00\xf0\x20\xe3", 4, EDIT_ONE, HF_APPLE_MUSIC},
     // #159 StreamingProviderInterface::connectedSSO() -> true, isDisconnectedFromProfile() -> false
-    {0xbf91d8u, "\xc2\x05\xd0\xe5", "\x01\x00\xa0\xe3", 4, EDIT_ONE},
-    {0xbf9234u, "\x01\x00\x20\xe2", "\x00\x00\xa0\xe3", 4, EDIT_ONE},
+    {0xbf91d8u, "\xc2\x05\xd0\xe5", "\x01\x00\xa0\xe3", 4, EDIT_ONE, HF_SSO},
+    {0xbf9234u, "\x01\x00\x20\xe2", "\x00\x00\xa0\xe3", 4, EDIT_ONE, HF_SSO},
     // #207 Reverb (Classic) decay formula: vsub s14, s14, s15; vldr s16, =0.65
-    {0x177b088u, "\x67\x7a\x37\xee\x5f\x8a\x9f\xed", (const char *)reverb_time_jump, 8, EDIT_REVERB},
+    {0x177b088u, "\x67\x7a\x37\xee\x5f\x8a\x9f\xed", (const char *)reverb_time_jump, 8, EDIT_REVERB, HF_ALWAYS},
     // #206 Recording with streaming tracks (all-in-ones only; the group is never ready on
     // the JP07/JP08/JP13/JP14 players, which have no recorder). All 8 sites or none.
     // AbstractCollectionModel streamingFlags: skip BlocksRecording (0x20) bit
-    {0x6b2398u, "\x20\x30\x83\xe3", "\x00\xf0\x20\xe3", 4, EDIT_REC_STREAM},
+    {0x6b2398u, "\x20\x30\x83\xe3", "\x00\xf0\x20\xe3", 4, EDIT_REC_STREAM, HF_REC_STREAMING},
     // TrackLoadArbitrator leftBlockMsg / rightBlockMsg / deckBlockMsg / allowedDecksBitmask: Recorder/Active (+0xf1) -> 0
-    {0x76b7bcu, "\xf1\x70\xd4\x15", "\x00\x70\xa0\xe3", 4, EDIT_REC_STREAM},
-    {0x76bc68u, "\xf1\x70\xd4\x15", "\x00\x70\xa0\xe3", 4, EDIT_REC_STREAM},
-    {0x773f10u, "\xf1\x30\xd6\xe5", "\x00\x30\xa0\xe3", 4, EDIT_REC_STREAM},
-    {0x774288u, "\xf1\x30\xd7\xe5", "\x00\x30\xa0\xe3", 4, EDIT_REC_STREAM},
+    {0x76b7bcu, "\xf1\x70\xd4\x15", "\x00\x70\xa0\xe3", 4, EDIT_REC_STREAM, HF_REC_STREAMING},
+    {0x76bc68u, "\xf1\x70\xd4\x15", "\x00\x70\xa0\xe3", 4, EDIT_REC_STREAM, HF_REC_STREAMING},
+    {0x773f10u, "\xf1\x30\xd6\xe5", "\x00\x30\xa0\xe3", 4, EDIT_REC_STREAM, HF_REC_STREAMING},
+    {0x774288u, "\xf1\x30\xd7\xe5", "\x00\x30\xa0\xe3", 4, EDIT_REC_STREAM, HF_REC_STREAMING},
     // Recorder streaming guard: skip BlockedByStreaming, DecksBlockedByStreaming, and /Engine/Mixer/Recorder/Abort
-    {0x83b9e8u, "\xa3\xfe\xff\x0a", "\xa3\xfe\xff\xea", 4, EDIT_REC_STREAM},
+    {0x83b9e8u, "\xa3\xfe\xff\x0a", "\xa3\xfe\xff\xea", 4, EDIT_REC_STREAM, HF_REC_STREAMING},
     // Streaming PreLoadCheck: always allow /GUI/ShowLoadToDeckMenu during active recording
-    {0x849eccu, "\x9b\xff\xff\x1a", "\x00\xf0\x20\xe3", 4, EDIT_REC_STREAM},
+    {0x849eccu, "\x9b\xff\xff\x1a", "\x00\xf0\x20\xe3", 4, EDIT_REC_STREAM, HF_REC_STREAMING},
     // TrackListModel: skip /Engine/Mixer/Recorder/Active load-disable override
-    {0xcd6c40u, "\x4b\x00\x00\x1a", "\x00\xf0\x20\xe3", 4, EDIT_REC_STREAM},
+    {0xcd6c40u, "\x4b\x00\x00\x1a", "\x00\xf0\x20\xe3", 4, EDIT_REC_STREAM, HF_REC_STREAMING},
 };
 
 static const struct engine_build engine_builds[] = {
@@ -2363,6 +2372,10 @@ static void apply_engine_edits(uintptr_t base, size_t page) {
     for (unsigned i = 0; i < build->edit_count; i++) {
         const struct engine_edit *e = &build->edits[i];
         if (e->group != EDIT_ONE && !ready[e->group]) continue;
+        // Switched off at build time or in hook-disable.conf: the site stays stock.
+        // Every group is either one feature or the getConfig site plus independent
+        // features whose config lines prepare_config leaves out with them.
+        if (!hf_on(e->feature)) continue;
         // An unprepared trampoline is all zero: never write it.
         if (e->replacement == (const char *)stems_feature_jump && !stems_feature_jump[1]) continue;
         if (e->replacement == (const char *)shadow_sync_play_jump && !shadow_sync_play_jump[1]) continue;
@@ -2414,22 +2427,26 @@ __attribute__((constructor)) static void edit_engine(void) {
     if (page_size <= 0) return;
     uintptr_t page = (uintptr_t)page_size;
     fprintf(stderr, "engine-ui-hook: Engine %s\n", build->name);
+    char off[512];
+    hf_describe(off, sizeof off);
+    if (off[0]) fprintf(stderr, "engine-ui-hook: features off: %s\n", off);
+    hf_publish();
 #if !defined(__aarch64__)
     prepare_aux(base, page);
     prepare_config(base, page);
     prepare_shadow_sync_play(base, page);
     prepare_reverb_time(base, page);
     uint32_t expected_feature[2] = {build->feature_displaced ? build->feature_displaced : 0xe51b3340, 0xe3540000};
-    if (build->feature_true && !memcmp((const void *)(base + build->feature_site), expected_feature, 8))
+    if (build->feature_true && hf_on(HF_STEMS) && !memcmp((const void *)(base + build->feature_site), expected_feature, 8))
         prepare_stems_feature(base, page);
 #endif
     apply_engine_edits(base, page);
-    install_sqlite_hooks(base, page);
+    if (hf_on(HF_SQLITE_TUNING) || hf_on(HF_TELEMETRY_BLOCK)) install_sqlite_hooks(base, page);
 #if !defined(__aarch64__)
-    install_rekordbox_rows(base, page);
+    if (hf_on(HF_GATEWAY)) install_rekordbox_rows(base, page);
 #endif
-    if (install_dsp_hooks(base, page)) {
-        install_bt_send(base, page);
+    if (hf_on(HF_DSP_GUARDS) && install_dsp_hooks(base, page)) {
+        if (hf_on(HF_BLUETOOTH)) install_bt_send(base, page);
 #if !defined(__aarch64__)
         fx_selector_supported = install_px_scope(base, page, build->name);
         cfx_installed = install_cfx_scope(base, page, build->name);
@@ -2626,7 +2643,7 @@ int _Z21qRegisterResourceDataiPKhS0_S0_(int version, const uchar *tree, const uc
     if (!real)
         return 0;
     if (active < 0)
-        active = is_engine() && access(UI_ROOT "/safe-mode", F_OK) != 0;
+        active = is_engine() && hf_on(HF_UI_PACKS) && access(UI_ROOT "/safe-mode", F_OK) != 0;
     if (!active || version < 1 || version > 3)
         return real(version, tree, names, data);
 
@@ -2695,7 +2712,7 @@ static void lower_io_nice(pid_t tid, int nice, int background_io) {
 }
 
 static void guard_named_thread(pthread_t thread, const char *name) {
-    if (!is_engine()) return;
+    if (!is_engine() || !hf_on(HF_THREAD_TUNING)) return;
     int kind = thread_class(name);
     if (!kind) return;
     int saved_errno = errno;
@@ -3015,16 +3032,18 @@ __attribute__((constructor)) static void lower_offline_analyzer(void) {
     exe[n] = 0;
     const char *name = strrchr(exe, '/');
     if (strcmp(name ? name + 1 : exe, "OfflineAnalyzer")) return;
-    struct sched_param param = {.sched_priority = 0};
-    sched_setscheduler(0, SCHED_OTHER, &param);
-    lower_io_nice(0, 10, 1);
-    // It may inherit only CPU1 from EMain: use the online set, not that mask.
-    initialize_engine_cpus();
-    cpu_set_t cpus = engine_cpus;
-    CPU_CLR(1, &cpus);
-    CPU_CLR(2, &cpus);
-    if (engine_cpus_ready && CPU_COUNT(&cpus)) {
-        sched_setaffinity(0, sizeof cpus, &cpus);
+    if (hf_on(HF_THREAD_TUNING)) {
+        struct sched_param param = {.sched_priority = 0};
+        sched_setscheduler(0, SCHED_OTHER, &param);
+        lower_io_nice(0, 10, 1);
+        // It may inherit only CPU1 from EMain: use the online set, not that mask.
+        initialize_engine_cpus();
+        cpu_set_t cpus = engine_cpus;
+        CPU_CLR(1, &cpus);
+        CPU_CLR(2, &cpus);
+        if (engine_cpus_ready && CPU_COUNT(&cpus)) {
+            sched_setaffinity(0, sizeof cpus, &cpus);
+        }
     }
     oa_install();
 }
@@ -3097,7 +3116,7 @@ int setpriority(__priority_which_t which, id_t who, int prio) {
     static void *cache;
     int (*real)(__priority_which_t, id_t, int) = next_symbol(&cache, "setpriority");
     if (!real) { errno = ENOSYS; return -1; }
-    if (which == PRIO_PROCESS && is_engine() && offline_analyzer((pid_t)who)) prio = 10;
+    if (which == PRIO_PROCESS && is_engine() && hf_on(HF_THREAD_TUNING) && offline_analyzer((pid_t)who)) prio = 10;
     return real(which, who, prio);
 }
 
@@ -3106,7 +3125,7 @@ int sched_setscheduler(pid_t pid, int policy, const struct sched_param *param) {
     int (*real)(pid_t, int, const struct sched_param *) = next_symbol(&cache, "sched_setscheduler");
     if (!real) { errno = ENOSYS; return -1; }
     static const struct sched_param idle = {.sched_priority = 0};
-    if (is_engine() && offline_analyzer(pid)) policy = SCHED_OTHER, param = &idle;
+    if (is_engine() && hf_on(HF_THREAD_TUNING) && offline_analyzer(pid)) policy = SCHED_OTHER, param = &idle;
     return real(pid, policy, param);
 }
 
@@ -3146,7 +3165,7 @@ int pthread_setschedparam(pthread_t thread, int policy, const struct sched_param
     if (!real) return ENOSYS;
     char name[16];
     struct sched_param idle = {.sched_priority = 0};
-    if (is_engine() && !pthread_getname_np(thread, name, sizeof name) && thread_class(name) == 2) {
+    if (is_engine() && hf_on(HF_THREAD_TUNING) && !pthread_getname_np(thread, name, sizeof name) && thread_class(name) == 2) {
         policy = SCHED_OTHER;
         param = &idle;
     }
@@ -3154,7 +3173,7 @@ int pthread_setschedparam(pthread_t thread, int policy, const struct sched_param
 }
 
 static int analytics_db(const char *filename) {
-    if (!filename) return 0;
+    if (!filename || !hf_on(HF_TELEMETRY_BLOCK)) return 0;
     int uri = !strncmp(filename, "file:", 5);
     const char *start = filename + (uri ? 5 : 0), *end = start + strlen(start);
     if (uri) { const char *query = strchr(start, '?'); if (query) end = query; }
@@ -3173,7 +3192,7 @@ static sqlite_open_fn sqlite_open_original;
 static sqlite_exec_fn sqlite_exec_original;
 
 static void tune_database(int rc, const char *filename, void **db) {
-    if (rc || !db || !*db || (filename && !strcmp(filename, ":memory:"))) return;
+    if (rc || !db || !*db || (filename && !strcmp(filename, ":memory:")) || !hf_on(HF_SQLITE_TUNING)) return;
     sqlite_exec_original(*db, "PRAGMA busy_timeout = 5000; PRAGMA synchronous = NORMAL; PRAGMA temp_store = MEMORY; PRAGMA cache_size = -8000;",
                          NULL, NULL, NULL);
 }
@@ -3350,6 +3369,7 @@ static const char *volatile_path(int dirfd, const char *path, char out[PATH_MAX]
     if (!path || !is_engine()) return path;
     if (*path == '/' && !strstr(path, "/analytics/posthog.db") && !strstr(path, "/analytics/events.db") &&
         !strstr(path, "/CrashReportDB/")) return path; // fast path: the common open
+    if (!hf_on(HF_TELEMETRY_BLOCK)) return path;
     char full[PATH_MAX];
     if (*path == '/') {
         if (strlen(path) >= sizeof full) { errno = ENAMETOOLONG; return NULL; }
@@ -3437,7 +3457,7 @@ OPENAT_WRAPPER(hook_openat64, O_LARGEFILE)
 
 static int crashpad(const char *file) {
     const char *base = file ? strrchr(file, '/') : NULL;
-    return file && !strcmp(base ? base + 1 : file, "crashpad_handler");
+    return file && !strcmp(base ? base + 1 : file, "crashpad_handler") && hf_on(HF_TELEMETRY_BLOCK);
 }
 
 static void *access_cache;
@@ -3466,7 +3486,7 @@ static const char *stems_processor_path(const char *path) {
     if (path && (!strcmp(path, "/usr/local/bin/stems-processor") ||
                  !strcmp(path, "/usr/Engine/stems-processor") ||
                  !strcmp(path, "/secure-media/stems-processor/bin/stems-processor"))) {
-        if (raw_access(path, X_OK) != 0) {
+        if (raw_access(path, X_OK) != 0 && hf_on(HF_STEMS)) {
             const char *const bundled[] = {STEMS_ENGINEX_PROCESSOR, STEMS_ENGINEX_BIN_PROCESSOR,
                                            STEMS_BUNDLE_PROCESSOR, STEMS_BUNDLE_BIN_PROCESSOR};
             for (size_t i = 0; i < sizeof bundled / sizeof *bundled; i++)
@@ -3554,7 +3574,8 @@ int pthread_setaffinity_np(pthread_t thread, size_t cpusetsize, const cpu_set_t 
         res = real_fn(thread, sizeof fallback, &fallback);
     }
     char name[16];
-    if (!res && !pthread_getname_np(thread, name, sizeof name)) {
+    // The EINVAL fallback above keeps Engine alive on 4-core decks: never switchable.
+    if (!res && hf_on(HF_THREAD_TUNING) && !pthread_getname_np(thread, name, sizeof name)) {
         int kind = thread_class(name);
         if (kind) res = guard_affinity(thread, kind);
     }
