@@ -85,9 +85,12 @@ func setupBackend(ctx context.Context, o *options) error {
 	if backend == "" || !stems.ValidEndpoint(backend) {
 		return errors.New("backend address must be HTTPS or HTTP on a private network")
 	}
-	password, err := ask("后端控制台密码（回车保留已保存的密码）：", "Backend console password (Enter keeps the saved password):")
+	password, err := ask("后端控制台密码（地址未变时回车可保留已保存的密码）：", "Backend console password (Enter keeps the saved password if the address is unchanged):")
 	if err != nil {
 		return err
+	}
+	if backend != saved && password == "" {
+		return errors.New("enter the password for the new backend")
 	}
 	payload := map[string]string{"relayUrl": backend}
 	if password != "" {

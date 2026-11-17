@@ -5,7 +5,8 @@
 # so is an installed unit while the given one still has the placeholder -public.
 set -eu
 BIN=${1:?binary}; UNIT=${2:-}
-HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+HERE=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+# shellcheck source=deploy/relay-host/migrate.sh
 . "$HERE/migrate.sh"
 INSTALLED=/etc/systemd/system/enginex-relay.service
 PREVIOUS=$(installed_relay_unit)
@@ -32,7 +33,7 @@ relay_compatibility_aliases
 systemctl daemon-reload
 systemctl enable enginex-relay.service
 systemctl restart enginex-relay.service
-for i in 1 2 3 4 5 6 7 8 9 10; do
+for _ in 1 2 3 4 5 6 7 8 9 10; do
   curl -fsS http://127.0.0.1:6595/healthz && exit 0
   sleep 1
 done

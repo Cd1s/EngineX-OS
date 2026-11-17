@@ -321,7 +321,7 @@ func TestAppleMusicHelperPhoneSetupWhenUnconfigured(t *testing.T) {
 	defer ui.Close()
 	ui.updateRelayConfig(&relay.URL, ptr("relay-pw"))
 
-	startReq := httptest.NewRequest("POST", "/v1/sc5000/login?provider=applemusic", nil)
+	startReq := httptest.NewRequest("POST", "/v1/enginex/login?provider=applemusic", nil)
 	startReq.RemoteAddr = "127.0.0.1:41002"
 	startRec := httptest.NewRecorder()
 	ui.ServeHTTP(startRec, startReq)

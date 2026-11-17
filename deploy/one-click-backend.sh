@@ -83,13 +83,19 @@ fi
 
 if [ -n "$PUBLIC_URL" ]; then
   # Reject systemd specifiers/argument separators in an operator-provided URL.
-  python3 - "$PUBLIC_URL" "$SCRIPT_DIR/relay-host/enginex-relay.service" "$WORK/relay.service" <<'PYUNIT'
-import pathlib, sys, urllib.parse
+  # shellcheck source=deploy/relay-host/migrate.sh
+  . "$SCRIPT_DIR/relay-host/migrate.sh"
+  TEMPLATE=$(installed_relay_unit)
+  python3 - "$PUBLIC_URL" "${TEMPLATE:-$SCRIPT_DIR/relay-host/enginex-relay.service}" "$WORK/relay.service" <<'PYUNIT'
+import pathlib, re, sys, urllib.parse
 value, template, output = sys.argv[1:]
 u = urllib.parse.urlsplit(value)
-if u.scheme not in ('https', 'http') or not u.hostname or u.username or u.password or any(c.isspace() or c in '%\\"' for c in value):
+if u.scheme not in ('https', 'http') or not u.hostname or u.username or u.password or any(c.isspace() or c in '%$\\"' for c in value):
     raise SystemExit('Use an HTTP(S) public URL without credentials, spaces or systemd specifiers')
-pathlib.Path(output).write_text(pathlib.Path(template).read_text().replace('-public auto ', '-public '+value+' '))
+def update(match):
+    line, n = re.subn(r'-public(?:=|\s+)(?:"[^"]*"|\S+)', '-public '+value, match[0], count=1)
+    return line if n else line+' -public '+value
+pathlib.Path(output).write_text(re.sub(r'^ExecStart=.*$', update, pathlib.Path(template).read_text(), flags=re.M))
 PYUNIT
   sh "$SCRIPT_DIR/relay-host/install.sh" "$RELAY_BIN" "$WORK/relay.service"
 else

@@ -36,6 +36,13 @@ trap 'kill "$health_pid" 2>/dev/null || :' EXIT
 printf '#!/bin/sh\nexit 0\n' > /data/relay
 chmod +x /data/relay
 . "$repo/rootfs-overlay/usr/libexec/enginex-migration"
+. "$repo/deploy/relay-host/migrate.sh"
+
+sh "$repo/deploy/relay-host/install.sh" /data/relay
+grep -q -- '-public auto' /etc/systemd/system/enginex-relay.service
+for name in enginex-relay.service $relay_previous_units; do
+  rm "/etc/systemd/system/$name"
+done
 
 mkdir -p "$legacy_relay_state"
 printf '{"passwordHash":"keep","cookieSecret":"keep"}\n' > "$legacy_relay_state/config.json"
@@ -44,6 +51,7 @@ cat > "/etc/systemd/system/$legacy_relay_unit" <<UNIT
 [Service]
 ExecStart=/usr/local/bin/$legacy_unit-relay -public https://keep.example -state $legacy_relay_state
 StateDirectory=$legacy_unit-relay
+Environment=KEEP_UNIT_VALUE=yes
 UNIT
 mkdir -p "/etc/systemd/system/$legacy_relay_unit.d"
 printf '[Service]\nEnvironment=KEEP_CUSTOM=yes\n' > "/etc/systemd/system/$legacy_relay_unit.d/override.conf"
@@ -70,6 +78,17 @@ printf 'private state\n' > "/var/lib/private/$legacy_unit-relay/config.json"
 ln -s "private/$legacy_unit-relay" "$legacy_relay_state"
 sh "$repo/deploy/relay-host/install.sh" /data/relay
 grep -q 'private state' /var/lib/enginex-relay/config.json
+rm "$legacy_relay_state"
+mkdir "$legacy_relay_state"
+printf 'other state\n' > "$legacy_relay_state/config.json"
+if sh "$repo/deploy/relay-host/install.sh" /data/relay > /data/conflict 2>&1; then
+  echo 'Conflicting state was overwritten' >&2; exit 1
+fi
+grep -q 'private state' /var/lib/enginex-relay/config.json
+grep -q 'other state' "$legacy_relay_state/config.json"
+rm "$legacy_relay_state/config.json"
+rmdir "$legacy_relay_state"
+ln -s enginex-relay "$legacy_relay_state"
 
 # A beginner's fresh install and rerun must use the current binary/flags and
 # actually start Stems, while retaining its token and the relay public URL.
@@ -109,13 +128,17 @@ test "$(stat -c %a /etc/enginex-amd.env)" = 600
 grep -q 'EnvironmentFile=/etc/enginex-amd.env' /etc/systemd/system/enginex-relay.service.d/60-applemusic.conf
 grep -q 'enable --now enginex-am-login.service enginex-amd.service' /data/service-calls
 grep -q -- '-public https://keep.example' /etc/systemd/system/enginex-relay.service
-! grep -q -- '-quick-tunnel' /etc/systemd/system/enginex-relay.service
-! grep -q 'Token:' /data/summary
+if grep -q -- '-quick-tunnel' /etc/systemd/system/enginex-relay.service || grep -q 'Token:' /data/summary; then
+  echo 'Unsupported relay flag or leaked helper token in summary' >&2; exit 1
+fi
+bash "$repo/deploy/one-click-backend.sh" --relay-bin /data/relay --public https://new.example > /data/summary
+grep -q -- '-public https://new.example' /etc/systemd/system/enginex-relay.service
+grep -q 'KEEP_UNIT_VALUE=yes' /etc/systemd/system/enginex-relay.service
 systemctl_fake=/data/bin/systemctl
 cp "$systemctl_fake" /data/systemctl-ok
 printf '#!/bin/sh\nexit 1\n' > "$systemctl_fake"
 if bash "$repo/deploy/one-click-backend.sh" --relay-bin /data/relay > /data/failed-summary 2>&1; then
   echo 'A failed service was reported as a successful deployment' >&2; exit 1
 fi
-! grep -q 'backend is running' /data/failed-summary
+if grep -q 'backend is running' /data/failed-summary; then exit 1; fi
 printf 'Backend migration and idempotent one-click setup: PASS\n'

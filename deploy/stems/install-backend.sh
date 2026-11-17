@@ -2,7 +2,8 @@
 # Install or upgrade the renderer, preserving its existing token.
 set -eu
 staging=${1:?path to staged release}
-HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+HERE=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+# shellcheck source=deploy/relay-host/migrate.sh
 . "$HERE/../relay-host/migrate.sh"
 test -f "$staging/enginex-stemsd"
 test -f "$staging/worker.py"

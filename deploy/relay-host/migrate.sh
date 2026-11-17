@@ -41,6 +41,7 @@ migrate_relay() {
     if [ -e "$relay_previous_state" ] && [ "$(readlink -f "$relay_previous_state")" != "$(readlink -f "$current")" ]; then
         # DynamicUser keeps the real state under /var/lib/private.
         source=$(readlink -f "$relay_previous_state")
+        [ -d "$source" ] || { echo 'Legacy relay state is not a directory' >&2; return 1; }
         case "$source" in
             "$relay_previous_state"|/var/lib/private/sc5000-relay) ;;
             *) echo 'Refusing an unrelated legacy relay state symlink' >&2; return 1 ;;
