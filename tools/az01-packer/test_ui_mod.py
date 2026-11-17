@@ -7672,8 +7672,8 @@ class ThreeBandPaletteTest(unittest.TestCase):
 
 
 class MixstreamPadsLayoutTest(unittest.TestCase):
-    """#261: Mixstream Pro (NH08/NH08S/NH10) pads bar layout tests.
-    Prevents Sweep FX and Stems EQ overlap while keeping native pads and Beat Jump accessible."""
+    """#261 / #286: Mixstream Pro (NH08/NH08S/NH10) pads bar layout tests.
+    The Pad bar holds the pads, the Beat Jump bank and one Sweep FX triangle; the EQ / Stems switch is a Control Center tile."""
 
     def test_pads_layout_patch_applies_and_maintains_coexistence(self):
         qrc = LAB / "5.3.0/qrc"
@@ -7690,11 +7690,16 @@ class MixstreamPadsLayoutTest(unittest.TestCase):
         finally:
             bp.ROOT = old_root
 
-        # 1. Verification of Mixstream controls structure
+        # 1. Verification of Mixstream controls structure (#286: one Sweep FX triangle, no EQ / STEMS button or button column)
         self.assertIn('visible: pads.scMixstream', pads_content)
-        self.assertIn('columns: pads.scBeatJumpBank ? 1 : 2', pads_content)
         self.assertIn('objectName: "MixstreamSweepFx" + pads.deckIndex', pads_content)
-        self.assertIn('objectName: "MixstreamStemsEq" + pads.deckIndex', pads_content)
+        self.assertIn('text: "△"', pads_content)
+        self.assertIn('Layout.preferredWidth: 44', pads_content)
+        self.assertIn('onClicked: root.scMixstreamSweepOpen = true', pads_content)
+        self.assertNotIn('MixstreamStemsEq', pads_content)
+        self.assertNotIn('scStripMode', pads_content)
+        self.assertNotIn('columns: pads.scBeatJumpBank ? 1 : 2', pads_content)
+        self.assertNotIn('SWEEP FX', pads_content)
         self.assertIn('objectName: "MixstreamBeatJumpBank" + pads.deckIndex', pads_content)
         self.assertIn('id: padsLayout', pads_content)
 
@@ -7703,7 +7708,7 @@ class MixstreamPadsLayoutTest(unittest.TestCase):
 
         # 3. Compact button padding and background styling preventing visual overlap
         self.assertIn('leftPadding: 4; rightPadding: 4', pads_content)
-        self.assertIn('font.pixelSize: 11', pads_content)
+        self.assertIn('font.pixelSize: 18', pads_content)
         self.assertIn('background: Rectangle {', pads_content)
 
         # 4. Non-Mixstream isolation: natural height preserved without forced stretching
@@ -7719,8 +7724,6 @@ class MixstreamPadsLayoutTest(unittest.TestCase):
             self.assertFalse(re.search(r'(?<!parent\.)\bdown\b', block), f"Bare 'down' found in background: {block}")
             self.assertFalse(re.search(r'(?<!parent\.)\bhighlighted\b', block), f"Bare 'highlighted' found in background: {block}")
         self.assertIn('color: parent.down ?', pads_content)
-        self.assertIn('color: parent.highlighted ?', pads_content)
-        self.assertIn('border.color: parent.highlighted ?', pads_content)
 
     def test_stems_eq_switch_is_a_control_center_tile_on_mixstream_only(self):
         rows = bp.load_dict()

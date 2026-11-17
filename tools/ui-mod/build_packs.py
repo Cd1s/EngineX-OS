@@ -8010,11 +8010,11 @@ def edits(dev: bool):
         }
 '''),
         ]
-        # #166 / #261: compact Numark decks (NH08/NH08S/NH10) have four pads and no Stems EQ key.
+        # #166 / #261 / #286: compact Numark decks (NH08/NH08S/NH10) have four pads.
         # When Beat Jump bank is enabled, show performance pads (row 1) and Beat Jump (row 2)
-        # simultaneously without sacrificing either, with Sweep FX and Stems EQ in a matching 2-row column.
-        # When Beat Jump bank is off, show Sweep FX and Stems EQ side-by-side in a 2-column single row
-        # so they never vertically overlap at any UI scale.
+        # simultaneously without sacrificing either. Sweep FX is a single "△" button that opens
+        # stock's Sweep FX popup when tapped; the Stems EQ switch is a Control Center tile
+        # (STEMS_EQ_TILE), so the Pad bar keeps only what the pads need.
         old_pads_layout = '''        GridLayout {
             id: padsLayout
             objectName: "Deck_Pads_Layout"
@@ -8047,50 +8047,24 @@ def edits(dev: bool):
         }
     }
 }'''
-        new_pads_layout = '''        GridLayout {
+        new_pads_layout = '''        Button {
+            objectName: "MixstreamSweepFx" + pads.deckIndex
             visible: pads.scMixstream
-            columns: pads.scBeatJumpBank ? 1 : 2
-            columnSpacing: 4
-            rowSpacing: 4
-            Layout.preferredWidth: pads.scBeatJumpBank ? 84 : 156
+            Layout.preferredWidth: 44
             Layout.fillHeight: true
             Layout.topMargin: pads.scBeatJumpBank ? 8 : 16
             Layout.bottomMargin: pads.scBeatJumpBank ? 8 : 16
-            Button {
-                objectName: "MixstreamSweepFx" + pads.deckIndex
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-                leftPadding: 4; rightPadding: 4; topPadding: 0; bottomPadding: 0
-                font.pixelSize: 11
-                font.bold: true
-                text: "SWEEP FX"
-                enabled: Config.ui.hasSweepFxSelectionPopup
-                background: Rectangle {
-                    color: parent.down ? Style.surface03Color : Style.surface02Color
-                    radius: 4
-                    border.width: 1
-                    border.color: Style.surface03Color
-                }
-                onClicked: root.scMixstreamSweepOpen = true
+            padding: 0
+            font.pixelSize: 18
+            text: "△"
+            enabled: Config.ui.hasSweepFxSelectionPopup
+            background: Rectangle {
+                color: parent.down ? Style.surface03Color : Style.surface02Color
+                radius: 4
+                border.width: 1
+                border.color: Style.surface03Color
             }
-            Button {
-                objectName: "MixstreamStemsEq" + pads.deckIndex
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-                leftPadding: 4; rightPadding: 4; topPadding: 0; bottomPadding: 0
-                font.pixelSize: 11
-                font.bold: true
-                text: "EQ / STEMS"
-                highlighted: !!pads.scStripMode && pads.scStripMode.index === 1
-                enabled: Config.audio.hasStemsLevel && !!pads.scStripMode
-                background: Rectangle {
-                    color: parent.highlighted ? Style.active01Color : (parent.down ? Style.surface03Color : Style.surface02Color)
-                    radius: 4
-                    border.width: 1
-                    border.color: parent.highlighted ? Style.active02Color : Style.surface03Color
-                }
-                onClicked: pads.scStripMode.index = pads.scStripMode.index === 1 ? 0 : 1
-            }
+            onClicked: root.scMixstreamSweepOpen = true
         }
 
         ColumnLayout {
@@ -8168,8 +8142,6 @@ def edits(dev: bool):
             ('    required property int deckIndex\n', '''    required property int deckIndex
     readonly property bool scMixstream: Config.audio.fx.hasNHFx
     readonly property bool scBeatJumpBank: scMixstream && Config.audio.deck.hasBeatJump && typeof root !== "undefined" && !!root.scBeatJumpPads
-    readonly property var scStripProperty: scMixstream ? Planck.getProperty("/Engine/Mixer/Channel" + deckIndex + "/ChannelStrip/Mode") : null
-    readonly property var scStripMode: scStripProperty ? scStripProperty.translator : null
     function scJump(action) {
         const p = Planck.getProperty("/Engine/Deck" + deckIndex + "/Track/BeatJump/" + action)
         if (p && p.translator) p.translator.state = true
