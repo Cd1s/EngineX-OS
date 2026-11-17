@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"log"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -385,10 +387,85 @@ func (s *server) configView() map[string]any {
 	return s.configViewWithContext(context.Background())
 }
 
+func localLANIPv4() string {
+	// Prefer a UDP socket dial so RestrictAddressFamilies=AF_INET (without AF_NETLINK) works.
+	for _, target := range []string{"192.168.1.1:80", "10.0.0.1:80", "1.1.1.1:80"} {
+		if c, err := net.Dial("udp4", target); err == nil {
+			ip := c.LocalAddr().(*net.UDPAddr).IP.To4()
+			_ = c.Close()
+			if ip != nil && !ip.IsLoopback() && !ip.IsLinkLocalUnicast() {
+				return ip.String()
+			}
+		}
+	}
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return ""
+	}
+	for _, a := range addrs {
+		ipnet, ok := a.(*net.IPNet)
+		if !ok || ipnet.IP.IsLoopback() {
+			continue
+		}
+		if ip4 := ipnet.IP.To4(); ip4 != nil && !ip4.IsLinkLocalUnicast() {
+			return ip4.String()
+		}
+	}
+	return ""
+}
+
+func readLocalHelperToken() string {
+	if t := strings.TrimSpace(os.Getenv("ENGINEX_AMD_TOKEN")); t != "" {
+		return t
+	}
+	b, err := os.ReadFile("/etc/enginex-amd.env")
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "ENGINEX_AMD_TOKEN=") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "ENGINEX_AMD_TOKEN="))
+		}
+	}
+	return ""
+}
+
+var testAppleMusicHelperProbeURL = "http://127.0.0.1:12341/healthz"
+
+func localAppleMusicHelper(ctx context.Context) (helperURL, loginURL, token string) {
+	if testAppleMusicHelperProbeURL == "" {
+		return "", "", ""
+	}
+	pctx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+	defer cancel()
+	req, err := http.NewRequestWithContext(pctx, http.MethodGet, testAppleMusicHelperProbeURL, nil)
+	if err != nil {
+		return "", "", ""
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", "", ""
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", "", ""
+	}
+	host := localLANIPv4()
+	if host == "" {
+		return "", "", ""
+	}
+	return "http://" + host + ":12341", "http://" + host + ":12342", readLocalHelperToken()
+}
+
 func (s *server) configViewWithContext(ctx context.Context) map[string]any {
 	c := s.cfg.get()
 	decks := s.decks.listView(time.Now())
 	stems := s.stemsStatus(ctx)
+	amURL, amLoginURL, amToken := c.AppleMusicHelperURL, c.AppleMusicHelperLoginURL, c.AppleMusicHelperToken
+	if amURL == "" {
+		amURL, amLoginURL, amToken = localAppleMusicHelper(ctx)
+	}
 	v := map[string]any{
 		"backendUrl":        s.publicURL(),
 		"tunnelUrl":         s.quickTunnelURL(),
@@ -402,9 +479,9 @@ func (s *server) configViewWithContext(ctx context.Context) map[string]any {
 		"soundcloudSecretSet":      c.SoundCloudSecret != "",
 		"soundcloudTokenSet":       c.SoundCloudToken != "",
 		"getSongBpmKeySet":         c.GetSongBPMKey != "",
-		"appleMusicHelperUrl":      c.AppleMusicHelperURL,
-		"appleMusicHelperLoginUrl": c.AppleMusicHelperLoginURL,
-		"appleMusicHelperTokenSet": c.AppleMusicHelperToken != "",
+		"appleMusicHelperUrl":      amURL,
+		"appleMusicHelperLoginUrl": amLoginURL,
+		"appleMusicHelperTokenSet": amToken != "",
 		"decks":                    decks,
 		"stems":                    stems,
 	}
@@ -435,7 +512,11 @@ func (s *server) handleConfigGet(w http.ResponseWriter, r *http.Request) {
 		view["soundcloudClientSecret"] = c.SoundCloudSecret
 		view["soundcloudToken"] = c.SoundCloudToken
 		view["getSongBpmKey"] = c.GetSongBPMKey
-		view["appleMusicHelperToken"] = c.AppleMusicHelperToken
+		amTok := c.AppleMusicHelperToken
+		if amTok == "" && c.AppleMusicHelperURL == "" {
+			_, _, amTok = localAppleMusicHelper(r.Context())
+		}
+		view["appleMusicHelperToken"] = amTok
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "config": view, "decks": view["decks"], "stems": view["stems"]})
 }
