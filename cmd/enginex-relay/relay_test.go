@@ -8,7 +8,9 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -848,5 +850,225 @@ func TestAppleMusicHelperConfig(t *testing.T) {
 	c := s.cfg.get()
 	if c.AppleMusicHelperURL != "" || c.AppleMusicHelperLoginURL != "" || c.AppleMusicHelperToken != "" {
 		t.Fatalf("expected cleared helper config, got %+v", c)
+	}
+}
+
+func TestAppleMusicRelayURLChangeWithoutTokenClearsSavedToken(t *testing.T) {
+	oldProbe := testAppleMusicHelperProbeURL
+	testAppleMusicHelperProbeURL = ""
+	defer func() { testAppleMusicHelperProbeURL = oldProbe }()
+
+	s := newTestServer(t)
+	h := s.routes()
+	if err := s.cfg.setPassword("relay-owner-pass-1234"); err != nil {
+		t.Fatal(err)
+	}
+	hdrs := map[string]string{
+		"Content-Type":      "application/json",
+		"X-Deemix-Password": "relay-owner-pass-1234",
+	}
+
+	if w := do(h, "POST", "/api/config", `{"appleMusicHelperUrl":"http://192.168.6.104:12341","appleMusicHelperLoginUrl":"http://192.168.6.104:12342","appleMusicHelperToken":"tok-host-A"}`, hdrs); w.Code != 200 {
+		t.Fatalf("save A: %d %s", w.Code, w.Body.String())
+	}
+
+	// Same URL with empty token preserves existing token while updating login URL.
+	if w := do(h, "POST", "/api/config", `{"appleMusicHelperUrl":"http://192.168.6.104:12341","appleMusicHelperLoginUrl":"http://192.168.6.104:22342","appleMusicHelperToken":""}`, hdrs); w.Code != 200 {
+		t.Fatalf("update login url on same host: %d %s", w.Code, w.Body.String())
+	}
+	if c := s.cfg.get(); c.AppleMusicHelperToken != "tok-host-A" || c.AppleMusicHelperLoginURL != "http://192.168.6.104:22342" {
+		t.Fatalf("same-URL save lost token or login URL: %+v", c)
+	}
+
+	// Changing URL without providing a new token must clear the old token (and stale login URL when omitted).
+	if w := do(h, "POST", "/api/config", `{"appleMusicHelperUrl":"http://192.168.6.200:12341","appleMusicHelperToken":""}`, hdrs); w.Code != 200 {
+		t.Fatalf("change to host B: %d %s", w.Code, w.Body.String())
+	}
+	wGet := do(h, "GET", "/api/config?secrets=1", "", hdrs)
+	var got struct {
+		Config struct {
+			URL   string `json:"appleMusicHelperUrl"`
+			Login string `json:"appleMusicHelperLoginUrl"`
+			Set   bool   `json:"appleMusicHelperTokenSet"`
+			Token string `json:"appleMusicHelperToken"`
+		} `json:"config"`
+	}
+	if err := json.Unmarshal(wGet.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Config.URL != "http://192.168.6.200:12341" || got.Config.Login != "" || got.Config.Set || got.Config.Token != "" {
+		t.Fatalf("expected cleared token and loginURL after URL change, got %+v", got.Config)
+	}
+}
+
+func TestAppleMusicAutodetectPreservesTokenOnConsoleSave(t *testing.T) {
+	probe := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer probe.Close()
+	old := testAppleMusicHelperProbeURL
+	testAppleMusicHelperProbeURL = probe.URL + "/healthz"
+	defer func() { testAppleMusicHelperProbeURL = old }()
+	t.Setenv("ENGINEX_AMD_TOKEN", "tok-auto")
+
+	if localLANIPv4() == "" {
+		t.Skip("host has no private/tailnet IPv4 address for auto-detect")
+	}
+
+	s := newTestServer(t)
+	h := s.routes()
+	if err := s.cfg.setPassword("relay-owner-pass-1234"); err != nil {
+		t.Fatal(err)
+	}
+	hdrs := map[string]string{
+		"Content-Type":      "application/json",
+		"X-Deemix-Password": "relay-owner-pass-1234",
+	}
+
+	readSecrets := func() (url, login, tok string, set bool) {
+		w := do(h, "GET", "/api/config?secrets=1", "", hdrs)
+		if w.Code != 200 {
+			t.Fatalf("get secrets: %d %s", w.Code, w.Body.String())
+		}
+		var out struct {
+			Config struct {
+				URL   string `json:"appleMusicHelperUrl"`
+				Login string `json:"appleMusicHelperLoginUrl"`
+				Set   bool   `json:"appleMusicHelperTokenSet"`
+				Token string `json:"appleMusicHelperToken"`
+			} `json:"config"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out.Config.URL, out.Config.Login, out.Config.Token, out.Config.Set
+	}
+
+	detURL, detLogin, detTok, detSet := readSecrets()
+	if detURL == "" || !detSet || detTok != "tok-auto" {
+		t.Fatalf("expected initial auto-detected helper + token, got url=%q set=%v tok=%q", detURL, detSet, detTok)
+	}
+
+	// Saving the auto-detected URLs with an empty token box must NOT drop tok-auto.
+	saveBody, _ := json.Marshal(map[string]string{
+		"appleMusicHelperUrl":      detURL,
+		"appleMusicHelperLoginUrl": detLogin,
+		"appleMusicHelperToken":    "",
+	})
+	if ws := do(h, "POST", "/api/config", string(saveBody), hdrs); ws.Code != 200 {
+		t.Fatalf("save detected URLs: %d %s", ws.Code, ws.Body.String())
+	}
+	afterURL, _, afterTok, afterSet := readSecrets()
+	if afterURL != detURL || !afterSet || afterTok != "tok-auto" {
+		t.Fatalf("Save on auto-detected helper dropped token: url=%q set=%v tok=%q", afterURL, afterSet, afterTok)
+	}
+
+	// Console HTML should keep auto-detected URLs as placeholders rather than pre-filling .value unconditionally.
+	lw := do(h, "POST", "/login", "password=relay-owner-pass-1234", map[string]string{"Content-Type": "application/x-www-form-urlencoded"})
+	if lw.Code != 303 || len(lw.Result().Cookies()) == 0 {
+		t.Fatalf("console login: %d", lw.Code)
+	}
+	cookie := lw.Result().Cookies()[0]
+	wPage := do(h, "GET", "/", "", map[string]string{"Cookie": cookie.Name + "=" + cookie.Value})
+	if wPage.Code != 200 || !strings.Contains(wPage.Body.String(), "appleMusicHelperAuto") {
+		t.Fatalf("expected console page to render auto-detected helper via appleMusicHelperAuto placeholder: code=%d", wPage.Code)
+	}
+
+	// Saving a different helper URL with an empty token must NOT expose the local helper's tok-auto.
+	if wd := do(h, "POST", "/api/config", `{"appleMusicHelperUrl":"http://192.168.250.99:12341","appleMusicHelperToken":""}`, hdrs); wd.Code != 200 {
+		t.Fatalf("save custom URL: %d %s", wd.Code, wd.Body.String())
+	}
+	customURL, _, customTok, customSet := readSecrets()
+	if customURL != "http://192.168.250.99:12341" || customSet || customTok != "" {
+		t.Fatalf("custom helper URL leaked local auto token: url=%q set=%v tok=%q", customURL, customSet, customTok)
+	}
+}
+
+func TestAppleMusicAutodetectPrivateAndTailnetOnly(t *testing.T) {
+	if mode := os.Getenv("TEST_RELAY_NETNS_CASE"); mode != "" {
+		runCmd := func(args ...string) {
+			t.Helper()
+			if out, err := exec.Command(args[0], args[1:]...).CombinedOutput(); err != nil {
+				t.Fatalf("%v failed: %v (%s)", args, err, out)
+			}
+		}
+		runCmd("ip", "link", "set", "lo", "up")
+		switch mode {
+		case "public_only":
+			runCmd("ip", "link", "add", "veth0", "type", "veth", "peer", "name", "veth1")
+			runCmd("ip", "link", "set", "veth0", "up")
+			runCmd("ip", "link", "set", "veth1", "up")
+			runCmd("ip", "addr", "add", "198.51.100.10/24", "dev", "veth0")
+			runCmd("ip", "route", "add", "default", "via", "198.51.100.1", "dev", "veth0")
+		case "non_cgnat_100":
+			runCmd("ip", "link", "add", "veth0", "type", "veth", "peer", "name", "veth1")
+			runCmd("ip", "link", "set", "veth0", "up")
+			runCmd("ip", "link", "set", "veth1", "up")
+			runCmd("ip", "addr", "add", "100.128.1.2/24", "dev", "veth0")
+			runCmd("ip", "route", "add", "default", "via", "100.128.1.1", "dev", "veth0")
+		case "public_default_with_tailnet":
+			runCmd("ip", "link", "add", "veth0", "type", "veth", "peer", "name", "veth1")
+			runCmd("ip", "link", "set", "veth0", "up")
+			runCmd("ip", "link", "set", "veth1", "up")
+			runCmd("ip", "addr", "add", "198.51.100.10/24", "dev", "veth0")
+			runCmd("ip", "route", "add", "default", "via", "198.51.100.1", "dev", "veth0")
+			runCmd("ip", "link", "add", "ts0", "type", "veth", "peer", "name", "ts1")
+			runCmd("ip", "link", "set", "ts0", "up")
+			runCmd("ip", "link", "set", "ts1", "up")
+			runCmd("ip", "addr", "add", "100.90.1.2/10", "dev", "ts0")
+		default:
+			t.Fatalf("unknown mode %q", mode)
+		}
+
+		probe := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer probe.Close()
+		old := testAppleMusicHelperProbeURL
+		testAppleMusicHelperProbeURL = probe.URL + "/healthz"
+		defer func() { testAppleMusicHelperProbeURL = old }()
+		t.Setenv("ENGINEX_AMD_TOKEN", "tok-auto")
+
+		s := newTestServer(t)
+		h := s.routes()
+		if err := s.cfg.setPassword("relay-owner-pass-1234"); err != nil {
+			t.Fatal(err)
+		}
+		w := do(h, "GET", "/api/config?secrets=1", "", map[string]string{"X-Deemix-Password": "relay-owner-pass-1234"})
+		var got struct {
+			Config struct {
+				URL   string `json:"appleMusicHelperUrl"`
+				Token string `json:"appleMusicHelperToken"`
+			} `json:"config"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+			t.Fatal(err)
+		}
+		if mode == "public_default_with_tailnet" {
+			if got.Config.URL != "http://100.90.1.2:12341" || got.Config.Token != "tok-auto" {
+				t.Fatalf("expected tailnet helper URL + token, got %+v", got.Config)
+			}
+		} else {
+			if got.Config.URL != "" || got.Config.Token != "" {
+				t.Fatalf("public IP leaked over plain HTTP in mode %s: %+v", mode, got.Config)
+			}
+		}
+		return
+	}
+
+	if runtime.GOOS != "linux" {
+		t.Skip("network namespace auto-detect test runs on Linux")
+	}
+	if err := exec.Command("unshare", "-n", "ip", "link", "show", "lo").Run(); err != nil {
+		t.Skipf("unshare -n unavailable: %v", err)
+	}
+	for _, mode := range []string{"public_only", "non_cgnat_100", "public_default_with_tailnet"} {
+		t.Run(mode, func(t *testing.T) {
+			cmd := exec.Command("unshare", "-n", os.Args[0], "-test.run=^TestAppleMusicAutodetectPrivateAndTailnetOnly$", "-test.v")
+			cmd.Env = append(os.Environ(), "TEST_RELAY_NETNS_CASE="+mode)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("mode %s failed: %v\n%s", mode, err, out)
+			}
+		})
 	}
 }

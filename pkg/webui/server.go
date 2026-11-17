@@ -891,6 +891,11 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.prune()
+	if !v.Guest && v.Provider == "applemusic" && s.appleMusic != nil && !s.appleMusic.Ready() && s.appleMusic.HelperConfig().URL != "" {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		_ = s.appleMusic.HelperStatus(ctx)
+		cancel()
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if len(s.sessions) >= 16 {
@@ -907,6 +912,9 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		delete(s.ownerDeleted, v.Provider)
 		for _, old := range s.sessions {
 			if !old.Guest && old.Provider == v.Provider {
+				if ready(old.p) {
+					old.Ready = true
+				}
 				respond(w, old)
 				return
 			}
@@ -928,11 +936,6 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		session.Ready = bp.Ready()
 	}
 	if am, ok := p.(*providers.AppleMusic); ok {
-		if !v.Guest && !am.Ready() && am.HelperConfig().URL != "" {
-			ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
-			_ = am.HelperStatus(ctx)
-			cancel()
-		}
 		session.Ready = am.Ready()
 	}
 	s.sessions[session.ID] = session

@@ -3827,8 +3827,21 @@ SERVICES_MAIN = """
 		// but re-apply every 30 s in case a local change raced a reply.
 		const digest = scUiPoll.getResponseHeader("X-UI-Digest") || "", now = Date.now()
 		if (digest && digest === scUiDigest && now - scUiAppliedAt < 30000) { scEnsureTidal(); return }
+		const prevScope = scScope
+		const wasLoaded = typeof scUiLoaded !== "undefined" && scUiLoaded
+		const wasIn = wasLoaded && prevScope && prevScope !== "tidal" && Array.isArray(scLoggedIn) ? scLoggedIn.indexOf(prevScope) >= 0 : null
 		scApply(JSON.parse(scUiPoll.responseText))
 		scUiDigest = digest; scUiAppliedAt = now
+		if (wasIn !== null && scScope === prevScope && Array.isArray(scLoggedIn) && (scLoggedIn.indexOf(prevScope) >= 0) !== wasIn) {
+			const nowIn = !wasIn
+			if (nowIn && typeof scLogin !== "undefined" && scLogin === prevScope) scLogin = ""
+			if (typeof Planck !== "undefined" && Planck && Planck.librarianController && Planck.librarianController.streamingPlaylistsController)
+				Planck.librarianController.streamingPlaylistsController.invalidateUI()
+			if (nowIn && typeof scEnterTimer !== "undefined" && scEnterTimer) {
+				scEnterTries = 8
+				scEnterTimer.start()
+			}
+		}
 	}
 	function scApply(v) {
 		scUsbPreparing = !!v.usbPreparing

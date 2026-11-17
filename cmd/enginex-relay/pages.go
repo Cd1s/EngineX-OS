@@ -303,8 +303,9 @@ function render(c){
  el('redir').textContent=c.spotifyRedirect;
  el('arlstate').innerHTML=c.deezerArlSet?'已保存：<code>'+esc(c.deezerArlMasked)+'</code>'+(c.deezerArlUser?' · 用户 '+esc(c.deezerArlUser):''):'<span class="badge warn">未设置 ARL</span>（请先保存 ARL，供 EngineX OS 碟机同步登录）';
  el('bpmstate').textContent='SoundCloud Client ID：'+(c.soundcloudClientIdSet?'已设置':'未设置')+' · Secret：'+(c.soundcloudSecretSet?'已设置':'未设置')+' · Token：'+(c.soundcloudTokenSet?'已设置':'未设置')+' · GetSongBPM：'+(c.getSongBpmKeySet?'已设置':'未设置');
- el('amstate').textContent='API 地址：'+(c.appleMusicHelperUrl||'未设置')+' · Token：'+(c.appleMusicHelperTokenSet?'已设置':'未设置');
- el('amurl').value=c.appleMusicHelperUrl||'';el('amlurl').value=c.appleMusicHelperLoginUrl||'';
+ el('amstate').textContent='API 地址：'+(c.appleMusicHelperUrl||'未设置')+(c.appleMusicHelperAuto?'（自动检测）':'')+' · Token：'+(c.appleMusicHelperTokenSet?'已设置':'未设置');
+ el('amurl').value=c.appleMusicHelperAuto?'':(c.appleMusicHelperUrl||'');el('amurl').placeholder=(c.appleMusicHelperAuto&&c.appleMusicHelperUrl)||'助手 API 地址（如 http://192.168.6.104:12341）';
+ el('amlurl').value=c.appleMusicHelperLoginAuto?'':(c.appleMusicHelperLoginUrl||'');el('amlurl').placeholder=(c.appleMusicHelperLoginAuto&&c.appleMusicHelperLoginUrl)||'助手扫码登录页地址（留空则自动推导 :12342）';
  const stems=c.stems||{};
  el('stemsstate').innerHTML=stems.online?'<span class="badge good">'+esc((stems.device||'stemsd')+' · '+(stems.backend||'hpss')+' · '+(stems.busy?'繁忙':'在线'))+'</span>':'<span class="badge warn">离线 / 未连接</span>';
  const decks=Array.isArray(c.decks)?c.decks:[];

@@ -339,7 +339,7 @@ func TestAppleMusicHelperPhoneSetupWhenUnconfigured(t *testing.T) {
 		t.Fatalf("expected setup form on unconfigured phone page: code=%d", getRec.Code)
 	}
 
-	// Submitting setup configures helper and pushes to relay.
+	// Submitting setup configures helper locally on the deck without pushing to the relay (#8).
 	postReq := httptest.NewRequest("POST", action, strings.NewReader("helperAction=setup&helperUrl=http://192.168.6.104:12341&helperToken=tok-1"))
 	postReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	postRec := httptest.NewRecorder()
@@ -353,11 +353,8 @@ func TestAppleMusicHelperPhoneSetupWhenUnconfigured(t *testing.T) {
 	}
 	select {
 	case pushed := <-relayReceived:
-		if pushed["appleMusicHelperUrl"] != "http://192.168.6.104:12341" || pushed["appleMusicHelperToken"] != "tok-1" {
-			t.Fatalf("unexpected relay push payload: %+v", pushed)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for relay push")
+		t.Fatalf("phone setup must stay deck-local, pushed to relay: %+v", pushed)
+	case <-time.After(150 * time.Millisecond):
 	}
 
 	// Once configured, phone setup cannot overwrite existing helperUrl.
@@ -575,5 +572,421 @@ func TestAppleMusicHelperAutoRestoreFavoritesAlbumsAndSearch(t *testing.T) {
 	tidalGet(t, gw.URL, "/v1/users/1/playlists", 200, &lists2)
 	if !strings.Contains(string(lists2.Items[1]), "Second Account") {
 		t.Fatalf("expected invalidated browse cache with Second Account, got %s", lists2.Items)
+	}
+}
+
+func TestAppleMusicDeckQRCompletesOnExternalHelperLoginAndSwitchAccount(t *testing.T) {
+	var mu sync.Mutex
+	account := 0 // 0 = signed out, 1 = First DJ, 2 = Second DJ
+	const devTok = "eyJabcde12345.eyJabcde123456789012345.eyJabcde123456789012345"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		acc := account
+		mu.Unlock()
+		switch r.URL.Path {
+		case "/healthz":
+			w.WriteHeader(http.StatusOK)
+		case "/v1/login/status":
+			st := "signed-out"
+			if acc > 0 {
+				st = "ready"
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"state": st, "signedIn": acc > 0})
+		case "/v1/login/credentials":
+			if acc == 0 {
+				_ = json.NewEncoder(w).Encode(map[string]any{"signedIn": false})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"signedIn":       true,
+				"mediaUserToken": fmt.Sprintf("ext-user-tok-%d", acc),
+				"developerToken": devTok,
+				"storefront":     "th",
+			})
+		case "/v1/me/storefront":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"id": "th"}}})
+		case "/v1/me/library/playlists":
+			name := "First DJ Crate"
+			if acc == 2 {
+				name = "Second DJ Crate"
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": []map[string]any{{"id": fmt.Sprintf("p.ext%d", acc), "attributes": map[string]any{"name": name}}},
+			})
+		case "/v1/me/library/songs", "/v1/me/library/albums":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	ui := New(Config{
+		AccessToken:           "console-fixture",
+		UIDir:                 t.TempDir(),
+		StateDir:              t.TempDir(),
+		AppleMusicURL:         srv.URL,
+		AppleMusicWebURL:      srv.URL,
+		AppleMusicHelperURL:   srv.URL,
+		AppleMusicHelperToken: "helper-secret",
+	}, nil)
+	defer ui.Close()
+	gw := httptest.NewServer(ui)
+	defer gw.Close()
+
+	deckCall := func(method, path string) (int, string) {
+		t.Helper()
+		req := httptest.NewRequest(method, path, nil)
+		req.RemoteAddr = "127.0.0.1:42001"
+		rec := httptest.NewRecorder()
+		ui.ServeHTTP(rec, req)
+		return rec.Code, rec.Body.String()
+	}
+
+	if code, _ := deckCall("POST", "/v1/enginex/ui?scope=applemusic&sources=applemusic"); code != 200 {
+		t.Fatalf("set scope: %d", code)
+	}
+
+	// 1. User opens Apple Music on deck while helper is signed out -> QR flow starts in waiting.
+	if code, body := deckCall("POST", "/v1/enginex/login?provider=applemusic"); code != 200 || !strings.Contains(body, `"status":"waiting"`) {
+		t.Fatalf("start login: %d %s", code, body)
+	}
+	if code, body := deckCall("GET", "/v1/enginex/login?provider=applemusic"); code != 200 || !strings.Contains(body, `"status":"waiting"`) {
+		t.Fatalf("poll before login: %d %s", code, body)
+	}
+
+	// 2. User signs in directly on external helper page (:12342) without submitting /m/applemusic.
+	mu.Lock()
+	account = 1
+	mu.Unlock()
+	if code, body := deckCall("GET", "/v1/enginex/login?provider=applemusic"); code != 200 || !strings.Contains(body, `"status":"done"`) {
+		t.Fatalf("expected deck QR poll to jump to done after external helper sign-in: %d %s", code, body)
+	}
+	if _, uiBody := deckCall("GET", "/v1/enginex/ui"); !strings.Contains(uiBody, `"applemusic"`) || !strings.Contains(uiBody, `"loggedIn":["applemusic"]`) {
+		t.Fatalf("expected applemusic in loggedIn: %s", uiBody)
+	}
+	var lists1 tidalList
+	tidalGet(t, gw.URL, "/v1/users/1/playlists", 200, &lists1)
+	if len(lists1.Items) != 1 || !strings.Contains(string(lists1.Items[0]), "First DJ Crate") {
+		t.Fatalf("expected First DJ Crate after QR done, got %s", lists1.Items)
+	}
+
+	// 3. Tapping "Switch account" while already logged in stays "waiting" until credentials change.
+	if code, _ := deckCall("POST", "/v1/enginex/login?provider=applemusic"); code != 200 {
+		t.Fatalf("start switch-account login: %d", code)
+	}
+	if code, body := deckCall("GET", "/v1/enginex/login?provider=applemusic"); code != 200 || !strings.Contains(body, `"status":"waiting"`) {
+		t.Fatalf("switch-account QR should stay waiting before new sign-in: %d %s", code, body)
+	}
+	mu.Lock()
+	account = 2
+	mu.Unlock()
+	if code, body := deckCall("GET", "/v1/enginex/login?provider=applemusic"); code != 200 || !strings.Contains(body, `"status":"done"`) {
+		t.Fatalf("switch-account QR should finish after external account change: %d %s", code, body)
+	}
+	var lists2 tidalList
+	tidalGet(t, gw.URL, "/v1/users/1/playlists", 200, &lists2)
+	if len(lists2.Items) != 1 || !strings.Contains(string(lists2.Items[0]), "Second DJ Crate") {
+		t.Fatalf("expected Second DJ Crate after switch account, got %s", lists2.Items)
+	}
+
+	// 4. Cold-boot server with an already-signed-in helper promotes POST /api/sessions to ready.
+	coldUI := New(Config{
+		AccessToken:           "console-fixture",
+		UIDir:                 t.TempDir(),
+		StateDir:              t.TempDir(),
+		AppleMusicURL:         srv.URL,
+		AppleMusicWebURL:      srv.URL,
+		AppleMusicHelperURL:   srv.URL,
+		AppleMusicHelperToken: "helper-secret",
+	}, nil)
+	defer coldUI.Close()
+	sessReq := httptest.NewRequest("POST", "/api/sessions", strings.NewReader(`{"provider":"applemusic"}`))
+	sessReq.Header.Set("Authorization", "Bearer console-fixture")
+	sessReq.Header.Set("Content-Type", "application/json")
+	sessRec := httptest.NewRecorder()
+	coldUI.ServeHTTP(sessRec, sessReq)
+	if sessRec.Code != 200 {
+		t.Fatalf("createSession: %d %s", sessRec.Code, sessRec.Body.String())
+	}
+	var sessOut struct {
+		Ready bool `json:"ready"`
+	}
+	_ = json.NewDecoder(sessRec.Body).Decode(&sessOut)
+	if !sessOut.Ready {
+		t.Fatal("expected cold-boot applemusic session to become ready via helper sync")
+	}
+}
+
+func TestAppleMusicConsoleSignOutSticksAcrossHelperPolls(t *testing.T) {
+	helper := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/healthz":
+			w.WriteHeader(http.StatusOK)
+		case "/v1/login/status":
+			_ = json.NewEncoder(w).Encode(map[string]any{"state": "ready", "signedIn": true})
+		case "/v1/login/credentials":
+			_ = json.NewEncoder(w).Encode(map[string]any{"signedIn": true, "mediaUserToken": "mut-from-helper", "storefront": "us"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer helper.Close()
+
+	s, dir := newTestServer(t)
+	s.appleMusic.SetHelper(helper.URL, "", "helper-tok")
+	owner := filepath.Join(dir, "applemusic-owner.json")
+	exists := func() bool { _, err := os.Stat(owner); return err == nil }
+	poll := func() {
+		req := httptest.NewRequest("GET", "/api/applemusic", nil)
+		req.Header.Set("Authorization", "Bearer test-token-1234")
+		rec := httptest.NewRecorder()
+		s.ServeHTTP(rec, req)
+		if rec.Code != 200 {
+			t.Fatalf("status %d %s", rec.Code, rec.Body.String())
+		}
+	}
+
+	poll()
+	if !exists() || !s.appleMusic.Ready() {
+		t.Fatalf("expected initial poll to link helper account: file=%v ready=%v", exists(), s.appleMusic.Ready())
+	}
+
+	sessReq := httptest.NewRequest("POST", "/api/sessions", strings.NewReader(`{"provider":"applemusic"}`))
+	sessReq.Header.Set("Authorization", "Bearer test-token-1234")
+	sessReq.Header.Set("Content-Type", "application/json")
+	sessRec := httptest.NewRecorder()
+	s.ServeHTTP(sessRec, sessReq)
+	var sess Session
+	_ = json.NewDecoder(sessRec.Body).Decode(&sess)
+	if sessRec.Code != 200 || !sess.Ready {
+		t.Fatalf("create session: %d %+v", sessRec.Code, sess)
+	}
+
+	delReq := httptest.NewRequest("DELETE", "/api/sessions/"+sess.ID, nil)
+	delReq.Header.Set("Authorization", "Bearer test-token-1234")
+	delRec := httptest.NewRecorder()
+	s.ServeHTTP(delRec, delReq)
+	if delRec.Code != 200 {
+		t.Fatalf("delete session: %d %s", delRec.Code, delRec.Body.String())
+	}
+
+	poll()
+	if exists() || s.appleMusic.Ready() || s.appleMusic.Owner().UserToken != "" {
+		t.Fatalf("signed-out account relinked after status poll: file=%v ready=%v owner=%+v", exists(), s.appleMusic.Ready(), s.appleMusic.Owner())
+	}
+
+	sessReq2 := httptest.NewRequest("POST", "/api/sessions", strings.NewReader(`{"provider":"applemusic"}`))
+	sessReq2.Header.Set("Authorization", "Bearer test-token-1234")
+	sessReq2.Header.Set("Content-Type", "application/json")
+	sessRec2 := httptest.NewRecorder()
+	s.ServeHTTP(sessRec2, sessReq2)
+	var sess2 Session
+	_ = json.NewDecoder(sessRec2.Body).Decode(&sess2)
+	if sess2.Ready || exists() {
+		t.Fatalf("signed-out account relinked on createSession: ready=%v file=%v", sess2.Ready, exists())
+	}
+}
+
+func TestAppleMusicRelayPullClearsOldTokenWhenHelperURLChanges(t *testing.T) {
+	var mu sync.Mutex
+	gotAuth := "unset"
+	hostB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		gotAuth = r.Header.Get("Authorization")
+		mu.Unlock()
+		switch r.URL.Path {
+		case "/healthz":
+			w.WriteHeader(http.StatusOK)
+		case "/v1/login/status":
+			_ = json.NewEncoder(w).Encode(map[string]any{"state": "sign-in"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer hostB.Close()
+
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "config": map[string]any{"appleMusicHelperUrl": hostB.URL}})
+	}))
+	defer relay.Close()
+
+	s, _ := newTestServer(t)
+	s.updateRelayConfig(&relay.URL, ptr("relay-pw"))
+	body := `{"helperUrl":"http://192.168.1.50:12341","helperLoginUrl":"http://192.168.1.50:12342","helperToken":"token-for-A"}`
+	req := httptest.NewRequest("POST", "/api/applemusic", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token-1234")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("save helper A: %d %s", rec.Code, rec.Body.String())
+	}
+
+	if err := s.pullRelayConfig(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	after := s.appleMusic.HelperConfig()
+	if after.URL != hostB.URL || after.Token != "" || after.LoginURL != "" {
+		t.Fatalf("expected URL=%s with cleared token and loginURL, got %+v", hostB.URL, after)
+	}
+	_ = s.appleMusic.HelperStatus(context.Background())
+	mu.Lock()
+	auth := gotAuth
+	mu.Unlock()
+	if auth != "" {
+		t.Fatalf("new helper host received old Authorization header %q", auth)
+	}
+
+	// Pulling the same URL without a token keeps a token set for that same URL.
+	saveB := fmt.Sprintf(`{"helperUrl":%q,"helperToken":"token-for-B"}`, hostB.URL)
+	reqB := httptest.NewRequest("POST", "/api/applemusic", strings.NewReader(saveB))
+	reqB.Header.Set("Authorization", "Bearer test-token-1234")
+	reqB.Header.Set("Content-Type", "application/json")
+	recB := httptest.NewRecorder()
+	s.ServeHTTP(recB, reqB)
+	if err := s.pullRelayConfig(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.appleMusic.HelperConfig(); got.Token != "token-for-B" {
+		t.Fatalf("same-URL pull without token should preserve token-for-B, got %+v", got)
+	}
+}
+
+type b1bHelperProbe struct {
+	s    *Server
+	dir  string
+	file string
+	t    *testing.T
+	set  func(in bool, tok string)
+}
+
+func newB1bHelperProbe(t *testing.T, creds bool) *b1bHelperProbe {
+	t.Helper()
+	var mu sync.Mutex
+	signedIn := true
+	token := "mut-alice"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		if r.URL.Path == "/v1/login" && r.Method == "POST" {
+			signedIn = true
+		}
+		in, tok := signedIn, token
+		mu.Unlock()
+		state := "signed-out"
+		if in {
+			state = "ready"
+		}
+		switch r.URL.Path {
+		case "/healthz":
+			w.WriteHeader(http.StatusOK)
+		case "/v1/login/status", "/v1/login":
+			_ = json.NewEncoder(w).Encode(map[string]any{"state": state, "signedIn": in})
+		case "/v1/login/credentials":
+			if !creds {
+				http.NotFound(w, r)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"signedIn": in, "mediaUserToken": tok, "storefront": "us"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	s, dir := newTestServer(t)
+	p := &b1bHelperProbe{
+		s:    s,
+		dir:  dir,
+		file: filepath.Join(dir, "applemusic-owner.json"),
+		t:    t,
+		set:  func(in bool, tok string) { mu.Lock(); signedIn, token = in, tok; mu.Unlock() },
+	}
+	p.api("POST", "/api/applemusic", `{"helperUrl":"`+srv.URL+`","helperToken":"helper-tok"}`)
+	return p
+}
+
+func (p *b1bHelperProbe) api(method, path, body string) (int, string) {
+	p.t.Helper()
+	var r *http.Request
+	if body != "" {
+		r = httptest.NewRequest(method, path, strings.NewReader(body))
+		r.Header.Set("Content-Type", "application/json")
+	} else {
+		r = httptest.NewRequest(method, path, nil)
+	}
+	r.Header.Set("Authorization", "Bearer test-token-1234")
+	w := httptest.NewRecorder()
+	p.s.ServeHTTP(w, r)
+	return w.Code, w.Body.String()
+}
+
+func (p *b1bHelperProbe) ownerFile() bool { _, err := os.Stat(p.file); return err == nil }
+func (p *b1bHelperProbe) poll() bool {
+	p.api("GET", "/api/applemusic", "")
+	return p.s.appleMusic.Ready()
+}
+func (p *b1bHelperProbe) signOut() {
+	p.t.Helper()
+	p.s.mu.Lock()
+	p.s.sessions["own-am"] = &Session{ID: "own-am", Provider: "applemusic", Ready: true, p: p.s.appleMusic, expires: time.Now().Add(time.Hour)}
+	p.s.mu.Unlock()
+	if c, b := p.api("DELETE", "/api/sessions/own-am", ""); c != 200 {
+		p.t.Fatalf("sign-out %d %s", c, b)
+	}
+}
+
+func TestAppleMusicExternalLoginOtherAccountAfterConsoleSignOut(t *testing.T) {
+	p := newB1bHelperProbe(t, true)
+	if !p.poll() || !p.ownerFile() {
+		t.Fatalf("expected initial poll to link mut-alice")
+	}
+	// DELETE /api/sessions/own-am invokes Logout() -> Forget() and forgetOwner() -> Forget().
+	p.signOut()
+	if p.poll() || p.ownerFile() {
+		t.Fatalf("expected sign-out to stick for mut-alice")
+	}
+	p.set(true, "mut-bob")
+	if !p.poll() || p.s.appleMusic.Owner().UserToken != "mut-bob" || !p.ownerFile() {
+		t.Fatalf("different account on external helper did not link after console sign-out: ready=%v owner=%+v file=%v", p.s.appleMusic.Ready(), p.s.appleMusic.Owner(), p.ownerFile())
+	}
+}
+
+func TestAppleMusicForgetSurvivesDeckRestart(t *testing.T) {
+	for _, creds := range []bool{true, false} {
+		p := newB1bHelperProbe(t, creds)
+		p.poll()
+		p.signOut()
+		p.poll()
+
+		s2 := New(Config{AccessToken: "test-token-1234", StateDir: p.dir}, nil)
+		t.Cleanup(s2.Close)
+		p.s = s2
+		if got := p.poll(); got || p.ownerFile() {
+			t.Fatalf("creds=%v: signed-out account linked again after deck restart: ready=%v file=%v", creds, got, p.ownerFile())
+		}
+
+		// Explicit console login still clears the persisted marker and relinks.
+		if c, b := p.api("POST", "/api/applemusic/login", `{"username":"alice@example.com","password":"pw"}`); c != 200 {
+			t.Fatalf("creds=%v: console login %d %s", creds, c, b)
+		}
+		if !p.poll() || (creds && !p.ownerFile()) {
+			t.Fatalf("creds=%v: console re-login after restart did not relink: ready=%v file=%v", creds, p.s.appleMusic.Ready(), p.ownerFile())
+		}
+	}
+}
+
+func TestAppleMusicForgetSurvivesHelperBlip(t *testing.T) {
+	p := newB1bHelperProbe(t, true)
+	p.poll()
+	p.signOut()
+	p.poll()
+	p.set(false, "mut-alice")
+	if p.poll() {
+		t.Fatalf("expected unready while helper reports signed-out")
+	}
+	p.set(true, "mut-alice")
+	if got := p.poll(); got || p.ownerFile() {
+		t.Fatalf("helper signedIn=false blip cleared sign-out marker and relinked mut-alice: ready=%v file=%v", got, p.ownerFile())
 	}
 }

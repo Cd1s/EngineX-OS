@@ -114,7 +114,7 @@ func (s *Server) syncAppleMusicSession(clearDeleted bool, prevGen uint64) {
 func (s *Server) appleMusicHelperStatus(w http.ResponseWriter, r *http.Request) {
 	prevGen := s.appleMusic.CredGen()
 	status := s.appleMusic.HelperStatus(r.Context())
-	s.syncAppleMusicSession(false, prevGen)
+	s.syncAppleMusicSession(status.SignedIn && s.appleMusic.CredGen() != prevGen, prevGen)
 	cfg := s.appleMusic.HelperConfig()
 	// Credential-bearing URLs are served only by the authenticated redirect / QR.
 	loginPage := ""

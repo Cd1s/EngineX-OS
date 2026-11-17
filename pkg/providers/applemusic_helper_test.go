@@ -302,3 +302,158 @@ func TestAppleMusicHelperCredentialsSyncAndDevTokenFallback(t *testing.T) {
 		t.Fatalf("cold developerToken sync fallback failed: %+v %v", tracks, err)
 	}
 }
+
+func TestAppleMusicProbeHelperOnlineVsOfflineCooldown(t *testing.T) {
+	var mu sync.Mutex
+	online := false
+	signedIn := false
+	hits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits++
+		up := online
+		in := signedIn
+		mu.Unlock()
+		if !up {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		switch r.URL.Path {
+		case "/healthz":
+			w.WriteHeader(http.StatusOK)
+		case "/v1/login/status":
+			st := "signed-out"
+			if in {
+				st = "ready"
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"state": st, "signedIn": in})
+		case "/v1/login/credentials":
+			_ = json.NewEncoder(w).Encode(map[string]any{"signedIn": in, "mediaUserToken": "probe-tok", "developerToken": "eyJabcde12345.eyJabcde123456789012345.eyJabcde123456789012345", "storefront": "us"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	am := &AppleMusic{HelperURL: srv.URL}
+	// Offline helper backs off for the full 30s cooldown.
+	st := am.ProbeHelper(t.Context(), 30*time.Second)
+	if st.Online || st.SignedIn || hits != 1 {
+		t.Fatalf("expected 1 offline probe, got st=%+v hits=%d", st, hits)
+	}
+	_ = am.ProbeHelper(t.Context(), 30*time.Second)
+	if hits != 1 {
+		t.Fatalf("offline helper should stay on cooldown, got hits=%d", hits)
+	}
+
+	// Once online (via direct HelperStatus), ProbeHelper uses a short 2s cooldown instead of 30s.
+	mu.Lock()
+	online = true
+	mu.Unlock()
+	if st = am.HelperStatus(t.Context()); !st.Online || st.SignedIn {
+		t.Fatalf("expected online signed-out status, got %+v", st)
+	}
+	mu.Lock()
+	signedIn = true
+	beforeHits := hits
+	mu.Unlock()
+	// Backdate helperProbedAt by 2.1s (< 30s, > 2s) to verify online 2s cooldown without sleeping.
+	am.mu.Lock()
+	am.helperProbedAt = time.Now().Add(-2100 * time.Millisecond)
+	am.mu.Unlock()
+	st = am.ProbeHelper(t.Context(), 30*time.Second)
+	mu.Lock()
+	afterHits := hits
+	mu.Unlock()
+	if !st.SignedIn || !am.Ready() || afterHits <= beforeHits {
+		t.Fatalf("online helper did not re-probe after 2s: st=%+v ready=%v hits=%d->%d", st, am.Ready(), beforeHits, afterHits)
+	}
+}
+
+func TestAppleMusicForgetSticksUntilNewLogin(t *testing.T) {
+	var mu sync.Mutex
+	signedIn := true
+	userTok := "mut-alice"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		in, tok := signedIn, userTok
+		mu.Unlock()
+		switch r.URL.Path {
+		case "/healthz":
+			w.WriteHeader(http.StatusOK)
+		case "/v1/login/status", "/v1/login":
+			st := "signed-out"
+			if in {
+				st = "ready"
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"state": st, "signedIn": in})
+		case "/v1/login/credentials":
+			_ = json.NewEncoder(w).Encode(map[string]any{"signedIn": in, "mediaUserToken": tok, "storefront": "us"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	ownerPath := filepath.Join(t.TempDir(), "applemusic-owner.json")
+	am := &AppleMusic{OwnerPath: ownerPath, HelperURL: srv.URL, HelperToken: "tok"}
+	if st := am.HelperStatus(t.Context()); !st.SignedIn || !am.Ready() || am.Owner().UserToken != "mut-alice" {
+		t.Fatalf("initial helper sync failed: st=%+v ready=%v owner=%+v", st, am.Ready(), am.Owner())
+	}
+	if _, err := os.Stat(ownerPath); err != nil {
+		t.Fatalf("expected owner file after initial sync: %v", err)
+	}
+
+	if err := am.Forget(); err != nil {
+		t.Fatal(err)
+	}
+	// Calling Forget a second time (Logout + forgetOwner) must not erase the remembered token.
+	if err := am.Forget(); err != nil {
+		t.Fatal(err)
+	}
+	st := am.HelperStatus(t.Context())
+	if st.SignedIn || am.Ready() || am.Owner().UserToken != "" {
+		t.Fatalf("sign-out did not stick across HelperStatus: st=%+v ready=%v owner=%+v", st, am.Ready(), am.Owner())
+	}
+	if _, err := os.Stat(ownerPath); !os.IsNotExist(err) {
+		t.Fatalf("owner file was rewritten after Forget: err=%v", err)
+	}
+	if st = am.ProbeHelper(t.Context(), 0); st.SignedIn || am.Ready() {
+		t.Fatalf("sign-out did not stick across ProbeHelper: st=%+v ready=%v", st, am.Ready())
+	}
+
+	// Reloading from disk after a restart preserves the sign-out marker.
+	restarted := &AppleMusic{OwnerPath: ownerPath, HelperURL: srv.URL, HelperToken: "tok"}
+	_ = restarted.Load()
+	if st = restarted.HelperStatus(t.Context()); st.SignedIn || restarted.Ready() {
+		t.Fatalf("sign-out did not survive Load() restart: st=%+v ready=%v", st, restarted.Ready())
+	}
+
+	// One helper signedIn=false blip must not clear the marker for the same account.
+	mu.Lock()
+	signedIn = false
+	mu.Unlock()
+	_ = am.HelperStatus(t.Context())
+	mu.Lock()
+	signedIn = true
+	mu.Unlock()
+	if st = am.HelperStatus(t.Context()); st.SignedIn || am.Ready() {
+		t.Fatalf("helper signed-out blip relinked mut-alice: st=%+v ready=%v", st, am.Ready())
+	}
+
+	// Signing into a different account on the external helper re-enables sync.
+	mu.Lock()
+	userTok = "mut-bob"
+	mu.Unlock()
+	if st = am.HelperStatus(t.Context()); !st.SignedIn || !am.Ready() || am.Owner().UserToken != "mut-bob" {
+		t.Fatalf("new helper account should sync: st=%+v ready=%v owner=%+v", st, am.Ready(), am.Owner())
+	}
+
+	// Explicit HelperLoginBegin also clears the forgotten flag even for the same account.
+	if err := am.Forget(); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := am.HelperLoginBegin(t.Context(), "bob@example.com", "pw"); err != nil || !st.SignedIn || !am.Ready() || am.Owner().UserToken != "mut-bob" {
+		t.Fatalf("explicit HelperLoginBegin should relink: st=%+v err=%v ready=%v owner=%+v", st, err, am.Ready(), am.Owner())
+	}
+}
