@@ -1,28 +1,259 @@
-# EngineX OS 5.3.0.5 change record
+# EngineX OS 5.3.0.5 发版与 Issue 修复记录（草稿，发布日期 【待填】）
 
-## Final naming contract (#234, 2026-11-16)
+> **草稿说明**：标有 `【待填】` 的位置在构建、门禁与发布后由发版人填入，其余内容来自 `agent/5305-integration` 的合并记录、候选分支 `agent/5305-rc-candidate` 的合并与测试记录和 `docs/REGRESSION-CHECKLIST.md`。构建提交、全部 SHA-256 和门禁结果在构建之前都不存在，请勿提前当作事实引用。
 
-The maintainer retired the compatibility HTTP namespace, data link, socket
-aliases, old scale environment output, certificate domain and downgrade
-restoration. Current clients use `/v1/enginex/` and `/data/enginex`. Historical
-records use current terminology; only upgrade migration readers retain the
-pre-5.3.0.5 literals.
+- **日期**：撰写 `2026-11-14`，夜间补录 `2026-11-17`（涵盖 `2026-11-16` 20:25 至 `2026-11-17` 10:16，碟机团队本地时间 UTC+7）；发布 `【待填】`
+- **范围**：`v5.3.0.4-r5`（`9e827205`）→ `v5.3.0.5`（版本号 `5.3.0.5`，tag `v5.3.0.5`），内容来自集成分支 `agent/5305-integration`（`b8b28d9d`）和候选分支 `agent/5305-rc-candidate`（补录时的分支头 `4da52987`，在集成分支之上依次合入了 5 批来源分支）。
+- **构建提交**：`【待填】`（候选分支头 `4da52987` 还不是构建提交；最终合并复核和最终候选的门禁尚未完成，见第 3 节）
+- **回滚点**：tag `v5.3.0.4-r5`（`9e827205`）；一代机与二代机刷回该 Release 的 `*-Update.img`。更早的回滚点见 `ISSUE-FIXES-5.3.0.4.md`。
+- **覆盖机型与产物（28 个发布资产 + `RELEASE-TAG.txt` + `SHA256SUMS.txt` + `SHA256SUMS.txt.sig` = 31 个上传文件）**：
+  - 8 款一代机 `*-Update.img`、8 款二代机 `*-Update.img`、4 个平台的 `EngineX-Installer-5.3.0.5-*`；
+  - 8 个 `*-Data-Bundle.tar.gz` **最后一次**随 Release 提供，仅供 `5.3.0.2` / `5.3.0.3` 二代机的屏幕 OTA 过渡（#215）；`5.3.0.6` 起退役。
+- **签名**：从 5.3.0.5 起每个 Release 附 `SHA256SUMS.txt.sig`（Ed25519，私钥只在编译机上）；5.3.0.4 及更早的碟机不验签，需先更新到 5.3.0.5。
+- **在线文档**：三份 README 与 `docs/site/content.js`（三语）已更新到 5.3.0.5，实测截图与开机画面预览 PNG 由发版构建负责，本次未改。
+- **本文件的读法**：第 1 节是 11 月 14 日之前合入的修复；**第 1A 节**是 11 月 16 日晚到 17 日上午合入的全部修复（日期、范围、原因、修法、测试、分支和提交、仍需实机的项目）；**第 1B 节**是仍在进行、**没有**合入本版本的工作。
 
-The one-time migration preserves real data, rewrites managed stored values and
-removes only owned compatibility links. An unrelated link or real directory
-is never deleted. Old restore operations are refused with live and parked
-user data untouched. Regression tests assert this contract instead of the
-retired downgrade restore. Gen-1 r5 image OTA and Gen-2 r5 Data-Bundle OTA must
-remain green. Official Mods use current names; only the exact saved-pause
-migration implementation and test files retain exceptions in the guard.
+---
 
-Upgrade cleanup runs after the new generation commits. Invalid input and
-failed or interrupted upgrades keep the original ALSA loader, library and
-existing data layout usable. Forward-upgrade rollback preserves its input
-bytes; this does not restore the retired downgrade/layout operation. A cold
-boot completes a committed loader-name migration without recreating a link.
+## 1. Issue 与 PR 修复总表（v5.3.0.4-r5 → v5.3.0.5）
 
-The integrated internal save drive now retains Engine's bundled Demo source
-explicitly when that content exists. Launch tests cover present/missing Demo
-content and an unavailable save directory; the JP07 gate keeps its Demo,
-Sampler and artwork checks on the normal shipped launch.
+| Issue / PR | 模块 | 原因与修法摘要 | 验证与回归测试 |
+| --- | --- | --- | --- |
+| **#255 / #239**（原生安装器与签名更新） | `cmd/enginex-installer/`<br>`tools/az01-packer/`<br>`pkg/webui/update*.go` | **原因**：安装器依赖主机上的 Python、fastboot、e2fsprogs、libusb 或 WSL；Release 资产可以被替换，而碟机更新只信任发布页给出的文件。<br>**修法**：安装器用 Go 直接准备镜像并经 USB 传输（Windows 走系统 WinUSB）；每个 Release 的 `SHA256SUMS.txt` 带 Ed25519 签名 `SHA256SUMS.txt.sig`，屏幕更新和安装器先验签再核对 SHA-256，无签名、签名无效、被改动或比碟机版本旧的发布一律拒绝；5.3.0.4 及更早的碟机不做该检查。安装器旁有同版本机型镜像时优先使用并要求同发布的 `SHA256SUMS.txt`、`.sig`、`RELEASE-TAG.txt`。 | 检验：`cmd/enginex-installer` 与 `pkg/webui` 的 Go 测试、`update_sign_test.go`；真机 WinUSB 绑定、USB 传输和刷入后激活需要实机（检查表行 215、216、218）。 |
+| **恢复官方固件**（含原厂卡 Logo 的 QML 缓存故障） | `cmd/enginex-installer/restore_stock.go`<br>`tools/ui-mod/`（QML 缓存隔离）<br>`tools/az01-packer/build-installer.sh` | **原因**：EngineX 与原厂共用 QML 磁盘缓存，原厂刷机保留 `/data`，损坏的缓存让原厂启动崩溃（卡 Logo）。<br>**修法**：EngineX 的 QML 缓存放到 `ui/qml-cache`，启动时清理旧共享缓存；`Restore-Official-Firmware.*`（`--restore-stock`）先清共享缓存，再校验官方 5.3.0 校验和与 AZ01 板号后刷入；二代机走 LAN 卸载。回到原厂前请先启动一次 5.3.0.5。 | 检验：`restore_stock` Go 测试、ARM 固件沙箱；真机官方刷入与返回 EngineX 需维护者进入更新模式（行 201、217）。 |
+| **蓝牙音箱输出与质量 / 延迟调优** | `tools/ui-mod/engine_ui_hook.c`<br>`tools/ui-mod/build_packs.py`<br>`pkg/webui/` | **原因**：Engine 自带的 A2DP 输出源原先拿到的是静音，面板也无法选择输出，另有环形缓冲回绕问题。<br>**修法**：钩子把 `bt_out=` 所选的输出对以 A2DP 流自身的采样率发给音箱，仅在有音箱收听时发送；原厂蓝牙面板 `输入分配到` 下新增 `输出来源`；网页控制台同步设置。蓝牙约增加 150–250 ms，不用于打拍对齐。 | 检验：UI 包与 C 测试；维护者 2026-11-14 在真实 SC5000 上试听并认可音质；其他机型的 `输出来源` 选项与已连接手机时的面板提示仍待确认（行 187、188）。 |
+| **#205**（碟机之间复制设置、USB 配置导入） | `pkg/webui/`<br>`tools/ui-mod/build_packs.py`<br>`tools/ui-mod/i18n.tsv` | **原因**：没有安全的跨碟机复制设置方式；r5 把原厂「加载保存的配置」提示自动答成 No，U 盘配置从未导入。<br>**修法**：来源碟机允许、接收碟机确认后只复制白名单偏好，Player 编号、角色、颜色、Name/Product、网络身份与账号保留本机；撤销按字节恢复；`Profile → Save to my drive` 同时导出 EngineX 偏好；恢复原厂 Yes / No 提示；机身菜单重启改用原厂正常退出以保存 Player 编号。 | 检验：UI 包与 Go 测试；两台真机的 Link / USB / 撤销验收待做（行 200、202、210）。 |
+| **#213 / PR #214**（分侧反转转盘） | `pkg/webui/ui_settings.go`<br>`tools/ui-mod/build_packs.py` | **需求**：转盘方向要能按碟机分别设置。<br>**修法**：`设置 → 设备` 与 `:8080` 增加 `反转转盘方向`（双转盘机型左右各一个），即时作用于顶部搓碟、外圈微调、网格 / Loop 微调与 `Shift + 转盘` 跳曲；电动转盘机型隐藏。**2026-11-16 晚的后续**：一体机上两个 QML 引擎之间的状态不同步（左右转盘设置在 `HighSpeedJogWheelAssignment` 上不生效），改为跨引擎轮询；SC5000 / SC6000 这类独立播放器本来就没有这个功能，现在在设置里**隐藏**且忽略它（见 1A）。 | 检验：`test_ui_mod.py`、原生 chroot QML 校验；实机物理转动待做（行 205、276）。 |
+| **#258**（所有一体机 `推子回音`） | `tools/ui-mod/engine_ui_hook.c`<br>`tools/ui-mod/build_packs.py` | **原因**：旧的主总线 PCM 回音与原厂逐通道 Transition FX 叠加，造成堆叠回音与卡顿。<br>**修法**：全部 5.3.0 一体机旁路旧回音，使用原厂逐通道 Transition FX；独立播放器保持旁路。 | 检验：C 与 Python 套件；真机一体机音频验收待做（行 190）。 |
+| **#263**（电动转盘 4 轨布局） | `tools/ui-mod/build_packs.py` | **原因**：原厂电动模块只对 `Repeater { model: [1, 2] }` 的碟位运行马达并设置 `ExternalPlatterLayerActive`，`4 Decks` / `Paired Player` 下转盘不动、微调无效。<br>**修法**：为本机持有的碟位启用马达与触摸微调。 | 检验：Go / Python 套件；`SC5000M` / `SC6000M` 实机待验（行 186）。 |
+| **#261 / PR #266**（Mixstream 打击垫栏） | `tools/ui-mod/build_packs.py` | **原因**：Sweep FX 与 Stems EQ 在 Beat Jump 组打开时互相重叠。<br>**修法**：重排 `Pads.qml`，两者按 Beat Jump 组状态动态切换列数，原生打击垫与跳拍同时可用。 | 检验：UI 包套件（行 204）。 |
+| **#238**（碟机本机 Stems 分离） | `internal/stems/separate.go` | **原因**：旧方案只在 250 Hz 与 4 kHz 处切频段，在 MUSDB18 片段上每个分轨都低于 0 dB。<br>**修法**：`LocalRender` 改用 STFT 软掩码分离器，人声 / 贝斯 / 鼓 / 旋律达到固定的信号失真比下限；不是神经网络，仍有串音；人声保持原有的立体声位置；只提供 `hpss` 的电脑 / 中继不再使用（碟机自己的分离得分更高），Stems 状态行写明所用来源；Stems 上传停止进展时释放名额，慢但仍在工作的渲染端保留任务（#243）。实测 60 秒音乐在空闲 SC5000 上约 16.5–17.0 s（人声立体声化前），构建机 armhf 核心上多约 6%。 | 检验：`internal/stems` Go 套件；碟机播放中的耗时未测（行 222）。 |
+| **#268**（演出曲目表导出） | `pkg/webui/` | **原因**：无法把已记录的演出导出为曲目表。<br>**修法**：认证后的文本 / CSV 下载，在 Engine 持有曲库时只读原厂 `hm.db` 历史，保留演出边界、播放顺序、重复曲目，处理已提交 WAL 与未知时钟，绝不创建或修改历史库。Remote Library 记录与 Prepare 仍待查。 | 检验：`pkg/webui` 的 `TestTracklist268Export`；真机 SC LIVE 4 对照原厂 History 待做（行 206）。 |
+| **3-Band / 概览**（rekordbox 配色、概览高度、跨读取补全） | `tools/ui-mod/build_packs.py`<br>`pkg/prolink/`<br>`pkg/bridge/`<br>`pkg/rekordbox/` | **原因**：`3-Band` 与 rekordbox / CDJ-3000 配色不同；rb-bridge 在 `overviewWaveFormData` 末尾写零，Engine 按未缩放字节只画约三分之一高度，QML 再放大；PWV7 三频段被按错误顺序（中 / 高 / 低）旋转；已播放过的曲目与导出读取超过挂载时限的卡留有零尾。<br>**修法**：配色改为低频蓝、中频橙、高频白，静音中频褪为棕；overview 写入三个频段最大值；PWV7 按低 / 中 / 高读取；先补全概览再读导出，补全可跨挂载续做。 | 检验：`ThreeBandPaletteTest`、eglfs 沙箱；实机对照 CDJ-3000 / rekordbox 与旧导入 U 盘重插待做（行 194–196、203、219）。 |
+| **Live Stream 只输出 WAV、按需采集** | `pkg/broadcast/`<br>`pkg/webui/`<br>`tools/ui-mod/` | **原因**：控制台提供 MP3 / OGG，但镜像没有这两种编码器，默认 `mp3` 永远连不上；没有收听者时仍持续采集并重采样，空闲碟机约占 7.3% 单核。<br>**修法**：固定 WAV（16 位、48 kHz、立体声）；旧设置自动转 WAV，Shoutcast 目标不再推送，`/live.mp3` 重定向到 `/live.wav`；没有 `/live.wav` 听众、Icecast 服务器与 LAN 流时不采集。 | 检验：`go test -race ./pkg/broadcast/... ./pkg/webui/...`；真实 Icecast 服务器播放待做（行 197、223）。 |
+| **有线 + Wi-Fi 同网段** | `rootfs-overlay/`（路由守护与 sysctl）<br>`pkg/webui/` | **原因**：两台 SC5000 同时走有线与 Wi-Fi 时，Link 曲目走了 Wi-Fi（13–19 MB 曲目加载 7.4–11.3 s）；网线地址晚于 Wi-Fi 到达时，Engine 报 `online check failed` 并断开 Wi-Fi；两张网卡互相应答对方地址。<br>**修法**：同网段时 Link 路由走 `eth0`；路由守护让 Wi-Fi 保持；每个接口 `arp_announce=2`、`arp_ignore=1` 从启动起生效。 | 检验：overlay 套件；两台真机多次开机验证待做（行 192、193、213）。 |
+| **#223**（Remote Library 列表封面） | `tools/ui-mod/build_packs.py` | **原因**：`BrowseView` 的 `AlbumArt.qml` 把带来源标签的行都发给网关 `/v1/enginex/art`，而它只认自己列表里的封面，返回 404，列表出现灰块。<br>**修法**：只有 Engine 自己没有封面（`""` 或 `image://streaming/`）时才询问网关，Engine 已有的封面不再被丢弃。 | 检验：Step 2 套件；SC LIVE 4 真机验收待做（行 185）。 |
+| **#264 / #272 / #252 / #216 / #246**（大 U 盘与 rekordbox 导入） | `pkg/compat/`<br>`pkg/bridge/`<br>`pkg/enginedb/`<br>`internal/cli/` | **原因**：大型导入重复 `Lstat` 数万次、桥接状态在 FAT32 上可超 4 GiB、挂载时限被占满；Pro DJ Link 暂存库可把存储卡占满（58.6 GiB 卡被占 50 GiB）；一代机的 pack 把原厂的网络盘判断改成恒为真，对方播放器的盘出现 Stems 入口（Engine 无法写入 Link 来源，报「空间不足」）；旧导入补全时重写曲目 / 歌单 ID、丢失碟机上的编辑；旧 MP3 网格偏移。<br>**修法**：解析器缓存路径查询并用 `DirEntry.Type()`；`BridgeAnalysis` 行数按 3 GiB 封顶；暂存库按盘限量与清理；Stems 滑动入口与 Stems 列表只在本机自己的盘上出现（与原厂一致）；按已保存来源记录匹配旧行并保留已播放标记、Cue、Loop 与歌单 ID；MP3 网格迁移与共享挂载时限；导入不再覆盖 Engine 同时对曲库做的改动。 | 检验：Go 套件（`-race`）、覆盖层与打包套件；真机 SD 重插与数据恢复为独立验收（行 189、191、207、211、212、214）。 |
+| **#269 / #277 / #279 / #247 / #248**（流媒体） | `pkg/providers/`<br>`pkg/webui/`<br>`tools/ui-mod/` | **原因**：Spotify 载入会弹出载体、TIDAL 登录载体被挤占；收藏夹里出现 TIDAL 专属空白行且无法进入 My Playlists；原生 Ogg 失去 Engine 认识的下载名；音源设置存在先读后写的丢失更新；歌单第二页失败时整批丢弃。<br>**修法**：保留 Spotify 载入与 TIDAL 载体、识别两种 `TIDAL Rising` 拼写并走原厂 `push()`、用载体补丁的 `mp3` 命名标记而 MIME 仍为 `audio/ogg`、两个写入者改用加锁的 `BPMStore.UpdateConfig`、保留已成功获取的有序前缀；后续页面失败时网关显示已加载的行加一条未完成提示并可重试，保留 401/403 与重新登录提示（#248，行 239）。 | 检验：`pkg/providers`、`pkg/webui` 套件（`TestBrowsePartial248KeepsPrefixAndErrorUntilRetry` 等）；NH08 真机浏览 Spotify 与真机中断后续页待做（行 225、226、239）；#247 的 SoundCloud 保存仍待其所有者完成。 |
+| **HFS+ U 盘**（弹出、`*-Update.img` 更新） | `pkg/webui/`<br>`rootfs-overlay/`（updater 路径） | **原因**：Engine 持有 HFS+ 曲库时弹出被拒 26 次且不说明原因；原厂 `az01-update` 给更新环境传了空的 `upgrade-file=`（或去掉了文件夹的文件名），因为 HFS+ 视图是 `/media/<卷>` 上的 tmpfs 绑定，原厂向上找根目录找不到 U 盘自己的根。<br>**修法**：保留真实弹出错误并解除缓存曲库；原厂读取 `/tmp/update-file-path` 之前由 `engine-ui-guard update-file` 把 U 盘上的所选文件映射成 U 盘上的路径（符号链接与越出 U 盘的路径保持原样）；正常模式与安全模式（回退到原厂 Engine）都走同一步骤。 | 检验：Go / overlay 套件；真机 HFS+ U 盘更新需实机（行 209、224）。 |
+| **影子碟搓碟** | `pkg/webui/shadow*.go`<br>`tools/ui-mod/build_packs.py` | **原因**：用力或极快（超过 14.4 倍）搓碟时，影子副本按对端约 40 ms 前的位置汇报来导向，出现反向与更宽的位移、冻结与跳转。<br>**修法**：沿源碟自己的路径连续跟随，不超出、不反向。 | 检验：Step 2 套件；双 SC5000 真机搓碟待做（行 198、199）。 |
+| **空闲碟机负载** | `rootfs-overlay/`（boot-watch、thread sweep） | **原因**：`engine-ui-guard watch` 每秒 fork `cut`、`cat`、`rm`（约 0.50% 单核），30 秒线程巡检读取约 11 万次系统调用（空闲约 1.16% 单核）。<br>**修法**：改用 shell 内建 `read`，已见过且同名的线程跳过。 | 检验：沙箱（nspawn）；真机 `enginex-perf-tune` 应低于 0.1% 单核（行 220、221）。 |
+| **#242**（可选 HTTPS 控制台） | `pkg/webui/`<br>`docs/site/content.js` | **需求**：控制台只有 HTTP。<br>**修法**：网页控制台「碟机显示与音频」里的 `HTTPS console (:8443)` 打开后，首次生成自签名证书（保存于 `/data/enginex/`，权限 `0600`，SAN 覆盖碟机 IP 与主机名，重启复用），在 `:8443` 同步提供 HTTPS；`:8080` HTTP 保持默认且不变，二维码与屏幕链接仅在开启时给出 `https://`。 | 检验：`pkg/webui` 证书与二维码测试（两种主机名）；r5 迁移保留 `console_https` 与证书字节和权限（行 236）。 |
+| **#281**（Remote Load 局域网 API） | `pkg/webui/`<br>`tools/ui-mod/build_packs.py`<br>`docs/remote-load-api.md` | **需求**：局域网内的电脑或脚本无法把歌加载到碟机。<br>**修法**：`设置 → 服务 → 远程加载（局域网 API）` 默认关、只能在碟机上打开；开启后用控制台访问码调用 `/api/remote-load`（规范路径 `/v1/enginex/remote-load`），把 `/media` 下硬盘上的歌加载到空闲碟位。正在播放、联机远端碟位、未挂载或内置盘的文件、经 Cloudflare 隧道的请求都被拒绝；按住 CUE 预听、搓碟和搜索（`PlayState` 不变）按播放位置 1.5 秒内是否移动或转盘是否被触碰判为忙；加载前一刻再检查一次，并要求 Engine 的 `Lock Playing Deck` 为开。 | 检验：`pkg/webui` 与 `RemoteLoadBehaviourTest`；SC LIVE 4 真机验收待做（行 237、238）。 |
+| **#283**（设置开关行） | `tools/ui-mod/build_packs.py` | **原因**：EngineX 的二值设置行没有跟随原厂的 `checkedExternally`，点按之后不再反映网页控制台所做的改动。<br>**修法**：13 个开关行全部改用 Engine 原厂开关行，保留各自的状态属性、`key=0/1` 写入与显隐条件。 | 检验：`OnOffSwitchCompatibilityTest`、`UiModSourceTest`（5.0.4 / 5.3.0 两套 QRC、三语）；碟机上逐项点按与网页改动待做（行 227）。 |
+| **#234**（更名为 `enginex`，最终版）<br>2026-11-16 决定、11-17 合入候选 | `rootfs-overlay/`<br>`pkg/webui/`<br>`tools/az01-packer/`<br>`internal/leave`<br>`docs/mods/src/` | **原因**：内部名称长期沿用旧项目名；维护者决定 5.3.0.5 把旧名彻底去掉，只保留从 5.3.0.4 及更早版本升级所需的一次性迁移。<br>**修法**：服务单元、程序、`/etc/enginex`、`/run/enginex*`、本机接口 `/v1/enginex` 全部用新名；旧的接口别名、数据目录兼容链接、旧套接字、旧缩放环境变量输出、旧证书域名和**降级还原**全部退役。升级时一次性迁移保留真实数据，改写受管理的存储值，只清除我们自己建的兼容链接，**从不删除**不相关的链接或真实目录；旧的还原操作被拒绝且不动任何数据。升级清理在新一代提交之后才运行；输入无效、升级失败或被中断时，原来的 ALSA 加载器、库和数据布局仍可用；一代 r5 镜像 OTA 与二代 r5 数据包 OTA 必须保持通过。官方 Mod 改用当前名称，只有已保存的暂停记录的迁移实现和它的测试保留例外。ALSA 文件名、钩子符号和 ALSA 文件指向的库路径因为每台已装碟机都靠它们加载 Engine，保持冻结。 | 检验：分支 `agent/5305-rename-final` @ `03b98aee`（19 个提交，合入 `40df1f8a`）。命名守卫 2/2、升级契约 4/4、`go test -race` 全部包通过、覆盖层 38/38、整套 UI 测试通过；二代降级还原的测试被改成断言“拒绝且不动数据”。**实机待验**：从 5.3.0.4-r5 与 5.3.0.2 真机升级一次（一代按镜像、二代按数据包），确认旧数据保留、碟机仍能起来（行 231–236）。 |
+| **#215**（屏幕 OTA 只提供 `*-Update.img`） | `pkg/webui/update*.go`<br>`tools/az01-packer/release-gate.sh` | **原因**：5.3.0.5 之后旧版 `*-Data-Bundle.tar.gz` 只应服务仍在旧版本的碟机。<br>**修法**：5.3.0.5 的碟机更新器只发现 `*-Update.img`（包括未解锁的二代机），Release 里仍保留 8 个 Data-Bundle 供旧更新器使用；安装器保留对本地 / 显式旧数据包的兼容；门禁文档覆盖 r5 旧路线与更新的签名更新器。`#244`（AZ04 分区大小）**未**随本次合入。 | 检验：`TestUpdateNeverOffersLegacyBundles`、`TestUpdatePicksGen2ImgWhenUnlocked`、重发与签名 OTA 套件；真机重启与进度待做（行 242）。 |
+| **#273 / #253**（压缩分析数据与重复插盘识别） | `pkg/enginedb/`<br>`pkg/bridge/` | **原因**：21,352 首曲目的 FAT32 U 盘上，未压缩的 `BridgeAnalysis` 行平均约 337 KB、共约 7.2 GB；重复插盘为匹配已有曲目而重读每个已存的波形。<br>**修法**：`sourceJSON` / `audioJSON` 用复用的 `gzip.BestSpeed` 写入压缩，`enginedb.UnpackAnalysis` 同时读压缩行与旧版明文行并拒绝超过限制的行；唯一来源 ID 加匹配路径时只用身份元数据，旧共享键、移动 / 互换 / 删除只读有界的 `Track.ID` 前缀，绝不读分析尾部。 | 检验：`pkg/enginedb`（`TestBridgeAnalysisRowsAreCompressedAndLossless` 等）、`pkg/bridge` 大 PDB 重复挂载计时；大 U 盘实际识别速度仍需维护者验收（行 240、241）。 |
+| **#237 / #245**（音频审计、Live Stream 保存不断听众） | `tools/ui-mod/test_rt_budget.c`<br>`tools/ui-mod/test_rt_callback.c`<br>`pkg/broadcast/` | **原因**：保存任一 `直播推流` 设置会同时重启采集、推流与局域网流，OBS、VLC 要重连；音频路径代码缺少统一的实时性检查（首次切换主 Pioneer FX 模式时清零 488 KB 未触碰的 BSS 并触发缺页，767 µs 超过 667 µs 的块时间）。<br>**修法**：采集与本地听众继续，只重启外部推流和局域网流；测试在计时前先触碰状态，并取三次相同运行里最短的块时间，预算不变；新增检查钩子音频线程函数不做分配、加锁、等待或 I/O 调用。 | 检验：`pkg/broadcast` `TestSettingsChangeKeepsLocalListeners`、`test_rt_budget.c` 与 `test_rt_callback.c`（本机与 armhf，`banned=0 misses=0`）；真机 `/live.wav` 在 VLC 中改设置不重连待做（行 228–230）。 |
+| **#285 / PR #287**（PRIME 4 效果选择） | `tools/ui-mod/build_packs.py`<br>`tools/ui-mod/` 效果选择器 | **原因**：连续转动旋钮浏览效果时选择窗口会关闭，通道 OLED 无法对应所选效果，旋钮每格移动的效果数不是一个。<br>**修法**：连续转动重启 600 ms 自动确认计时，原厂到原厂的选择走原生快速路径，OLED 按发布的 Planck 索引显示全部 31 个原厂与 PX 名称；旋钮每个有效格只发一个 `Plus` / `Minus`，与原厂 `incValue` / `decValue` 一致。 | 检验：`UiModSourceTest.test_prime4_fx_selector_browsing_and_oled_mapping_issue285`、`test_prime4_fx_knob_moves_one_effect_per_detent`、`test_fx_selector_sandbox.sh`；真机 PRIME 4 待验（行 246、247）。 |
+| **PR #282**（西班牙语界面，作者 Javier Saenz） | `tools/ui-mod/`<br>`pkg/webui/` | **需求**：没有西班牙语。<br>**修法**：`设置 → 设备 → 语言` 新增 `Español`，`lang=es` 选用西班牙语钩子包，控制台与手机页全部文字有西班牙语，未知语言回退英文。 | 检验：`LanguagePackSelectionTest`、`TestConsoleIsFullyTranslated`、`TestEveryPhoneTextHasEveryLanguage`；真机选 Español 重启后查看菜单重音与排版待做（行 248）。 |
+| **一体机原厂视图**（#285 后续） | `tools/ui-mod/build_packs.py` | **原因**：一体机上未保存的视图 1–3 被 `{pads: false}` 覆盖，`SHIFT + VIEW` 不再循环；横向波形旁显示曲库时 `LOAD` 不可用；`联机视图` 锁住通道。<br>**修法**：未保存的视图 1–3 交给原厂 `ViewStateController.resetToDefault`，已保存的视图优先；`compactBrowserVisible` 在横向波形加曲库时保持为真；`联机视图` 只在独立播放器（JP07/08/13/14）上提供并生效。 | 检验：`Prime4ViewsTests`（三项）、`test_prime4_views_sandbox.sh`；真机 PRIME 4 / SC LIVE 4 / Mixstream 待验（行 249–251）。 |
+| **高速 SD 卡**（实验性，默认关） | `rootfs-overlay/usr/local/bin/enginex-sd-highspeed`<br>`rootfs-overlay/etc/systemd/system/`<br>`pkg/webui/`<br>`tools/ui-mod/build_packs.py` | **需求**：SD 卡槽以 25 MHz 默认速度运行（最高 12.5 MB/s）。<br>**修法**：`设置 → 设备 → 高速 SD 卡模式`（网页控制台「碟机显示与音频」同一开关）打开后，在开机早于 `edisksd` / `engine` 时以及现场切换时，只对 `ff0c0000` 的 SD 控制器置位 caps 的 `0x4`，空闲时只读地重新初始化，碟机播放时延后并提示「将在下次启动或重新插入 SD 卡时生效」，`dmesg` 出现 mmc 错误或卡消失时撤回；PRIME 4 G2 / SYSTEM ONE 不显示。最高 25 MB/s，SC5000 上实测 23 MB/s。 | 检验：`tests/test_rootfs_overlay.sh`、`TestSdHighSpeedDefaultsOffPersistsAndApplies`、`test_sd_high_speed_switch_rk3288_only_and_four_languages`、数据包测试；真机 RK3288 读速与重启后验证待做（行 252）。 |
+| **其他** | `pkg/audioheader/`、`pkg/compat/`、`docs/mods/src/`、`pkg/rekordbox/`、`pkg/stems/` | 带 ID3 的 FLAC / WAV / AIFF 与 VBR MP3 元数据；官方 Mod 在无 FFmpeg 的碟机上可用；OneLibrary Cue 位置溢出；Stems 在网络盘上的开关与原厂一致；回到原厂时不再复用 EngineX 的 QML 字节码。 | 检验：各包 Go 套件（含 armhf）。 |
+
+## 1A. 2026-11-16 晚至 2026-11-17 上午合入的修复（夜间补录）
+
+时间为碟机团队本地时间（UTC+7）。「合入」指合入集成分支 `agent/5305-integration`（晚间的一批）或候选分支 `agent/5305-rc-candidate`（通宵的五批）；分支名后的提交是来源分支合入时的分支头，括号里的是合并提交。除“实机待验”外的结论都来自沙箱、单元测试和发版门禁；**没有任何一项在真机上完成最终验收**。
+
+### 1A-1 晚间合入集成分支（2026-11-16 20:25 之后）
+
+| Issue / PR（日期） | 模块 | 原因与修法 | 检验、分支与提交、仍需实机 |
+| --- | --- | --- | --- |
+| **#271**（11-16，写回 Cue） | `pkg/bridge/`<br>`pkg/rekordbox/`<br>`pkg/webui/` | **需求**：碟机上改过的热 Cue、记忆 Cue 和 Loop 要写回 rekordbox U 盘。<br>**修法**：`WriteBackCues` 比对 `PerformanceData` 与 U 盘 ANLZ 里的 Cue，原子地更新 `.DAT`（`PCOB`）、`.EXT`（`PCO2`）、有 Cue 段的 `.2EX` 和纯 Go 实现的 SQLCipher 4 `exportLibrary.db` 的 `cue` 表；在卷锁内执行，写前一次性备份到 `/.enginex-backup/<日期>/`；入口 `POST /v1/enginex/rekordbox/writeback` 和四语言控制台卡片。 | 检验：`TestEncryptSQLCipher4AndCLIProof`（含 `sqlcipher` 命令行 `PRAGMA integrity_check`）、`TestRewriteANLZCuesRoundTrip`、`TestWriteBackCuesEndToEndAndBridgeFastReinsert`、拔盘写到一半时原文件完好的用例、`TestHandleRekordboxWriteback`。集成 `14fa37c4`（行 266）。**实机待验**：FAT32 / exFAT U 盘上用 CDJ-3000 / NXS2 加 rekordbox 7 的设备视图核对写回结果。 |
+| **总览波形尺寸**（11-16）<br>维护者真机反馈 | `pkg/webui/`<br>`pkg/enginedb/`<br>`tools/ui-mod/` | **原因**：配对 / 四碟模式里对端曲目的小总览又变得很小；U 盘 5,981 行里有 5,710 行的总览末尾是零（频段最大值缺失），挂载补全每次只做约 256 行，2048 行一批在慢卡上永远提交不完、每次挂载重做。<br>**修法**：影子轨使用前先用 `OverviewMaxima` 补全对端总览的零尾，挂载后不写 `m.db`；补全批量固定 256 行并带检查点。**随后**钩子在内存里接管 Qt 的 `qUncompress`（Engine 5.3.0、SC LIVE 4 版和 AZ04 对每个 `PerformanceData` 都调用它），把形如总览的结果里的零尾补成各频段最大值：从任何来源首次加载的曲目就以原厂高度显示，不写数据库；Engine 自己写的尾巴、静音总览、其它数据块和 Engine 5.0.4 都不动。 | 检验：`TestPerfFromBlobsFillsZeroOverviewMaxima`、`TestFillOverviewMaximaSlowWriteProgressesAcrossMountBudgets`、`test_overview_maxima.c`（armhf、AArch64、ASan）、`OverviewMaximaHookTest`；JP07 eglfs 沙箱里 Denon Half / Full 由 32 / 46 px 变为 52 / 78 px，与 Engine 自己分析的库逐像素一致。集成 `b9b998a9`（行 267）、`179947d4`（行 272，提交 `85f84ea0`）。**实机待验**：配对与四碟模式下对端 rekordbox 曲目的总览高度；以前小的 U 盘首次加载就是原厂高度。 |
+| **#195 / #207**（11-16，效果） | `tools/ui-mod/`（`pioneer_fx.h`、`reverb_time.h`） | **需求**：PRIME 4 需要更多效果，混响尾音太短。<br>**修法**：FX 选择器末尾新增第 6 款 `Jet Flanger (PX)`（共振更强，扫频按倍频程匀速，低频不进梳状滤波，满湿声在干声 3 dB 内，湿度 0 逐位相同）；原厂 `Reverb`（经典）在 `Parameter` 82% 以内与原厂完全相同，往上尾音变长，100% 时约 28 秒（48 kHz 下 29 秒），关闭效果后的尾音是原厂的，切换效果立即清空，不会进入 DSP 的失控衰减。 | 检验：`test_jet_flanger.c`、混响时间的 C 测试、`test_ui_mod`。集成 `296a3ca6`（行 268、269）。**实机待验**：PRIME 4 上听 `Jet Flanger (PX)` 和长混响；PRIME 4 G2 / SYSTEM ONE 暂不包含。 |
+| **#99**（11-16，`Shift + View`） | `tools/ui-mod/build_packs.py` | **原因**：真机控制器上 `Shift + View` 无反应（左 SC5000 带上 `4dd3204f` 和 `3dfbbfba` 后仍然没有）：控制器的 QML 引擎跑在 MIDI 线程里，`trigger()` 只在调用它的对象上触发，状态不会跨引擎传到界面引擎；原厂的界面动作是用 `translator.state = true` 的锁存。<br>**修法**：在控制器引擎里锁存 `/GUI/Scripted/EngineXCycleView`，由界面引擎里原厂的状态变化通知器计数并复位；界面还没取走时按键排队（每次按键对应一步，不合并、不重复）；1.5 秒内界面没取走就撤回锁存和排队，不会过很久才跳一步。单按、双击、长按仍走原厂路径。 | 检验：`test_ui_mod_shift_view`（五视图循环、每种板型策略、重启）；经 4 轮复核（布尔锁存合并两次按键、请求永不过期被先后抓出并修复）。提交 `339d47fd` → `058163f2` → `7528ecbe`，集成 `a36cd4fb`（行 270）。**实机待验**：左 SC5000 上 `Shift + View` 一步一个视图；5.3.0.4-r5 的碟机本来就能切。 |
+| **官方 Mod**（11-16）<br>#293 | `docs/mods/src/`<br>`pkg/mods/` | **原因**：随 #234 退役旧接口，Mod 不能再用旧接口兜底；`minimal-club-mode` 在 5.3.0.4 保存的暂停记录里用旧的单元名，升级后无法还原。<br>**修法**：`dmx-studio`、`tailscale-remote`、`sampler-sequencer` 去掉旧接口回退；`minimal-club-mode` 把暂停记录里的旧单元名映射成现在的；`sampler-sequencer`（#293）只触发原厂采样器。 | 检验：全部 Go + `docs/mods` + `test_mods.py`；提交 `3875a9d5`，集成 `4fe5093f`（行 271）。 |
+| **流媒体与 Stems**（11-16）<br>真机反馈 | `tools/ui-mod/build_packs.py`<br>`pkg/webui/`<br>`tools/stems/` | **原因**：(1) 没有任何盘被接受为保存盘时报「没有可用的来源磁盘」；(2) 点了 Stems 的流媒体行，渲染几分钟屏幕毫无反应；(3) 下载不下来的曲目（如网易云对该账号只给试听）没有任何提示；(4) 内部保存盘 `stream-save` 出现在来源列表里；(5) 带有 RTX 50 系显卡的电脑上 Stems 工作进程悄悄退回 CPU。<br>**修法**：(1) 每次请求都检查，已就绪就算成功，不再等 10 秒（`e27646ef`）；(2) 点的那行显示原厂的渲染进度，每首曲目按自己的顺序、百分比与剩余时间（Engine 通过 `enqueueTrackRenderJob` 报出队列的曲目，`7197a0b6`）；(3) 该行显示「下载失败」10 秒，且不占 Engine 的队列；(4) 内部保存盘按路径从来源列表和浏览旋钮中隐藏，浏览器不停留在它上面；(5) 工作进程对 Blackwell（sm_120）改用 `cu128`，`--cuda-check`，退回 CPU 时大声警告（`555722d3` → `f79b5749`）。 | 检验：`StreamingStemsProgressTest` 系列、`InternalStreamingStorageTest`、`tools/stems` 18 项；多轮复核（本地入队被误当成已接受、查询能力在 CUDA 失败后抛错各一次，均已修复）。集成 `179947d4`、`b8b28d9d`（行 273–275）。**实机待验**：左 SC5000 的网易云弹窗不再出现（此前左碟的开机卫士缺 `stream-save`，需带该守卫重新推送）；两台碟机都在放时点 Stems 的提示（见 1A-2 的同一次滑动修复）。 |
+| **#213**（11-16，反转转盘）后续 | `tools/ui-mod/build_packs.py`<br>`pkg/webui/` | 见第 1 节 #213 行。一体机 `JP11`、`JP21` 等每 500 毫秒从共享状态同步左右设置到界面引擎；SC5000 / SC6000 这类独立播放器隐藏该设置且忽略它。 | 检验：`test_ui_mod`；`5e04eac9`，集成 `21e59d70`（行 276）。**实机待验**：双转盘一体机上左右分别反转。 |
+
+### 1A-2 通宵合入候选分支（2026-11-17 03:50 至 09:10，共 5 批）
+
+| Issue / PR（日期） | 模块 | 原因与修法 | 检验、分支与提交、仍需实机 |
+| --- | --- | --- | --- |
+| **#298**（11-17）<br>PRIME 4 加载曲目时正在播放的碟机卡顿 | `rootfs-overlay/usr/local/bin/enginex-perf-tune`<br>`tests/test_rootfs_overlay.sh` | **原因（沙箱里能证明的最可能原因）**：`enginex-perf-tune` 的 30 秒核心巡检（`2e79e426`，5.3.0.4-r5 已带）把 Engine 每路解码线程 `Streamer1–4` 和加载线程 `TrackLoad` 也挪到 CPU 0、3；原厂是每路解码、加载各占一个核。另一台碟机加载时，加载、导入、离线分析、USB / SSD / SD 的中断线程（FIFO 40，在 CPU 3）和音频线程挤在同样两个核上；正在播放的碟机只缓冲约 0.8 秒，解码线程被饿 0.8 秒就断音（沙箱里冻结 `Streamer1` 800 ms → 132 ms 静音，Engine 日志里什么都没有）。<br>**修法**：巡检不再移动 `Streamer[1-4]` 和 `TrackLoad[1-4]`，与音频线程一样；其余计划（界面、SceneGraph、其它辅助线程）不变。旧测试断言的正是这个 bug（`Streamer2` 被挪走），现在改为断言它们**不被移动**。 | 检验：`tests/test_rootfs_overlay.sh` 的 perf-tune 用例在旧版失败（`unexpected > <104>`）；沙箱 A/B：加载后 3 秒内 `Streamer1` 的运行队列等待原厂摆放 2.2–6.9 ms，旧巡检 3.5–12.2 ms。分支 `agent/5305-hunt-L1` @ `c6099b9f`（合入 `a626087e`）。**实机待验（必须）**：沙箱不能模拟 RK3288；在 PRIME 4 上从 USB 和内置盘加载曲目，正在播放的那台不再断音。若仍断，备选嫌疑：U 盘预读 1–2 MiB 与 mq-deadline（原厂 128 KB、BFQ）、中断线程布局与原厂相反、1.2 GHz ondemand 下限。 |
+| **影子轨：微调、略超前、循环**（11-17）<br>真机反馈：“微调 jog 的时候影子轨道好慢才反应过来”“影子轨道好像快一点点” | `tools/ui-mod/build_packs.py`（仅 QML JS） | **原因**：(1) 稳态略超前：发送端用上包络，包络只以 0.5 ms/s 衰减，约六十次读数里有一次提前约 13 ms，之后约 26 秒偏高，影子最多超前约 12 ms；(2) 微调显示慢：不触摸的微调只移动源碟的 TrackPosition，接收端 8 秒 EMA 的慢环路要几秒才跟上；(3) 影子不镜像循环：循环里最多冲过 LoopOut 约 200 ms 再弹回。<br>**修法**：孤立的一次提前读数最多把线抬高 2 ms，下一次读数确认的真实推动才全额计入（偏差均值 ≤1.5 ms、最大 ≤3 ms）；接收端读原厂的 BeatInfo 镜像（每三个音频块一次）做快速路径，用原厂的 `NudgeForward` / `NudgeBackward` 跟随（不写速度、不 seek），之后慢环路暂停 2 秒；镜像无效、换曲或卸载时释放微调；发送端发送 loopIn / loopOut，接收端每 16 ms 在循环末端折返（冲过 236.5 ms → ≤19 ms）。**影子不画循环区域**（原厂没有接口）。 | 检验：`ShadowNudgeTest`、`ShadowMirrorNudgeTest`（含 7 个子用例的释放测试）、`ShadowLoopTest`，全部在旧版失败；影子类 113 项、`test_shadow_review` 41 项通过。经 3 轮复核（镜像失效和换曲时微调没有释放被抓出并修复）。分支 `agent/5305-shadow-nudge-2` @ `1813c6fb`（合入 `d40dae58`，行 277）。**实机待验**：沙箱的镜像不规则、QML 计时器约 175 ms，只有两台碟机能证明快速路径：碟机日志 `/tmp/enginex-shadow-debug.log` 里出现 `nudge-ready`；微调时影子几十毫秒内跟上；1–2 拍循环时左碟循环、右碟影子不冲过；稳态不超前。 |
+| **电脑上的 rekordbox 作为碟机曲库来源**（11-17）<br>维护者反馈：“电脑连接了，碟机没有歌曲选项” | `pkg/prolink/`（`rekordbox_link.go`、`nfs.go`）<br>`pkg/webui/rekordbox_source.go`<br>`tools/ui-mod/`<br>`pkg/webui/index.html` | **原因**：碟机能被 rekordbox 看到，却没有选曲入口。<br>**修法**：开启 `设置 → 服务 → Pro DJ Link` 后，电脑上的 rekordbox 7（`Export` 模式、开启 `LINK`）出现在碟机来源列表里，名为 `rekordbox（<电脑名>）`；点开是 `Tracks`（全部曲目）和各歌单（文件夹显示为 `文件夹 / 歌单`），每行有曲名、艺人、BPM 和调性（每个列表三次请求）。加载曲目：文件路径由 dbserver 给出，先找已挂载的网络共享（控制台 `曲库、网络与系统 → rekordbox 音乐文件夹`，设置键 `rekordbox_share`），找不到就用 NFSv2 从电脑拉到 U 盘 / SD 卡的 `.rekordbox-cache`（遵守 Pro DJ Link 暂存预算，后台边拉边播，15 分钟上限）；都够不到时列表第一行提示“这台电脑没有向 EngineX 共享文件”，点歌立即失败（502），不会卡住。限 MP3 / FLAC / AAC；rekordbox 里的波形、拍线、Cue 暂不带过来，由 Engine 加载后自己分析。底层：dbserver 紧凑标签、空数据块、16 MiB 上限；从 udp/50002 的 `0x29` 发现电脑；以碟机自己的 Pro DJ Link 播放器编号提问（没有就用 5）。 | 检验：`pkg/webui`、`pkg/prolink`、`internal/cli`、`pkg/rekordbox` 带 `-race` 通过，`test_ui_mod` 258 项；`TestReadDBMessageCompactTagList` 在旧代码失败。分支 `agent/5305-rbx-link` @ `4f158359`（合入 `b2ef850e`）。**实机待验（8 步，见分支报告）**：(1) 真机上 `0x29` 的设备名 / 设备号偏移是否与假设一致（抓包只记录了类型和长度）；(2) rekordbox 的 `mountd` / `nfsd` 是否回答碟机（右碟探针没有收到回复，可能要求碟机先“报到”）；(3) NFS 速度（约 3–8 MB/s，差 Wi-Fi 约 2 MB/s，40 MB 的曲目需 5–20 秒），以及 Engine 对慢流和总超时的反应；(4) Engine 浏览界面里的来源、提示行和失败行是否清楚；(5) 两台碟机同时用时各自的播放器编号是否被接受。 |
+| **单一 Pro DJ Link 开关**（11-17）<br>维护者：“为什么不做一个开关？” | `pkg/webui/`<br>`pkg/prolink/`<br>`internal/cli/`<br>`tools/ui-mod/`<br>`pkg/webui/index.html` | **原因**：以前有两个开关：只读不发包的“库”（`prolink_share`）和测试版的“导出到 CDJ”（`prolink_export`）；只有后者才让碟机向 Pro DJ Link 宣告自己，rekordbox 才会出现 `LINK`，用户很难想到要开另一个。<br>**修法**：只剩一个键 `prolink_share`；旧的 `prolink_export=1` 在读取时迁移；碟机 `设置 → 服务 → Pro DJ Link` 和 `:8080` 控制台是同一个开关（四语言）：开启后宣告本机、浏览 CDJ 与 rekordbox、共享本机 USB / SD；没有 rekordbox U 盘时开关显示“已开启：插入 rekordbox U 盘后自动开始共享”。 | 检验：`pkg/webui`、`pkg/prolink`、`internal/cli` 带 `-race` 通过、47 个 UI 测试通过，3 个新用例在基线失败。分支 `agent/5305-prolink-switch` @ `0ae5a0d6`（合入 `4ef4a1bb`）。**兼容性**：旧的接口参数 `prolinkExport=1` / `export=1` 不再被接受（UI 包和控制台同版本发布）。**实机待验**：开启后 rekordbox 出现 `LINK`；从只开了旧“导出”开关的 5.3.0.4 升级后开关状态保持。 |
+| **Pro DJ Link 导出不刷新**（11-17，L4） | `pkg/prolink/export.go` | **原因**：`Exporter.Rebind()` 只看绑定的网卡 IP，忽略 U 盘卸载和 `export.pdb` / 挂载根变化。<br>**修法**：卸载、`export.pdb` 变化时重启导出。 | `TestExportRebindWhenPDBChanges`；`agent/5305-hunt-L4` @ `86688c38`（合入 `1a3a936b`）。**实机待验**：导出运行时插入新的 rekordbox U 盘，CDJ 看到的是更新后的曲库，不用先关再开导出。 |
+| **HFS+ 可读写：一代机与 PRIME 4 G2 / SYSTEM ONE**（11-16 至 11-17） | `kernel-modules/`<br>`tools/edisksd-hook/`<br>`tools/az01-packer/`<br>`pkg/dbhealer/`<br>`cmd/`（`engine-guardian`） | **原因**：HFS+ 过去只能只读，因为内核的 `hfsplus` 在 32 位 HIGHMEM 下有 bug：`hfs_bnode_move()` 把“基址 + 偏移”传给 `kunmap_local()`，对齐后落到相邻槽位，下一次映射撞上 `BUG_ON`，`PANIC_ON_OOPS` 直接重启并可能损坏 U 盘上的 B 树节点（上游和 6.18.57 都存在，不是 5.0.4 时代的旧事）；沙箱还复现了同页二次映射加 `memmove` 破坏 B 树的第二个 bug。<br>**修法**：**一代机**：用 6.18.57-rt 源码构建修好的 `hfsplusx.ko`（文件系统名 `hfsplusx`），放在 rootfs 的 `/usr/lib/modules/<内核>/extra/`（内核开启了 LoadPin，只能从 rootfs 加载，`/tmp` 里的模块被拒绝）；`edisksd` 钩子只在 `fsck.hfsplus -n -f` 通过、卷头与日志检查通过（日志为空）时才读写挂载，任何一步失败都回到只读视图；未干净卸载但 `fsck` 干净的卷先 `fsck -y` 标记干净再读写（维护者批准），`fsck -y` 从不被杀，且只在剩余时间够时才启动；读写卷卸载不用 `MNT_DETACH`、设备忙时拒绝（`target is busy`），设备被拔走时才用 lazy；只读视图改为只绑定一次卷根。**PRIME 4 G2 / SYSTEM ONE（arm64，没有 HIGHMEM）**：用原厂 `hfsplus.ko`，同样的 `fsck` 和日志检查，随数据包带静态的 `fsck.hfsplus`；原厂的 Paragon `ufsd` 路径（设备树标志 `inmusic,hfsplus-rw`）若开着则原样放行。 | 检验：QEMU armhf HIGHMEM 里原厂驱动复现 BUG，修好的模块 4338 次操作、`fsck` 干净；`tools/edisksd-hook/test_edisksd_hook.c`（armhf、arm64、ASan / UBSan，含 `--mounts`）、`test_az01_packer`、`test_data_bundle`、`CheckHfsplusxTests`、检查表行 281。分支 `agent/5305-hfs-rw` @ `f250141f`（合入 `98f7241d`）。**真机（左 SC5000，一块草稿盘，2026-11-16）**：`hfsplusx` 压力 4340 次操作 0 错误、`fsck` 干净、只读重挂后 1272 个文件哈希一致；经 `edisksd` 和 Engine，非日志盘和日志为空的日志盘都读写挂载，Engine 在盘上建库；Engine 占用时卸载被拒、盘仍读写；没有模块时回退只读也在机上验证。**仍需实机**：PRIME 4 G2 / SYSTEM ONE 的读写（没有在 AZ04 实机上跑过）；大盘上 `fsck -y` 的耗时；macOS `fsck_hfs` 复查；Engine 写 Cue / Loop / 封面；拔盘；机上加载过的模块是 GCC 14 编的，由发版构建产出的 GCC 13 版没有在机上加载过。 |
+| **5.3.0.4 现存风险：干净、未启用日志的 HFS+ 盘会以读写挂载**（11-16 夜间发现，随 5.3.0.5 修复） | `tools/edisksd-hook/`（挂载策略） | **原因**：5.3.0.4（含 r5）的钩子只在 HFS+ 已经是只读时才做只读视图，从不强制只读。macOS 默认的带日志卷会被内核降级成只读，所以平时看不出来；但 `mkfs.hfsplus` 或 `diskutil disableJournal` 格式化的干净、未启用日志的卷，会在内置的有 bug 的驱动上以读写挂载（一代机与二代 32 位机；AZ04 没有 HIGHMEM）。左碟用 5.3.0.5 开发版实测确认：非日志草稿盘经 `edisksd` 挂载就是读写，没有写入就立即卸载；5.3.0.4-r5 的钩子逻辑相同（读代码得出，没有在 r5 碟机上跑）。<br>**修法**：钩子对 `mount()`、`fsopen()`、`fsconfig()` 全部强制只读，除非该机型的读写策略批准（固件的 `libmount 2.39.3` 走新的挂载 API `fsopen` / `fsconfig` / `fsmount`，只拦 `mount(2)` 会被绕过）；二代 32 位机立即强制只读，不运行 `fsck` 也不加载模块，直到 lklfuse 落地（见 1B）。维护者决定：不发 r6、不在 GitHub 上警告，随 5.3.0.5 一并修复。 | 检验：`test_hfs_rw_unit`、`test_hfs_rw_policy`；左 SC5000 真机上无模块时回退只读的路径（`forcing ro via fsopen/fsconfig`）有效，说明新挂载 API 的拦截在真机上生效。同分支 `agent/5305-hfs-rw`。**仍需实机**：二代 32 位机（SC LIVE 4 等）插入非日志 HFS+ 盘确认只读。 |
+| **HFS+ 盘上的“碟机建的库”搬到盘上**（11-17） | `tools/edisksd-hook/`<br>`pkg/dbhealer/`<br>`cmd/`（`engine-guardian --check-copy`） | **原因**：以前只读的 HFS+ 盘没有自己的 `Engine Library`，碟机把曲库建在 `/data`；盘第一次读写挂载后，如果 Engine 在盘上另起一个空库，已分析好的库就看不见了。<br>**修法**：首次通过读写检查的挂载时，在私有命名空间里读写挂载，把 `/data` 里最新一代的库整体复制到盘根的暂存目录（逐个文件和目录同步），用 `engine-guardian --check-copy` 校验（`PRAGMA integrity_check`、本地曲目的路径相对库目录都留在本盘），再用 `RENAME_NOREPLACE` 改名成 `Engine Library`；盘上已有自己的库就绝不覆盖；任何失败（空间不够需要库大小加 16 MiB、复制超时、盘满）都清掉暂存并回到只读视图加 `/data` 的库，超时的盘到重启前不再重试；成功后 `/data` 那一代保留以便回退。 | 检验：`test_edisksd_hook` 5d 一组（拒绝复制、整体搬、不覆盖自己的库、空间不足、写到一半盘满、超时）、`dbhealer.CheckCopy`、`--check-copy` 的退出码；用真实 HFS+ 镜像和 Engine 做的沙箱证明：同样 2 行 Track、路径无需改写、`fsck` 干净。`f250141f`。**已知限制**：搬运必须在挂载时限内完成（约 17 秒减去 `fsck`），大库在慢盘上会超时、保持只读、重启后重试；二代 32 位机保持只读。**实机待验**：5.3.0.4 分析过的 HFS+ 盘在 5.3.0.5 上显示同样的曲目、Cue 和波形，且之后可写。 |
+| **`hfsplusx.ko` 由发版构建产出**（11-17） | `kernel-modules/`<br>`tools/az01-packer/build-release.sh`<br>`check-hfsplusx.sh`<br>`release-gate.sh` | **原因**：发版实验室里没有这个模块；靠人工放一个文件会让每次发版在第 1 步停下，或者带着不匹配的模块发版。<br>**修法**：`kernel-modules/build-release-module.sh` 用校验过 sha256 的固定 6.18.57 和 `-rt8` 补丁源码、碟机内核自己的 IKCONFIG、GCC 13 构建；`build-release.sh` 在没设 `HFSPLUSX_KO` 时自己构建并缓存（冷构建约 6.5 分钟，缓存后 0.06 秒）；找不到模块就停止；`check-hfsplusx.sh` 用 `debugfs` 检查每个一代 rootfs 里恰有一个内核目录、模块在 LoadPin 路径、`vermagic` 与镜像内核一致，并在发版门禁里加一项检查。 | 检验：`CheckHfsplusxTests`；真正的 `build-release.sh` 构建 16 个 `*-Update.img` 加 8 个数据包通过；JP07、JP13、JC11 门禁里这项检查均通过；模块 sha256 `4f162fa3…`，内核 `6.18.57-az01-2026-10-15-rt6`。`9f4834d2`、`efa4183c`，合入 `98f7241d`。**注意**：发版主机需要装 `flex`、`bison`、`bc`、`gcc-13-arm-linux-gnueabihf`，第一次构建需要联网。 |
+| **“丢失的 Demo 盘修复”补回**（11-17） | `rootfs-overlay/etc/enginex/engine-ui-guard` | **原因**：内部保存盘 `stream-save` 用 `-extraDriveDir` 登记后，原厂 Engine 不再自己加载随机附带的 Demo 内容。修复 `4b8e7ca8`（登记保存盘时显式加 `-demoDriveDir`）在一次 rebase 里**丢了**，不在任何分支里；L7 的发版门禁因此在 JP07 / JP13 / JC11 上 172 项通过、4 项失败（Demo 来源和封面）。<br>**修法**：补回该修复（先推成 `agent/5305-demo-drive-fix`，现已含在 rename-final 的分支头 `03b98aee` 里，候选分支里有一条保留作者的空 cherry-pick 记录 `df5b14f4`）；Demo 内容存在时显式保留，不存在或保存目录不可用时也能正常启动。 | 检验：Demo 内容存在 / 缺失 / 保存目录不可用的启动测试；JP07 门禁恢复 176 / 0（Demo 来源与封面在两次开机都通过）。 |
+| **#299**（11-17）<br>二代机网页控制台设置 SSH 密码返回 500 | `pkg/webui/`<br>`tools/az01-packer/build-data-bundle.py`<br>`rootfs-overlay/` | **原因**：二代机 5.3.0 去掉了 `etc.mount`，`/etc` 只读，控制台的 SSH root 密码调用 `chpasswd` 失败，返回 HTTP 500。机器人给的 PR #302 改成只允许密钥，但我们自己的数据包代码在“已启用且设了密码”时启动 sshd，等于期待密码登录。<br>**修法**：保留密码功能：只把 SHA-512 密码哈希存在 `/data/enginex/ssh-shadow`（权限 0600），开机时绑定到 `/etc/shadow` 之上并传给 sshd；密码和 root 登录选项需手动开启，所选端口和公钥访问保持；哈希或启用失败时不会打开 SSH。 | 检验：`TestSSHGen2PasswordOnReadOnlyEtc299`（覆盖 8 个二代板号）、43 个数据包测试、SC LIVE 4 引导沙箱里用真实 sshd 做密码和公钥登录并在开机时从 `/data` 还原、确认 `/etc` 仍只读（检查表行 286）。分支 `agent/5305-issue-299` @ `dfc01fdf`（合入 `9fd4195f`）。机器人的 PR #302 随本版本发布时关闭。**实机待验**：每一款二代机上的密码登录没有逐一实测。 |
+| **#286**（11-17）<br>Mixstream：Pitch Bend 改 Beat Jump，FX 槽位 | `pkg/webui/`<br>`tools/ui-mod/build_packs.py`<br>`pkg/webui/index.html` | **需求**：Mixstream 的 `-` / `+` 推音键想直接前后 Beat Jump；四个实体 FX 键想自选效果。<br>**修法**：`设置 → 设备`（及 `:8080` 控制台）新增 **`Pitch Bend → Beat Jump`**（`pitch_bend_beat_jump`）：开启后未按 Shift 的 `-` / `+` 触发 `BeatJump` 前后跳，`Shift + -` / `+` 仍是速度范围；屏幕上的 Beat Jump 栏默认隐藏，波形多出 6 px（Pads 栏 70 → 64 px）。新增 **`FX 槽位 1–4`**（`mixstream_fx`）：四个实体 FX 键各自从 Mixstream 的 `Echo`、`Flanger`、`Delay`、`Phaser` 里任选；不支持的效果（如 `Reverb`）被拒绝（HTTP 400）。只适用于 Mixstream Pro / Pro+ / Pro Go。 | 检验：`TestMixstreamPitchBendBeatJumpAndFxSlots`、`test_mixstream_pitch_bend_beat_jump_and_fx_slots`、`test_ui_mod` 247 项（后随整批 256 项）、NH08 沙箱 `MIXSTREAM_NATIVE_PASS`（NH10 需要 eFuse，沙箱做不到）。分支 `agent/5305-mixstream-beatjump-fx` @ `dd0872be`（合入 `2a5a1873`，行 278、279）。**未完成**：把 Sweep FX 收进 `▲` 按钮、把 Stem EQ 移入 Control Center 的布局调整，见 1B。**实机待验**：Mixstream Pro / Pro+ / Pro Go 上按键与 LED、四个 FX 键的分配。 |
+| **#255**（11-17）<br>Windows 原生安装器 | `cmd/enginex-installer/`<br>`internal/installer/`<br>`tools/az01-packer/` | **原因**：Windows + NH10 的测试者反馈（纯 Go 安装器、无 WSL）刷机成功，但干净的 Windows 上 WinUSB 绑定、Windows 上 ext4 测试的句柄泄漏、签名密钥权限的 0600 测试、二代机清空内部存储的警告都有缺口。<br>**修法**：Windows 上打开更新设备时，若缺少 WinUSB 绑定或接口注册，由提权的辅助程序只对**选中的、在线的**更新接口（fastboot、Rockchip loader、AZ04 `1cc5:2027`）用 Windows 自带已签名的 WinUSB 驱动补齐；不安装自带或未签名驱动、不开测试签名、不用 WSL，已有可用绑定不提示提权，普通音频 / HID / 存储 / ADB 接口和复合父设备一律拒绝；Rockchip loader 写入仍被禁用，不发任何协议命令；二代机新增中英文确认，说明内部音乐、曲库和设置会被清空；撤销方法写入三份 README 和网站；`build-installer.sh` 默认就是 Go 版。 | 检验：Linux `-race` 全套和 Windows 原生测试均通过（Windows 部分在 Windows 虚拟机上跑，没有在那里编译或装依赖）；六个 Windows 清理失败原来是测试夹具没关文件，已修。分支 `agent/5305-installer-win` @ `86d3fc95`（合入 `d8b2b67e`，行 280）。**实机待验**：干净的 Windows 电脑加一台实机，走提权、绑定、传输和刷入后的激活；原生 Windows 的安装与 UAC 行为只靠交叉编译和 Windows 虚拟机测试，没有在最终候选上复现。 |
+| **bug 追查 L3**（11-17）<br>64 位钩子 | `tools/ui-mod/`（DSP 绑定） | **原因**：64 位的 `dsp_bound_owner` 布局不对，且 owner 为空时没有保护。<br>**修法**：改正布局并加空指针保护。 | C、实时回调和 FX 测试通过。分支 `agent/5305-hunt-L3` @ `769e5e31`（合入 `a364f211`）。DJ 操作沙箱（JC11 / JP07 上 18 项操作加截图）**没有跑完**，见 1B。 |
+| **bug 追查 L4**（11-17）<br>两台碟机 | 见上面的“Pro DJ Link 导出不刷新”和“影子轨” | 双碟沙箱（shadow-twin）里加载镜像、播放暂停、热 Cue、Beat Jump、Throw、MASTER 双向、影子从不当 MASTER（1.8 秒内收回）、CDJ 显示模式、Paired Player 视图、一侧 Engine 重启均正常；发现并修了导出不刷新和影子不镜像循环两个问题。 | `agent/5305-hunt-L4` @ `86688c38`。 |
+| **bug 追查 L5**（11-17）<br>流媒体 | `tools/ui-mod/build_packs.py`<br>`tools/ui-mod/i18n.tsv` | **L5-1**：四碟机器上“所有碟机都在放”的提示说“Both decks…”，并破坏了滑动条文字的绑定 → 四语言新增 `All decks are playing. Free one deck, then tap Stems again`，按碟位数选择，改成响应式绑定。<br>**L5-3**：多首 Stems 下载失败共用一个计时器 → 每行各自计时，满 10 秒各自过期。<br>**L5-4（P2）**：拔掉 U 盘后，内部保存盘已被选中时没有重新检查，“没有来源盘”弹窗要等 10 秒超时才消失 → 立即让 Engine 重新检查。<br>**L5-2**（报告，不改）：原厂 TIDAL 退出登录不清 `tidal-auth.json`，是设计如此。 | 每项都有在基线失败的回归测试；此外并发加载加播放、401 后成功、断网恢复、非 ASCII 搜索、500 字节标题、四碟 Stems 状态、浏览中途换服务全部通过。分支 `agent/5305-hunt-L5` @ `6dd91c7a`（合入 `7dd593e7`；批 2 先合入的是 `32e64b9c`）。 |
+| **bug 追查 L6**（11-17）<br>曲库与媒体 | `pkg/bridge/cue_writeback.go` | **L6-1（P2）**：写回 Cue 时以 `immutable` 打开 `m.db`，看不到 Engine 还没检查点的 WAL，报告“无改动” → 读取 WAL。<br>**L6-2（P2）**：U 盘同时有 `exportLibrary.db` 和 `export.pdb`、前者损坏时写回报 SQLCipher 错误 → 回退到 `export.pdb`。<br>覆盖并通过：6000 首曲目首次挂载 847.9 ms、增量 130.3 ms；exFAT 回环；5500 首加 320 个歌单带陈旧的 `.rb-bridge.lock` 仍 0.8 秒转换完。 | `TestWriteBackCuesReadsUncheckpointedWAL`、`TestWriteBackCuesFallsBackToPDBWhenOneLibUnreadable`；分支 `agent/5305-hunt-L6` @ `8688eebe`（合入 `cb53fac8`）。**实机待验**：FAT32 / exFAT 的 rekordbox U 盘上在 Engine 还开着时写回。 |
+| **bug 追查 L7**（11-17）<br>升级、设置、网页控制台、OTA | `pkg/webui/` | **修复**：JSON 的时区问题；FX 请求报告成功但没有效果（`6406dfcb`）；无效 JSON 仍会改设置并重启 Engine（P2）。升级、OTA、首次开机、安全模式、交还原厂、恢复出厂（chroot）全部通过。**同时发现**：发版门禁 172 通过 / 4 失败，起因是上面的 Demo 修复丢失。 | 分支 `agent/5305-hunt-L7` @ `4d9a3efa`（合入 `15c9d323`）。 |
+| **bug 追查 L8**（11-17）<br>二代、AZ04、Mixstream 机型 | `tools/az01-packer/` 测试 | 仅新增测试：SC LIVE 4 与 PRIME 4 Plus（JC11S）引导沙箱通过、千兆网线断言（且没有被强制成 100 Mbps）、Mixstream NH08 沙箱通过、各机型的设置可见性正确、OTA 对 `*-Update.img` 和 `.tar.gz` 的桥接通过。**沙箱的局限**：NH10 需要 eFuse；AZ04 `/data` 分区大小（#244）仍需要真机。 | `agent/5305-hunt-L8` @ `20a0c1b2`（合入 `d53211ab`）。 |
+| **bug 追查 L9**（11-17）<br>发版前整套检查 | `docs/REGRESSION-CHECKLIST.md`<br>预编译钩子<br>`docs/mods/`<br>测试 | **六项**：检查表行 267 的措辞（“KDATA SD”改为“U 盘”，KDATA 是 U 盘不是 SD 卡）；预编译的 `libengine-ui-hook.so`、`libedisksd-hook.so` 没跟上 C 源码（P2，影响镜像）；官方 Mod 包数检查 6 → 7（#293 新增采样序列器）；`sampler-sequencer` 的 gofmt 对齐；两个 `-race` 在 ARM64 上的计时阈值（总览补全预算 1500 → 2500 ms，rb-bridge 未改导出的 200 → 500 ms）。 | 提交 `b7f04d79`、`0db21d4f`、`79134d57`、`c8c4c890`、`43ab39c7`、`bd9a3e5c`；分支 `agent/5305-hunt-L9` @ `bd9a3e5c`（合入 `69bde8c5`）。整套测试通过。 |
+| **bug 追查 L10**（11-17）<br>钩子与音频线程代码审查 | `tools/ui-mod/engine_ui_hook.c`<br>`tools/ui-mod/build.sh` | **L10-1（P3）**：手工把 `bt_out=` 改成 2³⁰ 以上会让主回调越界（AZ04 上 Engine 崩溃）→ `pair >= channels / 2`（`88accb5a`）。<br>**L10-3（疑似 P2，蓝牙断续的可能原因）**：SBC 码率池被设成音箱支持的最大值，支持 2..250 的设备会以 1.4 Mbit/s 传输（正常约 325 kbit/s，且与 Wi-Fi 共用同一个无线电）→ 改成 BlueZ 的默认值（44.1 kHz 及以下 53、48 kHz 51，单声道 / 双通道 31 / 29），音箱更低的最大值优先（`a2902d74`）。<br>**L10-2**：钩子惰性绑定，音频线程首次用到 libc 符号才解析 → 链接加 `-z now`（`cbc71ea1`）。<br>另加环形缓冲字段在真实 armhf Engine 上的固定检查（`c490da7c`）。<br>**报告、不改**：L10-4 罕见的渲染采样率会给音箱静音。 | 检验：`test_bt_out`（新循环在旧版失败；12 行质量测试在 armhf 和 AZ04 的 libsbc 上跑）、`test_stems_feature`、实时预算 / 回调、300k 次模糊测试、ASan / TSan 全部干净；`LD_BIND_NOW` 在 5.0.4、5.3.0、SC LIVE 4、AZ04 的 Engine 上全部符号可解析。分支 `agent/5305-hunt-L10` @ `cbc71ea1`（合入 `f17ca381`）。**实机待验（需要真音箱）**：音箱若支持 2..53，旧代码本来就发 53，这次修改不会改变它，不能证明断续就是码率池；步骤是 `journalctl -u engine -f` 里看 `SBC bitpool 53 (sink offers a..b)`，打开 Wi-Fi 流媒体对比；Wi-Fi 打开才断续说明是 2.4 GHz 共存问题。 |
+
+### 1A-3 综合复核后的修复（2026-11-17 07:00–09:10）
+
+两次综合复核对象是候选 `1dc05caa`（相对集成分支 310 个文件）：钩子 / HFS+ / 网络解析方向 **通过**（3 条 P3 备注）；Go / 网页 / 打包方向、UI 包 / 翻译方向各 **不通过**，结论如下，全部已修复并带回归测试。
+
+| 来源（日期） | 模块 | 原因与修法 | 检验、分支与提交、仍需实机 |
+| --- | --- | --- | --- |
+| **P2：`.rekordbox-cache` 清理会跟随符号链接，删除不相关文件**（11-17） | `pkg/webui/rekordbox_source.go` | **原因**：暂存逻辑对 `<盘>/.rekordbox-cache` 列目录、淘汰、写入时不看它是什么。<br>**修法**：新增 `rbxOwnCache`：缓存目录必须不存在，或用 `Lstat` 确认是目录且与盘根在同一个设备上；符号链接、普通文件、挂载上来的其他卷一律跳过，不列、不淘汰、不写入。 | `TestRekordboxCacheLinkIsNotFollowed`、`TestRekordboxCacheIsOnTheDrivesVolume`（需要挂载权限）；`4ba7f0d8`。局限：先 `Lstat` 再用，对恶意本地进程在检查之后换目录不是原子防御。 |
+| **P2：rekordbox 缓存另有一份暂存预算**（11-17） | 同上 | **修法**：`.rekordbox-cache` 与 `.prolink-cache` 的字节合计占用同一个每盘预算；腾空间只淘汰旧的 rekordbox 副本，Pro DJ Link 暂存库不被碰。 | `TestRekordboxCacheSharesTheDrivesStagingBudget`；`b9e34d41`（行 282、283）。 |
+| **P2：设置 JSON 接受后面跟着垃圾的数据**（11-17） | `pkg/webui/ui_settings.go` | **修法**：第一个值之后再次解码必须是文件结尾（后面的空白可以）；先于任何合并、派发和 Engine 重启，仍在原来的请求体上限内。 | `TestMalformedJSONSettingsDoNotApplyOrRestart` 加了后接垃圾和第二个对象两例（400、设置不变、不重启）；`fdc7a7d3`（行 284）。 |
+| **P3：`sampler-sequencer` 包不再能复现自己的源码**（11-17） | `docs/mods/` | **修法**：用 Go 1.27.1 重建（其余六个包逐字节相同）；sha256 `28ccc2f8…`。 | `test_packaged_sources_are_the_committed_sources`、`build_official_mods.py --check`；`bc24b00f`（行 285）。分支 `agent/5305-cr-go-fixes` @ `bc24b00f`（合入 `7a3b0d5f`）。 |
+| **P2：Stems“所有碟机都在放”的提示晚一次滑动才出现**（11-17） | `tools/ui-mod/build_packs.py` | **原因**：原厂的滑动项在触发动作**之前**先读提示文本，我们的补丁在动作里才设置 `scStemBusy`，所以第一次滑动显示旧文字。**修法**：在 Stems 分支里设置完 `scStemBusy` 后立刻重读一次提示列表，同一次滑动、两碟和四碟布局、所有语言下文字就是对的。 | `test_busy_message_shows_on_the_swipe_that_found_every_deck_playing`（含“忙 / 流媒体 / 忙 / 本地”的连续序列）；`50c351d7`（行 287）。**实机待验（必须）**：所有碟机都在放时滑动一次，再空出一台碟机滑动一次；节点测试按原厂顺序建模，但没有证明 Qt 在真机 QML 里立即读取脏绑定。 |
+| **P2：`engine-ui-guard` 迁移脚本查找**（11-17） | `tests/test_rootfs_overlay.sh`<br>`tools/az01-packer/test_ui_mod.py` | **复核有误**：一代镜像里 `/usr/libexec/enginex-migration` 就在；二代数据包里卫士与迁移脚本并排安装，`dirname "$0"` 的回退正是为这种布局而设，所以产品代码不改。真正的问题是测试主机上没有 `/usr/libexec` 的那份，43 个子用例失败。**修法**：测试自己设置迁移脚本路径，并在 `ok 15` 里固定默认路径、一代与二代并排布局。 | `5521fe54`；合并成 `4da52987`。整套 UI 测试 269 项通过、覆盖层 38 项通过。 |
+| **P3 备注**（钩子 / HFS+ 复核） | — | 3 条：一条纵深防御建议、一条容错说明、一条检查表编号核对，均不改产品。 | 钩子方向复核 **通过**：armhf / arm64 / ASan 的 `--mounts`、实时预算与回调（8400 块 0 次错过，最差 174.2 µs 对 666.6 µs 预算）、覆盖层 38 项、Pro DJ Link `-race`。 |
+
+## 1B. 仍在进行、没有合入 5.3.0.5 候选的工作
+
+以下都**不是本版本已完成的内容**，用户文档里不得写成已有功能。
+
+- **#301（rekordbox 导入重新设计，进行中）**：rekordbox 6.8.5 导出的 477 GB FAT32 U 盘（约 2 万首曲目、323 个歌单、加密的 `exportLibrary.db`）在 armhf 上首次导入 270 秒（其中冷读目录 256 秒），而挂载后约 17 秒钩子就杀掉转换，且每次插入都重来、什么也留不下，所以大库永远转不完。设计方向（已批准）：挂载立即返回，导入在后台一直做到完成，带检查点和续做，在 U 盘上原子发布；进度条覆盖整个导入；音频线程之外低优先级（`SCHED_IDLE`、IO idle）；弹出前停止；导入期间显示原厂的 OneLibrary 视图。同时把 256 秒的冷读目录挪出挂载路径，并测试 Engine 下次加载是否会读到实时写进 `m.db` 的 Cue。**当前现状**：根因已在 armhf 上确认，**修复尚未落地**；大库的 rekordbox U 盘在 5.3.0.5 上仍可能首次导入不完。分支 `agent/5305-issue-301`。
+- **二代 32 位机 HFS+ 读写（`lklfuse`，进行中）**：二代 32 位机的内核强制模块签名（`MODULE_SIG_FORCE`）且被 LoadPin 锁定，没法加载自己的模块，也没法换内核（维护者：不换内核）。方案是用 LKL（把 Linux 6.12 内核当库用）加 FUSE 做用户态挂载：`lklfuse`（armhf 4.4 MB，LKL 6.12 加 fuse 3.17.2，已移植 HFS+ 的 bug 修复）；QEMU armv7 HIGHMEM 里 4338 次操作的压力测试、预填充、脏弹出和重新插入都 `fsck` 干净，RSS 6–17 MiB，卸载比 `lklfuse` 退出早返回 74–1886 ms。Engine 与 `edisksd` 不拒绝 FUSE 类型（要用 `-o fsname=<块设备>`，钩子把 `/dev` 设备名规整好）。分支 `agent/5305-hfs-lkl-int` @ `f1728327`（原型 `agent/5305-hfs-lkl` @ `21fa1007`）：钩子里的二代 32 位集成、`fsck -y`、弹出与拔出处理、随二代数据包带 `lklfuse` 和 `fsck.hfsplus`。**没有在真机上跑过**；风险：`lklfuse` 以 `O_RDWR` 打开块设备且没用 `-o sync`（RK3288 上性能没测），写入时突然拔出仍可能丢脏缓存，干净弹出最多等 15 秒。**在此之前，二代 32 位机上的 HFS+ 盘保持只读。**
+- **拔盘后播放不中断（可行性研究，进行中）**：已加载的 USB 曲目能否在拔出 U 盘后继续播放（本地缓存），也许还能让 #301 的“无感重新挂载”成为可能。只做可行性：原厂拔盘时的行为、Engine 如何读文件、内存盘复制加 fd 交换对页缓存固定两种设计、各机型内存预算。**没有任何实现。**
+- **PRIME GO Color FX 错误（进行中）**：用户在 PRIME GO 上打开 `Color FX Style` 后曲目立即带上回声，关掉才停；日志显示这个设置不是给 PRIME GO 用的。`Color FX Style`（`pioneer_fx`）在除独立播放器外的所有板型上都显示，而它依赖的 PX 路径（`fxSelectorAvailable()`）只在 PRIME 4（JC11）上存在，所以在 PRIME GO、PRIME 2、Mixstream 和二代 / AZ04 一体机上的设置不应显示且已保存的值不应有效果。**修复尚未落地**；在此之前的绕过办法：把 `Color FX Style` 设为 `Off`。分支 `agent/5305-colorfx-primego`。
+- **Mixstream #286 第二项：Pad 栏布局**：把 Sweep FX 选择行收进 `△` 按钮、把 Stem EQ 模式切换移入 Control Center 的磁贴，让波形拿回空间；原本推迟到 5.3.0.6，维护者要求 5.3.0.5 做。分支 `agent/5305-mixstream-286b`，**尚未合入**。
+- **L2b（界面渲染扫描）**：JP07 / JP13 / JC11 的全部屏幕和语言的渲染检查还在做（第一版因为只做了 JP07 英文 3 个屏幕并带来看似无用的 AZ04 板号改动，被排除）。**L3 的 DJ 操作沙箱**（18 项操作加截图）也没跑完。
+- **#244（AZ04 `/data` 分区大小）**：不在 5.3.0.5，需要这两款机型用户的只读分区测量。
+
+---
+
+## 2. 实机验收与待实机验证项目清单
+
+以下项目在撰写时**没有**实机结论，发布前由维护者或发版人逐项确认；结论写入下方 `【待填】`：
+
+- **蓝牙音箱输出**（行 187、188）：维护者 2026-11-14 在真实 SC5000 上试听并认可音质；其余机型的 `输出来源` 选项、延迟约 150–250 ms、已连接手机等输入设备时面板停止扫描的提示仍待确认。`【待填】`
+- **复制设置与 USB 配置导入**（行 200、202、210）：两台碟机的 Link / USB / 撤销验收，Player 编号保留。`【待填】`
+- **分侧反转转盘**（行 205）：物理转动搓碟、外圈微调、`Shift + 转盘`。`【待填】`
+- **`推子回音`**（行 190）与 **电动转盘 4 轨**（行 186）：一体机真机音频，`SC5000M` / `SC6000M` 真机。`【待填】`
+- **有线 + Wi-Fi**（行 192、193、213）：两台 SC5000，三次以上开机，`ip route get <对端碟机>` 为 `dev eth0`，日志无 `online check failed`。`【待填】`
+- **3-Band 与概览**（行 194–196、203、219）：对照 CDJ-3000 / rekordbox，旧导入 U 盘重插后 Half / Full 高度。`【待填】`
+- **Live Stream**（行 197、223）：真实 Icecast 服务器播放推送；无听众时 `stream-sync` 占用。`【待填】`
+- **碟机本机 Stems**（行 222）：播放中的耗时（未测）。`【待填】`
+- **签名更新与安装器**（行 215、216、218）：屏幕从 r5 更新到已签名发布、拒绝未签名测试发布；WinUSB 绑定与 USB 传输；双击安装。`【待填】`
+- **恢复官方固件**（行 201、217）：真实 SC5000 官方刷入并回到 EngineX。`【待填】`
+- **PRIME 4 效果选择与视图**（行 246、247、249–251）：PRIME 4 连续浏览效果、旋钮一格一个效果；`SHIFT + VIEW`、`LOAD` 与 `联机视图` 的显示。`【待填】`
+- **西班牙语**（行 248）：选 Español 重启 Engine，检查菜单重音与排版、控制台和手机页切换。`【待填】`
+- **高速 SD 卡**（行 252）：RK3288 机型上 `caps`、`ios` 的 `timing spec: 2 (sd high-speed)`、约 23 MB/s 读速，播放中切换的提示，开着重启后的状态。`【待填】`
+- **U 盘**（行 209、211、212、214、224、225、226）：HFS+ 弹出与更新、暂存库占用、对方盘无 Stems、SD 重插与用户数据恢复、NH08 Spotify。`【待填】`
+- **SC LIVE 4**：Remote Library 封面（行 185）、演出曲目表导出与原厂 History 对照（行 206）。`【待填】`
+- **夜间补录的验收项（2026-11-17）**：
+  - **#298**：PRIME 4 上从 USB 和内置盘加载曲目，正在播放的另一台碟机不再断音；若仍断，按 1A-2 里列的备选嫌疑逐项排查。`【待填】`
+  - **影子轨微调、超前、循环**（行 277）：两台碟机，微调时影子几十毫秒内跟上，稳态不超前，1–2 拍循环不冲过；日志出现 `nudge-ready`。`【待填】`
+  - **rekordbox 来源 / 单一 Pro DJ Link 开关**：Mac 上的 rekordbox 7（Export 模式、LINK）出现在碟机来源列表，曲目和歌单可浏览，共享文件夹和 NFS 两条加载路径、慢速加载、两台碟机同时用；开启开关后 rekordbox 出现 `LINK`（需要插入 rekordbox U 盘）。`【待填】`
+  - **HFS+ 读写**：一代机（草稿盘）已在左 SC5000 上实测一轮；仍需：AZ04 实机、macOS `fsck_hfs` 复查、大盘 `fsck -y` 耗时、碟机建的库搬到盘上、二代 32 位机插非日志 HFS+ 盘保持只读。`【待填】`
+  - **#271 写回 Cue**（行 266）：CDJ-3000 / NXS2 加 rekordbox 7 的设备视图核对。`【待填】`
+  - **Stems**：左碟网易云弹窗消失（需带 `stream-save` 的卫士）；所有碟机都在放时滑动提示在**同一次滑动**出现（行 287）。`【待填】`
+  - **#299**：每款二代机上用密码和公钥登录。`【待填】`
+  - **Mixstream**（行 278、279）：`Pitch Bend → Beat Jump` 的按键与 LED、四个 FX 键的分配。`【待填】`
+  - **Windows 安装器**（行 280）：干净 Windows 电脑加实机。`【待填】`
+  - **从 5.3.0.4-r5 和 5.3.0.2 真机升级**（行 231–236，#234 最终版）。`【待填】`
+  - **蓝牙**：支持更宽码率范围的音箱，对比旧钩子；Wi-Fi 流媒体打开与关闭各听 10 分钟。`【待填】`
+
+---
+
+## 3. 全套测试与三组发版门禁结果
+
+> 下列结果来自候选分支 `agent/5305-rc-candidate` 在各批合入时的验证，**不是对最终构建提交的验证**：最终合并复核、最终候选的门禁和真机验收还没做。每一批的结果都按实际退出码核对，没有靠跳过、排除或放宽断言取得绿色。
+
+- **构建提交**：`【待填】`（候选分支头 `4da52987`）
+- **门禁（`release-gate.sh`，生产等价镜像，基线是 `v5.3.0.4-r5` 旧镜像在线升级到新版再开机验收）**：
+  - **JP07（SC5000 组）**：**176 项通过 / 0 失败**（候选 `1dc05caa`；两次开机的 Demo 来源与封面、HFS+ LoadPin 路径与内核审计均通过）。
+  - **JP13（SC6000 组）**：**176 / 0**（候选 `d53211ab`）。
+  - **JC11（PRIME 4 组）**：**176 / 0**（候选 `d53211ab`）。
+  - 三组还通过：陈旧 / 私有 QML 缓存处理、真实渲染探测、掉电重启与持久化、下一次更新、无效签名 / 镜像拒绝、主机时钟保护。基线镜像的内置 tag 都已核对为 `v5.3.0.4-r5`。**这些门禁是在批 4 / 批 5 的产品修复（综合复核后的 Go 修复、#299、同一次滑动修复）之前跑的，不能当作 `4da52987` 的门禁**；最终候选需要重跑。
+  - 更早的一次 JP07 门禁是 172 通过 / 4 失败，原因是 Demo 修复丢失（见 1A-2），补回后恢复 176 / 0。
+- **AZ04**：PRIME 4 G2 冷启动与 ALSA 激活、钩子初始化（26 处修改加 UI 包）、安装 / 卸载、旧目录升级、SYSTEM ONE 更新镜像预加载，引导沙箱通过（以发版构建里提取的载荷字节为输入）。沙箱的第二阶段**容忍 Engine 退出（日志里有 SIGABRT）**，PASS 只证明初始化检查，不证明持续运行或真机启动。
+- **综合测试数量（批 4 `651bf7af` 为最后一次整套；批 5 `4da52987` 只重跑 UI / 覆盖层 / Go）**：
+  - Go：`gofmt` 干净、`go vet ./...`、`go test -race -count=1 ./pkg/... ./internal/... ./cmd/... ./docs/mods/...` **47 个包全部通过**（6 个没有测试）；Windows USB 与安装器测试交叉编译、网站语法和曲目表检查通过；Mod 包可重复构建 `--check` 通过。
+  - 覆盖层 `tests/test_rootfs_overlay.sh`：**38 项通过**（含两个 32 位钩子与现编译字节一致）。
+  - 打包器整套（`tools/az01-packer`）：**498 项，497 通过、0 失败、1 个既有条件跳过**（`test_install_uses_bundle_alsa_dir`，因为主机上有 `/data`）；其中 `test_ui_mod` 256 项、`test_ui_mod_bh2` 11 项、FX 界面 4 项、界面性能 2 项、`Shift + View` 硬件循环与重启 1 项全部执行。批 5 单独跑 UI：**269 项通过、无跳过**（`test_ui_mod` 257、`test_ui_mod_bh2` 11、`test_ui_mod_shift_view` 1）。
+  - `tools/stems`：**18 项通过**。
+  - C 测试 **22 次调用全部通过**：蓝牙（armhf 与原生、含延迟与两次 SBC 质量）、`test_stems_feature`（5.0.4、5.3.0、SC LIVE 4 三个 Engine 夹具）、选择器与 DSP（ARM、ASan / UBSan、TSan）、AZ04 Engine 与离线分析器、主回调、实时回调（含自检）、实时预算（49 例、0 次错过）、实时取样（ASan / UBSan、TSan）、`edisksd` 单元与 `--mounts`。无消毒器报错。
+  - 引导沙箱：SC LIVE 4（含**二代只读 `/etc` 的 SSH 密码、公钥登录与开机还原**）、PRIME 4 Plus（JC11S，官方镜像 sha256 `bf5489d1…`，含 mkfs 与 fscrypt 首次开机）、AZ04 一次，全部通过。
+- **文档审计**（`tools/az01-packer/test_docs_audit.py`）：x86 编译机上通过；发布构建后复跑：`【待填】`
+- **第 4 步镜像检查**：16 个 `*-Update.img` 加 8 个兼容数据包，版本 5.3.0.5，签名参数 `none`、不签名；清单 25 行（24 个产物加 `RELEASE-TAG.txt`）逐项校验通过；其余 4 个安装器未在这些构建里生成。`【待填】`（发版构建）
+- **签名发布检查**（`sign-release.sh`、`SHA256SUMS.txt.sig` 验证）：`【待填】`
+- **尚未完成**：综合最终复核、最终候选的 JP07 / JP13 / JC11 门禁、最终候选的整套测试、全部真机验收。**本地没有做原生 Windows 安装与 UAC 的验证，也没有任何真机性能结论。**
+
+---
+
+## 4. 发布产物与 SHA-256 校验表（v5.3.0.5 全量 28 产物清单）
+
+- **说明**：下表 SHA-256 全部是占位符 `【待填】`，由构建出的 `SHA256SUMS.txt` 逐行填入，**不要**在构建前使用。
+- **产物目录**：`【待填】`；`SHA256SUMS.txt` 共 **29 行**（16 个 `*-Update.img` + 8 个 `*-Data-Bundle.tar.gz` + 4 个 `EngineX-Installer-5.3.0.5-*` + `RELEASE-TAG.txt`），连同 `SHA256SUMS.txt` 与 `SHA256SUMS.txt.sig` 共 **31** 个上传文件。
+- **回滚点**：tag `v5.3.0.4-r5`（`9e827205`）。
+
+### 一代机型完整固件（`*-Update.img`）
+
+| 镜像组 | 机型 | 板号 | 文件名 | SHA-256 |
+| --- | --- | --- | --- | --- |
+| SC5000 | Denon DJ SC5000 Prime | JP07 | `SC5000-5.3.0.5-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img` | `【待填】` |
+| SC5000 | Denon DJ SC5000M Prime | JP08 | `SC5000M-5.3.0.5-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img` | `【待填】` |
+| SC5000 | Denon DJ PRIME GO | JP11 | `PRIMEGO-5.3.0.5-EngineX-OS-Denon-PRIME-GO-JP11-Update.img` | `【待填】` |
+| SC6000 | Denon DJ SC6000 Prime | JP13 | `SC6000-5.3.0.5-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img` | `【待填】` |
+| SC6000 | Denon DJ SC6000M Prime | JP14 | `SC6000M-5.3.0.5-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img` | `【待填】` |
+| PRIME 4 | Denon DJ PRIME 4 | JC11 | `PRIME4-5.3.0.5-EngineX-OS-Denon-PRIME-4-JC11-Update.img` | `【待填】` |
+| PRIME 4 | Denon DJ PRIME 2 | JC16 | `PRIME2-5.3.0.5-EngineX-OS-Denon-PRIME-2-JC16-Update.img` | `【待填】` |
+| PRIME 4 | Numark Mixstream Pro | NH08 | `MIXSTREAMPRO-5.3.0.5-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img` | `【待填】` |
+
+### 二代机型统一升级镜像（`*-Update.img`，#215 主选格式）
+
+| 架构组 | 机型 | 板号 | 文件名 | SHA-256 |
+| --- | --- | --- | --- | --- |
+| AZ0x (armhf) | Denon DJ SC LIVE 4 | JP21 | `SCLIVE4-5.3.0.5-EngineX-OS-Denon-SC-LIVE-4-JP21-Update.img` | `【待填】` |
+| AZ0x (armhf) | Denon DJ SC LIVE 2 | JP20 | `SCLIVE2-5.3.0.5-EngineX-OS-Denon-SC-LIVE-2-JP20-Update.img` | `【待填】` |
+| AZ0x (armhf) | Denon DJ PRIME 4+ | JC11S | `PRIME4PLUS-5.3.0.5-EngineX-OS-Denon-PRIME-4-Plus-JC11S-Update.img` | `【待填】` |
+| AZ0x (armhf) | Denon DJ PRIME GO+ | JP11S | `PRIMEGOPLUS-5.3.0.5-EngineX-OS-Denon-PRIME-GO-Plus-JP11S-Update.img` | `【待填】` |
+| AZ0x (armhf) | Numark Mixstream Pro+ | NH08S | `MIXSTREAMPROPLUS-5.3.0.5-EngineX-OS-Numark-Mixstream-Pro-Plus-NH08S-Update.img` | `【待填】` |
+| AZ0x (armhf) | Numark Mixstream Pro Go | NH10 | `MIXSTREAMPROGO-5.3.0.5-EngineX-OS-Numark-Mixstream-Pro-Go-NH10-Update.img` | `【待填】` |
+| AZ04 (aarch64) | Denon DJ PRIME 4 G2 | JP24 | `PRIME4G2-5.3.0.5-EngineX-OS-Denon-PRIME-4-G2-JP24-Update.img` | `【待填】` |
+| AZ04 (aarch64) | Rane SYSTEM ONE | RMZ2 | `SYSTEMONE-5.3.0.5-EngineX-OS-Rane-SYSTEM-ONE-RMZ2-Update.img` | `【待填】` |
+
+### 二代机型过渡兼容数据包（`*-Data-Bundle.tar.gz`，供旧版 `5.3.0.2` / 未解锁 `5.3.0.3` 屏幕 OTA 升级）
+
+| 架构组 | 机型 | 板号 | 文件名 | SHA-256 |
+| --- | --- | --- | --- | --- |
+| AZ0x (armhf) | Denon DJ SC LIVE 4 | JP21 | `SCLIVE4-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `【待填】` |
+| AZ0x (armhf) | Denon DJ SC LIVE 2 | JP20 | `SCLIVE2-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `【待填】` |
+| AZ0x (armhf) | Denon DJ PRIME 4+ | JC11S | `PRIME4PLUS-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `【待填】` |
+| AZ0x (armhf) | Denon DJ PRIME GO+ | JP11S | `PRIMEGOPLUS-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `【待填】` |
+| AZ0x (armhf) | Numark Mixstream Pro+ | NH08S | `MIXSTREAMPROPLUS-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `【待填】` |
+| AZ0x (armhf) | Numark Mixstream Pro Go | NH10 | `MIXSTREAMPROGO-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `【待填】` |
+| AZ04 (aarch64) | Denon DJ PRIME 4 G2 | JP24 | `PRIME4G2-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `【待填】` |
+| AZ04 (aarch64) | Rane SYSTEM ONE | RMZ2 | `SYSTEMONE-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `【待填】` |
+
+### 跨平台一键安装器（`EngineX-Installer`）
+
+| 平台 | 文件名 | SHA-256 |
+| --- | --- | --- |
+| Windows 10/11 x64 | `EngineX-Installer-5.3.0.5-windows-amd64.zip` | `【待填】` |
+| macOS Apple Silicon (M1–M4) | `EngineX-Installer-5.3.0.5-macos-arm64.zip` | `【待填】` |
+| macOS Intel | `EngineX-Installer-5.3.0.5-macos-amd64.zip` | `【待填】` |
+| Linux x86_64 | `EngineX-Installer-5.3.0.5-linux-amd64.tar.gz` | `【待填】` |
+
+
+
+---
+
+## 5. 实机影响与升级说明
+
+- **一代机（8 款 `*-Update.img`）**：已刷 `5.3.0.4`（含 r2–r5）或更早版本的碟机，发布后可在 `设置 → 关于 / 更新` 收到 5.3.0.5 在线升级；也可把对应 `*-Update.img` 放入 FAT32 / exFAT U 盘根目录，经 `设置 → 关于 / 更新 → 固件更新模式 → 选项` 选 `USB/SD`。
+- **二代机**：已解锁的二代机在屏幕上更新，或用 U 盘 `*-Update.img`；`5.3.0.2` / 未解锁 `5.3.0.3` 的二代机继续通过随附的 `*-Data-Bundle.tar.gz` 屏幕 OTA（最后一次，`5.3.0.6` 起退役）；原厂二代机首次安装用 `EngineX-Installer`，会清空机身内置存储，请先备份。
+- **5.3.0.4 及更早的碟机不验签**：先更新到 5.3.0.5，之后的更新才会验签；已签名但比碟机当前版本旧的发布会被拒绝（同版本可重装修复），有意降级用安装器的 `--image` / `--bundle`。
+- **回到原厂**：先启动一次 5.3.0.5 再正常关机，然后运行 `Restore-Official-Firmware.*`；原厂已卡在 Logo 且无法 SSH 时，先用安装器刷入 EngineX 并让它启动，再运行恢复工具（原厂刷机保留 `/data`，旧 QML 缓存不会因再刷一次原厂而消失）。
+- **配置与数据保留**：升级保留 `/data/enginex` 下的流媒体登录态、歌单缓存、视图预设、已装 Mod 与 SSH 公钥；`Profile → Save to my drive` 现在也保存 EngineX 偏好。
+- **HFS+（新）**：一代机和 PRIME 4 G2 / SYSTEM ONE 上 Mac 格式的 U 盘 / SD 卡可读写（检查通过的卷才可写，否则仍是只读视图）；**二代 32 位机（SC LIVE 4、SC LIVE 2、PRIME 4+、PRIME GO+、Mixstream Pro+、Mixstream Pro Go）上的 HFS+ 盘保持只读**，直到 `lklfuse` 落地。5.3.0.4（含 r5）上干净、未启用日志的 HFS+ 盘会以读写挂载在有 bug 的内置驱动上（见 1A-2），更新到 5.3.0.5 修复。
+- **已知限制**：二代 32 位机的 HFS+ 仍只读；rekordbox 大库（约 2 万首以上、慢速 U 盘）的首次导入可能完不成（#301，进行中）；`PRIME GO` 上不要打开 `Color FX Style`（进行中）；蓝牙约增加 150–250 ms，不适合打拍对齐；碟机本机 Stems 不是神经网络，仍有串音；`Live Stream` 只有 WAV；`#247` 的 SoundCloud 保存、`#268` 的 Remote Library 记录与 Prepare 仍未完成；`#253` 大 U 盘识别速度需实机计时；`#244`（PRIME 4 G2 / SYSTEM ONE 数据分区大小）**不在**本版本，需要这两款机型用户的只读分区测量（#291）。
+- **已知问题（Spotify）**：许多账号（包括较早的 Premium 账号）播放 Spotify 会失败，提示 “audio key refused”。Spotify 更改了服务器，所有基于 librespot 的客户端都无法获得音频密钥（librespot-org/librespot#1649，2026-11-07 已锁定，没有已知修复）；碟机上无法修复，请改用 TIDAL、Beatport、SoundCloud 或 Deezer。来源菜单里仍保留 Spotify 入口
+
+---
+
+## 6. 本次修复的 Issue 清单
+
+#205、#213、#214（PR）、#216、#222（BH-GF3-12 / BH-GC2-10）、#223、#233、#237、#238、#239、#242、#243、#246、#245、#247、#248、#252、#253（识别速度待实机验收）、#285、#287（PR）、#282（PR，Javier Saenz）、#255、#258、#261、#263、#264、#266（PR）、#268（仅导出已有历史）、#269、#272、#273（PR）、#274、#277、#279、#281、#283。同时合入 #234 更名（最终版）、#215 的 OTA 桥接（不含 #244）和 #236 的后台负载收敛。**夜间补录**：#271（写回 Cue）、#298（加载时卡顿，需实机确认）、#299（二代机 SSH 密码）、#286（第一项：Beat Jump 和 FX 槽位）、#255 的 Windows 部分、#99（`Shift + View`）、#195 / #207（效果）、#293（Mod）、#213 的跨引擎修复。
+
+部分完成或待实机验收的 Issue 不应在发布时直接关闭：`#247`、`#252`、`#268`、`#253`、`#298`（等实机确认）、`#286`（第二项没做）；`#244` 保持打开；**`#301` 没有修复，保持打开**。机器人的 PR #302（二代机仅密钥）被 #299 的密码方案取代，发布时关闭。
