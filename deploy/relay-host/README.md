@@ -122,8 +122,8 @@ installer uses the existing deck API and installs no service on the computer.
 Alternatively set them in `http://<deck-ip>:8080`. The same relay settings route
 Stems and synchronize Apple Music helper settings to the deck. A helper on the
 same host is detected automatically; the optional systemd environment-file
-drop-in gives the DynamicUser relay its root-only helper token. A helper on
-another host can be configured in the relay console.
+drop-in gives the DynamicUser relay its root-only helper token. If the deck cannot reach the
+detected address, configure a reachable HTTPS helper URL in the relay console.
 
 If a state conflict is reported, preserve both directories and resolve which
 configuration to keep before rerunning. No server changes occur just by updating

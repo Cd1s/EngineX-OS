@@ -303,7 +303,7 @@ powershell -ExecutionPolicy Bypass -File .\stems\run-home-worker.ps1
 1. **播放機端免網域一鍵穿透**：開啟 `http://<播放機 IP>:8080` 點擊 **「開啟免網域公網通道 (Cloudflare Quick Tunnel)」**，數秒內產生 `https://*.trycloudflare.com` 公網位址供手機遠端存取與串流掃碼回呼。
 2. **一鍵部署 `enginex-relay` 後端（5.3.0.5）**：於 Debian 12+ / Ubuntu 24.04+（amd64 或 arm64）的 EngineX 原始碼目錄執行 `sudo bash deploy/one-click-backend.sh`，自動安裝並啟動 `enginex-relay.service` 與 HPSS Stems 服務；重複執行會保留現有位址、密碼及分軌權杖。已有反向代理時加 `--public https://你的網域`；全新安裝未指定時自動啟用 Quick Tunnel。開啟 `http://<後端 IP>:6595`，首次安裝於本機執行 `sudo cat /var/lib/enginex-relay/initial-password` 查看初始密碼，登入並修改；升級保留原密碼。[後端說明](deploy/relay-host/README.md)。
 3. **連接刷好的播放機**：正常啟動並接入同一區域網路，執行 `enginex-installer --setup-backend`（Windows：`enginex-installer.exe --setup-backend`），依序輸入播放機位址、螢幕 **設定 → 關於 / 更新** 顯示的主控台存取碼，以及後端位址和密碼；也可直接於 `http://<播放機 IP>:8080` 填寫。串流帳號透過播放機螢幕上的 QR Code 登入；區域網路手機登入無需中繼。
-4. **同一後端提供 Stems 與 Apple Music**：Stems 使用相同的中繼位址和密碼。若 `/opt/enginex-amd` 與 `/opt/wrapper-lite` 已有 Apple Music 助手檔案，指令碼也會啟動它們；中繼會自動偵測其區域網路位址與權杖並同步至播放機；只有助手於其他主機執行時才需手動填寫可連線的位址。**PRIME 4 G2 / SYSTEM ONE（64 位元二代機）**可原生登入 Apple Music，無需外部後端；其他機型可使用助手，需有效 Apple Music 訂閱。
+4. **同一後端提供 Stems 與 Apple Music**：Stems 使用相同的中繼位址和密碼。若 `/opt/enginex-amd` 與 `/opt/wrapper-lite` 已有 Apple Music 助手檔案，指令碼也會啟動它們；中繼會自動偵測其區域網路位址與權杖並同步至播放機；若播放機無法存取偵測到的位址，請於中繼主控台填寫可連線的 HTTPS 助手位址。**PRIME 4 G2 / SYSTEM ONE（64 位元二代機）**可原生登入 Apple Music，無需外部後端；其他機型可使用助手，需有效 Apple Music 訂閱。
 
 ---
 
