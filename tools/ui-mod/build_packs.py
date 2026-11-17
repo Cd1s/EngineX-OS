@@ -3416,10 +3416,15 @@ SERVICES_MAIN = """
 		if (id === "rekordbox") return "qrc:/@ICONS@/SourceEngineRemoteLibrary.png"
 		return "file:///data/enginex/ui/icons/" + id + ".png"
 	}
-	// The gateway appends " [128 BPM 8A]" to a row's label; see labelWithBPM. A value
-	// Engine analysed itself always wins, so these only fill empty columns.
+	// The gateway appends " [128 BPM 8A]" to a row's label; see labelWithBPM.
+	// Catalog previews fill empty columns, except rekordbox owns its tuned row values.
 	function scPreview(label) {
-		return /\\s\\[(\\d+) BPM(?: ([0-9]{1,2}[AB]))?\\]$/.exec(label || "") || ["", "", ""]
+		return /\\s\\[(\\d+(?:\\.\\d+)?) BPM(?: ([0-9]{1,2}[AB]))?\\]$/.exec(label || "") || ["", "", ""]
+	}
+	function scRowValue(data, field, column) {
+		const label = String(data.providerName || "")
+		const value = scPreview(label)[column]
+		return label.indexOf("rekordbox [") === 0 && value ? value : data[field] || value || ""
 	}
 	// Deck art for a streamed track: Engine hands the 7" deck / MicroDeck "" or image://streaming/, so ask the gateway by title+artist.
 	// Native song-name bindings invalidate on track changes; retry only while metadata is missing.
@@ -7437,8 +7442,8 @@ def edits(dev: bool):
             '        visible: !!parent && parent.status !== Image.Ready && String(parent.source) !== ""\n'
             "    }\n",
         )],
-        v + "BrowseView/Components/Components/" + ("BrowseViewBpm.qml" if v53() else "Bpm.qml"): [('text: row.modelData.bpm || ""', 'text: row.modelData.bpm || root.scPreview(row.modelData.providerName)[1]')],
-        v + "BrowseView/Components/Components/Key.qml": [('text: row.modelData.key || ""', 'text: row.modelData.key || root.scPreview(row.modelData.providerName)[2] || ""')],
+        v + "BrowseView/Components/Components/" + ("BrowseViewBpm.qml" if v53() else "Bpm.qml"): [('text: row.modelData.bpm || ""', 'text: root.scRowValue(row.modelData, "bpm", 1)')],
+        v + "BrowseView/Components/Components/Key.qml": [('text: row.modelData.key || ""', 'text: root.scRowValue(row.modelData, "key", 2)')],
         v + "BrowseView/Components/Components/Song.qml": [('title: row.modelData.song || ""', 'title: root.scPlainTitle(row.modelData.song)')],
         # rb-bridge converts rekordbox media at mount. Engine's own slow import of a
         # large library corrupted m.db, so always take the prompt's "Ignore" branch.

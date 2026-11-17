@@ -484,11 +484,11 @@ func TestRekordboxRowsShowArtistTempoAndKey(t *testing.T) {
 	tidalGet(t, e.base, "/v1/playlists/"+all.UUID+"/tracks", 200, &tracks)
 	first, second := tracks.Items[0].Item, tracks.Items[1].Item
 	// Am is 8A on the wheel; the label is what the deck's list moves into its BPM and Key columns.
-	if first.Artist.Name != "Artist One" || first.BPM != 128 || first.Copyright != " [128 BPM 8A]" {
+	if first.Artist.Name != "Artist One" || first.BPM != 128 || first.Copyright != "rekordbox [128 BPM 8A]" {
 		t.Fatalf("first row: %+v", first)
 	}
-	// A key the wheel does not know is left out, and with no tempo there is no label at all.
-	if second.Artist.Name != "" || second.BPM != 0 || second.Copyright != "" {
+	// A key the wheel does not know is left out, and with no tempo there is only the source label.
+	if second.Artist.Name != "" || second.BPM != 0 || second.Copyright != "rekordbox" {
 		t.Fatalf("second row: %+v", second)
 	}
 }

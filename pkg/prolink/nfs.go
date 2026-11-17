@@ -130,21 +130,43 @@ func (r *reader) opaque(max int) []byte {
 	return v
 }
 
-func (c *NFSClient) call(ctx context.Context, port int, prog, vers, proc uint32, args []byte) (*reader, error) {
-	var id [4]byte
-	_, _ = rand.Read(id[:])
-	xid := binary.BigEndian.Uint32(id[:])
+func rpcMessage(xid, prog, vers, proc uint32, args []byte) []byte {
 	msg := &xdr{}
 	msg.u32(xid).u32(0).u32(2).u32(prog).u32(vers).u32(proc)
 	cred := &xdr{} // AUTH_UNIX: stamp, empty machine name, uid 0, gid 0, no groups
 	cred.u32(0).opaque(nil).u32(0).u32(0).u32(0)
 	msg.u32(1).opaque(cred.Bytes()).u32(0).u32(0)
 	msg.Write(args)
+	return msg.Bytes()
+}
+
+func rpcAccepted(r *reader, prog, proc uint32) (*reader, error) {
+	if r.u32() != 1 || r.u32() != 0 {
+		return nil, errors.New("prolink: NFS call rejected")
+	}
+	r.u32()
+	r.opaque(400)
+	if st := r.u32(); r.err != nil || st != 0 {
+		return nil, fmt.Errorf("prolink: RPC program %d proc %d failed (%d)", prog, proc, st)
+	}
+	return r, nil
+}
+
+func (c *NFSClient) dial(port int) (*net.UDPConn, error) {
 	remote := &net.UDPAddr{IP: c.IP, Port: port}
 	conn, err := net.DialUDP("udp4", &net.UDPAddr{Port: c.SourcePort}, remote)
 	if err != nil && c.SourcePort != 0 {
 		conn, err = net.DialUDP("udp4", nil, remote)
 	}
+	return conn, err
+}
+
+func (c *NFSClient) call(ctx context.Context, port int, prog, vers, proc uint32, args []byte) (*reader, error) {
+	var id [4]byte
+	_, _ = rand.Read(id[:])
+	xid := binary.BigEndian.Uint32(id[:])
+	msg := rpcMessage(xid, prog, vers, proc, args)
+	conn, err := c.dial(port)
 	if err != nil {
 		return nil, err
 	}
@@ -165,7 +187,7 @@ func (c *NFSClient) call(ctx context.Context, port int, prog, vers, proc uint32,
 		if d, ok := ctx.Deadline(); ok && !time.Now().Before(d) {
 			return nil, context.DeadlineExceeded
 		}
-		if _, err := conn.Write(msg.Bytes()); err != nil {
+		if _, err := conn.Write(msg); err != nil {
 			return nil, err
 		}
 		deadline := time.Now().Add(timeout)
@@ -186,15 +208,7 @@ func (c *NFSClient) call(ctx context.Context, port int, prog, vers, proc uint32,
 			if r.u32() != xid || r.err != nil {
 				continue // stale or foreign datagram
 			}
-			if r.u32() != 1 || r.u32() != 0 { // REPLY, MSG_ACCEPTED
-				return nil, errors.New("prolink: NFS call rejected")
-			}
-			r.u32()
-			r.opaque(400) // verifier
-			if st := r.u32(); r.err != nil || st != 0 {
-				return nil, fmt.Errorf("prolink: RPC program %d proc %d failed (%d)", prog, proc, st)
-			}
-			return r, nil
+			return rpcAccepted(r, prog, proc)
 		}
 	}
 	return nil, fmt.Errorf("prolink: no reply from %s:%d", c.IP, port)
@@ -290,7 +304,7 @@ func (c *NFSClient) Fetch(ctx context.Context, export, path string, max uint32) 
 	return b.Bytes(), file, err
 }
 
-// FetchTo streams a file of at most max bytes to w, 8 KiB at a time.
+// FetchTo streams a bounded file in order while several 8 KiB READs are in flight.
 func (c *NFSClient) FetchTo(ctx context.Context, export, path string, w io.Writer, max uint32) (NFSFile, error) {
 	fh, file, err := c.Lookup(ctx, export, path)
 	if err != nil {
@@ -306,32 +320,5 @@ func (c *NFSClient) FetchTo(ctx context.Context, export, path string, w io.Write
 	if err != nil {
 		return file, err
 	}
-	for done := uint32(0); done < file.Size; {
-		args := &xdr{}
-		args.Write(fh)
-		args.u32(done).u32(nfsChunk).u32(0)
-		r, err := c.call(ctx, np, rpcNFS, 2, 6, args.Bytes())
-		if err != nil {
-			return file, err
-		}
-		if st := r.u32(); r.err != nil || st != 0 {
-			return file, fmt.Errorf("prolink: %s: NFS read error %d", path, st)
-		}
-		r.fixed(68)
-		data := r.opaque(nfsChunk)
-		if r.err != nil {
-			return file, r.err
-		}
-		if len(data) == 0 {
-			return file, fmt.Errorf("prolink: %s ended at %d of %d bytes", path, done, file.Size)
-		}
-		if rest := file.Size - done; uint32(len(data)) > rest {
-			data = data[:rest]
-		}
-		if _, err := w.Write(data); err != nil {
-			return file, err
-		}
-		done += uint32(len(data))
-	}
-	return file, nil
+	return file, c.readFile(ctx, np, fh, file.Size, w, nfsReadWindow)
 }

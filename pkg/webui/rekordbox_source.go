@@ -241,7 +241,7 @@ func (g *tidalGateway) rbxTracks(w http.ResponseWriter, r *http.Request, ref pla
 		if n, mode, ok := enginedb.Camelot(t.Key); ok {
 			key = fmt.Sprintf("%d%c", n, mode)
 		}
-		refs[i] = trackRef{track: providers.Track{ID: "rbx\x00" + ip + "\x00" + strconv.FormatUint(uint64(t.ID), 10), Title: t.Title, Artist: t.Artist, BPM: t.BPM, Key: key, Provider: rekordboxScope}}
+		refs[i] = trackRef{track: providers.Track{ID: "rbx\x00" + ip + "\x00" + strconv.FormatUint(uint64(t.ID), 10), Title: t.Title, Artist: t.Artist, BPM: t.BPM, Key: key, DurationMS: t.DurationMS, Provider: rekordboxScope}}
 	}
 	items := g.refItems(refs)
 	if first != "" {

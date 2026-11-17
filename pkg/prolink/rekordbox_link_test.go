@@ -310,7 +310,7 @@ func TestRekordboxTracksJoinArtistTempoAndKeyByIDInTheListsOrder(t *testing.T) {
 		}
 	}
 	f.mu.Unlock()
-	if lists != 3 { // the plain list, by artist and by tempo: never one request per row
+	if lists != 4 { // plain, artist, tempo/key and duration: never one request per row
 		t.Fatalf("%d track list requests", lists)
 	}
 }
