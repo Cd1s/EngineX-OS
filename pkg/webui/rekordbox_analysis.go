@@ -12,7 +12,6 @@ import (
 	"context"
 	"encoding/binary"
 	"log"
-	"net"
 	"os"
 	"path"
 	"path/filepath"
@@ -46,7 +45,7 @@ func rbxMarkLoading() {
 }
 
 // rbxWriteAnalysis writes track id's analysis (the gateway's id, the one in Engine's uri)
-// for rekordbox track tid of the computer at ip, whose audio is file.
+// for rekordbox track tid of the library ip (a computer, or a player's medium), whose audio is file.
 func (g *tidalGateway) rbxWriteAnalysis(id int64, ip string, tid uint32, rbPath, file string) {
 	out := filepath.Join(rbxAnalysisDir, strconv.FormatInt(id, 10)+".bin")
 	if _, err := os.Stat(out); err == nil {
@@ -57,7 +56,7 @@ func (g *tidalGateway) rbxWriteAnalysis(id int64, ip string, tid uint32, rbPath,
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	rbxSession.Lock()
-	link, err := dialRekordbox(ctx, net.ParseIP(ip), deckPlayer(g.s))
+	link, err := g.s.rbxDial(ctx, ip)
 	if err == nil {
 		if m, ok := link.(interface {
 			Metadata(uint32) ([]prolink.RekordboxItem, error)
@@ -178,6 +177,11 @@ func rbxHeader(file string, t *rekordbox.Track) {
 // rbxAnalysis is the track's rekordbox analysis over dbserver: each ANLZ tag rekordbox
 // hands out alone, read as a one-section analysis file and merged.
 func rbxAnalysis(link rbxLink, id uint32) *rekordbox.Analysis {
+	if m, ok := link.(interface {
+		AnalysisOf(uint32) *rekordbox.Analysis
+	}); ok {
+		return m.AnalysisOf(id) // a player's medium: its ANLZ files
+	}
 	a := &rekordbox.Analysis{}
 	l, ok := link.(interface {
 		Analysis(uint32, string, string) ([]byte, error)
