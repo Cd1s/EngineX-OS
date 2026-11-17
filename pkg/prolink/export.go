@@ -69,9 +69,14 @@ type Exporter struct {
 // the export looks like an idle player.
 type ExportDeck struct {
 	// Number is the EngineX deck (1-4) a player of ours stands for (SetDeck's decks).
-	Number          byte
-	Playing, Master bool
-	BPM, Pitch      float64 // the track's BPM; pitch in percent
+	Number byte
+	// Track, when not 0, is a rekordbox track id loaded from player Source's Slot
+	// (a computer's collection: 4) of Type (1, rekordbox); the status says so as a
+	// CDJ that loaded it over the link does, and rekordbox shows that track.
+	Source, Slot, Type byte
+	Track              uint32
+	Playing, Master    bool
+	BPM, Pitch         float64 // the track's BPM; pitch in percent
 	// Beat is Engine's BeatNumber when read at At: beats into the bar, 0..4
 	// (the integer part is the beat, the fraction the phase). As master and
 	// playing, the export sends a beat packet (0x28) on every beat from it.
@@ -1336,7 +1341,11 @@ func (r *exportRun) statusFor(n byte, d ExportDeck, unit bool) []byte {
 		}
 	}
 	binary.BigEndian.PutUint32(b[0x84:], max(r.syncN, 1))
-	if d.Master || d.Playing {
+	if d.Track != 0 {
+		b[0x28], b[0x29], b[0x2a] = d.Source, d.Slot, d.Type
+		binary.BigEndian.PutUint32(b[0x2c:], d.Track)
+	}
+	if d.Master || d.Playing || d.Track != 0 {
 		// The play mode bytes (P1, P2, P3, the activity flag) as players and Beat
 		// Link's virtual CDJ send them; ours said "no track loaded" next to the play flag.
 		b[0x7b], b[0x9d] = 5, 1

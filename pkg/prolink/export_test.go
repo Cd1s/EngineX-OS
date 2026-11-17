@@ -1342,6 +1342,23 @@ func TestExportOnePlayerPerDeck(t *testing.T) {
 	}
 }
 
+// rekordbox's player panel showed no title for a track our deck loaded from it: a
+// CDJ that loaded it over the link says where from (Dr 0x28, Sr 0x29 = 4, the
+// computer's collection, Tr 0x2a = 1) and its rekordbox id (0x2c), and a track is
+// loaded (P1 0x7b) also while paused.
+func TestExportStatusSaysTheRekordboxTrackLoaded(t *testing.T) {
+	r := &exportRun{player: 1, players: []byte{1}, decks: []ExportDeck{{Number: 1, BPM: 128, Source: 17, Slot: 4, Type: 1, Track: 854}}}
+	b := r.statusFor(1, r.deckLocked(1), false)
+	d, err := ParsePacket(b, 50002, net.IPv4(127, 63, 0, 1))
+	if err != nil || d.SourcePlayer != 17 || d.SourceSlot != 4 || b[0x2a] != 1 || d.TrackID != 854 || b[0x7b] != 5 || d.Playing {
+		t.Fatalf("loaded from the computer: %+v Tr %d P1 %d %v", d, b[0x2a], b[0x7b], err)
+	}
+	r.decks[0] = ExportDeck{Number: 1, BPM: 128} // a drive's track: as before, nothing said
+	if b := r.statusFor(1, r.deckLocked(1), false); b[0x28] != 0 || b[0x29] != 0 || b[0x2a] != 0 || binary.BigEndian.Uint32(b[0x2c:]) != 0 || b[0x7b] != 0 {
+		t.Fatalf("a drive's track: % x, P1 %d", b[0x28:0x30], b[0x7b])
+	}
+}
+
 // A paused deck does not hold master beside a computer that holds it, as a CDJ
 // would not; a playing one keeps doing what #217 settled.
 func TestExportPausedDeckLeavesMasterToRekordbox(t *testing.T) {

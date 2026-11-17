@@ -14,6 +14,7 @@ import (
 
 	"github.com/Cd1s/EngineX-OS/internal/testfixture"
 	"github.com/Cd1s/EngineX-OS/pkg/prolink"
+	"github.com/Cd1s/EngineX-OS/pkg/providers"
 )
 
 func TestProlinkExportSettingLifecycle(t *testing.T) {
@@ -398,4 +399,28 @@ func TestLinkPlayersPerDeckAndPausedMaster(t *testing.T) {
 	asked(false) // paused, nobody pressed MASTER: rekordbox keeps it
 	post(4)
 	asked(true) // MASTER pressed on deck 1
+}
+
+// A deck that loaded a row of the rekordbox source tells its player which: the
+// computer's number, slot 4 and the rekordbox id, so rekordbox shows the title.
+func TestLinkPlayerSaysTheRekordboxTrackItLoaded(t *testing.T) {
+	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	defer s.Close()
+	s.tidal.mu.Lock()
+	s.tidal.tracks[9001] = trackRef{track: providers.Track{ID: "rbx\x00127.64.0.31\x00854", Provider: rekordboxScope}}
+	s.tidal.mu.Unlock()
+	prolinkMu.Lock()
+	postedDevices[s] = map[string]prolink.Device{"17": {Number: 17, Name: "rekordbox", Address: "127.64.0.31", LastSeen: time.Now()}}
+	prolinkMu.Unlock()
+	w := httptest.NewRecorder()
+	s.decksPost(w, httptest.NewRequest("POST", "/v1/enginex/decks", strings.NewReader(`[{"deck":1,"playing":false,"bpm":128,"net":"streaming://TIDAL/Track/9001"},{"deck":3,"playing":false,"bpm":120}]`)))
+	if w.Code != 200 {
+		t.Fatalf("decks: %d", w.Code)
+	}
+	s.shadow.mu.Lock()
+	decks := s.shadow.ownDecks
+	s.shadow.mu.Unlock()
+	if len(decks) != 2 || decks[0].Source != 17 || decks[0].Slot != 4 || decks[0].Type != 1 || decks[0].Track != 854 || decks[1].Track != 0 {
+		t.Fatalf("players: %+v", decks)
+	}
 }

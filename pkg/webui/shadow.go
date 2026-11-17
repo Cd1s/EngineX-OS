@@ -145,6 +145,8 @@ type deckState struct {
 	// DisplayDetail (display compose only): the detail waveform of this deck's
 	// display data is ready here, so the QML re-reads it once instead of polling.
 	DisplayDetail bool `json:"displayDetail,omitempty"`
+	// rbx: a track from the rekordbox source, as our player's status reports it.
+	rbx prolink.ExportDeck
 }
 
 // shadowCue is one hot cue (I 1..8); the receiver checks it before use.
@@ -597,6 +599,16 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 		if f == "" && s.tidal != nil {
 			f = s.tidal.streamedFile(np) // loaded from the streaming browser (OmniSource too)
 		}
+		if s.tidal != nil {
+			if ip, id, ok := s.tidal.rekordboxLoaded(np); ok {
+				for _, dev := range s.mergedDevices() {
+					if dev.Address == ip && prolink.IsRekordbox(dev) {
+						d.rbx = prolink.ExportDeck{Source: dev.Number, Slot: 4, Type: 1, Track: id}
+						break
+					}
+				}
+			}
+		}
 		if f != "" && slices.Contains(shadowAudioExt, strings.ToLower(filepath.Ext(f))) {
 			if st, err := os.Stat(f); err == nil && st.Mode().IsRegular() {
 				d.Path, d.Ext, d.Name = f, strings.ToLower(filepath.Ext(f)), filepath.Base(f)
@@ -663,7 +675,8 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 	masterDeck, masterPress, masterPlaying := 0, 0, false
 	for i, d := range own {
 		master := d.Master != nil && *d.Master
-		players = append(players, prolink.ExportDeck{Number: byte(d.Deck), Playing: d.Playing, Master: master, BPM: d.BPM, Pitch: d.Pitch, Beat: d.Beat, At: ex.At})
+		players = append(players, prolink.ExportDeck{Number: byte(d.Deck), Playing: d.Playing, Master: master, BPM: d.BPM, Pitch: d.Pitch, Beat: d.Beat, At: ex.At,
+			Source: d.rbx.Source, Slot: d.rbx.Slot, Type: d.rbx.Type, Track: d.rbx.Track})
 		if master {
 			masterDeck, masterPress, masterPlaying = d.Deck, d.MasterPress, d.Playing
 		}
