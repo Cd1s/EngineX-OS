@@ -724,6 +724,9 @@ func (s *Server) phonePost(w http.ResponseWriter, r *http.Request) {
 			fail(w, 500, errors.New("could not save the Deezer login"))
 			return
 		}
+		if arl != "" {
+			go func(a string) { _ = s.pushRelayConfig(context.Background(), map[string]any{"deezerArl": a}) }(arl)
+		}
 		s.finishPhoneLogin(w, r, flow)
 	case *providers.SoundCloud:
 		user, token := strings.TrimSpace(r.Form.Get("user")), strings.TrimSpace(r.Form.Get("token"))
@@ -746,6 +749,38 @@ func (s *Server) phonePost(w http.ResponseWriter, r *http.Request) {
 		s.finishPhoneLogin(w, r, flow)
 	case *providers.AppleMusic:
 		if helperAction := r.Form.Get("helperAction"); helperAction != "" {
+			if helperAction == "setup" {
+				s.appleMusicHelperMu.Lock()
+				already := s.appleMusic.HelperConfig().URL != ""
+				s.appleMusicHelperMu.Unlock()
+				if already {
+					refuse("amFailed", tr(lang, "amHelperRetry"))
+					return
+				}
+				helperURL := strings.TrimSpace(r.Form.Get("helperUrl"))
+				helperToken := strings.TrimSpace(r.Form.Get("helperToken"))
+				if helperURL == "" || !validAppleMusicHelperURL(helperURL) {
+					refuse("badForm", "")
+					return
+				}
+				s.appleMusicHelperMu.Lock()
+				cfg := providers.AppleMusicHelperConfig{URL: helperURL, Token: helperToken}
+				err := providers.SaveJSON(s.appleMusicHelperPath(), appleMusicHelperSettings{cfg, helperToken == ""})
+				if err == nil {
+					s.appleMusicHelperTokenCleared = helperToken == ""
+					s.appleMusic.SetHelper(cfg.URL, cfg.LoginURL, cfg.Token)
+				}
+				s.appleMusicHelperMu.Unlock()
+				if err != nil {
+					fail(w, 500, errors.New("applemusic: could not save helper settings"))
+					return
+				}
+				go func(u, t string) {
+					_ = s.pushRelayConfig(context.Background(), map[string]any{"appleMusicHelperUrl": u, "appleMusicHelperToken": t})
+				}(helperURL, helperToken)
+				http.Redirect(w, r, phoneAction(r, flow), http.StatusSeeOther)
+				return
+			}
 			var status providers.AppleMusicHelperStatus
 			var err error
 			switch helperAction {

@@ -274,3 +274,88 @@ func postForm(t *testing.T, page string, v url.Values) string {
 	b, _ := io.ReadAll(resp.Body)
 	return string(b)
 }
+
+func TestAppleMusicPhonePageCollapsesLibraryLogin(t *testing.T) {
+	p := appleMusicPhonePage(0, "/m/applemusic?t=x", "tok")
+	detailsIdx := strings.Index(p, `<details><summary>`+tr(0, "amLibrary")+`</summary>`)
+	amkIdx := strings.Index(p, `id="amk"`)
+	if detailsIdx < 0 || amkIdx < 0 || amkIdx < detailsIdx {
+		t.Fatalf("expected MusicKit button collapsed inside <details>, got: %s", p)
+	}
+}
+
+func TestAppleMusicPlaylistsExcludeOmniSources(t *testing.T) {
+	am := fakeAppleMusic(t)
+	defer am.Close()
+	usb := t.TempDir()
+	djayDir := filepath.Join(usb, "djay")
+	if err := os.MkdirAll(djayDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	m3u := "#EXTM3U\n#EXTINF:210,Djay Artist - Djay Beat\n../Music/beat.mp3\n"
+	if err := os.WriteFile(filepath.Join(djayDir, "TopPicks.m3u8"), []byte(m3u), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s, base := omniServer(t, usb, true)
+	s.appleMusic.BaseURL = am.URL
+	s.appleMusic.WebURL = am.URL
+	resp, err := http.Post(base+"/v1/enginex/login?provider=applemusic", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	target, _ := url.Parse(s.logins["applemusic"].Target)
+	if body := postForm(t, base+target.Path+"?"+target.RawQuery, url.Values{
+		"links": {"https://music.apple.com/cn/playlist/club/pl.club"},
+	}); !strings.Contains(body, "Connected") {
+		t.Fatalf("expected Connected, got: %s", body)
+	}
+	if resp, err := http.Post(base+"/v1/enginex/ui?scope=applemusic", "", nil); err != nil {
+		t.Fatal(err)
+	} else {
+		resp.Body.Close()
+	}
+
+	var lists tidalList
+	tidalGet(t, base, "/v1/users/1/playlists", 200, &lists)
+	for _, raw := range lists.Items {
+		var p tidalPlaylist
+		_ = json.Unmarshal(raw, &p)
+		if strings.HasPrefix(p.Title, "[djay") || strings.HasPrefix(p.Title, "[USB") || strings.HasPrefix(p.Title, "[NAS") {
+			t.Fatalf("unexpected non-Apple-Music playlist in applemusic scope: %q", p.Title)
+		}
+	}
+	if len(lists.Items) != 1 {
+		t.Fatalf("expected only 1 Apple Music playlist, got %d: %+v", len(lists.Items), lists.Items)
+	}
+}
+
+func TestPullRelayConfigSyncsAppleMusicHelper(t *testing.T) {
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/config" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok": true,
+			"config": map[string]any{
+				"appleMusicHelperUrl":      "http://192.168.6.104:12341",
+				"appleMusicHelperLoginUrl": "http://192.168.6.104:12342",
+				"appleMusicHelperToken":    "sync-tok",
+			},
+		})
+	}))
+	defer relay.Close()
+
+	usb := t.TempDir()
+	s, _ := omniServer(t, usb, true)
+	s.updateRelayConfig(&relay.URL, ptr("relay-pw"))
+	if err := s.pullRelayConfig(t.Context()); err != nil {
+		t.Fatalf("pullRelayConfig: %v", err)
+	}
+	got := s.appleMusic.HelperConfig()
+	if got.URL != "http://192.168.6.104:12341" || got.LoginURL != "http://192.168.6.104:12342" || got.Token != "sync-tok" {
+		t.Fatalf("unexpected synced helper config: %+v", got)
+	}
+}
