@@ -90,6 +90,9 @@ func TestRekordboxLoadLeavesItsAnalysisForEngine(t *testing.T) {
 	if !bytes.HasPrefix(b, []byte(rbxAnalysisMagic)) {
 		t.Fatalf("no analysis left for the hook: %q", b)
 	}
+	if st, err := os.Stat(filepath.Join(rbxAnalysisDir, ".loading")); err != nil || time.Since(st.ModTime()) > time.Minute {
+		t.Fatalf("the load did not open the hook: %v", err)
+	}
 	var blobs [][]byte
 	for r := b[len(rbxAnalysisMagic):]; len(r) >= 4; {
 		n := binary.LittleEndian.Uint32(r)

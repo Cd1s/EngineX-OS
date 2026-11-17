@@ -32,6 +32,19 @@ var rbxAnalysisDir = "/run/enginex-rbx-analysis"
 // quickCues and loops, each a little-endian uint32 length and its bytes.
 const rbxAnalysisMagic = "RBXA1"
 
+// rbxMarkLoading opens the hook for a while: only a deck's request for a Pro DJ Link track
+// does, so a drive's load stays as stock (the hook does not even read then).
+func rbxMarkLoading() {
+	mark := filepath.Join(rbxAnalysisDir, ".loading")
+	if err := os.MkdirAll(rbxAnalysisDir, 0o755); err != nil {
+		return
+	}
+	now := time.Now()
+	if os.Chtimes(mark, now, now) != nil {
+		_ = os.WriteFile(mark, nil, 0o644)
+	}
+}
+
 // rbxWriteAnalysis writes track id's analysis (the gateway's id, the one in Engine's uri)
 // for rekordbox track tid of the computer at ip, whose audio is file.
 func (g *tidalGateway) rbxWriteAnalysis(id int64, ip string, tid uint32, rbPath, file string) {

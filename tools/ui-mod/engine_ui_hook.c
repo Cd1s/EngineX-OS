@@ -3319,59 +3319,25 @@ A32_ONLY static void install_rekordbox_rows(uintptr_t base, size_t page) {
     }
 }
 
-// rekordbox analysis for a streamed track. Engine analyses a streamed track unless its
+// Analysis for a streamed Pro DJ Link track. Engine analyses a streamed track unless its
 // PerformanceData row already holds the analysis (a second load is not analysed again).
-// Just before Engine prepares its read of that row, a rekordbox track's empty row gets
-// rekordbox's analysis from the file stream-sync left for it, by an UPDATE on Engine's
-// own connection and in its own transaction. Every prepare goes through
-// sqlite3LockAndPrepare (prepare_v2/v3 and prepare16 alike); only that one statement
-// costs more than a prefix compare.
+// Just before Engine prepares its read of that row, such a track's empty row gets the
+// analysis stream-sync left for it, by an UPDATE on Engine's own connection and in its
+// own transaction (sc_rbx_fill). Every prepare goes through sqlite3LockAndPrepare
+// (prepare_v2/v3 and prepare16 alike); any other statement, and a drive's load, costs a
+// prefix compare and nothing else.
 typedef int (*sqlite_prepare_fn)(void *, const char *, int, unsigned, void *, void **, const char **);
 static sqlite_prepare_fn rbx_prepare_original;
+static struct sc_rbx_sqlite rbx_sqlite;
 static __thread int rbx_filling;
 
-struct rbx_row {
-    char uri[256];
-    int ours;
-};
-
-static int rbx_row(void *arg, int n, char **value, char **name) {
-    struct rbx_row *row = arg;
-    (void)name;
-    if (n == 2 && value[0] && value[1] && !strncmp(value[1], "rekordbox [", 11)) {
-        snprintf(row->uri, sizeof row->uri, "%s", value[0]);
-        row->ours = 1;
-    }
-    return 0;
-}
-
-static void rbx_fill(void *db, long long track) {
-    char sql[192], file[96];
-    struct rbx_row row = {.ours = 0};
-    snprintf(sql, sizeof sql, "SELECT t.uri, t.label FROM Track t JOIN PerformanceData p ON p.trackId = t.id WHERE t.id = %lld AND p.trackData IS NULL", track);
-    if (sqlite_exec_original(db, sql, rbx_row, &row, NULL) || !row.ours) return;
-    long long id = sc_rbx_uri_id(row.uri);
-    snprintf(file, sizeof file, "/run/enginex-rbx-analysis/%lld.bin", id);
-    const char *result = "no analysis yet";
-    int fd = id ? open(file, O_RDONLY | O_CLOEXEC) : -1;
-    struct stat st;
-    if (fd >= 0 && !fstat(fd, &st) && st.st_size > 0 && st.st_size < (8 << 20)) {
-        unsigned char *b = malloc((size_t)st.st_size);
-        char *update = b && read(fd, b, (size_t)st.st_size) == st.st_size ? sc_rbx_analysis_sql(b, (size_t)st.st_size, track) : NULL;
-        result = !update ? "unreadable" : sqlite_exec_original(db, update, NULL, NULL, NULL) ? "update failed" : "filled";
-        free(update);
-        free(b);
-    }
-    if (fd >= 0) close(fd);
-    fprintf(stderr, "engine-ui-hook: rekordbox analysis for track %lld (%lld): %s\n", track, id, result);
-}
-
 static int rbx_prepare(void *db, const char *sql, int n, unsigned flags, void *old, void **stmt, const char **tail) {
-    long long track;
-    if (!rbx_filling && sql && sql[0] == 'S' && (track = sc_rbx_analysis_track(sql, n))) {
+    if (!rbx_filling && sql && sql[0] == 'S') {
+        long long track = 0, id = 0;
         rbx_filling = 1;
-        rbx_fill(db, track);
+        const char *result = sc_rbx_fill(&rbx_sqlite, db, sql, n, &track, &id);
         rbx_filling = 0;
+        if (result) fprintf(stderr, "engine-ui-hook: rekordbox analysis for track %lld (%lld): %s\n", track, id, result);
     }
     return rbx_prepare_original(db, sql, n, flags, old, stmt, tail);
 }
@@ -3385,6 +3351,11 @@ A32_ONLY static void install_rekordbox_analysis(uintptr_t base, size_t page) {
     uint32_t bl = *(const uint32_t *)(uintptr_t)(api[116] + 0x1c);
     if (api[116] != base + 0x1d55634 || (bl & 0xff000000u) != 0xeb000000u ||
         api[116] + 0x1c + 8 + (uint32_t)((int32_t)(bl << 8) >> 6) != entry) return;
+    // sqlite3_db_filename is slot 180 (close_v2 at 179 is "mov r1,#1; b sqlite3Close", as
+    // close at 16 is "mov r1,#0; b" to the same; db_readonly at 181 returns flags & 1 or -1).
+    if (api[180] != base + 0x1cb0d94 || api[179] != base + 0x1d21af4) return;
+    rbx_sqlite.exec = sqlite_exec_original;
+    rbx_sqlite.filename = (const char *(*)(void *, const char *))(uintptr_t)api[180];
     rbx_prepare_original = (sqlite_prepare_fn)function_trampoline(entry, page);
     redirect_function(entry, rbx_prepare, page);
     fprintf(stderr, "engine-ui-hook: rekordbox analysis for streamed tracks enabled\n");

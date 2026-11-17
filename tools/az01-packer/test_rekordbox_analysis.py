@@ -9,5 +9,5 @@ class RekordboxStreamedAnalysisTest(unittest.TestCase):
         source = Path(__file__).resolve().parents[1] / "ui-mod/test_rekordbox_analysis.c"
         with tempfile.TemporaryDirectory() as directory:
             binary = Path(directory) / "test_rekordbox_analysis"
-            subprocess.run(["cc", "-O2", "-Wall", "-Wextra", "-Werror", "-fsanitize=address,undefined", str(source), "-o", str(binary)], check=True)
+            subprocess.run(["cc", "-O2", "-Wall", "-Wextra", "-Werror", "-fsanitize=address,undefined", str(source), "-o", str(binary), "-lsqlite3"], check=True)
             subprocess.run([str(binary)], check=True)

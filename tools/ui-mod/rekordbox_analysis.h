@@ -1,9 +1,13 @@
 #ifndef SC_REKORDBOX_ANALYSIS_H
 #define SC_REKORDBOX_ANALYSIS_H
 
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <time.h>
+#include <unistd.h>
 
 // Engine 5.3.0 reads a streamed track's analysis with this statement, the id inline.
 #define SC_RBX_ANALYSIS_SELECT "SELECT trackId, trackData, overviewWaveFormData, beatData, quickCues, loops, thirdPartySourceId, activeOnLoadLoops FROM PerformanceData WHERE trackId = "
@@ -59,6 +63,64 @@ static char *sc_rbx_analysis_sql(const unsigned char *b, size_t n, long long tra
     }
     sprintf(p, " WHERE trackId = %lld AND trackData IS NULL", track);
     return sql;
+}
+
+// Where stream-sync leaves a Pro DJ Link track's analysis, and ".loading", touched when a
+// deck asks it for such a track. Variables for the tests.
+static const char *sc_rbx_dir = "/run/enginex-rbx-analysis";
+static const char *sc_rbx_drives = "/media/";
+static const long sc_rbx_window = 120; // seconds a load request opens the hook for
+
+struct sc_rbx_sqlite {
+    int (*exec)(void *, const char *, int (*)(void *, int, char **, char **), void *, char **);
+    const char *(*filename)(void *, const char *);
+};
+
+struct sc_rbx_row {
+    char uri[256];
+    int ours;
+};
+
+static int sc_rbx_row(void *arg, int n, char **value, char **name) {
+    struct sc_rbx_row *row = arg;
+    (void)name;
+    if (n == 2 && value[0] && value[1] && !strncmp(value[1], "rekordbox [", 11)) {
+        snprintf(row->uri, sizeof row->uri, "%s", value[0]);
+        row->ours = 1;
+    }
+    return 0;
+}
+
+// Before Engine prepares sql on db: when it is Engine's read of a track's analysis, the
+// track is a Pro DJ Link track a deck just asked stream-sync for, and its row is empty,
+// fill the row from the file stream-sync left. Anything else is Engine's own business:
+// with no load request in the window, or on a drive's database, not even a read is added.
+// Returns what it did, or NULL when it did nothing; *track and *id say for what.
+static const char *sc_rbx_fill(const struct sc_rbx_sqlite *q, void *db, const char *sql, int n, long long *track, long long *id) {
+    char path[160], query[192];
+    struct stat st;
+    if (!(*track = sc_rbx_analysis_track(sql, n))) return NULL;
+    snprintf(path, sizeof path, "%s/.loading", sc_rbx_dir);
+    if (stat(path, &st) || time(NULL) - st.st_mtime > sc_rbx_window) return NULL;
+    const char *main = q->filename(db, "main");
+    if (!main || !*main || !strncmp(main, sc_rbx_drives, strlen(sc_rbx_drives))) return NULL;
+    struct sc_rbx_row row = {.ours = 0};
+    snprintf(query, sizeof query, "SELECT t.uri, t.label FROM Track t JOIN PerformanceData p ON p.trackId = t.id WHERE t.id = %lld AND p.trackData IS NULL", *track);
+    if (q->exec(db, query, sc_rbx_row, &row, NULL) || !row.ours) return NULL;
+    *id = sc_rbx_uri_id(row.uri);
+    snprintf(path, sizeof path, "%s/%lld.bin", sc_rbx_dir, *id);
+    int fd = *id ? open(path, O_RDONLY | O_CLOEXEC) : -1;
+    if (fd < 0) return "no analysis yet";
+    const char *result = "unreadable";
+    if (!fstat(fd, &st) && st.st_size > 0 && st.st_size < (8 << 20)) {
+        unsigned char *b = malloc((size_t)st.st_size);
+        char *update = b && read(fd, b, (size_t)st.st_size) == st.st_size ? sc_rbx_analysis_sql(b, (size_t)st.st_size, *track) : NULL;
+        if (update) result = q->exec(db, update, NULL, NULL, NULL) ? "update failed" : "filled";
+        free(update);
+        free(b);
+    }
+    close(fd);
+    return result;
 }
 
 #endif

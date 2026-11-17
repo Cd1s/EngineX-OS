@@ -400,6 +400,7 @@ func (g *tidalGateway) rbxPrepare(ctx context.Context, id int64, ref trackRef) (
 	if err != nil || len(parts) != 3 {
 		return ref, errors.New("rekordbox: bad track")
 	}
+	rbxMarkLoading()
 	rbxSession.Lock()
 	link, err := dialRekordbox(ctx, net.ParseIP(parts[1]), deckPlayer(g.s))
 	var rbPath string
