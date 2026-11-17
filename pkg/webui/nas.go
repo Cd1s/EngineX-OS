@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Cd1s/EngineX-OS/internal/smbclient"
+
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
 )
 
@@ -33,8 +35,16 @@ func disallowedNASIP(ip net.IP) bool {
 
 func validateNASURL(raw string) error {
 	u, err := url.ParseRequestURI(strings.TrimSpace(raw))
-	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
-		return errors.New("invalid url: must be http or https with host")
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https" && u.Scheme != "smb") {
+		return errors.New("invalid url: must be http, https, or smb with host")
+	}
+	if u.User != nil {
+		return errors.New("invalid url: use the separate username and password fields")
+	}
+	if u.Scheme == "smb" {
+		if _, err := smbclient.Parse(raw); err != nil {
+			return err
+		}
 	}
 	host := strings.ToLower(strings.TrimSpace(u.Hostname()))
 	if host == "" {
@@ -116,6 +126,16 @@ func (s *Server) loadNASConfigLocked() providers.NASConfig {
 	if b, err := os.ReadFile(s.nasConfigPath()); err == nil {
 		_ = json.Unmarshal(b, &cfg)
 	}
+	// Older configs could keep Basic Auth in the URL. Preserve that login without
+	// returning its credentials in a URL or overwriting explicit auth fields.
+	if u, err := url.Parse(cfg.URL); err == nil && u.User != nil {
+		if cfg.Username == "" {
+			cfg.Username = u.User.Username()
+			cfg.Password, _ = u.User.Password()
+		}
+		u.User = nil
+		cfg.URL = u.String()
+	}
 	return cfg
 }
 
@@ -134,12 +154,6 @@ func toNASConfigView(cfg providers.NASConfig) NASConfigView {
 		HasPassword: cfg.Password != "",
 		HasToken:    cfg.Token != "",
 	}
-	if cfg.Password != "" {
-		v.Password = "***"
-	}
-	if cfg.Token != "" {
-		v.Token = "***"
-	}
 	return v
 }
 
@@ -149,6 +163,14 @@ func (s *Server) handleNASConfig(w http.ResponseWriter, r *http.Request) {
 		s.handleNASConfigGet(w, r)
 	case http.MethodPost:
 		s.handleNASConfigPost(w, r)
+	case http.MethodDelete:
+		s.uiMu.Lock()
+		defer s.uiMu.Unlock()
+		if err := os.Remove(s.nasConfigPath()); err != nil && !os.IsNotExist(err) {
+			fail(w, http.StatusInternalServerError, errors.New("could not remove NAS configuration"))
+			return
+		}
+		respond(w, toNASConfigView(providers.NASConfig{}))
 	default:
 		fail(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
 	}
@@ -177,8 +199,8 @@ func (s *Server) handleNASConfigPost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	proto := strings.ToLower(strings.TrimSpace(in.Protocol))
-	if proto != "webdav" && proto != "subsonic" && proto != "plex" {
-		fail(w, http.StatusBadRequest, errors.New("invalid protocol: must be webdav, subsonic, or plex"))
+	if proto != "webdav" && proto != "subsonic" && proto != "plex" && proto != "smb" {
+		fail(w, http.StatusBadRequest, errors.New("invalid protocol: must be webdav, subsonic, plex, or smb"))
 		return
 	}
 
@@ -262,8 +284,8 @@ func (s *Server) handleNASTest(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, errors.New("nas: no configuration provided or saved"))
 		return
 	}
-	if cfg.Protocol != "webdav" && cfg.Protocol != "subsonic" && cfg.Protocol != "plex" {
-		fail(w, http.StatusBadRequest, errors.New("invalid protocol: must be webdav, subsonic, or plex"))
+	if cfg.Protocol != "webdav" && cfg.Protocol != "subsonic" && cfg.Protocol != "plex" && cfg.Protocol != "smb" {
+		fail(w, http.StatusBadRequest, errors.New("invalid protocol: must be webdav, subsonic, plex, or smb"))
 		return
 	}
 	if err := validateNASURL(cfg.URL); err != nil {

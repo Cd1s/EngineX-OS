@@ -6,6 +6,7 @@ package webui
 // is found next to the deck, then plays like a drive track (/v1/stream, with Range):
 //   - a network share of the computer's music folder (mounts), with the setting
 //     rekordbox_share naming which folder of the computer that share shows;
+//   - else that configured share over SMB2/3 in Go, copied under the same staging budget;
 //   - else the computer's own NFS export, copied under the Pro DJ Link staging budget;
 //   - else the deck says the computer does not share its files.
 
@@ -29,6 +30,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/Cd1s/EngineX-OS/internal/smbclient"
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 	"github.com/Cd1s/EngineX-OS/pkg/prolink"
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
@@ -261,9 +263,8 @@ func validRekordboxShare(p string) bool {
 	return len(p) <= 512 && !strings.ContainsFunc(p, unicode.IsControl)
 }
 
-// rbxShareFile finds the track's file inside a mounted network share, if the share shows
-// the folder named by the setting (empty: the computer's whole disk).
-func (s *Server) rbxShareFile(rbPath string) (file, root string) {
+// rbxShareRel maps a computer path into the folder shown by its configured share.
+func (s *Server) rbxShareRel(rbPath string) (string, bool) {
 	s.uiMu.Lock()
 	prefix := rbxPath(s.loadUI().RekordboxShare)
 	s.uiMu.Unlock()
@@ -271,11 +272,15 @@ func (s *Server) rbxShareFile(rbPath string) (file, root string) {
 	if prefix != "/" {
 		rest, ok := strings.CutPrefix(p, prefix)
 		if !ok || !strings.HasPrefix(rest, "/") {
-			return "", ""
+			return "", false
 		}
 		p = rest
 	}
-	rel, ok := prolink.SafeRel(p)
+	return prolink.SafeRel(p)
+}
+
+func (s *Server) rbxShareFile(rbPath string) (file, root string) {
+	rel, ok := s.rbxShareRel(rbPath)
 	if !ok {
 		return "", ""
 	}
@@ -293,11 +298,39 @@ func (s *Server) rbxShareFile(rbPath string) (file, root string) {
 	return "", ""
 }
 
-// rbxFind says how the track's file can be had: in a share (file and root), or over the
-// computer's NFS export (nfs); an error when neither reaches it.
-func (g *tidalGateway) rbxFind(ctx context.Context, ip, rbPath string) (file, root string, nfs *prolink.NFSClient, err error) {
+type rbxRemote struct {
+	nfs   *prolink.NFSClient
+	mount RemoteMount
+	path  string
+	info  os.FileInfo
+}
+
+// rbxFind checks a kernel-mounted share, Go SMB, then the computer's NFS export.
+func (g *tidalGateway) rbxFind(ctx context.Context, ip, rbPath string) (file, root string, remote *rbxRemote, err error) {
 	if file, root = g.s.rbxShareFile(rbPath); file != "" {
 		return file, root, nil, nil
+	}
+	if rel, ok := g.s.rbxShareRel(rbPath); ok {
+		probe, cancel := context.WithTimeout(ctx, rbxProbeTime)
+		defer cancel()
+		for _, m := range g.s.loadMounts() {
+			if !m.Enabled || (m.Protocol != "smb" && m.Protocol != "cifs") || mountedAt(m.MountPoint) {
+				continue
+			}
+			c, e := smbclient.Dial(probe, m.smbURL(), m.Username, m.Password, nil)
+			if e != nil {
+				log.Printf("stream-sync: provider=rekordbox step=find via=smb result=failed error=%v", e)
+				continue
+			}
+			for _, name := range []string{rel, norm.NFC.String(rel), norm.NFD.String(rel)} {
+				p := path.Join(c.Root, name)
+				if info, e := c.Share.Stat(p); e == nil && info.Mode().IsRegular() {
+					c.Close()
+					return "", "", &rbxRemote{mount: m, path: p, info: info}, nil
+				}
+			}
+			c.Close()
+		}
 	}
 	ctx, cancel := context.WithTimeout(ctx, rbxProbeTime)
 	defer cancel()
@@ -305,7 +338,7 @@ func (g *tidalGateway) rbxFind(ctx context.Context, ip, rbPath string) (file, ro
 	if _, _, err = c.Lookup(ctx, rbxExport, rbxPath(rbPath)); err != nil {
 		return "", "", nil, err
 	}
-	return "", "", c, nil
+	return "", "", &rbxRemote{nfs: c}, nil
 }
 
 // rbxPrepare gives a rekordbox row the audio file it plays from, as a drive row has one.
@@ -332,18 +365,39 @@ func (g *tidalGateway) rbxPrepare(ctx context.Context, id int64, ref trackRef) (
 	if _, ok := localCodecs[strings.ToLower(path.Ext(rbxPath(rbPath)))]; !ok {
 		return ref, errors.New(g.s.rbxText("format"))
 	}
-	file, root, nfs, err := g.rbxFind(ctx, parts[1], rbPath)
+	file, root, remote, err := g.rbxFind(ctx, parts[1], rbPath)
 	if err != nil {
-		log.Printf("stream-sync: load track=%d provider=rekordbox step=find result=unreachable nfs=%v", id, err)
+		log.Printf("stream-sync: load track=%d provider=rekordbox step=find result=unreachable error=%v", id, err)
 		return ref, errors.New(g.s.rbxText("noshare"))
 	}
-	if nfs != nil {
-		if file, root, err = g.rbxStage(ctx, nfs, parts[1], rbPath); err != nil {
+	via := "share"
+	if remote != nil {
+		if remote.nfs != nil {
+			via = "nfs"
+			file, root, err = g.rbxStage(ctx, remote.nfs, parts[1], rbPath)
+		} else {
+			via = "smb"
+			file, root, err = g.rbxStageCopy(remote.mount.smbURL()+" "+remote.mount.Username, rbPath, remote.info.Size(), remote.info.ModTime().Unix(), func(ctx context.Context, w io.Writer) error {
+				c, err := smbclient.Dial(ctx, remote.mount.smbURL(), remote.mount.Username, remote.mount.Password, nil)
+				if err != nil {
+					return err
+				}
+				defer c.Close()
+				f, err := c.Share.Open(remote.path)
+				if err != nil {
+					return err
+				}
+				defer f.Close()
+				_, err = io.CopyN(w, f, remote.info.Size())
+				return err
+			})
+		}
+		if err != nil {
 			log.Printf("stream-sync: load track=%d provider=rekordbox step=copy result=failed error=%v", id, err)
 			return ref, err
 		}
 	}
-	log.Printf("stream-sync: load track=%d provider=rekordbox step=find result=ready via=%s", id, map[bool]string{true: "nfs", false: "share"}[nfs != nil])
+	log.Printf("stream-sync: load track=%d provider=rekordbox step=find result=ready via=%s", id, via)
 	ref.file, ref.drive = file, root
 	g.mu.Lock()
 	g.tracks[id] = ref
@@ -360,7 +414,14 @@ func (g *tidalGateway) rbxStage(ctx context.Context, c *prolink.NFSClient, ip, r
 	if err != nil {
 		return "", "", err
 	}
-	if info.Size > rbxMaxFile {
+	return g.rbxStageCopy(ip, p, int64(info.Size), int64(info.MTime), func(ctx context.Context, w io.Writer) error {
+		_, err := c.FetchTo(ctx, rbxExport, p, w, rbxMaxFile)
+		return err
+	})
+}
+
+func (g *tidalGateway) rbxStageCopy(ip, p string, size, mtime int64, fetch func(context.Context, io.Writer) error) (file, root string, err error) {
+	if size < 0 || size > rbxMaxFile {
 		return "", "", errors.New(g.s.rbxText("noroom"))
 	}
 	skip := map[string]bool{}
@@ -379,22 +440,22 @@ func (g *tidalGateway) rbxStage(ctx context.Context, c *prolink.NFSClient, ip, r
 		room := func() int64 {
 			return rbxRoom(&fs, prolink.DirSize(cache)+prolink.DirSize(filepath.Join(dir, prolink.StagedDir)))
 		}
-		for room() < int64(info.Size) && dropOldest(cache) {
+		for room() < size && dropOldest(cache) {
 			_ = syscall.Statfs(dir, &fs)
 		}
-		if room() < int64(info.Size) {
+		if room() < size {
 			continue
 		}
 		if err := os.MkdirAll(cache, 0o755); err != nil {
 			continue
 		}
-		name := fmt.Sprintf("%x%s", sha1.Sum(fmt.Appendf(nil, "%s %s %d %d", ip, p, info.Size, info.MTime)), strings.ToLower(path.Ext(p)))
+		name := fmt.Sprintf("%x%s", sha1.Sum(fmt.Appendf(nil, "%s %s %d %d", ip, p, size, mtime)), strings.ToLower(path.Ext(p)))
 		file = filepath.Join(cache, name)
 		// A copy that finished is a file; one that runs is joined. Both are decided under the lock
 		// a finishing copy takes to leave the table, after it has moved its file into place.
 		rbxCopies.Lock()
 		if rbxCopies.m[file] == nil {
-			if st, err := os.Stat(file); err == nil && st.Size() == int64(info.Size) {
+			if st, err := os.Stat(file); err == nil && st.Size() == size {
 				rbxCopies.Unlock()
 				return file, dir, nil
 			}
@@ -403,10 +464,10 @@ func (g *tidalGateway) rbxStage(ctx context.Context, c *prolink.NFSClient, ip, r
 				rbxCopies.Unlock()
 				continue
 			}
-			cp := &rbxCopy{file: file, tmp: tmp.Name(), size: int64(info.Size)}
+			cp := &rbxCopy{file: file, tmp: tmp.Name(), size: size}
 			cp.more = sync.NewCond(&cp.mu)
 			rbxCopies.m[file] = cp
-			go cp.run(c, p, tmp)
+			go cp.run(fetch, tmp)
 		}
 		rbxCopies.Unlock()
 		return file, dir, nil
@@ -426,7 +487,7 @@ func rbxOwnCache(dir, cache string) bool {
 	return err == nil && rerr == nil && st.IsDir() && st.Sys().(*syscall.Stat_t).Dev == root.Sys().(*syscall.Stat_t).Dev
 }
 
-// rbxCopy is a track being copied from the computer's NFS export into the cache. It goes on
+// rbxCopy is a track being copied over SMB or NFS into the cache. It goes on
 // when the request that started it gives up (the next try finds the file there), and a stream
 // request is answered from what has arrived while the rest comes.
 type rbxCopy struct {
@@ -466,11 +527,11 @@ func (w rbxWriter) Write(b []byte) (int, error) {
 	return n, err
 }
 
-func (cp *rbxCopy) run(c *prolink.NFSClient, p string, tmp *os.File) {
+func (cp *rbxCopy) run(fetch func(context.Context, io.Writer) error, tmp *os.File) {
 	started := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), rbxCopyTime)
 	defer cancel()
-	_, err := c.FetchTo(ctx, rbxExport, p, rbxWriter{cp, tmp}, rbxMaxFile)
+	err := fetch(ctx, rbxWriter{cp, tmp})
 	if cerr := tmp.Close(); err == nil {
 		err = cerr
 	}

@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Cd1s/EngineX-OS/internal/smbclient"
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
 )
 
@@ -493,6 +496,7 @@ type RemoteMount struct {
 	Mounted    bool   `json:"mounted"`
 	Enabled    bool   `json:"enabled"`
 	Options    string `json:"options,omitempty"`
+	Status     string `json:"status,omitempty"`
 }
 
 type RemoteMountView struct {
@@ -508,6 +512,7 @@ type RemoteMountView struct {
 	Mounted     bool   `json:"mounted"`
 	Enabled     bool   `json:"enabled"`
 	Options     string `json:"options,omitempty"`
+	Status      string `json:"status,omitempty"`
 }
 
 func (s *Server) mountsConfigPath() string {
@@ -549,7 +554,33 @@ func toMountView(m RemoteMount) RemoteMountView {
 		Mounted:     m.Mounted,
 		Enabled:     m.Enabled,
 		Options:     m.Options,
+		Status:      m.Status,
 	}
+}
+
+var procFilesystems = "/proc/filesystems"
+var mountLookPath = exec.LookPath
+
+func kernelCIFS() bool {
+	b, err := os.ReadFile(procFilesystems)
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		f := strings.Fields(line)
+		if len(f) > 0 && f[len(f)-1] == "cifs" {
+			return true
+		}
+	}
+	return false
+}
+
+func (m RemoteMount) smbURL() string {
+	host := m.Host
+	if m.Port > 0 {
+		host = net.JoinHostPort(strings.Trim(host, "[]"), strconv.Itoa(m.Port))
+	}
+	return (&url.URL{Scheme: "smb", Host: host, Path: "/" + strings.TrimLeft(m.RemotePath, "/")}).String()
 }
 
 func (s *Server) mountRemote(ctx context.Context, m *RemoteMount) error {
@@ -558,6 +589,9 @@ func (s *Server) mountRemote(ctx context.Context, m *RemoteMount) error {
 
 	switch strings.ToLower(m.Protocol) {
 	case "sftp", "sshfs":
+		if _, err := mountLookPath("sshfs"); err != nil {
+			return errors.New("SFTP mount unavailable: sshfs is not installed on this deck")
+		}
 		portStr := "22"
 		if m.Port > 0 {
 			portStr = strconv.Itoa(m.Port)
@@ -571,6 +605,21 @@ func (s *Server) mountRemote(ctx context.Context, m *RemoteMount) error {
 			return err
 		}
 	case "smb", "cifs":
+		if !kernelCIFS() {
+			m.Mounted = false
+			ctx, cancel := context.WithTimeout(ctx, rbxProbeTime)
+			defer cancel()
+			c, err := smbclient.Dial(ctx, m.smbURL(), m.Username, m.Password, nil)
+			if err != nil {
+				return fmt.Errorf("SMB login/share verification failed: %w", err)
+			}
+			defer c.Close()
+			if _, err := c.Session.ListSharenames(); err != nil {
+				return fmt.Errorf("SMB share listing failed: %w", err)
+			}
+			m.Status = "SMB last verified when saved for userspace access; kernel CIFS unavailable, no filesystem mount"
+			return nil
+		}
 		share := fmt.Sprintf("//%s/%s", m.Host, strings.TrimPrefix(m.RemotePath, "/"))
 		opts := []string{"ro"}
 		if m.Port > 0 {
@@ -589,6 +638,9 @@ func (s *Server) mountRemote(ctx context.Context, m *RemoteMount) error {
 			return err
 		}
 	case "webdav":
+		if _, err := mountLookPath("mount.davfs"); err != nil {
+			return errors.New("WebDAV mount unavailable: mount.davfs is not installed; use the NAS source instead")
+		}
 		scheme := "http"
 		if m.Port == 443 || strings.HasPrefix(m.Host, "https://") {
 			scheme = "https"
@@ -806,6 +858,9 @@ func (s *Server) handleMountsPost(w http.ResponseWriter, r *http.Request) {
 	var mountErr error
 	if enabled {
 		mountErr = s.mountRemote(r.Context(), &m)
+		if mountErr != nil {
+			m.Status = mountErr.Error()
+		}
 	}
 
 	if existingIdx >= 0 {

@@ -83,10 +83,10 @@ func TestNASConfigCRUD(t *testing.T) {
 	if err := json.NewDecoder(w.Body).Decode(&view); err != nil {
 		t.Fatalf("decode failed: %v", err)
 	}
-	if view.Password != "***" || !view.HasPassword {
+	if view.Password != "" || !view.HasPassword {
 		t.Fatalf("expected masked password, got %+v", view)
 	}
-	if view.Token != "***" || !view.HasToken {
+	if view.Token != "" || !view.HasToken {
 		t.Fatalf("expected masked token, got %+v", view)
 	}
 
@@ -129,12 +129,20 @@ func TestNASConfigCRUD(t *testing.T) {
 		t.Fatalf("secrets were unexpectedly overwritten: %+v", onDisk)
 	}
 
-	// 6. Method not allowed
+	// 6. Removing the source removes saved credentials too.
 	req = httptest.NewRequest(http.MethodDelete, "/v1/enginex/nas", nil)
 	w = httptest.NewRecorder()
 	s.handleNASConfig(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if _, err := os.Stat(filePath); !os.IsNotExist(err) {
+		t.Fatalf("NAS config remains after removal: %v", err)
+	}
+	w = httptest.NewRecorder()
+	s.handleNASConfig(w, httptest.NewRequest(http.MethodPut, "/api/nas", nil))
 	if w.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("expected 405, got %d", w.Code)
+		t.Fatalf("expected 405 for PUT, got %d", w.Code)
 	}
 }
 

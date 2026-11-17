@@ -81,6 +81,15 @@ a{color:var(--accent)}label.chk{display:flex;align-items:center;gap:10px;cursor:
   <div class="bar"><button class="btn primary" id="browse" data-i18n="browse"></button><button class="btn" id="relogin" data-i18n="relogin"></button><button class="btn" id="logout" data-i18n="logout"></button></div>
   <div id="login"><img id="qr" data-i18n-alt="loginQr"><p><a id="auth" target="_blank" rel="noreferrer" data-i18n="openOnPhone"></a></p><button class="btn" id="check" data-i18n="checkNetease"></button><small id="loginStatus"></small></div>
  </section>
+ <section class="card" id="nasCard">
+  <h3 data-i18n="nasTitle"></h3><p class="sub" data-i18n="nasHint"></p>
+  <div class="bar"><select id="nasProtocol" aria-label="Protocol"><option value="webdav">WebDAV</option><option value="subsonic">Subsonic / Navidrome</option><option value="plex">Plex</option><option value="smb">SMB</option></select></div>
+  <div class="bar"><input id="nasHost" data-i18n-ph="nasHost" data-i18n-aria="nasHost" autocomplete="off"><input id="nasPort" type="number" min="1" max="65535" data-i18n-ph="nasPort" data-i18n-aria="nasPort"></div>
+  <div class="bar"><input id="nasPath" data-i18n-ph="nasPath" data-i18n-aria="nasPath" autocomplete="off"></div>
+  <div class="bar"><input id="nasUser" data-i18n-ph="nasUser" data-i18n-aria="nasUser" autocomplete="username"><input id="nasPassword" type="password" data-i18n-ph="nasPassword" data-i18n-aria="nasPassword" autocomplete="new-password"></div>
+  <div class="bar"><button class="btn primary" onclick="action(saveNAS)" data-i18n="save"></button><button class="btn" onclick="action(removeNAS)" data-i18n="nasRemove"></button></div>
+  <p id="nasState" class="sub" role="status"></p>
+ </section>
  <section class="card" id="amHelperCard">
   <h3 data-i18n="amHelperTitle"></h3><p id="amState" role="status"></p>
   <p class="sub" data-i18n="amHow"></p>
@@ -489,6 +498,16 @@ tsNotInstalled:['Not downloaded yet','尚未下载','尚未下載','Aún no desc
 tsStopped:['Off','已关闭','已關閉','Desactivado'],
 tsNeedsLogin:['On, waiting for sign-in: open the link, or enter an auth key and tap Sign in','已开启，等待登录：打开链接，或填 Auth key 后点登录','已開啟，等待登入：開啟連結，或填 Auth key 後點登入','Activado, esperando inicio de sesión: abre el enlace o introduce una auth key y toca Iniciar sesión'],
 tsOnline:['Online as {0} · {1}','已在线：{0} · {1}','已上線：{0} · {1}','En línea como {0} · {1}'],
+nasTitle:['Network source','网络来源','網路來源','Fuente de red'],
+nasHint:['One source. For SMB, Path is share/folder. For HTTPS, enter https:// before the host. Saved settings reconnect when browsed after reboot.','配置一个来源。SMB 路径填共享名/文件夹；HTTPS 主机前加 https://。重启后浏览时自动重新连接。','設定一個來源。SMB 路徑填共用名稱/資料夾；HTTPS 主機前加 https://。重新啟動後瀏覽時自動重新連線。','Una fuente. Para SMB, Ruta es recurso/carpeta. Para HTTPS, añade https:// al servidor. Se vuelve a conectar al explorar tras reiniciar.'],
+nasHost:['Host (or https://host)','主机（或 https://主机）','主機（或 https://主機）','Servidor (o https://servidor)'],
+nasPort:['Port (optional)','端口（可选）','連接埠（選填）','Puerto (opcional)'],
+nasPath:['Path','路径','路徑','Ruta'],
+nasUser:['Username','用户名','使用者名稱','Usuario'],
+nasPassword:['Password / Plex token','密码 / Plex 令牌','密碼 / Plex 權杖','Contraseña / token de Plex'],
+nasRemove:['Remove source','移除来源','移除來源','Eliminar fuente'],
+nasSaved:['Saved; connects on access','已保存，访问时连接','已儲存，存取時連線','Guardada; conecta al acceder'],
+nasOff:['No enabled network source','未启用网络来源','未啟用網路來源','Ninguna fuente de red activada'],
 rbWbTitle:['Write cues back to rekordbox USB','写回 Hot Cue / Loop 到 rekordbox U 盘','寫回 Hot Cue / Loop 到 rekordbox 隨身碟','Escribir cues de vuelta al USB rekordbox'],
 rbWbHint:['Writes deck Hot Cues, Memory Cues, and Loops back to the stick for CDJs and rekordbox 7 (backups in /.enginex-backup/). Before re-exporting from rekordbox, run Import from Device in rekordbox.','将碟机新增的 Hot Cue、Memory Cue 和 Loop 写回 U 盘，供先锋 CDJ 和 rekordbox 7 读取（备份在 /.enginex-backup/）。下次在电脑导出覆盖前，请先在 rekordbox 中执行“从设备导入”。','將碟機新增的 Hot Cue、Memory Cue 和 Loop 寫回隨身碟，供先鋒 CDJ 和 rekordbox 7 讀取（備份於 /.enginex-backup/）。下次在電腦匯出覆蓋前，請先在 rekordbox 中執行「從裝置匯入」。','Escribe Hot Cues, Memory Cues y Loops del deck al USB para CDJ y rekordbox 7 (copias en /.enginex-backup/). Antes de volver a exportar en rekordbox, usa Importar desde dispositivo.'],
 rbWbBtn:['Write back cues','写回 Cue / Loop','寫回 Cue / Loop','Escribir cues'],
@@ -506,8 +525,11 @@ function applyLang(){document.documentElement.lang={en:'en','zh-Hans':'zh-CN','z
  for(const e of document.querySelectorAll('[data-i18n-aria]'))e.setAttribute('aria-label',t(e.dataset.i18nAria));
  for(const e of document.querySelectorAll('[data-i18n-alt]'))e.alt=t(e.dataset.i18nAlt);
  for(const b of document.querySelectorAll('[data-lang]'))b.classList.toggle('on',b.dataset.lang===lang)}
-function setLang(l,save){if(!LANGS.includes(l))return;lang=l;if(save)localStorage.setItem('enginex-console-lang',l);applyLang();if(lastUI)showUI(lastUI);renderSessions();renderDrives();renderTracklists();if(redrawList)redrawList();if(lastMods)renderMods(lastMods);if(lastJobs)renderJobs(lastJobs,true);action(async()=>{await showRelay();await showTunnel().catch(()=>{});await showSpotify();await showAppleMusic();await showBpm();await showBroadcast();await showTailscale().catch(()=>{});await showSSH().catch(()=>{});await showGen2().catch(()=>{})})}
+function setLang(l,save){if(!LANGS.includes(l))return;lang=l;if(save)localStorage.setItem('enginex-console-lang',l);applyLang();if(lastUI)showUI(lastUI);renderSessions();renderDrives();renderTracklists();if(redrawList)redrawList();if(lastMods)renderMods(lastMods);if(lastJobs)renderJobs(lastJobs,true);action(async()=>{await showRelay();await showTunnel().catch(()=>{});await showSpotify();await showAppleMusic();await showBpm();await showNAS();await showBroadcast();await showTailscale().catch(()=>{});await showSSH().catch(()=>{});await showGen2().catch(()=>{})})}
 for(const b of document.querySelectorAll('[data-lang]'))b.onclick=()=>setLang(b.dataset.lang,true);
+async function showNAS(){const v=await api('nas');$('nasProtocol').value=v.protocol||'webdav';const u=v.url?new URL(v.url):null;$('nasHost').value=u?u.protocol+'//'+u.hostname:'';$('nasPort').value=u?.port||'';$('nasPath').value=u?decodeURIComponent(u.pathname):'';$('nasUser').value=v.username||'';$('nasPassword').value='';$('nasPassword').placeholder=t('nasPassword')+((v.hasPassword||v.hasToken)?' ●●●':'');$('nasState').textContent=t(v.enabled?'nasSaved':'nasOff')}
+async function saveNAS(){const protocol=$('nasProtocol').value,host=$('nasHost').value.trim(),u=new URL(host.includes('://')?host:(protocol==='smb'?'smb://':'http://')+host);u.port=$('nasPort').value;u.pathname=$('nasPath').value.trim();const b={protocol,url:u.href,username:$('nasUser').value.trim(),enabled:true};if($('nasPassword').value)b[protocol==='plex'?'token':'password']=$('nasPassword').value;try{await post('nas',b)}finally{$('nasPassword').value=''}await showNAS()}
+async function removeNAS(){await api('nas',{method:'DELETE'});await showNAS()}
 async function showBpm(){const v=await api('bpm');$('bpmState').textContent='SoundCloud: '+(v.soundcloudSet?t('set'):t('unset'))+' · GetSongBPM: '+(v.getSongBpmSet?t('set'):t('unset'))}
 async function saveBpm(){const b={};if($('scClient').value)b.soundcloudClientId=$('scClient').value.trim();if($('scSecret').value)b.soundcloudClientSecret=$('scSecret').value.trim();if($('scToken').value)b.soundcloudToken=$('scToken').value.trim();if($('gsbKey').value)b.getSongBpmKey=$('gsbKey').value.trim();await api('bpm',{method:'POST',body:JSON.stringify(b)});$('scClient').value=$('scSecret').value=$('scToken').value=$('gsbKey').value='';await showBpm()}
 const setVal=(id,x)=>{const e=$(id);if(document.activeElement!==e)e.value=x};
@@ -705,5 +727,5 @@ $('modFile').onchange=e=>{const f=e.target.files[0];e.target.value='';action(()=
 $('modDrop').ondragover=e=>{e.preventDefault();$('modDrop').style.borderColor='var(--accent)'};$('modDrop').ondragleave=()=>{$('modDrop').style.borderColor=''};
 $('modDrop').ondrop=e=>{e.preventDefault();$('modDrop').style.borderColor='';const f=e.dataTransfer.files[0];action(()=>modUpload(f))};
 applyLang();renderSessions();renderDrives();renderTracklists();
-action(async()=>{const v=await api('ui');if(!localStorage.getItem('enginex-console-lang')&&LANGS.includes(v.language))setLang(v.language,false);showUI(v);await showDrives();await showRelay();await showTunnel().catch(()=>{});await showSpotify();await showAppleMusic();await showBt().catch(()=>{});await showBpm();await showBroadcast();await showTailscale().catch(()=>{});await showSSH().catch(()=>{});await showGen2().catch(()=>{});await showMods().catch(()=>{});await refreshSessions();await jobs()});setInterval(()=>{jobs().catch(()=>{})},2000);
+action(async()=>{const v=await api('ui');if(!localStorage.getItem('enginex-console-lang')&&LANGS.includes(v.language))setLang(v.language,false);showUI(v);await showDrives();await showRelay();await showTunnel().catch(()=>{});await showSpotify();await showAppleMusic();await showBt().catch(()=>{});await showBpm();await showNAS();await showBroadcast();await showTailscale().catch(()=>{});await showSSH().catch(()=>{});await showGen2().catch(()=>{});await showMods().catch(()=>{});await refreshSessions();await jobs()});setInterval(()=>{jobs().catch(()=>{})},2000);
 </script></html>
