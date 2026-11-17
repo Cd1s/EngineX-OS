@@ -3,7 +3,9 @@ package providers
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,7 +36,7 @@ type AppleMusic struct {
 	probeMu        sync.Mutex
 	owner          AppleMusicOwner
 	ownerForgot    bool
-	forgottenToken string
+	forgotHash     string
 	credGen        uint64
 	helperOnline   bool
 	helperSignedIn bool
@@ -128,7 +130,7 @@ func (a *AppleMusic) webURL() string {
 }
 
 type appleMusicForgotMarker struct {
-	UserToken string `json:"userToken,omitempty"`
+	TokenSHA256 string `json:"tokenSha256,omitempty"`
 }
 
 func forgotMarkerPath(ownerPath string) string {
@@ -138,43 +140,45 @@ func forgotMarkerPath(ownerPath string) string {
 	return ownerPath + ".forgot"
 }
 
+func hashAppleMusicToken(token string) string {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
+
 // Load reads the saved owner login; a missing file is no login.
 func (a *AppleMusic) Load() error {
 	a.saveMu.Lock()
-	b, err := os.ReadFile(a.OwnerPath)
-	var fb []byte
-	var ferr error
-	if os.IsNotExist(err) {
-		if fp := forgotMarkerPath(a.OwnerPath); fp != "" {
-			fb, ferr = os.ReadFile(fp)
-		}
-	}
-	a.saveMu.Unlock()
-	if err != nil {
-		if os.IsNotExist(err) && ferr == nil {
+	if fp := forgotMarkerPath(a.OwnerPath); fp != "" {
+		if fb, ferr := os.ReadFile(fp); ferr == nil {
+			_ = os.Remove(a.OwnerPath)
+			a.saveMu.Unlock()
 			var m appleMusicForgotMarker
 			_ = json.Unmarshal(fb, &m)
 			a.mu.Lock()
 			a.owner = AppleMusicOwner{}
 			a.ownerForgot = true
-			a.forgottenToken = strings.TrimSpace(m.UserToken)
+			a.forgotHash = strings.TrimSpace(m.TokenSHA256)
 			a.mu.Unlock()
+			return os.ErrNotExist
 		}
+	}
+	b, err := os.ReadFile(a.OwnerPath)
+	a.saveMu.Unlock()
+	if err != nil {
 		return err
 	}
 	var o AppleMusicOwner
 	if json.Unmarshal(b, &o) != nil {
 		return errors.New("applemusic: invalid owner file")
 	}
-	if fp := forgotMarkerPath(a.OwnerPath); fp != "" {
-		a.saveMu.Lock()
-		_ = os.Remove(fp)
-		a.saveMu.Unlock()
-	}
 	a.mu.Lock()
 	a.owner = o
 	a.ownerForgot = false
-	a.forgottenToken = ""
+	a.forgotHash = ""
 	a.mu.Unlock()
 	return nil
 }
@@ -218,7 +222,7 @@ func (a *AppleMusic) SetOwner(ctx context.Context, o AppleMusicOwner) error {
 	a.mu.Lock()
 	a.owner = o
 	a.ownerForgot = false
-	a.forgottenToken = ""
+	a.forgotHash = ""
 	a.credGen++
 	a.mu.Unlock()
 	return nil
@@ -238,11 +242,11 @@ func (a *AppleMusic) Forget() error {
 		return nil
 	}
 	a.mu.Lock()
-	prevToken := a.owner.UserToken
+	prevHash := hashAppleMusicToken(a.owner.UserToken)
 	a.owner = AppleMusicOwner{}
 	a.ownerForgot = true
-	if prevToken != "" {
-		a.forgottenToken = prevToken
+	if prevHash != "" {
+		a.forgotHash = prevHash
 	}
 	a.credGen++
 	a.helperSignedIn = false
@@ -256,15 +260,21 @@ func (a *AppleMusic) Forget() error {
 		return nil
 	}
 	a.saveMu.Lock()
-	err := os.Remove(path)
 	a.mu.Lock()
 	stillForgot := a.ownerForgot
-	forgotTok := a.forgottenToken
+	forgotHash := a.forgotHash
 	a.mu.Unlock()
+	var markerErr, err error
 	if stillForgot {
-		_ = SaveJSON(forgotMarkerPath(path), appleMusicForgotMarker{UserToken: forgotTok})
+		// Write the marker before removing the owner file so a crash in between
+		// cannot leave neither file on disk and re-link on reboot.
+		markerErr = SaveJSON(forgotMarkerPath(path), appleMusicForgotMarker{TokenSHA256: forgotHash})
+		err = os.Remove(path)
 	}
 	a.saveMu.Unlock()
+	if markerErr != nil {
+		return markerErr
+	}
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
