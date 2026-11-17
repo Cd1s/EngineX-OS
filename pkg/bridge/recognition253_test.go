@@ -14,7 +14,8 @@ func TestLargePDBRepeatMountTimings253(t *testing.T) {
 	root := t.TempDir()
 	testfixture.LargeExport(t, root, 6000)
 	start := time.Now()
-	r, err := bridge.ConvertAtMount(context.Background(), root, enginedb.Options{}, false)
+	// A library a build before #301 imported from the export alone; mounts read its files.
+	r, err := bridge.ImportLikeEarlierBuildsForTest(context.Background(), root, enginedb.Options{})
 	if err != nil || r.Added != 6000 {
 		t.Fatalf("first mount: %+v %v", r, err)
 	}
@@ -33,7 +34,7 @@ func TestDefaultMountCompressionThroughputDelta(t *testing.T) {
 	root := t.TempDir()
 	testfixture.LargeExport(t, root, 6000)
 	ctx := context.Background()
-	if r, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false); err != nil || r.Added != 6000 {
+	if r, err := bridge.ImportLikeEarlierBuildsForTest(ctx, root, enginedb.Options{}); err != nil || r.Added != 6000 {
 		t.Fatalf("first mount: %+v %v", r, err)
 	}
 	start := time.Now()

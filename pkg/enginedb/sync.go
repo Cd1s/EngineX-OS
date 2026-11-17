@@ -98,6 +98,9 @@ type Result struct {
 	AnalysisSkipped  int `json:",omitempty"`
 	PlaylistsChanged bool
 	Bypassed         bool
+	// Background: the volume's first import did not fit in the mount's time and goes on
+	// after the mount in its stage on the volume (#301).
+	Background bool `json:",omitempty"`
 }
 
 // safeFile refuses redirection into PIONEER through symlinks or hard links.

@@ -42,6 +42,9 @@ static uint64_t test_cache_reserve;
 // Free space left on a stick after a carry-over: none, so a tiny tmpfs stick fills up mid-copy.
 static uint64_t test_carry_slack;
 #define CARRY_SLACK test_carry_slack
+// systemctl for stopping a volume's background import: none (an empty path fails to run) until a test sets one.
+static char test_systemctl[PATH_MAX];
+#define SYSTEMCTL_PATH test_systemctl
 #include <errno.h>
 #include <sys/stat.h>
 static char test_eio_path[PATH_MAX];
@@ -268,6 +271,28 @@ static void test_paths_and_copy(const char *root) {
     char unsafe[PATH_MAX];join(unsafe,root,"link-parent");assert(!symlink(outside,unsafe));join(p,unsafe,"child");
     assert(make_dirs(p)==-1&&errno==ELOOP);
     puts("#20/#21/#22/#37: missing library, lossless seed/reuse, changed native DB, identity separation, all symlink components: PASS");
+}
+// #301: a first import too large for the mount goes on in a background job that writes its stage on
+// the stick. Eject stops it, under the unit rb-bridge started it as, before the unmount.
+static unsigned stop_seen;static char stop_log[PATH_MAX],stop_unit[64];
+static int unmount_after_stop(struct libmnt_context *c) {
+    (void)c;real_calls++;char buf[256]={0};int fd=open(stop_log,O_RDONLY|O_CLOEXEC);
+    if(fd>=0){if(read(fd,buf,sizeof buf-1)>0&&strstr(buf,stop_unit))stop_seen++;close(fd);}
+    return 0;
+}
+static void test_eject_stops_the_background_import(const char *root) {
+    char unit[64];import_unit("/media/REKORDBOX",unit);
+    assert(!strcmp(unit,"enginex-rb-import-2531a9d305fa8897.service")); // internal/cli TestImportUnitMatchesTheHook
+    char volume_path[PATH_MAX];join(volume_path,MEDIA_ROOT,"IMPORTING");assert(!make_dirs(volume_path));
+    join(stop_log,root,"systemctl.log");join(test_systemctl,root,"systemctl");
+    char script[PATH_MAX+64];snprintf(script,sizeof script,"#!/bin/sh\necho \"$@\" >> '%s'\n",stop_log);
+    write_file(test_systemctl,script);assert(!chmod(test_systemctl,0700));
+    import_unit(volume_path,stop_unit);
+    struct libmnt_context c={.target=volume_path};unsigned calls=real_calls;
+    assert(!unmount_dispatch(&c,unmount_after_stop)&&stop_seen==1&&real_calls==calls+1);
+    char expect[128];snprintf(expect,sizeof expect,"stop --quiet %s\n",stop_unit);expect_file(stop_log,expect);
+    test_systemctl[0]=0;assert(!unlink(stop_log));
+    puts("#301: eject stops the volume's background import before the unmount: PASS");
 }
 // 5.3.0.3 made /data/legacy data a symlink to enginex (#103). The cache path
 // through it failed with ELOOP, so no read-only HFS+ stick got a view or rb-bridge.
@@ -2162,7 +2187,7 @@ int main(int argc,char **argv) {
     join(test_prepare_state,root,"run/enginex-usb-preparing");char prep_run[PATH_MAX];join(prep_run,root,"run");assert(!make_dirs(prep_run));
     join(test_media,root,"media");join(test_library,root,"libraries");join(test_runtime,root,"runtime");
     join(test_legacy_library,root,"legacy-libraries");join(test_utab,root,"utab");assert(!make_dirs(test_utab));
-    assert(!make_dirs(test_media));test_paths_and_copy(root);test_compat_symlink_root(root);test_time();test_slow_marker_follows_every_export_file(root);test_only_an_export_makes_a_rekordbox_stick(root);test_monitor_sees_plain_device_mount(root);test_monitor_hides_new_and_old_view_names(root);test_hfs_rw_unit(root);test_hfs_gen2_unit(root);
+    assert(!make_dirs(test_media));test_paths_and_copy(root);test_eject_stops_the_background_import(root);test_compat_symlink_root(root);test_time();test_slow_marker_follows_every_export_file(root);test_only_an_export_makes_a_rekordbox_stick(root);test_monitor_sees_plain_device_mount(root);test_monitor_hides_new_and_old_view_names(root);test_hfs_rw_unit(root);test_hfs_gen2_unit(root);
     if(argc>1&&!strcmp(argv[1],"--mounts")){test_prepare_state_lifecycle(root);test_hfs_rw_policy(root);test_hfs_gen2_lkl_policy(root,argv[0]);test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);test_library_is_walked_once(root);test_two_sticks_at_once(root);test_hfs_visible_mount_reuses_the_converted_library(root);test_private_mount_leaves_nothing_behind(root);test_hfs_view_copies_only_metadata(root);test_heal_before_visible(root);test_eject_while_another_stick_converts(root);test_eject_of_a_pulled_stick(root);test_heal_marker_survives_another_port(root);test_hfs_view_with_a_long_entry_name(root);test_hfs_view_artwork_is_writable(root);test_seed_keeps_its_own_previous_generation(root);test_view_binds_stay_out_of_a_shared_data(root);test_guardian_from_the_data_bundle(root);test_slow_marker_survives_another_port(root);test_hfs_view_scale_and_47879b10_253(root);}
     // Mount tests have removed all namespace mounts before deleting fixtures.
     int tmp=open("/tmp",O_RDONLY|O_DIRECTORY);assert(tmp>=0);remove_tree(tmp,strrchr(root,'/')+1);close(tmp);

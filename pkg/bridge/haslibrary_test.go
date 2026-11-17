@@ -122,12 +122,34 @@ func TestHasPopulatedLibrary(t *testing.T) {
 		t.Fatal("empty Information.uuid must return false")
 	}
 
-	// Valid Information.uuid + Track row -> populated library.
+	// Valid Information.uuid + Track row, nothing else: the skeleton after the DJ
+	// loaded a track from the OneLibrary export. Taking it for a library showed an
+	// empty Engine Library instead of the export (#301).
 	if _, err = db.Exec(`UPDATE Information SET uuid='e7a89052-6441-43bb-9c6d-e3bed7011d00'`); err != nil {
 		db.Close()
 		t.Fatal(err)
 	}
+	if HasPopulatedLibrary(mount) {
+		db.Close()
+		t.Fatal("skeleton with a deck-loaded track must return false")
+	}
+	// Playlists make it a library, and so does the bridge's state beside it.
+	if _, err = db.Exec(`CREATE TABLE Playlist(id INTEGER PRIMARY KEY, title TEXT); INSERT INTO Playlist VALUES(1,'Set')`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if !HasPopulatedLibrary(mount) {
+		db.Close()
+		t.Fatal("m.db with tracks and playlists should return true")
+	}
+	if _, err = db.Exec(`DELETE FROM Playlist`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
 	db.Close()
+	if err := os.WriteFile(filepath.Join(dbDir, ".rb-bridge-state.db"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if !HasPopulatedLibrary(mount) {
 		t.Fatal("populated m.db should return true")
 	}

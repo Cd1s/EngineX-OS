@@ -849,6 +849,21 @@ static int run(char *const argv[],int64_t deadline) {
         if(budget(deadline)){kill(-pid,SIGKILL);while(waitpid(pid,&status,0)<0&&errno==EINTR){}errno=ETIMEDOUT;return -1;}usleep(20000);
     }
 }
+#ifndef SYSTEMCTL_PATH
+#define SYSTEMCTL_PATH "/bin/systemctl"
+#endif
+// The unit of a volume's background first import (rb-bridge --import-path, #301): FNV-1a 64 of
+// the mount path, as internal/cli importUnit names it.
+static void import_unit(const char *target,char out[64]) {
+    snprintf(out,64,"enginex-rb-import-%016llx.service",(unsigned long long)hash_bytes(UINT64_C(14695981039346656037),target,strlen(target)));
+}
+// The job writes its stage on the stick: stop it before the unmount, so an ejected stick is never
+// pulled half-written. Stopped, it goes on from its last pass at the next mount. Not running is fine.
+static void stop_import(const char *target) {
+    char unit[64];import_unit(target,unit);
+    char *const a[]={(char *)SYSTEMCTL_PATH,"stop","--quiet",unit,NULL};
+    if(run(a,now_ms()+8000)&&errno==ETIMEDOUT)note("background import did not stop on",target,errno);
+}
 #ifndef FSCK_HFSPLUS_SYSTEM
 #define FSCK_HFSPLUS_SYSTEM "/usr/sbin/fsck.hfsplus"
 #endif
@@ -2447,6 +2462,7 @@ static int unmount_dispatch(struct libmnt_context *ctx,int (*real)(struct libmnt
         // pulled without Eject: that must not keep the dead mount until a reboot (BH-O55-5).
         if(safe_path(lib,1)&&errno==ELOOP)return -ELOOP;
     }
+    stop_import(target);
     // Only this target's own mount makes its view record, under view_lock. Without one it
     // is the stock umount and does not wait for view_lock, which another stick's
     // conversion holds for up to its whole budget (BH-O55-3).

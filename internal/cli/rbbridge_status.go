@@ -67,8 +67,10 @@ type usbLoadingReporter struct {
 	mu       sync.Mutex
 	path     string
 	kind     string
+	state    string // "loading" when empty; "importing" for a first import after the mount (#301)
 	lastAt   time.Time
 	lastDone int
+	last     usbLoadingStatus
 }
 
 func newUSBLoadingReporter(path, kind string) *usbLoadingReporter {
@@ -95,18 +97,47 @@ func (r *usbLoadingReporter) Report(done, total int, force bool) {
 	}
 	r.lastAt = now
 	r.lastDone = done
-	writeStatusJSON(r.path, usbLoadingStatus{
-		State: "loading",
-		Kind:  r.kind,
-		Done:  done,
-		Total: total,
-	})
+	state := r.state
+	if state == "" {
+		state = "loading"
+	}
+	r.write(usbLoadingStatus{State: state, Kind: r.kind, Done: done, Total: total})
+}
+
+// Ready says the library is converted and waits for the next mount.
+func (r *usbLoadingReporter) Ready() {
+	if r == nil || r.path == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.write(usbLoadingStatus{State: "ready", Kind: r.kind})
+}
+
+// Refresh writes the last state again, so the browser keeps showing it.
+func (r *usbLoadingReporter) Refresh() {
+	if r == nil || r.path == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.last.State != "" {
+		r.write(r.last)
+	}
+}
+
+func (r *usbLoadingReporter) write(st usbLoadingStatus) {
+	r.last = st
+	writeStatusJSON(r.path, st)
 }
 
 func (r *usbLoadingReporter) Done() {
 	if r == nil || r.path == "" {
 		return
 	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.last = usbLoadingStatus{}
 	_ = os.Remove(r.path)
 	_ = os.Remove(r.path + ".err")
 }
@@ -115,6 +146,9 @@ func (r *usbLoadingReporter) Fail(err error) {
 	if r == nil || r.path == "" {
 		return
 	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.last = usbLoadingStatus{}
 	_ = os.Remove(r.path)
 	msg := ""
 	if err != nil {

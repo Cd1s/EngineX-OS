@@ -31,6 +31,18 @@ func issue233Mount(t *testing.T, root string, opts enginedb.Options) enginedb.Re
 	return r
 }
 
+// issue233EarlierBuild is the first mount of a build before #301: it imported a large library
+// from the export alone, straight into the live library. The tests that finish such a library
+// start from it; a first mount now builds the library aside (TestIssue301*).
+func issue233EarlierBuild(t *testing.T, root string) enginedb.Result {
+	t.Helper()
+	r, err := bridge.ImportLikeEarlierBuildsForTest(context.Background(), root, enginedb.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
 func issue233Marks(t *testing.T, root string, pending bool) {
 	t.Helper()
 	dir := filepath.Join(root, "Engine Library/Database2")

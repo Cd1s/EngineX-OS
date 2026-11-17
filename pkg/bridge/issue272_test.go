@@ -56,12 +56,12 @@ INSERT INTO playlist VALUES(1,0,'Issue272 Set',0,1,'');`); err != nil {
 
 	ctx := context.Background()
 
-	// Mount 1: Fast staged import (>500 tracks).
+	// Mount 1 by a build before #301: imported without cues (>500 tracks).
 	// Set MaxBridgeStateBytes to 20 KB so that during resume it caps BridgeAnalysis quickly.
 	opts := enginedb.Options{
 		MaxBridgeStateBytes: 20480,
 	}
-	r1, err := bridge.ConvertAtMount(ctx, root, opts, false)
+	r1, err := bridge.ImportLikeEarlierBuildsForTest(ctx, root, opts)
 	if err != nil {
 		t.Fatalf("mount 1: %v", err)
 	}

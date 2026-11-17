@@ -3763,6 +3763,7 @@ SERVICES_MAIN = """
 	}
 	property bool scUsbPreparing: false
 	property string scUsbPrepareKind: "usb"
+	property string scUsbPrepareState: ""
 	property int scUsbPrepareDone: 0
 	property int scUsbPrepareTotal: 0
 	property string scUsbPrepareError: ""
@@ -3778,7 +3779,10 @@ SERVICES_MAIN = """
 	}
 	function scUsbLoadingText() {
 		if (root.scUsbPrepareError) return root.scT(root.scUsbPrepareError)
-		const base = root.scUsbPrepareKind === "sd" ? root.scT("Loading SD card…") : root.scT("Loading USB…")
+		// A first import too large for the mount goes on after it (#301).
+		if (root.scUsbPrepareState === "ready") return root.scT("rekordbox library ready: eject and insert again to load it")
+		const base = root.scUsbPrepareState === "importing" ? root.scT("Importing rekordbox library…") :
+			root.scUsbPrepareKind === "sd" ? root.scT("Loading SD card…") : root.scT("Loading USB…")
 		if (root.scUsbPrepareTotal > 0) return base + " (" + root.scFormatCount(root.scUsbPrepareDone) + " / " + root.scFormatCount(root.scUsbPrepareTotal) + ")"
 		return base
 	}
@@ -3803,6 +3807,7 @@ SERVICES_MAIN = """
 		scUsbPreparing = !!v.usbPreparing
 		const up = v.usbPrepare || null
 		scUsbPrepareKind = (up && up.kind) ? String(up.kind) : "usb"
+		scUsbPrepareState = (up && up.state) ? String(up.state) : ""
 		scUsbPrepareDone = (up && up.done) ? Number(up.done) : 0
 		scUsbPrepareTotal = (up && up.total) ? Number(up.total) : 0
 		scUsbPrepareError = (up && up.state === "error" && up.error) ? String(up.error) : ""
