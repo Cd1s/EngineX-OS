@@ -501,7 +501,16 @@ for script in "$STORAGE" "$PERF" "$ROOT/rootfs-overlay/usr/local/bin/enginex-sui
     [[ $(head -n 1 "$script") == '#!/bin/sh' ]] || fail "$script must use /bin/sh (no bash on Engine OS)"
     if command -v busybox >/dev/null; then busybox sh -n "$script" || fail "busybox sh syntax: $script"; else sh -n "$script"; fi
 done
-ok 'device scripts run under /bin/sh'
+
+# Gen-1 images carry the overlay, so the guard's default path is a shipped file. A Gen-2 bundle has no
+# /usr/libexec: its guard runs from bin/ and finds the script beside itself.
+[[ -x $ROOT/rootfs-overlay/usr/libexec/enginex-migration ]] || fail 'the migration script must ship where the guard looks first'
+has '${ENGINEX_MIGRATION:-/usr/libexec/enginex-migration}' "$ROOT/rootfs-overlay/etc/enginex/engine-ui-guard"
+mkdir -p "$TMP/bundle/bin"
+cp "$ROOT/rootfs-overlay/etc/enginex/engine-ui-guard" "$TMP/bundle/bin/"
+printf 'echo sibling\nexit 0\n' > "$TMP/bundle/bin/enginex-migration"
+[[ $(ENGINEX_MIGRATION=$TMP/none sh "$TMP/bundle/bin/engine-ui-guard") == sibling ]] || fail 'a Gen-2 bundle guard must find the migration script beside it'
+ok 'device scripts run under /bin/sh; engine-ui-guard finds the migration script at /usr/libexec (Gen-1) or beside itself (Gen-2 bundle)'
 
 suite_share=$TMP/suite-share suite_dir=$TMP/suite-bin
 mkdir -p "$suite_share"
