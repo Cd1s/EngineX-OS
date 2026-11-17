@@ -70,7 +70,7 @@ func TestMalformedJSONSettingsDoNotApplyOrRestart(t *testing.T) {
 	if err := os.WriteFile(path, before, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for _, body := range []string{`{"lang":`, `{"junk":"` + strings.Repeat("x", 2*jsonBodyLimit)} {
+	for _, body := range []string{`{"lang":`, `{"junk":"` + strings.Repeat("x", 2*jsonBodyLimit), `{"lang":"es"} trailing-invalid-json`, `{"lang":"es"}{"waveform":"rgb"}`} {
 		r := httptest.NewRequest("POST", "/api/ui?lang=es&restart=1", strings.NewReader(body))
 		r.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()

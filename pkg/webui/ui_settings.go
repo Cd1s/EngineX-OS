@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -965,7 +966,9 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	if r.Body != nil && strings.Contains(r.Header.Get("Content-Type"), "application/json") {
 		var body map[string]any
 		r.Body = http.MaxBytesReader(w, r.Body, jsonBodyLimit)
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		dec := json.NewDecoder(r.Body)
+		// Exactly one value: anything but white space after it is a bad request too.
+		if err := dec.Decode(&body); err != nil || dec.Decode(new(any)) != io.EOF {
 			fail(w, http.StatusBadRequest, errors.New("invalid settings JSON"))
 			return
 		}

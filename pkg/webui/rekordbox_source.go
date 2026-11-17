@@ -372,13 +372,17 @@ func (g *tidalGateway) rbxStage(ctx context.Context, c *prolink.NFSClient, ip, r
 		dir := filepath.Join(g.s.mediaRoot(), e.Name())
 		cache := filepath.Join(dir, rbxCacheDir)
 		var fs syscall.Statfs_t
-		if skip[dir] || syscall.Statfs(dir, &fs) != nil || fs.Flags&1 != 0 { // ST_RDONLY
+		if skip[dir] || syscall.Statfs(dir, &fs) != nil || fs.Flags&1 != 0 || !rbxOwnCache(dir, cache) { // ST_RDONLY
 			continue
 		}
-		for rbxRoom(&fs, prolink.DirSize(cache)) < int64(info.Size) && dropOldest(cache) {
+		// One budget for everything staged on the drive: the Pro DJ Link libraries count too.
+		room := func() int64 {
+			return rbxRoom(&fs, prolink.DirSize(cache)+prolink.DirSize(filepath.Join(dir, prolink.StagedDir)))
+		}
+		for room() < int64(info.Size) && dropOldest(cache) {
 			_ = syscall.Statfs(dir, &fs)
 		}
-		if rbxRoom(&fs, prolink.DirSize(cache)) < int64(info.Size) {
+		if room() < int64(info.Size) {
 			continue
 		}
 		if err := os.MkdirAll(cache, 0o755); err != nil {
@@ -408,6 +412,18 @@ func (g *tidalGateway) rbxStage(ctx context.Context, c *prolink.NFSClient, ip, r
 		return file, dir, nil
 	}
 	return "", "", errors.New(g.s.rbxText("noroom"))
+}
+
+// rbxOwnCache reports whether cache is not there yet or is a folder of the drive's own
+// volume. A link, a file or another volume in its place could lead anywhere: nothing is
+// listed, removed or written through it.
+func rbxOwnCache(dir, cache string) bool {
+	st, err := os.Lstat(cache)
+	if os.IsNotExist(err) {
+		return true
+	}
+	root, rerr := os.Stat(dir)
+	return err == nil && rerr == nil && st.IsDir() && st.Sys().(*syscall.Stat_t).Dev == root.Sys().(*syscall.Stat_t).Dev
 }
 
 // rbxCopy is a track being copied from the computer's NFS export into the cache. It goes on
