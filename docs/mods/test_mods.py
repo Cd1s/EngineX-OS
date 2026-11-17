@@ -37,6 +37,15 @@ class ModTests(unittest.TestCase):
             for key in ("name", "summary", "description"):
                 self.assertEqual(set(mod[key]), {"s", "t", "e"})
 
+    def test_packaged_sources_are_the_committed_sources(self):
+        # The archives ship their Go sources: one edited without a rebuild leaves its package stale.
+        registry = json.loads((BASE / "registry.json").read_text())
+        for mod in registry["mods"]:
+            with tarfile.open(BASE / "packages" / Path(mod["downloadUrl"]).name) as tar:
+                for member in tar.getmembers():
+                    if member.name.startswith("src/"):
+                        self.assertEqual(tar.extractfile(member).read(), (BASE / member.name).read_bytes(), member.name)
+
     def test_no_package_ships_or_calls_python(self):
         # #208: Engine OS (gen-1, gen-2 and AZ04) has no Python; 1.0.0 helpers could never start.
         registry = json.loads((BASE / "registry.json").read_text())
