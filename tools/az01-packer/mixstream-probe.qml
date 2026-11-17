@@ -23,7 +23,7 @@ Item {
         check(!!p && !!p.translator, path)
         return p.translator
     }
-    function find(name) {
+    function find(name, from) {
         const seen = new Set()
         function walk(o) {
             if (!o || seen.has(o)) return null
@@ -36,8 +36,33 @@ Item {
             for (const c of children) { const found = walk(c); if (found) return found }
             return null
         }
+        if (from) return walk(from)
         for (const pads of probe.testPads) { const found = walk(pads); if (found) return found }
         return walk(probe.Window.window.contentItem)
+    }
+    // The Control Center's channel-strip EQ / Stems switch: one segment per channel, lit while that channel is in Stems.
+    function stemsEqTile() {
+        const component = Qt.createComponent("qrc:/Skins/Embedded/Views/ControlCenter/Tabs/ControlCenterTab.qml")
+        check(component.status === Component.Ready, "Control Center tab loads: " + component.errorString())
+        const backdrop = Qt.createQmlObject('import QtQuick 2.12; Rectangle { color: "#1c1c1c" }', probe.Window.window.contentItem)
+        backdrop.width = 1024; backdrop.height = 330; backdrop.y = 100; backdrop.z = 1000
+        const tab = component.createObject(backdrop, {width: 1024, height: 330})
+        check(!!tab, "create the Control Center tab")
+        const tile = find("ControlCenter_StemsEq", tab)
+        check(!!tile && tile.visible, "Stems EQ tile is in the Control Center")
+        for (let ch = 1; ch <= 2; ch++) {
+            const seg = find("ControlCenter_StemsEq_" + ch, tile)
+            check(!!seg && seg.width >= 44 && seg.height >= 44, "touch geometry of Stems EQ channel " + ch)
+            const own = tr("/Engine/Mixer/Channel" + ch + "/ChannelStrip/Mode")
+            const other = tr("/Engine/Mixer/Channel" + (3 - ch) + "/ChannelStrip/Mode")
+            const before = other.index
+            for (let i = 0; i < seg.children.length; i++) if (typeof seg.children[i].clicked === "function") seg.children[i].clicked(null)
+            // Native access filter can reject Stems without a stems track.
+            console.warn("X166 STEMSEQ|channel=" + ch + "|mode=" + own.index + "|selected=" + seg.selected + "|")
+            check(other.index === before, "Stems EQ tile keeps the other channel " + ch)
+            check(seg.selected === (own.index === 1), "Stems EQ highlight follows the actual mode " + ch)
+        }
+        backdrop.grabToImage(function(r) { check(r.saveToFile("/tmp/mx-control-center.png"), "picture of the Control Center") })
     }
     Timer {
         interval: 1500
@@ -100,6 +125,7 @@ Item {
                         probe.check(other.index === before, "EQ switch keeps other channel " + deck)
                         probe.check(eq.highlighted === (own.index === 1), "EQ highlight follows actual mode " + deck)
                     }
+                    probe.stemsEqTile()
                     probe.find("MixstreamSweepFx1").clicked()
                     probe.stage++
                 } else if (probe.stage === 2) {

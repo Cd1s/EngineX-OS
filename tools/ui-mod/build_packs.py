@@ -5775,6 +5775,58 @@ SYNC_TILE = """
 		}
 """
 
+# Control Center (5.3.0 only, Mixstream Pro / Pro+ / Pro Go): the channel strip's
+# EQ / Stems switch (#286; it was the "EQ / STEMS" button on each deck's Pad bar), one
+# segment per channel, lit while that channel's EQ knobs control the Stems.
+STEMS_EQ_TILE = """
+		Rectangle {
+			id: scStemsEqTile
+			objectName: "ControlCenter_StemsEq"
+			visible: Config.audio.fx.hasNHFx && Config.audio.hasStemsLevel
+			width: 256
+			height: 104
+			radius: 16
+			color: Style.surface03Color
+			Text {
+				x: 14
+				y: 8
+				text: root.scT("Stems EQ")
+				font: Style.fontH4
+				color: Style.font01Color
+			}
+			Row {
+				x: 12
+				y: 36
+				Repeater {
+					model: scStemsEqTile.visible ? ["Deck 1", "Deck 2"] : []
+					Rectangle {
+						readonly property var mode: Planck.getProperty("/Engine/Mixer/Channel" + (index + 1) + "/ChannelStrip/Mode").translator
+						readonly property bool selected: mode.index === 1
+						objectName: "ControlCenter_StemsEq_" + (index + 1)
+						width: (scStemsEqTile.width - 24) / 2
+						height: 56
+						color: selected ? "#00c3e3" : stemsEqTap.pressed ? "#6a6a6a" : "#4a4a4a"
+						border {
+							width: 1
+							color: "#a8a8a8"
+						}
+						Text {
+							anchors.centerIn: parent
+							text: root.scT(modelData).toUpperCase()
+							font: Style.fontH5
+							color: "#ffffff"
+						}
+						MouseArea {
+							id: stemsEqTap
+							anchors.fill: parent
+							onClicked: mode.index = selected ? 0 : 1
+						}
+					}
+				}
+			}
+		}
+"""
+
 # rekordbox / CDJ-3000 3-Band palette, taken from a rekordbox 6 screenshot: blue
 # lows, orange mids, white highs, and brown mids where the lows cover them. Engine
 # fades each band from its main colour to its fade colour as that band gets quieter,
@@ -7255,7 +7307,7 @@ def edits(dev: bool):
         ],
         v + "ControlCenter/Tabs/ControlCenterTab.qml": [
             ("import QtQuick.Layouts 1.12\n", "import QtQuick.Layouts 1.12\nimport EngineOS.UI.Style 1.0\n"),
-            ("		DayModeEnable { }\n", "		DayModeEnable { }\n" + WAVE_TILE.replace("@LOW@", BAND_COLORS["Low"]).replace("@MID@", BAND_COLORS["Mid"]).replace("@HIGH@", BAND_COLORS["High"]) + UPFADER_ECHO_TILE + (SYNC_TILE if v53() else "")),
+            ("		DayModeEnable { }\n", "		DayModeEnable { }\n" + WAVE_TILE.replace("@LOW@", BAND_COLORS["Low"]).replace("@MID@", BAND_COLORS["Mid"]).replace("@HIGH@", BAND_COLORS["High"]) + UPFADER_ECHO_TILE + ((SYNC_TILE + STEMS_EQ_TILE) if v53() else "")),
         ],
         v + "ControlCenter/ControlCenterTabView.qml": [("text: tabView.hideTabButtonLabel ? \"\" : modelData", "text: tabView.hideTabButtonLabel ? \"\" : root.scT(modelData)")],
         prefs + "PreferencesTabView.qml": [("					text: modelData\n", "					text: root.scT(modelData)\n")],

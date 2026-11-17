@@ -7722,6 +7722,26 @@ class MixstreamPadsLayoutTest(unittest.TestCase):
         self.assertIn('color: parent.highlighted ?', pads_content)
         self.assertIn('border.color: parent.highlighted ?', pads_content)
 
+    def test_stems_eq_switch_is_a_control_center_tile_on_mixstream_only(self):
+        rows = bp.load_dict()
+        for key in ("Stems EQ", "Deck 1", "Deck 2"):
+            self.assertIn(key, rows)
+            for lang in ("zh-Hans", "zh-Hant", "es"):
+                self.assertTrue(rows[key].get(lang), f"missing {lang} for {key}")
+        tile = bp.STEMS_EQ_TILE
+        self.assertIn('objectName: "ControlCenter_StemsEq"', tile)
+        self.assertIn('visible: Config.audio.fx.hasNHFx && Config.audio.hasStemsLevel', tile)
+        self.assertIn('model: scStemsEqTile.visible ? ["Deck 1", "Deck 2"] : []', tile)
+        self.assertIn('"/Engine/Mixer/Channel" + (index + 1) + "/ChannelStrip/Mode"', tile)
+        old_root = bp.ROOT
+        try:
+            for root, present in (("Skins/Embedded/", True), ("Skins/EmbeddedCommon/", False)):
+                bp.ROOT = root
+                injected = "".join(new for _, new in bp.edits(False)[root + "Views/ControlCenter/Tabs/ControlCenterTab.qml"])
+                self.assertEqual("ControlCenter_StemsEq" in injected, present, root)
+        finally:
+            bp.ROOT = old_root
+
     def test_mixstream_pitch_bend_beat_jump_and_fx_slots(self):
         rows = bp.load_dict()
         for key in ("Pitch Bend → Beat Jump", "FX Slot 1", "FX Slot 2", "FX Slot 3", "FX Slot 4"):
