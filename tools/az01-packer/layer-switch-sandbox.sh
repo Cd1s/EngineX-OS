@@ -18,6 +18,12 @@ case $PRODUCT in
     JP07) IMAGE=fw-5.3.0/SC5000-5.3.0-Update.img CARD=${LSW_CARD:-JP07} OUT=${LSW_OUT:-4} IN=${LSW_IN:-2} ;;
     *) echo "unsupported LSW_PRODUCT $PRODUCT" >&2; exit 2 ;;
 esac
+for arm in ${LSW_ARMS:-stock pack}; do
+    case "$arm" in stock|pack|drop) ;; *) echo 'LSW_ARMS must name stock, pack or drop' >&2; exit 2 ;; esac
+done
+for pattern in ${LSW_DROP:-}; do
+    case "$pattern" in /*|..|../*|*/../*|*/..) echo 'LSW_DROP must stay within the pack' >&2; exit 2 ;; esac
+done
 if [ "${3:-}" != --inner ]; then
     [ "$(uname -m)" = aarch64 ]
     [ ! -e "$W" ] || { echo "refusing existing work directory $W" >&2; exit 1; }
@@ -55,6 +61,8 @@ PY
     python3 "$REPO/tools/az01-packer/layer_switch_summary.py" "$W" | tee "$W/summary.txt"
     exit
 fi
+[[ ${2:-} =~ ^(stock|pack|drop)-[0-9]+$ ]] || { echo 'invalid sandbox run name' >&2; exit 2; }
+[ "$(readlink /proc/self/ns/mnt)" != "$(readlink /proc/1/ns/mnt)" ] || { echo 'inner run requires unshare -m' >&2; exit 2; }
 run=$2 arm=${2%-*}
 mount --make-rprivate /
 ip link set lo up
@@ -87,7 +95,7 @@ cp "$REPO/rootfs-overlay/etc/enginex/libengine-ui-hook.so" "$R/etc/enginex/"
 cp "$W/layer-switch-fixture.so" "$W/alsa_null_fixture.so" "$W/stream-sync" "$R/tmp/"
 cp "$W"/music/t?.wav "$R/data/music/"
 if [ "$arm" != stock ]; then cp -a "$W/packs/en/." "$R/data/enginex/ui/packs/en/"; cp -a "$W/packs/icons" "$R/data/enginex/ui/"; fi
-if [ "$arm" = drop ]; then (cd "$R/data/enginex/ui/packs/en" && shopt -s globstar nullglob && for g in $LSW_DROP; do rm -rfv -- $g; done) | wc -l; fi
+if [ "$arm" = drop ]; then (cd "$R/data/enginex/ui/packs/en" && shopt -s globstar nullglob && for g in $LSW_DROP; do rm -rfv -- "$g"; done) | wc -l; fi
 sed "s/@RUNS@/${LSW_RUNS:-12}/; s/@CENSUS@/${LSW_CENSUS:-false}/; s/@LOAD@/${LSW_LOAD:-true}/" "$REPO/tools/az01-packer/layer-switch-probe.qml" > "$R/data/enginex/ui/packs/en/Skins/Common/Items/QmlWarnings.qml"
 printf 'lang=en\n' > "$R/data/enginex/ui/settings.conf"
 chroot "$R" /usr/bin/dbus-daemon --system --fork --nopidfile > "$U/dbus.log" 2>&1 || true
