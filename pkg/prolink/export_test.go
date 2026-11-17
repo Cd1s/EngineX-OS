@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -1165,6 +1166,49 @@ func TestExportStatusWaitsForThePlayersFirmware(t *testing.T) {
 	}
 }
 
+// rekordbox on a computer serves its files (mountd, nfsd) only to a player whose
+// status it gets: on the left deck its mountd stayed silent while the deck announced
+// as player 3 and answered at once after status packets (2026-11-17). Our status goes
+// to it as to a player, and its number (17) is not one we avoid.
+func TestExportSendsStatusToRekordbox(t *testing.T) {
+	root := t.TempDir()
+	testfixture.Export(t, root)
+	e := NewExporter(testExportConfig(root))
+	defer e.Close()
+	if err := e.SetEnabled(true); err != nil {
+		t.Fatal(err)
+	}
+	computer, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 63, 0, 3), Port: 50002})
+	if err != nil {
+		t.Skip("status port:", err)
+	}
+	defer computer.Close()
+	keepalive := make([]byte, 0x36)
+	copy(keepalive, magic)
+	keepalive[10], keepalive[0x21], keepalive[0x24], keepalive[0x34] = 6, 2, 17, 4
+	binary.BigEndian.PutUint16(keepalive[0x22:], 0x36)
+	copy(keepalive[12:], "rekordbox")
+	copy(keepalive[0x26:], []byte{2, 0, 0, 0, 0, 17})
+	copy(keepalive[0x2c:], net.IPv4(127, 63, 0, 3).To4())
+	discovery, _ := net.ResolveUDPAddr("udp4", e.Status().DiscoveryAddress)
+	computer.WriteToUDP(keepalive, discovery)
+	waitNumber(t, e, 4, 300*time.Millisecond)
+	buf := make([]byte, 2048)
+	for until := time.Now().Add(2 * time.Second); ; {
+		computer.SetReadDeadline(until)
+		n, _, err := computer.ReadFromUDP(buf)
+		if err != nil {
+			t.Fatal("no status to the computer with rekordbox:", err)
+		}
+		if n == 0x11c && buf[10] == 0x0a && buf[0x21] == 4 {
+			break
+		}
+	}
+	if e.Status().Number != 4 {
+		t.Fatalf("player %d: the computer took a number from us", e.Status().Number)
+	}
+}
+
 // #217: players broadcast on the beat port (beats, and a CDJ-3000's absolute
 // positions), and a socket bound to the interface's own address gets no
 // broadcast. Checked on Linux in a network namespace: a datagram to
@@ -1188,6 +1232,157 @@ func TestExportBeatPortTakesBroadcasts(t *testing.T) {
 }
 
 // peerStatus is another player's status packet as far as the handoff reads it.
+// rekordbox's Link panel showed our paused deck (player 3) as MASTER, and MASTER on
+// rekordbox's own deck did nothing (left deck, 2026-11-17): the export answered a
+// takeover request only from players 1-6 and read master only from a player's status,
+// and a computer's status never said master, so a deck claimed it beside the computer.
+func TestExportHandsMasterToRekordbox(t *testing.T) {
+	computer := net.IPv4(127, 63, 0, 4)
+	status := func(flags, mh byte) []byte { // rekordbox 7: a mixer's status layout, subtype 1
+		b := make([]byte, 0x38)
+		copy(b, magic)
+		b[10], b[0x20], b[0x21], b[0x24], b[0x27], b[0x36] = 0x29, 1, 17, 17, flags, mh
+		copy(b[11:], "rekordbox")
+		binary.BigEndian.PutUint16(b[0x22:], 0x38)
+		return b
+	}
+	if d, err := ParsePacket(status(0xe0, 0xff), 50002, computer); err != nil || d.Number != 17 || !d.Master {
+		t.Fatalf("the computer's master status: %+v %v", d, err)
+	}
+	if d, _ := ParsePacket(status(0xc0, 0xff), 50002, computer); d.Master {
+		t.Fatal("a computer that is not master read as master")
+	}
+	r := &exportRun{player: 3, deck: ExportDeck{Master: true}, observe: func(Device) {}} // paused, Engine's master
+	look := func() (master bool, mh byte) {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		b := r.statusPacket()
+		return b[0x89]&0x20 != 0, b[0x9f]
+	}
+	heard := func(b []byte) {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		r.heardLocked(computer, b)
+	}
+	wire, err := net.ListenUDP("udp4", &net.UDPAddr{IP: computer, Port: 50001})
+	if err != nil {
+		t.Skip("beat port:", err)
+	}
+	defer wire.Close()
+	if r.beat, err = net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 63, 0, 1)}); err != nil {
+		t.Fatal(err)
+	}
+	_, r.network, _ = net.ParseCIDR("127.0.0.0/8")
+	r.wg.Add(1)
+	go r.receiveBeats()
+	defer func() { r.beat.Close(); r.wg.Wait() }()
+	if _, err := wire.WriteToUDP((&exportRun{player: 17}).handoffPacket(0x26, 0x28), r.beat.LocalAddr().(*net.UDPAddr)); err != nil {
+		t.Fatal(err)
+	}
+	wire.SetReadDeadline(time.Now().Add(time.Second))
+	b := make([]byte, 64)
+	if n, _, err := wire.ReadFromUDP(b); err != nil || n != 0x2c || b[10] != 0x27 || b[0x21] != 3 || b[0x2b] != 1 {
+		t.Fatalf("no yes (0x27) to the computer's request: %v % x", err, b[:max(n, 0)])
+	}
+	if master, mh := look(); !master || mh != 17 {
+		t.Fatalf("agreed: still master until it takes it, naming it (master %v, Mh %d)", master, mh)
+	}
+	heard(status(0xe0, 0xff))
+	if master, _ := look(); master {
+		t.Fatal("two masters: the computer took it and our status still claims it")
+	}
+	heard(status(0xc0, 0xff))
+	if master, _ := look(); master {
+		t.Fatal("the computer let go: our paused deck leaves master vacant, as a paused CDJ would")
+	}
+	r.mu.Lock()
+	r.deck.Playing = true
+	r.mu.Unlock()
+	heard(status(0xe0, 0xff))
+	heard(status(0xc0, 0xff))
+	if master, _ := look(); !master {
+		t.Fatal("the computer let go and Engine's playing deck leads: master is ours again")
+	}
+}
+
+// rekordbox's Link panel showed one player for the left deck, which runs EngineX
+// decks 1 and 3 (maintainer, 2026-11-17). Each deck is now a player of its own
+// number, as an XDJ-XZ shows two players from one address; a number a player
+// holds is not taken (#198).
+func TestExportOnePlayerPerDeck(t *testing.T) {
+	now := time.Now()
+	r := &exportRun{probed: true, mounted: true, peers: map[string]exportPeer{}, deck: ExportDeck{Master: true, Playing: true, BPM: 128},
+		decks: []ExportDeck{{Number: 3, Master: true, Playing: true, BPM: 128}, {Number: 1, BPM: 100}}}
+	r.chooseLocked(now)
+	if r.player != 1 || !slices.Equal(r.players, []byte{1, 3}) {
+		t.Fatalf("players %v (first %d), want 1 and 3", r.players, r.player)
+	}
+	bpm := func(b []byte) uint16 { return binary.BigEndian.Uint16(b[0x92:]) }
+	if b := r.statusPacket(); b[0x21] != 3 || b[0x24] != 3 || b[0x89]&0x60 != 0x60 || bpm(b) != 12800 || b[0x75] != 0 {
+		t.Fatalf("deck 3, master and playing: player %d F %x BPM %d LINK %d", b[0x21], b[0x89], bpm(b), b[0x75])
+	}
+	if b := r.statusFor(1, r.deckLocked(1), false); b[0x21] != 1 || b[0x89]&0x60 != 0 || bpm(b) != 0xffff || b[0x75] != 1 || b[0x6f] != 0 { // a paused deck sends no BPM
+		t.Fatalf("deck 1, paused, has the media: player %d F %x BPM %d LINK %d", b[0x21], b[0x89], bpm(b), b[0x75])
+	}
+	if b, h := r.beatPacket(r.deck, 0, 0), r.handoffPacket(0x26, 0x28); b[0x21] != 3 || h[0x21] != 3 {
+		t.Fatalf("beats and handoff come from the master deck's player: %d %d", b[0x21], h[0x21])
+	}
+	r.peers["cdj"] = exportPeer{number: 3, seen: now}
+	r.chooseLocked(now)
+	if r.player != 1 || !slices.Equal(r.players, []byte{1}) {
+		t.Fatalf("a CDJ holds 3: players %v, want 1 only", r.players)
+	}
+	if b := r.statusPacket(); b[0x21] != 1 || b[0x89]&0x20 == 0 || bpm(b) != 12800 {
+		t.Fatalf("player 1 speaks for the master deck: player %d F %x BPM %d", b[0x21], b[0x89], bpm(b))
+	}
+	r.peers["cdj1"] = exportPeer{number: 1, seen: now}
+	r.chooseLocked(now)
+	if r.player != 4 || !slices.Equal(r.players, []byte{4}) {
+		t.Fatalf("CDJs hold 1 and 3: players %v, want one free number (4)", r.players)
+	}
+}
+
+// rekordbox's player panel showed no title for a track our deck loaded from it: a
+// CDJ that loaded it over the link says where from (Dr 0x28, Sr 0x29 = 4, the
+// computer's collection, Tr 0x2a = 1) and its rekordbox id (0x2c), and a track is
+// loaded (P1 0x7b) also while paused.
+func TestExportStatusSaysTheRekordboxTrackLoaded(t *testing.T) {
+	r := &exportRun{player: 1, players: []byte{1}, decks: []ExportDeck{{Number: 1, BPM: 128, Source: 17, Slot: 4, Type: 1, Track: 854}}}
+	b := r.statusFor(1, r.deckLocked(1), false)
+	d, err := ParsePacket(b, 50002, net.IPv4(127, 63, 0, 1))
+	if err != nil || d.SourcePlayer != 17 || d.SourceSlot != 4 || b[0x2a] != 1 || d.TrackID != 854 || b[0x7b] != 5 || d.Playing {
+		t.Fatalf("loaded from the computer: %+v Tr %d P1 %d %v", d, b[0x2a], b[0x7b], err)
+	}
+	r.decks[0] = ExportDeck{Number: 1, BPM: 128} // a drive's track: as before, nothing said
+	if b := r.statusFor(1, r.deckLocked(1), false); b[0x28] != 0 || b[0x29] != 0 || b[0x2a] != 0 || binary.BigEndian.Uint32(b[0x2c:]) != 0 || b[0x7b] != 0 {
+		t.Fatalf("a drive's track: % x, P1 %d", b[0x28:0x30], b[0x7b])
+	}
+}
+
+// A paused deck does not hold master beside a computer that holds it, as a CDJ
+// would not; a playing one keeps doing what #217 settled.
+func TestExportPausedDeckLeavesMasterToRekordbox(t *testing.T) {
+	computer := net.IPv4(127, 63, 0, 4)
+	status := make([]byte, 0x38)
+	copy(status, magic)
+	status[10], status[0x21], status[0x27], status[0x36] = 0x29, 17, 0xe0, 0xff
+	copy(status[11:], "rekordbox")
+	for _, playing := range []bool{false, true} {
+		r := &exportRun{player: 3, deck: ExportDeck{Master: true, Playing: playing, BPM: 120}}
+		r.heardLocked(computer, status)
+		if master := r.statusPacket()[0x89]&0x20 != 0; master != playing {
+			t.Fatalf("playing %v: our status claims master %v", playing, master)
+		}
+		// rekordbox lets go: a playing deck takes the vacant master (#217), a paused one leaves it.
+		status[0x27] = 0xc0
+		r.heardLocked(computer, status)
+		status[0x27] = 0xe0
+		if master := r.statusPacket()[0x89]&0x20 != 0; master != playing {
+			t.Fatalf("playing %v, master vacant: our status claims master %v", playing, master)
+		}
+	}
+}
+
 func peerStatus(number byte, name string, flags, mm, mh byte, syncN uint32) []byte {
 	b := make([]byte, 0x11c)
 	copy(b, magic)

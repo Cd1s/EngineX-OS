@@ -517,3 +517,106 @@ func TestSimPitchExtremes(t *testing.T) {
 		}
 	}
 }
+
+// simClaim is a player's device number claim (dysentery's startup): stage 1 (0x00),
+// stage 2 (0x02, the number at 0x2e) or final (0x04, at 0x24); era 3 is a CDJ-3000's.
+func simClaim(kind, number, era byte, name string) []byte {
+	size := map[byte]int{0: 0x2c, 2: 0x32, 4: 0x26}[kind]
+	b := make([]byte, size)
+	copy(b, "Qspt1WmJOL")
+	b[10] = kind
+	copy(b[12:32], name)
+	b[0x20], b[0x21] = 1, era
+	binary.BigEndian.PutUint16(b[0x22:], uint16(size))
+	switch kind {
+	case 0:
+		b[0x25] = 1 // a player (a mixer sends 2)
+	case 2:
+		b[0x2e], b[0x31] = number, 1
+	case 4:
+		b[0x24] = number
+	}
+	return b
+}
+
+// Our per-deck players give way to a CDJ that boots after us: a PRIME 4 holds 1-4,
+// the left SC5000 of a pair 1 and 3 (the right one 2 and 4). A CDJ-2000NXS2 knows
+// only 1-4, a CDJ-3000 also 5 and 6.
+func TestSimCDJsBootAfterPrime4AndAnSC5000Pair(t *testing.T) {
+	root := t.TempDir()
+	testfixture.Export(t, root)
+	announcements := simSocket(t, 3)
+	peer := simSocket(t, 2)
+	start := func(master byte, decks ...byte) *prolink.Exporter {
+		t.Helper()
+		e := prolink.NewExporter(prolink.ExportConfig{Root: root, IP: net.IPv4(127, 63, 0, 1), MAC: net.HardwareAddr{2, 0, 0, 0, 0, 1}, DBAddr: "127.63.0.1:0", PortmapAddr: "127.63.0.1:0", DiscoveryAddr: "127.63.0.1:0", StatusAddr: "127.63.0.1:0", AnnounceAddr: announcements.LocalAddr().String(), ProbeDuration: 20 * time.Millisecond})
+		var ds []prolink.ExportDeck
+		for _, n := range decks {
+			ds = append(ds, prolink.ExportDeck{Number: n, Master: n == master})
+		}
+		e.SetDeck(prolink.ExportDeck{Master: true}, ds...)
+		if err := e.SetEnabled(true); err != nil {
+			t.Fatal(err)
+		}
+		return e
+	}
+	players := func(e *prolink.Exporter, want string) {
+		t.Helper()
+		for until := time.Now().Add(time.Second); e.Status().Players != want; time.Sleep(time.Millisecond) {
+			if time.Now().After(until) {
+				t.Fatalf("players %q, want %q", e.Status().Players, want)
+			}
+		}
+		time.Sleep(20 * time.Millisecond) // nothing more moves
+		if got := e.Status().Players; got != want {
+			t.Fatalf("players %q, want %q", got, want)
+		}
+	}
+	send := func(e *prolink.Exporter, packets ...[]byte) {
+		t.Helper()
+		to, _ := net.ResolveUDPAddr("udp4", e.Status().DiscoveryAddress)
+		for _, b := range packets {
+			if _, err := peer.WriteToUDP(b, to); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	keepalive := func(number, last byte, name string) []byte {
+		b := simKeepalive(number)
+		copy(b[12:32], make([]byte, 20))
+		copy(b[12:], name)
+		b[0x2b] = last // its own MAC
+		return b
+	}
+	boot := func(e *prolink.Exporter, number, era, last byte, name string) {
+		t.Helper()
+		send(e, simClaim(0, 0, era, name), simClaim(0, 0, era, name), simClaim(0, 0, era, name),
+			simClaim(2, number, era, name), simClaim(4, number, era, name), keepalive(number, last, name))
+	}
+
+	e := start(1, 1, 2, 3, 4) // PRIME 4, deck 1 master
+	players(e, "1,2,3,4")
+	boot(e, 5, 3, 0x30, "CDJ-3000") // 5 is free for it: nothing to give
+	players(e, "1,2,3,4")
+	mixer := simClaim(0, 0, 2, "DJM-900NXS2")
+	mixer[0x25] = 2 // a mixer's stage 1: it gives nobody a player number
+	send(e, mixer)
+	players(e, "1,2,3,4")
+	boot(e, 4, 2, 0x31, "CDJ-2000NXS2") // 1-4 held: stage 1 gets it 4 (not deck 1, the master)
+	players(e, "1,2,3")
+	send(e, simClaim(2, 2, 2, "CDJ-2000NXS2"), simClaim(4, 2, 2, "CDJ-2000NXS2"), keepalive(2, 0x32, "CDJ-2000NXS2")) // set to 2
+	players(e, "1,3")
+	e.Close()
+
+	e = start(3, 1, 3) // the left SC5000 of a pair, deck 3 master
+	defer e.Close()
+	send(e, keepalive(2, 0x40, "EngineX Export Beta"), keepalive(4, 0x40, "EngineX Export Beta")) // the right one
+	players(e, "1,3")
+	boot(e, 5, 3, 0x30, "CDJ-3000")
+	players(e, "1,3")
+	send(e, simClaim(0, 0, 2, "CDJ-2000NXS2")) // 1-4 held: it gets 1, the deck that is not master
+	players(e, "3")
+	boot(e, 1, 2, 0x31, "CDJ-2000NXS2")
+	send(e, simClaim(0, 0, 2, "CDJ-2000NXS2")) // another one: our last player stays
+	players(e, "3")
+}

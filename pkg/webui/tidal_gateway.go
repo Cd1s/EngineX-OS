@@ -1633,6 +1633,25 @@ func (g *tidalGateway) streamedFile(net string) string {
 	return ""
 }
 
+// rekordboxLoaded is the computer's address and rekordbox track id behind a deck's
+// streaming uri when that row came from the rekordbox source.
+func (g *tidalGateway) rekordboxLoaded(net string) (ip string, id uint32, ok bool) {
+	rest, found := strings.CutPrefix(net, "streaming://")
+	gid, err := strconv.ParseInt(path.Base(rest), 10, 64)
+	if !found || err != nil {
+		return "", 0, false
+	}
+	g.mu.Lock()
+	ref, found := g.tracks[gid]
+	g.mu.Unlock()
+	parts := strings.Split(ref.track.ID, "\x00")
+	if !found || ref.track.Provider != rekordboxScope || len(parts) != 3 {
+		return "", 0, false
+	}
+	n, err := strconv.ParseUint(parts[2], 10, 32)
+	return parts[1], uint32(n), err == nil
+}
+
 // playable is lookup for a row about to play: a rekordbox row first gets its audio file on
 // the deck, which can take a while (a copy over the network), then it is a drive row.
 func (g *tidalGateway) playable(w http.ResponseWriter, r *http.Request, raw string) (int64, trackRef, bool) {
