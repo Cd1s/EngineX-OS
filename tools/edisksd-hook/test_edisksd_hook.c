@@ -44,7 +44,8 @@ static uint64_t test_carry_slack;
 #include <errno.h>
 #include <sys/stat.h>
 static char test_eio_path[PATH_MAX];
-static int test_lstat(const char *path,struct stat *st){if(*test_eio_path&&!strcmp(path,test_eio_path)){errno=EIO;return -1;}return lstat(path,st);}
+static int test_eio_err=EIO;
+static int test_lstat(const char *path,struct stat *st){if(*test_eio_path&&!strcmp(path,test_eio_path)){errno=test_eio_err;return -1;}return lstat(path,st);}
 #define LSTAT test_lstat
 #include <sys/utsname.h>
 #include <unistd.h>
@@ -2070,6 +2071,23 @@ static void test_hfs_gen2_lkl_policy(const char *root,const char *self_exe) {
     mnt_context_enable_lazy(&c,1);
     u0=now_ms();assert(!unmount_dispatch(&c,real_unmount));uel=now_ms()-u0;
     assert(uel<250&&count_mounts(target)==0&&access(exf,F_OK)==-1&&kill(lpid,0)==-1&&errno==ESRCH);
+    close(held);mnt_free_context(&c);
+
+    // 4c. Dead lklfuse (target lstat ENOTCONN while an fd is open) -> still detaches and cleans up record.
+    join(img,root,"g2-pol-clean.img");
+    unlink(exf);unlink(pidf);unlink(logf);
+    memset(&c,0,sizeof c);c.target=target;c.source=img;
+    mnt_context_set_fstype_pattern(&c,"hfsplus");mnt_context_set_options(&c,"nosuid");
+    assert(!mnt_context_mount(&c)&&c.status==1);
+    pfd=open(pidf,O_RDONLY);assert(pfd>=0);pn=read(pfd,pbuf,sizeof pbuf-1);pbuf[pn]=0;close(pfd);
+    lpid=(pid_t)atoi(pbuf);assert(lpid>0);
+    held=open(p,O_RDONLY);assert(held>=0);
+    assert(!kill(lpid,SIGKILL));
+    while(waitpid(lpid,NULL,0)<0&&errno==EINTR){}
+    snprintf(test_eio_path,sizeof test_eio_path,"%s",target);test_eio_err=ENOTCONN;
+    assert(!unmount_dispatch(&c,real_unmount));
+    test_eio_path[0]=0;test_eio_err=EIO;
+    assert(count_mounts(target)==0);
     close(held);mnt_free_context(&c);
 
     // 5. lklfuse failure -> clean RO fallback.

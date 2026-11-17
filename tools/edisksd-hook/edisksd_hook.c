@@ -2305,7 +2305,7 @@ static int hfs_gen2_unmount(struct libmnt_context *ctx,const struct hfs_gen2_mou
     struct hfs_ctx_state *s=ctx_slot(ctx,0);
     if(s&&s->has_lazy)lazy=s->lazy;
     pthread_mutex_unlock(&ctx_lock);
-    int pulled=lazy||hfs_gen2_source_pulled(rec);
+    int pulled=lazy||hfs_gen2_source_pulled(rec)||!hfs_gen2_pid_alive((pid_t)rec->pid,rec->pid_starttime);
     if(pulled) {
         int (*set_lazy)(struct libmnt_context *,int)=REAL_MNT_CONTEXT_ENABLE_LAZY();
         if(set_lazy)set_lazy(ctx,1);
@@ -2438,10 +2438,14 @@ static int unmount_dispatch(struct libmnt_context *ctx,int (*real)(struct libmnt
     const char *target=mnt_context_get_target(ctx);
     if(!volume(target))return real(ctx);
     char lib[PATH_MAX];
-    if(safe_path(target,0)||path_join(lib,sizeof lib,target,"Engine Library"))return -errno;
-    // A symlinked library is refused. Any other error is the stick's, e.g. EIO once it was
-    // pulled without Eject: that must not keep the dead mount until a reboot (BH-O55-5).
-    if(safe_path(lib,1)&&errno==ELOOP)return -ELOOP;
+    int target_err=safe_path(target,0)?errno:0;
+    if(target_err&&target_err!=ENOTCONN){errno=target_err;return -target_err;}
+    if(!target_err) {
+        if(path_join(lib,sizeof lib,target,"Engine Library"))return -errno;
+        // A symlinked library is refused. Any other error is the stick's, e.g. EIO once it was
+        // pulled without Eject: that must not keep the dead mount until a reboot (BH-O55-5).
+        if(safe_path(lib,1)&&errno==ELOOP)return -ELOOP;
+    }
     // Only this target's own mount makes its view record, under view_lock. Without one it
     // is the stock umount and does not wait for view_lock, which another stick's
     // conversion holds for up to its whole budget (BH-O55-3).
@@ -2451,6 +2455,7 @@ static int unmount_dispatch(struct libmnt_context *ctx,int (*real)(struct libmnt
         int rc=hfs_gen2_unmount(ctx,&gen2_rec,real);
         int saved=errno;in_hook=0;errno=saved;return rc;
     }
+    if(target_err){errno=target_err;return -target_err;}
     struct owned_view *v=load_view(target);
     if(!v) {
         if(HFS_RW_MOUNTED(target)) {
