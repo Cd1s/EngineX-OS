@@ -369,3 +369,68 @@ func TestAppleMusicProbeHelperOnlineVsOfflineCooldown(t *testing.T) {
 		t.Fatalf("online helper did not re-probe after 2s: st=%+v ready=%v hits=%d->%d", st, am.Ready(), beforeHits, afterHits)
 	}
 }
+
+func TestAppleMusicForgetSticksUntilNewLogin(t *testing.T) {
+	var mu sync.Mutex
+	signedIn := true
+	userTok := "mut-alice"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		in, tok := signedIn, userTok
+		mu.Unlock()
+		switch r.URL.Path {
+		case "/healthz":
+			w.WriteHeader(http.StatusOK)
+		case "/v1/login/status", "/v1/login":
+			st := "signed-out"
+			if in {
+				st = "ready"
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"state": st, "signedIn": in})
+		case "/v1/login/credentials":
+			_ = json.NewEncoder(w).Encode(map[string]any{"signedIn": in, "mediaUserToken": tok, "storefront": "us"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	ownerPath := filepath.Join(t.TempDir(), "applemusic-owner.json")
+	am := &AppleMusic{OwnerPath: ownerPath, HelperURL: srv.URL, HelperToken: "tok"}
+	if st := am.HelperStatus(t.Context()); !st.SignedIn || !am.Ready() || am.Owner().UserToken != "mut-alice" {
+		t.Fatalf("initial helper sync failed: st=%+v ready=%v owner=%+v", st, am.Ready(), am.Owner())
+	}
+	if _, err := os.Stat(ownerPath); err != nil {
+		t.Fatalf("expected owner file after initial sync: %v", err)
+	}
+
+	if err := am.Forget(); err != nil {
+		t.Fatal(err)
+	}
+	st := am.HelperStatus(t.Context())
+	if st.SignedIn || am.Ready() || am.Owner().UserToken != "" {
+		t.Fatalf("sign-out did not stick across HelperStatus: st=%+v ready=%v owner=%+v", st, am.Ready(), am.Owner())
+	}
+	if _, err := os.Stat(ownerPath); !os.IsNotExist(err) {
+		t.Fatalf("owner file was rewritten after Forget: err=%v", err)
+	}
+	if st = am.ProbeHelper(t.Context(), 0); st.SignedIn || am.Ready() {
+		t.Fatalf("sign-out did not stick across ProbeHelper: st=%+v ready=%v", st, am.Ready())
+	}
+
+	// Signing into a different account on the external helper re-enables sync.
+	mu.Lock()
+	userTok = "mut-bob"
+	mu.Unlock()
+	if st = am.HelperStatus(t.Context()); !st.SignedIn || !am.Ready() || am.Owner().UserToken != "mut-bob" {
+		t.Fatalf("new helper account should sync: st=%+v ready=%v owner=%+v", st, am.Ready(), am.Owner())
+	}
+
+	// Explicit HelperLoginBegin also clears the forgotten flag even for the same account.
+	if err := am.Forget(); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := am.HelperLoginBegin(t.Context(), "bob@example.com", "pw"); err != nil || !st.SignedIn || !am.Ready() || am.Owner().UserToken != "mut-bob" {
+		t.Fatalf("explicit HelperLoginBegin should relink: st=%+v err=%v ready=%v owner=%+v", st, err, am.Ready(), am.Owner())
+	}
+}

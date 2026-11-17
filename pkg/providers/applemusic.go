@@ -33,6 +33,8 @@ type AppleMusic struct {
 	saveMu         sync.Mutex
 	probeMu        sync.Mutex
 	owner          AppleMusicOwner
+	ownerForgot    bool
+	forgottenToken string
 	credGen        uint64
 	helperOnline   bool
 	helperSignedIn bool
@@ -137,6 +139,8 @@ func (a *AppleMusic) Load() error {
 	}
 	a.mu.Lock()
 	a.owner = o
+	a.ownerForgot = false
+	a.forgottenToken = ""
 	a.mu.Unlock()
 	return nil
 }
@@ -174,6 +178,8 @@ func (a *AppleMusic) SetOwner(ctx context.Context, o AppleMusicOwner) error {
 	}
 	a.mu.Lock()
 	a.owner = o
+	a.ownerForgot = false
+	a.forgottenToken = ""
 	a.credGen++
 	a.mu.Unlock()
 	return nil
@@ -193,7 +199,10 @@ func (a *AppleMusic) Forget() error {
 		return nil
 	}
 	a.mu.Lock()
+	prevToken := a.owner.UserToken
 	a.owner = AppleMusicOwner{}
+	a.ownerForgot = true
+	a.forgottenToken = prevToken
 	a.credGen++
 	a.helperSignedIn = false
 	a.helperDevToken = ""

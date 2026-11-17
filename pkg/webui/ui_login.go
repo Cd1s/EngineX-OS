@@ -820,34 +820,33 @@ func (s *Server) phonePost(w http.ResponseWriter, r *http.Request) {
 	case *providers.AppleMusic:
 		if helperAction := r.Form.Get("helperAction"); helperAction != "" {
 			if helperAction == "setup" {
+				// Keep phone helper setup deck-local: holding the QR flow token is not owning the relay (#8).
+				helperURL := strings.TrimSpace(r.Form.Get("helperUrl"))
+				helperToken := strings.TrimSpace(r.Form.Get("helperToken"))
 				s.appleMusicHelperMu.Lock()
 				already := s.appleMusic.HelperConfig().URL != ""
+				var err error
+				if !already && helperURL != "" && validAppleMusicHelperURL(helperURL) {
+					cfg := providers.AppleMusicHelperConfig{URL: helperURL, Token: helperToken}
+					err = providers.SaveJSON(s.appleMusicHelperPath(), appleMusicHelperSettings{cfg, helperToken == ""})
+					if err == nil {
+						s.appleMusicHelperTokenCleared = helperToken == ""
+						s.appleMusic.SetHelper(cfg.URL, cfg.LoginURL, cfg.Token)
+					}
+				}
 				s.appleMusicHelperMu.Unlock()
 				if already {
 					refuse("amFailed", tr(lang, "amHelperRetry"))
 					return
 				}
-				helperURL := strings.TrimSpace(r.Form.Get("helperUrl"))
-				helperToken := strings.TrimSpace(r.Form.Get("helperToken"))
 				if helperURL == "" || !validAppleMusicHelperURL(helperURL) {
 					refuse("badForm", "")
 					return
 				}
-				s.appleMusicHelperMu.Lock()
-				cfg := providers.AppleMusicHelperConfig{URL: helperURL, Token: helperToken}
-				err := providers.SaveJSON(s.appleMusicHelperPath(), appleMusicHelperSettings{cfg, helperToken == ""})
-				if err == nil {
-					s.appleMusicHelperTokenCleared = helperToken == ""
-					s.appleMusic.SetHelper(cfg.URL, cfg.LoginURL, cfg.Token)
-				}
-				s.appleMusicHelperMu.Unlock()
 				if err != nil {
 					fail(w, 500, errors.New("applemusic: could not save helper settings"))
 					return
 				}
-				go func(u, t string) {
-					_ = s.pushRelayConfig(context.Background(), map[string]any{"appleMusicHelperUrl": u, "appleMusicHelperToken": t})
-				}(helperURL, helperToken)
 				http.Redirect(w, r, phoneAction(r, flow), http.StatusSeeOther)
 				return
 			}

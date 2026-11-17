@@ -275,15 +275,22 @@ func (s *Server) pullRelayConfig(ctx context.Context) error {
 		if validAppleMusicHelperURL(amURL) && validAppleMusicHelperURL(amLoginURL) {
 			s.appleMusicHelperMu.Lock()
 			cfg := s.appleMusic.HelperConfig()
+			trimmedURL := strings.TrimRight(amURL, "/")
+			urlChanged := trimmedURL != strings.TrimRight(cfg.URL, "/")
 			next := cfg
-			next.URL = amURL
+			next.URL = trimmedURL
 			if amLoginURL != "" {
 				next.LoginURL = amLoginURL
+			} else if urlChanged {
+				next.LoginURL = ""
 			}
 			tokenCleared := s.appleMusicHelperTokenCleared
 			if amToken != "" {
 				next.Token = amToken
 				tokenCleared = false
+			} else if urlChanged {
+				next.Token = ""
+				tokenCleared = true
 			}
 			var saveErr error
 			if next != cfg || tokenCleared != s.appleMusicHelperTokenCleared {

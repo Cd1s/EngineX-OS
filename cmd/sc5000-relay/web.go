@@ -387,13 +387,23 @@ func (s *server) configView() map[string]any {
 	return s.configViewWithContext(context.Background())
 }
 
+func isAutoHelperIPv4(ip net.IP) bool {
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return false
+	}
+	// Advertise plain-HTTP helper URLs only on RFC 1918 private LANs or
+	// RFC 6598 CGNAT / Tailscale (100.64.0.0/10), never on a public route.
+	return ip4.IsPrivate() || (ip4[0] == 100 && ip4[1]&0xc0 == 64)
+}
+
 func localLANIPv4() string {
 	// Prefer a UDP socket dial so RestrictAddressFamilies=AF_INET (without AF_NETLINK) works.
-	for _, target := range []string{"192.168.1.1:80", "10.0.0.1:80", "1.1.1.1:80"} {
+	for _, target := range []string{"192.168.1.1:80", "10.0.0.1:80", "172.16.0.1:80", "100.100.100.100:80", "1.1.1.1:80"} {
 		if c, err := net.Dial("udp4", target); err == nil {
 			ip := c.LocalAddr().(*net.UDPAddr).IP.To4()
 			_ = c.Close()
-			if ip != nil && !ip.IsLoopback() && !ip.IsLinkLocalUnicast() {
+			if isAutoHelperIPv4(ip) {
 				return ip.String()
 			}
 		}
@@ -407,8 +417,8 @@ func localLANIPv4() string {
 		if !ok || ipnet.IP.IsLoopback() {
 			continue
 		}
-		if ip4 := ipnet.IP.To4(); ip4 != nil && !ip4.IsLinkLocalUnicast() {
-			return ip4.String()
+		if isAutoHelperIPv4(ipnet.IP) {
+			return ipnet.IP.To4().String()
 		}
 	}
 	return ""
@@ -458,14 +468,38 @@ func localAppleMusicHelper(ctx context.Context) (helperURL, loginURL, token stri
 	return "http://" + host + ":12341", "http://" + host + ":12342", readLocalHelperToken()
 }
 
+func effectiveAppleMusicHelper(ctx context.Context, c config) (amURL, amLoginURL, amToken string, autoURL, autoLogin bool) {
+	amURL, amLoginURL, amToken = c.AppleMusicHelperURL, c.AppleMusicHelperLoginURL, c.AppleMusicHelperToken
+	if amURL == "" || amToken == "" {
+		detURL, detLoginURL, detTok := localAppleMusicHelper(ctx)
+		if amURL == "" {
+			amURL = detURL
+			autoURL = detURL != ""
+			if amLoginURL == "" {
+				amLoginURL = detLoginURL
+				autoLogin = detLoginURL != ""
+			}
+			if amToken == "" {
+				amToken = detTok
+			}
+		} else if detURL != "" && strings.TrimRight(amURL, "/") == strings.TrimRight(detURL, "/") {
+			if amLoginURL == "" {
+				amLoginURL = detLoginURL
+				autoLogin = detLoginURL != ""
+			}
+			if amToken == "" {
+				amToken = detTok
+			}
+		}
+	}
+	return amURL, amLoginURL, amToken, autoURL, autoLogin
+}
+
 func (s *server) configViewWithContext(ctx context.Context) map[string]any {
 	c := s.cfg.get()
 	decks := s.decks.listView(time.Now())
 	stems := s.stemsStatus(ctx)
-	amURL, amLoginURL, amToken := c.AppleMusicHelperURL, c.AppleMusicHelperLoginURL, c.AppleMusicHelperToken
-	if amURL == "" {
-		amURL, amLoginURL, amToken = localAppleMusicHelper(ctx)
-	}
+	amURL, amLoginURL, amToken, amAuto, amLoginAuto := effectiveAppleMusicHelper(ctx, c)
 	v := map[string]any{
 		"backendUrl":        s.publicURL(),
 		"tunnelUrl":         s.quickTunnelURL(),
@@ -475,15 +509,17 @@ func (s *server) configViewWithContext(ctx context.Context) map[string]any {
 		"passwordIsDefault": c.PasswordIsDefault,
 		"spotifyRedirect":   s.spotifyHTTPSRedirect(),
 
-		"soundcloudClientIdSet":    c.SoundCloudClientID != "",
-		"soundcloudSecretSet":      c.SoundCloudSecret != "",
-		"soundcloudTokenSet":       c.SoundCloudToken != "",
-		"getSongBpmKeySet":         c.GetSongBPMKey != "",
-		"appleMusicHelperUrl":      amURL,
-		"appleMusicHelperLoginUrl": amLoginURL,
-		"appleMusicHelperTokenSet": amToken != "",
-		"decks":                    decks,
-		"stems":                    stems,
+		"soundcloudClientIdSet":     c.SoundCloudClientID != "",
+		"soundcloudSecretSet":       c.SoundCloudSecret != "",
+		"soundcloudTokenSet":        c.SoundCloudToken != "",
+		"getSongBpmKeySet":          c.GetSongBPMKey != "",
+		"appleMusicHelperUrl":       amURL,
+		"appleMusicHelperLoginUrl":  amLoginURL,
+		"appleMusicHelperTokenSet":  amToken != "",
+		"appleMusicHelperAuto":      amAuto,
+		"appleMusicHelperLoginAuto": amLoginAuto,
+		"decks":                     decks,
+		"stems":                     stems,
 	}
 	if c.DeezerARL != "" {
 		v["deezerArlMasked"] = maskSecret(c.DeezerARL)
@@ -512,10 +548,7 @@ func (s *server) handleConfigGet(w http.ResponseWriter, r *http.Request) {
 		view["soundcloudClientSecret"] = c.SoundCloudSecret
 		view["soundcloudToken"] = c.SoundCloudToken
 		view["getSongBpmKey"] = c.GetSongBPMKey
-		amTok := c.AppleMusicHelperToken
-		if amTok == "" && c.AppleMusicHelperURL == "" {
-			_, _, amTok = localAppleMusicHelper(r.Context())
-		}
+		_, _, amTok, _, _ := effectiveAppleMusicHelper(r.Context(), c)
 		view["appleMusicHelperToken"] = amTok
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "config": view, "decks": view["decks"], "stems": view["stems"]})
@@ -621,14 +654,19 @@ func (s *server) handleConfigPost(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := s.cfg.update(func(c *config) {
+			urlChanged := v.Has("appleMusicHelperUrl") && strings.TrimRight(amURL, "/") != strings.TrimRight(c.AppleMusicHelperURL, "/")
 			if v.Has("appleMusicHelperUrl") {
 				c.AppleMusicHelperURL = amURL
 			}
 			if v.Has("appleMusicHelperLoginUrl") {
 				c.AppleMusicHelperLoginURL = amLoginURL
+			} else if urlChanged {
+				c.AppleMusicHelperLoginURL = ""
 			}
 			if amTok != "" {
 				c.AppleMusicHelperToken = amTok
+			} else if urlChanged {
+				c.AppleMusicHelperToken = ""
 			}
 		}); err != nil {
 			fail(500, err.Error())
