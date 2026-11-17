@@ -982,7 +982,8 @@ func (r *exportRun) heardLocked(ip net.IP, b []byte) {
 		// ours again: Engine's deck led our decks all along.
 		if _, was := r.masters[number]; was {
 			delete(r.masters, number)
-			if r.yielded && !r.peerMasterLocked(now) {
+			// A paused deck leaves it vacant, as a paused CDJ would (MASTER pressed takes it).
+			if r.yielded && !r.peerMasterLocked(now) && r.deckLocked(r.masterPlayerLocked()).Playing {
 				r.yielded = false
 			}
 		}

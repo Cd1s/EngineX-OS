@@ -1292,8 +1292,16 @@ func TestExportHandsMasterToRekordbox(t *testing.T) {
 		t.Fatal("two masters: the computer took it and our status still claims it")
 	}
 	heard(status(0xc0, 0xff))
+	if master, _ := look(); master {
+		t.Fatal("the computer let go: our paused deck leaves master vacant, as a paused CDJ would")
+	}
+	r.mu.Lock()
+	r.deck.Playing = true
+	r.mu.Unlock()
+	heard(status(0xe0, 0xff))
+	heard(status(0xc0, 0xff))
 	if master, _ := look(); !master {
-		t.Fatal("the computer let go and Engine's deck still leads: master is ours again")
+		t.Fatal("the computer let go and Engine's playing deck leads: master is ours again")
 	}
 }
 
@@ -1347,6 +1355,13 @@ func TestExportPausedDeckLeavesMasterToRekordbox(t *testing.T) {
 		r.heardLocked(computer, status)
 		if master := r.statusPacket()[0x89]&0x20 != 0; master != playing {
 			t.Fatalf("playing %v: our status claims master %v", playing, master)
+		}
+		// rekordbox lets go: a playing deck takes the vacant master (#217), a paused one leaves it.
+		status[0x27] = 0xc0
+		r.heardLocked(computer, status)
+		status[0x27] = 0xe0
+		if master := r.statusPacket()[0x89]&0x20 != 0; master != playing {
+			t.Fatalf("playing %v, master vacant: our status claims master %v", playing, master)
 		}
 	}
 }
