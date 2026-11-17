@@ -957,6 +957,11 @@ func TestAppleMusicForgetSurvivesDeckRestart(t *testing.T) {
 		p := newB1bHelperProbe(t, creds)
 		p.poll()
 		p.signOut()
+		if raw, err := os.ReadFile(p.file + ".forgot"); err != nil {
+			t.Fatalf("creds=%v: expected forgot marker file: %v", creds, err)
+		} else if strings.Contains(string(raw), "mut-alice") {
+			t.Fatalf("creds=%v: forgot marker leaked raw token bytes: %s", creds, raw)
+		}
 		p.poll()
 
 		s2 := New(Config{AccessToken: "test-token-1234", StateDir: p.dir}, nil)
@@ -972,6 +977,9 @@ func TestAppleMusicForgetSurvivesDeckRestart(t *testing.T) {
 		}
 		if !p.poll() || (creds && !p.ownerFile()) {
 			t.Fatalf("creds=%v: console re-login after restart did not relink: ready=%v file=%v", creds, p.s.appleMusic.Ready(), p.ownerFile())
+		}
+		if _, err := os.Stat(p.file + ".forgot"); !os.IsNotExist(err) {
+			t.Fatalf("creds=%v: forgot marker was not removed after re-login: %v", creds, err)
 		}
 	}
 }

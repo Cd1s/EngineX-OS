@@ -418,13 +418,26 @@ func TestAppleMusicForgetSticksUntilNewLogin(t *testing.T) {
 	if _, err := os.Stat(ownerPath); !os.IsNotExist(err) {
 		t.Fatalf("owner file was rewritten after Forget: err=%v", err)
 	}
+	markerBytes, err := os.ReadFile(ownerPath + ".forgot")
+	if err != nil {
+		t.Fatalf("expected forgot marker file: %v", err)
+	}
+	if strings.Contains(string(markerBytes), "mut-alice") {
+		t.Fatalf("forgot marker leaked raw media-user-token bytes: %s", markerBytes)
+	}
 	if st = am.ProbeHelper(t.Context(), 0); st.SignedIn || am.Ready() {
 		t.Fatalf("sign-out did not stick across ProbeHelper: st=%+v ready=%v", st, am.Ready())
 	}
 
-	// Reloading from disk after a restart preserves the sign-out marker.
+	// Reloading from disk after a restart (including a crash before ownerPath removal) preserves sign-out and cleans up ownerPath.
+	if err := os.WriteFile(ownerPath, []byte(`{"userToken":"mut-alice","storefront":"us"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	restarted := &AppleMusic{OwnerPath: ownerPath, HelperURL: srv.URL, HelperToken: "tok"}
 	_ = restarted.Load()
+	if _, err := os.Stat(ownerPath); !os.IsNotExist(err) {
+		t.Fatalf("Load() did not clean up leftover owner file when forgot marker was present: err=%v", err)
+	}
 	if st = restarted.HelperStatus(t.Context()); st.SignedIn || restarted.Ready() {
 		t.Fatalf("sign-out did not survive Load() restart: st=%+v ready=%v", st, restarted.Ready())
 	}

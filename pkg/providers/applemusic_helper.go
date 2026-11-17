@@ -113,10 +113,10 @@ func (a *AppleMusic) helperLogin(ctx context.Context, cfg AppleMusicHelperConfig
 			clearForgotPath = forgotMarkerPath(a.OwnerPath)
 		}
 		a.ownerForgot = false
-		a.forgottenToken = ""
+		a.forgotHash = ""
 	}
 	forgot := a.ownerForgot
-	forgotTok := a.forgottenToken
+	forgotHash := a.forgotHash
 	a.helperSignedIn = status.SignedIn && !forgot
 	if !status.SignedIn || forgot {
 		a.helperDevToken = ""
@@ -133,7 +133,7 @@ func (a *AppleMusic) helperLogin(ctx context.Context, cfg AppleMusicHelperConfig
 		a.saveMu.Unlock()
 	}
 	if status.SignedIn {
-		if !forgot || forgotTok != "" {
+		if !forgot || forgotHash != "" {
 			a.syncHelperCredentials(ctx, cfg)
 		}
 		a.mu.Lock()
@@ -166,7 +166,7 @@ func (a *AppleMusic) helperLogin(ctx context.Context, cfg AppleMusicHelperConfig
 // helpers without /v1/login/credentials are ignored without error.
 func (a *AppleMusic) syncHelperCredentials(ctx context.Context, cfg AppleMusicHelperConfig) {
 	a.mu.Lock()
-	if a.ownerForgot && a.forgottenToken == "" {
+	if a.ownerForgot && a.forgotHash == "" {
 		a.mu.Unlock()
 		return
 	}
@@ -199,12 +199,12 @@ func (a *AppleMusic) syncHelperCredentials(ctx context.Context, cfg AppleMusicHe
 		return
 	}
 	if a.ownerForgot {
-		if userToken == "" || userToken == a.forgottenToken {
+		if userToken == "" || hashAppleMusicToken(userToken) == a.forgotHash {
 			a.mu.Unlock()
 			return
 		}
 		a.ownerForgot = false
-		a.forgottenToken = ""
+		a.forgotHash = ""
 	}
 	if devToken != "" && devToken != a.helperDevToken {
 		if a.web != "" && a.web == a.helperDevToken {
