@@ -138,25 +138,4 @@ if [ "$runtime" = 1 ]; then
         az01-ethernet-speed 1000 || az01-ethernet-speed 100 || :
     fi
     if command -v iw >/dev/null 2>&1; then iw dev wlan0 set power_save off || :; fi
-    if [ -r /proc/interrupts ]; then
-        for spec in ffb20000:0 ffa30000:1 ehci_hcd:2 ff540000:2 eth0:2; do
-            name=${spec%:*}; cpu=${spec#*:}
-            for irq in $(awk -v name="$name" 'index($0,name) && $1 ~ /^[0-9]+:$/ {sub(":", "", $1); print $1}' /proc/interrupts); do
-                if [ -w "/proc/irq/$irq/smp_affinity_list" ]; then
-                    printf '%s\n' "$cpu" > "/proc/irq/$irq/smp_affinity_list" || :
-                elif [ -w "/proc/irq/$irq/smp_affinity" ]; then
-                    printf '%x\n' "$((1 << cpu))" > "/proc/irq/$irq/smp_affinity" || :
-                fi
-                for comm in /proc/[0-9]*/comm; do
-                    [ -r "$comm" ] || continue
-                    IFS= read -r thread < "$comm" || continue
-                    case "$thread" in irq/"$irq"-*)
-                        pid=${comm%/comm}; pid=${pid##*/}
-                        if command -v taskset >/dev/null 2>&1; then taskset -pc "$cpu" "$pid" >/dev/null || :; fi
-                        if [ "$name" = ffb20000 ] && command -v chrt >/dev/null 2>&1; then chrt -f -p 99 "$pid" || :; fi
-                        ;; esac
-                done
-            done
-        done
-    fi
 fi

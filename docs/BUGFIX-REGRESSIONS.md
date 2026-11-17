@@ -4,7 +4,7 @@ Validation used a disposable build-host checkout; restricted firmware trees were
 
 | 项 | 修复 | 回归覆盖 |
 | --- | --- | --- |
-| 1 | 音频 IRQ CPU0/FIFO99，GPU CPU1，IO CPU2，其余 IRQ CPU1–2；从 IRQ 编号识别被截断的线程名 | `tests/test_rootfs_overlay.sh` 的 IRQ mask、线程 CPU、优先级和重复执行断言 |
+| 1 | 音频 IRQ CPU0/FIFO99，GPU CPU1，IO CPU2，其余 IRQ CPU1–2；从 IRQ 编号识别被截断的线程名。5.3.0.5 起交还原厂摆放（#298，见 `docs/REGRESSION-CHECKLIST.md` 行 310） | `tests/test_rootfs_overlay.sh` 断言 IRQ mask 保持原值、不调用 `taskset`/`chrt`、重复执行结果相同；`pkg/dbhealer/debloat_test.go` 断言 debloat 的 runtime 段同样不动中断 |
 | 2 | 忽略路径大小写识别 PDB/SQLite 导出；bridge 后、通知前限时运行 CPU3 healer | Shell 的三类导出、混合大小写目录、执行顺序和 healer 超时用例 |
 | 3 | 波形索引乘法使用 uint64，并检查条目大小 | `TestWaveformIndexAndShortAnalysisBoundaries`；386 实际运行和 ARMv7 编译 |
 | 4 | 同一事务删除消失的桥接曲目、状态和本库成员，释放旧路径 | `TestDeletedSourceReleasesPathAndMembership`、`TestDeletedSourceCleanupRollsBackOnBadAnalysis` |

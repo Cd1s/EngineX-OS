@@ -102,7 +102,7 @@ the vendor's remaining encryption/storage behavior is not replaced here.
 The overlay enables both systemd units through relative wants links. The engine
 drop-in runs runtime tuning before startup, and `enginex-debloat.service` repeats
 it after the vendor prerequisites. Runtime mode never rewrites the rootfs.
-Audio IRQs use CPU 0/FIFO 99, GPU CPU 1, USB/network CPU 2, and guardian runs with
+IRQs and their threads keep the placement stock gives them (#298), and guardian runs with
 idle CPU/I/O scheduling on CPU 3. Missing hardware utilities are tolerated;
 gigabit negotiation failure falls back to 100 Mbps. Wi-Fi power saving is
 turned off on service execution. Networking reconnections may require repeating

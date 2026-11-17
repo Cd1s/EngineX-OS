@@ -708,7 +708,8 @@ class FilesystemTests(unittest.TestCase):
                  ('systemd/system/stream-sync.service.d/50-' + legacy.PROJECT + '-background.conf'),
                  ('systemd/system/edisksd.service.d/50-' + legacy.PROJECT + '-hook.conf'), ('default/' + legacy.PROJECT + '-perf'),
                  ('udev/rules.d/60-' + legacy.PROJECT + '-storage.rules'), ('systemd/journald.conf.d/' + legacy.PROJECT + '.conf'),
-                 ('dnsmasq.d/' + legacy.PROJECT + '-telemetry.conf'), 'systemd/system/enginex-deemixd.service']
+                 ('dnsmasq.d/' + legacy.PROJECT + '-telemetry.conf'), 'systemd/system/enginex-deemixd.service',
+                 'default/enginex-perf']
         for name in stale + ['keep.conf', 'systemd/system/user-own.service']:
             (upper/name).parent.mkdir(parents=True, exist_ok=True)
             (upper/name).write_text('r4')

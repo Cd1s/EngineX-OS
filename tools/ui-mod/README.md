@@ -131,8 +131,7 @@ best-effort I/O priority 7. Analysis Queue and other potential lock holders
 must make progress under ordinary CPU and I/O load; SCHED_IDLE/idle I/O
 cannot guarantee that. Freeze Checker and transient JobController names
 are left alone. Named helpers share all online CPUs except EMain/SceneGraph
-(1/2), instead of the old single last CPU. The perf-tune sweeper uses the
-same helper mask. Pixmap/FileInfo workers retain nice 10 and the helper mask.
+(1/2), instead of the old single last CPU. Pixmap/FileInfo workers retain nice 10 and the helper mask.
 
 Both pthread naming and Qt prctl/__prctl_time64 naming apply these guards;
 later pthread_setschedparam calls cannot put named background workers back
