@@ -164,3 +164,83 @@ func TestNFSReadPipelineCancellationAndWriterError(t *testing.T) {
 		t.Fatalf("silent server did not exhaust bounded retries: %v after %s", err, time.Since(start))
 	}
 }
+
+type gatedNFSWriter struct {
+	bytes.Buffer
+	once            sync.Once
+	started, resume chan struct{}
+}
+
+func (w *gatedNFSWriter) Write(p []byte) (int, error) {
+	w.once.Do(func() { close(w.started); <-w.resume })
+	return w.Buffer.Write(p)
+}
+
+func TestNFSReadPipelineConcurrentPrivilegedLookup(t *testing.T) {
+	var source int
+	for source = 1023; source > 1000; source-- {
+		probe, err := net.ListenUDP("udp4", &net.UDPAddr{Port: source})
+		if err == nil {
+			probe.Close()
+			break
+		}
+	}
+	if source == 1000 {
+		t.Skip("no available privileged UDP test port")
+	}
+	root := t.TempDir()
+	want := bytes.Repeat([]byte("audio"), 6000)
+	os.WriteFile(filepath.Join(root, "a.mp3"), want, 0600)
+	s := &NFSServer{Root: root}
+	if err := s.Listen("127.0.0.1:0"); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	secure, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		buf := make([]byte, 64<<10)
+		for {
+			n, from, err := secure.ReadFromUDP(buf)
+			if err != nil {
+				return
+			}
+			if from.Port >= 1024 {
+				continue
+			}
+			secure.WriteToUDP(s.handle(buf[:n], uint32(secure.LocalAddr().(*net.UDPAddr).Port)), from)
+		}
+	}()
+	defer func() { secure.Close(); <-done }()
+	c := &NFSClient{IP: net.IPv4(127, 0, 0, 1), Portmap: secure.LocalAddr().(*net.UDPAddr).Port, SourcePort: source, Timeout: 30 * time.Millisecond}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	w := &gatedNFSWriter{started: make(chan struct{}), resume: make(chan struct{})}
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(w.resume) }) }
+	defer release()
+	finished := make(chan error, 1)
+	go func() { _, err := c.FetchTo(ctx, "/C/", "/a.mp3", w, 1<<20); finished <- err }()
+	select {
+	case <-w.started:
+	case err := <-finished:
+		t.Fatalf("first copy never started: %v", err)
+	case <-ctx.Done():
+		t.Fatal("first copy stalled")
+	}
+	_, info, lookupErr := c.Lookup(ctx, "/C/", "/a.mp3")
+	release()
+	if err := <-finished; err != nil {
+		t.Fatalf("first copy: %v", err)
+	}
+	if lookupErr != nil || info.Size != uint32(len(want)) {
+		t.Fatalf("concurrent privileged lookup: %+v %v", info, lookupErr)
+	}
+	if !bytes.Equal(w.Bytes(), want) {
+		t.Fatal("copy bytes changed")
+	}
+}

@@ -17,6 +17,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode/utf16"
 )
@@ -155,6 +156,13 @@ func rpcAccepted(r *reader, prog, proc uint32) (*reader, error) {
 func (c *NFSClient) dial(port int) (*net.UDPConn, error) {
 	remote := &net.UDPAddr{IP: c.IP, Port: port}
 	conn, err := net.DialUDP("udp4", &net.UDPAddr{Port: c.SourcePort}, remote)
+	// A pipelined copy keeps its socket. Concurrent lookups/copies must still
+	// use a privileged port when the server requires one.
+	if c.SourcePort > 0 && c.SourcePort < 1024 {
+		for source := c.SourcePort - 1; source > 0 && errors.Is(err, syscall.EADDRINUSE); source-- {
+			conn, err = net.DialUDP("udp4", &net.UDPAddr{Port: source}, remote)
+		}
+	}
 	if err != nil && c.SourcePort != 0 {
 		conn, err = net.DialUDP("udp4", nil, remote)
 	}
