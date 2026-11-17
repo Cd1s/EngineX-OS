@@ -48,6 +48,7 @@ func simKeepalive(number byte) []byte {
 	copy(b[0x2c:], net.IPv4(127, 63, 0, 2).To4())
 	b[0x30] = 2
 	b[0x34] = 1
+	b[0x35] = 0x64 // CDJ-3000 model code
 	return b
 }
 func simStatus() []byte {
@@ -65,7 +66,7 @@ func simStatus() []byte {
 	b[0x73] = 4
 	b[0x75] = 1
 	b[0x7b] = 3
-	copy(b[0x7c:], "3.20")
+	copy(b[0x7c:], "3.22") // the 3.2.2 of #198, if it fills the 4-byte field
 	b[0x89] = 0xf8
 	b[0x8b] = 0xfa
 	for _, off := range []int{0x8c, 0x98, 0xc0, 0xc4} {
@@ -76,6 +77,7 @@ func simStatus() []byte {
 	b[0x9f] = 0xff
 	binary.BigEndian.PutUint32(b[0xa0:], 2)
 	b[0xa6] = 2
+	b[0xb6] = 1
 	b[0xb7] = 1
 	return b
 }
@@ -327,8 +329,8 @@ func TestSimCDJ3000ClientToDenon(t *testing.T) {
 		return b[:n]
 	}
 	keep := readPacket(announcements, 54, 6)
-	if keep[0x24] != 4 || string(keep[:10]) != "Qspt1WmJOL" {
-		t.Fatal("export keepalive")
+	if keep[0x24] != 4 || string(keep[:10]) != "Qspt1WmJOL" || keep[0x35] != 0x64 {
+		t.Fatalf("export keepalive % x", keep)
 	}
 	media := readPacket(mediaBroadcast, 192, 6)
 	if media[0x27] != 4 || media[0x2b] != 3 {
@@ -338,9 +340,17 @@ func TestSimCDJ3000ClientToDenon(t *testing.T) {
 	if _, err := peer.WriteToUDP(simKeepalive(6), claimAddress); err != nil {
 		t.Fatal(err)
 	}
+	// #198: a CDJ-3000 on 3.2.2 as player 6. It warned "Linked to player with
+	// older firmware" while our status had 0 at b6, whatever version 7c-7f said.
+	own := simStatus()
+	own[0x21], own[0x24] = 6, 6
+	statusAddr, _ := net.ResolveUDPAddr("udp4", e.Status().StatusAddress)
+	if _, err := peer.WriteToUDP(own, statusAddr); err != nil {
+		t.Fatal(err)
+	}
 	idle := readPacket(peerStatus, 0x11c, 0x0a)
-	if idle[0x21] != 4 || idle[0x6f] != 0 || idle[0x75] != 1 || idle[0x89]&0x70 != 0 {
-		t.Fatal("outgoing mounted idle status")
+	if idle[0x21] != 4 || idle[0x6f] != 0 || idle[0x75] != 1 || idle[0x89]&0x70 != 0 || idle[0xb6] != 1 || idle[0xb7] != 2 || string(idle[0x7c:0x80]) < "3.22" {
+		t.Fatalf("outgoing mounted idle status % x", idle[0x7c:0xb8])
 	}
 	// Query mounted USB using the real 48-byte media query envelope.
 	mediaQuery := simPacket(5, 0x30, 11, 1)
