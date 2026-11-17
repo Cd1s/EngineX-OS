@@ -552,3 +552,46 @@ func TestRekordboxCacheIsOnTheDrivesVolume(t *testing.T) {
 		t.Fatalf("a cache on another volume was used: %s", file)
 	}
 }
+
+func TestRekordboxCacheSharesTheDrivesStagingBudget(t *testing.T) {
+	// A 64 GiB drive with 20 GiB free: all staged libraries together may take a tenth of it.
+	fs := syscall.Statfs_t{Bsize: 4096, Blocks: 64 << 30 / 4096, Bavail: 20 << 30 / 4096}
+	allowance := int64(64<<30) / 10
+	sparse := func(path string, size int64) {
+		t.Helper()
+		os.MkdirAll(filepath.Dir(path), 0o755)
+		if err := os.WriteFile(path, nil, 0o644); err != nil || os.Truncate(path, size) != nil {
+			t.Fatal(err)
+		}
+	}
+	room := func(_ *syscall.Statfs_t, staged int64) int64 { return prolink.StageRoom(&fs, staged) }
+	t.Run("the libraries took it all", func(t *testing.T) {
+		e := newRbxEnv(t, nil)
+		sparse(filepath.Join(e.vol, prolink.StagedDir, "player", "audio.flac"), allowance)
+		rbxServe(t, room)
+		if file, err := rbxStageTrack(e); err == nil {
+			t.Fatalf("a second budget was given: %s", file)
+		}
+	})
+	t.Run("an old copy makes room, the libraries stay", func(t *testing.T) {
+		e := newRbxEnv(t, nil)
+		lib := filepath.Join(e.vol, prolink.StagedDir, "player", "audio.flac")
+		old := filepath.Join(e.vol, rbxCacheDir, "old.flac")
+		sparse(lib, allowance/2)
+		sparse(old, allowance-allowance/2-4) // 4 bytes short of the budget
+		rbxServe(t, room)
+		file, err := rbxStageTrack(e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i < 500 && rbxRunning(file) != nil; i++ {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if _, err := os.Stat(old); err == nil {
+			t.Fatal("the old copy was kept although the staged bytes of both caches fill the budget")
+		}
+		if _, err := os.Stat(lib); err != nil {
+			t.Fatalf("a staged library was removed: %v", err)
+		}
+	})
+}

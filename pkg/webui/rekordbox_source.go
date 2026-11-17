@@ -375,10 +375,14 @@ func (g *tidalGateway) rbxStage(ctx context.Context, c *prolink.NFSClient, ip, r
 		if skip[dir] || syscall.Statfs(dir, &fs) != nil || fs.Flags&1 != 0 || !rbxOwnCache(dir, cache) { // ST_RDONLY
 			continue
 		}
-		for rbxRoom(&fs, prolink.DirSize(cache)) < int64(info.Size) && dropOldest(cache) {
+		// One budget for everything staged on the drive: the Pro DJ Link libraries count too.
+		room := func() int64 {
+			return rbxRoom(&fs, prolink.DirSize(cache)+prolink.DirSize(filepath.Join(dir, prolink.StagedDir)))
+		}
+		for room() < int64(info.Size) && dropOldest(cache) {
 			_ = syscall.Statfs(dir, &fs)
 		}
-		if rbxRoom(&fs, prolink.DirSize(cache)) < int64(info.Size) {
+		if room() < int64(info.Size) {
 			continue
 		}
 		if err := os.MkdirAll(cache, 0o755); err != nil {
