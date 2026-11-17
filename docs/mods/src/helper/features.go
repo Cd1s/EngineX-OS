@@ -1,6 +1,7 @@
 package main
 
 import (
+	cpuram "github.com/Cd1s/EngineX-OS/docs/mods/src/cpu-ram-monitor"
 	dmxstudio "github.com/Cd1s/EngineX-OS/docs/mods/src/dmx-studio"
 	joglogo "github.com/Cd1s/EngineX-OS/docs/mods/src/jog-logo-studio"
 	midimapper "github.com/Cd1s/EngineX-OS/docs/mods/src/midi-controller-mapper"
@@ -18,4 +19,5 @@ var features = map[string]func(modkit.Env) (modkit.Feature, error){
 	"sampler-sequencer":      sequencer.New,
 	"minimal-club-mode":      clubmode.New,
 	"midi-controller-mapper": midimapper.New,
+	"cpu-ram-monitor":        cpuram.New,
 }

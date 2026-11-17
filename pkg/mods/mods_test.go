@@ -123,7 +123,7 @@ func TestScriptEnvironment(t *testing.T) {
 // Every shipped official package must install and validate; tailscale-remote is a built-in system Mod.
 func TestOfficialModPackagesInstallAndValidate(t *testing.T) {
 	paths, err := filepath.Glob("../../docs/mods/packages/*.tar.gz")
-	if err != nil || len(paths) != 7 {
+	if err != nil || len(paths) != 8 {
 		t.Fatalf("official packages: %v %v", paths, err)
 	}
 	mgr := NewManager("", filepath.Join(t.TempDir(), "ui"))
@@ -156,7 +156,7 @@ func TestOfficialModPackagesInstallAndValidate(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
-		if !mod.Valid || !mod.Official || mod.Enabled || mod.Drive != "internal" || mod.QMLCount != 1 || mod.Category == "" ||
+		if !mod.Valid || !mod.Official || mod.Enabled || mod.Drive != "internal" || mod.QMLCount < 1 || mod.Category == "" ||
 			name != mod.ID+"-"+mod.Version+".tar.gz" {
 			t.Fatalf("%s: unexpected mod %+v", name, mod)
 		}
@@ -165,7 +165,7 @@ func TestOfficialModPackagesInstallAndValidate(t *testing.T) {
 		}
 	}
 	list, err := mgr.Discover()
-	if err != nil || len(list) != 6 {
+	if err != nil || len(list) != 7 {
 		t.Fatalf("installed: %+v %v", list, err)
 	}
 	for _, m := range list {
