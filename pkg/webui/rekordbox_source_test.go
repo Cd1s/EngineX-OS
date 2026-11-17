@@ -492,3 +492,63 @@ func TestRekordboxRowsShowArtistTempoAndKey(t *testing.T) {
 		t.Fatalf("second row: %+v", second)
 	}
 }
+
+// rbxServe puts a nine-byte track on a loopback NFS export and points the stager at it, with
+// room as the drive's answer to how much more may be staged.
+func rbxServe(t *testing.T, room func(*syscall.Statfs_t, int64) int64) {
+	t.Helper()
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, "Users", "dj", "Music"), 0o755)
+	os.WriteFile(filepath.Join(root, "Users", "dj", "Music", "a.flac"), []byte("fLaC12345"), 0o644)
+	nfs := &prolink.NFSServer{Root: root}
+	if err := nfs.Listen("127.0.0.1:0"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(nfs.Close)
+	oldExport, oldNFS, oldRoom := rbxExport, rbxNFS, rbxRoom
+	t.Cleanup(func() { rbxExport, rbxNFS, rbxRoom = oldExport, oldNFS, oldRoom })
+	rbxExport, rbxRoom = "/C/", room
+	rbxNFS = func(ip net.IP) *prolink.NFSClient {
+		return &prolink.NFSClient{IP: ip, Portmap: nfs.PortmapPort(), Timeout: time.Second}
+	}
+}
+
+func rbxStageTrack(e *rbxEnv) (string, error) {
+	file, _, err := e.s.tidal.rbxStage(context.Background(), rbxNFS(net.IPv4(127, 0, 0, 1)), "127.0.0.1", "/Users/dj/Music/a.flac")
+	return file, err
+}
+
+func TestRekordboxCacheLinkIsNotFollowed(t *testing.T) {
+	e := newRbxEnv(t, nil)
+	foreign := t.TempDir()
+	keep := filepath.Join(foreign, "recording.wav")
+	os.WriteFile(keep, []byte("not ours"), 0o644)
+	if err := os.Symlink(foreign, filepath.Join(e.vol, rbxCacheDir)); err != nil {
+		t.Fatal(err)
+	}
+	// The drive is full until that file is gone: what eviction through the link would do.
+	rbxServe(t, func(*syscall.Statfs_t, int64) int64 {
+		if _, err := os.Stat(keep); err == nil {
+			return 0
+		}
+		return 1 << 30
+	})
+	rbxStageTrack(e)
+	if left, _ := os.ReadDir(foreign); len(left) != 1 || left[0].Name() != "recording.wav" {
+		t.Fatalf("a file outside the cache was removed or written through the link: %v", left)
+	}
+}
+
+func TestRekordboxCacheIsOnTheDrivesVolume(t *testing.T) {
+	e := newRbxEnv(t, nil)
+	cache := filepath.Join(e.vol, rbxCacheDir)
+	os.Mkdir(cache, 0o755)
+	if err := syscall.Mount("tmpfs", cache, "tmpfs", 0, ""); err != nil {
+		t.Skipf("no private mount here: %v", err)
+	}
+	t.Cleanup(func() { syscall.Unmount(cache, 0) })
+	rbxServe(t, func(*syscall.Statfs_t, int64) int64 { return 1 << 30 })
+	if file, err := rbxStageTrack(e); err == nil {
+		t.Fatalf("a cache on another volume was used: %s", file)
+	}
+}
