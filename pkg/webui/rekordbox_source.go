@@ -38,12 +38,13 @@ import (
 )
 
 const (
-	rekordboxScope = "rekordbox" // the deck's source id, its playlists' and its tracks' provider
-	rbxCacheDir    = ".rekordbox-cache"
-	rbxMaxFile     = 1 << 30
-	rbxProbeTime   = 3 * time.Second
-	rbxCopyTime    = 15 * time.Minute
-	rbxPortmap     = 50111
+	rekordboxScope   = "rekordbox" // the deck's source id, its playlists' and its tracks' provider
+	rbxCacheDir      = ".rekordbox-cache"
+	rbxMaxFile       = 1 << 30
+	rbxProbeTime     = 3 * time.Second
+	rbxPresenceEvery = 2 * time.Second // shorter than the UI poll, so timer jitter never skips a check
+	rbxCopyTime      = 15 * time.Minute
+	rbxPortmap       = 50111
 )
 
 // uiScopes are the sources the deck's browser can show: the services, and rekordbox
@@ -111,11 +112,50 @@ func (s *Server) rekordboxHost() *rbxHost {
 		return nil
 	}
 	for _, d := range s.mergedDevices() {
-		if prolink.IsRekordbox(d) && time.Since(d.LastSeen) < 15*time.Second && net.ParseIP(d.Address) != nil {
+		if prolink.IsRekordbox(d) && time.Since(d.LastSeen) <= prolink.DeviceTimeout && net.ParseIP(d.Address) != nil {
+			if !s.rekordboxReady(d.Address) {
+				return nil
+			}
 			return &rbxHost{d.Address, rbxName(d.Address)}
 		}
 	}
 	return nil
+}
+
+// A computer keeps announcing even with LINK off. Only a successful library-port
+// query confirms the source; this memory is never restored from a snapshot at boot.
+type rbxPresence struct {
+	ip            string
+	checked, seen time.Time
+	checking      bool
+}
+
+// rekordboxReady never waits on the network in a UI/browse request. Polls refresh
+// one bounded query, without opening a dbserver session or disturbing a load.
+func (s *Server) rekordboxReady(ip string) bool {
+	s.rbxPresenceMu.Lock()
+	defer s.rbxPresenceMu.Unlock()
+	p := s.rbxPresence
+	if p == nil || p.ip != ip {
+		p = &rbxPresence{ip: ip}
+		s.rbxPresence = p
+	}
+	now := time.Now()
+	if !p.checking && now.Sub(p.checked) >= rbxPresenceEvery {
+		p.checked, p.checking = now, true
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), rbxProbeTime)
+			defer cancel()
+			_, err := prolink.RekordboxPort(ctx, net.ParseIP(ip))
+			s.rbxPresenceMu.Lock()
+			defer s.rbxPresenceMu.Unlock()
+			if err == nil {
+				p.seen = time.Now()
+			}
+			p.checking = false
+		}()
+	}
+	return !p.seen.IsZero() && now.Sub(p.seen) <= prolink.DeviceTimeout
 }
 
 // rbxName is the computer's name, from the network's reverse lookup of its address. The
@@ -127,10 +167,11 @@ func rbxName(ip string) string {
 		return name
 	}
 	rbxNames.m[ip] = ip
+	lookup := lookupAddr
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		if names, err := lookupAddr(ctx, ip); err == nil && len(names) > 0 {
+		if names, err := lookup(ctx, ip); err == nil && len(names) > 0 {
 			rbxNames.Lock()
 			rbxNames.m[ip], _, _ = strings.Cut(strings.TrimSuffix(names[0], "."), ".")
 			rbxNames.Unlock()

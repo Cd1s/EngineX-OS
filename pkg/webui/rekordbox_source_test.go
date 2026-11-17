@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"io"
@@ -12,9 +13,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -73,6 +76,7 @@ func newRbxEnv(t *testing.T, paths map[uint32]string) *rbxEnv {
 	snap, _ := json.Marshal(prolink.Snapshot{Devices: []prolink.Device{{Name: "rekordbox", Number: 17, Address: "127.0.0.1", PacketType: 0x29, LastSeen: time.Now()}}})
 	os.WriteFile(filepath.Join(state, "prolink.json"), snap, 0o644)
 	e.s = New(Config{AccessToken: "code", UIDir: ui, StateDir: state, MediaRoot: media, DeezerURL: fakeDeezer(t).URL}, nil)
+	e.s.rbxPresence = &rbxPresence{ip: "127.0.0.1", checked: time.Now(), seen: time.Now()}
 	mounts, _ := json.Marshal([]RemoteMount{{ID: "m", Name: "Music", MountPoint: e.share, Enabled: true}})
 	os.WriteFile(e.s.mountsConfigPath(), mounts, 0o644)
 	srv := httptest.NewServer(e.s)
@@ -146,6 +150,163 @@ func TestRekordboxSourceNamesTheComputerAndListsItsLibrary(t *testing.T) {
 	tidalGet(t, e.base, "/v1/enginex/ui", 200, &ui)
 	if strings.Contains(strings.Join(ui.Sources, ","), "rekordbox") || ui.RekordboxName != "" {
 		t.Fatalf("source without Pro DJ Link: %+v", ui)
+	}
+}
+
+// The source follows the same ten-second silence timeout as a CDJ, even when
+// rb-bridge's last on-disk snapshot still contains the computer.
+func TestRekordboxPresenceUsesPlayerTimeout(t *testing.T) {
+	for _, sources := range []string{"tidal", ""} {
+		t.Run("sources_"+sources, func(t *testing.T) {
+			e := newRbxEnv(t, nil)
+			t.Setenv("ENGINEX_PROLINK_STATE", filepath.Join(t.TempDir(), "missing.json"))
+			settings := "scope=rekordbox\nprolink_share=1\nsources=" + sources + "\nknown=" + strings.Join(uiServices, ",") + "\n"
+			if err := os.WriteFile(filepath.Join(e.s.cfg.UIDir, "settings.conf"), []byte(settings), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			seen := func(at time.Time) {
+				t.Helper()
+				b, err := json.Marshal(prolink.Snapshot{Devices: []prolink.Device{
+					{Name: "rekordbox", Number: 17, Address: "127.0.0.1", PacketType: 0x29, LastSeen: at},
+					{Name: "CDJ-3000", Number: 2, Address: "192.0.2.2", LastSeen: time.Now()},
+				}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(e.s.cfg.StateDir, "prolink.json"), b, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			status := func(want bool) string {
+				t.Helper()
+				r := httptest.NewRecorder()
+				request := httptest.NewRequest("GET", "/v1/enginex/ui", nil)
+				request.RemoteAddr = "127.0.0.1:1234"
+				e.s.ServeHTTP(r, request)
+				if r.Code != 200 {
+					t.Fatalf("UI status: %d", r.Code)
+				}
+				var v uiSettings
+				if err := json.Unmarshal(r.Body.Bytes(), &v); err != nil {
+					t.Fatal(err)
+				}
+				if v.Sources == nil || v.LoggedIn == nil {
+					t.Error("UI lists must be arrays so QML clears prior entries")
+				}
+				if slices.Contains(v.Sources, rekordboxScope) != want || slices.Contains(v.LoggedIn, rekordboxScope) != want || (v.RekordboxName != "") != want {
+					t.Errorf("presence=%t: sources=%v loggedIn=%v name=%q", want, v.Sources, v.LoggedIn, v.RekordboxName)
+				}
+				if slices.Contains(v.Sources, "tidal") != (sources == "tidal") {
+					t.Errorf("other sources changed: %v", v.Sources)
+				}
+				return r.Header().Get("X-UI-Digest")
+			}
+			seen(time.Now().Add(-9 * time.Second))
+			present := status(true)
+			seen(time.Now().Add(-11 * time.Second))
+			absent := status(false)
+			if present == absent {
+				t.Error("loss did not refresh UI digest")
+			}
+			seen(time.Now())
+			if status(true) == absent {
+				t.Error("return did not refresh UI digest")
+			}
+		})
+	}
+}
+
+// Announcements stay fresh with LINK off; only the database-port service
+// distinguishes an offered library. Nothing from disk may pre-confirm it at boot.
+func TestRekordboxPresenceRequiresAnOfferedLibrary(t *testing.T) {
+	e := newRbxEnv(t, nil)
+	t.Setenv("ENGINEX_PROLINK_STATE", filepath.Join(t.TempDir(), "missing.json"))
+	ln, err := net.Listen("tcp4", "127.0.0.23:12523")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var offered atomic.Uint32
+	var queries atomic.Int32
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			queries.Add(1)
+			c.SetDeadline(time.Now().Add(time.Second))
+			query := make([]byte, 19)
+			if _, err := io.ReadFull(c, query); err == nil && string(query) == "\x00\x00\x00\x0fRemoteDBServer\x00" {
+				var port [2]byte
+				binary.BigEndian.PutUint16(port[:], uint16(offered.Load()))
+				c.Write(port[:])
+			}
+			c.Close()
+		}
+	}()
+	t.Cleanup(func() { ln.Close(); <-done })
+	cfg := e.s.cfg
+	s := New(cfg, nil) // no confirmed library, as after boot or a suite restart
+	t.Cleanup(s.Close)
+	status := func(server *Server) bool {
+		t.Helper()
+		b, _ := json.Marshal(prolink.Snapshot{Devices: []prolink.Device{{Name: "rekordbox", Number: 17, Address: "127.0.0.23", PacketType: 0x29, LastSeen: time.Now()}}})
+		if err := os.WriteFile(filepath.Join(cfg.StateDir, "prolink.json"), b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		r := httptest.NewRequest("GET", "/v1/enginex/ui", nil)
+		r.RemoteAddr = "127.0.0.1:1234"
+		w := httptest.NewRecorder()
+		start := time.Now()
+		server.ServeHTTP(w, r)
+		if time.Since(start) > 500*time.Millisecond {
+			t.Error("presence blocked the UI request")
+		}
+		var v uiSettings
+		if w.Code != 200 {
+			t.Fatalf("UI status: %d", w.Code)
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &v); err != nil {
+			t.Fatal(err)
+		}
+		present := slices.Contains(v.Sources, rekordboxScope)
+		if slices.Contains(v.LoggedIn, rekordboxScope) != present || (v.RekordboxName != "") != present {
+			t.Error("source/name/login presence differ")
+		}
+		return present
+	}
+	wait := func(want bool, limit time.Duration) {
+		t.Helper()
+		end := time.Now().Add(limit)
+		for {
+			if status(s) == want {
+				return
+			}
+			if time.Now().After(end) {
+				t.Fatalf("presence did not become %t", want)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	started := time.Now()
+	if status(s) {
+		t.Fatal("announcements alone showed a source at boot with LINK off")
+	}
+	offered.Store(12524)
+	wait(true, 7*time.Second)
+	offered.Store(0) // LINK off, but every status call continues the UDP announcements
+	wait(false, 14*time.Second)
+	restarted := New(cfg, nil)
+	t.Cleanup(restarted.Close)
+	if status(restarted) {
+		t.Fatal("restart restored a source from the persisted host")
+	}
+	offered.Store(12524)
+	wait(true, 7*time.Second)
+	if queries.Load() > int32(time.Since(started)/rbxPresenceEvery)+2 {
+		t.Fatal("polled the computer on every UI request")
 	}
 }
 
@@ -233,6 +394,18 @@ func TestRekordboxLoadsOverNFSIntoTheBudgetedCache(t *testing.T) {
 		t.Fatalf("one copy in the drive's cache folder: %v", cached)
 	}
 	nfs.Close()
+	// The computer disappears after a complete local copy. Neither presence
+	// withdrawal nor a fresh playback-info request may invalidate that copy.
+	t.Setenv("ENGINEX_PROLINK_STATE", filepath.Join(t.TempDir(), "missing.json"))
+	expired, _ := json.Marshal(prolink.Snapshot{Devices: []prolink.Device{{Name: "rekordbox", Number: 17, Address: "127.0.0.1", LastSeen: time.Now().Add(-11 * time.Second)}}})
+	if err := os.WriteFile(filepath.Join(e.s.cfg.StateDir, "prolink.json"), expired, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if e.s.rekordboxHost() != nil {
+		t.Error("expired computer still advertised")
+	}
+	dialRekordbox = func(context.Context, net.IP, byte) (rbxLink, error) { return nil, errors.New("computer gone") }
+	tidalGet(t, e.base, "/v1/tracks/"+strconv.FormatInt(ids["First"], 10)+"/playbackinfopostpaywall", 200, nil)
 	get() // played again with the computer's NFS gone: the copy is used
 	if again, _ := filepath.Glob(filepath.Join(e.vol, rbxCacheDir, "*")); len(again) != 1 {
 		t.Fatalf("copies: %v", again)

@@ -131,8 +131,18 @@ func TestRBBridgeLogsDevicesNotPackets(t *testing.T) {
 		l.packet(logf, computer, now.Add(time.Duration(i)*100*time.Millisecond))
 	}
 	l.packet(logf, prolink.Device{Address: "192.168.1.238", Number: 4, Name: "CDJ-3000"}, now)
-	l.expire(logf, now.Add(12*time.Second)) // the CDJ fell silent; the computer spoke 7 s ago
-	l.expire(logf, now.Add(16*time.Second))
+	if l.expire(logf, now.Add(10*time.Second)) {
+		t.Fatal("published a loss before the timeout")
+	}
+	if !l.expire(logf, now.Add(12*time.Second)) {
+		t.Fatal("CDJ loss did not dirty the snapshot")
+	}
+	if !l.expire(logf, now.Add(16*time.Second)) {
+		t.Fatal("computer loss did not dirty the snapshot")
+	}
+	if l.expire(logf, now.Add(17*time.Second)) {
+		t.Fatal("unchanged snapshot dirtied again")
+	}
 	want := []string{
 		`rb-bridge: Pro DJ Link device seen: 192.168.1.138 player 17 "rekordbox"`,
 		`rb-bridge: Pro DJ Link device seen: 192.168.1.238 player 4 "CDJ-3000"`,

@@ -187,7 +187,9 @@ func RBBridge(args []string, stdout io.Writer) error {
 				return
 			case now := <-tick.C:
 				verbose.Store(settingOn(*uiSettings, "verbose_log"))
-				devices.expire(log.Print, now)
+				if devices.expire(log.Print, now) {
+					dirty.Store(true) // publish removals even when no more packets arrive
+				}
 				if *stateFile != "" && dirty.Swap(false) {
 					writeState(*stateFile, prolink.BuildSnapshot(discovery.Devices(now)))
 				}
@@ -228,15 +230,18 @@ func (l *linkLog) packet(logf func(...any), d prolink.Device, now time.Time) {
 	l.seen[key] = now
 }
 
-func (l *linkLog) expire(logf func(...any), now time.Time) {
+func (l *linkLog) expire(logf func(...any), now time.Time) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	changed := false
 	for key, at := range l.seen {
-		if now.Sub(at) > 10*time.Second {
+		if now.Sub(at) > prolink.DeviceTimeout {
 			logf("rb-bridge: Pro DJ Link device lost: " + key)
 			delete(l.seen, key)
+			changed = true
 		}
 	}
+	return changed
 }
 
 // prolinkSettingOn reports whether Pro DJ Link is enabled in settings.conf,

@@ -14,6 +14,61 @@ import (
 	"time"
 )
 
+// A presence query must follow its context even when the port service accepts
+// TCP but never sends its two-byte reply.
+func TestRekordboxPortCancellationAndLinkOff(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		port  uint16
+		stall bool
+		want  bool
+	}{
+		{"ready", 12524, false, true}, {"link_off", 0, false, false},
+		{"unavailable", 0xffff, false, false}, {"stalled", 0, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ln, err := net.Listen("tcp4", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer ln.Close()
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				c, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				defer c.Close()
+				c.SetDeadline(time.Now().Add(time.Second))
+				q := make([]byte, 19)
+				if _, err := io.ReadFull(c, q); err != nil {
+					return
+				}
+				if tc.stall {
+					io.Copy(io.Discard, c)
+					return
+				}
+				var b [2]byte
+				binary.BigEndian.PutUint16(b[:], tc.port)
+				c.Write(b[:])
+			}()
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+			start := time.Now()
+			port, err := rekordboxPort(ctx, net.IPv4(127, 0, 0, 1), ln.Addr().(*net.TCPAddr).Port)
+			if (err == nil) != tc.want || tc.want && port != int(tc.port) {
+				t.Fatalf("port=%d err=%v", port, err)
+			}
+			if time.Since(start) > 500*time.Millisecond {
+				t.Fatal("query ignored its context")
+			}
+			ln.Close()
+			<-done
+		})
+	}
+}
+
 // fakeRekordbox answers like the computer cmd/rbx-probe talked to: a port query, then one
 // compact-framed dbserver session. rows maps a menu request to the rows it lists.
 type fakeRekordbox struct {

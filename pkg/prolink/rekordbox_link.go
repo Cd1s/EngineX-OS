@@ -72,30 +72,48 @@ func DialRekordbox(ctx context.Context, ip net.IP, player byte) (*RekordboxLink,
 	return dialRekordbox(ctx, ip, rekordboxQueryPort, player)
 }
 
-func dialRekordbox(ctx context.Context, ip net.IP, queryPort int, player byte) (*RekordboxLink, error) {
-	if player == 0 {
-		player = rekordboxPlayer
-	}
+// RekordboxPort asks the computer whether its library is offered. Announcements
+// continue with LINK off; a database port is advertised only while LINK is on.
+// This query does not open a dbserver session or reserve a player number.
+func RekordboxPort(ctx context.Context, ip net.IP) (int, error) {
+	return rekordboxPort(ctx, ip, rekordboxQueryPort)
+}
+
+func rekordboxPort(ctx context.Context, ip net.IP, queryPort int) (int, error) {
 	var d net.Dialer
 	q, err := d.DialContext(ctx, "tcp4", net.JoinHostPort(ip.String(), strconv.Itoa(queryPort)))
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
+	defer q.Close()
+	stop := context.AfterFunc(ctx, func() { q.Close() })
+	defer stop()
 	_ = q.SetDeadline(time.Now().Add(rbxTimeout))
 	var port [2]byte
 	_, err = q.Write(append([]byte{0, 0, 0, 15}, "RemoteDBServer\x00"...))
 	if err == nil {
 		_, err = io.ReadFull(q, port[:])
 	}
-	q.Close()
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 	n := binary.BigEndian.Uint16(port[:])
 	if n == 0 || n == 0xffff {
-		return nil, errors.New("prolink: rekordbox does not serve its library (LINK is off)")
+		return 0, errors.New("prolink: rekordbox does not serve its library (LINK is off)")
 	}
-	c, err := d.DialContext(ctx, "tcp4", net.JoinHostPort(ip.String(), strconv.Itoa(int(n))))
+	return int(n), nil
+}
+
+func dialRekordbox(ctx context.Context, ip net.IP, queryPort int, player byte) (*RekordboxLink, error) {
+	if player == 0 {
+		player = rekordboxPlayer
+	}
+	n, err := rekordboxPort(ctx, ip, queryPort)
+	if err != nil {
+		return nil, err
+	}
+	var d net.Dialer
+	c, err := d.DialContext(ctx, "tcp4", net.JoinHostPort(ip.String(), strconv.Itoa(n)))
 	if err != nil {
 		return nil, err
 	}
