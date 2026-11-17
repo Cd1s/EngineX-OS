@@ -51,6 +51,7 @@ var hookFeatures = []hookFeature{
 	{Name: "mount-hook", Group: "drives", Reboot: true, Gen2: true, About: "edisksd preload: converts rekordbox exports and repairs Engine libraries on sticks"},
 	{Name: "internal-heal", Group: "drives", About: "engine-guardian before each Engine start: the internal library's m.db without reserved page bytes (Engine 5.3.0 cannot attach other libraries otherwise)"},
 	{Name: "dsp-guards", Group: "audio", About: "21 DSP guards and the master chain: Echo Out, Pioneer FX, Auto-Gain, Soft Clipper, Live Stream tap"},
+	{Name: "reverb-tail", Group: "audio", About: "#207: the stock Reverb (Classic) decays up to about 28 s above 82 % of its knob, all-in-ones only"},
 	{Name: "alsa-timestamp", Group: "audio", About: "ALSA time stamps GETTIMEOFDAY -> MONOTONIC_RAW"},
 	{Name: "thread-tuning", Group: "audio", About: "Engine background threads and OfflineAnalyzer at lower priority, off CPU 1/2"},
 	{Name: "sqlite-tuning", Group: "data", About: "busy_timeout, synchronous=NORMAL, temp_store=MEMORY, cache_size for every Engine database"},

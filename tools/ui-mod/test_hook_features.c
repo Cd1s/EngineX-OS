@@ -120,6 +120,22 @@ static void test_edits_skip(void) {
     puts("switched-off features leave their Engine sites stock, the rest is applied: PASS");
 }
 
+// #207's longer Reverb tail is a switch of its own: every Reverb decay site carries it,
+// so switching it off leaves Engine's own decay formula (applied as one group).
+static void test_reverb_tail_switch(void) {
+    unsigned sites = 0;
+    for (unsigned b = 0; b < sizeof engine_builds / sizeof *engine_builds; b++)
+        for (unsigned i = 0; i < engine_builds[b].edit_count; i++) {
+            const struct engine_edit *e = &engine_builds[b].edits[i];
+            if (e->group != EDIT_REVERB) continue;
+            assert(e->feature == HF_REVERB_TAIL);
+            sites++;
+        }
+    assert(sites == 3); // 5.0.4, 5.3.0 and 5.3.0-sclive4
+    assert(!strcmp(hf_names[HF_REVERB_TAIL], "reverb-tail"));
+    puts("the longer Reverb tail (#207) has its own switch on every build: PASS");
+}
+
 static const uint32_t *config_code(size_t page) {
     // prepare_config reads only the two literal words at config_r2 / config_r3.
     size_t span = ((size_t)build->config_r3 + 8 + page - 1) / page * page;
@@ -210,6 +226,7 @@ int main(void) {
     test_masks();
     test_edits_skip();
     test_config_lines();
+    test_reverb_tail_switch();
     test_runtime_hooks();
     test_publish();
     unlink(state);

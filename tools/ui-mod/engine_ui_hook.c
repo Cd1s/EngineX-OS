@@ -2055,7 +2055,7 @@ static const struct engine_edit edits_504[] = {
     // DeviceManager::isReadOnly QFileInfo -> false
     {0x16728c0u, "\x01\x00\x24\xe2", "\x00\x00\xa0\xe3", 4, EDIT_ONE, HF_READONLY_STICKS},
     // #207 Reverb (Classic) decay formula: vsub s14, s14, s15; vldr s16, =0.65
-    {0x1639278u, "\x67\x7a\x37\xee\x5f\x8a\x9f\xed", (const char *)reverb_time_jump, 8, EDIT_REVERB, HF_ALWAYS},
+    {0x1639278u, "\x67\x7a\x37\xee\x5f\x8a\x9f\xed", (const char *)reverb_time_jump, 8, EDIT_REVERB, HF_REVERB_TAIL},
 };
 
 // 5.3.0 (BuildID be537e90...): sites found by RTTI/vtable slots (DSP), the QML
@@ -2098,7 +2098,7 @@ static const struct engine_edit edits_530[] = {
     // still needs the Layer A / Layer B branch instead of an empty map.
     {0x193f6d8u, "\x4e\x01\x00\x1a", "\x4e\x01\x00\xea", 4, EDIT_ONE, HF_FOUR_DECK},
     // #207 Reverb (Classic) decay formula: vsub s14, s14, s15; vldr s16, =0.65
-    {0x1725630u, "\x67\x7a\x37\xee\x5f\x8a\x9f\xed", (const char *)reverb_time_jump, 8, EDIT_REVERB, HF_ALWAYS},
+    {0x1725630u, "\x67\x7a\x37\xee\x5f\x8a\x9f\xed", (const char *)reverb_time_jump, 8, EDIT_REVERB, HF_REVERB_TAIL},
     // #206 Recording with streaming tracks (all-in-ones only; the group is never ready on
     // the JP07/JP08/JP13/JP14 players, which have no recorder). All 8 sites or none.
     // AbstractCollectionModel streamingFlags: skip BlocksRecording (0x20) bit
@@ -2145,7 +2145,7 @@ static const struct engine_edit edits_sclive[] = {
     {0xbf91d8u, "\xc2\x05\xd0\xe5", "\x01\x00\xa0\xe3", 4, EDIT_ONE, HF_SSO},
     {0xbf9234u, "\x01\x00\x20\xe2", "\x00\x00\xa0\xe3", 4, EDIT_ONE, HF_SSO},
     // #207 Reverb (Classic) decay formula: vsub s14, s14, s15; vldr s16, =0.65
-    {0x177b088u, "\x67\x7a\x37\xee\x5f\x8a\x9f\xed", (const char *)reverb_time_jump, 8, EDIT_REVERB, HF_ALWAYS},
+    {0x177b088u, "\x67\x7a\x37\xee\x5f\x8a\x9f\xed", (const char *)reverb_time_jump, 8, EDIT_REVERB, HF_REVERB_TAIL},
     // #206 Recording with streaming tracks (all-in-ones only; the group is never ready on
     // the JP07/JP08/JP13/JP14 players, which have no recorder). All 8 sites or none.
     // AbstractCollectionModel streamingFlags: skip BlocksRecording (0x20) bit
