@@ -7480,6 +7480,9 @@ def edits(dev: bool):
                     "				var result = [",
                     "		property var menuRoles: {\n"
                     "			if(showButton) {\n"
+                    "				const scCtrl = Planck.librarianController && Planck.librarianController.streamingInterfaceController\n"
+                    '				const scProv = String((scCtrl && scCtrl.selectedProviderDisplayName) || "")\n'
+                    '				if (isStreamingProviderWithSort && (scProv === "Engine Remote Library" || scProv === "EngineRemoteLibrary")) return showPlayOrderRole ? ["song", "bpm", "artist", "key", "rating", "length", "dateImported", "playOrder"] : ["song", "bpm", "artist", "key", "rating", "length", "dateImported"]\n'
                     '				if (isStreamingProviderWithSort) return showPlayOrderRole ? ["song", "bpm", "artist", "key", "rating", "length", "playOrder"] : ["song", "bpm", "artist", "key", "rating", "length"]\n'
                     "				var result = [",
                 ) if not v53() else (
@@ -7488,6 +7491,9 @@ def edits(dev: bool):
                     "            var result = [\n",
                     "    property var menuRoles: {\n"
                     "        if (showButton) {\n"
+                    "            const scCtrl = Planck.librarianController && Planck.librarianController.streamingInterfaceController\n"
+                    '            const scProv = String((scCtrl && scCtrl.selectedProviderDisplayName) || "")\n'
+                    '            if (isStreamingProviderWithSort && (scProv === "Engine Remote Library" || scProv === "EngineRemoteLibrary")) return showPlayOrderRole ? ["song", "bpm", "artist", "key", "rating", "length", "dateImported", "playOrder"] : ["song", "bpm", "artist", "key", "rating", "length", "dateImported"]\n'
                     '            if (isStreamingProviderWithSort) return showPlayOrderRole ? ["song", "bpm", "artist", "key", "rating", "length", "playOrder"] : ["song", "bpm", "artist", "key", "rating", "length"]\n'
                     "            var result = [\n",
                 )

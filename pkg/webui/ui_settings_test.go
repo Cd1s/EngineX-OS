@@ -785,6 +785,25 @@ func TestUISettingsQoLFXAndStreamingSort(t *testing.T) {
 			t.Errorf("expected 400 for %s, got %d", bad, badResp.StatusCode)
 		}
 	}
+
+	// 7. Verify dateImported is accepted for streamSortRole
+	diReq, _ := http.NewRequest("POST", srv2.URL+"/api/ui?streamSortRole=dateImported", nil)
+	diReq.Header.Set("Authorization", "Bearer "+token)
+	diResp, err := client.Do(diReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer diResp.Body.Close()
+	if diResp.StatusCode != 200 {
+		t.Fatalf("POST /api/ui?streamSortRole=dateImported returned status %d", diResp.StatusCode)
+	}
+	var diUpdated uiSettings
+	if err := json.NewDecoder(diResp.Body).Decode(&diUpdated); err != nil {
+		t.Fatal(err)
+	}
+	if diUpdated.StreamSortRole != "dateImported" {
+		t.Fatalf("expected streamSortRole dateImported, got %q", diUpdated.StreamSortRole)
+	}
 }
 
 func TestUIStatusDigestFollowsTheBody(t *testing.T) {
