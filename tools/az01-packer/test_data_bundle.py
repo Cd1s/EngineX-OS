@@ -1218,7 +1218,9 @@ pkill() { printf 'pkill %s\\n' "$*" >> "$KILLED"; }
         (dest / 'state').mkdir(parents=True)
         run_dir = self.tmp / 'run-ssh'
         ba = self.tmp / 'boot-activate-ssh.sh'
-        ba.write_text((src / 'boot-activate.sh').read_text().replace('/run/', str(run_dir) + '/'))
+        ba.write_text((src / 'boot-activate.sh').read_text().replace('/run/', str(run_dir) + '/')
+                      .replace('/etc/shadow', str(root / 'shadow')))
+        (root / 'shadow').write_text('root:!:20000:0:99999:7:::\n')
         sshd = self.tmp / 'fake-sshd'
         sshd.write_text('#!/bin/sh\nexit 0\n')
         sshd.chmod(0o755)
@@ -1259,7 +1261,15 @@ pkill() { printf 'pkill %s\\n' "$*" >> "$KILLED"; }
         self.assertFalse(boot(k, {'enabled': False, 'port': 22}))  # turned off in the console
         self.assertTrue(boot(k, {'enabled': True, 'port': 2222}))
         self.assertIn('-p 2222', dropin.read_text())
+        # A legacy flag alone cannot enable stock root password authentication (#299).
+        self.assertFalse(boot(None, {'enabled': True, 'port': 22, 'hasPassword': True}))
+        (dest / 'ssh-shadow').write_text('root:$6$fixture:20000:0:99999:7:::\n')
         self.assertTrue(boot(None, {'enabled': True, 'port': 22, 'hasPassword': True}))
+        self.assertIn('PasswordAuthentication=yes', dropin.read_text())
+        self.assertIn('PermitRootLogin=yes', dropin.read_text())
+        self.assertTrue(boot(None, {'enabled': True, 'port': 2222, 'hasPassword': True}))
+        self.assertIn('-p 2222', dropin.read_text())
+        self.assertFalse(boot(k, {'enabled': False, 'port': 2222, 'hasPassword': True}))
         self.assertFalse(boot(None, {'enabled': True, 'port': 2222, 'hasPassword': False}))
         self.assertFalse(dropin.exists())
         self.assertEqual((root / 'root-ssh/authorized_keys').read_text(), k)

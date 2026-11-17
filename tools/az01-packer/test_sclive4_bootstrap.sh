@@ -42,7 +42,12 @@ if [ ! -d "$ROOTFS" ]; then
 fi
 
 TMP=$(mktemp -d "${BOOTSTRAP_TMP_PARENT:-/tmp}/sclive4-sbx-XXXXXX")
-trap 'rm -rf "$TMP"' EXIT
+cleanup() {
+    umount -R "$TMP" 2>/dev/null || :
+    if findmnt -rn -R "$TMP" | grep -q .; then echo "refusing mounted work directory: $TMP" >&2; return 1; fi
+    rm -rf "$TMP"
+}
+trap cleanup EXIT
 
 echo "=== $PREFIX Bootstrap & Installer Verification ==="
 echo "Workdir: $TMP"
@@ -225,6 +230,9 @@ for i in \$(seq 1 50); do
 done
 cmp '$TMP/id_test.pub' '$TARGET/root/.ssh/authorized_keys'
 chroot '$TARGET' pgrep -x sshd >/dev/null
+if [ '$PREFIX' = SCLIVE4 ]; then
+    bash '$SCRIPT_DIR/test_gen2_ssh_password.sh' '$TARGET' '$TMP'
+fi
 "
 echo "  Stage 1 ALSA boot activation: PASS"
 

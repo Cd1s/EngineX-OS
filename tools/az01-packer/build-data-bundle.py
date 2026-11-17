@@ -548,15 +548,21 @@ fi
 # sshd off even with a key, "on" with a root password starts it without one, and the port
 # comes back on every boot (the console's drop-in lives in /run, /etc is read-only here).
 # Without that file: as before, sshd only with a key (#46: public images ship none).
-ssh_start=$ssh_key ssh_port=22
+ssh_start=$ssh_key ssh_port=22 ssh_auth=
 ssh_cfg=$(cat "$dest/state/ssh-config.json" 2>/dev/null | tr -d '[:space:]')
 case $ssh_cfg in *'"enabled":false'*) ssh_start= ;; esac
-case $ssh_cfg in *'"enabled":true'*'"hasPassword":true'*|*'"hasPassword":true'*'"enabled":true'*) [ ! -x "$sshd_bin" ] || ssh_start=1 ;; esac
+case $ssh_cfg in *'"enabled":true'*'"hasPassword":true'*|*'"hasPassword":true'*'"enabled":true'*)
+    if [ -x "$sshd_bin" ] && [ -s "$dest/ssh-shadow" ] &&
+        { cmp -s "$dest/ssh-shadow" /etc/shadow || mount --bind "$dest/ssh-shadow" /etc/shadow; }; then
+        ssh_start=1
+        ssh_auth='-o PasswordAuthentication=yes -o PermitRootLogin=yes'
+    fi ;;
+esac
 p=$(printf '%s' "$ssh_cfg" | sed -n 's/.*"port":\([0-9][0-9]*\).*/\1/p')
 case $p in ''|0*|??????*) ;; *) [ "$p" -gt 65535 ] || ssh_port=$p ;; esac
 ssh_dropin=/run/systemd/system/sshd.service.d/51-port.conf
-if [ -n "$ssh_start" ] && [ "$ssh_port" != 22 ]; then
-    mkdir -p "${ssh_dropin%/*}" && printf '[Service]\nExecStart=\nExecStart=%s -D -e -p %s\n' "$sshd_bin" "$ssh_port" > "$ssh_dropin" || :
+if [ -n "$ssh_start" ] && { [ "$ssh_port" != 22 ] || [ -n "$ssh_auth" ]; }; then
+    mkdir -p "${ssh_dropin%/*}" && printf '[Service]\nExecStart=\nExecStart=%s -D -e -p %s %s\n' "$sshd_bin" "$ssh_port" "$ssh_auth" > "$ssh_dropin" || :
 fi
 
 # Seed /data/StreamingAccounts.json with a stored-credential TIDAL entry (#56, #159)
@@ -612,7 +618,7 @@ else
     restore_gen2_timezone 0 || :
     convert_mounted
     if [ -n "$ssh_start" ] && ! pgrep -x sshd >/dev/null 2>&1; then
-        mkdir -p /var/run/sshd && "$sshd_bin" -p "$ssh_port" || :
+        mkdir -p /var/run/sshd && "$sshd_bin" -p "$ssh_port" $ssh_auth || :
     fi
     # Restart only service applets; leave helpers may hold or be waiting for the lock (#234).
     for suite_pid in $(pgrep -x "enginex-suite|$legacy_suite" 2>/dev/null); do

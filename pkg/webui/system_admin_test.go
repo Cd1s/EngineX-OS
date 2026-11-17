@@ -105,7 +105,7 @@ func TestSSHManagement(t *testing.T) {
 	}
 
 	// Reserved EngineX ports and multi-line passwords are refused before anything runs.
-	for _, bad := range []string{`{"port": 8080}`, `{"port": 6595}`, `{"port": 13579}`, `{"password": "a\nroot:b"}`, `{"password": "a\u0000b"}`} {
+	for _, bad := range []string{`{"port": 8080}`, `{"port": 6595}`, `{"port": 13579}`, `{"password": "a\nroot:b"}`, `{"password": "a\u0000b"}`, `{"password":"` + strings.Repeat("x", 257) + `"}`} {
 		req = httptest.NewRequest(http.MethodPost, "/api/ssh", strings.NewReader(bad))
 		w = httptest.NewRecorder()
 		s.handleSSH(w, req)
@@ -139,13 +139,13 @@ func TestSSHManagement(t *testing.T) {
 	for _, c := range mockRunner.commands {
 		if c[0] == "sh" {
 			found = true
-			if len(c) != 5 || strings.Contains(c[2], "touch") || c[4] != "$(touch /tmp/pwn)`id`\"x" {
-				t.Fatalf("unsafe chpasswd command: %q", c)
+			if len(c) != 7 || strings.Contains(c[2], "touch") || c[4] != "$(touch /tmp/pwn)`id`\"x" {
+				t.Fatalf("unsafe password command: %q", c)
 			}
 		}
 	}
 	if !found {
-		t.Fatal("chpasswd was not run")
+		t.Fatal("password hashing was not run")
 	}
 	if b, _ := os.ReadFile(filepath.Join(stateDir, "ssh-config.json")); strings.Contains(string(b), "touch") || !strings.Contains(string(b), `"hasPassword": true`) && !strings.Contains(string(b), `"hasPassword":true`) {
 		t.Fatalf("password persisted or hasPassword lost: %s", b)
