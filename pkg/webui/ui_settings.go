@@ -258,6 +258,7 @@ type uiSettings struct {
 	SdHighSpeedPending  bool     `json:"sdHighSpeedPending,omitempty"`
 	PioneerFx           string   `json:"pioneerFx"`
 	FXSelectorAvailable bool     `json:"fxSelectorAvailable"`
+	ColorFXAvailable    bool     `json:"colorFxAvailable"`
 	FxTimeMode          string   `json:"fxTimeMode"`
 	FxTimeMs            int      `json:"fxTimeMs"`
 
@@ -702,7 +703,7 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	if v.SdHighSpeed {
 		text += "sd_high_speed=1\n"
 	}
-	if !s.fxSelectorAvailable() && v.PioneerFx != "" && v.PioneerFx != "off" {
+	if (!s.fxSelectorAvailable() || s.colorFXAvailable()) && v.PioneerFx != "" && v.PioneerFx != "off" {
 		text += "pioneer_fx=" + v.PioneerFx + "\n"
 	}
 	if v.FxTimeMode == "ms" {
@@ -868,7 +869,9 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 	s.uiMu.Lock()
 	v := s.loadUI()
 	v.FXSelectorAvailable = s.fxSelectorAvailable()
-	if v.FXSelectorAvailable {
+	v.ColorFXAvailable = s.colorFXAvailable()
+	// pioneer_fx is the channel knobs' style now; only a PX board without them drops it.
+	if v.FXSelectorAvailable && !v.ColorFXAvailable {
 		if err := s.migratePioneerFX(); err != nil {
 			log.Printf("FX selector settings migration: %v", err)
 		}
