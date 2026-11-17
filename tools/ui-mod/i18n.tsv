@@ -47,8 +47,8 @@ Date	日期	日期	Fecha
 Day Mode	日间模式	日間模式	Modo día
 Decks	碟机	碟機	Decks
 Decrease BPM	降低 BPM	降低 BPM	Disminuir BPM
-Default Beat Jump Size	默认节拍跳跃长度	預設節拍跳躍長度	Tamaño de Beat Jump predeterminado
-Default Loop Size	默认 Loop 长度	預設 Loop 長度	Tamaño de loop predeterminado
+Default Beat Jump Size	默认节拍跳跃长度	預設節拍跳躍長度	Tamaño de beat jump inicial
+Default Loop Size	默认 Loop 长度	預設 Loop 長度	Tamaño de loop inicial
 Default Scratch Mode	默认搓碟模式	預設刷碟模式	Modo scratch predeterminado
 Default Speed Range	默认变速范围	預設變速範圍	Rango de velocidad predeterminado
 Device	设备	裝置	Dispositivo
@@ -144,7 +144,7 @@ Pitch Range	变速范围	變速範圍	Rango de pitch
 Platter Touch Sensitivity	转盘触摸灵敏度	轉盤觸控靈敏度	Sensibilidad táctil del plato
 Player #	碟机编号 #	碟機編號 #	Reproductor #
 Playhead Position	播放头位置	播放頭位置	Posición del cabezal
-Playlists	歌单	歌單	Listas de reproducción
+Playlists	歌单	歌單	Listas
 Please check your internet connection.	请检查网络连接。	請檢查網路連線。	Comprueba tu conexión a internet.
 Please wait...	请稍候…	請稍候…	Espera, por favor…
 Preview Volume	预览音量	預覽音量	Volumen de preescucha
@@ -252,7 +252,7 @@ Only one phone? Take a photo of this code, then in the app tap Scan and pick the
 Scan with your phone camera. Phone and deck must be on the same network.	请用手机相机扫码。手机和碟机要连同一个 Wi-Fi。	請用手機相機掃碼。手機和碟機要連同一個 Wi-Fi。	Escanea con la cámara de tu teléfono. El teléfono y el deck deben estar en la misma red.
 Not now	暂不登录	暫不登入	Ahora no
 Switch account	切换账号	切換帳號	Cambiar de cuenta
-Scan to log in	扫码登录	掃碼登入	Escanear para iniciar sesión
+Scan to log in	扫码登录	掃碼登入	Escanear para entrar
 Connecting to	正在连接	正在連接	Conectando a
 Waiting for confirmation	等待确认	等待確認	Esperando confirmación
 WAITING FOR	正在等待	正在等待	ESPERANDO A
@@ -310,7 +310,7 @@ Turn Off	关机	關機	Apagar
 Power	电源	電源	Energía
 Censor Button Behavior	Censor 键行为	Censor 鍵行為	Comportamiento del botón Censor
 Silent Cue	静音 Cue	靜音 Cue	Silent Cue
-Waveform Zoom	波形缩放	波形縮放	Zoom de forma de onda
+Waveform Zoom	波形缩放	波形縮放	Zoom de onda
 Open Library	打开曲库	開啟曲庫	Abrir biblioteca
 Master Limiter	原厂主输出限幅 (dB)	原廠主輸出限幅 (dB)	Limitador master
 Web Console	网页控制台	網頁控制台	Consola web
@@ -341,7 +341,7 @@ Space	Space	Space	Space
 ENGINEX VIEW PRESET	ENGINEX 视图预设	ENGINEX 視圖預設	PREAJUSTE DE VISTA ENGINEX
 Stems LAN renderer online:	局域网分轨主机在线：	區域網路分軌主機在線：	Renderizador LAN de Stems en línea:
 Stems LAN renderer offline:	局域网分轨主机离线：	區域網路分軌主機離線：	Renderizador LAN de Stems desconectado:
-On-deck stems (basic quality). For high-quality stems, run the EngineX Stems service on a computer on the same network.	本机分轨（基础音质）。如需高音质分轨，请在同一局域网的电脑上运行 EngineX Stems 服务。	本機分軌（基礎音質）。如需高音質分軌，請在同一區域網路的電腦上執行 EngineX Stems 服務。	Stems en el deck (calidad básica). Para stems de alta calidad, ejecuta el servicio EngineX Stems en un ordenador de la misma red.
+On-deck stems (basic quality). For high-quality stems, run the EngineX Stems service on a computer on the same network.	本机分轨（基础音质）。如需高音质分轨，请在同一局域网的电脑上运行 EngineX Stems 服务。	本機分軌（基礎音質）。如需高音質分軌，請在同一區域網路的電腦上執行 EngineX Stems 服務。	Stems en el deck (calidad básica). Para mayor calidad, ejecuta EngineX Stems en un ordenador de la misma red.
 High-quality stems:	高音质分轨：	高音質分軌：	Stems de alta calidad:
 On-deck stems (basic quality): %1 only offers hpss, which is not used.	本机分轨（基础音质）：%1 只提供 hpss，不会使用。	本機分軌（基礎音質）：%1 只提供 hpss，不會使用。	Stems en el deck (calidad básica): %1 solo ofrece hpss, que no se utiliza.
 For high-quality stems, that computer needs the htdemucs model.	如需高音质分轨，该电脑需要安装 htdemucs 模型。	如需高音質分軌，該電腦需要安裝 htdemucs 模型。	Para stems de alta calidad, ese ordenador necesita el modelo htdemucs.
@@ -521,8 +521,8 @@ Load drive profile to device?	将 U 盘中的配置加载到本机？	將隨身�
 Normal	标准	標準	Normal
 Instant	立即	立即	Instantáneo
 Motor Torque	转盘扭矩	轉盤扭力	Par del motor
-Cue Position	Cue 点	Cue 點	Posición de Cue
-Track Start	曲目开头	曲目開頭	Inicio de la pista
+Cue Position	Cue 点	Cue 點	Posición Cue
+Track Start	曲目开头	曲目開頭	Inicio de pista
 Censor	消音倒放	消音倒放	Censor
 Acapella/Instrumental FX	人声/伴奏分轨效果	人聲/伴奏分軌效果	FX Acapella/Instrumental
 Primary	主按钮	主按鈕	Principal
@@ -716,6 +716,7 @@ New UI	新界面	新介面	Nueva interfaz
 No Accounts Found	未找到账号	找不到帳號	No se encontraron cuentas
 No Update Available	没有可用更新	沒有可用更新	No hay actualizaciones
 No source drive available	没有可用的来源盘	沒有可用的來源磁碟	No hay unidad de origen disponible
+Beatgrid, cue, loop and waveform data will not be saved. Played state will not be shown. To enable these features, connect a compatible drive.	节拍网格、Cue、Loop 和波形数据不会被保存，也不会显示已播放状态。要启用这些功能，请连接兼容的存储设备。	節拍網格、Cue、Loop 和波形資料不會被儲存，也不會顯示已播放狀態。要啟用這些功能，請連接相容的儲存裝置。	Los datos de beatgrid, cue, loop y forma de onda no se guardarán y no se mostrará el estado de reproducido. Para activar estas funciones, conecta una unidad compatible.
 Note: Existing streaming/cloud logins will be removed and tracks loaded to deck will be ejected.	注意：现有的流媒体/云端登录将被移除，已加载到碟机的曲目将被退出。	注意：現有的串流/雲端登入將被移除，已載入碟機的曲目將被退出。	Nota: se eliminarán los inicios de sesión de streaming/nube y se expulsarán las pistas cargadas en los decks.
 OK	确定	確定	Aceptar
 Offline Device Limit Reached	已达到离线设备上限	已達離線裝置上限	Límite de dispositivos sin conexión alcanzado

@@ -1721,6 +1721,56 @@ assert.strictEqual(evalIsLead({{ master: false }}), false);
             res_f4 = subprocess.run(["node", "-e", f4_js], capture_output=True, text=True)
             self.assertEqual(res_f4.returncode, 0, res_f4.stderr)
 
+    def test_stock_strings_alone_on_a_line_are_translated(self):
+        """L2b: a prompt's long message (`message:` then the string on the next line, with a comma) and the
+        value of a branch (`;("text")`) have no property name in front: TEXT_LINE never saw them, so the
+        no-source dialog, the Factory Reset warning, Wi-Fi status and "No Tracks Found" stayed English in
+        every other language although the table has rows for them."""
+        qrc = LAB / "5.3.0/qrc"
+        if not qrc.is_dir():
+            self.skipTest(f"{qrc} not found")
+        rows = bp.load_dict()
+        skip = bp.compared_strings(qrc)
+        nosource = "Beatgrid, cue, loop and waveform data will not be saved. Played state will not be shown. To enable these features, connect a compatible drive."
+        for en in (nosource, "No Tracks Found", "Connected"):
+            self.assertIn(en, rows, f"missing i18n row: {en!r}")
+        for rel, en in (
+            ("Skins/Embedded/Views/Streaming/StreamingNoSourceAvailableDialog.qml", nosource),
+            ("Skins/Embedded/Views/BrowseView/BrowseView.qml", "No Tracks Found"),
+            ("Skins/Embedded/Views/ControlCenter/Tabs/Preferences/Entries/FactoryReset.qml",
+             "This will wipe all user settings and passwords from this device and restore it to its factory default configuration. The device will reboot during this process."),
+            ("Skins/Embedded/Views/WifiSelect/WifiInformationDialog.qml", "Connected"),
+        ):
+            self.assertIn(en, rows, f"missing i18n row: {en!r}")
+            source = (qrc / rel).read_text(encoding="utf-8")
+            self.assertIn(f'"{en}"', source, rel)
+            for lang in ("zh-Hans", "zh-Hant", "es"):
+                with self.subTest(file=rel.rsplit("/", 1)[-1], lang=lang):
+                    table = {k: v[lang] for k, v in rows.items()}
+                    done = bp.translate(source, table, skip, live=True)
+                    self.assertIn(rows[en][lang], done)
+                    self.assertNotIn(f'"{en}"', done)
+
+    def test_spanish_labels_fit_the_rows_that_showed_them_cut_off(self):
+        """L2b: measured on the 1280x800 render (JP07/JP13/JC11): each Spanish text below was cut off or ran
+        into its neighbour. The budgets are the character counts of the longest text that still fit."""
+        rows = {l.split("\t")[0]: l.split("\t")[1:] for l in (REPO / "tools/ui-mod/i18n.tsv").read_text(encoding="utf-8").splitlines()
+                if l and not l.startswith("#")}
+        es = lambda en: rows[en][2]
+        # the 80 px sidebar of the browser ("Historial" has 9)
+        self.assertLessEqual(len(es("Playlists")), 11)
+        # two options side by side in one row
+        self.assertLessEqual(len(es("Cue Position")) + len(es("Track Start")), 28)
+        self.assertLessEqual(len(es("Waveform Zoom")) + len(es("Open Library")), 32)
+        # a label in front of six options ("Tamaño de loop predeterminado", 29, fitted)
+        self.assertLessEqual(len(es("Default Beat Jump Size")), 29)
+        self.assertLessEqual(len(es("Default Loop Size")), 29)
+        # the source list's right column
+        self.assertLessEqual(len(es("Scan to log in")), 22)
+        # one line with no wrapping: a longer one also widens the About page and pushes the Update button out
+        stems = "On-deck stems (basic quality). For high-quality stems, run the EngineX Stems service on a computer on the same network."
+        self.assertLessEqual(len(es(stems)), 118)
+
     def test_sd_high_speed_switch_rk3288_only_and_four_languages(self):
         self.assertIn("property bool scSdHighSpeed: false", bp.SERVICES_MAIN)
         self.assertIn("property bool scSdHighSpeedPending: false", bp.SERVICES_MAIN)

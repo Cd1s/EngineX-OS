@@ -9476,7 +9476,9 @@ def legacy_qml_fixes():
 
 # Only these properties hold display text. Ids such as StateMap names never match.
 TEXT_LINE = re.compile(r'^(\s*(?:[\w.]*\.)?(?:text|label|labelText|title|message|messageText|headline|info|display|description|missingContentHint|noContentHint|hint|buttonText|value)\s*:)(.*)$')
-BARE_LITERAL = re.compile(r'^(\s*)"([^"\\]+)"(\s*)$')
+# A string alone on its line: stock writes a prompt's long message as `message:\n  "text",` and the
+# value of a branch as `;("text")`. Neither has a property name in front, so TEXT_LINE never sees it.
+BARE_LITERAL = re.compile(r'^(\s*(?:;\()?)"([^"\\]+)"((?:\))?\s*,?\s*)$')
 # Template literals match whole, ${...} included (`Version: ${version}`).
 LITERAL = re.compile(r'"([^"\\\n]*)"|`([^`\\\n]*)`')
 
