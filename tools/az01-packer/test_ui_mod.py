@@ -2049,7 +2049,7 @@ class ShadowDisplayTest(unittest.TestCase):
     def js(self, body):
         names = ("scDeckLocked", "scShadowVisible", "scShadowDeckFor", "scShadowData", "scShadowRate", "scShadowPosition",
                  "scShadowBeatIndex", "scShadowBeatAt", "scShadowGrid", "scShadowNextCue", "scShadowCuesFor", "scShadowAsset",
-                 "scShadowProperties", "scShadowTick", "scShadowPost", "scShadowPoll", "scShadowPollIdle", "scShadowDisplayFetch", "scShadowSameSample", "scShadowApplyDisplay", "scShadowCovers", "scShadowBusy", "scShadowApplyAll", "scNextCueInfo", "scNextCueCompute", "scCueTickFor",
+                 "scShadowProperties", "scShadowTick", "scShadowPost", "scShadowPoll", "scShadowPollIdle", "scShadowDisplayFetch", "scShadowSameSample", "scShadowApplyDisplay", "scShadowCovers", "scShadowBusy", "scShadowApplyAll", "scNextCueInfo", "scNextCueCompute", "scCueProps", "scCueBeatsLeft", "scCueTickFor",
                  "scShadowApply", "scShadowEmpty", "scShadowScratchLine", "scShadowScratchRelease", "scShadowSpeed", "scShadowCues", "scShadowBeat",
                  "scShadowLoad", "scShadowWrong", "scShadowHolds", "scShadowEndGap", "scShadowEnd",
                  "scShadowSeek", "scShadowMirror", "scShadowMirrorOff", "scShadowLink", "scShadowLinkEdge", "scPress", "scGcCheck", "scShadowWake", "scShadowAnyPlaying",
@@ -2088,7 +2088,7 @@ Object.assign(globalThis, {
     scShadowPrev: {}, scShadowCueCache: {}, scShadowPostAt: 0, scShadowPollAt: now, scShadowDebug: false,
     scShadowActiveDeck: 0, scPairedOn: false, scPairedEmpty: 0,
     scShadowLead: 0, scShadowPeerLead: 0, scShadowPeerPlaying: false, scShadowMasterAt: 0,
-    scShadowGen: 0, scShadowVer: 0, scShadowIdle: false, scShadowLinePaths: [], scShadowFrame: 17, scCueInfoCache: {}, scCueInfoMemo: {},
+    scShadowGen: 0, scShadowVer: 0, scShadowIdle: false, scShadowLinePaths: [], scShadowFrame: 17, scCueInfoCache: {}, scCueInfoMemo: {}, scCuePropCache: {},
     scTr() { throw Error('Engine access forbidden'); },
     Planck: { getProperty() { throw Error('Engine access forbidden'); } }
 });
@@ -2393,6 +2393,98 @@ assert.deepEqual(grid, beats.slice(1, 3));
 assert.strictEqual(scShadowGrid(2, meta, 910, 1610), grid); // same delegates until a grid boundary
 assert.equal(scShadowAsset('/wave.png'), 'http://127.0.0.1:8080/wave.png');
 assert.equal(scShadowAsset('file:///audio.wav'), '');
+""")
+
+    def test_shadow_countdown_steps_on_grid_lines_for_a_cue_off_the_grid(self):
+        # The cue sits 0.45 beat after line 2: it counts as line 2, so the count steps when the playhead crosses a line.
+        self.js(r"""
+const beats = [0, 1, 2, 3, 4].map(n => ({ms: n * 1000, number: n}));
+scShadowDisplay[2] = {key: 'A', meta: {beats, cues: [{i: 1, ms: 2450, n: 'OFF', c: '#123456'}]}, positionMs: 900, at: now, pitch: 0, playing: false};
+assert.equal(scNextCueInfo(2, 0).text, '0.2');
+scShadowDisplay[2].positionMs = 1100; // line 1 is crossed: one beat left, not 1.35
+assert.equal(scNextCueInfo(2, 0).text, '0.1');
+scShadowDisplay[2].positionMs = 2100; // line 2 is behind, the cue still ahead: counts 0, is not hidden
+assert.equal(scNextCueInfo(2, 0).text, '0.1');
+scShadowDisplay[2].positionMs = 2500; // past the cue
+assert.equal(scNextCueInfo(2, 0), null);
+""")
+
+    def local_countdown(self, body):
+        # Deck 1 is this player's own deck (role 13); Engine's deck 1 is a model: tempo at the playhead, beat position in the bar,
+        # one hot cue. Beats are the grid: a line every 60 / bpm s from `first`.
+        self.js(r"""
+const sr = 44100;
+const eng = {pos: 0, bpm: 128, first: 0.3, grid: true, cue: 20.2, pitch: 1};
+const tr = {
+    '/Engine/Deck1/Track/SongLoaded': {state: true},
+    '/Engine/Deck1/Track/TrackPosition': {get unnormalized() { return eng.pos * sr; }},
+    '/Engine/Deck1/Track/SampleRate': {value: sr},
+    '/Engine/Deck1/OriginalBPM': {get unnormalized() { return eng.bpm; }},
+    '/Engine/Deck1/Track/CurrentBPM': {get unnormalized() { return eng.bpm * eng.pitch; }},
+    '/Engine/Deck1/BeatNumber': {get unnormalized() { return eng.grid ? (((eng.bpm / 60 * (eng.pos - eng.first)) % 4) + 4) % 4 : -1; }},
+};
+for (let i = 1; i <= 8; i++) {
+    const k = '/Engine/Deck1/Track/QuickCue' + i;
+    tr[k + 'Exists'] = {state: i === 1};
+    tr[k + 'Position'] = {get value() { return i === 1 ? eng.cue * sr : 0; }};
+    tr[k + 'Name'] = {string: 'C' + i};
+    tr[k + 'Color'] = {color: '#26a6ff'};
+}
+globalThis.scTr = path => tr[path] || null;
+const text = () => { scCueInfoCache = {}; const i = scNextCueCompute(1); return i ? i.text : null; };
+const line = () => Math.floor(eng.bpm / 60 * (eng.pos - eng.first));
+// Positions across several beats: the text changes exactly where the playhead crosses a grid line.
+function sweep(label) {
+    let steps = 0, prev = null, prevLine = null;
+    for (let x = 5.0013; x < 9.0; x += 0.004) {
+        eng.pos = x;
+        const t = text(), l = line();
+        if (prev !== null) assert.equal(t !== prev, l !== prevLine, label + ' at ' + x.toFixed(3) + ': ' + prev + ' -> ' + t);
+        if (prev !== null && t !== prev) steps++;
+        prev = t; prevLine = l;
+    }
+    assert.ok(steps >= 6, label + ' steps ' + steps);
+}
+""" + body)
+
+    def test_local_countdown_steps_where_the_playhead_crosses_a_grid_line(self):
+        self.local_countdown(r"""
+sweep('cue 0.45 beat off the grid');
+eng.first = 0.45; sweep('grid shifted under the cue');   // a shift: the lines move, so do the steps
+eng.first = 0.3; eng.bpm = 131.5; sweep('tempo edited');  // a BPM edit: new line spacing, new steps
+eng.bpm = 128; eng.cue = 0.3 + 43 * 60 / 128; sweep('cue on a line');
+eng.cue = 20.2; eng.pitch = 1.08; sweep('pitch +8 %');    // pitch moves the playhead faster, not the beats
+""")
+
+    def test_local_countdown_for_a_cue_on_the_grid_is_unchanged(self):
+        # The most common case is as before: cue on a grid line, count = whole beats left.
+        self.local_countdown(r"""
+eng.cue = eng.first + 42 * 60 / eng.bpm;
+for (let x = 5.0013; x < eng.cue - 0.1; x += 0.0137) {
+    eng.pos = x;
+    const left = (eng.cue - x) * eng.bpm / 60;
+    assert.equal(text(), Math.floor(left / 4) + '.' + ((Math.floor(left) % 4) + 1), 'at ' + x);
+}
+""")
+
+    def test_local_countdown_edge_cases(self):
+        self.local_countdown(r"""
+// The cue's line is behind the playhead but the cue is still ahead: 0 beats left, shown, not hidden.
+eng.cue = eng.first + (42 + 0.45) * 60 / eng.bpm;
+eng.pos = eng.first + 42.1 * 60 / eng.bpm;
+assert.equal(text(), '0.1');
+// Just after line 41: the cue's line (42) is one beat ahead.
+eng.pos = eng.first + 41.2 * 60 / eng.bpm;
+assert.equal(text(), '0.1');
+eng.pos = eng.first + 40.9 * 60 / eng.bpm;
+assert.equal(text(), '0.2');
+// No grid (BeatNumber below 0): the distance in beats at the playhead's tempo, as before.
+eng.grid = false;
+eng.cue = 20.2; eng.pos = 5.0;
+assert.equal(text(), Math.floor(15.2 * 128 / 60 / 4) + '.' + ((Math.floor(15.2 * 128 / 60) % 4) + 1));
+// Past the cue: no countdown.
+eng.pos = 20.25;
+assert.equal(text(), null);
 """)
 
     def test_live_cues_change_on_same_key_using_source_sample_rate(self):
