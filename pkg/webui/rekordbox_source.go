@@ -263,8 +263,7 @@ func validRekordboxShare(p string) bool {
 	return len(p) <= 512 && !strings.ContainsFunc(p, unicode.IsControl)
 }
 
-// rbxShareFile finds the track's file inside a mounted network share, if the share shows
-// the folder named by the setting (empty: the computer's whole disk).
+// rbxShareRel maps a computer path into the folder shown by its configured share.
 func (s *Server) rbxShareRel(rbPath string) (string, bool) {
 	s.uiMu.Lock()
 	prefix := rbxPath(s.loadUI().RekordboxShare)
@@ -318,8 +317,9 @@ func (g *tidalGateway) rbxFind(ctx context.Context, ip, rbPath string) (file, ro
 			if !m.Enabled || (m.Protocol != "smb" && m.Protocol != "cifs") || mountedAt(m.MountPoint) {
 				continue
 			}
-			c, e := smbclient.Dial(probe, m.smbURL(), m.Username, m.Password)
+			c, e := smbclient.Dial(probe, m.smbURL(), m.Username, m.Password, nil)
 			if e != nil {
+				log.Printf("stream-sync: provider=rekordbox step=find via=smb result=failed error=%v", e)
 				continue
 			}
 			for _, name := range []string{rel, norm.NFC.String(rel), norm.NFD.String(rel)} {
@@ -378,7 +378,7 @@ func (g *tidalGateway) rbxPrepare(ctx context.Context, id int64, ref trackRef) (
 		} else {
 			via = "smb"
 			file, root, err = g.rbxStageCopy(remote.mount.smbURL()+" "+remote.mount.Username, rbPath, remote.info.Size(), remote.info.ModTime().Unix(), func(ctx context.Context, w io.Writer) error {
-				c, err := smbclient.Dial(ctx, remote.mount.smbURL(), remote.mount.Username, remote.mount.Password)
+				c, err := smbclient.Dial(ctx, remote.mount.smbURL(), remote.mount.Username, remote.mount.Password, nil)
 				if err != nil {
 					return err
 				}

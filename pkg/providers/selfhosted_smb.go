@@ -3,6 +3,7 @@ package providers
 import (
 	"context"
 	"io"
+	"net/http"
 	"os"
 	"path"
 	"strings"
@@ -10,12 +11,21 @@ import (
 	"github.com/Cd1s/EngineX-OS/internal/smbclient"
 )
 
+func (p *SelfHostedProvider) smbConnect(ctx context.Context) (*smbclient.Client, error) {
+	// NAS uses the same resolver/address policy as HTTP; configured filesystem
+	// shares also work on direct-cable link-local networks.
+	if transport, ok := p.httpClient().Transport.(*http.Transport); ok {
+		return smbclient.Dial(ctx, p.cfg.URL, p.cfg.Username, p.cfg.Password, transport.DialContext)
+	}
+	return smbclient.Dial(ctx, p.cfg.URL, p.cfg.Username, p.cfg.Password, nil)
+}
+
 func (p *SelfHostedProvider) smbReadDir(ctx context.Context, dir string) ([]os.FileInfo, error) {
 	rel, err := smbclient.Relative(dir)
 	if err != nil {
 		return nil, err
 	}
-	c, err := smbclient.Dial(ctx, p.cfg.URL, p.cfg.Username, p.cfg.Password)
+	c, err := p.smbConnect(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -80,7 +90,7 @@ func (p *SelfHostedProvider) smbDownloadTrack(ctx context.Context, id, destDir s
 	if err != nil {
 		return "", err
 	}
-	c, err := smbclient.Dial(ctx, p.cfg.URL, p.cfg.Username, p.cfg.Password)
+	c, err := p.smbConnect(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -96,7 +106,7 @@ func (p *SelfHostedProvider) smbDownloadTrack(ctx context.Context, id, destDir s
 	}
 	u, _ := smbclient.Parse(p.cfg.URL)
 	// A truncated remote file must not be published as a complete download.
-	return saveStreamToFile(destDir, nasCacheFilename(u, rel, path.Ext(rel)), &smbDownload{f, info.Size()})
+	return saveStreamToFile(destDir, nasCacheFilename(u, u.Path+"\x00"+rel, path.Ext(rel)), &smbDownload{f, info.Size()})
 }
 
 type smbDownload struct {

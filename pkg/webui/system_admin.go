@@ -609,7 +609,7 @@ func (s *Server) mountRemote(ctx context.Context, m *RemoteMount) error {
 			m.Mounted = false
 			ctx, cancel := context.WithTimeout(ctx, rbxProbeTime)
 			defer cancel()
-			c, err := smbclient.Dial(ctx, m.smbURL(), m.Username, m.Password)
+			c, err := smbclient.Dial(ctx, m.smbURL(), m.Username, m.Password, nil)
 			if err != nil {
 				return fmt.Errorf("SMB login/share verification failed: %w", err)
 			}
@@ -617,7 +617,7 @@ func (s *Server) mountRemote(ctx context.Context, m *RemoteMount) error {
 			if _, err := c.Session.ListSharenames(); err != nil {
 				return fmt.Errorf("SMB share listing failed: %w", err)
 			}
-			m.Status = "SMB verified for userspace access; kernel CIFS unavailable, no filesystem mount"
+			m.Status = "SMB last verified when saved for userspace access; kernel CIFS unavailable, no filesystem mount"
 			return nil
 		}
 		share := fmt.Sprintf("//%s/%s", m.Host, strings.TrimPrefix(m.RemotePath, "/"))

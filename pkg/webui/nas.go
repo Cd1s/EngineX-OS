@@ -38,6 +38,9 @@ func validateNASURL(raw string) error {
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https" && u.Scheme != "smb") {
 		return errors.New("invalid url: must be http, https, or smb with host")
 	}
+	if u.User != nil {
+		return errors.New("invalid url: use the separate username and password fields")
+	}
 	if u.Scheme == "smb" {
 		if _, err := smbclient.Parse(raw); err != nil {
 			return err

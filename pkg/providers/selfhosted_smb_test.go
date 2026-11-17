@@ -2,6 +2,9 @@ package providers
 
 import (
 	"context"
+	"errors"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
@@ -9,6 +12,29 @@ import (
 
 	"github.com/Cd1s/EngineX-OS/internal/testsmb"
 )
+
+func TestSMBNASUsesTheHTTPDialPolicy(t *testing.T) {
+	blocked := errors.New("NAS address policy rejected target")
+	calls := 0
+	httpClient := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+		calls++
+		deadline, ok := ctx.Deadline()
+		if !ok || time.Until(deadline) > 3*time.Second {
+			t.Error("SMB connect has no bounded deadline")
+		}
+		return nil, blocked
+	}}}
+	p := NewSelfHostedProvider(NASConfig{Protocol: "smb", URL: "smb://share.invalid/music"}, httpClient)
+	if _, err := p.Playlists(context.Background()); !errors.Is(err, blocked) {
+		t.Fatalf("browse ignored the NAS dial policy: %v", err)
+	}
+	if _, err := p.DownloadTrack(context.Background(), "a.mp3", t.TempDir()); !errors.Is(err, blocked) {
+		t.Fatalf("download ignored the NAS dial policy: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("NAS dial policy called %d times", calls)
+	}
+}
 
 func TestSMBNASBrowseSearchAndDownload(t *testing.T) {
 	s := testsmb.Start(t)
@@ -45,5 +71,30 @@ func TestSMBNASBrowseSearchAndDownload(t *testing.T) {
 	started := time.Now()
 	if _, err := bad.Playlists(ctx); err == nil || time.Since(started) > 4*time.Second {
 		t.Fatalf("wrong password: %v after %s", err, time.Since(started))
+	}
+}
+
+func TestSMBNASCacheSeparatesBaseFolders(t *testing.T) {
+	s := testsmb.Start(t)
+	dest := t.TempDir()
+	files := map[string]string{}
+	for _, folder := range []string{"A", "B"} {
+		os.MkdirAll(filepath.Join(s.Root, folder), 0700)
+		os.WriteFile(filepath.Join(s.Root, folder, "track.mp3"), []byte(folder), 0600)
+		p := NewSelfHostedProvider(NASConfig{Protocol: "smb", URL: s.URL + "/" + folder, Username: s.User, Password: s.Password}, nil)
+		file, err := p.DownloadTrack(context.Background(), "track.mp3", dest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		files[folder] = file
+	}
+	if files["A"] == files["B"] {
+		t.Fatal("different remote folders share a cache file")
+	}
+	for folder, file := range files {
+		b, err := os.ReadFile(file)
+		if err != nil || string(b) != folder {
+			t.Fatalf("cache for %s: %q %v", folder, b, err)
+		}
 	}
 }

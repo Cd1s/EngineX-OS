@@ -49,3 +49,22 @@ func TestSMBNASAPIAndRebootReload(t *testing.T) {
 		t.Fatalf("remove: %d %s", w.Code, w.Body.String())
 	}
 }
+
+func TestNASRejectsPasswordsInURLs(t *testing.T) {
+	s, _ := newTestServerWithUIDir(t)
+	for _, protocol := range []string{"webdav", "smb"} {
+		t.Run(protocol, func(t *testing.T) {
+			scheme := "https"
+			if protocol == "smb" {
+				scheme = "smb"
+			}
+			cfg := providers.NASConfig{Protocol: protocol, URL: scheme + "://user:fixture-password@nas.example/music", Enabled: true}
+			b, _ := json.Marshal(cfg)
+			w := httptest.NewRecorder()
+			s.handleNASConfig(w, httptest.NewRequest("POST", "/api/nas", bytes.NewReader(b)))
+			if w.Code != 400 || strings.Contains(w.Body.String(), "fixture-password") {
+				t.Fatalf("URL credentials accepted or echoed: %d %s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
