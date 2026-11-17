@@ -108,7 +108,7 @@ func RBBridge(args []string, stdout io.Writer) error {
 	}
 	if *mount != "" {
 		_ = syncDjayLibrary(*mount)
-		rep := newUSBLoadingReporter(usbLoadingStatusPath(), detectMediaKind(*mount, ""))
+		rep := newDriveReporter(*mount)
 		rep.Start()
 		opts := enginedb.Options{
 			SmartMatch:   *smart != 0,

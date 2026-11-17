@@ -161,8 +161,8 @@ func noteServed(mount string) {
 	}
 }
 
-// enginePeers are the devices on the local network Engine is connected to over TCP: its
-// Engine Link peers. A variable for tests.
+// enginePeers are the devices on the local network (private or link-local IPv4) Engine is
+// connected to over TCP: its Engine Link peers. A variable for tests.
 var enginePeers = func() []net.IP {
 	inodes := map[string]bool{}
 	for _, pid := range engines() {
@@ -186,7 +186,9 @@ var enginePeers = func() []net.IP {
 		}
 		local, _, _ := strings.Cut(f[1], ":")
 		remote, _, _ := strings.Cut(f[2], ":")
-		if ip := hexIPv4(remote); ip != nil && ip.IsPrivate() && !ip.Equal(hexIPv4(local)) && !slices.ContainsFunc(peers, ip.Equal) {
+		// A deck cabled straight to this one, without DHCP, is on 169.254.0.0/16.
+		if ip := hexIPv4(remote); ip != nil && (ip.IsPrivate() || ip.IsLinkLocalUnicast()) && !ip.IsLoopback() &&
+			!ip.Equal(hexIPv4(local)) && !slices.ContainsFunc(peers, ip.Equal) {
 			peers = append(peers, ip)
 		}
 	}
@@ -243,7 +245,7 @@ func runRemount(ctx context.Context, mount string) error {
 	if !filepath.IsAbs(mount) {
 		return fmt.Errorf("--remount must be absolute")
 	}
-	rep := newUSBLoadingReporter(usbLoadingStatusPath(), detectMediaKind(mount, ""))
+	rep := newDriveReporter(mount)
 	err := remount(ctx, mount, rep)
 	if err == nil || ctx.Err() != nil {
 		return nil

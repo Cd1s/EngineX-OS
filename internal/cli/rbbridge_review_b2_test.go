@@ -129,14 +129,14 @@ func TestIssue301CompletedImportReleasesGlobalLock(t *testing.T) {
 		t.Fatal(err)
 	}
 	err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-	// Stick B's import writes its progress; A's refresh must leave it.
+	// Stick B's import starts and writes its progress; A's job (publishing) must leave it.
 	b := newUSBLoadingReporter(status, "sd")
 	b.state = "importing"
-	b.Report(3, 10, true)
-	refreshed := newUSBLoadingReporter(status, "usb")
-	refreshed.set("publishing")
+	b.Start()
 	b.Report(4, 10, true)
-	refreshed.Refresh()
+	a := newDriveReporter(root)
+	a.Publishing()
+	a.Refresh()
 	got, _ := os.ReadFile(status)
 	lock.Close()
 	cancel()
@@ -278,3 +278,66 @@ func TestIssue301StatusIsOwnedByItsJob(t *testing.T) {
 }
 
 var oldEnginePeers = enginePeers // the real one, before newFakeStick stubs it
+
+// Re-check of fefdd5cf: a deck cabled straight to this one has a link-local address
+// (169.254.0.0/16, no DHCP); it is an Engine Link peer, asked like any other.
+func TestIssue301LinkLocalPeerIsAsked(t *testing.T) {
+	f := newFakeStick(t)
+	f.engine("5", "", "")
+	f.engine("6", "socket:[4242]", "02")
+	if err := os.MkdirAll(filepath.Join(f.proc, "net"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tcp := "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n" +
+		"   0: 0201FEA9:C35A 0301FEA9:C36A 01 00000000:00000000 00:00000000 00000000     0        0 4242 1 0 0 10 0\n"
+	if err := os.WriteFile(filepath.Join(f.proc, "net", "tcp"), []byte(tcp), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	enginePeers = oldEnginePeers
+	var asked []string
+	peerDecks = func(ip net.IP) ([]string, bool) {
+		asked = append(asked, ip.String())
+		return []string{"net://{1}/REKORDBOX (USB 1)/Contents/song.mp3"}, true
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	_ = remount(ctx, f.mount, newUSBLoadingReporter(filepath.Join(t.TempDir(), "status"), "usb"))
+	if got := f.seen(); len(got) > 0 || strings.Join(asked, ",") == "" || asked[0] != "169.254.1.3" {
+		t.Fatalf("169.254.1.3 holds a track of the stick: asked %v, uevent writes %v", asked, got)
+	}
+}
+
+// Re-check of fefdd5cf: a late state change of an old job (A publishing, or ready after a
+// failed remount) does not take the status over from a newer drive's import (B), nor write
+// over B's error.
+func TestIssue301LateTransitionKeepsNewerStatus(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "status")
+	a, b := newUSBLoadingReporter(p, "usb"), newUSBLoadingReporter(p, "sd")
+	a.state = "importing"
+	a.Start()
+	a.Report(10, 10, true)
+	b.state = "importing"
+	b.Start()
+	b.Report(4, 10, true)
+	a.Publishing()
+	b.Refresh()
+	var st usbLoadingStatus
+	data, err := os.ReadFile(p)
+	if err != nil || json.Unmarshal(data, &st) != nil || st.Owner != b.owner || st.State != "importing" || st.Done != 4 {
+		t.Fatalf("A's late publishing took B's status: %s %v", data, err)
+	}
+	b.Fail(errors.New("B failed"))
+	a.Ready()
+	if _, err = os.Stat(p); !os.IsNotExist(err) {
+		t.Fatalf("A's late ready hid B's error: %v", err)
+	}
+	// The same drive's remount (another process) carries on its import job's status.
+	t.Setenv("ENGINEX_USB_PREPARING_PATH", p)
+	job, remounter := newDriveReporter("/media/X"), newDriveReporter("/media/X")
+	job.Start()
+	job.Publishing()
+	remounter.Ready()
+	if data, _ = os.ReadFile(p); !strings.Contains(string(data), `"state":"ready"`) {
+		t.Fatalf("the drive's remount could not say ready: %s", data)
+	}
+}

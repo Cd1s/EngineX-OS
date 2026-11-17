@@ -80,7 +80,7 @@ func runImportJob(ctx context.Context, mount string) error {
 	// A peer that loads a track from the stick while the import runs keeps it (see remount).
 	_ = os.Remove(servedMark(mount)) // a new insert
 	go watchServed(ctx, mount)
-	rep := newUSBLoadingReporter(usbLoadingStatusPath(), detectMediaKind(mount, ""))
+	rep := newDriveReporter(mount)
 	r, started, err := convertLocked(ctx, mount, rep)
 	if !started {
 		return nil // ejected while another stick's import ran

@@ -4,6 +4,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"hash/fnv"
 	"os"
 	"path/filepath"
 	"strings"
@@ -79,13 +81,24 @@ type usbLoadingReporter struct {
 }
 
 // One status file serves every drive, and each drive's mount, import job and remount write it
-// from processes of their own (#301). A job refreshes, ends or clears only what it wrote: its
-// owner, unique per reporter, is in the file, and the file's own lock makes the
+// from processes of their own (#301). Start takes the file for a new operation; every later
+// write, refresh or clear of a job touches it only while it is still that job's (its owner is
+// in the file) or nobody's, and never over another job's error. The file's own lock makes the
 // read-then-write of another process wait.
 func newUSBLoadingReporter(path, kind string) *usbLoadingReporter {
 	var b [8]byte
 	_, _ = rand.Read(b[:])
 	return &usbLoadingReporter{path: path, kind: kind, owner: hex.EncodeToString(b[:])}
+}
+
+// newDriveReporter reports for the drive at mount: its mount, import job and remount, each in a
+// process of its own, are one owner, and another drive's are not.
+func newDriveReporter(mount string) *usbLoadingReporter {
+	r := newUSBLoadingReporter(usbLoadingStatusPath(), detectMediaKind(mount, ""))
+	h := fnv.New64a()
+	h.Write([]byte(filepath.Clean(mount)))
+	r.owner = fmt.Sprintf("drive-%016x", h.Sum64())
+	return r
 }
 
 // locked runs f under the status files' lock (beside them, shared by every process).
@@ -106,12 +119,35 @@ func (r *usbLoadingReporter) owns(p string) bool {
 	return err == nil && json.Unmarshal(b, &st) == nil && st.Owner == r.owner
 }
 
+// mayWrite: the status is this job's, or nobody's and no other job's error stands.
+func (r *usbLoadingReporter) mayWrite() bool {
+	if r.owns(r.path) {
+		return true
+	}
+	if _, err := os.Lstat(r.path); err == nil {
+		return false
+	}
+	_, err := os.Lstat(r.path + ".err")
+	return err != nil || r.owns(r.path+".err")
+}
+
+// Start takes the status for a new operation, over whatever another job left.
 func (r *usbLoadingReporter) Start() {
 	if r == nil || r.path == "" {
 		return
 	}
-	_ = os.Remove(r.path + ".err")
-	r.Report(0, 0, true)
+	r.locked(func() {
+		_ = os.Remove(r.path + ".err")
+		r.lastAt, r.lastDone = time.Time{}, 0
+		r.write(usbLoadingStatus{State: r.stateName(), Kind: r.kind})
+	})
+}
+
+func (r *usbLoadingReporter) stateName() string {
+	if r.state == "" {
+		return "loading"
+	}
+	return r.state
 }
 
 func (r *usbLoadingReporter) Report(done, total int, force bool) {
@@ -126,13 +162,12 @@ func (r *usbLoadingReporter) report(done, total int, force bool) {
 	if !force && done > 0 && done < total && done-r.lastDone < 100 && now.Sub(r.lastAt) < 200*time.Millisecond {
 		return
 	}
+	if !r.mayWrite() {
+		return
+	}
 	r.lastAt = now
 	r.lastDone = done
-	state := r.state
-	if state == "" {
-		state = "loading"
-	}
-	r.write(usbLoadingStatus{State: state, Kind: r.kind, Done: done, Total: total})
+	r.write(usbLoadingStatus{State: r.stateName(), Kind: r.kind, Done: done, Total: total})
 }
 
 // Ready says the library is converted and opens when the stick is inserted again: the remount
@@ -146,7 +181,11 @@ func (r *usbLoadingReporter) set(state string) {
 	if r == nil || r.path == "" {
 		return
 	}
-	r.locked(func() { r.write(usbLoadingStatus{State: state, Kind: r.kind}) })
+	r.locked(func() {
+		if r.mayWrite() {
+			r.write(usbLoadingStatus{State: state, Kind: r.kind})
+		}
+	})
 }
 
 // Refresh writes the last state again, so the browser keeps showing it; not over the status
