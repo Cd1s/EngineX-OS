@@ -2349,6 +2349,7 @@ static void install_sqlite_hooks(uintptr_t base, size_t page);
 static void install_bt_send(uintptr_t base, size_t page);
 #if !defined(__aarch64__)
 static void install_rekordbox_rows(uintptr_t base, size_t page);
+static void install_rbx_trace(uintptr_t base, size_t page);
 #endif
 
 static void apply_engine_edits(uintptr_t base, size_t page) {
@@ -2427,6 +2428,7 @@ __attribute__((constructor)) static void edit_engine(void) {
     install_sqlite_hooks(base, page);
 #if !defined(__aarch64__)
     install_rekordbox_rows(base, page);
+    install_rbx_trace(base, page);
 #endif
     if (install_dsp_hooks(base, page)) {
         install_bt_send(base, page);
@@ -3172,8 +3174,18 @@ static sqlite_open_v2_fn sqlite_open_v2_original;
 static sqlite_open_fn sqlite_open_original;
 static sqlite_exec_fn sqlite_exec_original;
 
+// Set by install_rbx_trace (rbx-analysis diagnosis): Engine's SQL on Track/PerformanceData/stm.
+static void (*rbx_sqlite_trace)(void *, void (*)(void *, const char *), void *);
+
+static void rbx_trace_sql(void *arg, const char *sql) {
+    (void)arg;
+    if (!sql || (!strstr(sql, "PerformanceData") && !strstr(sql, "isAnalyzed") && !strstr(sql, "stm"))) return;
+    fprintf(stderr, "engine-ui-hook: rbx-trace sql %.400s\n", sql);
+}
+
 static void tune_database(int rc, const char *filename, void **db) {
     if (rc || !db || !*db || (filename && !strcmp(filename, ":memory:"))) return;
+    if (rbx_sqlite_trace) rbx_sqlite_trace(*db, rbx_trace_sql, NULL);
     sqlite_exec_original(*db, "PRAGMA busy_timeout = 5000; PRAGMA synchronous = NORMAL; PRAGMA temp_store = MEMORY; PRAGMA cache_size = -8000;",
                          NULL, NULL, NULL);
 }
@@ -3302,6 +3314,36 @@ A32_ONLY static void install_rekordbox_rows(uintptr_t base, size_t page) {
         redirect_function(entry + 8, rekordbox_track_decode, page);
         fprintf(stderr, "engine-ui-hook: rekordbox native row metadata enabled\n");
     }
+}
+
+// rbx-analysis diagnosis: with /run/enginex-rbx-analysis-trace present when Engine
+// starts, log Engine's SQL on Track/PerformanceData/stm (legacy sqlite3_trace, slot 98,
+// bound values expanded) and each call of its analysis decision sites. 5.3.0 armhf only.
+static const char *const rbx_trace_names[] = {"AnalysisHelper::process", "AddTrackToAnalysisQueue", "SampleRatePerfUpdate",
+                                              "TrackData::setAnalyzed", "TrackDataFactory::create"};
+
+static void __attribute__((used)) rbx_trace_call(unsigned id, uintptr_t r0, uintptr_t r1) {
+    fprintf(stderr, "engine-ui-hook: rbx-trace call %s r0=%#lx r1=%#lx\n", rbx_trace_names[id], (unsigned long)r0, (unsigned long)r1);
+}
+
+A32_ONLY static void install_rbx_trace(uintptr_t base, size_t page) {
+    if (strcmp(build->name, "5.3.0") || access("/run/enginex-rbx-analysis-trace", F_OK)) return;
+    static const struct { uint32_t at, prologue[2]; } sites[] = {
+        {0xac61c8, {0xe16d42f4, 0xe1a05002}}, {0x19b9b60, {0xe16d42f4, 0xe1cda1f8}}, {0xbd1498, {0xe16d42f4, 0xe1cd60f8}},
+        {0xe3b130, {0xe52db004, 0xe28db000}}, {0xe665fc, {0xe16d42f4, 0xe1cd60f8}}};
+    const uint32_t *api = (const void *)(base + build->sqlite_api);
+    if (api[98] == base + 0x1c9bd80) rbx_sqlite_trace = (void *)(uintptr_t)api[98];
+    for (unsigned i = 0; i < sizeof sites / sizeof *sites; i++) {
+        uintptr_t entry = base + sites[i].at;
+        if (memcmp((const void *)entry, sites[i].prologue, sizeof sites[i].prologue)) continue;
+        void *original = function_trampoline(entry, page);
+        // push {r0-r5,r12,lr}; mov r2,r1; mov r1,r0; mov r0,#i; ldr r12,=call; blx r12;
+        // pop {r0-r5,r12,lr}; ldr pc,=original. Stack arguments stay where they were.
+        uint32_t stub[] = {0xe92d503f, 0xe1a02001, 0xe1a01000, 0xe3a00000 | i, 0xe59fc00c, 0xe12fff3c, 0xe8bd503f, 0xe51ff004,
+                           (uint32_t)(uintptr_t)original, (uint32_t)(uintptr_t)rbx_trace_call};
+        redirect_function(entry, rx_code(stub, sizeof stub, page), page);
+    }
+    fprintf(stderr, "engine-ui-hook: rbx-trace enabled, sql %s\n", rbx_sqlite_trace ? "on" : "off");
 }
 
 A32_ONLY static void install_sqlite_hooks(uintptr_t base, size_t page) {
