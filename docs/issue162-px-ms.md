@@ -3,11 +3,12 @@
 The optional **PX Delay Time Mode** setting under **Settings → User Profile →
 Playback** defaults to **Default (Off)**. In **Milliseconds (ms)** mode, Spiral,
 Pitch Echo and Dub Echo use a common **10–4000 ms** time independent of BPM.
-The web console provides the same mode switch. On units without the native FX
-selector, **PX Delay Time Mode** (and **PX Delay Time (ms)**) appears only while
-**Color FX Style** is set to **Spiral**, **Pitch Echo** or **Dub Echo**, and
-stays hidden (keeping its saved value while acting as **Off**) otherwise. The
-Playback time list also controls the legacy master Color FX path, including AZ04.
+The web console provides the same mode switch. Both exist only where the
+native PX selector does (PRIME 4): on every other unit the menu rows and the
+console switch are hidden and the saved value acts as **Off**. Before 5.3.0.5
+they also showed elsewhere while a legacy **Color FX Style** was set to Spiral,
+Pitch Echo or Dub Echo; that master-output style is gone (see
+`ISSUE-FIXES-5.3.0.5.md`).
 
 On the verified PRIME 4 native PX selector, the existing Time/Rate input has
 11 positions, mapped to 10, 18, 33, 60, 110, 200, 364, 663, 1207, 2197 and

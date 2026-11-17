@@ -516,6 +516,17 @@ func TestWebConsoleSingleProlinkSwitch(t *testing.T) {
 	}
 }
 
+// The PX delay time switch exists only where PX does: the console follows the same fxSelectorAvailable fact as the deck's row.
+func TestWebConsoleHidesPXDelayWithoutSelector(t *testing.T) {
+	b, err := os.ReadFile("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `document.querySelector('[data-seg="fxTimeMode"]').closest('.setting').hidden=!v.fxSelectorAvailable`) {
+		t.Fatal("the PX delay time switch must follow fxSelectorAvailable")
+	}
+}
+
 // #49: the 4-deck role is saved only when it is not the default, and checked.
 func TestFourDeckRole(t *testing.T) {
 	dir := t.TempDir()

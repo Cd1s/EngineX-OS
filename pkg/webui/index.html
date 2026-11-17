@@ -628,6 +628,7 @@ function showUI(v){lastUI=v;
  why(sdEl,v.sdHighSpeedPending?t('sdHighSpeedPending'):'');
  if(document.activeElement!==$('rbxShare'))$('rbxShare').value=v.rekordboxShare||'';
  why(tg('prolinkShare'),v.prolinkShare&&!v.prolinkExportActive?t('waitRbUsb'):'');
+ document.querySelector('[data-seg="fxTimeMode"]').closest('.setting').hidden=!v.fxSelectorAvailable; // PX delay time only exists where PX does
  const segs={quality:v.quality,lang:v.language,fxTimeMode:v.fxTimeMode||'beats'};
  for(const g of document.querySelectorAll('[data-seg]'))for(const b of g.querySelectorAll('button'))b.classList.toggle('on',b.dataset.v===segs[g.dataset.seg]);
  const lname={en:'English','zh-Hans':'简体中文','zh-Hant':'繁體中文',es:'Español'}[v.language]||v.language;
