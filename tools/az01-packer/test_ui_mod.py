@@ -1771,14 +1771,34 @@ assert.strictEqual(evalIsLead({{ master: false }}), false);
         # options of a stock list row are 136 px buttons side by side: "Todos los faders" + "Solo upfaders" had no gap
         self.assertLessEqual(len(es("All Faders")), 12)
         self.assertLessEqual(len(es("Upfader Only")), 12)
-        # the source list's right column
-        self.assertLessEqual(len(es("Scan to log in")), 22)
+        # the source list's right column: "Escanear para entrar" (20) reached the panel's edge, English (14) leaves a margin
+        self.assertLessEqual(len(es("Scan to log in")), 16)
         # the pack's own PX Delay row holds two long labels ("Predeterminado (desactivado)" was 270 px wide in a
         # 136 px button and ran over "Milisegundos (ms)"; the English pair touched): wider buttons, not shorter words
         self.assertRegex(bp.PLAYBACK_ENTRIES, r'text: "PX Delay Time Mode"\n\t\t\tvisible: root.scHasPxDelay\n\t\t\tentryWidth: 2[0-9][0-9]')
         # one line with no wrapping: a longer one also widens the About page and pushes the Update button out
         stems = "On-deck stems (basic quality). For high-quality stems, run the EngineX Stems service on a computer on the same network."
         self.assertLessEqual(len(es(stems)), 118)
+
+    def test_spanish_prompt_titles_fit_on_one_line(self):
+        """L2b: a stock prompt shows its title on one line, 730 px wide at 52 px, and elides the rest. Rendered on
+        JP07: 31 characters still fit ("Versiones de firmware distintas"), 34 did not ("No hay unidad de origen
+        disponible" -> "No hay unidad de origen dispon..."). These are the titles the table translates."""
+        rows = {l.split("\t")[0]: l.split("\t")[1:] for l in (REPO / "tools/ui-mod/i18n.tsv").read_text(encoding="utf-8").splitlines()
+                if l and not l.startswith("#")}
+        titles = (
+            "Offline Device Limit Reached", "Clear Stem Render Queue?", "Device Became Inactive", "Engine Library unsupported",
+            "No source drive available", "Firmware version mismatch", "Wi-Fi Login Error", "Streaming quality mismatch",
+            "Not Enough Disk Space", "RGB Waveform Creation", "New features available", "Track Download Failed",
+            "Stream Limit Reached", "Remove Offline Tracks", "Login Failed", "Failed to load track", "Pairing Failed",
+            "Choose your Database", "Battery level is low", "Download Interrupted", "Track Too Long", "Clear Database",
+            "Track Not Available", "Recording error", "Download in progress", "Update Now", "Lost Connection", "Logged Out",
+            "Account in use", "No connection",
+        )
+        for en in titles:
+            with self.subTest(title=en):
+                self.assertIn(en, rows)
+                self.assertLessEqual(len(rows[en][2]), 31, rows[en][2])
 
     def test_sd_high_speed_switch_rk3288_only_and_four_languages(self):
         self.assertIn("property bool scSdHighSpeed: false", bp.SERVICES_MAIN)
