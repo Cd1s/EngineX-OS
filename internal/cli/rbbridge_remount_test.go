@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -30,10 +31,10 @@ type fakeStick struct {
 func newFakeStick(t *testing.T) *fakeStick {
 	t.Helper()
 	dir := t.TempDir()
-	f := &fakeStick{mount: "/media/REKORDBOX", mountedNow: true, unmountOnRemove: true, proc: filepath.Join(dir, "proc")}
+	f := &fakeStick{mount: filepath.Join(dir, "media", "REKORDBOX"), mountedNow: true, unmountOnRemove: true, proc: filepath.Join(dir, "proc")}
 	sys := filepath.Join(dir, "sys")
 	f.uevent = filepath.Join(sys, "sdz1", "uevent")
-	for _, d := range []string{filepath.Dir(f.uevent), filepath.Join(f.proc, "77", "fd"), filepath.Join(f.proc, "77", "fdinfo")} {
+	for _, d := range []string{f.mount, filepath.Dir(f.uevent), filepath.Join(f.proc, "77", "fd"), filepath.Join(f.proc, "77", "fdinfo")} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -60,12 +61,18 @@ func newFakeStick(t *testing.T) *fakeStick {
 	}
 	oldInfo, oldSys, oldProc, oldMark, oldMounted := mountinfoPath, sysClassBlock, procDir, ejectMarkDir, mounted
 	oldWait, oldRemove, oldClose, oldRemount, oldReady := remountWait, removeLimit, closeLimit, remountLimit, readyEvery
+	oldDeck, oldCopies := deckWait, engineCopies
 	t.Cleanup(func() {
 		mountinfoPath, sysClassBlock, procDir, ejectMarkDir, mounted = oldInfo, oldSys, oldProc, oldMark, oldMounted
 		remountWait, removeLimit, closeLimit, remountLimit, readyEvery = oldWait, oldRemove, oldClose, oldRemount, oldReady
+		deckWait, engineCopies = oldDeck, oldCopies
 	})
 	mountinfoPath, sysClassBlock, procDir, ejectMarkDir = info, sys, f.proc, filepath.Join(dir, "run")
 	remountWait, removeLimit, closeLimit, remountLimit, readyEvery = 20*time.Millisecond, 300*time.Millisecond, 300*time.Millisecond, 300*time.Millisecond, 20*time.Millisecond
+	deckWait, engineCopies = 20*time.Millisecond, filepath.Join(dir, "inMusicTempFiles")+"/"
+	if err := os.MkdirAll(engineCopies, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.MkdirAll(ejectMarkDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -207,5 +214,83 @@ func TestIssue301RemountFindsTheDeviceUnderAView(t *testing.T) {
 	}
 	if _, _, err = mountDevice("/media/OTHER"); err == nil {
 		t.Fatal("a volume that is not mounted")
+	}
+}
+
+// #301: a remount waits while any deck holds a track from the stick, loaded, playing or not:
+// Engine could not save that track's play count or edits after it ("pool is disposed"). Engine
+// plays a loaded track from its copy "<id>_<file name>" in /data/inMusicTempFiles, which it keeps
+// open until the deck unloads it (sandbox, stock Engine 5.3.0), so a copy whose name the stick's
+// library has counts, whatever size the export recorded; so does an audio file Engine plays from
+// the stick itself. The remount looks again now and then, says the library opens at the next
+// insert meanwhile, and goes ahead once no deck holds one. Engine's copies of its own sampler
+// sounds (always open), the stick's m.db and its OneLibrary export do not count.
+func TestIssue301RemountWaitsWhileADeckHoldsATrackFromTheStick(t *testing.T) {
+	for _, held := range []string{"copy", "file"} {
+		t.Run(held, func(t *testing.T) {
+			f := newFakeStick(t)
+			f.engine("5", "", "")
+			dir := filepath.Join(f.mount, "Engine Library", "Database2")
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			db, err := sql.Open("sqlite", filepath.Join(dir, "m.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = db.Exec(`CREATE TABLE Track(id INTEGER PRIMARY KEY,filename TEXT,fileBytes INTEGER);
+INSERT INTO Track(filename,fileBytes) VALUES('Track00003.mp3',1234),('Track00004.mp3',NULL)`); err != nil {
+				t.Fatal(err)
+			}
+			db.Close()
+			files := map[string]string{
+				filepath.Join(engineCopies, "c647-aa42-9cf4-7699_Track00003.mp3"):  "abcd", // this stick's track
+				filepath.Join(engineCopies, "d001-0000-0000-0001_Other_Track.mp3"): "abcd", // another drive's, or Engine's sampler
+				filepath.Join(f.mount, "Contents", "Track00004.mp3"):               "abcdef",
+				filepath.Join(f.mount, "PIONEER", "rekordbox", "exportLibrary.db"): "x",
+			}
+			for p, body := range files {
+				if err = os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err = os.WriteFile(p, []byte(body), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			f.engine("6", filepath.Join(engineCopies, "d001-0000-0000-0001_Other_Track.mp3"), "0100000")
+			f.engine("7", filepath.Join(f.mount, "PIONEER", "rekordbox", "exportLibrary.db"), "0100000")
+			hold := filepath.Join(engineCopies, "c647-aa42-9cf4-7699_Track00003.mp3")
+			if held == "file" { // a track Engine could not copy, played from the stick
+				hold = filepath.Join(f.mount, "Contents", "Track00004.mp3")
+			}
+			f.engine("9", hold, "0100000")
+			status := filepath.Join(t.TempDir(), "preparing")
+			t.Setenv("ENGINEX_USB_PREPARING_PATH", status)
+			var before []string
+			var state usbLoadingStatus
+			unloaded := make(chan struct{})
+			go func() {
+				defer close(unloaded)
+				time.Sleep(300 * time.Millisecond)
+				before = f.seen()
+				if b, err := os.ReadFile(status); err == nil {
+					json.Unmarshal(b, &state)
+				}
+				f.engine("9", "", "") // the deck unloads it
+			}()
+			if err = runRemount(context.Background(), f.mount); err != nil {
+				t.Fatal(err)
+			}
+			<-unloaded
+			if len(before) != 0 {
+				t.Fatalf("uevent writes %v while a deck held a track from the stick", before)
+			}
+			if state.State != "ready" {
+				t.Fatalf("status while a deck held a track: %q", state.State)
+			}
+			if got := strings.Join(f.seen(), " "); got != "remove: add:" {
+				t.Fatalf("uevent writes %q once no deck held one", got)
+			}
+		})
 	}
 }

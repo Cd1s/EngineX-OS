@@ -14,15 +14,17 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Cd1s/EngineX-OS/pkg/bridge"
 	"golang.org/x/sys/unix"
 )
 
 // --remount publishes a library the background job finished, without a re-plug (#301). It sends
 // the stick's partition a synthetic udev remove and then add: edisksd detaches it lazily and Engine
 // closes its library, then the add mounts it again and the edisksd hook's pre-mount publishes the
-// library before Engine sees the stick. Decks keep playing: Engine plays a loaded track from its
-// copy in /data/inMusicTempFiles. It waits while Engine is still copying a track it loads, and a
-// stick the DJ ejected (the hook's mark) is never mounted again.
+// library before Engine sees the stick. It waits while any deck holds a track from the stick,
+// loaded, playing or not: Engine could not save that track's play count or edits after the
+// remount ("pool is disposed"). A stick the DJ ejected (the hook's mark) is never mounted again,
+// and one ejected or pulled meanwhile publishes at its next insert.
 
 var (
 	sysClassBlock = "/sys/class/block"
@@ -35,6 +37,7 @@ var (
 	closeLimit    = 10 * time.Second
 	remountLimit  = 60 * time.Second // a mount runs fsck and the publish
 	readyEvery    = 2 * time.Second
+	deckWait      = 5 * time.Second // how often a remount a deck blocks looks again
 )
 
 // ejectMark is the hook's mark of an Eject of mount (edisksd_hook.c mark_eject).
@@ -72,7 +75,7 @@ func runRemount(ctx context.Context, mount string) error {
 		return fmt.Errorf("--remount must be absolute")
 	}
 	rep := newUSBLoadingReporter(usbLoadingStatusPath(), detectMediaKind(mount, ""))
-	err := remount(ctx, mount)
+	err := remount(ctx, mount, rep)
 	if err == nil || ctx.Err() != nil {
 		return nil
 	}
@@ -88,7 +91,7 @@ func runRemount(ctx context.Context, mount string) error {
 	return err
 }
 
-func remount(ctx context.Context, mount string) error {
+func remount(ctx context.Context, mount string, rep *usbLoadingReporter) error {
 	dev, devno, err := mountDevice(mount)
 	if err != nil {
 		return err
@@ -96,18 +99,31 @@ func remount(ctx context.Context, mount string) error {
 	uevent := filepath.Join(sysClassBlock, filepath.Base(dev), "uevent")
 	ejected := func() bool { _, err := os.Lstat(ejectMark(mount)); return err == nil }
 	// Engine copies a track it loads from the stick; a remove meanwhile could cut that load short.
+	waiting := false
 	for clear := 0; clear < 2; {
 		if !mounted(mount) || ejected() {
 			return nil // ejected or pulled: the next mount publishes
 		}
-		if engineCopying() {
+		wait := remountWait
+		switch {
+		case engineCopying():
 			clear = 0
-		} else {
+		case deckHolds(mount):
+			clear, wait = 0, deckWait
+			if !waiting {
+				log.Printf("rb-bridge: a deck holds a track from %s; it opens when none does, or at the next insert", mount)
+				waiting = true
+				rep.Ready()
+			}
+		default:
 			clear++
 		}
-		if err = sleepCtx(ctx, remountWait); err != nil {
+		if err = sleepCtx(ctx, wait); err != nil {
 			return nil
 		}
+	}
+	if waiting {
+		rep.Publishing()
 	}
 	start := time.Now()
 	if err = os.WriteFile(uevent, []byte("remove"), 0); err != nil {
@@ -231,6 +247,35 @@ func engineCopying() bool {
 					if flags, err := strconv.ParseUint(strings.TrimSpace(v), 8, 32); err != nil || flags&3 != 0 {
 						return true // O_WRONLY or O_RDWR
 					}
+				}
+			}
+		}
+	}
+	return false
+}
+
+// audioExt are the files a deck plays; Engine also holds the stick's m.db and, for stock
+// OneLibrary, PIONEER/rekordbox/exportLibrary.db.
+var audioExt = map[string]bool{".mp3": true, ".m4a": true, ".mp4": true, ".aac": true, ".flac": true, ".wav": true,
+	".aif": true, ".aiff": true, ".alac": true, ".ogg": true, ".opus": true}
+
+// deckHolds reports a deck holding a track from the stick at mount: Engine has an audio file of
+// it open (a track it could not copy), or its copy of one, under engineCopies as
+// "<id>_<file name>", a name the stick's library has. Engine also keeps copies of its own sampler
+// sounds open there, which no stick's library names.
+func deckHolds(mount string) bool {
+	for _, pid := range engines() {
+		fds, _ := os.ReadDir(filepath.Join(procDir, pid, "fd"))
+		for _, fd := range fds {
+			link := filepath.Join(procDir, pid, "fd", fd.Name())
+			target, err := os.Readlink(link)
+			switch {
+			case err != nil:
+			case strings.HasPrefix(target, mount+"/") && audioExt[strings.ToLower(filepath.Ext(target))]:
+				return true
+			case strings.HasPrefix(target, engineCopies):
+				if _, name, ok := strings.Cut(filepath.Base(target), "_"); ok && bridge.LibraryHasFile(mount, name) {
+					return true
 				}
 			}
 		}

@@ -8,10 +8,12 @@ package bridge
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -185,4 +187,28 @@ func publishUpdate(ctx context.Context, mount, dir string) (enginedb.Result, err
 	}
 	log.Printf("rb-bridge: update published")
 	return enginedb.Result{PlaylistsChanged: true}, nil
+}
+
+// LibraryHasFile reports whether a library of mount, the one a remount publishes or Engine's live
+// one (which has the tracks Engine added), has a track whose file is called name. A remount waits
+// while a deck holds Engine's copy of such a track (#301). By name only: the export's file size
+// may be out of date, and a remount too many only waits. True when it cannot tell.
+func LibraryHasFile(mount, name string) bool {
+	dir := filepath.Join(mount, "Engine Library", "Database2")
+	for _, p := range []string{filepath.Join(dir, importStageName, "m.db"), filepath.Join(dir, "m.db")} {
+		if _, err := os.Stat(p); errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: p, RawQuery: "mode=ro&_pragma=busy_timeout(1500)&_pragma=query_only(1)"}).String())
+		if err != nil {
+			return true
+		}
+		var has bool
+		err = db.QueryRow(`SELECT EXISTS(SELECT 1 FROM Track WHERE filename=?)`, name).Scan(&has)
+		db.Close()
+		if err != nil || has {
+			return true
+		}
+	}
+	return false
 }
