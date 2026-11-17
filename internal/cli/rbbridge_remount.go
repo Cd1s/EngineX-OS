@@ -3,9 +3,12 @@ package cli
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,6 +28,13 @@ import (
 // loaded, playing or not: Engine could not save that track's play count or edits after the
 // remount ("pool is disposed"). A stick the DJ ejected (the hook's mark) is never mounted again,
 // and one ejected or pulled meanwhile publishes at its next insert.
+//
+// A peer deck that loaded a track from the stick over Engine Link holds it on the peer, where
+// this deck cannot see it. What this deck sees is Engine sending it: Engine reads an audio file
+// of the stick while it writes no copy and no deck of this player has the track loaded (its own
+// decks, from stream-sync). Once that was seen, while the job ran or the remount waited, the
+// stick is not remounted: the library opens at the next insert, as it did before the remount
+// existed. A peer's unload is not observable, so there is no window after which it is safe.
 
 var (
 	sysClassBlock = "/sys/class/block"
@@ -38,7 +48,79 @@ var (
 	remountLimit  = 60 * time.Second // a mount runs fsck and the publish
 	readyEvery    = 2 * time.Second
 	deckWait      = 5 * time.Second // how often a remount a deck blocks looks again
+	// ownDecks are the tracks this player's decks have loaded, Engine's TrackNetworkPath
+	// ("net://<uuid>/<volume>/<path>"); ok is false when stream-sync does not answer.
+	ownDecks = func() (nets []string, ok bool) {
+		c := http.Client{Timeout: time.Second}
+		resp, err := c.Get("http://127.0.0.1:8080/peer/decks")
+		if err != nil {
+			return nil, false
+		}
+		defer resp.Body.Close()
+		var v struct {
+			Decks []struct {
+				Net string `json:"net"`
+			} `json:"decks"`
+		}
+		if resp.StatusCode != http.StatusOK || json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&v) != nil {
+			return nil, false
+		}
+		for _, d := range v.Decks {
+			nets = append(nets, d.Net)
+		}
+		return nets, true
+	}
 )
+
+// servedMark marks a stick from which Engine sent a peer a track since the import began.
+func servedMark(mount string) string {
+	h := fnv.New64a()
+	h.Write([]byte(mount))
+	return filepath.Join(ejectMarkDir, fmt.Sprintf("enginex-rb-served-%016x", h.Sum64()))
+}
+
+// noteServed marks mount when Engine sends a peer an audio file of it now (see above). When
+// stream-sync cannot say what this player's decks hold, it marks nothing, as before.
+func noteServed(mount string) {
+	if engineCopying() {
+		return // a load of this player reads the stick to copy it
+	}
+	var nets []string
+	asked := false
+	for _, pid := range engines() {
+		fds, _ := os.ReadDir(filepath.Join(procDir, pid, "fd"))
+		for _, fd := range fds {
+			target, err := os.Readlink(filepath.Join(procDir, pid, "fd", fd.Name()))
+			if err != nil || !strings.HasPrefix(target, mount+"/") || !audioExt[strings.ToLower(filepath.Ext(target))] {
+				continue
+			}
+			if !asked {
+				var ok bool
+				if nets, ok = ownDecks(); !ok {
+					return
+				}
+				asked = true
+			}
+			rel := strings.TrimPrefix(target, mount)
+			local := false
+			for _, n := range nets {
+				local = local || strings.HasPrefix(n, "net://") && strings.HasSuffix(n, rel)
+			}
+			if !local {
+				log.Printf("rb-bridge: Engine sends %s to a peer deck; %s opens at its next insert", filepath.Base(target), mount)
+				_ = os.WriteFile(servedMark(mount), nil, 0o600)
+				return
+			}
+		}
+	}
+}
+
+// watchServed notes Engine sending a peer a track of mount until ctx ends.
+func watchServed(ctx context.Context, mount string) {
+	for sleepCtx(ctx, remountWait) == nil {
+		noteServed(mount)
+	}
+}
 
 // ejectMark is the hook's mark of an Eject of mount (edisksd_hook.c mark_eject).
 func ejectMark(mount string) string {
@@ -100,9 +182,13 @@ func remount(ctx context.Context, mount string, rep *usbLoadingReporter) error {
 	ejected := func() bool { _, err := os.Lstat(ejectMark(mount)); return err == nil }
 	// Engine copies a track it loads from the stick; a remove meanwhile could cut that load short.
 	waiting := false
+	served := func() bool { _, err := os.Lstat(servedMark(mount)); return err == nil }
 	for clear := 0; clear < 2; {
 		if !mounted(mount) || ejected() {
 			return nil // ejected or pulled: the next mount publishes
+		}
+		if noteServed(mount); served() {
+			return fmt.Errorf("a peer deck may hold a track from %s; eject it and insert it again to load the library", mount)
 		}
 		wait := remountWait
 		switch {

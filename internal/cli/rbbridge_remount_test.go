@@ -61,12 +61,13 @@ func newFakeStick(t *testing.T) *fakeStick {
 	}
 	oldInfo, oldSys, oldProc, oldMark, oldMounted := mountinfoPath, sysClassBlock, procDir, ejectMarkDir, mounted
 	oldWait, oldRemove, oldClose, oldRemount, oldReady := remountWait, removeLimit, closeLimit, remountLimit, readyEvery
-	oldDeck, oldCopies := deckWait, engineCopies
+	oldDeck, oldCopies, oldOwn := deckWait, engineCopies, ownDecks
 	t.Cleanup(func() {
 		mountinfoPath, sysClassBlock, procDir, ejectMarkDir, mounted = oldInfo, oldSys, oldProc, oldMark, oldMounted
 		remountWait, removeLimit, closeLimit, remountLimit, readyEvery = oldWait, oldRemove, oldClose, oldRemount, oldReady
-		deckWait, engineCopies = oldDeck, oldCopies
+		deckWait, engineCopies, ownDecks = oldDeck, oldCopies, oldOwn
 	})
+	ownDecks = func() ([]string, bool) { return nil, false } // no stream-sync here
 	mountinfoPath, sysClassBlock, procDir, ejectMarkDir = info, sys, f.proc, filepath.Join(dir, "run")
 	remountWait, removeLimit, closeLimit, remountLimit, readyEvery = 20*time.Millisecond, 300*time.Millisecond, 300*time.Millisecond, 300*time.Millisecond, 20*time.Millisecond
 	deckWait, engineCopies = 20*time.Millisecond, filepath.Join(dir, "inMusicTempFiles")+"/"

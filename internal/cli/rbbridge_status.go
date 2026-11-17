@@ -120,16 +120,24 @@ func (r *usbLoadingReporter) set(state string) {
 	r.write(usbLoadingStatus{State: state, Kind: r.kind})
 }
 
-// Refresh writes the last state again, so the browser keeps showing it.
+// Refresh writes the last state again, so the browser keeps showing it; not over the status
+// another stick's import or mount wrote since (one status file for every drive).
 func (r *usbLoadingReporter) Refresh() {
 	if r == nil || r.path == "" {
 		return
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.last.State != "" {
-		r.write(r.last)
+	if r.last.State == "" {
+		return
 	}
+	if b, err := os.ReadFile(r.path); err == nil {
+		var now usbLoadingStatus
+		if json.Unmarshal(b, &now) == nil && now != r.last {
+			return
+		}
+	}
+	r.write(r.last)
 }
 
 func (r *usbLoadingReporter) write(st usbLoadingStatus) {

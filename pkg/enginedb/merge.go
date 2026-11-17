@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -71,8 +72,17 @@ func MergeLive(ctx context.Context, buildDir, liveDir string, base BaseCounts) e
 	}
 	defer db.Close()
 	db.SetMaxOpenConns(1)
-	for _, a := range [][2]string{{ro(filepath.Join(liveDir, "m.db")), "live"}, {filepath.Join(buildDir, stateFile), "bridge"}, {ro(filepath.Join(liveDir, stateFile)), "livebridge"}} {
+	liveState := ro(filepath.Join(liveDir, stateFile))
+	if _, err := os.Stat(filepath.Join(liveDir, stateFile)); errors.Is(err, os.ErrNotExist) {
+		liveState = ":memory:" // a library rb-bridge never imported: no track of it is the import's
+	}
+	for _, a := range [][2]string{{ro(filepath.Join(liveDir, "m.db")), "live"}, {filepath.Join(buildDir, stateFile), "bridge"}, {liveState, "livebridge"}} {
 		if _, err = db.ExecContext(ctx, `ATTACH DATABASE ? AS `+a[1], a[0]); err != nil {
+			return err
+		}
+	}
+	if liveState == ":memory:" {
+		if _, err = db.ExecContext(ctx, strings.ReplaceAll(bridgeSchema, "bridge.", "livebridge.")); err != nil {
 			return err
 		}
 	}
