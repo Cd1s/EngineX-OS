@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -178,12 +179,15 @@ func TestIssue301RemountAsksEngineLinkPeers(t *testing.T) {
 		t.Fatalf("Engine Link peers %v, want only 192.168.1.138", got)
 	}
 	// The peer is an EngineX deck: its stream-sync answers GET /peer/decks.
+	var mu sync.Mutex
 	var holds []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/peer/decks" {
 			http.NotFound(w, r)
 			return
 		}
+		mu.Lock()
+		defer mu.Unlock()
 		decks := []map[string]any{{"deck": 1}}
 		for i, n := range holds {
 			decks = append(decks, map[string]any{"deck": i + 2, "net": n})
@@ -200,18 +204,22 @@ func TestIssue301RemountAsksEngineLinkPeers(t *testing.T) {
 	try := func() ([]string, error) {
 		t.Helper()
 		before := len(f.seen())
-		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second) // a blocked remount returns at once
 		defer cancel()
 		err := remount(ctx, f.mount, newUSBLoadingReporter(filepath.Join(t.TempDir(), "status"), "usb"))
 		return f.seen()[before:], err
 	}
 	// It holds its own stick's track and nothing of ours: remounted.
+	mu.Lock()
 	holds = []string{"net://{9f}/THEIRS (USB 1)/Contents/x.mp3"}
+	mu.Unlock()
 	if got, err := try(); err != nil || strings.Join(got, " ") != "remove: add:" {
 		t.Fatalf("EngineX peer holding nothing of the stick: %v %v", got, err)
 	}
 	// One of its decks holds a track of this stick: not remounted, and marked.
+	mu.Lock()
 	holds = []string{"net://{1}/REKORDBOX (USB 1)/Contents/Track00003.mp3"}
+	mu.Unlock()
 	if got, err := try(); len(got) != 0 || err == nil {
 		t.Fatalf("EngineX peer holding a track of the stick: %v %v", got, err)
 	}
@@ -254,6 +262,8 @@ func TestIssue301StatusIsOwnedByItsJob(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "status")
 	a, b := newUSBLoadingReporter(p, "usb"), newUSBLoadingReporter(p, "sd")
 	a.Publishing()
+	b.state = "importing"
+	b.Start() // a new import takes the status (re-check of fefdd5cf: only Start does)
 	b.Report(4, 10, true)
 	a.Done()
 	if _, err := os.Stat(p); err != nil {
