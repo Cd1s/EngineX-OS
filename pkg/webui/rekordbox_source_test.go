@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -149,6 +150,69 @@ func TestRekordboxSourceNamesTheComputerAndListsItsLibrary(t *testing.T) {
 	}
 }
 
+// The source follows the same ten-second silence timeout as a CDJ, even when
+// rb-bridge's last on-disk snapshot still contains the computer.
+func TestRekordboxPresenceUsesPlayerTimeout(t *testing.T) {
+	for _, sources := range []string{"tidal", ""} {
+		t.Run("sources_"+sources, func(t *testing.T) {
+			e := newRbxEnv(t, nil)
+			t.Setenv("ENGINEX_PROLINK_STATE", filepath.Join(t.TempDir(), "missing.json"))
+			settings := "scope=rekordbox\nprolink_share=1\nsources=" + sources + "\nknown=" + strings.Join(uiServices, ",") + "\n"
+			if err := os.WriteFile(filepath.Join(e.s.cfg.UIDir, "settings.conf"), []byte(settings), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			seen := func(at time.Time) {
+				t.Helper()
+				b, err := json.Marshal(prolink.Snapshot{Devices: []prolink.Device{
+					{Name: "rekordbox", Number: 17, Address: "127.0.0.1", PacketType: 0x29, LastSeen: at},
+					{Name: "CDJ-3000", Number: 2, Address: "192.0.2.2", LastSeen: time.Now()},
+				}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(e.s.cfg.StateDir, "prolink.json"), b, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			status := func(want bool) string {
+				t.Helper()
+				r := httptest.NewRecorder()
+				request := httptest.NewRequest("GET", "/v1/enginex/ui", nil)
+				request.RemoteAddr = "127.0.0.1:1234"
+				e.s.ServeHTTP(r, request)
+				if r.Code != 200 {
+					t.Fatalf("UI status: %d", r.Code)
+				}
+				var v uiSettings
+				if err := json.Unmarshal(r.Body.Bytes(), &v); err != nil {
+					t.Fatal(err)
+				}
+				if v.Sources == nil || v.LoggedIn == nil {
+					t.Error("UI lists must be arrays so QML clears prior entries")
+				}
+				if slices.Contains(v.Sources, rekordboxScope) != want || slices.Contains(v.LoggedIn, rekordboxScope) != want || (v.RekordboxName != "") != want {
+					t.Errorf("presence=%t: sources=%v loggedIn=%v name=%q", want, v.Sources, v.LoggedIn, v.RekordboxName)
+				}
+				if slices.Contains(v.Sources, "tidal") != (sources == "tidal") {
+					t.Errorf("other sources changed: %v", v.Sources)
+				}
+				return r.Header().Get("X-UI-Digest")
+			}
+			seen(time.Now().Add(-9 * time.Second))
+			present := status(true)
+			seen(time.Now().Add(-11 * time.Second))
+			absent := status(false)
+			if present == absent {
+				t.Error("loss did not refresh UI digest")
+			}
+			seen(time.Now())
+			if status(true) == absent {
+				t.Error("return did not refresh UI digest")
+			}
+		})
+	}
+}
+
 func TestRekordboxLoadsFromAMountedShare(t *testing.T) {
 	// rekordbox names the file in composed form; the share holds it in the decomposed one macOS may keep.
 	composed := "Bj\u00f6rk.mp3"
@@ -233,6 +297,18 @@ func TestRekordboxLoadsOverNFSIntoTheBudgetedCache(t *testing.T) {
 		t.Fatalf("one copy in the drive's cache folder: %v", cached)
 	}
 	nfs.Close()
+	// The computer disappears after a complete local copy. Neither presence
+	// withdrawal nor a fresh playback-info request may invalidate that copy.
+	t.Setenv("ENGINEX_PROLINK_STATE", filepath.Join(t.TempDir(), "missing.json"))
+	expired, _ := json.Marshal(prolink.Snapshot{Devices: []prolink.Device{{Name: "rekordbox", Number: 17, Address: "127.0.0.1", LastSeen: time.Now().Add(-11 * time.Second)}}})
+	if err := os.WriteFile(filepath.Join(e.s.cfg.StateDir, "prolink.json"), expired, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if e.s.rekordboxHost() != nil {
+		t.Error("expired computer still advertised")
+	}
+	dialRekordbox = func(context.Context, net.IP, byte) (rbxLink, error) { return nil, errors.New("computer gone") }
+	tidalGet(t, e.base, "/v1/tracks/"+strconv.FormatInt(ids["First"], 10)+"/playbackinfopostpaywall", 200, nil)
 	get() // played again with the computer's NFS gone: the copy is used
 	if again, _ := filepath.Glob(filepath.Join(e.vol, rbxCacheDir, "*")); len(again) != 1 {
 		t.Fatalf("copies: %v", again)

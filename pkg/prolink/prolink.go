@@ -22,6 +22,9 @@ import (
 
 const magic = "Qspt1WmJOL"
 
+// DeviceTimeout is the silence interval after which a player or rekordbox leaves the link.
+const DeviceTimeout = 10 * time.Second
+
 type BeatGridPoint struct {
 	Beat   uint16  `json:"beat"`
 	BPM    float64 `json:"bpm"`
@@ -408,7 +411,7 @@ func BuildSnapshot(devices []Device) Snapshot {
 	active := make([]Device, 0, len(devices))
 	var masterDev *Device
 	for _, d := range devices {
-		if d.LastSeen.IsZero() || now.Sub(d.LastSeen) <= 10*time.Second {
+		if d.LastSeen.IsZero() || now.Sub(d.LastSeen) <= DeviceTimeout {
 			d.BeatPhase = deviceBeatPhase(d)
 			active = append(active, d)
 			if d.Master && masterDev == nil {
@@ -945,7 +948,7 @@ func (d *Discovery) Devices(now time.Time) []Device {
 	d.prune(now)
 	var out []Device
 	for _, v := range d.devices {
-		if now.Sub(v.LastSeen) <= 10*time.Second {
+		if now.Sub(v.LastSeen) <= DeviceTimeout {
 			out = append(out, v)
 		}
 	}
@@ -955,7 +958,7 @@ func (d *Discovery) Devices(now time.Time) []Device {
 // prune runs while the discovery mutex is held.
 func (d *Discovery) prune(now time.Time) {
 	for key, device := range d.devices {
-		if now.Sub(device.LastSeen) > 10*time.Second {
+		if now.Sub(device.LastSeen) > DeviceTimeout {
 			delete(d.devices, key)
 		}
 	}

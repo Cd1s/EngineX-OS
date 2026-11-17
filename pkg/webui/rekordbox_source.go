@@ -111,7 +111,7 @@ func (s *Server) rekordboxHost() *rbxHost {
 		return nil
 	}
 	for _, d := range s.mergedDevices() {
-		if prolink.IsRekordbox(d) && time.Since(d.LastSeen) < 15*time.Second && net.ParseIP(d.Address) != nil {
+		if prolink.IsRekordbox(d) && time.Since(d.LastSeen) <= prolink.DeviceTimeout && net.ParseIP(d.Address) != nil {
 			return &rbxHost{d.Address, rbxName(d.Address)}
 		}
 	}
