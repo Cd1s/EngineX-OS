@@ -1725,7 +1725,7 @@ assert.strictEqual(evalIsLead({{ master: false }}), false);
         """L2b: a prompt's long message (`message:` then the string on the next line, with a comma) and the
         value of a branch (`;("text")`) have no property name in front: TEXT_LINE never saw them, so the
         no-source dialog, the Factory Reset warning, Wi-Fi status and "No Tracks Found" stayed English in
-        every other language although the table has rows for them."""
+        every other language although the table has rows for them (the Folder and History hints had no row)."""
         qrc = LAB / "5.3.0/qrc"
         if not qrc.is_dir():
             self.skipTest(f"{qrc} not found")
@@ -1737,6 +1737,9 @@ assert.strictEqual(evalIsLead({{ master: false }}), false);
         for rel, en in (
             ("Skins/Embedded/Views/Streaming/StreamingNoSourceAvailableDialog.qml", nosource),
             ("Skins/Embedded/Views/BrowseView/BrowseView.qml", "No Tracks Found"),
+            # the Folder and History views' hints sit in the same `;("...")` block; the first has a `\n` in it
+            ("Skins/Embedded/Views/BrowseView/BrowseView.qml", "No tracks on this folder level.\\nTracks may be contained in subfolders."),
+            ("Skins/Embedded/Views/BrowseView/BrowseView.qml", "Select a year or month folder, or a history list to view history content."),
             ("Skins/Embedded/Views/ControlCenter/Tabs/Preferences/Entries/FactoryReset.qml",
              "This will wipe all user settings and passwords from this device and restore it to its factory default configuration. The device will reboot during this process."),
             ("Skins/Embedded/Views/WifiSelect/WifiInformationDialog.qml", "Connected"),
