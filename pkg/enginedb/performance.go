@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"slices"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -27,7 +28,10 @@ var little = binary.LittleEndian
 func QCompress(raw []byte) ([]byte, error) {
 	var out bytes.Buffer
 	_ = binary.Write(&out, big, uint32(len(raw)))
-	w := zlib.NewWriter(&out)
+	// A new compressor is about a megabyte: one per blob was most of a 20 000-track import's time (#301).
+	w := zlibWriters.Get().(*zlib.Writer)
+	defer zlibWriters.Put(w)
+	w.Reset(&out)
 	if _, e := w.Write(raw); e != nil {
 		return nil, e
 	}
@@ -36,6 +40,8 @@ func QCompress(raw []byte) ([]byte, error) {
 	}
 	return out.Bytes(), nil
 }
+
+var zlibWriters = sync.Pool{New: func() any { return zlib.NewWriter(nil) }}
 
 // QUncompress is bounded and rejects both trailing compressed data and incorrect lengths.
 func QUncompress(blob []byte, limit int) ([]byte, error) {

@@ -16,6 +16,14 @@ func FinishPublishForTest(dir string) error { return finishPublish(dir, stateNam
 // ExportReadsForTest reports how often the drive's export was read.
 func ExportReadsForTest() int64 { return exportReads.Load() }
 
+// SetLargeExportForTest makes every export one too large to import or update while the mount
+// waits: first imports and updates go on in the background (#301).
+func SetLargeExportForTest() func() {
+	oldAttempt, oldPublish := attemptExportBytes, maxPublishExportBytes
+	attemptExportBytes, maxPublishExportBytes = -1, -1
+	return func() { attemptExportBytes, maxPublishExportBytes = oldAttempt, oldPublish }
+}
+
 // SlowExportReadForTest makes each export read take d and shortens the mount
 // read budget to budget, until the returned function restores both.
 func SlowExportReadForTest(d, budget time.Duration) func() {

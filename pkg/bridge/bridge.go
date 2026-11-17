@@ -384,6 +384,9 @@ const (
 var (
 	mountReadBudget    = 8 * time.Second
 	maxMountHookBudget = 14 * time.Second
+	// An update in place still running this long after the mount stops before the hook's kill
+	// and goes on in the background (#301): the kill threw it away, at every insert.
+	mountGiveUp = 17 * time.Second
 )
 
 // ConvertAtMount is Convert for when a volume is mounted, while Engine is waiting
@@ -395,6 +398,10 @@ var (
 // imported only once no track was left without its cues.
 func ConvertAtMount(ctx context.Context, mount string, opts enginedb.Options, full bool) (enginedb.Result, error) {
 	r, err := convertAtMount(ctx, mount, &opts, full)
+	if r.Background {
+		// The library is updated aside (#301): its upkeep and queued edits wait for the publish.
+		return r, err
+	}
 	// A bypass without file reads has not started the shared read budget yet.
 	if opts.Deadline.IsZero() && !full {
 		opts.Deadline = time.Now().Add(mountReadBudget)
@@ -499,8 +506,15 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 		}
 		return firstImportAtMount(ctx, mount, dir, stamp, opts, r, mountStart)
 	}
+	stage := filepath.Join(dir, importStageName)
 	if canWrite {
-		dropStage(filepath.Join(dir, importStageName)) // the volume has a library of its own now
+		switch {
+		case isUpdateStage(stage) && readMark(stage, stampName) == stamp:
+			return publishUpdate(ctx, mount, dir)
+		case isUpdateStage(stage) && readMark(stage, pendingName) == stamp && !opts.SmartMatch:
+			return enginedb.Result{Background: true}, nil
+		}
+		dropStage(stage) // a stage of another export, or a first import's: the library is the volume's own now
 	}
 	oldStamp := readMark(dir, stampName)
 	opts.LegacyOffsets = oldStamp != "" && !strings.HasPrefix(oldStamp, stampVersion+" ")
@@ -513,6 +527,15 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 	var readErr error
 	if !full && opts.SmartMatch && !canWrite {
 		return enginedb.Result{Bypassed: true}, nil
+	}
+	// An update a large export needs cannot finish while the mount waits: resolving and reading
+	// the files of a cold stick takes minutes (#301). It goes on in the background on a copy.
+	if !full && !bypass && !opts.SmartMatch && canWrite && opts.Deadline.IsZero() && exportBytes(r, mount) > attemptExportBytes {
+		if err := startUpdate(stage, stamp); err != nil {
+			return enginedb.Result{}, err
+		}
+		log.Printf("rb-bridge: update of a large export goes on after the mount")
+		return enginedb.Result{Background: true}, nil
 	}
 	// The overviews before anything is read from the export. On a card that also carries
 	// the staged exports of thousands of tracks that read alone outlasts the mount's time:
@@ -531,9 +554,15 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 			budget = max(budget-time.Since(start), 1)
 		}
 	}
+	giveUp := mountStart.Add(mountGiveUp)
+	if opts.Deadline.After(giveUp) {
+		giveUp = opts.Deadline // a caller's own, longer budget
+	}
+	inPlace, stop := context.WithDeadline(ctx, giveUp)
+	defer stop()
 	if !full && !bypass {
 		// Parsing/decrypting the export does not spend the file-reading budget.
-		l, stagedOnly, err := readLibrary(ctx, mount)
+		l, stagedOnly, err := readLibrary(inPlace, mount)
 		readErr = err
 		if err == nil {
 			pre = &preread{l, stagedOnly, r}
@@ -558,6 +587,20 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 		}
 		return enginedb.Result{Bypassed: true}, nil
 	}
+	// Out of the mount's time: what was done is not committed, the rest goes on in the background.
+	late := func(err error) bool {
+		return err != nil && inPlace.Err() != nil && ctx.Err() == nil && canWrite && !full && !opts.SmartMatch
+	}
+	background := func(err error) (enginedb.Result, error) {
+		log.Printf("rb-bridge: update goes on after the mount: %v", err)
+		if err = startUpdate(stage, stamp); err != nil {
+			return enginedb.Result{}, err
+		}
+		return enginedb.Result{Background: true}, nil
+	}
+	if late(readErr) {
+		return background(readErr)
+	}
 	if readErr != nil {
 		if opts.SmartMatch && errors.Is(readErr, os.ErrNotExist) {
 			return enginedb.Result{Bypassed: true}, nil
@@ -567,7 +610,10 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 	// The same export as a mount that left tracks without their files: read
 	// only those, the others are known to be imported with theirs.
 	opts.Resume = resume || (!full && !opts.SmartMatch && readMark(dir, pendingName) == stamp)
-	result, err = convert(ctx, mount, opts, pre, budget, mountStart)
+	result, err = convert(inPlace, mount, opts, pre, budget, mountStart)
+	if late(err) {
+		return background(err)
+	}
 	if err == nil && !result.Bypassed {
 		// Only this build has written since the progress was read, and it leaves no overview
 		// without band maxima: the backfill goes on where it was, also with no time left now.

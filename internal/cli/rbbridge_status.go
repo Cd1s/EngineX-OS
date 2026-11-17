@@ -104,14 +104,20 @@ func (r *usbLoadingReporter) Report(done, total int, force bool) {
 	r.write(usbLoadingStatus{State: state, Kind: r.kind, Done: done, Total: total})
 }
 
-// Ready says the library is converted and waits for the next mount.
-func (r *usbLoadingReporter) Ready() {
+// Ready says the library is converted and opens when the stick is inserted again: the remount
+// that publishes it failed (#301).
+func (r *usbLoadingReporter) Ready() { r.set("ready") }
+
+// Publishing says the library is converted and a remount is opening it (#301).
+func (r *usbLoadingReporter) Publishing() { r.set("publishing") }
+
+func (r *usbLoadingReporter) set(state string) {
 	if r == nil || r.path == "" {
 		return
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.write(usbLoadingStatus{State: "ready", Kind: r.kind})
+	r.write(usbLoadingStatus{State: state, Kind: r.kind})
 }
 
 // Refresh writes the last state again, so the browser keeps showing it.

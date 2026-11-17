@@ -3779,7 +3779,9 @@ SERVICES_MAIN = """
 	}
 	function scUsbLoadingText() {
 		if (root.scUsbPrepareError) return root.scT(root.scUsbPrepareError)
-		// A first import too large for the mount goes on after it (#301).
+		// A first import too large for the mount goes on after it, and a remount opens it (#301);
+		// "ready" only when that remount failed.
+		if (root.scUsbPrepareState === "publishing") return root.scT("Opening rekordbox library…")
 		if (root.scUsbPrepareState === "ready") return root.scT("rekordbox library ready: eject and insert again to load it")
 		const base = root.scUsbPrepareState === "importing" ? root.scT("Importing rekordbox library…") :
 			root.scUsbPrepareKind === "sd" ? root.scT("Loading SD card…") : root.scT("Loading USB…")

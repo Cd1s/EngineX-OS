@@ -7365,6 +7365,7 @@ class UsbPreparingFeedbackTest(unittest.TestCase):
         self.assertIn(["Loading SD card…", "SD 卡载入中…", "SD 卡載入中…", "Cargando tarjeta SD…"], rows)
         # #301: a first import that goes on after the mount, then waits for the next one.
         self.assertIn(["Importing rekordbox library…", "正在导入 rekordbox 曲库…", "正在匯入 rekordbox 曲庫…", "Importando la biblioteca de rekordbox…"], rows)
+        self.assertIn(["Opening rekordbox library…", "正在打开 rekordbox 曲库…", "正在開啟 rekordbox 曲庫…", "Abriendo la biblioteca de rekordbox…"], rows)
         self.assertIn(["rekordbox library ready: eject and insert again to load it", "rekordbox 曲库已就绪：弹出后重新插入即可载入",
                        "rekordbox 曲庫已就緒：退出後重新插入即可載入", "Biblioteca de rekordbox lista: expulsa y vuelve a insertar para cargarla"], rows)
 
@@ -7469,6 +7470,8 @@ assert.equal(state.scUsbPreparing, true);
 assert.equal(state.scUsbLoadingText(), 'Loading SD card… (1,200 / 21,352)');
 state.scApply({usbPreparing: true, usbPrepare: {state: 'importing', kind: 'usb', done: 3200, total: 20000}});
 assert.equal(state.scUsbLoadingText(), 'Importing rekordbox library… (3,200 / 20,000)');
+state.scApply({usbPreparing: true, usbPrepare: {state: 'publishing', kind: 'usb'}});
+assert.equal(state.scUsbLoadingText(), 'Opening rekordbox library…');
 state.scApply({usbPreparing: true, usbPrepare: {state: 'ready', kind: 'usb'}});
 assert.equal(state.scUsbLoadingText(), 'rekordbox library ready: eject and insert again to load it');
 state.scApply({usbPreparing: true, usbPrepare: {state: 'loading', kind: 'usb', done: 5, total: 9}});

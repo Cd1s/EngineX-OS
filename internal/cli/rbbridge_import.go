@@ -103,7 +103,7 @@ func runImportJob(ctx context.Context, mount string) error {
 	}()
 	r, err := bridge.ImportInBackground(ctx, mount, func(done, total int) { rep.Report(done, total, true) })
 	if ctx.Err() != nil {
-		log.Printf("rb-bridge: first import of %s stopped; the next mount goes on from its last pass", mount)
+		log.Printf("rb-bridge: import of %s stopped; the next mount goes on from its last pass", mount)
 		return nil
 	}
 	if err != nil {
@@ -113,14 +113,19 @@ func runImportJob(ctx context.Context, mount string) error {
 	if r.Bypassed {
 		return nil
 	}
-	log.Printf("rb-bridge: first import of %s complete; it is published at the next mount", mount)
-	rep.Ready()
+	// Published by a remount (#301); the hook stops this job when the remount unmounts the stick.
+	log.Printf("rb-bridge: import of %s complete; a remount publishes it", mount)
+	rep.Publishing()
+	if err = startRemount(mount); err != nil {
+		log.Printf("rb-bridge: %v", err)
+		rep.Ready()
+	}
 	<-ctx.Done()
 	return nil
 }
 
-// mounted reports a mount point: its own filesystem, not its parent's.
-func mounted(p string) bool {
+// mounted reports a mount point: its own filesystem, not its parent's. A variable for tests.
+var mounted = func(p string) bool {
 	var st, parent syscall.Stat_t
 	return syscall.Lstat(p, &st) == nil && st.Mode&syscall.S_IFMT == syscall.S_IFDIR &&
 		syscall.Stat(filepath.Dir(p), &parent) == nil && st.Dev != parent.Dev

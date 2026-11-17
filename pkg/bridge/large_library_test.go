@@ -17,35 +17,31 @@ import (
 
 // BH-GC1-2: a library over 500 tracks was imported from the export alone at
 // the first mount and stamped as imported, so its hot cues, memory cues,
-// loops, beat grids and waveforms were never read on any later mount. A first
-// import now reads them all in its stage, after the mount when the mount's
-// time is short, and is published only then (#301).
+// loops, beat grids and waveforms were never read on any later mount.
 func TestLargeLibraryGetsItsCuesLoopsAndGridOnTheNextMount(t *testing.T) {
 	const n = largeTracks
 	root := largeExport(t)
 	stamp := filepath.Join(root, "Engine Library/Database2/.rb-bridge-stamp")
 	ctx := context.Background()
 
-	// First mount, its read budget spent: playlists and tracks in the stage, nothing published.
-	r, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{Deadline: time.Now()}, false)
-	if err != nil || r.Added != n || !r.PlaylistsChanged || !r.Background || r.Deferred == 0 {
+	// First mount: playlists and tracks at once (#182), from the export alone.
+	r, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false)
+	if err != nil || r.Added != n || !r.PlaylistsChanged {
 		t.Fatalf("first mount: %+v %v", r, err)
 	}
-	if _, err = os.Stat(filepath.Join(root, "Engine Library/Database2/m.db")); !os.IsNotExist(err) {
-		t.Fatalf("a library without its cues was published: %v", err)
+	engine := dbOpen(t, root)
+	if got := scalar[int](t, engine, `SELECT count(*) FROM PlaylistEntity e JOIN Playlist p ON p.id=e.listId WHERE p.title='Big Set'`); got != n {
+		t.Fatalf("first mount: %d tracks in the playlist", got)
 	}
 	if _, err = os.Stat(stamp); !os.IsNotExist(err) {
 		t.Fatal("a library imported without its cues was recorded as imported")
 	}
 
-	// After the mount the files are read; the next mount publishes and records the import.
-	if r, err = bridge.ImportInBackground(ctx, root, nil); err != nil || r.Deferred != 0 {
-		t.Fatalf("background import: %+v %v", r, err)
-	}
-	if r, err = bridge.ConvertAtMount(ctx, root, enginedb.Options{Deadline: time.Now().Add(time.Hour)}, false); err != nil || r.Background || !r.PlaylistsChanged {
+	// Next mount: the files are read and the import is recorded. The deadline
+	// stands in for the mount's read budget, which -race on a busy host can use up.
+	if r, err = bridge.ConvertAtMount(ctx, root, enginedb.Options{Deadline: time.Now().Add(time.Hour)}, false); err != nil || r.Deferred != 0 || r.Updated != n {
 		t.Fatalf("second mount: %+v %v", r, err)
 	}
-	engine := dbOpen(t, root)
 	if got := scalar[int](t, engine, `SELECT count(*) FROM PerformanceData WHERE beatData IS NOT NULL AND quickCues IS NOT NULL AND loops IS NOT NULL`); got != n {
 		t.Fatalf("%d of %d tracks have their beat grid, cues and loops", got, n)
 	}
@@ -106,7 +102,7 @@ func TestLargeLibraryResumesAndHealsAnOldStamp(t *testing.T) {
 	ctx := context.Background()
 	far := enginedb.Options{Deadline: time.Now().Add(time.Hour)}
 	dir := filepath.Join(root, "Engine Library/Database2")
-	if _, err := bridge.ImportLikeEarlierBuildsForTest(ctx, root, enginedb.Options{}); err != nil {
+	if _, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false); err != nil {
 		t.Fatal(err)
 	}
 	// What an earlier build left: the export-only import recorded as complete.

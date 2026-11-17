@@ -38,9 +38,18 @@ func TestDefaultMountCompressionThroughputDelta(t *testing.T) {
 		t.Fatalf("first mount: %+v %v", r, err)
 	}
 	start := time.Now()
+	// The update of a large export goes on after the mount (#301), and reads every file there.
 	r, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false)
-	if err != nil || r.Added != 0 || r.Updated == 0 {
+	if err != nil || !r.Background {
 		t.Fatalf("default-budget repeat: %+v %v", r, err)
 	}
-	t.Logf("6000-track default-budget repeat: elapsed=%s updated=%d deferred=%d", time.Since(start), r.Updated, r.Deferred)
+	t.Logf("6000-track default-budget repeat: elapsed=%s", time.Since(start))
+	start = time.Now()
+	if r, err = bridge.ImportInBackground(ctx, root, nil); err != nil || r.Added != 0 || r.Updated == 0 || r.Deferred != 0 {
+		t.Fatalf("update after the mount: %+v %v", r, err)
+	}
+	t.Logf("6000-track update after the mount: elapsed=%s updated=%d", time.Since(start), r.Updated)
+	if r, err = bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false); err != nil || r.Background || !r.PlaylistsChanged {
+		t.Fatalf("mount publishing the update: %+v %v", r, err)
+	}
 }

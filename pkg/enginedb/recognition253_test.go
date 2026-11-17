@@ -32,7 +32,7 @@ func recognition253Fixture(t testing.TB, n int) (string, *rekordbox.Library, *sq
 	if err != nil {
 		t.Fatal(err)
 	}
-	prepared, err := prepareFast(context.Background(), r, l)
+	prepared, err := prepareFast(context.Background(), r, l, false)
 	if err != nil {
 		t.Fatal(err)
 	}

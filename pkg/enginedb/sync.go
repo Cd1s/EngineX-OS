@@ -58,6 +58,22 @@ type Options struct {
 	// or artwork file. Tracks already imported are left as they are. Engine
 	// analyses a track without performance data when it is loaded.
 	Fast bool `json:"-"`
+	// TrustPaths takes a Fast import's file paths from the export as they are, without a
+	// directory lookup for each: on a cold stick those took 4 minutes for 20 000 tracks
+	// (#301). The next full import resolves them and moves a row whose file is spelled
+	// otherwise on the volume.
+	TrustPaths bool `json:"-"`
+	// FastCues gives the tracks a Fast import adds the hot cues, memory cues and loops
+	// the export's own database holds (OneLibrary), with no analysis file read. Engine
+	// analyses such a track on load and keeps them; the next full import replaces them.
+	FastCues bool `json:"-"`
+	// Bulk builds a private database in DatabaseDir that nothing opens before it is
+	// renamed into place (#301): its journal stays in memory, nothing is synced until
+	// the commit, and Engine's secondary indexes on Track and PlaylistEntity and the
+	// two triggers that fill derived Track data are dropped for the inserts and
+	// recreated from their own SQL afterwards. The caller discards DatabaseDir after
+	// an error.
+	Bulk bool `json:"-"`
 	// DatabaseDir builds the database elsewhere, such as on tmpfs, instead of in
 	// the mount's Engine Library.
 	DatabaseDir string `json:"-"`
@@ -128,8 +144,9 @@ func playedIndicator() int64 {
 	return int64(binary.BigEndian.Uint64(id[:8])>>1) | 1
 }
 
-// open keeps schema initialization in the same transaction as the import.
-func open(ctx context.Context, p string) (*sql.DB, *sql.Tx, error) {
+// open keeps schema initialization in the same transaction as the import. bulk is
+// Options.Bulk: journals in memory and no syncs, for a private build only.
+func open(ctx context.Context, p string, bulk bool) (*sql.DB, *sql.Tx, error) {
 	state := filepath.Join(filepath.Dir(p), stateFile)
 	for _, file := range []string{p, state} {
 		for _, suffix := range []string{"", "-journal", "-wal", "-shm"} {
@@ -139,7 +156,11 @@ func open(ctx context.Context, p string) (*sql.DB, *sql.Tx, error) {
 		}
 	}
 	u := url.URL{Scheme: "file", Path: p}
-	db, e := sql.Open("sqlite", u.String()+"?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_txlock=immediate")
+	dsn := u.String() + "?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_txlock=immediate"
+	if bulk {
+		dsn += "&_pragma=journal_mode(MEMORY)&_pragma=synchronous(OFF)"
+	}
+	db, e := sql.Open("sqlite", dsn)
 	if e != nil {
 		return nil, nil, e
 	}
@@ -158,6 +179,11 @@ func open(ctx context.Context, p string) (*sql.DB, *sql.Tx, error) {
 	// One transaction spans both files, so they commit atomically.
 	if _, e = db.ExecContext(ctx, `ATTACH DATABASE ? AS bridge`, state); e != nil {
 		return nil, nil, e
+	}
+	if bulk {
+		if _, e = db.ExecContext(ctx, `PRAGMA bridge.journal_mode=MEMORY; PRAGMA bridge.synchronous=OFF`); e != nil {
+			return nil, nil, e
+		}
 	}
 	tx, e = db.BeginTx(ctx, nil)
 	if e != nil {
@@ -430,7 +456,7 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 	}
 	var prepared []preparedTrack
 	if opts.Fast {
-		if prepared, err = prepareFast(ctx, res, l); err != nil {
+		if prepared, err = prepareFast(ctx, res, l, opts.TrustPaths); err != nil {
 			return result, err
 		}
 	} else if !opts.Resume {
@@ -462,7 +488,10 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 	if OpenElsewhere(filepath.Join(dir, "m.db")) != 0 {
 		return result, ErrLibraryInUse
 	}
-	db, tx, err := open(ctx, filepath.Join(dir, "m.db"))
+	if opts.Bulk && opts.DatabaseDir == "" {
+		return result, errors.New("enginedb: a bulk import needs a private DatabaseDir")
+	}
+	db, tx, err := open(ctx, filepath.Join(dir, "m.db"), opts.Bulk)
 	if err != nil {
 		return result, err
 	}
@@ -470,6 +499,19 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 	defer tx.Rollback()
 	q := newStmtCache(tx)
 	defer q.Close()
+	var bulk *bulkLoad
+	if opts.Bulk {
+		if bulk, err = startBulk(ctx, tx); err != nil {
+			return result, err
+		}
+	}
+	// Nothing to look up for each track in a library that has none: a first import's (#301).
+	var empty bool
+	if bulk != nil {
+		if err = tx.QueryRowContext(ctx, `SELECT NOT EXISTS(SELECT 1 FROM Track) AND NOT EXISTS(SELECT 1 FROM BridgeState)`).Scan(&empty); err != nil {
+			return result, err
+		}
+	}
 	if opts.Resume && !opts.Fast {
 		done, e := finishedFingerprints(ctx, tx)
 		if e != nil {
@@ -518,12 +560,14 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 		var id int64
 		var previous string
 		var storedBPM float64
-		if ownedID := owned[t.ID]; ownedID != 0 {
+		switch ownedID := owned[t.ID]; {
+		case empty: // no row to find
+		case ownedID != 0:
 			e := q.QueryRowContext(ctx, `SELECT s.trackId,s.fingerprint,COALESCE(t.bpmAnalyzed,0) FROM BridgeState s JOIN Track t ON t.id=s.trackId WHERE s.trackId=?`, ownedID).Scan(&id, &previous, &storedBPM)
 			if e != nil {
 				return result, e
 			}
-		} else {
+		default:
 			e := q.QueryRowContext(ctx, `SELECT s.trackId,s.fingerprint,COALESCE(t.bpmAnalyzed,0) FROM BridgeState s JOIN Track t ON t.id=s.trackId WHERE s.path=?`, enginePath).Scan(&id, &previous, &storedBPM)
 			if e != nil && !errors.Is(e, sql.ErrNoRows) {
 				return result, e
@@ -541,7 +585,7 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 			read++
 		}
 		existing := id != 0
-		if !existing {
+		if !existing && !empty {
 			// Engine (or its desktop app) already owns a track at this path:
 			// reference it from imported playlists, but never adopt or rewrite it.
 			var native int64
@@ -662,6 +706,11 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 				degrade(fmt.Errorf("performance: %w", e))
 				perf = Performance{}
 			}
+		} else if opts.FastCues && len(t.Cues) > 0 && !existing {
+			// Positions without the audio header's start offset: the full import corrects them.
+			if p, e := EncodePerformance(t, &rekordbox.Analysis{Cues: t.Cues}); e == nil {
+				perf = Performance{QuickCues: p.QuickCues, Loops: p.Loops, ActiveLoops: p.ActiveLoops}
+			}
 		}
 		var artID any
 		var data []byte
@@ -719,6 +768,19 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 			if e != nil {
 				return result, e
 			}
+			if bulk != nil { // what the dropped factory trigger does, with a Fast import's cues at once
+				var source, active any
+				if perf.QuickCues != nil && fast {
+					source, active = 1, perf.ActiveLoops
+				}
+				if _, e = q.ExecContext(ctx, `INSERT INTO PerformanceData(trackId,quickCues,loops,activeOnLoadLoops,thirdPartySourceId) VALUES(?,?,?,?,?)`,
+					id, perf.QuickCues, perf.Loops, active, source); e != nil {
+					return result, e
+				}
+				if fast {
+					perf.QuickCues = nil // written
+				}
+			}
 			result.Added++
 		} else {
 			args = append(args, id)
@@ -744,6 +806,10 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 				thirdPartySourceId=CASE WHEN old.imported AND thirdPartySourceId IS NULL AND (beatData IS NOT NULL OR quickCues IS NOT NULL OR loops IS NOT NULL) THEN NULL ELSE 1 END
 				FROM (SELECT EXISTS(SELECT 1 FROM BridgeAnalysis WHERE trackId=?) AS imported) old
 				WHERE trackId=?`, perf.TrackData, perf.Overview, perf.Beats, perf.QuickCues, perf.Loops, perf.ActiveLoops, id, id); e != nil {
+				return result, e
+			}
+		} else if perf.QuickCues != nil {
+			if _, e = q.ExecContext(ctx, `UPDATE PerformanceData SET quickCues=?,loops=?,activeOnLoadLoops=?,thirdPartySourceId=1 WHERE trackId=?`, perf.QuickCues, perf.Loops, perf.ActiveLoops, id); e != nil {
 				return result, e
 			}
 		}
@@ -814,7 +880,7 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 		return result, err
 	}
 	if oldHash != playlistHash || actualPlaylists != expectedPlaylists || validPlaylists != expectedPlaylists {
-		if err = writePlaylists(ctx, q, l, opts, mapping, databaseUUID, recommendations); err != nil {
+		if err = writePlaylists(ctx, q, l, opts, mapping, databaseUUID, recommendations, bulk); err != nil {
 			return result, err
 		}
 		result.PlaylistsChanged = true
@@ -831,6 +897,11 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 			Playlists []rekordbox.Playlist
 		}{l.Columns, l.Playlists})
 		if _, err = q.ExecContext(ctx, `INSERT INTO BridgeLibrary(key,value) VALUES('source',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, metadata); err != nil {
+			return result, err
+		}
+	}
+	if bulk != nil {
+		if err = bulk.finish(ctx, tx); err != nil {
 			return result, err
 		}
 	}
@@ -852,7 +923,11 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 	if OpenElsewhere(filepath.Join(dir, "m.db")) != 0 {
 		return result, ErrLibraryInUse
 	}
-	err = tx.Commit()
+	if err = tx.Commit(); err == nil && opts.Bulk {
+		if err = syncFilePath(filepath.Join(dir, "m.db")); err == nil {
+			err = syncFilePath(filepath.Join(dir, stateFile))
+		}
+	}
 	return result, err
 }
 
@@ -876,7 +951,7 @@ func uniqueTitle(ctx context.Context, q sqlExecer, name string, parent int64) (s
 	}
 }
 
-func writePlaylists(ctx context.Context, q *stmtCache, l *rekordbox.Library, opts Options, mapping map[uint32]int64, databaseUUID string, recommendations []uint32) error {
+func writePlaylists(ctx context.Context, q *stmtCache, l *rekordbox.Library, opts Options, mapping map[uint32]int64, databaseUUID string, recommendations []uint32, bulk *bulkLoad) error {
 	// Without prior import metadata, existing unowned rows cannot be identified
 	// as rebuilt imports. Preserve that decision across subsequent imports too.
 	if _, e := q.ExecContext(ctx, `INSERT OR IGNORE INTO BridgeLibrary(key,value) SELECT 'native-playlist:' || id, '1' FROM Playlist WHERE id NOT IN (SELECT listId FROM BridgePlaylist) AND NOT EXISTS (SELECT 1 FROM BridgeLibrary WHERE key IN ('playlists','source'))`); e != nil {
@@ -976,7 +1051,7 @@ func writePlaylists(ctx context.Context, q *stmtCache, l *rekordbox.Library, opt
 			if _, e = q.ExecContext(ctx, `INSERT INTO BridgePlaylist(sourceId,listId) VALUES(?,?)`, p.ID, id); e != nil {
 				return e
 			}
-			if e = writeEntities(ctx, q, id, p.Tracks, mapping, databaseUUID); e != nil {
+			if e = bulk.writeEntities(ctx, q, id, p.Tracks, mapping, databaseUUID); e != nil {
 				return e
 			}
 			if e = insert(p.ID, id); e != nil {
@@ -1012,24 +1087,18 @@ func writePlaylists(ctx context.Context, q *stmtCache, l *rekordbox.Library, opt
 		if _, e = q.ExecContext(ctx, `INSERT INTO BridgePlaylist(sourceId,listId) VALUES(-1,?)`, id); e != nil {
 			return e
 		}
-		return writeEntities(ctx, q, id, recommendations, mapping, databaseUUID)
+		return bulk.writeEntities(ctx, q, id, recommendations, mapping, databaseUUID)
 	}
 	return nil
 }
 
 func writeEntities(ctx context.Context, q sqlExecer, list int64, tracks []uint32, mapping map[uint32]int64, databaseUUID string) error {
-	// Engine membership is unique by track/list. Preserve first occurrence order.
-	seen := map[uint32]bool{}
+	members, err := entityTracks(tracks, mapping)
+	if err != nil {
+		return err
+	}
 	var previous int64
-	for _, sourceID := range tracks {
-		if seen[sourceID] {
-			continue
-		}
-		seen[sourceID] = true
-		id, ok := mapping[sourceID]
-		if !ok || id == 0 {
-			return fmt.Errorf("missing Engine mapping for track %d", sourceID)
-		}
+	for _, id := range members {
 		r, e := q.ExecContext(ctx, `INSERT INTO PlaylistEntity(listId,trackId,databaseUuid,nextEntityId,membershipReference) VALUES(?,?,?,0,0)`, list, id, databaseUUID)
 		if e != nil {
 			return e
@@ -1046,6 +1115,25 @@ func writeEntities(ctx context.Context, q sqlExecer, list int64, tracks []uint32
 		previous = entity
 	}
 	return nil
+}
+
+// entityTracks is a playlist's Engine tracks: membership is unique by track and list, so
+// the first occurrence keeps its place.
+func entityTracks(tracks []uint32, mapping map[uint32]int64) ([]int64, error) {
+	seen := map[uint32]bool{}
+	var members []int64
+	for _, sourceID := range tracks {
+		if seen[sourceID] {
+			continue
+		}
+		seen[sourceID] = true
+		id, ok := mapping[sourceID]
+		if !ok || id == 0 {
+			return nil, fmt.Errorf("missing Engine mapping for track %d", sourceID)
+		}
+		members = append(members, id)
+	}
+	return members, nil
 }
 
 // finishedFingerprints maps the Engine path of every bridge-owned track that

@@ -29,8 +29,11 @@ func TestMountPathStartsTheBackgroundImport(t *testing.T) {
 	t.Setenv("ENGINEX_USB_PREPARING_PATH", status)
 	root := t.TempDir()
 	testfixture.Export(t, root)
-	// The first mount ran out of time: the stage waits for its job.
-	if r, err := bridge.ConvertAtMount(context.Background(), root, enginedb.Options{Deadline: time.Now()}, false); err != nil || !r.Background {
+	// An export too large to read while the mount waits (64 MB, sparse): the stage waits for its job.
+	if err := os.Truncate(filepath.Join(root, "PIONEER", "rekordbox", "export.pdb"), 64<<20); err != nil {
+		t.Fatal(err)
+	}
+	if r, err := bridge.ConvertAtMount(context.Background(), root, enginedb.Options{}, false); err != nil || !r.Background {
 		t.Fatalf("first mount: %+v %v", r, err)
 	}
 	var started []string

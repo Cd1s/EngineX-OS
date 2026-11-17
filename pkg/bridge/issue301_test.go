@@ -112,7 +112,23 @@ func TestIssue301FirstImportPastTheMountWindowFinishesInTheBackground(t *testing
 		t.Fatal("Engine is shown a library that is not imported")
 	}
 
-	// After the mount: a pass at a time, however many it takes.
+	// After the mount the job builds the library from the export alone; the remount that
+	// publishes it shows every playlist and track, and starts the update that reads the files.
+	if r, err = bridge.ImportInBackground(ctx, root, nil); err != nil {
+		t.Fatalf("build from the export: %+v %v", r, err)
+	}
+	if fileSum(t, live) != before {
+		t.Fatal("the background import wrote Engine's library")
+	}
+	if r, err = bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false); err != nil || !r.Background || !r.PlaylistsChanged {
+		t.Fatalf("first publishing mount: %+v %v", r, err)
+	}
+	if n := scalar[int](t, dbOpen(t, root), `SELECT count(*) FROM PlaylistEntity`); n != issue301Tracks {
+		t.Fatalf("%d playlist entries published from the export", n)
+	}
+	before = fileSum(t, live)
+
+	// The update: a pass at a time, however many it takes.
 	defer bridge.SetImportWindowForTest(10 * time.Millisecond)()
 	var done []int
 	r, err = bridge.ImportInBackground(ctx, root, func(d, total int) {
@@ -176,18 +192,26 @@ func TestIssue301EjectOrKillKeepsTheFinishedPasses(t *testing.T) {
 	root, skeleton := issue301Stick(t, n)
 	skeleton.Close()
 	live := filepath.Join(root, "Engine Library", "Database2", "m.db")
-	before := fileSum(t, live)
 	ctx := context.Background()
-	r, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{Deadline: time.Now()}, false)
+	// Published from the export alone first; the update that publish starts reads the files.
+	defer bridge.SetLargeExportForTest()()
+	r, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false)
 	if err != nil || !r.Background {
 		t.Fatalf("first mount: %+v %v", r, err)
 	}
+	if r, err = bridge.ImportInBackground(ctx, root, nil); err != nil {
+		t.Fatalf("build from the export: %+v %v", r, err)
+	}
+	if r, err = bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false); err != nil || !r.Background || !r.PlaylistsChanged {
+		t.Fatalf("first publishing mount: %+v %v", r, err)
+	}
+	before := fileSum(t, live)
 	defer bridge.SetImportWindowForTest(100 * time.Millisecond)()
 
 	// Eject: the job's context ends after some passes.
 	ejected, eject := context.WithCancel(ctx)
 	_, err = bridge.ImportInBackground(ejected, root, func(d, total int) {
-		if d >= 100 {
+		if d > 100 { // the track the deck loaded stays Engine's: it counts as done, not as finished
 			eject()
 		}
 	})
@@ -269,7 +293,8 @@ func TestIssue301Child(t *testing.T) {
 func TestIssue301SkeletonChangedDuringTheImportIsKept(t *testing.T) {
 	root, skeleton := issue301Stick(t, 20)
 	ctx := context.Background()
-	r, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{Deadline: time.Now()}, false)
+	defer bridge.SetLargeExportForTest()()
+	r, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false)
 	if err != nil || !r.Background {
 		t.Fatalf("first mount: %+v %v", r, err)
 	}
@@ -291,6 +316,12 @@ func TestIssue301SkeletonChangedDuringTheImportIsKept(t *testing.T) {
 	if n := scalar[int](t, kept, `SELECT count(*) FROM Track WHERE title='loaded during the import'`); n != 1 {
 		t.Fatalf("Engine's skeleton not kept: %d", n)
 	}
+	if r, err = bridge.ImportInBackground(ctx, root, nil); err != nil || r.Deferred != 0 {
+		t.Fatalf("update: %+v %v", r, err)
+	}
+	if r, err = bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false); err != nil || r.Background || !r.PlaylistsChanged {
+		t.Fatalf("mount publishing the update: %+v %v", r, err)
+	}
 	if n := scalar[int](t, dbOpen(t, root), `SELECT count(*) FROM PerformanceData p JOIN Track t ON t.id=p.trackId WHERE t.pdbImportKey>0 AND beatData IS NOT NULL`); n != 19 {
 		t.Fatalf("published %d tracks with their grid", n)
 	}
@@ -301,14 +332,17 @@ func TestIssue301SkeletonChangedDuringTheImportIsKept(t *testing.T) {
 func TestIssue301StageDroppedForALibraryOfItsOwn(t *testing.T) {
 	root, skeleton := issue301Stick(t, 20)
 	ctx := context.Background()
-	if r, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{Deadline: time.Now()}, false); err != nil || !r.Background {
+	restore := bridge.SetLargeExportForTest()
+	r, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false)
+	restore()
+	if err != nil || !r.Background {
 		t.Fatalf("first mount: %+v %v", r, err)
 	}
 	if _, err := skeleton.Exec(`INSERT INTO Playlist(id,title) VALUES(7,'From the computer')`); err != nil {
 		t.Fatal(err)
 	}
 	skeleton.Close()
-	r, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{Deadline: time.Now().Add(time.Hour)}, false)
+	r, err = bridge.ConvertAtMount(ctx, root, enginedb.Options{Deadline: time.Now().Add(time.Hour)}, false)
 	if err != nil || r.Background || r.Added != 19 {
 		t.Fatalf("in-place import: %+v %v", r, err)
 	}
@@ -320,21 +354,23 @@ func TestIssue301StageDroppedForALibraryOfItsOwn(t *testing.T) {
 	}
 }
 
-// #253 with a first import in the background: a 6000-track stick's later mounts return at
-// once, without reading the export, while its import goes on.
+// #253 with a large first import: a 6000-track stick is published from its export at the first
+// mount, and later mounts return at once, without reading the export, while the update that
+// reads its files goes on (#301).
 func TestIssue301LargeFirstImportRepeatMounts253(t *testing.T) {
 	root := t.TempDir()
 	testfixture.LargeExport(t, root, 6000)
 	ctx := context.Background()
 	start, reads := time.Now(), bridge.ExportReadsForTest()
 	r, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false)
-	if err != nil || !r.Background {
+	if err != nil || r.Background || r.Added != 6000 || !r.PlaylistsChanged {
 		t.Fatalf("first mount: %+v %v", r, err)
 	}
 	t.Logf("6000-track first mount: %s", time.Since(start))
-	if got := bridge.ExportReadsForTest(); got != reads {
+	if got := bridge.ExportReadsForTest(); got != reads+1 {
 		t.Fatalf("the first mount of a large export read it %d times", got-reads)
 	}
+	reads++
 	for mount := 2; mount <= 3; mount++ {
 		start = time.Now()
 		if r, err = bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false); err != nil || !r.Background {

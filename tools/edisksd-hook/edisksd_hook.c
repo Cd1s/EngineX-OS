@@ -864,6 +864,18 @@ static void stop_import(const char *target) {
     char *const a[]={(char *)SYSTEMCTL_PATH,"stop","--quiet",unit,NULL};
     if(run(a,now_ms()+8000)&&errno==ETIMEDOUT)note("background import did not stop on",target,errno);
 }
+#ifndef EJECT_MARK_DIR
+#define EJECT_MARK_DIR "/run"
+#endif
+// An Eject (edisksd's Unmount, which is never lazy; its removal path is). rb-bridge --remount
+// publishes a finished background import by a synthetic udev remove and add of the partition
+// (#301): it must not mount again a stick the DJ ejected. Same name hash as import_unit.
+static void mark_eject(const char *target) {
+    char p[PATH_MAX];
+    if(snprintf(p,sizeof p,"%s/enginex-rb-ejected-%016llx",EJECT_MARK_DIR,
+                (unsigned long long)hash_bytes(UINT64_C(14695981039346656037),target,strlen(target)))>=(int)sizeof p)return;
+    int fd=open(p,O_WRONLY|O_CREAT|O_TRUNC|O_NOFOLLOW|O_CLOEXEC,0600);if(fd>=0)close(fd);
+}
 #ifndef FSCK_HFSPLUS_SYSTEM
 #define FSCK_HFSPLUS_SYSTEM "/usr/sbin/fsck.hfsplus"
 #endif
@@ -1072,6 +1084,14 @@ static struct hfs_ctx_state *ctx_slot(struct libmnt_context *ctx,int create) {
     for(unsigned i=0;i<64;i++)if(!ctx_states[i].ctx){memset(&ctx_states[i],0,sizeof ctx_states[i]);ctx_states[i].ctx=ctx;return &ctx_states[i];}
     struct hfs_ctx_state *s=&ctx_states[ctx_next_evict++%64];
     memset(s,0,sizeof *s);s->ctx=ctx;return s;
+}
+// edisksd asks for a lazy unmount when the stick goes away (udev remove), never for an Eject.
+static int ctx_wants_lazy(struct libmnt_context *ctx) {
+    pthread_mutex_lock(&ctx_lock);
+    struct hfs_ctx_state *s=ctx_slot(ctx,0);
+    int lazy=s&&s->has_lazy&&s->lazy;
+    pthread_mutex_unlock(&ctx_lock);
+    return lazy;
 }
 int mnt_reset_context(struct libmnt_context *ctx) {
     int (*real)(struct libmnt_context *)=REAL_MNT_RESET_CONTEXT();
@@ -2411,9 +2431,23 @@ static int restored_with_parent(struct owned_view *v,unsigned i,unsigned removed
     for(unsigned j=i+1;j<removed;j++)if(!strcmp(v->child[j].name,"Engine Library"))return 1;
     return 0;
 }
+// The stick under a view's base mount is gone: mountinfo names its device, /sys no longer does.
+static int base_device_gone(uint64_t base_id) {
+    FILE *f=fopen(PROC_MOUNTINFO_PATH,"re");if(!f)return 0;
+    char *line=NULL;size_t cap=0;int gone=0;
+    while(getline(&line,&cap,f)>0) {
+        unsigned long long id;unsigned maj,min;char sysblk[PATH_MAX];struct stat st;
+        if(sscanf(line,"%llu %*u %u:%u",&id,&maj,&min)!=3||id!=base_id)continue;
+        gone=maj>0&&snprintf(sysblk,sizeof sysblk,"%s/%u:%u",SYS_DEV_BLOCK_DIR,maj,min)<(int)sizeof sysblk&&lstat(sysblk,&st)&&errno==ENOENT;
+        break;
+    }
+    free(line);fclose(f);return gone;
+}
 // A rescue tree is cloned BEFORE changing the public view. Normal child
 // unmounts detect open files; rollback moves the already allocated mounts back.
-static int unmount_view(struct libmnt_context *ctx,struct owned_view *v,int (*real)(struct libmnt_context *)) {
+// detach: the stick goes away (pulled, or a udev remove), so what Engine holds open on it
+// cannot keep the view: everything is detached lazily, as edisksd does with the stick itself.
+static int unmount_view(struct libmnt_context *ctx,struct owned_view *v,int (*real)(struct libmnt_context *),int detach) {
     char view[PATH_MAX],rescue[PATH_MAX],pub[PATH_MAX],src[PATH_MAX];
     if(path_join(view,sizeof view,v->anchor,"view")||path_join(rescue,sizeof rescue,v->anchor,"rescue")||
        safe_path(v->target,0)||mount_id(v->target)!=v->public_id)return -EINVAL;
@@ -2427,11 +2461,13 @@ static int unmount_view(struct libmnt_context *ctx,struct owned_view *v,int (*re
     for(;removed<v->count;removed++) {
         // "Engine Library", last, is the cached library on /data. Engine keeps its database open
         // there across Eject; that holds nothing of the stick, so it is detached (a later failure
-        // moves the rescue copy back, #23). Every entry from the stick is still refused in use.
-        int lazy=strcmp(v->child[removed].name,"Engine Library")?0:MNT_DETACH;
+        // moves the rescue copy back, #23). On an Eject every entry from the stick is still
+        // refused in use. On a removal Engine still holds a loaded track's source, and refusing
+        // left the dead mount and its view until a reboot.
+        int lazy=detach||!strcmp(v->child[removed].name,"Engine Library")?MNT_DETACH:0;
         if(path_join(pub,sizeof pub,v->target,v->child[removed].name)||umount2(pub,UMOUNT_NOFOLLOW|lazy)) {saved=errno;goto restore_children;}
     }
-    if(umount2(v->target,UMOUNT_NOFOLLOW)){saved=errno;goto restore_children;}
+    if(umount2(v->target,UMOUNT_NOFOLLOW|(detach?MNT_DETACH:0))){saved=errno;goto restore_children;}
     if(mount_id(v->target)!=v->base_id) {saved=EBUSY;goto restore_root;}
     rc=real(ctx);saved=errno;
     if(!rc) {cleanup_view(v);return 0;}
@@ -2463,6 +2499,7 @@ static int unmount_dispatch(struct libmnt_context *ctx,int (*real)(struct libmnt
         if(safe_path(lib,1)&&errno==ELOOP)return -ELOOP;
     }
     stop_import(target);
+    if(!ctx_wants_lazy(ctx))mark_eject(target);
     // Only this target's own mount makes its view record, under view_lock. Without one it
     // is the stock umount and does not wait for view_lock, which another stick's
     // conversion holds for up to its whole budget (BH-O55-3).
@@ -2493,7 +2530,7 @@ static int unmount_dispatch(struct libmnt_context *ctx,int (*real)(struct libmnt
     }
     free(v);
     pthread_mutex_lock(&view_lock);in_hook=1;pthread_mutex_lock(&post_lock);v=load_view(target);
-    int rc=v?unmount_view(ctx,v,real):real(ctx);int saved=errno;free(v);
+    int rc=v?unmount_view(ctx,v,real,ctx_wants_lazy(ctx)||base_device_gone(v->base_id)):real(ctx);int saved=errno;free(v);
     pthread_mutex_unlock(&post_lock);in_hook=0;pthread_mutex_unlock(&view_lock);errno=saved;return rc;
 }
 

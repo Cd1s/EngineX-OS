@@ -39,6 +39,7 @@ func RBBridge(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("rb-bridge", flag.ContinueOnError)
 	mount := fs.String("mount-path", "", "mounted USB/export root")
 	importPath := fs.String("import-path", "", "finish the first import a --mount-path run left on this volume, after its mount (#301)")
+	remount := fs.String("remount", "", "after the deck UI ejects this volume to publish its import, mount it again through edisksd (#301)")
 	link := fs.Bool("prolink", false, "listen for Rekordbox / Pro DJ Link announcements and player status")
 	bind := fs.String("bind", "0.0.0.0", "IPv4 address for Pro DJ Link listeners")
 	full := fs.Bool("full", false, "with --mount-path: read every file for cues and waveforms, even if unchanged")
@@ -69,9 +70,12 @@ func RBBridge(args []string, stdout io.Writer) error {
 	if *smart > 0xffffffff {
 		return fmt.Errorf("smart-match track ID exceeds uint32")
 	}
-	if *importPath != "" {
+	if *importPath != "" || *remount != "" {
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer cancel()
+		if *remount != "" {
+			return runRemount(ctx, *remount)
+		}
 		return runImportJob(ctx, *importPath)
 	}
 	if !*link && *mount == "" {
