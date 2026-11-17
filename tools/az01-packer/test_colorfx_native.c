@@ -1,7 +1,9 @@
 /* Color FX on the channel filter knobs, sandbox only, never shipped or preloaded on a deck.
  * Run as FX_DRIVER=tools/az01-packer/test_colorfx_native.c FX_DRIVER_TAG=CFXNATIVE with
- * FX_PRODUCT=JC11|JC16|JP11|NH08|JP07 (test_fx_selector_sandbox.sh; settings.conf has
- * pioneer_fx=spiral). Engine 5.3.0 armhf only: every address below belongs to that build.
+ * FX_PRODUCT=JC11|JC16|JP11|NH08|JP07 (Engine 5.3.0) or JP21|JP20|JC11S|NH08S|NH10 (Gen-2,
+ * Engine 5.3.0-sclive4) (test_fx_selector_sandbox.sh). Every address below belongs to the build
+ * picked by its BuildID. On Gen-2 the sandbox also needs Engine's SoC identity predicate stubbed,
+ * as sclive-aux-hardware-fixture.c does: without the eFuse device Engine exits to "TestApp".
  *
  * Offline (the sandbox has no audio device): turns Engine's real SweepFxControl::setValue,
  * which the hook wraps, and renders noise through the real ChannelSweepFx nodes. Channel 1 is
@@ -9,6 +11,7 @@
  * through a copy of stock's own entry, so the two are bit-identical exactly where the hook
  * leaves stock alone. Players (JP07) must have no Sweep FX control and no ready marker. */
 #define _GNU_SOURCE
+#include <elf.h>
 #include <fcntl.h>
 #include <link.h>
 #include <math.h>
@@ -20,7 +23,16 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
-enum { CTRL_VT = 0x2b1e478, NODE_VT = 0x2b22f5c, SET_VALUE = 0xd8ba3c, PROCESS = 0xec127c, BLOCK = 128 };
+enum { BLOCK = 128 };
+static const struct build { unsigned char id[20]; uintptr_t ctrl_vt, node_vt, set_value, process, identity; } builds[] = {
+    {"\xbe\x53\x7e\x90\x81\x21\xe7\x61\x64\xdd\xbb\xf9\x73\x0d\x47\x2b\xa0\xb8\xf9\xd4", 0x2b1e478, 0x2b22f5c, 0xd8ba3c, 0xec127c, 0},
+    {"\xb9\x46\xc3\xb8\xd9\x9d\x32\x99\x8c\x81\x97\xd5\xdc\x90\x5a\x6b\xdd\xaa\x5d\x2f", 0x2b9e0a0, 0x2ba23c8, 0xd9619c, 0xecdbd4, 0x3a6794},
+};
+static const struct build *eng;
+#define CTRL_VT (eng->ctrl_vt)
+#define NODE_VT (eng->node_vt)
+#define SET_VALUE (eng->set_value)
+#define PROCESS (eng->process)
 typedef void (*value_fn)(void *, float);
 typedef void (*process_fn)(void *, int, float **, int, float **, int, void *, void *);
 
@@ -36,7 +48,25 @@ void *_Znwj(size_t n) {
     }
     return p;
 }
-static int main_base(struct dl_phdr_info *info, size_t n, void *arg) { (void)n; (void)arg; base = info->dlpi_addr; return 1; }
+/* The main program (first object): its base and, from its GNU build-id note, its build. */
+static int main_base(struct dl_phdr_info *info, size_t n, void *arg) {
+    (void)n; (void)arg;
+    base = info->dlpi_addr;
+    for (unsigned p = 0; p < info->dlpi_phnum; ++p) {
+        const ElfW(Phdr) *h = info->dlpi_phdr + p;
+        const unsigned char *note = (const void *)(base + h->p_vaddr), *end = note + h->p_memsz;
+        while (h->p_type == PT_NOTE && note + sizeof(ElfW(Nhdr)) <= end) {
+            const ElfW(Nhdr) *nh = (const void *)note;
+            size_t name = (nh->n_namesz + 3u) & ~3u, desc = (nh->n_descsz + 3u) & ~3u;
+            note += sizeof *nh;
+            if (nh->n_type == NT_GNU_BUILD_ID && nh->n_descsz == 20)
+                for (unsigned i = 0; i < sizeof builds / sizeof *builds; ++i)
+                    if (!memcmp(note + name, builds[i].id, 20)) eng = &builds[i];
+            note += name + desc;
+        }
+    }
+    return 1;
+}
 
 static int failures;
 #define CHECK(ok, ...) do { int pass_ = (ok); if (!pass_) ++failures; \
@@ -185,7 +215,20 @@ static void *test(void *unused) {
     return NULL;
 }
 __attribute__((constructor)) static void start(void) {
+    char exe[64];
+    ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
+    if (n <= 0 || (exe[n] = 0, strcmp(exe, "/usr/Engine/Engine"))) return; /* Engine's helpers inherit the preload */
     dl_iterate_phdr(main_base, NULL);
+    if (!eng) { fprintf(stderr, "CFXNATIVE FAIL|unknown Engine build\nCFXNATIVE done|FAIL\n"); return; }
+    if (eng->identity) { /* sandbox only: the Gen-2 SoC identity predicate returns true */
+        static const uint32_t expected[] = {0xe16d42f4, 0xe3031e54}, stub[] = {0xe3a00001, 0xe12fff1e};
+        uint32_t *at = (uint32_t *)(base + eng->identity);
+        void *page = (void *)((uintptr_t)at & ~(uintptr_t)4095);
+        if (memcmp(at, expected, sizeof expected) || mprotect(page, 4096, PROT_READ | PROT_WRITE)) _exit(127);
+        memcpy(at, stub, sizeof stub);
+        if (mprotect(page, 4096, PROT_READ | PROT_EXEC)) _exit(127);
+        __builtin___clear_cache((char *)at, (char *)at + sizeof stub);
+    }
     pthread_t t;
     pthread_create(&t, NULL, test, NULL);
     pthread_detach(t);

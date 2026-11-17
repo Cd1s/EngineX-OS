@@ -337,15 +337,16 @@ static int ready_write(const char *path, const char *body) {
 }
 static int px_write_ready(const char *path) { return ready_write(path, "armhf-px-v2 JC11\n"); }
 
-/* Color FX on each channel's own filter knob (5.3.0 all-in-ones). Engine has one
- * SweepFxControl per mixer channel; its setValue (0xd8ba3c) stores the knob (0..1, centre
- * 0.5) at +0x40 and drives the two ChannelSweepFx audio nodes at +0x38 and +0x3c, whose
- * process is 0xec127c (sandbox: node +0x38 copies input to output at centre, node +0x3c
+/* Color FX on each channel's own filter knob (all-in-ones on 5.3.0 and 5.3.0-sclive4). Engine
+ * has one SweepFxControl per mixer channel; its setValue (5.3.0 0xd8ba3c, sclive4 0xd9619c)
+ * stores the knob (0..1, centre 0.5) at +0x40 and drives the two ChannelSweepFx audio nodes at
+ * +0x38 and +0x3c, whose process is 5.3.0 0xec127c, sclive4 0xecdbd4 (byte-identical code;
+ * sandbox: node +0x38 copies input to output at centre, node +0x3c
  * leaves both buffers alone at centre). With a style picked and the knob outside stock's
  * centre band, both nodes skip stock (their centre behaviour) and +0x38 plays the style,
  * as much as the knob is turned. Inside the band, or style Off, stock runs untouched. */
 #define CFX_READY "/run/enginex-colorfx.ready"
-enum { CFX_SET_VALUE = 0xd8ba3c, CFX_PROCESS = 0xec127c, CFX_CHANNELS = 4 };
+enum { CFX_CHANNELS = 4 };
 static int cfx_installed, cfx_style; /* cfx_style: pioneer_fx= in settings.conf, the channel knobs only */
 static void *cfx_value_original, *cfx_process_original;
 static struct cfx_channel {
@@ -1491,10 +1492,13 @@ static int install_px_scope(uintptr_t base, size_t page, const char *version) {
     return 1;
 }
 static int install_cfx_scope(uintptr_t base, size_t page, const char *version) {
-    if (strcmp(version, "5.3.0") || player_board()) return 0; /* players have no Sweep FX */
+    uintptr_t value, process;
+    if (!strcmp(version, "5.3.0")) value = base + 0xd8ba3c, process = base + 0xec127c;
+    else if (!strcmp(version, "5.3.0-sclive4")) value = base + 0xd9619c, process = base + 0xecdbd4;
+    else return 0;
+    if (player_board()) return 0; /* players have no Sweep FX */
     static const uint32_t value_prefix[] = {0xe52d400c, 0xe98d4800};   // str r4,[sp,#-12]!; stmib sp,{fp,lr}
     static const uint32_t process_prefix[] = {0xe16d42f4, 0xe1cd60f8}; // strd r4,[sp,#-36]!; strd r6,[sp,#8]
-    uintptr_t value = base + CFX_SET_VALUE, process = base + CFX_PROCESS;
     if (memcmp((void *)value, value_prefix, 8) || memcmp((void *)process, process_prefix, 8)) return 0;
     /* Before the UI can ask: on PRIME 4, pkg/webui drops a stored style when PX is ready alone. */
     if (!ready_write(CFX_READY, "armhf-cfx-v1\n")) return 0;

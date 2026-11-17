@@ -246,8 +246,8 @@ assert.equal(scStemsEqMode, true);
 for (let ch = 1; ch <= 4; ch++) assert.equal(stripModes[ch].index, 0, 'late scPlayer resets Stems EQ to Off');
 
 // 2. Mixer consoles without native PX selector (PRIME 2, PRIME GO, Mixstream, SC LIVE 4, PRIME 4+, AZ04).
-// Color FX Style follows the hook's channel-knob marker only: the 5.3.0 all-in-ones have it, Gen-2 and AZ04 do not.
-for (const [board, hasStems, colorFx] of [['JC16', true, true], ['JP11', true, true], ['NH08', true, true], ['JP21', true, false], ['JC11S', true, false], ['JP24', false, false], ['RMZ2', true, false]]) {{
+// Color FX Style follows the hook's channel-knob marker only: the armhf all-in-ones (5.3.0 and Gen-2) have it, AZ04 does not.
+for (const [board, hasStems, colorFx] of [['JC16', true, true], ['JP11', true, true], ['NH08', true, true], ['JP21', true, true], ['JC11S', true, true], ['JP24', false, false], ['RMZ2', true, false]]) {{
     resetUnit(board, {{isPlayer: false, hasStemsLevel: hasStems, hasNHFx: board === 'NH08'}});
     scApply({{
         player: false, fxSelectorAvailable: false, colorFxAvailable: colorFx,
