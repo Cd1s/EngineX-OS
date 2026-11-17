@@ -3232,20 +3232,19 @@ SERVICES_MAIN = """
 	}
 	property bool scBeatJumpPads: false
 	property bool scPitchBendBeatJump: false
-	property bool scWholeBpm: false
-	property bool scWholeBpmSynced: false
-	readonly property var scWholeBpmPropRef: Planck.createProperty("EngineXWholeBpm", 0.0, 0)
-	readonly property var scWholeBpmProp: scWholeBpmPropRef && Planck.getProperty("/GUI/Scripted/EngineXWholeBpm")
-	function scSyncWholeBpm() {
-		const p = scWholeBpmProp && scWholeBpmProp.translator ? scWholeBpmProp : Planck.getProperty("/GUI/Scripted/EngineXWholeBpm")
-		if (!p || !p.translator || !scUiLoaded) { scWholeBpmSynced = false; return }
-		p.translator.value = scWholeBpm ? 1.0 : 0.5
-		scWholeBpmSynced = true
+	property bool scBpmDecimalsSynced: false
+	readonly property var scBpmDecimalsPropRef: Planck.createProperty("EngineXBpmDecimals", 0.0, 0)
+	readonly property var scBpmDecimalsProp: scBpmDecimalsPropRef && Planck.getProperty("/GUI/Scripted/EngineXBpmDecimals")
+	function scSyncBpmDecimals() {
+		const p = scBpmDecimalsProp && scBpmDecimalsProp.translator ? scBpmDecimalsProp : Planck.getProperty("/GUI/Scripted/EngineXBpmDecimals")
+		if (!p || !p.translator || !scUiLoaded) { scBpmDecimalsSynced = false; return }
+		p.translator.value = scBpmDecimals === 2 ? 1.0 : 0.5
+		scBpmDecimalsSynced = true
 	}
-	onScWholeBpmChanged: scSyncWholeBpm()
+	onScBpmDecimalsChanged: scSyncBpmDecimals()
 	Timer {
-		interval: 250; running: root.scUiLoaded && !root.scWholeBpmSynced; repeat: true; triggeredOnStart: true
-		onTriggered: root.scSyncWholeBpm()
+		interval: 250; running: root.scUiLoaded && !root.scBpmDecimalsSynced; repeat: true; triggeredOnStart: true
+		onTriggered: root.scSyncBpmDecimals()
 	}
 	property var scMixstreamFx: ["Echo", "Flanger", "Delay", "Phaser"]
 	property bool scMixstreamSweepOpen: false
@@ -3897,8 +3896,6 @@ SERVICES_MAIN = """
 			else if (v.beat_jump_pads !== undefined) scBeatJumpPads = v.beat_jump_pads === "1" || v.beat_jump_pads === 1 || v.beat_jump_pads === true
 			if (v.pitchBendBeatJump !== undefined) scPitchBendBeatJump = !!v.pitchBendBeatJump
 			else if (v.pitch_bend_beat_jump !== undefined) scPitchBendBeatJump = v.pitch_bend_beat_jump === "1" || v.pitch_bend_beat_jump === 1 || v.pitch_bend_beat_jump === true
-			if (v.wholeBpm !== undefined) scWholeBpm = !!v.wholeBpm
-			else if (v.whole_bpm !== undefined) scWholeBpm = v.whole_bpm === "1" || v.whole_bpm === 1 || v.whole_bpm === true
 			if (v.mixstreamFx && typeof v.mixstreamFx !== "string" && v.mixstreamFx.length === 4) scMixstreamFx = v.mixstreamFx
 			else if (typeof v.mixstream_fx === "string") {
 				const fx = v.mixstream_fx.split(",").map(s => s.trim()).filter(Boolean)
@@ -3924,7 +3921,7 @@ SERVICES_MAIN = """
 		}
 		const wasUiLoaded = scUiLoaded
 		scUiLoaded = true
-		if (typeof scSyncWholeBpm === "function") scSyncWholeBpm()
+		if (typeof scSyncBpmDecimals === "function") scSyncBpmDecimals()
 		if (!wasUiLoaded) {
 			scWatchStemsEq()
 			scMidiInitBridge()
@@ -3994,7 +3991,6 @@ SERVICES_MAIN = """
 			else if (key === "stems_eq_mode") root.scStemsEqMode = val === "1"
 			else if (key === "beat_jump_pads") root.scBeatJumpPads = val === "1"
 			else if (key === "pitch_bend_beat_jump") root.scPitchBendBeatJump = val === "1" || val === "true"
-			else if (key === "whole_bpm") root.scWholeBpm = val === "1" || val === "true"
 			else if (key === "mixstream_fx") {
 				const fx = val.split(",").map(s => s.trim()).filter(Boolean)
 				if (fx.length === 4) root.scMixstreamFx = fx
@@ -4004,7 +4000,7 @@ SERVICES_MAIN = """
 			else if (key === "pioneer_fx") root.scPioneerFx = val || "off"
 		}
 		if (typeof scSyncReverseJog === "function") scSyncReverseJog(true)
-		if (typeof scSyncWholeBpm === "function") scSyncWholeBpm()
+		if (typeof scSyncBpmDecimals === "function") scSyncBpmDecimals()
 		scFxMsApply(fxMode, fxMs)
 	}
 	function scSyncBroadcastMeta() {
@@ -5192,7 +5188,6 @@ DISPLAY_ENTRIES = """
 # User Profile -> Playback: audio DSP and playback.
 PLAYBACK_ENTRIES = (switch_entry("Master Soft Clipper", "scMasterLimiter", "masterLimiter")
     + switch_entry("Auto-Gain (0 dB Normalize)", "scAutoGain", "autoGain")
-    + switch_entry("Whole-number BPM", "scWholeBpm", "wholeBpm")
     + switch_entry("Echo Out", "scUpfaderEcho", "upfaderEcho", "\t\t\tvisible: root.scHasMixer\n")
     + switch_entry("Stems EQ Mode", "scStemsEqMode", "stemsEqMode", "\t\t\tvisible: root.scHasStemsEq\n") + """
 		EntryBase.ListEntry {
@@ -8189,7 +8184,7 @@ def edits(dev: bool):
             '    property real scPadBrightness: 1\n'
             '    property bool scSwapLoopOrder: false\n'
             '    property bool scPitchBendBeatJump: false\n'
-            '    property bool scWholeBpm: false\n'
+            '    property int scBpmDecimals: 2\n'
             '    property var scMixstreamFx: ["Echo", "Flanger", "Delay", "Phaser"]\n'
             '    property bool scReverseJogLeft: false\n'
             '    property bool scReverseJogRight: false\n'
@@ -8197,18 +8192,18 @@ def edits(dev: bool):
             '    property var pReverseJogRight: Planck.getProperty("/GUI/Scripted/EngineXJogInvertRight")\n'
             '    property var pReverseJogReady: Planck.getProperty("/GUI/Scripted/EngineXJogInvertReady")\n'
             '    property var pPerfLibVisible: Planck.getProperty("/GUI/Scripted/EngineXPerfLibVisible")\n'
-            '    property var pWholeBpm: Planck.getProperty("/GUI/Scripted/EngineXWholeBpm")\n'
+            '    property var pBpmDecimals: Planck.getProperty("/GUI/Scripted/EngineXBpmDecimals")\n'
             '    readonly property bool scPerformanceLibraryVisible: !!(pPerfLibVisible && pPerfLibVisible.translator && pPerfLibVisible.translator.state)\n'
             '    property bool scReverseJogLeftEffective: false\n'
             '    property bool scReverseJogRightEffective: false\n'
             '    function scIsReverseJog(deckName) {\n'
             '        return deckName === "Right" ? scReverseJogRightEffective : scReverseJogLeftEffective\n'
             '    }\n'
-            '    function scIsWholeBpm() {\n'
-            '        if (!scGlobalConfig.pWholeBpm || !scGlobalConfig.pWholeBpm.translator)\n'
-            '            scGlobalConfig.pWholeBpm = Planck.getProperty("/GUI/Scripted/EngineXWholeBpm")\n'
-            '        const t = scGlobalConfig.pWholeBpm && scGlobalConfig.pWholeBpm.translator\n'
-            '        return (t && t.value > 0) ? (t.value >= 0.75) : scGlobalConfig.scWholeBpm\n'
+            '    function scGetBpmDecimals() {\n'
+            '        if (!scGlobalConfig.pBpmDecimals || !scGlobalConfig.pBpmDecimals.translator)\n'
+            '            scGlobalConfig.pBpmDecimals = Planck.getProperty("/GUI/Scripted/EngineXBpmDecimals")\n'
+            '        const t = scGlobalConfig.pBpmDecimals && scGlobalConfig.pBpmDecimals.translator\n'
+            '        return (t && t.value > 0) ? (t.value >= 0.75 ? 2 : 1) : scGlobalConfig.scBpmDecimals\n'
             '    }\n'
             '    function scSyncReverseJogFromState() {\n'
             '        if (!scGlobalConfig.pReverseJogLeft || !scGlobalConfig.pReverseJogLeft.translator)\n'
@@ -8243,7 +8238,8 @@ def edits(dev: bool):
             '                    scGlobalConfig.scReverseJogLeft = !!j.jogInvertLeft\n'
             '                    scGlobalConfig.scReverseJogRight = !!j.jogInvertRight\n'
             '                    scGlobalConfig.scPitchBendBeatJump = !!j.pitchBendBeatJump\n'
-            '                    scGlobalConfig.scWholeBpm = !!j.wholeBpm\n'
+            '                    if (j.bpmDecimals !== undefined)\n'
+            '                        scGlobalConfig.scBpmDecimals = parseInt(j.bpmDecimals) === 1 ? 1 : 2\n'
             '                    if (Array.isArray(j.mixstreamFx) && j.mixstreamFx.length === 4)\n'
             '                        scGlobalConfig.scMixstreamFx = j.mixstreamFx\n'
             '                    scGlobalConfig.scSyncReverseJogFromState()\n'
@@ -8289,7 +8285,8 @@ def edits(dev: bool):
             ('                        deckConfig.activeDeckTrackPath + "Nudge%1".arg(model.direction)\n',
              '                        deckConfig.activeDeckTrackPath + (module.scBeatJumpActive ? ("BeatJump/" + model.jumpAction) : ("Nudge%1".arg(model.direction)))\n'),
         ]
-        # Whole-number BPM: map [0, 0.5] and [0.5, 1] independently around center so 0% stays exact,
+        # Integer-BPM pitch-fader plateaus when BPM Decimals is 2 (1 = exact stock linear fader):
+        # map [0, 0.5] and [0.5, 1] independently around center so 0% stays exact,
         # placing 2-ADC-step (w = 4/4095 in half-travel) plateaus at each integer BPM with uniform linear slope between them.
         scaled["ControlSurfaceModules/ControlSurfaceModules/SpeedSlider.qml"] = [
             ('    property bool invert: false\n',
@@ -8299,8 +8296,8 @@ def edits(dev: bool):
         let u = invert ? 1.0 - inVal : inVal
         if (u < 0.0) u = 0.0
         else if (u > 1.0) u = 1.0
-        const whole = typeof globalConfig !== "undefined" && globalConfig && globalConfig.scIsWholeBpm ? !!globalConfig.scIsWholeBpm() : false
-        if (!whole || !loaded) return u
+        const dec = typeof globalConfig !== "undefined" && globalConfig && globalConfig.scGetBpmDecimals ? globalConfig.scGetBpmDecimals() : 2
+        if (dec !== 2 || !loaded) return u
         let B = origProp && origProp.translator ? origProp.translator.unnormalized : 0
         if (!(B > 0) && metaProp && metaProp.translator && metaProp.translator.string) {
             const parsed = parseFloat(String(metaProp.translator.string).trim().replace(",", "."))

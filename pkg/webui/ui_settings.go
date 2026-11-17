@@ -250,7 +250,6 @@ type uiSettings struct {
 	UIScale             int      `json:"uiScale"`
 	StemsEqMode         bool     `json:"stemsEqMode"`
 	BeatJumpPads        bool     `json:"beatJumpPads"`
-	WholeBpm            bool     `json:"wholeBpm"`
 	PitchBendBeatJump   bool     `json:"pitchBendBeatJump"`
 	MixstreamFx         []string `json:"mixstreamFx"`
 	JogInvertLeft       bool     `json:"jogInvertLeft"`
@@ -515,8 +514,6 @@ func (s *Server) loadUI() uiSettings {
 			v.StemsEqMode = val == "1" || strings.EqualFold(val, "true")
 		case "beat_jump_pads":
 			v.BeatJumpPads = val == "1" || strings.EqualFold(val, "true")
-		case "whole_bpm":
-			v.WholeBpm = val == "1" || strings.EqualFold(val, "true")
 		case "pitch_bend_beat_jump":
 			v.PitchBendBeatJump = val == "1" || strings.EqualFold(val, "true")
 		case "mixstream_fx":
@@ -689,9 +686,6 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	}
 	if v.BeatJumpPads {
 		text += "beat_jump_pads=1\n"
-	}
-	if v.WholeBpm {
-		text += "whole_bpm=1\n"
 	}
 	if v.PitchBendBeatJump {
 		text += "pitch_bend_beat_jump=1\n"
@@ -1165,15 +1159,6 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		v.BeatJumpPads = b
-	}
-	if q.Has("wholeBpm") {
-		b, ok := parseBoolParam(q.Get("wholeBpm"))
-		if !ok {
-			s.uiMu.Unlock()
-			fail(w, 400, errors.New("invalid setting"))
-			return
-		}
-		v.WholeBpm = b
 	}
 	if q.Has("pitchBendBeatJump") {
 		b, ok := parseBoolParam(q.Get("pitchBendBeatJump"))

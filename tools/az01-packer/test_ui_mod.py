@@ -409,7 +409,6 @@ class OnOffSwitchCompatibilityTest(unittest.TestCase):
             "scBroadcastOn": "broadcast", "scProlinkShare": "prolinkShare",
             "scMasterLimiter": "masterLimiter",
             "scAutoGain": "autoGain", "scUpfaderEcho": "upfaderEcho",
-            "scWholeBpm": "wholeBpm",
             "scStemsEqMode": "stemsEqMode", "scBeatJumpPads": "beatJumpPads",
             "scPitchBendBeatJump": "pitchBendBeatJump",
             "scSwapLoopOrder": "swapLoopOrder", "scDualColumn": "browserDualColumn",
@@ -1390,7 +1389,6 @@ assert.strictEqual(vfx.enabled, false);
             "Remote Load (LAN API)": ("scRemoteLoad", "remoteLoad", bp.SERVICES_ENTRIES),
             "Master Soft Clipper": ("scMasterLimiter", "masterLimiter", bp.PLAYBACK_ENTRIES),
             "Auto-Gain (0 dB Normalize)": ("scAutoGain", "autoGain", bp.PLAYBACK_ENTRIES),
-            "Whole-number BPM": ("scWholeBpm", "wholeBpm", bp.PLAYBACK_ENTRIES),
             "Echo Out": ("scUpfaderEcho", "upfaderEcho", bp.PLAYBACK_ENTRIES),
             "Stems EQ Mode": ("scStemsEqMode", "stemsEqMode", bp.PLAYBACK_ENTRIES),
             "Beat Jump Pad Bank": ("scBeatJumpPads", "beatJumpPads", bp.BEAT_JUMP_ENTRIES),
@@ -9772,14 +9770,16 @@ assert.equal(scStemText('fail', 0, ''), 'Download failed');
 
 
 class WholeBpmTest(unittest.TestCase):
-    def test_i18n_and_playback_entry(self):
+    def test_no_separate_whole_bpm_setting(self):
         rows = bp.load_dict()
-        self.assertIn("Whole-number BPM", rows)
-        for lang in ("zh-Hans", "zh-Hant", "es"):
-            self.assertTrue(rows["Whole-number BPM"].get(lang), f"missing {lang}")
-        self.assertIn('text: "Whole-number BPM"', bp.PLAYBACK_ENTRIES)
-        self.assertIn('checkedExternally: !!root.scWholeBpm', bp.PLAYBACK_ENTRIES)
-        self.assertIn('root.scCall("wholeBpm="', bp.PLAYBACK_ENTRIES)
+        self.assertNotIn("Whole-number BPM", rows)
+        self.assertNotIn("Whole-number BPM", bp.PLAYBACK_ENTRIES)
+        for forbidden in ("scWholeBpm", "scSyncWholeBpm", "EngineXWholeBpm", "scIsWholeBpm", "wholeBpm", "whole_bpm"):
+            self.assertNotIn(forbidden, bp.SERVICES_MAIN)
+            self.assertNotIn(forbidden, bp.PLAYBACK_ENTRIES)
+            self.assertNotIn(forbidden, bp.DISPLAY_ENTRIES)
+        self.assertIn('text: "BPM Decimals"', bp.DISPLAY_ENTRIES)
+        self.assertIn('values: ["1", "2"]', bp.DISPLAY_ENTRIES)
 
     @unittest.skipUnless(shutil.which("node"), "Node is required")
     def test_built_speed_slider_mapping_and_bridge(self):
@@ -9798,8 +9798,14 @@ class WholeBpmTest(unittest.TestCase):
             slider = (en / "ControlSurfaceModules/ControlSurfaceModules/SpeedSlider.qml").read_text(encoding="utf-8")
             main_qml = (en / "Skins/Embedded/EmbeddedMain.qml").read_text(encoding="utf-8")
 
-            self.assertIn('Planck.createProperty("EngineXWholeBpm", 0.0, 0)', main_qml)
-            self.assertIn('scGlobalConfig.scWholeBpm = !!j.wholeBpm', gcfg)
+            for forbidden in ("scWholeBpm", "scSyncWholeBpm", "EngineXWholeBpm", "scIsWholeBpm", "wholeBpm", "whole_bpm"):
+                self.assertNotIn(forbidden, gcfg)
+                self.assertNotIn(forbidden, slider)
+                self.assertNotIn(forbidden, main_qml)
+
+            self.assertIn('Planck.createProperty("EngineXBpmDecimals", 0.0, 0)', main_qml)
+            self.assertIn('property int scBpmDecimals: 2', gcfg)
+            self.assertIn('scGlobalConfig.scBpmDecimals = parseInt(j.bpmDecimals) === 1 ? 1 : 2', gcfg)
             self.assertIn('module.scTransformSpeed(', slider)
             self.assertIn(
                 'readonly property bool songLoaded: Planck.getProperty("/Engine/Deck%1/Track/SongLoaded".arg(modelData))\n'
@@ -9813,49 +9819,109 @@ class WholeBpmTest(unittest.TestCase):
                 slider,
             )
 
-            fn_whole = re.search(r"function scIsWholeBpm\(\)\s*\{[\s\S]*?\n    \}", gcfg)
+            fn_dec = re.search(r"function scGetBpmDecimals\(\)\s*\{[\s\S]*?\n    \}", gcfg)
             fn_tx = re.search(r"function scTransformSpeed\([^\)]*\)\s*\{[\s\S]*?\n    \}", slider)
-            self.assertIsNotNone(fn_whole)
+            fn_sync = re.search(r"function scSyncBpmDecimals\(\)\s*\{[\s\S]*?\n\t\}", main_qml)
+            fn_parse = re.search(r"function scParseSettingsConf\(text\)\s*\{[\s\S]*?\n\t\}", main_qml)
+            self.assertIsNotNone(fn_dec)
             self.assertIsNotNone(fn_tx)
+            self.assertIsNotNone(fn_sync)
+            self.assertIsNotNone(fn_parse)
 
             js = f"""
 const assert = require('node:assert/strict');
-const shared = {{ "/GUI/Scripted/EngineXWholeBpm": 0.0 }};
+const shared = {{ "/GUI/Scripted/EngineXBpmDecimals": 0.0 }};
 globalThis.Planck = {{
-    getProperty: (p) => ({{ translator: {{ get value() {{ return shared[p]; }} }} }})
+    getProperty: (p) => ({{ translator: {{
+        get value() {{ return shared[p]; }},
+        set value(v) {{ shared[p] = v; }}
+    }} }})
 }};
 const scGlobalConfig = {{
-    scWholeBpm: false,
-    pWholeBpm: null,
+    scBpmDecimals: 2,
+    pBpmDecimals: null,
 }};
-{fn_whole.group(0)}
+let scBpmDecimals = 2, scBpmDecimalsSynced = false, scUiLoaded = true;
+let scCueCountdown = true, scTracklistWaveform = true, scDualColumn = false, scSyncGuardPct = 0;
+let scSwapLoopOrder = false, scLedBrightness = 100, scUIScale = 100, scStemsEqMode = false;
+let scBeatJumpPads = false, scPitchBendBeatJump = false, scPioneerFx = "off";
+let scMixstreamFx = ["Echo", "Flanger", "Delay", "Phaser"], scReverseJogLeft = false, scReverseJogRight = false;
+const scBpmDecimalsProp = Planck.getProperty("/GUI/Scripted/EngineXBpmDecimals");
+function scFxMsInteger(v) {{ return parseInt(v) || 500; }}
+function scFxMsApply() {{}}
+function scSyncReverseJog() {{}}
+globalThis.root = {{
+    get scBpmDecimals() {{ return scBpmDecimals; }},
+    set scBpmDecimals(v) {{ scBpmDecimals = v; scSyncBpmDecimals(); }},
+    get scDualColumn() {{ return scDualColumn; }}, set scDualColumn(v) {{ scDualColumn = v; }},
+    get scTracklistWaveform() {{ return scTracklistWaveform; }}, set scTracklistWaveform(v) {{ scTracklistWaveform = v; }},
+    get scCueCountdown() {{ return scCueCountdown; }}, set scCueCountdown(v) {{ scCueCountdown = v; }},
+    get scSyncGuardPct() {{ return scSyncGuardPct; }}, set scSyncGuardPct(v) {{ scSyncGuardPct = v; }},
+    get scSwapLoopOrder() {{ return scSwapLoopOrder; }}, set scSwapLoopOrder(v) {{ scSwapLoopOrder = v; }},
+    get scReverseJogLeft() {{ return scReverseJogLeft; }}, set scReverseJogLeft(v) {{ scReverseJogLeft = v; }},
+    get scReverseJogRight() {{ return scReverseJogRight; }}, set scReverseJogRight(v) {{ scReverseJogRight = v; }},
+    get scLedBrightness() {{ return scLedBrightness; }}, set scLedBrightness(v) {{ scLedBrightness = v; }},
+    get scUIScale() {{ return scUIScale; }}, set scUIScale(v) {{ scUIScale = v; }},
+    get scStemsEqMode() {{ return scStemsEqMode; }}, set scStemsEqMode(v) {{ scStemsEqMode = v; }},
+    get scBeatJumpPads() {{ return scBeatJumpPads; }}, set scBeatJumpPads(v) {{ scBeatJumpPads = v; }},
+    get scPitchBendBeatJump() {{ return scPitchBendBeatJump; }}, set scPitchBendBeatJump(v) {{ scPitchBendBeatJump = v; }},
+    get scMixstreamFx() {{ return scMixstreamFx; }}, set scMixstreamFx(v) {{ scMixstreamFx = v; }},
+    get scPioneerFx() {{ return scPioneerFx; }}, set scPioneerFx(v) {{ scPioneerFx = v; }},
+}};
+{fn_sync.group(0)}
+{fn_parse.group(0)}
+{fn_dec.group(0)}
 {fn_tx.group(0)}
-globalThis.globalConfig = {{ scIsWholeBpm }};
+globalThis.globalConfig = {{ scGetBpmDecimals }};
 
-// Before UI loads (value=0), scIsWholeBpm falls back to HTTP poll scWholeBpm
-scGlobalConfig.scWholeBpm = true;
-assert.equal(scIsWholeBpm(), true);
-// Once UI loads (value=0.5 off / 1.0 on), Planck property wins across engines
-shared["/GUI/Scripted/EngineXWholeBpm"] = 0.5;
-assert.equal(scIsWholeBpm(), false);
-shared["/GUI/Scripted/EngineXWholeBpm"] = 1.0;
-assert.equal(scIsWholeBpm(), true);
+// Before UI loads (value=0), scGetBpmDecimals falls back to HTTP poll scBpmDecimals (default 2)
+assert.equal(scGetBpmDecimals(), 2);
+scGlobalConfig.scBpmDecimals = 1;
+assert.equal(scGetBpmDecimals(), 1);
+scGlobalConfig.scBpmDecimals = 2;
+assert.equal(scGetBpmDecimals(), 2);
+
+// Once UI loads (value=0.5 for 1 decimal / 1.0 for 2 decimals), Planck property wins across engines
+shared["/GUI/Scripted/EngineXBpmDecimals"] = 0.5;
+assert.equal(scGetBpmDecimals(), 1);
+scGlobalConfig.scBpmDecimals = 1;
+shared["/GUI/Scripted/EngineXBpmDecimals"] = 1.0;
+assert.equal(scGetBpmDecimals(), 2);
+
+// Round-trip through scParseSettingsConf + scSyncBpmDecimals drives scGetBpmDecimals
+scParseSettingsConf("bpm_decimals=1\\n");
+assert.equal(shared["/GUI/Scripted/EngineXBpmDecimals"], 0.5);
+assert.equal(scGetBpmDecimals(), 1);
+scParseSettingsConf("");
+assert.equal(shared["/GUI/Scripted/EngineXBpmDecimals"], 1.0);
+assert.equal(scGetBpmDecimals(), 2);
 
 const f32 = v => {{ const a = new Float32Array(1); a[0] = v; return a[0]; }};
 const propNum = v => ({{ translator: {{ unnormalized: v }} }});
 const propStr = s => ({{ translator: {{ string: s }} }});
 
-// Off or unloaded passes input through (preserving invert)
-shared["/GUI/Scripted/EngineXWholeBpm"] = 0.5;
+// Decimals = 1 (stock): exact linear passthrough across full sweep (with and without invert)
+shared["/GUI/Scripted/EngineXBpmDecimals"] = 0.5;
 assert.equal(scTransformSpeed(0.3, false, true, propNum(124), propStr(""), propStr("8%")), 0.3);
 assert.equal(scTransformSpeed(0.3, true, true, propNum(124), propStr(""), propStr("8%")), 0.7);
-shared["/GUI/Scripted/EngineXWholeBpm"] = 1.0;
+for (const inv of [false, true]) {{
+    for (let i = 0; i <= 4095; i++) {{
+        const uIn = i / 4095;
+        const expected = inv ? 1.0 - uIn : uIn;
+        assert.equal(scTransformSpeed(uIn, inv, true, propNum(124), propStr(""), propStr("8%")), expected);
+    }}
+}}
+
+// Decimals = 2 with unloaded track passes input through (preserving invert)
+shared["/GUI/Scripted/EngineXBpmDecimals"] = 1.0;
 assert.equal(scTransformSpeed(0.3, false, false, propNum(124), propStr(""), propStr("8%")), 0.3);
+assert.equal(scTransformSpeed(0.3, true, false, propNum(124), propStr(""), propStr("8%")), 0.7);
 
 // MetaDataBPM comma fallback when OriginalBPM is 0
 const outMeta = scTransformSpeed(0.5, false, true, propNum(0), propStr("126,5"), propStr("8%"));
 assert.equal(outMeta, 0.5);
 
+// Decimals = 2 (plateau ON) with loaded track places 2-ADC-step plateaus at every integer BPM
 for (const inv of [false, true]) {{
     for (const B of [87.6, 110.0, 123.45, 123.99, 124.0, 125.0, 140.0, 174.0]) {{
         for (const rPct of [4, 8, 10, 16, 25, 50, 100]) {{
