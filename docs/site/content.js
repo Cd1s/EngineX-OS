@@ -396,6 +396,11 @@
             "**OmniSource 統一瀏覽**：隨身碟 / SD 卡、自建伺服器與各平台歌單直接顯示在串流瀏覽器中，一次搜尋全部找到；本機曲目直接從原碟讀取，音質不打折。路徑：`設定檔 → 曲庫 → OmniSource（在串流中顯示 USB/SD）`（預設關閉）。",
             "**OmniSource unified browsing**: playlists and tracks on USB / SD, self-hosted servers and streaming services appear together inside the streaming browser, so one search finds them all. Local tracks play straight from the drive at full quality. Path: `Profile → Library → OmniSource (Drives in Streaming)` (off by default)."),
         ] },
+        { k: "note", tone: "new", x: L(
+          "**Engine Remote Library 排序新增 Date Added（尚未发布，#292）**：浏览电脑端 Engine DJ Desktop 远程曲库时，排序菜单恢复显示 `Date Added`（`dateImported`）。未包含原厂协议与 QML 均未提供的 `Date Created`。",
+          "**Engine Remote Library 排序新增 Date Added（尚未發佈，#292）**：瀏覽電腦端 Engine DJ Desktop 遠端曲庫時，排序選單恢復顯示 `Date Added`（`dateImported`）。未包含原廠協定與 QML 均未提供的 `Date Created`。",
+          "**Engine Remote Library Date Added sort (unreleased, #292)**: restores `Date Added` (`dateImported`) in the sort menu when browsing Engine DJ Desktop Remote Library. `Date Created` is omitted as neither the stock QML model nor `enginelibrary.v1` provides it.",
+        ) },
         { k: "h", id: "relay", x: L("可选：自建登录中继", "選配：自建登入中繼", "Optional: self-hosted login relay"), nav: L("自建登录中继", "自建登入中繼", "Self-hosted relay") },
         { k: "p", x: L("手机用移动数据时也要完成登录，或需要 Deezer 网页内登录，可在有公网 HTTPS 的服务器上运行 `enginex-relay`，再在碟机网页控制台填入地址和密码。", "手機使用行動數據時也要完成登入，或需要 Deezer 網頁內登入，可在有公網 HTTPS 的伺服器執行 `enginex-relay`，再於碟機網頁主控台填入位址與密碼。", "To log in from a phone on mobile data, or to get in-page Deezer login, run `enginex-relay` on a server with public HTTPS and enter its address and password in the deck's web console.") },
         { k: "p", x: L("没有域名也行，不用买域名或配反向代理：在碟机 `:8080` 控制台点「开启免域名公网隧道 (Cloudflare Quick Tunnel)」，碟机会自动安装并启动 `cloudflared`，秒级生成 `https://*.trycloudflare.com` 公网 HTTPS 地址；手机用 4G/5G 就能远程打开控制台，碟机屏幕上的流媒体登录二维码也会自动用该地址回调。自建中继同样免域名：运行 `enginex-relay -public auto`（或 `run-home-worker.sh --with-tunnel`），通过 Cloudflare Quick Tunnel 生成公网 HTTPS 中继地址并汇总管理多台碟机。",

@@ -9768,6 +9768,43 @@ assert.equal(scStemText('fail', 0, ''), 'Download failed');
         res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
         self.assertEqual(res.returncode, 0, res.stderr)
 
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_remote_library_sort_menu_includes_date_imported(self):
+        """Engine Remote Library gets dateImported in SortMenu menuRoles; other streaming providers do not."""
+        rel = "Skins/Embedded/Views/BrowseView/Components/SortMenu/SortMenu.qml"
+        qml = (LAB / "5.3.0/qrc" / rel).read_text()
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            for old, new in bp.edits(False).get(rel, []):
+                qml = bp.patch(qml, old, new, rel)
+        finally:
+            bp.ROOT = old_root
+
+        m = re.search(r"property var menuRoles:\s*\{(.*?)\n    \}", qml, re.S)
+        self.assertIsNotNone(m, "patched menuRoles block not found in SortMenu.qml")
+        body = m.group(1)
+        script = f"""
+const assert = require('assert');
+function evalMenuRoles(providerName, showPlayOrderRole) {{
+  const showButton = true;
+  const isStreamingProviderWithSort = true;
+  const Planck = {{ librarianController: {{ streamingInterfaceController: {{ selectedProviderDisplayName: providerName }} }} }};
+  const collectionController = {{ isCurrentCollectionCraylist: false, isCurrentCollectionSmartlist: false }};
+  const searchActive = false;
+  const showStemsRole = false;
+  return (() => {{
+{body}
+  }})();
+}}
+assert.deepStrictEqual(evalMenuRoles('Engine Remote Library', false), ['song', 'bpm', 'artist', 'key', 'rating', 'length', 'dateImported']);
+assert.deepStrictEqual(evalMenuRoles('EngineRemoteLibrary', true), ['song', 'bpm', 'artist', 'key', 'rating', 'length', 'dateImported', 'playOrder']);
+assert.deepStrictEqual(evalMenuRoles('TIDAL', false), ['song', 'bpm', 'artist', 'key', 'rating', 'length']);
+assert.deepStrictEqual(evalMenuRoles('Spotify', true), ['song', 'bpm', 'artist', 'key', 'rating', 'length', 'playOrder']);
+"""
+        res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
