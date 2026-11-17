@@ -855,8 +855,8 @@ SERVICES_MAIN = """
 		for (let i = 0; i < cues.length; i++) { const c = cues[i]; if (c.i > 0 && c.ms > pos + 50 && (!best || c.ms < best.ms)) best = c }
 		if (!best) return null
 		const beats = m.beats || []
-		const totalBeats = scShadowBeatAt(beats, best.ms) - scShadowBeatAt(beats, pos)
-		if (!(totalBeats > 0 && totalBeats <= 2048)) return null
+		const totalBeats = scCueBeatsLeft(scShadowBeatAt(beats, pos), scShadowBeatAt(beats, best.ms))
+		if (!(totalBeats >= 0 && totalBeats <= 2048)) return null
 		const bars = Math.floor(totalBeats / 4)
 		return {text: String(bars) + "." + ((Math.floor(totalBeats) % 4) + 1),
 			label: String(best.n || "").slice(0, 32), color: best.c || "#26a6ff", urgent: bars < 4}
@@ -1388,6 +1388,10 @@ SERVICES_MAIN = """
 		if (scShadowVisible(d)) return scShadowDisplay[d] && scShadowDisplay[d].playing && !scShadowDisplay[d].stale ? scShadowFrame : 0
 		return d === 1 ? scCueClock1.tick : d === 2 ? scCueClock2.tick : d === 3 ? scCueClock3.tick : scCueClock4.tick
 	}
+	// #151: the beats left to a hot cue, counted on the beat grid. The count steps where the playhead crosses a grid line, so the
+	// cue counts as sitting on its nearest line (a cue set off the grid, or a grid moved under it, otherwise steps between lines
+	// and never follows the grid). Beat positions are in beats; a cue ahead of the playhead whose line is behind it counts 0.
+	function scCueBeatsLeft(posBeat, cueBeat) { return Math.max(0, Math.round(cueBeat) - posBeat) }
 	// Same object while text/label/color/urgent are unchanged, so bindings do not re-layout every tick.
 	property var scCueInfoCache: ({})
 	// Every deck view (and layout variant) evaluates its countdown on the same
@@ -1428,8 +1432,11 @@ SERVICES_MAIN = """
 			best = i; bestPos = cp
 		}
 		if (best < 0) return null
-		const totalBeats = (bestPos - pos) / sr * (bpm / 60.0)
-		if (totalBeats <= 0 || totalBeats > 2048) return null
+		let totalBeats = (bestPos - pos) / sr * (bpm / 60.0)
+		// The count follows the grid: the playhead's place in its beat (Engine's BeatNumber, a position in the bar; below 0 without a grid).
+		const beat = p.beat ? p.beat.unnormalized : -1
+		if (beat >= 0) { const f = beat - Math.floor(beat); totalBeats = scCueBeatsLeft(f, f + totalBeats) }
+		if (!(totalBeats <= 2048)) return null
 		const bars = Math.floor(totalBeats / 4)
 		const cue = p.cues[best]
 		const text = String(bars) + "." + ((Math.floor(totalBeats) % 4) + 1)
@@ -1448,7 +1455,7 @@ SERVICES_MAIN = """
 		const prefix = "/Engine/Deck" + d
 		const t = p => root.scTr(prefix + p)
 		const p = {loaded: t("/Track/SongLoaded"), position: t("/Track/TrackPosition"), sampleRate: t("/Track/SampleRate"),
-			bpm: t("/OriginalBPM"), trackBpm: t("/Track/CurrentBPM"), cues: []}
+			bpm: t("/OriginalBPM"), trackBpm: t("/Track/CurrentBPM"), beat: t("/BeatNumber"), cues: []}
 		for (let i = 1; i <= 8; i++) {
 			const key = "/Track/QuickCue" + i
 			p.cues.push({exists: t(key + "Exists"), position: t(key + "Position"), name: t(key + "Name"), color: t(key + "Color")})
