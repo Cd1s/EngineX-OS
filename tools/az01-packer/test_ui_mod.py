@@ -7745,6 +7745,37 @@ class MixstreamPadsLayoutTest(unittest.TestCase):
         finally:
             bp.ROOT = old_root
 
+    def test_stems_eq_strip_sits_above_the_tile_flow_and_takes_no_grid_slot(self):
+        """The Control Center tab does not scroll and its bottom row covers every tile past row 3, so the strip lives in the
+        free 64 px above the Flow (a Flow child would take a slot, and the last slot in the worst case is under that row)."""
+        qrc = LAB / "5.3.0/qrc"
+        if not qrc.is_dir():
+            self.skipTest(f"{LAB} 5.3.0 QRC not found")
+        rel = "Skins/Embedded/Views/ControlCenter/Tabs/ControlCenterTab.qml"
+        stock = (qrc / rel).read_text(encoding="utf-8")
+        text = stock
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            for old, new in bp.edits(False)[rel]:
+                text = bp.patch(text, old, new, rel)
+        finally:
+            bp.ROOT = old_root
+        # End of the Flow: its matching closing brace.
+        depth, at = 0, text.index("Flow {") + len("Flow ")
+        for at, ch in enumerate(text[at:], at):
+            depth += (ch == "{") - (ch == "}")
+            if ch == "}" and depth == 0:
+                break
+        strip = text.index('objectName: "ControlCenter_StemsEq"')
+        self.assertGreater(strip, at, "the Stems EQ strip is a Flow child and would take a grid slot")
+        self.assertLess(strip, text.index("UberEntries {"))
+        self.assertEqual(text.count("ControlCenter_StemsEq\""), 1)
+        flow_y = int(re.search(r"Flow \{.*?\n\s*y: (\d+)", stock, re.S).group(1))
+        y = int(re.search(r"\n\t\ty: (\d+)\n", bp.STEMS_EQ_TILE).group(1))
+        height = int(re.search(r"\n\t\theight: (\d+)\n", bp.STEMS_EQ_TILE).group(1))
+        self.assertTrue(0 <= y and y + height <= flow_y, f"strip {y}+{height} must end above the Flow at {flow_y}")
+
     def test_mixstream_pitch_bend_beat_jump_and_fx_slots(self):
         rows = bp.load_dict()
         for key in ("Pitch Bend → Beat Jump", "FX Slot 1", "FX Slot 2", "FX Slot 3", "FX Slot 4"):
