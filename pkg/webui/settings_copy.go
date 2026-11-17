@@ -16,7 +16,7 @@ var copyUIBools = []string{
 	"engineLighting", "autoAnalyze", "masterLimiter", "autoGain",
 	"fourDeckWaveform", "pairedView", "prolinkWaveform", "upfaderEcho",
 	"browserDualColumn", "tracklistWaveform", "cueCountdown", "swapLoopOrder",
-	"stemsEqMode", "beatJumpPads", "sdHighSpeed",
+	"stemsEqMode", "beatJumpPads", "wholeBpm", "sdHighSpeed",
 }
 
 var copyUIEnums = map[string][]string{

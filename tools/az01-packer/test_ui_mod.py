@@ -409,6 +409,7 @@ class OnOffSwitchCompatibilityTest(unittest.TestCase):
             "scBroadcastOn": "broadcast", "scProlinkShare": "prolinkShare",
             "scMasterLimiter": "masterLimiter",
             "scAutoGain": "autoGain", "scUpfaderEcho": "upfaderEcho",
+            "scWholeBpm": "wholeBpm",
             "scStemsEqMode": "stemsEqMode", "scBeatJumpPads": "beatJumpPads",
             "scPitchBendBeatJump": "pitchBendBeatJump",
             "scSwapLoopOrder": "swapLoopOrder", "scDualColumn": "browserDualColumn",
@@ -1389,6 +1390,7 @@ assert.strictEqual(vfx.enabled, false);
             "Remote Load (LAN API)": ("scRemoteLoad", "remoteLoad", bp.SERVICES_ENTRIES),
             "Master Soft Clipper": ("scMasterLimiter", "masterLimiter", bp.PLAYBACK_ENTRIES),
             "Auto-Gain (0 dB Normalize)": ("scAutoGain", "autoGain", bp.PLAYBACK_ENTRIES),
+            "Whole-number BPM": ("scWholeBpm", "wholeBpm", bp.PLAYBACK_ENTRIES),
             "Echo Out": ("scUpfaderEcho", "upfaderEcho", bp.PLAYBACK_ENTRIES),
             "Stems EQ Mode": ("scStemsEqMode", "stemsEqMode", bp.PLAYBACK_ENTRIES),
             "Beat Jump Pad Bank": ("scBeatJumpPads", "beatJumpPads", bp.BEAT_JUMP_ENTRIES),
@@ -9767,6 +9769,137 @@ assert.equal(scStemText('fail', 0, ''), 'Download failed');
 """
         res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
         self.assertEqual(res.returncode, 0, res.stderr)
+
+
+class WholeBpmTest(unittest.TestCase):
+    def test_i18n_and_playback_entry(self):
+        rows = bp.load_dict()
+        self.assertIn("Whole-number BPM", rows)
+        for lang in ("zh-Hans", "zh-Hant", "es"):
+            self.assertTrue(rows["Whole-number BPM"].get(lang), f"missing {lang}")
+        self.assertIn('text: "Whole-number BPM"', bp.PLAYBACK_ENTRIES)
+        self.assertIn('checkedExternally: !!root.scWholeBpm', bp.PLAYBACK_ENTRIES)
+        self.assertIn('root.scCall("wholeBpm="', bp.PLAYBACK_ENTRIES)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_built_speed_slider_mapping_and_bridge(self):
+        qrc = LAB / "5.3.0/qrc"
+        if not qrc.is_dir():
+            self.skipTest(f"{qrc} not found")
+        with tempfile.TemporaryDirectory(prefix="ui-whole-bpm-") as tmp:
+            out = Path(tmp) / "packs"
+            res = subprocess.run(
+                ["python3", str(BUILD_PACKS), "--qrc", str(qrc), "--out", str(out), "--release"],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(res.returncode, 0, res.stderr)
+            en = out / "en"
+            gcfg = (en / "ControlSurfaceModules/ControlSurfaceModules/GlobalAssignmentConfig.qml").read_text(encoding="utf-8")
+            slider = (en / "ControlSurfaceModules/ControlSurfaceModules/SpeedSlider.qml").read_text(encoding="utf-8")
+            main_qml = (en / "Skins/Embedded/EmbeddedMain.qml").read_text(encoding="utf-8")
+
+            self.assertIn('Planck.createProperty("EngineXWholeBpm", 0.0, 0)', main_qml)
+            self.assertIn('scGlobalConfig.scWholeBpm = !!j.wholeBpm', gcfg)
+            self.assertIn('module.scTransformSpeed(', slider)
+            self.assertIn(
+                'readonly property bool songLoaded: Planck.getProperty("/Engine/Deck%1/Track/SongLoaded".arg(modelData))\n'
+                '                .translator.state',
+                slider,
+            )
+            self.assertIn('readonly property var pOrigBpm: Planck.getProperty("/Engine/Deck%1/OriginalBPM".arg(modelData))\n', slider)
+            self.assertIn('readonly property var pMetaBpm: Planck.getProperty("/Engine/Deck%1/Track/MetaDataBPM".arg(modelData))\n', slider)
+            self.assertIn(
+                'readonly property var pSpeedRange: Planck.getProperty("/Engine/Deck%1/SpeedRange".arg(modelData))\n\n',
+                slider,
+            )
+
+            fn_whole = re.search(r"function scIsWholeBpm\(\)\s*\{[\s\S]*?\n    \}", gcfg)
+            fn_tx = re.search(r"function scTransformSpeed\([^\)]*\)\s*\{[\s\S]*?\n    \}", slider)
+            self.assertIsNotNone(fn_whole)
+            self.assertIsNotNone(fn_tx)
+
+            js = f"""
+const assert = require('node:assert/strict');
+const shared = {{ "/GUI/Scripted/EngineXWholeBpm": 0.0 }};
+globalThis.Planck = {{
+    getProperty: (p) => ({{ translator: {{ get value() {{ return shared[p]; }} }} }})
+}};
+const scGlobalConfig = {{
+    scWholeBpm: false,
+    pWholeBpm: null,
+}};
+{fn_whole.group(0)}
+{fn_tx.group(0)}
+globalThis.globalConfig = {{ scIsWholeBpm }};
+
+// Before UI loads (value=0), scIsWholeBpm falls back to HTTP poll scWholeBpm
+scGlobalConfig.scWholeBpm = true;
+assert.equal(scIsWholeBpm(), true);
+// Once UI loads (value=0.5 off / 1.0 on), Planck property wins across engines
+shared["/GUI/Scripted/EngineXWholeBpm"] = 0.5;
+assert.equal(scIsWholeBpm(), false);
+shared["/GUI/Scripted/EngineXWholeBpm"] = 1.0;
+assert.equal(scIsWholeBpm(), true);
+
+const f32 = v => {{ const a = new Float32Array(1); a[0] = v; return a[0]; }};
+const propNum = v => ({{ translator: {{ unnormalized: v }} }});
+const propStr = s => ({{ translator: {{ string: s }} }});
+
+// Off or unloaded passes input through (preserving invert)
+shared["/GUI/Scripted/EngineXWholeBpm"] = 0.5;
+assert.equal(scTransformSpeed(0.3, false, true, propNum(124), propStr(""), propStr("8%")), 0.3);
+assert.equal(scTransformSpeed(0.3, true, true, propNum(124), propStr(""), propStr("8%")), 0.7);
+shared["/GUI/Scripted/EngineXWholeBpm"] = 1.0;
+assert.equal(scTransformSpeed(0.3, false, false, propNum(124), propStr(""), propStr("8%")), 0.3);
+
+// MetaDataBPM comma fallback when OriginalBPM is 0
+const outMeta = scTransformSpeed(0.5, false, true, propNum(0), propStr("126,5"), propStr("8%"));
+assert.equal(outMeta, 0.5);
+
+for (const inv of [false, true]) {{
+    for (const B of [87.6, 110.0, 123.45, 123.99, 124.0, 125.0, 140.0, 174.0]) {{
+        for (const rPct of [4, 8, 10, 16, 25, 50, 100]) {{
+            const r = rPct / 100;
+            const oP = propNum(B), mP = propStr(""), rP = propStr(rPct + "%");
+            const end0 = scTransformSpeed(inv ? 1 : 0, inv, true, oP, mP, rP);
+            const end1 = scTransformSpeed(inv ? 0 : 1, inv, true, oP, mP, rP);
+            const ctr = scTransformSpeed(0.5, inv, true, oP, mP, rP);
+            assert.ok(Math.abs(end0) < 1e-12 && Math.abs(end1 - 1) < 1e-12 && ctr === 0.5);
+
+            // Physical center detent (8192/16383) stays at 0.5 for integer BPM and near 0.5 for fractional
+            const detIn = inv ? 1 - 8192 / 16383 : 8192 / 16383;
+            const detOut = scTransformSpeed(detIn, inv, true, oP, mP, rP);
+            if (Math.abs(B - Math.round(B)) < 1e-4) assert.equal(detOut, 0.5);
+            else assert.ok(Math.abs(detOut - 0.5) < 2e-4);
+
+            let prev = -1;
+            const hits = new Map();
+            let maxStep = 0, prevBpm = null;
+            for (let i = 0; i <= 4095; i++) {{
+                const uIn = inv ? 1 - i / 4095 : i / 4095;
+                const uOut = scTransformSpeed(uIn, inv, true, oP, mP, rP);
+                assert.ok(uOut >= prev - 1e-12 && uOut >= 0 && uOut <= 1);
+                prev = uOut;
+                const bpm32 = f32(B) * (1 + r * (2 * f32(uOut) - 1));
+                if (prevBpm !== null) maxStep = Math.max(maxStep, bpm32 - prevBpm);
+                prevBpm = bpm32;
+                const k = Math.round(bpm32);
+                if (Math.abs(bpm32 - k) < 1e-4) hits.set(k, (hits.get(k) || 0) + 1);
+            }}
+            const kMin = Math.ceil(B * (1 - r) + 1e-4), kMax = Math.floor(B * (1 + r) - 1e-4);
+            for (let k = kMin; k <= kMax; k++) {{
+                if (Math.abs(k - B) < 1e-4) continue;
+                assert.ok((hits.get(k) || 0) >= 2, `missing plateau B=${{B}} r=${{rPct}}% k=${{k}}`);
+            }}
+            if (B === 124.0 && rPct <= 16) {{
+                assert.ok(maxStep <= 0.01, `B=124 r=${{rPct}}% maxStep=${{maxStep}}`);
+            }}
+        }}
+    }}
+}}
+"""
+            node_res = subprocess.run(["node", "-e", js], capture_output=True, text=True)
+            self.assertEqual(node_res.returncode, 0, node_res.stderr)
 
 
 if __name__ == "__main__":

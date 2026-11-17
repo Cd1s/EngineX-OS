@@ -10,7 +10,7 @@ import (
 )
 
 func TestSettingsCopyAllowlistAndModel(t *testing.T) {
-	source := uiSettings{SpotifySource: "auto", Language: "en", Quality: qualityFLAC, Waveform: "rgb", ShadowMode: "auto", StreamSortRole: "default", StreamSortOrder: "asc", PioneerFx: "off", FxTimeMode: "beats", FxTimeMs: 500, LedBrightness: 100, UIScale: 100, BpmDecimals: 2, FourDeckRole: "13", Scope: "spotify", RelayURL: "https://private.invalid", GitHubRepo: "private/repo", VerboseLog: true, DebugTelemetry: true, UpfaderEcho: true, StemsEqMode: true, BeatJumpPads: true, SdHighSpeed: true}
+	source := uiSettings{SpotifySource: "auto", Language: "en", Quality: qualityFLAC, Waveform: "rgb", ShadowMode: "auto", StreamSortRole: "default", StreamSortOrder: "asc", PioneerFx: "off", FxTimeMode: "beats", FxTimeMs: 500, LedBrightness: 100, UIScale: 100, BpmDecimals: 2, FourDeckRole: "13", Scope: "spotify", RelayURL: "https://private.invalid", GitHubRepo: "private/repo", VerboseLog: true, DebugTelemetry: true, UpfaderEcho: true, StemsEqMode: true, BeatJumpPads: true, WholeBpm: true, SdHighSpeed: true}
 	payload := copyUIExport(source)
 	for _, key := range []string{"fourDeckRole", "scope", "sources", "relayUrl", "githubRepo", "verboseLog", "debugTelemetry", "btOut", "loggedIn"} {
 		if _, found := payload[key]; found {
