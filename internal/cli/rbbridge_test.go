@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/Cd1s/EngineX-OS/internal/testfixture"
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
+	"github.com/Cd1s/EngineX-OS/pkg/prolink"
 )
 
 func TestRBBridgeValidation(t *testing.T) {
@@ -113,5 +115,31 @@ func TestProlinkSettingOnMigration(t *testing.T) {
 				t.Fatalf("prolinkSettingOn(%q) = %v, want %v", tc.conf, got, tc.want)
 			}
 		})
+	}
+}
+
+// A deck's journal got every Pro DJ Link packet from rb-bridge (25,660 lines in
+// 30 min with a computer on the link): it now gets a device when it appears and
+// when it has been silent for 10 s; packets need verbose_log=1.
+func TestRBBridgeLogsDevicesNotPackets(t *testing.T) {
+	var lines []string
+	logf := func(v ...any) { lines = append(lines, fmt.Sprint(v...)) }
+	l := linkLog{seen: map[string]time.Time{}}
+	now := time.Now()
+	computer := prolink.Device{Address: "192.168.1.138", Number: 17, Name: "rekordbox"}
+	for i := range 50 {
+		l.packet(logf, computer, now.Add(time.Duration(i)*100*time.Millisecond))
+	}
+	l.packet(logf, prolink.Device{Address: "192.168.1.238", Number: 4, Name: "CDJ-3000"}, now)
+	l.expire(logf, now.Add(12*time.Second)) // the CDJ fell silent; the computer spoke 7 s ago
+	l.expire(logf, now.Add(16*time.Second))
+	want := []string{
+		`rb-bridge: Pro DJ Link device seen: 192.168.1.138 player 17 "rekordbox"`,
+		`rb-bridge: Pro DJ Link device seen: 192.168.1.238 player 4 "CDJ-3000"`,
+		`rb-bridge: Pro DJ Link device lost: 192.168.1.238 player 4 "CDJ-3000"`,
+		`rb-bridge: Pro DJ Link device lost: 192.168.1.138 player 17 "rekordbox"`,
+	}
+	if strings.Join(lines, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("journal:\n%s\nwant:\n%s", strings.Join(lines, "\n"), strings.Join(want, "\n"))
 	}
 }

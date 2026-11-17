@@ -3385,15 +3385,17 @@ SERVICES_MAIN = """
 	property bool scTidalSynthetic: false
 	property string scScope: ""
 	property string scRekordboxName: "" // the computer with rekordbox on Pro DJ Link, while there is one
+	// The Sources list shows these in this order after the drives and Link sources:
+	// the computer with rekordbox is a library on the link, so it comes before the services.
 	readonly property var scServices: [
+		{ id: "rekordbox", name: scRekordboxName ? "rekordbox (" + scRekordboxName + ")" : "rekordbox" },
 		{ id: "tidal", name: "TIDAL" },
 		{ id: "netease", name: scT("NetEase Cloud Music") },
 		{ id: "spotify", name: "Spotify" },
 		{ id: "deezer", name: "Deezer" },
 		{ id: "soundcloud", name: "SoundCloud" },
 		{ id: "beatport", name: "Beatport" },
-		{ id: "applemusic", name: "Apple Music" },
-		{ id: "rekordbox", name: scRekordboxName ? "rekordbox (" + scRekordboxName + ")" : "rekordbox" }
+		{ id: "applemusic", name: "Apple Music" }
 	]
 	// Keep inactive dictionaries as scalar JSON strings. Only the selected language
 	// becomes a JS object/GC root; retain all spellings for live language switching.

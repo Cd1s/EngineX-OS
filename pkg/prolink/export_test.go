@@ -1165,6 +1165,49 @@ func TestExportStatusWaitsForThePlayersFirmware(t *testing.T) {
 	}
 }
 
+// rekordbox on a computer serves its files (mountd, nfsd) only to a player whose
+// status it gets: on the left deck its mountd stayed silent while the deck announced
+// as player 3 and answered at once after status packets (2026-11-17). Our status goes
+// to it as to a player, and its number (17) is not one we avoid.
+func TestExportSendsStatusToRekordbox(t *testing.T) {
+	root := t.TempDir()
+	testfixture.Export(t, root)
+	e := NewExporter(testExportConfig(root))
+	defer e.Close()
+	if err := e.SetEnabled(true); err != nil {
+		t.Fatal(err)
+	}
+	computer, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 63, 0, 3), Port: 50002})
+	if err != nil {
+		t.Skip("status port:", err)
+	}
+	defer computer.Close()
+	keepalive := make([]byte, 0x36)
+	copy(keepalive, magic)
+	keepalive[10], keepalive[0x21], keepalive[0x24], keepalive[0x34] = 6, 2, 17, 4
+	binary.BigEndian.PutUint16(keepalive[0x22:], 0x36)
+	copy(keepalive[12:], "rekordbox")
+	copy(keepalive[0x26:], []byte{2, 0, 0, 0, 0, 17})
+	copy(keepalive[0x2c:], net.IPv4(127, 63, 0, 3).To4())
+	discovery, _ := net.ResolveUDPAddr("udp4", e.Status().DiscoveryAddress)
+	computer.WriteToUDP(keepalive, discovery)
+	waitNumber(t, e, 4, 300*time.Millisecond)
+	buf := make([]byte, 2048)
+	for until := time.Now().Add(2 * time.Second); ; {
+		computer.SetReadDeadline(until)
+		n, _, err := computer.ReadFromUDP(buf)
+		if err != nil {
+			t.Fatal("no status to the computer with rekordbox:", err)
+		}
+		if n == 0x11c && buf[10] == 0x0a && buf[0x21] == 4 {
+			break
+		}
+	}
+	if e.Status().Number != 4 {
+		t.Fatalf("player %d: the computer took a number from us", e.Status().Number)
+	}
+}
+
 // #217: players broadcast on the beat port (beats, and a CDJ-3000's absolute
 // positions), and a socket bound to the interface's own address gets no
 // broadcast. Checked on Linux in a network namespace: a datagram to
