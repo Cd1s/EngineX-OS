@@ -845,10 +845,9 @@ func (r *exportRun) receiveMedia() {
 }
 
 // heardLocked notes a packet from a player on the status port: it now knows us,
-// and its status carries its firmware version (bytes 0x7c..0x7f, "1.44"). A
-// CDJ-3000 shows "Linked to player with older firmware" for as long as a player
-// announces a lower version than its own (#217), so ours is never below the
-// newest one on the link. Caller holds r.mu.
+// and its status carries its firmware version (bytes 0x7c..0x7f, "1.44"). Ours
+// is never below the newest one on the link (#217; the warning itself was byte
+// 0xb6, see statusPacket). Caller holds r.mu.
 func (r *exportRun) heardLocked(ip net.IP, b []byte) {
 	for key, p := range r.peers {
 		if !p.heard && p.ip.Equal(ip) {
@@ -1068,6 +1067,9 @@ func (r *exportRun) announcement() []byte {
 	copy(b[0x26:], r.mac)
 	copy(b[0x2c:], r.ip.To4())
 	b[0x30], b[0x34] = byte(min(len(r.peers)+1, 6)), 1
+	// Model code: a CDJ-3000's (dysentery, beat-link). With 00, a legacy player, a
+	// CDJ-3000 set to player 5 or 6 shows a warning and drops off the link (#198).
+	b[0x35] = 0x64
 	return b
 }
 func (r *exportRun) mediaPacket() []byte {
@@ -1103,6 +1105,10 @@ func (r *exportRun) statusPacket() []byte {
 	binary.BigEndian.PutUint16(b[0x90:], 0x7fff)                // no loaded track / meaningful master BPM
 	copy(b[0x7c:0x80], max(exportFirmware, r.firmware))         // never older than a player on the link (heardLocked)
 	b[0x89], b[0x8b], b[0x9f], b[0xcc] = 0x84, 0x7e, 0xff, 0x0f // idle, no master/sync
+	// 0xb6 is 1 in real players' status (nexus capture, beat-link); at 0 a CDJ shows
+	// "Linked to player with older firmware" whatever 7c-7f say (prolink-go, #198).
+	// 0xb7: a CDJ-3000's media presence, the USB bit (we only send while mounted).
+	b[0xb6], b[0xb7] = 1, 2
 	for _, off := range []int{0x8c, 0x98, 0xc0, 0xc4} {
 		binary.BigEndian.PutUint32(b[off:], 0x00100000)
 	}

@@ -62,7 +62,8 @@ func TestCapturedWire(t *testing.T) {
 	keep := fixture("keepalive")
 	r := &exportRun{player: keep[0x24], first: true, ip: net.IP(keep[0x2c:0x30]), mac: net.HardwareAddr(keep[0x26:0x2c]), peers: map[string]exportPeer{"peer": {}}}
 	got := r.announcement()
-	copy(keep[12:32], got[12:32]) // Only the model name differs.
+	copy(keep[12:32], got[12:32]) // Only the model name differs,
+	keep[0x35] = 0x64             // and the model code: a CDJ-3000's (#198), the nexus has none.
 	if !bytes.Equal(got, keep) {
 		t.Fatalf("keepalive: got %x want %x", got, keep)
 	}
@@ -75,8 +76,8 @@ func TestCapturedWire(t *testing.T) {
 	if err != nil || d.Name != "CDJ-2000nexus" {
 		t.Fatal("captured status name offset", d, err)
 	}
-	if len(status) != len(captured) || len(status) != 0x11c || !bytes.Equal(status[:11], captured[:11]) || status[0x1f] != captured[0x1f] || status[0x20] != captured[0x20] || !bytes.Equal(status[0x22:0x24], captured[0x22:0x24]) {
-		t.Fatal("status framing differs from capture")
+	if len(status) != len(captured) || len(status) != 0x11c || !bytes.Equal(status[:11], captured[:11]) || status[0x1f] != captured[0x1f] || status[0x20] != captured[0x20] || !bytes.Equal(status[0x22:0x24], captured[0x22:0x24]) || status[0xb6] != captured[0xb6] {
+		t.Fatal("status framing differs from capture") // b6 0: "Linked to player with older firmware" (#198)
 	}
 	r.nfs = &NFSServer{Root: "/media/test"}
 	r.lib = &rekordbox.Library{}
