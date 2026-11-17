@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -148,14 +151,19 @@ func TestIssue301CompletedImportReleasesGlobalLock(t *testing.T) {
 	}
 }
 
-// Re-check of 2e227f88: a peer that copied a track before any look leaves no trace here but
-// Engine's connection to it; with a peer on Engine Link the stick is not remounted (the
-// reviewer's original probe). Engine with no connection to another device: remounted.
-func TestIssue301RemountWaitsForNoEnginePeer(t *testing.T) {
+// Re-check of 2e227f88 and the PM's steer: a peer that copied a track before any look leaves
+// no trace here but Engine's connection to it (the reviewer's original probe). Each Engine Link
+// peer is asked what its decks hold, as this deck asks its own stream-sync: an EngineX peer that
+// holds nothing from this stick does not block the remount (two linked EngineX decks, the
+// maintainer's set), one that holds a track of it does and marks the stick, and a peer that
+// does not answer (stock Engine, another device, an older EngineX) blocks.
+func TestIssue301RemountAsksEngineLinkPeers(t *testing.T) {
 	f := newFakeStick(t)
 	f.engine("5", "", "")
-	// Engine's socket, established to a deck on the LAN (192.168.1.138:50010 from .224).
+	// Engine's socket, established to a deck on the LAN (192.168.1.224 to .138), and one to
+	// stream-sync on loopback.
 	f.engine("6", "socket:[4242]", "02")
+	f.engine("7", "socket:[4243]", "02")
 	tcp := "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n" +
 		"   0: E001A8C0:C35A 8A01A8C0:C36A 01 00000000:00000000 00:00000000 00000000     0        0 4242 1 0 0 10 0\n" +
 		"   1: 0100007F:1F90 0100007F:D431 01 00000000:00000000 00:00000000 00000000     0        0 4243 1 0 0 10 0\n"
@@ -166,19 +174,60 @@ func TestIssue301RemountWaitsForNoEnginePeer(t *testing.T) {
 		t.Fatal(err)
 	}
 	enginePeers = oldEnginePeers
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
-	err := remount(ctx, f.mount, newUSBLoadingReporter(filepath.Join(t.TempDir(), "status"), "usb"))
-	if got := f.seen(); len(got) != 0 || err == nil {
-		t.Fatalf("remounted while a peer on Engine Link may hold a track: %v %v", got, err)
+	if got := enginePeers(); len(got) != 1 || !got[0].Equal(net.IPv4(192, 168, 1, 138)) {
+		t.Fatalf("Engine Link peers %v, want only 192.168.1.138", got)
 	}
-	// Only a loopback connection (stream-sync): no peer.
-	f.engine("6", "socket:[4243]", "02")
-	if err = remount(context.Background(), f.mount, newUSBLoadingReporter(filepath.Join(t.TempDir(), "status"), "usb")); err != nil {
-		t.Fatal(err)
+	// The peer is an EngineX deck: its stream-sync answers GET /peer/decks.
+	var holds []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/peer/decks" {
+			http.NotFound(w, r)
+			return
+		}
+		decks := []map[string]any{{"deck": 1}}
+		for i, n := range holds {
+			decks = append(decks, map[string]any{"deck": i + 2, "net": n})
+		}
+		json.NewEncoder(w).Encode(map[string]any{"decks": decks})
+	}))
+	defer srv.Close()
+	peerDecks = func(ip net.IP) ([]string, bool) {
+		if !ip.Equal(net.IPv4(192, 168, 1, 138)) {
+			return nil, false
+		}
+		return decksAt(strings.TrimPrefix(srv.URL, "http://"))
 	}
-	if got := strings.Join(f.seen(), " "); got != "remove: add:" {
-		t.Fatalf("no peer: uevent writes %q", got)
+	try := func() ([]string, error) {
+		t.Helper()
+		before := len(f.seen())
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		defer cancel()
+		err := remount(ctx, f.mount, newUSBLoadingReporter(filepath.Join(t.TempDir(), "status"), "usb"))
+		return f.seen()[before:], err
+	}
+	// It holds its own stick's track and nothing of ours: remounted.
+	holds = []string{"net://{9f}/THEIRS (USB 1)/Contents/x.mp3"}
+	if got, err := try(); err != nil || strings.Join(got, " ") != "remove: add:" {
+		t.Fatalf("EngineX peer holding nothing of the stick: %v %v", got, err)
+	}
+	// One of its decks holds a track of this stick: not remounted, and marked.
+	holds = []string{"net://{1}/REKORDBOX (USB 1)/Contents/Track00003.mp3"}
+	if got, err := try(); len(got) != 0 || err == nil {
+		t.Fatalf("EngineX peer holding a track of the stick: %v %v", got, err)
+	}
+	if _, err := os.Stat(servedMark(f.mount)); err != nil {
+		t.Fatalf("not marked: %v", err)
+	}
+	// A stock peer: no answer, not remounted.
+	os.Remove(servedMark(f.mount))
+	peerDecks = func(net.IP) ([]string, bool) { return nil, false }
+	if got, err := try(); len(got) != 0 || err == nil {
+		t.Fatalf("peer that does not answer: %v %v", got, err)
+	}
+	// Engine connected to no other device: remounted.
+	f.engine("6", "", "")
+	if got, err := try(); err != nil || strings.Join(got, " ") != "remove: add:" {
+		t.Fatalf("no peer: %v %v", got, err)
 	}
 }
 

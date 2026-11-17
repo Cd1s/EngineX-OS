@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -61,11 +62,11 @@ func newFakeStick(t *testing.T) *fakeStick {
 	}
 	oldInfo, oldSys, oldProc, oldMark, oldMounted := mountinfoPath, sysClassBlock, procDir, ejectMarkDir, mounted
 	oldWait, oldRemove, oldClose, oldRemount, oldReady := remountWait, removeLimit, closeLimit, remountLimit, readyEvery
-	oldDeck, oldCopies, oldOwn, oldPeers := deckWait, engineCopies, ownDecks, enginePeers
+	oldDeck, oldCopies, oldOwn, oldPeers, oldPeerDecks := deckWait, engineCopies, ownDecks, enginePeers, peerDecks
 	t.Cleanup(func() {
 		mountinfoPath, sysClassBlock, procDir, ejectMarkDir, mounted = oldInfo, oldSys, oldProc, oldMark, oldMounted
 		remountWait, removeLimit, closeLimit, remountLimit, readyEvery = oldWait, oldRemove, oldClose, oldRemount, oldReady
-		deckWait, engineCopies, ownDecks, enginePeers = oldDeck, oldCopies, oldOwn, oldPeers
+		deckWait, engineCopies, ownDecks, enginePeers, peerDecks = oldDeck, oldCopies, oldOwn, oldPeers, oldPeerDecks
 	})
 	// stream-sync: this player's decks hold what Engine has open of the stick; no Engine Link peer.
 	ownDecks = func() ([]string, bool) {
@@ -78,7 +79,8 @@ func newFakeStick(t *testing.T) *fakeStick {
 		}
 		return nets, true
 	}
-	enginePeers = func() bool { return false }
+	enginePeers = func() []net.IP { return nil }
+	peerDecks = func(net.IP) ([]string, bool) { return nil, false }
 	mountinfoPath, sysClassBlock, procDir, ejectMarkDir = info, sys, f.proc, filepath.Join(dir, "run")
 	remountWait, removeLimit, closeLimit, remountLimit, readyEvery = 20*time.Millisecond, 300*time.Millisecond, 300*time.Millisecond, 300*time.Millisecond, 20*time.Millisecond
 	deckWait, engineCopies = 20*time.Millisecond, filepath.Join(dir, "inMusicTempFiles")+"/"

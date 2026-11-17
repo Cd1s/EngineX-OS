@@ -191,9 +191,7 @@ func (r *usbLoadingReporter) Fail(err error) {
 
 func (r *usbLoadingReporter) fail(err error) {
 	r.last = usbLoadingStatus{}
-	if r.owns(r.path) {
-		_ = os.Remove(r.path)
-	}
+	_ = os.Remove(r.path) // the error is the latest word, whoever wrote the status
 	msg := ""
 	if err != nil {
 		msg = strings.Join(strings.Fields(err.Error()), " ")

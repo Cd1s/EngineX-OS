@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -37,8 +38,10 @@ import (
 //   - Engine was seen sending a peer a track: an audio file of the stick read while Engine writes
 //     no copy, unless stream-sync confirms a deck of this player has that track loaded (seen while
 //     the job ran or the remount waited, kept as a mark until the next insert);
-//   - Engine is connected to another device on the network now (enginePeers): a peer that copied
-//     a track between two looks, or before the job, leaves no other trace here.
+//   - an Engine Link peer (a device Engine is connected to, enginePeers) may hold one: it does
+//     not answer what its decks hold, as an EngineX deck does, or one of them holds a track of
+//     the stick. A peer that copied a track between two looks, or before the job, leaves no
+//     other trace here.
 // A peer's unload is not observable, so there is no window after which it is safe.
 
 var (
@@ -55,27 +58,69 @@ var (
 	deckWait      = 5 * time.Second // how often a remount a deck blocks looks again
 	// ownDecks are the tracks this player's decks have loaded, Engine's TrackNetworkPath
 	// ("net://<uuid>/<volume>/<path>"); ok is false when stream-sync does not answer.
-	ownDecks = func() (nets []string, ok bool) {
-		c := http.Client{Timeout: time.Second}
-		resp, err := c.Get("http://127.0.0.1:8080/peer/decks")
-		if err != nil {
-			return nil, false
-		}
-		defer resp.Body.Close()
-		var v struct {
-			Decks []struct {
-				Net string `json:"net"`
-			} `json:"decks"`
-		}
-		if resp.StatusCode != http.StatusOK || json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&v) != nil {
-			return nil, false
-		}
-		for _, d := range v.Decks {
-			nets = append(nets, d.Net)
-		}
-		return nets, true
-	}
+	ownDecks = func() ([]string, bool) { return decksAt("127.0.0.1:8080") }
+	// peerDecks asks an Engine Link peer's stream-sync the same: an EngineX deck answers.
+	peerDecks = func(ip net.IP) ([]string, bool) { return decksAt(net.JoinHostPort(ip.String(), "8080")) }
 )
+
+// decksAt reads the decks an EngineX stream-sync at addr serves the other player
+// (GET /peer/decks): each deck's Net; ok is false when it does not answer.
+func decksAt(addr string) (nets []string, ok bool) {
+	c := http.Client{Timeout: time.Second}
+	resp, err := c.Get("http://" + addr + "/peer/decks")
+	if err != nil {
+		return nil, false
+	}
+	defer resp.Body.Close()
+	var v struct {
+		Decks []struct {
+			Net string `json:"net"`
+		} `json:"decks"`
+	}
+	if resp.StatusCode != http.StatusOK || json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&v) != nil {
+		return nil, false
+	}
+	for _, d := range v.Decks {
+		nets = append(nets, d.Net)
+	}
+	return nets, true
+}
+
+// onStick reports a TrackNetworkPath ("net://<uuid>/<volume>/<path>", the volume possibly
+// "<name> (<slot>)") on a volume named as the stick at mount. A peer's own stick of the same
+// name counts too: that only costs a re-insert.
+func onStick(np, mount string) bool {
+	parts := strings.SplitN(strings.TrimPrefix(np, "net://"), "/", 3)
+	if !strings.HasPrefix(np, "net://") || len(parts) != 3 {
+		return false
+	}
+	vol := parts[1]
+	if i := strings.LastIndex(vol, " ("); i > 0 && strings.HasSuffix(vol, ")") {
+		vol = vol[:i]
+	}
+	return strings.EqualFold(vol, filepath.Base(mount))
+}
+
+// peerBlocks reports an Engine Link peer that may hold a track from the stick at mount: one
+// that does not answer what its decks hold (stock Engine, another device, an older EngineX),
+// or one whose deck holds a track of this stick (then the stick is marked as served).
+func peerBlocks(mount string) bool {
+	for _, ip := range enginePeers() {
+		nets, ok := peerDecks(ip)
+		if !ok {
+			log.Printf("rb-bridge: Engine Link peer %s does not say what it holds; %s opens at its next insert", ip, mount)
+			return true
+		}
+		for _, n := range nets {
+			if onStick(n, mount) {
+				log.Printf("rb-bridge: a deck of %s holds a track from %s; it opens at its next insert", ip, mount)
+				_ = os.WriteFile(servedMark(mount), nil, 0o600)
+				return true
+			}
+		}
+	}
+	return false
+}
 
 // servedMark marks a stick from which Engine sent a peer a track since the import began.
 func servedMark(mount string) string {
@@ -116,9 +161,9 @@ func noteServed(mount string) {
 	}
 }
 
-// enginePeers reports Engine connected over TCP to another device on the local network:
-// Engine Link. A variable for tests.
-var enginePeers = func() bool {
+// enginePeers are the devices on the local network Engine is connected to over TCP: its
+// Engine Link peers. A variable for tests.
+var enginePeers = func() []net.IP {
 	inodes := map[string]bool{}
 	for _, pid := range engines() {
 		fds, _ := os.ReadDir(filepath.Join(procDir, pid, "fd"))
@@ -129,8 +174,9 @@ var enginePeers = func() bool {
 		}
 	}
 	if len(inodes) == 0 {
-		return false
+		return nil
 	}
+	var peers []net.IP
 	b, _ := os.ReadFile(filepath.Join(procDir, "net", "tcp"))
 	for _, line := range strings.Split(string(b), "\n")[1:] {
 		f := strings.Fields(line)
@@ -140,11 +186,11 @@ var enginePeers = func() bool {
 		}
 		local, _, _ := strings.Cut(f[1], ":")
 		remote, _, _ := strings.Cut(f[2], ":")
-		if ip := hexIPv4(remote); ip != nil && ip.IsPrivate() && !ip.Equal(hexIPv4(local)) {
-			return true
+		if ip := hexIPv4(remote); ip != nil && ip.IsPrivate() && !ip.Equal(hexIPv4(local)) && !slices.ContainsFunc(peers, ip.Equal) {
+			peers = append(peers, ip)
 		}
 	}
-	return false
+	return peers
 }
 
 // hexIPv4 reads /proc/net/tcp's little-endian hex address.
@@ -228,7 +274,7 @@ func remount(ctx context.Context, mount string, rep *usbLoadingReporter) error {
 		if !mounted(mount) || ejected() {
 			return nil // ejected or pulled: the next mount publishes
 		}
-		if noteServed(mount); served() || enginePeers() {
+		if noteServed(mount); served() || peerBlocks(mount) {
 			return fmt.Errorf("a peer deck may hold a track from %s; eject it and insert it again to load the library", mount)
 		}
 		wait := remountWait
