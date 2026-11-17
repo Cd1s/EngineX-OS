@@ -65,7 +65,7 @@ func (s *Server) rbxPlayers() []prolink.Device {
 	for _, d := range s.mergedDevices() {
 		name := strings.ToUpper(d.Name)
 		if d.Number < 1 || d.Number > 6 || prolink.IsRekordbox(d) || !strings.HasPrefix(name, "CDJ") && !strings.HasPrefix(name, "XDJ") ||
-			time.Since(d.LastSeen) >= 15*time.Second || net.ParseIP(d.Address) == nil || seen[d.Address] {
+			time.Since(d.LastSeen) > prolink.DeviceTimeout || net.ParseIP(d.Address) == nil || seen[d.Address] {
 			continue
 		}
 		seen[d.Address] = true
