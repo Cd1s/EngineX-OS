@@ -224,12 +224,12 @@ func appleMusicPhonePage(lang int, action, devToken string, helper ...string) st
 	return phoneHeading(lang, "applemusic") + strings.Join(helper, "") + `<p>` + tr(lang, "amIntro") + `</p>` +
 		`<form id="amf" method="post" action="` + a + `"><textarea name="links" rows="4" placeholder="https://music.apple.com/…/playlist/…" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>` +
 		`<button>` + tr(lang, "connect") + `</button>` +
-		`<h3>` + tr(lang, "amLibrary") + `</h3>` + signIn +
+		`<details><summary>` + tr(lang, "amLibrary") + `</summary>` + signIn +
 		`<input id="amt" name="userToken" type="password" placeholder="media-user-token" autocomplete="off">` +
 		`<details><summary>` + tr(lang, "howTo") + `</summary><p>` + tr(lang, "amLibraryHow") + `</p></details>` +
 		`<label>` + tr(lang, "amStorefront") + `<select name="storefront">` + stores + `</select></label>` +
 		`<details><summary>` + tr(lang, "amAdvanced") + `</summary><p>` + tr(lang, "amDevHow") + `</p><input name="devToken" type="password" placeholder="eyJ…" autocomplete="off"></details>` +
-		`<button>` + tr(lang, "connect") + `</button></form>` +
+		`<button>` + tr(lang, "connect") + `</button></details></form>` +
 		`<p class="note">` + tr(lang, "amAudio") + `</p><small>` + tr(lang, "amPrivacy") + `</small>`
 }
 
