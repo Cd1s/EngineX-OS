@@ -1,9 +1,30 @@
 # enginex-relay self-hosted deployment
 
 
-`https://relay.example.com` below is a placeholder: set `-public` in the unit to
-this relay's real public URL before the first install. `install.sh` refuses the
-placeholder on a fresh host and keeps an installed unit's `-public` on upgrade.
+Run from a current checkout on Debian 12+ / Ubuntu 24.04+ (amd64 or arm64):
+
+```sh
+sudo bash deploy/one-click-backend.sh
+# With an existing HTTPS reverse proxy:
+sudo bash deploy/one-click-backend.sh --public https://relay.example.com
+```
+
+The script builds the Go relay and HPSS Stems renderer, installs their systemd
+units and starts them. Missing Python/FFmpeg dependencies are installed with
+apt; Go is bootstrapped from go.dev with its published checksum only when
+needed. With no public URL a fresh install starts a Cloudflare Quick Tunnel;
+an upgrade retains its existing public URL, password, sessions and renderer
+token. Optional Apple Music helper services start when their files already
+exist under `/opt/enginex-amd` and `/opt/wrapper-lite`; these files and an Apple
+subscription are not installed by this script. The summary states whether that
+helper is available. Tokens and passwords are not printed.
+
+The canonical command/service/state are `enginex-relay`,
+`enginex-relay.service` and `/var/lib/enginex-relay`. The upgrade installer
+stops/disables previous units, moves their state (including DynamicUser state),
+keeps the former state path as a symlink, and keeps command/service aliases for
+one release. It also accepts the intermediate `enginex-deemix-relay.service`
+name. Conflicting old/new state or overrides are refused rather than overwritten.
 
 The web service handles Spotify/Deezer QR login and credential transfer. It
 never downloads or stores music. SC5000 downloads directly from Deezer using
@@ -24,7 +45,7 @@ on `0.0.0.0:6595` with DynamicUser and persistent configuration at
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o bin/enginex-relay-amd64 ./cmd/enginex-relay
 # Back up the deployed binary, unit, state and old cache to agent-backup first.
 # Copy the binary, unit and installer to the host, then run as root:
-sh install.sh ./enginex-relay-amd64 ./enginex-deemix-relay.service
+sh install.sh ./enginex-relay-amd64 ./enginex-relay.service
 # Stop the previous audio process before clearing the legacy cache; with
 # DynamicUser the backing directory may be /var/cache/private/enginex-relay.
 ```
@@ -68,7 +89,7 @@ own address.
 
 The relay runs as a DynamicUser and cannot read the root-only token itself.
 Install [`50-stems.conf`](50-stems.conf) as
-`/etc/systemd/system/enginex-deemix-relay.service.d/50-stems.conf`, then
+`/etc/systemd/system/enginex-relay.service.d/50-stems.conf`, then
 `systemctl daemon-reload` and restart the relay.
 
 The edge reverse proxy in front of the relay must stream request bodies
@@ -79,37 +100,26 @@ no greeting or reports `remote renderer did not finish successfully`.
 
 Use `agent-backup get <backup-id> --output <archive>` to restore the previous
 binary and service unit, run `systemctl daemon-reload`, then restart
-`enginex-deemix-relay.service`. Leave the current state/configuration in place
+`enginex-relay.service`. Leave the current state/configuration in place
 unless the state itself needs recovery. Restoring the previous binary also
 restores its cloud audio behavior.
 
 ## Switching an existing host
 
-Back up the deployed unit, credential and state before running any command.
-The source and target names are defined by the migration reader, so this note
-stays usable while legacy spellings are isolated there. From a checkout:
+Back up the deployed binary, units/drop-ins and relay state before upgrading.
+Run the same one-click command; the migration runs automatically. Existing
+custom service arguments and drop-ins are retained. A low-level upgrade can
+still use `sh deploy/relay-host/install.sh <new binary> [unit file]`; without a
+unit argument it retains an installed one or uses the bundled default.
 
-```sh
-. rootfs-overlay/usr/libexec/enginex-migration
-printf 'Previous units: %s.service, %s\n' "$legacy_stemsd" "$legacy_relay_unit"
-printf 'Current units: enginex-stemsd.service, enginex-deemix-relay.service\n'
-sudo systemctl disable --now "$legacy_stemsd.service" "$legacy_relay_unit"
-# Move state only if the current destination does not exist; keep a backup.
-sudo test ! -e /var/lib/enginex-relay
-sudo mv "$legacy_relay_state" /var/lib/enginex-relay
-sudo test ! -e /etc/enginex-stems
-sudo mv "$legacy_stems_config" /etc/enginex-stems
-sudo test ! -e /opt/enginex-stems
-sudo mv "$legacy_stems_code" /opt/enginex-stems
-# Install freshly built enginex-relay / enginex-stemsd and the current units.
-sudo systemctl daemon-reload
-sudo systemctl enable --now enginex-stemsd.service enginex-deemix-relay.service
-```
+Open `http://<backend-ip>:6595` and read the initial password locally with
+`sudo cat /var/lib/enginex-relay/initial-password`; change it in the console.
+After flashing, run `enginex-installer --setup-backend`, enter the deck address
+and its screen's Console Access Code, then the backend URL and password. The
+installer uses the existing deck API and installs no service on the computer.
+Alternatively set them in `http://<deck-ip>:8080`. The same relay settings route
+Stems and synchronize configured Apple Music helper settings to the deck.
 
-If the configured relay URL includes the former project prefix, update it to
-`/enginex` or the service root when switching the host.
-
-Run only the steps for services present on that host. Preserve the existing
-relay `-public`, console password and renderer token. The new relay's
-`50-stems.conf` reads `/etc/enginex-stems/token`. Keep the backed-up unit and
-binary for rollback; no server is changed by this repository update.
+If a state conflict is reported, preserve both directories and resolve which
+configuration to keep before rerunning. No server changes occur just by updating
+this repository.

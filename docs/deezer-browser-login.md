@@ -47,8 +47,8 @@ agent-backup get 20261102T174024Z-<relay-host>-before-deezer-browser-login-7597e
 chmod 755 /tmp/enginex-relay-rollback
 chown root:root /tmp/enginex-relay-rollback
 mv /tmp/enginex-relay-rollback /usr/local/bin/enginex-relay
-systemctl restart enginex-deemix-relay.service
-systemctl is-active enginex-deemix-relay.service
+systemctl restart enginex-relay.service
+systemctl is-active enginex-relay.service
 curl -fsS http://127.0.0.1:6595/healthz
 ```
 
@@ -61,7 +61,7 @@ Spotify 不再内置 Client ID：每位碟机主人在 /ui 控制台填自己的
 ## 本次部署验收
 
 - 线上二进制 SHA-256：`59aae060670dbe54c89570e9a05c8e229e85095d08e7092a32f10359181cdd38`。
-- `enginex-deemix-relay.service` active，`/healthz` 正常。
+- `enginex-relay.service` active，`/healthz` 正常。
 - 指定测试 token 原先属于已过期的 SoundCloud 会话；通过原有 `POST /api/relay/session` 将该测试 token 重新注册为 Deezer 后，公开 `/m/deezer` 返回 HTTP 200，`/m/deezer/frame` 返回 HTTP 200、`image/jpeg`，截图为 390 × 680。
 - 真实登录页面会自动跳转至 `account.deezer.com/en-us/login/`。已看到邮箱和密码表单，已通过点击操作关闭 Cookie 提示。
 - 测试窗口关闭后，CDP 检查确认无痕 context 为 0、Deezer 标签页为 0。

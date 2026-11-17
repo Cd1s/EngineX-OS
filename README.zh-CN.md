@@ -301,7 +301,9 @@ powershell -ExecutionPolicy Bypass -File .\stems\run-home-worker.ps1
 ### 选配：远程登录中继与免域名公网隧道
 当手机使用 4G/5G 流量扫码登录，或需要集中查看多台碟机状态时：
 1. **碟机端免域名一键穿透**：打开 `http://<碟机 IP>:8080` 点击 **「开启免域名公网隧道 (Cloudflare Quick Tunnel)」**，数秒内生成 `https://*.trycloudflare.com` 公网地址供手机远程访问与流媒体扫码回调。
-2. **自建 `enginex-relay` 中继**：在服务器运行 `enginex-relay -public https://你的域名`（或 `enginex-relay -public auto` 免域名穿透），再把地址与密码填入碟机 `:8080` 控制台。
+2. **一键部署 `enginex-relay` 后端（5.3.0.5）**：在 Debian 12+ / Ubuntu 24.04+（amd64 或 arm64）的 EngineX 源码目录执行 `sudo bash deploy/one-click-backend.sh`，自动安装并启动 `enginex-relay.service` 和 HPSS Stems 服务；重复执行会保留现有地址、密码及分轨令牌。已有反向代理时加 `--public https://你的域名`；全新安装未指定时自动开启 Quick Tunnel。打开 `http://<后端 IP>:6595`，首次安装在本机执行 `sudo cat /var/lib/enginex-relay/initial-password` 查看初始密码，登录并修改；升级保留原密码。[后端说明](deploy/relay-host/README.md)。
+3. **连接刷好的碟机**：正常启动并接入同一局域网，运行 `enginex-installer --setup-backend`（Windows：`enginex-installer.exe --setup-backend`），依次输入碟机地址、屏幕 **设置 → 关于 / 更新** 显示的控制台访问码，以及后端地址和密码；也可直接在 `http://<碟机 IP>:8080` 填写。流媒体账号通过碟机屏幕上的二维码登录；局域网手机登录无需中继。
+4. **同一后端提供 Stems 与 Apple Music**：Stems 使用相同的中继地址和密码。如果 `/opt/enginex-amd` 与 `/opt/wrapper-lite` 已有 Apple Music 助手文件，脚本也会启动它们；中继会自动检测其局域网地址和令牌并同步到碟机；只有助手在其他主机运行时才需手动填写可达地址。**PRIME 4 G2 / SYSTEM ONE（64 位二代机）**可原生登录 Apple Music，无需外部后端；其他机型可使用助手，需有效 Apple Music 订阅。
 
 ---
 

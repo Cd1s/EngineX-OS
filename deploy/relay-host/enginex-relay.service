@@ -1,11 +1,10 @@
 [Unit]
-Description=EngineX Deemix relay (credential relay only; downloads run on the deck)
-Documentation=https://relay.example.com/
+Description=EngineX relay (credential relay; downloads run on the deck)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=/usr/local/bin/enginex-relay -listen 0.0.0.0:6595 -public https://relay.example.com -state /var/lib/enginex-relay
+ExecStart=/usr/local/bin/enginex-relay -listen 0.0.0.0:6595 -public auto -state /var/lib/enginex-relay
 DynamicUser=yes
 StateDirectory=enginex-relay
 StateDirectoryMode=0700

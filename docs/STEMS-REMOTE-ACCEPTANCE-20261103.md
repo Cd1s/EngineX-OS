@@ -92,7 +92,7 @@ cp /tmp/stems-processor /data/enginex/bin/.stems-processor.new && chmod 755 /dat
 agent-backup get 20261103T150337Z-<workstation>-before-stems-framing-20261103-38aa93e7f6a8-<relay-host>-enginex-stems-relay-prestate.tar.gz --output pre.tar.gz
 # 传到 <relay-host> 后：
 tar -C / -xzf pre.tar.gz usr/local/bin/enginex-relay opt/enginex-stems/enginex-stemsd
-systemctl restart enginex-stemsd enginex-deemix-relay
+systemctl restart enginex-stemsd enginex-relay
 ```
 
 新后端向后兼容，碟机现有客户端不受影响，所以回滚只在后端本身出问题时才需要。
