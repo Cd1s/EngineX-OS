@@ -34,7 +34,7 @@ func (p *SelfHostedProvider) smbReadDir(ctx context.Context, dir string) ([]os.F
 }
 
 func (p *SelfHostedProvider) smbTrack(dir string, info os.FileInfo) Track {
-	return Track{ID: path.Join(dir, info.Name()), Title: strings.TrimSuffix(info.Name(), path.Ext(info.Name())), Album: dir, Provider: "smb"}
+	return Track{ID: path.Join(dir, info.Name()), Title: strings.TrimSuffix(info.Name(), path.Ext(info.Name())), Album: path.Clean(dir), Provider: "smb"}
 }
 
 func (p *SelfHostedProvider) smbPlaylists(ctx context.Context) ([]Playlist, error) {
@@ -45,7 +45,7 @@ func (p *SelfHostedProvider) smbPlaylists(ctx context.Context) ([]Playlist, erro
 	lists := []Playlist{{ID: "root", Title: "Root"}}
 	for _, e := range entries {
 		if e.IsDir() {
-			lists = append(lists, Playlist{ID: e.Name(), Title: e.Name()})
+			lists = append(lists, Playlist{ID: "./" + e.Name(), Title: e.Name()})
 		} else if webdavAudioExts[strings.ToLower(path.Ext(e.Name()))] {
 			lists[0].Count++
 			p.cacheWebDAVTrack(p.smbTrack(".", e))

@@ -98,3 +98,18 @@ func TestSMBNASCacheSeparatesBaseFolders(t *testing.T) {
 		}
 	}
 }
+
+func TestSMBNASFolderNamedRoot(t *testing.T) {
+	s := testsmb.Start(t)
+	os.MkdirAll(filepath.Join(s.Root, "root"), 0700)
+	os.WriteFile(filepath.Join(s.Root, "root", "a.mp3"), []byte("ID3 fixture"), 0600)
+	p := NewSelfHostedProvider(NASConfig{Protocol: "smb", URL: s.URL, Username: s.User, Password: s.Password}, nil)
+	lists, err := p.Playlists(context.Background())
+	if err != nil || len(lists) != 2 {
+		t.Fatalf("playlists: %+v %v", lists, err)
+	}
+	tracks, err := p.Tracks(context.Background(), lists[1].ID)
+	if err != nil || len(tracks) != 1 || tracks[0].Title != "a" || tracks[0].ID != "root/a.mp3" || tracks[0].Album != "root" {
+		t.Fatalf("folder named root is confused with the root playlist: %+v %v", tracks, err)
+	}
+}
