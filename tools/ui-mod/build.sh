@@ -2,12 +2,13 @@
 # Builds on the armhf cross host; the target has glibc 2.39, so reject newer symbols.
 # The deck kernel uses 4 KiB pages; ld pads ARM segments to 64 KiB by default.
 # -z now: every libc symbol is bound at load, none by the audio thread on its first call (and a missing one fails at load, where the gate sees it).
+# Native JSON decoder exceptions must cross the C metadata wrapper.
 set -eu
 # AArch64 hook (AZ04: PRIME 4 G2, SYSTEM ONE) on an arm64 host: CROSS= OUT=/abs/path.so sh build.sh
 cd "$(dirname "$0")"
 cross=${CROSS-arm-linux-gnueabihf-}
 out=${OUT:-../../rootfs-overlay/etc/enginex/libengine-ui-hook.so}
-"${cross}gcc" -O2 -Wall -Wextra -shared -fPIC -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 \
+"${cross}gcc" -O2 -Wall -Wextra -shared -fPIC -funwind-tables -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 \
     -ffunction-sections -fdata-sections -Wl,--gc-sections -Wl,-z,now -Wl,-z,max-page-size=4096 -o "$out" engine_ui_hook.c -ldl -lpthread
 "${cross}strip" "$out"
 if "${cross}readelf" -V "$out" | grep -E 'GLIBC_2\.(39\.|[4-9][0-9])'; then

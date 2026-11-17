@@ -3417,11 +3417,12 @@ SERVICES_MAIN = """
 		if (id === "rekordbox") return "qrc:/@ICONS@/SourceEngineRemoteLibrary.png"
 		return "file:///data/enginex/ui/icons/" + id + ".png"
 	}
-	// The gateway appends " [128 BPM 8A]" to a row's label; see labelWithBPM. A value
-	// Engine analysed itself always wins, so these only fill empty columns.
+	// The gateway appends " [128 BPM 8A]" to a row's label; see labelWithBPM.
+	// Catalog previews fill empty columns; rekordbox metadata enters the native Track.
 	function scPreview(label) {
-		return /\\s\\[(\\d+) BPM(?: ([0-9]{1,2}[AB]))?\\]$/.exec(label || "") || ["", "", ""]
+		return /\\s\\[(\\d+(?:\\.\\d+)?) BPM(?: ([0-9]{1,2}[AB]))?\\]$/.exec(label || "") || ["", "", ""]
 	}
+
 	// Deck art for a streamed track: Engine hands the 7" deck / MicroDeck "" or image://streaming/, so ask the gateway by title+artist.
 	// Native song-name bindings invalidate on track changes; retry only while metadata is missing.
 	function scDeckArtUrl(deck, path, tick, metadata) {

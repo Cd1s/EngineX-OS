@@ -34,6 +34,9 @@
 #include <time.h>
 #include <unistd.h>
 #include "settings_copy_profile.h"
+#if !defined(__aarch64__)
+#include "rekordbox_rows.h"
+#endif
 #include "dsp_smooth.h"
 #include "master_limiter.h"
 #include "echo_out.h"
@@ -2344,6 +2347,9 @@ static int edit_state(uintptr_t base, const struct engine_edit *e) {
 
 static void install_sqlite_hooks(uintptr_t base, size_t page);
 static void install_bt_send(uintptr_t base, size_t page);
+#if !defined(__aarch64__)
+static void install_rekordbox_rows(uintptr_t base, size_t page);
+#endif
 
 static void apply_engine_edits(uintptr_t base, size_t page) {
     // A group is applied only if every site of it is stock or already patched.
@@ -2419,6 +2425,9 @@ __attribute__((constructor)) static void edit_engine(void) {
 #endif
     apply_engine_edits(base, page);
     install_sqlite_hooks(base, page);
+#if !defined(__aarch64__)
+    install_rekordbox_rows(base, page);
+#endif
     if (install_dsp_hooks(base, page)) {
         install_bt_send(base, page);
 #if !defined(__aarch64__)
@@ -3256,6 +3265,43 @@ static void redirect_function(uintptr_t entry, const void *handler, size_t page)
     memcpy((void *)entry, jump, sizeof jump);
     if (mprotect((void *)first, span, PROT_READ | PROT_EXEC)) _exit(127);
     __builtin___clear_cache((char *)entry, (char *)entry + sizeof jump);
+}
+
+static void (*tidal_track_decode)(void *, void *, uintptr_t, uintptr_t);
+
+static void rekordbox_track_decode(void *json, void *track, uintptr_t r2, uintptr_t r3) {
+    tidal_track_decode(json, track, r2, r3);
+    char *t = track;
+    double bpm;
+    unsigned wheel;
+    char mode;
+    if (!sc_rekordbox_row_values(*(const char **)(t + 0x2bc), &bpm, &wheel, &mode)) return;
+    // Same Streaming::Track fields as Beatport's native decoder (5.3.0 armhf).
+    memcpy(t + 0x348, &bpm, sizeof bpm);
+    if (wheel) {
+        char *letter = *(char **)(t + 0x360);
+        if (letter != t + 0x368) return; // freshly decoded key's std::string SSO
+        *(unsigned *)(t + 0x354) = 5;
+        t[0x358] = 1;
+        *(unsigned *)(t + 0x35c) = wheel;
+        letter[0] = mode;
+        letter[1] = 0;
+        *(unsigned *)(t + 0x364) = 1;
+    }
+}
+
+A32_ONLY static void install_rekordbox_rows(uintptr_t base, size_t page) {
+    if (strcmp(build->name, "5.3.0")) return;
+    const uint32_t prefix[] = {0xe59f2cf8, 0xe59f3cf8, 0xe16d42f4, 0xe1cd81f0};
+    uintptr_t entry = base + 0x118b418;
+    if (memcmp((const void *)entry, prefix, sizeof prefix)) return;
+    // Leave the two PC-relative literal loads in place; pass their r2/r3 through
+    // the wrapper. The displaced ARM prologue itself has no PC-relative words.
+    tidal_track_decode = function_trampoline(entry + 8, page);
+    if (tidal_track_decode) {
+        redirect_function(entry + 8, rekordbox_track_decode, page);
+        fprintf(stderr, "engine-ui-hook: rekordbox native row metadata enabled\n");
+    }
 }
 
 A32_ONLY static void install_sqlite_hooks(uintptr_t base, size_t page) {

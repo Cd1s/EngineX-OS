@@ -121,7 +121,7 @@ func sourceFailedTitle(provider string, err error) string {
 
 var (
 	tidalNS        = uuid.MustParse("6f1c5a52-3c55-4c2e-9d0b-5c5000000000")
-	providerLabels = map[string]string{"netease": "网易云音乐", "spotify": "Spotify", "deezer": "Deezer", "soundcloud": "SoundCloud", "beatport": "Beatport", localProvider: "USB/SD", "applemusic": "Apple Music"}
+	providerLabels = map[string]string{"netease": "网易云音乐", "spotify": "Spotify", "deezer": "Deezer", "soundcloud": "SoundCloud", "beatport": "Beatport", localProvider: "USB/SD", "applemusic": "Apple Music", rekordboxScope: "rekordbox"}
 	providerOrder  = map[string]int{"netease": 0, "spotify": 1, "deezer": 2, "soundcloud": 3, "beatport": 4, "applemusic": 5}
 )
 
@@ -485,7 +485,11 @@ func labelWithBPM(t providers.Track) string {
 	if t.BPM <= 0 {
 		return label
 	}
-	tempo := strconv.Itoa(int(math.Round(t.BPM))) + " BPM"
+	bpm := strconv.Itoa(int(math.Round(t.BPM)))
+	if t.Provider == rekordboxScope {
+		bpm = strconv.FormatFloat(t.BPM, 'f', -1, 64)
+	}
+	tempo := bpm + " BPM"
 	if t.Key != "" {
 		tempo += " " + t.Key
 	}
@@ -1049,6 +1053,10 @@ func (g *tidalGateway) playlist(w http.ResponseWriter, r *http.Request) {
 	respond(w, g.refJSON(id, ref))
 }
 func (g *tidalGateway) trackJSON(id int64, t providers.Track) map[string]any {
+	var bpm any = int(math.Round(t.BPM))
+	if t.Provider == rekordboxScope {
+		bpm = t.BPM
+	}
 	names := t.Artists
 	if len(names) == 0 && t.Artist != "" {
 		names = []string{t.Artist}
@@ -1065,7 +1073,7 @@ func (g *tidalGateway) trackJSON(id int64, t providers.Track) map[string]any {
 	if len(artists) > 0 {
 		artist = artists[0]
 	}
-	return map[string]any{"id": id, "title": t.Title, "bpm": int(math.Round(t.BPM)), "duration": t.DurationMS / 1000, "replayGain": 0, "peak": 1, "allowStreaming": t.Provider != listNoticeProvider, "streamReady": t.Provider != listNoticeProvider, "premiumStreamingOnly": false, "trackNumber": 1, "volumeNumber": 1, "version": nil, "popularity": 0, "copyright": labelWithBPM(t), "url": "http://enginex.lan:8080", "isrc": t.ISRC, "editable": false, "explicit": false, "audioQuality": "LOSSLESS", "audioModes": []string{"STEREO"}, "artist": artist, "artists": artists, "album": map[string]any{"id": tidalNumericID(t.Album), "title": t.Album, "cover": nil, "vibrantColor": nil, "videoCover": nil}, "mixes": map[string]any{}}
+	return map[string]any{"id": id, "title": t.Title, "bpm": bpm, "duration": t.DurationMS / 1000, "replayGain": 0, "peak": 1, "allowStreaming": t.Provider != listNoticeProvider, "streamReady": t.Provider != listNoticeProvider, "premiumStreamingOnly": false, "trackNumber": 1, "volumeNumber": 1, "version": nil, "popularity": 0, "copyright": labelWithBPM(t), "url": "http://enginex.lan:8080", "isrc": t.ISRC, "editable": false, "explicit": false, "audioQuality": "LOSSLESS", "audioModes": []string{"STEREO"}, "artist": artist, "artists": artists, "album": map[string]any{"id": tidalNumericID(t.Album), "title": t.Album, "cover": nil, "vibrantColor": nil, "videoCover": nil}, "mixes": map[string]any{}}
 }
 
 // trackItems wraps each track as {"item":…,"type":"track"} (playlist items and
@@ -1670,7 +1678,9 @@ func (g *tidalGateway) trackInfo(w http.ResponseWriter, r *http.Request) {
 	if id, ref, ok := g.lookup(w, r.PathValue("id")); ok {
 		// Lists preview a catalog tempo. A track on a deck is Engine's to analyse.
 		t := ref.track
-		t.BPM, t.Key = 0, ""
+		if t.Provider != rekordboxScope {
+			t.BPM, t.Key = 0, ""
+		}
 		respond(w, g.trackJSON(id, t))
 	}
 }

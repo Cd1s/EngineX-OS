@@ -53,6 +53,7 @@ type RekordboxTrack struct {
 	Title, Artist string
 	BPM           float64
 	Key           string
+	DurationMS    int64
 }
 
 // RekordboxLink is one dbserver session with a computer running rekordbox. Not for
@@ -232,10 +233,11 @@ var rbxColumns = []struct {
 		_, key, _ := strings.Cut(r.Second, " - ")
 		t.Key = strings.TrimSpace(key)
 	}},
+	{8, 0x0b, func(t *RekordboxTrack, r RekordboxItem) { t.DurationMS = int64(r.Parent) * 1000 }},
 }
 
-// trackList asks a track list in the plain order, then twice more with the sort orders that
-// carry the artist, and the tempo and key, and joins the rows by track id: two more requests per
+// trackList asks a track list in the plain order, then with the artist, tempo/key and duration
+// columns, and joins the rows by track id: three more requests per
 // list, never one per row. Those orders reorder the rows (by artist, by tempo), so the plain
 // order is the result's order.
 func (l *RekordboxLink) trackList(kind uint16, args func(sort uint32) []uint32) ([]RekordboxTrack, error) {
