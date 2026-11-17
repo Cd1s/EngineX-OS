@@ -278,6 +278,13 @@ document.getElementById('clip').onclick=async function(){
 <button class="btn ghost small" onclick="if(confirm('确定清除这些密钥？'))save({clearBpm:'1'})">清除</button>
 <p class="hint"><a href="https://getsongbpm.com" target="_blank" rel="noreferrer">BPM data by GetSongBPM</a></p></div>
 
+<div class="card"><h2>Apple Music 助手（可选）</h2><p class="hint" id="amstate">…</p>
+<input id="amurl" placeholder="助手 API 地址（如 http://192.168.6.104:12341）" autocomplete="off" spellcheck="false" style="margin-bottom:8px">
+<input id="amlurl" placeholder="助手扫码登录页地址（留空则自动推导 :12342）" autocomplete="off" spellcheck="false" style="margin-bottom:8px">
+<input id="amtok" type="password" placeholder="助手访问 Token（留空不改）" autocomplete="off">
+<button class="btn green small" onclick="save({appleMusicHelperUrl:val('amurl'),appleMusicHelperLoginUrl:val('amlurl'),appleMusicHelperToken:val('amtok')}).then(()=>{el('amtok').value=''})">保存</button>
+<button class="btn ghost small" onclick="if(confirm('确定清除 Apple Music 助手配置？'))save({clearAppleMusicHelper:'1'})">清除</button></div>
+
 <div class="card"><h2>修改访问密码</h2>
 <input id="cur" type="password" placeholder="当前密码" autocomplete="current-password" style="margin-bottom:8px">
 <input id="np" type="password" placeholder="新密码（至少 8 位）" autocomplete="new-password">
@@ -296,6 +303,8 @@ function render(c){
  el('redir').textContent=c.spotifyRedirect;
  el('arlstate').innerHTML=c.deezerArlSet?'已保存：<code>'+esc(c.deezerArlMasked)+'</code>'+(c.deezerArlUser?' · 用户 '+esc(c.deezerArlUser):''):'<span class="badge warn">未设置 ARL</span>（请先保存 ARL，供 EngineX OS 碟机同步登录）';
  el('bpmstate').textContent='SoundCloud Client ID：'+(c.soundcloudClientIdSet?'已设置':'未设置')+' · Secret：'+(c.soundcloudSecretSet?'已设置':'未设置')+' · Token：'+(c.soundcloudTokenSet?'已设置':'未设置')+' · GetSongBPM：'+(c.getSongBpmKeySet?'已设置':'未设置');
+ el('amstate').textContent='API 地址：'+(c.appleMusicHelperUrl||'未设置')+' · Token：'+(c.appleMusicHelperTokenSet?'已设置':'未设置');
+ el('amurl').value=c.appleMusicHelperUrl||'';el('amlurl').value=c.appleMusicHelperLoginUrl||'';
  const stems=c.stems||{};
  el('stemsstate').innerHTML=stems.online?'<span class="badge good">'+esc((stems.device||'stemsd')+' · '+(stems.backend||'hpss')+' · '+(stems.busy?'繁忙':'在线'))+'</span>':'<span class="badge warn">离线 / 未连接</span>';
  const decks=Array.isArray(c.decks)?c.decks:[];

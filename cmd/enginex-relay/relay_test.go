@@ -799,3 +799,54 @@ func TestPasswordChangeRequiresRelayPassword(t *testing.T) {
 		t.Fatalf("valid relay password change failed: %d %s", wOK.Code, wOK.Body.String())
 	}
 }
+
+func TestAppleMusicHelperConfig(t *testing.T) {
+	s := newTestServer(t)
+	h := s.routes()
+	if err := s.cfg.setPassword("relay-owner-pass-1234"); err != nil {
+		t.Fatal(err)
+	}
+	hdrs := map[string]string{
+		"Content-Type":      "application/json",
+		"X-Deemix-Password": "relay-owner-pass-1234",
+	}
+
+	wBad := do(h, "POST", "/api/config", `{"appleMusicHelperUrl":"http://127.0.0.1:12341?bad=1"}`, hdrs)
+	if wBad.Code != 400 {
+		t.Fatalf("expected 400 for invalid helper url, got %d: %s", wBad.Code, wBad.Body.String())
+	}
+
+	wSave := do(h, "POST", "/api/config", `{"appleMusicHelperUrl":"http://192.168.6.104:12341","appleMusicHelperLoginUrl":"http://192.168.6.104:12342","appleMusicHelperToken":"am-secret-123"}`, hdrs)
+	if wSave.Code != 200 {
+		t.Fatalf("save helper failed: %d %s", wSave.Code, wSave.Body.String())
+	}
+
+	wGet := do(h, "GET", "/api/config?secrets=1", "", hdrs)
+	if wGet.Code != 200 {
+		t.Fatalf("get config secrets failed: %d %s", wGet.Code, wGet.Body.String())
+	}
+	var got struct {
+		OK     bool `json:"ok"`
+		Config struct {
+			AppleMusicHelperURL      string `json:"appleMusicHelperUrl"`
+			AppleMusicHelperLoginURL string `json:"appleMusicHelperLoginUrl"`
+			AppleMusicHelperTokenSet bool   `json:"appleMusicHelperTokenSet"`
+			AppleMusicHelperToken    string `json:"appleMusicHelperToken"`
+		} `json:"config"`
+	}
+	if err := json.Unmarshal(wGet.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.OK || got.Config.AppleMusicHelperURL != "http://192.168.6.104:12341" || got.Config.AppleMusicHelperLoginURL != "http://192.168.6.104:12342" || !got.Config.AppleMusicHelperTokenSet || got.Config.AppleMusicHelperToken != "am-secret-123" {
+		t.Fatalf("unexpected helper config: %+v", got)
+	}
+
+	wClear := do(h, "POST", "/api/config", `{"clearAppleMusicHelper":"1"}`, hdrs)
+	if wClear.Code != 200 {
+		t.Fatalf("clear helper failed: %d %s", wClear.Code, wClear.Body.String())
+	}
+	c := s.cfg.get()
+	if c.AppleMusicHelperURL != "" || c.AppleMusicHelperLoginURL != "" || c.AppleMusicHelperToken != "" {
+		t.Fatalf("expected cleared helper config, got %+v", c)
+	}
+}

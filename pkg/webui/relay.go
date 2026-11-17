@@ -6,6 +6,7 @@ package webui
 // thing that links the two, and it is shown only on the deck's screen.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -220,46 +221,105 @@ func (s *Server) pullRelayConfig(ctx context.Context) error {
 	}
 	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	var r struct {
-		Config providers.BPMConfig `json:"config"`
+		Config struct {
+			providers.BPMConfig
+			AppleMusicHelperURL      string `json:"appleMusicHelperUrl"`
+			AppleMusicHelperLoginURL string `json:"appleMusicHelperLoginUrl"`
+			AppleMusicHelperToken    string `json:"appleMusicHelperToken"`
+		} `json:"config"`
 	}
 	if err := providers.JSON(ctx, &c, "GET", strings.TrimRight(base, "/")+"/api/config?secrets=1", nil, h, &r); err != nil {
 		return err
 	}
-	if s.cfg.BPM == nil {
-		return nil
-	}
-	v := s.cfg.BPM.Config()
-	next := v
-	if r.Config.SoundCloudClientID != "" {
-		next.SoundCloudClientID = r.Config.SoundCloudClientID
-	}
-	if r.Config.SoundCloudSecret != "" {
-		next.SoundCloudSecret = r.Config.SoundCloudSecret
-	}
-	if r.Config.SoundCloudToken != "" {
-		next.SoundCloudToken = r.Config.SoundCloudToken
-	}
-	if r.Config.GetSongBPMKey != "" {
-		next.GetSongBPMKey = r.Config.GetSongBPMKey
-	}
-	if next == v {
-		return nil
-	}
-	if testRelayPullHook != nil {
-		testRelayPullHook()
-	}
-	return s.cfg.BPM.UpdateConfig(func(v *providers.BPMConfig) {
+	if s.cfg.BPM != nil {
+		v := s.cfg.BPM.Config()
+		next := v
 		if r.Config.SoundCloudClientID != "" {
-			v.SoundCloudClientID = r.Config.SoundCloudClientID
+			next.SoundCloudClientID = r.Config.SoundCloudClientID
 		}
 		if r.Config.SoundCloudSecret != "" {
-			v.SoundCloudSecret = r.Config.SoundCloudSecret
+			next.SoundCloudSecret = r.Config.SoundCloudSecret
 		}
 		if r.Config.SoundCloudToken != "" {
-			v.SoundCloudToken = r.Config.SoundCloudToken
+			next.SoundCloudToken = r.Config.SoundCloudToken
 		}
 		if r.Config.GetSongBPMKey != "" {
-			v.GetSongBPMKey = r.Config.GetSongBPMKey
+			next.GetSongBPMKey = r.Config.GetSongBPMKey
 		}
-	})
+		if next != v {
+			if testRelayPullHook != nil {
+				testRelayPullHook()
+			}
+			if err := s.cfg.BPM.UpdateConfig(func(v *providers.BPMConfig) {
+				if r.Config.SoundCloudClientID != "" {
+					v.SoundCloudClientID = r.Config.SoundCloudClientID
+				}
+				if r.Config.SoundCloudSecret != "" {
+					v.SoundCloudSecret = r.Config.SoundCloudSecret
+				}
+				if r.Config.SoundCloudToken != "" {
+					v.SoundCloudToken = r.Config.SoundCloudToken
+				}
+				if r.Config.GetSongBPMKey != "" {
+					v.GetSongBPMKey = r.Config.GetSongBPMKey
+				}
+			}); err != nil {
+				return err
+			}
+		}
+	}
+	if s.appleMusic != nil && r.Config.AppleMusicHelperURL != "" {
+		amURL := strings.TrimSpace(r.Config.AppleMusicHelperURL)
+		amLoginURL := strings.TrimSpace(r.Config.AppleMusicHelperLoginURL)
+		amToken := strings.TrimSpace(r.Config.AppleMusicHelperToken)
+		if validAppleMusicHelperURL(amURL) && validAppleMusicHelperURL(amLoginURL) {
+			s.appleMusicHelperMu.Lock()
+			cfg := s.appleMusic.HelperConfig()
+			next := cfg
+			next.URL = amURL
+			if amLoginURL != "" {
+				next.LoginURL = amLoginURL
+			}
+			tokenCleared := s.appleMusicHelperTokenCleared
+			if amToken != "" {
+				next.Token = amToken
+				tokenCleared = false
+			}
+			var saveErr error
+			if next != cfg || tokenCleared != s.appleMusicHelperTokenCleared {
+				saveErr = providers.SaveJSON(s.appleMusicHelperPath(), appleMusicHelperSettings{next, tokenCleared})
+				if saveErr == nil {
+					s.appleMusicHelperTokenCleared = tokenCleared
+					s.appleMusic.SetHelper(next.URL, next.LoginURL, next.Token)
+				}
+			}
+			s.appleMusicHelperMu.Unlock()
+			if saveErr != nil {
+				return saveErr
+			}
+		}
+	}
+	return nil
+}
+
+func (s *Server) pushRelayConfig(ctx context.Context, payload map[string]any) error {
+	base, password := s.relaySettings()
+	if base == "" || password == "" || len(payload) == 0 {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, relayTimeout)
+	defer cancel()
+	h := http.Header{"Content-Type": {"application/json"}}
+	h.Set("X-Deemix-Password", password)
+	h.Set("Authorization", "Bearer "+password)
+	c := http.Client{Timeout: relayTimeout}
+	if s.cfg.HTTP != nil {
+		c = *s.cfg.HTTP
+	}
+	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	return providers.JSON(ctx, &c, "POST", strings.TrimRight(base, "/")+"/api/config", bytes.NewReader(body), h, nil)
 }
