@@ -102,6 +102,7 @@ static void test_hidden_means_off(void) {
         snprintf(conf_path, sizeof conf_path, "%s/settings.conf", dir);
         four_deck_settings = conf_path;
     }
+    pioneer_fx_mode = 0; // the DSP tests above leave a style set; settings.conf no longer resets it
     write_file(board_path, "JP07\n");
     write_file(conf_path, "upfader_echo=1\npioneer_fx=off\nfx_time_mode=ms\nfx_time_ms=250\n");
     lim_start_poll();
@@ -147,58 +148,29 @@ static void test_hidden_means_off(void) {
     select_build(&engine_builds[1]);
 #endif
 
-    // 2. Hidden PX Delay Time Mode / (ms) when Color FX Style is Off or Space behaves as Off while keeping 250 ms stored.
-    write_file(conf_path, "pioneer_fx=off\nfx_time_mode=ms\nfx_time_ms=250\n");
-    usleep(180000);
-    assert(__atomic_load_n(&pfx_time_ms, __ATOMIC_ACQUIRE) == 250);
-    memset(master_pfx, 0, sizeof master_pfx);
-    memset(master_ms, 0, sizeof master_ms); sc_ms_prepare(&master_ms[0]);
-    for (unsigned n = 0; n < 512; ++n) {
-        float dry = 0.3f * sinf((float)n * 0.1f), l, r;
-        const float *in[] = {&dry, &dry}; float *out[] = {&l, &r};
-        hook_master_output(NULL, NULL, 2, in, 2, out, 1);
-        assert(l == dry && r == dry);
-    }
-
-    write_file(conf_path, "pioneer_fx=space\nfx_time_mode=ms\nfx_time_ms=250\n");
-    usleep(180000);
-    struct sc_master_pioneer_fx ref_space = {0};
-    memset(master_pfx, 0, sizeof master_pfx);
-    for (unsigned n = 0; n < 512; ++n) {
-        float dry = 0.2f * sinf((float)n * 0.07f), l, r, rl = dry, rr = dry;
-        const float *in[] = {&dry, &dry}; float *out[] = {&l, &r};
-        hook_master_output(NULL, NULL, 2, in, 2, out, 1);
-        sc_master_pioneer_fx_planar(&ref_space, &rl, &rr, 1, SC_MASTER_PFX_SPACE);
-        assert(memcmp(&l, &rl, 4) == 0 && memcmp(&r, &rr, 4) == 0);
-    }
-
-    // 3. Hidden Color FX Style on JC11 PRIME 4 (fx_selector_master_bypass=1) behaves as Off even with spiral + ms stored.
-    write_file(conf_path, "pioneer_fx=spiral\nfx_time_mode=ms\nfx_time_ms=250\n");
-    usleep(180000);
-    __atomic_store_n(&fx_selector_master_bypass, 1, __ATOMIC_RELEASE);
-    memset(master_pfx, 0, sizeof master_pfx);
-    memset(master_ms, 0, sizeof master_ms); sc_ms_prepare(&master_ms[0]);
-    for (unsigned n = 0; n < 512; ++n) {
-        float dry = 0.25f * cosf((float)n * 0.05f), l, r;
-        const float *in[] = {&dry, &dry}; float *out[] = {&l, &r};
-        hook_master_output(NULL, NULL, 2, in, 2, out, 1);
-        assert(l == dry && r == dry);
-    }
-    __atomic_store_n(&fx_selector_master_bypass, 0, __ATOMIC_RELEASE);
-
-    // 4. Standalone players hide Color FX Style (no PX effects on SC5000/SC6000): a stored style behaves as Off.
-    for (unsigned p = 0; p < sizeof players / sizeof *players; ++p) {
-        write_file(board_path, players[p]);
-        write_file(conf_path, "pioneer_fx=space\nfx_time_mode=ms\nfx_time_ms=250\n");
-        usleep(180000);
-        assert(__atomic_load_n(&pioneer_fx_mode, __ATOMIC_RELAXED) == 0);
-        memset(master_pfx, 0, sizeof master_pfx);
-        memset(master_ms, 0, sizeof master_ms); sc_ms_prepare(&master_ms[0]);
-        for (unsigned n = 0; n < 512; ++n) {
-            float dry = 0.2f * sinf((float)n * 0.07f), l, r;
-            const float *in[] = {&dry, &dry}; float *out[] = {&l, &r};
-            hook_master_output(NULL, NULL, 2, in, 2, out, 1);
-            assert(l == dry && r == dry);
+    // 2. A stored Color FX style is inert on every board: it used to play on the main output at a fixed mix with
+    //    nothing to turn it down (PRIME GO report, 5.3.0.5). The output stays the dry signal, bit for bit, whatever
+    //    board and style are stored; the 250 ms kept for PX is still read.
+    static const char *const boards[] = {"JP07\n", "JP08\n", "JP13\n", "JP14\n", "JC16\n", "JC11\n", "JC11S\n",
+                                         "JP11\n", "JP20\n", "JP21\n", "NH08\n", "JP24\n"};
+    static const char *const styles[] = {"spiral", "pitch_echo", "slip_roll", "dub_echo", "space"};
+    for (unsigned b = 0; b < sizeof boards / sizeof *boards; ++b) {
+        for (unsigned st = 0; st < sizeof styles / sizeof *styles; ++st) {
+            char text[128];
+            snprintf(text, sizeof text, "pioneer_fx=%s\nfx_time_mode=ms\nfx_time_ms=250\n", styles[st]);
+            write_file(board_path, boards[b]);
+            write_file(conf_path, text);
+            usleep(180000);
+            assert(__atomic_load_n(&pfx_time_ms, __ATOMIC_ACQUIRE) == 250);
+            assert(__atomic_load_n(&pioneer_fx_mode, __ATOMIC_RELAXED) == 0);
+            memset(master_pfx, 0, sizeof master_pfx);
+            memset(master_ms, 0, sizeof master_ms); sc_ms_prepare(&master_ms[0]);
+            for (unsigned n = 0; n < 512; ++n) {
+                float dry = 0.2f * sinf((float)n * 0.07f), l, r;
+                const float *in[] = {&dry, &dry}; float *out[] = {&l, &r};
+                hook_master_output(NULL, NULL, 2, in, 2, out, 1);
+                assert(l == dry && r == dry);
+            }
         }
     }
     unlink(board_path);

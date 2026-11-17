@@ -168,7 +168,7 @@ static int echo_player_bypass;        // standalone players hide Echo Out and Co
 static int echo_master_bypass;        // #258 all 5.3.0 consoles use native per-channel Transition FX
 static unsigned pfx_time_ms;          // #162: zero OFF, otherwise 10..4000
 static struct sc_pfx_ms master_ms[4];
-static int pioneer_fx_mode;           // #88 Pioneer FX emulations
+static int pioneer_fx_mode;           // #88 master-output style: settings.conf never sets it (a stored style stayed on at a fixed mix, no control drove it); only the DSP tests do
 static const char *four_deck_settings = UI_ROOT "/settings.conf";
 static const char *product_code_path = "/sys/firmware/devicetree/base/inmusic,product-code";
 static int player_board(void);
@@ -322,20 +322,105 @@ static int fx_selector_master_bypass;
 static int px_selector_capable(const char *version, const char *product) {
     return !strcmp(version, "5.3.0") && !strcmp(product, "JC11");
 }
-static int px_write_ready(const char *path) {
+static int ready_write(const char *path, const char *body) {
     char tmp[PATH_MAX];
     int n = snprintf(tmp, sizeof tmp, "%s.tmp", path);
     if (n < 0 || (size_t)n >= sizeof tmp) return 0;
     FILE *f = fopen(tmp, "w");
     if (!f) return 0;
-    int ok = fputs("armhf-px-v2 JC11\n", f) >= 0;
+    int ok = fputs(body, f) >= 0;
     if (fclose(f)) ok = 0;
     /* Go validates the marker body: never expose a truncated heartbeat. */
     if (ok && !rename(tmp, path)) return 1;
     unlink(tmp);
     return 0;
 }
+static int px_write_ready(const char *path) { return ready_write(path, "armhf-px-v2 JC11\n"); }
+
+/* Color FX on each channel's own filter knob (5.3.0 all-in-ones). Engine has one
+ * SweepFxControl per mixer channel; its setValue (0xd8ba3c) stores the knob (0..1, centre
+ * 0.5) at +0x40 and drives the two ChannelSweepFx audio nodes at +0x38 and +0x3c, whose
+ * process is 0xec127c (sandbox: node +0x38 copies input to output at centre, node +0x3c
+ * leaves both buffers alone at centre). With a style picked and the knob outside stock's
+ * centre band, both nodes skip stock (their centre behaviour) and +0x38 plays the style,
+ * as much as the knob is turned. Inside the band, or style Off, stock runs untouched. */
+#define CFX_READY "/run/enginex-colorfx.ready"
+enum { CFX_SET_VALUE = 0xd8ba3c, CFX_PROCESS = 0xec127c, CFX_CHANNELS = 4 };
+static int cfx_installed, cfx_style; /* cfx_style: pioneer_fx= in settings.conf, the channel knobs only */
+static void *cfx_value_original, *cfx_process_original;
+static struct cfx_channel {
+    void *node, *spare;    /* ChannelSweepFx at SweepFxControl +0x38 and +0x3c */
+    unsigned knob;         /* float bits, written by setValue's thread */
+    struct sc_pfx_instance dsp;
+} cfx_channels[CFX_CHANNELS];
+typedef void (*cfx_value_fn)(void *, float);
+typedef void (*cfx_process_fn)(void *, int, float **, int, float **, int, void *, void *);
+
+/* Stock Filter and Dub Echo treat 0.495..0.505 as centre (5.3.0 literals 0xe95ba0/0xe95ba8). */
+static float cfx_amount(float v) {
+    float a = v > 0.505f ? (v - 0.505f) / 0.495f : (v < 0.495f ? (0.495f - v) / 0.495f : 0.0f);
+    return a > 1.0f ? 1.0f : a;
+}
+static void hook_cfx_value(void *control, float v) {
+    void *node = *(void **)((char *)control + 0x38), *spare = *(void **)((char *)control + 0x3c);
+    unsigned bits;
+    memcpy(&bits, &v, sizeof bits);
+    // shortcut: CFX_CHANNELS slots, claimed on a channel's first knob move; a fifth channel stays stock.
+    for (unsigned i = 0; node && i < CFX_CHANNELS; ++i) {
+        struct cfx_channel *c = &cfx_channels[i];
+        void *expected = NULL;
+        if (__atomic_load_n(&c->node, __ATOMIC_ACQUIRE) != node &&
+            !__atomic_compare_exchange_n(&c->node, &expected, node, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) continue;
+        __atomic_store_n(&c->knob, bits, __ATOMIC_RELEASE);
+        __atomic_store_n(&c->spare, spare, __ATOMIC_RELEASE);
+        break;
+    }
+    ((cfx_value_fn)cfx_value_original)(control, v);
+}
+/* Audio thread. No lock, allocation or I/O; banks are cleared by the poll worker. */
+static void hook_cfx_process(void *node, int ins, float **in, int outs, float **out, int frames, void *a, void *b) {
+    struct cfx_channel *c = NULL;
+    int main = 0;
+    for (unsigned i = 0; i < CFX_CHANNELS && !c; ++i) {
+        if (__atomic_load_n(&cfx_channels[i].node, __ATOMIC_ACQUIRE) == node) c = &cfx_channels[i], main = 1;
+        else if (__atomic_load_n(&cfx_channels[i].spare, __ATOMIC_ACQUIRE) == node) c = &cfx_channels[i];
+    }
+    int style = __atomic_load_n(&cfx_style, __ATOMIC_RELAXED);
+    int stereo = c && ins == 2 && outs == 2 && in && out && in[0] && in[1] && out[0] && out[1] && frames > 0;
+    float amount = 0.0f;
+    if (stereo) {
+        unsigned bits = __atomic_load_n(&c->knob, __ATOMIC_ACQUIRE);
+        float v;
+        memcpy(&v, &bits, sizeof v);
+        amount = cfx_amount(v);
+    }
+    if (!style || amount == 0.0f) {
+        ((cfx_process_fn)cfx_process_original)(node, ins, in, outs, out, frames, a, b);
+        if (stereo && main && c->dsp.current) {
+            // Let the style ring down over stock's own output, then hand the bank back.
+            (void)sc_pfx_process(&c->dsp, out[0], out[1], (unsigned)frames, style ? style : c->dsp.mode, 0.5f, 0.5f, 0.0f);
+            if (c->dsp.wet == 0.0f && !c->dsp.fade) sc_pfx_instance_reset(&c->dsp);
+        }
+        return;
+    }
+    if (!main) return;
+    for (unsigned ch = 0; ch < 2; ++ch)
+        if (out[ch] != in[ch]) memmove(out[ch], in[ch], (size_t)frames * sizeof(float));
+    (void)sc_pfx_process(&c->dsp, out[0], out[1], (unsigned)frames, style, 0.5f, 0.5f, amount);
+}
 #endif
+
+/* Ordinary worker only: clears the Color FX banks and publishes the marker the UI pack and
+ * pkg/webui check before they show Color FX Style. */
+static void cfx_poll(void) {
+#if !defined(__aarch64__)
+    if (!cfx_installed) return;
+    for (unsigned i = 0; i < CFX_CHANNELS; ++i) sc_pfx_instance_prepare(&cfx_channels[i].dsp);
+    static time_t heartbeat;
+    time_t now = time(NULL);
+    if (now != heartbeat && ready_write(CFX_READY, "armhf-cfx-v1\n")) heartbeat = now;
+#endif
+}
 
 /* Ordinary worker only: never poll files, log, or wait in an audio callback. */
 static void fx_selector_poll(void) {
@@ -386,6 +471,7 @@ static void *lim_poll(void *arg) {
     clock_gettime(CLOCK_MONOTONIC, &resolve);
     for (;;) {
         fx_selector_poll();
+        cfx_poll();
         static struct stat previous;
         static int had_settings;
         struct stat st;
@@ -400,7 +486,8 @@ static void *lim_poll(void *arg) {
         }
         had_settings = have_settings;
         if (have_settings) previous = st;
-        int on = 0, gain = 0, echo = 0, pioneer_fx = 0, led = 100, btout = 0;
+        int on = 0, gain = 0, echo = 0, led = 100, btout = 0;
+        A32_ONLY int style = 0;
         struct sc_ms_config timing = {500, 0};
         FILE *f = fopen(four_deck_settings, "r");
         if (f) {
@@ -419,15 +506,9 @@ static void *lim_poll(void *arg) {
                     int n = atoi(line + 15);
                     if (n >= 10 && n <= 100) led = n;
                 }
-                else if (!strncmp(line, "pioneer_fx=", 11)) {
-                    char val[64];
-                    size_t len = strcspn(line + 11, "\r\n");
-                    if (len < sizeof val) {
-                        memcpy(val, line + 11, len);
-                        val[len] = '\0';
-                        pioneer_fx = sc_master_pioneer_fx_parse(val);
-                    }
-                }
+#if !defined(__aarch64__)
+                else if (!strncmp(line, "pioneer_fx=", 11)) style = sc_pioneer_fx_parse(line + 11);
+#endif
             }
             free(line);
             fclose(f);
@@ -445,8 +526,10 @@ static void *lim_poll(void *arg) {
         __atomic_store_n(&gain_enabled, gain, __ATOMIC_RELAXED);
         __atomic_store_n(&bt_out_pair, btout, __ATOMIC_RELAXED);
         __atomic_store_n(&echo_enabled, player_bypass ? 0 : echo, __ATOMIC_RELAXED);
-        __atomic_store_n(&pioneer_fx_mode, player_bypass ? 0 : pioneer_fx, __ATOMIC_RELAXED);
         __atomic_store_n(&pfx_time_ms, timing.enabled ? timing.ms : 0, __ATOMIC_RELEASE);
+#if !defined(__aarch64__)
+        __atomic_store_n(&cfx_style, player_bypass ? 0 : style, __ATOMIC_RELAXED); /* never the master output */
+#endif
         if (led != __atomic_load_n(&led_pct, __ATOMIC_RELAXED)) led_replay(led);
         usleep(80000);
     }
@@ -1407,6 +1490,25 @@ static int install_px_scope(uintptr_t base, size_t page, const char *version) {
     unlink(UI_ROOT "/fx-selector.ack");
     return 1;
 }
+static int install_cfx_scope(uintptr_t base, size_t page, const char *version) {
+    if (strcmp(version, "5.3.0") || player_board()) return 0; /* players have no Sweep FX */
+    static const uint32_t value_prefix[] = {0xe52d400c, 0xe98d4800};   // str r4,[sp,#-12]!; stmib sp,{fp,lr}
+    static const uint32_t process_prefix[] = {0xe16d42f4, 0xe1cd60f8}; // strd r4,[sp,#-36]!; strd r6,[sp,#8]
+    uintptr_t value = base + CFX_SET_VALUE, process = base + CFX_PROCESS;
+    if (memcmp((void *)value, value_prefix, 8) || memcmp((void *)process, process_prefix, 8)) return 0;
+    /* Before the UI can ask: on PRIME 4, pkg/webui drops a stored style when PX is ready alone. */
+    if (!ready_write(CFX_READY, "armhf-cfx-v1\n")) return 0;
+    uint32_t value_code[] = {value_prefix[0], value_prefix[1], 0xe51ff004, (uint32_t)(value + 8)};
+    uint32_t process_code[] = {process_prefix[0], process_prefix[1], 0xe51ff004, (uint32_t)(process + 8)};
+    cfx_value_original = rx_code(value_code, sizeof value_code, page);
+    cfx_process_original = rx_code(process_code, sizeof process_code, page);
+    uint32_t value_jump[] = {0xe51ff004, (uint32_t)(uintptr_t)hook_cfx_value};
+    uint32_t process_jump[] = {0xe51ff004, (uint32_t)(uintptr_t)hook_cfx_process};
+    patch_bytes(value, value_jump, sizeof value_jump, page);
+    patch_bytes(process, process_jump, sizeof process_jump, page);
+    fprintf(stderr, "engine-ui-hook: Color FX channel knobs installed\n");
+    return 1;
+}
 #endif
 
 static int install_dsp_hooks(uintptr_t base, size_t page) {
@@ -2317,6 +2419,7 @@ __attribute__((constructor)) static void edit_engine(void) {
         install_bt_send(base, page);
 #if !defined(__aarch64__)
         fx_selector_supported = install_px_scope(base, page, build->name);
+        cfx_installed = install_cfx_scope(base, page, build->name);
 #endif
         __atomic_store_n(&echo_player_bypass, player_board(), __ATOMIC_RELAXED);
         lim_start_poll();

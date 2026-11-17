@@ -21,6 +21,9 @@ arm-linux-gnueabihf-gcc -O2 -Wall -Wextra -Werror -Wl,-z,max-page-size=4096 \
     "$repo/tools/ui-mod/test_flanger_scope.c" -ldl -lpthread -o "$work/test_flanger_scope"
 "$work/test_flanger_scope" > "$work/test_flanger_scope.log" 2>&1
 echo "test_flanger_scope armhf PASS"
+arm-linux-gnueabihf-gcc -O2 -Wall -Wextra -Werror "$repo/tools/ui-mod/test_color_fx_hook.c" -ldl -lpthread -lm -o "$work/test_color_fx_hook"
+"$work/test_color_fx_hook" > "$work/test_color_fx_hook.log" 2>&1
+echo "test_color_fx_hook armhf PASS"
 arm-linux-gnueabihf-gcc -O2 -mfpu=neon-vfpv4 -Wall -Wextra -Werror "$repo/tools/ui-mod/test_reverb_time.c" -o "$work/test_reverb_time"
 "$work/test_reverb_time" > "$work/test_reverb_time.log" 2>&1
 echo "test_reverb_time armhf PASS"

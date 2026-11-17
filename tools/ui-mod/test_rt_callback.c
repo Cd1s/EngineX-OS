@@ -2,7 +2,8 @@
  * does I/O, and each block stays inside its real-time duration with everything switched on:
  * the four-deck pad, Echo Out, the master effects with their mode changing, auto gain, the
  * limiter, the live tap, a Bluetooth speaker, and the DSP guards and event hooks around them
- * (armhf also: an FX unit playing the selector's Jet Flanger, #195).
+ * (armhf also: an FX unit playing the selector's Jet Flanger, #195, and a channel filter knob
+ * playing a Color FX style, switching styles and coming back to centre).
  *
  * test_rt_budget.c bans those calls in the DSP headers at build time. engine_ui_hook.c uses
  * them outside the audio path, so here the linker wraps them and a wrapper reached while an
@@ -85,6 +86,13 @@ static unsigned phase;
 static int trip; /* selftest: make one banned call inside an audio block */
 #if !defined(__aarch64__)
 static int px_owner, px_effect; /* #195: an FX unit whose selector plays the Jet Flanger */
+static struct { char head[0x38]; void *node, *spare; } cfx_control; /* a SweepFxControl and its two nodes */
+static char cfx_nodes[2];
+static float cfx_peak;
+static void fake_cfx_value(void *c, float v) { (void)c; (void)v; }
+static void fake_cfx_process(void *node, int ins, float **in, int outs, float **o, int frames, void *a, void *b) {
+    (void)node; (void)ins; (void)in; (void)outs; (void)o; (void)frames; (void)a; (void)b;
+}
 #endif
 
 static unsigned long long fake_clock(void) { return clock_ns; }
@@ -112,6 +120,8 @@ static void audio_block(int channels, int frames) {
     hook_flanger(owner, pair, pair, (uint32_t)frames);
 #if !defined(__aarch64__)
     hook_flanger(&px_effect, pair, (float *const *)2, (uint32_t)frames);
+    hook_cfx_process(cfx_nodes, 2, pair, 2, pair, frames, NULL, NULL);
+    hook_cfx_process(cfx_nodes + 1, 2, pair, 2, pair, frames, NULL, NULL);
 #endif
     hook_fx_common_chain(owner, pair, pair, (uint32_t)frames);
     hook_fx_turn_off(handler, event); hook_fx_turn_on(handler, event); hook_fx_switch(handler, event);
@@ -164,6 +174,9 @@ int main(int argc, char **argv) {
     hook_fx_switch(NULL, event);
     assert(__atomic_load_n(&sc_pfx_routes[0].native_override, __ATOMIC_ACQUIRE) == 1);
     sc_pfx_instance_prepare(&sc_pfx_routes[0].dsp); /* the worker's part as well */
+    cfx_value_original = (void *)fake_cfx_value;
+    cfx_process_original = (void *)fake_cfx_process;
+    cfx_control.node = cfx_nodes; cfx_control.spare = cfx_nodes + 1;
 #endif
 
     static const int sizes[] = {64, 225, 256, MAX_FRAMES};
@@ -184,9 +197,18 @@ int main(int argc, char **argv) {
                     __atomic_add_fetch(&bt_encodes, 1, __ATOMIC_RELEASE); /* the speaker's encoder ran */
                     clock_ns += (unsigned long long)frames * 1000000000ull / 48000ull;
                     phase += (unsigned)frames;
+#if !defined(__aarch64__)
+                    /* Engine's thread turns the knob; the worker clears handed-back banks. */
+                    hook_cfx_value(&cfx_control, block / 16 % 3 ? 0.95f : 0.5f);
+                    __atomic_store_n(&cfx_style, (int)(block / 64 % 6), __ATOMIC_RELAXED);
+                    sc_pfx_instance_prepare(&cfx_channels[0].dsp);
+#endif
                     unsigned long long start = now_ns();
                     audio_block(channels, frames);
                     unsigned long long elapsed = now_ns() - start, *least = &best[n][layout][block];
+#if !defined(__aarch64__)
+                    if (cfx_channels[0].dsp.wet > cfx_peak) cfx_peak = cfx_channels[0].dsp.wet;
+#endif
                     if (pass && (pass == 1 || elapsed < *least)) *least = elapsed;
                     if (pass < PASSES - 1) continue;
                     blocks++;
@@ -197,6 +219,7 @@ int main(int argc, char **argv) {
     assert(bt_render == 48000 && bt_idle < BT_IDLE); /* the Bluetooth path really ran */
 #if !defined(__aarch64__)
     assert(sc_pfx_routes[0].dsp.mode == SC_PFX_FLANGER && sc_pfx_routes[0].dsp.wet > 0.99f); /* and so did the Jet Flanger */
+    assert(cfx_peak > 0.85f); /* and a channel knob's Color FX */
 #endif
     printf("rt-callback blocks=%u misses=%u worst_ns=%llu of budget_ns=%llu banned=%u %s\n", blocks, misses, worst, worst_budget, banned, banned_name);
     if (trip) return banned && !strcmp(banned_name, "usleep") ? EXIT_SUCCESS : EXIT_FAILURE;
