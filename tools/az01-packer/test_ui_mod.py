@@ -960,7 +960,7 @@ class UiModSourceTest(unittest.TestCase):
         self.assertIn('ActionTranslatorStateChangeNotifier', qml)
         self.assertIn('scFxReady.translator.state = false', qml)
         self.assertIn('return scFxCanUse() ? px : fxConfig.channel[modelData].pEffectIndex.translator', bp.FX_JOG_TARGET)
-        self.assertIn('visible: !root.scFxMasterBypassed', bp.PLAYBACK_ENTRIES)
+        self.assertNotIn('Color FX Style', bp.PLAYBACK_ENTRIES)  # the fixed-mix master style row is gone on every board
         self.assertIn('scFxSelectorAvailable = scFxMasterBypassed && (Config.audio.fx.hasDJFx || Config.audio.fx.hasNHFx)', SRC)
 
     def test_prime4_fx_selector_browsing_and_oled_mapping_issue285(self):

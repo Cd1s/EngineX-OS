@@ -168,7 +168,7 @@ static int echo_player_bypass;        // standalone players hide Echo Out and Co
 static int echo_master_bypass;        // #258 all 5.3.0 consoles use native per-channel Transition FX
 static unsigned pfx_time_ms;          // #162: zero OFF, otherwise 10..4000
 static struct sc_pfx_ms master_ms[4];
-static int pioneer_fx_mode;           // #88 Pioneer FX emulations
+static int pioneer_fx_mode;           // #88 master-output style: settings.conf never sets it (a stored style stayed on at a fixed mix, no control drove it); only the DSP tests do
 static const char *four_deck_settings = UI_ROOT "/settings.conf";
 static const char *product_code_path = "/sys/firmware/devicetree/base/inmusic,product-code";
 static int player_board(void);
@@ -400,7 +400,7 @@ static void *lim_poll(void *arg) {
         }
         had_settings = have_settings;
         if (have_settings) previous = st;
-        int on = 0, gain = 0, echo = 0, pioneer_fx = 0, led = 100, btout = 0;
+        int on = 0, gain = 0, echo = 0, led = 100, btout = 0;
         struct sc_ms_config timing = {500, 0};
         FILE *f = fopen(four_deck_settings, "r");
         if (f) {
@@ -419,15 +419,6 @@ static void *lim_poll(void *arg) {
                     int n = atoi(line + 15);
                     if (n >= 10 && n <= 100) led = n;
                 }
-                else if (!strncmp(line, "pioneer_fx=", 11)) {
-                    char val[64];
-                    size_t len = strcspn(line + 11, "\r\n");
-                    if (len < sizeof val) {
-                        memcpy(val, line + 11, len);
-                        val[len] = '\0';
-                        pioneer_fx = sc_master_pioneer_fx_parse(val);
-                    }
-                }
             }
             free(line);
             fclose(f);
@@ -445,7 +436,6 @@ static void *lim_poll(void *arg) {
         __atomic_store_n(&gain_enabled, gain, __ATOMIC_RELAXED);
         __atomic_store_n(&bt_out_pair, btout, __ATOMIC_RELAXED);
         __atomic_store_n(&echo_enabled, player_bypass ? 0 : echo, __ATOMIC_RELAXED);
-        __atomic_store_n(&pioneer_fx_mode, player_bypass ? 0 : pioneer_fx, __ATOMIC_RELAXED);
         __atomic_store_n(&pfx_time_ms, timing.enabled ? timing.ms : 0, __ATOMIC_RELEASE);
         if (led != __atomic_load_n(&led_pct, __ATOMIC_RELAXED)) led_replay(led);
         usleep(80000);

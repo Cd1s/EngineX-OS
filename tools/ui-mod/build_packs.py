@@ -3234,12 +3234,11 @@ SERVICES_MAIN = """
 	property bool scPitchBendBeatJump: false
 	property var scMixstreamFx: ["Echo", "Flanger", "Delay", "Phaser"]
 	property bool scMixstreamSweepOpen: false
-	property string scPioneerFx: "off"
 	property string scFxTimeMode: "beats"
 	property int scFxTimeMs: 500
 	property bool scFxSelectorAvailable: false
 	property bool scFxMasterBypassed: false
-	readonly property bool scHasPxDelay: scFxSelectorAvailable || (!scFxMasterBypassed && !scIsPlayerBoard && ["spiral", "pitch_echo", "dub_echo"].indexOf(scPioneerFx) >= 0)
+	readonly property bool scHasPxDelay: scFxSelectorAvailable
 	// Offers this model's release image to EngineX's online updater.
 	property ListModel scUpdateModel: ListModel {}
 	property bool scUpdating: false
@@ -3889,8 +3888,6 @@ SERVICES_MAIN = """
 			}
 			scFxMsApply(v.fxTimeMode !== undefined ? v.fxTimeMode : v.fx_time_mode,
 			            v.fxTimeMs !== undefined ? v.fxTimeMs : v.fx_time_ms)
-			if (v.pioneerFx !== undefined) scPioneerFx = v.pioneerFx || "off"
-			else if (v.pioneer_fx !== undefined) scPioneerFx = v.pioneer_fx || "off"
 		}
 		if (scHasStemsEq && scStemsEqMode && !scStemsEqApplied) {
 			scStemsEqApplied = true
@@ -3982,7 +3979,6 @@ SERVICES_MAIN = """
 			}
 			else if (key === "fx_time_mode" && line.trim().indexOf("fx_time_mode=") === 0) fxMode = line.trim().slice(13) === "ms" ? "ms" : "beats"
 			else if (key === "fx_time_ms" && line.trim().indexOf("fx_time_ms=") === 0) fxMs = scFxMsInteger(line.trim().slice(11))
-			else if (key === "pioneer_fx") root.scPioneerFx = val || "off"
 		}
 		if (typeof scSyncReverseJog === "function") scSyncReverseJog(true)
 		scFxMsApply(fxMode, fxMs)
@@ -5174,15 +5170,6 @@ PLAYBACK_ENTRIES = (switch_entry("Master Soft Clipper", "scMasterLimiter", "mast
     + switch_entry("Auto-Gain (0 dB Normalize)", "scAutoGain", "autoGain")
     + switch_entry("Echo Out", "scUpfaderEcho", "upfaderEcho", "\t\t\tvisible: root.scHasMixer\n")
     + switch_entry("Stems EQ Mode", "scStemsEqMode", "stemsEqMode", "\t\t\tvisible: root.scHasStemsEq\n") + """
-		EntryBase.ListEntry {
-			text: "Color FX Style"
-			// No PX effects on standalone players; the hook keeps a stored style Off there.
-			visible: !root.scFxMasterBypassed && !root.scIsPlayerBoard
-			readonly property var ids: ["off", "spiral", "pitch_echo", "slip_roll", "dub_echo", "space"]
-			values: ["Off", "Spiral", "Pitch Echo", "Slip Roll", "Dub Echo", "Space"]
-			currentValue: values[Math.max(0, ids.indexOf(root.scPioneerFx))]
-			onSelected: function(index) { root.scCall("pioneerFx=" + ids[index]) }
-		},
 		EntryBase.ListEntry {
 			text: "PX Delay Time Mode"
 			visible: root.scHasPxDelay

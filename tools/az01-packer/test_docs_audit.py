@@ -44,7 +44,6 @@ class DocsAuditBH2A10Test(unittest.TestCase):
             "Master Soft Clipper",
             "Auto-Gain (0 dB Normalize)",
             "Stems EQ Mode",
-            "Color FX Style",
             "PX Delay Time Mode",
             "Profile → Safety",
             "Sync Guard Tolerance",

@@ -147,7 +147,7 @@ Object.assign(root, {{
     scPlayer: false, scUiLoaded: false, scFxMsWanted: -1,
     scMasterLimiter: false, scAutoGain: false, scUpfaderEcho: false,
     scStemsEqApplied: false, scStemsEqWatched: false, scBeatJumpPads: false,
-    scPioneerFx: 'off', scFxTimeMode: 'beats', scFxTimeMs: 500,
+    scFxTimeMode: 'beats', scFxTimeMs: 500,
     scFxSelectorAvailable: false, scFxMasterBypassed: false,
     scVersion: '', scBuildTag: '', scLang: 'en', scWave: 'denon', scQuality: 'flac',
     scNeteaseMode: 'official', scUpdateRepo: '', scAccessCode: '', scConsoleUrl: '',
@@ -189,7 +189,6 @@ function resetUnit(board, opts = {{}}) {{
     stemsEqVal = false;
     scPlayer = false;
     scUpfaderEcho = false;
-    scPioneerFx = 'off';
     scFxTimeMode = 'beats';
     scFxTimeMs = 500;
     scFxMasterBypassed = false;
@@ -203,15 +202,15 @@ for (const board of ['JP07', 'JP08', 'JP13', 'JP14']) {{
     scApply({{
         player: true, fxSelectorAvailable: false,
         upfaderEcho: true, stemsEqMode: true,
-        pioneerFx: 'off', fxTimeMode: 'ms', fxTimeMs: 250,
+        pioneerFx: 'space', fxTimeMode: 'ms', fxTimeMs: 250,
     }});
     assert.equal(visible['Master Soft Clipper'](), true, board);
     assert.equal(visible['Auto-Gain (0 dB Normalize)'](), true, board);
     assert.equal(visible['Echo Out'](), false, board + ' Echo Out hidden');
     assert.equal(visible['Stems EQ Mode'](), false, board + ' Stems EQ hidden');
-    assert.equal(visible['Color FX Style'](), false, board + ' Color FX Style hidden (no PX effects on standalone players)');
-    assert.equal(visible['PX Delay Time Mode'](), false, board + ' PX Delay Time Mode hidden when Color FX Off');
-    assert.equal(visible['PX Delay Time (ms)'](), false, board + ' PX Delay Time (ms) hidden when Color FX Off');
+    assert.equal(visible['Color FX Style'], undefined, board + ' has no Color FX Style row (it played at a fixed mix with nothing to turn it down)');
+    assert.equal(visible['PX Delay Time Mode'](), false, board + ' PX Delay Time Mode hidden without the PX selector');
+    assert.equal(visible['PX Delay Time (ms)'](), false, board + ' PX Delay Time (ms) hidden without the PX selector');
     // Hidden entries keep stored values and behave as Off:
     assert.equal(scUpfaderEcho, true);
     assert.equal(transitionFx.enabled, false, board + ' hidden Echo Out stays Off');
@@ -220,17 +219,9 @@ for (const board of ['JP07', 'JP08', 'JP13', 'JP14']) {{
     assert.equal(scFxTimeMode, 'ms');
     assert.equal(scFxTimeMs, 250);
 
-    // Non-delay styles (Slip Roll, Space) also keep PX Delay entries hidden:
-    for (const style of ['slip_roll', 'space']) {{
-        scPioneerFx = style;
-        assert.equal(visible['PX Delay Time Mode'](), false, board + ' ' + style);
-        assert.equal(visible['PX Delay Time (ms)'](), false, board + ' ' + style + ' ms');
-        assert.equal(scFxTimeMode, 'ms');
-        assert.equal(scFxTimeMs, 250);
-    }}
-    // A delay style stored before this rule does not bring the PX Delay rows back on a player:
-    for (const style of ['spiral', 'pitch_echo', 'dub_echo']) {{
-        scPioneerFx = style;
+    // A style stored by an older build brings no PX Delay row back:
+    for (const style of ['spiral', 'pitch_echo', 'slip_roll', 'dub_echo', 'space']) {{
+        scApply({{player: true, fxSelectorAvailable: false, pioneerFx: style, fxTimeMode: 'ms', fxTimeMs: 250}});
         assert.equal(visible['PX Delay Time Mode'](), false, board + ' ' + style);
         assert.equal(visible['PX Delay Time (ms)'](), false, board + ' ' + style + ' ms');
     }}
@@ -257,14 +248,14 @@ for (const [board, hasStems] of [['JC16', true], ['JP11', true], ['NH08', true],
     assert.equal(visible['Stems EQ Mode'](), hasStems, board + ' Stems EQ gate');
     for (let ch = 1; ch <= 4; ch++) assert.equal(stripModes[ch].index, hasStems ? 1 : 0, board + ' Stems EQ state');
     assert.equal(scStemsEqMode, true);
-    assert.equal(visible['Color FX Style'](), true, board + ' Color FX Style shown');
-    assert.equal(visible['PX Delay Time Mode'](), false, board + ' PX Delay hidden when Off');
-    assert.equal(visible['PX Delay Time (ms)'](), false, board + ' PX Delay ms hidden when Off');
+    assert.equal(visible['Color FX Style'], undefined, board + ' has no Color FX Style row');
+    assert.equal(visible['PX Delay Time Mode'](), false, board + ' PX Delay hidden without the PX selector');
+    assert.equal(visible['PX Delay Time (ms)'](), false, board + ' PX Delay ms hidden without the PX selector');
     assert.equal(scFxTimeMode, 'ms');
     assert.equal(scFxTimeMs, 364);
-    scPioneerFx = 'dub_echo';
-    assert.equal(visible['PX Delay Time Mode'](), true, board + ' PX Delay shown on dub_echo');
-    assert.equal(visible['PX Delay Time (ms)'](), true, board + ' PX Delay ms shown on dub_echo');
+    scApply({{player: false, fxSelectorAvailable: false, pioneerFx: 'dub_echo', fxTimeMode: 'ms', fxTimeMs: 364}});
+    assert.equal(visible['PX Delay Time Mode'](), false, board + ' a stored dub_echo brings no PX Delay row back');
+    assert.equal(visible['PX Delay Time (ms)'](), false, board + ' a stored dub_echo brings no PX Delay ms row back');
 }}
 
 // #258: stock UI and WebUI enabled linkage preserve every saved trigger source.
@@ -300,7 +291,7 @@ scApply({{
 }});
 assert.equal(visible['Echo Out'](), true, 'JC11 Echo Out shown');
 assert.equal(visible['Stems EQ Mode'](), true, 'JC11 Stems EQ shown');
-assert.equal(visible['Color FX Style'](), false, 'JC11 Color FX Style hidden');
+assert.equal(visible['Color FX Style'], undefined, 'JC11 has no Color FX Style row');
 assert.equal(visible['PX Delay Time Mode'](), true, 'JC11 PX Delay Time Mode shown');
 assert.equal(visible['PX Delay Time (ms)'](), false, 'JC11 PX Delay Time (ms) hidden when beats');
 scFxMsApply('ms', 663);
@@ -309,7 +300,7 @@ assert.equal(visible['PX Delay Time (ms)'](), true, 'JC11 PX Delay Time (ms) sho
 // Safety fallback: master bypassed without selector flags hides all three:
 resetUnit('JP07', {{isPlayer: true, hasStemsLevel: false, hasDJFx: false, hasNHFx: false}});
 scApply({{player: true, fxSelectorAvailable: true, pioneerFx: 'spiral', fxTimeMode: 'ms', fxTimeMs: 500}});
-assert.equal(visible['Color FX Style'](), false);
+assert.equal(visible['Color FX Style'], undefined);
 assert.equal(visible['PX Delay Time Mode'](), false);
 assert.equal(visible['PX Delay Time (ms)'](), false);
 """
@@ -374,7 +365,7 @@ Object.assign(root, {{
     scPlayer: false, scUiLoaded: false, scFxMsWanted: -1,
     scMasterLimiter: false, scAutoGain: false, scUpfaderEcho: false,
     scStemsEqApplied: false, scStemsEqWatched: false, scBeatJumpPads: false,
-    scPioneerFx: 'off', scFxTimeMode: 'beats', scFxTimeMs: 500,
+    scFxTimeMode: 'beats', scFxTimeMs: 500,
     scFxSelectorAvailable: false, scFxMasterBypassed: false,
     scVersion: '', scBuildTag: '', scLang: 'en', scWave: 'denon', scQuality: 'flac',
     scNeteaseMode: 'official', scUpdateRepo: '', scAccessCode: '', scConsoleUrl: '',

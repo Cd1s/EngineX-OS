@@ -75,7 +75,7 @@
 | `Settings → Services`（设置 → 服务） | `Streaming` 7 个流媒体服务开关（隐藏原厂 TIDAL / SoundCloud / Beatport LINK 行）、`Streaming Quality`、`NetEase Download`、`Live Stream`、`Pro DJ Link Library`、`Pro DJ Link Export to CDJ (Beta)` |
 | `Settings → About / Update`（设置 → 关于 / 更新） | 版本行（含 Web 控制台地址与 8 位访问码 `XXXX-XXXX`）；在线更新改查 GitHub Releases |
 | `Profile → Display`（配置 → 显示） | `Waveform Style`（`Denon` / `RGB` / `3-Band`） |
-| `Profile → Playback`（配置 → 播放） | `Master Soft Clipper`、`Auto-Gain (0 dB Normalize)`、`Echo Out`、`Stems EQ Mode`、`Color FX Style`、`PX Delay Time Mode`、`PX Delay Time (ms)`，并放开 `Censor Button Behavior` 下的 `Silent Cue` |
+| `Profile → Playback`（配置 → 播放） | `Master Soft Clipper`、`Auto-Gain (0 dB Normalize)`、`Echo Out`、`Stems EQ Mode`、`PX Delay Time Mode`、`PX Delay Time (ms)`，并放开 `Censor Button Behavior` 下的 `Silent Cue` |
 | `Profile → Cues/Loops`（配置 → Cue / Loop） | 放开原厂 `Link Beat Jump / Loop Size Controls`（`Smart Loops` 保持原厂自带） |
 | `Profile → Safety`（配置 → 安全） | `Sync Guard Tolerance`（`Off` / `10%` / `15%` / `20%`） |
 | `Profile → Library`（配置 → 曲库） | `Stems List`（armhf 机型放开并附局域网分轨状态提示）、`OmniSource (Drives in Streaming)`、`Tracklist Waveform` |
@@ -102,7 +102,7 @@
 | 11 | `Profile → Playback` | `Auto-Gain (0 dB Normalize)` / 自动增益（0 dB 归一化） / 自動增益（0 dB 正規化） | 偏小曲目平滑提至接近 0 dBFS（最多 +9 dB，低于 -42 dBFS 静音不提） | 关 | `autoGain=0\|1` | `auto_gain` | 开启后总会过软限幅；#64、#149 |
 | 12 | `Profile → Playback` | `Echo Out` / 回声淡出 / 回聲淡出 | 带混音台机型推子切歌时释放回声尾音（与 `Settings → Mixer → Fader Echo` 及控制中心磁贴同步） | 关 | `upfaderEcho=0\|1` | `upfader_echo` | `visible: root.scHasMixer` |
 | 13 | `Profile → Playback` | `Stems EQ Mode` / 分轨 EQ 模式 / 分軌 EQ 模式 | 通道 EQ 旋钮切换控制分轨音量 | 关 | `stemsEqMode=0\|1` | `stems_eq_mode` | `visible: root.scHasStemsEq` |
-| 14 | `Profile → Playback` | `Color FX Style` / 先锋风格效果 (Color FX) / 先鋒風格效果 (Color FX) | `Off` / `Spiral` / `Pitch Echo` / `Slip Roll` / `Dub Echo` / `Space` | `off` | `pioneerFx=off\|spiral\|...` | `pioneer_fx` | 独立播放机隐藏并直通（#88） |
+| 14 | `Profile → Playback` | ~~`Color FX Style`~~（5.3.0.5 起移除：以固定混音深度一直作用于主输出，没有旋钮可以关小） | — | — | — | `pioneer_fx`（旧值保留在 `settings.conf`，不再起作用） | 全机型无此项，存下的样式不影响音频（#88） |
 | 15 | `Profile → Playback` | `PX Delay Time Mode` & `PX Delay Time (ms)` | 先锋延迟效果（`Spiral` / `Pitch Echo` / `Dub Echo`）拍值或自由毫秒模式（`10`–`4000 ms`） | `beats` / `500` | `fxTimeMode=beats\|ms`、`fxTimeMs=...` | `fx_time_mode`、`fx_time_ms` | `visible: root.scHasPxDelay`（#162） |
 | 16 | `Profile → Safety` | `Sync Guard Tolerance` / 同步保护容差 / 同步保護容差 | 限制大跨度速度同步幅度（`Off` / `10%` / `15%` / `20%`） | `0` | `syncGuardPct=0\|10\|15\|20` | `sync_guard_pct` | — |
 | 17 | `Profile → Library` | `OmniSource (Drives in Streaming)` / OmniSource（在流媒体中显示 U 盘/SD） / OmniSource（在串流中顯示 USB/SD） | U 盘 / SD、自建服务器与 djay 曲库统一显示在流媒体浏览器 | 关 | `omniSource=0\|1` | `omni_source` | #62、#112 |

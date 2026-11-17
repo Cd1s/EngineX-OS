@@ -54,7 +54,7 @@
 
 ### 5. 演出现场音质保护、一体机先锋风格效果与千兆网络
 - **21 项实时音频保护**：消除切效果器爆音，内置零延迟 `0dB 防破音软限幅`（峰值压在 -0.1 dBFS 以下）、`自动增益（0 dB 归一化）`、Flanger 音量下沉补偿，以及带混音台一体机上的 `推子回音` / `回声淡出`；
-- **一体机先锋风格效果**：`PRIME 4` 硬件效果选择器内置 `Spiral (PX)`、`Pitch Echo (PX)`、`Slip Roll (PX)`、`Dub Echo (PX)`、`Space (PX)`，其余一体机提供 `配置 → 播放 → 先锋风格效果 (Color FX)` 以及可选的 **10–4000 ms** 独立毫秒延时模式（`先锋效果延时模式 (PX)`；独立播放器不提供 PX 效果，保持纯净播放器链路）；
+- **PRIME 4 先锋风格效果**：`PRIME 4` 硬件效果选择器内置 `Spiral (PX)`、`Pitch Echo (PX)`、`Slip Roll (PX)`、`Dub Echo (PX)`、`Space (PX)`，并提供可选的 **10–4000 ms** 独立毫秒延时模式（`先锋效果延时模式 (PX)`）。其余机型暂不提供先锋风格效果：旧的 `先锋风格效果 (Color FX)` 设置已在 5.3.0.5 移除（它以固定混音深度一直开着，没有任何旋钮可以关小），旧版本存下的样式不再起作用；
 - **智能同步、千兆网口与 `:8080` Web 控制台**：控制中心一键切换 `Bar / Beat / Tempo` 同步并在大 BPM 跨度下自动扩大变速范围，有线网口解锁 **1 Gbps** 满速，`:8080` 网页控制台支持 Wi-Fi 拖拽传歌、丢失曲目一键重定位、Shoutcast / Icecast `直播推流`，以及按需安装的 Mod 插件中心（`tailscale-remote`、`dmx-studio`、`midi-controller-mapper`、`jog-logo-studio`、`sampler-pad-studio`、`minimal-club-mode`）。
 
 ---
