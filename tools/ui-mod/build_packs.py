@@ -7766,6 +7766,8 @@ def edits(dev: bool):
                  "            scStemBusy = false\n"
                  "            const scStemmed = root.scStemStream(row.modelData.trackId)\n"
                  "            scStemBusy = scStemmed === \"busy\"\n"
+                 # Stock read the message before the trigger, when the answer was not known yet.
+                 "            textCommitValid = actionCommitMessages[actionIndex]\n"
                  "            if (!scStemmed) Planck.librarianController.stemsQueueManager.startRenderTracks(String(row.modelData.trackId))\n"
                  f"        }} else if (scDeck > 0 && /\\d/.test({a}[actionIndex].display.label)) {{\n"
                  "            trackList.pCurrentIndex.translator.unnormalized = row.index\n"

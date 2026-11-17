@@ -6,7 +6,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 
 ---
 
-## Regression Table (286 Rows)
+## Regression Table (287 Rows)
 
 | # | Behaviour that must keep working | Issue / commit that fixed it | How it is checked (automated test name, or exact real-deck / sandbox step) | Release gate / deck acceptance / recording coverage |
 | --- | --- | --- | --- | --- |
@@ -296,6 +296,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 | 284 | **Settings JSON contains exactly one value**: trailing whitespace is accepted; trailing invalid bytes or a second JSON value return HTTP 400 before settings writes or an Engine restart | Combined Go review (`fdc7a7d3`) | `pkg/webui/settings_json_test.go::TestMalformedJSONSettingsDoNotApplyOrRestart` | Submit valid settings with trailing whitespace, then trailing junk and a second object; only the valid request applies |
 | 285 | **Official Mod archives contain the current committed sources and match their registry**: the sampler-sequencer archive includes its formatted source; all seven packages rebuild deterministically with static armhf/arm64 helpers and unchanged source bytes | Combined Go review (`bc24b00f`) | `docs/mods/test_mods.py::ModTests::test_packaged_sources_are_the_committed_sources`; `python3 tools/mods/build_official_mods.py --check` | Install the sampler-sequencer package through the console and check its normal operation; physical MIDI/audio acceptance remains separate |
 | 286 | **Gen-2 SSH passwords work with read-only `/etc` and survive boot**: only the SHA-512 password hash is stored in mode-0600 `/data/enginex/ssh-shadow`, bound onto `/etc/shadow`; opt-in sshd password/root options, selected port and public-key access persist, while failed hash/activation does not enable SSH | #299 | `pkg/webui/ssh_password299_test.go::TestSSHGen2PasswordOnReadOnlyEtc299` (all eight Gen-2 board IDs), `TestSSHPasswordFailureDoesNotEnable299`; `tools/az01-packer/test_gen2_ssh_password.sh` via the SC LIVE 4 bootstrap; `test_data_bundle.py` | On a Gen-2 scratch setup, enable a password and selected port, log in by password and key, reboot and repeat, then disable SSH; `/etc` must remain read-only |
+| 287 | **Tapping Stems while every deck is playing says so on that same swipe**: a streamed row starts nothing, and the swipe shows `Both decks are playing. Free one deck, then tap Stems again` (two decks) or `All decks are playing. ...` (four-deck layout), in every language; the next tap with a deck free shows `Stems` at once, not the previous answer. Stock's `onCommit` copies the message list into `textCommitValid` before it runs the action, so the answer found while triggering is read again after it | 5.3.0.5 combined UI review of `cd81a7e9` (the message came one swipe late or never) | `test_ui_mod.py::StreamingStemsProgressTest::test_busy_message_shows_on_the_swipe_that_found_every_deck_playing` (stock's order, both swipe sides), `test_a_tap_with_every_deck_playing_says_so`, `test_stems_busy_4deck_and_preserves_textCommitValid_binding` | Real deck: play every deck, swipe a streamed track toward Stems and read the message during that swipe; free a deck and swipe again. |
 
 ## Automated Test Gaps (`[NO AUTOMATED TEST]`)
 
