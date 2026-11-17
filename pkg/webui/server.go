@@ -291,6 +291,7 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.mux.HandleFunc("POST /v1/enginex/bluetooth", s.handleBluetooth)
 	s.mux.HandleFunc("GET /api/nas", s.handleNASConfig)
 	s.mux.HandleFunc("POST /api/nas", s.handleNASConfig)
+	s.mux.HandleFunc("DELETE /api/nas", s.handleNASConfig)
 	s.mux.HandleFunc("POST /api/nas/test", s.handleNASTest)
 	s.mux.HandleFunc("GET /v1/enginex/nas", s.handleNASConfig)
 	s.mux.HandleFunc("POST /v1/enginex/nas", s.handleNASConfig)

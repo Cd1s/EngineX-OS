@@ -26,7 +26,7 @@ import (
 const defaultMaxCache = 5000
 
 type NASConfig struct {
-	Protocol string `json:"protocol"` // "webdav", "subsonic", "plex"
+	Protocol string `json:"protocol"` // "webdav", "subsonic", "plex", "smb"
 	URL      string `json:"url"`      // e.g. "https://nas.example.com/music" or "http://192.168.1.10:4533"
 	Username string `json:"username,omitempty"`
 	Password string `json:"password,omitempty"`
@@ -77,6 +77,8 @@ func (p *SelfHostedProvider) Playlists(ctx context.Context) ([]Playlist, error) 
 		return p.webdavPlaylists(ctx)
 	case "plex":
 		return p.plexPlaylists(ctx)
+	case "smb":
+		return p.smbPlaylists(ctx)
 	default:
 		return nil, fmt.Errorf("selfhosted: unsupported protocol %q", p.cfg.Protocol)
 	}
@@ -90,6 +92,8 @@ func (p *SelfHostedProvider) PlaylistTracks(ctx context.Context, playlistID stri
 		return p.webdavPlaylistTracks(ctx, playlistID)
 	case "plex":
 		return p.plexPlaylistTracks(ctx, playlistID)
+	case "smb":
+		return p.smbPlaylistTracks(ctx, playlistID)
 	default:
 		return nil, fmt.Errorf("selfhosted: unsupported protocol %q", p.cfg.Protocol)
 	}
@@ -108,6 +112,8 @@ func (p *SelfHostedProvider) Search(ctx context.Context, query string) ([]Track,
 		return p.webdavSearch(ctx, query)
 	case "plex":
 		return p.plexSearch(ctx, query)
+	case "smb":
+		return p.smbSearch(ctx, query)
 	default:
 		return nil, fmt.Errorf("selfhosted: unsupported protocol %q", p.cfg.Protocol)
 	}
@@ -121,6 +127,8 @@ func (p *SelfHostedProvider) DownloadTrack(ctx context.Context, trackID, destDir
 		return p.webdavDownloadTrack(ctx, trackID, destDir)
 	case "plex":
 		return p.plexDownloadTrack(ctx, trackID, destDir)
+	case "smb":
+		return p.smbDownloadTrack(ctx, trackID, destDir)
 	default:
 		return "", fmt.Errorf("selfhosted: unsupported protocol %q", p.cfg.Protocol)
 	}
@@ -728,6 +736,10 @@ func (p *SelfHostedProvider) webdavSearch(ctx context.Context, query string) ([]
 		_, _ = p.webdavPlaylistTracks(ctx, "root")
 	}
 
+	return p.filenameSearch(query), nil
+}
+
+func (p *SelfHostedProvider) filenameSearch(query string) []Track {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	q := strings.ToLower(query)
@@ -737,7 +749,7 @@ func (p *SelfHostedProvider) webdavSearch(ctx context.Context, query string) ([]
 			out = append(out, t)
 		}
 	}
-	return out, nil
+	return out
 }
 
 func (p *SelfHostedProvider) webdavDownloadTrack(ctx context.Context, trackID, destDir string) (string, error) {

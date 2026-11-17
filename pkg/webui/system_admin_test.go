@@ -183,6 +183,7 @@ func TestSSHManagement(t *testing.T) {
 }
 
 func TestRemoteMountsManagementAndOmniSourceSync(t *testing.T) {
+	mockMountCapabilities(t)
 	mockRunner := &mockSystemRunner{outputs: make(map[string][]byte)}
 	SetSystemRunner(mockRunner.Run)
 	defer SetSystemRunner(nil)

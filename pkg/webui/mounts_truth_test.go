@@ -17,6 +17,7 @@ import (
 // not on the stock rootfs), reported a saved mounted: true after a reboot that remounted nothing,
 // and left a share mounted when it was switched off.
 func TestRemoteMountsReportTheTruth(t *testing.T) {
+	mockMountCapabilities(t)
 	var mu sync.Mutex
 	var calls []string
 	SetSystemRunner(func(_ context.Context, name string, args ...string) ([]byte, error) {

@@ -257,3 +257,13 @@
 #205、#213、#214（PR）、#216、#222（BH-GF3-12 / BH-GC2-10）、#223、#233、#237、#238、#239、#242、#243、#246、#245、#247、#248、#252、#253（识别速度待实机验收）、#285、#287（PR）、#282（PR，Javier Saenz）、#255、#258、#261、#263、#264、#266（PR）、#268（仅导出已有历史）、#269、#272、#273（PR）、#274、#277、#279、#281、#283。同时合入 #234 更名（最终版）、#215 的 OTA 桥接（不含 #244）和 #236 的后台负载收敛。**夜间补录**：#271（写回 Cue）、#298（加载时卡顿，需实机确认）、#299（二代机 SSH 密码）、#286（第一项：Beat Jump 和 FX 槽位）、#255 的 Windows 部分、#99（`Shift + View`）、#195 / #207（效果）、#293（Mod）、#213 的跨引擎修复。
 
 部分完成或待实机验收的 Issue 不应在发布时直接关闭：`#247`、`#252`、`#268`、`#253`、`#298`（等实机确认）、`#286`（第二项没做）；`#244` 保持打开；**`#301` 没有修复，保持打开**。机器人的 PR #302（二代机仅密钥）被 #299 的密码方案取代，发布时关闭。
+
+## SMB without kernel CIFS — proposed, not merged (#300)
+
+Root cause: first-generation decks have no CIFS filesystem and lack sshfs / mount.davfs. The old mount API executed unavailable mounts, so the rekordbox computer source could not use a configured SMB share.
+
+A pure-Go SMB2/3 client (github.com/hirochachacha/go-smb2, BSD-2, no cgo) now reads NAS folders as playlists, searches filenames and downloads to the existing cache. The console adds/removes the existing single NAS configuration and never returns passwords or tokens. Saved NAS settings reload after reboot; connections open on demand. Filesystem mounts are not automatically restored after reboot. On no-CIFS decks the mount API keeps the SMB entry, verifies login and share listing, and reports mounted:false with a userspace status; errors and missing SFTP/WebDAV helpers are explicit. BH-GC2-14 mount truth remains covered.
+
+rekordbox audio resolution is kernel-mounted share, then Go SMB using /api/mounts and rekordbox_share, then NFS, then the existing notice. SMB uses the same .rekordbox-cache budget, rbxCopy sharing and Range reader as NFS. TCP dial/read/write deadlines and cancellation bound stalled servers. Player announcements and NFS discovery are unchanged.
+
+Regression tests: TestSMBNASBrowseSearchAndDownload, TestSMBNASAPIAndRebootReload, TestSMBRekordboxRangeAndSharedCache, TestSMBRekordboxWrongPasswordNotice, TestSMBRekordboxServerStopsMidCopy, TestSMBMountWithoutCIFSNeverExecutesMount, TestSMBDialStalledServerHasDeadline. Authenticated Samba fixtures require SMB3 and include accented filenames. Real macOS File Sharing and stock Engine playback remain hardware acceptance checks.
