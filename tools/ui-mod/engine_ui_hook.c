@@ -3343,22 +3343,29 @@ static int rbx_prepare(void *db, const char *sql, int n, unsigned flags, void *o
 }
 
 A32_ONLY static void install_rekordbox_analysis(uintptr_t base, size_t page) {
-    static const uint32_t prologue[] = {0xe16d42f4, 0xe1cd60f8}; // strd r4,[sp,#-36]!; strd r6,[sp,#8]
-    const uintptr_t entry = base + 0x1d55120;
-    if (strcmp(build->name, "5.3.0") || !sqlite_exec_original || memcmp((const void *)entry, prologue, sizeof prologue)) return;
-    // sqlite3_prepare_v2 (api slot 116) is "push {lr}; sub sp,sp,#20; ...; bl" to it at +0x1c.
-    const uint32_t *api = (const void *)(base + build->sqlite_api);
-    uint32_t bl = *(const uint32_t *)(uintptr_t)(api[116] + 0x1c);
-    if (api[116] != base + 0x1d55634 || (bl & 0xff000000u) != 0xeb000000u ||
-        api[116] + 0x1c + 8 + (uint32_t)((int32_t)(bl << 8) >> 6) != entry) return;
+    // sqlite3LockAndPrepare, which sqlite3_prepare_v2 (api slot 116) calls with "bl" at +0x1c;
     // sqlite3_db_filename is slot 180 (close_v2 at 179 is "mov r1,#1; b sqlite3Close", as
     // close at 16 is "mov r1,#0; b" to the same; db_readonly at 181 returns flags & 1 or -1).
-    if (api[180] != base + 0x1cb0d94 || api[179] != base + 0x1d21af4) return;
-    rbx_sqlite.exec = sqlite_exec_original;
-    rbx_sqlite.filename = (const char *(*)(void *, const char *))(uintptr_t)api[180];
-    rbx_prepare_original = (sqlite_prepare_fn)function_trampoline(entry, page);
-    redirect_function(entry, rbx_prepare, page);
-    fprintf(stderr, "engine-ui-hook: rekordbox analysis for streamed tracks enabled\n");
+    static const struct { const char *name; uint32_t lock, prepare_v2, close_v2, filename; } sites[] = {
+        {"5.3.0", 0x1d55120, 0x1d55634, 0x1d21af4, 0x1cb0d94},
+        {"5.3.0-sclive4", 0x1dc19a0, 0x1dc1eb4, 0x1d8e374, 0x1d1d614},
+    };
+    static const uint32_t prologue[] = {0xe16d42f4, 0xe1cd60f8}; // strd r4,[sp,#-36]!; strd r6,[sp,#8]
+    const uint32_t *api = (const void *)(base + build->sqlite_api);
+    for (unsigned i = 0; i < sizeof sites / sizeof *sites; i++) {
+        if (strcmp(build->name, sites[i].name)) continue;
+        const uintptr_t entry = base + sites[i].lock;
+        if (!sqlite_exec_original || memcmp((const void *)entry, prologue, sizeof prologue) || api[116] != base + sites[i].prepare_v2 ||
+            api[179] != base + sites[i].close_v2 || api[180] != base + sites[i].filename) return;
+        uint32_t bl = *(const uint32_t *)(uintptr_t)(api[116] + 0x1c);
+        if ((bl & 0xff000000u) != 0xeb000000u || api[116] + 0x1c + 8 + (uint32_t)((int32_t)(bl << 8) >> 6) != entry) return;
+        rbx_sqlite.exec = sqlite_exec_original;
+        rbx_sqlite.filename = (const char *(*)(void *, const char *))(uintptr_t)api[180];
+        rbx_prepare_original = (sqlite_prepare_fn)function_trampoline(entry, page);
+        redirect_function(entry, rbx_prepare, page);
+        fprintf(stderr, "engine-ui-hook: rekordbox analysis for streamed tracks enabled\n");
+        return;
+    }
 }
 
 // rbx-analysis diagnosis: with /run/enginex-rbx-analysis-trace present when Engine

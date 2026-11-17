@@ -238,6 +238,14 @@ func TestSimCDJ3000ServerToDenon(t *testing.T) {
 	if err = db.QueryRow(`SELECT count(*) FROM Track WHERE path LIKE '%.prolink-cache/CDJ-3000/%'`).Scan(&n); err != nil || n != 5 {
 		t.Fatal("staged playable audio missing", n, err)
 	}
+	// A CDJ's tracks load as a stick's do: with the CDJ's own grid, cues and both
+	// waveforms already in m.db, so Engine does not analyse them.
+	var grid, overview, data, cues int
+	if err = db.QueryRow(`SELECT count(p.beatData), count(p.overviewWaveFormData), count(p.trackData), count(p.quickCues) FROM Track t
+		JOIN PerformanceData p ON p.trackId = t.id WHERE t.path LIKE '%.prolink-cache/CDJ-3000/%'`).Scan(&grid, &overview, &data, &cues); err != nil ||
+		grid != 5 || overview != 5 || data != 5 || cues != 5 {
+		t.Fatalf("staged analysis: grid %d overview %d trackData %d cues %d of 5 (%v)", grid, overview, data, cues, err)
+	}
 }
 
 // Independent tagged-number request and response parser for the virtual client.
