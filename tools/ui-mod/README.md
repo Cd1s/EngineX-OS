@@ -89,6 +89,7 @@ alive on 4-core decks are never switched off.
 | `aux-input` | #171 SC LIVE 4 AUX/MIC2 input routing and Mixer menu |
 | `four-deck` | #49 4-deck layout unlock, shadow MASTER eligibility, SamplerOutput branch |
 | `dsp-guards` | all 21 DSP sites, and with them Echo Out, Pioneer FX, Auto-Gain, soft limiter and Live Stream audio |
+| `reverb-tail` | #207: the stock Reverb (Classic) decay formula; off, the Reverb rings out as stock at every knob position |
 | `sqlite-tuning` | the PRAGMAs on every database Engine opens |
 | `telemetry-block` | PostHog/events databases and crash reports stay on disk, Crashpad starts |
 | `vendor-update-block` | `autoupdate.airmusictech.com` resolves again |
