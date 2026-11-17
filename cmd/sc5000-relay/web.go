@@ -388,6 +388,16 @@ func (s *server) configView() map[string]any {
 }
 
 func localLANIPv4() string {
+	// Prefer a UDP socket dial so RestrictAddressFamilies=AF_INET (without AF_NETLINK) works.
+	for _, target := range []string{"192.168.1.1:80", "10.0.0.1:80", "1.1.1.1:80"} {
+		if c, err := net.Dial("udp4", target); err == nil {
+			ip := c.LocalAddr().(*net.UDPAddr).IP.To4()
+			_ = c.Close()
+			if ip != nil && !ip.IsLoopback() && !ip.IsLinkLocalUnicast() {
+				return ip.String()
+			}
+		}
+	}
 	addrs, err := net.InterfaceAddrs()
 	if err != nil {
 		return ""
