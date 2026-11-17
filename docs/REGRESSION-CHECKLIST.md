@@ -6,7 +6,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 
 ---
 
-## Regression Table (309 Rows)
+## Regression Table (310 Rows)
 
 | # | Behaviour that must keep working | Issue / commit that fixed it | How it is checked (automated test name, or exact real-deck / sandbox step) | Release gate / deck acceptance / recording coverage |
 | --- | --- | --- | --- | --- |
@@ -319,6 +319,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 | 307 | **PX effect names fit the touch FX bar without overlapping BEATS**: the bar omits the selector-only ` (PX)` suffix while preserving stock labels, the effect list and OLED behavior | L3-2, `c872990e` | `test_ui_mod.py::test_px_name_on_the_fx_bar_fits_the_name_column`; L3 sandbox `fx-bar-shows-jet-flanger-without-px-tag-and-reverb` | PRIME 4: select every PX effect on both units and check the name beside the beat value |
 | 308 | **Shadow layers bind to the right deck after construction without a deck binding loop**: performance, grouped-track and mini-track overlays wait for `Component.onCompleted` before walking owner ancestry | L3-3, `7e89da1c` | `test_ui_mod.py::test_shadow_layer_deck_binding_waits_for_construction`; L3 sandbox `shadow-layers-bound-to-the-right-deck` and deck-binding log checks | Change views and layers on JP07 and JC11; all shadow overlays keep the correct deck |
 | 309 | **Pioneer FX ignores NULL or unbound dispatcher handlers without a crash or clearing another route**: handler lookup uses the correct pointer layout on both architectures | L3-1, `769e5e31` (already present in the candidate) | `test_pioneer_selector.c::test_null_owner`; `test_rt_callback.c` NULL-handler regression, native and armhf | Select PX effects while playing and switching views; no crash or unrelated route reset |
+| 310 | **Display > BPM Decimals controls whole-BPM pitch-fader plateaus without a new setting**: on 5.3.0 packs, `2` gives two-ADC-step plateaus at each whole BPM using the loaded track tempo and current pitch range; `1` is the exact stock linear mapping. Both directions, inverted faders, center and endpoints remain correct; unloaded or unavailable-tempo/range inputs pass through; metadata BPM accepts a decimal comma | `agent/5305-int-bpm`, `4fe0afbd` | `test_ui_mod.py::WholeBpmTest::test_no_separate_whole_bpm_setting`, `test_built_speed_slider_mapping_and_bridge`; `DeckHeaderLayoutTest::test_bpm_decimals_display_setting_and_formatting`; `pkg/webui::TestUISettingsBpmDecimals` | On JP07 and JC11, toggle Display > BPM Decimals between1 and2, sweep the physical fader both ways at several ranges, verify whole-BPM plateaus only at2 and unchanged center/endpoints; confirm settings persist after reboot |
 
 ## Automated Test Gaps (`[NO AUTOMATED TEST]`)
 

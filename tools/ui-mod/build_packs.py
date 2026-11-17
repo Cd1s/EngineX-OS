@@ -3232,6 +3232,20 @@ SERVICES_MAIN = """
 	}
 	property bool scBeatJumpPads: false
 	property bool scPitchBendBeatJump: false
+	property bool scBpmDecimalsSynced: false
+	readonly property var scBpmDecimalsPropRef: Planck.createProperty("EngineXBpmDecimals", 0.0, 0)
+	readonly property var scBpmDecimalsProp: scBpmDecimalsPropRef && Planck.getProperty("/GUI/Scripted/EngineXBpmDecimals")
+	function scSyncBpmDecimals() {
+		const p = scBpmDecimalsProp && scBpmDecimalsProp.translator ? scBpmDecimalsProp : Planck.getProperty("/GUI/Scripted/EngineXBpmDecimals")
+		if (!p || !p.translator || !scUiLoaded) { scBpmDecimalsSynced = false; return }
+		p.translator.value = scBpmDecimals === 2 ? 1.0 : 0.5
+		scBpmDecimalsSynced = true
+	}
+	onScBpmDecimalsChanged: scSyncBpmDecimals()
+	Timer {
+		interval: 250; running: root.scUiLoaded && !root.scBpmDecimalsSynced; repeat: true; triggeredOnStart: true
+		onTriggered: root.scSyncBpmDecimals()
+	}
 	property var scMixstreamFx: ["Echo", "Flanger", "Delay", "Phaser"]
 	property bool scMixstreamSweepOpen: false
 	property string scPioneerFx: "off"
@@ -3919,6 +3933,7 @@ SERVICES_MAIN = """
 		}
 		const wasUiLoaded = scUiLoaded
 		scUiLoaded = true
+		if (typeof scSyncBpmDecimals === "function") scSyncBpmDecimals()
 		if (!wasUiLoaded) {
 			scWatchStemsEq()
 			scMidiInitBridge()
@@ -3997,6 +4012,7 @@ SERVICES_MAIN = """
 			else if (key === "pioneer_fx") root.scPioneerFx = val || "off"
 		}
 		if (typeof scSyncReverseJog === "function") scSyncReverseJog(true)
+		if (typeof scSyncBpmDecimals === "function") scSyncBpmDecimals()
 		scFxMsApply(fxMode, fxMs)
 	}
 	function scSyncBroadcastMeta() {
@@ -8166,6 +8182,7 @@ def edits(dev: bool):
             '    property real scPadBrightness: 1\n'
             '    property bool scSwapLoopOrder: false\n'
             '    property bool scPitchBendBeatJump: false\n'
+            '    property int scBpmDecimals: 2\n'
             '    property var scMixstreamFx: ["Echo", "Flanger", "Delay", "Phaser"]\n'
             '    property bool scReverseJogLeft: false\n'
             '    property bool scReverseJogRight: false\n'
@@ -8173,11 +8190,18 @@ def edits(dev: bool):
             '    property var pReverseJogRight: Planck.getProperty("/GUI/Scripted/EngineXJogInvertRight")\n'
             '    property var pReverseJogReady: Planck.getProperty("/GUI/Scripted/EngineXJogInvertReady")\n'
             '    property var pPerfLibVisible: Planck.getProperty("/GUI/Scripted/EngineXPerfLibVisible")\n'
+            '    property var pBpmDecimals: Planck.getProperty("/GUI/Scripted/EngineXBpmDecimals")\n'
             '    readonly property bool scPerformanceLibraryVisible: !!(pPerfLibVisible && pPerfLibVisible.translator && pPerfLibVisible.translator.state)\n'
             '    property bool scReverseJogLeftEffective: false\n'
             '    property bool scReverseJogRightEffective: false\n'
             '    function scIsReverseJog(deckName) {\n'
             '        return deckName === "Right" ? scReverseJogRightEffective : scReverseJogLeftEffective\n'
+            '    }\n'
+            '    function scGetBpmDecimals() {\n'
+            '        if (!scGlobalConfig.pBpmDecimals || !scGlobalConfig.pBpmDecimals.translator)\n'
+            '            scGlobalConfig.pBpmDecimals = Planck.getProperty("/GUI/Scripted/EngineXBpmDecimals")\n'
+            '        const t = scGlobalConfig.pBpmDecimals && scGlobalConfig.pBpmDecimals.translator\n'
+            '        return (t && t.value > 0) ? (t.value >= 0.75 ? 2 : 1) : scGlobalConfig.scBpmDecimals\n'
             '    }\n'
             '    function scSyncReverseJogFromState() {\n'
             '        if (!scGlobalConfig.pReverseJogLeft || !scGlobalConfig.pReverseJogLeft.translator)\n'
@@ -8212,6 +8236,8 @@ def edits(dev: bool):
             '                    scGlobalConfig.scReverseJogLeft = !!j.jogInvertLeft\n'
             '                    scGlobalConfig.scReverseJogRight = !!j.jogInvertRight\n'
             '                    scGlobalConfig.scPitchBendBeatJump = !!j.pitchBendBeatJump\n'
+            '                    if (j.bpmDecimals !== undefined)\n'
+            '                        scGlobalConfig.scBpmDecimals = parseInt(j.bpmDecimals) === 1 ? 1 : 2\n'
             '                    if (Array.isArray(j.mixstreamFx) && j.mixstreamFx.length === 4)\n'
             '                        scGlobalConfig.scMixstreamFx = j.mixstreamFx\n'
             '                    scGlobalConfig.scSyncReverseJogFromState()\n'
@@ -8256,6 +8282,71 @@ def edits(dev: bool):
              '                        path: deckConfig.activeDeckTrackPath + (module.scBeatJumpActive ? ("BeatJump/" + model.jumpAction) : ("Nudge%1".arg(model.direction)))\n'),
             ('                        deckConfig.activeDeckTrackPath + "Nudge%1".arg(model.direction)\n',
              '                        deckConfig.activeDeckTrackPath + (module.scBeatJumpActive ? ("BeatJump/" + model.jumpAction) : ("Nudge%1".arg(model.direction)))\n'),
+        ]
+        # Integer-BPM pitch-fader plateaus when BPM Decimals is 2 (1 = exact stock linear fader):
+        # map [0, 0.5] and [0.5, 1] independently around center so 0% stays exact,
+        # placing 2-ADC-step (w = 4/4095 in half-travel) plateaus at each integer BPM with uniform linear slope between them.
+        scaled["ControlSurfaceModules/ControlSurfaceModules/SpeedSlider.qml"] = [
+            ('    property bool invert: false\n',
+             '''    property bool invert: false
+
+    function scTransformSpeed(inVal, invert, loaded, origProp, metaProp, rangeProp) {
+        let u = invert ? 1.0 - inVal : inVal
+        if (u < 0.0) u = 0.0
+        else if (u > 1.0) u = 1.0
+        const dec = typeof globalConfig !== "undefined" && globalConfig && globalConfig.scGetBpmDecimals ? globalConfig.scGetBpmDecimals() : 2
+        if (dec !== 2 || !loaded) return u
+        let B = origProp && origProp.translator ? origProp.translator.unnormalized : 0
+        if (!(B > 0) && metaProp && metaProp.translator && metaProp.translator.string) {
+            const parsed = parseFloat(String(metaProp.translator.string).trim().replace(",", "."))
+            if (parsed > 0) B = parsed
+        }
+        const rPct = rangeProp && rangeProp.translator ? parseFloat(rangeProp.translator.string) : 0
+        const r = rPct > 0 ? rPct / 100.0 : 0
+        if (!(B > 0) || !(r > 0)) return u
+
+        const w = 4.0 / 4095.0
+        const sign = u >= 0.5 ? 1 : -1
+        const y = sign > 0 ? 2.0 * (u - 0.5) : 2.0 * (0.5 - u)
+        const delta = B * r
+        const tEnd = B + sign * delta
+        const bRound = Math.round(B)
+        const hasCenter = Math.abs(B - bRound) < 1e-4
+        const k0 = hasCenter ? bRound + sign : (sign > 0 ? Math.floor(B) + 1 : Math.ceil(B) - 1)
+        const k1 = sign > 0 ? Math.floor(tEnd - 1e-4) : Math.ceil(tEnd + 1e-4)
+        const m = Math.max(0, sign * (k1 - k0) + 1)
+        const wEff = Math.min(w, 0.5 / (m + 0.5))
+        const cEff = hasCenter ? 0.5 * wEff : 0.0
+        const S = 1.0 - cEff - m * wEff
+        if (y <= cEff) return 0.5
+        if (m === 0) return Math.max(0.0, Math.min(1.0, 0.5 + 0.5 * sign * (y - cEff) / S))
+        const y0 = cEff + (S / delta) * (sign * (k0 - B))
+        if (y < y0) return Math.max(0.0, Math.min(1.0, 0.5 + 0.5 * sign * (y - cEff) / S))
+        const P = wEff + S / delta
+        const j = Math.min(m - 1, Math.floor((y - y0) / P))
+        if (y - (y0 + j * P) <= wEff) {
+            const k = k0 + sign * j
+            return Math.max(0.0, Math.min(1.0, 0.5 + 0.5 * (k / B - 1.0) / r))
+        }
+        const s = y - cEff - (j + 1) * wEff
+        return Math.max(0.0, Math.min(1.0, 0.5 + 0.5 * sign * s / S))
+    }
+'''),
+            ('        ValueCCAssignment {\n            readonly property bool songLoaded: Planck.getProperty("/Engine/Deck%1/Track/SongLoaded".arg(modelData))\n                .translator.state\n',
+             '        ValueCCAssignment {\n            id: scSpeedAssign\n            readonly property bool songLoaded: Planck.getProperty("/Engine/Deck%1/Track/SongLoaded".arg(modelData))\n                .translator.state\n'
+             '            readonly property var pOrigBpm: Planck.getProperty("/Engine/Deck%1/OriginalBPM".arg(modelData))\n'
+             '            readonly property var pMetaBpm: Planck.getProperty("/Engine/Deck%1/Track/MetaDataBPM".arg(modelData))\n'
+             '            readonly property var pSpeedRange: Planck.getProperty("/Engine/Deck%1/SpeedRange".arg(modelData))\n'),
+            ('            valueTransform: ValueTransform {\n                invert: module.invert\n            }\n',
+             '            valueTransform: QtObject {\n'
+             '                property bool invert: module.invert\n'
+             '                function transformValue(in_val) {\n'
+             '                    return module.scTransformSpeed(\n'
+             '                        in_val, invert, scSpeedAssign.songLoaded,\n'
+             '                        scSpeedAssign.pOrigBpm, scSpeedAssign.pMetaBpm, scSpeedAssign.pSpeedRange\n'
+             '                    )\n'
+             '                }\n'
+             '            }\n'),
         ]
         # #286: allow Mixstream hardware FX buttons (slots 1-4) to select any stock Mixstream effect.
         scaled["ControlSurfaceModules/ControlSurfaceModules/private/DJFxSelectButtons.qml"] = [
