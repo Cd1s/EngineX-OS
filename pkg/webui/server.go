@@ -354,6 +354,9 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.appleMusic.OwnerPath = filepath.Join(cfg.StateDir, "applemusic-owner.json")
 	_ = s.appleMusic.Load()
 	s.tidal = newTidalGateway(s)
+	if isDeckStateDir(cfg.StateDir) { // on the deck, not in tests
+		go s.eaasLoop()
+	}
 	s.RegisterTunnelRoutes()
 	// Resume before accepting requests: a delayed resume could see a newly
 	// enabled tunnel and restart it underneath its first Configure call.

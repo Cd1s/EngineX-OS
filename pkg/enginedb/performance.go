@@ -72,6 +72,30 @@ type Performance struct {
 	TrackData, Overview, Beats, QuickCues, Loops []byte
 	ActiveLoops                                  uint32
 	Complete                                     bool
+	// Cues are QuickCues and Loops as values, for those who take them unencoded
+	// (Engine's Remote Library): the same slots, positions in samples and colours.
+	Cues CueSlots
+}
+
+// CueSlots are a track's eight Hot Cue slots, eight loop slots and main cue, as
+// EncodePerformance places them. Main is -1 when the track has none.
+type CueSlots struct {
+	Hot   [8]*SlotCue
+	Loops [8]*SlotLoop
+	Main  float64
+}
+
+type SlotCue struct {
+	Name     string
+	Position float64
+	Color    [4]byte // A, R, G, B
+}
+
+type SlotLoop struct {
+	Name    string
+	In, Out float64
+	Color   [4]byte // A, R, G, B
+	OnLoad  bool
 }
 
 func put(b *bytes.Buffer, order binary.ByteOrder, v any) { _ = binary.Write(b, order, v) }
@@ -447,7 +471,7 @@ func EncodePerformance(t rekordbox.Track, a *rekordbox.Analysis) (Performance, e
 	slices.SortStableFunc(memoryLoops, byTime)
 	var q bytes.Buffer
 	put(&q, big, uint64(8))
-	writeCue := func(c *rekordbox.Cue) {
+	writeCue := func(i int, c *rekordbox.Cue) {
 		if c == nil {
 			label(&q, "")
 			put(&q, big, float64(-1))
@@ -455,17 +479,20 @@ func EncodePerformance(t rekordbox.Track, a *rekordbox.Analysis) (Performance, e
 			return
 		}
 		label(&q, c.Name)
-		put(&q, big, max(0, float64(c.TimeMS)*float64(sr)/1000-offset))
+		pos := max(0, float64(c.TimeMS)*float64(sr)/1000-offset)
+		put(&q, big, pos)
 		color := cueColor(*c)
 		q.Write(color[:])
+		p.Cues.Hot[i] = &SlotCue{c.Name, pos, color}
 	}
-	for _, c := range hot {
-		writeCue(c)
+	for i, c := range hot {
+		writeCue(i, c)
 	}
 	main := float64(-1)
 	if len(memory) > 0 {
 		main = max(0, float64(memory[0].TimeMS)*float64(sr)/1000-offset)
 	}
+	p.Cues.Main = main
 	put(&q, big, main)
 	q.WriteByte(0)
 	put(&q, big, main)
@@ -476,7 +503,7 @@ func EncodePerformance(t rekordbox.Track, a *rekordbox.Analysis) (Performance, e
 	var loops bytes.Buffer
 	loops.WriteByte(8)
 	loops.Write(make([]byte, 7))
-	writeLoop := func(c *rekordbox.Cue) {
+	writeLoop := func(i int, c *rekordbox.Cue) {
 		if c == nil || !c.Loop {
 			label(&loops, "")
 			put(&loops, little, float64(-1))
@@ -495,6 +522,7 @@ func EncodePerformance(t rekordbox.Track, a *rekordbox.Analysis) (Performance, e
 		loops.Write([]byte{1, 1})
 		color := cueColor(*c)
 		loops.Write(color[:])
+		p.Cues.Loops[i] = &SlotLoop{c.Name, start, end, color, c.Active}
 	}
 	// Memory loops fill unused loop slots, never the independent Hot Cue slots.
 	loopSlots := hot
@@ -508,7 +536,7 @@ func EncodePerformance(t rekordbox.Track, a *rekordbox.Analysis) (Performance, e
 		}
 	}
 	for i, c := range loopSlots {
-		writeLoop(c)
+		writeLoop(i, c)
 		if c != nil && c.Loop && c.Active {
 			p.ActiveLoops |= 1 << uint(i)
 		}
