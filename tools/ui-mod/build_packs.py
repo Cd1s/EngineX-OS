@@ -5186,6 +5186,7 @@ PLAYBACK_ENTRIES = (switch_entry("Master Soft Clipper", "scMasterLimiter", "mast
 		EntryBase.ListEntry {
 			text: "PX Delay Time Mode"
 			visible: root.scHasPxDelay
+			entryWidth: 232 // two long labels in every language ("Predeterminado (desactivado)"): the 136 px default made them run into each other
 			values: ["Default (Off)", "Milliseconds (ms)"]
 			currentValue: values[root.scFxTimeMode === "ms" ? 1 : 0]
 			onSelected: function(index) { root.scCall("fxTimeMode=" + (index === 1 ? "ms" : "beats")) }
@@ -9476,7 +9477,10 @@ def legacy_qml_fixes():
 
 # Only these properties hold display text. Ids such as StateMap names never match.
 TEXT_LINE = re.compile(r'^(\s*(?:[\w.]*\.)?(?:text|label|labelText|title|message|messageText|headline|info|display|description|missingContentHint|noContentHint|hint|buttonText|value)\s*:)(.*)$')
-BARE_LITERAL = re.compile(r'^(\s*)"([^"\\]+)"(\s*)$')
+# A string alone on its line: stock writes a prompt's long message as `message:\n  "text",` and the
+# value of a branch as `;("text")`. Neither has a property name in front, so TEXT_LINE never sees it.
+# A `\n` escape may be in it (the folder view's two-line hint).
+BARE_LITERAL = re.compile(r'^(\s*(?:;\()?)"((?:[^"\\]|\\n)+)"((?:\))?\s*,?\s*)$')
 # Template literals match whole, ${...} included (`Version: ${version}`).
 LITERAL = re.compile(r'"([^"\\\n]*)"|`([^`\\\n]*)`')
 

@@ -47,8 +47,8 @@ Date	日期	日期	Fecha
 Day Mode	日间模式	日間模式	Modo día
 Decks	碟机	碟機	Decks
 Decrease BPM	降低 BPM	降低 BPM	Disminuir BPM
-Default Beat Jump Size	默认节拍跳跃长度	預設節拍跳躍長度	Tamaño de Beat Jump predeterminado
-Default Loop Size	默认 Loop 长度	預設 Loop 長度	Tamaño de loop predeterminado
+Default Beat Jump Size	默认节拍跳跃长度	預設節拍跳躍長度	Tamaño de beat jump inicial
+Default Loop Size	默认 Loop 长度	預設 Loop 長度	Tamaño de loop inicial
 Default Scratch Mode	默认搓碟模式	預設刷碟模式	Modo scratch predeterminado
 Default Speed Range	默认变速范围	預設變速範圍	Rango de velocidad predeterminado
 Device	设备	裝置	Dispositivo
@@ -122,6 +122,8 @@ No History Lists Found	未找到历史列表	找不到歷史清單	No se encontr
 No Playlists Found	未找到歌单	找不到歌單	No se encontraron listas de reproducción
 No Search Results	无搜索结果	沒有搜尋結果	Sin resultados de búsqueda
 No Tracks Found	未找到曲目	找不到曲目	No se encontraron pistas
+No tracks on this folder level.\nTracks may be contained in subfolders.	此文件夹层级没有曲目。\n曲目可能在子文件夹中。	此資料夾層級沒有曲目。\n曲目可能在子資料夾中。	No hay pistas en este nivel de carpeta.\nLas pistas pueden estar en subcarpetas.
+Select a year or month folder, or a history list to view history content.	选择年份或月份文件夹，或历史记录列表，以查看历史内容。	選擇年份或月份資料夾，或歷史紀錄清單，以查看歷史內容。	Selecciona una carpeta de año o mes, o una lista del historial, para ver su contenido.
 No connection	无连接	沒有連線	Sin conexión
 No network connection was detected.	未检测到网络连接。	未偵測到網路連線。	No se detectó ninguna conexión de red.
 Not Enough Disk Space	磁盘空间不足	磁碟空間不足	Espacio insuficiente en disco
@@ -144,7 +146,7 @@ Pitch Range	变速范围	變速範圍	Rango de pitch
 Platter Touch Sensitivity	转盘触摸灵敏度	轉盤觸控靈敏度	Sensibilidad táctil del plato
 Player #	碟机编号 #	碟機編號 #	Reproductor #
 Playhead Position	播放头位置	播放頭位置	Posición del cabezal
-Playlists	歌单	歌單	Listas de reproducción
+Playlists	歌单	歌單	Listas
 Please check your internet connection.	请检查网络连接。	請檢查網路連線。	Comprueba tu conexión a internet.
 Please wait...	请稍候…	請稍候…	Espera, por favor…
 Preview Volume	预览音量	預覽音量	Volumen de preescucha
@@ -252,7 +254,7 @@ Only one phone? Take a photo of this code, then in the app tap Scan and pick the
 Scan with your phone camera. Phone and deck must be on the same network.	请用手机相机扫码。手机和碟机要连同一个 Wi-Fi。	請用手機相機掃碼。手機和碟機要連同一個 Wi-Fi。	Escanea con la cámara de tu teléfono. El teléfono y el deck deben estar en la misma red.
 Not now	暂不登录	暫不登入	Ahora no
 Switch account	切换账号	切換帳號	Cambiar de cuenta
-Scan to log in	扫码登录	掃碼登入	Escanear para iniciar sesión
+Scan to log in	扫码登录	掃碼登入	Entrar con QR
 Connecting to	正在连接	正在連接	Conectando a
 Waiting for confirmation	等待确认	等待確認	Esperando confirmación
 WAITING FOR	正在等待	正在等待	ESPERANDO A
@@ -310,7 +312,7 @@ Turn Off	关机	關機	Apagar
 Power	电源	電源	Energía
 Censor Button Behavior	Censor 键行为	Censor 鍵行為	Comportamiento del botón Censor
 Silent Cue	静音 Cue	靜音 Cue	Silent Cue
-Waveform Zoom	波形缩放	波形縮放	Zoom de forma de onda
+Waveform Zoom	波形缩放	波形縮放	Zoom de onda
 Open Library	打开曲库	開啟曲庫	Abrir biblioteca
 Master Limiter	原厂主输出限幅 (dB)	原廠主輸出限幅 (dB)	Limitador master
 Web Console	网页控制台	網頁控制台	Consola web
@@ -319,8 +321,8 @@ Trigger Source	触发来源	觸發來源	Fuente de disparo
 Fader Echo	推子回音	推桿回音	Fader Echo
 Fader Echo: Up	推子回音：仅竖推	推桿回音：僅豎推	Fader Echo: subir
 Fader Echo: All	推子回音：全部	推桿回音：全部	Fader Echo: todos
-All Faders	全部推子	全部推桿	Todos los faders
-Upfader Only	仅竖推	僅豎推	Solo upfaders
+All Faders	全部推子	全部推桿	Todos
+Upfader Only	仅竖推	僅豎推	Solo upfader
 Upfader	竖推	豎推	Upfader
 All	全部	全部	Todos
 Pad LED Brightness	打击垫亮度	打擊墊亮度	Brillo LED de pads
@@ -341,7 +343,7 @@ Space	Space	Space	Space
 ENGINEX VIEW PRESET	ENGINEX 视图预设	ENGINEX 視圖預設	PREAJUSTE DE VISTA ENGINEX
 Stems LAN renderer online:	局域网分轨主机在线：	區域網路分軌主機在線：	Renderizador LAN de Stems en línea:
 Stems LAN renderer offline:	局域网分轨主机离线：	區域網路分軌主機離線：	Renderizador LAN de Stems desconectado:
-On-deck stems (basic quality). For high-quality stems, run the EngineX Stems service on a computer on the same network.	本机分轨（基础音质）。如需高音质分轨，请在同一局域网的电脑上运行 EngineX Stems 服务。	本機分軌（基礎音質）。如需高音質分軌，請在同一區域網路的電腦上執行 EngineX Stems 服務。	Stems en el deck (calidad básica). Para stems de alta calidad, ejecuta el servicio EngineX Stems en un ordenador de la misma red.
+On-deck stems (basic quality). For high-quality stems, run the EngineX Stems service on a computer on the same network.	本机分轨（基础音质）。如需高音质分轨，请在同一局域网的电脑上运行 EngineX Stems 服务。	本機分軌（基礎音質）。如需高音質分軌，請在同一區域網路的電腦上執行 EngineX Stems 服務。	Stems en el deck (calidad básica). Para mayor calidad, ejecuta EngineX Stems en un ordenador de la misma red.
 High-quality stems:	高音质分轨：	高音質分軌：	Stems de alta calidad:
 On-deck stems (basic quality): %1 only offers hpss, which is not used.	本机分轨（基础音质）：%1 只提供 hpss，不会使用。	本機分軌（基礎音質）：%1 只提供 hpss，不會使用。	Stems en el deck (calidad básica): %1 solo ofrece hpss, que no se utiliza.
 For high-quality stems, that computer needs the htdemucs model.	如需高音质分轨，该电脑需要安装 htdemucs 模型。	如需高音質分軌，該電腦需要安裝 htdemucs 模型。	Para stems de alta calidad, ese ordenador necesita el modelo htdemucs.
@@ -437,7 +439,7 @@ PX Delay Time Mode	先锋效果延时模式 (PX)	先鋒效果延遲模式 (PX)	M
 PX Delay Time (ms)	先锋效果延时 (ms)	先鋒效果延遲 (ms)	Tiempo de delay PX (ms)
 Spiral / Pitch Echo / Dub Echo only; stock Beat FX stay in beats	仅作用于 Spiral / Pitch Echo / Dub Echo；原厂效果仍按节拍同步	僅作用於 Spiral / Pitch Echo / Dub Echo；原廠效果仍依節拍同步	Solo Spiral / Pitch Echo / Dub Echo; los Beat FX originales siguen en beats
 Default (Off)	默认（关闭）	預設（關閉）	Predeterminado (desactivado)
-Milliseconds (ms)	毫秒（ms）	毫秒（ms）	Milisegundos (ms)
+Milliseconds (ms)	毫秒（ms）	毫秒（ms）	Milisegundos
 Time (ms)	时间（ms）	時間（ms）	Tiempo (ms)
 OFFLINE · 	离线 · 	離線 · 	SIN CONEXIÓN · 
 REMOTE	仅曲目信息	僅曲目資訊	REMOTO
@@ -483,7 +485,7 @@ View %1	视图 %1	視圖 %1	Vista %1
 Dismiss	关闭	關閉	Descartar
 Authorize	授权	授權	Autorizar
 Start your journey	开始使用	開始使用	Empezar
-Clear Stem Render Queue?	清空 Stems 分轨队列？	清空 Stems 分軌佇列？	¿Vaciar la cola de renderizado de Stems?
+Clear Stem Render Queue?	清空 Stems 分轨队列？	清空 Stems 分軌佇列？	¿Vaciar la cola de Stems?
 Clearing the render will clear queued stem tracks and stop any rendering in progress.	清空后将移除排队中的曲目并停止当前正在进行的 Stems 分轨。	清空後將移除排隊中的曲目並停止目前進行中的 Stems 分軌。	Vaciar la cola eliminará las pistas de Stems en espera y detendrá cualquier renderizado en curso.
 Please connect to the internet to sync the time.	请连接网络以同步时间。	請連線至網路以同步時間。	Conéctate a internet para sincronizar la hora.
 Failed to set Time Zone.	设置时区失败。	設定時區失敗。	No se pudo ajustar la zona horaria.
@@ -521,8 +523,8 @@ Load drive profile to device?	将 U 盘中的配置加载到本机？	將隨身�
 Normal	标准	標準	Normal
 Instant	立即	立即	Instantáneo
 Motor Torque	转盘扭矩	轉盤扭力	Par del motor
-Cue Position	Cue 点	Cue 點	Posición de Cue
-Track Start	曲目开头	曲目開頭	Inicio de la pista
+Cue Position	Cue 点	Cue 點	Posición Cue
+Track Start	曲目开头	曲目開頭	Inicio de pista
 Censor	消音倒放	消音倒放	Censor
 Acapella/Instrumental FX	人声/伴奏分轨效果	人聲/伴奏分軌效果	FX Acapella/Instrumental
 Primary	主按钮	主按鈕	Principal
@@ -688,13 +690,13 @@ Current Dropbox database will not be available during the download process.	下�
 Delete Anchor	删除锚点	刪除錨點	Borrar ancla
 Delete local content	删除本地内容	刪除本機內容	Borrar contenido local
 Destination	目标位置	目標位置	Destino
-Device Became Inactive	设备已变为非活动状态	裝置已變為非使用中	El dispositivo ha pasado a inactivo
+Device Became Inactive	设备已变为非活动状态	裝置已變為非使用中	Dispositivo inactivo
 Device Type	设备类型	裝置類型	Tipo de dispositivo
 Downbeat Left	强拍左移	強拍左移	Downbeat a la izquierda
 Downbeat Right	强拍右移	強拍右移	Downbeat a la derecha
 Download completed	下载完成	下載完成	Descarga completada
 Engine DJ Profiles	Engine DJ 账号	Engine DJ 帳號	Perfiles de Engine DJ
-Engine Library unsupported	不支持此 Engine 曲库	不支援此 Engine 曲庫	Biblioteca de Engine no compatible
+Engine Library unsupported	不支持此 Engine 曲库	不支援此 Engine 曲庫	Biblioteca no compatible
 Enter the password for '	输入密码：'	輸入密碼：'	Introduce la contraseña de '
 Fader FX	推子效果	推桿效果	FX de fader
 Firmware version mismatch	固件版本不一致	韌體版本不一致	Versiones de firmware distintas
@@ -715,10 +717,11 @@ Media not ejected properly. This can corrupt the database. Eject before removing
 New UI	新界面	新介面	Nueva interfaz
 No Accounts Found	未找到账号	找不到帳號	No se encontraron cuentas
 No Update Available	没有可用更新	沒有可用更新	No hay actualizaciones
-No source drive available	没有可用的来源盘	沒有可用的來源磁碟	No hay unidad de origen disponible
+No source drive available	没有可用的来源盘	沒有可用的來源磁碟	No hay unidad de origen
+Beatgrid, cue, loop and waveform data will not be saved. Played state will not be shown. To enable these features, connect a compatible drive.	节拍网格、Cue、Loop 和波形数据不会被保存，也不会显示已播放状态。要启用这些功能，请连接兼容的存储设备。	節拍網格、Cue、Loop 和波形資料不會被儲存，也不會顯示已播放狀態。要啟用這些功能，請連接相容的儲存裝置。	Los datos de beatgrid, cue, loop y forma de onda no se guardarán y no se mostrará el estado de reproducido. Para activar estas funciones, conecta una unidad compatible.
 Note: Existing streaming/cloud logins will be removed and tracks loaded to deck will be ejected.	注意：现有的流媒体/云端登录将被移除，已加载到碟机的曲目将被退出。	注意：現有的串流/雲端登入將被移除，已載入碟機的曲目將被退出。	Nota: se eliminarán los inicios de sesión de streaming/nube y se expulsarán las pistas cargadas en los decks.
 OK	确定	確定	Aceptar
-Offline Device Limit Reached	已达到离线设备上限	已達離線裝置上限	Límite de dispositivos sin conexión alcanzado
+Offline Device Limit Reached	已达到离线设备上限	已達離線裝置上限	Límite offline alcanzado
 Offline Library Management	离线曲库管理	離線曲庫管理	Gestión de la biblioteca sin conexión
 Offline Track Total	离线曲目总数	離線曲目總數	Total de pistas sin conexión
 Or visit	或访问	或造訪	O visita
