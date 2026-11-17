@@ -61,13 +61,24 @@ func newFakeStick(t *testing.T) *fakeStick {
 	}
 	oldInfo, oldSys, oldProc, oldMark, oldMounted := mountinfoPath, sysClassBlock, procDir, ejectMarkDir, mounted
 	oldWait, oldRemove, oldClose, oldRemount, oldReady := remountWait, removeLimit, closeLimit, remountLimit, readyEvery
-	oldDeck, oldCopies, oldOwn := deckWait, engineCopies, ownDecks
+	oldDeck, oldCopies, oldOwn, oldPeers := deckWait, engineCopies, ownDecks, enginePeers
 	t.Cleanup(func() {
 		mountinfoPath, sysClassBlock, procDir, ejectMarkDir, mounted = oldInfo, oldSys, oldProc, oldMark, oldMounted
 		remountWait, removeLimit, closeLimit, remountLimit, readyEvery = oldWait, oldRemove, oldClose, oldRemount, oldReady
-		deckWait, engineCopies, ownDecks = oldDeck, oldCopies, oldOwn
+		deckWait, engineCopies, ownDecks, enginePeers = oldDeck, oldCopies, oldOwn, oldPeers
 	})
-	ownDecks = func() ([]string, bool) { return nil, false } // no stream-sync here
+	// stream-sync: this player's decks hold what Engine has open of the stick; no Engine Link peer.
+	ownDecks = func() ([]string, bool) {
+		var nets []string
+		fds, _ := os.ReadDir(filepath.Join(f.proc, "77", "fd"))
+		for _, fd := range fds {
+			if t, err := os.Readlink(filepath.Join(f.proc, "77", "fd", fd.Name())); err == nil && strings.HasPrefix(t, f.mount+"/") {
+				nets = append(nets, "net://{1}/REKORDBOX"+strings.TrimPrefix(t, f.mount))
+			}
+		}
+		return nets, true
+	}
+	enginePeers = func() bool { return false }
 	mountinfoPath, sysClassBlock, procDir, ejectMarkDir = info, sys, f.proc, filepath.Join(dir, "run")
 	remountWait, removeLimit, closeLimit, remountLimit, readyEvery = 20*time.Millisecond, 300*time.Millisecond, 300*time.Millisecond, 300*time.Millisecond, 20*time.Millisecond
 	deckWait, engineCopies = 20*time.Millisecond, filepath.Join(dir, "inMusicTempFiles")+"/"

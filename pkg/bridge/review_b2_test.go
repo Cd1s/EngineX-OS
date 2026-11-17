@@ -33,6 +33,13 @@ func TestIssue301BackgroundImportOfANativeLibrary(t *testing.T) {
 	if _, err = bridge.ImportInBackground(ctx, root, nil); err != nil {
 		t.Fatalf("background import of a library rb-bridge never imported: %v", err)
 	}
+	// Engine records a play of the stick's own track while the job ran (re-check of 2e227f88:
+	// the merge then restored the native playlist's old sibling link, a UNIQUE conflict).
+	edited := dbOpen(t, root)
+	if _, err = edited.Exec(`UPDATE Track SET isPlayed=1 WHERE title='loaded on a deck'`); err != nil {
+		t.Fatal(err)
+	}
+	edited.Close()
 	if r, err = bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false); err != nil || !r.PlaylistsChanged {
 		t.Fatalf("publishing mount: %+v %v", r, err)
 	}
@@ -40,6 +47,12 @@ func TestIssue301BackgroundImportOfANativeLibrary(t *testing.T) {
 	defer live.Close()
 	if got := scalar[int](t, live, `SELECT count(*) FROM Playlist WHERE title='Native set'`); got != 1 {
 		t.Fatal("the stick's own playlist was lost")
+	}
+	if n := scalar[int](t, live, `SELECT count(*) FROM Track WHERE title='loaded on a deck' AND isPlayed=1`); n != 1 {
+		t.Fatalf("the play Engine recorded during the import was lost: %d", n)
+	}
+	if n := scalar[int](t, live, `SELECT count(*) FROM pragma_foreign_key_check`); n != 0 {
+		t.Fatalf("%d foreign key violations", n)
 	}
 	// As in issue301Updated's library: the fixture's track 1 is a row Engine already has.
 	if n := scalar[int](t, live, `SELECT count(*) FROM PerformanceData p JOIN Track t ON t.id=p.trackId WHERE t.pdbImportKey>0 AND beatData IS NOT NULL`); n != 19 {

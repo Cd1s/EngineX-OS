@@ -236,7 +236,9 @@ func MergeLive(ctx context.Context, buildDir, liveDir string, base BaseCounts) e
 		},
 		// Playlists and entries that are not the import's.
 		func() error {
-			c, err := cols("Playlist", all)
+			// Not the sibling link: the build put the import's playlists beside the stick's
+			// own, and the live link would break that chain (UNIQUE parentListId, nextListId).
+			c, err := cols("Playlist", func(n string) bool { return all(n) && n != "nextListId" })
 			if err != nil {
 				return err
 			}

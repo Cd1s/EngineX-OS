@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -146,3 +147,85 @@ func TestIssue301CompletedImportReleasesGlobalLock(t *testing.T) {
 		t.Fatalf("A's refresh overwrote B's progress: %s", got)
 	}
 }
+
+// Re-check of 2e227f88: a peer that copied a track before any look leaves no trace here but
+// Engine's connection to it; with a peer on Engine Link the stick is not remounted (the
+// reviewer's original probe). Engine with no connection to another device: remounted.
+func TestIssue301RemountWaitsForNoEnginePeer(t *testing.T) {
+	f := newFakeStick(t)
+	f.engine("5", "", "")
+	// Engine's socket, established to a deck on the LAN (192.168.1.138:50010 from .224).
+	f.engine("6", "socket:[4242]", "02")
+	tcp := "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n" +
+		"   0: E001A8C0:C35A 8A01A8C0:C36A 01 00000000:00000000 00:00000000 00000000     0        0 4242 1 0 0 10 0\n" +
+		"   1: 0100007F:1F90 0100007F:D431 01 00000000:00000000 00:00000000 00000000     0        0 4243 1 0 0 10 0\n"
+	if err := os.MkdirAll(filepath.Join(f.proc, "net"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.proc, "net", "tcp"), []byte(tcp), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	enginePeers = oldEnginePeers
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	err := remount(ctx, f.mount, newUSBLoadingReporter(filepath.Join(t.TempDir(), "status"), "usb"))
+	if got := f.seen(); len(got) != 0 || err == nil {
+		t.Fatalf("remounted while a peer on Engine Link may hold a track: %v %v", got, err)
+	}
+	// Only a loopback connection (stream-sync): no peer.
+	f.engine("6", "socket:[4243]", "02")
+	if err = remount(context.Background(), f.mount, newUSBLoadingReporter(filepath.Join(t.TempDir(), "status"), "usb")); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(f.seen(), " "); got != "remove: add:" {
+		t.Fatalf("no peer: uevent writes %q", got)
+	}
+}
+
+// Re-check of 2e227f88: Engine was seen sending a track while stream-sync did not answer; that
+// read counts as a peer's, and stays a mark after the transfer closes.
+func TestIssue301UnconfirmedServeKeepsTheMark(t *testing.T) {
+	f := newFakeStick(t)
+	f.engine("5", "", "")
+	ownDecks = func() ([]string, bool) { return nil, false }
+	f.engine("9", filepath.Join(f.mount, "Contents/song.mp3"), "0100000")
+	noteServed(f.mount)
+	f.engine("9", "", "")
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	_ = remount(ctx, f.mount, newUSBLoadingReporter(filepath.Join(t.TempDir(), "status"), "usb"))
+	if events := f.seen(); len(events) > 0 {
+		t.Fatalf("remount after serving while stream-sync was unavailable: %v", events)
+	}
+}
+
+// Re-check of 2e227f88: one status file for every drive; an old job of drive A neither
+// deletes B's progress, nor writes its stale state over B's error, nor clears B's error.
+func TestIssue301StatusIsOwnedByItsJob(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "status")
+	a, b := newUSBLoadingReporter(p, "usb"), newUSBLoadingReporter(p, "sd")
+	a.Publishing()
+	b.Report(4, 10, true)
+	a.Done()
+	if _, err := os.Stat(p); err != nil {
+		t.Fatalf("A's exit deleted B's in-progress status: %v", err)
+	}
+	a, b = newUSBLoadingReporter(p, "usb"), newUSBLoadingReporter(p, "sd")
+	a.Publishing()
+	b.Fail(errors.New("B failed"))
+	a.Refresh()
+	if _, err := os.Stat(p); !os.IsNotExist(err) {
+		t.Fatalf("A resurrected its old status after B failed: %v", err)
+	}
+	a.Done()
+	if _, err := os.Stat(p + ".err"); err != nil {
+		t.Fatalf("A's exit deleted B's error before another Start: %v", err)
+	}
+	// A job's own lifecycle is unchanged: it clears its own status and error.
+	b.Done()
+	if _, err := os.Stat(p + ".err"); !os.IsNotExist(err) {
+		t.Fatalf("B's own cleanup left its error: %v", err)
+	}
+}
+
+var oldEnginePeers = enginePeers // the real one, before newFakeStick stubs it

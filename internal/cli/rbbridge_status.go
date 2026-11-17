@@ -1,11 +1,14 @@
 package cli
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -17,6 +20,7 @@ type usbLoadingStatus struct {
 	Done  int    `json:"done,omitempty"`
 	Total int    `json:"total,omitempty"`
 	Error string `json:"error,omitempty"`
+	Owner string `json:"owner,omitempty"` // the job that wrote it (newUSBLoadingReporter)
 }
 
 func usbLoadingStatusPath() string {
@@ -71,10 +75,35 @@ type usbLoadingReporter struct {
 	lastAt   time.Time
 	lastDone int
 	last     usbLoadingStatus
+	owner    string
 }
 
+// One status file serves every drive, and each drive's mount, import job and remount write it
+// from processes of their own (#301). A job refreshes, ends or clears only what it wrote: its
+// owner, unique per reporter, is in the file, and the file's own lock makes the
+// read-then-write of another process wait.
 func newUSBLoadingReporter(path, kind string) *usbLoadingReporter {
-	return &usbLoadingReporter{path: path, kind: kind}
+	var b [8]byte
+	_, _ = rand.Read(b[:])
+	return &usbLoadingReporter{path: path, kind: kind, owner: hex.EncodeToString(b[:])}
+}
+
+// locked runs f under the status files' lock (beside them, shared by every process).
+func (r *usbLoadingReporter) locked(f func()) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if l, err := os.OpenFile(r.path+".lock", os.O_CREATE|os.O_RDWR, 0o600); err == nil {
+		defer l.Close()
+		_ = syscall.Flock(int(l.Fd()), syscall.LOCK_EX)
+	}
+	f()
+}
+
+// owns reports whether the status at p was written by this reporter.
+func (r *usbLoadingReporter) owns(p string) bool {
+	b, err := os.ReadFile(p)
+	var st usbLoadingStatus
+	return err == nil && json.Unmarshal(b, &st) == nil && st.Owner == r.owner
 }
 
 func (r *usbLoadingReporter) Start() {
@@ -89,8 +118,10 @@ func (r *usbLoadingReporter) Report(done, total int, force bool) {
 	if r == nil || r.path == "" {
 		return
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.locked(func() { r.report(done, total, force) })
+}
+
+func (r *usbLoadingReporter) report(done, total int, force bool) {
 	now := time.Now()
 	if !force && done > 0 && done < total && done-r.lastDone < 100 && now.Sub(r.lastAt) < 200*time.Millisecond {
 		return
@@ -115,9 +146,7 @@ func (r *usbLoadingReporter) set(state string) {
 	if r == nil || r.path == "" {
 		return
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.write(usbLoadingStatus{State: state, Kind: r.kind})
+	r.locked(func() { r.write(usbLoadingStatus{State: state, Kind: r.kind}) })
 }
 
 // Refresh writes the last state again, so the browser keeps showing it; not over the status
@@ -126,21 +155,15 @@ func (r *usbLoadingReporter) Refresh() {
 	if r == nil || r.path == "" {
 		return
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.last.State == "" {
-		return
-	}
-	if b, err := os.ReadFile(r.path); err == nil {
-		var now usbLoadingStatus
-		if json.Unmarshal(b, &now) == nil && now != r.last {
-			return
+	r.locked(func() {
+		if r.last.State != "" && r.owns(r.path) {
+			r.write(r.last)
 		}
-	}
-	r.write(r.last)
+	})
 }
 
 func (r *usbLoadingReporter) write(st usbLoadingStatus) {
+	st.Owner = r.owner
 	r.last = st
 	writeStatusJSON(r.path, st)
 }
@@ -149,21 +172,28 @@ func (r *usbLoadingReporter) Done() {
 	if r == nil || r.path == "" {
 		return
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.last = usbLoadingStatus{}
-	_ = os.Remove(r.path)
-	_ = os.Remove(r.path + ".err")
+	r.locked(func() {
+		r.last = usbLoadingStatus{}
+		for _, p := range []string{r.path, r.path + ".err"} {
+			if r.owns(p) {
+				_ = os.Remove(p)
+			}
+		}
+	})
 }
 
 func (r *usbLoadingReporter) Fail(err error) {
 	if r == nil || r.path == "" {
 		return
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.locked(func() { r.fail(err) })
+}
+
+func (r *usbLoadingReporter) fail(err error) {
 	r.last = usbLoadingStatus{}
-	_ = os.Remove(r.path)
+	if r.owns(r.path) {
+		_ = os.Remove(r.path)
+	}
 	msg := ""
 	if err != nil {
 		msg = strings.Join(strings.Fields(err.Error()), " ")
@@ -175,6 +205,7 @@ func (r *usbLoadingReporter) Fail(err error) {
 		State: "error",
 		Kind:  r.kind,
 		Error: msg,
+		Owner: r.owner,
 	})
 }
 
