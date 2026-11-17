@@ -44,7 +44,16 @@ func (s *Server) loadAppleMusicHelper() {
 func (s *Server) helperLoginPageURL() string {
 	cfg := s.appleMusic.HelperConfig()
 	if cfg.LoginURL != "" {
-		return cfg.LoginURL
+		u, err := url.Parse(cfg.LoginURL)
+		if err != nil || u.Hostname() == "" {
+			return cfg.LoginURL
+		}
+		if cfg.Token != "" && u.Query().Get("token") == "" {
+			q := u.Query()
+			q.Set("token", cfg.Token)
+			u.RawQuery = q.Encode()
+		}
+		return u.String()
 	}
 	if cfg.URL == "" {
 		return ""
