@@ -100,7 +100,7 @@ static const char *test_lklfuse_path(void){return *test_lklfuse_bin&&!access(tes
 #define PROC_FILESYSTEMS_PATH test_proc_fs
 #define PROC_MOUNTINFO_PATH (*test_proc_mi?test_proc_mi:"/proc/self/mountinfo")
 static char test_sys_dev_block[PATH_MAX];
-#define SYS_DEV_BLOCK_DIR test_sys_dev_block
+#define SYS_DEV_BLOCK_DIR (*test_sys_dev_block?test_sys_dev_block:"/sys/dev/block")
 #define HFSPLUSX_MODULES_ROOT test_modules_root
 static char test_uname_release[65] = "6.18.57-az01-2026-10-15-rt6";
 static int test_uname(struct utsname *u){memset(u,0,sizeof *u);snprintf(u->release,sizeof u->release,"%s",test_uname_release);return 0;}
@@ -303,7 +303,7 @@ static void test_only_an_eject_marks_the_stick(const char *root) {
     char name[80];snprintf(name,sizeof name,"enginex-rb-ejected-%016llx",(unsigned long long)hash_bytes(UINT64_C(14695981039346656037),"/media/REKORDBOX",16));
     assert(!strcmp(name,"enginex-rb-ejected-2531a9d305fa8897")); // internal/cli ejectMark pins the same
     char volume_path[PATH_MAX],mark[PATH_MAX];join(volume_path,MEDIA_ROOT,"EJECTED");assert(!make_dirs(volume_path));
-    snprintf(mark,sizeof mark,"%s/enginex-rb-ejected-%016llx",test_runtime,(unsigned long long)hash_bytes(UINT64_C(14695981039346656037),volume_path,strlen(volume_path)));
+    assert(snprintf(mark,sizeof mark,"%s/enginex-rb-ejected-%016llx",test_runtime,(unsigned long long)hash_bytes(UINT64_C(14695981039346656037),volume_path,strlen(volume_path)))<(int)sizeof mark);
     struct libmnt_context removal={.target=volume_path};assert(!mnt_context_enable_lazy(&removal,1));
     assert(!unmount_dispatch(&removal,no_unmount));assert(access(mark,F_OK)==-1&&errno==ENOENT);
     struct libmnt_context eject={.target=volume_path};
