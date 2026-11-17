@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # One-click EngineX OS backend setup:
-#   - sc5000-relay (credential console + OAuth + optional trycloudflare quick tunnel)
-#   - sc5000-stemsd (if tools/stems is present)
+#   - enginex-relay (credential console + OAuth + optional trycloudflare quick tunnel)
+#   - enginex-stemsd (if tools/stems is present)
 #   - enginex-amd + enginex-am-login (if /opt/enginex-amd & /opt/wrapper-lite are present)
 #
 # Usage:
-#   sudo bash deploy/one-click-backend.sh [--public https://relay.example.com] [--relay-bin /path/to/sc5000-relay]
+#   sudo bash deploy/one-click-backend.sh [--public https://relay.example.com] [--relay-bin /path/to/enginex-relay]
 set -euo pipefail
 
 PUBLIC_URL=""
@@ -15,7 +15,7 @@ while [ $# -gt 0 ]; do
     --public) PUBLIC_URL="${2:?missing --public value}"; shift 2 ;;
     --relay-bin) RELAY_BIN="${2:?missing --relay-bin value}"; shift 2 ;;
     -h|--help)
-      echo "Usage: sudo bash $0 [--public https://relay.example.com] [--relay-bin ./sc5000-relay]"
+      echo "Usage: sudo bash $0 [--public https://relay.example.com] [--relay-bin ./enginex-relay]"
       exit 0
       ;;
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
@@ -39,31 +39,31 @@ if command -v apt-get >/dev/null 2>&1; then
   apt-get install -y -qq curl ffmpeg python3 openssl >/dev/null
 fi
 
-# 1. Build or install sc5000-relay
+# 1. Build or install enginex-relay
 if [ -z "$RELAY_BIN" ]; then
-  if [ -f "$REPO_ROOT/cmd/sc5000-relay/main.go" ] && command -v go >/dev/null 2>&1; then
-    echo "==> Building sc5000-relay from source..."
-    RELAY_BIN="/tmp/sc5000-relay-$GOARCH"
-    (cd "$REPO_ROOT" && CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" go build -trimpath -ldflags="-s -w" -o "$RELAY_BIN" ./cmd/sc5000-relay)
-  elif [ -x /usr/local/bin/sc5000-relay ]; then
-    RELAY_BIN="/usr/local/bin/sc5000-relay"
+  if [ -f "$REPO_ROOT/cmd/enginex-relay/main.go" ] && command -v go >/dev/null 2>&1; then
+    echo "==> Building enginex-relay from source..."
+    RELAY_BIN="/tmp/enginex-relay-$GOARCH"
+    (cd "$REPO_ROOT" && CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" go build -trimpath -ldflags="-s -w" -o "$RELAY_BIN" ./cmd/enginex-relay)
+  elif [ -x /usr/local/bin/enginex-relay ]; then
+    RELAY_BIN="/usr/local/bin/enginex-relay"
   else
-    echo "error: sc5000-relay binary not found. Pass --relay-bin /path/to/sc5000-relay or install Go." >&2
+    echo "error: enginex-relay binary not found. Pass --relay-bin /path/to/enginex-relay or install Go." >&2
     exit 1
   fi
 fi
 
-install -m 0755 "$RELAY_BIN" /usr/local/bin/sc5000-relay
-mkdir -p /var/lib/sc5000-relay /etc/systemd/system/sc5000-deemix-relay.service.d
+install -m 0755 "$RELAY_BIN" /usr/local/bin/enginex-relay
+mkdir -p /var/lib/enginex-relay /etc/systemd/system/enginex-deemix-relay.service.d
 
-EXEC_ARGS="-listen 0.0.0.0:6595 -state /var/lib/sc5000-relay"
+EXEC_ARGS="-listen 0.0.0.0:6595 -state /var/lib/enginex-relay"
 if [ -n "$PUBLIC_URL" ]; then
   EXEC_ARGS="$EXEC_ARGS -public $PUBLIC_URL"
 else
   EXEC_ARGS="$EXEC_ARGS -quick-tunnel"
 fi
 
-cat > /etc/systemd/system/sc5000-deemix-relay.service <<EOF
+cat > /etc/systemd/system/enginex-deemix-relay.service <<EOF
 [Unit]
 Description=EngineX OS Relay Console
 After=network-online.target
@@ -71,7 +71,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/sc5000-relay $EXEC_ARGS
+ExecStart=/usr/local/bin/enginex-relay $EXEC_ARGS
 Restart=always
 RestartSec=3
 
@@ -82,10 +82,10 @@ EOF
 # 2. Optional remote Stems backend (if tools/stems exists)
 STEMS_PORT=""
 if [ -f "$SCRIPT_DIR/stems/install-backend.sh" ] && [ -d "$REPO_ROOT/tools/stems" ]; then
-  echo "==> Installing sc5000-stemsd..."
+  echo "==> Installing enginex-stemsd..."
   bash "$SCRIPT_DIR/stems/install-backend.sh" || true
   if [ -f "$SCRIPT_DIR/relay-host/50-stems.conf" ]; then
-    cp "$SCRIPT_DIR/relay-host/50-stems.conf" /etc/systemd/system/sc5000-deemix-relay.service.d/50-stems.conf
+    cp "$SCRIPT_DIR/relay-host/50-stems.conf" /etc/systemd/system/enginex-deemix-relay.service.d/50-stems.conf
     STEMS_PORT="8787"
   fi
 fi
@@ -139,7 +139,7 @@ EOF
 fi
 
 systemctl daemon-reload
-systemctl enable --now sc5000-deemix-relay.service
+systemctl enable --now enginex-deemix-relay.service
 sleep 2
 
 LAN_IP="$(hostname -I | awk '{print $1}')"
@@ -151,7 +151,7 @@ echo "局域网控制台: http://${LAN_IP}:6595"
 if [ -n "$PUBLIC_URL" ]; then
   echo "公网地址:     $PUBLIC_URL"
 else
-  echo "公网隧道:     查看日志获取 trycloudflare.com 地址 -> journalctl -u sc5000-deemix-relay -n 20 --no-pager"
+  echo "公网隧道:     查看日志获取 trycloudflare.com 地址 -> journalctl -u enginex-deemix-relay -n 20 --no-pager"
 fi
 if [ -n "$STEMS_PORT" ]; then
   echo "Stems 服务:   active (127.0.0.1:${STEMS_PORT})"
@@ -159,4 +159,4 @@ fi
 if [ -n "$AM_TOKEN" ]; then
   echo "Apple Music:  http://${LAN_IP}:12341  (Token: ${AM_TOKEN})"
 fi
-echo "初始密码查看: journalctl -u sc5000-deemix-relay -n 30 --no-pager | grep -i password"
+echo "初始密码查看: journalctl -u enginex-deemix-relay -n 30 --no-pager | grep -i password"
