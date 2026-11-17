@@ -8052,6 +8052,8 @@ def edits(dev: bool):
             visible: pads.scMixstream
             Layout.preferredWidth: 44
             Layout.fillHeight: true
+            Layout.leftMargin: isPadLayoutMirrored ? 0 : 16
+            Layout.rightMargin: isPadLayoutMirrored ? 16 : 0
             Layout.topMargin: pads.scBeatJumpBank ? 8 : 16
             Layout.bottomMargin: pads.scBeatJumpBank ? 8 : 16
             padding: 0

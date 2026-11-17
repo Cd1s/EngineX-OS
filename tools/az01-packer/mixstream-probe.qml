@@ -51,16 +51,18 @@ Item {
             pads.grabToImage(function(r) {
                 probe.check(r.saveToFile("/tmp/mx-pads-" + tag + "-deck" + deck + ".png"), "picture of the " + tag + " Pad bar deck " + deck)
                 pads.destroy()
-            })
+            }, Qt.size(pads.width * 2, pads.implicitHeight * 2))
         }
     }
     // The Control Center's channel-strip EQ / Stems switch: one segment per channel, lit while that channel is in Stems.
     function stemsEqTile() {
         const component = Qt.createComponent("qrc:/Skins/Embedded/Views/ControlCenter/Tabs/ControlCenterTab.qml")
         check(component.status === Component.Ready, "Control Center tab loads: " + component.errorString())
+        // Laid out as on the 1280 x 800 panel the 5.3.0 firmware group shares (this sandbox's window is 800 x 800):
+        // the tab is 640 px high (800 less the 80 px tab bar and 80 px status bar) and does not scroll.
         const backdrop = Qt.createQmlObject('import QtQuick 2.12; Rectangle { color: "#1c1c1c" }', probe.Window.window.contentItem)
-        backdrop.width = 1024; backdrop.height = 330; backdrop.y = 100; backdrop.z = 1000
-        const tab = component.createObject(backdrop, {width: 1024, height: 330})
+        backdrop.width = 1280; backdrop.height = 720; backdrop.z = 1000
+        const tab = component.createObject(backdrop, {width: 1280, height: 640})
         check(!!tab, "create the Control Center tab")
         const tile = find("ControlCenter_StemsEq", tab)
         check(!!tile && tile.visible, "Stems EQ tile is in the Control Center")
@@ -77,6 +79,7 @@ Item {
             check(seg.selected === (own.index === 1), "Stems EQ highlight follows the actual mode " + ch)
         }
         backdrop.grabToImage(function(r) { check(r.saveToFile("/tmp/mx-control-center.png"), "picture of the Control Center") })
+        tile.grabToImage(function(r) { check(r.saveToFile("/tmp/mx-stems-eq-tile.png"), "picture of the Stems EQ tile") }, Qt.size(tile.width * 2, tile.height * 2))
     }
     Timer {
         interval: 1500
@@ -127,7 +130,7 @@ Item {
                         }
                         const sweep = probe.find("MixstreamSweepFx" + deck)
                         probe.check(!!sweep && sweep.enabled && sweep.width >= 44 && sweep.height >= 44, "touch Sweep FX triangle deck " + deck)
-                        probe.check(!probe.find("MixstreamStemsEq" + deck), "no EQ / STEMS button on the Pad bar deck " + deck)
+                        probe.check(!probe.find("MixstreamStemsEq" + deck, probe.testPads[deck - 1]), "no EQ / STEMS button on the Pad bar deck " + deck)
                     }
                     probe.shoot("beat-jump-bank")
                     probe.stemsEqTile()
@@ -179,7 +182,7 @@ Item {
                         probe.check(!!bank && !bank.visible, "Beat Jump preference off hides Beat Jump bank " + deck)
                         const padsLayout = probe.find("Deck_Pads_Layout")
                         probe.check(!!padsLayout && padsLayout.visible, "native pads remain visible deck " + deck)
-                        probe.check(!!probe.find("MixstreamSweepFx" + deck) && !probe.find("MixstreamStemsEq" + deck), "only the Sweep FX triangle beside the pads deck " + deck)
+                        probe.check(!!probe.find("MixstreamSweepFx" + deck) && !probe.find("MixstreamStemsEq" + deck, probe.testPads[deck - 1]), "only the Sweep FX triangle beside the pads deck " + deck)
                     }
                     probe.shoot("default")
                     console.warn("X166 DONE|PASS|")
