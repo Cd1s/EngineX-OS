@@ -62,6 +62,7 @@ type browseCache struct {
 	dir        string
 	entries    map[string]*browseEntry
 	flights    map[string]*browseFlight
+	gen        map[string]uint64
 	bytes      int
 	now        func() time.Time
 	ttl, stale time.Duration
@@ -75,7 +76,7 @@ func newBrowseCache(state string) *browseCache {
 			dir = "/data/enginex/cache/browse-v1"
 		}
 	}
-	c := &browseCache{dir: dir, entries: map[string]*browseEntry{}, flights: map[string]*browseFlight{}, now: time.Now, ttl: browseTTL, stale: browseStale}
+	c := &browseCache{dir: dir, entries: map[string]*browseEntry{}, flights: map[string]*browseFlight{}, gen: map[string]uint64{}, now: time.Now, ttl: browseTTL, stale: browseStale}
 	c.pruneDisk()
 	return c
 }
@@ -137,6 +138,27 @@ func (c *browseCache) get(ctx context.Context, key string, load func(context.Con
 	}
 }
 
+func (c *browseCache) drop(key string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	if c.gen == nil {
+		c.gen = map[string]uint64{}
+	}
+	c.gen[key]++
+	if e := c.entries[key]; e != nil {
+		c.bytes -= len(e.data)
+		delete(c.entries, key)
+	}
+	c.mu.Unlock()
+	if c.dir != "" {
+		c.diskMu.Lock()
+		_ = os.Remove(filepath.Join(c.dir, key+".json"))
+		c.diskMu.Unlock()
+	}
+}
+
 // start is called under mu. A cancelled browser request cannot cancel another
 // browser's shared fetch, or the refresh of a stale page.
 func (c *browseCache) start(key string, load func(context.Context) (browseData, error)) *browseFlight {
@@ -146,6 +168,7 @@ func (c *browseCache) start(key string, load func(context.Context) (browseData, 
 	if len(c.flights) >= 32 {
 		return nil
 	}
+	flightGen := c.gen[key]
 	f := &browseFlight{done: make(chan struct{})}
 	c.flights[key] = f
 	go func() {
@@ -170,14 +193,15 @@ func (c *browseCache) start(key string, load func(context.Context) (browseData, 
 			}
 		}()
 		c.mu.Lock()
+		invalidated := c.gen[key] != flightGen
 		now := c.now()
-		persist := err == nil && len(data) <= browseEntryBytes
-		oversized := err == nil && !persist
+		persist := !invalidated && err == nil && len(data) <= browseEntryBytes
+		oversized := !invalidated && err == nil && !persist
 		var status providers.StatusError
-		revoked := errors.As(err, &status) && (status == 401 || status == 403)
+		revoked := !invalidated && errors.As(err, &status) && (status == 401 || status == 403)
 		// A complete snapshot outlives a partial refresh unless its login was revoked.
 		kept := c.entries[key]
-		partial := err != nil && len(data) > 0 && (revoked || kept == nil || kept.partial || kept.data == nil)
+		partial := !invalidated && err != nil && len(data) > 0 && (revoked || kept == nil || kept.partial || kept.data == nil)
 		if persist {
 			c.insert(key, &browseEntry{data: data, at: now, used: now})
 		} else if oversized {
@@ -186,7 +210,7 @@ func (c *browseCache) start(key string, load func(context.Context) (browseData, 
 			// Keep a tombstone until the old disk file is gone. A concurrent
 			// reader must join this flight rather than reload that snapshot.
 			c.insert(key, &browseEntry{used: now})
-		} else if err != nil && !errors.Is(err, errBrowseBusy) {
+		} else if !invalidated && err != nil && !errors.Is(err, errBrowseBusy) {
 			if partial {
 				// Keep the prefix with its error for native pagination, never as a
 				// complete hit or a disk snapshot. Only another request retries it.

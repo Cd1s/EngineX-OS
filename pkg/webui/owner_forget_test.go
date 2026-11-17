@@ -151,3 +151,40 @@ func TestSigningSoundCloudOutDropsTheAccountTokens(t *testing.T) {
 		t.Errorf("a lookup key that was not the account's login was removed: %+v", keys)
 	}
 }
+
+func TestSigningAppleMusicOutClearsMemoryAndKeepsHelper(t *testing.T) {
+	s, dir := newTestServer(t)
+	s.appleMusic.SetHelper("http://helper.invalid:12341", "", "helper-tok")
+	srv := fakeAppleMusic(t)
+	s.appleMusic.BaseURL = srv.URL
+	s.appleMusic.WebURL = srv.URL
+	if err := s.appleMusic.SetOwner(t.Context(), providers.AppleMusicOwner{
+		Links:      []string{"https://music.apple.com/cn/playlist/club/pl.club"},
+		Storefront: "cn",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !s.appleMusic.Ready() {
+		t.Fatal("expected Ready before sign-out")
+	}
+	s.mu.Lock()
+	s.sessions["own-am"] = &Session{ID: "own-am", Provider: "applemusic", Ready: true, p: s.appleMusic, tracks: map[string]providers.Track{}, expires: time.Now().Add(time.Hour)}
+	s.mu.Unlock()
+
+	req := httptest.NewRequest("DELETE", "/api/sessions/own-am", nil)
+	req.Header.Set("Authorization", "Bearer test-token-1234")
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("DELETE applemusic session: %d %s", rec.Code, rec.Body.String())
+	}
+	if s.appleMusic.Ready() || len(s.appleMusic.Owner().Links) != 0 {
+		t.Fatalf("applemusic still ready or holding links in memory after sign-out: %+v", s.appleMusic.Owner())
+	}
+	if _, err := os.Stat(filepath.Join(dir, "applemusic-owner.json")); !os.IsNotExist(err) {
+		t.Fatalf("applemusic-owner.json still exists after sign-out: %v", err)
+	}
+	if cfg := s.appleMusic.HelperConfig(); cfg.URL != "http://helper.invalid:12341" || cfg.Token != "helper-tok" {
+		t.Fatalf("helper config lost on sign-out: %+v", cfg)
+	}
+}

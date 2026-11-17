@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"github.com/Cd1s/EngineX-OS/internal/testaudio"
 	"github.com/Cd1s/EngineX-OS/pkg/deemixclient"
 	"net/http"
@@ -366,5 +367,213 @@ func TestAppleMusicHelperPhoneSetupWhenUnconfigured(t *testing.T) {
 	ui.ServeHTTP(overwriteRec, overwriteReq)
 	if overwriteRec.Code != 200 || ui.appleMusic.HelperConfig().URL != "http://192.168.6.104:12341" {
 		t.Fatalf("expected overwrite rejection, got code=%d cfg=%+v", overwriteRec.Code, ui.appleMusic.HelperConfig())
+	}
+}
+
+func TestAppleMusicHelperAutoRestoreFavoritesAlbumsAndSearch(t *testing.T) {
+	var mu sync.Mutex
+	account := 1
+	const devTok = "eyJhbGciOiJFUzI1NiJ9.eyJpc3MiOiJURUFNIiwiZXhwIjo0MTAyNDQ0ODAwfQ.c2lnbmF0dXJlLWJ5dGVzLWxvbmctZW5vdWdo"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		acc := account
+		mu.Unlock()
+		wantUser := "user-1"
+		wantPlaylist := "Favourite Songs"
+		if acc == 2 {
+			wantUser = "user-2"
+			wantPlaylist = "Second Account"
+		}
+		switch r.URL.Path {
+		case "/healthz":
+			w.WriteHeader(200)
+		case "/v1/login/status":
+			json.NewEncoder(w).Encode(map[string]any{"state": "ready", "signedIn": true})
+		case "/v1/login":
+			json.NewEncoder(w).Encode(map[string]any{"state": "ready", "signedIn": true})
+		case "/v1/login/credentials":
+			if r.Header.Get("Authorization") != "Bearer helper-tok" {
+				w.WriteHeader(401)
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{
+				"signedIn":       true,
+				"mediaUserToken": wantUser,
+				"developerToken": devTok,
+				"storefront":     "th",
+			})
+		case "/us/browse":
+			w.WriteHeader(http.StatusBadGateway)
+		case "/v1/me/library/playlists":
+			if r.Header.Get("Media-User-Token") != wantUser || r.Header.Get("Authorization") != "Bearer "+devTok {
+				w.WriteHeader(403)
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{
+				"data": []any{map[string]any{"id": "p.fav", "type": "library-playlists", "attributes": map[string]any{"name": wantPlaylist}}},
+			})
+		case "/v1/me/library/songs":
+			if r.Header.Get("Media-User-Token") != wantUser {
+				w.WriteHeader(403)
+				return
+			}
+			if r.URL.Query().Get("limit") == "1" {
+				json.NewEncoder(w).Encode(map[string]any{
+					"data": []any{map[string]any{"id": "i.s1", "type": "library-songs", "attributes": map[string]any{"name": "Sandstorm", "artistName": "Darude"}}},
+					"meta": map[string]any{"total": 1},
+				})
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{
+				"data": []any{map[string]any{"id": "i.s1", "type": "library-songs", "attributes": map[string]any{"name": "Sandstorm", "artistName": "Darude", "durationInMillis": 225000, "playParams": map[string]any{"catalogId": "338349243"}}}},
+			})
+		case "/v1/me/library/albums":
+			if r.Header.Get("Media-User-Token") != wantUser {
+				w.WriteHeader(403)
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{
+				"data": []any{map[string]any{"id": "l.alb1", "type": "library-albums", "attributes": map[string]any{"name": "Before the Storm", "artistName": "Darude", "trackCount": 1}}},
+			})
+		case "/v1/me/library/albums/l.alb1/tracks":
+			json.NewEncoder(w).Encode(map[string]any{
+				"data": []any{map[string]any{"id": "i.s1", "type": "library-songs", "attributes": map[string]any{"name": "Sandstorm", "artistName": "Darude", "durationInMillis": 225000}}},
+			})
+		case "/v1/catalog/th/search":
+			if r.URL.Query().Get("types") == "playlists" {
+				json.NewEncoder(w).Encode(map[string]any{
+					"results": map[string]any{"playlists": map[string]any{"data": []any{map[string]any{"id": "pl.srch1", "type": "playlists", "attributes": map[string]any{"name": "Sandstorm Mix", "trackCount": 10}}}}},
+				})
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{
+				"results": map[string]any{"songs": map[string]any{"data": []any{map[string]any{"id": "338349243", "type": "songs", "attributes": map[string]any{"name": "Sandstorm", "artistName": "Darude", "durationInMillis": 225000}}}}},
+			})
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+
+	state := t.TempDir()
+	uiDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(uiDir, "settings.conf"), []byte("scope=applemusic\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ui := New(Config{
+		AccessToken:           "console-fixture",
+		StateDir:              state,
+		UIDir:                 uiDir,
+		AppleMusicURL:         srv.URL,
+		AppleMusicWebURL:      srv.URL,
+		AppleMusicHelperURL:   srv.URL,
+		AppleMusicHelperToken: "helper-tok",
+	}, nil)
+	defer ui.Close()
+	gw := httptest.NewServer(ui)
+	defer gw.Close()
+
+	// 1. Auto-restore from helper without any pre-existing applemusic-owner.json.
+	var status struct {
+		LoggedIn []string `json:"loggedIn"`
+	}
+	tidalGet(t, gw.URL, "/v1/enginex/ui", 200, &status)
+	if !strings.Contains(strings.Join(status.LoggedIn, ","), "applemusic") {
+		t.Fatalf("expected applemusic in loggedIn, got %+v", status.LoggedIn)
+	}
+	if _, err := os.Stat(filepath.Join(state, "applemusic-owner.json")); err != nil {
+		t.Fatalf("expected persisted applemusic-owner.json: %v", err)
+	}
+
+	// 2. Playlists, favorite tracks, favorite albums, album tracks, and search playlists.
+	var lists tidalList
+	tidalGet(t, gw.URL, "/v1/users/1/playlists", 200, &lists)
+	if len(lists.Items) != 3 {
+		t.Fatalf("expected 3 playlists (liked, Favourite Songs, album), got %d: %s", len(lists.Items), lists.Items)
+	}
+
+	var favTracks struct {
+		Items []struct {
+			Title string `json:"title"`
+		} `json:"items"`
+	}
+	tidalGet(t, gw.URL, "/v1/users/1/favorites/tracks", 200, &favTracks)
+	if len(favTracks.Items) != 1 || favTracks.Items[0].Title != "Sandstorm" {
+		t.Fatalf("favorite tracks: %+v", favTracks)
+	}
+
+	var favAlbums struct {
+		Items []struct {
+			ID    int64  `json:"id"`
+			Title string `json:"title"`
+		} `json:"items"`
+	}
+	tidalGet(t, gw.URL, "/v1/users/1/favorites/albums", 200, &favAlbums)
+	if len(favAlbums.Items) != 1 || favAlbums.Items[0].Title != "Before the Storm" || favAlbums.Items[0].ID <= 0 || favAlbums.Items[0].ID > 1<<31-1 {
+		t.Fatalf("favorite albums: %+v", favAlbums)
+	}
+
+	var albTracks struct {
+		Items []struct {
+			Title string `json:"title"`
+		} `json:"items"`
+	}
+	tidalGet(t, gw.URL, "/v1/albums/"+fmt.Sprint(favAlbums.Items[0].ID)+"/tracks", 200, &albTracks)
+	if len(albTracks.Items) != 1 || albTracks.Items[0].Title != "Sandstorm" {
+		t.Fatalf("album tracks: %+v", albTracks)
+	}
+
+	var searchRes struct {
+		Tracks    tidalList `json:"tracks"`
+		Playlists tidalList `json:"playlists"`
+	}
+	tidalGet(t, gw.URL, "/v1/search?query=sandstorm", 200, &searchRes)
+	if searchRes.Tracks.TotalNumberOfItems != 1 || searchRes.Playlists.TotalNumberOfItems != 1 {
+		t.Fatalf("search results: tracks=%+v playlists=%+v", searchRes.Tracks, searchRes.Playlists)
+	}
+
+	// 3. Console session reports ready=true and sign-out clears memory & owner file.
+	sessReq, _ := http.NewRequest("POST", gw.URL+"/api/sessions", strings.NewReader(`{"provider":"applemusic"}`))
+	sessReq.Header.Set("Authorization", "Bearer console-fixture")
+	sessReq.Header.Set("Content-Type", "application/json")
+	sessResp, err := http.DefaultClient.Do(sessReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sess Session
+	json.NewDecoder(sessResp.Body).Decode(&sess)
+	sessResp.Body.Close()
+	if !sess.Ready {
+		t.Fatalf("expected applemusic console session ready=true, got %+v", sess)
+	}
+
+	delReq, _ := http.NewRequest("DELETE", gw.URL+"/api/sessions/"+sess.ID, nil)
+	delReq.Header.Set("Authorization", "Bearer console-fixture")
+	delResp, err := http.DefaultClient.Do(delReq)
+	if err != nil || delResp.StatusCode != 200 {
+		t.Fatalf("delete session: %v %v", err, delResp)
+	}
+	delResp.Body.Close()
+	if ui.appleMusic.Ready() || ui.appleMusic.HelperConfig().URL != srv.URL {
+		t.Fatalf("logout should clear ready but keep helper: ready=%v cfg=%+v", ui.appleMusic.Ready(), ui.appleMusic.HelperConfig())
+	}
+
+	// 4. Signing into a second Apple Music account via helper clears ownerDeleted and drops browse cache.
+	mu.Lock()
+	account = 2
+	mu.Unlock()
+	loginReq, _ := http.NewRequest("POST", gw.URL+"/api/applemusic/login", strings.NewReader(`{"username":"dj@example.com","password":"pw"}`))
+	loginReq.Header.Set("Authorization", "Bearer console-fixture")
+	loginReq.Header.Set("Content-Type", "application/json")
+	loginResp, err := http.DefaultClient.Do(loginReq)
+	if err != nil || loginResp.StatusCode != 200 {
+		t.Fatalf("helper login: %v %v", err, loginResp)
+	}
+	loginResp.Body.Close()
+
+	var lists2 tidalList
+	tidalGet(t, gw.URL, "/v1/users/1/playlists", 200, &lists2)
+	if !strings.Contains(string(lists2.Items[1]), "Second Account") {
+		t.Fatalf("expected invalidated browse cache with Second Account, got %s", lists2.Items)
 	}
 }

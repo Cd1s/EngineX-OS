@@ -28,10 +28,13 @@ func (a *AppleMusic) HelperConfig() AppleMusicHelperConfig {
 func (a *AppleMusic) SetHelper(helperURL, loginURL, token string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.HelperURL, a.HelperLoginURL, a.HelperToken = strings.TrimRight(helperURL, "/"), loginURL, token
-	if a.HelperURL == "" {
+	trimmed := strings.TrimRight(helperURL, "/")
+	if trimmed == "" || a.HelperURL != trimmed || a.HelperToken != token {
 		a.helperSignedIn = false
+		a.helperDevToken = ""
+		a.helperProbedAt = time.Time{}
 	}
+	a.HelperURL, a.HelperLoginURL, a.HelperToken = trimmed, loginURL, token
 }
 
 type AppleMusicHelperStatus struct {
@@ -102,7 +105,13 @@ func (a *AppleMusic) helperLogin(ctx context.Context, cfg AppleMusicHelperConfig
 	status.SignedIn = wire.SignedIn || status.LoginState == "ready"
 	a.mu.Lock()
 	a.helperSignedIn = status.SignedIn
+	if !status.SignedIn {
+		a.helperDevToken = ""
+	}
 	a.mu.Unlock()
+	if status.SignedIn {
+		a.syncHelperCredentials(ctx, cfg)
+	}
 	// Use an allowlisted message rather than exposing an upstream credential echo.
 	switch status.LoginState {
 	case "ready":
@@ -117,15 +126,91 @@ func (a *AppleMusic) helperLogin(ctx context.Context, cfg AppleMusicHelperConfig
 	return status, nil
 }
 
+// syncHelperCredentials pulls the signed-in account's media-user-token,
+// developer token, and storefront from enginex-amd when supported. Older
+// helpers without /v1/login/credentials are ignored without error.
+func (a *AppleMusic) syncHelperCredentials(ctx context.Context, cfg AppleMusicHelperConfig) {
+	var creds struct {
+		SignedIn       bool   `json:"signedIn"`
+		MediaUserToken string `json:"mediaUserToken"`
+		DeveloperToken string `json:"developerToken"`
+		Storefront     string `json:"storefront"`
+	}
+	if err := a.helperCall(ctx, cfg, "GET", "/v1/login/credentials", nil, &creds); err != nil || !creds.SignedIn {
+		return
+	}
+	userToken := strings.TrimSpace(creds.MediaUserToken)
+	devToken := strings.TrimSpace(creds.DeveloperToken)
+	storefront := strings.ToLower(strings.TrimSpace(creds.Storefront))
+	if !amStore.MatchString(storefront) {
+		storefront = ""
+	}
+	var save bool
+	var owner AppleMusicOwner
+	var ownerPath string
+
+	a.mu.Lock()
+	if devToken != "" && devToken != a.helperDevToken {
+		if a.web != "" && a.web == a.helperDevToken {
+			a.web = ""
+			a.webAt = time.Time{}
+		}
+		a.helperDevToken = devToken
+	}
+	if userToken != "" && userToken != a.owner.UserToken {
+		a.owner.UserToken = userToken
+		save = true
+	}
+	if storefront != "" && storefront != a.owner.Storefront {
+		a.owner.Storefront = storefront
+		save = true
+	}
+	if save {
+		a.credGen++
+		owner = a.owner
+		owner.Links = append([]string(nil), a.owner.Links...)
+		ownerPath = a.OwnerPath
+	}
+	a.mu.Unlock()
+
+	if save && ownerPath != "" {
+		a.saveMu.Lock()
+		_ = SaveJSON(ownerPath, owner)
+		a.saveMu.Unlock()
+	}
+}
+
+// ProbeHelper checks helper status at most once per cooldown when unready so an
+// offline helper does not stall every gateway browse or search request.
+func (a *AppleMusic) ProbeHelper(ctx context.Context, cooldown time.Duration) AppleMusicHelperStatus {
+	a.probeMu.Lock()
+	defer a.probeMu.Unlock()
+	a.mu.Lock()
+	configured := a.HelperURL != ""
+	last := a.helperProbedAt
+	signedIn := a.helperSignedIn
+	if configured && (last.IsZero() || time.Since(last) >= cooldown) {
+		a.helperProbedAt = time.Now()
+		a.mu.Unlock()
+		return a.HelperStatus(ctx)
+	}
+	a.mu.Unlock()
+	return AppleMusicHelperStatus{Configured: configured, SignedIn: signedIn}
+}
+
 func (a *AppleMusic) HelperStatus(ctx context.Context) AppleMusicHelperStatus {
 	cfg := a.HelperConfig()
 	status := AppleMusicHelperStatus{Configured: cfg.URL != ""}
 	if !status.Configured {
 		a.mu.Lock()
 		a.helperSignedIn = false
+		a.helperDevToken = ""
 		a.mu.Unlock()
 		return status
 	}
+	a.mu.Lock()
+	a.helperProbedAt = time.Now()
+	a.mu.Unlock()
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	if err := a.helperCall(ctx, cfg, "GET", "/healthz", nil, nil); err != nil {

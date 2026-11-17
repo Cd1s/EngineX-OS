@@ -84,8 +84,37 @@ func validAppleMusicHelperURL(raw string) bool {
 	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Hostname() != "" && u.User == nil && u.RawQuery == "" && u.Fragment == ""
 }
 
+func (s *Server) syncAppleMusicSession(clearDeleted bool, prevGen uint64) {
+	if s.appleMusic == nil {
+		return
+	}
+	readyNow := s.appleMusic.Ready()
+	credChanged := s.appleMusic.CredGen() != prevGen
+	var sessionIDs []string
+	s.mu.Lock()
+	if clearDeleted {
+		delete(s.ownerDeleted, "applemusic")
+	}
+	for _, v := range s.sessions {
+		if !v.Guest && v.Provider == "applemusic" {
+			if readyNow && !s.ownerDeleted["applemusic"] {
+				v.Ready = true
+			}
+			sessionIDs = append(sessionIDs, v.ID)
+		}
+	}
+	s.mu.Unlock()
+	if credChanged && s.tidal != nil {
+		for _, id := range sessionIDs {
+			s.tidal.dropAppleMusicBrowse(id)
+		}
+	}
+}
+
 func (s *Server) appleMusicHelperStatus(w http.ResponseWriter, r *http.Request) {
+	prevGen := s.appleMusic.CredGen()
 	status := s.appleMusic.HelperStatus(r.Context())
+	s.syncAppleMusicSession(false, prevGen)
 	cfg := s.appleMusic.HelperConfig()
 	// Credential-bearing URLs are served only by the authenticated redirect / QR.
 	loginPage := ""
@@ -142,11 +171,13 @@ func (s *Server) appleMusicHelperLogin(w http.ResponseWriter, r *http.Request) {
 	if !input(w, r, &in) {
 		return
 	}
+	prevGen := s.appleMusic.CredGen()
 	status, err := s.appleMusic.HelperLoginBegin(r.Context(), in.Username, in.Password)
 	if err != nil {
 		fail(w, 400, err)
 		return
 	}
+	s.syncAppleMusicSession(status.SignedIn, prevGen)
 	respond(w, status)
 }
 
@@ -157,11 +188,13 @@ func (s *Server) appleMusicHelper2FA(w http.ResponseWriter, r *http.Request) {
 	if !input(w, r, &in) {
 		return
 	}
+	prevGen := s.appleMusic.CredGen()
 	status, err := s.appleMusic.HelperLogin2FA(r.Context(), strings.TrimSpace(in.Code))
 	if err != nil {
 		fail(w, 400, err)
 		return
 	}
+	s.syncAppleMusicSession(status.SignedIn, prevGen)
 	respond(w, status)
 }
 

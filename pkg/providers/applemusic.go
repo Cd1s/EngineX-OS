@@ -30,10 +30,29 @@ type AppleMusic struct {
 	HelperURL, HelperLoginURL, HelperToken string
 
 	mu             sync.Mutex
+	saveMu         sync.Mutex
+	probeMu        sync.Mutex
 	owner          AppleMusicOwner
+	credGen        uint64
 	helperSignedIn bool
+	helperDevToken string // developer token synced from enginex-amd (fallback if web scrape fails)
+	helperProbedAt time.Time
 	web            string // developer token scraped from the web player
 	webAt          time.Time
+}
+
+// AppleMusicLikedID names the owner's library & favourite songs view.
+const AppleMusicLikedID = "liked"
+
+const amLibraryAlbumPrefix = "libal:"
+
+// AppleMusicAlbum is a saved album from the owner's library or pasted album links.
+type AppleMusicAlbum struct {
+	ID         string
+	ListID     string
+	Name       string
+	ArtistName string
+	TrackCount int
 }
 
 // AppleMusicOwner is what the phone page saves.
@@ -146,13 +165,57 @@ func (a *AppleMusic) SetOwner(ctx context.Context, o AppleMusicOwner) error {
 			return fmt.Errorf("applemusic: the media-user-token was refused: %w", err)
 		}
 	}
-	if err := SaveJSON(a.OwnerPath, o); err != nil {
+	a.saveMu.Lock()
+	err := SaveJSON(a.OwnerPath, o)
+	a.saveMu.Unlock()
+	if err != nil {
 		return err
 	}
 	a.mu.Lock()
 	a.owner = o
+	a.credGen++
 	a.mu.Unlock()
 	return nil
+}
+
+// CredGen returns a monotonic counter incremented when owner credentials change.
+func (a *AppleMusic) CredGen() uint64 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.credGen
+}
+
+// Forget clears the owner's account credentials and links in memory and removes
+// the persisted owner file, leaving any configured download helper intact.
+func (a *AppleMusic) Forget() error {
+	if a == nil {
+		return nil
+	}
+	a.mu.Lock()
+	a.owner = AppleMusicOwner{}
+	a.credGen++
+	a.helperSignedIn = false
+	a.helperDevToken = ""
+	a.helperProbedAt = time.Time{}
+	a.web = ""
+	a.webAt = time.Time{}
+	path := a.OwnerPath
+	a.mu.Unlock()
+	if path == "" {
+		return nil
+	}
+	a.saveMu.Lock()
+	err := os.Remove(path)
+	a.saveMu.Unlock()
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// Logout clears the owner's account credentials on sign-out.
+func (a *AppleMusic) Logout() error {
+	return a.Forget()
 }
 
 // Download asks the enginex-amd helper for a FLAC of t. The helper owns the
@@ -349,7 +412,9 @@ func (a *AppleMusic) DeveloperToken(ctx context.Context) (string, error) {
 }
 
 // developerToken is the owner's own token, or the one Apple's web player
-// ships in its script bundle, refreshed a day before it expires.
+// ships in its script bundle, refreshed a day before it expires. If a download
+// helper is configured and the web player cannot be scraped, it falls back to
+// the helper's developer token.
 func (a *AppleMusic) developerToken(ctx context.Context) (string, error) {
 	if t := a.state().DevToken; t != "" {
 		return t, nil
@@ -360,7 +425,60 @@ func (a *AppleMusic) developerToken(ctx context.Context) (string, error) {
 		a.mu.Unlock()
 		return t, nil
 	}
+	helperToken := a.helperDevToken
+	cfg := AppleMusicHelperConfig{a.HelperURL, a.HelperLoginURL, a.HelperToken}
 	a.mu.Unlock()
+
+	scrapeCtx := ctx
+	var cancelScrape context.CancelFunc
+	if helperToken != "" || cfg.URL != "" {
+		limit := 2 * time.Second
+		if deadline, ok := ctx.Deadline(); ok {
+			if rem := time.Until(deadline) / 2; rem > 0 && rem < limit {
+				limit = rem
+			}
+		}
+		scrapeCtx, cancelScrape = context.WithTimeout(ctx, limit)
+	}
+	token, err := a.scrapeDeveloperToken(scrapeCtx)
+	if cancelScrape != nil {
+		cancelScrape()
+	}
+	if err == nil {
+		until := time.Now().Add(12 * time.Hour)
+		if exp := jwtExpiry(token); !exp.IsZero() {
+			until = exp.Add(-24 * time.Hour)
+		}
+		a.mu.Lock()
+		a.web, a.webAt = token, until
+		a.mu.Unlock()
+		return token, nil
+	}
+	if ctx.Err() == nil && cfg.URL != "" && helperToken == "" {
+		syncCtx, cancelSync := context.WithTimeout(ctx, 2*time.Second)
+		a.syncHelperCredentials(syncCtx, cfg)
+		cancelSync()
+		a.mu.Lock()
+		helperToken = a.helperDevToken
+		a.mu.Unlock()
+	}
+	if helperToken != "" {
+		exp := jwtExpiry(helperToken)
+		if exp.IsZero() || time.Now().Before(exp) {
+			until := time.Now().Add(15 * time.Minute)
+			if !exp.IsZero() && exp.Before(until) {
+				until = exp
+			}
+			a.mu.Lock()
+			a.web, a.webAt = helperToken, until
+			a.mu.Unlock()
+			return helperToken, nil
+		}
+	}
+	return "", err
+}
+
+func (a *AppleMusic) scrapeDeveloperToken(ctx context.Context) (string, error) {
 	page, err := a.fetch(ctx, a.webURL()+"/us/browse", 4<<20)
 	if err != nil {
 		return "", fmt.Errorf("applemusic: web player: %w", err)
@@ -396,13 +514,6 @@ func (a *AppleMusic) developerToken(ctx context.Context) (string, error) {
 			return "", errors.New("applemusic: no developer token in the web player")
 		}
 	}
-	until := time.Now().Add(12 * time.Hour)
-	if exp := jwtExpiry(token); !exp.IsZero() {
-		until = exp.Add(-24 * time.Hour)
-	}
-	a.mu.Lock()
-	a.web, a.webAt = token, until
-	a.mu.Unlock()
 	return token, nil
 }
 
@@ -555,6 +666,9 @@ func (a *AppleMusic) get(ctx context.Context, path string, user bool, out any) e
 		var status StatusError
 		if try == 0 && errors.As(err, &status) && status == 401 && a.state().DevToken == "" {
 			a.mu.Lock()
+			if a.web != "" && a.web == a.helperDevToken {
+				a.helperDevToken = ""
+			}
 			a.web = ""
 			a.mu.Unlock()
 			continue
@@ -585,6 +699,7 @@ type amResource struct {
 type amPage struct {
 	Data []amResource
 	Next string
+	Meta struct{ Total int }
 }
 
 func artwork(u string, size int) string {
@@ -640,15 +755,15 @@ func (a *AppleMusic) pages(ctx context.Context, path string, user bool, max int)
 	return all, nil
 }
 
-// Playlist IDs: "pl:<storefront>:<id>", "al:<storefront>:<id>", "lib:<id>".
+// Playlist IDs: "pl:<storefront>:<id>", "al:<storefront>:<id>", "lib:<id>", "libal:<id>", "liked".
 func linkID(l AppleMusicLink) string {
 	return map[string]string{"playlist": "pl", "album": "al"}[l.Kind] + ":" + l.Storefront + ":" + l.ID
 }
 
-func (a *AppleMusic) linkPlaylist(ctx context.Context, raw string) (Playlist, error) {
+func (a *AppleMusic) linkResource(ctx context.Context, raw string) (AppleMusicLink, amResource, int, error) {
 	links := ParseAppleMusicLinks(raw)
 	if len(links) != 1 {
-		return Playlist{}, errors.New("not an Apple Music playlist or album link")
+		return AppleMusicLink{}, amResource{}, 0, errors.New("not an Apple Music playlist or album link")
 	}
 	l := links[0]
 	if l.Storefront == "" {
@@ -656,15 +771,23 @@ func (a *AppleMusic) linkPlaylist(ctx context.Context, raw string) (Playlist, er
 	}
 	var p amPage
 	if err := a.get(ctx, "/v1/catalog/"+l.Storefront+"/"+l.Kind+"s/"+url.PathEscape(l.ID), false, &p); err != nil {
-		return Playlist{}, err
+		return AppleMusicLink{}, amResource{}, 0, err
 	}
 	if len(p.Data) == 0 {
-		return Playlist{}, StatusError(404)
+		return AppleMusicLink{}, amResource{}, 0, StatusError(404)
 	}
 	r := p.Data[0]
 	count := r.Attributes.TrackCount
 	if count == 0 {
 		count = len(r.Relationships.Tracks.Data)
+	}
+	return l, r, count, nil
+}
+
+func (a *AppleMusic) linkPlaylist(ctx context.Context, raw string) (Playlist, error) {
+	l, r, count, err := a.linkResource(ctx, raw)
+	if err != nil {
+		return Playlist{}, err
 	}
 	return Playlist{ID: linkID(l), Title: r.Attributes.Name, Count: count}, nil
 }
@@ -676,6 +799,83 @@ func (a *AppleMusic) libraryPlaylists(ctx context.Context, max int) ([]Playlist,
 		out = append(out, Playlist{ID: "lib:" + r.ID, Title: r.Attributes.Name})
 	}
 	return out, err
+}
+
+func (a *AppleMusic) librarySongsCount(ctx context.Context) (int, error) {
+	var p amPage
+	if err := a.get(ctx, "/v1/me/library/songs?limit=1&include=catalog", true, &p); err != nil {
+		return 0, err
+	}
+	if len(p.Data) == 0 && p.Meta.Total == 0 {
+		return 0, nil
+	}
+	if p.Meta.Total > 0 {
+		return p.Meta.Total, nil
+	}
+	return len(p.Data), nil
+}
+
+func (a *AppleMusic) libraryAlbums(ctx context.Context, max int) ([]AppleMusicAlbum, error) {
+	rs, err := a.pages(ctx, "/v1/me/library/albums?limit=100", true, max)
+	var out []AppleMusicAlbum
+	for _, r := range rs {
+		out = append(out, AppleMusicAlbum{
+			ID:         r.ID,
+			ListID:     amLibraryAlbumPrefix + r.ID,
+			Name:       r.Attributes.Name,
+			ArtistName: r.Attributes.ArtistName,
+			TrackCount: r.Attributes.TrackCount,
+		})
+	}
+	return out, err
+}
+
+// FavoriteAlbums lists saved library albums and any pasted album links.
+func (a *AppleMusic) FavoriteAlbums(ctx context.Context) ([]AppleMusicAlbum, error) {
+	o := a.state()
+	var out []AppleMusicAlbum
+	var firstErr error
+	for _, raw := range o.Links {
+		links := ParseAppleMusicLinks(raw)
+		if len(links) != 1 || links[0].Kind != "album" {
+			continue
+		}
+		l, r, count, err := a.linkResource(ctx, raw)
+		if err != nil {
+			var st StatusError
+			if errors.As(err, &st) && (st == 401 || st == 403) {
+				return nil, err
+			}
+			firstErr = keepFirst(firstErr, err)
+			continue
+		}
+		out = append(out, AppleMusicAlbum{
+			ID:         l.ID,
+			ListID:     linkID(l),
+			Name:       r.Attributes.Name,
+			ArtistName: r.Attributes.ArtistName,
+			TrackCount: count,
+		})
+	}
+	if o.UserToken != "" {
+		albums, err := a.libraryAlbums(ctx, 1000)
+		if err != nil {
+			var st StatusError
+			if errors.As(err, &st) && st == 404 {
+				return out, nil
+			}
+			if len(albums) == 0 && len(out) == 0 {
+				return nil, err
+			}
+			out = append(out, albums...)
+			return out, err
+		}
+		out = append(out, albums...)
+	}
+	if len(out) == 0 && firstErr != nil {
+		return nil, firstErr
+	}
+	return out, nil
 }
 
 // Playlists lists the saved links first, then the library. One broken link
@@ -697,11 +897,43 @@ func (a *AppleMusic) Playlists(ctx context.Context) ([]Playlist, error) {
 		out = append(out, p)
 	}
 	if o.UserToken != "" {
-		lib, err := a.libraryPlaylists(ctx, 1000)
-		if err != nil {
+		// Warm the developer token once so concurrent library endpoints share it.
+		if _, err := a.developerToken(ctx); err != nil {
 			return nil, err
 		}
+		var lib []Playlist
+		var libErr error
+		var songsCount int
+		var songsErr error
+		var albums []AppleMusicAlbum
+		var albumsErr error
+		var wg sync.WaitGroup
+		wg.Add(3)
+		go func() {
+			defer wg.Done()
+			lib, libErr = a.libraryPlaylists(ctx, 1000)
+		}()
+		go func() {
+			defer wg.Done()
+			songsCount, songsErr = a.librarySongsCount(ctx)
+		}()
+		go func() {
+			defer wg.Done()
+			albums, albumsErr = a.libraryAlbums(ctx, 1000)
+		}()
+		wg.Wait()
+		if libErr != nil {
+			return nil, libErr
+		}
+		if songsErr == nil && songsCount > 0 {
+			out = append(out, Playlist{ID: AppleMusicLikedID, Title: "资料库歌曲 (Library Songs)", Count: songsCount})
+		}
 		out = append(out, lib...)
+		if albumsErr == nil {
+			for _, al := range albums {
+				out = append(out, Playlist{ID: al.ListID, Title: "【专辑】" + al.Name, Count: al.TrackCount})
+			}
+		}
 	}
 	if len(out) == 0 && firstErr != nil {
 		return nil, firstErr
@@ -719,17 +951,29 @@ func keepFirst(old, err error) error {
 func (a *AppleMusic) Tracks(ctx context.Context, id string) ([]Track, error) {
 	var path string
 	user := false
-	switch kind, rest, _ := strings.Cut(id, ":"); kind {
-	case "pl", "al":
-		sf, cid, ok := strings.Cut(rest, ":")
-		if !ok || !amStore.MatchString(sf) {
+	if id == AppleMusicLikedID {
+		if a.state().UserToken == "" {
+			return nil, nil
+		}
+		path, user = "/v1/me/library/songs?limit=100&include=catalog", true
+	} else {
+		switch kind, rest, _ := strings.Cut(id, ":"); kind {
+		case "pl", "al":
+			sf, cid, ok := strings.Cut(rest, ":")
+			if !ok || !amStore.MatchString(sf) {
+				return nil, errors.New("applemusic: invalid playlist id")
+			}
+			path = "/v1/catalog/" + sf + "/" + map[string]string{"pl": "playlists", "al": "albums"}[kind] + "/" + url.PathEscape(cid) + "/tracks?limit=100"
+		case "lib":
+			path, user = "/v1/me/library/playlists/"+url.PathEscape(rest)+"/tracks?limit=100&include=catalog", true
+		case "libal":
+			if rest == "" {
+				return nil, errors.New("applemusic: invalid playlist id")
+			}
+			path, user = "/v1/me/library/albums/"+url.PathEscape(rest)+"/tracks?limit=100&include=catalog", true
+		default:
 			return nil, errors.New("applemusic: invalid playlist id")
 		}
-		path = "/v1/catalog/" + sf + "/" + map[string]string{"pl": "playlists", "al": "albums"}[kind] + "/" + url.PathEscape(cid) + "/tracks?limit=100"
-	case "lib":
-		path, user = "/v1/me/library/playlists/"+url.PathEscape(rest)+"/tracks?limit=100&include=catalog", true
-	default:
-		return nil, errors.New("applemusic: invalid playlist id")
 	}
 	rs, err := a.pages(ctx, path, user, 20000)
 	if err != nil {
@@ -758,6 +1002,26 @@ func (a *AppleMusic) Search(ctx context.Context, query string) ([]Track, error) 
 		if t, ok := s.track(); ok {
 			out = append(out, t)
 		}
+	}
+	return out, nil
+}
+
+// SearchPlaylists looks up catalog playlists in the owner's storefront.
+func (a *AppleMusic) SearchPlaylists(ctx context.Context, query string) ([]Playlist, error) {
+	var r struct {
+		Results struct{ Playlists amPage }
+	}
+	sf := a.state().Storefront
+	q := url.Values{"term": {query}, "types": {"playlists"}, "limit": {"20"}}
+	if err := a.get(ctx, "/v1/catalog/"+sf+"/search?"+q.Encode(), false, &r); err != nil {
+		return nil, err
+	}
+	out := make([]Playlist, 0, len(r.Results.Playlists.Data))
+	for _, p := range r.Results.Playlists.Data {
+		if p.ID == "" || p.Attributes.Name == "" {
+			continue
+		}
+		out = append(out, Playlist{ID: "pl:" + sf + ":" + p.ID, Title: p.Attributes.Name, Count: p.Attributes.TrackCount})
 	}
 	return out, nil
 }

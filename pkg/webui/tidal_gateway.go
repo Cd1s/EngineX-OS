@@ -137,6 +137,12 @@ type playlistRef struct {
 	list     providers.Playlist
 	guest    bool
 }
+type albumRef struct {
+	session  string
+	provider string
+	listID   string
+	guest    bool
+}
 type trackSearcher interface {
 	Search(context.Context, string) ([]providers.Track, error)
 }
@@ -155,6 +161,8 @@ type tidalGateway struct {
 	ids       map[string]int64
 	tracks    map[int64]trackRef
 	lists     map[string]playlistRef
+	albums    map[int64]albumRef
+	albumIDs  map[string]int64
 	next      int64
 
 	// Artwork for list rows, by what the row knows: title and artist.
@@ -168,6 +176,7 @@ type tidalGateway struct {
 	seq       int64
 	trackSeen map[int64]int64
 	listSeen  map[string]int64
+	albumSeen map[int64]int64
 
 	saving bool       // a save of the track IDs is scheduled
 	saveMu sync.Mutex // keeps saves in order
@@ -190,10 +199,18 @@ type savedList struct {
 	List     providers.Playlist `json:"list"`
 	Guest    bool               `json:"guest,omitempty"`
 }
+type savedAlbum struct {
+	ID       int64  `json:"id"`
+	Session  string `json:"session,omitempty"`
+	Provider string `json:"provider"`
+	ListID   string `json:"listId"`
+	Guest    bool   `json:"guest,omitempty"`
+}
 type savedTracks struct {
-	Next   int64       `json:"next"`
-	Tracks []savedRef  `json:"tracks"` // least recently used first
-	Lists  []savedList `json:"lists"`  // least recently used first
+	Next   int64        `json:"next"`
+	Tracks []savedRef   `json:"tracks"` // least recently used first
+	Lists  []savedList  `json:"lists"`  // least recently used first
+	Albums []savedAlbum `json:"albums,omitempty"`
 }
 
 const trackSaveDelay = 3 * time.Second
@@ -238,6 +255,13 @@ func (g *tidalGateway) loadTracks() {
 		g.seq++
 		g.listSeen[l.ID] = g.seq
 	}
+	for _, al := range v.Albums {
+		ref := albumRef{al.Session, al.Provider, al.ListID, al.Guest}
+		g.albums[al.ID] = ref
+		g.albumIDs[albumKey(ref)] = al.ID
+		g.seq++
+		g.albumSeen[al.ID] = g.seq
+	}
 }
 
 // scheduleSave must be called with g.mu held.
@@ -267,6 +291,10 @@ func (g *tidalGateway) saveTracks() {
 		v.Lists = append(v.Lists, savedList{id, ref.session, ref.provider, ref.list, ref.guest})
 	}
 	sort.Slice(v.Lists, func(a, b int) bool { return g.listSeen[v.Lists[a].ID] < g.listSeen[v.Lists[b].ID] })
+	for id, ref := range g.albums {
+		v.Albums = append(v.Albums, savedAlbum{id, ref.session, ref.provider, ref.listID, ref.guest})
+	}
+	sort.Slice(v.Albums, func(a, b int) bool { return g.albumSeen[v.Albums[a].ID] < g.albumSeen[v.Albums[b].ID] })
 	g.mu.Unlock()
 	if _, err := os.Stat(filepath.Dir(path)); err != nil {
 		return // the state dir is gone (a test that ended)
@@ -303,7 +331,7 @@ func evict[K comparable](seen map[K]int64, limit int, drop func(K)) {
 }
 
 func newTidalGateway(s *Server) *tidalGateway {
-	g := &tidalGateway{browse: newBrowseCache(s.cfg.StateDir), artURLs: map[string]string{}, artCache: map[string][]byte{}, s: s, catalog: &providers.Deezer{BaseURL: s.cfg.DeezerURL, HTTP: s.cfg.HTTP}, mux: http.NewServeMux(), ids: map[string]int64{}, tracks: map[int64]trackRef{}, lists: map[string]playlistRef{}, trackSeen: map[int64]int64{}, listSeen: map[string]int64{}}
+	g := &tidalGateway{browse: newBrowseCache(s.cfg.StateDir), artURLs: map[string]string{}, artCache: map[string][]byte{}, s: s, catalog: &providers.Deezer{BaseURL: s.cfg.DeezerURL, HTTP: s.cfg.HTTP}, mux: http.NewServeMux(), ids: map[string]int64{}, tracks: map[int64]trackRef{}, lists: map[string]playlistRef{}, albums: map[int64]albumRef{}, albumIDs: map[string]int64{}, trackSeen: map[int64]int64{}, listSeen: map[string]int64{}, albumSeen: map[int64]int64{}}
 	g.searches = newSearchCache()
 	g.seedFromStreamingAccounts()
 	g.loadTracks()
@@ -613,27 +641,54 @@ func (g *tidalGateway) sourcesFor(scope string) []*Session {
 	s.prune()
 	s.mu.Lock()
 	var restore []string
+	var pendingAM []*Session
 	for _, name := range loginServices {
 		if scope != "" && name != scope {
 			continue
 		}
 		owned := false
 		for _, v := range s.sessions {
-			owned = owned || (!v.Guest && v.Provider == name)
+			if !v.Guest && v.Provider == name {
+				owned = true
+				if name == "applemusic" && !v.Ready && !s.ownerDeleted[name] {
+					pendingAM = append(pendingAM, v)
+				}
+			}
 		}
 		if !(owned || s.ownerDeleted[name]) {
 			restore = append(restore, name)
 		}
 	}
 	s.mu.Unlock()
+	for _, v := range pendingAM {
+		if am, ok := v.p.(*providers.AppleMusic); ok && !am.Ready() && am.HelperConfig().URL != "" {
+			ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+			_ = am.ProbeHelper(ctx, 30*time.Second)
+			cancel()
+		}
+		if ready(v.p) {
+			s.mu.Lock()
+			if !s.ownerDeleted[v.Provider] {
+				v.Ready = true
+			}
+			s.mu.Unlock()
+		}
+	}
 	type restored struct {
 		name string
 		p    providers.Provider
 	}
 	var found []restored
 	for _, name := range restore {
-		if p, err := s.makeProvider(name, false, ""); err == nil && ready(p) {
-			found = append(found, restored{name, p})
+		if p, err := s.makeProvider(name, false, ""); err == nil {
+			if am, ok := p.(*providers.AppleMusic); ok && !am.Ready() && am.HelperConfig().URL != "" {
+				ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+				_ = am.ProbeHelper(ctx, 30*time.Second)
+				cancel()
+			}
+			if ready(p) {
+				found = append(found, restored{name, p})
+			}
 		}
 	}
 	s.mu.Lock()
@@ -739,6 +794,63 @@ func (g *tidalGateway) list(id string) (playlistRef, bool) {
 		g.listSeen[id] = g.seq
 	}
 	return ref, ok
+}
+
+func albumKey(ref albumRef) string {
+	return owner(ref.session, ref.guest) + "\x00" + ref.provider + "\x00" + ref.listID
+}
+
+func (g *tidalGateway) addAlbum(ref albumRef) int64 {
+	key := albumKey(ref)
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	id := g.albumIDs[key]
+	if id == 0 {
+		id = int64(tidalNumericID(key))
+		if id == 0 {
+			id = 1
+		}
+		for {
+			existing, taken := g.albums[id]
+			if !taken || existing == ref {
+				break
+			}
+			id++
+			if id > 1<<31-1 {
+				id = 1
+			}
+		}
+		g.albumIDs[key] = id
+	}
+	g.scheduleSave()
+	g.albums[id] = ref
+	g.seq++
+	g.albumSeen[id] = g.seq
+	evict(g.albumSeen, maxLists, func(id int64) {
+		r := g.albums[id]
+		delete(g.albumIDs, albumKey(r))
+		delete(g.albums, id)
+	})
+	return id
+}
+
+func (g *tidalGateway) album(id int64) (albumRef, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	ref, ok := g.albums[id]
+	if ok {
+		g.seq++
+		g.albumSeen[id] = g.seq
+	}
+	return ref, ok
+}
+
+func (g *tidalGateway) dropAppleMusicBrowse(sessionID string) {
+	if g == nil || g.browse == nil || sessionID == "" {
+		return
+	}
+	g.browse.drop(browseKey("applemusic", sessionID, "lists", ""))
+	g.browse.drop(browseKey("applemusic", sessionID, "tracks", providers.AppleMusicLikedID))
 }
 
 // addTrack assigns stable positive IDs per source track, kept across restarts.
@@ -1445,6 +1557,8 @@ func (g *tidalGateway) favoriteTracks(w http.ResponseWriter, r *http.Request) {
 			tracks, err = g.browseTracks(r.Context(), scope, v.ID, v.p, providers.SpotifyLikedID)
 		case "soundcloud":
 			tracks, err = g.browseTracks(r.Context(), scope, v.ID, v.p, "likes")
+		case "applemusic":
+			tracks, err = g.browseTracks(r.Context(), scope, v.ID, v.p, providers.AppleMusicLikedID)
 		}
 		if len(tracks) > 0 && len(tracks) <= maxPlaylistTracks {
 			g.s.cfg.BPM.Enrich(r.Context(), tracks)
@@ -1471,6 +1585,30 @@ func (g *tidalGateway) ownerNetease() (*Session, *providers.Netease) {
 	return nil, nil
 }
 
+func albumJSON(id any, title, copyright string, count int, artistNames []string) map[string]any {
+	names := []any{}
+	for i, name := range artistNames {
+		if name == "" {
+			continue
+		}
+		kind := "FEATURED"
+		if len(names) == 0 && i == 0 {
+			kind = "MAIN"
+		}
+		names = append(names, map[string]any{"id": tidalNumericID(name), "name": name, "type": kind, "picture": nil})
+	}
+	var main any
+	if len(names) > 0 {
+		main = names[0]
+	}
+	v := map[string]any{"id": id, "title": title, "numberOfTracks": count, "numberOfVideos": 0, "numberOfVolumes": 1, "duration": 0, "releaseDate": "2000-01-01", "streamStartDate": "2000-01-01T00:00:00.000+0000", "cover": nil, "streamReady": true, "allowStreaming": true, "premiumStreamingOnly": false, "copyright": copyright, "explicit": false, "popularity": 0, "audioQuality": "LOSSLESS", "audioModes": []string{"STEREO"}, "type": "ALBUM", "url": "http://enginex.lan:8080", "artist": main, "artists": names}
+	flat := map[string]any{"item": v, "created": tidalTime(time.Now())}
+	for k, f := range v {
+		flat[k] = f
+	}
+	return flat
+}
+
 func (g *tidalGateway) favoriteAlbums(w http.ResponseWriter, r *http.Request) {
 	items := []any{}
 	if _, n := g.ownerNetease(); n != nil {
@@ -1479,36 +1617,69 @@ func (g *tidalGateway) favoriteAlbums(w http.ResponseWriter, r *http.Request) {
 			log.Printf("stream-sync: gateway source failed: %v", err)
 		}
 		for _, a := range albums {
-			names := []any{}
-			for i, artist := range a.Artists {
-				kind := "FEATURED"
-				if i == 0 {
-					kind = "MAIN"
-				}
-				names = append(names, map[string]any{"id": tidalNumericID(artist.Name), "name": artist.Name, "type": kind, "picture": nil})
+			artists := make([]string, 0, len(a.Artists))
+			for _, artist := range a.Artists {
+				artists = append(artists, artist.Name)
 			}
-			var main any
-			if len(names) > 0 {
-				main = names[0]
+			items = append(items, albumJSON(a.ID, a.Name, providerLabels["netease"], a.Size, artists))
+		}
+	} else if g.s.scope() == "applemusic" {
+		for _, v := range g.sourcesFor("applemusic") {
+			am, ok := v.p.(*providers.AppleMusic)
+			if !ok || v.Guest {
+				continue
 			}
-			v := map[string]any{"id": a.ID, "title": a.Name, "numberOfTracks": a.Size, "numberOfVideos": 0, "numberOfVolumes": 1, "duration": 0, "releaseDate": "2000-01-01", "streamStartDate": "2000-01-01T00:00:00.000+0000", "cover": nil, "streamReady": true, "allowStreaming": true, "premiumStreamingOnly": false, "copyright": providerLabels["netease"], "explicit": false, "popularity": 0, "audioQuality": "LOSSLESS", "audioModes": []string{"STEREO"}, "type": "ALBUM", "url": "http://enginex.lan:8080", "artist": main, "artists": names}
-			flat := map[string]any{"item": v, "created": tidalTime(time.Now())}
-			for k, f := range v {
-				flat[k] = f
+			albums, err := am.FavoriteAlbums(r.Context())
+			if err != nil {
+				log.Printf("stream-sync: gateway source failed: %v", err)
 			}
-			items = append(items, flat)
+			for _, al := range albums {
+				id := g.addAlbum(albumRef{session: v.ID, provider: "applemusic", listID: al.ListID, guest: v.Guest})
+				items = append(items, albumJSON(id, al.Name, providerLabels["applemusic"], al.TrackCount, []string{al.ArtistName}))
+			}
+			break
 		}
 	}
 	respond(w, page(r, 100, items))
 }
 
 func (g *tidalGateway) albumTracks(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	if numID, parseErr := strconv.ParseInt(idStr, 10, 64); parseErr == nil {
+		if ref, ok := g.album(numID); ok {
+			v := g.sessionByID(ref.session)
+			if v == nil && !ref.guest {
+				for _, o := range g.sourcesFor(ref.provider) {
+					if !o.Guest && o.Provider == ref.provider {
+						v = o
+					}
+				}
+			}
+			if v == nil {
+				fail(w, 404, errors.New("login expired; sign in again at "+lanHost()+":8080"))
+				return
+			}
+			tracks, err := g.browseTracks(r.Context(), ref.provider, v.ID, v.p, ref.listID)
+			if err != nil && len(tracks) == 0 {
+				fail(w, 502, err)
+				return
+			}
+			g.s.cfg.BPM.Enrich(r.Context(), tracks)
+			g.enrichRatingsFromDB(r.Context(), tracks)
+			items := g.trackItems(v.ID, v.Guest, tracks)
+			if err != nil {
+				items = append(items, g.incompleteTrack(ref.provider, browseKey(ref.provider, v.ID, "tracks", ref.listID), err))
+			}
+			respond(w, page(r, 500, items))
+			return
+		}
+	}
 	session, n := g.ownerNetease()
 	if n == nil {
 		respond(w, page(r, 100, []any{}))
 		return
 	}
-	tracks, err := g.browseTracks(r.Context(), "netease", session.ID, n, "album:"+r.PathValue("id"))
+	tracks, err := g.browseTracks(r.Context(), "netease", session.ID, n, "album:"+idStr)
 	if err != nil && len(tracks) == 0 {
 		fail(w, 502, err)
 		return
@@ -1516,7 +1687,7 @@ func (g *tidalGateway) albumTracks(w http.ResponseWriter, r *http.Request) {
 	g.s.cfg.BPM.Enrich(r.Context(), tracks)
 	items := g.trackItems(session.ID, false, tracks)
 	if err != nil {
-		items = append(items, g.incompleteTrack("netease", browseKey("netease", session.ID, "tracks", "album:"+r.PathValue("id")), err))
+		items = append(items, g.incompleteTrack("netease", browseKey("netease", session.ID, "tracks", "album:"+idStr), err))
 	}
 	respond(w, page(r, 500, items))
 }

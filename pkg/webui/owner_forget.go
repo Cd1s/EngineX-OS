@@ -29,8 +29,13 @@ func (s *Server) forgetOwner(provider string) error {
 	switch provider {
 	case "deezer":
 		return remove(s.deezerOwnerPath())
-	case "netease", "applemusic":
+	case "netease":
 		return remove(filepath.Join(s.cfg.StateDir, provider+"-owner.json"))
+	case "applemusic":
+		if s.appleMusic != nil {
+			return s.appleMusic.Forget()
+		}
+		return remove(filepath.Join(s.cfg.StateDir, "applemusic-owner.json"))
 	case "beatport":
 		if s.beatport != nil {
 			return s.beatport.Forget()

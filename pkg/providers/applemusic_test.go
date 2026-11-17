@@ -254,3 +254,93 @@ func TestFindDeveloperToken(t *testing.T) {
 		t.Fatalf("expected empty for no tokens, got %q", got)
 	}
 }
+
+func TestAppleMusicLibrarySongsAlbumsAndSearchPlaylists(t *testing.T) {
+	tok := fakeJWT(time.Now().Add(30 * 24 * time.Hour))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/us/browse":
+			fmt.Fprintf(w, `<script src="/assets/index.js"></script>`)
+			return
+		case "/assets/index.js":
+			fmt.Fprintf(w, `const t=%q;`, tok)
+			return
+		}
+		switch {
+		case r.URL.Path == "/v1/me/library/playlists":
+			json.NewEncoder(w).Encode(map[string]any{
+				"data": []any{map[string]any{"id": "p.fav", "type": "library-playlists", "attributes": map[string]any{"name": "Favourite Songs"}}},
+			})
+		case r.URL.Path == "/v1/me/library/songs":
+			if r.URL.Query().Get("limit") == "1" {
+				json.NewEncoder(w).Encode(map[string]any{
+					"data": []any{map[string]any{"id": "i.s1", "type": "library-songs", "attributes": map[string]any{"name": "Sandstorm", "artistName": "Darude", "playParams": map[string]any{"catalogId": "338349243"}}}},
+					"meta": map[string]any{"total": 42},
+				})
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{
+				"data": []any{map[string]any{"id": "i.s1", "type": "library-songs", "attributes": map[string]any{"name": "Sandstorm", "artistName": "Darude", "durationInMillis": 225000, "playParams": map[string]any{"catalogId": "338349243"}}}},
+			})
+		case r.URL.Path == "/v1/me/library/albums":
+			json.NewEncoder(w).Encode(map[string]any{
+				"data": []any{map[string]any{"id": "l.alb1", "type": "library-albums", "attributes": map[string]any{"name": "Before the Storm", "artistName": "Darude", "trackCount": 12}}},
+			})
+		case r.URL.Path == "/v1/me/library/albums/l.alb1/tracks":
+			json.NewEncoder(w).Encode(map[string]any{
+				"data": []any{map[string]any{"id": "i.s1", "type": "library-songs", "attributes": map[string]any{"name": "Sandstorm", "artistName": "Darude", "playParams": map[string]any{"catalogId": "338349243"}}}},
+			})
+		case r.URL.Path == "/v1/catalog/th/search":
+			if r.URL.Query().Get("types") != "playlists" {
+				w.WriteHeader(400)
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{
+				"results": map[string]any{
+					"playlists": map[string]any{
+						"data": []any{map[string]any{"id": "pl.srch1", "type": "playlists", "attributes": map[string]any{"name": "Electronic Essentials", "trackCount": 25}}},
+					},
+				},
+			})
+		case r.URL.Path == "/v1/catalog/th/playlists/pl.srch1/tracks":
+			json.NewEncoder(w).Encode(map[string]any{"data": []any{song("9", "Found Track", "ISRC9")}})
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+
+	am := &AppleMusic{BaseURL: srv.URL, WebURL: srv.URL, owner: AppleMusicOwner{UserToken: "user-token", Storefront: "th"}}
+
+	lists, err := am.Playlists(t.Context())
+	if err != nil || len(lists) != 3 {
+		t.Fatalf("playlists = %+v, err=%v", lists, err)
+	}
+	if lists[0].ID != AppleMusicLikedID || lists[0].Count != 42 || lists[1].ID != "lib:p.fav" || lists[2].ID != "libal:l.alb1" {
+		t.Fatalf("unexpected playlist entries: %+v", lists)
+	}
+
+	liked, err := am.Tracks(t.Context(), AppleMusicLikedID)
+	if err != nil || len(liked) != 1 || liked[0].CatalogID != "338349243" {
+		t.Fatalf("liked tracks = %+v, err=%v", liked, err)
+	}
+
+	albums, err := am.FavoriteAlbums(t.Context())
+	if err != nil || len(albums) != 1 || albums[0].ListID != "libal:l.alb1" || albums[0].ArtistName != "Darude" {
+		t.Fatalf("favorite albums = %+v, err=%v", albums, err)
+	}
+
+	albTracks, err := am.Tracks(t.Context(), albums[0].ListID)
+	if err != nil || len(albTracks) != 1 || albTracks[0].Title != "Sandstorm" {
+		t.Fatalf("album tracks = %+v, err=%v", albTracks, err)
+	}
+
+	foundLists, err := am.SearchPlaylists(t.Context(), "electronic")
+	if err != nil || len(foundLists) != 1 || foundLists[0].ID != "pl:th:pl.srch1" {
+		t.Fatalf("search playlists = %+v, err=%v", foundLists, err)
+	}
+	plTracks, err := am.Tracks(t.Context(), foundLists[0].ID)
+	if err != nil || len(plTracks) != 1 || plTracks[0].Title != "Found Track" {
+		t.Fatalf("searched playlist tracks = %+v, err=%v", plTracks, err)
+	}
+}
