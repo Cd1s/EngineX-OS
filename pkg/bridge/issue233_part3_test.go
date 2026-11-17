@@ -32,7 +32,7 @@ func TestIssue233LargeSkeletonAndEngineAnalyzedResume(t *testing.T) {
 	if bridge.HasPopulatedLibrary(root) {
 		t.Fatal("empty skeleton counts as populated")
 	}
-	r := issue233Mount(t, root, enginedb.Options{})
+	r := issue233EarlierBuild(t, root)
 	if r.Added != issue233Tracks {
 		t.Fatalf("first mount: %+v", r)
 	}
@@ -124,7 +124,7 @@ func TestIssue233LargeSkeletonAndEngineAnalyzedResume(t *testing.T) {
 func TestIssue233LargeLegacyOffsetMigrationResumes(t *testing.T) {
 	root := t.TempDir()
 	testfixture.LargeExport(t, root, issue233Tracks)
-	issue233Mount(t, root, enginedb.Options{})
+	issue233EarlierBuild(t, root)
 	l, err := bridge.ReadLibrary(context.Background(), root)
 	if err != nil {
 		t.Fatal(err)
@@ -232,7 +232,7 @@ func TestIssue233CompletedV2LibraryReexportKeepsFinishedTracks(t *testing.T) {
 	const n = 600
 	root := t.TempDir()
 	testfixture.LargeExport(t, root, n)
-	issue233Mount(t, root, enginedb.Options{})
+	issue233EarlierBuild(t, root)
 	if r := issue233Mount(t, root, enginedb.Options{Deadline: time.Now().Add(time.Hour)}); r.Deferred != 0 {
 		t.Fatalf("initial completion: %+v", r)
 	}

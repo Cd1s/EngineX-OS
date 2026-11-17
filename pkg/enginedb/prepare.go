@@ -179,7 +179,7 @@ func (f exportFileInfo) ModTime() time.Time { return time.Time{} }
 // from directory entries, as in a full import (#6). A path that cannot be
 // resolved (missing file) keeps the export spelling; one that tries to leave
 // the volume is dropped.
-func prepareFast(ctx context.Context, res *compat.Resolver, l *rekordbox.Library) ([]preparedTrack, error) {
+func prepareFast(ctx context.Context, res *compat.Resolver, l *rekordbox.Library, trust bool) ([]preparedTrack, error) {
 	prepared := make([]preparedTrack, 0, len(l.Tracks))
 	paths := map[string]bool{}
 	for _, t := range l.Tracks {
@@ -190,8 +190,10 @@ func prepareFast(ctx context.Context, res *compat.Resolver, l *rekordbox.Library
 		if rel == "" || t.Path == "" || strings.HasPrefix(rel, "PIONEER/") || strings.HasPrefix(rel, ".PIONEER/") {
 			continue
 		}
-		if resolved, e := res.ResolveContext(ctx, t.Path); e == nil {
-			rel = resolved
+		if !trust {
+			if resolved, e := res.ResolveContext(ctx, t.Path); e == nil {
+				rel = resolved
+			}
 		}
 		if paths[rel] {
 			continue

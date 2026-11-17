@@ -159,6 +159,17 @@ func TestUSBPreparingStatusAndErrorLifecycle(t *testing.T) {
 		}
 	}
 
+	// #301: a first import that goes on after the mount, then waits for the next mount.
+	for _, st := range []string{"importing", "ready"} {
+		if err := os.WriteFile(path, []byte(`{"state":"`+st+`","kind":"usb","done":3200,"total":20000}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		v, _ := get("/v1/enginex/ui")
+		if up, ok := v["usbPrepare"].(map[string]any); v["usbPreparing"] != true || !ok || up["state"] != st {
+			t.Fatalf("%s: usbPreparing=%v usbPrepare=%v", st, v["usbPreparing"], v["usbPrepare"])
+		}
+	}
+
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}

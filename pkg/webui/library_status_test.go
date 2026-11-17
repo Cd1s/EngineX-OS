@@ -86,12 +86,22 @@ func TestLibraryStatusEndpointAndSkeletonRejection(t *testing.T) {
 		t.Fatal("0-track Engine skeleton m.db must return converted=false")
 	}
 
-	// 5. Once rb-bridge converts tracks into m.db -> converted: true (even when Scope == "tidal").
+	// 5. The skeleton after the DJ loaded a track from the OneLibrary export: still not
+	//    converted, or Engine shows an empty library instead of the export (#301).
 	if _, err = db.Exec(`INSERT INTO Track(id, path) VALUES(1, '../Contents/track1.flac')`); err != nil {
 		db.Close()
 		t.Fatal(err)
 	}
 	db.Close()
+	if query(skelStick) {
+		t.Fatal("skeleton with a deck-loaded track must return converted=false")
+	}
+
+	// 6. Once rb-bridge converts tracks into m.db, with its state beside it -> converted: true
+	//    (even when Scope == "tidal").
+	if err := os.WriteFile(filepath.Join(skelDBDir, ".rb-bridge-state.db"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if !query(skelStick) {
 		t.Fatal("populated Engine Library m.db must return converted=true")
 	}

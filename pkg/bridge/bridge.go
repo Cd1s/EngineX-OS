@@ -349,6 +349,26 @@ func ReconcileContext(ctx context.Context, r *compat.Resolver, l *rekordbox.Libr
 	return nil
 }
 
+// exportStamp names the export a library is imported from: the export files' sizes and
+// times and the CDJ libraries staged on the volume. "" when the volume has neither.
+func exportStamp(r *compat.Resolver, mount string) (string, error) {
+	candidates, err := exportCandidates(r, mount)
+	if err != nil {
+		return "", err
+	}
+	if len(candidates) == 0 {
+		if staged := strings.TrimSpace(stagedStamp(mount)); staged != "" {
+			return stampVersion + " " + staged, nil
+		}
+		return "", nil
+	}
+	parts := make([]string, len(candidates))
+	for i, c := range candidates {
+		parts[i] = fmt.Sprintf("%s %d %d", c.rel, c.size, c.mtime.UnixNano())
+	}
+	return stampVersion + " " + strings.Join(parts, " | ") + stagedStamp(mount), nil
+}
+
 const (
 	stampName = ".rb-bridge-stamp"
 	// pendingName holds the stamp of an export whose import left tracks without
@@ -356,10 +376,6 @@ const (
 	pendingName  = ".rb-bridge-pending"
 	stampVersion = "v2" // v2 checks per-track MP3 start-offset classes (#178)
 	stateName    = ".rb-bridge-state.db"
-	// Past this, a first import cannot finish while the mount waits: reading every
-	// file took 8 minutes for 6000 tracks on a USB stick. Later mounts read the
-	// files a budget at a time.
-	fastImportTracks = 500
 )
 
 // The edisksd hook kills rb-bridge 20 s after the mount, which rolled back the
@@ -368,16 +384,24 @@ const (
 var (
 	mountReadBudget    = 8 * time.Second
 	maxMountHookBudget = 14 * time.Second
+	// An update in place still running this long after the mount stops before the hook's kill
+	// and goes on in the background (#301): the kill threw it away, at every insert.
+	mountGiveUp = 17 * time.Second
 )
 
 // ConvertAtMount is Convert for when a volume is mounted, while Engine is waiting
-// for it. An export unchanged since the last import is skipped at once. A large
-// library's first import takes only what the export holds, built on tmpfs and
-// copied over in one go. full forces a complete import, with cues and waveforms.
+// for it. An export unchanged since the last import is skipped at once. A first
+// import is built in a stage on the volume and published complete; one that does
+// not fit in the mount's time returns Result.Background and is finished by
+// ImportInBackground (#301). full forces a complete import, with cues and waveforms.
 // Otherwise files are read for mountReadBudget at most, and the export counts as
 // imported only once no track was left without its cues.
 func ConvertAtMount(ctx context.Context, mount string, opts enginedb.Options, full bool) (enginedb.Result, error) {
 	r, err := convertAtMount(ctx, mount, &opts, full)
+	if r.Background {
+		// The library is updated aside (#301): its upkeep and queued edits wait for the publish.
+		return r, err
+	}
 	// A bypass without file reads has not started the shared read budget yet.
 	if opts.Deadline.IsZero() && !full {
 		opts.Deadline = time.Now().Add(mountReadBudget)
@@ -460,27 +484,38 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 	if err != nil {
 		return enginedb.Result{}, err
 	}
-	candidates, err := exportCandidates(r, mount)
+	stamp, err := exportStamp(r, mount)
 	if err != nil {
 		return enginedb.Result{}, err
 	}
-	var stamp string
-	if len(candidates) > 0 {
-		parts := make([]string, len(candidates))
-		for i, c := range candidates {
-			parts[i] = fmt.Sprintf("%s %d %d", c.rel, c.size, c.mtime.UnixNano())
-		}
-		stamp = stampVersion + " " + strings.Join(parts, " | ") + stagedStamp(mount)
-	} else {
-		staged := strings.TrimSpace(stagedStamp(mount))
-		if staged == "" {
-			return convert(ctx, mount, opts, nil, budget, mountStart)
-		}
-		stamp = stampVersion + " " + staged
+	if stamp == "" {
+		return convert(ctx, mount, opts, nil, budget, mountStart)
 	}
 	dir := filepath.Join(mount, "Engine Library", "Database2")
 	// Prepare a read-only drive's writable library view before reading its stamp.
 	canWrite := !full && writable(mount)
+	if canWrite {
+		// A publish an earlier mount did not finish, before anything looks at the library.
+		if err := finishPublish(dir, stateName, stampName, "m.db"); err != nil {
+			return enginedb.Result{}, err
+		}
+	}
+	if !full && !opts.SmartMatch && firstImport(dir) {
+		if !canWrite {
+			return enginedb.Result{Bypassed: true}, nil
+		}
+		return firstImportAtMount(ctx, mount, dir, stamp, opts, r, mountStart)
+	}
+	stage := filepath.Join(dir, importStageName)
+	if canWrite {
+		switch {
+		case isUpdateStage(stage) && readMark(stage, stampName) == stamp:
+			return publishUpdate(ctx, mount, dir)
+		case isUpdateStage(stage) && readMark(stage, pendingName) == stamp && !opts.SmartMatch:
+			return enginedb.Result{Background: true}, nil
+		}
+		dropStage(stage) // a stage of another export, or a first import's: the library is the volume's own now
+	}
 	oldStamp := readMark(dir, stampName)
 	opts.LegacyOffsets = oldStamp != "" && !strings.HasPrefix(oldStamp, stampVersion+" ")
 	bypass := !full && !opts.SmartMatch && importedStamp(dir) == stamp
@@ -492,6 +527,15 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 	var readErr error
 	if !full && opts.SmartMatch && !canWrite {
 		return enginedb.Result{Bypassed: true}, nil
+	}
+	// An update a large export needs cannot finish while the mount waits: resolving and reading
+	// the files of a cold stick takes minutes (#301). It goes on in the background on a copy.
+	if !full && !bypass && !opts.SmartMatch && canWrite && opts.Deadline.IsZero() && exportBytes(r, mount) > attemptExportBytes {
+		if err := startUpdate(stage, stamp); err != nil {
+			return enginedb.Result{}, err
+		}
+		log.Printf("rb-bridge: update of a large export goes on after the mount")
+		return enginedb.Result{Background: true}, nil
 	}
 	// The overviews before anything is read from the export. On a card that also carries
 	// the staged exports of thousands of tracks that read alone outlasts the mount's time:
@@ -510,9 +554,15 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 			budget = max(budget-time.Since(start), 1)
 		}
 	}
+	giveUp := mountStart.Add(mountGiveUp)
+	if opts.Deadline.After(giveUp) {
+		giveUp = opts.Deadline // a caller's own, longer budget
+	}
+	inPlace, stop := context.WithDeadline(ctx, giveUp)
+	defer stop()
 	if !full && !bypass {
 		// Parsing/decrypting the export does not spend the file-reading budget.
-		l, stagedOnly, err := readLibrary(ctx, mount)
+		l, stagedOnly, err := readLibrary(inPlace, mount)
 		readErr = err
 		if err == nil {
 			pre = &preread{l, stagedOnly, r}
@@ -537,64 +587,33 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 		}
 		return enginedb.Result{Bypassed: true}, nil
 	}
+	// Out of the mount's time: what was done is not committed, the rest goes on in the background.
+	late := func(err error) bool {
+		return err != nil && inPlace.Err() != nil && ctx.Err() == nil && canWrite && !full && !opts.SmartMatch
+	}
+	background := func(err error) (enginedb.Result, error) {
+		log.Printf("rb-bridge: update goes on after the mount: %v", err)
+		if err = startUpdate(stage, stamp); err != nil {
+			return enginedb.Result{}, err
+		}
+		return enginedb.Result{Background: true}, nil
+	}
+	if late(readErr) {
+		return background(readErr)
+	}
 	if readErr != nil {
 		if opts.SmartMatch && errors.Is(readErr, os.ErrNotExist) {
 			return enginedb.Result{Bypassed: true}, nil
 		}
-		if !hasLibrary(dir) {
-			cleanEmptyEngineLibrary(dir)
-		}
 		return result, readErr
-	}
-	if pre != nil && !opts.SmartMatch {
-		l := pre.l
-		opts.StagedOnly = pre.stagedOnly
-		// A large library's first import takes only what the export holds, built
-		// aside and published in one go, so its playlists are there when Engine
-		// first sees the stick (#182). Its cues, loops, beat grids, waveforms and
-		// MP3 offsets are read on the next inserts, a read budget at a time, in
-		// the in-place import below: no stamp until no track is left without them.
-		// Before, the stamp was written here and they were never read.
-		if !hasLibrary(dir) {
-			if !writable(mount) {
-				return enginedb.Result{Bypassed: true}, nil
-			}
-			if err := ReconcileContext(ctx, r, l); err != nil {
-				cleanEmptyEngineLibrary(dir)
-				return result, err
-			}
-			if budget > 0 && opts.Deadline.IsZero() {
-				remaining := max(maxMountHookBudget-time.Since(mountStart), time.Second)
-				opts.Deadline = time.Now().Add(min(budget, remaining))
-				budget = 0
-			}
-			if len(l.Tracks) > fastImportTracks {
-				opts.Fast = true
-				result, err = stagedImport(ctx, dir, l, *opts, r)
-				if err != nil {
-					cleanEmptyEngineLibrary(dir)
-				} else {
-					writeMark(dir, pendingName, stamp)
-					log.Printf("rb-bridge: %d tracks imported without cues; the next mounts read them", len(l.Tracks))
-				}
-				return result, err
-			}
-			result, err = stagedImport(ctx, dir, l, *opts, r)
-			if err != nil {
-				cleanEmptyEngineLibrary(dir)
-			} else if result.Deferred > 0 {
-				writeMark(dir, pendingName, stamp)
-				log.Printf("rb-bridge: %d tracks imported without cues; the next mount reads them", result.Deferred)
-			} else {
-				writeStamp(dir, stamp)
-			}
-			return result, err
-		}
 	}
 	// The same export as a mount that left tracks without their files: read
 	// only those, the others are known to be imported with theirs.
 	opts.Resume = resume || (!full && !opts.SmartMatch && readMark(dir, pendingName) == stamp)
-	result, err = convert(ctx, mount, opts, pre, budget, mountStart)
+	result, err = convert(inPlace, mount, opts, pre, budget, mountStart)
+	if late(err) {
+		return background(err)
+	}
 	if err == nil && !result.Bypassed {
 		// Only this build has written since the progress was read, and it leaves no overview
 		// without band maxima: the backfill goes on where it was, also with no time left now.
@@ -694,12 +713,15 @@ func hasLibrary(dir string) bool {
 }
 
 // HasPopulatedLibrary reports whether mount carries a readable Engine Library
-// database (Engine Library/Database2/m.db) with a valid Information row and at
-// least one Track row. Stock Engine creates an empty ~80–160 KB m.db skeleton on
-// writable media before asking QML to choose a database; unlike hasLibrary
-// (which treats unreadable files as present so ConvertAtMount never overwrites
-// them), any missing, symlinked, unreadable, or 0-track database returns false
-// here so the UI falls back to stock OneLibrary reading.
+// database (Engine Library/Database2/m.db) with a valid Information row, at
+// least one Track row, and playlists or the bridge's state beside it. Stock
+// Engine creates an empty ~80–160 KB m.db skeleton on writable media before
+// asking QML to choose a database, and adds a track to it for each one the DJ
+// loads from the OneLibrary export: a skeleton with a few tracks is still not a
+// library to show instead of the export (#301). Unlike hasLibrary (which treats
+// unreadable files as present so ConvertAtMount never overwrites them), any
+// missing, symlinked, unreadable, or skeleton database returns false here so the
+// UI falls back to stock OneLibrary reading.
 func HasPopulatedLibrary(mount string) bool {
 	if mount == "" || !filepath.IsAbs(mount) {
 		return false
@@ -733,15 +755,24 @@ func HasPopulatedLibrary(mount string) bool {
 		`SELECT CASE WHEN EXISTS(SELECT 1 FROM Information WHERE id=1 AND trim(COALESCE(uuid,''))<>'')` +
 			` AND EXISTS(SELECT 1 FROM Track) THEN 1 ELSE 0 END`,
 	).Scan(&ok)
-	return err == nil && ok == 1
+	if err != nil || ok != 1 {
+		return false
+	}
+	if st, err := os.Lstat(filepath.Join(dbDir, stateName)); err == nil && st.Mode().IsRegular() {
+		return true
+	}
+	var playlists int
+	return db.QueryRow(`SELECT EXISTS(SELECT 1 FROM Playlist)`).Scan(&playlists) == nil && playlists == 1
 }
 
-func writeStamp(dir, stamp string) { writeMark(dir, stampName, stamp) }
+func writeStamp(dir, stamp string) { _ = writeMark(dir, stampName, stamp) }
 
-func writeMark(dir, name, stamp string) {
-	if err := os.WriteFile(filepath.Join(dir, name), []byte(stamp+"\n"), 0o644); err != nil {
+func writeMark(dir, name, stamp string) error {
+	err := os.WriteFile(filepath.Join(dir, name), []byte(stamp+"\n"), 0o644)
+	if err != nil {
 		log.Printf("rb-bridge: could not record the import: %v", err)
 	}
+	return err
 }
 
 func readMark(dir, name string) string {
@@ -750,89 +781,6 @@ func readMark(dir, name string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(b))
-}
-
-// stagedImport syncs a copy of the volume's database in a temporary directory
-// and publishes it back only if the whole import succeeded.
-func stagedImport(ctx context.Context, dir string, l *rekordbox.Library, opts enginedb.Options, res *compat.Resolver) (enginedb.Result, error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return enginedb.Result{}, err
-	}
-	unlock, err := lockVolume(dir)
-	if err != nil {
-		return enginedb.Result{}, err
-	}
-	defer unlock()
-	if enginedb.LibraryInUse(res.FullPath("")) {
-		return enginedb.Result{}, enginedb.ErrLibraryInUse
-	}
-	// An earlier run may have died between the two renames.
-	if err = finishPublish(dir, stateName, "m.db"); err != nil {
-		return enginedb.Result{}, err
-	}
-	work, err := os.MkdirTemp("", "rb-bridge-*")
-	if err != nil {
-		return enginedb.Result{}, err
-	}
-	defer os.RemoveAll(work)
-	// Keep one read-only connection so data_version detects commits to m.db
-	// or its WAL while we import the snapshot. File identity also catches an
-	// Engine-created/replaced database, including an initially absent m.db.
-	p := filepath.Join(dir, "m.db")
-	before, err := os.Stat(p)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return enginedb.Result{}, err
-	}
-	var source *sql.DB
-	var version int
-	if before != nil {
-		source, err = sql.Open("sqlite", (&url.URL{Scheme: "file", Path: p, RawQuery: "mode=ro&_pragma=busy_timeout(5000)"}).String())
-		if err != nil {
-			return enginedb.Result{}, err
-		}
-		defer source.Close()
-		source.SetMaxOpenConns(1)
-		if err = source.QueryRowContext(ctx, `PRAGMA data_version`).Scan(&version); err != nil {
-			return enginedb.Result{}, err
-		}
-	}
-	// Tracks and bridge state already held on this volume stay in the library for incremental sync.
-	for _, name := range []string{"m.db", stateName} {
-		if err = snapshot(filepath.Join(dir, name), filepath.Join(work, name)); err != nil {
-			return enginedb.Result{}, err
-		}
-	}
-	opts.DatabaseDir = work
-	mergeByPath(l)
-	result, err := enginedb.SyncResolved(ctx, res, l, opts)
-	if err != nil {
-		return result, err
-	}
-	return result, publish(work, dir, func() error {
-		after, err := os.Stat(p)
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		changed := (before == nil) != (after == nil)
-		if before != nil && after != nil {
-			changed = !os.SameFile(before, after)
-			var current int
-			if err = source.QueryRowContext(ctx, `PRAGMA data_version`).Scan(&current); err != nil {
-				return err
-			}
-			changed = changed || current != version
-		}
-		if changed {
-			return errors.New("Engine library changed during import; retry on next mount")
-		}
-		if enginedb.LibraryInUse(res.FullPath("")) {
-			return enginedb.ErrLibraryInUse
-		}
-		if source != nil {
-			return source.Close()
-		}
-		return nil
-	}, stateName, "m.db")
 }
 
 // mergeByPath is Reconcile without touching the disk.

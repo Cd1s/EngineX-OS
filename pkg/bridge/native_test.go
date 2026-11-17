@@ -311,7 +311,8 @@ func TestLargeMountIncrementalSyncAddsNewTracksAndPlaylists_GL011(t *testing.T) 
 	if _, e = db.Exec(`INSERT INTO playlist_content VALUES(1,1,1),(1,505,2)`); e != nil {
 		t.Fatal(e)
 	}
-	r1, e := bridge.ConvertAtMount(context.Background(), root, enginedb.Options{}, false)
+	// The 505 tracks as a build before #301 imported them: from the export alone.
+	r1, e := bridge.ImportLikeEarlierBuildsForTest(context.Background(), root, enginedb.Options{})
 	if e != nil || r1.Added != 505 || !r1.PlaylistsChanged {
 		t.Fatalf("first mount: %+v %v", r1, e)
 	}

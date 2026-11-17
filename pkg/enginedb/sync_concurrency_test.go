@@ -87,7 +87,7 @@ func TestOpenReservesWriterBeforeReading(t *testing.T) {
 	if _, err := engine.Exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=0`); err != nil {
 		t.Fatal(err)
 	}
-	db, tx, err := open(context.Background(), p)
+	db, tx, err := open(context.Background(), p, false)
 	if err != nil {
 		t.Fatal(err)
 	}

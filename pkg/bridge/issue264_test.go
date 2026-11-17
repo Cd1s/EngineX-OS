@@ -66,8 +66,8 @@ INSERT INTO playlist VALUES(1,0,'Issue264 Set',0,1,'');`); err != nil {
 
 	ctx := context.Background()
 
-	// Mount 1: Fast staged import of the >500 track library without reading cues.
-	r1, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false)
+	// Mount 1 by a build before #301: the >500 track library imported without reading cues.
+	r1, err := bridge.ImportLikeEarlierBuildsForTest(ctx, root, enginedb.Options{})
 	if err != nil {
 		t.Fatalf("mount 1: %v", err)
 	}
@@ -183,7 +183,8 @@ INSERT INTO playlist VALUES(1,0,'Slow Set',0,1,'');`); err != nil {
 	_ = os.Remove(filepath.Join(root, "PIONEER/rekordbox/export.pdb"))
 
 	ctx := context.Background()
-	r1, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false)
+	// A library a build before #301 imported without reading cues.
+	r1, err := bridge.ImportLikeEarlierBuildsForTest(ctx, root, enginedb.Options{})
 	if err != nil || r1.Added != n {
 		t.Fatalf("first mount: %+v %v", r1, err)
 	}
