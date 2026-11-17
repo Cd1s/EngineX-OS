@@ -772,7 +772,9 @@ func (r *exportRun) receivePeers() {
 			return
 		}
 		d, err := ParsePacket(b[:n], 50000, addr.IP)
-		if err != nil || d.Number < 1 || d.Number > 6 || !r.network.Contains(addr.IP) {
+		// A computer with rekordbox is a peer too: it serves NFS only to a player whose
+		// status it gets (left deck, 2026-11-17), and its number (16-31) is not ours to avoid.
+		if err != nil || (d.Number < 1 || d.Number > 6) && !IsRekordbox(d) || !r.network.Contains(addr.IP) {
 			continue
 		}
 		mac := b[0x26:0x2c]
@@ -1166,7 +1168,8 @@ func (r *exportRun) masterLocked(now time.Time) bool {
 	return r.deck.Master && !r.yielded && !now.Before(r.claimAt)
 }
 
-// peerIPsLocked lists the players seen in the last 10 s (at most 6). For
+// peerIPsLocked lists the players (and a computer with rekordbox) seen in the last
+// 10 s, at most 6. For
 // status packets (announced: since when we have a player number), only those
 // whose firmware we could have read: a status packet with a lower version than
 // the player's own would raise its warning. Caller holds r.mu.

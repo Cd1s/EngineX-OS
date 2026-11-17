@@ -7713,6 +7713,10 @@ assert.equal(tp.loggedIn,true); assert.equal(scTidalLogoutPending,false);
                     # named after the computer, with no login and no switch among the services.
                     self.assertIn('{ id: "rekordbox", name: scRekordboxName ? "rekordbox (" + scRekordboxName + ")" : "rekordbox" }', main)
                     self.assertIn('scRekordboxName = v.rekordboxName || ""', main)
+                    # Listed right after the drives and Link sources, above the streaming services.
+                    services = main[main.index("readonly property var scServices: ["):]
+                    services = services[:services.index("\n\t]")]
+                    self.assertLess(services.index('id: "rekordbox"'), services.index('id: "tidal"'))
                     self.assertIn('visible: modelData.id !== "tidal" && modelData.id !== "rekordbox"', bp.SOURCE_FOOTER)
                     self.assertIn('model: root.scServices.filter(s => s.id !== "rekordbox")', bp.STREAM_SWITCHES)
                     self.assertIn('scSources.indexOf("tidal") < 0 ||', main)

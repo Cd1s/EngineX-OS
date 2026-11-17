@@ -158,28 +158,33 @@ func RBBridge(args []string, stdout io.Writer) error {
 	_, _ = resourceguard.New(resourceguard.DefaultConfig()).ApplyToProcess(0)
 	st := &stager{mounts: localExports, last: map[string]time.Time{}}
 	// Packets arrive many times a second; snapshot at most every 500 ms and only when something changed.
-	var dirty atomic.Bool
-	if *stateFile != "" {
-		go func() {
-			tick := time.NewTicker(500 * time.Millisecond)
-			defer tick.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					if dirty.Swap(false) {
-						writeState(*stateFile, prolink.BuildSnapshot(discovery.Devices(time.Now())))
-					}
-					return
-				case <-tick.C:
-					if dirty.Swap(false) {
-						writeState(*stateFile, prolink.BuildSnapshot(discovery.Devices(time.Now())))
-					}
+	var dirty, verbose atomic.Bool
+	verbose.Store(settingOn(*uiSettings, "verbose_log"))
+	devices := linkLog{seen: map[string]time.Time{}}
+	go func() {
+		tick := time.NewTicker(500 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				if *stateFile != "" && dirty.Swap(false) {
+					writeState(*stateFile, prolink.BuildSnapshot(discovery.Devices(time.Now())))
+				}
+				return
+			case now := <-tick.C:
+				verbose.Store(settingOn(*uiSettings, "verbose_log"))
+				devices.expire(log.Print, now)
+				if *stateFile != "" && dirty.Swap(false) {
+					writeState(*stateFile, prolink.BuildSnapshot(discovery.Devices(now)))
 				}
 			}
-		}()
-	}
+		}
+	}()
 	err := discovery.Listen(ctx, ip, func(d prolink.Device) {
-		emit(d)
+		if verbose.Load() {
+			emit(d)
+		}
+		devices.packet(log.Print, d, time.Now())
 		if d.PacketType == 6 && d.Number >= 1 && d.Number <= 6 && prolinkSettingOn(*uiSettings) {
 			st.observe(ctx, d)
 		}
@@ -189,6 +194,35 @@ func RBBridge(args []string, stdout io.Writer) error {
 		return nil
 	}
 	return err
+}
+
+// linkLog puts in the journal when a Pro DJ Link device appears and when it has
+// been silent for 10 s. Every packet (about 14 a second with a computer on the
+// link) goes there only with verbose_log=1 in the deck settings.
+type linkLog struct {
+	mu   sync.Mutex
+	seen map[string]time.Time
+}
+
+func (l *linkLog) packet(logf func(...any), d prolink.Device, now time.Time) {
+	key := fmt.Sprintf("%s player %d %q", d.Address, d.Number, d.Name)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if _, ok := l.seen[key]; !ok {
+		logf("rb-bridge: Pro DJ Link device seen: " + key)
+	}
+	l.seen[key] = now
+}
+
+func (l *linkLog) expire(logf func(...any), now time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for key, at := range l.seen {
+		if now.Sub(at) > 10*time.Second {
+			logf("rb-bridge: Pro DJ Link device lost: " + key)
+			delete(l.seen, key)
+		}
+	}
 }
 
 // prolinkSettingOn reports whether Pro DJ Link is enabled in settings.conf,
