@@ -167,10 +167,11 @@ func rbxName(ip string) string {
 		return name
 	}
 	rbxNames.m[ip] = ip
+	lookup := lookupAddr
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		if names, err := lookupAddr(ctx, ip); err == nil && len(names) > 0 {
+		if names, err := lookup(ctx, ip); err == nil && len(names) > 0 {
 			rbxNames.Lock()
 			rbxNames.m[ip], _, _ = strings.Cut(strings.TrimSuffix(names[0], "."), ".")
 			rbxNames.Unlock()
