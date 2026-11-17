@@ -114,7 +114,7 @@ func (s *Server) rekordboxHost() *rbxHost {
 	for _, d := range s.mergedDevices() {
 		if prolink.IsRekordbox(d) && time.Since(d.LastSeen) <= prolink.DeviceTimeout && net.ParseIP(d.Address) != nil {
 			if !s.rekordboxReady(d.Address) {
-				return nil
+				continue
 			}
 			return &rbxHost{d.Address, rbxName(d.Address)}
 		}
@@ -125,7 +125,6 @@ func (s *Server) rekordboxHost() *rbxHost {
 // A computer keeps announcing even with LINK off. Only a successful library-port
 // query confirms the source; this memory is never restored from a snapshot at boot.
 type rbxPresence struct {
-	ip            string
 	checked, seen time.Time
 	checking      bool
 }
@@ -135,12 +134,21 @@ type rbxPresence struct {
 func (s *Server) rekordboxReady(ip string) bool {
 	s.rbxPresenceMu.Lock()
 	defer s.rbxPresenceMu.Unlock()
-	p := s.rbxPresence
-	if p == nil || p.ip != ip {
-		p = &rbxPresence{ip: ip}
-		s.rbxPresence = p
-	}
 	now := time.Now()
+	// Drop abandoned IPs without discarding a recent reply or an in-flight query.
+	for addr, p := range s.rbxPresence {
+		if !p.checking && now.Sub(p.checked) > prolink.DeviceTimeout && now.Sub(p.seen) > prolink.DeviceTimeout {
+			delete(s.rbxPresence, addr)
+		}
+	}
+	if s.rbxPresence == nil {
+		s.rbxPresence = make(map[string]*rbxPresence)
+	}
+	p := s.rbxPresence[ip]
+	if p == nil {
+		p = &rbxPresence{}
+		s.rbxPresence[ip] = p
+	}
 	if !p.checking && now.Sub(p.checked) >= rbxPresenceEvery {
 		p.checked, p.checking = now, true
 		go func() {

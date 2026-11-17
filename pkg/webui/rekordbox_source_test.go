@@ -76,7 +76,7 @@ func newRbxEnv(t *testing.T, paths map[uint32]string) *rbxEnv {
 	snap, _ := json.Marshal(prolink.Snapshot{Devices: []prolink.Device{{Name: "rekordbox", Number: 17, Address: "127.0.0.1", PacketType: 0x29, LastSeen: time.Now()}}})
 	os.WriteFile(filepath.Join(state, "prolink.json"), snap, 0o644)
 	e.s = New(Config{AccessToken: "code", UIDir: ui, StateDir: state, MediaRoot: media, DeezerURL: fakeDeezer(t).URL}, nil)
-	e.s.rbxPresence = &rbxPresence{ip: "127.0.0.1", checked: time.Now(), seen: time.Now()}
+	e.s.rbxPresence = map[string]*rbxPresence{"127.0.0.1": {checked: time.Now(), seen: time.Now()}}
 	mounts, _ := json.Marshal([]RemoteMount{{ID: "m", Name: "Music", MountPoint: e.share, Enabled: true}})
 	os.WriteFile(e.s.mountsConfigPath(), mounts, 0o644)
 	srv := httptest.NewServer(e.s)
@@ -213,6 +213,104 @@ func TestRekordboxPresenceUsesPlayerTimeout(t *testing.T) {
 				t.Error("return did not refresh UI digest")
 			}
 		})
+	}
+}
+
+// An announcing prep computer with LINK off must not hide another library,
+// whichever computer has the lower player number in mergedDevices.
+func TestRekordboxPresenceWithTwoComputers(t *testing.T) {
+	serve := func(ip string, port uint16) {
+		t.Helper()
+		ln, err := net.Listen("tcp4", ip+":12523")
+		if err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			for {
+				c, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				c.SetDeadline(time.Now().Add(time.Second))
+				query := make([]byte, 19)
+				if _, err := io.ReadFull(c, query); err == nil {
+					var reply [2]byte
+					binary.BigEndian.PutUint16(reply[:], port)
+					c.Write(reply[:])
+				}
+				c.Close()
+			}
+		}()
+		t.Cleanup(func() { ln.Close(); <-done })
+	}
+	serve("127.0.0.24", 0)
+	serve("127.0.0.25", 12524)
+	for _, tc := range []struct {
+		name    string
+		off, on byte
+	}{
+		{"off_first", 16, 17}, {"ready_first", 18, 17},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newRbxEnv(t, nil)
+			t.Setenv("ENGINEX_PROLINK_STATE", filepath.Join(t.TempDir(), "missing.json"))
+			s := New(e.s.cfg, nil) // confirmation must start empty for both IPs
+			t.Cleanup(s.Close)
+			poll := func() *rbxHost {
+				t.Helper()
+				b, _ := json.Marshal(prolink.Snapshot{Devices: []prolink.Device{
+					{Name: "rekordbox", Number: tc.off, Address: "127.0.0.24", PacketType: 0x29, LastSeen: time.Now()},
+					{Name: "rekordbox", Number: tc.on, Address: "127.0.0.25", PacketType: 0x29, LastSeen: time.Now()},
+				}})
+				if err := os.WriteFile(filepath.Join(s.cfg.StateDir, "prolink.json"), b, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				return s.rekordboxHost()
+			}
+			if poll() != nil {
+				t.Fatal("restored a library confirmation at boot")
+			}
+			end := time.Now().Add(7 * time.Second)
+			var host *rbxHost
+			for host == nil && time.Now().Before(end) {
+				time.Sleep(20 * time.Millisecond)
+				host = poll()
+			}
+			if host == nil || host.IP != "127.0.0.25" {
+				t.Fatalf("ready computer hidden: host=%+v", host)
+			}
+			for range 3 {
+				if host := poll(); host == nil || host.IP != "127.0.0.25" {
+					t.Fatalf("presence changed while both kept announcing: %+v", host)
+				}
+			}
+			t.Logf("LINK-off player %d, ready player %d: selected ready computer", tc.off, tc.on)
+		})
+	}
+}
+
+func TestRekordboxPresenceDropsOnlyExpiredIdleIPs(t *testing.T) {
+	now := time.Now()
+	old := now.Add(-prolink.DeviceTimeout - time.Second)
+	s := &Server{rbxPresence: map[string]*rbxPresence{
+		"expired":        {checked: old, seen: old},
+		"recent_reply":   {checked: old, seen: now.Add(-prolink.DeviceTimeout + time.Second)},
+		"recent_attempt": {checked: now},
+		"pending":        {checked: old, checking: true},
+		"current":        {checked: now, seen: now},
+	}}
+	if !s.rekordboxReady("current") {
+		t.Fatal("current confirmation lost")
+	}
+	if _, ok := s.rbxPresence["expired"]; ok {
+		t.Error("abandoned IP retained")
+	}
+	for _, ip := range []string{"recent_reply", "recent_attempt", "pending", "current"} {
+		if _, ok := s.rbxPresence[ip]; !ok {
+			t.Errorf("discarded %s", ip)
+		}
 	}
 }
 

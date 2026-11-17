@@ -114,7 +114,7 @@ type Server struct {
 	stemsMu       sync.Mutex // streaming-stems.json
 	stemsImportMu sync.Mutex // one streamed row at a time is named, recorded and swept
 	rbxPresenceMu sync.Mutex
-	rbxPresence   *rbxPresence
+	rbxPresence   map[string]*rbxPresence
 
 	prolinkExport *prolink.Exporter
 	closed        chan struct{}
