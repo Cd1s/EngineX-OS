@@ -648,6 +648,7 @@ function run(opts = {}) {
     }));
     const ACTIONS = actions;
     const scDeck = opts.deck || 0;
+    let scStemBusy = false;
     LABEL_FUNCTION
     const Planck = {
         librarianController: {stemsQueueManager: {
