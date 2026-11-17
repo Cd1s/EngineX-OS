@@ -148,6 +148,52 @@ assert.equal(made, 1);
         result = subprocess.run(["node"], input=script, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_ui_poll_refreshes_active_provider_on_login_change(self):
+        start = re.search(r"(?m)^\tfunction scUiPollReply\([^\n]*\) \{", packs.SERVICES_MAIN)
+        self.assertIsNotNone(start)
+        end = packs.SERVICES_MAIN.index("\n\t}", start.end()) + 3
+        fn = packs.SERVICES_MAIN[start.start():end]
+        script = r'''
+const assert = require('node:assert/strict');
+var scUiPoll = {readyState: 4, status: 200, responseText: '{}', headers: {}, getResponseHeader(k) { return this.headers[k] || ''; }};
+var scScopePending = 0, scScope = 'applemusic', scUiPollScope = 'applemusic';
+var scUiDigest = '', scUiAppliedAt = 0, scUiLoaded = true;
+var scLoggedIn = ['spotify'], scLogin = 'applemusic', scEnterTries = 0;
+let invalidated = 0, entered = 0;
+const scEnterTimer = {start() { entered++; }};
+const Planck = {librarianController: {streamingPlaylistsController: {invalidateUI() { invalidated++; }}}};
+function scEnsureTidal() {}
+function scApply(v) { if (v.loggedIn) scLoggedIn = v.loggedIn; }
+''' + fn + r'''
+// External WebUI / helper sign-in adds active scope -> closes QR, invalidates playlists, enters list.
+scUiPoll.headers = {'X-UI-Digest': 'd1'};
+scUiPoll.responseText = JSON.stringify({loggedIn: ['spotify', 'applemusic']});
+scUiPollReply();
+assert.equal(scLogin, '');
+assert.equal(invalidated, 1);
+assert.equal(entered, 1);
+assert.equal(scEnterTries, 8);
+
+// "Switch account" opens QR while already logged in -> unchanged membership must not close QR.
+scLogin = 'applemusic';
+scUiPoll.headers = {'X-UI-Digest': 'd2'};
+scUiPoll.responseText = JSON.stringify({loggedIn: ['spotify', 'applemusic']});
+scUiPollReply();
+assert.equal(scLogin, 'applemusic');
+assert.equal(invalidated, 1);
+assert.equal(entered, 1);
+
+// Remote logout removes active scope -> invalidates stale playlists without auto-entering.
+scLogin = '';
+scUiPoll.headers = {'X-UI-Digest': 'd3'};
+scUiPoll.responseText = JSON.stringify({loggedIn: ['spotify']});
+scUiPollReply();
+assert.equal(invalidated, 2);
+assert.equal(entered, 1);
+'''
+        result = subprocess.run(["node"], input=script, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

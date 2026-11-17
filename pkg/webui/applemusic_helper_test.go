@@ -577,3 +577,144 @@ func TestAppleMusicHelperAutoRestoreFavoritesAlbumsAndSearch(t *testing.T) {
 		t.Fatalf("expected invalidated browse cache with Second Account, got %s", lists2.Items)
 	}
 }
+
+func TestAppleMusicDeckQRCompletesOnExternalHelperLoginAndSwitchAccount(t *testing.T) {
+	var mu sync.Mutex
+	account := 0 // 0 = signed out, 1 = First DJ, 2 = Second DJ
+	const devTok = "eyJabcde12345.eyJabcde123456789012345.eyJabcde123456789012345"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		acc := account
+		mu.Unlock()
+		switch r.URL.Path {
+		case "/healthz":
+			w.WriteHeader(http.StatusOK)
+		case "/v1/login/status":
+			st := "signed-out"
+			if acc > 0 {
+				st = "ready"
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"state": st, "signedIn": acc > 0})
+		case "/v1/login/credentials":
+			if acc == 0 {
+				_ = json.NewEncoder(w).Encode(map[string]any{"signedIn": false})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"signedIn":       true,
+				"mediaUserToken": fmt.Sprintf("ext-user-tok-%d", acc),
+				"developerToken": devTok,
+				"storefront":     "th",
+			})
+		case "/v1/me/storefront":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"id": "th"}}})
+		case "/v1/me/library/playlists":
+			name := "First DJ Crate"
+			if acc == 2 {
+				name = "Second DJ Crate"
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": []map[string]any{{"id": fmt.Sprintf("p.ext%d", acc), "attributes": map[string]any{"name": name}}},
+			})
+		case "/v1/me/library/songs", "/v1/me/library/albums":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	ui := New(Config{
+		AccessToken:           "console-fixture",
+		UIDir:                 t.TempDir(),
+		StateDir:              t.TempDir(),
+		AppleMusicURL:         srv.URL,
+		AppleMusicWebURL:      srv.URL,
+		AppleMusicHelperURL:   srv.URL,
+		AppleMusicHelperToken: "helper-secret",
+	}, nil)
+	defer ui.Close()
+	gw := httptest.NewServer(ui)
+	defer gw.Close()
+
+	deckCall := func(method, path string) (int, string) {
+		t.Helper()
+		req := httptest.NewRequest(method, path, nil)
+		req.RemoteAddr = "127.0.0.1:42001"
+		rec := httptest.NewRecorder()
+		ui.ServeHTTP(rec, req)
+		return rec.Code, rec.Body.String()
+	}
+
+	if code, _ := deckCall("POST", "/v1/enginex/ui?scope=applemusic&sources=applemusic"); code != 200 {
+		t.Fatalf("set scope: %d", code)
+	}
+
+	// 1. User opens Apple Music on deck while helper is signed out -> QR flow starts in waiting.
+	if code, body := deckCall("POST", "/v1/enginex/login?provider=applemusic"); code != 200 || !strings.Contains(body, `"status":"waiting"`) {
+		t.Fatalf("start login: %d %s", code, body)
+	}
+	if code, body := deckCall("GET", "/v1/enginex/login?provider=applemusic"); code != 200 || !strings.Contains(body, `"status":"waiting"`) {
+		t.Fatalf("poll before login: %d %s", code, body)
+	}
+
+	// 2. User signs in directly on external helper page (:12342) without submitting /m/applemusic.
+	mu.Lock()
+	account = 1
+	mu.Unlock()
+	if code, body := deckCall("GET", "/v1/enginex/login?provider=applemusic"); code != 200 || !strings.Contains(body, `"status":"done"`) {
+		t.Fatalf("expected deck QR poll to jump to done after external helper sign-in: %d %s", code, body)
+	}
+	if _, uiBody := deckCall("GET", "/v1/enginex/ui"); !strings.Contains(uiBody, `"applemusic"`) || !strings.Contains(uiBody, `"loggedIn":["applemusic"]`) {
+		t.Fatalf("expected applemusic in loggedIn: %s", uiBody)
+	}
+	var lists1 tidalList
+	tidalGet(t, gw.URL, "/v1/users/1/playlists", 200, &lists1)
+	if len(lists1.Items) != 1 || !strings.Contains(string(lists1.Items[0]), "First DJ Crate") {
+		t.Fatalf("expected First DJ Crate after QR done, got %s", lists1.Items)
+	}
+
+	// 3. Tapping "Switch account" while already logged in stays "waiting" until credentials change.
+	if code, _ := deckCall("POST", "/v1/enginex/login?provider=applemusic"); code != 200 {
+		t.Fatalf("start switch-account login: %d", code)
+	}
+	if code, body := deckCall("GET", "/v1/enginex/login?provider=applemusic"); code != 200 || !strings.Contains(body, `"status":"waiting"`) {
+		t.Fatalf("switch-account QR should stay waiting before new sign-in: %d %s", code, body)
+	}
+	mu.Lock()
+	account = 2
+	mu.Unlock()
+	if code, body := deckCall("GET", "/v1/enginex/login?provider=applemusic"); code != 200 || !strings.Contains(body, `"status":"done"`) {
+		t.Fatalf("switch-account QR should finish after external account change: %d %s", code, body)
+	}
+	var lists2 tidalList
+	tidalGet(t, gw.URL, "/v1/users/1/playlists", 200, &lists2)
+	if len(lists2.Items) != 1 || !strings.Contains(string(lists2.Items[0]), "Second DJ Crate") {
+		t.Fatalf("expected Second DJ Crate after switch account, got %s", lists2.Items)
+	}
+
+	// 4. Existing unready owner session is promoted by POST /api/sessions when helper is ready.
+	ui.mu.Lock()
+	for _, s := range ui.sessions {
+		if s.Provider == "applemusic" {
+			s.Ready = false
+		}
+	}
+	ui.mu.Unlock()
+	ui.appleMusic.Forget()
+	sessReq, _ := http.NewRequest("POST", gw.URL+"/api/sessions", strings.NewReader(`{"provider":"applemusic"}`))
+	sessReq.Header.Set("Authorization", "Bearer console-fixture")
+	sessReq.Header.Set("Content-Type", "application/json")
+	sessResp, err := http.DefaultClient.Do(sessReq)
+	if err != nil || sessResp.StatusCode != 200 {
+		t.Fatalf("createSession: %v %v", err, sessResp)
+	}
+	var sessOut struct {
+		Ready bool `json:"ready"`
+	}
+	_ = json.NewDecoder(sessResp.Body).Decode(&sessOut)
+	sessResp.Body.Close()
+	if !sessOut.Ready {
+		t.Fatal("expected existing applemusic session to become ready via helper sync")
+	}
+}

@@ -302,3 +302,70 @@ func TestAppleMusicHelperCredentialsSyncAndDevTokenFallback(t *testing.T) {
 		t.Fatalf("cold developerToken sync fallback failed: %+v %v", tracks, err)
 	}
 }
+
+func TestAppleMusicProbeHelperOnlineVsOfflineCooldown(t *testing.T) {
+	var mu sync.Mutex
+	online := false
+	signedIn := false
+	hits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits++
+		up := online
+		in := signedIn
+		mu.Unlock()
+		if !up {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		switch r.URL.Path {
+		case "/healthz":
+			w.WriteHeader(http.StatusOK)
+		case "/v1/login/status":
+			st := "signed-out"
+			if in {
+				st = "ready"
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"state": st, "signedIn": in})
+		case "/v1/login/credentials":
+			_ = json.NewEncoder(w).Encode(map[string]any{"signedIn": in, "mediaUserToken": "probe-tok", "developerToken": "eyJabcde12345.eyJabcde123456789012345.eyJabcde123456789012345", "storefront": "us"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	am := &AppleMusic{HelperURL: srv.URL}
+	// Offline helper backs off for the full 30s cooldown.
+	st := am.ProbeHelper(t.Context(), 30*time.Second)
+	if st.Online || st.SignedIn || hits != 1 {
+		t.Fatalf("expected 1 offline probe, got st=%+v hits=%d", st, hits)
+	}
+	_ = am.ProbeHelper(t.Context(), 30*time.Second)
+	if hits != 1 {
+		t.Fatalf("offline helper should stay on cooldown, got hits=%d", hits)
+	}
+
+	// Once online (via direct HelperStatus), ProbeHelper uses a short 2s cooldown instead of 30s.
+	mu.Lock()
+	online = true
+	mu.Unlock()
+	if st = am.HelperStatus(t.Context()); !st.Online || st.SignedIn {
+		t.Fatalf("expected online signed-out status, got %+v", st)
+	}
+	mu.Lock()
+	signedIn = true
+	beforeHits := hits
+	mu.Unlock()
+	// Backdate helperProbedAt by 2.1s (< 30s, > 2s) to verify online 2s cooldown without sleeping.
+	am.mu.Lock()
+	am.helperProbedAt = time.Now().Add(-2100 * time.Millisecond)
+	am.mu.Unlock()
+	st = am.ProbeHelper(t.Context(), 30*time.Second)
+	mu.Lock()
+	afterHits := hits
+	mu.Unlock()
+	if !st.SignedIn || !am.Ready() || afterHits <= beforeHits {
+		t.Fatalf("online helper did not re-probe after 2s: st=%+v ready=%v hits=%d->%d", st, am.Ready(), beforeHits, afterHits)
+	}
+}

@@ -34,6 +34,7 @@ type AppleMusic struct {
 	probeMu        sync.Mutex
 	owner          AppleMusicOwner
 	credGen        uint64
+	helperOnline   bool
 	helperSignedIn bool
 	helperDevToken string // developer token synced from enginex-amd (fallback if web scrape fails)
 	helperProbedAt time.Time

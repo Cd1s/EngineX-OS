@@ -30,6 +30,7 @@ func (a *AppleMusic) SetHelper(helperURL, loginURL, token string) {
 	defer a.mu.Unlock()
 	trimmed := strings.TrimRight(helperURL, "/")
 	if trimmed == "" || a.HelperURL != trimmed || a.HelperToken != token {
+		a.helperOnline = false
 		a.helperSignedIn = false
 		a.helperDevToken = ""
 		a.helperProbedAt = time.Time{}
@@ -104,6 +105,7 @@ func (a *AppleMusic) helperLogin(ctx context.Context, cfg AppleMusicHelperConfig
 	}
 	status.SignedIn = wire.SignedIn || status.LoginState == "ready"
 	a.mu.Lock()
+	a.helperOnline = true
 	a.helperSignedIn = status.SignedIn
 	if !status.SignedIn {
 		a.helperDevToken = ""
@@ -188,14 +190,19 @@ func (a *AppleMusic) ProbeHelper(ctx context.Context, cooldown time.Duration) Ap
 	a.mu.Lock()
 	configured := a.HelperURL != ""
 	last := a.helperProbedAt
+	online := a.helperOnline
 	signedIn := a.helperSignedIn
-	if configured && (last.IsZero() || time.Since(last) >= cooldown) {
+	effective := cooldown
+	if online && effective > 2*time.Second {
+		effective = 2 * time.Second
+	}
+	if configured && (last.IsZero() || time.Since(last) >= effective) {
 		a.helperProbedAt = time.Now()
 		a.mu.Unlock()
 		return a.HelperStatus(ctx)
 	}
 	a.mu.Unlock()
-	return AppleMusicHelperStatus{Configured: configured, SignedIn: signedIn}
+	return AppleMusicHelperStatus{Configured: configured, Online: online, SignedIn: signedIn}
 }
 
 func (a *AppleMusic) HelperStatus(ctx context.Context) AppleMusicHelperStatus {
@@ -203,6 +210,7 @@ func (a *AppleMusic) HelperStatus(ctx context.Context) AppleMusicHelperStatus {
 	status := AppleMusicHelperStatus{Configured: cfg.URL != ""}
 	if !status.Configured {
 		a.mu.Lock()
+		a.helperOnline = false
 		a.helperSignedIn = false
 		a.helperDevToken = ""
 		a.mu.Unlock()
@@ -215,6 +223,7 @@ func (a *AppleMusic) HelperStatus(ctx context.Context) AppleMusicHelperStatus {
 	defer cancel()
 	if err := a.helperCall(ctx, cfg, "GET", "/healthz", nil, nil); err != nil {
 		a.mu.Lock()
+		a.helperOnline = false
 		a.helperSignedIn = false
 		a.mu.Unlock()
 		status.Error = err.Error()
@@ -222,6 +231,9 @@ func (a *AppleMusic) HelperStatus(ctx context.Context) AppleMusicHelperStatus {
 	}
 	status, err := a.helperLogin(ctx, cfg, "GET", "/v1/login/status", nil)
 	if err != nil {
+		a.mu.Lock()
+		a.helperOnline = true
+		a.mu.Unlock()
 		status.Online = true
 	}
 	return status

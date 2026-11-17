@@ -49,6 +49,9 @@ type loginFlow struct {
 	spotifyState  string
 	spotifyDevice *providers.SpotifyDeviceAuth
 	helperPending bool
+	amWasReady    bool
+	amSawSignOut  bool
+	amInitCredGen uint64
 	UserCode      string `json:"userCode,omitempty"`
 	Error         string `json:"error,omitempty"`
 }
@@ -379,12 +382,29 @@ func (s *Server) loginStart(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, errors.New("unsupported provider"))
 		return
 	}
+	var amWasReady bool
+	var amInitCredGen uint64
+	if provider == "applemusic" && s.appleMusic != nil {
+		s.mu.Lock()
+		deleted := s.ownerDeleted["applemusic"]
+		s.mu.Unlock()
+		amInitCredGen = s.appleMusic.CredGen()
+		amWasReady = !deleted && s.appleMusic.Ready()
+	}
 	session, err := s.ownerSession(provider)
 	if err != nil {
 		fail(w, 500, err)
 		return
 	}
-	flow := &loginFlow{Provider: provider, Status: "waiting", token: providers.RandomID(), session: session.ID, expires: time.Now().Add(loginLifetime)}
+	flow := &loginFlow{
+		Provider:      provider,
+		Status:        "waiting",
+		token:         providers.RandomID(),
+		session:       session.ID,
+		expires:       time.Now().Add(loginLifetime),
+		amWasReady:    amWasReady,
+		amInitCredGen: amInitCredGen,
+	}
 	if sp, ok := session.p.(*providers.Spotify); ok && sp.DeviceAuthorizationEnabled() {
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		device, err := sp.BeginDeviceAuth(ctx)
@@ -434,6 +454,14 @@ func (s *Server) loginFlow(provider string) *loginFlow {
 	return s.logins[provider]
 }
 
+func hasAppleMusicHelper(p providers.Provider, helperPending bool) bool {
+	if helperPending {
+		return true
+	}
+	am, ok := p.(*providers.AppleMusic)
+	return ok && am != nil && am.HelperConfig().URL != ""
+}
+
 // loginStatus is polled by the deck while the QR code is on screen.
 func (s *Server) loginStatus(w http.ResponseWriter, r *http.Request) {
 	flow := s.loginFlow(r.URL.Query().Get("provider"))
@@ -447,6 +475,9 @@ func (s *Server) loginStatus(w http.ResponseWriter, r *http.Request) {
 	expired := time.Now().After(flow.expires)
 	device := flow.spotifyDevice
 	helperPending := flow.helperPending
+	amWasReady := flow.amWasReady
+	amSawSignOut := flow.amSawSignOut
+	amInitCredGen := flow.amInitCredGen
 	initialStatus := status
 	var loginError string
 	s.mu.Unlock()
@@ -482,21 +513,32 @@ func (s *Server) loginStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	case viaRelay && status != "done" && status != "linked":
 		status = s.relayStatus(r.Context(), session, token, status)
-	case helperPending && flow.Provider == "applemusic" && status != "done" && status != "linked":
+	case flow.Provider == "applemusic" && status != "done" && status != "linked" && hasAppleMusicHelper(session.p, helperPending):
 		if am, ok := session.p.(*providers.AppleMusic); ok {
 			prevGen := am.CredGen()
 			ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 			st := am.HelperStatus(ctx)
 			cancel()
-			if am.CredGen() != prevGen && s.tidal != nil {
+			credGen := am.CredGen()
+			if credGen != prevGen && s.tidal != nil {
 				s.tidal.dropAppleMusicBrowse(session.ID)
 			}
-			if st.SignedIn && ready(session.p) {
+			if st.Online && !st.SignedIn {
+				amSawSignOut = true
+				s.mu.Lock()
+				flow.amSawSignOut = true
+				s.mu.Unlock()
+			}
+			if st.SignedIn && ready(session.p) && (!amWasReady || helperPending || amSawSignOut || credGen != amInitCredGen) {
 				s.mu.Lock()
 				flow.helperPending = false
+				delete(s.ownerDeleted, "applemusic")
 				s.mu.Unlock()
+				if s.tidal != nil && (credGen != amInitCredGen || !amWasReady) {
+					s.tidal.dropAppleMusicBrowse(session.ID)
+				}
 				status = "done"
-			} else if st.LoginState == "failed" {
+			} else if st.LoginState == "failed" && (helperPending || amSawSignOut) {
 				s.mu.Lock()
 				flow.helperPending = false
 				s.mu.Unlock()
@@ -514,6 +556,9 @@ func (s *Server) loginStatus(w http.ResponseWriter, r *http.Request) {
 	if flow.Status != initialStatus && (flow.Status == "linked" || flow.Status == "done") {
 		status = flow.Status
 		loginError = ""
+		if status == "linked" && session != nil && ready(session.p) {
+			status = "done"
+		}
 	}
 	flow.Status = status
 	flow.Error = loginError
@@ -572,19 +617,40 @@ func (s *Server) phoneGet(w http.ResponseWriter, r *http.Request) {
 	case "applemusic":
 		s.mu.Lock()
 		pendingHelper := flow.helperPending
+		amWasReady := flow.amWasReady
+		amSawSignOut := flow.amSawSignOut
+		amInitCredGen := flow.amInitCredGen
 		s.mu.Unlock()
-		if pendingHelper {
+		if pendingHelper || (s.appleMusic != nil && s.appleMusic.HelperConfig().URL != "") {
+			prevGen := s.appleMusic.CredGen()
 			ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 			st := s.appleMusic.HelperStatus(ctx)
 			cancel()
-			if st.SignedIn && s.appleMusic.Ready() {
+			credGen := s.appleMusic.CredGen()
+			if credGen != prevGen {
+				s.syncAppleMusicSession(false, prevGen)
+			}
+			if st.Online && !st.SignedIn {
+				amSawSignOut = true
+				s.mu.Lock()
+				flow.amSawSignOut = true
+				s.mu.Unlock()
+			}
+			if st.SignedIn && s.appleMusic.Ready() && (pendingHelper || !amWasReady || amSawSignOut || credGen != amInitCredGen) {
 				s.mu.Lock()
 				flow.helperPending = false
+				if v := s.sessions[flow.session]; v != nil {
+					v.Ready = true
+				}
+				delete(s.ownerDeleted, "applemusic")
 				s.mu.Unlock()
+				if s.tidal != nil && flow.session != "" {
+					s.tidal.dropAppleMusicBrowse(flow.session)
+				}
 				s.finishPhoneLogin(w, r, flow)
 				return
 			}
-			if st.LoginState == "failed" {
+			if st.LoginState == "failed" && pendingHelper {
 				s.mu.Lock()
 				flow.helperPending = false
 				s.mu.Unlock()
@@ -816,7 +882,7 @@ func (s *Server) phonePost(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			s.mu.Lock()
-			flow.helperPending = status.LoginState == "logging-in"
+			flow.helperPending = status.LoginState == "logging-in" || status.LoginState == "2fa"
 			s.mu.Unlock()
 			http.Redirect(w, r, phoneAction(r, flow), http.StatusSeeOther)
 			return
