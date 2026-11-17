@@ -79,10 +79,11 @@ echo "X166 ENGINE_EXIT|$engine_rc|" >> "$W/$board-engine.log"
 if [ -f "$R/tmp/engine-quit-reason" ]; then cp "$R/tmp/engine-quit-reason" "$W/$board-quit-reason"; fi
 mkdir -p "$W/$board-qrc-dump"
 cp -a "$R/tmp/qrc-dump/." "$W/$board-qrc-dump/"
+cp "$R"/tmp/mx-*.png "$W/" 2>/dev/null || true
 wait "$collection_pid" || { tail -n 8 "$W/$board-collection.log"; tail -n 8 "$W/$board-engine.log"; cat "$W/$board-quit-reason" 2>/dev/null || true; exit 1; }
 cat "$W/$board-collection.log"
-grep -aE 'X166 (CONFIG|TOUCH|CAROUSEL|SWEEP|ERROR|DONE)|X166 PASS\|(native Sweep|Sweep Type|Beat Jump preference)' "$W/$board-engine.log" | cut -c1-200 | head -n 40
+grep -aE 'X166 (CONFIG|TOUCH|CAROUSEL|SWEEP|PADS|STEMSEQ|ERROR|DONE)|X166 PASS\|(native Sweep|Sweep Type|Beat Jump preference)' "$W/$board-engine.log" | cut -c1-200 | head -n 40
 ! grep -aq 'X166 ERROR|' "$W/$board-engine.log"
-! grep -aEq '(Pads|SweepFxSelectCarousel)\.qml:[0-9]+: (TypeError|ReferenceError|Error:|Unable to assign)' "$W/$board-engine.log"
+! grep -aEq '(Pads|SweepFxSelectCarousel|ControlCenterTab)\.qml:[0-9]+: (TypeError|ReferenceError|Error:|Unable to assign)' "$W/$board-engine.log"
 grep -aq 'X166 DONE|PASS|' "$W/$board-engine.log"
 echo "$board MIXSTREAM_NATIVE_PASS"

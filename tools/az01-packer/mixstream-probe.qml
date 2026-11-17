@@ -23,7 +23,7 @@ Item {
         check(!!p && !!p.translator, path)
         return p.translator
     }
-    function find(name) {
+    function find(name, from) {
         const seen = new Set()
         function walk(o) {
             if (!o || seen.has(o)) return null
@@ -36,8 +36,71 @@ Item {
             for (const c of children) { const found = walk(c); if (found) return found }
             return null
         }
+        if (from) return walk(from)
         for (const pads of probe.testPads) { const found = walk(pads); if (found) return found }
         return walk(probe.Window.window.contentItem)
+    }
+    // Pad bar at its natural height, half the 1024 px screen wide: measured and pictured as shipped.
+    // The bars in testPads are stretched to 150 px to check touch targets.
+    function shoot(tag) {
+        const component = Qt.createComponent("qrc:/Skins/Embedded/Items/Pads/Pads.qml")
+        for (let deck = 1; deck <= 2; deck++) {
+            const pads = component.createObject(probe.Window.window.contentItem, {deckIndex: deck, width: 508, x: (deck - 1) * 512, y: 100, z: 1000})
+            const grid = probe.find("Deck_Pads_Layout", pads)
+            console.warn("X166 PADS|" + tag + "|deck=" + deck + "|height=" + pads.implicitHeight + "|padGridWidth=" + Math.round(grid.width) + "|")
+            pads.grabToImage(function(r) {
+                probe.check(r.saveToFile("/tmp/mx-pads-" + tag + "-deck" + deck + ".png"), "picture of the " + tag + " Pad bar deck " + deck)
+                pads.destroy()
+            }, Qt.size(pads.width * 2, pads.implicitHeight * 2))
+        }
+    }
+    // The Control Center's channel-strip EQ / Stems switch: one segment per channel, lit while that channel is in Stems.
+    function stemsEqTile() {
+        const component = Qt.createComponent("qrc:/Skins/Embedded/Views/ControlCenter/Tabs/ControlCenterTab.qml")
+        check(component.status === Component.Ready, "Control Center tab loads: " + component.errorString())
+        // Laid out as on the Pro+ / Pro Go panel: its device tree names the panel urt,umo-p076md-t (kernel mode 800 x 1280)
+        // with rotation 90, so the UI is 1280 x 800 (this sandbox's window is 800 x 800 for every board). The tab is 640 px high
+        // (800 less the 80 px tab bar and 80 px status bar) and does not scroll.
+        const backdrop = Qt.createQmlObject('import QtQuick 2.12; Rectangle { color: "#1c1c1c" }', probe.Window.window.contentItem)
+        backdrop.width = 1280; backdrop.height = 720; backdrop.z = 1000
+        const tab = component.createObject(backdrop, {width: 1280, height: 640})
+        check(!!tab, "create the Control Center tab")
+        const tile = find("ControlCenter_StemsEq", tab)
+        check(!!tile && tile.visible, "Stems EQ strip is in the Control Center")
+        // Worst case: every stock tile Mixstream can show is visible. The strip must sit in the room above them, cover none of
+        // them and not touch the Source / Wi-Fi / Bluetooth row at the bottom.
+        let flow = null
+        for (let i = 0; i < tab.children.length; i++) if (tab.children[i].numColumns !== undefined) flow = tab.children[i]
+        check(!!flow, "found the tile Flow")
+        const box = tile.mapToItem(tab, 0, 0)
+        function overlaps(item) {
+            const r = item.mapToItem(tab, 0, 0)
+            return r.x < box.x + tile.width && box.x < r.x + item.width && r.y < box.y + tile.height && box.y < r.y + item.height
+        }
+        let shown = 0
+        for (let i = 0; i < flow.children.length; i++) {
+            if (!flow.children[i].visible) continue
+            shown++
+            check(!overlaps(flow.children[i]), "Stems EQ strip covers no stock tile (child " + i + ")")
+        }
+        check(shown >= 17, "worst case: 15 stock tiles + Waveform Style + Smart Sync visible, got " + shown)
+        const bottomRow = find("ControlCenter_AdditionalControls", tab)
+        check(!!bottomRow && !overlaps(bottomRow), "Stems EQ strip leaves the bottom row alone")
+        check(box.y >= 0 && box.y + tile.height <= flow.y, "Stems EQ strip lies in the room above the tiles")
+        for (let ch = 1; ch <= 2; ch++) {
+            const seg = find("ControlCenter_StemsEq_" + ch, tile)
+            check(!!seg && seg.width >= 44 && seg.height >= 44, "touch geometry of Stems EQ channel " + ch)
+            const own = tr("/Engine/Mixer/Channel" + ch + "/ChannelStrip/Mode")
+            const other = tr("/Engine/Mixer/Channel" + (3 - ch) + "/ChannelStrip/Mode")
+            const before = other.index
+            for (let i = 0; i < seg.children.length; i++) if (typeof seg.children[i].clicked === "function") seg.children[i].clicked(null)
+            // Native access filter can reject Stems without a stems track.
+            console.warn("X166 STEMSEQ|channel=" + ch + "|mode=" + own.index + "|selected=" + seg.selected + "|")
+            check(other.index === before, "Stems EQ tile keeps the other channel " + ch)
+            check(seg.selected === (own.index === 1), "Stems EQ highlight follows the actual mode " + ch)
+        }
+        backdrop.grabToImage(function(r) { check(r.saveToFile("/tmp/mx-control-center.png"), "picture of the Control Center") })
+        tile.grabToImage(function(r) { check(r.saveToFile("/tmp/mx-stems-eq-tile.png"), "picture of the Stems EQ tile") }, Qt.size(tile.width * 2, tile.height * 2))
     }
     Timer {
         interval: 1500
@@ -86,20 +149,12 @@ Item {
                                         "touch action and geometry " + a + " deck " + deck)
                             button.clicked()
                         }
-                        const eq = probe.find("MixstreamStemsEq" + deck)
-                        probe.check(!!eq && eq.enabled && eq.height >= 44, "touch EQ / STEMS deck " + deck)
                         const sweep = probe.find("MixstreamSweepFx" + deck)
-                        probe.check(!!sweep && sweep.enabled && sweep.height >= 44, "touch SWEEP FX deck " + deck)
-                        probe.check(sweep.y + sweep.height <= eq.y, "no overlap 2-row Sweep FX above Stems EQ deck " + deck)
-                        const own = probe.tr("/Engine/Mixer/Channel" + deck + "/ChannelStrip/Mode")
-                        const other = probe.tr("/Engine/Mixer/Channel" + (3 - deck) + "/ChannelStrip/Mode")
-                        const before = other.index
-                        eq.clicked()
-                        // Native access filter can reject Stems without a stems track.
-                        console.warn("X166 EQ|deck=" + deck + "|mode=" + own.index + "|highlight=" + eq.highlighted + "|")
-                        probe.check(other.index === before, "EQ switch keeps other channel " + deck)
-                        probe.check(eq.highlighted === (own.index === 1), "EQ highlight follows actual mode " + deck)
+                        probe.check(!!sweep && sweep.enabled && sweep.width >= 44 && sweep.height >= 44, "touch Sweep FX triangle deck " + deck)
+                        probe.check(!probe.find("MixstreamStemsEq" + deck, probe.testPads[deck - 1]), "no EQ / STEMS button on the Pad bar deck " + deck)
                     }
+                    probe.shoot("beat-jump-bank")
+                    probe.stemsEqTile()
                     probe.find("MixstreamSweepFx1").clicked()
                     probe.stage++
                 } else if (probe.stage === 2) {
@@ -148,13 +203,9 @@ Item {
                         probe.check(!!bank && !bank.visible, "Beat Jump preference off hides Beat Jump bank " + deck)
                         const padsLayout = probe.find("Deck_Pads_Layout")
                         probe.check(!!padsLayout && padsLayout.visible, "native pads remain visible deck " + deck)
-                        const sweep = probe.find("MixstreamSweepFx" + deck)
-                        const eq = probe.find("MixstreamStemsEq" + deck)
-                        probe.check(!!sweep && !!eq, "controls found deck " + deck)
-                        probe.check(sweep.y === eq.y, "single-row Sweep FX and Stems EQ share same row deck " + deck)
-                        probe.check(sweep.x + sweep.width <= eq.x || eq.x + eq.width <= sweep.x,
-                                    "no horizontal overlap Sweep FX and Stems EQ deck " + deck)
+                        probe.check(!!probe.find("MixstreamSweepFx" + deck) && !probe.find("MixstreamStemsEq" + deck, probe.testPads[deck - 1]), "only the Sweep FX triangle beside the pads deck " + deck)
                     }
+                    probe.shoot("default")
                     console.warn("X166 DONE|PASS|")
                     running = false
                 }

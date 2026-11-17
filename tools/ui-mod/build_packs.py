@@ -5776,6 +5776,64 @@ SYNC_TILE = """
 		}
 """
 
+# Control Center (5.3.0 only, Mixstream Pro / Pro+ / Pro Go): the channel strip's
+# EQ / Stems switch (#286; it was the "EQ / STEMS" button on each deck's Pad bar), one
+# segment per channel, lit while that channel's EQ knobs control the Stems.
+# The tab is a fixed Flow of tiles that starts 64 px down and does not scroll, and
+# the Source / Wi-Fi / Bluetooth row at the bottom covers every tile past the third
+# row. So this is not a grid tile: it is a slim strip in the free 64 px above the
+# Flow, beside no stock tile, and is declared before UberEntries (see edits()).
+STEMS_EQ_TILE = """
+	Rectangle {
+		id: scStemsEqTile
+		objectName: "ControlCenter_StemsEq"
+		visible: Config.audio.fx.hasNHFx && Config.audio.hasStemsLevel
+		anchors.horizontalCenter: parent.horizontalCenter
+		y: 4
+		width: 272
+		height: 56
+		radius: 12
+		color: Style.surface03Color
+		Text {
+			x: 14
+			anchors.verticalCenter: parent.verticalCenter
+			text: root.scT("Stems EQ")
+			font: Style.fontH4
+			color: Style.font01Color
+		}
+		Row {
+			x: 122
+			y: 6
+			Repeater {
+				model: scStemsEqTile.visible ? ["Deck 1", "Deck 2"] : []
+				Rectangle {
+					readonly property var mode: Planck.getProperty("/Engine/Mixer/Channel" + (index + 1) + "/ChannelStrip/Mode").translator
+					readonly property bool selected: mode.index === 1
+					objectName: "ControlCenter_StemsEq_" + (index + 1)
+					width: 68
+					height: 44
+					color: selected ? "#00c3e3" : stemsEqTap.pressed ? "#6a6a6a" : "#4a4a4a"
+					border {
+						width: 1
+						color: "#a8a8a8"
+					}
+					Text {
+						anchors.centerIn: parent
+						text: root.scT(modelData).toUpperCase()
+						font: Style.fontH5
+						color: "#ffffff"
+					}
+					MouseArea {
+						id: stemsEqTap
+						anchors.fill: parent
+						onClicked: mode.index = selected ? 0 : 1
+					}
+				}
+			}
+		}
+	}
+"""
+
 # rekordbox / CDJ-3000 3-Band palette, taken from a rekordbox 6 screenshot: blue
 # lows, orange mids, white highs, and brown mids where the lows cover them. Engine
 # fades each band from its main colour to its fade colour as that band gets quieter,
@@ -7257,7 +7315,7 @@ def edits(dev: bool):
         v + "ControlCenter/Tabs/ControlCenterTab.qml": [
             ("import QtQuick.Layouts 1.12\n", "import QtQuick.Layouts 1.12\nimport EngineOS.UI.Style 1.0\n"),
             ("		DayModeEnable { }\n", "		DayModeEnable { }\n" + WAVE_TILE.replace("@LOW@", BAND_COLORS["Low"]).replace("@MID@", BAND_COLORS["Mid"]).replace("@HIGH@", BAND_COLORS["High"]) + UPFADER_ECHO_TILE + (SYNC_TILE if v53() else "")),
-        ],
+        ] + ([("\tUberEntries {\n", STEMS_EQ_TILE + "\tUberEntries {\n")] if v53() else []),
         v + "ControlCenter/ControlCenterTabView.qml": [("text: tabView.hideTabButtonLabel ? \"\" : modelData", "text: tabView.hideTabButtonLabel ? \"\" : root.scT(modelData)")],
         prefs + "PreferencesTabView.qml": [("					text: modelData\n", "					text: root.scT(modelData)\n")],
         v + "BrowseView/Components/BreadcrumbView/BreadcrumbViewHeader.qml": [
@@ -7959,11 +8017,11 @@ def edits(dev: bool):
         }
 '''),
         ]
-        # #166 / #261: compact Numark decks (NH08/NH08S/NH10) have four pads and no Stems EQ key.
+        # #166 / #261 / #286: compact Numark decks (NH08/NH08S/NH10) have four pads.
         # When Beat Jump bank is enabled, show performance pads (row 1) and Beat Jump (row 2)
-        # simultaneously without sacrificing either, with Sweep FX and Stems EQ in a matching 2-row column.
-        # When Beat Jump bank is off, show Sweep FX and Stems EQ side-by-side in a 2-column single row
-        # so they never vertically overlap at any UI scale.
+        # simultaneously without sacrificing either. Sweep FX is a single "△" button that opens
+        # stock's Sweep FX popup when tapped; the Stems EQ switch is a Control Center tile
+        # (STEMS_EQ_TILE), so the Pad bar keeps only what the pads need.
         old_pads_layout = '''        GridLayout {
             id: padsLayout
             objectName: "Deck_Pads_Layout"
@@ -7996,50 +8054,26 @@ def edits(dev: bool):
         }
     }
 }'''
-        new_pads_layout = '''        GridLayout {
+        new_pads_layout = '''        Button {
+            objectName: "MixstreamSweepFx" + pads.deckIndex
             visible: pads.scMixstream
-            columns: pads.scBeatJumpBank ? 1 : 2
-            columnSpacing: 4
-            rowSpacing: 4
-            Layout.preferredWidth: pads.scBeatJumpBank ? 84 : 156
+            Layout.preferredWidth: 44
             Layout.fillHeight: true
+            Layout.leftMargin: isPadLayoutMirrored ? 0 : 16
+            Layout.rightMargin: isPadLayoutMirrored ? 16 : 0
             Layout.topMargin: pads.scBeatJumpBank ? 8 : 16
             Layout.bottomMargin: pads.scBeatJumpBank ? 8 : 16
-            Button {
-                objectName: "MixstreamSweepFx" + pads.deckIndex
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-                leftPadding: 4; rightPadding: 4; topPadding: 0; bottomPadding: 0
-                font.pixelSize: 11
-                font.bold: true
-                text: "SWEEP FX"
-                enabled: Config.ui.hasSweepFxSelectionPopup
-                background: Rectangle {
-                    color: parent.down ? Style.surface03Color : Style.surface02Color
-                    radius: 4
-                    border.width: 1
-                    border.color: Style.surface03Color
-                }
-                onClicked: root.scMixstreamSweepOpen = true
+            padding: 0
+            font.pixelSize: 18
+            text: "△"
+            enabled: Config.ui.hasSweepFxSelectionPopup
+            background: Rectangle {
+                color: parent.down ? Style.surface03Color : Style.surface02Color
+                radius: 4
+                border.width: 1
+                border.color: Style.surface03Color
             }
-            Button {
-                objectName: "MixstreamStemsEq" + pads.deckIndex
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-                leftPadding: 4; rightPadding: 4; topPadding: 0; bottomPadding: 0
-                font.pixelSize: 11
-                font.bold: true
-                text: "EQ / STEMS"
-                highlighted: !!pads.scStripMode && pads.scStripMode.index === 1
-                enabled: Config.audio.hasStemsLevel && !!pads.scStripMode
-                background: Rectangle {
-                    color: parent.highlighted ? Style.active01Color : (parent.down ? Style.surface03Color : Style.surface02Color)
-                    radius: 4
-                    border.width: 1
-                    border.color: parent.highlighted ? Style.active02Color : Style.surface03Color
-                }
-                onClicked: pads.scStripMode.index = pads.scStripMode.index === 1 ? 0 : 1
-            }
+            onClicked: root.scMixstreamSweepOpen = true
         }
 
         ColumnLayout {
@@ -8117,8 +8151,6 @@ def edits(dev: bool):
             ('    required property int deckIndex\n', '''    required property int deckIndex
     readonly property bool scMixstream: Config.audio.fx.hasNHFx
     readonly property bool scBeatJumpBank: scMixstream && Config.audio.deck.hasBeatJump && typeof root !== "undefined" && !!root.scBeatJumpPads
-    readonly property var scStripProperty: scMixstream ? Planck.getProperty("/Engine/Mixer/Channel" + deckIndex + "/ChannelStrip/Mode") : null
-    readonly property var scStripMode: scStripProperty ? scStripProperty.translator : null
     function scJump(action) {
         const p = Planck.getProperty("/Engine/Deck" + deckIndex + "/Track/BeatJump/" + action)
         if (p && p.translator) p.translator.state = true

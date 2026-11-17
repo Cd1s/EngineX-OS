@@ -7751,8 +7751,8 @@ class ThreeBandPaletteTest(unittest.TestCase):
 
 
 class MixstreamPadsLayoutTest(unittest.TestCase):
-    """#261: Mixstream Pro (NH08/NH08S/NH10) pads bar layout tests.
-    Prevents Sweep FX and Stems EQ overlap while keeping native pads and Beat Jump accessible."""
+    """#261 / #286: Mixstream Pro (NH08/NH08S/NH10) pads bar layout tests.
+    The Pad bar holds the pads, the Beat Jump bank and one Sweep FX triangle; the EQ / Stems switch is a Control Center tile."""
 
     def test_pads_layout_patch_applies_and_maintains_coexistence(self):
         qrc = LAB / "5.3.0/qrc"
@@ -7769,11 +7769,16 @@ class MixstreamPadsLayoutTest(unittest.TestCase):
         finally:
             bp.ROOT = old_root
 
-        # 1. Verification of Mixstream controls structure
+        # 1. Verification of Mixstream controls structure (#286: one Sweep FX triangle, no EQ / STEMS button or button column)
         self.assertIn('visible: pads.scMixstream', pads_content)
-        self.assertIn('columns: pads.scBeatJumpBank ? 1 : 2', pads_content)
         self.assertIn('objectName: "MixstreamSweepFx" + pads.deckIndex', pads_content)
-        self.assertIn('objectName: "MixstreamStemsEq" + pads.deckIndex', pads_content)
+        self.assertIn('text: "△"', pads_content)
+        self.assertIn('Layout.preferredWidth: 44', pads_content)
+        self.assertIn('onClicked: root.scMixstreamSweepOpen = true', pads_content)
+        self.assertNotIn('MixstreamStemsEq', pads_content)
+        self.assertNotIn('scStripMode', pads_content)
+        self.assertNotIn('columns: pads.scBeatJumpBank ? 1 : 2', pads_content)
+        self.assertNotIn('SWEEP FX', pads_content)
         self.assertIn('objectName: "MixstreamBeatJumpBank" + pads.deckIndex', pads_content)
         self.assertIn('id: padsLayout', pads_content)
 
@@ -7782,7 +7787,7 @@ class MixstreamPadsLayoutTest(unittest.TestCase):
 
         # 3. Compact button padding and background styling preventing visual overlap
         self.assertIn('leftPadding: 4; rightPadding: 4', pads_content)
-        self.assertIn('font.pixelSize: 11', pads_content)
+        self.assertIn('font.pixelSize: 18', pads_content)
         self.assertIn('background: Rectangle {', pads_content)
 
         # 4. Non-Mixstream isolation: natural height preserved without forced stretching
@@ -7798,8 +7803,57 @@ class MixstreamPadsLayoutTest(unittest.TestCase):
             self.assertFalse(re.search(r'(?<!parent\.)\bdown\b', block), f"Bare 'down' found in background: {block}")
             self.assertFalse(re.search(r'(?<!parent\.)\bhighlighted\b', block), f"Bare 'highlighted' found in background: {block}")
         self.assertIn('color: parent.down ?', pads_content)
-        self.assertIn('color: parent.highlighted ?', pads_content)
-        self.assertIn('border.color: parent.highlighted ?', pads_content)
+
+    def test_stems_eq_switch_is_a_control_center_tile_on_mixstream_only(self):
+        rows = bp.load_dict()
+        for key in ("Stems EQ", "Deck 1", "Deck 2"):
+            self.assertIn(key, rows)
+            for lang in ("zh-Hans", "zh-Hant", "es"):
+                self.assertTrue(rows[key].get(lang), f"missing {lang} for {key}")
+        tile = bp.STEMS_EQ_TILE
+        self.assertIn('objectName: "ControlCenter_StemsEq"', tile)
+        self.assertIn('visible: Config.audio.fx.hasNHFx && Config.audio.hasStemsLevel', tile)
+        self.assertIn('model: scStemsEqTile.visible ? ["Deck 1", "Deck 2"] : []', tile)
+        self.assertIn('"/Engine/Mixer/Channel" + (index + 1) + "/ChannelStrip/Mode"', tile)
+        old_root = bp.ROOT
+        try:
+            for root, present in (("Skins/Embedded/", True), ("Skins/EmbeddedCommon/", False)):
+                bp.ROOT = root
+                injected = "".join(new for _, new in bp.edits(False)[root + "Views/ControlCenter/Tabs/ControlCenterTab.qml"])
+                self.assertEqual("ControlCenter_StemsEq" in injected, present, root)
+        finally:
+            bp.ROOT = old_root
+
+    def test_stems_eq_strip_sits_above_the_tile_flow_and_takes_no_grid_slot(self):
+        """The Control Center tab does not scroll and its bottom row covers every tile past row 3, so the strip lives in the
+        free 64 px above the Flow (a Flow child would take a slot, and the last slot in the worst case is under that row)."""
+        qrc = LAB / "5.3.0/qrc"
+        if not qrc.is_dir():
+            self.skipTest(f"{LAB} 5.3.0 QRC not found")
+        rel = "Skins/Embedded/Views/ControlCenter/Tabs/ControlCenterTab.qml"
+        stock = (qrc / rel).read_text(encoding="utf-8")
+        text = stock
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            for old, new in bp.edits(False)[rel]:
+                text = bp.patch(text, old, new, rel)
+        finally:
+            bp.ROOT = old_root
+        # End of the Flow: its matching closing brace.
+        depth, at = 0, text.index("Flow {") + len("Flow ")
+        for at, ch in enumerate(text[at:], at):
+            depth += (ch == "{") - (ch == "}")
+            if ch == "}" and depth == 0:
+                break
+        strip = text.index('objectName: "ControlCenter_StemsEq"')
+        self.assertGreater(strip, at, "the Stems EQ strip is a Flow child and would take a grid slot")
+        self.assertLess(strip, text.index("UberEntries {"))
+        self.assertEqual(text.count("ControlCenter_StemsEq\""), 1)
+        flow_y = int(re.search(r"Flow \{.*?\n\s*y: (\d+)", stock, re.S).group(1))
+        y = int(re.search(r"\n\t\ty: (\d+)\n", bp.STEMS_EQ_TILE).group(1))
+        height = int(re.search(r"\n\t\theight: (\d+)\n", bp.STEMS_EQ_TILE).group(1))
+        self.assertTrue(0 <= y and y + height <= flow_y, f"strip {y}+{height} must end above the Flow at {flow_y}")
 
     def test_mixstream_pitch_bend_beat_jump_and_fx_slots(self):
         rows = bp.load_dict()

@@ -333,6 +333,7 @@ Reverse Jog Wheel	反转转盘方向	反轉轉盤方向	Invertir rueda jog
 Reverse Left Jog Wheel	反转左侧转盘方向	反轉左側轉盤方向	Invertir rueda jog izquierda
 Reverse Right Jog Wheel	反转右侧转盘方向	反轉右側轉盤方向	Invertir rueda jog derecha
 Sync Guard Tolerance	同步保护容差	同步保護容差	Tolerancia de Sync Guard
+Stems EQ	分轨 EQ	分軌 EQ	Stems EQ
 Stems EQ Mode	分轨 EQ 模式	分軌 EQ 模式	Modo Stems EQ
 Color FX Style	先锋风格效果 (Color FX)	先鋒風格效果 (Color FX)	Estilo Color FX
 Spiral	Spiral	Spiral	Spiral
@@ -429,8 +430,6 @@ FX Noise Volume	Noise 效果音量	Noise 效果音量	Volumen del ruido de FX
 Fader Effects	推子效果 (Fader FX)	推桿效果 (Fader FX)	Efectos de fader
 Disarm After Trigger	触发后自动解除	觸發後自動解除	Desarmar tras disparar
 Reset Effects to Default Settings	恢复效果默认设置	恢復效果預設設定	Restablecer efectos a valores predeterminados
-SWEEP FX	滤波效果	濾波效果	SWEEP FX
-EQ / STEMS	EQ / 分轨	EQ / 分軌	EQ / STEMS
 Jump −	跳拍 −	跳拍 −	Salto −
 Jump +	跳拍 +	跳拍 +	Salto +
 Sweep FX	滤波效果	濾波效果	FX de barrido
