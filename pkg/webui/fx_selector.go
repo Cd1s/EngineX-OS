@@ -34,6 +34,21 @@ func (s *Server) fxSelectorAvailable() bool {
 	return err == nil && strings.TrimSpace(string(b)) == "armhf-px-v2 JC11"
 }
 
+// The hook writes this heartbeat once a second while each channel's filter knob can play
+// Color FX (5.3.0 all-in-ones); the Color FX Style row is shown only then.
+func (s *Server) colorFXAvailable() bool {
+	path := s.cfg.ColorFXReadyFile
+	if path == "" {
+		path = "/run/enginex-colorfx.ready"
+	}
+	i, err := os.Stat(path)
+	if err != nil || time.Since(i.ModTime()) >= 2*time.Second {
+		return false
+	}
+	b, err := os.ReadFile(path)
+	return err == nil && strings.TrimSpace(string(b)) == "armhf-cfx-v1"
+}
+
 // Queue ordinary cross-unit overlaps without holding the saved-settings lock.
 // Bound the wait so a stalled hook cannot leave arbitrarily late selections.
 func (s *Server) lockFXSelector(ctx context.Context) bool {

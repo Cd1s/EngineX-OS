@@ -238,3 +238,61 @@ func TestFXSelectorQueuesOverlappingUnits(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// Color FX Style is shown where the hook's channel-knob heartbeat is fresh, and there the
+// stored style is kept, PRIME 4 included: it is the filter knobs' style, never the master's.
+func TestColorFXStyleFollowsTheChannelKnobHook(t *testing.T) {
+	dir := t.TempDir()
+	ready := filepath.Join(dir, "colorfx.ready")
+	s := New(Config{UIDir: dir, StateDir: t.TempDir(), FXSelectorReadyFile: filepath.Join(dir, "ready"), ColorFXReadyFile: ready}, nil)
+	path := filepath.Join(dir, "settings.conf")
+	if err := os.WriteFile(path, []byte("lang=en\npioneer_fx=spiral\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	status := func() string {
+		w := httptest.NewRecorder()
+		s.uiStatus(w, httptest.NewRequest("GET", "/api/ui", nil))
+		return w.Body.String()
+	}
+	if !strings.Contains(status(), `"colorFxAvailable":false`) {
+		t.Fatal("shown without the hook")
+	}
+	for _, body := range []string{"armhf-cfx-v0\n", "armhf-px-v2 JC11\n"} {
+		if err := os.WriteFile(ready, []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(status(), `"colorFxAvailable":false`) {
+			t.Fatalf("foreign heartbeat %q accepted", body)
+		}
+	}
+	if err := os.WriteFile(ready, []byte("armhf-cfx-v1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-3 * time.Second)
+	if err := os.Chtimes(ready, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(status(), `"colorFxAvailable":false`) {
+		t.Fatal("stale heartbeat accepted (Engine stopped)")
+	}
+	for _, f := range []string{ready, s.fxSelectorReadyFile()} {
+		body := "armhf-cfx-v1\n"
+		if f != ready {
+			body = "armhf-px-v2 JC11\n"
+		}
+		if err := os.WriteFile(f, []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if body := status(); !strings.Contains(body, `"colorFxAvailable":true`) || !strings.Contains(body, `"fxSelectorAvailable":true`) || !strings.Contains(body, `"pioneerFx":"spiral"`) {
+		t.Fatal(body)
+	}
+	v := s.loadUI()
+	v.PioneerFx = "dub_echo"
+	if err := s.saveUI(v); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(path); !strings.Contains(string(b), "pioneer_fx=dub_echo\n") {
+		t.Fatalf("style not saved next to PX: %s", b)
+	}
+}

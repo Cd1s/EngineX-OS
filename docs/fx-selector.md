@@ -2,6 +2,8 @@
 
 This branch enables PX only on JC11 PRIME 4, Engine 5.3.0 armhf, BuildID `be537e908121e76164ddbbf9730d472ba0b8f9d4`, whose rootfs reports `hasDJFx=true`. JP07 reports `hasDJFx=false` and `hasNHFx=false`; PX is not installed there. JP07 keeps the dfdef97 global Color FX Style menu, master DSP and settings. JP08, 5.0.4 and sclive4 also retain the original master DSP. Both architectures compile the frozen dfdef97 master source through `pioneer_master.h`; AZ04 keeps its existing behavior. Only the selector-capable scope bypasses master Color FX, hides its legacy menu and removes old `pioneer_fx=` lines.
 
+Update (5.3.0.5): `settings.conf` no longer drives the master Color FX on any board. `pioneer_fx=` is now the style of each channel's `FILTER` knob on the armhf all-in-ones: the hook wraps `SweepFxControl::setValue` and `ChannelSweepFx::process` (5.3.0, JC11 / JC16 / JP11 / NH08: `0xd8ba3c`, `0xec127c`; 5.3.0-sclive4, JP21 / JP20 / JC11S / JP11S / NH08S / NH10: `0xd9619c`, `0xecdbd4`), keeps stock inside its centre band (0.495–0.505) and with the style `Off`, and writes `/run/enginex-colorfx.ready`, which the UI pack and `pkg/webui` check before showing `Color FX Style`. On PRIME 4 the stored style is kept next to PX; the PX migration only drops it on a PX board without that marker.
+
 The selector retains the 26 stock entries and appends Spiral (PX), Pitch Echo (PX), Slip Roll (PX), Dub Echo (PX), and Space (PX). Flanger is the carrier because its process entry is already guarded by an exact build/prefix match, it has native Parameter/Mix controls, and its instances belong to individual FX units. Choosing the original Flanger or another original entry clears the route before native selection.
 
 ## Controls and identity

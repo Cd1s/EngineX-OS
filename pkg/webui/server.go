@@ -64,6 +64,8 @@ type Config struct {
 	USBPreparingPath string
 	// FXSelectorReadyFile overrides the tmpfs heartbeat path in sandbox tests.
 	FXSelectorReadyFile string
+	// ColorFXReadyFile overrides the channel-knob Color FX heartbeat path in sandbox tests.
+	ColorFXReadyFile string
 	// ZoneinfoDir overrides /usr/share/zoneinfo in tests.
 	ZoneinfoDir string
 	// RelayURL is the cloud login service; it passes credentials and never audio.

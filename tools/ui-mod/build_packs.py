@@ -3238,8 +3238,9 @@ SERVICES_MAIN = """
 	property string scFxTimeMode: "beats"
 	property int scFxTimeMs: 500
 	property bool scFxSelectorAvailable: false
+	property bool scColorFxAvailable: false
 	property bool scFxMasterBypassed: false
-	readonly property bool scHasPxDelay: scFxSelectorAvailable || (!scFxMasterBypassed && !scIsPlayerBoard && ["spiral", "pitch_echo", "dub_echo"].indexOf(scPioneerFx) >= 0)
+	readonly property bool scHasPxDelay: scFxSelectorAvailable
 	// Offers this model's release image to EngineX's online updater.
 	property ListModel scUpdateModel: ListModel {}
 	property bool scUpdating: false
@@ -3819,6 +3820,7 @@ SERVICES_MAIN = """
 			scFxMasterBypassed = !!v.fxSelectorAvailable
 			scFxSelectorAvailable = scFxMasterBypassed && (Config.audio.fx.hasDJFx || Config.audio.fx.hasNHFx)
 		}
+		if (v.colorFxAvailable !== undefined) scColorFxAvailable = !!v.colorFxAvailable
 		scEnsureTidal()
 		if (v.version) scVersion = v.version
 		if (v.buildTag !== undefined) scBuildTag = String(v.buildTag || "")
@@ -5185,8 +5187,8 @@ PLAYBACK_ENTRIES = (switch_entry("Master Soft Clipper", "scMasterLimiter", "mast
     + switch_entry("Stems EQ Mode", "scStemsEqMode", "stemsEqMode", "\t\t\tvisible: root.scHasStemsEq\n") + """
 		EntryBase.ListEntry {
 			text: "Color FX Style"
-			// No PX effects on standalone players; the hook keeps a stored style Off there.
-			visible: !root.scFxMasterBypassed && !root.scIsPlayerBoard
+			// Played by each channel's filter knob; shown only where the hook installed that (its ready marker).
+			visible: root.scColorFxAvailable
 			readonly property var ids: ["off", "spiral", "pitch_echo", "slip_roll", "dub_echo", "space"]
 			values: ["Off", "Spiral", "Pitch Echo", "Slip Roll", "Dub Echo", "Space"]
 			currentValue: values[Math.max(0, ids.indexOf(root.scPioneerFx))]

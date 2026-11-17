@@ -272,6 +272,7 @@ if [ '$AZ04' = 1 ]; then
 else
     grep -q 'engine-ui-hook: 21 DSP guards/transitions installed' '$TMP/stage2.log'
     grep -q 'engine-ui-hook: SQLite open/open_v2 hooks installed' '$TMP/stage2.log'
+    grep -q 'engine-ui-hook: Color FX channel knobs installed' '$TMP/stage2.log'
 fi
 "
 echo "  Stage 2 $PREFIX Engine hook: PASS ($EDITS memory edits, UI pack loaded)"

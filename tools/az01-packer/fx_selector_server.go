@@ -13,7 +13,8 @@ import (
 )
 
 func main() {
-	s := webui.New(webui.Config{UIDir: os.Args[1], StateDir: os.Args[2], AccessToken: "sandbox-fixture", FXSelectorReadyFile: filepath.Join(os.Args[1], "../../../run/enginex-fx-selector.ready")}, nil)
+	s := webui.New(webui.Config{UIDir: os.Args[1], StateDir: os.Args[2], AccessToken: "sandbox-fixture", FXSelectorReadyFile: filepath.Join(os.Args[1], "../../../run/enginex-fx-selector.ready"),
+		ColorFXReadyFile: filepath.Join(os.Args[1], "../../../run/enginex-colorfx.ready")}, nil)
 	defer s.Close()
 	log.Fatal(http.ListenAndServe("127.0.0.1:8080", s))
 }

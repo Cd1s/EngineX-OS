@@ -5,7 +5,8 @@ ENGINEX_LAB=${ENGINEX_LAB:-$legacy_lab}
 set -euo pipefail
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 PRODUCT=${FX_PRODUCT:-JC11}
-case "$PRODUCT" in JP07|JC11) ;; *) exit 2 ;; esac
+# Gen-2 (JP21 JP20 JC11S NH08S NH10, Engine 5.3.0-sclive4): FX_DRIVER runs only; the driver stubs the SoC check.
+case "$PRODUCT" in JP07|JC11|JC16|JP11|NH08|JP21|JP20|JC11S|NH08S|NH10) ;; *) exit 2 ;; esac
 # FX_DRIVER=<file.c> FX_DRIVER_TAG=<log tag>: run that offline driver alone, without the selector's QML probe.
 DRIVER=${FX_DRIVER:-$REPO/tools/az01-packer/test_fx_selector_native.c}
 W=${FX_SANDBOX_DIR:-/var/tmp/fx-selector-native-$PRODUCT${FX_DRIVER:+-$(basename "$FX_DRIVER" .c)}}
@@ -19,9 +20,28 @@ if [ "${1:-}" != --inner ]; then
     arm-linux-gnueabihf-gcc -O2 -shared -fPIC -Wall -Wextra -Werror -Wl,-z,max-page-size=4096 -I "$REPO/tools/ui-mod" \
         "$DRIVER" -ldl -lpthread -lm -o "$W/libfx-native-test.so"
     if [ ! -e "$W/image/rootfs.ext2" ]; then
-        image=${ENGINEX_LAB}/fw-5.3.0/PRIME4-5.3.0-Update.img
-        if [ "$PRODUCT" = JP07 ]; then image=${ENGINEX_LAB}/fw-5.3.0/SC5000-5.3.0-Update.img; fi
-        python3 tools/az01-packer/az01_packer.py unpack "$image" --output "$W/image" > "$W/unpack.json"
+        case "$PRODUCT" in
+            JC11) m=fw-5.3.0/PRIME4 ;; JC16) m=fw-5.3.0/PRIME2 ;; JP11) m=fw-5.3.0/PRIMEGO ;; NH08) m=fw-5.3.0/MIXSTREAMPRO ;;
+            JP21) m=fw-5.3.0/SCLIVE4 ;; JP20) m=fw-5.3.0/SCLIVE2 ;; JC11S) m=fw-5.3.0-gen2/PRIME4PLUS ;;
+            NH08S) m=fw-5.3.0-gen2/MIXSTREAMPROPLUS ;; NH10) m=fw-5.3.0-gen2/MIXSTREAMPROGO ;; *) m=fw-5.3.0/SC5000 ;;
+        esac
+        image=${ENGINEX_LAB}/$m-5.3.0-Update.img
+        case "$PRODUCT" in
+        JP21|JP20|JC11S|NH08S|NH10) # signed AZ0x container: take its rootfs record, as sclive-aux-sandbox.sh does
+            mkdir -p "$W/image"
+            python3 - "$REPO" "$image" "$W/image/rootfs.ext2" <<'PY'
+import gzip, importlib.util, lzma, sys
+from pathlib import Path
+repo, image, out = map(Path, sys.argv[1:])
+spec = importlib.util.spec_from_file_location('az0x', repo/'tools/az01-packer/az0x_packer.py')
+az0x = importlib.util.module_from_spec(spec); spec.loader.exec_module(az0x)
+b = image.read_bytes(); r = next(r for r in az0x.parse_header(b)['records'] if r['name'] == 'rootfs')
+payload = b[r['offset']:r['offset'] + r['size']]
+out.write_bytes((lzma.decompress if payload.startswith(b'\xfd7zXZ\0') else gzip.decompress)(payload))
+PY
+            ;;
+        *) python3 tools/az01-packer/az01_packer.py unpack "$image" --output "$W/image" > "$W/unpack.json" ;;
+        esac
     fi
     python3 tools/ui-mod/build_packs.py --qrc ${ENGINEX_LAB}/5.3.0/qrc --out "$W/packs" > "$W/packs.log"
     unshare -m -n -p -f --kill-child bash "$0" --inner
@@ -98,12 +118,15 @@ fi
 grep -a -m 40 -E 'FXCONFIG|FXPROBE|FXNATIVE|engine-ui-hook: PX' "$W/engine.log" | cut -c1-200 | head -n 40
 if [ "$PRODUCT" = JC11 ] && [ "${FX_READY_READONLY:-0}" != 1 ]; then
     grep -aq "PX product=JC11 master-bypass=1 installed" "$W/engine.log"
-    ! grep -q '^pioneer_fx=' "$R/data/enginex/ui/settings.conf"
-    echo "FXCONFIG legacy-master-bypass-and-migration|PASS"
+    # Next to PX the stored style stays: it is the channel filter knobs' Color FX now, never the master's.
+    grep -aq "Color FX channel knobs installed" "$W/engine.log"
+    grep -q '^pioneer_fx=spiral$' "$R/data/enginex/ui/settings.conf"
+    echo "FXCONFIG px-master-bypass-colorfx-kept|PASS"
 else
     ! grep -aq "PX product=$PRODUCT" "$W/engine.log"
     test ! -e "$R/run/enginex-fx-selector.ready"
     grep -q '^pioneer_fx=spiral$' "$R/data/enginex/ui/settings.conf"
+    if [ "$PRODUCT" = JP07 ]; then test ! -e "$R/run/enginex-colorfx.ready"; else grep -aq "Color FX channel knobs installed" "$W/engine.log"; fi
     echo "FXCONFIG $PRODUCT-legacy-preserved|PASS"
 fi
 if [ "${FX_CONFIG_ONLY:-0}" = 1 ]; then

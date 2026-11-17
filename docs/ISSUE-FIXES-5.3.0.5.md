@@ -116,13 +116,16 @@
 
 - **#301（rekordbox 导入重新设计，候选已合入，待实机验收）**：rekordbox 6.8.5 导出的 477 GB FAT32 U 盘（约 2 万首、323 个歌单）首次导入在挂载窗口里被反复杀掉，大库永远转不完。分支 `agent/5305-issue-301` 现在的做法：能在挂载窗口内放下的导出（SC5000 上约 6–7k 首以内）首插即从导出发布全部歌单、曲目和导出数据库里的热 Cue / Memory Cue（信任导出路径、批量写库），拍线和波形在之后插入时补齐，不重挂；更大的先显示原厂 OneLibrary，后台以低优先级构建，完成后在没有任何碟机载着这个盘的曲目时（载入即算，不论是否在播放）用 udev remove + add 无感重挂发布，否则等下次插入时发布，之后后台补拍线和波形、再按同样条件重挂一次；大曲库的更新也在后台副本上进行，发布时合并 Engine 期间写入的播放记录、准备列表和碟机上的编辑；手动弹出的盘不会被自动重挂；拔出载有曲目的只读 HFS+ 盘不再留下卸不掉的挂载。2 万首实测（限速 477 GB 镜像，原生 armhf）：带 Cue 首发 11.75 秒；SC5000 预计 1k 约 4–5 秒、5k 约 10–11 秒、2 万首约 31–35 秒（走后台加重挂）。合入后第 5 节「已知限制」与第 6 节里的 #301 说明需要随之更新；实机验收在合并推送时做（左碟机）。
 
+### 1A-5 通道 Color FX
+
+- **PRIME GO Color FX 错误（修复已合入候选，待实机验收）**：用户在 PRIME GO 上打开 `Color FX Style` 后曲目立即带上回声，关掉才停。**原因**：#88 的 `Color FX Style`（`pioneer_fx`）在除 PRIME 4 和独立播放器以外的机型上以固定混音深度一直作用于主输出，没有任何旋钮能调小。**修法**（分支 `agent/5305-colorfx-channel`，基于候选 `89225d00`）：钩子不再让 `pioneer_fx` 驱动主输出（任何机型）；改为挂在原厂每通道的 Sweep FX 上（一代一体机的 5.3.0 Engine 里 `SweepFxControl::setValue` `0xd8ba3c` 与 `ChannelSweepFx::process` `0xec127c`；二代 32 位机 SC LIVE 2 / 4、PRIME 4+、PRIME GO+、Mixstream Pro+ / Pro Go 共用的 `5.3.0-sclive4` Engine（BuildID `b946c3b8…`）里是代码相同的 `0xd9619c` 与 `0xecdbd4`）：选了风格且 `FILTER` 旋钮离开原厂的中位带（0.495–0.505）时，用 PX 的 DSP 代替原厂效果，转得越多越深；中位带内和选 `关` 时原厂原样运行，各通道互不影响。`Color FX Style` 只在钩子的就绪标记 `/run/enginex-colorfx.ready` 新鲜时显示（UI 包和 `pkg/webui` 都查它，不写机型清单），PRIME 4 的 PX 选择器不变，PRIME 4 上已存的风格保留。**测试**：`test_color_fx_hook.c`、`test_rt_callback.c`（armhf）、`test_ms_master_hook.c` 第 2 节、`TestColorFXStyleFollowsTheChannelKnobHook`、`test_fx_ms_ui.py`、FX 沙箱驱动 `test_colorfx_native.c`（JC11 / JC16 / JP11 / NH08 / JP07 用原厂 5.3.0 Engine，JP21 / JP20 / JC11S / NH08S / NH10 用原厂二代 Engine，离线）、`test_sclive4_bootstrap.sh` 第 2 阶段，回归清单第 304 行。**未在实机验证**；AZ04（PRIME 4 G2 / SYSTEM ONE）没有沙箱，不在本版本。
+
 ## 1B. 仍在进行、没有合入 5.3.0.5 候选的工作
 
 以下都**不是本版本已完成的内容**，用户文档里不得写成已有功能。
 
 - **二代 32 位机 HFS+ 读写（`lklfuse`，进行中）**：二代 32 位机的内核强制模块签名（`MODULE_SIG_FORCE`）且被 LoadPin 锁定，没法加载自己的模块，也没法换内核（维护者：不换内核）。方案是用 LKL（把 Linux 6.12 内核当库用）加 FUSE 做用户态挂载：`lklfuse`（armhf 4.4 MB，LKL 6.12 加 fuse 3.17.2，已移植 HFS+ 的 bug 修复）；QEMU armv7 HIGHMEM 里 4338 次操作的压力测试、预填充、脏弹出和重新插入都 `fsck` 干净，RSS 6–17 MiB，卸载比 `lklfuse` 退出早返回 74–1886 ms。Engine 与 `edisksd` 不拒绝 FUSE 类型（要用 `-o fsname=<块设备>`，钩子把 `/dev` 设备名规整好）。分支 `agent/5305-hfs-lkl-int` @ `f1728327`（原型 `agent/5305-hfs-lkl` @ `21fa1007`）：钩子里的二代 32 位集成、`fsck -y`、弹出与拔出处理、随二代数据包带 `lklfuse` 和 `fsck.hfsplus`。**没有在真机上跑过**；风险：`lklfuse` 以 `O_RDWR` 打开块设备且没用 `-o sync`（RK3288 上性能没测），写入时突然拔出仍可能丢脏缓存，干净弹出最多等 15 秒。**在此之前，二代 32 位机上的 HFS+ 盘保持只读。**
 - **拔盘后播放不中断（可行性研究，进行中）**：已加载的 USB 曲目能否在拔出 U 盘后继续播放（本地缓存），也许还能让 #301 的“无感重新挂载”成为可能。只做可行性：原厂拔盘时的行为、Engine 如何读文件、内存盘复制加 fd 交换对页缓存固定两种设计、各机型内存预算。**没有任何实现。**
-- **PRIME GO Color FX 错误（进行中）**：用户在 PRIME GO 上打开 `Color FX Style` 后曲目立即带上回声，关掉才停；日志显示这个设置不是给 PRIME GO 用的。`Color FX Style`（`pioneer_fx`）在除独立播放器外的所有板型上都显示，而它依赖的 PX 路径（`fxSelectorAvailable()`）只在 PRIME 4（JC11）上存在，所以在 PRIME GO、PRIME 2、Mixstream 和二代 / AZ04 一体机上的设置不应显示且已保存的值不应有效果。**修复尚未落地**；在此之前的绕过办法：把 `Color FX Style` 设为 `Off`。分支 `agent/5305-colorfx-primego`。
 - **L2b（界面渲染扫描）**：JP07 / JP13 / JC11 的全部屏幕和语言的渲染检查还在做（第一版因为只做了 JP07 英文 3 个屏幕并带来看似无用的 AZ04 板号改动，被排除）。**L3 的 DJ 操作沙箱**（18 项操作加截图）也没跑完。
 - **#244（AZ04 `/data` 分区大小）**：不在 5.3.0.5，需要这两款机型用户的只读分区测量。
 
@@ -254,7 +257,7 @@
 - **回到原厂**：先启动一次 5.3.0.5 再正常关机，然后运行 `Restore-Official-Firmware.*`；原厂已卡在 Logo 且无法 SSH 时，先用安装器刷入 EngineX 并让它启动，再运行恢复工具（原厂刷机保留 `/data`，旧 QML 缓存不会因再刷一次原厂而消失）。
 - **配置与数据保留**：升级保留 `/data/enginex` 下的流媒体登录态、歌单缓存、视图预设、已装 Mod 与 SSH 公钥；`Profile → Save to my drive` 现在也保存 EngineX 偏好。
 - **HFS+（新）**：一代机和 PRIME 4 G2 / SYSTEM ONE 上 Mac 格式的 U 盘 / SD 卡可读写（检查通过的卷才可写，否则仍是只读视图）；**二代 32 位机（SC LIVE 4、SC LIVE 2、PRIME 4+、PRIME GO+、Mixstream Pro+、Mixstream Pro Go）上的 HFS+ 盘保持只读**，直到 `lklfuse` 落地。5.3.0.4（含 r5）上干净、未启用日志的 HFS+ 盘会以读写挂载在有 bug 的内置驱动上（见 1A-2），更新到 5.3.0.5 修复。
-- **已知限制**：二代 32 位机的 HFS+ 仍只读；rekordbox 大库的后台发布会等待所有碟机卸下该盘曲目，重新挂载时列表会短暂消失（#301，待实机验收）；`PRIME GO` 上不要打开 `Color FX Style`（进行中）；蓝牙约增加 150–250 ms，不适合打拍对齐；碟机本机 Stems 不是神经网络，仍有串音；`Live Stream` 只有 WAV；`#247` 的 SoundCloud 保存、`#268` 的 Remote Library 记录与 Prepare 仍未完成；`#253` 大 U 盘识别速度需实机计时；`#244`（PRIME 4 G2 / SYSTEM ONE 数据分区大小）**不在**本版本，需要这两款机型用户的只读分区测量（#291）。
+- **已知限制**：二代 32 位机的 HFS+ 仍只读；rekordbox 大库的后台发布会等待所有碟机卸下该盘曲目，重新挂载时列表会短暂消失（#301，待实机验收）；一体机 Color FX 已改由各通道 `FILTER` 旋钮控制，AZ04 隐藏此项，实际旋钮路径仍待实机验收；蓝牙约增加 150–250 ms，不适合打拍对齐；碟机本机 Stems 不是神经网络，仍有串音；`Live Stream` 只有 WAV；`#247` 的 SoundCloud 保存、`#268` 的 Remote Library 记录与 Prepare 仍未完成；`#253` 大 U 盘识别速度需实机计时；`#244`（PRIME 4 G2 / SYSTEM ONE 数据分区大小）**不在**本版本，需要这两款机型用户的只读分区测量（#291）。
 - **已知问题（Spotify）**：许多账号（包括较早的 Premium 账号）播放 Spotify 会失败，提示 “audio key refused”。Spotify 更改了服务器，所有基于 librespot 的客户端都无法获得音频密钥（librespot-org/librespot#1649，2026-11-07 已锁定，没有已知修复）；碟机上无法修复，请改用 TIDAL、Beatport、SoundCloud 或 Deezer。来源菜单里仍保留 Spotify 入口
 
 ---
