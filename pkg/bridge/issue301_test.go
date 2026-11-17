@@ -326,15 +326,14 @@ func TestIssue301LargeFirstImportRepeatMounts253(t *testing.T) {
 	root := t.TempDir()
 	testfixture.LargeExport(t, root, 6000)
 	ctx := context.Background()
-	start := time.Now()
+	start, reads := time.Now(), bridge.ExportReadsForTest()
 	r, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false)
 	if err != nil || !r.Background {
 		t.Fatalf("first mount: %+v %v", r, err)
 	}
 	t.Logf("6000-track first mount: %s", time.Since(start))
-	reads := bridge.ExportReadsForTest()
-	if reads != 0 {
-		t.Fatalf("the first mount of a large export read it %d times", reads)
+	if got := bridge.ExportReadsForTest(); got != reads {
+		t.Fatalf("the first mount of a large export read it %d times", got-reads)
 	}
 	for mount := 2; mount <= 3; mount++ {
 		start = time.Now()
