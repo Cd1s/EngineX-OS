@@ -199,6 +199,9 @@ func ParsePacket(b []byte, port int, remote net.IP) (Device, error) {
 		if !IsRekordbox(d) {
 			return d, fmt.Errorf("prolink: unsupported packet type/port")
 		}
+		// A mixer's status layout (dysentery): flag 0x20 at 0x27 is tempo master, so
+		// a deck taking master asks the computer for it instead of claiming it beside it.
+		d.Master = len(b) > 0x27 && b[0x27]&0x20 != 0
 	case port == 50001 && b[10] == 0x0b:
 		if len(b) < 0x3c {
 			return d, fmt.Errorf("prolink: truncated absolute position packet")

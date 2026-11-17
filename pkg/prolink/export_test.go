@@ -1231,6 +1231,71 @@ func TestExportBeatPortTakesBroadcasts(t *testing.T) {
 }
 
 // peerStatus is another player's status packet as far as the handoff reads it.
+// rekordbox's Link panel showed our paused deck (player 3) as MASTER, and MASTER on
+// rekordbox's own deck did nothing (left deck, 2026-11-17): the export answered a
+// takeover request only from players 1-6 and read master only from a player's status,
+// and a computer's status never said master, so a deck claimed it beside the computer.
+func TestExportHandsMasterToRekordbox(t *testing.T) {
+	computer := net.IPv4(127, 63, 0, 4)
+	status := func(flags, mh byte) []byte { // rekordbox 7: a mixer's status layout, subtype 1
+		b := make([]byte, 0x38)
+		copy(b, magic)
+		b[10], b[0x20], b[0x21], b[0x24], b[0x27], b[0x36] = 0x29, 1, 17, 17, flags, mh
+		copy(b[11:], "rekordbox")
+		binary.BigEndian.PutUint16(b[0x22:], 0x38)
+		return b
+	}
+	if d, err := ParsePacket(status(0xe0, 0xff), 50002, computer); err != nil || d.Number != 17 || !d.Master {
+		t.Fatalf("the computer's master status: %+v %v", d, err)
+	}
+	if d, _ := ParsePacket(status(0xc0, 0xff), 50002, computer); d.Master {
+		t.Fatal("a computer that is not master read as master")
+	}
+	r := &exportRun{player: 3, deck: ExportDeck{Master: true}, observe: func(Device) {}} // paused, Engine's master
+	look := func() (master bool, mh byte) {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		b := r.statusPacket()
+		return b[0x89]&0x20 != 0, b[0x9f]
+	}
+	heard := func(b []byte) {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		r.heardLocked(computer, b)
+	}
+	wire, err := net.ListenUDP("udp4", &net.UDPAddr{IP: computer, Port: 50001})
+	if err != nil {
+		t.Skip("beat port:", err)
+	}
+	defer wire.Close()
+	if r.beat, err = net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 63, 0, 1)}); err != nil {
+		t.Fatal(err)
+	}
+	_, r.network, _ = net.ParseCIDR("127.0.0.0/8")
+	r.wg.Add(1)
+	go r.receiveBeats()
+	defer func() { r.beat.Close(); r.wg.Wait() }()
+	if _, err := wire.WriteToUDP((&exportRun{player: 17}).handoffPacket(0x26, 0x28), r.beat.LocalAddr().(*net.UDPAddr)); err != nil {
+		t.Fatal(err)
+	}
+	wire.SetReadDeadline(time.Now().Add(time.Second))
+	b := make([]byte, 64)
+	if n, _, err := wire.ReadFromUDP(b); err != nil || n != 0x2c || b[10] != 0x27 || b[0x21] != 3 || b[0x2b] != 1 {
+		t.Fatalf("no yes (0x27) to the computer's request: %v % x", err, b[:max(n, 0)])
+	}
+	if master, mh := look(); !master || mh != 17 {
+		t.Fatalf("agreed: still master until it takes it, naming it (master %v, Mh %d)", master, mh)
+	}
+	heard(status(0xe0, 0xff))
+	if master, _ := look(); master {
+		t.Fatal("two masters: the computer took it and our status still claims it")
+	}
+	heard(status(0xc0, 0xff))
+	if master, _ := look(); !master {
+		t.Fatal("the computer let go and Engine's deck still leads: master is ours again")
+	}
+}
+
 func peerStatus(number byte, name string, flags, mm, mh byte, syncN uint32) []byte {
 	b := make([]byte, 0x11c)
 	copy(b, magic)
