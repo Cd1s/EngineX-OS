@@ -542,7 +542,7 @@ func simClaim(kind, number, era byte, name string) []byte {
 // Our per-deck players give way to a CDJ that boots after us: a PRIME 4 holds 1-4,
 // the left SC5000 of a pair 1 and 3 (the right one 2 and 4). A CDJ-2000NXS2 knows
 // only 1-4, a CDJ-3000 also 5 and 6.
-func TestSimCDJsBootAfterPrime4AndAnSC5000Pair(t *testing.T) {
+func TestSimCDJsBootAfterConsoleAndPlayerPair(t *testing.T) {
 	root := t.TempDir()
 	testfixture.Export(t, root)
 	announcements := simSocket(t, 3)
