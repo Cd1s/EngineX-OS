@@ -12,7 +12,9 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -44,6 +46,7 @@ type ExportConfig struct {
 type ExportStatus struct {
 	Enabled          bool   `json:"enabled"`
 	Number           byte   `json:"number"`
+	Players          string `json:"players,omitempty"` // one per deck of this unit: "1,3"
 	Root             string `json:"root,omitempty"`
 	DBAddress        string `json:"dbAddress,omitempty"`
 	PortmapPort      int    `json:"portmapPort,omitempty"`
@@ -54,16 +57,19 @@ type ExportStatus struct {
 // Exporter is inert until SetEnabled(true): constructing it, asking its status,
 // or disabling it binds no sockets and starts no goroutines or timers.
 type Exporter struct {
-	mu   sync.Mutex
-	cfg  ExportConfig
-	run  *exportRun
-	deck ExportDeck
+	mu    sync.Mutex
+	cfg   ExportConfig
+	run   *exportRun
+	deck  ExportDeck
+	decks []ExportDeck
 }
 
 // ExportDeck is what the status packets say about the decks this player plays
 // (#49): playing, tempo, and whether one of them is tempo master. Without it
 // the export looks like an idle player.
 type ExportDeck struct {
+	// Number is the EngineX deck (1-4) a player of ours stands for (SetDeck's decks).
+	Number          byte
 	Playing, Master bool
 	BPM, Pitch      float64 // the track's BPM; pitch in percent
 	// Beat is Engine's BeatNumber when read at At: beats into the bar, 0..4
@@ -102,7 +108,7 @@ func (d ExportDeck) Carried(now time.Time) ExportDeck {
 // time to the following beats and bars, pitch and BPM.
 func (r *exportRun) beatPacket(d ExportDeck, inBar int, frac float64) []byte {
 	b := linkPacket(0x28, 0x60, 11)
-	b[0x21], b[0x5f] = r.player, r.player
+	b[0x21], b[0x5f] = r.masterPlayerLocked(), r.masterPlayerLocked()
 	binary.BigEndian.PutUint16(b[0x22:], 0x3c)
 	ms := 60000 / (d.BPM * (1 + d.Pitch/100))
 	next := (1 - frac) * ms
@@ -159,19 +165,46 @@ func (r *exportRun) beatLoop() {
 	}
 }
 
-// SetDeck updates the status packets. Losing master ends a handoff we granted,
-// and the next deck to take master claims it again.
-func (e *Exporter) SetDeck(d ExportDeck) {
+// SetDeck updates the status packets: d is this unit's decks taken together (master,
+// and the tempo and beat of the master deck), decks each deck on its own. Each deck
+// is a player of its own, numbered as EngineX numbers it, as an XDJ-XZ shows two
+// players from one address; without decks the unit is one player. Losing master
+// ends a handoff we granted, and the next deck to take master claims it again.
+func (e *Exporter) SetDeck(d ExportDeck, decks ...ExportDeck) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.deck = d
-	if e.run != nil {
-		e.run.mu.Lock()
-		e.run.deck = d
-		if !d.Master {
-			e.run.handoff, e.run.yielded = 0, false
+	e.deck, e.decks = d, decks
+	if e.run == nil {
+		return
+	}
+	r := e.run
+	r.mu.Lock()
+	r.deck = d
+	numbers := func(ds []ExportDeck) (n []byte) {
+		for _, d := range ds {
+			n = append(n, d.Number)
 		}
-		e.run.mu.Unlock()
+		return n
+	}
+	renumber := !slices.Equal(numbers(r.decks), numbers(decks))
+	r.decks = decks
+	if !d.Master {
+		r.handoff, r.yielded = 0, false
+	}
+	old, oldPlayers := r.player, r.players
+	if renumber {
+		r.chooseLocked(time.Now())
+	}
+	moved := !slices.Equal(oldPlayers, r.players)
+	r.mu.Unlock()
+	if old != r.number() {
+		r.db.closeClients()
+	}
+	if moved {
+		select {
+		case r.wake <- struct{}{}:
+		default:
+		}
 	}
 }
 
@@ -235,7 +268,7 @@ const (
 // request's length field is 4, the response's 8.
 func (r *exportRun) handoffPacket(kind byte, length int) []byte {
 	b := linkPacket(kind, length, 11)
-	b[0x21], b[0x27] = r.player, r.player
+	b[0x21], b[0x27] = r.masterPlayerLocked(), r.masterPlayerLocked()
 	binary.BigEndian.PutUint16(b[0x22:], uint16(length-0x24))
 	if kind == 0x27 {
 		b[0x2b] = 1
@@ -264,7 +297,7 @@ func (e *Exporter) SetEnabled(on bool) error {
 	if e.run != nil {
 		return nil
 	}
-	r, err := startExport(e.cfg, e.deck)
+	r, err := startExport(e.cfg, e.deck, e.decks)
 	if err != nil {
 		return err
 	}
@@ -302,7 +335,7 @@ func (e *Exporter) Rebind() error {
 	}
 	e.run.close()
 	e.run = nil
-	r, err := startExport(e.cfg, e.deck)
+	r, err := startExport(e.cfg, e.deck, e.decks)
 	if err != nil {
 		return err
 	}
@@ -316,7 +349,13 @@ func (e *Exporter) Status() ExportStatus {
 		return ExportStatus{}
 	}
 	r := e.run
-	return ExportStatus{Enabled: true, Number: r.number(), Root: r.nfs.Root, DBAddress: r.db.Addr().String(), PortmapPort: r.nfs.PortmapPort(), DiscoveryAddress: r.discovery.LocalAddr().String(), StatusAddress: r.status.LocalAddr().String()}
+	var players []string
+	r.mu.Lock()
+	for _, n := range r.players {
+		players = append(players, strconv.Itoa(int(n)))
+	}
+	r.mu.Unlock()
+	return ExportStatus{Enabled: true, Number: r.number(), Players: strings.Join(players, ","), Root: r.nfs.Root, DBAddress: r.db.Addr().String(), PortmapPort: r.nfs.PortmapPort(), DiscoveryAddress: r.discovery.LocalAddr().String(), StatusAddress: r.status.LocalAddr().String()}
 }
 
 // TrackPath is the file behind track id of the export this deck serves (the id
@@ -362,8 +401,11 @@ type exportRun struct {
 	db                *DBServer
 	discovery, status *net.UDPConn
 	beat              *net.UDPConn // nil when the port is taken
+	statusCast        *net.UDPConn // the status port's broadcasts (rekordbox's 0x29); nil in tests
 	deck              ExportDeck
-	handoff           byte // the player we agreed to hand master to
+	decks             []ExportDeck // each deck of this unit, a player of its own
+	players           []byte       // our player numbers, players[0] == player; empty while we have none
+	handoff           byte         // the player we agreed to hand master to
 	// Tempo master on the link (#217). yielded: that player took it, so our
 	// status no longer claims it though Engine's own deck still leads our decks.
 	// asked, claimAt, askUntil: see RequestMaster. syncN is our sync counter
@@ -532,7 +574,7 @@ func exportIdentity(cfg ExportConfig) (net.IP, net.HardwareAddr, net.IP, *net.IP
 	return nil, nil, nil, nil, errors.New("prolink: no IPv4 interface for export")
 }
 
-func startExport(cfg ExportConfig, deck ExportDeck) (*exportRun, error) {
+func startExport(cfg ExportConfig, deck ExportDeck, decks []ExportDeck) (*exportRun, error) {
 	root := cfg.Root
 	if root == "" {
 		roots := MountedExports()
@@ -626,7 +668,7 @@ func startExport(cfg ExportConfig, deck ExportDeck) (*exportRun, error) {
 		}
 		return net.JoinHostPort(ip.String(), port)
 	}
-	r := &exportRun{network: network, observe: cfg.Observe, nfs: nfs, deck: deck, ip: ip, mac: mac, lib: lib, pdb: pdb, pdbInfo: st, peers: make(map[string]exportPeer), mounted: true, done: make(chan struct{}), wake: make(chan struct{}, 1)}
+	r := &exportRun{network: network, observe: cfg.Observe, nfs: nfs, deck: deck, decks: decks, ip: ip, mac: mac, lib: lib, pdb: pdb, pdbInfo: st, peers: make(map[string]exportPeer), mounted: true, done: make(chan struct{}), wake: make(chan struct{}, 1)}
 	var disk syscall.Statfs_t
 	if syscall.Statfs(root, &disk) == nil {
 		r.capacity = uint64(disk.Blocks) * uint64(disk.Bsize)
@@ -693,9 +735,21 @@ func startExport(cfg ExportConfig, deck ExportDeck) (*exportRun, error) {
 		r.wg.Add(1)
 		go r.receiveBeats()
 	}
+	// rekordbox broadcasts its status (0x29, the master flag); Linux gives a broadcast
+	// only to a socket on the wildcard or the broadcast address, never to one on the
+	// interface's own, which players' unicast status needs (rb-bridge has the wildcard).
+	if cfg.StatusAddr == "" {
+		if r.statusCast, err = listenLinkUDP(net.JoinHostPort(broadcast.String(), "50002"), true); err != nil {
+			log.Printf("prolink: no broadcast status: %v", err)
+			r.statusCast, err = nil, nil
+		} else {
+			r.wg.Add(1)
+			go r.receiveMedia(r.statusCast)
+		}
+	}
 	r.wg.Add(4)
 	go r.receivePeers()
-	go r.receiveMedia()
+	go r.receiveMedia(r.status)
 	go r.announceLoop(probe)
 	go r.beatLoop()
 	return r, nil
@@ -725,11 +779,14 @@ func (r *exportRun) close() {
 	}
 	r.discovery.Close()
 	r.status.Close()
+	if r.statusCast != nil {
+		r.statusCast.Close()
+	}
 	if r.beat != nil {
 		r.beat.Close()
 	}
 	r.mu.Lock()
-	r.player = 0
+	r.player, r.players = 0, nil
 	r.mu.Unlock()
 	r.db.Close()
 	r.nfs.Close()
@@ -748,20 +805,61 @@ func (r *exportRun) chooseLocked(now time.Time) {
 	}
 	r.first = len(r.peers) == 0
 	old := r.player
-	r.player = 0
+	r.player, r.players = 0, nil
 	if !r.probed || !r.mounted || now.Before(r.floodUntil) {
 		return
 	}
-	if old > 0 && !used[old] {
-		r.player = old
-		return
-	}
-	for n := byte(4); n > 0; n-- {
-		if !used[n] {
-			r.player = n
-			return
+	// Each deck is the player of its own number, unless a player holds it (#198).
+	for _, d := range r.decks {
+		if n := d.Number; n >= 1 && n <= 4 && !used[n] && !slices.Contains(r.players, n) {
+			r.players = append(r.players, n)
 		}
 	}
+	slices.Sort(r.players)
+	if len(r.players) > 0 {
+		r.player = r.players[0]
+		return
+	}
+	// No decks, or players hold all their numbers: one free number of our own.
+	if old > 0 && !used[old] {
+		r.player = old
+	}
+	for n := byte(4); n > 0 && r.player == 0; n-- {
+		if !used[n] {
+			r.player = n
+		}
+	}
+	if r.player != 0 {
+		r.players = []byte{r.player}
+	}
+}
+
+// oursLocked: n is one of our player numbers. Caller holds r.mu.
+func (r *exportRun) oursLocked(n byte) bool {
+	return n != 0 && (n == r.player || slices.Contains(r.players, n))
+}
+
+// masterPlayerLocked is the player that speaks for Engine's master deck (its
+// status claims master, its beat packets and handoff requests and answers go
+// out), else our first. Caller holds r.mu.
+func (r *exportRun) masterPlayerLocked() byte {
+	for _, d := range r.decks {
+		if d.Master && slices.Contains(r.players, d.Number) {
+			return d.Number
+		}
+	}
+	return r.player
+}
+
+// deckLocked is the deck player n stands for; the unit's decks taken together
+// when it is not a deck's own number. Caller holds r.mu.
+func (r *exportRun) deckLocked(n byte) ExportDeck {
+	for _, d := range r.decks {
+		if d.Number == n && slices.Contains(r.players, n) {
+			return d
+		}
+	}
+	return r.deck
 }
 func (r *exportRun) receivePeers() {
 	defer r.wg.Done()
@@ -787,7 +885,7 @@ func (r *exportRun) receivePeers() {
 		key := addr.IP.String() + "/" + net.HardwareAddr(mac).String()
 		r.mu.Lock()
 		if _, ok := r.peers[key]; !ok && len(r.peers) >= 64 {
-			r.player = 0
+			r.player, r.players = 0, nil
 			r.floodUntil = time.Now().Add(10 * time.Second) // resume after the bounded peer window expires
 			r.mu.Unlock()
 			r.db.closeClients()
@@ -800,15 +898,17 @@ func (r *exportRun) receivePeers() {
 			p.first = p.seen
 		}
 		r.peers[key] = p
-		old := r.player
+		old, oldPlayers := r.player, r.players
 		// No disk, menu work, or periodic timer on the collision path.
-		if old == d.Number {
+		if r.oursLocked(d.Number) {
 			r.chooseLocked(time.Now())
 		}
-		changed := old != r.player
+		changed, moved := old != r.player, !slices.Equal(oldPlayers, r.players)
 		r.mu.Unlock()
 		if changed {
 			r.db.closeClients()
+		}
+		if moved {
 			select {
 			case r.wake <- struct{}{}:
 			default:
@@ -816,11 +916,11 @@ func (r *exportRun) receivePeers() {
 		}
 	}
 }
-func (r *exportRun) receiveMedia() {
+func (r *exportRun) receiveMedia(c *net.UDPConn) {
 	defer r.wg.Done()
 	b := make([]byte, 2048)
 	for {
-		n, addr, err := r.status.ReadFromUDP(b)
+		n, addr, err := c.ReadFromUDP(b)
 		if err != nil {
 			return
 		}
@@ -899,16 +999,24 @@ func (r *exportRun) heardLocked(ip net.IP, b []byte) {
 		r.masters[number] = now
 	}
 	switch {
-	case to == r.player:
+	case r.oursLocked(to):
 		// It hands master to us: claim it now. The request is settled, so a late
 		// or repeated answer to it changes nothing any more.
 		r.yielded, r.claimAt, r.askUntil = false, time.Time{}, time.Time{}
 	case r.handoff != 0 && number == r.handoff:
 		r.yielded, r.handoff, r.askUntil = true, 0, time.Time{} // the player we agreed to has taken it
 	case r.deck.Master && !r.yielded && r.handoff == 0 && !bytes.HasPrefix(b[11:], []byte("EngineX")):
-		if now.Before(r.askUntil) && now.Sub(r.asked) >= masterAgain {
-			r.asked = now
-			r.sendLocked(r.beatConn(), r.handoffPacket(0x26, 0x28), &net.UDPAddr{IP: ip, Port: 50001})
+		switch {
+		case now.Before(r.askUntil):
+			if now.Sub(r.asked) >= masterAgain {
+				r.asked = now
+				r.sendLocked(r.beatConn(), r.handoffPacket(0x26, 0x28), &net.UDPAddr{IP: ip, Port: 50001})
+			}
+		case !r.deckLocked(r.masterPlayerLocked()).Playing && !now.Before(r.claimAt):
+			// It holds master and our master deck is paused, and nobody pressed MASTER
+			// on ours: a CDJ would not take it, so neither do we (rekordbox's Link panel
+			// showed our paused deck as MASTER next to its own).
+			r.yielded = true
 		}
 	}
 }
@@ -951,7 +1059,7 @@ func (r *exportRun) receiveBeats() {
 			// moves master to its shadow deck (SetDeck). Our own request, if one was
 			// still open, is over.
 			r.mu.Lock()
-			if asker := b[0x21]; r.player != 0 && r.masterLocked(time.Now()) && (asker >= 1 && asker <= 6 || IsRekordbox(Device{Number: asker})) && asker != r.player {
+			if asker := b[0x21]; r.player != 0 && r.masterLocked(time.Now()) && (asker >= 1 && asker <= 6 || IsRekordbox(Device{Number: asker})) && !r.oursLocked(asker) {
 				r.sendLocked(r.beat, r.handoffPacket(0x27, 0x2c), &net.UDPAddr{IP: addr.IP, Port: 50001})
 				r.handoff, r.askUntil = asker, time.Time{}
 			}
@@ -1047,8 +1155,10 @@ func (r *exportRun) announceLoop(probe time.Duration) {
 		// Each send holds the identity lock for at most its 10ms deadline, so a
 		// received claim cannot be followed by a queued old-number announcement.
 		r.mu.Lock()
-		if r.player != 0 {
-			r.sendLocked(r.discovery, r.announcement(), r.announce)
+		for _, n := range r.players {
+			b := r.announcement()
+			b[0x24] = n
+			r.sendLocked(r.discovery, b, r.announce)
 		}
 		r.mu.Unlock()
 		r.mu.Lock()
@@ -1076,7 +1186,7 @@ func (r *exportRun) announcement() []byte {
 	}
 	copy(b[0x26:], r.mac)
 	copy(b[0x2c:], r.ip.To4())
-	b[0x30], b[0x34] = byte(min(len(r.peers)+1, 6)), 1
+	b[0x30], b[0x34] = byte(min(len(r.peers)+max(1, len(r.players)), 6)), 1
 	// Model code: a CDJ-3000's (dysentery, beat-link). With 00, a legacy player, a
 	// CDJ-3000 set to player 5 or 6 shows a warning and drops off the link (#198).
 	b[0x35] = 0x64
@@ -1107,8 +1217,19 @@ func (r *exportRun) mediaPacket() []byte {
 // layout (not 0x110, which is the offset of its final row). Advertise this
 // common layout; native CDJ-3000 status extensions are not implemented.
 func (r *exportRun) statusPacket() []byte {
+	n := r.masterPlayerLocked()
+	d := r.deckLocked(n)
+	if r.deck.Master && !d.Master {
+		d = r.deck // the master deck has no player of its own (a CDJ holds its number): ours speaks for it
+	}
+	return r.statusFor(n, d, true)
+}
+
+// statusFor is player n's status for deck d. Only the unit's status (the master
+// deck's player) keeps the master state; our first player has the media.
+func (r *exportRun) statusFor(n byte, d ExportDeck, unit bool) []byte {
 	b := linkPacket(0x0a, 0x11c, 11)
-	b[0x20], b[0x21], b[0x24], b[0x26] = 4, r.player, r.player, 1
+	b[0x20], b[0x21], b[0x24], b[0x26] = 4, n, n, 1
 	binary.BigEndian.PutUint16(b[0x22:], uint16(len(b)-0x24))
 	b[0x6a], b[0x6b], b[0x6f], b[0x73] = 4, 4, 0, 4             // USB mounted, no SD
 	b[0x75] = 1                                                 // LINK available while the exported USB is mounted
@@ -1119,20 +1240,26 @@ func (r *exportRun) statusPacket() []byte {
 	// "Linked to player with older firmware" whatever 7c-7f say (prolink-go, #198).
 	// 0xb7: a CDJ-3000's media presence, the USB bit (we only send while mounted).
 	b[0xb6], b[0xb7] = 1, 2
+	if n != r.player { // the media is our first player's
+		b[0x6f], b[0x75], b[0xb7] = 4, 0, 0
+	}
 	for _, off := range []int{0x8c, 0x98, 0xc0, 0xc4} {
 		binary.BigEndian.PutUint32(b[off:], 0x00100000)
 	}
 	binary.BigEndian.PutUint16(b[0x92:], 0xffff)
 	binary.BigEndian.PutUint32(b[0xa0:], 0xffffffff)
-	master := r.masterLocked(time.Now())
-	if r.wasMaster && !master {
-		r.syncN = max(r.syncN, r.syncMax) + 1 // as a player does when it gives master up
-	}
-	if r.wasMaster = master; !master {
-		r.handoff = 0 // nothing to hand over
+	master := false
+	if unit {
+		master = r.masterLocked(time.Now())
+		if r.wasMaster && !master {
+			r.syncN = max(r.syncN, r.syncMax) + 1 // as a player does when it gives master up
+		}
+		if r.wasMaster = master; !master {
+			r.handoff = 0 // nothing to hand over
+		}
 	}
 	binary.BigEndian.PutUint32(b[0x84:], max(r.syncN, 1))
-	if d := r.deck; d.Master || d.Playing {
+	if d.Master || d.Playing {
 		// The play mode bytes (P1, P2, P3, the activity flag) as players and Beat
 		// Link's virtual CDJ send them; ours said "no track loaded" next to the play flag.
 		b[0x7b], b[0x9d] = 5, 1
@@ -1161,7 +1288,7 @@ func (r *exportRun) statusPacket() []byte {
 	if r.handoff != 0 && master {
 		b[0x9f] = r.handoff
 	}
-	if beat, _, ok := r.deck.beatAt(time.Now()); ok {
+	if beat, _, ok := d.beatAt(time.Now()); ok {
 		b[0xa6] = byte(beat + 1)
 	}
 	r.statusCounter++
@@ -1206,8 +1333,17 @@ func (r *exportRun) sendStatus() {
 	if r.announced.IsZero() {
 		r.announced = time.Now()
 	}
+	peers := r.peerIPsLocked(r.announced)
 	pkt := r.statusPacket() // identical for every peer
-	for _, ip := range r.peerIPsLocked(r.announced) {
+	for _, ip := range peers {
 		r.sendLocked(r.status, pkt, &net.UDPAddr{IP: ip, Port: 50002})
+	}
+	for _, n := range r.players {
+		if n != r.masterPlayerLocked() {
+			pkt := r.statusFor(n, r.deckLocked(n), false)
+			for _, ip := range peers {
+				r.sendLocked(r.status, pkt, &net.UDPAddr{IP: ip, Port: 50002})
+			}
+		}
 	}
 }
