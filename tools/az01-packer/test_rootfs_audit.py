@@ -48,6 +48,31 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('0 FAIL', result.stdout)
 
+    def test_suite_command_scan_excludes_shared_test_fixtures(self):
+        repo = Path(self.tmp.name) / 'repo'
+        files = {
+            'cmd/enginex-suite/main.go': 'exec.Command("runtime-needed")',
+            'cmd/enginex-installer/main.go': 'exec.Command("installer-only")',
+            'internal/testsmb/server.go': 'exec.Command("smbpasswd")',
+            'pkg/example/source_test.go': 'exec.Command("test-only")',
+        }
+        for rel, text in files.items():
+            path = repo / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+        gate = Path(__file__).with_name('release-gate.sh').read_text()
+        scan = next(line for line in gate.splitlines() if line.startswith('SUITE_CMDS='))
+        commands = subprocess.check_output(
+            ['bash', '-c', scan + '\nprintf "%s\\n" "$SUITE_CMDS"'],
+            env=dict(os.environ, REPO=str(repo)), text=True).split()
+        self.assertEqual(commands, ['runtime-needed'])
+        ok, audit = self.audit(commands)
+        self.assertFalse(ok)
+        self.assertIn('the suite runs runtime-needed, not in this rootfs', audit.fails)
+        (self.root / 'usr/bin/runtime-needed').write_text('')
+        ok, audit = self.audit(commands)
+        self.assertTrue(ok, audit.fails)
+
     def test_migration_prefixes_pass_but_a_missing_command_still_fails(self):
         source = Path(__file__).resolve().parents[2] / 'rootfs-overlay/usr/libexec/enginex-migration'
         script = source.read_text()
