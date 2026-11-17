@@ -206,6 +206,15 @@ class DataBundleTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             self.build('out-wrong-arch')
 
+    def test_no_edisksd_hook_option_leaves_the_mount_hook_out(self):
+        edisksd = self.tmp / 'libedisksd-hook.so'  # would be found next to --hook
+        edisksd.write_bytes(fake_elf(bdb.EM_ARM, b'edisksd'))
+        src = self.extract(self.build('out-no-mount-hook', no_edisksd_hook=True))
+        self.assertFalse((src / 'lib/libedisksd-hook.so').exists())
+        self.assertNotIn('libedisksd-hook.so', (src / 'SHA256SUMS').read_text())
+        with self.assertRaises(SystemExit):
+            self.build('out-both', edisksd_hook=edisksd, no_edisksd_hook=True)
+
     def test_rebuild_is_identical(self):
         a, b = self.build('a'), self.build('b')
         self.assertEqual(a['sha256'], b['sha256'])
@@ -1155,6 +1164,119 @@ pkill() { printf 'pkill %s\\n' "$*" >> "$KILLED"; }
         self.assertEqual(calls.read_text().splitlines(), [f'--mount-path {media}/STICK'])
         self.assertEqual(gcalls.read_text().splitlines(),
                          [f'--heal-mount {media}/ENGINE_STICK --fix-mp3-grids --timeout 5s'])
+
+    def test_mount_hook_off_in_hook_disable_conf(self):
+        """hook-disable.conf naming mount-hook: no edisksd preload (a drop-in from an earlier run is
+        removed), and sticks present at boot are not converted; other names leave it on."""
+        src = self.extract(self.build())
+        root = self.tmp / 'gen2-mount-hook'
+        dest = root / 'enginex'
+        (dest / 'bundle/bin').mkdir(parents=True)
+        (dest / 'bundle/lib').mkdir()
+        (dest / 'state').mkdir()
+        (dest / 'bundle/lib/libedisksd-hook.so').write_bytes(fake_elf(bdb.EM_ARM, b'edisksd'))
+        calls = self.tmp / 'rb-bridge-off.calls'
+        bridge = dest / 'bundle/bin/rb-bridge'
+        bridge.write_text(f'#!/bin/sh\necho "$*" >> {calls}\n')
+        bridge.chmod(0o755)
+        media = self.tmp / 'media-off'
+        (media / 'STICK/PIONEER').mkdir(parents=True)
+        run_dir = self.tmp / 'run-mount-hook'
+        ba = self.tmp / 'boot-activate-mount-hook.sh'
+        ba.write_text((src / 'boot-activate.sh').read_text().replace('/run/', str(run_dir) + '/'))
+        env = dict(self.env, ENGINEX_CUSTOM=str(dest), ENGINEX_MEDIA_ROOT=str(media),
+                   ENGINEX_CONVERT_MARK=str(run_dir / 'boot-converted'),
+                   ENGINEX_PID1_COMM=str(self.pid1_systemd()),
+                   ENGINEX_ROOT_SSH_DIR=str(root / 'root-ssh'),
+                   ENGINEX_STREAMING_ACCOUNTS=str(root / 'StreamingAccounts.json'),
+                   ENGINEX_CONFIG_DIR=str(root / '.config'),
+                   ENGINEX_TIMESYNC_LIB_DIR=str(root / 'timesync'),
+                   ENGINEX_PRODUCT_CODE_FILE=str(self.tmp / 'no-product-code'),
+                   ENGINEX_TZ_NEWER_MARKER=str(run_dir / 'tz-newer'))
+        dropin = run_dir / 'systemd/system/edisksd.service.d/99-enginex.conf'
+
+        (dest / 'hook-disable.conf').write_text('# keep the hook\nstems, zoom30\n')
+        res = subprocess.run(['sh', str(ba)], env=env, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn('LD_PRELOAD=', dropin.read_text())
+        self.assertIn('restart edisksd.service', self.host_commands.read_text())
+        self.host_commands.write_text('')
+
+        (dest / 'hook-disable.conf').write_text('gateway\nmount-hook # no conversion, no heal\n')
+        (run_dir / 'boot-converted').unlink(missing_ok=True)
+        res = subprocess.run(['sh', str(ba)], env=env, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertFalse(dropin.exists(), 'mount-hook off must remove the edisksd preload')
+        self.assertIn('restart edisksd.service', self.host_commands.read_text())  # back to stock mounting
+        self.host_commands.write_text('')
+        res = subprocess.run(['sh', str(ba), '--convert-mounted'], env=env, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertFalse(calls.exists(), 'a stick present at boot was converted with mount-hook off')
+        self.host_commands.write_text('')
+
+    def test_service_features_off_in_hook_disable_conf(self):
+        """hook-disable.conf naming rb-bridge or deemixd: boot-activate.sh writes no unit for it,
+        removes one an earlier run left, and restarts only the services that are on. deemixd
+        also stays out when gateway, which it needs, is off."""
+        src = self.extract(self.build())
+        root = self.tmp / 'gen2-services'
+        dest = root / 'enginex'
+        (dest / 'bundle/bin').mkdir(parents=True)
+        (dest / 'bundle/lib').mkdir()
+        (dest / 'state').mkdir()
+        for applet in ('rb-bridge', 'enginex-deemixd', 'stream-sync'):
+            exe = dest / 'bundle/bin' / applet
+            exe.write_text('#!/bin/sh\nexit 0\n')
+            exe.chmod(0o755)
+        run_dir = self.tmp / 'run-services'
+        ba = self.tmp / 'boot-activate-services.sh'
+        ba.write_text((src / 'boot-activate.sh').read_text().replace('/run/', str(run_dir) + '/'))
+        env = dict(self.env, ENGINEX_CUSTOM=str(dest), ENGINEX_MEDIA_ROOT=str(self.tmp / 'media-services'),
+                   ENGINEX_CONVERT_MARK=str(run_dir / 'boot-converted'),
+                   ENGINEX_PID1_COMM=str(self.pid1_systemd()),
+                   ENGINEX_ROOT_SSH_DIR=str(root / 'root-ssh'),
+                   ENGINEX_STREAMING_ACCOUNTS=str(root / 'StreamingAccounts.json'),
+                   ENGINEX_CONFIG_DIR=str(root / '.config'),
+                   ENGINEX_TIMESYNC_LIB_DIR=str(root / 'timesync'),
+                   ENGINEX_PRODUCT_CODE_FILE=str(self.tmp / 'no-product-code'),
+                   ENGINEX_TZ_NEWER_MARKER=str(run_dir / 'tz-newer'))
+        units = run_dir / 'systemd/system'
+        bridge, deemix = units / 'enginex-rb-bridge.service', units / 'enginex-deemixd.service'
+
+        def boot(conf):
+            (dest / 'hook-disable.conf').write_text(conf)
+            self.host_commands.write_text('')
+            res = subprocess.run(['sh', str(ba)], env=env, capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0, res.stderr)
+            restart = [l for l in self.host_commands.read_text().splitlines() if 'restart --no-block enginex-stream-sync' in l]
+            self.assertEqual(len(restart), 1, self.host_commands.read_text())
+            return restart[0]
+
+        line = boot('# all on\n')
+        self.assertTrue(bridge.exists() and deemix.exists())
+        self.assertIn('enginex-rb-bridge.service', line)
+        self.assertIn('enginex-deemixd.service', line)
+
+        line = boot('rb-bridge # no Pro DJ Link\n')
+        self.assertFalse(bridge.exists(), 'rb-bridge off must remove its unit')
+        self.assertTrue(deemix.exists())
+        self.assertNotIn('enginex-rb-bridge.service', line)
+        self.assertIn('enginex-deemixd.service', line)
+
+        line = boot('deemixd\n')
+        self.assertTrue(bridge.exists())
+        self.assertFalse(deemix.exists(), 'deemixd off must remove its unit')
+        self.assertNotIn('deemixd', line)
+
+        wants = (units / 'engine.service.d/99-enginex.conf').read_text()
+        self.assertNotIn('deemixd', wants)
+        self.assertIn('enginex-rb-bridge.service', wants)
+
+        # The console's Deezer jobs use deemixd without the gateway.
+        line = boot('gateway\n')
+        self.assertTrue(deemix.exists(), 'gateway off must not take deemixd along')
+        self.assertIn('enginex-deemixd.service', line)
+        self.host_commands.write_text('')
 
     def test_boot_activate_follows_console_ssh_settings(self):
         """BH-GC2-9 / BH-GF4-15: boot-activate.sh started sshd whenever a key was stored, even

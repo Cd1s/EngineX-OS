@@ -304,6 +304,8 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.mux.HandleFunc("POST /api/hotcues", s.handleHotCues)
 	s.mux.HandleFunc("GET /v1/enginex/hotcues", s.handleHotCues)
 	s.mux.HandleFunc("POST /v1/enginex/hotcues", s.handleHotCues)
+	s.mux.HandleFunc("GET /api/hook-features", s.handleHookFeatures)
+	s.mux.HandleFunc("POST /api/hook-features", s.handleHookFeatures)
 	s.mux.HandleFunc("GET /api/ssh", s.handleSSH)
 	s.mux.HandleFunc("POST /api/ssh", s.handleSSH)
 	s.mux.HandleFunc("GET /v1/enginex/ssh", s.handleSSH)
