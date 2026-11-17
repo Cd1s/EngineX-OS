@@ -194,6 +194,41 @@ assert.equal(entered, 1);
         result = subprocess.run(["node"], input=script, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_ui_poll_scope_change_does_not_auto_enter(self):
+        start = re.search(r"(?m)^\tfunction scUiPollReply\([^\n]*\) \{", packs.SERVICES_MAIN)
+        self.assertIsNotNone(start)
+        end = packs.SERVICES_MAIN.index("\n\t}", start.end()) + 3
+        fn = packs.SERVICES_MAIN[start.start():end]
+        script = r'''
+const assert = require('node:assert/strict');
+var scUiPoll = {readyState: 4, status: 200, responseText: '{}', headers: {}, getResponseHeader(k) { return this.headers[k] || ''; }};
+var scScopePending = 0, scScope = 'spotify', scUiPollScope = 'spotify';
+var scUiDigest = '', scUiAppliedAt = 0, scUiLoaded = true;
+var scLoggedIn = ['spotify'], scLogin = '', scEnterTries = 0;
+let invalidated = 0, entered = 0;
+const scEnterTimer = {start() { entered++; }};
+const Planck = {librarianController: {streamingPlaylistsController: {invalidateUI() { invalidated++; }}}};
+function scEnsureTidal() {}
+function scApply(v) { if (v.loggedIn) scLoggedIn = v.loggedIn; if (v.scope !== undefined) scScope = v.scope; }
+''' + fn + r'''
+// Web console switches scope from Spotify (logged in) to Apple Music (not logged in) with no login change.
+scUiPoll.headers = {'X-UI-Digest': 'a'};
+scUiPoll.responseText = JSON.stringify({scope: 'applemusic', loggedIn: ['spotify']});
+scUiPollReply();
+assert.equal(invalidated, 0);
+assert.equal(entered, 0);
+
+// Web console switches scope from Apple Music (not logged in) to Spotify (logged in) with no login change.
+scScope = 'applemusic'; scUiPollScope = 'applemusic'; scLoggedIn = ['spotify']; invalidated = 0; entered = 0;
+scUiPoll.headers = {'X-UI-Digest': 'b'};
+scUiPoll.responseText = JSON.stringify({scope: 'spotify', loggedIn: ['spotify']});
+scUiPollReply();
+assert.equal(invalidated, 0);
+assert.equal(entered, 0);
+'''
+        result = subprocess.run(["node"], input=script, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

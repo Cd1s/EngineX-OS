@@ -407,6 +407,10 @@ func TestAppleMusicForgetSticksUntilNewLogin(t *testing.T) {
 	if err := am.Forget(); err != nil {
 		t.Fatal(err)
 	}
+	// Calling Forget a second time (Logout + forgetOwner) must not erase the remembered token.
+	if err := am.Forget(); err != nil {
+		t.Fatal(err)
+	}
 	st := am.HelperStatus(t.Context())
 	if st.SignedIn || am.Ready() || am.Owner().UserToken != "" {
 		t.Fatalf("sign-out did not stick across HelperStatus: st=%+v ready=%v owner=%+v", st, am.Ready(), am.Owner())
@@ -416,6 +420,25 @@ func TestAppleMusicForgetSticksUntilNewLogin(t *testing.T) {
 	}
 	if st = am.ProbeHelper(t.Context(), 0); st.SignedIn || am.Ready() {
 		t.Fatalf("sign-out did not stick across ProbeHelper: st=%+v ready=%v", st, am.Ready())
+	}
+
+	// Reloading from disk after a restart preserves the sign-out marker.
+	restarted := &AppleMusic{OwnerPath: ownerPath, HelperURL: srv.URL, HelperToken: "tok"}
+	_ = restarted.Load()
+	if st = restarted.HelperStatus(t.Context()); st.SignedIn || restarted.Ready() {
+		t.Fatalf("sign-out did not survive Load() restart: st=%+v ready=%v", st, restarted.Ready())
+	}
+
+	// One helper signedIn=false blip must not clear the marker for the same account.
+	mu.Lock()
+	signedIn = false
+	mu.Unlock()
+	_ = am.HelperStatus(t.Context())
+	mu.Lock()
+	signedIn = true
+	mu.Unlock()
+	if st = am.HelperStatus(t.Context()); st.SignedIn || am.Ready() {
+		t.Fatalf("helper signed-out blip relinked mut-alice: st=%+v ready=%v", st, am.Ready())
 	}
 
 	// Signing into a different account on the external helper re-enables sync.

@@ -852,3 +852,141 @@ func TestAppleMusicRelayPullClearsOldTokenWhenHelperURLChanges(t *testing.T) {
 		t.Fatalf("same-URL pull without token should preserve token-for-B, got %+v", got)
 	}
 }
+
+type b1bHelperProbe struct {
+	s    *Server
+	dir  string
+	file string
+	t    *testing.T
+	set  func(in bool, tok string)
+}
+
+func newB1bHelperProbe(t *testing.T, creds bool) *b1bHelperProbe {
+	t.Helper()
+	var mu sync.Mutex
+	signedIn := true
+	token := "mut-alice"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		if r.URL.Path == "/v1/login" && r.Method == "POST" {
+			signedIn = true
+		}
+		in, tok := signedIn, token
+		mu.Unlock()
+		state := "signed-out"
+		if in {
+			state = "ready"
+		}
+		switch r.URL.Path {
+		case "/healthz":
+			w.WriteHeader(http.StatusOK)
+		case "/v1/login/status", "/v1/login":
+			_ = json.NewEncoder(w).Encode(map[string]any{"state": state, "signedIn": in})
+		case "/v1/login/credentials":
+			if !creds {
+				http.NotFound(w, r)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"signedIn": in, "mediaUserToken": tok, "storefront": "us"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	s, dir := newTestServer(t)
+	p := &b1bHelperProbe{
+		s:    s,
+		dir:  dir,
+		file: filepath.Join(dir, "applemusic-owner.json"),
+		t:    t,
+		set:  func(in bool, tok string) { mu.Lock(); signedIn, token = in, tok; mu.Unlock() },
+	}
+	p.api("POST", "/api/applemusic", `{"helperUrl":"`+srv.URL+`","helperToken":"helper-tok"}`)
+	return p
+}
+
+func (p *b1bHelperProbe) api(method, path, body string) (int, string) {
+	p.t.Helper()
+	var r *http.Request
+	if body != "" {
+		r = httptest.NewRequest(method, path, strings.NewReader(body))
+		r.Header.Set("Content-Type", "application/json")
+	} else {
+		r = httptest.NewRequest(method, path, nil)
+	}
+	r.Header.Set("Authorization", "Bearer test-token-1234")
+	w := httptest.NewRecorder()
+	p.s.ServeHTTP(w, r)
+	return w.Code, w.Body.String()
+}
+
+func (p *b1bHelperProbe) ownerFile() bool { _, err := os.Stat(p.file); return err == nil }
+func (p *b1bHelperProbe) poll() bool {
+	p.api("GET", "/api/applemusic", "")
+	return p.s.appleMusic.Ready()
+}
+func (p *b1bHelperProbe) signOut() {
+	p.t.Helper()
+	p.s.mu.Lock()
+	p.s.sessions["own-am"] = &Session{ID: "own-am", Provider: "applemusic", Ready: true, p: p.s.appleMusic, expires: time.Now().Add(time.Hour)}
+	p.s.mu.Unlock()
+	if c, b := p.api("DELETE", "/api/sessions/own-am", ""); c != 200 {
+		p.t.Fatalf("sign-out %d %s", c, b)
+	}
+}
+
+func TestAppleMusicExternalLoginOtherAccountAfterConsoleSignOut(t *testing.T) {
+	p := newB1bHelperProbe(t, true)
+	if !p.poll() || !p.ownerFile() {
+		t.Fatalf("expected initial poll to link mut-alice")
+	}
+	// DELETE /api/sessions/own-am invokes Logout() -> Forget() and forgetOwner() -> Forget().
+	p.signOut()
+	if p.poll() || p.ownerFile() {
+		t.Fatalf("expected sign-out to stick for mut-alice")
+	}
+	p.set(true, "mut-bob")
+	if !p.poll() || p.s.appleMusic.Owner().UserToken != "mut-bob" || !p.ownerFile() {
+		t.Fatalf("different account on external helper did not link after console sign-out: ready=%v owner=%+v file=%v", p.s.appleMusic.Ready(), p.s.appleMusic.Owner(), p.ownerFile())
+	}
+}
+
+func TestAppleMusicForgetSurvivesDeckRestart(t *testing.T) {
+	for _, creds := range []bool{true, false} {
+		p := newB1bHelperProbe(t, creds)
+		p.poll()
+		p.signOut()
+		p.poll()
+
+		s2 := New(Config{AccessToken: "test-token-1234", StateDir: p.dir}, nil)
+		t.Cleanup(s2.Close)
+		p.s = s2
+		if got := p.poll(); got || p.ownerFile() {
+			t.Fatalf("creds=%v: signed-out account linked again after deck restart: ready=%v file=%v", creds, got, p.ownerFile())
+		}
+
+		// Explicit console login still clears the persisted marker and relinks.
+		if c, b := p.api("POST", "/api/applemusic/login", `{"username":"alice@example.com","password":"pw"}`); c != 200 {
+			t.Fatalf("creds=%v: console login %d %s", creds, c, b)
+		}
+		if !p.poll() || (creds && !p.ownerFile()) {
+			t.Fatalf("creds=%v: console re-login after restart did not relink: ready=%v file=%v", creds, p.s.appleMusic.Ready(), p.ownerFile())
+		}
+	}
+}
+
+func TestAppleMusicForgetSurvivesHelperBlip(t *testing.T) {
+	p := newB1bHelperProbe(t, true)
+	p.poll()
+	p.signOut()
+	p.poll()
+	p.set(false, "mut-alice")
+	if p.poll() {
+		t.Fatalf("expected unready while helper reports signed-out")
+	}
+	p.set(true, "mut-alice")
+	if got := p.poll(); got || p.ownerFile() {
+		t.Fatalf("helper signedIn=false blip cleared sign-out marker and relinked mut-alice: ready=%v file=%v", got, p.ownerFile())
+	}
+}

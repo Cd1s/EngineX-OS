@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
@@ -30,8 +31,6 @@ func (a *AppleMusic) SetHelper(helperURL, loginURL, token string) {
 	defer a.mu.Unlock()
 	trimmed := strings.TrimRight(helperURL, "/")
 	if trimmed == "" || a.HelperURL != trimmed || a.HelperToken != token {
-		a.ownerForgot = false
-		a.forgottenToken = ""
 		a.helperOnline = false
 		a.helperSignedIn = false
 		a.helperDevToken = ""
@@ -106,9 +105,13 @@ func (a *AppleMusic) helperLogin(ctx context.Context, cfg AppleMusicHelperConfig
 		status.LoginState = wire.LoginState
 	}
 	status.SignedIn = wire.SignedIn || status.LoginState == "ready"
+	var clearForgotPath string
 	a.mu.Lock()
 	a.helperOnline = true
-	if method == "POST" || !status.SignedIn {
+	if method == "POST" {
+		if a.ownerForgot {
+			clearForgotPath = forgotMarkerPath(a.OwnerPath)
+		}
 		a.ownerForgot = false
 		a.forgottenToken = ""
 	}
@@ -119,6 +122,16 @@ func (a *AppleMusic) helperLogin(ctx context.Context, cfg AppleMusicHelperConfig
 		a.helperDevToken = ""
 	}
 	a.mu.Unlock()
+	if clearForgotPath != "" {
+		a.saveMu.Lock()
+		a.mu.Lock()
+		stillClear := !a.ownerForgot
+		a.mu.Unlock()
+		if stillClear {
+			_ = os.Remove(clearForgotPath)
+		}
+		a.saveMu.Unlock()
+	}
 	if status.SignedIn {
 		if !forgot || forgotTok != "" {
 			a.syncHelperCredentials(ctx, cfg)
@@ -224,6 +237,7 @@ func (a *AppleMusic) syncHelperCredentials(ctx context.Context, cfg AppleMusicHe
 		a.mu.Unlock()
 		if valid {
 			_ = SaveJSON(ownerPath, owner)
+			_ = os.Remove(forgotMarkerPath(ownerPath))
 		}
 		a.saveMu.Unlock()
 	}

@@ -127,15 +127,49 @@ func (a *AppleMusic) webURL() string {
 	return "https://music.apple.com"
 }
 
+type appleMusicForgotMarker struct {
+	UserToken string `json:"userToken,omitempty"`
+}
+
+func forgotMarkerPath(ownerPath string) string {
+	if ownerPath == "" {
+		return ""
+	}
+	return ownerPath + ".forgot"
+}
+
 // Load reads the saved owner login; a missing file is no login.
 func (a *AppleMusic) Load() error {
+	a.saveMu.Lock()
 	b, err := os.ReadFile(a.OwnerPath)
+	var fb []byte
+	var ferr error
+	if os.IsNotExist(err) {
+		if fp := forgotMarkerPath(a.OwnerPath); fp != "" {
+			fb, ferr = os.ReadFile(fp)
+		}
+	}
+	a.saveMu.Unlock()
 	if err != nil {
+		if os.IsNotExist(err) && ferr == nil {
+			var m appleMusicForgotMarker
+			_ = json.Unmarshal(fb, &m)
+			a.mu.Lock()
+			a.owner = AppleMusicOwner{}
+			a.ownerForgot = true
+			a.forgottenToken = strings.TrimSpace(m.UserToken)
+			a.mu.Unlock()
+		}
 		return err
 	}
 	var o AppleMusicOwner
 	if json.Unmarshal(b, &o) != nil {
 		return errors.New("applemusic: invalid owner file")
+	}
+	if fp := forgotMarkerPath(a.OwnerPath); fp != "" {
+		a.saveMu.Lock()
+		_ = os.Remove(fp)
+		a.saveMu.Unlock()
 	}
 	a.mu.Lock()
 	a.owner = o
@@ -172,6 +206,11 @@ func (a *AppleMusic) SetOwner(ctx context.Context, o AppleMusicOwner) error {
 	}
 	a.saveMu.Lock()
 	err := SaveJSON(a.OwnerPath, o)
+	if err == nil {
+		if fp := forgotMarkerPath(a.OwnerPath); fp != "" {
+			_ = os.Remove(fp)
+		}
+	}
 	a.saveMu.Unlock()
 	if err != nil {
 		return err
@@ -202,7 +241,9 @@ func (a *AppleMusic) Forget() error {
 	prevToken := a.owner.UserToken
 	a.owner = AppleMusicOwner{}
 	a.ownerForgot = true
-	a.forgottenToken = prevToken
+	if prevToken != "" {
+		a.forgottenToken = prevToken
+	}
 	a.credGen++
 	a.helperSignedIn = false
 	a.helperDevToken = ""
@@ -216,6 +257,13 @@ func (a *AppleMusic) Forget() error {
 	}
 	a.saveMu.Lock()
 	err := os.Remove(path)
+	a.mu.Lock()
+	stillForgot := a.ownerForgot
+	forgotTok := a.forgottenToken
+	a.mu.Unlock()
+	if stillForgot {
+		_ = SaveJSON(forgotMarkerPath(path), appleMusicForgotMarker{UserToken: forgotTok})
+	}
 	a.saveMu.Unlock()
 	if err != nil && !os.IsNotExist(err) {
 		return err
