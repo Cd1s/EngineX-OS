@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updatedAt": "2026-11-12",
+  "updatedAt": "2026-11-17",
   "mods": [
     {
       "id": "tailscale-remote",
@@ -105,8 +105,8 @@
       ],
       "official": true,
       "downloadUrl": "mods/packages/dmx-studio-1.2.0.tar.gz",
-      "sha256": "9753c54b721560e1da60eb270fdf1d6abc9ac65df7992a8f0222a7994051c1ab",
-      "size": 4019873,
+      "sha256": "a17b27d12142dbe0bc2aa1022cd8b7f5a06b5e7658da9d57e6134766cc2df168",
+      "size": 4027398,
       "models": "All 16 Models",
       "hardwareValidation": "not-tested",
       "stars": 0,
@@ -158,8 +158,8 @@
       ],
       "official": true,
       "downloadUrl": "mods/packages/jog-logo-studio-1.2.0.tar.gz",
-      "sha256": "eb56980613513bdd59006dc87ade91f77cac4d73f9efc9639849901329f28d14",
-      "size": 4005134,
+      "sha256": "f03510dca823efc4234c4b132c0832d833dcda92749a82fbd30aae8e548f3a84",
+      "size": 4009167,
       "models": "All 16 Models",
       "hardwareValidation": "not-tested",
       "stars": 0,
@@ -222,8 +222,8 @@
       ],
       "official": true,
       "downloadUrl": "mods/packages/sampler-pad-studio-1.2.0.tar.gz",
-      "sha256": "13c03ebfaf77c690536dee1f67acb5cee96302f38070b6a52d1956a305b245fb",
-      "size": 4007081,
+      "sha256": "ea85a285934fdc72cf11fd38bc5848dd06f03f4ccd20cc4429ad5c9590ddbb6a",
+      "size": 4011081,
       "models": "All 16 Models",
       "hardwareValidation": "not-tested",
       "stars": 0,
@@ -276,8 +276,8 @@
       ],
       "official": true,
       "downloadUrl": "mods/packages/minimal-club-mode-1.2.1.tar.gz",
-      "sha256": "fc7714b7190ba64acb3f641b1f4f3b6a338bd3db4533f124e79c16759f6b338f",
-      "size": 4004420,
+      "sha256": "c87fcb319abb399b8a118bb042707e8efe7943dd48b705d3576c2aa2cb850258",
+      "size": 4008558,
       "models": "All 16 Models",
       "hardwareValidation": "not-tested",
       "stars": 0,
@@ -330,8 +330,8 @@
       ],
       "official": true,
       "downloadUrl": "mods/packages/midi-controller-mapper-1.2.0.tar.gz",
-      "sha256": "cc07e122e379d6aa965668a8701156eb545ae6b0bcd003deff76b7c34a48c0e0",
-      "size": 4020148,
+      "sha256": "38e8a7b423b26e4d2b00d85fe4d64a78273926cbffaea9e8b1eb2b56292c0002",
+      "size": 4027470,
       "models": "All 16 Models",
       "hardwareValidation": "not-tested",
       "stars": 0,
@@ -375,8 +375,61 @@
       "initialComments": [],
       "official": true,
       "downloadUrl": "mods/packages/sampler-sequencer-1.0.0.tar.gz",
-      "sha256": "28ccc2f8f73861d68959180ba489362cf39d3120700ea0dc9dbf272e383eae49",
-      "size": 4006405,
+      "sha256": "01b78310b082f79d194a9127fdbf82a50b0a18b1bc0015c21610090380afee28",
+      "size": 4009927,
+      "models": "All 16 Models",
+      "hardwareValidation": "not-tested",
+      "stars": 0,
+      "downloads": 0,
+      "license": "MIT",
+      "sourceUrl": "https://github.com/Cd1s/EngineX-OS/tree/main/docs/mods/src",
+      "runtimeStatus": "background-helper",
+      "helperArch": [
+        "armv7",
+        "arm64"
+      ],
+      "requiresPython": false
+    },
+    {
+      "id": "cpu-ram-monitor",
+      "version": "1.0.0",
+      "category": "system",
+      "issueNumber": 296,
+      "author": "EngineX Official",
+      "tags": [
+        "CPU",
+        "RAM",
+        "Monitor",
+        "Status Bar"
+      ],
+      "name": {
+        "s": "CPU 与内存负载显示",
+        "t": "CPU 與記憶體負載顯示",
+        "e": "CPU & RAM Load"
+      },
+      "summary": {
+        "s": "在顶部状态栏时间旁实时显示 CPU 与内存占用。",
+        "t": "於頂部狀態列時間旁即時顯示 CPU 與記憶體佔用。",
+        "e": "Display live CPU and RAM load in the top status bar next to the clock."
+      },
+      "description": {
+        "s": "通过状态栏 TimeIndicator.qml 叠加层与轻量级 loopback Go helper（读取 /proc/stat 与 /proc/meminfo），在顶部时间旁每 2 秒刷新显示 CPU 与内存占用百分比。未启用或 helper 未运行时自动隐藏，不影响原生时钟显示。",
+        "t": "透過狀態列 TimeIndicator.qml 疊加層與輕量級 loopback Go helper（讀取 /proc/stat 與 /proc/meminfo），於頂部時間旁每 2 秒重新整理顯示 CPU 與記憶體佔用百分比。未啟用或 helper 未執行時自動隱藏，不影響原生時鐘顯示。",
+        "e": "Overlays TimeIndicator.qml in the top status bar and pairs it with a lightweight loopback Go helper reading /proc/stat and /proc/meminfo to display live CPU and RAM usage next to the clock every 2 seconds. Automatically hides the load readout if the helper is not running."
+      },
+      "initialComments": [
+        {
+          "author": "Djpd66",
+          "body": "display CPU and RAM load at the top, next to the time",
+          "date": "2026-11-17",
+          "issueNumber": 296,
+          "url": "https://github.com/Cd1s/EngineX-OS/issues/296"
+        }
+      ],
+      "official": true,
+      "downloadUrl": "mods/packages/cpu-ram-monitor-1.0.0.tar.gz",
+      "sha256": "287ff563183a48b3bd349f914c05a23a0f386b5c523aca1f839b03315aba7f3b",
+      "size": 4007383,
       "models": "All 16 Models",
       "hardwareValidation": "not-tested",
       "stars": 0,

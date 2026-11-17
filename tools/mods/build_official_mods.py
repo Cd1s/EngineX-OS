@@ -23,7 +23,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[2]
 DEST = ROOT / "docs/mods"
 SRC = DEST / "src"
-DATE = "2026-11-12"
+DATE = "2026-11-17"
 LEGACY_COMMENT_DATE = "2026-11-08"
 
 
@@ -85,6 +85,13 @@ MODS = [
          description=tri("基于公开 /Engine/Sampler<N>/Triggered 与 Loaded/Playing 状态的 8 步×8 槽采样步进音序器。支持 Play/Stop、1/4·1/8·1/16 步进分频、摇摆、跟随 MASTER 碟机节拍（/v1/enginex/clock）与手动 BPM 回退，并将音序样式持久化在 Mod 自有状态目录中。不触碰音频线程。", "基於公開 /Engine/Sampler<N>/Triggered 與 Loaded/Playing 狀態的 8 步×8 槽取樣步進音序器。支援 Play/Stop、1/4·1/8·1/16 步進分頻、搖擺、跟隨 MASTER 播放機節拍（/v1/enginex/clock）與手動 BPM 回退，並將音序樣式持久化於 Mod 自有狀態目錄中。不觸碰音訊執行緒。", "8-step × 8-slot pattern sequencer using public /Engine/Sampler<N>/Triggered, Loaded, and Playing state. Supports Play/Stop, 1/4·1/8·1/16 division, swing, MASTER deck tempo following (/v1/enginex/clock) plus manual BPM fallback, and persists the pattern in the Mod's own state directory without touching the audio thread."),
          initialComments=[],
          ),
+    dict(id="cpu-ram-monitor", version="1.0.0", category="system", issueNumber=296,
+         author="EngineX Official", tags=["CPU", "RAM", "Monitor", "Status Bar"],
+         name=tri("CPU 与内存负载显示", "CPU 與記憶體負載顯示", "CPU & RAM Load"),
+         summary=tri("在顶部状态栏时间旁实时显示 CPU 与内存占用。", "於頂部狀態列時間旁即時顯示 CPU 與記憶體佔用。", "Display live CPU and RAM load in the top status bar next to the clock."),
+         description=tri("通过状态栏 TimeIndicator.qml 叠加层与轻量级 loopback Go helper（读取 /proc/stat 与 /proc/meminfo），在顶部时间旁每 2 秒刷新显示 CPU 与内存占用百分比。未启用或 helper 未运行时自动隐藏，不影响原生时钟显示。", "透過狀態列 TimeIndicator.qml 疊加層與輕量級 loopback Go helper（讀取 /proc/stat 與 /proc/meminfo），於頂部時間旁每 2 秒重新整理顯示 CPU 與記憶體佔用百分比。未啟用或 helper 未執行時自動隱藏，不影響原生時鐘顯示。", "Overlays TimeIndicator.qml in the top status bar and pairs it with a lightweight loopback Go helper reading /proc/stat and /proc/meminfo to display live CPU and RAM usage next to the clock every 2 seconds. Automatically hides the load readout if the helper is not running."),
+         initialComments=[comment("Djpd66", "display CPU and RAM load at the top, next to the time", 296, "", "2026-11-17")],
+         ),
 ]
 
 
@@ -115,16 +122,27 @@ def go_sources(mid):
     return files
 
 
+EXTRA_QML = {
+    "cpu-ram-monitor": {
+        "TimeIndicator.qml": "Skins/Embedded/Views/StatusBar/Indicators/TimeIndicator.qml",
+    },
+}
+
+
 def package_files(mod, helpers):
     mid = mod["id"]
+    qml_files = {"Panel.qml": f"EngineXMods/{mid}/Panel.qml"}
+    qml_files.update(EXTRA_QML.get(mid, {}))
     manifest = {key: mod[key] for key in ("id", "version", "author", "category")}
     manifest.update(name=mod["name"]["e"], description=mod["description"]["e"], official=True,
                     homepage="https://enginexdj.com/#mods", license="MIT",
-                    qmlFiles={"Panel.qml": f"EngineXMods/{mid}/Panel.qml"},
+                    qmlFiles=qml_files,
                     script="tailscale-helper.sh" if mid == "tailscale-remote" else "start.sh")
-    files = {"mod.json": json_bytes(manifest), "Panel.qml": (SRC / mid / "Panel.qml").read_bytes(),
+    files = {"mod.json": json_bytes(manifest),
              "README.md": (SRC / mid / "README.md").read_bytes(),
              "LICENSE": (ROOT / "LICENSE").read_bytes()}
+    for src_qml in qml_files:
+        files[src_qml] = (SRC / mid / src_qml).read_bytes()
     if mid == "tailscale-remote":
         files["tailscale-helper.sh"] = (SRC / mid / "tailscale-helper.sh").read_bytes()
     else:
