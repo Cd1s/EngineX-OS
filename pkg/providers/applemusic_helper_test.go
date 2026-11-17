@@ -210,3 +210,95 @@ func TestAppleMusicHelperProbeTimeout(t *testing.T) {
 		t.Fatal("timed out helper online")
 	}
 }
+
+func TestAppleMusicHelperCredentialsSyncAndDevTokenFallback(t *testing.T) {
+	devTok := fakeJWT(time.Now().Add(30 * 24 * time.Hour))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/healthz":
+			io.WriteString(w, "ok")
+		case "/v1/login/status":
+			json.NewEncoder(w).Encode(map[string]any{"state": "ready", "signedIn": true})
+		case "/v1/login/credentials":
+			if r.Header.Get("Authorization") != "Bearer fixture-helper" {
+				w.WriteHeader(401)
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{
+				"signedIn":       true,
+				"mediaUserToken": "synced-user-token",
+				"developerToken": devTok,
+				"storefront":     "TH",
+			})
+		case "/us/browse":
+			w.WriteHeader(http.StatusBadGateway)
+		case "/v1/catalog/th/search":
+			if r.Header.Get("Authorization") != "Bearer "+devTok {
+				w.WriteHeader(401)
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{
+				"results": map[string]any{
+					"songs": map[string]any{"data": []any{song("338349243", "Sandstorm", "FI123")}},
+				},
+			})
+		case "/v1/me/library/playlists":
+			if r.Header.Get("Authorization") != "Bearer "+devTok || r.Header.Get("Media-User-Token") != "synced-user-token" {
+				w.WriteHeader(403)
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{
+				"data": []any{map[string]any{"id": "p.lib1", "type": "library-playlists", "attributes": map[string]any{"name": "My Sets"}}},
+			})
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+
+	ownerPath := filepath.Join(t.TempDir(), "applemusic-owner.json")
+	am := &AppleMusic{BaseURL: srv.URL, WebURL: srv.URL, OwnerPath: ownerPath, HelperURL: srv.URL, HelperToken: "fixture-helper"}
+
+	st := am.HelperStatus(t.Context())
+	if !st.SignedIn || !am.Ready() {
+		t.Fatalf("expected signedIn & Ready, got %+v", st)
+	}
+	owner := am.Owner()
+	if owner.UserToken != "synced-user-token" || owner.Storefront != "th" {
+		t.Fatalf("credentials not synced: %+v", owner)
+	}
+
+	// Persisted owner file restores login without needing helper probe on restart.
+	reloaded := &AppleMusic{BaseURL: srv.URL, WebURL: srv.URL, OwnerPath: ownerPath}
+	if err := reloaded.Load(); err != nil || !reloaded.Ready() || reloaded.Owner().UserToken != "synced-user-token" {
+		t.Fatalf("reloaded login lost: err=%v owner=%+v", err, reloaded.Owner())
+	}
+
+	// Web scrape fails (502), so API calls fall back to the helper developer token.
+	tracks, err := am.Search(t.Context(), "sandstorm")
+	if err != nil || len(tracks) != 1 || tracks[0].ID != "338349243" {
+		t.Fatalf("search fallback failed: %+v %v", tracks, err)
+	}
+	lists, err := am.Playlists(t.Context())
+	if err != nil || len(lists) != 1 || lists[0].ID != "lib:p.lib1" {
+		t.Fatalf("playlists fallback failed: %+v %v", lists, err)
+	}
+
+	// Forget clears memory and removes owner file while keeping HelperConfig intact.
+	if err := am.Forget(); err != nil {
+		t.Fatalf("Forget: %v", err)
+	}
+	if am.Ready() || am.Owner().UserToken != "" || am.HelperConfig().URL != srv.URL {
+		t.Fatalf("Forget left stale state or cleared helper: ready=%v owner=%+v helper=%+v", am.Ready(), am.Owner(), am.HelperConfig())
+	}
+	if _, err := os.Stat(ownerPath); !os.IsNotExist(err) {
+		t.Fatalf("owner file still exists after Forget: %v", err)
+	}
+
+	// Cold start with saved UserToken + blocked WebURL syncs helperDevToken on demand.
+	cold := &AppleMusic{BaseURL: srv.URL, WebURL: srv.URL, HelperURL: srv.URL, HelperToken: "fixture-helper", owner: AppleMusicOwner{UserToken: "synced-user-token", Storefront: "th"}}
+	tracks, err = cold.Search(t.Context(), "sandstorm")
+	if err != nil || len(tracks) != 1 {
+		t.Fatalf("cold developerToken sync fallback failed: %+v %v", tracks, err)
+	}
+}

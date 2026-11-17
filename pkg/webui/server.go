@@ -924,6 +924,14 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	if bp, ok := p.(*providers.Beatport); ok {
 		session.Ready = bp.Ready()
 	}
+	if am, ok := p.(*providers.AppleMusic); ok {
+		if !v.Guest && !am.Ready() && am.HelperConfig().URL != "" {
+			ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+			_ = am.HelperStatus(ctx)
+			cancel()
+		}
+		session.Ready = am.Ready()
+	}
 	s.sessions[session.ID] = session
 	respond(w, session)
 }

@@ -39,7 +39,8 @@
 ### 2. 內建 7 大串流音源（手機掃碼與一鍵配對登入）
 - 來源選單直接內建 **TIDAL、網易雲音樂、Spotify、Deezer、SoundCloud、Beatport、Apple Music**，與隨身碟、SD 卡並列顯示；
 - 手機掃描播放機螢幕 QR Code（或在 Spotify Connect 裡點選 **`EngineX OS`**）即可登入帳號，直接瀏覽個人歌單、收藏夾並依 BPM、調性、評等、歌名或歌手排序；
-- 支援 **無損 FLAC 與 320 kbps** 音質切換；播放過的曲目依平台各自獨立快取在播放機內部儲存，再次載入直接秒開（網易雲開啟 `Deemix 優先` 時與 Deezer 共享無損快取）；
+- **支援無損 FLAC 與 320 kbps** 音質切換；播放過的曲目依平台各自獨立快取在播放機內部儲存，再次載入直接秒開（網易雲開啟 `Deemix 優先` 時與 Deezer 共享無損快取）；
+- **Apple Music 原廠解鎖與公開/個人歌單匯入**：二代機與已解鎖 Engine 5.3.0 原生播放 Apple Music；手機掃碼即可直接貼上 Apple Music 公開歌單/專輯連結或登入個人資料庫，自動輪轉擷取 Web 開發者權杖，針對受保護音訊透過 ISRC 與歌名精準智慧回放，OmniSource 隔離保持 Apple Music 歌單純淨；
 - **OmniSource**（`設定檔 → 曲庫 → OmniSource（在串流中顯示 USB/SD）`，預設關閉）支援一次搜尋同時查找各串流平台、隨身碟 / SD 卡、djay 曲庫與網路共用，同時保持各平台自己的歌單頁乾淨不混單。
 
 ### 3. 先鋒 Rekordbox 隨身碟隨插即用與 CDJ 互聯

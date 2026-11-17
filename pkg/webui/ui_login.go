@@ -484,9 +484,13 @@ func (s *Server) loginStatus(w http.ResponseWriter, r *http.Request) {
 		status = s.relayStatus(r.Context(), session, token, status)
 	case helperPending && flow.Provider == "applemusic" && status != "done" && status != "linked":
 		if am, ok := session.p.(*providers.AppleMusic); ok {
+			prevGen := am.CredGen()
 			ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 			st := am.HelperStatus(ctx)
 			cancel()
+			if am.CredGen() != prevGen && s.tidal != nil {
+				s.tidal.dropAppleMusicBrowse(session.ID)
+			}
 			if st.SignedIn && ready(session.p) {
 				s.mu.Lock()
 				flow.helperPending = false
@@ -781,6 +785,7 @@ func (s *Server) phonePost(w http.ResponseWriter, r *http.Request) {
 				http.Redirect(w, r, phoneAction(r, flow), http.StatusSeeOther)
 				return
 			}
+			prevGen := p.CredGen()
 			var status providers.AppleMusicHelperStatus
 			var err error
 			switch helperAction {
@@ -792,6 +797,9 @@ func (s *Server) phonePost(w http.ResponseWriter, r *http.Request) {
 				refuse("badForm", "")
 				return
 			}
+			if p.CredGen() != prevGen && s.tidal != nil {
+				s.tidal.dropAppleMusicBrowse(session.ID)
+			}
 			if err != nil || status.LoginState == "failed" {
 				s.mu.Lock()
 				flow.helperPending = false
@@ -802,6 +810,7 @@ func (s *Server) phonePost(w http.ResponseWriter, r *http.Request) {
 			if status.SignedIn && p.Ready() {
 				s.mu.Lock()
 				flow.helperPending = false
+				session.Ready = true
 				s.mu.Unlock()
 				s.finishPhoneLogin(w, r, flow)
 				return
@@ -812,6 +821,7 @@ func (s *Server) phonePost(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, phoneAction(r, flow), http.StatusSeeOther)
 			return
 		}
+		prevGen := p.CredGen()
 		o := p.Owner()
 		for field, dst := range map[string]*string{"userToken": &o.UserToken, "devToken": &o.DevToken, "storefront": &o.Storefront} {
 			if v := strings.TrimSpace(r.Form.Get(field)); v != "" {
@@ -850,6 +860,9 @@ func (s *Server) phonePost(w http.ResponseWriter, r *http.Request) {
 			log.Print("stream-sync: Apple Music library login failed")
 			refuse("amFailed", tr(lang, "amFailedHint"))
 			return
+		}
+		if p.CredGen() != prevGen && s.tidal != nil {
+			s.tidal.dropAppleMusicBrowse(session.ID)
 		}
 		s.finishPhoneLogin(w, r, flow)
 	case *providers.Spotify:
