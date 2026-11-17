@@ -7839,6 +7839,15 @@ class MixstreamPadsLayoutTest(unittest.TestCase):
             self.assertFalse(re.search(r'(?<!parent\.)\bhighlighted\b', block), f"Bare 'highlighted' found in background: {block}")
         self.assertIn('color: parent.down ?', pads_content)
 
+        # 6. Stock rebuilds Pads at every layer switch: off Mixstream these controls are not even created
+        # (they were over half of the pack's extra layer-switch time in the SC LIVE 4 sandbox, #222).
+        sweep = pads_content.split('objectName: "MixstreamSweepFx" + pads.deckIndex', 1)[0].rsplit('Loader {', 1)[1]
+        self.assertIn('visible: pads.scMixstream', sweep)
+        self.assertIn('active: pads.scMixstream', sweep)
+        self.assertIn('sourceComponent: Button {', sweep)
+        self.assertIn('model: pads.scBeatJumpBank ? [', pads_content)
+        self.assertIn('] : []', pads_content)
+
     def test_stems_eq_switch_is_a_settings_playback_row_on_mixstream_only(self):
         rows = bp.load_dict()
         for key in ("Stems EQ", "Deck 1", "Deck 2"):

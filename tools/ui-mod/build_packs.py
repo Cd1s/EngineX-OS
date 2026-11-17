@@ -8068,26 +8068,30 @@ def edits(dev: bool):
         }
     }
 }'''
-        new_pads_layout = '''        Button {
-            objectName: "MixstreamSweepFx" + pads.deckIndex
+        new_pads_layout = '''        // Mixstream-only controls are created only there: stock rebuilds Pads at every layer switch (#222).
+        Loader {
             visible: pads.scMixstream
+            active: pads.scMixstream
             Layout.preferredWidth: 44
             Layout.fillHeight: true
             Layout.leftMargin: isPadLayoutMirrored ? 0 : 16
             Layout.rightMargin: isPadLayoutMirrored ? 16 : 0
             Layout.topMargin: pads.scBeatJumpBank ? 8 : 16
             Layout.bottomMargin: pads.scBeatJumpBank ? 8 : 16
-            padding: 0
-            font.pixelSize: 18
-            text: "△"
-            enabled: Config.ui.hasSweepFxSelectionPopup
-            background: Rectangle {
-                color: parent.down ? Style.surface03Color : Style.surface02Color
-                radius: 4
-                border.width: 1
-                border.color: Style.surface03Color
+            sourceComponent: Button {
+                objectName: "MixstreamSweepFx" + pads.deckIndex
+                padding: 0
+                font.pixelSize: 18
+                text: "△"
+                enabled: Config.ui.hasSweepFxSelectionPopup
+                background: Rectangle {
+                    color: parent.down ? Style.surface03Color : Style.surface02Color
+                    radius: 4
+                    border.width: 1
+                    border.color: Style.surface03Color
+                }
+                onClicked: root.scMixstreamSweepOpen = true
             }
-            onClicked: root.scMixstreamSweepOpen = true
         }
 
         ColumnLayout {
@@ -8133,12 +8137,12 @@ def edits(dev: bool):
                 Layout.fillHeight: true
                 spacing: 4
                 Repeater {
-                    model: [
+                    model: pads.scBeatJumpBank ? [
                         {label: "Jump −", action: "JumpBack"},
                         {label: "Jump +", action: "JumpForward"},
                         {label: "½", action: "BeatJumpHalve"},
                         {label: "×2", action: "BeatJumpDouble"}
-                    ]
+                    ] : []
                     delegate: Button {
                         required property var modelData
                         objectName: "Mixstream" + modelData.action + pads.deckIndex
