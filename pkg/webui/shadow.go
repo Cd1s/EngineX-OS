@@ -652,6 +652,11 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+		if d.Key != "" && d.rbxAnalysis != "" {
+			// One audio file can be two rekordbox rows, and an edit in rekordbox refreshes
+			// the analysis of the same file: the copy is of this row's analysis, as it is now.
+			d.Key = fmt.Sprintf("%x", fnvSum(d.Key+" "+np+" "+rbxGeneration(d.rbxAnalysis)))
+		}
 		s.shadow.mu.Lock()
 		if d.Key != "" {
 			d.baseKey = d.Key
@@ -1262,7 +1267,12 @@ func (s *Server) peerPerfGet(w http.ResponseWriter, r *http.Request) {
 	native := r.URL.Query().Get("format") == "native"
 	perf, err := libraryPerfFormat(r.Context(), d.Path, s.shadow.dataRoot, s.shadow.mediaRoot, native)
 	if err != nil && d.rbxAnalysis != "" {
-		perf, err = rbxPeerPerf(d.rbxAnalysis, d.BPM, native)
+		if perf, err = rbxPeerPerf(d.rbxAnalysis, d.BPM, native); errors.Is(err, os.ErrNotExist) {
+			// The load writes it while Engine asks for the track: the copy waits for it.
+			w.Header().Set("Retry-After", "1")
+			http.Error(w, "analysing", http.StatusServiceUnavailable)
+			return
+		}
 	}
 	if err != nil {
 		http.Error(w, "not analysed", http.StatusNotFound)
@@ -1277,7 +1287,7 @@ func (s *Server) peerPerfGet(w http.ResponseWriter, r *http.Request) {
 // gateway's copy on a drive, which no library lists until Engine's row has it,
 // so the library lookup missed and the copy was analysed again.
 func rbxPeerPerf(file string, bpm float64, native bool) ([]byte, error) {
-	b, err := os.ReadFile(file)
+	b, err := rbxReadAnalysisFile(file)
 	if err != nil {
 		return nil, err
 	}
@@ -1290,6 +1300,62 @@ func rbxPeerPerf(file string, bpm float64, native bool) ([]byte, error) {
 	}
 	return perfFromBlobs(bpm, p.TrackData, p.Beats, p.Overview)
 }
+
+// rbxReadAnalysisFile reads a regular file directly in rbxAnalysisDir, not
+// following a link, at most rbxAnalysisMax bytes.
+func rbxReadAnalysisFile(file string) ([]byte, error) {
+	if filepath.Dir(file) != filepath.Clean(rbxAnalysisDir) {
+		return nil, errors.New("rekordbox analysis outside its directory")
+	}
+	fd, err := syscall.Open(file, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		if errors.Is(err, syscall.ENOENT) {
+			return nil, os.ErrNotExist
+		}
+		return nil, err
+	}
+	f := os.NewFile(uintptr(fd), file)
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil || !st.Mode().IsRegular() || st.Size() > rbxAnalysisMax {
+		return nil, errors.New("rekordbox analysis is not a bounded regular file")
+	}
+	return io.ReadAll(io.LimitReader(f, rbxAnalysisMax+1))
+}
+
+const rbxAnalysisMax = 16 << 20
+
+// rbxGeneration names the analysis a rekordbox deck's copy carries: a hash of what
+// /perf serves from the file, kept while it is the same file, size and time (a refresh
+// renames a new one in). A refresh that leaves the analysis as it was keeps the name.
+func rbxGeneration(file string) string {
+	st, err := os.Lstat(file)
+	if err != nil || !st.Mode().IsRegular() {
+		return ""
+	}
+	rbxGenerations.Lock()
+	defer rbxGenerations.Unlock()
+	if g, ok := rbxGenerations.m[file]; ok && os.SameFile(g.st, st) && g.st.Size() == st.Size() && g.st.ModTime().Equal(st.ModTime()) {
+		return g.sum
+	}
+	b, err := rbxReadAnalysisFile(file)
+	if err != nil {
+		return ""
+	}
+	g := rbxGenerationOf{st: st, sum: fmt.Sprintf("%x", sha256.Sum256(b))}
+	rbxGenerations.m[file] = g
+	return g.sum
+}
+
+type rbxGenerationOf struct {
+	st  os.FileInfo
+	sum string
+}
+
+var rbxGenerations = struct {
+	sync.Mutex
+	m map[string]rbxGenerationOf
+}{m: map[string]rbxGenerationOf{}}
 
 // streamingDownload is Engine's own download of a streaming track (Engine
 // 5.3.0's TrackNetworkPath for one is just "net://<uuid>/(Unknown)", its
@@ -1464,18 +1530,36 @@ func savePerf(local string, perf []byte) {
 	}
 }
 
+// A source still writing a rekordbox Link track's analysis answers 503: asked again
+// this often, a few times, before Engine loads the copy (only such a track waits).
+var perfRetryWait, perfRetries = 2 * time.Second, 5
+
 func fetchPerf(ctx context.Context, url string) []byte {
+	for try := 0; ; try++ {
+		b, status := fetchPerfOnce(ctx, url)
+		if status != http.StatusServiceUnavailable || try+1 >= perfRetries {
+			return b
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(perfRetryWait):
+		}
+	}
+}
+
+func fetchPerfOnce(ctx context.Context, url string) ([]byte, int) {
 	req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
 	resp, err := peerFileClient.Do(req)
 	if err != nil {
-		return nil
+		return nil, 0
 	}
 	defer resp.Body.Close()
 	b, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
 	if resp.StatusCode != 200 || err != nil {
-		return nil // a source without /perf: Engine analyses the copy
+		return nil, resp.StatusCode // a source without /perf: Engine analyses the copy
 	}
-	return b
+	return b, resp.StatusCode
 }
 
 // cdjCuePlay is a status packet's play state while CUE is held (P1 0x07).

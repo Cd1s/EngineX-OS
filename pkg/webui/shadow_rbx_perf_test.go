@@ -86,3 +86,132 @@ func TestShadowPerfOfARekordboxLinkDeck(t *testing.T) {
 		t.Fatalf("perf %q", b)
 	}
 }
+
+// rbxShadowSource is a source player with a rekordbox Link deck on deck 1 of the
+// gateway row id, whose audio is the gateway's copy on a drive.
+type rbxShadowSource struct {
+	s    *Server
+	srv  *httptest.Server
+	file string
+}
+
+func newRbxShadowSource(t *testing.T) *rbxShadowSource {
+	t.Helper()
+	shadowBeaconOn = false
+	media := t.TempDir()
+	shadowMediaRoot = media
+	oldDir := rbxAnalysisDir
+	rbxAnalysisDir = t.TempDir()
+	t.Cleanup(func() { shadowBeaconOn, shadowMediaRoot, rbxAnalysisDir = true, "/media", oldDir })
+	drive := filepath.Join(media, "USB")
+	file := filepath.Join(drive, rbxCacheDir, "0123abcd.flac")
+	os.MkdirAll(filepath.Dir(file), 0o755)
+	os.WriteFile(file, []byte("AUDIO"), 0o644)
+	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	srv := httptest.NewServer(s)
+	t.Cleanup(func() { srv.Close(); s.Close() })
+	return &rbxShadowSource{s: s, srv: srv, file: file}
+}
+
+func (r *rbxShadowSource) row(tid uint32) int64 {
+	return r.s.tidal.addTrack(trackRef{track: providers.Track{ID: fmt.Sprintf("x\x00192.0.2.5\x00%d", tid), Provider: rekordboxScope, Title: "Song"}, file: r.file, drive: filepath.Dir(filepath.Dir(r.file))})
+}
+
+// publish leaves row id's analysis with its first beat at firstMS, as a load or a refresh does.
+func (r *rbxShadowSource) publish(t *testing.T, id int64, firstMS uint32) enginedb.Performance {
+	t.Helper()
+	a := &rekordbox.Analysis{
+		Beats:     []rekordbox.Beat{{Number: 1, BPM: 120, TimeMS: firstMS}, {Number: 2, BPM: 120, TimeMS: firstMS + 500}},
+		Waveforms: []rekordbox.Waveform{{Tag: "PWV7", EntryBytes: 3, Data: bytes.Repeat([]byte{100, 50, 25}, 300)}},
+	}
+	p, err := enginedb.EncodePerformance(rekordbox.Track{SampleRate: 48000, SampleCount: 3 * 48000, Duration: 3, BPM: 120}, a)
+	if err != nil || !p.Complete || !rbxPublishAnalysis(rbxAnalysisPath(id), p, 120, false) {
+		t.Fatalf("publish: %v", err)
+	}
+	return p
+}
+
+// post shows row id on deck 1 and returns the key a peer copies it by.
+func (r *rbxShadowSource) post(t *testing.T, id int64) string {
+	t.Helper()
+	body := fmt.Sprintf(`[{"deck":1,"net":"streaming://TIDAL/Track/%d","bpm":120}]`, id)
+	if resp, err := http.Post(r.srv.URL+"/v1/enginex/decks", "application/json", strings.NewReader(body)); err != nil || resp.StatusCode != 200 {
+		t.Fatalf("post: %v %v", resp, err)
+	}
+	var peer struct{ Decks []deckState }
+	resp, _ := http.Get(r.srv.URL + "/peer/decks")
+	json.NewDecoder(resp.Body).Decode(&peer)
+	resp.Body.Close()
+	if len(peer.Decks) != 1 || peer.Decks[0].Key == "" {
+		t.Fatalf("peer decks: %+v", peer.Decks)
+	}
+	return peer.Decks[0].Key
+}
+
+func (r *rbxShadowSource) native(t *testing.T, key string) (int, []byte) {
+	t.Helper()
+	resp, err := http.Get(r.srv.URL + "/peer/decks/1/perf?format=native&key=" + key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, b
+}
+
+// Two rekordbox rows can share one audio file (the same file in two places of the
+// library, or the gateway's cache): switching between them must not keep the copy
+// of the first, with its grid.
+func TestShadowRekordboxRowSwitchIsANewCopy(t *testing.T) {
+	r := newRbxShadowSource(t)
+	a, b := r.row(7), r.row(8)
+	r.publish(t, a, 500)
+	pb := r.publish(t, b, 250)
+	ka := r.post(t, a)
+	kb := r.post(t, b)
+	if ka == kb {
+		t.Fatal("the other row's copy key is the first row's: the receiver keeps the first grid")
+	}
+	want, _ := encodeShadowAnalysis(pb)
+	if code, got := r.native(t, kb); code != 200 || !bytes.Equal(got, want) {
+		t.Fatalf("second row's analysis: %d", code)
+	}
+}
+
+// An edit in rekordbox refreshes the analysis of the loaded row: the copy key moves
+// on, so the receiver copies it again with the new grid. A refresh that leaves the
+// analysis as it was keeps the key (no reload).
+func TestShadowRekordboxEditRefreshIsANewCopy(t *testing.T) {
+	r := newRbxShadowSource(t)
+	id := r.row(7)
+	r.publish(t, id, 500)
+	k1 := r.post(t, id)
+	if k := r.post(t, id); k != k1 {
+		t.Fatal("the key moved without a refresh")
+	}
+	p := r.publish(t, id, 250)
+	k2 := r.post(t, id)
+	if k2 == k1 {
+		t.Fatal("refreshed analysis under the old copy key: the receiver keeps the old grid")
+	}
+	want, _ := encodeShadowAnalysis(p)
+	if code, got := r.native(t, k2); code != 200 || !bytes.Equal(got, want) {
+		t.Fatalf("refreshed analysis: %d", code)
+	}
+	r.publish(t, id, 250) // the same analysis again
+	if k := r.post(t, id); k != k2 {
+		t.Fatal("an unchanged refresh moved the key")
+	}
+}
+
+// The deck's file can be there before its analysis is written: the source says it
+// is coming (503), and the receiver asks again instead of loading the copy bare.
+// A track without analysis (404) is not waited for.
+func TestShadowRekordboxDelayedAnalysis(t *testing.T) {
+	r := newRbxShadowSource(t)
+	id := r.row(7)
+	key := r.post(t, id)
+	if code, _ := r.native(t, key); code != http.StatusServiceUnavailable {
+		t.Fatalf("analysis not written yet: %d, want 503", code)
+	}
+}
