@@ -1856,8 +1856,7 @@ func (g *tidalGateway) trackInfo(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// streamTarget reports MP3 only when an explicitly allowed lossy download is
-// already on disk; otherwise Deemix is asked for FLAC.
+// streamTarget returns the media URL and its manifest codec.
 func (g *tidalGateway) streamTarget(r *http.Request, id int64, ref trackRef) (address, codec string) {
 	codec = "flac"
 	ext := "flac"
@@ -1867,10 +1866,13 @@ func (g *tidalGateway) streamTarget(r *http.Request, id int64, ref trackRef) (ad
 		codec, ext = "mp3", "mp3"
 	}
 	if ref.file != "" {
-		codec = localCodecs[strings.ToLower(path.Ext(ref.file))]
-		if codec == "mp3" {
-			ext = "mp3"
-		} else if codec != "flac" {
+		suffix := strings.ToLower(path.Ext(ref.file))
+		codec = localCodecs[suffix]
+		switch codec {
+		case "mp3", "wav", "aiff":
+			ext = strings.TrimPrefix(suffix, ".")
+		case "flac":
+		default:
 			ext = "mp4"
 		}
 	} else if g.s.jobs != nil {
@@ -1943,8 +1945,11 @@ func (g *tidalGateway) playbackInfo(w http.ResponseWriter, r *http.Request) {
 	if ref.track.Provider == "spotify" && g.s.jobs != nil && strings.EqualFold(path.Ext(g.s.jobs.File(ref.track)), ".ogg") {
 		mime = "audio/ogg" // #277: the naming tag does not change legacy Ogg bytes.
 	}
+	if ref.file != "" {
+		mime = localMIMEs[localCodecs[strings.ToLower(path.Ext(ref.file))]]
+	}
 	manifest, _ := json.Marshal(map[string]any{"mimeType": mime, "codecs": codec, "encryptionType": "NONE", "urls": []string{address}})
-	log.Printf("stream-sync: load track=%d provider=%s step=manifest codec=%s", id, ref.track.Provider, codec)
+	log.Printf("stream-sync: load track=%d provider=%s step=manifest codec=%s mime=%s", id, ref.track.Provider, codec, mime)
 	respond(w, map[string]any{"trackId": id, "assetPresentation": "FULL", "audioMode": "STEREO", "audioQuality": "LOSSLESS", "manifestMimeType": "application/vnd.tidal.bts", "manifestHash": "", "manifest": base64.StdEncoding.EncodeToString(manifest), "albumReplayGain": 0, "albumPeakAmplitude": 1, "trackReplayGain": 0, "trackPeakAmplitude": 1})
 }
 func (g *tidalGateway) streamURL(w http.ResponseWriter, r *http.Request) {
@@ -2109,22 +2114,21 @@ func stemsPending(ctx context.Context, paths []string) map[string]bool {
 // the CPU3 analysis/import job is queued by Jobs.Fetch and runs afterwards.
 func (g *tidalGateway) stream(w http.ResponseWriter, r *http.Request) {
 	file := r.PathValue("file")
-	raw := strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(file, ".flac"), ".mp3"), ".mp4"), ".ogg"), ".wav")
-	if raw == file {
+	suffix := path.Ext(file)
+	switch suffix {
+	case ".flac", ".mp3", ".mp4", ".ogg", ".wav", ".aif", ".aiff", ".aifc":
+	default:
 		http.NotFound(w, r)
 		return
 	}
-	id, ref, ok := g.playable(w, r, raw)
+	id, ref, ok := g.playable(w, r, strings.TrimSuffix(file, suffix))
 	if !ok {
 		return
 	}
 	started := time.Now()
 	log.Printf("stream-sync: load track=%d provider=%s scope=%s step=stream result=request", id, ref.track.Provider, g.s.scope())
 	if ref.file != "" { // OmniSource: straight from the drive, with Range
-		mime := map[string]string{"flac": "audio/flac", "mp3": "audio/mpeg"}[localCodecs[strings.ToLower(path.Ext(ref.file))]]
-		if mime == "" {
-			mime = "audio/mp4"
-		}
+		mime := localMIMEs[localCodecs[strings.ToLower(path.Ext(ref.file))]]
 		w.Header().Set("Content-Type", mime)
 		if cp := rbxRunning(ref.file); cp != nil { // a rekordbox track still being copied
 			cp.serve(w, r)

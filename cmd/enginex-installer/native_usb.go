@@ -50,7 +50,7 @@ func tryUSB(ctx context.Context, o *options, board string) (found bool, err erro
 	var candidates []candidate
 	for _, info := range devices {
 		id := fmt.Sprintf("%04x:%04x", info.VID, info.PID)
-		az := id == azID
+		az := id == azID || id == azPrime4G2ID
 		rock := goos == "windows" && (id == "2207:320a" || id == "2207:350b")
 		if !az && !rock && gen1USB[id] == "" && gen2USB[id] == "" && id != "18d1:4ee0" && !(goos == "windows" && id == "2207:0006") {
 			continue

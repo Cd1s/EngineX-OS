@@ -20,6 +20,8 @@ func TestAppletAcceptsNewAndOldNames(t *testing.T) {
 		{"enginex-deemixd", "enginex-deemixd", []string{"-state-dir", "/x"}, []string{"-state-dir", "/x"}},
 		{migration.Deemix, "enginex-deemixd", []string{"-state-dir", "/x"}, []string{"-state-dir", "/x"}},
 		{"rb-bridge", "rb-bridge", []string{"--prolink"}, []string{"--prolink"}},
+		{"iw", "iw", []string{"dev", "wlan0", "set", "power_save", "off"}, []string{"dev", "wlan0", "set", "power_save", "off"}},
+		{"enginex-suite", "iw", []string{"iw", "dev", "wlan0", "get", "power_save"}, []string{"dev", "wlan0", "get", "power_save"}},
 		{"enginex-suite", "enginex-suite", nil, nil},
 	} {
 		got, rest := applet(c.prog, c.args)

@@ -1,14 +1,20 @@
 #!/usr/bin/env bash
 # Run from an EngineX checkout on Debian/Ubuntu with systemd (amd64 or arm64).
-# sudo bash deploy/one-click-backend.sh [--public https://relay.example.com] [--relay-bin /path/to/enginex-relay]
+# sudo bash deploy/one-click-backend.sh [--public https://relay.example.com] [--relay-bin /path/to/enginex-relay] [--stems hpss|demucs|auto]
 set -euo pipefail
 PUBLIC_URL=""
 RELAY_BIN=""
+STEMS_MODE=hpss
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --public) PUBLIC_URL="${2:?missing --public value}"; shift 2 ;;
     --relay-bin) RELAY_BIN="${2:?missing --relay-bin value}"; shift 2 ;;
-    -h|--help) echo "Usage: sudo bash $0 [--public https://relay.example.com] [--relay-bin /path/to/enginex-relay]"; exit 0 ;;
+    --stems)
+      case "${2:-}" in
+        hpss|demucs|auto) STEMS_MODE=$2; shift 2 ;;
+        *) echo "Invalid --stems value '${2:-}'; expected hpss, demucs or auto" >&2; exit 2 ;;
+      esac ;;
+    -h|--help) echo "Usage: sudo bash $0 [--public https://relay.example.com] [--relay-bin /path/to/enginex-relay] [--stems hpss|demucs|auto]"; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -58,10 +64,10 @@ fi
 
 # The renderer installer preserves its token on rerun; failed optional components
 # are errors, not a successful deployment summary.
-echo "Installing enginex-stemsd (HPSS renderer)..."
+echo "Installing enginex-stemsd (--stems $STEMS_MODE)..."
 (cd "$REPO_ROOT" && CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" go build -trimpath -ldflags='-s -w' -o "$WORK/enginex-stemsd" ./cmd/enginex-stemsd)
 cp "$REPO_ROOT/tools/stems/worker.py" "$SCRIPT_DIR/stems/enginex-stemsd.service" "$WORK/"
-sh "$SCRIPT_DIR/stems/install-backend.sh" "$WORK"
+sh "$SCRIPT_DIR/stems/install-backend.sh" "$WORK" "$STEMS_MODE"
 mkdir -p /etc/systemd/system/enginex-relay.service.d
 
 AM_STATUS="not installed (optional helper files are absent)"

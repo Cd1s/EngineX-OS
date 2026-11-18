@@ -222,3 +222,34 @@ esac
 		t.Fatalf("IRQ threads moved or reprioritised: %s", calls)
 	}
 }
+
+func TestDebloatUsesSuiteOnlyWhenStockIWMissing(t *testing.T) {
+	script := read(t, "../../rootfs-overlay", "usr/local/bin/enginex-debloat")
+	start := strings.LastIndex(script, "if [ \"$runtime\" = 1 ]; then")
+	for _, stock := range []bool{true, false} {
+		t.Run(fmt.Sprintf("stock_%t", stock), func(t *testing.T) {
+			root := t.TempDir()
+			block := strings.ReplaceAll(script[start:], "/proc/", filepath.Join(root, "proc")+"/")
+			put(t, root, "runtime.sh", "#!/bin/sh\n"+read(t, "../../rootfs-overlay", "usr/libexec/enginex-migration")+"\nset -eu\nruntime=1\n"+block)
+			for _, name := range []string{"iw", "enginex-suite-exec"} {
+				if name == "iw" && !stock {
+					continue
+				}
+				put(t, root, "bin/"+name, "#!/bin/sh\necho \"${0##*/} $*\" >> \"$COMMAND_LOG\"\n")
+				os.Chmod(filepath.Join(root, "bin", name), 0755)
+			}
+			cmd := exec.Command("/bin/sh", filepath.Join(root, "runtime.sh"))
+			cmd.Env = append(os.Environ(), "PATH="+filepath.Join(root, "bin"), "COMMAND_LOG="+filepath.Join(root, "calls"))
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("%v: %s", err, out)
+			}
+			want := "iw dev wlan0 set power_save off\n"
+			if !stock {
+				want = "enginex-suite-exec " + want
+			}
+			if got := read(t, root, "calls"); got != want {
+				t.Fatalf("got %q want %q", got, want)
+			}
+		})
+	}
+}

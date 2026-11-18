@@ -2,7 +2,9 @@ package webui
 
 import (
 	"context"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -95,4 +97,45 @@ func TestEth0AndWiFiSpeakForTheirOwnAddressBeforeEitherHasOne(t *testing.T) {
 		t.Fatal(err)
 	}
 	within("an interface that came after the start", func() bool { return now(settings...) == "2 2 1 1" })
+}
+
+func TestWiFiPowerSaveWaitsForUpAndAppliesOnce(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	checks, writes := 0, 0
+	disableWiFiPowerSave(ctx, time.Millisecond, func() bool { checks++; return checks >= 3 }, func() error { writes++; return nil })
+	if checks != 3 || writes != 1 {
+		t.Fatalf("checks=%d writes=%d", checks, writes)
+	}
+	disableWiFiPowerSave(ctx, time.Millisecond, func() bool { cancel(); return false }, func() error { t.Fatal("set before up"); return nil })
+}
+
+func TestWiFiPowerSaveUsesStockIW(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(map[bool]string{false: "success", true: "driver_error"}[fail], func(t *testing.T) {
+			bin := t.TempDir()
+			calls := filepath.Join(bin, "calls")
+			script := "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$COMMAND_LOG\"\n"
+			if fail {
+				script += "echo 'driver refused power save' >&2\nexit 1\n"
+			}
+			if err := os.WriteFile(filepath.Join(bin, "iw"), []byte(script), 0755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", bin)
+			t.Setenv("COMMAND_LOG", calls)
+			err := setWiFiPowerSaveOff(context.Background())
+			if fail {
+				var exit *exec.ExitError
+				if !errors.As(err, &exit) || !strings.Contains(err.Error(), "driver refused") {
+					t.Fatalf("lost stock iw error: %v", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if out, err := os.ReadFile(calls); err != nil || string(out) != "dev wlan0 set power_save off\n" {
+				t.Fatalf("stock iw arguments: %q, %v", out, err)
+			}
+		})
+	}
 }

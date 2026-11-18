@@ -71,7 +71,14 @@ func snapshotLive(ctx context.Context, dir, stage string) error {
 		if strings.HasSuffix(before, "-journal") || strings.HasSuffix(before, "-wal") || before == "absent" || before == "unreadable" {
 			continue
 		}
-		for _, name := range []string{"m.db", stateName} {
+		// A library Engine made, which rb-bridge never imported, has no bridge state: the
+		// passes start one in the stage, and MergeLive reads the live one as empty.
+		names := []string{"m.db", stateName}
+		if _, err := os.Stat(filepath.Join(dir, stateName)); errors.Is(err, os.ErrNotExist) {
+			names = names[:1]
+			os.Remove(filepath.Join(stage, stateName))
+		}
+		for _, name := range names {
 			os.Remove(filepath.Join(stage, name+".copy"))
 			if err := copyFile(filepath.Join(dir, name), filepath.Join(stage, name+".copy")); err != nil {
 				return err
@@ -80,7 +87,7 @@ func snapshotLive(ctx context.Context, dir, stage string) error {
 		if liveIdentity(live) != before {
 			continue
 		}
-		for _, name := range []string{"m.db", stateName} {
+		for _, name := range names {
 			if err := os.Rename(filepath.Join(stage, name+".copy"), filepath.Join(stage, name)); err != nil {
 				return err
 			}

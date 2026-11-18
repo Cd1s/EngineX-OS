@@ -137,5 +137,9 @@ if [ "$runtime" = 1 ]; then
     if command -v az01-ethernet-speed >/dev/null 2>&1; then
         az01-ethernet-speed 1000 || az01-ethernet-speed 100 || :
     fi
-    if command -v iw >/dev/null 2>&1; then iw dev wlan0 set power_save off || :; fi
+    if command -v iw >/dev/null 2>&1; then
+        iw dev wlan0 set power_save off || :
+    elif command -v enginex-suite-exec >/dev/null 2>&1; then
+        enginex-suite-exec iw dev wlan0 set power_save off || :
+    fi
 fi
