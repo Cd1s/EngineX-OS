@@ -3,6 +3,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import legacy_names as legacy
+
 
 class RekordboxStreamedAnalysisTest(unittest.TestCase):
     def test_statement_uri_and_update(self):
@@ -17,8 +19,8 @@ class RekordboxAnalysisSitesTest(unittest.TestCase):
     """The hook's sqlite sites against the Engine binaries they are for (lab copies, when present)."""
 
     BINARIES = {
-        "5.3.0": "/root/build/sc5000-lab/5.3.0/tree/usr/Engine/Engine",
-        "5.3.0-sclive4": "/root/build/sc5000-lab/sclive4-rea61-followup/rootfs/usr/Engine/Engine",
+        "5.3.0": Path(legacy.LAB) / "5.3.0/tree/usr/Engine/Engine",
+        "5.3.0-sclive4": Path(legacy.LAB) / "sclive4-rea61-followup/rootfs/usr/Engine/Engine",
     }
 
     def test_sites_match_engine(self):
@@ -31,7 +33,7 @@ class RekordboxAnalysisSitesTest(unittest.TestCase):
         self.assertEqual({s[0] for s in sites}, set(self.BINARIES))
         checked = 0
         for name, lock, prepare_v2, close_v2, filename, bind_int64, bind_int, db_handle, sql in sites:
-            path = Path(self.BINARIES[name])
+            path = self.BINARIES[name]
             if not path.exists():
                 continue
             elf = path.read_bytes()
