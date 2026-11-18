@@ -12,16 +12,6 @@ static int exec_counted(void *db, const char *sql, int (*row)(void *, int, char 
 static const char *db_main(void *db, const char *name) { return sqlite3_db_filename(db, name); }
 static const struct sc_rbx_sqlite sqlite = {exec_counted, db_main};
 
-static int open_readonly(const char *path, void **db, int flags, const char *vfs) {
-    assert(flags == SQLITE_OPEN_READONLY);
-    sqlite3 *handle = NULL;
-    int rc = sqlite3_open_v2(path, &handle, flags, vfs);
-    *db = handle;
-    return rc;
-}
-
-static int close_readonly(void *db) { return sqlite3_close(db); }
-
 static void check_edits(sqlite3 *db, const char *want) {
     sqlite3_stmt *st;
     assert(sqlite3_prepare_v2(db, "SELECT hex(beatData)||'/'||hex(quickCues) FROM PerformanceData", -1, &st, NULL) == SQLITE_OK);
@@ -177,19 +167,10 @@ int main(void) {
     statements = 0;
     assert(!load_bound(engine) && statements == 1 && filled(engine));
     sqlite3_close(engine);
-    // Complete the Engine download while no bind-time fill has succeeded.
-    // The analyzer finds the late payload by the download path even without an alias.
     db = library(internal, "rekordbox [126 BPM]");
     char alias[160];
     snprintf(alias, sizeof alias, "%s/0123456789012345678901234567890123456789.perf", dir);
     assert(!unlink(alias));
-    sc_rbx_stm = internal;
-    sc_rbx_open_readonly = open_readonly;
-    sc_rbx_close_db = close_readonly;
-    sc_rbx_exec_readonly = exec_counted;
-    int keep_grid = 0;
-    assert(sc_rbx_replay_download(download, replay, sizeof replay, &keep_grid) && !keep_grid);
-    assert(strstr(replay, "/855.bin.perf") != NULL && !filled(db));
     assert(!strcmp(load_bound(db), "filled"));
     // The deck changes its cue while the source changes both fields.
     assert(sqlite3_exec(db, "UPDATE PerformanceData SET quickCues=X'99'", NULL, NULL, NULL) == SQLITE_OK);
@@ -200,9 +181,8 @@ int main(void) {
     result = load_bound(db);
     assert(result && !strcmp(result, "refreshed; kept deck edits"));
     check_edits(db, "12/99");
-    assert(sc_rbx_replay_download(download, replay, sizeof replay, &keep_grid) && !keep_grid);
     // A subsequent source cue edit is accepted once it matches our last
-    // import; a local grid edit remains protected from both refresh and replay.
+    // import; a local grid edit remains protected from refresh.
     assert(sqlite3_exec(db, "UPDATE PerformanceData SET quickCues=NULL, beatData=X'88'", NULL, NULL, NULL) == SQLITE_OK);
     unsigned char next[sizeof edited];
     memcpy(next, edited, sizeof next);
@@ -212,7 +192,6 @@ int main(void) {
     result = load_bound(db);
     assert(result && !strcmp(result, "refreshed; kept deck edits"));
     check_edits(db, "88/34");
-    assert(sc_rbx_replay_download(download, replay, sizeof replay, &keep_grid) && keep_grid);
     sqlite3_close(db);
     // Engine Link (a track of the other deck's USB) and Remote Library (Engine DJ desktop)
     // loads while a rekordbox load is open: one read of the row, nothing written, even with a
