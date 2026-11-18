@@ -970,7 +970,9 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 			// FeaturesOff: hook features the running Engine has off; QML hides their
 			// rows. Absent when unknown: every row stays.
 			FeaturesOff []string `json:"featuresOff,omitempty"`
-		}{v, s.cfg.AccessToken, consoleLink, s.TunnelManager().Status(""), relay.LANStems, runningFeaturesOff()})
+			// ShadowPausedFollow: the running hook moves a paused shadow deck's line.
+			ShadowPausedFollow bool `json:"shadowPausedFollow,omitempty"`
+		}{v, s.cfg.AccessToken, consoleLink, s.TunnelManager().Status(""), relay.LANStems, runningFeaturesOff(), runningFeatureOn("shadow-paused-follow")})
 		if err != nil {
 			fail(w, http.StatusInternalServerError, err)
 			return

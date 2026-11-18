@@ -698,7 +698,11 @@ SERVICES_MAIN = """
 	// A shadow deck that stays paused while Engine's waveform follows the source's
 	// position (the hook reads the feed stream-sync writes). Off, or on an Engine the
 	// hook has not verified, the shadow deck plays as before.
-	readonly property bool scPausedShadowFollow: !scIsAZ04 && !scOff("shadow-paused-follow")
+	// Only when stream-sync says the running hook moves the line (GET /v1/enginex/ui): a
+	// hook that does not know the feature lists it nowhere, and a copy left paused under it
+	// would stand still.
+	property bool scHookFollows: false
+	readonly property bool scPausedShadowFollow: !scIsAZ04 && scHookFollows && !scOff("shadow-paused-follow")
 	property var scShadowFeedSent: ({})
 	// The source's position as stream-sync sent it (at.feedMs at its own clock's
 	// at.feedAt), not carried to now here: stream-sync dates the record by that clock, so
@@ -4061,6 +4065,7 @@ SERVICES_MAIN = """
 		scAutoGain = !!v.autoGain
 		scHifiOutput = !!v.hifiOutput
 		scFeaturesOff = Array.isArray(v.featuresOff) ? v.featuresOff : []
+		scHookFollows = v.shadowPausedFollow === true
 		scAutoAnalyze = !!v.autoAnalyze
 		scOmniSource = !!v.omniSource
 		scRemoteLoad = !!v.remoteLoad

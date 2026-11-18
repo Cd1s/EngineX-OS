@@ -1266,6 +1266,12 @@ for (const amt of [1/63, 2/63, 4/63, 5/63, 8/63, 1.0]) {{
         self.assertIn("property var scFeaturesOff: []", bp.SERVICES_MAIN)
         self.assertIn("function scOff(name) { return scFeaturesOff.indexOf(name) >= 0 }", bp.SERVICES_MAIN)
         self.assertIn("scFeaturesOff = Array.isArray(v.featuresOff) ? v.featuresOff : []", bp.SERVICES_MAIN)
+        # The paused shadow follow is the other way round: on only when stream-sync says the
+        # running hook does it. Under a hook that does not (an older one, none, an unreadable
+        # state) the copy plays as before; paused there, its waveform would stand still.
+        self.assertIn("property bool scHookFollows: false", bp.SERVICES_MAIN)
+        self.assertIn("scHookFollows = v.shadowPausedFollow === true", bp.SERVICES_MAIN)
+        self.assertIn('readonly property bool scPausedShadowFollow: !scIsAZ04 && scHookFollows && !scOff("shadow-paused-follow")', bp.SERVICES_MAIN)
         dsp = '!root.scOff("dsp-guards")'
         for text in ("Master Soft Clipper", "Auto-Gain (0 dB Normalize)", "Echo Out", "Color FX Style",
                      "PX Delay Time Mode", "PX Delay Time (ms)"):

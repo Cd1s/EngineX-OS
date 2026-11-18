@@ -243,16 +243,17 @@ static void test_publish(void) {
     use_conf("stems\n");
     hf_publish();
     read_state(text, sizeof text);
-    snprintf(want, sizeof want, "pid=%d\nbuild=zoom30\noff=stems,zoom30\n", (int)getpid());
+    snprintf(want, sizeof want, "pid=%d\nbuild=zoom30\noff=stems,zoom30\non=shadow-paused-follow\n", (int)getpid());
     assert(!strcmp(text, want));
     snprintf(tmp, sizeof tmp, "%s.tmp", state);
     assert(access(tmp, F_OK) != 0);
     use_conf(NULL);
     hf_publish();
     read_state(text, sizeof text);
-    snprintf(want, sizeof want, "pid=%d\nbuild=zoom30\noff=zoom30\n", (int)getpid());
+    snprintf(want, sizeof want, "pid=%d\nbuild=zoom30\noff=zoom30\non=shadow-paused-follow\n", (int)getpid());
     assert(!strcmp(text, want));
-    // A feature this Engine has no verified site for is off like one the build left out.
+    // A feature this Engine has no verified site for is off like one the build left out,
+    // and the hook does not say it follows: the UI pack then lets the shadow deck play.
     hf_runtime_off(HF_SHADOW_PAUSED_FOLLOW);
     assert(!hf_on(HF_SHADOW_PAUSED_FOLLOW) && hf_on(HF_STEMS));
     hf_publish();

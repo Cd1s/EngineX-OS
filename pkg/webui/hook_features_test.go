@@ -190,6 +190,27 @@ func TestHookFeatureMenuShowsWhatTheRunningEngineHas(t *testing.T) {
 	if body := ui(); !strings.Contains(body, `"featuresOff":["stems","zoom30"]`) {
 		t.Fatalf("featuresOff missing: %s", body)
 	}
+	// The paused shadow follow is on only when the running hook says it does it: a hook of
+	// before it lists it nowhere, and the shadow deck must then play as before.
+	if body := ui(); strings.Contains(body, `"shadowPausedFollow"`) {
+		t.Fatalf("a hook that does not say it follows: %s", body)
+	}
+	for _, c := range []struct {
+		state string
+		want  bool
+	}{
+		{"pid=4242\nbuild=\noff=\non=shadow-paused-follow\n", true},
+		{"pid=4242\nbuild=\noff=shadow-paused-follow\non=shadow-paused-follow\n", false},
+		{"pid=4242\nbuild=shadow-paused-follow\noff=shadow-paused-follow\n", false},
+		{"pid=99\nbuild=\noff=\non=shadow-paused-follow\n", false}, // an Engine that no longer runs
+	} {
+		if err := os.WriteFile(state, []byte(c.state), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Contains(ui(), `"shadowPausedFollow":true`); got != c.want {
+			t.Fatalf("%q: shadowPausedFollow %v, want %v", c.state, got, c.want)
+		}
+	}
 	// A state file of an Engine that no longer runs says nothing: every row stays.
 	if err := os.WriteFile(state, []byte("pid=99\nbuild=\noff=dsp-guards\n"), 0o644); err != nil {
 		t.Fatal(err)
