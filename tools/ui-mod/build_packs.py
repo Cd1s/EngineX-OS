@@ -4064,8 +4064,8 @@ SERVICES_MAIN = """
 		scMasterLimiter = !!v.masterLimiter
 		scAutoGain = !!v.autoGain
 		scHifiOutput = !!v.hifiOutput
-		scFeaturesOff = Array.isArray(v.featuresOff) ? v.featuresOff : []
-		scHookFollows = v.shadowPausedFollow === true
+		if (Array.isArray(v.featuresOff)) scFeaturesOff = v.featuresOff
+		if (v.shadowPausedFollow !== undefined) scHookFollows = v.shadowPausedFollow === true
 		scAutoAnalyze = !!v.autoAnalyze
 		scOmniSource = !!v.omniSource
 		scRemoteLoad = !!v.remoteLoad
