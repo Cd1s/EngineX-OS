@@ -761,10 +761,15 @@ static int shadow_feed_read(int deck, double *position) {
         uint64_t age = now > copy.mono_ns ? now - copy.mono_ns : 0;
         if (age > SHADOW_FEED_MAX_AGE_NS) return 0;
         double at = copy.position_samples + copy.rate_samples_per_sec * ((double)age / 1e9);
-        // In the source's loop its line does not run on past the loop out.
-        if (copy.loop_out_samples > copy.loop_in_samples && at > copy.loop_out_samples)
-            at = copy.loop_in_samples + fmod(at - copy.loop_in_samples, copy.loop_out_samples - copy.loop_in_samples);
         if (!isfinite(at)) return 0;
+        // In the source's loop its line does not run on past the loop out. No libm here:
+        // the hook is preloaded into Engine's helper commands too, which do not load it.
+        double span = copy.loop_out_samples - copy.loop_in_samples;
+        if (span > 0.0 && isfinite(span) && at > copy.loop_out_samples) {
+            double laps = (at - copy.loop_in_samples) / span;
+            if (!(laps < 9e15)) return 0;
+            at -= span * (double)(long long)laps;
+        }
         *position = at;
         return 1;
     }
@@ -829,12 +834,22 @@ static int install_shadow_position_hooks(uintptr_t base, size_t page) {
     uintptr_t *a = (uintptr_t *)(base + build->shadow_vtable_a + build->shadow_vtable_slot);
     uintptr_t *b = (uintptr_t *)(base + build->shadow_vtable_b + build->shadow_vtable_slot);
     if (*a != base + build->shadow_position_fn || *b != base + build->shadow_position_fn) return 0;
+    // After a boot Engine can be the first to need the feed's directory. The file is
+    // stream-sync's as much as the hook's: whoever comes first makes it, nobody replaces it.
     size_t bytes = sizeof(struct shadow_position_feed_record) * 4;
+    char dir[] = SHADOW_POSITION_FEED_PATH;
+    char *slash = strrchr(dir, '/');
+    if (slash && slash != dir) {
+        *slash = 0;
+        mkdir(dir, 0755);
+    }
     int fd = open(SHADOW_POSITION_FEED_PATH, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
-    if (fd < 0) return 0;
-    void *map = ftruncate(fd, (off_t)bytes) ? MAP_FAILED : mmap(NULL, bytes, PROT_READ, MAP_SHARED, fd, 0);
-    close(fd);
-    if (map == MAP_FAILED) return 0;
+    void *map = fd < 0 || ftruncate(fd, (off_t)bytes) ? MAP_FAILED : mmap(NULL, bytes, PROT_READ, MAP_SHARED, fd, 0);
+    if (fd >= 0) close(fd);
+    if (map == MAP_FAILED) {
+        fprintf(stderr, "engine-ui-hook: paused shadow deck: no position feed at " SHADOW_POSITION_FEED_PATH " (%s); shadow decks play as before\n", strerror(errno));
+        return 0;
+    }
 #if !defined(__aarch64__)
     const uint32_t jump[] = {0xe51ff004, (uint32_t)(uintptr_t)shadow_capture_waveform_item_stub};
     shadow_capture_return = base + build->shadow_capture_site + sizeof jump;

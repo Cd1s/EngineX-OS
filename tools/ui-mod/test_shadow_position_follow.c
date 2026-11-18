@@ -3,10 +3,12 @@
 // arm-linux-gnueabihf-gcc -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=undefined -static-libasan -static-libubsan -o test_shadow_position_follow test_shadow_position_follow.c -ldl -lpthread -lm
 // ./test_shadow_position_follow   (native armhf on the build host)
 #define ENGINE_UI_HOOK_TEST
-#define SHADOW_POSITION_FEED_PATH "/tmp/enginex-shadow-position-test"
+#define FEED_DIR "/tmp/enginex-shadow-position-test"
+#define SHADOW_POSITION_FEED_PATH FEED_DIR "/shadow-position"
 #include "engine_ui_hook.c"
 #include <assert.h>
 #include <stddef.h>
+#include <sys/stat.h>
 
 int hook_test_engine;
 
@@ -227,6 +229,7 @@ static void *writer(void *unused) {
         r->loop_in_samples = n & 1 ? 0.0 : 10000.0;
         r->loop_out_samples = n & 1 ? 0.0 : 20000.0;
         __atomic_store_n(&r->seq, r->seq + 1, __ATOMIC_RELEASE);
+        usleep(20); // far busier than stream-sync's 250 ms, with room for a whole read
     }
     return NULL;
 }
@@ -266,6 +269,61 @@ static void test_install_refuses_unverified_engines(void) {
     puts("an Engine without a verified site keeps its own function: PASS");
 }
 
+// The install on an image that holds Engine 5.3.0's bytes at the sites, on the first
+// Engine start after a boot (no /run/enginex yet), and the feed as stream-sync writes it:
+// through the file.
+static void test_install(void) {
+    hf_reload();
+    reset(2);
+    size_t size = 0x2c00000, page = 4096;
+    unsigned char *image = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    assert(image != MAP_FAILED);
+    unsigned char *site = image + build->shadow_capture_site;
+    memcpy(image + build->shadow_position_fn, build->shadow_position_prefix, build->shadow_position_prefix_size);
+    memcpy(site, build->shadow_capture_prefix, sizeof build->shadow_capture_prefix);
+    uintptr_t fn = (uintptr_t)image + build->shadow_position_fn;
+    uintptr_t *a = (void *)(image + build->shadow_vtable_a + build->shadow_vtable_slot);
+    uintptr_t *b = (void *)(image + build->shadow_vtable_b + build->shadow_vtable_slot);
+    unlink(SHADOW_POSITION_FEED_PATH);
+    rmdir(FEED_DIR);
+    shadow_feed = NULL;
+
+    *a = fn;
+    *b = fn + 4; // one slot holds another function: not the Engine the sites are for
+    assert(!install_shadow_position_hooks((uintptr_t)image, page));
+    assert(*a == fn && *b == fn + 4 && !shadow_feed && !memcmp(site, build->shadow_capture_prefix, 8));
+    assert(access(FEED_DIR, F_OK));
+
+    *b = fn;
+    assert(install_shadow_position_hooks((uintptr_t)image, page));
+    assert(*a == (uintptr_t)shadow_position_hook && *b == (uintptr_t)shadow_position_hook);
+    uint32_t jump[2];
+    memcpy(jump, site, sizeof jump);
+    assert(jump[0] == 0xe51ff004 && jump[1] == (uintptr_t)shadow_capture_waveform_item_stub);
+    assert(shadow_capture_return == (uintptr_t)site + 8);
+    struct stat st;
+    assert(!stat(SHADOW_POSITION_FEED_PATH, &st) && st.st_size == 256);
+    assert(shadow_position_original == (int (*)(const void *))fn);
+
+    // The other process: one whole record for deck 2, written to the file.
+    shadow_position_original = stock_position;
+    void *item = (void *)0x202;
+    items[1] = (uintptr_t)item;
+    assert(shadow_position_hook(item) == STOCK);
+    struct shadow_position_feed_record r = {.seq = 2, .active = 1, .deck = 2, .position_samples = 4242.0, .mono_ns = shadow_now_ns()};
+    int fd = open(SHADOW_POSITION_FEED_PATH, O_RDWR);
+    assert(fd >= 0 && pwrite(fd, &r, sizeof r, sizeof r) == (ssize_t)sizeof r);
+    assert(shadow_position_hook(item) == 4242);
+    r.seq = 4;
+    r.active = 0;
+    assert(pwrite(fd, &r, sizeof r, sizeof r) == (ssize_t)sizeof r);
+    assert(shadow_position_hook(item) == STOCK);
+    close(fd);
+    unlink(SHADOW_POSITION_FEED_PATH);
+    rmdir(FEED_DIR);
+    puts("the install verifies both slots, makes the feed file on a fresh boot and reads what is written to it: PASS");
+}
+
 int main(void) {
     hf_reload();
     test_follows_its_own_deck_only();
@@ -277,5 +335,6 @@ int main(void) {
     test_nothing_followed_reads_nothing();
     test_reader_against_a_writer();
     test_install_refuses_unverified_engines();
+    test_install();
     return 0;
 }
