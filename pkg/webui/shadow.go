@@ -149,6 +149,9 @@ type deckState struct {
 	rbx prolink.ExportDeck
 	// rbxAnalysis: that track's analysis as the rekordbox load left it for Engine here.
 	rbxAnalysis string
+	// PerfGen names the analysis /perf serves for a rekordbox Link deck (empty: none
+	// yet). The copy keeps its audio; a new PerfGen gives it the new analysis.
+	PerfGen string `json:"perfGen,omitempty"`
 }
 
 // shadowCue is one hot cue (I 1..8); the receiver checks it before use.
@@ -364,6 +367,7 @@ type shadowState struct {
 	beacon              bool
 	unresolved          [5]string              // per deck: the last TrackNetworkPath logged as having no file
 	streamFiles         map[string]streamTrack // streaming uri -> Engine's download (zero = none)
+	copyGens            map[string]string      // copy key -> the source's PerfGen its analysis is of
 	peerTaken           map[string]time.Time   // when takePeer last accepted an update per peer (as peerSeq)
 	peerClock           map[string]peerClock   // per peer (as peerSeq)
 	dbg                 shadowDebug
@@ -653,9 +657,10 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if d.Key != "" && d.rbxAnalysis != "" {
-			// One audio file can be two rekordbox rows, and an edit in rekordbox refreshes
-			// the analysis of the same file: the copy is of this row's analysis, as it is now.
-			d.Key = fmt.Sprintf("%x", fnvSum(d.Key+" "+np+" "+rbxGeneration(d.rbxAnalysis)))
+			// One audio file can be two rekordbox rows: the copy is of this row. Its
+			// analysis can come or change later (an edit in rekordbox): PerfGen says so.
+			d.Key = fmt.Sprintf("%x", fnvSum(d.Key+" "+np))
+			d.PerfGen = s.perfGen(r.Context(), d)
 		}
 		s.shadow.mu.Lock()
 		if d.Key != "" {
@@ -1264,15 +1269,12 @@ func (s *Server) peerPerfGet(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not loaded", http.StatusConflict)
 		return
 	}
-	native := r.URL.Query().Get("format") == "native"
-	perf, err := libraryPerfFormat(r.Context(), d.Path, s.shadow.dataRoot, s.shadow.mediaRoot, native)
-	if err != nil && d.rbxAnalysis != "" {
-		if perf, err = rbxPeerPerf(d.rbxAnalysis, d.BPM, native); errors.Is(err, os.ErrNotExist) {
-			// The load writes it while Engine asks for the track: the copy waits for it.
-			w.Header().Set("Retry-After", "1")
-			http.Error(w, "analysing", http.StatusServiceUnavailable)
-			return
-		}
+	perf, err := s.ownPerf(r.Context(), d, r.URL.Query().Get("format") == "native")
+	if d.rbxAnalysis != "" && errors.Is(err, os.ErrNotExist) {
+		// The load writes it while Engine asks for the track: the copy waits for it.
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "analysing", http.StatusServiceUnavailable)
+		return
 	}
 	if err != nil {
 		http.Error(w, "not analysed", http.StatusNotFound)
@@ -1301,23 +1303,29 @@ func rbxPeerPerf(file string, bpm float64, native bool) ([]byte, error) {
 	return perfFromBlobs(bpm, p.TrackData, p.Beats, p.Overview)
 }
 
-// rbxReadAnalysisFile reads a regular file directly in rbxAnalysisDir, not
-// following a link, at most rbxAnalysisMax bytes.
+// rbxReadAnalysisFile reads a regular file directly in rbxAnalysisDir through an
+// os.Root (no link, nor a parent's, leads out of it), at most rbxAnalysisMax bytes.
 func rbxReadAnalysisFile(file string) ([]byte, error) {
 	if filepath.Dir(file) != filepath.Clean(rbxAnalysisDir) {
 		return nil, errors.New("rekordbox analysis outside its directory")
 	}
-	fd, err := syscall.Open(file, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+	root, err := os.OpenRoot(rbxAnalysisDir)
 	if err != nil {
-		if errors.Is(err, syscall.ENOENT) {
-			return nil, os.ErrNotExist
-		}
 		return nil, err
 	}
-	f := os.NewFile(uintptr(fd), file)
+	defer root.Close()
+	name := filepath.Base(file)
+	if st, err := root.Lstat(name); err != nil {
+		return nil, err
+	} else if !st.Mode().IsRegular() || st.Size() > rbxAnalysisMax {
+		return nil, errors.New("rekordbox analysis is not a bounded regular file")
+	}
+	f, err := root.OpenFile(name, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
 	defer f.Close()
-	st, err := f.Stat()
-	if err != nil || !st.Mode().IsRegular() || st.Size() > rbxAnalysisMax {
+	if st, err := f.Stat(); err != nil || !st.Mode().IsRegular() || st.Size() > rbxAnalysisMax {
 		return nil, errors.New("rekordbox analysis is not a bounded regular file")
 	}
 	return io.ReadAll(io.LimitReader(f, rbxAnalysisMax+1))
@@ -1325,37 +1333,50 @@ func rbxReadAnalysisFile(file string) ([]byte, error) {
 
 const rbxAnalysisMax = 16 << 20
 
-// rbxGeneration names the analysis a rekordbox deck's copy carries: a hash of what
-// /perf serves from the file, kept while it is the same file, size and time (a refresh
-// renames a new one in). A refresh that leaves the analysis as it was keeps the name.
-func rbxGeneration(file string) string {
-	st, err := os.Lstat(file)
-	if err != nil || !st.Mode().IsRegular() {
-		return ""
+// ownPerf is what /perf serves for an own deck: its library's analysis, else a
+// rekordbox Link deck's own (os.ErrNotExist while that is not written yet).
+func (s *Server) ownPerf(ctx context.Context, d deckState, native bool) ([]byte, error) {
+	perf, err := libraryPerfFormat(ctx, d.Path, s.shadow.dataRoot, s.shadow.mediaRoot, native)
+	if err != nil && d.rbxAnalysis != "" {
+		perf, err = rbxPeerPerf(d.rbxAnalysis, d.BPM, native)
 	}
-	rbxGenerations.Lock()
-	defer rbxGenerations.Unlock()
-	if g, ok := rbxGenerations.m[file]; ok && os.SameFile(g.st, st) && g.st.Size() == st.Size() && g.st.ModTime().Equal(st.ModTime()) {
-		return g.sum
-	}
-	b, err := rbxReadAnalysisFile(file)
-	if err != nil {
-		return ""
-	}
-	g := rbxGenerationOf{st: st, sum: fmt.Sprintf("%x", sha256.Sum256(b))}
-	rbxGenerations.m[file] = g
-	return g.sum
+	return perf, err
 }
 
-type rbxGenerationOf struct {
-	st  os.FileInfo
-	sum string
-}
+// perfGenEvery bounds how often a deck's PerfGen is worked out (the QML posts 8 a second).
+var perfGenEvery = time.Second
 
-var rbxGenerations = struct {
+var perfGens = struct {
 	sync.Mutex
-	m map[string]rbxGenerationOf
-}{m: map[string]rbxGenerationOf{}}
+	m map[string]perfGenAt
+}{m: map[string]perfGenAt{}}
+
+type perfGenAt struct {
+	gen string
+	at  time.Time
+}
+
+// perfGen is a hash of the native analysis /perf serves for d now, "" if none.
+func (s *Server) perfGen(ctx context.Context, d deckState) string {
+	id := fmt.Sprintf("%d\x00%s\x00%s", d.Deck, d.Path, d.rbxAnalysis)
+	perfGens.Lock()
+	g, ok := perfGens.m[id]
+	perfGens.Unlock()
+	if ok && time.Since(g.at) < perfGenEvery {
+		return g.gen
+	}
+	g = perfGenAt{at: time.Now()}
+	if perf, err := s.ownPerf(ctx, d, true); err == nil {
+		g.gen = fmt.Sprintf("%x", sha256.Sum256(perf))[:16]
+	}
+	perfGens.Lock()
+	if len(perfGens.m) > 64 {
+		clear(perfGens.m)
+	}
+	perfGens.m[id] = g
+	perfGens.Unlock()
+	return g.gen
+}
 
 // streamingDownload is Engine's own download of a streaming track (Engine
 // 5.3.0's TrackNetworkPath for one is just "net://<uuid>/(Unknown)", its
@@ -1532,7 +1553,7 @@ func savePerf(local string, perf []byte) {
 
 // A source still writing a rekordbox Link track's analysis answers 503: asked again
 // this often, a few times, before Engine loads the copy (only such a track waits).
-var perfRetryWait, perfRetries = 2 * time.Second, 5
+var perfRetryWait, perfRetries, perfRequestTimeout = 2 * time.Second, 5, 5 * time.Second
 
 func fetchPerf(ctx context.Context, url string) []byte {
 	for try := 0; ; try++ {
@@ -1549,6 +1570,8 @@ func fetchPerf(ctx context.Context, url string) []byte {
 }
 
 func fetchPerfOnce(ctx context.Context, url string) ([]byte, int) {
+	ctx, cancel := context.WithTimeout(ctx, perfRequestTimeout)
+	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
 	resp, err := peerFileClient.Do(req)
 	if err != nil {
@@ -1911,6 +1934,8 @@ func (s *Server) shadowLegacy(role string, now time.Time, all bool, lines ...[]i
 			if d.Path == "" {
 				s.shadowFetchPeer(key, p)
 				d.Progress, d.Error = sh.copyShown(key)
+			} else if p.PerfGen != "" && p.PerfGen != sh.copyGens[key] {
+				s.shadowRefreshPeerPerf(key, p, d.Path) // the copy plays on until the new path
 			}
 		}
 		// Audio still on its way: the QML shows the deck as loading. No track on
@@ -2152,9 +2177,62 @@ func (s *Server) shadowFetchPeer(key string, p peerDeck) {
 			return "", err
 		}
 		// Engine loads the copy only after this returns, so it sees the .perf.
-		savePerf(local, fetchPerf(ctx, strings.Replace(url, "/audio?", "/perf?", 1)))
+		perf := fetchPerf(ctx, strings.Replace(url, "/audio?", "/perf?", 1))
+		savePerf(local, perf)
 		if playerBoards[imagePrefix(deviceCompatible())] {
 			saveShadowAnalysis(ctx, local, strings.Replace(url, "/audio?", "/perf?", 1)+"&format=native")
+		}
+		if perf != nil {
+			s.shadowCopyGen(key, p.PerfGen)
+		}
+		return local, nil
+	})
+}
+
+func (s *Server) shadowCopyGen(key, gen string) {
+	s.shadow.mu.Lock()
+	defer s.shadow.mu.Unlock()
+	if s.shadow.copyGens == nil {
+		s.shadow.copyGens = map[string]string{}
+	}
+	s.shadow.copyGens[key] = gen
+}
+
+// shadowRefreshPeerPerf gives the copy at old the analysis the source now serves
+// (it came after the copy, or a rekordbox edit changed it). Engine keeps the
+// analysis of a path it has loaded, so the same audio, linked, not downloaded again,
+// gets a new path with the new sidecars, and the shadow deck loads that. Called
+// with sh.mu held; one try per PerfGen.
+func (s *Server) shadowRefreshPeerPerf(key string, p peerDeck, old string) {
+	port := s.shadow.peerPort
+	if port == 0 {
+		port = 8080
+	}
+	perfURL := fmt.Sprintf("http://%s/peer/decks/%d/perf?key=%s", net.JoinHostPort(p.ip, strconv.Itoa(port)), p.Deck, url.QueryEscape(p.Key))
+	dir := filepath.Join(s.shadowDir(), fmt.Sprintf("peer-%x", fnvSum(key+" "+p.PerfGen)))
+	if filepath.Base(filepath.Dir(old)) == "Contents" {
+		dir = filepath.Join(dir, "Contents")
+	}
+	local := filepath.Join(dir, filepath.Base(old))
+	gen := p.PerfGen
+	s.shadowFetch(key, func(ctx context.Context, cp *shadowCopy) (string, error) {
+		s.shadowCopyGen(key, gen)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return "", err
+		}
+		os.Remove(local)
+		if err := os.Link(old, local); err != nil {
+			return "", err
+		}
+		savePerf(local, fetchPerf(ctx, perfURL))
+		if playerBoards[imagePrefix(deviceCompatible())] {
+			saveShadowAnalysis(ctx, local, perfURL+"&format=native")
+		}
+		for _, f := range []string{old, old + ".perf", old + ".analysis"} {
+			os.Remove(f)
+		}
+		for d := filepath.Dir(old); d != s.shadowDir() && strings.HasPrefix(d, s.shadowDir()); d = filepath.Dir(d) {
+			os.Remove(d) // the old copy's own directories, once empty
 		}
 		return local, nil
 	})
@@ -2262,6 +2340,7 @@ func (s *Server) shadowCleanCopies(keep string) {
 			}
 			delete(sh.files, k)
 			delete(sh.used, k)
+			delete(sh.copyGens, k)
 		}
 	}
 }

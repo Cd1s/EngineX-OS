@@ -102,7 +102,11 @@ func newRbxShadowSource(t *testing.T) *rbxShadowSource {
 	shadowMediaRoot = media
 	oldDir := rbxAnalysisDir
 	rbxAnalysisDir = t.TempDir()
-	t.Cleanup(func() { shadowBeaconOn, shadowMediaRoot, rbxAnalysisDir = true, "/media", oldDir })
+	oldEvery := perfGenEvery
+	perfGenEvery = 0
+	t.Cleanup(func() {
+		shadowBeaconOn, shadowMediaRoot, rbxAnalysisDir, perfGenEvery = true, "/media", oldDir, oldEvery
+	})
 	drive := filepath.Join(media, "USB")
 	file := filepath.Join(drive, rbxCacheDir, "0123abcd.flac")
 	os.MkdirAll(filepath.Dir(file), 0o755)
@@ -132,7 +136,10 @@ func (r *rbxShadowSource) publish(t *testing.T, id int64, firstMS uint32) engine
 }
 
 // post shows row id on deck 1 and returns the key a peer copies it by.
-func (r *rbxShadowSource) post(t *testing.T, id int64) string {
+func (r *rbxShadowSource) post(t *testing.T, id int64) string { return r.status(t, id).Key }
+
+// status shows row id on deck 1 and returns what a peer sees of it.
+func (r *rbxShadowSource) status(t *testing.T, id int64) deckState {
 	t.Helper()
 	body := fmt.Sprintf(`[{"deck":1,"net":"streaming://TIDAL/Track/%d","bpm":120}]`, id)
 	if resp, err := http.Post(r.srv.URL+"/v1/enginex/decks", "application/json", strings.NewReader(body)); err != nil || resp.StatusCode != 200 {
@@ -145,7 +152,7 @@ func (r *rbxShadowSource) post(t *testing.T, id int64) string {
 	if len(peer.Decks) != 1 || peer.Decks[0].Key == "" {
 		t.Fatalf("peer decks: %+v", peer.Decks)
 	}
-	return peer.Decks[0].Key
+	return peer.Decks[0]
 }
 
 func (r *rbxShadowSource) native(t *testing.T, key string) (int, []byte) {
@@ -178,40 +185,54 @@ func TestShadowRekordboxRowSwitchIsANewCopy(t *testing.T) {
 	}
 }
 
-// An edit in rekordbox refreshes the analysis of the loaded row: the copy key moves
-// on, so the receiver copies it again with the new grid. A refresh that leaves the
-// analysis as it was keeps the key (no reload).
-func TestShadowRekordboxEditRefreshIsANewCopy(t *testing.T) {
+// An edit in rekordbox refreshes the analysis of the loaded row: the audio copy
+// key stays (no new download), PerfGen moves on so the receiver takes the new
+// analysis; a refresh that leaves the analysis as it was keeps PerfGen.
+func TestShadowRekordboxEditRefreshIsANewPerfGen(t *testing.T) {
 	r := newRbxShadowSource(t)
 	id := r.row(7)
 	r.publish(t, id, 500)
-	k1 := r.post(t, id)
-	if k := r.post(t, id); k != k1 {
-		t.Fatal("the key moved without a refresh")
+	d1 := r.status(t, id)
+	if d1.PerfGen == "" {
+		t.Fatal("no PerfGen for an analysed rekordbox deck")
+	}
+	if d := r.status(t, id); d.Key != d1.Key || d.PerfGen != d1.PerfGen {
+		t.Fatal("the deck moved without a refresh")
 	}
 	p := r.publish(t, id, 250)
-	k2 := r.post(t, id)
-	if k2 == k1 {
-		t.Fatal("refreshed analysis under the old copy key: the receiver keeps the old grid")
+	d2 := r.status(t, id)
+	if d2.Key != d1.Key {
+		t.Fatal("a refresh changed the audio copy key: the receiver downloads the audio again")
+	}
+	if d2.PerfGen == d1.PerfGen {
+		t.Fatal("refreshed analysis under the old PerfGen: the receiver keeps the old grid")
 	}
 	want, _ := encodeShadowAnalysis(p)
-	if code, got := r.native(t, k2); code != 200 || !bytes.Equal(got, want) {
+	if code, got := r.native(t, d2.Key); code != 200 || !bytes.Equal(got, want) {
 		t.Fatalf("refreshed analysis: %d", code)
 	}
 	r.publish(t, id, 250) // the same analysis again
-	if k := r.post(t, id); k != k2 {
-		t.Fatal("an unchanged refresh moved the key")
+	if d := r.status(t, id); d.PerfGen != d2.PerfGen {
+		t.Fatal("an unchanged refresh moved PerfGen")
 	}
 }
 
 // The deck's file can be there before its analysis is written: the source says it
-// is coming (503), and the receiver asks again instead of loading the copy bare.
-// A track without analysis (404) is not waited for.
+// is coming (503) under the same key, then serves it, and PerfGen tells the receiver.
 func TestShadowRekordboxDelayedAnalysis(t *testing.T) {
 	r := newRbxShadowSource(t)
 	id := r.row(7)
-	key := r.post(t, id)
-	if code, _ := r.native(t, key); code != http.StatusServiceUnavailable {
-		t.Fatalf("analysis not written yet: %d, want 503", code)
+	d1 := r.status(t, id)
+	if code, _ := r.native(t, d1.Key); code != http.StatusServiceUnavailable || d1.PerfGen != "" {
+		t.Fatalf("analysis not written yet: %d %q, want 503 and no PerfGen", code, d1.PerfGen)
+	}
+	p := r.publish(t, id, 500)
+	d2 := r.status(t, id)
+	if d2.Key != d1.Key || d2.PerfGen == "" {
+		t.Fatalf("analysis written between two reports: key %q -> %q, PerfGen %q", d1.Key, d2.Key, d2.PerfGen)
+	}
+	want, _ := encodeShadowAnalysis(p)
+	if code, got := r.native(t, d1.Key); code != 200 || !bytes.Equal(got, want) {
+		t.Fatalf("the first report's key: %d", code)
 	}
 }
