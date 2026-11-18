@@ -10787,23 +10787,58 @@ for (const c of [8274, 8109, 0, 16383]) assert.equal(scCentreLit(true, 'BeatOrBa
 assert.equal(scCentreLit(true, 'BeatOrBarSync', true, -1), false, 'no soft value: stock');
 """)
 
-    def test_centre_led_outputs_are_complementary_and_read_only(self):
+    def test_centre_led_is_one_stock_output_and_the_setting_is_event_driven(self):
         text = self.STOCK_CENTRE_LED
         for old, new in self._slider_edits():
             if old in text:
                 text = text.replace(old, new, 1)
-        # stock output: only when our zone is not lit; ours: only when it is. Exactly one sends.
-        self.assertIn('objectName: "Speed Slider Centre LED Deck%1".arg(deckConfig.name)\n'
-                      '            enabled: deckConfig.inDJMode && !module.scCentreZoneLit\n', text)
-        self.assertIn('enabled: deckConfig.inDJMode && module.scCentreZoneLit\n', text)
-        self.assertEqual(text.count("midiIndex: module.centreLedNote"), 2)
-        self.assertEqual(text.count('path: deckConfig.activeDeckPath + "SpeedNeutral"'), 1)  # stock path kept
+        # one writer on the note: the stock output, stock path and `enabled`; only its minimum follows the zone
+        self.assertEqual(text.count("midiIndex: module.centreLedNote"), 1)
+        self.assertEqual(text.count("ValueOutputAssignment {"), 1)
+        self.assertIn('            enabled: deckConfig.inDJMode\n', text)
+        self.assertIn('path: deckConfig.activeDeckPath + "SpeedNeutral"\n            minimum: module.scCentreZoneLit ? maximum : 0\n', text)
         slider = "\n".join(new for _, new in self._slider_edits())
         self.assertNotRegex(slider, r"scP(Sync|Speed|Loaded)\.translator\.(value|string|state|softValue)\s*=[^=]")  # never written
-        gcfg = self._slider_edits("ControlSurfaceModules/ControlSurfaceModules/GlobalAssignmentConfig.qml")
-        gtext = "\n".join(new for _, new in gcfg)
-        self.assertIn("property bool scRestoreBpmOnUnsync: false", gtext)  # off until the web server says on
-        self.assertIn("scGlobalConfig.scRestoreBpmOnUnsync = !!j.restoreBpmOnUnsync", gtext)
+        # The setting reaches the controller engine through /GUI/Scripted, not the 10 s HTTP poll.
+        gtext = "\n".join(new for _, new in self._slider_edits("ControlSurfaceModules/ControlSurfaceModules/GlobalAssignmentConfig.qml"))
+        self.assertIn('property var pRestoreBpm: Planck.getProperty("/GUI/Scripted/EngineXRestoreBpm")', gtext)
+        self.assertIn("readonly property bool scRestoreBpmOnUnsync: !!(pRestoreBpm && pRestoreBpm.translator && pRestoreBpm.translator.state)", gtext)
+        self.assertIn('scGlobalConfig.pRestoreBpm = Planck.getProperty("/GUI/Scripted/EngineXRestoreBpm")', gtext)  # re-acquired if Engine's GUI starts later
+        self.assertNotIn("restoreBpmOnUnsync", gtext)  # no poll field
+        main = bp.SERVICES_MAIN
+        self.assertIn('Planck.createProperty("EngineXRestoreBpm", false, 1)', main)
+        self.assertIn("onScRestoreBpmOnUnsyncChanged: scSyncRestoreBpm()", main)
+        self.assertIn("p.translator.state = scRestoreBpmOnUnsync", self._block(main, "function scSyncRestoreBpm(")[0])
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required for the LED logic")
+    def test_centre_led_value_follows_a_setting_flip_immediately(self):
+        # GUI writes /GUI/Scripted/EngineXRestoreBpm; the controller's binding and the stock output's
+        # value ((maximum - minimum) * SpeedNeutral + minimum, ValueOutputAssignment.send) follow at once.
+        main = bp.SERVICES_MAIN
+        sync_fn = self._block(main, "function scSyncRestoreBpm(")[0]
+        slider = "\n".join(new for _, new in self._slider_edits())
+        lit = self._block(slider, "function scCentreLit(")[0]
+        self.run_node(lit + "\n" + sync_fn + r"""
+const scripted = {translator: {state: false}};
+const Planck = {getProperty: (p) => p === "/GUI/Scripted/EngineXRestoreBpm" ? scripted : null};
+var scRestoreBpmProp = scripted, scRestoreBpmSynced = false;
+const gcfgOn = () => !!(scripted && scripted.translator && scripted.translator.state);  // GlobalAssignmentConfig binding
+const sent = (neutral, sync, soft) => {                                                  // what the one output sends
+  const minimum = scCentreLit(gcfgOn(), sync, true, soft) ? 127 : 0;
+  return (127 - minimum) * neutral + minimum;
+};
+const centre = 8192 / 16383;
+scRestoreBpmOnUnsync = false; scSyncRestoreBpm();
+assert.equal(sent(0, 'BeatOrBarSync', centre), 0, 'Off: stock (SpeedNeutral 0)');
+assert.equal(sent(1, 'Off', centre), 127, 'Off: stock (SpeedNeutral 1)');
+scRestoreBpmOnUnsync = true; scSyncRestoreBpm();
+assert.equal(scripted.translator.state, true);
+assert.equal(sent(0, 'BeatOrBarSync', centre), 127, 'On + synced + in zone: lit with the next send');
+assert.equal(sent(0, 'BeatOrBarSync', 8274 / 16383), 0, 'out of zone: stock');
+assert.equal(sent(0, 'Off', centre), 0, 'not synced: stock');
+scRestoreBpmOnUnsync = false; scSyncRestoreBpm();
+assert.equal(sent(0, 'BeatOrBarSync', centre), 0, 'flipped Off: stock again');
+""")
 
     def test_web_console_copy_names_the_centre_condition_in_four_languages(self):
         # The deck row keeps its short name (maintainer: no longer names on the deck); the web console
@@ -10863,8 +10898,12 @@ assert.deepEqual(writes, ['2:0.5']); assert.equal(armed, 0);
     def test_setting_is_wired_off_by_default_and_translated(self):
         main = bp.SERVICES_MAIN
         self.assertIn("property bool scRestoreBpmOnUnsync: false", main)
-        self.assertIn('key === "restore_bpm_on_unsync") root.scRestoreBpmOnUnsync = val === "1" || val === "true"', main)
-        self.assertIn("root.scRestoreBpmOnUnsync = false\n", main)  # reset before the file is parsed
+        # absent key: Off. Parsed into a local and assigned once, so the scripted property the controller
+        # reads never blinks Off/On while the file is re-read.
+        self.assertIn("let restoreBpm = false", main)
+        self.assertIn('key === "restore_bpm_on_unsync") restoreBpm = val === "1" || val === "true"', main)
+        self.assertIn("root.scRestoreBpmOnUnsync = restoreBpm\n", main)
+        self.assertNotIn("root.scRestoreBpmOnUnsync = false\n", main)
         self.assertIn("v.restoreBpmOnUnsync !== undefined", main)
         self.assertIn('text: "Restore BPM on Sync Off"', bp.PLAYBACK_ENTRIES)
         self.assertIn('root.scCall("restoreBpmOnUnsync=" + (root.scRestoreBpmOnUnsync ? 0 : 1))', bp.PLAYBACK_ENTRIES)
