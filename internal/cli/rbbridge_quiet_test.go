@@ -35,9 +35,6 @@ func TestIssue301WaitsThenRemountsAutomatically(t *testing.T) {
 			if scenario == "serve_in_progress" || scenario == "unconfirmed_serve" {
 				f.engine("9", track, "0100000")
 				noteServed(f.mount)
-				if scenario == "unconfirmed_serve" {
-					f.engine("9", "", "")
-				}
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			done := make(chan error, 1)
@@ -46,7 +43,7 @@ func TestIssue301WaitsThenRemountsAutomatically(t *testing.T) {
 			// An active read stays blocked longer than one quiet window. Others must
 			// still wait before their initial quiet window expires.
 			delay := serveQuiet / 2
-			if scenario == "serve_in_progress" || scenario == "peer_holds" {
+			if scenario == "serve_in_progress" || scenario == "unconfirmed_serve" || scenario == "peer_holds" {
 				delay = 2 * serveQuiet
 			}
 			time.Sleep(delay)
@@ -60,7 +57,7 @@ func TestIssue301WaitsThenRemountsAutomatically(t *testing.T) {
 			}
 			holds.Store(false)
 			stopped := time.Now()
-			if scenario == "serve_in_progress" {
+			if scenario == "serve_in_progress" || scenario == "unconfirmed_serve" {
 				f.engine("9", "", "")
 			}
 			select {
@@ -72,12 +69,38 @@ func TestIssue301WaitsThenRemountsAutomatically(t *testing.T) {
 			case <-ctx.Done():
 				t.Fatal("did not remount automatically after release/quiet")
 			}
-			if scenario == "serve_in_progress" && time.Since(stopped) < serveQuiet-remountWait {
+			if (scenario == "serve_in_progress" || scenario == "unconfirmed_serve") && time.Since(stopped) < serveQuiet-remountWait {
 				t.Fatalf("serve close did not restart quiet: %s", time.Since(stopped))
 			}
 			if got := strings.Join(f.seen(), " "); got != "remove: add:" {
 				t.Fatalf("automatic publication: %q", got)
 			}
 		})
+	}
+}
+
+// History accumulated during import counts: an already-quiet stick needs no new window.
+func TestIssue301UsesObservedQuietHistory(t *testing.T) {
+	if serveQuiet != 30*time.Second {
+		t.Fatalf("documented quiet window: %s", serveQuiet)
+	}
+	f := newFakeStick(t)
+	f.engine("5", "", "")
+	serveQuiet = 2 * time.Second
+	mark := servedMark(f.mount)
+	if err := os.WriteFile(mark, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-time.Minute)
+	if err := os.Chtimes(mark, old, old); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := remount(ctx, f.mount, newUSBLoadingReporter(filepath.Join(t.TempDir(), "status"), "usb")); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(f.seen(), " "); got != "remove: add:" {
+		t.Fatalf("ignored already-quiet history: %q", got)
 	}
 }

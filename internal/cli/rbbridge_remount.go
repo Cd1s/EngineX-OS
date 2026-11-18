@@ -46,7 +46,7 @@ var (
 	removeLimit   = 15 * time.Second
 	closeLimit    = 10 * time.Second
 	remountLimit  = 60 * time.Second // a mount runs fsck and the publish
-	serveQuiet    = 30 * time.Second // 60 observations at the existing 500 ms serve-watch interval
+	serveQuiet    = 30 * time.Second // 60 nominal 500 ms watch intervals; short reads may escape sampling
 	deckWait      = 5 * time.Second  // how often a remount a deck blocks looks again
 	// ownDecks are the tracks this player's decks have loaded, Engine's TrackNetworkPath
 	// ("net://<uuid>/<volume>/<path>"); ok is false when stream-sync does not answer.

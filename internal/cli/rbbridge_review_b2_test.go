@@ -41,6 +41,18 @@ func TestIssue301RemountKeepsALibraryAPeerLoadedFrom(t *testing.T) {
 	if got := strings.Join(f.seen(), " "); got != "remove: add:" {
 		t.Fatalf("quiet after serving: uevent writes %q", got)
 	}
+	// A confirmed own-deck read must not be recorded as a new outgoing serve.
+	old := time.Now().Add(-time.Minute)
+	if err := os.Chtimes(servedMark(f.mount), old, old); err != nil {
+		t.Fatal(err)
+	}
+	ownDecks = func() ([]string, bool) { return []string{"net://{1}/REKORDBOX/Contents/song.mp3"}, true }
+	f.engine("9", filepath.Join(f.mount, "Contents/song.mp3"), "0100000")
+	noteServed(f.mount)
+	if st, err := os.Stat(servedMark(f.mount)); err != nil || !st.ModTime().Equal(old) {
+		t.Fatalf("own-deck read restarted peer quiet: %v %v", st, err)
+	}
+	f.engine("9", "", "")
 }
 
 // Review B2: a failed background import keeps its error for the browser; the deferred cleanup

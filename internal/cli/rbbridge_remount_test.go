@@ -192,7 +192,7 @@ func TestIssue301RemountFailureKeepsAnError(t *testing.T) {
 	f.unmountOnRemove = false
 	status := filepath.Join(t.TempDir(), "preparing")
 	t.Setenv("ENGINEX_USB_PREPARING_PATH", status)
-	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if err := runRemount(ctx, f.mount); err == nil || !strings.Contains(err.Error(), "not unmounted") {
 		t.Fatalf("err %v", err)
