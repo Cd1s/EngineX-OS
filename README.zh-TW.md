@@ -92,8 +92,8 @@
 - **大型 rekordbox 隨身碟首次插入很快（#301）**：第一次插入時播放機直接讀出匯出裡的歌單、曲目、熱 Cue 和 Memory Cue，幾秒內即可使用，拍線和波形隨後在背景低優先順序補齊，並顯示 `正在匯入 rekordbox 曲庫…` 進度。超出掛載時限的匯入不會再被丟棄。
 - **把 Cue 和 Loop 的修改寫回 rekordbox 隨身碟（#271）**：網頁主控台 `擴充` 頁的 `寫回 Hot Cue / Loop 到 rekordbox 隨身碟` 會把播放機上的 Hot Cue、Memory Cue 和 Loop 寫進碟上的分析檔案和 `exportLibrary.db`（先在 `/.enginex-backup/` 備份一次）。
 - **每個通道的 `FILTER` 旋鈕帶 Color FX**：`設定檔 → 播放 → 先鋒風格效果 (Color FX)`（`Spiral`、`Pitch Echo`、`Slip Roll`、`Dub Echo`、`Space`）現在像先鋒混音台一樣掛在通道自己的濾波旋鈕上，旋鈕中位與原廠完全一致；`Off` 是原廠 Sweep FX。適用於 PRIME 4、PRIME 2、PRIME GO、Mixstream Pro 以及二代的 SC LIVE 2 / 4、PRIME 4+、PRIME GO+、Mixstream Pro+ / Pro Go（同時修復了部分 PRIME GO 使用者聽到的持續迴音）。
-- **Mixstream（#286）**：`設定 → 裝置` 新增 `Pitch Bend 按鍵改為 Beat Jump`（`-` / `+` 前後跳，`Shift` 仍調速度範圍）和 `FX 槽位 1–4`（四個實體 FX 鍵各自選 Echo、Flanger、Delay 或 Phaser）；打擊墊列只保留打擊墊和一個 `△` Sweep FX 按鈕，`Stems EQ` 在 `設定 → 播放` 裡有獨立一列。
-- **PRIME 4 的 `Jet Flanger (PX)` 與更長的 `Reverb` 尾音（#195、#207）**、`顯示 → BPM 小數位數` 設為 `2` 時的**整數 BPM 推桿平台**，以及**依拍線跳變的熱點倒數**（#151）。
+- **Mixstream（#286）**：`設定 → 裝置` 新增 `Pitch Bend 按鍵改為 Beat Jump`（`-` / `+` 前後跳，`Shift` 仍調速度範圍）和 `FX 槽位 1–4`（四個實體 FX 鍵各自選 Echo、Flanger、Delay 或 Phaser）；打擊墊列只保留打擊墊和一個 `△` Sweep FX 按鈕，`Stems EQ` 在 `設定檔 → 播放` 裡有獨立一列。
+- **PRIME 4 的 `Jet Flanger (PX)` 與更長的 `Reverb` 尾音（#195、#207）**、`設定檔 → 顯示 → BPM 小數位數` 設為 `2` 時的**整數 BPM 推桿平台**，以及**依拍線跳變的熱點倒數**（#151）。
 - **影子軌**：來源碟微調時，另一台播放機的影子軌幾幀內就跟上，不再略微超前，循環裡也不會衝過。
 - **串流 Stems**：匯入的檔案依「藝人 - 標題」命名並寫入標籤，點的那一列顯示原廠的逐首分軌進度，下載不下來的歌會說明，「沒有可用的來源磁碟」彈窗不再出現（播放機為此保留自己的私有儲存碟）；帶 RTX 50 系顯示卡的電腦上 Stems 也能用。
 - **遠端存取與 QR Code**：`設定 → 裝置 → 遠端存取` 透過 Cloudflare Quick Tunnel 開啟網頁主控台；「關於 / 更新」裡有 `掃碼開啟主控台` QR Code（優先公開位址，其次通道，再次區域網路；QR Code 裡不含存取碼）。網頁主控台換了新設計。
