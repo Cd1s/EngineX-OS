@@ -120,12 +120,8 @@
 - **其他修復**：實機控制器上 `Shift + View` 重新可用；Pro DJ Link 匯出會跟隨插入或拔出的隨身碟；寫回 Cue 能看到尚未檢查點的修改並回退到 `export.pdb`；藍牙喇叭的 SBC 位元池使用標準高音質值；帶多餘內容的設定請求會在改動任何東西之前被拒絕；選擇隨身碟不會再跳出「複製設定」錯誤；Mixstream 的層切換與原廠只差幾毫秒（#222）；Apple Music 曲庫瀏覽在助手登入或登出後恢復；西班牙語等翻譯標籤不再溢出。
 - **所有播放機都會關閉 Wi-Fi 省電（#309）**：沒有原廠 `iw` 工具的播放機（例如 SC LIVE 4）以前會悄悄保持 Wi-Fi 省電；現在播放機開機時自己關掉它（有原廠 `iw` 的機型仍優先使用原廠工具）。
 - **Apple Music、中繼和 rekordbox 的複核修復**：在播放機上登出 Apple Music 後，下載助手仍在登入時也不會自動重新登入；中繼把播放機指向另一個助手位址時，不再把舊權杖交給新主機；中繼主控台按儲存不再丟掉自動偵測到的權杖；持有手機登入 QR Code 的人不能再設定助手並推送到中繼；兩台電腦執行 rekordbox 時，關了 `LINK` 的那台不再遮住另一台的曲庫；只屬於 Mixstream 的 `Stems EQ` 列只在 Mixstream 機型上建立。
-<!-- PENDING-REVIEW #304: drop this bullet if agent/5305-issue-304 is not merged -->
 - **登入 Engine DJ 帳號不再讓串流掉線（#304）**：已登入 Engine DJ 帳號時，載入串流曲目不再跳出「Tidal Disconnected」並讓串流來源登出。
-<!-- /PENDING-REVIEW #304 -->
-<!-- PENDING-REVIEW #305: drop this bullet if agent/5305-issue-305 is not merged -->
 - **播放機頂列顯示你選的串流服務（#305）**：從 Deezer、Spotify、Apple Music、網易雲、SoundCloud、Beatport 或 rekordbox 播放的曲目，頂列顯示該服務的圖示，`Track Info → Source` 顯示它的名字，不再是 TIDAL。它跟隨目前選中的服務，不是每首曲目各自記錄的事實。
-<!-- /PENDING-REVIEW #305 -->
 
 ### 已知問題
 - 許多帳號（包括較早的 Premium 帳號）播放 Spotify 會失敗，提示 “audio key refused”。Spotify 更改了伺服器，所有基於 librespot 的用戶端都無法取得音訊金鑰（librespot-org/librespot#1649，2026-11-07 已鎖定，目前沒有已知的修復）。播放機上沒有任何辦法能修復它：請改用 TIDAL、Beatport、SoundCloud 或 Deezer。來源選單裡仍保留 Spotify 入口。

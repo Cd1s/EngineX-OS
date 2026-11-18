@@ -311,16 +311,12 @@
           L("**Apple Music、中继和 rekordbox 的复核修复**：在碟机上退出 Apple Music 后，下载助手仍在登录时也不会自动重新登录；中继把碟机指向另一个助手地址时，不再把旧令牌交给新主机；中继控制台点保存不再丢掉自动探测到的令牌；持有手机登录二维码的人不能再设置助手并推送到中继；两台电脑运行 rekordbox 时，关了 `LINK` 的那台不再遮住另一台的曲库；只属于 Mixstream 的 `Stems EQ` 行只在 Mixstream 机型上创建。",
             "**Apple Music、中繼和 rekordbox 的複核修復**：在播放機上登出 Apple Music 後，下載助手仍在登入時也不會自動重新登入；中繼把播放機指向另一個助手位址時，不再把舊權杖交給新主機；中繼主控台按儲存不再丟掉自動偵測到的權杖；持有手機登入 QR Code 的人不能再設定助手並推送到中繼；兩台電腦執行 rekordbox 時，關了 `LINK` 的那台不再遮住另一台的曲庫；只屬於 Mixstream 的 `Stems EQ` 列只在 Mixstream 機型上建立。",
             "**Review fixes for Apple Music, the relay and rekordbox**: signing out of Apple Music on the deck stays signed out while the download helper is still signed in; a relay that points a deck to another helper address no longer hands the old token to the new host; the relay console keeps the auto-detected token when you press Save; holding a phone-login QR can no longer set the helper and push it to the relay; with two computers running rekordbox, one with `LINK` off no longer hides the library of the other; the Mixstream-only `Stems EQ` row is built only on Mixstream units."),
-          /* PENDING-REVIEW #304: drop this entry if agent/5305-issue-304 is not merged */
           L("**登录 Engine DJ 账号不再让流媒体掉线（#304）**：已登录 Engine DJ 账号时，载入流媒体曲目不再弹出“Tidal Disconnected”并让流媒体来源退出登录。",
             "**登入 Engine DJ 帳號不再讓串流掉線（#304）**：已登入 Engine DJ 帳號時，載入串流曲目不再跳出「Tidal Disconnected」並讓串流來源登出。",
             "**Engine DJ profile no longer logs streaming out (#304)**: being signed in to your Engine DJ profile no longer ends in \"Tidal Disconnected\" and a logged-out streaming source when you load a streaming track."),
-          /* /PENDING-REVIEW #304 */
-          /* PENDING-REVIEW #305: drop this entry if agent/5305-issue-305 is not merged */
           L("**碟机顶栏显示你选的流媒体服务（#305）**：从 Deezer、Spotify、Apple Music、网易云、SoundCloud、Beatport 或 rekordbox 播放的曲目，顶栏显示该服务的图标，`Track Info → Source` 显示它的名字，不再是 TIDAL。它跟随当前选中的服务，不是每首曲目各自记录的事实。",
             "**播放機頂列顯示你選的串流服務（#305）**：從 Deezer、Spotify、Apple Music、網易雲、SoundCloud、Beatport 或 rekordbox 播放的曲目，頂列顯示該服務的圖示，`Track Info → Source` 顯示它的名字，不再是 TIDAL。它跟隨目前選中的服務，不是每首曲目各自記錄的事實。",
             "**The deck header shows the streaming service you chose (#305)**: tracks played from Deezer, Spotify, Apple Music, NetEase, SoundCloud, Beatport or rekordbox show that service's icon, and `Track Info → Source` its name, instead of TIDAL's. It follows the service selected now, not a fact stored per track."),
-          /* /PENDING-REVIEW #305 */
         ] },
         { k: "h", id: "known-5305",
           x: L("<span id=\"known-5305\"></span><span id=\"start-known-5305\"></span>5.3.0.5 已知问题",

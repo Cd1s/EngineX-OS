@@ -44,12 +44,8 @@ Custom system rebuilt on the official Engine OS 5.3.0+ base for all 16 Denon DJ,
 - Internal names now all say EngineX (#234): the old compatibility API alias, data link, sockets and downgrade restore are retired; upgrades from 5.3.0.4 and earlier migrate once and keep your data.
 - **Wi-Fi power saving is off on every deck (#309)**: decks without the stock `iw` tool, such as the SC LIVE 4, silently kept Wi-Fi power saving on; the deck now switches it off itself at start-up (stock `iw` is still used where it exists).
 - **Review fixes for Apple Music, the relay and rekordbox**: signing out of Apple Music on the deck stays signed out while the download helper is still signed in; a relay that points a deck to another helper address no longer hands the old token to the new host; the relay console keeps the auto-detected token when you press Save; holding a phone-login QR can no longer set the helper and push it to the relay; with two computers running rekordbox, one with `LINK` off no longer hides the library of the other; the Mixstream-only `Stems EQ` row is built only on Mixstream units.
-<!-- PENDING-REVIEW #304: drop this line if agent/5305-issue-304 is not merged -->
 - **Engine DJ profile no longer logs streaming out (#304)**: being signed in to your Engine DJ profile no longer ends in "Tidal Disconnected" and a logged-out streaming source when you load a streaming track.
-<!-- /PENDING-REVIEW #304 -->
-<!-- PENDING-REVIEW #305: drop this line if agent/5305-issue-305 is not merged -->
 - **The deck header shows the streaming service you chose (#305)**: tracks played from Deezer, Spotify, Apple Music, NetEase, SoundCloud, Beatport or rekordbox show that service's icon, and `Track Info → Source` its name, instead of TIDAL's. It follows the service selected now, not a fact stored per track.
-<!-- /PENDING-REVIEW #305 -->
 
 ### Changed
 

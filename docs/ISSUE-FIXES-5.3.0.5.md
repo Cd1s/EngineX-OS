@@ -148,21 +148,19 @@
 | Issue / 复核（日期） | 模块 | 原因与修法 | 检验、分支与提交、仍需实机 |
 | --- | --- | --- | --- |
 | **#301 自动发布**（11-18，维护者否决了“要重新插入”） | `internal/cli/`<br>`tools/ui-mod/` | **原因**：综合复核 B2 的做法把一次观察到的对端传输永久当作否决，沉默的 Engine Link 对端也要求重新插入；维护者明确不接受。<br>**修法**：标记只记录观察开始时间和最近一次未确认的外发音频读取，不再是永久否决；沉默的原厂 / CDJ 对端不再永远阻止；30 秒安静期（相当于 60 个观察周期）；等待状态在四种语言里显示；重挂助手交接后刷新状态，旧导入任务不会再把 `publishing` 盖回 `waiting`；挂载和提供两个观察线程在取消时先汇合再返回。 | 检验：`TestIssue301WaitsThenRemountsAutomatically`（4 个子用例在基线全部失败）、`internal/cli` 带 `-race`、`UsbPreparingFeedbackTest` 4 项、bridge / cli / enginedb / rekordbox / webui 整套 `-race`。分支 `agent/5305-cr-b2-fixes` @ `fe9592a0`（独立生产复核通过）。**实机待验**：大库完成后不重新插入就换成转换好的曲库；播放中的碟机不被打断。 |
-| **#309**（11-18）<br>SC LIVE 4 上 Wi-Fi 省电没关 | `pkg/`（纯 Go 的 nl80211）<br>`rootfs-overlay/`（debloat）<br>`internal/cli/`（stream-sync） | **原因**：debloat 只在有 `iw` 时才运行 `iw dev wlan0 set power_save off`；没有原厂 `iw` 的机型（包括 SC LIVE 4）这一步被悄悄跳过。对 25 个官方镜像（11 种不同的 rootfs）的审计：只有 4.3.4 带 `iw`。<br>**修法**：保留纯 Go 的 nl80211 读写省电状态（校验对齐、序号、协议族、内核发送方与 ACK / errno，套接字 3 秒超时）和显式的 suite 小程序，开机时应用；原厂 `iw` 存在时仍优先用原厂（3 秒超时），缺失才回退；stream-sync 同样先原厂后回退，等 wlan0 起来后应用一次。丢弃了覆盖整个 `iw` 的包装脚本和周期性重应用。 | 检验：独立复核（Sonnet）v2 通过；纯 Go netlink、stock-first 运行时测试、Batam 上的整套必需检查通过。分支 `agent/5305-issue-309` @ `0e137273`。**实机待验**：SC LIVE 4 上 `iw dev wlan0 get power_save` 为 off。 |
+| **#309**（11-18）<br>SC LIVE 4 上 Wi-Fi 省电没关 | `pkg/`（纯 Go 的 nl80211）<br>`rootfs-overlay/`（debloat）<br>`internal/cli/`（stream-sync） | **原因**：debloat 只在有 `iw` 时才运行 `iw dev wlan0 set power_save off`；没有原厂 `iw` 的机型（包括 SC LIVE 4）这一步被悄悄跳过。对 25 个官方镜像（11 种不同的 rootfs）的审计：只有 4.3.4 带 `iw`。<br>**修法**：保留纯 Go 的 nl80211 读写省电状态（校验对齐、序号、协议族、内核发送方与 ACK / errno，套接字 3 秒超时）和显式的 suite 小程序，开机时应用；原厂 `iw` 存在时仍优先用原厂（3 秒超时），缺失才回退；stream-sync 同样先原厂后回退，等 wlan0 起来后应用一次。丢弃了覆盖整个 `iw` 的包装脚本和周期性重应用。 | 检验：独立复核（Sonnet）v2 通过；纯 Go netlink、stock-first 运行时测试、Batam 上的整套必需检查通过。分支 `agent/5305-issue-309` @ `0e137273`，候选 `1fc18b2c`；开机顺序修正（Wi-Fi 回退排在运行时准备之后，`enginex-debloat.service`）候选 `375e412f`。**实机待验**：SC LIVE 4 上 `iw dev wlan0 get power_save` 为 off。 |
 | **综合复核 B1 的 Apple Music 与中继修复**（11-17 至 11-18） | `pkg/providers/`<br>`pkg/webui/`<br>`cmd/enginex-relay/` | **F1**：在碟机上退出 Apple Music 后，下载助手仍在登录，下一次状态轮询又把凭据同步回来 → 记住“已退出”，直到在碟机上显式登录助手。**F2**：中继拉取把碟机的助手地址换成另一个，却保留旧令牌，旧令牌发给了新主机 → 地址不同且没带令牌时清除本地令牌。**F3**：持有手机登录二维码的人可在碟机没配置助手时设置助手并推送到中继 → 手机设置只在碟机本地，且“是否已配置”与写入在同一把锁里。**F4**：中继控制台点保存会丢掉自动探测到的令牌 → 不再用探测值预填，保存后仍自动。**F6**：自动探测的地址范围 `10/8`、`172.16/12`、`192.168/16`、`100.64/10`，其余拒绝。 | 复核记录：B1 第二轮 F1–F4、F6 全部关闭（8 个并行的 `setup` 请求只有 1 个被接受）。含在候选 `c7ca61e0`。仍有两条低级别备注（N1、N2）见复核报告。 |
 | **综合复核 B1/F5：两台 rekordbox 电脑**（11-18） | `pkg/webui/rekordbox_source.go` | **原因**：第一台在广播但没开 `LINK` 的电脑让 `rekordboxHost` 直接返回空，遮住后面真正提供曲库的电脑；所有 IP 共用一个确认槽。<br>**修法**：确认与查询状态按 IP 记在同一把锁下，选择时跳过未就绪的电脑；沿用“第一台就绪的曲库”，不加选择器。 | 检验：两个真实 TCP 测试服务在两个回环地址上，对调播放器编号的两个用例；在基线上 `off_first` 失败（`ready computer hidden`）。分支 `agent/5305-rbx-two-hosts` @ `21d44fb6`，含在候选 `d9ec58c6`。 |
 | **综合复核 C：Mixstream 的 `Stems EQ` 行**（11-18） | `tools/ui-mod/build_packs.py` | 只属于 Mixstream 的行不再在没有软件混音器的播放机上创建绑定（见检查表行 317）。 | `MixstreamPadsLayoutTest`；含在候选 `41061299`。 |
 
-### 1A-8 待复核（`PENDING-REVIEW`，没有合入候选；发布前决定是否保留）
+### 1A-8 已合入候选（#304 `c63edf0f`、#305 `73091d1a`，候选 `375e412f`）
 
-<!-- PENDING-REVIEW #304 and #305: drop this whole section if the branches are not merged -->
 
 | Issue（日期） | 模块 | 原因与修法 | 检验、分支与提交、仍需实机 |
 | --- | --- | --- | --- |
 | **#304**（11-18）<br>已登录 Engine DJ 账号时载入流媒体曲目出现“Tidal Disconnected” | `tools/ui-mod/engine_ui_hook.c` | **原因**：原厂流媒体控制器独立于我们的 TIDAL 网关接收账号凭据更新；凭据被清空时会把我们本地提供的承载账号当成云端管理的 TIDAL 来断开。#159 的补丁只强制了已连接 / 未连接的取值，拦不住这条独立的回调。Gen-1 与 SC LIVE 4 的原厂代码路径相同。<br>**修法**：钩子（沿用按 BuildID 选择的补丁表）只替换 TIDAL 的“个人资料单点登录能力”槽，对本地承载账号返回 false，真正的 TIDAL（作用域 `tidal`）仍返回原厂的 true；不改网关路由、合成令牌、已存的真实 TIDAL 凭据、个人资料会话和登录界面。 | 检验：新的原生 ELF 回归在 Gen-1、SC LIVE 4、AZ04 上通过；对旧候选钩子失败（退出码 134）；右碟用修好的钩子做凭据更新回调：`profile=true carrier=true`（旧钩子是 `carrier=false`）；检查表行 318。分支 `agent/5305-issue-304` @ `0ca2d877`（`f174c22c`）。**实机待验**：原始的“载入流媒体曲目”复现路径没有在真机上完整重放。 |
 | **#305**（11-18）<br>碟机顶栏对所有服务都显示 TIDAL 图标 | `tools/ui-mod/build_packs.py` | **原因**：Engine 对所有服务的曲目都报 `Track/Source = TIDAL`（它们都走 TIDAL 槽），顶栏画的就是 TIDAL 图标，`Track Info` 的 `Source` 行也写 TIDAL；Engine 没有告诉界面真正的提供方。<br>**修法**：界面包里按当前选中的服务显示该服务自己的图标和名字（Deezer、Spotify、Apple Music、网易云、SoundCloud、Beatport、rekordbox）；真正的 TIDAL、其他来源和本地曲目不变；不做网络请求，不碰音频路径。**局限**：跟随“当前选中的服务”，不是每首曲目各自的事实。 | 检验：界面包测试；有截图。分支 `agent/5305-issue-305` @ `bf3e5b2f`（只改界面包，仅 5.3.0）。**实机待验**。 |
 
-<!-- /PENDING-REVIEW #304 and #305 -->
 
 ## 1B. 没有合入 5.3.0.5 的工作（不得写成已有功能）
 

@@ -120,12 +120,8 @@
 - **其他修复**：真机控制器上 `Shift + View` 重新可用；Pro DJ Link 导出会跟随插入或拔出的 U 盘；写回 Cue 能看到尚未检查点的修改并回退到 `export.pdb`；蓝牙音箱的 SBC 码率池使用标准高音质值；带多余内容的设置请求会在改动任何东西之前被拒绝；选择 U 盘不会再弹出“复制设置”错误；Mixstream 的层切换与原厂只差几毫秒（#222）；Apple Music 曲库浏览在助手登录或退出后恢复；西班牙语等翻译标签不再溢出。
 - **所有碟机都会关闭 Wi-Fi 省电（#309）**：没有原厂 `iw` 工具的碟机（例如 SC LIVE 4）以前会悄悄保持 Wi-Fi 省电；现在碟机开机时自己关掉它（有原厂 `iw` 的机型仍优先用原厂工具）。
 - **Apple Music、中继和 rekordbox 的复核修复**：在碟机上退出 Apple Music 后，下载助手仍在登录时也不会自动重新登录；中继把碟机指向另一个助手地址时，不再把旧令牌交给新主机；中继控制台点保存不再丢掉自动探测到的令牌；持有手机登录二维码的人不能再设置助手并推送到中继；两台电脑运行 rekordbox 时，关了 `LINK` 的那台不再遮住另一台的曲库；只属于 Mixstream 的 `Stems EQ` 行只在 Mixstream 机型上创建。
-<!-- PENDING-REVIEW #304: drop this bullet if agent/5305-issue-304 is not merged -->
 - **登录 Engine DJ 账号不再让流媒体掉线（#304）**：已登录 Engine DJ 账号时，载入流媒体曲目不再弹出“Tidal Disconnected”并让流媒体来源退出登录。
-<!-- /PENDING-REVIEW #304 -->
-<!-- PENDING-REVIEW #305: drop this bullet if agent/5305-issue-305 is not merged -->
 - **碟机顶栏显示你选的流媒体服务（#305）**：从 Deezer、Spotify、Apple Music、网易云、SoundCloud、Beatport 或 rekordbox 播放的曲目，顶栏显示该服务的图标，`Track Info → Source` 显示它的名字，不再是 TIDAL。它跟随当前选中的服务，不是每首曲目各自记录的事实。
-<!-- /PENDING-REVIEW #305 -->
 
 ### 已知问题
 - 许多账号（包括较早的 Premium 账号）播放 Spotify 会失败，提示 “audio key refused”。Spotify 更改了服务器，所有基于 librespot 的客户端都无法获得音频密钥（librespot-org/librespot#1649，2026-11-07 已锁定，目前没有已知的修复）。碟机上没有任何办法能修复它：请改用 TIDAL、Beatport、SoundCloud 或 Deezer。来源菜单里仍保留 Spotify 入口。
