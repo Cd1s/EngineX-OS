@@ -225,6 +225,8 @@ type uiSettings struct {
 	ProlinkWaveform  bool     `json:"prolinkWaveform"`
 	BroadcastEnabled bool     `json:"broadcastEnabled"`
 	UpfaderEcho      bool     `json:"upfaderEcho"`
+	// CrossfaderReverse remembers the software mixer switch across Engine restarts.
+	CrossfaderReverse bool `json:"crossfaderReverse"`
 	// PairedView (#201): a standalone player in the 4-deck layout shows Engine's own
 	// 2-deck view instead, this unit's active layer and the other player's active
 	// deck (its layer followed). Needs FourDeckWaveform: setting it turns that on,
@@ -466,6 +468,10 @@ func (s *Server) loadUI() uiSettings {
 			} else if val == "0" || strings.EqualFold(val, "false") {
 				v.UpfaderEcho = false
 			}
+		case "crossfader_reverse":
+			if b, ok := parseBoolParam(val); ok {
+				v.CrossfaderReverse = b
+			}
 		case "verbose_log":
 			v.VerboseLog = val == "1" || strings.EqualFold(val, "true")
 		case "debug_telemetry":
@@ -624,6 +630,9 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	}
 	if v.UpfaderEcho {
 		text += "upfader_echo=1\n"
+	}
+	if v.CrossfaderReverse {
+		text += "crossfader_reverse=1\n"
 	}
 	if v.AutoAnalyze {
 		text += "auto_analyze=1\n"
@@ -1103,6 +1112,15 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		v.UpfaderEcho = b
+	}
+	if q.Has("crossfaderReverse") {
+		b, ok := parseBoolParam(q.Get("crossfaderReverse"))
+		if !ok {
+			s.uiMu.Unlock()
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+		v.CrossfaderReverse = b
 	}
 	if q.Has("cueCountdown") {
 		b, ok := parseBoolParam(q.Get("cueCountdown"))

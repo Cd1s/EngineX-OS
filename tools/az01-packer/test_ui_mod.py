@@ -3271,6 +3271,35 @@ assert.equal(runs, 1, "startup gc() runs only once, not repeatedly");
 
 
 class UiModBuildTest(unittest.TestCase):
+    def test_crossfader_reverse_uses_the_stock_switch_in_all_languages(self):
+        qrc = LAB / "5.3.0/qrc"
+        if not qrc.is_dir():
+            self.skipTest("requires the stock 5.3.0 QML")
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "packs"
+            subprocess.run([sys.executable, str(BUILD_PACKS), "--qrc", str(qrc), "--out", str(out)],
+                           check=True, stdout=subprocess.DEVNULL)
+            for lang, label in zip(("en", "zh-Hans", "zh-Hant", "es"),
+                                   ("Crossfader Reverse", "反转交叉推子", "反轉交叉推桿", "Invertir crossfader")):
+                with self.subTest(lang=lang):
+                    mixer = (out / lang / "Skins/Embedded/Views/ControlCenter/Tabs/Preferences/MixerTabContent.qml").read_text()
+                    main = (out / lang / "Skins/Embedded/EmbeddedMain.qml").read_text()
+                    self.assertIn('scHasCrossfaderReverse: true && scHasMixer && !scIsAZ04', main)
+                    self.assertIn('scTr("/Engine/Mixer/CrossfaderReverse")', main)
+                    self.assertIn('scTr("/Engine/Mixer/CrossfaderPosition")', main)
+                    self.assertIn("reverse.state = on", main)
+                    self.assertIn("position.unnormalized = position.unnormalized", main)
+                    row = mixer.split("XFaderCutInLeft {}", 1)[0].rsplit("EntryBase.SwitchEntry {", 1)[1]
+                    self.assertIn('"' + label + '"', row)
+                    self.assertIn('reverse: root.scCrossfaderReverse', row)
+                    self.assertIn('position: root.scCrossfaderPosition', row)
+                    self.assertIn('const on = !reverse.state', row)
+                    self.assertIn('root.scSetCrossfaderReverse(on)', row)
+                    self.assertIn('root.scCall("crossfaderReverse="', row)
+                    self.assertNotRegex(row, r"CrossfaderCurve|onCompleted")
+                    self.assertEqual(mixer.count("XFaderCutInLeft {}"), 1)
+                    self.assertEqual(mixer.count("XFaderCutInRight {}"), 1)
+
     def test_jc11_jc11s_packs_contain_shadow_display(self):
         # Each supported console gets a separately built archive. The patcher
         # is board independent; stock 5.3.0 QML is the shared input for these

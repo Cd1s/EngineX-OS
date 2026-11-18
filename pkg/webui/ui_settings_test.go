@@ -392,6 +392,38 @@ func TestUIBroadcastSetting(t *testing.T) {
 	}
 }
 
+func TestUICrossfaderReversePersists(t *testing.T) {
+	t.Parallel()
+	cfg := Config{AccessToken: "code", UIDir: t.TempDir(), StateDir: t.TempDir()}
+	srv := httptest.NewServer(New(cfg, nil))
+	t.Cleanup(srv.Close)
+	if code, v := uiPost(t, srv.URL, ""); code != 200 || v.CrossfaderReverse {
+		t.Fatalf("default: status %d, crossfaderReverse %v", code, v.CrossfaderReverse)
+	}
+	if code, v := uiPost(t, srv.URL, "crossfaderReverse=1"); code != 200 || !v.CrossfaderReverse {
+		t.Fatalf("enable: status %d, crossfaderReverse %v", code, v.CrossfaderReverse)
+	}
+	srv.Close()
+	again := httptest.NewServer(New(cfg, nil))
+	t.Cleanup(again.Close)
+	if code, v := uiPost(t, again.URL, "waveform=rgb"); code != 200 || !v.CrossfaderReverse {
+		t.Fatalf("after restart and unrelated save: status %d, crossfaderReverse %v", code, v.CrossfaderReverse)
+	}
+	if code, _ := uiPost(t, again.URL, "crossfaderReverse=2"); code != 400 {
+		t.Fatalf("invalid value: status %d, want 400", code)
+	}
+	if code, v := uiPost(t, again.URL, "crossfaderReverse=0"); code != 200 || v.CrossfaderReverse {
+		t.Fatalf("disable: status %d, crossfaderReverse %v", code, v.CrossfaderReverse)
+	}
+	data, err := os.ReadFile(filepath.Join(cfg.UIDir, "settings.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "crossfader_reverse=") {
+		t.Fatal("default off must not be written to settings.conf")
+	}
+}
+
 func TestUIUpfaderEchoSetting(t *testing.T) {
 	dir := t.TempDir()
 	cfg := Config{AccessToken: "code", UIDir: dir, StateDir: t.TempDir()}
