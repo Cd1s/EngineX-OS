@@ -176,13 +176,13 @@ func readDBMessageMax(r io.Reader, maxBlob uint32) (dbMessage, error) {
 }
 
 type dbItem struct {
-	parent, id, kind, position uint32
-	label, secondary           string
+	parent, id, kind, position, art uint32
+	label, secondary                string
 }
 
 func (i dbItem) fields() []dbField {
 	a, b := dbString(i.label), dbString(i.secondary)
-	return []dbField{dbNumber(i.parent), dbNumber(i.id), dbNumber(uint32(len(a.data))), a, dbNumber(uint32(len(b.data))), b, dbNumber(i.kind), dbNumber(0), dbNumber(0), dbNumber(i.position), dbNumber(0), dbNumber(0)}
+	return []dbField{dbNumber(i.parent), dbNumber(i.id), dbNumber(uint32(len(a.data))), a, dbNumber(uint32(len(b.data))), b, dbNumber(i.kind), dbNumber(0), dbNumber(i.art), dbNumber(i.position), dbNumber(0), dbNumber(0)}
 }
 
 // DBServer implements the TCP 12523 port query and dbserver on the same port.

@@ -127,6 +127,11 @@ func (s *Server) rekordboxHost() *rbxHost {
 	return nil
 }
 
+func (s *Server) rekordboxAvailable(ip string) bool {
+	host := s.rekordboxHost()
+	return host != nil && host.IP == ip
+}
+
 // A computer keeps announcing even with LINK off. Only a successful library-port
 // query confirms the source; this memory is never restored from a snapshot at boot.
 type rbxPresence struct {
