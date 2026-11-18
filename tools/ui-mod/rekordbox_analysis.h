@@ -2,6 +2,7 @@
 #define SC_REKORDBOX_ANALYSIS_H
 
 #include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -127,9 +128,125 @@ struct sc_rbx_row {
     int ours, imported;
 };
 
+// Engine can rewrite the Track presentation fields after the first streamed load.
+// Keep the source identity we already proved for this library row so a later
+// PerformanceData read can still refresh a newer .bin through Engine's connection.
+#define SC_RBX_TRACK_MAP_CAP 256
+struct sc_rbx_track_map {
+    long long track;
+    long long id;
+    char download[41];
+};
+static struct sc_rbx_track_map sc_rbx_track_maps[SC_RBX_TRACK_MAP_CAP];
+static unsigned sc_rbx_track_map_next;
+static int sc_rbx_track_map_loaded;
+
+static void sc_rbx_track_map_path(char path[PATH_MAX]) {
+    snprintf(path, PATH_MAX, "%s/rowmap", sc_rbx_dir);
+}
+
+static void sc_rbx_append_track_map(long long track, long long id, const char *download) {
+    char path[PATH_MAX], line[128];
+    sc_rbx_track_map_path(path);
+    int n = snprintf(line, sizeof line, "%lld %lld %s\n", track, id, download ? download : "");
+    if (n <= 0 || (size_t)n >= sizeof line) return;
+    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (fd < 0) return;
+    size_t at = 0;
+    while (at < (size_t)n) {
+        ssize_t wrote = write(fd, line + at, (size_t)n - at);
+        if (wrote <= 0) break;
+        at += (size_t)wrote;
+    }
+    close(fd);
+}
+
+static const char *sc_rbx_map_space(const char *p) {
+    while (*p == ' ' || *p == '\t') p++;
+    return p;
+}
+
+static int sc_rbx_parse_track_map(const char *line, long long *track, long long *id, char download[41]) {
+    char *end;
+    const char *p = sc_rbx_map_space(line);
+    long long parsed_track = strtoll(p, &end, 10);
+    if (end == p || parsed_track <= 0) return 0;
+    p = sc_rbx_map_space(end);
+    long long parsed_id = strtoll(p, &end, 10);
+    if (end == p || parsed_id <= 0) return 0;
+    p = sc_rbx_map_space(end);
+    download[0] = 0;
+    if (*p == 0 || *p == '\n') goto done;
+    size_t n = 0;
+    while ((p[n] >= '0' && p[n] <= '9') || (p[n] >= 'a' && p[n] <= 'f')) n++;
+    if (!n || n > 40 || ((p[n] >= '0' && p[n] <= '9') || (p[n] >= 'a' && p[n] <= 'f'))) return 0;
+    memcpy(download, p, n);
+    download[n] = 0;
+    p = sc_rbx_map_space(p + n);
+    if (*p != 0 && *p != '\n') return 0;
+done:
+    *track = parsed_track;
+    *id = parsed_id;
+    return 1;
+}
+
+static void sc_rbx_load_track_map(void) {
+    if (sc_rbx_track_map_loaded) return;
+    sc_rbx_track_map_loaded = 1;
+    char path[PATH_MAX], line[128], download[41];
+    sc_rbx_track_map_path(path);
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return;
+    FILE *file = fdopen(fd, "r");
+    if (!file) { close(fd); return; }
+    while (sc_rbx_track_map_next < SC_RBX_TRACK_MAP_CAP && fgets(line, sizeof line, file)) {
+        long long track = 0, id = 0;
+        download[0] = 0;
+        if (!sc_rbx_parse_track_map(line, &track, &id, download)) continue;
+        int duplicate = 0;
+        for (unsigned i = 0; i < sc_rbx_track_map_next; ++i)
+            if (sc_rbx_track_maps[i].track == track) { duplicate = 1; break; }
+        if (duplicate) continue;
+        struct sc_rbx_track_map *slot = &sc_rbx_track_maps[sc_rbx_track_map_next++];
+        slot->track = track;
+        slot->id = id;
+        snprintf(slot->download, sizeof slot->download, "%s", download);
+    }
+    fclose(file);
+}
+
+static void sc_rbx_remember_track(long long track, long long id, const char *download) {
+    if (track <= 0 || id <= 0) return;
+    for (unsigned i = 0; i < SC_RBX_TRACK_MAP_CAP; ++i) {
+        if (sc_rbx_track_maps[i].track == track) {
+            sc_rbx_track_maps[i].id = id;
+            snprintf(sc_rbx_track_maps[i].download, sizeof sc_rbx_track_maps[i].download, "%s", download ? download : "");
+            return;
+        }
+    }
+    if (sc_rbx_track_map_next >= SC_RBX_TRACK_MAP_CAP) return;
+    struct sc_rbx_track_map *slot = &sc_rbx_track_maps[sc_rbx_track_map_next++];
+    slot->track = track;
+    slot->id = id;
+    snprintf(slot->download, sizeof slot->download, "%s", download ? download : "");
+    sc_rbx_append_track_map(track, id, download);
+}
+
+static int sc_rbx_lookup_track(long long track, long long *id, char download[41]) {
+    if (track <= 0) return 0;
+    for (unsigned i = 0; i < SC_RBX_TRACK_MAP_CAP; ++i) {
+        if (sc_rbx_track_maps[i].track != track) continue;
+        if (id) *id = sc_rbx_track_maps[i].id;
+        if (download) snprintf(download, 41, "%s", sc_rbx_track_maps[i].download);
+        return 1;
+    }
+    return 0;
+}
+
 static int sc_rbx_row(void *arg, int n, char **value, char **name) {
     struct sc_rbx_row *row = arg;
     (void)name;
+    row->imported = n >= 4 && value[3] && !strcmp(value[3], "1");
     // Ours: a row of stream-sync's gateway (Engine's TIDAL client) that the rekordbox source
     // labelled. An Engine Link or Remote Library track has no such uri.
     if (n >= 3 && value[0] && value[1] && !strncmp(value[0], "streaming://TIDAL/Track/", 24) && !strncmp(value[1], "rekordbox [", 11)) {
@@ -137,7 +254,6 @@ static int sc_rbx_row(void *arg, int n, char **value, char **name) {
         const char *key = sc_rbx_download_key(value[2], SC_RBX_DOWNLOADS_REL);
         if (key) snprintf(row->download, sizeof row->download, "%.40s", key);
         row->ours = 1;
-        row->imported = n == 4 && value[3] && !strcmp(value[3], "1");
     }
     return 0;
 }
@@ -336,8 +452,17 @@ static const char *sc_rbx_fill_track(const struct sc_rbx_sqlite *q, void *db, lo
     if (main && !strncmp(main, sc_rbx_drives, strlen(sc_rbx_drives))) return sc_rbx_verbose ? "skipped (a drive's database)" : NULL;
     struct sc_rbx_row row = {.ours = 0};
     snprintf(query, sizeof query, "SELECT t.uri,t.label,t.path,CASE WHEN p.trackData IS NOT NULL THEN p.thirdPartySourceId END FROM Track t JOIN PerformanceData p ON p.trackId=t.id WHERE t.id=%lld AND (p.trackData IS NULL OR p.thirdPartySourceId=1)", track);
-    if (q->exec(db, query, sc_rbx_row, &row, NULL) || !row.ours) return sc_rbx_verbose ? "skipped (not a rekordbox row)" : NULL;
-    *id = sc_rbx_uri_id(row.uri);
+    if (q->exec(db, query, sc_rbx_row, &row, NULL)) return sc_rbx_verbose ? "skipped (not a rekordbox row)" : NULL;
+    if (row.ours) {
+        *id = sc_rbx_uri_id(row.uri);
+        sc_rbx_remember_track(track, *id, row.download);
+    } else if (row.imported && sc_rbx_lookup_track(track, id, row.download)) {
+        // Engine has retained our imported row but no longer exposes the original
+        // gateway URI/label in this reload snapshot. The prior proof is enough to
+        // refresh the same source generation; unknown rows remain untouched.
+    } else {
+        return sc_rbx_verbose ? "skipped (not a rekordbox row)" : NULL;
+    }
     snprintf(path, sizeof path, "%s/%lld.bin", sc_rbx_dir, *id);
     size_t size = 0;
     unsigned char *b = *id ? sc_rbx_read(path, &size) : NULL;

@@ -3532,6 +3532,7 @@ A32_ONLY static void install_rekordbox_analysis(uintptr_t base, size_t page) {
                 sc_rbx_close_db = (int (*)(void *))(uintptr_t)api[179];
                 sc_rbx_exec_readonly = sqlite_exec_original;
             }
+            sc_rbx_load_track_map();
             redirect_function(HF_GATEWAY, entry, rbx_prepare, page);
             redirect_function(HF_GATEWAY, bind, rbx_bind, page);
             fprintf(stderr, "engine-ui-hook: rekordbox analysis for streamed tracks enabled\n");
