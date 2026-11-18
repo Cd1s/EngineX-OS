@@ -65,6 +65,8 @@ static void test_masks(void) {
     assert(hf_on(HF_STEMS) && !hf_on(HF_ZOOM30));
     use_conf("sso");
     assert(!hf_on(HF_SSO) && !hf_on(HF_GATEWAY));
+    use_conf("dsp-guards");
+    assert(!hf_on(HF_DSP_GUARDS) && !hf_on(HF_HIFI_OUTPUT));
     use_conf("");
     // A commented file longer than 4 KiB: the last name still counts (it once read 4 KiB only).
     static char big[20000];

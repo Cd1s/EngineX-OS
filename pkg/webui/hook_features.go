@@ -51,7 +51,7 @@ var hookFeatures = []hookFeature{
 	{Name: "mount-hook", Group: "drives", Reboot: true, Gen2: true, About: "edisksd preload: converts rekordbox exports and repairs Engine libraries on sticks"},
 	{Name: "internal-heal", Group: "drives", About: "engine-guardian before each Engine start: the internal library's m.db without reserved page bytes (Engine 5.3.0 cannot attach other libraries otherwise)"},
 	{Name: "dsp-guards", Group: "audio", About: "21 DSP guards and the master chain: Echo Out, Pioneer FX, Hi-Fi Output, Auto-Gain, Soft Clipper, Live Stream tap"},
-	{Name: "hifi-output", Group: "audio", About: "#172: 48->96 kHz Hermite output roll-off compensation before the soft limiter on Gen-1 players (SC5000/SC6000)"},
+	{Name: "hifi-output", Group: "audio", Needs: []string{"dsp-guards"}, About: "#172: 48->96 kHz Hermite output roll-off compensation before the soft limiter on Gen-1 players (SC5000/SC6000)"},
 	{Name: "reverb-tail", Group: "audio", About: "#207: the stock Reverb (Classic) decays up to about 28 s above 82 % of its knob, all-in-ones only"},
 	{Name: "alsa-timestamp", Group: "audio", About: "ALSA time stamps GETTIMEOFDAY -> MONOTONIC_RAW"},
 	{Name: "thread-tuning", Group: "audio", About: "Engine background threads and OfflineAnalyzer at lower priority, off CPU 1/2"},
