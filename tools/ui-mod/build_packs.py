@@ -4737,7 +4737,9 @@ SERVICES_MAIN = """
 		const load = root.scLoadSeq[deck] = (root.scLoadSeq[deck] || 0) + 1
 		const m = /^streaming:\\/\\/TIDAL\\/Track\\/(\\d+)$/.exec(uri)
 		const slot = root.scScope || "tidal" // what the slot's backend is as this track loads
-		const real = slot === "tidal" && root.scTidalLoggedIn // real TIDAL's tracks: a gateway track of the same number is not this one
+		// Real TIDAL's tracks: a gateway track of the same number is not this one. The scope must really be tidal: with no scope selected
+		// (TIDAL disabled in Sources keeps the pairing) the gateway can still be what plays, and "tidal" above is only the mark's default.
+		const real = root.scScope === "tidal" && root.scTidalLoggedIn
 		root.scNoteService(deck, m ? slot : "") // the last track's service must not outlive it
 		if (!m) return
 		const x = new XMLHttpRequest()

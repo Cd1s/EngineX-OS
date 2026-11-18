@@ -8406,6 +8406,23 @@ scScope = 'spotify'; scTidalLoggedIn = true;
 r = load(2, track(4)); r.answer(200, {'x-enginex-provider': 'spotify'}, {path: '/data/two.flac'}); assert.equal(loaded.length, 2); assert.equal(scOwnService(2), 'spotify');
 """)
 
+    @unittest.skipUnless(shutil.which("node"), "Node is required to run the root helpers")
+    def test_an_empty_scope_is_not_real_tidal_even_with_an_account_paired(self):
+        self.run_node(self.PRELUDE + self.functions("scIcon", "scNoteService", "scServiceOf", "scOwnService", "scSlotIcon", "scBrand", "scSwapStemmed") + self.LOADING + r"""
+// TIDAL disabled in Sources clears the scope but keeps the pairing: the gateway can still be what plays, so its valid answer counts and
+// its stemmed copy may swap in.
+scScope = ''; scTidalLoggedIn = true;
+let r = load(1, track(7)); assert.equal(scOwnService(1), 'tidal'); // nothing known yet: the mark's default
+r.answer(200, {'x-enginex-provider': 'spotify'}, {path: '/data/sp.flac'});
+assert.equal(scOwnService(1), 'spotify'); assert.equal(scSlotIcon('TIDAL', 1), 'file:///data/enginex/ui/icons/spotify.png'); assert.equal(scBrand('TIDAL', 1), 'Spotify');
+assert.deepEqual(loaded, [[1, 'file:///data/sp.flac']]);
+// No answer naming a service: the default, TIDAL's mark, as before.
+r = load(2, track(8)); r.answer(404, {}); assert.equal(scSlotIcon('TIDAL', 2), '');
+// A selected tidal scope with the account paired is still real TIDAL's.
+scScope = 'tidal'; r = load(2, track(9)); r.answer(200, {'x-enginex-provider': 'spotify'}, {path: '/data/no.flac'});
+assert.equal(scOwnService(2), 'tidal'); assert.equal(loaded.length, 1);
+""")
+
     def test_the_gateway_and_the_pack_use_the_same_header(self):
         go = (REPO / "pkg/webui/stems_lists.go").read_text(encoding="utf-8")
         name = re.search(r'const providerHeader = "([^"]+)"', go).group(1)
