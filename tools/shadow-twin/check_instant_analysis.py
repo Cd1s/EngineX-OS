@@ -18,7 +18,8 @@ def row(side, filename):
         return None
     with closing(sqlite3.connect(db.as_uri() + "?mode=ro", uri=True)) as conn:
         return conn.execute(
-            "SELECT t.id,t.path,p.trackData,p.overviewWaveFormData,p.beatData,p.quickCues,p.loops "
+            "SELECT t.id,t.path,p.trackData,p.overviewWaveFormData,p.beatData,p.quickCues,p.loops, "
+            "t.isAnalyzed,t.isBeatGridLocked,t.bpm,t.bpmAnalyzed "
             "FROM Track t JOIN PerformanceData p ON t.id=p.trackId WHERE t.filename=?"
             + (" AND t.isAnalyzed=1" if side == "A" else ""),
             (filename,),
@@ -34,6 +35,10 @@ def wait_for(fn):
     raise AssertionError("sandbox state did not arrive")
 
 
+def analyzer_log(side):
+    return subprocess.check_output(twin.ns_chroot_cmd(side, "cat /var/log/enginex-uimod-oa.log"), text=True)
+
+
 def main():
     assert os.environ.get("SHADOW_TWIN_WORK"), "use a fresh SHADOW_TWIN_WORK"
     assert row("A", "track-a.wav") is None and row("B", "track-a.wav") is None
@@ -43,6 +48,9 @@ def main():
     try:
         twin.ev("A", 'root.rtTr("/Client/Librarian/AddToDatabaseAndLoadToDeck1").url="file:///data/music/track-a.wav"; "requested"')
         source = wait_for(lambda: (r := row("A", "track-a.wav")) and all(r[2:5]) and r)
+        twin.ev("A", 'root.rtTr("/Engine/Deck1/Track/QuickCue1SetPosition").value=441000;'
+                'root.rtTr("/Engine/Deck1/Track/QuickCue1Name").string="Shadow test cue"; "set cue"')
+        source = wait_for(lambda: (r := row("A", "track-a.wav")) and r[5] != source[5] and r)
 
         def get(path):
             return subprocess.check_output([
@@ -54,7 +62,7 @@ def main():
         query = urlencode({"key": decks[0]["key"], "format": "native"})
         response = get("/peer/decks/1/perf?" + query)
         assert response.startswith(b"RBXA1"), (decks[0], source[:2], [len(b or b"") for b in source[2:]], response[:60])
-        print("Source analysis fields:", [len(b or b"") for b in source[2:]], flush=True)
+        print("Source analysis fields:", [len(b or b"") for b in source[2:7]], "flags:", source[7:], flush=True)
     finally:
         subprocess.run([*cmd, "up"], check=True)
 
@@ -76,21 +84,40 @@ def main():
         print("Receiver sidecars:", [p.name for p in (twin.WORK / "B/data/enginex/shadow-v3").rglob("*")], flush=True)
         raise
     assert "/shadow-v3/peer-" in target[1], target[:2]
-    assert target[2:] == source[2:], "receiving Engine did not store the source blobs"
-    def loaded():
-        state = twin.evj(
+    assert target[2:7] == source[2:7], "receiving Engine did not store the source blobs"
+    def deck_state():
+        return twin.evj(
             "B", 'JSON.stringify({loaded: root.rtTr("/Engine/Deck1/Track/SongLoaded").state,'
+            'analysed: root.rtTr("/Engine/Deck1/Track/SongAnalyzed").state,'
+            'cue: root.rtTr("/Engine/Deck1/Track/QuickCue1Name").string,'
             'bpm: root.rtTr("/Engine/Deck1/OriginalBPM").unnormalized})'
         )
-        if state["loaded"]:
-            assert abs(state["bpm"] - 128) < 0.1, state
-            return state
-        return None
 
-    wait_for(loaded)
-    assert received() == target
-    analyzer_log = twin.WORK / "B/upper/var/log/enginex-uimod-oa.log"
-    assert "track-a.wav" not in analyzer_log.read_text(), "the shadow entered the EXPF replay"
+    def ready(state):
+        return state["loaded"] and state["analysed"] and state["cue"] == "Shadow test cue" and abs(state["bpm"] - 128) < 0.1
+
+    wait_for(lambda: (state := deck_state()) and ready(state))
+    assert received()[:9] == target[:9], "analysis changed during the first load"
+    print("Receiver analysis flags:", target[7:], flush=True)
+    assert target[7:9] == source[7:9], (source[7:], target[7:])
+    sidecars = twin.WORK / "B/data/enginex/shadow-v3"
+    assert any(p.read_bytes().startswith(b"EXPF") for p in sidecars.rglob("track-a.wav.perf")), "missing EXPF fallback"
+    # The retained EXPF path delays its replay until after the loader settles.
+    # Keep reading the deck during that window to catch a reset after load.
+    deadline = time.monotonic() + 6
+    while time.monotonic() < deadline:
+        state = deck_state()
+        assert ready(state), state
+        time.sleep(0.35)
+    # Read /var in the chroot: it is a separate tmpfs mount. Finish a stock
+    # analysis on B before checking that A's track never took the replay path.
+    twin.ev("B", 'root.rtTr("/Client/Librarian/AddToDatabaseAndLoadToDeck2").url="file:///data/music/track-b.wav"; "requested"')
+    wait_for(lambda: (r := row("B", "track-b.wav")) and r[7] == 1)
+    log = analyzer_log("B")
+    assert "installed" in log, log
+    assert "track-a.wav" not in log, "the shadow entered the OfflineAnalyzer:\n" + log
+    final = received()
+    assert final[:9] == target[:9], [i for i, (a, b) in enumerate(zip(final, target)) if a != b]
     print("PASS: peer shadow received source analysis on first load; no OfflineAnalyzer for that track")
 
 

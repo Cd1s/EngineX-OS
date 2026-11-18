@@ -9,6 +9,8 @@
 #include <unistd.h>
 
 #define SC_SHADOW_SELECT "SELECT trackId, trackData, overviewWaveFormData, beatData, quickCues, loops, thirdPartySourceId, activeOnLoadLoops FROM PerformanceData WHERE trackId = "
+#define SC_SHADOW_TRACK_READ "SELECT t.id, t.playOrder, t.length, t.bpm, t.year, t.path, "
+#define SC_SHADOW_INSERT "INSERT OR REPLACE INTO PerformanceData (trackId,trackData,overviewWaveFormData,beatData,quickCues,loops,thirdPartySourceId,activeOnLoadLoops) VALUES  ( ?, ?, ?, ?, ?, ?, ?, ?);"
 #define SC_SHADOW_REL "../../../../enginex/shadow-v3/"
 #define SC_SHADOW_MAX (8 << 20)
 
@@ -21,9 +23,11 @@ struct sc_shadow_sqlite {
 };
 
 static int sc_shadow_analysis_bound(const char *sql) {
-    const size_t n = sizeof SC_SHADOW_SELECT - 1;
-    if (!sql || strncmp(sql, SC_SHADOW_SELECT, n) || sql[n] != '?') return 0;
-    for (sql += n + 1; *sql == ' ' || *sql == ';'; sql++) {}
+    // Engine has already copied isAnalyzed by the time it binds PerformanceData.
+    if (!sql || strncmp(sql, SC_SHADOW_TRACK_READ, sizeof SC_SHADOW_TRACK_READ - 1)) return 0;
+    const char *where = strstr(sql, " WHERE t.id = ?");
+    if (!where || strchr(sql, '?') != where + sizeof " WHERE t.id = " - 1) return 0;
+    for (sql = where + sizeof " WHERE t.id = ?" - 1; *sql == ' ' || *sql == ';'; sql++) {}
     return !*sql;
 }
 
@@ -49,7 +53,7 @@ static char *sc_shadow_analysis_sql(const unsigned char *b, size_t n, long long 
         at = start[i] + len[i];
     }
     if (at != n) return NULL;
-    char *sql = malloc(512 + 2 * (n + pathlen)), *p = sql;
+    char *sql = malloc(640 + 2 * (n + 2 * pathlen)), *p = sql;
     if (!sql) return NULL;
     p += sprintf(p, "UPDATE main.PerformanceData SET ");
     for (int i = 0; i < 5; i++) {
@@ -62,26 +66,39 @@ static char *sc_shadow_analysis_sql(const unsigned char *b, size_t n, long long 
     p += sprintf(p, " WHERE trackId = %lld AND trackData IS NULL AND EXISTS "
                  "(SELECT 1 FROM main.Track WHERE id = %lld AND CAST(path AS BLOB) = X'", id, id);
     p = sc_shadow_hex(p, (const unsigned char *)path, pathlen);
-    memcpy(p, "')", 3);
+    // Engine starts OfflineAnalyzer if its Track row is still unanalysed,
+    // even when the complete native PerformanceData is already present.
+    p += sprintf(p, "'); UPDATE main.Track SET isAnalyzed = 1 WHERE id = %lld AND changes() > 0 "
+                    "AND CAST(path AS BLOB) = X'", id);
+    p = sc_shadow_hex(p, (const unsigned char *)path, pathlen);
+    memcpy(p, "'", 2);
     return sql;
 }
 
 // A copy can have one extra Contents directory for the stock overview scale.
 // Nothing from the DB may name a file outside the peer cache.
-static const char *sc_shadow_relative(const char *path) {
-    if (!path || strncmp(path, SC_SHADOW_REL "peer-", sizeof SC_SHADOW_REL "peer-" - 1)) return NULL;
-    const char *rel = path + sizeof SC_SHADOW_REL - 1;
+static int sc_shadow_peer_path(const char *rel) {
+    if (strncmp(rel, "peer-", 5)) return 0;
     size_t hash = strspn(rel + 5, "0123456789abcdef");
-    if (!hash || hash > 16 || rel[5 + hash] != '/') return NULL;
+    if (!hash || hash > 16 || rel[5 + hash] != '/') return 0;
     const char *name = rel + 6 + hash;
     if (!strncmp(name, "Contents/", 9)) name += 9;
-    if (!*name || !strcmp(name, ".") || !strcmp(name, "..") || strchr(name, '/')) return NULL;
-    return rel;
+    return *name && strcmp(name, ".") && strcmp(name, "..") && !strchr(name, '/');
+}
+
+static int sc_shadow_analysis_staged(const char *path) {
+    const size_t n = strlen(sc_shadow_root);
+    if (strncmp(path, sc_shadow_root, n) || path[n] != '/' || !sc_shadow_peer_path(path + n + 1)) return 0;
+    char sidecar[640];
+    if ((size_t)snprintf(sidecar, sizeof sidecar, "%s.analysis", path) >= sizeof sidecar) return 0;
+    struct stat st;
+    return !lstat(sidecar, &st) && S_ISREG(st.st_mode) && st.st_size > 0 && st.st_size <= SC_SHADOW_MAX;
 }
 
 static int sc_shadow_copy_path(void *out, int n, char **values, char **names) {
     (void)names;
-    if (n == 1 && sc_shadow_relative(values[0]) && strlen(values[0]) < 512)
+    if (n == 1 && values[0] && !strncmp(values[0], SC_SHADOW_REL, sizeof SC_SHADOW_REL - 1) &&
+        sc_shadow_peer_path(values[0] + sizeof SC_SHADOW_REL - 1) && strlen(values[0]) < 512)
         strcpy(out, values[0]);
     return 0;
 }

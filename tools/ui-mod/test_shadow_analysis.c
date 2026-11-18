@@ -16,15 +16,28 @@ static sqlite3 *library(const char *file) {
     sqlite3 *db = NULL;
     assert(sqlite3_open(file, &db) == SQLITE_OK);
     assert(sqlite3_exec(db,
-        "CREATE TABLE Track(id INTEGER PRIMARY KEY, path TEXT);"
+        "CREATE TABLE Track(id INTEGER PRIMARY KEY, path TEXT, isAnalyzed INTEGER DEFAULT 0,"
+        " isBeatGridLocked INTEGER DEFAULT 0);"
         "CREATE TABLE PerformanceData(trackId INTEGER PRIMARY KEY, trackData BLOB, overviewWaveFormData BLOB,"
         " beatData BLOB, quickCues BLOB, loops BLOB, thirdPartySourceId INTEGER, activeOnLoadLoops INTEGER);"
-        "INSERT INTO Track VALUES(1,'" SC_SHADOW_REL "peer-f012/Contents/L''ete.wav'),"
+        "INSERT INTO Track(id,path) VALUES(1,'" SC_SHADOW_REL "peer-f012/Contents/L''ete.wav'),"
         "(2,'../../../../music/local.wav'),(3,'" SC_SHADOW_REL "peer-f012/missing.wav'),"
         "(4,'" SC_SHADOW_REL "peer-f012/../outside.wav'),(5,'" SC_SHADOW_REL "peer-f012/corrupt.wav');"
         "INSERT INTO PerformanceData(trackId) VALUES(1),(2),(3),(4),(5);",
         NULL, NULL, NULL) == SQLITE_OK);
     return db;
+}
+
+static void check_flags(sqlite3 *db, int analysed_id) {
+    sqlite3_stmt *stmt = NULL;
+    assert(sqlite3_prepare_v2(db, "SELECT id,isAnalyzed,isBeatGridLocked FROM Track ORDER BY id", -1, &stmt, NULL) == SQLITE_OK);
+    for (int id = 1; id <= 5; id++) {
+        assert(sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_int(stmt, 0) == id);
+        assert(sqlite3_column_int(stmt, 1) == (id == analysed_id));
+        assert(sqlite3_column_int(stmt, 2) == 0);
+    }
+    assert(sqlite3_step(stmt) == SQLITE_DONE);
+    sqlite3_finalize(stmt);
 }
 
 int main(void) {
@@ -45,23 +58,36 @@ int main(void) {
     assert(out && fwrite(payload, 1, sizeof payload - 1, out) == sizeof payload - 1 && !fclose(out));
     out = fopen(malformed, "wb");
     assert(out && fwrite(payload, 1, sizeof payload - 2, out) == sizeof payload - 2 && !fclose(out));
+    char audio[256];
+    snprintf(audio, sizeof audio, "%s/peer-f012/Contents/L'ete.wav", dir);
+    assert(sc_shadow_analysis_staged(audio));
+    snprintf(audio, sizeof audio, "%s/peer-f012/missing.wav", dir);
+    assert(!sc_shadow_analysis_staged(audio));
+    snprintf(audio, sizeof audio, "%s/peer-f012/Contents/../corrupt.wav", dir);
+    assert(!sc_shadow_analysis_staged(audio));
 
     sc_shadow_library = path;
     sqlite3 *db = library(path), *usb = library(stick);
     const struct sc_shadow_sqlite api = {exec_sql, filename};
-    assert(sc_shadow_analysis_bound(SC_SHADOW_SELECT "? ;"));
-    assert(!sc_shadow_analysis_bound(SC_SHADOW_SELECT "? OR 1"));
-    assert(!sc_shadow_analysis_bound(SC_SHADOW_SELECT "1"));
+    assert(sc_shadow_analysis_bound(SC_SHADOW_TRACK_READ "t.isAnalyzed FROM Track AS t WHERE t.id = ? ;"));
+    assert(!sc_shadow_analysis_bound(SC_SHADOW_TRACK_READ "t.isAnalyzed FROM Track AS t WHERE t.id = ? OR 1"));
+    assert(!sc_shadow_analysis_bound(SC_SHADOW_SELECT "?"));
     assert(!sc_shadow_analysis_fill(&api, usb, 1)); // Same ID and path, wrong library.
     for (int i = 2; i <= 5; i++) assert(!sc_shadow_analysis_fill(&api, db, i));
+    check_flags(usb, 0);
+    check_flags(db, 0);
 
     sqlite3_stmt *stmt = NULL;
-    assert(sqlite3_prepare_v2(db, SC_SHADOW_SELECT "?", -1, &stmt, NULL) == SQLITE_OK);
+    assert(sqlite3_prepare_v2(db, "SELECT id,isAnalyzed FROM Track WHERE id=?", -1, &stmt, NULL) == SQLITE_OK);
     assert(sqlite3_bind_int64(stmt, 1, 1) == SQLITE_OK);
-    assert(sc_shadow_analysis_bound(sqlite3_sql(stmt)));
     assert(sqlite3_exec(db, "BEGIN", NULL, NULL, NULL) == SQLITE_OK);
     assert(sc_shadow_analysis_fill(&api, sqlite3_db_handle(stmt), 1));
+    assert(sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_int(stmt, 1) == 1);
+    sqlite3_finalize(stmt);
+    check_flags(db, 1);
     assert(!sc_shadow_analysis_fill(&api, db, 1));
+    assert(sqlite3_prepare_v2(db, SC_SHADOW_SELECT "?", -1, &stmt, NULL) == SQLITE_OK);
+    assert(sqlite3_bind_int64(stmt, 1, 1) == SQLITE_OK);
     assert(sqlite3_step(stmt) == SQLITE_ROW);
     for (int i = 1; i < 5; i++) {
         const char *want[] = {"track", "waves", "beats", "cues!"};
@@ -70,7 +96,9 @@ int main(void) {
     assert(sqlite3_column_type(stmt, 5) == SQLITE_NULL);
     sqlite3_finalize(stmt);
     assert(sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL) == SQLITE_OK);
+    check_flags(db, 0);
     assert(sc_shadow_analysis_fill(&api, db, 1)); // The first fill followed Engine's transaction.
+    check_flags(db, 1);
     assert(sqlite3_close(usb) == SQLITE_OK && sqlite3_close(db) == SQLITE_OK);
     assert(!unlink(path) && !unlink(stick) && !unlink(sidecar) && !unlink(malformed));
     assert(!rmdir(contents) && !rmdir(cache) && !rmdir(dir));

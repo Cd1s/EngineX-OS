@@ -3347,17 +3347,53 @@ typedef int (*sqlite_bind_int64_fn)(void *, int, long long);
 static sqlite_bind_int64_fn shadow_bind_original;
 static const char *(*shadow_statement_sql)(void *);
 static void *(*shadow_statement_db)(void *);
+static int (*shadow_step_original)(void *);
+static long long (*shadow_last_insert)(void *);
 static struct sc_shadow_sqlite shadow_sqlite;
 static __thread int shadow_filling;
+static uintptr_t shadow_deck_load_return;
+static unsigned (*shadow_analyze_original)(void *, const void *);
+
+// Deck loads can request analysis on EMain even when the library Track is
+// marked analysed. Leave the loaded native data in place for our peer copies.
+static unsigned shadow_analyze(void *obj, const void *prefs) {
+    if ((uintptr_t)__builtin_return_address(0) == shadow_deck_load_return) {
+        const unsigned char *self = obj, *track = *(const unsigned char *const *)(self + 0x48);
+        const struct oa_string *path = (const void *)(self + 0x10);
+        if (track && track[0x31d] && path->ptr && path->size > 0 && path->size < 512) {
+            char text[512];
+            if (utf16_to_utf8(path->ptr, path->size, text, sizeof text) && sc_shadow_analysis_staged(text))
+                return 0;
+        }
+    }
+    return shadow_analyze_original(obj, prefs);
+}
+
+static void shadow_fill(void *db, long long id) {
+    shadow_filling = 1;
+    int filled = sc_shadow_analysis_fill(&shadow_sqlite, db, id);
+    shadow_filling = 0;
+    if (filled) fprintf(stderr, "engine-ui-hook: shadow analysis filled track %lld\n", id);
+}
 
 static int shadow_bind(void *stmt, int index, long long id) {
     int rc = shadow_bind_original(stmt, index, id);
     if (!rc && index == 1 && id > 0 && !shadow_filling && stmt &&
-        sc_shadow_analysis_bound(shadow_statement_sql(stmt))) {
-        shadow_filling = 1;
-        int filled = sc_shadow_analysis_fill(&shadow_sqlite, shadow_statement_db(stmt), id);
-        shadow_filling = 0;
-        if (filled) fprintf(stderr, "engine-ui-hook: shadow analysis filled track %lld\n", id);
+        sc_shadow_analysis_bound(shadow_statement_sql(stmt)))
+        shadow_fill(shadow_statement_db(stmt), id);
+    return rc;
+}
+
+static int shadow_step(void *stmt) {
+    int rc = shadow_step_original(stmt);
+    if (rc == 101 /* SQLITE_DONE */ && stmt && !shadow_filling) {
+        const char *sql = shadow_statement_sql(stmt);
+        if (sql && !strcmp(sql, SC_SHADOW_INSERT)) {
+            // Engine creates the row before this import step; trackId aliases
+            // the PerformanceData rowid. Fill before the importer hands it off.
+            void *db = shadow_statement_db(stmt);
+            if (db) shadow_fill(db, shadow_last_insert(db));
+        }
     }
     return rc;
 }
@@ -3367,25 +3403,42 @@ A32_ONLY static void install_shadow_analysis(uintptr_t base, size_t page) {
     // sign-extends r2 into r3 then branches to bind_int64.
     if (strcmp(build->name, "5.3.0") || !player_board() || !sqlite_exec_original) return;
     const uint32_t *api = (const void *)(base + build->sqlite_api);
-    uintptr_t bind = base + 0x1cdfb90;
+    uintptr_t bind = base + 0x1cdfb90, step = base + 0x1d6fef8, analyze = base + 0xe525ec;
+    const uintptr_t load_call = base + 0xd6b100;
     const uint32_t prologue[] = {0xe16d41f8, 0xe1a04001};
+    const uint32_t step_prefix[] = {0xe59f3d88, 0xe16d42f4};
+    const uint32_t analyze_prefix[] = {0xe16d42f4, 0xe1cd60f8};
+    const uint32_t load_analysis[] = {0xe24b105c, 0xe1a00007, 0xe59330c8, 0xe12fff33};
     const uint32_t db_handle[] = {0xe3500000, 0x15900000, 0xe12fff1e};
     const uint32_t sql_text[] = {0xe3500000, 0x159000d0, 0xe12fff1e};
     if (api[5] != bind || api[4] != base + 0x1cdfc28 || api[49] != base + 0x1c9a210 ||
+        api[65] != base + 0x1c9bc08 || api[94] != step ||
         api[153] != base + 0x1c9a2a0 || api[180] != base + 0x1cb0d94 ||
         memcmp((const void *)bind, prologue, sizeof prologue) ||
+        memcmp((const void *)step, step_prefix, sizeof step_prefix) ||
+        memcmp((const void *)analyze, analyze_prefix, sizeof analyze_prefix) ||
+        memcmp((const void *)load_call, load_analysis, sizeof load_analysis) ||
         *(const uint32_t *)(uintptr_t)api[4] != 0xe1a03fc2 ||
         arm_branch_target(api[4] + 4) != bind ||
         memcmp((const void *)(uintptr_t)api[49], db_handle, sizeof db_handle) ||
         memcmp((const void *)(uintptr_t)api[153], sql_text, sizeof sql_text)) return;
     shadow_bind_original = (sqlite_bind_int64_fn)function_trampoline(bind, page);
-    if (!shadow_bind_original) return;
+    // Relocate step's entry literal load. The original body still adds its PC.
+    const uint32_t step_stub[] = {0xe59f3008, step_prefix[1], 0xe51ff004,
+        (uint32_t)(step + 8), *(const uint32_t *)(step + 8 + 0xd88)};
+    shadow_step_original = rx_code(step_stub, sizeof step_stub, page);
+    shadow_analyze_original = function_trampoline(analyze, page);
+    if (!shadow_bind_original || !shadow_step_original || !shadow_analyze_original) return;
+    shadow_deck_load_return = load_call + sizeof load_analysis;
     shadow_statement_db = (void *(*)(void *))(uintptr_t)api[49];
     shadow_statement_sql = (const char *(*)(void *))(uintptr_t)api[153];
+    shadow_last_insert = (long long (*)(void *))(uintptr_t)api[65];
     shadow_sqlite.exec = sqlite_exec_original;
     shadow_sqlite.filename = (const char *(*)(void *, const char *))(uintptr_t)api[180];
     redirect_function(bind, shadow_bind, page);
-    fprintf(stderr, "engine-ui-hook: shadow analysis bind hook installed\n");
+    redirect_function(step, shadow_step, page);
+    redirect_function(analyze, shadow_analyze, page);
+    fprintf(stderr, "engine-ui-hook: shadow analysis hooks installed\n");
 }
 
 A32_ONLY static void install_sqlite_hooks(uintptr_t base, size_t page) {
