@@ -1547,6 +1547,8 @@ func fetchPerfPending(ctx context.Context, url string) (perf []byte, pending boo
 		case status == http.StatusServiceUnavailable:
 			pending = true
 		case !pending || status == http.StatusNotFound:
+			// Which answer left the copy to Engine's own analysis; 0 is none at all.
+			log.Printf("stream-sync: shadow: the source gave no analysis (http %d)", status)
 			return nil, false
 		}
 		if try+1 >= perfRetries {
@@ -2177,6 +2179,9 @@ func (s *Server) shadowFetchPeer(key string, p peerDeck) {
 		if playerBoards[imagePrefix(deviceCompatible())] {
 			saveShadowAnalysis(ctx, local, strings.Replace(url, "/audio?", "/perf?", 1)+"&format=native")
 		}
+		// The three ways a copy is analysed end with different waveform peaks.
+		_, noFill := os.Stat(local + ".analysis")
+		log.Printf("stream-sync: shadow: copy %s %q analysis replay=%t fill=%t", key, name, perf != nil, noFill == nil)
 		return local, nil
 	})
 }
