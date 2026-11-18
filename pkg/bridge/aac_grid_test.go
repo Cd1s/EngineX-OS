@@ -16,14 +16,14 @@ import (
 
 func TestAACImportPreservesExportTiming(t *testing.T) {
 	for _, tc := range []struct {
-		name             string
-		fixture          func([]byte) []byte
-		priming          float64
-		wantSampleCount  uint64
-		wantBeat0        float64
-		wantBeat1        float64
-		wantHotB         float64
-		wantLoop0Start   float64
+		name            string
+		fixture         func([]byte) []byte
+		priming         float64
+		wantSampleCount uint64
+		wantBeat0       float64
+		wantBeat1       float64
+		wantHotB        float64
+		wantLoop0Start  float64
 	}{
 		{name: "truncated moov", fixture: func(b []byte) []byte { return b[:300] }, wantSampleCount: 352800, wantBeat1: 22050, wantHotB: 22050, wantLoop0Start: 33075},
 		{name: "HE-AAC core rate", priming: 2048, wantSampleCount: 352800, wantBeat0: -2048, wantBeat1: 20002, wantHotB: 20002, wantLoop0Start: 31027, fixture: func(b []byte) []byte {
