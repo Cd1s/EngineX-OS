@@ -1,11 +1,11 @@
 package webui
 
 import (
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
 	"testing"
-	"net/http/httptest"
 )
 
 // #172: Hi-Fi output compensation is default OFF, persisted as hifi_output=1 on
