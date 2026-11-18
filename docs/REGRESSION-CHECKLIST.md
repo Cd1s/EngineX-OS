@@ -6,7 +6,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 
 ---
 
-## Regression Table (322 Rows)
+## Regression Table (323 Rows)
 
 | # | Behaviour that must keep working | Issue / commit that fixed it | How it is checked (automated test name, or exact real-deck / sandbox step) | Release gate / deck acceptance / recording coverage |
 | --- | --- | --- | --- | --- |
@@ -332,6 +332,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 | 320 | **Engine DJ profile and real TIDAL coexist with EngineX streaming**: profile account refresh/unlink must not log out the local carrier; selecting real TIDAL retains stock SSO and other providers remain untouched | `#304` | `tools/ui-mod/test_profile_sso.c` executes stock Gen-1, SC LIVE 4 and AZ04 capability slots before/after the hook; real-deck check with a signed-in profile: refresh connected accounts, load an EngineX streaming track, then switch to real TIDAL and back without losing either account | RIGHT profile-sync callback regression; real linked-TIDAL account needs hardware acceptance |
 | 321 | **rekordbox and CDJ-staged WAV/AIFF play through the streaming carrier unchanged**: admit WAV, AIF/AIFF and PCM AIFF-C, advertise the original format in the manifest and download name, and keep the container MIME and bytes; retain Range/seek and MP3/FLAC/AAC behavior | Maintainer compatibility request, 2026-11-18 | `pkg/webui::TestRekordboxPCMStream` (16/24-bit PCM, float32 WAV, AIFF-C, computer/media, manifest/legacy/full/Range); JP07/JC11 native sandbox | Real rekordbox computer and CDJ-3000 media: load, seek forward/backward, verify waveform and cues, no carrier logout or source rotation |
 | 322 | **The installer identifies PRIME 4 G2 on USB `15e4:d014` without writing to its audio interface**: prompt and wait for the update interface; with the AZ update interface (`ff/61/7a`), identify JP24 and use native Mode C | #311 | `TestPrime4G2D014AudioDeviceWaitsWithoutWriting`, `TestPrime4G2D014UpdateInterfaceWritesData` | On a PRIME 4 G2 connected to a Mac, confirm the installer prompts in normal mode and recognizes Firmware Update Mode; stop before confirming a write |
+| 323 | Incoming shadow loads wait during browsing. A private peer copy completing after Browse reopens must also leave it open; a manual load of the same file on an owned deck still closes Browse. | Linked SC5000, Paired Player | `ShadowIdentityTest::test_browsing_and_dialogs_defer_only_the_latest_shadow_load`; `tools/shadow-twin/check_shadow_browse.py` | Scroll on A while B loads two tracks; A keeps its selected row and mirrors the latest track after leaving Browse. Known gap: a shared USB original completing after Browse reopens is not a private copy. |
 
 ## Automated Test Gaps (`[NO AUTOMATED TEST]`)
 
