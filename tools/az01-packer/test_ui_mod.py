@@ -1272,11 +1272,13 @@ for (const amt of [1/63, 2/63, 4/63, 5/63, 8/63, 1.0]) {{
             self.assertIn(gateway, bp.QUALITY_ENTRY.split('text: "%s"' % text, 1)[1].split("values:", 1)[0], text)
         self.assertIn(gateway, bp.STREAM_SWITCHES)
         # Rows that work without the hook keep no feature gate.
-        for text in ("Pro DJ Link Export to CDJ (Beta)", "Remote Load (LAN API)"):
+        for text in ("Remote Load (LAN API)",):
             self.assertNotIn("scOff", bp.SERVICES_ENTRIES.split('text: "%s"' % text, 1)[1].split("}", 1)[0], text)
         # Reading the players' media is rb-bridge --prolink's job: with that service off
         # (a console feature, listed in featuresOff) the row would do nothing.
-        library = bp.SERVICES_ENTRIES.split('text: "Pro DJ Link Library"', 1)[1].split("values:", 1)[0]
+        library = bp.SERVICES_ENTRIES.split('text: "Pro DJ Link"', 1)[1].split("values:", 1)[0]
+        self.assertNotIn('text: "Pro DJ Link Library"', bp.SERVICES_ENTRIES)
+        self.assertNotIn('text: "Pro DJ Link Export to CDJ (Beta)"', bp.SERVICES_ENTRIES)
         self.assertIn('visible: !root.scOff("rb-bridge")', library)
     def test_board_capabilities_jp07_vs_jc11_and_build_tag(self):
         # Task B: board-level capability gating must NOT depend on Config.device.isPlayer

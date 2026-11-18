@@ -2,6 +2,7 @@
 # Boot state machine with fake Engine/systemd; no host service or media changes.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+export ENGINEX_MIGRATION=${ENGINEX_MIGRATION:-$ROOT/rootfs-overlay/usr/libexec/enginex-migration}
 GUARD=${BOOT_GUARD_TEST_TARGET:-$ROOT/rootfs-overlay/etc/enginex/engine-ui-guard}
 W=$(mktemp -d "$ROOT/tests/.tmp.boot-safety.XXXXXX")
 pids=()
