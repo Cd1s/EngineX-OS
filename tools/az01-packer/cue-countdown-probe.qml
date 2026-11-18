@@ -1,5 +1,5 @@
 // Sandbox only: loaded over QmlWarnings.qml by cue-countdown-sandbox.sh (it fills in @BOARD@).
-// Loads a real 128 BPM track with hot cues on Deck 1, then reads the shared #151 countdown (root.scNextCueInfo) while the
+// Loads a real 128 BPM track with hot cues on Deck 1, then reads the #151 countdown (a count made afresh, and the capsules) while the
 // playhead, the pitch fader and the beat grid are moved through Engine's own properties and its Beat Grid Edit controller.
 import QtQuick
 import QtQuick.Window
@@ -36,7 +36,7 @@ Item {
         const t = opt("/Engine/Deck1" + sub)
         return t ? num(t.unnormalized) + "/" + num(t.value) : "absent"
     }
-    function cd() { const i = root.scNextCueInfo(1, 0); return i ? i.text + " " + i.label : "null" }
+    function cd() { const i = root.scCueCount(1, root.scCueTableOf(1)); return i ? i.text + " " + i.label : "null" }
     function sr() { return g("/Track/SampleRate").value }
     function len() { return g("/Track/TrackLength").unnormalized }
     function pos() { return g("/Track/TrackPosition").unnormalized }
@@ -66,7 +66,7 @@ Item {
         return capsules().map(c => c.visible ? (c.info ? c.info.text : "none") : "hidden").join(",")
     }
     function report(tag) {
-        const fresh = root.scNextCueInfo(1, 0)
+        const fresh = root.scCueCount(1, root.scCueTableOf(1))
         say(tag + " pos=" + num(pos() / sr()) + "s orig=" + peek("/OriginalBPM") + " fresh=" + (fresh ? fresh.text : "null") + " capsules(" + capsules().length + ")=" + shown())
     }
     function dismiss() {
@@ -116,7 +116,7 @@ Item {
     // The countdown steps where the playhead crosses a grid line (Engine's BeatNumber: a position in the bar, an integer on each
     // line), whatever the cue's own place between lines is. Rows of one scan are compared with the one before.
     function row(tag, wanted) {
-        const fresh = root.scNextCueInfo(1, 0), text = fresh ? fresh.text : "null", beat = g("/BeatNumber").unnormalized
+        const fresh = root.scCueCount(1, root.scCueTableOf(1)), text = fresh ? fresh.text : "null", beat = g("/BeatNumber").unnormalized
         const list = rows[tag] || (rows[tag] = [])
         const prev = list.length ? list[list.length - 1] : null
         const here = {pos: pos() / sr(), beat: beat, text: text}
