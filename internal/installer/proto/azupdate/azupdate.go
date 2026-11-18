@@ -14,9 +14,13 @@ import (
 )
 
 const (
-	// VID and PID are the USB identifiers exposed by az0x-splash usbupdate.
+	// VID and PID are the USB identifiers exposed by az0x-splash usbupdate on Rane SYSTEM ONE.
 	VID uint16 = 0x1CC5
 	PID uint16 = 0x2027
+
+	// G2VID and G2PID are the USB identifiers exposed by az0x-splash usbupdate on Denon DJ PRIME 4 G2.
+	G2VID uint16 = 0x15E4
+	G2PID uint16 = 0xD014
 
 	RequestMagic = "AZ0O"
 	ReplyMagic   = "AZ0I"

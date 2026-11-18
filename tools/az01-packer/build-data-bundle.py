@@ -1060,7 +1060,7 @@ Back up /data first and use an image made from your own backup:
 Never flash an empty or someone else's userdata image.
 
 Decks without fastboot (SYSTEM ONE, PRIME 4 G2: Firmware Update Mode shows up
-as USB 1cc5:2027) take a NEW, EMPTY 64 MiB /data image; music, settings and the
+as USB 1cc5:2027 or 15e4:d014) take a NEW, EMPTY 64 MiB /data image; music, settings and the
 library on the internal /data are erased. EngineX-Installer does all of this;
 by hand (needs pyusb, see host-install-usbupdate.py):
 

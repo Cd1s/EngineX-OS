@@ -86,7 +86,7 @@ func (d *testUSB) ReadBulk(ctx context.Context, _ uint8, b []byte) (int, error) 
 }
 
 func (d *testUSB) WriteBulk(ctx context.Context, _ uint8, b []byte) (int, error) {
-	if d.info.VID == 0x1cc5 {
+	if d.info.VID == 0x1cc5 || (d.info.VID == 0x15e4 && d.info.PID == 0xd014) {
 		if d.remaining > 0 {
 			d.payload.Write(b)
 			d.remaining -= int64(len(b))

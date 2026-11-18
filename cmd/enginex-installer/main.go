@@ -1127,6 +1127,7 @@ func IsRockchipUSBLoader(line string) bool {
 var gen2USB = map[string]string{
 	"15e4:d007": "jc11s", "15e4:c00c": "jp11s", "15e4:d011": "jp20", "15e4:d012": "jp21",
 	"15e4:103f": "nh08s", "15e4:303f": "nh08s", "15e4:2059": "nh10",
+	"15e4:d014": "jp24", "1cc5:2027": "rmz2",
 }
 
 // gen1USB is the usb_devices table of the official 5.3.0 1st-gen images, in their compatible order.
@@ -1481,16 +1482,29 @@ func modeBGen1(ctx context.Context, o *options, session *updateSession, m model)
 	return nil
 }
 
-// ---- mode C: Firmware Update Mode without fastboot (1cc5:2027) --------------
+// ---- mode C: Firmware Update Mode without fastboot (1cc5:2027, 15e4:d014) --------------
 
 const (
 	azID       = "1cc5:2027"
+	azG2ID     = "15e4:d014"
 	azDataSize = 64 << 20 // the fresh /data image SBDJUK flashed on a SYSTEM ONE (#116)
 )
 
+func isAZID(id string) bool {
+	return id == azID || id == azG2ID
+}
+
+func azTag(line string) string {
+	if f := strings.Fields(line); len(f) > 0 && isAZID(f[0]) {
+		return f[0]
+	}
+	return azID
+}
+
 // azNames match the USB product string when nothing else names the deck; most specific first.
 var azNames = []struct{ name, board string }{
-	{"system one", "rmz2"}, {"prime 4 g2", "jp24"}, {"prime 4+", "jc11s"}, {"prime 4 plus", "jc11s"},
+	{"system one", "rmz2"}, {"prime 4 g2", "jp24"}, {"prime4g2", "jp24"}, {"15e4:d014", "jp24"},
+	{"prime 4+", "jc11s"}, {"prime 4 plus", "jc11s"},
 	{"sc live 4", "jp21"}, {"sc live 2", "jp20"}, {"prime go+", "jp11s"}, {"mixstream pro+", "nh08s"}, {"mixstream pro go", "nh10"},
 }
 
@@ -1587,7 +1601,8 @@ func modeAZ(ctx context.Context, o *options, session *updateSession, board, line
 		return fmt.Errorf("碟机处于 Firmware Update Mode（%s），但认不出型号：请用 --image 或 --bundle 指定该机型的 *-Update.img，没有刷写任何东西 / "+
 			"the deck is in Firmware Update Mode (%s) but its model is unknown: pass --image or --bundle <MODEL>-<VERSION>-EngineX-OS-*-Update.img; nothing flashed", line, line)
 	}
-	o.say("USB Firmware Update Mode（"+azID+"）识别到 "+m.Name, "Firmware Update Mode ("+azID+") found "+m.Name)
+	tag := azTag(line)
+	o.say("USB Firmware Update Mode（"+tag+"）识别到 "+m.Name, "Firmware Update Mode ("+tag+") found "+m.Name)
 	b, err := obtainBundle(ctx, o, m.Prefix)
 	if err != nil {
 		return err
@@ -1609,9 +1624,9 @@ func modeAZ(ctx context.Context, o *options, session *updateSession, board, line
 	sayGen2Steps(o, filepath.Base(b.Path))
 	o.say("正在通过 USB 写入 data 分区，请勿断开连接或关闭电源…", "Writing the data partition over USB. Do not disconnect USB or power off the deck...")
 	if err := usbFlash(ctx, o, session, img); err != nil {
-		return fmt.Errorf("USB %s write-part: %w", azID, err)
+		return fmt.Errorf("USB %s write-part: %w", tag, err)
 	}
-	// 1cc5:2027 has no reboot command over USB.
+	// 1cc5:2027 / 15e4:d014 has no reboot command over USB.
 	o.say(fmt.Sprintf("完成：EngineX OS %s 已写入 %s。请按电源键关机再开机（或拔插电源），开机后自动激活。", b.Version, m.Name),
 		fmt.Sprintf("Done: EngineX OS %s written to %s. Press the power button to turn it off and on again (or replug power); it activates on boot.", b.Version, m.Name))
 	sayGen2Unlocked(o, b, m.Prefix)

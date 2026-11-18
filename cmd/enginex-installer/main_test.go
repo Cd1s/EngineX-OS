@@ -1730,11 +1730,15 @@ func TestAZModel(t *testing.T) {
 	for _, c := range []struct{ board, bundle, line, want string }{
 		{"RMZ2", "", "1cc5:2027", "SYSTEMONE"},
 		{"JP24", "", "1cc5:2027", "PRIME4G2"},
+		{"JP24", "", "15e4:d014", "PRIME4G2"},
 		{"nh08s", "", "1cc5:2027", ""},
 		{"jp21", "", "1cc5:2027", ""},
 		{"", "/x/PRIME4G2-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz", "1cc5:2027", "PRIME4G2"},
+		{"", "/x/PRIME4G2-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz", "15e4:d014", "PRIME4G2"},
 		{"", "", "1cc5:2027 inMusic Rane SYSTEM ONE", "SYSTEMONE"},
 		{"", "", "1cc5:2027 Denon DJ PRIME 4 G2", "PRIME4G2"},
+		{"", "", "15e4:d014 Denon DJ PRIME 4 G2", "PRIME4G2"},
+		{"", "", "15e4:d014", "PRIME4G2"},
 		{"", "", "1cc5:2027 Denon DJ PRIME 4+", "PRIME4PLUS"},
 		{"", "", "1cc5:2027 Numark Mixstream Pro Go", "MIXSTREAMPROGO"},
 		{"", "", "1cc5:2027 Numark Mixstream Pro+", "MIXSTREAMPROPLUS"},
@@ -1775,12 +1779,17 @@ func azOpts(t *testing.T, b bundleFile, list func(int) string) (*options, *testU
 	d := &testUSB{img: filepath.Join(t.TempDir(), "flashed.img")}
 	d.enumerate = func() []usb.DeviceInfo {
 		text := list(d.polls)
-		_, product, found := strings.Cut(text, azID)
-		if !found {
-			return nil
+		for _, id := range []string{azID, azG2ID} {
+			if _, product, found := strings.Cut(text, id); found {
+				vid, pid := uint16(0x1cc5), uint16(0x2027)
+				if id == azG2ID {
+					vid, pid = 0x15e4, 0xd014
+				}
+				d.info = usbInfo(vid, pid, strings.TrimSpace(product), true)
+				return []usb.DeviceInfo{d.info}
+			}
 		}
-		d.info = usbInfo(0x1cc5, 0x2027, strings.TrimSpace(product), true)
-		return []usb.DeviceInfo{d.info}
+		return nil
 	}
 	o.USB = d
 	return o, d
@@ -1818,6 +1827,28 @@ func TestUSBUpdateModeFlashesA64MiBDataImage(t *testing.T) {
 		t.Errorf("AZ04 ALSA hook missing:\n%s", s)
 	}
 	if s := o.Out.(*bytes.Buffer).String(); !strings.Contains(s, "Rane SYSTEM ONE") || !strings.Contains(s, "100%") || !strings.Contains(s, "power button") {
+		t.Errorf("output:\n%s", s)
+	}
+}
+
+func TestUSBUpdateModeFlashesPrime4G2Over15e4d014(t *testing.T) {
+	need(t, "python3", "mke2fs", "debugfs", "e2fsck", "dumpe2fs")
+	b := buildBundle(t, "PRIME4G2", "5.3.0.3")
+	o, shim := azOpts(t, b, func(int) string { return "1d6b:0002 Linux Foundation\n15e4:d014 Denon DJ PRIME 4 G2\n" })
+	originalPath := os.Getenv("PATH")
+	t.Setenv("PATH", t.TempDir())
+	if err := run(ctxT(t), o); err != nil {
+		t.Fatalf("run: %v\n%s", err, o.Out)
+	}
+	t.Setenv("PATH", originalPath)
+	if shim.calls != 1 {
+		t.Fatalf("USB flash calls = %d", shim.calls)
+	}
+	if fi, _ := os.Stat(shim.img); fi == nil || fi.Size() != 64<<20 {
+		t.Fatalf("image size = %v, want 64 MiB", fi)
+	}
+	sh(t, "e2fsck", "-fn", shim.img)
+	if s := o.Out.(*bytes.Buffer).String(); !strings.Contains(s, "PRIME 4 G2") || !strings.Contains(s, "15e4:d014") || !strings.Contains(s, "100%") || !strings.Contains(s, "power button") {
 		t.Errorf("output:\n%s", s)
 	}
 }

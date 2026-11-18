@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Flash a /data image over USB to a deck in Firmware Update Mode (1cc5:2027, az0x-splash usbupdate) (#116).
+"""Flash a /data image over USB to a deck in Firmware Update Mode (1cc5:2027, 15e4:d014, az0x-splash usbupdate) (#116, #311).
 
 This is the write-part flow of the official libaz01-prog, checked on a Rane SYSTEM ONE:
 
@@ -20,6 +20,10 @@ import struct
 import sys
 
 VID, PID = 0x1CC5, 0x2027
+SUPPORTED_DEVICES = (
+    (0x1CC5, 0x2027),  # Rane SYSTEM ONE (RMZ2)
+    (0x15E4, 0xD014),  # Denon DJ PRIME 4 G2 (JP24)
+)
 CMD_WRITE_PART = 0x5AA5FB04
 ST_WRITTEN, ST_ENOENT, ST_READY = 1, 3, 5
 CHUNK = 256 * 1024
@@ -90,17 +94,21 @@ def open_deck():
     except ImportError:
         raise FlashError('pyusb is missing: pip3 install pyusb (macOS also: brew install libusb)')
     try:
-        dev = usb.core.find(idVendor=VID, idProduct=PID)
+        dev = None
+        for v, p in SUPPORTED_DEVICES:
+            dev = usb.core.find(idVendor=v, idProduct=p)
+            if dev is not None:
+                break
     except usb.core.NoBackendError:
         raise FlashError('libusb is missing: macOS brew install libusb; Linux apt install libusb-1.0-0; Windows pip install libusb-package')
     if dev is None:
-        raise FlashError('no deck in Firmware Update Mode (USB 1cc5:2027) found')
+        raise FlashError('no deck in Firmware Update Mode (USB 1cc5:2027 or 15e4:d014) found')
     try:
         if sys.platform.startswith('linux') and dev.is_kernel_driver_active(0):
             dev.detach_kernel_driver(0)
         dev.set_configuration()
     except usb.core.USBError as e:
-        raise FlashError(f'cannot open the deck ({e}): run with sudo, or add the udev rule for 1cc5')
+        raise FlashError(f'cannot open the deck ({e}): run with sudo, or add the udev rule for 1cc5/15e4')
     intf = dev.get_active_configuration()[(0, 0)]
 
     def ep(direction):
