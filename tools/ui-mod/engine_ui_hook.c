@@ -3534,6 +3534,7 @@ A32_ONLY static void install_rekordbox_analysis(uintptr_t base, size_t page) {
             rbx_prepare_original = (sqlite_prepare_fn)function_trampoline(entry, page);
             if (!rbx_prepare_original) return;
             sc_rbx_verbose = !access("/run/enginex-rbx-analysis-trace", F_OK); // debug: log why a read was left alone
+            sc_rbx_load_track_map();
             redirect_function(HF_GATEWAY, entry, rbx_prepare, page);
             redirect_function(HF_GATEWAY, bind, rbx_bind, page);
             fprintf(stderr, "engine-ui-hook: rekordbox analysis for streamed tracks enabled\n");
