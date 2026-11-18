@@ -56,6 +56,77 @@ while running crashed PID 1 once.
   `/etc/systemd/system/engine.service.d/60-ui-hook.conf`, run
   `systemctl daemon-reload` and restart `engine.service`.
 
+## Switching hook features off
+
+Each Engine change the hook makes belongs to one feature in `hook_features.h`.
+A feature can be left out when the hook is built, or switched off on the deck:
+
+- Build: `ENGINEX_HOOK_DISABLE="stems,zoom30" sh tools/ui-mod/build.sh`.
+  An unknown name stops the build. The names are baked into that `.so`.
+- Deck: names in `/data/enginex/hook-disable.conf` (comma, blank or one per line,
+  `#` comments), read once per process: edit it, then restart Engine. Unknown
+  names are logged and ignored. A missing or empty file changes nothing.
+
+A feature is on unless the build or the file names it. The Engine log shows
+`engine-ui-hook: features off: …` at start. Sites marked `HF_ALWAYS` (the
+getConfig return path itself) and the CPU-affinity fallback that keeps Engine
+alive on 4-core decks are never switched off.
+
+| Name | Leaves stock when off |
+|---|---|
+| `gateway` | TidalAPI URLs and the `aac`→`mp3` name: no EngineX streaming through Engine's TIDAL client |
+| `sso` | `connectedSSO()` / `isDisconnectedFromProfile()` (#159): Engine DJ Profile prompts return |
+| `apple-music` | the native Apple Music provider gate |
+| `stems` | Stems processor path and handshake, Stems feature and list, getConfig Stems fields, processor redirect |
+| `bluetooth` | getConfig `hasBluetooth` / `hasBluetoothSendToAssignment` |
+| `filesystems` | unknown/HFS+ filesystem support and getConfig `disableHfsPlus` |
+| `readonly-sticks` | read-only volumes are ejected and reported read-only as in stock |
+| `limiter-menu` | the stock Master Limiter menu stays where Engine hides it |
+| `stems-eq` | #152 Stems Level EQ (5.3.0 builds) |
+| `sweep-fx` | #166 full Sweep FX collection on NH (Mixstream) consoles |
+| `zoom30` | #77 30 s waveform zoom-out |
+| `rec-streaming` | #206 recording with streaming tracks (all 8 sites) |
+| `aux-input` | #171 SC LIVE 4 AUX/MIC2 input routing and Mixer menu |
+| `four-deck` | #49 4-deck layout unlock, shadow MASTER eligibility, SamplerOutput branch |
+| `dsp-guards` | all 21 DSP sites, and with them Echo Out, Pioneer FX, Auto-Gain, soft limiter and Live Stream audio |
+| `reverb-tail` | #207: the stock Reverb (Classic) decay formula; off, the Reverb rings out as stock at every knob position |
+| `sqlite-tuning` | the PRAGMAs on every database Engine opens |
+| `telemetry-block` | PostHog/events databases and crash reports stay on disk, Crashpad starts |
+| `vendor-update-block` | `autoupdate.airmusictech.com` resolves again |
+| `thread-tuning` | thread priorities and CPU sets of Engine's background threads and OfflineAnalyzer |
+| `alsa-timestamp` | ALSA keeps a GETTIMEOFDAY timestamp request |
+| `ui-packs` | the QML packs: stock Engine UI (settings that only exist in the packs disappear) |
+| `mount-hook` | second-generation bundles: no edisksd preload and no boot-time stick conversion. Build: `build-data-bundle.py --no-edisksd-hook`. The Engine hook ignores the name |
+| `rb-bridge` | service, after a reboot: `rb-bridge --prolink` does not start (no Pro DJ Link announcements, player status or players' media; the `Pro DJ Link Library` row hides). Mount-time rekordbox conversion is `mount-hook`'s. The Engine hook ignores the name |
+| `deemixd` | service, after a reboot: the Deezer download queue does not start (console Deezer jobs and Deezer tracks through the gateway) |
+| `internal-heal` | at the next Engine start: `engine-ui-guard` no longer rebuilds the internal library's `m.db` without reserved page bytes. Engine 5.3.0 cannot attach other libraries to an `m.db` that reserves them (a `.recover`ed copy). The Engine hook ignores the name |
+
+Needs: `gateway` needs `sso`. Switching a feature off in the
+console switches off what needs it as well (the file names both, so the hook and the boot
+script need no rules of their own); the console indents such a feature under its need and
+greys it out while the need is off. A feature that went off only with its need is marked
+`# off with <need>` in the file and comes back on with the need; one switched off by hand
+stays off. Second-generation bundles leave a switched-off service's
+unit out at boot; first-generation images skip it by `ExecCondition=enginex-feature-on`.
+
+Switching a feature off only removes what EngineX adds. At start the hook writes
+what the Engine runs with to `/run/enginex/hook-features`
+(`pid=…`, `build=…`, `off=…`); stream-sync passes the `off` list to the UI packs as
+`featuresOff` in `GET /v1/enginex/ui`, and rows that would do nothing hide: the
+Playback DSP rows, Color FX, PX delay and Live Stream with `dsp-guards` off, the
+EngineX streaming switches, quality and NetEase rows with `gateway` off. Other
+rows (for example the Stems entries with `stems` off) stay visible but do nothing.
+The stock TIDAL, SoundCloud and Beatport LINK rows stay hidden with `gateway` off.
+
+The web console's **EngineX features** card (`GET/POST /api/hook-features`) shows
+every feature with its state in the running Engine, writes `hook-disable.conf`
+(the whole file, every feature listed with what it does) and can restart Engine.
+Features the build left out cannot be switched on there; `mount-hook` waits for
+a reboot. Test: `test_hook_features.c`, `test_data_bundle.py`
+(`test_no_edisksd_hook_option_leaves_the_mount_hook_out`, `test_mount_hook_off_in_hook_disable_conf`),
+`pkg/webui/hook_features_test.go`, `test_ui_mod.py`
+(`test_switched_off_hook_features_hide_their_rows`).
+
 ## Remote Stems runtime adapter
 
 All backend offsets below are ELF virtual addresses in the ARMv7 Engine 5.0.4

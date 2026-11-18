@@ -1253,6 +1253,34 @@ for (const amt of [1/63, 2/63, 4/63, 5/63, 8/63, 1.0]) {{
         # ENGINEX VIEW PRESET must be on its own text: line so translate() matches it.
         self.assertRegex(bp.VIEW_ENTRIES, r'(?m)^\s*text:\s*"ENGINEX VIEW PRESET"\s*$')
 
+    def test_switched_off_hook_features_hide_their_rows(self):
+        # GET /v1/enginex/ui names the hook features the running Engine has off
+        # (hook-disable.conf); rows that would do nothing then hide. Without the list
+        # every row stays.
+        self.assertIn("property var scFeaturesOff: []", bp.SERVICES_MAIN)
+        self.assertIn("function scOff(name) { return scFeaturesOff.indexOf(name) >= 0 }", bp.SERVICES_MAIN)
+        self.assertIn("scFeaturesOff = Array.isArray(v.featuresOff) ? v.featuresOff : []", bp.SERVICES_MAIN)
+        dsp = '!root.scOff("dsp-guards")'
+        for text in ("Master Soft Clipper", "Auto-Gain (0 dB Normalize)", "Echo Out", "Color FX Style",
+                     "PX Delay Time Mode", "PX Delay Time (ms)"):
+            entry = bp.PLAYBACK_ENTRIES.split('text: "%s"' % text, 1)[1].split("EntryBase.ListEntry", 1)[0]
+            self.assertIn(dsp, entry.split("values:", 1)[0], text)
+        self.assertIn("visible: root.scHasPxDelay && " + dsp, bp.PLAYBACK_ENTRIES)
+        live = bp.SERVICES_ENTRIES.split('text: "Live Stream"', 1)[1].split("values:", 1)[0]
+        self.assertIn("visible: " + dsp, live)
+        gateway = 'visible: !root.scOff("gateway")'
+        for text in ("Streaming Quality", "NetEase Download"):
+            self.assertIn(gateway, bp.QUALITY_ENTRY.split('text: "%s"' % text, 1)[1].split("values:", 1)[0], text)
+        self.assertIn(gateway, bp.STREAM_SWITCHES)
+        # Rows that work without the hook keep no feature gate.
+        for text in ("Remote Load (LAN API)",):
+            self.assertNotIn("scOff", bp.SERVICES_ENTRIES.split('text: "%s"' % text, 1)[1].split("}", 1)[0], text)
+        # Reading the players' media is rb-bridge --prolink's job: with that service off
+        # (a console feature, listed in featuresOff) the row would do nothing.
+        library = bp.SERVICES_ENTRIES.split('text: "Pro DJ Link"', 1)[1].split("values:", 1)[0]
+        self.assertNotIn('text: "Pro DJ Link Library"', bp.SERVICES_ENTRIES)
+        self.assertNotIn('text: "Pro DJ Link Export to CDJ (Beta)"', bp.SERVICES_ENTRIES)
+        self.assertIn('visible: !root.scOff("rb-bridge")', library)
     def test_board_capabilities_jp07_vs_jc11_and_build_tag(self):
         # Task B: board-level capability gating must NOT depend on Config.device.isPlayer
         for expr in (
@@ -1794,7 +1822,7 @@ assert.strictEqual(evalIsLead({{ master: false }}), false);
         self.assertLessEqual(len(es("Scan to log in")), 16)
         # the pack's own PX Delay row holds two long labels ("Predeterminado (desactivado)" was 270 px wide in a
         # 136 px button and ran over "Milisegundos (ms)"; the English pair touched): wider buttons, not shorter words
-        self.assertRegex(bp.PLAYBACK_ENTRIES, r'text: "PX Delay Time Mode"\n\t\t\tvisible: root.scHasPxDelay\n\t\t\tentryWidth: 2[0-9][0-9]')
+        self.assertRegex(bp.PLAYBACK_ENTRIES, r'text: "PX Delay Time Mode"\n\t\t\tvisible: root.scHasPxDelay && !root.scOff\("dsp-guards"\)\n\t\t\tentryWidth: 2[0-9][0-9]')
         # one line with no wrapping: a longer one also widens the About page and pushes the Update button out
         stems = "On-deck stems (basic quality). For high-quality stems, run the EngineX Stems service on a computer on the same network."
         self.assertLessEqual(len(es(stems)), 118)

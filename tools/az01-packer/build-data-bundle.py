@@ -107,6 +107,20 @@ bin_dir="$bundle_dir/bin"
 lib_hook="$bundle_dir/lib/libengine-ui-hook.so"
 lib_edisksd_hook="$bundle_dir/lib/libedisksd-hook.so"
 
+# Features switched off on this deck (tools/ui-mod/hook_features.h): names separated by
+# commas, blanks or lines, '#' comments. The Engine hook reads the same file.
+hook_off() {
+    [ -f "$dest/hook-disable.conf" ] || return 1
+    sed 's/#.*//' "$dest/hook-disable.conf" | tr ',\t\r ' '\n\n\n\n' | grep -qx -- "$1"
+}
+
+# EngineX services the console can switch off (hookFeatures, Service): their units are
+# left out at boot.
+rb_bridge_on=1; deemixd_on=1
+! hook_off rb-bridge || rb_bridge_on=
+! hook_off deemixd || deemixd_on=
+services="enginex-stream-sync.service${rb_bridge_on:+ enginex-rb-bridge.service}${deemixd_on:+ enginex-deemixd.service} engine-guardian.service"
+
 @SWAP_UNDO@
 # The boot run (no arguments; --restore-tz runs on every Engine start and may overlap an
 # install): a swap that lost power is undone, and the generation put back activates itself.
@@ -243,6 +257,7 @@ restore_gen2_timezone() {
 # rekordbox sticks already mounted when the hook was not yet active (present at boot).
 convert_mounted() {
     [ ! -e "$dest/ui/safe-mode" ] || return 0
+    ! hook_off mount-hook || return 0
     if [ -x "$bin_dir/rb-bridge" ]; then
         for m in "${ENGINEX_MEDIA_ROOT:-/media}"/*; do
             if [ -d "$m/PIONEER" ] || [ -d "$m/.PIONEER" ]; then
@@ -323,7 +338,7 @@ mkdir -p /run/systemd/system/engine.service.d
 # leave the hook-less /usr/Engine/Engine running and nobody to run poweroff (#116). The daemons have their own units.
 cat <<EOF > /run/systemd/system/engine.service.d/99-enginex.conf
 [Unit]
-Wants=enginex-stream-sync.service enginex-rb-bridge.service enginex-deemixd.service engine-guardian.service
+Wants=enginex-stream-sync.service${rb_bridge_on:+ enginex-rb-bridge.service}${deemixd_on:+ enginex-deemixd.service} engine-guardian.service
 After=enginex-stream-sync.service
 
 [Service]
@@ -398,8 +413,11 @@ EOF
 
 # Converts a rekordbox stick inside the mount, before Engine sees it (as on the 1st-gen images).
 edisksd_changed=0
-if [ -f "$lib_edisksd_hook" ]; then
-    dropin=/run/systemd/system/edisksd.service.d/99-enginex.conf
+dropin=/run/systemd/system/edisksd.service.d/99-enginex.conf
+if hook_off mount-hook; then
+    # mount-hook off: sticks are mounted as stock Engine OS does, nothing converted or healed.
+    [ ! -f "$dropin" ] || { rm -f "$dropin"; edisksd_changed=1; }
+elif [ -f "$lib_edisksd_hook" ]; then
     mkdir -p /run/systemd/system/edisksd.service.d
     cat <<EOF > "$dropin.new"
 [Service]
@@ -491,7 +509,8 @@ WantedBy=multi-user.target
 EOF
 fi
 
-if [ -x "$bin_dir/rb-bridge" ]; then
+rm -f /run/systemd/system/enginex-rb-bridge.service /run/systemd/system/enginex-deemixd.service
+if [ -x "$bin_dir/rb-bridge" ] && [ -n "$rb_bridge_on" ]; then
     cat <<EOF > /run/systemd/system/enginex-rb-bridge.service
 [Unit]
 Description=EngineX Rekordbox Zero-Scan & Pro DJ Link Bridge
@@ -510,7 +529,7 @@ WantedBy=multi-user.target
 EOF
 fi
 
-if [ -x "$bin_dir/enginex-deemixd" ]; then
+if [ -x "$bin_dir/enginex-deemixd" ] && [ -n "$deemixd_on" ]; then
     cat <<EOF > /run/systemd/system/enginex-deemixd.service
 [Unit]
 Description=EngineX Deezer Download Queue
@@ -568,7 +587,7 @@ fi
 # Seed /data/StreamingAccounts.json with a stored-credential TIDAL entry (#56, #159)
 # so Engine 5.3.0 logs in to the local gateway at boot instead of waiting for Profile SSO.
 accounts=${ENGINEX_STREAMING_ACCOUNTS:-/data/StreamingAccounts.json}
-if [ ! -e "$dest/ui/safe-mode" ] && [ -d "${accounts%/*}" ] && ! grep -qx 'scope=tidal' "$dest/ui/settings.conf" 2>/dev/null; then
+if [ ! -e "$dest/ui/safe-mode" ] && [ -d "${accounts%/*}" ] && ! hook_off gateway && ! hook_off sso && ! grep -qx 'scope=tidal' "$dest/ui/settings.conf" 2>/dev/null; then
     export T='"TIDAL": "{\"provider\":\"TIDAL\",\"providerType\":\"TIDAL\",\"accessToken\":\"enginex\",\"refreshToken\":\"enginex\"}"'
     if grep -Eq '"TIDAL"[[:space:]]*:' "$accounts" 2>/dev/null && ! grep -E '"TIDAL"[[:space:]]*:' "$accounts" 2>/dev/null | grep -q 'accessToken'; then
         awk '{
@@ -599,7 +618,10 @@ fi
 # Sticks mounted before this ran never went through the edisksd hook.
 # In a chroot systemctl only prints "Running in chroot, ignoring" and exits 0, so require systemd as PID 1.
 if [ "$(cat "${ENGINEX_PID1_COMM:-/proc/1/comm}" 2>/dev/null)" = systemd ] && systemctl daemon-reload >/dev/null 2>&1; then
-    systemctl restart --no-block enginex-stream-sync.service enginex-rb-bridge.service enginex-deemixd.service engine-guardian.service || :
+    # A service switched off since the last run (its unit is gone now) stops as well.
+    [ -n "$rb_bridge_on" ] || systemctl stop --no-block enginex-rb-bridge.service 2>/dev/null || :
+    [ -n "$deemixd_on" ] || systemctl stop --no-block enginex-deemixd.service 2>/dev/null || :
+    systemctl restart --no-block $services || :
     [ -z "$ssh_start" ] || systemctl start --no-block sshd.service || :
     [ ! -x "$bin_dir/enginex-sd-highspeed" ] || ENGINEX_UI_DIR="$dest/ui" ENGINEX_RUN_ROOT=/run/enginex "$bin_dir/enginex-sd-highspeed" boot || :
     # Blocking, so edisksd is up again before the hooked start converts what is in /media.
@@ -627,8 +649,8 @@ else
         esac
     done
     [ -x "$bin_dir/stream-sync" ] && "$bin_dir/stream-sync" --listen :8080 --cpu 3 >/dev/null 2>&1 &
-    [ -x "$bin_dir/rb-bridge" ] && "$bin_dir/rb-bridge" --prolink >/dev/null 2>&1 &
-    [ -x "$bin_dir/enginex-deemixd" ] && "$bin_dir/enginex-deemixd" -state-dir "$dest/state" >/dev/null 2>&1 &
+    [ -x "$bin_dir/rb-bridge" ] && [ -n "$rb_bridge_on" ] && "$bin_dir/rb-bridge" --prolink >/dev/null 2>&1 &
+    [ -x "$bin_dir/enginex-deemixd" ] && [ -n "$deemixd_on" ] && "$bin_dir/enginex-deemixd" -state-dir "$dest/state" >/dev/null 2>&1 &
 fi
 '''
 
@@ -1033,7 +1055,10 @@ def is_static_elf(data):
                for i in range(phnum))
 
 
-def build(version, suite, hook, ui_packs, out, prefix='SCLIVE4', edisksd_hook=None, release_tag=None, fsck_hfsplus=None, lklfuse=None, require_lklfuse=False):
+def build(version, suite, hook, ui_packs, out, prefix='SCLIVE4', edisksd_hook=None, release_tag=None, fsck_hfsplus=None, lklfuse=None, require_lklfuse=False, no_edisksd_hook=False):
+    """no_edisksd_hook leaves the mount hook out: sticks are never converted or healed at mount."""
+    if no_edisksd_hook and edisksd_hook:
+        fail('--edisksd-hook and --no-edisksd-hook exclude each other')
     if prefix not in PREFIXES:
         fail(f'prefix must be one of {PREFIXES}, got {prefix!r}')
     if not VERSION_RE.match(version):
@@ -1045,7 +1070,7 @@ def build(version, suite, hook, ui_packs, out, prefix='SCLIVE4', edisksd_hook=No
         fail(f'{out} exists; refusing to overwrite')
     files = {}  # path in bundle -> (bytes, mode)
     machine = EM_AARCH64 if prefix in AZ04 else EM_ARM
-    if edisksd_hook is None and (Path(hook).parent / 'libedisksd-hook.so').is_file():
+    if edisksd_hook is None and not no_edisksd_hook and (Path(hook).parent / 'libedisksd-hook.so').is_file():
         edisksd_hook = Path(hook).parent / 'libedisksd-hook.so'
     if fsck_hfsplus is None and prefix in AZ04 and (Path(hook).parent / 'fsck.hfsplus').is_file():
         fsck_hfsplus = Path(hook).parent / 'fsck.hfsplus'
@@ -1141,12 +1166,14 @@ def main(argv=None):
     p.add_argument('--fsck-hfsplus', type=Path, help='static fsck.hfsplus (AZ04 default: next to --hook, if present)')
     p.add_argument('--lklfuse', type=Path, help='static-libfuse lklfuse for armhf Gen-2 (default: next to --hook, if present)')
     p.add_argument('--require-lklfuse', action='store_true', help='fail if lklfuse is missing for armhf Gen-2 models')
+    p.add_argument('--no-edisksd-hook', action='store_true',
+                   help='leave the mount hook out (no rekordbox conversion or library heal when a stick is inserted)')
     p.add_argument('--ui-packs', required=True, type=Path, help='build_packs.py packs.tar(.gz)')
     p.add_argument('--out', required=True, type=Path, help='new output directory')
     p.add_argument('--prefix', default='SCLIVE4', choices=PREFIXES, help='model prefix in the file name')
     p.add_argument('--release-tag', help='tag of the release, default v<version>; v<version>-rN for a same-version re-release')
     a = p.parse_args(argv)
-    json.dump(build(a.version, a.suite, a.hook, a.ui_packs, a.out, a.prefix, a.edisksd_hook, a.release_tag, a.fsck_hfsplus, a.lklfuse, a.require_lklfuse), sys.stdout, indent=2)
+    json.dump(build(a.version, a.suite, a.hook, a.ui_packs, a.out, a.prefix, a.edisksd_hook, a.release_tag, a.fsck_hfsplus, a.lklfuse, a.require_lklfuse, a.no_edisksd_hook), sys.stdout, indent=2)
     print()
 
 

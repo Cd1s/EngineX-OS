@@ -115,3 +115,22 @@ func TestSameDeemixd(t *testing.T) {
 		}
 	}
 }
+
+// First generation: stream-sync starts deemixd itself (no unit at boot), so the
+// console's deemixd switch must reach this supervisor, not only the gen-2 units.
+func TestSwitchedOffDeemixdIsNotSupervised(t *testing.T) {
+	old := deemixdOff
+	t.Cleanup(func() { deemixdOff = old })
+	base := "http://" + deemixdAddr
+	deemixdOff = func() bool { return false }
+	if !supervisesDeemixd(defaultDeemixd, "", base) {
+		t.Fatal("deemixd on: not supervised")
+	}
+	if supervisesDeemixd("", "", base) || supervisesDeemixd(defaultDeemixd, "/run/x.sock", base) || supervisesDeemixd(defaultDeemixd, "", "http://10.0.0.2:6595") {
+		t.Fatal("supervised although left to others")
+	}
+	deemixdOff = func() bool { return true }
+	if supervisesDeemixd(defaultDeemixd, "", base) {
+		t.Fatal("deemixd switched off in hook-disable.conf, still supervised")
+	}
+}

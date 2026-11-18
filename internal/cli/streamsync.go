@@ -124,7 +124,7 @@ func StreamSync(args []string) error {
 	// The player's systemd reads its units before the writable /etc overlay is
 	// mounted, so a unit enabled there never starts at boot. Starting the
 	// downloader here makes it part of stream-sync, which the base /etc enables.
-	if *deemixd != "" && *socket == "" && sameDeemixd(*base) {
+	if supervisesDeemixd(*deemixd, *socket, *base) {
 		go superviseDeemixd(ctx, deemixdAddr, *deemixd, "-state-dir", *state, "-download-dir", *downloads)
 	}
 	dl := &deemixclient.Client{Mode: *mode, BaseURL: *base, QueuePath: *queue, DownloadDir: *downloads, AllowLossy: *lossy, MaxCache: internalCache, MinFree: internalMinFree}

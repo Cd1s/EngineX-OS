@@ -1507,7 +1507,7 @@ static void analysis_bind(sqlite_bind_int64_fn bind, sqlite3 *db, const char *sq
     assert(sqlite3_finalize(stmt) == SQLITE_OK);
 }
 
-static void test_analysis_dispatch(void) {
+static void test_analysis_dispatch(const char *off, int gateway, int shadow) {
     enum { lock = 0x1d55120, prepare = 0x1d55634, close_v2 = 0x1d21af4, filename = 0x1cb0d94,
            bind = 0x1cdfb90, bind_int = 0x1cdfc28, db_handle = 0x1c9a210, sql_text = 0x1c9a2a0,
            step = 0x1d6fef8, analyze = 0xe525ec, load = 0xd6b100, size = 0x2d00000 };
@@ -1542,7 +1542,7 @@ static void test_analysis_dispatch(void) {
     const uint32_t bind_code[] = {0xe16d41f8, 0xe1a04001, 0xe49d4018};
     emit_tail(image + bind, bind_code, 3, sqlite3_bind_int64);
 
-    char dir[] = "/tmp/enginex-dispatch-XXXXXX", board[128], loading[128], rbx[128], peer[128], sidecar[128], library[128];
+    char dir[] = "/tmp/enginex-dispatch-XXXXXX", board[128], loading[128], rbx[128], peer[128], sidecar[128], library[128], conf[128];
     assert(mkdtemp(dir));
     snprintf(board, sizeof board, "%s/board", dir);
     snprintf(loading, sizeof loading, "%s/.loading", dir);
@@ -1550,22 +1550,31 @@ static void test_analysis_dispatch(void) {
     snprintf(peer, sizeof peer, "%s/peer-a", dir);
     snprintf(sidecar, sizeof sidecar, "%s/peer-a/track.wav.analysis", dir);
     snprintf(library, sizeof library, "%s/m.db", dir);
+    snprintf(conf, sizeof conf, "%s/hook-disable.conf", dir);
     assert(!mkdir(peer, 0700));
     static const char data[] = "RBXA1" "\5\0\0\0" "track" "\5\0\0\0" "waves" "\5\0\0\0" "beats" "\1\0\0\0" "c" "\0\0\0\0";
     analysis_file(board, "JP07", 4);
     analysis_file(loading, "", 0);
     analysis_file(rbx, data, sizeof data - 1);
     analysis_file(sidecar, data, sizeof data - 1);
+    if (*off) analysis_file(conf, off, strlen(off));
+    hf_path = conf;
+    hf_reload();
     product_code_path = board;
     sc_rbx_dir = sc_shadow_root = dir;
     sc_shadow_library = library;
     sqlite_exec_original = real_sqlite_exec;
 
     install_rekordbox_analysis(base, page);
-    assert(rbx_bind_original);
+    assert(!!rbx_prepare_original == gateway);
+    assert(!!rbx_bind_original == (gateway || shadow));
+    assert((memcmp(image + lock, lock_code, sizeof lock_code) != 0) == gateway);
     install_shadow_analysis(base, page);
-    assert(shadow_analysis_enabled);
-    assert(((const uint32_t *)(base + bind))[1] == (uintptr_t)rbx_bind);
+    assert(shadow_analysis_enabled == shadow);
+    assert((memcmp(image + step, step_code, sizeof step_code) != 0) == shadow);
+    assert((memcmp(image + analyze, lock_code, sizeof lock_code) != 0) == shadow);
+    if (gateway || shadow) assert(((const uint32_t *)(base + bind))[1] == (uintptr_t)rbx_bind);
+    else assert(!memcmp(image + bind, bind_code, sizeof bind_code));
     // The stock consumers use the prepared statement's SQLite handle and SQL.
     // Use libsqlite adapters for the test statements while keeping the patched
     // entry and its original bind trampoline in the path.
@@ -1588,15 +1597,16 @@ static void test_analysis_dispatch(void) {
     analysis_bind(entry, db, shadow_read, 1);
     assert(pragma(db, "SELECT count(*) FROM PerformanceData WHERE trackData IS NOT NULL") == 0);
     analysis_bind(entry, db, SC_RBX_ANALYSIS_SELECT "?", 1);
-    assert(pragma(db, "SELECT id FROM Track WHERE isAnalyzed = 1") == 1);
-    assert(pragma(db, "SELECT count(*) FROM PerformanceData WHERE trackData IS NOT NULL") == 1);
+    assert(pragma(db, "SELECT isAnalyzed FROM Track WHERE id = 1") == gateway);
+    assert(pragma(db, "SELECT count(*) FROM PerformanceData WHERE trackData IS NOT NULL") == gateway);
     analysis_bind(entry, db, shadow_read, 2);
-    assert(pragma(db, "SELECT count(*) FROM Track WHERE isAnalyzed = 1") == 2);
-    assert(pragma(db, "SELECT count(*) FROM PerformanceData WHERE trackData IS NOT NULL") == 2);
+    assert(pragma(db, "SELECT isAnalyzed FROM Track WHERE id = 2") == shadow);
+    assert(pragma(db, "SELECT count(*) FROM PerformanceData WHERE trackData IS NOT NULL") == gateway + shadow);
     assert(sqlite3_close(db) == SQLITE_OK);
+    if (*off) assert(!unlink(conf));
     assert(!unlink(library) && !unlink(sidecar) && !rmdir(peer) && !unlink(rbx) && !unlink(loading) && !unlink(board) && !rmdir(dir));
     assert(!munmap(image, size));
-    puts("Installed SQLite bind dispatcher isolates rekordbox and shadow: PASS");
+    printf("Installed SQLite bind dispatcher isolates rekordbox and shadow (off: %s): PASS\n", *off ? off : "none");
 }
 
 int main(int argc, char **argv) {
@@ -1628,6 +1638,19 @@ int main(int argc, char **argv) {
     test_stems_processor_prefers_enginex();
     test_alsa_boot_hook();
     for (int i = 1; i < argc; i++) { test_patch_files(argv[i]); test_rec_stream(argv[i]); }
-    test_analysis_dispatch();
+    static const struct { const char *off; int gateway, shadow; } cases[] = {
+        {"", 1, 1}, {"gateway", 0, 1}, {"four-deck", 1, 0}, {"gateway,four-deck", 0, 0},
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof *cases; i++) {
+        fflush(NULL);
+        pid_t child = fork(); assert(child >= 0);
+        if (!child) {
+            test_analysis_dispatch(cases[i].off, cases[i].gateway, cases[i].shadow);
+            exit(0);
+        }
+        int status;
+        assert(waitpid(child, &status, 0) == child);
+        assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    }
     return 0;
 }

@@ -349,7 +349,31 @@ lacks ', RUN+=' "$ROOT/rootfs-overlay/etc/udev/rules.d/60-enginex-storage.rules"
 has 'Restart=always' "$ROOT/rootfs-overlay/etc/systemd/system/rb-bridge.service"
 ok 'background service isolation and systemd udev handoff are installed'
 
-for script in "$STORAGE" "$PERF" "$ROOT/rootfs-overlay/usr/local/bin/enginex-suite-exec" "$ROOT/rootfs-overlay/etc/enginex/engine-ui-guard" "$ROOT/rootfs-overlay/usr/local/bin/enginex-sd-highspeed"; do
+# rb-bridge and deemixd can be switched off in the console (hook-disable.conf). deemixd
+# does not depend on gateway: the console's Deezer jobs use it directly. systemd skips a
+# unit whose ExecCondition exits 1 (systemd >= 243; SC LIVE 4 5.3.0 has 255; an older
+# systemd ignores the line with a warning and the service runs as before the switch).
+FEATURE_ON=$ROOT/rootfs-overlay/usr/local/bin/enginex-feature-on
+has 'ExecCondition=/usr/local/bin/enginex-feature-on rb-bridge' "$ROOT/rootfs-overlay/etc/systemd/system/rb-bridge.service"
+has 'ExecCondition=/usr/local/bin/enginex-feature-on deemixd' "$ROOT/rootfs-overlay/etc/systemd/system/enginex-deemixd.service"
+[[ -x $FEATURE_ON ]] || fail 'enginex-feature-on must be executable'
+FEATURE_DIR=$(mktemp -d)
+ENGINEX_CUSTOM=$FEATURE_DIR sh "$FEATURE_ON" rb-bridge || fail 'no hook-disable.conf: every service runs'
+printf '# all on\nstems, zoom30\n' > "$FEATURE_DIR/hook-disable.conf"
+ENGINEX_CUSTOM=$FEATURE_DIR sh "$FEATURE_ON" rb-bridge || fail 'rb-bridge not named: it runs'
+printf 'stems\nrb-bridge   # no Pro DJ Link\n' > "$FEATURE_DIR/hook-disable.conf"
+! ENGINEX_CUSTOM=$FEATURE_DIR sh "$FEATURE_ON" rb-bridge || fail 'rb-bridge named: it must not run'
+grep -q 'enginex-feature-on deemixd gateway' "$ROOT/rootfs-overlay/etc/systemd/system/enginex-deemixd.service" && fail 'deemixd must not wait for gateway'
+printf 'zoom30,gateway\n' > "$FEATURE_DIR/hook-disable.conf"
+ENGINEX_CUSTOM=$FEATURE_DIR sh "$FEATURE_ON" deemixd || fail 'gateway off: deemixd still runs'
+printf 'deemixd\n' > "$FEATURE_DIR/hook-disable.conf"
+! ENGINEX_CUSTOM=$FEATURE_DIR sh "$FEATURE_ON" deemixd || fail 'deemixd named: it must not run'
+printf '# rb-bridge\nxrb-bridge\n' > "$FEATURE_DIR/hook-disable.conf"
+ENGINEX_CUSTOM=$FEATURE_DIR sh "$FEATURE_ON" rb-bridge || fail 'a comment or another name does not count'
+rm -rf "$FEATURE_DIR"
+ok 'rb-bridge and deemixd follow hook-disable.conf'
+
+for script in "$STORAGE" "$PERF" "$ROOT/rootfs-overlay/usr/local/bin/enginex-suite-exec" "$ROOT/rootfs-overlay/usr/local/bin/enginex-feature-on" "$ROOT/rootfs-overlay/etc/enginex/engine-ui-guard" "$ROOT/rootfs-overlay/usr/local/bin/enginex-sd-highspeed"; do
     [[ $(head -n 1 "$script") == '#!/bin/sh' ]] || fail "$script must use /bin/sh (no bash on Engine OS)"
     if command -v busybox >/dev/null; then busybox sh -n "$script" || fail "busybox sh syntax: $script"; else sh -n "$script"; fi
 done
@@ -506,6 +530,15 @@ printf 'scope=tidal\nsources=spotify,netease\n' > "$ENGINEX_UI_DIR/settings.conf
 sh "$GUARD" pre
 ! grep -qx 'scope=tidal' "$ENGINEX_UI_DIR/settings.conf" || fail 'disabled TIDAL retained stale scope'
 [[ $(tidal_entry) == 1 ]] || fail 'disabled TIDAL must seed the gateway account'
+# internal-heal: the console can switch off the internal library check at Engine start.
+printf '#!/bin/sh\necho "$*" >> "%s"\n' "$TMP/heal.log" > "$TMP/guardian-stub"; chmod +x "$TMP/guardian-stub"
+heal_pre() { rm -f "$TMP/heal.log"; ENGINEX_ENGINE_GUARDIAN=$TMP/guardian-stub ENGINEX_CUSTOM=$TMP/heal-custom sh "$GUARD" pre; }
+mkdir -p "$TMP/heal-custom"
+heal_pre; grep -q -- '--normalize-reserve' "$TMP/heal.log" 2>/dev/null || fail 'guard must check the internal library at Engine start'
+printf '# internal-heal  # left on\nstems\n' > "$TMP/heal-custom/hook-disable.conf"
+heal_pre; grep -q -- '--normalize-reserve' "$TMP/heal.log" 2>/dev/null || fail 'a commented internal-heal must keep the library check'
+printf 'stems,internal-heal  # off\n' > "$TMP/heal-custom/hook-disable.conf"
+heal_pre; [[ ! -e $TMP/heal.log ]] || fail 'internal-heal off in hook-disable.conf must skip the library check'
 has 'Wants=stream-sync.service' "$ROOT/rootfs-overlay/etc/systemd/system/engine.service.d/60-ui-hook.conf"
 has 'After=stream-sync.service' "$ROOT/rootfs-overlay/etc/systemd/system/engine.service.d/60-ui-hook.conf"
 rm -rf "$ENGINEX_UI_DIR"

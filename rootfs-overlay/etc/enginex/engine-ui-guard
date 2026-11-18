@@ -30,6 +30,11 @@ record() {
     (umask 077; printf '%s\n' "$2" > "$UI/.$1.$$" && mv -f "$UI/.$1.$$" "$UI/$1")
 }
 uptime_seconds() { cut -d. -f1 "${ENGINEX_BOOT_UPTIME:-/proc/uptime}"; }
+# feature_off NAME: the console switched NAME off in hook-disable.conf.
+feature_off() {
+    conf="${ENGINEX_CUSTOM:-/data/enginex}/hook-disable.conf"
+    [ -f "$conf" ] && sed 's/#.*//' "$conf" | tr ',\t\r ' '\n\n\n\n' | grep -qx "$1"
+}
 quarantine() {
     rm -rf "$UI/mods-overlay"
     : > "$UI/mods-quarantined"
@@ -209,7 +214,9 @@ watch)
                 esac
                 if [ $((now - since)) -ge "$limit" ] &&
                     [ "$(cat "$UI/boot-token" 2>/dev/null)" = "$token" ] &&
-                    [ "$(cat "$UI/boot-ready" 2>/dev/null)" != "$token" ]; then
+                    [ "$(cat "$UI/boot-ready" 2>/dev/null)" != "$token" ] &&
+                    # Only the EngineX interface acknowledges a start; the stock one never does.
+                    ! feature_off ui-packs; then
                     if fallback ui-ready-timeout; then
                         # Do not wait for report generation or restart a unit during shutdown.
                         if [ "$(systemctl is-system-running 2>/dev/null)" != stopping ]; then
@@ -371,7 +378,12 @@ pre|settings)
     guardian=${ENGINEX_ENGINE_GUARDIAN:-/usr/local/bin/engine-guardian}
     # A huge or locked m.db must not hold the splash screen forever.
     t=; ! command -v timeout >/dev/null 2>&1 || t="timeout 10"
-    [ ! -x "$guardian" ] || $t "$guardian" --heal-mount "${ENGINEX_ENGINE_DATA_DIR:-/data/AppDataUser/AIR Music Technology/Engine}" --normalize-reserve --fix-mp3-grids --timeout 10s > /dev/null 2>&1 || :
+    # The console's internal-heal switch (hook-disable.conf) leaves the library alone.
+    if feature_off internal-heal; then
+        :
+    elif [ -x "$guardian" ]; then
+        $t "$guardian" --heal-mount "${ENGINEX_ENGINE_DATA_DIR:-/data/AppDataUser/AIR Music Technology/Engine}" --normalize-reserve --fix-mp3-grids --timeout 10s > /dev/null 2>&1 || :
+    fi
     # Engine 5.3.0 sends a TIDAL client with no saved account (or a tokenless SSO
     # account) to the Engine DJ Profile login (#56, #159), and every EngineX service
     # runs on that client. With stored accessToken/refreshToken credentials Engine
@@ -388,7 +400,7 @@ pre|settings)
                 mv "$UI/settings.conf.tmp" "$UI/settings.conf" ;;
         esac
     fi
-    if ! grep -qx 'scope=tidal' "$UI/settings.conf" 2>/dev/null; then
+    if ! feature_off gateway && ! feature_off sso && ! grep -qx 'scope=tidal' "$UI/settings.conf" 2>/dev/null; then
         if grep -Eq '"TIDAL"[[:space:]]*:' "$accounts" 2>/dev/null && ! grep -E '"TIDAL"[[:space:]]*:' "$accounts" 2>/dev/null | grep -q 'accessToken'; then
             awk '{
                 if ($0 ~ /"TIDAL"[[:space:]]*:/ && $0 !~ /accessToken/) {

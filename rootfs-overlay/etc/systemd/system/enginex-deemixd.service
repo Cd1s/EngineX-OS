@@ -11,6 +11,7 @@ Slice=enginex-background.slice
 CPUAffinity=3
 Nice=19
 IOSchedulingClass=idle
+ExecCondition=/usr/local/bin/enginex-feature-on deemixd
 ExecStart=/usr/local/bin/enginex-deemixd -state-dir /data/enginex/state
 # No -download-dir: the daemon prefers the SD cache when it is mounted, else /data/enginex/Stream.
 Restart=on-failure

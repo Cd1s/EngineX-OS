@@ -956,7 +956,10 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 			Tunnel     TunnelStatus `json:"tunnel"`
 			// LANStems: the home legacy-stemsd last seen, for Settings -> About (#148).
 			LANStems *stems.LANState `json:"lanStems,omitempty"`
-		}{v, s.cfg.AccessToken, consoleLink, s.TunnelManager().Status(""), relay.LANStems})
+			// FeaturesOff: hook features the running Engine has off; QML hides their
+			// rows. Absent when unknown: every row stays.
+			FeaturesOff []string `json:"featuresOff,omitempty"`
+		}{v, s.cfg.AccessToken, consoleLink, s.TunnelManager().Status(""), relay.LANStems, runningFeaturesOff()})
 		if err != nil {
 			fail(w, http.StatusInternalServerError, err)
 			return
