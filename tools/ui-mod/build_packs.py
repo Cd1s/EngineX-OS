@@ -8314,12 +8314,19 @@ def edits(dev: bool):
         ]
         # Integer-BPM pitch-fader plateaus when BPM Decimals is 2 (1 = exact stock linear fader):
         # map [0, 0.5] and [0.5, 1] independently around center so 0% stays exact,
-        # placing 2-ADC-step (w = 4/4095 in half-travel) plateaus at each integer BPM with uniform linear slope between them.
+        # placing 2-hardware-step (w = 4 steps in half-travel, step learned from the fader's own CC jumps, 4/16383 until seen) plateaus at each integer BPM with uniform linear slope between them.
         scaled["ControlSurfaceModules/ControlSurfaceModules/SpeedSlider.qml"] = [
             ('    property bool invert: false\n',
              '''    property bool invert: false
+    property real scPrevIn: -1
+    property int scStepUnits: 0
 
-    function scTransformSpeed(inVal, invert, loaded, origProp, metaProp, rangeProp) {
+    // One fader step in 14-bit CC units, learned as the smallest jump between two successive raw values (0 = not yet seen).
+    function scLearnFaderStep(prevIn, inVal, learned) {
+        const d = Math.round(Math.abs(inVal - prevIn) * 16383.0)
+        return d >= 1 && (!(learned > 0) || d < learned) ? d : learned
+    }
+    function scTransformSpeed(inVal, invert, loaded, origProp, metaProp, rangeProp, stepUnits) {
         let u = invert ? 1.0 - inVal : inVal
         if (u < 0.0) u = 0.0
         else if (u > 1.0) u = 1.0
@@ -8334,7 +8341,10 @@ def edits(dev: bool):
         const r = rPct > 0 ? rPct / 100.0 : 0
         if (!(B > 0) || !(r > 0)) return u
 
-        const w = 4.0 / 4095.0
+        // The plateau is two real fader steps wide: y = 2 * |u - 0.5| doubles the step, so w = 4 * step. The closed plateau holds
+        // two steps wherever it falls, three only if a step sits exactly on both edges.
+        const step = stepUnits > 0 ? stepUnits / 16383.0 : 4.0 / 16383.0
+        const w = 4.0 * step
         const sign = u >= 0.5 ? 1 : -1
         const y = sign > 0 ? 2.0 * (u - 0.5) : 2.0 * (0.5 - u)
         const delta = B * r
@@ -8344,7 +8354,7 @@ def edits(dev: bool):
         const k0 = hasCenter ? bRound + sign : (sign > 0 ? Math.floor(B) + 1 : Math.ceil(B) - 1)
         const k1 = sign > 0 ? Math.floor(tEnd - 1e-4) : Math.ceil(tEnd + 1e-4)
         const m = Math.max(0, sign * (k1 - k0) + 1)
-        const wEff = Math.min(w, 0.5 / (m + 0.5))
+        const wEff = Math.min(w, 0.9 / (m + 0.5))
         const cEff = hasCenter ? 0.5 * wEff : 0.0
         const S = 1.0 - cEff - m * wEff
         if (y <= cEff) return 0.5
@@ -8370,9 +8380,11 @@ def edits(dev: bool):
              '            valueTransform: QtObject {\n'
              '                property bool invert: module.invert\n'
              '                function transformValue(in_val) {\n'
+             '                    if (module.scPrevIn >= 0) module.scStepUnits = module.scLearnFaderStep(module.scPrevIn, in_val, module.scStepUnits)\n'
+             '                    module.scPrevIn = in_val\n'
              '                    return module.scTransformSpeed(\n'
              '                        in_val, invert, scSpeedAssign.songLoaded,\n'
-             '                        scSpeedAssign.pOrigBpm, scSpeedAssign.pMetaBpm, scSpeedAssign.pSpeedRange\n'
+             '                        scSpeedAssign.pOrigBpm, scSpeedAssign.pMetaBpm, scSpeedAssign.pSpeedRange, module.scStepUnits\n'
              '                    )\n'
              '                }\n'
              '            }\n'),

@@ -10142,6 +10142,9 @@ class WholeBpmTest(unittest.TestCase):
             self.assertIn('property int scBpmDecimals: 2', gcfg)
             self.assertIn('scGlobalConfig.scBpmDecimals = parseInt(j.bpmDecimals) === 1 ? 1 : 2', gcfg)
             self.assertIn('module.scTransformSpeed(', slider)
+            self.assertIn('module.scStepUnits = module.scLearnFaderStep(module.scPrevIn, in_val, module.scStepUnits)', slider)
+            self.assertIn('scSpeedAssign.pSpeedRange, module.scStepUnits', slider)
+            self.assertNotIn('4095', slider)
             self.assertIn(
                 'readonly property bool songLoaded: Planck.getProperty("/Engine/Deck%1/Track/SongLoaded".arg(modelData))\n'
                 '                .translator.state',
@@ -10156,6 +10159,7 @@ class WholeBpmTest(unittest.TestCase):
 
             fn_dec = re.search(r"function scGetBpmDecimals\(\)\s*\{[\s\S]*?\n    \}", gcfg)
             fn_tx = re.search(r"function scTransformSpeed\([^\)]*\)\s*\{[\s\S]*?\n    \}", slider)
+            fn_learn = re.search(r"function scLearnFaderStep\([^\)]*\)\s*\{[\s\S]*?\n    \}", slider)
             fn_sync = re.search(r"function scSyncBpmDecimals\(\)\s*\{[\s\S]*?\n\t\}", main_qml)
             fn_parse = re.search(r"function scParseSettingsConf\(text\)\s*\{[\s\S]*?\n\t\}", main_qml)
             self.assertIsNotNone(fn_dec)
@@ -10207,6 +10211,7 @@ globalThis.root = {{
 {fn_parse.group(0)}
 {fn_dec.group(0)}
 {fn_tx.group(0)}
+{fn_learn.group(0)}
 globalThis.globalConfig = {{ scGetBpmDecimals }};
 
 // Before UI loads (value=0), scGetBpmDecimals falls back to HTTP poll scBpmDecimals (default 2)
@@ -10277,7 +10282,8 @@ for (const inv of [false, true]) {{
             const hits = new Map();
             let maxStep = 0, prevBpm = null;
             for (let i = 0; i <= 4095; i++) {{
-                const uIn = inv ? 1 - i / 4095 : i / 4095;
+                const raw = i * 4 / 16383;  // default (step not learned yet): 4 raw CC units, a 12-bit fader
+                const uIn = inv ? 1 - raw : raw;
                 const uOut = scTransformSpeed(uIn, inv, true, oP, mP, rP);
                 assert.ok(uOut >= prev - 1e-12 && uOut >= 0 && uOut <= 1);
                 prev = uOut;
@@ -10290,7 +10296,7 @@ for (const inv of [false, true]) {{
             const kMin = Math.ceil(B * (1 - r) + 1e-4), kMax = Math.floor(B * (1 + r) - 1e-4);
             for (let k = kMin; k <= kMax; k++) {{
                 if (Math.abs(k - B) < 1e-4) continue;
-                assert.ok((hits.get(k) || 0) >= 2, `missing plateau B=${{B}} r=${{rPct}}% k=${{k}}`);
+                const h = hits.get(k) || 0; assert.ok(h >= 2 && h <= 3, `plateau B=${{B}} r=${{rPct}}% k=${{k}} hits=${{h}}`);  // 3: a neighbour within 1e-4 BPM of the whole number
             }}
             if (B === 124.0 && rPct <= 16) {{
                 assert.ok(maxStep <= 0.01, `B=124 r=${{rPct}}% maxStep=${{maxStep}}`);
@@ -10298,6 +10304,76 @@ for (const inv of [false, true]) {{
         }}
     }}
 }}
+
+// The plateau is TWO REAL fader steps whatever the fader resolution (14 / 13 / 12 / 11 / 10 bit = 1 / 2 / 4 / 8 / 16 raw CC
+// units), at every pitch range and in both directions: each whole number holds 2 steps (3 only when steps sit on both edges);
+// outside the plateaus the fader is never dead.
+for (const s of [1, 2, 4, 8, 16]) {{
+    for (const inv of [false, true]) {{
+        for (const B of [87.6, 123.45, 124.0, 126.5, 174.0]) {{
+            for (const rPct of [4, 8, 10, 16, 24, 50, 100]) {{
+                const r = rPct / 100;
+                const oP = propNum(B), mP = propStr(""), rP = propStr(rPct + "%");
+                const outs = [];
+                for (let n = 0; n * s <= 16383; n++) outs.push(scTransformSpeed(n * s / 16383, inv, true, oP, mP, rP, s));
+                if (inv) outs.reverse();  // walk the travel low -> high
+                const tag = `s=${{s}} inv=${{inv}} B=${{B}} r=${{rPct}}%`;
+                const runs = [];  // [length, bpm of the run, index of its first step]
+                for (let i = 0; i < outs.length; i++) {{
+                    assert.ok(i === 0 || outs[i] >= outs[i - 1] - 1e-12, `monotonic ${{tag}}`);
+                    if (i > 0 && Math.abs(outs[i] - outs[i - 1]) < 1e-12) runs[runs.length - 1][0]++;
+                    else runs.push([1, f32(B) * (1 + r * (2 * f32(outs[i]) - 1)), i]);
+                }}
+                const plateau = new Map();
+                for (const [len, bpm, first] of runs) {{
+                    const k = Math.round(bpm), onInt = Math.abs(bpm - k) < 1e-4;
+                    const nearCentre = Math.abs(first * s / 16383 - 0.5) < 3 * s / 16383;
+                    if (len > 1) {{
+                        // a run of equal outputs is an integer-BPM plateau of exactly two steps, or the centre detent (<= 3)
+                        assert.ok((onInt && len >= 2 && len <= 3) || (nearCentre && len <= 3), `dead zone len=${{len}} bpm=${{bpm}} ${{tag}}`);
+                    }}
+                    if (onInt && len >= 2) plateau.set(k, (plateau.get(k) || 0) + 1);
+                }}
+                const kMin = Math.ceil(B * (1 - r) + 1e-4), kMax = Math.floor(B * (1 + r) - 1e-4);
+                for (let k = kMin; k <= kMax; k++) {{
+                    if (Math.abs(k - B) < 1e-4) continue;
+                    assert.equal(plateau.get(k), 1, `no 2-step plateau at ${{k}} ${{tag}} runs=${{JSON.stringify(runs.filter(x => Math.abs(x[1] - k) < 0.02))}}`);
+                }}
+            }}
+        }}
+    }}
+}}
+
+// The step is learned from the fader's own jumps: smallest nonzero jump wins, repeats are ignored, fast sweeps never shrink it.
+{{
+    let learned = 0, prev = -1;
+    for (const raw of [100, 100, 148, 160, 160, 176, 400, 416]) {{
+        if (prev >= 0) learned = scLearnFaderStep(prev / 16383, raw / 16383, learned);
+        prev = raw;
+    }}
+    assert.equal(learned, 12);  // 160 -> 176 is 16, 148 -> 160 is 12, 100 -> 148 is 48
+    assert.equal(scLearnFaderStep(0.5, 0.5, 0), 0);
+    assert.equal(scLearnFaderStep(0.5, 0.5 + 8 / 16383, 16), 8);
+    assert.equal(scLearnFaderStep(0.5, 0.5 + 64 / 16383, 8), 8);
+}}
+// End to end on a 10-bit-like fader (16 units per step): learn while sweeping slowly, then the plateau is two of ITS steps.
+{{
+    const s = 16, oP = propNum(124.0), mP = propStr(""), rP = propStr("8%");
+    let learned = 0, prev = -1;
+    const outs = [];
+    for (let n = 0; n * s <= 16383; n++) {{
+        const v = n * s / 16383;
+        if (prev >= 0) learned = scLearnFaderStep(prev, v, learned);
+        prev = v;
+        outs.push(scTransformSpeed(v, false, true, oP, mP, rP, learned));
+    }}
+    assert.equal(learned, s);
+    let at125 = 0;
+    for (const o of outs) if (Math.abs(f32(124.0) * (1 + 0.08 * (2 * f32(o) - 1)) - 125) < 1e-4) at125++;
+    assert.ok(at125 >= 2 && at125 <= 3);
+}}
+// Not learned yet (first touch): keeps the 12-bit width of before, never no plateau.
+assert.equal(scTransformSpeed(0.5 + 4 / 16383, false, true, propNum(124), propStr(""), propStr("8%")), scTransformSpeed(0.5 + 4 / 16383, false, true, propNum(124), propStr(""), propStr("8%"), 0));
 """
             node_res = subprocess.run(["node", "-e", js], capture_output=True, text=True)
             self.assertEqual(node_res.returncode, 0, node_res.stderr)
