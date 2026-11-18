@@ -1511,6 +1511,41 @@ func TestSpotifySourceSettingsPersistenceAndWiring(t *testing.T) {
 	}
 }
 
+// #289: opt-in, default Off; the pack reads it from settings.conf and the UI JSON.
+func TestRestoreBpmOnUnsyncSetting(t *testing.T) {
+	dir := t.TempDir()
+	srv := httptest.NewServer(New(Config{UIDir: dir, StateDir: t.TempDir()}, nil))
+	defer srv.Close()
+	code, def := uiPost(t, srv.URL, "")
+	if code != 200 || def.RestoreBpmOnUnsync {
+		t.Fatalf("default must be Off: code=%d %+v", code, def.RestoreBpmOnUnsync)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "settings.conf")); strings.Contains(string(b), "restore_bpm_on_unsync") {
+		t.Fatalf("Off must not write the key: %q", b)
+	}
+	code, on := uiPost(t, srv.URL, "restoreBpmOnUnsync=1")
+	if code != 200 || !on.RestoreBpmOnUnsync {
+		t.Fatalf("turning it On failed: code=%d on=%v", code, on.RestoreBpmOnUnsync)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "settings.conf")); !strings.Contains(string(b), "restore_bpm_on_unsync=1\n") {
+		t.Fatalf("On must be saved for the pack: %q", b)
+	}
+	code, again := uiPost(t, srv.URL, "")
+	if code != 200 || !again.RestoreBpmOnUnsync {
+		t.Fatalf("On must persist: code=%d on=%v", code, again.RestoreBpmOnUnsync)
+	}
+	if code, _ = uiPost(t, srv.URL, "restoreBpmOnUnsync=maybe"); code != 400 {
+		t.Fatalf("a bad value must be refused, got %d", code)
+	}
+	code, off := uiPost(t, srv.URL, "restoreBpmOnUnsync=0")
+	if code != 200 || off.RestoreBpmOnUnsync {
+		t.Fatalf("turning it Off failed: code=%d on=%v", code, off.RestoreBpmOnUnsync)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "settings.conf")); strings.Contains(string(b), "restore_bpm_on_unsync") {
+		t.Fatalf("Off must remove the key: %q", b)
+	}
+}
+
 func TestMixstreamPitchBendBeatJumpAndFxSlots(t *testing.T) {
 	dir := t.TempDir()
 	srv := httptest.NewServer(New(Config{UIDir: dir, StateDir: t.TempDir()}, nil))

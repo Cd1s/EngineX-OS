@@ -2194,7 +2194,9 @@ SERVICES_MAIN = """
 		if (at.path !== e.path || at.id !== id) {
 			scShadowScratchRelease(d, at)
 			scShadowNudgeDrop(at, now)
-			at = scShadowAt[d] = {path: e.path, id: id, tries: 0, seekAt: 0, seeks: 0, loads: at.loads || 0, jumps: e.jumps, nativeSync: !!at.nativeSync, mirror: at.mirror}
+			at = scShadowAt[d] = {path: e.path, id: id, pendingLoad: true, tries: 0, seekAt: 0, seeks: 0, loads: at.loads || 0, jumps: e.jumps, nativeSync: !!at.nativeSync, mirror: at.mirror}
+		}
+		if (at.pendingLoad) {
 			root.scShadowLoad(d, at, e, now)
 			return
 		}
@@ -2803,6 +2805,10 @@ SERVICES_MAIN = """
 		const ps = root.scTr("/Engine/Deck" + d + "/PlayState"), play = root.scTr("/Engine/Deck" + d + "/Play")
 		const playing = !!(ps && ps.state)
 		if (playing && play) play.state = false
+		// Stock handles this URL like a file dropped on a deck: it leaves the browser.
+		// A live peer is polled even when paused; the next poll carries its latest track.
+		at.pendingLoad = root.scBrowserVisible() || root.dialogOpen
+		if (at.pendingLoad) { at.ready = false; return }
 		root.scTr("/Client/Librarian/AddToDatabaseAndLoadToDeck" + d).url = "file://" + encodeURI(e.path)
 		at.loads = (at.loads || 0) + 1
 		at.tries = (at.tries || 0) + 1
@@ -3239,6 +3245,7 @@ SERVICES_MAIN = """
 	}
 	property bool scBeatJumpPads: false
 	property bool scPitchBendBeatJump: false
+	property bool scRestoreBpmOnUnsync: false
 	property bool scBpmDecimalsSynced: false
 	readonly property var scBpmDecimalsPropRef: Planck.createProperty("EngineXBpmDecimals", 0.0, 0)
 	readonly property var scBpmDecimalsProp: scBpmDecimalsPropRef && Planck.getProperty("/GUI/Scripted/EngineXBpmDecimals")
@@ -3958,6 +3965,8 @@ SERVICES_MAIN = """
 			else if (v.beat_jump_pads !== undefined) scBeatJumpPads = v.beat_jump_pads === "1" || v.beat_jump_pads === 1 || v.beat_jump_pads === true
 			if (v.pitchBendBeatJump !== undefined) scPitchBendBeatJump = !!v.pitchBendBeatJump
 			else if (v.pitch_bend_beat_jump !== undefined) scPitchBendBeatJump = v.pitch_bend_beat_jump === "1" || v.pitch_bend_beat_jump === 1 || v.pitch_bend_beat_jump === true
+			if (v.restoreBpmOnUnsync !== undefined) scRestoreBpmOnUnsync = !!v.restoreBpmOnUnsync
+			else if (v.restore_bpm_on_unsync !== undefined) scRestoreBpmOnUnsync = v.restore_bpm_on_unsync === "1" || v.restore_bpm_on_unsync === 1 || v.restore_bpm_on_unsync === true
 			if (v.mixstreamFx && typeof v.mixstreamFx !== "string" && v.mixstreamFx.length === 4) scMixstreamFx = v.mixstreamFx
 			else if (typeof v.mixstream_fx === "string") {
 				const fx = v.mixstream_fx.split(",").map(s => s.trim()).filter(Boolean)
@@ -4034,6 +4043,7 @@ SERVICES_MAIN = """
 		root.scReverseJogLeft = false
 		root.scReverseJogRight = false
 		root.scSdHighSpeed = false
+		root.scRestoreBpmOnUnsync = false
 		for (const line of (text || "").split("\\n")) {
 			const eq = line.indexOf("=")
 			if (eq < 0) continue
@@ -4053,6 +4063,7 @@ SERVICES_MAIN = """
 			else if (key === "stems_eq_mode") root.scStemsEqMode = val === "1"
 			else if (key === "beat_jump_pads") root.scBeatJumpPads = val === "1"
 			else if (key === "pitch_bend_beat_jump") root.scPitchBendBeatJump = val === "1" || val === "true"
+			else if (key === "restore_bpm_on_unsync") root.scRestoreBpmOnUnsync = val === "1" || val === "true"
 			else if (key === "mixstream_fx") {
 				const fx = val.split(",").map(s => s.trim()).filter(Boolean)
 				if (fx.length === 4) root.scMixstreamFx = fx
@@ -5254,7 +5265,8 @@ DISPLAY_ENTRIES = """
 """
 
 # User Profile -> Playback: audio DSP and playback.
-PLAYBACK_ENTRIES = (switch_entry("Master Soft Clipper", "scMasterLimiter", "masterLimiter")
+PLAYBACK_ENTRIES = (switch_entry("Restore BPM on Sync Off", "scRestoreBpmOnUnsync", "restoreBpmOnUnsync")
+    + switch_entry("Master Soft Clipper", "scMasterLimiter", "masterLimiter")
     + switch_entry("Auto-Gain (0 dB Normalize)", "scAutoGain", "autoGain")
     + switch_entry("Echo Out", "scUpfaderEcho", "upfaderEcho", "\t\t\tvisible: root.scHasMixer\n")
     + switch_entry("Stems EQ Mode", "scStemsEqMode", "stemsEqMode", "\t\t\tvisible: root.scHasStemsEq\n") + """
@@ -5750,6 +5762,25 @@ SMART_SYNC_MAIN = """
 		}
 		return minNeed
 	}
+	// #289 (opt-in, default off): Sync turned off while the tempo fader is still at
+	// 0 % returns the deck to the track's original BPM; stock keeps the synced rate
+	// after UnSync until the fader moves. Engine rewrites the effective Speed when Sync
+	// engages, so the physical fader is the Speed translator's softValue (what the
+	// control surface reports, stock ValueOutput's soft-takeover path). Only the centre
+	// codes count. Not for the MASTER deck (decks synced to it would follow
+	// the change), not for a slot this unit does not own (four-deck player mode), not
+	// with no track loaded. One write, nothing delayed.
+	// Runs in the GUI engine from the SyncMode change: no controller latch.
+	function scUnsyncRestoreBpm(d) {
+		if (!scRestoreBpmOnUnsync || (scFourDeckRole !== "" && scFourDeckRole.indexOf(String(d)) < 0)) return
+		const pLoaded = root.scTr("/Engine/Deck" + d + "/Track/SongLoaded"), pSync = root.scTr("/Engine/Deck" + d + "/SyncMode")
+		const pMaster = root.scTr("/Engine/Deck" + d + "/DeckIsMaster"), pSpeed = root.scTr("/Engine/Deck" + d + "/Speed")
+		if (!pLoaded || !pSync || !pMaster || !pSpeed || !pLoaded.state || pSync.string !== "Off" || pMaster.state) return
+		// Speed is the effective rate, so at exactly 0.5 the deck already plays its own BPM.
+		// A 14-bit fader has no exact 0.5: its centre codes 8191 / 8192 arrive as 0.49997 / 0.50003
+		// (code / 16383); 8193 and anything further is a moved fader and stays.
+		if (Math.abs(pSpeed.softValue - 0.5) < 1 / 16383 && pSpeed.value !== 0.5) pSpeed.value = 0.5
+	}
 	Instantiator {
 		model: root.scDeckList()
 		delegate: QtObject {
@@ -5779,6 +5810,7 @@ SMART_SYNC_MAIN = """
 						r.index = savedRangeIndex
 						savedRangeIndex = -1
 					}
+					root.scUnsyncRestoreBpm(deckIdx)
 				}
 			}
 			onSyncNeedChanged: {
