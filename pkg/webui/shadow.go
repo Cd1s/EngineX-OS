@@ -147,11 +147,10 @@ type deckState struct {
 	DisplayDetail bool `json:"displayDetail,omitempty"`
 	// rbx: a track from the rekordbox source, as our player's status reports it.
 	rbx prolink.ExportDeck
-	// rbxAnalysis: that track's analysis as the rekordbox load left it for Engine here.
+	// rbxAnalysis: that track's analysis as the rekordbox load leaves it for Engine
+	// here; rbxRow the gateway row it is of.
 	rbxAnalysis string
-	// PerfGen names the analysis /perf serves for a rekordbox Link deck (empty: none
-	// yet). The copy keeps its audio; a new PerfGen gives it the new analysis.
-	PerfGen string `json:"perfGen,omitempty"`
+	rbxRow      int64
 }
 
 // shadowCue is one hot cue (I 1..8); the receiver checks it before use.
@@ -367,7 +366,6 @@ type shadowState struct {
 	beacon              bool
 	unresolved          [5]string              // per deck: the last TrackNetworkPath logged as having no file
 	streamFiles         map[string]streamTrack // streaming uri -> Engine's download (zero = none)
-	copyGens            map[string]string      // copy key -> the source's PerfGen its analysis is of
 	peerTaken           map[string]time.Time   // when takePeer last accepted an update per peer (as peerSeq)
 	peerClock           map[string]peerClock   // per peer (as peerSeq)
 	dbg                 shadowDebug
@@ -608,7 +606,7 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 		if s.tidal != nil {
 			if ip, id, ok := s.tidal.rekordboxLoaded(np); ok {
 				if gid, err := strconv.ParseInt(filepath.Base(np), 10, 64); err == nil {
-					d.rbxAnalysis = rbxAnalysisPath(gid)
+					d.rbxAnalysis, d.rbxRow = rbxAnalysisPath(gid), gid
 				}
 				for _, dev := range s.mergedDevices() {
 					if dev.Address == ip && prolink.IsRekordbox(dev) {
@@ -657,10 +655,8 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if d.Key != "" && d.rbxAnalysis != "" {
-			// One audio file can be two rekordbox rows: the copy is of this row. Its
-			// analysis can come or change later (an edit in rekordbox): PerfGen says so.
+			// One audio file can be two rekordbox rows: the copy is of this row.
 			d.Key = fmt.Sprintf("%x", fnvSum(d.Key+" "+np))
-			d.PerfGen = s.perfGen(r.Context(), d)
 		}
 		s.shadow.mu.Lock()
 		if d.Key != "" {
@@ -1270,8 +1266,9 @@ func (s *Server) peerPerfGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	perf, err := s.ownPerf(r.Context(), d, r.URL.Query().Get("format") == "native")
-	if d.rbxAnalysis != "" && errors.Is(err, os.ErrNotExist) {
-		// The load writes it while Engine asks for the track: the copy waits for it.
+	if d.rbxAnalysis != "" && errors.Is(err, os.ErrNotExist) && rbxAnalysisRunning(d.rbxRow) {
+		// The load is still reading it from rekordbox: the copy waits for it. Once
+		// that is over without one, 404: the copy is analysed here, as before.
 		w.Header().Set("Retry-After", "1")
 		http.Error(w, "analysing", http.StatusServiceUnavailable)
 		return
@@ -1282,6 +1279,12 @@ func (s *Server) peerPerfGet(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Write(perf)
+}
+
+// rbxAnalysisRunning: the rekordbox load of gateway row id is still reading its analysis.
+func rbxAnalysisRunning(id int64) bool {
+	_, running := rbxAnalysing.Load(id)
+	return running
 }
 
 // rbxPeerPerf is a rekordbox Link track's analysis for a shadow copy, from the file
@@ -1341,41 +1344,6 @@ func (s *Server) ownPerf(ctx context.Context, d deckState, native bool) ([]byte,
 		perf, err = rbxPeerPerf(d.rbxAnalysis, d.BPM, native)
 	}
 	return perf, err
-}
-
-// perfGenEvery bounds how often a deck's PerfGen is worked out (the QML posts 8 a second).
-var perfGenEvery = time.Second
-
-var perfGens = struct {
-	sync.Mutex
-	m map[string]perfGenAt
-}{m: map[string]perfGenAt{}}
-
-type perfGenAt struct {
-	gen string
-	at  time.Time
-}
-
-// perfGen is a hash of the native analysis /perf serves for d now, "" if none.
-func (s *Server) perfGen(ctx context.Context, d deckState) string {
-	id := fmt.Sprintf("%d\x00%s\x00%s", d.Deck, d.Path, d.rbxAnalysis)
-	perfGens.Lock()
-	g, ok := perfGens.m[id]
-	perfGens.Unlock()
-	if ok && time.Since(g.at) < perfGenEvery {
-		return g.gen
-	}
-	g = perfGenAt{at: time.Now()}
-	if perf, err := s.ownPerf(ctx, d, true); err == nil {
-		g.gen = fmt.Sprintf("%x", sha256.Sum256(perf))[:16]
-	}
-	perfGens.Lock()
-	if len(perfGens.m) > 64 {
-		clear(perfGens.m)
-	}
-	perfGens.m[id] = g
-	perfGens.Unlock()
-	return g.gen
 }
 
 // streamingDownload is Engine's own download of a streaming track (Engine
@@ -1556,14 +1524,23 @@ func savePerf(local string, perf []byte) {
 var perfRetryWait, perfRetries, perfRequestTimeout = 2 * time.Second, 5, 5 * time.Second
 
 func fetchPerf(ctx context.Context, url string) []byte {
+	b, _ := fetchPerfPending(ctx, url)
+	return b
+}
+
+// fetchPerfPending also says whether the source was still reading the analysis.
+func fetchPerfPending(ctx context.Context, url string) (perf []byte, pending bool) {
 	for try := 0; ; try++ {
 		b, status := fetchPerfOnce(ctx, url)
-		if status != http.StatusServiceUnavailable || try+1 >= perfRetries {
-			return b
+		if status != http.StatusServiceUnavailable {
+			return b, false
+		}
+		if try+1 >= perfRetries {
+			return nil, true
 		}
 		select {
 		case <-ctx.Done():
-			return nil
+			return nil, true
 		case <-time.After(perfRetryWait):
 		}
 	}
@@ -1934,8 +1911,6 @@ func (s *Server) shadowLegacy(role string, now time.Time, all bool, lines ...[]i
 			if d.Path == "" {
 				s.shadowFetchPeer(key, p)
 				d.Progress, d.Error = sh.copyShown(key)
-			} else if p.PerfGen != "" && p.PerfGen != sh.copyGens[key] {
-				s.shadowRefreshPeerPerf(key, p, d.Path) // the copy plays on until the new path
 			}
 		}
 		// Audio still on its way: the QML shows the deck as loading. No track on
@@ -2148,6 +2123,12 @@ func (s *Server) shadowFetchPeer(key string, p peerDeck) {
 	}
 	local := filepath.Join(dir, name)
 	s.shadowFetch(key, func(ctx context.Context, cp *shadowCopy) (string, error) {
+		// The analysis first: a copy is published only once the source has said what
+		// it has. Still being read there (503): no copy yet, tried again later.
+		perf, pending := fetchPerfPending(ctx, strings.Replace(url, "/audio?", "/perf?", 1))
+		if pending {
+			return "", errPerfPending
+		}
 		req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
 		resp, err := peerFileClient.Do(req)
 		if err != nil {
@@ -2177,62 +2158,9 @@ func (s *Server) shadowFetchPeer(key string, p peerDeck) {
 			return "", err
 		}
 		// Engine loads the copy only after this returns, so it sees the .perf.
-		perf := fetchPerf(ctx, strings.Replace(url, "/audio?", "/perf?", 1))
 		savePerf(local, perf)
 		if playerBoards[imagePrefix(deviceCompatible())] {
 			saveShadowAnalysis(ctx, local, strings.Replace(url, "/audio?", "/perf?", 1)+"&format=native")
-		}
-		if perf != nil {
-			s.shadowCopyGen(key, p.PerfGen)
-		}
-		return local, nil
-	})
-}
-
-func (s *Server) shadowCopyGen(key, gen string) {
-	s.shadow.mu.Lock()
-	defer s.shadow.mu.Unlock()
-	if s.shadow.copyGens == nil {
-		s.shadow.copyGens = map[string]string{}
-	}
-	s.shadow.copyGens[key] = gen
-}
-
-// shadowRefreshPeerPerf gives the copy at old the analysis the source now serves
-// (it came after the copy, or a rekordbox edit changed it). Engine keeps the
-// analysis of a path it has loaded, so the same audio, linked, not downloaded again,
-// gets a new path with the new sidecars, and the shadow deck loads that. Called
-// with sh.mu held; one try per PerfGen.
-func (s *Server) shadowRefreshPeerPerf(key string, p peerDeck, old string) {
-	port := s.shadow.peerPort
-	if port == 0 {
-		port = 8080
-	}
-	perfURL := fmt.Sprintf("http://%s/peer/decks/%d/perf?key=%s", net.JoinHostPort(p.ip, strconv.Itoa(port)), p.Deck, url.QueryEscape(p.Key))
-	dir := filepath.Join(s.shadowDir(), fmt.Sprintf("peer-%x", fnvSum(key+" "+p.PerfGen)))
-	if filepath.Base(filepath.Dir(old)) == "Contents" {
-		dir = filepath.Join(dir, "Contents")
-	}
-	local := filepath.Join(dir, filepath.Base(old))
-	gen := p.PerfGen
-	s.shadowFetch(key, func(ctx context.Context, cp *shadowCopy) (string, error) {
-		s.shadowCopyGen(key, gen)
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return "", err
-		}
-		os.Remove(local)
-		if err := os.Link(old, local); err != nil {
-			return "", err
-		}
-		savePerf(local, fetchPerf(ctx, perfURL))
-		if playerBoards[imagePrefix(deviceCompatible())] {
-			saveShadowAnalysis(ctx, local, perfURL+"&format=native")
-		}
-		for _, f := range []string{old, old + ".perf", old + ".analysis"} {
-			os.Remove(f)
-		}
-		for d := filepath.Dir(old); d != s.shadowDir() && strings.HasPrefix(d, s.shadowDir()); d = filepath.Dir(d) {
-			os.Remove(d) // the old copy's own directories, once empty
 		}
 		return local, nil
 	})
@@ -2248,6 +2176,9 @@ type shadowCopy struct {
 }
 
 var errShadowUnavailable = errors.New("the source does not have the track")
+
+// errPerfPending: the source is still reading the track's analysis.
+var errPerfPending = errors.New("the source's analysis is not ready")
 
 type countWriter struct{ n *atomic.Int64 }
 
@@ -2305,6 +2236,8 @@ func (s *Server) shadowFetch(key string, fetch func(context.Context, *shadowCopy
 		if err != nil {
 			var timeout net.Error
 			switch {
+			case errors.Is(err, errPerfPending):
+				c.err = "" // still copying, as the deck shows it
 			case errors.Is(err, errShadowUnavailable):
 				c.err = "unavailable"
 			case ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &timeout) && timeout.Timeout()): // ctx: a read cut off by the deadline fails with another error
@@ -2340,7 +2273,6 @@ func (s *Server) shadowCleanCopies(keep string) {
 			}
 			delete(sh.files, k)
 			delete(sh.used, k)
-			delete(sh.copyGens, k)
 		}
 	}
 }

@@ -102,11 +102,7 @@ func newRbxShadowSource(t *testing.T) *rbxShadowSource {
 	shadowMediaRoot = media
 	oldDir := rbxAnalysisDir
 	rbxAnalysisDir = t.TempDir()
-	oldEvery := perfGenEvery
-	perfGenEvery = 0
-	t.Cleanup(func() {
-		shadowBeaconOn, shadowMediaRoot, rbxAnalysisDir, perfGenEvery = true, "/media", oldDir, oldEvery
-	})
+	t.Cleanup(func() { shadowBeaconOn, shadowMediaRoot, rbxAnalysisDir = true, "/media", oldDir })
 	drive := filepath.Join(media, "USB")
 	file := filepath.Join(drive, rbxCacheDir, "0123abcd.flac")
 	os.MkdirAll(filepath.Dir(file), 0o755)
@@ -185,54 +181,28 @@ func TestShadowRekordboxRowSwitchIsANewCopy(t *testing.T) {
 	}
 }
 
-// An edit in rekordbox refreshes the analysis of the loaded row: the audio copy
-// key stays (no new download), PerfGen moves on so the receiver takes the new
-// analysis; a refresh that leaves the analysis as it was keeps PerfGen.
-func TestShadowRekordboxEditRefreshIsANewPerfGen(t *testing.T) {
-	r := newRbxShadowSource(t)
-	id := r.row(7)
-	r.publish(t, id, 500)
-	d1 := r.status(t, id)
-	if d1.PerfGen == "" {
-		t.Fatal("no PerfGen for an analysed rekordbox deck")
-	}
-	if d := r.status(t, id); d.Key != d1.Key || d.PerfGen != d1.PerfGen {
-		t.Fatal("the deck moved without a refresh")
-	}
-	p := r.publish(t, id, 250)
-	d2 := r.status(t, id)
-	if d2.Key != d1.Key {
-		t.Fatal("a refresh changed the audio copy key: the receiver downloads the audio again")
-	}
-	if d2.PerfGen == d1.PerfGen {
-		t.Fatal("refreshed analysis under the old PerfGen: the receiver keeps the old grid")
-	}
-	want, _ := encodeShadowAnalysis(p)
-	if code, got := r.native(t, d2.Key); code != 200 || !bytes.Equal(got, want) {
-		t.Fatalf("refreshed analysis: %d", code)
-	}
-	r.publish(t, id, 250) // the same analysis again
-	if d := r.status(t, id); d.PerfGen != d2.PerfGen {
-		t.Fatal("an unchanged refresh moved PerfGen")
-	}
-}
-
-// The deck's file can be there before its analysis is written: the source says it
-// is coming (503) under the same key, then serves it, and PerfGen tells the receiver.
+// The deck's file can be there before its analysis is written: while the load is
+// still reading it from rekordbox the source says it is coming (503) under the same
+// key, then serves it; a load that ended without one is a 404 (analysed there).
 func TestShadowRekordboxDelayedAnalysis(t *testing.T) {
 	r := newRbxShadowSource(t)
 	id := r.row(7)
-	d1 := r.status(t, id)
-	if code, _ := r.native(t, d1.Key); code != http.StatusServiceUnavailable || d1.PerfGen != "" {
-		t.Fatalf("analysis not written yet: %d %q, want 503 and no PerfGen", code, d1.PerfGen)
+	rbxAnalysing.Store(id, true)
+	k1 := r.post(t, id)
+	if code, _ := r.native(t, k1); code != http.StatusServiceUnavailable {
+		t.Fatalf("analysis being read: %d, want 503", code)
 	}
 	p := r.publish(t, id, 500)
-	d2 := r.status(t, id)
-	if d2.Key != d1.Key || d2.PerfGen == "" {
-		t.Fatalf("analysis written between two reports: key %q -> %q, PerfGen %q", d1.Key, d2.Key, d2.PerfGen)
+	rbxAnalysing.Delete(id)
+	if k2 := r.post(t, id); k2 != k1 {
+		t.Fatalf("analysis written between two reports moved the key %q -> %q: the copy gets 409", k1, k2)
 	}
 	want, _ := encodeShadowAnalysis(p)
-	if code, got := r.native(t, d1.Key); code != 200 || !bytes.Equal(got, want) {
+	if code, got := r.native(t, k1); code != 200 || !bytes.Equal(got, want) {
 		t.Fatalf("the first report's key: %d", code)
+	}
+	other := r.row(8) // its load ended without analysis
+	if code, _ := r.native(t, r.post(t, other)); code != http.StatusNotFound {
+		t.Fatalf("no analysis and no load reading one: %d, want 404", code)
 	}
 }
