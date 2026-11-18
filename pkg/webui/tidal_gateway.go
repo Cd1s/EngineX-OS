@@ -1856,8 +1856,7 @@ func (g *tidalGateway) trackInfo(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// streamTarget reports MP3 only when an explicitly allowed lossy download is
-// already on disk; otherwise Deemix is asked for FLAC.
+// streamTarget returns the media URL and the carrier's native download-name token.
 func (g *tidalGateway) streamTarget(r *http.Request, id int64, ref trackRef) (address, codec string) {
 	codec = "flac"
 	ext := "flac"
