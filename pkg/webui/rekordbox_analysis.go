@@ -118,6 +118,7 @@ func (g *tidalGateway) rbxWriteAnalysis(id int64, ip string, tid uint32, rbPath,
 	defer rbxAnalysing.Delete(id)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
+	defer rbxClaim()()
 	rbxSession.Lock()
 	link, err := g.s.rbxDial(ctx, ip)
 	if err != nil {

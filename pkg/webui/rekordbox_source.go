@@ -11,10 +11,14 @@ package webui
 //   - else the deck says the computer does not share its files.
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha1"
 	"errors"
 	"fmt"
+	"image"
+	"image/jpeg"
+	"image/png"
 	"io"
 	"log"
 	"net"
@@ -45,6 +49,7 @@ const (
 	rbxPresenceEvery = 2 * time.Second // shorter than the UI poll, so timer jitter never skips a check
 	rbxCopyTime      = 15 * time.Minute
 	rbxPortmap       = 50111
+	rbxArtTime       = 3 * time.Second
 )
 
 // uiScopes are the sources the deck's browser can show: the services, and rekordbox
@@ -105,34 +110,21 @@ type rbxHost struct{ IP, Name string }
 
 // rekordboxHost is the computer with rekordbox on the link, once Pro DJ Link is on.
 func (s *Server) rekordboxHost() *rbxHost {
-	for _, d := range s.rekordboxDevices() {
-		if s.rekordboxReady(d.Address) {
-			return &rbxHost{d.Address, rbxName(d.Address)}
-		}
-	}
-	return nil
-}
-
-func (s *Server) rekordboxDevices() []prolink.Device {
 	s.uiMu.Lock()
 	on := s.loadUI().ProlinkShare
 	s.uiMu.Unlock()
 	if !on {
 		return nil
 	}
-	devices := s.mergedDevices()
-	return slices.DeleteFunc(devices, func(d prolink.Device) bool {
-		return !prolink.IsRekordbox(d) || time.Since(d.LastSeen) > prolink.DeviceTimeout || net.ParseIP(d.Address) == nil
-	})
-}
-
-func (s *Server) rekordboxAvailable(ip string) bool {
-	for _, d := range s.rekordboxDevices() {
-		if d.Address == ip {
-			return s.rekordboxReady(ip)
+	for _, d := range s.mergedDevices() {
+		if prolink.IsRekordbox(d) && time.Since(d.LastSeen) <= prolink.DeviceTimeout && net.ParseIP(d.Address) != nil {
+			if !s.rekordboxReady(d.Address) {
+				continue
+			}
+			return &rbxHost{d.Address, rbxName(d.Address)}
 		}
 	}
-	return false
+	return nil
 }
 
 // A computer keeps announcing even with LINK off. Only a successful library-port
@@ -232,6 +224,7 @@ func (g *tidalGateway) rbxPlaylists(ctx context.Context, add func(map[string]any
 		notice("none")
 		return
 	}
+	defer rbxClaim()()
 	rbxSession.Lock()
 	defer rbxSession.Unlock()
 	library := func(key, prefix string, link rbxLink) {
@@ -305,6 +298,7 @@ func (g *tidalGateway) rbxRows(ctx context.Context, ip, list string) ([]prolink.
 // rbxTracks answers a rekordbox list's tracks. When none of the computer's files can be
 // reached, the first row says so: better than a load that fails.
 func (g *tidalGateway) rbxTracks(w http.ResponseWriter, r *http.Request, ref playlistRef) {
+	defer rbxClaim()() // the rows, the file check and the analysis prefetch go before covers
 	_, rest, _ := strings.Cut(ref.list.ID, "\x00")
 	ip, list, _ := strings.Cut(rest, "\x00")
 	prefetch := g.rbxBrowse.begin()
@@ -314,6 +308,7 @@ func (g *tidalGateway) rbxTracks(w http.ResponseWriter, r *http.Request, ref pla
 		return
 	}
 	refs := make([]trackRef, len(rows))
+	_, slot := rbxMedia(ip)
 	for i, t := range rows {
 		// The list shows the key as the wheel notation or not at all: its tempo column reads nothing else.
 		key := ""
@@ -321,6 +316,9 @@ func (g *tidalGateway) rbxTracks(w http.ResponseWriter, r *http.Request, ref pla
 			key = fmt.Sprintf("%d%c", n, mode)
 		}
 		refs[i] = trackRef{track: providers.Track{ID: "rbx\x00" + ip + "\x00" + strconv.FormatUint(uint64(t.ID), 10), Title: t.Title, Artist: t.Artist, BPM: t.BPM, Key: key, DurationMS: t.DurationMS, Provider: rekordboxScope}}
+		if slot == 0 && t.Art != 0 { // a computer's cover; a player's medium is left as it was
+			refs[i].track.CoverURL = rbxCoverScheme + ip + "/" + strconv.FormatUint(uint64(t.Art), 10)
+		}
 	}
 	items := g.refItems(refs)
 	noticeCount := 0
@@ -348,9 +346,111 @@ func (g *tidalGateway) rbxTracks(w http.ResponseWriter, r *http.Request, ref pla
 	respond(w, result)
 	if _, slot := rbxMedia(ip); slot == 0 && len(rows) != 0 {
 		g.rbxBrowse.enqueue(prefetch, func() {
+			release := rbxClaim()
+			defer release()
 			g.rbxPrefetchContinue(prefetch, ip, rows, items[noticeCount:], offset)
 		})
 	}
+}
+
+// rbxCoverScheme marks a cover the computer's rekordbox holds: rekordbox-art://<ip>/<artwork id>.
+// The gateway's art cache and /v1/enginex/art serve it like a service's cover link.
+const rbxCoverScheme = "rekordbox-art://"
+
+// rbxArtTurn lets covers use the dbserver session only when nothing else wants it: a list,
+// a load or an analysis read claims it, which ends a cover being read at once (its context is
+// cancelled, closing the connection) and keeps new ones out until released.
+var rbxArtTurn struct {
+	sync.Mutex
+	claims int
+	cancel context.CancelFunc
+}
+
+func rbxClaim() (release func()) {
+	rbxArtTurn.Lock()
+	rbxArtTurn.claims++
+	if rbxArtTurn.cancel != nil {
+		rbxArtTurn.cancel()
+	}
+	rbxArtTurn.Unlock()
+	return func() {
+		rbxArtTurn.Lock()
+		rbxArtTurn.claims--
+		rbxArtTurn.Unlock()
+	}
+}
+
+// rbxArtTake takes the session for a cover when it is free and unclaimed.
+func rbxArtTake(cancel context.CancelFunc) bool {
+	rbxArtTurn.Lock()
+	defer rbxArtTurn.Unlock()
+	if rbxArtTurn.claims > 0 || !rbxSession.TryLock() {
+		return false
+	}
+	rbxArtTurn.cancel = cancel
+	return true
+}
+
+func rbxArtRelease() {
+	rbxArtTurn.Lock()
+	rbxArtTurn.cancel = nil
+	rbxArtTurn.Unlock()
+	rbxSession.Unlock()
+}
+
+// rbxArtPixels bounds a cover's decoded size; rekordbox's own are far smaller.
+const rbxArtPixels = 1600 * 1600
+
+// rbxArt reads a cover over dbserver (0x2003) from the computer on the link now, waiting at
+// most rbxArtTime for a free session. Only a JPEG, or a PNG it re-encodes as JPEG (Engine's
+// stm.db covers are JPEG), within maxArtBytes and rbxArtPixels is a cover.
+func (g *tidalGateway) rbxArt(ctx context.Context, address string) []byte {
+	ip, n, _ := strings.Cut(strings.TrimPrefix(address, rbxCoverScheme), "/")
+	art, err := strconv.ParseUint(n, 10, 32)
+	if host := g.s.rekordboxHost(); err != nil || art == 0 || host == nil || host.IP != ip {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, rbxArtTime)
+	defer cancel()
+	for !rbxArtTake(cancel) {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	link, err := g.s.rbxDial(ctx, ip)
+	var data []byte
+	if err == nil {
+		if a, ok := link.(interface{ Artwork(uint32) ([]byte, error) }); ok {
+			data, err = a.Artwork(uint32(art))
+		}
+		link.Close()
+	}
+	rbxArtRelease()
+	if err != nil || len(data) > maxArtBytes {
+		return nil
+	}
+	cfg, format, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil || cfg.Width*cfg.Height > rbxArtPixels || format != "jpeg" && format != "png" {
+		return nil
+	}
+	img, err := png.Decode(bytes.NewReader(data))
+	if format == "jpeg" {
+		_, err = jpeg.Decode(bytes.NewReader(data)) // a truncated picture is no cover
+		img = nil
+	}
+	if err != nil {
+		return nil
+	}
+	if img != nil {
+		var b bytes.Buffer
+		if jpeg.Encode(&b, img, &jpeg.Options{Quality: 90}) != nil || b.Len() > maxArtBytes {
+			return nil
+		}
+		data = b.Bytes()
+	}
+	return data
 }
 
 // rbxPath is a path of the computer as one slash-separated absolute path, whichever its system.
@@ -472,6 +572,7 @@ func (g *tidalGateway) rbxPrepare(ctx context.Context, id int64, ref trackRef) (
 		return ref, errors.New("rekordbox: bad track")
 	}
 	rbxMarkLoading()
+	release := rbxClaim()
 	rbxSession.Lock()
 	link, err := g.s.rbxDial(ctx, parts[1])
 	var rbPath string
@@ -480,6 +581,7 @@ func (g *tidalGateway) rbxPrepare(ctx context.Context, id int64, ref trackRef) (
 		link.Close()
 	}
 	rbxSession.Unlock()
+	release()
 	if err != nil {
 		return ref, err
 	}

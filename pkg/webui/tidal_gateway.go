@@ -855,6 +855,16 @@ func (g *tidalGateway) dropAppleMusicBrowse(sessionID string) {
 // addTrack assigns stable positive IDs per source track, kept across restarts.
 func (g *tidalGateway) addTrack(ref trackRef) int64 {
 	httpsCover(&ref.track)
+	src := "" // a rekordbox row's cover has its own keys: it never replaces a service's
+	if ref.track.Provider == rekordboxScope {
+		src = rekordboxScope
+	} else { // only the gateway's own rekordbox rows reach a computer
+		for _, p := range []*string{&ref.track.CoverURL, &ref.track.ThumbURL} {
+			if strings.HasPrefix(*p, rbxCoverScheme) {
+				*p = ""
+			}
+		}
+	}
 	key := refKey(ref)
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -870,8 +880,8 @@ func (g *tidalGateway) addTrack(ref trackRef) int64 {
 		if len(g.artURLs) > maxTracks {
 			g.artURLs = map[string]string{}
 		}
-		g.artURLs[artKey(ref.track.Title, ref.track.Artist)] = address
-		g.artURLs[artKey(ref.track.Title, "")] = address
+		g.artURLs[artKey(src, ref.track.Title, ref.track.Artist)] = address
+		g.artURLs[artKey(src, ref.track.Title, "")] = address
 	}
 	g.seq++
 	g.trackSeen[id] = g.seq
@@ -882,7 +892,7 @@ func (g *tidalGateway) addTrack(ref trackRef) int64 {
 	})
 	return id
 }
-func artKey(title, artist string) string { return title + "\x00" + artist }
+func artKey(src, title, artist string) string { return src + "\x00" + title + "\x00" + artist }
 
 // thumbURL asks each service for its small size, so a list stays quick and light.
 func thumbURL(t providers.Track) string {
@@ -902,10 +912,19 @@ const (
 // art serves a list row's thumbnail, keeping the most recently fetched in memory.
 func (g *tidalGateway) art(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
+	order := []string{"", rekordboxScope} // the browsed source's cover first
+	if g.s.scope() == rekordboxScope {
+		order = []string{rekordboxScope, ""}
+	}
+	address := ""
 	g.mu.Lock()
-	address := g.artURLs[artKey(q.Get("song"), q.Get("artist"))]
-	if address == "" {
-		address = g.artURLs[artKey(q.Get("song"), "")]
+	for _, src := range order {
+		if address = g.artURLs[artKey(src, q.Get("song"), q.Get("artist"))]; address == "" {
+			address = g.artURLs[artKey(src, q.Get("song"), "")]
+		}
+		if address != "" {
+			break
+		}
 	}
 	g.mu.Unlock()
 	data := g.artBytes(r.Context(), address)

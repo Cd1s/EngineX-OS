@@ -76,6 +76,8 @@ type fakeRekordbox struct {
 	rows  map[uint16][]dbItem
 	none  uint16 // a request answered with "no results"
 	blobs map[uint16][]byte
+	// reply, when set, answers a request in its place: the raw bytes to send.
+	reply func(m dbMessage) []byte
 	// sorted is what a track list answers to a sort order (the second request argument), and
 	// failing sort orders are answered "unavailable".
 	sorted map[uint32][]dbItem
@@ -137,6 +139,10 @@ func (f *fakeRekordbox) serve(c net.Conn) {
 		f.mu.Lock()
 		f.seen = append(f.seen, m)
 		f.mu.Unlock()
+		if f.reply != nil && m.kind != 0 && m.kind != 0x0100 {
+			c.Write(f.reply(m))
+			continue
+		}
 		switch m.kind {
 		case 0:
 			c.Write(compactWire(m.tx, 0x4000, dbNumber(0), dbNumber(17)))
@@ -150,9 +156,9 @@ func (f *fakeRekordbox) serve(c net.Conn) {
 				c.Write(compactWire(m.tx, 0x4101, it.fields()...))
 			}
 			c.Write(compactWire(m.tx, 0x4201, dbNumber(0x3000), dbNumber(0)))
-		case 0x2204, 0x2004, 0x2904, 0x2104, 0x2b04, 0x2c04:
+		case 0x2204, 0x2004, 0x2904, 0x2104, 0x2b04, 0x2c04, 0x2003:
 			blob := f.blobs[m.kind]
-			reply := map[uint16]uint16{0x2204: 0x4602, 0x2004: 0x4402, 0x2904: 0x4a02, 0x2104: 0x4702, 0x2b04: 0x4e02, 0x2c04: 0x4f02}[m.kind]
+			reply := map[uint16]uint16{0x2204: 0x4602, 0x2004: 0x4402, 0x2904: 0x4a02, 0x2104: 0x4702, 0x2b04: 0x4e02, 0x2c04: 0x4f02, 0x2003: 0x4002}[m.kind]
 			status := uint32(0)
 			if len(blob) == 0 {
 				status = 50 // not available
@@ -314,6 +320,74 @@ func TestRekordboxLinkReadsAnalysisBlobs(t *testing.T) {
 		if m.kind == 0x2204 && m.args[0].n != 5<<24|8<<16|4<<8|1 {
 			t.Fatalf("beat grid asks on menu %#x", m.args[0].n)
 		}
+	}
+}
+
+// A track row names its artwork in argument 8; 0x2003 on the data menu hands out the picture.
+func TestRekordboxLinkReadsTrackArtwork(t *testing.T) {
+	jpeg := []byte("\xff\xd8\xff\xe0 cover")
+	f := newFakeRekordbox(t, map[uint16][]dbItem{0x1004: {{id: 1, kind: 4, label: "One", art: 42}, {id: 2, kind: 4, label: "Two"}}})
+	f.blobs = map[uint16][]byte{0x2003: jpeg}
+	l, err := dialRekordbox(context.Background(), net.IPv4(127, 0, 0, 1), f.port(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	all, err := l.Tracks()
+	if err != nil || len(all) != 2 || all[0].Art != 42 || all[1].Art != 0 {
+		t.Fatalf("tracks: %+v %v", all, err)
+	}
+	if b, err := l.Artwork(42); err != nil || !bytes.Equal(b, jpeg) {
+		t.Fatalf("artwork: %q %v", b, err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	last := f.seen[len(f.seen)-1]
+	if last.kind != 0x2003 || last.args[0].n != 5<<24|8<<16|4<<8|1 || last.args[1].n != 42 {
+		t.Fatalf("artwork request: 0x%04x %+v", last.kind, last.args)
+	}
+}
+
+// A cover reply is checked before its bytes are read: the request it answers, its kind, its
+// status and its declared length, and at most RekordboxArtMax is accepted.
+func TestRekordboxArtworkReplyIsCheckedAndBounded(t *testing.T) {
+	jpeg := []byte("\xff\xd8\xff\xe0 cover")
+	art := func(tx uint32, kind uint16, req, status, length uint32, data []byte) []byte {
+		return compactWire(tx, kind, dbNumber(req), dbNumber(status), dbNumber(length), dbField{tag: 0x14, data: data}, dbNumber(1))
+	}
+	for _, tc := range []struct {
+		name  string
+		reply func(m dbMessage) []byte
+		want  []byte
+		err   bool
+	}{
+		{"ok", func(m dbMessage) []byte { return art(m.tx, 0x4002, 0x2003, 0, uint32(len(jpeg)), jpeg) }, jpeg, false},
+		{"none", func(m dbMessage) []byte { return art(m.tx, 0x4002, 0x2003, 50, 0, nil) }, nil, false},
+		{"other_transaction", func(m dbMessage) []byte { return art(m.tx+1, 0x4002, 0x2003, 0, uint32(len(jpeg)), jpeg) }, nil, true},
+		{"other_kind", func(m dbMessage) []byte { return art(m.tx, 0x4602, 0x2003, 0, uint32(len(jpeg)), jpeg) }, nil, true},
+		{"other_request", func(m dbMessage) []byte { return art(m.tx, 0x4002, 0x2204, 0, uint32(len(jpeg)), jpeg) }, nil, true},
+		{"length_mismatch", func(m dbMessage) []byte { return art(m.tx, 0x4002, 0x2003, 0, uint32(len(jpeg))+1, jpeg) }, nil, true},
+		{"unavailable", func(m dbMessage) []byte { return compactWire(m.tx, 0x4003, dbNumber(0x2003)) }, nil, true},
+		// Only the header of a too-large field is sent: refusing it must not wait for its bytes.
+		{"too_large", func(m dbMessage) []byte {
+			b := compactWire(m.tx, 0x4002, dbNumber(0x2003), dbNumber(0), dbNumber(512<<10+1), dbField{tag: 0x14, data: make([]byte, 512<<10+1)}, dbNumber(1))
+			return b[:len(b)-(512<<10+1)-5]
+		}, nil, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeRekordbox(t, nil)
+			f.reply = tc.reply
+			l, err := dialRekordbox(context.Background(), net.IPv4(127, 0, 0, 1), f.port(), 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer l.Close()
+			start := time.Now()
+			b, err := l.Artwork(42)
+			if (err != nil) != tc.err || !bytes.Equal(b, tc.want) || time.Since(start) > time.Second {
+				t.Fatalf("%q %v after %s", b, err, time.Since(start))
+			}
+		})
 	}
 }
 
