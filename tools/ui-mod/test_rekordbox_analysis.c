@@ -12,17 +12,24 @@ static int exec_counted(void *db, const char *sql, int (*row)(void *, int, char 
 static const char *db_main(void *db, const char *name) { return sqlite3_db_filename(db, name); }
 static const struct sc_rbx_sqlite sqlite = {exec_counted, db_main};
 
-static sqlite3 *library(const char *path, const char *label) {
+// A library with track 16449 (uri, label) and its empty analysis row. With attach, Engine's own
+// connection: a main database without a file and the library attached to it.
+static sqlite3 *library_row(const char *path, const char *uri, const char *label, int attach) {
     sqlite3 *db;
     unlink(path);
-    assert(sqlite3_open(path, &db) == SQLITE_OK);
-    char sql[512];
-    snprintf(sql, sizeof sql, "CREATE TABLE Track (id INTEGER PRIMARY KEY, uri TEXT, label TEXT);"
-             "CREATE TABLE PerformanceData (trackId INTEGER PRIMARY KEY, trackData BLOB, overviewWaveFormData BLOB, beatData BLOB, quickCues BLOB, loops BLOB);"
-             "INSERT INTO Track VALUES (16449, 'streaming://TIDAL/Track/855', '%s'); INSERT INTO PerformanceData (trackId) VALUES (16449);", label);
+    assert(sqlite3_open(attach ? ":memory:" : path, &db) == SQLITE_OK);
+    char sql[768];
+    snprintf(sql, sizeof sql, "%s%s%s;"
+             "CREATE TABLE %sTrack (id INTEGER PRIMARY KEY, uri TEXT, label TEXT);"
+             "CREATE TABLE %sPerformanceData (trackId INTEGER PRIMARY KEY, trackData BLOB, overviewWaveFormData BLOB, beatData BLOB, quickCues BLOB, loops BLOB);"
+             "INSERT INTO Track VALUES (16449, %s%s%s, '%s'); INSERT INTO PerformanceData (trackId) VALUES (16449);",
+             attach ? "ATTACH '" : "SELECT 1", attach ? path : "", attach ? "' AS stm" : "", attach ? "stm." : "", attach ? "stm." : "",
+             uri ? "'" : "", uri ? uri : "NULL", uri ? "'" : "", label);
     assert(sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK);
     return db;
 }
+
+static sqlite3 *library(const char *path, const char *label) { return library_row(path, "streaming://TIDAL/Track/855", label, 0); }
 
 static int filled(sqlite3 *db) {
     sqlite3_stmt *st;
@@ -33,10 +40,17 @@ static int filled(sqlite3 *db) {
     return got;
 }
 
-// A load through Engine's own SQL: what the hook does before Engine prepares its read.
+// A load through Engine's own SQL: what the hook does before Engine reads the row, with the
+// id in the text (prepare) and, as Engine 5.3.0 does it, bound to "= ?" (bind_int64).
 static const char *load(sqlite3 *db) {
     long long track = 0, id = 0;
     return sc_rbx_fill(&sqlite, db, SC_RBX_ANALYSIS_SELECT "16449", -1, &track, &id);
+}
+
+static const char *load_bound(sqlite3 *db) {
+    long long id = 0;
+    assert(sc_rbx_analysis_bound(SC_RBX_ANALYSIS_SELECT "?"));
+    return sc_rbx_fill_track(&sqlite, db, 16449, &id);
 }
 
 int main(void) {
@@ -47,6 +61,12 @@ int main(void) {
     const char *bad[] = {"", SC_RBX_ANALYSIS_SELECT, SC_RBX_ANALYSIS_SELECT "x", SC_RBX_ANALYSIS_SELECT "12 OR 1",
                          "SELECT trackId FROM PerformanceData WHERE trackId = 3", SC_RBX_ANALYSIS_SELECT "123456789012345"};
     for (unsigned i = 0; i < sizeof bad / sizeof *bad; i++) assert(!sc_rbx_analysis_track(bad[i], -1));
+
+    assert(sc_rbx_analysis_bound(SC_RBX_ANALYSIS_SELECT "?") && sc_rbx_analysis_bound(SC_RBX_ANALYSIS_SELECT "? ;"));
+    const char *unbound[] = {NULL, "", SC_RBX_ANALYSIS_SELECT, SC_RBX_ANALYSIS_SELECT "16449", SC_RBX_ANALYSIS_SELECT "? OR 1",
+                             SC_RBX_ANALYSIS_SELECT "?1", "SELECT trackId FROM PerformanceData WHERE trackId = ?"};
+    for (unsigned i = 0; i < sizeof unbound / sizeof *unbound; i++) assert(!sc_rbx_analysis_bound(unbound[i]));
+    assert(!sc_rbx_analysis_track(SC_RBX_ANALYSIS_SELECT "?", -1)); // the morning test: no id at prepare
 
     assert(sc_rbx_uri_id("streaming://TIDAL/Track/855") == 855);
     assert(sc_rbx_uri_id("tidal:855") == 855);
@@ -81,7 +101,7 @@ int main(void) {
     // No Pro DJ Link load asked for: stock, not one statement.
     sqlite3 *db = library(internal, "rekordbox [126 BPM 6A]");
     statements = 0;
-    assert(!load(db) && !statements && !filled(db));
+    assert(!load(db) && !load_bound(db) && !statements && !filled(db));
     // A drive's load while a Pro DJ Link load is open: stock, not one statement.
     assert((f = fopen(mark, "w")) && !fclose(f));
     sqlite3 *stick = library(drive, "rekordbox [126 BPM 6A]");
@@ -101,12 +121,38 @@ int main(void) {
     statements = 0;
     assert(!load(db) && statements == 1 && filled(db));
     sqlite3_close(db);
+    // Engine 5.3.0: the id bound at the read, on its own connection (library attached to a
+    // main database without a file). Filled once.
+    sqlite3 *engine = library_row(internal, "streaming://TIDAL/Track/855", "rekordbox [126 BPM 6A]", 1);
+    result = load_bound(engine);
+    assert(result && !strcmp(result, "filled") && filled(engine));
+    statements = 0;
+    assert(!load_bound(engine) && statements == 1 && filled(engine));
+    sqlite3_close(engine);
+    // Engine Link (a track of the other deck's USB) and Remote Library (Engine DJ desktop)
+    // loads while a rekordbox load is open: one read of the row, nothing written, even with a
+    // label that looks like ours and a file for the id.
+    const char *theirs[][2] = {{NULL, "rekordbox [126 BPM 6A]"}, {"file:///Users/dj/Music/855.flac", "rekordbox [126 BPM 6A]"},
+                               {"engine-link://{6d}/Engine Library/855", "Label"}, {"streaming://TIDAL/Track/855", "TIDAL [126 BPM]"}};
+    for (unsigned i = 0; i < sizeof theirs / sizeof *theirs; i++) {
+        for (int attach = 0; attach < 2; attach++) {
+            sqlite3 *link = library_row(internal, theirs[i][0], theirs[i][1], attach);
+            statements = 0;
+            assert(!load_bound(link) && !load(link) && statements == 2 && !filled(link));
+            sqlite3_close(link);
+        }
+    }
+    // A drive's load, the id bound: stock, not one statement.
+    stick = library(drive, "rekordbox [126 BPM 6A]");
+    statements = 0;
+    assert(!load_bound(stick) && !statements && !filled(stick));
+    sqlite3_close(stick);
     // A stale request no longer opens the hook.
     struct timespec old[2] = {{.tv_sec = time(NULL) - 2 * sc_rbx_window}, {.tv_sec = time(NULL) - 2 * sc_rbx_window}};
     assert(!utimensat(AT_FDCWD, mark, old, 0));
     db = library(internal, "rekordbox [126 BPM 6A]");
     statements = 0;
-    assert(!load(db) && !statements && !filled(db));
+    assert(!load(db) && !load_bound(db) && !statements && !filled(db));
     sqlite3_close(db);
     return 0;
 }

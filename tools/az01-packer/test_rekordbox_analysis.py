@@ -26,11 +26,11 @@ class RekordboxAnalysisSitesTest(unittest.TestCase):
         import struct
         source = (Path(__file__).resolve().parents[1] / "ui-mod/engine_ui_hook.c").read_text()
         table = source[source.index("install_rekordbox_analysis(uintptr_t base, size_t page) {"):]
-        sites = re.findall(r'\{"([^"]+)", (0x[0-9a-f]+), (0x[0-9a-f]+), (0x[0-9a-f]+), (0x[0-9a-f]+)\}', table[:2000])
+        sites = re.findall(r'\{"([^"]+)", ' + ", ".join(["(0x[0-9a-f]+)"] * 8) + r'\}', table[:2500])
         apis = {m[0]: int(m[1], 16) for m in re.findall(r'\{"(5\.3\.0(?:-sclive4)?)", "[^"]*",\n(?:.*\n){5}\s+(0x[0-9a-f]+), 0x', source)}
         self.assertEqual({s[0] for s in sites}, set(self.BINARIES))
         checked = 0
-        for name, lock, prepare_v2, close_v2, filename in sites:
+        for name, lock, prepare_v2, close_v2, filename, bind_int64, bind_int, db_handle, sql in sites:
             path = Path(self.BINARIES[name])
             if not path.exists():
                 continue
@@ -46,13 +46,41 @@ class RekordboxAnalysisSitesTest(unittest.TestCase):
                 raise AssertionError(hex(va))
 
             api = apis[name]
-            lock, prepare_v2, close_v2, filename = (int(x, 16) for x in (lock, prepare_v2, close_v2, filename))
+            lock, prepare_v2, close_v2, filename, bind_int64, bind_int, db_handle, sql = (int(x, 16) for x in (lock, prepare_v2, close_v2, filename, bind_int64, bind_int, db_handle, sql))
             self.assertEqual((word(lock), word(lock + 4)), (0xe16d42f4, 0xe1cd60f8), name)
             self.assertEqual((word(api + 4 * 116), word(api + 4 * 179), word(api + 4 * 180)), (prepare_v2, close_v2, filename), name)
             bl = word(prepare_v2 + 0x1c)
             self.assertEqual(bl >> 24, 0xEB, name)
             self.assertEqual((prepare_v2 + 0x1C + 8 + (((bl & 0xFFFFFF) ^ 0x800000) - 0x800000) * 4) & 0xFFFFFFFF, lock, name)
             self.assertEqual((word(close_v2), word(word(api + 4 * 16))), (0xE3A01001, 0xE3A01000), name)
+            # Engine binds the analysis read's id: bind_int64, and bind_int that branches to it.
+            self.assertEqual((word(api + 4 * 5), word(api + 4 * 4), word(api + 4 * 49), word(api + 4 * 153)), (bind_int64, bind_int, db_handle, sql), name)
+            self.assertEqual((word(bind_int64), word(bind_int64 + 4)), (0xE16D41F8, 0xE1A04001), name)
+            b = word(bind_int + 4)
+            self.assertEqual((word(bind_int), b >> 24), (0xE1A03FC2, 0xEA), name)
+            self.assertEqual((bind_int + 4 + 8 + (((b & 0xFFFFFF) ^ 0x800000) - 0x800000) * 4) & 0xFFFFFFFF, bind_int64, name)
+            self.assertEqual([word(db_handle + 4 * k) for k in range(3)], [0xE3500000, 0x15900000, 0xE12FFF1E], name)
+            self.assertEqual([word(sql + 4 * k) for k in range(3)], [0xE3500000, 0x159000D0, 0xE12FFF1E], name)
             checked += 1
         if not checked:
             self.skipTest("no lab Engine binaries on this host")
+
+
+class GatewayTakesOnlyTidalTest(unittest.TestCase):
+    """Engine reaches stream-sync's gateway only through its TIDAL client's two URLs: Engine Link
+    (another deck's USB) and the Remote Library (Engine DJ desktop) keep Engine's own transport."""
+
+    def test_only_tidal_urls_point_at_stream_sync(self):
+        import importlib.util
+        path = Path(__file__).resolve().parent / "unlock_jp07_features.py"
+        spec = importlib.util.spec_from_file_location("unlock_jp07_features", path)
+        unlock = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(unlock)
+        redirected = []
+        for patch in unlock.PATCHES:
+            _, old, new, _ = patch
+            for shift in range(-8, 9):
+                text = bytes((b - shift) & 0xFF for b in new)
+                if unlock.STREAM_SYNC_URL in text:
+                    redirected.append(bytes((b - shift) & 0xFF for b in old))
+        self.assertEqual(redirected, [b"https://api.tidal.com/v1", b"https://auth.tidal.com/v"])

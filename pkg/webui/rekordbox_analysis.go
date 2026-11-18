@@ -186,8 +186,10 @@ func rbxHeader(file string, t *rekordbox.Track) {
 	}
 }
 
-// rbxAnalysis is the track's rekordbox analysis over dbserver: each ANLZ tag rekordbox
-// hands out alone, read as a one-section analysis file and merged.
+// rbxAnalysis is the track's rekordbox analysis over dbserver. rekordbox 7 answers 0x2c04
+// with the tag's sections, each behind its little-endian length (padded; the section's own
+// length cuts it), read as one analysis file; it has no PQTZ there (status 50), so the grid
+// comes from 0x2204 (live probe, rbx-probe mac-run-4).
 func rbxAnalysis(link rbxLink, id uint32) *rekordbox.Analysis {
 	if m, ok := link.(interface {
 		AnalysisOf(uint32) *rekordbox.Analysis
@@ -203,16 +205,45 @@ func rbxAnalysis(link rbxLink, id uint32) *rekordbox.Analysis {
 	}
 	for _, tf := range [][2]string{{"PQTZ", "DAT"}, {"PCO2", "EXT"}, {"PCOB", "DAT"}, {"PWV7", "2EX"}, {"PWV5", "EXT"}, {"PWAV", "DAT"}} {
 		b, err := l.Analysis(id, tf[0], tf[1])
-		if err != nil || len(b) < 12 {
+		if err != nil {
 			continue
 		}
 		file := make([]byte, 28, 28+len(b))
 		copy(file, "PMAI")
 		binary.BigEndian.PutUint32(file[4:], 28)
-		binary.BigEndian.PutUint32(file[8:], uint32(28+len(b)))
-		if s, err := rekordbox.ParseAnalysis(append(file, b...)); err == nil {
+		for len(b) >= 4+12 {
+			n := uint64(binary.LittleEndian.Uint32(b))
+			s := b[4:]
+			if n > uint64(len(s)) {
+				break
+			}
+			if own := uint64(binary.BigEndian.Uint32(s[8:])); own <= n {
+				file = append(file, s[:own]...)
+			}
+			b = s[n:]
+		}
+		if len(file) == 28 {
+			continue
+		}
+		binary.BigEndian.PutUint32(file[8:], uint32(len(file)))
+		if s, err := rekordbox.ParseAnalysis(file); err == nil {
 			a.Merge(s)
 		}
 	}
+	if g, ok := link.(interface{ BeatGrid(uint32) ([]byte, error) }); ok && len(a.Beats) == 0 {
+		if b, err := g.BeatGrid(id); err == nil {
+			a.Beats = rbxBeatGrid(b)
+		}
+	}
 	return a
+}
+
+// rbxBeatGrid reads 0x2204's grid: 20 bytes, then per beat 16 (little-endian beat in the
+// bar, tempo times 100, time in ms).
+func rbxBeatGrid(b []byte) []rekordbox.Beat {
+	var beats []rekordbox.Beat
+	for p := 20; p+16 <= len(b); p += 16 {
+		beats = append(beats, rekordbox.Beat{Number: binary.LittleEndian.Uint16(b[p:]), BPM: float64(binary.LittleEndian.Uint16(b[p+2:])) / 100, TimeMS: binary.LittleEndian.Uint32(b[p+4:])})
+	}
+	return beats
 }

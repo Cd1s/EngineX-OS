@@ -29,39 +29,41 @@ func (analysedRbxLink) Metadata(id uint32) ([]prolink.RekordboxItem, error) {
 	return []prolink.RekordboxItem{{Kind: 4, Label: "First"}, {Kind: 7, Label: "Artist One"}, {Kind: 0xb, ID: 3}, {Kind: 0xd, ID: 12000}}, nil
 }
 
+// Analysis answers as rekordbox 7 does (live probe, rbx-probe mac-run-4): no PQTZ over 0x2c04
+// (status 50), and each section behind its little-endian length, padded to 4 bytes.
 func (analysedRbxLink) Analysis(id uint32, tag, file string) ([]byte, error) {
-	switch tag + "." + file {
-	case "PQTZ.DAT": // beats at 0.5 s and 1 s, 120 BPM
-		b := make([]byte, 24+16)
-		copy(b, "PQTZ")
-		binary.BigEndian.PutUint32(b[4:], 24)
-		binary.BigEndian.PutUint32(b[8:], 40)
-		binary.BigEndian.PutUint32(b[20:], 2)
-		for i, ms := range []uint32{500, 1000} {
-			p := b[24+8*i:]
-			binary.BigEndian.PutUint16(p, uint16(i+1))
-			binary.BigEndian.PutUint16(p[2:], 12000)
-			binary.BigEndian.PutUint32(p[4:], ms)
-		}
-		return b, nil
-	case "PCOB.DAT": // hot cue A at 2 s
-		b := make([]byte, 24+56)
-		copy(b, "PCOB")
-		binary.BigEndian.PutUint32(b[4:], 24)
-		binary.BigEndian.PutUint32(b[8:], uint32(len(b)))
-		binary.BigEndian.PutUint32(b[12:], 1)
-		binary.BigEndian.PutUint16(b[18:], 1)
-		p := b[24:]
-		copy(p, "PCPT")
-		binary.BigEndian.PutUint32(p[4:], 28)
-		binary.BigEndian.PutUint32(p[8:], 56)
-		binary.BigEndian.PutUint32(p[12:], 1)
-		p[28] = 1
-		binary.BigEndian.PutUint32(p[32:], 2000)
-		binary.BigEndian.PutUint32(p[36:], 0xffffffff)
-		return b, nil
+	if tag+"."+file != "PCOB.DAT" {
+		return nil, nil
 	}
-	return nil, nil
+	// hot cue A at 2 s
+	b := make([]byte, 24+56)
+	copy(b, "PCOB")
+	binary.BigEndian.PutUint32(b[4:], 24)
+	binary.BigEndian.PutUint32(b[8:], uint32(len(b)))
+	binary.BigEndian.PutUint32(b[12:], 1)
+	binary.BigEndian.PutUint16(b[18:], 1)
+	p := b[24:]
+	copy(p, "PCPT")
+	binary.BigEndian.PutUint32(p[4:], 28)
+	binary.BigEndian.PutUint32(p[8:], 56)
+	binary.BigEndian.PutUint32(p[12:], 1)
+	p[28] = 1
+	binary.BigEndian.PutUint32(p[32:], 2000)
+	binary.BigEndian.PutUint32(p[36:], 0xffffffff)
+	out := binary.LittleEndian.AppendUint32(nil, uint32(len(b)+4))
+	return append(append(out, b...), 0, 0, 0, 0), nil
+}
+
+// BeatGrid is 0x2204's grid: beats at 0.5 s and 1 s, 120 BPM.
+func (analysedRbxLink) BeatGrid(id uint32) ([]byte, error) {
+	b := make([]byte, 20+2*16)
+	for i, ms := range []uint32{500, 1000} {
+		p := b[20+16*i:]
+		binary.LittleEndian.PutUint16(p, uint16(i+1))
+		binary.LittleEndian.PutUint16(p[2:], 12000)
+		binary.LittleEndian.PutUint32(p[4:], ms)
+	}
+	return b, nil
 }
 
 // flac48k is a FLAC file at 48 kHz, 3 s, padded to size: only its header is real.
@@ -105,6 +107,10 @@ func TestRekordboxLoadLeavesItsAnalysisForEngine(t *testing.T) {
 		n := binary.LittleEndian.Uint32(r)
 		blobs = append(blobs, r[4:4+n])
 		r = r[4+n:]
+	}
+	// The morning test: rekordbox's real answers gave no grid and no cue, so Engine analysed.
+	if a := rbxAnalysis(analysedRbxLink{}, 1); len(a.Beats) != 2 || a.Beats[1].TimeMS != 1000 || a.Beats[0].BPM != 120 || len(a.Cues) != 1 || a.Cues[0].TimeMS != 2000 {
+		t.Fatalf("rekordbox's analysis as it answers it: %+v", a)
 	}
 	want, _ := enginedb.EncodePerformance(rekordbox.Track{ID: 1, Path: paths[1], SampleRate: 48000, SampleCount: 3 * 48000, Duration: 3, BPM: 120, Title: "First", Artist: "Artist One"},
 		rbxAnalysis(analysedRbxLink{}, 1))

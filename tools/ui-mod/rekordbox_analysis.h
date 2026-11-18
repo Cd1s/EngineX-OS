@@ -27,6 +27,16 @@ static long long sc_rbx_analysis_track(const char *sql, int n) {
     return (end ? p == end : !*p) ? id : 0;
 }
 
+// Whether sql is Engine's read of a track's analysis with the id bound ("… = ?"): Engine
+// builds it with a placeholder and binds the id at each read (morning test 2026-11-17:
+// twelve reads of the loaded row, and not one with the id in the prepared text).
+static int sc_rbx_analysis_bound(const char *sql) {
+    size_t len = sizeof SC_RBX_ANALYSIS_SELECT - 1;
+    if (!sql || strncmp(sql, SC_RBX_ANALYSIS_SELECT, len) || sql[len] != '?') return 0;
+    for (sql += len + 1; *sql == ' ' || *sql == ';'; sql++) {}
+    return !*sql;
+}
+
 // The streaming service's track id that ends Engine's uri ("…/855"), or 0.
 static long long sc_rbx_uri_id(const char *uri) {
     size_t n = uri ? strlen(uri) : 0, i = n;
@@ -84,29 +94,33 @@ struct sc_rbx_row {
 static int sc_rbx_row(void *arg, int n, char **value, char **name) {
     struct sc_rbx_row *row = arg;
     (void)name;
-    if (n == 2 && value[0] && value[1] && !strncmp(value[1], "rekordbox [", 11)) {
+    // Ours: a row of stream-sync's gateway (Engine's TIDAL client) that the rekordbox source
+    // labelled. An Engine Link or Remote Library track has no such uri.
+    if (n == 2 && value[0] && value[1] && !strncmp(value[0], "streaming://TIDAL/Track/", 24) && !strncmp(value[1], "rekordbox [", 11)) {
         snprintf(row->uri, sizeof row->uri, "%s", value[0]);
         row->ours = 1;
     }
     return 0;
 }
 
-// Before Engine prepares sql on db: when it is Engine's read of a track's analysis, the
-// track is a Pro DJ Link track a deck just asked stream-sync for, and its row is empty,
-// fill the row from the file stream-sync left. Anything else is Engine's own business:
-// with no load request in the window, or on a drive's database, not even a read is added.
-// Returns what it did, or NULL when it did nothing; *track and *id say for what.
-static const char *sc_rbx_fill(const struct sc_rbx_sqlite *q, void *db, const char *sql, int n, long long *track, long long *id) {
+static int sc_rbx_verbose; // with the trace flag: say why a read was left alone
+
+// Before Engine reads track's analysis on db: when the track is a Pro DJ Link track a deck
+// just asked stream-sync for, and its row is empty, fill the row from the file stream-sync
+// left. Anything else is Engine's own business: with no load request in the window, or on a
+// drive's database, not even a read is added. Returns what it did, or NULL when it did
+// nothing; *id says the streaming id.
+static const char *sc_rbx_fill_track(const struct sc_rbx_sqlite *q, void *db, long long track, long long *id) {
     char path[160], query[192];
     struct stat st;
-    if (!(*track = sc_rbx_analysis_track(sql, n))) return NULL;
     snprintf(path, sizeof path, "%s/.loading", sc_rbx_dir);
-    if (stat(path, &st) || time(NULL) - st.st_mtime > sc_rbx_window) return NULL;
+    if (track <= 0 || stat(path, &st) || time(NULL) - st.st_mtime > sc_rbx_window) return NULL;
+    // Engine's own connection has its library attached to a main database without a file.
     const char *main = q->filename(db, "main");
-    if (!main || !*main || !strncmp(main, sc_rbx_drives, strlen(sc_rbx_drives))) return NULL;
+    if (main && !strncmp(main, sc_rbx_drives, strlen(sc_rbx_drives))) return sc_rbx_verbose ? "skipped (a drive's database)" : NULL;
     struct sc_rbx_row row = {.ours = 0};
-    snprintf(query, sizeof query, "SELECT t.uri, t.label FROM Track t JOIN PerformanceData p ON p.trackId = t.id WHERE t.id = %lld AND p.trackData IS NULL", *track);
-    if (q->exec(db, query, sc_rbx_row, &row, NULL) || !row.ours) return NULL;
+    snprintf(query, sizeof query, "SELECT t.uri, t.label FROM Track t JOIN PerformanceData p ON p.trackId = t.id WHERE t.id = %lld AND p.trackData IS NULL", track);
+    if (q->exec(db, query, sc_rbx_row, &row, NULL) || !row.ours) return sc_rbx_verbose ? "skipped (not an empty rekordbox row)" : NULL;
     *id = sc_rbx_uri_id(row.uri);
     snprintf(path, sizeof path, "%s/%lld.bin", sc_rbx_dir, *id);
     int fd = *id ? open(path, O_RDONLY | O_CLOEXEC) : -1;
@@ -114,13 +128,19 @@ static const char *sc_rbx_fill(const struct sc_rbx_sqlite *q, void *db, const ch
     const char *result = "unreadable";
     if (!fstat(fd, &st) && st.st_size > 0 && st.st_size < (8 << 20)) {
         unsigned char *b = malloc((size_t)st.st_size);
-        char *update = b && read(fd, b, (size_t)st.st_size) == st.st_size ? sc_rbx_analysis_sql(b, (size_t)st.st_size, *track) : NULL;
+        char *update = b && read(fd, b, (size_t)st.st_size) == st.st_size ? sc_rbx_analysis_sql(b, (size_t)st.st_size, track) : NULL;
         if (update) result = q->exec(db, update, NULL, NULL, NULL) ? "update failed" : "filled";
         free(update);
         free(b);
     }
     close(fd);
     return result;
+}
+
+// Before Engine prepares sql on db: the same, when the id is in the text.
+static const char *sc_rbx_fill(const struct sc_rbx_sqlite *q, void *db, const char *sql, int n, long long *track, long long *id) {
+    if (!(*track = sc_rbx_analysis_track(sql, n))) return NULL;
+    return sc_rbx_fill_track(q, db, *track, id);
 }
 
 #endif
