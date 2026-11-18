@@ -163,19 +163,20 @@ func TestMP3AudioHeader(t *testing.T) {
 		file       string
 		sr         int
 		wantOffset int
+		wantLink   int
 		wantClass  string
 	}{
-		{"01-lame-cbr-info-44100.mp3", 44100, 2257, "lame:2257"},
-		{"01-lame-cbr-info-48000.mp3", 48000, 2257, "lame:2257"},
-		{"04-xing-only-44100.mp3", 44100, 1152, "xing:1152"},
-		{"05-headerless-lame-44100.mp3", 44100, 0, ""},
+		{"01-lame-cbr-info-44100.mp3", 44100, 2257, 1105, "lame:2257"},
+		{"01-lame-cbr-info-48000.mp3", 48000, 2257, 1105, "lame:2257"},
+		{"04-xing-only-44100.mp3", 44100, 1152, 1152, "xing:1152"},
+		{"05-headerless-lame-44100.mp3", 44100, 0, 0, ""},
 	} {
 		t.Run(tc.file, func(t *testing.T) {
 			info, err := compat.AudioHeader(filepath.Join(src, tc.file))
 			if err != nil {
 				t.Fatal(err)
 			}
-			if info.Format != "mp3" || info.SampleRate != tc.sr || info.Channels != 2 || info.StartOffsetSamples != tc.wantOffset || info.OffsetClass != tc.wantClass {
+			if info.Format != "mp3" || info.SampleRate != tc.sr || info.Channels != 2 || info.StartOffsetSamples != tc.wantOffset || info.LinkStartOffsetSamples != tc.wantLink || info.OffsetClass != tc.wantClass {
 				t.Fatalf("unexpected MP3 AudioInfo: %+v", info)
 			}
 		})

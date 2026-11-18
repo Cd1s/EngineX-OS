@@ -7,11 +7,18 @@ import legacy_names as legacy
 
 
 class RekordboxStreamedAnalysisTest(unittest.TestCase):
+    def test_offline_analyzer_does_not_depend_on_engine_sqlite(self):
+        ui = Path(__file__).resolve().parents[1] / "ui-mod"
+        source = (ui / "engine_ui_hook.c").read_text()
+        replay = source.split("static int oa_replay(", 1)[1].split("\n}", 1)[0]
+        self.assertIn("sc_rbx_replay_path(path, perf, sizeof perf)", replay)
+        self.assertNotIn("sc_rbx_open_readonly", (ui / "rekordbox_analysis.h").read_text())
+
     def test_statement_uri_and_update(self):
         source = Path(__file__).resolve().parents[1] / "ui-mod/test_rekordbox_analysis.c"
         with tempfile.TemporaryDirectory() as directory:
             binary = Path(directory) / "test_rekordbox_analysis"
-            subprocess.run(["cc", "-O2", "-Wall", "-Wextra", "-Werror", "-fsanitize=address,undefined", str(source), "-o", str(binary), "-lsqlite3"], check=True)
+            subprocess.run(["cc", "-O2", "-Wall", "-Wextra", "-Werror", "-fsanitize=address,undefined", "-pthread", str(source), "-o", str(binary), "-lsqlite3"], check=True)
             subprocess.run([str(binary)], check=True)
 
 

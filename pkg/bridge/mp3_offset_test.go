@@ -66,14 +66,15 @@ func makeOffsetANLZ(firstBeatMS uint32) []byte {
 }
 
 type decodedTrackPositions struct {
-	beat0, beat1    float64
-	hotA, hotB      float64
-	mainCue         float64
-	loop0Start      float64
-	loop0End        float64
-	loop2Start      float64
-	loop2End        float64
-	trackSampleRate float64
+	beat0, beat1     float64
+	hotA, hotB       float64
+	mainCue          float64
+	loop0Start       float64
+	loop0End         float64
+	loop2Start       float64
+	loop2End         float64
+	trackSampleRate  float64
+	trackSampleCount uint64
 }
 
 func readTrackPositions(t *testing.T, db *sql.DB, pdbID int) decodedTrackPositions {
@@ -99,6 +100,7 @@ func readTrackPositions(t *testing.T, db *sql.DB, pdbID int) decodedTrackPositio
 
 	var out decodedTrackPositions
 	out.trackSampleRate = math.Float64frombits(binary.BigEndian.Uint64(trackRaw))
+	out.trackSampleCount = binary.BigEndian.Uint64(trackRaw[8:])
 	out.beat0 = math.Float64frombits(binary.LittleEndian.Uint64(beatRaw[25:]))
 	out.beat1 = math.Float64frombits(binary.LittleEndian.Uint64(beatRaw[25+24:]))
 

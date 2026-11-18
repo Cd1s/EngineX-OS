@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <pthread.h>
 #include <sqlite3.h>
 #include <string.h>
 #include "rekordbox_analysis.h"
@@ -11,6 +12,24 @@ static int exec_counted(void *db, const char *sql, int (*row)(void *, int, char 
 }
 static const char *db_main(void *db, const char *name) { return sqlite3_db_filename(db, name); }
 static const struct sc_rbx_sqlite sqlite = {exec_counted, db_main};
+
+static void check_edits(sqlite3 *db, const char *want) {
+    sqlite3_stmt *st;
+    assert(sqlite3_prepare_v2(db, "SELECT hex(beatData)||'/'||hex(quickCues) FROM PerformanceData", -1, &st, NULL) == SQLITE_OK);
+    assert(sqlite3_step(st) == SQLITE_ROW && !strcmp((const char *)sqlite3_column_text(st, 0), want));
+    sqlite3_finalize(st);
+}
+
+static void *map_thread(void *arg) {
+    long long base = *(long long *)arg;
+    for (int i = 0; i < 16; ++i) sc_rbx_remember_track(base + i, base + i + 1000, NULL);
+    for (int pass = 0; pass < 1000; ++pass)
+        for (int i = 0; i < 16; ++i) {
+            long long id = 0;
+            assert(sc_rbx_lookup_track(base + i, &id, NULL) && id == base + i + 1000);
+        }
+    return NULL;
+}
 
 // A library with track 16449 (uri, label) and its empty analysis row. With attach, Engine's own
 // connection: a main database without a file and the library attached to it.
@@ -99,9 +118,11 @@ int main(void) {
     const unsigned char no_grid[] = "RBXA1" "\1\0\0\0" "\x01" "\0\0\0\0" "\0\0\0\0" "\0\0\0\0" "\0\0\0\0";
     assert(!sc_rbx_analysis_sql(no_grid, sizeof no_grid - 1, 9));                 // nothing to skip analysis for
 
-    char dir[] = "/tmp/rbx-analysis-XXXXXX", drives[64], path[160];
+    char dir[] = "/tmp/rbx-analysis-XXXXXX", drives[64], path[160], history[64];
     assert(mkdtemp(dir));
     sc_rbx_dir = dir;
+    snprintf(history, sizeof history, "%s/history", dir);
+    sc_rbx_history = history;
     snprintf(drives, sizeof drives, "%s/media/", dir);
     sc_rbx_drives = drives;
     snprintf(path, sizeof path, "%s/media", dir);
@@ -158,6 +179,32 @@ int main(void) {
     statements = 0;
     assert(!load_bound(engine) && statements == 1 && filled(engine));
     sqlite3_close(engine);
+    db = library(internal, "rekordbox [126 BPM]");
+    char alias[160];
+    snprintf(alias, sizeof alias, "%s/0123456789012345678901234567890123456789.perf", dir);
+    assert(!unlink(alias));
+    assert(!strcmp(load_bound(db), "filled"));
+    // The deck changes its cue while the source changes both fields.
+    assert(sqlite3_exec(db, "UPDATE PerformanceData SET quickCues=X'99'", NULL, NULL, NULL) == SQLITE_OK);
+    const unsigned char edited[] = "RBXA1" "\2\0\0\0" "\x01\xab" "\0\0\0\0" "\1\0\0\0" "\x12" "\1\0\0\0" "\x34" "\0\0\0\0";
+    snprintf(path, sizeof path, "%s/855.bin", dir);
+    f = fopen(path, "wb");
+    assert(f && fwrite(edited, 1, sizeof edited - 1, f) == sizeof edited - 1 && !fclose(f));
+    result = load_bound(db);
+    assert(result && !strcmp(result, "refreshed; kept deck edits"));
+    check_edits(db, "12/99");
+    // A subsequent source cue edit is accepted once it matches our last
+    // import; a local grid edit remains protected from refresh.
+    assert(sqlite3_exec(db, "UPDATE PerformanceData SET quickCues=NULL, beatData=X'88'", NULL, NULL, NULL) == SQLITE_OK);
+    unsigned char next[sizeof edited];
+    memcpy(next, edited, sizeof next);
+    next[19] = 0x56;
+    f = fopen(path, "wb");
+    assert(f && fwrite(next, 1, sizeof next - 1, f) == sizeof next - 1 && !fclose(f));
+    result = load_bound(db);
+    assert(result && !strcmp(result, "refreshed; kept deck edits"));
+    check_edits(db, "88/34");
+    sqlite3_close(db);
     // Engine Link (a track of the other deck's USB) and Remote Library (Engine DJ desktop)
     // loads while a rekordbox load is open: one read of the row, nothing written, even with a
     // label that looks like ours and a file for the id.
@@ -184,5 +231,70 @@ int main(void) {
     statements = 0;
     assert(!load(db) && !load_bound(db) && !statements && !filled(db));
     sqlite3_close(db);
+    assert(!utimensat(AT_FDCWD, mark, NULL, 0));
+    char rowmap[160];
+    snprintf(rowmap, sizeof rowmap, "%s/rowmap", dir);
+    assert(!access(rowmap, R_OK));
+    f = fopen(rowmap, "a");
+    assert(f && fputs("malformed rowmap\n1 nope\n2 3 0123456789abcdef0123456789abcdef012345678\n", f) >= 0 && !fclose(f));
+    pthread_mutex_lock(&sc_rbx_track_map_mu);
+    memset(sc_rbx_track_maps, 0, sizeof sc_rbx_track_maps);
+    sc_rbx_track_map_next = sc_rbx_track_map_clock = 0;
+    sc_rbx_track_map_loaded = 0;
+    pthread_mutex_unlock(&sc_rbx_track_map_mu);
+    sc_rbx_load_track_map();
+    long long mapped = 0;
+    assert(sc_rbx_lookup_track(16449, &mapped, NULL) && mapped == 855);
+    assert(!sc_rbx_lookup_track(2, &mapped, NULL));
+    pthread_t workers[8];
+    long long bases[8];
+    for (int i = 0; i < 8; ++i) {
+        bases[i] = 600000 + i * 100;
+        assert(!pthread_create(&workers[i], NULL, map_thread, &bases[i]));
+    }
+    for (int i = 0; i < 8; ++i) assert(!pthread_join(workers[i], NULL));
+    // Engine may rewrite the Track presentation fields after the first load. A later
+    // source generation must still refresh the row through the remembered mapping.
+    sqlite3 *reload = library_row(internal, "streaming://TIDAL/Track/855", "rekordbox [126 BPM 6A]", 1);
+    result = load_bound(reload);
+    assert(result && !strcmp(result, "filled"));
+    assert(sqlite3_exec(reload, "UPDATE Track SET uri='file:///data/inMusicTempFiles/935.m4a', label='Fenner' WHERE id=16449", NULL, NULL, NULL) == SQLITE_OK);
+    const unsigned char refreshed[] = "RBXA1" "\2\0\0\0" "\x02" "\xbc" "\0\0\0\0" "\1\0\0\0" "\x66" "\1\0\0\0" "\x77" "\0\0\0\0";
+    snprintf(path, sizeof path, "%s/855.bin", dir);
+    f = fopen(path, "wb");
+    assert(f && fwrite(refreshed, 1, sizeof refreshed - 1, f) == sizeof refreshed - 1 && !fclose(f));
+    result = load_bound(reload);
+    assert(result && !strcmp(result, "refreshed"));
+    check_edits(reload, "66/77");
+    sqlite3_close(reload);
+    pthread_mutex_lock(&sc_rbx_track_map_mu);
+    memset(sc_rbx_track_maps, 0, sizeof sc_rbx_track_maps);
+    sc_rbx_track_map_next = sc_rbx_track_map_clock = 0;
+    sc_rbx_track_map_loaded = 1;
+    pthread_mutex_unlock(&sc_rbx_track_map_mu);
+    for (unsigned i = 0; i < SC_RBX_TRACK_MAP_CAP; ++i) sc_rbx_remember_track(700000 + i, 800000 + i, NULL);
+    sc_rbx_remember_track(900000, 900001, NULL);
+    assert(!sc_rbx_lookup_track(700000, &mapped, NULL));
+    assert(sc_rbx_lookup_track(900000, &mapped, NULL) && mapped == 900001);
+    pthread_mutex_lock(&sc_rbx_track_map_mu);
+    memset(sc_rbx_track_maps, 0, sizeof sc_rbx_track_maps);
+    sc_rbx_track_map_next = sc_rbx_track_map_clock = 0;
+    sc_rbx_track_map_loaded = 0;
+    pthread_mutex_unlock(&sc_rbx_track_map_mu);
+    sc_rbx_load_track_map();
+    assert(!sc_rbx_lookup_track(700000, &mapped, NULL));
+    assert(sc_rbx_lookup_track(900000, &mapped, NULL) && mapped == 900001);
+    snprintf(path, sizeof path, "%s/855-16449-beatData", history);
+    assert(!unlink(path));
+    snprintf(path, sizeof path, "%s/855-16449-quickCues", history);
+    assert(!unlink(path) && !rmdir(history));
+    assert(!unlink(rowmap));
+    snprintf(path, sizeof path, "%s/855.bin", dir);
+    assert(!unlink(path));
+    snprintf(path, sizeof path, "%s/855.bin.perf", dir);
+    assert(!unlink(path));
+    assert(!unlink(alias) && !unlink(mark) && !unlink(internal) && !unlink(drive));
+    snprintf(path, sizeof path, "%s/media", dir);
+    assert(!rmdir(path) && !rmdir(dir));
     return 0;
 }

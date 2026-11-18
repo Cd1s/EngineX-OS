@@ -40,16 +40,16 @@ const (
 
 // RekordboxItem is one menu row: a track, a playlist or a folder. Second is the row's second
 // text, which a track list's sort order turns into the artist, or the tempo and key; Parent is
-// then the tempo times 100.
+// then the tempo times 100. Art is a track row's artwork id (0: none).
 type RekordboxItem struct {
-	Parent, ID, Kind uint32
-	Label, Second    string
+	Parent, ID, Kind, Art uint32
+	Label, Second         string
 }
 
 // RekordboxTrack is a row of a track list with its artist, tempo and key. Artist and key are
 // empty and BPM 0 where rekordbox has none, or did not say.
 type RekordboxTrack struct {
-	ID            uint32
+	ID, Art       uint32 // Art: the artwork id for Artwork, 0 when the track has none
 	Title, Artist string
 	BPM           float64
 	Key           string
@@ -152,12 +152,14 @@ func (l *RekordboxLink) Close() {
 	l.c.Close()
 }
 
-func (l *RekordboxLink) exchange(m dbMessage) (dbMessage, error) {
+func (l *RekordboxLink) exchange(m dbMessage) (dbMessage, error) { return l.exchangeMax(m, rbxMaxBlob) }
+
+func (l *RekordboxLink) exchangeMax(m dbMessage, max uint32) (dbMessage, error) {
 	_ = l.c.SetDeadline(time.Now().Add(rbxTimeout))
 	if _, err := l.c.Write(m.bytes()); err != nil {
 		return dbMessage{}, err
 	}
-	return readDBMessageMax(l.r, rbxMaxBlob)
+	return readDBMessageMax(l.r, max)
 }
 
 func (l *RekordboxLink) call(kind uint16, args ...dbField) (dbMessage, error) {
@@ -216,6 +218,9 @@ func (l *RekordboxLink) menu(kind uint16, args ...uint32) ([]RekordboxItem, erro
 			if len(m.args) > 5 && m.args[5].tag == 0x26 {
 				item.Second = clean(m.args[5])
 			}
+			if len(m.args) > 8 {
+				item.Art = m.args[8].n
+			}
 			items = append(items, item)
 		}
 	}
@@ -263,7 +268,7 @@ func (l *RekordboxLink) trackList(kind uint16, args func(sort uint32) []uint32) 
 	tracks := make([]RekordboxTrack, len(plain))
 	at := map[uint32][]int{} // a playlist may hold a track twice
 	for i, it := range plain {
-		tracks[i] = RekordboxTrack{ID: it.ID, Title: it.Label}
+		tracks[i] = RekordboxTrack{ID: it.ID, Art: it.Art, Title: it.Label}
 		at[it.ID] = append(at[it.ID], i)
 	}
 	if err != nil || len(plain) == 0 {
@@ -316,6 +321,27 @@ func (l *RekordboxLink) blob(kind uint16, menu byte, args ...uint32) ([]byte, er
 	}
 	if len(r.args) < 4 || r.args[3].tag != 0x14 {
 		return nil, fmt.Errorf("prolink: rekordbox answered 0x%04x to 0x%04x without data", r.kind, kind)
+	}
+	return r.args[3].data, nil
+}
+
+// RekordboxArtMax bounds a cover: a reply declaring more is refused before it is read.
+const RekordboxArtMax = 512 << 10
+
+// Artwork is the picture with artwork id art (0x2003), as rekordbox stores it: JPEG as a rule.
+// The reply is 0x4002 to this request: request kind, status (0 ok), length, bytes. nil when
+// rekordbox has none.
+func (l *RekordboxLink) Artwork(art uint32) ([]byte, error) {
+	l.tx++
+	r, err := l.exchangeMax(dbMessage{l.tx, 0x2003, []dbField{dbNumber(l.where(rbxDataMenu)), dbNumber(art)}}, RekordboxArtMax)
+	if err != nil {
+		return nil, err
+	}
+	if r.tx != l.tx || r.kind != 0x4002 || len(r.args) < 4 || r.args[0].n != 0x2003 || r.args[3].tag != 0x14 || r.args[2].n != uint32(len(r.args[3].data)) {
+		return nil, fmt.Errorf("prolink: malformed rekordbox artwork reply 0x%04x", r.kind)
+	}
+	if r.args[1].n != 0 {
+		return nil, nil
 	}
 	return r.args[3].data, nil
 }

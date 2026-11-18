@@ -1254,6 +1254,10 @@ static void test_shadow_replay(void) {
     assert(!link("/tmp/test-oa-replay/\xc3\xa9.flac.perf", registered));
     assert(oa_replay(oa_self, &download, prefs) && oa_count == 9 && oa_seen[2] == OA_BEATS);
     assert(!strcmp(oa_payload[2], "BEATS"));
+    static const uint16_t m4a[] = u"/data/downloads/TIDAL/0123456789012345678901234567890123456789.m4a";
+    const struct oa_string aac = {NULL, m4a, sizeof m4a / sizeof *m4a - 1};
+    oa_count = 0;
+    assert(oa_replay(oa_self, &aac, prefs) && oa_count == 9 && oa_seen[2] == OA_BEATS);
     assert(!unlink(registered));
     sc_rbx_dir = old_rbx_dir;
     // stopBeatDetection while the replay waits for Engine's loader: stopped, finished.
@@ -1293,6 +1297,31 @@ static void test_shadow_replay(void) {
     f = fopen("/tmp/test-oa-replay/shadow-v3/peer-1/Contents/x_y.mp3", "wb"); assert(f); fputs("AUDIO", f); fclose(f);
     prefs[12] = 0;
     assert(oa_replay(oa_self, &cs, prefs) && oa_count == 9 && oa_seen[2] == OA_BEATS);
+    // A late Link analysis arrives after the named copy, without an alias or
+    // the Engine SQLite install. A same-name copy of another size is not a hit.
+    const char *named_audio = OA_ENGINE_COPIES "ab-cd_link.m4a";
+    static const uint16_t named_path[] = u"/tmp/test-oa-replay/copies/ab-cd_link.m4a";
+    const struct oa_string named = {NULL, named_path, sizeof named_path / sizeof *named_path - 1};
+    const char *entry = "/tmp/test-oa-replay/names/5/link.m4a";
+    const char *late = "/tmp/test-oa-replay/855.bin.perf";
+    sc_rbx_dir = dir;
+    assert(!mkdir("/tmp/test-oa-replay/names", 0755));
+    assert(!mkdir("/tmp/test-oa-replay/names/5", 0755));
+    f = fopen(entry, "wb"); assert(f); fputs("855\n", f); fclose(f);
+    f = fopen(named_audio, "wb"); assert(f); fputs("AUDIO", f); fclose(f);
+    oa_count = 0;
+    assert(!oa_replay(oa_self, &named, prefs) && oa_count == 0);
+    assert(!link("/tmp/test-oa-replay/shadow-v3/peer-1/Contents/x_y.mp3.perf", late));
+    assert(oa_replay(oa_self, &named, prefs) && oa_count == 9 && oa_seen[2] == OA_BEATS);
+    f = fopen(named_audio, "ab"); assert(f); fputs("X", f); fclose(f);
+    oa_count = 0;
+    assert(!oa_replay(oa_self, &named, prefs) && oa_count == 0);
+    assert(!truncate(named_audio, 5));
+    f = fopen(entry, "wb"); assert(f); fputs("0\n", f); fclose(f);
+    assert(!oa_replay(oa_self, &named, prefs) && oa_count == 0);
+    assert(!unlink(late) && !unlink(entry) && !unlink(named_audio));
+    assert(!rmdir("/tmp/test-oa-replay/names/5") && !rmdir("/tmp/test-oa-replay/names"));
+    sc_rbx_dir = old_rbx_dir;
     unlink("/tmp/test-oa-replay/shadow-v3/peer-1/Contents/x_y.mp3.perf");
     unlink("/tmp/test-oa-replay/shadow-v3/peer-1/Contents/x_y.mp3");
     unlink("/tmp/test-oa-replay/copies/ab-cd_x_y.mp3");
@@ -1561,7 +1590,7 @@ static void test_analysis_dispatch(const char *off, int gateway, int shadow) {
     assert(!mprotect((void *)((base + bind) & ~(page - 1)), page, PROT_READ | PROT_EXEC));
     __builtin___clear_cache(image + bind, image + bind + sizeof bind_code + 8);
 
-    char dir[] = "/tmp/enginex-dispatch-XXXXXX", board[128], loading[128], rbx[128], peer[128], sidecar[128], library[128], conf[128];
+    char dir[] = "/tmp/enginex-dispatch-XXXXXX", board[128], loading[128], rbx[128], peer[128], sidecar[128], library[128], conf[128], history[64];
     assert(mkdtemp(dir));
     snprintf(board, sizeof board, "%s/board", dir);
     snprintf(loading, sizeof loading, "%s/.loading", dir);
@@ -1570,6 +1599,7 @@ static void test_analysis_dispatch(const char *off, int gateway, int shadow) {
     snprintf(sidecar, sizeof sidecar, "%s/peer-a/track.wav.analysis", dir);
     snprintf(library, sizeof library, "%s/m.db", dir);
     snprintf(conf, sizeof conf, "%s/hook-disable.conf", dir);
+    snprintf(history, sizeof history, "%s/history", dir);
     assert(!mkdir(peer, 0700));
     static const char data[] = "RBXA1" "\5\0\0\0" "track" "\5\0\0\0" "waves" "\5\0\0\0" "beats" "\1\0\0\0" "c" "\0\0\0\0";
     analysis_file(board, "JP07", 4);
@@ -1581,6 +1611,7 @@ static void test_analysis_dispatch(const char *off, int gateway, int shadow) {
     hf_reload();
     product_code_path = board;
     sc_rbx_dir = sc_shadow_root = dir;
+    sc_rbx_history = history;
     sc_shadow_library = library;
     sqlite_exec_original = real_sqlite_exec;
 
@@ -1613,16 +1644,27 @@ static void test_analysis_dispatch(const char *off, int gateway, int shadow) {
     sqlite_bind_int64_fn entry = (void *)(base + bind);
     const char *shadow_read = SC_SHADOW_TRACK_READ "t.isAnalyzed FROM Track AS t WHERE t.id = ?";
     analysis_bind(entry, db, SC_RBX_ANALYSIS_SELECT "?", 2);
-    analysis_bind(entry, db, shadow_read, 1);
     assert(pragma(db, "SELECT count(*) FROM PerformanceData WHERE trackData IS NOT NULL") == 0);
-    analysis_bind(entry, db, SC_RBX_ANALYSIS_SELECT "?", 1);
+    // Engine can snapshot isAnalyzed on the Track read before it binds the
+    // PerformanceData statement. The late rekordbox payload must be usable here.
+    analysis_bind(entry, db, shadow_read, 1);
     assert(pragma(db, "SELECT isAnalyzed FROM Track WHERE id = 1") == gateway);
     assert(pragma(db, "SELECT count(*) FROM PerformanceData WHERE trackData IS NOT NULL") == gateway);
     analysis_bind(entry, db, shadow_read, 2);
     assert(pragma(db, "SELECT isAnalyzed FROM Track WHERE id = 2") == shadow);
     assert(pragma(db, "SELECT count(*) FROM PerformanceData WHERE trackData IS NOT NULL") == gateway + shadow);
     assert(sqlite3_close(db) == SQLITE_OK);
+    if (gateway) {
+        char saved[128];
+        snprintf(saved, sizeof saved, "%s/712-1-beatData", history);
+        assert(!unlink(saved));
+        snprintf(saved, sizeof saved, "%s/712-1-quickCues", history);
+        assert(!unlink(saved) && !rmdir(history));
+    }
     if (*off) assert(!unlink(conf));
+    char rowmap[PATH_MAX];
+    snprintf(rowmap, sizeof rowmap, "%s/rowmap", dir);
+    unlink(rowmap);
     assert(!unlink(library) && !unlink(sidecar) && !rmdir(peer) && !unlink(rbx) && !unlink(loading) && !unlink(board) && !rmdir(dir));
     assert(!munmap(image, size));
     printf("Installed SQLite bind dispatcher isolates rekordbox and shadow (off: %s): PASS\n", *off ? off : "none");

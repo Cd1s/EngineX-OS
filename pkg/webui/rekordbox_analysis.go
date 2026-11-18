@@ -1,11 +1,12 @@
 package webui
 
-// Write rekordbox's analysis before returning a computer's track list to Engine.
+// Cache rekordbox's analysis while browsing a computer's track list.
 // The native hook fills Engine's rows on its own connection as Engine reads them.
 
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
 	"io"
 	"log"
@@ -40,6 +41,57 @@ var (
 // last byte is EncodePerformance's analysed flag, absent in older files.
 const rbxAnalysisMagic = "RBXA1"
 
+const rbxPrefetchBudget = 2 * time.Second
+
+// The newest list replaces any pending work. A single worker can finish
+// cancelling an old session before it starts the new list.
+type rbxPrefetchQueue struct {
+	mu      sync.Mutex
+	cancel  context.CancelFunc
+	pending func()
+	running bool
+}
+
+func (q *rbxPrefetchQueue) begin() context.Context {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.cancel != nil {
+		q.cancel()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	q.cancel, q.pending = cancel, nil
+	return ctx
+}
+
+func (q *rbxPrefetchQueue) enqueue(ctx context.Context, work func()) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if ctx.Err() != nil {
+		return
+	}
+	q.pending = work
+	if q.running {
+		return
+	}
+	q.running = true
+	rbxAnalysisJobs.Add(1)
+	go func() {
+		defer rbxAnalysisJobs.Done()
+		for {
+			q.mu.Lock()
+			work := q.pending
+			q.pending = nil
+			if work == nil {
+				q.running = false
+				q.mu.Unlock()
+				return
+			}
+			q.mu.Unlock()
+			work()
+		}
+	}()
+}
+
 // rbxMarkLoading opens the hook for a while: only a deck's request for a Pro DJ Link track
 // does, so a drive's load stays as stock (the hook does not even read then).
 func rbxMarkLoading() {
@@ -66,6 +118,7 @@ func (g *tidalGateway) rbxWriteAnalysis(id int64, ip string, tid uint32, rbPath,
 	defer rbxAnalysing.Delete(id)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
+	defer rbxClaim()()
 	rbxSession.Lock()
 	link, err := g.s.rbxDial(ctx, ip)
 	if err != nil {
@@ -73,12 +126,12 @@ func (g *tidalGateway) rbxWriteAnalysis(id int64, ip string, tid uint32, rbPath,
 		log.Printf("stream-sync: load track=%d provider=rekordbox step=analysis result=failed error=%v", id, err)
 		return
 	}
-	t, a := rbxReadAnalysis(link, tid, rbPath)
+	t, a, source := rbxReadAnalysis(link, tid, rbPath)
 	link.Close()
 	rbxSession.Unlock()
 	rbxHeader(file, &t)
 	_, slot := rbxMedia(ip)
-	rbxStoreAnalysis(id, t, a, slot == 0)
+	rbxStoreAnalysis(id, t, a, source, slot == 0)
 }
 
 func rbxAnalysisPath(id int64) string {
@@ -90,17 +143,47 @@ func rbxAnalysisReady(id int64) bool {
 	return err == nil
 }
 
-func rbxReadAnalysis(link rbxLink, tid uint32, rbPath string) (rekordbox.Track, *rekordbox.Analysis) {
+var rbxReplayIndexMu sync.Mutex
+
+// The analyzer is a separate process. Publish the name and full audio size
+// before streaming, even when the analysis job has not produced a .perf yet.
+func rbxIndexReplay(id int64, rbPath, file string) {
+	var size int64
+	if copy := rbxRunning(file); copy != nil {
+		size = copy.size
+	} else if st, err := os.Stat(file); err == nil && st.Mode().IsRegular() {
+		size = st.Size()
+	}
+	name := path.Base(rbxPath(rbPath))
+	if size <= 0 || id <= 0 || name == "." || name == "/" {
+		return
+	}
+	dir := filepath.Join(rbxAnalysisDir, "names", strconv.FormatInt(size, 10))
+	key := filepath.Join(dir, name)
+	rbxReplayIndexMu.Lock()
+	defer rbxReplayIndexMu.Unlock()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return
+	}
+	entry := strconv.FormatInt(id, 10) + "\n"
+	if old, err := os.ReadFile(key); err == nil && string(old) != entry {
+		entry = "0\n" // Two sources can have the same filename and size.
+	}
+	rbxWriteCache(key, []byte(entry))
+}
+
+func rbxReadAnalysis(link rbxLink, tid uint32, rbPath string) (rekordbox.Track, *rekordbox.Analysis, rbxFingerprint) {
 	var meta []prolink.RekordboxItem
 	if m, ok := link.(interface {
 		Metadata(uint32) ([]prolink.RekordboxItem, error)
 	}); ok {
 		meta, _ = m.Metadata(tid)
 	}
-	return rbxTrackFacts(meta, tid, rbPath), rbxAnalysis(link, tid)
+	a, source := rbxAnalysisWithSource(link, tid)
+	return rbxTrackFacts(meta, tid, rbPath), a, source
 }
 
-func rbxStoreAnalysis(id int64, t rekordbox.Track, a *rekordbox.Analysis, replay bool) {
+func rbxStoreAnalysis(id int64, t rekordbox.Track, a *rekordbox.Analysis, source rbxFingerprint, replay bool) {
 	if rbxAnalysisReady(id) || t.SampleRate <= 0 || t.SampleCount == 0 {
 		return
 	}
@@ -115,6 +198,23 @@ func rbxStoreAnalysis(id int64, t rekordbox.Track, a *rekordbox.Analysis, replay
 		log.Printf("stream-sync: load track=%d provider=rekordbox step=analysis result=none error=%v", id, err)
 		return
 	}
+	out := rbxAnalysisPath(id)
+	if !rbxPublishAnalysis(out, p, t.BPM, replay) {
+		return
+	}
+	if source != (rbxFingerprint{}) {
+		rbxWriteCache(out+".source", source[:])
+	}
+	hot := 0
+	for _, cue := range a.Cues {
+		if cue.HotCue > 0 {
+			hot++
+		}
+	}
+	log.Printf("stream-sync: load track=%d provider=rekordbox step=analysis result=ready rate=%d grid=%d cues=%d hot=%d overview=%d", id, t.SampleRate, len(p.Beats), len(a.Cues), hot, len(p.Overview))
+}
+
+func rbxPublishAnalysis(out string, p enginedb.Performance, bpm float64, replay bool) bool {
 	var b bytes.Buffer
 	b.WriteString(rbxAnalysisMagic)
 	for _, blob := range [][]byte{p.TrackData, p.Overview, p.Beats, p.QuickCues, p.Loops} {
@@ -127,28 +227,118 @@ func rbxStoreAnalysis(id int64, t rekordbox.Track, a *rekordbox.Analysis, replay
 		b.WriteByte(0)
 	}
 	if err := os.MkdirAll(rbxAnalysisDir, 0o755); err != nil {
-		return
+		return false
 	}
-	out := rbxAnalysisPath(id)
-	// Engine can ask OfflineAnalyzer to analyse a newly downloaded stream
-	// even after it has read the same track's PerformanceData from stm.
+	// Engine can request OfflineAnalyzer even after reading PerformanceData.
 	if replay && p.Complete {
-		if perf, err := perfFromBlobs(t.BPM, p.TrackData, p.Beats, p.Overview); err == nil {
+		if perf, err := perfFromBlobs(bpm, p.TrackData, p.Beats, p.Overview); err == nil {
 			savePerf(out, perf)
 		}
 	}
+	return rbxWriteCache(out, b.Bytes())
+}
+
+func rbxWriteCache(out string, b []byte) bool {
 	tmp := out + ".tmp"
-	if err := os.WriteFile(tmp, b.Bytes(), 0o644); err != nil || os.Rename(tmp, out) != nil {
+	if err := os.WriteFile(tmp, b, 0o644); err != nil || os.Rename(tmp, out) != nil {
 		os.Remove(tmp)
+		return false
+	}
+	return true
+}
+
+func rbxCachedPerformance(b []byte) (p enginedb.Performance) {
+	b, ok := bytes.CutPrefix(b, []byte(rbxAnalysisMagic))
+	if !ok {
+		return p
+	}
+	for _, blob := range []*[]byte{&p.TrackData, &p.Overview, &p.Beats, &p.QuickCues, &p.Loops} {
+		if len(b) < 4 {
+			return enginedb.Performance{}
+		}
+		n := binary.LittleEndian.Uint32(b)
+		b = b[4:]
+		if uint64(n) > uint64(len(b)) {
+			return enginedb.Performance{}
+		}
+		*blob, b = b[:n], b[n:]
+	}
+	p.Complete = len(b) == 1 && b[0] == 1
+	return p
+}
+
+// Refresh only the editable sections. The original audio header supplies the
+// sample timeline again, so an AAC offset is never applied to an encoded grid.
+func (g *tidalGateway) rbxRefresh(ctx context.Context, link rbxLink, ip string, id int64, tid uint32, rbPath string) {
+	if ctx.Err() != nil {
 		return
 	}
-	hot := 0
-	for _, cue := range a.Cues {
-		if cue.HotCue > 0 {
-			hot++
+	if _, running := rbxAnalysing.LoadOrStore(id, true); running {
+		return
+	}
+	defer rbxAnalysing.Delete(id)
+	out := rbxAnalysisPath(id)
+	stamp, _ := os.ReadFile(out + ".source")
+	var previous rbxFingerprint
+	if len(stamp) == len(previous) {
+		copy(previous[:], stamp)
+	}
+	a, next := rbxReadSourceEdits(link, tid, previous)
+	gridChanged := !bytes.Equal(next[:sha256.Size], previous[:sha256.Size])
+	cuesChanged := !bytes.Equal(next[sha256.Size:], previous[sha256.Size:])
+	if ctx.Err() != nil || (!gridChanged && !cuesChanged) {
+		return
+	}
+	if !gridChanged {
+		a.Beats = nil
+	}
+	if !cuesChanged {
+		a.Cues = nil
+	}
+	if rbPath == "" {
+		var err error
+		if rbPath, err = link.Path(tid); err != nil {
+			return
 		}
 	}
-	log.Printf("stream-sync: load track=%d provider=rekordbox step=analysis result=ready rate=%d grid=%d cues=%d hot=%d overview=%d", id, t.SampleRate, len(p.Beats), len(a.Cues), hot, len(p.Overview))
+	info, err := g.rbxRemoteHeader(ctx, ip, rbPath)
+	if err != nil || ctx.Err() != nil || info.SampleRate <= 0 || info.Samples == 0 {
+		return
+	}
+	var t rekordbox.Track
+	rbxApplyHeader(&t, info)
+	p, err := enginedb.EncodePerformance(t, &a)
+	if err != nil {
+		return
+	}
+	b, _ := os.ReadFile(out)
+	cached := rbxCachedPerformance(b)
+	if len(cached.TrackData) == 0 || len(cached.Beats) == 0 || ctx.Err() != nil {
+		return
+	}
+	changed := (gridChanged && !bytes.Equal(cached.Beats, p.Beats)) ||
+		(cuesChanged && !bytes.Equal(cached.QuickCues, p.QuickCues))
+	if changed {
+		// Keep the immediate predecessor for the hook's import comparison.
+		if !rbxWriteCache(out+".previous", b) {
+			return
+		}
+		if gridChanged {
+			cached.Beats = p.Beats
+		}
+		if cuesChanged {
+			cached.QuickCues = p.QuickCues
+		}
+		var bpm float64
+		if len(a.Beats) > 0 {
+			bpm = a.Beats[0].BPM
+		}
+		if !rbxPublishAnalysis(out, cached, bpm, gridChanged) {
+			return
+		}
+		log.Printf("stream-sync: load track=%d provider=rekordbox step=analysis result=refreshed cues=%t grid=%t", id, cuesChanged, gridChanged)
+	}
+	rbxWriteCache(out+".source", next[:])
 }
 
 // rbxPrefetch runs before publishing the page: Engine snapshots the analysed
@@ -158,7 +348,7 @@ func (g *tidalGateway) rbxPrefetch(ctx context.Context, ip string, rows []prolin
 	if _, slot := rbxMedia(ip); slot != 0 || len(items) == 0 {
 		return false // keep the CDJ media load path as before
 	}
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, rbxPrefetchBudget)
 	defer cancel()
 	var link rbxLink
 	defer func() {
@@ -192,29 +382,120 @@ func (g *tidalGateway) rbxPrefetch(ctx context.Context, ip string, rows []prolin
 				break
 			}
 		}
-		tid := rows[i+offset].ID
-		rbPath, err := link.Path(tid)
-		if err != nil {
-			continue
-		}
-		if _, ok := localCodecs[strings.ToLower(path.Ext(rbxPath(rbPath)))]; !ok {
-			continue
-		}
-		info, err := g.rbxRemoteHeader(ctx, ip, rbPath)
-		if err != nil || info.SampleRate <= 0 || info.Samples == 0 {
-			continue
-		}
-		t, a := rbxReadAnalysis(link, tid, rbPath)
-		rbxApplyHeader(&t, info)
-		if ctx.Err() == nil {
-			if _, running := rbxAnalysing.LoadOrStore(id, true); !running {
-				rbxStoreAnalysis(id, t, a, true)
-				rbxAnalysing.Delete(id)
-				ready = rbxAnalysisReady(id) || ready
-			}
-		}
+		g.rbxPrefetchTrack(ctx, link, ip, id, rows[i+offset].ID)
+		ready = rbxAnalysisReady(id) || ready
 	}
 	return ready
+}
+
+func (g *tidalGateway) rbxPrefetchTrack(ctx context.Context, link rbxLink, ip string, id int64, tid uint32) {
+	rbPath, err := link.Path(tid)
+	if err != nil {
+		return
+	}
+	if _, ok := localCodecs[strings.ToLower(path.Ext(rbxPath(rbPath)))]; !ok {
+		return
+	}
+	info, err := g.rbxRemoteHeader(ctx, ip, rbPath)
+	if err != nil || info.SampleRate <= 0 || info.Samples == 0 {
+		return
+	}
+	t, a, source := rbxReadAnalysis(link, tid, rbPath)
+	rbxApplyHeader(&t, info)
+	if ctx.Err() == nil {
+		if _, running := rbxAnalysing.LoadOrStore(id, true); !running {
+			rbxStoreAnalysis(id, t, a, source, true)
+			rbxAnalysing.Delete(id)
+		}
+	}
+}
+
+func (g *tidalGateway) rbxPrefetchContinue(ctx context.Context, ip string, rows []prolink.RekordboxTrack, items []any, offset int) {
+	var check, marked time.Time
+	active := func() bool {
+		if ctx.Err() != nil {
+			return false
+		}
+		if time.Now().Before(check) {
+			return true
+		}
+		check = time.Now().Add(500 * time.Millisecond)
+		return g.s.rekordboxAvailable(ip)
+	}
+	for n := range rows {
+		i := (n + offset) % len(rows)
+		id := items[i].(map[string]any)["id"].(int64)
+		if !active() {
+			return
+		}
+		// Yield between tracks: foreground listing and loading share this player session.
+		for !rbxSession.TryLock() {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(25 * time.Millisecond):
+				if !active() {
+					return
+				}
+			}
+		}
+		ok := g.rbxPrefetchOne(ctx, ip, id, rows[i].ID)
+		rbxSession.Unlock()
+		if !ok {
+			return
+		}
+		if ctx.Err() == nil && time.Since(marked) >= time.Minute && rbxAnalysisReady(id) {
+			rbxMarkLoading()
+			marked = time.Now()
+		}
+	}
+}
+
+// The playback manifest is the load boundary. Refresh there once per request,
+// without repeating dbserver reads for the audio's Range requests.
+func (g *tidalGateway) rbxRefreshLoad(ctx context.Context, id int64) {
+	ip, tid, ok := g.rekordboxLoaded("streaming://TIDAL/Track/" + strconv.FormatInt(id, 10))
+	if _, slot := rbxMedia(ip); !ok || slot != 0 || !rbxAnalysisReady(id) {
+		return
+	}
+	rbxMarkLoading()
+	ctx, cancel := context.WithTimeout(ctx, rbxPrefetchBudget)
+	defer cancel()
+	for !rbxSession.TryLock() {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	defer rbxSession.Unlock()
+	link, err := g.s.rbxDial(ctx, ip)
+	if err == nil {
+		defer link.Close()
+		g.rbxRefresh(ctx, link, ip, id, tid, "")
+	}
+}
+
+// rbxPrefetchOne owns one bounded session. The caller holds rbxSession.
+func (g *tidalGateway) rbxPrefetchOne(ctx context.Context, ip string, id int64, tid uint32) bool {
+	ctx, cancel := context.WithTimeout(ctx, rbxPrefetchBudget)
+	defer cancel()
+	link, err := g.s.rbxDial(ctx, ip)
+	if err != nil {
+		return false
+	}
+	defer link.Close()
+	if _, ok := link.(interface {
+		Analysis(uint32, string, string) ([]byte, error)
+	}); !ok {
+		return false
+	}
+	if rbxAnalysisReady(id) {
+		g.rbxRefresh(ctx, link, ip, id, tid, "")
+	} else {
+		g.rbxPrefetchTrack(ctx, link, ip, id, tid)
+	}
+	return true
 }
 
 func (g *tidalGateway) rbxRemoteHeader(ctx context.Context, ip, rbPath string) (compat.AudioInfo, error) {
@@ -309,7 +590,11 @@ func rbxHeader(file string, t *rekordbox.Track) {
 }
 
 func rbxApplyHeader(t *rekordbox.Track, info compat.AudioInfo) {
-	t.SampleRate, t.StartOffsetSamples = info.SampleRate, info.StartOffsetSamples
+	offset := info.StartOffsetSamples
+	if info.Format == "mp3" {
+		offset = info.LinkStartOffsetSamples
+	}
+	t.SampleRate, t.StartOffsetSamples = info.SampleRate, offset
 	if info.Duration > 0 {
 		t.Duration = info.Duration
 	}
@@ -374,17 +659,22 @@ func rbxParsePrefix(file string, head []byte, size int64) (compat.AudioInfo, err
 // length cuts it), read as one analysis file; it has no PQTZ there (status 50), so the grid
 // comes from 0x2204 (live probe, rbx-probe mac-run-4).
 func rbxAnalysis(link rbxLink, id uint32) *rekordbox.Analysis {
+	a, _ := rbxAnalysisWithSource(link, id)
+	return a
+}
+
+func rbxAnalysisWithSource(link rbxLink, id uint32) (*rekordbox.Analysis, rbxFingerprint) {
 	if m, ok := link.(interface {
 		AnalysisOf(uint32) *rekordbox.Analysis
 	}); ok {
-		return m.AnalysisOf(id) // a player's medium: its ANLZ files
+		return m.AnalysisOf(id), rbxFingerprint{} // a player's medium: its ANLZ files
 	}
 	a := &rekordbox.Analysis{}
 	l, ok := link.(interface {
 		Analysis(uint32, string, string) ([]byte, error)
 	})
 	if !ok {
-		return a
+		return a, rbxFingerprint{}
 	}
 	for _, tf := range [][2]string{{"PQTZ", "DAT"}, {"PCO2", "EXT"}, {"PCOB", "DAT"}, {"PWV7", "2EX"}, {"PWV5", "EXT"}, {"PWAV", "DAT"}} {
 		b, err := l.Analysis(id, tf[0], tf[1])
@@ -413,18 +703,42 @@ func rbxAnalysis(link rbxLink, id uint32) *rekordbox.Analysis {
 			a.Merge(s)
 		}
 	}
-	if g, ok := link.(interface{ BeatGrid(uint32) ([]byte, error) }); ok && len(a.Beats) == 0 {
-		if b, err := g.BeatGrid(id); err == nil {
-			a.Beats = rbxBeatGrid(b)
-		}
+	edits, source := rbxReadSourceEdits(link, id, rbxFingerprint{})
+	if len(a.Beats) == 0 {
+		a.Beats = edits.Beats
 	}
 	// rekordbox 7 sends its PCO2 sections empty: the cues come only as the cue list.
-	if c, ok := link.(interface{ CuesExtended(uint32) ([]byte, error) }); ok && len(a.Cues) == 0 {
-		if b, err := c.CuesExtended(id); err == nil {
-			a.Merge(&rekordbox.Analysis{Cues: rbxCueList(b)})
+	if len(a.Cues) == 0 {
+		a.Merge(&rekordbox.Analysis{Cues: edits.Cues})
+	}
+	return a, source
+}
+
+type rbxFingerprint [2 * sha256.Size]byte
+
+// Only successful, valid responses replace a field's previous fingerprint.
+func rbxReadSourceEdits(link rbxLink, id uint32, source rbxFingerprint) (a rekordbox.Analysis, next rbxFingerprint) {
+	next = source
+	if l, ok := link.(interface{ BeatGrid(uint32) ([]byte, error) }); ok {
+		if b, err := l.BeatGrid(id); err == nil && len(b) >= 36 && (len(b)-20)%16 == 0 {
+			beats := rbxBeatGrid(b)
+			if beats[0].BPM > 0 && beats[0].BPM < 499.5 {
+				a.Beats = beats
+				h := sha256.Sum256(b)
+				copy(next[:sha256.Size], h[:])
+			}
 		}
 	}
-	return a
+	if l, ok := link.(interface{ CuesExtended(uint32) ([]byte, error) }); ok {
+		if b, err := l.CuesExtended(id); err == nil {
+			if cues, valid := rbxParseCueList(b); valid {
+				a.Cues = cues
+				h := sha256.Sum256(b)
+				copy(next[sha256.Size:], h[:])
+			}
+		}
+	}
+	return a, next
 }
 
 // rbxCueList reads 0x2b04's cues as the PCO2 entries of an export give them: per entry
@@ -432,6 +746,11 @@ func rbxAnalysis(link rbxLink, id uint32) *rekordbox.Analysis {
 // and end in ms at 12 and 16, colour ID at 0x22, then the comment's size at 0x48 and its
 // UTF-16LE text, the colour code and RGB after it (beat-link's CueList).
 func rbxCueList(b []byte) []rekordbox.Cue {
+	cues, _ := rbxParseCueList(b)
+	return cues
+}
+
+func rbxParseCueList(b []byte) ([]rekordbox.Cue, bool) {
 	var cues []rekordbox.Cue
 	for len(b) >= 0x24 {
 		n := int(binary.LittleEndian.Uint32(b))
@@ -463,7 +782,7 @@ func rbxCueList(b []byte) []rekordbox.Cue {
 		}
 		cues = append(cues, c)
 	}
-	return cues
+	return cues, len(b) == 0
 }
 
 // rbxBeatGrid reads 0x2204's grid: 20 bytes, then per beat 16 (little-endian beat in the

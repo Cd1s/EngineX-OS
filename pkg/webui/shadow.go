@@ -147,6 +147,10 @@ type deckState struct {
 	DisplayDetail bool `json:"displayDetail,omitempty"`
 	// rbx: a track from the rekordbox source, as our player's status reports it.
 	rbx prolink.ExportDeck
+	// rbxAnalysis: that track's analysis as the rekordbox load leaves it for Engine
+	// here; rbxRow the gateway row it is of.
+	rbxAnalysis string
+	rbxRow      int64
 }
 
 // shadowCue is one hot cue (I 1..8); the receiver checks it before use.
@@ -601,6 +605,9 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 		}
 		if s.tidal != nil {
 			if ip, id, ok := s.tidal.rekordboxLoaded(np); ok {
+				if gid, err := strconv.ParseInt(filepath.Base(np), 10, 64); err == nil {
+					d.rbxAnalysis, d.rbxRow = rbxAnalysisPath(gid), gid
+				}
 				for _, dev := range s.mergedDevices() {
 					if dev.Address == ip && prolink.IsRekordbox(dev) {
 						d.rbx = prolink.ExportDeck{Source: dev.Number, Slot: 4, Type: 1, Track: id}
@@ -646,6 +653,10 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 					sh.resolveMu.Unlock()
 				}
 			}
+		}
+		if d.Key != "" && d.rbxAnalysis != "" {
+			// One audio file can be two rekordbox rows: the copy is of this row.
+			d.Key = fmt.Sprintf("%x", fnvSum(d.Key+" "+np))
 		}
 		s.shadow.mu.Lock()
 		if d.Key != "" {
@@ -1211,15 +1222,20 @@ func (s *Server) peerDecksGet(w http.ResponseWriter, r *http.Request) {
 
 // ownDeckFile is the file on this player's deck {n} if ?key= still names it.
 func (s *Server) ownDeckFile(r *http.Request) string {
+	d, _ := s.ownDeck(r)
+	return d.Path
+}
+
+func (s *Server) ownDeck(r *http.Request) (deckState, bool) {
 	n, _ := strconv.Atoi(r.PathValue("n"))
 	s.shadow.mu.Lock()
 	defer s.shadow.mu.Unlock()
 	for _, d := range s.shadow.own {
 		if d.Deck == n && d.Key != "" && d.Key == r.URL.Query().Get("key") {
-			return d.Path
+			return d, true
 		}
 	}
-	return ""
+	return deckState{}, false
 }
 
 func (s *Server) peerAudioGet(w http.ResponseWriter, r *http.Request) {
@@ -1244,18 +1260,97 @@ func (s *Server) peerAudioGet(w http.ResponseWriter, r *http.Request) {
 // peerPerfGet serves the current deck's analysis as EXPF (#49) or as the
 // original compressed blobs for a peer that can fill its shadow row at load.
 func (s *Server) peerPerfGet(w http.ResponseWriter, r *http.Request) {
-	path := s.ownDeckFile(r)
-	if path == "" {
+	d, _ := s.ownDeck(r)
+	if d.Path == "" {
 		http.Error(w, "not loaded", http.StatusConflict)
 		return
 	}
-	perf, err := libraryPerfFormat(r.Context(), path, s.shadow.dataRoot, s.shadow.mediaRoot, r.URL.Query().Get("format") == "native")
+	// Asked before the read and again after a miss: a load that finishes in between
+	// has written the file the read missed.
+	running := d.rbxAnalysis != "" && rbxAnalysisRunning(d.rbxRow)
+	perf, err := s.ownPerf(r.Context(), d, r.URL.Query().Get("format") == "native")
+	afterPerfRead()
+	if d.rbxAnalysis != "" && errors.Is(err, os.ErrNotExist) && (running || rbxAnalysisRunning(d.rbxRow)) {
+		// The load is still reading it from rekordbox: the copy waits for it. Once
+		// that is over without one, 404: the copy is analysed here, as before.
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "analysing", http.StatusServiceUnavailable)
+		return
+	}
 	if err != nil {
 		http.Error(w, "not analysed", http.StatusNotFound)
 		return
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Write(perf)
+}
+
+// afterPerfRead runs between /perf's read and its second check; tests use it.
+var afterPerfRead = func() {}
+
+// rbxAnalysisRunning: the rekordbox load of gateway row id is still reading its analysis.
+func rbxAnalysisRunning(id int64) bool {
+	_, running := rbxAnalysing.Load(id)
+	return running
+}
+
+// rbxPeerPerf is a rekordbox Link track's analysis for a shadow copy, from the file
+// its load left for Engine here. The deck's file is Engine's download or the
+// gateway's copy on a drive, which no library lists until Engine's row has it,
+// so the library lookup missed and the copy was analysed again.
+func rbxPeerPerf(file string, bpm float64, native bool) ([]byte, error) {
+	b, err := rbxReadAnalysisFile(file)
+	if err != nil {
+		return nil, err
+	}
+	p := rbxCachedPerformance(b)
+	if !p.Complete {
+		return nil, errors.New("rekordbox analysis incomplete")
+	}
+	if native {
+		return encodeShadowAnalysis(p)
+	}
+	return perfFromBlobs(bpm, p.TrackData, p.Beats, p.Overview)
+}
+
+// rbxReadAnalysisFile reads a regular file directly in rbxAnalysisDir through an
+// os.Root (no link, nor a parent's, leads out of it), at most rbxAnalysisMax bytes.
+func rbxReadAnalysisFile(file string) ([]byte, error) {
+	if filepath.Dir(file) != filepath.Clean(rbxAnalysisDir) {
+		return nil, errors.New("rekordbox analysis outside its directory")
+	}
+	root, err := os.OpenRoot(rbxAnalysisDir)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	name := filepath.Base(file)
+	if st, err := root.Lstat(name); err != nil {
+		return nil, err
+	} else if !st.Mode().IsRegular() || st.Size() > rbxAnalysisMax {
+		return nil, errors.New("rekordbox analysis is not a bounded regular file")
+	}
+	f, err := root.OpenFile(name, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	if st, err := f.Stat(); err != nil || !st.Mode().IsRegular() || st.Size() > rbxAnalysisMax {
+		return nil, errors.New("rekordbox analysis is not a bounded regular file")
+	}
+	return io.ReadAll(io.LimitReader(f, rbxAnalysisMax+1))
+}
+
+const rbxAnalysisMax = 16 << 20
+
+// ownPerf is what /perf serves for an own deck: its library's analysis, else a
+// rekordbox Link deck's own (os.ErrNotExist while that is not written yet).
+func (s *Server) ownPerf(ctx context.Context, d deckState, native bool) ([]byte, error) {
+	perf, err := libraryPerfFormat(ctx, d.Path, s.shadow.dataRoot, s.shadow.mediaRoot, native)
+	if err != nil && d.rbxAnalysis != "" {
+		perf, err = rbxPeerPerf(d.rbxAnalysis, d.BPM, native)
+	}
+	return perf, err
 }
 
 // streamingDownload is Engine's own download of a streaming track (Engine
@@ -1431,18 +1526,55 @@ func savePerf(local string, perf []byte) {
 	}
 }
 
+// A source still writing a rekordbox Link track's analysis answers 503: asked again
+// this often, a few times, before Engine loads the copy (only such a track waits).
+var perfRetryWait, perfRetries, perfRequestTimeout = 2 * time.Second, 5, 5 * time.Second
+
 func fetchPerf(ctx context.Context, url string) []byte {
+	b, _ := fetchPerfPending(ctx, url)
+	return b
+}
+
+// fetchPerfPending also says whether the source was still reading the analysis.
+// Once the source said 503, only its analysis or an explicit 404 ends the wait: a
+// timeout, a broken connection or a cut body is not an answer.
+func fetchPerfPending(ctx context.Context, url string) (perf []byte, pending bool) {
+	for try := 0; ; try++ {
+		b, status, ok := fetchPerfOnce(ctx, url)
+		switch {
+		case ok:
+			return b, false
+		case status == http.StatusServiceUnavailable:
+			pending = true
+		case !pending || status == http.StatusNotFound:
+			return nil, false
+		}
+		if try+1 >= perfRetries {
+			return nil, true
+		}
+		select {
+		case <-ctx.Done():
+			return nil, true
+		case <-time.After(perfRetryWait):
+		}
+	}
+}
+
+// fetchPerfOnce: ok only for a complete 200 answer.
+func fetchPerfOnce(ctx context.Context, url string) ([]byte, int, bool) {
+	ctx, cancel := context.WithTimeout(ctx, perfRequestTimeout)
+	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
 	resp, err := peerFileClient.Do(req)
 	if err != nil {
-		return nil
+		return nil, 0, false
 	}
 	defer resp.Body.Close()
 	b, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
 	if resp.StatusCode != 200 || err != nil {
-		return nil // a source without /perf: Engine analyses the copy
+		return nil, resp.StatusCode, false // a source without /perf: Engine analyses the copy
 	}
-	return b
+	return b, resp.StatusCode, true
 }
 
 // cdjCuePlay is a status packet's play state while CUE is held (P1 0x07).
@@ -2006,6 +2138,12 @@ func (s *Server) shadowFetchPeer(key string, p peerDeck) {
 	}
 	local := filepath.Join(dir, name)
 	s.shadowFetch(key, func(ctx context.Context, cp *shadowCopy) (string, error) {
+		// The analysis first: a copy is published only once the source has said what
+		// it has. Still being read there (503): no copy yet, tried again later.
+		perf, pending := fetchPerfPending(ctx, strings.Replace(url, "/audio?", "/perf?", 1))
+		if pending {
+			return "", errPerfPending
+		}
 		req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
 		resp, err := peerFileClient.Do(req)
 		if err != nil {
@@ -2035,7 +2173,7 @@ func (s *Server) shadowFetchPeer(key string, p peerDeck) {
 			return "", err
 		}
 		// Engine loads the copy only after this returns, so it sees the .perf.
-		savePerf(local, fetchPerf(ctx, strings.Replace(url, "/audio?", "/perf?", 1)))
+		savePerf(local, perf)
 		if playerBoards[imagePrefix(deviceCompatible())] {
 			saveShadowAnalysis(ctx, local, strings.Replace(url, "/audio?", "/perf?", 1)+"&format=native")
 		}
@@ -2053,6 +2191,9 @@ type shadowCopy struct {
 }
 
 var errShadowUnavailable = errors.New("the source does not have the track")
+
+// errPerfPending: the source is still reading the track's analysis.
+var errPerfPending = errors.New("the source's analysis is not ready")
 
 type countWriter struct{ n *atomic.Int64 }
 
@@ -2110,6 +2251,8 @@ func (s *Server) shadowFetch(key string, fetch func(context.Context, *shadowCopy
 		if err != nil {
 			var timeout net.Error
 			switch {
+			case errors.Is(err, errPerfPending):
+				c.err = "" // still copying, as the deck shows it
 			case errors.Is(err, errShadowUnavailable):
 				c.err = "unavailable"
 			case ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &timeout) && timeout.Timeout()): // ctx: a read cut off by the deadline fails with another error

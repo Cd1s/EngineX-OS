@@ -123,13 +123,13 @@ func mp4AudioHeader(r io.ReaderAt, start, end int64) (AudioInfo, error) {
 		if rem != 0 || samples/rate > 1e7 {
 			continue
 		}
-		// iTunes AAC priming is skipped at playback; Engine still counts the
-		// trailing AAC frame padding. The grid uses the same decoded timebase.
+		// Keep the container's full decoded sample count in trackData. Engine
+		// compares it with the decoder's duration; priming only shifts the
+		// grid/cue positions through EncodePerformance.
 		prime := mp4AudioPriming(r, moov)
 		if samples <= uint64(prime) {
 			continue
 		}
-		samples -= uint64(prime)
 		info := AudioInfo{Format: "aac", SampleRate: int(rate), Channels: channels, Samples: samples, Duration: float64(samples) / float64(rate), StartOffsetSamples: prime}
 		return info, nil
 	}

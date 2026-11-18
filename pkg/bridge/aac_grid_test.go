@@ -16,12 +16,17 @@ import (
 
 func TestAACImportPreservesExportTiming(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		fixture func([]byte) []byte
-		priming float64
+		name             string
+		fixture          func([]byte) []byte
+		priming          float64
+		wantSampleCount  uint64
+		wantBeat0        float64
+		wantBeat1        float64
+		wantHotB         float64
+		wantLoop0Start   float64
 	}{
-		{name: "truncated moov", fixture: func(b []byte) []byte { return b[:300] }},
-		{name: "HE-AAC core rate", priming: 2048, fixture: func(b []byte) []byte {
+		{name: "truncated moov", fixture: func(b []byte) []byte { return b[:300] }, wantSampleCount: 352800, wantBeat1: 22050, wantHotB: 22050, wantLoop0Start: 33075},
+		{name: "HE-AAC core rate", priming: 2048, wantSampleCount: 352800, wantBeat0: -2048, wantBeat1: 20002, wantHotB: 20002, wantLoop0Start: 31027, fixture: func(b []byte) []byte {
 			entry := bytes.Index(b, []byte("mp4a"))
 			binary.BigEndian.PutUint32(b[entry+4+24:], 22050<<16)
 			return b
@@ -40,8 +45,8 @@ func TestAACImportPreservesExportTiming(t *testing.T) {
 			}
 			defer db.Close()
 			got := readTrackPositions(t, db, 1)
-			if got.trackSampleRate != 44100 || got.beat0 != -tc.priming || got.beat1 != 22050-tc.priming ||
-				got.hotB != 22050-tc.priming || got.loop0Start != 33075-tc.priming {
+			if got.trackSampleRate != 44100 || got.trackSampleCount != tc.wantSampleCount || got.beat0 != tc.wantBeat0 || got.beat1 != tc.wantBeat1 ||
+				got.hotB != tc.wantHotB || got.loop0Start != tc.wantLoop0Start {
 				t.Fatalf("want 44.1 kHz export grid, cue and loop with %v samples of priming; got %+v", tc.priming, got)
 			}
 		})
