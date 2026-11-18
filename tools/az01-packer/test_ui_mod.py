@@ -415,6 +415,7 @@ class OnOffSwitchCompatibilityTest(unittest.TestCase):
             "scTracklistWaveform": "tracklistWaveform", "scOmniSource": "omniSource",
             "scCueCountdown": "cueCountdown", "scRemoteLoad": "remoteLoad",
             "scSdHighSpeed": "sdHighSpeed", "scRemoteAccess": "remoteAccess",
+            "scRestoreBpmOnUnsync": "restoreBpmOnUnsync",
         }
         for version, skin in (("5.0.4", "EmbeddedCommon"), ("5.3.0", "Embedded")):
             qrc = LAB / version / "qrc"
@@ -10301,6 +10302,124 @@ for (const inv of [false, true]) {{
 """
             node_res = subprocess.run(["node", "-e", js], capture_output=True, text=True)
             self.assertEqual(node_res.returncode, 0, node_res.stderr)
+
+
+class RestoreBpmOnUnsyncTest(unittest.TestCase):
+    """#289: `Restore BPM on Sync Off`, opt-in. Sync turned off with the tempo control at 0 % returns the deck
+    to the track's original BPM; everything else keeps stock behaviour and Smart Sync's own range restore."""
+
+    @staticmethod
+    def _block(text, start, open_at=None):
+        i = text.index(start)
+        j = text.index("{", i if open_at is None else open_at)
+        depth = 0
+        for k in range(j, len(text)):
+            depth += (text[k] == "{") - (text[k] == "}")
+            if depth == 0:
+                return text[i:k + 1], text[j + 1:k]
+        raise AssertionError(start)
+
+    def _script(self, cases):
+        src = bp.SMART_SYNC_MAIN
+        neutral, _ = self._block(src, "function scSpeedNeutral(")
+        restore, _ = self._block(src, "function scUnsyncRestoreBpm(")
+        _, fire_body = self._block(src, "id: scBpmRestoreTimer", src.index("id: scBpmRestoreTimer") + src[src.index("id: scBpmRestoreTimer"):].index("onTriggered:"))
+        return r"""
+const assert = require('node:assert/strict');
+var scRestoreBpmOnUnsync = true, scShadowEngineMask = 0, scBpmRestorePending = {}, armed = 0, writes = [];
+const decks = {};
+function deck(d, o) { decks[d] = Object.assign({loaded: true, sync: 'Off', master: false, speed: 0.5, range: '8'}, o); }
+const root = {
+  get scBpmRestorePending() { return scBpmRestorePending; }, set scBpmRestorePending(v) { scBpmRestorePending = v; },
+  get scRestoreBpmOnUnsync() { return scRestoreBpmOnUnsync; },
+  scTr(path) {
+    const m = /Deck(\d)\/(.*)$/.exec(path), s = decks[m[1]], k = m[2];
+    if (!s) return null;
+    if (k === 'Track/SongLoaded') return {get state() { return s.loaded; }};
+    if (k === 'SyncMode') return {get string() { return s.sync; }};
+    if (k === 'DeckIsMaster') return {get state() { return s.master; }};
+    if (k === 'SpeedRange') return {get string() { return s.range; }};
+    if (k === 'Speed') return {get value() { return s.speed; }, set value(v) { s.speed = v; writes.push(m[1] + ':' + v); }};
+  },
+};
+const scBpmRestoreTimer = {restart() { armed++; }};
+""" + neutral + "\n" + restore + "\nfunction fire() {" + fire_body + "}\n" + cases
+
+    def run_node(self, cases):
+        out = subprocess.run(["node", "-e", self._script(cases)], capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required for the restore logic")
+    def test_off_writes_nothing_and_every_stock_case_is_left_alone(self):
+        self.run_node(r"""
+const none = (label) => { assert.deepEqual(writes, [], label); assert.equal(armed, 0, label); };
+// Off (the default): the same neutral, unsynced, unmastered, loaded deck is never touched.
+scRestoreBpmOnUnsync = false; deck(1, {}); scUnsyncRestoreBpm(1); fire(); none('off');
+scRestoreBpmOnUnsync = true;
+deck(1, {speed: 0.55}); scUnsyncRestoreBpm(1); none('control moved 0.8 %');          // the DJ moved it: stock
+deck(1, {master: true}); scUnsyncRestoreBpm(1); none('master deck');                   // decks synced to it would follow
+deck(1, {loaded: false}); scUnsyncRestoreBpm(1); none('no track loaded');              // eject / load
+deck(1, {sync: 'TempoSync'}); scUnsyncRestoreBpm(1); none('still synced');
+scShadowEngineMask = 1 << 1; deck(1, {}); scUnsyncRestoreBpm(1); none('shadow deck');
+scShadowEngineMask = 0; deck(1, {range: '100', speed: 0.5006}); scUnsyncRestoreBpm(1); none('0.12 % of a 100 % range');
+assert.equal(scBpmRestorePending[1], undefined);
+""")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required for the restore logic")
+    def test_neutral_control_returns_to_zero_percent(self):
+        self.run_node(r"""
+// 0.0048 % off centre: one write of exactly 0 %.
+deck(2, {speed: 0.5003}); scUnsyncRestoreBpm(2);
+assert.deepEqual(writes, ['2:0.5']); assert.equal(armed, 0);
+// 0.08 % of a 100 % range is still neutral.
+writes.length = 0; deck(2, {range: '100', speed: 0.5004}); scUnsyncRestoreBpm(2);
+assert.deepEqual(writes, ['2:0.5']);
+// Exactly 0 %: Engine ignores a write of the same value, so move the control and put it back.
+writes.length = 0; deck(2, {speed: 0.5}); scUnsyncRestoreBpm(2);
+assert.deepEqual(writes, ['2:0.502']); assert.equal(armed, 1); assert.equal(scBpmRestorePending[2], true);
+fire();
+assert.deepEqual(writes, ['2:0.502', '2:0.5']); assert.deepEqual(scBpmRestorePending, {});
+assert.equal(decks[2].speed, 0.5);
+""")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required for the restore logic")
+    def test_the_put_back_only_happens_if_nothing_changed_in_the_40_ms(self):
+        self.run_node(r"""
+const arm = () => { writes.length = 0; deck(2, {speed: 0.5}); scUnsyncRestoreBpm(2); assert.deepEqual(writes, ['2:0.502']); };
+arm(); decks[2].speed = 0.53; writes.length = 0; fire(); assert.deepEqual(writes, [], 'the DJ moved the control');
+arm(); decks[2].sync = 'BeatOrBarSync'; writes.length = 0; fire(); assert.deepEqual(writes, [], 'Sync came back');
+arm(); decks[2].loaded = false; writes.length = 0; fire(); assert.deepEqual(writes, [], 'track ejected');
+arm(); scRestoreBpmOnUnsync = false; writes.length = 0; fire(); assert.deepEqual(writes, [], 'setting turned off');
+scRestoreBpmOnUnsync = true; arm(); fire(); assert.deepEqual(writes.slice(-1), ['2:0.5']);
+fire(); assert.deepEqual(writes.slice(-1), ['2:0.5'], 'a second fire has nothing pending'); assert.equal(writes.length, 2);
+""")
+
+    def test_smart_sync_keeps_its_range_restore_and_calls_the_new_logic_after_it(self):
+        src = bp.SMART_SYNC_MAIN
+        old_else = """				} else {
+					if (savedRangeIndex >= 0 && r) {
+						r.index = savedRangeIndex
+						savedRangeIndex = -1
+					}
+					root.scUnsyncRestoreBpm(deckIdx)
+				}"""
+        self.assertIn(old_else, src)  # the range restore is untouched, the new call comes after it
+        self.assertIn("if (syncNeed > 0) root.scWidenRange(deckIdx, syncNeed)", src)
+        self.assertEqual(src.count("root.scUnsyncRestoreBpm("), 1)
+        # no controller module is touched: nothing for the controller engine to latch
+        self.assertNotIn("scUnsyncRestoreBpm", bp.FX_CONTROLLER)
+
+    def test_setting_is_wired_off_by_default_and_translated(self):
+        main = bp.SERVICES_MAIN
+        self.assertIn("property bool scRestoreBpmOnUnsync: false", main)
+        self.assertIn('key === "restore_bpm_on_unsync") root.scRestoreBpmOnUnsync = val === "1" || val === "true"', main)
+        self.assertIn("root.scRestoreBpmOnUnsync = false\n", main)  # reset before the file is parsed
+        self.assertIn("v.restoreBpmOnUnsync !== undefined", main)
+        self.assertIn('text: "Restore BPM on Sync Off"', bp.PLAYBACK_ENTRIES)
+        self.assertIn('root.scCall("restoreBpmOnUnsync=" + (root.scRestoreBpmOnUnsync ? 0 : 1))', bp.PLAYBACK_ENTRIES)
+        row = bp.load_dict()["Restore BPM on Sync Off"]
+        for lang in ("zh-Hans", "zh-Hant", "es"):
+            self.assertTrue(row.get(lang), lang)
 
 
 if __name__ == "__main__":

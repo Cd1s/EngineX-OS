@@ -3239,6 +3239,7 @@ SERVICES_MAIN = """
 	}
 	property bool scBeatJumpPads: false
 	property bool scPitchBendBeatJump: false
+	property bool scRestoreBpmOnUnsync: false
 	property bool scBpmDecimalsSynced: false
 	readonly property var scBpmDecimalsPropRef: Planck.createProperty("EngineXBpmDecimals", 0.0, 0)
 	readonly property var scBpmDecimalsProp: scBpmDecimalsPropRef && Planck.getProperty("/GUI/Scripted/EngineXBpmDecimals")
@@ -3931,6 +3932,8 @@ SERVICES_MAIN = """
 			else if (v.beat_jump_pads !== undefined) scBeatJumpPads = v.beat_jump_pads === "1" || v.beat_jump_pads === 1 || v.beat_jump_pads === true
 			if (v.pitchBendBeatJump !== undefined) scPitchBendBeatJump = !!v.pitchBendBeatJump
 			else if (v.pitch_bend_beat_jump !== undefined) scPitchBendBeatJump = v.pitch_bend_beat_jump === "1" || v.pitch_bend_beat_jump === 1 || v.pitch_bend_beat_jump === true
+			if (v.restoreBpmOnUnsync !== undefined) scRestoreBpmOnUnsync = !!v.restoreBpmOnUnsync
+			else if (v.restore_bpm_on_unsync !== undefined) scRestoreBpmOnUnsync = v.restore_bpm_on_unsync === "1" || v.restore_bpm_on_unsync === 1 || v.restore_bpm_on_unsync === true
 			if (v.mixstreamFx && typeof v.mixstreamFx !== "string" && v.mixstreamFx.length === 4) scMixstreamFx = v.mixstreamFx
 			else if (typeof v.mixstream_fx === "string") {
 				const fx = v.mixstream_fx.split(",").map(s => s.trim()).filter(Boolean)
@@ -4007,6 +4010,7 @@ SERVICES_MAIN = """
 		root.scReverseJogLeft = false
 		root.scReverseJogRight = false
 		root.scSdHighSpeed = false
+		root.scRestoreBpmOnUnsync = false
 		for (const line of (text || "").split("\\n")) {
 			const eq = line.indexOf("=")
 			if (eq < 0) continue
@@ -4026,6 +4030,7 @@ SERVICES_MAIN = """
 			else if (key === "stems_eq_mode") root.scStemsEqMode = val === "1"
 			else if (key === "beat_jump_pads") root.scBeatJumpPads = val === "1"
 			else if (key === "pitch_bend_beat_jump") root.scPitchBendBeatJump = val === "1" || val === "true"
+			else if (key === "restore_bpm_on_unsync") root.scRestoreBpmOnUnsync = val === "1" || val === "true"
 			else if (key === "mixstream_fx") {
 				const fx = val.split(",").map(s => s.trim()).filter(Boolean)
 				if (fx.length === 4) root.scMixstreamFx = fx
@@ -5221,7 +5226,8 @@ DISPLAY_ENTRIES = """
 """
 
 # User Profile -> Playback: audio DSP and playback.
-PLAYBACK_ENTRIES = (switch_entry("Master Soft Clipper", "scMasterLimiter", "masterLimiter")
+PLAYBACK_ENTRIES = (switch_entry("Restore BPM on Sync Off", "scRestoreBpmOnUnsync", "restoreBpmOnUnsync")
+    + switch_entry("Master Soft Clipper", "scMasterLimiter", "masterLimiter")
     + switch_entry("Auto-Gain (0 dB Normalize)", "scAutoGain", "autoGain")
     + switch_entry("Echo Out", "scUpfaderEcho", "upfaderEcho", "\t\t\tvisible: root.scHasMixer\n")
     + switch_entry("Stems EQ Mode", "scStemsEqMode", "stemsEqMode", "\t\t\tvisible: root.scHasStemsEq\n") + """
@@ -5717,6 +5723,44 @@ SMART_SYNC_MAIN = """
 		}
 		return minNeed
 	}
+	// #289 (opt-in, default off): Sync turned off while the tempo control is still at
+	// 0 % returns the deck to the track's original BPM; stock keeps the synced rate
+	// after UnSync until the fader moves. Not for the MASTER deck (decks synced to
+	// it would follow the change), not for shadow decks, not when the DJ moved the
+	// control. Runs in the GUI engine from the SyncMode change: no controller latch.
+	property var scBpmRestorePending: ({})
+	function scSpeedNeutral(value, rangePct) {
+		return rangePct > 0 && Math.abs(value - 0.5) * 2 * rangePct <= 0.1
+	}
+	function scUnsyncRestoreBpm(d) {
+		if (!scRestoreBpmOnUnsync || ((scShadowEngineMask >> d) & 1) !== 0) return
+		const pLoaded = root.scTr("/Engine/Deck" + d + "/Track/SongLoaded"), pSync = root.scTr("/Engine/Deck" + d + "/SyncMode")
+		const pMaster = root.scTr("/Engine/Deck" + d + "/DeckIsMaster"), pSpeed = root.scTr("/Engine/Deck" + d + "/Speed"), pRange = root.scTr("/Engine/Deck" + d + "/SpeedRange")
+		if (!pLoaded || !pSync || !pMaster || !pSpeed || !pRange || !pLoaded.state || pSync.string !== "Off" || pMaster.state) return
+		if (!scSpeedNeutral(pSpeed.value, parseFloat(pRange.string))) return
+		if (Math.abs(pSpeed.value - 0.5) > 1e-9) { pSpeed.value = 0.5; return }
+		// Exactly 0 % already: writing the same value changes nothing in Engine, so move
+		// the control by 0.2 % of its range and put it back 40 ms later.
+		pSpeed.value = 0.502
+		const pend = scBpmRestorePending
+		pend[d] = true
+		scBpmRestorePending = pend
+		scBpmRestoreTimer.restart()
+	}
+	Timer {
+		id: scBpmRestoreTimer
+		interval: 40
+		onTriggered: {
+			const pend = root.scBpmRestorePending
+			root.scBpmRestorePending = ({})
+			for (const k in pend) {
+				const d = parseInt(k)
+				const pLoaded = root.scTr("/Engine/Deck" + d + "/Track/SongLoaded"), pSync = root.scTr("/Engine/Deck" + d + "/SyncMode"), pSpeed = root.scTr("/Engine/Deck" + d + "/Speed")
+				// Only if nothing happened meanwhile: still loaded, Sync still off, the control still where we put it.
+				if (root.scRestoreBpmOnUnsync && pLoaded && pSync && pSpeed && pLoaded.state && pSync.string === "Off" && Math.abs(pSpeed.value - 0.502) < 1e-5) pSpeed.value = 0.5
+			}
+		}
+	}
 	Instantiator {
 		model: root.scDeckList()
 		delegate: QtObject {
@@ -5746,6 +5790,7 @@ SMART_SYNC_MAIN = """
 						r.index = savedRangeIndex
 						savedRangeIndex = -1
 					}
+					root.scUnsyncRestoreBpm(deckIdx)
 				}
 			}
 			onSyncNeedChanged: {
