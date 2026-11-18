@@ -158,7 +158,7 @@ int main(int argc, char **argv) {
     hook_test_clock = fake_clock;
     bt_send_orig = fake_sender;
     stream_rate = 44100;
-    echo_enabled = gain_enabled = lim_enabled = 1;
+    echo_enabled = hifi_enabled = gain_enabled = lim_enabled = 1;
     live_tap.on = 1;
     for (unsigned p = 0; p < 4; p++) sc_ms_prepare(&master_ms[p]); /* the polling worker's part */
 #if !defined(__aarch64__)
@@ -194,6 +194,7 @@ int main(int argc, char **argv) {
                 for (unsigned block = 0; block < BLOCKS; block++) { /* over 1 s at 48 kHz: the Bluetooth rate is measured */
                     __atomic_store_n(&pioneer_fx_mode, (int)(block / 8 % 6), __ATOMIC_RELAXED);
                     __atomic_store_n(&pfx_time_ms, block / 48 % 2 ? 10u : 0u, __ATOMIC_RELEASE);
+                    __atomic_store_n(&hifi_enabled, (int)(block / 16 % 2), __ATOMIC_RELAXED);
                     __atomic_add_fetch(&bt_encodes, 1, __ATOMIC_RELEASE); /* the speaker's encoder ran */
                     clock_ns += (unsigned long long)frames * 1000000000ull / 48000ull;
                     phase += (unsigned)frames;

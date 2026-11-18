@@ -671,6 +671,7 @@ SERVICES_MAIN = """
 	property string scNeteaseMode: "official"
 	property bool scMasterLimiter: false // #58, applied by engine_ui_hook.c
 	property bool scAutoGain: false // #64, applied by engine_ui_hook.c
+	property bool scHifiOutput: false // #172, applied by engine_ui_hook.c
 	// #55: retain the saved preference, but fail closed until a bounded native
 	// per-track adapter is verified. See AUTO_ANALYZE.md. No drive/toggle handler
 	// may submit a whole-library scan or guess an ITrackDataPtr payload.
@@ -3994,6 +3995,7 @@ SERVICES_MAIN = """
 		scLanStems = root.scLanStemsLine ? root.scLanStemsLine(root.scLanStemsInfo, scLang) : ""
 		scMasterLimiter = !!v.masterLimiter
 		scAutoGain = !!v.autoGain
+		scHifiOutput = !!v.hifiOutput
 		scFeaturesOff = Array.isArray(v.featuresOff) ? v.featuresOff : []
 		scAutoAnalyze = !!v.autoAnalyze
 		scOmniSource = !!v.omniSource
@@ -4131,6 +4133,7 @@ SERVICES_MAIN = """
 		root.scReverseJogLeft = false
 		root.scReverseJogRight = false
 		root.scSdHighSpeed = false
+		root.scHifiOutput = false
 		let restoreBpm = false // assigned once below: no Off/On blink on the controller's centre LED
 		for (const line of (text || "").split("\\n")) {
 			const eq = line.indexOf("=")
@@ -4146,6 +4149,7 @@ SERVICES_MAIN = """
 			else if (key === "jog_invert_left") root.scReverseJogLeft = val === "1" || val === "true"
 			else if (key === "jog_invert_right") root.scReverseJogRight = val === "1" || val === "true"
 			else if (key === "sd_high_speed") root.scSdHighSpeed = val === "1" || val === "true"
+			else if (key === "hifi_output") root.scHifiOutput = root.scIsPlayerBoard && (val === "1" || val === "true")
 			else if (key === "led_brightness") root.scLedBrightness = parseInt(val) || 100
 			else if (key === "ui_scale") root.scUIScale = parseInt(val) || 100
 			else if (key === "stems_eq_mode") root.scStemsEqMode = val === "1"
@@ -5362,6 +5366,7 @@ DISPLAY_ENTRIES = """
 PLAYBACK_ENTRIES = (switch_entry("Restore BPM on Sync Off", "scRestoreBpmOnUnsync", "restoreBpmOnUnsync")
     + switch_entry("Master Soft Clipper", "scMasterLimiter", "masterLimiter", '\t\t\tvisible: !root.scOff("dsp-guards")\n')
     + switch_entry("Auto-Gain (0 dB Normalize)", "scAutoGain", "autoGain", '\t\t\tvisible: !root.scOff("dsp-guards")\n')
+    + switch_entry("Hi-Fi Output", "scHifiOutput", "hifiOutput", '\t\t\tvisible: root.scIsPlayerBoard && !root.scOff("dsp-guards") && !root.scOff("hifi-output")\n')
     + switch_entry("Echo Out", "scUpfaderEcho", "upfaderEcho", '\t\t\tvisible: root.scHasMixer && !root.scOff("dsp-guards")\n')
     + switch_entry("Stems EQ Mode", "scStemsEqMode", "stemsEqMode", '\t\t\tvisible: root.scHasStemsEq && !root.scOff("stems-eq")\n') + """
 		EntryBase.ListEntry {

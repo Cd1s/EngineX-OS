@@ -170,7 +170,7 @@ int snd_pcm_sw_params(void *pcm, void *params) {
 
 // #58: the toggle is master_limiter=1 in settings.conf, polled once a second
 // off the audio thread; the limiter itself runs in hook_master_output.
-static int lim_enabled, gain_enabled; // gain_enabled: #64 auto_gain=1
+static int lim_enabled, gain_enabled, hifi_enabled; // gain_enabled: #64 auto_gain=1; hifi_enabled: #172 hifi_output=1
 static int bt_out_pair;               // bt_out=: output pair sent to Bluetooth (default 0, the first)
 static int echo_enabled;              // #104 upfader_echo=1: Echo Out on the master bus
 static int echo_player_bypass;        // standalone players hide Echo Out and Color FX Style; stored values behave as Off
@@ -497,7 +497,7 @@ static void *lim_poll(void *arg) {
         }
         had_settings = have_settings;
         if (have_settings) previous = st;
-        int on = 0, gain = 0, echo = 0, led = 100, btout = 0;
+        int on = 0, gain = 0, hifi = 0, echo = 0, led = 100, btout = 0;
         A32_ONLY int style = 0;
         struct sc_ms_config timing = {500, 0};
         FILE *f = fopen(four_deck_settings, "r");
@@ -508,6 +508,7 @@ static void *lim_poll(void *arg) {
                 if (sc_ms_setting(&timing, line)) continue;
                 if (!strncmp(line, "master_limiter=1", 16)) on = 1;
                 else if (!strncmp(line, "auto_gain=1", 11)) gain = 1;
+                else if (!strncmp(line, "hifi_output=1", 13)) hifi = 1;
                 else if (!strncmp(line, "upfader_echo=1", 14)) echo = 1;
                 else if (!strncmp(line, "bt_out=", 7)) {
                     int n = atoi(line + 7);
@@ -535,6 +536,7 @@ static void *lim_poll(void *arg) {
         __atomic_store_n(&echo_player_bypass, player_bypass, __ATOMIC_RELAXED);
         __atomic_store_n(&lim_enabled, on, __ATOMIC_RELAXED);
         __atomic_store_n(&gain_enabled, gain, __ATOMIC_RELAXED);
+        __atomic_store_n(&hifi_enabled, (player_bypass && hf_on(HF_HIFI_OUTPUT)) ? hifi : 0, __ATOMIC_RELAXED);
         __atomic_store_n(&bt_out_pair, btout, __ATOMIC_RELAXED);
         __atomic_store_n(&echo_enabled, player_bypass ? 0 : echo, __ATOMIC_RELAXED);
         __atomic_store_n(&pfx_time_ms, timing.enabled ? timing.ms : 0, __ATOMIC_RELEASE);
@@ -1059,6 +1061,7 @@ static void hook_flanger(void *self, float *const *input, float *const *output, 
 typedef uint32_t (*audio_callback_fn)(void *, void *, int, const float *const *, int, float *const *, int);
 static struct sc_lim master_lim[8];
 static struct sc_gain master_gain[8];
+static struct sc_hifi master_hifi[8];
 #define MASTER_ECHO_PAIRS 4 // 384 KB of BSS each, untouched until Echo Out is armed
 static struct sc_echo master_echo[MASTER_ECHO_PAIRS];
 #define MASTER_PFX_PAIRS 4
@@ -1355,6 +1358,11 @@ static uint32_t hook_master_output(void *host, void *context, int in_channels, c
             }
         }
     }
+    // #172 Hi-Fi output compensation (Gen-1 players only; 10 ms dry/wet fade on toggle).
+    int hifi = hf_on(HF_HIFI_OUTPUT) ? __atomic_load_n(&hifi_enabled, __ATOMIC_RELAXED) : 0;
+    if (out && frames > 0)
+        for (int ch = 0; ch < out_channels && ch < 16; ch += 2)
+            if (out[ch]) sc_hifi_planar(&master_hifi[ch / 2], out[ch], ch + 1 < out_channels ? out[ch + 1] : NULL, (unsigned)frames, hifi);
     int gain = __atomic_load_n(&gain_enabled, __ATOMIC_RELAXED);
     // Auto-Gain (#64) always runs into the limiter, so a boost never clips.
     if ((gain || __atomic_load_n(&lim_enabled, __ATOMIC_RELAXED)) && out && frames > 0)

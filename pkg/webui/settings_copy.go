@@ -13,7 +13,7 @@ import (
 )
 
 var copyUIBools = []string{
-	"engineLighting", "autoAnalyze", "masterLimiter", "autoGain",
+	"engineLighting", "autoAnalyze", "masterLimiter", "autoGain", "hifiOutput",
 	"fourDeckWaveform", "pairedView", "prolinkWaveform", "upfaderEcho",
 	"browserDualColumn", "tracklistWaveform", "cueCountdown", "swapLoopOrder",
 	"stemsEqMode", "beatJumpPads", "sdHighSpeed",
@@ -61,7 +61,7 @@ func copyUISupported(key, board string) bool {
 		return c.StemsEq
 	case "beatJumpPads":
 		return c.BeatJumpPads
-	case "pairedView":
+	case "pairedView", "hifiOutput":
 		return playerBoards[board]
 	case "fourDeckWaveform", "shadowMode":
 		return c.FourDeck

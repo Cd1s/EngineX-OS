@@ -194,6 +194,9 @@ type uiSettings struct {
 	// AutoGain raises quiet material toward 0 dBFS (at most +9 dB) ahead of the
 	// limiter, which then always runs (#64). Off by default.
 	AutoGain bool `json:"autoGain"`
+	// HifiOutput compensates the fixed 48->96 kHz Hermite output roll-off on Gen-1
+	// standalone players (JP07/JP08/JP13/JP14) ahead of the soft limiter (#172). Off by default.
+	HifiOutput bool `json:"hifiOutput"`
 	// OmniSource adds every mounted drive's playlists and tracks, and the other
 	// services' playlists, to the streaming browser (#62). Off by default.
 	OmniSource bool `json:"omniSource"`
@@ -422,6 +425,8 @@ func (s *Server) loadUI() uiSettings {
 			v.MasterLimiter = val == "1"
 		case "auto_gain":
 			v.AutoGain = val == "1"
+		case "hifi_output":
+			v.HifiOutput = val == "1"
 		case "omni_source":
 			v.OmniSource = val == "1"
 		case "remote_load":
@@ -648,6 +653,9 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	}
 	if v.AutoGain {
 		text += "auto_gain=1\n"
+	}
+	if v.HifiOutput {
+		text += "hifi_output=1\n"
 	}
 	if v.OmniSource {
 		text += "omni_source=1\n"
@@ -930,6 +938,9 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 	if !v.Capabilities.JogWheel {
 		v.JogInvertLeft = false
 		v.JogInvertRight = false
+	}
+	if board != "" && !v.Player {
+		v.HifiOutput = false
 	}
 	v.SdHighSpeedPending = s.sdHighSpeedPending(v.SdHighSpeed)
 	v.FourDeckRoleActive = s.activeRole(v)
@@ -1398,6 +1409,20 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		v.AutoGain = on == "1"
+	}
+	if q.Has("hifiOutput") || q.Has("hifi_output") {
+		raw := q.Get("hifiOutput")
+		if !q.Has("hifiOutput") {
+			raw = q.Get("hifi_output")
+		}
+		on, ok := parseBoolParam(raw)
+		if !ok {
+			s.uiMu.Unlock()
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+		board := imagePrefix(deviceCompatible())
+		v.HifiOutput = on && (board == "" || playerBoards[board])
 	}
 	if q.Has("rekordboxShare") {
 		if !validRekordboxShare(q.Get("rekordboxShare")) {

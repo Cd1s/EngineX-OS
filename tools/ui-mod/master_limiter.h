@@ -116,4 +116,91 @@ static inline void sc_gain_planar(struct sc_gain *s, float *l, float *r, unsigne
     }
 }
 
+/* #172 Hi-Fi output compensation (Gen-1 players JP07/JP08/JP13/JP14 only).
+ *
+ * On SC5000/SC6000 players, Engine renders DSP_MASTER at 48 kHz (225 frames)
+ * and ALSACombinedDevice upsamples 2x to 96 kHz via a 4-point Catmull-Rom
+ * cubic Hermite interpolator (phases {0, 0.5}), which rolls off the passband
+ * by -0.26/-0.91/-1.48/-2.24/-3.23 dB at 10/14/16/18/20 kHz.
+ *
+ * Two cascaded minimum-phase DF2T biquads at 48 kHz invert that fixed stage
+ * within +/-0.011 dB across 20 Hz - 20 kHz (0.002 dB RMS, <= +0.005 dB net
+ * everywhere, so 48 kHz @ 0 % becomes flat and never overshoots) and roll the
+ * boost back down above ~21.5 kHz to 0.00 dB at 24 kHz Nyquist. A 480-frame
+ * (10 ms) linear dry/wet ramp switches on and off without clicks. */
+#define SC_HIFI_STEP (1.0f / 480.0f)
+
+struct sc_hifi {
+    float z[2][4]; /* per-channel DF2T states: [z1_0, z2_0, z1_1, z2_1] */
+    float mix;     /* 0.0f = bypassed, 1.0f = fully engaged */
+};
+
+static inline float sc_hifi_sample(float *z, float x)
+{
+    static const float b10 = 1.085936189f, b11 = 0.125369817f, b12 = 0.037535761f;
+    static const float a11 = 0.235026851f, a12 = 0.013814930f;
+    static const float b20 = 1.032249928f, b21 = 1.523236990f, b22 = 0.561940193f;
+    static const float a21 = 1.513246536f, a22 = 0.604180515f;
+
+    float u = (x >= -3.0e38f && x <= 3.0e38f) ? x : 0.0f;
+    float y1 = b10 * u + z[0];
+    z[0] = b11 * u - a11 * y1 + z[1];
+    z[1] = b12 * u - a12 * y1;
+    float y2 = b20 * y1 + z[2];
+    z[2] = b21 * y1 - a21 * y2 + z[3];
+    z[3] = b22 * y1 - a22 * y2;
+    return y2;
+}
+
+static inline int sc_hifi_planar(struct sc_hifi *s, float *l, float *r, unsigned frames, int enabled)
+{
+    if (!s || !l || !frames)
+        return 0;
+    float mix = s->mix;
+    if (!enabled && mix <= 0.0f)
+        return 0;
+    if (enabled && mix <= 0.0f) {
+        for (unsigned c = 0; c < 2; c++)
+            for (unsigned k = 0; k < 4; k++)
+                s->z[c][k] = 0.0f;
+        mix = 0.0f;
+    }
+    if (enabled && mix >= 1.0f) {
+        for (unsigned i = 0; i < frames; i++) {
+            l[i] = sc_hifi_sample(s->z[0], l[i]);
+            if (r)
+                r[i] = sc_hifi_sample(s->z[1], r[i]);
+        }
+        mix = 1.0f;
+    } else {
+        float delta = enabled ? SC_HIFI_STEP : -SC_HIFI_STEP;
+        for (unsigned i = 0; i < frames; i++) {
+            mix += delta;
+            if (mix >= 1.0f) mix = 1.0f;
+            if (mix <= 0.0f) mix = 0.0f;
+            float dl = (l[i] >= -3.0e38f && l[i] <= 3.0e38f) ? l[i] : 0.0f;
+            float wl = sc_hifi_sample(s->z[0], dl);
+            l[i] = dl + mix * (wl - dl);
+            if (r) {
+                float dr = (r[i] >= -3.0e38f && r[i] <= 3.0e38f) ? r[i] : 0.0f;
+                float wr = sc_hifi_sample(s->z[1], dr);
+                r[i] = dr + mix * (wr - dr);
+            }
+        }
+    }
+    if (!enabled && mix <= 0.0f) {
+        for (unsigned c = 0; c < 2; c++)
+            for (unsigned k = 0; k < 4; k++)
+                s->z[c][k] = 0.0f;
+        s->mix = 0.0f;
+        return 1;
+    }
+    for (unsigned c = 0; c < 2; c++)
+        for (unsigned k = 0; k < 4; k++)
+            if (s->z[c][k] > -1.0e-20f && s->z[c][k] < 1.0e-20f)
+                s->z[c][k] = 0.0f;
+    s->mix = mix;
+    return 1;
+}
+
 #endif
