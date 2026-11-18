@@ -59,10 +59,7 @@ func AudioHeader(path string) (AudioInfo, error) {
 	default:
 		lower := strings.ToLower(path)
 		if IsMP4AudioPath(lower) && string(b[4:8]) == "ftyp" {
-			// Leave export timing available when the MP4 header is unreadable.
-			// The Link prefix reader still needs the error to request more bytes.
-			info, _ := mp4AudioHeader(f, baseOff, st.Size())
-			return info, nil
+			return mp4AudioHeader(f, baseOff, st.Size())
 		}
 		if strings.HasSuffix(lower, ".wav") || strings.HasSuffix(lower, ".wave") || strings.HasSuffix(lower, ".flac") || strings.HasSuffix(lower, ".aif") || strings.HasSuffix(lower, ".aiff") || strings.HasSuffix(lower, ".aifc") {
 			return AudioInfo{}, fmt.Errorf("invalid WAV/FLAC/AIFF magic")

@@ -147,7 +147,7 @@ func prepareOne(res *compat.Resolver, t rekordbox.Track, rel string, cutoff time
 			uninspected = true
 		} else if info, err := audioHeader(full); err == nil {
 			fp.MP3Offset = info.OffsetClass
-			if info.Format == "aac" && info.StartOffsetSamples > 0 {
+			if info.Format == "aac" {
 				fp.AACOffset = strconv.Itoa(info.StartOffsetSamples)
 			}
 			audio = &info

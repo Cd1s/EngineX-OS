@@ -677,11 +677,7 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 		if !fast && len(t.Cues) > 0 {
 			a.Merge(&rekordbox.Analysis{Cues: t.Cues})
 		}
-		if audio.Format == "aac" && t.SampleRate > 0 && t.SampleRate != audio.SampleRate {
-			// An implicit SBR stream can advertise only its core sample rate.
-			// Keep the export's timing; the priming tag is in decoded samples.
-			t.StartOffsetSamples = audio.StartOffsetSamples
-		} else if audio.SampleRate > 0 {
+		if audio.SampleRate > 0 {
 			if t.SampleRate > 0 && t.SampleRate != audio.SampleRate {
 				log.Printf("rb-bridge: track %d (%s): export sample rate %d Hz differs from file header %d Hz; using file header", t.ID, rel, t.SampleRate, audio.SampleRate)
 			}
