@@ -16,6 +16,7 @@ type AudioInfo struct {
 	Duration                                float64
 	Format                                  string
 	StartOffsetSamples                      int    `json:",omitempty"`
+	LinkStartOffsetSamples                  int    `json:",omitempty"`
 	OffsetClass                             string `json:",omitempty"`
 }
 
@@ -73,14 +74,15 @@ func AudioHeader(path string) (AudioInfo, error) {
 				return AudioInfo{}, err
 			}
 			return AudioInfo{
-				SampleRate:         mp3.SampleRate,
-				Channels:           mp3.Channels,
-				Bitrate:            mp3.Bitrate,
-				Samples:            mp3.Samples,
-				Duration:           mp3.Duration,
-				Format:             "mp3",
-				StartOffsetSamples: mp3.StartOffsetSamples,
-				OffsetClass:        mp3.OffsetClass,
+				SampleRate:             mp3.SampleRate,
+				Channels:               mp3.Channels,
+				Bitrate:                mp3.Bitrate,
+				Samples:                mp3.Samples,
+				Duration:               mp3.Duration,
+				Format:                 "mp3",
+				StartOffsetSamples:     mp3.StartOffsetSamples,
+				LinkStartOffsetSamples: mp3.LinkStartOffsetSamples,
+				OffsetClass:            mp3.OffsetClass,
 			}, nil
 		}
 		return AudioInfo{}, nil // exported metadata remains authoritative for other codecs

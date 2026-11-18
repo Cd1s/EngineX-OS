@@ -63,7 +63,12 @@ type MP3Info struct {
 	EncoderDelay       int    // 12-bit start_pad
 	EndPadding         int    // 12-bit end_pad
 	StartOffsetSamples int    // Rekordbox sample - Engine sample (>= 0)
-	OffsetClass        string // "", "xing:<samples>", or "lame:<samples>"
+	// LinkStartOffsetSamples is the decoder timeline offset used by the
+	// Pro DJ Link stream path.  Info/Lavc streams already account for their
+	// leading Info frame in the decoder start; USB conversion keeps the
+	// historical #178 frame-plus-delay correction in StartOffsetSamples.
+	LinkStartOffsetSamples int
+	OffsetClass            string // "", "xing:<samples>", or "lame:<samples>"
 }
 
 type mpegHeader struct {
@@ -470,6 +475,11 @@ func finalizeMP3Info(info MP3Info, audio mpegHeader, vbrKbps, xingSkip, lameSkip
 		}
 	}
 	info.StartOffsetSamples = xingSkip + lameSkip
+	if info.Tag == "Info" && info.LAMEApplied {
+		info.LinkStartOffsetSamples = lameSkip
+	} else {
+		info.LinkStartOffsetSamples = info.StartOffsetSamples
+	}
 	if info.StartOffsetSamples > 0 {
 		if info.LAMEApplied {
 			info.OffsetClass = fmt.Sprintf("lame:%d", info.StartOffsetSamples)

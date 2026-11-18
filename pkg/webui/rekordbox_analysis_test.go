@@ -24,6 +24,7 @@ import (
 
 	"github.com/Cd1s/EngineX-OS/internal/testfixture"
 	"github.com/Cd1s/EngineX-OS/pkg/bridge"
+	"github.com/Cd1s/EngineX-OS/pkg/compat"
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 	"github.com/Cd1s/EngineX-OS/pkg/prolink"
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
@@ -593,6 +594,19 @@ func (l rb7Link) CuesExtended(uint32) ([]byte, error) {
 func TestRekordboxLinkAnalysisIsRbBridgesForTheSameTrack(t *testing.T) {
 	for _, format := range []string{"mp3", "aac"} {
 		t.Run(format, func(t *testing.T) { assertLinkMatchesBridge(t, format) })
+	}
+}
+
+func TestRbxApplyHeaderUsesInfoLinkTimeline(t *testing.T) {
+	var tr rekordbox.Track
+	rbxApplyHeader(&tr, compat.AudioInfo{
+		Format:                 "mp3",
+		SampleRate:             44100,
+		StartOffsetSamples:     2257,
+		LinkStartOffsetSamples: 1105,
+	})
+	if tr.StartOffsetSamples != 1105 {
+		t.Fatalf("Link MP3 offset = %d, want 1105", tr.StartOffsetSamples)
 	}
 }
 
