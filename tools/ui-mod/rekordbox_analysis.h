@@ -324,10 +324,11 @@ static int sc_rbx_row(void *arg, int n, char **value, char **name) {
     row->imported = n >= 4 && value[3] && (!strcmp(value[3], "1") || !strcmp(value[3], "-1"));
     // A streaming row is safe to identify by its URI; the rekordbox analysis path
     // additionally requires the label prefix below.
+    // The download's key names the file whatever Engine has made of the uri since.
+    const char *key = n >= 3 ? sc_rbx_download_key(value[2], SC_RBX_DOWNLOADS_REL) : NULL;
+    if (key) snprintf(row->download, sizeof row->download, "%.40s", key);
     if (n >= 3 && value[0] && !strncmp(value[0], "streaming://TIDAL/Track/", 24)) {
         snprintf(row->uri, sizeof row->uri, "%s", value[0]);
-        const char *key = sc_rbx_download_key(value[2], SC_RBX_DOWNLOADS_REL);
-        if (key) snprintf(row->download, sizeof row->download, "%.40s", key);
         row->streaming = 1;
         if (value[1] && !strncmp(value[1], "rekordbox [", 11)) row->ours = 1;
     }
