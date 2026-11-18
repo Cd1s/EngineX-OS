@@ -1633,6 +1633,9 @@ static void test_analysis_dispatch(const char *off, int gateway, int shadow) {
         assert(!unlink(saved) && !rmdir(history));
     }
     if (*off) assert(!unlink(conf));
+    char rowmap[PATH_MAX];
+    snprintf(rowmap, sizeof rowmap, "%s/rowmap", dir);
+    unlink(rowmap);
     assert(!unlink(library) && !unlink(sidecar) && !rmdir(peer) && !unlink(rbx) && !unlink(loading) && !unlink(board) && !rmdir(dir));
     assert(!munmap(image, size));
     printf("Installed SQLite bind dispatcher isolates rekordbox and shadow (off: %s): PASS\n", *off ? off : "none");

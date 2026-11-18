@@ -3,6 +3,7 @@
 
 #include <fcntl.h>
 #include <limits.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -136,29 +137,54 @@ struct sc_rbx_track_map {
     long long track;
     long long id;
     char download[41];
+    unsigned long long age;
 };
 static struct sc_rbx_track_map sc_rbx_track_maps[SC_RBX_TRACK_MAP_CAP];
 static unsigned sc_rbx_track_map_next;
+static unsigned long long sc_rbx_track_map_clock;
 static int sc_rbx_track_map_loaded;
+static pthread_mutex_t sc_rbx_track_map_mu = PTHREAD_MUTEX_INITIALIZER;
 
 static void sc_rbx_track_map_path(char path[PATH_MAX]) {
     snprintf(path, PATH_MAX, "%s/rowmap", sc_rbx_dir);
 }
 
-static void sc_rbx_append_track_map(long long track, long long id, const char *download) {
-    char path[PATH_MAX], line[128];
-    sc_rbx_track_map_path(path);
-    int n = snprintf(line, sizeof line, "%lld %lld %s\n", track, id, download ? download : "");
-    if (n <= 0 || (size_t)n >= sizeof line) return;
-    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW, 0600);
-    if (fd < 0) return;
+static int sc_rbx_write_all(int fd, const char *data, size_t size) {
     size_t at = 0;
-    while (at < (size_t)n) {
-        ssize_t wrote = write(fd, line + at, (size_t)n - at);
-        if (wrote <= 0) break;
+    while (at < size) {
+        ssize_t wrote = write(fd, data + at, size - at);
+        if (wrote <= 0) return 0;
         at += (size_t)wrote;
     }
-    close(fd);
+    return 1;
+}
+
+// Called with sc_rbx_track_map_mu held. The map is short-lived (/run), so a
+// complete replacement keeps it bounded even after hundreds of track loads.
+static void sc_rbx_compact_track_map_locked(void) {
+    char path[PATH_MAX], temp[PATH_MAX], line[128];
+    unsigned order[SC_RBX_TRACK_MAP_CAP];
+    for (unsigned i = 0; i < sc_rbx_track_map_next; ++i) {
+        order[i] = i;
+        for (unsigned j = i; j && sc_rbx_track_maps[order[j]].age < sc_rbx_track_maps[order[j - 1]].age; --j) {
+            unsigned swap = order[j];
+            order[j] = order[j - 1];
+            order[j - 1] = swap;
+        }
+    }
+    sc_rbx_track_map_path(path);
+    int n = snprintf(temp, sizeof temp, "%s.tmp", path);
+    if (n <= 0 || (size_t)n >= sizeof temp) return;
+    int fd = open(temp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (fd < 0) return;
+    int ok = 1;
+    for (unsigned i = 0; i < sc_rbx_track_map_next && ok; ++i) {
+        const struct sc_rbx_track_map *slot = &sc_rbx_track_maps[order[i]];
+        n = snprintf(line, sizeof line, "%lld %lld%s%s\n", slot->track, slot->id,
+                     slot->download[0] ? " " : "", slot->download);
+        ok = n > 0 && (size_t)n < sizeof line && sc_rbx_write_all(fd, line, (size_t)n);
+    }
+    if (close(fd) || !ok || rename(temp, path)) unlink(temp);
 }
 
 static const char *sc_rbx_map_space(const char *p) {
@@ -179,7 +205,7 @@ static int sc_rbx_parse_track_map(const char *line, long long *track, long long 
     if (*p == 0 || *p == '\n') goto done;
     size_t n = 0;
     while ((p[n] >= '0' && p[n] <= '9') || (p[n] >= 'a' && p[n] <= 'f')) n++;
-    if (!n || n > 40 || ((p[n] >= '0' && p[n] <= '9') || (p[n] >= 'a' && p[n] <= 'f'))) return 0;
+    if (n != 40) return 0;
     memcpy(download, p, n);
     download[n] = 0;
     p = sc_rbx_map_space(p + n);
@@ -191,14 +217,15 @@ done:
 }
 
 static void sc_rbx_load_track_map(void) {
-    if (sc_rbx_track_map_loaded) return;
+    pthread_mutex_lock(&sc_rbx_track_map_mu);
+    if (sc_rbx_track_map_loaded) { pthread_mutex_unlock(&sc_rbx_track_map_mu); return; }
     sc_rbx_track_map_loaded = 1;
     char path[PATH_MAX], line[128], download[41];
     sc_rbx_track_map_path(path);
     int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    if (fd < 0) return;
+    if (fd < 0) { pthread_mutex_unlock(&sc_rbx_track_map_mu); return; }
     FILE *file = fdopen(fd, "r");
-    if (!file) { close(fd); return; }
+    if (!file) { close(fd); pthread_mutex_unlock(&sc_rbx_track_map_mu); return; }
     while (sc_rbx_track_map_next < SC_RBX_TRACK_MAP_CAP && fgets(line, sizeof line, file)) {
         long long track = 0, id = 0;
         download[0] = 0;
@@ -210,36 +237,55 @@ static void sc_rbx_load_track_map(void) {
         struct sc_rbx_track_map *slot = &sc_rbx_track_maps[sc_rbx_track_map_next++];
         slot->track = track;
         slot->id = id;
+        slot->age = ++sc_rbx_track_map_clock;
         snprintf(slot->download, sizeof slot->download, "%s", download);
     }
     fclose(file);
+    pthread_mutex_unlock(&sc_rbx_track_map_mu);
 }
 
 static void sc_rbx_remember_track(long long track, long long id, const char *download) {
     if (track <= 0 || id <= 0) return;
+    pthread_mutex_lock(&sc_rbx_track_map_mu);
     for (unsigned i = 0; i < SC_RBX_TRACK_MAP_CAP; ++i) {
         if (sc_rbx_track_maps[i].track == track) {
             sc_rbx_track_maps[i].id = id;
             snprintf(sc_rbx_track_maps[i].download, sizeof sc_rbx_track_maps[i].download, "%s", download ? download : "");
+            sc_rbx_track_maps[i].age = ++sc_rbx_track_map_clock;
+            sc_rbx_compact_track_map_locked();
+            pthread_mutex_unlock(&sc_rbx_track_map_mu);
             return;
         }
     }
-    if (sc_rbx_track_map_next >= SC_RBX_TRACK_MAP_CAP) return;
-    struct sc_rbx_track_map *slot = &sc_rbx_track_maps[sc_rbx_track_map_next++];
+    unsigned slot_index = sc_rbx_track_map_next;
+    if (slot_index < SC_RBX_TRACK_MAP_CAP) {
+        sc_rbx_track_map_next++;
+    } else {
+        slot_index = 0;
+        for (unsigned i = 1; i < SC_RBX_TRACK_MAP_CAP; ++i)
+            if (sc_rbx_track_maps[i].age < sc_rbx_track_maps[slot_index].age) slot_index = i;
+    }
+    struct sc_rbx_track_map *slot = &sc_rbx_track_maps[slot_index];
     slot->track = track;
     slot->id = id;
     snprintf(slot->download, sizeof slot->download, "%s", download ? download : "");
-    sc_rbx_append_track_map(track, id, download);
+    slot->age = ++sc_rbx_track_map_clock;
+    sc_rbx_compact_track_map_locked();
+    pthread_mutex_unlock(&sc_rbx_track_map_mu);
 }
 
 static int sc_rbx_lookup_track(long long track, long long *id, char download[41]) {
     if (track <= 0) return 0;
+    pthread_mutex_lock(&sc_rbx_track_map_mu);
     for (unsigned i = 0; i < SC_RBX_TRACK_MAP_CAP; ++i) {
         if (sc_rbx_track_maps[i].track != track) continue;
         if (id) *id = sc_rbx_track_maps[i].id;
         if (download) snprintf(download, 41, "%s", sc_rbx_track_maps[i].download);
+        sc_rbx_track_maps[i].age = ++sc_rbx_track_map_clock;
+        pthread_mutex_unlock(&sc_rbx_track_map_mu);
         return 1;
     }
+    pthread_mutex_unlock(&sc_rbx_track_map_mu);
     return 0;
 }
 
@@ -456,7 +502,7 @@ static const char *sc_rbx_fill_track(const struct sc_rbx_sqlite *q, void *db, lo
     if (row.ours) {
         *id = sc_rbx_uri_id(row.uri);
         sc_rbx_remember_track(track, *id, row.download);
-    } else if (row.imported && sc_rbx_lookup_track(track, id, row.download)) {
+    } else if (row.imported && sc_rbx_lookup_track(track, id, NULL)) {
         // Engine has retained our imported row but no longer exposes the original
         // gateway URI/label in this reload snapshot. The prior proof is enough to
         // refresh the same source generation; unknown rows remain untouched.
