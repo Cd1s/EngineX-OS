@@ -59,7 +59,10 @@ def check(source):
     for fn in signature.finditer(source):
         if re.search(r'\b(?:static|typedef)\b', fn[1]):
             continue
-        previous = source[:fn.start()].rstrip().rstrip('\\').rstrip().splitlines()[-1]
+        lines = source[:fn.start()].rstrip().splitlines()
+        while lines and lines[-1].startswith('__attribute__'):
+            lines.pop()
+        previous = lines[-1].rstrip('\\').rstrip() if lines else ''
         if not re.fullmatch(r'HF_INTERPOSE\(HF_[A-Z_0-9]+\)', previous):
             fail(fn.start(), f'exported hook {fn[2]} needs HF_INTERPOSE')
     for ctor in re.finditer(r'__attribute__\(\(constructor\)\) static void (\w+)\(', source):

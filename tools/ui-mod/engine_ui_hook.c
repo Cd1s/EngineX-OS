@@ -3653,8 +3653,8 @@ int pthread_getaffinity_np(pthread_t thread, size_t cpusetsize, cpu_set_t *cpuse
 
 // #61 / #67: One-shot ALSA boot loader for SC LIVE 4 (inmusic,jp21) and devices
 // with read-only root filesystems where LD_PRELOAD cannot be placed in rootfs.
-__attribute__((visibility("default")))
 HF_INTERPOSE(HF_ALWAYS)
+__attribute__((visibility("default")))
 int enginex_alsa_boot_hook(void *root, void *config, void **dst, void *private_data) {
     (void)root;
     (void)config;
@@ -3690,8 +3690,8 @@ int enginex_alsa_boot_hook(void *root, void *config, void **dst, void *private_d
     return 0;
 }
 
-__attribute__((visibility("default")))
 HF_INTERPOSE(HF_ALWAYS)
+__attribute__((visibility("default")))
 int snd_config_hook_enginex_alsa_boot_hook(void *root, void *config, void **dst, void *private_data) {
     return enginex_alsa_boot_hook(root, config, dst, private_data);
 }
@@ -3885,8 +3885,8 @@ static int enginex_img_state = IMG_NONE;  // result of the last az01_open_image 
 
 // az01_download_image / az01-update --file: open -> set_onboard_key_lookup -> verify -> close -> apply.
 // The stand-in handle is never given to the real library.
-__attribute__((visibility("default")))
 HF_INTERPOSE(HF_ALWAYS)
+__attribute__((visibility("default")))
 int az01_open_image(const char *path, void **img_out) {
     int state = enginex_img_check(path);
     if (state != IMG_NONE) {
@@ -3900,8 +3900,8 @@ int az01_open_image(const char *path, void **img_out) {
     return fn ? fn(path, img_out) : -1;
 }
 
-__attribute__((visibility("default")))
 HF_INTERPOSE(HF_ALWAYS)
+__attribute__((visibility("default")))
 int az01_image_set_onboard_key_lookup(void *img) {
     if (img == (void *)enginex_dummy_img) return 0;
     static void *orig_fn = NULL;
@@ -3909,8 +3909,8 @@ int az01_image_set_onboard_key_lookup(void *img) {
     return fn ? fn(img) : -1;
 }
 
-__attribute__((visibility("default")))
 HF_INTERPOSE(HF_ALWAYS)
+__attribute__((visibility("default")))
 int az01_verify_image(void *img, int flags) {
     if (img == (void *)enginex_dummy_img) {
         int state = __atomic_load_n(&enginex_img_state, __ATOMIC_ACQUIRE);
@@ -3921,8 +3921,8 @@ int az01_verify_image(void *img, int flags) {
     return fn ? fn(img, flags) : -1;
 }
 
-__attribute__((visibility("default")))
 HF_INTERPOSE(HF_ALWAYS)
+__attribute__((visibility("default")))
 int az01_close_image(void *img) {
     if (img == (void *)enginex_dummy_img) {
         __atomic_store_n(&enginex_img_state, IMG_NONE, __ATOMIC_RELEASE);
@@ -3957,8 +3957,8 @@ static void enginex_reboot(void) {
 }
 
 // Intercepts az01_apply_image for EngineX data bundles; everything else goes to the stock updater.
-__attribute__((visibility("default")))
 HF_INTERPOSE(HF_ALWAYS)
+__attribute__((visibility("default")))
 int az01_apply_image(const char *path, int flags) {
     int state = enginex_img_check(path);
     if (state == IMG_BAD) return ENGINEX_ERR_BAD_IMAGE;
@@ -4041,8 +4041,8 @@ static int rm_tree(int parent, const char *name, dev_t root_dev) {
 // the installed bundle, UI packs, version, unlock flag, SSH keys and /data/system, so EngineX OS
 // survives. Current data and a not-yet-migrated real data directory are preserved.
 // ENGINEX_TEST_DATA_ROOT redirects /data (and skips the reboot) for the unit test.
-__attribute__((visibility("default")))
 HF_INTERPOSE(HF_ALWAYS)
+__attribute__((visibility("default")))
 int az01_erase_data_partition(void) {
     const char *root = getenv("ENGINEX_TEST_DATA_ROOT");
     int testing = root && *root;
