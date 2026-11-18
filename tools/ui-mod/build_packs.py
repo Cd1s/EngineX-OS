@@ -8373,19 +8373,17 @@ def edits(dev: bool):
             ('                        deckConfig.activeDeckTrackPath + "Nudge%1".arg(model.direction)\n',
              '                        deckConfig.activeDeckTrackPath + (module.scBeatJumpActive ? ("BeatJump/" + model.jumpAction) : ("Nudge%1".arg(model.direction)))\n'),
         ]
-        # Integer-BPM pitch-fader plateaus when BPM Decimals is 2 (1 = exact stock linear fader):
-        # map [0, 0.5] and [0.5, 1] independently around center so 0% stays exact,
-        # placing 2-ADC-step (w = 4/4095 in half-travel) plateaus at each integer BPM with uniform linear slope between them.
+        # BPM Decimals = 2 snaps near whole tempos; outside the window keep the stock value.
         scaled["ControlSurfaceModules/ControlSurfaceModules/SpeedSlider.qml"] = [
             ('    property bool invert: false\n',
              '''    property bool invert: false
 
-    function scTransformSpeed(inVal, invert, loaded, origProp, metaProp, rangeProp) {
+    function scTransformSpeed(inVal, invert, loaded, origProp, metaProp, rangeProp, synced) {
         let u = invert ? 1.0 - inVal : inVal
         if (u < 0.0) u = 0.0
         else if (u > 1.0) u = 1.0
         const dec = typeof globalConfig !== "undefined" && globalConfig && globalConfig.scGetBpmDecimals ? globalConfig.scGetBpmDecimals() : 2
-        if (dec !== 2 || !loaded) return u
+        if (dec !== 2 || !loaded || synced) return u
         let B = origProp && origProp.translator ? origProp.translator.unnormalized : 0
         if (!(B > 0) && metaProp && metaProp.translator && metaProp.translator.string) {
             const parsed = parseFloat(String(metaProp.translator.string).trim().replace(",", "."))
@@ -8395,37 +8393,25 @@ def edits(dev: bool):
         const r = rPct > 0 ? rPct / 100.0 : 0
         if (!(B > 0) || !(r > 0)) return u
 
-        const w = 4.0 / 4095.0
-        const sign = u >= 0.5 ? 1 : -1
-        const y = sign > 0 ? 2.0 * (u - 0.5) : 2.0 * (0.5 - u)
+        if (u === 0.0 || u === 0.5 || u === 1.0) return u
         const delta = B * r
-        const tEnd = B + sign * delta
-        const bRound = Math.round(B)
-        const hasCenter = Math.abs(B - bRound) < 1e-4
-        const k0 = hasCenter ? bRound + sign : (sign > 0 ? Math.floor(B) + 1 : Math.ceil(B) - 1)
-        const k1 = sign > 0 ? Math.floor(tEnd - 1e-4) : Math.ceil(tEnd + 1e-4)
-        const m = Math.max(0, sign * (k1 - k0) + 1)
-        const wEff = Math.min(w, 0.5 / (m + 0.5))
-        const cEff = hasCenter ? 0.5 * wEff : 0.0
-        const S = 1.0 - cEff - m * wEff
-        if (y <= cEff) return 0.5
-        if (m === 0) return Math.max(0.0, Math.min(1.0, 0.5 + 0.5 * sign * (y - cEff) / S))
-        const y0 = cEff + (S / delta) * (sign * (k0 - B))
-        if (y < y0) return Math.max(0.0, Math.min(1.0, 0.5 + 0.5 * sign * (y - cEff) / S))
-        const P = wEff + S / delta
-        const j = Math.min(m - 1, Math.floor((y - y0) / P))
-        if (y - (y0 + j * P) <= wEff) {
-            const k = k0 + sign * j
-            return Math.max(0.0, Math.min(1.0, 0.5 + 0.5 * (k / B - 1.0) / r))
-        }
-        const s = y - cEff - (j + 1) * wEff
-        return Math.max(0.0, Math.min(1.0, 0.5 + 0.5 * sign * s / S))
+        const raw = B + (2.0 * u - 1.0) * delta
+        const k = Math.round(raw)
+        const snapHalfTravelFraction = 0.05 / (124 * 0.08) // Calibrate at 124 BPM and +/-8%.
+        const maxSnapBpm = 0.15 // Keep wide ranges precise even as each fader step grows.
+        const threshold = Math.min(maxSnapBpm, snapHalfTravelFraction * delta)
+        if (raw < k - threshold || raw > k + threshold) return u
+        // A snap past the center or an endpoint would reverse at that fixed point.
+        if (u < 0.5 ? (k < B - delta || k > B) : (k < B || k > B + delta)) return u
+        return Math.max(0.0, Math.min(1.0, 0.5 + (k - B) / (2.0 * delta)))
     }
 '''),
             ('        ValueCCAssignment {\n            readonly property bool songLoaded: Planck.getProperty("/Engine/Deck%1/Track/SongLoaded".arg(modelData))\n                .translator.state\n',
              '        ValueCCAssignment {\n            id: scSpeedAssign\n            readonly property bool songLoaded: Planck.getProperty("/Engine/Deck%1/Track/SongLoaded".arg(modelData))\n                .translator.state\n'
              '            readonly property var pOrigBpm: Planck.getProperty("/Engine/Deck%1/OriginalBPM".arg(modelData))\n'
              '            readonly property var pMetaBpm: Planck.getProperty("/Engine/Deck%1/Track/MetaDataBPM".arg(modelData))\n'
+             '            readonly property var pSyncMode: Planck.getProperty("/Engine/Deck%1/SyncMode".arg(modelData))\n'
+             '            readonly property bool syncOff: !!(pSyncMode && pSyncMode.translator && pSyncMode.translator.string === "Off")\n'
              '            readonly property var pSpeedRange: Planck.getProperty("/Engine/Deck%1/SpeedRange".arg(modelData))\n'),
             ('            valueTransform: ValueTransform {\n                invert: module.invert\n            }\n',
              '            valueTransform: QtObject {\n'
@@ -8433,7 +8419,7 @@ def edits(dev: bool):
              '                function transformValue(in_val) {\n'
              '                    return module.scTransformSpeed(\n'
              '                        in_val, invert, scSpeedAssign.songLoaded,\n'
-             '                        scSpeedAssign.pOrigBpm, scSpeedAssign.pMetaBpm, scSpeedAssign.pSpeedRange\n'
+             '                        scSpeedAssign.pOrigBpm, scSpeedAssign.pMetaBpm, scSpeedAssign.pSpeedRange, !scSpeedAssign.syncOff\n'
              '                    )\n'
              '                }\n'
              '            }\n'),

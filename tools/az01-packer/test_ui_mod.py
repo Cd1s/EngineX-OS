@@ -10198,6 +10198,7 @@ class WholeBpmTest(unittest.TestCase):
             )
             self.assertIn('readonly property var pOrigBpm: Planck.getProperty("/Engine/Deck%1/OriginalBPM".arg(modelData))\n', slider)
             self.assertIn('readonly property var pMetaBpm: Planck.getProperty("/Engine/Deck%1/Track/MetaDataBPM".arg(modelData))\n', slider)
+            self.assertIn('readonly property var pSyncMode: Planck.getProperty("/Engine/Deck%1/SyncMode".arg(modelData))\n', slider)
             self.assertIn(
                 'readonly property var pSpeedRange: Planck.getProperty("/Engine/Deck%1/SpeedRange".arg(modelData))\n\n',
                 slider,
@@ -10289,8 +10290,8 @@ shared["/GUI/Scripted/EngineXBpmDecimals"] = 0.5;
 assert.equal(scTransformSpeed(0.3, false, true, propNum(124), propStr(""), propStr("8%")), 0.3);
 assert.equal(scTransformSpeed(0.3, true, true, propNum(124), propStr(""), propStr("8%")), 0.7);
 for (const inv of [false, true]) {{
-    for (let i = 0; i <= 4095; i++) {{
-        const uIn = i / 4095;
+    for (let i = 0; i <= 16383; i++) {{
+        const uIn = i / 16383;
         const expected = inv ? 1.0 - uIn : uIn;
         assert.equal(scTransformSpeed(uIn, inv, true, propNum(124), propStr(""), propStr("8%")), expected);
     }}
@@ -10305,44 +10306,60 @@ assert.equal(scTransformSpeed(0.3, true, false, propNum(124), propStr(""), propS
 const outMeta = scTransformSpeed(0.5, false, true, propNum(0), propStr("126,5"), propStr("8%"));
 assert.equal(outMeta, 0.5);
 
-// Decimals = 2 (plateau ON) with loaded track places 2-ADC-step plateaus at every integer BPM
+// Both boundaries are inclusive, and the very next value outside is stock.
+const wide = 0.5 + (130.16 - 124) / 248;
+assert.equal(scTransformSpeed(wide, false, true, propNum(124), propStr(""), propStr("100%")), wide,
+             "wide range must leave 130.16 alone");
+for (const raw of [129.949999, 129.95, 129.950001, 130, 130.049999, 130.05, 130.050001, 130.06]) {{
+    const u = 0.5 + (raw - 124) / 19.84; // 124 BPM at +/-8%
+    const out = scTransformSpeed(u, false, true, propNum(124), propStr(""), propStr("8%"));
+    assert.equal(out, raw >= 129.95 && raw <= 130.05 ? 0.5 + 6 / 19.84 : u, `threshold at ${{raw}}`);
+}}
+
+// Exercise the emitted transform on uniform 10-, 12- and 14-bit input grids.
 for (const inv of [false, true]) {{
-    for (const B of [87.6, 110.0, 123.45, 123.99, 124.0, 125.0, 140.0, 174.0]) {{
-        for (const rPct of [4, 8, 10, 16, 25, 50, 100]) {{
+    for (const B of [60, 87.6, 110.0, 123.45, 123.99, 124.0, 124.01, 125.0, 140.0, 174.0, 250]) {{
+        for (const rPct of [4, 8, 10, 16, 24, 25, 50, 100]) {{
             const r = rPct / 100;
             const oP = propNum(B), mP = propStr(""), rP = propStr(rPct + "%");
             const end0 = scTransformSpeed(inv ? 1 : 0, inv, true, oP, mP, rP);
             const end1 = scTransformSpeed(inv ? 0 : 1, inv, true, oP, mP, rP);
             const ctr = scTransformSpeed(0.5, inv, true, oP, mP, rP);
-            assert.ok(Math.abs(end0) < 1e-12 && Math.abs(end1 - 1) < 1e-12 && ctr === 0.5);
+            assert.ok(end0 === 0 && end1 === 1 && ctr === 0.5);
 
-            // Physical center detent (8192/16383) stays at 0.5 for integer BPM and near 0.5 for fractional
+            // An integer track's physical center detent stays inside its window.
             const detIn = inv ? 1 - 8192 / 16383 : 8192 / 16383;
             const detOut = scTransformSpeed(detIn, inv, true, oP, mP, rP);
-            if (Math.abs(B - Math.round(B)) < 1e-4) assert.equal(detOut, 0.5);
-            else assert.ok(Math.abs(detOut - 0.5) < 2e-4);
+            if (Number.isInteger(B)) assert.equal(detOut, 0.5);
 
-            let prev = -1;
-            const hits = new Map();
-            let maxStep = 0, prevBpm = null;
-            for (let i = 0; i <= 4095; i++) {{
-                const uIn = inv ? 1 - i / 4095 : i / 4095;
-                const uOut = scTransformSpeed(uIn, inv, true, oP, mP, rP);
-                assert.ok(uOut >= prev - 1e-12 && uOut >= 0 && uOut <= 1);
-                prev = uOut;
-                const bpm32 = f32(B) * (1 + r * (2 * f32(uOut) - 1));
-                if (prevBpm !== null) maxStep = Math.max(maxStep, bpm32 - prevBpm);
-                prevBpm = bpm32;
-                const k = Math.round(bpm32);
-                if (Math.abs(bpm32 - k) < 1e-4) hits.set(k, (hits.get(k) || 0) + 1);
-            }}
-            const kMin = Math.ceil(B * (1 - r) + 1e-4), kMax = Math.floor(B * (1 + r) - 1e-4);
-            for (let k = kMin; k <= kMax; k++) {{
-                if (Math.abs(k - B) < 1e-4) continue;
-                assert.ok((hits.get(k) || 0) >= 2, `missing plateau B=${{B}} r=${{rPct}}% k=${{k}}`);
-            }}
-            if (B === 124.0 && rPct <= 16) {{
-                assert.ok(maxStep <= 0.01, `B=124 r=${{rPct}}% maxStep=${{maxStep}}`);
+            const low = B - B * r, high = B + B * r;
+            for (const last of [1023, 4095, 16383]) {{
+                let prev = 0;
+                let centerHits = 0;
+                const threshold = Math.min(0.15, 0.05 * (B / 124) * (rPct / 8));
+                for (let i = 0; i <= last; i++) {{
+                    const uIn = inv ? 1 - i / last : i / last;
+                    const uOut = scTransformSpeed(uIn, inv, true, oP, mP, rP);
+                    const stock = inv ? 1 - uIn : uIn;
+                    const raw = B + (2 * stock - 1) * (B * r), k = Math.round(raw);
+                    const bpm32 = f32(B) * (1 + r * (2 * f32(uOut) - 1));
+                    const sameSide = stock < 0.5 ? k <= B : k >= B;
+                    if (i !== 0 && i !== last && sameSide && k >= low && k <= high &&
+                        raw >= k - threshold && raw <= k + threshold) {{
+                        assert.ok(Math.abs(bpm32 - k) < 1e-4, `missed integer B=${{B}} raw=${{raw}}`);
+                    }} else {{
+                        assert.equal(uOut, stock, `changed stock B=${{B}} raw=${{raw}}`);
+                    }}
+                    assert.ok(uOut >= prev && uOut <= 1);
+                    prev = uOut;
+                    if (uOut === 0.5) centerHits++;
+                }}
+                if (B === 124) {{
+                    // Up to 24%, all ranges have the same width; wider ranges get harder to hit.
+                    const width = last * (rPct <= 24 ? 0.05 / 9.92 : 0.15 / (124 * r));
+                    assert.ok(centerHits >= Math.floor(width) && centerHits <= Math.ceil(width),
+                              `center width range=${{rPct}} last=${{last}} hits=${{centerHits}}`);
+                }}
             }}
         }}
     }}
@@ -10401,6 +10418,49 @@ const scBpmRestoreTimer = {restart() { armed++; }};
     def run_node(self, cases):
         out = subprocess.run(["node", "-e", self._script(cases)], capture_output=True, text=True)
         self.assertEqual(out.returncode, 0, out.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required for the speed and restore logic")
+    def test_whole_bpm_respects_sync_and_only_restores_a_snapped_centre(self):
+        path = "ControlSurfaceModules/ControlSurfaceModules/SpeedSlider.qml"
+        slider = "\n".join(new for _, new in bp.edits(False)[path])
+        transform = self._block(slider, "function scTransformSpeed(")[0]
+        callback = self._block(slider, "function transformValue(")[0]
+        sync_off = re.search(r"readonly property bool syncOff: (.+)", slider)
+        self.assertIsNotNone(sync_off)
+        self.run_node(transform + "\n" + r"""
+const globalConfig = {scGetBpmDecimals: () => 2};
+let pSyncMode = {translator: {string: "Off"}};
+const invert = false;
+const scSpeedAssign = {
+    songLoaded: true, pOrigBpm: {translator: {unnormalized: 124}},
+    pMetaBpm: null, pSpeedRange: {translator: {string: "8%"}},
+    get syncOff() { return SYNC_OFF; }
+};
+const assign = (function(module) {
+    CALLBACK
+    return transformValue;
+})({scTransformSpeed});
+const inside = 0.5 + 0.03 / (2 * 124 * 0.08);
+const outside = 0.5 + 0.08 / (2 * 124 * 0.08);
+const matched = assign(inside), unmatched = assign(outside);
+assert.equal(matched, 0.5);
+assert.equal(unmatched, outside);
+for (const mode of ["TempoSync", "BeatSync"]) {
+    pSyncMode.translator.string = mode;
+    assert.equal(assign(inside), inside, "Sync uses the stock fader");
+}
+pSyncMode = null;
+assert.equal(assign(inside), inside, "unknown Sync mode uses the stock fader");
+// The last fader position, after the assignment ran while unsynced, is
+// softValue. Sync rewrites the effective speed without changing it.
+deck(2, {speed: 0.7016, fader: matched});
+scUnsyncRestoreBpm(2);
+assert.deepEqual(writes, ["2:0.5"]);
+writes.length = 0;
+deck(2, {speed: 0.7016, fader: unmatched});
+scUnsyncRestoreBpm(2);
+assert.deepEqual(writes, []);
+""".replace("SYNC_OFF", sync_off.group(1)).replace("CALLBACK", callback))
 
     @unittest.skipUnless(shutil.which("node"), "Node is required for the restore logic")
     def test_off_writes_nothing_and_every_stock_case_is_left_alone(self):
