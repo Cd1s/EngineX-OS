@@ -129,6 +129,21 @@ Combined delta review C: the Mixstream-only Stems EQ row now uses the native con
 
 - **热点倒数（`BARS.BEATS`）不跟 BPM / 网格（实机报告，2026-11-17 下午，Remote Library 曲目；修复待实机验收）**：用户反馈“热点倒数好像不跟 BPM，我调了节拍网格也还是不跟”。**原因**（沙箱里复现，JP07，真实 128 BPM 曲目、热点偏离网格 0.45 拍）：倒数是“到热点的拍距”取整，数字变化的时刻由**热点自己的位置**决定，不是播放头越过网格线的时刻；热点不在网格线上时（不开量化、导入的热点、或事后调了网格），数字在两条拍线之间跳（`BeatNumber` 2.451→2.557 时 8.1→7.4，2.984→3.091 越过拍线却不变）；用 Beat Grid Edit 平移网格后跳变时刻一点没动。BPM 修改、减半 / 加倍本来就会反映，推音高也不改拍数（对的），问题只在跳变相位。**修法**：`tools/ui-mod/build_packs.py` 里一个共享函数 `scCueBeatsLeft`，热点算在离它最近的网格线上；本机轨道用 Engine 的 `BeatNumber` 当播放头在拍内的位置（每个 200 ms 节拍多读一个属性，缓存不变），影子轨道用来源的拍表；热点恰在网格线上时结果与以前完全一样；热点的线在播放头后面而热点仍在前面时显示 `0.1`。**已知限制**：Engine 只给播放头处的速度，网格有锚点（速度不恒定）时，跨过锚点的远距离倒数按播放头处速度估算，播放头进入热点所在段后精确；影子轨道用来源的完整拍表，不受此限。**检验**：`ShadowDisplayTest` 新增 4 项（旧代码上 3 项失败，“热点在网格线上不变”那项两边都过），原 `#151` 影子测试全部保持通过；JP07 沙箱探针（`tools/az01-packer/cue-countdown-sandbox.sh`）在旧代码上 9 处断言失败（热点偏离网格、平移网格、减半速度三段扫描各自失败），修复后 0 处。JC11 沙箱里曲目分析不完成，没有跑出结果（与 JP07 同一份 Engine 和共享 QML / JS）。分支 `agent/5305-cue-countdown`。**实机待验**：设一个偏离网格的热点，播放接近它看数字是否正好在拍线上变；打开 Beat Grid Edit 平移网格后再看。
 
+### 1A-7 rekordbox / CDJ 的 Pro DJ Link 加载即带分析（待维护者实机验收，未通过则不进 5.3.0.5）
+
+- **现象**（左 SC5000，2026-11-17 / 18 维护者实测）：从电脑 rekordbox（LINK）加载曲目时，Engine 每次都要自己重新分析 15–45 秒，期间没有网格、Cue 和波形。
+- **原因**：
+  - stream-sync 取 rekordbox 分析时，没按 rekordbox 7 的真实回包格式解析：0x2c04 每段前有小端长度；PQTZ 不走 0x2c04（状态 50），网格只在 0x2204。结果什么都没取到。
+  - Engine 读这一行 `PerformanceData` 时，`trackId` 用 `?` 绑定，所以只看 prepare 文本的钩子从未动作。
+- **修法**：
+  - stream-sync 按长度切段，网格从 0x2204 读；CDJ-3000 的 USB/SD 从导出的 ANLZ 文件读。分析写到 `/run/enginex-rbx-analysis/<id>.bin`。
+  - 钩子在 Engine 绑定该行 id 时（`sqlite3_bind_int64`，5.3.0 与 5.3.0-sclive4，按 api 表核对地址），在 Engine 自己的连接上填好这一行的临时 `PerformanceData`。
+  - 只动网关的 `rekordbox [` 行，且 120 秒内要有 rekordbox 加载请求。碟机自己的 U 盘 / SD 加载不多执行任何语句；Engine Link（另一台碟机的 U 盘）和 Remote Library（Engine DJ 桌面版）的加载只读一次、从不写，网关也只接管 TIDAL 的两个网址。
+- **检验**：
+  - 检查表行 318、319；
+  - `TestRekordboxLoadLeavesItsAnalysisForEngine`（在旧代码上失败）、`TestCDJMediaListsAndLoadsWithItsAnalysis`、`test_rekordbox_analysis.c`、`RekordboxAnalysisSitesTest`、`GatewayTakesOnlyTidalTest`。
+  - **实机待验**：Link 加载即时；同一首歌 USB 与 Link 的概览高度一致；Engine Link 与 Remote Library 照旧。`【待填】`
+
 ## 1B. 仍在进行、没有合入 5.3.0.5 候选的工作
 
 以下都**不是本版本已完成的内容**，用户文档里不得写成已有功能。
