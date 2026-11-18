@@ -33,6 +33,7 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+#include <math.h>
 #include "settings_copy_profile.h"
 #if !defined(__aarch64__)
 #include "rekordbox_rows.h"
@@ -64,6 +65,9 @@ static struct sc_tap live_tap; // #50, every Engine build; .bss (512 KiB ring), 
 #endif
 
 #define UI_ROOT "/data/enginex/ui"
+#ifndef SHADOW_POSITION_FEED_PATH
+#define SHADOW_POSITION_FEED_PATH "/run/enginex/shadow-position"
+#endif
 #define FLAG_COMPRESSED 0x01
 #define FLAG_DIRECTORY 0x02
 #define FLAG_ZSTD 0x04
@@ -653,8 +657,100 @@ struct engine_build {
     uint32_t bt_send;
     // #304: TidalProvider's profile-SSO capability slot and its stock true getter.
     uint32_t tidal_sso_slot, tidal_sso_getter;
+    // Paused shadow waveform position hook. Zero means this Engine has no verified site.
+    uintptr_t shadow_vtable_a, shadow_vtable_b, shadow_position_fn;
+    uint32_t shadow_vtable_slot, shadow_item_offset, shadow_array_offset, shadow_position_prefix_size;
+    uchar shadow_position_prefix[16];
 };
 static const struct engine_build *build;
+
+struct shadow_position_feed_record {
+    uint32_t seq;
+    uint32_t active;
+    uint32_t deck;
+    uint32_t reserved;
+    uint64_t track_hash;
+    double position_samples;
+    double rate_samples_per_sec;
+    uint64_t mono_ns;
+};
+
+static struct shadow_position_feed_record *shadow_feed;
+static int (*shadow_position_original)(const void *);
+static void *shadow_items[4];
+static unsigned char shadow_item_decks[4];
+static uint64_t shadow_item_hash[4];
+static unsigned shadow_item_count;
+
+static uint64_t shadow_now_ns(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC_RAW, &ts)) return 0;
+    return (uint64_t)ts.tv_sec * UINT64_C(1000000000) + (uint64_t)ts.tv_nsec;
+}
+
+static int shadow_item_deck(const void *self) {
+    if (!self) return 0;
+    for (unsigned i = 0; i < shadow_item_count; i++)
+        if (shadow_items[i] == self) return shadow_item_decks[i];
+    if (shadow_item_count >= 4) return 0;
+    unsigned deck = shadow_item_count + 1;
+    if (shadow_feed) {
+        for (unsigned d = 1; d <= 4; d++) {
+            if (!__atomic_load_n(&shadow_feed[d - 1].active, __ATOMIC_ACQUIRE)) continue;
+            int used = 0;
+            for (unsigned i = 0; i < shadow_item_count; i++)
+                if (shadow_items[i] && shadow_item_decks[i] == d) used = 1;
+            if (!used) { deck = d; break; }
+        }
+    }
+    shadow_items[shadow_item_count] = (void *)self;
+    shadow_item_decks[shadow_item_count] = (unsigned char)deck;
+    shadow_item_count++;
+    return (int)deck;
+}
+
+static int shadow_feed_read(int deck, double *position, double *rate, uint64_t *track_hash) {
+    if (!shadow_feed || deck < 1 || deck > 4) return 0;
+    const struct shadow_position_feed_record *r = &shadow_feed[deck - 1];
+    for (unsigned tries = 0; tries < 3; tries++) {
+        uint32_t a = __atomic_load_n(&r->seq, __ATOMIC_ACQUIRE);
+        if (!a || (a & 1u)) continue;
+        struct shadow_position_feed_record copy = *r;
+        uint32_t b = __atomic_load_n(&r->seq, __ATOMIC_ACQUIRE);
+        if (a != b || (b & 1u) || !copy.active || copy.deck != (uint32_t)deck) continue;
+        uint64_t now = shadow_now_ns();
+        if (!now || !copy.mono_ns || now < copy.mono_ns || now - copy.mono_ns > UINT64_C(750000000)) return 0;
+        if (!isfinite(copy.position_samples) || !isfinite(copy.rate_samples_per_sec) || copy.rate_samples_per_sec < 0.0) return 0;
+        *position = copy.position_samples + copy.rate_samples_per_sec * ((double)(now - copy.mono_ns) / 1e9);
+        *rate = copy.rate_samples_per_sec;
+        *track_hash = copy.track_hash;
+        return isfinite(*position) && *position >= 0.0;
+    }
+    return 0;
+}
+
+#if defined(__aarch64__)
+__attribute__((target("branch-protection=standard")))
+#endif
+static int shadow_position_hook(const void *self) {
+    int stock = shadow_position_original ? shadow_position_original(self) : 0;
+    if (!hf_on(HF_SHADOW_PAUSED_FOLLOW)) return stock;
+    int deck = shadow_item_deck(self);
+    double position, rate;
+    uint64_t track_hash;
+    (void)rate;
+    if (!deck || !shadow_feed_read(deck, &position, &rate, &track_hash)) return stock;
+    unsigned item = (unsigned)(deck - 1);
+    if (shadow_item_hash[item] && shadow_item_hash[item] != track_hash) {
+        // A new source identity must cross one stock frame before the copied
+        // deck's waveform is allowed to follow it.
+        shadow_item_hash[item] = track_hash;
+        return stock;
+    }
+    shadow_item_hash[item] = track_hash;
+    if (position > 2147483647.0) return INT32_MAX;
+    return (int)position;
+}
 
 static int tidal_profile_sso(void *provider) {
     (void)provider;
@@ -682,6 +778,35 @@ static void patch_pointer(int feature, uintptr_t *slot, uintptr_t value, size_t 
     if (mprotect(start, page, PROT_READ | PROT_WRITE)) _exit(127);
     *slot = value;
     if (mprotect(start, page, PROT_READ)) _exit(127);
+}
+
+static int install_shadow_position_hooks(uintptr_t base, size_t page) {
+    if (!base || !page || !build || !hf_on(HF_SHADOW_PAUSED_FOLLOW) || !build->shadow_position_fn ||
+        !build->shadow_vtable_a || !build->shadow_vtable_b) return 0;
+    if (!build->shadow_position_prefix_size || build->shadow_position_prefix_size > sizeof build->shadow_position_prefix ||
+        memcmp((const void *)(base + build->shadow_position_fn), build->shadow_position_prefix,
+               build->shadow_position_prefix_size)) return 0;
+    uintptr_t *a = (uintptr_t *)(base + build->shadow_vtable_a + build->shadow_vtable_slot);
+    uintptr_t *b = (uintptr_t *)(base + build->shadow_vtable_b + build->shadow_vtable_slot);
+    if (*a != base + build->shadow_position_fn || *b != base + build->shadow_position_fn) return 0;
+    size_t bytes = sizeof(struct shadow_position_feed_record) * 4;
+    int fd = open(SHADOW_POSITION_FEED_PATH, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+    if (fd < 0 || ftruncate(fd, (off_t)bytes)) {
+        if (fd >= 0) close(fd);
+        return 0;
+    }
+    void *map = mmap(NULL, bytes, PROT_READ, MAP_SHARED, fd, 0);
+    if (map == MAP_FAILED) {
+        close(fd);
+        return 0;
+    }
+    shadow_feed = map;
+    close(fd);
+    shadow_position_original = (int (*)(const void *))(base + build->shadow_position_fn);
+    patch_pointer(HF_SHADOW_PAUSED_FOLLOW, a, (uintptr_t)shadow_position_hook, page);
+    patch_pointer(HF_SHADOW_PAUSED_FOLLOW, b, (uintptr_t)shadow_position_hook, page);
+    fprintf(stderr, "engine-ui-hook: paused shadow waveform follow installed\n");
+    return 1;
 }
 
 static void install_tidal_profile_sso(uintptr_t base, size_t page) {
@@ -2200,7 +2325,12 @@ static const struct engine_build engine_builds[] = {
      .sqlite_open_v2 = 0x1bbd5c0, .sqlite_opendb = 0x1b8b060,
      .sqlite_prefix = {"", "\x3f\x23\x03\xd5\xff\x43\x02\xd1\xfd\x7b\x03\xa9\xfd\xc3\x00\x91", ""},
      .bt_send = 0x102eb20,
-     .tidal_sso_slot = 0x2d52870, .tidal_sso_getter = 0x713b80},
+     .tidal_sso_slot = 0x2d52870, .tidal_sso_getter = 0x713b80,
+     .shadow_vtable_a = 0x2d23c18, .shadow_vtable_b = 0x2d21858,
+     .shadow_vtable_slot = 0x178, .shadow_position_fn = 0x655330,
+     .shadow_item_offset = 0x48, .shadow_array_offset = 0x450, .shadow_position_prefix_size = 16,
+     .shadow_position_prefix = {0x5f, 0x24, 0x03, 0xd5, 0x00, 0x48, 0x40, 0xbd,
+                                0x00, 0x00, 0x38, 0x1e, 0xc0, 0x03, 0x5f, 0xd6}},
 };
 #else
 static const struct engine_edit edits_504[] = {
@@ -2355,7 +2485,8 @@ static const struct engine_build engine_builds[] = {
      0xf6303c, 0xf63124, 0xf63120, {0xdb, 0x24c, 0x24e, 0x276, 0x289},
      0x842644, 0x29bc83c, 0x258e185, 0x8429b0, 0xe51b3340,
      0x29980a4, 0x1c91f74, 0x1cba858, 0x1cba874, 0,
-     {"\xf4\x42\x6d\xe1\x02\x50\xa0\xe1", "\x04\xb0\x2d\xe5\x00\x30\xa0\xe3", "\x04\xb0\x2d\xe5\x00\xb0\x8d\xe2"}, 0x4bc, 0, 0, 0},
+     {"\xf4\x42\x6d\xe1\x02\x50\xa0\xe1", "\x04\xb0\x2d\xe5\x00\x30\xa0\xe3", "\x04\xb0\x2d\xe5\x00\xb0\x8d\xe2"}, 0x4bc, 0, 0, 0,
+     .shadow_vtable_a = 0},
     {"5.3.0", "\xbe\x53\x7e\x90\x81\x21\xe7\x61\x64\xdd\xbb\xf9\x73\x0d\x47\x2b\xa0\xb8\xf9\xd4",
      {0xe6a090, 0xe6a0bc, 0xe6a16c, 0xe6a198, 0xe6a1c4, 0xe6a0e8, 0xe6a140, 0x170e714, 0x1710c00,
       0x1710a74, 0x170f110, 0xdde87c, 0xd265cc, 0xd265f8, 0xd26624, 0xf1afa4, 0x16b38e0, 0xf1dd20, 0xf1ede4, 0xf1ab24, 0xc77934},
@@ -2364,7 +2495,11 @@ static const struct engine_build engine_builds[] = {
      0x8a1eac, 0x2c8e808, 0x21b8b98, 0x8a2218, 0xe51b3340,
      0x2b9bee8, 0x1d7289c, 0x1d47324, 0x1d7e2bc, 0x1d46a6c,
      {"\xf4\x42\x6d\xe1\xf8\x60\xcd\xe1", "\xf4\x42\x6d\xe1\x20\xe0\x8d\xe5", ""}, 0x52c, 0xf56034,
-     0x2b68184, 0x573624},
+     0x2b68184, 0x573624,
+     .shadow_vtable_a = 0x2b52c68, .shadow_vtable_b = 0x2b51a88,
+     .shadow_vtable_slot = 0xbc, .shadow_position_fn = 0x4b9090,
+     .shadow_item_offset = 0x28, .shadow_array_offset = 0x244, .shadow_position_prefix_size = 8,
+     .shadow_position_prefix = {0x0a, 0x7a, 0xd0, 0xed, 0x04, 0xb0, 0x2d, 0xe5}},
     // feature_object 0x2d0eb78 is StemsPreRenderedPlayback (stored into 0x2d180c8 at 0x360d68, read by PlanckScriptRoot::hasStemsPreRenderedPlayback at 0x9d7808).
     {"5.3.0-sclive4", "\xb9\x46\xc3\xb8\xd9\x9d\x32\x99\x8c\x81\x97\xd5\xdc\x90\x5a\x6b\xdd\xaa\x5d\x2f",
      {0xe774fc, 0xe77528, 0xe775d8, 0xe77604, 0xe77630, 0xe77554, 0xe775ac, 0x17597bc, 0x179b090,
@@ -2374,7 +2509,11 @@ static const struct engine_build engine_builds[] = {
      0x89cd64, 0x2d0eb78, 0x222cc8d, 0x89d0d0, 0xe51b3338,
      0x2c1bea4, 0x1ddf11c, 0x1db3ba4, 0x1deab3c, 0x1db32ec,
      {"\xf4\x42\x6d\xe1\xf8\x60\xcd\xe1", "\xf4\x42\x6d\xe1\x20\xe0\x8d\xe5", ""}, 0x52c, 0xf629b0,
-     0x2be7944, 0x585a1c},
+     0x2be7944, 0x585a1c,
+     .shadow_vtable_a = 0x2bd2544, .shadow_vtable_b = 0x2bd1364,
+     .shadow_vtable_slot = 0xbc, .shadow_position_fn = 0x4c5780,
+     .shadow_item_offset = 0x28, .shadow_array_offset = 0x244, .shadow_position_prefix_size = 8,
+     .shadow_position_prefix = {0x0a, 0x7a, 0xd0, 0xed, 0x04, 0xb0, 0x2d, 0xe5}},
 };
 #endif
 
@@ -2510,12 +2649,14 @@ __attribute__((constructor)) static void edit_engine(void) {
 #endif
     apply_engine_edits(base, page);
 #if !defined(__aarch64__)
+    install_shadow_position_hooks(base, page);
     install_sqlite_hooks(base, page);
     if (hf_on(HF_GATEWAY)) install_rekordbox_rows(base, page);
     install_rekordbox_analysis(base, page);
     install_shadow_analysis(base, page);
     if (hf_on(HF_FOUR_DECK)) install_shadow_browse(base, page);
 #else
+    install_shadow_position_hooks(base, page);
     if (hf_on(HF_SQLITE_TUNING) || hf_on(HF_TELEMETRY_BLOCK)) install_sqlite_hooks(base, page);
 #endif
     int dsp_ready = hf_on(HF_DSP_GUARDS) && install_dsp_hooks(base, page);

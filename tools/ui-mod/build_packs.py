@@ -694,6 +694,22 @@ SERVICES_MAIN = """
 	// Empty when stream-sync does not know: every row stays.
 	property var scFeaturesOff: []
 	function scOff(name) { return scFeaturesOff.indexOf(name) >= 0 }
+	// Native waveform follow is limited to the verified 32-bit Engine sites. When
+	// the hook is unavailable the existing shadow transport remains unchanged.
+	readonly property bool scPausedShadowFollow: !scIsAZ04 && !scOff("shadow-paused-follow")
+	property var scShadowFeedRequests: ({})
+	function scShadowFeed(d, e, at, positionMs, rate, sampleRate) {
+		if (!root.scPausedShadowFollow || !at || !at.ready || !(sampleRate > 0) || !isFinite(positionMs) || !isFinite(rate)) return
+		const key = String(e.id || e.path || ""), now = Date.now()
+		const old = scShadowFeedRequests[d]
+		if (old && old.key === key && now - old.at < 80) return
+		const req = new XMLHttpRequest()
+		const next = Object.assign({}, scShadowFeedRequests); next[d] = {key: key, at: now}; scShadowFeedRequests = next
+		req.open("POST", "http://127.0.0.1:8080/v1/enginex/shadow/position-feed")
+		req.setRequestHeader("Content-Type", "application/json")
+		req.send(JSON.stringify({deck: Number(d), key: key, active: true,
+			positionSamples: positionMs * sampleRate / 1000, rateSamplesPerSec: rate * sampleRate / 1000}))
+	}
 	readonly property bool scCanFourDeck: scIsPlayerBoard || ["JC11", "JC11S", "JP21", "JP24"].indexOf(scBoard) >= 0
 	readonly property bool scHasAutoLoopKnob: typeof Config !== "undefined" && Config && Config.device && Config.device.hasAutoLoopKnob !== undefined ? !!Config.device.hasAutoLoopKnob : ["NH08", "NH08S", "NH10"].indexOf(scBoard) < 0
 	readonly property bool scIsMixstream: typeof Config !== "undefined" && Config && Config.audio && Config.audio.fx && Config.audio.fx.hasNHFx !== undefined ? !!Config.audio.fx.hasNHFx : ["NH08", "NH08S", "NH10"].indexOf(scBoard) >= 0
@@ -2281,8 +2297,12 @@ SERVICES_MAIN = """
 		// needs their liveness and carried source line on every delivery.
 		at.sourceTarget = loopWrap(e.positionMs + (e.playing && !e.scratch && e.at ? Math.max(0, now - e.at) * at.rate : 0))
 		at.sourceAt = now; at.sourcePlaying = !!e.playing && !e.stale
+		const feedRate = e.playing && !e.scratch && !e.stale ? at.rate : 0
 		if (!at.sourcePlaying || !e.sync || !e.link || !root.scPlayer || at.nativeSync || (e.sync && e.pitch > 100)) at.landing = undefined
-		if (e.seq && e.seq === at.lastSeq && e.playing === local && !at.wantMaster && !at.check && !at.nativeSync && !e.scratch && !wasScratch) return
+		if (e.seq && e.seq === at.lastSeq && e.playing === local && !at.wantMaster && !at.check && !at.nativeSync && !e.scratch && !wasScratch) {
+			if (at.ready && at.sampleRate > 0) root.scShadowFeed(d, e, at, at.sourceTarget, feedRate, at.sampleRate)
+			return
+		}
 		at.lastSeq = e.seq
 		const wasPreview = at.preview
 		at.preview = !!e.cue
@@ -2304,6 +2324,7 @@ SERVICES_MAIN = """
 		// e.at is when Go extrapolated e.positionMs; this runs later on a busy GUI
 		// thread, so carry the target to now before comparing.
 		const target = loopWrap(e.positionMs + (e.playing && !e.scratch && e.at ? Math.max(0, now - e.at) * scShadowRate(e) : 0))
+		root.scShadowFeed(d, e, at, target, feedRate, sr)
 		const posMs = g("/Track/TrackPosition").unnormalized / sr * 1000
 		const drift = target - posMs // > 0: behind
 		const meanReady = at.env !== undefined && now - at.envT0 >= 300
@@ -2354,8 +2375,23 @@ SERVICES_MAIN = """
 			at.landing = undefined; at.phaseHardUntil = 0; at.phaseUntil = 0; at.transitionSeeks = 0
 			at.phaseLine = target; at.phaseAt = now; at.phaseRate = at.rate
 		}
-		if (!(wantSync && synced) && !(at.nativeSync && e.pitch > 100)) scShadowSpeed(d, Math.abs(exact - e.pitch) < 0.02 ? exact : e.pitch, e.range)
+		if (!root.scPausedShadowFollow && !(wantSync && synced) && !(at.nativeSync && e.pitch > 100)) scShadowSpeed(d, Math.abs(exact - e.pitch) < 0.02 ? exact : e.pitch, e.range)
 		const pKey = g("/Track/KeyLock")
+		if (root.scPausedShadowFollow) {
+			// The copy is display-only audio. Keep its transport paused, while the
+			// native render hook follows the source feed. The stock overview/time
+			// properties get a low-rate seek and jump edges get one immediately.
+			if (pKey && pKey.state) pKey.state = false
+			const jump = e.jumps !== at.pausedFollowJumps
+			if (local) g("/Play").state = false
+			if (jump || now - (at.pausedFollowSeekAt || 0) >= 1000) {
+				seek(at.sourceTarget)
+				at.pausedFollowSeekAt = now
+			}
+			at.pausedFollowJumps = e.jumps
+			at.cmd = false
+			return dbg("paused-follow")
+		}
 		if (typeof e.keylock === "boolean" && pKey && !!pKey.state !== e.keylock) pKey.state = e.keylock
 		// Play, CUE held, pause, CUE released: on the first update that shows it.
 		// at.cmd only stops rewriting the same state while Engine follows (a frame
