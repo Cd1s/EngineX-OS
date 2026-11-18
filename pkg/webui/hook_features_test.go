@@ -210,6 +210,15 @@ func TestHookFeatureMenuShowsWhatTheRunningEngineHas(t *testing.T) {
 		if got := strings.Contains(ui(), `"shadowPausedFollow":true`); got != c.want {
 			t.Fatalf("%q: shadowPausedFollow %v, want %v", c.state, got, c.want)
 		}
+		// The answer to a setting the pack posts says the same: the pack applies it like a
+		// poll's, and one without the hook's state un-paused the copy until the next poll.
+		req := httptest.NewRequest(http.MethodPost, "/v1/enginex/ui", nil)
+		req.RemoteAddr = "127.0.0.1:4000"
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, req)
+		if got := strings.Contains(w.Body.String(), `"shadowPausedFollow":true`); w.Code != http.StatusOK || got != c.want {
+			t.Fatalf("%q: a POST's answer (%d) has shadowPausedFollow %v, want %v", c.state, w.Code, got, c.want)
+		}
 	}
 	// A state file of an Engine that no longer runs says nothing: every row stays.
 	if err := os.WriteFile(state, []byte("pid=99\nbuild=\noff=dsp-guards\n"), 0o644); err != nil {
