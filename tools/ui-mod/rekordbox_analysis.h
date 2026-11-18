@@ -395,7 +395,22 @@ static int sc_rbx_changes(void *arg, int n, char **v, char **names) {
 
 #define SC_RBX_COVER_MAGIC "RBXC1"
 #define SC_RBX_COVER_HEADER 25
-#define SC_RBX_COVER_MAX (512u << 10)
+#define SC_RBX_COVER_MAX (480u << 10)
+
+struct sc_rbx_cover_state {
+    int rows;
+    int has_picture;
+};
+
+static int sc_rbx_cover_state_row(void *arg, int n, char **v, char **names) {
+    struct sc_rbx_cover_state *state = arg;
+    (void)names;
+    if (n == 1) {
+        state->rows++;
+        state->has_picture = v[0] && v[0][0] == '1';
+    }
+    return 0;
+}
 
 // Apply a staged cover on Engine's own connection. The sidecar is retained when
 // no matching empty AlbumArt row exists so a later bind can consume it.
@@ -403,10 +418,22 @@ static int sc_rbx_apply_cover(const struct sc_rbx_sqlite *q, void *db, long long
     if (id <= 0) return 0;
     char path[160];
     snprintf(path, sizeof path, "%s/%lld.cover", sc_rbx_dir, id);
+    if (access(path, R_OK)) return 0;
+    char state_query[256];
+    struct sc_rbx_cover_state state = {0, 0};
+    snprintf(state_query, sizeof state_query,
+             "SELECT albumArt IS NOT NULL FROM AlbumArt WHERE id = (SELECT albumArtId FROM Track WHERE id = %lld)", track);
+    if (q->exec(db, state_query, sc_rbx_cover_state_row, &state, NULL)) return -1;
+    if (state.rows && state.has_picture) {
+        unlink(path);
+        return 0;
+    }
     size_t n = 0;
     unsigned char *b = sc_rbx_read(path, &n);
-    if (!b || n < SC_RBX_COVER_HEADER + 2 || n > SC_RBX_COVER_HEADER + SC_RBX_COVER_MAX ||
+    if (!b) return 0;
+    if (n < SC_RBX_COVER_HEADER + 2 || n > SC_RBX_COVER_HEADER + SC_RBX_COVER_MAX ||
         memcmp(b, SC_RBX_COVER_MAGIC, 5) || b[SC_RBX_COVER_HEADER] != 0xff || b[SC_RBX_COVER_HEADER + 1] != 0xd8) {
+        if (n > SC_RBX_COVER_HEADER + SC_RBX_COVER_MAX) unlink(path);
         free(b);
         return 0;
     }

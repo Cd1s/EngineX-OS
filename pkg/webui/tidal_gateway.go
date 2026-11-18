@@ -908,6 +908,9 @@ func thumbURL(t providers.Track) string {
 const (
 	maxArtEntries = 128
 	maxArtBytes   = 512 << 10
+	// The hook hex-encodes staged covers in one SQLite statement; keep that
+	// statement below SQLite's default 1,000,000-byte SQL limit.
+	maxStagedArtBytes = 480 << 10
 )
 
 // art serves a list row's thumbnail, keeping the most recently fetched in memory.
@@ -1032,7 +1035,7 @@ func (g *tidalGateway) stageAlbumArt(ctx context.Context, id int64, t providers.
 		address = thumbURL(t)
 	}
 	data := g.artBytes(ctx, address)
-	if len(data) < 3 || data[0] != 0xff || data[1] != 0xd8 { // Engine's Artwork files are JPEG
+	if len(data) < 3 || len(data) > maxStagedArtBytes || data[0] != 0xff || data[1] != 0xd8 { // Engine's Artwork files are JPEG
 		return
 	}
 	sum := sha1.Sum(data)

@@ -358,11 +358,32 @@ int main(void) {
     assert(f && fwrite("RBXC1", 1, 5, f) == 5 && fwrite(hash, 1, sizeof hash, f) == sizeof hash &&
            fwrite(jpeg, 1, sizeof jpeg, f) == sizeof jpeg && !fclose(f));
     assert(sqlite3_exec(cover, "UPDATE stm.Track SET albumArtId=2", NULL, NULL, NULL) == SQLITE_OK);
-    assert(!load_bound(cover) && access(cover_path, F_OK) == 0);
+    assert(!load_bound(cover) && access(cover_path, F_OK));
     assert(sqlite3_prepare_v2(cover, "SELECT hash,hex(albumArt) FROM stm.AlbumArt WHERE id=2", -1, &art, NULL) == SQLITE_OK);
     assert(sqlite3_step(art) == SQLITE_ROW && !strcmp((const char *)sqlite3_column_text(art, 0), "keep") &&
            !strcmp((const char *)sqlite3_column_text(art, 1), "01"));
     sqlite3_finalize(art);
+
+    // A cover that is already present makes the hook discard the staged copy after one
+    // small read; it must not hex-encode the JPEG or issue a failing large SQL statement.
+    assert(sqlite3_exec(cover, "UPDATE stm.Track SET albumArtId=2", NULL, NULL, NULL) == SQLITE_OK);
+    f = fopen(cover_path, "wb");
+    assert(f && fwrite("RBXC1", 1, 5, f) == 5 && fwrite(hash, 1, sizeof hash, f) == sizeof hash &&
+           fwrite(jpeg, 1, sizeof jpeg, f) == sizeof jpeg && !fclose(f));
+    statements = 0;
+    assert(!load_bound(cover) && statements == 2 && access(cover_path, F_OK));
+
+    // Oversized staged covers are discarded instead of retrying a statement over SQLite's
+    // default SQL-length limit forever.
+    size_t large_n = SC_RBX_COVER_HEADER + SC_RBX_COVER_MAX + 1;
+    unsigned char *large = calloc(1, large_n);
+    assert(large);
+    memcpy(large, "RBXC1", 5);
+    memcpy(large + SC_RBX_COVER_HEADER, jpeg, sizeof jpeg);
+    f = fopen(cover_path, "wb");
+    assert(f && fwrite(large, 1, large_n, f) == large_n && !fclose(f));
+    free(large);
+    assert(!load_bound(cover) && access(cover_path, F_OK));
     sqlite3_close(cover);
     pthread_mutex_lock(&sc_rbx_track_map_mu);
     memset(sc_rbx_track_maps, 0, sizeof sc_rbx_track_maps);
@@ -391,7 +412,7 @@ int main(void) {
     snprintf(path, sizeof path, "%s/855.bin.perf", dir);
     assert(!unlink(path));
     assert(!unlink(alias) && !unlink(mark) && !unlink(internal) && !unlink(drive));
-    assert(!unlink(cover_path));
+    if (!access(cover_path, F_OK)) assert(!unlink(cover_path));
     snprintf(path, sizeof path, "%s/media", dir);
     assert(!rmdir(path) && !rmdir(dir));
     return 0;

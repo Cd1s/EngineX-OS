@@ -1054,6 +1054,14 @@ func TestAlbumArtIsStagedNotWrittenIntoEnginesDatabase(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(lib, "Artwork", base64.RawURLEncoding.EncodeToString(sum[:])+".jpg")); err != nil {
 		t.Fatal(err)
 	}
+	// A JPEG large enough to exceed the hook's single-statement budget is rejected before
+	// a sidecar is created, so it cannot be retried forever on every bind.
+	big := append([]byte{0xff, 0xd8, 0xff}, make([]byte, maxStagedArtBytes)...)
+	g.artCache["https://img.example/large.jpg"] = big
+	g.stageAlbumArt(context.Background(), 9, providers.Track{CoverURL: "https://img.example/large.jpg"})
+	if _, err := os.Stat(filepath.Join(rbxAnalysisDir, "9.cover")); !os.IsNotExist(err) {
+		t.Fatalf("oversized sidecar: %v", err)
+	}
 }
 
 func TestHTTPSCover(t *testing.T) {
