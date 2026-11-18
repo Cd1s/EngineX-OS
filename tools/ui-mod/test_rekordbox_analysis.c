@@ -240,6 +240,21 @@ int main(void) {
     statements = 0;
     assert(!load(db) && !load_bound(db) && !statements && !filled(db));
     sqlite3_close(db);
+    assert(!utimensat(AT_FDCWD, mark, NULL, 0));
+    // Engine may rewrite the Track presentation fields after the first load. A later
+    // source generation must still refresh the row through the remembered mapping.
+    sqlite3 *reload = library_row(internal, "streaming://TIDAL/Track/855", "rekordbox [126 BPM 6A]", 1);
+    result = load_bound(reload);
+    assert(result && !strcmp(result, "filled"));
+    assert(sqlite3_exec(reload, "UPDATE Track SET uri='file:///data/inMusicTempFiles/935.m4a', label='Fenner' WHERE id=16449", NULL, NULL, NULL) == SQLITE_OK);
+    const unsigned char refreshed[] = "RBXA1" "\2\0\0\0" "\x02" "\xbc" "\0\0\0\0" "\1\0\0\0" "\x66" "\1\0\0\0" "\x77" "\0\0\0\0";
+    snprintf(path, sizeof path, "%s/855.bin", dir);
+    f = fopen(path, "wb");
+    assert(f && fwrite(refreshed, 1, sizeof refreshed - 1, f) == sizeof refreshed - 1 && !fclose(f));
+    result = load_bound(reload);
+    assert(result && !strcmp(result, "refreshed"));
+    check_edits(reload, "66/77");
+    sqlite3_close(reload);
     snprintf(path, sizeof path, "%s/855-16449-beatData", history);
     assert(!unlink(path));
     snprintf(path, sizeof path, "%s/855-16449-quickCues", history);
