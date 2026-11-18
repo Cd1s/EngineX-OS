@@ -137,7 +137,7 @@ Combined delta review C: the Mixstream-only Stems EQ row now uses the native con
   - Engine 读这一行 `PerformanceData` 时，`trackId` 用 `?` 绑定，所以只看 prepare 文本的钩子从未动作。
 - **修法**：
   - stream-sync 按长度切段，网格从 0x2204 读；CDJ-3000 的 USB/SD 从导出的 ANLZ 文件读。分析写到 `/run/enginex-rbx-analysis/<id>.bin`。
-  - 钩子在 Engine 绑定该行 id 时（`sqlite3_bind_int64`，5.3.0 与 5.3.0-sclive4，按 api 表核对地址），在 Engine 自己的连接上填好这一行的临时 `PerformanceData`。
+  - 钩子在 Engine 绑定该行 id 时（`sqlite3_bind_int64`，5.3.0 与 5.3.0-sclive4，按 api 表核对地址），在 Engine 自己的连接上填好这一行的临时 `PerformanceData`，并像 rb-bridge 对 U 盘曲目那样把 `Track.isAnalyzed` 设为 1。只填 `PerformanceData` 时，维护者实测（11-18）波形已即时出现，但 Engine 仍把曲目重新分析一遍，网格要等 15–35 秒。
   - 只动网关的 `rekordbox [` 行，且 120 秒内要有 rekordbox 加载请求。碟机自己的 U 盘 / SD 加载不多执行任何语句；Engine Link（另一台碟机的 U 盘）和 Remote Library（Engine DJ 桌面版）的加载只读一次、从不写，网关也只接管 TIDAL 的两个网址。
 - **检验**：
   - 检查表行 318、319；
