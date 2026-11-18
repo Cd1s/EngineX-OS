@@ -1003,8 +1003,10 @@ func (g *tidalGateway) prewarmArt(refs []trackRef) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		for _, ref := range refs[:min(len(refs), 12)] {
-			if ref.track.Provider != rekordboxScope { // its session goes to the analysis prefetch first
-				g.artBytes(ctx, thumbURL(ref.track))
+			// Never a rekordbox computer's cover: its session goes to the analysis prefetch first,
+			// and another source's row naming one is not the gateway's own (addTrack drops it).
+			if address := thumbURL(ref.track); !strings.HasPrefix(address, rbxCoverScheme) {
+				g.artBytes(ctx, address)
 			}
 		}
 	}()

@@ -221,6 +221,13 @@ func TestRekordboxCoverOnlyFromTheComputerOnTheLink(t *testing.T) {
 	if code, _, _ := artGet(t, e.base, "Bait", "B"); code != 404 {
 		t.Fatalf("another source's row reached the computer: %d", code)
 	}
+	// Nor through the list's cover prewarm, which sees the rows as their source gave them.
+	g.refItems([]trackRef{{track: providers.Track{ID: "y", Title: "Bait 2", Provider: "deezer", CoverURL: "rekordbox-art://127.0.0.1/1"}}})
+	for end := time.Now().Add(5 * time.Second); g.warming.Load() && time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("another source's row reached the computer through the prewarm: %d requests", calls.Load())
+	}
 	e.s.rbxPresenceMu.Lock()
 	e.s.rbxPresence["127.0.0.1"].seen = time.Time{} // LINK turned off
 	e.s.rbxPresenceMu.Unlock()
