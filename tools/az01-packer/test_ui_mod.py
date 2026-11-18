@@ -2460,6 +2460,7 @@ for (let i = 1; i <= 8; i++) {
     tr[k + 'Color'] = {color: '#26a6ff'};
 }
 globalThis.scTr = path => tr[path] || null;
+globalThis.scCueSnap = {}; globalThis.scCueBeatsCache = {};
 const text = () => { scCueInfoCache = {}; const i = scNextCueCompute(1); return i ? i.text : null; };
 const line = () => Math.floor(eng.bpm / 60 * (eng.pos - eng.first));
 // Positions across several beats: the text changes exactly where the playhead crosses a grid line.
@@ -2523,7 +2524,7 @@ assert.equal(text(), null);
         # without a notification), so the binding below depends on the beat key and the grid, exactly what the capsule is bound to.
         self.js(r"""
 const sr = 44100;
-const eng = {pos: 0, first: 0.3, segs: [[0.3, 128]], cue: 40.0, playing: false, cueLed: false, loaded: true, grid: true};
+const eng = {pos: 0, first: 0.3, segs: [[0.3, 128]], cue: 40.0, playing: false, cueLed: false, loaded: true, grid: true, bars: 'real', anchorErr: 0};
 function beatAt(t) {
     if (t < eng.segs[0][0]) return (t - eng.segs[0][0]) * eng.segs[0][1] / 60; // the intro: beats before the first grid beat, negative
     let b = 0;
@@ -2542,10 +2543,10 @@ const tr = {
     '/Engine/Deck1/Track/FirstAnchorTempo': {get unnormalized() { return eng.segs[0][1]; }},
     '/Engine/Deck1/Track/TrackPosition': {get unnormalized() { return eng.pos * sr; }},
     '/Engine/Deck1/Track/SampleRate': {value: sr},
-    '/Engine/Deck1/Track/FirstDownbeatSamplePosition': {get unnormalized() { return eng.segs[0][0] * sr; }},
+    '/Engine/Deck1/Track/FirstDownbeatSamplePosition': {get unnormalized() { return (eng.segs[0][0] + eng.anchorErr) * sr; }},
     '/Engine/Deck1/OriginalBPM': {get unnormalized() { return tempo(); }},
     '/Engine/Deck1/BeatNumber': {get unnormalized() { return eng.grid && beatAt(eng.pos) >= 0 ? beatAt(eng.pos) % 4 : -1; }},
-    '/Engine/Deck1/Track/BarsElapsed': {get unnormalized() { return Math.floor(beatAt(eng.pos) / 4); }},
+    '/Engine/Deck1/Track/BarsElapsed': {get unnormalized() { return eng.bars === 'missing' ? NaN : eng.bars === 'zero' ? 0 : Math.floor(beatAt(eng.pos) / 4); }},
 };
 for (let i = 1; i <= 8; i++) {
     const k = '/Engine/Deck1/Track/QuickCue' + i;
@@ -2554,9 +2555,9 @@ for (let i = 1; i <= 8; i++) {
     tr[k + 'Name'] = {string: 'C' + i};
     tr[k + 'Color'] = {color: '#26a6ff'};
 }
-// What QML subscribes the info binding to: the properties its evaluation reads, except the playhead (position, beat, bar), which
-// moves without a notification. The beat key carries the playhead instead: one int that changes once per beat.
-const quiet = new Set(['/Engine/Deck1/Track/TrackPosition', '/Engine/Deck1/BeatNumber', '/Engine/Deck1/Track/BarsElapsed']);
+// What QML subscribes the info binding to: every property its evaluation reads. The playhead reaches the count through the beat gate's
+// copy (scCueSnap) while a deck has a beat position, so it is not one of them; the gate's own reads are outside the binding.
+const quiet = new Set();
 let recording = null;
 const proxied = {};
 for (const [path, o] of Object.entries(tr)) proxied[path] = new Proxy(o, {get(t, k) { if (recording && !quiet.has(path)) recording.add(path); return Reflect.get(t, k, t); }});
@@ -2566,7 +2567,10 @@ globalThis.scCueBeatsCache = {};
 globalThis.scCueBeatPaths = ['', ...[1, 2, 3, 4].map(d => '/Engine/Deck' + d + '/BeatNumber')];
 globalThis.scCueBarPaths = ['', ...[1, 2, 3, 4].map(d => '/Engine/Deck' + d + '/Track/BarsElapsed')];
 globalThis.scCueClock1 = globalThis.scCueClock2 = globalThis.scCueClock3 = globalThis.scCueClock4 = {tick: 0}; // PlayState off: no clock runs
-for (let d = 1; d <= 4; d++) Object.defineProperty(globalThis, 'scCueBeat' + d, {get() { return scCueBeatOf(d, 0); }, configurable: true});
+globalThis.scCueSnap = {};
+globalThis.scCuePosPaths = ['', ...[1, 2, 3, 4].map(d => '/Engine/Deck' + d + '/Track/TrackPosition')];
+// The gate is its own binding: its reads are not the info binding's.
+for (let d = 1; d <= 4; d++) Object.defineProperty(globalThis, 'scCueBeat' + d, {get() { const r = recording; recording = null; try { return scCueBeatOf(d, 0); } finally { recording = r; } }, configurable: true});
 let deps = new Set(), sig = null, shown = null, evaluations = 0;
 const snap = () => [...deps].sort().map(p => JSON.stringify([tr[p].state, tr[p].value, tr[p].unnormalized, tr[p].string, tr[p].color])).join('|');
 function binding() {
@@ -2684,6 +2688,56 @@ for (let x = 0.5013; x < 4.9; x += 0.05) {
 assert.ok(seen.size >= 8, 'the countdown moved ' + seen.size + ' times through the intro');
 // Over the first beat into the grid proper: no jump in the count.
 for (let x = 4.9013; x < 6.5; x += 0.05) { eng.pos = x; scCueClock1.tick++; assert.equal(binding(), truth(), 'across the first beat at ' + x.toFixed(2)); }
+""")
+
+    def test_local_countdown_with_an_anchor_a_few_hundredths_of_a_beat_off(self):
+        # The count crosses a line where Engine's beat does, whatever the anchor property is off by (it only places the cues).
+        self.local_beat_countdown(r"""
+const beatS = 60 / 128;
+for (const err of [0.02 * beatS, -0.02 * beatS, 0.04 * beatS, -0.04 * beatS]) {
+    eng.anchorErr = err; delete scCueBeatsCache[1]; sig = null;
+    eng.cue = 0.3 + 90 * beatS; // on a line
+    for (let x = 0.3 + 40 * beatS - 0.05; x < 0.3 + 44 * beatS; x += 0.002) { eng.pos = x; assert.equal(binding(), truth(), 'anchor off by ' + (err / beatS).toFixed(2) + ' beat at ' + x.toFixed(4)); }
+}
+""")
+
+    def test_local_countdown_whole_bar_jump_without_bars_elapsed(self):
+        for bars in ('missing', 'zero'):
+            self.local_beat_countdown(r"""
+eng.bars = '""" + bars + r"""'; eng.cue = 120.0;
+eng.pos = 5.0013; assert.equal(binding(), truth());
+for (const jump of [4, 8, 16, 12]) {
+    const key = scCueBeatOf(1, 0);
+    eng.pos += jump * 4 * 60 / 128; // whole bars: the beat in the bar is the same
+    assert.notEqual(scCueBeatOf(1, 0), key, 'the beat key moves with the bar (' + jump + ')');
+    assert.equal(binding(), truth(), jump + ' bars');
+}
+eng.pos = 5.0013; assert.equal(binding(), truth(), 'back');
+""")
+
+    def test_local_countdown_cue_edit_while_paused_without_a_beat_position(self):
+        # No beat position (BeatNumber below 0): the fallback clock does not move while paused, and a cue edit has to count at once.
+        self.local_beat_countdown(r"""
+eng.grid = false; eng.playing = false; eng.cueLed = false;
+eng.pos = 10.2; eng.cue = 40.0;
+const before = binding();
+eng.cue = 41.1;
+const fresh = (() => { scCueInfoCache = {}; const i = scNextCueCompute(1); return i ? i.text : null; })();
+assert.notEqual(fresh, before);
+assert.equal(binding(), fresh, 'the edit inside the 50 ms the old reuse held an answer for');
+eng.cue = 30.0;
+assert.equal(binding(), (() => { scCueInfoCache = {}; return scNextCueCompute(1).text; })());
+""")
+
+    def test_local_countdown_evaluates_once_per_beat_not_per_fractional_notification(self):
+        # 20 fractional BeatNumber / position changes inside one beat: the gate is read 20 times, the count evaluated once.
+        self.local_beat_countdown(r"""
+eng.pos = 10.0013; binding();
+const before = evaluations;
+for (let i = 1; i <= 20; i++) { eng.pos = 10.0013 + i * 0.0005; binding(); }
+assert.equal(evaluations, before, 'evaluations inside one beat');
+eng.pos += 0.4; binding();
+assert.equal(evaluations, before + 1, 'the next beat');
 """)
 
     def test_live_cues_change_on_same_key_using_source_sample_rate(self):

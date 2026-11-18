@@ -1361,22 +1361,41 @@ SERVICES_MAIN = """
 		for (let d = 1; d <= 4; d++)
 			if (!scPropCache["/Engine/Deck" + d + "/PlayState"] || !scPropCache["/Engine/Deck" + d + "/BeatNumber"]) { root.scCueProbe = (root.scCueProbe + 1) & 0xffff; return }
 	}
-	// Engine's own beat counter drives the countdown: BeatNumber (the playhead's place in the bar, below 0 without a grid) with
-	// BarsElapsed (the bar it is in) is the absolute beat the playhead is on. One int property per deck, so a binding downstream
+	// Engine's own beat counter drives the countdown: BeatNumber (the playhead's place in the bar, below 0 without a beat position)
+	// with BarsElapsed (the bar it is in) is the absolute beat the playhead is on. One int property per deck, so a binding downstream
 	// re-evaluates only when that beat changes (CUE preview, scratch, reverse, beat jump and every other move included), never per
-	// frame, and nothing runs while the playhead stands still. -2: the property is missing; -1: no grid. The reads sit after the
-	// switch test, so a switched-off countdown subscribes to nothing.
+	// notification of the fractional BeatNumber, and nothing runs while the playhead stands still. -2: the property is missing;
+	// -1: no beat position. The reads sit after the switch test, so a switched-off countdown subscribes to nothing.
+	// The gate also keeps the playhead it saw (beat and position) in scCueSnap: the countdown reads that copy, not the translators,
+	// so it is not subscribed to every fractional notification. A deck without a beat position is read live (fallback clock).
 	// Constant paths: this runs on every beat notification, so no string is built per call.
 	readonly property var scCueBeatPaths: ["", "/Engine/Deck1/BeatNumber", "/Engine/Deck2/BeatNumber", "/Engine/Deck3/BeatNumber", "/Engine/Deck4/BeatNumber"]
 	readonly property var scCueBarPaths: ["", "/Engine/Deck1/Track/BarsElapsed", "/Engine/Deck2/Track/BarsElapsed", "/Engine/Deck3/Track/BarsElapsed", "/Engine/Deck4/Track/BarsElapsed"]
+	readonly property var scCuePosPaths: ["", "/Engine/Deck1/Track/TrackPosition", "/Engine/Deck2/Track/TrackPosition", "/Engine/Deck3/Track/TrackPosition", "/Engine/Deck4/Track/TrackPosition"]
+	property var scCueSnap: ({})
 	function scCueBeatOf(d, probe) {
 		if (!root.scCueCountdown) return -2
 		const b = root.scTr(root.scCueBeatPaths[d])
 		if (!b) return -2
 		const n = b.unnormalized
+		const t = root.scTr(root.scCuePosPaths[d])
+		const snap = scCueSnap[d] || (scCueSnap[d] = {beat: -1, pos: 0})
+		snap.beat = n; snap.pos = t ? t.unnormalized || 0 : 0
 		if (!(n >= 0)) return -1
 		const bars = root.scTr(root.scCueBarPaths[d])
-		const k = bars ? Math.floor(bars.unnormalized) : 0
+		let k = bars ? Math.floor(bars.unnormalized) : NaN
+		// BarsElapsed missing, not a number or stuck at 0 after the first bars: the bar comes from the grid (anchor, tempo, position),
+		// so a jump of whole bars still changes the key.
+		if (!isFinite(k) || (k === 0 && snap.pos > 0)) {
+			const prefix = "/Engine/Deck" + d, down = root.scTr(prefix + "/Track/FirstDownbeatSamplePosition"), tempo = root.scTr(prefix + "/Track/FirstAnchorTempo")
+			const rate = root.scTr(prefix + "/Track/SampleRate")
+			const gridBpm = tempo ? tempo.unnormalized : 0
+			const sr = rate ? rate.value || 0 : 0
+			if (down && gridBpm > 0 && sr > 0) {
+				const bar = Math.round(((snap.pos - down.unnormalized) / sr * (gridBpm / 60.0) - n) / 4)
+				if (isFinite(bar) && (!isFinite(k) || Math.abs(bar) > 1)) k = bar
+			}
+		}
 		// 100000 + ...: a bar before the first one is negative and keeps its own keys, apart from the -1 / -2 markers.
 		return 100000 + Math.floor(n) + 4 * (isFinite(k) ? k : 0)
 	}
@@ -1428,12 +1447,12 @@ SERVICES_MAIN = """
 	function scCueBeatsLeft(posBeat, cueBeat) { return Math.max(0, Math.round(cueBeat) - posBeat) }
 	// Same object while text/label/color/urgent are unchanged, so bindings do not re-layout every tick.
 	property var scCueInfoCache: ({})
-	// The views (every layout variant) of a shadow frame or of the fallback clock (negative ticks) evaluate on the same edge and share
-	// one count per deck and tick. A local beat edge (positive tick) always counts afresh: a cue edit, a jump or a reload inside the same beat
-	// must not get the earlier answer back.
+	// The views (every layout variant) of a shadow frame evaluate on the same edge and share one count per deck and frame. A local
+	// deck always counts afresh (a cue edit, a jump or a reload inside the same beat or clock tick must not get an earlier answer
+	// back, and a reused answer skips the reads the binding is subscribed through).
 	property var scCueInfoMemo: ({})
 	function scNextCueInfo(d, tick) {
-		const memo = scCueInfoMemo[d], now = Date.now(), edge = typeof tick === "number" && tick !== 0 && (tick < 0 || scShadowVisible(d))
+		const memo = scCueInfoMemo[d], now = Date.now(), edge = typeof tick === "number" && tick > 0 && scShadowVisible(d)
 		if (edge && memo && memo.tick === tick && now - memo.at < 50) return memo.info
 		const info = scNextCueCompute(d)
 		if (edge) {
@@ -1475,7 +1494,14 @@ SERVICES_MAIN = """
 		}
 		const p = scCueProps(d)
 		if (!p.loaded || !p.loaded.state) { delete scCueBeatsCache[d]; return null }
-		const pos = p.position ? p.position.unnormalized || 0 : 0
+		// Optional Engine properties missing when the pack was built are looked up again (a miss is not cached).
+		if (!p.beat) p.beat = root.scTr(p.prefix + "/BeatNumber")
+		if (!p.down) p.down = root.scTr(p.prefix + "/Track/FirstDownbeatSamplePosition")
+		if (!p.gridTempo) p.gridTempo = root.scTr(p.prefix + "/Track/FirstAnchorTempo")
+		if (!p.length) p.length = root.scTr(p.prefix + "/Track/TrackLength")
+		// On a beat position the playhead is the gate's copy (no subscription to the fractional notifications); else read live.
+		const snap = scCueSnap[d] && scCueSnap[d].beat >= 0 ? scCueSnap[d] : null
+		const pos = snap ? snap.pos : p.position ? p.position.unnormalized || 0 : 0
 		// The grid's origin: reading it makes a grid shift (Beat Grid Edit) re-count within the same beat.
 		if (p.down) void p.down.unnormalized
 		const sr = p.sampleRate ? p.sampleRate.value || 44100 : 44100
@@ -1492,7 +1518,7 @@ SERVICES_MAIN = """
 		if (best < 0) return null
 		let totalBeats = (bestPos - pos) / sr * (bpm / 60.0)
 		// The count follows the grid: the playhead's place in its beat (Engine's BeatNumber, a position in the bar; below 0 without a grid).
-		const beat = p.beat ? p.beat.unnormalized : -1
+		const beat = snap ? snap.beat : p.beat ? p.beat.unnormalized : -1
 		// Engine's grid: its anchor and tempo. The cue's beat comes from the per-deck table, the playhead's from the same anchor,
 		// so a count before the first grid beat (BeatNumber below 0, an intro) is right too. Used only while Engine's own beat
 		// agrees (same place in the beat, same tempo at the playhead); otherwise Engine's BeatNumber and the tempo at the playhead count.
@@ -1501,8 +1527,12 @@ SERVICES_MAIN = """
 		const anchor = p.down ? p.down.unnormalized : NaN, gridBpm = p.gridTempo ? p.gridTempo.unnormalized : 0
 		let counted = false
 		if (isFinite(anchor) && gridBpm > 0 && Math.abs(gridBpm / bpm - 1) < 0.02) {
-			const posBeat = (pos - anchor) / sr * (gridBpm / 60.0), off = beat >= 0 ? posBeat - beat : 0
+			let posBeat = (pos - anchor) / sr * (gridBpm / 60.0)
+			const off = beat >= 0 ? posBeat - beat : 0
 			if (Math.abs(off - Math.round(off)) <= 0.1) {
+				// With a beat position the line the playhead is past is Engine's (its live phase on the anchor's numbering), so an
+				// anchor a few hundredths of a beat off cannot move a count across a line; the cue's beat rounds to its nearest line.
+				if (beat >= 0) posBeat = beat + Math.round(off)
 				const tableBeat = scCueBeatTable(d, p, sr, anchor, gridBpm, p.length ? p.length.unnormalized : 0).beats[best]
 				totalBeats = scCueBeatsLeft(posBeat, tableBeat)
 				counted = true
@@ -1527,7 +1557,7 @@ SERVICES_MAIN = """
 		if (scCuePropCache[d]) return scCuePropCache[d]
 		const prefix = "/Engine/Deck" + d
 		const t = p => root.scTr(prefix + p)
-		const p = {loaded: t("/Track/SongLoaded"), position: t("/Track/TrackPosition"), sampleRate: t("/Track/SampleRate"),
+		const p = {prefix: prefix, loaded: t("/Track/SongLoaded"), position: t("/Track/TrackPosition"), sampleRate: t("/Track/SampleRate"),
 			bpm: t("/OriginalBPM"), trackBpm: t("/Track/CurrentBPM"), beat: t("/BeatNumber"), down: t("/Track/FirstDownbeatSamplePosition"), gridTempo: t("/Track/FirstAnchorTempo"), length: t("/Track/TrackLength"), cues: []}
 		for (let i = 1; i <= 8; i++) {
 			const key = "/Track/QuickCue" + i

@@ -77,7 +77,7 @@ class XMLHttpRequest {
     abort() { this.readyState = 0; this.aborted = true; }
     getResponseHeader(name) { return (this.headers || {})[name] || null; }
 }
-''' + "\n".join(functions) + "\nroot.scTr = scTr; root.scCuePlaying = scCuePlaying; root.scCueProbe = 0; root.scCueBeatOf = scCueBeatOf; root.scCueBeatsCache = {};\nroot.scCueBeatPaths = ['', ...[1, 2, 3, 4].map(d => '/Engine/Deck' + d + '/BeatNumber')]; root.scCueBarPaths = ['', ...[1, 2, 3, 4].map(d => '/Engine/Deck' + d + '/Track/BarsElapsed')];\n" + "".join(f"Object.defineProperty(root, 'scCueBeat{d}', {{get() {{ return scCueBeatOf({d}, root.scCueProbe); }}, configurable: true}});\n" for d in range(1, 5)) + r'''
+''' + "\n".join(functions) + "\nroot.scTr = scTr; root.scCuePlaying = scCuePlaying; root.scCueProbe = 0; root.scCueBeatOf = scCueBeatOf; root.scCueBeatsCache = {}; root.scCueSnap = {}; root.scCuePosPaths = ['', ...[1, 2, 3, 4].map(d => '/Engine/Deck' + d + '/Track/TrackPosition')];\nroot.scCueBeatPaths = ['', ...[1, 2, 3, 4].map(d => '/Engine/Deck' + d + '/BeatNumber')]; root.scCueBarPaths = ['', ...[1, 2, 3, 4].map(d => '/Engine/Deck' + d + '/Track/BarsElapsed')];\n" + "".join(f"Object.defineProperty(root, 'scCueBeat{d}', {{get() {{ return scCueBeatOf({d}, root.scCueProbe); }}, configurable: true}});\n" for d in range(1, 5)) + r'''
 const set = (key, fields) => Object.assign(scTr('/Engine/Deck1/' + key), fields);
 set('Track/SongLoaded', {state: true});
 set('Track/SampleRate', {value: 1000});
@@ -93,14 +93,13 @@ for (let i = 0; i < 60; i++) assert.equal(scNextCueInfo(1, i), info);
 assert.equal(lookups, initialLookups); // same translators and same display object
 set('Track/TrackPosition', {unnormalized: 1000});
 assert.equal(scNextCueInfo(1, 1).text, '4.1');
-// Every view evaluates on the same fallback-clock edge (negative tick): computed once per deck and tick.
-const edge = scNextCueInfo(1, -7), before = lookups;
+// A local deck always counts afresh, on a fallback-clock tick (negative) or a beat tick (positive): an edit, jump or reload inside the
+// same tick must get its own answer, and a reused answer would skip the reads the binding is subscribed through.
+const before = lookups;
 set('Track/TrackPosition', {unnormalized: 3000});
-assert.strictEqual(scNextCueInfo(1, -7), edge);
-scCueInfoMemo[1].at -= 100; // a later re-evaluation on the same tick (a load or cue edit while paused)
-assert.equal(scNextCueInfo(1, -7).text, '3.1'); assert.equal(edge.text, '4.1');
-// A beat edge (positive tick) is never shared: a jump, cue edit or reload inside the same beat gets its own count.
+assert.equal(scNextCueInfo(1, -7).text, '3.1');
 set('Track/TrackPosition', {unnormalized: 1000});
+assert.equal(scNextCueInfo(1, -7).text, '4.1');
 assert.equal(scNextCueInfo(1, 100004).text, '4.1');
 set('Track/TrackPosition', {unnormalized: 3000});
 assert.equal(scNextCueInfo(1, 100004).text, '3.1');
