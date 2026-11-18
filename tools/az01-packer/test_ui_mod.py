@@ -1151,7 +1151,12 @@ for (const amt of [1/63, 2/63, 4/63, 5/63, 8/63, 1.0]) {{
 
     def test_cue_info_cached_and_master_not_fought(self):
         self.assertIn("property var scCueInfoCache", bp.SERVICES_MAIN)
-        self.assertIn("c.text === text && c.label === label && c.color === color && c.urgent === urgent", bp.SERVICES_MAIN)
+        # The same display object while nothing changed: a shadow deck keeps its last one, a local deck has one for good.
+        self.assertIn("c.text === info.text && c.label === info.label && c.color === info.color && c.urgent === info.urgent", bp.SERVICES_MAIN)
+        for d in range(1, 5):
+            self.assertIn(f"QtObject {{ id: scCueShown{d}; property string text; property string label; property string color; property bool urgent }}", bp.SERVICES_MAIN)
+            # Typed, not var: a var property notifies on every write, which re-evaluated every binding of the capsule at each beat.
+            self.assertIn(f"property QtObject scCueInfo{d}: null", bp.SERVICES_MAIN)
         self.assertNotIn("onTriggered: root.scCueTick", bp.SERVICES_MAIN)
         self.assertIn("if ((!e.link || !root.scPlayer) && e.master && !at.master) at.wantMaster", bp.SERVICES_MAIN)
 
@@ -1423,6 +1428,10 @@ assert.strictEqual(vfx.enabled, false);
         cap = bp.cue_capsule("", "X", 30, 20)
         self.assertIn('objectName: "EngineX_CueCountdown"', cap)
         self.assertIn("visible: info !== null && root.scCueCountdown", cap)
+        # A capsule of a layout that is not on screen is not bound to the count (it was, and laid its text out again at every beat).
+        self.assertIn("readonly property var info: parent.visible && ", cap)
+        # Stock's one fade (the performance row under the download cover: opacity 0, visible true) hides the row's Loader.
+        self.assertIn("visible: control.opacity !== 0 && (control.deckView.deckData.songLoaded || ", SRC)
         self.assertIn("Style.surface03Color", cap)
         self.assertNotIn("border", cap)
         self.assertEqual(cap.count("{"), cap.count("}"))
@@ -2078,7 +2087,7 @@ class ShadowDisplayTest(unittest.TestCase):
     def js(self, body):
         names = ("scDeckLocked", "scShadowVisible", "scShadowDeckFor", "scShadowData", "scShadowRate", "scShadowPosition",
                  "scShadowBeatIndex", "scShadowBeatAt", "scShadowGrid", "scShadowNextCue", "scShadowCuesFor", "scShadowAsset",
-                 "scShadowProperties", "scShadowTick", "scShadowPost", "scShadowPoll", "scShadowPollIdle", "scShadowDisplayFetch", "scShadowSameSample", "scShadowApplyDisplay", "scShadowCovers", "scShadowBusy", "scShadowApplyAll", "scNextCueInfo", "scNextCueCompute", "scCueProps", "scCueBeatsLeft", "scCueTickFor",
+                 "scShadowProperties", "scShadowTick", "scShadowPost", "scShadowPoll", "scShadowPollIdle", "scShadowDisplayFetch", "scShadowSameSample", "scShadowApplyDisplay", "scShadowCovers", "scShadowBusy", "scShadowApplyAll", "scNextCueInfo", "scNextCueCompute", "scCueProps", "scCueBeatsLeft", "scCueTickFor", "scCueStep", "scCueTableOf", "scCueCount", "scCueWatch",
                  "scShadowApply", "scShadowEmpty", "scShadowScratchLine", "scShadowScratchRelease", "scShadowSpeed", "scShadowCues", "scShadowBeat",
                  "scBrowserVisible", "scShadowLoad", "scShadowWrong", "scShadowHolds", "scShadowEndGap", "scShadowEnd",
                  "scShadowSeek", "scShadowMirror", "scShadowMirrorOff", "scShadowLink", "scShadowLinkEdge", "scPress", "scGcCheck", "scShadowWake", "scShadowAnyPlaying",
@@ -2117,7 +2126,8 @@ Object.assign(globalThis, {
     scShadowPrev: {}, scShadowCueCache: {}, scShadowPostAt: 0, scShadowPollAt: now, scShadowDebug: false,
     scShadowActiveDeck: 0, scPairedOn: false, scPairedEmpty: 0,
     scShadowLead: 0, scShadowPeerLead: 0, scShadowPeerPlaying: false, scShadowMasterAt: 0,
-    scShadowGen: 0, scShadowVer: 0, scShadowIdle: false, scShadowLinePaths: [], scShadowFrame: 17, scCueInfoCache: {}, scCueInfoMemo: {}, scCuePropCache: {},
+    scShadowGen: 0, scShadowVer: 0, scShadowIdle: false, scShadowLinePaths: [], scShadowFrame: 17, scCueInfoCache: {}, scCueInfoMemo: {}, scCuePropCache: {}, scCueTexts: [], scCueProbe: 0, scCueNoBeat: 0,
+    scCueInfo1: null, scCueInfo2: null, scCueInfo3: null, scCueInfo4: null, scCueShown1: {}, scCueShown2: {}, scCueShown3: {}, scCueShown4: {}, scCueTable1: null, scCueTable2: null, scCueTable3: null, scCueTable4: null,
     scTr() { throw Error('Engine access forbidden'); },
     Planck: { getProperty() { throw Error('Engine access forbidden'); } }
 });
@@ -2488,6 +2498,8 @@ for (let i = 1; i <= 8; i++) {
     tr[k + 'Color'] = {color: '#26a6ff'};
 }
 globalThis.scTr = path => tr[path] || null;
+globalThis.scCueCountdown = true;
+Object.defineProperty(globalThis, 'scCueTable1', {get() { return scCueTableOf(1); }, configurable: true}); // the binding, afresh at every read
 const text = () => { scCueInfoCache = {}; const i = scNextCueCompute(1); return i ? i.text : null; };
 const line = () => Math.floor(eng.bpm / 60 * (eng.pos - eng.first));
 // Positions across several beats: the text changes exactly where the playhead crosses a grid line.
@@ -2543,6 +2555,282 @@ assert.equal(text(), Math.floor(15.2 * 128 / 60 / 4) + '.' + ((Math.floor(15.2 *
 eng.pos = 20.25;
 assert.equal(text(), null);
 """)
+
+    def local_beat_countdown(self, body):
+        # Deck 1 is this player's own deck; Engine's deck 1 is a model of a beat grid with one or more tempo segments (segs: from
+        # second, BPM): the tempo at the playhead, the beat in the bar and the bars elapsed are all Engine publishes per deck.
+        # QML re-evaluates the info binding when a property it read changes; the playhead's position is not one of them (it moves
+        # without a notification), so the binding below depends on the beat key and the grid, exactly what the capsule is bound to.
+        self.js(r"""
+const sr = 44100;
+const eng = {pos: 0, first: 0.3, segs: [[0.3, 128]], cue: 40.0, playing: false, cueLed: false, loaded: true, grid: true, bars: 'real', anchorErr: 0};
+function beatAt(t) {
+    if (t < eng.segs[0][0]) return (t - eng.segs[0][0]) * eng.segs[0][1] / 60; // the intro: beats before the first grid beat, negative
+    let b = 0;
+    for (let i = 0; i < eng.segs.length; i++) {
+        const s = eng.segs[i][0], e = i + 1 < eng.segs.length ? eng.segs[i + 1][0] : Infinity;
+        if (t > s) b += (Math.min(t, e) - s) * eng.segs[i][1] / 60;
+    }
+    return b;
+}
+const tempo = () => (eng.segs.filter(x => x[0] <= eng.pos).pop() || eng.segs[0])[1];
+const tr = {
+    '/Engine/Deck1/PlayState': {get state() { return eng.playing; }},
+    '/Engine/Deck1/Track/CueLEDState': {get state() { return eng.cueLed; }},
+    '/Engine/Deck1/Track/SongLoaded': {get state() { return eng.loaded; }},
+    '/Engine/Deck1/Track/TrackLength': {unnormalized: 90 * sr},
+    '/Engine/Deck1/Track/FirstAnchorTempo': {get unnormalized() { return eng.segs[0][1]; }},
+    '/Engine/Deck1/Track/TrackPosition': {get unnormalized() { return eng.pos * sr; }},
+    '/Engine/Deck1/Track/SampleRate': {value: sr},
+    '/Engine/Deck1/Track/FirstDownbeatSamplePosition': {get unnormalized() { return (eng.segs[0][0] + eng.anchorErr) * sr; }},
+    '/Engine/Deck1/OriginalBPM': {get unnormalized() { return tempo(); }},
+    '/Engine/Deck1/BeatNumber': {get unnormalized() { return eng.grid && beatAt(eng.pos) >= 0 ? beatAt(eng.pos) % 4 : -1; }},
+    '/Engine/Deck1/Track/BarsElapsed': {get unnormalized() { return eng.bars === 'missing' ? NaN : eng.bars === 'zero' ? 0 : Math.floor(beatAt(eng.pos) / 4); }},
+};
+for (let i = 1; i <= 8; i++) {
+    const k = '/Engine/Deck1/Track/QuickCue' + i;
+    tr[k + 'Exists'] = {state: i === 1};
+    tr[k + 'Position'] = {get value() { return i === 1 ? eng.cue * sr : 0; }};
+    tr[k + 'Name'] = {string: 'C' + i};
+    tr[k + 'Color'] = {color: '#26a6ff'};
+}
+// The pack's reactive graph as QML runs it. The table is a binding: worked out again when a property it read changes. scCueStep is
+// the handler of Engine's beat counter (BeatNumber), of a new table and, on a deck at rest or without a beat position only, of
+// the playhead; the count runs inside it, so it subscribes to nothing.
+let recording = null;
+const proxied = {};
+for (const [path, o] of Object.entries(tr)) proxied[path] = new Proxy(o, {get(t, k) { if (recording) recording.add(path); return Reflect.get(t, k, t); }});
+globalThis.scTr = path => proxied[path] || null;
+globalThis.scCueCountdown = true;
+let table = null, tableDeps = new Set(), tableSig = null, tables = 0, stepCalls = 0, evaluations = 0, seenBeat, seenPos;
+Object.defineProperty(globalThis, 'scCueTable1', {get() { return table; }, configurable: true});
+const snap = deps => [...deps].sort().map(p => JSON.stringify([tr[p].state, tr[p].value, tr[p].unnormalized, tr[p].string, tr[p].color])).join('|');
+const realCount = scCueCount; scCueCount = (t, o) => { evaluations++; return realCount(t, o); };
+const step = () => { stepCalls++; scCueStep(1); };
+function binding() {
+    if (tableSig === null || snap(tableDeps) !== tableSig) {
+        recording = new Set(); const t = scCueTableOf(1); tableDeps = recording; recording = null;
+        tableSig = snap(tableDeps); tables++;
+        if (t !== table) { table = t; step(); }
+    }
+    if (table) {
+        const beat = tr['/Engine/Deck1/BeatNumber'].unnormalized, pos = tr['/Engine/Deck1/Track/TrackPosition'].unnormalized;
+        if (beat !== seenBeat) { seenBeat = beat; step(); }
+        if (pos !== seenPos) { seenPos = pos; if (scCueWatch(table, scCueNoBeat & 2)) step(); }
+    }
+    return scCueInfo1 ? scCueInfo1.text : null;
+}
+// A count on a table made now, whatever the handlers have seen.
+function fresh() { const i = realCount(scCueTableOf(1)); return i ? i.text : null; }
+// The truth on Engine's grid: the cue counts on its nearest line, beats left = lines between the playhead and it.
+function truth() {
+    const left = Math.max(0, Math.round(beatAt(eng.cue)) - beatAt(eng.pos));
+    return Math.floor(left / 4) + '.' + ((Math.floor(left) % 4) + 1);
+}
+""" + body)
+
+    def test_local_countdown_follows_engines_beat_while_cue_preview_holds_the_deck(self):
+        # CUE held: PlayState is off but the playhead runs. The countdown is on Engine's beat, not on a PlayState-gated clock.
+        self.local_beat_countdown(r"""
+eng.playing = false;
+const seen = new Set(), keys = new Set();
+for (let x = 5.0; x < 12.0; x += 0.01) {
+    eng.pos = x;
+    assert.equal(binding(), truth(), 'at ' + x.toFixed(2) + ' s');
+    seen.add(binding()); keys.add(Math.floor(beatAt(x)));
+}
+assert.ok(seen.size >= 14, 'the countdown stepped ' + seen.size + ' times in 7 s of CUE preview');
+// Computed on beat changes only: once per beat key, not once per position.
+assert.equal(evaluations, keys.size);
+assert.ok(evaluations <= 20, evaluations + ' evaluations for 15 beats');
+// Nothing moves, nothing is evaluated.
+const before = evaluations;
+for (let i = 0; i < 50; i++) binding();
+assert.equal(evaluations, before);
+""")
+
+    def test_local_countdown_counts_a_grid_with_a_tempo_change(self):
+        # Two tempo segments (128, then 140 BPM from 20 s): the playhead and the cue in the second one; scratching back and
+        # forth over the change and a reverse run count on the same beat index.
+        self.local_beat_countdown(r"""
+eng.segs = [[0.3, 128], [20.0, 140]];
+eng.cue = 35.3;
+for (let x = 21.0; x < 34.5; x += 0.01) { eng.pos = x; assert.equal(binding(), truth(), 'forward at ' + x.toFixed(2)); }
+for (let x = 34.5; x > 21.0; x -= 0.01) { eng.pos = x; assert.equal(binding(), truth(), 'reverse at ' + x.toFixed(2)); }
+// One step per Engine beat, whatever the tempo: the text changes exactly where the beat index does.
+let prev = null, prevBeat = null, steps = 0;
+for (let x = 21.0; x < 34.0; x += 0.002) {
+    eng.pos = x;
+    const t = binding(), b = Math.floor(beatAt(x));
+    if (prev !== null) assert.equal(t !== prev, b !== prevBeat, 'at ' + x.toFixed(3));
+    if (prev !== null && t !== prev) steps++;
+    prev = t; prevBeat = b;
+}
+assert.ok(steps >= 28, 'steps ' + steps);
+""")
+
+    def test_local_countdown_follows_a_grid_edit(self):
+        self.local_beat_countdown(r"""
+eng.pos = 10.2;
+assert.equal(binding(), truth());
+eng.segs = [[0.3703, 128]]; // Shift Right by 0.15 beat: every line moves, the playhead stays (the count goes 15.4 -> 16.1)
+assert.equal(binding(), truth(), 'grid shifted under the paused playhead');
+eng.segs = [[0.3703, 64]]; // Halve Tempo
+assert.equal(binding(), truth(), 'tempo halved');
+eng.segs = [[0.3703, 128]]; eng.cue = 41.1; // the cue moved (hot cue edit)
+assert.equal(binding(), truth(), 'cue moved');
+// No grid: Engine reports a beat below 0 and the countdown falls back to the clock (a PlayState-gated 200 ms Timer).
+eng.grid = false; binding();
+assert.equal(scCueNoBeat, 2); // no beat position: the deck's position is watched instead
+assert.equal(binding(), fresh());
+""")
+
+    def test_local_countdown_precomputes_each_cue_beat_once_and_follows_edits_and_reloads(self):
+        self.local_beat_countdown(r"""
+eng.pos = 10.2;
+assert.equal(binding(), truth());
+const first = scCueTable1;
+assert.deepEqual(first.pos, [40.0 * sr]); assert.deepEqual(first.label, ['C1']);
+// Seven seconds of beats: the table is the same object, not worked out again at every beat.
+for (let x = 10.2; x < 17.2; x += 0.01) { eng.pos = x; assert.equal(binding(), truth(), 'at ' + x.toFixed(2)); }
+assert.strictEqual(scCueTable1, first);
+// A cue edit inside the same beat counts at once (the old 50 ms reuse handed the earlier answer back).
+eng.pos = 10.2; binding();
+eng.cue = 41.1;
+assert.equal(binding(), truth(), 'cue edited inside the same beat');
+assert.notStrictEqual(scCueTable1, first);
+const afterEdit = scCueTable1;
+// A jump of whole bars changes the beat key; the count follows.
+eng.pos += 8 * 4 * 60 / 128; assert.equal(binding(), truth(), 'bar jump');
+assert.strictEqual(scCueTable1, afterEdit);
+// The same file loads again, its grid moved meanwhile: the table is dropped on unload and worked out again.
+eng.loaded = false; assert.equal(binding(), null); assert.equal(scCueTable1, null);
+eng.loaded = true; eng.segs = [[0.3703, 128]];
+assert.equal(binding(), truth(), 'reloaded with another grid');
+assert.notStrictEqual(scCueTable1, afterEdit);
+""")
+
+    def test_local_countdown_keeps_moving_through_an_intro_while_cue_is_held(self):
+        # The first grid beat is at 5 s: before it Engine's BeatNumber is below 0 (no beat key). CUE held: PlayState off, CUE lamp on.
+        self.local_beat_countdown(r"""
+eng.segs = [[5.0, 128]]; eng.cue = 20.0; eng.playing = false; eng.cueLed = true;
+binding(); assert.equal(scCueNoBeat, 2);
+const seen = new Set();
+for (let x = 0.5013; x < 4.9; x += 0.05) {
+    eng.pos = x;
+    assert.equal(binding(), truth(), 'intro at ' + x.toFixed(2));
+    seen.add(binding());
+}
+assert.ok(seen.size >= 8, 'the countdown moved ' + seen.size + ' times through the intro');
+// Over the first beat into the grid proper: no jump in the count.
+for (let x = 4.9013; x < 6.5; x += 0.05) { eng.pos = x; assert.equal(binding(), truth(), 'across the first beat at ' + x.toFixed(2)); }
+""")
+
+    def test_local_countdown_with_an_anchor_a_few_hundredths_of_a_beat_off(self):
+        # The count crosses a line where Engine's beat does, whatever the anchor property is off by (it only places the cues).
+        self.local_beat_countdown(r"""
+const beatS = 60 / 128;
+for (const err of [0.02 * beatS, -0.02 * beatS, 0.04 * beatS, -0.04 * beatS]) {
+    eng.anchorErr = err; tableSig = null;
+    eng.cue = 0.3 + 90 * beatS; // on a line
+    for (let x = 0.3 + 40 * beatS - 0.05; x < 0.3 + 44 * beatS; x += 0.002) { eng.pos = x; assert.equal(binding(), truth(), 'anchor off by ' + (err / beatS).toFixed(2) + ' beat at ' + x.toFixed(4)); }
+}
+""")
+
+    def test_local_countdown_whole_bar_jump_without_bars_elapsed(self):
+        # At rest a jump of whole bars leaves BeatNumber exactly where it was (here: the same value, no notification): the playhead tells.
+        for bars in ('missing', 'zero'):
+            self.local_beat_countdown(r"""
+eng.bars = '""" + bars + r"""'; eng.cue = 120.0;
+const bn = tr['/Engine/Deck1/BeatNumber'], frozen = 2.3; Object.defineProperty(bn, 'unnormalized', {get() { return frozen; }});
+eng.first = eng.segs[0][0] = 5.0013 - (16 + frozen) * 60 / 128; // the grid that puts 5.0013 s at beat 2.3 of a bar
+eng.pos = 5.0013; assert.equal(binding(), truth());
+for (const jump of [4, 8, 16, 12]) {
+    eng.pos += jump * 4 * 60 / 128; // whole bars: the beat in the bar is the same
+    assert.equal(binding(), truth(), jump + ' bars');
+}
+eng.pos = 5.0013; assert.equal(binding(), truth(), 'back');
+""")
+
+    def test_local_countdown_cue_edit_while_paused_without_a_beat_position(self):
+        # No beat position (BeatNumber below 0): the fallback clock does not move while paused, and a cue edit has to count at once.
+        self.local_beat_countdown(r"""
+eng.grid = false; eng.playing = false; eng.cueLed = false;
+eng.pos = 10.2; eng.cue = 40.0;
+const before = binding();
+eng.cue = 41.1;
+const edited = fresh();
+assert.notEqual(edited, before);
+assert.equal(binding(), edited, 'the edit inside the 50 ms the old reuse held an answer for');
+eng.cue = 30.0;
+assert.equal(binding(), fresh());
+""")
+
+    def test_local_countdown_evaluates_once_per_beat_not_per_fractional_notification(self):
+        # 20 fractional BeatNumber / position changes inside one beat: the gate is read 20 times, the count evaluated once.
+        self.local_beat_countdown(r"""
+eng.pos = 10.0013; binding();
+const before = evaluations;
+for (let i = 1; i <= 20; i++) { eng.pos = 10.0013 + i * 0.0005; binding(); }
+assert.equal(evaluations, before, 'evaluations inside one beat');
+eng.pos += 0.4; binding();
+assert.equal(evaluations, before + 1, 'the next beat');
+""")
+
+    def test_local_countdown_follows_a_seek_past_a_cue_inside_the_same_beat(self):
+        # Paused, the playhead is moved within one beat across a hot cue (and back): Engine's beat is the same, the next cue is not.
+        self.local_beat_countdown(r"""
+const beatS = 60 / 128;
+tr['/Engine/Deck1/Track/QuickCue2Exists'] = proxied['/Engine/Deck1/Track/QuickCue2Exists'] = {state: true};
+tr['/Engine/Deck1/Track/QuickCue2Position'] = proxied['/Engine/Deck1/Track/QuickCue2Position'] = {value: (0.3 + 80 * beatS) * sr};
+tr['/Engine/Deck1/Track/QuickCue2Name'] = proxied['/Engine/Deck1/Track/QuickCue2Name'] = {string: 'LATER'};
+eng.cue = 0.3 + 42.45 * beatS; // between two lines
+eng.pos = 0.3 + 42.1 * beatS; binding();
+assert.equal(scCueInfo1.label, 'C1');
+eng.pos = 0.3 + 42.6 * beatS; binding(); // past the cue, still in beat 42
+assert.equal(scCueInfo1.label, 'LATER'); assert.equal(binding(), fresh());
+eng.pos = 0.3 + 42.1 * beatS; binding(); // and back before it
+assert.equal(scCueInfo1.label, 'C1'); assert.equal(binding(), fresh());
+// A deck resting on a line counts one beat more than one just past it (a jump to a cue, a quantized stop).
+eng.cue = 0.3 + 60 * beatS;
+eng.pos = 0.3 + 43.2 * beatS; assert.equal(binding(), '4.1'); // 16.8 beats: 17 lines ahead of beat 43, 0.2 into it
+eng.pos = 0.3 + 43 * beatS; assert.equal(binding(), '4.2', 'back onto the line of the same beat');
+""")
+
+    def test_local_countdown_costs_one_count_per_beat_and_nothing_when_idle(self):
+        # Engine notifies BeatNumber and TrackPosition about 6 times a second each on a JP07 (measured in the eglfs sandbox) and can
+        # do so far more often: the count must run once per beat whatever the rate, and never from the playhead's notifications.
+        self.local_beat_countdown(r"""
+eng.playing = true; eng.pos = 10.0013; binding();
+// One display object per deck: a new count writes its text into it, so the views' bindings on the object itself are left alone.
+const shownObject = scCueInfo1, shownText = shownObject.text;
+eng.pos = 12.0013; binding();
+assert.strictEqual(scCueInfo1, shownObject); assert.strictEqual(scCueInfo1, scCueShown1); assert.notEqual(shownObject.text, shownText);
+eng.pos = 10.0013; binding();
+const before = evaluations, stepsBefore = stepCalls, tablesBefore = tables;
+let beats = new Set();
+for (let x = 10.0013; x < 40.0; x += 0.002) { eng.pos = x; binding(); beats.add(Math.floor(beatAt(x))); } // 30 s at 500 notifications a second
+assert.equal(stepCalls - stepsBefore, 14999, 'one step per beat notification, none from the playhead of a playing deck');
+assert.ok(evaluations - before <= beats.size + 2, (evaluations - before) + ' counts for ' + beats.size + ' beats'); // + the cue's two edges
+assert.equal(tables, tablesBefore, 'the table is not worked out again while the track plays');
+assert.ok(!tableDeps.has('/Engine/Deck1/Track/TrackPosition') && !tableDeps.has('/Engine/Deck1/BeatNumber'), 'no binding on the playhead or the fractional beat');
+// Past the last hot cue: the step still returns at once, and nothing is shown.
+eng.pos = 45.0; assert.equal(binding(), null);
+// No hot cue, no track, or the switch off: no table, so no handler is connected and no step runs at all.
+for (const off of [() => { tr['/Engine/Deck1/Track/QuickCue1Exists'].state = false; }, () => { tr['/Engine/Deck1/Track/QuickCue1Exists'].state = true; eng.loaded = false; },
+                   () => { eng.loaded = true; scCueCountdown = false; tableSig = null; }]) {
+    off(); binding();
+    assert.equal(scCueTable1, null); assert.equal(scCueInfo1, null); assert.equal(scCueNoBeat, 0);
+    const quiet = stepCalls + '/' + evaluations;
+    for (let x = 5.0; x < 9.0; x += 0.01) { eng.pos = x; assert.equal(binding(), null); }
+    assert.equal(stepCalls + '/' + evaluations, quiet);
+}
+""")
+        # No Timer of its own, and the two Engine properties that read undefined on 5.3.0 are not used.
+        cue = bp.SERVICES_MAIN[bp.SERVICES_MAIN.index("// #151: CDJ-style BARS.BEATS countdown"):bp.SERVICES_MAIN.index("property var scShadowCueCache")]
+        self.assertNotIn("Timer {", cue)
+        self.assertNotIn("FirstDownbeatSamplePosition\")", cue)
+        self.assertNotIn("TrackPosition\")).unnormalized", cue)
 
     def test_live_cues_change_on_same_key_using_source_sample_rate(self):
         self.js(r"""
