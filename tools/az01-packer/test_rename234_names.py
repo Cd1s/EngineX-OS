@@ -10,7 +10,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 ALLOW = json.loads((Path(__file__).with_name('rename234_allowlist.json')).read_text())
 OLD = 'sc' + '5000'
-MODEL = re.compile(r'(?<![A-Za-z_])SC' + r'5000M?(?![A-Za-z_0-9])')  # Denon hardware and official image prefixes.
+MODEL = re.compile(r'(?<![A-Za-z_])SC' + r'5000M?s?(?![A-Za-z_0-9])')  # Denon hardware and official image prefixes.
 
 
 def findings(repo, paths=None):
@@ -45,7 +45,7 @@ class Rename234NamesTest(unittest.TestCase):
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            files = {'guide.md': 'Denon SC5000 and SC5000M\n' + OLD + '.lan\n',
+            files = {'guide.md': 'Denon SC5000, SC5000M and SC5000s\n' + OLD + '.lan\n',
                      'pkg/x_test.go': '// ' + OLD + '-suite\n',
                      OLD + '-tool': 'EngineX\n',
                      'docs/ISSUE-FIXES-5.3.0.4.md': OLD + '\n',
