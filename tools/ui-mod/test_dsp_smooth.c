@@ -955,6 +955,62 @@ static void test_pioneer_fx(void)
     }
 }
 
+static void test_hifi_output(void)
+{
+    struct sc_hifi h = {0};
+    float l[4096], r[4096];
+
+    /* Bypassed by default: bit-exact passthrough */
+    for (int i = 0; i < 256; i++) l[i] = r[i] = 0.25f * sinf(0.4f * (float)i);
+    CHECK(sc_hifi_planar(&h, l, r, 256, 0) == 0);
+    for (int i = 0; i < 256; i++)
+        CHECK(l[i] == r[i]);
+
+    /* Verify passband inverse fit against 48->96 kHz Catmull-Rom Hermite {0, 0.5} */
+    const double freqs[] = {1000.0, 10000.0, 14000.0, 16000.0, 18000.0, 20000.0};
+    for (size_t k = 0; k < sizeof freqs / sizeof *freqs; k++) {
+        memset(&h, 0, sizeof h);
+        h.mix = 1.0f;
+        double f = freqs[k], w48 = 2.0 * M_PI * f / 48000.0, w96 = 2.0 * M_PI * f / 96000.0;
+        for (int i = 0; i < 4096; i++) {
+            l[i] = 0.25f * sinf((float)(w48 * i));
+            r[i] = l[i];
+        }
+        CHECK(sc_hifi_planar(&h, l, r, 4096, 1) == 1);
+        double re = 0.0, im = 0.0;
+        const int n0 = 1024, cnt = 2048;
+        for (int i = n0; i < n0 + cnt; i++) {
+            double y0 = l[i];
+            double y1 = -0.0625 * l[i - 1] + 0.5625 * l[i] + 0.5625 * l[i + 1] - 0.0625 * l[i + 2];
+            int k0 = 2 * (i - n0);
+            re += y0 * cos(w96 * k0) + y1 * cos(w96 * (k0 + 1));
+            im -= y0 * sin(w96 * k0) + y1 * sin(w96 * (k0 + 1));
+        }
+        double amp = hypot(re, im) / (double)cnt; /* 2*cnt samples at 96k of amplitude 0.25 -> amp ~ 0.25 */
+        double db = 20.0 * log10(amp / 0.25);
+        CHECK(fabs(db) < 0.025);
+        CHECK(db <= 0.01);
+    }
+
+    /* Nyquist roll-back: 24 kHz alternating sign has ~0 dB gain (does not boost ultrasonic fold) */
+    memset(&h, 0, sizeof h);
+    h.mix = 1.0f;
+    for (int i = 0; i < 1024; i++) l[i] = (i & 1) ? -0.25f : 0.25f;
+    sc_hifi_planar(&h, l, NULL, 1024, 1);
+    CHECK(fabsf(fabsf(l[1023]) - 0.25f) < 0.002f);
+
+    /* Click-free 480-frame linear fade-in and fade-out + NaN resilience */
+    memset(&h, 0, sizeof h);
+    for (int i = 0; i < 600; i++) l[i] = r[i] = 0.3f * sinf(2.0f * (float)M_PI * 18000.0f * (float)i / 48000.0f);
+    sc_hifi_planar(&h, l, r, 600, 1);
+    CHECK(h.mix == 1.0f);
+    for (int i = 1; i < 600; i++) CHECK(fabsf(l[i] - l[i - 1]) < 0.9f);
+    l[0] = NAN; r[0] = INFINITY;
+    sc_hifi_planar(&h, l, r, 600, 0);
+    CHECK(h.mix == 0.0f);
+    for (int i = 0; i < 600; i++) CHECK(isfinite(l[i]) && isfinite(r[i]));
+}
+
 int main(void)
 {
     test_finite();
@@ -969,6 +1025,7 @@ int main(void)
     test_flanger_threads();
     test_master_limiter();
     test_auto_gain();
+    test_hifi_output();
     test_echo_out();
     test_pioneer_fx();
     test_slip_roll_seam();

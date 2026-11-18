@@ -143,9 +143,10 @@ root.scMidiInitBridge = () => {{}};
 root.scHookTimeZonePicker = () => {{}};
 root.scProbeCueClocks = () => {{}};
 root.scT = s => s;
+root.scOff = name => root.scFeaturesOff.indexOf(name) >= 0;
 Object.assign(root, {{
-    scPlayer: false, scUiLoaded: false, scFxMsWanted: -1,
-    scMasterLimiter: false, scAutoGain: false, scUpfaderEcho: false,
+    scPlayer: false, scUiLoaded: false, scFxMsWanted: -1, scFeaturesOff: [],
+    scMasterLimiter: false, scAutoGain: false, scHifiOutput: false, scUpfaderEcho: false,
     scStemsEqApplied: false, scStemsEqWatched: false, scBeatJumpPads: false,
     scPioneerFx: 'off', scFxTimeMode: 'beats', scFxTimeMs: 500,
     scFxSelectorAvailable: false, scFxMasterBypassed: false, scColorFxAvailable: false,
@@ -209,6 +210,11 @@ for (const board of ['JP07', 'JP08', 'JP13', 'JP14']) {{
     }});
     assert.equal(visible['Master Soft Clipper'](), true, board);
     assert.equal(visible['Auto-Gain (0 dB Normalize)'](), true, board);
+    assert.equal(visible['Hi-Fi Output'](), true, board + ' Hi-Fi Output shown');
+    scFeaturesOff = ['hifi-output'];
+    assert.equal(visible['Hi-Fi Output'](), false, board + ' Hi-Fi Output hidden when hifi-output off');
+    assert.equal(visible['Master Soft Clipper'](), true, board + ' Master Soft Clipper stays shown');
+    scFeaturesOff = [];
     assert.equal(visible['Echo Out'](), false, board + ' Echo Out hidden');
     assert.equal(visible['Stems EQ Mode'](), false, board + ' Stems EQ hidden');
     assert.equal(visible['Color FX Style'](), false, board + ' Color FX Style hidden (players have no filter knob; no hook marker)');
@@ -256,6 +262,7 @@ for (const [board, hasStems, colorFx] of [['JC16', true, true], ['JP11', true, t
         pioneerFx: 'off', fxTimeMode: 'ms', fxTimeMs: 364,
     }});
     assert.equal(visible['Echo Out'](), true, board + ' Echo Out shown');
+    assert.equal(visible['Hi-Fi Output'](), false, board + ' Hi-Fi Output hidden on consoles');
     assert.equal(transitionFx.enabled, true, board + ' Echo Out active');
     assert.equal(visible['Stems EQ Mode'](), hasStems, board + ' Stems EQ gate');
     for (let ch = 1; ch <= 4; ch++) assert.equal(stripModes[ch].index, hasStems ? 1 : 0, board + ' Stems EQ state');
@@ -391,9 +398,10 @@ root.scMidiInitBridge = () => {{}};
 root.scHookTimeZonePicker = () => {{}};
 root.scProbeCueClocks = () => {{}};
 root.scT = s => s;
+root.scOff = name => root.scFeaturesOff.indexOf(name) >= 0;
 Object.assign(root, {{
-    scPlayer: false, scUiLoaded: false, scFxMsWanted: -1,
-    scMasterLimiter: false, scAutoGain: false, scUpfaderEcho: false,
+    scPlayer: false, scUiLoaded: false, scFxMsWanted: -1, scFeaturesOff: [],
+    scMasterLimiter: false, scAutoGain: false, scHifiOutput: false, scUpfaderEcho: false,
     scStemsEqApplied: false, scStemsEqWatched: false, scBeatJumpPads: false,
     scPioneerFx: 'off', scFxTimeMode: 'beats', scFxTimeMs: 500,
     scFxSelectorAvailable: false, scFxMasterBypassed: false, scColorFxAvailable: false,

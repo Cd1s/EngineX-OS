@@ -11227,6 +11227,18 @@ assert.deepEqual(writes, ['2:0.5']); assert.equal(armed, 0);
         for lang in ("zh-Hans", "zh-Hant", "es"):
             self.assertTrue(row.get(lang), lang)
 
+    def test_hifi_output_menu_player_only_and_i18n(self):
+        main = bp.SERVICES_MAIN
+        self.assertIn("property bool scHifiOutput: false", main)
+        self.assertIn("scHifiOutput = !!v.hifiOutput", main)
+        self.assertIn("root.scHifiOutput = false", main)
+        self.assertIn('text: "Hi-Fi Output"', bp.PLAYBACK_ENTRIES)
+        self.assertIn('visible: root.scIsPlayerBoard && !root.scOff("dsp-guards") && !root.scOff("hifi-output")', bp.PLAYBACK_ENTRIES)
+        self.assertIn('root.scCall("hifiOutput=" + (root.scHifiOutput ? 0 : 1))', bp.PLAYBACK_ENTRIES)
+        row = bp.load_dict()["Hi-Fi Output"]
+        for lang in ("zh-Hans", "zh-Hant", "es"):
+            self.assertTrue(row.get(lang), lang)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -57,6 +57,7 @@ static float samples[PAIRS][2][MAX_FRAMES], dry[2][MAX_FRAMES];
 static struct sc_echo echo[PAIRS];
 static struct sc_master_pioneer_fx master[PAIRS];
 static struct sc_pfx_ms timing[PAIRS];
+static struct sc_hifi hifi[PAIRS];
 static struct sc_gain gain[PAIRS];
 static struct sc_lim limiter[PAIRS];
 static struct sc_pfx_instance selector;
@@ -104,6 +105,7 @@ static void master_block(unsigned frames, int mode, unsigned ms)
         } else {
             sc_master_pioneer_fx_planar(&master[p], l, r, frames, mode);
         }
+        sc_hifi_planar(&hifi[p], l, r, frames, 1);
         sc_gain_planar(&gain[p], l, r, frames);
         sc_lim_planar(&limiter[p], l, r, frames);
     }
@@ -116,7 +118,7 @@ int main(void)
     unsigned failures = 0;
     resident(samples, sizeof samples); resident(dry, sizeof dry);
     resident(echo, sizeof echo); resident(master, sizeof master);
-    resident(timing, sizeof timing); resident(gain, sizeof gain);
+    resident(timing, sizeof timing); resident(hifi, sizeof hifi); resident(gain, sizeof gain);
     resident(limiter, sizeof limiter); resident(&selector, sizeof selector);
     resident(&tap, sizeof tap);
     /* Worker preparation stays outside the measured audio blocks. */
