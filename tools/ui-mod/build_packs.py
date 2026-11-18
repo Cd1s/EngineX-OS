@@ -8559,6 +8559,8 @@ def edits(dev: bool):
             ]
         mini = bj + "DeckTrackData/GroupedMiniDeckTrackDataContent.qml"
         scaled[mini] += [
+            # #288: stock hides the artist once a track loads; keep ArtistSong's stock two-line default (as SplitMini).
+            ("                    artistVisible: !deckTrackDataContent.songLoaded\n", ""),
             ("                SoftTakeoverIndicators {\n", cue_capsule("                ", "deckTrackDataContent.deckIndex", 22, 16, compact=True, lead_sep=False, fill_width=True) + "\n                SoftTakeoverIndicators {\n                    iconWidth: 14\n                    iconHeight: 10\n                    flow: Flow.LeftToRight\n                    spacing: -4\n"),
             ("                spacing: 16\n                visible: deckTrackDataContent.songLoaded\n", "                spacing: 2\n                visible: deckTrackDataContent.songLoaded\n"),
             ("                    Layout.alignment: Qt.AlignLeft\n                    Layout.preferredWidth: 72\n", "                    Layout.fillWidth: false\n                    Layout.alignment: Qt.AlignLeft\n                    Layout.preferredWidth: 52\n"),

@@ -3726,6 +3726,28 @@ class DeckHeaderLayoutTest(unittest.TestCase):
         mini_cue = next(new for _, new in edits[mini_rel] if "EngineX_CueCountdown" in new)
         self.assertIn("Layout.fillWidth: true", mini_cue)
 
+    def test_grouped_mini_header_keeps_artist_line_288(self):
+        qrc = LAB / "5.3.0" / "qrc"
+        if not qrc.is_dir():
+            self.skipTest(f"{qrc} not found (run on the build host)")
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            edits = bp.edits(False)
+        finally:
+            bp.ROOT = old_root
+        composite = "Skins/EngineOS/UI/CompositeControls/DeckTrackData/"
+        artist_pat = r"(?m)^ +ArtistSong \{.*?^ +\}"
+        split = re.search(artist_pat, (qrc / (composite + "SplitMiniDeckTrackDataContent.qml")).read_text(), re.S).group()
+        self.assertNotIn("artistVisible", split)  # the stock 4-deck header the fix reuses
+        rel = composite + "GroupedMiniDeckTrackDataContent.qml"
+        text = (qrc / rel).read_text()
+        for old, new in edits[rel]:
+            text = bp.patch(text, old, new, rel)
+        grouped = re.search(artist_pat, text, re.S).group()
+        self.assertNotIn("artistVisible", grouped)
+        self.assertIn("deckLoaded: deckTrackDataContent.songLoaded", grouped)
+
     def test_autoloop_beatjump_and_speedinfo_preserve_safe_widths(self):
         old_root = bp.ROOT
         try:
