@@ -310,8 +310,8 @@ func TestRekordboxAnalysisOfAnotherBuildIsDropped(t *testing.T) {
 		}
 		DropStaleRekordboxAnalysis(start.build)
 		for _, name := range cached {
-			if kept(name) != start.keep {
-				t.Fatalf("start of build %q: %s kept=%t, want %t", start.build, name, !start.keep, start.keep)
+			if got := kept(name); got != start.keep {
+				t.Fatalf("start of build %q: %s kept=%t, want %t", start.build, name, got, start.keep)
 			}
 		}
 		if !kept("rowmap") {
