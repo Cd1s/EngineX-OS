@@ -476,74 +476,76 @@ static void fx_selector_poll(void) {
 #endif
 }
 
+static void lim_poll_once(void) {
+    fx_selector_poll();
+    cfx_poll();
+    static struct stat previous;
+    static int had_settings;
+    struct stat st;
+    int have_settings = stat(four_deck_settings, &st) == 0;
+    // Preserve the 80 ms control poll; replacements count even with preserved mtime.
+    if (have_settings && had_settings && previous.st_dev == st.st_dev &&
+        previous.st_ino == st.st_ino && previous.st_size == st.st_size &&
+        previous.st_mtim.tv_sec == st.st_mtim.tv_sec && previous.st_mtim.tv_nsec == st.st_mtim.tv_nsec &&
+        previous.st_ctim.tv_sec == st.st_ctim.tv_sec && previous.st_ctim.tv_nsec == st.st_ctim.tv_nsec)
+        return;
+    had_settings = have_settings;
+    if (have_settings) previous = st;
+    int on = 0, gain = 0, hifi = 0, echo = 0, led = 100, btout = 0;
+    A32_ONLY int style = 0;
+    struct sc_ms_config timing = {500, 0};
+    FILE *f = fopen(four_deck_settings, "r");
+    if (f) {
+        char *line = NULL;
+        size_t capacity = 0;
+        while (getline(&line, &capacity, f) >= 0) {
+            if (sc_ms_setting(&timing, line)) continue;
+            if (!strncmp(line, "master_limiter=1", 16)) on = 1;
+            else if (!strncmp(line, "auto_gain=1", 11)) gain = 1;
+            else if (!strncmp(line, "hifi_output=1", 13)) hifi = 1;
+            else if (!strncmp(line, "upfader_echo=1", 14)) echo = 1;
+            else if (!strncmp(line, "bt_out=", 7)) {
+                int n = atoi(line + 7);
+                btout = n > 0 ? n : 0;
+            }
+            else if (!strncmp(line, "led_brightness=", 15)) {
+                int n = atoi(line + 15);
+                if (n >= 10 && n <= 100) led = n;
+            }
+#if !defined(__aarch64__)
+            else if (!strncmp(line, "pioneer_fx=", 11)) style = sc_pioneer_fx_parse(line + 11);
+#endif
+        }
+        free(line);
+        fclose(f);
+    }
+    if (timing.enabled) {
+        for (unsigned pair = 0; pair < 4; ++pair) sc_ms_prepare(&master_ms[pair]);
+#if !defined(__aarch64__)
+        if (fx_selector_supported) for (unsigned i = 0; i < SC_PFX_UNITS; ++i)
+            sc_ms_prepare(&sc_pfx_routes[i].dsp.ms);
+#endif
+    }
+    int player_bypass = player_board();
+    __atomic_store_n(&echo_player_bypass, player_bypass, __ATOMIC_RELAXED);
+    __atomic_store_n(&lim_enabled, on, __ATOMIC_RELAXED);
+    __atomic_store_n(&gain_enabled, gain, __ATOMIC_RELAXED);
+    __atomic_store_n(&hifi_enabled, (player_bypass && hf_on(HF_HIFI_OUTPUT)) ? hifi : 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&bt_out_pair, btout, __ATOMIC_RELAXED);
+    __atomic_store_n(&echo_enabled, player_bypass ? 0 : echo, __ATOMIC_RELAXED);
+    __atomic_store_n(&pfx_time_ms, timing.enabled ? timing.ms : 0, __ATOMIC_RELEASE);
+#if !defined(__aarch64__)
+    __atomic_store_n(&cfx_style, player_bypass ? 0 : style, __ATOMIC_RELAXED); /* never the master output */
+#endif
+    if (led != __atomic_load_n(&led_pct, __ATOMIC_RELAXED)) led_replay(led);
+}
+
 static void *lim_poll(void *arg) {
     (void)arg;
     struct timespec resolve; // bind clock_gettime here: its first call takes the loader lock, which the audio thread must not
     clock_gettime(CLOCK_MONOTONIC, &resolve);
     for (;;) {
-        fx_selector_poll();
-        cfx_poll();
-        static struct stat previous;
-        static int had_settings;
-        struct stat st;
-        int have_settings = stat(four_deck_settings, &st) == 0;
-        // Preserve the 80 ms control poll; replacements count even with preserved mtime.
-        if (have_settings && had_settings && previous.st_dev == st.st_dev &&
-            previous.st_ino == st.st_ino && previous.st_size == st.st_size &&
-            previous.st_mtim.tv_sec == st.st_mtim.tv_sec && previous.st_mtim.tv_nsec == st.st_mtim.tv_nsec &&
-            previous.st_ctim.tv_sec == st.st_ctim.tv_sec && previous.st_ctim.tv_nsec == st.st_ctim.tv_nsec) {
-            usleep(80000);
-            continue;
-        }
-        had_settings = have_settings;
-        if (have_settings) previous = st;
-        int on = 0, gain = 0, hifi = 0, echo = 0, led = 100, btout = 0;
-        A32_ONLY int style = 0;
-        struct sc_ms_config timing = {500, 0};
-        FILE *f = fopen(four_deck_settings, "r");
-        if (f) {
-            char *line = NULL;
-            size_t capacity = 0;
-            while (getline(&line, &capacity, f) >= 0) {
-                if (sc_ms_setting(&timing, line)) continue;
-                if (!strncmp(line, "master_limiter=1", 16)) on = 1;
-                else if (!strncmp(line, "auto_gain=1", 11)) gain = 1;
-                else if (!strncmp(line, "hifi_output=1", 13)) hifi = 1;
-                else if (!strncmp(line, "upfader_echo=1", 14)) echo = 1;
-                else if (!strncmp(line, "bt_out=", 7)) {
-                    int n = atoi(line + 7);
-                    btout = n > 0 ? n : 0;
-                }
-                else if (!strncmp(line, "led_brightness=", 15)) {
-                    int n = atoi(line + 15);
-                    if (n >= 10 && n <= 100) led = n;
-                }
-#if !defined(__aarch64__)
-                else if (!strncmp(line, "pioneer_fx=", 11)) style = sc_pioneer_fx_parse(line + 11);
-#endif
-            }
-            free(line);
-            fclose(f);
-        }
-        if (timing.enabled) {
-            for (unsigned pair = 0; pair < 4; ++pair) sc_ms_prepare(&master_ms[pair]);
-#if !defined(__aarch64__)
-            if (fx_selector_supported) for (unsigned i = 0; i < SC_PFX_UNITS; ++i)
-                sc_ms_prepare(&sc_pfx_routes[i].dsp.ms);
-#endif
-        }
-        int player_bypass = player_board();
-        __atomic_store_n(&echo_player_bypass, player_bypass, __ATOMIC_RELAXED);
-        __atomic_store_n(&lim_enabled, on, __ATOMIC_RELAXED);
-        __atomic_store_n(&gain_enabled, gain, __ATOMIC_RELAXED);
-        __atomic_store_n(&hifi_enabled, (player_bypass && hf_on(HF_HIFI_OUTPUT)) ? hifi : 0, __ATOMIC_RELAXED);
-        __atomic_store_n(&bt_out_pair, btout, __ATOMIC_RELAXED);
-        __atomic_store_n(&echo_enabled, player_bypass ? 0 : echo, __ATOMIC_RELAXED);
-        __atomic_store_n(&pfx_time_ms, timing.enabled ? timing.ms : 0, __ATOMIC_RELEASE);
-#if !defined(__aarch64__)
-        __atomic_store_n(&cfx_style, player_bypass ? 0 : style, __ATOMIC_RELAXED); /* never the master output */
-#endif
-        if (led != __atomic_load_n(&led_pct, __ATOMIC_RELAXED)) led_replay(led);
+        lim_poll_once();
         usleep(80000);
     }
     return NULL;
@@ -1359,7 +1361,7 @@ static uint32_t hook_master_output(void *host, void *context, int in_channels, c
         }
     }
     // #172 Hi-Fi output compensation (Gen-1 players only; 10 ms dry/wet fade on toggle).
-    int hifi = hf_on(HF_HIFI_OUTPUT) ? __atomic_load_n(&hifi_enabled, __ATOMIC_RELAXED) : 0;
+    int hifi = __atomic_load_n(&hifi_enabled, __ATOMIC_RELAXED);
     if (out && frames > 0)
         for (int ch = 0; ch < out_channels && ch < 16; ch += 2)
             if (out[ch]) sc_hifi_planar(&master_hifi[ch / 2], out[ch], ch + 1 < out_channels ? out[ch + 1] : NULL, (unsigned)frames, hifi);
