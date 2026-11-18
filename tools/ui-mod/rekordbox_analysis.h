@@ -76,9 +76,11 @@ static char *sc_rbx_analysis_sql(const unsigned char *b, size_t n, long long tra
         for (size_t k = 0; k < len[i]; k++) p += sprintf(p, "%02x", b[start[i] + k]);
         *p++ = '\'';
     }
-    // Match rb-bridge: the incoming grid is a rekordbox import, even though the
-    // audio is streamed. Leave the user's beat-grid lock as Engine created it.
-    sprintf(p, ", thirdPartySourceId = 1 WHERE trackId = %lld AND trackData IS NULL; UPDATE Track SET isAnalyzed = %d WHERE id = %lld AND changes() > 0", track, analysed, track);
+    // No import mark (thirdPartySourceId): Engine shifts a marked row's grid, cues and
+    // loops by its own rekordbox correction when it loads the audio (an MP3 by 2292
+    // samples), and ours is in the data already. Leave the user's beat-grid lock as
+    // Engine created it.
+    sprintf(p, " WHERE trackId = %lld AND trackData IS NULL; UPDATE Track SET isAnalyzed = %d WHERE id = %lld AND changes() > 0", track, analysed, track);
     return sql;
 }
 
@@ -555,7 +557,7 @@ static const char *sc_rbx_fill_track(const struct sc_rbx_sqlite *q, void *db, lo
     const char *main = q->filename(db, "main");
     if (main && !strncmp(main, sc_rbx_drives, strlen(sc_rbx_drives))) return sc_rbx_verbose ? "skipped (a drive's database)" : NULL;
     struct sc_rbx_row row = {.ours = 0};
-    snprintf(query, sizeof query, "SELECT t.uri,t.label,t.path,CASE WHEN p.trackData IS NOT NULL THEN coalesce(p.thirdPartySourceId,-1) END FROM Track t JOIN PerformanceData p ON p.trackId=t.id WHERE t.id=%lld AND (p.trackData IS NULL OR p.thirdPartySourceId=1 OR (p.thirdPartySourceId IS NULL AND t.uri LIKE 'streaming://TIDAL/Track/%%'))", track);
+    snprintf(query, sizeof query, "SELECT t.uri,t.label,t.path,CASE WHEN p.trackData IS NOT NULL THEN coalesce(p.thirdPartySourceId,-1) END FROM Track t JOIN PerformanceData p ON p.trackId=t.id WHERE t.id=%lld AND (p.trackData IS NULL OR p.thirdPartySourceId=1 OR p.thirdPartySourceId IS NULL)", track);
     if (q->exec(db, query, sc_rbx_row, &row, NULL)) return sc_rbx_verbose ? "skipped (not a rekordbox row)" : NULL;
     long long cover_id = row.streaming ? sc_rbx_uri_id(row.uri) : 0;
     if (cover_id) sc_rbx_apply_cover(q, db, track, cover_id);

@@ -95,7 +95,7 @@ int main(void) {
 
     const unsigned char file[] = "RBXA1" "\2\0\0\0" "\x01\xab" "\0\0\0\0" "\1\0\0\0" "\xff" "\0\0\0\0" "\0\0\0\0";
     char *sql = sc_rbx_analysis_sql(file, sizeof file - 1, 9);
-    assert(sql && !strcmp(sql, "UPDATE PerformanceData SET trackData = X'01ab', overviewWaveFormData = NULL, beatData = X'ff', quickCues = NULL, loops = NULL, thirdPartySourceId = 1 WHERE trackId = 9 AND trackData IS NULL; "
+    assert(sql && !strcmp(sql, "UPDATE PerformanceData SET trackData = X'01ab', overviewWaveFormData = NULL, beatData = X'ff', quickCues = NULL, loops = NULL WHERE trackId = 9 AND trackData IS NULL; "
                               "UPDATE Track SET isAnalyzed = 1 WHERE id = 9 AND changes() > 0"));
     free(sql);
     unsigned char with_flag[sizeof file];
@@ -174,7 +174,9 @@ int main(void) {
     assert(result && !strcmp(result, "filled") && filled(engine));
     sqlite3_stmt *source;
     assert(sqlite3_prepare_v2(engine, "SELECT thirdPartySourceId FROM stm.PerformanceData WHERE trackId = 16449", -1, &source, NULL) == SQLITE_OK);
-    assert(sqlite3_step(source) == SQLITE_ROW && sqlite3_column_int(source, 0) == 1);
+    // No import mark: Engine moves the grid, cues and loops of a marked row by its own
+    // rekordbox correction when it loads the audio (an MP3 by 2292 samples), on top of ours.
+    assert(sqlite3_step(source) == SQLITE_ROW && sqlite3_column_type(source, 0) == SQLITE_NULL);
     sqlite3_finalize(source);
     statements = 0;
     assert(!load_bound(engine) && statements == 1 && filled(engine));
@@ -326,6 +328,14 @@ int main(void) {
     statements = 0;
     assert(!load_bound(real) && statements == 1);
     check_edits(real, "99/22");
+    // An unmarked row of another library whose id is in the map (a file there, its own
+    // analysis): a newer source generation writes nothing into it.
+    assert(sqlite3_exec(real, "UPDATE stm.Track SET uri='file:///data/music/other.mp3', label='Other'", NULL, NULL, NULL) == SQLITE_OK);
+    assert(sqlite3_exec(real, "UPDATE stm.PerformanceData SET beatData=X'AA', quickCues=X'BB'", NULL, NULL, NULL) == SQLITE_OK);
+    f = fopen(path, "wb");
+    assert(f && fwrite(edit1, 1, sizeof edit1 - 1, f) == sizeof edit1 - 1 && !fclose(f));
+    load_bound(real);
+    check_edits(real, "AA/BB");
     sqlite3_close(real);
     // The reload block above left 66/77 as the last import; put that back for the checks below.
     f = fopen(path, "wb");
