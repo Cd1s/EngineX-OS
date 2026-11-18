@@ -147,6 +147,8 @@ type deckState struct {
 	DisplayDetail bool `json:"displayDetail,omitempty"`
 	// rbx: a track from the rekordbox source, as our player's status reports it.
 	rbx prolink.ExportDeck
+	// rbxAnalysis: that track's analysis as the rekordbox load left it for Engine here.
+	rbxAnalysis string
 }
 
 // shadowCue is one hot cue (I 1..8); the receiver checks it before use.
@@ -601,6 +603,9 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 		}
 		if s.tidal != nil {
 			if ip, id, ok := s.tidal.rekordboxLoaded(np); ok {
+				if gid, err := strconv.ParseInt(filepath.Base(np), 10, 64); err == nil {
+					d.rbxAnalysis = rbxAnalysisPath(gid)
+				}
 				for _, dev := range s.mergedDevices() {
 					if dev.Address == ip && prolink.IsRekordbox(dev) {
 						d.rbx = prolink.ExportDeck{Source: dev.Number, Slot: 4, Type: 1, Track: id}
@@ -1211,15 +1216,20 @@ func (s *Server) peerDecksGet(w http.ResponseWriter, r *http.Request) {
 
 // ownDeckFile is the file on this player's deck {n} if ?key= still names it.
 func (s *Server) ownDeckFile(r *http.Request) string {
+	d, _ := s.ownDeck(r)
+	return d.Path
+}
+
+func (s *Server) ownDeck(r *http.Request) (deckState, bool) {
 	n, _ := strconv.Atoi(r.PathValue("n"))
 	s.shadow.mu.Lock()
 	defer s.shadow.mu.Unlock()
 	for _, d := range s.shadow.own {
 		if d.Deck == n && d.Key != "" && d.Key == r.URL.Query().Get("key") {
-			return d.Path
+			return d, true
 		}
 	}
-	return ""
+	return deckState{}, false
 }
 
 func (s *Server) peerAudioGet(w http.ResponseWriter, r *http.Request) {
@@ -1244,18 +1254,41 @@ func (s *Server) peerAudioGet(w http.ResponseWriter, r *http.Request) {
 // peerPerfGet serves the current deck's analysis as EXPF (#49) or as the
 // original compressed blobs for a peer that can fill its shadow row at load.
 func (s *Server) peerPerfGet(w http.ResponseWriter, r *http.Request) {
-	path := s.ownDeckFile(r)
-	if path == "" {
+	d, _ := s.ownDeck(r)
+	if d.Path == "" {
 		http.Error(w, "not loaded", http.StatusConflict)
 		return
 	}
-	perf, err := libraryPerfFormat(r.Context(), path, s.shadow.dataRoot, s.shadow.mediaRoot, r.URL.Query().Get("format") == "native")
+	native := r.URL.Query().Get("format") == "native"
+	perf, err := libraryPerfFormat(r.Context(), d.Path, s.shadow.dataRoot, s.shadow.mediaRoot, native)
+	if err != nil && d.rbxAnalysis != "" {
+		perf, err = rbxPeerPerf(d.rbxAnalysis, d.BPM, native)
+	}
 	if err != nil {
 		http.Error(w, "not analysed", http.StatusNotFound)
 		return
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Write(perf)
+}
+
+// rbxPeerPerf is a rekordbox Link track's analysis for a shadow copy, from the file
+// its load left for Engine here. The deck's file is Engine's download or the
+// gateway's copy on a drive, which no library lists until Engine's row has it,
+// so the library lookup missed and the copy was analysed again.
+func rbxPeerPerf(file string, bpm float64, native bool) ([]byte, error) {
+	b, err := os.ReadFile(file)
+	if err != nil {
+		return nil, err
+	}
+	p := rbxCachedPerformance(b)
+	if !p.Complete {
+		return nil, errors.New("rekordbox analysis incomplete")
+	}
+	if native {
+		return encodeShadowAnalysis(p)
+	}
+	return perfFromBlobs(bpm, p.TrackData, p.Beats, p.Overview)
 }
 
 // streamingDownload is Engine's own download of a streaming track (Engine
