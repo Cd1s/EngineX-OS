@@ -31,18 +31,10 @@ import (
 // remount ("pool is disposed"). A stick the DJ ejected (the hook's mark) is never mounted again,
 // and one ejected or pulled meanwhile publishes at its next insert.
 //
-// A peer deck that loaded a track from the stick over Engine Link holds it on the peer, where
-// this deck cannot see it. A wrong remount breaks a track a peer plays; a wrong mark costs one
-// re-insert. So the stick is not remounted, and its library opens at the next insert as it did
-// before the remount existed, when:
-//   - Engine was seen sending a peer a track: an audio file of the stick read while Engine writes
-//     no copy, unless stream-sync confirms a deck of this player has that track loaded (seen while
-//     the job ran or the remount waited, kept as a mark until the next insert);
-//   - an Engine Link peer (a device Engine is connected to, enginePeers) may hold one: it does
-//     not answer what its decks hold, as an EngineX deck does, or one of them holds a track of
-//     the stick. A peer that copied a track between two looks, or before the job, leaves no
-//     other trace here.
-// A peer's unload is not observable, so there is no window after which it is safe.
+// EngineX peers report loaded tracks through /peer/decks. Silent peers cannot report an
+// unload, so they do not block forever: publication also requires a quiet window with no
+// observed outgoing audio read. Each observed serve restarts that window, including when
+// stream-sync cannot establish which deck owns the read.
 
 var (
 	sysClassBlock = "/sys/class/block"
@@ -54,8 +46,8 @@ var (
 	removeLimit   = 15 * time.Second
 	closeLimit    = 10 * time.Second
 	remountLimit  = 60 * time.Second // a mount runs fsck and the publish
-	readyEvery    = 2 * time.Second
-	deckWait      = 5 * time.Second // how often a remount a deck blocks looks again
+	serveQuiet    = 30 * time.Second // 60 observations at the existing 500 ms serve-watch interval
+	deckWait      = 5 * time.Second  // how often a remount a deck blocks looks again
 	// ownDecks are the tracks this player's decks have loaded, Engine's TrackNetworkPath
 	// ("net://<uuid>/<volume>/<path>"); ok is false when stream-sync does not answer.
 	ownDecks = func() ([]string, bool) { return decksAt("127.0.0.1:8080") }
@@ -88,7 +80,7 @@ func decksAt(addr string) (nets []string, ok bool) {
 
 // onStick reports a TrackNetworkPath ("net://<uuid>/<volume>/<path>", the volume possibly
 // "<name> (<slot>)") on a volume named as the stick at mount. A peer's own stick of the same
-// name counts too: that only costs a re-insert.
+// name counts too: conservatively wait until that deck releases it.
 func onStick(np, mount string) bool {
 	parts := strings.SplitN(strings.TrimPrefix(np, "net://"), "/", 3)
 	if !strings.HasPrefix(np, "net://") || len(parts) != 3 {
@@ -101,20 +93,16 @@ func onStick(np, mount string) bool {
 	return strings.EqualFold(vol, filepath.Base(mount))
 }
 
-// peerBlocks reports an Engine Link peer that may hold a track from the stick at mount: one
-// that does not answer what its decks hold (stock Engine, another device, an older EngineX),
-// or one whose deck holds a track of this stick (then the stick is marked as served).
+// peerBlocks reports an answering EngineX peer holding a track from this stick.
+// Silent peers rely on the outgoing-serve quiet window instead of blocking forever.
 func peerBlocks(mount string) bool {
 	for _, ip := range enginePeers() {
 		nets, ok := peerDecks(ip)
 		if !ok {
-			log.Printf("rb-bridge: Engine Link peer %s does not say what it holds; %s opens at its next insert", ip, mount)
-			return true
+			continue
 		}
 		for _, n := range nets {
 			if onStick(n, mount) {
-				log.Printf("rb-bridge: a deck of %s holds a track from %s; it opens at its next insert", ip, mount)
-				_ = os.WriteFile(servedMark(mount), nil, 0o600)
 				return true
 			}
 		}
@@ -122,18 +110,15 @@ func peerBlocks(mount string) bool {
 	return false
 }
 
-// servedMark marks a stick from which Engine sent a peer a track since the import began.
+// servedMark records the last observed outgoing read (mtime), or the start of observation.
 func servedMark(mount string) string {
 	h := fnv.New64a()
 	h.Write([]byte(mount))
 	return filepath.Join(ejectMarkDir, fmt.Sprintf("enginex-rb-served-%016x", h.Sum64()))
 }
 
-// noteServed marks mount when Engine sends a peer an audio file of it now (see above).
+// noteServed refreshes the last-serve timestamp while Engine sends audio from mount.
 func noteServed(mount string) {
-	if engineCopying() {
-		return // a load of this player reads the stick to copy it
-	}
 	var nets []string
 	asked := false
 	for _, pid := range engines() {
@@ -153,7 +138,6 @@ func noteServed(mount string) {
 				local = local || strings.HasPrefix(n, "net://") && strings.HasSuffix(n, rel)
 			}
 			if !local {
-				log.Printf("rb-bridge: Engine sends %s to a peer deck; %s opens at its next insert", filepath.Base(target), mount)
 				_ = os.WriteFile(servedMark(mount), nil, 0o600)
 				return
 			}
@@ -245,20 +229,18 @@ func runRemount(ctx context.Context, mount string) error {
 	if !filepath.IsAbs(mount) {
 		return fmt.Errorf("--remount must be absolute")
 	}
+	ctx, cancel := context.WithCancel(ctx)
 	rep := newDriveReporter(mount)
+	done := make(chan struct{})
+	go func() { defer close(done); refresh(ctx, rep) }()
+	defer func() { cancel(); <-done }()
 	err := remount(ctx, mount, rep)
 	if err == nil || ctx.Err() != nil {
 		return nil
 	}
-	// The DJ inserts the stick again; the banner says so until it is mounted anew.
 	log.Printf("rb-bridge: %v", err)
-	old := mountID(mount)
-	for i := 0; i < 600 && ctx.Err() == nil && (!mounted(mount) || mountID(mount) == old); i++ {
-		rep.Ready()
-		if sleepCtx(ctx, readyEvery) != nil {
-			break
-		}
-	}
+	rep.FailPublication(err)
+
 	return err
 }
 
@@ -269,44 +251,45 @@ func remount(ctx context.Context, mount string, rep *usbLoadingReporter) error {
 	}
 	uevent := filepath.Join(sysClassBlock, filepath.Base(dev), "uevent")
 	ejected := func() bool { _, err := os.Lstat(ejectMark(mount)); return err == nil }
-	// Engine copies a track it loads from the stick; a remove meanwhile could cut that load short.
+	// If the import watcher left no history, observe a whole quiet window here.
+	quietSince := time.Now()
+	if st, err := os.Stat(servedMark(mount)); err == nil {
+		quietSince = st.ModTime()
+	}
 	waiting := false
-	served := func() bool { _, err := os.Lstat(servedMark(mount)); return err == nil }
 	for clear := 0; clear < 2; {
 		if !mounted(mount) || ejected() {
 			return nil // ejected or pulled: the next mount publishes
 		}
-		if noteServed(mount); served() || peerBlocks(mount) {
-			return fmt.Errorf("a peer deck may hold a track from %s; eject it and insert it again to load the library", mount)
+		peerHeld := peerBlocks(mount)
+		// Sample after peer queries too: they may take a second per silent peer.
+		noteServed(mount)
+		if st, err := os.Stat(servedMark(mount)); err == nil && st.ModTime().After(quietSince) {
+			quietSince = st.ModTime()
 		}
 		wait := remountWait
-		switch {
-		case engineCopying():
-			clear = 0
-		case deckHolds(mount):
+		if engineCopying() || deckHolds(mount) || peerHeld || time.Since(quietSince) < serveQuiet {
 			clear, wait = 0, deckWait
 			if !waiting {
-				log.Printf("rb-bridge: a deck holds a track from %s; it opens when none does, or at the next insert", mount)
+				log.Printf("rb-bridge: %s waits for decks to release its tracks and outgoing reads to be quiet", mount)
 				waiting = true
-				rep.Ready()
 			}
-		default:
+			rep.Waiting()
+		} else {
 			clear++
 		}
 		if err = sleepCtx(ctx, wait); err != nil {
 			return nil
 		}
 	}
-	if waiting {
-		rep.Publishing()
-	}
+	rep.Publishing()
 	start := time.Now()
 	if err = os.WriteFile(uevent, []byte("remove"), 0); err != nil {
 		return fmt.Errorf("remove %s: %w", dev, err)
 	}
 	if err = pollUntil(ctx, removeLimit, func() bool { return !mounted(mount) }); err != nil {
 		// Nothing was unmounted (a busy read-write HFS+ stick): it still has its old library.
-		return fmt.Errorf("%s not unmounted by the remove; eject it and insert it again to load the library", mount)
+		return fmt.Errorf("%s not unmounted by the remove", mount)
 	}
 	// The publish renames the library: Engine's old handles must be closed first.
 	if pollUntil(ctx, closeLimit, func() bool { return !engineHolds(devno) }) != nil {
@@ -316,10 +299,10 @@ func remount(ctx context.Context, mount string, rep *usbLoadingReporter) error {
 		return nil
 	}
 	if err = os.WriteFile(uevent, []byte("add"), 0); err != nil {
-		return fmt.Errorf("add %s: %w; insert it again", dev, err)
+		return fmt.Errorf("add %s: %w", dev, err)
 	}
 	if err = pollUntil(ctx, remountLimit, func() bool { return mounted(mount) }); err != nil {
-		return fmt.Errorf("%s not mounted again; insert it again", dev)
+		return fmt.Errorf("%s not mounted again", dev)
 	}
 	log.Printf("rb-bridge: %s published by a remount in %s", mount, time.Since(start).Round(10*time.Millisecond))
 	return nil

@@ -19,53 +19,27 @@ import (
 	"github.com/Cd1s/EngineX-OS/internal/testfixture"
 )
 
-// Review B2: a peer deck that loaded a track from this stick over Engine Link keeps it on the
-// peer, where this deck cannot see it; the remount replaced the library under it. Engine sending
-// the track (an audio file of the stick read with no copy written and no deck of this player
-// holding it) marks the stick, and the library then opens at the next insert. A track this
-// player's own deck plays from the stick is not a peer's: the remount goes ahead after the unload.
+// A serve observed during import postpones publication, then expires after a quiet window.
 func TestIssue301RemountKeepsALibraryAPeerLoadedFrom(t *testing.T) {
 	f := newFakeStick(t)
 	f.engine("5", "", "")
-	track := filepath.Join(f.mount, "Contents", "Track00003.mp3")
-	if err := os.MkdirAll(filepath.Dir(track), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(track, []byte("ID3"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	ownDecks = func() ([]string, bool) { return []string{"net://{1}/OTHER/Contents/a.mp3"}, true }
-	// While the import job ran: Engine sent the track to a peer, then closed it.
+	ownDecks = func() ([]string, bool) { return nil, true }
+	f.engine("9", filepath.Join(f.mount, "Contents/song.mp3"), "0100000")
 	watch, stop := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() { watchServed(watch, f.mount); close(done) }()
-	f.engine("9", track, "0100000")
-	time.Sleep(150 * time.Millisecond)
-	f.engine("9", "", "")
+	go func() { defer close(done); watchServed(watch, f.mount) }()
+	err := pollUntil(watch, time.Second, func() bool { _, err := os.Stat(servedMark(f.mount)); return err == nil })
 	stop()
 	<-done
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
-	defer cancel()
-	err := remount(ctx, f.mount, newUSBLoadingReporter(filepath.Join(t.TempDir(), "status"), "usb"))
-	if got := f.seen(); len(got) != 0 {
-		t.Fatalf("remounted while a peer may hold a track from the stick: %v", got)
+	if err != nil {
+		t.Fatal("import watcher missed the outgoing read")
 	}
-	if err == nil || !strings.Contains(err.Error(), "insert it again") {
-		t.Fatalf("no reason for the banner: %v", err)
-	}
-	// This player's own deck playing the same file from the stick: not a peer.
-	os.Remove(servedMark(f.mount))
-	ownDecks = func() ([]string, bool) { return []string{"net://{1}/REKORDBOX/Contents/Track00003.mp3"}, true }
-	f.engine("9", track, "0100000")
-	go func() {
-		time.Sleep(150 * time.Millisecond)
-		f.engine("9", "", "") // the deck unloads it
-	}()
-	if err = remount(context.Background(), f.mount, newUSBLoadingReporter(filepath.Join(t.TempDir(), "status"), "usb")); err != nil {
+	f.engine("9", "", "")
+	if err := remount(context.Background(), f.mount, newUSBLoadingReporter(filepath.Join(t.TempDir(), "status"), "usb")); err != nil {
 		t.Fatal(err)
 	}
 	if got := strings.Join(f.seen(), " "); got != "remove: add:" {
-		t.Fatalf("own deck's unload: uevent writes %q", got)
+		t.Fatalf("quiet after serving: uevent writes %q", got)
 	}
 }
 
@@ -156,8 +130,7 @@ func TestIssue301CompletedImportReleasesGlobalLock(t *testing.T) {
 // no trace here but Engine's connection to it (the reviewer's original probe). Each Engine Link
 // peer is asked what its decks hold, as this deck asks its own stream-sync: an EngineX peer that
 // holds nothing from this stick does not block the remount (two linked EngineX decks, the
-// maintainer's set), one that holds a track of it does and marks the stick, and a peer that
-// does not answer (stock Engine, another device, an older EngineX) blocks.
+// maintainer's set), one that holds a track of it blocks until release; a silent peer instead waits for quiet.
 func TestIssue301RemountAsksEngineLinkPeers(t *testing.T) {
 	f := newFakeStick(t)
 	f.engine("5", "", "")
@@ -204,7 +177,7 @@ func TestIssue301RemountAsksEngineLinkPeers(t *testing.T) {
 	try := func() ([]string, error) {
 		t.Helper()
 		before := len(f.seen())
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second) // a blocked remount returns at once
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second) // bounded safety wait
 		defer cancel()
 		err := remount(ctx, f.mount, newUSBLoadingReporter(filepath.Join(t.TempDir(), "status"), "usb"))
 		return f.seen()[before:], err
@@ -216,21 +189,27 @@ func TestIssue301RemountAsksEngineLinkPeers(t *testing.T) {
 	if got, err := try(); err != nil || strings.Join(got, " ") != "remove: add:" {
 		t.Fatalf("EngineX peer holding nothing of the stick: %v %v", got, err)
 	}
-	// One of its decks holds a track of this stick: not remounted, and marked.
+	// The peer holds this stick, then releases it: wait and remount automatically.
 	mu.Lock()
 	holds = []string{"net://{1}/REKORDBOX (USB 1)/Contents/Track00003.mp3"}
 	mu.Unlock()
-	if got, err := try(); len(got) != 0 || err == nil {
-		t.Fatalf("EngineX peer holding a track of the stick: %v %v", got, err)
+	before := len(f.seen())
+	released := make(chan bool, 1)
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		released <- len(f.seen()) == before
+		mu.Lock()
+		holds = nil
+		mu.Unlock()
+	}()
+	got, err := try()
+	if stayed := <-released; !stayed || err != nil || strings.Join(got, " ") != "remove: add:" {
+		t.Fatalf("peer release: held=%v events=%v err=%v", stayed, got, err)
 	}
-	if _, err := os.Stat(servedMark(f.mount)); err != nil {
-		t.Fatalf("not marked: %v", err)
-	}
-	// A stock peer: no answer, not remounted.
-	os.Remove(servedMark(f.mount))
+	// A stock peer does not answer: after the quiet window it does not block forever.
 	peerDecks = func(net.IP) ([]string, bool) { return nil, false }
-	if got, err := try(); len(got) != 0 || err == nil {
-		t.Fatalf("peer that does not answer: %v %v", got, err)
+	if got, err := try(); err != nil || strings.Join(got, " ") != "remove: add:" {
+		t.Fatalf("silent peer after quiet window: %v %v", got, err)
 	}
 	// Engine connected to no other device: remounted.
 	f.engine("6", "", "")
@@ -240,19 +219,20 @@ func TestIssue301RemountAsksEngineLinkPeers(t *testing.T) {
 }
 
 // Re-check of 2e227f88: Engine was seen sending a track while stream-sync did not answer; that
-// read counts as a peer's, and stays a mark after the transfer closes.
-func TestIssue301UnconfirmedServeKeepsTheMark(t *testing.T) {
+// read restarts the quiet window even when stream-sync cannot identify its owner.
+func TestIssue301UnconfirmedServeWaitsThenRemounts(t *testing.T) {
 	f := newFakeStick(t)
 	f.engine("5", "", "")
 	ownDecks = func() ([]string, bool) { return nil, false }
 	f.engine("9", filepath.Join(f.mount, "Contents/song.mp3"), "0100000")
 	noteServed(f.mount)
 	f.engine("9", "", "")
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
-	_ = remount(ctx, f.mount, newUSBLoadingReporter(filepath.Join(t.TempDir(), "status"), "usb"))
-	if events := f.seen(); len(events) > 0 {
-		t.Fatalf("remount after serving while stream-sync was unavailable: %v", events)
+	start := time.Now()
+	if err := remount(context.Background(), f.mount, newUSBLoadingReporter(filepath.Join(t.TempDir(), "status"), "usb")); err != nil {
+		t.Fatal(err)
+	}
+	if events := strings.Join(f.seen(), " "); events != "remove: add:" || time.Since(start) < serveQuiet {
+		t.Fatalf("must wait for quiet, then remount: %v after %s", events, time.Since(start))
 	}
 }
 
@@ -317,8 +297,8 @@ func TestIssue301LinkLocalPeerIsAsked(t *testing.T) {
 	}
 }
 
-// Re-check of fefdd5cf: a late state change of an old job (A publishing, or ready after a
-// failed remount) does not take the status over from a newer drive's import (B), nor write
+// Re-check of fefdd5cf: a late state change of an old job (A publishing, waiting, or a publication
+// failure) does not take the status over from a newer drive's import (B), nor write
 // over B's error.
 func TestIssue301LateTransitionKeepsNewerStatus(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "status")
@@ -330,6 +310,7 @@ func TestIssue301LateTransitionKeepsNewerStatus(t *testing.T) {
 	b.Start()
 	b.Report(4, 10, true)
 	a.Publishing()
+	a.FailPublication(errors.New("old publication failed"))
 	b.Refresh()
 	var st usbLoadingStatus
 	data, err := os.ReadFile(p)
@@ -337,17 +318,18 @@ func TestIssue301LateTransitionKeepsNewerStatus(t *testing.T) {
 		t.Fatalf("A's late publishing took B's status: %s %v", data, err)
 	}
 	b.Fail(errors.New("B failed"))
-	a.Ready()
+	a.Waiting()
+	a.FailPublication(errors.New("old publication failed"))
 	if _, err = os.Stat(p); !os.IsNotExist(err) {
-		t.Fatalf("A's late ready hid B's error: %v", err)
+		t.Fatalf("A's late publication hid B's error: %v", err)
 	}
 	// The same drive's remount (another process) carries on its import job's status.
 	t.Setenv("ENGINEX_USB_PREPARING_PATH", p)
 	job, remounter := newDriveReporter("/media/X"), newDriveReporter("/media/X")
 	job.Start()
 	job.Publishing()
-	remounter.Ready()
-	if data, _ = os.ReadFile(p); !strings.Contains(string(data), `"state":"ready"`) {
-		t.Fatalf("the drive's remount could not say ready: %s", data)
+	remounter.Waiting()
+	if data, _ = os.ReadFile(p); !strings.Contains(string(data), `"state":"waiting"`) {
+		t.Fatalf("the drive's remount could not report waiting: %s", data)
 	}
 }

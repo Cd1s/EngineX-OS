@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -72,14 +73,18 @@ func runImportJob(ctx context.Context, mount string) error {
 	}
 	// A lazy unmount leaves the stick writable while it can be pulled: stop with it.
 	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	var watchers sync.WaitGroup
+	defer func() { cancel(); watchers.Wait() }()
+	watchers.Add(1)
 	go func() {
+		defer watchers.Done()
 		_ = pollUntil(ctx, 0, func() bool { return !mounted(mount) })
 		cancel()
 	}()
 	// A peer that loads a track from the stick while the import runs keeps it (see remount).
-	_ = os.Remove(servedMark(mount)) // a new insert
-	go watchServed(ctx, mount)
+	_ = os.WriteFile(servedMark(mount), nil, 0o600) // begin observing this insert
+	watchers.Add(1)
+	go func() { defer watchers.Done(); watchServed(ctx, mount) }()
 	rep := newDriveReporter(mount)
 	r, started, err := convertLocked(ctx, mount, rep)
 	if !started {
@@ -98,15 +103,13 @@ func runImportJob(ctx context.Context, mount string) error {
 		return nil
 	}
 	defer rep.Done()
-	// The browser shows the state for 30 s after each write: refreshed until the remount,
-	// never over another stick's import that now holds the lock (Refresh).
-	go refresh(ctx, rep)
+	// The remount helper refreshes publication status after this handoff.
 	// Published by a remount (#301); the hook stops this job when the remount unmounts the stick.
 	log.Printf("rb-bridge: import of %s complete; a remount publishes it", mount)
 	rep.Publishing()
 	if err = startRemount(mount); err != nil {
 		log.Printf("rb-bridge: %v", err)
-		rep.Ready()
+		rep.FailPublication(err)
 	}
 	<-ctx.Done()
 	return nil
@@ -127,8 +130,9 @@ func convertLocked(ctx context.Context, mount string, rep *usbLoadingReporter) (
 	rep.state = "importing"
 	rep.Start()
 	convert, stop := context.WithCancel(ctx)
-	defer stop()
-	go refresh(convert, rep)
+	done := make(chan struct{})
+	go func() { defer close(done); refresh(convert, rep) }()
+	defer func() { stop(); <-done }()
 	r, err = bridge.ImportInBackground(ctx, mount, func(done, total int) { rep.Report(done, total, true) })
 	if err != nil && ctx.Err() == nil {
 		rep.Fail(err)

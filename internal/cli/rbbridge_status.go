@@ -170,9 +170,8 @@ func (r *usbLoadingReporter) report(done, total int, force bool) {
 	r.write(usbLoadingStatus{State: r.stateName(), Kind: r.kind, Done: done, Total: total})
 }
 
-// Ready says the library is converted and opens when the stick is inserted again: the remount
-// that publishes it failed (#301).
-func (r *usbLoadingReporter) Ready() { r.set("ready") }
+// Waiting keeps the converted library visible while decks or network reads delay publication.
+func (r *usbLoadingReporter) Waiting() { r.set("waiting") }
 
 // Publishing says the library is converted and a remount is opening it (#301).
 func (r *usbLoadingReporter) Publishing() { r.set("publishing") }
@@ -226,6 +225,18 @@ func (r *usbLoadingReporter) Fail(err error) {
 		return
 	}
 	r.locked(func() { r.fail(err) })
+}
+
+// FailPublication is a late transition: it cannot replace a newer drive's status/error.
+func (r *usbLoadingReporter) FailPublication(err error) {
+	if r == nil || r.path == "" {
+		return
+	}
+	r.locked(func() {
+		if r.mayWrite() {
+			r.fail(err)
+		}
+	})
 }
 
 func (r *usbLoadingReporter) fail(err error) {
