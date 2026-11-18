@@ -30,6 +30,26 @@ import (
 // Use a new cache directory so an upgrade does not reuse the old grids and cues.
 var rbxAnalysisDir = "/run/enginex-rbx-analysis-v3"
 
+// DropStaleRekordboxAnalysis empties the cache another build of stream-sync left: /run
+// outlives a restart, a ready file is never encoded again, and so an update's encoder fix
+// did not reach a track cached before it. build names this binary; the cache of an
+// unknown build is not trusted. rowmap is the hook's own and stays.
+func DropStaleRekordboxAnalysis(build string) {
+	stamp := filepath.Join(rbxAnalysisDir, "build")
+	if old, err := os.ReadFile(stamp); err == nil && build != "" && string(old) == build {
+		return
+	}
+	entries, _ := os.ReadDir(rbxAnalysisDir)
+	for _, e := range entries {
+		if e.Name() != "rowmap" {
+			os.RemoveAll(filepath.Join(rbxAnalysisDir, e.Name()))
+		}
+	}
+	if build != "" && os.MkdirAll(rbxAnalysisDir, 0o755) == nil {
+		rbxWriteCache(stamp, []byte(build))
+	}
+}
+
 // rbxAnalysing are the tracks whose analysis is being read; rbxAnalysisJobs waits for them.
 var (
 	rbxAnalysing    sync.Map

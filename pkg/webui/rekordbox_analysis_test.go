@@ -283,6 +283,47 @@ func (l rbxStampedLink) Path(id uint32) (string, error) {
 
 func (l rbxStampedLink) Analysis(uint32, string, string) ([]byte, error) { return nil, nil }
 
+// Uruk, 2026-11-18: its .bin was written at 05:24 with the MP3 offset of that build and
+// was still served after two updates, so the corrected offset never showed on the deck.
+func TestRekordboxAnalysisOfAnotherBuildIsDropped(t *testing.T) {
+	old := rbxAnalysisDir
+	rbxAnalysisDir = t.TempDir()
+	t.Cleanup(func() { rbxAnalysisDir = old })
+	cached := []string{"7.bin", "7.bin.source", "7.bin.perf", "7.bin.previous", "names/4096/x.mp3", ".loading"}
+	kept := func(name string) bool {
+		_, err := os.Stat(filepath.Join(rbxAnalysisDir, name))
+		return err == nil
+	}
+	// A first start, an update, a restart of the same build, a binary that cannot be named.
+	for _, start := range []struct {
+		build string
+		keep  bool
+	}{{"a", false}, {"b", false}, {"b", true}, {"", false}} {
+		for _, name := range append([]string{"rowmap"}, cached...) {
+			p := filepath.Join(rbxAnalysisDir, name)
+			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		DropStaleRekordboxAnalysis(start.build)
+		for _, name := range cached {
+			if kept(name) != start.keep {
+				t.Fatalf("start of build %q: %s kept=%t, want %t", start.build, name, !start.keep, start.keep)
+			}
+		}
+		if !kept("rowmap") {
+			t.Fatalf("start of build %q dropped the hook's rowmap", start.build)
+		}
+		// The stamp is this start's: an unnamed build leaves none for the next to match.
+		if stamp, _ := os.ReadFile(filepath.Join(rbxAnalysisDir, "build")); string(stamp) != start.build {
+			t.Fatalf("start of build %q left the stamp %q", start.build, stamp)
+		}
+	}
+}
+
 func TestRekordboxFirstPrefetchSkipsSecondHeaderRead(t *testing.T) {
 	paths := map[uint32]string{1: "/Users/dj/Music/x.flac"}
 	e := newRbxEnv(t, paths)

@@ -160,6 +160,14 @@ func StreamSync(args []string) error {
 	go webui.DisableWiFiPowerSave(ctx)
 	dl.RemoveStaleParts()
 	dl.Trim("")
+	// The file itself, not enginex-suite-exec's .id: a binary deployed over it keeps that.
+	var build string
+	if exe, err := os.Executable(); err == nil {
+		if st, err := os.Stat(exe); err == nil {
+			build = fmt.Sprintf("%d %d", st.Size(), st.ModTime().UnixNano())
+		}
+	}
+	webui.DropStaleRekordboxAnalysis(build)
 	go watchEngineTemp(ctx)
 	go watchPersistentClock(ctx)
 	// Tunnels and Tailscale forward to a loopback console listener of their own,
