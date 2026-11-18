@@ -1030,7 +1030,72 @@ class UiModSourceTest(unittest.TestCase):
         self.assertIn('/Engine/Mixer/Channel3/DJFx/Assigned', bar)
         self.assertIn('/Engine/Mixer/Channel4/DJFx/Assigned', bar)
         self.assertIn('/Engine/Mixer/Main/DJFx/Assigned', bar)
-        self.assertIn('visible: !Config.device.isPlayer && scAssignedLabel !== ""', bar)
+        self.assertIn('scAssignSupported: Config.device.name === "JP20" || Config.device.name === "JP21"', bar)
+        self.assertIn('visible: scAssignSupported && scAssignedLabel !== ""', bar)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required for FX assignment bindings")
+    def test_fx_bar_assignment_changes_at_runtime_issue276(self):
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            edits = bp.edits(False)["Skins/Embedded/Views/MainView/Fx/DJFx.qml"]
+        finally:
+            bp.ROOT = old_root
+        bar = "\n".join(rep for _, rep in edits)
+        bindings = re.findall(r'^    readonly property (\w+) (sc(?:Assign|Ch|Main|Color)\w+): (\{\n.*?^    \}|[^\n]+)', bar, re.M | re.S)
+        box_visible = re.search(r'objectName: "DJFx_Assign_Indicator"\n +visible: (.+)', bar).group(1)
+        name_margin = re.search(r'Layout.leftMargin: (.+)\n +Layout.rightMargin: 12', bar).group(1)
+        script = """
+const [bindings, boxVisible, nameMargin] = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
+const vm = require('node:vm');
+const cases = [
+    ['JP21', '', false, 'Channel1'], ['JP21', '', false, 'Channel3'],
+    ['JP21', '', false, 'Channel1', 'Channel2'], ['JP21', '', false],
+    ['JP21', '', false, 'Main'],
+    ['JP21', '', false, 'Channel1', 'Channel2', 'Channel3', 'Channel4', 'Main'],
+    ['JP20', '', false, 'Channel2', 'Main'], ['JP20', '', false, 'Channel3', 'Channel4'],
+    ['JC11', '1', false], ['JC11S', '2', false], ['NH08', '', false, 'Channel1'],
+    ['NH10', '', false, 'Channel2'], ['JP07', '', true],
+];
+const Config = {device: {}};
+let assigned = [];
+const Planck = {getProperty(path) {
+    const match = path.match(/^\\/Engine\\/Mixer\\/(Channel[1-4]|Main)\\/DJFx\\/Assigned$/);
+    if (!match || (Config.device.name === 'JP20' && ['Channel3', 'Channel4'].includes(match[1]))) return null;
+    return {translator: {get state() { return assigned.includes(match[1]); }}};
+}};
+const qml = vm.createContext({Config, Planck, Style: {font02Color: '#ffffff'}});
+for (const [type, name, expression] of bindings) {
+    const body = expression.startsWith('{') ? expression : `(${expression})`;
+    const evaluate = new vm.Script(`(() => ${body})()`);
+    Object.defineProperty(qml, name, {get() {
+        const value = evaluate.runInContext(qml);
+        return type === 'bool' ? Boolean(value) : value;
+    }});
+}
+const visible = new vm.Script(boxVisible), margin = new vm.Script(nameMargin);
+qml.scAssignIndicator = {get visible() { return visible.runInContext(qml); }};
+console.log(JSON.stringify(cases.map(([name, indicator, isPlayer, ...channels]) => {
+    Config.device = {name, isPlayer};
+    qml.indicator = indicator;
+    assigned = channels;
+    const shown = qml.scAssignIndicator.visible;
+    return [shown, shown ? qml.scAssignedLabel : '', margin.runInContext(qml)];
+})));
+"""
+        result = subprocess.run(["node", "-e", script], input=json.dumps([bindings, box_visible, name_margin]),
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        expected = {
+            "JP21 C1": "1", "JP21 C3": "3", "JP21 C1+C2": "1·2", "JP21 none": "",
+            "JP21 Main": "M", "JP21 all": "1·2·3·4·M", "JP20 C2+Main": "2·M", "JP20 no C3/C4": "",
+            "JC11": "", "JC11S": "", "NH08": "", "NH10": "", "JP07": "",
+        }
+        actual = json.loads(result.stdout)
+        self.assertEqual(len(actual), len(expected))
+        for (case, label), rendered in zip(expected.items(), actual):
+            with self.subTest(case=case):
+                self.assertEqual(rendered, [bool(label), label, 8 if label else 12])
 
     def test_prime4_fx_knob_moves_one_effect_per_detent(self):
         old_root = bp.ROOT

@@ -349,36 +349,30 @@ FX_SELECTOR = r'''
         }
         if (djFxView) djFxView.abortSelecting()
     }
-    readonly property var scAssignCh1: Planck.getProperty("/Engine/Mixer/Channel1/DJFx/Assigned")
-    readonly property var scAssignCh2: Planck.getProperty("/Engine/Mixer/Channel2/DJFx/Assigned")
-    readonly property var scAssignCh3: Planck.getProperty("/Engine/Mixer/Channel3/DJFx/Assigned")
-    readonly property var scAssignCh4: Planck.getProperty("/Engine/Mixer/Channel4/DJFx/Assigned")
-    readonly property var scAssignMain: Planck.getProperty("/Engine/Mixer/Main/DJFx/Assigned")
-    readonly property bool scCh1Assigned: scAssignCh1 && scAssignCh1.translator && scAssignCh1.translator.state
-    readonly property bool scCh2Assigned: scAssignCh2 && scAssignCh2.translator && scAssignCh2.translator.state
-    readonly property bool scCh3Assigned: scAssignCh3 && scAssignCh3.translator && scAssignCh3.translator.state
-    readonly property bool scCh4Assigned: scAssignCh4 && scAssignCh4.translator && scAssignCh4.translator.state
-    readonly property bool scMainAssigned: scAssignMain && scAssignMain.translator && scAssignMain.translator.state
+    readonly property bool scAssignSupported: Config.device.name === "JP20" || Config.device.name === "JP21"
+    readonly property var scAssignCh1: scAssignSupported && Planck.getProperty("/Engine/Mixer/Channel1/DJFx/Assigned")
+    readonly property var scAssignCh2: scAssignSupported && Planck.getProperty("/Engine/Mixer/Channel2/DJFx/Assigned")
+    readonly property var scAssignCh3: Config.device.name === "JP21" && Planck.getProperty("/Engine/Mixer/Channel3/DJFx/Assigned")
+    readonly property var scAssignCh4: Config.device.name === "JP21" && Planck.getProperty("/Engine/Mixer/Channel4/DJFx/Assigned")
+    readonly property var scAssignMain: scAssignSupported && Planck.getProperty("/Engine/Mixer/Main/DJFx/Assigned")
+    readonly property bool scCh1Assigned: !!(scAssignCh1 && scAssignCh1.translator && scAssignCh1.translator.state)
+    readonly property bool scCh2Assigned: !!(scAssignCh2 && scAssignCh2.translator && scAssignCh2.translator.state)
+    readonly property bool scCh3Assigned: !!(scAssignCh3 && scAssignCh3.translator && scAssignCh3.translator.state)
+    readonly property bool scCh4Assigned: !!(scAssignCh4 && scAssignCh4.translator && scAssignCh4.translator.state)
+    readonly property bool scMainAssigned: !!(scAssignMain && scAssignMain.translator && scAssignMain.translator.state)
     readonly property string scAssignedLabel: {
-        if (scCh3Assigned) return "3"
-        if (scCh1Assigned) return "1"
-        if (scCh2Assigned) return "2"
-        if (scCh4Assigned) return "4"
-        if (scMainAssigned) return "M"
-        if (Config.device.name === "JP20" || Config.device.name === "JP21") return "1"
-        return indicator || ""
+        const channels = []
+        if (scCh1Assigned) channels.push("1")
+        if (scCh2Assigned) channels.push("2")
+        if (scCh3Assigned) channels.push("3")
+        if (scCh4Assigned) channels.push("4")
+        if (scMainAssigned) channels.push("M")
+        return channels.join("·")
     }
-    readonly property var scColorCh1: Planck.getProperty("/Engine/Deck1/Color")
-    readonly property var scColorCh2: Planck.getProperty("/Engine/Deck2/Color")
-    readonly property var scColorCh3: Planck.getProperty("/Engine/Deck3/Color")
-    readonly property var scColorCh4: Planck.getProperty("/Engine/Deck4/Color")
     readonly property color scChannelColor: {
-        if (scCh3Assigned || scAssignedLabel === "3") return scColorCh3 && scColorCh3.translator ? scColorCh3.translator.color : "#ff8800"
-        if (scCh1Assigned || scAssignedLabel === "1") return scColorCh1 && scColorCh1.translator ? scColorCh1.translator.color : "#0088ff"
-        if (scCh2Assigned || scAssignedLabel === "2") return scColorCh2 && scColorCh2.translator ? scColorCh2.translator.color : "#00cc44"
-        if (scCh4Assigned || scAssignedLabel === "4") return scColorCh4 && scColorCh4.translator ? scColorCh4.translator.color : "#cc44ff"
-        if (scMainAssigned || scAssignedLabel === "M") return Style.font02Color
-        return Style.font02Color
+        const first = scAssignedLabel.charAt(0)
+        const deckColor = first && first !== "M" && Planck.getProperty("/Engine/Deck" + first + "/Color")
+        return deckColor && deckColor.translator ? deckColor.translator.color : Style.font02Color
     }
 '''
 
@@ -386,10 +380,10 @@ FX_ASSIGN_BOX = r'''
     Item {
         id: scAssignIndicator
         objectName: "DJFx_Assign_Indicator"
-        visible: !Config.device.isPlayer && scAssignedLabel !== ""
+        visible: scAssignSupported && scAssignedLabel !== ""
         Layout.alignment: Qt.AlignVCenter
         Layout.leftMargin: 12
-        implicitWidth: 24
+        implicitWidth: Math.max(24, Math.ceil(scAssignIndicatorText.implicitWidth) + 12)
         implicitHeight: 24
 
         Rectangle {
