@@ -77,6 +77,11 @@ func TestDisplayStockRoundedBeatDuration(t *testing.T) {
 		{"stock mp3", 11487744, 11466000, false},
 		{"short track", 22050, 0, false},
 		{"exact", 176400, 176400, false},
+		// Rows Engine had loaded on the test decks (2026-11-19): the track's count is the
+		// decoder's, the grid's the import's. The source's shadow refused them all.
+		{"m4a Engine has loaded: priming off the track's count", 21433344, 21435392, false},
+		{"mp3 Engine has loaded: delay and padding off the track's count", 14903808, 14905728, false},
+		{"more than a decoder trims", 176400, 176400 + 16385, true},
 		{"unrelated length", 176400, 176300, true},
 		{"previous second", 176400, 132300, true},
 		{"future second", 176401, 220500, true},

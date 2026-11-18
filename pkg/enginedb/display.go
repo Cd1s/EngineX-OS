@@ -182,6 +182,10 @@ func ParseDisplayCuesAndLoops(track, cues, loops []byte) ([]DisplayCue, []Displa
 	return outCues, outLoops, nil
 }
 
+// displayDecoderTrim is more than a decoder takes off a track: an M4A's priming is under
+// 16384 samples (compat), an MP3's delay and padding under 4096 each beside one frame.
+const displayDecoderTrim = 16384
+
 func parseDisplayBeats(blob []byte, rate, samples float64) ([]DisplayBeat, error) {
 	raw, err := QUncompress(blob, 8<<20)
 	if err != nil {
@@ -192,9 +196,13 @@ func parseDisplayBeats(blob []byte, rate, samples float64) ([]DisplayBeat, error
 	}
 	// Stock beatData can store a duration truncated to whole seconds, while
 	// trackData keeps the decoded sample count. Keep the saved grid unchanged.
+	// Once Engine has loaded an imported track it writes its decoder's count into
+	// trackData, without what the decoder trims (an M4A's priming, an MP3's delay and
+	// padding), and leaves the import's in beatData: the grid's is that much more.
 	gridSamples := displayFloat(raw[8:], big)
 	if !displayFinite(gridSamples) || gridSamples < 0 ||
-		(math.Abs(gridSamples-samples) > 1 && gridSamples != math.Floor(samples/rate)*rate) {
+		(math.Abs(gridSamples-samples) > 1 && gridSamples != math.Floor(samples/rate)*rate &&
+			!(gridSamples > samples && gridSamples-samples <= displayDecoderTrim)) {
 		return nil, fmt.Errorf("display: invalid beatData header")
 	}
 	type marker struct {
