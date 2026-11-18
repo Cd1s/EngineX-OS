@@ -37,6 +37,10 @@ def check(source):
     # Patch primitives have a mandatory tag in their C signature as well.
     for call in re.finditer(r'\b(?:try_patch_bytes|patch_bytes|patch_pointer|redirect_function)\(\s*([^,\n]+)', source):
         arg = call[1].strip()
+        if arg == 'feature':
+            enclosing = re.findall(r'^static [^;{\n]*?\b(\w+)\([^;{]*?\)\s*\{', source[:call.start()], re.M)
+            if not enclosing or enclosing[-1] not in ('patch_bytes', 'redirect_function'):
+                fail(call.start(), 'only the central dispatchers may forward a feature variable')
         if arg not in ('int feature', 'feature') and not re.fullmatch(r'HF_[A-Z_0-9]+', arg):
             fail(call.start(), 'native patch call needs an explicit HF_* argument')
     start = source.index('A32_ONLY static void prepare_config(')
