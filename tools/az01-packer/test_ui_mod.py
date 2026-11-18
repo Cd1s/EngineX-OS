@@ -2362,6 +2362,34 @@ scPress('/Engine/Deck4/Sync');
 assert.deepEqual(scShadowAt, {});
 """)
 
+    def test_paused_bar_phase_waits_for_the_grid(self):
+        # Shadow grid/CUE (maintainer, two linked SC5000s): a CUE set before a rekordbox track's first
+        # grid marker, then play, left the copy's waveform off the main deck's; cued inside the grid,
+        # both lined up. Paused, scShadowBeat matched the bar phase with BeatNumber, which is below 0
+        # before the first marker: it shifted the copy by a beat, or spent its one calibration.
+        self.js(r"""
+let local = -1.6;
+const presses = [];
+scShadowEngineMask = 1 << 2;
+globalThis.scTr = p => p === '/Engine/Deck2/BeatNumber' ? {unnormalized: local} : {};
+globalThis.scPress = p => presses.push(p);
+const at = {};
+scShadowBeat(2, at, {bpm: 120, beat: -0.6}, 0, now); // both before the first marker
+local = -0.6;
+scShadowBeat(2, at, {bpm: 120, beat: -0.6}, 0, now);
+local = 1.4;
+scShadowBeat(2, at, {bpm: 120, beat: -0.6}, 0, now); // the source is still before it
+local = -0.6;
+scShadowBeat(2, at, {bpm: 120, beat: 2.4}, 0, now); // the copy is
+assert.deepEqual(presses, []);
+assert.equal(at.beatTries, undefined); // the calibration is still there
+// Inside the grid a beat apart: the copy is matched to the source.
+local = 1.4;
+scShadowBeat(2, at, {bpm: 120, beat: 2.4}, 0, now);
+assert.deepEqual(presses, ['/Engine/Deck2/Track/OffsetPhaseBackward']);
+assert.equal(at.beatTries, 1);
+""")
+
     def test_interpolation_pause_jump_and_expiry(self):
         self.js(r"""
 const s = {positionMs: 1000, at: 10000, playing: true, pitch: 20};
