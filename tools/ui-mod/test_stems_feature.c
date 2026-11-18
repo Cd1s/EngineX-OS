@@ -1659,6 +1659,8 @@ static void test_analysis_dispatch(const char *off, int gateway, int shadow) {
         snprintf(saved, sizeof saved, "%s/712-1-beatData", history);
         assert(!unlink(saved));
         snprintf(saved, sizeof saved, "%s/712-1-quickCues", history);
+        assert(!unlink(saved));
+        snprintf(saved, sizeof saved, "%s/712-1-unmarked", history); // the fill's own record
         assert(!unlink(saved) && !rmdir(history));
     }
     if (*off) assert(!unlink(conf));
