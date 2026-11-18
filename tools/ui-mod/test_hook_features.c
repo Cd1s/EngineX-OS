@@ -139,6 +139,43 @@ static void test_reverb_tail_switch(void) {
     puts("the longer Reverb tail (#207) has its own switch on every build: PASS");
 }
 
+static uint32_t noop_master_cb(void *host, void *ctx, int ic, const float *const *in, int oc, float *const *out, int frames) {
+    (void)host; (void)ctx; (void)ic; (void)in; (void)oc; (void)out; (void)frames;
+    return 0;
+}
+
+static void test_hifi_output_switch(void) {
+    assert(!strcmp(hf_names[HF_HIFI_OUTPUT], "hifi-output"));
+    write_file(board, "JP07");
+    assert(player_board() == 1);
+    write_file(board, "JP14");
+    assert(player_board() == 1);
+    write_file(board, "JP21");
+    assert(player_board() == 0);
+
+    float l[512], r[512], ref[512];
+    float *outs[2] = {l, r};
+    for (int i = 0; i < 512; i++) ref[i] = l[i] = r[i] = (i & 1) ? -0.25f : 0.25f;
+    void *saved_orig = dsp_originals[DSP_MASTER];
+    dsp_originals[DSP_MASTER] = (void *)noop_master_cb;
+    memset(master_hifi, 0, sizeof master_hifi);
+    hifi_enabled = 1;
+
+    use_conf("hifi-output");
+    hook_master_output(NULL, NULL, 0, NULL, 2, outs, 512);
+    assert(memcmp(l, ref, sizeof l) == 0);
+
+    for (int i = 0; i < 512; i++) ref[i] = l[i] = r[i] = (i % 3 == 0) ? 0.25f : -0.125f; /* 16 kHz at 48 kHz */
+    use_conf("");
+    hook_master_output(NULL, NULL, 0, NULL, 2, outs, 512);
+    assert(memcmp(l, ref, sizeof l) != 0);
+
+    hifi_enabled = 0;
+    memset(master_hifi, 0, sizeof master_hifi);
+    dsp_originals[DSP_MASTER] = saved_orig;
+    puts("Hi-Fi output (#172) respects hifi-output switch and Gen-1 player board gate: PASS");
+}
+
 static const uint32_t *config_code(size_t page) {
     // prepare_config reads only the two literal words at config_r2 / config_r3.
     size_t span = ((size_t)build->config_r3 + 8 + page - 1) / page * page;
@@ -243,6 +280,7 @@ int main(void) {
     test_edits_skip();
     test_config_lines();
     test_reverb_tail_switch();
+    test_hifi_output_switch();
     test_runtime_hooks();
     test_publish();
     test_ui_poll_without_dsp();

@@ -41,6 +41,7 @@
     X(AUX_INPUT, "aux-input") \
     X(FOUR_DECK, "four-deck") \
     X(DSP_GUARDS, "dsp-guards") \
+    X(HIFI_OUTPUT, "hifi-output") \
     X(REVERB_TAIL, "reverb-tail") \
     X(SQLITE_TUNING, "sqlite-tuning") \
     X(TELEMETRY_BLOCK, "telemetry-block") \

@@ -54,9 +54,23 @@ Everything runs right inside the familiar Denon DJ interface — install it and 
 - **3 Waveform Styles & 4 Languages**: switch live between **English, 简体中文, 繁體中文, and Español**, and toggle between `Denon`, `RGB`, and Pioneer-style `3-Band` waveforms from the Control Center or `Profile → Display → Waveform Style` across all 16 models.
 
 ### 5. Studio-Clean Audio, All-in-One FX & Gigabit Networking
-- **21 Real-Time Audio Guards**: click-free FX switching, zero-latency `Master Soft Clipper` (-0.1 dBFS ceiling), `Auto-Gain (0 dB Normalize)`, Flanger volume drop compensation, and smooth `Fader Echo` / `Echo Out` tails on mixer consoles;
+- **21 Real-Time Audio Guards**: click-free FX switching, zero-latency `Master Soft Clipper` (-0.1 dBFS ceiling), `Auto-Gain (0 dB Normalize)`, opt-in `Hi-Fi Output` on Gen-1 SC5000 / SC6000 players (`Profile → Playback → Hi-Fi Output`, default `Off`), Flanger volume drop compensation, and smooth `Fader Echo` / `Echo Out` tails on mixer consoles;
 - **Pioneer-Style FX on Consoles**: `PRIME 4` adds `Spiral (PX)`, `Pitch Echo (PX)`, `Slip Roll (PX)`, `Dub Echo (PX)`, and `Space (PX)` to its hardware FX selector, with an optional BPM-independent **10–4000 ms** delay mode (`PX Delay Time Mode`), and on the PRIME 4 / PRIME 2 / PRIME GO / Mixstream Pro and the second-generation 32-bit consoles `Profile → Playback → Color FX Style` puts one of them on each channel's `FILTER` knob (stock at the centre, `Off` keeps the stock Sweep FX); standalone players keep a pure player signal path without PX effects;
 - **Smart Sync, Gigabit Ethernet & `:8080` Web Console**: one-tap `Bar / Beat / Tempo` sync in the Control Center with automatic Pitch Range widening on wide BPM gaps, unlocked **1 Gbps** wired Ethernet, Wi-Fi drag-and-drop music upload, missing-track relocation, Shoutcast / Icecast `Live Stream`, and optional Mod Hub add-ons (`tailscale-remote`, `dmx-studio`, `midi-controller-mapper`, `jog-logo-studio`, `sampler-pad-studio`, `minimal-club-mode`).
+
+**Gen-1 Player `Hi-Fi Output` — Before vs. After (`5.3.0.5`, unreleased; dB relative to `1 kHz`):**
+
+| Source & Pitch (`SC5000` / `JP07`) | Mode           |   10k |   14k |   16k |   18k |       20k |
+| :--------------------------------- | :------------- | ----: | ----: | ----: | ----: | --------: |
+| `48 kHz` @ `0.00 %`                | Stock (`Off`)  | -0.26 | -0.91 | -1.48 | -2.24 |     -3.23 |
+| `48 kHz` @ `0.00 %`                | `Hi-Fi Output` |  0.00 |  0.00 |  0.00 |  0.00 | **-0.01** |
+| `48 kHz` @ `+1.00 %`               | Stock (`Off`)  | -0.55 | -1.90 | -3.07 | -4.64 |     -6.67 |
+| `48 kHz` @ `+1.00 %`               | `Hi-Fi Output` | -0.28 | -0.96 | -1.54 | -2.32 |     -3.35 |
+| `44.1 kHz` @ `0.00 %`              | Stock (`Off`)  | -0.64 | -2.21 | -3.54 | -5.34 |     -7.66 |
+| `44.1 kHz` @ `0.00 %`              | `Hi-Fi Output` | -0.38 | -1.29 | -2.07 | -3.11 |     -4.44 |
+
+*Method: measured through Engine's real `JP07` (`SC5000`) audio path in the build-host sandbox via `96 kHz` (`S32_LE`) digital capture (Key Lock `Off`; `0.00 %` Key Lock `On` is identical).*
+`Hi-Fi Output` restores the fixed `48 → 96 kHz` output-stage roll-off (exact inverse within `±0.011 dB` up to `20 kHz`, rolling back above `~22 kHz`), while it cannot undo the first resampling stage for `44.1 kHz` files and non-zero pitch (for example, `44.1 kHz` @ `0.00 %` still measures `-4.44 dB` at `20 kHz`).
 
 ---
 
