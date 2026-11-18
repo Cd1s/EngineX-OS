@@ -175,6 +175,7 @@ Object.defineProperty(root, 'scStemsEqMode', {{
 {prop_defs}
 {helpers}
 const visible = {{}};
+root.scOff = () => false;
 {entry_defs}
 
 function resetUnit(board, opts = {{}}) {{
