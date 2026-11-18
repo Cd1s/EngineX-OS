@@ -295,9 +295,12 @@ static void test_eject_stops_the_background_import(const char *root) {
     test_systemctl[0]=0;assert(!unlink(stop_log));
     puts("#301: eject stops the volume's background import before the unmount: PASS");
 }
-static int no_unmount(struct libmnt_context *c){(void)c;real_calls++;return 0;}
+static int no_unmount(struct libmnt_context *c){c->status=1;real_calls++;return 0;}
+static int no_mount_ok(struct libmnt_context *c){c->status=1;real_calls++;return 0;}
+static int no_mount_fail(struct libmnt_context *c){c->status=0;errno=EINVAL;return -EINVAL;}
 // #301: an Eject marks the stick, so the synthetic udev remove and add that publishes a finished
-// background import never mounts it again. edisksd's removal path (lazy) leaves no mark.
+// background import never mounts it again. edisksd's removal path (lazy) and a refused Eject
+// (EBUSY) leave no mark, and mounting the stick again clears a prior Eject mark.
 static void test_only_an_eject_marks_the_stick(const char *root) {
     (void)root;assert(!make_dirs(test_runtime));
     char name[80];snprintf(name,sizeof name,"enginex-rb-ejected-%016llx",(unsigned long long)hash_bytes(UINT64_C(14695981039346656037),"/media/REKORDBOX",16));
@@ -306,9 +309,15 @@ static void test_only_an_eject_marks_the_stick(const char *root) {
     assert(snprintf(mark,sizeof mark,"%s/enginex-rb-ejected-%016llx",test_runtime,(unsigned long long)hash_bytes(UINT64_C(14695981039346656037),volume_path,strlen(volume_path)))<(int)sizeof mark);
     struct libmnt_context removal={.target=volume_path};assert(!mnt_context_enable_lazy(&removal,1));
     assert(!unmount_dispatch(&removal,no_unmount));assert(access(mark,F_OK)==-1&&errno==ENOENT);
+    struct libmnt_context busy={.target=volume_path,.fail=1};
+    assert(unmount_dispatch(&busy,real_unmount)==-EBUSY);assert(access(mark,F_OK)==-1&&errno==ENOENT);
     struct libmnt_context eject={.target=volume_path};
-    assert(!unmount_dispatch(&eject,no_unmount));assert(!access(mark,F_OK));assert(!unlink(mark));
-    puts("#301: only an Eject marks the stick against the publish's remount, a removal does not: PASS");
+    assert(!unmount_dispatch(&eject,no_unmount));assert(!access(mark,F_OK));
+    struct libmnt_context bad_mount={.target=volume_path};
+    assert(hooked_mount(&bad_mount,no_mount_fail)==-EINVAL);assert(!access(mark,F_OK));
+    struct libmnt_context remount={.target=volume_path};
+    assert(!hooked_mount(&remount,no_mount_ok));assert(access(mark,F_OK)==-1&&errno==ENOENT);
+    puts("#301: only a completed Eject marks the stick, failed unmount leaves none, re-mount clears it: PASS");
 }
 // 5.3.0.3 made /data/legacy data a symlink to enginex (#103). The cache path
 // through it failed with ELOOP, so no read-only HFS+ stick got a view or rb-bridge.
