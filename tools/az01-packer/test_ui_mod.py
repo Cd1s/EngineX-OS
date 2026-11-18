@@ -1821,7 +1821,7 @@ assert.strictEqual(evalIsLead({{ master: false }}), false);
         self.assertLessEqual(len(es("Scan to log in")), 16)
         # the pack's own PX Delay row holds two long labels ("Predeterminado (desactivado)" was 270 px wide in a
         # 136 px button and ran over "Milisegundos (ms)"; the English pair touched): wider buttons, not shorter words
-        self.assertRegex(bp.PLAYBACK_ENTRIES, r'text: "PX Delay Time Mode"\n\t\t\tvisible: root.scHasPxDelay\n\t\t\tentryWidth: 2[0-9][0-9]')
+        self.assertRegex(bp.PLAYBACK_ENTRIES, r'text: "PX Delay Time Mode"\n\t\t\tvisible: root.scHasPxDelay && !root.scOff\("dsp-guards"\)\n\t\t\tentryWidth: 2[0-9][0-9]')
         # one line with no wrapping: a longer one also widens the About page and pushes the Update button out
         stems = "On-deck stems (basic quality). For high-quality stems, run the EngineX Stems service on a computer on the same network."
         self.assertLessEqual(len(es(stems)), 118)
