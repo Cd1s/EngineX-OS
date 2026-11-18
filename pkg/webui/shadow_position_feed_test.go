@@ -59,6 +59,10 @@ func TestShadowPositionFeedDatesTheRecordByItsPosition(t *testing.T) {
 		{"no time", 0, 0},
 		{"ahead", time.Now().Add(time.Minute).UnixMilli(), 0},
 		{"a minute old", time.Now().Add(-time.Minute).UnixMilli(), 0},
+		// The hook's side of the contract (2026-11-19): a record is never dated more than
+		// 2 s before its write, so a record 5 s old is one this process no longer writes.
+		{"1.9 s old", time.Now().Add(-1900 * time.Millisecond).UnixMilli(), 1900 * time.Millisecond},
+		{"2.1 s old", time.Now().Add(-2100 * time.Millisecond).UnixMilli(), 0},
 	} {
 		before := raw()
 		if err := shadowPositionFeedWrite(shadowPositionFeedRequest{Deck: 1, Key: "k", Active: true, PositionSamples: 1, RateSamplesPerSec: 44100, At: c.at}); err != nil {
