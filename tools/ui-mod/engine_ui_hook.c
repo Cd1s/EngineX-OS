@@ -577,6 +577,12 @@ static void start_thread(void *(*fn)(void *)) {
 
 static void lim_start_poll(void) { start_thread(lim_poll); start_thread(live_tap_drain); }
 
+// LED brightness belongs to the UI pack even when all DSP guards stay stock.
+static void start_feature_workers(int dsp_ready) {
+    if (dsp_ready) lim_start_poll();
+    else if (!hf_on(HF_DSP_GUARDS) && hf_on(HF_UI_PACKS)) start_thread(lim_poll);
+}
+
 static int official_update_host(const char *node) {
     static const char host[] = "autoupdate.airmusictech.com";
     if (!node) return 0;
@@ -2502,15 +2508,16 @@ __attribute__((constructor)) static void edit_engine(void) {
 #if !defined(__aarch64__)
     if (hf_on(HF_GATEWAY)) install_rekordbox_rows(base, page);
 #endif
-    if (hf_on(HF_DSP_GUARDS) && install_dsp_hooks(base, page)) {
+    int dsp_ready = hf_on(HF_DSP_GUARDS) && install_dsp_hooks(base, page);
+    if (dsp_ready) {
         if (hf_on(HF_BLUETOOTH)) install_bt_send(base, page);
 #if !defined(__aarch64__)
         fx_selector_supported = install_px_scope(base, page, build->name);
         cfx_installed = install_cfx_scope(base, page, build->name);
 #endif
         __atomic_store_n(&echo_player_bypass, player_board(), __ATOMIC_RELAXED);
-        lim_start_poll();
     }
+    start_feature_workers(dsp_ready);
 }
 
 // Unknown or unsafe values fall back to the English pack.

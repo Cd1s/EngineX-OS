@@ -215,6 +215,19 @@ static void test_publish(void) {
     puts("the running Engine's feature state is published whole for stream-sync: PASS");
 }
 
+static void test_ui_poll_without_dsp(void) {
+    static char settings[sizeof dir + 32];
+    snprintf(settings, sizeof settings, "%s/settings.conf", dir);
+    write_file(settings, "led_brightness=37\n");
+    four_deck_settings = settings;
+    use_conf("dsp-guards");
+    start_feature_workers(0);
+    for (unsigned i = 0; i < 150 && __atomic_load_n(&led_pct, __ATOMIC_RELAXED) != 37; i++) usleep(10000);
+    assert(__atomic_load_n(&led_pct, __ATOMIC_RELAXED) == 37);
+    unlink(settings);
+    puts("UI LED brightness still follows settings with DSP guards off: PASS");
+}
+
 int main(void) {
     assert(mkdtemp(dir));
     snprintf(conf, sizeof conf, "%s/hook-disable.conf", dir);
@@ -229,6 +242,7 @@ int main(void) {
     test_reverb_tail_switch();
     test_runtime_hooks();
     test_publish();
+    test_ui_poll_without_dsp();
     unlink(state);
     unlink(conf);
     unlink(board);
