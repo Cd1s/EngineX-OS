@@ -8312,7 +8312,7 @@ def edits(dev: bool):
             ('                        deckConfig.activeDeckTrackPath + "Nudge%1".arg(model.direction)\n',
              '                        deckConfig.activeDeckTrackPath + (module.scBeatJumpActive ? ("BeatJump/" + model.jumpAction) : ("Nudge%1".arg(model.direction)))\n'),
         ]
-        # BPM Decimals = 2 gives each whole BPM a fixed window in the stock fader's BPM space.
+        # BPM Decimals = 2 snaps near whole tempos; outside the window keep the stock value.
         scaled["ControlSurfaceModules/ControlSurfaceModules/SpeedSlider.qml"] = [
             ('    property bool invert: false\n',
              '''    property bool invert: false
@@ -8335,17 +8335,14 @@ def edits(dev: bool):
         if (u === 0.0 || u === 0.5 || u === 1.0) return u
         const delta = B * r
         const raw = B + (2.0 * u - 1.0) * delta
-        const whole = Math.floor(raw)
-        // A fractional center or endpoint splits the interval and must map to itself.
-        const lo = Math.max(whole, u < 0.5 ? B - delta : B)
-        const hi = Math.min(whole + 1, u < 0.5 ? B : B + delta)
-        const span = hi - lo
-        // Keep at least half of even a shortened interval for the linear ramp.
-        const width = Math.min(0.25, span / 2)
-        const start = lo === whole ? lo + width : lo
-        const end = hi === whole + 1 ? hi - width : hi
-        const target = raw <= start ? lo : raw >= end ? hi : lo + span * (raw - start) / (end - start)
-        return Math.max(0.0, Math.min(1.0, 0.5 + (target - B) / (2.0 * delta)))
+        const k = Math.round(raw)
+        // About +/-0.05 BPM at 124 BPM and +/-8%; keep the same travel on other ranges.
+        const snapHalfTravelFraction = 0.005
+        const threshold = Math.min(0.45, snapHalfTravelFraction * delta)
+        if (raw < k - threshold || raw > k + threshold) return u
+        // A snap past the center or an endpoint would reverse at that fixed point.
+        if (u < 0.5 ? (k < B - delta || k > B) : (k < B || k > B + delta)) return u
+        return Math.max(0.0, Math.min(1.0, 0.5 + (k - B) / (2.0 * delta)))
     }
 '''),
             ('        ValueCCAssignment {\n            readonly property bool songLoaded: Planck.getProperty("/Engine/Deck%1/Track/SongLoaded".arg(modelData))\n                .translator.state\n',
