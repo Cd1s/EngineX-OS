@@ -5,12 +5,19 @@ Run from a current checkout on Debian 12+ / Ubuntu 24.04+ (amd64 or arm64):
 
 ```sh
 sudo bash deploy/one-click-backend.sh
+sudo bash deploy/one-click-backend.sh --stems demucs
+sudo bash deploy/one-click-backend.sh --stems auto
 # With an existing HTTPS reverse proxy:
 sudo bash deploy/one-click-backend.sh --public https://relay.example.com
 ```
 
-The script builds the Go relay and HPSS Stems renderer, installs their systemd
-units and starts them. Missing Python/FFmpeg dependencies are installed with
+The script builds the Go relay and Stems renderer, installs their systemd
+units and starts them. HPSS remains the default. `--stems demucs` installs
+HTDemucs; `--stems auto` uses it when the NVIDIA driver lists a GPU or Linux
+reports at least 8 GiB of RAM, and uses HPSS otherwise or if PyTorch or Demucs
+cannot be installed. Rerun with `--stems hpss`
+to switch back. See [Stems deployment](../stems/README.md#switching-an-existing-host)
+for the model cache and CUDA check. Missing Python/FFmpeg dependencies are installed with
 apt; Go is bootstrapped from go.dev with its published checksum only when
 needed. With no public URL a fresh install starts a Cloudflare Quick Tunnel;
 an upgrade retains its existing public URL, password, sessions and renderer
