@@ -400,6 +400,7 @@ func newTidalGateway(s *Server) *tidalGateway {
 	g.mux.HandleFunc("GET /v1/enginex/prolink/diag", s.prolinkDiagGet)
 	g.mux.HandleFunc("POST /v1/enginex/prolink", s.prolinkPost)
 	g.mux.HandleFunc("POST /v1/enginex/decks", s.decksPost)
+	g.mux.HandleFunc("POST /v1/enginex/shadow/position-feed", s.shadowPositionFeedPost)
 	g.mux.HandleFunc("POST /v1/enginex/decks/alive", s.decksAlive)
 	g.mux.HandleFunc("GET /v1/enginex/clock", s.deckClockGet)
 	g.mux.HandleFunc("POST /v1/enginex/clock", s.deckClockPost)
