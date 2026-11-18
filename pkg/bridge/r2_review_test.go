@@ -103,7 +103,7 @@ func TestSingleExportStampUnchanged(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := fmt.Sprintf("v3 PIONEER/rekordbox/export.pdb %d %d\n", st.Size(), st.ModTime().UnixNano()); string(b) != want {
+	if want := fmt.Sprintf("v2 PIONEER/rekordbox/export.pdb %d %d\n", st.Size(), st.ModTime().UnixNano()); string(b) != want {
 		t.Fatalf("stamp %q, want %q", b, want)
 	}
 }

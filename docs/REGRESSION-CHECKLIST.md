@@ -6,7 +6,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 
 ---
 
-## Regression Table (333 Rows)
+## Regression Table (332 Rows)
 
 | # | Behaviour that must keep working | Issue / commit that fixed it | How it is checked (automated test name, or exact real-deck / sandbox step) | Release gate / deck acceptance / recording coverage |
 | --- | --- | --- | --- | --- |
@@ -342,7 +342,6 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 | 330 | **Community Mod `settings-polish` is listed in the registry as a community (non-official) declarative-QML Mod with the author's `mod.json` and QML unchanged**: three stock Preferences files are overlaid while it is enabled and restored byte for byte when it is disabled or removed; its `ListEntry.qml` keeps EngineX OS's own `ListEntry.qml` changes (`isSelected(value)`, `root.scT`), so re-check it whenever a release changes that file | #219 | `python3 docs/mods/test_mods.py`; `pkg/mods/mods_test.go::TestOfficialModPackagesInstallAndValidate`; `tools/mods/build_official_mods.py` | Real deck: install from the Mod Hub, enable, open Settings → Playback / Display and Layout, check list options, values and all four languages, disable and confirm the stock look returns `[NO AUTOMATED TEST]` |
 | 331 | **Switching `ui-packs` off never forces safe mode**: with `ui-packs` in `hook-disable.conf` the stock interface never acknowledges the start, so `engine-ui-guard watch` must not count that as a hung UI; a commented `# ui-packs` line keeps the timeout | SC LIVE 4 2026-11-17: `ui-packs` switched off in the console, about 3 min later Engine restarted into safe mode with `boot-stage` `ui-ready-timeout` | `tests/test_boot_safety.sh` (`PASS ui-packs off never times out; a commented ui-packs line still does`) | SC LIVE 4: switch `ui-packs` off, wait 4 min: no restart, no `safe-mode` in `/data/enginex/ui`; switch it back on |
 | 332 | **EngineX feature switches keep default Engine patch bytes, DSP guards and services unchanged, and new native sites require an explicit feature tag** | #308 | `test_hook_features.c`, `test_hook_feature_coverage.py`, `test_stems_feature.c::test_analysis_dispatch`, `pkg/webui/hook_features*_test.go`; default JP07 gate; explicit deny-file sandbox | Toggle a feature, restart/reboot as indicated; no-file behavior stays unchanged; a newly untagged edit, getConfig word or patch call fails the build |
-| 333 | **AAC in a rekordbox M4A export keeps its grid and analysis across USB and Pro DJ Link**: read the audio timebase and iTunes priming, even when the tag follows cover art, and re-encode imported AAC rows from a v2 USB library on its next writable mount | Rake on SC5000 | `TestAACGridMigratesAnUnchangedV2Export`, `TestRekordboxLinkAnalysisIsRbBridgesForTheSameTrack/aac` | Reinsert the rekordbox USB, wait for import, and load Rake. Through Link, load it on a deck without the old cached analysis; grid, cues and overview should appear at load |
 
 ## Automated Test Gaps (`[NO AUTOMATED TEST]`)
 

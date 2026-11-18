@@ -142,14 +142,11 @@ func prepareOne(res *compat.Resolver, t rekordbox.Track, rel string, cutoff time
 		audioErr    error
 		uninspected bool
 	)
-	if strings.EqualFold(path.Ext(rel), ".mp3") || compat.IsMP4AudioPath(rel) {
+	if strings.EqualFold(path.Ext(rel), ".mp3") {
 		if mayDefer && !cutoff.IsZero() && now().After(cutoff) {
 			uninspected = true
 		} else if info, err := audioHeader(full); err == nil {
 			fp.MP3Offset = info.OffsetClass
-			if info.Format == "aac" {
-				fp.AACOffset = strconv.Itoa(info.StartOffsetSamples)
-			}
 			audio = &info
 		} else {
 			if p, e := unreadableAudio(t, rel, err); e == nil {

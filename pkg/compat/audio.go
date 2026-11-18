@@ -58,9 +58,6 @@ func AudioHeader(path string) (AudioInfo, error) {
 		return aiffHeader(f, baseOff, st.Size(), string(b[8:12]) == "AIFC")
 	default:
 		lower := strings.ToLower(path)
-		if IsMP4AudioPath(lower) && string(b[4:8]) == "ftyp" {
-			return mp4AudioHeader(f, baseOff, st.Size())
-		}
 		if strings.HasSuffix(lower, ".wav") || strings.HasSuffix(lower, ".wave") || strings.HasSuffix(lower, ".flac") || strings.HasSuffix(lower, ".aif") || strings.HasSuffix(lower, ".aiff") || strings.HasSuffix(lower, ".aifc") {
 			return AudioInfo{}, fmt.Errorf("invalid WAV/FLAC/AIFF magic")
 		}

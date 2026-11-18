@@ -255,11 +255,7 @@ func (g *tidalGateway) rbxRemoteHeader(ctx context.Context, ip, rbPath string) (
 		return compat.AudioInfo{}, err
 	}
 	defer f.Close()
-	var limit int64 = 32 << 10
-	if compat.IsMP4AudioPath(p) {
-		limit = 512 << 10
-	}
-	b, err := io.ReadAll(io.LimitReader(f, limit))
+	b, err := io.ReadAll(io.LimitReader(f, 32<<10))
 	if err != nil {
 		return compat.AudioInfo{}, err
 	}
@@ -350,9 +346,6 @@ func rbxHead(file string, want int64) (compat.AudioInfo, int64, error) {
 }
 
 func rbxParsePrefix(file string, head []byte, size int64) (compat.AudioInfo, error) {
-	if compat.IsMP4AudioPath(file) {
-		return compat.MP4AudioHeaderPrefix(bytes.NewReader(head), size)
-	}
 	tmp, err := os.CreateTemp("", "rbx-head-*"+filepath.Ext(file))
 	if err != nil {
 		return compat.AudioInfo{}, err

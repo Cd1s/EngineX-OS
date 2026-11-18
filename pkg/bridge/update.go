@@ -124,14 +124,14 @@ func updateInBackground(ctx context.Context, mount, stage, stamp string, r *comp
 		return enginedb.Result{}, err
 	}
 	old := readMark(dir, stampName)
-	legacy, legacyAAC := legacyGridOptions(old)
+	legacy := old != "" && !strings.HasPrefix(old, stampVersion+" ")
 	total, left, window := len(l.Tracks), -1, importWindow
 	if progress != nil {
 		progress(0, total)
 	}
 	changed := readMark(stage, resumeName) != "" // an earlier pass may have changed it
 	for {
-		o := enginedb.Options{DatabaseDir: stage, StagedOnly: stagedOnly, LegacyOffsets: legacy, LegacyAACOffsets: legacyAAC,
+		o := enginedb.Options{DatabaseDir: stage, StagedOnly: stagedOnly, LegacyOffsets: legacy,
 			Resume: readMark(stage, resumeName) == stamp, Deadline: time.Now().Add(window)}
 		res, err := enginedb.SyncResolved(ctx, r, l, o)
 		if err != nil {

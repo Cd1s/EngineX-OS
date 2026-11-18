@@ -330,27 +330,14 @@ func (l rb7Link) CuesExtended(uint32) ([]byte, error) {
 // its grid and cues at once. A Link load of a track leaves for Engine the bytes rb-bridge
 // writes for that track from its export, and the same Track flag.
 func TestRekordboxLinkAnalysisIsRbBridgesForTheSameTrack(t *testing.T) {
-	for _, format := range []string{"mp3", "aac"} {
-		t.Run(format, func(t *testing.T) { assertLinkMatchesBridge(t, format) })
-	}
-}
-
-func assertLinkMatchesBridge(t *testing.T, format string) {
-	t.Helper()
 	root := t.TempDir()
-	var file []byte
-	rel := testfixture.LargeTrackPath(1)
-	if format == "aac" {
-		rel, file = testfixture.AACExport(t, root), testfixture.AACWithPriming()
-	} else {
-		testfixture.LargeExport(t, root, 1)
-		// Make the file larger than the NFS prefix; keep Xing's counts valid.
-		file = testfixture.MP3WithLAMETag()
-		file = append(file, bytes.Repeat(file[417:834], 100)...)
-		binary.BigEndian.PutUint32(file[44:], 102)
-		binary.BigEndian.PutUint32(file[48:], uint32(len(file)))
-		testfixture.Write(t, root, rel, file)
-	}
+	testfixture.LargeExport(t, root, 1) // MP3 with Xing/LAME delay, hot cues and loops
+	// Make the file larger than the NFS prefix. Keep Xing's byte and frame counts valid.
+	mp3 := testfixture.MP3WithLAMETag()
+	mp3 = append(mp3, bytes.Repeat(mp3[417:834], 100)...)
+	binary.BigEndian.PutUint32(mp3[44:], 102)
+	binary.BigEndian.PutUint32(mp3[48:], uint32(len(mp3)))
+	testfixture.Write(t, root, testfixture.LargeTrackPath(1), mp3)
 	if _, err := bridge.ConvertAtMount(context.Background(), root, enginedb.Options{}, false); err != nil {
 		t.Fatal(err)
 	}
@@ -385,7 +372,7 @@ func assertLinkMatchesBridge(t *testing.T, format string) {
 			one = tr
 		}
 	}
-	paths := map[uint32]string{1: "/" + rel}
+	paths := map[uint32]string{1: "/" + testfixture.LargeTrackPath(1)}
 	e := newRbxEnv(t, paths)
 	nfs := &prolink.NFSServer{Root: root}
 	if err := nfs.Listen("127.0.0.1:0"); err != nil {
@@ -399,7 +386,7 @@ func assertLinkMatchesBridge(t *testing.T, format string) {
 		return &prolink.NFSClient{IP: ip, Portmap: nfs.PortmapPort(), Timeout: time.Second}
 	}
 	prefix, audio, err := rbxNFS(net.IPv4(127, 0, 0, 1)).FetchPrefix(t.Context(), rbxExport, paths[1], 32<<10)
-	if err != nil || audio.Size != uint32(len(file)) || !bytes.Equal(prefix, file[:32<<10]) {
+	if err != nil || audio.Size != uint32(len(mp3)) || !bytes.Equal(prefix, mp3[:32<<10]) {
 		t.Fatalf("NFS prefix: %d of %d bytes: %v", len(prefix), audio.Size, err)
 	}
 	link := rb7Link{fakeRbxLink{paths}, one, a, map[string][]byte{"DAT": testfixture.DAT(), "EXT": testfixture.EXT(), "2EX": testfixture.EX2()}}
