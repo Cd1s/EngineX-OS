@@ -2,6 +2,7 @@
 #define SC_REKORDBOX_ANALYSIS_H
 
 #include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -138,6 +139,81 @@ struct sc_rbx_track_map {
 };
 static struct sc_rbx_track_map sc_rbx_track_maps[SC_RBX_TRACK_MAP_CAP];
 static unsigned sc_rbx_track_map_next;
+static int sc_rbx_track_map_loaded;
+
+static void sc_rbx_track_map_path(char path[PATH_MAX]) {
+    snprintf(path, PATH_MAX, "%s/rowmap", sc_rbx_dir);
+}
+
+static void sc_rbx_append_track_map(long long track, long long id, const char *download) {
+    char path[PATH_MAX], line[128];
+    sc_rbx_track_map_path(path);
+    int n = snprintf(line, sizeof line, "%lld %lld %s\n", track, id, download ? download : "");
+    if (n <= 0 || (size_t)n >= sizeof line) return;
+    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (fd < 0) return;
+    size_t at = 0;
+    while (at < (size_t)n) {
+        ssize_t wrote = write(fd, line + at, (size_t)n - at);
+        if (wrote <= 0) break;
+        at += (size_t)wrote;
+    }
+    close(fd);
+}
+
+static const char *sc_rbx_map_space(const char *p) {
+    while (*p == ' ' || *p == '\t') p++;
+    return p;
+}
+
+static int sc_rbx_parse_track_map(const char *line, long long *track, long long *id, char download[41]) {
+    char *end;
+    const char *p = sc_rbx_map_space(line);
+    long long parsed_track = strtoll(p, &end, 10);
+    if (end == p || parsed_track <= 0) return 0;
+    p = sc_rbx_map_space(end);
+    long long parsed_id = strtoll(p, &end, 10);
+    if (end == p || parsed_id <= 0) return 0;
+    p = sc_rbx_map_space(end);
+    download[0] = 0;
+    if (*p == 0 || *p == '\n') goto done;
+    size_t n = 0;
+    while ((p[n] >= '0' && p[n] <= '9') || (p[n] >= 'a' && p[n] <= 'f')) n++;
+    if (!n || n > 40 || ((p[n] >= '0' && p[n] <= '9') || (p[n] >= 'a' && p[n] <= 'f'))) return 0;
+    memcpy(download, p, n);
+    download[n] = 0;
+    p = sc_rbx_map_space(p + n);
+    if (*p != 0 && *p != '\n') return 0;
+done:
+    *track = parsed_track;
+    *id = parsed_id;
+    return 1;
+}
+
+static void sc_rbx_load_track_map(void) {
+    if (sc_rbx_track_map_loaded) return;
+    sc_rbx_track_map_loaded = 1;
+    char path[PATH_MAX], line[128], download[41];
+    sc_rbx_track_map_path(path);
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return;
+    FILE *file = fdopen(fd, "r");
+    if (!file) { close(fd); return; }
+    while (sc_rbx_track_map_next < SC_RBX_TRACK_MAP_CAP && fgets(line, sizeof line, file)) {
+        long long track = 0, id = 0;
+        download[0] = 0;
+        if (!sc_rbx_parse_track_map(line, &track, &id, download)) continue;
+        int duplicate = 0;
+        for (unsigned i = 0; i < sc_rbx_track_map_next; ++i)
+            if (sc_rbx_track_maps[i].track == track) { duplicate = 1; break; }
+        if (duplicate) continue;
+        struct sc_rbx_track_map *slot = &sc_rbx_track_maps[sc_rbx_track_map_next++];
+        slot->track = track;
+        slot->id = id;
+        snprintf(slot->download, sizeof slot->download, "%s", download);
+    }
+    fclose(file);
+}
 
 static void sc_rbx_remember_track(long long track, long long id, const char *download) {
     if (track <= 0 || id <= 0) return;
@@ -148,10 +224,12 @@ static void sc_rbx_remember_track(long long track, long long id, const char *dow
             return;
         }
     }
-    struct sc_rbx_track_map *slot = &sc_rbx_track_maps[sc_rbx_track_map_next++ % SC_RBX_TRACK_MAP_CAP];
+    if (sc_rbx_track_map_next >= SC_RBX_TRACK_MAP_CAP) return;
+    struct sc_rbx_track_map *slot = &sc_rbx_track_maps[sc_rbx_track_map_next++];
     slot->track = track;
     slot->id = id;
     snprintf(slot->download, sizeof slot->download, "%s", download ? download : "");
+    sc_rbx_append_track_map(track, id, download);
 }
 
 static int sc_rbx_lookup_track(long long track, long long *id, char download[41]) {

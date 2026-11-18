@@ -241,6 +241,17 @@ int main(void) {
     assert(!load(db) && !load_bound(db) && !statements && !filled(db));
     sqlite3_close(db);
     assert(!utimensat(AT_FDCWD, mark, NULL, 0));
+    char rowmap[160];
+    snprintf(rowmap, sizeof rowmap, "%s/rowmap", dir);
+    assert(!access(rowmap, R_OK));
+    f = fopen(rowmap, "a");
+    assert(f && fputs("malformed rowmap\n1 nope\n", f) >= 0 && !fclose(f));
+    memset(sc_rbx_track_maps, 0, sizeof sc_rbx_track_maps);
+    sc_rbx_track_map_next = 0;
+    sc_rbx_track_map_loaded = 0;
+    sc_rbx_load_track_map();
+    long long mapped = 0;
+    assert(sc_rbx_lookup_track(16449, &mapped, NULL) && mapped == 855);
     // Engine may rewrite the Track presentation fields after the first load. A later
     // source generation must still refresh the row through the remembered mapping.
     sqlite3 *reload = library_row(internal, "streaming://TIDAL/Track/855", "rekordbox [126 BPM 6A]", 1);
@@ -259,6 +270,7 @@ int main(void) {
     assert(!unlink(path));
     snprintf(path, sizeof path, "%s/855-16449-quickCues", history);
     assert(!unlink(path) && !rmdir(history));
+    assert(!unlink(rowmap));
     snprintf(path, sizeof path, "%s/855.bin", dir);
     assert(!unlink(path));
     snprintf(path, sizeof path, "%s/855.bin.perf", dir);
