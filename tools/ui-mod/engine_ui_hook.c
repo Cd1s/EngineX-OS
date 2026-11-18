@@ -2578,9 +2578,9 @@ static const struct engine_build engine_builds[] = {
      .shadow_vtable_a = 0x2bd2544, .shadow_vtable_b = 0x2bd1364,
      .shadow_vtable_slot = 0xbc, .shadow_position_fn = 0x4c5780,
      .shadow_array_offset = 0x244, .shadow_position_prefix_size = 8,
-     .shadow_position_prefix = {0x0a, 0x7a, 0xd0, 0xed, 0x04, 0xb0, 0x2d, 0xe5}},
-    // HF_SHADOW_PAUSED_FOLLOW is not installed here: the waveformPositionItem case is at
-    // 0xa3c264 with the first-generation bytes, but it has not run on this Engine yet.
+     .shadow_position_prefix = {0x0a, 0x7a, 0xd0, 0xed, 0x04, 0xb0, 0x2d, 0xe5},
+     .shadow_capture_site = 0xa3c264,
+     .shadow_capture_prefix = {0x04, 0x30, 0x96, 0xe5, 0x00, 0x30, 0x93, 0xe5}},
 };
 #endif
 
