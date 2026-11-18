@@ -20,7 +20,7 @@ class ModTests(unittest.TestCase):
     def test_registry_and_archive_members(self):
         registry = json.loads((BASE / "registry.json").read_text())
         self.assertEqual(registry["updatedAt"], "2026-11-17")
-        self.assertEqual(len(registry["mods"]), 8)
+        self.assertEqual(len(registry["mods"]), 9)
         for mod in registry["mods"]:
             blob = (BASE / "packages" / Path(mod["downloadUrl"]).name).read_bytes()
             self.assertEqual(len(blob), mod["size"])
@@ -31,7 +31,11 @@ class ModTests(unittest.TestCase):
                 manifest = json.load(tar.extractfile("mod.json"))
                 self.assertEqual(manifest["id"], mod["id"])
                 self.assertEqual(manifest["version"], mod["version"])
-                self.assertIn(manifest["script"], tar.getnames())
+                if mod["official"]:
+                    self.assertIn(manifest["script"], tar.getnames())
+                else:  # community Mod: declarative QML only
+                    self.assertNotIn("script", manifest)
+                    self.assertEqual(mod["runtimeStatus"], "declarative-qml")
                 for source in manifest["qmlFiles"]:
                     self.assertGreater(len(tar.extractfile(source).read()), 0)
             for key in ("name", "summary", "description"):
@@ -57,7 +61,7 @@ class ModTests(unittest.TestCase):
                     data = tar.extractfile(member).read()
                     if member.name.endswith((".sh", ".qml")):
                         self.assertNotIn(b"python", data.lower(), member.name)
-                if mod["id"] == "tailscale-remote":
+                if mod["id"] == "tailscale-remote" or not mod["official"]:
                     continue
                 self.assertEqual(manifest["script"], "start.sh")
                 self.assertFalse(mod["requiresPython"])

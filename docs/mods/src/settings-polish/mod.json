@@ -1,0 +1,15 @@
+{
+  "id": "settings-polish",
+  "version": "1.0.0",
+  "author": "JaviLabarumDJ",
+  "category": "ui",
+  "name": "Settings Polish",
+  "description": "Cleaner Settings and Layout screens: list options become a segmented control (a quiet pill each, the chosen one tinted and outlined in the active colour), section headlines line up with the rows, and entry buttons are rounded. Visual only: selection and values work exactly as in EngineX OS. Built for EngineX OS 5.3.0.4.",
+  "homepage": "https://enginexdj.com/#mods",
+  "license": "MIT",
+  "qmlFiles": {
+    "qml/ListEntry.qml": "Skins/Embedded/Views/ControlCenter/Tabs/Preferences/Entries/Base/ListEntry.qml",
+    "qml/PrefsHeadline.qml": "Skins/Embedded/Views/ControlCenter/Tabs/Preferences/Entries/PrefsHeadline.qml",
+    "qml/PrefsEntryButton.qml": "Skins/Embedded/Views/ControlCenter/Tabs/Preferences/Entries/Base/PrefsEntryButton.qml"
+  }
+}

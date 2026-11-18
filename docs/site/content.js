@@ -748,6 +748,9 @@
         { k: "note", tone: "new", x: L("**5.3.0.5（尚未发布）新增官方 Mod `cpu-ram-monitor`（#296）**：通过 `TimeIndicator.qml` 状态栏叠加层与静态 Go loopback helper（`127.0.0.1:17840`，读取 `/proc/stat` 与 `/proc/meminfo`），每 2 秒在顶部时钟旁显示实时 CPU 与内存占用百分比；helper 未运行时自动隐藏，不影响原生时钟。",
           "**5.3.0.5（尚未發佈）新增官方 Mod `cpu-ram-monitor`（#296）**：透過 `TimeIndicator.qml` 狀態列疊加層與靜態 Go loopback helper（`127.0.0.1:17840`，讀取 `/proc/stat` 與 `/proc/meminfo`），每 2 秒於頂部時鐘旁顯示即時 CPU 與記憶體佔用百分比；helper 未執行時自動隱藏，不影響原廠時鐘。",
           "**New in 5.3.0.5 (unreleased) official Mod `cpu-ram-monitor` (#296)**: overlays `TimeIndicator.qml` in the top status bar with a static Go loopback helper (`127.0.0.1:17840` reading `/proc/stat` and `/proc/meminfo`) to show live CPU and RAM percentages next to the clock every 2 seconds; hides automatically when the helper is stopped.") },
+        { k: "note", tone: "new", x: L("**5.3.0.5（尚未发布）新增社区 Mod `settings-polish`（#219，作者 JaviLabarumDJ）**：纯 QML，使设置与布局页面更清爽（分段式选项、对齐的分区标题、圆角按钮）；只改变外观，停用或卸载后还原原厂文件。",
+          "**5.3.0.5（尚未發佈）新增社群 Mod `settings-polish`（#219，作者 JaviLabarumDJ）**：純 QML，讓設定與版面頁面更清爽（分段式選項、對齊的分區標題、圓角按鈕）；僅改變外觀，停用或解除安裝後還原原廠檔案。",
+          "**New in 5.3.0.5 (unreleased) community Mod `settings-polish` (#219, by JaviLabarumDJ)**: declarative QML that tidies the Settings and Layout screens (segmented options, aligned headlines, rounded buttons); visual only, and the stock files come back when it is disabled or removed.") },
         { k: "h", id: "publish", x: L("如何在线打包并发布到 enginexdj.com/#mods", "如何線上打包並發佈到 enginexdj.com/#mods", "Packaging & publishing on enginexdj.com/#mods"), nav: L("在线打包与发布", "線上打包與發佈", "Package & publish") },
         { k: "ol", x: [
           L("打开 <a href=\"#mods\"><b>`https://enginexdj.com/#mods`</b></a>，点击右上角 **「+ 上传开源 Mod」**。",

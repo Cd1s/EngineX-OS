@@ -21,6 +21,7 @@ fail=0
 for pkg in "$PKGS"/*.tar.gz; do
     id=$(basename "$pkg" | sed 's/-[0-9][0-9.]*\.tar\.gz$//')
     [ "$id" = tailscale-remote ] && continue
+    tar -xzOf "$pkg" mod.json | grep -q '"script"' || continue # declarative QML Mod (community): no start.sh to run
     mkdir -p "$WORK/$id"
     tar -xzf "$pkg" -C "$WORK/$id"
     out=$WORK/$id.log

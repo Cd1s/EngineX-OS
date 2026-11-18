@@ -92,6 +92,14 @@ MODS = [
          description=tri("通过状态栏 TimeIndicator.qml 叠加层与轻量级 loopback Go helper（读取 /proc/stat 与 /proc/meminfo），在顶部时间旁每 2 秒刷新显示 CPU 与内存占用百分比。未启用或 helper 未运行时自动隐藏，不影响原生时钟显示。", "透過狀態列 TimeIndicator.qml 疊加層與輕量級 loopback Go helper（讀取 /proc/stat 與 /proc/meminfo），於頂部時間旁每 2 秒重新整理顯示 CPU 與記憶體佔用百分比。未啟用或 helper 未執行時自動隱藏，不影響原生時鐘顯示。", "Overlays TimeIndicator.qml in the top status bar and pairs it with a lightweight loopback Go helper reading /proc/stat and /proc/meminfo to display live CPU and RAM usage next to the clock every 2 seconds. Automatically hides the load readout if the helper is not running."),
          initialComments=[comment("Djpd66", "display CPU and RAM load at the top, next to the time", 296, "", "2026-11-17")],
          ),
+    # Community Mod: the author's mod.json and QML are packaged unchanged (no helper, no script).
+    dict(id="settings-polish", version="1.0.0", category="ui", issueNumber=219, community=True,
+         author="JaviLabarumDJ", tags=["Settings", "Layout", "QML", "Style"],
+         name=tri("设置界面美化", "設定介面美化", "Settings Polish"),
+         summary=tri("更清爽的设置与布局页面：分段式选项、对齐的标题、圆角按钮。", "更清爽的設定與版面頁面：分段式選項、對齊的標題、圓角按鈕。", "Cleaner Settings and Layout screens: segmented options, aligned headlines, rounded buttons."),
+         description=tri("纯 QML 社区 Mod：列表选项变为分段式控件（选中项以当前主题色描边），分区标题与各行对齐，入口按钮改为圆角。仅改变外观，选择与数值行为与 EngineX OS 完全一致；停用或卸载后还原原厂文件。为 EngineX OS 5.3.0.4 制作。", "純 QML 社群 Mod：清單選項變為分段式控制項（選中項以目前主題色描邊），分區標題與各列對齊，入口按鈕改為圓角。僅改變外觀，選擇與數值行為與 EngineX OS 完全一致；停用或解除安裝後還原原廠檔案。為 EngineX OS 5.3.0.4 製作。", "Declarative-QML community Mod: list options become a segmented control (the chosen one outlined in the active colour), section headlines line up with the rows and entry buttons are rounded. Visual only: selection and values behave exactly as in EngineX OS, and the stock files come back when it is disabled or removed. Built for EngineX OS 5.3.0.4."),
+         initialComments=[],
+         ),
 ]
 
 
@@ -131,6 +139,12 @@ EXTRA_QML = {
 
 def package_files(mod, helpers):
     mid = mod["id"]
+    if mod.get("community"):
+        # The author's manifest and QML verbatim, plus our README; no helper, script or repo LICENSE.
+        files = {"mod.json": (SRC / mid / "mod.json").read_bytes(), "README.md": (SRC / mid / "README.md").read_bytes()}
+        for src_qml in json.loads(files["mod.json"])["qmlFiles"]:
+            files[src_qml] = (SRC / mid / src_qml).read_bytes()
+        return files
     qml_files = {"Panel.qml": f"EngineXMods/{mid}/Panel.qml"}
     qml_files.update(EXTRA_QML.get(mid, {}))
     manifest = {key: mod[key] for key in ("id", "version", "author", "category")}
@@ -173,7 +187,7 @@ def archive(files):
 def validate(files):
     manifest = json.loads(files["mod.json"])
     assert re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}", manifest["id"])
-    assert manifest["script"] in files and manifest["qmlFiles"]
+    assert manifest["qmlFiles"] and ("script" not in manifest or manifest["script"] in files)
     for src, dst in manifest["qmlFiles"].items():
         assert not Path(dst).is_absolute() and ".." not in Path(dst).parts and dst.endswith(".qml")
         assert 0 < len(files[src]) <= 512 * 1024
@@ -212,12 +226,13 @@ def main():
         else:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(blob)
-        entry = dict(mod, official=True, downloadUrl=f"mods/packages/{path.name}",
+        community = mod.get("community", False)
+        entry = dict({k: v for k, v in mod.items() if k != "community"}, official=not community, downloadUrl=f"mods/packages/{path.name}",
                      sha256=hashlib.sha256(blob).hexdigest(), size=len(blob),
                      models="All 16 Models", hardwareValidation="not-tested", stars=0, downloads=0,
-                     license="MIT", sourceUrl="https://github.com/Cd1s/EngineX-OS/tree/main/docs/mods/src",
-                     runtimeStatus="background-helper" if mod["id"] != "tailscale-remote" else "system-api-required",
-                     **({} if mod["id"] == "tailscale-remote" else dict(helperArch=["armv7", "arm64"], requiresPython=False)))
+                     license="MIT", sourceUrl="https://github.com/Cd1s/EngineX-OS/tree/main/docs/mods/src" + (f"/{mod['id']}" if community else ""),
+                     runtimeStatus="declarative-qml" if community else "background-helper" if mod["id"] != "tailscale-remote" else "system-api-required",
+                     **({} if community or mod["id"] == "tailscale-remote" else dict(helperArch=["armv7", "arm64"], requiresPython=False)))
         registry["mods"].append(entry)
         print(f'{mod["id"]}: {len(files)} files, {len(blob)} bytes, sha256={entry["sha256"]}')
     data = json_bytes(registry)
