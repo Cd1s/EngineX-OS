@@ -55,7 +55,9 @@ def check(source):
             continue  # the array above
         if not re.match(r'HF_CONFIG\(HF_[A-Z_0-9]+,', write[1]):
             fail(start, 'getConfig slot write needs HF_CONFIG')
-    if re.search(r'\bmemcpy\(\s*code\b', config):
+    if re.search(r'\bcode\[[^;\n]*?\]\s*(?:[|&+^\-]=|\+\+|--)', config):
+        fail(start, 'getConfig compound writes must use a tagged instruction assignment')
+    if re.search(r'\bmem(?:cpy|move)\(\s*code\b', config):
         fail(start, 'getConfig copy needs HF_CONFIG_COPY')
     # Directly exported interposers (including macro-generated open/stat aliases).
     signature = re.compile(r'^([A-Za-z_][\w *]*?\b(\w+)\([^;{}]*?\)\s*\{)', re.M)

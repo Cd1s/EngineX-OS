@@ -18,6 +18,7 @@ class HookFeatureCoverageTest(unittest.TestCase):
             source.replace('patch_bytes(HF_DSP_GUARDS, rate,', 'patch_bytes(rate,', 1),
             source.replace('patch_pointer(HF_GATEWAY, slot,', 'patch_pointer(slot,', 1),
             source.replace('HF_CONFIG(HF_STEMS, 0xe5c020db)', '0xe5c020db', 1),
+            source.replace('    const unsigned at[]', '    code[6] |= 1;\n    const unsigned at[]', 1),
             source.replace('code[6] = HF_CONFIG(HF_STEMS_EQ, 0xe5c02054)', 'code[6] = 0xe5c02054', 1),
             source.replace('patch_bytes(HF_DSP_GUARDS, rate,', 'patch_bytes(feature, rate,', 1),
             source + '\nint untagged_wrapper(void) { return 0; }\n',

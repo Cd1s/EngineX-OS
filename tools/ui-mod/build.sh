@@ -16,7 +16,7 @@ if [ -n "$(printf '%s' "$disable" | tr -d ' ')" ]; then
     known=$(sed -n 's/^ *X([A-Z0-9_]*, "\([a-z0-9-]*\)").*$/\1/p' hook_features.h)
     list=
     for name in $disable; do
-        printf '%s\n' "$known" | grep -qx -- "$name" || {
+        printf '%s\n' "$known" | grep -Fqx -- "$name" || {
             echo "unknown hook feature: $name (known: $(printf '%s ' $known))" >&2
             exit 2
         }

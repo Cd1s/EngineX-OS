@@ -21,9 +21,10 @@
 #include <unistd.h>
 
 /* X(ID, "name"): one line each, build.sh reads the names from these lines. mount-hook,
- * rb-bridge, deemixd and internal-heal have no site in the hook: the boot script leaves
+ * deemixd and internal-heal have no site in the hook: the boot script leaves
  * them out (the edisksd preload, the services) and engine-ui-guard skips the internal
- * library check. Naming them here keeps them known names. */
+ * library check. rb-bridge also gates imported-analysis replay/overview repair.
+ * Naming them here keeps them known names. */
 #define ENGINEX_HOOK_FEATURES(X) \
     X(GATEWAY, "gateway") \
     X(SSO, "sso") \

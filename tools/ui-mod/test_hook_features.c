@@ -63,6 +63,9 @@ static void test_masks(void) {
     assert(!strcmp(text, "stems,zoom30,sqlite-tuning"));
     use_conf(""); // an empty file switches nothing off; the build still does
     assert(hf_on(HF_STEMS) && !hf_on(HF_ZOOM30));
+    use_conf("sso");
+    assert(!hf_on(HF_SSO) && !hf_on(HF_GATEWAY));
+    use_conf("");
     // A commented file longer than 4 KiB: the last name still counts (it once read 4 KiB only).
     static char big[20000];
     size_t used = 0;
