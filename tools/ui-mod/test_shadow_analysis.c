@@ -1,0 +1,78 @@
+// cc -O2 -Wall -Wextra -Werror -fsanitize=address,undefined test_shadow_analysis.c -lsqlite3 -o test_shadow_analysis
+#define _GNU_SOURCE
+#include <assert.h>
+#include <sqlite3.h>
+#include "shadow_analysis.h"
+
+static int exec_sql(void *db, const char *sql, int (*row)(void *, int, char **, char **), void *arg, char **err) {
+    return sqlite3_exec(db, sql, row, arg, err);
+}
+
+static const char *filename(void *db, const char *name) {
+    return sqlite3_db_filename(db, name);
+}
+
+static sqlite3 *library(const char *file) {
+    sqlite3 *db = NULL;
+    assert(sqlite3_open(file, &db) == SQLITE_OK);
+    assert(sqlite3_exec(db,
+        "CREATE TABLE Track(id INTEGER PRIMARY KEY, path TEXT);"
+        "CREATE TABLE PerformanceData(trackId INTEGER PRIMARY KEY, trackData BLOB, overviewWaveFormData BLOB,"
+        " beatData BLOB, quickCues BLOB, loops BLOB, thirdPartySourceId INTEGER, activeOnLoadLoops INTEGER);"
+        "INSERT INTO Track VALUES(1,'" SC_SHADOW_REL "peer-f012/Contents/L''ete.wav'),"
+        "(2,'../../../../music/local.wav'),(3,'" SC_SHADOW_REL "peer-f012/missing.wav'),"
+        "(4,'" SC_SHADOW_REL "peer-f012/../outside.wav'),(5,'" SC_SHADOW_REL "peer-f012/corrupt.wav');"
+        "INSERT INTO PerformanceData(trackId) VALUES(1),(2),(3),(4),(5);",
+        NULL, NULL, NULL) == SQLITE_OK);
+    return db;
+}
+
+int main(void) {
+    static const unsigned char payload[] = "RBXA1"
+        "\5\0\0\0" "track" "\5\0\0\0" "waves" "\5\0\0\0" "beats"
+        "\5\0\0\0" "cues!" "\0\0\0\0";
+    char dir[] = "/tmp/shadow-analysis-XXXXXX", path[256], stick[256], contents[256], cache[256], sidecar[256], malformed[256];
+    assert(mkdtemp(dir));
+    sc_shadow_root = dir;
+    snprintf(path, sizeof path, "%s/m.db", dir);
+    snprintf(stick, sizeof stick, "%s/usb.db", dir);
+    snprintf(cache, sizeof cache, "%s/peer-f012", dir);
+    snprintf(contents, sizeof contents, "%s/peer-f012/Contents", dir);
+    snprintf(sidecar, sizeof sidecar, "%s/peer-f012/Contents/L'ete.wav.analysis", dir);
+    snprintf(malformed, sizeof malformed, "%s/peer-f012/corrupt.wav.analysis", dir);
+    assert(!mkdir(cache, 0700) && !mkdir(contents, 0700));
+    FILE *out = fopen(sidecar, "wb");
+    assert(out && fwrite(payload, 1, sizeof payload - 1, out) == sizeof payload - 1 && !fclose(out));
+    out = fopen(malformed, "wb");
+    assert(out && fwrite(payload, 1, sizeof payload - 2, out) == sizeof payload - 2 && !fclose(out));
+
+    sc_shadow_library = path;
+    sqlite3 *db = library(path), *usb = library(stick);
+    const struct sc_shadow_sqlite api = {exec_sql, filename};
+    assert(sc_shadow_analysis_bound(SC_SHADOW_SELECT "? ;"));
+    assert(!sc_shadow_analysis_bound(SC_SHADOW_SELECT "? OR 1"));
+    assert(!sc_shadow_analysis_bound(SC_SHADOW_SELECT "1"));
+    assert(!sc_shadow_analysis_fill(&api, usb, 1)); // Same ID and path, wrong library.
+    for (int i = 2; i <= 5; i++) assert(!sc_shadow_analysis_fill(&api, db, i));
+
+    sqlite3_stmt *stmt = NULL;
+    assert(sqlite3_prepare_v2(db, SC_SHADOW_SELECT "?", -1, &stmt, NULL) == SQLITE_OK);
+    assert(sqlite3_bind_int64(stmt, 1, 1) == SQLITE_OK);
+    assert(sc_shadow_analysis_bound(sqlite3_sql(stmt)));
+    assert(sqlite3_exec(db, "BEGIN", NULL, NULL, NULL) == SQLITE_OK);
+    assert(sc_shadow_analysis_fill(&api, sqlite3_db_handle(stmt), 1));
+    assert(!sc_shadow_analysis_fill(&api, db, 1));
+    assert(sqlite3_step(stmt) == SQLITE_ROW);
+    for (int i = 1; i < 5; i++) {
+        const char *want[] = {"track", "waves", "beats", "cues!"};
+        assert(sqlite3_column_bytes(stmt, i) == 5 && !memcmp(sqlite3_column_blob(stmt, i), want[i - 1], 5));
+    }
+    assert(sqlite3_column_type(stmt, 5) == SQLITE_NULL);
+    sqlite3_finalize(stmt);
+    assert(sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL) == SQLITE_OK);
+    assert(sc_shadow_analysis_fill(&api, db, 1)); // The first fill followed Engine's transaction.
+    assert(sqlite3_close(usb) == SQLITE_OK && sqlite3_close(db) == SQLITE_OK);
+    assert(!unlink(path) && !unlink(stick) && !unlink(sidecar) && !unlink(malformed));
+    assert(!rmdir(contents) && !rmdir(cache) && !rmdir(dir));
+    return 0;
+}

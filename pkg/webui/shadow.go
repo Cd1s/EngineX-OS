@@ -1241,15 +1241,15 @@ func (s *Server) peerAudioGet(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, "", st.ModTime(), f)
 }
 
-// peerPerfGet serves the analysis of the track on this player's deck {n} as
-// EXPF (#49), read from the library Engine keeps it in; unanalysed is 404.
+// peerPerfGet serves the current deck's analysis as EXPF (#49) or as the
+// original compressed blobs for a peer that can fill its shadow row at load.
 func (s *Server) peerPerfGet(w http.ResponseWriter, r *http.Request) {
 	path := s.ownDeckFile(r)
 	if path == "" {
 		http.Error(w, "not loaded", http.StatusConflict)
 		return
 	}
-	perf, err := libraryPerf(r.Context(), path, s.shadow.dataRoot, s.shadow.mediaRoot)
+	perf, err := libraryPerfFormat(r.Context(), path, s.shadow.dataRoot, s.shadow.mediaRoot, r.URL.Query().Get("format") == "native")
 	if err != nil {
 		http.Error(w, "not analysed", http.StatusNotFound)
 		return
@@ -1334,6 +1334,10 @@ func engineLibrary(f, dataRoot, mediaRoot string) string {
 // libraryPerf reads f's analysis from its m.db. Read-only: Engine owns that
 // database, and writing it from another process corrupted it (#49).
 func libraryPerf(ctx context.Context, f, dataRoot, mediaRoot string) ([]byte, error) {
+	return libraryPerfFormat(ctx, f, dataRoot, mediaRoot, false)
+}
+
+func libraryPerfFormat(ctx context.Context, f, dataRoot, mediaRoot string, native bool) ([]byte, error) {
 	lib := engineLibrary(f, dataRoot, mediaRoot)
 	rel, err := filepath.Rel(lib, f)
 	if err != nil {
@@ -1342,21 +1346,21 @@ func libraryPerf(ctx context.Context, f, dataRoot, mediaRoot string) ([]byte, er
 	// Streaming downloads (/data/downloads/<service>/) are in stm.db, not m.db.
 	for _, name := range []string{"m.db", "stm.db"} {
 		var perf []byte
-		if perf, err = dbPerf(ctx, filepath.Join(lib, "Database2", name), filepath.ToSlash(rel)); err == nil {
+		if perf, err = dbPerf(ctx, filepath.Join(lib, "Database2", name), filepath.ToSlash(rel), native); err == nil {
 			return perf, nil
 		}
 	}
 	if orig, ok := inMusicTempOrig(f, dataRoot); ok {
 		if st, statErr := os.Stat(f); statErr == nil {
 			if real := resolveInMusicTempPath(ctx, orig, st.Size(), dataRoot); real != "" {
-				return libraryPerf(ctx, real, dataRoot, mediaRoot)
+				return libraryPerfFormat(ctx, real, dataRoot, mediaRoot, native)
 			}
 		}
 	}
 	return nil, err
 }
 
-func dbPerf(ctx context.Context, mdb, rel string) ([]byte, error) {
+func dbPerf(ctx context.Context, mdb, rel string, native bool) ([]byte, error) {
 	if _, err := os.Stat(mdb); err != nil {
 		return nil, err
 	}
@@ -1365,6 +1369,17 @@ func dbPerf(ctx context.Context, mdb, rel string) ([]byte, error) {
 		return nil, err
 	}
 	defer db.Close()
+	if native {
+		var p enginedb.Performance
+		err := db.QueryRowContext(ctx, `SELECT p.trackData,p.overviewWaveFormData,p.beatData,p.quickCues,p.loops
+			FROM Track t JOIN PerformanceData p ON p.trackId=t.id
+			WHERE t.path=? AND t.isAnalyzed=1 AND length(p.trackData)>4 AND length(p.overviewWaveFormData)>4 AND length(p.beatData)>4`, rel).
+			Scan(&p.TrackData, &p.Overview, &p.Beats, &p.QuickCues, &p.Loops)
+		if err != nil {
+			return nil, err
+		}
+		return encodeShadowAnalysis(p)
+	}
 	var bpm sql.NullFloat64
 	var track, beats, overview []byte
 	err = db.QueryRowContext(ctx, `SELECT coalesce(t.bpmAnalyzed, t.bpm), p.trackData, p.beatData, p.overviewWaveFormData
@@ -2021,6 +2036,9 @@ func (s *Server) shadowFetchPeer(key string, p peerDeck) {
 		}
 		// Engine loads the copy only after this returns, so it sees the .perf.
 		savePerf(local, fetchPerf(ctx, strings.Replace(url, "/audio?", "/perf?", 1)))
+		if playerBoards[imagePrefix(deviceCompatible())] {
+			saveShadowAnalysis(ctx, local, strings.Replace(url, "/audio?", "/perf?", 1)+"&format=native")
+		}
 		return local, nil
 	})
 }
@@ -2121,6 +2139,7 @@ func (s *Server) shadowCleanCopies(keep string) {
 		if k != keep && !sh.busy[k] && time.Since(sh.used[k]) > 2*time.Minute {
 			os.Remove(f)
 			os.Remove(f + ".perf")
+			os.Remove(f + ".analysis")
 			for dir := filepath.Dir(f); dir != s.shadowDir() && strings.HasPrefix(dir, s.shadowDir()); dir = filepath.Dir(dir) {
 				os.Remove(dir) // the copy's own directories, once empty
 			}
