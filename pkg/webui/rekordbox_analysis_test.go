@@ -289,7 +289,7 @@ func TestRekordboxAnalysisOfAnotherBuildIsDropped(t *testing.T) {
 	old := rbxAnalysisDir
 	rbxAnalysisDir = t.TempDir()
 	t.Cleanup(func() { rbxAnalysisDir = old })
-	cached := []string{"7.bin", "7.bin.source", "7.bin.perf", "7.bin.previous", "names/4096/x.mp3", ".loading"}
+	cached := []string{"7.bin", "7.bin.source", "7.bin.perf", "7.bin.previous", "7.cover", "names/4096/x.mp3", ".loading"}
 	kept := func(name string) bool {
 		_, err := os.Stat(filepath.Join(rbxAnalysisDir, name))
 		return err == nil
