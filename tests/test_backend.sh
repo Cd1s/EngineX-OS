@@ -17,6 +17,7 @@ export PATH="/data/bin:/usr/bin:/bin"
 cat > /data/bin/systemctl <<'STUB'
 #!/bin/sh
 printf '%s\n' "$*" >> /data/service-calls
+if [ "$1" = show ]; then printf '%032d\n' 1; fi
 STUB
 cat > /data/bin/curl <<'STUB'
 #!/bin/sh
@@ -27,7 +28,9 @@ chmod +x /data/bin/*
 from http.server import BaseHTTPRequestHandler,HTTPServer
 class Health(BaseHTTPRequestHandler):
  def do_GET(self):
-  self.send_response(200); self.end_headers(); self.wfile.write(b'{"ok":true}')
+  from pathlib import Path
+  backend = b'htdemucs' if Path('/etc/systemd/system/enginex-stemsd.service.d/50-demucs.conf').exists() else b'hpss'
+  self.send_response(200); self.end_headers(); self.wfile.write(b'{"ok":true,"backend":"'+backend+b'"}')
  def log_message(self,*args): pass
 HTTPServer(('127.0.0.1',6596),Health).serve_forever()
 HEALTH
@@ -109,15 +112,133 @@ cat > /data/bin/systemd-analyze <<'STUB'
 exit 0
 STUB
 chmod +x /data/bin/*
+reject_stems() {
+  if bash "$repo/deploy/one-click-backend.sh" --stems "$@" > /data/invalid 2>&1; then
+    echo "Accepted invalid --stems arguments: $*" >&2; exit 1
+  fi
+  grep -q 'expected hpss, demucs or auto' /data/invalid
+}
+reject_stems wrong
+reject_stems
+reject_stems --public
+bash "$repo/deploy/one-click-backend.sh" --help > /data/help
+grep -Fq -- '--stems hpss|demucs|auto' /data/help
 mkdir -p /etc/"$legacy_unit-stems" /opt/"$legacy_unit-stems"
 printf 'existing-renderer-token\n' > /etc/"$legacy_unit-stems/token"
 printf '[Service]\n' > "/etc/systemd/system/$legacy_stemsd.service"
+# A baseline deploy/ copy can be supplied when remote-build omits Git history.
+if [[ -n ${BASELINE_BACKEND:-} ]]; then
+  bash "$BASELINE_BACKEND/deploy/one-click-backend.sh" --relay-bin /data/relay > /data/baseline-summary
+  mkdir /data/baseline
+  cp -a /etc /opt /usr/local/bin /var/lib /data/baseline
+fi
 bash "$repo/deploy/one-click-backend.sh" --relay-bin /data/relay > /data/summary
 grep -q 'enginex-relay' /data/summary
 grep -q 'enable --now enginex-stemsd.service' /data/service-calls
 test -f /etc/enginex-stems/token
 grep -q existing-renderer-token /etc/enginex-stems/token
 sha256sum /etc/enginex-stems/token > /data/token-before
+dropin=/etc/systemd/system/enginex-stemsd.service.d/50-demucs.conf
+test ! -e "$dropin"
+test ! -e /opt/enginex-stems/venv
+grep -qx 'Stems backend: hpss' /data/summary
+
+if [[ -n ${BASELINE_BACKEND:-} ]]; then
+  for path in /etc /opt /usr/local/bin /var/lib; do
+    diff --no-dereference -r "/data/baseline/${path##*/}" "$path"
+  done
+  echo 'Default deployment files match baseline byte for byte'
+fi
+
+cat > /data/bin/python3 <<'STUB'
+#!/bin/sh
+set -eu
+[ "$1 $2" = '-m venv' ] || exec /usr/bin/python3 "$@"
+mkdir -p "$3/bin"
+cat > "$3/bin/python3" <<'PYTHON'
+#!/bin/sh
+[ "$1 $2" = '-m pip' ] || exit 2
+shift 2
+exec pip "$@"
+PYTHON
+chmod +x "$3/bin/python3"
+STUB
+cat > /data/bin/pip <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >> /data/pip-calls
+case "$*" in
+  *whl/cu126*) [ ! -f /data/reject-cu126 ] ;;
+esac
+STUB
+cat > /data/bin/nvidia-smi <<'STUB'
+#!/bin/sh
+[ -s /data/compute-cap ] || exit 1
+case "$1" in
+  -L) echo 'GPU 0: NVIDIA test device' ;;
+  --query-gpu=compute_cap) cat /data/compute-cap ;;
+  *) exit 2 ;;
+esac
+STUB
+cat > /data/bin/journalctl <<'STUB'
+#!/bin/sh
+if [ -s /data/compute-cap ]; then
+  echo 'Stems CUDA: ok'
+else
+  echo 'Stems CUDA: PyTorch is a CPU-only build'
+fi
+STUB
+chmod +x /data/bin/python3 /data/bin/pip /data/bin/nvidia-smi /data/bin/journalctl
+
+one_click_stems() {
+  bash "$repo/deploy/one-click-backend.sh" --relay-bin /data/relay --stems "$1" > /data/summary
+}
+printf 'MemTotal: 8388607 kB\n' > /data/meminfo
+mount --bind /data/meminfo /proc/meminfo
+one_click_stems auto
+test ! -e "$dropin"
+test ! -e /data/pip-calls
+printf 'MemTotal: 8388608 kB\n' > /data/meminfo
+one_click_stems auto
+grep -Fq 'whl/cpu torch torchaudio' /data/pip-calls
+grep -qx 'install demucs' /data/pip-calls
+grep -q -- '-python /opt/enginex-stems/venv/bin/python3 -backend demucs$' "$dropin"
+grep -qx 'Environment=TORCH_HOME=/var/lib/enginex-stems/cache' "$dropin"
+grep -q 'get_model("htdemucs")' "$dropin"
+if grep -Eq '^(PrivateDevices|DeviceAllow|SupplementaryGroups)=' "$dropin"; then
+  echo 'CPU drop-in changed GPU sandbox settings' >&2; exit 1
+fi
+grep -qx 'Stems backend: htdemucs' /data/summary
+grep -qx 'Stems CUDA: PyTorch is a CPU-only build' /data/summary
+cp "$dropin" /data/cpu-dropin
+one_click_stems demucs
+cmp "$dropin" /data/cpu-dropin
+grep -qx 'install --index-url https://download.pytorch.org/whl/cpu torch torchaudio' /data/pip-calls
+
+printf '12.0\n' > /data/compute-cap
+printf 'MemTotal: 8388607 kB\n' > /data/meminfo
+one_click_stems auto
+grep -Fq 'whl/cu128 torch torchaudio' /data/pip-calls
+grep -qx 'PrivateDevices=no' "$dropin"
+grep -Fxq 'DeviceAllow=char-nvidia* rw' "$dropin"
+grep -qx 'SupplementaryGroups=video render' "$dropin"
+grep -qx 'Stems CUDA: ok' /data/summary
+/usr/bin/systemd-analyze --recursive-errors=no verify /etc/systemd/system/enginex-stemsd.service
+printf '8.6\n' > /data/compute-cap
+touch /data/reject-cu126
+one_click_stems demucs
+grep -Fq 'whl/cu126 torch torchaudio' /data/pip-calls
+grep -Fq 'whl/cu124 torch torchaudio' /data/pip-calls
+grep -qx cu124 /opt/enginex-stems/venv/.torch-index
+
+# Switch back without removing operator files or the renderer token.
+printf '[Service]\nNice=11\n' > "${dropin%/*}/90-local.conf"
+one_click_stems hpss
+test ! -e "$dropin"
+test -f "${dropin%/*}/90-local.conf"
+test -x /opt/enginex-stems/venv/bin/python3
+sha256sum -c /data/token-before
+grep -qx 'Stems backend: hpss' /data/summary
+
 mkdir -p /opt/enginex-amd /opt/wrapper-lite
 touch /opt/enginex-amd/enginex-amd.py /opt/enginex-amd/enginex-am-login.py
 cp /data/relay /opt/wrapper-lite/amdl

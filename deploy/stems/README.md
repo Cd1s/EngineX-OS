@@ -98,8 +98,26 @@ token file from the backup. Keep user audio and databases untouched.
 
 ## Switching an existing host
 
-Use `sudo bash deploy/one-click-backend.sh` from a current checkout for the relay
-and renderer together. Back up the existing state and renderer token first. The
-renderer installer preserves `/etc/enginex-stems/token` on rerun. See
+Run from a current checkout on the relay host after backing up the existing
+state and renderer token:
+
+```sh
+sudo bash deploy/one-click-backend.sh                  # HPSS (default)
+sudo bash deploy/one-click-backend.sh --stems demucs   # HTDemucs, GPU or CPU
+sudo bash deploy/one-click-backend.sh --stems auto     # choose for this host
+sudo bash deploy/one-click-backend.sh --stems hpss     # switch back
+```
+
+`auto` selects HTDemucs if `nvidia-smi -L` lists an NVIDIA GPU or Linux reports
+at least 8 GiB of total RAM (`MemTotal`); otherwise it uses HPSS. Demucs uses a
+dedicated venv at `/opt/enginex-stems/venv`, official PyTorch CUDA wheels for the
+detected GPU or CPU wheels on hosts without one, and PyPI for Demucs. The service
+caches the `htdemucs` weights under `/var/lib/enginex-stems/cache` and fetches
+them at startup during install. The installer reports the backend from
+`/healthz` and the result of the service's CUDA check. CPU rendering is slower.
+Switching back to HPSS removes the installer's drop-in and keeps the venv and
+cache for reuse.
+
+The renderer installer preserves `/etc/enginex-stems/token` on rerun. See
 [`deploy/relay-host`](../relay-host/README.md) for relay compatibility names and
 backend setup on a flashed deck.
