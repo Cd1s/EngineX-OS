@@ -2051,7 +2051,7 @@ class ShadowDisplayTest(unittest.TestCase):
                  "scShadowBeatIndex", "scShadowBeatAt", "scShadowGrid", "scShadowNextCue", "scShadowCuesFor", "scShadowAsset",
                  "scShadowProperties", "scShadowTick", "scShadowPost", "scShadowPoll", "scShadowPollIdle", "scShadowDisplayFetch", "scShadowSameSample", "scShadowApplyDisplay", "scShadowCovers", "scShadowBusy", "scShadowApplyAll", "scNextCueInfo", "scNextCueCompute", "scCueProps", "scCueBeatsLeft", "scCueTickFor",
                  "scShadowApply", "scShadowEmpty", "scShadowScratchLine", "scShadowScratchRelease", "scShadowSpeed", "scShadowCues", "scShadowBeat",
-                 "scShadowLoad", "scShadowWrong", "scShadowHolds", "scShadowEndGap", "scShadowEnd",
+                 "scBrowserVisible", "scShadowLoad", "scShadowWrong", "scShadowHolds", "scShadowEndGap", "scShadowEnd",
                  "scShadowSeek", "scShadowMirror", "scShadowMirrorOff", "scShadowLink", "scShadowLinkEdge", "scPress", "scGcCheck", "scShadowWake", "scShadowAnyPlaying",
                  "scShadowLine", "scShadowLandingSeek", "scShadowLandingTick", "scShadowBend", "scShadowBendEnd", "scShadowNudgeTick", "scShadowNudgeDrop", "scShadowNudgeEnd", "scShadowLoopTick", "scShadowMasterBack", "scPressWrite", "scMasterPresses",
                  "scLayerPath", "scPairedLanes", "scPairedFollow", "scShadowHeldBy", "scShadowEngineHeld")
@@ -5083,6 +5083,25 @@ const copying = (id, extra) => Object.assign({deck: 2, path: '', id, key: 'key-'
 const all = e => scShadowApplyAll([Object.assign({}, e, {at: now})], false);
 const busy = () => { const s = scShadowData(2); return scShadowBusy(s, s && s.meta, false); };
 """
+
+    def test_browsing_and_dialogs_defer_only_the_latest_shadow_load(self):
+        self.js(self.ENGINE + r"""
+root.scBrowseProp = {translator: {state: true}};
+run(4000, src(A)); run(4000, src(B));
+assert.deepEqual(eng.asked, [], 'no manual-load command while browsing');
+root.dialogOpen = true; root.scBrowseProp.translator.state = false;
+run(4000, src(B));
+assert.deepEqual(eng.asked, [], 'keep the deck picker open');
+root.dialogOpen = false;
+scShadowApply(src(B)); settle(); run(1500, src(B));
+assert.deepEqual(eng.asked, [B]); assert.equal(eng.held, B); assert.ok(scShadowAt[2].ready);
+// Engine replaced the held file. Repair must respect a newly opened browser too.
+eng.held = NEXT; root.scBrowseProp.translator.state = true;
+run(4000, src(B)); assert.deepEqual(eng.asked, [B]);
+root.scBrowseProp.translator.state = false;
+scShadowApply(src(B)); settle(); run(1500, src(B));
+assert.deepEqual(eng.asked, [B, B]); assert.equal(eng.held, B);
+""")
 
     def test_copy_then_engine_load_is_covered_until_engine_holds_the_track(self):
         self.js(self.ENGINE + self.COPY + r"""

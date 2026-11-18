@@ -2194,7 +2194,9 @@ SERVICES_MAIN = """
 		if (at.path !== e.path || at.id !== id) {
 			scShadowScratchRelease(d, at)
 			scShadowNudgeDrop(at, now)
-			at = scShadowAt[d] = {path: e.path, id: id, tries: 0, seekAt: 0, seeks: 0, loads: at.loads || 0, jumps: e.jumps, nativeSync: !!at.nativeSync, mirror: at.mirror}
+			at = scShadowAt[d] = {path: e.path, id: id, pendingLoad: true, tries: 0, seekAt: 0, seeks: 0, loads: at.loads || 0, jumps: e.jumps, nativeSync: !!at.nativeSync, mirror: at.mirror}
+		}
+		if (at.pendingLoad) {
 			root.scShadowLoad(d, at, e, now)
 			return
 		}
@@ -2803,6 +2805,10 @@ SERVICES_MAIN = """
 		const ps = root.scTr("/Engine/Deck" + d + "/PlayState"), play = root.scTr("/Engine/Deck" + d + "/Play")
 		const playing = !!(ps && ps.state)
 		if (playing && play) play.state = false
+		// Stock handles this URL like a file dropped on a deck: it leaves the browser.
+		// A live peer is polled even when paused; the next poll carries its latest track.
+		at.pendingLoad = root.scBrowserVisible() || root.dialogOpen
+		if (at.pendingLoad) { at.ready = false; return }
 		root.scTr("/Client/Librarian/AddToDatabaseAndLoadToDeck" + d).url = "file://" + encodeURI(e.path)
 		at.loads = (at.loads || 0) + 1
 		at.tries = (at.tries || 0) + 1
