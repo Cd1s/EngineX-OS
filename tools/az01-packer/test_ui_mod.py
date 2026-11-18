@@ -10622,7 +10622,12 @@ const scBpmRestoreTimer = {restart() { armed++; }};
     @unittest.skipUnless(shutil.which("node"), "Node is required for the speed and restore logic")
     def test_whole_bpm_respects_sync_and_only_restores_a_snapped_centre(self):
         path = "ControlSurfaceModules/ControlSurfaceModules/SpeedSlider.qml"
-        slider = "\n".join(new for _, new in bp.edits(False)[path])
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            slider = "\n".join(new for _, new in bp.edits(False)[path])
+        finally:
+            bp.ROOT = old_root
         transform = self._block(slider, "function scTransformSpeed(")[0]
         callback = self._block(slider, "function transformValue(")[0]
         sync_off = re.search(r"readonly property bool syncOff: (.+)", slider)
