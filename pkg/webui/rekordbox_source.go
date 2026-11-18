@@ -105,21 +105,34 @@ type rbxHost struct{ IP, Name string }
 
 // rekordboxHost is the computer with rekordbox on the link, once Pro DJ Link is on.
 func (s *Server) rekordboxHost() *rbxHost {
+	for _, d := range s.rekordboxDevices() {
+		if s.rekordboxReady(d.Address) {
+			return &rbxHost{d.Address, rbxName(d.Address)}
+		}
+	}
+	return nil
+}
+
+func (s *Server) rekordboxDevices() []prolink.Device {
 	s.uiMu.Lock()
 	on := s.loadUI().ProlinkShare
 	s.uiMu.Unlock()
 	if !on {
 		return nil
 	}
-	for _, d := range s.mergedDevices() {
-		if prolink.IsRekordbox(d) && time.Since(d.LastSeen) <= prolink.DeviceTimeout && net.ParseIP(d.Address) != nil {
-			if !s.rekordboxReady(d.Address) {
-				continue
-			}
-			return &rbxHost{d.Address, rbxName(d.Address)}
+	devices := s.mergedDevices()
+	return slices.DeleteFunc(devices, func(d prolink.Device) bool {
+		return !prolink.IsRekordbox(d) || time.Since(d.LastSeen) > prolink.DeviceTimeout || net.ParseIP(d.Address) == nil
+	})
+}
+
+func (s *Server) rekordboxAvailable(ip string) bool {
+	for _, d := range s.rekordboxDevices() {
+		if d.Address == ip {
+			return s.rekordboxReady(ip)
 		}
 	}
-	return nil
+	return false
 }
 
 // A computer keeps announcing even with LINK off. Only a successful library-port
@@ -294,6 +307,7 @@ func (g *tidalGateway) rbxRows(ctx context.Context, ip, list string) ([]prolink.
 func (g *tidalGateway) rbxTracks(w http.ResponseWriter, r *http.Request, ref playlistRef) {
 	_, rest, _ := strings.Cut(ref.list.ID, "\x00")
 	ip, list, _ := strings.Cut(rest, "\x00")
+	prefetch := g.rbxBrowse.begin()
 	rows, first, err := g.rbxRows(r.Context(), ip, list)
 	if err != nil && len(rows) == 0 {
 		fail(w, 502, errors.New(g.s.rbxText("unreadable")))
@@ -324,10 +338,19 @@ func (g *tidalGateway) rbxTracks(w http.ResponseWriter, r *http.Request, ref pla
 		shown = shown[min(-offset, len(shown)):]
 		offset = 0
 	}
-	if g.rbxPrefetch(r.Context(), ip, rows, shown, offset) {
+	front, cancel := context.WithCancel(r.Context())
+	stop := context.AfterFunc(prefetch, cancel)
+	if g.rbxPrefetch(front, ip, rows, shown, offset) {
 		rbxMarkLoading()
 	}
+	stop()
+	cancel()
 	respond(w, result)
+	if _, slot := rbxMedia(ip); slot == 0 && len(rows) != 0 {
+		g.rbxBrowse.enqueue(prefetch, func() {
+			g.rbxPrefetchContinue(prefetch, ip, rows, items[noticeCount:], offset)
+		})
+	}
 }
 
 // rbxPath is a path of the computer as one slash-separated absolute path, whichever its system.

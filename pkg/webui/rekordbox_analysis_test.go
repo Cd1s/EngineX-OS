@@ -6,14 +6,17 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -79,6 +82,264 @@ func flac48k(size int) []byte {
 	binary.BigEndian.PutUint32(b[8:], 4096<<16|4096)
 	binary.BigEndian.PutUint64(b[8+10:], si)
 	return b
+}
+
+type rbxPrefetchLink struct {
+	analysedRbxLink
+	rows  []prolink.RekordboxTrack
+	path  func(uint32)
+	close func()
+}
+
+func (l rbxPrefetchLink) Tracks() ([]prolink.RekordboxTrack, error) { return l.rows, nil }
+func (l rbxPrefetchLink) Path(id uint32) (string, error) {
+	l.path(id)
+	return l.analysedRbxLink.Path(id)
+}
+func (l rbxPrefetchLink) Close() { l.close() }
+
+func TestRekordboxPrefetchContinuesPastPageAfterResponse(t *testing.T) {
+	const tracks = 52
+	paths := make(map[uint32]string)
+	rows := make([]prolink.RekordboxTrack, tracks)
+	for i := range rows {
+		id := uint32(i + 1)
+		paths[id] = "/Users/dj/Music/same.flac"
+		rows[i] = prolink.RekordboxTrack{ID: id, Title: strconv.Itoa(i + 1)}
+	}
+	e := newRbxEnv(t, paths)
+	if err := os.WriteFile(filepath.Join(e.share, "same.flac"), flac48k(4096), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := rbxAnalysisDir
+	rbxAnalysisDir = t.TempDir()
+	t.Cleanup(func() { rbxAnalysisDir = old })
+	started, release := make(chan struct{}), make(chan struct{})
+	var startOnce, releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(rbxAnalysisJobs.Wait)
+	t.Cleanup(unblock)
+	var active atomic.Int32
+	dialRekordbox = func(ctx context.Context, _ net.IP, _ byte) (rbxLink, error) {
+		if active.Add(1) != 1 {
+			t.Error("more than one dbserver session")
+		}
+		return rbxPrefetchLink{
+			analysedRbxLink: analysedRbxLink{fakeRbxLink{paths}}, rows: rows,
+			path: func(id uint32) {
+				if id != 49 {
+					return
+				}
+				deadline, ok := ctx.Deadline()
+				if !ok || time.Until(deadline) > 2*time.Second {
+					t.Error("background dbserver read has no two-second budget")
+				}
+				startOnce.Do(func() { close(started) })
+				select {
+				case <-release:
+				case <-ctx.Done():
+				}
+			},
+			close: func() { active.Add(-1) },
+		}, nil
+	}
+	ref := playlistRef{}
+	ref.list.ID = rbxListID("127.0.0.1", "all")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	request := httptest.NewRequest("GET", "/?limit=50", nil).WithContext(ctx)
+	response := httptest.NewRecorder()
+	sent := make(chan struct{})
+	go func() {
+		defer close(sent)
+		e.s.tidal.rbxTracks(response, request, ref)
+		cancel() // net/http cancels when the handler returns.
+	}()
+	select {
+	case <-sent:
+	case <-time.After(2 * time.Second):
+		t.Fatal("background read blocked the list response")
+	}
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("prefetch stopped at 48 tracks")
+	}
+	var page tidalList
+	if err := json.Unmarshal(response.Body.Bytes(), &page); err != nil || len(page.Items) != 50 {
+		t.Fatalf("response: %d tracks, %v", len(page.Items), err)
+	}
+	unblock()
+	rbxAnalysisJobs.Wait()
+	files, err := filepath.Glob(filepath.Join(rbxAnalysisDir, "*.bin"))
+	if err != nil || len(files) != tracks {
+		t.Fatalf("cached %d of %d tracks: %v", len(files), tracks, err)
+	}
+}
+
+func TestRekordboxPrefetchCancelsOldList(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		stop func(*rbxEnv)
+	}{
+		{"newer list", func(e *rbxEnv) {
+			ref := playlistRef{}
+			ref.list.ID = rbxListID("127.0.0.1", "9")
+			e.s.tidal.rbxTracks(httptest.NewRecorder(), httptest.NewRequest("GET", "/", nil), ref)
+		}},
+		{"source removed", func(e *rbxEnv) {
+			os.Remove(e.s.ProlinkStatePath())
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("ENGINEX_PROLINK_STATE", filepath.Join(t.TempDir(), "none.json"))
+			paths := map[uint32]string{1: "/Users/dj/Music/x.flac", 2: "/Users/dj/Music/x.flac", 3: "/Users/dj/Music/x.flac"}
+			e := newRbxEnv(t, paths)
+			if err := os.WriteFile(filepath.Join(e.share, "x.flac"), flac48k(4096), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			old := rbxAnalysisDir
+			rbxAnalysisDir = t.TempDir()
+			t.Cleanup(func() { rbxAnalysisDir = old })
+			t.Cleanup(rbxAnalysisJobs.Wait)
+			started, unstick := make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			var cancelled, reachedThird atomic.Bool
+			dialRekordbox = func(ctx context.Context, _ net.IP, _ byte) (rbxLink, error) {
+				return rbxPrefetchLink{
+					analysedRbxLink: analysedRbxLink{fakeRbxLink{paths}},
+					rows:            []prolink.RekordboxTrack{{ID: 1, Title: "A"}, {ID: 2, Title: "B"}, {ID: 3, Title: "C"}},
+					path: func(id uint32) {
+						if id == 3 {
+							reachedThird.Store(true)
+						}
+						if id != 2 {
+							return
+						}
+						once.Do(func() {
+							close(started)
+							select {
+							case <-unstick:
+							case <-ctx.Done():
+								cancelled.Store(true)
+							}
+						})
+					},
+					close: func() {},
+				}, nil
+			}
+			ref := playlistRef{}
+			ref.list.ID = rbxListID("127.0.0.1", "all")
+			e.s.tidal.rbxTracks(httptest.NewRecorder(), httptest.NewRequest("GET", "/?limit=1", nil), ref)
+			select {
+			case <-started:
+			case <-time.After(2 * time.Second):
+				t.Fatal("background read never started")
+			}
+			tc.stop(e)
+			if tc.name == "source removed" {
+				time.Sleep(550 * time.Millisecond) // pass the presence refresh interval
+			}
+			close(unstick)
+			rbxAnalysisJobs.Wait()
+			if reachedThird.Load() || (tc.name == "newer list" && !cancelled.Load()) {
+				t.Fatalf("old list was not stopped: cancelled=%t third=%t", cancelled.Load(), reachedThird.Load())
+			}
+		})
+	}
+}
+
+type rbxEditedLink struct {
+	analysedRbxLink
+	ms uint32
+}
+
+func (l rbxEditedLink) BeatGrid(id uint32) ([]byte, error) {
+	b, err := l.analysedRbxLink.BeatGrid(id)
+	binary.LittleEndian.PutUint32(b[24:], l.ms)
+	return b, err
+}
+
+func (l rbxEditedLink) CuesExtended(uint32) ([]byte, error) {
+	b := make([]byte, 0x24)
+	binary.LittleEndian.PutUint32(b, uint32(len(b)))
+	b[4], b[6] = 3, 1
+	binary.LittleEndian.PutUint32(b[12:], l.ms)
+	return b, nil
+}
+
+func TestRekordboxManifestRefreshesEditedGridAndCue(t *testing.T) {
+	paths := map[uint32]string{1: "/Users/dj/Music/x.m4a"}
+	e := newRbxEnv(t, paths)
+	if err := os.WriteFile(filepath.Join(e.share, "x.m4a"), testfixture.AACWithPriming(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := rbxAnalysisDir
+	rbxAnalysisDir = t.TempDir()
+	t.Cleanup(func() { rbxAnalysisDir = old })
+	t.Cleanup(rbxAnalysisJobs.Wait)
+	base := analysedRbxLink{fakeRbxLink{paths}}
+	var edit atomic.Uint32
+	dialRekordbox = func(context.Context, net.IP, byte) (rbxLink, error) {
+		if ms := edit.Load(); ms != 0 {
+			return rbxEditedLink{base, ms}, nil
+		}
+		return base, nil
+	}
+	ids, _ := e.trackIDs(t, "Tracks")
+	rbxAnalysisJobs.Wait()
+	id := ids["First"]
+	out := rbxAnalysisPath(id)
+	before, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edit.Store(650)
+	manifest := fmt.Sprintf("/v1/tracks/%d/playbackinfopostpaywall", id)
+	tidalGet(t, e.base, manifest, 200, nil)
+	after, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := rbxEditedLink{base, 650}
+	grid, _ := l.BeatGrid(1)
+	cues, _ := l.CuesExtended(1)
+	want, err := enginedb.EncodePerformance(rekordbox.Track{SampleRate: 44100, SampleCount: 21435392 - 2048, StartOffsetSamples: 2048},
+		&rekordbox.Analysis{Beats: rbxBeatGrid(grid), Cues: rbxCueList(cues)})
+	got, original := rbxTestBlobs(t, after), rbxTestBlobs(t, before)
+	if err != nil || !bytes.Equal(got[2], want.Beats) || !bytes.Equal(got[3], want.QuickCues) ||
+		!bytes.Equal(got[0], original[0]) || !bytes.Equal(got[1], original[1]) {
+		t.Fatal("reload did not refresh both edited fields and preserve the waveform")
+	}
+	first, err := os.Stat(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tidalGet(t, e.base, manifest, 200, nil)
+	again, err := os.Stat(out)
+	if err != nil || !os.SameFile(first, again) {
+		t.Fatal("unchanged source responses rewrote the analysis")
+	}
+}
+
+func rbxTestBlobs(t *testing.T, b []byte) [5][]byte {
+	t.Helper()
+	r := bytes.NewReader(b)
+	if _, err := r.Seek(int64(len(rbxAnalysisMagic)), io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	var blobs [5][]byte
+	for i := range blobs {
+		var len uint32
+		if err := binary.Read(r, binary.LittleEndian, &len); err != nil || len > uint32(r.Len()) {
+			t.Fatalf("bad analysis field %d: %v", i, err)
+		}
+		blobs[i] = make([]byte, len)
+		if _, err := io.ReadFull(r, blobs[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return blobs
 }
 
 // Engine analysed every rekordbox track it streamed (maintainer: grid, cues and both
