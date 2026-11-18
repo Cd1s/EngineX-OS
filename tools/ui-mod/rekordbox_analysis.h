@@ -47,7 +47,8 @@ static long long sc_rbx_uri_id(const char *uri) {
 
 // The UPDATE that gives the empty PerformanceData row of track the analysis in b, the file
 // stream-sync writes: "RBXA1", then trackData, overviewWaveFormData, beatData, quickCues
-// and loops, each a little-endian uint32 length and its bytes. NULL if b is not one.
+// and loops, each a little-endian uint32 length and its bytes, then the
+// encoder's analysed flag (omitted by older builds). NULL if b is not one.
 static char *sc_rbx_analysis_sql(const unsigned char *b, size_t n, long long track) {
     static const char *const columns[] = {"trackData", "overviewWaveFormData", "beatData", "quickCues", "loops"};
     size_t at = 5, len[5], start[5], total = 256;
@@ -60,6 +61,8 @@ static char *sc_rbx_analysis_sql(const unsigned char *b, size_t n, long long tra
         at = start[i] + len[i];
         total += strlen(columns[i]) + 8 + 2 * len[i];
     }
+    int analysed = 1;
+    if (n - at == 1 && b[at] <= 1) analysed = b[at++];
     if (at != n || !len[0] || !len[2]) return NULL;
     char *sql = malloc(total), *p = sql;
     if (!sql) return NULL;
@@ -74,13 +77,13 @@ static char *sc_rbx_analysis_sql(const unsigned char *b, size_t n, long long tra
     // Engine analyses a track whose Track row says it is not analysed, whatever its
     // PerformanceData holds (left deck 2026-11-18: filled rows with isAnalyzed 0 were analysed
     // again; rb-bridge's drive rows say 1 and load with their grid).
-    sprintf(p, " WHERE trackId = %lld AND trackData IS NULL; UPDATE Track SET isAnalyzed = 1 WHERE id = %lld AND changes() > 0", track, track);
+    sprintf(p, " WHERE trackId = %lld AND trackData IS NULL; UPDATE Track SET isAnalyzed = %d WHERE id = %lld AND changes() > 0", track, analysed, track);
     return sql;
 }
 
 // Where stream-sync leaves a Pro DJ Link track's analysis, and ".loading", touched when a
 // deck asks it for such a track. Variables for the tests.
-static const char *sc_rbx_dir = "/run/enginex-rbx-analysis";
+static const char *sc_rbx_dir = "/run/enginex-rbx-analysis-v2";
 static const char *sc_rbx_drives = "/media/";
 static const long sc_rbx_window = 120; // seconds a load request opens the hook for
 

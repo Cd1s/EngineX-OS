@@ -309,13 +309,25 @@ func (g *tidalGateway) rbxTracks(w http.ResponseWriter, r *http.Request, ref pla
 		refs[i] = trackRef{track: providers.Track{ID: "rbx\x00" + ip + "\x00" + strconv.FormatUint(uint64(t.ID), 10), Title: t.Title, Artist: t.Artist, BPM: t.BPM, Key: key, DurationMS: t.DurationMS, Provider: rekordboxScope}}
 	}
 	items := g.refItems(refs)
+	noticeCount := 0
 	if first != "" {
 		if _, _, _, err := g.rbxFind(r.Context(), ip, first); err != nil {
 			notice := g.trackItems("", false, []providers.Track{{Provider: listNoticeProvider, ID: "rekordbox-files", Title: g.s.rbxText("noshare")}})
 			items = append(notice, items...)
+			noticeCount = len(notice)
 		}
 	}
-	respond(w, page(r, 500, items))
+	result := page(r, 500, items)
+	shown := result["items"].([]any)
+	offset := result["offset"].(int) - noticeCount
+	if offset < 0 {
+		shown = shown[min(-offset, len(shown)):]
+		offset = 0
+	}
+	if g.rbxPrefetch(r.Context(), ip, rows, shown, offset) {
+		rbxMarkLoading()
+	}
+	respond(w, result)
 }
 
 // rbxPath is a path of the computer as one slash-separated absolute path, whichever its system.
@@ -388,6 +400,19 @@ func (g *tidalGateway) rbxFind(ctx context.Context, ip, rbPath string) (file, ro
 	if file, root = g.s.rbxShareFile(rbPath); file != "" {
 		return file, root, nil, nil
 	}
+	if smb := g.rbxFindSMB(ctx, rbPath); smb != nil {
+		return "", "", smb, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, rbxProbeTime)
+	defer cancel()
+	c := rbxNFS(net.ParseIP(ip))
+	if _, _, err = c.Lookup(ctx, rbxExport, rbxPath(rbPath)); err != nil {
+		return "", "", nil, err
+	}
+	return "", "", &rbxRemote{nfs: c}, nil
+}
+
+func (g *tidalGateway) rbxFindSMB(ctx context.Context, rbPath string) *rbxRemote {
 	if rel, ok := g.s.rbxShareRel(rbPath); ok {
 		probe, cancel := context.WithTimeout(ctx, rbxProbeTime)
 		defer cancel()
@@ -404,19 +429,13 @@ func (g *tidalGateway) rbxFind(ctx context.Context, ip, rbPath string) (file, ro
 				p := path.Join(c.Root, name)
 				if info, e := c.Share.Stat(p); e == nil && info.Mode().IsRegular() {
 					c.Close()
-					return "", "", &rbxRemote{mount: m, path: p, info: info}, nil
+					return &rbxRemote{mount: m, path: p, info: info}
 				}
 			}
 			c.Close()
 		}
 	}
-	ctx, cancel := context.WithTimeout(ctx, rbxProbeTime)
-	defer cancel()
-	c := rbxNFS(net.ParseIP(ip))
-	if _, _, err = c.Lookup(ctx, rbxExport, rbxPath(rbPath)); err != nil {
-		return "", "", nil, err
-	}
-	return "", "", &rbxRemote{nfs: c}, nil
+	return nil
 }
 
 // rbxPrepare gives a rekordbox row the audio file it plays from, as a drive row has one.

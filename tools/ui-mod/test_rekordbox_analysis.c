@@ -20,7 +20,7 @@ static sqlite3 *library_row(const char *path, const char *uri, const char *label
     assert(sqlite3_open(attach ? ":memory:" : path, &db) == SQLITE_OK);
     char sql[768];
     snprintf(sql, sizeof sql, "%s%s%s;"
-             "CREATE TABLE %sTrack (id INTEGER PRIMARY KEY, uri TEXT, label TEXT, isAnalyzed INTEGER DEFAULT 0);"
+             "CREATE TABLE %sTrack (id INTEGER PRIMARY KEY, uri TEXT, label TEXT, isAnalyzed INTEGER DEFAULT 0, isBeatGridLocked INTEGER);"
              "CREATE TABLE %sPerformanceData (trackId INTEGER PRIMARY KEY, trackData BLOB, overviewWaveFormData BLOB, beatData BLOB, quickCues BLOB, loops BLOB);"
              "INSERT INTO Track (id, uri, label) VALUES (16449, %s%s%s, '%s'); INSERT INTO PerformanceData (trackId) VALUES (16449);",
              attach ? "ATTACH '" : "SELECT 1", attach ? path : "", attach ? "' AS stm" : "", attach ? "stm." : "", attach ? "stm." : "",
@@ -78,6 +78,19 @@ int main(void) {
     char *sql = sc_rbx_analysis_sql(file, sizeof file - 1, 9);
     assert(sql && !strcmp(sql, "UPDATE PerformanceData SET trackData = X'01ab', overviewWaveFormData = NULL, beatData = X'ff', quickCues = NULL, loops = NULL WHERE trackId = 9 AND trackData IS NULL; "
                               "UPDATE Track SET isAnalyzed = 1 WHERE id = 9 AND changes() > 0"));
+    free(sql);
+    unsigned char with_flag[sizeof file];
+    memcpy(with_flag, file, sizeof file);
+    sql = sc_rbx_analysis_sql(with_flag, sizeof with_flag, 16449);
+    assert(sql);
+    sqlite3 *partial = library(":memory:", "rekordbox [126 BPM]");
+    assert(sqlite3_exec(partial, sql, NULL, NULL, NULL) == SQLITE_OK);
+    sqlite3_stmt *flags;
+    assert(sqlite3_prepare_v2(partial, "SELECT isAnalyzed, isBeatGridLocked, hex(beatData) FROM Track JOIN PerformanceData ON id = trackId", -1, &flags, NULL) == SQLITE_OK);
+    assert(sqlite3_step(flags) == SQLITE_ROW && !sqlite3_column_int(flags, 0) && sqlite3_column_type(flags, 1) == SQLITE_NULL);
+    assert(!strcmp((const char *)sqlite3_column_text(flags, 2), "FF"));
+    sqlite3_finalize(flags);
+    sqlite3_close(partial);
     free(sql);
     assert(!sc_rbx_analysis_sql(file, sizeof file - 2, 9));                      // cut short
     assert(!sc_rbx_analysis_sql((const unsigned char *)"RBXA0", 5, 9));           // not ours
