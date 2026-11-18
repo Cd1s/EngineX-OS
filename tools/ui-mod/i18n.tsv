@@ -457,6 +457,7 @@ LATCH	锁定	鎖定	LATCH
 Extreme Type	滤波极值行为	濾波極值行為	Tipo de extremo
 Volume	音量	音量	Volumen
 Crossfader	交叉推子	交叉推桿	Crossfader
+Crossfader Reverse	反转交叉推子	反轉交叉推桿	Invertir crossfader
 Microphone	麦克风	麥克風	Micrófono
 Output	输出	輸出	Salida
 Computer	电脑	電腦	Ordenador

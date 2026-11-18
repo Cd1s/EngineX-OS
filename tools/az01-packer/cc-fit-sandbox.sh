@@ -4,6 +4,7 @@ ENGINEX_LAB=${ENGINEX_LAB:-$legacy_lab}
 # Control Center fit: the shipped 5.3.0 ControlCenterTab.qml laid out at each model's real panel size, on that model's own
 # Engine and Config (product code), natively on the build host. No qemu, host services or deck connections.
 # bash tools/az01-packer/cc-fit-sandbox.sh <new-private-dir> [BOARD ...]     (default: all 16 models)
+# CROSS_FADER_TEST=1 bash tools/az01-packer/cc-fit-sandbox.sh <new-private-dir> JP11S [other software-switch boards...]
 # Panel: every model's device tree (Gen-2, AZ04) or stock splash (Gen-1) is an 800 x 1280 portrait panel shown rotated, 1280 x 800.
 set -euo pipefail
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
@@ -26,7 +27,11 @@ if [ "${2:-}" != --inner ]; then
     [ "$(uname -m)" = aarch64 ] || { echo 'native ARM build host (aarch64) required' >&2; exit 1; }
     [ ! -e "$W" ] || { echo "refusing existing sandbox $W" >&2; exit 1; }
     mkdir -p "$W"
-    boards=("${@:2}"); [ ${#boards[@]} -gt 0 ] || boards=(JC11 JC16 NH08 JP07 JP08 JP11 JP13 JP14 JP20 JP21 JC11S JP11S NH08S NH10 JP24 RMZ2)
+    boards=("${@:2}")
+    if [ "${CROSS_FADER_TEST:-0}" = 1 ]; then
+        [ ${#boards[@]} -gt 0 ] || boards=(JC11 JC16 NH08 JP11 JP20 JP21 JC11S JP11S NH08S NH10)
+    fi
+    [ ${#boards[@]} -gt 0 ] || boards=(JC11 JC16 NH08 JP07 JP08 JP11 JP13 JP14 JP20 JP21 JC11S JP11S NH08S NH10 JP24 RMZ2)
     for board in "${boards[@]}"; do
         read -r kind image < <(image_of "$board")
         dir=$W/$(basename "$image")
@@ -50,7 +55,9 @@ PY
     python3 "$REPO/tools/ui-mod/build_packs.py" --qrc "$LAB/5.3.0/qrc" --out "$W/packs" > "$W/packs.log"
     # The 32-bit Gen-2 Engine exits with "TestApp" without a deck's SoC identity: a sandbox-only stub passes that one check.
     arm-linux-gnueabihf-gcc -O2 -Wall -Wextra -Werror -shared -fPIC -o "$W/identity.so" "$REPO/tools/az01-packer/cc-fit-identity.c"
-    (cd "$REPO/tools/ui-mod" && CROSS= OUT="$W/hook-az04.so" sh build.sh)
+    if [ "${CROSS_FADER_TEST:-0}" != 1 ]; then
+        (cd "$REPO/tools/ui-mod" && CROSS= OUT="$W/hook-az04.so" sh build.sh)
+    fi
     fail=0
     for board in "${boards[@]}"; do
         unshare -m -n -p -f --kill-child bash "$0" "$W" --inner "$board" || fail=1
@@ -98,6 +105,36 @@ cp -a "$W/packs/en" "$R/data/enginex/ui/packs/"
 mkdir -p "$R/data/enginex/ui/packs/en/Skins/Common/Items"
 sed "s/@BOARD@/$board/; s/@WIDTH@/${PANEL%x*}/; s/@HEIGHT@/${PANEL#*x}/" "$REPO/tools/az01-packer/cc-fit-probe.qml" > "$R/data/enginex/ui/packs/en/Skins/Common/Items/QmlWarnings.qml"
 printf 'lang=en\n' > "$R/data/enginex/ui/settings.conf"
+if [ "${CROSS_FADER_TEST:-0}" = 1 ]; then
+    cp "$REPO/tools/az01-packer/crossfader-reverse-probe.qml" "$R/data/enginex/ui/packs/en/Skins/Common/Items/QmlWarnings.qml"
+    triplet=arm-linux-gnueabihf; loader=ld-linux-armhf.so.3
+    for path in /dev/dri /sys/class /sys/devices /sys/bus /usr/lib/"$triplet" /usr/share/glvnd /usr/share/drirc.d; do
+        mkdir -p "$R$path"
+        mount --bind "$path" "$R$path"; mount -o remount,bind,ro "$R$path"
+    done
+    printf '{"device":"/dev/dri/card0","headless":"1280x800","hwcursor":false}\n' > "$W/$board-screen.json"
+    for c in Default "$board"; do
+        cfg="$R/usr/Engine/ScreenConfiguration/$c/ScreenConfiguration.json"
+        if [ -f "$cfg" ]; then mount --bind "$W/$board-screen.json" "$cfg"; fi
+    done
+    chroot "$R" /usr/bin/dbus-daemon --system --fork --nopidfile > "$W/$board-dbus.log" 2>&1 || true
+    # Engine locates QML plugins relative to /proc/self/exe. Exec it normally with Mesa's matching loader.
+    mount --bind "/usr/lib/$triplet/$loader" "$R/lib/$loader"
+    engine_rc=0
+    timeout --kill-after=5s 60s chroot "$R" "/usr/lib/$triplet/$loader" --library-path "/usr/lib/$triplet" \
+        /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/tmp/home \
+        QT_QPA_PLATFORM=eglfs QT_QPA_EGLFS_INTEGRATION=eglfs_kms LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe \
+        LP_NUM_THREADS=2 QML_DISABLE_DISK_CACHE=1 MALLOC_ARENA_MAX=1 LD_LIBRARY_PATH="/usr/lib/$triplet:/usr/lib:/usr/qt/lib" \
+        LD_PRELOAD="$preload" /usr/Engine/Engine -d0 > "$W/$board-engine.log" 2>&1 || engine_rc=$?
+    if ! grep -aq "X303 PASS|$board" "$W/$board-engine.log"; then
+        cp "$R/tmp/engine-quit-reason" "$W/$board-quit-reason" 2>/dev/null || true
+        echo "$board: crossfader test failed (Engine exit $engine_rc)" >&2
+        exit 1
+    fi
+    grep -a "X303 " "$W/$board-engine.log" | cut -c1-150
+    cp "$R/tmp/crossfader-reverse.png" "$W/$board-reverse.png"
+    exit
+fi
 chroot "$R" /usr/bin/dbus-daemon --system --fork --nopidfile > "$W/$board-dbus.log" 2>&1 || true
 engine_rc=0
 timeout --kill-after=5s 60s chroot "$R" /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/tmp/home LD_LIBRARY_PATH=/usr/qt/lib \

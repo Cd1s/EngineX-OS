@@ -7314,6 +7314,21 @@ def edits(dev: bool):
         prefs + ("" if v53() else "TabContents/") + "MixerTabContent.qml": [
             (f'import "{"" if v53() else "../"}Entries"\n',
              f'import "{"" if v53() else "../"}Entries"\nimport "{"Entries/Base" if v53() else "../Entries/Base"}" as EntryBase\nimport Planck 1.0\n'),
+            *([("XFaderCutInLeft {},", """EntryBase.SwitchEntry {
+            text: "Crossfader Reverse"
+            readonly property var reverse: root.scHasMixer && !root.scIsAZ04
+                ? Planck.getProperty("/Engine/Mixer/CrossfaderReverse") : null
+            readonly property var position: reverse ? Planck.getProperty("/Engine/Mixer/CrossfaderPosition") : null
+            visible: !!reverse && !!reverse.translator && typeof reverse.translator.state === "boolean"
+                && !!position && !!position.translator && typeof position.translator.unnormalized === "number"
+            checkedExternally: visible && reverse.translator.state
+            onClicked: if (visible) {
+                reverse.translator.state = !reverse.translator.state
+                // Engine recomputes channel gains on a position write, even when the fader is at rest.
+                position.translator.unnormalized = position.translator.unnormalized
+            }
+        },
+        XFaderCutInLeft {},""")] if v53() else []),
             ("CrossfaderCalibration {}" if v53() else "CrossfaderCalibration { }",
              """EntryBase.ListEntry {
 \t\t\t\ttext: "Fader Echo"
