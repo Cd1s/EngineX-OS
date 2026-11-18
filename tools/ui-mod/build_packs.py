@@ -562,6 +562,53 @@ STREAMING_INTERNAL_SAVE = """
         }
         if (!PlanckGUI.views.sourceScreenView.visible) PlanckGUI.views.sourceScreenView.onQuickSourceButtonClicked()
     }
+    // A stock deck with one source browses it at start-up (board flag
+    // autoSelectSingleSource). To Engine the internal drive is a second drive, so that
+    // stopped and the Sources list asked for the card at every start. The only drive is
+    // a row whose identifier is a path (another deck's drive over Engine Link is
+    // net://…), other than the internal drive and the read-only sampler demo device
+    // (type 6). Engine ignores a selection until it is ready, so it is repeated until
+    // something is browsed; select() is what a tap does and loads the drive's library.
+    property string scStartDrive: ""
+    property int scStartTries: 0
+    function scOnlyDrive() {
+        const model = Planck.librarianController.browserSourceControllerPtr().model()
+        let only = ""
+        for (let row = 0; row < model.rowCount(); row++) {
+            const index = model.index(row, 0)
+            const id = String(model.data(index, 257) || "")
+            if (!id.startsWith("/") || id === "/data/enginex/stream-save" || model.data(index, 259) === 6) continue
+            if (only) return ""
+            only = id
+        }
+        return only
+    }
+    function scStartOnlyDrive() {
+        if (typeof Config === "undefined" || !Config.device || Config.device.autoSelectSingleSource !== true) return
+        if (scCurrentSource() !== "") return
+        scStartDrive = scOnlyDrive()
+        scStartTries = 0
+        if (scStartDrive) scSelectStartDrive()
+    }
+    function scSelectStartDrive() {
+        if (scCurrentSource() !== "" || scStartTries >= 15) return
+        const sources = Planck.librarianController.browserSourceControllerPtr()
+        const model = sources.model()
+        for (let row = 0; row < model.rowCount(); row++) {
+            const index = model.index(row, 0)
+            if (model.data(index, 257) === scStartDrive) {
+                scStartTries++
+                sources.select(index)
+                scStartSelect.start()
+                return
+            }
+        }
+    }
+    Timer {
+        id: scStartSelect
+        interval: 2000
+        onTriggered: scSelectStartDrive()
+    }
     // Engine itself browses the internal drive (it remembered it at start-up, or the
     // drive being browsed went away): leave it unless our own selection is running.
     function scLeaveInternal() {
@@ -7406,6 +7453,7 @@ def edits(dev: bool):
              "    Component.onCompleted: {\n"
              "        Planck.librarianController.streamingInterfaceController.checkSourceDriveAvailability()\n"
              "        Qt.callLater(scLeaveInternal)\n"
+             "        Qt.callLater(scStartOnlyDrive)\n"
              "    }\n"),
             ("        function onShowNoSourceAvailableDialog() {\n",
              "        function onHasSourceDriveChanged(available) {\n"
