@@ -2435,7 +2435,7 @@ assert.deepEqual(scShadowAt, {});
 """)
 
     def test_paused_bar_phase_waits_for_the_grid(self):
-        # Shadow grid/CUE (maintainer, two linked SC5000s): a CUE set before a rekordbox track's first
+        # Shadow grid/CUE (maintainer, two linked SC5000 players): a CUE set before a rekordbox track's first
         # grid marker, then play, left the copy's waveform off the main deck's; cued inside the grid,
         # both lined up. Paused, scShadowBeat matched the bar phase with BeatNumber, which is below 0
         # before the first marker: it shifted the copy by a beat, or spent its one calibration.
