@@ -10142,8 +10142,8 @@ class WholeBpmTest(unittest.TestCase):
             self.assertIn('property int scBpmDecimals: 2', gcfg)
             self.assertIn('scGlobalConfig.scBpmDecimals = parseInt(j.bpmDecimals) === 1 ? 1 : 2', gcfg)
             self.assertIn('module.scTransformSpeed(', slider)
-            self.assertIn('module.scStepUnits = module.scLearnFaderStep(module.scPrevIn, in_val, module.scStepUnits)', slider)
-            self.assertIn('scSpeedAssign.pSpeedRange, module.scStepUnits', slider)
+            self.assertIn('module.scLearnFaderStep(module.scFaderLearn, in_val, Date.now(), dec === 2 && scSpeedAssign.songLoaded,', slider)
+            self.assertIn('scSpeedAssign.pSpeedRange, step\n', slider)
             self.assertNotIn('4095', slider)
             self.assertIn(
                 'readonly property bool songLoaded: Planck.getProperty("/Engine/Deck%1/Track/SongLoaded".arg(modelData))\n'
@@ -10344,35 +10344,94 @@ for (const s of [1, 2, 4, 8, 16]) {{
     }}
 }}
 
-// The step is learned from the fader's own jumps: smallest nonzero jump wins, repeats are ignored, fast sweeps never shrink it.
+// Learning the fader step (scLearnFaderStep): a step is believed after three equal jumps in one gesture and only taken up once
+// the fader rested 300 ms; the curve never changes under a moving fader.
+const newSt = () => ({{ prev: -1, t: 0, step: 0, pending: 0, key: "", counts: {{}} }});
+const tgt = (raw, step, B, rPct, inv) => f32(B) * (1 + rPct / 100 * (2 * f32(scTransformSpeed(raw / 16383, inv, true, propNum(B), propStr(""), propStr(rPct + "%"), step)) - 1));
+// Review sequence 8000 -> 9600 -> 9616 -> 9604 (124 BPM, +-8%): one big jump used to re-draw the whole curve, so a fader moved up
+// could lower the tempo. Nothing is learned from it and the target never falls while the raw value rises.
 {{
-    let learned = 0, prev = -1;
-    for (const raw of [100, 100, 148, 160, 160, 176, 400, 416]) {{
-        if (prev >= 0) learned = scLearnFaderStep(prev / 16383, raw / 16383, learned);
-        prev = raw;
+    const st = newSt(); let t = 0; const o = [];
+    for (const raw of [8000, 9600, 9616, 9604]) {{
+        o.push(tgt(raw, scLearnFaderStep(st, raw / 16383, t, true, "1|8%"), 124, 8, false));
+        t += 10;
     }}
-    assert.equal(learned, 12);  // 160 -> 176 is 16, 148 -> 160 is 12, 100 -> 148 is 48
-    assert.equal(scLearnFaderStep(0.5, 0.5, 0), 0);
-    assert.equal(scLearnFaderStep(0.5, 0.5 + 8 / 16383, 16), 8);
-    assert.equal(scLearnFaderStep(0.5, 0.5 + 64 / 16383, 8), 8);
+    assert.equal(st.step, 0);
+    assert.ok(o[0] <= o[1] && o[1] <= o[2] && o[3] <= o[2], `review sequence ${{o}}`);
 }}
-// End to end on a 10-bit-like fader (16 units per step): learn while sweeping slowly, then the plateau is two of ITS steps.
+// A stray small jump (8192 -> 8193) does not narrow the stop; the repeated 16-unit jumps are what it learns, after the rest.
+{{
+    const st = newSt(); let t = 0;
+    for (const raw of [8192, 8193, 8208, 8224, 8240, 8256, 8272]) {{ scLearnFaderStep(st, raw / 16383, t, true, "1|8%"); t += 10; }}
+    assert.equal(st.step, 0);  // still moving: not taken up yet
+    t += 400;
+    assert.equal(scLearnFaderStep(st, 8272 / 16383, t, true, "1|8%"), 16);
+    assert.equal(st.counts[1], 1);
+}}
+// Not learning while the plateau is off or no track is loaded; a deck or range change drops the samples, not the learned step.
+{{
+    const st = newSt(); let t = 0;
+    for (const raw of [100, 116, 132, 148, 164, 180]) {{ scLearnFaderStep(st, raw / 16383, t, false, "1|8%"); t += 10; }}
+    assert.equal(st.pending, 0); assert.equal(st.prev, -1); assert.deepEqual(st.counts, {{}});
+    for (const raw of [100, 108, 116, 124, 132]) {{ scLearnFaderStep(st, raw / 16383, t, true, "1|8%"); t += 10; }}
+    t += 400; scLearnFaderStep(st, 132 / 16383, t, true, "1|8%");
+    assert.equal(st.step, 8);
+    scLearnFaderStep(st, 140 / 16383, t + 10, true, "2|8%");  // other deck
+    assert.equal(st.pending, 0); assert.equal(st.step, 8); assert.deepEqual(st.counts, {{}});
+    scLearnFaderStep(st, 140 / 16383, t + 20, true, "2|10%");  // other range
+    assert.equal(st.prev, 140 / 16383);
+}}
+// Random raw walks (slow steps, fast sweeps, rests, direction changes, 1..16-unit faders) with learning active: while the learned
+// step is unchanged the target never moves against the fader; a step is only switched at the first move after a 300 ms rest; and it
+// ends at the fader's real step.
+{{
+    let seed = 12345;
+    const rnd = () => {{ seed = (seed + 0x6D2B79F5) | 0; let x = Math.imul(seed ^ (seed >>> 15), 1 | seed); x = (x + Math.imul(x ^ (x >>> 7), 61 | x)) ^ x; return ((x ^ (x >>> 14)) >>> 0) / 4294967296; }};
+    for (const s of [1, 2, 4, 8, 16]) {{
+        for (const inv of [false, true]) {{
+            for (const [B, rPct] of [[124, 8], [87.6, 4], [124, 100], [140, 16], [123.45, 50]]) {{
+                const st = newSt(), top = Math.floor(16383 / s);
+                let n = Math.floor(top / 2), t = 0, prevOut = null, prevStep = 0, prevRaw = null;
+                for (let e = 0; e < 1500; e++) {{
+                    const r = rnd(), dir = rnd() < 0.5 ? -1 : 1;
+                    let gap = 10 + Math.floor(rnd() * 30), move = 1;
+                    if (r > 0.85) {{ gap = 300 + Math.floor(rnd() * 600); move = 1 + Math.floor(rnd() * 3); }}
+                    else if (r > 0.6) move = 2 + Math.floor(rnd() * 11);
+                    n = Math.max(0, Math.min(top, n + dir * move));
+                    t += gap;
+                    const raw = n * s;
+                    const step = scLearnFaderStep(st, raw / 16383, t, true, "1|" + rPct + "%");
+                    if (step !== prevStep) assert.ok(gap >= 300, `step ${{prevStep}}->${{step}} under a moving fader s=${{s}}`);
+                    const out = tgt(raw, step, B, rPct, inv);
+                    if (prevOut !== null && step === prevStep && raw !== prevRaw) {{
+                        const up = inv ? raw < prevRaw : raw > prevRaw;
+                        assert.ok(up ? out >= prevOut - 1e-9 : out <= prevOut + 1e-9, `target against the fader s=${{s}} inv=${{inv}} B=${{B}} r=${{rPct}} raw ${{prevRaw}}->${{raw}} out ${{prevOut}}->${{out}}`);
+                    }}
+                    prevOut = out; prevStep = step; prevRaw = raw;
+                }}
+                t += 500;
+                assert.equal(scLearnFaderStep(st, prevRaw / 16383, t, true, "1|" + rPct + "%"), s, `learned step s=${{s}}`);
+            }}
+        }}
+    }}
+}}
+// End to end on a 10-bit-like fader (16 units per step): a few slow steps, a rest, then a full sweep: the whole number holds two of ITS steps.
 {{
     const s = 16, oP = propNum(124.0), mP = propStr(""), rP = propStr("8%");
-    let learned = 0, prev = -1;
-    const outs = [];
-    for (let n = 0; n * s <= 16383; n++) {{
-        const v = n * s / 16383;
-        if (prev >= 0) learned = scLearnFaderStep(prev, v, learned);
-        prev = v;
-        outs.push(scTransformSpeed(v, false, true, oP, mP, rP, learned));
-    }}
-    assert.equal(learned, s);
+    const st = newSt(); let t = 0;
+    for (let n = 100; n < 110; n++) {{ scLearnFaderStep(st, n * s / 16383, t, true, "1|8%"); t += 10; }}
+    t += 400;
     let at125 = 0;
-    for (const o of outs) if (Math.abs(f32(124.0) * (1 + 0.08 * (2 * f32(o) - 1)) - 125) < 1e-4) at125++;
-    assert.ok(at125 >= 2 && at125 <= 3);
+    for (let n = 0; n * s <= 16383; n++) {{
+        t += 10;
+        const step = scLearnFaderStep(st, n * s / 16383, t, true, "1|8%");
+        const o = scTransformSpeed(n * s / 16383, false, true, oP, mP, rP, step);
+        if (Math.abs(f32(124.0) * (1 + 0.08 * (2 * f32(o) - 1)) - 125) < 1e-4) at125++;
+    }}
+    assert.equal(st.step, s);
+    assert.ok(at125 >= 2 && at125 <= 3, `at125=${{at125}}`);
 }}
-// Not learned yet (first touch): keeps the 12-bit width of before, never no plateau.
+// Not known yet (first touch): keeps the 12-bit width of before.
 assert.equal(scTransformSpeed(0.5 + 4 / 16383, false, true, propNum(124), propStr(""), propStr("8%")), scTransformSpeed(0.5 + 4 / 16383, false, true, propNum(124), propStr(""), propStr("8%"), 0));
 """
             node_res = subprocess.run(["node", "-e", js], capture_output=True, text=True)

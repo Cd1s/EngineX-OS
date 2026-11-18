@@ -8314,17 +8314,33 @@ def edits(dev: bool):
         ]
         # Integer-BPM pitch-fader plateaus when BPM Decimals is 2 (1 = exact stock linear fader):
         # map [0, 0.5] and [0.5, 1] independently around center so 0% stays exact,
-        # placing 2-hardware-step (w = 4 steps in half-travel, step learned from the fader's own CC jumps, 4/16383 until seen) plateaus at each integer BPM with uniform linear slope between them.
+        # placing 2-hardware-step (w = 4 steps in half-travel, step learned from the fader's own CC jumps while it rests, 4/16383 until known) plateaus at each integer BPM with uniform linear slope between them.
         scaled["ControlSurfaceModules/ControlSurfaceModules/SpeedSlider.qml"] = [
             ('    property bool invert: false\n',
              '''    property bool invert: false
-    property real scPrevIn: -1
-    property int scStepUnits: 0
+    property var scFaderLearn: ({ prev: -1, t: 0, step: 0, pending: 0, key: "", counts: {} })
 
-    // One fader step in 14-bit CC units, learned as the smallest jump between two successive raw values (0 = not yet seen).
-    function scLearnFaderStep(prevIn, inVal, learned) {
-        const d = Math.round(Math.abs(inVal - prevIn) * 16383.0)
-        return d >= 1 && (!(learned > 0) || d < learned) ? d : learned
+    // The fader's step in 14-bit CC units (0 = not known yet: the plateau then uses 4), learned from its own jumps. A step is only
+    // believed once the same jump was seen three times inside one gesture, so a stray value does not count, and only taken up
+    // once the fader has rested 300 ms, so the curve never changes under a moving fader. Samples are only taken while the
+    // plateau is on and a track is loaded, and are dropped when the deck or the pitch range changes.
+    function scLearnFaderStep(st, raw, now, eligible, key) {
+        if (!eligible || st.key !== key) {
+            st.prev = -1; st.pending = 0; st.counts = {}; st.key = eligible ? key : ""
+        }
+        if (!eligible) return st.step
+        const rested = st.prev >= 0 && now - st.t >= 300
+        if (rested && st.pending > 0) st.step = st.pending
+        if (st.prev >= 0 && !rested) {
+            const d = Math.round(Math.abs(raw - st.prev) * 16383.0)
+            if (d >= 1 && d <= 128) {
+                st.counts[d] = (st.counts[d] || 0) + 1
+                if (st.counts[d] >= 3 && (!(st.pending > 0) || d < st.pending)) st.pending = d
+            }
+        }
+        st.prev = raw
+        st.t = now
+        return st.step
     }
     function scTransformSpeed(inVal, invert, loaded, origProp, metaProp, rangeProp, stepUnits) {
         let u = invert ? 1.0 - inVal : inVal
@@ -8372,7 +8388,7 @@ def edits(dev: bool):
     }
 '''),
             ('        ValueCCAssignment {\n            readonly property bool songLoaded: Planck.getProperty("/Engine/Deck%1/Track/SongLoaded".arg(modelData))\n                .translator.state\n',
-             '        ValueCCAssignment {\n            id: scSpeedAssign\n            readonly property bool songLoaded: Planck.getProperty("/Engine/Deck%1/Track/SongLoaded".arg(modelData))\n                .translator.state\n'
+             '        ValueCCAssignment {\n            id: scSpeedAssign\n            readonly property string scDeck: String(modelData)\n            readonly property bool songLoaded: Planck.getProperty("/Engine/Deck%1/Track/SongLoaded".arg(modelData))\n                .translator.state\n'
              '            readonly property var pOrigBpm: Planck.getProperty("/Engine/Deck%1/OriginalBPM".arg(modelData))\n'
              '            readonly property var pMetaBpm: Planck.getProperty("/Engine/Deck%1/Track/MetaDataBPM".arg(modelData))\n'
              '            readonly property var pSpeedRange: Planck.getProperty("/Engine/Deck%1/SpeedRange".arg(modelData))\n'),
@@ -8380,11 +8396,12 @@ def edits(dev: bool):
              '            valueTransform: QtObject {\n'
              '                property bool invert: module.invert\n'
              '                function transformValue(in_val) {\n'
-             '                    if (module.scPrevIn >= 0) module.scStepUnits = module.scLearnFaderStep(module.scPrevIn, in_val, module.scStepUnits)\n'
-             '                    module.scPrevIn = in_val\n'
+             '                    const dec = typeof globalConfig !== "undefined" && globalConfig && globalConfig.scGetBpmDecimals ? globalConfig.scGetBpmDecimals() : 2\n'
+             '                    const rt = scSpeedAssign.pSpeedRange && scSpeedAssign.pSpeedRange.translator\n'
+             '                    const step = module.scLearnFaderStep(module.scFaderLearn, in_val, Date.now(), dec === 2 && scSpeedAssign.songLoaded, scSpeedAssign.scDeck + "|" + (rt ? rt.string : ""))\n'
              '                    return module.scTransformSpeed(\n'
              '                        in_val, invert, scSpeedAssign.songLoaded,\n'
-             '                        scSpeedAssign.pOrigBpm, scSpeedAssign.pMetaBpm, scSpeedAssign.pSpeedRange, module.scStepUnits\n'
+             '                        scSpeedAssign.pOrigBpm, scSpeedAssign.pMetaBpm, scSpeedAssign.pSpeedRange, step\n'
              '                    )\n'
              '                }\n'
              '            }\n'),
