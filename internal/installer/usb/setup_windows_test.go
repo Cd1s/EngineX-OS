@@ -17,6 +17,7 @@ func TestWindowsSetupTargetsOnlyUpdateInterfaces(t *testing.T) {
 		want               bool
 	}{
 		{"Gen-2 fastboot", 0x15e4, 0x2059, "", `USB\Class_ff&SubClass_42&Prot_03`, true},
+		{"PRIME 4 G2", 0x15e4, 0xd014, "", `USB\Class_ff&SubClass_61&Prot_7a`, true},
 		{"AZ04", 0x1cc5, 0x2027, "", `USB\Class_ff&SubClass_61&Prot_7a`, true},
 		{"RK3288 loader", 0x2207, 0x320a, "Rockusb", `USB\Class_ff&SubClass_06&Prot_05`, true},
 		{"RK3588 loader", 0x2207, 0x350b, "Rockusb", `USB\Class_ff&SubClass_06&Prot_05`, true},
