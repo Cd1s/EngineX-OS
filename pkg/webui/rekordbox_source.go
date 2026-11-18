@@ -90,7 +90,7 @@ var rbxTexts = map[string][4]string{
 	"none":       {"No computer with rekordbox found on Pro DJ Link", "Pro DJ Link 上没有找到运行 rekordbox 的电脑", "Pro DJ Link 上沒有找到執行 rekordbox 的電腦", "No se encontró ningún ordenador con rekordbox en Pro DJ Link"},
 	"unreadable": {"Could not read the rekordbox library", "无法读取 rekordbox 资料库", "無法讀取 rekordbox 資料庫", "No se pudo leer la biblioteca de rekordbox"},
 	"noshare":    {"This computer does not share files with EngineX; set up a network share of your music folder", "这台电脑没有向 EngineX 共享文件；请把音乐文件夹设为网络共享", "這台電腦沒有向 EngineX 分享檔案；請把音樂資料夾設為網路共用", "Este ordenador no comparte archivos con EngineX; configura una carpeta de red compartida con tu música"},
-	"format":     {"This file type cannot be loaded from rekordbox (MP3, FLAC and AAC only)", "无法从 rekordbox 加载这种文件（仅支持 MP3、FLAC、AAC）", "無法從 rekordbox 載入這種檔案（僅支援 MP3、FLAC、AAC）", "Este tipo de archivo no se puede cargar desde rekordbox (solo MP3, FLAC y AAC)"},
+	"format":     {"This file type cannot be loaded from rekordbox (MP3, FLAC, AAC, WAV and AIFF only)", "无法从 rekordbox 加载这种文件（仅支持 MP3、FLAC、AAC、WAV、AIFF）", "無法從 rekordbox 載入這種檔案（僅支援 MP3、FLAC、AAC、WAV、AIFF）", "Este tipo de archivo no se puede cargar desde rekordbox (solo MP3, FLAC, AAC, WAV y AIFF)"},
 	"noroom":     {"No room on the drive to copy this track", "存储空间不足，无法复制这首曲目", "儲存空間不足，無法複製這首曲目", "No hay espacio en la unidad para copiar esta pista"},
 }
 
