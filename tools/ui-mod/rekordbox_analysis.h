@@ -50,7 +50,7 @@ static long long sc_rbx_uri_id(const char *uri) {
 // and loops, each a little-endian uint32 length and its bytes. NULL if b is not one.
 static char *sc_rbx_analysis_sql(const unsigned char *b, size_t n, long long track) {
     static const char *const columns[] = {"trackData", "overviewWaveFormData", "beatData", "quickCues", "loops"};
-    size_t at = 5, len[5], start[5], total = 160;
+    size_t at = 5, len[5], start[5], total = 256;
     if (n < 5 || memcmp(b, "RBXA1", 5)) return NULL;
     for (int i = 0; i < 5; i++) {
         if (n - at < 4) return NULL;
@@ -71,7 +71,10 @@ static char *sc_rbx_analysis_sql(const unsigned char *b, size_t n, long long tra
         for (size_t k = 0; k < len[i]; k++) p += sprintf(p, "%02x", b[start[i] + k]);
         *p++ = '\'';
     }
-    sprintf(p, " WHERE trackId = %lld AND trackData IS NULL", track);
+    // Engine analyses a track whose Track row says it is not analysed, whatever its
+    // PerformanceData holds (left deck 2026-11-18: filled rows with isAnalyzed 0 were analysed
+    // again; rb-bridge's drive rows say 1 and load with their grid).
+    sprintf(p, " WHERE trackId = %lld AND trackData IS NULL; UPDATE Track SET isAnalyzed = 1 WHERE id = %lld AND changes() > 0", track, track);
     return sql;
 }
 
