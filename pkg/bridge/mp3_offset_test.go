@@ -217,11 +217,6 @@ func TestIssue178MP3OffsetClassesAndExistingLibraryResync(t *testing.T) {
 		}
 		wantBeat0 := float64(tr.firstBeatMS)*sr/1000 - off
 		wantBeat1 := float64(tr.firstBeatMS+500)*sr/1000 - off
-		if wantBeat0 > 0 {
-			// The grid runs back one beat to before sample 0 (shadow grid/CUE): the
-			// first two markers are that beat and rekordbox's first.
-			wantBeat0, wantBeat1 = wantBeat0-500*sr/1000, wantBeat0
-		}
 		wantHotA := max(0.0, 20.0*sr/1000-off)
 		wantHotB := 550.0*sr/1000 - off
 		wantMain := 550.0*sr/1000 - off

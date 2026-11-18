@@ -2985,7 +2985,9 @@ SERVICES_MAIN = """
 		if (((scShadowEngineMask >> d) & 1) === 0) return
 		if ((at.beatTries || 0) >= 4 || !(e.bpm > 0) || e.beat === undefined || Math.abs(drift) > 15 || now < (at.beatAt || 0)) return
 		const local = (root.scTr("/Engine/Deck" + d + "/BeatNumber") || {}).unnormalized
-		if (local === undefined) return
+		// Before the first grid marker BeatNumber is below 0: no bar phase there. A CUE set in a
+		// rekordbox intro shifted the copy by a beat off the main deck, or spent this one calibration.
+		if (!(e.beat >= 0) || !(local >= 0)) return
 		const k = ((Math.round(e.beat - local) % 4) + 4) % 4
 		const step = k === 3 ? -1 : k
 		if (!step) {

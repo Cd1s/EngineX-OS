@@ -131,30 +131,6 @@ func beatPositionsWithOffset(beats []rekordbox.Beat, sampleRate, offsetSamples f
 	return positions
 }
 
-// gridFromStart runs the grid back from rekordbox's first beat to sample 0, as
-// Engine's own analysis does (its first marker is before sample 0, beat -4).
-// rekordbox's grid starts at its first beat: before it Engine had no grid, so a deck
-// playing there (a CUE set in the intro) had no beat phase, and its shadow copy went
-// off the main deck's waveform. The step is the first run's own spacing; the start
-// offset is already in positions. It returns the positions and how many beats it added.
-// A grid of one beat has no step and stays as it is; rekordbox's grid runs to the end.
-func gridFromStart(positions []float64) ([]float64, int) {
-	const maxBeats = 4096
-	if len(positions) < 2 || positions[0] <= 0 {
-		return positions, 0
-	}
-	step := positions[1] - positions[0]
-	if step <= 0 {
-		return positions, 0
-	}
-	pre := min(maxBeats, int(math.Ceil(positions[0]/step)))
-	out := make([]float64, 0, pre+len(positions))
-	for k := pre; k > 0; k-- {
-		out = append(out, positions[0]-float64(k)*step)
-	}
-	return append(out, positions...), pre
-}
-
 // Engine 5.3.0 trackData (68 bytes): sample rate, sample count, key, then the
 // low/mid/high waveform peaks (0..1) and the same three for stems. Engine reads
 // the peaks as floats and ignores an all-zero triple; its analyser sets them and
@@ -361,26 +337,22 @@ func EncodePerformance(t rekordbox.Track, a *rekordbox.Analysis) (Performance, e
 		// Engine beatData natively supports negative pre-zero sample_position anchors
 		// (see stock samples and ParseDisplayPerformance), keeping bar-1 BPM exact.
 		positions := beatPositionsWithOffset(a.Beats, float64(sr), offset)
-		var previous uint32
-		for i, beat := range a.Beats {
-			if i > 0 && beat.TimeMS <= previous {
-				return p, fmt.Errorf("non-increasing beatgrid")
-			}
-			previous = beat.TimeMS
-		}
-		positions, pre := gridFromStart(positions)
-		first := int64(a.Beats[0].Number) - 1 - int64(pre)
 		var b bytes.Buffer
 		put(&b, big, float64(sr))
 		put(&b, big, samples)
 		b.WriteByte(1)
 		for grid := 0; grid < 2; grid++ {
-			put(&b, big, uint64(len(positions)))
-			for i, pos := range positions {
-				put(&b, little, pos)
-				put(&b, little, int64(i)+first)
+			put(&b, big, uint64(len(a.Beats)))
+			var previous uint32
+			for i, beat := range a.Beats {
+				if i > 0 && beat.TimeMS <= previous {
+					return p, fmt.Errorf("non-increasing beatgrid")
+				}
+				previous = beat.TimeMS
+				put(&b, little, positions[i])
+				put(&b, little, int64(i)+int64(a.Beats[0].Number)-1)
 				next := uint32(1)
-				if i == len(positions)-1 {
+				if i == len(a.Beats)-1 {
 					next = 0
 				}
 				put(&b, little, next)

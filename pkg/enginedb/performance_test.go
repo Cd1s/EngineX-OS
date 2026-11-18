@@ -256,28 +256,8 @@ func TestEncodePerformanceMP3StartOffsetAndClamping(t *testing.T) {
 			}
 			wantB0 := float64(firstBeatMS)*float64(sr)/1000 - float64(tc.offset)
 			wantStep := 0.5 * float64(sr)
-			off := 17
 			for g := 0; g < 2; g++ {
-				// rekordbox's first beat (bar beat 4, index 3), after any beats the grid runs
-				// back to sample 0 (shadow grid/CUE): those are one step apart and at or before 0.
-				n := int(binary.BigEndian.Uint64(beats[off:]))
-				base := off + 8
-				off = base + 24*n
-				pre := 0
-				for n > 0 && int64(binary.LittleEndian.Uint64(beats[base+8:])) != 3 {
-					if pos := math.Float64frombits(binary.LittleEndian.Uint64(beats[base:])); pos > 0 || pos <= -wantStep {
-						t.Fatalf("sr=%d %s grid %d: run-back beat at %v", sr, tc.name, g, pos)
-					}
-					base += 24
-					n--
-					pre++
-				}
-				if (wantB0 > 0) != (pre == 1) {
-					t.Fatalf("sr=%d %s grid %d: %d beats before rekordbox's first at %v", sr, tc.name, g, pre, wantB0)
-				}
-				if n < 3 {
-					t.Fatalf("sr=%d %s grid %d: rekordbox's beats missing", sr, tc.name, g)
-				}
+				base := 17 + g*(8+3*24) + 8
 				b0 := math.Float64frombits(binary.LittleEndian.Uint64(beats[base:]))
 				b1 := math.Float64frombits(binary.LittleEndian.Uint64(beats[base+24:]))
 				b2 := math.Float64frombits(binary.LittleEndian.Uint64(beats[base+48:]))
