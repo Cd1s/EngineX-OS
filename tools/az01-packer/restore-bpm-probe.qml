@@ -1,6 +1,7 @@
 // Sandbox only: loaded over QmlWarnings.qml by restore-bpm-sandbox.sh (it fills in @BOARD@ and @E2E@).
-// #289: Engine's own Sync on two real tracks (128 and 124 BPM): UnSync with the setting Off keeps the synced rate (stock),
-// with it On and the tempo control at 0 % the deck returns to its own BPM, with the control moved it stays synced.
+// #289: Engine's own Sync on two real tracks (128 and 124 BPM), each phase a real Sync on / off edge with the fader given as a
+// raw 14-bit code: setting Off keeps the synced rate (stock); On inside the centre zone (8192, 8273) returns to the own BPM,
+// one code outside (8274) stays synced.
 // Also renders the shipped Profile -> Playback page with the new switch row.
 import QtQuick
 import QtQuick.Window
@@ -137,59 +138,43 @@ Item {
     function faderInit(d, v) { tr("/Engine/Deck" + d + "/Speed").setValue(v, 0x10000000 | 2002, 0) }
     function faderSoft(d, v) { tr("/Engine/Deck" + d + "/Speed").setSoftValue(v) }
     function speed2() { return tr("/Engine/Deck2/Speed") }
-    function syncOn() { root.scPress("/Engine/Deck2/Sync", true) }
-    function syncOff() { root.scPress("/Engine/Deck2/UnSync", true) }
-    // A real falling edge: Sync observed on, then observed Off after the press.
-    function syncOffSecond() { if (sync(2) !== "Off") syncOn() }
-    readonly property var stock: [
-        [300, function() { faderInit(2, code(8192)); snap("fader at centre code 8192 (soft " + speed2().softValue + ")") }],
-        [300, function() { syncOn() }],
-        [2500, function() { snap("OFF: synced"); expect(sync(2) !== "Off", "Sync engaged"); expect(Math.abs(bpm(2, "/CurrentBPM") - bpm(1, "/CurrentBPM")) < 0.3, "deck 2 runs at deck 1's tempo"); expect(speed2().value !== 0.5 && Math.abs(speed2().softValue - code(8192)) < 1e-6, "Engine rewrote Speed, the fader is still at code 8192") }],
-        [300, function() { syncOff() }],
-        [600, function() { syncOffSecond() }],
-        [1500, function() {
-            snap("OFF: after Sync off")
-            expect(sync(2) === "Off", "falling edge: Sync is off")
-            expect(Math.abs(bpm(2, "/CurrentBPM") - bpm(1, "/CurrentBPM")) < 0.3, "setting Off: the deck keeps the synced rate (stock)")
-        }]
-    ]
-    readonly property var restoring: [
-        [300, function() { root.scRestoreBpmOnUnsync = true; syncOn() }],
-        [2500, function() { snap("ON: synced"); expect(sync(2) !== "Off", "Sync engaged again"); expect(speed2().value !== 0.5 && Math.abs(speed2().softValue - code(8192)) < 1e-6, "synced rate, fader at code 8192"); shot("synced") }],
-        [300, function() { syncOff() }],
-        [600, function() { syncOffSecond() }],
-        [1500, function() {
-            snap("ON: after Sync off, fader at code 8192")
-            expect(sync(2) === "Off", "falling edge: Sync is off")
-            expect(Math.abs(bpm(2, "/CurrentBPM") - bpm(2, "/OriginalBPM")) < 0.05, "setting On, fader at code 8192: the deck is back at its own BPM")
-            expect(speed2().value === 0.5, "the rate reads 0 % again")
-            shot("restored")
-        }]
-    ]
-    readonly property var restoring8191: [
-        [300, function() { syncOn() }],
-        [2500, function() { faderSoft(2, code(8191)); snap("ON: synced, fader at centre code 8191"); expect(sync(2) !== "Off" && speed2().value !== 0.5, "synced rate again") }],
-        [300, function() { syncOff() }],
-        [600, function() { syncOffSecond() }],
-        [1500, function() {
-            snap("ON: after Sync off, fader at code 8191")
-            expect(sync(2) === "Off", "falling edge: Sync is off")
-            expect(Math.abs(bpm(2, "/CurrentBPM") - bpm(2, "/OriginalBPM")) < 0.05, "fader at code 8191: the deck is back at its own BPM")
-        }]
-    ]
-    function movedPhase(c, label) { return [
-        [300, function() { syncOn() }],
-        [2500, function() { faderSoft(2, c); snap("ON: synced, fader " + label); expect(sync(2) !== "Off", "Sync engaged with the fader " + label) }],
-        [300, function() { ctx.synced = speed2().value; syncOff() }],
-        [600, function() { syncOffSecond() }],
-        [1500, function() {
-            snap("ON: after Sync off, fader " + label)
-            expect(sync(2) === "Off", "falling edge: Sync is off")
-            expect(Math.abs(bpm(2, "/CurrentBPM") - bpm(1, "/CurrentBPM")) < 0.3, "fader " + label + ": the deck keeps the synced rate (stock)")
-            expect(speed2().value === ctx.synced, "fader " + label + ": the rate was not written")
-        }]
-    ] }
-    readonly property var moved: movedPhase(code(8193), "at code 8193").concat(movedPhase(0.505, "moved +0.08 %"))
+    // Drive Sync until Engine reports the state (a press that did not take is pressed again every 2 s):
+    // each phase sees a real rising and then a real falling SyncMode edge.
+    function want(on) {
+        const now = Date.now()
+        if ((sync(2) !== "Off") === on) { ctx.pressAt = 0; return true }
+        if (!ctx.pressAt || now - ctx.pressAt > 2000) { ctx.pressAt = now; root.scPress(on ? "/Engine/Deck2/Sync" : "/Engine/Deck2/UnSync", true) }
+        return false
+    }
+    // One phase: fader at f (raw 14-bit code / 16383, the soft value), Sync on, Sync off.
+    function phase(f, label, restores, setting) {
+        return [
+            [300, function() { root.scRestoreBpmOnUnsync = setting; faderSoft(2, f) }],
+            [2000, function() { return want(true) }],
+            [300, function() {
+                snap((setting ? "ON" : "OFF") + ": synced, fader " + label)
+                expect(Math.abs(bpm(2, "/CurrentBPM") - bpm(1, "/CurrentBPM")) < 0.3, label + ": synced to deck 1")
+                expect(speed2().value !== 0.5 && Math.abs(speed2().softValue - f) < 1e-6, label + ": Engine rewrote Speed, the fader stays")
+                ctx.synced = speed2().value
+            }],
+            [1500, function() { return want(false) }],
+            [300, function() {
+                snap((setting ? "ON" : "OFF") + ": Sync off, fader " + label)
+                if (restores) {
+                    expect(Math.abs(bpm(2, "/CurrentBPM") - bpm(2, "/OriginalBPM")) < 0.05, label + ": back at its own BPM")
+                    expect(speed2().value === 0.5, label + ": the rate reads 0 %")
+                } else {
+                    expect(Math.abs(bpm(2, "/CurrentBPM") - bpm(1, "/CurrentBPM")) < 0.3, label + ": keeps the synced rate")
+                    expect(speed2().value === ctx.synced, label + ": the rate was not written")
+                }
+                speed2().value = 0.5 // next phase starts from the track's own BPM
+            }]
+        ]
+    }
+    readonly property var stock: phase(code(8192), "at code 8192, setting Off (stock)", false, false)
+    readonly property var restoring: phase(code(8192), "at code 8192", true, true)
+        .concat(phase(code(8273), "at code 8273 (zone edge)", true, true))
+    readonly property var moved: phase(code(8274), "at code 8274 (one code outside)", false, true)
     readonly property var finish: [
         [500, function() {
             say("failures " + failures)
@@ -197,7 +182,7 @@ Item {
             Planck.getProperty("/Client/Quit").translator.state = true
         }]
     ]
-    readonly property var steps: e2e ? load1.concat(stock).concat(restoring).concat(restoring8191).concat(moved).concat(pagePart).concat(finish) : pagePart.concat(finish)
+    readonly property var steps: e2e ? load1.concat(stock).concat(restoring).concat(moved).concat(pagePart).concat(finish) : pagePart.concat(finish)
     Timer {
         interval: 250
         running: true

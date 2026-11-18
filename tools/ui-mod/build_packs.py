@@ -3262,6 +3262,22 @@ SERVICES_MAIN = """
 	property bool scBeatJumpPads: false
 	property bool scPitchBendBeatJump: false
 	property bool scRestoreBpmOnUnsync: false
+	// #289: the controller engine reads the setting from /GUI/Scripted/EngineXRestoreBpm (its
+	// centre LED), written here on every change: instant, no poll field.
+	property bool scRestoreBpmSynced: false
+	readonly property var scRestoreBpmPropRef: Planck.createProperty("EngineXRestoreBpm", false, 1)
+	readonly property var scRestoreBpmProp: scRestoreBpmPropRef && Planck.getProperty("/GUI/Scripted/EngineXRestoreBpm")
+	function scSyncRestoreBpm() {
+		const p = scRestoreBpmProp && scRestoreBpmProp.translator ? scRestoreBpmProp : Planck.getProperty("/GUI/Scripted/EngineXRestoreBpm")
+		if (!p || !p.translator) { scRestoreBpmSynced = false; return }
+		p.translator.state = scRestoreBpmOnUnsync
+		scRestoreBpmSynced = true
+	}
+	onScRestoreBpmOnUnsyncChanged: scSyncRestoreBpm()
+	Timer {
+		interval: 250; running: !root.scRestoreBpmSynced; repeat: true; triggeredOnStart: true
+		onTriggered: root.scSyncRestoreBpm()
+	}
 	property bool scBpmDecimalsSynced: false
 	readonly property var scBpmDecimalsPropRef: Planck.createProperty("EngineXBpmDecimals", 0.0, 0)
 	readonly property var scBpmDecimalsProp: scBpmDecimalsPropRef && Planck.getProperty("/GUI/Scripted/EngineXBpmDecimals")
@@ -4061,7 +4077,7 @@ SERVICES_MAIN = """
 		root.scReverseJogLeft = false
 		root.scReverseJogRight = false
 		root.scSdHighSpeed = false
-		root.scRestoreBpmOnUnsync = false
+		let restoreBpm = false // assigned once below: no Off/On blink on the controller's centre LED
 		for (const line of (text || "").split("\\n")) {
 			const eq = line.indexOf("=")
 			if (eq < 0) continue
@@ -4081,7 +4097,7 @@ SERVICES_MAIN = """
 			else if (key === "stems_eq_mode") root.scStemsEqMode = val === "1"
 			else if (key === "beat_jump_pads") root.scBeatJumpPads = val === "1"
 			else if (key === "pitch_bend_beat_jump") root.scPitchBendBeatJump = val === "1" || val === "true"
-			else if (key === "restore_bpm_on_unsync") root.scRestoreBpmOnUnsync = val === "1" || val === "true"
+			else if (key === "restore_bpm_on_unsync") restoreBpm = val === "1" || val === "true"
 			else if (key === "mixstream_fx") {
 				const fx = val.split(",").map(s => s.trim()).filter(Boolean)
 				if (fx.length === 4) root.scMixstreamFx = fx
@@ -4090,6 +4106,7 @@ SERVICES_MAIN = """
 			else if (key === "fx_time_ms" && line.trim().indexOf("fx_time_ms=") === 0) fxMs = scFxMsInteger(line.trim().slice(11))
 			else if (key === "pioneer_fx") root.scPioneerFx = val || "off"
 		}
+		root.scRestoreBpmOnUnsync = restoreBpm
 		if (typeof scSyncReverseJog === "function") scSyncReverseJog(true)
 		if (typeof scSyncBpmDecimals === "function") scSyncBpmDecimals()
 		scFxMsApply(fxMode, fxMs)
@@ -5794,15 +5811,17 @@ SMART_SYNC_MAIN = """
 	// the change), not for a slot this unit does not own (four-deck player mode), not
 	// with no track loaded. One write, nothing delayed.
 	// Runs in the GUI engine from the SyncMode change: no controller latch.
+	// The fader counts as centred within 1 % of half its travel (about 82 of 16384 codes): the exact
+	// centre codes alone rarely matched a real fader (#289, real decks). The controller's centre LED
+	// (SpeedSlider.qml, scBpmRestoreZone there) uses the same zone.
+	readonly property real scBpmRestoreZone: 0.005
 	function scUnsyncRestoreBpm(d) {
 		if (!scRestoreBpmOnUnsync || (scFourDeckRole !== "" && scFourDeckRole.indexOf(String(d)) < 0)) return
 		const pLoaded = root.scTr("/Engine/Deck" + d + "/Track/SongLoaded"), pSync = root.scTr("/Engine/Deck" + d + "/SyncMode")
 		const pMaster = root.scTr("/Engine/Deck" + d + "/DeckIsMaster"), pSpeed = root.scTr("/Engine/Deck" + d + "/Speed")
 		if (!pLoaded || !pSync || !pMaster || !pSpeed || !pLoaded.state || pSync.string !== "Off" || pMaster.state) return
 		// Speed is the effective rate, so at exactly 0.5 the deck already plays its own BPM.
-		// A 14-bit fader has no exact 0.5: its centre codes 8191 / 8192 arrive as 0.49997 / 0.50003
-		// (code / 16383); 8193 and anything further is a moved fader and stays.
-		if (Math.abs(pSpeed.softValue - 0.5) < 1 / 16383 && pSpeed.value !== 0.5) pSpeed.value = 0.5
+		if (Math.abs(pSpeed.softValue - 0.5) <= scBpmRestoreZone && pSpeed.value !== 0.5) pSpeed.value = 0.5
 	}
 	Instantiator {
 		model: root.scDeckList()
@@ -8315,6 +8334,8 @@ def edits(dev: bool):
             '    property real scPadBrightness: 1\n'
             '    property bool scSwapLoopOrder: false\n'
             '    property bool scPitchBendBeatJump: false\n'
+            '    property var pRestoreBpm: Planck.getProperty("/GUI/Scripted/EngineXRestoreBpm")\n'
+            '    readonly property bool scRestoreBpmOnUnsync: !!(pRestoreBpm && pRestoreBpm.translator && pRestoreBpm.translator.state)\n'
             '    property int scBpmDecimals: 2\n'
             '    property var scMixstreamFx: ["Echo", "Flanger", "Delay", "Phaser"]\n'
             '    property bool scReverseJogLeft: false\n'
@@ -8345,6 +8366,8 @@ def edits(dev: bool):
             '            scGlobalConfig.pReverseJogReady = Planck.getProperty("/GUI/Scripted/EngineXJogInvertReady")\n'
             '        if (!scGlobalConfig.pPerfLibVisible || !scGlobalConfig.pPerfLibVisible.translator)\n'
             '            scGlobalConfig.pPerfLibVisible = Planck.getProperty("/GUI/Scripted/EngineXPerfLibVisible")\n'
+            '        if (!scGlobalConfig.pRestoreBpm || !scGlobalConfig.pRestoreBpm.translator)\n'
+            '            scGlobalConfig.pRestoreBpm = Planck.getProperty("/GUI/Scripted/EngineXRestoreBpm")\n'
             '        const ready = !!(scGlobalConfig.pReverseJogReady && scGlobalConfig.pReverseJogReady.translator && scGlobalConfig.pReverseJogReady.translator.state)\n'
             '        const nextL = (ready && scGlobalConfig.pReverseJogLeft && scGlobalConfig.pReverseJogLeft.translator) ? !!scGlobalConfig.pReverseJogLeft.translator.state : scGlobalConfig.scReverseJogLeft\n'
             '        const nextR = (ready && scGlobalConfig.pReverseJogRight && scGlobalConfig.pReverseJogRight.translator) ? !!scGlobalConfig.pReverseJogRight.translator.state : scGlobalConfig.scReverseJogRight\n'
@@ -8448,6 +8471,22 @@ def edits(dev: bool):
         if (u < 0.5 ? (k < B - delta || k > B) : (k < B || k > B + delta)) return u
         return Math.max(0.0, Math.min(1.0, 0.5 + (k - B) / (2.0 * delta)))
     }
+
+    // #289: with Restore BPM on Sync Off (globalConfig, from /GUI/Scripted/EngineXRestoreBpm), a synced
+    // deck's centre LED also lights while the fader (the Speed soft value, i.e. where it physically is)
+    // is in the zone that restores on Sync off. Read-only: no action, no write. Off, unsynced or outside
+    // the zone: stock SpeedNeutral.
+    readonly property real scBpmRestoreZone: 0.005 // same zone as the GUI restore (SMART_SYNC_MAIN)
+    readonly property var scPSync: Planck.getProperty(deckConfig.activeDeckPath + "SyncMode")
+    readonly property var scPSpeed: Planck.getProperty(deckConfig.activeDeckPath + "Speed")
+    readonly property var scPLoaded: Planck.getProperty(deckConfig.activeDeckTrackPath + "SongLoaded")
+    function scCentreLit(on, syncMode, loaded, soft) {
+        return !!on && !!loaded && syncMode !== undefined && syncMode !== "Off" && Math.abs(soft - 0.5) <= scBpmRestoreZone
+    }
+    readonly property bool scCentreZoneLit: scCentreLit(typeof globalConfig !== "undefined" && globalConfig && globalConfig.scRestoreBpmOnUnsync,
+        scPSync && scPSync.translator ? scPSync.translator.string : undefined,
+        scPLoaded && scPLoaded.translator && scPLoaded.translator.state,
+        scPSpeed && scPSpeed.translator ? scPSpeed.translator.softValue : -1)
 '''),
             ('        ValueCCAssignment {\n            readonly property bool songLoaded: Planck.getProperty("/Engine/Deck%1/Track/SongLoaded".arg(modelData))\n                .translator.state\n',
              '        ValueCCAssignment {\n            id: scSpeedAssign\n            readonly property bool songLoaded: Planck.getProperty("/Engine/Deck%1/Track/SongLoaded".arg(modelData))\n                .translator.state\n'
@@ -8466,6 +8505,12 @@ def edits(dev: bool):
              '                    )\n'
              '                }\n'
              '            }\n'),
+            # #289: the stock centre-LED output stays the only writer; inside the zone its `minimum`
+            # becomes `maximum`, so the value it sends is 127 whatever SpeedNeutral says, and the LED
+            # follows any change of setting, Sync, track or fader zone. Off: minimum 0, stock.
+            ('            midiIndex: module.centreLedNote\n            path: deckConfig.activeDeckPath + "SpeedNeutral"\n',
+             '            midiIndex: module.centreLedNote\n            path: deckConfig.activeDeckPath + "SpeedNeutral"\n'
+             '            minimum: module.scCentreZoneLit ? maximum : 0\n'),
         ]
         # #286: allow Mixstream hardware FX buttons (slots 1-4) to select any stock Mixstream effect.
         scaled["ControlSurfaceModules/ControlSurfaceModules/private/DJFxSelectButtons.qml"] = [

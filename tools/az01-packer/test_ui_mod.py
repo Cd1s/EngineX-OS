@@ -10620,7 +10620,8 @@ class RestoreBpmOnUnsyncTest(unittest.TestCase):
         fire_body = ""  # the old revision's delayed second write, if any
         if "id: scBpmRestoreTimer" in src:
             _, fire_body = self._block(src, "id: scBpmRestoreTimer", src.index("id: scBpmRestoreTimer") + src[src.index("id: scBpmRestoreTimer"):].index("onTriggered:"))
-        return r"""
+        zone = re.search(r"readonly property real scBpmRestoreZone: ([0-9.]+)", src)
+        return "var scBpmRestoreZone = " + (zone.group(1) if zone else "undefined") + ";\n" + r"""
 const assert = require('node:assert/strict');
 var scRestoreBpmOnUnsync = true, scShadowEngineMask = 0, scFourDeckRole = '', scBpmRestorePending = {}, armed = 0, writes = [];
 const decks = {};
@@ -10690,7 +10691,14 @@ deck(2, {speed: 0.7016, fader: matched});
 scUnsyncRestoreBpm(2);
 assert.deepEqual(writes, ["2:0.5"]);
 writes.length = 0;
+// #289 real decks: the restore uses the centre zone (scBpmRestoreZone, 1 % of half the travel), wider
+// than the snap window, so a fader just outside the snap (+0.08 BPM) restores too; outside the zone it
+// does not.
 deck(2, {speed: 0.7016, fader: unmatched});
+scUnsyncRestoreBpm(2);
+assert.deepEqual(writes, ["2:0.5"]);
+writes.length = 0;
+deck(2, {speed: 0.7016, fader: 0.5 + 2 * scBpmRestoreZone});
 scUnsyncRestoreBpm(2);
 assert.deepEqual(writes, []);
 """.replace("SYNC_OFF", sync_off.group(1)).replace("CALLBACK", callback))
@@ -10703,8 +10711,7 @@ const none = (label) => { assert.deepEqual(writes, [], label); assert.equal(arme
 scRestoreBpmOnUnsync = false; deck(1, {speed: 0.7016}); scUnsyncRestoreBpm(1); fire(); none('off');
 scRestoreBpmOnUnsync = true;
 deck(1, {speed: 0.7016, fader: 0.55}); scUnsyncRestoreBpm(1); none('fader moved 0.8 %');      // the DJ moved it: stock
-deck(1, {speed: 0.7016, fader: 0.505}); scUnsyncRestoreBpm(1); none('fader moved +0.08 % on 8 %'); // review #289 P2.2
-deck(1, {range: '100', speed: 0.7016, fader: 0.5004}); scUnsyncRestoreBpm(1); none('fader moved +0.08 % on 100 %');
+deck(1, {speed: 0.7016, fader: 0.506}); scUnsyncRestoreBpm(1); none('fader outside the centre zone'); // zone since the real-deck test
 deck(1, {speed: 0.7016, master: true}); scUnsyncRestoreBpm(1); none('master deck');          // decks synced to it would follow
 deck(1, {speed: 0.7016, loaded: false}); scUnsyncRestoreBpm(1); none('no track loaded');     // eject / load
 deck(1, {speed: 0.7016, sync: 'TempoSync'}); scUnsyncRestoreBpm(1); none('still synced');
@@ -10723,20 +10730,130 @@ assert.deepEqual(writes, ['2:0.5']);
 """)
 
     @unittest.skipUnless(shutil.which("node"), "Node is required for the restore logic")
-    def test_a_14_bit_fader_at_its_centre_codes_restores(self):
-        # Review #289 (91bfd11e): stock decodes the 14-bit speed fader as code / 16383, so the centre
-        # detent is 8192 (0.50003) or 8191 (0.49997), never exactly 0.5. Both restore; 8193 does not.
+    def test_the_centre_zone_boundaries_in_14_bit_codes(self):
+        # #289 real decks (2026-11-18): the exact centre codes 8191 / 8192 rarely matched a real fader.
+        # The zone is |softValue - 0.5| <= 0.005 (1 % of half the travel): codes 8110..8273 restore,
+        # 8109 and 8274 (one code further out) keep the synced rate. Stock decodes code / 16383.
+        self.assertIn("readonly property real scBpmRestoreZone: 0.005", bp.SMART_SYNC_MAIN)
         self.run_node(r"""
 const code = (c) => c / 16383;
-for (const c of [8192, 8191]) {
+for (const c of [8192, 8191, 8273, 8110]) {
   writes.length = 0; deck(2, {speed: 0.7016, fader: code(c)}); scUnsyncRestoreBpm(2);
-  assert.deepEqual(writes, ['2:0.5'], 'centre code ' + c);
+  assert.deepEqual(writes, ['2:0.5'], 'inside the zone: ' + c);
 }
-for (const c of [8193, 8190]) {
+for (const c of [8274, 8109, 0]) {
   writes.length = 0; deck(2, {speed: 0.7016, fader: code(c)}); scUnsyncRestoreBpm(2);
-  assert.deepEqual(writes, [], 'moved one code: ' + c);
+  assert.deepEqual(writes, [], 'outside the zone: ' + c);
 }
 """)
+
+    @staticmethod
+    def _slider_edits(path="ControlSurfaceModules/ControlSurfaceModules/SpeedSlider.qml"):
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            return bp.edits(False)[path]
+        finally:
+            bp.ROOT = old_root
+
+    # The stock 5.3.0 centre-LED block of ControlSurfaceModules/SpeedSlider.qml (JP07, JP13, JC11, JC16 use it).
+    STOCK_CENTRE_LED = """    Loader {
+        active: module.centreLedNote !== -1
+        sourceComponent: ValueOutputAssignment {
+            objectName: "Speed Slider Centre LED Deck%1".arg(deckConfig.name)
+            enabled: deckConfig.inDJMode
+            channel: deckConfig.midiChannel
+            messageType: type.note
+            midiIndex: module.centreLedNote
+            path: deckConfig.activeDeckPath + "SpeedNeutral"
+        }
+    }
+"""
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required for the LED logic")
+    def test_centre_led_lights_in_the_zone_only_when_on_and_synced(self):
+        slider = "\n".join(new for _, new in self._slider_edits())
+        self.assertIn("readonly property real scBpmRestoreZone: 0.005", slider)  # the GUI's zone
+        lit = self._block(slider, "function scCentreLit(")[0]
+        self.run_node(lit + r"""
+const code = (c) => c / 16383;
+assert.equal(scCentreLit(false, 'BeatOrBarSync', true, code(8192)), false, 'setting off: stock');
+assert.equal(scCentreLit(true, 'Off', true, code(8192)), false, 'not synced: stock');
+assert.equal(scCentreLit(true, 'BeatOrBarSync', false, code(8192)), false, 'no track: stock');
+assert.equal(scCentreLit(true, undefined, true, code(8192)), false, 'no SyncMode: stock');
+for (const c of [8192, 8191, 8273, 8110]) assert.equal(scCentreLit(true, 'BeatOrBarSync', true, code(c)), true, 'lit at ' + c);
+assert.equal(scCentreLit(true, 'TempoSync', true, code(8200)), true, 'tempo sync too');
+for (const c of [8274, 8109, 0, 16383]) assert.equal(scCentreLit(true, 'BeatOrBarSync', true, code(c)), false, 'stock at ' + c);
+assert.equal(scCentreLit(true, 'BeatOrBarSync', true, -1), false, 'no soft value: stock');
+""")
+
+    def test_centre_led_is_one_stock_output_and_the_setting_is_event_driven(self):
+        text = self.STOCK_CENTRE_LED
+        for old, new in self._slider_edits():
+            if old in text:
+                text = text.replace(old, new, 1)
+        # one writer on the note: the stock output, stock path and `enabled`; only its minimum follows the zone
+        self.assertEqual(text.count("midiIndex: module.centreLedNote"), 1)
+        self.assertEqual(text.count("ValueOutputAssignment {"), 1)
+        self.assertIn('            enabled: deckConfig.inDJMode\n', text)
+        self.assertIn('path: deckConfig.activeDeckPath + "SpeedNeutral"\n            minimum: module.scCentreZoneLit ? maximum : 0\n', text)
+        slider = "\n".join(new for _, new in self._slider_edits())
+        self.assertNotRegex(slider, r"scP(Sync|Speed|Loaded)\.translator\.(value|string|state|softValue)\s*=[^=]")  # never written
+        # The setting reaches the controller engine through /GUI/Scripted, not the 10 s HTTP poll.
+        gtext = "\n".join(new for _, new in self._slider_edits("ControlSurfaceModules/ControlSurfaceModules/GlobalAssignmentConfig.qml"))
+        self.assertIn('property var pRestoreBpm: Planck.getProperty("/GUI/Scripted/EngineXRestoreBpm")', gtext)
+        self.assertIn("readonly property bool scRestoreBpmOnUnsync: !!(pRestoreBpm && pRestoreBpm.translator && pRestoreBpm.translator.state)", gtext)
+        self.assertIn('scGlobalConfig.pRestoreBpm = Planck.getProperty("/GUI/Scripted/EngineXRestoreBpm")', gtext)  # re-acquired if Engine's GUI starts later
+        self.assertNotIn("restoreBpmOnUnsync", gtext)  # no poll field
+        main = bp.SERVICES_MAIN
+        self.assertIn('Planck.createProperty("EngineXRestoreBpm", false, 1)', main)
+        self.assertIn("onScRestoreBpmOnUnsyncChanged: scSyncRestoreBpm()", main)
+        self.assertIn("p.translator.state = scRestoreBpmOnUnsync", self._block(main, "function scSyncRestoreBpm(")[0])
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required for the LED logic")
+    def test_centre_led_value_follows_a_setting_flip_immediately(self):
+        # GUI writes /GUI/Scripted/EngineXRestoreBpm; the controller's binding and the stock output's
+        # value ((maximum - minimum) * SpeedNeutral + minimum, ValueOutputAssignment.send) follow at once.
+        main = bp.SERVICES_MAIN
+        sync_fn = self._block(main, "function scSyncRestoreBpm(")[0]
+        slider = "\n".join(new for _, new in self._slider_edits())
+        lit = self._block(slider, "function scCentreLit(")[0]
+        self.run_node(lit + "\n" + sync_fn + r"""
+const scripted = {translator: {state: false}};
+const Planck = {getProperty: (p) => p === "/GUI/Scripted/EngineXRestoreBpm" ? scripted : null};
+var scRestoreBpmProp = scripted, scRestoreBpmSynced = false;
+const gcfgOn = () => !!(scripted && scripted.translator && scripted.translator.state);  // GlobalAssignmentConfig binding
+const sent = (neutral, sync, soft) => {                                                  // what the one output sends
+  const minimum = scCentreLit(gcfgOn(), sync, true, soft) ? 127 : 0;
+  return (127 - minimum) * neutral + minimum;
+};
+const centre = 8192 / 16383;
+scRestoreBpmOnUnsync = false; scSyncRestoreBpm();
+assert.equal(sent(0, 'BeatOrBarSync', centre), 0, 'Off: stock (SpeedNeutral 0)');
+assert.equal(sent(1, 'Off', centre), 127, 'Off: stock (SpeedNeutral 1)');
+scRestoreBpmOnUnsync = true; scSyncRestoreBpm();
+assert.equal(scripted.translator.state, true);
+assert.equal(sent(0, 'BeatOrBarSync', centre), 127, 'On + synced + in zone: lit with the next send');
+assert.equal(sent(0, 'BeatOrBarSync', 8274 / 16383), 0, 'out of zone: stock');
+assert.equal(sent(0, 'Off', centre), 0, 'not synced: stock');
+scRestoreBpmOnUnsync = false; scSyncRestoreBpm();
+assert.equal(sent(0, 'BeatOrBarSync', centre), 0, 'flipped Off: stock again');
+""")
+
+    def test_web_console_copy_names_the_centre_condition_in_four_languages(self):
+        # The deck row keeps its short name (maintainer: no longer names on the deck); the web console
+        # description and the docs note carry the pitch-fader-centre condition.
+        html = (REPO / "pkg/webui/index.html").read_text(encoding="utf-8")
+        self.assertIn("tRestoreBpm:['Restore BPM on Sync Off','关闭 Sync 时恢复原 BPM','關閉 Sync 時還原原 BPM','Restaurar BPM al apagar Sync'],", html)
+        line = next(l for l in html.splitlines() if l.startswith("sRestoreBpm:["))
+        langs = re.findall(r"'((?:[^'\\]|\\.)*)'", line)
+        self.assertEqual(len(langs), 4, line)
+        for text, word in zip(langs, ("pitch fader at the centre", "推子居中", "推桿置中", "fader de pitch en el centro")):
+            self.assertIn(word, text)
+        self.assertIn('text: "Restore BPM on Sync Off"', bp.PLAYBACK_ENTRIES)
+        docs = (REPO / "docs/site/content.js").read_text(encoding="utf-8")
+        for word in ("只在速度推子居中时生效", "只在速度推桿置中時生效", "only works with the pitch fader at the centre"):
+            self.assertIn(word, docs)
 
     @unittest.skipUnless(shutil.which("node"), "Node is required for the restore logic")
     def test_ownership_not_the_routing_mask_decides_in_four_deck_player_mode(self):
@@ -10781,8 +10898,12 @@ assert.deepEqual(writes, ['2:0.5']); assert.equal(armed, 0);
     def test_setting_is_wired_off_by_default_and_translated(self):
         main = bp.SERVICES_MAIN
         self.assertIn("property bool scRestoreBpmOnUnsync: false", main)
-        self.assertIn('key === "restore_bpm_on_unsync") root.scRestoreBpmOnUnsync = val === "1" || val === "true"', main)
-        self.assertIn("root.scRestoreBpmOnUnsync = false\n", main)  # reset before the file is parsed
+        # absent key: Off. Parsed into a local and assigned once, so the scripted property the controller
+        # reads never blinks Off/On while the file is re-read.
+        self.assertIn("let restoreBpm = false", main)
+        self.assertIn('key === "restore_bpm_on_unsync") restoreBpm = val === "1" || val === "true"', main)
+        self.assertIn("root.scRestoreBpmOnUnsync = restoreBpm\n", main)
+        self.assertNotIn("root.scRestoreBpmOnUnsync = false\n", main)
         self.assertIn("v.restoreBpmOnUnsync !== undefined", main)
         self.assertIn('text: "Restore BPM on Sync Off"', bp.PLAYBACK_ENTRIES)
         self.assertIn('root.scCall("restoreBpmOnUnsync=" + (root.scRestoreBpmOnUnsync ? 0 : 1))', bp.PLAYBACK_ENTRIES)
