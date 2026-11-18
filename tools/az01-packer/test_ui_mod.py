@@ -11308,5 +11308,164 @@ assert.deepEqual(writes, ['2:0.5']); assert.equal(armed, 0);
             self.assertTrue(row.get(lang), lang)
 
 
+class PadModeSelectStemsPageTest(unittest.TestCase):
+    """On 4-pad models (NH08/NH08S/NH10/JP11), Stems sits on page 1 (IndexOffset=0) and CUE exits cleanly without flipping to blank page 2."""
+
+    @staticmethod
+    def _block(text, start):
+        i = text.index(start)
+        j = text.index("{", i)
+        depth = 0
+        for k in range(j, len(text)):
+            depth += (text[k] == "{") - (text[k] == "}")
+            if depth == 0:
+                return text[i:k + 1], text[j + 1:k]
+        raise AssertionError(start)
+
+    def test_four_pad_stems_stays_on_page_one_and_preserves_eight_pad_exit(self):
+        stock_path = LAB / "5.3.0/qrc/ControlSurfaceModules/ControlSurfaceModules/PadModeSelect.qml"
+        if stock_path.is_file():
+            qml = stock_path.read_text(encoding="utf-8")
+        else:
+            qml = (
+                "Item {\n    id: module\n    property int ledType: LedType.None\n"
+                "    Repeater {\n        Item {\n            id: button\n"
+                "            ValueNoteAssignment {\n                id: padModeSelect\n"
+                "                output: ComboActionOutput {\n                    singleAction: function () {\n"
+                "                        if (globalConfig.shift) {\n"
+                "                            Planck.getProperty(`${deckConfig.activeDeckPath}PadModeButton${model.index}ShiftPressed`).translator.trigger()\n"
+                "                        } else {\n"
+                "                            Planck.getProperty(\n"
+                "                                `${deckConfig.activeDeckPath}PadModeButton${model.index}Pressed`\n"
+                "                            ).translator.trigger()\n"
+                "                        }\n"
+                "                    }\n                }\n            }\n        }\n    }\n}\n"
+            )
+        prev_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            patches = bp.edits(False)["ControlSurfaceModules/ControlSurfaceModules/PadModeSelect.qml"]
+        finally:
+            bp.ROOT = prev_root
+        for old, new in patches:
+            self.assertEqual(qml.count(old), 1, old[:60])
+            qml = qml.replace(old, new, 1)
+
+        _, single_body = self._block(qml, "singleAction: function ()")
+        helpers = ""
+        m_four = re.search(r"readonly property bool scFourPad:\s*([^\n]+(?:\n\s+&&[^\n]+)*)", qml)
+        if m_four:
+            helpers += f"Object.defineProperty(module, 'scFourPad', {{ get() {{ return ({m_four.group(1)}); }} }});\n"
+        if "function scResetStemsPage(" in qml:
+            helpers += self._block(qml, "function scResetStemsPage(")[0].replace("function scResetStemsPage", "module.scResetStemsPage = function") + "\n"
+        on_mode = self._block(qml, "function onPadsModeChanged()")[1] if "function onPadsModeChanged()" in qml else ""
+        on_off = self._block(qml, "function onPadIndexOffsetChanged()")[1] if "function onPadIndexOffsetChanged()" in qml else ""
+
+        script = r"""
+const assert = require('node:assert/strict');
+let now = 10000;
+Date.now = () => now;
+function runDevice(padsCount) {
+    let view = 'CUES', offset = 0, triggers = [];
+    const Config = { device: { hardwarePadsCount: padsCount, hasSWBankButton: false } };
+    const globalConfig = { shift: false };
+    const module = {};
+    const button = { scStemsLatchedAt: 0, scExitedStemsAt: 0 };
+    const model = { index: 0 };
+    let onPadsMode = () => {}, onPadOff = () => {};
+    const pPadsView = { translator: { get string() { return view; }, set string(v) { const ch = v !== view; view = v; if (ch) onPadsMode(); } } };
+    const pPadIndexOffset = { translator: { get unnormalized() { return offset; }, set unnormalized(v) { const ch = v !== offset; offset = v; if (ch) onPadOff(); } } };
+    const deckConfig = {
+        activeDeckPath: '/Engine/Deck1/',
+        pPadsView,
+        pPadIndexOffset,
+        get padsMode() { return view; },
+        get padsModeIsStems() { return view === 'STEMS'; },
+        get padIndexOffset() { return offset; },
+    };
+    const Planck = {
+        getProperty(path) {
+            return {
+                translator: {
+                    trigger() {
+                        triggers.push(path);
+                        const m = /PadModeButton(\d+)Pressed$/.exec(path);
+                        if (!m) return;
+                        const idx = Number(m[1]);
+                        if (idx === 0) {
+                            if (padsCount <= 4) {
+                                // Stock 4-pad C++ BankedPadModeSelect flips IndexOffset 0<->4 in CUES and in STEMS.
+                                if (view === 'CUES' || view === 'STEMS') pPadIndexOffset.translator.unnormalized = offset === 0 ? 4 : 0;
+                                else { pPadsView.translator.string = 'CUES'; pPadIndexOffset.translator.unnormalized = 0; }
+                            } else {
+                                // Stock 8-pad Engine exits STEMS back to CUES (#256).
+                                pPadsView.translator.string = 'CUES';
+                            }
+                        } else if (idx === 1) {
+                            pPadsView.translator.string = 'LOOPS';
+                        }
+                    }
+                }
+            };
+        }
+    };
+    HELPERS
+    onPadsMode = () => { ON_MODE };
+    onPadOff = () => { ON_OFF };
+    function press(idx, dt) {
+        now += dt;
+        model.index = idx;
+        SINGLE_BODY
+    }
+    return {
+        press,
+        setMode(v) { pPadsView.translator.string = v; },
+        setOffset(v) { pPadIndexOffset.translator.unnormalized = v; },
+        state() { return { view, offset, triggers: triggers.slice() }; },
+    };
+}
+
+// 1. 4-pad (NH08/NH08S/NH10/JP11): double-tap CUE enters STEMS on page 1 (IndexOffset=0),
+//    single-tap CUE in STEMS exits to CUES on page 1 without touching blank page 2,
+//    single-tap CUE in CUES keeps page 1<->2 bank toggle, and touchscreen STEMS stays on page 1.
+const p4 = runDevice(4);
+p4.press(0, 500);
+assert.deepEqual({ view: p4.state().view, offset: p4.state().offset }, { view: 'CUES', offset: 4 });
+p4.press(0, 500);
+assert.deepEqual({ view: p4.state().view, offset: p4.state().offset }, { view: 'CUES', offset: 0 });
+p4.press(0, 500); // tap 1
+p4.press(0, 120); // tap 2 (<350ms) -> STEMS
+assert.equal(p4.state().view, 'STEMS');
+assert.equal(p4.state().offset, 0, '4-pad double-tap CUE into STEMS must reset IndexOffset to 0');
+p4.press(0, 500); // tap CUE inside STEMS
+assert.equal(p4.state().view, 'CUES', '4-pad CUE inside STEMS must exit to CUES');
+assert.equal(p4.state().offset, 0, '4-pad CUE exit from STEMS must land on page 1');
+p4.press(0, 500); // toggle to CUES page 2
+assert.equal(p4.state().offset, 4);
+p4.setMode('STEMS'); // touchscreen entry from CUES page 2
+assert.equal(p4.state().offset, 0, '4-pad touchscreen STEMS entry must reset IndexOffset to 0');
+p4.setOffset(4);
+assert.equal(p4.state().offset, 0, '4-pad STEMS must never stay on blank page 2');
+p4.press(0, 500); // tap 1 inside STEMS -> exits to CUES page 1
+p4.press(0, 120); // tap 2 (<350ms, double-tap exit) -> stays on CUES page 1
+assert.deepEqual({ view: p4.state().view, offset: p4.state().offset }, { view: 'CUES', offset: 0 }, '4-pad double-tap CUE exit from STEMS must stay on CUES page 1');
+p4.press(1, 500);
+assert.equal(p4.state().view, 'LOOPS');
+
+// 2. 8-pad (SC LIVE 4 #256): double-tap CUE enters STEMS, single-tap CUE exits via stock Engine trigger.
+const p8 = runDevice(8);
+p8.press(0, 500);
+p8.press(0, 120);
+assert.equal(p8.state().view, 'STEMS');
+const countAtEnter = p8.state().triggers.length;
+p8.press(0, 500);
+assert.equal(p8.state().view, 'CUES');
+assert.equal(p8.state().triggers.length, countAtEnter + 1, '8-pad CUE exit must still trigger PadModeButton0Pressed');
+assert.equal(p8.state().offset, 0);
+""".replace("HELPERS", helpers).replace("ON_MODE", on_mode).replace("ON_OFF", on_off).replace("SINGLE_BODY", single_body)
+        result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -8592,9 +8592,28 @@ def edits(dev: bool):
             "    readonly property bool canToggleMode: Config.audio.hasStemsLevel || module.pflShiftAction == Action.ToggleChannelStripMode\n",
         )]
         scaled["ControlSurfaceModules/ControlSurfaceModules/PadModeSelect.qml"] = [(
+            "    property int ledType: LedType.None\n",
+            "    property int ledType: LedType.None\n"
+            "    // 4-pad models without a software Bank button (NH08/NH08S/NH10/JP11): STEMS only uses pads 1-4;\n"
+            "    // keep IndexOffset at 0 so entering or tapping CUE never flips to a blank page 2.\n"
+            "    readonly property bool scFourPad: typeof Config !== \"undefined\" && Config && Config.device && Config.device.hardwarePadsCount > 0 && Config.device.hardwarePadsCount <= 4 && !Config.device.hasSWBankButton\n"
+            "    function scResetStemsPage() {\n"
+            "        if (module.scFourPad && typeof deckConfig !== \"undefined\" && deckConfig && deckConfig.padsModeIsStems && deckConfig.pPadIndexOffset && deckConfig.pPadIndexOffset.translator && deckConfig.padIndexOffset !== 0) {\n"
+            "            deckConfig.pPadIndexOffset.translator.unnormalized = 0\n"
+            "        }\n"
+            "    }\n"
+            "    Component.onCompleted: module.scResetStemsPage()\n"
+            "    Connections {\n"
+            "        target: typeof deckConfig !== \"undefined\" ? deckConfig : null\n"
+            "        ignoreUnknownSignals: true\n"
+            "        function onPadsModeChanged() { module.scResetStemsPage() }\n"
+            "        function onPadIndexOffsetChanged() { module.scResetStemsPage() }\n"
+            "    }\n",
+        ), (
             "            ValueNoteAssignment {\n"
             "                id: padModeSelect\n",
-            "            property double scStemsLatchedAt: 0\n\n"
+            "            property double scStemsLatchedAt: 0\n"
+            "            property double scExitedStemsAt: 0\n\n"
             "            ValueNoteAssignment {\n"
             "                id: padModeSelect\n",
         ), (
@@ -8605,13 +8624,31 @@ def edits(dev: bool):
             "                        }\n",
             "                        } else {\n"
             "                            const now = Date.now()\n"
+            "                            if (model.index === 0 && module.scFourPad && !deckConfig.padsModeIsStems && now - button.scExitedStemsAt < 350) {\n"
+            "                                button.scExitedStemsAt = 0\n"
+            "                                return\n"
+            "                            }\n"
             "                            if (model.index === 0 && now - button.scStemsLatchedAt < 350) {\n"
+            "                                button.scStemsLatchedAt = 0\n"
+            "                                button.scExitedStemsAt = 0\n"
             "                                if (!deckConfig.padsModeIsStems && deckConfig.pPadsView && deckConfig.pPadsView.translator) {\n"
             "                                    deckConfig.pPadsView.translator.string = \"STEMS\"\n"
             "                                }\n"
+            "                                module.scResetStemsPage()\n"
             "                                return\n"
             "                            }\n"
             "                            const wasStems = deckConfig.padsModeIsStems\n"
+            "                            if (model.index === 0 && wasStems && module.scFourPad) {\n"
+            "                                button.scStemsLatchedAt = 0\n"
+            "                                button.scExitedStemsAt = now\n"
+            "                                if (deckConfig.pPadsView && deckConfig.pPadsView.translator) {\n"
+            "                                    deckConfig.pPadsView.translator.string = \"CUES\"\n"
+            "                                }\n"
+            "                                if (deckConfig.pPadIndexOffset && deckConfig.pPadIndexOffset.translator) {\n"
+            "                                    deckConfig.pPadIndexOffset.translator.unnormalized = 0\n"
+            "                                }\n"
+            "                                return\n"
+            "                            }\n"
             "                            Planck.getProperty(\n"
             "                                `${deckConfig.activeDeckPath}PadModeButton${model.index}Pressed`\n"
             "                            ).translator.trigger()\n"
