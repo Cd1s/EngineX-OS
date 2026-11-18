@@ -8312,9 +8312,7 @@ def edits(dev: bool):
             ('                        deckConfig.activeDeckTrackPath + "Nudge%1".arg(model.direction)\n',
              '                        deckConfig.activeDeckTrackPath + (module.scBeatJumpActive ? ("BeatJump/" + model.jumpAction) : ("Nudge%1".arg(model.direction)))\n'),
         ]
-        # Integer-BPM pitch-fader plateaus when BPM Decimals is 2 (1 = exact stock linear fader):
-        # map [0, 0.5] and [0.5, 1] independently around center so 0% stays exact,
-        # placing 2-ADC-step (w = 4/4095 in half-travel) plateaus at each integer BPM with uniform linear slope between them.
+        # BPM Decimals = 2 gives each whole BPM a fixed window in the stock fader's BPM space.
         scaled["ControlSurfaceModules/ControlSurfaceModules/SpeedSlider.qml"] = [
             ('    property bool invert: false\n',
              '''    property bool invert: false
@@ -8334,31 +8332,20 @@ def edits(dev: bool):
         const r = rPct > 0 ? rPct / 100.0 : 0
         if (!(B > 0) || !(r > 0)) return u
 
-        const w = 4.0 / 4095.0
-        const sign = u >= 0.5 ? 1 : -1
-        const y = sign > 0 ? 2.0 * (u - 0.5) : 2.0 * (0.5 - u)
+        if (u === 0.0 || u === 0.5 || u === 1.0) return u
         const delta = B * r
-        const tEnd = B + sign * delta
-        const bRound = Math.round(B)
-        const hasCenter = Math.abs(B - bRound) < 1e-4
-        const k0 = hasCenter ? bRound + sign : (sign > 0 ? Math.floor(B) + 1 : Math.ceil(B) - 1)
-        const k1 = sign > 0 ? Math.floor(tEnd - 1e-4) : Math.ceil(tEnd + 1e-4)
-        const m = Math.max(0, sign * (k1 - k0) + 1)
-        const wEff = Math.min(w, 0.5 / (m + 0.5))
-        const cEff = hasCenter ? 0.5 * wEff : 0.0
-        const S = 1.0 - cEff - m * wEff
-        if (y <= cEff) return 0.5
-        if (m === 0) return Math.max(0.0, Math.min(1.0, 0.5 + 0.5 * sign * (y - cEff) / S))
-        const y0 = cEff + (S / delta) * (sign * (k0 - B))
-        if (y < y0) return Math.max(0.0, Math.min(1.0, 0.5 + 0.5 * sign * (y - cEff) / S))
-        const P = wEff + S / delta
-        const j = Math.min(m - 1, Math.floor((y - y0) / P))
-        if (y - (y0 + j * P) <= wEff) {
-            const k = k0 + sign * j
-            return Math.max(0.0, Math.min(1.0, 0.5 + 0.5 * (k / B - 1.0) / r))
-        }
-        const s = y - cEff - (j + 1) * wEff
-        return Math.max(0.0, Math.min(1.0, 0.5 + 0.5 * sign * s / S))
+        const raw = B + (2.0 * u - 1.0) * delta
+        const whole = Math.floor(raw)
+        // A fractional center or endpoint splits the interval and must map to itself.
+        const lo = Math.max(whole, u < 0.5 ? B - delta : B)
+        const hi = Math.min(whole + 1, u < 0.5 ? B : B + delta)
+        const span = hi - lo
+        // Keep at least half of even a shortened interval for the linear ramp.
+        const width = Math.min(0.25, span / 2)
+        const start = lo === whole ? lo + width : lo
+        const end = hi === whole + 1 ? hi - width : hi
+        const target = raw <= start ? lo : raw >= end ? hi : lo + span * (raw - start) / (end - start)
+        return Math.max(0.0, Math.min(1.0, 0.5 + (target - B) / (2.0 * delta)))
     }
 '''),
             ('        ValueCCAssignment {\n            readonly property bool songLoaded: Planck.getProperty("/Engine/Deck%1/Track/SongLoaded".arg(modelData))\n                .translator.state\n',

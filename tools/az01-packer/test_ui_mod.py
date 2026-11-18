@@ -10240,8 +10240,8 @@ shared["/GUI/Scripted/EngineXBpmDecimals"] = 0.5;
 assert.equal(scTransformSpeed(0.3, false, true, propNum(124), propStr(""), propStr("8%")), 0.3);
 assert.equal(scTransformSpeed(0.3, true, true, propNum(124), propStr(""), propStr("8%")), 0.7);
 for (const inv of [false, true]) {{
-    for (let i = 0; i <= 4095; i++) {{
-        const uIn = i / 4095;
+    for (let i = 0; i <= 16383; i++) {{
+        const uIn = i / 16383;
         const expected = inv ? 1.0 - uIn : uIn;
         assert.equal(scTransformSpeed(uIn, inv, true, propNum(124), propStr(""), propStr("8%")), expected);
     }}
@@ -10256,16 +10256,16 @@ assert.equal(scTransformSpeed(0.3, true, false, propNum(124), propStr(""), propS
 const outMeta = scTransformSpeed(0.5, false, true, propNum(0), propStr("126,5"), propStr("8%"));
 assert.equal(outMeta, 0.5);
 
-// Decimals = 2 (plateau ON) with loaded track places 2-ADC-step plateaus at every integer BPM
+// Exercise the emitted transform on uniform 10-, 12- and 14-bit input grids.
 for (const inv of [false, true]) {{
-    for (const B of [87.6, 110.0, 123.45, 123.99, 124.0, 125.0, 140.0, 174.0]) {{
-        for (const rPct of [4, 8, 10, 16, 25, 50, 100]) {{
+    for (const B of [60, 87.6, 110.0, 123.45, 123.99, 124.0, 125.0, 140.0, 174.0, 250]) {{
+        for (const rPct of [4, 8, 10, 16, 24, 25, 50, 100]) {{
             const r = rPct / 100;
             const oP = propNum(B), mP = propStr(""), rP = propStr(rPct + "%");
             const end0 = scTransformSpeed(inv ? 1 : 0, inv, true, oP, mP, rP);
             const end1 = scTransformSpeed(inv ? 0 : 1, inv, true, oP, mP, rP);
             const ctr = scTransformSpeed(0.5, inv, true, oP, mP, rP);
-            assert.ok(Math.abs(end0) < 1e-12 && Math.abs(end1 - 1) < 1e-12 && ctr === 0.5);
+            assert.ok(end0 === 0 && end1 === 1 && ctr === 0.5);
 
             // Physical center detent (8192/16383) stays at 0.5 for integer BPM and near 0.5 for fractional
             const detIn = inv ? 1 - 8192 / 16383 : 8192 / 16383;
@@ -10273,27 +10273,36 @@ for (const inv of [false, true]) {{
             if (Math.abs(B - Math.round(B)) < 1e-4) assert.equal(detOut, 0.5);
             else assert.ok(Math.abs(detOut - 0.5) < 2e-4);
 
-            let prev = -1;
-            const hits = new Map();
-            let maxStep = 0, prevBpm = null;
-            for (let i = 0; i <= 4095; i++) {{
-                const uIn = inv ? 1 - i / 4095 : i / 4095;
-                const uOut = scTransformSpeed(uIn, inv, true, oP, mP, rP);
-                assert.ok(uOut >= prev - 1e-12 && uOut >= 0 && uOut <= 1);
-                prev = uOut;
-                const bpm32 = f32(B) * (1 + r * (2 * f32(uOut) - 1));
-                if (prevBpm !== null) maxStep = Math.max(maxStep, bpm32 - prevBpm);
-                prevBpm = bpm32;
-                const k = Math.round(bpm32);
-                if (Math.abs(bpm32 - k) < 1e-4) hits.set(k, (hits.get(k) || 0) + 1);
-            }}
-            const kMin = Math.ceil(B * (1 - r) + 1e-4), kMax = Math.floor(B * (1 + r) - 1e-4);
-            for (let k = kMin; k <= kMax; k++) {{
-                if (Math.abs(k - B) < 1e-4) continue;
-                assert.ok((hits.get(k) || 0) >= 2, `missing plateau B=${{B}} r=${{rPct}}% k=${{k}}`);
-            }}
-            if (B === 124.0 && rPct <= 16) {{
-                assert.ok(maxStep <= 0.01, `B=124 r=${{rPct}}% maxStep=${{maxStep}}`);
+            const low = B - B * r, high = B + B * r;
+            for (const last of [1023, 4095, 16383]) {{
+                const stockStep = 2 * B * r / last;
+                const hits = new Map();
+                let prev = 0, prevBpm = low;
+                for (let i = 0; i <= last; i++) {{
+                    const uIn = inv ? 1 - i / last : i / last;
+                    const uOut = scTransformSpeed(uIn, inv, true, oP, mP, rP);
+                    const raw = low + stockStep * i, k = Math.round(raw);
+                    const bpm32 = f32(B) * (1 + r * (2 * f32(uOut) - 1));
+                    const full = k - low >= 0.5 && high - k >= 0.5 && (k === B || Math.abs(B - k) >= 0.5);
+                    if (full && Math.abs(raw - k) < 0.25 - 1e-10) {{
+                        assert.ok(Math.abs(bpm32 - k) < 1e-4, `missed integer B=${{B}} r=${{rPct}} raw=${{raw}}`);
+                    }}
+                    assert.ok(uOut >= prev && uOut <= 1);
+                    assert.ok(uOut - prev <= 2 / last + 1e-12);
+                    if (B === 124 && rPct <= 16 && (last === 16383 || stockStep * 2 < 0.01)) {{
+                        assert.ok(bpm32 - prevBpm <= 0.01);
+                    }}
+                    prev = uOut;
+                    prevBpm = bpm32;
+                    const hit = Math.round(bpm32);
+                    if (Math.abs(bpm32 - hit) < 1e-4) hits.set(hit, (hits.get(hit) || 0) + 1);
+                }}
+                for (let k = Math.ceil(low); k <= Math.floor(high); k++) {{
+                    // Even next to a fractional center or endpoint, the far side stays full.
+                    const nearAnchor = k - low < 0.5 || high - k < 0.5 || (k !== B && Math.abs(B - k) < 0.5);
+                    const n = Math.floor((nearAnchor ? 0.25 : 0.5) / stockStep);
+                    assert.ok((hits.get(k) || 0) >= n, `B=${{B}} range=${{rPct}} last=${{last}} k=${{k}} need=${{n}}`);
+                }}
             }}
         }}
     }}
