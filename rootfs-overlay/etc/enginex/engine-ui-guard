@@ -400,7 +400,7 @@ pre|settings)
                 mv "$UI/settings.conf.tmp" "$UI/settings.conf" ;;
         esac
     fi
-    if ! grep -qx 'scope=tidal' "$UI/settings.conf" 2>/dev/null; then
+    if ! feature_off gateway && ! feature_off sso && ! grep -qx 'scope=tidal' "$UI/settings.conf" 2>/dev/null; then
         if grep -Eq '"TIDAL"[[:space:]]*:' "$accounts" 2>/dev/null && ! grep -E '"TIDAL"[[:space:]]*:' "$accounts" 2>/dev/null | grep -q 'accessToken'; then
             awk '{
                 if ($0 ~ /"TIDAL"[[:space:]]*:/ && $0 !~ /accessToken/) {

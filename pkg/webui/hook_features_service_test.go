@@ -5,11 +5,130 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 )
+
+func TestHookFeatureRebootChangesDoNotRestartOnlyEngine(t *testing.T) {
+	for _, name := range []string{"deemixd", "rb-bridge", "mount-hook", "zoom30"} {
+		t.Run(name, func(t *testing.T) {
+			_, state := hookFeatureFiles(t, true)
+			if err := os.WriteFile(state, []byte("pid=4242\nbuild=\noff=\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			restarts := 0
+			s := New(Config{AccessToken: "t", UIDir: t.TempDir(), StateDir: t.TempDir(), RestartEngine: func() error { restarts++; return nil }}, nil)
+			defer s.Close()
+			w := postHookFeatures(t, s, `{"off":["`+name+`"],"restart":true}`)
+			var v hookFeaturesView
+			if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &v) != nil {
+				t.Fatalf("%d %s", w.Code, w.Body.String())
+			}
+			wantReboot := name != "zoom30"
+			wantRestarts := 1
+			if wantReboot {
+				wantRestarts = 0
+			}
+			if v.RebootNeeded != wantReboot || restarts != wantRestarts {
+				t.Fatalf("%s: reboot=%t Engine restarts=%d", name, v.RebootNeeded, restarts)
+			}
+		})
+	}
+}
+
+func TestHookFeatureViewClosesHandWrittenDependencies(t *testing.T) {
+	conf, state := hookFeatureFiles(t, true)
+	if err := os.MkdirAll(filepath.Dir(conf), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(conf, []byte("sso\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(state, []byte("pid=4242\nbuild=\noff=sso\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := New(Config{AccessToken: "t", UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	defer s.Close()
+	for _, f := range s.hookFeaturesView().Features {
+		if f.Name == "gateway" && (!f.Off || !f.Along || !f.Blocked || f.Running != "off") {
+			t.Fatalf("gateway must follow a hand-written sso denial: %+v", f)
+		}
+	}
+	if !HookFeatureOff("gateway") {
+		t.Fatal("a file denying sso must also deny its gateway dependent")
+	}
+}
+
+// Run the actual two startup seed blocks, rather than reproducing their shell condition.
+func TestHookFeatureOffKeepsStockStreamingAccounts(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("startup account fixture requires sh")
+	}
+	for _, kind := range []string{"guard", "bundle"} {
+		t.Run(kind, func(t *testing.T) {
+			file, helper, startMark, endMark := "../../rootfs-overlay/etc/enginex/engine-ui-guard", "feature_off", "\n    accounts=${ENGINEX_STREAMING_ACCOUNTS", "\n    fi\n    # #49:"
+			if kind == "bundle" {
+				file, helper, startMark, endMark = "../../tools/az01-packer/build-data-bundle.py", "hook_off", "\naccounts=${ENGINEX_STREAMING_ACCOUNTS", "\n# #160:"
+			}
+			b, err := os.ReadFile(file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			src := string(b)
+			h := strings.Index(src, helper+"() {")
+			if h < 0 {
+				t.Fatal("missing feature reader")
+			}
+			hEnd := strings.Index(src[h:], "\n}")
+			start := strings.Index(src, startMark)
+			if hEnd < 0 || start < 0 {
+				t.Fatal("missing startup seed block")
+			}
+			end := strings.Index(src[start:], endMark)
+			if end < 0 {
+				t.Fatal("missing startup seed end")
+			}
+			script := src[h:h+hEnd+2] + "\nUI=$ENGINEX_CUSTOM/ui\ndest=$ENGINEX_CUSTOM\n" + src[start:start+end]
+			for _, off := range []string{"absent", "", "gateway", "sso", "# gateway\n# sso"} {
+				t.Run(off, func(t *testing.T) {
+					root := t.TempDir()
+					if err := os.Mkdir(filepath.Join(root, "ui"), 0o755); err != nil {
+						t.Fatal(err)
+					}
+					if off != "absent" {
+						if err := os.WriteFile(filepath.Join(root, "hook-disable.conf"), []byte(off+"\n"), 0o644); err != nil {
+							t.Fatal(err)
+						}
+					}
+					accounts := filepath.Join(root, "accounts.json")
+					original := "{\n  \"TIDAL\": \"{}\"\n}\n"
+					if err := os.WriteFile(accounts, []byte(original), 0o644); err != nil {
+						t.Fatal(err)
+					}
+					cmd := exec.Command("sh", "-c", script)
+					cmd.Env = append(os.Environ(), "ENGINEX_CUSTOM="+root, "ENGINEX_STREAMING_ACCOUNTS="+accounts)
+					if out, err := cmd.CombinedOutput(); err != nil {
+						t.Fatalf("startup block: %v %s", err, out)
+					}
+					got, err := os.ReadFile(accounts)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if off == "gateway" || off == "sso" {
+						if string(got) != original {
+							t.Fatalf("disabled gateway changed stock account: %s", got)
+						}
+					} else if !strings.Contains(string(got), "enginex") {
+						t.Fatalf("default-on startup did not seed the gateway: %s", got)
+					}
+				})
+			}
+		})
+	}
+}
 
 // rb-bridge and deemixd are EngineX services, not hook sites: the boot script leaves
 // their units out, so they wait for a reboot like mount-hook.

@@ -126,7 +126,7 @@ func engineAliveIn(proc string, pid int) bool {
 // asks it for the services it starts itself (first generation: deemixd).
 func HookFeatureOff(name string) bool {
 	b, err := os.ReadFile(hookDisablePath)
-	return err == nil && slices.Contains(parseHookFeatureNames(string(b)), name)
+	return err == nil && slices.Contains(hookFeaturesOffWithNeeds(parseHookFeatureNames(string(b))), name)
 }
 
 func knownHookFeature(name string) bool {
@@ -175,6 +175,8 @@ func readHookRunState() hookRunState {
 			st.off = parseHookFeatureNames(val)
 		}
 	}
+	st.build = hookFeaturesOffWithNeeds(st.build)
+	st.off = hookFeaturesOffWithNeeds(st.off)
 	st.ok = pid > 0 && engineAlive(pid)
 	return st
 }
@@ -224,12 +226,20 @@ type hookFeaturesView struct {
 	EngineKnown bool `json:"engineKnown"`
 	// RestartNeeded: the file differs from the running Engine (restart Engine to apply).
 	RestartNeeded bool `json:"restartNeeded"`
+	// RebootNeeded: a reboot-required feature differs from Engine's start snapshot.
+	RebootNeeded bool `json:"rebootNeeded"`
 }
 
 func (s *Server) hookFeaturesView() hookFeaturesView {
 	var file, along []string
 	if b, err := os.ReadFile(hookDisablePath); err == nil {
 		file, along = parseHookFeatureNames(string(b)), hookFeaturesAlong(string(b))
+		for _, name := range hookFeaturesOffWithNeeds(file) {
+			if !slices.Contains(file, name) {
+				along = append(along, name)
+			}
+		}
+		file = hookFeaturesOffWithNeeds(file)
 	}
 	st := readHookRunState()
 	gen2 := dataBundleBoards[imagePrefix(deviceCompatible())] || !onDeck()
@@ -255,6 +265,9 @@ func (s *Server) hookFeaturesView() hookFeaturesView {
 			if !f.Reboot && runningOff != (fv.Off || fv.Build) {
 				v.RestartNeeded = true
 			}
+		}
+		if st.ok && f.Reboot && slices.Contains(st.off, f.Name) != (fv.Off || fv.Build) {
+			v.RebootNeeded = true
 		}
 		v.Features = append(v.Features, fv)
 	}
@@ -367,9 +380,10 @@ func (s *Server) handleHookFeatures(w http.ResponseWriter, r *http.Request) {
 	s.uiMu.Lock()
 	// A feature that went off only with its need comes back with it, even when the
 	// client still lists it; one switched off by hand stays off.
-	var before []string
+	var before, previous []string
 	if b, err := os.ReadFile(hookDisablePath); err == nil {
 		before = hookFeaturesAlong(string(b))
+		previous = hookFeaturesOffWithNeeds(parseHookFeatureNames(string(b)))
 	}
 	off = slices.DeleteFunc(off, func(name string) bool {
 		f, _ := hookFeatureNamed(name)
@@ -384,6 +398,9 @@ func (s *Server) handleHookFeatures(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	off = all
+	rebootChanged := slices.ContainsFunc(hookFeatures, func(f hookFeature) bool {
+		return f.Reboot && slices.Contains(previous, f.Name) != slices.Contains(off, f.Name)
+	})
 	err := writeHookDisableFileAlong(off, along)
 	s.uiMu.Unlock()
 	if err != nil {
@@ -391,12 +408,14 @@ func (s *Server) handleHookFeatures(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("stream-sync: hook features off: %s", strings.Join(off, ","))
-	if in.Restart {
+	v := s.hookFeaturesView()
+	v.RebootNeeded = v.RebootNeeded || rebootChanged
+	if in.Restart && !v.RebootNeeded {
 		if err := s.restartEngine(); err != nil {
 			log.Printf("stream-sync: restart Engine: %v", err)
 			fail(w, http.StatusInternalServerError, errors.New("features saved, but Engine did not restart"))
 			return
 		}
 	}
-	respond(w, s.hookFeaturesView())
+	respond(w, v)
 }

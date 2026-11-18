@@ -587,7 +587,7 @@ fi
 # Seed /data/StreamingAccounts.json with a stored-credential TIDAL entry (#56, #159)
 # so Engine 5.3.0 logs in to the local gateway at boot instead of waiting for Profile SSO.
 accounts=${ENGINEX_STREAMING_ACCOUNTS:-/data/StreamingAccounts.json}
-if [ ! -e "$dest/ui/safe-mode" ] && [ -d "${accounts%/*}" ] && ! grep -qx 'scope=tidal' "$dest/ui/settings.conf" 2>/dev/null; then
+if [ ! -e "$dest/ui/safe-mode" ] && [ -d "${accounts%/*}" ] && ! hook_off gateway && ! hook_off sso && ! grep -qx 'scope=tidal' "$dest/ui/settings.conf" 2>/dev/null; then
     export T='"TIDAL": "{\"provider\":\"TIDAL\",\"providerType\":\"TIDAL\",\"accessToken\":\"enginex\",\"refreshToken\":\"enginex\"}"'
     if grep -Eq '"TIDAL"[[:space:]]*:' "$accounts" 2>/dev/null && ! grep -E '"TIDAL"[[:space:]]*:' "$accounts" 2>/dev/null | grep -q 'accessToken'; then
         awk '{

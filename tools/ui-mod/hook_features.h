@@ -68,6 +68,11 @@ static const char *const hf_names[HF_COUNT] = {
 #undef HF_NAME
 };
 
+// Instruction tagging is checked before compilation; disabled instructions become NOPs.
+#define HF_CONFIG(feature, word) (hf_on(feature) ? (uint32_t)(word) : UINT32_C(0xe320f000))
+#define HF_CONFIG_COPY(feature, dst, src, size) do { if (hf_on(feature)) memcpy(dst, src, size); } while (0)
+#define HF_INTERPOSE(feature) _Static_assert((feature) >= HF_ALWAYS && (feature) < HF_COUNT, "missing hook feature");
+
 #ifndef ENGINEX_HOOK_DISABLE
 #define ENGINEX_HOOK_DISABLE ""
 #endif
@@ -142,6 +147,7 @@ static uint32_t hf_disabled(void) {
     if (!__atomic_compare_exchange_n(&hf_state, &expected, 1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
         return expected == 2 ? __atomic_load_n(&hf_mask, __ATOMIC_ACQUIRE) : mask;
     mask |= hf_read(hf_path, &unknown);
+    if (mask & (1u << HF_SSO)) mask |= 1u << HF_GATEWAY;
     __atomic_store_n(&hf_mask, mask, __ATOMIC_RELEASE);
     __atomic_store_n(&hf_state, 2, __ATOMIC_RELEASE);
     if (unknown) hf_log("engine-ui-hook: hook-disable.conf names an unknown feature; ignored\n");

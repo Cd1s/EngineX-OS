@@ -128,19 +128,21 @@ static int is_engine(void) {
 #endif
 }
 
+HF_INTERPOSE(HF_UI_PACKS)
 int setenv(const char *name, const char *value, int overwrite) {
     static void *cache;
     int (*real)(const char *, const char *, int) = next_symbol(&cache, "setenv");
     if (!real) { errno = ENOSYS; return -1; }
     // Engine overwrites QML_DISK_CACHE_PATH at startup. Keep its compiled
     // EngineX resources out of the cache a stock reflash will read.
-    if (name && !strcmp(name, "QML_DISK_CACHE_PATH") && is_engine() && access(UI_ROOT "/safe-mode", F_OK))
+    if (name && !strcmp(name, "QML_DISK_CACHE_PATH") && is_engine() && hf_on(HF_UI_PACKS) && access(UI_ROOT "/safe-mode", F_OK))
         value = UI_ROOT "/qml-cache";
     return real(name, value, overwrite);
 }
 
 static void *alsa_sw_cache, *alsa_tstamp_set_cache, *alsa_tstamp_get_cache;
 
+HF_INTERPOSE(HF_ALSA_TIMESTAMP)
 int snd_pcm_sw_params_set_tstamp_type(void *pcm, void *params, int type) {
     int (*real)(void *, void *, int) = next_symbol(&alsa_tstamp_set_cache, "snd_pcm_sw_params_set_tstamp_type");
     if (!real) return -ENOSYS;
@@ -149,6 +151,7 @@ int snd_pcm_sw_params_set_tstamp_type(void *pcm, void *params, int type) {
     return real(pcm, params, type);
 }
 
+HF_INTERPOSE(HF_ALSA_TIMESTAMP)
 int snd_pcm_sw_params(void *pcm, void *params) {
     int (*real)(void *, void *) = next_symbol(&alsa_sw_cache, "snd_pcm_sw_params");
     if (!real) return -ENOSYS;
@@ -276,10 +279,11 @@ static void led_catch_up(int (*real)(void *, void *), void *handle) {
     pthread_mutex_unlock(&led_mu);
 }
 
+HF_INTERPOSE(HF_UI_PACKS)
 int snd_seq_event_output_direct(void *handle, void *ev) {
     int (*real)(void *, void *) = next_symbol(&seq_direct_cache, "snd_seq_event_output_direct");
     if (!real) return -ENOSYS;
-    if (!ev || !is_engine()) return real(handle, ev);
+    if (!ev || !is_engine() || !hf_on(HF_UI_PACKS)) return real(handle, ev);
     led_catch_up(real, handle);
     uchar *e = ev;
     if (e[0] == SEQ_SYSEX && (e[1] & 0x0c) == 0x04) {
@@ -583,6 +587,7 @@ static int official_update_host(const char *node) {
 
 static void *getaddrinfo_cache;
 
+HF_INTERPOSE(HF_VENDOR_UPDATE_BLOCK)
 int getaddrinfo(const char *node, const char *service, const struct addrinfo *hints, struct addrinfo **result) {
     // device.inmusicbrands.com also serves OAuth/unlock; only deny the firmware-update host
     // on 32-bit decks (AZ04 uses PrimeUpdates.xml on autoupdate.airmusictech.com to download
@@ -1067,12 +1072,13 @@ static unsigned stream_rate;                   // SBC rate of the A2DP stream: 0
 // streams (BlueZ's a2dp_default_bitpool: 53 up to 44.1 kHz, 51 at 48 kHz, 31 / 29 in mono and dual channel,
 // where the bitpool is per channel), not the sink's maximum, which can be 250 (1.4 Mbit/s at 44.1 kHz).
 // A lower sink maximum wins, and so does a minimum above the default.
+HF_INTERPOSE(HF_BLUETOOTH)
 int sbc_reinit_a2dp(void *sbc, unsigned long flags, const void *config, size_t len) {
     static void *cache;
     int (*real)(void *, unsigned long, const void *, size_t) = next_symbol(&cache, "sbc_reinit_a2dp");
     if (!real) return -ENOSYS;
     int rc = real(sbc, flags, config, len);
-    if (!rc && is_engine()) {
+    if (!rc && is_engine() && hf_on(HF_BLUETOOTH)) {
         const uint8_t *c = config; // real validates the four-byte SBC format
         unsigned limit = (c[0] & 0x0c ? 16u : 32u) * (c[1] & 0x08 ? 4u : 8u);
         if (c[2] < 2 || c[2] > c[3] || c[3] > 250 || c[2] > limit) return -EINVAL;
@@ -1095,9 +1101,10 @@ static void bt_encoded(const void *sbc) {
     __atomic_add_fetch(&bt_encodes, 1, __ATOMIC_RELEASE);
 }
 
+HF_INTERPOSE(HF_BLUETOOTH)
 ssize_t sbc_encode(void *sbc, const void *input, size_t input_len, void *output, size_t output_len, ssize_t *written) {
     static void *real_cache;
-    if (sbc && is_engine()) bt_encoded(sbc);
+    if (sbc && is_engine() && hf_on(HF_BLUETOOTH)) bt_encoded(sbc);
     ssize_t (*real)(void *, const void *, size_t, void *, size_t, ssize_t *) = next_symbol(&real_cache, "sbc_encode");
     if (!real) return -ENOSYS;
     return real(sbc, input, input_len, output, output_len, written);
@@ -1439,6 +1446,23 @@ static struct dsp_hook_site dsp_hooks[DSP_HOOK_COUNT] = { // offsets: 5.0.4, rep
     {0x1462a6c, hook_master_output}
 };
 
+static int try_patch_bytes(int feature, uintptr_t entry, const void *bytes, size_t size, size_t page) {
+    if (!hf_on(feature)) return 1;
+    uintptr_t start = entry - entry % page;
+    size_t span = ((entry + size + page - 1) / page * page) - start;
+    // Constructor only, before Engine threads start. Never continue with a
+    // partially installed group or an executable page left writable.
+    if (mprotect((void *)start, span, PROT_READ | PROT_WRITE)) return 0;
+    memcpy((void *)entry, bytes, size);
+    if (mprotect((void *)start, span, PROT_READ | PROT_EXEC)) _exit(127);
+    __builtin___clear_cache((char *)entry, (char *)entry + size);
+    return 1;
+}
+
+static void patch_bytes(int feature, uintptr_t entry, const void *bytes, size_t size, size_t page) {
+    if (!try_patch_bytes(feature, entry, bytes, size, page)) _exit(127);
+}
+
 #if !defined(__aarch64__)
 static const void *dsp_expected(unsigned slot, size_t *size) {
     *size = slot == DSP_COMMON ? sizeof dsp_common_prefix : sizeof dsp_event_prefix;
@@ -1449,16 +1473,6 @@ static const void *dsp_expected(unsigned slot, size_t *size) {
         (slot == DSP_AUTOGATE ? dsp_autogate_prefix : dsp_event_prefix);
 }
 
-static void patch_bytes(uintptr_t entry, const void *bytes, size_t size, size_t page) {
-    uintptr_t start = entry - entry % page;
-    size_t span = ((entry + size + page - 1) / page * page) - start;
-    // Constructor only, before Engine threads start. Never continue with a
-    // partially installed group or an executable page left writable.
-    if (mprotect((void *)start, span, PROT_READ | PROT_WRITE)) _exit(127);
-    memcpy((void *)entry, bytes, size);
-    if (mprotect((void *)start, span, PROT_READ | PROT_EXEC)) _exit(127);
-    __builtin___clear_cache((char *)entry, (char *)entry + size);
-}
 
 #if !defined(__aarch64__)
 static int install_px_scope(uintptr_t base, size_t page, const char *version) {
@@ -1485,9 +1499,9 @@ static int install_px_scope(uintptr_t base, size_t page, const char *version) {
     uint32_t rate_code[] = {dsp_event_prefix[0], dsp_event_prefix[1], 0xe51ff004, (uint32_t)(rate + 8)};
     px_rate_original = rx_code(rate_code, sizeof rate_code, page);
     uint32_t rate_jump[] = {0xe51ff004, (uint32_t)(uintptr_t)hook_px_rate};
-    patch_bytes(rate, rate_jump, sizeof rate_jump, page);
+    patch_bytes(HF_DSP_GUARDS, rate, rate_jump, sizeof rate_jump, page);
     uint32_t jump[] = {0xe51ff004, (uint32_t)(uintptr_t)hook_px_destroy};
-    patch_bytes(entry, jump, sizeof jump, page);
+    patch_bytes(HF_DSP_GUARDS, entry, jump, sizeof jump, page);
     px_engine_base = base;
     fx_selector_master_bypass = 1; /* no hidden legacy master FX on any PX-enabled board */
     fprintf(stderr, "engine-ui-hook: PX product=%s master-bypass=1 installed\n", product);
@@ -1513,8 +1527,8 @@ static int install_cfx_scope(uintptr_t base, size_t page, const char *version) {
     cfx_process_original = rx_code(process_code, sizeof process_code, page);
     uint32_t value_jump[] = {0xe51ff004, (uint32_t)(uintptr_t)hook_cfx_value};
     uint32_t process_jump[] = {0xe51ff004, (uint32_t)(uintptr_t)hook_cfx_process};
-    patch_bytes(value, value_jump, sizeof value_jump, page);
-    patch_bytes(process, process_jump, sizeof process_jump, page);
+    patch_bytes(HF_DSP_GUARDS, value, value_jump, sizeof value_jump, page);
+    patch_bytes(HF_DSP_GUARDS, process, process_jump, sizeof process_jump, page);
     fprintf(stderr, "engine-ui-hook: Color FX channel knobs installed\n");
     return 1;
 }
@@ -1547,7 +1561,7 @@ static int install_dsp_hooks(uintptr_t base, size_t page) {
     }
     for (unsigned i = 0; i < DSP_HOOK_COUNT; i++) {
         uint32_t jump[] = {0xe51ff004, (uint32_t)(uintptr_t)dsp_hooks[i].hook, 0xe320f000};
-        patch_bytes(base + dsp_hooks[i].offset, jump, i == DSP_AUTOGATE ? 12 : 8, page);
+        patch_bytes(HF_DSP_GUARDS, base + dsp_hooks[i].offset, jump, i == DSP_AUTOGATE ? 12 : 8, page);
     }
     fprintf(stderr, "engine-ui-hook: %u DSP guards/transitions installed (shared FX state)\n", DSP_HOOK_COUNT);
     return 1;
@@ -1566,7 +1580,7 @@ static const uint32_t a64_flanger_prefix[4] = {0xd503233f, 0xa9b87bfd, 0x910003f
 
 static uintptr_t a64_branch_target(uintptr_t at);
 static void *function_trampoline(uintptr_t entry, size_t page);
-static void redirect_function(uintptr_t entry, const void *handler, size_t page);
+static void redirect_function(int feature, uintptr_t entry, const void *handler, size_t page);
 
 // The event guards (Mix, Parameter, Nudge, Tempo, Jump, RampTime, MotorRampTime) read
 // fields of the event at 32-bit layout offsets; the AZ04 event layouts are not
@@ -1651,7 +1665,7 @@ static int install_dsp_hooks(uintptr_t base, size_t page) {
     unsigned installed = 0;
     for (unsigned i = 0; i < DSP_HOOK_COUNT; i++)
         if (dsp_site_active(i)) {
-            redirect_function(base + dsp_hooks[i].offset, dsp_hooks[i].hook, page);
+            redirect_function(HF_DSP_GUARDS, base + dsp_hooks[i].offset, dsp_hooks[i].hook, page);
             installed++;
         }
     fprintf(stderr, "engine-ui-hook: %u DSP guards/transitions installed (shared FX state)\n", installed);
@@ -1965,52 +1979,53 @@ A32_ONLY static void prepare_reverb_time(uintptr_t base, size_t page) {
 A32_ONLY static void prepare_config(uintptr_t base, size_t page) {
     // getConfig's common return path runs after every model's constructor.
     uint32_t code[] = {
-        0xe3a02001, // mov r2, #1
-        0xe5c020db, // hasStems integration
-        0xe5c0224c, // hasBluetooth
-        0xe5c0224e, // hasBluetoothSendToAssignment
-        0xe5c02276, // remote Stems processor support
-        0xe320f000, // gen1 5.3.0 only: hasStemsProcessorFactoryInstalled ([r0, #0x2a7] = 1)
-        0xe320f000, // #152 (5.3.0+): Config.audio.hasStemsLevel ([r0, #0x54] = 1)
-        0xe3a02000, // mov r2, #0
-        0xe5c02289, // disableHfsPlus
-        0xe320f000, // #49 when enabled: ldrb r2, [r0, #0x239] (isPlayer)
-        0xe320f000, // cmp r2, #0: all-in-ones (not players) keep their config
-        0xe320f000, // movne r2, #4
-        0xe320f000, // strne r2, [r0, #0x90] (numberOfDecks)
-        0xe320f000, // movne r2, #0
-        0xe320f000, // strbne r2, [r0, #0x239]
-        0xe320f000, // #77: mov r2, #30
-        0xe320f000, // #77: str r2, [r0, #maximumZoomSecs]
-        0xe320f000, // #166 (5.3.0+): ldrb r2, [r0, #0x12e] (hasNHFx)
-        0xe320f000, // cmp r2, #0
-        0xe320f000, // movne r2, #1
-        0xe320f000, // strbne r2, [r0, #0xe1] (hasBeatJump)
-        0xe320f000, // strbne r2, [r0, #0x19c] (hasNoiseSweep)
-        0xe320f000, // strbne r2, [r0, #0x19d] (hasFilterRoll)
-        0xe320f000, // strbne r2, [r0, #0x4cd] (hasSweepFxSelectionPopup)
-        0xe3a02001, // mov r2, #1
-        0xe5c02003, // Config.audio.hasBluetoothOutput: Engine's own A2DP source
-        0xe59f2004, // replay the two displaced literal loads
-        0xe59f3004,
-        0xe59ff004,
-        *(const uint32_t *)(base + build->config_r2),
-        *(const uint32_t *)(base + build->config_r3),
-        (uint32_t)(base + build->config_site + 8),
+
+        HF_CONFIG(HF_ALWAYS, 0xe3a02001), // mov r2, #1
+        HF_CONFIG(HF_STEMS, 0xe5c020db), // hasStems integration
+        HF_CONFIG(HF_BLUETOOTH, 0xe5c0224c), // hasBluetooth
+        HF_CONFIG(HF_BLUETOOTH, 0xe5c0224e), // hasBluetoothSendToAssignment
+        HF_CONFIG(HF_STEMS, 0xe5c02276), // remote Stems processor support
+        HF_CONFIG(HF_STEMS, 0xe320f000), // gen1 5.3.0 only: hasStemsProcessorFactoryInstalled ([r0, #0x2a7] = 1)
+        HF_CONFIG(HF_STEMS_EQ, 0xe320f000), // #152 (5.3.0+): Config.audio.hasStemsLevel ([r0, #0x54] = 1)
+        HF_CONFIG(HF_ALWAYS, 0xe3a02000), // mov r2, #0
+        HF_CONFIG(HF_FILESYSTEMS, 0xe5c02289), // disableHfsPlus
+        HF_CONFIG(HF_FOUR_DECK, 0xe320f000), // #49 when enabled: ldrb r2, [r0, #0x239] (isPlayer)
+        HF_CONFIG(HF_FOUR_DECK, 0xe320f000), // cmp r2, #0: all-in-ones (not players) keep their config
+        HF_CONFIG(HF_FOUR_DECK, 0xe320f000), // movne r2, #4
+        HF_CONFIG(HF_FOUR_DECK, 0xe320f000), // strne r2, [r0, #0x90] (numberOfDecks)
+        HF_CONFIG(HF_FOUR_DECK, 0xe320f000), // movne r2, #0
+        HF_CONFIG(HF_FOUR_DECK, 0xe320f000), // strbne r2, [r0, #0x239]
+        HF_CONFIG(HF_ZOOM30, 0xe320f000), // #77: mov r2, #30
+        HF_CONFIG(HF_ZOOM30, 0xe320f000), // #77: str r2, [r0, #maximumZoomSecs]
+        HF_CONFIG(HF_SWEEP_FX, 0xe320f000), // #166 (5.3.0+): ldrb r2, [r0, #0x12e] (hasNHFx)
+        HF_CONFIG(HF_SWEEP_FX, 0xe320f000), // cmp r2, #0
+        HF_CONFIG(HF_SWEEP_FX, 0xe320f000), // movne r2, #1
+        HF_CONFIG(HF_SWEEP_FX, 0xe320f000), // strbne r2, [r0, #0xe1] (hasBeatJump)
+        HF_CONFIG(HF_SWEEP_FX, 0xe320f000), // strbne r2, [r0, #0x19c] (hasNoiseSweep)
+        HF_CONFIG(HF_SWEEP_FX, 0xe320f000), // strbne r2, [r0, #0x19d] (hasFilterRoll)
+        HF_CONFIG(HF_SWEEP_FX, 0xe320f000), // strbne r2, [r0, #0x4cd] (hasSweepFxSelectionPopup)
+        HF_CONFIG(HF_BLUETOOTH, 0xe3a02001), // mov r2, #1
+        HF_CONFIG(HF_BLUETOOTH, 0xe5c02003), // Config.audio.hasBluetoothOutput: Engine's own A2DP source
+        HF_CONFIG(HF_ALWAYS, 0xe59f2004), // replay the two displaced literal loads
+        HF_CONFIG(HF_ALWAYS, 0xe59f3004),
+        HF_CONFIG(HF_ALWAYS, 0xe59ff004),
+        HF_CONFIG(HF_ALWAYS, *(const uint32_t *)(base + build->config_r2)),
+        HF_CONFIG(HF_ALWAYS, *(const uint32_t *)(base + build->config_r3)),
+        HF_CONFIG(HF_ALWAYS, (uint32_t)(base + build->config_site + 8)),
     };
     const unsigned at[] = {1, 2, 3, 4, 8};
-    for (unsigned i = 0; i < 5; i++) code[at[i]] = (code[at[i]] & ~0xfffu) | build->config_field[i];
+    for (unsigned i = 0; i < 5; i++) code[at[i]] = HF_CONFIG(HF_ALWAYS, (code[at[i]] & ~0xfffu) | build->config_field[i]);
     // A switched-off feature keeps the nop in its slot: Engine's own value stays.
     const uint32_t nop = 0xe320f000;
-    if (!hf_on(HF_STEMS)) code[1] = code[4] = nop;
-    if (!hf_on(HF_BLUETOOTH)) code[2] = code[3] = nop;
-    if (!hf_on(HF_FILESYSTEMS)) code[8] = nop;
-    if (!build->bt_send || !hf_on(HF_BLUETOOTH)) code[24] = code[25] = nop;
+    if (!hf_on(HF_STEMS)) { code[1] = HF_CONFIG(HF_STEMS, nop); code[4] = HF_CONFIG(HF_STEMS, nop); }
+    if (!hf_on(HF_BLUETOOTH)) { code[2] = HF_CONFIG(HF_BLUETOOTH, nop); code[3] = HF_CONFIG(HF_BLUETOOTH, nop); }
+    if (!hf_on(HF_FILESYSTEMS)) code[8] = HF_CONFIG(HF_FILESYSTEMS, nop);
+    if (!build->bt_send || !hf_on(HF_BLUETOOTH)) { code[24] = HF_CONFIG(HF_BLUETOOTH, nop); code[25] = HF_CONFIG(HF_BLUETOOTH, nop); }
     if (!strcmp(build->name, "5.3.0"))
-        code[5] = hf_on(HF_STEMS) ? 0xe5c022a7 : nop;
+        code[5] = HF_CONFIG(HF_STEMS, 0xe5c022a7);
     if (build->config_zoom == 0x52c && hf_on(HF_STEMS_EQ)) {
         // #152: unlock native 3-band Stems Level EQ (ChannelStrip) on all 5.3.0 models.
-        code[6] = 0xe5c02054;
+        code[6] = HF_CONFIG(HF_STEMS_EQ, 0xe5c02054);
     }
     if (build->config_zoom == 0x52c && hf_on(HF_SWEEP_FX)) {
         // Keep hasNHFx: Mixstream's Main FX switches still need Nh effects.
@@ -2018,19 +2033,18 @@ A32_ONLY static void prepare_config(uintptr_t base, size_t page) {
         // retains these bytes, including models with Beat Jump disabled.
         // Both return tails execute eors before the next conditional branch,
         // so no incoming CPSR flags are consumed after this cmp.
-        const uint32_t mixstream[] = {0xe5d0212e, 0xe3520000, 0x13a02001,
-                                     0x15c020e1, 0x15c0219c, 0x15c0219d, 0x15c024cd};
-        memcpy(code + 17, mixstream, sizeof mixstream);
+        const uint32_t mixstream[] = {HF_CONFIG(HF_SWEEP_FX, 0xe5d0212e), HF_CONFIG(HF_SWEEP_FX, 0xe3520000), HF_CONFIG(HF_SWEEP_FX, 0x13a02001), HF_CONFIG(HF_SWEEP_FX, 0x15c020e1), HF_CONFIG(HF_SWEEP_FX, 0x15c0219c), HF_CONFIG(HF_SWEEP_FX, 0x15c0219d), HF_CONFIG(HF_SWEEP_FX, 0x15c024cd)};
+        HF_CONFIG_COPY(HF_SWEEP_FX, code + 17, mixstream, sizeof mixstream);
     }
     if (build->config_zoom && hf_on(HF_ZOOM30)) {
         // #77: the players' 30 s zoom-out limit on every model (same SoC; Engine
         // sets 10 s on the all-in-ones). No flags touched; never above 30 in 32-bit.
-        code[15] = 0xe3a0201e;
-        code[16] = 0xe5802000 | build->config_zoom;
+        code[15] = HF_CONFIG(HF_ZOOM30, 0xe3a0201e);
+        code[16] = HF_CONFIG(HF_ZOOM30, 0xe5802000 | build->config_zoom);
     }
     if (!strcmp(build->name, "5.3.0") && hf_on(HF_FOUR_DECK) && four_deck_layout() > 0) {
-        const uint32_t unlock[] = {0xe5d02239, 0xe3520000, 0x13a02004, 0x15802090, 0x13a02000, 0x15c02239};
-        memcpy(code + 9, unlock, sizeof unlock);
+        const uint32_t unlock[] = {HF_CONFIG(HF_FOUR_DECK, 0xe5d02239), HF_CONFIG(HF_FOUR_DECK, 0xe3520000), HF_CONFIG(HF_FOUR_DECK, 0x13a02004), HF_CONFIG(HF_FOUR_DECK, 0x15802090), HF_CONFIG(HF_FOUR_DECK, 0x13a02000), HF_CONFIG(HF_FOUR_DECK, 0x15c02239)};
+        HF_CONFIG_COPY(HF_FOUR_DECK, code + 9, unlock, sizeof unlock);
         four_deck_pad_on = player_board();
         four_deck_role();
         fprintf(stderr, "engine-ui-hook: 4-deck layout unlocked (#49)\n");
@@ -2038,8 +2052,8 @@ A32_ONLY static void prepare_config(uintptr_t base, size_t page) {
     if (aux_ready) {
         // hasMixerMenu is UI +9, root +0x4d1 (QVariant registration
         // 0x15a612c), rather than the older report's root +0x4c9.
-        const uint32_t aux[] = {0xe3a02001, 0xe5c02026, 0xe5c024d1, 0xe3a02000};
-        memcpy(code + 9, aux, sizeof aux);
+        const uint32_t aux[] = {HF_CONFIG(HF_AUX_INPUT, 0xe3a02001), HF_CONFIG(HF_AUX_INPUT, 0xe5c02026), HF_CONFIG(HF_AUX_INPUT, 0xe5c024d1), HF_CONFIG(HF_AUX_INPUT, 0xe3a02000)};
+        HF_CONFIG_COPY(HF_AUX_INPUT, code + 9, aux, sizeof aux);
     }
     config_jump[0] = 0xe51ff004;
     config_jump[1] = (uint32_t)(uintptr_t)rx_code(code, sizeof code, page);
@@ -2408,6 +2422,7 @@ static void apply_engine_edits(uintptr_t base, size_t page) {
 
 int g_hook_initialized = 0;
 
+HF_INTERPOSE(HF_ALWAYS)
 __attribute__((constructor)) static void edit_engine(void) {
 #ifdef ENGINE_UI_HOOK_TEST
     g_hook_initialized = 1;
@@ -2636,6 +2651,7 @@ static void apply(struct walk *w, uint32_t node, const char *prefix, int depth) 
     w->replaced++;
 }
 
+HF_INTERPOSE(HF_ALWAYS)
 int _Z21qRegisterResourceDataiPKhS0_S0_(int version, const uchar *tree, const uchar *names, const uchar *data) {
     static void *cache;
     static int active = -1;
@@ -2985,6 +3001,7 @@ static int oa_main_bias(struct dl_phdr_info *info, size_t size, void *out) {
 }
 
 static void oa_install(void) {
+    if (!hf_on(HF_RB_BRIDGE)) return;
     uintptr_t base = 0;
     dl_iterate_phdr(oa_main_bias, &base);
     const uintptr_t *meta = (const uintptr_t *)(base + OA_META), entry = base + OA_PROCESS_FN;
@@ -3011,20 +3028,16 @@ static void oa_install(void) {
     memcpy(stub, orig, sizeof orig);
     if (mprotect(stub, page, PROT_READ | PROT_EXEC)) return;
     __builtin___clear_cache(stub, (char *)stub + sizeof orig);
-    uintptr_t start = entry - entry % page;
-    size_t span = (entry + sizeof jump + page - 1) / page * page - start;
-    if (mprotect((void *)start, span, PROT_READ | PROT_WRITE)) return;
     oa_meta = meta;
     oa_orig = (oa_process_fn)stub;
-    memcpy((void *)entry, jump, sizeof jump);
-    mprotect((void *)start, span, PROT_READ | PROT_EXEC);
-    __builtin___clear_cache((char *)entry, (char *)entry + sizeof jump);
+    if (!try_patch_bytes(HF_RB_BRIDGE, entry, jump, sizeof jump, page)) return;
     oa_log("installed", "", 0);
 }
 
 // #55: Engine analyses in OfflineAnalyzer child processes, which inherit this
 // preload. Analysing a whole drive in the background must never compete with
 // playback: fair CPU class, nice 10 and best-effort I/O, off GUI/GL (1/2).
+HF_INTERPOSE(HF_ALWAYS)
 __attribute__((constructor)) static void lower_offline_analyzer(void) {
     char exe[64];
     ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
@@ -3083,13 +3096,14 @@ static int overview_filled;
 // QByteArray qUncompress(const uchar *, qsizetype). The class comes back through the address in
 // r0 (armhf) / x8 (AArch64), as this struct does: Engine's 17 call sites in each build set it so.
 struct oa_bytes q_uncompress(const uchar *data, ssize_t size) __asm__(Q_UNCOMPRESS);
+HF_INTERPOSE(HF_RB_BRIDGE)
 struct oa_bytes q_uncompress(const uchar *data, ssize_t size) {
     struct oa_bytes (*real)(const uchar *, ssize_t) = next_symbol(&q_uncompress_cache, Q_UNCOMPRESS);
     struct oa_bytes out = {0};
     if (!real) return out;
     out = real(data, size);
     // Only Engine 5.3.0, 5.3.0-sclive4 and AZ04, and only a fresh result nothing else shares.
-    if (out.size >= 27 && out.d && __atomic_load_n(out.d, __ATOMIC_RELAXED) == 1 && build &&
+    if (hf_on(HF_RB_BRIDGE) && out.size >= 27 && out.d && __atomic_load_n(out.d, __ATOMIC_RELAXED) == 1 && build &&
         strcmp(build->name, "5.0.4") && overview_fill_maxima((uchar *)out.ptr, (size_t)out.size) &&
         !__atomic_exchange_n(&overview_filled, 1, __ATOMIC_RELAXED)) {
         char thread[16] = "";
@@ -3112,6 +3126,7 @@ static int offline_analyzer(pid_t pid) {
     return match;
 }
 
+HF_INTERPOSE(HF_THREAD_TUNING)
 int setpriority(__priority_which_t which, id_t who, int prio) {
     static void *cache;
     int (*real)(__priority_which_t, id_t, int) = next_symbol(&cache, "setpriority");
@@ -3120,6 +3135,7 @@ int setpriority(__priority_which_t which, id_t who, int prio) {
     return real(which, who, prio);
 }
 
+HF_INTERPOSE(HF_THREAD_TUNING)
 int sched_setscheduler(pid_t pid, int policy, const struct sched_param *param) {
     static void *cache;
     int (*real)(pid_t, int, const struct sched_param *) = next_symbol(&cache, "sched_setscheduler");
@@ -3129,6 +3145,7 @@ int sched_setscheduler(pid_t pid, int policy, const struct sched_param *param) {
     return real(pid, policy, param);
 }
 
+HF_INTERPOSE(HF_ALWAYS)
 int pthread_setname_np(pthread_t thread, const char *name) {
     static void *cache;
     int (*real)(pthread_t, const char *) = next_symbol(&cache, "pthread_setname_np");
@@ -3152,6 +3169,7 @@ static int named_prctl(void **cache, const char *symbol, int option, va_list ap)
 int hook_prctl(int, ...) __asm__("prctl");
 int hook_prctl_time64(int, ...) __asm__("__prctl_time64");
 #define PRCTL_WRAPPER(fn, symbol) \
+HF_INTERPOSE(HF_ALWAYS) \
 int fn(int option, ...) { \
     static void *cache; va_list ap; va_start(ap, option); \
     int rc = named_prctl(&cache, symbol, option, ap); va_end(ap); return rc; \
@@ -3159,6 +3177,7 @@ int fn(int option, ...) { \
 PRCTL_WRAPPER(hook_prctl, "prctl")
 PRCTL_WRAPPER(hook_prctl_time64, "__prctl_time64")
 
+HF_INTERPOSE(HF_THREAD_TUNING)
 int pthread_setschedparam(pthread_t thread, int policy, const struct sched_param *param) {
     static void *cache;
     int (*real)(pthread_t, int, const struct sched_param *) = next_symbol(&cache, "pthread_setschedparam");
@@ -3231,16 +3250,11 @@ static void *function_trampoline(uintptr_t entry, size_t page) {
     return rx_code(code, sizeof code, page);
 }
 
-static void redirect_function(uintptr_t entry, const void *handler, size_t page) {
+static void redirect_function(int feature, uintptr_t entry, const void *handler, size_t page) {
     uint32_t jump[4] = {0x58000050, 0xd61f0200};
     uint64_t to = (uintptr_t)handler;
     memcpy(&jump[2], &to, 8);
-    uintptr_t first = entry - entry % page;
-    size_t span = ((entry + sizeof jump + page - 1) / page * page) - first;
-    if (mprotect((void *)first, span, PROT_READ | PROT_WRITE)) _exit(127);
-    memcpy((void *)entry, jump, sizeof jump);
-    if (mprotect((void *)first, span, PROT_READ | PROT_EXEC)) _exit(127);
-    __builtin___clear_cache((char *)entry, (char *)entry + sizeof jump);
+    patch_bytes(feature, entry, jump, sizeof jump, page);
 }
 
 static void install_sqlite_hooks(uintptr_t base, size_t page) {
@@ -3256,7 +3270,7 @@ static void install_sqlite_hooks(uintptr_t base, size_t page) {
         memcmp((const void *)(base + b->sqlite_opendb), b->sqlite_prefix[1], 16)) return;
     sqlite_exec_original = (sqlite_exec_fn)(base + b->sqlite_exec);
     sqlite_open_v2_original = (sqlite_open_v2_fn)function_trampoline(base + b->sqlite_opendb, page);
-    redirect_function(base + b->sqlite_opendb, tuned_sqlite_open_v2, page);
+    redirect_function(HF_ALWAYS, base + b->sqlite_opendb, tuned_sqlite_open_v2, page);
     fprintf(stderr, "engine-ui-hook: SQLite open/open_v2 hooks installed\n");
 }
 #else
@@ -3276,14 +3290,9 @@ static void *function_trampoline(uintptr_t entry, size_t page) {
     return rx_code(code, sizeof code, page);
 }
 
-static void redirect_function(uintptr_t entry, const void *handler, size_t page) {
+static void redirect_function(int feature, uintptr_t entry, const void *handler, size_t page) {
     uint32_t jump[] = {0xe51ff004, (uint32_t)(uintptr_t)handler};
-    uintptr_t first = entry - entry % page;
-    size_t span = ((entry + sizeof jump + page - 1) / page * page) - first;
-    if (mprotect((void *)first, span, PROT_READ | PROT_WRITE)) _exit(127);
-    memcpy((void *)entry, jump, sizeof jump);
-    if (mprotect((void *)first, span, PROT_READ | PROT_EXEC)) _exit(127);
-    __builtin___clear_cache((char *)entry, (char *)entry + sizeof jump);
+    patch_bytes(feature, entry, jump, sizeof jump, page);
 }
 
 static void (*tidal_track_decode)(void *, void *, uintptr_t, uintptr_t);
@@ -3318,7 +3327,7 @@ A32_ONLY static void install_rekordbox_rows(uintptr_t base, size_t page) {
     // the wrapper. The displaced ARM prologue itself has no PC-relative words.
     tidal_track_decode = function_trampoline(entry + 8, page);
     if (tidal_track_decode) {
-        redirect_function(entry + 8, rekordbox_track_decode, page);
+        redirect_function(HF_GATEWAY, entry + 8, rekordbox_track_decode, page);
         fprintf(stderr, "engine-ui-hook: rekordbox native row metadata enabled\n");
     }
 }
@@ -3338,14 +3347,14 @@ A32_ONLY static void install_sqlite_hooks(uintptr_t base, size_t page) {
             arm_branch_target((uintptr_t)v2) != base + b->sqlite_opendb ||
             memcmp((const void *)(base + b->sqlite_opendb), b->sqlite_prefix[1], 8)) return;
         sqlite_open_v2_original = (sqlite_open_v2_fn)function_trampoline(base + b->sqlite_opendb, page);
-        redirect_function(base + b->sqlite_opendb, tuned_sqlite_open_v2, page);
+        redirect_function(HF_ALWAYS, base + b->sqlite_opendb, tuned_sqlite_open_v2, page);
     } else {
         if (memcmp((const void *)(base + b->sqlite_open), b->sqlite_prefix[1], 8) ||
             memcmp((const void *)(base + b->sqlite_open_v2), b->sqlite_prefix[2], 8)) return;
         sqlite_open_original = (sqlite_open_fn)function_trampoline(base + b->sqlite_open, page);
         sqlite_open_v2_original = (sqlite_open_v2_fn)function_trampoline(base + b->sqlite_open_v2, page);
-        redirect_function(base + b->sqlite_open, tuned_sqlite_open, page);
-        redirect_function(base + b->sqlite_open_v2, tuned_sqlite_open_v2, page);
+        redirect_function(HF_ALWAYS, base + b->sqlite_open, tuned_sqlite_open, page);
+        redirect_function(HF_ALWAYS, base + b->sqlite_open_v2, tuned_sqlite_open_v2, page);
     }
     fprintf(stderr, "engine-ui-hook: SQLite open/open_v2 hooks installed\n");
 }
@@ -3361,7 +3370,7 @@ static void install_bt_send(uintptr_t base, size_t page) {
     uintptr_t entry = base + build->bt_send;
     if (!build->bt_send || memcmp((const void *)entry, prefix, sizeof prefix)) return;
     bt_send_orig = function_trampoline(entry, page);
-    redirect_function(entry, hook_bt_send, page);
+    redirect_function(HF_BLUETOOTH, entry, hook_bt_send, page);
     fprintf(stderr, "engine-ui-hook: Bluetooth output sender hooked\n");
 }
 
@@ -3436,11 +3445,13 @@ static int redirected_open(int dirfd, const char *path, int flags, mode_t mode) 
 
 #define OPEN_MODE(flags, ap) (((flags) & O_CREAT) || (((flags) & O_TMPFILE) == O_TMPFILE) ? va_arg(ap, mode_t) : 0)
 #define OPEN_WRAPPER(fn, large) \
+HF_INTERPOSE(HF_ALWAYS) \
 int fn(const char *path, int flags, ...) { \
     va_list ap; va_start(ap, flags); mode_t mode = OPEN_MODE(flags, ap); va_end(ap); \
     return redirected_open(AT_FDCWD, path, flags | (large), mode); \
 }
 #define OPENAT_WRAPPER(fn, large) \
+HF_INTERPOSE(HF_ALWAYS) \
 int fn(int dirfd, const char *path, int flags, ...) { \
     va_list ap; va_start(ap, flags); mode_t mode = OPEN_MODE(flags, ap); va_end(ap); \
     return redirected_open(dirfd, path, flags | (large), mode); \
@@ -3496,6 +3507,7 @@ static const char *stems_processor_path(const char *path) {
     return path;
 }
 
+HF_INTERPOSE(HF_ALWAYS)
 int access(const char *path, int mode) {
     int (*real)(const char *, int) = next_symbol(&access_cache, "access");
     if (!real) { errno = ENOSYS; return -1; }
@@ -3504,6 +3516,7 @@ int access(const char *path, int mode) {
 }
 
 static void *statx_cache;
+HF_INTERPOSE(HF_ALWAYS)
 int statx(int dirfd, const char *path, int flags, unsigned int mask, struct statx *buf) {
     int (*real)(int, const char *, int, unsigned int, struct statx *) = next_symbol(&statx_cache, "statx");
     if (!real) { errno = ENOSYS; return -1; }
@@ -3522,6 +3535,7 @@ static int stems_stat(void **cache, const char *name, const char *path, struct s
     return real(path, buf);
 }
 #define STAT_WRAPPER(fn, name) \
+HF_INTERPOSE(HF_ALWAYS) \
 int fn(const char *path, struct stat *buf) { static void *cache; return stems_stat(&cache, name, path, buf); }
 int hook_stat(const char *, struct stat *) __asm__("stat");
 int hook_stat64(const char *, struct stat *) __asm__("stat64");
@@ -3530,6 +3544,7 @@ STAT_WRAPPER(hook_stat, "stat")
 STAT_WRAPPER(hook_stat64, "stat64")
 STAT_WRAPPER(hook_stat64_time64, "__stat64_time64")
 
+HF_INTERPOSE(HF_ALWAYS)
 int posix_spawn(pid_t *pid, const char *path, const posix_spawn_file_actions_t *actions,
                 const posix_spawnattr_t *attr, char *const argv[], char *const envp[]) {
     static void *cache;
@@ -3542,6 +3557,7 @@ int posix_spawn(pid_t *pid, const char *path, const posix_spawn_file_actions_t *
     return real ? real(pid, path, actions, attr, argv, envp) : ENOSYS;
 }
 
+HF_INTERPOSE(HF_ALWAYS)
 int execve(const char *path, char *const argv[], char *const envp[]) {
     static void *cache;
     if (is_engine()) {
@@ -3553,6 +3569,7 @@ int execve(const char *path, char *const argv[], char *const envp[]) {
     errno = ENOSYS; return -1;
 }
 
+HF_INTERPOSE(HF_ALWAYS)
 int execv(const char *path, char *const argv[]) {
     extern char **environ;
     return execve(path, argv, environ);
@@ -3561,6 +3578,7 @@ int execv(const char *path, char *const argv[]) {
 // Engine's RenderStemsJob sets thread affinity to CPU cores that exist on 6/8-core models
 // (e.g. CPU 4/5), but on the 4-core SC5000 (cores 0..3) pthread_setaffinity_np fails with
 // EINVAL, causing Engine to call QMessageLogger::fatal("Failed setting CPU Affinity") and abort.
+HF_INTERPOSE(HF_THREAD_TUNING)
 int pthread_setaffinity_np(pthread_t thread, size_t cpusetsize, const cpu_set_t *cpuset) {
     static void *cache;
     int (*real_fn)(pthread_t, size_t, const cpu_set_t *) = next_symbol(&cache, "pthread_setaffinity_np");
@@ -3582,6 +3600,7 @@ int pthread_setaffinity_np(pthread_t thread, size_t cpusetsize, const cpu_set_t 
     return res;
 }
 
+HF_INTERPOSE(HF_THREAD_TUNING)
 int pthread_getaffinity_np(pthread_t thread, size_t cpusetsize, cpu_set_t *cpuset) {
     static void *cache;
     int (*real_fn)(pthread_t, size_t, cpu_set_t *) = next_symbol(&cache, "pthread_getaffinity_np");
@@ -3593,6 +3612,7 @@ int pthread_getaffinity_np(pthread_t thread, size_t cpusetsize, cpu_set_t *cpuse
 // #61 / #67: One-shot ALSA boot loader for SC LIVE 4 (inmusic,jp21) and devices
 // with read-only root filesystems where LD_PRELOAD cannot be placed in rootfs.
 __attribute__((visibility("default")))
+HF_INTERPOSE(HF_ALWAYS)
 int enginex_alsa_boot_hook(void *root, void *config, void **dst, void *private_data) {
     (void)root;
     (void)config;
@@ -3629,6 +3649,7 @@ int enginex_alsa_boot_hook(void *root, void *config, void **dst, void *private_d
 }
 
 __attribute__((visibility("default")))
+HF_INTERPOSE(HF_ALWAYS)
 int snd_config_hook_enginex_alsa_boot_hook(void *root, void *config, void **dst, void *private_data) {
     return enginex_alsa_boot_hook(root, config, dst, private_data);
 }
@@ -3823,6 +3844,7 @@ static int enginex_img_state = IMG_NONE;  // result of the last az01_open_image 
 // az01_download_image / az01-update --file: open -> set_onboard_key_lookup -> verify -> close -> apply.
 // The stand-in handle is never given to the real library.
 __attribute__((visibility("default")))
+HF_INTERPOSE(HF_ALWAYS)
 int az01_open_image(const char *path, void **img_out) {
     int state = enginex_img_check(path);
     if (state != IMG_NONE) {
@@ -3837,6 +3859,7 @@ int az01_open_image(const char *path, void **img_out) {
 }
 
 __attribute__((visibility("default")))
+HF_INTERPOSE(HF_ALWAYS)
 int az01_image_set_onboard_key_lookup(void *img) {
     if (img == (void *)enginex_dummy_img) return 0;
     static void *orig_fn = NULL;
@@ -3845,6 +3868,7 @@ int az01_image_set_onboard_key_lookup(void *img) {
 }
 
 __attribute__((visibility("default")))
+HF_INTERPOSE(HF_ALWAYS)
 int az01_verify_image(void *img, int flags) {
     if (img == (void *)enginex_dummy_img) {
         int state = __atomic_load_n(&enginex_img_state, __ATOMIC_ACQUIRE);
@@ -3856,6 +3880,7 @@ int az01_verify_image(void *img, int flags) {
 }
 
 __attribute__((visibility("default")))
+HF_INTERPOSE(HF_ALWAYS)
 int az01_close_image(void *img) {
     if (img == (void *)enginex_dummy_img) {
         __atomic_store_n(&enginex_img_state, IMG_NONE, __ATOMIC_RELEASE);
@@ -3891,6 +3916,7 @@ static void enginex_reboot(void) {
 
 // Intercepts az01_apply_image for EngineX data bundles; everything else goes to the stock updater.
 __attribute__((visibility("default")))
+HF_INTERPOSE(HF_ALWAYS)
 int az01_apply_image(const char *path, int flags) {
     int state = enginex_img_check(path);
     if (state == IMG_BAD) return ENGINEX_ERR_BAD_IMAGE;
@@ -3974,6 +4000,7 @@ static int rm_tree(int parent, const char *name, dev_t root_dev) {
 // survives. Current data and a not-yet-migrated real data directory are preserved.
 // ENGINEX_TEST_DATA_ROOT redirects /data (and skips the reboot) for the unit test.
 __attribute__((visibility("default")))
+HF_INTERPOSE(HF_ALWAYS)
 int az01_erase_data_partition(void) {
     const char *root = getenv("ENGINEX_TEST_DATA_ROOT");
     int testing = root && *root;

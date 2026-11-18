@@ -7,6 +7,7 @@ set -eu
 # AArch64 hook (AZ04: PRIME 4 G2, SYSTEM ONE) on an arm64 host: CROSS= OUT=/abs/path.so sh build.sh
 # ENGINEX_HOOK_DISABLE="stems,zoom30" leaves those features out of this build (names: hook_features.h).
 cd "$(dirname "$0")"
+python3 check_hook_features.py
 cross=${CROSS-arm-linux-gnueabihf-}
 out=${OUT:-../../rootfs-overlay/etc/enginex/libengine-ui-hook.so}
 disable=$(printf '%s' "${ENGINEX_HOOK_DISABLE-}" | tr ',\t\r\n' '    ')
@@ -24,7 +25,7 @@ if [ -n "$(printf '%s' "$disable" | tr -d ' ')" ]; then
     set -- "-DENGINEX_HOOK_DISABLE=\"$list\""
     echo "hook features off in this build: $list" >&2
 fi
-"${cross}gcc" -O2 -Wall -Wextra -shared -fPIC -funwind-tables -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 "$@" \
+"${cross}gcc" -O2 -Wall -Wextra -Werror=missing-field-initializers -shared -fPIC -funwind-tables -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 "$@" \
     -ffunction-sections -fdata-sections -Wl,--gc-sections -Wl,-z,now -Wl,-z,max-page-size=4096 -o "$out" engine_ui_hook.c -ldl -lpthread
 "${cross}strip" "$out"
 if "${cross}readelf" -V "$out" | grep -E 'GLIBC_2\.(39\.|[4-9][0-9])'; then
