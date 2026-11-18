@@ -219,6 +219,24 @@ int main(void) {
             sqlite3_close(link);
         }
     }
+    // With the trace flag a skipped row says what it looked like: one more read, no write.
+    sqlite3 *traced = library_row(internal, "file:///Users/dj/Music/855.flac", "Label", 1);
+    snprintf(path, sizeof path, "%s/trace", dir);
+    fflush(stderr);
+    int saved = dup(2), log = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    assert(saved >= 0 && log >= 0 && dup2(log, 2) == 2 && !close(log));
+    sc_rbx_verbose = 1;
+    statements = 0;
+    result = load_bound(traced);
+    sc_rbx_verbose = 0;
+    fflush(stderr);
+    assert(dup2(saved, 2) == 2 && !close(saved));
+    assert(result && !strcmp(result, "skipped (not a rekordbox row)") && statements == 2 && !filled(traced));
+    char said[400] = "";
+    f = fopen(path, "r");
+    assert(f && fgets(said, sizeof said, f) && !fclose(f) && !unlink(path));
+    assert(strstr(said, "track 16449: row uri=file:///User label=Label analysed=0 data=null mark=null download=yes map="));
+    sqlite3_close(traced);
     // A drive's load, the id bound: stock, not one statement.
     stick = library(drive, "rekordbox [126 BPM 6A]");
     statements = 0;

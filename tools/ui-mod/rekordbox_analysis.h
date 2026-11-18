@@ -444,6 +444,40 @@ static const char *sc_rbx_refresh_edits(const struct sc_rbx_sqlite *q, void *db,
     return changed ? "refreshed" : NULL;
 }
 
+// Trace only: what a row looked like when the hook left it alone, and whether the row map
+// knows it. One more read, nothing written; the map's ages are not touched.
+struct sc_rbx_trace { long long track; int rows; };
+
+static int sc_rbx_trace_row(void *arg, int n, char **v, char **name) {
+    struct sc_rbx_trace *t = arg;
+    (void)name;
+    if (n != 6) return 0;
+    t->rows++;
+    const char *key = sc_rbx_download_key(v[2], SC_RBX_DOWNLOADS_REL), *map = "none";
+    long long id = 0;
+    pthread_mutex_lock(&sc_rbx_track_map_mu);
+    for (unsigned i = 0; i < SC_RBX_TRACK_MAP_CAP; ++i) {
+        const struct sc_rbx_track_map *slot = &sc_rbx_track_maps[i];
+        if (slot->track != t->track) continue;
+        id = slot->id;
+        map = !slot->download[0] ? "no key" : key && !strncmp(key, slot->download, 40) ? "same key" : "other key";
+        break;
+    }
+    pthread_mutex_unlock(&sc_rbx_track_map_mu);
+    fprintf(stderr, "engine-ui-hook: rekordbox analysis for track %lld: row uri=%.12s label=%.11s analysed=%s data=%s mark=%s download=%s map=%s (%lld)\n",
+            t->track, v[0] ? v[0] : "null", v[1] ? v[1] : "null", v[3] ? v[3] : "null", v[4] && v[4][0] == '1' ? "null" : "set",
+            v[5] ? v[5] : "null", key ? "yes" : "no", map, id);
+    return 0;
+}
+
+static void sc_rbx_trace_skip(const struct sc_rbx_sqlite *q, void *db, long long track) {
+    char query[256];
+    struct sc_rbx_trace t = {track, 0};
+    snprintf(query, sizeof query, "SELECT t.uri,t.label,t.path,t.isAnalyzed,p.trackData IS NULL,p.thirdPartySourceId FROM Track t LEFT JOIN PerformanceData p ON p.trackId=t.id WHERE t.id=%lld", track);
+    if (q->exec(db, query, sc_rbx_trace_row, &t, NULL) || !t.rows)
+        fprintf(stderr, "engine-ui-hook: rekordbox analysis for track %lld: no Track row\n", track);
+}
+
 // Before Engine reads track's analysis on db: when the track is a Pro DJ Link track a deck
 // just asked stream-sync for, and its row is empty, fill the row from the file stream-sync
 // left. Anything else is Engine's own business: with no load request in the window, or on a
@@ -468,6 +502,7 @@ static const char *sc_rbx_fill_track(const struct sc_rbx_sqlite *q, void *db, lo
         // gateway URI/label in this reload snapshot. The prior proof is enough to
         // refresh the same source generation; unknown rows remain untouched.
     } else {
+        if (sc_rbx_verbose) sc_rbx_trace_skip(q, db, track);
         return sc_rbx_verbose ? "skipped (not a rekordbox row)" : NULL;
     }
     snprintf(path, sizeof path, "%s/%lld.bin", sc_rbx_dir, *id);
