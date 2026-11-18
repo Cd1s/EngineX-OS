@@ -27,7 +27,7 @@ import (
 )
 
 // Use a new cache directory so an upgrade does not reuse the old grids and cues.
-var rbxAnalysisDir = "/run/enginex-rbx-analysis-v2"
+var rbxAnalysisDir = "/run/enginex-rbx-analysis-v3"
 
 // rbxAnalysing are the tracks whose analysis is being read; rbxAnalysisJobs waits for them.
 var (
@@ -77,7 +77,8 @@ func (g *tidalGateway) rbxWriteAnalysis(id int64, ip string, tid uint32, rbPath,
 	link.Close()
 	rbxSession.Unlock()
 	rbxHeader(file, &t)
-	rbxStoreAnalysis(id, t, a)
+	_, slot := rbxMedia(ip)
+	rbxStoreAnalysis(id, t, a, slot == 0)
 }
 
 func rbxAnalysisPath(id int64) string {
@@ -99,7 +100,7 @@ func rbxReadAnalysis(link rbxLink, tid uint32, rbPath string) (rekordbox.Track, 
 	return rbxTrackFacts(meta, tid, rbPath), rbxAnalysis(link, tid)
 }
 
-func rbxStoreAnalysis(id int64, t rekordbox.Track, a *rekordbox.Analysis) {
+func rbxStoreAnalysis(id int64, t rekordbox.Track, a *rekordbox.Analysis, replay bool) {
 	if rbxAnalysisReady(id) || t.SampleRate <= 0 || t.SampleCount == 0 {
 		return
 	}
@@ -129,6 +130,13 @@ func rbxStoreAnalysis(id int64, t rekordbox.Track, a *rekordbox.Analysis) {
 		return
 	}
 	out := rbxAnalysisPath(id)
+	// Engine can ask OfflineAnalyzer to analyse a newly downloaded stream
+	// even after it has read the same track's PerformanceData from stm.
+	if replay && p.Complete {
+		if perf, err := perfFromBlobs(t.BPM, p.TrackData, p.Beats, p.Overview); err == nil {
+			savePerf(out, perf)
+		}
+	}
 	tmp := out + ".tmp"
 	if err := os.WriteFile(tmp, b.Bytes(), 0o644); err != nil || os.Rename(tmp, out) != nil {
 		os.Remove(tmp)
@@ -200,7 +208,7 @@ func (g *tidalGateway) rbxPrefetch(ctx context.Context, ip string, rows []prolin
 		rbxApplyHeader(&t, info)
 		if ctx.Err() == nil {
 			if _, running := rbxAnalysing.LoadOrStore(id, true); !running {
-				rbxStoreAnalysis(id, t, a)
+				rbxStoreAnalysis(id, t, a, true)
 				rbxAnalysing.Delete(id)
 				ready = rbxAnalysisReady(id) || ready
 			}

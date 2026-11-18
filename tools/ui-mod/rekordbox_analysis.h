@@ -74,18 +74,46 @@ static char *sc_rbx_analysis_sql(const unsigned char *b, size_t n, long long tra
         for (size_t k = 0; k < len[i]; k++) p += sprintf(p, "%02x", b[start[i] + k]);
         *p++ = '\'';
     }
-    // Engine analyses a track whose Track row says it is not analysed, whatever its
-    // PerformanceData holds (left deck 2026-11-18: filled rows with isAnalyzed 0 were analysed
-    // again; rb-bridge's drive rows say 1 and load with their grid).
-    sprintf(p, " WHERE trackId = %lld AND trackData IS NULL; UPDATE Track SET isAnalyzed = %d WHERE id = %lld AND changes() > 0", track, analysed, track);
+    // Match rb-bridge: the incoming grid is a rekordbox import, even though the
+    // audio is streamed. Leave the user's beat-grid lock as Engine created it.
+    sprintf(p, ", thirdPartySourceId = 1 WHERE trackId = %lld AND trackData IS NULL; UPDATE Track SET isAnalyzed = %d WHERE id = %lld AND changes() > 0", track, analysed, track);
     return sql;
 }
 
 // Where stream-sync leaves a Pro DJ Link track's analysis, and ".loading", touched when a
 // deck asks it for such a track. Variables for the tests.
-static const char *sc_rbx_dir = "/run/enginex-rbx-analysis-v2";
+static const char *sc_rbx_dir = "/run/enginex-rbx-analysis-v3";
 static const char *sc_rbx_drives = "/media/";
 static const long sc_rbx_window = 120; // seconds a load request opens the hook for
+#define SC_RBX_DOWNLOADS "/data/downloads/TIDAL/"
+#define SC_RBX_DOWNLOADS_REL "../../../../downloads/TIDAL/"
+
+// Engine uses the same 40 hex digits for the temporary and finished downloads.
+static const char *sc_rbx_download_key(const char *path, const char *prefix) {
+    const size_t n = strlen(prefix);
+    if (!path || strncmp(path, prefix, n)) return NULL;
+    const char *key = path + n;
+    if (strspn(key, "0123456789abcdef") != 40) return NULL;
+    const char *ext = key + 40;
+    return !strcmp(ext, ".temp") || !strcmp(ext, ".flac") || !strcmp(ext, ".mp3") ||
+           !strcmp(ext, ".m4a") || !strcmp(ext, ".aac") || !strcmp(ext, ".mp4") ? key : NULL;
+}
+
+static int sc_rbx_replay_path(const char *path, char *perf, size_t cap) {
+    const char *key = sc_rbx_download_key(path, SC_RBX_DOWNLOADS);
+    if (!key) return 0;
+    int n = snprintf(perf, cap, "%s/%.40s.perf", sc_rbx_dir, key);
+    return n > 0 && (size_t)n < cap && !access(perf, R_OK);
+}
+
+static void sc_rbx_link_replay(const char *key, const char *payload) {
+    if (!key) return;
+    char source[192], target[160];
+    snprintf(source, sizeof source, "%s.perf", payload);
+    snprintf(target, sizeof target, "%s/%.40s.perf", sc_rbx_dir, key);
+    // The same download key always denotes the same Engine streaming track.
+    (void)link(source, target);
+}
 
 struct sc_rbx_sqlite {
     int (*exec)(void *, const char *, int (*)(void *, int, char **, char **), void *, char **);
@@ -94,6 +122,7 @@ struct sc_rbx_sqlite {
 
 struct sc_rbx_row {
     char uri[256];
+    char download[41];
     int ours;
 };
 
@@ -102,8 +131,10 @@ static int sc_rbx_row(void *arg, int n, char **value, char **name) {
     (void)name;
     // Ours: a row of stream-sync's gateway (Engine's TIDAL client) that the rekordbox source
     // labelled. An Engine Link or Remote Library track has no such uri.
-    if (n == 2 && value[0] && value[1] && !strncmp(value[0], "streaming://TIDAL/Track/", 24) && !strncmp(value[1], "rekordbox [", 11)) {
+    if (n == 3 && value[0] && value[1] && !strncmp(value[0], "streaming://TIDAL/Track/", 24) && !strncmp(value[1], "rekordbox [", 11)) {
         snprintf(row->uri, sizeof row->uri, "%s", value[0]);
+        const char *key = sc_rbx_download_key(value[2], SC_RBX_DOWNLOADS_REL);
+        if (key) snprintf(row->download, sizeof row->download, "%.40s", key);
         row->ours = 1;
     }
     return 0;
@@ -125,7 +156,7 @@ static const char *sc_rbx_fill_track(const struct sc_rbx_sqlite *q, void *db, lo
     const char *main = q->filename(db, "main");
     if (main && !strncmp(main, sc_rbx_drives, strlen(sc_rbx_drives))) return sc_rbx_verbose ? "skipped (a drive's database)" : NULL;
     struct sc_rbx_row row = {.ours = 0};
-    snprintf(query, sizeof query, "SELECT t.uri, t.label FROM Track t JOIN PerformanceData p ON p.trackId = t.id WHERE t.id = %lld AND p.trackData IS NULL", track);
+    snprintf(query, sizeof query, "SELECT t.uri, t.label, t.path FROM Track t JOIN PerformanceData p ON p.trackId = t.id WHERE t.id = %lld AND p.trackData IS NULL", track);
     if (q->exec(db, query, sc_rbx_row, &row, NULL) || !row.ours) return sc_rbx_verbose ? "skipped (not an empty rekordbox row)" : NULL;
     *id = sc_rbx_uri_id(row.uri);
     snprintf(path, sizeof path, "%s/%lld.bin", sc_rbx_dir, *id);
@@ -135,7 +166,11 @@ static const char *sc_rbx_fill_track(const struct sc_rbx_sqlite *q, void *db, lo
     if (!fstat(fd, &st) && st.st_size > 0 && st.st_size < (8 << 20)) {
         unsigned char *b = malloc((size_t)st.st_size);
         char *update = b && read(fd, b, (size_t)st.st_size) == st.st_size ? sc_rbx_analysis_sql(b, (size_t)st.st_size, track) : NULL;
-        if (update) result = q->exec(db, update, NULL, NULL, NULL) ? "update failed" : "filled";
+        if (update) {
+            int error = q->exec(db, update, NULL, NULL, NULL);
+            result = error ? "update failed" : "filled";
+            if (!error && row.download[0]) sc_rbx_link_replay(row.download, path);
+        }
         free(update);
         free(b);
     }

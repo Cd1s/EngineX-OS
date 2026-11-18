@@ -415,6 +415,14 @@ func TestRekordboxLinkAnalysisIsRbBridgesForTheSameTrack(t *testing.T) {
 			t.Errorf("%s differs from rb-bridge's: %d bytes, rb-bridge %d", name, len(got[i]), len(want[i]))
 		}
 	}
+	replay, err := os.ReadFile(rbxAnalysisPath(ids["First"]) + ".perf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedReplay, err := perfFromBlobs(one.BPM, want[0], want[2], want[1])
+	if err != nil || !bytes.Equal(replay, expectedReplay) {
+		t.Fatalf("download analysis replay differs from USB performance: %v", err)
+	}
 }
 
 // The maintainer's test 2026-11-18: three FLACs with 1.3-2 MB of cover art before the audio

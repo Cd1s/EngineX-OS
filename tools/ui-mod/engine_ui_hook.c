@@ -2920,7 +2920,11 @@ static int oa_replay(void *o, const struct oa_string *s, const uchar *prefs) {
     if (!s || s->size <= 0 || !utf16_to_utf8(s->ptr, s->size, path, sizeof path - 5)) return 0;
     char perf[PATH_MAX + 8];
     snprintf(perf, sizeof perf, "%s.perf", path);
-    if (access(perf, F_OK) && !oa_shadow_perf(path, perf, sizeof perf)) {
+    int rekordbox_stream = 0;
+#if !defined(__aarch64__)
+    if (access(perf, F_OK)) rekordbox_stream = sc_rbx_replay_path(path, perf, sizeof perf);
+#endif
+    if (!rekordbox_stream && access(perf, F_OK) && !oa_shadow_perf(path, perf, sizeof perf)) {
         if (!strncmp(path, OA_ENGINE_COPIES, strlen(OA_ENGINE_COPIES))) oa_log("analyse", path, 0);
         return 0;
     }
@@ -2930,7 +2934,10 @@ static int oa_replay(void *o, const struct oa_string *s, const uchar *prefs) {
         return 0;
     }
     oa_emit(o, OA_STARTED, NULL);
-    if (!oa_settle(o, p.part[0], p.len[0])) {
+    // The streaming request is for Engine's completed download. The shadow
+    // copy has its own loader timing and keeps the existing settle check.
+    int ready = rekordbox_stream ? !__atomic_load_n((uchar *)o + OA_STOP, __ATOMIC_ACQUIRE) : oa_settle(o, p.part[0], p.len[0]);
+    if (!ready) {
         oa_emit(o, OA_STOPPED, NULL);
         oa_emit(o, OA_FINISHED, NULL);
         free(p.buf);

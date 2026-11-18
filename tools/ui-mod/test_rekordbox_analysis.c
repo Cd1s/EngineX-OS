@@ -18,11 +18,11 @@ static sqlite3 *library_row(const char *path, const char *uri, const char *label
     sqlite3 *db;
     unlink(path);
     assert(sqlite3_open(attach ? ":memory:" : path, &db) == SQLITE_OK);
-    char sql[768];
+    char sql[1000];
     snprintf(sql, sizeof sql, "%s%s%s;"
-             "CREATE TABLE %sTrack (id INTEGER PRIMARY KEY, uri TEXT, label TEXT, isAnalyzed INTEGER DEFAULT 0, isBeatGridLocked INTEGER);"
-             "CREATE TABLE %sPerformanceData (trackId INTEGER PRIMARY KEY, trackData BLOB, overviewWaveFormData BLOB, beatData BLOB, quickCues BLOB, loops BLOB);"
-             "INSERT INTO Track (id, uri, label) VALUES (16449, %s%s%s, '%s'); INSERT INTO PerformanceData (trackId) VALUES (16449);",
+             "CREATE TABLE %sTrack (id INTEGER PRIMARY KEY, uri TEXT, label TEXT, path TEXT, isAnalyzed INTEGER DEFAULT 0, isBeatGridLocked INTEGER);"
+             "CREATE TABLE %sPerformanceData (trackId INTEGER PRIMARY KEY, trackData BLOB, overviewWaveFormData BLOB, beatData BLOB, quickCues BLOB, loops BLOB, thirdPartySourceId INTEGER);"
+             "INSERT INTO Track (id, uri, label, path) VALUES (16449, %s%s%s, '%s', '" SC_RBX_DOWNLOADS_REL "0123456789012345678901234567890123456789.temp'); INSERT INTO PerformanceData (trackId) VALUES (16449);",
              attach ? "ATTACH '" : "SELECT 1", attach ? path : "", attach ? "' AS stm" : "", attach ? "stm." : "", attach ? "stm." : "",
              uri ? "'" : "", uri ? uri : "NULL", uri ? "'" : "", label);
     assert(sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK);
@@ -76,7 +76,7 @@ int main(void) {
 
     const unsigned char file[] = "RBXA1" "\2\0\0\0" "\x01\xab" "\0\0\0\0" "\1\0\0\0" "\xff" "\0\0\0\0" "\0\0\0\0";
     char *sql = sc_rbx_analysis_sql(file, sizeof file - 1, 9);
-    assert(sql && !strcmp(sql, "UPDATE PerformanceData SET trackData = X'01ab', overviewWaveFormData = NULL, beatData = X'ff', quickCues = NULL, loops = NULL WHERE trackId = 9 AND trackData IS NULL; "
+    assert(sql && !strcmp(sql, "UPDATE PerformanceData SET trackData = X'01ab', overviewWaveFormData = NULL, beatData = X'ff', quickCues = NULL, loops = NULL, thirdPartySourceId = 1 WHERE trackId = 9 AND trackData IS NULL; "
                               "UPDATE Track SET isAnalyzed = 1 WHERE id = 9 AND changes() > 0"));
     free(sql);
     unsigned char with_flag[sizeof file];
@@ -109,6 +109,12 @@ int main(void) {
     snprintf(path, sizeof path, "%s/855.bin", dir);
     FILE *f = fopen(path, "wb");
     assert(f && fwrite(file, 1, sizeof file - 1, f) == sizeof file - 1 && !fclose(f));
+    snprintf(path, sizeof path, "%s/855.bin.perf", dir);
+    f = fopen(path, "wb");
+    assert(f && !fclose(f));
+    char replay[160];
+    const char *download = "/data/downloads/TIDAL/0123456789012345678901234567890123456789.flac";
+    assert(!sc_rbx_replay_path(download, replay, sizeof replay));
     char internal[160], drive[160], mark[160];
     snprintf(internal, sizeof internal, "%s/stm.db", dir);
     snprintf(drive, sizeof drive, "%s/media/stm.db", dir);
@@ -134,6 +140,9 @@ int main(void) {
     db = library(internal, "rekordbox [126 BPM 6A]");
     const char *result = load(db);
     assert(result && !strcmp(result, "filled") && filled(db));
+    assert(sc_rbx_replay_path(download, replay, sizeof replay));
+    assert(!sc_rbx_replay_path("/data/inMusicTempFiles/0123456789012345678901234567890123456789.flac", replay, sizeof replay));
+    assert(!sc_rbx_replay_path("/data/downloads/TIDAL/0123456789012345678901234567890123456789.flac.other", replay, sizeof replay));
     statements = 0;
     assert(!load(db) && statements == 1 && filled(db));
     sqlite3_close(db);
@@ -142,6 +151,10 @@ int main(void) {
     sqlite3 *engine = library_row(internal, "streaming://TIDAL/Track/855", "rekordbox [126 BPM 6A]", 1);
     result = load_bound(engine);
     assert(result && !strcmp(result, "filled") && filled(engine));
+    sqlite3_stmt *source;
+    assert(sqlite3_prepare_v2(engine, "SELECT thirdPartySourceId FROM stm.PerformanceData WHERE trackId = 16449", -1, &source, NULL) == SQLITE_OK);
+    assert(sqlite3_step(source) == SQLITE_ROW && sqlite3_column_int(source, 0) == 1);
+    sqlite3_finalize(source);
     statements = 0;
     assert(!load_bound(engine) && statements == 1 && filled(engine));
     sqlite3_close(engine);
@@ -149,6 +162,7 @@ int main(void) {
     // loads while a rekordbox load is open: one read of the row, nothing written, even with a
     // label that looks like ours and a file for the id.
     const char *theirs[][2] = {{NULL, "rekordbox [126 BPM 6A]"}, {"file:///Users/dj/Music/855.flac", "rekordbox [126 BPM 6A]"},
+                               {"file:///data/inMusicTempFiles/42_855.flac", "rekordbox [126 BPM 6A]"},
                                {"engine-link://{6d}/Engine Library/855", "Label"}, {"streaming://TIDAL/Track/855", "TIDAL [126 BPM]"}};
     for (unsigned i = 0; i < sizeof theirs / sizeof *theirs; i++) {
         for (int attach = 0; attach < 2; attach++) {

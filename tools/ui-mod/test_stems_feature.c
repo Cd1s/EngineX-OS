@@ -1242,6 +1242,20 @@ static void test_shadow_replay(void) {
     assert(oa_count == 9 && !memcmp(oa_seen, want, sizeof want));
     assert(!strcmp(oa_payload[1], "TRACK") && !strcmp(oa_payload[2], "BEATS") && !strcmp(oa_payload[4], "OVERVIEW"));
     assert(oa_double[5] == 1.0 && oa_self[OA_PROGRESS / 4] == 1.0f && oa_double[7] == (double)(float)bpm);
+    // A completed streaming download uses the analysis registered by the
+    // rekordbox row fill; the analyzer delivers the imported grid without decoding.
+    const char *old_rbx_dir = sc_rbx_dir;
+    sc_rbx_dir = dir;
+    static const uint16_t streamed[] = u"/data/downloads/TIDAL/0123456789012345678901234567890123456789.flac";
+    const struct oa_string download = {NULL, streamed, sizeof streamed / sizeof *streamed - 1};
+    oa_count = 0;
+    assert(!oa_replay(oa_self, &download, prefs) && oa_count == 0);
+    const char *registered = "/tmp/test-oa-replay/0123456789012345678901234567890123456789.perf";
+    assert(!link("/tmp/test-oa-replay/\xc3\xa9.flac.perf", registered));
+    assert(oa_replay(oa_self, &download, prefs) && oa_count == 9 && oa_seen[2] == OA_BEATS);
+    assert(!strcmp(oa_payload[2], "BEATS"));
+    assert(!unlink(registered));
+    sc_rbx_dir = old_rbx_dir;
     // stopBeatDetection while the replay waits for Engine's loader: stopped, finished.
     oa_count = 0;
     ((uchar *)oa_self)[OA_STOP] = 1;
