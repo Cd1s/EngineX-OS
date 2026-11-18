@@ -28,7 +28,7 @@ func rekordboxPCM(form string, bits int, floating bool) []byte {
 		n := []int32{0, 1, -1, 1<<(bits-1) - 1, -1 << (bits - 1), 12345, -23456, 42}[i%8]
 		for j := 0; j < bits/8; j++ {
 			shift := j * 8
-			if form == "AIFF" {
+			if form == "AIFF" || form == "AIFC" && bits == 24 {
 				shift = bits - 8 - shift
 			}
 			pcm.WriteByte(byte(n >> shift))
@@ -56,7 +56,11 @@ func rekordboxPCM(form string, bits int, floating bool) []byte {
 		binary.Write(comm, binary.BigEndian, uint16(bits))
 		comm.Write([]byte{0x40, 0x0e, 0xbb, 0x80, 0, 0, 0, 0, 0, 0}) // 48000 Hz, extended80
 		if form == "AIFC" {
-			comm.WriteString("sowt\x00\x00")
+			compression := "sowt"
+			if bits == 24 {
+				compression = "NONE"
+			}
+			comm.WriteString(compression + "\x00\x00")
 		}
 		out.WriteString("FORM")
 		size := uint32(4 + 8 + comm.Len() + 16 + pcm.Len())
@@ -91,6 +95,7 @@ func TestRekordboxPCMStream(t *testing.T) {
 		{"float.wav", "audio/wav", "mp3", ".mp3", rekordboxPCM("WAVE", 32, true)},
 		{"16.AIF", "audio/aiff", "mp3", ".mp3", rekordboxPCM("AIFF", 16, false)},
 		{"24.aiff", "audio/aiff", "mp3", ".mp3", rekordboxPCM("AIFF", 24, false)},
+		{"16.aifc", "audio/aiff", "mp3", ".mp3", rekordboxPCM("AIFC", 16, false)},
 		{"24.aifc", "audio/aiff", "mp3", ".mp3", rekordboxPCM("AIFC", 24, false)},
 		{"control.mp3", "audio/mpeg", "mp3", ".mp3", bytes.Repeat([]byte("ID3 control"), 20)},
 		{"control.flac", "audio/flac", "flac", ".flac", bytes.Repeat([]byte("fLaC control"), 20)},
