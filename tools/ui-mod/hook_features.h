@@ -141,16 +141,21 @@ static void hf_log(const char *text) {
     if (text[0]) syscall(SYS_write, STDERR_FILENO, text, strlen(text));
 }
 
+static uint32_t hf_with_needs(uint32_t mask) {
+    if (mask & (1u << HF_SSO)) mask |= 1u << HF_GATEWAY;
+    if (mask & (1u << HF_DSP_GUARDS)) mask |= 1u << HF_HIFI_OUTPUT;
+    return mask;
+}
+
 /* Build and deck mask, read once. A caller racing the first read gets the build mask. */
 static uint32_t hf_disabled(void) {
     if (__atomic_load_n(&hf_state, __ATOMIC_ACQUIRE) == 2) return hf_mask;
     unsigned unknown = 0;
-    uint32_t mask = hf_parse(ENGINEX_HOOK_DISABLE, sizeof ENGINEX_HOOK_DISABLE - 1, NULL);
+    uint32_t mask = hf_with_needs(hf_parse(ENGINEX_HOOK_DISABLE, sizeof ENGINEX_HOOK_DISABLE - 1, NULL));
     int expected = 0;
     if (!__atomic_compare_exchange_n(&hf_state, &expected, 1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
         return expected == 2 ? __atomic_load_n(&hf_mask, __ATOMIC_ACQUIRE) : mask;
-    mask |= hf_read(hf_path, &unknown);
-    if (mask & (1u << HF_SSO)) mask |= 1u << HF_GATEWAY;
+    mask = hf_with_needs(mask | hf_read(hf_path, &unknown));
     __atomic_store_n(&hf_mask, mask, __ATOMIC_RELEASE);
     __atomic_store_n(&hf_state, 2, __ATOMIC_RELEASE);
     if (unknown) hf_log("engine-ui-hook: hook-disable.conf names an unknown feature; ignored\n");
@@ -212,7 +217,7 @@ static const char *hf_state_path = HOOK_FEATURES_STATE_PATH; /* tests point it e
  * Written to a temporary file and renamed, so a reader never sees half of it. */
 static void hf_publish(void) {
     char build_off[512], off[512], text[1100], tmp[256], dir[256];
-    hf_names_of(hf_parse(ENGINEX_HOOK_DISABLE, sizeof ENGINEX_HOOK_DISABLE - 1, NULL) | hf_unavailable, build_off, sizeof build_off);
+    hf_names_of(hf_with_needs(hf_parse(ENGINEX_HOOK_DISABLE, sizeof ENGINEX_HOOK_DISABLE - 1, NULL)) | hf_unavailable, build_off, sizeof build_off);
     hf_names_of(hf_disabled(), off, sizeof off);
     int n = snprintf(text, sizeof text, "pid=%d\nbuild=%s\noff=%s\n%s", (int)getpid(), build_off, off,
                      hf_on(HF_SHADOW_PAUSED_FOLLOW) ? "on=shadow-paused-follow\n" : "");

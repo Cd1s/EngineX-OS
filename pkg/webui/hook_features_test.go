@@ -71,8 +71,12 @@ func TestHookFeatureMenuWritesTheFileTheHookReads(t *testing.T) {
 		t.Fatal(err)
 	}
 	// deemixd stays on: the console's Deezer job queue needs it without the gateway.
-	if got := parseHookFeatureNames(string(b)); !slices.Equal(got, []string{"gateway", "dsp-guards"}) {
+	// hifi-output goes off along with dsp-guards: hook_master_output is not installed without it.
+	if got := parseHookFeatureNames(string(b)); !slices.Equal(got, []string{"gateway", "dsp-guards", "hifi-output"}) {
 		t.Fatalf("file switches off %v:\n%s", got, b)
+	}
+	if along := hookFeaturesAlong(string(b)); !slices.Equal(along, []string{"hifi-output"}) {
+		t.Fatalf("along = %v:\n%s", along, b)
 	}
 	// Every feature is documented in the file, the ones left on behind '#'.
 	for _, f := range hookFeatures {
@@ -95,8 +99,8 @@ func TestHookFeatureMenuWritesTheFileTheHookReads(t *testing.T) {
 		t.Fatalf("file changed by a refused request:\n%s", after)
 	}
 
-	// Everything on again, without a restart.
-	if w := postHookFeatures(t, s, `{"off":[]}`); w.Code != http.StatusOK {
+	// Everything on again, without a restart; hifi-output comes back with dsp-guards even if still listed.
+	if w := postHookFeatures(t, s, `{"off":["hifi-output"]}`); w.Code != http.StatusOK {
 		t.Fatalf("%d %s", w.Code, w.Body.String())
 	}
 	if b, _ := os.ReadFile(conf); len(parseHookFeatureNames(string(b))) != 0 || restarts != 1 {

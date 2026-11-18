@@ -24,6 +24,11 @@
  * shared host preempts a block now and then; a wait in the code costs every pass). The
  * least only filters the host out: a banned call fails the test however quick it is.
  * No Engine, rootfs or device is needed. */
+#define _GNU_SOURCE
+#include <sys/syscall.h>
+#include <unistd.h>
+static void seen(const char *name);
+#define syscall(...) (seen("syscall"), (syscall)(__VA_ARGS__))
 #define ENGINE_UI_HOOK_TEST
 int hook_test_engine;
 #include "engine_ui_hook.c"

@@ -870,11 +870,16 @@ static void stop_import(const char *target) {
 // An Eject (edisksd's Unmount, which is never lazy; its removal path is). rb-bridge --remount
 // publishes a finished background import by a synthetic udev remove and add of the partition
 // (#301): it must not mount again a stick the DJ ejected. Same name hash as import_unit.
+static int eject_mark_path(const char *target,char p[PATH_MAX]) {
+    return target&&volume(target)&&snprintf(p,PATH_MAX,"%s/enginex-rb-ejected-%016llx",EJECT_MARK_DIR,
+                                            (unsigned long long)hash_bytes(UINT64_C(14695981039346656037),target,strlen(target)))<(int)PATH_MAX?0:-1;
+}
 static void mark_eject(const char *target) {
-    char p[PATH_MAX];
-    if(snprintf(p,sizeof p,"%s/enginex-rb-ejected-%016llx",EJECT_MARK_DIR,
-                (unsigned long long)hash_bytes(UINT64_C(14695981039346656037),target,strlen(target)))>=(int)sizeof p)return;
+    char p[PATH_MAX];if(eject_mark_path(target,p))return;
     int fd=open(p,O_WRONLY|O_CREAT|O_TRUNC|O_NOFOLLOW|O_CLOEXEC,0600);if(fd>=0)close(fd);
+}
+static void clear_eject(const char *target) {
+    char p[PATH_MAX];if(!eject_mark_path(target,p))unlink(p);
 }
 #ifndef FSCK_HFSPLUS_SYSTEM
 #define FSCK_HFSPLUS_SYSTEM "/usr/sbin/fsck.hfsplus"
@@ -2382,6 +2387,7 @@ static int hooked_mount(struct libmnt_context *ctx,int (*real)(struct libmnt_con
     hfs_rw_approved=hfs_prepare_mount(ctx,&hfs_bk,deadline-POST_RESERVE_MS);
     if(hfs_rw_approved==HFS_RW_LKLFUSE) {
         if(!hfs_gen2_mount_flow(ctx,&hfs_bk,deadline,whole_window)) {
+            clear_eject(mnt_context_get_target(ctx));
             hfs_rw_approved=HFS_RW_NONE;
             release_post();clear_preparing();in_hook=0;
             seeded_hint[0]=0;carry_from[0]=0;
@@ -2406,7 +2412,7 @@ static int hooked_mount(struct libmnt_context *ctx,int (*real)(struct libmnt_con
         rc=real(ctx);saved=errno;
     }
     hfs_rw_approved=HFS_RW_NONE;
-    if(!rc&&mnt_context_get_status(ctx)==1){after_mount(ctx,pre?MOUNT_POST:MOUNT_FULL,deadline);errno=saved;}
+    if(!rc&&mnt_context_get_status(ctx)==1){clear_eject(mnt_context_get_target(ctx));after_mount(ctx,pre?MOUNT_POST:MOUNT_FULL,deadline);errno=saved;}
     release_post();clear_preparing();in_hook=0;
     seeded_hint[0]=0;
     pthread_mutex_unlock(&view_lock);return rc;
@@ -2499,7 +2505,8 @@ static int unmount_dispatch(struct libmnt_context *ctx,int (*real)(struct libmnt
         if(safe_path(lib,1)&&errno==ELOOP)return -ELOOP;
     }
     stop_import(target);
-    if(!ctx_wants_lazy(ctx))mark_eject(target);
+    int eager=!ctx_wants_lazy(ctx);
+    if(eager)mark_eject(target);
     // Only this target's own mount makes its view record, under view_lock. Without one it
     // is the stock umount and does not wait for view_lock, which another stick's
     // conversion holds for up to its whole budget (BH-O55-3).
@@ -2507,9 +2514,9 @@ static int unmount_dispatch(struct libmnt_context *ctx,int (*real)(struct libmnt
     if(!hfs_gen2_find_record(target,&gen2_rec)) {
         in_hook=1;
         int rc=hfs_gen2_unmount(ctx,&gen2_rec,real);
-        int saved=errno;in_hook=0;errno=saved;return rc;
+        int saved=errno;if(eager&&rc)clear_eject(target);in_hook=0;errno=saved;return rc;
     }
-    if(target_err){errno=target_err;return -target_err;}
+    if(target_err){if(eager)clear_eject(target);errno=target_err;return -target_err;}
     struct owned_view *v=load_view(target);
     if(!v) {
         if(HFS_RW_MOUNTED(target)) {
@@ -2526,11 +2533,13 @@ static int unmount_dispatch(struct libmnt_context *ctx,int (*real)(struct libmnt
                 note("device gone, keeping lazy unmount for rw HFS+ volume",target,0);
             }
         }
-        in_hook=1;int rc=real(ctx),saved=errno;in_hook=0;errno=saved;return rc;
+        in_hook=1;int rc=real(ctx),saved=errno;if(eager&&(rc||mnt_context_get_status(ctx)!=1))clear_eject(target);in_hook=0;errno=saved;return rc;
     }
     free(v);
     pthread_mutex_lock(&view_lock);in_hook=1;pthread_mutex_lock(&post_lock);v=load_view(target);
-    int rc=v?unmount_view(ctx,v,real,ctx_wants_lazy(ctx)||base_device_gone(v->base_id)):real(ctx);int saved=errno;free(v);
+    int rc=v?unmount_view(ctx,v,real,ctx_wants_lazy(ctx)||base_device_gone(v->base_id)):real(ctx);int saved=errno;
+    if(eager&&(rc||(!v&&mnt_context_get_status(ctx)!=1)))clear_eject(target);
+    free(v);
     pthread_mutex_unlock(&post_lock);in_hook=0;pthread_mutex_unlock(&view_lock);errno=saved;return rc;
 }
 

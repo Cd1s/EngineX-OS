@@ -65,6 +65,8 @@ static void test_masks(void) {
     assert(hf_on(HF_STEMS) && !hf_on(HF_ZOOM30));
     use_conf("sso");
     assert(!hf_on(HF_SSO) && !hf_on(HF_GATEWAY));
+    use_conf("dsp-guards");
+    assert(!hf_on(HF_DSP_GUARDS) && !hf_on(HF_HIFI_OUTPUT));
     use_conf("");
     // A commented file longer than 4 KiB: the last name still counts (it once read 4 KiB only).
     static char big[20000];
@@ -157,20 +159,38 @@ static void test_hifi_output_switch(void) {
     float *outs[2] = {l, r};
     for (int i = 0; i < 512; i++) ref[i] = l[i] = r[i] = (i & 1) ? -0.25f : 0.25f;
     void *saved_orig = dsp_originals[DSP_MASTER];
+    const char *saved_settings = four_deck_settings;
+    char settings[sizeof dir + 32];
+    snprintf(settings, sizeof settings, "%s/hifi-settings.conf", dir);
+    four_deck_settings = settings;
     dsp_originals[DSP_MASTER] = (void *)noop_master_cb;
     memset(master_hifi, 0, sizeof master_hifi);
-    hifi_enabled = 1;
 
+    write_file(board, "JP21");
+    use_conf("");
+    write_file(settings, "hifi_output=1\n");
+    lim_poll_once();
+    hook_master_output(NULL, NULL, 0, NULL, 2, outs, 512);
+    assert(memcmp(l, ref, sizeof l) == 0);
+
+    write_file(board, "JP07");
     use_conf("hifi-output");
+    write_file(settings, "hifi_output=1\n\n");
+    lim_poll_once();
     hook_master_output(NULL, NULL, 0, NULL, 2, outs, 512);
     assert(memcmp(l, ref, sizeof l) == 0);
 
     for (int i = 0; i < 512; i++) ref[i] = l[i] = r[i] = (i % 3 == 0) ? 0.25f : -0.125f; /* 16 kHz at 48 kHz */
     use_conf("");
+    write_file(settings, "hifi_output=1\n");
+    lim_poll_once();
     hook_master_output(NULL, NULL, 0, NULL, 2, outs, 512);
     assert(memcmp(l, ref, sizeof l) != 0);
 
-    hifi_enabled = 0;
+    unlink(settings);
+    write_file(board, "JP21");
+    lim_poll_once();
+    four_deck_settings = saved_settings;
     memset(master_hifi, 0, sizeof master_hifi);
     dsp_originals[DSP_MASTER] = saved_orig;
     puts("Hi-Fi output (#172) respects hifi-output switch and Gen-1 player board gate: PASS");
