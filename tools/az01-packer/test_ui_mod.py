@@ -2088,7 +2088,7 @@ class ShadowDisplayTest(unittest.TestCase):
         names = ("scDeckLocked", "scShadowVisible", "scShadowDeckFor", "scShadowData", "scShadowRate", "scShadowPosition",
                  "scShadowBeatIndex", "scShadowBeatAt", "scShadowGrid", "scShadowNextCue", "scShadowCuesFor", "scShadowAsset",
                  "scShadowProperties", "scShadowTick", "scShadowPost", "scShadowPoll", "scShadowPollIdle", "scShadowDisplayFetch", "scShadowSameSample", "scShadowApplyDisplay", "scShadowCovers", "scShadowBusy", "scShadowApplyAll", "scNextCueInfo", "scNextCueCompute", "scCueProps", "scCueBeatsLeft", "scCueTickFor", "scCueStep", "scCueTableOf", "scCueCount", "scCueWatch",
-                 "scShadowApply", "scShadowEmpty", "scShadowScratchLine", "scShadowScratchRelease", "scShadowSpeed", "scShadowCues", "scShadowBeat",
+                 "scShadowApply", "scShadowFeed", "scShadowEmpty", "scShadowScratchLine", "scShadowScratchRelease", "scShadowSpeed", "scShadowCues", "scShadowBeat",
                  "scBrowserVisible", "scShadowLoad", "scShadowWrong", "scShadowHolds", "scShadowEndGap", "scShadowEnd",
                  "scShadowSeek", "scShadowMirror", "scShadowMirrorOff", "scShadowLink", "scShadowLinkEdge", "scPress", "scGcCheck", "scShadowWake", "scShadowAnyPlaying",
                  "scShadowLine", "scShadowLandingSeek", "scShadowLandingTick", "scShadowBend", "scShadowBendEnd", "scShadowNudgeTick", "scShadowNudgeDrop", "scShadowNudgeEnd", "scShadowLoopTick", "scShadowMasterBack", "scPressWrite", "scMasterPresses",
@@ -2124,7 +2124,7 @@ Object.assign(globalThis, {
     scGcLoadSeq: 0, scGcRuns: 0, scGcLastMs: 0, scGcProps: null,
     scGcState: {armed: true, quietSince: 0, lastRun: -Infinity, loadSig: 0, loadSeq: 0, loadAt: 0, followAt: 0},
     scShadowPrev: {}, scShadowCueCache: {}, scShadowPostAt: 0, scShadowPollAt: now, scShadowDebug: false,
-    scShadowActiveDeck: 0, scPairedOn: false, scPairedEmpty: 0,
+    scShadowActiveDeck: 0, scPairedOn: false, scPairedEmpty: 0, scPausedShadowFollow: false, scShadowFeedRequests: {},
     scShadowLead: 0, scShadowPeerLead: 0, scShadowPeerPlaying: false, scShadowMasterAt: 0,
     scShadowGen: 0, scShadowVer: 0, scShadowIdle: false, scShadowLinePaths: [], scShadowFrame: 17, scCueInfoCache: {}, scCueInfoMemo: {}, scCuePropCache: {}, scCueTexts: [], scCueProbe: 0, scCueNoBeat: 0,
     scCueInfo1: null, scCueInfo2: null, scCueInfo3: null, scCueInfo4: null, scCueShown1: {}, scCueShown2: {}, scCueShown3: {}, scCueShown4: {}, scCueTable1: null, scCueTable2: null, scCueTable3: null, scCueTable4: null,
@@ -2157,6 +2157,37 @@ scShadowApplyAll([{deck:3,key:'cdj:same',lineIn:true}]);
 assert.equal(scShadowData(3).lineIn, true);
 scShadowApplyAll([{deck:3,key:'cdj:same',lineIn:false}]);
 assert.equal(scShadowData(3).lineIn, false);
+""")
+
+    def test_paused_shadow_follow_keeps_transport_paused_and_reseeks_at_low_rate(self):
+        self.js(r"""
+scPausedShadowFollow = true; scShadowEngineMask = 1 << 2; scFourDeckRole = '1'; scPlayer = true;
+let seeks = 0, plays = 0, speedWrites = 0, feed = null;
+const props = new Map();
+globalThis.scTr = path => {
+    if (props.has(path)) return props.get(path);
+    const p = { _state: path.endsWith('/KeyLock') || path.endsWith('/PlayState'), _value: path.endsWith('/SampleRate') ? 48000 : 0,
+        string: path.endsWith('/SyncMode') ? 'Off' : path.endsWith('/SpeedRange') ? '8' : '', index: 1,
+        get state() { return this._state; }, set state(v) { if (path.endsWith('/Play')) { plays++; assert.equal(v, false); } this._state = v; },
+        get value() { return this._value; }, set value(v) { this._value = v; if (path.endsWith('/SetSongPosition')) seeks++; },
+        get unnormalized() { return path.endsWith('/TrackLength') ? 48000 * 300 : path.endsWith('/TrackPosition') ? 0 : 0; } };
+    if (path.endsWith('/Speed')) Object.defineProperty(p, 'value', {get(){return 0.5}, set(){speedWrites++}});
+    props.set(path, p); return p;
+};
+globalThis.XMLHttpRequest = class { open(method, url) { assert.equal(method, 'POST'); assert(url.endsWith('/shadow/position-feed')); } setRequestHeader() {} send(body) { feed = JSON.parse(body); } };
+globalThis.scShadowHolds = () => true; globalThis.scShadowEnd = () => false;
+globalThis.scShadowMirror = () => {}; globalThis.scShadowMirrorOff = () => {};
+globalThis.scShadowCues = () => {}; globalThis.scShadowBeat = () => {};
+scShadowAt[2] = {path:'/copy.flac', id:'track-a', pendingLoad:false, ready:true, sampleRate:48000, seekAt:0, jumps:0};
+const e = {deck:2,path:'/copy.flac',id:'track-a',playing:true,scratch:false,stale:false,positionMs:1000,at:now,rate:1,jumps:0,pitch:0,bpm:120,currentBpm:120,range:8,keylock:true,cues:[]};
+scShadowApplyAll([e], false);
+assert.equal(plays, 1, 'shadow transport was not explicitly held paused');
+assert.equal(props.get('/Engine/Deck2/Track/KeyLock').state, false);
+assert.equal(speedWrites, 0, 'paused follow wrote the shadow Speed');
+assert.equal(feed.deck, 2); assert.equal(feed.positionSamples, 48000);
+const firstSeeks = seeks; now += 500; scShadowApplyAll([e], false); assert.equal(seeks, firstSeeks);
+now += 600; scShadowApplyAll([e], false); assert.equal(seeks, firstSeeks + 1, 'missing 1 Hz overview seek');
+e.jumps = 1; now += 10; scShadowApplyAll([e], false); assert.equal(seeks, firstSeeks + 2, 'jump did not reseek immediately');
 """)
 
     def test_line_hint_stays_stock_without_cdj(self):

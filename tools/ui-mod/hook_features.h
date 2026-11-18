@@ -48,6 +48,7 @@
     X(THREAD_TUNING, "thread-tuning") \
     X(ALSA_TIMESTAMP, "alsa-timestamp") \
     X(UI_PACKS, "ui-packs") \
+    X(SHADOW_PAUSED_FOLLOW, "shadow-paused-follow") \
     X(MOUNT_HOOK, "mount-hook") \
     X(RB_BRIDGE, "rb-bridge") \
     X(DEEMIXD, "deemixd") \

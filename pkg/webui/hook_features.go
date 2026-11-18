@@ -58,6 +58,7 @@ var hookFeatures = []hookFeature{
 	{Name: "telemetry-block", Group: "data", About: "PostHog/events databases in RAM, crash reports to /tmp, no Crashpad"},
 	{Name: "vendor-update-block", Group: "data", About: "autoupdate.airmusictech.com is not resolved (no inMusic firmware offers)"},
 	{Name: "ui-packs", Group: "ui", About: "EngineX interface (QML packs): all EngineX menus, About, Remote Load; off = stock interface"},
+	{Name: "shadow-paused-follow", Group: "ui", About: "Gen-1 shadow waveform follows the source while the local shadow Engine deck stays paused"},
 	{Name: "rb-bridge", Group: "services", Reboot: true, Service: true, About: "EngineX service: Pro DJ Link (players' announcements and status for CDJ shadow decks, library sharing); CDJ export is the console's, rekordbox Zero-Scan mount-hook's"},
 }
 
