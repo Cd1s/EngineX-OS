@@ -415,6 +415,7 @@ class OnOffSwitchCompatibilityTest(unittest.TestCase):
             "scTracklistWaveform": "tracklistWaveform", "scOmniSource": "omniSource",
             "scCueCountdown": "cueCountdown", "scRemoteLoad": "remoteLoad",
             "scSdHighSpeed": "sdHighSpeed", "scRemoteAccess": "remoteAccess",
+            "scRestoreBpmOnUnsync": "restoreBpmOnUnsync",
         }
         for version, skin in (("5.0.4", "EmbeddedCommon"), ("5.3.0", "Embedded")):
             qrc = LAB / version / "qrc"
@@ -10320,6 +10321,152 @@ for (const inv of [false, true]) {{
 """
             node_res = subprocess.run(["node", "-e", js], capture_output=True, text=True)
             self.assertEqual(node_res.returncode, 0, node_res.stderr)
+
+
+class RestoreBpmOnUnsyncTest(unittest.TestCase):
+    """#289: `Restore BPM on Sync Off`, opt-in. Sync turned off with the tempo control at 0 % returns the deck
+    to the track's original BPM; everything else keeps stock behaviour and Smart Sync's own range restore."""
+
+    @staticmethod
+    def _block(text, start, open_at=None):
+        i = text.index(start)
+        j = text.index("{", i if open_at is None else open_at)
+        depth = 0
+        for k in range(j, len(text)):
+            depth += (text[k] == "{") - (text[k] == "}")
+            if depth == 0:
+                return text[i:k + 1], text[j + 1:k]
+        raise AssertionError(start)
+
+    def _script(self, cases):
+        src = bp.SMART_SYNC_MAIN
+        # Every helper the pack defines for the restore (names differ between revisions, so the
+        # same cases also run against the old code and fail on behaviour, not on extraction).
+        helpers = [self._block(src, h)[0] for h in ("function scSpeedNeutral(", "function scUnsyncRestoreBpm(") if h in src]
+        fire_body = ""  # the old revision's delayed second write, if any
+        if "id: scBpmRestoreTimer" in src:
+            _, fire_body = self._block(src, "id: scBpmRestoreTimer", src.index("id: scBpmRestoreTimer") + src[src.index("id: scBpmRestoreTimer"):].index("onTriggered:"))
+        return r"""
+const assert = require('node:assert/strict');
+var scRestoreBpmOnUnsync = true, scShadowEngineMask = 0, scFourDeckRole = '', scBpmRestorePending = {}, armed = 0, writes = [];
+const decks = {};
+// speed: Engine's effective rate (rewritten by Sync); fader: the physical control (the translator's softValue).
+function deck(d, o) { decks[d] = Object.assign({loaded: true, sync: 'Off', master: false, speed: 0.5, fader: 0.5, range: '8'}, o); }
+const root = {
+  get scBpmRestorePending() { return scBpmRestorePending; }, set scBpmRestorePending(v) { scBpmRestorePending = v; },
+  get scRestoreBpmOnUnsync() { return scRestoreBpmOnUnsync; },
+  get scShadowEngineMask() { return scShadowEngineMask; }, get scFourDeckRole() { return scFourDeckRole; },
+  scTr(path) {
+    const m = /Deck(\d)\/(.*)$/.exec(path), s = decks[m[1]], k = m[2];
+    if (!s) return null;
+    if (k === 'Track/SongLoaded') return {get state() { return s.loaded; }};
+    if (k === 'SyncMode') return {get string() { return s.sync; }};
+    if (k === 'DeckIsMaster') return {get state() { return s.master; }};
+    if (k === 'SpeedRange') return {get string() { return s.range; }};
+    if (k === 'Speed') return {get value() { return s.speed; }, set value(v) { s.speed = v; writes.push(m[1] + ':' + v); }, get softValue() { return s.fader; }};
+  },
+};
+const scBpmRestoreTimer = {restart() { armed++; }};
+""" + "\n".join(helpers) + "\nfunction fire() {" + fire_body + "}\n" + cases
+
+    def run_node(self, cases):
+        out = subprocess.run(["node", "-e", self._script(cases)], capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required for the restore logic")
+    def test_off_writes_nothing_and_every_stock_case_is_left_alone(self):
+        self.run_node(r"""
+const none = (label) => { assert.deepEqual(writes, [], label); assert.equal(armed, 0, label); };
+// Off (the default): the same synced-away, unsynced, unmastered, loaded deck with a centred fader is never touched.
+scRestoreBpmOnUnsync = false; deck(1, {speed: 0.7016}); scUnsyncRestoreBpm(1); fire(); none('off');
+scRestoreBpmOnUnsync = true;
+deck(1, {speed: 0.7016, fader: 0.55}); scUnsyncRestoreBpm(1); none('fader moved 0.8 %');      // the DJ moved it: stock
+deck(1, {speed: 0.7016, fader: 0.505}); scUnsyncRestoreBpm(1); none('fader moved +0.08 % on 8 %'); // review #289 P2.2
+deck(1, {range: '100', speed: 0.7016, fader: 0.5004}); scUnsyncRestoreBpm(1); none('fader moved +0.08 % on 100 %');
+deck(1, {speed: 0.7016, master: true}); scUnsyncRestoreBpm(1); none('master deck');          // decks synced to it would follow
+deck(1, {speed: 0.7016, loaded: false}); scUnsyncRestoreBpm(1); none('no track loaded');     // eject / load
+deck(1, {speed: 0.7016, sync: 'TempoSync'}); scUnsyncRestoreBpm(1); none('still synced');
+assert.equal(scBpmRestorePending[1], undefined);
+""")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required for the restore logic")
+    def test_centred_fader_restores_the_rate_engine_rewrote_on_sync(self):
+        # Review #289 P1, measured natively on JP07: Sync from 124 to 128 BPM rewrote Speed to 0.7016 with no
+        # fader move. The physical fader (softValue) is still centred, so Sync Off returns to 0 %.
+        self.run_node(r"""
+deck(2, {speed: 0.7016128897666931}); scUnsyncRestoreBpm(2);
+assert.deepEqual(writes, ['2:0.5']); assert.equal(armed, 0);
+writes.length = 0; deck(2, {range: '100', speed: 0.5203}); scUnsyncRestoreBpm(2);
+assert.deepEqual(writes, ['2:0.5']);
+""")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required for the restore logic")
+    def test_a_14_bit_fader_at_its_centre_codes_restores(self):
+        # Review #289 (91bfd11e): stock decodes the 14-bit speed fader as code / 16383, so the centre
+        # detent is 8192 (0.50003) or 8191 (0.49997), never exactly 0.5. Both restore; 8193 does not.
+        self.run_node(r"""
+const code = (c) => c / 16383;
+for (const c of [8192, 8191]) {
+  writes.length = 0; deck(2, {speed: 0.7016, fader: code(c)}); scUnsyncRestoreBpm(2);
+  assert.deepEqual(writes, ['2:0.5'], 'centre code ' + c);
+}
+for (const c of [8193, 8190]) {
+  writes.length = 0; deck(2, {speed: 0.7016, fader: code(c)}); scUnsyncRestoreBpm(2);
+  assert.deepEqual(writes, [], 'moved one code: ' + c);
+}
+""")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required for the restore logic")
+    def test_ownership_not_the_routing_mask_decides_in_four_deck_player_mode(self):
+        # Review #289 P2.1: the mixed fixture (local role 13, engine peer 2, display-only peer 4) leaves
+        # scShadowEngineMask = 14. Local decks 1 and 3 restore; the peer's deck 2 is never written.
+        self.run_node(r"""
+scFourDeckRole = '13'; scShadowEngineMask = 14;
+for (const d of [1, 2, 3, 4]) deck(d, {speed: 0.7016});
+for (const d of [1, 2, 3, 4]) scUnsyncRestoreBpm(d);
+assert.deepEqual(writes, ['1:0.5', '3:0.5']);
+""")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required for the restore logic")
+    def test_one_immediate_write_never_a_delayed_one(self):
+        # Review #289 P2.3 / P2.4: Speed is the effective rate, so an exact 0.5 already plays the track's own
+        # BPM and needs no nudge. Nothing is written later, so a deck promoted to MASTER or synced again
+        # meanwhile is never touched and no 0.502 is left behind.
+        self.run_node(r"""
+deck(2, {speed: 0.5}); scUnsyncRestoreBpm(2); fire();
+assert.deepEqual(writes, []); assert.equal(armed, 0);
+deck(2, {speed: 0.7016}); scUnsyncRestoreBpm(2); decks[2].master = true; decks[2].sync = 'TempoSync'; fire();
+assert.deepEqual(writes, ['2:0.5']); assert.equal(armed, 0);
+""")
+        self.assertNotIn("scBpmRestoreTimer", bp.SMART_SYNC_MAIN)
+        self.assertNotIn("0.502", bp.SMART_SYNC_MAIN)
+
+    def test_smart_sync_keeps_its_range_restore_and_calls_the_new_logic_after_it(self):
+        src = bp.SMART_SYNC_MAIN
+        old_else = """				} else {
+					if (savedRangeIndex >= 0 && r) {
+						r.index = savedRangeIndex
+						savedRangeIndex = -1
+					}
+					root.scUnsyncRestoreBpm(deckIdx)
+				}"""
+        self.assertIn(old_else, src)  # the range restore is untouched, the new call comes after it
+        self.assertIn("if (syncNeed > 0) root.scWidenRange(deckIdx, syncNeed)", src)
+        self.assertEqual(src.count("root.scUnsyncRestoreBpm("), 1)
+        # no controller module is touched: nothing for the controller engine to latch
+        self.assertNotIn("scUnsyncRestoreBpm", bp.FX_CONTROLLER)
+
+    def test_setting_is_wired_off_by_default_and_translated(self):
+        main = bp.SERVICES_MAIN
+        self.assertIn("property bool scRestoreBpmOnUnsync: false", main)
+        self.assertIn('key === "restore_bpm_on_unsync") root.scRestoreBpmOnUnsync = val === "1" || val === "true"', main)
+        self.assertIn("root.scRestoreBpmOnUnsync = false\n", main)  # reset before the file is parsed
+        self.assertIn("v.restoreBpmOnUnsync !== undefined", main)
+        self.assertIn('text: "Restore BPM on Sync Off"', bp.PLAYBACK_ENTRIES)
+        self.assertIn('root.scCall("restoreBpmOnUnsync=" + (root.scRestoreBpmOnUnsync ? 0 : 1))', bp.PLAYBACK_ENTRIES)
+        row = bp.load_dict()["Restore BPM on Sync Off"]
+        for lang in ("zh-Hans", "zh-Hant", "es"):
+            self.assertTrue(row.get(lang), lang)
 
 
 if __name__ == "__main__":

@@ -251,6 +251,7 @@ type uiSettings struct {
 	StemsEqMode         bool     `json:"stemsEqMode"`
 	BeatJumpPads        bool     `json:"beatJumpPads"`
 	PitchBendBeatJump   bool     `json:"pitchBendBeatJump"`
+	RestoreBpmOnUnsync  bool     `json:"restoreBpmOnUnsync"` // #289: Sync off with the tempo control at 0 % returns the deck to the track's original BPM
 	MixstreamFx         []string `json:"mixstreamFx"`
 	JogInvertLeft       bool     `json:"jogInvertLeft"`
 	JogInvertRight      bool     `json:"jogInvertRight"`
@@ -517,6 +518,8 @@ func (s *Server) loadUI() uiSettings {
 			v.BeatJumpPads = val == "1" || strings.EqualFold(val, "true")
 		case "pitch_bend_beat_jump":
 			v.PitchBendBeatJump = val == "1" || strings.EqualFold(val, "true")
+		case "restore_bpm_on_unsync":
+			v.RestoreBpmOnUnsync = val == "1" || strings.EqualFold(val, "true")
 		case "mixstream_fx":
 			if fx, ok := parseMixstreamFx(val); ok {
 				v.MixstreamFx = fx
@@ -690,6 +693,9 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	}
 	if v.PitchBendBeatJump {
 		text += "pitch_bend_beat_jump=1\n"
+	}
+	if v.RestoreBpmOnUnsync {
+		text += "restore_bpm_on_unsync=1\n"
 	}
 	if len(v.MixstreamFx) == len(uiMixstreamFxDefaults) && !slices.Equal(v.MixstreamFx, uiMixstreamFxDefaults) {
 		text += "mixstream_fx=" + strings.Join(v.MixstreamFx, ",") + "\n"
@@ -1171,6 +1177,15 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		v.PitchBendBeatJump = b
+	}
+	if q.Has("restoreBpmOnUnsync") {
+		b, ok := parseBoolParam(q.Get("restoreBpmOnUnsync"))
+		if !ok {
+			s.uiMu.Unlock()
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+		v.RestoreBpmOnUnsync = b
 	}
 	if len(v.MixstreamFx) != len(uiMixstreamFxDefaults) {
 		v.MixstreamFx = slices.Clone(uiMixstreamFxDefaults)
