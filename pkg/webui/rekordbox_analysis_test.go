@@ -428,6 +428,55 @@ func rbxTestBlobs(t *testing.T, b []byte) [5][]byte {
 	return blobs
 }
 
+// Real decks, 2026-11-19: of one playlist the M4As loaded with grid, cues and overview, and
+// the MP3 beside them (Osmosis, 183 KB of cover art before its first frame) with Engine's
+// own grid and no overview. The list's prefetch gives a file's header 350 ms and had not
+// reached it; the load then started its analysis and answered Engine at once, and Engine
+// read the row before the analysis was written. The hook fills a row when Engine reads it.
+func TestRekordboxLoadAnswersAfterItsAnalysisIsWritten(t *testing.T) {
+	paths := map[uint32]string{1: "/Users/dj/Music/x.flac", 2: "/Users/dj/Music/y.flac"}
+	e := newRbxEnv(t, paths)
+	os.WriteFile(filepath.Join(e.share, "x.flac"), flac48k(4096), 0o644)
+	link := analysedRbxLink{fakeRbxLink{paths}}
+	dialRekordbox = func(context.Context, net.IP, byte) (rbxLink, error) { return link, nil }
+	old := rbxAnalysisDir
+	rbxAnalysisDir = t.TempDir()
+	t.Cleanup(func() { rbxAnalysisDir = old })
+	t.Cleanup(rbxAnalysisJobs.Wait) // before the fakes go
+	ids, _ := e.trackIDs(t, "Tracks")
+	rbxAnalysisJobs.Wait()
+	// The list is on the deck, and its prefetch has not left this track's analysis.
+	bin := rbxAnalysisPath(ids["First"])
+	for _, f := range []string{bin, bin + ".perf", bin + ".source"} {
+		os.Remove(f)
+	}
+	dialRekordbox = func(context.Context, net.IP, byte) (rbxLink, error) {
+		time.Sleep(150 * time.Millisecond) // rekordbox takes its time
+		return link, nil
+	}
+	tidalGet(t, e.base, "/v1/tracks/"+strconv.FormatInt(ids["First"], 10)+"/playbackinfopostpaywall", 200, nil)
+	if _, err := os.Stat(bin); err != nil {
+		t.Fatalf("Engine has the load's answer before the analysis is written: %v", err)
+	}
+	// A rekordbox that does not answer holds a load up no longer than the bound.
+	oldWait := rbxAnalysisWait
+	rbxAnalysisWait = 100 * time.Millisecond
+	t.Cleanup(func() { rbxAnalysisWait = oldWait })
+	os.WriteFile(filepath.Join(e.share, "y.flac"), flac48k(4096), 0o644)
+	calls := 0
+	dialRekordbox = func(context.Context, net.IP, byte) (rbxLink, error) {
+		if calls++; calls > 1 { // the load's own question is answered, its analysis is not
+			time.Sleep(time.Second)
+		}
+		return link, nil
+	}
+	start := time.Now()
+	tidalGet(t, e.base, "/v1/tracks/"+strconv.FormatInt(ids["Second"], 10)+"/playbackinfopostpaywall", 200, nil)
+	if took := time.Since(start); took > 700*time.Millisecond {
+		t.Fatalf("the load waited %v for an analysis that does not come", took)
+	}
+}
+
 // Engine analysed every rekordbox track it streamed (maintainer: grid, cues and both
 // waveforms came only after 30-45 s): a load leaves rekordbox's own analysis, as the
 // m.db blobs at the file's sample rate, where the native hook hands it to Engine.
