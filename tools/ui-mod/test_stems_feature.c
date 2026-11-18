@@ -1551,7 +1551,7 @@ static void test_analysis_dispatch(void) {
     snprintf(sidecar, sizeof sidecar, "%s/peer-a/track.wav.analysis", dir);
     snprintf(library, sizeof library, "%s/m.db", dir);
     assert(!mkdir(peer, 0700));
-    static const char data[] = "RBXA1" "\1\0\0\0" "t" "\1\0\0\0" "o" "\1\0\0\0" "b" "\1\0\0\0" "c" "\0\0\0\0";
+    static const char data[] = "RBXA1" "\5\0\0\0" "track" "\5\0\0\0" "waves" "\5\0\0\0" "beats" "\1\0\0\0" "c" "\0\0\0\0";
     analysis_file(board, "JP07", 4);
     analysis_file(loading, "", 0);
     analysis_file(rbx, data, sizeof data - 1);
