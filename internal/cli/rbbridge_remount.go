@@ -3,12 +3,17 @@ package cli
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"log"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -25,6 +30,11 @@ import (
 // loaded, playing or not: Engine could not save that track's play count or edits after the
 // remount ("pool is disposed"). A stick the DJ ejected (the hook's mark) is never mounted again,
 // and one ejected or pulled meanwhile publishes at its next insert.
+//
+// EngineX peers report loaded tracks through /peer/decks. Silent peers cannot report an
+// unload, so they do not block forever: publication also requires a quiet window with no
+// observed outgoing audio read. Each observed serve restarts that window, including when
+// stream-sync cannot establish which deck owns the read.
 
 var (
 	sysClassBlock = "/sys/class/block"
@@ -36,9 +46,154 @@ var (
 	removeLimit   = 15 * time.Second
 	closeLimit    = 10 * time.Second
 	remountLimit  = 60 * time.Second // a mount runs fsck and the publish
-	readyEvery    = 2 * time.Second
-	deckWait      = 5 * time.Second // how often a remount a deck blocks looks again
+	serveQuiet    = 30 * time.Second // 60 nominal 500 ms watch intervals; short reads may escape sampling
+	deckWait      = 5 * time.Second  // how often a remount a deck blocks looks again
+	// ownDecks are the tracks this player's decks have loaded, Engine's TrackNetworkPath
+	// ("net://<uuid>/<volume>/<path>"); ok is false when stream-sync does not answer.
+	ownDecks = func() ([]string, bool) { return decksAt("127.0.0.1:8080") }
+	// peerDecks asks an Engine Link peer's stream-sync the same: an EngineX deck answers.
+	peerDecks = func(ip net.IP) ([]string, bool) { return decksAt(net.JoinHostPort(ip.String(), "8080")) }
 )
+
+// decksAt reads the decks an EngineX stream-sync at addr serves the other player
+// (GET /peer/decks): each deck's Net; ok is false when it does not answer.
+func decksAt(addr string) (nets []string, ok bool) {
+	c := http.Client{Timeout: time.Second}
+	resp, err := c.Get("http://" + addr + "/peer/decks")
+	if err != nil {
+		return nil, false
+	}
+	defer resp.Body.Close()
+	var v struct {
+		Decks []struct {
+			Net string `json:"net"`
+		} `json:"decks"`
+	}
+	if resp.StatusCode != http.StatusOK || json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&v) != nil {
+		return nil, false
+	}
+	for _, d := range v.Decks {
+		nets = append(nets, d.Net)
+	}
+	return nets, true
+}
+
+// onStick reports a TrackNetworkPath ("net://<uuid>/<volume>/<path>", the volume possibly
+// "<name> (<slot>)") on a volume named as the stick at mount. A peer's own stick of the same
+// name counts too: conservatively wait until that deck releases it.
+func onStick(np, mount string) bool {
+	parts := strings.SplitN(strings.TrimPrefix(np, "net://"), "/", 3)
+	if !strings.HasPrefix(np, "net://") || len(parts) != 3 {
+		return false
+	}
+	vol := parts[1]
+	if i := strings.LastIndex(vol, " ("); i > 0 && strings.HasSuffix(vol, ")") {
+		vol = vol[:i]
+	}
+	return strings.EqualFold(vol, filepath.Base(mount))
+}
+
+// peerBlocks reports an answering EngineX peer holding a track from this stick.
+// Silent peers rely on the outgoing-serve quiet window instead of blocking forever.
+func peerBlocks(mount string) bool {
+	for _, ip := range enginePeers() {
+		nets, ok := peerDecks(ip)
+		if !ok {
+			continue
+		}
+		for _, n := range nets {
+			if onStick(n, mount) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// servedMark records the last observed outgoing read (mtime), or the start of observation.
+func servedMark(mount string) string {
+	h := fnv.New64a()
+	h.Write([]byte(mount))
+	return filepath.Join(ejectMarkDir, fmt.Sprintf("enginex-rb-served-%016x", h.Sum64()))
+}
+
+// noteServed refreshes the last-serve timestamp while Engine sends audio from mount.
+func noteServed(mount string) {
+	var nets []string
+	asked := false
+	for _, pid := range engines() {
+		fds, _ := os.ReadDir(filepath.Join(procDir, pid, "fd"))
+		for _, fd := range fds {
+			target, err := os.Readlink(filepath.Join(procDir, pid, "fd", fd.Name()))
+			if err != nil || !strings.HasPrefix(target, mount+"/") || !audioExt[strings.ToLower(filepath.Ext(target))] {
+				continue
+			}
+			if !asked {
+				nets, _ = ownDecks() // unanswered: no deck of ours is known to hold it
+				asked = true
+			}
+			rel := strings.TrimPrefix(target, mount)
+			local := false
+			for _, n := range nets {
+				local = local || strings.HasPrefix(n, "net://") && strings.HasSuffix(n, rel)
+			}
+			if !local {
+				_ = os.WriteFile(servedMark(mount), nil, 0o600)
+				return
+			}
+		}
+	}
+}
+
+// enginePeers are the devices on the local network (private or link-local IPv4) Engine is
+// connected to over TCP: its Engine Link peers. A variable for tests.
+var enginePeers = func() []net.IP {
+	inodes := map[string]bool{}
+	for _, pid := range engines() {
+		fds, _ := os.ReadDir(filepath.Join(procDir, pid, "fd"))
+		for _, fd := range fds {
+			if t, err := os.Readlink(filepath.Join(procDir, pid, "fd", fd.Name())); err == nil && strings.HasPrefix(t, "socket:[") {
+				inodes[strings.TrimSuffix(strings.TrimPrefix(t, "socket:["), "]")] = true
+			}
+		}
+	}
+	if len(inodes) == 0 {
+		return nil
+	}
+	var peers []net.IP
+	b, _ := os.ReadFile(filepath.Join(procDir, "net", "tcp"))
+	for _, line := range strings.Split(string(b), "\n")[1:] {
+		f := strings.Fields(line)
+		// sl local remote st ... inode: established, to a private IPv4 peer that is not us.
+		if len(f) < 10 || f[3] != "01" || !inodes[f[9]] {
+			continue
+		}
+		local, _, _ := strings.Cut(f[1], ":")
+		remote, _, _ := strings.Cut(f[2], ":")
+		// A deck cabled straight to this one, without DHCP, is on 169.254.0.0/16.
+		if ip := hexIPv4(remote); ip != nil && (ip.IsPrivate() || ip.IsLinkLocalUnicast()) && !ip.IsLoopback() &&
+			!ip.Equal(hexIPv4(local)) && !slices.ContainsFunc(peers, ip.Equal) {
+			peers = append(peers, ip)
+		}
+	}
+	return peers
+}
+
+// hexIPv4 reads /proc/net/tcp's little-endian hex address.
+func hexIPv4(h string) net.IP {
+	v, err := strconv.ParseUint(h, 16, 32)
+	if err != nil || len(h) != 8 {
+		return nil
+	}
+	return net.IPv4(byte(v), byte(v>>8), byte(v>>16), byte(v>>24))
+}
+
+// watchServed notes Engine sending a peer a track of mount until ctx ends.
+func watchServed(ctx context.Context, mount string) {
+	for sleepCtx(ctx, remountWait) == nil {
+		noteServed(mount)
+	}
+}
 
 // ejectMark is the hook's mark of an Eject of mount (edisksd_hook.c mark_eject).
 func ejectMark(mount string) string {
@@ -74,20 +229,18 @@ func runRemount(ctx context.Context, mount string) error {
 	if !filepath.IsAbs(mount) {
 		return fmt.Errorf("--remount must be absolute")
 	}
-	rep := newUSBLoadingReporter(usbLoadingStatusPath(), detectMediaKind(mount, ""))
+	ctx, cancel := context.WithCancel(ctx)
+	rep := newDriveReporter(mount)
+	done := make(chan struct{})
+	go func() { defer close(done); refresh(ctx, rep) }()
+	defer func() { cancel(); <-done }()
 	err := remount(ctx, mount, rep)
 	if err == nil || ctx.Err() != nil {
 		return nil
 	}
-	// The DJ inserts the stick again; the banner says so until it is mounted anew.
 	log.Printf("rb-bridge: %v", err)
-	old := mountID(mount)
-	for i := 0; i < 600 && ctx.Err() == nil && (!mounted(mount) || mountID(mount) == old); i++ {
-		rep.Ready()
-		if sleepCtx(ctx, readyEvery) != nil {
-			break
-		}
-	}
+	rep.FailPublication(err)
+
 	return err
 }
 
@@ -98,40 +251,45 @@ func remount(ctx context.Context, mount string, rep *usbLoadingReporter) error {
 	}
 	uevent := filepath.Join(sysClassBlock, filepath.Base(dev), "uevent")
 	ejected := func() bool { _, err := os.Lstat(ejectMark(mount)); return err == nil }
-	// Engine copies a track it loads from the stick; a remove meanwhile could cut that load short.
+	// If the import watcher left no history, observe a whole quiet window here.
+	quietSince := time.Now()
+	if st, err := os.Stat(servedMark(mount)); err == nil {
+		quietSince = st.ModTime()
+	}
 	waiting := false
 	for clear := 0; clear < 2; {
 		if !mounted(mount) || ejected() {
 			return nil // ejected or pulled: the next mount publishes
 		}
+		peerHeld := peerBlocks(mount)
+		// Sample after peer queries too: they may take a second per silent peer.
+		noteServed(mount)
+		if st, err := os.Stat(servedMark(mount)); err == nil && st.ModTime().After(quietSince) {
+			quietSince = st.ModTime()
+		}
 		wait := remountWait
-		switch {
-		case engineCopying():
-			clear = 0
-		case deckHolds(mount):
+		if engineCopying() || deckHolds(mount) || peerHeld || time.Since(quietSince) < serveQuiet {
 			clear, wait = 0, deckWait
 			if !waiting {
-				log.Printf("rb-bridge: a deck holds a track from %s; it opens when none does, or at the next insert", mount)
+				log.Printf("rb-bridge: %s waits for decks to release its tracks and outgoing reads to be quiet", mount)
 				waiting = true
-				rep.Ready()
 			}
-		default:
+			rep.Waiting()
+		} else {
 			clear++
 		}
 		if err = sleepCtx(ctx, wait); err != nil {
 			return nil
 		}
 	}
-	if waiting {
-		rep.Publishing()
-	}
+	rep.Publishing()
 	start := time.Now()
 	if err = os.WriteFile(uevent, []byte("remove"), 0); err != nil {
 		return fmt.Errorf("remove %s: %w", dev, err)
 	}
 	if err = pollUntil(ctx, removeLimit, func() bool { return !mounted(mount) }); err != nil {
 		// Nothing was unmounted (a busy read-write HFS+ stick): it still has its old library.
-		return fmt.Errorf("%s not unmounted by the remove; eject it and insert it again to load the library", mount)
+		return fmt.Errorf("%s not unmounted by the remove", mount)
 	}
 	// The publish renames the library: Engine's old handles must be closed first.
 	if pollUntil(ctx, closeLimit, func() bool { return !engineHolds(devno) }) != nil {
@@ -141,10 +299,10 @@ func remount(ctx context.Context, mount string, rep *usbLoadingReporter) error {
 		return nil
 	}
 	if err = os.WriteFile(uevent, []byte("add"), 0); err != nil {
-		return fmt.Errorf("add %s: %w; insert it again", dev, err)
+		return fmt.Errorf("add %s: %w", dev, err)
 	}
 	if err = pollUntil(ctx, remountLimit, func() bool { return mounted(mount) }); err != nil {
-		return fmt.Errorf("%s not mounted again; insert it again", dev)
+		return fmt.Errorf("%s not mounted again", dev)
 	}
 	log.Printf("rb-bridge: %s published by a remount in %s", mount, time.Since(start).Round(10*time.Millisecond))
 	return nil

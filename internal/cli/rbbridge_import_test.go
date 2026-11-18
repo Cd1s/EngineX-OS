@@ -96,7 +96,7 @@ func TestImportJobWaitsForTheVisibleMount(t *testing.T) {
 	}
 }
 
-func TestImportStatusReadyStaysUntilDone(t *testing.T) {
+func TestImportStatusWaitingStaysUntilDone(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "preparing")
 	rep := newUSBLoadingReporter(path, "usb")
 	rep.state = "importing"
@@ -113,13 +113,13 @@ func TestImportStatusReadyStaysUntilDone(t *testing.T) {
 	if st := read(); st.State != "importing" || st.Done != 10 || st.Total != 600 {
 		t.Fatalf("importing: %+v", st)
 	}
-	rep.Ready()
+	rep.Waiting()
 	old := time.Now().Add(-time.Minute)
 	if err := os.Chtimes(path, old, old); err != nil {
 		t.Fatal(err)
 	}
 	rep.Refresh()
-	if st, err := os.Stat(path); err != nil || time.Since(st.ModTime()) > 10*time.Second || read().State != "ready" {
+	if st, err := os.Stat(path); err != nil || time.Since(st.ModTime()) > 10*time.Second || read().State != "waiting" {
 		t.Fatalf("refresh: %v %+v", err, read())
 	}
 	rep.Done()

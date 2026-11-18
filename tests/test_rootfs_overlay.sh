@@ -388,6 +388,18 @@ printf 'echo sibling\nexit 0\n' > "$TMP/bundle/bin/enginex-migration"
 [[ $(ENGINEX_MIGRATION=$TMP/none sh "$TMP/bundle/bin/engine-ui-guard") == sibling ]] || fail 'a Gen-2 bundle guard must find the migration script beside it'
 ok 'device scripts run under /bin/sh; engine-ui-guard finds the migration script at /usr/libexec (Gen-1) or beside itself (Gen-2 bundle)'
 
+# #309: copying the full overlay must leave a stock iw and its full command set in charge.
+iw_root=$TMP/iw-stock
+mkdir -p "$iw_root/usr/sbin"
+printf '#!/bin/sh\nprintf "stock iw: %%s\\n" "$*"\n' > "$iw_root/usr/sbin/iw"
+chmod 755 "$iw_root/usr/sbin/iw"
+cp -a "$ROOT/rootfs-overlay/." "$iw_root/"
+for subcommand in link scan; do
+    result=$(PATH="$iw_root/usr/local/bin:$iw_root/usr/bin:$iw_root/usr/sbin:$iw_root/bin:$iw_root/sbin" iw dev wlan0 "$subcommand")
+    [[ $result == "stock iw: dev wlan0 $subcommand" ]] || fail 'overlay shadows stock iw'
+done
+ok 'overlay does not shadow stock iw'
+
 suite_share=$TMP/suite-share suite_dir=$TMP/suite-bin
 mkdir -p "$suite_share"
 printf '#!/bin/sh\necho image-1 "$@"\n' | gzip -c > "$suite_share/enginex-suite.gz"

@@ -1,6 +1,6 @@
 [Unit]
 Description=EngineX IRQ, networking and firmware script corrections
-After=engine.service
+After=engine.service enginex-prepare.service
 
 [Service]
 Type=oneshot

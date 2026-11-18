@@ -643,8 +643,46 @@ struct engine_build {
     uint16_t config_zoom;
     // BluetoothSignalSender::audio (Engine's own A2DP source); 0: no sender in this build.
     uint32_t bt_send;
+    // #304: TidalProvider's profile-SSO capability slot and its stock true getter.
+    uint32_t tidal_sso_slot, tidal_sso_getter;
 };
 static const struct engine_build *build;
+
+static int tidal_profile_sso(void *provider) {
+    (void)provider;
+    // The local carrier has no inMusic-linked account. Letting profile sync own
+    // it makes an empty cloud credential log it out (independently of #159).
+    // Real TIDAL retains stock SSO. Read on this UI/account path so a source
+    // switch takes effect immediately, without another polling thread.
+    FILE *f = fopen(four_deck_settings, "r");
+    if (!f) return 0;
+    char *line = NULL;
+    size_t capacity = 0;
+    int real_tidal = 0;
+    while (getline(&line, &capacity, f) >= 0)
+        if (!strncmp(line, "scope=", 6))
+            real_tidal = !strcmp(line, "scope=tidal\n") || !strcmp(line, "scope=tidal");
+    free(line);
+    fclose(f);
+    return real_tidal;
+}
+
+// A tagged vtable write restores the original read-only data protection.
+static void patch_pointer(int feature, uintptr_t *slot, uintptr_t value, size_t page) {
+    if (!hf_on(feature)) return;
+    void *start = (void *)((uintptr_t)slot & ~(uintptr_t)(page - 1));
+    if (mprotect(start, page, PROT_READ | PROT_WRITE)) _exit(127);
+    *slot = value;
+    if (mprotect(start, page, PROT_READ)) _exit(127);
+}
+
+static void install_tidal_profile_sso(uintptr_t base, size_t page) {
+    if (!build->tidal_sso_slot || !hf_on(HF_GATEWAY)) return;
+    uintptr_t *slot = (void *)(base + build->tidal_sso_slot);
+    if (*slot != base + build->tidal_sso_getter) return;
+    patch_pointer(HF_GATEWAY, slot, (uintptr_t)tidal_profile_sso, page);
+    fprintf(stderr, "engine-ui-hook: isolated local TIDAL carrier from profile SSO\n");
+}
 
 static uint32_t stems_feature_jump[2];
 static uint32_t config_jump[2];
@@ -2153,7 +2191,8 @@ static const struct engine_build engine_builds[] = {
      .sqlite_api = 0x2db6b68, .sqlite_exec = 0x1bb2f48, .sqlite_open = 0x1b8b7a0,
      .sqlite_open_v2 = 0x1bbd5c0, .sqlite_opendb = 0x1b8b060,
      .sqlite_prefix = {"", "\x3f\x23\x03\xd5\xff\x43\x02\xd1\xfd\x7b\x03\xa9\xfd\xc3\x00\x91", ""},
-     .bt_send = 0x102eb20},
+     .bt_send = 0x102eb20,
+     .tidal_sso_slot = 0x2d52870, .tidal_sso_getter = 0x713b80},
 };
 #else
 static const struct engine_edit edits_504[] = {
@@ -2308,7 +2347,7 @@ static const struct engine_build engine_builds[] = {
      0xf6303c, 0xf63124, 0xf63120, {0xdb, 0x24c, 0x24e, 0x276, 0x289},
      0x842644, 0x29bc83c, 0x258e185, 0x8429b0, 0xe51b3340,
      0x29980a4, 0x1c91f74, 0x1cba858, 0x1cba874, 0,
-     {"\xf4\x42\x6d\xe1\x02\x50\xa0\xe1", "\x04\xb0\x2d\xe5\x00\x30\xa0\xe3", "\x04\xb0\x2d\xe5\x00\xb0\x8d\xe2"}, 0x4bc, 0},
+     {"\xf4\x42\x6d\xe1\x02\x50\xa0\xe1", "\x04\xb0\x2d\xe5\x00\x30\xa0\xe3", "\x04\xb0\x2d\xe5\x00\xb0\x8d\xe2"}, 0x4bc, 0, 0, 0},
     {"5.3.0", "\xbe\x53\x7e\x90\x81\x21\xe7\x61\x64\xdd\xbb\xf9\x73\x0d\x47\x2b\xa0\xb8\xf9\xd4",
      {0xe6a090, 0xe6a0bc, 0xe6a16c, 0xe6a198, 0xe6a1c4, 0xe6a0e8, 0xe6a140, 0x170e714, 0x1710c00,
       0x1710a74, 0x170f110, 0xdde87c, 0xd265cc, 0xd265f8, 0xd26624, 0xf1afa4, 0x16b38e0, 0xf1dd20, 0xf1ede4, 0xf1ab24, 0xc77934},
@@ -2316,7 +2355,8 @@ static const struct engine_build engine_builds[] = {
      0x1537148, 0x1537234, 0x1537230, {0xe3, 0x254, 0x256, 0x2a6, 0x2b9},
      0x8a1eac, 0x2c8e808, 0x21b8b98, 0x8a2218, 0xe51b3340,
      0x2b9bee8, 0x1d7289c, 0x1d47324, 0x1d7e2bc, 0x1d46a6c,
-     {"\xf4\x42\x6d\xe1\xf8\x60\xcd\xe1", "\xf4\x42\x6d\xe1\x20\xe0\x8d\xe5", ""}, 0x52c, 0xf56034},
+     {"\xf4\x42\x6d\xe1\xf8\x60\xcd\xe1", "\xf4\x42\x6d\xe1\x20\xe0\x8d\xe5", ""}, 0x52c, 0xf56034,
+     0x2b68184, 0x573624},
     // feature_object 0x2d0eb78 is StemsPreRenderedPlayback (stored into 0x2d180c8 at 0x360d68, read by PlanckScriptRoot::hasStemsPreRenderedPlayback at 0x9d7808).
     {"5.3.0-sclive4", "\xb9\x46\xc3\xb8\xd9\x9d\x32\x99\x8c\x81\x97\xd5\xdc\x90\x5a\x6b\xdd\xaa\x5d\x2f",
      {0xe774fc, 0xe77528, 0xe775d8, 0xe77604, 0xe77630, 0xe77554, 0xe775ac, 0x17597bc, 0x179b090,
@@ -2325,7 +2365,8 @@ static const struct engine_build engine_builds[] = {
      0x159f4a8, 0x159f594, 0x159f590, {0xe3, 0x254, 0x256, 0x2a6, 0x2b9},
      0x89cd64, 0x2d0eb78, 0x222cc8d, 0x89d0d0, 0xe51b3338,
      0x2c1bea4, 0x1ddf11c, 0x1db3ba4, 0x1deab3c, 0x1db32ec,
-     {"\xf4\x42\x6d\xe1\xf8\x60\xcd\xe1", "\xf4\x42\x6d\xe1\x20\xe0\x8d\xe5", ""}, 0x52c, 0xf629b0},
+     {"\xf4\x42\x6d\xe1\xf8\x60\xcd\xe1", "\xf4\x42\x6d\xe1\x20\xe0\x8d\xe5", ""}, 0x52c, 0xf629b0,
+     0x2be7944, 0x585a1c},
 };
 #endif
 
@@ -2375,6 +2416,7 @@ static void install_rekordbox_rows(uintptr_t base, size_t page);
 #endif
 
 static void apply_engine_edits(uintptr_t base, size_t page) {
+    install_tidal_profile_sso(base, page);
     // A group is applied only if every site of it is stock or already patched.
     int ready[EDIT_GROUP_COUNT];
     for (unsigned i = 0; i < EDIT_GROUP_COUNT; i++) ready[i] = 1;

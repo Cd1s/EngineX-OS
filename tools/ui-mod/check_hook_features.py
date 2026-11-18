@@ -35,7 +35,7 @@ def check(source):
             if len(fields) != 6 or not re.fullmatch(r'HF_[A-Z_0-9]+', fields[-1]):
                 fail(table.start(), f'{table[1]} has an untagged edit')
     # Patch primitives have a mandatory tag in their C signature as well.
-    for call in re.finditer(r'\b(?:try_patch_bytes|patch_bytes|redirect_function)\(\s*([^,\n]+)', source):
+    for call in re.finditer(r'\b(?:try_patch_bytes|patch_bytes|patch_pointer|redirect_function)\(\s*([^,\n]+)', source):
         arg = call[1].strip()
         if arg not in ('int feature', 'feature') and not re.fullmatch(r'HF_[A-Z_0-9]+', arg):
             fail(call.start(), 'native patch call needs an explicit HF_* argument')
@@ -78,7 +78,7 @@ def check(source):
             depth += (clean[end] == '{') - (clean[end] == '}')
             end += 1
         body = clean[opening:end]
-        if 'mprotect(' in body and fn[1] not in ('rx_code', 'try_patch_bytes', 'apply_engine_edits', 'oa_install'):
+        if 'mprotect(' in body and fn[1] not in ('rx_code', 'try_patch_bytes', 'patch_pointer', 'apply_engine_edits', 'oa_install'):
             fail(fn.start(), f'{fn[1]} must use a tagged patch primitive')
         if fn[1] == 'oa_install' and re.search(r'mprotect\((?!stub,)', body):
             fail(fn.start(), 'OfflineAnalyzer text writes must use a tagged patch primitive')

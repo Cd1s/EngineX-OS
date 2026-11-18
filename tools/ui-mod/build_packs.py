@@ -3638,6 +3638,9 @@ SERVICES_MAIN = """
 		const service = scServices.find(v => v.id === scScope)
 		return s && service && scScope !== "tidal" ? String(s).replace(/TIDAL/gi, service.name) : s
 	}
+	// #305: every service rides Engine's TIDAL slot, so a deck's track reports the source "TIDAL" whoever it comes from. The slot holds
+	// the active scope's tracks: a deck header shows that service's own mark (the same icons as the Source list and the login dialogs).
+	function scSlotIcon(source) { return source === "TIDAL" && scScope && scScope !== "tidal" ? scIcon(scScope) : "" }
 	// Capture manual and auto-detected IANA time zones via stock Planck.timeDateController
 	// signals and persist them through stream-sync (/data/enginex/state/timezone) without
 	// interposing setenv/unsetenv in Engine. Treat UTC as an unsolicited fallback only
@@ -3809,9 +3812,9 @@ SERVICES_MAIN = """
 	function scUsbLoadingText() {
 		if (root.scUsbPrepareError) return root.scT(root.scUsbPrepareError)
 		// A first import too large for the mount goes on after it, and a remount opens it (#301);
-		// "ready" only when that remount failed.
+		// Waiting keeps the existing banner visible until publication is safe.
 		if (root.scUsbPrepareState === "publishing") return root.scT("Opening rekordbox library…")
-		if (root.scUsbPrepareState === "ready") return root.scT("rekordbox library ready: eject and insert again to load it")
+		if (root.scUsbPrepareState === "waiting") return root.scT("Waiting for other decks to finish…")
 		const base = root.scUsbPrepareState === "importing" ? root.scT("Importing rekordbox library…") :
 			root.scUsbPrepareKind === "sd" ? root.scT("Loading SD card…") : root.scT("Loading USB…")
 		if (root.scUsbPrepareTotal > 0) return base + " (" + root.scFormatCount(root.scUsbPrepareDone) + " / " + root.scFormatCount(root.scUsbPrepareTotal) + ")"
@@ -8640,6 +8643,11 @@ def edits(dev: bool):
              "    readonly property bool isStemmed: scHead && scHead.title ? scHead.stems : view.stemmed\n"),
             ("        providerName: artistSong.trackSource\n",
              "        providerName: artistSong.trackSource\n        respectHideTitleArtist: true\n"),
+            # #305: the deck header's provider mark is the active service's, not TIDAL's.
+            ("                        source: visible ? `qrc:/streaming/${artistSong.trackSource}/Icon.png` : \"\"\n",
+             "                        readonly property string scMark: typeof root !== \"undefined\" && root && root.scSlotIcon ? root.scSlotIcon(artistSong.trackSource) : \"\"\n"
+             "                        useOriginal: scMark !== \"\"\n"
+             "                        source: visible ? (scMark !== \"\" ? scMark : `qrc:/streaming/${artistSong.trackSource}/Icon.png`) : \"\"\n"),
             ("            visible: artistSong.artistVisible && !artistSong.onlyFileName && artistSong.artistTextString.length > 0\n",
              "            visible: artistSong.artistVisible && !artistSong.onlyFileName && !displayText.hideTitleArtist && artistSong.artistTextString.length > 0\n"),
             ("    TapHandler {\n        id: tapHandler\n        enabled: false\n        onTapped: {\n",
@@ -9230,6 +9238,12 @@ def edits(dev: bool):
         "\t\t} else if (row.isRenderingStems) {",
     )])
     if v53():
+        # #305: Track Info's Source line names the active service, not TIDAL (scBrand swaps the word).
+        out.setdefault(ROOT + "Items/TrackInfo.qml", []).extend([(
+            'text: trackData.streamingSource || "Local Drive"\n',
+            'text: (typeof root !== "undefined" && root && root.scBrand ? root.scBrand(trackData.streamingSource) : trackData.streamingSource) || "Local Drive"\n',
+        )])
+    if v53():
         # Stock's pulsing Stems icon in the browse status bar says a render is
         # running whatever list is open. Stock shows it on units with side
         # screens only, and that stays so for a local track's render: it is
@@ -9594,6 +9608,15 @@ def legacy_qml_fixes():
         v + "MainView/ArtistSong.qml": [
             ("				providerName: artistSong.trackSource\n",
              "				providerName: artistSong.trackSource\n				respectHideTitleArtist: true\n"),
+            # #305: the deck header's provider mark is the active service's, not TIDAL's (the icon keeps stock's 48 px footprint).
+            *([("		source: visible ? `qrc:/Skins/UIKit/Icons/Source${artistSong.trackSource}.png` : \"\"\n"
+                "		visible: artistSong.isStreamingTrack\n"
+                "		width: src.width\n",
+                "		readonly property string scMark: typeof root !== \"undefined\" && root && root.scSlotIcon ? root.scSlotIcon(artistSong.trackSource) : \"\"\n"
+                "		useOriginal: scMark !== \"\"\n"
+                "		source: visible ? (scMark !== \"\" ? scMark : `qrc:/Skins/UIKit/Icons/Source${artistSong.trackSource}.png`) : \"\"\n"
+                "		visible: artistSong.isStreamingTrack\n"
+                "		width: scMark !== \"\" ? 48 : src.width\n")] if v53() else []),
             ("			visible: !artistSong.onlyFileName && text.length > 0\n",
              "			visible: !artistSong.onlyFileName && !displayText.hideTitleArtist && text.length > 0\n"),
             # #146: PRIME GO / Mixstream have no physical Previous/Next Track keys (every other
