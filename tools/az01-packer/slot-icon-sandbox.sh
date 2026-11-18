@@ -86,7 +86,7 @@ sed "s/@BOARD@/$board/" "$REPO/tools/az01-packer/slot-icon-probe.qml" > "$R/data
 printf 'lang=en\n' > "$R/data/enginex/ui/settings.conf"
 chroot "$R" /usr/bin/dbus-daemon --system --fork --nopidfile > "$W/$board-dbus.log" 2>&1 || true
 # The gateway's answer to the lookup the pack makes for a streaming track, from inside the sandbox's own network.
-python3 -I "$REPO/tools/az01-packer/slot-icon-gateway.py" &
+python3 -I "$REPO/tools/az01-packer/slot-icon-gateway.py" > "$W/$board-gateway.log" 2>&1 &
 gateway=$!
 engine_rc=0
 timeout --kill-after=5s "${SLOT_ICON_TIMEOUT:-180}s" chroot "$R" /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/tmp/home LD_LIBRARY_PATH=/usr/lib/arm-linux-gnueabihf:/usr/lib:/usr/qt/lib \
@@ -94,6 +94,7 @@ timeout --kill-after=5s "${SLOT_ICON_TIMEOUT:-180}s" chroot "$R" /usr/bin/env -i
     QT_QPA_PLATFORM=eglfs QT_QPA_EGLFS_INTEGRATION=eglfs_kms LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe LP_NUM_THREADS=2 \
     QML_DISABLE_DISK_CACHE=1 QML_XHR_ALLOW_FILE_READ=1 MALLOC_ARENA_MAX=1 /usr/Engine/Engine -d0 > "$W/$board-engine.log" 2>&1 || engine_rc=$?
 kill "$gateway" 2>/dev/null || true
+grep -a stems "$W/$board-gateway.log" | grep -av HTTP/ | sed "s/^/$board gateway: /" | head -8
 echo "X166 ENGINE_EXIT|$engine_rc|" >> "$W/$board-engine.log"
 cp "$R"/tmp/slot-*.png "$W/" 2>/dev/null || true
 grep -aq "engine-ui-hook: Engine " "$W/$board-engine.log" || { echo "$board: the hook did not start" >&2; exit 1; }

@@ -3646,6 +3646,10 @@ SERVICES_MAIN = """
 		all[deck] = id
 		scDeckService = all
 	}
+	// The service the gateway named on an answer (the response header), read from the one header or, failing that, from the whole list.
+	function scServiceOf(x) {
+		return x.getResponseHeader("X-Enginex-Provider") || (/^x-enginex-provider:[ \\t]*(\\S+)/im.exec(x.getAllResponseHeaders() || "") || [])[1] || ""
+	}
 	function scOwnService(deck) {
 		const id = deck > 0 ? scDeckService[deck] : ""
 		return id && scServices.some(v => v.id === id) ? id : ""
@@ -4721,7 +4725,7 @@ SERVICES_MAIN = """
 			if (x.readyState !== 4) return
 			const cur = Planck.getProperty("/Engine/Deck%1/Track/TrackUri".arg(deck)) // another track may have been loaded meanwhile
 			if (!cur || !cur.translator || cur.translator.string !== uri) return
-			root.scNoteService(deck, x.getResponseHeader("X-Enginex-Provider") || "") // 404 (no stemmed copy) names the service too
+			root.scNoteService(deck, root.scServiceOf(x)) // 404 (no stemmed copy) names the service too
 			if (x.status !== 200 || Planck.getProperty("/Engine/Deck%1/PlayState".arg(deck)).translator.state) return
 			Planck.getProperty("/Client/Librarian/AddToDatabaseAndLoadToDeck%1".arg(deck)).translator.url = "file://" + encodeURI(JSON.parse(x.responseText).path)
 		}

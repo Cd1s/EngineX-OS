@@ -8205,7 +8205,7 @@ const scT = s => s;
 const scServices = [{id: 'rekordbox', name: 'rekordbox'}, {id: 'tidal', name: 'TIDAL'}, {id: 'netease', name: 'NetEase Cloud Music'},
     {id: 'spotify', name: 'Spotify'}, {id: 'deezer', name: 'Deezer'}, {id: 'soundcloud', name: 'SoundCloud'},
     {id: 'beatport', name: 'Beatport'}, {id: 'applemusic', name: 'Apple Music'}];
-const root = {scNoteService: (d, i) => scNoteService(d, i)};
+const root = {scNoteService: (d, i) => scNoteService(d, i), scServiceOf: x => scServiceOf(x)};
 """
 
     def run_node(self, script):
@@ -8255,7 +8255,7 @@ scScope = 'applemusic'; assert.equal(scBrand('TIDAL'), 'Apple Music'); scScope =
 
     @unittest.skipUnless(shutil.which("node"), "Node is required to run the root helpers")
     def test_a_loading_deck_learns_its_tracks_service_from_the_lookup_it_already_makes(self):
-        self.run_node(self.PRELUDE + self.functions("scNoteService", "scOwnService", "scSwapStemmed") + r"""
+        self.run_node(self.PRELUDE + self.functions("scNoteService", "scServiceOf", "scOwnService", "scSwapStemmed") + r"""
 String.prototype.arg = function(v) { return this.replace('%1', v) }; // QML's
 const uris = {}, playing = {}, loaded = [], requests = [];
 const Planck = {getProperty: path => {
@@ -8268,6 +8268,7 @@ class XMLHttpRequest {
     open(method, url) { this.url = url }
     send() { requests.push(this) }
     getResponseHeader(name) { return this.headers[name.toLowerCase()] ?? null }
+    getAllResponseHeaders() { return Object.entries(this.headers).map(([k, v]) => k + ': ' + v).join('\r\n') + '\r\n' }
     answer(status, headers, body) { Object.assign(this, {readyState: 4, status, headers, responseText: JSON.stringify(body || {})}); this.onreadystatechange() }
 }
 const track = id => 'streaming://TIDAL/Track/' + id;
@@ -8291,12 +8292,15 @@ next.answer(404, {'x-enginex-provider': 'beatport'}); assert.equal(scOwnService(
 playing[1] = true; r = load(1, track(11)); r.answer(200, {'x-enginex-provider': 'rekordbox'}, {path: '/data/y.flac'});
 assert.equal(scOwnService(1), 'rekordbox'); assert.equal(loaded.length, 1);
 r = load(1, track(12)); r.answer(404, {}); assert.equal(scOwnService(1), '');
+// A client whose single-header lookup finds nothing still gets the service from the whole header list.
+r = load(1, track(13)); r.getResponseHeader = () => null; r.answer(404, {'x-enginex-provider': 'netease', 'content-length': '0'}); assert.equal(scOwnService(1), 'netease');
 """)
 
     def test_the_gateway_and_the_pack_use_the_same_header(self):
         go = (REPO / "pkg/webui/stems_lists.go").read_text(encoding="utf-8")
         name = re.search(r'const providerHeader = "([^"]+)"', go).group(1)
         self.assertIn(f'x.getResponseHeader("{name}")', bp.SERVICES_MAIN)
+        self.assertIn(f"/^{name.lower()}:", bp.SERVICES_MAIN)
         self.assertIn(f"/v1/enginex/stems/local?id=", bp.SERVICES_MAIN)  # the lookup the header rides on
 
     def test_deck_headers_and_track_info_use_the_tracks_own_service(self):

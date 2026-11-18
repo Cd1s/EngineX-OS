@@ -548,6 +548,10 @@ func TestStemsLocalNamesTheTrackProvider(t *testing.T) {
 		if got := w.Header().Get(providerHeader); w.Code != 404 || got != want {
 			t.Fatalf("id %s: %d, %s = %q, want 404 and %q", id, w.Code, providerHeader, got, want)
 		}
+		// Qt's XHR on the deck hands over no response header when the body is empty (seen in the JP07 / JC11 / NH08 sandbox), so the answer keeps one.
+		if w.Body.Len() == 0 {
+			t.Fatalf("id %s: empty body", id)
+		}
 	}
 	for _, name := range []string{"deezer", "soundcloud", "beatport", "spotify", "applemusic", "netease", rekordboxScope} {
 		ask(strconv.FormatInt(s.tidal.addTrack(trackRef{track: providers.Track{ID: "x-" + name, Title: "T", Provider: name}}), 10), name)

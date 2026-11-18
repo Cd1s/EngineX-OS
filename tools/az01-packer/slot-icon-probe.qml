@@ -81,20 +81,19 @@ Item {
         checkStrip(strip.item, s.id, s.mark, s.original)
         shot(s.id, strip.holder)
     }
-    // The track on a deck loads: its URI is what Engine reports, and the pack's own lookup (scSwapStemmed, run by the Instantiator on the
-    // URI change) asks the gateway which service it is from. If this Engine will not take a made-up URI, the same request is made here.
+    // A track loads on a deck: the pack asks the gateway which service it is from (scSwapStemmed, on Engine's TrackUri change) and notes the header
+    // of the answer. This Engine has no streaming track to load, so the probe makes the same request and notes the answer the same way;
+    // scSwapStemmed itself runs in the Node test with a fake XHR.
     function load(deck, id) {
-        const uri = "streaming://TIDAL/Track/" + id
-        const p = Planck.getProperty("/Engine/Deck" + deck + "/Track/TrackUri")
-        let own = false
-        try { p.translator.string = uri; own = p.translator.string === uri } catch (e) { }
-        if (!own) {
-            const x = new XMLHttpRequest()
-            x.open("GET", "http://127.0.0.1:8080/v1/enginex/stems/local?id=" + id)
-            x.onreadystatechange = function() { if (x.readyState === 4) root.scNoteService(deck, x.getResponseHeader("X-Enginex-Provider") || "") }
-            x.send()
+        const x = new XMLHttpRequest()
+        x.open("GET", "http://127.0.0.1:8080/v1/enginex/stems/local?id=" + id)
+        x.onreadystatechange = function() {
+            if (x.readyState !== 4) return
+            const service = root.scServiceOf(x)
+            say("deck " + deck + " track " + id + ": HTTP " + x.status + ", service \"" + service + "\"; one header \"" + x.getResponseHeader("X-Enginex-Provider") + "\", lower \"" + x.getResponseHeader("x-enginex-provider") + "\", all " + JSON.stringify(x.getAllResponseHeaders()).slice(0, 90) + ", body " + x.responseText.length + " " + x.responseText.slice(0, 40))
+            root.scNoteService(deck, service)
         }
-        say("deck " + deck + " loads track " + id + " (" + (own ? "the pack's own lookup" : "the same request, made by the probe") + ")")
+        x.send()
     }
     function stepsFor() {
         const list = [[500, function() {
