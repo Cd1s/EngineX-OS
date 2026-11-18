@@ -1,5 +1,5 @@
 // Sandbox only: loaded over QmlWarnings.qml by cue-countdown-sandbox.sh (it fills in @BOARD@).
-// Loads a real 128 BPM track with hot cues on Deck 1, then reads the shared #151 countdown (root.scNextCueInfo) while the
+// Loads a real 128 BPM track with hot cues on Deck 1, then reads the #151 countdown (a count made afresh, and the capsules) while the
 // playhead, the pitch fader and the beat grid are moved through Engine's own properties and its Beat Grid Edit controller.
 import QtQuick
 import QtQuick.Window
@@ -36,7 +36,7 @@ Item {
         const t = opt("/Engine/Deck1" + sub)
         return t ? num(t.unnormalized) + "/" + num(t.value) : "absent"
     }
-    function cd() { const i = root.scNextCueInfo(1, 0); return i ? i.text + " " + i.label : "null" }
+    function cd() { const i = root.scCueCount(root.scCueTableOf(1)); return i ? i.text + " " + i.label : "null" }
     function sr() { return g("/Track/SampleRate").value }
     function len() { return g("/Track/TrackLength").unnormalized }
     function pos() { return g("/Track/TrackPosition").unnormalized }
@@ -66,7 +66,7 @@ Item {
         return capsules().map(c => c.visible ? (c.info ? c.info.text : "none") : "hidden").join(",")
     }
     function report(tag) {
-        const fresh = root.scNextCueInfo(1, 0)
+        const fresh = root.scCueCount(root.scCueTableOf(1))
         say(tag + " pos=" + num(pos() / sr()) + "s orig=" + peek("/OriginalBPM") + " fresh=" + (fresh ? fresh.text : "null") + " capsules(" + capsules().length + ")=" + shown())
     }
     function dismiss() {
@@ -116,7 +116,7 @@ Item {
     // The countdown steps where the playhead crosses a grid line (Engine's BeatNumber: a position in the bar, an integer on each
     // line), whatever the cue's own place between lines is. Rows of one scan are compared with the one before.
     function row(tag, wanted) {
-        const fresh = root.scNextCueInfo(1, 0), text = fresh ? fresh.text : "null", beat = g("/BeatNumber").unnormalized
+        const fresh = root.scCueCount(root.scCueTableOf(1)), text = fresh ? fresh.text : "null", beat = g("/BeatNumber").unnormalized
         const list = rows[tag] || (rows[tag] = [])
         const prev = list.length ? list[list.length - 1] : null
         const here = {pos: pos() / sr(), beat: beat, text: text}
@@ -224,8 +224,9 @@ Item {
         [500, function() { dump("dump p5"); probe.bnT = opt("/Engine/Deck1/BeatNumber"); probe.baT = opt("/Engine/Deck1/Track/BarsElapsed"); seekSeconds(20.5) }],
         [900, function() { dump("dump p20.5"); seekSeconds(60.0) }],
         [900, function() { dump("dump p60"); seekSeconds(5.0) }],
-        [900, function() { probe.bnCount = 0; probe.baCount = 0; probe.lags = []; probe.textSeen = ""; probe.sampled = {beats: 0, texts: 0}; sampler.running = true; tr("/Engine/Deck1/Play").state = true }],
-        [4500, function() {
+        // The settle time is the one after the step: the sampler runs for the 4.5 s that follow this one (it ran for 0.9 s).
+        [4500, function() { probe.bnCount = 0; probe.baCount = 0; probe.lags = []; probe.textSeen = ""; probe.sampled = {beats: 0, texts: 0}; sampler.running = true; tr("/Engine/Deck1/Play").state = true }],
+        [900, function() {
             sampler.running = false
             const ls = probe.lags.slice().sort((a, b) => a - b), med = ls.length ? ls[Math.floor(ls.length / 2)] : -1
             say("play 4.5s: PlayState=" + tr("/Engine/Deck1/PlayState").state + " beatNotifies=" + probe.bnCount + " barNotifies=" + probe.baCount
@@ -237,7 +238,7 @@ Item {
         [900, function() { say("paused: PlayState=" + tr("/Engine/Deck1/PlayState").state + " beat=" + peek("/BeatNumber")); seekSeconds(5.0) }]
     ]
     // A second tempo from 20.0 s on (an anchor, then Double Tempo): what Engine publishes on both sides of it.
-    readonly property var anchors: [
+    readonly property var tempoAnchors: [
         [500, function() { seekSeconds(20.0) }],
         [900, function() { dump("before-anchor"); ed.insertAnchorAtPlayPosition() }],
         [900, function() { dump("anchored"); ed.doubleTempo() }],
@@ -254,7 +255,7 @@ Item {
         }]
     ]
     readonly property var steps: setup.concat([[600, function() { dismissOverlays() }], [600, function() { shot("before-edit") }]]).concat(scan("A")).concat(play).concat(openEditor).concat(shiftGrid)
-        .concat(scan("B")).concat([[200, function() { shot("after-shift") }]]).concat(raiseBpm).concat(scan("C")).concat(pitch).concat(anchors).concat(finish)
+        .concat(scan("B")).concat([[200, function() { shot("after-shift") }]]).concat(raiseBpm).concat(scan("C")).concat(pitch).concat(tempoAnchors).concat(finish)
     Timer {
         interval: 250
         running: true
