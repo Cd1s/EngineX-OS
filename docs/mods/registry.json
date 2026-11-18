@@ -442,6 +442,46 @@
         "arm64"
       ],
       "requiresPython": false
+    },
+    {
+      "id": "settings-polish",
+      "version": "1.0.0",
+      "category": "ui",
+      "issueNumber": 219,
+      "author": "JaviLabarumDJ",
+      "tags": [
+        "Settings",
+        "Layout",
+        "QML",
+        "Style"
+      ],
+      "name": {
+        "s": "设置界面美化",
+        "t": "設定介面美化",
+        "e": "Settings Polish"
+      },
+      "summary": {
+        "s": "更清爽的设置与布局页面：分段式选项、对齐的标题、圆角按钮。",
+        "t": "更清爽的設定與版面頁面：分段式選項、對齊的標題、圓角按鈕。",
+        "e": "Cleaner Settings and Layout screens: segmented options, aligned headlines, rounded buttons."
+      },
+      "description": {
+        "s": "纯 QML 社区 Mod：列表选项变为分段式控件（选中项以当前主题色描边），分区标题与各行对齐，入口按钮改为圆角。仅改变外观，选择与数值行为与 EngineX OS 完全一致；停用或卸载后还原原厂文件。为 EngineX OS 5.3.0.4 制作。",
+        "t": "純 QML 社群 Mod：清單選項變為分段式控制項（選中項以目前主題色描邊），分區標題與各列對齊，入口按鈕改為圓角。僅改變外觀，選擇與數值行為與 EngineX OS 完全一致；停用或解除安裝後還原原廠檔案。為 EngineX OS 5.3.0.4 製作。",
+        "e": "Declarative-QML community Mod: list options become a segmented control (the chosen one outlined in the active colour), section headlines line up with the rows and entry buttons are rounded. Visual only: selection and values behave exactly as in EngineX OS, and the stock files come back when it is disabled or removed. Built for EngineX OS 5.3.0.4."
+      },
+      "initialComments": [],
+      "official": false,
+      "downloadUrl": "mods/packages/settings-polish-1.0.0.tar.gz",
+      "sha256": "d256e4889e7cfe00bde59cf093144b4764157f00063480e0a24fd7bb72d7874b",
+      "size": 2631,
+      "models": "All 16 Models",
+      "hardwareValidation": "not-tested",
+      "stars": 0,
+      "downloads": 0,
+      "license": "MIT",
+      "sourceUrl": "https://github.com/Cd1s/EngineX-OS/tree/main/docs/mods/src/settings-polish",
+      "runtimeStatus": "declarative-qml"
     }
   ]
 }
