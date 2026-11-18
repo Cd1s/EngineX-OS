@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <pthread.h>
 #include <sqlite3.h>
 #include <string.h>
 #include "rekordbox_analysis.h"
@@ -27,6 +28,17 @@ static void check_edits(sqlite3 *db, const char *want) {
     assert(sqlite3_prepare_v2(db, "SELECT hex(beatData)||'/'||hex(quickCues) FROM PerformanceData", -1, &st, NULL) == SQLITE_OK);
     assert(sqlite3_step(st) == SQLITE_ROW && !strcmp((const char *)sqlite3_column_text(st, 0), want));
     sqlite3_finalize(st);
+}
+
+static void *map_thread(void *arg) {
+    long long base = *(long long *)arg;
+    for (int i = 0; i < 16; ++i) sc_rbx_remember_track(base + i, base + i + 1000, NULL);
+    for (int pass = 0; pass < 1000; ++pass)
+        for (int i = 0; i < 16; ++i) {
+            long long id = 0;
+            assert(sc_rbx_lookup_track(base + i, &id, NULL) && id == base + i + 1000);
+        }
+    return NULL;
 }
 
 // A library with track 16449 (uri, label) and its empty analysis row. With attach, Engine's own
@@ -245,13 +257,23 @@ int main(void) {
     snprintf(rowmap, sizeof rowmap, "%s/rowmap", dir);
     assert(!access(rowmap, R_OK));
     f = fopen(rowmap, "a");
-    assert(f && fputs("malformed rowmap\n1 nope\n", f) >= 0 && !fclose(f));
+    assert(f && fputs("malformed rowmap\n1 nope\n2 3 0123456789abcdef0123456789abcdef012345678\n", f) >= 0 && !fclose(f));
+    pthread_mutex_lock(&sc_rbx_track_map_mu);
     memset(sc_rbx_track_maps, 0, sizeof sc_rbx_track_maps);
-    sc_rbx_track_map_next = 0;
+    sc_rbx_track_map_next = sc_rbx_track_map_clock = 0;
     sc_rbx_track_map_loaded = 0;
+    pthread_mutex_unlock(&sc_rbx_track_map_mu);
     sc_rbx_load_track_map();
     long long mapped = 0;
     assert(sc_rbx_lookup_track(16449, &mapped, NULL) && mapped == 855);
+    assert(!sc_rbx_lookup_track(2, &mapped, NULL));
+    pthread_t workers[8];
+    long long bases[8];
+    for (int i = 0; i < 8; ++i) {
+        bases[i] = 600000 + i * 100;
+        assert(!pthread_create(&workers[i], NULL, map_thread, &bases[i]));
+    }
+    for (int i = 0; i < 8; ++i) assert(!pthread_join(workers[i], NULL));
     // Engine may rewrite the Track presentation fields after the first load. A later
     // source generation must still refresh the row through the remembered mapping.
     sqlite3 *reload = library_row(internal, "streaming://TIDAL/Track/855", "rekordbox [126 BPM 6A]", 1);
@@ -266,6 +288,23 @@ int main(void) {
     assert(result && !strcmp(result, "refreshed"));
     check_edits(reload, "66/77");
     sqlite3_close(reload);
+    pthread_mutex_lock(&sc_rbx_track_map_mu);
+    memset(sc_rbx_track_maps, 0, sizeof sc_rbx_track_maps);
+    sc_rbx_track_map_next = sc_rbx_track_map_clock = 0;
+    sc_rbx_track_map_loaded = 1;
+    pthread_mutex_unlock(&sc_rbx_track_map_mu);
+    for (unsigned i = 0; i < SC_RBX_TRACK_MAP_CAP; ++i) sc_rbx_remember_track(700000 + i, 800000 + i, NULL);
+    sc_rbx_remember_track(900000, 900001, NULL);
+    assert(!sc_rbx_lookup_track(700000, &mapped, NULL));
+    assert(sc_rbx_lookup_track(900000, &mapped, NULL) && mapped == 900001);
+    pthread_mutex_lock(&sc_rbx_track_map_mu);
+    memset(sc_rbx_track_maps, 0, sizeof sc_rbx_track_maps);
+    sc_rbx_track_map_next = sc_rbx_track_map_clock = 0;
+    sc_rbx_track_map_loaded = 0;
+    pthread_mutex_unlock(&sc_rbx_track_map_mu);
+    sc_rbx_load_track_map();
+    assert(!sc_rbx_lookup_track(700000, &mapped, NULL));
+    assert(sc_rbx_lookup_track(900000, &mapped, NULL) && mapped == 900001);
     snprintf(path, sizeof path, "%s/855-16449-beatData", history);
     assert(!unlink(path));
     snprintf(path, sizeof path, "%s/855-16449-quickCues", history);
