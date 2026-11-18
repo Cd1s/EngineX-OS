@@ -51,7 +51,9 @@ static long long sc_rbx_uri_id(const char *uri) {
 // stream-sync writes: "RBXA1", then trackData, overviewWaveFormData, beatData, quickCues
 // and loops, each a little-endian uint32 length and its bytes, then the
 // encoder's analysed flag (omitted by older builds). NULL if b is not one.
-static char *sc_rbx_analysis_sql(const unsigned char *b, size_t n, long long track) {
+// again: the row holds an older fill (see sc_rbx_fill); all of it is replaced and the
+// import mark that fill wrote goes.
+static char *sc_rbx_analysis_sql(const unsigned char *b, size_t n, long long track, int again) {
     static const char *const columns[] = {"trackData", "overviewWaveFormData", "beatData", "quickCues", "loops"};
     size_t at = 5, len[5], start[5], total = 256;
     if (n < 5 || memcmp(b, "RBXA1", 5)) return NULL;
@@ -80,7 +82,8 @@ static char *sc_rbx_analysis_sql(const unsigned char *b, size_t n, long long tra
     // loops by its own rekordbox correction when it loads the audio (an MP3 by 2292
     // samples), and ours is in the data already. Leave the user's beat-grid lock as
     // Engine created it.
-    sprintf(p, " WHERE trackId = %lld AND trackData IS NULL; UPDATE Track SET isAnalyzed = %d WHERE id = %lld AND changes() > 0", track, analysed, track);
+    sprintf(p, "%s WHERE trackId = %lld%s; UPDATE Track SET isAnalyzed = %d WHERE id = %lld AND changes() > 0",
+            again ? ", thirdPartySourceId = NULL" : "", track, again ? "" : " AND trackData IS NULL", analysed, track);
     return sql;
 }
 
@@ -154,6 +157,7 @@ struct sc_rbx_row {
     char uri[256];
     char download[41];
     int ours, imported, streaming;
+    int marked; // carries the import mark
 };
 
 // Engine can rewrite the Track presentation fields after the first streamed load.
@@ -322,6 +326,7 @@ static int sc_rbx_row(void *arg, int n, char **value, char **name) {
     // SQLite's NULL mark is represented as -1 only for a row whose identity still
     // matches our gateway; it is eligible for history-guarded refresh, not first fill.
     row->imported = n >= 4 && value[3] && (!strcmp(value[3], "1") || !strcmp(value[3], "-1"));
+    row->marked = row->imported && value[3][0] == '1';
     // A streaming row is safe to identify by its URI; the rekordbox analysis path
     // additionally requires the label prefix below.
     // The download's key names the file whatever Engine has made of the uri since.
@@ -582,16 +587,27 @@ static const char *sc_rbx_fill_track(const struct sc_rbx_sqlite *q, void *db, lo
     unsigned char *b = *id ? sc_rbx_read(path, &size) : NULL;
     if (!b) return "no analysis yet";
     const char *result;
-    if (row.imported) {
+    // A fill of before the import mark was dropped (2026-11-19). While the row still has
+    // the mark, Engine has not loaded it and would shift it at its next load: all of it is
+    // ours. Without the mark Engine has loaded it, and an MP3's grid, cues and loops were
+    // shifted and saved then, which looks like an edit on the deck. The row does not say
+    // its format until the download is over (path .temp, no fileType), so any row whose
+    // fill left no record of the new kind is filled again once.
+    char filled[192], imported[192];
+    sc_rbx_edit_path(filled, sizeof filled, *id, track, "unmarked");
+    sc_rbx_edit_path(imported, sizeof imported, *id, track, "beatData");
+    int again = row.ours && row.imported && (row.marked || (access(filled, F_OK) && !access(imported, F_OK)));
+    if (row.imported && !again) {
         result = sc_rbx_refresh_edits(q, db, path, track, *id, b, size, 0);
     } else {
-        char *update = sc_rbx_analysis_sql(b, size, track);
+        char *update = sc_rbx_analysis_sql(b, size, track, again);
         result = "unreadable";
         if (update) {
             int error = q->exec(db, update, NULL, NULL, NULL);
-            result = error ? "update failed" : "filled";
+            result = error ? "update failed" : again ? "filled again" : "filled";
             if (!error) {
                 sc_rbx_refresh_edits(q, db, path, track, *id, b, size, 1);
+                sc_rbx_save_edit(filled, (struct sc_rbx_blob){(const unsigned char *)"1", 1});
                 if (row.download[0]) sc_rbx_link_replay(row.download, path);
             }
         }
