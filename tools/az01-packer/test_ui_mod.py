@@ -10321,17 +10321,22 @@ class RestoreBpmOnUnsyncTest(unittest.TestCase):
 
     def _script(self, cases):
         src = bp.SMART_SYNC_MAIN
-        neutral, _ = self._block(src, "function scSpeedNeutral(")
-        restore, _ = self._block(src, "function scUnsyncRestoreBpm(")
-        _, fire_body = self._block(src, "id: scBpmRestoreTimer", src.index("id: scBpmRestoreTimer") + src[src.index("id: scBpmRestoreTimer"):].index("onTriggered:"))
+        # Every helper the pack defines for the restore (names differ between revisions, so the
+        # same cases also run against the old code and fail on behaviour, not on extraction).
+        helpers = [self._block(src, h)[0] for h in ("function scSpeedNeutral(", "function scUnsyncRestoreBpm(") if h in src]
+        fire_body = ""  # the old revision's delayed second write, if any
+        if "id: scBpmRestoreTimer" in src:
+            _, fire_body = self._block(src, "id: scBpmRestoreTimer", src.index("id: scBpmRestoreTimer") + src[src.index("id: scBpmRestoreTimer"):].index("onTriggered:"))
         return r"""
 const assert = require('node:assert/strict');
-var scRestoreBpmOnUnsync = true, scShadowEngineMask = 0, scBpmRestorePending = {}, armed = 0, writes = [];
+var scRestoreBpmOnUnsync = true, scShadowEngineMask = 0, scFourDeckRole = '', scBpmRestorePending = {}, armed = 0, writes = [];
 const decks = {};
-function deck(d, o) { decks[d] = Object.assign({loaded: true, sync: 'Off', master: false, speed: 0.5, range: '8'}, o); }
+// speed: Engine's effective rate (rewritten by Sync); fader: the physical control (the translator's softValue).
+function deck(d, o) { decks[d] = Object.assign({loaded: true, sync: 'Off', master: false, speed: 0.5, fader: 0.5, range: '8'}, o); }
 const root = {
   get scBpmRestorePending() { return scBpmRestorePending; }, set scBpmRestorePending(v) { scBpmRestorePending = v; },
   get scRestoreBpmOnUnsync() { return scRestoreBpmOnUnsync; },
+  get scShadowEngineMask() { return scShadowEngineMask; }, get scFourDeckRole() { return scFourDeckRole; },
   scTr(path) {
     const m = /Deck(\d)\/(.*)$/.exec(path), s = decks[m[1]], k = m[2];
     if (!s) return null;
@@ -10339,11 +10344,11 @@ const root = {
     if (k === 'SyncMode') return {get string() { return s.sync; }};
     if (k === 'DeckIsMaster') return {get state() { return s.master; }};
     if (k === 'SpeedRange') return {get string() { return s.range; }};
-    if (k === 'Speed') return {get value() { return s.speed; }, set value(v) { s.speed = v; writes.push(m[1] + ':' + v); }};
+    if (k === 'Speed') return {get value() { return s.speed; }, set value(v) { s.speed = v; writes.push(m[1] + ':' + v); }, get softValue() { return s.fader; }};
   },
 };
 const scBpmRestoreTimer = {restart() { armed++; }};
-""" + neutral + "\n" + restore + "\nfunction fire() {" + fire_body + "}\n" + cases
+""" + "\n".join(helpers) + "\nfunction fire() {" + fire_body + "}\n" + cases
 
     def run_node(self, cases):
         out = subprocess.run(["node", "-e", self._script(cases)], capture_output=True, text=True)
@@ -10353,46 +10358,53 @@ const scBpmRestoreTimer = {restart() { armed++; }};
     def test_off_writes_nothing_and_every_stock_case_is_left_alone(self):
         self.run_node(r"""
 const none = (label) => { assert.deepEqual(writes, [], label); assert.equal(armed, 0, label); };
-// Off (the default): the same neutral, unsynced, unmastered, loaded deck is never touched.
-scRestoreBpmOnUnsync = false; deck(1, {}); scUnsyncRestoreBpm(1); fire(); none('off');
+// Off (the default): the same synced-away, unsynced, unmastered, loaded deck with a centred fader is never touched.
+scRestoreBpmOnUnsync = false; deck(1, {speed: 0.7016}); scUnsyncRestoreBpm(1); fire(); none('off');
 scRestoreBpmOnUnsync = true;
-deck(1, {speed: 0.55}); scUnsyncRestoreBpm(1); none('control moved 0.8 %');          // the DJ moved it: stock
-deck(1, {master: true}); scUnsyncRestoreBpm(1); none('master deck');                   // decks synced to it would follow
-deck(1, {loaded: false}); scUnsyncRestoreBpm(1); none('no track loaded');              // eject / load
-deck(1, {sync: 'TempoSync'}); scUnsyncRestoreBpm(1); none('still synced');
-scShadowEngineMask = 1 << 1; deck(1, {}); scUnsyncRestoreBpm(1); none('shadow deck');
-scShadowEngineMask = 0; deck(1, {range: '100', speed: 0.5006}); scUnsyncRestoreBpm(1); none('0.12 % of a 100 % range');
+deck(1, {speed: 0.7016, fader: 0.55}); scUnsyncRestoreBpm(1); none('fader moved 0.8 %');      // the DJ moved it: stock
+deck(1, {speed: 0.7016, fader: 0.505}); scUnsyncRestoreBpm(1); none('fader moved +0.08 % on 8 %'); // review #289 P2.2
+deck(1, {range: '100', speed: 0.7016, fader: 0.5004}); scUnsyncRestoreBpm(1); none('fader moved +0.08 % on 100 %');
+deck(1, {speed: 0.7016, master: true}); scUnsyncRestoreBpm(1); none('master deck');          // decks synced to it would follow
+deck(1, {speed: 0.7016, loaded: false}); scUnsyncRestoreBpm(1); none('no track loaded');     // eject / load
+deck(1, {speed: 0.7016, sync: 'TempoSync'}); scUnsyncRestoreBpm(1); none('still synced');
 assert.equal(scBpmRestorePending[1], undefined);
 """)
 
     @unittest.skipUnless(shutil.which("node"), "Node is required for the restore logic")
-    def test_neutral_control_returns_to_zero_percent(self):
+    def test_centred_fader_restores_the_rate_engine_rewrote_on_sync(self):
+        # Review #289 P1, measured natively on JP07: Sync from 124 to 128 BPM rewrote Speed to 0.7016 with no
+        # fader move. The physical fader (softValue) is still centred, so Sync Off returns to 0 %.
         self.run_node(r"""
-// 0.0048 % off centre: one write of exactly 0 %.
-deck(2, {speed: 0.5003}); scUnsyncRestoreBpm(2);
+deck(2, {speed: 0.7016128897666931}); scUnsyncRestoreBpm(2);
 assert.deepEqual(writes, ['2:0.5']); assert.equal(armed, 0);
-// 0.08 % of a 100 % range is still neutral.
-writes.length = 0; deck(2, {range: '100', speed: 0.5004}); scUnsyncRestoreBpm(2);
+writes.length = 0; deck(2, {range: '100', speed: 0.5203}); scUnsyncRestoreBpm(2);
 assert.deepEqual(writes, ['2:0.5']);
-// Exactly 0 %: Engine ignores a write of the same value, so move the control and put it back.
-writes.length = 0; deck(2, {speed: 0.5}); scUnsyncRestoreBpm(2);
-assert.deepEqual(writes, ['2:0.502']); assert.equal(armed, 1); assert.equal(scBpmRestorePending[2], true);
-fire();
-assert.deepEqual(writes, ['2:0.502', '2:0.5']); assert.deepEqual(scBpmRestorePending, {});
-assert.equal(decks[2].speed, 0.5);
 """)
 
     @unittest.skipUnless(shutil.which("node"), "Node is required for the restore logic")
-    def test_the_put_back_only_happens_if_nothing_changed_in_the_40_ms(self):
+    def test_ownership_not_the_routing_mask_decides_in_four_deck_player_mode(self):
+        # Review #289 P2.1: the mixed fixture (local role 13, engine peer 2, display-only peer 4) leaves
+        # scShadowEngineMask = 14. Local decks 1 and 3 restore; the peer's deck 2 is never written.
         self.run_node(r"""
-const arm = () => { writes.length = 0; deck(2, {speed: 0.5}); scUnsyncRestoreBpm(2); assert.deepEqual(writes, ['2:0.502']); };
-arm(); decks[2].speed = 0.53; writes.length = 0; fire(); assert.deepEqual(writes, [], 'the DJ moved the control');
-arm(); decks[2].sync = 'BeatOrBarSync'; writes.length = 0; fire(); assert.deepEqual(writes, [], 'Sync came back');
-arm(); decks[2].loaded = false; writes.length = 0; fire(); assert.deepEqual(writes, [], 'track ejected');
-arm(); scRestoreBpmOnUnsync = false; writes.length = 0; fire(); assert.deepEqual(writes, [], 'setting turned off');
-scRestoreBpmOnUnsync = true; arm(); fire(); assert.deepEqual(writes.slice(-1), ['2:0.5']);
-fire(); assert.deepEqual(writes.slice(-1), ['2:0.5'], 'a second fire has nothing pending'); assert.equal(writes.length, 2);
+scFourDeckRole = '13'; scShadowEngineMask = 14;
+for (const d of [1, 2, 3, 4]) deck(d, {speed: 0.7016});
+for (const d of [1, 2, 3, 4]) scUnsyncRestoreBpm(d);
+assert.deepEqual(writes, ['1:0.5', '3:0.5']);
 """)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required for the restore logic")
+    def test_one_immediate_write_never_a_delayed_one(self):
+        # Review #289 P2.3 / P2.4: Speed is the effective rate, so an exact 0.5 already plays the track's own
+        # BPM and needs no nudge. Nothing is written later, so a deck promoted to MASTER or synced again
+        # meanwhile is never touched and no 0.502 is left behind.
+        self.run_node(r"""
+deck(2, {speed: 0.5}); scUnsyncRestoreBpm(2); fire();
+assert.deepEqual(writes, []); assert.equal(armed, 0);
+deck(2, {speed: 0.7016}); scUnsyncRestoreBpm(2); decks[2].master = true; decks[2].sync = 'TempoSync'; fire();
+assert.deepEqual(writes, ['2:0.5']); assert.equal(armed, 0);
+""")
+        self.assertNotIn("scBpmRestoreTimer", bp.SMART_SYNC_MAIN)
+        self.assertNotIn("0.502", bp.SMART_SYNC_MAIN)
 
     def test_smart_sync_keeps_its_range_restore_and_calls_the_new_logic_after_it(self):
         src = bp.SMART_SYNC_MAIN

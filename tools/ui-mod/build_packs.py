@@ -5723,43 +5723,22 @@ SMART_SYNC_MAIN = """
 		}
 		return minNeed
 	}
-	// #289 (opt-in, default off): Sync turned off while the tempo control is still at
+	// #289 (opt-in, default off): Sync turned off while the tempo fader is still at
 	// 0 % returns the deck to the track's original BPM; stock keeps the synced rate
-	// after UnSync until the fader moves. Not for the MASTER deck (decks synced to
-	// it would follow the change), not for shadow decks, not when the DJ moved the
-	// control. Runs in the GUI engine from the SyncMode change: no controller latch.
-	property var scBpmRestorePending: ({})
-	function scSpeedNeutral(value, rangePct) {
-		return rangePct > 0 && Math.abs(value - 0.5) * 2 * rangePct <= 0.1
-	}
+	// after UnSync until the fader moves. Engine rewrites the effective Speed when Sync
+	// engages, so the physical fader is the Speed translator's softValue (what the
+	// control surface reports, stock ValueOutput's soft-takeover path). Only an exactly
+	// centred fader counts. Not for the MASTER deck (decks synced to it would follow
+	// the change), not for a slot this unit does not own (four-deck player mode), not
+	// with no track loaded. One write, nothing delayed.
+	// Runs in the GUI engine from the SyncMode change: no controller latch.
 	function scUnsyncRestoreBpm(d) {
-		if (!scRestoreBpmOnUnsync || ((scShadowEngineMask >> d) & 1) !== 0) return
+		if (!scRestoreBpmOnUnsync || (scFourDeckRole !== "" && scFourDeckRole.indexOf(String(d)) < 0)) return
 		const pLoaded = root.scTr("/Engine/Deck" + d + "/Track/SongLoaded"), pSync = root.scTr("/Engine/Deck" + d + "/SyncMode")
-		const pMaster = root.scTr("/Engine/Deck" + d + "/DeckIsMaster"), pSpeed = root.scTr("/Engine/Deck" + d + "/Speed"), pRange = root.scTr("/Engine/Deck" + d + "/SpeedRange")
-		if (!pLoaded || !pSync || !pMaster || !pSpeed || !pRange || !pLoaded.state || pSync.string !== "Off" || pMaster.state) return
-		if (!scSpeedNeutral(pSpeed.value, parseFloat(pRange.string))) return
-		if (Math.abs(pSpeed.value - 0.5) > 1e-9) { pSpeed.value = 0.5; return }
-		// Exactly 0 % already: writing the same value changes nothing in Engine, so move
-		// the control by 0.2 % of its range and put it back 40 ms later.
-		pSpeed.value = 0.502
-		const pend = scBpmRestorePending
-		pend[d] = true
-		scBpmRestorePending = pend
-		scBpmRestoreTimer.restart()
-	}
-	Timer {
-		id: scBpmRestoreTimer
-		interval: 40
-		onTriggered: {
-			const pend = root.scBpmRestorePending
-			root.scBpmRestorePending = ({})
-			for (const k in pend) {
-				const d = parseInt(k)
-				const pLoaded = root.scTr("/Engine/Deck" + d + "/Track/SongLoaded"), pSync = root.scTr("/Engine/Deck" + d + "/SyncMode"), pSpeed = root.scTr("/Engine/Deck" + d + "/Speed")
-				// Only if nothing happened meanwhile: still loaded, Sync still off, the control still where we put it.
-				if (root.scRestoreBpmOnUnsync && pLoaded && pSync && pSpeed && pLoaded.state && pSync.string === "Off" && Math.abs(pSpeed.value - 0.502) < 1e-5) pSpeed.value = 0.5
-			}
-		}
+		const pMaster = root.scTr("/Engine/Deck" + d + "/DeckIsMaster"), pSpeed = root.scTr("/Engine/Deck" + d + "/Speed")
+		if (!pLoaded || !pSync || !pMaster || !pSpeed || !pLoaded.state || pSync.string !== "Off" || pMaster.state) return
+		// Speed is the effective rate, so at exactly 0.5 the deck already plays its own BPM.
+		if (pSpeed.softValue === 0.5 && pSpeed.value !== 0.5) pSpeed.value = 0.5
 	}
 	Instantiator {
 		model: root.scDeckList()
