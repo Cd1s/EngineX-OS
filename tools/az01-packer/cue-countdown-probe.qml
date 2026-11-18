@@ -172,7 +172,7 @@ Item {
     readonly property var shiftGrid: [
         [300, function() { ed.setShiftingGridRight(true) }],
         [1300, function() { ed.setShiftingGridRight(false) }],
-        [900, function() { say("grid shifted: beat at the playhead " + peek("/BeatNumber")); seekSeconds(5.0) }]
+        [900, function() { dump("grid shifted"); seekSeconds(5.0) }]
     ]
     readonly property var raiseBpm: [
         [300, function() { ed.halveTempo() }],
@@ -187,6 +187,65 @@ Item {
             tr("/Engine/Deck1/Speed").value = 0.5
         }]
     ]
+    // Engine's beat data, as the sandbox's Engine publishes it (read-only dump), and how often it notifies while the deck plays.
+    property int bnCount: 0
+    property int baCount: 0
+    property var bnT: null
+    property var baT: null
+    Connections { target: probe.bnT; function onUnnormalizedChanged() { probe.bnCount++ } }
+    Connections { target: probe.baT; function onStringChanged() { probe.baCount++ } }
+    function dump(tag) {
+        const names = ["/BeatNumber", "/Track/BarsElapsed", "/Track/BarsRemaining", "/Track/ElapsedTime", "/Track/FirstDownbeatSamplePosition",
+            "/Track/FirstAnchorTempo", "/Track/TrackHasAnchors", "/Track/HasAnchoredBeatGrid", "/OriginalBPM", "/CurrentBPM", "/Track/MetaDataBPM"]
+        let out = tag + " pos=" + num(pos() / sr()) + "s"
+        for (const n of names) {
+            const t = opt("/Engine/Deck1" + n)
+            out += " " + n.replace("/Track/", "T/") + "=" + (t ? (num(t.unnormalized) + "/" + num(t.value) + "/" + String(t.string).slice(0, 10) + "/" + t.state) : "absent")
+        }
+        say(out)
+    }
+    property var beatSeen: ({t: 0, n: -1})
+    property var textSeen: ""
+    property var lags: []
+    property var sampled: ({beats: 0, texts: 0})
+    Timer {
+        id: sampler
+        interval: 15; repeat: true; running: false
+        onTriggered: {
+            const now = Date.now(), n = Math.floor(g("/BeatNumber").unnormalized), text = shown().split(",")[0]
+            if (n !== probe.beatSeen.n) { probe.beatSeen = {t: now, n: n, bar: 0}; probe.sampled.beats++ }
+            if (text !== probe.textSeen) {
+                if (probe.textSeen !== "") { probe.lags.push(now - probe.beatSeen.t); probe.sampled.texts++ }
+                probe.textSeen = text
+            }
+        }
+    }
+    readonly property var play: [
+        [500, function() { dump("dump p5"); probe.bnT = opt("/Engine/Deck1/BeatNumber"); probe.baT = opt("/Engine/Deck1/Track/BarsElapsed"); seekSeconds(20.5) }],
+        [900, function() { dump("dump p20.5"); seekSeconds(60.0) }],
+        [900, function() { dump("dump p60"); seekSeconds(5.0) }],
+        [900, function() { probe.bnCount = 0; probe.baCount = 0; probe.lags = []; probe.textSeen = ""; probe.sampled = {beats: 0, texts: 0}; sampler.running = true; tr("/Engine/Deck1/Play").state = true }],
+        [4500, function() {
+            sampler.running = false
+            const ls = probe.lags.slice().sort((a, b) => a - b), med = ls.length ? ls[Math.floor(ls.length / 2)] : -1
+            say("play 4.5s: PlayState=" + tr("/Engine/Deck1/PlayState").state + " beatNotifies=" + probe.bnCount + " barNotifies=" + probe.baCount
+                + " beatSteps=" + probe.sampled.beats + " textSteps=" + probe.sampled.texts + " lag(ms) median=" + med + " max=" + (ls.length ? ls[ls.length - 1] : -1) + " all=" + ls.join(","))
+            expect(probe.sampled.texts >= 5, "the capsule stepped " + probe.sampled.texts + " times in 4.5 s of playback (about 9 beats at 128 BPM)")
+            expect(med >= 0 && med < 120, "the capsule steps on Engine's beat: median lag " + med + " ms")
+            tr("/Engine/Deck1/Play").state = false
+        }],
+        [900, function() { say("paused: PlayState=" + tr("/Engine/Deck1/PlayState").state + " beat=" + peek("/BeatNumber")); seekSeconds(5.0) }]
+    ]
+    // A second tempo from 20.0 s on (an anchor, then Double Tempo): what Engine publishes on both sides of it.
+    readonly property var anchors: [
+        [500, function() { seekSeconds(20.0) }],
+        [900, function() { dump("before-anchor"); ed.insertAnchorAtPlayPosition() }],
+        [900, function() { dump("anchored"); ed.doubleTempo() }],
+        [1500, function() { dump("doubled@20.0"); seekSeconds(10.0) }],
+        [900, function() { dump("seg1@10"); seekSeconds(30.0) }],
+        [900, function() { dump("seg2@30"); seekSeconds(5.0) }],
+        [900, function() { dump("seg1@5") }]
+    ]
     readonly property var finish: [
         [500, function() {
             say("failures " + failures)
@@ -194,8 +253,8 @@ Item {
             Planck.getProperty("/Client/Quit").translator.state = true
         }]
     ]
-    readonly property var steps: setup.concat([[600, function() { dismissOverlays() }], [600, function() { shot("before-edit") }]]).concat(scan("A")).concat(openEditor).concat(shiftGrid)
-        .concat(scan("B")).concat([[200, function() { shot("after-shift") }]]).concat(raiseBpm).concat(scan("C")).concat(pitch).concat(finish)
+    readonly property var steps: setup.concat([[600, function() { dismissOverlays() }], [600, function() { shot("before-edit") }]]).concat(scan("A")).concat(play).concat(openEditor).concat(shiftGrid)
+        .concat(scan("B")).concat([[200, function() { shot("after-shift") }]]).concat(raiseBpm).concat(scan("C")).concat(pitch).concat(anchors).concat(finish)
     Timer {
         interval: 250
         running: true

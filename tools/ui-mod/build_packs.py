@@ -1355,41 +1355,67 @@ SERVICES_MAIN = """
 		if (!root.scCueCountdown) return
 		// Reuse the existing settings poll to retry properties absent at startup.
 		// Once all translators are cached this does nothing; no extra polling Timer.
-		if (!scPropCache["/Engine/Deck1/PlayState"] || !scPropCache["/Engine/Deck2/PlayState"] ||
-			!scPropCache["/Engine/Deck3/PlayState"] || !scPropCache["/Engine/Deck4/PlayState"])
-			root.scCueProbe = (root.scCueProbe + 1) & 0xffff
+		for (let d = 1; d <= 4; d++)
+			if (!scPropCache["/Engine/Deck" + d + "/PlayState"] || !scPropCache["/Engine/Deck" + d + "/BeatNumber"]) { root.scCueProbe = (root.scCueProbe + 1) & 0xffff; return }
 	}
+	// Engine's own beat counter drives the countdown: BeatNumber (the playhead's place in the bar, below 0 without a grid) with
+	// BarsElapsed (the bar it is in) is the absolute beat the playhead is on. One int property per deck, so a binding downstream
+	// re-evaluates only when that beat changes (CUE preview, scratch, reverse, beat jump and every other move included), never per
+	// frame, and nothing runs while the playhead stands still. -2: the property is missing; -1: no grid. The reads sit after the
+	// switch test, so a switched-off countdown subscribes to nothing.
+	// Constant paths: this runs on every beat notification, so no string is built per call.
+	readonly property var scCueBeatPaths: ["", "/Engine/Deck1/BeatNumber", "/Engine/Deck2/BeatNumber", "/Engine/Deck3/BeatNumber", "/Engine/Deck4/BeatNumber"]
+	readonly property var scCueBarPaths: ["", "/Engine/Deck1/Track/BarsElapsed", "/Engine/Deck2/Track/BarsElapsed", "/Engine/Deck3/Track/BarsElapsed", "/Engine/Deck4/Track/BarsElapsed"]
+	function scCueBeatOf(d, probe) {
+		if (!root.scCueCountdown) return -2
+		const b = root.scTr(root.scCueBeatPaths[d])
+		if (!b) return -2
+		const n = b.unnormalized
+		if (!(n >= 0)) return -1
+		const bars = root.scTr(root.scCueBarPaths[d])
+		const k = bars ? Math.floor(bars.unnormalized) : 0
+		return Math.floor(n) + 4 * (k > 0 ? k : 0)
+	}
+	readonly property int scCueBeat1: root.scCueBeatOf(1, root.scCueProbe)
+	readonly property int scCueBeat2: root.scCueBeatOf(2, root.scCueProbe)
+	readonly property int scCueBeat3: root.scCueBeatOf(3, root.scCueProbe)
+	readonly property int scCueBeat4: root.scCueBeatOf(4, root.scCueProbe)
+	// The 200 ms clock is only the fallback for a deck without beat data (property missing, or a track with no grid): it counts
+	// time while the deck plays, as before.
 	Timer {
 		id: scCueClock1
 		property int tick: 0
 		interval: 200; repeat: true
-		running: root.scCueCountdown && root.scCuePlaying(1, root.scCueProbe)
+		running: root.scCueCountdown && root.scCuePlaying(1, root.scCueProbe) && root.scCueBeat1 < 0
 		onTriggered: tick = (tick + 1) & 0xffff
 	}
 	Timer {
 		id: scCueClock2
 		property int tick: 0
 		interval: 200; repeat: true
-		running: root.scCueCountdown && root.scCuePlaying(2, root.scCueProbe)
+		running: root.scCueCountdown && root.scCuePlaying(2, root.scCueProbe) && root.scCueBeat2 < 0
 		onTriggered: tick = (tick + 1) & 0xffff
 	}
 	Timer {
 		id: scCueClock3
 		property int tick: 0
 		interval: 200; repeat: true
-		running: root.scCueCountdown && root.scCuePlaying(3, root.scCueProbe)
+		running: root.scCueCountdown && root.scCuePlaying(3, root.scCueProbe) && root.scCueBeat3 < 0
 		onTriggered: tick = (tick + 1) & 0xffff
 	}
 	Timer {
 		id: scCueClock4
 		property int tick: 0
 		interval: 200; repeat: true
-		running: root.scCueCountdown && root.scCuePlaying(4, root.scCueProbe)
+		running: root.scCueCountdown && root.scCuePlaying(4, root.scCueProbe) && root.scCueBeat4 < 0
 		onTriggered: tick = (tick + 1) & 0xffff
 	}
 	function scCueTickFor(d) {
 		// A resting shadow deck's countdown does not move: no clock dependency.
 		if (scShadowVisible(d)) return scShadowDisplay[d] && scShadowDisplay[d].playing && !scShadowDisplay[d].stale ? scShadowFrame : 0
+		const beat = d === 1 ? scCueBeat1 : d === 2 ? scCueBeat2 : d === 3 ? scCueBeat3 : scCueBeat4
+		// On the beat: Engine's beat index (+ 2 keeps it a non-zero edge). Else the fallback clock.
+		if (beat >= 0) return beat + 2
 		return d === 1 ? scCueClock1.tick : d === 2 ? scCueClock2.tick : d === 3 ? scCueClock3.tick : scCueClock4.tick
 	}
 	// #151: the beats left to a hot cue, counted on the beat grid. The count steps where the playhead crosses a grid line, so the
@@ -1424,6 +1450,8 @@ SERVICES_MAIN = """
 		const p = scCueProps(d)
 		if (!p.loaded || !p.loaded.state) return null
 		const pos = p.position ? p.position.unnormalized || 0 : 0
+		// The grid's origin: reading it makes a grid shift (Beat Grid Edit) re-count within the same beat.
+		if (p.down) void p.down.unnormalized
 		const sr = p.sampleRate ? p.sampleRate.value || 44100 : 44100
 		const bpm = (p.bpm ? p.bpm.unnormalized : 0) || (p.trackBpm ? p.trackBpm.unnormalized : 0) || 0
 		if (!(sr > 0 && bpm > 0)) return null
@@ -1459,7 +1487,7 @@ SERVICES_MAIN = """
 		const prefix = "/Engine/Deck" + d
 		const t = p => root.scTr(prefix + p)
 		const p = {loaded: t("/Track/SongLoaded"), position: t("/Track/TrackPosition"), sampleRate: t("/Track/SampleRate"),
-			bpm: t("/OriginalBPM"), trackBpm: t("/Track/CurrentBPM"), beat: t("/BeatNumber"), cues: []}
+			bpm: t("/OriginalBPM"), trackBpm: t("/Track/CurrentBPM"), beat: t("/BeatNumber"), down: t("/Track/FirstDownbeatSamplePosition"), cues: []}
 		for (let i = 1; i <= 8; i++) {
 			const key = "/Track/QuickCue" + i
 			p.cues.push({exists: t(key + "Exists"), position: t(key + "Position"), name: t(key + "Name"), color: t(key + "Color")})
