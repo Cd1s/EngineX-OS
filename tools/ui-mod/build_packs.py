@@ -2304,7 +2304,10 @@ SERVICES_MAIN = """
 		}
 		if (!(wantSync && synced) && !(at.nativeSync && e.pitch > 100)) scShadowSpeed(d, Math.abs(exact - e.pitch) < 0.02 ? exact : e.pitch, e.range)
 		const pKey = g("/Track/KeyLock")
-		if (typeof e.keylock === "boolean" && pKey && !!pKey.state !== e.keylock) pKey.state = e.keylock
+		// Shadow playback is muted, so time-stretch only adds renderer work. Keep
+		// the source key in the outgoing display sample, but never mirror Key Lock
+		// into the shadow Engine slot.
+		if (pKey && pKey.state) pKey.state = false
 		// Play, CUE held, pause, CUE released: on the first update that shows it.
 		// at.cmd only stops rewriting the same state while Engine follows (a frame
 		// or two); a change of the source's state always goes through.
@@ -2591,7 +2594,7 @@ SERVICES_MAIN = """
 	// what the source travels past its fader line is bent into the shadow deck at once with
 	// the PITCH BEND of scShadowBend (7 %) until it has gone as far, and the line holds off 2 s.
 	// Travel more than a quarter off its periods' (a jump, a loop, a scratch, a stall) starts it anew.
-	Timer { id: scShadowNudgeTimer; interval: 16; repeat: true; onTriggered: root.scShadowNudgeTick(Date.now()) }
+	Timer { id: scShadowNudgeTimer; interval: 40; repeat: true; onTriggered: root.scShadowNudgeTick(Date.now()) }
 	function scShadowNudgeTick(now) {
 		let live = false
 		for (const d in scShadowAt) {
@@ -2928,7 +2931,9 @@ SERVICES_MAIN = """
 			}
 		}
 		const speed = Math.max(0, Math.min(1, 0.5 + pitch / (2 * range)))
-		if (Math.abs(pSpeed.value - speed) * 2 * range > 0.002) pSpeed.value = speed
+		// Engine speed writes are transport tempo changes. Source updates arrive
+		// around 120 ms apart; suppress sub-0.01 percentage-point corrections.
+		if (Math.abs(pSpeed.value - speed) * 2 * range > 0.01) pSpeed.value = speed
 	}
 	// Debug telemetry (debug_telemetry=1 or /tmp/enginex-debug, told by GET /shadow):
 	// the receiver's decisions, posted in batches to Go's ring and log.

@@ -3326,6 +3326,73 @@ assert.equal(runs, 1, "startup gc() runs only once, not repeatedly");
 """)
 
 
+    def test_shadow_keylock_is_off_but_source_key_is_sent(self):
+        self.js(r"""
+scShadowDisplayOnly = false; scShadowEngineMask = 30; scFourDeckRole = '1';
+globalThis.scShadowBent = null;
+const props = new Map();
+globalThis.scTr = path => {
+    let p = props.get(path);
+    if (p) return p;
+    p = { _state: path.endsWith('/SongLoaded') || path.endsWith('/PlayState'),
+        _value: path.endsWith('/SampleRate') ? 48000 : 0,
+        string: path.endsWith('/CurrentKey') ? '8A' : path.endsWith('/SpeedRange') ? '8' : 'Off',
+        entries: ['4', '8', '10', '20', '50', '100'], index: 1,
+        get state() { return this._state; }, set state(v) { this._state = v; },
+        get value() { return this._value; }, set value(v) { this._value = v; },
+        get unnormalized() { return path.endsWith('/TrackLength') ? 48000 * 300 : path.endsWith('/TrackPosition') ? 0 : 0; } };
+    props.set(path, p); return p;
+};
+globalThis.scShadowHolds = () => true;
+globalThis.scShadowEnd = () => false;
+globalThis.scShadowMirror = () => {};
+globalThis.scShadowCues = () => {};
+globalThis.scShadowSpeed = () => {};
+globalThis.scShadowLink = () => {};
+globalThis.scShadowNudgeTimer = {running:false,start(){this.running=true},stop(){this.running=false}};
+globalThis.scShadowLoopTimer = {running:false,start(){this.running=true},stop(){this.running=false}};
+scShadowAt[2] = {path:'/peer.flac', id:'peer:1', ready:true, seekAt:0, loads:1};
+scShadowApply({deck:2, path:'/peer.flac', id:'peer:1', key:'peer:1', title:'Source', artist:'Artist',
+    keyName:'8A', playing:false, scratch:false, stale:false, positionMs:0, at:now, pitch:0,
+    bpm:120, currentBpm:120, range:8, sync:false, keylock:true, jumps:0, link:''});
+assert.equal(props.get('/Engine/Deck2/Track/KeyLock').state, false, 'shadow Key Lock stayed on');
+// The source key is carried by the sender sample, independent of shadow Key Lock.
+const sent = [], oldPost = scShadowPost;
+scShadowPost = mine => sent.push(mine);
+scShadowOwn = [{deck:1, keyName:'8A', keylock:true, title:'Source', artist:'Artist', net:'file:///a.mp3', playing:false, scratch:false, jumps:0, pitch:0, master:false, masterPress:0, lead:false, sync:false, cuePos:undefined, durationMs:1000, link:'', bpm:120, currentBpm:120, range:8, loop:false, loopIn:0, loopOut:0, keyOffset:0, stems:false, slip:0, positionMs:0, at:now, active:true}];
+scShadowPost(scShadowOwn);
+assert.equal(sent[0][0].keyName, '8A');
+""")
+
+    def test_shadow_speed_deadband_suppresses_small_transport_writes(self):
+        self.js(r"""
+scShadowEngineMask = 30;
+let writes = 0;
+const props = new Map();
+globalThis.scTr = path => {
+    if (props.has(path)) return props.get(path);
+    const p = path.endsWith('/SpeedRange')
+        ? {string:'8', entries:['4','8','10','20'], index:1}
+        : {value:0.5};
+    if (path.endsWith('/Speed')) Object.defineProperty(p, 'value', {get(){return 0.5}, set(){writes++}});
+    props.set(path, p); return p;
+};
+scShadowSpeed(2, 0, 8);
+scShadowSpeed(2, 0.005, 8);
+assert.equal(writes, 0, 'small speed correction still wrote Engine Speed');
+scShadowSpeed(2, 0.02, 8);
+assert.equal(writes, 1, 'meaningful speed correction was suppressed');
+""")
+
+    def test_shadow_timer_rates_keep_nudge_below_source_poll_rate(self):
+        self.js(r"""
+assert.equal(scShadowTickTimer.interval, 40);
+""")
+        main = bp.SERVICES_MAIN
+        self.assertIn('id: scShadowNudgeTimer; interval: 40;', main)
+        self.assertIn('if (Math.abs(pSpeed.value - speed) * 2 * range > 0.01)', main)
+
+
 class UiModBuildTest(unittest.TestCase):
     def test_crossfader_reverse_uses_the_stock_switch_in_all_languages(self):
         qrc = LAB / "5.3.0/qrc"
