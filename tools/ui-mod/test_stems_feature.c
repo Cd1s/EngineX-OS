@@ -1470,7 +1470,24 @@ static void test_rec_stream(const char *filename) {
         assert(f && fputs(cases[c].board, f) >= 0 && !fclose(f));
         image = rec_stream_image(filename, &len);
         if (cases[c].corrupt) image[build->edits[first + 7].offset] ^= 0xff;
+        const char *board = cases[c].board;
+        int gate = !cases[c].corrupt && !strcmp(build->name, "5.3.0") &&
+            (!strcmp(board, "JP07") || !strcmp(board, "JP13") || !strcmp(board, "JC11"));
+        if (gate) {
+            prepare_aux((uintptr_t)image, page);
+            prepare_config((uintptr_t)image, page);
+            prepare_reverb_time((uintptr_t)image, page);
+            prepare_stems_feature((uintptr_t)image, page);
+        }
         apply_engine_edits((uintptr_t)image, page);
+        if (gate) {
+            unsigned applied = 0;
+            for (size_t i = 0; i < build->edit_count; i++)
+                applied += edit_state((uintptr_t)image, &build->edits[i]) == 2;
+            assert(applied == (!strcmp(board, "JC11") ? 29 : 20));
+            assert(DSP_HOOK_COUNT == 21);
+            printf("Default gate compatibility (%s): %u edits, %u DSP sites: PASS\n", board, applied, (unsigned)DSP_HOOK_COUNT);
+        }
         apply_engine_edits((uintptr_t)image, page); // idempotent
         for (size_t k = 0; k < 8; k++) {
             int st = edit_state((uintptr_t)image, &build->edits[first + k]);
@@ -1541,6 +1558,8 @@ static void test_analysis_dispatch(const char *off, int gateway, int shadow) {
     // tail restores r4/sp and continues into real SQLite.
     const uint32_t bind_code[] = {0xe16d41f8, 0xe1a04001, 0xe49d4018};
     emit_tail(image + bind, bind_code, 3, sqlite3_bind_int64);
+    assert(!mprotect((void *)((base + bind) & ~(page - 1)), page, PROT_READ | PROT_EXEC));
+    __builtin___clear_cache(image + bind, image + bind + sizeof bind_code + 8);
 
     char dir[] = "/tmp/enginex-dispatch-XXXXXX", board[128], loading[128], rbx[128], peer[128], sidecar[128], library[128], conf[128];
     assert(mkdtemp(dir));
