@@ -661,6 +661,10 @@ struct engine_build {
     uintptr_t shadow_vtable_a, shadow_vtable_b, shadow_position_fn;
     uint32_t shadow_vtable_slot, shadow_item_offset, shadow_array_offset, shadow_position_prefix_size;
     uchar shadow_position_prefix[16];
+    // Gen-1 PlanckGUI::waveformPositionItem return path. Zero means that the
+    // live per-deck mapping cannot be verified, so the position hook stays stock.
+    uint32_t shadow_capture_site, shadow_capture_return, shadow_capture_prefix_size;
+    uchar shadow_capture_prefix[8];
 };
 static const struct engine_build *build;
 
@@ -677,10 +681,9 @@ struct shadow_position_feed_record {
 
 static struct shadow_position_feed_record *shadow_feed;
 static int (*shadow_position_original)(const void *);
-static void *shadow_items[4];
-static unsigned char shadow_item_decks[4];
 static uint64_t shadow_item_hash[4];
-static unsigned shadow_item_count;
+static uintptr_t shadow_planck_owner;
+static uint32_t shadow_map_seq;
 
 static uint64_t shadow_now_ns(void) {
     struct timespec ts;
@@ -688,26 +691,59 @@ static uint64_t shadow_now_ns(void) {
     return (uint64_t)ts.tv_sec * UINT64_C(1000000000) + (uint64_t)ts.tv_nsec;
 }
 
-static int shadow_item_deck(const void *self) {
-    if (!self) return 0;
-    for (unsigned i = 0; i < shadow_item_count; i++)
-        if (shadow_items[i] == self) return shadow_item_decks[i];
-    if (shadow_item_count >= 4) return 0;
-    unsigned deck = shadow_item_count + 1;
-    if (shadow_feed) {
-        for (unsigned d = 1; d <= 4; d++) {
-            if (!__atomic_load_n(&shadow_feed[d - 1].active, __ATOMIC_ACQUIRE)) continue;
-            int used = 0;
-            for (unsigned i = 0; i < shadow_item_count; i++)
-                if (shadow_items[i] && shadow_item_decks[i] == d) used = 1;
-            if (!used) { deck = d; break; }
-        }
-    }
-    shadow_items[shadow_item_count] = (void *)self;
-    shadow_item_decks[shadow_item_count] = (unsigned char)deck;
-    shadow_item_count++;
-    return (int)deck;
+__attribute__((used, noinline)) static void shadow_capture_waveform_item(void *planck, unsigned deck) {
+    if (!planck || !build || deck >= 4) return;
+    __atomic_add_fetch(&shadow_map_seq, 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&shadow_planck_owner, (uintptr_t)planck, __ATOMIC_RELEASE);
+    __atomic_add_fetch(&shadow_map_seq, 1, __ATOMIC_RELEASE);
 }
+
+static int shadow_item_deck(const void *self) {
+    if (!self || !build || !build->shadow_array_offset) return 0;
+    for (unsigned tries = 0; tries < 2; tries++) {
+        uint32_t a = __atomic_load_n(&shadow_map_seq, __ATOMIC_ACQUIRE);
+        if (a & 1u) continue;
+        uintptr_t owner = __atomic_load_n(&shadow_planck_owner, __ATOMIC_ACQUIRE);
+        if (!owner) continue;
+        uintptr_t array = *(const uintptr_t *)(owner + build->shadow_array_offset);
+        if (!array) continue;
+        int found = 0, deck = 0;
+        for (unsigned d = 0; d < 4; d++) {
+            uintptr_t item = __atomic_load_n((const uintptr_t *)(array + d * sizeof(uintptr_t)), __ATOMIC_ACQUIRE);
+            if (item != (uintptr_t)self) continue;
+            if (found) return 0; // duplicate entries are ambiguous
+            found = 1;
+            deck = (int)d + 1;
+        }
+        uint32_t b = __atomic_load_n(&shadow_map_seq, __ATOMIC_ACQUIRE);
+        if (a != b || (b & 1u) || owner != __atomic_load_n(&shadow_planck_owner, __ATOMIC_ACQUIRE)) continue;
+        return found ? deck : 0;
+    }
+    return 0;
+}
+
+#if !defined(__aarch64__)
+__attribute__((used)) static uintptr_t shadow_capture_return;
+
+static void __attribute__((noinline)) shadow_capture_waveform_item_stub(void);
+__attribute__((naked, noinline)) static void shadow_capture_waveform_item_stub(void) {
+    __asm__ volatile(
+        "push {r0-r3,r4-r6,lr}\n"
+        "ldr r0, [sp, #0]\n"
+        "ldr r1, [sp, #24]\n"
+        "ldr r1, [r1, #4]\n"
+        "ldr r1, [r1]\n"
+        "bl shadow_capture_waveform_item\n"
+        "pop {r0-r3,r4-r6,lr}\n"
+        "ldr r3, [r6, #4]\n"
+        "ldr r3, [r3]\n"
+        "ldr ip, 1f\n"
+        "ldr ip, [ip]\n"
+        "bx ip\n"
+        ".align 2\n"
+        "1: .word shadow_capture_return\n");
+}
+#endif
 
 static int shadow_feed_read(int deck, double *position, double *rate, uint64_t *track_hash) {
     if (!shadow_feed || deck < 1 || deck > 4) return 0;
@@ -780,12 +816,17 @@ static void patch_pointer(int feature, uintptr_t *slot, uintptr_t value, size_t 
     if (mprotect(start, page, PROT_READ)) _exit(127);
 }
 
+static int try_patch_bytes(int feature, uintptr_t entry, const void *bytes, size_t size, size_t page);
+
 static int install_shadow_position_hooks(uintptr_t base, size_t page) {
     if (!base || !page || !build || !hf_on(HF_SHADOW_PAUSED_FOLLOW) || !build->shadow_position_fn ||
-        !build->shadow_vtable_a || !build->shadow_vtable_b) return 0;
+        !build->shadow_vtable_a || !build->shadow_vtable_b || !build->shadow_capture_site) return 0;
     if (!build->shadow_position_prefix_size || build->shadow_position_prefix_size > sizeof build->shadow_position_prefix ||
         memcmp((const void *)(base + build->shadow_position_fn), build->shadow_position_prefix,
                build->shadow_position_prefix_size)) return 0;
+    if (!build->shadow_capture_prefix_size || build->shadow_capture_prefix_size > sizeof build->shadow_capture_prefix ||
+        memcmp((const void *)(base + build->shadow_capture_site), build->shadow_capture_prefix,
+               build->shadow_capture_prefix_size)) return 0;
     uintptr_t *a = (uintptr_t *)(base + build->shadow_vtable_a + build->shadow_vtable_slot);
     uintptr_t *b = (uintptr_t *)(base + build->shadow_vtable_b + build->shadow_vtable_slot);
     if (*a != base + build->shadow_position_fn || *b != base + build->shadow_position_fn) return 0;
@@ -803,9 +844,17 @@ static int install_shadow_position_hooks(uintptr_t base, size_t page) {
     shadow_feed = map;
     close(fd);
     shadow_position_original = (int (*)(const void *))(base + build->shadow_position_fn);
+#if !defined(__aarch64__)
+    shadow_capture_return = base + build->shadow_capture_return;
+    {
+        const uint32_t jump[] = {0xe51ff004, (uint32_t)(uintptr_t)shadow_capture_waveform_item_stub};
+        if (!try_patch_bytes(HF_SHADOW_PAUSED_FOLLOW, base + build->shadow_capture_site, jump, sizeof jump, page))
+            return 0;
+    }
+#endif
     patch_pointer(HF_SHADOW_PAUSED_FOLLOW, a, (uintptr_t)shadow_position_hook, page);
     patch_pointer(HF_SHADOW_PAUSED_FOLLOW, b, (uintptr_t)shadow_position_hook, page);
-    fprintf(stderr, "engine-ui-hook: paused shadow waveform follow installed\n");
+    fprintf(stderr, "engine-ui-hook: paused shadow waveform follow installed with verified deck mapping\n");
     return 1;
 }
 
@@ -2499,7 +2548,10 @@ static const struct engine_build engine_builds[] = {
      .shadow_vtable_a = 0x2b52c68, .shadow_vtable_b = 0x2b51a88,
      .shadow_vtable_slot = 0xbc, .shadow_position_fn = 0x4b9090,
      .shadow_item_offset = 0x28, .shadow_array_offset = 0x244, .shadow_position_prefix_size = 8,
-     .shadow_position_prefix = {0x0a, 0x7a, 0xd0, 0xed, 0x04, 0xb0, 0x2d, 0xe5}},
+     .shadow_position_prefix = {0x0a, 0x7a, 0xd0, 0xed, 0x04, 0xb0, 0x2d, 0xe5},
+     .shadow_capture_site = 0xa1746c, .shadow_capture_return = 0xa17474,
+     .shadow_capture_prefix_size = 8,
+     .shadow_capture_prefix = {0x04, 0x30, 0x96, 0xe5, 0x00, 0x30, 0x93, 0xe5}},
     // feature_object 0x2d0eb78 is StemsPreRenderedPlayback (stored into 0x2d180c8 at 0x360d68, read by PlanckScriptRoot::hasStemsPreRenderedPlayback at 0x9d7808).
     {"5.3.0-sclive4", "\xb9\x46\xc3\xb8\xd9\x9d\x32\x99\x8c\x81\x97\xd5\xdc\x90\x5a\x6b\xdd\xaa\x5d\x2f",
      {0xe774fc, 0xe77528, 0xe775d8, 0xe77604, 0xe77630, 0xe77554, 0xe775ac, 0x17597bc, 0x179b090,
