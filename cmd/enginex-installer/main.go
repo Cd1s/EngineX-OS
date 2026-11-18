@@ -1101,6 +1101,7 @@ func IsRockchipUSBLoader(line string) bool {
 // (not yet seen on a real NH10; modeB still reads the model from fastboot before flashing).
 var gen2USB = map[string]string{
 	"15e4:d007": "jc11s", "15e4:c00c": "jp11s", "15e4:d011": "jp20", "15e4:d012": "jp21",
+	"15e4:d014": "jp24", // PRIME 4 G2 running stock, seen on a Mac (#311)
 	"15e4:103f": "nh08s", "15e4:303f": "nh08s", "15e4:2059": "nh10",
 }
 

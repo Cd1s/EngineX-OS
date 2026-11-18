@@ -1219,6 +1219,7 @@ func TestUSBDeckFindsIDsAnywhereInTheLine(t *testing.T) {
 		`Instance ID:   USB\15E4:303F\5&2B1C0A3E&0&2`: "nh08s",
 		"15e4:2059 Numark MIXSTREAM PRO GO":           "nh10", // from the official Mixstream image usb_devices
 		"15e4:d012 Denon DJ SC LIVE 4 Update":         "jp21",
+		"15e4:d014 PRIME 4 G2":                        "jp24", // #311
 		"1d6b:0002 Linux Foundation 2.0 root hub":     "",
 	} {
 		o.ListUSB = func(context.Context) string { return line + "\n" }
