@@ -5794,15 +5794,17 @@ SMART_SYNC_MAIN = """
 	// the change), not for a slot this unit does not own (four-deck player mode), not
 	// with no track loaded. One write, nothing delayed.
 	// Runs in the GUI engine from the SyncMode change: no controller latch.
+	// The fader counts as centred within 1 % of half its travel (about 82 of 16384 codes): the exact
+	// centre codes alone rarely matched a real fader (#289, real decks). The controller's centre LED
+	// (SpeedSlider.qml, scBpmRestoreZone there) uses the same zone.
+	readonly property real scBpmRestoreZone: 0.005
 	function scUnsyncRestoreBpm(d) {
 		if (!scRestoreBpmOnUnsync || (scFourDeckRole !== "" && scFourDeckRole.indexOf(String(d)) < 0)) return
 		const pLoaded = root.scTr("/Engine/Deck" + d + "/Track/SongLoaded"), pSync = root.scTr("/Engine/Deck" + d + "/SyncMode")
 		const pMaster = root.scTr("/Engine/Deck" + d + "/DeckIsMaster"), pSpeed = root.scTr("/Engine/Deck" + d + "/Speed")
 		if (!pLoaded || !pSync || !pMaster || !pSpeed || !pLoaded.state || pSync.string !== "Off" || pMaster.state) return
 		// Speed is the effective rate, so at exactly 0.5 the deck already plays its own BPM.
-		// A 14-bit fader has no exact 0.5: its centre codes 8191 / 8192 arrive as 0.49997 / 0.50003
-		// (code / 16383); 8193 and anything further is a moved fader and stays.
-		if (Math.abs(pSpeed.softValue - 0.5) < 1 / 16383 && pSpeed.value !== 0.5) pSpeed.value = 0.5
+		if (Math.abs(pSpeed.softValue - 0.5) <= scBpmRestoreZone && pSpeed.value !== 0.5) pSpeed.value = 0.5
 	}
 	Instantiator {
 		model: root.scDeckList()
@@ -8315,6 +8317,7 @@ def edits(dev: bool):
             '    property real scPadBrightness: 1\n'
             '    property bool scSwapLoopOrder: false\n'
             '    property bool scPitchBendBeatJump: false\n'
+            '    property bool scRestoreBpmOnUnsync: false\n'
             '    property int scBpmDecimals: 2\n'
             '    property var scMixstreamFx: ["Echo", "Flanger", "Delay", "Phaser"]\n'
             '    property bool scReverseJogLeft: false\n'
@@ -8369,6 +8372,7 @@ def edits(dev: bool):
             '                    scGlobalConfig.scReverseJogLeft = !!j.jogInvertLeft\n'
             '                    scGlobalConfig.scReverseJogRight = !!j.jogInvertRight\n'
             '                    scGlobalConfig.scPitchBendBeatJump = !!j.pitchBendBeatJump\n'
+            '                    scGlobalConfig.scRestoreBpmOnUnsync = !!j.restoreBpmOnUnsync\n'
             '                    if (j.bpmDecimals !== undefined)\n'
             '                        scGlobalConfig.scBpmDecimals = parseInt(j.bpmDecimals) === 1 ? 1 : 2\n'
             '                    if (Array.isArray(j.mixstreamFx) && j.mixstreamFx.length === 4)\n'
@@ -8448,6 +8452,21 @@ def edits(dev: bool):
         if (u < 0.5 ? (k < B - delta || k > B) : (k < B || k > B + delta)) return u
         return Math.max(0.0, Math.min(1.0, 0.5 + (k - B) / (2.0 * delta)))
     }
+
+    // #289: with Restore BPM on Sync Off, a synced deck's centre LED also lights while the fader
+    // (the Speed soft value, i.e. where it physically is) is in the zone that restores on Sync off.
+    // Read-only: no action, no write. Off, unsynced or outside the zone: stock SpeedNeutral.
+    readonly property real scBpmRestoreZone: 0.005 // same zone as the GUI restore (SMART_SYNC_MAIN)
+    readonly property var scPSync: Planck.getProperty(deckConfig.activeDeckPath + "SyncMode")
+    readonly property var scPSpeed: Planck.getProperty(deckConfig.activeDeckPath + "Speed")
+    readonly property var scPLoaded: Planck.getProperty(deckConfig.activeDeckTrackPath + "SongLoaded")
+    function scCentreLit(on, syncMode, loaded, soft) {
+        return !!on && !!loaded && syncMode !== undefined && syncMode !== "Off" && Math.abs(soft - 0.5) <= scBpmRestoreZone
+    }
+    readonly property bool scCentreZoneLit: scCentreLit(typeof globalConfig !== "undefined" && globalConfig && globalConfig.scRestoreBpmOnUnsync,
+        scPSync && scPSync.translator ? scPSync.translator.string : undefined,
+        scPLoaded && scPLoaded.translator && scPLoaded.translator.state,
+        scPSpeed && scPSpeed.translator ? scPSpeed.translator.softValue : -1)
 '''),
             ('        ValueCCAssignment {\n            readonly property bool songLoaded: Planck.getProperty("/Engine/Deck%1/Track/SongLoaded".arg(modelData))\n                .translator.state\n',
              '        ValueCCAssignment {\n            id: scSpeedAssign\n            readonly property bool songLoaded: Planck.getProperty("/Engine/Deck%1/Track/SongLoaded".arg(modelData))\n                .translator.state\n'
@@ -8466,6 +8485,23 @@ def edits(dev: bool):
              '                    )\n'
              '                }\n'
              '            }\n'),
+            # #289: exactly one of the two centre-LED outputs is enabled; enabling one sends its value
+            # (stock OutputAssignment re-sends on `enabled`), so the LED follows without a second writer.
+            ('            midiIndex: module.centreLedNote\n            path: deckConfig.activeDeckPath + "SpeedNeutral"\n        }\n    }\n',
+             '            midiIndex: module.centreLedNote\n            path: deckConfig.activeDeckPath + "SpeedNeutral"\n        }\n    }\n\n'
+             '    Loader {\n'
+             '        active: module.centreLedNote !== -1\n'
+             '        sourceComponent: ValueOutputAssignment {\n'
+             '            objectName: "Speed Slider Centre LED Restore Zone Deck%1".arg(deckConfig.name)\n'
+             '            enabled: deckConfig.inDJMode && module.scCentreZoneLit\n'
+             '            channel: deckConfig.midiChannel\n'
+             '            messageType: type.note\n'
+             '            midiIndex: module.centreLedNote\n'
+             '            path: deckConfig.activeDeckTrackPath + "SongLoaded"\n'
+             '        }\n'
+             '    }\n'),
+            ('            objectName: "Speed Slider Centre LED Deck%1".arg(deckConfig.name)\n            enabled: deckConfig.inDJMode\n',
+             '            objectName: "Speed Slider Centre LED Deck%1".arg(deckConfig.name)\n            enabled: deckConfig.inDJMode && !module.scCentreZoneLit\n'),
         ]
         # #286: allow Mixstream hardware FX buttons (slots 1-4) to select any stock Mixstream effect.
         scaled["ControlSurfaceModules/ControlSurfaceModules/private/DJFxSelectButtons.qml"] = [
