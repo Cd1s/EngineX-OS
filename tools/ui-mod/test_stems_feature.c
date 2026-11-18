@@ -1561,7 +1561,7 @@ static void test_analysis_dispatch(const char *off, int gateway, int shadow) {
     assert(!mprotect((void *)((base + bind) & ~(page - 1)), page, PROT_READ | PROT_EXEC));
     __builtin___clear_cache(image + bind, image + bind + sizeof bind_code + 8);
 
-    char dir[] = "/tmp/enginex-dispatch-XXXXXX", board[128], loading[128], rbx[128], peer[128], sidecar[128], library[128], conf[128];
+    char dir[] = "/tmp/enginex-dispatch-XXXXXX", board[128], loading[128], rbx[128], peer[128], sidecar[128], library[128], conf[128], history[64];
     assert(mkdtemp(dir));
     snprintf(board, sizeof board, "%s/board", dir);
     snprintf(loading, sizeof loading, "%s/.loading", dir);
@@ -1570,6 +1570,7 @@ static void test_analysis_dispatch(const char *off, int gateway, int shadow) {
     snprintf(sidecar, sizeof sidecar, "%s/peer-a/track.wav.analysis", dir);
     snprintf(library, sizeof library, "%s/m.db", dir);
     snprintf(conf, sizeof conf, "%s/hook-disable.conf", dir);
+    snprintf(history, sizeof history, "%s/history", dir);
     assert(!mkdir(peer, 0700));
     static const char data[] = "RBXA1" "\5\0\0\0" "track" "\5\0\0\0" "waves" "\5\0\0\0" "beats" "\1\0\0\0" "c" "\0\0\0\0";
     analysis_file(board, "JP07", 4);
@@ -1581,6 +1582,7 @@ static void test_analysis_dispatch(const char *off, int gateway, int shadow) {
     hf_reload();
     product_code_path = board;
     sc_rbx_dir = sc_shadow_root = dir;
+    sc_rbx_history = history;
     sc_shadow_library = library;
     sqlite_exec_original = real_sqlite_exec;
 
@@ -1613,15 +1615,23 @@ static void test_analysis_dispatch(const char *off, int gateway, int shadow) {
     sqlite_bind_int64_fn entry = (void *)(base + bind);
     const char *shadow_read = SC_SHADOW_TRACK_READ "t.isAnalyzed FROM Track AS t WHERE t.id = ?";
     analysis_bind(entry, db, SC_RBX_ANALYSIS_SELECT "?", 2);
-    analysis_bind(entry, db, shadow_read, 1);
     assert(pragma(db, "SELECT count(*) FROM PerformanceData WHERE trackData IS NOT NULL") == 0);
-    analysis_bind(entry, db, SC_RBX_ANALYSIS_SELECT "?", 1);
+    // Engine can snapshot isAnalyzed on the Track read before it binds the
+    // PerformanceData statement. The late rekordbox payload must be usable here.
+    analysis_bind(entry, db, shadow_read, 1);
     assert(pragma(db, "SELECT isAnalyzed FROM Track WHERE id = 1") == gateway);
     assert(pragma(db, "SELECT count(*) FROM PerformanceData WHERE trackData IS NOT NULL") == gateway);
     analysis_bind(entry, db, shadow_read, 2);
     assert(pragma(db, "SELECT isAnalyzed FROM Track WHERE id = 2") == shadow);
     assert(pragma(db, "SELECT count(*) FROM PerformanceData WHERE trackData IS NOT NULL") == gateway + shadow);
     assert(sqlite3_close(db) == SQLITE_OK);
+    if (gateway) {
+        char saved[128];
+        snprintf(saved, sizeof saved, "%s/712-1-beatData", history);
+        assert(!unlink(saved));
+        snprintf(saved, sizeof saved, "%s/712-1-quickCues", history);
+        assert(!unlink(saved) && !rmdir(history));
+    }
     if (*off) assert(!unlink(conf));
     assert(!unlink(library) && !unlink(sidecar) && !rmdir(peer) && !unlink(rbx) && !unlink(loading) && !unlink(board) && !rmdir(dir));
     assert(!munmap(image, size));

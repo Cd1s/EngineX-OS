@@ -166,6 +166,8 @@ type tidalGateway struct {
 	albumIDs  map[string]int64
 	next      int64
 
+	rbxBrowse rbxPrefetchQueue
+
 	// Artwork for list rows, by what the row knows: title and artist.
 	artURLs  map[string]string
 	artMu    sync.Mutex
@@ -1928,6 +1930,9 @@ func (g *tidalGateway) playbackInfo(w http.ResponseWriter, r *http.Request) {
 	id, ref, ok := g.playable(w, r, r.PathValue("id"))
 	if !ok {
 		return
+	}
+	if ref.track.Provider == rekordboxScope {
+		g.rbxRefreshLoad(r.Context(), id)
 	}
 	log.Printf("stream-sync: load track=%d provider=%s scope=%s step=request api=manifest", id, ref.track.Provider, g.s.scope())
 	if !g.knownCodec(w, r, ref) {

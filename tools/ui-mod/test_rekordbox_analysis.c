@@ -12,6 +12,23 @@ static int exec_counted(void *db, const char *sql, int (*row)(void *, int, char 
 static const char *db_main(void *db, const char *name) { return sqlite3_db_filename(db, name); }
 static const struct sc_rbx_sqlite sqlite = {exec_counted, db_main};
 
+static int open_readonly(const char *path, void **db, int flags, const char *vfs) {
+    assert(flags == SQLITE_OPEN_READONLY);
+    sqlite3 *handle = NULL;
+    int rc = sqlite3_open_v2(path, &handle, flags, vfs);
+    *db = handle;
+    return rc;
+}
+
+static int close_readonly(void *db) { return sqlite3_close(db); }
+
+static void check_edits(sqlite3 *db, const char *want) {
+    sqlite3_stmt *st;
+    assert(sqlite3_prepare_v2(db, "SELECT hex(beatData)||'/'||hex(quickCues) FROM PerformanceData", -1, &st, NULL) == SQLITE_OK);
+    assert(sqlite3_step(st) == SQLITE_ROW && !strcmp((const char *)sqlite3_column_text(st, 0), want));
+    sqlite3_finalize(st);
+}
+
 // A library with track 16449 (uri, label) and its empty analysis row. With attach, Engine's own
 // connection: a main database without a file and the library attached to it.
 static sqlite3 *library_row(const char *path, const char *uri, const char *label, int attach) {
@@ -99,9 +116,11 @@ int main(void) {
     const unsigned char no_grid[] = "RBXA1" "\1\0\0\0" "\x01" "\0\0\0\0" "\0\0\0\0" "\0\0\0\0" "\0\0\0\0";
     assert(!sc_rbx_analysis_sql(no_grid, sizeof no_grid - 1, 9));                 // nothing to skip analysis for
 
-    char dir[] = "/tmp/rbx-analysis-XXXXXX", drives[64], path[160];
+    char dir[] = "/tmp/rbx-analysis-XXXXXX", drives[64], path[160], history[64];
     assert(mkdtemp(dir));
     sc_rbx_dir = dir;
+    snprintf(history, sizeof history, "%s/history", dir);
+    sc_rbx_history = history;
     snprintf(drives, sizeof drives, "%s/media/", dir);
     sc_rbx_drives = drives;
     snprintf(path, sizeof path, "%s/media", dir);
@@ -158,6 +177,43 @@ int main(void) {
     statements = 0;
     assert(!load_bound(engine) && statements == 1 && filled(engine));
     sqlite3_close(engine);
+    // Complete the Engine download while no bind-time fill has succeeded.
+    // The analyzer finds the late payload by the download path even without an alias.
+    db = library(internal, "rekordbox [126 BPM]");
+    char alias[160];
+    snprintf(alias, sizeof alias, "%s/0123456789012345678901234567890123456789.perf", dir);
+    assert(!unlink(alias));
+    sc_rbx_stm = internal;
+    sc_rbx_open_readonly = open_readonly;
+    sc_rbx_close_db = close_readonly;
+    sc_rbx_exec_readonly = exec_counted;
+    int keep_grid = 0;
+    assert(sc_rbx_replay_download(download, replay, sizeof replay, &keep_grid) && !keep_grid);
+    assert(strstr(replay, "/855.bin.perf") != NULL && !filled(db));
+    assert(!strcmp(load_bound(db), "filled"));
+    // The deck changes its cue while the source changes both fields.
+    assert(sqlite3_exec(db, "UPDATE PerformanceData SET quickCues=X'99'", NULL, NULL, NULL) == SQLITE_OK);
+    const unsigned char edited[] = "RBXA1" "\2\0\0\0" "\x01\xab" "\0\0\0\0" "\1\0\0\0" "\x12" "\1\0\0\0" "\x34" "\0\0\0\0";
+    snprintf(path, sizeof path, "%s/855.bin", dir);
+    f = fopen(path, "wb");
+    assert(f && fwrite(edited, 1, sizeof edited - 1, f) == sizeof edited - 1 && !fclose(f));
+    result = load_bound(db);
+    assert(result && !strcmp(result, "refreshed; kept deck edits"));
+    check_edits(db, "12/99");
+    assert(sc_rbx_replay_download(download, replay, sizeof replay, &keep_grid) && !keep_grid);
+    // A subsequent source cue edit is accepted once it matches our last
+    // import; a local grid edit remains protected from both refresh and replay.
+    assert(sqlite3_exec(db, "UPDATE PerformanceData SET quickCues=NULL, beatData=X'88'", NULL, NULL, NULL) == SQLITE_OK);
+    unsigned char next[sizeof edited];
+    memcpy(next, edited, sizeof next);
+    next[19] = 0x56;
+    f = fopen(path, "wb");
+    assert(f && fwrite(next, 1, sizeof next - 1, f) == sizeof next - 1 && !fclose(f));
+    result = load_bound(db);
+    assert(result && !strcmp(result, "refreshed; kept deck edits"));
+    check_edits(db, "88/34");
+    assert(sc_rbx_replay_download(download, replay, sizeof replay, &keep_grid) && keep_grid);
+    sqlite3_close(db);
     // Engine Link (a track of the other deck's USB) and Remote Library (Engine DJ desktop)
     // loads while a rekordbox load is open: one read of the row, nothing written, even with a
     // label that looks like ours and a file for the id.
@@ -184,5 +240,16 @@ int main(void) {
     statements = 0;
     assert(!load(db) && !load_bound(db) && !statements && !filled(db));
     sqlite3_close(db);
+    snprintf(path, sizeof path, "%s/855-16449-beatData", history);
+    assert(!unlink(path));
+    snprintf(path, sizeof path, "%s/855-16449-quickCues", history);
+    assert(!unlink(path) && !rmdir(history));
+    snprintf(path, sizeof path, "%s/855.bin", dir);
+    assert(!unlink(path));
+    snprintf(path, sizeof path, "%s/855.bin.perf", dir);
+    assert(!unlink(path));
+    assert(!unlink(alias) && !unlink(mark) && !unlink(internal) && !unlink(drive));
+    snprintf(path, sizeof path, "%s/media", dir);
+    assert(!rmdir(path) && !rmdir(dir));
     return 0;
 }

@@ -3013,9 +3013,9 @@ static int oa_replay(void *o, const struct oa_string *s, const uchar *prefs) {
     if (!s || s->size <= 0 || !utf16_to_utf8(s->ptr, s->size, path, sizeof path - 5)) return 0;
     char perf[PATH_MAX + 8];
     snprintf(perf, sizeof perf, "%s.perf", path);
-    int rekordbox_stream = 0;
+    int rekordbox_stream = 0, keep_grid = 0;
 #if !defined(__aarch64__)
-    if (access(perf, F_OK)) rekordbox_stream = sc_rbx_replay_path(path, perf, sizeof perf);
+    if (access(perf, F_OK)) rekordbox_stream = sc_rbx_replay_download(path, perf, sizeof perf, &keep_grid);
 #endif
     if (!rekordbox_stream && access(perf, F_OK) && !oa_shadow_perf(path, perf, sizeof perf)) {
         if (!strncmp(path, OA_ENGINE_COPIES, strlen(OA_ENGINE_COPIES))) oa_log("analyse", path, 0);
@@ -3041,7 +3041,7 @@ static int oa_replay(void *o, const struct oa_string *s, const uchar *prefs) {
     long waited = (t1.tv_sec - t0.tv_sec) * 1000000L + (t1.tv_nsec - t0.tv_nsec) / 1000;
     oa_emit_bytes(o, OA_TRACK, p.part[0], p.len[0]);
     if (!prefs[12]) {
-        if (p.len[1]) oa_emit_bytes(o, OA_BEATS, p.part[1], p.len[1]);
+        if (p.len[1] && !keep_grid) oa_emit_bytes(o, OA_BEATS, p.part[1], p.len[1]);
         oa_emit_bytes(o, OA_OVERVIEW, p.part[2], p.len[2]);
     }
     oa_emit_bytes(o, OA_OVERVIEW_RGB, p.part[2], p.len[2]);
@@ -3479,9 +3479,11 @@ static int rbx_bind(void *stmt, int i, long long value) {
     int rc = rbx_bind_original(stmt, i, value);
     if (!rc && i == 1 && value > 0 && !analysis_filling && stmt) {
         const char *sql = rbx_statement_sql(stmt);
-        if (rbx_prepare_original && sc_rbx_analysis_bound(sql))
+        const int track_read = sc_shadow_analysis_bound(sql);
+        // The Track read copies isAnalyzed before a PerformanceData bind.
+        if (rbx_prepare_original && (track_read || sc_rbx_analysis_bound(sql)))
             rbx_fill(rbx_statement_db(stmt), value, NULL, 0);
-        else if (shadow_analysis_enabled && sc_shadow_analysis_bound(sql))
+        if (shadow_analysis_enabled && track_read)
             shadow_fill(rbx_statement_db(stmt), value);
     }
     return rc;
@@ -3525,6 +3527,11 @@ A32_ONLY static void install_rekordbox_analysis(uintptr_t base, size_t page) {
             rbx_prepare_original = (sqlite_prepare_fn)function_trampoline(entry, page);
             if (!rbx_prepare_original) return;
             sc_rbx_verbose = !access("/run/enginex-rbx-analysis-trace", F_OK); // debug: log why a read was left alone
+            if (build->sqlite_open_v2 && api[135] == base + build->sqlite_open_v2) {
+                sc_rbx_open_readonly = sqlite_open_v2_original ? sqlite_open_v2_original : (sqlite_open_v2_fn)(uintptr_t)api[135];
+                sc_rbx_close_db = (int (*)(void *))(uintptr_t)api[179];
+                sc_rbx_exec_readonly = sqlite_exec_original;
+            }
             redirect_function(HF_GATEWAY, entry, rbx_prepare, page);
             redirect_function(HF_GATEWAY, bind, rbx_bind, page);
             fprintf(stderr, "engine-ui-hook: rekordbox analysis for streamed tracks enabled\n");
