@@ -1438,6 +1438,71 @@ SERVICES_MAIN = """
 		}
 		return info
 	}
+	// #151: the countdown on the track's saved beat grid. Engine's QML has only the tempo at the playhead, so for a deck whose
+	// track is on a drive stream-sync reads the grid markers once (GET /v1/enginex/grid, read-only on Engine's library) and the
+	// pack maps the playhead and every hot cue to a beat on them, exact across tempo changes. Until the answer arrives, when
+	// there is none (streaming track, not analysed yet) or when Engine's live beat disagrees with it (the grid was edited), the
+	// count above (tempo at the playhead) stands.
+	property var scCueGrids: ({})
+	property int scCueGridGen: 0
+	function scGridSeg(m, s) {
+		let lo = 0, hi = m.length - 1
+		while (lo + 1 < hi) { const mid = (lo + hi) >> 1; if (m[mid].p <= s) lo = mid; else hi = mid }
+		return lo
+	}
+	function scGridBeat(m, s) {
+		const a = m[scGridSeg(m, s)], b = m[scGridSeg(m, s) + 1]
+		return a.n + (s - a.p) * (b.n - a.n) / (b.p - a.p)
+	}
+	function scCueGridFetch(g) {
+		g.at = Date.now(); g.tries++
+		const x = new XMLHttpRequest()
+		g.req = x
+		x.onreadystatechange = function() {
+			if (x.readyState !== 4 || g.req !== x) return
+			g.req = null
+			let m = null
+			if (x.status === 200) {
+				try {
+					const v = JSON.parse(x.responseText)
+					if (v.rate > 0 && Array.isArray(v.markers) && v.markers.length >= 2) { g.rate = v.rate; m = v.markers }
+				} catch (e) { m = null }
+			}
+			g.markers = m; g.bad = 0
+			root.scCueGridGen = (root.scCueGridGen + 1) & 0xffff
+		}
+		x.open("GET", "http://127.0.0.1:8080/v1/enginex/grid?net=" + encodeURIComponent(g.net))
+		x.send()
+	}
+	// The saved grid of deck d's track, or null (pending, none, or not matching Engine's live beat: then re-read, a few times).
+	function scCueGrid(d, p, pos, sr, beat, bpm) {
+		void root.scCueGridGen // an answer re-evaluates the countdown
+		const net = p.net ? p.net.string || "" : ""
+		if (!net) return null
+		let g = scCueGrids[d]
+		if (!g || g.net !== net) {
+			g = scCueGrids[d] = {net: net, markers: null, rate: 0, req: null, at: 0, tries: 0, bad: 0}
+			scCueGridFetch(g)
+			return null
+		}
+		if (g.req) return null
+		const m = g.markers
+		if (!m) {
+			// Not analysed yet when the track loaded: ask again a few times.
+			if (g.tries < 4 && Date.now() - g.at > 5000) scCueGridFetch(g)
+			return null
+		}
+		// Engine's live beat has to agree with the saved grid: the same place in the beat, the same tempo in the playhead's segment.
+		if (!(beat >= 0)) return null
+		const at = pos * g.rate / sr, i = scGridSeg(m, at)
+		const off = scGridBeat(m, at) - beat, tempo = (m[i + 1].n - m[i].n) * g.rate * 60 / (m[i + 1].p - m[i].p)
+		if (Math.abs(off - Math.round(off)) > 0.1 || Math.abs(tempo / bpm - 1) > 0.02) {
+			if (++g.bad >= 3 && g.tries < 6 && Date.now() - g.at > 3000) scCueGridFetch(g)
+			return null
+		}
+		g.bad = 0
+		return g
+	}
 	function scNextCueCompute(d) {
 		if (scShadowVisible(d)) {
 			const info = scShadowNextCue(d)
@@ -1467,7 +1532,9 @@ SERVICES_MAIN = """
 		let totalBeats = (bestPos - pos) / sr * (bpm / 60.0)
 		// The count follows the grid: the playhead's place in its beat (Engine's BeatNumber, a position in the bar; below 0 without a grid).
 		const beat = p.beat ? p.beat.unnormalized : -1
-		if (beat >= 0) { const f = beat - Math.floor(beat); totalBeats = scCueBeatsLeft(f, f + totalBeats) }
+		const g = scCueGrid(d, p, pos, sr, beat, bpm)
+		if (g) totalBeats = scCueBeatsLeft(scGridBeat(g.markers, pos * g.rate / sr), scGridBeat(g.markers, bestPos * g.rate / sr))
+		else if (beat >= 0) { const f = beat - Math.floor(beat); totalBeats = scCueBeatsLeft(f, f + totalBeats) }
 		if (!(totalBeats <= 2048)) return null
 		const bars = Math.floor(totalBeats / 4)
 		const cue = p.cues[best]
@@ -1487,7 +1554,7 @@ SERVICES_MAIN = """
 		const prefix = "/Engine/Deck" + d
 		const t = p => root.scTr(prefix + p)
 		const p = {loaded: t("/Track/SongLoaded"), position: t("/Track/TrackPosition"), sampleRate: t("/Track/SampleRate"),
-			bpm: t("/OriginalBPM"), trackBpm: t("/Track/CurrentBPM"), beat: t("/BeatNumber"), down: t("/Track/FirstDownbeatSamplePosition"), cues: []}
+			bpm: t("/OriginalBPM"), trackBpm: t("/Track/CurrentBPM"), beat: t("/BeatNumber"), down: t("/Track/FirstDownbeatSamplePosition"), net: t("/Track/TrackNetworkPath"), cues: []}
 		for (let i = 1; i <= 8; i++) {
 			const key = "/Track/QuickCue" + i
 			p.cues.push({exists: t(key + "Exists"), position: t(key + "Position"), name: t(key + "Name"), color: t(key + "Color")})

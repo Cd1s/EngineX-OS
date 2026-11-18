@@ -240,3 +240,58 @@ func TestDisplayStockPrerollHotCueAndLoop(t *testing.T) {
 		t.Fatal("inverted loop accepted")
 	}
 }
+
+func gridBlob(t *testing.T, flag byte, grids ...[][2]float64) []byte {
+	t.Helper()
+	var b bytes.Buffer
+	put(&b, big, float64(44100))
+	put(&b, big, float64(176400))
+	b.WriteByte(flag)
+	for i := 0; i < 2; i++ {
+		var g [][2]float64
+		if i < len(grids) {
+			g = grids[i]
+		}
+		put(&b, big, uint64(len(g)))
+		for _, m := range g {
+			put(&b, little, m[0])
+			put(&b, little, int64(m[1]))
+			put(&b, little, uint32(0))
+			put(&b, little, uint32(0))
+		}
+	}
+	q, err := QCompress(b.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return q
+}
+
+// The countdown to a hot cue maps samples to beats on the saved markers: a tempo change is a marker, so the map is exact across it.
+func TestParseDisplayGridKeepsEveryMarkerOfATempoChange(t *testing.T) {
+	p := displayFixture(t)
+	two := [][2]float64{{0, 0}, {88200, 4}, {163800, 8}} // 120 BPM for 4 beats, then 140 BPM
+	rate, m, err := ParseDisplayGrid(p.TrackData, gridBlob(t, 1, [][2]float64{{0, 0}, {176400, 8}}, two))
+	if err != nil || rate != 44100 || len(m) != 3 || m[1] != (GridMarker{88200, 4}) || m[2] != (GridMarker{163800, 8}) {
+		t.Fatalf("the adjusted grid's markers: %v %v %+v", rate, err, m)
+	}
+	// Only one adjusted marker: the original grid is used, as the display does.
+	_, m, err = ParseDisplayGrid(p.TrackData, gridBlob(t, 1, [][2]float64{{0, 0}, {176400, 8}}, [][2]float64{{0, 0}}))
+	if err != nil || len(m) != 2 || m[1].Beat != 8 {
+		t.Fatalf("original grid fallback: %v %+v", err, m)
+	}
+	// The grid flag off: no grid, so the pack keeps counting by tempo.
+	_, m, err = ParseDisplayGrid(p.TrackData, gridBlob(t, 0, two))
+	if err != nil || len(m) != 0 {
+		t.Fatalf("no grid: %v %+v", err, m)
+	}
+	// What the display shows from the same blob is unchanged by the shared reader.
+	d, err := ParseDisplayPerformance(p.TrackData, p.Overview, gridBlob(t, 1, two), nil, nil)
+	if err != nil || len(d.Beats) != 9 || d.Beats[4].MS != 2000 || d.Beats[8].Number != 8 {
+		t.Fatalf("display beats: %v %+v", err, d.Beats)
+	}
+	// Corrupt and unordered markers fail closed.
+	if _, _, err = ParseDisplayGrid(p.TrackData, gridBlob(t, 1, [][2]float64{{0, 0}, {0, 4}})); err == nil {
+		t.Fatal("unordered markers accepted")
+	}
+}

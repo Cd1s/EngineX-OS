@@ -38,7 +38,7 @@ class DictionaryTest(unittest.TestCase):
 @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise QML JavaScript")
 class HotPathTest(unittest.TestCase):
     def test_cue_bindings_and_status_polling(self):
-        names = ("scDeckLocked", "scShadowVisible", "scTr", "scCuePlaying", "scProbeCueClocks", "scCueBeatOf", "scCueProps", "scCueBeatsLeft", "scNextCueInfo", "scNextCueCompute", "scCueTickFor", "scSameItems", "scCall", "scUiPollReply")
+        names = ("scDeckLocked", "scShadowVisible", "scTr", "scCuePlaying", "scProbeCueClocks", "scCueBeatOf", "scGridSeg", "scGridBeat", "scCueGridFetch", "scCueGrid", "scCueProps", "scCueBeatsLeft", "scNextCueInfo", "scNextCueCompute", "scCueTickFor", "scSameItems", "scCall", "scUiPollReply")
         functions = []
         for name in names:
             start = re.search(r"(?m)^\tfunction " + name + r"\([^\n]*\) \{", packs.SERVICES_MAIN)
@@ -77,7 +77,7 @@ class XMLHttpRequest {
     abort() { this.readyState = 0; this.aborted = true; }
     getResponseHeader(name) { return (this.headers || {})[name] || null; }
 }
-''' + "\n".join(functions) + "\nroot.scTr = scTr; root.scCuePlaying = scCuePlaying; root.scCueProbe = 0; root.scCueBeatOf = scCueBeatOf;\nroot.scCueBeatPaths = ['', ...[1, 2, 3, 4].map(d => '/Engine/Deck' + d + '/BeatNumber')]; root.scCueBarPaths = ['', ...[1, 2, 3, 4].map(d => '/Engine/Deck' + d + '/Track/BarsElapsed')];\n" + "".join(f"Object.defineProperty(root, 'scCueBeat{d}', {{get() {{ return scCueBeatOf({d}, root.scCueProbe); }}, configurable: true}});\n" for d in range(1, 5)) + r'''
+''' + "\n".join(functions) + "\nroot.scTr = scTr; root.scCuePlaying = scCuePlaying; root.scCueProbe = 0; root.scCueBeatOf = scCueBeatOf; root.scCueGrids = {}; root.scCueGridGen = 0;\nroot.scCueBeatPaths = ['', ...[1, 2, 3, 4].map(d => '/Engine/Deck' + d + '/BeatNumber')]; root.scCueBarPaths = ['', ...[1, 2, 3, 4].map(d => '/Engine/Deck' + d + '/Track/BarsElapsed')];\n" + "".join(f"Object.defineProperty(root, 'scCueBeat{d}', {{get() {{ return scCueBeatOf({d}, root.scCueProbe); }}, configurable: true}});\n" for d in range(1, 5)) + r'''
 const set = (key, fields) => Object.assign(scTr('/Engine/Deck1/' + key), fields);
 set('Track/SongLoaded', {state: true});
 set('Track/SampleRate', {value: 1000});

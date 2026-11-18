@@ -182,44 +182,49 @@ func ParseDisplayCuesAndLoops(track, cues, loops []byte) ([]DisplayCue, []Displa
 	return outCues, outLoops, nil
 }
 
-func parseDisplayBeats(blob []byte, rate, samples float64) ([]DisplayBeat, error) {
+// GridMarker is one anchor of Engine's saved beat grid: the sample position and Engine's zero-based beat index there. Between
+// two markers the beats are evenly spaced; the tempo changes at a marker.
+type GridMarker struct {
+	Sample float64 `json:"p"`
+	Beat   int64   `json:"n"`
+}
+
+// readGridMarkers returns the markers the display grid is built from (the adjusted grid when it has two, else the original)
+// and whether the track has a grid at all.
+func readGridMarkers(blob []byte, rate, samples float64) ([]GridMarker, bool, error) {
 	raw, err := QUncompress(blob, 8<<20)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if len(raw) < 33 || raw[16] > 1 || displayFloat(raw, big) != rate {
-		return nil, fmt.Errorf("display: invalid beatData header")
+		return nil, false, fmt.Errorf("display: invalid beatData header")
 	}
 	// Stock beatData can store a duration truncated to whole seconds, while
 	// trackData keeps the decoded sample count. Keep the saved grid unchanged.
 	gridSamples := displayFloat(raw[8:], big)
 	if !displayFinite(gridSamples) || gridSamples < 0 ||
 		(math.Abs(gridSamples-samples) > 1 && gridSamples != math.Floor(samples/rate)*rate) {
-		return nil, fmt.Errorf("display: invalid beatData header")
+		return nil, false, fmt.Errorf("display: invalid beatData header")
 	}
-	type marker struct {
-		p float64
-		n int64
-	}
-	var grids [2][]marker
+	var grids [2][]GridMarker
 	off := 17
 	for g := range grids {
 		if len(raw)-off < 8 {
-			return nil, fmt.Errorf("display: truncated grid")
+			return nil, false, fmt.Errorf("display: truncated grid")
 		}
 		n := big.Uint64(raw[off:])
 		off += 8
 		if n > 65536 || n > uint64((len(raw)-off)/24) {
-			return nil, fmt.Errorf("display: invalid grid count")
+			return nil, false, fmt.Errorf("display: invalid grid count")
 		}
 		for range n {
-			m := marker{displayFloat(raw[off:], little), int64(little.Uint64(raw[off+8:]))}
+			m := GridMarker{displayFloat(raw[off:], little), int64(little.Uint64(raw[off+8:]))}
 			off += 24
-			if !displayFinite(m.p) || math.Abs(m.p) > 1e12 || m.n < -1000000 || m.n > 1000000 {
-				return nil, fmt.Errorf("display: invalid grid marker")
+			if !displayFinite(m.Sample) || math.Abs(m.Sample) > 1e12 || m.Beat < -1000000 || m.Beat > 1000000 {
+				return nil, false, fmt.Errorf("display: invalid grid marker")
 			}
-			if a := grids[g]; len(a) != 0 && (a[len(a)-1].p >= m.p || a[len(a)-1].n >= m.n) {
-				return nil, fmt.Errorf("display: unordered grid")
+			if a := grids[g]; len(a) != 0 && (a[len(a)-1].Sample >= m.Sample || a[len(a)-1].Beat >= m.Beat) {
+				return nil, false, fmt.Errorf("display: unordered grid")
 			}
 			grids[g] = append(grids[g], m)
 		}
@@ -228,24 +233,54 @@ func parseDisplayBeats(blob []byte, rate, samples float64) ([]DisplayBeat, error
 	if len(m) < 2 {
 		m = grids[0]
 	}
+	return m, raw[16] != 0, nil
+}
+
+// ParseDisplayGrid returns the sample rate and the saved grid's markers for the countdown to a hot cue: a piecewise-linear
+// map from a sample position to a beat index, exact across tempo changes. A track without a grid has no markers.
+func ParseDisplayGrid(track, beats []byte) (float64, []GridMarker, error) {
+	raw, err := QUncompress(track, 4096)
+	if err != nil {
+		return 0, nil, err
+	}
+	if len(raw) != 44 && len(raw) != 68 {
+		return 0, nil, fmt.Errorf("display: unknown trackData length")
+	}
+	rate := displayFloat(raw, big)
+	samples := big.Uint64(raw[8:])
+	if !displayFinite(rate) || rate < 8000 || rate > 384000 || samples == 0 || samples > uint64(rate*86400) {
+		return 0, nil, fmt.Errorf("display: invalid trackData")
+	}
+	m, on, err := readGridMarkers(beats, rate, float64(samples))
+	if err != nil || !on || len(m) < 2 {
+		return rate, nil, err
+	}
+	return rate, m, nil
+}
+
+func parseDisplayBeats(blob []byte, rate, samples float64) ([]DisplayBeat, error) {
+	m, on, err := readGridMarkers(blob, rate, samples)
+	if err != nil {
+		return nil, err
+	}
 	out := []DisplayBeat{}
-	if raw[16] == 0 || len(m) < 2 {
+	if !on || len(m) < 2 {
 		return out, nil
 	}
-	if m[len(m)-1].n-m[0].n > 65536 {
+	if m[len(m)-1].Beat-m[0].Beat > 65536 {
 		return nil, fmt.Errorf("display: excessive expanded grid")
 	}
 	for i := 0; i+1 < len(m); i++ {
-		for n := m[i].n; n < m[i+1].n; n++ {
-			p := m[i].p + float64(n-m[i].n)*(m[i+1].p-m[i].p)/float64(m[i+1].n-m[i].n)
+		for n := m[i].Beat; n < m[i+1].Beat; n++ {
+			p := m[i].Sample + float64(n-m[i].Beat)*(m[i+1].Sample-m[i].Sample)/float64(m[i+1].Beat-m[i].Beat)
 			if p >= 0 && p <= samples {
 				out = append(out, DisplayBeat{MS: p * 1000 / rate, Number: n})
 			}
 		}
 	}
 	last := m[len(m)-1]
-	if last.p >= 0 && last.p <= samples {
-		out = append(out, DisplayBeat{MS: last.p * 1000 / rate, Number: last.n})
+	if last.Sample >= 0 && last.Sample <= samples {
+		out = append(out, DisplayBeat{MS: last.Sample * 1000 / rate, Number: last.Beat})
 	}
 	return out, nil
 }
