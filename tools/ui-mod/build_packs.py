@@ -5232,7 +5232,7 @@ DISPLAY_ENTRIES = """
 PLAYBACK_ENTRIES = (switch_entry("Master Soft Clipper", "scMasterLimiter", "masterLimiter", '\t\t\tvisible: !root.scOff("dsp-guards")\n')
     + switch_entry("Auto-Gain (0 dB Normalize)", "scAutoGain", "autoGain", '\t\t\tvisible: !root.scOff("dsp-guards")\n')
     + switch_entry("Echo Out", "scUpfaderEcho", "upfaderEcho", '\t\t\tvisible: root.scHasMixer && !root.scOff("dsp-guards")\n')
-    + switch_entry("Stems EQ Mode", "scStemsEqMode", "stemsEqMode", "\t\t\tvisible: root.scHasStemsEq\n") + """
+    + switch_entry("Stems EQ Mode", "scStemsEqMode", "stemsEqMode", '\t\t\tvisible: root.scHasStemsEq && !root.scOff("stems-eq")\n') + """
 		EntryBase.ListEntry {
 			text: "Color FX Style"
 			// Played by each channel's filter knob; shown only where the hook installed that (its ready marker).

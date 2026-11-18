@@ -16,6 +16,7 @@ class HookFeatureCoverageTest(unittest.TestCase):
         mutations = [
             source.replace('EDIT_GATEWAY, HF_GATEWAY}', 'EDIT_GATEWAY}', 1),
             source.replace('patch_bytes(HF_DSP_GUARDS, rate,', 'patch_bytes(rate,', 1),
+            source.replace('patch_pointer(HF_GATEWAY, slot,', 'patch_pointer(slot,', 1),
             source.replace('HF_CONFIG(HF_STEMS, 0xe5c020db)', '0xe5c020db', 1),
             source.replace('HF_INTERPOSE(HF_BLUETOOTH)\nint sbc_reinit_a2dp', 'int sbc_reinit_a2dp', 1),
             source + '\nstatic void new_hook(void *p) { mprotect(p, 4096, 3); }\n',
