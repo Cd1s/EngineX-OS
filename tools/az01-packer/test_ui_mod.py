@@ -407,7 +407,7 @@ class OnOffSwitchCompatibilityTest(unittest.TestCase):
     def test_both_bases_follow_external_state_after_clicks_in_all_languages(self):
         expected = {
             "scBroadcastOn": "broadcast", "scProlinkShare": "prolinkShare",
-            "scMasterLimiter": "masterLimiter",
+            "scMasterLimiter": "masterLimiter", "scHifiOutput": "hifiOutput",
             "scAutoGain": "autoGain", "scUpfaderEcho": "upfaderEcho",
             "scStemsEqMode": "stemsEqMode", "scBeatJumpPads": "beatJumpPads",
             "scPitchBendBeatJump": "pitchBendBeatJump",
