@@ -735,6 +735,9 @@ static unsigned lim_release_frames(unsigned rate)
 
 static void test_master_limiter_rate(void)
 {
+    CHECK(sc_dsp_rate_from_output(96000, 1) == 48000); /* Gen-1 ALSACombinedDevice is 2x DSP_MASTER */
+    CHECK(sc_dsp_rate_from_output(44100, 0) == 44100); /* all-in-one */
+    CHECK(sc_dsp_rate_from_output(48000, 0) == 48000); /* AZ04 / native-rate path */
     const unsigned rates[] = {44100, 48000, 96000};
     unsigned reference = 0;
     for (unsigned i = 0; i < sizeof rates / sizeof *rates; i++) {

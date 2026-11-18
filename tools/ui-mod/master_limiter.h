@@ -21,6 +21,13 @@
 #define SC_LIM_RELEASE_INV_TAU 9.984508f /* -1/log(SC_LIM_RELEASE) / 96 kHz */
 #define SC_DSP_DEFAULT_RATE 96000u
 
+static inline unsigned sc_dsp_rate_from_output(unsigned output_rate, int gen1_player)
+{
+    if (!output_rate)
+        return SC_DSP_DEFAULT_RATE;
+    return gen1_player && output_rate >= 2 ? output_rate / 2 : output_rate;
+}
+
 struct sc_lim {
     float env; /* peak envelope, 0 while below SC_LIM_SAT */
     float release;

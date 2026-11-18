@@ -144,7 +144,9 @@ int setenv(const char *name, const char *value, int overwrite) {
 
 static void *alsa_sw_cache, *alsa_tstamp_set_cache, *alsa_tstamp_get_cache;
 static void *alsa_hw_cache, *alsa_hw_rate_cache, *alsa_stream_cache;
+/* Rate after Engine's own pre-DAC render stage; Gen-1 renders at half its 96 kHz ALSA rate. */
 static unsigned master_rate = SC_DSP_DEFAULT_RATE;
+static int player_board(void);
 
 HF_INTERPOSE(HF_DSP_GUARDS)
 int snd_pcm_hw_params(void *pcm, void *params) {
@@ -157,7 +159,7 @@ int snd_pcm_hw_params(void *pcm, void *params) {
         unsigned rate = 0;
         int direction = 0;
         if (get_rate && (!stream || stream(pcm) == 0) && get_rate(params, &rate, &direction) >= 0 && rate)
-            __atomic_store_n(&master_rate, rate, __ATOMIC_RELEASE);
+            __atomic_store_n(&master_rate, sc_dsp_rate_from_output(rate, player_board()), __ATOMIC_RELEASE);
     }
     return rc;
 }
@@ -198,7 +200,6 @@ static struct sc_pfx_ms master_ms[4];
 static int pioneer_fx_mode;           // #88 master-output style: settings.conf never sets it (a stored style stayed on at a fixed mix, no control drove it); only the DSP tests do
 static const char *four_deck_settings = UI_ROOT "/settings.conf";
 static const char *product_code_path = "/sys/firmware/devicetree/base/inmusic,product-code";
-static int player_board(void);
 
 // Pad LED Brightness: Engine sends every controller LED through snd_seq_event_output_direct
 // (RGB LEDs as 14/15-byte SysEx, single-colour keys as NoteOn). Scale the RGB SysEx PWM bytes
