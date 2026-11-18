@@ -134,6 +134,7 @@ func exportCandidates(r *compat.Resolver, mount string) ([]exportCandidate, erro
 			mark = readMark(dir, stampName)
 		}
 		mark = strings.TrimPrefix(mark, stampVersion+" ")
+		mark = strings.TrimPrefix(mark, "v2 ")
 		for i, c := range oneLib {
 			if strings.HasPrefix(mark, c.rel+" ") {
 				oneLib[0], oneLib[i] = oneLib[i], oneLib[0]
@@ -374,9 +375,14 @@ const (
 	// pendingName holds the stamp of an export whose import left tracks without
 	// their files read; the next mount of the same export resumes it.
 	pendingName  = ".rb-bridge-pending"
-	stampVersion = "v2" // v2 checks per-track MP3 start-offset classes (#178)
+	stampVersion = "v3" // v2 aligned MP3 (#178); v3 also checks AAC priming.
 	stateName    = ".rb-bridge-state.db"
 )
+
+func legacyGridOptions(stamp string) (mp3, aac bool) {
+	return stamp != "" && !strings.HasPrefix(stamp, stampVersion+" ") && !strings.HasPrefix(stamp, "v2 "),
+		strings.HasPrefix(stamp, "v2 ")
+}
 
 // The edisksd hook kills rb-bridge 20 s after the mount, which rolled back the
 // whole import, playlists included (#48). Stop reading files after this; the
@@ -517,7 +523,7 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 		dropStage(stage) // a stage of another export, or a first import's: the library is the volume's own now
 	}
 	oldStamp := readMark(dir, stampName)
-	opts.LegacyOffsets = oldStamp != "" && !strings.HasPrefix(oldStamp, stampVersion+" ")
+	opts.LegacyOffsets, opts.LegacyAACOffsets = legacyGridOptions(oldStamp)
 	bypass := !full && !opts.SmartMatch && importedStamp(dir) == stamp
 	// An earlier export-only import still has tracks without their files read.
 	resume := bypass && hasFastTracks(dir)

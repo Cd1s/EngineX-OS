@@ -115,7 +115,7 @@ func TestIssue233LargeSkeletonAndEngineAnalyzedResume(t *testing.T) {
 		t.Fatalf("playlist lost tracks: %d", n)
 	}
 	if r := issue233Mount(t, root, enginedb.Options{}); !r.Bypassed {
-		t.Fatalf("v2 stamp not bypassed: %+v", r)
+		t.Fatalf("current stamp not bypassed: %+v", r)
 	}
 }
 
