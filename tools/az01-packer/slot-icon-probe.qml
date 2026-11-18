@@ -82,8 +82,8 @@ Item {
         shot(s.id, strip.holder)
     }
     // A track loads on a deck: the pack asks the gateway which service it is from (scSwapStemmed, on Engine's TrackUri change) and notes the header
-    // of the answer. This Engine has no streaming track to load, so the probe makes the same request and notes the answer the same way;
-    // scSwapStemmed itself runs in the Node test with a fake XHR.
+    // of the answer. This Engine has no streaming track to load (the live TrackUri check would drop the answer), so the probe makes the same
+    // request and notes the answer the same way, bypassing scSwapStemmed: its load snapshot, load counter and URI check run only in the Node tests.
     function load(deck, id) {
         const x = new XMLHttpRequest()
         x.open("GET", "http://127.0.0.1:8080/v1/enginex/stems/local?id=" + id)
@@ -144,15 +144,16 @@ Item {
         // A rekordbox Link row (computer or CDJ media) is not TIDAL's mark even while TIDAL is selected.
         list.push([900, function() { load(2, 4) }])
         list.push([1200, function() { two("own-C-rekordbox-link", marks.deezer, true, marks.rekordbox, true) }])
-        // A track the gateway does not know (real TIDAL's) keeps TIDAL's mark under the TIDAL scope; under another scope it gets the fallback.
+        // A deck with no service on record (the probe notes none for an id the gateway does not know; scSwapStemmed itself would record the slot's
+        // service at load, which only the Node tests cover) keeps TIDAL's mark under the TIDAL scope; under another scope it gets the fallback.
         list.push([900, function() { load(1, 99) }])
         list.push([1200, function() {
-            checkStrip(pair.a.item, "unknown track under TIDAL", marks.tidal, false)
+            checkStrip(pair.a.item, "no record under TIDAL", marks.tidal, false)
             checkStrip(pair.b.item, "rekordbox deck unchanged", marks.rekordbox, true)
             shot("own-D-unknown", pair.box)
             root.scScope = "deezer"
         }])
-        list.push([900, function() { checkStrip(pair.a.item, "unknown track, Deezer selected: the fallback", marks.deezer, true) }])
+        list.push([900, function() { checkStrip(pair.a.item, "no record, Deezer selected: the fallback", marks.deezer, true) }])
         list.push([300, function() {
             say("failures " + failures)
             console.warn("X166 DONE|" + (failures === 0 ? "PASS" : "FAIL") + "|")

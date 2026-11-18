@@ -8206,12 +8206,12 @@ class StreamingSlotIconTest(unittest.TestCase):
 
     PRELUDE = r"""
 const assert = require('node:assert/strict');
-let scScope = '', scRekordboxName = '', scDeckService = {};
+let scScope = '', scRekordboxName = '', scDeckService = {}, scTidalLoggedIn = false;
 const scT = s => s;
 const scServices = [{id: 'rekordbox', name: 'rekordbox'}, {id: 'tidal', name: 'TIDAL'}, {id: 'netease', name: 'NetEase Cloud Music'},
     {id: 'spotify', name: 'Spotify'}, {id: 'deezer', name: 'Deezer'}, {id: 'soundcloud', name: 'SoundCloud'},
     {id: 'beatport', name: 'Beatport'}, {id: 'applemusic', name: 'Apple Music'}];
-const root = {scNoteService: (d, i) => scNoteService(d, i), scServiceOf: x => scServiceOf(x), scLoadSeq: {}, get scScope() { return scScope }};
+const root = {scNoteService: (d, i) => scNoteService(d, i), scServiceOf: x => scServiceOf(x), scLoadSeq: {}, get scScope() { return scScope }, get scTidalLoggedIn() { return scTidalLoggedIn }};
 """
 
     def run_node(self, script):
@@ -8316,9 +8316,10 @@ r = load(1, track(16)); r.getResponseHeader = () => null; r.answer(404, {'x-engi
     @unittest.skipUnless(shutil.which("node"), "Node is required to run the root helpers")
     def test_a_real_tidal_track_keeps_tidals_mark_whatever_is_selected_later(self):
         self.run_node(self.PRELUDE + self.functions("scIcon", "scNoteService", "scServiceOf", "scOwnService", "scSlotIcon", "scBrand", "scSwapStemmed") + self.LOADING + r"""
-// Loaded under the tidal scope, the slot is real TIDAL's: the gateway has no header for its id, and the id may even coincide with a gateway
-// track's (the gateway then names another service); the deck is TIDAL's all the same, now and after the selected service changes.
-scScope = 'tidal';
+// Loaded under the tidal scope with a TIDAL account paired, the slot is real TIDAL's: the gateway has no header for its id, and the id may
+// even coincide with a gateway track's (the gateway then names another service); the deck is TIDAL's all the same, now and after the selected
+// service changes.
+scScope = 'tidal'; scTidalLoggedIn = true;
 let r = load(1, track(5000001)); assert.equal(scOwnService(1), 'tidal'); r.answer(404, {});
 r = load(2, track(3)); r.answer(404, {'x-enginex-provider': 'deezer'});
 for (const scope of ['tidal', 'deezer', 'spotify', 'rekordbox', '']) {
@@ -8330,6 +8331,11 @@ scScope = ''; r = load(1, track(5000002)); r.answer(404, {}); scScope = 'deezer'
 // A Deezer track loaded under the Deezer scope that the gateway no longer knows keeps its service when another one is selected.
 r = load(2, track(4)); r.answer(404, {}); scScope = 'spotify';
 assert.equal(scSlotIcon('TIDAL', 2), 'file:///data/enginex/ui/icons/deezer.png'); assert.equal(scBrand('TIDAL', 2), 'Deezer');
+// No TIDAL account paired: the gateway also plays its known tracks in the tidal scope, so its valid answer counts there; no answer is TIDAL's.
+scTidalLoggedIn = false; scScope = 'tidal';
+r = load(1, track(21)); assert.equal(scOwnService(1), 'tidal'); r.answer(404, {'x-enginex-provider': 'spotify'});
+scScope = 'deezer'; assert.equal(scOwnService(1), 'spotify'); assert.equal(scSlotIcon('TIDAL', 1), 'file:///data/enginex/ui/icons/spotify.png'); assert.equal(scBrand('TIDAL', 1), 'Spotify');
+scScope = 'tidal'; r = load(2, track(22)); r.answer(404, {}); scScope = 'deezer'; assert.equal(scSlotIcon('TIDAL', 2), '');
 """)
 
     @unittest.skipUnless(shutil.which("node"), "Node is required to run the root helpers")
@@ -8350,6 +8356,34 @@ a.answer(404, {'x-enginex-provider': 'netease'}); assert.equal(scOwnService(2), 
 b.answer(404, {'x-enginex-provider': 'deezer'}); assert.equal(scOwnService(2), 'deezer');
 // The answer to the live load still swaps a stemmed copy in.
 const c = load(1, track(9)); c.answer(200, {'x-enginex-provider': 'soundcloud'}, {path: '/data/new.flac'}); assert.deepEqual(loaded, [[1, 'file:///data/new.flac']]);
+""")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required to run the root helpers")
+    def test_an_answer_for_a_track_that_is_no_longer_on_the_deck_is_dropped_even_without_a_notice(self):
+        self.run_node(self.PRELUDE + self.functions("scNoteService", "scServiceOf", "scOwnService", "scSwapStemmed") + self.LOADING + r"""
+scScope = 'spotify';
+// A deck whose listener is gone (four-deck roles) changes track with no scSwapStemmed call: the old 200 must not record a service for, nor
+// load a stemmed copy over, the track that is on the deck now.
+const old = load(1, track(7));
+uris[1] = 'file:///data/now.mp3';
+old.answer(200, {'x-enginex-provider': 'netease'}, {path: '/data/old.flac'});
+assert.equal(scOwnService(1), 'spotify'); assert.equal(loaded.length, 0);
+// The same, the deck now holding another streamed track that was never noticed.
+uris[1] = track(8); old.answer(200, {'x-enginex-provider': 'netease'}, {path: '/data/old.flac'}); assert.equal(scOwnService(1), 'spotify'); assert.equal(loaded.length, 0);
+""")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required to run the root helpers")
+    def test_a_real_tidal_track_never_loads_a_gateway_tracks_stems(self):
+        self.run_node(self.PRELUDE + self.functions("scNoteService", "scServiceOf", "scOwnService", "scSwapStemmed") + self.LOADING + r"""
+// Real TIDAL (account paired, tidal scope) with an id that coincides with a gateway track that has a stemmed copy: the 200 is another track's.
+scScope = 'tidal'; scTidalLoggedIn = true;
+let r = load(1, track(3)); r.answer(200, {'x-enginex-provider': 'deezer'}, {path: '/data/other.flac'});
+assert.equal(loaded.length, 0); assert.equal(scOwnService(1), 'tidal');
+// A gateway track still swaps in: no TIDAL account paired in the tidal scope, or any other scope.
+scTidalLoggedIn = false;
+r = load(1, track(3)); r.answer(200, {'x-enginex-provider': 'deezer'}, {path: '/data/own.flac'}); assert.deepEqual(loaded, [[1, 'file:///data/own.flac']]);
+scScope = 'spotify'; scTidalLoggedIn = true;
+r = load(2, track(4)); r.answer(200, {'x-enginex-provider': 'spotify'}, {path: '/data/two.flac'}); assert.equal(loaded.length, 2); assert.equal(scOwnService(2), 'spotify');
 """)
 
     def test_the_gateway_and_the_pack_use_the_same_header(self):

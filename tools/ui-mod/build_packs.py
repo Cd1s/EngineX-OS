@@ -3638,8 +3638,9 @@ SERVICES_MAIN = """
 	}
 	// #305: every service rides Engine's TIDAL slot, so a deck's track reports the source "TIDAL" whoever it comes from, and Engine passes
 	// nothing else about a loaded track to QML. scSwapStemmed records a service per deck as the track loads: the slot's own backend (the
-	// selected service then; real TIDAL under the tidal scope, whatever the gateway would say of a coinciding id), which the gateway's
-	// answer to the lookup scSwapStemmed makes then replaces with the track's own. The deck header draws that service's mark (the same
+	// selected service then; real TIDAL under the tidal scope while a TIDAL account is paired, whatever the gateway would say of a
+	// coinciding id), which the gateway's answer to the lookup scSwapStemmed makes then replaces with the track's own (the gateway also
+	// plays its known tracks in the tidal scope when no TIDAL account is paired, so there its valid answer counts). The deck header draws that service's mark (the same
 	// icons as the Source list and the login dialogs); only a deck with no record (a track already loaded when the UI started) falls back to
 	// the selected service.
 	property var scDeckService: ({})
@@ -4724,15 +4725,18 @@ SERVICES_MAIN = """
 		// Every URI change (a load, an unload, the same track again) is a new load of the deck: an answer to an older one is dropped (#305).
 		const load = root.scLoadSeq[deck] = (root.scLoadSeq[deck] || 0) + 1
 		const m = /^streaming:\\/\\/TIDAL\\/Track\\/(\\d+)$/.exec(uri)
-		const slot = root.scScope || "tidal" // what the slot's backend is as this track loads: real TIDAL under the tidal scope, else the gateway
+		const slot = root.scScope || "tidal" // what the slot's backend is as this track loads
+		const real = slot === "tidal" && root.scTidalLoggedIn // real TIDAL's tracks: a gateway track of the same number is not this one
 		root.scNoteService(deck, m ? slot : "") // the last track's service must not outlive it
 		if (!m) return
 		const x = new XMLHttpRequest()
 		x.open("GET", "http://127.0.0.1:8080/v1/enginex/stems/local?id=" + m[1])
 		x.onreadystatechange = function() {
 			if (x.readyState !== 4 || root.scLoadSeq[deck] !== load) return
-			if (slot !== "tidal") root.scNoteService(deck, root.scServiceOf(x) || slot) // 404 (no stemmed copy) names the service too
-			if (x.status !== 200 || Planck.getProperty("/Engine/Deck%1/PlayState".arg(deck)).translator.state) return
+			const cur = Planck.getProperty("/Engine/Deck%1/Track/TrackUri".arg(deck)) // the deck may have no listener (four-deck roles) while its track changes
+			if (!cur || !cur.translator || cur.translator.string !== uri) return
+			if (!real) root.scNoteService(deck, root.scServiceOf(x) || slot) // 404 (no stemmed copy) names the service too
+			if (x.status !== 200 || real || Planck.getProperty("/Engine/Deck%1/PlayState".arg(deck)).translator.state) return
 			Planck.getProperty("/Client/Librarian/AddToDatabaseAndLoadToDeck%1".arg(deck)).translator.url = "file://" + encodeURI(JSON.parse(x.responseText).path)
 		}
 		x.send()
