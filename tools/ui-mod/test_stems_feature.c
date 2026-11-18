@@ -1487,6 +1487,118 @@ static void test_rec_stream(const char *filename) {
     printf("#206 recording with streaming tracks (%s): 8 sites stock->patched on all-in-ones, untouched on JP07/JP08/JP13/JP14, none on a 1-site mismatch: PASS\n", build->name);
 }
 
+static const char *analysis_filename(void *db, const char *name) {
+    return sqlite3_db_filename(db, name);
+}
+
+static const char *analysis_sql(void *stmt) { return sqlite3_sql(stmt); }
+static void *analysis_db(void *stmt) { return sqlite3_db_handle(stmt); }
+
+static void analysis_file(const char *path, const void *data, size_t size) {
+    FILE *file = fopen(path, "wb");
+    assert(file && fwrite(data, 1, size, file) == size && !fclose(file));
+}
+
+static void analysis_bind(sqlite_bind_int64_fn bind, sqlite3 *db, const char *sql, int id) {
+    sqlite3_stmt *stmt = NULL;
+    assert(sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK);
+    assert(bind(stmt, 1, id) == SQLITE_OK);
+    assert(sqlite3_step(stmt) == SQLITE_ROW);
+    assert(sqlite3_finalize(stmt) == SQLITE_OK);
+}
+
+static void test_analysis_dispatch(void) {
+    enum { lock = 0x1d55120, prepare = 0x1d55634, close_v2 = 0x1d21af4, filename = 0x1cb0d94,
+           bind = 0x1cdfb90, bind_int = 0x1cdfc28, db_handle = 0x1c9a210, sql_text = 0x1c9a2a0,
+           step = 0x1d6fef8, analyze = 0xe525ec, load = 0xd6b100, size = 0x2d00000 };
+    size_t page = (size_t)sysconf(_SC_PAGESIZE);
+    char *image = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    assert(image != MAP_FAILED);
+    uintptr_t base = (uintptr_t)image;
+    for (size_t i = 0; i < sizeof engine_builds / sizeof *engine_builds; i++)
+        if (!strcmp(engine_builds[i].name, "5.3.0")) select_build(&engine_builds[i]);
+    assert(!strcmp(build->name, "5.3.0"));
+    uint32_t *api = (void *)(base + build->sqlite_api);
+    api[116] = base + prepare; api[179] = base + close_v2; api[180] = base + filename;
+    api[5] = base + bind; api[4] = base + bind_int; api[49] = base + db_handle; api[153] = base + sql_text;
+    api[65] = base + 0x1c9bc08; api[94] = base + step;
+    const uint32_t lock_code[] = {0xe16d42f4, 0xe1cd60f8};
+    const uint32_t db_code[] = {0xe3500000, 0x15900000, 0xe12fff1e};
+    const uint32_t sql_code[] = {0xe3500000, 0x159000d0, 0xe12fff1e};
+    const uint32_t step_code[] = {0xe59f3d88, 0xe16d42f4};
+    const uint32_t load_code[] = {0xe24b105c, 0xe1a00007, 0xe59330c8, 0xe12fff33};
+    memcpy(image + lock, lock_code, sizeof lock_code);
+    memcpy(image + analyze, lock_code, sizeof lock_code);
+    memcpy(image + db_handle, db_code, sizeof db_code);
+    memcpy(image + sql_text, sql_code, sizeof sql_code);
+    memcpy(image + step, step_code, sizeof step_code);
+    memcpy(image + load, load_code, sizeof load_code);
+    *(uint32_t *)(image + prepare + 0x1c) = 0xeb000000u | (((uint32_t)(lock - prepare - 0x1c - 8) >> 2) & 0xffffffu);
+    uint32_t *short_bind = (void *)(image + bind_int);
+    short_bind[0] = 0xe1a03fc2;
+    short_bind[1] = 0xea000000u | (((uint32_t)(bind - bind_int - 12) >> 2) & 0xffffffu);
+    // The production trampoline replays the first two instructions. The test
+    // tail restores r4/sp and continues into real SQLite.
+    const uint32_t bind_code[] = {0xe16d41f8, 0xe1a04001, 0xe49d4018};
+    emit_tail(image + bind, bind_code, 3, sqlite3_bind_int64);
+
+    char dir[] = "/tmp/enginex-dispatch-XXXXXX", board[128], loading[128], rbx[128], peer[128], sidecar[128], library[128];
+    assert(mkdtemp(dir));
+    snprintf(board, sizeof board, "%s/board", dir);
+    snprintf(loading, sizeof loading, "%s/.loading", dir);
+    snprintf(rbx, sizeof rbx, "%s/712.bin", dir);
+    snprintf(peer, sizeof peer, "%s/peer-a", dir);
+    snprintf(sidecar, sizeof sidecar, "%s/peer-a/track.wav.analysis", dir);
+    snprintf(library, sizeof library, "%s/m.db", dir);
+    assert(!mkdir(peer, 0700));
+    static const char data[] = "RBXA1" "\1\0\0\0" "t" "\1\0\0\0" "o" "\1\0\0\0" "b" "\1\0\0\0" "c" "\0\0\0\0";
+    analysis_file(board, "JP07", 4);
+    analysis_file(loading, "", 0);
+    analysis_file(rbx, data, sizeof data - 1);
+    analysis_file(sidecar, data, sizeof data - 1);
+    product_code_path = board;
+    sc_rbx_dir = sc_shadow_root = dir;
+    sc_shadow_library = library;
+    sqlite_exec_original = real_sqlite_exec;
+
+    install_rekordbox_analysis(base, page);
+    assert(rbx_bind_original);
+    install_shadow_analysis(base, page);
+    assert(shadow_analysis_enabled);
+    assert(((const uint32_t *)(base + bind))[1] == (uintptr_t)rbx_bind);
+    // The stock consumers use the prepared statement's SQLite handle and SQL.
+    // Use libsqlite adapters for the test statements while keeping the patched
+    // entry and its original bind trampoline in the path.
+    rbx_statement_sql = analysis_sql;
+    rbx_statement_db = analysis_db;
+    rbx_sqlite.filename = shadow_sqlite.filename = analysis_filename;
+    sqlite3 *db = NULL;
+    assert(sqlite3_open(library, &db) == SQLITE_OK);
+    assert(sqlite3_exec(db,
+        "CREATE TABLE Track(id INTEGER PRIMARY KEY,uri TEXT,label TEXT,path TEXT,isAnalyzed INTEGER DEFAULT 0,"
+        "isBeatGridLocked INTEGER DEFAULT 0,playOrder INTEGER,length INTEGER,bpm REAL,year INTEGER);"
+        "CREATE TABLE PerformanceData(trackId INTEGER PRIMARY KEY,trackData BLOB,overviewWaveFormData BLOB,"
+        "beatData BLOB,quickCues BLOB,loops BLOB,thirdPartySourceId INTEGER,activeOnLoadLoops INTEGER);"
+        "INSERT INTO Track(id,uri,label,path) VALUES(1,'streaming://TIDAL/Track/712','rekordbox [Test]',''),"
+        "(2,'','','" SC_SHADOW_REL "peer-a/track.wav');"
+        "INSERT INTO PerformanceData(trackId) VALUES(1),(2);", NULL, NULL, NULL) == SQLITE_OK);
+    sqlite_bind_int64_fn entry = (void *)(base + bind);
+    const char *shadow_read = SC_SHADOW_TRACK_READ "t.isAnalyzed FROM Track AS t WHERE t.id = ?";
+    analysis_bind(entry, db, SC_RBX_ANALYSIS_SELECT "?", 2);
+    analysis_bind(entry, db, shadow_read, 1);
+    assert(pragma(db, "SELECT count(*) FROM PerformanceData WHERE trackData IS NOT NULL") == 0);
+    analysis_bind(entry, db, SC_RBX_ANALYSIS_SELECT "?", 1);
+    assert(pragma(db, "SELECT id FROM Track WHERE isAnalyzed = 1") == 1);
+    assert(pragma(db, "SELECT count(*) FROM PerformanceData WHERE trackData IS NOT NULL") == 1);
+    analysis_bind(entry, db, shadow_read, 2);
+    assert(pragma(db, "SELECT count(*) FROM Track WHERE isAnalyzed = 1") == 2);
+    assert(pragma(db, "SELECT count(*) FROM PerformanceData WHERE trackData IS NOT NULL") == 2);
+    assert(sqlite3_close(db) == SQLITE_OK);
+    assert(!unlink(library) && !unlink(sidecar) && !rmdir(peer) && !unlink(rbx) && !unlink(loading) && !unlink(board) && !rmdir(dir));
+    assert(!munmap(image, size));
+    puts("Installed SQLite bind dispatcher isolates rekordbox and shadow: PASS");
+}
+
 int main(int argc, char **argv) {
     for (size_t b = 0; b < sizeof engine_builds / sizeof *engine_builds; b++) {
         // Hooks and counters are process-global; each build starts pristine.
@@ -1516,5 +1628,6 @@ int main(int argc, char **argv) {
     test_stems_processor_prefers_enginex();
     test_alsa_boot_hook();
     for (int i = 1; i < argc; i++) { test_patch_files(argv[i]); test_rec_stream(argv[i]); }
+    test_analysis_dispatch();
     return 0;
 }

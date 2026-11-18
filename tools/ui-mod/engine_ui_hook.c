@@ -37,6 +37,7 @@
 #if !defined(__aarch64__)
 #include "rekordbox_rows.h"
 #include "rekordbox_analysis.h"
+#include "shadow_analysis.h"
 #endif
 #include "dsp_smooth.h"
 #include "master_limiter.h"
@@ -2386,6 +2387,7 @@ static void install_bt_send(uintptr_t base, size_t page);
 #if !defined(__aarch64__)
 static void install_rekordbox_rows(uintptr_t base, size_t page);
 static void install_rekordbox_analysis(uintptr_t base, size_t page);
+static void install_shadow_analysis(uintptr_t base, size_t page);
 static void install_shadow_browse(uintptr_t base, size_t page);
 #endif
 
@@ -2467,6 +2469,7 @@ __attribute__((constructor)) static void edit_engine(void) {
 #if !defined(__aarch64__)
     install_rekordbox_rows(base, page);
     install_rekordbox_analysis(base, page);
+    install_shadow_analysis(base, page);
     install_shadow_browse(base, page);
 #endif
     if (install_dsp_hooks(base, page)) {
@@ -3412,24 +3415,33 @@ static sqlite_bind_int64_fn rbx_bind_original;
 static const char *(*rbx_statement_sql)(void *);
 static void *(*rbx_statement_db)(void *);
 static struct sc_rbx_sqlite rbx_sqlite;
-static __thread int rbx_filling;
+static __thread int analysis_filling;
+static int shadow_analysis_enabled;
+static void shadow_fill(void *db, long long id);
 
 static void rbx_fill(void *db, long long track, const char *sql, int n) {
     long long id = 0;
-    rbx_filling = 1;
+    analysis_filling = 1;
     const char *result = sql ? sc_rbx_fill(&rbx_sqlite, db, sql, n, &track, &id) : sc_rbx_fill_track(&rbx_sqlite, db, track, &id);
-    rbx_filling = 0;
+    analysis_filling = 0;
     if (result) fprintf(stderr, "engine-ui-hook: rekordbox analysis for track %lld (%lld): %s\n", track, id, result);
 }
 
 static int rbx_prepare(void *db, const char *sql, int n, unsigned flags, void *old, void **stmt, const char **tail) {
-    if (!rbx_filling && sql && sql[0] == 'S') rbx_fill(db, 0, sql, n);
+    if (!analysis_filling && sql && sql[0] == 'S') rbx_fill(db, 0, sql, n);
     return rbx_prepare_original(db, sql, n, flags, old, stmt, tail);
 }
 
 static int rbx_bind(void *stmt, int i, long long value) {
-    if (i == 1 && !rbx_filling && stmt && sc_rbx_analysis_bound(rbx_statement_sql(stmt))) rbx_fill(rbx_statement_db(stmt), value, NULL, 0);
-    return rbx_bind_original(stmt, i, value);
+    int rc = rbx_bind_original(stmt, i, value);
+    if (!rc && i == 1 && value > 0 && !analysis_filling && stmt) {
+        const char *sql = rbx_statement_sql(stmt);
+        if (sc_rbx_analysis_bound(sql))
+            rbx_fill(rbx_statement_db(stmt), value, NULL, 0);
+        else if (shadow_analysis_enabled && sc_shadow_analysis_bound(sql))
+            shadow_fill(rbx_statement_db(stmt), value);
+    }
+    return rc;
 }
 
 A32_ONLY static void install_rekordbox_analysis(uintptr_t base, size_t page) {
@@ -3463,12 +3475,85 @@ A32_ONLY static void install_rekordbox_analysis(uintptr_t base, size_t page) {
         rbx_statement_sql = (const char *(*)(void *))(uintptr_t)api[153];
         sc_rbx_verbose = !access("/run/enginex-rbx-analysis-trace", F_OK); // debug: log why a read was left alone
         rbx_prepare_original = (sqlite_prepare_fn)function_trampoline(entry, page);
-        redirect_function(entry, rbx_prepare, page);
         rbx_bind_original = (sqlite_bind_int64_fn)function_trampoline(bind, page);
+        if (!rbx_prepare_original || !rbx_bind_original) return;
+        redirect_function(entry, rbx_prepare, page);
         redirect_function(bind, rbx_bind, page);
         fprintf(stderr, "engine-ui-hook: rekordbox analysis for streamed tracks enabled\n");
         return;
     }
+}
+
+static int (*shadow_step_original)(void *);
+static long long (*shadow_last_insert)(void *);
+static struct sc_shadow_sqlite shadow_sqlite;
+static uintptr_t shadow_deck_load_return;
+static unsigned (*shadow_analyze_original)(void *, const void *);
+
+// Deck loads can request analysis on EMain even when the library Track is
+// marked analysed. Leave the loaded native data in place for our peer copies.
+static unsigned shadow_analyze(void *obj, const void *prefs) {
+    if ((uintptr_t)__builtin_return_address(0) == shadow_deck_load_return) {
+        const unsigned char *self = obj, *track = *(const unsigned char *const *)(self + 0x48);
+        const struct oa_string *path = (const void *)(self + 0x10);
+        if (track && track[0x31d] && path->ptr && path->size > 0 && path->size < 512) {
+            char text[512];
+            if (utf16_to_utf8(path->ptr, path->size, text, sizeof text) && sc_shadow_analysis_staged(text))
+                return 0;
+        }
+    }
+    return shadow_analyze_original(obj, prefs);
+}
+
+static void shadow_fill(void *db, long long id) {
+    analysis_filling = 1;
+    int filled = sc_shadow_analysis_fill(&shadow_sqlite, db, id);
+    analysis_filling = 0;
+    if (filled) fprintf(stderr, "engine-ui-hook: shadow analysis filled track %lld\n", id);
+}
+
+static int shadow_step(void *stmt) {
+    int rc = shadow_step_original(stmt);
+    if (rc == 101 /* SQLITE_DONE */ && stmt && !analysis_filling) {
+        const char *sql = rbx_statement_sql(stmt);
+        if (sql && !strcmp(sql, SC_SHADOW_INSERT)) {
+            // Engine creates the row before this import step; trackId aliases
+            // the PerformanceData rowid. Fill before the importer hands it off.
+            void *db = rbx_statement_db(stmt);
+            if (db) shadow_fill(db, shadow_last_insert(db));
+        }
+    }
+    return rc;
+}
+
+A32_ONLY static void install_shadow_analysis(uintptr_t base, size_t page) {
+    // Same Gen-1 SQLite bind site as the rekordbox analysis hook. bind_int
+    // sign-extends r2 into r3 then branches to bind_int64.
+    if (strcmp(build->name, "5.3.0") || !player_board() || !rbx_prepare_original || !rbx_bind_original) return;
+    const uint32_t *api = (const void *)(base + build->sqlite_api);
+    uintptr_t step = base + 0x1d6fef8, analyze = base + 0xe525ec;
+    const uintptr_t load_call = base + 0xd6b100;
+    const uint32_t step_prefix[] = {0xe59f3d88, 0xe16d42f4};
+    const uint32_t analyze_prefix[] = {0xe16d42f4, 0xe1cd60f8};
+    const uint32_t load_analysis[] = {0xe24b105c, 0xe1a00007, 0xe59330c8, 0xe12fff33};
+    if (api[65] != base + 0x1c9bc08 || api[94] != step ||
+        memcmp((const void *)step, step_prefix, sizeof step_prefix) ||
+        memcmp((const void *)analyze, analyze_prefix, sizeof analyze_prefix) ||
+        memcmp((const void *)load_call, load_analysis, sizeof load_analysis)) return;
+    // Relocate step's entry literal load. The original body still adds its PC.
+    const uint32_t step_stub[] = {0xe59f3008, step_prefix[1], 0xe51ff004,
+        (uint32_t)(step + 8), *(const uint32_t *)(step + 8 + 0xd88)};
+    shadow_step_original = rx_code(step_stub, sizeof step_stub, page);
+    shadow_analyze_original = function_trampoline(analyze, page);
+    if (!shadow_step_original || !shadow_analyze_original) return;
+    shadow_deck_load_return = load_call + sizeof load_analysis;
+    shadow_last_insert = (long long (*)(void *))(uintptr_t)api[65];
+    shadow_sqlite.exec = sqlite_exec_original;
+    shadow_sqlite.filename = (const char *(*)(void *, const char *))(uintptr_t)api[180];
+    redirect_function(step, shadow_step, page);
+    redirect_function(analyze, shadow_analyze, page);
+    shadow_analysis_enabled = 1;
+    fprintf(stderr, "engine-ui-hook: shadow analysis hooks installed\n");
 }
 
 A32_ONLY static void install_sqlite_hooks(uintptr_t base, size_t page) {
