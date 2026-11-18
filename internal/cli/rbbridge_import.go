@@ -10,10 +10,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/bridge"
+	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 )
 
 // A first import that does not fit in the mount's time goes on after the mount in a job of its
@@ -71,57 +73,85 @@ func runImportJob(ctx context.Context, mount string) error {
 	}
 	// A lazy unmount leaves the stick writable while it can be pulled: stop with it.
 	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	var watchers sync.WaitGroup
+	defer func() { cancel(); watchers.Wait() }()
+	watchers.Add(1)
 	go func() {
+		defer watchers.Done()
 		_ = pollUntil(ctx, 0, func() bool { return !mounted(mount) })
 		cancel()
 	}()
-	lock, err := os.OpenFile(importLock, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return err
-	}
-	defer lock.Close()
-	if err = pollUntil(ctx, 0, func() bool { return syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) == nil }); err != nil {
+	// A peer that loads a track from the stick while the import runs keeps it (see remount).
+	_ = os.WriteFile(servedMark(mount), nil, 0o600) // begin observing this insert
+	watchers.Add(1)
+	go func() { defer watchers.Done(); watchServed(ctx, mount) }()
+	rep := newDriveReporter(mount)
+	r, started, err := convertLocked(ctx, mount, rep)
+	if !started {
 		return nil // ejected while another stick's import ran
 	}
-	rep := newUSBLoadingReporter(usbLoadingStatusPath(), detectMediaKind(mount, ""))
-	rep.state = "importing"
-	rep.Start()
-	defer rep.Done()
-	// The browser shows the state for 30 s after each write.
-	go func() {
-		t := time.NewTicker(2 * time.Second)
-		defer t.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				rep.Refresh()
-			}
-		}
-	}()
-	r, err := bridge.ImportInBackground(ctx, mount, func(done, total int) { rep.Report(done, total, true) })
 	if ctx.Err() != nil {
+		rep.Done()
 		log.Printf("rb-bridge: import of %s stopped; the next mount goes on from its last pass", mount)
 		return nil
 	}
 	if err != nil {
-		rep.Fail(err)
-		return err
+		return err // rep.Fail kept the error for the browser; the next import's Start clears it
 	}
 	if r.Bypassed {
+		rep.Done()
 		return nil
 	}
+	defer rep.Done()
+	// The remount helper refreshes publication status after this handoff.
 	// Published by a remount (#301); the hook stops this job when the remount unmounts the stick.
 	log.Printf("rb-bridge: import of %s complete; a remount publishes it", mount)
 	rep.Publishing()
 	if err = startRemount(mount); err != nil {
 		log.Printf("rb-bridge: %v", err)
-		rep.Ready()
+		rep.FailPublication(err)
 	}
 	<-ctx.Done()
 	return nil
+}
+
+// convertLocked runs the import under the global lock and releases it as soon as the
+// conversion ends: a finished stick waiting for its remount never holds another's import.
+// started is false when it never got the lock (the stick went first).
+func convertLocked(ctx context.Context, mount string, rep *usbLoadingReporter) (r enginedb.Result, started bool, err error) {
+	lock, err := os.OpenFile(importLock, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return r, true, err
+	}
+	defer lock.Close()
+	if pollUntil(ctx, 0, func() bool { return syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) == nil }) != nil {
+		return r, false, nil
+	}
+	rep.state = "importing"
+	rep.Start()
+	convert, stop := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() { defer close(done); refresh(convert, rep) }()
+	defer func() { stop(); <-done }()
+	r, err = bridge.ImportInBackground(ctx, mount, func(done, total int) { rep.Report(done, total, true) })
+	if err != nil && ctx.Err() == nil {
+		rep.Fail(err)
+	}
+	return r, true, err
+}
+
+// refresh writes rep's state again every 2 s until ctx ends.
+func refresh(ctx context.Context, rep *usbLoadingReporter) {
+	t := time.NewTicker(2 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			rep.Refresh()
+		}
+	}
 }
 
 // mounted reports a mount point: its own filesystem, not its parent's. A variable for tests.

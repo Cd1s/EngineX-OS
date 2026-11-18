@@ -207,17 +207,32 @@ func TestFillOverviewMaximaSlowWriteProgressesAcrossMountBudgets(t *testing.T) {
 	_, _ = FillOverviewMaxima(ctx1, mount, time.Now().Add(budget))
 	cancel1()
 
+	// left is how many rows still end in the zero trailer.
+	left := func() int {
+		t.Helper()
+		var n int
+		if err := db.QueryRow(`SELECT count(*) FROM PerformanceData WHERE overviewWaveFormData=?`, old).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
 	p1 := ReadOverviewProgress(mount)
-	if p1.after < 256 {
-		t.Fatalf("attempt 1 committed checkpoint=%d, want >= 256 (batch too large for mount budget?)", p1.after)
+	left1 := left()
+	if p1.after < 256 || left1 > 2048-256 {
+		t.Fatalf("attempt 1 committed checkpoint=%d with %d rows left, want >= 256 committed (batch too large for mount budget?)", p1.after, left1)
 	}
 
 	ctx2, cancel2 := context.WithTimeout(context.Background(), budget)
 	_, _ = FillOverviewMaxima(ctx2, mount, time.Now().Add(budget))
 	cancel2()
 
-	p2 := ReadOverviewProgress(mount)
-	if p2.after <= p1.after {
-		t.Fatalf("attempt 2 did not advance checkpoint: p1=%d p2=%d", p1.after, p2.after)
+	// Attempt 2 goes on from attempt 1's checkpoint: either it finished every row (a scan
+	// without a generation then drops its checkpoint, so it reads as the start again), or
+	// it committed further rows and a checkpoint past attempt 1's.
+	p2, left2 := ReadOverviewProgress(mount), left()
+	switch {
+	case left2 == 0:
+	case left2 >= left1 || p2.after <= p1.after:
+		t.Fatalf("attempt 2 did not advance: p1=%d p2=%d, rows left %d then %d", p1.after, p2.after, left1, left2)
 	}
 }

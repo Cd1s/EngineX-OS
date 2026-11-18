@@ -7473,11 +7473,12 @@ class UsbPreparingFeedbackTest(unittest.TestCase):
         self.assertIn(["Preparing USB…", "正在准备 USB…", "正在準備 USB…", "Preparando el USB…"], rows)
         self.assertIn(["Loading USB…", "U盘载入中…", "隨身碟載入中…", "Cargando USB…"], rows)
         self.assertIn(["Loading SD card…", "SD 卡载入中…", "SD 卡載入中…", "Cargando tarjeta SD…"], rows)
-        # #301: a first import that goes on after the mount, then waits for the next one.
+        # #301: a first import waits for safe automatic publication after the mount.
         self.assertIn(["Importing rekordbox library…", "正在导入 rekordbox 曲库…", "正在匯入 rekordbox 曲庫…", "Importando la biblioteca de rekordbox…"], rows)
         self.assertIn(["Opening rekordbox library…", "正在打开 rekordbox 曲库…", "正在開啟 rekordbox 曲庫…", "Abriendo la biblioteca de rekordbox…"], rows)
-        self.assertIn(["rekordbox library ready: eject and insert again to load it", "rekordbox 曲库已就绪：弹出后重新插入即可载入",
-                       "rekordbox 曲庫已就緒：退出後重新插入即可載入", "Biblioteca de rekordbox lista: expulsa y vuelve a insertar para cargarla"], rows)
+        self.assertIn(["Waiting for other decks to finish…", "正在等待其他碟机完成…",
+                       "正在等待其他播放機完成…", "Esperando a que terminen los otros decks…"], rows)
+        self.assertNotIn("rekordbox library ready: eject and insert again to load it", (REPO / 'tools/ui-mod/build_packs.py').read_text())
 
     def check_feedback(self, main, sources):
         for text in ('property bool scUsbPreparing: false', 'scUsbPreparing = !!v.usbPreparing',
@@ -7486,7 +7487,8 @@ class UsbPreparingFeedbackTest(unittest.TestCase):
                      'visible: root.scUsbPreparing || root.scUsbPrepareError !== ""', 'Style.surface03Color', 'Style.active01Color',
                      'Style.font02Color', 'root.robotoMediumFontLoader.name', '#142',
                      'text: root.scUsbLoadingText()',
-                     'root.scT("Loading USB…")', 'root.scT("Loading SD card…")'):
+                     'root.scT("Loading USB…")', 'root.scT("Loading SD card…")',
+                     'scUsbPrepareState === "waiting"', 'root.scT("Waiting for other decks to finish…")'):
             self.assertIn(text, main)
         banner = main.split('objectName: "EngineX_UsbPreparingBanner"' , 1)[1].split('\n\t\t}', 1)[0]
         self.assertNotIn('focus: true', banner)
@@ -7542,6 +7544,10 @@ class UsbPreparingFeedbackTest(unittest.TestCase):
                     self.assertEqual(lang_dict["USB conversion failed"], expected_usb_fail[lang])
                     self.assertEqual(lang_dict["SD card conversion timed out"], expected_sd_to[lang])
                     self.assertEqual(lang_dict["SD card conversion failed"], expected_sd_fail[lang])
+                    self.assertEqual(lang_dict["Waiting for other decks to finish…"], {
+                        'en': 'Waiting for other decks to finish…', 'zh-Hans': '正在等待其他碟机完成…',
+                        'zh-Hant': '正在等待其他播放機完成…', 'es': 'Esperando a que terminen los otros decks…'}[lang])
+                    self.assertNotIn("rekordbox library ready: eject and insert again to load it", lang_dict)
         if not built:
             self.skipTest(f"{LAB} QRC fixtures not found")
 
@@ -7582,8 +7588,8 @@ state.scApply({usbPreparing: true, usbPrepare: {state: 'importing', kind: 'usb',
 assert.equal(state.scUsbLoadingText(), 'Importing rekordbox library… (3,200 / 20,000)');
 state.scApply({usbPreparing: true, usbPrepare: {state: 'publishing', kind: 'usb'}});
 assert.equal(state.scUsbLoadingText(), 'Opening rekordbox library…');
-state.scApply({usbPreparing: true, usbPrepare: {state: 'ready', kind: 'usb'}});
-assert.equal(state.scUsbLoadingText(), 'rekordbox library ready: eject and insert again to load it');
+state.scApply({usbPreparing: true, usbPrepare: {state: 'waiting', kind: 'usb'}});
+assert.equal(state.scUsbLoadingText(), 'Waiting for other decks to finish…');
 state.scApply({usbPreparing: true, usbPrepare: {state: 'loading', kind: 'usb', done: 5, total: 9}});
 assert.equal(state.scUsbLoadingText(), 'Loading USB… (5 / 9)');
 state.scApply({usbPreparing: false, usbPrepare: {state: 'error', kind: 'usb', error: 'bridge failed'}});

@@ -159,8 +159,8 @@ func TestUSBPreparingStatusAndErrorLifecycle(t *testing.T) {
 		}
 	}
 
-	// #301: a first import that goes on after the mount, then waits for the next mount.
-	for _, st := range []string{"importing", "ready"} {
+	// #301: a first import that goes on after the mount, then waits for safe automatic publication.
+	for _, st := range []string{"importing", "waiting", "publishing"} {
 		if err := os.WriteFile(path, []byte(`{"state":"`+st+`","kind":"usb","done":3200,"total":20000}`), 0o644); err != nil {
 			t.Fatal(err)
 		}

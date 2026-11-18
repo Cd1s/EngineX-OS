@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -60,15 +61,28 @@ func newFakeStick(t *testing.T) *fakeStick {
 		t.Fatal(err)
 	}
 	oldInfo, oldSys, oldProc, oldMark, oldMounted := mountinfoPath, sysClassBlock, procDir, ejectMarkDir, mounted
-	oldWait, oldRemove, oldClose, oldRemount, oldReady := remountWait, removeLimit, closeLimit, remountLimit, readyEvery
-	oldDeck, oldCopies := deckWait, engineCopies
+	oldWait, oldRemove, oldClose, oldRemount, oldQuiet := remountWait, removeLimit, closeLimit, remountLimit, serveQuiet
+	oldDeck, oldCopies, oldOwn, oldPeers, oldPeerDecks := deckWait, engineCopies, ownDecks, enginePeers, peerDecks
 	t.Cleanup(func() {
 		mountinfoPath, sysClassBlock, procDir, ejectMarkDir, mounted = oldInfo, oldSys, oldProc, oldMark, oldMounted
-		remountWait, removeLimit, closeLimit, remountLimit, readyEvery = oldWait, oldRemove, oldClose, oldRemount, oldReady
-		deckWait, engineCopies = oldDeck, oldCopies
+		remountWait, removeLimit, closeLimit, remountLimit, serveQuiet = oldWait, oldRemove, oldClose, oldRemount, oldQuiet
+		deckWait, engineCopies, ownDecks, enginePeers, peerDecks = oldDeck, oldCopies, oldOwn, oldPeers, oldPeerDecks
 	})
+	// stream-sync: this player's decks hold what Engine has open of the stick; no Engine Link peer.
+	ownDecks = func() ([]string, bool) {
+		var nets []string
+		fds, _ := os.ReadDir(filepath.Join(f.proc, "77", "fd"))
+		for _, fd := range fds {
+			if t, err := os.Readlink(filepath.Join(f.proc, "77", "fd", fd.Name())); err == nil && strings.HasPrefix(t, f.mount+"/") {
+				nets = append(nets, "net://{1}/REKORDBOX"+strings.TrimPrefix(t, f.mount))
+			}
+		}
+		return nets, true
+	}
+	enginePeers = func() []net.IP { return nil }
+	peerDecks = func(net.IP) ([]string, bool) { return nil, false }
 	mountinfoPath, sysClassBlock, procDir, ejectMarkDir = info, sys, f.proc, filepath.Join(dir, "run")
-	remountWait, removeLimit, closeLimit, remountLimit, readyEvery = 20*time.Millisecond, 300*time.Millisecond, 300*time.Millisecond, 300*time.Millisecond, 20*time.Millisecond
+	remountWait, removeLimit, closeLimit, remountLimit, serveQuiet = 20*time.Millisecond, 300*time.Millisecond, 300*time.Millisecond, 300*time.Millisecond, 100*time.Millisecond
 	deckWait, engineCopies = 20*time.Millisecond, filepath.Join(dir, "inMusicTempFiles")+"/"
 	if err := os.MkdirAll(engineCopies, 0o755); err != nil {
 		t.Fatal(err)
@@ -171,21 +185,20 @@ func TestIssue301RemountLeavesAnEjectedStick(t *testing.T) {
 	}
 }
 
-// A remove that unmounts nothing leaves the old library; the banner asks for a re-insert until
-// the stick is mounted anew.
-func TestIssue301RemountFailsToTheBanner(t *testing.T) {
+// A remove that unmounts nothing leaves the old library and reports the actual failure.
+func TestIssue301RemountFailureKeepsAnError(t *testing.T) {
 	f := newFakeStick(t)
 	f.engine("5", "", "")
 	f.unmountOnRemove = false
 	status := filepath.Join(t.TempDir(), "preparing")
 	t.Setenv("ENGINEX_USB_PREPARING_PATH", status)
-	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if err := runRemount(ctx, f.mount); err == nil || !strings.Contains(err.Error(), "insert it again") {
+	if err := runRemount(ctx, f.mount); err == nil || !strings.Contains(err.Error(), "not unmounted") {
 		t.Fatalf("err %v", err)
 	}
 	var st usbLoadingStatus
-	if b, err := os.ReadFile(status); err != nil || json.Unmarshal(b, &st) != nil || st.State != "ready" {
+	if b, err := os.ReadFile(status + ".err"); err != nil || json.Unmarshal(b, &st) != nil || st.State != "error" {
 		t.Fatalf("status %q %v", b, err)
 	}
 	if got := strings.Join(f.seen(), " "); got != "remove:" {
@@ -222,8 +235,8 @@ func TestIssue301RemountFindsTheDeviceUnderAView(t *testing.T) {
 // plays a loaded track from its copy "<id>_<file name>" in /data/inMusicTempFiles, which it keeps
 // open until the deck unloads it (sandbox, stock Engine 5.3.0), so a copy whose name the stick's
 // library has counts, whatever size the export recorded; so does an audio file Engine plays from
-// the stick itself. The remount looks again now and then, says the library opens at the next
-// insert meanwhile, and goes ahead once no deck holds one. Engine's copies of its own sampler
+// the stick itself. The remount keeps waiting status and goes ahead once no deck holds one.
+// Engine's copies of its own sampler
 // sounds (always open), the stick's m.db and its OneLibrary export do not count.
 func TestIssue301RemountWaitsWhileADeckHoldsATrackFromTheStick(t *testing.T) {
 	for _, held := range []string{"copy", "file"} {
@@ -285,7 +298,7 @@ INSERT INTO Track(filename,fileBytes) VALUES('Track00003.mp3',1234),('Track00004
 			if len(before) != 0 {
 				t.Fatalf("uevent writes %v while a deck held a track from the stick", before)
 			}
-			if state.State != "ready" {
+			if state.State != "waiting" {
 				t.Fatalf("status while a deck held a track: %q", state.State)
 			}
 			if got := strings.Join(f.seen(), " "); got != "remove: add:" {
