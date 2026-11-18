@@ -99,7 +99,7 @@
 | 8 | `Settings → Services` | `Pro DJ Link Export to CDJ (Beta)` / Pro DJ Link 导出至 CDJ（测试版） / Pro DJ Link 匯出至 CDJ（測試版） | 把本机 U 盘与已缓存流媒体共享给 CDJ 浏览 | 关 | `prolinkExport=0\|1` | `prolink_export` | 状态 `prolinkExportActive` 只读 |
 | 9 | `Profile → Display` | `Waveform Style` / 波形样式 / 波形樣式 | 波形配色 `Denon` / `RGB` / `3-Band` | `denon` | `waveform=denon\|rgb\|3band` | `waveform` | 与控制中心 `Waveform Style` 磁贴双向同步 |
 | 10 | `Profile → Playback` | `Master Soft Clipper` / 0dB 防破音软限幅 / 0dB 防破音軟限幅 | 主输出软限幅，峰值压到 -0.1 dBFS 以下 | 关 | `masterLimiter=0\|1` | `master_limiter` | 立即生效；#58、#149 |
-| 11 | `Profile → Playback` | `Auto-Gain (0 dB Normalize)` / 自动增益（0 dB 归一化） / 自動增益（0 dB 正規化） | 偏小曲目平滑提至接近 0 dBFS（最多 +9 dB，低于 -42 dBFS 静音不提） | 关 | `autoGain=0\|1` | `auto_gain` | 开启后总会过软限幅；#64、#149 |
+| 11 | `Profile → Playback` | `Auto-Gain (0 dB Normalize)` / 自动增益（0 dB 归一化） / 自動增益（0 dB 正規化） | 偏小曲目平滑提至约 -4.4 dBFS（最多 +9 dB，低于 -42 dBFS 静音不提） | 关 | `autoGain=0\|1` | `auto_gain` | 含防削波保护；#64、#149 |
 | 12 | `Profile → Playback` | `Echo Out` / 回声淡出 / 回聲淡出 | 带混音台机型推子切歌时释放回声尾音（与 `Settings → Mixer → Fader Echo` 及控制中心磁贴同步） | 关 | `upfaderEcho=0\|1` | `upfader_echo` | `visible: root.scHasMixer` |
 | 13 | `Profile → Playback` | `Stems EQ Mode` / 分轨 EQ 模式 / 分軌 EQ 模式 | 通道 EQ 旋钮切换控制分轨音量 | 关 | `stemsEqMode=0\|1` | `stems_eq_mode` | `visible: root.scHasStemsEq` |
 | 14 | `Profile → Playback` | `Color FX Style` / 先锋风格效果 (Color FX) / 先鋒風格效果 (Color FX) | `Off` / `Spiral` / `Pitch Echo` / `Slip Roll` / `Dub Echo` / `Space` | `off` | `pioneerFx=off\|spiral\|...` | `pioneer_fx` | 每个通道的 `FILTER` 旋钮带动（一代 PRIME 4 / PRIME 2 / PRIME GO / Mixstream Pro 与二代 32 位一体机，有 hook 标记 `/run/enginex-colorfx.ready` 时才显示）；居中与 `Off` 为原厂；其余机型隐藏，从不作用于主输出（#88） |
@@ -345,9 +345,9 @@ sFourDeck: ['Adds Layout → 4 Decks. This player plays the two decks of its rol
             '在 Layout 里加入 4 Decks。本机只播放角色负责的两台，另外两台只显示、不出声。切换会重启 Engine',
             '在 Layout 裡加入 4 Decks。本機只播放角色負責的兩台，另外兩台只顯示、不出聲。切換會重啟 Engine']
 tRole:     ['4-Deck Role', '4 碟角色', '4 碟角色']
-sGain:     ['Lifts quiet tracks toward 0 dBFS (up to +9 dB), then always through the soft limiter. Silence below -42 dBFS is left alone',
-            '把偏小的歌平滑提到接近 0 dBFS（最多 +9 dB），之后总会过软限幅；低于 -42 dBFS 的静音不提升',
-            '把偏小的歌平滑提到接近 0 dBFS（最多 +9 dB），之後總會過軟限幅；低於 -42 dBFS 的靜音不提升']
+sGain:     ['Lifts quiet tracks toward about -4.4 dBFS (up to +9 dB) with clip protection. Silence below -42 dBFS is left alone',
+            '把偏小的歌平滑提到约 -4.4 dBFS（最多 +9 dB），包含防削波保护；低于 -42 dBFS 的静音不提升',
+            '把偏小的歌平滑提到約 -4.4 dBFS（最多 +9 dB），包含防削波保護；低於 -42 dBFS 的靜音不提升']
 tExport:   [... , 'Pro DJ Link 共享给 CDJ', 'Pro DJ Link 分享給 CDJ']
 beta:      ['Beta', '测试版', '測試版']
 ```

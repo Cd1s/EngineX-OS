@@ -147,6 +147,26 @@ int setenv(const char *name, const char *value, int overwrite) {
 }
 
 static void *alsa_sw_cache, *alsa_tstamp_set_cache, *alsa_tstamp_get_cache;
+static void *alsa_hw_cache, *alsa_hw_rate_cache, *alsa_stream_cache;
+/* Rate after Engine's own pre-DAC render stage; Gen-1 renders at half its 96 kHz ALSA rate. */
+static unsigned master_rate = SC_DSP_DEFAULT_RATE;
+static int player_board(void);
+
+HF_INTERPOSE(HF_DSP_GUARDS)
+int snd_pcm_hw_params(void *pcm, void *params) {
+    int (*real)(void *, void *) = next_symbol(&alsa_hw_cache, "snd_pcm_hw_params");
+    if (!real) return -ENOSYS;
+    int rc = real(pcm, params);
+    if (rc >= 0 && is_engine() && hf_on(HF_DSP_GUARDS)) {
+        int (*get_rate)(const void *, unsigned *, int *) = next_symbol(&alsa_hw_rate_cache, "snd_pcm_hw_params_get_rate");
+        int (*stream)(void *) = next_symbol(&alsa_stream_cache, "snd_pcm_stream");
+        unsigned rate = 0;
+        int direction = 0;
+        if (get_rate && (!stream || stream(pcm) == 0) && get_rate(params, &rate, &direction) >= 0 && rate)
+            __atomic_store_n(&master_rate, sc_dsp_rate_from_output(rate, player_board()), __ATOMIC_RELEASE);
+    }
+    return rc;
+}
 
 HF_INTERPOSE(HF_ALSA_TIMESTAMP)
 int snd_pcm_sw_params_set_tstamp_type(void *pcm, void *params, int type) {
@@ -184,7 +204,6 @@ static struct sc_pfx_ms master_ms[4];
 static int pioneer_fx_mode;           // #88 master-output style: settings.conf never sets it (a stored style stayed on at a fixed mix, no control drove it); only the DSP tests do
 static const char *four_deck_settings = UI_ROOT "/settings.conf";
 static const char *product_code_path = "/sys/firmware/devicetree/base/inmusic,product-code";
-static int player_board(void);
 
 // Pad LED Brightness: Engine sends every controller LED through snd_seq_event_output_direct
 // (RGB LEDs as 14/15-byte SysEx, single-colour keys as NoteOn). Scale the RGB SysEx PWM bytes
@@ -1546,11 +1565,16 @@ static uint32_t hook_master_output(void *host, void *context, int in_channels, c
         for (int ch = 0; ch < out_channels && ch < 16; ch += 2)
             if (out[ch]) sc_hifi_planar(&master_hifi[ch / 2], out[ch], ch + 1 < out_channels ? out[ch + 1] : NULL, (unsigned)frames, hifi);
     int gain = __atomic_load_n(&gain_enabled, __ATOMIC_RELAXED);
+    unsigned rate = __atomic_load_n(&master_rate, __ATOMIC_ACQUIRE);
     // Auto-Gain (#64) always runs into the limiter, so a boost never clips.
     if ((gain || __atomic_load_n(&lim_enabled, __ATOMIC_RELAXED)) && out && frames > 0)
         for (int ch = 0; ch < out_channels && ch < 16; ch += 2) {
             float *r = ch + 1 < out_channels ? out[ch + 1] : NULL;
-            if (gain) sc_gain_planar(&master_gain[ch / 2], out[ch], r, (unsigned)frames);
+            if (gain) {
+                sc_gain_set_rate(&master_gain[ch / 2], rate);
+                sc_gain_planar(&master_gain[ch / 2], out[ch], r, (unsigned)frames);
+            }
+            sc_lim_set_rate(&master_lim[ch / 2], rate);
             sc_lim_planar(&master_lim[ch / 2], out[ch], r, (unsigned)frames);
         }
     // #50 Live Stream: the first pair as it goes to the DAC; one relaxed load when nobody listens.

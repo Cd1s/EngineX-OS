@@ -650,13 +650,15 @@ static void test_master_limiter(void)
 }
 
 /* #64 Auto-Gain into the #58 limiter, the way hook_master_output runs them. */
-static float gain_run(struct sc_gain *g, struct sc_lim *lim, float amp, int blocks, float *peak_out)
+static float gain_run(struct sc_gain *g, struct sc_lim *lim, unsigned rate, float amp, int blocks, float *peak_out)
 {
     enum { B = 512 };
     float l[B], r[B], peak = 0.0f;
+    sc_gain_set_rate(g, rate);
+    sc_lim_set_rate(lim, rate);
     for (int b = 0; b < blocks; b++) {
         for (int i = 0; i < B; i++)
-            l[i] = r[i] = amp * sinf(2.0f * 3.14159265f * 1000.0f * (float)(b * B + i) / 96000.0f);
+            l[i] = r[i] = amp * sinf(2.0f * 3.14159265f * 1000.0f * (float)(b * B + i) / (float)rate);
         sc_gain_planar(g, l, r, B);
         sc_lim_planar(lim, l, r, B);
         for (int i = 0; i < B; i++) {
@@ -671,25 +673,26 @@ static float gain_run(struct sc_gain *g, struct sc_lim *lim, float amp, int bloc
 static void test_auto_gain(void)
 {
     float peak;
-    /* 0.35 (-9 dBFS) is brought up near 0 dBFS within 10 s, never past the ceiling. */
+    /* A -12 dBFS sine is brought up to the -4.4 dBFS target within 10 s, below the knee. */
     struct sc_gain g = {0};
     struct sc_lim lim = {0};
-    float gain = gain_run(&g, &lim, 0.35f, 1875, &peak);
-    CHECK(gain > 2.6f && gain <= SC_GAIN_MAX && peak > 0.85f);
-    /* Then a loud 1.8 passage: gain falls back to unity fast, the limiter holds the ceiling. */
-    gain = gain_run(&g, &lim, 1.8f, 200, &peak);
+    float gain = gain_run(&g, &lim, 96000, 0.25118864f, 1875, &peak);
+    CHECK(gain > 2.3f && gain <= SC_GAIN_MAX && peak > 0.55f);
+    CHECK(peak < SC_LIM_KNEE && lim.env == 0.0f);
+    /* Then a loud 1.8 passage: gain returns to unity, the limiter holds the ceiling. */
+    gain = gain_run(&g, &lim, 96000, 1.8f, 500, &peak);
     CHECK(gain == 1.0f && peak <= SC_LIM_CEIL);
 
     /* Under the -42 dBFS gate nothing is boosted, from a fresh start or after music. */
     struct sc_gain q = {0};
     struct sc_lim ql = {0};
-    gain = gain_run(&q, &ql, 0.007f, 1875, &peak);
+    gain = gain_run(&q, &ql, 96000, 0.007f, 1875, &peak);
     CHECK(q.gain == 1.0f && q.level == 0.0f && peak < 0.0071f);
     struct sc_gain m = {0};
     struct sc_lim ml = {0};
-    gain_run(&m, &ml, 0.5f, 1875, &peak);
+    gain_run(&m, &ml, 96000, 0.5f, 1875, &peak);
     float held = m.gain;
-    gain_run(&m, &ml, 0.002f, 1875, &peak);
+    gain_run(&m, &ml, 96000, 0.002f, 1875, &peak);
     CHECK(m.gain == held && peak < 0.002f * held + 1e-4f); /* frozen, not raised further */
 
     /* Per-sample ramp: no step larger than the block's gain change. */
@@ -714,6 +717,99 @@ static void test_auto_gain(void)
     struct sc_gain u = {0};
     sc_gain_planar(&u, quiet, quiet, 256);
     CHECK(!memcmp(quiet, copy, sizeof quiet));
+}
+
+static unsigned lim_release_frames(unsigned rate)
+{
+    float zero = 0.0f;
+    float *p = &zero;
+    struct sc_lim s = {.env = 10.0f};
+    sc_lim_set_rate(&s, rate);
+    unsigned frames = 0;
+    while (s.env > 10.0f * 0.36787944f && frames < rate) {
+        sc_lim_planar(&s, p, NULL, 1);
+        frames++;
+    }
+    return frames;
+}
+
+static void test_master_limiter_rate(void)
+{
+    CHECK(sc_dsp_rate_from_output(96000, 1) == 48000); /* Gen-1 ALSACombinedDevice is 2x DSP_MASTER */
+    CHECK(sc_dsp_rate_from_output(44100, 0) == 44100); /* all-in-one */
+    CHECK(sc_dsp_rate_from_output(48000, 0) == 48000); /* AZ04 / native-rate path */
+    const unsigned rates[] = {44100, 48000, 96000};
+    unsigned reference = 0;
+    for (unsigned i = 0; i < sizeof rates / sizeof *rates; i++) {
+        struct sc_lim attack = {0};
+        float burst = 2.0f;
+        sc_lim_set_rate(&attack, rates[i]);
+        sc_lim_planar(&attack, &burst, NULL, 1);
+        CHECK(attack.env == 2.0f); /* instant attack at every opened rate */
+        unsigned frames = lim_release_frames(rates[i]);
+        unsigned ms = frames * 1000u / rates[i];
+        CHECK(ms >= 95 && ms <= 105);
+        if (!reference) reference = ms;
+        CHECK(ms >= reference - 2 && ms <= reference + 2);
+        struct sc_gain gain = {0};
+        sc_gain_set_rate(&gain, rates[i]);
+        CHECK(fabsf(gain.fall / (float)rates[i] - SC_GAIN_FALL / SC_DSP_DEFAULT_RATE) < 1e-5f);
+        CHECK(fabsf(gain.down / (float)rates[i] - SC_GAIN_DOWN / SC_DSP_DEFAULT_RATE) < 1e-5f);
+        CHECK(fabsf(gain.up / (float)rates[i] - SC_GAIN_UP / SC_DSP_DEFAULT_RATE) < 1e-5f);
+    }
+}
+
+static float hat_amplitude(const float *samples, unsigned frames, unsigned rate)
+{
+    double re = 0.0, im = 0.0;
+    for (unsigned i = 0; i < frames; i++) {
+        double phase = 2.0 * 3.141592653589793 * 12000.0 * (double)i / (double)rate;
+        re += samples[i] * cos(phase);
+        im += samples[i] * sin(phase);
+    }
+    return (float)(2.0 * hypot(re, im) / (double)frames);
+}
+
+static void test_auto_gain_pumping(void)
+{
+    enum { RATE = 44100, B = 882 };
+    float l[B], r[B], baseline[B], with_kick[B];
+    struct sc_gain g = {0};
+    struct sc_lim lim = {0};
+    sc_gain_set_rate(&g, RATE);
+    sc_lim_set_rate(&lim, RATE);
+    for (int b = 0; b < 700; b++) {
+        for (unsigned i = 0; i < B; i++) {
+            l[i] = r[i] = 0.25f * sinf(2.0f * 3.14159265f * 1000.0f * (float)(b * B + i) / RATE);
+        }
+        sc_gain_planar(&g, l, r, B);
+        sc_lim_planar(&lim, l, r, B);
+    }
+    for (unsigned i = 0; i < B; i++)
+        l[i] = r[i] = 0.05f * sinf(2.0f * 3.14159265f * 12000.0f * (float)i / RATE);
+    sc_gain_planar(&g, l, r, B);
+    sc_lim_planar(&lim, l, r, B);
+    memcpy(baseline, r, sizeof baseline);
+
+    g.level = 0.0f; g.gain = 0.0f; lim.env = 0.0f;
+    sc_gain_set_rate(&g, RATE);
+    sc_lim_set_rate(&lim, RATE);
+    for (int b = 0; b < 700; b++) {
+        for (unsigned i = 0; i < B; i++)
+            l[i] = r[i] = 0.25f * sinf(2.0f * 3.14159265f * 1000.0f * (float)(b * B + i) / RATE);
+        sc_gain_planar(&g, l, r, B);
+        sc_lim_planar(&lim, l, r, B);
+    }
+    for (unsigned i = 0; i < B; i++) {
+        float kick = 0.45f * sinf(2.0f * 3.14159265f * 50.0f * (float)i / RATE);
+        float hat = 0.05f * sinf(2.0f * 3.14159265f * 12000.0f * (float)i / RATE);
+        l[i] = kick;
+        r[i] = hat;
+    }
+    sc_gain_planar(&g, l, r, B);
+    sc_lim_planar(&lim, l, r, B);
+    memcpy(with_kick, r, sizeof with_kick);
+    CHECK(20.0f * log10f(hat_amplitude(with_kick, B, RATE) / hat_amplitude(baseline, B, RATE)) > -1.0f);
 }
 
 /* #104 Echo Out: music plays 1 s, goes silent, the last beat rings out for 2.2 s. */
@@ -1024,7 +1120,9 @@ int main(void)
     test_flanger_makeup();
     test_flanger_threads();
     test_master_limiter();
+    test_master_limiter_rate();
     test_auto_gain();
+    test_auto_gain_pumping();
     test_hifi_output();
     test_echo_out();
     test_pioneer_fx();

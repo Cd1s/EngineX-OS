@@ -16,13 +16,35 @@
 #define SC_LIM_CEIL 0.988f                            /* -0.1 dBFS */
 #define SC_LIM_RANGE (SC_LIM_CEIL - SC_LIM_KNEE)
 #define SC_LIM_SAT (SC_LIM_KNEE + 3.0f * SC_LIM_RANGE) /* input at which the curve reaches the ceiling */
-/* Envelope release per frame, ~100 ms. shortcut: assumes 96 kHz like the Flanger
- * makeup; at 48 kHz it releases in ~200 ms. Read the rate from hw_params if it matters. */
-#define SC_LIM_RELEASE 0.999896f
+/* Envelope release per frame, ~100 ms at the rate Engine opened. */
+#define SC_LIM_RELEASE 0.999896f /* 96 kHz compatibility value */
+#define SC_LIM_RELEASE_INV_TAU 9.984508f /* -1/log(SC_LIM_RELEASE) / 96 kHz */
+#define SC_DSP_DEFAULT_RATE 96000u
+
+static inline unsigned sc_dsp_rate_from_output(unsigned output_rate, int gen1_player)
+{
+    if (!output_rate)
+        return SC_DSP_DEFAULT_RATE;
+    return gen1_player && output_rate >= 2 ? output_rate / 2 : output_rate;
+}
 
 struct sc_lim {
     float env; /* peak envelope, 0 while below SC_LIM_SAT */
+    float release;
+    unsigned rate;
 };
+
+static inline void sc_lim_set_rate(struct sc_lim *s, unsigned rate)
+{
+    if (!s)
+        return;
+    if (!rate)
+        rate = SC_DSP_DEFAULT_RATE;
+    if (s->rate == rate && s->release > 0.0f)
+        return;
+    s->rate = rate;
+    s->release = 1.0f - SC_LIM_RELEASE_INV_TAU / (float)rate;
+}
 
 /* Static curve. Non-finite input becomes silence. */
 static inline float sc_lim_clip(float x)
@@ -46,12 +68,13 @@ static inline void sc_lim_planar(struct sc_lim *s, float *l, float *r, unsigned 
 {
     if (!s || !l)
         return;
+    sc_lim_set_rate(s, s->rate);
     float env = s->env;
     for (unsigned i = 0; i < frames; i++) {
         float a = l[i] < 0.0f ? -l[i] : l[i], b = r ? (r[i] < 0.0f ? -r[i] : r[i]) : 0.0f, peak = 0.0f;
         if (a <= 3.0e38f) peak = a; /* false for NaN/Inf: they do not drive the envelope */
         if (b <= 3.0e38f && b > peak) peak = b;
-        env *= SC_LIM_RELEASE;
+        env *= s->release;
         if (peak > env)
             env = peak; /* instant attack: no lookahead, no added latency */
         if (env <= SC_LIM_SAT)
@@ -65,28 +88,47 @@ static inline void sc_lim_planar(struct sc_lim *s, float *l, float *r, unsigned 
     s->env = env;
 }
 
-/* #64 Auto-Gain: brings quiet material up toward a -0.4 dBFS peak before the
+/* #64 Auto-Gain: brings quiet material up toward a -4.4 dBFS peak before the
  * limiter above, which always runs after it. A stereo-linked peak follower
  * (instant rise, ~3 s fall) sets the target; the gain only ever boosts (at
- * most +9 dB), falls within ~50 ms when the music gets louder, rises over
+ * most +9 dB), falls within ~200 ms when the music gets louder, rises over
  * ~2 s, and moves linearly sample by sample inside a block (no zipper noise).
  * A block whose peak is under -42 dBFS freezes everything, so silence, intros
- * and noise floors are never pulled up. shortcut: time constants assume 96 kHz. */
-#define SC_GAIN_TARGET 0.95f  /* -0.4 dBFS */
+ * and noise floors are never pulled up. Time constants are scaled to the
+ * output rate Engine opened. */
+#define SC_GAIN_TARGET 0.600f /* -4.4 dBFS: about 2.9 dB below the limiter knee */
 #define SC_GAIN_MAX 2.82f     /* +9 dB */
 #define SC_GAIN_GATE 0.008f   /* -42 dBFS */
 #define SC_GAIN_FALL 288000.0f /* level follower release, frames (~3 s) */
-#define SC_GAIN_DOWN 4800.0f   /* gain decrease time constant, frames (~50 ms) */
+#define SC_GAIN_DOWN 19200.0f  /* gain decrease time constant, frames (~200 ms) */
 #define SC_GAIN_UP 192000.0f   /* gain increase time constant, frames (~2 s) */
 
 struct sc_gain {
     float level, gain; /* 0 means not started: unity gain */
+    float fall, down, up;
+    unsigned rate;
 };
+
+static inline void sc_gain_set_rate(struct sc_gain *s, unsigned rate)
+{
+    if (!s)
+        return;
+    if (!rate)
+        rate = SC_DSP_DEFAULT_RATE;
+    if (s->rate == rate && s->fall > 0.0f)
+        return;
+    s->rate = rate;
+    float scale = (float)rate / (float)SC_DSP_DEFAULT_RATE;
+    s->fall = SC_GAIN_FALL * scale;
+    s->down = SC_GAIN_DOWN * scale;
+    s->up = SC_GAIN_UP * scale;
+}
 
 static inline void sc_gain_planar(struct sc_gain *s, float *l, float *r, unsigned frames)
 {
     if (!s || !l || !frames)
         return;
+    sc_gain_set_rate(s, s->rate);
     float peak = 0.0f;
     for (unsigned i = 0; i < frames; i++) {
         float a = l[i] < 0.0f ? -l[i] : l[i], b = r ? (r[i] < 0.0f ? -r[i] : r[i]) : 0.0f;
@@ -95,13 +137,13 @@ static inline void sc_gain_planar(struct sc_gain *s, float *l, float *r, unsigne
     }
     float g0 = s->gain > 0.0f ? s->gain : 1.0f, g1 = g0;
     if (peak >= SC_GAIN_GATE) {
-        float n = (float)frames, fall = n / SC_GAIN_FALL;
+        float n = (float)frames, fall = n / s->fall;
         if (fall > 1.0f) fall = 1.0f;
         s->level = peak > s->level ? peak : s->level + (peak - s->level) * fall;
         float target = SC_GAIN_TARGET / s->level;
         if (target > SC_GAIN_MAX) target = SC_GAIN_MAX;
         if (target < 1.0f) target = 1.0f;
-        float k = n / (target < g0 ? SC_GAIN_DOWN : SC_GAIN_UP);
+        float k = n / (target < g0 ? s->down : s->up);
         g1 = g0 + (target - g0) * (k > 1.0f ? 1.0f : k);
         if (g1 - target < 1e-4f && target - g1 < 1e-4f) g1 = target; /* float steps stall one ulp short of unity */
     }
