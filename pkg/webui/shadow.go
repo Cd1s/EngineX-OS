@@ -2176,12 +2176,15 @@ func (s *Server) shadowFetchPeer(key string, p peerDeck) {
 		}
 		// Engine loads the copy only after this returns, so it sees the .perf.
 		savePerf(local, perf)
+		noFill := "not a player"
 		if playerBoards[imagePrefix(deviceCompatible())] {
-			saveShadowAnalysis(ctx, local, strings.Replace(url, "/audio?", "/perf?", 1)+"&format=native")
+			noFill = saveShadowAnalysis(ctx, local, strings.Replace(url, "/audio?", "/perf?", 1)+"&format=native")
 		}
 		// The three ways a copy is analysed end with different waveform peaks.
-		_, noFill := os.Stat(local + ".analysis")
-		log.Printf("stream-sync: shadow: copy %s %q analysis replay=%t fill=%t", key, name, perf != nil, noFill == nil)
+		if noFill != "" {
+			noFill = " (" + noFill + ")"
+		}
+		log.Printf("stream-sync: shadow: copy %s %q analysis replay=%t fill=%t%s", key, name, perf != nil, noFill == "", noFill)
 		return local, nil
 	})
 }

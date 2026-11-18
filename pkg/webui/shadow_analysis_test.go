@@ -78,13 +78,17 @@ func TestPeerShadowNativeAnalysis(t *testing.T) {
 	local := filepath.Join(t.TempDir(), "shadow.wav")
 	url := peer.URL + "/peer/decks/1/perf?key=analysed"
 	ctx := context.Background()
-	saveShadowAnalysis(ctx, local, url+"&format=native")
+	why := saveShadowAnalysis(ctx, local, url+"&format=native")
 	got, err := os.ReadFile(local + ".analysis")
-	if err != nil || !validShadowAnalysis(got) {
-		t.Fatalf("native response not staged: %v", err)
+	if err != nil || !validShadowAnalysis(got) || why != "" {
+		t.Fatalf("native response not staged: %v %q", err, why)
 	}
-	saveShadowAnalysis(ctx, local, url) // An old peer ignores the query and serves EXPF.
-	if _, err = os.Stat(local + ".analysis"); !os.IsNotExist(err) {
-		t.Fatalf("legacy response left a native sidecar: %v", err)
+	why = saveShadowAnalysis(ctx, local, url) // An old peer ignores the query and serves EXPF.
+	if _, err = os.Stat(local + ".analysis"); !os.IsNotExist(err) || why != "not a native analysis" {
+		t.Fatalf("legacy response left a native sidecar: %v %q", err, why)
+	}
+	// The log names the source's answer when it has none.
+	if why = saveShadowAnalysis(ctx, local, peer.URL+"/peer/decks/1/perf?key=other&format=native"); why != "http 404" && why != "http 409" {
+		t.Fatalf("a source without the track: %q", why)
 	}
 }

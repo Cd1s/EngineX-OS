@@ -138,8 +138,8 @@ func TestShadowCopyLogsHowItWasAnalysed(t *testing.T) {
 	mu.Unlock()
 	for _, want := range []string{
 		"shadow: the source gave no analysis (http 404)",
-		`shadow: copy bare "Song.m4a" analysis replay=false fill=false`,
-		`shadow: copy replayed "Song.m4a" analysis replay=true fill=false`,
+		`shadow: copy bare "Song.m4a" analysis replay=false fill=false (not a player)`,
+		`shadow: copy replayed "Song.m4a" analysis replay=true fill=false (not a player)`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("log lacks %q:\n%s", want, got)
