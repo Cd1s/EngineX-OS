@@ -146,7 +146,7 @@ sub("/run/systemd/system/engine.service.d", "@DROPIN@")
 sub("/run/systemd/system/", f"{tmp}/units/")
 sub("/run/systemd/system", f"{tmp}/units")
 sub("@DROPIN@", dropin_dir)
-sub("Wants=$services\n", "")
+sub("Wants=enginex-stream-sync.service${rb_bridge_on:+ enginex-rb-bridge.service}${deemixd_on:+ enginex-deemixd.service} engine-guardian.service\n", "")
 sub("engine-ui-guard service /usr/Engine/Scripts/runengine",
     f"engine-ui-guard service {tmp}/mock-runengine.sh {tmp} {tmp}/new-activator-wrapper.sh")
 sub("/usr/Engine/Scripts/engine", f"{tmp}/no-vendor-engine-script")
