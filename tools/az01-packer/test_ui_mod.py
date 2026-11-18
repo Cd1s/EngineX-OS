@@ -3270,6 +3270,27 @@ assert.equal(runs, 1, "startup gc() runs only once, not repeatedly");
 
 
 class UiModBuildTest(unittest.TestCase):
+    def test_crossfader_reverse_uses_the_stock_switch_in_all_languages(self):
+        qrc = LAB / "5.3.0/qrc"
+        if not qrc.is_dir():
+            self.skipTest("requires the stock 5.3.0 QML")
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "packs"
+            subprocess.run([sys.executable, str(BUILD_PACKS), "--qrc", str(qrc), "--out", str(out)],
+                           check=True, stdout=subprocess.DEVNULL)
+            for lang, label in zip(("en", "zh-Hans", "zh-Hant", "es"),
+                                   ("Crossfader Reverse", "反转交叉推子", "反轉交叉推桿", "Invertir crossfader")):
+                with self.subTest(lang=lang):
+                    mixer = (out / lang / "Skins/Embedded/Views/ControlCenter/Tabs/Preferences/MixerTabContent.qml").read_text()
+                    self.assertIn('Planck.getProperty("/Engine/Mixer/CrossfaderReverse")', mixer)
+                    row = mixer.split("EntryBase.SwitchEntry {")[1].split("},")[0]
+                    self.assertIn(label, row)
+                    self.assertIn('root.scHasMixer && root.scBoard !== "RMZ2"', row)
+                    self.assertIn("reverse.translator.state = !reverse.translator.state", row)
+                    self.assertNotRegex(row, r"Crossfader(Position|Curve)|onCompleted")
+                    self.assertEqual(mixer.count("XFaderCutInLeft {}"), 1)
+                    self.assertEqual(mixer.count("XFaderCutInRight {}"), 1)
+
     def test_jc11_jc11s_packs_contain_shadow_display(self):
         # Each supported console gets a separately built archive. The patcher
         # is board independent; stock 5.3.0 QML is the shared input for these

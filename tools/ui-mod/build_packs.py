@@ -7314,6 +7314,15 @@ def edits(dev: bool):
         prefs + ("" if v53() else "TabContents/") + "MixerTabContent.qml": [
             (f'import "{"" if v53() else "../"}Entries"\n',
              f'import "{"" if v53() else "../"}Entries"\nimport "{"Entries/Base" if v53() else "../Entries/Base"}" as EntryBase\nimport Planck 1.0\n'),
+            *([("XFaderCutInLeft {},", """EntryBase.SwitchEntry {
+            text: "Crossfader Reverse"
+            readonly property var reverse: root.scHasMixer && root.scBoard !== "RMZ2"
+                ? Planck.getProperty("/Engine/Mixer/CrossfaderReverse") : null
+            visible: !!reverse && !!reverse.translator && typeof reverse.translator.state === "boolean"
+            checkedExternally: visible && reverse.translator.state
+            onClicked: if (visible) reverse.translator.state = !reverse.translator.state
+        },
+        XFaderCutInLeft {},""")] if v53() else []),
             ("CrossfaderCalibration {}" if v53() else "CrossfaderCalibration { }",
              """EntryBase.ListEntry {
 \t\t\t\ttext: "Fader Echo"
