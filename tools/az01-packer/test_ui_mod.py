@@ -8178,6 +8178,69 @@ assert.equal(shrunk, 54 - 12);
         subprocess.run(["node", "-e", script], check=True)
 
 
+class StreamingSlotIconTest(unittest.TestCase):
+    """#305: every service rides Engine's TIDAL slot, so a deck's track reports the source "TIDAL" whoever it comes from."""
+    ROOTS = ("Skins/Embedded/Views/MainView/ArtistSong.qml",
+             "Skins/EngineOS/UI/CompositeControls/Deck/DeckItem/ArtistSong.qml",
+             "Skins/Embedded/Items/TrackInfo.qml")
+
+    def patched(self, rel):
+        qrc = LAB / "5.3.0/qrc"
+        if not qrc.is_dir():
+            self.skipTest(f"{LAB} 5.3.0 QRC not found")
+        text = (qrc / rel).read_text(encoding="utf-8")
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            for old, new in bp.edits(False)[rel]:
+                text = bp.patch(text, old, new, rel)
+        finally:
+            bp.ROOT = old_root
+        return text
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required to run the root helpers")
+    def test_slot_icon_and_brand_follow_the_active_service(self):
+        main = bp.SERVICES_MAIN.replace("@ICONS@", "Skins/UIKit/Icons")
+        functions = "\n".join(PrimeGoTidalQRTest.function(main, name) for name in ("scIcon", "scSlotIcon", "scBrand"))
+        script = r"""
+const assert = require('node:assert/strict');
+let scScope = '', scRekordboxName = '';
+const scT = s => s;
+const scServices = [{id: 'rekordbox', name: 'rekordbox'}, {id: 'tidal', name: 'TIDAL'}, {id: 'netease', name: 'NetEase Cloud Music'},
+    {id: 'spotify', name: 'Spotify'}, {id: 'deezer', name: 'Deezer'}, {id: 'soundcloud', name: 'SoundCloud'},
+    {id: 'beatport', name: 'Beatport'}, {id: 'applemusic', name: 'Apple Music'}];
+""" + functions + r"""
+const marks = {deezer: 'file:///data/enginex/ui/icons/deezer.png', spotify: 'file:///data/enginex/ui/icons/spotify.png',
+    applemusic: 'file:///data/enginex/ui/icons/applemusic.png', netease: 'file:///data/enginex/ui/icons/netease.png',
+    soundcloud: 'qrc:/Skins/UIKit/Icons/SourceSoundCloudColored.png', beatport: 'qrc:/Skins/UIKit/Icons/SourceBeatport%20LINKColored.png',
+    rekordbox: 'qrc:/Skins/UIKit/Icons/SourceEngineRemoteLibrary.png'};
+for (const [id, url] of Object.entries(marks)) { scScope = id; assert.equal(scSlotIcon('TIDAL'), url, id); }
+for (const scope of ['tidal', '']) { scScope = scope; assert.equal(scSlotIcon('TIDAL'), '', 'stock TIDAL keeps its own mark: ' + scope); }
+scScope = 'deezer';
+for (const other of ['', 'SoundCloud', 'Dropbox']) assert.equal(scSlotIcon(other), '', 'only the TIDAL slot is renamed: ' + other);
+assert.equal(scBrand('TIDAL'), 'Deezer');
+scScope = 'applemusic'; assert.equal(scBrand('TIDAL'), 'Apple Music');
+scScope = 'tidal'; assert.equal(scBrand('TIDAL'), 'TIDAL');
+scScope = 'deezer'; assert.equal(scBrand(''), '');
+"""
+        result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_deck_headers_and_track_info_use_the_active_service(self):
+        embedded = self.patched(self.ROOTS[0])
+        self.assertIn("root.scSlotIcon(artistSong.trackSource)", embedded)
+        self.assertIn("useOriginal: scMark !== \"\"", embedded)
+        self.assertIn("Source${artistSong.trackSource}.png", embedded)  # stock's own mark stays for every other source
+        self.assertIn("width: scMark !== \"\" ? 48 : src.width", embedded)  # the stock icon's 48 px footprint; a parent's own width still wins
+        composite = self.patched(self.ROOTS[1])
+        self.assertIn("root.scSlotIcon(artistSong.trackSource)", composite)
+        self.assertIn("qrc:/streaming/${artistSong.trackSource}/Icon.png", composite)
+        self.assertIn("width: artistSong.iconWidth", composite)  # the 5.3.0 composite header keeps its own size
+        info = self.patched(self.ROOTS[2])
+        self.assertIn("root.scBrand(trackData.streamingSource)", info)
+        self.assertIn('|| "Local Drive"', info)
+
+
 class ReverseJogWheelTest(unittest.TestCase):
     def test_device_tab_and_jog_wheel_patches_on_530_and_504_compat(self):
         rows = bp.load_dict()
