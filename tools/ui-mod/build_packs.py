@@ -8336,9 +8336,9 @@ def edits(dev: bool):
         const delta = B * r
         const raw = B + (2.0 * u - 1.0) * delta
         const k = Math.round(raw)
-        // About +/-0.05 BPM at 124 BPM and +/-8%; keep the same travel on other ranges.
-        const snapHalfTravelFraction = 0.005
-        const threshold = Math.min(0.45, snapHalfTravelFraction * delta)
+        const snapHalfTravelFraction = 0.05 / (124 * 0.08) // Calibrate at 124 BPM and +/-8%.
+        const maxSnapBpm = 0.15 // Keep wide ranges precise even as each fader step grows.
+        const threshold = Math.min(maxSnapBpm, snapHalfTravelFraction * delta)
         if (raw < k - threshold || raw > k + threshold) return u
         // A snap past the center or an endpoint would reverse at that fixed point.
         if (u < 0.5 ? (k < B - delta || k > B) : (k < B || k > B + delta)) return u

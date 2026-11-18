@@ -10257,10 +10257,13 @@ const outMeta = scTransformSpeed(0.5, false, true, propNum(0), propStr("126,5"),
 assert.equal(outMeta, 0.5);
 
 // Both boundaries are inclusive, and the very next value outside is stock.
+const wide = 0.5 + (130.16 - 124) / 248;
+assert.equal(scTransformSpeed(wide, false, true, propNum(124), propStr(""), propStr("100%")), wide,
+             "wide range must leave 130.16 alone");
 for (const raw of [129.949999, 129.95, 129.950001, 130, 130.049999, 130.05, 130.050001, 130.06]) {{
-    const u = 0.5 + (raw - 125) / 20; // 125 BPM at +/-8%
-    const out = scTransformSpeed(u, false, true, propNum(125), propStr(""), propStr("8%"));
-    assert.equal(out, raw >= 129.95 && raw <= 130.05 ? 0.75 : u, `threshold at ${{raw}}`);
+    const u = 0.5 + (raw - 124) / 19.84; // 124 BPM at +/-8%
+    const out = scTransformSpeed(u, false, true, propNum(124), propStr(""), propStr("8%"));
+    assert.equal(out, raw >= 129.95 && raw <= 130.05 ? 0.5 + 6 / 19.84 : u, `threshold at ${{raw}}`);
 }}
 
 // Exercise the emitted transform on uniform 10-, 12- and 14-bit input grids.
@@ -10283,7 +10286,7 @@ for (const inv of [false, true]) {{
             for (const last of [1023, 4095, 16383]) {{
                 let prev = 0;
                 let centerHits = 0;
-                const threshold = Math.min(0.45, B * r / 200);
+                const threshold = Math.min(0.15, 0.05 * (B / 124) * (rPct / 8));
                 for (let i = 0; i <= last; i++) {{
                     const uIn = inv ? 1 - i / last : i / last;
                     const uOut = scTransformSpeed(uIn, inv, true, oP, mP, rP);
@@ -10302,8 +10305,8 @@ for (const inv of [false, true]) {{
                     if (uOut === 0.5) centerHits++;
                 }}
                 if (B === 124) {{
-                    // Full center window covers 0.5% of travel on every uncapped range.
-                    const width = rPct === 100 ? last * 0.45 / 124 : last / 200;
+                    // Up to 24%, all ranges have the same width; wider ranges get harder to hit.
+                    const width = last * (rPct <= 24 ? 0.05 / 9.92 : 0.15 / (124 * r));
                     assert.ok(centerHits >= Math.floor(width) && centerHits <= Math.ceil(width),
                               `center width range=${{rPct}} last=${{last}} hits=${{centerHits}}`);
                 }}
