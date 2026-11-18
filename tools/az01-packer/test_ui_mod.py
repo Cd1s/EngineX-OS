@@ -1014,6 +1014,24 @@ class UiModSourceTest(unittest.TestCase):
         bar = "".join(rep for _, rep in edits["Skins/Embedded/Views/MainView/Fx/DJFx.qml"])
         self.assertIn('djFx.scFxNames[djFx.scFxSelected].replace(" (PX)", "")', bar)
 
+    def test_fx_bar_channel_assign_indicator_issue276(self):
+        # Task #276: show which channel the FX unit is assigned to as a small box
+        # in the FX info strip on consoles (SC LIVE 2 JP20, SC LIVE 4 JP21).
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            edits = bp.edits(False)
+        finally:
+            bp.ROOT = old_root
+        bar = "".join(rep for _, rep in edits["Skins/Embedded/Views/MainView/Fx/DJFx.qml"])
+        self.assertIn('objectName: "DJFx_Assign_Indicator"', bar)
+        self.assertIn('/Engine/Mixer/Channel1/DJFx/Assigned', bar)
+        self.assertIn('/Engine/Mixer/Channel2/DJFx/Assigned', bar)
+        self.assertIn('/Engine/Mixer/Channel3/DJFx/Assigned', bar)
+        self.assertIn('/Engine/Mixer/Channel4/DJFx/Assigned', bar)
+        self.assertIn('/Engine/Mixer/Main/DJFx/Assigned', bar)
+        self.assertIn('visible: !Config.device.isPlayer && scAssignedLabel !== ""', bar)
+
     def test_prime4_fx_knob_moves_one_effect_per_detent(self):
         old_root = bp.ROOT
         try:
