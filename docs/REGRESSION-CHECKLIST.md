@@ -6,7 +6,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 
 ---
 
-## Regression Table (317 Rows)
+## Regression Table (318 Rows)
 
 | # | Behaviour that must keep working | Issue / commit that fixed it | How it is checked (automated test name, or exact real-deck / sandbox step) | Release gate / deck acceptance / recording coverage |
 | --- | --- | --- | --- | --- |
@@ -329,6 +329,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 | 316 | **A layer switch costs the UI pack little more than stock: the Mixstream-only Pad controls (Sweep FX triangle, Beat Jump bank) are created only on Mixstream** (#222 follow-up, SC LIVE 4 user: a layer switch takes about a second with four decks playing. Stock rebuilds the active deck's Pads view and header at every switch, about 480 objects; the pack added five hidden Mixstream buttons to every Pads instance on every model, rebuilt with it. Sandbox, GUI-thread CPU per switch over stock: SC LIVE 4 17 ms → 7.5 ms, PRIME 4 15 → 5, SC5000 11 → 7; stock itself takes 45-110 ms there) | #222 | `tools/az01-packer/test_ui_mod.py` (`MixstreamPadsLayoutTest`, item 6); `tools/az01-packer/layer-switch-sandbox.sh` (JP21, JC11, JP07: stock vs pack); `mixstream-sandbox.sh` (NH08: bank and triangle still shown and working) | `[NO AUTOMATED TEST]` on hardware: an SC LIVE 4 with four decks playing switches layers about as fast as in safe mode (stock UI); on a Mixstream the Beat Jump bank and Sweep FX triangle still show and work |
 
 | 317 | **Settings > Playback never constructs Mixstream Stems EQ channel bindings on players without a software mixer**: the native conditional-entry Loader is active only when the Mixstream row is offered; both DECK segments follow live modes and independently toggle off/on/off | Combined delta review C (P1/P2/P3), batch16 | `test_ui_mod.py::MixstreamPadsLayoutTest::test_stems_eq_row_constructs_only_where_the_mixer_exists_and_toggles`; native NH08 `mixstream-probe.qml` uses signal-emitting test translators to prove both highlight states; JP07/JP13/JC11 gates | On JP07/JP08/JP13/JP14 open Playback without mixer TypeErrors; on Mixstream, with a playable Stems track, verify both channels switch independently |
+| 318 | **Engine DJ profile and real TIDAL coexist with EngineX streaming**: profile account refresh/unlink must not log out the local carrier; selecting real TIDAL retains stock SSO and other providers remain untouched | `#304` | `tools/ui-mod/test_profile_sso.c` executes stock Gen-1, SC LIVE 4 and AZ04 capability slots before/after the hook; real-deck check with a signed-in profile: refresh connected accounts, load an EngineX streaming track, then switch to real TIDAL and back without losing either account | RIGHT profile-sync callback regression; real linked-TIDAL account needs hardware acceptance |
 
 ## Automated Test Gaps (`[NO AUTOMATED TEST]`)
 
