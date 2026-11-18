@@ -922,9 +922,11 @@ var artClient = func() *http.Client {
 	return &http.Client{Timeout: 6 * time.Second, Transport: t}
 }()
 
-// artBytes is the cover at address (https only), from memory or fetched; nil on any failure.
+// artBytes is the cover at address (https, or a rekordbox computer's), from memory or
+// fetched; nil on any failure.
 func (g *tidalGateway) artBytes(ctx context.Context, address string) []byte {
-	if !strings.HasPrefix(address, "https://") {
+	rbx := strings.HasPrefix(address, rbxCoverScheme)
+	if !rbx && !strings.HasPrefix(address, "https://") {
 		return nil
 	}
 	g.artMu.Lock()
@@ -933,17 +935,12 @@ func (g *tidalGateway) artBytes(ctx context.Context, address string) []byte {
 	if data != nil {
 		return data
 	}
-	req, err := http.NewRequestWithContext(ctx, "GET", address, nil)
-	if err != nil {
-		return nil
+	if rbx {
+		data = g.rbxArt(ctx, address)
+	} else {
+		data = fetchArt(ctx, address)
 	}
-	resp, err := artClient.Do(req)
-	if err != nil {
-		return nil
-	}
-	defer resp.Body.Close()
-	data, err = io.ReadAll(io.LimitReader(resp.Body, maxArtBytes+1))
-	if err != nil || resp.StatusCode != http.StatusOK || len(data) > maxArtBytes {
+	if data == nil {
 		return nil
 	}
 	g.artMu.Lock()
@@ -959,6 +956,23 @@ func (g *tidalGateway) artBytes(ctx context.Context, address string) []byte {
 	return data
 }
 
+func fetchArt(ctx context.Context, address string) []byte {
+	req, err := http.NewRequestWithContext(ctx, "GET", address, nil)
+	if err != nil {
+		return nil
+	}
+	resp, err := artClient.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxArtBytes+1))
+	if err != nil || resp.StatusCode != http.StatusOK || len(data) > maxArtBytes {
+		return nil
+	}
+	return data
+}
+
 // prewarmArt fetches the first covers of a listing in the background so the rows
 // and the jog wheel find them cached. One run at a time: a busy deck skips it.
 func (g *tidalGateway) prewarmArt(refs []trackRef) {
@@ -970,7 +984,9 @@ func (g *tidalGateway) prewarmArt(refs []trackRef) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		for _, ref := range refs[:min(len(refs), 12)] {
-			g.artBytes(ctx, thumbURL(ref.track))
+			if ref.track.Provider != rekordboxScope { // its session goes to the analysis prefetch first
+				g.artBytes(ctx, thumbURL(ref.track))
+			}
 		}
 	}()
 }
@@ -2130,6 +2146,9 @@ func (g *tidalGateway) stream(w http.ResponseWriter, r *http.Request) {
 	if ref.file != "" { // OmniSource: straight from the drive, with Range
 		mime := localMIMEs[localCodecs[strings.ToLower(path.Ext(ref.file))]]
 		w.Header().Set("Content-Type", mime)
+		if ref.track.CoverURL != "" { // a rekordbox computer's cover
+			g.syncStmAlbumArtLater(id, ref.track)
+		}
 		if cp := rbxRunning(ref.file); cp != nil { // a rekordbox track still being copied
 			cp.serve(w, r)
 			return
@@ -2165,14 +2184,19 @@ func (g *tidalGateway) stream(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "audio/wav")
 	}
 	log.Printf("stream-sync: load track=%d provider=%s step=stream result=ready elapsed=%s canceled=%t mime=%s", id, ref.track.Provider, time.Since(started).Round(time.Millisecond), r.Context().Err() != nil, w.Header().Get("Content-Type"))
-	// Engine's stm.db row exists by now; it may still be settling, so retry a few times.
+	g.syncStmAlbumArtLater(id, ref.track)
+	http.ServeFile(w, r, p)
+}
+
+// syncStmAlbumArtLater runs syncStmAlbumArt when Engine's stm.db row exists, by the
+// stream request; it may still be settling, so it retries a few times.
+func (g *tidalGateway) syncStmAlbumArtLater(id int64, t providers.Track) {
 	go func() {
 		for _, wait := range []time.Duration{0, 800 * time.Millisecond, 1700 * time.Millisecond, 3500 * time.Millisecond} {
 			time.Sleep(wait)
 			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-			g.syncStmAlbumArt(ctx, id, ref.track)
+			g.syncStmAlbumArt(ctx, id, t)
 			cancel()
 		}
 	}()
-	http.ServeFile(w, r, p)
 }

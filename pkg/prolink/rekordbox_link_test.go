@@ -150,9 +150,9 @@ func (f *fakeRekordbox) serve(c net.Conn) {
 				c.Write(compactWire(m.tx, 0x4101, it.fields()...))
 			}
 			c.Write(compactWire(m.tx, 0x4201, dbNumber(0x3000), dbNumber(0)))
-		case 0x2204, 0x2004, 0x2904, 0x2104, 0x2b04, 0x2c04:
+		case 0x2204, 0x2004, 0x2904, 0x2104, 0x2b04, 0x2c04, 0x2003:
 			blob := f.blobs[m.kind]
-			reply := map[uint16]uint16{0x2204: 0x4602, 0x2004: 0x4402, 0x2904: 0x4a02, 0x2104: 0x4702, 0x2b04: 0x4e02, 0x2c04: 0x4f02}[m.kind]
+			reply := map[uint16]uint16{0x2204: 0x4602, 0x2004: 0x4402, 0x2904: 0x4a02, 0x2104: 0x4702, 0x2b04: 0x4e02, 0x2c04: 0x4f02, 0x2003: 0x4002}[m.kind]
 			status := uint32(0)
 			if len(blob) == 0 {
 				status = 50 // not available
@@ -314,6 +314,31 @@ func TestRekordboxLinkReadsAnalysisBlobs(t *testing.T) {
 		if m.kind == 0x2204 && m.args[0].n != 5<<24|8<<16|4<<8|1 {
 			t.Fatalf("beat grid asks on menu %#x", m.args[0].n)
 		}
+	}
+}
+
+// A track row names its artwork in argument 8; 0x2003 on the data menu hands out the picture.
+func TestRekordboxLinkReadsTrackArtwork(t *testing.T) {
+	jpeg := []byte("\xff\xd8\xff\xe0 cover")
+	f := newFakeRekordbox(t, map[uint16][]dbItem{0x1004: {{id: 1, kind: 4, label: "One", art: 42}, {id: 2, kind: 4, label: "Two"}}})
+	f.blobs = map[uint16][]byte{0x2003: jpeg}
+	l, err := dialRekordbox(context.Background(), net.IPv4(127, 0, 0, 1), f.port(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	all, err := l.Tracks()
+	if err != nil || len(all) != 2 || all[0].Art != 42 || all[1].Art != 0 {
+		t.Fatalf("tracks: %+v %v", all, err)
+	}
+	if b, err := l.Artwork(42); err != nil || !bytes.Equal(b, jpeg) {
+		t.Fatalf("artwork: %q %v", b, err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	last := f.seen[len(f.seen)-1]
+	if last.kind != 0x2003 || last.args[0].n != 5<<24|8<<16|4<<8|1 || last.args[1].n != 42 {
+		t.Fatalf("artwork request: 0x%04x %+v", last.kind, last.args)
 	}
 }
 

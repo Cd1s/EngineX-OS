@@ -11,6 +11,7 @@ package webui
 //   - else the deck says the computer does not share its files.
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha1"
 	"errors"
@@ -45,6 +46,7 @@ const (
 	rbxPresenceEvery = 2 * time.Second // shorter than the UI poll, so timer jitter never skips a check
 	rbxCopyTime      = 15 * time.Minute
 	rbxPortmap       = 50111
+	rbxArtTime       = 3 * time.Second
 )
 
 // uiScopes are the sources the deck's browser can show: the services, and rekordbox
@@ -300,6 +302,7 @@ func (g *tidalGateway) rbxTracks(w http.ResponseWriter, r *http.Request, ref pla
 		return
 	}
 	refs := make([]trackRef, len(rows))
+	_, slot := rbxMedia(ip)
 	for i, t := range rows {
 		// The list shows the key as the wheel notation or not at all: its tempo column reads nothing else.
 		key := ""
@@ -307,6 +310,9 @@ func (g *tidalGateway) rbxTracks(w http.ResponseWriter, r *http.Request, ref pla
 			key = fmt.Sprintf("%d%c", n, mode)
 		}
 		refs[i] = trackRef{track: providers.Track{ID: "rbx\x00" + ip + "\x00" + strconv.FormatUint(uint64(t.ID), 10), Title: t.Title, Artist: t.Artist, BPM: t.BPM, Key: key, DurationMS: t.DurationMS, Provider: rekordboxScope}}
+		if slot == 0 && t.Art != 0 { // a computer's cover; a player's medium is left as it was
+			refs[i].track.CoverURL = rbxCoverScheme + ip + "/" + strconv.FormatUint(uint64(t.Art), 10)
+		}
 	}
 	items := g.refItems(refs)
 	noticeCount := 0
@@ -328,6 +334,45 @@ func (g *tidalGateway) rbxTracks(w http.ResponseWriter, r *http.Request, ref pla
 		rbxMarkLoading()
 	}
 	respond(w, result)
+}
+
+// rbxCoverScheme marks a cover the computer's rekordbox holds: rekordbox-art://<ip>/<artwork id>.
+// The gateway's art cache and /v1/enginex/art serve it like a service's cover link.
+const rbxCoverScheme = "rekordbox-art://"
+
+// rbxArt reads a cover over dbserver (0x2003). It takes the session only when it is free,
+// waiting at most rbxArtTime for that, so lists and loads never queue behind covers.
+// Anything but a JPEG or PNG within maxArtBytes is no cover.
+func (g *tidalGateway) rbxArt(ctx context.Context, address string) []byte {
+	ip, n, _ := strings.Cut(strings.TrimPrefix(address, rbxCoverScheme), "/")
+	art, err := strconv.ParseUint(n, 10, 32)
+	if err != nil || art == 0 || net.ParseIP(ip) == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, rbxArtTime)
+	defer cancel()
+	for !rbxSession.TryLock() {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	defer rbxSession.Unlock()
+	link, err := g.s.rbxDial(ctx, ip)
+	if err != nil {
+		return nil
+	}
+	defer link.Close()
+	a, ok := link.(interface{ Artwork(uint32) ([]byte, error) })
+	if !ok {
+		return nil
+	}
+	data, err := a.Artwork(uint32(art))
+	if err != nil || len(data) > maxArtBytes || !bytes.HasPrefix(data, []byte("\xff\xd8\xff")) && !bytes.HasPrefix(data, []byte("\x89PNG\r\n\x1a\n")) {
+		return nil
+	}
+	return data
 }
 
 // rbxPath is a path of the computer as one slash-separated absolute path, whichever its system.

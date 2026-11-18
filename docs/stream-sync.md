@@ -184,6 +184,8 @@ MP3 回退默认开启，标签写实际码率（如 `[128k]`），`--allow-320k
 
 曲目列表的缩略图由网关 `GET /v1/enginex/art?song=&artist=` 提供，取各平台的小尺寸图，内存里留最近 300 张。下载的文件里
 也内嵌封面（FLAC 的 PICTURE 块、MP3 的 APIC 帧），AAC 不内嵌。TIDAL 自己的列表不经过这里。
+rekordbox 电脑上的曲目用列表行自带的 artwork id，经 dbserver（`0x2003`）向 rekordbox 取图，只收 JPEG/PNG，
+与各平台封面共用同一个内存缓存；会话忙时最多等 3 秒，取不到就是没有封面。
 
 ## BPM 与调性
 

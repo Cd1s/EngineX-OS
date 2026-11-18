@@ -40,16 +40,16 @@ const (
 
 // RekordboxItem is one menu row: a track, a playlist or a folder. Second is the row's second
 // text, which a track list's sort order turns into the artist, or the tempo and key; Parent is
-// then the tempo times 100.
+// then the tempo times 100. Art is a track row's artwork id (0: none).
 type RekordboxItem struct {
-	Parent, ID, Kind uint32
-	Label, Second    string
+	Parent, ID, Kind, Art uint32
+	Label, Second         string
 }
 
 // RekordboxTrack is a row of a track list with its artist, tempo and key. Artist and key are
 // empty and BPM 0 where rekordbox has none, or did not say.
 type RekordboxTrack struct {
-	ID            uint32
+	ID, Art       uint32 // Art: the artwork id for Artwork, 0 when the track has none
 	Title, Artist string
 	BPM           float64
 	Key           string
@@ -216,6 +216,9 @@ func (l *RekordboxLink) menu(kind uint16, args ...uint32) ([]RekordboxItem, erro
 			if len(m.args) > 5 && m.args[5].tag == 0x26 {
 				item.Second = clean(m.args[5])
 			}
+			if len(m.args) > 8 {
+				item.Art = m.args[8].n
+			}
 			items = append(items, item)
 		}
 	}
@@ -263,7 +266,7 @@ func (l *RekordboxLink) trackList(kind uint16, args func(sort uint32) []uint32) 
 	tracks := make([]RekordboxTrack, len(plain))
 	at := map[uint32][]int{} // a playlist may hold a track twice
 	for i, it := range plain {
-		tracks[i] = RekordboxTrack{ID: it.ID, Title: it.Label}
+		tracks[i] = RekordboxTrack{ID: it.ID, Art: it.Art, Title: it.Label}
 		at[it.ID] = append(at[it.ID], i)
 	}
 	if err != nil || len(plain) == 0 {
@@ -319,6 +322,9 @@ func (l *RekordboxLink) blob(kind uint16, menu byte, args ...uint32) ([]byte, er
 	}
 	return r.args[3].data, nil
 }
+
+// Artwork is the picture with artwork id art (0x2003), as rekordbox stores it: JPEG as a rule.
+func (l *RekordboxLink) Artwork(art uint32) ([]byte, error) { return l.blob(0x2003, rbxDataMenu, art) }
 
 // BeatGrid is the track's beat grid, as 0x2204 gives it.
 func (l *RekordboxLink) BeatGrid(id uint32) ([]byte, error) { return l.blob(0x2204, rbxDataMenu, id) }
