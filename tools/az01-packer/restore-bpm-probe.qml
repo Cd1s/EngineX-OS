@@ -132,6 +132,8 @@ Item {
     // The physical tempo fader as stock's control surface reports it (airAssignments ValueOutput):
     // at device init a forced hard + soft value, while the assignment does not drive Speed only the
     // soft value. The sandbox has no MIDI device, so the probe makes the same translator calls.
+    // Raw 14-bit codes as stock decodes them (doublePrecision ValueCCAssignment): code / 16383; centre is 8192.
+    function code(c) { return c / 16383 }
     function faderInit(d, v) { tr("/Engine/Deck" + d + "/Speed").setValue(v, 0x10000000 | 2002, 0) }
     function faderSoft(d, v) { tr("/Engine/Deck" + d + "/Speed").setSoftValue(v) }
     function speed2() { return tr("/Engine/Deck2/Speed") }
@@ -140,9 +142,9 @@ Item {
     // A real falling edge: Sync observed on, then observed Off after the press.
     function syncOffSecond() { if (sync(2) !== "Off") syncOn() }
     readonly property var stock: [
-        [300, function() { faderInit(2, 0.5); snap("fader at 0 % (soft " + speed2().softValue + ")") }],
+        [300, function() { faderInit(2, code(8192)); snap("fader at centre code 8192 (soft " + speed2().softValue + ")") }],
         [300, function() { syncOn() }],
-        [2500, function() { snap("OFF: synced"); expect(sync(2) !== "Off", "Sync engaged"); expect(Math.abs(bpm(2, "/CurrentBPM") - bpm(1, "/CurrentBPM")) < 0.3, "deck 2 runs at deck 1's tempo"); expect(speed2().value !== 0.5 && speed2().softValue === 0.5, "Engine rewrote Speed, the fader is still at 0 %") }],
+        [2500, function() { snap("OFF: synced"); expect(sync(2) !== "Off", "Sync engaged"); expect(Math.abs(bpm(2, "/CurrentBPM") - bpm(1, "/CurrentBPM")) < 0.3, "deck 2 runs at deck 1's tempo"); expect(speed2().value !== 0.5 && Math.abs(speed2().softValue - code(8192)) < 1e-6, "Engine rewrote Speed, the fader is still at code 8192") }],
         [300, function() { syncOff() }],
         [600, function() { syncOffSecond() }],
         [1500, function() {
@@ -153,29 +155,41 @@ Item {
     ]
     readonly property var restoring: [
         [300, function() { root.scRestoreBpmOnUnsync = true; syncOn() }],
-        [2500, function() { snap("ON: synced"); expect(sync(2) !== "Off", "Sync engaged again"); expect(speed2().value !== 0.5 && speed2().softValue === 0.5, "synced rate, fader at 0 %"); shot("synced") }],
+        [2500, function() { snap("ON: synced"); expect(sync(2) !== "Off", "Sync engaged again"); expect(speed2().value !== 0.5 && Math.abs(speed2().softValue - code(8192)) < 1e-6, "synced rate, fader at code 8192"); shot("synced") }],
         [300, function() { syncOff() }],
         [600, function() { syncOffSecond() }],
         [1500, function() {
-            snap("ON: after Sync off, fader at 0 %")
+            snap("ON: after Sync off, fader at code 8192")
             expect(sync(2) === "Off", "falling edge: Sync is off")
-            expect(Math.abs(bpm(2, "/CurrentBPM") - bpm(2, "/OriginalBPM")) < 0.05, "setting On, fader at 0 %: the deck is back at its own BPM")
+            expect(Math.abs(bpm(2, "/CurrentBPM") - bpm(2, "/OriginalBPM")) < 0.05, "setting On, fader at code 8192: the deck is back at its own BPM")
             expect(speed2().value === 0.5, "the rate reads 0 % again")
             shot("restored")
         }]
     ]
-    readonly property var moved: [
+    readonly property var restoring8191: [
         [300, function() { syncOn() }],
-        [2500, function() { faderSoft(2, 0.505); snap("ON: synced, fader moved +0.08 %"); expect(sync(2) !== "Off", "Sync engaged with the fader moved") }],
+        [2500, function() { faderSoft(2, code(8191)); snap("ON: synced, fader at centre code 8191"); expect(sync(2) !== "Off" && speed2().value !== 0.5, "synced rate again") }],
+        [300, function() { syncOff() }],
+        [600, function() { syncOffSecond() }],
+        [1500, function() {
+            snap("ON: after Sync off, fader at code 8191")
+            expect(sync(2) === "Off", "falling edge: Sync is off")
+            expect(Math.abs(bpm(2, "/CurrentBPM") - bpm(2, "/OriginalBPM")) < 0.05, "fader at code 8191: the deck is back at its own BPM")
+        }]
+    ]
+    function movedPhase(c, label) { return [
+        [300, function() { syncOn() }],
+        [2500, function() { faderSoft(2, c); snap("ON: synced, fader " + label); expect(sync(2) !== "Off", "Sync engaged with the fader " + label) }],
         [300, function() { ctx.synced = speed2().value; syncOff() }],
         [600, function() { syncOffSecond() }],
         [1500, function() {
-            snap("ON: after Sync off, fader moved")
+            snap("ON: after Sync off, fader " + label)
             expect(sync(2) === "Off", "falling edge: Sync is off")
-            expect(Math.abs(bpm(2, "/CurrentBPM") - bpm(1, "/CurrentBPM")) < 0.3, "fader moved: the deck keeps the synced rate (stock)")
-            expect(speed2().value === ctx.synced, "the rate was not written")
+            expect(Math.abs(bpm(2, "/CurrentBPM") - bpm(1, "/CurrentBPM")) < 0.3, "fader " + label + ": the deck keeps the synced rate (stock)")
+            expect(speed2().value === ctx.synced, "fader " + label + ": the rate was not written")
         }]
-    ]
+    ] }
+    readonly property var moved: movedPhase(code(8193), "at code 8193").concat(movedPhase(0.505, "moved +0.08 %"))
     readonly property var finish: [
         [500, function() {
             say("failures " + failures)
@@ -183,7 +197,7 @@ Item {
             Planck.getProperty("/Client/Quit").translator.state = true
         }]
     ]
-    readonly property var steps: e2e ? load1.concat(stock).concat(restoring).concat(moved).concat(pagePart).concat(finish) : pagePart.concat(finish)
+    readonly property var steps: e2e ? load1.concat(stock).concat(restoring).concat(restoring8191).concat(moved).concat(pagePart).concat(finish) : pagePart.concat(finish)
     Timer {
         interval: 250
         running: true

@@ -10382,6 +10382,22 @@ assert.deepEqual(writes, ['2:0.5']);
 """)
 
     @unittest.skipUnless(shutil.which("node"), "Node is required for the restore logic")
+    def test_a_14_bit_fader_at_its_centre_codes_restores(self):
+        # Review #289 (91bfd11e): stock decodes the 14-bit speed fader as code / 16383, so the centre
+        # detent is 8192 (0.50003) or 8191 (0.49997), never exactly 0.5. Both restore; 8193 does not.
+        self.run_node(r"""
+const code = (c) => c / 16383;
+for (const c of [8192, 8191]) {
+  writes.length = 0; deck(2, {speed: 0.7016, fader: code(c)}); scUnsyncRestoreBpm(2);
+  assert.deepEqual(writes, ['2:0.5'], 'centre code ' + c);
+}
+for (const c of [8193, 8190]) {
+  writes.length = 0; deck(2, {speed: 0.7016, fader: code(c)}); scUnsyncRestoreBpm(2);
+  assert.deepEqual(writes, [], 'moved one code: ' + c);
+}
+""")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required for the restore logic")
     def test_ownership_not_the_routing_mask_decides_in_four_deck_player_mode(self):
         # Review #289 P2.1: the mixed fixture (local role 13, engine peer 2, display-only peer 4) leaves
         # scShadowEngineMask = 14. Local decks 1 and 3 restore; the peer's deck 2 is never written.

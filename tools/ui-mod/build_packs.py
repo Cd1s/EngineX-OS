@@ -5727,8 +5727,8 @@ SMART_SYNC_MAIN = """
 	// 0 % returns the deck to the track's original BPM; stock keeps the synced rate
 	// after UnSync until the fader moves. Engine rewrites the effective Speed when Sync
 	// engages, so the physical fader is the Speed translator's softValue (what the
-	// control surface reports, stock ValueOutput's soft-takeover path). Only an exactly
-	// centred fader counts. Not for the MASTER deck (decks synced to it would follow
+	// control surface reports, stock ValueOutput's soft-takeover path). Only the centre
+	// codes count. Not for the MASTER deck (decks synced to it would follow
 	// the change), not for a slot this unit does not own (four-deck player mode), not
 	// with no track loaded. One write, nothing delayed.
 	// Runs in the GUI engine from the SyncMode change: no controller latch.
@@ -5738,7 +5738,9 @@ SMART_SYNC_MAIN = """
 		const pMaster = root.scTr("/Engine/Deck" + d + "/DeckIsMaster"), pSpeed = root.scTr("/Engine/Deck" + d + "/Speed")
 		if (!pLoaded || !pSync || !pMaster || !pSpeed || !pLoaded.state || pSync.string !== "Off" || pMaster.state) return
 		// Speed is the effective rate, so at exactly 0.5 the deck already plays its own BPM.
-		if (pSpeed.softValue === 0.5 && pSpeed.value !== 0.5) pSpeed.value = 0.5
+		// A 14-bit fader has no exact 0.5: its centre codes 8191 / 8192 arrive as 0.49997 / 0.50003
+		// (code / 16383); 8193 and anything further is a moved fader and stays.
+		if (Math.abs(pSpeed.softValue - 0.5) < 1 / 16383 && pSpeed.value !== 0.5) pSpeed.value = 0.5
 	}
 	Instantiator {
 		model: root.scDeckList()
