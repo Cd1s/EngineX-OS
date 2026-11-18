@@ -1219,6 +1219,7 @@ func TestUSBDeckFindsIDsAnywhereInTheLine(t *testing.T) {
 		`Instance ID:   USB\15E4:303F\5&2B1C0A3E&0&2`: "nh08s",
 		"15e4:2059 Numark MIXSTREAM PRO GO":           "nh10", // from the official Mixstream image usb_devices
 		"15e4:d012 Denon DJ SC LIVE 4 Update":         "jp21",
+		"15e4:d014 PRIME 4 G2":                        "jp24", // #311
 		"1d6b:0002 Linux Foundation 2.0 root hub":     "",
 	} {
 		o.ListUSB = func(context.Context) string { return line + "\n" }
@@ -1832,6 +1833,47 @@ func TestUSBUpdateModeFlashesA64MiBDataImage(t *testing.T) {
 	}
 	if s := o.Out.(*bytes.Buffer).String(); !strings.Contains(s, "Rane SYSTEM ONE") || !strings.Contains(s, "100%") || !strings.Contains(s, "power button") {
 		t.Errorf("output:\n%s", s)
+	}
+}
+
+func TestPrime4G2D014AudioDeviceWaitsWithoutWriting(t *testing.T) {
+	o := testOpts(t)
+	d := &testUSB{info: usbInfo(0x15e4, 0xd014, "", true)}
+	d.info.Interfaces[0].Class = 1 // audio, not the vendor update interface
+	o.USB = d
+	o.ListUSB = func(context.Context) string { return usbLine(d.info) }
+	o.WaitUSB = -time.Second
+	err := run(ctxT(t), o)
+	if err == nil || !strings.Contains(err.Error(), "timed out waiting for fastboot") {
+		t.Fatalf("expected the update wait to time out, got %v", err)
+	}
+	if out := o.Out.(*bytes.Buffer).String(); !strings.Contains(out, "[Denon DJ PRIME 4 G2]") || !strings.Contains(out, "Firmware Update Mode (Reboot)") {
+		t.Fatalf("expected the G2 update mode prompt: %s", out)
+	}
+	if d.polls < 2 || d.opens != 0 || d.calls != 0 {
+		t.Fatalf("polls=%d USB opens=%d write-part calls=%d", d.polls, d.opens, d.calls)
+	}
+}
+
+func TestPrime4G2D014UpdateInterfaceWritesData(t *testing.T) {
+	need(t, "python3", "mke2fs", "debugfs", "e2fsck")
+	o := testOpts(t)
+	b := buildBundle(t, "PRIME4G2", "5.3.0.3")
+	useRelease(o, releaseServer(t, b, "", nil))
+	d := &testUSB{info: usbInfo(0x15e4, 0xd014, "", true), img: filepath.Join(t.TempDir(), "flashed.img")}
+	o.USB = d
+	if err := run(ctxT(t), o); err != nil {
+		t.Fatalf("run: %v\n%s", err, o.Out)
+	}
+	if d.opens != 1 || d.calls != 1 {
+		t.Fatalf("USB opens=%d write-part calls=%d", d.opens, d.calls)
+	}
+	if fi, err := os.Stat(d.img); err != nil || fi.Size() != 64<<20 {
+		t.Fatalf("data image: %v (%v), want 64 MiB", fi, err)
+	}
+	sh(t, "e2fsck", "-fn", d.img)
+	if out := o.Out.(*bytes.Buffer).String(); !strings.Contains(out, "Firmware Update Mode (15e4:d014) found Denon DJ PRIME 4 G2") {
+		t.Fatalf("expected the G2 update interface to be named: %s", out)
 	}
 }
 

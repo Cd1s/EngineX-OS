@@ -3,7 +3,7 @@
 //
 //	mode A: the deck is on the LAN with SSH open -> stream the Data-Bundle over SSH.
 //	mode B: the deck is in fastboot (USB)         -> build a /data image and flash it.
-//	mode C: Firmware Update Mode as 1cc5:2027      -> build a 64 MiB /data image, write-part it over USB (#116).
+//	mode C: Firmware Update Mode with AZ update interface -> build a 64 MiB /data image, write-part it over USB (#116).
 package main
 
 import (
@@ -1101,7 +1101,8 @@ func IsRockchipUSBLoader(line string) bool {
 // (not yet seen on a real NH10; modeB still reads the model from fastboot before flashing).
 var gen2USB = map[string]string{
 	"15e4:d007": "jc11s", "15e4:c00c": "jp11s", "15e4:d011": "jp20", "15e4:d012": "jp21",
-	"15e4:103f": "nh08s", "15e4:303f": "nh08s", "15e4:2059": "nh10",
+	azPrime4G2ID: "jp24", // PRIME 4 G2 seen on a Mac (#311); the interface determines the mode.
+	"15e4:103f":  "nh08s", "15e4:303f": "nh08s", "15e4:2059": "nh10",
 }
 
 // gen1USB is the usb_devices table of the official 5.3.0 1st-gen images, in their compatible order.
@@ -1461,11 +1462,12 @@ func modeBGen1(ctx context.Context, o *options, session *updateSession, m model)
 	return nil
 }
 
-// ---- mode C: Firmware Update Mode without fastboot (1cc5:2027) --------------
+// ---- mode C: Firmware Update Mode without fastboot -------------------------
 
 const (
-	azID       = "1cc5:2027"
-	azDataSize = 64 << 20 // the fresh /data image SBDJUK flashed on a SYSTEM ONE (#116)
+	azID         = "1cc5:2027"
+	azPrime4G2ID = "15e4:d014"
+	azDataSize   = 64 << 20 // the fresh /data image SBDJUK flashed on a SYSTEM ONE (#116)
 )
 
 // azNames match the USB product string when nothing else names the deck; most specific first.
@@ -1481,7 +1483,7 @@ func azModel(o *options, board, line string) (model, bool) {
 }
 
 // errAZUnknown: nothing names the deck in Firmware Update Mode.
-var errAZUnknown = errors.New("unknown 1cc5:2027 model")
+var errAZUnknown = errors.New("unknown AZ update model")
 
 // azResolve picks the model to flash in mode C. What the hardware reports (the AZ04 board seen on
 // the LAN, the USB product string) wins; a --bundle/--image filename only fills a missing identity
@@ -1499,6 +1501,9 @@ func azResolve(o *options, board, line string) (model, error) {
 		ids = append(ids, id{lm, "LAN"})
 	}
 	l := strings.ToLower(line)
+	if vidPID.FindString(l) == azPrime4G2ID {
+		ids = append(ids, id{gen2Boards["jp24"], "USB ID"})
+	}
 	for _, n := range azNames {
 		if strings.Contains(l, n.name) {
 			ids = append(ids, id{gen2Boards[n.board], "USB"})
@@ -1517,7 +1522,7 @@ func azResolve(o *options, board, line string) (model, error) {
 				ids[0].from, ids[0].m.Name, x.from, x.m.Name, ids[0].from, ids[0].m.Name, x.from, x.m.Name)
 		}
 	}
-	// Only AZ04 decks without fastboot (rmz2 SYSTEM ONE, jp24 PRIME 4 G2) use 1cc5:2027 write-part.
+	// Only AZ04 decks without fastboot (rmz2 SYSTEM ONE, jp24 PRIME 4 G2) use USB write-part.
 	// A fastboot deck (e.g. nh08s, jp21) discovered on the LAN must never be passed to modeAZ (#164).
 	if b := boardCode(board); lanGen2 && (b == "rmz2" || b == "jp24") {
 		return ids[0].m, nil
@@ -1567,7 +1572,8 @@ func modeAZ(ctx context.Context, o *options, session *updateSession, board, line
 		return fmt.Errorf("碟机处于 Firmware Update Mode（%s），但认不出型号：请用 --image 或 --bundle 指定该机型的 *-Update.img，没有刷写任何东西 / "+
 			"the deck is in Firmware Update Mode (%s) but its model is unknown: pass --image or --bundle <MODEL>-<VERSION>-EngineX-OS-*-Update.img; nothing flashed", line, line)
 	}
-	o.say("USB Firmware Update Mode（"+azID+"）识别到 "+m.Name, "Firmware Update Mode ("+azID+") found "+m.Name)
+	tag := vidPID.FindString(line)
+	o.say("USB Firmware Update Mode（"+tag+"）识别到 "+m.Name, "Firmware Update Mode ("+tag+") found "+m.Name)
 	b, err := obtainBundle(ctx, o, m.Prefix)
 	if err != nil {
 		return err
@@ -1588,9 +1594,9 @@ func modeAZ(ctx context.Context, o *options, session *updateSession, board, line
 	sayGen2Steps(o, filepath.Base(b.Path))
 	o.say("正在通过 USB 写入 data 分区，请勿断开连接或关闭电源…", "Writing the data partition over USB. Do not disconnect USB or power off the deck...")
 	if err := usbFlash(ctx, o, session, img); err != nil {
-		return fmt.Errorf("USB %s write-part: %w", azID, err)
+		return fmt.Errorf("USB %s write-part: %w", tag, err)
 	}
-	// 1cc5:2027 has no reboot command over USB.
+	// AZ update has no reboot command over USB.
 	o.say(fmt.Sprintf("完成：EngineX OS %s 已写入 %s。请按电源键关机再开机（或拔插电源），开机后自动激活。", b.Version, m.Name),
 		fmt.Sprintf("Done: EngineX OS %s written to %s. Press the power button to turn it off and on again (or replug power); it activates on boot.", b.Version, m.Name))
 	sayGen2Unlocked(o, b, m.Prefix)
