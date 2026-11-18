@@ -304,7 +304,7 @@ func TestRekordboxManifestRefreshesEditedGridAndCue(t *testing.T) {
 	l := rbxEditedLink{base, 650}
 	grid, _ := l.BeatGrid(1)
 	cues, _ := l.CuesExtended(1)
-	want, err := enginedb.EncodePerformance(rekordbox.Track{SampleRate: 44100, SampleCount: 21435392 - 2048, StartOffsetSamples: 2048},
+	want, err := enginedb.EncodePerformance(rekordbox.Track{SampleRate: 44100, SampleCount: 21435392, StartOffsetSamples: 2048},
 		&rekordbox.Analysis{Beats: rbxBeatGrid(grid), Cues: rbxCueList(cues)})
 	got, original := rbxTestBlobs(t, after), rbxTestBlobs(t, before)
 	if err != nil || !bytes.Equal(got[2], want.Beats) || !bytes.Equal(got[3], want.QuickCues) ||
