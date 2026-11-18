@@ -49,10 +49,10 @@ func issue233Marks(t *testing.T, root string, pending bool) {
 	p, _ := os.ReadFile(filepath.Join(dir, ".rb-bridge-pending"))
 	s, _ := os.ReadFile(filepath.Join(dir, ".rb-bridge-stamp"))
 	if pending {
-		if !strings.HasPrefix(string(p), "v3 ") || bytes.Equal(p, s) {
+		if !strings.HasPrefix(string(p), "v4 ") || bytes.Equal(p, s) {
 			t.Fatalf("deferred import marks: pending=%q stamp=%q", p, s)
 		}
-	} else if len(p) != 0 || !strings.HasPrefix(string(s), "v3 ") {
+	} else if len(p) != 0 || !strings.HasPrefix(string(s), "v4 ") {
 		t.Fatalf("completed import marks: pending=%q stamp=%q", p, s)
 	}
 }

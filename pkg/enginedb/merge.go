@@ -217,18 +217,7 @@ func MergeLive(ctx context.Context, buildDir, liveDir string, base BaseCounts) e
 		func() error {
 			return copyRows("Track", "id", trackEngine, `m.id IN (SELECT id FROM temp.changed)`)
 		},
-		func() error {
-			_, err := tx.ExecContext(ctx, `UPDATE main.PerformanceData AS m SET
-				beatData=CASE WHEN l.beatData IS NOT NULL THEN l.beatData ELSE m.beatData END,
-				quickCues=CASE WHEN l.quickCues IS NOT NULL THEN l.quickCues ELSE m.quickCues END,
-				loops=CASE WHEN l.loops IS NOT NULL THEN l.loops ELSE m.loops END,
-				activeOnLoadLoops=CASE WHEN l.loops IS NOT NULL THEN l.activeOnLoadLoops ELSE m.activeOnLoadLoops END,
-				thirdPartySourceId=CASE WHEN l.beatData IS NOT NULL OR l.quickCues IS NOT NULL OR l.loops IS NOT NULL THEN NULL ELSE m.thirdPartySourceId END
-				FROM live.PerformanceData AS l
-				WHERE l.trackId=m.trackId AND m.trackId IN (SELECT id FROM temp.changed) AND l.thirdPartySourceId IS NULL
-				AND EXISTS (SELECT 1 FROM livebridge.BridgeAnalysis a WHERE a.trackId=m.trackId)`)
-			return err
-		},
+		func() error { return carryLiveEdits(ctx, tx) },
 		func() error {
 			_, err := tx.ExecContext(ctx, `UPDATE main.Track AS m SET lastEditTime=l.lastEditTime FROM live.Track AS l
 				WHERE l.id=m.id AND m.id IN (SELECT id FROM temp.changed) AND l.lastEditTime>COALESCE(m.lastEditTime,0)`)

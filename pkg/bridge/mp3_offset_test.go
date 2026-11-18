@@ -158,11 +158,14 @@ func TestIssue178MP3OffsetClassesAndExistingLibraryResync(t *testing.T) {
 		wantOffset  int
 	}
 	tracks := []spec{
-		{1, "MUSIC/44k-lame.mp3", "01-lame-cbr-info-44100.mp3", 44100, 44100, 50, 2257},
+		// Info + LAME extension: rekordbox does not play the Info frame, so only the delay
+		// Engine's decoder trims (576 + 529) separates the two; measured on real files
+		// from a stick on 2026-11-19 (it was 2257 here, 26 ms early on the deck).
+		{1, "MUSIC/44k-lame.mp3", "01-lame-cbr-info-44100.mp3", 44100, 44100, 50, 1105},
 		{2, "MUSIC/44k-xing.mp3", "04-xing-only-44100.mp3", 44100, 44100, 50, 1152},
 		{3, "MUSIC/44k-hdrless.mp3", "05-headerless-lame-44100.mp3", 44100, 44100, 24, 0},
 		{4, "MUSIC/44k-ref.wav", "", 44100, 44100, 0, 0},
-		{5, "MUSIC/48k-lame.mp3", "01-lame-cbr-info-48000.mp3", 48000, 44100, 46, 2257},
+		{5, "MUSIC/48k-lame.mp3", "01-lame-cbr-info-48000.mp3", 48000, 44100, 46, 1105},
 		{6, "MUSIC/48k-xing.mp3", "04-xing-only-48000.mp3", 48000, 48000, 46, 1152},
 		{7, "MUSIC/48k-hdrless.mp3", "05-headerless-lame-48000.mp3", 48000, 48000, 22, 0},
 		{8, "MUSIC/48k-ref.wav", "", 48000, 48000, 0, 0},
@@ -320,14 +323,15 @@ func TestIssue178MP3OffsetClassesAndExistingLibraryResync(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Next mount must NOT bypass the legacy stamp, and must re-convert ONLY the 4 affected
-	// MP3 tracks (1, 2, 5, 6), leaving the 2 headerless MP3s and 2 WAVs untouched.
+	// Next mount must NOT bypass the legacy stamp, and must re-convert only the MP3 tracks:
+	// every one of them since the offset rule of 2026-11-19 (a row Engine has loaded may
+	// hold an older import's positions whatever its header), leaving the 2 WAVs untouched.
 	res, err = bridge.ConvertAtMount(context.Background(), root, enginedb.Options{}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Bypassed || res.Added != 0 || res.Updated != 4 || res.Unchanged != 4 {
-		t.Fatalf("upgrade mount sync: got %+v, want Updated=4 Unchanged=4", res)
+	if res.Bypassed || res.Added != 0 || res.Updated != 6 || res.Unchanged != 2 {
+		t.Fatalf("upgrade mount sync: got %+v, want Updated=6 Unchanged=2", res)
 	}
 
 	db = dbOpen(t, root)

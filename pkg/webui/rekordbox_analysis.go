@@ -610,11 +610,7 @@ func rbxHeader(file string, t *rekordbox.Track) {
 }
 
 func rbxApplyHeader(t *rekordbox.Track, info compat.AudioInfo) {
-	offset := info.StartOffsetSamples
-	if info.Format == "mp3" {
-		offset = info.LinkStartOffsetSamples
-	}
-	t.SampleRate, t.StartOffsetSamples = info.SampleRate, offset
+	t.SampleRate, t.StartOffsetSamples = info.SampleRate, info.RekordboxOffset()
 	if info.Duration > 0 {
 		t.Duration = info.Duration
 	}

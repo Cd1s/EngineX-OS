@@ -92,7 +92,7 @@ func TestIssue301CompletedImportReleasesGlobalLock(t *testing.T) {
 	if err = os.MkdirAll(stage, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	stamp := fmt.Sprintf("v3 PIONEER/rekordbox/export.pdb %d %d", st.Size(), st.ModTime().UnixNano())
+	stamp := fmt.Sprintf("v4 PIONEER/rekordbox/export.pdb %d %d", st.Size(), st.ModTime().UnixNano())
 	if err = os.WriteFile(filepath.Join(stage, ".rb-bridge-stamp"), []byte(stamp), 0o644); err != nil {
 		t.Fatal(err)
 	}

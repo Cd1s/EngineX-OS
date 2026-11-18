@@ -200,7 +200,7 @@ func TestExportTieKeepsPDBImport(t *testing.T) {
 			}
 			dir := filepath.Join(root, "Engine Library/Database2")
 			stampPath := filepath.Join(dir, ".rb-bridge-stamp")
-			oldStamp := fmt.Sprintf("v3 PIONEER/rekordbox/export.pdb %d %d | PIONEER/rekordbox/exportLibrary.db %d %d\n",
+			oldStamp := fmt.Sprintf("v4 PIONEER/rekordbox/export.pdb %d %d | PIONEER/rekordbox/exportLibrary.db %d %d\n",
 				pdbStat.Size(), pdbStat.ModTime().UnixNano(), dbStat.Size(), dbStat.ModTime().UnixNano())
 			if err := os.Remove(stampPath); err != nil {
 				t.Fatal(err)

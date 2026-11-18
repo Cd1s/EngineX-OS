@@ -95,7 +95,7 @@ func TestAACGridMigratesAnUnchangedV2Export(t *testing.T) {
 		t.Fatalf("first beat %v samples, want -2048", got.beat0)
 	}
 	v, err = os.ReadFile(stamp)
-	if err != nil || !bytes.HasPrefix(v, []byte("v3 ")) {
+	if err != nil || !bytes.HasPrefix(v, []byte("v4 ")) {
 		t.Fatalf("upgraded stamp: %q, %v", v, err)
 	}
 }

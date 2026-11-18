@@ -146,7 +146,7 @@ func prepareOne(res *compat.Resolver, t rekordbox.Track, rel string, cutoff time
 		if mayDefer && !cutoff.IsZero() && now().After(cutoff) {
 			uninspected = true
 		} else if info, err := audioHeader(full); err == nil {
-			fp.MP3Offset = info.OffsetClass
+			fp.MP3Offset, fp.OffsetRule = info.OffsetClass, offsetRule
 			if info.Format == "aac" && info.StartOffsetSamples > 0 {
 				fp.AACOffset = strconv.Itoa(info.StartOffsetSamples)
 			}
@@ -332,6 +332,7 @@ func stageOwnedMoves(ctx context.Context, tx *sql.Tx, prepared []preparedTrack, 
 			`DELETE FROM PlaylistEntity WHERE trackId=? AND (databaseUuid IS NULL OR databaseUuid='' OR databaseUuid=(SELECT uuid FROM Information))`,
 			`DELETE FROM BridgeState WHERE trackId=?`,
 			`DELETE FROM BridgeAnalysis WHERE trackId=?`,
+			`DELETE FROM BridgeWritten WHERE trackId=?`,
 			`DELETE FROM Track WHERE id=?`,
 		} {
 			if _, e = tx.ExecContext(ctx, query, id); e != nil {

@@ -46,6 +46,9 @@ CREATE TABLE bridge.BridgePlaylist(sourceId INTEGER PRIMARY KEY, listId INTEGER 
 CREATE TABLE bridge.BridgeLibrary(key TEXT PRIMARY KEY, value BLOB);
 `
 
+// What an import left in a track's row (written.go). A state file of an earlier build has none.
+const bridgeWrittenSchema = `CREATE TABLE IF NOT EXISTS bridge.BridgeWritten(trackId INTEGER PRIMARY KEY, digest BLOB NOT NULL)`
+
 var bridgeTables = []string{"BridgeState", "BridgeAnalysis", "BridgePlaylist", "BridgeLibrary"}
 
 type Options struct {
@@ -234,6 +237,9 @@ func open(ctx context.Context, p string, bulk bool) (*sql.DB, *sql.Tx, error) {
 			return nil, nil, e
 		}
 	}
+	if _, e = tx.ExecContext(ctx, bridgeWrittenSchema); e != nil {
+		return nil, nil, e
+	}
 	// Libraries from earlier builds kept this state in m.db, not yet dropped by Engine.
 	var migratedAnalysis bool
 	for _, table := range bridgeTables {
@@ -270,6 +276,7 @@ func open(ctx context.Context, p string, bulk bool) (*sql.DB, *sql.Tx, error) {
 	for _, prune := range []string{
 		`DELETE FROM BridgeState WHERE trackId NOT IN (SELECT id FROM main.Track)`,
 		`DELETE FROM BridgeAnalysis WHERE trackId NOT IN (SELECT id FROM main.Track)`,
+		`DELETE FROM BridgeWritten WHERE trackId NOT IN (SELECT id FROM main.Track)`,
 		`DELETE FROM BridgePlaylist WHERE listId NOT IN (SELECT id FROM main.Playlist)`,
 	} {
 		if _, e = tx.ExecContext(ctx, prune); e != nil {
@@ -297,6 +304,11 @@ type analysisFile struct {
 // 3 writes Engine 5.3.0's 68-byte trackData with waveform peaks (#101).
 const performanceEncoding = 3
 
+// offsetRule is in the fingerprint of an MP3 or M4A whose header was read: raising it reads
+// those tracks again. 4: one rekordbox offset for USB and Link, no import mark, and what a
+// row Engine has loaded kept from an older import is moved to it (realign.go).
+const offsetRule = 4
+
 type fingerprint struct {
 	Encoding     int
 	Record       string
@@ -306,6 +318,7 @@ type fingerprint struct {
 	Artwork      *analysisFileExport
 	MP3Offset    string `json:",omitempty"`
 	AACOffset    string `json:",omitempty"`
+	OffsetRule   int    `json:",omitempty"`
 }
 type analysisFileExport struct {
 	Path        string
@@ -680,7 +693,7 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 		if audio.Format == "aac" && t.SampleRate > 0 && t.SampleRate != audio.SampleRate {
 			// An implicit SBR stream can advertise only its core sample rate.
 			// Keep the export's timing; the priming tag is in decoded samples.
-			t.StartOffsetSamples = audio.StartOffsetSamples
+			t.StartOffsetSamples = audio.RekordboxOffset()
 		} else if audio.SampleRate > 0 {
 			if t.SampleRate > 0 && t.SampleRate != audio.SampleRate {
 				log.Printf("rb-bridge: track %d (%s): export sample rate %d Hz differs from file header %d Hz; using file header", t.ID, rel, t.SampleRate, audio.SampleRate)
@@ -698,7 +711,7 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 			if audio.Bitrate > 0 && (audio.Format != "mp3" || t.Bitrate == 0) {
 				t.Bitrate = audio.Bitrate
 			}
-			t.StartOffsetSamples = audio.StartOffsetSamples
+			t.StartOffsetSamples = audio.RekordboxOffset()
 		}
 		if len(a.Beats) > 0 && a.Beats[0].BPM >= 499.5 {
 			a.Beats = nil
@@ -802,18 +815,24 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 		// Track's factory trigger already inserted PerformanceData(trackId).
 		// Fast mode leaves it empty, which is what makes Engine analyse on load.
 		if !fast {
-			// Engine clears the source mark when it writes a loaded track back.
-			// Protect edits after an earlier performance import, while an initial
-			// fast import still needs its first Rekordbox cues/grid (#233).
+			// What the deck changed in a row stays; the rest is this import's (realign.go).
+			// No import mark: the positions hold the file's offset already, and Engine adds
+			// its own rekordbox correction to a marked row it loads with a decoder attached.
+			keep, e := importKeeps(ctx, q, id, perf)
+			if e != nil {
+				return result, e
+			}
 			if _, e = q.ExecContext(ctx, `UPDATE PerformanceData SET
-				trackData=?,overviewWaveFormData=?,
-				beatData=CASE WHEN old.imported AND thirdPartySourceId IS NULL AND beatData IS NOT NULL THEN beatData ELSE ? END,
-				quickCues=CASE WHEN old.imported AND thirdPartySourceId IS NULL AND quickCues IS NOT NULL THEN quickCues ELSE ? END,
-				loops=CASE WHEN old.imported AND thirdPartySourceId IS NULL AND loops IS NOT NULL THEN loops ELSE ? END,
-				activeOnLoadLoops=CASE WHEN old.imported AND thirdPartySourceId IS NULL AND loops IS NOT NULL THEN activeOnLoadLoops ELSE ? END,
-				thirdPartySourceId=CASE WHEN old.imported AND thirdPartySourceId IS NULL AND (beatData IS NOT NULL OR quickCues IS NOT NULL OR loops IS NOT NULL) THEN NULL ELSE 1 END
-				FROM (SELECT EXISTS(SELECT 1 FROM BridgeAnalysis WHERE trackId=?) AS imported) old
-				WHERE trackId=?`, perf.TrackData, perf.Overview, perf.Beats, perf.QuickCues, perf.Loops, perf.ActiveLoops, id, id); e != nil {
+				trackData=?1,overviewWaveFormData=?2,
+				beatData=CASE WHEN ?3 AND beatData IS NOT NULL THEN beatData ELSE ?4 END,
+				quickCues=CASE WHEN ?3 AND quickCues IS NOT NULL THEN quickCues ELSE ?5 END,
+				loops=CASE WHEN ?3 AND loops IS NOT NULL THEN loops ELSE ?6 END,
+				activeOnLoadLoops=CASE WHEN ?3 AND loops IS NOT NULL THEN activeOnLoadLoops ELSE ?7 END,
+				thirdPartySourceId=NULL
+				WHERE trackId=?8`, perf.TrackData, perf.Overview, keep, perf.Beats, perf.QuickCues, perf.Loops, perf.ActiveLoops, id); e != nil {
+				return result, e
+			}
+			if e = recordWritten(ctx, q, id, perf); e != nil {
 				return result, e
 			}
 		} else if perf.QuickCues != nil {

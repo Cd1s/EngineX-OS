@@ -680,8 +680,10 @@ func (l rb7Link) CuesExtended(uint32) ([]byte, error) {
 // analysed it again, where the same track from a rekordbox USB stick (rb-bridge) loads with
 // its grid and cues at once. A Link load of a track leaves for Engine the bytes rb-bridge
 // writes for that track from its export, and the same Track flag.
+// "mp3 info" (2026-11-19): an Info frame with a LAME extension, the class of the maintainer's
+// library, where the stick's grid was 1152 samples before the Link grid of the same file.
 func TestRekordboxLinkAnalysisIsRbBridgesForTheSameTrack(t *testing.T) {
-	for _, format := range []string{"mp3", "aac"} {
+	for _, format := range []string{"mp3", "mp3 info", "aac"} {
 		t.Run(format, func(t *testing.T) { assertLinkMatchesBridge(t, format) })
 	}
 }
@@ -692,7 +694,7 @@ func TestRbxApplyHeaderUsesInfoLinkTimeline(t *testing.T) {
 		Format:                 "mp3",
 		SampleRate:             44100,
 		StartOffsetSamples:     2257,
-		LinkStartOffsetSamples: 1105,
+		RekordboxOffsetSamples: 1105,
 	})
 	if tr.StartOffsetSamples != 1105 {
 		t.Fatalf("Link MP3 offset = %d, want 1105", tr.StartOffsetSamples)
@@ -710,6 +712,9 @@ func assertLinkMatchesBridge(t *testing.T, format string) {
 		testfixture.LargeExport(t, root, 1)
 		// Make the file larger than the NFS prefix; keep Xing's counts valid.
 		file = testfixture.MP3WithLAMETag()
+		if format == "mp3 info" {
+			copy(file[36:], "Info")
+		}
 		file = append(file, bytes.Repeat(file[417:834], 100)...)
 		binary.BigEndian.PutUint32(file[44:], 102)
 		binary.BigEndian.PutUint32(file[48:], uint32(len(file)))

@@ -71,7 +71,7 @@ func ruleOffset(t *testing.T, root string) float64 {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return float64(info.LinkStartOffsetSamples)
+	return float64(info.RekordboxOffsetSamples)
 }
 
 func ruleConvert(t *testing.T, root string, opts enginedb.Options) enginedb.Result {
@@ -96,6 +96,15 @@ func ruleOlderBuild(t *testing.T, root, version string) {
 		t.Fatalf("stamp %q has no version", b)
 	}
 	if err = os.WriteFile(stamp, append([]byte(version+" "), rest...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// An older build's record of each track is not this build's (another encoding number).
+	state, err := sql.Open("sqlite", filepath.Join(root, "Engine Library/Database2/.rb-bridge-state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	if _, err = state.Exec(`UPDATE BridgeState SET fingerprint='an older build'; DELETE FROM BridgeWritten`); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -239,24 +248,36 @@ func TestOneOffsetRuleConvertedRowHasNoMark(t *testing.T) {
 	}
 }
 
-// A fast import writes the export's own cues before any file is read.
-func TestOneOffsetRuleFastImportCuesHaveNoMark(t *testing.T) {
+// A fast import writes the export's own cues before any file is read: it does not know the
+// file's offset, so the cues are at rekordbox's raw position and carry the import mark, the
+// one case where Engine's own correction is the only one. The full import replaces both.
+func TestOneOffsetRuleFastImportCuesAreRawAndMarked(t *testing.T) {
 	root := ruleStick(t)
 	l, err := bridge.ReadLibrary(context.Background(), root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	l.Tracks[0].Cues = []rekordbox.Cue{{HotCue: 1, TimeMS: 1000, Name: "A"}}
+	l.Tracks[0].Cues = []rekordbox.Cue{{HotCue: 2, TimeMS: ruleHotBMS, Name: "B"}}
 	if _, err = enginedb.Sync(context.Background(), root, l, enginedb.Options{Fast: true, FastCues: true}); err != nil {
 		t.Fatal(err)
 	}
 	db := dbOpen(t, root)
-	defer db.Close()
-	if n := scalar[int](t, db, `SELECT count(*) FROM PerformanceData WHERE quickCues IS NOT NULL`); n != 1 {
-		t.Fatalf("fast import wrote cues for %d rows, want 1", n)
+	var blob []byte
+	var mark sql.NullInt64
+	if err = db.QueryRow(`SELECT quickCues, thirdPartySourceId FROM PerformanceData WHERE quickCues IS NOT NULL`).Scan(&blob, &mark); err != nil {
+		t.Fatal(err)
 	}
-	if n := scalar[int](t, db, `SELECT count(*) FROM PerformanceData WHERE thirdPartySourceId IS NOT NULL`); n != 0 {
-		t.Fatalf("%d fast-import rows carry thirdPartySourceId", n)
+	db.Close()
+	cues, err := enginedb.QUncompress(blob, 1<<16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := math.Float64frombits(binary.BigEndian.Uint64(cues[ruleHotB(cues):])); mark.Int64 != 1 || got != ruleHotBMS*ruleRate/1000 {
+		t.Fatalf("fast import: hot cue B at %v with mark %v, want the raw position %v with the mark", got, mark, ruleHotBMS*ruleRate/1000)
+	}
+	ruleConvert(t, root, enginedb.Options{})
+	if got, off := readRuleRow(t, root), ruleOffset(t, root); got.marked || got.hotB != ruleHotBMS*ruleRate/1000-off {
+		t.Fatalf("full import after it: %+v, want hot cue B at %v without the mark", got, ruleHotBMS*ruleRate/1000-off)
 	}
 }
 
@@ -376,5 +397,41 @@ func TestOneOffsetRuleFrozenAACRowGetsThePriming(t *testing.T) {
 	defer db.Close()
 	if got := readTrackPositions(t, db, 1); got.beat0 != -2048 {
 		t.Fatalf("first beat %v samples after the mount, want -2048 (2048 samples of priming)", got.beat0)
+	}
+}
+
+// The maintainer's stick is large: its update is built after the mount on a snapshot and
+// replaces the live library at a later mount (#301), carrying what the deck wrote meanwhile.
+// It carried the whole live row, so a row Engine had loaded came back at the older import's
+// position whatever the build had made of it.
+func TestOneOffsetRuleStagedUpdateCorrectsARowEngineHasLoaded(t *testing.T) {
+	root := ruleStick(t)
+	ruleConvert(t, root, enginedb.Options{})
+	off := ruleOffset(t, root)
+	rowAsConverted(t, root, 2257, true, nil)
+	ruleOlderBuild(t, root, "v3")
+	defer bridge.SetLargeExportForTest()()
+	ctx := context.Background()
+	if r, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false); err != nil || !r.Background {
+		t.Fatalf("mount that starts the update: %+v %v", r, err)
+	}
+	if r, err := bridge.ImportInBackground(ctx, root, nil); err != nil || r.Deferred != 0 {
+		t.Fatalf("update: %+v %v", r, err)
+	}
+	// While the update ran, the DJ moved hot cue B on the deck.
+	rowAsConverted(t, root, 2257, true, func(beats, cues []byte) {
+		binary.BigEndian.PutUint64(cues[ruleHotB(cues):], math.Float64bits(30000.5))
+	})
+	if r, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false); err != nil || r.Background {
+		t.Fatalf("mount publishing the update: %+v %v", r, err)
+	}
+	want := ruleBeatMS*ruleRate/1000 - off
+	if got := readRuleRow(t, root); got.grid != want || got.adjusted != want || got.hotB != 30000.5 || got.marked {
+		t.Fatalf("published row: %+v, want grid %v, the deck's hot cue B at 30000.5 and no mark", got, want)
+	}
+	db := dbOpen(t, root)
+	defer db.Close()
+	if got, want := readTrackPositions(t, db, 1).loop0Start, 1050*ruleRate/1000-off; got != want {
+		t.Fatalf("published row: loop starts at %v, want %v", got, want)
 	}
 }

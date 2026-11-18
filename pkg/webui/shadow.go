@@ -2092,7 +2092,7 @@ func (s *Server) shadowFetchCDJ(key string, host net.IP, slot byte, id uint32) {
 				if info.Samples > 0 {
 					t.SampleCount = info.Samples
 				}
-				t.StartOffsetSamples = info.StartOffsetSamples
+				t.StartOffsetSamples = info.RekordboxOffset()
 			}
 			if p, err := enginedb.EncodePerformance(t, a); err == nil && p.Complete {
 				perf, _ = perfFromBlobs(t.BPM, p.TrackData, p.Beats, p.Overview)

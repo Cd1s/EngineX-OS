@@ -176,7 +176,7 @@ func TestMP3AudioHeader(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if info.Format != "mp3" || info.SampleRate != tc.sr || info.Channels != 2 || info.StartOffsetSamples != tc.wantOffset || info.LinkStartOffsetSamples != tc.wantLink || info.OffsetClass != tc.wantClass {
+			if info.Format != "mp3" || info.SampleRate != tc.sr || info.Channels != 2 || info.StartOffsetSamples != tc.wantOffset || info.RekordboxOffsetSamples != tc.wantLink || info.OffsetClass != tc.wantClass {
 				t.Fatalf("unexpected MP3 AudioInfo: %+v", info)
 			}
 		})

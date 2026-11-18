@@ -133,8 +133,9 @@ func exportCandidates(r *compat.Resolver, mount string) ([]exportCandidate, erro
 		if mark == "" {
 			mark = readMark(dir, stampName)
 		}
-		mark = strings.TrimPrefix(mark, stampVersion+" ")
-		mark = strings.TrimPrefix(mark, "v2 ")
+		for _, v := range []string{stampVersion, "v3", "v2"} {
+			mark = strings.TrimPrefix(mark, v+" ")
+		}
 		for i, c := range oneLib {
 			if strings.HasPrefix(mark, c.rel+" ") {
 				oneLib[0], oneLib[i] = oneLib[i], oneLib[0]
@@ -375,13 +376,13 @@ const (
 	// pendingName holds the stamp of an export whose import left tracks without
 	// their files read; the next mount of the same export resumes it.
 	pendingName  = ".rb-bridge-pending"
-	stampVersion = "v3" // v2 aligned MP3 (#178); v3 also checks AAC priming.
+	stampVersion = "v4" // v2 aligned MP3 (#178); v3 also checks AAC priming; v4: one rekordbox offset, loaded rows moved to it.
 	stateName    = ".rb-bridge-state.db"
 )
 
 func legacyGridOptions(stamp string) (mp3, aac bool) {
-	return stamp != "" && !strings.HasPrefix(stamp, stampVersion+" ") && !strings.HasPrefix(stamp, "v2 "),
-		strings.HasPrefix(stamp, "v2 ")
+	// v4 reads every track again, whatever the library was before.
+	return stamp != "" && !strings.HasPrefix(stamp, stampVersion+" "), false
 }
 
 // The edisksd hook kills rb-bridge 20 s after the mount, which rolled back the
