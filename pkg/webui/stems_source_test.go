@@ -532,3 +532,27 @@ func TestStemsSourceNamesItsNotReadyRow(t *testing.T) {
 		t.Fatalf("after the render: row %d %q loadable %v", id, title, loadable)
 	}
 }
+
+// #305: every service rides Engine's TIDAL slot, so the deck header asks which service a loaded track is from. The answer is a header on the
+// lookup the UI already makes for each streaming track; status and body stay what they were.
+func TestStemsLocalNamesTheTrackProvider(t *testing.T) {
+	s := New(Config{AccessToken: "code", UIDir: t.TempDir(), StateDir: t.TempDir()}, NewJobs(Pipeline{Catalog: noCatalog{}, Deemix: &deemixclient.Client{DownloadDir: t.TempDir()}}))
+	t.Cleanup(s.Close)
+	ask := func(id, want string) {
+		t.Helper()
+		req := httptest.NewRequest("GET", "/v1/enginex/stems/local?id="+id, nil)
+		req.RemoteAddr = "127.0.0.1:41000"
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, req)
+		// No stemmed copy: 404 as before, and the service is still named.
+		if got := w.Header().Get(providerHeader); w.Code != 404 || got != want {
+			t.Fatalf("id %s: %d, %s = %q, want 404 and %q", id, w.Code, providerHeader, got, want)
+		}
+	}
+	for _, name := range []string{"deezer", "soundcloud", "beatport", "spotify", "applemusic", "netease", rekordboxScope} {
+		ask(strconv.FormatInt(s.tidal.addTrack(trackRef{track: providers.Track{ID: "x-" + name, Title: "T", Provider: name}}), 10), name)
+	}
+	// A notice row and an id the gateway never saw (real TIDAL's) name no service.
+	ask(strconv.FormatInt(s.tidal.addTrack(trackRef{track: providers.Track{ID: "n1", Provider: listNoticeProvider}}), 10), "")
+	ask("999999", "")
+}

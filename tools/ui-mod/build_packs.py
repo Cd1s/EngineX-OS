@@ -3630,13 +3630,30 @@ SERVICES_MAIN = """
 	}
 	function scPlainTitle(song) { return (song || "").replace(/\\s\\[\\d+ BPM(?: [0-9]{1,2}[AB])?\\]$/, "") }
 	// Engine's messages name its one streaming client; say which service is showing.
-	function scBrand(s) {
-		const service = scServices.find(v => v.id === scScope)
-		return s && service && scScope !== "tidal" ? String(s).replace(/TIDAL/gi, service.name) : s
+	// A deck's track says which service it is from when it has (scOwnService); otherwise the selected service speaks for it.
+	function scBrand(s, deck) {
+		const id = scOwnService(deck) || scScope
+		const service = scServices.find(v => v.id === id)
+		return s && service && id !== "tidal" ? String(s).replace(/TIDAL/gi, service.name) : s
 	}
-	// #305: every service rides Engine's TIDAL slot, so a deck's track reports the source "TIDAL" whoever it comes from. The slot holds
-	// the active scope's tracks: a deck header shows that service's own mark (the same icons as the Source list and the login dialogs).
-	function scSlotIcon(source) { return source === "TIDAL" && scScope && scScope !== "tidal" ? scIcon(scScope) : "" }
+	// #305: every service rides Engine's TIDAL slot, so a deck's track reports the source "TIDAL" whoever it comes from, and Engine passes
+	// nothing else about a loaded track to QML. The gateway names the service on the lookup scSwapStemmed makes as a track loads; the deck
+	// header draws that service's own mark (the same icons as the Source list and the login dialogs), and a track without a service on
+	// record (not looked up yet, a real TIDAL track) gets the selected service's.
+	property var scDeckService: ({})
+	function scNoteService(deck, id) {
+		const all = Object.assign({}, scDeckService)
+		all[deck] = id
+		scDeckService = all
+	}
+	function scOwnService(deck) {
+		const id = deck > 0 ? scDeckService[deck] : ""
+		return id && scServices.some(v => v.id === id) ? id : ""
+	}
+	function scSlotIcon(source, deck) {
+		const id = scOwnService(deck) || scScope
+		return source === "TIDAL" && id && id !== "tidal" ? scIcon(id) : ""
+	}
 	// Capture manual and auto-detected IANA time zones via stock Planck.timeDateController
 	// signals and persist them through stream-sync (/data/enginex/state/timezone) without
 	// interposing setenv/unsetenv in Engine. Treat UTC as an unsolicited fallback only
@@ -4695,15 +4712,17 @@ SERVICES_MAIN = """
 	// is swapped for that copy as it loads, so the deck has its Stems. Engine's
 	// own import finds the track it already imported; a playing deck is left alone.
 	function scSwapStemmed(deck, uri) {
+		root.scNoteService(deck, "") // the last track's service must not outlive it (#305)
 		const m = /^streaming:\\/\\/TIDAL\\/Track\\/(\\d+)$/.exec(uri)
 		if (!m) return
 		const x = new XMLHttpRequest()
 		x.open("GET", "http://127.0.0.1:8080/v1/enginex/stems/local?id=" + m[1])
 		x.onreadystatechange = function() {
-			if (x.readyState !== 4 || x.status !== 200) return
-			if (Planck.getProperty("/Engine/Deck%1/PlayState".arg(deck)).translator.state) return
+			if (x.readyState !== 4) return
 			const cur = Planck.getProperty("/Engine/Deck%1/Track/TrackUri".arg(deck)) // another track may have been loaded meanwhile
 			if (!cur || !cur.translator || cur.translator.string !== uri) return
+			root.scNoteService(deck, x.getResponseHeader("X-Enginex-Provider") || "") // 404 (no stemmed copy) names the service too
+			if (x.status !== 200 || Planck.getProperty("/Engine/Deck%1/PlayState".arg(deck)).translator.state) return
 			Planck.getProperty("/Client/Librarian/AddToDatabaseAndLoadToDeck%1".arg(deck)).translator.url = "file://" + encodeURI(JSON.parse(x.responseText).path)
 		}
 		x.send()
@@ -8635,9 +8654,9 @@ def edits(dev: bool):
              "    readonly property bool isStemmed: scHead && scHead.title ? scHead.stems : view.stemmed\n"),
             ("        providerName: artistSong.trackSource\n",
              "        providerName: artistSong.trackSource\n        respectHideTitleArtist: true\n"),
-            # #305: the deck header's provider mark is the active service's, not TIDAL's.
+            # #305: the deck header's provider mark is the track's own service's, not TIDAL's.
             ("                        source: visible ? `qrc:/streaming/${artistSong.trackSource}/Icon.png` : \"\"\n",
-             "                        readonly property string scMark: typeof root !== \"undefined\" && root && root.scSlotIcon ? root.scSlotIcon(artistSong.trackSource) : \"\"\n"
+             "                        readonly property string scMark: typeof root !== \"undefined\" && root && root.scSlotIcon ? root.scSlotIcon(artistSong.trackSource, artistSong.deckIndex) : \"\"\n"
              "                        useOriginal: scMark !== \"\"\n"
              "                        source: visible ? (scMark !== \"\" ? scMark : `qrc:/streaming/${artistSong.trackSource}/Icon.png`) : \"\"\n"),
             ("            visible: artistSong.artistVisible && !artistSong.onlyFileName && artistSong.artistTextString.length > 0\n",
@@ -9230,10 +9249,10 @@ def edits(dev: bool):
         "\t\t} else if (row.isRenderingStems) {",
     )])
     if v53():
-        # #305: Track Info's Source line names the active service, not TIDAL (scBrand swaps the word).
+        # #305: Track Info's Source line names the service, not TIDAL (scBrand swaps the word; a deck's own track says which).
         out.setdefault(ROOT + "Items/TrackInfo.qml", []).extend([(
             'text: trackData.streamingSource || "Local Drive"\n',
-            'text: (typeof root !== "undefined" && root && root.scBrand ? root.scBrand(trackData.streamingSource) : trackData.streamingSource) || "Local Drive"\n',
+            'text: (typeof root !== "undefined" && root && root.scBrand ? root.scBrand(trackData.streamingSource, trackData.infoFromDeck ? trackData.deckIndex : 0) : trackData.streamingSource) || "Local Drive"\n',
         )])
     if v53():
         # Stock's pulsing Stems icon in the browse status bar says a render is
@@ -9600,11 +9619,11 @@ def legacy_qml_fixes():
         v + "MainView/ArtistSong.qml": [
             ("				providerName: artistSong.trackSource\n",
              "				providerName: artistSong.trackSource\n				respectHideTitleArtist: true\n"),
-            # #305: the deck header's provider mark is the active service's, not TIDAL's (the icon keeps stock's 48 px footprint).
+            # #305: the deck header's provider mark is the track's own service's, not TIDAL's (the icon keeps stock's 48 px footprint).
             *([("		source: visible ? `qrc:/Skins/UIKit/Icons/Source${artistSong.trackSource}.png` : \"\"\n"
                 "		visible: artistSong.isStreamingTrack\n"
                 "		width: src.width\n",
-                "		readonly property string scMark: typeof root !== \"undefined\" && root && root.scSlotIcon ? root.scSlotIcon(artistSong.trackSource) : \"\"\n"
+                "		readonly property string scMark: typeof root !== \"undefined\" && root && root.scSlotIcon ? root.scSlotIcon(artistSong.trackSource, artistSong.deckIndex) : \"\"\n"
                 "		useOriginal: scMark !== \"\"\n"
                 "		source: visible ? (scMark !== \"\" ? scMark : `qrc:/Skins/UIKit/Icons/Source${artistSong.trackSource}.png`) : \"\"\n"
                 "		visible: artistSong.isStreamingTrack\n"

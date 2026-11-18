@@ -8198,46 +8198,119 @@ class StreamingSlotIconTest(unittest.TestCase):
             bp.ROOT = old_root
         return text
 
-    @unittest.skipUnless(shutil.which("node"), "Node is required to run the root helpers")
-    def test_slot_icon_and_brand_follow_the_active_service(self):
-        main = bp.SERVICES_MAIN.replace("@ICONS@", "Skins/UIKit/Icons")
-        functions = "\n".join(PrimeGoTidalQRTest.function(main, name) for name in ("scIcon", "scSlotIcon", "scBrand"))
-        script = r"""
+    PRELUDE = r"""
 const assert = require('node:assert/strict');
-let scScope = '', scRekordboxName = '';
+let scScope = '', scRekordboxName = '', scDeckService = {};
 const scT = s => s;
 const scServices = [{id: 'rekordbox', name: 'rekordbox'}, {id: 'tidal', name: 'TIDAL'}, {id: 'netease', name: 'NetEase Cloud Music'},
     {id: 'spotify', name: 'Spotify'}, {id: 'deezer', name: 'Deezer'}, {id: 'soundcloud', name: 'SoundCloud'},
     {id: 'beatport', name: 'Beatport'}, {id: 'applemusic', name: 'Apple Music'}];
-""" + functions + r"""
+const root = {scNoteService: (d, i) => scNoteService(d, i)};
+"""
+
+    def run_node(self, script):
+        result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def functions(self, *names):
+        main = bp.SERVICES_MAIN.replace("@ICONS@", "Skins/UIKit/Icons")
+        return "\n".join(PrimeGoTidalQRTest.function(main, name) for name in names)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required to run the root helpers")
+    def test_each_track_shows_its_own_service_and_the_selected_one_only_as_fallback(self):
+        self.run_node(self.PRELUDE + self.functions("scIcon", "scNoteService", "scOwnService", "scSlotIcon", "scBrand") + r"""
 const marks = {deezer: 'file:///data/enginex/ui/icons/deezer.png', spotify: 'file:///data/enginex/ui/icons/spotify.png',
     applemusic: 'file:///data/enginex/ui/icons/applemusic.png', netease: 'file:///data/enginex/ui/icons/netease.png',
     soundcloud: 'qrc:/Skins/UIKit/Icons/SourceSoundCloudColored.png', beatport: 'qrc:/Skins/UIKit/Icons/SourceBeatport%20LINKColored.png',
     rekordbox: 'qrc:/Skins/UIKit/Icons/SourceEngineRemoteLibrary.png'};
-for (const [id, url] of Object.entries(marks)) { scScope = id; assert.equal(scSlotIcon('TIDAL'), url, id); }
-for (const scope of ['tidal', '']) { scScope = scope; assert.equal(scSlotIcon('TIDAL'), '', 'stock TIDAL keeps its own mark: ' + scope); }
+// Every service's track shows that service's mark, whichever service is selected (a loaded track keeps its mark across a switch).
+for (const [id, url] of Object.entries(marks)) {
+    scNoteService(1, id);
+    for (const scope of ['tidal', 'deezer', 'spotify', '', id]) { scScope = scope; assert.equal(scSlotIcon('TIDAL', 1), url, id + ' under ' + scope); }
+}
+// Two decks, two services, two marks; switching the selected service changes neither.
+scNoteService(1, 'deezer'); scNoteService(2, 'beatport');
+for (const scope of ['tidal', 'netease', 'beatport', '']) {
+    scScope = scope;
+    assert.equal(scSlotIcon('TIDAL', 1), marks.deezer, 'deck 1 under ' + scope);
+    assert.equal(scSlotIcon('TIDAL', 2), marks.beatport, 'deck 2 under ' + scope);
+    assert.equal(scBrand('TIDAL', 1), 'Deezer'); assert.equal(scBrand('TIDAL', 2), 'Beatport');
+}
+// A rekordbox Link row (computer or CDJ media) never shows TIDAL's mark, not even while TIDAL is the selected service.
+scNoteService(3, 'rekordbox'); scScope = 'tidal';
+assert.equal(scSlotIcon('TIDAL', 3), marks.rekordbox); assert.equal(scBrand('TIDAL', 3), 'rekordbox');
+// Real TIDAL keeps TIDAL's mark: nothing on record under the TIDAL scope, or a track the gateway says is TIDAL's.
+scNoteService(4, ''); assert.equal(scSlotIcon('TIDAL', 4), ''); assert.equal(scBrand('TIDAL', 4), 'TIDAL');
+scNoteService(4, 'tidal'); scScope = 'deezer'; assert.equal(scSlotIcon('TIDAL', 4), '');
+// No service on record (not looked up yet, an older gateway, an unknown name): the selected service, as before this change.
 scScope = 'deezer';
-for (const other of ['', 'SoundCloud', 'Dropbox']) assert.equal(scSlotIcon(other), '', 'only the TIDAL slot is renamed: ' + other);
-assert.equal(scBrand('TIDAL'), 'Deezer');
-scScope = 'applemusic'; assert.equal(scBrand('TIDAL'), 'Apple Music');
-scScope = 'tidal'; assert.equal(scBrand('TIDAL'), 'TIDAL');
-scScope = 'deezer'; assert.equal(scBrand(''), '');
-"""
-        result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
+for (const none of ['', 'local', 'nope']) { scNoteService(4, none); assert.equal(scSlotIcon('TIDAL', 4), marks.deezer, 'marker ' + none); assert.equal(scBrand('TIDAL', 4), 'Deezer'); }
+assert.equal(scSlotIcon('TIDAL'), marks.deezer); assert.equal(scSlotIcon('TIDAL', 0), marks.deezer); assert.equal(scBrand('TIDAL'), 'Deezer');
+scScope = 'tidal'; assert.equal(scSlotIcon('TIDAL'), ''); scScope = ''; assert.equal(scSlotIcon('TIDAL', 4), '');
+// Only the TIDAL slot is renamed.
+scNoteService(1, 'deezer');
+for (const other of ['', 'SoundCloud', 'Dropbox']) assert.equal(scSlotIcon(other, 1), '', 'source ' + other);
+scScope = 'applemusic'; assert.equal(scBrand('TIDAL'), 'Apple Music'); scScope = 'deezer'; assert.equal(scBrand(''), '');
+""")
 
-    def test_deck_headers_and_track_info_use_the_active_service(self):
+    @unittest.skipUnless(shutil.which("node"), "Node is required to run the root helpers")
+    def test_a_loading_deck_learns_its_tracks_service_from_the_lookup_it_already_makes(self):
+        self.run_node(self.PRELUDE + self.functions("scNoteService", "scOwnService", "scSwapStemmed") + r"""
+String.prototype.arg = function(v) { return this.replace('%1', v) }; // QML's
+const uris = {}, playing = {}, loaded = [], requests = [];
+const Planck = {getProperty: path => {
+    const deck = +/Deck(\d)/.exec(path)[1];
+    if (path.endsWith('/Track/TrackUri')) return {translator: {string: uris[deck] || ''}};
+    if (path.endsWith('/PlayState')) return {translator: {state: !!playing[deck]}};
+    return {translator: {set url(u) { loaded.push([deck, u]) }}};
+}};
+class XMLHttpRequest {
+    open(method, url) { this.url = url }
+    send() { requests.push(this) }
+    getResponseHeader(name) { return this.headers[name.toLowerCase()] ?? null }
+    answer(status, headers, body) { Object.assign(this, {readyState: 4, status, headers, responseText: JSON.stringify(body || {})}); this.onreadystatechange() }
+}
+const track = id => 'streaming://TIDAL/Track/' + id;
+const load = (deck, uri) => { uris[deck] = uri; scSwapStemmed(deck, uri); return requests[requests.length - 1] };
+// Deezer track on deck 1: nothing is claimed until the lookup answers; its 404 (no stemmed copy) names the service all the same.
+let r = load(1, track(7));
+assert.equal(r.url, 'http://127.0.0.1:8080/v1/enginex/stems/local?id=7'); assert.equal(scOwnService(1), '');
+r.answer(404, {'x-enginex-provider': 'deezer'}); assert.equal(scOwnService(1), 'deezer'); assert.equal(loaded.length, 0);
+// A second deck, another service; a stemmed copy still swaps in as before.
+r = load(2, track(8)); r.answer(200, {'x-enginex-provider': 'soundcloud'}, {path: '/data/x.flac'});
+assert.equal(scOwnService(2), 'soundcloud'); assert.deepEqual(loaded, [[2, 'file:///data/x.flac']]);
+assert.equal(scOwnService(1), 'deezer');
+// The next track (a local file, then another streamed one) never inherits the last track's service.
+load(1, 'file:///data/x.mp3'); assert.equal(scOwnService(1), ''); assert.equal(requests.length, 2);
+load(1, track(9)); assert.equal(scOwnService(1), '');
+// An answer for a track that is no longer loaded is dropped.
+const late = requests[requests.length - 1]; const next = load(1, track(10));
+late.answer(404, {'x-enginex-provider': 'spotify'}); assert.equal(scOwnService(1), '');
+next.answer(404, {'x-enginex-provider': 'beatport'}); assert.equal(scOwnService(1), 'beatport');
+// A playing deck is never swapped; the service is still noted. A track the gateway does not know (404, no header) names none.
+playing[1] = true; r = load(1, track(11)); r.answer(200, {'x-enginex-provider': 'rekordbox'}, {path: '/data/y.flac'});
+assert.equal(scOwnService(1), 'rekordbox'); assert.equal(loaded.length, 1);
+r = load(1, track(12)); r.answer(404, {}); assert.equal(scOwnService(1), '');
+""")
+
+    def test_the_gateway_and_the_pack_use_the_same_header(self):
+        go = (REPO / "pkg/webui/stems_lists.go").read_text(encoding="utf-8")
+        name = re.search(r'const providerHeader = "([^"]+)"', go).group(1)
+        self.assertIn(f'x.getResponseHeader("{name}")', bp.SERVICES_MAIN)
+        self.assertIn(f"/v1/enginex/stems/local?id=", bp.SERVICES_MAIN)  # the lookup the header rides on
+
+    def test_deck_headers_and_track_info_use_the_tracks_own_service(self):
         embedded = self.patched(self.ROOTS[0])
-        self.assertIn("root.scSlotIcon(artistSong.trackSource)", embedded)
+        self.assertIn("root.scSlotIcon(artistSong.trackSource, artistSong.deckIndex)", embedded)
         self.assertIn("useOriginal: scMark !== \"\"", embedded)
         self.assertIn("Source${artistSong.trackSource}.png", embedded)  # stock's own mark stays for every other source
         self.assertIn("width: scMark !== \"\" ? 48 : src.width", embedded)  # the stock icon's 48 px footprint; a parent's own width still wins
         composite = self.patched(self.ROOTS[1])
-        self.assertIn("root.scSlotIcon(artistSong.trackSource)", composite)
+        self.assertIn("root.scSlotIcon(artistSong.trackSource, artistSong.deckIndex)", composite)
         self.assertIn("qrc:/streaming/${artistSong.trackSource}/Icon.png", composite)
         self.assertIn("width: artistSong.iconWidth", composite)  # the 5.3.0 composite header keeps its own size
         info = self.patched(self.ROOTS[2])
-        self.assertIn("root.scBrand(trackData.streamingSource)", info)
+        self.assertIn("root.scBrand(trackData.streamingSource, trackData.infoFromDeck ? trackData.deckIndex : 0)", info)
         self.assertIn('|| "Local Drive"', info)
 
 
