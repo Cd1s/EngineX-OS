@@ -1112,6 +1112,30 @@ static void test_patch_files(const char *filename) {
         assert(!memcmp(image + build->sqlite_open, build->sqlite_prefix[1], 8));
         assert(!memcmp(image + build->sqlite_open_v2, build->sqlite_prefix[2], 8));
     }
+    // HF_SHADOW_PAUSED_FOLLOW: WaveFormPositionItem::currentPosition, its slot in both
+    // vtables, and the waveformPositionItem case of PlanckGUI::qt_static_metacall, whose
+    // next instructions read the vector the hook reads (begin and end, from r0 = PlanckGUI).
+    if (build->shadow_position_fn) {
+        assert(!memcmp(image + build->shadow_position_fn, build->shadow_position_prefix, build->shadow_position_prefix_size));
+        const uint32_t vtables[] = {build->shadow_vtable_a, build->shadow_vtable_b};
+        for (unsigned v = 0; v < 2; v++) {
+            uint32_t slot = vtables[v] + build->shadow_vtable_slot, held = 0;
+            for (unsigned i = 0; i < info.dlpi_phnum; i++) {
+                const ElfW(Phdr) *p = &info.dlpi_phdr[i];
+                if (p->p_type == PT_LOAD && slot >= p->p_vaddr && slot + 4 <= p->p_vaddr + p->p_filesz)
+                    memcpy(&held, image + p->p_offset + slot - p->p_vaddr, 4);
+            }
+            assert(held == build->shadow_position_fn);
+        }
+    }
+    if (build->shadow_capture_site) {
+        uint32_t site[6];
+        memcpy(site, image + build->shadow_capture_site, sizeof site);
+        assert(build->shadow_position_fn && !memcmp(site, build->shadow_capture_prefix, 8));
+        assert(site[2] == 0xe3530000 && site[3] >> 24 == 0xda); // cmp r3, #0; ble
+        assert(site[4] == (0xe5901000 | build->shadow_array_offset));     // ldr r1, [r0, #vector]
+        assert(site[5] == (0xe5902000 | (build->shadow_array_offset + 4))); // ldr r2, [r0, #vector + 4]
+    }
     // #256: verify build->feature_object points to a real Feature object whose vtable[0]
     // is Feature::isEnabled(), and on 5.3.0-sclive4 matches the StemsPreRenderedPlayback
     // global read by PlanckScriptRoot::hasStemsPreRenderedPlayback().
@@ -1659,6 +1683,8 @@ static void test_analysis_dispatch(const char *off, int gateway, int shadow) {
         snprintf(saved, sizeof saved, "%s/712-1-beatData", history);
         assert(!unlink(saved));
         snprintf(saved, sizeof saved, "%s/712-1-quickCues", history);
+        assert(!unlink(saved));
+        snprintf(saved, sizeof saved, "%s/712-1-unmarked", history); // the fill's own record
         assert(!unlink(saved) && !rmdir(history));
     }
     if (*off) assert(!unlink(conf));

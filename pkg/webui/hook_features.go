@@ -59,6 +59,7 @@ var hookFeatures = []hookFeature{
 	{Name: "telemetry-block", Group: "data", About: "PostHog/events databases in RAM, crash reports to /tmp, no Crashpad"},
 	{Name: "vendor-update-block", Group: "data", About: "autoupdate.airmusictech.com is not resolved (no inMusic firmware offers)"},
 	{Name: "ui-packs", Group: "ui", About: "EngineX interface (QML packs): all EngineX menus, About, Remote Load; off = stock interface"},
+	{Name: "shadow-paused-follow", Group: "ui", About: "a shadow deck stays paused and its waveform line follows the source deck (first-generation Engine 5.3.0); off = the shadow deck plays muted as before"},
 	{Name: "rb-bridge", Group: "services", Reboot: true, Service: true, About: "EngineX service: Pro DJ Link (players' announcements and status for CDJ shadow decks, library sharing); CDJ export is the console's, rekordbox Zero-Scan mount-hook's"},
 }
 
@@ -154,8 +155,8 @@ func parseHookFeatureNames(text string) []string {
 // hookRunState is what the running Engine's hook published; ok is false when no
 // Engine with the hook runs (or the hook predates the state file).
 type hookRunState struct {
-	build, off []string
-	ok         bool
+	build, off, on []string
+	ok             bool
 }
 
 func readHookRunState() hookRunState {
@@ -174,12 +175,23 @@ func readHookRunState() hookRunState {
 			st.build = parseHookFeatureNames(val)
 		case "off":
 			st.off = parseHookFeatureNames(val)
+		case "on":
+			st.on = parseHookFeatureNames(val)
 		}
 	}
 	st.build = hookFeaturesOffWithNeeds(st.build)
 	st.off = hookFeaturesOffWithNeeds(st.off)
 	st.ok = pid > 0 && engineAlive(pid)
 	return st
+}
+
+// runningFeatureOn reports that the running Engine's hook says it does name. A hook of
+// before a feature existed does not list it as off either, so not being off is no proof;
+// the paused shadow follow needs one (a UI pack that pauses the copy under a hook that does
+// not move its line shows a standing waveform).
+func runningFeatureOn(name string) bool {
+	st := readHookRunState()
+	return st.ok && slices.Contains(st.on, name) && !slices.Contains(st.off, name)
 }
 
 // runningFeaturesOff is the list QML hides rows by; nil when unknown, so every row stays.

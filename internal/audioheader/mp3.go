@@ -62,12 +62,13 @@ type MP3Info struct {
 	LAMEApplied        bool   // true when Encoder starts with "LAME", "Lavf", or "Lavc"
 	EncoderDelay       int    // 12-bit start_pad
 	EndPadding         int    // 12-bit end_pad
-	StartOffsetSamples int    // Rekordbox sample - Engine sample (>= 0)
-	// LinkStartOffsetSamples is the decoder timeline offset used by the
-	// Pro DJ Link stream path.  Info/Lavc streams already account for their
-	// leading Info frame in the decoder start; USB conversion keeps the
-	// historical #178 frame-plus-delay correction in StartOffsetSamples.
-	LinkStartOffsetSamples int
+	StartOffsetSamples int    // what Engine's decoder leaves out at the start; pkg/analyzer's plays it (>= 0)
+	// RekordboxOffsetSamples is rekordbox sample - Engine sample, for every way a
+	// rekordbox position reaches a deck (USB import, Link, a CDJ's copy). rekordbox does
+	// not play the Info frame of a file with a LAME/Lavf/Lavc extension: measured on a
+	// real Info + Lavc file, whose kicks sit at rekordbox - (start_pad + 529) in Engine's
+	// decode. The other classes are as #178 calibrated them.
+	RekordboxOffsetSamples int
 	OffsetClass            string // "", "xing:<samples>", or "lame:<samples>"
 }
 
@@ -476,9 +477,9 @@ func finalizeMP3Info(info MP3Info, audio mpegHeader, vbrKbps, xingSkip, lameSkip
 	}
 	info.StartOffsetSamples = xingSkip + lameSkip
 	if info.Tag == "Info" && info.LAMEApplied {
-		info.LinkStartOffsetSamples = lameSkip
+		info.RekordboxOffsetSamples = lameSkip
 	} else {
-		info.LinkStartOffsetSamples = info.StartOffsetSamples
+		info.RekordboxOffsetSamples = info.StartOffsetSamples
 	}
 	if info.StartOffsetSamples > 0 {
 		if info.LAMEApplied {

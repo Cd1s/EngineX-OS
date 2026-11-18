@@ -17,7 +17,7 @@ import (
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
 
-// Maintainer, two linked SC5000s with shadow decks: a rekordbox Link load is instant
+// Maintainer, two linked SC5000 players with shadow decks: a rekordbox Link load is instant
 // on its deck, but the other player's shadow copy analysed the overview and grid
 // again. The deck's file is the gateway's copy on a drive (or Engine's download
 // before its row has it): no library lists it, so /perf answered 404 and the copy

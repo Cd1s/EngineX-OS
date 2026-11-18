@@ -49,6 +49,7 @@
     X(THREAD_TUNING, "thread-tuning") \
     X(ALSA_TIMESTAMP, "alsa-timestamp") \
     X(UI_PACKS, "ui-packs") \
+    X(SHADOW_PAUSED_FOLLOW, "shadow-paused-follow") \
     X(MOUNT_HOOK, "mount-hook") \
     X(RB_BRIDGE, "rb-bridge") \
     X(DEEMIXD, "deemixd") \
@@ -157,13 +158,25 @@ static uint32_t hf_disabled(void) {
 }
 
 /* Forget the cached mask (tests, after changing hf_path or the file). */
+static uint32_t hf_unavailable;
 __attribute__((unused)) static void hf_reload(void) {
+    __atomic_store_n(&hf_unavailable, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&hf_mask, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&hf_state, 0, __ATOMIC_RELEASE);
 }
 
 static int hf_on(int feature) {
     return feature <= HF_ALWAYS || feature >= HF_COUNT || !(hf_disabled() & (1u << feature));
+}
+
+/* A feature this process turned out not to have (an Engine build without a verified
+ * site): off from here on, and hf_publish() lists it with what the build left out, so
+ * the console shows it as not available instead of asking for an Engine restart. */
+__attribute__((unused)) static void hf_runtime_off(int feature) {
+    if (feature <= HF_ALWAYS || feature >= HF_COUNT) return;
+    hf_disabled();
+    __atomic_or_fetch(&hf_unavailable, 1u << feature, __ATOMIC_RELEASE);
+    __atomic_or_fetch(&hf_mask, 1u << feature, __ATOMIC_RELEASE);
 }
 
 /* "gateway,stems" for a mask; "" when it names nothing. */
@@ -192,13 +205,17 @@ static const char *hf_state_path = HOOK_FEATURES_STATE_PATH; /* tests point it e
 /* Tells stream-sync what the running Engine was started with: the web console's feature
  * menu and the QML rows of switched-off features read it. hook-disable.conf alone is not
  * enough: it may have changed since Engine started, and the build list is not in it.
- *   pid=<Engine pid>\nbuild=<names>\noff=<names>\n
+ *   pid=<Engine pid>\nbuild=<names>\noff=<names>\n[on=shadow-paused-follow\n]
+ * on= names what this hook does and a hook of before it did not: not being in off= cannot
+ * say that, and a UI pack that left a shadow deck paused under a hook that does not move
+ * its line would show a waveform that stands still.
  * Written to a temporary file and renamed, so a reader never sees half of it. */
 static void hf_publish(void) {
     char build_off[512], off[512], text[1100], tmp[256], dir[256];
-    hf_names_of(hf_parse(ENGINEX_HOOK_DISABLE, sizeof ENGINEX_HOOK_DISABLE - 1, NULL), build_off, sizeof build_off);
+    hf_names_of(hf_parse(ENGINEX_HOOK_DISABLE, sizeof ENGINEX_HOOK_DISABLE - 1, NULL) | hf_unavailable, build_off, sizeof build_off);
     hf_names_of(hf_disabled(), off, sizeof off);
-    int n = snprintf(text, sizeof text, "pid=%d\nbuild=%s\noff=%s\n", (int)getpid(), build_off, off);
+    int n = snprintf(text, sizeof text, "pid=%d\nbuild=%s\noff=%s\n%s", (int)getpid(), build_off, off,
+                     hf_on(HF_SHADOW_PAUSED_FOLLOW) ? "on=shadow-paused-follow\n" : "");
     if (n < 0 || (size_t)n >= sizeof text) return;
     if ((size_t)snprintf(dir, sizeof dir, "%s", hf_state_path) >= sizeof dir) return;
     char *slash = strrchr(dir, '/');

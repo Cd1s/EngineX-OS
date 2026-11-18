@@ -40,6 +40,14 @@ static char *sc_shadow_hex(char *dst, const unsigned char *src, size_t n) {
     return dst;
 }
 
+static char *sc_shadow_value(char *p, const unsigned char *b, size_t n) {
+    if (!n) return p + sprintf(p, "NULL");
+    *p++ = 'X'; *p++ = '\'';
+    p = sc_shadow_hex(p, b, n);
+    *p++ = '\'';
+    return p;
+}
+
 // The rekordbox RBXA1 record, with all three analysis blobs required here.
 static char *sc_shadow_analysis_sql(const unsigned char *b, size_t n, long long id, const char *path) {
     static const char *const columns[] = {"trackData", "overviewWaveFormData", "beatData", "quickCues", "loops"};
@@ -53,25 +61,31 @@ static char *sc_shadow_analysis_sql(const unsigned char *b, size_t n, long long 
         at = start[i] + len[i];
     }
     if (at != n) return NULL;
-    char *sql = malloc(640 + 2 * (n + 2 * pathlen)), *p = sql;
+    char *sql = malloc(1024 + 4 * (n + pathlen)), *p = sql;
     if (!sql) return NULL;
+    // The row is the source's analysis whenever the copy is read, not only the first time:
+    // a copy is used again for the same track, and what its row held from an earlier load
+    // (another build's grid, a grid since edited in rekordbox, an overview Engine never
+    // finished) drew the shadow lane apart from the source's. Written only when it differs.
     p += sprintf(p, "UPDATE main.PerformanceData SET ");
     for (int i = 0; i < 5; i++) {
         p += sprintf(p, "%s%s = ", i ? ", " : "", columns[i]);
-        if (!len[i]) { p += sprintf(p, "NULL"); continue; }
-        *p++ = 'X'; *p++ = '\'';
-        p = sc_shadow_hex(p, b + start[i], len[i]);
-        *p++ = '\'';
+        p = sc_shadow_value(p, b + start[i], len[i]);
     }
-    p += sprintf(p, " WHERE trackId = %lld AND trackData IS NULL AND EXISTS "
-                 "(SELECT 1 FROM main.Track WHERE id = %lld AND CAST(path AS BLOB) = X'", id, id);
+    p += sprintf(p, " WHERE trackId = %lld AND (trackData IS NULL", id);
+    for (int i = 0; i < 5; i++) {
+        p += sprintf(p, " OR %s IS NOT ", columns[i]);
+        p = sc_shadow_value(p, b + start[i], len[i]);
+    }
+    p += sprintf(p, ") AND EXISTS "
+                 "(SELECT 1 FROM main.Track WHERE id = %lld AND CAST(path AS BLOB) = X'", id);
     p = sc_shadow_hex(p, (const unsigned char *)path, pathlen);
     // Engine starts OfflineAnalyzer if its Track row is still unanalysed,
     // even when the complete native PerformanceData is already present.
     p += sprintf(p, "'); UPDATE main.Track SET isAnalyzed = 1 WHERE id = %lld AND changes() > 0 "
                     "AND CAST(path AS BLOB) = X'", id);
     p = sc_shadow_hex(p, (const unsigned char *)path, pathlen);
-    memcpy(p, "'", 2);
+    memcpy(p, "'; SELECT changes()", sizeof "'; SELECT changes()");
     return sql;
 }
 
@@ -103,6 +117,13 @@ static int sc_shadow_copy_path(void *out, int n, char **values, char **names) {
     return 0;
 }
 
+static int sc_shadow_written(void *out, int n, char **values, char **names) {
+    (void)names;
+    if (n == 1 && values[0]) *(int *)out = values[0][0] != '0';
+    return 0;
+}
+
+// Whether the row was written.
 static int sc_shadow_analysis_fill(const struct sc_shadow_sqlite *q, void *db, long long id) {
     if (!db || id <= 0) return 0;
     const char *main = q->filename(db, "main");
@@ -110,7 +131,7 @@ static int sc_shadow_analysis_fill(const struct sc_shadow_sqlite *q, void *db, l
     char path[512] = "", query[384];
     snprintf(query, sizeof query,
              "SELECT t.path FROM main.Track t JOIN main.PerformanceData p ON p.trackId=t.id "
-             "WHERE t.id=%lld AND p.trackData IS NULL AND t.path GLOB '" SC_SHADOW_REL "peer-*'", id);
+             "WHERE t.id=%lld AND t.path GLOB '" SC_SHADOW_REL "peer-*'", id);
     if (q->exec(db, query, sc_shadow_copy_path, path, NULL) || !*path) return 0;
     char sidecar[640];
     if ((size_t)snprintf(sidecar, sizeof sidecar, "%s/%s.analysis", sc_shadow_root,
@@ -128,7 +149,7 @@ static int sc_shadow_analysis_fill(const struct sc_shadow_sqlite *q, void *db, l
             at += (size_t)got;
         }
         char *sql = at == size ? sc_shadow_analysis_sql(b, size, id, path) : NULL;
-        if (sql) filled = !q->exec(db, sql, NULL, NULL, NULL);
+        if (sql && q->exec(db, sql, sc_shadow_written, &filled, NULL)) filled = 0;
         free(sql);
         free(b);
     }

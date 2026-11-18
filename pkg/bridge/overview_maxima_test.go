@@ -26,7 +26,7 @@ func oldOverviews(t *testing.T, count int) (string, *sql.DB, map[int64][]byte) {
 	testfixture.LargeExport(t, root, count)
 	issue233Mount(t, root, enginedb.Options{})
 	db := dbOpen(t, root)
-	rows, err := db.Query(`SELECT trackId, overviewWaveFormData FROM PerformanceData WHERE thirdPartySourceId=1`)
+	rows, err := db.Query(`SELECT trackId, overviewWaveFormData FROM PerformanceData WHERE overviewWaveFormData IS NOT NULL`)
 	if err != nil {
 		t.Fatal(err)
 	}

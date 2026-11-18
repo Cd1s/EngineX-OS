@@ -3,6 +3,8 @@
 # The deck kernel uses 4 KiB pages; ld pads ARM segments to 64 KiB by default.
 # -z now: every libc symbol is bound at load, none by the audio thread on its first call (and a missing one fails at load, where the gate sees it).
 # Native JSON decoder exceptions must cross the C metadata wrapper.
+# -z defs: a symbol none of the linked libraries has fails the build. The hook is preloaded into every command Engine starts; one that
+# does not itself load the missing library (libm for lscpu) would not start, and Engine aborts without its CPU count.
 set -eu
 # AArch64 hook (AZ04: PRIME 4 G2, SYSTEM ONE) on an arm64 host: CROSS= OUT=/abs/path.so sh build.sh
 # ENGINEX_HOOK_DISABLE="stems,zoom30" leaves those features out of this build (names: hook_features.h).
@@ -26,7 +28,7 @@ if [ -n "$(printf '%s' "$disable" | tr -d ' ')" ]; then
     echo "hook features off in this build: $list" >&2
 fi
 "${cross}gcc" -O2 -Wall -Wextra -Werror=missing-field-initializers -shared -fPIC -funwind-tables -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 "$@" \
-    -ffunction-sections -fdata-sections -Wl,--gc-sections -Wl,-z,now -Wl,-z,max-page-size=4096 -o "$out" engine_ui_hook.c -ldl -lpthread
+    -ffunction-sections -fdata-sections -Wl,--gc-sections -Wl,-z,now -Wl,-z,defs -Wl,-z,max-page-size=4096 -o "$out" engine_ui_hook.c -ldl -lpthread
 "${cross}strip" "$out"
 if "${cross}readelf" -V "$out" | grep -E 'GLIBC_2\.(39\.|[4-9][0-9])'; then
     echo "needs glibc newer than the target's 2.39" >&2

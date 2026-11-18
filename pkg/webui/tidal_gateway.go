@@ -6,6 +6,7 @@ package webui
 // native TIDAL browser plays them. Audio comes from the Deemix pipeline.
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha1"
 	"database/sql"
@@ -399,6 +400,7 @@ func newTidalGateway(s *Server) *tidalGateway {
 	g.mux.HandleFunc("GET /v1/enginex/prolink/diag", s.prolinkDiagGet)
 	g.mux.HandleFunc("POST /v1/enginex/prolink", s.prolinkPost)
 	g.mux.HandleFunc("POST /v1/enginex/decks", s.decksPost)
+	g.mux.HandleFunc("POST /v1/enginex/shadow/position-feed", s.shadowPositionFeedPost)
 	g.mux.HandleFunc("POST /v1/enginex/decks/alive", s.decksAlive)
 	g.mux.HandleFunc("GET /v1/enginex/clock", s.deckClockGet)
 	g.mux.HandleFunc("POST /v1/enginex/clock", s.deckClockPost)
@@ -907,6 +909,9 @@ func thumbURL(t providers.Track) string {
 const (
 	maxArtEntries = 128
 	maxArtBytes   = 512 << 10
+	// The hook hex-encodes staged covers in one SQLite statement; keep that
+	// statement below SQLite's default 1,000,000-byte SQL limit.
+	maxStagedArtBytes = 480 << 10
 )
 
 // art serves a list row's thumbnail, keeping the most recently fetched in memory.
@@ -1014,26 +1019,29 @@ func (g *tidalGateway) prewarmArt(refs []trackRef) {
 	}()
 }
 
-// syncStmAlbumArt gives the streaming row Engine inserted into stm.db a real
-// cover. Engine writes it as hash "image://streaming/" with no image, never reads
-// the file's embedded picture for a row that already has an AlbumArt id, and so the
-// jog wheel (GET_ALBUM_ART) shows nothing. Writing Engine's live database is how
-// m.db got corrupted before (legacy-shadow-decks), so this stays one UPDATE on a
-// PERSIST-journal connection: the default DELETE mode unlinks the stm.db-journal
-// Engine keeps open. Only a still-empty row is touched.
-func (g *tidalGateway) syncStmAlbumArt(ctx context.Context, id int64, t providers.Track) {
+// rbxCoverMagic heads <gateway id>.cover in the analysis cache: then the JPEG's SHA-1
+// (20 bytes, Engine's AlbumArt.hash) and the JPEG.
+const rbxCoverMagic = "RBXC1"
+
+// stageAlbumArt leaves a streaming track's cover for the row Engine inserted into stm.db:
+// the picture as an Artwork file, and <gateway id>.cover for the UI hook to set on
+// Engine's own connection. Engine writes the row as hash "image://streaming/" with no
+// image and never reads the file's embedded picture for a row that already has an
+// AlbumArt id, so the jog wheel (GET_ALBUM_ART) shows nothing. stream-sync used to
+// UPDATE stm.db itself: Engine takes no lock on its library, and a deck's stm.db ended
+// up with one track's analysis inside another's (LEFT, 2026-11-18).
+func (g *tidalGateway) stageAlbumArt(ctx context.Context, id int64, t providers.Track) {
 	address := t.CoverURL
 	if address == "" {
 		address = thumbURL(t)
 	}
 	data := g.artBytes(ctx, address)
-	if len(data) < 3 || data[0] != 0xff || data[1] != 0xd8 { // Engine's Artwork files are JPEG
+	if len(data) < 3 || len(data) > maxStagedArtBytes || data[0] != 0xff || data[1] != 0xd8 { // Engine's Artwork files are JPEG
 		return
 	}
 	sum := sha1.Sum(data)
 	lib := filepath.Join(shadowDataRoot, "AppDataUser/AIR Music Technology/Engine/Engine Library")
-	stm := filepath.Join(lib, "Database2", "stm.db")
-	if _, err := os.Stat(stm); err != nil {
+	if _, err := os.Stat(filepath.Join(lib, "Database2", "stm.db")); err != nil {
 		return
 	}
 	file := filepath.Join(lib, "Artwork", base64.RawURLEncoding.EncodeToString(sum[:])+".jpg")
@@ -1047,17 +1055,13 @@ func (g *tidalGateway) syncStmAlbumArt(ctx context.Context, id int64, t provider
 			return
 		}
 	}
-	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: stm}).String()+"?_pragma=busy_timeout(2000)&_pragma=journal_mode(persist)")
-	if err != nil {
+	staged := append(append([]byte(rbxCoverMagic), sum[:]...), data...)
+	out := filepath.Join(rbxAnalysisDir, strconv.FormatInt(id, 10)+".cover")
+	if old, _ := os.ReadFile(out); bytes.Equal(old, staged) {
 		return
 	}
-	defer db.Close()
-	db.SetMaxOpenConns(1)
-	res, err := db.ExecContext(ctx, `UPDATE AlbumArt SET hash = ?, albumArt = ? WHERE albumArt IS NULL AND id = (SELECT albumArtId FROM Track WHERE uri = ? ORDER BY id DESC LIMIT 1)`, sum[:], data, fmt.Sprintf("streaming://TIDAL/Track/%d", id))
-	if err != nil {
-		log.Printf("stream-sync: stm.db cover for track %d: %v", id, err)
-	} else if n, _ := res.RowsAffected(); n > 0 {
-		log.Printf("stream-sync: stm.db cover set for track %d", id)
+	if os.MkdirAll(rbxAnalysisDir, 0o755) == nil && rbxWriteCache(out, staged) {
+		log.Printf("stream-sync: cover staged for track %d", id)
 	}
 }
 
@@ -2173,7 +2177,7 @@ func (g *tidalGateway) stream(w http.ResponseWriter, r *http.Request) {
 		mime := localMIMEs[localCodecs[strings.ToLower(path.Ext(ref.file))]]
 		w.Header().Set("Content-Type", mime)
 		if ref.track.CoverURL != "" { // a rekordbox computer's cover
-			g.syncStmAlbumArtLater(id, ref.track)
+			g.stageAlbumArtLater(id, ref.track)
 		}
 		if cp := rbxRunning(ref.file); cp != nil { // a rekordbox track still being copied
 			cp.serve(w, r)
@@ -2210,18 +2214,18 @@ func (g *tidalGateway) stream(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "audio/wav")
 	}
 	log.Printf("stream-sync: load track=%d provider=%s step=stream result=ready elapsed=%s canceled=%t mime=%s", id, ref.track.Provider, time.Since(started).Round(time.Millisecond), r.Context().Err() != nil, w.Header().Get("Content-Type"))
-	g.syncStmAlbumArtLater(id, ref.track)
+	g.stageAlbumArtLater(id, ref.track)
 	http.ServeFile(w, r, p)
 }
 
-// syncStmAlbumArtLater runs syncStmAlbumArt when Engine's stm.db row exists, by the
-// stream request; it may still be settling, so it retries a few times.
-func (g *tidalGateway) syncStmAlbumArtLater(id int64, t providers.Track) {
+// stageAlbumArtLater runs stageAlbumArt by the stream request. It retries a few times:
+// a rekordbox computer's cover waits for the load to give the dbserver session back.
+func (g *tidalGateway) stageAlbumArtLater(id int64, t providers.Track) {
 	go func() {
 		for _, wait := range []time.Duration{0, 800 * time.Millisecond, 1700 * time.Millisecond, 3500 * time.Millisecond} {
 			time.Sleep(wait)
 			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-			g.syncStmAlbumArt(ctx, id, t)
+			g.stageAlbumArt(ctx, id, t)
 			cancel()
 		}
 	}()

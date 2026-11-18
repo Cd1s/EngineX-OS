@@ -283,6 +283,47 @@ func (l rbxStampedLink) Path(id uint32) (string, error) {
 
 func (l rbxStampedLink) Analysis(uint32, string, string) ([]byte, error) { return nil, nil }
 
+// Uruk, 2026-11-18: its .bin was written at 05:24 with the MP3 offset of that build and
+// was still served after two updates, so the corrected offset never showed on the deck.
+func TestRekordboxAnalysisOfAnotherBuildIsDropped(t *testing.T) {
+	old := rbxAnalysisDir
+	rbxAnalysisDir = t.TempDir()
+	t.Cleanup(func() { rbxAnalysisDir = old })
+	cached := []string{"7.bin", "7.bin.source", "7.bin.perf", "7.bin.previous", "7.cover", "names/4096/x.mp3", ".loading"}
+	kept := func(name string) bool {
+		_, err := os.Stat(filepath.Join(rbxAnalysisDir, name))
+		return err == nil
+	}
+	// A first start, an update, a restart of the same build, a binary that cannot be named.
+	for _, start := range []struct {
+		build string
+		keep  bool
+	}{{"a", false}, {"b", false}, {"b", true}, {"", false}} {
+		for _, name := range append([]string{"rowmap"}, cached...) {
+			p := filepath.Join(rbxAnalysisDir, name)
+			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		DropStaleRekordboxAnalysis(start.build)
+		for _, name := range cached {
+			if got := kept(name); got != start.keep {
+				t.Fatalf("start of build %q: %s kept=%t, want %t", start.build, name, got, start.keep)
+			}
+		}
+		if !kept("rowmap") {
+			t.Fatalf("start of build %q dropped the hook's rowmap", start.build)
+		}
+		// The stamp is this start's: an unnamed build leaves none for the next to match.
+		if stamp, _ := os.ReadFile(filepath.Join(rbxAnalysisDir, "build")); string(stamp) != start.build {
+			t.Fatalf("start of build %q left the stamp %q", start.build, stamp)
+		}
+	}
+}
+
 func TestRekordboxFirstPrefetchSkipsSecondHeaderRead(t *testing.T) {
 	paths := map[uint32]string{1: "/Users/dj/Music/x.flac"}
 	e := newRbxEnv(t, paths)
@@ -385,6 +426,55 @@ func rbxTestBlobs(t *testing.T, b []byte) [5][]byte {
 		}
 	}
 	return blobs
+}
+
+// Real decks, 2026-11-19: of one playlist the M4As loaded with grid, cues and overview, and
+// the MP3 beside them (Osmosis, 183 KB of cover art before its first frame) with Engine's
+// own grid and no overview. The list's prefetch gives a file's header 350 ms and had not
+// reached it; the load then started its analysis and answered Engine at once, and Engine
+// read the row before the analysis was written. The hook fills a row when Engine reads it.
+func TestRekordboxLoadAnswersAfterItsAnalysisIsWritten(t *testing.T) {
+	paths := map[uint32]string{1: "/Users/dj/Music/x.flac", 2: "/Users/dj/Music/y.flac"}
+	e := newRbxEnv(t, paths)
+	os.WriteFile(filepath.Join(e.share, "x.flac"), flac48k(4096), 0o644)
+	link := analysedRbxLink{fakeRbxLink{paths}}
+	dialRekordbox = func(context.Context, net.IP, byte) (rbxLink, error) { return link, nil }
+	old := rbxAnalysisDir
+	rbxAnalysisDir = t.TempDir()
+	t.Cleanup(func() { rbxAnalysisDir = old })
+	t.Cleanup(rbxAnalysisJobs.Wait) // before the fakes go
+	ids, _ := e.trackIDs(t, "Tracks")
+	rbxAnalysisJobs.Wait()
+	// The list is on the deck, and its prefetch has not left this track's analysis.
+	bin := rbxAnalysisPath(ids["First"])
+	for _, f := range []string{bin, bin + ".perf", bin + ".source"} {
+		os.Remove(f)
+	}
+	dialRekordbox = func(context.Context, net.IP, byte) (rbxLink, error) {
+		time.Sleep(150 * time.Millisecond) // rekordbox takes its time
+		return link, nil
+	}
+	tidalGet(t, e.base, "/v1/tracks/"+strconv.FormatInt(ids["First"], 10)+"/playbackinfopostpaywall", 200, nil)
+	if _, err := os.Stat(bin); err != nil {
+		t.Fatalf("Engine has the load's answer before the analysis is written: %v", err)
+	}
+	// A rekordbox that does not answer holds a load up no longer than the bound.
+	oldWait := rbxAnalysisWait
+	rbxAnalysisWait = 100 * time.Millisecond
+	t.Cleanup(func() { rbxAnalysisWait = oldWait })
+	os.WriteFile(filepath.Join(e.share, "y.flac"), flac48k(4096), 0o644)
+	calls := 0
+	dialRekordbox = func(context.Context, net.IP, byte) (rbxLink, error) {
+		if calls++; calls > 1 { // the load's own question is answered, its analysis is not
+			time.Sleep(time.Second)
+		}
+		return link, nil
+	}
+	start := time.Now()
+	tidalGet(t, e.base, "/v1/tracks/"+strconv.FormatInt(ids["Second"], 10)+"/playbackinfopostpaywall", 200, nil)
+	if took := time.Since(start); took > 700*time.Millisecond {
+		t.Fatalf("the load waited %v for an analysis that does not come", took)
+	}
 }
 
 // Engine analysed every rekordbox track it streamed (maintainer: grid, cues and both
@@ -639,8 +729,10 @@ func (l rb7Link) CuesExtended(uint32) ([]byte, error) {
 // analysed it again, where the same track from a rekordbox USB stick (rb-bridge) loads with
 // its grid and cues at once. A Link load of a track leaves for Engine the bytes rb-bridge
 // writes for that track from its export, and the same Track flag.
+// "mp3 info" (2026-11-19): an Info frame with a LAME extension, the class of the maintainer's
+// library, where the stick's grid was 1152 samples before the Link grid of the same file.
 func TestRekordboxLinkAnalysisIsRbBridgesForTheSameTrack(t *testing.T) {
-	for _, format := range []string{"mp3", "aac"} {
+	for _, format := range []string{"mp3", "mp3 info", "aac"} {
 		t.Run(format, func(t *testing.T) { assertLinkMatchesBridge(t, format) })
 	}
 }
@@ -651,7 +743,7 @@ func TestRbxApplyHeaderUsesInfoLinkTimeline(t *testing.T) {
 		Format:                 "mp3",
 		SampleRate:             44100,
 		StartOffsetSamples:     2257,
-		LinkStartOffsetSamples: 1105,
+		RekordboxOffsetSamples: 1105,
 	})
 	if tr.StartOffsetSamples != 1105 {
 		t.Fatalf("Link MP3 offset = %d, want 1105", tr.StartOffsetSamples)
@@ -669,6 +761,9 @@ func assertLinkMatchesBridge(t *testing.T, format string) {
 		testfixture.LargeExport(t, root, 1)
 		// Make the file larger than the NFS prefix; keep Xing's counts valid.
 		file = testfixture.MP3WithLAMETag()
+		if format == "mp3 info" {
+			copy(file[36:], "Info")
+		}
 		file = append(file, bytes.Repeat(file[417:834], 100)...)
 		binary.BigEndian.PutUint32(file[44:], 102)
 		binary.BigEndian.PutUint32(file[48:], uint32(len(file)))

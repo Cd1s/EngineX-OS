@@ -33,6 +33,7 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+#include <math.h>
 #include "settings_copy_profile.h"
 #if !defined(__aarch64__)
 #include "rekordbox_rows.h"
@@ -64,6 +65,9 @@ static struct sc_tap live_tap; // #50, every Engine build; .bss (512 KiB ring), 
 #endif
 
 #define UI_ROOT "/data/enginex/ui"
+#ifndef SHADOW_POSITION_FEED_PATH
+#define SHADOW_POSITION_FEED_PATH "/run/enginex/shadow-position"
+#endif
 #define FLAG_COMPRESSED 0x01
 #define FLAG_DIRECTORY 0x02
 #define FLAG_ZSTD 0x04
@@ -655,8 +659,140 @@ struct engine_build {
     uint32_t bt_send;
     // #304: TidalProvider's profile-SSO capability slot and its stock true getter.
     uint32_t tidal_sso_slot, tidal_sso_getter;
+    // HF_SHADOW_PAUSED_FOLLOW: WaveFormPositionItem::currentPosition (its first bytes, the
+    // slot it has in the class's two vtables) and PlanckGUI's vector of the decks' items.
+    uint32_t shadow_vtable_a, shadow_vtable_b, shadow_vtable_slot, shadow_position_fn;
+    uint32_t shadow_array_offset, shadow_position_prefix_size;
+    uchar shadow_position_prefix[16];
+    // The waveformPositionItem case of PlanckGUI::qt_static_metacall, where the owner of
+    // that vector is learnt. 0: not verified for this Engine, the hook is not installed.
+    uint32_t shadow_capture_site;
+    uchar shadow_capture_prefix[8];
 };
 static const struct engine_build *build;
+
+// One record of stream-sync's position feed (pkg/webui/shadow_position_feed.go) per deck
+// 1-4: 64 bytes, little-endian; seq is odd while a record is written, 0 before the first.
+struct shadow_position_feed_record {
+    uint32_t seq, active, deck, reserved;
+    uint64_t track_hash;
+    double position_samples;                  // below 0: a cue in the lead-in
+    double rate_samples_per_sec;              // 0: the source stands; below 0: a scratch backwards
+    uint64_t mono_ns;                         // CLOCK_MONOTONIC_RAW of that position
+    double loop_in_samples, loop_out_samples; // both 0: no loop
+};
+_Static_assert(sizeof(struct shadow_position_feed_record) == 64, "the feed record is 64 bytes");
+
+// The writer repeats a record every 250 ms. Up to this age the line is carried on at the
+// record's rate, so a busy stream-sync does not make it jump. Older, the writer is gone and
+// the deck shows its own line again: a deck that is no longer a shadow must not keep a dead
+// feed's position.
+#define SHADOW_FEED_MAX_AGE_NS UINT64_C(5000000000)
+
+static const struct shadow_position_feed_record *shadow_feed;
+static int (*shadow_position_original)(const void *);
+static uintptr_t shadow_planck_owner;
+
+static uint64_t shadow_now_ns(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC_RAW, &ts)) return 0;
+    return (uint64_t)ts.tv_sec * UINT64_C(1000000000) + (uint64_t)ts.tv_nsec;
+}
+
+// PlanckGUI::waveformPositionItem(deck) ran on planck: the object that owns the items.
+__attribute__((used, noinline)) static void shadow_capture_waveform_item(void *planck) {
+    if (planck) __atomic_store_n(&shadow_planck_owner, (uintptr_t)planck, __ATOMIC_RELEASE);
+}
+
+// The deck (1-4) whose position item self is, by PlanckGUI's own per-deck vector. Read at
+// every call, because a layout switch makes the items again. 0: no deck's item, or listed
+// twice.
+static int shadow_item_deck(const void *self) {
+    uintptr_t owner = __atomic_load_n(&shadow_planck_owner, __ATOMIC_ACQUIRE);
+    if (!owner || !self) return 0;
+    const uintptr_t *vector = (const uintptr_t *)(owner + build->shadow_array_offset);
+    const uintptr_t *item = (const uintptr_t *)vector[0], *end = (const uintptr_t *)vector[1];
+    if (!item || end < item) return 0;
+    size_t count = (size_t)(end - item);
+    if (count > 4) count = 4;
+    int deck = 0;
+    for (size_t d = 0; d < count; d++) {
+        if (item[d] != (uintptr_t)self) continue;
+        if (deck) return 0;
+        deck = (int)d + 1;
+    }
+    return deck;
+}
+
+#if !defined(__aarch64__)
+__attribute__((used)) static uintptr_t shadow_capture_return;
+
+// Replaces the first two instructions of the waveformPositionItem case in
+// PlanckGUI::qt_static_metacall (r0 = PlanckGUI, r6 = the call's arguments), runs them
+// after the capture and goes back behind them.
+__attribute__((naked, noinline)) static void shadow_capture_waveform_item_stub(void) {
+    __asm__ volatile(
+        "push {r0-r3,r4-r6,lr}\n"
+        "bl shadow_capture_waveform_item\n"
+        "pop {r0-r3,r4-r6,lr}\n"
+        "ldr r3, [r6, #4]\n"
+        "ldr r3, [r3]\n"
+        "ldr ip, 1f\n"
+        "ldr ip, [ip]\n"
+        "bx ip\n"
+        ".align 2\n"
+        "1: .word shadow_capture_return\n");
+}
+#endif
+
+// The source's position now for deck, from a whole record that is not too old.
+static int shadow_feed_read(int deck, double *position) {
+    const struct shadow_position_feed_record *r = &shadow_feed[deck - 1];
+    for (unsigned tries = 0; tries < 3; tries++) {
+        uint32_t seq = __atomic_load_n(&r->seq, __ATOMIC_ACQUIRE);
+        if (!seq) return 0;
+        if (seq & 1u) continue;
+        struct shadow_position_feed_record copy;
+        memcpy(&copy, r, sizeof copy);
+        if (__atomic_load_n(&r->seq, __ATOMIC_ACQUIRE) != seq) continue;
+        if (!copy.active || copy.deck != (uint32_t)deck) return 0;
+        uint64_t now = shadow_now_ns();
+        if (!now || !copy.mono_ns) return 0;
+        uint64_t age = now > copy.mono_ns ? now - copy.mono_ns : 0;
+        if (age > SHADOW_FEED_MAX_AGE_NS) return 0;
+        double at = copy.position_samples + copy.rate_samples_per_sec * ((double)age / 1e9);
+        if (!isfinite(at)) return 0;
+        // In the source's loop its line does not run on past the loop out. No libm here:
+        // the hook is preloaded into Engine's helper commands too, which do not load it.
+        double span = copy.loop_out_samples - copy.loop_in_samples;
+        if (span > 0.0 && isfinite(span) && at > copy.loop_out_samples) {
+            double laps = (at - copy.loop_in_samples) / span;
+            if (!(laps < 9e15)) return 0;
+            at -= span * (double)(long long)laps;
+        }
+        *position = at;
+        return 1;
+    }
+    return 0;
+}
+
+// WaveFormPositionItem::currentPosition: about 1300 calls a second on the render thread,
+// also for a paused deck. No lock, no allocation, one clock read for a followed deck.
+#if defined(__aarch64__)
+__attribute__((target("branch-protection=standard")))
+#endif
+static int shadow_position_hook(const void *self) {
+    int stock = shadow_position_original(self);
+    const struct shadow_position_feed_record *feed = shadow_feed;
+    // Nothing of PlanckGUI is read while no deck is followed.
+    if (!(feed[0].active | feed[1].active | feed[2].active | feed[3].active)) return stock;
+    int deck = shadow_item_deck(self);
+    double position;
+    if (!deck || !shadow_feed_read(deck, &position)) return stock;
+    if (position >= 2147483647.0) return INT32_MAX;
+    if (position <= -2147483648.0) return INT32_MIN;
+    return (int)position;
+}
 
 static int tidal_profile_sso(void *provider) {
     (void)provider;
@@ -684,6 +820,50 @@ static void patch_pointer(int feature, uintptr_t *slot, uintptr_t value, size_t 
     if (mprotect(start, page, PROT_READ | PROT_WRITE)) _exit(127);
     *slot = value;
     if (mprotect(start, page, PROT_READ)) _exit(127);
+}
+
+static int try_patch_bytes(int feature, uintptr_t entry, const void *bytes, size_t size, size_t page);
+
+// The paused shadow deck's waveform line (HF_SHADOW_PAUSED_FOLLOW). 1: installed. 0: off, or
+// this Engine has no verified site; then nothing was changed and the feature is reported
+// off, so the packs keep the shadow deck playing.
+static int install_shadow_position_hooks(uintptr_t base, size_t page) {
+    if (!hf_on(HF_SHADOW_PAUSED_FOLLOW) || !build->shadow_position_fn || !build->shadow_capture_site) return 0;
+    if (memcmp((const void *)(base + build->shadow_position_fn), build->shadow_position_prefix, build->shadow_position_prefix_size) ||
+        memcmp((const void *)(base + build->shadow_capture_site), build->shadow_capture_prefix, sizeof build->shadow_capture_prefix)) return 0;
+    uintptr_t *a = (uintptr_t *)(base + build->shadow_vtable_a + build->shadow_vtable_slot);
+    uintptr_t *b = (uintptr_t *)(base + build->shadow_vtable_b + build->shadow_vtable_slot);
+    if (*a != base + build->shadow_position_fn || *b != base + build->shadow_position_fn) return 0;
+    // After a boot Engine can be the first to need the feed's directory. The file is
+    // stream-sync's as much as the hook's: whoever comes first makes it, nobody replaces it.
+    size_t bytes = sizeof(struct shadow_position_feed_record) * 4;
+    char dir[] = SHADOW_POSITION_FEED_PATH;
+    char *slash = strrchr(dir, '/');
+    if (slash && slash != dir) {
+        *slash = 0;
+        mkdir(dir, 0755);
+    }
+    int fd = open(SHADOW_POSITION_FEED_PATH, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+    void *map = fd < 0 || ftruncate(fd, (off_t)bytes) ? MAP_FAILED : mmap(NULL, bytes, PROT_READ, MAP_SHARED, fd, 0);
+    if (fd >= 0) close(fd);
+    if (map == MAP_FAILED) {
+        fprintf(stderr, "engine-ui-hook: paused shadow deck: no position feed at " SHADOW_POSITION_FEED_PATH " (%s); shadow decks play as before\n", strerror(errno));
+        return 0;
+    }
+#if !defined(__aarch64__)
+    const uint32_t jump[] = {0xe51ff004, (uint32_t)(uintptr_t)shadow_capture_waveform_item_stub};
+    shadow_capture_return = base + build->shadow_capture_site + sizeof jump;
+    if (!try_patch_bytes(HF_SHADOW_PAUSED_FOLLOW, base + build->shadow_capture_site, jump, sizeof jump, page)) {
+        munmap(map, bytes);
+        return 0;
+    }
+#endif
+    shadow_feed = map;
+    shadow_position_original = (int (*)(const void *))(base + build->shadow_position_fn);
+    patch_pointer(HF_SHADOW_PAUSED_FOLLOW, a, (uintptr_t)shadow_position_hook, page);
+    patch_pointer(HF_SHADOW_PAUSED_FOLLOW, b, (uintptr_t)shadow_position_hook, page);
+    fprintf(stderr, "engine-ui-hook: paused shadow deck: the waveform line follows the source's position feed\n");
+    return 1;
 }
 
 static void install_tidal_profile_sso(uintptr_t base, size_t page) {
@@ -2208,7 +2388,12 @@ static const struct engine_build engine_builds[] = {
      .sqlite_open_v2 = 0x1bbd5c0, .sqlite_opendb = 0x1b8b060,
      .sqlite_prefix = {"", "\x3f\x23\x03\xd5\xff\x43\x02\xd1\xfd\x7b\x03\xa9\xfd\xc3\x00\x91", ""},
      .bt_send = 0x102eb20,
-     .tidal_sso_slot = 0x2d52870, .tidal_sso_getter = 0x713b80},
+     .tidal_sso_slot = 0x2d52870, .tidal_sso_getter = 0x713b80,
+     .shadow_vtable_a = 0x2d23c18, .shadow_vtable_b = 0x2d21858,
+     .shadow_vtable_slot = 0x178, .shadow_position_fn = 0x655330,
+     .shadow_array_offset = 0x450, .shadow_position_prefix_size = 16,
+     .shadow_position_prefix = {0x5f, 0x24, 0x03, 0xd5, 0x00, 0x48, 0x40, 0xbd,
+                                0x00, 0x00, 0x38, 0x1e, 0xc0, 0x03, 0x5f, 0xd6}},
 };
 #else
 static const struct engine_edit edits_504[] = {
@@ -2363,7 +2548,8 @@ static const struct engine_build engine_builds[] = {
      0xf6303c, 0xf63124, 0xf63120, {0xdb, 0x24c, 0x24e, 0x276, 0x289},
      0x842644, 0x29bc83c, 0x258e185, 0x8429b0, 0xe51b3340,
      0x29980a4, 0x1c91f74, 0x1cba858, 0x1cba874, 0,
-     {"\xf4\x42\x6d\xe1\x02\x50\xa0\xe1", "\x04\xb0\x2d\xe5\x00\x30\xa0\xe3", "\x04\xb0\x2d\xe5\x00\xb0\x8d\xe2"}, 0x4bc, 0, 0, 0},
+     {"\xf4\x42\x6d\xe1\x02\x50\xa0\xe1", "\x04\xb0\x2d\xe5\x00\x30\xa0\xe3", "\x04\xb0\x2d\xe5\x00\xb0\x8d\xe2"}, 0x4bc, 0, 0, 0,
+     .shadow_position_fn = 0},
     {"5.3.0", "\xbe\x53\x7e\x90\x81\x21\xe7\x61\x64\xdd\xbb\xf9\x73\x0d\x47\x2b\xa0\xb8\xf9\xd4",
      {0xe6a090, 0xe6a0bc, 0xe6a16c, 0xe6a198, 0xe6a1c4, 0xe6a0e8, 0xe6a140, 0x170e714, 0x1710c00,
       0x1710a74, 0x170f110, 0xdde87c, 0xd265cc, 0xd265f8, 0xd26624, 0xf1afa4, 0x16b38e0, 0xf1dd20, 0xf1ede4, 0xf1ab24, 0xc77934},
@@ -2372,7 +2558,13 @@ static const struct engine_build engine_builds[] = {
      0x8a1eac, 0x2c8e808, 0x21b8b98, 0x8a2218, 0xe51b3340,
      0x2b9bee8, 0x1d7289c, 0x1d47324, 0x1d7e2bc, 0x1d46a6c,
      {"\xf4\x42\x6d\xe1\xf8\x60\xcd\xe1", "\xf4\x42\x6d\xe1\x20\xe0\x8d\xe5", ""}, 0x52c, 0xf56034,
-     0x2b68184, 0x573624},
+     0x2b68184, 0x573624,
+     .shadow_vtable_a = 0x2b52c68, .shadow_vtable_b = 0x2b51a88,
+     .shadow_vtable_slot = 0xbc, .shadow_position_fn = 0x4b9090,
+     .shadow_array_offset = 0x244, .shadow_position_prefix_size = 8,
+     .shadow_position_prefix = {0x0a, 0x7a, 0xd0, 0xed, 0x04, 0xb0, 0x2d, 0xe5},
+     .shadow_capture_site = 0xa1746c,
+     .shadow_capture_prefix = {0x04, 0x30, 0x96, 0xe5, 0x00, 0x30, 0x93, 0xe5}},
     // feature_object 0x2d0eb78 is StemsPreRenderedPlayback (stored into 0x2d180c8 at 0x360d68, read by PlanckScriptRoot::hasStemsPreRenderedPlayback at 0x9d7808).
     {"5.3.0-sclive4", "\xb9\x46\xc3\xb8\xd9\x9d\x32\x99\x8c\x81\x97\xd5\xdc\x90\x5a\x6b\xdd\xaa\x5d\x2f",
      {0xe774fc, 0xe77528, 0xe775d8, 0xe77604, 0xe77630, 0xe77554, 0xe775ac, 0x17597bc, 0x179b090,
@@ -2382,7 +2574,13 @@ static const struct engine_build engine_builds[] = {
      0x89cd64, 0x2d0eb78, 0x222cc8d, 0x89d0d0, 0xe51b3338,
      0x2c1bea4, 0x1ddf11c, 0x1db3ba4, 0x1deab3c, 0x1db32ec,
      {"\xf4\x42\x6d\xe1\xf8\x60\xcd\xe1", "\xf4\x42\x6d\xe1\x20\xe0\x8d\xe5", ""}, 0x52c, 0xf629b0,
-     0x2be7944, 0x585a1c},
+     0x2be7944, 0x585a1c,
+     .shadow_vtable_a = 0x2bd2544, .shadow_vtable_b = 0x2bd1364,
+     .shadow_vtable_slot = 0xbc, .shadow_position_fn = 0x4c5780,
+     .shadow_array_offset = 0x244, .shadow_position_prefix_size = 8,
+     .shadow_position_prefix = {0x0a, 0x7a, 0xd0, 0xed, 0x04, 0xb0, 0x2d, 0xe5}},
+    // HF_SHADOW_PAUSED_FOLLOW is not installed here: the waveformPositionItem case is at
+    // 0xa3c264 with the first-generation bytes, but it has not run on this Engine yet.
 };
 #endif
 
@@ -2506,6 +2704,7 @@ __attribute__((constructor)) static void edit_engine(void) {
     char off[512];
     hf_describe(off, sizeof off);
     if (off[0]) fprintf(stderr, "engine-ui-hook: features off: %s\n", off);
+    if (!install_shadow_position_hooks(base, page)) hf_runtime_off(HF_SHADOW_PAUSED_FOLLOW);
     hf_publish();
 #if !defined(__aarch64__)
     prepare_aux(base, page);

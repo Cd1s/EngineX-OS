@@ -117,7 +117,7 @@ func TestFailedImportRollsBackBridgeSchema(t *testing.T) {
 	db := dbOpen(t, root)
 	// Existing tracks are now native; they are referenced, and the import then
 	// fails late while writing playlist entries.
-	if _, e := db.Exec(`DROP TABLE BridgeState;DROP TABLE BridgeAnalysis;DROP TABLE BridgePlaylist;DROP TABLE BridgeLibrary;
+	if _, e := db.Exec(`DROP TABLE BridgeState;DROP TABLE BridgeAnalysis;DROP TABLE BridgePlaylist;DROP TABLE BridgeLibrary;DROP TABLE BridgeWritten;
 CREATE TRIGGER fail_import BEFORE INSERT ON PlaylistEntity BEGIN SELECT RAISE(ABORT,'injected'); END;`); e != nil {
 		t.Fatal(e)
 	}
@@ -125,7 +125,7 @@ CREATE TRIGGER fail_import BEFORE INSERT ON PlaylistEntity BEGIN SELECT RAISE(AB
 	if _, e := bridge.Convert(context.Background(), root, enginedb.Options{}); e == nil {
 		t.Fatal("injected failure ignored")
 	}
-	if n := scalar[int](t, db, `SELECT count(*) FROM Track WHERE pdbImportKey IS NOT NULL AND id IN (SELECT trackId FROM PerformanceData WHERE thirdPartySourceId=1)`); n == 0 {
+	if n := scalar[int](t, db, `SELECT count(*) FROM Track WHERE pdbImportKey IS NOT NULL AND id IN (SELECT trackId FROM PerformanceData WHERE beatData IS NOT NULL)`); n == 0 {
 		t.Fatal("fixture lost its tracks")
 	}
 	if n := scalar[int](t, db, `SELECT count(*) FROM bridge.sqlite_master WHERE name LIKE 'Bridge%'`); n != 0 {

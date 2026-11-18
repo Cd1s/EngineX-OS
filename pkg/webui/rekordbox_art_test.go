@@ -3,6 +3,7 @@ package webui
 import (
 	"bytes"
 	"context"
+	"crypto/sha1"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -95,8 +96,8 @@ func artGet(t *testing.T, base, song, artist string) (int, []byte, string) {
 }
 
 // A computer's track row carries its cover; the row and the deck ask /v1/enginex/art by title
-// and artist, which reads the picture over dbserver once, and the loaded track's stm.db row
-// gets it for the jog wheel, as a service's track does.
+// and artist, which reads the picture over dbserver once, and the loaded track's cover is
+// staged for the jog wheel's stm.db row, as a service's track's is.
 func TestRekordboxCoverComesFromTheComputer(t *testing.T) {
 	e := newRbxEnv(t, nil)
 	os.WriteFile(filepath.Join(e.share, "a.mp3"), []byte("ID3 one"), 0o644)
@@ -130,7 +131,7 @@ func TestRekordboxCoverComesFromTheComputer(t *testing.T) {
 	}
 	rbxSession.Unlock()
 
-	// The jog wheel's stm.db row gets the computer's cover.
+	// The computer's cover is staged for the jog wheel's stm.db row: the hook sets it there.
 	data := t.TempDir()
 	lib := filepath.Join(data, "AppDataUser/AIR Music Technology/Engine/Engine Library")
 	os.MkdirAll(filepath.Join(lib, "Database2"), 0o755)
@@ -154,14 +155,22 @@ func TestRekordboxCoverComesFromTheComputer(t *testing.T) {
 	g.mu.Lock()
 	ref := g.tracks[ids["First"]]
 	g.mu.Unlock()
-	g.syncStmAlbumArt(context.Background(), ids["First"], ref.track)
+	oldDir := rbxAnalysisDir
+	rbxAnalysisDir = t.TempDir()
+	t.Cleanup(func() { rbxAnalysisDir = oldDir })
+	g.stageAlbumArt(context.Background(), ids["First"], ref.track)
 	shadowDataRoot = old
 	var art []byte
-	if db.QueryRow(`SELECT albumArt FROM AlbumArt WHERE id = 1`).Scan(&art); !bytes.Equal(art, cover) {
-		t.Fatalf("stm.db cover: %d bytes", len(art))
+	if err := db.QueryRow(`SELECT albumArt FROM AlbumArt WHERE id = 1`).Scan(&art); err != nil || art != nil {
+		t.Fatalf("stm.db was written by stream-sync: %d bytes %v", len(art), err)
+	}
+	sum := sha1.Sum(cover)
+	staged, _ := os.ReadFile(filepath.Join(rbxAnalysisDir, strconv.FormatInt(ids["First"], 10)+".cover"))
+	if !bytes.Equal(staged, append(append([]byte("RBXC1"), sum[:]...), cover...)) {
+		t.Fatalf("staged cover: %d bytes", len(staged))
 	}
 
-	// Loading the track starts that stm.db update, as a service's stream does: its four tries
+	// Loading the track starts that staging, as a service's stream does: its four tries
 	// each ask the computer here, since the picture is no longer cached and is not an image.
 	g.artMu.Lock()
 	delete(g.artCache, first)

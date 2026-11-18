@@ -41,6 +41,9 @@ import (
 	"golang.org/x/text/unicode/norm"
 )
 
+// rbxAnalysisWait is how long a load's answer waits for its analysis. A variable for tests.
+var rbxAnalysisWait = 3 * time.Second
+
 const (
 	rekordboxScope   = "rekordbox" // the deck's source id, its playlists' and its tracks' provider
 	rbxCacheDir      = ".rekordbox-cache"
@@ -629,8 +632,21 @@ func (g *tidalGateway) rbxPrepare(ctx context.Context, id int64, ref trackRef) (
 	if _, slot := rbxMedia(parts[1]); slot == 0 {
 		rbxIndexReplay(id, rbPath, file)
 	}
+	// Engine reads the track's row as soon as it has this answer, and the hook fills the row
+	// then and not again: an analysis written later left the deck without overview and with
+	// Engine's own grid until the track was loaded once more. The list's prefetch has it
+	// ready for most tracks; a load it did not reach waits for its own, within bounds.
 	rbxAnalysisJobs.Add(1)
-	go g.rbxWriteAnalysis(id, parts[1], uint32(tid), rbPath, file)
+	written := make(chan struct{})
+	go func() {
+		defer close(written)
+		g.rbxWriteAnalysis(id, parts[1], uint32(tid), rbPath, file)
+	}()
+	select {
+	case <-written:
+	case <-time.After(rbxAnalysisWait):
+	case <-ctx.Done():
+	}
 	ref.file, ref.drive = file, root
 	g.mu.Lock()
 	g.tracks[id] = ref

@@ -99,6 +99,32 @@ int main(void) {
     check_flags(db, 0);
     assert(sc_shadow_analysis_fill(&api, db, 1)); // The first fill followed Engine's transaction.
     check_flags(db, 1);
+    // RIGHT, 2026-11-19: a copy is used again for the same track, and its row still held
+    // what an earlier load had left (a grid of another build, an overview never finished),
+    // so the shadow lane drew another grid than the source and no overview. The row is the
+    // staged analysis again, and is written only when it differs.
+    assert(!sc_shadow_analysis_fill(&api, db, 1));
+    assert(sqlite3_exec(db, "UPDATE PerformanceData SET beatData = X'00', overviewWaveFormData = NULL, thirdPartySourceId = NULL WHERE trackId = 1;"
+                            "UPDATE Track SET isAnalyzed = 0 WHERE id = 1", NULL, NULL, NULL) == SQLITE_OK);
+    assert(sc_shadow_analysis_fill(&api, db, 1));
+    check_flags(db, 1);
+    // The source's grid was edited in rekordbox: the newer analysis replaces the copy's.
+    static const unsigned char edited[] = "RBXA1"
+        "\5\0\0\0" "track" "\5\0\0\0" "waves" "\5\0\0\0" "BEATS"
+        "\5\0\0\0" "cues!" "\0\0\0\0";
+    out = fopen(sidecar, "wb");
+    assert(out && fwrite(edited, 1, sizeof edited - 1, out) == sizeof edited - 1 && !fclose(out));
+    assert(sc_shadow_analysis_fill(&api, db, 1) && !sc_shadow_analysis_fill(&api, db, 1));
+    assert(sqlite3_prepare_v2(db, "SELECT hex(overviewWaveFormData) || '/' || hex(beatData) FROM PerformanceData WHERE trackId = 1", -1, &stmt, NULL) == SQLITE_OK);
+    assert(sqlite3_step(stmt) == SQLITE_ROW && !strcmp((const char *)sqlite3_column_text(stmt, 0), "7761766573/4245415453"));
+    sqlite3_finalize(stmt);
+    // Neighbours: a track of the library, a copy without a staged analysis, a path out of
+    // the cache and a damaged record are left alone, also now that their rows are read.
+    assert(sqlite3_exec(db, "UPDATE PerformanceData SET beatData = X'00' WHERE trackId > 1", NULL, NULL, NULL) == SQLITE_OK);
+    for (int i = 2; i <= 5; i++) assert(!sc_shadow_analysis_fill(&api, db, i));
+    assert(sqlite3_prepare_v2(db, "SELECT count(*) FROM PerformanceData WHERE trackId > 1 AND hex(beatData) = '00'", -1, &stmt, NULL) == SQLITE_OK);
+    assert(sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_int(stmt, 0) == 4);
+    sqlite3_finalize(stmt);
     assert(sqlite3_close(usb) == SQLITE_OK && sqlite3_close(db) == SQLITE_OK);
     assert(!unlink(path) && !unlink(stick) && !unlink(sidecar) && !unlink(malformed));
     assert(!rmdir(contents) && !rmdir(cache) && !rmdir(dir));

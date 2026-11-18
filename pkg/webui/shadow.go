@@ -1547,6 +1547,8 @@ func fetchPerfPending(ctx context.Context, url string) (perf []byte, pending boo
 		case status == http.StatusServiceUnavailable:
 			pending = true
 		case !pending || status == http.StatusNotFound:
+			// Which answer left the copy to Engine's own analysis; 0 is none at all.
+			log.Printf("stream-sync: shadow: the source gave no analysis (http %d)", status)
 			return nil, false
 		}
 		if try+1 >= perfRetries {
@@ -2090,7 +2092,7 @@ func (s *Server) shadowFetchCDJ(key string, host net.IP, slot byte, id uint32) {
 				if info.Samples > 0 {
 					t.SampleCount = info.Samples
 				}
-				t.StartOffsetSamples = info.StartOffsetSamples
+				t.StartOffsetSamples = info.RekordboxOffset()
 			}
 			if p, err := enginedb.EncodePerformance(t, a); err == nil && p.Complete {
 				perf, _ = perfFromBlobs(t.BPM, p.TrackData, p.Beats, p.Overview)
@@ -2174,9 +2176,15 @@ func (s *Server) shadowFetchPeer(key string, p peerDeck) {
 		}
 		// Engine loads the copy only after this returns, so it sees the .perf.
 		savePerf(local, perf)
+		noFill := "not a player"
 		if playerBoards[imagePrefix(deviceCompatible())] {
-			saveShadowAnalysis(ctx, local, strings.Replace(url, "/audio?", "/perf?", 1)+"&format=native")
+			noFill = saveShadowAnalysis(ctx, local, strings.Replace(url, "/audio?", "/perf?", 1)+"&format=native")
 		}
+		// The three ways a copy is analysed end with different waveform peaks.
+		if noFill != "" {
+			noFill = " (" + noFill + ")"
+		}
+		log.Printf("stream-sync: shadow: copy %s %q analysis replay=%t fill=%t%s", key, name, perf != nil, noFill == "", noFill)
 		return local, nil
 	})
 }

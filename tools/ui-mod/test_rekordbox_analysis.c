@@ -94,13 +94,13 @@ int main(void) {
     assert(!sc_rbx_uri_id("") && !sc_rbx_uri_id("855") && !sc_rbx_uri_id("streaming://TIDAL/Track/") && !sc_rbx_uri_id("x/a855"));
 
     const unsigned char file[] = "RBXA1" "\2\0\0\0" "\x01\xab" "\0\0\0\0" "\1\0\0\0" "\xff" "\0\0\0\0" "\0\0\0\0";
-    char *sql = sc_rbx_analysis_sql(file, sizeof file - 1, 9);
-    assert(sql && !strcmp(sql, "UPDATE PerformanceData SET trackData = X'01ab', overviewWaveFormData = NULL, beatData = X'ff', quickCues = NULL, loops = NULL, thirdPartySourceId = 1 WHERE trackId = 9 AND trackData IS NULL; "
+    char *sql = sc_rbx_analysis_sql(file, sizeof file - 1, 9, 0);
+    assert(sql && !strcmp(sql, "UPDATE PerformanceData SET trackData = X'01ab', overviewWaveFormData = NULL, beatData = X'ff', quickCues = NULL, loops = NULL WHERE trackId = 9 AND trackData IS NULL; "
                               "UPDATE Track SET isAnalyzed = 1 WHERE id = 9 AND changes() > 0"));
     free(sql);
     unsigned char with_flag[sizeof file];
     memcpy(with_flag, file, sizeof file);
-    sql = sc_rbx_analysis_sql(with_flag, sizeof with_flag, 16449);
+    sql = sc_rbx_analysis_sql(with_flag, sizeof with_flag, 16449, 0);
     assert(sql);
     sqlite3 *partial = library(":memory:", "rekordbox [126 BPM]");
     assert(sqlite3_exec(partial, sql, NULL, NULL, NULL) == SQLITE_OK);
@@ -111,12 +111,12 @@ int main(void) {
     sqlite3_finalize(flags);
     sqlite3_close(partial);
     free(sql);
-    assert(!sc_rbx_analysis_sql(file, sizeof file - 2, 9));                      // cut short
-    assert(!sc_rbx_analysis_sql((const unsigned char *)"RBXA0", 5, 9));           // not ours
+    assert(!sc_rbx_analysis_sql(file, sizeof file - 2, 9, 0));                      // cut short
+    assert(!sc_rbx_analysis_sql((const unsigned char *)"RBXA0", 5, 9, 0));           // not ours
     const unsigned char huge[] = "RBXA1" "\xff\xff\xff\x7f";
-    assert(!sc_rbx_analysis_sql(huge, sizeof huge - 1, 9));                       // length past the end
+    assert(!sc_rbx_analysis_sql(huge, sizeof huge - 1, 9, 0));                       // length past the end
     const unsigned char no_grid[] = "RBXA1" "\1\0\0\0" "\x01" "\0\0\0\0" "\0\0\0\0" "\0\0\0\0" "\0\0\0\0";
-    assert(!sc_rbx_analysis_sql(no_grid, sizeof no_grid - 1, 9));                 // nothing to skip analysis for
+    assert(!sc_rbx_analysis_sql(no_grid, sizeof no_grid - 1, 9, 0));                 // nothing to skip analysis for
 
     char dir[] = "/tmp/rbx-analysis-XXXXXX", drives[64], path[160], history[64];
     assert(mkdtemp(dir));
@@ -174,7 +174,9 @@ int main(void) {
     assert(result && !strcmp(result, "filled") && filled(engine));
     sqlite3_stmt *source;
     assert(sqlite3_prepare_v2(engine, "SELECT thirdPartySourceId FROM stm.PerformanceData WHERE trackId = 16449", -1, &source, NULL) == SQLITE_OK);
-    assert(sqlite3_step(source) == SQLITE_ROW && sqlite3_column_int(source, 0) == 1);
+    // No import mark: Engine moves the grid, cues and loops of a marked row by its own
+    // rekordbox correction when it loads the audio (an MP3 by 2292 samples), on top of ours.
+    assert(sqlite3_step(source) == SQLITE_ROW && sqlite3_column_type(source, 0) == SQLITE_NULL);
     sqlite3_finalize(source);
     statements = 0;
     assert(!load_bound(engine) && statements == 1 && filled(engine));
@@ -219,6 +221,24 @@ int main(void) {
             sqlite3_close(link);
         }
     }
+    // With the trace flag a skipped row says what it looked like: one more read, no write.
+    sqlite3 *traced = library_row(internal, "file:///Users/dj/Music/855.flac", "Label", 1);
+    snprintf(path, sizeof path, "%s/trace", dir);
+    fflush(stderr);
+    int saved = dup(2), log = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    assert(saved >= 0 && log >= 0 && dup2(log, 2) == 2 && !close(log));
+    sc_rbx_verbose = 1;
+    statements = 0;
+    result = load_bound(traced);
+    sc_rbx_verbose = 0;
+    fflush(stderr);
+    assert(dup2(saved, 2) == 2 && !close(saved));
+    assert(result && !strcmp(result, "skipped (not a rekordbox row)") && statements == 2 && !filled(traced));
+    char said[400] = "";
+    f = fopen(path, "r");
+    assert(f && fgets(said, sizeof said, f) && !fclose(f) && !unlink(path));
+    assert(strstr(said, "track 16449: row uri=file:///User label=Label analysed=0 data=null mark=null download=yes map="));
+    sqlite3_close(traced);
     // A drive's load, the id bound: stock, not one statement.
     stick = library(drive, "rekordbox [126 BPM 6A]");
     statements = 0;
@@ -267,6 +287,152 @@ int main(void) {
     assert(result && !strcmp(result, "refreshed"));
     check_edits(reload, "66/77");
     sqlite3_close(reload);
+    // LEFT, 2026-11-18: after a load Engine writes the row back without the import mark, uri
+    // and label still ours (8 of 24 rows in its stm.db). Such a row still takes a later
+    // source edit, and only where it holds what we imported.
+    sqlite3 *real = library_row(internal, "streaming://TIDAL/Track/855", "rekordbox [126 BPM 6A]", 1);
+    result = load_bound(real);
+    assert(result && !strcmp(result, "filled"));
+    check_edits(real, "66/77");
+    assert(sqlite3_exec(real, "UPDATE stm.PerformanceData SET thirdPartySourceId=NULL", NULL, NULL, NULL) == SQLITE_OK);
+    const unsigned char edit1[] = "RBXA1" "\2\0\0\0" "\x02" "\xbc" "\0\0\0\0" "\1\0\0\0" "\x55" "\1\0\0\0" "\x44" "\0\0\0\0";
+    f = fopen(path, "wb");
+    assert(f && fwrite(edit1, 1, sizeof edit1 - 1, f) == sizeof edit1 - 1 && !fclose(f));
+    result = load_bound(real);
+    assert(result && !strcmp(result, "refreshed"));
+    check_edits(real, "55/44");
+    // A grid moved on the deck stays; the cue we imported still follows the source.
+    assert(sqlite3_exec(real, "UPDATE stm.PerformanceData SET thirdPartySourceId=NULL, beatData=X'99'", NULL, NULL, NULL) == SQLITE_OK);
+    const unsigned char edit2[] = "RBXA1" "\2\0\0\0" "\x02" "\xbc" "\0\0\0\0" "\1\0\0\0" "\x33" "\1\0\0\0" "\x22" "\0\0\0\0";
+    f = fopen(path, "wb");
+    assert(f && fwrite(edit2, 1, sizeof edit2 - 1, f) == sizeof edit2 - 1 && !fclose(f));
+    result = load_bound(real);
+    assert(result && !strcmp(result, "refreshed; kept deck edits"));
+    check_edits(real, "99/22");
+    // Neighbours. A row of ours that Engine analysed itself (nothing imported to compare
+    // with): untouched.
+    char kept[2][200], aside[2][216];
+    snprintf(kept[0], sizeof kept[0], "%s/855-16449-beatData", history);
+    snprintf(kept[1], sizeof kept[1], "%s/855-16449-quickCues", history);
+    for (int i = 0; i < 2; i++) {
+        snprintf(aside[i], sizeof aside[i], "%s.aside", kept[i]);
+        assert(!rename(kept[i], aside[i]));
+    }
+    assert(sqlite3_exec(real, "UPDATE stm.PerformanceData SET thirdPartySourceId=NULL, beatData=X'AA', quickCues=X'BB'", NULL, NULL, NULL) == SQLITE_OK);
+    assert(!load_bound(real));
+    check_edits(real, "AA/BB");
+    for (int i = 0; i < 2; i++) assert(!rename(aside[i], kept[i]));
+    // Another source's analysed row with the same id (uri or label not ours): one read, no write.
+    assert(sqlite3_exec(real, "UPDATE stm.Track SET label='TIDAL [126 BPM]'", NULL, NULL, NULL) == SQLITE_OK);
+    assert(sqlite3_exec(real, "UPDATE stm.PerformanceData SET beatData=X'99', quickCues=X'22'", NULL, NULL, NULL) == SQLITE_OK);
+    statements = 0;
+    assert(!load_bound(real) && statements == 1);
+    check_edits(real, "99/22");
+    // An unmarked row of another library whose id is in the map (a file there, its own
+    // analysis): a newer source generation writes nothing into it.
+    assert(sqlite3_exec(real, "UPDATE stm.Track SET uri='file:///data/music/other.mp3', label='Other'", NULL, NULL, NULL) == SQLITE_OK);
+    assert(sqlite3_exec(real, "UPDATE stm.Track SET path='file:///data/music/other.mp3'", NULL, NULL, NULL) == SQLITE_OK);
+    assert(sqlite3_exec(real, "UPDATE stm.PerformanceData SET beatData=X'AA', quickCues=X'BB'", NULL, NULL, NULL) == SQLITE_OK);
+    f = fopen(path, "wb");
+    assert(f && fwrite(edit1, 1, sizeof edit1 - 1, f) == sizeof edit1 - 1 && !fclose(f));
+    statements = 0;
+    load_bound(real);
+    assert(statements == 1);
+    check_edits(real, "AA/BB");
+    // A foreign row with a different download key is also not eligible for the map.
+    assert(sqlite3_exec(real, "UPDATE stm.Track SET path='../../../../downloads/TIDAL/abcdefabcdefabcdefabcdefabcdefabcdefabcdefab.mp3'", NULL, NULL, NULL) == SQLITE_OK);
+    statements = 0;
+    load_bound(real);
+    assert(statements == 1);
+    check_edits(real, "AA/BB");
+    sqlite3_close(real);
+    // The reload block above left 66/77 as the last import; put that back for the checks below.
+    f = fopen(path, "wb");
+    assert(f && fwrite(refreshed, 1, sizeof refreshed - 1, f) == sizeof refreshed - 1 && !fclose(f));
+
+    // LEFT and RIGHT, 2026-11-19: rows a fill of before the import mark was dropped had left.
+    // One that still has the mark (Engine has not loaded it, and would shift it by its own
+    // rekordbox correction when it does) is all ours: filled again, without the mark.
+    sqlite3 *stale = library_row(internal, "streaming://TIDAL/Track/855", "rekordbox [126 BPM 6A]", 1);
+    assert(sqlite3_exec(stale, "UPDATE stm.PerformanceData SET trackData=X'0101', overviewWaveFormData=X'02', beatData=X'EE', quickCues=X'DD', thirdPartySourceId=1;"
+                               "UPDATE stm.Track SET isAnalyzed=1", NULL, NULL, NULL) == SQLITE_OK);
+    result = load_bound(stale);
+    assert(result && !strcmp(result, "filled again"));
+    check_edits(stale, "66/77");
+    assert(sqlite3_prepare_v2(stale, "SELECT thirdPartySourceId IS NULL AND hex(trackData)='02BC' AND overviewWaveFormData IS NULL FROM stm.PerformanceData", -1, &source, NULL) == SQLITE_OK);
+    assert(sqlite3_step(source) == SQLITE_ROW && sqlite3_column_int(source, 0) == 1);
+    sqlite3_finalize(source);
+    // A row Engine loaded under such a fill (LEFT's Osmosis, an MP3: path still .temp, no
+    // fileType): Engine cleared the mark and saved the grid and cues it had shifted, which
+    // read like edits on the deck. No record of a fill of the new kind: filled again, once.
+    char unmarked[200];
+    snprintf(unmarked, sizeof unmarked, "%s/855-16449-unmarked", history);
+    assert(!access(unmarked, F_OK) && !unlink(unmarked));
+    assert(sqlite3_exec(stale, "UPDATE stm.PerformanceData SET beatData=X'E1', quickCues=X'D1'", NULL, NULL, NULL) == SQLITE_OK);
+    result = load_bound(stale);
+    assert(result && !strcmp(result, "filled again"));
+    check_edits(stale, "66/77");
+    // Neighbour. After that, an edit on the deck stays, as on any row of the new kind.
+    assert(!access(unmarked, F_OK));
+    assert(sqlite3_exec(stale, "UPDATE stm.PerformanceData SET beatData=X'E2'", NULL, NULL, NULL) == SQLITE_OK);
+    assert(!load_bound(stale));
+    check_edits(stale, "E2/77");
+    sqlite3_close(stale);
+
+    // A staged cover is applied on Engine's own connection, including when it arrives
+    // after the first analysis bind, and never replaces an existing AlbumArt blob.
+    sqlite3 *cover = library_row(internal, "streaming://TIDAL/Track/855", "rekordbox [126 BPM 6A]", 1);
+    assert(sqlite3_exec(cover,
+        "ALTER TABLE stm.Track ADD COLUMN albumArtId INTEGER;"
+        "CREATE TABLE stm.AlbumArt (id INTEGER PRIMARY KEY, hash, albumArt BLOB);"
+        "INSERT INTO stm.AlbumArt VALUES (1, 'image://streaming/', NULL), (2, 'keep', X'01');"
+        "UPDATE stm.Track SET albumArtId=1 WHERE id=16449", NULL, NULL, NULL) == SQLITE_OK);
+    char cover_path[160];
+    snprintf(cover_path, sizeof cover_path, "%s/855.cover", dir);
+    unsigned char hash[20], jpeg[] = {0xff, 0xd8, 0xff, 0xe0, 0x01, 0x02};
+    for (unsigned i = 0; i < sizeof hash; i++) hash[i] = (unsigned char)i;
+    f = fopen(cover_path, "wb");
+    assert(f && fwrite("RBXC1", 1, 5, f) == 5 && fwrite(hash, 1, sizeof hash, f) == sizeof hash &&
+           fwrite(jpeg, 1, sizeof jpeg, f) == sizeof jpeg && !fclose(f));
+    result = load_bound(cover);
+    assert(result && !strcmp(result, "filled") && access(cover_path, F_OK));
+    sqlite3_stmt *art;
+    assert(sqlite3_prepare_v2(cover, "SELECT hex(hash),hex(albumArt) FROM stm.AlbumArt WHERE id=1", -1, &art, NULL) == SQLITE_OK);
+    assert(sqlite3_step(art) == SQLITE_ROW && !strcmp((const char *)sqlite3_column_text(art, 0), "000102030405060708090A0B0C0D0E0F10111213") &&
+           !strcmp((const char *)sqlite3_column_text(art, 1), "FFD8FFE00102"));
+    sqlite3_finalize(art);
+    assert(sqlite3_exec(cover, "UPDATE stm.AlbumArt SET hash='image://streaming/', albumArt=NULL WHERE id=1", NULL, NULL, NULL) == SQLITE_OK);
+    f = fopen(cover_path, "wb");
+    assert(f && fwrite("RBXC1", 1, 5, f) == 5 && fwrite(hash, 1, sizeof hash, f) == sizeof hash &&
+           fwrite(jpeg, 1, sizeof jpeg, f) == sizeof jpeg && !fclose(f));
+    assert(sqlite3_exec(cover, "UPDATE stm.Track SET albumArtId=2", NULL, NULL, NULL) == SQLITE_OK);
+    assert(!load_bound(cover) && access(cover_path, F_OK));
+    assert(sqlite3_prepare_v2(cover, "SELECT hash,hex(albumArt) FROM stm.AlbumArt WHERE id=2", -1, &art, NULL) == SQLITE_OK);
+    assert(sqlite3_step(art) == SQLITE_ROW && !strcmp((const char *)sqlite3_column_text(art, 0), "keep") &&
+           !strcmp((const char *)sqlite3_column_text(art, 1), "01"));
+    sqlite3_finalize(art);
+
+    // A cover that is already present makes the hook discard the staged copy after one
+    // small read; it must not hex-encode the JPEG or issue a failing large SQL statement.
+    assert(sqlite3_exec(cover, "UPDATE stm.Track SET albumArtId=2", NULL, NULL, NULL) == SQLITE_OK);
+    f = fopen(cover_path, "wb");
+    assert(f && fwrite("RBXC1", 1, 5, f) == 5 && fwrite(hash, 1, sizeof hash, f) == sizeof hash &&
+           fwrite(jpeg, 1, sizeof jpeg, f) == sizeof jpeg && !fclose(f));
+    statements = 0;
+    assert(!load_bound(cover) && statements == 2 && access(cover_path, F_OK));
+
+    // Oversized staged covers are discarded instead of retrying a statement over SQLite's
+    // default SQL-length limit forever.
+    size_t large_n = SC_RBX_COVER_HEADER + SC_RBX_COVER_MAX + 1;
+    unsigned char *large = calloc(1, large_n);
+    assert(large);
+    memcpy(large, "RBXC1", 5);
+    memcpy(large + SC_RBX_COVER_HEADER, jpeg, sizeof jpeg);
+    f = fopen(cover_path, "wb");
+    assert(f && fwrite(large, 1, large_n, f) == large_n && !fclose(f));
+    free(large);
+    assert(!load_bound(cover) && access(cover_path, F_OK));
+    sqlite3_close(cover);
     pthread_mutex_lock(&sc_rbx_track_map_mu);
     memset(sc_rbx_track_maps, 0, sizeof sc_rbx_track_maps);
     sc_rbx_track_map_next = sc_rbx_track_map_clock = 0;
@@ -287,13 +453,14 @@ int main(void) {
     snprintf(path, sizeof path, "%s/855-16449-beatData", history);
     assert(!unlink(path));
     snprintf(path, sizeof path, "%s/855-16449-quickCues", history);
-    assert(!unlink(path) && !rmdir(history));
+    assert(!unlink(path) && !unlink(unmarked) && !rmdir(history));
     assert(!unlink(rowmap));
     snprintf(path, sizeof path, "%s/855.bin", dir);
     assert(!unlink(path));
     snprintf(path, sizeof path, "%s/855.bin.perf", dir);
     assert(!unlink(path));
     assert(!unlink(alias) && !unlink(mark) && !unlink(internal) && !unlink(drive));
+    if (!access(cover_path, F_OK)) assert(!unlink(cover_path));
     snprintf(path, sizeof path, "%s/media", dir);
     assert(!rmdir(path) && !rmdir(dir));
     return 0;

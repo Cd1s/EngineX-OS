@@ -78,13 +78,39 @@ func TestPeerShadowNativeAnalysis(t *testing.T) {
 	local := filepath.Join(t.TempDir(), "shadow.wav")
 	url := peer.URL + "/peer/decks/1/perf?key=analysed"
 	ctx := context.Background()
-	saveShadowAnalysis(ctx, local, url+"&format=native")
+	why := saveShadowAnalysis(ctx, local, url+"&format=native")
 	got, err := os.ReadFile(local + ".analysis")
-	if err != nil || !validShadowAnalysis(got) {
-		t.Fatalf("native response not staged: %v", err)
+	if err != nil || !validShadowAnalysis(got) || why != "" {
+		t.Fatalf("native response not staged: %v %q", err, why)
 	}
-	saveShadowAnalysis(ctx, local, url) // An old peer ignores the query and serves EXPF.
-	if _, err = os.Stat(local + ".analysis"); !os.IsNotExist(err) {
-		t.Fatalf("legacy response left a native sidecar: %v", err)
+	// Engine has loaded the source's track since the import: trackData now has its decoder's
+	// sample count, without the 2048 samples of priming it trims, and the grid the import's.
+	// Every track loaded for the second time looked like that, and the copy was analysed by
+	// the shadow deck itself: no overview at once, and other colours (real decks, 2026-11-19).
+	track, err := enginedb.QUncompress(p.TrackData, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binary.BigEndian.PutUint64(track[8:], binary.BigEndian.Uint64(track[8:])-2048)
+	loaded, err := enginedb.QCompress(track)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE PerformanceData SET trackData=? WHERE trackId=(SELECT id FROM Track WHERE filename='song.wav')`, loaded); err != nil {
+		t.Fatal(err)
+	}
+	if why = saveShadowAnalysis(ctx, local, url+"&format=native"); why != "" {
+		t.Fatalf("the row of a track Engine has loaded was not staged: %q", why)
+	}
+	if _, err := db.Exec(`UPDATE PerformanceData SET trackData=? WHERE trackId=(SELECT id FROM Track WHERE filename='song.wav')`, p.TrackData); err != nil {
+		t.Fatal(err)
+	}
+	why = saveShadowAnalysis(ctx, local, url) // An old peer ignores the query and serves EXPF.
+	if _, err = os.Stat(local + ".analysis"); !os.IsNotExist(err) || why != "not a native analysis" {
+		t.Fatalf("legacy response left a native sidecar: %v %q", err, why)
+	}
+	// The log names the source's answer when it has none.
+	if why = saveShadowAnalysis(ctx, local, peer.URL+"/peer/decks/1/perf?key=other&format=native"); why != "http 404" && why != "http 409" {
+		t.Fatalf("a source without the track: %q", why)
 	}
 }

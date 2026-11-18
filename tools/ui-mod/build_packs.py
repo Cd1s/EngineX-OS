@@ -3997,6 +3997,7 @@ SERVICES_MAIN = """
 		scAutoGain = !!v.autoGain
 		scHifiOutput = !!v.hifiOutput
 		scFeaturesOff = Array.isArray(v.featuresOff) ? v.featuresOff : []
+		if (v.shadowPausedFollow !== undefined) scHookFollows = v.shadowPausedFollow === true
 		scAutoAnalyze = !!v.autoAnalyze
 		scOmniSource = !!v.omniSource
 		scRemoteLoad = !!v.remoteLoad

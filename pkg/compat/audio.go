@@ -16,8 +16,18 @@ type AudioInfo struct {
 	Duration                                float64
 	Format                                  string
 	StartOffsetSamples                      int    `json:",omitempty"`
-	LinkStartOffsetSamples                  int    `json:",omitempty"`
+	RekordboxOffsetSamples                  int    `json:",omitempty"`
 	OffsetClass                             string `json:",omitempty"`
+}
+
+// RekordboxOffset is how many samples a rekordbox position is ahead of the same sound in
+// Engine's decode of this file. The USB import, the Link fill and a CDJ's shadow copy all
+// subtract it, and nothing else: one file has one grid whichever way it reaches the deck.
+func (i AudioInfo) RekordboxOffset() int {
+	if i.Format == "mp3" {
+		return i.RekordboxOffsetSamples
+	}
+	return i.StartOffsetSamples // AAC: the priming Engine's decoder trims
 }
 
 // AudioHeader visits only container headers. Large FLAC pictures and WAV data
@@ -81,7 +91,7 @@ func AudioHeader(path string) (AudioInfo, error) {
 				Duration:               mp3.Duration,
 				Format:                 "mp3",
 				StartOffsetSamples:     mp3.StartOffsetSamples,
-				LinkStartOffsetSamples: mp3.LinkStartOffsetSamples,
+				RekordboxOffsetSamples: mp3.RekordboxOffsetSamples,
 				OffsetClass:            mp3.OffsetClass,
 			}, nil
 		}

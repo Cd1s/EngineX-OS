@@ -214,7 +214,7 @@ func TestPeekMP3StartOffsetMatchesReadMP3OnZeroFlagLAMETag(t *testing.T) {
 	}
 }
 
-func TestInfoLavcLinkOffsetKeepsUSBCorrectionSeparate(t *testing.T) {
+func TestInfoLavcRekordboxOffsetIsTheDecoderDelay(t *testing.T) {
 	// Uruk's header shape: a large ID3v2.3 tag, an Info frame and a Lavc
 	// encoder tag carrying a 576-sample encoder delay.
 	stream := append(makeID3v2(3, 0, bytes.Repeat([]byte{0x01}, 238729)),
@@ -223,10 +223,13 @@ func TestInfoLavcLinkOffsetKeepsUSBCorrectionSeparate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// What Engine's decoder leaves out (pkg/analyzer trims this much) is still 2257.
 	if got.Tag != "Info" || !got.LAMEApplied || got.StartOffsetSamples != 2257 {
-		t.Fatalf("USB correction changed: %+v", got)
+		t.Fatalf("decoder start changed: %+v", got)
 	}
-	if got.LinkStartOffsetSamples != 1105 {
-		t.Fatalf("Link decoder offset = %d, want 1105", got.LinkStartOffsetSamples)
+	// Measured on the real file (2026-11-19): rekordbox's first beat 7717.5, the kick in
+	// Engine's decode at 6612.5. One number for USB, Link and a CDJ's copy.
+	if got.RekordboxOffsetSamples != 1105 {
+		t.Fatalf("rekordbox offset = %d, want 1105", got.RekordboxOffsetSamples)
 	}
 }

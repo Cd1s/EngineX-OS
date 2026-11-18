@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
@@ -65,34 +66,42 @@ func validShadowAnalysis(b []byte) bool {
 
 // Publish only a complete file, before shadowFetch publishes the audio path.
 // Older peers ignore format=native and return EXPF; it never becomes a sidecar.
-func saveShadowAnalysis(ctx context.Context, local, url string) {
+// The result says why there is none ("" when there is one), for the log.
+func saveShadowAnalysis(ctx context.Context, local, url string) string {
 	out := local + ".analysis"
 	_ = os.Remove(out)
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return
+		return "no request"
 	}
 	resp, err := peerFileClient.Do(req)
 	if err != nil {
-		return
+		return "no answer"
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK || resp.ContentLength > shadowAnalysisMax {
-		return
+	if resp.StatusCode != http.StatusOK {
+		return "http " + strconv.Itoa(resp.StatusCode)
+	}
+	if resp.ContentLength > shadowAnalysisMax {
+		return "too large"
 	}
 	b, err := io.ReadAll(io.LimitReader(resp.Body, shadowAnalysisMax+1))
-	if err != nil || !validShadowAnalysis(b) {
-		return
+	if err != nil {
+		return "cut off"
+	}
+	if !validShadowAnalysis(b) {
+		return "not a native analysis"
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(local), ".analysis-*")
 	if err != nil {
-		return
+		return "not written"
 	}
 	defer os.Remove(tmp.Name())
 	_, err = tmp.Write(b)
-	if closeErr := tmp.Close(); err == nil && closeErr == nil {
-		_ = os.Rename(tmp.Name(), out)
+	if closeErr := tmp.Close(); err != nil || closeErr != nil || os.Rename(tmp.Name(), out) != nil {
+		return "not written"
 	}
+	return ""
 }

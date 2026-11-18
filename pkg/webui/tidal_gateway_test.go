@@ -986,7 +986,13 @@ func TestRatingsStreamingWinsAndAreCached(t *testing.T) {
 	}
 }
 
-func TestSyncStmAlbumArtFillsOnlyEmptyRow(t *testing.T) {
+// stream-sync never writes Engine's live stm.db (LEFT, 2026-11-18: after its cover UPDATEs
+// the deck's stm.db failed integrity_check and one track's analysis lay inside another's).
+// The cover is staged; the UI hook sets it on Engine's own connection, on an empty row only.
+func TestAlbumArtIsStagedNotWrittenIntoEnginesDatabase(t *testing.T) {
+	oldDir := rbxAnalysisDir
+	rbxAnalysisDir = t.TempDir()
+	defer func() { rbxAnalysisDir = oldDir }()
 	data := t.TempDir()
 	old := shadowDataRoot
 	shadowDataRoot = data
@@ -1015,19 +1021,46 @@ func TestSyncStmAlbumArtFillsOnlyEmptyRow(t *testing.T) {
 	jpg := []byte{0xff, 0xd8, 0xff, 0xe0, 1, 2, 3}
 	g.artCache["https://img.example/c.jpg"] = jpg
 	tr := providers.Track{CoverURL: "https://img.example/c.jpg"}
-	g.syncStmAlbumArt(context.Background(), 7, tr)
-	g.syncStmAlbumArt(context.Background(), 8, tr)
+	before, err := os.ReadFile(stm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.stageAlbumArt(context.Background(), 7, tr)
+	g.stageAlbumArt(context.Background(), 8, tr)
 	sum := sha1.Sum(jpg)
-	var hash, art []byte
-	if err := db.QueryRow(`SELECT hash, albumArt FROM AlbumArt WHERE id = 1`).Scan(&hash, &art); err != nil || !bytes.Equal(hash, sum[:]) || !bytes.Equal(art, jpg) {
-		t.Fatalf("row 1: %x %x %v", hash, art, err)
+	if after, err := os.ReadFile(stm); err != nil || !bytes.Equal(after, before) {
+		t.Fatalf("stm.db was written: %v", err)
+	}
+	if _, err := os.Stat(stm + "-journal"); err == nil {
+		t.Fatal("stm.db was opened for writing: a journal was left")
+	}
+	var hash string
+	var art []byte
+	if err := db.QueryRow(`SELECT hash, albumArt FROM AlbumArt WHERE id = 1`).Scan(&hash, &art); err != nil || hash != "image://streaming/" || art != nil {
+		t.Fatalf("row 1: %q %x %v", hash, art, err)
 	}
 	var kept string
 	if err := db.QueryRow(`SELECT hash FROM AlbumArt WHERE id = 2`).Scan(&kept); err != nil || kept != "keep" {
 		t.Fatalf("row 2 was rewritten: %q %v", kept, err)
 	}
+	// Both tracks' covers are staged: "RBXC1", the JPEG's SHA-1, the JPEG. Which row is
+	// still empty is for the hook to see, on Engine's connection.
+	want := append(append([]byte("RBXC1"), sum[:]...), jpg...)
+	for _, id := range []string{"7", "8"} {
+		if staged, err := os.ReadFile(filepath.Join(rbxAnalysisDir, id+".cover")); err != nil || !bytes.Equal(staged, want) {
+			t.Fatalf("track %s: staged cover %x %v", id, staged, err)
+		}
+	}
 	if _, err := os.Stat(filepath.Join(lib, "Artwork", base64.RawURLEncoding.EncodeToString(sum[:])+".jpg")); err != nil {
 		t.Fatal(err)
+	}
+	// A JPEG large enough to exceed the hook's single-statement budget is rejected before
+	// a sidecar is created, so it cannot be retried forever on every bind.
+	big := append([]byte{0xff, 0xd8, 0xff}, make([]byte, maxStagedArtBytes)...)
+	g.artCache["https://img.example/large.jpg"] = big
+	g.stageAlbumArt(context.Background(), 9, providers.Track{CoverURL: "https://img.example/large.jpg"})
+	if _, err := os.Stat(filepath.Join(rbxAnalysisDir, "9.cover")); !os.IsNotExist(err) {
+		t.Fatalf("oversized sidecar: %v", err)
 	}
 }
 

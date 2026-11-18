@@ -416,6 +416,7 @@ class OnOffSwitchCompatibilityTest(unittest.TestCase):
             "scCueCountdown": "cueCountdown", "scRemoteLoad": "remoteLoad",
             "scSdHighSpeed": "sdHighSpeed", "scRemoteAccess": "remoteAccess",
             "scRestoreBpmOnUnsync": "restoreBpmOnUnsync",
+            "scHifiOutput": "hifiOutput",
         }
         for version, skin in (("5.0.4", "EmbeddedCommon"), ("5.3.0", "Embedded")):
             qrc = LAB / version / "qrc"
@@ -1264,7 +1265,13 @@ for (const amt of [1/63, 2/63, 4/63, 5/63, 8/63, 1.0]) {{
         # every row stays.
         self.assertIn("property var scFeaturesOff: []", bp.SERVICES_MAIN)
         self.assertIn("function scOff(name) { return scFeaturesOff.indexOf(name) >= 0 }", bp.SERVICES_MAIN)
-        self.assertIn("scFeaturesOff = Array.isArray(v.featuresOff) ? v.featuresOff : []", bp.SERVICES_MAIN)
+        self.assertIn("if (Array.isArray(v.featuresOff)) scFeaturesOff = v.featuresOff", bp.SERVICES_MAIN)
+        # The paused shadow follow is the other way round: on only when stream-sync says the
+        # running hook does it. Under a hook that does not (an older one, none, an unreadable
+        # state) the copy plays as before; paused there, its waveform would stand still.
+        self.assertIn("property bool scHookFollows: false", bp.SERVICES_MAIN)
+        self.assertIn("if (v.shadowPausedFollow !== undefined) scHookFollows = v.shadowPausedFollow === true", bp.SERVICES_MAIN)
+        self.assertIn('readonly property bool scPausedShadowFollow: !scIsAZ04 && scHookFollows && !scOff("shadow-paused-follow")', bp.SERVICES_MAIN)
         dsp = '!root.scOff("dsp-guards")'
         for text in ("Master Soft Clipper", "Auto-Gain (0 dB Normalize)", "Echo Out", "Color FX Style",
                      "PX Delay Time Mode", "PX Delay Time (ms)"):
@@ -2088,7 +2095,7 @@ class ShadowDisplayTest(unittest.TestCase):
         names = ("scDeckLocked", "scShadowVisible", "scShadowDeckFor", "scShadowData", "scShadowRate", "scShadowPosition",
                  "scShadowBeatIndex", "scShadowBeatAt", "scShadowGrid", "scShadowNextCue", "scShadowCuesFor", "scShadowAsset",
                  "scShadowProperties", "scShadowTick", "scShadowPost", "scShadowPoll", "scShadowPollIdle", "scShadowDisplayFetch", "scShadowSameSample", "scShadowApplyDisplay", "scShadowCovers", "scShadowBusy", "scShadowApplyAll", "scNextCueInfo", "scNextCueCompute", "scCueProps", "scCueBeatsLeft", "scCueTickFor", "scCueStep", "scCueTableOf", "scCueCount", "scCueWatch",
-                 "scShadowApply", "scShadowEmpty", "scShadowScratchLine", "scShadowScratchRelease", "scShadowSpeed", "scShadowCues", "scShadowBeat",
+                 "scShadowApply", "scShadowFeed", "scShadowEmpty", "scShadowScratchLine", "scShadowScratchRelease", "scShadowSpeed", "scShadowCues", "scShadowBeat",
                  "scBrowserVisible", "scShadowLoad", "scShadowWrong", "scShadowHolds", "scShadowEndGap", "scShadowEnd",
                  "scShadowSeek", "scShadowMirror", "scShadowMirrorOff", "scShadowLink", "scShadowLinkEdge", "scPress", "scGcCheck", "scShadowWake", "scShadowAnyPlaying",
                  "scShadowLine", "scShadowLandingSeek", "scShadowLandingTick", "scShadowBend", "scShadowBendEnd", "scShadowNudgeTick", "scShadowNudgeDrop", "scShadowNudgeEnd", "scShadowLoopTick", "scShadowMasterBack", "scPressWrite", "scMasterPresses",
@@ -2124,7 +2131,7 @@ Object.assign(globalThis, {
     scGcLoadSeq: 0, scGcRuns: 0, scGcLastMs: 0, scGcProps: null,
     scGcState: {armed: true, quietSince: 0, lastRun: -Infinity, loadSig: 0, loadSeq: 0, loadAt: 0, followAt: 0},
     scShadowPrev: {}, scShadowCueCache: {}, scShadowPostAt: 0, scShadowPollAt: now, scShadowDebug: false,
-    scShadowActiveDeck: 0, scPairedOn: false, scPairedEmpty: 0,
+    scShadowActiveDeck: 0, scPairedOn: false, scPairedEmpty: 0, scPausedShadowFollow: false, scShadowFeedSent: {},
     scShadowLead: 0, scShadowPeerLead: 0, scShadowPeerPlaying: false, scShadowMasterAt: 0,
     scShadowGen: 0, scShadowVer: 0, scShadowIdle: false, scShadowLinePaths: [], scShadowFrame: 17, scCueInfoCache: {}, scCueInfoMemo: {}, scCuePropCache: {}, scCueTexts: [], scCueProbe: 0, scCueNoBeat: 0,
     scCueInfo1: null, scCueInfo2: null, scCueInfo3: null, scCueInfo4: null, scCueShown1: {}, scCueShown2: {}, scCueShown3: {}, scCueShown4: {}, scCueTable1: null, scCueTable2: null, scCueTable3: null, scCueTable4: null,
@@ -2157,6 +2164,67 @@ scShadowApplyAll([{deck:3,key:'cdj:same',lineIn:true}]);
 assert.equal(scShadowData(3).lineIn, true);
 scShadowApplyAll([{deck:3,key:'cdj:same',lineIn:false}]);
 assert.equal(scShadowData(3).lineIn, false);
+""")
+
+    def test_paused_shadow_follow_keeps_transport_paused_and_reseeks_at_low_rate(self):
+        self.js(r"""
+scPausedShadowFollow = true; scShadowEngineMask = 1 << 2; scFourDeckRole = '1'; scPlayer = true;
+let seeks = 0, plays = 0, speedWrites = 0, feed = null, posts = 0;
+const props = new Map();
+globalThis.scTr = path => {
+    if (props.has(path)) return props.get(path);
+    const p = { _state: path.endsWith('/KeyLock') || path.endsWith('/PlayState'), _value: path.endsWith('/SampleRate') ? 48000 : 0,
+        string: path.endsWith('/SyncMode') ? 'Off' : path.endsWith('/SpeedRange') ? '8' : '', index: 1,
+        get state() { return this._state; }, set state(v) { if (path.endsWith('/Play')) { plays++; assert.equal(v, false); } this._state = v; },
+        get value() { return this._value; }, set value(v) { this._value = v; if (path.endsWith('/SetSongPosition')) seeks++; },
+        get unnormalized() { return path.endsWith('/TrackLength') ? 48000 * 300 : path.endsWith('/TrackPosition') ? 0 : 0; } };
+    if (path.endsWith('/Speed')) Object.defineProperty(p, 'value', {get(){return 0.5}, set(){speedWrites++}});
+    props.set(path, p); return p;
+};
+globalThis.XMLHttpRequest = class { open(method, url) { assert.equal(method, 'POST'); assert(url.endsWith('/shadow/position-feed')); } setRequestHeader() {} send(body) { feed = JSON.parse(body); posts++; } };
+globalThis.scShadowHolds = () => true; globalThis.scShadowEnd = () => false;
+globalThis.scShadowMirror = () => {}; globalThis.scShadowMirrorOff = () => {};
+globalThis.scShadowCues = () => {}; globalThis.scShadowBeat = () => {};
+scShadowAt[2] = {path:'/copy.flac', id:'track-a', pendingLoad:false, ready:true, sampleRate:48000, seekAt:0, jumps:0};
+const e = {deck:2,path:'/copy.flac',id:'track-a',playing:true,scratch:false,stale:false,positionMs:1000,at:now,rate:1,jumps:0,pitch:0,bpm:120,currentBpm:120,range:8,keylock:true,cues:[]};
+scShadowApplyAll([e], false);
+assert.equal(plays, 1, 'shadow transport was not explicitly held paused');
+assert.equal(props.get('/Engine/Deck2/Track/KeyLock').state, false);
+assert.equal(speedWrites, 0, 'paused follow wrote the shadow Speed');
+assert.equal(feed.deck, 2); assert.equal(feed.positionSamples, 48000);
+// The position goes out as stream-sync dated it, not carried to now on the GUI thread,
+// and once per change (or 250 ms), not on every delivery.
+assert.equal(feed.at, e.at); assert.equal(feed.rateSamplesPerSec, 48000); assert.equal(posts, 1);
+now += 20; scShadowApplyAll([e], false); assert.equal(posts, 1, 'the same position was posted again');
+assert.equal(feed.positionSamples, 48000, 'the posted position was carried to now');
+now -= 20;
+const firstSeeks = seeks; now += 500; scShadowApplyAll([e], false); assert.equal(seeks, firstSeeks);
+now += 600; scShadowApplyAll([e], false); assert.equal(seeks, firstSeeks + 1, 'missing 1 Hz overview seek');
+e.jumps = 1; now += 10; scShadowApplyAll([e], false); assert.equal(seeks, firstSeeks + 2, 'jump did not reseek immediately');
+// A loop goes into the feed for the hook to wrap on; the 16 ms nudge and loop timers stay off.
+e.jumps = 1; e.loop = true; e.loopIn = 2000; e.loopOut = 4000; e.positionMs = 2500; now += 300; e.at = now;
+scShadowApplyAll([e], false);
+assert.equal(feed.positionSamples, 120000); assert.equal(feed.loopInSamples, 96000); assert.equal(feed.loopOutSamples, 192000);
+assert.equal(scShadowLoopTimer.running, false); assert.equal(scShadowNudgeTimer.running, false);
+// A scratch on the source: its line goes into the feed with its speed, backwards too, and
+// this deck's scratch wheel is not touched.
+e.loop = false; e.scratch = true; e.positionMs = 3000; now += 120; e.at = now;
+scShadowApplyAll([e], false);
+assert.equal(scShadowScratchTimer.running, true);
+scShadowScratchTimer.tick();
+assert.equal(feed.positionSamples, 144000); assert.equal(feed.rateSamplesPerSec, 0); assert.equal(feed.at, e.at);
+e.positionMs = 2930; now += 35; e.at = now;
+scShadowApplyAll([e], false); scShadowScratchTimer.tick();
+assert.equal(feed.positionSamples, 2930 * 48); assert.equal(feed.rateSamplesPerSec, -96000, 'a scratch backwards has no speed in the feed');
+assert.equal(feed.loopInSamples, 0);
+for (const [path, p] of props) if (path.includes('ExternalScratchWheel')) assert.fail('the paused deck was scratched: ' + path);
+assert.equal(speedWrites, 0);
+e.scratch = false; now += 120; e.at = now; scShadowApplyAll([e], false);
+assert.equal(scShadowScratchTimer.running, false); assert.equal(feed.rateSamplesPerSec, 48000);
+// Another track on the slot: the feed is off until that copy is loaded.
+globalThis.scShadowLoad = () => {};
+scShadowApplyAll([Object.assign({}, e, {path:'/other.flac', id:'track-b'})], false);
+assert.deepEqual(feed, {deck: 2, active: false});
 """)
 
     def test_line_hint_stays_stock_without_cdj(self):
@@ -2373,7 +2441,7 @@ assert.deepEqual(scShadowAt, {});
 """)
 
     def test_paused_bar_phase_waits_for_the_grid(self):
-        # Shadow grid/CUE (maintainer, two linked SC5000s): a CUE set before a rekordbox track's first
+        # Shadow grid/CUE (maintainer, two linked SC5000 players): a CUE set before a rekordbox track's first
         # grid marker, then play, left the copy's waveform off the main deck's; cued inside the grid,
         # both lined up. Paused, scShadowBeat matched the bar phase with BeatNumber, which is below 0
         # before the first marker: it shifted the copy by a beat, or spent its one calibration.
