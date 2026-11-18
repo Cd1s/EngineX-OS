@@ -108,6 +108,27 @@ func TestRealignKeptMovesTheImportsPositionsAndKeepsTheDecks(t *testing.T) {
 	if !changed || !bytes.Equal(beats, row.Beats) || got[1] != 70000 || got[4] != 123456 || math.Abs(got[0]-want[0]) > 1e-6 || math.Abs(got[8]-want[8]) > 1e-6 {
 		t.Fatalf("deck edits: changed %v, grid kept %v, cues %v, this import's %v", changed, bytes.Equal(beats, row.Beats), got, want)
 	}
+	// The DJ named hot cue A and loop L on the deck: the bytes of every later slot moved, and
+	// the import's cues and loops are still found, slot by slot.
+	rename := func(raw []byte, at int, name string) []byte {
+		out := append(append(append([]byte(nil), raw[:at]...), byte(len(name))), name...)
+		return append(out, raw[at+1+int(raw[at]):]...)
+	}
+	row = encode(2257, 120)
+	rawCues, _ := QUncompress(row.QuickCues, 1<<16)
+	row.QuickCues, _ = QCompress(rename(rawCues, 8, "Intro, first drop"))
+	loopAt := 8
+	for i := 0; i < 2; i++ { // the loop is in slot 3
+		loopAt += 1 + int(row.Loops[loopAt]) + 22
+	}
+	row.Loops = rename(row.Loops, loopAt, "Breakdown loop")
+	_, quick, loops, changed := realignKept(row.Beats, row.QuickCues, row.Loops, now, false)
+	rowLoops, _ := loopPositions(loops)
+	nowLoops, _ := loopPositions(now.Loops)
+	if got := cues(quick); !changed || math.Abs(got[0]-want[0]) > 1e-6 || math.Abs(got[1]-want[1]) > 1e-6 ||
+		little.Uint64(loops[rowLoops[4]:]) != little.Uint64(now.Loops[nowLoops[4]:]) || little.Uint64(loops[rowLoops[5]:]) != little.Uint64(now.Loops[nowLoops[5]:]) {
+		t.Fatalf("a cue and a loop named on the deck: changed %v, cues %v, this import's %v", changed, got, want)
+	}
 	// A locked grid stays, its cues move.
 	row = encode(2257, 120)
 	if beats, quick, _, changed = realignKept(row.Beats, row.QuickCues, row.Loops, now, true); !changed || !bytes.Equal(beats, row.Beats) || math.Abs(cues(quick)[0]-want[0]) > 1e-6 {

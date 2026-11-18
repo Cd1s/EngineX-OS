@@ -7,7 +7,6 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"math"
-	"slices"
 )
 
 // A row Engine has loaded keeps its grid, cues and loops at the next import (sync.go): they
@@ -173,11 +172,13 @@ func realignKept(beats, cues, loops []byte, perf Performance, locked bool) ([]by
 	if !locked && bytes.Equal(rowDef, rowAdj) {
 		beats, changed = perf.Beats, true
 	}
-	// A position is still the import's when it is this import's, the same distance away.
-	move := func(row, now []byte, at []int, order binary.ByteOrder) bool {
+	// A position is still the import's when it is this import's of the same slot, the same
+	// distance away. Slot by slot: a cue the DJ named or added on the deck moves the bytes
+	// of every slot after it, and must not keep the import's other cues where they were.
+	move := func(row, now []byte, rowAt, nowAt []int, order binary.ByteOrder) bool {
 		moved := false
-		for _, off := range at {
-			p, n := math.Float64frombits(order.Uint64(row[off:])), math.Float64frombits(order.Uint64(now[off:]))
+		for i, off := range rowAt {
+			p, n := math.Float64frombits(order.Uint64(row[off:])), math.Float64frombits(order.Uint64(now[nowAt[i]:]))
 			if p >= 0 && n >= 0 && p != n && math.Abs(p-(n+shift)) < 0.5 {
 				order.PutUint64(row[off:], math.Float64bits(n))
 				moved = true
@@ -189,8 +190,7 @@ func realignKept(beats, cues, loops []byte, perf Performance, locked bool) ([]by
 		newCues, e := QUncompress(perf.QuickCues, 64<<10)
 		rowAt, ok1 := cuePositions(rowCues)
 		newAt, ok2 := cuePositions(newCues)
-		// The same labels in the same slots, or the offsets do not line up.
-		if e == nil && ok1 && ok2 && slices.Equal(rowAt, newAt) && move(rowCues, newCues, rowAt, big) {
+		if e == nil && ok1 && ok2 && move(rowCues, newCues, rowAt, newAt, big) {
 			if enc, e := QCompress(rowCues); e == nil {
 				cues, changed = enc, true
 			}
@@ -198,9 +198,9 @@ func realignKept(beats, cues, loops []byte, perf Performance, locked bool) ([]by
 	}
 	rowAt, ok1 := loopPositions(loops)
 	newAt, ok2 := loopPositions(perf.Loops)
-	if ok1 && ok2 && slices.Equal(rowAt, newAt) {
+	if ok1 && ok2 && len(rowAt) == len(newAt) {
 		out := append([]byte(nil), loops...)
-		if move(out, perf.Loops, rowAt, little) {
+		if move(out, perf.Loops, rowAt, newAt, little) {
 			loops, changed = out, true
 		}
 	}
@@ -247,7 +247,8 @@ func cuePositions(raw []byte) ([]int, bool) {
 	return append(at, off, off+9), true
 }
 
-// loopPositions returns where the set starts and ends are in a loops blob.
+// loopPositions returns where each slot's start and end are in a loops blob; one that is
+// not set reads -1 there.
 func loopPositions(blob []byte) ([]int, bool) {
 	if len(blob) < 8 || blob[0] > 8 || !bytes.Equal(blob[1:8], make([]byte, 7)) {
 		return nil, false
@@ -259,12 +260,7 @@ func loopPositions(blob []byte) ([]int, bool) {
 			return nil, false
 		}
 		off += 1 + int(blob[off])
-		if blob[off+16] == 1 {
-			at = append(at, off)
-		}
-		if blob[off+17] == 1 {
-			at = append(at, off+8)
-		}
+		at = append(at, off, off+8)
 		off += 22
 	}
 	return at, off == len(blob)
