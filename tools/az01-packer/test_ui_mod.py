@@ -2195,6 +2195,26 @@ now -= 20;
 const firstSeeks = seeks; now += 500; scShadowApplyAll([e], false); assert.equal(seeks, firstSeeks);
 now += 600; scShadowApplyAll([e], false); assert.equal(seeks, firstSeeks + 1, 'missing 1 Hz overview seek');
 e.jumps = 1; now += 10; scShadowApplyAll([e], false); assert.equal(seeks, firstSeeks + 2, 'jump did not reseek immediately');
+// A loop goes into the feed for the hook to wrap on; the 16 ms nudge and loop timers stay off.
+e.jumps = 1; e.loop = true; e.loopIn = 2000; e.loopOut = 4000; e.positionMs = 2500; now += 300; e.at = now;
+scShadowApplyAll([e], false);
+assert.equal(feed.positionSamples, 120000); assert.equal(feed.loopInSamples, 96000); assert.equal(feed.loopOutSamples, 192000);
+assert.equal(scShadowLoopTimer.running, false); assert.equal(scShadowNudgeTimer.running, false);
+// A scratch on the source: its line goes into the feed with its speed, backwards too, and
+// this deck's scratch wheel is not touched.
+e.loop = false; e.scratch = true; e.positionMs = 3000; now += 120; e.at = now;
+scShadowApplyAll([e], false);
+assert.equal(scShadowScratchTimer.running, true);
+scShadowScratchTimer.tick();
+assert.equal(feed.positionSamples, 144000); assert.equal(feed.rateSamplesPerSec, 0); assert.equal(feed.at, e.at);
+e.positionMs = 2930; now += 35; e.at = now;
+scShadowApplyAll([e], false); scShadowScratchTimer.tick();
+assert.equal(feed.positionSamples, 2930 * 48); assert.equal(feed.rateSamplesPerSec, -96000, 'a scratch backwards has no speed in the feed');
+assert.equal(feed.loopInSamples, 0);
+for (const [path, p] of props) if (path.includes('ExternalScratchWheel')) assert.fail('the paused deck was scratched: ' + path);
+assert.equal(speedWrites, 0);
+e.scratch = false; now += 120; e.at = now; scShadowApplyAll([e], false);
+assert.equal(scShadowScratchTimer.running, false); assert.equal(feed.rateSamplesPerSec, 48000);
 // Another track on the slot: the feed is off until that copy is loaded.
 globalThis.scShadowLoad = () => {};
 scShadowApplyAll([Object.assign({}, e, {path:'/other.flac', id:'track-b'})], false);

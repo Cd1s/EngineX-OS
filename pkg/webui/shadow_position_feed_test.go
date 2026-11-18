@@ -22,7 +22,7 @@ func TestShadowPositionFeedWritesSeqlockRecord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	off := 48
+	off := shadowPositionFeedRecordSize
 	if got := binary.LittleEndian.Uint32(b[off : off+4]); got == 0 || got&1 != 0 {
 		t.Fatalf("sequence is not a stable even value: %d", got)
 	}
@@ -79,5 +79,35 @@ func TestShadowPositionFeedDatesTheRecordByItsPosition(t *testing.T) {
 	b, _ := os.ReadFile(shadowPositionFeedPath)
 	if seq, active := binary.LittleEndian.Uint32(b[:4]), binary.LittleEndian.Uint32(b[4:8]); active != 0 || seq&1 != 0 {
 		t.Fatalf("NaN position: active=%d seq=%d", active, seq)
+	}
+}
+
+// A cue before sample 0 and a scratch backwards are positions like any other; a loop is
+// sent only when it is one.
+func TestShadowPositionFeedTakesNegativeValuesAndALoop(t *testing.T) {
+	old := shadowPositionFeedPath
+	shadowPositionFeedPath = filepath.Join(t.TempDir(), "feed")
+	defer func() { shadowPositionFeedPath = old }()
+	f64 := func(b []byte) float64 { return math.Float64frombits(binary.LittleEndian.Uint64(b)) }
+	write := func(r shadowPositionFeedRequest) []byte {
+		t.Helper()
+		if err := shadowPositionFeedWrite(r); err != nil {
+			t.Fatal(err)
+		}
+		b, err := os.ReadFile(shadowPositionFeedPath)
+		if err != nil || len(b) != 4*64 {
+			t.Fatalf("feed file: %d bytes, %v", len(b), err)
+		}
+		return b[2*64 : 3*64]
+	}
+	b := write(shadowPositionFeedRequest{Deck: 3, Key: "k", Active: true, PositionSamples: -2000, RateSamplesPerSec: -88200, LoopInSamples: 1000, LoopOutSamples: 5000})
+	if active, pos, rate, in, out := binary.LittleEndian.Uint32(b[4:]), f64(b[24:]), f64(b[32:]), f64(b[48:]), f64(b[56:]); active != 1 || pos != -2000 || rate != -88200 || in != 1000 || out != 5000 {
+		t.Fatalf("active %d position %v rate %v loop %v..%v", active, pos, rate, in, out)
+	}
+	for _, loop := range [][2]float64{{5000, 1000}, {-1, 5000}, {1000, 1000}, {math.NaN(), 5000}, {1000, math.Inf(1)}} {
+		b = write(shadowPositionFeedRequest{Deck: 3, Key: "k", Active: true, PositionSamples: 1, LoopInSamples: loop[0], LoopOutSamples: loop[1]})
+		if in, out := f64(b[48:]), f64(b[56:]); in != 0 || out != 0 || binary.LittleEndian.Uint32(b[4:]) != 1 {
+			t.Errorf("loop %v: sent %v..%v", loop, in, out)
+		}
 	}
 }

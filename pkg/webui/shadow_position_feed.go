@@ -16,13 +16,14 @@ import (
 )
 
 // The paused shadow deck's position feed, read by the Engine hook on its render thread:
-// one 48-byte little-endian record per deck 1-4, guarded by a sequence that is odd while
+// one 64-byte little-endian record per deck 1-4, guarded by a sequence that is odd while
 // it is written: u32 seq, u32 active, u32 deck, 4 unused, u64 FNV-1a of the track key,
-// f64 position in samples, f64 samples per second (0: the source stands), u64
-// CLOCK_MONOTONIC_RAW ns of that position.
+// f64 position in samples (before sample 0 for a cue in the lead-in), f64 samples per
+// second (0: the source stands; negative: a scratch backwards), u64 CLOCK_MONOTONIC_RAW
+// ns of that position, f64 loop in and f64 loop out in samples (both 0: no loop).
 var shadowPositionFeedPath = "/run/enginex/shadow-position"
 
-const shadowPositionFeedRecordSize = 48
+const shadowPositionFeedRecordSize = 64
 
 // shadowPositionFeedRequest is what the shadow follower posts. At is stream-sync's own
 // clock (ms) when it extrapolated the position, handed back unchanged: the record's time
@@ -33,6 +34,8 @@ type shadowPositionFeedRequest struct {
 	Active            bool    `json:"active"`
 	PositionSamples   float64 `json:"positionSamples"`
 	RateSamplesPerSec float64 `json:"rateSamplesPerSec"`
+	LoopInSamples     float64 `json:"loopInSamples"`
+	LoopOutSamples    float64 `json:"loopOutSamples"`
 	At                int64   `json:"at"`
 }
 
@@ -57,8 +60,12 @@ func shadowPositionFeedWrite(r shadowPositionFeedRequest) error {
 	if r.Deck < 1 || r.Deck > 4 {
 		return nil
 	}
-	if !(r.PositionSamples >= 0) || !(r.RateSamplesPerSec >= 0) || math.IsInf(r.PositionSamples, 0) || math.IsInf(r.RateSamplesPerSec, 0) {
+	finite := func(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
+	if !finite(r.PositionSamples) || !finite(r.RateSamplesPerSec) {
 		r.Active, r.PositionSamples, r.RateSamplesPerSec = false, 0, 0
+	}
+	if !finite(r.LoopInSamples) || !finite(r.LoopOutSamples) || r.LoopInSamples < 0 || r.LoopOutSamples <= r.LoopInSamples {
+		r.LoopInSamples, r.LoopOutSamples = 0, 0
 	}
 	var ts unix.Timespec
 	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC_RAW, &ts); err != nil {
@@ -104,6 +111,8 @@ func shadowPositionFeedWrite(r shadowPositionFeedRequest) error {
 	binary.LittleEndian.PutUint64(b[24:], math.Float64bits(r.PositionSamples))
 	binary.LittleEndian.PutUint64(b[32:], math.Float64bits(r.RateSamplesPerSec))
 	binary.LittleEndian.PutUint64(b[40:], uint64(at))
+	binary.LittleEndian.PutUint64(b[48:], math.Float64bits(r.LoopInSamples))
+	binary.LittleEndian.PutUint64(b[56:], math.Float64bits(r.LoopOutSamples))
 	if _, err := feed.f.WriteAt(b[4:], off+4); err != nil {
 		return err
 	}

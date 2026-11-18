@@ -708,14 +708,16 @@ SERVICES_MAIN = """
 		const sr = at && at.ready ? at.sampleRate : 0, now = Date.now()
 		const on = sr > 0 && isFinite(at.feedMs) && isFinite(rate)
 		const key = on ? String(e.id || e.path || "") : ""
-		const sent = on ? key + " " + at.feedAt + " " + at.feedMs + " " + rate + " " + Math.floor(now / 250) : "off"
+		const loop = on && at.loop ? at.loop : null
+		const sent = on ? key + " " + at.feedAt + " " + at.feedMs + " " + rate + " " + (loop ? loop.in + "-" + loop.out : "") + " " + Math.floor(now / 250) : "off"
 		if (scShadowFeedSent[d] === sent || (!on && scShadowFeedSent[d] === undefined)) return
 		scShadowFeedSent[d] = sent
 		const req = new XMLHttpRequest()
 		req.open("POST", "http://127.0.0.1:8080/v1/enginex/shadow/position-feed")
 		req.setRequestHeader("Content-Type", "application/json")
 		req.send(JSON.stringify(on ? {deck: Number(d), key: key, active: true, at: at.feedAt,
-			positionSamples: at.feedMs * sr / 1000, rateSamplesPerSec: rate * sr} : {deck: Number(d), active: false}))
+			positionSamples: at.feedMs * sr / 1000, rateSamplesPerSec: rate * sr,
+			loopInSamples: loop ? loop.in * sr / 1000 : 0, loopOutSamples: loop ? loop.out * sr / 1000 : 0} : {deck: Number(d), active: false}))
 	}
 	readonly property bool scCanFourDeck: scIsPlayerBoard || ["JC11", "JC11S", "JP21", "JP24"].indexOf(scBoard) >= 0
 	readonly property bool scHasAutoLoopKnob: typeof Config !== "undefined" && Config && Config.device && Config.device.hasAutoLoopKnob !== undefined ? !!Config.device.hasAutoLoopKnob : ["NH08", "NH08S", "NH10"].indexOf(scBoard) < 0
@@ -2291,9 +2293,9 @@ SERVICES_MAIN = """
 		scShadowMirror(d, at, now)
 		const nudgePath = at.link ? "/Engine/BeatInfoSenderControl/" + at.link + "/PositionInSamples" + (e.src >= 1 && e.src <= 4 ? e.src : d) : ""
 		if (at.nudgePath !== nudgePath) { at.nudgePath = nudgePath; at.nudgeMirror = nudgePath ? root.scTr(nudgePath) : null }
-		if (at.nudgeMirror && e.playing && !e.scratch && !e.sync && !scShadowNudgeTimer.running) scShadowNudgeTimer.start()
+		if (!root.scPausedShadowFollow && at.nudgeMirror && e.playing && !e.scratch && !e.sync && !scShadowNudgeTimer.running) scShadowNudgeTimer.start()
 		at.loop = e.loop && e.loopOut > e.loopIn && e.loopIn >= 0 ? {in: e.loopIn, out: e.loopOut, pos: e.positionMs, at: e.at || now} : null
-		if (at.loop && e.playing && !scShadowLoopTimer.running) scShadowLoopTimer.start()
+		if (!root.scPausedShadowFollow && at.loop && e.playing && !scShadowLoopTimer.running) scShadowLoopTimer.start()
 		// In the source's loop its line runs on past the loop out: it is back at the loop in.
 		const loopWrap = ms => at.loop && ms > at.loop.out ? at.loop.in + (ms - at.loop.in) % (at.loop.out - at.loop.in) : ms
 		scShadowCues(d, at, e, now)
@@ -2310,7 +2312,7 @@ SERVICES_MAIN = """
 		const feedRate = e.playing && !e.scratch && !e.stale ? at.rate : 0
 		if (!at.sourcePlaying || !e.sync || !e.link || !root.scPlayer || at.nativeSync || (e.sync && e.pitch > 100)) at.landing = undefined
 		if (e.seq && e.seq === at.lastSeq && e.playing === local && !at.wantMaster && !at.check && !at.nativeSync && !e.scratch && !wasScratch) {
-			root.scShadowFeed(d, e, at, feedRate)
+			if (!at.scratch) root.scShadowFeed(d, e, at, feedRate)
 			return
 		}
 		at.lastSeq = e.seq
@@ -2334,7 +2336,7 @@ SERVICES_MAIN = """
 		// e.at is when Go extrapolated e.positionMs; this runs later on a busy GUI
 		// thread, so carry the target to now before comparing.
 		const target = loopWrap(e.positionMs + (e.playing && !e.scratch && e.at ? Math.max(0, now - e.at) * scShadowRate(e) : 0))
-		root.scShadowFeed(d, e, at, feedRate)
+		if (!at.scratch) root.scShadowFeed(d, e, at, feedRate)
 		const posMs = g("/Track/TrackPosition").unnormalized / sr * 1000
 		const drift = target - posMs // > 0: behind
 		const meanReady = at.env !== undefined && now - at.envT0 >= 300
@@ -2400,6 +2402,18 @@ SERVICES_MAIN = """
 			}
 			at.pausedFollowJumps = e.jumps
 			at.cmd = false
+			if (e.scratch && !e.stale) {
+				// The source's hand: its line (scShadowScratchTimer) goes into the feed with its
+				// speed, backwards too. Nothing is written to this deck's scratch wheel.
+				if (!at.scratch) {
+					at.scratchMove = true; at.scratchPosition = g("/Track/TrackPosition")
+					at.scratchMirror = at.link ? root.scTr("/Engine/BeatInfoSenderControl/" + at.link + "/PositionInSamples" + (e.src >= 1 && e.src <= 4 ? e.src : d)) : null
+					at.scratchOwn = null; at.scratchPush = undefined
+				}
+				at.scratch = true
+				if (e.positionMs !== at.scratchPush) { at.scratchPush = e.positionMs; at.scratchPushAt = e.at || now }
+				scShadowScratchTimer.start()
+			}
 			return dbg("paused-follow")
 		}
 		if (typeof e.keylock === "boolean" && pKey && !!pKey.state !== e.keylock) pKey.state = e.keylock
@@ -2831,6 +2845,11 @@ SERVICES_MAIN = """
 					at.scratchLive = false; at.scratchMir.raw = undefined
 				}
 				const l = at.scratchLive ? at.scratchMir : at.scratchOwn
+				if (root.scPausedShadowFollow) {
+					at.feedMs = l.src; at.feedAt = l.seen
+					root.scShadowFeed(d, at, at, l.vel || 0)
+					continue
+				}
 				const vel = l.vel, dt = Math.max(1, Math.min(50, now - at.scratchFrame))
 				at.scratchFrame = now
 				const target = l.src + vel * (Math.min(now - l.seen, l.span * 1.5) - l.span)
