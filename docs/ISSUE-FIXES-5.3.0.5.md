@@ -133,6 +133,21 @@ Combined delta review C: the Mixstream-only Stems EQ row now uses the native con
 
 - **轨道顶栏一直显示 TIDAL 图标（修复待实机验收，分支 `agent/5305-issue-305`）**：所有服务（Deezer、SoundCloud、Beatport、Spotify、Apple Music、网易云、rekordbox）都借用 Engine 的 TIDAL 通道，Engine 给这些曲目的 `Track/Source` 一律是 `TIDAL`，原厂轨道顶栏按这个字符串选图标（`Source${trackSource}.png`；5.3.0 的组合版顶栏选 `streaming/${trackSource}/Icon.png`），`曲目信息` 的 `Source` 行也直接写 `TIDAL`。**修法**（只改界面包，没有新请求，不碰音频路径）：`tools/ui-mod/build_packs.py` 的 `scSlotIcon(source)`，来源是 `TIDAL` 且当前所选服务（`scScope`）不是 `tidal` 时返回该服务的图标（与来源列表、登录对话框同一个 `scIcon`）；两处顶栏（`MainView/ArtistSong.qml`、`DeckItem/ArtistSong.qml`）用它，保持原厂 48 px 占位（父级自己设的宽度，如碟标签栏的 30 px，仍然优先）；`TrackInfo.qml` 的 `Source` 行走 `scBrand`。真 TIDAL、其他来源、本地曲目不变。**已知限制**：Engine 只给“来自 TIDAL 通道”，不给具体服务，所以显示的是当前所选服务：切换服务后仍加载在碟上的旧曲目、以及流媒体通道里的 U 盘 / OmniSource 曲目都会显示新服务的图标；浏览列表行原厂没有服务图标（只有 TIDAL 离线歌单行有，网关不产生这种行），没有改。**检验**：`StreamingSlotIconTest` 两项（旧代码上失败）；`slot-icon-sandbox.sh` 在 JP07 / JC11 / NH08 上用界面包自己的顶栏、模拟一首来自 TIDAL 通道的曲目，逐个服务检查图标、颜色、48 × 48。曲目的来源字符串在沙箱里是模拟的（这个沙箱没有流媒体曲目）。**实机待验**：先后载入 Deezer、SoundCloud 曲目看顶栏图标和 `曲目信息`。
 
+### 1A-8 rekordbox / CDJ 的 Pro DJ Link 加载即带分析
+
+- **现象**（左 SC5000，2026-11-17 / 18 维护者实测）：从电脑 rekordbox（LINK）加载曲目时，Engine 每次都要自己重新分析 15–45 秒，期间没有网格、Cue 和波形。
+- **原因**：
+  - stream-sync 取 rekordbox 分析时，没按 rekordbox 7 的真实回包格式解析：0x2c04 每段前有小端长度；PQTZ 不走 0x2c04（状态 50），网格只在 0x2204。结果什么都没取到。
+  - Engine 读这一行 `PerformanceData` 时，`trackId` 用 `?` 绑定，所以只看 prepare 文本的钩子从未动作。
+- **修法**：
+  - stream-sync 按长度切段，网格从 0x2204 读；CDJ-3000 的 USB/SD 从导出的 ANLZ 文件读。分析写到 `/run/enginex-rbx-analysis-v3/<id>.bin`。
+  - 钩子在 Engine 绑定该行 id 时（`sqlite3_bind_int64`，5.3.0 与 5.3.0-sclive4，按 api 表核对地址），在 Engine 自己的连接上填好这一行的临时 `PerformanceData`，并像 rb-bridge 对 U 盘曲目那样把 `Track.isAnalyzed` 设为 1。只填 `PerformanceData` 时，维护者实测（11-18）波形已即时出现，但 Engine 仍把曲目重新分析一遍，网格要等 15–35 秒。
+  - 只动网关的 `rekordbox [` 行，且 120 秒内要有 rekordbox 加载请求。碟机自己的 U 盘 / SD 加载不多执行任何语句；Engine Link（另一台碟机的 U 盘）和 Remote Library（Engine DJ 桌面版）的加载只读一次、从不写，网关也只接管 TIDAL 的两个网址。
+- **检验**：
+  - 检查表行 325、326；
+  - `TestRekordboxLoadLeavesItsAnalysisForEngine`（在旧代码上失败）、`TestCDJMediaListsAndLoadsWithItsAnalysis`、`test_rekordbox_analysis.c`、`RekordboxAnalysisSitesTest`、`GatewayTakesOnlyTidalTest`。
+  - **实机已验**：维护者确认 rekordbox Link 与 USB 加载时，概览、波形、拍线和热 Cue 均即时出现。同曲比较概览高度，以及 Engine Link 和 Remote Library 的回归检查，仍按检查表执行。
+
 ## 1B. 仍在进行、没有合入 5.3.0.5 候选的工作
 
 以下都**不是本版本已完成的内容**，用户文档里不得写成已有功能。

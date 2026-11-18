@@ -214,47 +214,63 @@ func (g *tidalGateway) rbxPlaylists(ctx context.Context, add func(map[string]any
 		ref := playlistRef{provider: listNoticeProvider, list: providers.Playlist{ID: rekordboxScope, Title: g.s.rbxText(key)}}
 		add(g.refJSON(g.addPlaylist(ref), ref))
 	}
-	host := g.s.rekordboxHost()
-	if host == nil {
+	host, players := g.s.rekordboxHost(), g.s.rbxPlayers()
+	if host == nil && len(players) == 0 {
 		notice("none")
 		return
 	}
 	rbxSession.Lock()
 	defer rbxSession.Unlock()
-	link, err := dialRekordbox(ctx, net.ParseIP(host.IP), deckPlayer(g.s))
-	if err != nil {
-		notice("unreadable")
-		return
-	}
-	defer link.Close()
-	list := func(id, title string) {
-		ref := playlistRef{provider: rekordboxScope, list: providers.Playlist{ID: rbxListID(host.IP, id), Title: title}}
-		add(g.refJSON(g.addPlaylist(ref), ref))
-	}
-	list("all", g.s.rbxText("tracks"))
-	var walk func(folder uint32, prefix string, depth int)
-	walk = func(folder uint32, prefix string, depth int) {
-		items, err := link.Playlists(folder)
-		for _, it := range items {
-			switch {
-			case it.Kind == prolink.RekordboxPlaylist:
-				list(strconv.FormatUint(uint64(it.ID), 10), prefix+it.Label)
-			case it.Kind == prolink.RekordboxFolder && depth < 4:
-				walk(it.ID, prefix+it.Label+" / ", depth+1)
+	library := func(key, prefix string, link rbxLink) {
+		list := func(id, title string) {
+			ref := playlistRef{provider: rekordboxScope, list: providers.Playlist{ID: rbxListID(key, id), Title: title}}
+			add(g.refJSON(g.addPlaylist(ref), ref))
+		}
+		list("all", prefix+g.s.rbxText("tracks"))
+		var walk func(folder uint32, prefix string, depth int)
+		walk = func(folder uint32, prefix string, depth int) {
+			items, err := link.Playlists(folder)
+			for _, it := range items {
+				switch {
+				case it.Kind == prolink.RekordboxPlaylist:
+					list(strconv.FormatUint(uint64(it.ID), 10), prefix+it.Label)
+				case it.Kind == prolink.RekordboxFolder && depth < 4:
+					walk(it.ID, prefix+it.Label+" / ", depth+1)
+				}
+			}
+			if err != nil {
+				notice("unreadable")
 			}
 		}
+		walk(0, prefix, 0)
+	}
+	if host != nil {
+		link, err := g.s.rbxDial(ctx, host.IP)
 		if err != nil {
 			notice("unreadable")
+		} else {
+			library(host.IP, "", link)
+			link.Close()
 		}
 	}
-	walk(0, "", 0)
+	// The players' media: what a CDJ would browse over Pro DJ Link.
+	for _, d := range players {
+		for _, slot := range []byte{3, 2} {
+			probe, cancel := context.WithTimeout(ctx, rbxProbeTime)
+			key := rbxMediaKey(d.Address, slot)
+			if link, err := g.s.rbxDial(probe, key); err == nil {
+				library(key, rbxMediaName(d, slot)+" / ", link)
+			}
+			cancel()
+		}
+	}
 }
 
 // rbxRows reads a list of the computer's tracks, and where the first one's file is.
 func (g *tidalGateway) rbxRows(ctx context.Context, ip, list string) ([]prolink.RekordboxTrack, string, error) {
 	rbxSession.Lock()
 	defer rbxSession.Unlock()
-	link, err := dialRekordbox(ctx, net.ParseIP(ip), deckPlayer(g.s))
+	link, err := g.s.rbxDial(ctx, ip)
 	if err != nil {
 		return nil, "", err
 	}
@@ -293,13 +309,25 @@ func (g *tidalGateway) rbxTracks(w http.ResponseWriter, r *http.Request, ref pla
 		refs[i] = trackRef{track: providers.Track{ID: "rbx\x00" + ip + "\x00" + strconv.FormatUint(uint64(t.ID), 10), Title: t.Title, Artist: t.Artist, BPM: t.BPM, Key: key, DurationMS: t.DurationMS, Provider: rekordboxScope}}
 	}
 	items := g.refItems(refs)
+	noticeCount := 0
 	if first != "" {
 		if _, _, _, err := g.rbxFind(r.Context(), ip, first); err != nil {
 			notice := g.trackItems("", false, []providers.Track{{Provider: listNoticeProvider, ID: "rekordbox-files", Title: g.s.rbxText("noshare")}})
 			items = append(notice, items...)
+			noticeCount = len(notice)
 		}
 	}
-	respond(w, page(r, 500, items))
+	result := page(r, 500, items)
+	shown := result["items"].([]any)
+	offset := result["offset"].(int) - noticeCount
+	if offset < 0 {
+		shown = shown[min(-offset, len(shown)):]
+		offset = 0
+	}
+	if g.rbxPrefetch(r.Context(), ip, rows, shown, offset) {
+		rbxMarkLoading()
+	}
+	respond(w, result)
 }
 
 // rbxPath is a path of the computer as one slash-separated absolute path, whichever its system.
@@ -356,9 +384,35 @@ type rbxRemote struct {
 
 // rbxFind checks a kernel-mounted share, Go SMB, then the computer's NFS export.
 func (g *tidalGateway) rbxFind(ctx context.Context, ip, rbPath string) (file, root string, remote *rbxRemote, err error) {
+	if host, slot := rbxMedia(ip); slot != 0 { // a player's medium: its own NFS export
+		export, err := prolink.SlotExport(slot)
+		if err != nil {
+			return "", "", nil, err
+		}
+		ctx, cancel := context.WithTimeout(ctx, rbxProbeTime)
+		defer cancel()
+		c := rbxPlayerNFS(net.ParseIP(host))
+		if _, _, err = c.Lookup(ctx, export, rbxPath(rbPath)); err != nil {
+			return "", "", nil, err
+		}
+		return "", "", &rbxRemote{nfs: c}, nil
+	}
 	if file, root = g.s.rbxShareFile(rbPath); file != "" {
 		return file, root, nil, nil
 	}
+	if smb := g.rbxFindSMB(ctx, rbPath); smb != nil {
+		return "", "", smb, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, rbxProbeTime)
+	defer cancel()
+	c := rbxNFS(net.ParseIP(ip))
+	if _, _, err = c.Lookup(ctx, rbxExport, rbxPath(rbPath)); err != nil {
+		return "", "", nil, err
+	}
+	return "", "", &rbxRemote{nfs: c}, nil
+}
+
+func (g *tidalGateway) rbxFindSMB(ctx context.Context, rbPath string) *rbxRemote {
 	if rel, ok := g.s.rbxShareRel(rbPath); ok {
 		probe, cancel := context.WithTimeout(ctx, rbxProbeTime)
 		defer cancel()
@@ -375,19 +429,13 @@ func (g *tidalGateway) rbxFind(ctx context.Context, ip, rbPath string) (file, ro
 				p := path.Join(c.Root, name)
 				if info, e := c.Share.Stat(p); e == nil && info.Mode().IsRegular() {
 					c.Close()
-					return "", "", &rbxRemote{mount: m, path: p, info: info}, nil
+					return &rbxRemote{mount: m, path: p, info: info}
 				}
 			}
 			c.Close()
 		}
 	}
-	ctx, cancel := context.WithTimeout(ctx, rbxProbeTime)
-	defer cancel()
-	c := rbxNFS(net.ParseIP(ip))
-	if _, _, err = c.Lookup(ctx, rbxExport, rbxPath(rbPath)); err != nil {
-		return "", "", nil, err
-	}
-	return "", "", &rbxRemote{nfs: c}, nil
+	return nil
 }
 
 // rbxPrepare gives a rekordbox row the audio file it plays from, as a drive row has one.
@@ -400,8 +448,9 @@ func (g *tidalGateway) rbxPrepare(ctx context.Context, id int64, ref trackRef) (
 	if err != nil || len(parts) != 3 {
 		return ref, errors.New("rekordbox: bad track")
 	}
+	rbxMarkLoading()
 	rbxSession.Lock()
-	link, err := dialRekordbox(ctx, net.ParseIP(parts[1]), deckPlayer(g.s))
+	link, err := g.s.rbxDial(ctx, parts[1])
 	var rbPath string
 	if err == nil {
 		rbPath, err = link.Path(uint32(tid))
@@ -447,6 +496,8 @@ func (g *tidalGateway) rbxPrepare(ctx context.Context, id int64, ref trackRef) (
 		}
 	}
 	log.Printf("stream-sync: load track=%d provider=rekordbox step=find result=ready via=%s", id, via)
+	rbxAnalysisJobs.Add(1)
+	go g.rbxWriteAnalysis(id, parts[1], uint32(tid), rbPath, file)
 	ref.file, ref.drive = file, root
 	g.mu.Lock()
 	g.tracks[id] = ref
@@ -458,13 +509,16 @@ func (g *tidalGateway) rbxPrepare(ctx context.Context, id int64, ref trackRef) (
 // folder, within the Pro DJ Link staging budget (the oldest copies make room), and returns
 // the file it will be: the copy goes on while the manifest and stream requests are answered.
 func (g *tidalGateway) rbxStage(ctx context.Context, c *prolink.NFSClient, ip, rbPath string) (file, root string, err error) {
-	p := rbxPath(rbPath)
-	_, info, err := c.Lookup(ctx, rbxExport, p)
+	p, export := rbxPath(rbPath), rbxExport
+	if _, slot := rbxMedia(ip); slot != 0 {
+		export, _ = prolink.SlotExport(slot)
+	}
+	_, info, err := c.Lookup(ctx, export, p)
 	if err != nil {
 		return "", "", err
 	}
 	return g.rbxStageCopy(ip, p, int64(info.Size), int64(info.MTime), func(ctx context.Context, w io.Writer) error {
-		_, err := c.FetchTo(ctx, rbxExport, p, w, rbxMaxFile)
+		_, err := c.FetchTo(ctx, export, p, w, rbxMaxFile)
 		return err
 	})
 }

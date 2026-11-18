@@ -98,6 +98,7 @@ func newRbxEnv(t *testing.T, paths map[uint32]string) *rbxEnv {
 	rbxNFS = func(ip net.IP) *prolink.NFSClient {
 		return &prolink.NFSClient{IP: ip, Portmap: silent.LocalAddr().(*net.UDPAddr).Port, Timeout: 50 * time.Millisecond}
 	}
+	t.Cleanup(rbxAnalysisJobs.Wait) // Analysis requests can still be using the fakes.
 	return e
 }
 

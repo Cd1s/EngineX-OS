@@ -312,6 +312,21 @@ func (c *NFSClient) Fetch(ctx context.Context, export, path string, max uint32) 
 	return b.Bytes(), file, err
 }
 
+// FetchPrefix reads up to limit bytes and reports the size of the whole file.
+func (c *NFSClient) FetchPrefix(ctx context.Context, export, path string, limit uint32) ([]byte, NFSFile, error) {
+	fh, file, err := c.Lookup(ctx, export, path)
+	if err != nil {
+		return nil, file, err
+	}
+	port, err := c.port(ctx, rpcNFS, 2)
+	if err != nil {
+		return nil, file, err
+	}
+	var b bytes.Buffer
+	err = c.readFile(ctx, port, fh, min(limit, file.Size), &b, nfsReadWindow)
+	return b.Bytes(), file, err
+}
+
 // FetchTo streams a bounded file in order while several 8 KiB READs are in flight.
 func (c *NFSClient) FetchTo(ctx context.Context, export, path string, w io.Writer, max uint32) (NFSFile, error) {
 	fh, file, err := c.Lookup(ctx, export, path)

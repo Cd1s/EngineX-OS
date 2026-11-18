@@ -896,10 +896,16 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 			v.LoggedIn = append(v.LoggedIn, session.Provider)
 		}
 	}
+	name := ""
 	if host := s.rekordboxHost(); host != nil { // not saved: the source is there while the computer is
+		name = host.Name
+	} else if players := s.rbxPlayers(); len(players) > 0 { // or a player whose media it lists
+		name = players[0].Name
+	}
+	if name != "" {
 		v.Sources = append(slices.Clone(v.Sources), rekordboxScope)
 		v.LoggedIn = append(v.LoggedIn, rekordboxScope)
-		v.RekordboxName = host.Name
+		v.RekordboxName = name
 	}
 	relay := s.relayStatusView()
 	v.RelayURL, v.DeemixPasswordSet = relay.RelayURL, relay.PasswordSet
