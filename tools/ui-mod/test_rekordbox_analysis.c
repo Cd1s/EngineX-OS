@@ -285,6 +285,85 @@ int main(void) {
     assert(result && !strcmp(result, "refreshed"));
     check_edits(reload, "66/77");
     sqlite3_close(reload);
+    // LEFT, 2026-11-18: after a load Engine writes the row back without the import mark, uri
+    // and label still ours (8 of 24 rows in its stm.db). Such a row still takes a later
+    // source edit, and only where it holds what we imported.
+    sqlite3 *real = library_row(internal, "streaming://TIDAL/Track/855", "rekordbox [126 BPM 6A]", 1);
+    result = load_bound(real);
+    assert(result && !strcmp(result, "filled"));
+    check_edits(real, "66/77");
+    assert(sqlite3_exec(real, "UPDATE stm.PerformanceData SET thirdPartySourceId=NULL", NULL, NULL, NULL) == SQLITE_OK);
+    const unsigned char edit1[] = "RBXA1" "\2\0\0\0" "\x02" "\xbc" "\0\0\0\0" "\1\0\0\0" "\x55" "\1\0\0\0" "\x44" "\0\0\0\0";
+    f = fopen(path, "wb");
+    assert(f && fwrite(edit1, 1, sizeof edit1 - 1, f) == sizeof edit1 - 1 && !fclose(f));
+    result = load_bound(real);
+    assert(result && !strcmp(result, "refreshed"));
+    check_edits(real, "55/44");
+    // A grid moved on the deck stays; the cue we imported still follows the source.
+    assert(sqlite3_exec(real, "UPDATE stm.PerformanceData SET thirdPartySourceId=NULL, beatData=X'99'", NULL, NULL, NULL) == SQLITE_OK);
+    const unsigned char edit2[] = "RBXA1" "\2\0\0\0" "\x02" "\xbc" "\0\0\0\0" "\1\0\0\0" "\x33" "\1\0\0\0" "\x22" "\0\0\0\0";
+    f = fopen(path, "wb");
+    assert(f && fwrite(edit2, 1, sizeof edit2 - 1, f) == sizeof edit2 - 1 && !fclose(f));
+    result = load_bound(real);
+    assert(result && !strcmp(result, "refreshed; kept deck edits"));
+    check_edits(real, "99/22");
+    // Neighbours. A row of ours that Engine analysed itself (nothing imported to compare
+    // with): untouched.
+    char kept[2][200], aside[2][216];
+    snprintf(kept[0], sizeof kept[0], "%s/855-16449-beatData", history);
+    snprintf(kept[1], sizeof kept[1], "%s/855-16449-quickCues", history);
+    for (int i = 0; i < 2; i++) {
+        snprintf(aside[i], sizeof aside[i], "%s.aside", kept[i]);
+        assert(!rename(kept[i], aside[i]));
+    }
+    assert(sqlite3_exec(real, "UPDATE stm.PerformanceData SET thirdPartySourceId=NULL, beatData=X'AA', quickCues=X'BB'", NULL, NULL, NULL) == SQLITE_OK);
+    assert(!load_bound(real));
+    check_edits(real, "AA/BB");
+    for (int i = 0; i < 2; i++) assert(!rename(aside[i], kept[i]));
+    // Another source's analysed row with the same id (uri or label not ours): one read, no write.
+    assert(sqlite3_exec(real, "UPDATE stm.Track SET label='TIDAL [126 BPM]'", NULL, NULL, NULL) == SQLITE_OK);
+    assert(sqlite3_exec(real, "UPDATE stm.PerformanceData SET beatData=X'99', quickCues=X'22'", NULL, NULL, NULL) == SQLITE_OK);
+    statements = 0;
+    assert(!load_bound(real) && statements == 1);
+    check_edits(real, "99/22");
+    sqlite3_close(real);
+    // The reload block above left 66/77 as the last import; put that back for the checks below.
+    f = fopen(path, "wb");
+    assert(f && fwrite(refreshed, 1, sizeof refreshed - 1, f) == sizeof refreshed - 1 && !fclose(f));
+
+    // A staged cover is applied on Engine's own connection, including when it arrives
+    // after the first analysis bind, and never replaces an existing AlbumArt blob.
+    sqlite3 *cover = library_row(internal, "streaming://TIDAL/Track/855", "rekordbox [126 BPM 6A]", 1);
+    assert(sqlite3_exec(cover,
+        "ALTER TABLE stm.Track ADD COLUMN albumArtId INTEGER;"
+        "CREATE TABLE stm.AlbumArt (id INTEGER PRIMARY KEY, hash, albumArt BLOB);"
+        "INSERT INTO stm.AlbumArt VALUES (1, 'image://streaming/', NULL), (2, 'keep', X'01');"
+        "UPDATE stm.Track SET albumArtId=1 WHERE id=16449", NULL, NULL, NULL) == SQLITE_OK);
+    char cover_path[160];
+    snprintf(cover_path, sizeof cover_path, "%s/855.cover", dir);
+    unsigned char hash[20], jpeg[] = {0xff, 0xd8, 0xff, 0xe0, 0x01, 0x02};
+    for (unsigned i = 0; i < sizeof hash; i++) hash[i] = (unsigned char)i;
+    f = fopen(cover_path, "wb");
+    assert(f && fwrite("RBXC1", 1, 5, f) == 5 && fwrite(hash, 1, sizeof hash, f) == sizeof hash &&
+           fwrite(jpeg, 1, sizeof jpeg, f) == sizeof jpeg && !fclose(f));
+    result = load_bound(cover);
+    assert(result && !strcmp(result, "filled") && access(cover_path, F_OK));
+    sqlite3_stmt *art;
+    assert(sqlite3_prepare_v2(cover, "SELECT hex(hash),hex(albumArt) FROM stm.AlbumArt WHERE id=1", -1, &art, NULL) == SQLITE_OK);
+    assert(sqlite3_step(art) == SQLITE_ROW && !strcmp((const char *)sqlite3_column_text(art, 0), "000102030405060708090A0B0C0D0E0F10111213") &&
+           !strcmp((const char *)sqlite3_column_text(art, 1), "FFD8FFE00102"));
+    sqlite3_finalize(art);
+    assert(sqlite3_exec(cover, "UPDATE stm.AlbumArt SET hash='image://streaming/', albumArt=NULL WHERE id=1", NULL, NULL, NULL) == SQLITE_OK);
+    f = fopen(cover_path, "wb");
+    assert(f && fwrite("RBXC1", 1, 5, f) == 5 && fwrite(hash, 1, sizeof hash, f) == sizeof hash &&
+           fwrite(jpeg, 1, sizeof jpeg, f) == sizeof jpeg && !fclose(f));
+    assert(sqlite3_exec(cover, "UPDATE stm.Track SET albumArtId=2", NULL, NULL, NULL) == SQLITE_OK);
+    assert(!load_bound(cover) && access(cover_path, F_OK) == 0);
+    assert(sqlite3_prepare_v2(cover, "SELECT hash,hex(albumArt) FROM stm.AlbumArt WHERE id=2", -1, &art, NULL) == SQLITE_OK);
+    assert(sqlite3_step(art) == SQLITE_ROW && !strcmp((const char *)sqlite3_column_text(art, 0), "keep") &&
+           !strcmp((const char *)sqlite3_column_text(art, 1), "01"));
+    sqlite3_finalize(art);
+    sqlite3_close(cover);
     pthread_mutex_lock(&sc_rbx_track_map_mu);
     memset(sc_rbx_track_maps, 0, sizeof sc_rbx_track_maps);
     sc_rbx_track_map_next = sc_rbx_track_map_clock = 0;
@@ -312,6 +391,7 @@ int main(void) {
     snprintf(path, sizeof path, "%s/855.bin.perf", dir);
     assert(!unlink(path));
     assert(!unlink(alias) && !unlink(mark) && !unlink(internal) && !unlink(drive));
+    assert(!unlink(cover_path));
     snprintf(path, sizeof path, "%s/media", dir);
     assert(!rmdir(path) && !rmdir(dir));
     return 0;

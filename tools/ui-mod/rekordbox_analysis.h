@@ -151,7 +151,7 @@ struct sc_rbx_sqlite {
 struct sc_rbx_row {
     char uri[256];
     char download[41];
-    int ours, imported;
+    int ours, imported, streaming;
 };
 
 // Engine can rewrite the Track presentation fields after the first streamed load.
@@ -317,14 +317,17 @@ static int sc_rbx_lookup_track(long long track, long long *id, char download[41]
 static int sc_rbx_row(void *arg, int n, char **value, char **name) {
     struct sc_rbx_row *row = arg;
     (void)name;
-    row->imported = n >= 4 && value[3] && !strcmp(value[3], "1");
-    // Ours: a row of stream-sync's gateway (Engine's TIDAL client) that the rekordbox source
-    // labelled. An Engine Link or Remote Library track has no such uri.
-    if (n >= 3 && value[0] && value[1] && !strncmp(value[0], "streaming://TIDAL/Track/", 24) && !strncmp(value[1], "rekordbox [", 11)) {
+    // SQLite's NULL mark is represented as -1 only for a row whose identity still
+    // matches our gateway; it is eligible for history-guarded refresh, not first fill.
+    row->imported = n >= 4 && value[3] && (!strcmp(value[3], "1") || !strcmp(value[3], "-1"));
+    // A streaming row is safe to identify by its URI; the rekordbox analysis path
+    // additionally requires the label prefix below.
+    if (n >= 3 && value[0] && !strncmp(value[0], "streaming://TIDAL/Track/", 24)) {
         snprintf(row->uri, sizeof row->uri, "%s", value[0]);
         const char *key = sc_rbx_download_key(value[2], SC_RBX_DOWNLOADS_REL);
         if (key) snprintf(row->download, sizeof row->download, "%.40s", key);
-        row->ours = 1;
+        row->streaming = 1;
+        if (value[1] && !strncmp(value[1], "rekordbox [", 11)) row->ours = 1;
     }
     return 0;
 }
@@ -390,6 +393,39 @@ static int sc_rbx_changes(void *arg, int n, char **v, char **names) {
     return 0;
 }
 
+#define SC_RBX_COVER_MAGIC "RBXC1"
+#define SC_RBX_COVER_HEADER 25
+#define SC_RBX_COVER_MAX (512u << 10)
+
+// Apply a staged cover on Engine's own connection. The sidecar is retained when
+// no matching empty AlbumArt row exists so a later bind can consume it.
+static int sc_rbx_apply_cover(const struct sc_rbx_sqlite *q, void *db, long long track, long long id) {
+    if (id <= 0) return 0;
+    char path[160];
+    snprintf(path, sizeof path, "%s/%lld.cover", sc_rbx_dir, id);
+    size_t n = 0;
+    unsigned char *b = sc_rbx_read(path, &n);
+    if (!b || n < SC_RBX_COVER_HEADER + 2 || n > SC_RBX_COVER_HEADER + SC_RBX_COVER_MAX ||
+        memcmp(b, SC_RBX_COVER_MAGIC, 5) || b[SC_RBX_COVER_HEADER] != 0xff || b[SC_RBX_COVER_HEADER + 1] != 0xd8) {
+        free(b);
+        return 0;
+    }
+    size_t hex = 2 * (n - 5);
+    char *sql = malloc(256 + hex);
+    if (!sql) { free(b); return -1; }
+    char *p = sql + sprintf(sql, "UPDATE AlbumArt SET hash = X'");
+    for (size_t i = 5; i < 25; i++) p += sprintf(p, "%02x", b[i]);
+    p += sprintf(p, "', albumArt = X'");
+    for (size_t i = SC_RBX_COVER_HEADER; i < n; i++) p += sprintf(p, "%02x", b[i]);
+    p += sprintf(p, "' WHERE albumArt IS NULL AND id = (SELECT albumArtId FROM Track WHERE id = %lld); SELECT changes()", track);
+    int changed = 0;
+    int err = q->exec(db, sql, sc_rbx_changes, &changed, NULL);
+    free(sql);
+    free(b);
+    if (!err && changed) unlink(path);
+    return err ? -1 : changed;
+}
+
 // The comparisons are part of the UPDATE on Engine's own connection. A
 // changed cue never prevents an untouched grid from receiving a source edit.
 static int sc_rbx_update_edit(const struct sc_rbx_sqlite *q, void *db, long long track,
@@ -398,7 +434,7 @@ static int sc_rbx_update_edit(const struct sc_rbx_sqlite *q, void *db, long long
     if (!sql) return -1;
     char *p = sql + sprintf(sql, "UPDATE PerformanceData SET %s = ", col);
     p = sc_rbx_blob_sql(p, after);
-    p += sprintf(p, " WHERE trackId = %lld AND thirdPartySourceId = 1 AND %s IS ", track, col);
+    p += sprintf(p, " WHERE trackId = %lld AND (thirdPartySourceId = 1 OR thirdPartySourceId IS NULL) AND %s IS ", track, col);
     p = sc_rbx_blob_sql(p, before);
     strcpy(p, "; SELECT changes()");
     int changed = 0;
@@ -484,7 +520,7 @@ static void sc_rbx_trace_skip(const struct sc_rbx_sqlite *q, void *db, long long
 // drive's database, not even a read is added. Returns what it did, or NULL when it did
 // nothing; *id says the streaming id.
 static const char *sc_rbx_fill_track(const struct sc_rbx_sqlite *q, void *db, long long track, long long *id) {
-    char path[160], query[320];
+    char path[160], query[512];
     struct stat st;
     snprintf(path, sizeof path, "%s/.loading", sc_rbx_dir);
     if (track <= 0 || stat(path, &st) || time(NULL) - st.st_mtime > sc_rbx_window) return NULL;
@@ -492,12 +528,14 @@ static const char *sc_rbx_fill_track(const struct sc_rbx_sqlite *q, void *db, lo
     const char *main = q->filename(db, "main");
     if (main && !strncmp(main, sc_rbx_drives, strlen(sc_rbx_drives))) return sc_rbx_verbose ? "skipped (a drive's database)" : NULL;
     struct sc_rbx_row row = {.ours = 0};
-    snprintf(query, sizeof query, "SELECT t.uri,t.label,t.path,CASE WHEN p.trackData IS NOT NULL THEN p.thirdPartySourceId END FROM Track t JOIN PerformanceData p ON p.trackId=t.id WHERE t.id=%lld AND (p.trackData IS NULL OR p.thirdPartySourceId=1)", track);
+    snprintf(query, sizeof query, "SELECT t.uri,t.label,t.path,CASE WHEN p.trackData IS NOT NULL THEN coalesce(p.thirdPartySourceId,-1) END FROM Track t JOIN PerformanceData p ON p.trackId=t.id WHERE t.id=%lld AND (p.trackData IS NULL OR p.thirdPartySourceId=1 OR (p.thirdPartySourceId IS NULL AND t.uri LIKE 'streaming://TIDAL/Track/%%'))", track);
     if (q->exec(db, query, sc_rbx_row, &row, NULL)) return sc_rbx_verbose ? "skipped (not a rekordbox row)" : NULL;
+    long long cover_id = row.streaming ? sc_rbx_uri_id(row.uri) : 0;
+    if (cover_id) sc_rbx_apply_cover(q, db, track, cover_id);
     if (row.ours) {
-        *id = sc_rbx_uri_id(row.uri);
+        *id = cover_id;
         sc_rbx_remember_track(track, *id, row.download);
-    } else if (row.imported && sc_rbx_lookup_track(track, id, NULL)) {
+    } else if (!row.streaming && row.imported && sc_rbx_lookup_track(track, id, NULL)) {
         // Engine has retained our imported row but no longer exposes the original
         // gateway URI/label in this reload snapshot. The prior proof is enough to
         // refresh the same source generation; unknown rows remain untouched.
