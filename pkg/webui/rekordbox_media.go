@@ -94,7 +94,7 @@ func rbxMediaReady(ip string) bool {
 		if len(rbxMediaChecks.m) >= 16 {
 			clear(rbxMediaChecks.m)
 		}
-		p = &rbxPresence{ip: ip}
+		p = &rbxPresence{}
 		rbxMediaChecks.m[ip] = p
 	}
 	now := time.Now()
