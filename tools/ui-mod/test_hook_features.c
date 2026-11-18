@@ -252,6 +252,15 @@ static void test_publish(void) {
     read_state(text, sizeof text);
     snprintf(want, sizeof want, "pid=%d\nbuild=zoom30\noff=zoom30\n", (int)getpid());
     assert(!strcmp(text, want));
+    // A feature this Engine has no verified site for is off like one the build left out.
+    hf_runtime_off(HF_SHADOW_PAUSED_FOLLOW);
+    assert(!hf_on(HF_SHADOW_PAUSED_FOLLOW) && hf_on(HF_STEMS));
+    hf_publish();
+    read_state(text, sizeof text);
+    snprintf(want, sizeof want, "pid=%d\nbuild=zoom30,shadow-paused-follow\noff=zoom30,shadow-paused-follow\n", (int)getpid());
+    assert(!strcmp(text, want));
+    use_conf(NULL);
+    assert(hf_on(HF_SHADOW_PAUSED_FOLLOW));
     puts("the running Engine's feature state is published whole for stream-sync: PASS");
 }
 

@@ -97,6 +97,7 @@ alive on 4-core decks are never switched off.
 | `thread-tuning` | thread priorities and CPU sets of Engine's background threads and OfflineAnalyzer |
 | `alsa-timestamp` | ALSA keeps a GETTIMEOFDAY timestamp request |
 | `ui-packs` | the QML packs: stock Engine UI (settings that only exist in the packs disappear) |
+| `shadow-paused-follow` | a shadow deck stays paused and Engine's waveform line follows the source deck's position feed (first-generation Engine 5.3.0; reported off on an Engine without a verified site); off: the shadow deck plays muted as before |
 | `mount-hook` | second-generation bundles: no edisksd preload and no boot-time stick conversion. Build: `build-data-bundle.py --no-edisksd-hook`. The Engine hook ignores the name |
 | `rb-bridge` | service, after a reboot: `rb-bridge --prolink` does not start (no Pro DJ Link announcements, player status or players' media; the `Pro DJ Link Library` row hides). Mount-time rekordbox conversion is `mount-hook`'s. The Engine hook ignores the name |
 | `deemixd` | service, after a reboot: the Deezer download queue does not start (console Deezer jobs and Deezer tracks through the gateway) |
