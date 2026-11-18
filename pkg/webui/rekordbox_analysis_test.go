@@ -269,6 +269,44 @@ func (l rbxEditedLink) CuesExtended(uint32) ([]byte, error) {
 	return b, nil
 }
 
+type rbxStampedLink struct {
+	rbxEditedLink
+	paths *atomic.Int32
+}
+
+func (l rbxStampedLink) Path(id uint32) (string, error) {
+	if id == 1 {
+		l.paths.Add(1)
+	}
+	return l.rbxEditedLink.Path(id)
+}
+
+func (l rbxStampedLink) Analysis(uint32, string, string) ([]byte, error) { return nil, nil }
+
+func TestRekordboxFirstPrefetchSkipsSecondHeaderRead(t *testing.T) {
+	paths := map[uint32]string{1: "/Users/dj/Music/x.flac"}
+	e := newRbxEnv(t, paths)
+	if err := os.WriteFile(filepath.Join(e.share, "x.flac"), flac48k(4096), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := rbxAnalysisDir
+	rbxAnalysisDir = t.TempDir()
+	t.Cleanup(func() { rbxAnalysisDir = old })
+	t.Cleanup(rbxAnalysisJobs.Wait)
+	var reads atomic.Int32
+	l := rbxStampedLink{rbxEditedLink{analysedRbxLink{fakeRbxLink{paths}}, 500}, &reads}
+	dialRekordbox = func(context.Context, net.IP, byte) (rbxLink, error) { return l, nil }
+	ref := playlistRef{}
+	ref.list.ID = rbxListID("127.0.0.1", "all")
+	e.s.tidal.rbxTracks(httptest.NewRecorder(), httptest.NewRequest("GET", "/", nil), ref)
+	rbxAnalysisJobs.Wait()
+	// Listing probes the first path once, then first-screen prefetch reads its
+	// header. The follow-up fingerprint check must not resolve that path again.
+	if n := reads.Load(); n != 2 {
+		t.Fatalf("first track path read %d times, want 2", n)
+	}
+}
+
 func TestRekordboxManifestRefreshesEditedGridAndCue(t *testing.T) {
 	paths := map[uint32]string{1: "/Users/dj/Music/x.m4a"}
 	e := newRbxEnv(t, paths)
@@ -321,6 +359,12 @@ func TestRekordboxManifestRefreshesEditedGridAndCue(t *testing.T) {
 	if err != nil || !os.SameFile(first, again) {
 		t.Fatal("unchanged source responses rewrote the analysis")
 	}
+	edit.Store(750)
+	tidalGet(t, e.base, manifest, 200, nil)
+	previous, err := os.ReadFile(out + ".previous")
+	if err != nil || !bytes.Equal(previous, after) {
+		t.Fatalf("second edit did not retain the immediate predecessor: %v", err)
+	}
 }
 
 func rbxTestBlobs(t *testing.T, b []byte) [5][]byte {
@@ -357,6 +401,10 @@ func TestRekordboxLoadLeavesItsAnalysisForEngine(t *testing.T) {
 	t.Cleanup(rbxAnalysisJobs.Wait) // before the fakes go
 	ids, _ := e.trackIDs(t, "Tracks")
 	tidalGet(t, e.base, "/v1/tracks/"+strconv.FormatInt(ids["First"], 10)+"/playbackinfopostpaywall", 200, nil)
+	name := filepath.Join(rbxAnalysisDir, "names", "4096", "x.flac")
+	if b, err := os.ReadFile(name); err != nil || string(b) != strconv.FormatInt(ids["First"], 10)+"\n" {
+		t.Fatalf("Link load did not register its name and full size: %q (%v)", b, err)
+	}
 	var b []byte
 	for i := 0; i < 200 && len(b) == 0; i++ {
 		b, _ = os.ReadFile(filepath.Join(rbxAnalysisDir, strconv.FormatInt(ids["First"], 10)+".bin"))

@@ -109,6 +109,31 @@ static int sc_rbx_replay_path(const char *path, char *perf, size_t cap) {
     return n > 0 && (size_t)n < cap && !access(perf, R_OK);
 }
 
+// A named Engine temporary copy can still identify an import when no download
+// alias was installed. The small index is written by stream-sync before load.
+static inline int sc_rbx_replay_named(const char *path, const char *prefix, char *perf, size_t cap) {
+    size_t prefix_len = strlen(prefix);
+    if (strncmp(path, prefix, prefix_len) || strchr(path + prefix_len, '/')) return 0;
+    const char *name = strchr(path + prefix_len, '_');
+    struct stat audio, entry;
+    if (!name || !*++name || !strcmp(name, ".") || !strcmp(name, "..") ||
+        stat(path, &audio) || !S_ISREG(audio.st_mode) || audio.st_size <= 0) return 0;
+    char key[512];
+    int n = snprintf(key, sizeof key, "%s/names/%lld/%s", sc_rbx_dir, (long long)audio.st_size, name);
+    if (n < 0 || (size_t)n >= sizeof key) return 0;
+    int fd = open(key, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0) return 0;
+    char id[14];
+    ssize_t bytes = !fstat(fd, &entry) && S_ISREG(entry.st_mode) && time(NULL) - entry.st_mtime <= sc_rbx_window
+        ? read(fd, id, sizeof id) : -1;
+    close(fd);
+    if (bytes < 2 || bytes >= (ssize_t)sizeof id || id[bytes - 1] != '\n' || id[0] == '0') return 0;
+    id[bytes - 1] = '\0';
+    if (strspn(id, "0123456789") != (size_t)bytes - 1) return 0;
+    n = snprintf(perf, cap, "%s/%s.bin.perf", sc_rbx_dir, id);
+    return n > 0 && (size_t)n < cap && !access(perf, R_OK);
+}
+
 static void sc_rbx_link_replay(const char *key, const char *payload) {
     if (!key) return;
     char source[192], target[160];
@@ -339,70 +364,6 @@ static int sc_rbx_edits(const unsigned char *b, size_t n, struct sc_rbx_blob edi
 
 static void sc_rbx_edit_path(char *path, size_t cap, long long id, long long track, const char *col) {
     snprintf(path, cap, "%s/%lld-%lld-%s", sc_rbx_history, id, track, col);
-}
-
-static const char *sc_rbx_stm = "/data/AppDataUser/AIR Music Technology/Engine/Engine Library/Database2/stm.db";
-static int (*sc_rbx_open_readonly)(const char *, void **, int, const char *);
-static int (*sc_rbx_close_db)(void *);
-static int (*sc_rbx_exec_readonly)(void *, const char *, int (*)(void *, int, char **, char **), void *, char **);
-
-struct sc_rbx_download { long long id; int keep_grid; };
-
-static int sc_rbx_hex_matches(const char *hex, struct sc_rbx_blob blob) {
-    static const char digits[] = "0123456789ABCDEF";
-    if (strlen(hex) != blob.n * 2) return 0;
-    for (size_t i = 0; i < blob.n; i++)
-        if (hex[2*i] != digits[blob.b[i] >> 4] || hex[2*i + 1] != digits[blob.b[i] & 15]) return 0;
-    return 1;
-}
-
-static int sc_rbx_download_row(void *arg, int n, char **v, char **names) {
-    struct sc_rbx_download *download = arg;
-    struct sc_rbx_row row = {0};
-    sc_rbx_row(&row, n > 3 ? 3 : n, v, names);
-    if (!row.ours || n != 5 || !v[3] || !(download->id = sc_rbx_uri_id(row.uri)) || !v[4]) return 0;
-    // An existing Engine grid can be replayed only if we know it is still ours.
-    char file[160];
-    sc_rbx_edit_path(file, sizeof file, download->id, strtoll(v[3], NULL, 10), "beatData");
-    size_t len = 0;
-    unsigned char *saved = sc_rbx_read(file, &len);
-    int same = saved && sc_rbx_hex_matches(v[4], (struct sc_rbx_blob){saved, len});
-    free(saved);
-    if (!same) {
-        snprintf(file, sizeof file, "%s/%lld.bin", sc_rbx_dir, download->id);
-        struct sc_rbx_blob edits[2];
-        saved = sc_rbx_read(file, &len);
-        same = sc_rbx_edits(saved, len, edits) && sc_rbx_hex_matches(v[4], edits[0]);
-        free(saved);
-    }
-    download->keep_grid = !same;
-    return 0;
-}
-
-// OfflineAnalyzer can run without a second PerformanceData read. Resolve
-// Engine's download path directly when its list snapshot missed the import.
-static int sc_rbx_replay_download(const char *path, char *perf, size_t cap, int *keep_grid) {
-    const char *key = sc_rbx_download_key(path, SC_RBX_DOWNLOADS);
-    if (!key) return 0;
-    if (sc_rbx_open_readonly && sc_rbx_close_db && sc_rbx_exec_readonly && !access(sc_rbx_dir, F_OK)) {
-        void *db = NULL;
-        struct sc_rbx_download download = {0};
-        if (!sc_rbx_open_readonly(sc_rbx_stm, &db, 1 /* SQLITE_OPEN_READONLY */, NULL)) {
-            char query[512];
-            // The suffix and the 40 lowercase hex digits were validated above.
-            snprintf(query, sizeof query, "SELECT t.uri,t.label,t.path,t.id,CASE WHEN p.beatData IS NOT NULL THEN hex(p.beatData) END FROM Track t "
-                     "LEFT JOIN PerformanceData p ON p.trackId=t.id WHERE t.path IN ('" SC_RBX_DOWNLOADS_REL "%s','" SC_RBX_DOWNLOADS_REL "%.40s.temp') "
-                     "ORDER BY t.id DESC LIMIT 1", key, key);
-            (void)sc_rbx_exec_readonly(db, query, sc_rbx_download_row, &download, NULL);
-        }
-        if (db) sc_rbx_close_db(db);
-        if (download.id) {
-            *keep_grid = download.keep_grid;
-            int n = snprintf(perf, cap, "%s/%lld.bin.perf", sc_rbx_dir, download.id);
-            return n > 0 && (size_t)n < cap && !access(perf, R_OK);
-        }
-    }
-    return sc_rbx_replay_path(path, perf, cap);
 }
 
 static void sc_rbx_save_edit(const char *path, struct sc_rbx_blob blob) {
