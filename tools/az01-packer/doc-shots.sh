@@ -24,6 +24,8 @@
 set -euo pipefail
 
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
+mapfile -t LEGACY_INPUTS < <(PYTHONPATH="$REPO/tools/az01-packer" python3 -c \
+    'import legacy_names as legacy; print(legacy.DATA_DIR); print(legacy.IMAGE_DIR); print(legacy.LAB)')
 DEFAULT_IMG="/var/tmp/enginex-rc-5305-3e4c7a3/SC5000-5.3.0.5-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img"
 [ -f "$DEFAULT_IMG" ] || DEFAULT_IMG="/var/tmp/enginex-dryrun-5305/SC5000-5.3.0.5-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img"
 IMG=${1:-$DEFAULT_IMG}
@@ -135,7 +137,7 @@ PY
 
     # /data setup
     mkdir -p "$R/data/enginex/ui/packs"
-    ln -sf enginex "$R/data/sc5000-custom"
+    ln -sf enginex "$R${LEGACY_INPUTS[0]}"
     cp -a "$W/packs/$LANG_PACK" "$R/data/enginex/ui/packs/"
     if [ -f "$W/probe.qml" ]; then
         mkdir -p "$R/data/enginex/ui/packs/$LANG_PACK/Skins/Common/Items"
@@ -228,13 +230,13 @@ python3 "$REPO/tools/az01-packer/az01_packer.py" unpack "$IMG" --output "$W/imag
 IMG_EXT2=$W/image/rootfs.ext2
 [ -f "$IMG_EXT2" ] || { echo "Error: unpacked rootfs.ext2 not found" >&2; exit 1; }
 
-# /etc/enginex since 5.3.0.5 (#234); older images keep it in /etc/sc5000.
+# /etc/enginex since 5.3.0.5 (#234); use the migration reader for older images.
 CURR_VERSION=$(debugfs -R "cat /etc/enginex/version.txt" "$IMG_EXT2" 2>/dev/null | grep -E '^[0-9]' | head -1 || true)
-[ -n "$CURR_VERSION" ] || CURR_VERSION=$(debugfs -R "cat /etc/sc5000/version.txt" "$IMG_EXT2" 2>/dev/null | grep -E '^[0-9]' | head -1 || true)
+[ -n "$CURR_VERSION" ] || CURR_VERSION=$(debugfs -R "cat ${LEGACY_INPUTS[1]}/version.txt" "$IMG_EXT2" 2>/dev/null | grep -E '^[0-9]' | head -1 || true)
 echo "Detected current version in image: $CURR_VERSION (mock next: $NEXTV)"
 
 echo "==> Building language packs..."
-QRC_SRC=/root/build/sc5000-lab/5.3.0/qrc
+QRC_SRC="${LEGACY_INPUTS[2]}/5.3.0/qrc"
 python3 "$REPO/tools/ui-mod/build_packs.py" --release --qrc "$QRC_SRC" --out "$W/packs" > "$W/packs.log"
 
 # Setup shared fixtures
