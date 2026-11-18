@@ -2384,6 +2384,7 @@ static void install_sqlite_hooks(uintptr_t base, size_t page);
 static void install_bt_send(uintptr_t base, size_t page);
 #if !defined(__aarch64__)
 static void install_rekordbox_rows(uintptr_t base, size_t page);
+static void install_shadow_browse(uintptr_t base, size_t page);
 #endif
 
 static void apply_engine_edits(uintptr_t base, size_t page) {
@@ -2463,6 +2464,7 @@ __attribute__((constructor)) static void edit_engine(void) {
     install_sqlite_hooks(base, page);
 #if !defined(__aarch64__)
     install_rekordbox_rows(base, page);
+    install_shadow_browse(base, page);
 #endif
     if (install_dsp_hooks(base, page)) {
         install_bt_send(base, page);
@@ -3301,6 +3303,46 @@ static void redirect_function(uintptr_t entry, const void *handler, size_t page)
     memcpy((void *)entry, jump, sizeof jump);
     if (mprotect((void *)first, span, PROT_READ | PROT_EXEC)) _exit(127);
     __builtin___clear_cache((char *)entry, (char *)entry + sizeof jump);
+}
+
+static uintptr_t librarian_track_vtable;
+static void (*stock_hide_browser)(void *);
+static void hide_browser_for_user_load(void *controller, const uint32_t *track) {
+    static const char prefix[] = OA_SHADOW "/";
+    int deck = ((const int *)controller)[0x68 / 4];
+    if (deck >= 0 && deck < 4 && deck != four_deck_route[0] && deck != four_deck_route[1] &&
+        track && track[0] == librarian_track_vtable) {
+        const struct oa_string *path = (const void *)(track + 4);
+        if (path->ptr && path->size >= (ssize_t)sizeof prefix) {
+            size_t i = 0;
+            while (i < sizeof prefix - 1 && path->ptr[i] == (uint16_t)prefix[i]) i++;
+            if (i == sizeof prefix - 1) return;
+        }
+    }
+    stock_hide_browser(controller);
+}
+
+static void install_shadow_browse(uintptr_t base, size_t page) {
+    if (strcmp(build->name, "5.3.0") || !four_deck_pad_on) return;
+    // Both native load notifications call hideBrowser(controller) after checking
+    // hideBrowserOnTrackLoad. Leave every other side effect and caller alone.
+    static const struct { uint32_t offset, call, track[2]; } sites[] = {
+        {0xd6a680, 0xeb2d321c, {0xe5951000, 0xe5911010}}, // event = *r5; track = event->track
+        {0xd6bf9c, 0xeb2d2bd5, {0xe51b107c, 0xe320f000}}, // track = local ref at fp-124
+    };
+    for (unsigned i = 0; i < 2; i++) {
+        const uint32_t *p = (const void *)(base + sites[i].offset);
+        if (p[0] != 0xe1a00004 || p[1] != sites[i].call) return;
+    }
+    librarian_track_vtable = base + 0x2b7d3a8;
+    stock_hide_browser = (void *)(base + 0x18b6efc);
+    for (unsigned i = 0; i < 2; i++) {
+        uintptr_t site = base + sites[i].offset;
+        uint32_t code[] = {sites[i].track[0], sites[i].track[1], 0xe1a00004, // r0 = controller
+                           0xe59fc004, 0xe12fff3c, 0xe59ff000,             // call helper; resume after BL
+                           (uint32_t)(uintptr_t)hide_browser_for_user_load, (uint32_t)(site + 8)};
+        redirect_function(site, rx_code(code, sizeof code, page), page);
+    }
 }
 
 static void (*tidal_track_decode)(void *, void *, uintptr_t, uintptr_t);
