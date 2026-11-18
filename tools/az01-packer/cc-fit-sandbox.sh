@@ -5,12 +5,23 @@ ENGINEX_LAB=${ENGINEX_LAB:-$legacy_lab}
 # Engine and Config (product code), natively on the build host. No qemu, host services or deck connections.
 # bash tools/az01-packer/cc-fit-sandbox.sh <new-private-dir> [BOARD ...]     (default: all 16 models)
 # CROSS_FADER_TEST=1 bash tools/az01-packer/cc-fit-sandbox.sh <new-private-dir> JP11S [other software-switch boards...]
+# CROSS_FADER_TEST=1 CROSS_FADER_REBOOT=1 runs two JP11S boots on one /data.
+# CROSS_FADER_LANG=zh-Hans or zh-Hant captures the localized mixer page.
 # Panel: every model's device tree (Gen-2, AZ04) or stock splash (Gen-1) is an 800 x 1280 portrait panel shown rotated, 1280 x 800.
 set -euo pipefail
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 W=$(realpath -m "${1:?private sandbox directory required}")
 LAB=${ENGINEX_LAB}
 PANEL=${CC_FIT_PANEL:-1280x800}
+lang=${CROSS_FADER_LANG:-en}
+reboot=${CROSS_FADER_REBOOT:-0}
+case "$reboot" in 0|1) ;; *) echo 'CROSS_FADER_REBOOT must be 0 or 1' >&2; exit 2 ;; esac
+case "$lang" in
+    en) label='Crossfader Reverse' ;;
+    zh-Hans) label='反转交叉推子' ;;
+    zh-Hant) label='反轉交叉推桿' ;;
+    *) echo "unsupported crossfader test language: $lang" >&2; exit 2 ;;
+esac
 # board -> kind and lab image (AZ04 uses the lab's unpacked rootfs)
 image_of() {
     case "$1" in
@@ -30,6 +41,10 @@ if [ "${2:-}" != --inner ]; then
     boards=("${@:2}")
     if [ "${CROSS_FADER_TEST:-0}" = 1 ]; then
         [ ${#boards[@]} -gt 0 ] || boards=(JC11 JC16 NH08 JP11 JP20 JP21 JC11S JP11S NH08S NH10)
+        if [ "$reboot" = 1 ] && [ "${boards[*]}" != JP11S ]; then
+            echo 'crossfader reboot test requires exactly JP11S' >&2; exit 2
+        fi
+        (cd "$REPO" && GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -o "$W/stream-sync" ./cmd/enginex-suite)
     fi
     [ ${#boards[@]} -gt 0 ] || boards=(JC11 JC16 NH08 JP07 JP08 JP11 JP13 JP14 JP20 JP21 JC11S JP11S NH08S NH10 JP24 RMZ2)
     for board in "${boards[@]}"; do
@@ -101,12 +116,13 @@ hook=$REPO/rootfs-overlay/etc/enginex/libengine-ui-hook.so; preload=/tmp/libengi
 [ "$kind" = az04 ] && hook=$W/hook-az04.so
 cp "$hook" "$R/tmp/libengine-ui-hook.so"
 [ "$kind" = gen2 ] && { cp "$W/identity.so" "$R/tmp/identity.so"; preload=/tmp/identity.so:/tmp/libengine-ui-hook.so; }
-cp -a "$W/packs/en" "$R/data/enginex/ui/packs/"
-mkdir -p "$R/data/enginex/ui/packs/en/Skins/Common/Items"
-sed "s/@BOARD@/$board/; s/@WIDTH@/${PANEL%x*}/; s/@HEIGHT@/${PANEL#*x}/" "$REPO/tools/az01-packer/cc-fit-probe.qml" > "$R/data/enginex/ui/packs/en/Skins/Common/Items/QmlWarnings.qml"
-printf 'lang=en\n' > "$R/data/enginex/ui/settings.conf"
+if [ "${CROSS_FADER_TEST:-0}" != 1 ]; then lang=en; fi
+cp -a "$W/packs/$lang" "$R/data/enginex/ui/packs/"
+probe="$R/data/enginex/ui/packs/$lang/Skins/Common/Items/QmlWarnings.qml"
+mkdir -p "$(dirname "$probe")"
+sed "s/@BOARD@/$board/; s/@WIDTH@/${PANEL%x*}/; s/@HEIGHT@/${PANEL#*x}/" "$REPO/tools/az01-packer/cc-fit-probe.qml" > "$probe"
+printf 'lang=%s\n' "$lang" > "$R/data/enginex/ui/settings.conf"
 if [ "${CROSS_FADER_TEST:-0}" = 1 ]; then
-    cp "$REPO/tools/az01-packer/crossfader-reverse-probe.qml" "$R/data/enginex/ui/packs/en/Skins/Common/Items/QmlWarnings.qml"
     triplet=arm-linux-gnueabihf; loader=ld-linux-armhf.so.3
     for path in /dev/dri /sys/class /sys/devices /sys/bus /usr/lib/"$triplet" /usr/share/glvnd /usr/share/drirc.d; do
         mkdir -p "$R$path"
@@ -120,18 +136,41 @@ if [ "${CROSS_FADER_TEST:-0}" = 1 ]; then
     chroot "$R" /usr/bin/dbus-daemon --system --fork --nopidfile > "$W/$board-dbus.log" 2>&1 || true
     # Engine locates QML plugins relative to /proc/self/exe. Exec it normally with Mesa's matching loader.
     mount --bind "/usr/lib/$triplet/$loader" "$R/lib/$loader"
-    engine_rc=0
-    timeout --kill-after=5s 60s chroot "$R" "/usr/lib/$triplet/$loader" --library-path "/usr/lib/$triplet" \
-        /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/tmp/home \
-        QT_QPA_PLATFORM=eglfs QT_QPA_EGLFS_INTEGRATION=eglfs_kms LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe \
-        LP_NUM_THREADS=2 QML_DISABLE_DISK_CACHE=1 MALLOC_ARENA_MAX=1 LD_LIBRARY_PATH="/usr/lib/$triplet:/usr/lib:/usr/qt/lib" \
-        LD_PRELOAD="$preload" /usr/Engine/Engine -d0 > "$W/$board-engine.log" 2>&1 || engine_rc=$?
-    if ! grep -aq "X303 PASS|$board" "$W/$board-engine.log"; then
-        cp "$R/tmp/engine-quit-reason" "$W/$board-quit-reason" 2>/dev/null || true
-        echo "$board: crossfader test failed (Engine exit $engine_rc)" >&2
-        exit 1
+    cp "$W/stream-sync" "$R/tmp/stream-sync"
+    for boot in $(seq "$((1 + reboot))"); do
+        sed "s/@LABEL@/$label/; s/@BOOT@/$boot/; s/@REBOOT@/$reboot/" \
+            "$REPO/tools/az01-packer/crossfader-reverse-probe.qml" > "$probe"
+        chroot "$R" /usr/bin/env -i PATH=/usr/bin:/bin HOME=/tmp/home /tmp/stream-sync \
+            --deemixd= --relay-url= --disable-guard --access-token=x303-sandbox \
+            --listen 127.0.0.1:8080 > "$W/$board-settings-$boot.log" 2>&1 &
+        settings_pid=$!
+        for _ in $(seq 50); do
+            if curl -sf -o /dev/null http://127.0.0.1:8080/v1/enginex/ui; then break; fi
+            sleep 0.2
+        done
+        curl -sf -o /dev/null http://127.0.0.1:8080/v1/enginex/ui
+        log="$W/$board-engine.log"
+        if [ "$boot" = 2 ]; then log="$W/$board-engine-boot2.log"; fi
+        engine_rc=0
+        timeout --kill-after=5s 60s chroot "$R" "/usr/lib/$triplet/$loader" --library-path "/usr/lib/$triplet" \
+            /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/tmp/home \
+            QT_QPA_PLATFORM=eglfs QT_QPA_EGLFS_INTEGRATION=eglfs_kms LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe \
+            LP_NUM_THREADS=2 QML_DISABLE_DISK_CACHE=1 MALLOC_ARENA_MAX=1 LD_LIBRARY_PATH="/usr/lib/$triplet:/usr/lib:/usr/qt/lib" \
+            LD_PRELOAD="$preload" /usr/Engine/Engine -d0 > "$log" 2>&1 || engine_rc=$?
+        kill "$settings_pid" 2>/dev/null || true
+        wait "$settings_pid" 2>/dev/null || true
+        grep -a "X303 " "$log" | cut -c1-150 || true
+        if ! grep -aqF "X303 PASS|$board|$boot" "$log" || { [ "$reboot" = 1 ] && [ "$engine_rc" != 0 ]; }; then
+            cp "$R/tmp/engine-quit-reason" "$W/$board-quit-reason" 2>/dev/null || true
+            echo "$board: crossfader test failed on boot $boot (Engine exit $engine_rc)" >&2
+            exit 1
+        fi
+    done
+    if [ "$reboot" = 1 ]; then
+        ! grep -qx 'crossfader_reverse=1' "$R/data/enginex/ui/settings.conf" || {
+            echo "$board: switch-off was not saved" >&2; exit 1;
+        }
     fi
-    grep -a "X303 " "$W/$board-engine.log" | cut -c1-150
     cp "$R/tmp/crossfader-reverse.png" "$W/$board-reverse.png"
     exit
 fi

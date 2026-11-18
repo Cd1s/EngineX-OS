@@ -112,7 +112,7 @@ assert.equal(scFxTimeMode,'beats'); assert.equal(scFxTimeMs,500);
         stems_handler = re.search(r"onScStemsEqModeChanged:\s*\{([\s\S]*?)\n\t\}", bp.SERVICES_MAIN).group(1)
         has_stems_m = re.search(r"onScHasStemsEqChanged:\s*\{([\s\S]*?)\n\t\}", bp.SERVICES_MAIN)
         has_stems_handler = has_stems_m.group(1) if has_stems_m else ""
-        helpers = "\n".join(function(bp.SERVICES_MAIN, n) for n in ("scFxMsInteger", "scFxMsApply", "scParseSettingsConf", "scSyncStemsEqChannel", "scWatchStemsEq", "scApply", "scSetTransitionFx", "onEnabledChanged"))
+        helpers = "\n".join(function(bp.SERVICES_MAIN, n) for n in ("scFxMsInteger", "scFxMsApply", "scParseSettingsConf", "scSyncStemsEqChannel", "scWatchStemsEq", "scApply", "scSetTransitionFx", "onEnabledChanged", "scSetCrossfaderReverse"))
         prop_defs = "\n".join(
             f"Object.defineProperty(root, {k!r}, {{get() {{ return ({v}); }}, configurable: true}});"
             for k, v in props.items()
@@ -317,6 +317,21 @@ scApply({{player: true, fxSelectorAvailable: true, pioneerFx: 'spiral', fxTimeMo
 assert.equal(visible['Color FX Style'](), false);
 assert.equal(visible['PX Delay Time Mode'](), false);
 assert.equal(visible['PX Delay Time (ms)'](), false);
+
+// #303: default off does not touch Engine; an enabled preference applies once.
+resetUnit('JP11S', {{hasStemsLevel: false}});
+const faderWrites = [];
+let reversed = false;
+root.scCrossfaderReverse = {{get state() {{ return reversed; }}, set state(v) {{ reversed = v; faderWrites.push(['reverse', v]); }}}};
+root.scCrossfaderPosition = {{get unnormalized() {{ return 38; }}, set unnormalized(v) {{ faderWrites.push(['position', v]); }}}};
+scUiLoaded = false;
+scApply({{crossfaderReverse: false}});
+assert.deepEqual(faderWrites, []);
+scUiLoaded = false;
+scApply({{crossfaderReverse: true}});
+reversed = false;
+scApply({{crossfaderReverse: true}});
+assert.deepEqual(faderWrites, [['reverse', true], ['position', 38]]);
 """
         result = subprocess.run(["node", "-e", script], text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)

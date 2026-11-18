@@ -11,6 +11,8 @@ Item {
     property real curve
     property int step: 0
     property bool saved: false
+    property int readyTries: 0
+    function quit() { Planck.getProperty("/Client/Quit").translator.state = true }
     function tr(name) { return Planck.getProperty("/Engine/Mixer/" + name).translator }
     function check(ok, why) { if (!ok) throw new Error(why) }
     function gains(position, reversed) {
@@ -33,10 +35,19 @@ Item {
                     break
                 case 1:
                     for (const entry of page.content)
-                        if (entry.text === "Crossfader Reverse") row = entry
+                        if (entry.text === "@LABEL@") row = entry
                     check(row && row.visible, "missing settings row")
-                    check(!tr("CrossfaderReverse").state && !row.checkedExternally, "default not off")
+                    // Wait for the first settings reply before checking the restored state.
+                    if (!row.enabled && ++readyTries < 25) return
+                    check(row.enabled, "settings service did not load")
                     curve = tr("CrossfaderCurve").value
+                    if (@BOOT@ === 2) {
+                        check(tr("CrossfaderReverse").state && row.checkedExternally, "reverse was not restored on reboot")
+                        tr("CrossfaderPosition").value = 0
+                        step = 11
+                        return
+                    }
+                    check(!tr("CrossfaderReverse").state && !row.checkedExternally, "default not off")
                     tr("CrossfaderPosition").value = 0
                     page.contentY = Math.max(0, Math.min(page.contentHeight - page.height, row.y - page.height / 2))
                     break
@@ -53,15 +64,25 @@ Item {
                 case 8:
                     gains(0, false)
                     check(saved, "missing screenshot")
-                    console.warn("X303 PASS|" + Config.device.name)
+                    if (@REBOOT@ === 1) {
+                        row.clicked()
+                        break
+                    }
+                    step = 13
+                    return
+                case 9: gains(0, true); step = 13; return
+                case 11: gains(0, true); row.clicked(); break
+                case 12: gains(0, false); break
+                case 13:
+                    console.warn("X303 PASS|" + Config.device.name + "|@BOOT@")
                     running = false
-                    Planck.getProperty("/Client/Quit").translator.state = true
+                    quit()
                 }
                 step++
             } catch (e) {
                 console.warn("X303 FAIL|" + e)
                 running = false
-                Planck.getProperty("/Client/Quit").translator.state = true
+                quit()
             }
         }
     }

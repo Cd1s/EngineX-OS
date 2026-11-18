@@ -3282,12 +3282,19 @@ class UiModBuildTest(unittest.TestCase):
                                    ("Crossfader Reverse", "反转交叉推子", "反轉交叉推桿", "Invertir crossfader")):
                 with self.subTest(lang=lang):
                     mixer = (out / lang / "Skins/Embedded/Views/ControlCenter/Tabs/Preferences/MixerTabContent.qml").read_text()
-                    self.assertIn('Planck.getProperty("/Engine/Mixer/CrossfaderReverse")', mixer)
+                    main = (out / lang / "Skins/Embedded/EmbeddedMain.qml").read_text()
+                    self.assertIn('scHasCrossfaderReverse: true && scHasMixer && !scIsAZ04', main)
+                    self.assertIn('scTr("/Engine/Mixer/CrossfaderReverse")', main)
+                    self.assertIn('scTr("/Engine/Mixer/CrossfaderPosition")', main)
+                    self.assertIn("reverse.state = on", main)
+                    self.assertIn("position.unnormalized = position.unnormalized", main)
                     row = mixer.split("XFaderCutInLeft {}", 1)[0].rsplit("EntryBase.SwitchEntry {", 1)[1]
                     self.assertIn('"' + label + '"', row)
-                    self.assertIn('root.scHasMixer && !root.scIsAZ04', row)
-                    self.assertIn("reverse.translator.state = !reverse.translator.state", row)
-                    self.assertIn("position.translator.unnormalized = position.translator.unnormalized", row)
+                    self.assertIn('reverse: root.scCrossfaderReverse', row)
+                    self.assertIn('position: root.scCrossfaderPosition', row)
+                    self.assertIn('const on = !reverse.state', row)
+                    self.assertIn('root.scSetCrossfaderReverse(on)', row)
+                    self.assertIn('root.scCall("crossfaderReverse="', row)
                     self.assertNotRegex(row, r"CrossfaderCurve|onCompleted")
                     self.assertEqual(mixer.count("XFaderCutInLeft {}"), 1)
                     self.assertEqual(mixer.count("XFaderCutInRight {}"), 1)

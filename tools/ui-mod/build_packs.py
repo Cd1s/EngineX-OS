@@ -3142,6 +3142,18 @@ SERVICES_MAIN = """
 	property string scUpdateText: ""
 	property bool scBroadcastOn: false
 	property bool scUpfaderEcho: false
+	readonly property bool scHasCrossfaderReverse: @STOCK_FADER_REVERSE@ && scHasMixer && !scIsAZ04
+	readonly property var scCrossfaderReverse: scHasCrossfaderReverse ? scTr("/Engine/Mixer/CrossfaderReverse") : null
+	readonly property var scCrossfaderPosition: scCrossfaderReverse ? scTr("/Engine/Mixer/CrossfaderPosition") : null
+	function scSetCrossfaderReverse(on) {
+		const reverse = scCrossfaderReverse, position = scCrossfaderPosition
+		if (!reverse || typeof reverse.state !== "boolean" || reverse.state === on
+			|| !position || typeof position.unnormalized !== "number") return false
+		reverse.state = on
+		// Engine updates the gains on a position write, even with the fader at rest.
+		position.unnormalized = position.unnormalized
+		return true
+	}
 	property string scLastBroadcastTrack: ""
 	property bool scDualColumn: false
 	property bool scTracklistWaveform: true
@@ -3958,6 +3970,7 @@ SERVICES_MAIN = """
 		scUiLoaded = true
 		if (typeof scSyncBpmDecimals === "function") scSyncBpmDecimals()
 		if (!wasUiLoaded) {
+		if (v.crossfaderReverse === true) scSetCrossfaderReverse(true)
 			scWatchStemsEq()
 			scMidiInitBridge()
 			scHookTimeZonePicker()
@@ -7147,6 +7160,7 @@ def edits(dev: bool):
     main = DEV_HARNESS if dev else ""
     services_main = (SERVICES_MAIN
                      .replace("@TIDAL_OPEN@", TIDAL_OPEN_530 if v53() else TIDAL_OPEN_504)
+                     .replace("@STOCK_FADER_REVERSE@", "true" if v53() else "false")
                      .replace("@TIDAL_SELECT@", TIDAL_SELECT_530 if v53() else "")
                      .replace("@TIDAL_PAIRING@", TIDAL_PAIRING_530 if v53() else "")
                      .replace("@TIDAL_LOGIN_PENDING@", "\tproperty bool scTidalLoginPending: false" if v53() else ""))
@@ -7316,16 +7330,16 @@ def edits(dev: bool):
              f'import "{"" if v53() else "../"}Entries"\nimport "{"Entries/Base" if v53() else "../Entries/Base"}" as EntryBase\nimport Planck 1.0\n'),
             *([("XFaderCutInLeft {},", """EntryBase.SwitchEntry {
             text: "Crossfader Reverse"
-            readonly property var reverse: root.scHasMixer && !root.scIsAZ04
-                ? Planck.getProperty("/Engine/Mixer/CrossfaderReverse") : null
-            readonly property var position: reverse ? Planck.getProperty("/Engine/Mixer/CrossfaderPosition") : null
-            visible: !!reverse && !!reverse.translator && typeof reverse.translator.state === "boolean"
-                && !!position && !!position.translator && typeof position.translator.unnormalized === "number"
-            checkedExternally: visible && reverse.translator.state
-            onClicked: if (visible) {
-                reverse.translator.state = !reverse.translator.state
-                // Engine recomputes channel gains on a position write, even when the fader is at rest.
-                position.translator.unnormalized = position.translator.unnormalized
+            readonly property var reverse: root.scCrossfaderReverse
+            readonly property var position: root.scCrossfaderPosition
+            visible: !!reverse && typeof reverse.state === "boolean"
+                && !!position && typeof position.unnormalized === "number"
+            enabled: root.scUiLoaded
+            checkedExternally: visible && reverse.state
+            onClicked: if (enabled && visible) {
+                const on = !reverse.state
+                if (root.scSetCrossfaderReverse(on))
+                    root.scCall("crossfaderReverse=" + (on ? "1" : "0"))
             }
         },
         XFaderCutInLeft {},""")] if v53() else []),
