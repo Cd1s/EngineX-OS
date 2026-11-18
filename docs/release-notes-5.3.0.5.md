@@ -58,7 +58,7 @@ Custom system rebuilt on the official Engine OS 5.3.0+ base for all 16 Denon DJ,
 
 ### Not in this release
 
-- **Pull the stick and keep playing** (feasibility study only), **WAV / AIFF from the rekordbox source**, the Wi-Fi power-save fallback for decks without `iw` (#309), the TIDAL "disconnected" fix when logged in to an Engine DJ profile (#304), and the PRIME 4 G2 / SYSTEM ONE data partition size (#244).
+- **Pull the stick and keep playing** (feasibility study only), **WAV / AIFF from the rekordbox source**, rekordbox Link instant waveforms, cues and grids, and the PRIME 4 G2 / SYSTEM ONE data partition size (#244).
 - Two items of #286 (items 3 and 4).
 
 ### Known issues and limits
