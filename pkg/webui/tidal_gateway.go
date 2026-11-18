@@ -1870,6 +1870,10 @@ func (g *tidalGateway) streamTarget(r *http.Request, id int64, ref trackRef) (ad
 		codec = localCodecs[strings.ToLower(path.Ext(ref.file))]
 		if codec == "mp3" {
 			ext = "mp3"
+		} else if codec == "wav" || codec == "aiff" {
+			// As for native Ogg (#277), retain a recognized carrier filename.
+			// Engine probes the original PCM container; no samples are converted.
+			codec, ext = "mp3", "mp3"
 		} else if codec != "flac" {
 			ext = "mp4"
 		}
@@ -1943,8 +1947,11 @@ func (g *tidalGateway) playbackInfo(w http.ResponseWriter, r *http.Request) {
 	if ref.track.Provider == "spotify" && g.s.jobs != nil && strings.EqualFold(path.Ext(g.s.jobs.File(ref.track)), ".ogg") {
 		mime = "audio/ogg" // #277: the naming tag does not change legacy Ogg bytes.
 	}
+	if ref.file != "" {
+		mime = localMIMEs[localCodecs[strings.ToLower(path.Ext(ref.file))]]
+	}
 	manifest, _ := json.Marshal(map[string]any{"mimeType": mime, "codecs": codec, "encryptionType": "NONE", "urls": []string{address}})
-	log.Printf("stream-sync: load track=%d provider=%s step=manifest codec=%s", id, ref.track.Provider, codec)
+	log.Printf("stream-sync: load track=%d provider=%s step=manifest codec=%s mime=%s", id, ref.track.Provider, codec, mime)
 	respond(w, map[string]any{"trackId": id, "assetPresentation": "FULL", "audioMode": "STEREO", "audioQuality": "LOSSLESS", "manifestMimeType": "application/vnd.tidal.bts", "manifestHash": "", "manifest": base64.StdEncoding.EncodeToString(manifest), "albumReplayGain": 0, "albumPeakAmplitude": 1, "trackReplayGain": 0, "trackPeakAmplitude": 1})
 }
 func (g *tidalGateway) streamURL(w http.ResponseWriter, r *http.Request) {
@@ -2121,10 +2128,7 @@ func (g *tidalGateway) stream(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 	log.Printf("stream-sync: load track=%d provider=%s scope=%s step=stream result=request", id, ref.track.Provider, g.s.scope())
 	if ref.file != "" { // OmniSource: straight from the drive, with Range
-		mime := map[string]string{"flac": "audio/flac", "mp3": "audio/mpeg"}[localCodecs[strings.ToLower(path.Ext(ref.file))]]
-		if mime == "" {
-			mime = "audio/mp4"
-		}
+		mime := localMIMEs[localCodecs[strings.ToLower(path.Ext(ref.file))]]
 		w.Header().Set("Content-Type", mime)
 		if cp := rbxRunning(ref.file); cp != nil { // a rekordbox track still being copied
 			cp.serve(w, r)

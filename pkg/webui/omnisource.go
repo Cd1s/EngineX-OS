@@ -29,9 +29,10 @@ const (
 	maxLocalResults  = 50
 )
 
-// localCodecs are the files Engine's TIDAL player takes, by manifest codec.
-// shortcut: WAV/AIFF rows are left out; add them once the deck is shown to play them as a stream.
-var localCodecs = map[string]string{".flac": "flac", ".mp3": "mp3", ".m4a": "mp4a.40.2", ".mp4": "mp4a.40.2", ".aac": "mp4a.40.2"}
+// localCodecs describe the original containers; the carrier's download-name
+// token is separate because its native filename table only knows FLAC/AAC/MP4.
+var localCodecs = map[string]string{".flac": "flac", ".mp3": "mp3", ".m4a": "mp4a.40.2", ".mp4": "mp4a.40.2", ".aac": "mp4a.40.2", ".wav": "wav", ".aif": "aiff", ".aiff": "aiff", ".aifc": "aiff"}
+var localMIMEs = map[string]string{"flac": "audio/flac", "mp3": "audio/mpeg", "mp4a.40.2": "audio/mp4", "wav": "audio/wav", "aiff": "audio/aiff"}
 
 type drive struct{ root, name, db string }
 

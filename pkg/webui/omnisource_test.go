@@ -30,7 +30,7 @@ type omniTrack struct {
 func omniDrive(t *testing.T) (dbPath, root string, flac []byte) {
 	dbPath, root, db := testlibrary.Create(t)
 	flac = append([]byte("fLaC"), bytes.Repeat([]byte{7, 1, 9}, 400)...)
-	for name, data := range map[string][]byte{"Contents/Artist/One.flac": flac, "Contents/Two.mp3": []byte("ID3 mp3 data"), "Contents/Wav.wav": []byte("RIFF")} {
+	for name, data := range map[string][]byte{"Contents/Artist/One.flac": flac, "Contents/Two.mp3": []byte("ID3 mp3 data"), "Contents/Unsupported.ogg": []byte("OggS")} {
 		p := filepath.Join(root, name)
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 			t.Fatal(err)
@@ -49,7 +49,7 @@ func omniDrive(t *testing.T) (dbPath, root string, flac []byte) {
 			(1,'../Contents/Artist/One.flac','One.flac','Omni One','Local Artist',300,124.0),
 			(2,'../Contents/Two.mp3','Two.mp3','Omni Two','Local Artist',200,0),
 			(3,'../../../../etc/passwd','passwd','Omni Escape','',1,0),
-			(4,'../Contents/Wav.wav','Wav.wav','Omni Wav','',1,0),
+			(4,'../Contents/Unsupported.ogg','Unsupported.ogg','Omni Unsupported','',1,0),
 			(5,'../Contents/Link.flac','Link.flac','Omni Link','',1,0)`,
 		`INSERT INTO Playlist(id,title,parentListId,isPersisted,nextListId,lastEditTime,isExplicitlyExported) VALUES(1,'Club',0,1,0,0,1)`,
 		// Inserted backwards: entity 2 (track 1) comes first through nextEntityId.
@@ -143,7 +143,7 @@ func TestOmniSourceSearchFindsDriveTracksBesideStreaming(t *testing.T) {
 	var res struct{ Tracks tidalList }
 	tidalGet(t, base, "/v1/search?query=Omni&limit=50&offset=0&types=TRACKS", 200, &res)
 	got, _ := titles(t, res.Tracks.Items)
-	// Escape (outside the volume) and Wav (not a stream codec) are left out;
+	// Escape (outside the volume) and Unsupported (not an admitted local codec) are left out;
 	// Link is listed but cannot play (see the stream test). Deezer's "Found" follows.
 	if strings.Join(got, "|") != "Omni One|Omni Two|Omni Link|Found" {
 		t.Fatalf("%v", got)
