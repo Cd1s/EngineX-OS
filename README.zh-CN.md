@@ -89,7 +89,7 @@
 - **高速 SD 卡（实验性）**：`设置 → 设备 → 高速 SD 卡模式`（网页控制台「碟机显示与音频」卡片里有同一个开关）默认关闭，在 14 款 RK3288 机型上提供，PRIME 4 G2 / SYSTEM ONE 没有。它把 SD 卡槽从 25 MHz 默认速度（最高 12.5 MB/s）提到 50 MHz 高速（最高 25 MB/s，SC5000 上实测 23 MB/s）。若某张卡无法识别请关闭它。碟机正在播放时改动，会在下次启动或重新插入 SD 卡时生效。
 - **全部 16 款机型都能读写 Mac 格式（HFS+）的 U 盘和存储卡**：通过只读检查的盘会以读写方式挂载，Engine 把曲库、Cue 和 Loop 直接存到盘上（一代机用固定的驱动模块，PRIME 4 G2 / SYSTEM ONE 用原厂驱动，二代 32 位机用用户态驱动）。上次没有正常弹出、但检查正常的盘会先标记为干净再读写，其余情况仍是只读。碟机在盘只读时为它建的库，第一次读写挂载时整体复制到盘上，要么全部成功要么不复制。弹出时会等数据全部写完。
 - **电脑上的 rekordbox 作为来源，只有一个 `Pro DJ Link` 开关**：`设置 → 服务 → Pro DJ Link` 取代原来的两个开关。开启后每台碟机在 rekordbox 里都是独立的播放器（所以会出现 `LINK`，MASTER 也能交接），在 `Export` 模式运行的 rekordbox 7 会出现在碟机来源列表里，名为 `rekordbox（<电脑名>）`，可浏览全部曲目和歌单（曲名、艺人、BPM、调性）。音频来自共享的音乐文件夹（网页控制台 `曲库、网络与系统 → rekordbox 音乐文件夹`）、已挂载的 SMB / NAS 共享，或电脑自己的 NFS 服务（并行读取）。关掉 LINK 后来源会消失。波形、拍线和 Cue 由 Engine 在加载后自己分析。
-- **大型 rekordbox U 盘首次插入很快（#301）**：第一次插入时碟机直接读出导出里的歌单、曲目、热 Cue 和 Memory Cue，几秒内即可使用，拍线和波形随后在后台低优先级补齐，并显示 `正在导入 rekordbox 曲库…` 进度。超出挂载时限的导入不会再被丢弃。
+- **大型 rekordbox U 盘首次插入很快（#301）**：第一次插入时碟机直接读出导出里的歌单、曲目、热 Cue 和 Memory Cue，几秒内即可使用，拍线和波形随后在后台低优先级补齐，并显示 `正在导入 rekordbox 曲库…` 进度。超出挂载时限的导入不会再被丢弃。大库转换完成后，碟机会在没有碟机再用这个 U 盘、并安静 30 秒后自动发布，不需要重新插入。
 - **把 Cue 和 Loop 的修改写回 rekordbox U 盘（#271）**：网页控制台 `扩展` 页的 `写回 Hot Cue / Loop 到 rekordbox U 盘` 会把碟机上的 Hot Cue、Memory Cue 和 Loop 写进盘上的分析文件和 `exportLibrary.db`（先在 `/.enginex-backup/` 备份一次）。
 - **每个通道的 `FILTER` 旋钮带 Color FX**：`配置 → 播放 → 先锋风格效果 (Color FX)`（`Spiral`、`Pitch Echo`、`Slip Roll`、`Dub Echo`、`Space`）现在像先锋混音台一样挂在通道自己的滤波旋钮上，旋钮中位与原厂完全一致；`Off` 是原厂 Sweep FX。适用于 PRIME 4、PRIME 2、PRIME GO、Mixstream Pro 以及二代的 SC LIVE 2 / 4、PRIME 4+、PRIME GO+、Mixstream Pro+ / Pro Go（同时修复了部分 PRIME GO 用户听到的持续回声）。
 - **Mixstream（#286）**：`设置 → 设备` 新增 `Pitch Bend 按键改为 Beat Jump`（`-` / `+` 前后跳，`Shift` 仍调速度范围）和 `FX 槽位 1–4`（四个实体 FX 键各自选 Echo、Flanger、Delay 或 Phaser）；打击垫栏只保留打击垫和一个 `△` Sweep FX 按钮，`Stems EQ` 在 `配置 → 播放` 里有独立一行。
@@ -118,6 +118,14 @@
 - **HFS+ 安全**：5.3.0.4 会把干净、未启用日志的 HFS+ U 盘以读写方式挂在有内核 bug 的驱动上，可能让碟机崩溃并损坏盘；5.3.0.5 在所有机型上堵上了这个问题。
 - **CDJ-3000 联机（#198）**：CDJ-3000 不再提示“已与固件较旧的播放机联机”并会保持联机；每台碟机都是独立的播放器，也不会占用 CDJ 自己的编号。
 - **其他修复**：真机控制器上 `Shift + View` 重新可用；Pro DJ Link 导出会跟随插入或拔出的 U 盘；写回 Cue 能看到尚未检查点的修改并回退到 `export.pdb`；蓝牙音箱的 SBC 码率池使用标准高音质值；带多余内容的设置请求会在改动任何东西之前被拒绝；选择 U 盘不会再弹出“复制设置”错误；Mixstream 的层切换与原厂只差几毫秒（#222）；Apple Music 曲库浏览在助手登录或退出后恢复；西班牙语等翻译标签不再溢出。
+- **所有碟机都会关闭 Wi-Fi 省电（#309）**：没有原厂 `iw` 工具的碟机（例如 SC LIVE 4）以前会悄悄保持 Wi-Fi 省电；现在碟机开机时自己关掉它（有原厂 `iw` 的机型仍优先用原厂工具）。
+- **Apple Music、中继和 rekordbox 的复核修复**：在碟机上退出 Apple Music 后，下载助手仍在登录时也不会自动重新登录；中继把碟机指向另一个助手地址时，不再把旧令牌交给新主机；中继控制台点保存不再丢掉自动探测到的令牌；持有手机登录二维码的人不能再设置助手并推送到中继；两台电脑运行 rekordbox 时，关了 `LINK` 的那台不再遮住另一台的曲库；只属于 Mixstream 的 `Stems EQ` 行只在 Mixstream 机型上创建。
+<!-- PENDING-REVIEW #304: drop this bullet if agent/5305-issue-304 is not merged -->
+- **登录 Engine DJ 账号不再让流媒体掉线（#304）**：已登录 Engine DJ 账号时，载入流媒体曲目不再弹出“Tidal Disconnected”并让流媒体来源退出登录。
+<!-- /PENDING-REVIEW #304 -->
+<!-- PENDING-REVIEW #305: drop this bullet if agent/5305-issue-305 is not merged -->
+- **碟机顶栏显示你选的流媒体服务（#305）**：从 Deezer、Spotify、Apple Music、网易云、SoundCloud、Beatport 或 rekordbox 播放的曲目，顶栏显示该服务的图标，`Track Info → Source` 显示它的名字，不再是 TIDAL。它跟随当前选中的服务，不是每首曲目各自记录的事实。
+<!-- /PENDING-REVIEW #305 -->
 
 ### 已知问题
 - 许多账号（包括较早的 Premium 账号）播放 Spotify 会失败，提示 “audio key refused”。Spotify 更改了服务器，所有基于 librespot 的客户端都无法获得音频密钥（librespot-org/librespot#1649，2026-11-07 已锁定，目前没有已知的修复）。碟机上没有任何办法能修复它：请改用 TIDAL、Beatport、SoundCloud 或 Deezer。来源菜单里仍保留 Spotify 入口。
