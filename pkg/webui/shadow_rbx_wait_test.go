@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -76,5 +77,25 @@ func TestShadowFetchPerfTimesOut(t *testing.T) {
 	start := time.Now()
 	if b, pending := fetchPerfPending(context.Background(), peer.URL); b != nil || pending || time.Since(start) > time.Second {
 		t.Fatalf("slow /perf: %q pending %v after %v", b, pending, time.Since(start))
+	}
+}
+
+// Once the source said 503, a timeout (or a broken connection) is no answer: the
+// copy stays unpublished, it does not fall back to Engine's analysis.
+func TestShadowFetchPerf503ThenTimeoutStaysPending(t *testing.T) {
+	oldWait, oldTries, oldTimeout := perfRetryWait, perfRetries, perfRequestTimeout
+	perfRetryWait, perfRetries, perfRequestTimeout = time.Millisecond, 3, 50*time.Millisecond
+	defer func() { perfRetryWait, perfRetries, perfRequestTimeout = oldWait, oldTries, oldTimeout }()
+	var calls atomic.Int32
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			http.Error(w, "analysing", http.StatusServiceUnavailable)
+			return
+		}
+		<-r.Context().Done() // never answers in time
+	}))
+	defer peer.Close()
+	if b, pending := fetchPerfPending(context.Background(), peer.URL); b != nil || !pending || int(calls.Load()) != perfRetries {
+		t.Fatalf("503 then timeouts: %q pending %v after %d requests", b, pending, calls.Load())
 	}
 }
