@@ -152,12 +152,14 @@ func (l *RekordboxLink) Close() {
 	l.c.Close()
 }
 
-func (l *RekordboxLink) exchange(m dbMessage) (dbMessage, error) {
+func (l *RekordboxLink) exchange(m dbMessage) (dbMessage, error) { return l.exchangeMax(m, rbxMaxBlob) }
+
+func (l *RekordboxLink) exchangeMax(m dbMessage, max uint32) (dbMessage, error) {
 	_ = l.c.SetDeadline(time.Now().Add(rbxTimeout))
 	if _, err := l.c.Write(m.bytes()); err != nil {
 		return dbMessage{}, err
 	}
-	return readDBMessageMax(l.r, rbxMaxBlob)
+	return readDBMessageMax(l.r, max)
 }
 
 func (l *RekordboxLink) call(kind uint16, args ...dbField) (dbMessage, error) {
@@ -323,8 +325,26 @@ func (l *RekordboxLink) blob(kind uint16, menu byte, args ...uint32) ([]byte, er
 	return r.args[3].data, nil
 }
 
+// RekordboxArtMax bounds a cover: a reply declaring more is refused before it is read.
+const RekordboxArtMax = 512 << 10
+
 // Artwork is the picture with artwork id art (0x2003), as rekordbox stores it: JPEG as a rule.
-func (l *RekordboxLink) Artwork(art uint32) ([]byte, error) { return l.blob(0x2003, rbxDataMenu, art) }
+// The reply is 0x4002 to this request: request kind, status (0 ok), length, bytes. nil when
+// rekordbox has none.
+func (l *RekordboxLink) Artwork(art uint32) ([]byte, error) {
+	l.tx++
+	r, err := l.exchangeMax(dbMessage{l.tx, 0x2003, []dbField{dbNumber(l.where(rbxDataMenu)), dbNumber(art)}}, RekordboxArtMax)
+	if err != nil {
+		return nil, err
+	}
+	if r.tx != l.tx || r.kind != 0x4002 || len(r.args) < 4 || r.args[0].n != 0x2003 || r.args[3].tag != 0x14 || r.args[2].n != uint32(len(r.args[3].data)) {
+		return nil, fmt.Errorf("prolink: malformed rekordbox artwork reply 0x%04x", r.kind)
+	}
+	if r.args[1].n != 0 {
+		return nil, nil
+	}
+	return r.args[3].data, nil
+}
 
 // BeatGrid is the track's beat grid, as 0x2204 gives it.
 func (l *RekordboxLink) BeatGrid(id uint32) ([]byte, error) { return l.blob(0x2204, rbxDataMenu, id) }

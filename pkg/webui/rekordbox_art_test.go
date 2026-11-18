@@ -6,6 +6,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"image"
+	"image/jpeg"
+	"image/png"
 	"io"
 	"net"
 	"net/http"
@@ -18,13 +21,17 @@ import (
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/prolink"
+	"github.com/Cd1s/EngineX-OS/pkg/providers"
 )
 
 // artRbxLink is fakeRbxLink whose first track has artwork id 42, with the computer's pictures.
+// With entered set, Artwork signals it and then answers only when the session's context ends.
 type artRbxLink struct {
 	fakeRbxLink
-	art   map[uint32][]byte
-	calls *atomic.Int32
+	art     map[uint32][]byte
+	calls   *atomic.Int32
+	ctx     context.Context
+	entered chan struct{}
 }
 
 func (f artRbxLink) Tracks() ([]prolink.RekordboxTrack, error) {
@@ -35,6 +42,11 @@ func (f artRbxLink) Tracks() ([]prolink.RekordboxTrack, error) {
 
 func (f artRbxLink) Artwork(id uint32) ([]byte, error) {
 	f.calls.Add(1)
+	if f.entered != nil {
+		f.entered <- struct{}{}
+		<-f.ctx.Done()
+		return nil, f.ctx.Err()
+	}
 	if b, ok := f.art[id]; ok {
 		return b, nil
 	}
@@ -43,13 +55,33 @@ func (f artRbxLink) Artwork(id uint32) ([]byte, error) {
 
 func useArtLink(paths map[uint32]string, art map[uint32][]byte) *atomic.Int32 {
 	calls := new(atomic.Int32)
-	dialRekordbox = func(context.Context, net.IP, byte) (rbxLink, error) {
-		return artRbxLink{fakeRbxLink{paths}, art, calls}, nil
+	dialRekordbox = func(ctx context.Context, _ net.IP, _ byte) (rbxLink, error) {
+		return artRbxLink{fakeRbxLink{paths}, art, calls, ctx, nil}, nil
 	}
 	return calls
 }
 
-var testJPEG = []byte("\xff\xd8\xff\xe0 a rekordbox cover")
+func testImage(w, h int, enc func(io.Writer, image.Image) error) []byte {
+	img := image.NewNRGBA(image.Rect(0, 0, w, h))
+	for i := range img.Pix {
+		img.Pix[i] = byte(i)
+	}
+	var b bytes.Buffer
+	if err := enc(&b, img); err != nil {
+		panic(err)
+	}
+	return b.Bytes()
+}
+
+var (
+	testJPEG = testImage(16, 16, func(w io.Writer, m image.Image) error { return jpeg.Encode(w, m, nil) })
+	testPNG  = testImage(16, 16, png.Encode)
+)
+
+func isJPEG(b []byte) bool {
+	_, format, err := image.Decode(bytes.NewReader(b))
+	return err == nil && format == "jpeg"
+}
 
 func artGet(t *testing.T, base, song, artist string) (int, []byte, string) {
 	t.Helper()
@@ -68,7 +100,8 @@ func artGet(t *testing.T, base, song, artist string) (int, []byte, string) {
 func TestRekordboxCoverComesFromTheComputer(t *testing.T) {
 	e := newRbxEnv(t, nil)
 	os.WriteFile(filepath.Join(e.share, "a.mp3"), []byte("ID3 one"), 0o644)
-	calls := useArtLink(map[uint32]string{1: "/Users/dj/Music/a.mp3"}, map[uint32][]byte{42: testJPEG})
+	// rekordbox may hold a PNG: the gateway hands it on as JPEG, which the platter's stm.db row takes.
+	calls := useArtLink(map[uint32]string{1: "/Users/dj/Music/a.mp3"}, map[uint32][]byte{42: testPNG})
 	ids, _ := e.trackIDs(t, "Tracks")
 
 	g := e.s.tidal
@@ -78,10 +111,13 @@ func TestRekordboxCoverComesFromTheComputer(t *testing.T) {
 	if first != "rekordbox-art://127.0.0.1/42" || second != "" {
 		t.Fatalf("cover links: %q %q", first, second)
 	}
+	var cover []byte
 	for i := 0; i < 2; i++ {
-		if code, body, mime := artGet(t, e.base, "First", "Artist One"); code != 200 || !bytes.Equal(body, testJPEG) || mime != "image/jpeg" {
-			t.Fatalf("cover: %d %q %s", code, body, mime)
+		code, body, mime := artGet(t, e.base, "First", "Artist One")
+		if code != 200 || !isJPEG(body) || mime != "image/jpeg" || cover != nil && !bytes.Equal(body, cover) {
+			t.Fatalf("cover: %d %d bytes %s", code, len(body), mime)
 		}
+		cover = body
 	}
 	if code, _, _ := artGet(t, e.base, "Second", ""); code != 404 {
 		t.Fatalf("a track without artwork: %d", code)
@@ -121,8 +157,8 @@ func TestRekordboxCoverComesFromTheComputer(t *testing.T) {
 	g.syncStmAlbumArt(context.Background(), ids["First"], ref.track)
 	shadowDataRoot = old
 	var art []byte
-	if db.QueryRow(`SELECT albumArt FROM AlbumArt WHERE id = 1`).Scan(&art); !bytes.Equal(art, testJPEG) {
-		t.Fatalf("stm.db cover: %q", art)
+	if db.QueryRow(`SELECT albumArt FROM AlbumArt WHERE id = 1`).Scan(&art); !bytes.Equal(art, cover) {
+		t.Fatalf("stm.db cover: %d bytes", len(art))
 	}
 
 	// Loading the track starts that stm.db update, as a service's stream does: its four tries
@@ -145,14 +181,17 @@ func TestRekordboxCoverComesFromTheComputer(t *testing.T) {
 	}
 }
 
-// Only a JPEG or PNG within maxArtBytes is a cover; a bad link or a failing computer is no cover.
+// Only a JPEG, or a PNG re-encoded as JPEG, that decodes within maxArtBytes and rbxArtPixels
+// is a cover; a bad link or a failing computer is no cover.
 func TestRekordboxCoverFormatAndSizeLimits(t *testing.T) {
 	e := newRbxEnv(t, nil)
-	png := []byte("\x89PNG\r\n\x1a\n rest")
 	big := append(bytes.Clone(testJPEG), make([]byte, maxArtBytes)...)
-	calls := useArtLink(nil, map[uint32][]byte{1: testJPEG, 2: png, 3: big, 4: []byte("GIF89a"), 5: {}, 6: []byte("<html>")})
-	for art, want := range map[uint32][]byte{1: testJPEG, 2: png, 3: nil, 4: nil, 5: nil, 6: nil, 7: nil} {
-		if got := e.s.tidal.artBytes(context.Background(), "rekordbox-art://127.0.0.1/"+strconv.Itoa(int(art))); !bytes.Equal(got, want) || (want == nil) != (got == nil) {
+	huge := testImage(1700, 1700, png.Encode) // few bytes, too many pixels
+	calls := useArtLink(nil, map[uint32][]byte{1: testJPEG, 2: testPNG, 3: big, 4: []byte("GIF89a"), 5: {}, 6: []byte("<html>"),
+		8: testJPEG[:len(testJPEG)/2], 9: []byte("\xff\xd8\xff\xe0 signature only"), 10: huge})
+	for art, ok := range map[int]bool{1: true, 2: true, 3: false, 4: false, 5: false, 6: false, 7: false, 8: false, 9: false, 10: false} {
+		got := e.s.tidal.artBytes(context.Background(), "rekordbox-art://127.0.0.1/"+strconv.Itoa(art))
+		if ok != (got != nil) || ok && !isJPEG(got) || art == 1 && !bytes.Equal(got, testJPEG) {
 			t.Fatalf("artwork %d: %d bytes", art, len(got))
 		}
 	}
@@ -164,6 +203,96 @@ func TestRekordboxCoverFormatAndSizeLimits(t *testing.T) {
 	}
 	if calls.Load() != n {
 		t.Fatal("a malformed cover link reached the computer")
+	}
+}
+
+// A cover is read only from the rekordbox computer the deck sees on the link now, and only for
+// the gateway's own rekordbox rows: never from an address another source's row names.
+func TestRekordboxCoverOnlyFromTheComputerOnTheLink(t *testing.T) {
+	e := newRbxEnv(t, nil)
+	calls := useArtLink(nil, map[uint32][]byte{1: testJPEG})
+	g := e.s.tidal
+	for _, address := range []string{"rekordbox-art://10.9.9.9/1", "rekordbox-art://127.0.0.2/1"} {
+		if g.artBytes(context.Background(), address) != nil {
+			t.Fatalf("%s: a cover from a computer not on the link", address)
+		}
+	}
+	g.addTrack(trackRef{track: providers.Track{ID: "x", Title: "Bait", Artist: "B", Provider: "deezer", CoverURL: "rekordbox-art://127.0.0.1/1"}})
+	if code, _, _ := artGet(t, e.base, "Bait", "B"); code != 404 {
+		t.Fatalf("another source's row reached the computer: %d", code)
+	}
+	e.s.rbxPresenceMu.Lock()
+	e.s.rbxPresence["127.0.0.1"].seen = time.Time{} // LINK turned off
+	e.s.rbxPresenceMu.Unlock()
+	if g.artBytes(context.Background(), "rekordbox-art://127.0.0.1/1") != nil {
+		t.Fatal("a cover from a computer that no longer offers its library")
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("%d artwork requests", calls.Load())
+	}
+}
+
+// A list, a load or an analysis read never waits for a cover: one being read is ended at once,
+// and none starts while they hold their claim.
+func TestRekordboxCoverGivesWayToListsAndLoads(t *testing.T) {
+	e := newRbxEnv(t, nil)
+	calls := new(atomic.Int32)
+	entered := make(chan struct{}, 1)
+	dialRekordbox = func(ctx context.Context, _ net.IP, _ byte) (rbxLink, error) {
+		return artRbxLink{fakeRbxLink{nil}, nil, calls, ctx, entered}, nil
+	}
+	done := make(chan []byte)
+	go func() { done <- e.s.tidal.artBytes(context.Background(), "rekordbox-art://127.0.0.1/1") }()
+	<-entered
+	useArtLink(nil, nil)
+	start := time.Now()
+	if ids, _ := e.trackIDs(t, "Tracks"); len(ids) != 2 || time.Since(start) > time.Second {
+		t.Fatalf("list behind a cover: %d rows after %s", len(ids), time.Since(start))
+	}
+	if b := <-done; b != nil {
+		t.Fatal("the cover that gave way was served")
+	}
+}
+
+// While a list, a load or an analysis read holds its claim, no cover takes the session.
+func TestRekordboxCoverWaitsWhileClaimed(t *testing.T) {
+	e := newRbxEnv(t, nil)
+	release := rbxClaim()
+	more := useArtLink(nil, map[uint32][]byte{1: testJPEG})
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	got := e.s.tidal.artBytes(ctx, "rekordbox-art://127.0.0.1/1")
+	cancel()
+	release()
+	if got != nil || more.Load() != 0 {
+		t.Fatal("a cover took the session while a list held its claim")
+	}
+	if !bytes.Equal(e.s.tidal.artBytes(context.Background(), "rekordbox-art://127.0.0.1/1"), testJPEG) {
+		t.Fatal("no cover once the claim is released")
+	}
+}
+
+// In the rekordbox source its own cover wins over a service row with the same title and artist,
+// which keeps its own cover.
+func TestRekordboxCoverDoesNotReplaceAServicesCover(t *testing.T) {
+	e := newRbxEnv(t, nil)
+	useArtLink(nil, map[uint32][]byte{42: testJPEG})
+	e.trackIDs(t, "Tracks")
+	g := e.s.tidal
+	g.artMu.Lock()
+	g.artCache["https://img.example/first.jpg"] = testPNG
+	g.artMu.Unlock()
+	g.addTrack(trackRef{track: providers.Track{ID: "d1", Title: "First", Artist: "Artist One", Provider: "deezer", CoverURL: "https://img.example/first.jpg"}})
+	if code, body, _ := artGet(t, e.base, "First", "Artist One"); code != 200 || !bytes.Equal(body, testJPEG) {
+		t.Fatalf("rekordbox source: %d %d bytes", code, len(body))
+	}
+	g.mu.Lock()
+	kept := false
+	for _, address := range g.artURLs {
+		kept = kept || address == "https://img.example/first.jpg"
+	}
+	g.mu.Unlock()
+	if !kept {
+		t.Fatal("the service row lost its cover")
 	}
 }
 

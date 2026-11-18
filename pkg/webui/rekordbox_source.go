@@ -16,6 +16,9 @@ import (
 	"crypto/sha1"
 	"errors"
 	"fmt"
+	"image"
+	"image/jpeg"
+	"image/png"
 	"io"
 	"log"
 	"net"
@@ -221,6 +224,7 @@ func (g *tidalGateway) rbxPlaylists(ctx context.Context, add func(map[string]any
 		notice("none")
 		return
 	}
+	defer rbxClaim()()
 	rbxSession.Lock()
 	defer rbxSession.Unlock()
 	library := func(key, prefix string, link rbxLink) {
@@ -294,6 +298,7 @@ func (g *tidalGateway) rbxRows(ctx context.Context, ip, list string) ([]prolink.
 // rbxTracks answers a rekordbox list's tracks. When none of the computer's files can be
 // reached, the first row says so: better than a load that fails.
 func (g *tidalGateway) rbxTracks(w http.ResponseWriter, r *http.Request, ref playlistRef) {
+	defer rbxClaim()() // the rows, the file check and the analysis prefetch go before covers
 	_, rest, _ := strings.Cut(ref.list.ID, "\x00")
 	ip, list, _ := strings.Cut(rest, "\x00")
 	rows, first, err := g.rbxRows(r.Context(), ip, list)
@@ -340,37 +345,98 @@ func (g *tidalGateway) rbxTracks(w http.ResponseWriter, r *http.Request, ref pla
 // The gateway's art cache and /v1/enginex/art serve it like a service's cover link.
 const rbxCoverScheme = "rekordbox-art://"
 
-// rbxArt reads a cover over dbserver (0x2003). It takes the session only when it is free,
-// waiting at most rbxArtTime for that, so lists and loads never queue behind covers.
-// Anything but a JPEG or PNG within maxArtBytes is no cover.
+// rbxArtTurn lets covers use the dbserver session only when nothing else wants it: a list,
+// a load or an analysis read claims it, which ends a cover being read at once (its context is
+// cancelled, closing the connection) and keeps new ones out until released.
+var rbxArtTurn struct {
+	sync.Mutex
+	claims int
+	cancel context.CancelFunc
+}
+
+func rbxClaim() (release func()) {
+	rbxArtTurn.Lock()
+	rbxArtTurn.claims++
+	if rbxArtTurn.cancel != nil {
+		rbxArtTurn.cancel()
+	}
+	rbxArtTurn.Unlock()
+	return func() {
+		rbxArtTurn.Lock()
+		rbxArtTurn.claims--
+		rbxArtTurn.Unlock()
+	}
+}
+
+// rbxArtTake takes the session for a cover when it is free and unclaimed.
+func rbxArtTake(cancel context.CancelFunc) bool {
+	rbxArtTurn.Lock()
+	defer rbxArtTurn.Unlock()
+	if rbxArtTurn.claims > 0 || !rbxSession.TryLock() {
+		return false
+	}
+	rbxArtTurn.cancel = cancel
+	return true
+}
+
+func rbxArtRelease() {
+	rbxArtTurn.Lock()
+	rbxArtTurn.cancel = nil
+	rbxArtTurn.Unlock()
+	rbxSession.Unlock()
+}
+
+// rbxArtPixels bounds a cover's decoded size; rekordbox's own are far smaller.
+const rbxArtPixels = 1600 * 1600
+
+// rbxArt reads a cover over dbserver (0x2003) from the computer on the link now, waiting at
+// most rbxArtTime for a free session. Only a JPEG, or a PNG it re-encodes as JPEG (Engine's
+// stm.db covers are JPEG), within maxArtBytes and rbxArtPixels is a cover.
 func (g *tidalGateway) rbxArt(ctx context.Context, address string) []byte {
 	ip, n, _ := strings.Cut(strings.TrimPrefix(address, rbxCoverScheme), "/")
 	art, err := strconv.ParseUint(n, 10, 32)
-	if err != nil || art == 0 || net.ParseIP(ip) == nil {
+	if host := g.s.rekordboxHost(); err != nil || art == 0 || host == nil || host.IP != ip {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, rbxArtTime)
 	defer cancel()
-	for !rbxSession.TryLock() {
+	for !rbxArtTake(cancel) {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-time.After(20 * time.Millisecond):
 		}
 	}
-	defer rbxSession.Unlock()
 	link, err := g.s.rbxDial(ctx, ip)
+	var data []byte
+	if err == nil {
+		if a, ok := link.(interface{ Artwork(uint32) ([]byte, error) }); ok {
+			data, err = a.Artwork(uint32(art))
+		}
+		link.Close()
+	}
+	rbxArtRelease()
+	if err != nil || len(data) > maxArtBytes {
+		return nil
+	}
+	cfg, format, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil || cfg.Width*cfg.Height > rbxArtPixels || format != "jpeg" && format != "png" {
+		return nil
+	}
+	img, err := png.Decode(bytes.NewReader(data))
+	if format == "jpeg" {
+		_, err = jpeg.Decode(bytes.NewReader(data)) // a truncated picture is no cover
+		img = nil
+	}
 	if err != nil {
 		return nil
 	}
-	defer link.Close()
-	a, ok := link.(interface{ Artwork(uint32) ([]byte, error) })
-	if !ok {
-		return nil
-	}
-	data, err := a.Artwork(uint32(art))
-	if err != nil || len(data) > maxArtBytes || !bytes.HasPrefix(data, []byte("\xff\xd8\xff")) && !bytes.HasPrefix(data, []byte("\x89PNG\r\n\x1a\n")) {
-		return nil
+	if img != nil {
+		var b bytes.Buffer
+		if jpeg.Encode(&b, img, &jpeg.Options{Quality: 90}) != nil || b.Len() > maxArtBytes {
+			return nil
+		}
+		data = b.Bytes()
 	}
 	return data
 }
@@ -494,6 +560,7 @@ func (g *tidalGateway) rbxPrepare(ctx context.Context, id int64, ref trackRef) (
 		return ref, errors.New("rekordbox: bad track")
 	}
 	rbxMarkLoading()
+	release := rbxClaim()
 	rbxSession.Lock()
 	link, err := g.s.rbxDial(ctx, parts[1])
 	var rbPath string
@@ -502,6 +569,7 @@ func (g *tidalGateway) rbxPrepare(ctx context.Context, id int64, ref trackRef) (
 		link.Close()
 	}
 	rbxSession.Unlock()
+	release()
 	if err != nil {
 		return ref, err
 	}
