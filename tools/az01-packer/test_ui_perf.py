@@ -166,6 +166,14 @@ assert.equal(table[2].k, -1); assert.equal(scCueNoBeat, 4); // no beat property:
 unavailable.delete('/Engine/Deck2/BeatNumber');
 table[2] = scCueTableOf(2); scCueStep(2);
 assert.equal(table[2].k, 0); assert.equal(scCueNoBeat, 0);
+// A track load is such a table: BeatNumber and PlayState missing at first, there when the next track loads (SongLoaded off, then on).
+for (const key of ['BeatNumber', 'PlayState']) { unavailable.add('/Engine/Deck2/' + key); delete scPropCache['/Engine/Deck2/' + key]; }
+delete scCuePropCache[2];
+table[2] = scCueTableOf(2); assert.equal(table[2].p.beat, null); assert.equal(table[2].p.play, null);
+scTr('/Engine/Deck2/Track/SongLoaded').state = false; table[2] = scCueTableOf(2); assert.equal(table[2], null);
+unavailable.delete('/Engine/Deck2/BeatNumber'); unavailable.delete('/Engine/Deck2/PlayState');
+scTr('/Engine/Deck2/Track/SongLoaded').state = true; table[2] = scCueTableOf(2); scCueStep(2);
+assert.equal(table[2].p.beat, scTr('/Engine/Deck2/BeatNumber')); assert.equal(table[2].p.play, scTr('/Engine/Deck2/PlayState')); assert.equal(scCueNoBeat, 0);
 // Unloaded, empty, without a hot cue or switched off: no table, so nothing is connected and a stray step counts nothing.
 scTr('/Engine/Deck2/Track/SongLoaded').state = false; assert.equal(scCueTableOf(2), null);
 scTr('/Engine/Deck2/Track/SongLoaded').state = true; scTr('/Engine/Deck2/Track/QuickCue1Exists').state = false; assert.equal(scCueTableOf(2), null);

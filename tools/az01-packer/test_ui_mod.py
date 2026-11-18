@@ -1430,6 +1430,8 @@ assert.strictEqual(vfx.enabled, false);
         self.assertIn("visible: info !== null && root.scCueCountdown", cap)
         # A capsule of a layout that is not on screen is not bound to the count (it was, and laid its text out again at every beat).
         self.assertIn("readonly property var info: parent.visible && ", cap)
+        # Stock's one fade (the performance row under the download cover: opacity 0, visible true) hides the row's Loader.
+        self.assertIn("visible: control.opacity !== 0 && (control.deckView.deckData.songLoaded || ", SRC)
         self.assertIn("Style.surface03Color", cap)
         self.assertNotIn("border", cap)
         self.assertEqual(cap.count("{"), cap.count("}"))

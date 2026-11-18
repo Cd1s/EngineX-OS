@@ -1384,7 +1384,8 @@ SERVICES_MAIN = """
 		if (!root.scCueCountdown || scShadowVisible(d)) return null
 		const p = scCueProps(d)
 		if (!p || !p.loaded.state) return null
-		// Optional translators absent when the deck was first looked up: asked again per table (a load or an edit), never per beat.
+		// Optional translators absent when the deck was first looked up: asked again per table, so at every track load (this binding
+		// reads SongLoaded) and cue edit, never per beat.
 		if (!p.beat) p.beat = root.scTr(p.prefix + "/BeatNumber")
 		if (!p.play) p.play = root.scTr(p.prefix + "/PlayState")
 		// The tempo at the playhead moves only at a tempo change of the grid: read here, a tempo edit under a resting playhead counts at once.
@@ -7226,7 +7227,9 @@ def cue_capsule(ind: str, deck_expr: str, h: int, px: int, compact: bool = False
         id: cueCap
         objectName: "EngineX_CueCountdown"
         anchors.fill: parent
-        // A capsule that is not on screen (another layout of the same deck) is not bound to the count.
+        // A capsule that is not on screen is not bound to the count. parent.visible is the effective visibility, and stock 5.3.0 takes
+        // these rows off screen by visible (the deck, the performance view under the browser, the deck states) or does not create
+        // them (a Loader per layout); its one fade, the row under the download cover, hides the row's Loader (DeckPerformanceData.qml).
         readonly property var info: parent.visible && typeof root !== "undefined" && root && root.scCueCountdown && root.scNextCueInfo ? root.scNextCueInfo({deck_expr}, root.scCueTickFor({deck_expr})) : null
         visible: info !== null && root.scCueCountdown
         spacing: 4
@@ -8600,7 +8603,8 @@ def edits(dev: bool):
         # Cue / soft takeover / speed. Never spend the time display's width.
         scaled[bj + "DeckPerformanceData/DeckPerformanceData.qml"] = [
             ("        visible: control.deckView.deckData.songLoaded\n",
-             '        visible: control.deckView.deckData.songLoaded || (typeof root !== "undefined" && root && root.scShadowVisible && root.scShadowVisible(control.deckView.deckData.deckIndex))\n'),
+             # Stock fades this row under the download cover (opacity 0, still visible): its Loader hides then, so the cue capsule is unbound.
+             '        visible: control.opacity !== 0 && (control.deckView.deckData.songLoaded || (typeof root !== "undefined" && root && root.scShadowVisible && root.scShadowVisible(control.deckView.deckData.deckIndex)))\n'),
         ]
         performance = bj + "DeckPerformanceData/DeckPerformanceDataContent.qml"
         scaled[performance] += [
