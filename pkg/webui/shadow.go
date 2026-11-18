@@ -1265,8 +1265,12 @@ func (s *Server) peerPerfGet(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not loaded", http.StatusConflict)
 		return
 	}
+	// Asked before the read and again after a miss: a load that finishes in between
+	// has written the file the read missed.
+	running := d.rbxAnalysis != "" && rbxAnalysisRunning(d.rbxRow)
 	perf, err := s.ownPerf(r.Context(), d, r.URL.Query().Get("format") == "native")
-	if d.rbxAnalysis != "" && errors.Is(err, os.ErrNotExist) && rbxAnalysisRunning(d.rbxRow) {
+	afterPerfRead()
+	if d.rbxAnalysis != "" && errors.Is(err, os.ErrNotExist) && (running || rbxAnalysisRunning(d.rbxRow)) {
 		// The load is still reading it from rekordbox: the copy waits for it. Once
 		// that is over without one, 404: the copy is analysed here, as before.
 		w.Header().Set("Retry-After", "1")
@@ -1280,6 +1284,9 @@ func (s *Server) peerPerfGet(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Write(perf)
 }
+
+// afterPerfRead runs between /perf's read and its second check; tests use it.
+var afterPerfRead = func() {}
 
 // rbxAnalysisRunning: the rekordbox load of gateway row id is still reading its analysis.
 func rbxAnalysisRunning(id int64) bool {
@@ -1529,11 +1536,18 @@ func fetchPerf(ctx context.Context, url string) []byte {
 }
 
 // fetchPerfPending also says whether the source was still reading the analysis.
+// Once the source said 503, only its analysis or an explicit 404 ends the wait: a
+// timeout, a broken connection or a cut body is not an answer.
 func fetchPerfPending(ctx context.Context, url string) (perf []byte, pending bool) {
 	for try := 0; ; try++ {
-		b, status := fetchPerfOnce(ctx, url)
-		if status != http.StatusServiceUnavailable {
+		b, status, ok := fetchPerfOnce(ctx, url)
+		switch {
+		case ok:
 			return b, false
+		case status == http.StatusServiceUnavailable:
+			pending = true
+		case !pending || status == http.StatusNotFound:
+			return nil, false
 		}
 		if try+1 >= perfRetries {
 			return nil, true
@@ -1546,20 +1560,21 @@ func fetchPerfPending(ctx context.Context, url string) (perf []byte, pending boo
 	}
 }
 
-func fetchPerfOnce(ctx context.Context, url string) ([]byte, int) {
+// fetchPerfOnce: ok only for a complete 200 answer.
+func fetchPerfOnce(ctx context.Context, url string) ([]byte, int, bool) {
 	ctx, cancel := context.WithTimeout(ctx, perfRequestTimeout)
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
 	resp, err := peerFileClient.Do(req)
 	if err != nil {
-		return nil, 0
+		return nil, 0, false
 	}
 	defer resp.Body.Close()
 	b, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
 	if resp.StatusCode != 200 || err != nil {
-		return nil, resp.StatusCode // a source without /perf: Engine analyses the copy
+		return nil, resp.StatusCode, false // a source without /perf: Engine analyses the copy
 	}
-	return b, resp.StatusCode
+	return b, resp.StatusCode, true
 }
 
 // cdjCuePlay is a status packet's play state while CUE is held (P1 0x07).

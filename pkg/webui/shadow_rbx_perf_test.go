@@ -206,3 +206,24 @@ func TestShadowRekordboxDelayedAnalysis(t *testing.T) {
 		t.Fatalf("no analysis and no load reading one: %d, want 404", code)
 	}
 }
+
+// The load can finish between /perf's read of the analysis and its check of the
+// running load: the read missed a file that is now there, so it is 503 (ask again),
+// not 404 (which makes the copy analyse the track again).
+func TestShadowRekordboxAnalysisFinishesDuringRead(t *testing.T) {
+	r := newRbxShadowSource(t)
+	id := r.row(7)
+	key := r.post(t, id)
+	rbxAnalysing.Store(id, true)
+	defer rbxAnalysing.Delete(id)
+	old := afterPerfRead
+	afterPerfRead = func() { r.publish(t, id, 500); rbxAnalysing.Delete(id) }
+	defer func() { afterPerfRead = old }()
+	if code, _ := r.native(t, key); code != http.StatusServiceUnavailable {
+		t.Fatalf("analysis written during the read: %d, want 503", code)
+	}
+	afterPerfRead = old
+	if code, _ := r.native(t, key); code != 200 {
+		t.Fatalf("the next ask: %d", code)
+	}
+}
