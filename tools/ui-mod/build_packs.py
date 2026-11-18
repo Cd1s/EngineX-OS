@@ -3649,13 +3649,40 @@ SERVICES_MAIN = """
 	}
 	function scPlainTitle(song) { return (song || "").replace(/\\s\\[\\d+ BPM(?: [0-9]{1,2}[AB])?\\]$/, "") }
 	// Engine's messages name its one streaming client; say which service is showing.
-	function scBrand(s) {
-		const service = scServices.find(v => v.id === scScope)
-		return s && service && scScope !== "tidal" ? String(s).replace(/TIDAL/gi, service.name) : s
+	// A deck's track says which service it is from when it has (scOwnService); otherwise the selected service speaks for it.
+	function scBrand(s, deck) {
+		const id = scOwnService(deck) || scScope
+		const service = scServices.find(v => v.id === id)
+		return s && service && id !== "tidal" ? String(s).replace(/TIDAL/gi, service.name) : s
 	}
-	// #305: every service rides Engine's TIDAL slot, so a deck's track reports the source "TIDAL" whoever it comes from. The slot holds
-	// the active scope's tracks: a deck header shows that service's own mark (the same icons as the Source list and the login dialogs).
-	function scSlotIcon(source) { return source === "TIDAL" && scScope && scScope !== "tidal" ? scIcon(scScope) : "" }
+	// #305: every service rides Engine's TIDAL slot, so a deck's track reports the source "TIDAL" whoever it comes from, and Engine passes
+	// nothing else about a loaded track to QML. scSwapStemmed records a service per deck as the track loads: the slot's own backend (the
+	// selected service then; real TIDAL under the tidal scope while a TIDAL account is paired, whatever the gateway would say of a
+	// coinciding id), which the gateway's answer to the lookup scSwapStemmed makes then replaces with the track's own (the gateway also
+	// plays its known tracks in the tidal scope when no TIDAL account is paired, so there its valid answer counts). The deck header draws that service's mark (the same
+	// icons as the Source list and the login dialogs); only a deck with no record (a track already loaded when the UI started) falls back to
+	// the selected service.
+	property var scDeckService: ({})
+	property var scLoadSeq: ({}) // deck -> its load counter: only the answer to the deck's latest load counts
+	function scNoteService(deck, id) {
+		const all = Object.assign({}, scDeckService)
+		all[deck] = id
+		scDeckService = all
+	}
+	// The service the gateway named on an answer (the response header), read from the one header or, failing that, from the whole list;
+	// only a whole, known service id counts.
+	function scServiceOf(x) {
+		const id = String(x.getResponseHeader("X-Enginex-Provider") || (/^x-enginex-provider:([^\\r\\n]*)/im.exec(x.getAllResponseHeaders() || "") || [])[1] || "").trim()
+		return scServices.some(v => v.id === id) ? id : ""
+	}
+	function scOwnService(deck) {
+		const id = deck > 0 ? scDeckService[deck] : ""
+		return id && scServices.some(v => v.id === id) ? id : ""
+	}
+	function scSlotIcon(source, deck) {
+		const id = scOwnService(deck) || scScope
+		return source === "TIDAL" && id && id !== "tidal" ? scIcon(id) : ""
+	}
 	// Capture manual and auto-detected IANA time zones via stock Planck.timeDateController
 	// signals and persist them through stream-sync (/data/enginex/state/timezone) without
 	// interposing setenv/unsetenv in Engine. Treat UTC as an unsolicited fallback only
@@ -4719,15 +4746,23 @@ SERVICES_MAIN = """
 	// is swapped for that copy as it loads, so the deck has its Stems. Engine's
 	// own import finds the track it already imported; a playing deck is left alone.
 	function scSwapStemmed(deck, uri) {
+		// Every URI change (a load, an unload, the same track again) is a new load of the deck: an answer to an older one is dropped (#305).
+		const load = root.scLoadSeq[deck] = (root.scLoadSeq[deck] || 0) + 1
 		const m = /^streaming:\\/\\/TIDAL\\/Track\\/(\\d+)$/.exec(uri)
+		const slot = root.scScope || "tidal" // what the slot's backend is as this track loads
+		// Real TIDAL's tracks: a gateway track of the same number is not this one. The scope must really be tidal: with no scope selected
+		// (TIDAL disabled in Sources keeps the pairing) the gateway can still be what plays, and "tidal" above is only the mark's default.
+		const real = root.scScope === "tidal" && root.scTidalLoggedIn
+		root.scNoteService(deck, m ? slot : "") // the last track's service must not outlive it
 		if (!m) return
 		const x = new XMLHttpRequest()
 		x.open("GET", "http://127.0.0.1:8080/v1/enginex/stems/local?id=" + m[1])
 		x.onreadystatechange = function() {
-			if (x.readyState !== 4 || x.status !== 200) return
-			if (Planck.getProperty("/Engine/Deck%1/PlayState".arg(deck)).translator.state) return
-			const cur = Planck.getProperty("/Engine/Deck%1/Track/TrackUri".arg(deck)) // another track may have been loaded meanwhile
+			if (x.readyState !== 4 || root.scLoadSeq[deck] !== load) return
+			const cur = Planck.getProperty("/Engine/Deck%1/Track/TrackUri".arg(deck)) // the deck may have no listener (four-deck roles) while its track changes
 			if (!cur || !cur.translator || cur.translator.string !== uri) return
+			if (!real) root.scNoteService(deck, root.scServiceOf(x) || slot) // 404 (no stemmed copy) names the service too
+			if (x.status !== 200 || real || Planck.getProperty("/Engine/Deck%1/PlayState".arg(deck)).translator.state) return
 			Planck.getProperty("/Client/Librarian/AddToDatabaseAndLoadToDeck%1".arg(deck)).translator.url = "file://" + encodeURI(JSON.parse(x.responseText).path)
 		}
 		x.send()
@@ -8684,9 +8719,9 @@ def edits(dev: bool):
              "    readonly property bool isStemmed: scHead && scHead.title ? scHead.stems : view.stemmed\n"),
             ("        providerName: artistSong.trackSource\n",
              "        providerName: artistSong.trackSource\n        respectHideTitleArtist: true\n"),
-            # #305: the deck header's provider mark is the active service's, not TIDAL's.
+            # #305: the deck header's provider mark is the track's own service's, not TIDAL's.
             ("                        source: visible ? `qrc:/streaming/${artistSong.trackSource}/Icon.png` : \"\"\n",
-             "                        readonly property string scMark: typeof root !== \"undefined\" && root && root.scSlotIcon ? root.scSlotIcon(artistSong.trackSource) : \"\"\n"
+             "                        readonly property string scMark: typeof root !== \"undefined\" && root && root.scSlotIcon ? root.scSlotIcon(artistSong.trackSource, artistSong.deckIndex) : \"\"\n"
              "                        useOriginal: scMark !== \"\"\n"
              "                        source: visible ? (scMark !== \"\" ? scMark : `qrc:/streaming/${artistSong.trackSource}/Icon.png`) : \"\"\n"),
             ("            visible: artistSong.artistVisible && !artistSong.onlyFileName && artistSong.artistTextString.length > 0\n",
@@ -9279,10 +9314,10 @@ def edits(dev: bool):
         "\t\t} else if (row.isRenderingStems) {",
     )])
     if v53():
-        # #305: Track Info's Source line names the active service, not TIDAL (scBrand swaps the word).
+        # #305: Track Info's Source line names the service, not TIDAL (scBrand swaps the word; a deck's own track says which).
         out.setdefault(ROOT + "Items/TrackInfo.qml", []).extend([(
             'text: trackData.streamingSource || "Local Drive"\n',
-            'text: (typeof root !== "undefined" && root && root.scBrand ? root.scBrand(trackData.streamingSource) : trackData.streamingSource) || "Local Drive"\n',
+            'text: (typeof root !== "undefined" && root && root.scBrand ? root.scBrand(trackData.streamingSource, trackData.infoFromDeck ? trackData.deckIndex : 0) : trackData.streamingSource) || "Local Drive"\n',
         )])
     if v53():
         # Stock's pulsing Stems icon in the browse status bar says a render is
@@ -9649,11 +9684,11 @@ def legacy_qml_fixes():
         v + "MainView/ArtistSong.qml": [
             ("				providerName: artistSong.trackSource\n",
              "				providerName: artistSong.trackSource\n				respectHideTitleArtist: true\n"),
-            # #305: the deck header's provider mark is the active service's, not TIDAL's (the icon keeps stock's 48 px footprint).
+            # #305: the deck header's provider mark is the track's own service's, not TIDAL's (the icon keeps stock's 48 px footprint).
             *([("		source: visible ? `qrc:/Skins/UIKit/Icons/Source${artistSong.trackSource}.png` : \"\"\n"
                 "		visible: artistSong.isStreamingTrack\n"
                 "		width: src.width\n",
-                "		readonly property string scMark: typeof root !== \"undefined\" && root && root.scSlotIcon ? root.scSlotIcon(artistSong.trackSource) : \"\"\n"
+                "		readonly property string scMark: typeof root !== \"undefined\" && root && root.scSlotIcon ? root.scSlotIcon(artistSong.trackSource, artistSong.deckIndex) : \"\"\n"
                 "		useOriginal: scMark !== \"\"\n"
                 "		source: visible ? (scMark !== \"\" ? scMark : `qrc:/Skins/UIKit/Icons/Source${artistSong.trackSource}.png`) : \"\"\n"
                 "		visible: artistSong.isStreamingTrack\n"

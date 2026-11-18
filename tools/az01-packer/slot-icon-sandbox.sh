@@ -2,9 +2,10 @@
 . "${ENGINEX_MIGRATION:-$(git rev-parse --show-toplevel)/rootfs-overlay/usr/libexec/enginex-migration}"
 ENGINEX_LAB=${ENGINEX_LAB:-$legacy_lab}
 # Streaming provider mark (#305): the shipped deck header (MainView/ArtistSong.qml) on a first-generation model's own Engine and UI hook,
-# natively on the build host (no qemu, host services or deck connections), for a track whose source is Engine's TIDAL slot, once per
-# active service. This Engine has no streaming track, so the probe models the track's source ("TIDAL"), song and artist on a copy of the
-# pack's own file; the icon choice, size and colouring are the shipped code.
+# natively on the build host (no qemu, host services or deck connections), for a track whose source is Engine's TIDAL slot: with the
+# selected service as the fallback, and with each deck's track naming its own service (a fake gateway answers the pack's lookup with the
+# X-Enginex-Provider header). This Engine has no streaming track, so the probe models the track's source ("TIDAL"), song and artist on a
+# copy of the pack's own file; the icon choice, size and colouring are the shipped code.
 # bash tools/az01-packer/slot-icon-sandbox.sh <new-private-dir> [BOARD ...]     (default: JP07 JC11 NH08)
 set -euo pipefail
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
@@ -84,11 +85,16 @@ mkdir -p "$R/data/enginex/ui/packs/en/Skins/Common/Items"
 sed "s/@BOARD@/$board/" "$REPO/tools/az01-packer/slot-icon-probe.qml" > "$R/data/enginex/ui/packs/en/Skins/Common/Items/QmlWarnings.qml"
 printf 'lang=en\n' > "$R/data/enginex/ui/settings.conf"
 chroot "$R" /usr/bin/dbus-daemon --system --fork --nopidfile > "$W/$board-dbus.log" 2>&1 || true
+# The gateway's answer to the lookup the pack makes for a streaming track, from inside the sandbox's own network.
+python3 -I "$REPO/tools/az01-packer/slot-icon-gateway.py" > "$W/$board-gateway.log" 2>&1 &
+gateway=$!
 engine_rc=0
 timeout --kill-after=5s "${SLOT_ICON_TIMEOUT:-180}s" chroot "$R" /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/tmp/home LD_LIBRARY_PATH=/usr/lib/arm-linux-gnueabihf:/usr/lib:/usr/qt/lib \
     LD_PRELOAD=/tmp/alsa-null-fixture.so:/tmp/libengine-ui-hook.so SBX_CARD=$board SBX_OUT=4 SBX_IN=2 SBX_CLOCK_HZ=48000 SBX_HEADLESS_VSYNC=1 \
     QT_QPA_PLATFORM=eglfs QT_QPA_EGLFS_INTEGRATION=eglfs_kms LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe LP_NUM_THREADS=2 \
     QML_DISABLE_DISK_CACHE=1 QML_XHR_ALLOW_FILE_READ=1 MALLOC_ARENA_MAX=1 /usr/Engine/Engine -d0 > "$W/$board-engine.log" 2>&1 || engine_rc=$?
+kill "$gateway" 2>/dev/null || true
+grep -a stems "$W/$board-gateway.log" | grep -av HTTP/ | sed "s/^/$board gateway: /" | head -8
 echo "X166 ENGINE_EXIT|$engine_rc|" >> "$W/$board-engine.log"
 cp "$R"/tmp/slot-*.png "$W/" 2>/dev/null || true
 grep -aq "engine-ui-hook: Engine " "$W/$board-engine.log" || { echo "$board: the hook did not start" >&2; exit 1; }

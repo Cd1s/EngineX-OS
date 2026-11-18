@@ -327,9 +327,16 @@ func (g *tidalGateway) stemsNotice(t providers.Track) providers.Track {
 	return providers.Track{Provider: listNoticeProvider, ID: "stems-" + t.Provider + "-" + t.ID, Title: title + " — " + t.Title, Artist: hint}
 }
 
+// providerHeader names the service a streamed track comes from. Engine tells the UI nothing per loaded deck but the source "TIDAL" (every
+// service rides that slot), and the UI already asks stemsLocal for each streaming track a deck loads, so the answer carries the service:
+// the deck header draws that service's own mark (#305). Status and body are unchanged.
+// The spelling is the one Go puts on the wire, so the UI reads it back the same whatever its HTTP client does with case.
+const providerHeader = "X-Enginex-Provider"
+
 // stemsLocal answers whether a streamed row has a stemmed local copy.
 func (g *tidalGateway) stemsLocal(w http.ResponseWriter, r *http.Request) {
 	if _, ref, ok := g.lookup(w, r.URL.Query().Get("id")); ok {
+		w.Header().Set(providerHeader, ref.track.Provider)
 		if p := g.s.stemmedPath(ref.track); p != "" {
 			respond(w, map[string]any{"path": p})
 		} else {
