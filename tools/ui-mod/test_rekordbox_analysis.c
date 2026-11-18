@@ -331,10 +331,19 @@ int main(void) {
     // An unmarked row of another library whose id is in the map (a file there, its own
     // analysis): a newer source generation writes nothing into it.
     assert(sqlite3_exec(real, "UPDATE stm.Track SET uri='file:///data/music/other.mp3', label='Other'", NULL, NULL, NULL) == SQLITE_OK);
+    assert(sqlite3_exec(real, "UPDATE stm.Track SET path='file:///data/music/other.mp3'", NULL, NULL, NULL) == SQLITE_OK);
     assert(sqlite3_exec(real, "UPDATE stm.PerformanceData SET beatData=X'AA', quickCues=X'BB'", NULL, NULL, NULL) == SQLITE_OK);
     f = fopen(path, "wb");
     assert(f && fwrite(edit1, 1, sizeof edit1 - 1, f) == sizeof edit1 - 1 && !fclose(f));
+    statements = 0;
     load_bound(real);
+    assert(statements == 1);
+    check_edits(real, "AA/BB");
+    // A foreign row with a different download key is also not eligible for the map.
+    assert(sqlite3_exec(real, "UPDATE stm.Track SET path='../../../../downloads/TIDAL/abcdefabcdefabcdefabcdefabcdefabcdefabcdefab.mp3'", NULL, NULL, NULL) == SQLITE_OK);
+    statements = 0;
+    load_bound(real);
+    assert(statements == 1);
     check_edits(real, "AA/BB");
     sqlite3_close(real);
     // The reload block above left 66/77 as the last import; put that back for the checks below.

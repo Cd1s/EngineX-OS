@@ -550,6 +550,7 @@ static void sc_rbx_trace_skip(const struct sc_rbx_sqlite *q, void *db, long long
 // nothing; *id says the streaming id.
 static const char *sc_rbx_fill_track(const struct sc_rbx_sqlite *q, void *db, long long track, long long *id) {
     char path[160], query[512];
+    char mapped_download[41] = "";
     struct stat st;
     snprintf(path, sizeof path, "%s/.loading", sc_rbx_dir);
     if (track <= 0 || stat(path, &st) || time(NULL) - st.st_mtime > sc_rbx_window) return NULL;
@@ -564,10 +565,13 @@ static const char *sc_rbx_fill_track(const struct sc_rbx_sqlite *q, void *db, lo
     if (row.ours) {
         *id = cover_id;
         sc_rbx_remember_track(track, *id, row.download);
-    } else if (!row.streaming && row.imported && sc_rbx_lookup_track(track, id, NULL)) {
+    } else if (!row.streaming && row.imported &&
+               sc_rbx_lookup_track(track, id, mapped_download) && row.download[0] &&
+               mapped_download[0] && !strcmp(row.download, mapped_download)) {
         // Engine has retained our imported row but no longer exposes the original
-        // gateway URI/label in this reload snapshot. The prior proof is enough to
-        // refresh the same source generation; unknown rows remain untouched.
+        // gateway URI/label in this reload snapshot. The row's download key must
+        // still match the remembered source; reused ids in another library stay
+        // untouched even when their bytes happen to match our history.
     } else {
         if (sc_rbx_verbose) sc_rbx_trace_skip(q, db, track);
         return sc_rbx_verbose ? "skipped (not a rekordbox row)" : NULL;
