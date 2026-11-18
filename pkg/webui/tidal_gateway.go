@@ -2114,12 +2114,14 @@ func stemsPending(ctx context.Context, paths []string) map[string]bool {
 // the CPU3 analysis/import job is queued by Jobs.Fetch and runs afterwards.
 func (g *tidalGateway) stream(w http.ResponseWriter, r *http.Request) {
 	file := r.PathValue("file")
-	raw := strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(file, ".flac"), ".mp3"), ".mp4"), ".ogg"), ".wav")
-	if raw == file {
+	suffix := path.Ext(file)
+	switch suffix {
+	case ".flac", ".mp3", ".mp4", ".ogg", ".wav", ".aif", ".aiff", ".aifc":
+	default:
 		http.NotFound(w, r)
 		return
 	}
-	id, ref, ok := g.playable(w, r, raw)
+	id, ref, ok := g.playable(w, r, strings.TrimSuffix(file, suffix))
 	if !ok {
 		return
 	}
