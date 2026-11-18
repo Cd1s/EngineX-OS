@@ -40,7 +40,7 @@ func TestAACImportPreservesExportTiming(t *testing.T) {
 			}
 			defer db.Close()
 			got := readTrackPositions(t, db, 1)
-			if got.trackSampleRate != 44100 || got.beat0 != -tc.priming || got.beat1 != 22050-tc.priming ||
+			if got.trackSampleRate != 44100 || got.trackSampleCount != 21435392 || got.beat0 != -tc.priming || got.beat1 != 22050-tc.priming ||
 				got.hotB != 22050-tc.priming || got.loop0Start != 33075-tc.priming {
 				t.Fatalf("want 44.1 kHz export grid, cue and loop with %v samples of priming; got %+v", tc.priming, got)
 			}
