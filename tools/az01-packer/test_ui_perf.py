@@ -38,7 +38,7 @@ class DictionaryTest(unittest.TestCase):
 @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise QML JavaScript")
 class HotPathTest(unittest.TestCase):
     def test_cue_bindings_and_status_polling(self):
-        names = ("scDeckLocked", "scShadowVisible", "scTr", "scCuePlaying", "scProbeCueClocks", "scCueBeatOf", "scGridSeg", "scGridBeat", "scCueGridFetch", "scCueGrid", "scCueProps", "scCueBeatsLeft", "scNextCueInfo", "scNextCueCompute", "scCueTickFor", "scSameItems", "scCall", "scUiPollReply")
+        names = ("scDeckLocked", "scShadowVisible", "scTr", "scCuePlaying", "scProbeCueClocks", "scCueBeatOf", "scCuePosAt", "scCueBeatTable", "scCueProps", "scCueBeatsLeft", "scNextCueInfo", "scNextCueCompute", "scCueTickFor", "scSameItems", "scCall", "scUiPollReply")
         functions = []
         for name in names:
             start = re.search(r"(?m)^\tfunction " + name + r"\([^\n]*\) \{", packs.SERVICES_MAIN)
@@ -77,7 +77,7 @@ class XMLHttpRequest {
     abort() { this.readyState = 0; this.aborted = true; }
     getResponseHeader(name) { return (this.headers || {})[name] || null; }
 }
-''' + "\n".join(functions) + "\nroot.scTr = scTr; root.scCuePlaying = scCuePlaying; root.scCueProbe = 0; root.scCueBeatOf = scCueBeatOf; root.scCueGrids = {}; root.scCueGridGen = 0;\nroot.scCueBeatPaths = ['', ...[1, 2, 3, 4].map(d => '/Engine/Deck' + d + '/BeatNumber')]; root.scCueBarPaths = ['', ...[1, 2, 3, 4].map(d => '/Engine/Deck' + d + '/Track/BarsElapsed')];\n" + "".join(f"Object.defineProperty(root, 'scCueBeat{d}', {{get() {{ return scCueBeatOf({d}, root.scCueProbe); }}, configurable: true}});\n" for d in range(1, 5)) + r'''
+''' + "\n".join(functions) + "\nroot.scTr = scTr; root.scCuePlaying = scCuePlaying; root.scCueProbe = 0; root.scCueBeatOf = scCueBeatOf; root.scCueBeatsCache = {};\nroot.scCueBeatPaths = ['', ...[1, 2, 3, 4].map(d => '/Engine/Deck' + d + '/BeatNumber')]; root.scCueBarPaths = ['', ...[1, 2, 3, 4].map(d => '/Engine/Deck' + d + '/Track/BarsElapsed')];\n" + "".join(f"Object.defineProperty(root, 'scCueBeat{d}', {{get() {{ return scCueBeatOf({d}, root.scCueProbe); }}, configurable: true}});\n" for d in range(1, 5)) + r'''
 const set = (key, fields) => Object.assign(scTr('/Engine/Deck1/' + key), fields);
 set('Track/SongLoaded', {state: true});
 set('Track/SampleRate', {value: 1000});
@@ -93,34 +93,50 @@ for (let i = 0; i < 60; i++) assert.equal(scNextCueInfo(1, i), info);
 assert.equal(lookups, initialLookups); // same translators and same display object
 set('Track/TrackPosition', {unnormalized: 1000});
 assert.equal(scNextCueInfo(1, 1).text, '4.1');
-// Every deck view evaluates on the same clock edge: computed once per deck and tick.
-const edge = scNextCueInfo(1, 7), before = lookups;
+// Every view evaluates on the same fallback-clock edge (negative tick): computed once per deck and tick.
+const edge = scNextCueInfo(1, -7), before = lookups;
 set('Track/TrackPosition', {unnormalized: 3000});
-assert.strictEqual(scNextCueInfo(1, 7), edge);
+assert.strictEqual(scNextCueInfo(1, -7), edge);
 scCueInfoMemo[1].at -= 100; // a later re-evaluation on the same tick (a load or cue edit while paused)
-assert.equal(scNextCueInfo(1, 7).text, '3.1'); assert.equal(edge.text, '4.1');
+assert.equal(scNextCueInfo(1, -7).text, '3.1'); assert.equal(edge.text, '4.1');
+// A beat edge (positive tick) is never shared: a jump, cue edit or reload inside the same beat gets its own count.
+set('Track/TrackPosition', {unnormalized: 1000});
+assert.equal(scNextCueInfo(1, 100004).text, '4.1');
+set('Track/TrackPosition', {unnormalized: 3000});
+assert.equal(scNextCueInfo(1, 100004).text, '3.1');
 set('Track/TrackPosition', {unnormalized: 1000});
 set('Track/SongLoaded', {state: false});
 assert.equal(scNextCueInfo(1, 2), null);
-assert.equal(scCueTickFor(2), 2);
+assert.equal(scCueTickFor(2), -3); // the fallback clock's ticks are negative
 assert.deepEqual(reads, [2]); // deck 2 never depends on the other three clocks
 root.scCueCountdown = true;
 set('PlayState', {state: true});
 // On the beat Engine's own beat counter drives the countdown: no clock runs, PlayState or not (CUE preview does not set it).
 set('BeatNumber', {unnormalized: 2.5});
 ''' + "\n".join(f"assert.equal(!!({expr}), false);" for expr in running) + r'''
-assert.equal(scCueBeat1, 2); assert.equal(scCueTickFor(1), 4);
+assert.equal(scCueBeat1, 100002); assert.equal(scCueTickFor(1), 100004);
 set('Track/BarsElapsed', {unnormalized: 3, string: '3'});
-assert.equal(scCueBeat1, 14); // the bar counts: 3 bars + beat 2
-set('BeatNumber', {unnormalized: 2.9}); assert.equal(scCueBeat1, 14); // inside a beat the key does not move
-set('BeatNumber', {unnormalized: 3.0}); assert.equal(scCueBeat1, 15);
+assert.equal(scCueBeat1, 100014); // the bar counts: 3 bars + beat 2
+set('BeatNumber', {unnormalized: 2.9}); assert.equal(scCueBeat1, 100014); // inside a beat the key does not move
+set('BeatNumber', {unnormalized: 3.0}); assert.equal(scCueBeat1, 100015);
+// Bars before the first one are negative and keep their own keys (they were all squeezed into one).
+set('Track/BarsElapsed', {unnormalized: -1, string: '-1'}); const k1 = scCueBeat1;
+set('Track/BarsElapsed', {unnormalized: -2, string: '-2'}); const k2 = scCueBeat1;
+assert.ok(k1 > 0 && k2 > 0 && k1 !== k2 && k1 - k2 === 4 && k1 !== 100015, k1 + ' ' + k2);
+set('Track/BarsElapsed', {unnormalized: 3, string: '3'});
 // No grid (BeatNumber below 0) or no beat property: the 200 ms clock is the fallback, while the deck plays.
 set('BeatNumber', {unnormalized: -1});
 assert.equal(scCueBeat1, -1);
 ''' + "\n".join(f"assert.equal(!!({expr}), {str(i == 0).lower()});" for i, expr in enumerate(running)) + r'''
+// CUE held on a deck without a grid: PlayState is off, the CUE lamp is on, the fallback clock must run (it did not).
+set('PlayState', {state: false}); set('Track/CueLEDState', {state: true});
+''' + "\n".join(f"assert.equal(!!({expr}), {str(i == 0).lower()});" for i, expr in enumerate(running)) + r'''
+set('Track/CueLEDState', {state: false});
+''' + "\n".join(f"assert.equal(!!({expr}), false);" for expr in running) + r'''
+set('PlayState', {state: true});
 unavailable.add('/Engine/Deck2/BeatNumber'); delete scPropCache['/Engine/Deck2/BeatNumber'];
 assert.equal(scCueBeat2, -2); // no beat property: the clock again
-unavailable.delete('/Engine/Deck2/BeatNumber'); assert.equal(scCueBeat2, 0);
+unavailable.delete('/Engine/Deck2/BeatNumber'); assert.equal(scCueBeat2, 100000);
 void scCueBeat3; void scCueBeat4; // the readonly properties evaluate on their own at startup
 
 root.scCueCountdown = false;

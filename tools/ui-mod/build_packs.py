@@ -1349,7 +1349,10 @@ SERVICES_MAIN = """
 	property int scCueProbe: 0
 	function scCuePlaying(d, probe) {
 		const t = root.scTr("/Engine/Deck" + d + "/PlayState")
-		return !!t && t.state
+		if (t && t.state) return true
+		// CUE held (preview): PlayState is off while the playhead runs; the CUE lamp is on (it is lit at rest on the cue too).
+		const c = root.scTr("/Engine/Deck" + d + "/Track/CueLEDState")
+		return !!c && c.state
 	}
 	function scProbeCueClocks() {
 		if (!root.scCueCountdown) return
@@ -1374,7 +1377,8 @@ SERVICES_MAIN = """
 		if (!(n >= 0)) return -1
 		const bars = root.scTr(root.scCueBarPaths[d])
 		const k = bars ? Math.floor(bars.unnormalized) : 0
-		return Math.floor(n) + 4 * (k > 0 ? k : 0)
+		// 100000 + ...: a bar before the first one is negative and keeps its own keys, apart from the -1 / -2 markers.
+		return 100000 + Math.floor(n) + 4 * (isFinite(k) ? k : 0)
 	}
 	readonly property int scCueBeat1: root.scCueBeatOf(1, root.scCueProbe)
 	readonly property int scCueBeat2: root.scCueBeatOf(2, root.scCueProbe)
@@ -1416,7 +1420,7 @@ SERVICES_MAIN = """
 		const beat = d === 1 ? scCueBeat1 : d === 2 ? scCueBeat2 : d === 3 ? scCueBeat3 : scCueBeat4
 		// On the beat: Engine's beat index (+ 2 keeps it a non-zero edge). Else the fallback clock.
 		if (beat >= 0) return beat + 2
-		return d === 1 ? scCueClock1.tick : d === 2 ? scCueClock2.tick : d === 3 ? scCueClock3.tick : scCueClock4.tick
+		return -1 - (d === 1 ? scCueClock1.tick : d === 2 ? scCueClock2.tick : d === 3 ? scCueClock3.tick : scCueClock4.tick)
 	}
 	// #151: the beats left to a hot cue, counted on the beat grid. The count steps where the playhead crosses a grid line, so the
 	// cue counts as sitting on its nearest line (a cue set off the grid, or a grid moved under it, otherwise steps between lines
@@ -1424,84 +1428,41 @@ SERVICES_MAIN = """
 	function scCueBeatsLeft(posBeat, cueBeat) { return Math.max(0, Math.round(cueBeat) - posBeat) }
 	// Same object while text/label/color/urgent are unchanged, so bindings do not re-layout every tick.
 	property var scCueInfoCache: ({})
-	// Every deck view (and layout variant) evaluates its countdown on the same
-	// clock tick: compute once per deck and tick, the rest share the answer.
+	// The views (every layout variant) of a shadow frame or of the fallback clock (negative ticks) evaluate on the same edge and share
+	// one count per deck and tick. A local beat edge (positive tick) always counts afresh: a cue edit, a jump or a reload inside the same beat
+	// must not get the earlier answer back.
 	property var scCueInfoMemo: ({})
 	function scNextCueInfo(d, tick) {
-		// Same tick within 50 ms: the same clock edge. A later re-evaluation (a load
-		// or cue edit while paused) computes afresh.
-		const memo = scCueInfoMemo[d], now = Date.now()
-		if (typeof tick === "number" && tick !== 0 && memo && memo.tick === tick && now - memo.at < 50) return memo.info
+		const memo = scCueInfoMemo[d], now = Date.now(), edge = typeof tick === "number" && tick !== 0 && (tick < 0 || scShadowVisible(d))
+		if (edge && memo && memo.tick === tick && now - memo.at < 50) return memo.info
 		const info = scNextCueCompute(d)
-		if (typeof tick === "number" && tick !== 0) {
+		if (edge) {
 			if (memo) { memo.tick = tick; memo.info = info; memo.at = now } else scCueInfoMemo[d] = {tick: tick, info: info, at: now}
 		}
 		return info
 	}
-	// #151: the countdown on the track's saved beat grid. Engine's QML has only the tempo at the playhead, so for a deck whose
-	// track is on a drive stream-sync reads the grid markers once (GET /v1/enginex/grid, read-only on Engine's library) and the
-	// pack maps the playhead and every hot cue to a beat on them, exact across tempo changes. Until the answer arrives, when
-	// there is none (streaming track, not analysed yet) or when Engine's live beat disagrees with it (the grid was edited), the
-	// count above (tempo at the playhead) stands.
-	property var scCueGrids: ({})
-	property int scCueGridGen: 0
-	function scGridSeg(m, s) {
-		let lo = 0, hi = m.length - 1
-		while (lo + 1 < hi) { const mid = (lo + hi) >> 1; if (m[mid].p <= s) lo = mid; else hi = mid }
-		return lo
+	// #151: every hot cue's beat on Engine's own grid, worked out once per deck and kept until the track, the grid or a cue changes
+	// (not at every beat). Engine's QML publishes the grid's anchor (Track/FirstDownbeatSamplePosition, samples) and its tempo
+	// (Track/FirstAnchorTempo): a cue's beat is (cue - anchor) / sampleRate * tempo / 60, on the same lines as BeatNumber, and before
+	// the first grid beat it simply goes negative, so the count keeps moving through an intro.
+	property var scCueBeatsCache: ({})
+	function scCuePosAt(p, i) {
+		const cue = p.cues[i]
+		return cue.exists && cue.exists.state && cue.position ? cue.position.value : -1
 	}
-	function scGridBeat(m, s) {
-		const a = m[scGridSeg(m, s)], b = m[scGridSeg(m, s) + 1]
-		return a.n + (s - a.p) * (b.n - a.n) / (b.p - a.p)
-	}
-	function scCueGridFetch(g) {
-		g.at = Date.now(); g.tries++
-		const x = new XMLHttpRequest()
-		g.req = x
-		x.onreadystatechange = function() {
-			if (x.readyState !== 4 || g.req !== x) return
-			g.req = null
-			let m = null
-			if (x.status === 200) {
-				try {
-					const v = JSON.parse(x.responseText)
-					if (v.rate > 0 && Array.isArray(v.markers) && v.markers.length >= 2) { g.rate = v.rate; m = v.markers }
-				} catch (e) { m = null }
-			}
-			g.markers = m; g.bad = 0
-			root.scCueGridGen = (root.scCueGridGen + 1) & 0xffff
+	function scCueBeatTable(d, p, sr, anchor, tempo, len) {
+		let c = scCueBeatsCache[d]
+		let same = !!c && c.len === len && c.anchor === anchor && c.tempo === tempo && c.sr === sr
+		for (let i = 0; same && i < 8; i++) if (c.pos[i] !== scCuePosAt(p, i)) same = false
+		if (same) return c
+		const pos = [], beats = []
+		for (let i = 0; i < 8; i++) {
+			const cp = scCuePosAt(p, i)
+			pos.push(cp)
+			beats.push(cp >= 0 ? (cp - anchor) / sr * (tempo / 60.0) : NaN)
 		}
-		x.open("GET", "http://127.0.0.1:8080/v1/enginex/grid?net=" + encodeURIComponent(g.net))
-		x.send()
-	}
-	// The saved grid of deck d's track, or null (pending, none, or not matching Engine's live beat: then re-read, a few times).
-	function scCueGrid(d, p, pos, sr, beat, bpm) {
-		void root.scCueGridGen // an answer re-evaluates the countdown
-		const net = p.net ? p.net.string || "" : ""
-		if (!net) return null
-		let g = scCueGrids[d]
-		if (!g || g.net !== net) {
-			g = scCueGrids[d] = {net: net, markers: null, rate: 0, req: null, at: 0, tries: 0, bad: 0}
-			scCueGridFetch(g)
-			return null
-		}
-		if (g.req) return null
-		const m = g.markers
-		if (!m) {
-			// Not analysed yet when the track loaded: ask again a few times.
-			if (g.tries < 4 && Date.now() - g.at > 5000) scCueGridFetch(g)
-			return null
-		}
-		// Engine's live beat has to agree with the saved grid: the same place in the beat, the same tempo in the playhead's segment.
-		if (!(beat >= 0)) return null
-		const at = pos * g.rate / sr, i = scGridSeg(m, at)
-		const off = scGridBeat(m, at) - beat, tempo = (m[i + 1].n - m[i].n) * g.rate * 60 / (m[i + 1].p - m[i].p)
-		if (Math.abs(off - Math.round(off)) > 0.1 || Math.abs(tempo / bpm - 1) > 0.02) {
-			if (++g.bad >= 3 && g.tries < 6 && Date.now() - g.at > 3000) scCueGridFetch(g)
-			return null
-		}
-		g.bad = 0
-		return g
+		c = scCueBeatsCache[d] = {len: len, anchor: anchor, tempo: tempo, sr: sr, pos: pos, beats: beats}
+		return c
 	}
 	function scNextCueCompute(d) {
 		if (scShadowVisible(d)) {
@@ -1513,7 +1474,7 @@ SERVICES_MAIN = """
 			return info
 		}
 		const p = scCueProps(d)
-		if (!p.loaded || !p.loaded.state) return null
+		if (!p.loaded || !p.loaded.state) { delete scCueBeatsCache[d]; return null }
 		const pos = p.position ? p.position.unnormalized || 0 : 0
 		// The grid's origin: reading it makes a grid shift (Beat Grid Edit) re-count within the same beat.
 		if (p.down) void p.down.unnormalized
@@ -1532,9 +1493,22 @@ SERVICES_MAIN = """
 		let totalBeats = (bestPos - pos) / sr * (bpm / 60.0)
 		// The count follows the grid: the playhead's place in its beat (Engine's BeatNumber, a position in the bar; below 0 without a grid).
 		const beat = p.beat ? p.beat.unnormalized : -1
-		const g = scCueGrid(d, p, pos, sr, beat, bpm)
-		if (g) totalBeats = scCueBeatsLeft(scGridBeat(g.markers, pos * g.rate / sr), scGridBeat(g.markers, bestPos * g.rate / sr))
-		else if (beat >= 0) { const f = beat - Math.floor(beat); totalBeats = scCueBeatsLeft(f, f + totalBeats) }
+		// Engine's grid: its anchor and tempo. The cue's beat comes from the per-deck table, the playhead's from the same anchor,
+		// so a count before the first grid beat (BeatNumber below 0, an intro) is right too. Used only while Engine's own beat
+		// agrees (same place in the beat, same tempo at the playhead); otherwise Engine's BeatNumber and the tempo at the playhead count.
+		// shortcut: a grid with several tempo segments is counted with the tempo of the playhead's segment, so a cue in a later
+		// segment is exact only once the playhead is in it (Engine's QML has no beat index for a cue position).
+		const anchor = p.down ? p.down.unnormalized : NaN, gridBpm = p.gridTempo ? p.gridTempo.unnormalized : 0
+		let counted = false
+		if (isFinite(anchor) && gridBpm > 0 && Math.abs(gridBpm / bpm - 1) < 0.02) {
+			const posBeat = (pos - anchor) / sr * (gridBpm / 60.0), off = beat >= 0 ? posBeat - beat : 0
+			if (Math.abs(off - Math.round(off)) <= 0.1) {
+				const tableBeat = scCueBeatTable(d, p, sr, anchor, gridBpm, p.length ? p.length.unnormalized : 0).beats[best]
+				totalBeats = scCueBeatsLeft(posBeat, tableBeat)
+				counted = true
+			}
+		}
+		if (!counted && beat >= 0) { const f = beat - Math.floor(beat); totalBeats = scCueBeatsLeft(f, f + totalBeats) }
 		if (!(totalBeats <= 2048)) return null
 		const bars = Math.floor(totalBeats / 4)
 		const cue = p.cues[best]
@@ -1554,7 +1528,7 @@ SERVICES_MAIN = """
 		const prefix = "/Engine/Deck" + d
 		const t = p => root.scTr(prefix + p)
 		const p = {loaded: t("/Track/SongLoaded"), position: t("/Track/TrackPosition"), sampleRate: t("/Track/SampleRate"),
-			bpm: t("/OriginalBPM"), trackBpm: t("/Track/CurrentBPM"), beat: t("/BeatNumber"), down: t("/Track/FirstDownbeatSamplePosition"), net: t("/Track/TrackNetworkPath"), cues: []}
+			bpm: t("/OriginalBPM"), trackBpm: t("/Track/CurrentBPM"), beat: t("/BeatNumber"), down: t("/Track/FirstDownbeatSamplePosition"), gridTempo: t("/Track/FirstAnchorTempo"), length: t("/Track/TrackLength"), cues: []}
 		for (let i = 1; i <= 8; i++) {
 			const key = "/Track/QuickCue" + i
 			p.cues.push({exists: t(key + "Exists"), position: t(key + "Position"), name: t(key + "Name"), color: t(key + "Color")})

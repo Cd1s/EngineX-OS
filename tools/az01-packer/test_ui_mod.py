@@ -2078,7 +2078,7 @@ class ShadowDisplayTest(unittest.TestCase):
     def js(self, body):
         names = ("scDeckLocked", "scShadowVisible", "scShadowDeckFor", "scShadowData", "scShadowRate", "scShadowPosition",
                  "scShadowBeatIndex", "scShadowBeatAt", "scShadowGrid", "scShadowNextCue", "scShadowCuesFor", "scShadowAsset",
-                 "scShadowProperties", "scShadowTick", "scShadowPost", "scShadowPoll", "scShadowPollIdle", "scShadowDisplayFetch", "scShadowSameSample", "scShadowApplyDisplay", "scShadowCovers", "scShadowBusy", "scShadowApplyAll", "scNextCueInfo", "scNextCueCompute", "scCueProps", "scCueBeatsLeft", "scCueTickFor", "scCueBeatOf", "scGridSeg", "scGridBeat", "scCueGridFetch", "scCueGrid",
+                 "scShadowProperties", "scShadowTick", "scShadowPost", "scShadowPoll", "scShadowPollIdle", "scShadowDisplayFetch", "scShadowSameSample", "scShadowApplyDisplay", "scShadowCovers", "scShadowBusy", "scShadowApplyAll", "scNextCueInfo", "scNextCueCompute", "scCueProps", "scCueBeatsLeft", "scCueTickFor", "scCueBeatOf", "scCuePosAt", "scCueBeatTable", "scCuePlaying",
                  "scShadowApply", "scShadowEmpty", "scShadowScratchLine", "scShadowScratchRelease", "scShadowSpeed", "scShadowCues", "scShadowBeat",
                  "scBrowserVisible", "scShadowLoad", "scShadowWrong", "scShadowHolds", "scShadowEndGap", "scShadowEnd",
                  "scShadowSeek", "scShadowMirror", "scShadowMirrorOff", "scShadowLink", "scShadowLinkEdge", "scPress", "scGcCheck", "scShadowWake", "scShadowAnyPlaying",
@@ -2523,8 +2523,9 @@ assert.equal(text(), null);
         # without a notification), so the binding below depends on the beat key and the grid, exactly what the capsule is bound to.
         self.js(r"""
 const sr = 44100;
-const eng = {pos: 0, first: 0.3, segs: [[0.3, 128]], cue: 40.0, playing: false, grid: true};
+const eng = {pos: 0, first: 0.3, segs: [[0.3, 128]], cue: 40.0, playing: false, cueLed: false, loaded: true, grid: true};
 function beatAt(t) {
+    if (t < eng.segs[0][0]) return (t - eng.segs[0][0]) * eng.segs[0][1] / 60; // the intro: beats before the first grid beat, negative
     let b = 0;
     for (let i = 0; i < eng.segs.length; i++) {
         const s = eng.segs[i][0], e = i + 1 < eng.segs.length ? eng.segs[i + 1][0] : Infinity;
@@ -2532,16 +2533,18 @@ function beatAt(t) {
     }
     return b;
 }
-const tempo = () => eng.segs.filter(x => x[0] <= eng.pos).pop()[1];
+const tempo = () => (eng.segs.filter(x => x[0] <= eng.pos).pop() || eng.segs[0])[1];
 const tr = {
     '/Engine/Deck1/PlayState': {get state() { return eng.playing; }},
-    '/Engine/Deck1/Track/SongLoaded': {state: true},
+    '/Engine/Deck1/Track/CueLEDState': {get state() { return eng.cueLed; }},
+    '/Engine/Deck1/Track/SongLoaded': {get state() { return eng.loaded; }},
+    '/Engine/Deck1/Track/TrackLength': {unnormalized: 90 * sr},
+    '/Engine/Deck1/Track/FirstAnchorTempo': {get unnormalized() { return eng.segs[0][1]; }},
     '/Engine/Deck1/Track/TrackPosition': {get unnormalized() { return eng.pos * sr; }},
     '/Engine/Deck1/Track/SampleRate': {value: sr},
-    '/Engine/Deck1/Track/TrackNetworkPath': {string: 'net://deck/vol/Contents/song.wav'},
     '/Engine/Deck1/Track/FirstDownbeatSamplePosition': {get unnormalized() { return eng.segs[0][0] * sr; }},
     '/Engine/Deck1/OriginalBPM': {get unnormalized() { return tempo(); }},
-    '/Engine/Deck1/BeatNumber': {get unnormalized() { return eng.grid ? ((beatAt(eng.pos) % 4) + 4) % 4 : -1; }},
+    '/Engine/Deck1/BeatNumber': {get unnormalized() { return eng.grid && beatAt(eng.pos) >= 0 ? beatAt(eng.pos) % 4 : -1; }},
     '/Engine/Deck1/Track/BarsElapsed': {get unnormalized() { return Math.floor(beatAt(eng.pos) / 4); }},
 };
 for (let i = 1; i <= 8; i++) {
@@ -2559,7 +2562,7 @@ const proxied = {};
 for (const [path, o] of Object.entries(tr)) proxied[path] = new Proxy(o, {get(t, k) { if (recording && !quiet.has(path)) recording.add(path); return Reflect.get(t, k, t); }});
 globalThis.scTr = path => proxied[path] || null;
 globalThis.scCueCountdown = true;
-globalThis.scCueGrids = {}; globalThis.scCueGridGen = 0;
+globalThis.scCueBeatsCache = {};
 globalThis.scCueBeatPaths = ['', ...[1, 2, 3, 4].map(d => '/Engine/Deck' + d + '/BeatNumber')];
 globalThis.scCueBarPaths = ['', ...[1, 2, 3, 4].map(d => '/Engine/Deck' + d + '/Track/BarsElapsed')];
 globalThis.scCueClock1 = globalThis.scCueClock2 = globalThis.scCueClock3 = globalThis.scCueClock4 = {tick: 0}; // PlayState off: no clock runs
@@ -2568,12 +2571,12 @@ let deps = new Set(), sig = null, shown = null, evaluations = 0;
 const snap = () => [...deps].sort().map(p => JSON.stringify([tr[p].state, tr[p].value, tr[p].unnormalized, tr[p].string, tr[p].color])).join('|');
 function binding() {
     const tick = scCueTickFor(1);
-    if (sig === null || tick + '#' + snap() + '#' + scCueGridGen !== sig) {
-        now += 100;
+    if (sig === null || tick + '#' + snap() !== sig) {
+        now += 10; // less than the 50 ms the fallback clock's views share an answer for
         recording = new Set();
         shown = scNextCueInfo(1, tick);
         deps = recording; recording = null;
-        sig = tick + '#' + snap() + '#' + scCueGridGen;
+        sig = tick + '#' + snap();
         evaluations++;
     }
     return shown ? shown.text : null;
@@ -2638,56 +2641,49 @@ assert.equal(binding(), truth(), 'cue moved');
 // No grid: Engine reports a beat below 0 and the countdown falls back to the clock (a PlayState-gated 200 ms Timer).
 eng.grid = false;
 assert.equal(scCueBeatOf(1, 0), -1);
-assert.equal(scCueTickFor(1), 0);
+assert.equal(scCueTickFor(1), -1); // the fallback clock's tick
 """)
 
-    def test_local_countdown_counts_on_the_saved_grid_across_a_tempo_change(self):
-        # The playhead in the first tempo segment, the cue in the second: Engine's QML gives only the tempo at the playhead, so
-        # the pack asks stream-sync for the saved grid markers and maps both positions to beats on them.
+    def test_local_countdown_precomputes_each_cue_beat_once_and_follows_edits_and_reloads(self):
         self.local_beat_countdown(r"""
-const t2 = 0.3 + 42 * 60 / 128; // 128 BPM for 42 beats, then 140 BPM
-eng.segs = [[0.3, 128], [t2, 140]];
-eng.cue = 40.0;
-const markers = [{p: Math.round(0.3 * sr), n: 0}, {p: Math.round(t2 * sr), n: 42}, {p: Math.round((t2 + 30 * 60 / 140) * sr), n: 72}];
-eng.pos = 10.0;
-const tempoOnly = binding();
-assert.equal(requests.length, 1); // asked once, when the track was first counted
-assert.ok(requests[0].url.startsWith('http://127.0.0.1:8080/v1/enginex/grid?net=net%3A%2F%2Fdeck%2Fvol%2FContents%2Fsong.wav'), requests[0].url);
-assert.notEqual(tempoOnly, truth(), 'while the answer is pending the tempo at the playhead counts (inexact across the change)');
-requests[0].finish(200, {rate: sr, markers: markers});
-assert.equal(binding(), truth(), 'on the saved grid');
-for (let x = 5.0013; x < 19.9; x += 0.01) { eng.pos = x; assert.equal(binding(), truth(), 'segment 1 at ' + x.toFixed(3)); }
-for (let x = 19.9013; x < 39.9; x += 0.01) { eng.pos = x; assert.equal(binding(), truth(), 'across the change at ' + x.toFixed(3)); }
-// A cue between two lines counts on the nearest line, as before.
-eng.cue = t2 + (10 + 0.4) * 60 / 140; eng.pos = 21.0;
-assert.equal(binding(), truth());
-assert.equal(requests.length, 1);
-""")
-
-    def test_local_countdown_rereads_a_grid_that_no_longer_matches_engine(self):
-        self.local_beat_countdown(r"""
-eng.cue = 40.0;
-const markers = [{p: Math.round(0.3 * sr), n: 0}, {p: Math.round((0.3 + 80 * 60 / 128) * sr), n: 80}];
 eng.pos = 10.2;
-binding(); requests[0].finish(200, {rate: sr, markers: markers});
 assert.equal(binding(), truth());
-// Beat Grid Edit shifted the lines: Engine's beat no longer sits where the saved grid says. The count falls back to Engine's
-// beat (still right), then the grid is read again, a few times at most.
-eng.segs = [[0.3703, 128]];
-for (let i = 0; i < 3; i++) { now += 4000; assert.equal(binding(), truth(), 'fallback ' + i); eng.pos += 0.5; } // a beat each
-assert.equal(requests.length, 2);
-const shifted = [{p: Math.round(0.3703 * sr), n: 0}, {p: Math.round((0.3703 + 80 * 60 / 128) * sr), n: 80}];
-requests[1].finish(200, {rate: sr, markers: shifted});
-assert.equal(binding(), truth());
-// A track stream-sync has no grid for (404): the fallback counts, and it is asked again only a few times.
-eng.segs = [[0.3, 128]]; eng.pos = 12.0;
-delete scCueGrids[1]; scCueGridGen++;
-binding(); requests[requests.length - 1].finish(404, {});
-const n = requests.length;
-for (let i = 0; i < 20; i++) { eng.pos += 0.5; binding(); }
-assert.equal(requests.length, n, 'not asked again within 5 s');
-for (let i = 0; i < 12; i++) { now += 6000; eng.pos += 0.5; binding(); if (requests.length > n) requests[requests.length - 1].finish(404, {}); }
-assert.ok(requests.length - n <= 3, 'asked ' + (requests.length - n) + ' more times');
+const table = scCueBeatsCache[1];
+assert.ok(table && Math.abs(table.beats[0] - (40.0 - 0.3) * 128 / 60) < 1e-9, 'the cue beat comes from the grid anchor and tempo');
+// Seven seconds of beats: the table is the same object, not worked out again at every beat.
+for (let x = 10.2; x < 17.2; x += 0.01) { eng.pos = x; assert.equal(binding(), truth(), 'at ' + x.toFixed(2)); }
+assert.strictEqual(scCueBeatsCache[1], table);
+// A cue edit inside the same beat counts at once (the old 50 ms reuse handed the earlier answer back).
+eng.pos = 10.2; binding();
+eng.cue = 41.1;
+assert.equal(binding(), truth(), 'cue edited inside the same beat');
+assert.notStrictEqual(scCueBeatsCache[1], table);
+const afterEdit = scCueBeatsCache[1];
+// A jump of whole bars changes the beat key; the count follows.
+eng.pos += 8 * 4 * 60 / 128; assert.equal(binding(), truth(), 'bar jump');
+assert.strictEqual(scCueBeatsCache[1], afterEdit);
+// The same file loads again, its grid moved meanwhile: the table is dropped on unload and worked out again.
+eng.loaded = false; assert.equal(binding(), null); assert.equal(scCueBeatsCache[1], undefined);
+eng.loaded = true; eng.segs = [[0.3703, 128]];
+assert.equal(binding(), truth(), 'reloaded with another grid');
+assert.notStrictEqual(scCueBeatsCache[1], afterEdit);
+""")
+
+    def test_local_countdown_keeps_moving_through_an_intro_while_cue_is_held(self):
+        # The first grid beat is at 5 s: before it Engine's BeatNumber is below 0 (no beat key). CUE held: PlayState off, CUE lamp on.
+        self.local_beat_countdown(r"""
+eng.segs = [[5.0, 128]]; eng.cue = 20.0; eng.playing = false; eng.cueLed = true;
+assert.equal(scCueBeatOf(1, 0), -1);
+assert.ok(scCuePlaying(1, 0), 'the fallback clock runs while CUE is held');
+const seen = new Set();
+for (let x = 0.5013; x < 4.9; x += 0.05) {
+    eng.pos = x; scCueClock1.tick++; // the clock fires while the playhead moves
+    assert.equal(binding(), truth(), 'intro at ' + x.toFixed(2));
+    seen.add(binding());
+}
+assert.ok(seen.size >= 8, 'the countdown moved ' + seen.size + ' times through the intro');
+// Over the first beat into the grid proper: no jump in the count.
+for (let x = 4.9013; x < 6.5; x += 0.05) { eng.pos = x; scCueClock1.tick++; assert.equal(binding(), truth(), 'across the first beat at ' + x.toFixed(2)); }
 """)
 
     def test_live_cues_change_on_same_key_using_source_sample_rate(self):
