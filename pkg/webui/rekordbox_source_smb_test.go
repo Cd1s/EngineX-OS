@@ -24,7 +24,8 @@ func TestSMBRekordboxRangeAndSharedCache(t *testing.T) {
 	data := append([]byte("fLaC"), bytes.Repeat([]byte("audio"), 2<<20)...)
 	os.WriteFile(filepath.Join(smb.Root, "Björk.flac"), data, 0600)
 	e := newRbxEnv(t, map[uint32]string{1: "/Users/dj/Music/Björk.flac"})
-	m := RemoteMount{ID: "smb", Name: "Music", Protocol: "smb", Host: smb.Host, Port: smb.SlowProxy(t), RemotePath: "music", Username: smb.User, Password: smb.Password, MountPoint: filepath.Join(e.s.mediaRoot(), "share"), Enabled: true}
+	port, release := smb.SlowProxyHold(t)
+	m := RemoteMount{ID: "smb", Name: "Music", Protocol: "smb", Host: smb.Host, Port: port, RemotePath: "music", Username: smb.User, Password: smb.Password, MountPoint: filepath.Join(e.s.mediaRoot(), "share"), Enabled: true}
 	b, _ := json.Marshal([]RemoteMount{m})
 	os.WriteFile(e.s.mountsConfigPath(), b, 0600)
 	oldRoom := rbxRoom
@@ -44,6 +45,7 @@ func TestSMBRekordboxRangeAndSharedCache(t *testing.T) {
 	if cp == nil {
 		t.Fatal("expected a copy still arriving")
 	}
+	release()
 	// Another load joins exactly the same rbxCopy.
 	if _, err := e.s.tidal.rbxPrepare(context.Background(), id, ref); err != nil || rbxRunning(ref.file) != cp {
 		t.Fatalf("copy not shared: %v", err)

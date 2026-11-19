@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -96,12 +97,30 @@ func (s *Server) Stop() { _ = s.cmd.Process.Signal(os.Interrupt) }
 
 // SlowProxy keeps a copy in flight long enough to test readers and disconnections.
 func (s *Server) SlowProxy(t *testing.T) int {
+	port, _ := s.slowProxy(t, false)
+	return port
+}
+
+// SlowProxyHold pauses the first large response after the SMB handshake until
+// the caller releases it, making an in-flight copy assertion deterministic.
+func (s *Server) SlowProxyHold(t *testing.T) (int, func()) {
+	return s.slowProxy(t, true)
+}
+
+func (s *Server) slowProxy(t *testing.T, hold bool) (int, func()) {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { l.Close() })
+	var releaseOnce sync.Once
+	released := make(chan struct{})
+	release := func() { releaseOnce.Do(func() { close(released) }) }
+	t.Cleanup(release)
+	if !hold {
+		release()
+	}
 	go func() {
 		for {
 			client, err := l.Accept()
@@ -118,13 +137,24 @@ func (s *Server) SlowProxy(t *testing.T) int {
 				done := make(chan struct{})
 				go func() { io.Copy(server, client); server.Close(); close(done) }()
 				buf := make([]byte, 32<<10)
+				var sent int64
 				for {
 					n, err := server.Read(buf)
 					if n > 0 {
 						time.Sleep(time.Millisecond)
-						if _, e := client.Write(buf[:n]); e != nil {
+						if hold && sent < 1<<20 && sent+int64(n) > 1<<20 {
+							cut := int((1 << 20) - sent)
+							if _, e := client.Write(buf[:cut]); e != nil {
+								break
+							}
+							<-released
+							if _, e := client.Write(buf[cut:n]); e != nil {
+								break
+							}
+						} else if _, e := client.Write(buf[:n]); e != nil {
 							break
 						}
+						sent += int64(n)
 					}
 					if err != nil {
 						break
@@ -135,5 +165,5 @@ func (s *Server) SlowProxy(t *testing.T) int {
 			}()
 		}
 	}()
-	return l.Addr().(*net.TCPAddr).Port
+	return l.Addr().(*net.TCPAddr).Port, release
 }
