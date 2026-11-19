@@ -38,23 +38,28 @@
 - **7 大流媒体音源**：音源菜单内置 TIDAL、网易云音乐、Spotify、Deezer、SoundCloud、Beatport、Apple Music，支持手机扫码登录、FLAC / 320 kbps 音质切换（`设置 → 服务 → 流媒体音质`）、分平台本地缓存，以及跨音源联合搜索 `配置 → 曲库 → OmniSource（在流媒体中显示 U 盘/SD）`。
 - **Rekordbox U 盘直读与 Pro DJ Link**：直读 rekordbox 5/6/7 导出的 U 盘（支持 `FAT32`、`exFAT`、`NTFS` 与 Mac `HFS+` 读写；不支持 `APFS`）中的歌单、Hot Cue、Memory Cue、Loop 与拍线。`设置 → 服务 → Pro DJ Link` 支持与 CDJ 及电脑 rekordbox 7（`Export` 模式开启 `LINK`）互联、共享 USB/SD、交接 `MASTER`，并在影子轨或 `线路输入`（`Line In`）通道显示 CDJ 波形。
 - **联机视图、波形样式与四语界面**：`布局 → ENGINEX 视图预设 → 联机视图` 让独立播放器在 `原厂`、`双碟机配对` 与 `4 轨` 之间切换（4 轨一体机可在 `原厂` 与 `4 轨` 之间切换），提供 5 组保存视图（`视图 1`–`视图 5`）、`界面缩放`、`热标拍数倒数`、`Denon` / `RGB` / `3-Band` 波形（`配置 → 显示 → 波形样式`），以及简体中文、繁體中文、English、Español 免重启切换（`设置 → 设备 → 语言`）。
-- **音频保护、一体机效果与 Web 控制台**：内置 `0dB 防破音软限幅`、`自动增益（0 dB 归一化）`、一代独立播放器 `Hi-Fi 高频补偿输出`（`配置 → 播放 → Hi-Fi 高频补偿输出`）、`推子回音`、`PRIME 4` `(PX)` 硬件效果、通道 `FILTER` 旋钮效果 `配置 → 播放 → 先锋风格效果 (Color FX)`、`先锋效果延时模式 (PX)`、控制中心智能同步、1 Gbps 千兆有线网络，以及 `:8080` 网页控制台（传歌、重定位、WAV `直播推流` 与 Mod 插件中心）。
+- **音频保护、一体机效果与 Web 控制台**：内置 `0dB 防破音软限幅`、`自动增益`、一代独立播放器 `Hi-Fi 高频补偿输出`（`配置 → 播放 → Hi-Fi 高频补偿输出`）、`推子回音`、`PRIME 4` `(PX)` 硬件效果、通道 `FILTER` 旋钮效果 `配置 → 播放 → 先锋风格效果 (Color FX)`、`先锋效果延时模式 (PX)`、控制中心智能同步、1 Gbps 千兆有线网络，以及 `:8080` 网页控制台（传歌、重定位、WAV `直播推流` 与 Mod 插件中心）。
 
 ---
 
 ## 5.3.0.5 更新内容
 
-- **原生安装器与签名更新**：`EngineX-Installer` 无需安装 Python、fastboot、libusb 或 WSL 即可通过 USB 刷写，安装器与屏幕在线更新均校验 `SHA256SUMS.txt.sig` 签名（#255、#239）。
+- **原生安装器与签名更新**：`EngineX-Installer` 无需安装 Python、fastboot、libusb 或 WSL 即可通过 USB 刷写，在 Windows 下识别处于固件更新模式的 `PRIME 4 G2`，且安装器与屏幕在线更新均校验 `SHA256SUMS.txt.sig` 签名（#255、#239）。
 - **恢复官方固件**：`Restore-Official-Firmware` 可恢复原厂 Engine OS 5.3.0；回退原厂前请先启动一次 5.3.0.5 并正常关机。
 - **HFS+ 磁盘读写**：通过只读检查的 Mac `HFS+` U 盘与 SD 卡在全部 16 款机型上以读写方式挂载，Engine 可直接在盘上保存曲库、Cue 与 Loop。
 - **电脑 rekordbox Link 与统一 Pro DJ Link**：`设置 → 服务 → Pro DJ Link` 合并原有的两个开关，与 CDJ-3000 联机不再报旧固件提示，并将电脑 rekordbox 7（`Export` 模式）列为碟机音源，加载即带拍线、Cue 与封面（#198、#300）。
+- **影子轨显示与跟随**：立即以一致的总览颜色显示对侧碟机曲目，仅跟随源碟机位置而不实际播放以降低 CPU 占用，不支持的机型自动回退原方式。
 - **大型 rekordbox U 盘快速导入**：大容量 rekordbox U 盘插入后几秒内即可使用歌单与 Cue，波形在后台转换并在空闲 30 秒后自动发布（#301）。
+- **Rekordbox 拍线对齐**：为 Pro DJ Link、U 盘与影子轨的 MP3 和 AAC/M4A 统一拍线起点偏移规则，旧转换曲目自动重新对齐一次并保留碟机上的编辑。
 - **rekordbox Cue 写回**：把碟机上修改的 Hot Cue、Memory Cue 与 Loop 写回 rekordbox U 盘，并在 `/.enginex-backup/` 保存备份（`:8080` 网页控制台 `扩展 → 写回 Hot Cue / Loop 到 rekordbox U 盘`，#271）。
+- **U 盘曲库安全保护**：当字符集不匹配等原因导致大量文件名无法读取时，曲库更新不会改动任何数据，并在下次挂载时重试。
 - **通道 FILTER 旋钮 Color FX**：在一体机各通道的 `FILTER` 旋钮上挂载 `Spiral`、`Pitch Echo`、`Slip Roll`、`Dub Echo` 或 `Space`，位于 `配置 → 播放 → 先锋风格效果 (Color FX)`。
+- **Hi-Fi 高频补偿输出**：为一代 SC5000 / SC6000 独立播放器新增可选的高频补偿，默认关闭，位于 `配置 → 播放 → Hi-Fi 高频补偿输出`（#172）。
+- **自动增益余量与防削波**：将安静曲目提升至约 `-4.4 dBFS` 并提供削波保护以减少泵动，`配置 → 播放` 中的开关名称简化为 `自动增益`。
 - **Apple Music 助手与 Spotify 音源选择**：二代机支持通过 `enginex-amd` 缓存 Apple Music 无损音频（`/m/applemusic`），`:8080` 控制台可指定 Spotify 曲目的匹配音源。
 - **蓝牙音箱输出来源**：为已配对的蓝牙音箱选择播放的碟位或混音总线（`设置 → 设备 → 蓝牙 → 输出来源`）。
 - **碟机间复制设置**：经局域网在两台碟机间确认并复制设置，U 盘保存配置时也包含 EngineX 设置（`设置 → 设备 → 从另一台设备复制设置`，#205）。
-- **Mixstream 硬件控制**：在 Mixstream Pro / Pro+ / Pro Go 上新增 Pitch Bend 跳拍、4 个可分配 FX 槽位、精简打击垫栏与逐通道分轨 EQ 开关（`设置 → 设备` 与 `配置 → 播放`，#261、#286）。
+- **Mixstream 与 4 垫机型控制**：在 Mixstream Pro / Pro+ / Pro Go 上新增 Pitch Bend 跳拍、4 个可分配 FX 槽位、精简打击垫栏与逐通道分轨 EQ 开关（`设置 → 设备` 与 `配置 → 播放`，#261、#286），并在 Mixstream 系列与 `PRIME GO` 上使 Stems 保持在第 1 页、按 `CUE` 返回热标页。
 - **PRIME 4 效果器与一体机控制**：`PRIME 4` 浏览效果时保持弹窗打开并新增 `Jet Flanger (PX)` 与更长的 `Reverb` 尾音，全部一体机支持 `推子回音`，电动转盘支持 4 轨视图（#195、#207、#258、#263、#285）。
 - **分侧反转转盘方向**：单转盘机型或双转盘机型左右两侧可独立反转转盘方向（`设置 → 设备 → 反转转盘方向`，#213）。
 - **推子整数 BPM 平台与热标倒数**：`配置 → 显示 → BPM 小数位数` 设为 `2` 时在整数 BPM 处提供推子平台，热标拍数倒数按拍线跳变（#151）。
@@ -204,7 +209,7 @@
 ### 4. 恢复官方固件与可选电脑端服务
 
 - **恢复官方 Engine OS 5.3.0**：先让碟机启动一次 5.3.0.5 并连入与电脑相同的局域网，运行 `Restore-Official-Firmware.bat` / `.command` / `.sh`（`enginex-installer --restore-stock`）。一代机先确认清理缓存，拔下含更新文件的存储设备，进入电脑更新模式（SC5000/SC6000 按住 `MEDIA EJECT + SOURCE + LAYER` 开机；其他一代机按[官方更新说明](https://support.enginedj.com/support/solutions/articles/69000797882)操作），保持供电与 USB 连接直至官方 5.3.0 刷入完成；若一代机已卡在原厂 Logo，请先刷入 EngineX 启动一次再恢复。二代机可在 `:8080` 控制台点 `卸载恢复原厂` 或局域网运行 `enginex-installer --uninstall`（保留曲库与设置）。
-- **电脑端 Stems、流媒体与中继**：在同局域网电脑解压安装器后运行 `./stems/run-home-worker.sh`（macOS/Linux）或 `.\stems\run-home-worker.ps1`（Windows）即可启用 `htdemucs` 高音质分轨。流媒体扫码登录、Apple Music 下载助手（`enginex-amd`）与一键中继后端（`sudo bash deploy/one-click-backend.sh`）说明见[在线使用文档](https://enginexdj.com)与 [`CONTRIBUTING.md`](./CONTRIBUTING.md)。
+- **电脑端 Stems、流媒体与中继**：在同局域网电脑解压安装器后运行 `./stems/run-home-worker.sh`（macOS/Linux）或 `powershell -ExecutionPolicy Bypass -File .\stems\run-home-worker.ps1`（Windows）即可启用 `htdemucs` 高音质分轨。手机用 4G/5G 扫码登录时，可在 `http://<deck-ip>:8080` 开启 `Cloudflare Quick Tunnel`（`设置 → 设备 → 远程访问`），或在 Debian 12+ / Ubuntu 24.04+ 主机运行 `sudo bash deploy/one-click-backend.sh` 部署自建中继、Stems 与 `enginex-amd` Apple Music 后端并用 `enginex-installer --setup-backend` 绑定碟机。详见 [`deploy/relay-host/README.md`](./deploy/relay-host/README.md)、[在线使用文档](https://enginexdj.com)与 [`CONTRIBUTING.md`](./CONTRIBUTING.md)。
 
 ---
 
