@@ -38,6 +38,44 @@ func UpdateOneLibraryCues(ctx context.Context, dbPath string, updates map[uint32
 	if len(updates) == 0 {
 		return nil
 	}
+	return rewriteOneLibrary(ctx, dbPath, dstPath, func(plainPath string) error {
+		return applyCueUpdatesSQLite(ctx, plainPath, updates)
+	})
+}
+
+// UpdateOneLibraryMetadata updates editable track metadata in a rekordbox 7
+// OneLibrary database (SQLCipher 4 encrypted or plaintext SQLite).
+func UpdateOneLibraryMetadata(ctx context.Context, dbPath string, updates map[uint32]Metadata, dstPath string) error {
+	if len(updates) == 0 {
+		return nil
+	}
+	return rewriteOneLibrary(ctx, dbPath, dstPath, func(plainPath string) error {
+		return applyMetadataUpdatesSQLite(ctx, plainPath, updates)
+	})
+}
+
+// UpdateOneLibraryEdits applies cue and metadata updates to one decrypted or
+// copied SQLite working file before writing the final export.
+func UpdateOneLibraryEdits(ctx context.Context, dbPath string, cues map[uint32][]Cue, metadata map[uint32]Metadata, dstPath string) error {
+	if len(cues) == 0 && len(metadata) == 0 {
+		return nil
+	}
+	return rewriteOneLibrary(ctx, dbPath, dstPath, func(plainPath string) error {
+		if len(cues) > 0 {
+			if err := applyCueUpdatesSQLite(ctx, plainPath, cues); err != nil {
+				return err
+			}
+		}
+		if len(metadata) > 0 {
+			if err := applyMetadataUpdatesSQLite(ctx, plainPath, metadata); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func rewriteOneLibrary(ctx context.Context, dbPath, dstPath string, apply func(string) error) error {
 	encrypted, err := isEncryptedSQLite(dbPath)
 	if err != nil {
 		return err
@@ -65,7 +103,7 @@ func UpdateOneLibraryCues(ctx context.Context, dbPath string, updates map[uint32
 		plainPath = tmpPlain
 	}
 
-	if err := applyCueUpdatesSQLite(ctx, plainPath, updates); err != nil {
+	if err := apply(plainPath); err != nil {
 		return err
 	}
 
@@ -171,6 +209,199 @@ func applyCueUpdatesSQLite(ctx context.Context, plainPath string, updates map[ui
 		}
 	}
 	return tx.Commit()
+}
+
+func applyMetadataUpdatesSQLite(ctx context.Context, plainPath string, updates map[uint32]Metadata) error {
+	u := url.URL{Scheme: "file", Path: plainPath}
+	db, err := sql.Open("sqlite", u.String())
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	if _, err := db.ExecContext(ctx, `PRAGMA journal_mode=DELETE;`); err != nil {
+		return fmt.Errorf("onelibrary: set journal_mode: %w", err)
+	}
+
+	contentTable, err := findSQLiteTable(ctx, db, "content", "djmdcontent", "track")
+	if err != nil {
+		return fmt.Errorf("onelibrary: content table: %w", err)
+	}
+	contentCols, err := sqliteTableColumns(ctx, db, contentTable)
+	if err != nil {
+		return err
+	}
+	idCol := firstSQLiteColumn(contentCols, "content_id", "id", "track_id")
+	if idCol == "" {
+		return fmt.Errorf("onelibrary: content table has no id column")
+	}
+	genreIDCol := firstSQLiteColumn(contentCols, "genre_id")
+	labelIDCol := firstSQLiteColumn(contentCols, "label_id")
+	genreCol := firstSQLiteColumn(contentCols, "genre")
+	labelCol := firstSQLiteColumn(contentCols, "label")
+	commentCol := firstSQLiteColumn(contentCols, "djcomment", "commnt", "comment")
+	if commentCol == "" && genreIDCol == "" && labelIDCol == "" && genreCol == "" && labelCol == "" {
+		return fmt.Errorf("onelibrary: content table has no editable metadata columns")
+	}
+	genreTable, _ := findSQLiteTable(ctx, db, "genre", "djmdgenre")
+	labelTable, _ := findSQLiteTable(ctx, db, "label", "djmdlabel")
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for contentID, m := range updates {
+		sets := []string{}
+		args := []any{}
+		if commentCol != "" {
+			sets = append(sets, quoteSQLiteIdentifier(commentCol)+"=?")
+			args = append(args, m.Comment)
+		}
+		if genreIDCol != "" {
+			var value any
+			if m.Genre != "" {
+				if genreTable == "" {
+					return fmt.Errorf("onelibrary: genre table missing")
+				}
+				id, err := lookupSQLiteID(ctx, tx, genreTable, m.Genre)
+				if err != nil {
+					return err
+				}
+				value = id
+			}
+			sets = append(sets, quoteSQLiteIdentifier(genreIDCol)+"=?")
+			args = append(args, value)
+		} else if genreCol != "" {
+			sets = append(sets, quoteSQLiteIdentifier(genreCol)+"=?")
+			args = append(args, m.Genre)
+		}
+		if labelIDCol != "" {
+			var value any
+			if m.Label != "" {
+				if labelTable == "" {
+					return fmt.Errorf("onelibrary: label table missing")
+				}
+				id, err := lookupSQLiteID(ctx, tx, labelTable, m.Label)
+				if err != nil {
+					return err
+				}
+				value = id
+			}
+			sets = append(sets, quoteSQLiteIdentifier(labelIDCol)+"=?")
+			args = append(args, value)
+		} else if labelCol != "" {
+			sets = append(sets, quoteSQLiteIdentifier(labelCol)+"=?")
+			args = append(args, m.Label)
+		}
+		if len(sets) == 0 {
+			continue
+		}
+		args = append(args, contentID)
+		q := `UPDATE ` + quoteSQLiteIdentifier(contentTable) + ` SET ` + strings.Join(sets, ", ") + ` WHERE ` + quoteSQLiteIdentifier(idCol) + `=?`
+		if _, err := tx.ExecContext(ctx, q, args...); err != nil {
+			return fmt.Errorf("onelibrary: update metadata for %d: %w", contentID, err)
+		}
+	}
+	return tx.Commit()
+}
+
+func findSQLiteTable(ctx context.Context, db *sql.DB, names ...string) (string, error) {
+	want := map[string]bool{}
+	for _, name := range names {
+		want[normalized(name)] = true
+	}
+	rows, err := db.QueryContext(ctx, `SELECT name FROM sqlite_master WHERE type='table'`)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return "", err
+		}
+		if want[normalized(name)] {
+			return name, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	return "", sql.ErrNoRows
+}
+
+func sqliteTableColumns(ctx context.Context, db *sql.DB, table string) (map[string]string, error) {
+	rows, err := db.QueryContext(ctx, `SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return nil, fmt.Errorf("onelibrary: inspect %s: %w", table, err)
+	}
+	defer rows.Close()
+	cols := map[string]string{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		cols[normalized(name)] = name
+	}
+	return cols, rows.Err()
+}
+
+func firstSQLiteColumn(cols map[string]string, names ...string) string {
+	for _, name := range names {
+		if col := cols[normalized(name)]; col != "" {
+			return col
+		}
+	}
+	return ""
+}
+
+func quoteSQLiteIdentifier(s string) string {
+	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
+}
+
+func lookupSQLiteID(ctx context.Context, tx *sql.Tx, table, name string) (int64, error) {
+	cols, err := sqliteTableColumnsTx(ctx, tx, table)
+	if err != nil {
+		return 0, err
+	}
+	idCol := firstSQLiteColumn(cols, "genre_id", "label_id", "id")
+	nameCol := firstSQLiteColumn(cols, "name", "title")
+	if idCol == "" || nameCol == "" {
+		return 0, fmt.Errorf("onelibrary: lookup table %s has no id/name columns", table)
+	}
+	var id int64
+	q := `SELECT ` + quoteSQLiteIdentifier(idCol) + ` FROM ` + quoteSQLiteIdentifier(table) + ` WHERE ` + quoteSQLiteIdentifier(nameCol) + `=? LIMIT 1`
+	if err := tx.QueryRowContext(ctx, q, name).Scan(&id); err == nil {
+		return id, nil
+	} else if err != sql.ErrNoRows {
+		return 0, err
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(`+quoteSQLiteIdentifier(idCol)+`),0)+1 FROM `+quoteSQLiteIdentifier(table)).Scan(&id); err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO `+quoteSQLiteIdentifier(table)+` (`+quoteSQLiteIdentifier(idCol)+`, `+quoteSQLiteIdentifier(nameCol)+`) VALUES (?, ?)`, id, name); err != nil {
+		return 0, fmt.Errorf("onelibrary: insert lookup %s: %w", table, err)
+	}
+	return id, nil
+}
+
+func sqliteTableColumnsTx(ctx context.Context, tx *sql.Tx, table string) (map[string]string, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	cols := map[string]string{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		cols[normalized(name)] = name
+	}
+	return cols, rows.Err()
 }
 
 func cueTableColumns(ctx context.Context, db *sql.DB) (map[string]bool, error) {

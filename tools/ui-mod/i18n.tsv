@@ -34,6 +34,7 @@ Close	关闭	關閉	Cerrar
 Cloud	云端	雲端	Nube
 Collection	曲库	曲庫	Colección
 Comment	备注	備註	Comentario
+Edit %1	编辑 %1	編輯 %1	Editar %1
 Computer Mode	电脑模式	電腦模式	Modo ordenador
 Confirm	确认	確認	Confirmar
 Connect New Sources	连接新来源	連接新來源	Conectar nuevas fuentes
@@ -99,6 +100,8 @@ Key Sync Mode	调性同步模式	調性同步模式	Modo Key Sync
 LOG IN	登录	登入	INICIAR SESIÓN
 LOG OUT	退出登录	登出	CERRAR SESIÓN
 Label	厂牌	廠牌	Sello
+Metadata edit was not saved	元数据修改未保存	中繼資料修改未儲存	No se guardó la edición de metadatos
+Queued until the drive is inserted	已排队，插入磁盘后写入	已排隊，插入磁碟後寫入	En cola hasta insertar la unidad
 Large	大	大	Grande
 Legal	法律信息	法律資訊	Legal
 Lighting	灯光	燈光	Iluminación

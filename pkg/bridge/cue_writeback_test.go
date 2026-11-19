@@ -44,11 +44,17 @@ func setupWriteBackStick(t *testing.T, withOneLibrary bool) string {
 		_, err = db.Exec(`
 			PRAGMA journal_mode=DELETE;
 			ALTER TABLE content ADD COLUMN analysisDataFilePath varchar;
+			ALTER TABLE content ADD COLUMN genre_id INTEGER;
+			ALTER TABLE content ADD COLUMN label_id INTEGER;
+			CREATE TABLE genre(genre_id INTEGER PRIMARY KEY, name TEXT);
+			CREATE TABLE label(label_id INTEGER PRIMARY KEY, name TEXT);
+			INSERT INTO genre VALUES (20, 'Old Genre');
+			INSERT INTO label VALUES (30, 'Old Label');
 			DELETE FROM content;
 			DELETE FROM cue;
-			INSERT INTO content(content_id, title, bpmx100, length, path, samplingRate, djComment, analysisDataFilePath) VALUES
-				(1, 'Track 1', 12800, 4, ?, 44100, '', '/PIONEER/USBANLZ/P001/ANLZ0000.DAT'),
-				(2, 'Track 2', 12400, 4, ?, 44100, '', '/PIONEER/USBANLZ/P001/ANLZ0000.DAT');
+			INSERT INTO content(content_id, title, bpmx100, length, path, samplingRate, djComment, analysisDataFilePath, genre_id, label_id) VALUES
+				(1, 'Track 1', 12800, 4, ?, 44100, 'Old Comment', '/PIONEER/USBANLZ/P001/ANLZ0000.DAT', 20, 30),
+				(2, 'Track 2', 12400, 4, ?, 44100, '', '/PIONEER/USBANLZ/P001/ANLZ0000.DAT', 20, 30);
 		`, "/"+testfixture.LargeTrackPath(1), "/"+testfixture.LargeTrackPath(2))
 		_ = db.Close()
 		if err != nil {
@@ -74,6 +80,58 @@ func setupWriteBackStick(t *testing.T, withOneLibrary bool) string {
 		}
 	}
 	return stick
+}
+
+func injectDeckMetadataEdit(t *testing.T, stick string) {
+	t.Helper()
+	mPath := filepath.Join(stick, "Engine Library", "Database2", "m.db")
+	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: mPath}).String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	genre := strings.Repeat("G", 140)
+	label := strings.Repeat("标签", 100)
+	if _, err := db.Exec(`UPDATE Track SET genre=?, comment='New Comment', label=? WHERE id=1`, genre, label); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWriteBackTrackMetadataToPDBAndOneLibrary(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		withOneLib bool
+	}{
+		{name: "classic PDB", withOneLib: false},
+		{name: "rekordbox 7 OneLibrary", withOneLib: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stick := setupWriteBackStick(t, tc.withOneLib)
+			if _, err := bridge.Convert(context.Background(), stick, enginedb.Options{}); err != nil {
+				t.Fatal(err)
+			}
+			injectDeckMetadataEdit(t, stick)
+			res, err := bridge.WriteBackCues(context.Background(), stick, bridge.WriteBackOptions{DateDir: "2026-11-19", SkipPreparingCheck: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.TracksChanged != 1 {
+				t.Fatalf("TracksChanged=%d, want 1: %+v", res.TracksChanged, res)
+			}
+			var lib *rekordbox.Library
+			if tc.withOneLib {
+				lib, err = rekordbox.ReadSQLite(context.Background(), filepath.Join(stick, "PIONEER/rekordbox/exportLibrary.db"), nil)
+			} else {
+				lib, err = rekordbox.ReadPDB(filepath.Join(stick, "PIONEER/rekordbox/export.pdb"))
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(lib.Tracks) == 0 || lib.Tracks[0].Genre != strings.Repeat("G", 140) || lib.Tracks[0].Comment != "New Comment" || lib.Tracks[0].Label != strings.Repeat("标签", 100) {
+				t.Fatalf("track metadata=%+v", lib.Tracks)
+			}
+		})
+	}
 }
 
 func injectDeckCueEdit(t *testing.T, stick string) {

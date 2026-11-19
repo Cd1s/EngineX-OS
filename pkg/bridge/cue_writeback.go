@@ -31,7 +31,7 @@ type WriteBackOptions struct {
 	BeforeRename func(dst string) error
 }
 
-// WriteBackResult summarizes a cue/loop write-back pass on a stick.
+// WriteBackResult summarizes a deck-edit write-back pass on a stick.
 type WriteBackResult struct {
 	TracksChecked     int    `json:"tracksChecked"`
 	TracksChanged     int    `json:"tracksChanged"`
@@ -42,7 +42,8 @@ type WriteBackResult struct {
 
 const usbPreparingFlagPath = "/run/enginex-usb-preparing"
 
-// WriteBackCues writes Engine deck Hot Cues, Memory Cues, and Saved Loops
+// WriteBackCues writes Engine deck Hot Cues, Memory Cues, Saved Loops, and
+// editable track metadata
 // that differ from the stick's current rekordbox export back to the stick's
 // ANLZ files (.DAT, .EXT, and .2EX if present) and rekordbox 7 exportLibrary.db
 // (if present). Originals are backed up once under /.enginex-backup/<date>/.
@@ -109,8 +110,10 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 
 	rows, err := db.QueryContext(ctx, `
 		SELECT bs.path, bs.trackId, ba.sourceJSON,
-		       pd.trackData, pd.quickCues, pd.loops
+		       pd.trackData, pd.quickCues, pd.loops,
+		       COALESCE(t.genre,''), COALESCE(t.comment,''), COALESCE(t.label,'')
 		FROM bridge.BridgeState bs
+		JOIN Track t ON t.id = bs.trackId
 		JOIN PerformanceData pd ON pd.trackId = bs.trackId
 		LEFT JOIN bridge.BridgeAnalysis ba ON ba.trackId = bs.trackId
 	`)
@@ -128,6 +131,9 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 		rbTrackID    uint32
 		analysisPath string
 		cues         []rekordbox.Cue
+		cuesDiff     bool
+		metadata     rekordbox.Metadata
+		metadataDiff bool
 	}
 	var changes []trackChange
 
@@ -138,31 +144,38 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 		var enginePath string
 		var engineID int64
 		var srcJSON, trackData, quickCues, loopsBlob []byte
-		if err := rows.Scan(&enginePath, &engineID, &srcJSON, &trackData, &quickCues, &loopsBlob); err != nil {
+		var genre, comment, label string
+		if err := rows.Scan(&enginePath, &engineID, &srcJSON, &trackData, &quickCues, &loopsBlob, &genre, &comment, &label); err != nil {
 			return res, err
 		}
 		res.TracksChecked++
 
 		rbTrack, ok := resolveRekordboxTrack(srcJSON, enginePath, byID, byPath)
-		if !ok || rbTrack.ID == 0 || rbTrack.AnalysisPath == "" {
+		if !ok || rbTrack.ID == 0 {
 			continue
 		}
-		if len(trackData) == 0 {
-			continue
+		var nextCues []rekordbox.Cue
+		cuesDiff := false
+		if rbTrack.AnalysisPath != "" && len(trackData) > 0 {
+			dcues, dloops, err := enginedb.ParseDisplayCuesAndLoops(trackData, quickCues, loopsBlob)
+			if err == nil {
+				origCues := readStickTrackCues(absMount, rbTrack.AnalysisPath)
+				nextCues = mergeEngineCues(origCues, dcues, dloops)
+				cuesDiff = !cuesEquivalent(origCues, nextCues)
+			}
 		}
-		dcues, dloops, err := enginedb.ParseDisplayCuesAndLoops(trackData, quickCues, loopsBlob)
-		if err != nil {
-			continue
-		}
-		origCues := readStickTrackCues(absMount, rbTrack.AnalysisPath)
-		nextCues := mergeEngineCues(origCues, dcues, dloops)
-		if cuesEquivalent(origCues, nextCues) {
+		metadata := rekordbox.Metadata{Genre: genre, Comment: comment, Label: label}
+		metadataDiff := metadata != (rekordbox.Metadata{Genre: rbTrack.Genre, Comment: rbTrack.Comment, Label: rbTrack.Label})
+		if !cuesDiff && !metadataDiff {
 			continue
 		}
 		changes = append(changes, trackChange{
 			rbTrackID:    rbTrack.ID,
 			analysisPath: rbTrack.AnalysisPath,
 			cues:         nextCues,
+			cuesDiff:     cuesDiff,
+			metadata:     metadata,
+			metadataDiff: metadataDiff,
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -175,16 +188,25 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 
 	backupRoot := filepath.Join(absMount, ".enginex-backup")
 	oneLibUpdates := make(map[uint32][]rekordbox.Cue, len(changes))
+	oneLibMetadata := make(map[uint32]rekordbox.Metadata, len(changes))
+	pdbMetadata := make(map[uint32]rekordbox.Metadata, len(changes))
 
 	for _, ch := range changes {
 		if err := ctx.Err(); err != nil {
 			return res, err
 		}
+		res.TracksChanged++
+		if ch.metadataDiff {
+			oneLibMetadata[ch.rbTrackID] = ch.metadata
+			pdbMetadata[ch.rbTrackID] = ch.metadata
+		}
+		if !ch.cuesDiff || ch.analysisPath == "" {
+			continue
+		}
 		datRel, err := safeANLZRelPath(ch.analysisPath)
 		if err != nil {
 			continue
 		}
-		res.TracksChanged++
 		oneLibUpdates[ch.rbTrackID] = ch.cues
 
 		baseRel := strings.TrimSuffix(datRel, filepath.Ext(datRel))
@@ -226,7 +248,7 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 
 	oneLibRel := "PIONEER/rekordbox/exportLibrary.db"
 	oneLibFull := filepath.Join(absMount, filepath.FromSlash(oneLibRel))
-	if oneLibOK && len(oneLibUpdates) > 0 {
+	if oneLibOK && (len(oneLibUpdates) > 0 || len(oneLibMetadata) > 0) {
 		if _, err := os.Stat(oneLibFull); err == nil {
 			if err := ensureFirstOriginalBackup(absMount, backupRoot, dateDir, oneLibRel); err != nil {
 				return res, err
@@ -237,7 +259,7 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 			}
 			tmpPath := tmpOut.Name()
 			_ = tmpOut.Close()
-			if err := rekordbox.UpdateOneLibraryCues(ctx, oneLibFull, oneLibUpdates, tmpPath); err != nil {
+			if err := rekordbox.UpdateOneLibraryEdits(ctx, oneLibFull, oneLibUpdates, oneLibMetadata, tmpPath); err != nil {
 				_ = os.Remove(tmpPath)
 				return res, err
 			}
@@ -253,6 +275,38 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 			}
 			_ = syncDir(filepath.Dir(oneLibFull))
 			res.OneLibraryUpdated = true
+			res.FilesUpdated++
+		}
+	}
+
+	if !oneLibOK && len(pdbMetadata) > 0 {
+		pdbRel := "PIONEER/rekordbox/export.pdb"
+		pdbFull := filepath.Join(absMount, filepath.FromSlash(pdbRel))
+		if _, err := os.Stat(pdbFull); err == nil {
+			if err := ensureFirstOriginalBackup(absMount, backupRoot, dateDir, pdbRel); err != nil {
+				return res, err
+			}
+			tmpOut, err := os.CreateTemp(filepath.Dir(pdbFull), ".enginex-pdb-*.tmp")
+			if err != nil {
+				return res, err
+			}
+			tmpPath := tmpOut.Name()
+			_ = tmpOut.Close()
+			if err := updatePDBMetadata(ctx, pdbFull, pdbMetadata, tmpPath); err != nil {
+				_ = os.Remove(tmpPath)
+				return res, err
+			}
+			if opts.BeforeRename != nil {
+				if err := opts.BeforeRename(pdbFull); err != nil {
+					_ = os.Remove(tmpPath)
+					return res, err
+				}
+			}
+			if err := os.Rename(tmpPath, pdbFull); err != nil {
+				_ = os.Remove(tmpPath)
+				return res, err
+			}
+			_ = syncDir(filepath.Dir(pdbFull))
 			res.FilesUpdated++
 		}
 	}
@@ -326,6 +380,21 @@ func readStickTrackCues(mountPath, analysisPath string) []rekordbox.Cue {
 		}
 	}
 	return nil
+}
+
+func updatePDBMetadata(ctx context.Context, path string, updates map[uint32]rekordbox.Metadata, dst string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	updated, err := rekordbox.RewritePDBMetadata(raw, updates)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(dst, updated, 0o644)
 }
 
 func mergeEngineCues(orig []rekordbox.Cue, dcues []enginedb.DisplayCue, dloops []enginedb.DisplayLoop) []rekordbox.Cue {
