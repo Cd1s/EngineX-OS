@@ -2526,11 +2526,16 @@ SERVICES_MAIN = """
 			if (scShadowBent && scShadowBent.at === at) scShadowBendEnd()
 			const en = g("/ExternalScratchWheelScratchEnable"), tc = g("/ExternalScratchWheelTouch"), mv = g("/ExternalScratchWheelMove")
 			if (!at.scratch) {
-				at.scratchEnable = en ? !!en.state : undefined
-				at.scratchTouch = tc ? !!tc.state : undefined
-				at.scratchPosition = g("/Track/TrackPosition"); at.scratchMove = mv
+				at.scratchPosition = g("/Track/TrackPosition")
 				at.scratchMirror = at.link ? root.scTr("/Engine/BeatInfoSenderControl/" + at.link + "/PositionInSamples" + (e.src >= 1 && e.src <= 4 ? e.src : d)) : null
 				at.scratchOwn = null; at.scratchPush = undefined
+			}
+			// What the wheel was before our hand, to put back at the release: also when the paused
+			// follow began this scratch (it writes nothing to the wheel and saved nothing).
+			if (!at.scratchWheel) {
+				at.scratchEnable = en ? !!en.state : undefined
+				at.scratchTouch = tc ? !!tc.state : undefined
+				at.scratchMove = mv; at.scratchWheel = true
 			}
 			if (en && !en.state) en.state = true
 			if (tc && !tc.state) tc.state = true
@@ -2971,7 +2976,7 @@ SERVICES_MAIN = """
 		const en = root.scTr("/Engine/Deck" + d + "/ExternalScratchWheelScratchEnable")
 		if (tc && at.scratchTouch !== undefined && !!tc.state !== at.scratchTouch) tc.state = at.scratchTouch
 		if (en && at.scratchEnable !== undefined && !!en.state !== at.scratchEnable) en.state = at.scratchEnable
-		at.scratch = false; at.scratchTouch = undefined; at.scratchEnable = undefined
+		at.scratch = false; at.scratchTouch = undefined; at.scratchEnable = undefined; at.scratchWheel = false
 		let active = false
 		for (let n = 1; n <= 4; n++) if (scShadowAt[n] && scShadowAt[n].scratch) active = true
 		if (!active) scShadowScratchTimer.stop()

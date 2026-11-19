@@ -65,6 +65,22 @@ scShadowApplyAll([E({id:'2',path:'/data/enginex/shadow-v3/peer-2/b.flac',scratch
 assert.equal(P('/Engine/Deck2/ExternalScratchWheelTouch').state,false,'touch still held on the shadow deck after the track changed');
 """)
 
+    def test_follow_mode_change_during_a_scratch_leaves_no_touch_or_vinyl_mode(self):
+        # The running hook's state arrives with a settings reply: the follow can change from
+        # paused (nothing written to the copy's wheel) to playing while the source is under a
+        # hand. The playing branch then set the copy's touch and vinyl mode without having
+        # saved what they were, and the release had nothing to put back.
+        self.js(RX.replace("for(let i=1;i<=5;i++)", "globalThis.XMLHttpRequest=class{open(){} setRequestHeader(){} send(){}};scPausedShadowFollow=true;P('/Engine/Deck2/ExternalScratchWheelScratchEnable').state=false;\nfor(let i=1;i<=5;i++)").replace("assert.equal(P('/Engine/Deck2/ExternalScratchWheelTouch').state,true,'precondition: touch engaged');", "assert.equal(P('/Engine/Deck2/ExternalScratchWheelTouch').state,false,'paused follow wrote the touch');") + r"""
+scPausedShadowFollow=false;
+for(let i=6;i<=9;i++){now+=25;scShadowApplyAll([E({scratch:true,positionMs:11500-i*40,at:now})],false);scShadowScratchTimer.tick();}
+assert.equal(P('/Engine/Deck2/ExternalScratchWheelTouch').state,true,'the scratch is not followed after the change');
+assert(wheelMoves.length>0,'the wheel is not moved after the change');
+now+=25;
+scShadowApplyAll([E({scratch:false,positionMs:11140,at:now})],false);
+assert.equal(P('/Engine/Deck2/ExternalScratchWheelTouch').state,false,'touch held on the deck after the hand let go');
+assert.equal(P('/Engine/Deck2/ExternalScratchWheelScratchEnable').state,false,'vinyl mode left on on the deck after the hand let go');
+""")
+
     def test_scratch_enable_is_restored_after_release(self):
         self.js(RX + r"""
 now+=25;
