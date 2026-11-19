@@ -562,6 +562,62 @@ STREAMING_INTERNAL_SAVE = """
         }
         if (!PlanckGUI.views.sourceScreenView.visible) PlanckGUI.views.sourceScreenView.onQuickSourceButtonClicked()
     }
+    // At start-up, with nothing browsed and one local drive, browse it on every model.
+    // To Engine the internal save drive is a second drive, so its own single-source
+    // auto-select stopped and the Sources list opened at every start. The only drive is
+    // a row whose identifier is a path (another deck's drive over Engine Link is
+    // net://…), other than the internal drive and the read-only demo devices (type 6).
+    // Re-check on each try within the 15 x 2 s window so a late-mounting drive is
+    // picked and a second drive arriving during start-up stops selection; wait while
+    // an internal save or native device selection is running, and stop once any real
+    // source has been browsed. select() is what a tap does and loads the library.
+    property int scStartTries: 0
+    function scOnlyDrive() {
+        const model = Planck.librarianController.browserSourceControllerPtr().model()
+        let only = ""
+        for (let row = 0; row < model.rowCount(); row++) {
+            const index = model.index(row, 0)
+            const id = String(model.data(index, 257) || "")
+            if (!id.startsWith("/") || id === "/data/enginex/stream-save" || model.data(index, 259) === 6) continue
+            if (only) return null
+            only = id
+        }
+        return only
+    }
+    function scStartOnlyDrive() {
+        const cur = scCurrentSource() || ""
+        if (scLastSource !== "" || (cur !== "" && cur !== "/data/enginex/stream-save")) return
+        scStartTries = 0
+        scSelectStartDrive()
+    }
+    function scSelectStartDrive() {
+        const cur = scCurrentSource() || ""
+        if (scLastSource !== "" || (cur !== "" && cur !== "/data/enginex/stream-save") || scStartTries >= 15) return
+        scStartTries++
+        let multi = false
+        if (!scInternalPending && !(scSelectingDevice && scSelectingDevice.state)) {
+            const drive = scOnlyDrive()
+            if (drive === null) multi = true
+            else if (drive) {
+                const sources = Planck.librarianController.browserSourceControllerPtr()
+                const model = sources.model()
+                for (let row = 0; row < model.rowCount(); row++) {
+                    const index = model.index(row, 0)
+                    if (model.data(index, 257) === drive) {
+                        sources.select(index)
+                        break
+                    }
+                }
+            }
+        }
+        const after = scCurrentSource() || ""
+        if (!multi && scStartTries < 15 && scLastSource === "" && (after === "" || after === "/data/enginex/stream-save")) scStartSelect.start()
+    }
+    Timer {
+        id: scStartSelect
+        interval: 2000
+        onTriggered: scSelectStartDrive()
+    }
     // Engine itself browses the internal drive (it remembered it at start-up, or the
     // drive being browsed went away): leave it unless our own selection is running.
     function scLeaveInternal() {
@@ -7937,6 +7993,7 @@ def edits(dev: bool):
              "    Component.onCompleted: {\n"
              "        Planck.librarianController.streamingInterfaceController.checkSourceDriveAvailability()\n"
              "        Qt.callLater(scLeaveInternal)\n"
+             "        Qt.callLater(scStartOnlyDrive)\n"
              "    }\n"),
             ("        function onShowNoSourceAvailableDialog() {\n",
              "        function onHasSourceDriveChanged(available) {\n"

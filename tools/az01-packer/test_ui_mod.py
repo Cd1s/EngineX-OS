@@ -401,6 +401,205 @@ assert.equal(opened, 0);
         self.assertIn("checkSourceDriveAvailability()", completed)
         self.assertIn("Qt.callLater(scLeaveInternal)", completed)
 
+    @unittest.skipUnless(shutil.which("node"), "Node is required for source selection handlers")
+    def test_start_up_browses_the_only_drive_like_a_stock_deck(self):
+        rel = "Skins/Embedded/Views/Streaming/StreamingNoSourceAvailableDialog.qml"
+        qrc_env = os.environ.get("ENGINEX_TEST_QRC")
+        bases = [("override", Path(qrc_env))] if qrc_env else [
+            (name, LAB / sub / "qrc")
+            for name, sub in (("5.3.0", "5.3.0"), ("5.3.0-sclive4", "5.3.0-sclive4"), ("5.3.0-az04", "5.3.0-az04"))
+            if (LAB / sub / "qrc" / rel).is_file()
+        ]
+        if not bases:
+            bases = [("5.3.0", LAB / "5.3.0/qrc")]
+        harness = r"""
+const assert = require('node:assert/strict');
+const internal = '/data/enginex/stream-save';
+let scStartDrive = '', scStartTries = 0, scInternalPending = false, scLastSource = '';
+const scSelectingDevice = {state: false};
+let selected = '', selections = [], deferred = [], accept = 1, timer = false;
+// Rows as an SC LIVE 4 with one SD card lists them (role 259 is the source type:
+// 0 drive, 3 streaming, 6 the read-only demo / sampler demo devices).
+let rows = [['/media/Denon DJ', 0], [internal, 0], ['TIDAL', 3], ['/usr/Engine/Content/SamplerDemoDevice', 6], ['/usr/Engine/Content/DemoDevice', 6]];
+const model = {
+    rowCount: () => rows.length, index: row => row,
+    data: (row, role) => role === 257 ? rows[row][0] : role === 259 ? rows[row][1]
+        : role === 265 ? rows[row][0] === selected : undefined,
+};
+// Engine takes a selection only once it is ready: the first ones are ignored.
+const sources = {
+    model: () => model,
+    select: row => { selections.push(rows[row][0]); if (--accept <= 0) selected = rows[row][0]; },
+    forceSelect: () => assert.fail('forceSelect marks a drive without loading it'),
+};
+const Planck = {librarianController: {browserSourceControllerPtr: () => sources}};
+let Config = {device: {autoSelectSingleSource: true}};
+const sourceScreenView = {visible: true, close: () => assert.fail('Engine closes the list itself')};
+const PlanckGUI = {views: {sourceScreenView}};
+const Qt = {callLater: fn => deferred.push(fn)};
+const scStartSelect = {start() { timer = true; }, stop() { timer = false; }};
+function flush() { while (deferred.length) deferred.shift()(); }
+function tick() { if (timer) { timer = false; scSelectStartDrive(); } }
+function startUp(initial = '') {
+    selected = initial; selections = []; scStartDrive = ''; scStartTries = 0;
+    scInternalPending = false; scLastSource = ''; scSelectingDevice.state = false;
+    timer = false; scStartOnlyDrive(); flush();
+}
+FUNCTIONS
+CASE_BODY
+"""
+        cases = {
+            "stock_cases": r"""
+// SC LIVE 4, 2026-11-18: one SD card, nothing browsed at start-up. The internal
+// save drive and demo devices (type 6) are not a second source. Engine ignored the
+// first selection on the deck, so it is repeated until the card is browsed.
+accept = 2; startUp();
+assert.deepEqual(selections, ['/media/Denon DJ']);
+tick();
+assert.deepEqual(selections, ['/media/Denon DJ', '/media/Denon DJ']);
+assert.equal(selected, '/media/Denon DJ');
+tick(); tick();
+assert.equal(selections.length, 2);
+assert.equal(timer, false);
+
+// Two drives: nothing says which one, the Sources list stays for the user
+// (and polling stops immediately so a later #301 remount bounce cannot hijack it).
+rows.push(['/media/sda1', 0]); accept = 1; startUp();
+assert.deepEqual(selections, []);
+assert.equal(timer, false);
+rows.pop();
+tick();
+assert.deepEqual(selections, []);
+
+// Another deck's drive over Engine Link is not this deck's drive.
+rows[0][0] = 'net://cb6580d2-8a13-4e67-946e-6039dc115724/USB 1'; startUp();
+for (let i = 0; i < 20; i++) tick();
+assert.deepEqual(selections, []);
+assert.equal(timer, false);
+rows[0][0] = '/media/Denon DJ';
+
+// Something already browsed: unchanged.
+selected = 'TIDAL'; selections = []; scLastSource = ''; timer = false; scStartOnlyDrive(); flush();
+assert.deepEqual(selections, []);
+assert.equal(timer, false);
+
+// The user picks a source while Engine is not ready yet: theirs stays.
+accept = 99; startUp(); selected = 'TIDAL'; tick();
+assert.deepEqual(selections, ['/media/Denon DJ']);
+assert.equal(timer, false);
+
+// A drive Engine never takes: given up after a bounded number of tries.
+accept = 99; startUp();
+for (let i = 0; i < 40; i++) tick();
+assert.equal(selections.length, 15);
+assert.equal(timer, false);
+""",
+            "all_models_without_flag": r"""
+// All 16 models: start-up single-drive browse does not require autoSelectSingleSource.
+for (const cfg of [{device: {autoSelectSingleSource: false}}, {device: {}}, undefined]) {
+    Config = cfg;
+    accept = 1; startUp();
+    assert.deepEqual(selections, ['/media/Denon DJ']);
+    assert.equal(selected, '/media/Denon DJ');
+    assert.equal(timer, false);
+}
+""",
+            "late_mount_within_window": r"""
+// Late mount (slow card, fsck, HFS+, #301 rekordbox remount): no local drive at
+// start-up, then one mounts within the 15 x 2 s window.
+rows = [[internal, 0], ['TIDAL', 3], ['/usr/Engine/Content/SamplerDemoDevice', 6], ['/usr/Engine/Content/DemoDevice', 6]];
+accept = 2; startUp();
+assert.deepEqual(selections, []);
+assert.equal(timer, true);
+tick(); tick(); tick();
+assert.deepEqual(selections, []);
+assert.equal(timer, true);
+rows.unshift(['/media/Denon DJ', 0]);
+tick();
+assert.deepEqual(selections, ['/media/Denon DJ']);
+assert.equal(selected, '');
+assert.equal(timer, true);
+tick();
+assert.deepEqual(selections, ['/media/Denon DJ', '/media/Denon DJ']);
+assert.equal(selected, '/media/Denon DJ');
+assert.equal(timer, false);
+tick();
+assert.equal(selections.length, 2);
+
+// A drive mounting after the bounded 15-try window expires is not selected.
+rows = [[internal, 0], ['TIDAL', 3]];
+accept = 1; startUp();
+for (let i = 0; i < 20; i++) tick();
+assert.deepEqual(selections, []);
+assert.equal(timer, false);
+rows.unshift(['/media/Denon DJ', 0]);
+tick();
+assert.deepEqual(selections, []);
+
+// A second drive arriving while retrying stops auto-selection immediately.
+rows = [['/media/Denon DJ', 0], [internal, 0]];
+accept = 99; startUp();
+assert.deepEqual(selections, ['/media/Denon DJ']);
+rows.push(['/media/sda1', 0]);
+tick();
+assert.deepEqual(selections, ['/media/Denon DJ']);
+assert.equal(timer, false);
+rows.pop();
+tick();
+assert.deepEqual(selections, ['/media/Denon DJ']);
+""",
+            "internal_save_and_busy_guards": r"""
+// Engine remembered the internal save drive at start-up: it is not a browsable
+// source, so the deck still browses its only local drive.
+accept = 1; startUp(internal);
+assert.deepEqual(selections, ['/media/Denon DJ']);
+assert.equal(selected, '/media/Denon DJ');
+assert.equal(timer, false);
+
+// While scInternalPending or IsSelectingDevice is active, wait instead of colliding.
+selected = internal; selections = []; scStartTries = 0; scLastSource = '';
+scInternalPending = true; scSelectingDevice.state = false; timer = false; accept = 1;
+scStartOnlyDrive(); flush();
+assert.deepEqual(selections, []);
+assert.equal(timer, true);
+scInternalPending = false; scSelectingDevice.state = true;
+tick();
+assert.deepEqual(selections, []);
+assert.equal(timer, true);
+scSelectingDevice.state = false;
+tick();
+assert.deepEqual(selections, ['/media/Denon DJ']);
+assert.equal(selected, '/media/Denon DJ');
+assert.equal(timer, false);
+
+// User browsed a real source during the start-up window (even if later cleared): stop.
+rows = [[internal, 0], ['TIDAL', 3]];
+accept = 1; startUp();
+scLastSource = 'TIDAL';
+rows.unshift(['/media/Denon DJ', 0]);
+tick();
+assert.deepEqual(selections, []);
+assert.equal(timer, false);
+""",
+        }
+        for base_name, qrc in bases:
+            qml = (qrc / rel).read_text()
+            old_root = bp.ROOT
+            try:
+                bp.ROOT = "Skins/Embedded/"
+                for old, new in bp.edits(False).get(rel, []):
+                    qml = bp.patch(qml, old, new, rel)
+            finally:
+                bp.ROOT = old_root
+            functions = "\n".join(PrimeGoTidalQRTest.function(qml, name)
+                                   for name in re.findall(r"function (\w+)\(", qml))
+            for case_name, body in cases.items():
+                with self.subTest(base=base_name, case=case_name):
+                    script = harness.replace("FUNCTIONS", functions).replace("CASE_BODY", body)
+                    result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+            completed = qml.split("Component.onCompleted: {", 1)[1].split("\n    }", 1)[0]
+            self.assertIn("Qt.callLater(scStartOnlyDrive)", completed)
 
 class OnOffSwitchCompatibilityTest(unittest.TestCase):
     @unittest.skipUnless(shutil.which("node"), "Node is required for switch handlers")
