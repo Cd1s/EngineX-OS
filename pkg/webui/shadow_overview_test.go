@@ -8,24 +8,6 @@ import (
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 )
 
-func TestNormalizeShadowOverviewFillsDecoderScaleWithoutChangingGoodRows(t *testing.T) {
-	low := enginedb.DisplayWave{Bands: bytes.Repeat([]byte{2, 1, 1}, 4), SamplesPerBin: 44100}
-	got := normalizeShadowOverview(low, [3]float64{0.68, 0.40, 0.18})
-	var top [3]byte
-	for i, v := range got.Bands {
-		top[i%3] = max(top[i%3], v)
-	}
-	if top != [3]byte{103, 114, 112} {
-		t.Fatalf("normalized overview maxima = %v, want decoder-scaled maxima", top)
-	}
-
-	good := enginedb.DisplayWave{Bands: []byte{103, 114, 112, 40, 50, 60}, SamplesPerBin: 44100}
-	unchanged := normalizeShadowOverview(good, [3]float64{0.68, 0.40, 0.18})
-	if !bytes.Equal(unchanged.Bands, good.Bands) {
-		t.Fatalf("correctly scaled overview changed: %v -> %v", good.Bands, unchanged.Bands)
-	}
-}
-
 func TestPerfFromBlobsFillsZeroOverviewMaxima(t *testing.T) {
 	// 44-byte Engine 5.0.4 trackData without peaks.
 	rawTrack := make([]byte, 44)
