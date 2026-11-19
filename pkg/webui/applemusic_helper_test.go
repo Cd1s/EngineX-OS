@@ -643,8 +643,11 @@ func TestAppleMusicDeckQRCompletesOnExternalHelperLoginAndSwitchAccount(t *testi
 		return rec.Code, rec.Body.String()
 	}
 
-	if code, _ := deckCall("POST", "/v1/enginex/ui?scope=applemusic&sources=applemusic"); code != 200 {
-		t.Fatalf("set scope: %d", code)
+	if code, _ := deckCall("POST", "/v1/enginex/ui?sources=applemusic"); code != 200 {
+		t.Fatalf("set sources: %d", code)
+	}
+	if code, _ := deckCall("POST", "/v1/enginex/ui?scope=applemusic"); code != http.StatusConflict {
+		t.Fatalf("unlogged scope must be refused before sign-in: %d", code)
 	}
 
 	// 1. User opens Apple Music on deck while helper is signed out -> QR flow starts in waiting.
@@ -664,6 +667,9 @@ func TestAppleMusicDeckQRCompletesOnExternalHelperLoginAndSwitchAccount(t *testi
 	}
 	if _, uiBody := deckCall("GET", "/v1/enginex/ui"); !strings.Contains(uiBody, `"applemusic"`) || !strings.Contains(uiBody, `"loggedIn":["applemusic"]`) {
 		t.Fatalf("expected applemusic in loggedIn: %s", uiBody)
+	}
+	if code, _ := deckCall("POST", "/v1/enginex/ui?scope=applemusic"); code != 200 {
+		t.Fatalf("set scope after login: %d", code)
 	}
 	var lists1 tidalList
 	tidalGet(t, gw.URL, "/v1/users/1/playlists", 200, &lists1)

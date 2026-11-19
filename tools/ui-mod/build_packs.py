@@ -468,7 +468,15 @@ TIDAL_OPEN_530 = """	function scTidalProvider() {
 		}
 	}
 	function scOpen(id) {
-		if (id === "tidal" && scSources.indexOf("tidal") < 0) return
+		if (!id || !scUiLoaded || scSources.indexOf(id) < 0) return
+		if (id !== "tidal" && scLoggedIn.indexOf(id) < 0) {
+			if (id !== "rekordbox") {
+				root.scLoginOpen = id
+				scLoginBegin(id)
+			}
+			return
+		}
+		root.scLoginOpen = ""
 		scAskedAt = Date.now()
 		scScope = id // before Engine's TIDAL client can raise a prompt; scApply confirms it
 		if (id !== "tidal") scTidalLoginPending = false
@@ -488,12 +496,20 @@ TIDAL_OPEN_530 = """	function scTidalProvider() {
 			scSelectPending = !scTidalLoginPending && !scSelectTidal()
 			scEnterTries = 8
 			scEnterTimer.start()
-			if (id !== "tidal" && scLoggedIn.indexOf(id) < 0) scLoginBegin(id)
 		})
 	}
 """
 TIDAL_OPEN_504 = """
 	function scOpen(id) {
+		if (!id || !scUiLoaded || scSources.indexOf(id) < 0) return
+		if (id !== "tidal" && scLoggedIn.indexOf(id) < 0) {
+			if (id !== "rekordbox") {
+				root.scLoginOpen = id
+				scLoginBegin(id)
+			}
+			return
+		}
+		root.scLoginOpen = ""
 		scAskedAt = Date.now()
 		scScope = id // before Engine's TIDAL client can raise a prompt; scApply confirms it
 		if (scScopePending) return
@@ -504,7 +520,6 @@ TIDAL_OPEN_504 = """
 			scSelectPending = !scSelectTidal()
 			scEnterTries = 8
 			scEnterTimer.start()
-			if (id !== "tidal" && scLoggedIn.indexOf(id) < 0) scLoginBegin(id)
 		})
 	}
 """
@@ -3620,7 +3635,7 @@ SERVICES_MAIN = """
 		}
 		return true
 	}
-	property var scSources: ["tidal", "netease", "spotify", "deezer", "soundcloud", "beatport", "applemusic"]
+	property var scSources: []
 	property var scLoggedIn: []
 	property bool scTidalLoggedIn: false
 	property bool scTidalSynthetic: false
@@ -4025,7 +4040,10 @@ SERVICES_MAIN = """
 			if (x.readyState !== 4) return
 			if (scopeChange) scScopePending--
 			if (x.status !== 200) {
-				if (scopeChange && scope !== scScope) scOpen(scScope)
+				if (scopeChange) {
+					if (scope !== scScope) scOpen(scScope)
+					else { scUiDigest = ""; scCall("", function() {}) }
+				}
 				return
 			}
 			const reply = JSON.parse(x.responseText)
@@ -4081,6 +4099,13 @@ SERVICES_MAIN = """
 		const wasIn = wasLoaded && prevScope && prevScope !== "tidal" && Array.isArray(scLoggedIn) ? scLoggedIn.indexOf(prevScope) >= 0 : null
 		scApply(JSON.parse(scUiPoll.responseText))
 		scUiDigest = digest; scUiAppliedAt = now
+		if (typeof scLoginOpen !== "undefined" && scLoginOpen && Array.isArray(scLoggedIn) && scLoggedIn.indexOf(scLoginOpen) >= 0 && typeof scSources !== "undefined" && Array.isArray(scSources) && scSources.indexOf(scLoginOpen) >= 0) {
+			const target = scLoginOpen
+			scLogin = ""
+			scLoginOpen = ""
+			scOpen(target)
+			return
+		}
 		if (wasIn !== null && scScope === prevScope && Array.isArray(scLoggedIn) && (scLoggedIn.indexOf(prevScope) >= 0) !== wasIn) {
 			const nowIn = !wasIn
 			if (nowIn && typeof scLogin !== "undefined" && scLogin === prevScope) scLogin = ""
@@ -4334,6 +4359,7 @@ SERVICES_MAIN = """
 		scCall("waveform=" + id)
 	}
 	function scSetSource(id, on) {
+		if (!scUiLoaded) return
 		const list = scSources.filter(s => s !== id)
 		if (on) list.push(id)
 		scCall("sources=" + list.join(","))
@@ -4358,6 +4384,7 @@ SERVICES_MAIN = """
 		return true
 	}
 	property string scLogin: ""
+	property string scLoginOpen: ""
 	property string scLoginStatus: ""
 	property bool scLoginLocal: false
 	property int scLoginSerial: 0
@@ -4381,8 +4408,14 @@ SERVICES_MAIN = """
 		})
 	}
 	function scLoginDone() {
+		const target = root.scLoginOpen
 		scLogin = ""
+		root.scLoginOpen = ""
 		scCall("", function() {
+			if (target && scSources.indexOf(target) >= 0 && scLoggedIn.indexOf(target) >= 0) {
+				scOpen(target)
+				return
+			}
 			Planck.librarianController.streamingPlaylistsController.invalidateUI()
 			scEnterTries = 8
 			scEnterTimer.start()
@@ -5111,7 +5144,7 @@ LOGIN_DIALOG = """
 					MouseArea {
 						id: closeArea
 						anchors.fill: parent
-						onClicked: root.scLogin = ""
+						onClicked: { root.scLogin = ""; root.scLoginOpen = "" }
 					}
 				}
 			}
@@ -5221,7 +5254,7 @@ SOURCE_FOOTER = """
 		else if (e.kind === "footer") scEnsureVisible(connectedSource.footerItem ? connectedSource.footerItem.scRepeater.itemAt(e.row) : null)
 	}
 	function scActivate() {
-		if (!scFocusKind) scStep(1)
+		if (!scFocusKind) { scStep(1); return }
 		const sources = Planck.librarianController.browserSourceControllerPtr()
 		if (scFocusKind === "footer" && scFocusService) {
 			root.scOpen(scFocusService)
@@ -5268,6 +5301,10 @@ SOURCE_FOOTER = """
 	}
 	Connections {
 		property int prevCount: 0
+		Component.onCompleted: {
+			const tr = connectedSource.pScSourceSelect && connectedSource.pScSourceSelect.translator
+			if (tr) prevCount = tr.stateTrueCount
+		}
 		target: connectedSource.pScSourceSelect ? connectedSource.pScSourceSelect.translator : null
 		function onStateChanged() {
 			const tr = connectedSource.pScSourceSelect.translator
@@ -5334,7 +5371,7 @@ SOURCE_FOOTER = """
 					anchors { right: parent.right; top: parent.top; bottom: parent.bottom }
 					width: 140
 					visible: modelData.id !== "tidal" && modelData.id !== "rekordbox"
-					onClicked: root.scLoginBegin(modelData.id)
+					onClicked: { root.scLoginOpen = ""; root.scLoginBegin(modelData.id) }
 					Text {
 						anchors.centerIn: parent
 						text: root.scT(root.scLoggedIn.indexOf(modelData.id) >= 0 ? "Switch account" : "Scan to log in")
@@ -7908,6 +7945,8 @@ def edits(dev: bool):
                 "        }\n"
                 "        responsiveBrowseView.sortRole = sortRole\n"
                 "    }\n",
+                "    property bool scSortReady: false\n"
+                "    Component.onCompleted: scSortReady = true\n"
                 "    onSortRoleChanged: {\n"
                 "        if (dialog) {\n"
                 "            dialog.sortRole = sortRole\n"
@@ -7919,7 +7958,7 @@ def edits(dev: bool):
                 "        scPostSortSettings()\n"
                 "    }\n"
                 "    function scPostSortSettings() {\n"
-                "        if (!isStreamingProviderWithSort) return\n"
+                "        if (!scSortReady || !isStreamingProviderWithSort) return\n"
                 "        try {\n"
                 "            var scReq = new XMLHttpRequest()\n"
                 '            scReq.open("POST", "http://127.0.0.1:8080/v1/enginex/ui", true)\n'

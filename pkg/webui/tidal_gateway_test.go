@@ -73,7 +73,8 @@ func tidalGet(t *testing.T, base, path string, status int, out any) []byte {
 }
 
 func TestTidalGatewayLoginAndHint(t *testing.T) {
-	ui := New(Config{AccessToken: "test-console-code", SpotifyClientID: testSpotifyClientID, DeezerURL: fakeDeezer(t).URL, StateDir: t.TempDir(), UIDir: t.TempDir()}, nil)
+	uiDir := t.TempDir()
+	ui := New(Config{AccessToken: "test-console-code", SpotifyClientID: testSpotifyClientID, DeezerURL: fakeDeezer(t).URL, StateDir: t.TempDir(), UIDir: uiDir}, nil)
 	srv := httptest.NewServer(ui)
 	defer srv.Close()
 	for _, path := range []string{"/au/oauth2/device_authorization", "/au//oauth2/token"} {
@@ -119,6 +120,13 @@ func TestTidalGatewayLoginAndHint(t *testing.T) {
 			t.Fatal(err)
 		}
 		resp.Body.Close()
+		if resp.StatusCode != http.StatusConflict {
+			t.Fatalf("unlogged %s scope: got HTTP %d, want 409", scope, resp.StatusCode)
+		}
+		// A previously saved scope whose session later expired still renders the login hint.
+		if err := os.WriteFile(filepath.Join(uiDir, "settings.conf"), []byte("scope="+scope+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
 		if got := titles(); len(got) != 1 || !strings.Contains(got[0], lanHost()+":8080") || strings.Contains(got[0], "enginex.lan") {
 			t.Fatalf("%s titles=%q", scope, got)
 		}
@@ -417,6 +425,9 @@ func TestTidalScopeGoesToTidalsOwnServers(t *testing.T) {
 	}))
 	defer auth.Close()
 	ui := New(Config{AccessToken: "c", UIDir: t.TempDir(), StateDir: t.TempDir(), TidalAPIURL: api.URL, TidalAuthURL: auth.URL}, nil)
+	ui.mu.Lock()
+	ui.sessions["owner-netease"] = &Session{ID: "owner-netease", Provider: "netease", Ready: true, p: &providers.Netease{UserID: 1, Cookie: "MUSIC_U=x"}, expires: time.Now().Add(time.Hour)}
+	ui.mu.Unlock()
 	srv := httptest.NewServer(ui)
 	defer srv.Close()
 	if r, err := http.Post(srv.URL+"/v1/enginex/ui?scope=tidal", "", nil); err != nil || r.StatusCode != 200 {
@@ -1142,6 +1153,9 @@ func TestTidalRealLoginSurvivesScopeSwitch(t *testing.T) {
 	defer up.Close()
 	dir := t.TempDir()
 	s := New(Config{AccessToken: "code", UIDir: t.TempDir(), StateDir: dir, TidalAPIURL: up.URL, TidalAuthURL: up.URL}, nil)
+	s.mu.Lock()
+	s.sessions["owner-spotify"] = &Session{ID: "owner-spotify", Provider: "spotify", Ready: true, p: &providers.Spotify{Token: providers.Token{AccessToken: "tok"}}, expires: time.Now().Add(time.Hour)}
+	s.mu.Unlock()
 	srv := httptest.NewServer(s)
 	defer srv.Close()
 	post := func(endpoint, form string) []byte {

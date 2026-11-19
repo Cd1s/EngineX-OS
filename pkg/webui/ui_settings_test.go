@@ -13,8 +13,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/deemixclient"
+	"github.com/Cd1s/EngineX-OS/pkg/providers"
 )
 
 func uiPost(t *testing.T, base, query string) (int, uiSettings) {
@@ -33,7 +35,11 @@ func TestUISettingsPersistAndRestart(t *testing.T) {
 	dir := t.TempDir()
 	restarts := 0
 	cfg := Config{AccessToken: "code", UIDir: dir, StateDir: t.TempDir(), RestartEngine: func() error { restarts++; return nil }}
-	srv := httptest.NewServer(New(cfg, nil))
+	s := New(cfg, nil)
+	s.mu.Lock()
+	s.sessions["owner-spotify"] = &Session{ID: "owner-spotify", Provider: "spotify", Ready: true, p: &providers.Spotify{Token: providers.Token{AccessToken: "tok"}}, expires: time.Now().Add(time.Hour)}
+	s.mu.Unlock()
+	srv := httptest.NewServer(s)
 	defer srv.Close()
 
 	if code, v := uiPost(t, srv.URL, "waveform=3band&sources=spotify,netease&scope=spotify"); code != 200 || v.Waveform != "3band" || v.Scope != "spotify" || !slices.Equal(v.Sources, []string{"netease", "spotify"}) || restarts != 0 {
@@ -1640,5 +1646,97 @@ func TestMixstreamPitchBendBeatJumpAndFxSlots(t *testing.T) {
 		if !strings.Contains(html, want) {
 			t.Fatalf("index.html missing %q", want)
 		}
+	}
+}
+
+func TestScopeRejectsDisabledOrUnloggedAndPreservesUnchangedConf(t *testing.T) {
+	dir := t.TempDir()
+	s := New(Config{AccessToken: "code", UIDir: dir, StateDir: t.TempDir()}, nil)
+	t.Cleanup(s.Close)
+	s.mu.Lock()
+	s.sessions["owner-deezer"] = &Session{
+		ID:       "owner-deezer",
+		Provider: "deezer",
+		Ready:    true,
+		p:        &providers.Deezer{UserID: "12345"},
+		expires:  time.Now().Add(time.Hour),
+	}
+	s.sessions["owner-spotify"] = &Session{
+		ID:       "owner-spotify",
+		Provider: "spotify",
+		Ready:    true,
+		p:        &providers.Spotify{Token: providers.Token{AccessToken: "tok"}},
+		expires:  time.Now().Add(time.Hour),
+	}
+	s.mu.Unlock()
+
+	srv := httptest.NewServer(s)
+	defer srv.Close()
+
+	// Enabled + logged-in service succeeds.
+	if code, v := uiPost(t, srv.URL, "sources=netease,deezer&scope=deezer&streamSortRole=bpm"); code != 200 || v.Scope != "deezer" {
+		t.Fatalf("valid deezer scope: code=%d scope=%q", code, v.Scope)
+	}
+	confPath := filepath.Join(dir, "settings.conf")
+	oldTime := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(confPath, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+
+	// Enabled but NOT logged-in service (netease) must be rejected without touching scope or settings.conf.
+	if code, _ := uiPost(t, srv.URL, "scope=netease"); code != http.StatusConflict {
+		t.Fatalf("unlogged netease scope: got HTTP %d, want 409", code)
+	}
+	// Unavailable dynamic rekordbox must be rejected without touching scope or settings.conf.
+	if code, _ := uiPost(t, srv.URL, "scope=rekordbox"); code != http.StatusConflict {
+		t.Fatalf("unavailable rekordbox scope: got HTTP %d, want 409", code)
+	}
+	// Logged-in but switched-off service (spotify) must be rejected without touching scope or settings.conf.
+	if code, _ := uiPost(t, srv.URL, "scope=spotify"); code != http.StatusConflict {
+		t.Fatalf("disabled spotify scope: got HTTP %d, want 409", code)
+	}
+	// A no-op settings POST (e.g. startup SortMenu re-sending streamSortRole=bpm) must not rewrite settings.conf.
+	if code, v := uiPost(t, srv.URL, "streamSortRole=bpm"); code != 200 || v.Scope != "deezer" {
+		t.Fatalf("no-op sort POST: code=%d scope=%q", code, v.Scope)
+	}
+	st, err := os.Stat(confPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.ModTime().Equal(oldTime) {
+		t.Fatalf("settings.conf mtime changed on rejected/no-op POSTs: got %v want %v", st.ModTime(), oldTime)
+	}
+	if got := s.scope(); got != "deezer" {
+		t.Fatalf("scope mutated to %q, want deezer", got)
+	}
+
+	// Switching off the currently active non-TIDAL service clears scope.
+	if code, v := uiPost(t, srv.URL, "sources=spotify"); code != 200 || v.Scope != "" {
+		t.Fatalf("disabling active deezer scope: code=%d scope=%q", code, v.Scope)
+	}
+	b, err := os.ReadFile(confPath)
+	if err != nil || strings.Contains(string(b), "scope=deezer") {
+		t.Fatalf("disabled deezer scope persisted: %q %v", b, err)
+	}
+
+	// A legacy settings.conf with a disabled non-TIDAL scope must read empty, never the disabled service.
+	if err := os.WriteFile(confPath, []byte("scope=netease\nsources=deezer\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.scope(); got != "" {
+		t.Fatalf("loadUI retained disabled scope=%q, want empty", got)
+	}
+
+	// Deezer with an ARL-only deemix login (no UserID) counts as logged in for both uiStatus and scope selection.
+	arlState := t.TempDir()
+	if err := os.WriteFile(filepath.Join(arlState, "deezer-owner.json"), []byte(`{"ARL":"0123456789abcdef0123456789abcdef"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sARL := New(Config{AccessToken: "code", UIDir: t.TempDir(), StateDir: arlState}, nil)
+	t.Cleanup(sARL.Close)
+	srvARL := httptest.NewServer(sARL)
+	defer srvARL.Close()
+	if code, v := uiPost(t, srvARL.URL, "sources=deezer&scope=deezer"); code != 200 || v.Scope != "deezer" || !slices.Contains(v.LoggedIn, "deezer") {
+		t.Fatalf("ARL-only deezer scope: code=%d scope=%q loggedIn=%v", code, v.Scope, v.LoggedIn)
 	}
 }

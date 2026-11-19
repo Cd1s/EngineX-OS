@@ -8487,6 +8487,229 @@ scTidalLogoutPending=true; scOpen('spotify'); pending[14].finish('spotify');
 assert.equal(tp.loggedIn,true); assert.equal(scTidalLogoutPending,false);
 """)
 
+    def test_scopen_refuses_unloaded_disabled_or_unlogged_service_and_opens_after_login(self):
+        self.assertIn("property var scSources: []", bp.SERVICES_MAIN)
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            sort_edits = bp.edits(True)["Skins/Embedded/Views/BrowseView/Components/SortMenu/SortMenu.qml"]
+            sort_file = LAB / "5.3.0/qrc/Skins/Embedded/Views/BrowseView/Components/SortMenu/SortMenu.qml"
+            if sort_file.is_file():
+                sort_qml = sort_file.read_text()
+                for old, new in sort_edits:
+                    sort_qml = bp.patch(sort_qml, old, new, "SortMenu.qml")
+            else:
+                sort_qml = "\n".join(new for _old, new in sort_edits)
+        finally:
+            bp.ROOT = old_root
+        self.assertIn("property bool scSortReady: false", sort_qml)
+        self.assertIn("Component.onCompleted: scSortReady = true", sort_qml)
+        post_sort = self.function(sort_qml, "scPostSortSettings")
+        self.run_js("""
+let sortPosts = 0;
+const Qt = { DescendingOrder: 1 };
+let scSortReady = false, isStreamingProviderWithSort = true, sortRole = "bpm", sortOrder = 0;
+function XMLHttpRequest() {
+    this.open = () => {};
+    this.setRequestHeader = () => {};
+    this.send = () => { sortPosts++; };
+}
+""" + post_sort + """
+scPostSortSettings();
+assert.equal(sortPosts, 0, 'SortMenu must not POST during QML startup before Component.onCompleted');
+scSortReady = true;
+scPostSortSettings();
+assert.equal(sortPosts, 1, 'SortMenu should POST once ready');
+""")
+        for label, open_code in (("5.3.0", bp.TIDAL_OPEN_530), ("5.0.4", bp.TIDAL_OPEN_504)):
+            with self.subTest(version=label):
+                login_begin = self.function(bp.SERVICES_MAIN, "scLoginBegin")
+                login_done = self.function(bp.SERVICES_MAIN, "scLoginDone")
+                set_source = self.function(bp.SERVICES_MAIN, "scSetSource")
+                self.run_js("""
+const posts = [];
+let logins = [];
+let selects = 0;
+const tp = {loggedIn: true, loginToService() { this.loggedIn = true; }};
+globalThis.root = globalThis;
+globalThis.Planck = {librarianController: {
+    streamingInterfaceController: {logoutOfProvider() {}},
+    streamingPlaylistsController: {invalidateUI() {}}
+}};
+Object.assign(globalThis, {
+    scUiLoaded: false, scSources: ['netease', 'deezer'], scLoggedIn: ['deezer'],
+    scScope: 'deezer', scScopePending: 0, scTidalLoggedIn: false, scTidalSynthetic: false,
+    scTidalLoginPending: false, scTidalLogoutPending: false,
+    scLogin: '', scLoginOpen: '', scLoginStatus: '', scLoginLocal: false, scLoginSerial: 0,
+    scProviders: {count: 1, objectAt() { return {tidalProvider: tp}; }},
+    scEnsureTidal() {},
+    scSelectTidal() { selects++; return true; },
+    scEnterTimer: {start() {}},
+    scLoginRequest(method, id, done) { logins.push(id); done({status: 'waiting', target: ''}); },
+    scCall(q, done) {
+        if (q) posts.push(q);
+        else scLoggedIn = ['deezer', 'netease'];
+        if (done) done({});
+    }
+});
+""" + open_code + "\n" + login_begin + "\n" + login_done + "\n" + set_source + """
+// 1. Before initial /v1/enginex/ui reply loads, scOpen and scSetSource must never mutate scope or POST.
+scOpen('netease');
+scOpen('deezer');
+scSetSource('netease', false);
+assert.equal(scScope, 'deezer');
+assert.deepEqual(posts, []);
+assert.deepEqual(logins, []);
+
+// 2. Switched-off service must never change scope or start login.
+scUiLoaded = true;
+scSources = ['deezer'];
+scOpen('netease');
+assert.equal(scScope, 'deezer');
+assert.deepEqual(posts, []);
+assert.deepEqual(logins, []);
+
+// 3. Enabled but NOT logged-in service opens QR login WITHOUT changing scope or POSTing.
+scSources = ['netease', 'deezer'];
+scOpen('netease');
+assert.equal(scScope, 'deezer', 'unlogged service must not change scope');
+assert.deepEqual(posts, [], 'unlogged service must not POST scope');
+assert.deepEqual(logins, ['netease']);
+assert.equal(scLoginOpen, 'netease');
+
+// 4. Canceling ("Not now") leaves scope untouched.
+scLogin = ''; scLoginOpen = '';
+assert.equal(scScope, 'deezer');
+assert.deepEqual(posts, []);
+
+// 5. Unavailable rekordbox neither changes scope nor opens QR login.
+scSources = ['rekordbox', 'deezer'];
+scOpen('rekordbox');
+assert.equal(scScope, 'deezer');
+assert.deepEqual(posts, []);
+assert.deepEqual(logins, ['netease']);
+
+// 6. Completing QR login after tapping an unlogged service opens it once scLoggedIn updates.
+scSources = ['netease', 'deezer'];
+scOpen('netease');
+assert.equal(scScope, 'deezer');
+assert.deepEqual(posts, []);
+scLoginDone();
+assert.equal(scScope, 'netease');
+assert.deepEqual(posts, ['scope=netease']);
+assert.equal(selects, 1);
+""")
+        # 7. If the server rejects a scope POST (e.g. 409 after session expired), scCall restores the server's scope.
+        self.run_js("""
+const reqs = [];
+globalThis.scUiPoll = null;
+globalThis.scUiPollScope = '';
+globalThis.scUiPollAt = 0;
+globalThis.scUiDigest = 'old';
+globalThis.scScope = 'spotify';
+globalThis.scScopePending = 0;
+globalThis.scApply = v => { if (v.scope !== undefined) scScope = v.scope; };
+globalThis.scOpen = () => { throw Error('unexpected retry'); };
+globalThis.XMLHttpRequest = class {
+    constructor() { this.readyState = 0; }
+    open(m, u) { this.method = m; this.url = u; this.readyState = 1; reqs.push(this); }
+    send() {}
+    finish(status, body) { this.readyState = 4; this.status = status; this.responseText = JSON.stringify(body); this.onreadystatechange(); }
+};
+""" + self.function(bp.SERVICES_MAIN, "scCall") + """
+scCall('scope=spotify', () => { throw Error('done must not fire on 409'); });
+reqs[0].finish(409, {error: 'source is not logged in'});
+assert.equal(scUiDigest, '', 'digest cleared before resync');
+assert.equal(reqs.length, 2, '409 must trigger a GET resync');
+assert.equal(reqs[1].method, 'GET');
+reqs[1].finish(200, {scope: 'deezer'});
+assert.equal(scScope, 'deezer', 'resync restores server scope after 409');
+""")
+        # 8. External console login while QR dialog is open for scLoginOpen closes dialog and opens that service.
+        self.run_js("""
+let opened = [];
+globalThis.scUiLoaded = true;
+globalThis.scScope = 'deezer';
+globalThis.scScopePending = 0;
+globalThis.scUiPollScope = 'deezer';
+globalThis.scUiDigest = '';
+globalThis.scUiAppliedAt = 0;
+globalThis.scSources = ['deezer', 'spotify'];
+globalThis.scLoggedIn = ['deezer'];
+globalThis.scLogin = 'spotify';
+globalThis.scLoginOpen = 'spotify';
+globalThis.scEnsureTidal = () => {};
+globalThis.scApply = v => { if (v.loggedIn) scLoggedIn = v.loggedIn; };
+globalThis.scOpen = id => opened.push(id);
+globalThis.scUiPoll = {
+    readyState: 4, status: 200,
+    responseText: JSON.stringify({scope: 'deezer', sources: ['deezer', 'spotify'], loggedIn: ['deezer', 'spotify']}),
+    getResponseHeader: () => 'd2',
+};
+""" + self.function(bp.SERVICES_MAIN, "scUiPollReply") + """
+scUiPollReply();
+assert.equal(scLogin, '', 'external login closes QR dialog');
+assert.equal(scLoginOpen, '');
+assert.deepEqual(opened, ['spotify'], 'external login opens the requested service');
+""")
+
+    def test_unfocused_source_activate_does_not_open_first_footer_service(self):
+        self.assertIn("property int prevCount: 0", bp.SOURCE_FOOTER)
+        self.assertIn("if (tr) prevCount = tr.stateTrueCount", bp.SOURCE_FOOTER)
+        self.assertNotIn("property int prevCount: connectedSource.pScSourceSelect", bp.SOURCE_FOOTER)
+        js_body = bp.SOURCE_FOOTER.split("function scHiddenSourceName(name, typeText) {", 1)[1].split("\tConnections {\n\t\ttarget: PlanckGUI", 1)[0]
+        select_conn = bp.SOURCE_FOOTER.split("\tConnections {\n\t\tproperty int prevCount:", 1)[1].split("\n\tfooter:", 1)[0]
+        on_completed = select_conn.split("Component.onCompleted: {", 1)[1].split("\n\t\t}", 1)[0]
+        on_state = select_conn.split("function onStateChanged() {", 1)[1].split("\n\t\t}", 1)[0]
+        self.run_js("""
+let scFocusKind = "", scFocusRow = -1, scFocusService = "";
+let opened = [], selectedConn = [];
+const tr = { state: true, stateTrueCount: 5 };
+const connectedSource = {
+    expanded: false, parent: null, itemAtIndex: () => null,
+    footerItem: { scRepeater: { itemAt: () => null } },
+    pScSourceSelect: { translator: tr },
+    scActivate() { scActivate(); },
+};
+const root = {
+    messageBoxOpen: false,
+    scSourceNameRole: 257,
+    scSourceTypeText: () => "Streaming",
+    scServices: [{ id: "netease", name: "NetEase" }, { id: "deezer", name: "Deezer" }],
+    scSources: ["netease", "deezer"],
+    scOpen: id => opened.push(id),
+};
+const connRows = ["TIDAL"];
+const cm = { rowCount: () => connRows.length, index: r => r, data: r => connRows[r] };
+const Planck = { librarianController: { browserSourceControllerPtr: () => ({ connectedSourceModel: () => cm, availableSourceModel: () => null, select: idx => selectedConn.push(idx) }) } };
+const PlanckGUI = { views: { sourceScreenView: { visible: true } } };
+function scHiddenSourceName(name, typeText) {
+""" + js_body + """
+let prevCount = 0;
+function onCompleted() {
+""" + on_completed + """
+}
+function onStateChanged() {
+""" + on_state + """
+}
+onCompleted();
+// A stale stateTrueCount already present when the view loads must not activate anything.
+onStateChanged();
+assert.deepEqual(opened, []);
+assert.equal(scFocusKind, '');
+// First real encoder press with nothing focused only focuses scEntries()[0], never opens NetEase.
+tr.state = true; tr.stateTrueCount = 6;
+onStateChanged();
+assert.deepEqual(opened, [], 'unfocused activate must never auto-open scEntries()[0]');
+assert.equal(scFocusKind, 'footer');
+assert.equal(scFocusService, 'netease');
+// Moving to Deezer and pressing the encoder opens the DJ's chosen source.
+scStep(1);
+tr.state = true; tr.stateTrueCount = 7;
+onStateChanged();
+assert.deepEqual(opened, ['deezer']);
+""")
+
     def test_generated_530_packs_guard_profile_pairing_and_encoder(self):
         with tempfile.TemporaryDirectory(prefix="issue224-") as tmp:
             out = Path(tmp) / "packs"
@@ -8514,7 +8737,7 @@ assert.equal(tp.loggedIn,true); assert.equal(scTidalLogoutPending,false);
                     self.assertIn('"Beatport LINK"', source)
                     main = (base / "EmbeddedMain.qml").read_text()
                     self.assertIn('{ id: "applemusic", name: "Apple Music" }', main)
-                    self.assertIn('"applemusic"]', main)
+                    self.assertIn('property var scSources: []', main)
                     self.assertTrue((out / "icons/applemusic.png").is_file())
                     self.assertIn('const streaming = root.scSourceTypeText(model, row) === "Streaming"', source)
                     self.assertIn('if (streaming && name === "Apple Music") { root.scOpen("applemusic"); return }', source)

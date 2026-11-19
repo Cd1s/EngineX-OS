@@ -529,7 +529,23 @@ sh "$GUARD" pre; [[ ! -e $ENGINEX_STREAMING_ACCOUNTS ]] || fail 'guard must not 
 printf 'scope=tidal\nsources=spotify,netease\n' > "$ENGINEX_UI_DIR/settings.conf"
 sh "$GUARD" pre
 ! grep -qx 'scope=tidal' "$ENGINEX_UI_DIR/settings.conf" || fail 'disabled TIDAL retained stale scope'
+grep -qx 'scope=' "$ENGINEX_UI_DIR/settings.conf" || fail 'disabled TIDAL must clear scope without falling back'
 [[ $(tidal_entry) == 1 ]] || fail 'disabled TIDAL must seed the gateway account'
+# Guard must never rewrite settings.conf on restart when scope is already valid (even with TIDAL off),
+# and must clear any disabled switchable service while preserving dynamic rekordbox.
+for valid_scope in deezer rekordbox ""; do
+    printf 'scope=%s\nsources=deezer\n' "$valid_scope" > "$ENGINEX_UI_DIR/settings.conf"
+    touch -d '2020-01-01 00:00:00Z' "$ENGINEX_UI_DIR/settings.conf"
+    before_mtime=$(stat -c %Y "$ENGINEX_UI_DIR/settings.conf")
+    sh "$GUARD" pre
+    after_mtime=$(stat -c %Y "$ENGINEX_UI_DIR/settings.conf")
+    [[ "$before_mtime" == "$after_mtime" ]] || fail "guard rewrote settings.conf on restart for valid scope=$valid_scope"
+    grep -qx "scope=$valid_scope" "$ENGINEX_UI_DIR/settings.conf" || fail "guard lost valid scope=$valid_scope"
+done
+printf 'scope=netease\nsources=deezer\n' > "$ENGINEX_UI_DIR/settings.conf"
+sh "$GUARD" pre
+! grep -qx 'scope=netease' "$ENGINEX_UI_DIR/settings.conf" || fail 'disabled netease retained stale scope'
+grep -qx 'scope=' "$ENGINEX_UI_DIR/settings.conf" || fail 'disabled netease must clear scope to empty'
 # internal-heal: the console can switch off the internal library check at Engine start.
 printf '#!/bin/sh\necho "$*" >> "%s"\n' "$TMP/heal.log" > "$TMP/guardian-stub"; chmod +x "$TMP/guardian-stub"
 heal_pre() { rm -f "$TMP/heal.log"; ENGINEX_ENGINE_GUARDIAN=$TMP/guardian-stub ENGINEX_CUSTOM=$TMP/heal-custom sh "$GUARD" pre; }
