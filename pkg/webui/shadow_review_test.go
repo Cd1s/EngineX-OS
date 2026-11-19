@@ -203,7 +203,14 @@ func TestShadowTempResolutionIsCachedAndInvalidatesOnWrite(t *testing.T) {
 			t.Fatal("hot post reopened the library instead of reusing resolution")
 		}
 	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(path, []byte("CHANGED"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, before.ModTime().Add(time.Second), before.ModTime().Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	if next := shadowReviewPost(t, s, np); next.baseKey == first.baseKey {
