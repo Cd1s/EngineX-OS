@@ -9,6 +9,8 @@
 #   DOC_SHOT_CONSOLE=1         Render Web Console screenshots (14, 15) in 3 languages
 #   DOC_SHOT_SETTINGS_PAGES=1  Render Settings -> Device (06b) and Services (13) in 3 languages
 #   DOC_SHOT_SETTINGS_COPY=1   Render Settings -> Copy (21b) in 3 languages
+#   DOC_SHOT_PROFILES=1        Render Profile -> Playback (16) and Display (17) in 3 languages
+#   DOC_SHOT_USB_PROFILE=1     Render the Load drive profile prompt (21a) in 3 languages
 #   (default)                  Render About & Update screenshots (06, 06c, shot-about-*)
 #
 # Arguments:
@@ -18,7 +20,7 @@
 #
 # Requirements:
 #   - Runs on the build host (aarch64 with 32-bit EL0) as root
-#   - /dev/dri/card0 available (virtio-gpu)
+#   - /dev/dri/card0 available (virtio-gpu), or set DOC_SHOT_DRM_CARD (for example card1 on Batam)
 #   - Memory limit per process <= 4G
 
 set -euo pipefail
@@ -255,17 +257,14 @@ printf '           CPU0
  41:        100     GICv2  32 Level     ttyS0
 ' > "$W/interrupts"
 
-cat > "$W/ScreenConfiguration.json" <<'JSON'
+DRM_CARD=${DOC_SHOT_DRM_CARD:-card0}
+SCREEN_WIDTH=${DOC_SHOT_SCREEN_WIDTH:-1280}
+SCREEN_HEIGHT=${DOC_SHOT_SCREEN_HEIGHT:-800}
+cat > "$W/ScreenConfiguration.json" <<JSON
 {
-	"device": "/dev/dri/card0",
-	"outputs": [
-		{
-			"name": "Virtual-1",
-			"mode": "1280x800",
-			"primary": true,
-			"virtualIndex": 0
-		}
-	]
+	"device": "/dev/dri/$DRM_CARD",
+	"headless": "${SCREEN_WIDTH}x${SCREEN_HEIGHT}",
+	"hwcursor": false
 }
 JSON
 
@@ -353,6 +352,141 @@ for language in ('en', 'zh-CN', 'zh-TW'):
     print(f"Updated: {out}")
 PY
     [ "${DOC_SHOT_ALL:-0}" = 1 ] || exit 0
+fi
+
+if [ "${DOC_SHOT_PROFILES:-0}" = 1 ]; then
+    echo "==> Rendering Profile pages screenshots (16, 17)..."
+    for page in playback display; do
+        index=0
+        [ "$page" = display ] && index=2
+        cat > "$W/probe.qml" <<QML
+import QtQuick 2.12
+import QtQuick.Window 2.2
+import Planck 1.0
+Item {
+    id: probe
+    visible: false
+    property int tick: 0
+    property int opened: 0
+    property int selected: 0
+    function walk(o, f) {
+        if (!o) return
+        f(o)
+        if (o.children) for (let i = 0; i < o.children.length; i++) walk(o.children[i], f)
+    }
+    Timer {
+        interval: 1000; repeat: true; running: true
+        onTriggered: {
+            probe.tick++
+            const win = probe.Window.window ? probe.Window.window.contentItem : null
+            if (!win) return
+            if (PlanckGUI.views.outOfBoxUpdateScreenShowing) PlanckGUI.views.outOfBoxUpdateScreenShowing = false
+            if (PlanckGUI.views.onBoardingController) PlanckGUI.views.onBoardingController.close()
+            PlanckGUI.views.prompts.drop("StemsDownload")
+            Planck.getProperty("/GUI/CloseDialogs").translator.state = true
+            probe.walk(win, function(o) {
+                if (o.objectName === "DismissButton" && typeof o.clicked === "function") o.clicked()
+                if (o.objectName === "NextButton" && typeof o.clicked === "function") o.clicked()
+            })
+            if (!probe.opened) {
+                try { PlanckGUI.views.controlCenter.openTab("Profile") } catch (e) {}
+            }
+            if (!probe.selected && probe.tick >= 2) {
+                probe.walk(win, function(o) {
+                    if (o.objectName === "ControlCenter_SubTabBar" && o.visible) {
+                        o.currentIndex = $index
+                        probe.opened = probe.tick
+                        probe.selected = probe.tick
+                    }
+                })
+            }
+            if (probe.selected && probe.tick >= probe.selected + 3) {
+                probe.walk(win, function(o) {
+                    if (typeof o.contentY === "number" && typeof o.originY === "number" && o.visible && o.height > 300) {
+                        o.contentY = o.originY
+                    }
+                })
+                win.grabToImage(function(result) { result.saveToFile("/tmp/shot.png"); Qt.quit() })
+            }
+        }
+    }
+}
+QML
+        for spec in en:en zh-Hans:zh-CN zh-Hant:zh-TW; do
+            pack=${spec%%:*}; language=${spec#*:}
+            unshare -m -n -p -f --kill-child bash "$0" --render-one "$W" "$IMG_EXT2" "$pack" "$pack" "v$CURR_VERSION" "$W/raw/$language-profile-$page.png"
+        done
+    done
+    python3 - "$W/raw" "$OUT_REPO" <<'PY'
+from pathlib import Path
+from PIL import Image
+import sys
+raw, repo = map(Path, sys.argv[1:])
+for language in ('en', 'zh-CN', 'zh-TW'):
+    for page, name in (('playback', '16-profile-playback.png'), ('display', '17-profile-display.png')):
+        out = repo/'docs/assets/screenshots'/language/name
+        out.parent.mkdir(parents=True, exist_ok=True)
+        Image.open(raw/f'{language}-profile-{page}.png').convert('RGB').save(out)
+        print(f"Updated: {out}")
+PY
+    exit 0
+fi
+
+if [ "${DOC_SHOT_USB_PROFILE:-0}" = 1 ]; then
+    echo "==> Rendering USB profile import prompt (21a)..."
+    cat > "$W/probe.qml" <<'QML'
+import QtQuick 2.12
+import QtQuick.Window 2.2
+import Planck 1.0
+Item {
+    id: probe
+    visible: false
+    property int tick: 0
+    property bool posted: false
+    function walk(o, f) {
+        if (!o) return
+        f(o)
+        if (o.children) for (let i = 0; i < o.children.length; i++) walk(o.children[i], f)
+    }
+    Timer {
+        interval: 1000; repeat: true; running: true
+        onTriggered: {
+            probe.tick++
+            const win = probe.Window.window ? probe.Window.window.contentItem : null
+            if (!win) return
+            if (PlanckGUI.views.outOfBoxUpdateScreenShowing) PlanckGUI.views.outOfBoxUpdateScreenShowing = false
+            if (PlanckGUI.views.onBoardingController) PlanckGUI.views.onBoardingController.close()
+            PlanckGUI.views.prompts.drop("StemsDownload")
+            Planck.getProperty("/GUI/CloseDialogs").translator.state = true
+            if (!probe.posted && probe.tick >= 4) {
+                const p = Planck.getProperty("/Client/Preferences/Profile/ShowLoadDialog")
+                if (p && p.translator) {
+                    p.translator.state = true
+                    probe.posted = true
+                }
+            }
+            if (probe.posted && probe.tick >= 8)
+                win.grabToImage(function(result) { result.saveToFile("/tmp/shot.png"); Qt.quit() })
+        }
+    }
+}
+QML
+    for spec in en:en zh-Hans:zh-CN zh-Hant:zh-TW; do
+        pack=${spec%%:*}; language=${spec#*:}
+        DOC_SHOT_SCREEN_WIDTH=800 DOC_SHOT_SCREEN_HEIGHT=800 unshare -m -n -p -f --kill-child bash "$0" --render-one "$W" "$IMG_EXT2" "$pack" "$pack" "v$CURR_VERSION" "$W/raw/$language-usb-profile.png"
+    done
+    python3 - "$W/raw" "$OUT_REPO" <<'PY'
+from pathlib import Path
+from PIL import Image
+import sys
+raw, repo = map(Path, sys.argv[1:])
+for language in ('en', 'zh-CN', 'zh-TW'):
+    out = repo/'docs/assets/screenshots'/language/'21a-usb-profile-import.png'
+    out.parent.mkdir(parents=True, exist_ok=True)
+    Image.open(raw/f'{language}-usb-profile.png').convert('RGB').save(out)
+    print(f"Updated: {out}")
+PY
+    exit 0
 fi
 
 if [ "${DOC_SHOT_ALL:-0}" = 1 ] || [ "${DOC_SHOT_CONSOLE:-0}" = 0 -a "${DOC_SHOT_SETTINGS_PAGES:-0}" = 0 -a "${DOC_SHOT_SETTINGS_COPY:-0}" = 0 ]; then
