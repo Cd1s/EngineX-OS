@@ -143,6 +143,19 @@
 
 - **热点倒数（`BARS.BEATS`）不跟 BPM / 网格（实机报告，2026-11-17 下午，Remote Library 曲目；修复待实机验收）**：用户反馈“热点倒数好像不跟 BPM，我调了节拍网格也还是不跟”。**原因**（沙箱里复现，JP07，真实 128 BPM 曲目、热点偏离网格 0.45 拍）：倒数是“到热点的拍距”取整，数字变化的时刻由**热点自己的位置**决定，不是播放头越过网格线的时刻；热点不在网格线上时（不开量化、导入的热点、或事后调了网格），数字在两条拍线之间跳（`BeatNumber` 2.451→2.557 时 8.1→7.4，2.984→3.091 越过拍线却不变）；用 Beat Grid Edit 平移网格后跳变时刻一点没动。BPM 修改、减半 / 加倍本来就会反映，推音高也不改拍数（对的），问题只在跳变相位。**修法**：`tools/ui-mod/build_packs.py` 里一个共享函数 `scCueBeatsLeft`，热点算在离它最近的网格线上；本机轨道用 Engine 的 `BeatNumber` 当播放头在拍内的位置（每个 200 ms 节拍多读一个属性，缓存不变），影子轨道用来源的拍表；热点恰在网格线上时结果与以前完全一样；热点的线在播放头后面而热点仍在前面时显示 `0.1`。**已知限制**：Engine 只给播放头处的速度，网格有锚点（速度不恒定）时，跨过锚点的远距离倒数按播放头处速度估算，播放头进入热点所在段后精确；影子轨道用来源的完整拍表，不受此限。**检验**：`ShadowDisplayTest` 新增 4 项（旧代码上 3 项失败，“热点在网格线上不变”那项两边都过），原 `#151` 影子测试全部保持通过；JP07 沙箱探针（`tools/az01-packer/cue-countdown-sandbox.sh`）在旧代码上 9 处断言失败（热点偏离网格、平移网格、减半速度三段扫描各自失败），修复后 0 处。JC11 沙箱里曲目分析不完成，没有跑出结果（与 JP07 同一份 Engine 和共享 QML / JS）。分支 `agent/5305-cue-countdown`。**实机待验**：设一个偏离网格的热点，播放接近它看数字是否正好在拍线上变；打开 Beat Grid Edit 平移网格后再看。
 
+### 1A-6B RC2 补录（2026-11-19）
+
+| 范围（日期） | 原因与修法 | 检验、分支与提交、仍需实机 |
+| --- | --- | --- |
+| **rekordbox Link、USB 与影子轨加载分析**（11-19） | Link 曲目在加载时直接复用 rekordbox 的网格、热 Cue、概览和封面，不再让 Engine 重分析；Pro DJ Link、USB 和影子轨（MP3、AAC/M4A）共用一个起始偏移规则，旧版转换行只校准一次并保留碟机编辑。影子轨同时修复另一台碟机加载后概览黑色或延迟的问题。 | `RekordboxAnalysisSitesTest`、`ShadowDisplayTest`、`test_rekordbox_analysis.c`；rc2 分支 `agent/5305-rc2` @ `d02500d4` 及其合入的 rekordbox / shadow 提交。**实机待验**：Link 与 USB 加载时网格、Cue、概览和封面即时出现，影子轨概览配色一致。 |
+| **U 盘曲库更新安全**（11-19） | 更新读不出大量文件名（例如错误字符集）时不删除或重写任何曲库内容，并把任务留到下一次挂载重试。 | `rb-bridge` / USB 更新回归测试；rc2 提交 `ea7b581f`。**实机待验**：插入含异常文件名的 U 盘后曲库不变，下一次挂载可继续。 |
+| **#172 Hi-Fi Output**（11-19） | 第一代 SC5000 / SC6000 独立播放器继续保持默认关闭的可选高保真输出，三语 README 与网站表格同步列出测量结果。 | 三语 README 表格、网站文档审计；rc2 已合入候选。**实机待验**：`Profile → Playback → Hi-Fi Output` 开关与输出确认。 |
+| **Auto-Gain 余量与采样率一致性**（11-19） | 减少泵动，安静曲目提升到约 `-4.4 dBFS`，最多 `+9 dB` 并带削波保护；44.1 / 48 / 96 kHz 使用同一时序。 | Auto-Gain 单测与 44.1/48/96 kHz rate-scaling 回归；rc2 提交 `836f5157`。**实机待验**：不同采样率曲目切换时增益平稳且不削波。 |
+| **Mixstream Pro / PRIME GO 四垫页面**（11-19） | Stems 固定在 pad page 1，`CUE` 返回 cue page，避免四垫机型切页后落入错误页面。 | `test_ui_mod.py` pad-page 回归；rc2 分支 `agent/5305-pads-qml-fix`。**实机待验**：Mixstream Pro / PRIME GO 实体垫页和 CUE 返回路径。 |
+| **Windows 一键安装器识别 PRIME 4 G2**（11-19） | Firmware Update Mode 的 PRIME 4 G2 设备识别路径纳入 Windows 安装器枚举。 | Windows installer discovery tests；rc2 提交 `7e27deea`。**实机待验**：PRIME 4 G2 进入 Firmware Update Mode 后被识别。 |
+| **#301 后台发布继续运行**（11-19） | 重新插拔或被拒绝的 Eject 不再把自动发布任务置为终止；任务等待并在下一次挂载或可用时继续。 | `TestIssue301WaitsThenRemountsAutomatically`、bridge/cli race 套件；候选 `agent/5305-cr-b2-fixes` @ `fe9592a0`。**实机待验**：播放中不重新插入也能完成发布。 |
+| **文档合入与菜单路径**（11-19） | 合入 `origin/agent/5305-release-docs-final`（`37c3ab8e`），将当前 rc2 事实补入三语 README、网站 What's New 和匹配功能段；菜单路径按 `tools/ui-mod/i18n.tsv` 与手册核对。 | 本分支 `agent/5305-rc2-docs`；合并提交与本次文档提交。`node --check docs/site/content.js`、文档审计和 `git diff --check` 待本分支完成后运行。 |
+
 ### 1A-7 最后一批（2026-11-18 上午）
 
 | Issue / 复核（日期） | 模块 | 原因与修法 | 检验、分支与提交、仍需实机 |
