@@ -1,11 +1,16 @@
 package webui
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -97,5 +102,98 @@ func TestShadowFetchPerf503ThenTimeoutStaysPending(t *testing.T) {
 	defer peer.Close()
 	if b, pending := fetchPerfPending(context.Background(), peer.URL); b != nil || !pending || int(calls.Load()) != perfRetries {
 		t.Fatalf("503 then timeouts: %q pending %v after %d requests", b, pending, calls.Load())
+	}
+}
+
+// A cached rekordbox Link audio file gets a new sidecar path for each edited
+// analysis generation, without downloading the audio again.
+func TestShadowPerfGenRefreshesWithoutDownload(t *testing.T) {
+	var mu sync.Mutex
+	audio, perf := 0, []byte(nil)
+	src := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch r.URL.Path {
+		case "/peer/decks/1/audio":
+			audio++
+			_, _ = w.Write([]byte("AUDIO"))
+		case "/peer/decks/1/perf":
+			if perf == nil || r.URL.Query().Get("format") == "native" {
+				http.Error(w, "not analysed", http.StatusNotFound)
+				return
+			}
+			_, _ = w.Write(perf)
+		}
+	}))
+	defer src.Close()
+	s := New(Config{UIDir: filepath.Join(t.TempDir(), "ui"), StateDir: t.TempDir()}, nil)
+	defer s.Close()
+	u, _ := url.Parse(src.URL)
+	s.shadow.peerPort, _ = strconv.Atoi(u.Port())
+	p := peerDeck{deckState: deckState{Deck: 1, Key: "k1", Ext: ".m4a", Name: "Song.m4a"}, ip: "127.0.0.1"}
+	key := "peer:k1"
+	s.shadow.mu.Lock()
+	p.at = time.Now()
+	s.shadow.peerDecks[1] = p
+	s.shadow.mu.Unlock()
+	first := ""
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		for _, d := range s.shadowComposeLegacy("", time.Now()) {
+			if d.Path != "" {
+				first = d.Path
+			}
+		}
+		if first != "" {
+			break
+		}
+	}
+	if first == "" {
+		t.Fatal("no initial shadow copy")
+	}
+	if _, err := os.Stat(first + ".perf"); !os.IsNotExist(err) {
+		t.Fatal("perf unexpectedly exists before the source analysis")
+	}
+	inPeerCache := regexp.MustCompile(`/shadow-v3/peer-[0-9a-f]{1,16}/[^/]+$`)
+	for i, want := range [][]byte{[]byte("EXPF1"), []byte("EXPF2")} {
+		mu.Lock()
+		perf = want
+		mu.Unlock()
+		p.PerfGen = "g" + strconv.Itoa(i+1)
+		s.shadow.mu.Lock()
+		p.at = time.Now()
+		s.shadow.peerDecks[1] = p
+		s.shadow.mu.Unlock()
+		old := first
+		first = ""
+		for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+			for _, d := range s.shadowComposeLegacy("", time.Now()) {
+				if d.Path != "" && d.Path != old {
+					first = d.Path
+				}
+			}
+			if first != "" {
+				break
+			}
+		}
+		if first == "" {
+			t.Fatal("no refreshed shadow copy")
+		}
+		got, _ := os.ReadFile(first + ".perf")
+		body, _ := os.ReadFile(first)
+		if !bytes.Equal(got, want) || string(body) != "AUDIO" || !inPeerCache.MatchString(filepath.ToSlash(first)) {
+			t.Fatalf("refreshed copy %s: perf %q audio %q", first, got, body)
+		}
+		if _, err := os.Stat(old); !os.IsNotExist(err) {
+			t.Fatal("old shadow copy remains")
+		}
+		s.shadow.mu.Lock()
+		gen := s.shadow.copyGens[key]
+		s.shadow.mu.Unlock()
+		mu.Lock()
+		n := audio
+		mu.Unlock()
+		if gen != p.PerfGen || n != 1 {
+			t.Fatalf("generation %q, audio downloads %d", gen, n)
+		}
 	}
 }

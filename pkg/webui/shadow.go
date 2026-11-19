@@ -151,6 +151,9 @@ type deckState struct {
 	// here; rbxRow the gateway row it is of.
 	rbxAnalysis string
 	rbxRow      int64
+	// PerfGen names the analysis /perf serves for a rekordbox Link deck. The
+	// audio copy remains reusable while a changed generation refreshes its sidecars.
+	PerfGen string `json:"perfGen,omitempty"`
 }
 
 // shadowCue is one hot cue (I 1..8); the receiver checks it before use.
@@ -234,7 +237,7 @@ func sameOptionalBool(a, b *bool) bool {
 // Seq, At, Beat and Dbg do not count: the display QML does not use them.
 func samePeerPicture(old peerDeck, d deckState, now time.Time) bool {
 	o := old.deckState
-	if o.Deck != d.Deck || o.Path != d.Path || o.Net != d.Net || o.Key != d.Key || o.Ext != d.Ext || o.Name != d.Name ||
+	if o.Deck != d.Deck || o.Path != d.Path || o.Net != d.Net || o.Key != d.Key || o.PerfGen != d.PerfGen || o.Ext != d.Ext || o.Name != d.Name ||
 		o.Title != d.Title || o.Artist != d.Artist || o.KeyName != d.KeyName || o.Loading != d.Loading || o.Active != d.Active || o.Stale != d.Stale || o.MetadataOnly != d.MetadataOnly ||
 		o.Playing != d.Playing || o.Pitch != d.Pitch || !sameOptionalBool(o.Master, d.Master) || !sameOptionalBool(o.Lead, d.Lead) || o.Loop != d.Loop || o.LoopIn != d.LoopIn || o.LoopOut != d.LoopOut || o.KeyOffset != d.KeyOffset || o.Stems != d.Stems || o.Slip != d.Slip || o.ShadowMaster != d.ShadowMaster || o.Sync != d.Sync || o.BPM != d.BPM ||
 		o.CurrentBPM != d.CurrentBPM || o.Range != d.Range || (o.KeyLock == nil) != (d.KeyLock == nil) || (o.KeyLock != nil && *o.KeyLock != *d.KeyLock) ||
@@ -366,6 +369,7 @@ type shadowState struct {
 	beacon              bool
 	unresolved          [5]string              // per deck: the last TrackNetworkPath logged as having no file
 	streamFiles         map[string]streamTrack // streaming uri -> Engine's download (zero = none)
+	copyGens            map[string]string      // copy key -> the source's PerfGen its analysis is of
 	peerTaken           map[string]time.Time   // when takePeer last accepted an update per peer (as peerSeq)
 	peerClock           map[string]peerClock   // per peer (as peerSeq)
 	dbg                 shadowDebug
@@ -378,7 +382,7 @@ type shadowState struct {
 }
 
 func newShadowState() *shadowState {
-	return &shadowState{precise: map[byte]precisePos{}, cdj: map[byte]cdjSeen{}, peers: map[string]time.Time{}, peerDecks: map[int]peerDeck{}, peerSeq: map[string]int64{}, notify: make(chan struct{}), files: map[string]string{}, busy: map[string]bool{}, copies: map[string]*shadowCopy{}, copyRetry: time.Second, copyTimeout: 2 * time.Minute, used: map[string]time.Time{}, streamFiles: map[string]streamTrack{}, peerTaken: map[string]time.Time{}, peerClock: map[string]peerClock{}, dataRoot: shadowDataRoot, mediaRoot: shadowMediaRoot, beacon: shadowBeaconOn}
+	return &shadowState{precise: map[byte]precisePos{}, cdj: map[byte]cdjSeen{}, peers: map[string]time.Time{}, peerDecks: map[int]peerDeck{}, peerSeq: map[string]int64{}, notify: make(chan struct{}), files: map[string]string{}, busy: map[string]bool{}, copies: map[string]*shadowCopy{}, copyRetry: time.Second, copyTimeout: 2 * time.Minute, used: map[string]time.Time{}, streamFiles: map[string]streamTrack{}, copyGens: map[string]string{}, peerTaken: map[string]time.Time{}, peerClock: map[string]peerClock{}, dataRoot: shadowDataRoot, mediaRoot: shadowMediaRoot, beacon: shadowBeaconOn}
 }
 
 // shadow-v3: copies under the old "shadow" were analysed by Engine itself,
@@ -657,6 +661,7 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 		if d.Key != "" && d.rbxAnalysis != "" {
 			// One audio file can be two rekordbox rows: the copy is of this row.
 			d.Key = fmt.Sprintf("%x", fnvSum(d.Key+" "+np))
+			d.PerfGen = s.perfGen(r.Context(), d)
 		}
 		s.shadow.mu.Lock()
 		if d.Key != "" {
@@ -1353,6 +1358,42 @@ func (s *Server) ownPerf(ctx context.Context, d deckState, native bool) ([]byte,
 	return perf, err
 }
 
+// perfGen is a bounded hash of the native analysis served for a rekordbox Link
+// deck. The QML posts often, but a one-second cache keeps those posts from
+// rereading the analysis file; an edit is visible on the next generation.
+var perfGenEvery = time.Second
+
+var perfGens = struct {
+	sync.Mutex
+	m map[string]perfGenAt
+}{m: map[string]perfGenAt{}}
+
+type perfGenAt struct {
+	gen string
+	at  time.Time
+}
+
+func (s *Server) perfGen(ctx context.Context, d deckState) string {
+	id := fmt.Sprintf("%d\x00%s\x00%s", d.Deck, d.Path, d.rbxAnalysis)
+	perfGens.Lock()
+	g, ok := perfGens.m[id]
+	perfGens.Unlock()
+	if ok && time.Since(g.at) < perfGenEvery {
+		return g.gen
+	}
+	g = perfGenAt{at: time.Now()}
+	if perf, err := s.ownPerf(ctx, d, true); err == nil {
+		g.gen = fmt.Sprintf("%x", sha256.Sum256(perf))[:16]
+	}
+	perfGens.Lock()
+	if len(perfGens.m) > 64 {
+		clear(perfGens.m)
+	}
+	perfGens.m[id] = g
+	perfGens.Unlock()
+	return g.gen
+}
+
 // streamingDownload is Engine's own download of a streaming track (Engine
 // 5.3.0's TrackNetworkPath for one is just "net://<uuid>/(Unknown)", its
 // TrackUri "streaming://TIDAL/Track/<id>"): stm.db's row for the uri, read-only
@@ -1928,6 +1969,10 @@ func (s *Server) shadowLegacy(role string, now time.Time, all bool, lines ...[]i
 			if d.Path == "" {
 				s.shadowFetchPeer(key, p)
 				d.Progress, d.Error = sh.copyShown(key)
+			} else if p.PerfGen != "" && p.PerfGen != sh.copyGens[key] {
+				// The audio copy is reusable, but Engine keeps a path's analysis
+				// after load. Publish the edited source analysis on a new path.
+				s.shadowRefreshPeerPerf(key, p, d.Path)
 			}
 		}
 		// Audio still on its way: the QML shows the deck as loading. No track on
@@ -2180,11 +2225,65 @@ func (s *Server) shadowFetchPeer(key string, p peerDeck) {
 		if playerBoards[imagePrefix(deviceCompatible())] {
 			noFill = saveShadowAnalysis(ctx, local, strings.Replace(url, "/audio?", "/perf?", 1)+"&format=native")
 		}
+		if perf != nil {
+			s.shadowCopyGen(key, p.PerfGen)
+		}
 		// The three ways a copy is analysed end with different waveform peaks.
 		if noFill != "" {
 			noFill = " (" + noFill + ")"
 		}
 		log.Printf("stream-sync: shadow: copy %s %q analysis replay=%t fill=%t%s", key, name, perf != nil, noFill == "", noFill)
+		return local, nil
+	})
+}
+
+func (s *Server) shadowCopyGen(key, gen string) {
+	s.shadow.mu.Lock()
+	defer s.shadow.mu.Unlock()
+	if s.shadow.copyGens == nil {
+		s.shadow.copyGens = map[string]string{}
+	}
+	s.shadow.copyGens[key] = gen
+}
+
+// Refresh a cached shadow audio path's analysis without downloading the audio
+// again. Engine keeps analysis by path, so the edited generation gets a new
+// sidecar path and is loaded as a new copy.
+func (s *Server) shadowRefreshPeerPerf(key string, p peerDeck, old string) {
+	port := s.shadow.peerPort
+	if port == 0 {
+		port = 8080
+	}
+	perfURL := fmt.Sprintf("http://%s/peer/decks/%d/perf?key=%s", net.JoinHostPort(p.ip, strconv.Itoa(port)), p.Deck, url.QueryEscape(p.Key))
+	dir := filepath.Join(s.shadowDir(), fmt.Sprintf("peer-%x", fnvSum(key+" "+p.PerfGen)))
+	if filepath.Base(filepath.Dir(old)) == "Contents" {
+		dir = filepath.Join(dir, "Contents")
+	}
+	local := filepath.Join(dir, filepath.Base(old))
+	gen := p.PerfGen
+	s.shadowFetch(key, func(ctx context.Context, cp *shadowCopy) (string, error) {
+		perf, pending := fetchPerfPending(ctx, perfURL)
+		if pending || perf == nil {
+			return "", errPerfPending
+		}
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return "", err
+		}
+		_ = os.Remove(local)
+		if err := os.Link(old, local); err != nil {
+			return "", err
+		}
+		savePerf(local, perf)
+		if playerBoards[imagePrefix(deviceCompatible())] {
+			saveShadowAnalysis(ctx, local, perfURL+"&format=native")
+		}
+		s.shadowCopyGen(key, gen)
+		for _, f := range []string{old, old + ".perf", old + ".analysis"} {
+			_ = os.Remove(f)
+		}
+		for d := filepath.Dir(old); d != s.shadowDir() && strings.HasPrefix(d, s.shadowDir()); d = filepath.Dir(d) {
+			_ = os.Remove(d)
+		}
 		return local, nil
 	})
 }
@@ -2296,6 +2395,7 @@ func (s *Server) shadowCleanCopies(keep string) {
 			}
 			delete(sh.files, k)
 			delete(sh.used, k)
+			delete(sh.copyGens, k)
 		}
 	}
 }
