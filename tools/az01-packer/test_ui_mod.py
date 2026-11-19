@@ -2498,7 +2498,7 @@ assert.equal(legacy[0], 2);
 assert.equal(scShadowData(2).engine, true); assert.equal(scShadowData(2).copying, false);
 assert.equal(scShadowVisible(2), true);
 scShadowAt[2] = {path: '/old.wav', ready: true};
-scShadowApplyAll([{deck: 2, path: '/old.wav'}], false);
+scShadowApplyAll([{deck: 2, key: 'local-old', path: '/old.wav'}], false);
 assert.equal(scShadowData(2).engine, true);
 assert.equal(scShadowVisible(2), true);
 assert.equal(requests.length, 2, 'a loaded Engine shadow must fetch its source overview');
@@ -2518,7 +2518,7 @@ assert.equal(scShadowEngineMask, 30 & ~(1 << 4));
 assert.deepEqual(writes, ['/Client/Librarian/AddToDatabaseAndLoadToDeck2=file:///peer.flac']);
 assert.equal(scShadowData(2).engine, true); assert.equal(scShadowVisible(2), true); assert.equal(scDeckLocked(2), true); // covered while Engine loads
 assert.equal(scShadowData(4).title, 'CDJ'); assert.equal(scShadowVisible(4), true);
-assert.equal(requests.length, 1); assert(requests[0].url.endsWith('deck=4&key=cdj%3Ax'));
+assert.equal(requests.length, 2); assert(requests[0].url.endsWith('deck=4&key=cdj%3Ax'));
 scShadowAt[2].ready = true; // Engine holds the peer's track: the cover leaves
 scShadowApplyAll([{deck: 2, key: 'local-peer', path: '/peer.flac', playing: true}, cdj(4)], false);
 assert.equal(scShadowData(2).engine, true); assert.equal(scShadowVisible(2), true); assert.equal(scDeckLocked(2), true);
