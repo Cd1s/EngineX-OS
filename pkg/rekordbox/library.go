@@ -38,6 +38,14 @@ type Track struct {
 	Cues               []Cue `json:",omitempty"`
 }
 
+// Metadata is the editable library metadata that Engine can carry from a deck
+// edit back to a Pioneer export.
+type Metadata struct {
+	Genre   string
+	Comment string
+	Label   string
+}
+
 type Playlist struct {
 	ID, ParentID, SortOrder uint32
 	Name                    string

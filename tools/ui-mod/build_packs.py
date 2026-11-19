@@ -9710,10 +9710,141 @@ def edits(dev: bool):
     )])
     if v53():
         # #305: Track Info's Source line names the service, not TIDAL (scBrand swaps the word; a deck's own track says which).
-        out.setdefault(ROOT + "Items/TrackInfo.qml", []).extend([(
-            'text: trackData.streamingSource || "Local Drive"\n',
+        out.setdefault(ROOT + "Items/TrackInfo.qml", []).extend([
+            ('import "img"\n', 'import "img"\nimport "MessageBoxes"\n'),
+            ('    readonly property TrackInfoViewControllerInterface trackData: PlanckGUI.views.trackInfoViewController\n',
+             '''    readonly property TrackInfoViewControllerInterface trackData: PlanckGUI.views.trackInfoViewController
+    property string scGenre: String(trackData.genre || "")
+    property string scComment: String(trackData.comment || "")
+    property string scLabel: String(trackData.label || "")
+    property string scEditField: ""
+    property string scMetadataStatus: ""
+    readonly property QObjProperty scDeckTrackUri: trackData.infoFromDeck && trackData.deckIndex > 0
+        ? Planck.getProperty("/Engine/Deck%1/Track/TrackUri".arg(trackData.deckIndex)) : null
+    readonly property QObjProperty scDeckTrackNetworkPath: trackData.infoFromDeck && trackData.deckIndex > 0
+        ? Planck.getProperty("/Engine/Deck%1/Track/TrackNetworkPath".arg(trackData.deckIndex)) : null
+    readonly property QObjProperty scDeckTrackId: trackData.infoFromDeck && trackData.deckIndex > 0
+        ? Planck.getProperty("/Engine/Deck%1/Track/TrackId".arg(trackData.deckIndex)) : null
+    readonly property bool scMetadataEditable: trackData.infoFromDeck && trackData.deckIndex > 0
+
+    function scTranslatorString(prop) {
+        return prop && prop.translator ? String(prop.translator.string || "") : ""
+    }
+
+    function scTranslatorNumber(prop) {
+        if (!prop || !prop.translator) return 0
+        return Number(prop.translator.value || prop.translator.unnormalized || 0) || 0
+    }
+
+    function scOpenMetadata(field, value) {
+        if (!scMetadataEditable) return
+        scEditField = field
+        scMetadataDialog.field.title = root.scT("Edit %1").arg(field)
+        scMetadataDialog.field.label = root.scT(field)
+        scMetadataDialog.field.text = value
+        scMetadataDialog.field.placeholder = value
+        root.openDialogComponent(scMetadataDialog)
+    }
+
+    function scWriteStockMetadata(field, value) {
+        if (!scMetadataEditable) return false
+        try {
+            const prop = Planck.getProperty(`/Engine/Deck${trackData.deckIndex}/Track/${field}`)
+            if (!prop || !prop.translator) return false
+            prop.translator.string = String(value)
+            return true
+        } catch (e) {
+            return false
+        }
+    }
+
+    function scMetadataDrive() {
+        let value = scTranslatorString(scDeckTrackNetworkPath) || scTranslatorString(scDeckTrackUri)
+        try { value = decodeURIComponent(value) } catch (e) {}
+        const match = /(?:^|\\/)media\\/([^/]+)/.exec(value)
+        return match ? match[1] : ""
+    }
+
+    function scCommitMetadata(field, value) {
+        const next = {genre: scGenre, comment: scComment, label: scLabel}
+        next[field.toLowerCase()] = String(value)
+        const previous = {genre: scGenre, comment: scComment, label: scLabel}
+        const stockWrite = scWriteStockMetadata(field, value)
+        scGenre = next.genre
+        scComment = next.comment
+        scLabel = next.label
+        const req = new XMLHttpRequest()
+        req.onreadystatechange = function() {
+            if (req.readyState !== 4) return
+            if (req.status !== 200) {
+                if (!stockWrite) {
+                    scGenre = previous.genre
+                    scComment = previous.comment
+                    scLabel = previous.label
+                }
+                scMetadataStatus = stockWrite ? root.scT("Queued until the drive is inserted") : root.scT("Metadata edit was not saved")
+                return
+            }
+            const reply = JSON.parse(req.responseText)
+            scGenre = String(reply.genre || "")
+            scComment = String(reply.comment || "")
+            scLabel = String(reply.label || "")
+            scMetadataStatus = reply.pending ? root.scT("Queued until the drive is inserted") : ""
+        }
+        req.open("POST", "http://127.0.0.1:8080/v1/enginex/track-metadata")
+        req.setRequestHeader("Content-Type", "application/json")
+        req.send(JSON.stringify({
+            drive: scMetadataDrive(),
+            trackId: scTranslatorNumber(scDeckTrackId),
+            trackUri: scTranslatorString(scDeckTrackUri),
+            trackNetworkPath: scTranslatorString(scDeckTrackNetworkPath),
+            stockEdit: stockWrite,
+            genre: next.genre,
+            comment: next.comment,
+            label: next.label
+        }))
+    }
+
+    readonly property Component scMetadataDialog: TextInputDialog {
+        id: scMetadataDialog
+        field.doneButtonTitle: root.scT("Done")
+        field.cancelButtonTitle: root.scT("Cancel")
+        onDone: text => trackInfo.scCommitMetadata(trackInfo.scEditField, text)
+    }
+'''),
+            ('        if (showTrackInfoFromDeck) {\n            trackData.currentRating = trackData.rawRating\n',
+             '        if (showTrackInfoFromDeck) {\n'
+             '            scGenre = String(trackData.genre || "")\n'
+             '            scComment = String(trackData.comment || "")\n'
+             '            scLabel = String(trackData.label || "")\n'
+             '            scMetadataStatus = ""\n'
+             '            trackData.currentRating = trackData.rawRating\n'),
+            ('            Qt.callLater(() => {\n                trackData.updateRating()\n            })\n',
+             '            Qt.callLater(() => {\n'
+             '                scGenre = String(trackData.genre || "")\n'
+             '                scComment = String(trackData.comment || "")\n'
+             '                scLabel = String(trackData.label || "")\n'
+             '                scMetadataStatus = ""\n'
+             '                trackData.updateRating()\n'
+             '            })\n'),
+            ('text: trackData.streamingSource || "Local Drive"\n',
             'text: (typeof root !== "undefined" && root && root.scBrand ? root.scBrand(trackData.streamingSource, trackData.infoFromDeck ? trackData.deckIndex : 0) : trackData.streamingSource) || "Local Drive"\n',
-        )])
+            ),
+            ('                        text: trackData.genre || " -"\n',
+             '                        text: trackInfo.scGenre || " -"\n'
+             '                        MouseArea { objectName: "TrackInfo_EditGenre"; anchors.fill: parent; enabled: trackInfo.scMetadataEditable; onClicked: trackInfo.scOpenMetadata("Genre", trackInfo.scGenre) }\n',
+            ),
+            ('                        text: trackData.label || " -"\n',
+             '                        text: trackInfo.scLabel || " -"\n'
+             '                        MouseArea { objectName: "TrackInfo_EditLabel"; anchors.fill: parent; enabled: trackInfo.scMetadataEditable; onClicked: trackInfo.scOpenMetadata("Label", trackInfo.scLabel) }\n',
+            ),
+            ('                        text: "Comment"\n',
+             '                        text: trackInfo.scMetadataStatus || "Comment"\n',
+            ),
+            ('                        text: trackData.comment || " -"\n',
+             '                        text: trackInfo.scComment || " -"\n'
+             '                        MouseArea { objectName: "TrackInfo_EditComment"; anchors.fill: parent; enabled: trackInfo.scMetadataEditable; onClicked: trackInfo.scOpenMetadata("Comment", trackInfo.scComment) }\n',
+            )])
     if v53():
         # Stock's pulsing Stems icon in the browse status bar says a render is
         # running whatever list is open. Stock shows it on units with side
