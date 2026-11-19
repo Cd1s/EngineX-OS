@@ -98,6 +98,7 @@
       title: L("5.3.0.5 更新内容", "5.3.0.5 更新內容", "What's new in 5.3.0.5"),
       nav: L("5.3.0.5 更新内容", "5.3.0.5 更新內容", "What's new in 5.3.0.5"),
       blocks: [
+        { k: "note", x: L("`Restore BPM on Sync Off` 只在速度推子居中时生效。", "`Restore BPM on Sync Off` 只在速度推桿置中時生效。", "`Restore BPM on Sync Off` only works with the pitch fader at the centre.") },
         { k: "h", id: "whatsnew-5305", x: L("<span id=\"whatsnew-5305\"></span><span id=\"start-whatsnew-5305\"></span>5.3.0.5 新功能", "<span id=\"whatsnew-5305\"></span><span id=\"start-whatsnew-5305\"></span>5.3.0.5 新功能", "<span id=\"whatsnew-5305\"></span><span id=\"start-whatsnew-5305\"></span>New features in 5.3.0.5"), nav: L("5.3.0.5 新功能", "5.3.0.5 新功能", "New features") },
         { k: "ul", x: [
           L("**原生 EngineX-Installer 与签名更新**：安装器自带镜像准备与 USB 传输（含 Windows 下 PRIME 4 G2 更新模式识别），无需另装 Python、fastboot 或 WSL，且屏幕在线更新与安装器均校验 `SHA256SUMS.txt.sig` 签名（#239、#255）。", "**原生 EngineX-Installer 與簽章更新**：安裝器自帶映像準備與 USB 傳輸（含 Windows 下 PRIME 4 G2 更新模式辨識），無需另裝 Python、fastboot 或 WSL，且螢幕線上更新與安裝器皆驗證 `SHA256SUMS.txt.sig` 簽章（#239、#255）。", "**Native EngineX-Installer & signed updates**: the installer handles image preparation and USB transfer natively (including PRIME 4 G2 recognition on Windows) without Python, fastboot or WSL, and both on-screen updates and the installer verify `SHA256SUMS.txt.sig` (#239, #255)."),
