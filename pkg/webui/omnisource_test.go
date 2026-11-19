@@ -65,8 +65,12 @@ func omniDrive(t *testing.T) (dbPath, root string, flac []byte) {
 }
 
 func omniServer(t *testing.T, root string, on bool) (*Server, string) {
+	return omniServerScope(t, root, on, "deezer")
+}
+
+func omniServerScope(t *testing.T, root string, on bool, scope string) (*Server, string) {
 	ui := t.TempDir()
-	conf := "scope=deezer\n"
+	conf := "scope=" + scope + "\n"
 	if on {
 		conf += "omni_source=1\n"
 	}
@@ -94,14 +98,15 @@ func titles(t *testing.T, items []json.RawMessage) ([]string, map[string]int64) 
 
 func TestOmniSourceListsDrivePlaylistsAndOtherServices(t *testing.T) {
 	_, root, _ := omniDrive(t)
-	_, off := omniServer(t, root, false)
+	// Deezer and Apple Music exclude OmniSource playlists; use a participating scope.
+	_, off := omniServerScope(t, root, false, "soundcloud")
 	var plain tidalList
 	tidalGet(t, off, "/v1/users/1/playlists", 200, &plain)
 	if strings.Contains(string(tidalGet(t, off, "/v1/users/1/playlists", 200, nil)), "[USB:") {
 		t.Fatal("OmniSource is off by default")
 	}
 
-	s, base := omniServer(t, root, true)
+	s, base := omniServerScope(t, root, true, "soundcloud")
 	s.mu.Lock()
 	s.sessions["sp"] = &Session{ID: "sp", Provider: "spotify", Ready: true, p: fixtureProvider{}, tracks: map[string]providers.Track{}, expires: time.Now().Add(time.Hour)}
 	s.mu.Unlock()
@@ -274,7 +279,7 @@ func TestOmniSourceDjayIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, base := omniServer(t, usb1, true)
+	_, base := omniServerScope(t, usb1, true, "soundcloud")
 
 	// 1. Verify OmniSource sees [djay · USB1] House playlist
 	var lists tidalList
@@ -332,5 +337,93 @@ func TestOmniSourceDjayIntegration(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 || !bytes.Equal(body, []byte("ID3 mp3 data")) {
 		t.Fatalf("unexpected stream response: %d, body=%q", resp.StatusCode, body)
+	}
+}
+
+func TestDeezerPlaylistsExcludeOtherServicesAndOmniSources(t *testing.T) {
+	_, root, _ := omniDrive(t)
+	djayDir := filepath.Join(root, "djay")
+	if err := os.MkdirAll(djayDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	m3u := "#EXTM3U\n#EXTINF:210,Djay Artist - Djay Beat\n../Music/beat.mp3\n"
+	if err := os.WriteFile(filepath.Join(djayDir, "TopPicks.m3u8"), []byte(m3u), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dzSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/user/42/playlists":
+			io.WriteString(w, `{"data":[{"id":101,"title":"My Deezer Mix","nb_tracks":3}]}`)
+		case "/chart/0/playlists":
+			io.WriteString(w, `{"data":[{"id":77,"title":"Deezer Top","nb_tracks":10}]}`)
+		default:
+			io.WriteString(w, `{"error":{"message":"unexpected"}}`)
+		}
+	}))
+	defer dzSrv.Close()
+
+	ui := t.TempDir()
+	if err := os.WriteFile(filepath.Join(ui, "settings.conf"), []byte("scope=deezer\nomni_source=1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := New(Config{
+		AccessToken: "code",
+		UIDir:       ui,
+		StateDir:    t.TempDir(),
+		DeezerURL:   dzSrv.URL,
+		MediaRoot:   filepath.Dir(root),
+	}, nil)
+	s.mu.Lock()
+	s.sessions["dz"] = &Session{ID: "dz", Provider: "deezer", Ready: true, p: &providers.Deezer{BaseURL: dzSrv.URL, UserID: "42"}, tracks: map[string]providers.Track{}, expires: time.Now().Add(time.Hour)}
+	s.sessions["sp"] = &Session{ID: "sp", Provider: "spotify", Ready: true, p: fixtureProvider{}, tracks: map[string]providers.Track{}, expires: time.Now().Add(time.Hour)}
+	s.sessions["sc"] = &Session{ID: "sc", Provider: "soundcloud", Ready: true, p: fixtureProvider{}, tracks: map[string]providers.Track{}, expires: time.Now().Add(time.Hour)}
+	s.sessions["bp"] = &Session{ID: "bp", Provider: "beatport", Ready: true, p: fixtureProvider{}, tracks: map[string]providers.Track{}, expires: time.Now().Add(time.Hour)}
+	s.sessions["ne"] = &Session{ID: "ne", Provider: "netease", Ready: true, p: fixtureProvider{}, tracks: map[string]providers.Track{}, expires: time.Now().Add(time.Hour)}
+	s.mu.Unlock()
+	srv := httptest.NewServer(s)
+	defer srv.Close()
+
+	var dzLists tidalList
+	tidalGet(t, srv.URL, "/v1/users/1/playlists", 200, &dzLists)
+	var gotTitles []string
+	for _, raw := range dzLists.Items {
+		var p tidalPlaylist
+		if err := json.Unmarshal(raw, &p); err != nil {
+			t.Fatal(err)
+		}
+		gotTitles = append(gotTitles, p.Title)
+		for _, bad := range []string{"[Spotify]", "[SoundCloud]", "[Beatport]", "[网易云音乐]", "[Apple Music]", "[USB:", "[djay", "[NAS"} {
+			if strings.HasPrefix(p.Title, bad) {
+				t.Fatalf("unexpected non-Deezer playlist in deezer scope: %q (all=%v)", p.Title, gotTitles)
+			}
+		}
+	}
+	if strings.Join(gotTitles, "|") != "My Deezer Mix|Deezer Top" {
+		t.Fatalf("expected only Deezer's own playlists, got %v", gotTitles)
+	}
+
+	// Other services keep their existing OmniSource playlist behavior unchanged.
+	resp, err := http.Post(srv.URL+"/v1/enginex/ui?scope=soundcloud", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	var scLists tidalList
+	tidalGet(t, srv.URL, "/v1/users/1/playlists", 200, &scLists)
+	sawSpotify, sawUSB := false, false
+	for _, raw := range scLists.Items {
+		var p tidalPlaylist
+		_ = json.Unmarshal(raw, &p)
+		if p.Title == "[Spotify] Friend" {
+			sawSpotify = true
+		}
+		if p.Title == "[USB: "+filepath.Base(root)+"] Club" {
+			sawUSB = true
+		}
+	}
+	if !sawSpotify || !sawUSB {
+		t.Fatalf("expected soundcloud scope to keep OmniSource playlists unchanged (sawSpotify=%t sawUSB=%t)", sawSpotify, sawUSB)
 	}
 }

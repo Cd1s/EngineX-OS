@@ -1174,7 +1174,7 @@ func (g *tidalGateway) playlists(w http.ResponseWriter, r *http.Request) {
 			markPartial("deezer", chartErr)
 		}
 	}
-	if g.s.omniSource() && !favorites && scope != "applemusic" {
+	if g.s.omniSource() && !favorites && scope != "applemusic" && scope != "deezer" {
 		provider, err := g.omniPlaylists(r.Context(), scope, add)
 		markPartial(provider, err)
 	}
