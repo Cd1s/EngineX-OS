@@ -75,7 +75,7 @@
 | `Settings → Services`（设置 → 服务） | `Streaming` 7 个流媒体服务开关（隐藏原厂 TIDAL / SoundCloud / Beatport LINK 行）、`Streaming Quality`、`NetEase Download`、`Live Stream`、`Pro DJ Link Library`、`Pro DJ Link Export to CDJ (Beta)` |
 | `Settings → About / Update`（设置 → 关于 / 更新） | 版本行（含 Web 控制台地址与 8 位访问码 `XXXX-XXXX`）；在线更新改查 GitHub Releases |
 | `Profile → Display`（配置 → 显示） | `Waveform Style`（`Denon` / `RGB` / `3-Band`） |
-| `Profile → Playback`（配置 → 播放） | `Master Soft Clipper`、`Auto-Gain (0 dB Normalize)`、`Fader Echo`、`Stems EQ Mode`、`Color FX Style`、`PX Delay Time Mode`、`PX Delay Time (ms)`，并放开 `Censor Button Behavior` 下的 `Silent Cue` |
+| `Profile → Playback`（配置 → 播放） | `Master Soft Clipper`、`Auto-Gain`、`Fader Echo`、`Stems EQ Mode`、`Color FX Style`、`PX Delay Time Mode`、`PX Delay Time (ms)`，并放开 `Censor Button Behavior` 下的 `Silent Cue` |
 | `Profile → Cues/Loops`（配置 → Cue / Loop） | 放开原厂 `Link Beat Jump / Loop Size Controls`（`Smart Loops` 保持原厂自带） |
 | `Profile → Safety`（配置 → 安全） | `Sync Guard Tolerance`（`Off` / `10%` / `15%` / `20%`） |
 | `Profile → Library`（配置 → 曲库） | `Stems List`（armhf 机型放开并附局域网分轨状态提示）、`OmniSource (Drives in Streaming)`、`Tracklist Waveform` |
@@ -99,7 +99,7 @@
 | 8 | `Settings → Services` | `Pro DJ Link Export to CDJ (Beta)` / Pro DJ Link 导出至 CDJ（测试版） / Pro DJ Link 匯出至 CDJ（測試版） | 把本机 U 盘与已缓存流媒体共享给 CDJ 浏览 | 关 | `prolinkExport=0\|1` | `prolink_export` | 状态 `prolinkExportActive` 只读 |
 | 9 | `Profile → Display` | `Waveform Style` / 波形样式 / 波形樣式 | 波形配色 `Denon` / `RGB` / `3-Band` | `denon` | `waveform=denon\|rgb\|3band` | `waveform` | 与控制中心 `Waveform Style` 磁贴双向同步 |
 | 10 | `Profile → Playback` | `Master Soft Clipper` / 0dB 防破音软限幅 / 0dB 防破音軟限幅 | 主输出软限幅，峰值压到 -0.1 dBFS 以下 | 关 | `masterLimiter=0\|1` | `master_limiter` | 立即生效；#58、#149 |
-| 11 | `Profile → Playback` | `Auto-Gain (0 dB Normalize)` / 自动增益（0 dB 归一化） / 自動增益（0 dB 正規化） | 偏小曲目平滑提至约 -4.4 dBFS（最多 +9 dB，低于 -42 dBFS 静音不提） | 关 | `autoGain=0\|1` | `auto_gain` | 含防削波保护；#64、#149 |
+| 11 | `Profile → Playback` | `Auto-Gain` / 自动增益 / 自動增益 | 偏小曲目平滑提至约 -4.4 dBFS（最多 +9 dB，低于 -42 dBFS 静音不提） | 关 | `autoGain=0\|1` | `auto_gain` | 含防削波保护；#64、#149 |
 | 12 | `Profile → Playback` | `Fader Echo` / 推子回音 / 推桿回音 | 带混音台机型推子切歌时释放回声尾音（与 `Settings → Mixer → Fader Echo`、控制中心磁贴及 `:8080` WebUI `Fader Echo` 同步；已有原厂 `Fader Echo` 磁贴或实体 `Fader FX` 按键的机型隐藏以免重复） | 关 | `upfaderEcho=0\|1` | `upfader_echo` | `visible: root.scHasMixer && !root.scHasStockTransitionTile && !root.scHasHardwareFaderFxButtons` |
 | 13 | `Profile → Playback` | `Stems EQ Mode` / 分轨 EQ 模式 / 分軌 EQ 模式 | 通道 EQ 旋钮切换控制分轨音量 | 关 | `stemsEqMode=0\|1` | `stems_eq_mode` | `visible: root.scHasStemsEq` |
 | 14 | `Profile → Playback` | `Color FX Style` / 先锋风格效果 (Color FX) / 先鋒風格效果 (Color FX) | `Off` / `Spiral` / `Pitch Echo` / `Slip Roll` / `Dub Echo` / `Space` | `off` | `pioneerFx=off\|spiral\|...` | `pioneer_fx` | 每个通道的 `FILTER` 旋钮带动（一代 PRIME 4 / PRIME 2 / PRIME GO / Mixstream Pro 与二代 32 位一体机，有 hook 标记 `/run/enginex-colorfx.ready` 时才显示）；居中与 `Off` 为原厂；其余机型隐藏，从不作用于主输出（#88） |
