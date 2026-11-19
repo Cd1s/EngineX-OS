@@ -18,6 +18,14 @@ import (
 type dirEntry struct {
 	name      string
 	isSymlink bool
+	isDir     bool
+}
+
+// Stop is where the lookup of a path that is not on the volume ended: Dir, as the volume
+// spells it ("" is the root), has no entry for Name. File: Name is the path's last component.
+type Stop struct {
+	Dir, Name string
+	File      bool
 }
 
 type Resolver struct {
@@ -26,6 +34,7 @@ type Resolver struct {
 	dirs     map[string]map[string][]dirEntry
 	resolved map[string]string
 	missing  map[string]bool
+	stops    map[string]Stop
 }
 
 func NewResolver(root string) (*Resolver, error) {
@@ -42,6 +51,7 @@ func NewResolver(root string) (*Resolver, error) {
 		dirs:     map[string]map[string][]dirEntry{},
 		resolved: map[string]string{},
 		missing:  map[string]bool{},
+		stops:    map[string]Stop{},
 	}, nil
 }
 
@@ -94,7 +104,8 @@ func (r *Resolver) ResolveContext(ctx context.Context, s string) (string, error)
 		return "", fmt.Errorf("resolve %q: %w", s, fs.ErrNotExist)
 	}
 	cur := ""
-	for _, component := range strings.Split(rel, "/") {
+	components := strings.Split(rel, "/")
+	for i, component := range components {
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
@@ -111,6 +122,7 @@ func (r *Resolver) ResolveContext(ctx context.Context, s string) (string, error)
 				idx[canonical(ent.Name())] = append(idx[canonical(ent.Name())], dirEntry{
 					name:      ent.Name(),
 					isSymlink: ent.Type()&fs.ModeSymlink != 0,
+					isDir:     ent.IsDir(),
 				})
 			}
 			r.dirs[cur] = idx
@@ -139,6 +151,7 @@ func (r *Resolver) ResolveContext(ctx context.Context, s string) (string, error)
 		}
 		if len(matches) == 0 {
 			r.missing[rel] = true
+			r.stops[rel] = Stop{Dir: cur, Name: component, File: i == len(components)-1}
 			return "", fmt.Errorf("resolve %q: %w", s, fs.ErrNotExist)
 		}
 		if len(matches) != 1 {
@@ -153,6 +166,34 @@ func (r *Resolver) ResolveContext(ctx context.Context, s string) (string, error)
 	out := filepath.ToSlash(cur)
 	r.resolved[rel] = out
 	return out, nil
+}
+
+// Stopped reports where the lookup of s ended, for a path Resolve did not find.
+func (r *Resolver) Stopped(s string) (Stop, bool) {
+	rel, e := CleanRelative(s)
+	if e != nil {
+		return Stop{}, false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	stop, ok := r.stops[rel]
+	return stop, ok
+}
+
+// Entries lists the names in dir, a directory Resolve has looked into (a Stop's Dir): its
+// directories when dirs, else its other entries.
+func (r *Resolver) Entries(dir string, dirs bool) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var names []string
+	for _, entries := range r.dirs[dir] {
+		for _, ent := range entries {
+			if ent.isDir == dirs {
+				names = append(names, ent.name)
+			}
+		}
+	}
+	return names
 }
 
 func (r *Resolver) FullPath(rel string) string { return filepath.Join(r.root, filepath.FromSlash(rel)) }

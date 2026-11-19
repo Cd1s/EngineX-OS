@@ -306,7 +306,9 @@ func convert(ctx context.Context, mount string, opts *enginedb.Options, pre *pre
 // Reconcile fits a real export to what a library can hold, so that one odd entry
 // cannot lose thousands of tracks. rekordbox can list one file under two records,
 // and files get deleted from a stick after export. The first record of a file
-// stands for it in playlists; a track whose file is gone is left out.
+// stands for it in playlists; a track whose file is gone is left out. Files that are
+// still on the drive under names the export does not have are not gone: see
+// ErrFilesUnreadable.
 func Reconcile(r *compat.Resolver, l *rekordbox.Library) {
 	_ = ReconcileContext(context.Background(), r, l)
 }
@@ -317,6 +319,7 @@ func ReconcileContext(ctx context.Context, r *compat.Resolver, l *rekordbox.Libr
 	replaced := map[uint32]uint32{} // 0 means left out
 	kept := l.Tracks[:0:0]
 	var merged, missing int
+	var gone []string
 	for _, t := range l.Tracks {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -328,6 +331,7 @@ func ReconcileContext(ctx context.Context, r *compat.Resolver, l *rekordbox.Libr
 		if errors.Is(err, os.ErrNotExist) {
 			replaced[t.ID] = 0
 			missing++
+			gone = append(gone, t.Path)
 			continue
 		}
 		if err != nil {
@@ -345,10 +349,101 @@ func ReconcileContext(ctx context.Context, r *compat.Resolver, l *rekordbox.Libr
 	if len(replaced) == 0 {
 		return nil
 	}
+	if hidden := hiddenTracks(r, byPath, gone); hidden > unreadableLimit(len(l.Tracks)) {
+		log.Printf("rb-bridge: NOT IMPORTED: the files of %d of the export's %d tracks are on the drive under names that cannot be read as the export wrote them (the first: %q). Nothing is removed, the library stays as it is; the next mount tries again", hidden, len(l.Tracks), gone[0])
+		return fmt.Errorf("%w: %d of %d tracks", ErrFilesUnreadable, hidden, len(l.Tracks))
+	}
 	l.Tracks = kept
 	replacePlaylistTracks(l, replaced)
 	log.Printf("rb-bridge: %d duplicate records merged, %d tracks without a file left out", merged, missing)
 	return nil
+}
+
+// ErrFilesUnreadable: many tracks of the export have no file under their name, and files
+// no track of the export leads to lie where those names should be. The library is left as
+// it is and a later mount tries again. Real stick, 2026-11-19: during one update of a
+// stick of 6013 tracks no file name with a non-ASCII character could be read as the export
+// wrote it (a mount without UTF-8 names); the update took those 707 tracks for deleted
+// and built a library without them, their playlist entries and what the deck had saved.
+var ErrFilesUnreadable = errors.New("files of the export are on the drive under names that cannot be read")
+
+// unreadableLimit is how many such tracks an import leaves out without refusing: 2 % of
+// the export's tracks, at most 50 and at least 5.
+func unreadableLimit(tracks int) int { return min(50, max(5, tracks/50)) }
+
+// hiddenTracks counts the tracks in gone (export paths without a file) whose file is
+// still on the drive under another name. A deleted file or folder leaves nothing behind.
+// A name the volume does not give as the export wrote it leaves, where the lookup
+// stopped, an entry no track of the export leads to and of the same kind: a folder with a
+// file somewhere in it for a folder (deleting an album's files by hand leaves empty folders),
+// a file with the same extension for a file. kept has the found tracks' paths.
+func hiddenTracks(r *compat.Resolver, kept map[string]uint32, gone []string) int {
+	claimed := map[string]map[string]bool{}
+	for rel := range kept {
+		dir := ""
+		for _, name := range strings.Split(rel, "/") {
+			if claimed[dir] == nil {
+				claimed[dir] = map[string]bool{}
+			}
+			claimed[dir][name] = true
+			dir = filepath.Join(dir, name)
+		}
+	}
+	type place struct{ dir, kind string } // kind: "/" for a folder, else the file's extension
+	lost := map[place]map[string]int{}    // the names not found there, and their tracks
+	for _, p := range gone {
+		stop, ok := r.Stopped(p)
+		if !ok {
+			continue
+		}
+		at := place{stop.Dir, "/"}
+		if stop.File {
+			at.kind = strings.ToLower(filepath.Ext(stop.Name))
+		}
+		if lost[at] == nil {
+			lost[at] = map[string]int{}
+		}
+		lost[at][stop.Name]++
+	}
+	hidden := 0
+	for at, names := range lost {
+		free, tracks := 0, 0
+		for _, name := range r.Entries(at.dir, at.kind == "/") {
+			if free >= len(names) || claimed[at.dir][name] || strings.HasPrefix(name, ".") {
+				continue
+			}
+			if at.kind == "/" {
+				if !holdsFile(r.FullPath(filepath.Join(at.dir, name))) {
+					continue
+				}
+			} else if strings.ToLower(filepath.Ext(name)) != at.kind {
+				continue
+			}
+			free++
+		}
+		for _, n := range names {
+			tracks += n
+		}
+		hidden += tracks * min(free, len(names)) / len(names)
+	}
+	return hidden
+}
+
+// holdsFile reports whether a file, hidden ones aside, lies anywhere under dir.
+func holdsFile(dir string) bool {
+	found := errors.New("found")
+	return filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+		if err == nil && p != dir && strings.HasPrefix(d.Name(), ".") {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if err == nil && !d.IsDir() {
+			return found
+		}
+		return nil
+	}) == found
 }
 
 // exportStamp names the export a library is imported from: the export files' sizes and
