@@ -705,6 +705,7 @@ SERVICES_MAIN = """
 	readonly property bool scHasStockTransitionTile: typeof Config !== "undefined" && Config && Config.audio && Config.audio.fx && Config.device
 		? (!!Config.audio.fx.hasTransitionFx && !Config.device.hasHardwareFaderFxButtons && !!scTransitionFxView)
 		: false
+	readonly property bool scHasHardwareFaderFxButtons: typeof Config !== "undefined" && Config && Config.device ? !!Config.device.hasHardwareFaderFxButtons : false
 	Connections {
 		target: root.scTransitionFxView
 		ignoreUnknownSignals: true
@@ -5368,7 +5369,7 @@ PLAYBACK_ENTRIES = (switch_entry("Restore BPM on Sync Off", "scRestoreBpmOnUnsyn
     + switch_entry("Master Soft Clipper", "scMasterLimiter", "masterLimiter", '\t\t\tvisible: !root.scOff("dsp-guards")\n')
     + switch_entry("Auto-Gain (0 dB Normalize)", "scAutoGain", "autoGain", '\t\t\tvisible: !root.scOff("dsp-guards")\n')
     + switch_entry("Hi-Fi Output", "scHifiOutput", "hifiOutput", '\t\t\tvisible: root.scIsPlayerBoard && !root.scOff("dsp-guards") && !root.scOff("hifi-output")\n')
-    + switch_entry("Echo Out", "scUpfaderEcho", "upfaderEcho", '\t\t\tvisible: root.scHasMixer && !root.scOff("dsp-guards")\n')
+    + switch_entry("Fader Echo", "scUpfaderEcho", "upfaderEcho", '\t\t\tvisible: root.scHasMixer && !root.scHasStockTransitionTile && !root.scHasHardwareFaderFxButtons && !root.scOff("dsp-guards")\n')
     + switch_entry("Stems EQ Mode", "scStemsEqMode", "stemsEqMode", '\t\t\tvisible: root.scHasStemsEq && !root.scOff("stems-eq")\n') + """
 		EntryBase.ListEntry {
 			text: "Color FX Style"
@@ -5797,7 +5798,7 @@ UPFADER_ECHO_TILE = """
 			Rectangle {
 				id: scUpfaderEchoTile
 				objectName: "ControlCenter_UpfaderEcho"
-				visible: root.scHasMixer && !root.scHasStockTransitionTile && !(typeof Config !== "undefined" && Config && Config.device && Config.device.hasHardwareFaderFxButtons)
+				visible: root.scHasMixer && !root.scHasStockTransitionTile && !root.scHasHardwareFaderFxButtons
 				width: 256
 				height: 104
 				radius: 16

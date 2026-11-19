@@ -966,7 +966,7 @@ AZ04_NOTE = """
 64-bit (AZ04) build: the UI packs, the streaming gateway (Deezer, SoundCloud,
 Beatport) and the EngineX services are in, with 16 Engine patches (including
 the stock Apple Music unlock), 14 DSP guards, the 0 dB master soft clipper,
-auto gain, Echo Out, SQLite tuning and the OfflineAnalyzer .perf injection
+auto gain, Fader Echo, SQLite tuning and the OfflineAnalyzer .perf injection
 (#149). The 4-deck unlock is for the stand-alone players only; Stems stay as
 the official firmware has them. The 64-bit Engine
 needs the device's secure element (OP-TEE) to start, so in the sandbox it

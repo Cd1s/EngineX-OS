@@ -88,7 +88,7 @@ alive on 4-core decks are never switched off.
 | `rec-streaming` | #206 recording with streaming tracks (all 8 sites) |
 | `aux-input` | #171 SC LIVE 4 AUX/MIC2 input routing and Mixer menu |
 | `four-deck` | #49 4-deck layout unlock, shadow MASTER eligibility, SamplerOutput branch |
-| `dsp-guards` | all 21 DSP sites, and with them Echo Out, Pioneer FX, Hi-Fi Output, Auto-Gain, soft limiter and Live Stream audio |
+| `dsp-guards` | all 21 DSP sites, and with them Fader Echo, Pioneer FX, Hi-Fi Output, Auto-Gain, soft limiter and Live Stream audio |
 | `hifi-output` | #172: 48->96 kHz Hermite output roll-off compensation before the soft limiter on Gen-1 players (`JP07`/`JP08`/`JP13`/`JP14`) |
 | `reverb-tail` | #207: the stock Reverb (Classic) decay formula; off, the Reverb rings out as stock at every knob position |
 | `sqlite-tuning` | the PRAGMAs on every database Engine opens |

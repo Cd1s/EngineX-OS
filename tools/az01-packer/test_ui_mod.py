@@ -1273,7 +1273,7 @@ for (const amt of [1/63, 2/63, 4/63, 5/63, 8/63, 1.0]) {{
         self.assertIn("if (v.shadowPausedFollow !== undefined) scHookFollows = v.shadowPausedFollow === true", bp.SERVICES_MAIN)
         self.assertIn('readonly property bool scPausedShadowFollow: !scIsAZ04 && scHookFollows && !scOff("shadow-paused-follow")', bp.SERVICES_MAIN)
         dsp = '!root.scOff("dsp-guards")'
-        for text in ("Master Soft Clipper", "Auto-Gain (0 dB Normalize)", "Echo Out", "Color FX Style",
+        for text in ("Master Soft Clipper", "Auto-Gain (0 dB Normalize)", "Fader Echo", "Color FX Style",
                      "PX Delay Time Mode", "PX Delay Time (ms)"):
             entry = bp.PLAYBACK_ENTRIES.split('text: "%s"' % text, 1)[1].split("EntryBase.ListEntry", 1)[0]
             self.assertIn(dsp, entry.split("values:", 1)[0], text)
@@ -1315,7 +1315,8 @@ for (const amt of [1/63, 2/63, 4/63, 5/63, 8/63, 1.0]) {{
         # Stock TransitionFxEnable stays untouched in Control Center, UPFADER_ECHO_TILE hides where
         # stock tile or hardware Fader FX buttons exist, and Settings -> Mixer syncs with vfx.enabled.
         self.assertNotIn("ControlCenter/Tabs/ControlCenter/Entries/TransitionFxEnable.qml", SRC)
-        self.assertIn("root.scHasMixer && !root.scHasStockTransitionTile", bp.UPFADER_ECHO_TILE)
+        self.assertIn("root.scHasMixer && !root.scHasStockTransitionTile && !root.scHasHardwareFaderFxButtons", bp.UPFADER_ECHO_TILE)
+        self.assertIn("root.scHasMixer && !root.scHasStockTransitionTile && !root.scHasHardwareFaderFxButtons", bp.PLAYBACK_ENTRIES)
         self.assertIn("scTransitionFxView", SRC)
         self.assertIn("function scSetTransitionFx(", SRC)
         self.assertIn("triggerSourceOptions", SRC)
@@ -1452,7 +1453,7 @@ assert.strictEqual(vfx.enabled, false);
             "Remote Load (LAN API)": ("scRemoteLoad", "remoteLoad", bp.SERVICES_ENTRIES),
             "Master Soft Clipper": ("scMasterLimiter", "masterLimiter", bp.PLAYBACK_ENTRIES),
             "Auto-Gain (0 dB Normalize)": ("scAutoGain", "autoGain", bp.PLAYBACK_ENTRIES),
-            "Echo Out": ("scUpfaderEcho", "upfaderEcho", bp.PLAYBACK_ENTRIES),
+            "Fader Echo": ("scUpfaderEcho", "upfaderEcho", bp.PLAYBACK_ENTRIES),
             "Stems EQ Mode": ("scStemsEqMode", "stemsEqMode", bp.PLAYBACK_ENTRIES),
             "Beat Jump Pad Bank": ("scBeatJumpPads", "beatJumpPads", bp.BEAT_JUMP_ENTRIES),
             "Swap Loop / Beat Jump": ("scSwapLoopOrder", "swapLoopOrder", bp.BEAT_JUMP_ENTRIES),

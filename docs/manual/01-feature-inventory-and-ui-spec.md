@@ -35,7 +35,7 @@
 | Numark Mixstream Pro | `MIXSTREAMPRO` | NH08 | armhf | PRIME 4 组 | 同上 | 一体机 |
 
 - 文件名：`<前缀>-<版本>-EngineX-OS-<品牌型号>-Update.img`（`build-release.sh`）。
-- "独立播放机"（`playerBoards`：SC5000/5000M/6000/6000M）没有通道推子：因此仅带混音推子的一体机提供 Echo Out（`回声淡出` / `Fader Echo`），独立播放机隐藏该开关且 96 kHz 主输出完全直通。
+- "独立播放机"（`playerBoards`：SC5000/5000M/6000/6000M）没有通道推子：因此仅带混音推子的一体机提供 `推子回音`（`Fader Echo`），独立播放机隐藏该开关且 96 kHz 主输出完全直通。
 - 官方底包 5.3.0（打包用）；原厂 4.3.x、5.0.x 都能直接刷。
 
 ### 1.2 二代机（8 款，一键解锁后统一 `*-Update.img`，#119 / #215）
@@ -55,7 +55,7 @@
 
 - 前置条件：先升到官方 Engine OS 5.3.0。首次经 `EngineX-Installer` 解锁装好后，后续版本既可把对应 `*-Update.img` 拷入 FAT32/exFAT U 盘插机直刷，也可在碟机屏幕 设置 → 关于 / 更新 → 更新 一键完成（下载 `*-Update.img`、校验 128 字节头 SHA-256 与包内 `SHA256SUMS`、更新 `<DATA>` 并重启服务，#119 / #215）。
 - 卸载：`sh <DATA>/bundle/uninstall.sh && reboot`。
-- **AZ04（PRIME 4 G2 / SYSTEM ONE）能力**（`build-data-bundle.py` 的 `AZ04_NOTE`，README 同，#149）：UI 包、流媒体网关（Deezer、SoundCloud、Beatport）和各服务之外，已带 16 处 Engine 补丁（含原厂 Apple Music 解锁）、14 处 DSP 防护、0dB 软限幅、自动增益、Echo Out、SQLite 调优和 64 位 `OfflineAnalyzer` 的 `.perf` 直注；PRIME 4 G2 原生即为 4 通道机型并支持四轨联机视图（SYSTEM ONE 为双通道机型保持双轨）；Stems 保持官方原样。
+- **AZ04（PRIME 4 G2 / SYSTEM ONE）能力**（`build-data-bundle.py` 的 `AZ04_NOTE`，README 同，#149）：UI 包、流媒体网关（Deezer、SoundCloud、Beatport）和各服务之外，已带 16 处 Engine 补丁（含原厂 Apple Music 解锁）、14 处 DSP 防护、0dB 软限幅、自动增益、Fader Echo、SQLite 调优和 64 位 `OfflineAnalyzer` 的 `.perf` 直注；PRIME 4 G2 原生即为 4 通道机型并支持四轨联机视图（SYSTEM ONE 为双通道机型保持双轨）；Stems 保持官方原样。
 - 6 款 armhf 二代机共用 SC LIVE 4 的 Engine 构建（同 BuildID），功能面与一代机基本一致，但没有实机验证（README 明说）。
 
 ### 1.3 EngineX-Installer（`cmd/enginex-installer`，#88/#89/#215）
@@ -75,7 +75,7 @@
 | `Settings → Services`（设置 → 服务） | `Streaming` 7 个流媒体服务开关（隐藏原厂 TIDAL / SoundCloud / Beatport LINK 行）、`Streaming Quality`、`NetEase Download`、`Live Stream`、`Pro DJ Link Library`、`Pro DJ Link Export to CDJ (Beta)` |
 | `Settings → About / Update`（设置 → 关于 / 更新） | 版本行（含 Web 控制台地址与 8 位访问码 `XXXX-XXXX`）；在线更新改查 GitHub Releases |
 | `Profile → Display`（配置 → 显示） | `Waveform Style`（`Denon` / `RGB` / `3-Band`） |
-| `Profile → Playback`（配置 → 播放） | `Master Soft Clipper`、`Auto-Gain (0 dB Normalize)`、`Echo Out`、`Stems EQ Mode`、`Color FX Style`、`PX Delay Time Mode`、`PX Delay Time (ms)`，并放开 `Censor Button Behavior` 下的 `Silent Cue` |
+| `Profile → Playback`（配置 → 播放） | `Master Soft Clipper`、`Auto-Gain (0 dB Normalize)`、`Fader Echo`、`Stems EQ Mode`、`Color FX Style`、`PX Delay Time Mode`、`PX Delay Time (ms)`，并放开 `Censor Button Behavior` 下的 `Silent Cue` |
 | `Profile → Cues/Loops`（配置 → Cue / Loop） | 放开原厂 `Link Beat Jump / Loop Size Controls`（`Smart Loops` 保持原厂自带） |
 | `Profile → Safety`（配置 → 安全） | `Sync Guard Tolerance`（`Off` / `10%` / `15%` / `20%`） |
 | `Profile → Library`（配置 → 曲库） | `Stems List`（armhf 机型放开并附局域网分轨状态提示）、`OmniSource (Drives in Streaming)`、`Tracklist Waveform` |
@@ -100,7 +100,7 @@
 | 9 | `Profile → Display` | `Waveform Style` / 波形样式 / 波形樣式 | 波形配色 `Denon` / `RGB` / `3-Band` | `denon` | `waveform=denon\|rgb\|3band` | `waveform` | 与控制中心 `Waveform Style` 磁贴双向同步 |
 | 10 | `Profile → Playback` | `Master Soft Clipper` / 0dB 防破音软限幅 / 0dB 防破音軟限幅 | 主输出软限幅，峰值压到 -0.1 dBFS 以下 | 关 | `masterLimiter=0\|1` | `master_limiter` | 立即生效；#58、#149 |
 | 11 | `Profile → Playback` | `Auto-Gain (0 dB Normalize)` / 自动增益（0 dB 归一化） / 自動增益（0 dB 正規化） | 偏小曲目平滑提至约 -4.4 dBFS（最多 +9 dB，低于 -42 dBFS 静音不提） | 关 | `autoGain=0\|1` | `auto_gain` | 含防削波保护；#64、#149 |
-| 12 | `Profile → Playback` | `Echo Out` / 回声淡出 / 回聲淡出 | 带混音台机型推子切歌时释放回声尾音（与 `Settings → Mixer → Fader Echo` 及控制中心磁贴同步） | 关 | `upfaderEcho=0\|1` | `upfader_echo` | `visible: root.scHasMixer` |
+| 12 | `Profile → Playback` | `Fader Echo` / 推子回音 / 推桿回音 | 带混音台机型推子切歌时释放回声尾音（与 `Settings → Mixer → Fader Echo`、控制中心磁贴及 `:8080` WebUI `Fader Echo` 同步；已有原厂 `Fader Echo` 磁贴或实体 `Fader FX` 按键的机型隐藏以免重复） | 关 | `upfaderEcho=0\|1` | `upfader_echo` | `visible: root.scHasMixer && !root.scHasStockTransitionTile && !root.scHasHardwareFaderFxButtons` |
 | 13 | `Profile → Playback` | `Stems EQ Mode` / 分轨 EQ 模式 / 分軌 EQ 模式 | 通道 EQ 旋钮切换控制分轨音量 | 关 | `stemsEqMode=0\|1` | `stems_eq_mode` | `visible: root.scHasStemsEq` |
 | 14 | `Profile → Playback` | `Color FX Style` / 先锋风格效果 (Color FX) / 先鋒風格效果 (Color FX) | `Off` / `Spiral` / `Pitch Echo` / `Slip Roll` / `Dub Echo` / `Space` | `off` | `pioneerFx=off\|spiral\|...` | `pioneer_fx` | 每个通道的 `FILTER` 旋钮带动（一代 PRIME 4 / PRIME 2 / PRIME GO / Mixstream Pro 与二代 32 位一体机，有 hook 标记 `/run/enginex-colorfx.ready` 时才显示）；居中与 `Off` 为原厂；其余机型隐藏，从不作用于主输出（#88） |
 | 15 | `Profile → Playback` | `PX Delay Time Mode` & `PX Delay Time (ms)` | 先锋延迟效果（`Spiral` / `Pitch Echo` / `Dub Echo`）拍值或自由毫秒模式（`10`–`4000 ms`） | `beats` / `500` | `fxTimeMode=beats\|ms`、`fxTimeMs=...` | `fx_time_mode`、`fx_time_ms` | `visible: root.scHasPxDelay`（#162） |
@@ -123,7 +123,7 @@
 
 | 条目 | 来源 | 说明 |
 |---|---|---|
-| `Fader Echo` / 推子回音 / 推桿回音 | EngineX | 插在 `Calibrate Crossfader` 之前，可选 `Off` / `All Faders` / `Upfader Only`；带 `visible: root.scHasMixer` 守卫（独立播放机隐藏并直通），与 `Profile → Playback → Echo Out` 及控制中心磁贴同步 |
+| `Fader Echo` / 推子回音 / 推桿回音 | EngineX | 插在 `Calibrate Crossfader` 之前，可选 `Off` / `All Faders` / `Upfader Only`；带 `visible: root.scHasMixer` 守卫（独立播放机隐藏并直通），与 `Profile → Playback → Fader Echo` 及控制中心磁贴同步 |
 | Master Limiter / 原厂主输出限幅 (dB) | 原厂，EngineX 放开 | PRIME GO、Mixstream Pro 原厂隐藏，补丁让 `Config.audio.hasLimiter` 的板子显示；关 / 0–18 dB。与 `Master Soft Clipper` 并存 |
 
 ### 2.4 设置 → 服务 → 流媒体
@@ -277,7 +277,7 @@ APFS 备注：不支持。固件只加载 `hfsplus` 和 `overlay`（`rootfs-over
 ### 5.1 结构问题
 
 1. **16 项 EngineX 条目平铺在"设备"页**，夹在原厂条目里，没有分组、没有 EngineX 标识。音质、音频保护、联机、4 碟、直播、关机全混在一个长列表里；用户要找"防爆音"得翻到 Device 页中段。
-2. **同类设置分散在不同页**：Streaming Quality / NetEase Download 在设备页，而 7 个服务开关在 服务 → 流媒体；两个限幅（原厂 Master Limiter 在混音台，EngineX 软限幅在设备页）；Upfader Echo 在设备页、混音台、控制中心三处。
+2. **同类设置分散在不同页**：Streaming Quality / NetEase Download 在设备页，而 7 个服务开关在 服务 → 流媒体；两个限幅（原厂 Master Limiter 在混音台，EngineX 软限幅在设备页）；Fader Echo 在设备页、混音台、控制中心三处。
 3. **Live Stream 开关没有前置条件提示**：屏幕上能点开，但服务器地址和密码只能在 Web 控制台填；没配置就开会静默失败。
 4. **有设置但没有入口**：`prolink_waveform`（孤儿翻译）、`github_repo`。
 5. **有功能但没有可见状态**：安全模式只有 Web 页面能看出来，屏幕上回原厂界面后用户不知道发生了什么；Stems 当前走云 / 局域网 / 本机、Pro DJ Link 连上了哪些设备，两处都没显示。
@@ -306,13 +306,13 @@ APFS 备注：不支持。固件只加载 `hfsplus` 和 `overlay`（`rootfs-over
 |---|---|---|---|---|
 | A | Display / 显示 / 顯示 | Language、Waveform Style、Jog Light Mode | 设置 → 设备（置顶，EngineX 区块） | "碟机显示与音频"卡片的"显示"小节 |
 | B | Streaming / 流媒体 / 串流 | 7 个服务开关、Streaming Quality、NetEase Download、OmniSource | 设置 → 服务 → 流媒体（全部集中到这一页） | "流媒体"卡片 + 补上服务开关与 NetEase Download |
-| C | Audio Protection / 音频保护 / 音訊保護 | Master Soft Clipper、Auto-Gain、原厂 Master Limiter（不动）、Upfader Echo Out | 设置 → 混音台（EngineX 软限幅与自动增益从设备页移来；Upfader Echo 只留这里和控制中心磁贴） | "音频"小节 |
+| C | Audio Protection / 音频保护 / 音訊保護 | Master Soft Clipper、Auto-Gain、原厂 Master Limiter（不动）、Fader Echo | 设置 → 混音台（EngineX 软限幅与自动增益从设备页移来；Fader Echo 只留这里和控制中心磁贴） | "音频"小节 |
 | D | Library / 曲库 / 曲庫 | Auto-Analyze Drives (Unavailable) | 设置 → 曲库（Library） | "曲库"小节 |
 | E | Network & CDJ / 网络与 CDJ / 網路與 CDJ | Pro DJ Link Library（测试版）、Pro DJ Link 共享给 CDJ（测试版）、Pro DJ Link 波形 | 设置 → 网络（Network） | "联机"小节 |
 | F | Layout / 布局 / 版面 | 4-Deck Layout、4-Deck Role | 设置 → 设备，紧挨 Player # | "4 碟"小节 |
 | G | System / 系统 / 系統 | Live Stream（配置未填时置灰并提示"先在 Web 控制台填写服务器"）、Power → Turn Off | 设置 → 设备末尾 | "直播推流"折叠卡片保留 |
 
-控制中心磁贴保留 4 个（Waveform Style、Live Stream、Upfader Echo Out、Smart Sync），它们是演出中要快速点的，不动。
+控制中心磁贴保留 4 个（Waveform Style、Live Stream、Fader Echo、Smart Sync），它们是演出中要快速点的，不动。
 
 约束：改动只重排 / 改名，不改 conf 键名和接口参数名，所以旧版本和 Web 的调用不会断；`/v1/enginex/*` 与 `/v1/enginex/*` 两套别名参数保持一致（#103）。
 
@@ -333,7 +333,7 @@ EngineX Soft Limiter (0 dBFS)	EngineX 防破音软限幅	EngineX 防破音軟限
 
 - `EXTRA_DEVICE_ENTRIES`：`text: "4-Deck Waveform"` → `"4-Deck Layout"`。
 - `Live Stream` 条目加 `enabled: root.scBroadcastConfigured`（需要在 `/v1/enginex/ui` 响应里补一个只读 `broadcastConfigured`，由 `broadcast-config.json` 是否有 URL 决定），并在未配置时用 `root.scT("Set up in the web console first")` 作副标题。
-- 混音台页的 Upfader Echo Out 补 `visible: !root.scPlayer`（与设备页、磁贴一致）。设备页那份删除，只留混音台和磁贴。
+- 混音台页的 Fader Echo 补 `visible: !root.scPlayer`（与设备页、磁贴一致）。设备页那份删除，只留混音台和磁贴。
 - `JOG_ENTRY` 拆开：Jog Light Mode 留设备页；Master Soft Clipper、Auto-Gain 移到 `MixerTabContent.qml` 注入块；Auto-Analyze Drives 移到曲库页；两个 Pro DJ Link 条目移到网络页。（一代 5.0.4 与 5.3.0 的页面文件路径不同，沿用 `v53()` 分支。曲库页、网络页是按 `i18n.tsv` 里的标签页名推断的，动手前先在 `extract_qrc.py` 解出的 QML 里确认 `Preferences/` 下有对应的 TabContent 文件。）
 - `QUALITY_ENTRY`（Streaming Quality、NetEase Download）和 OmniSource 移到 `Entries/StreamingServices.qml` 注入块，靠近 `STREAM_SWITCHES`。
 

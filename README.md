@@ -54,7 +54,7 @@ Everything runs right inside the familiar Denon DJ interface — install it and 
 - **3 Waveform Styles & 4 Languages**: switch live between **English, 简体中文, 繁體中文, and Español**, and toggle between `Denon`, `RGB`, and Pioneer-style `3-Band` waveforms from the Control Center or `Profile → Display → Waveform Style` across all 16 models.
 
 ### 5. Studio-Clean Audio, All-in-One FX & Gigabit Networking
-- **21 Real-Time Audio Guards**: click-free FX switching, zero-latency `Master Soft Clipper` (-0.1 dBFS ceiling), `Auto-Gain (0 dB Normalize)`, opt-in `Hi-Fi Output` on Gen-1 SC5000 / SC6000 players (`Profile → Playback → Hi-Fi Output`, default `Off`), Flanger volume drop compensation, and smooth `Fader Echo` / `Echo Out` tails on mixer consoles;
+- **21 Real-Time Audio Guards**: click-free FX switching, zero-latency `Master Soft Clipper` (-0.1 dBFS ceiling), `Auto-Gain (0 dB Normalize)`, opt-in `Hi-Fi Output` on Gen-1 SC5000 / SC6000 players (`Profile → Playback → Hi-Fi Output`, default `Off`), Flanger volume drop compensation, and smooth `Fader Echo` tails on mixer consoles;
 - **Pioneer-Style FX on Consoles**: `PRIME 4` adds `Spiral (PX)`, `Pitch Echo (PX)`, `Slip Roll (PX)`, `Dub Echo (PX)`, and `Space (PX)` to its hardware FX selector, with an optional BPM-independent **10–4000 ms** delay mode (`PX Delay Time Mode`), and on the PRIME 4 / PRIME 2 / PRIME GO / Mixstream Pro and the second-generation 32-bit consoles `Profile → Playback → Color FX Style` puts one of them on each channel's `FILTER` knob (stock at the centre, `Off` keeps the stock Sweep FX); standalone players keep a pure player signal path without PX effects;
 - **Smart Sync, Gigabit Ethernet & `:8080` Web Console**: one-tap `Bar / Beat / Tempo` sync in the Control Center with automatic Pitch Range widening on wide BPM gaps, unlocked **1 Gbps** wired Ethernet, Wi-Fi drag-and-drop music upload, missing-track relocation, Shoutcast / Icecast `Live Stream`, and optional Mod Hub add-ons (`tailscale-remote`, `dmx-studio`, `midi-controller-mapper`, `jog-logo-studio`, `sampler-pad-studio`, `minimal-club-mode`).
 
@@ -275,7 +275,7 @@ If stock already hangs at the logo and SSH is unavailable, first flash EngineX w
 
 </details>
 
-> **PRIME 4 G2 / Rane SYSTEM ONE (64-bit models)**: includes the 4-language UI, streaming services (including Apple Music via enginex-amd, Spotify, Deezer, SoundCloud, Beatport, TIDAL, and NetEase), streaming recording, audio guards (`Master Soft Clipper`, `Auto-Gain`, `Echo Out`, `Color FX Style`, `PX Delay Time Mode`), Rekordbox USB direct-read, and `:8080` web console features; Stems remain as provided by official firmware.
+> **PRIME 4 G2 / Rane SYSTEM ONE (64-bit models)**: includes the 4-language UI, streaming services (including Apple Music via enginex-amd, Spotify, Deezer, SoundCloud, Beatport, TIDAL, and NetEase), streaming recording, audio guards (`Master Soft Clipper`, `Auto-Gain`, `Fader Echo`, `Color FX Style`, `PX Delay Time Mode`), Rekordbox USB direct-read, and `:8080` web console features; Stems remain as provided by official firmware.
 
 ### Option 2: One-Click On-Deck Update (Already Running EngineX OS)
 - Connect your deck to Wi-Fi or Ethernet and open **Settings → About / Update**;

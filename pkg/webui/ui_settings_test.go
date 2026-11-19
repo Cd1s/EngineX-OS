@@ -991,6 +991,14 @@ func TestBoardCapabilitiesAndSettingsCompatJP07vsJC11(t *testing.T) {
 	if !strings.Contains(indexHTML, "caps.mixer!==undefined?!caps.mixer:!!v.player") {
 		t.Fatal("web console missing mixer capability gate for upfaderEcho")
 	}
+	if !strings.Contains(indexHTML, "tEcho:['Fader Echo','推子回音','推桿回音','Fader Echo']") || strings.Contains(indexHTML, "Echo Out") {
+		t.Fatal("web console must use Fader Echo everywhere")
+	}
+	for _, f := range hookFeatures {
+		if f.Name == "dsp-guards" && strings.Contains(f.About, "Echo Out") {
+			t.Fatal("dsp-guards About must use Fader Echo")
+		}
+	}
 	if !strings.Contains(indexHTML, "v.buildTag") {
 		t.Fatal("web console missing buildTag display")
 	}
