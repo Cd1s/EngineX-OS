@@ -44,8 +44,12 @@ func importKeeps(ctx context.Context, q *stmtCache, id int64, perf Performance) 
 	var beats, cues, loops, written []byte
 	var mark sql.NullInt64
 	var imported, locked bool
+	// BridgeAnalysis is optional when the state database is capped. A completed
+	// BridgeState row still identifies an imported row whose deck edits must
+	// survive a rebuild; a fast row is intentionally excluded until its first
+	// full import supplies the source performance.
 	e := q.QueryRowContext(ctx, `SELECT p.beatData,p.quickCues,p.loops,p.thirdPartySourceId,COALESCE(t.isBeatGridLocked,0),
-		EXISTS(SELECT 1 FROM BridgeAnalysis WHERE trackId=p.trackId),(SELECT digest FROM BridgeWritten WHERE trackId=p.trackId)
+		EXISTS(SELECT 1 FROM BridgeState WHERE trackId=p.trackId AND fingerprint NOT LIKE 'fast:%'),(SELECT digest FROM BridgeWritten WHERE trackId=p.trackId)
 		FROM PerformanceData p JOIN Track t ON t.id=p.trackId WHERE p.trackId=?`, id).Scan(&beats, &cues, &loops, &mark, &locked, &imported, &written)
 	if e != nil || !imported {
 		return false, e
@@ -90,11 +94,14 @@ func carryLiveEdits(ctx context.Context, tx *sql.Tx) error {
 	if n > 0 {
 		digest = `(SELECT digest FROM livebridge.BridgeWritten WHERE trackId=m.trackId)`
 	}
+	// A completed BridgeState row is enough here: temp.changed contains only rows
+	// the import owns. BridgeAnalysis may be absent when the state database hit
+	// its size cap, but fast rows must wait for their first full import.
 	rows, e := tx.QueryContext(ctx, `SELECT m.trackId,l.beatData,l.quickCues,l.loops,l.activeOnLoadLoops,l.thirdPartySourceId,`+digest+`,
 		m.beatData,m.quickCues,m.loops,m.activeOnLoadLoops,COALESCE(t.isBeatGridLocked,0)
 		FROM main.PerformanceData m JOIN live.PerformanceData l ON l.trackId=m.trackId JOIN live.Track t ON t.id=m.trackId
 		WHERE m.trackId IN (SELECT id FROM temp.touched) AND m.trackId IN (SELECT id FROM temp.changed)
-		AND EXISTS (SELECT 1 FROM livebridge.BridgeAnalysis a WHERE a.trackId=m.trackId)`)
+		AND EXISTS (SELECT 1 FROM livebridge.BridgeState s WHERE s.trackId=m.trackId AND s.fingerprint NOT LIKE 'fast:%')`)
 	if e != nil {
 		return e
 	}
