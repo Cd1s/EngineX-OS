@@ -5,7 +5,7 @@ Source & Releases: https://github.com/Cd1s/EngineX-OS
 
 ## What is EngineX OS?
 
-EngineX OS (current series: 5.3.0.4) is an MIT-licensed custom firmware and software enhancement layer built on official Engine OS 5.3.0+ for Denon DJ, Numark, and Rane standalone DJ players and all-in-one controllers. It preserves the stock Engine interface and hardware controls while adding major features requested by standalone DJs.
+EngineX OS (current series: 5.3.0.5) is an MIT-licensed custom firmware and software enhancement layer built on official Engine OS 5.3.0+ for Denon DJ, Numark, and Rane standalone DJ players and all-in-one controllers. It preserves the stock Engine interface and hardware controls while adding major features requested by standalone DJs.
 
 ## All 16 Supported Models
 
