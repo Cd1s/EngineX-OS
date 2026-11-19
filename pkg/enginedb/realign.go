@@ -77,6 +77,8 @@ func recordWritten(ctx context.Context, q *stmtCache, id int64, perf Performance
 // carryLiveEdits is importKeeps for a build that replaces the live library (merge.go): what
 // Engine or the deck wrote to the live row of a track the build has imported again goes
 // into the build's row, moved to the build's positions like any row an import keeps.
+// Only the tracks Engine has written since the snapshot (temp.touched): the build was made
+// from the snapshot's row of every other track and has kept what that row held already.
 func carryLiveEdits(ctx context.Context, tx *sql.Tx) error {
 	if _, e := tx.ExecContext(ctx, bridgeWrittenSchema); e != nil {
 		return e
@@ -91,7 +93,8 @@ func carryLiveEdits(ctx context.Context, tx *sql.Tx) error {
 	rows, e := tx.QueryContext(ctx, `SELECT m.trackId,l.beatData,l.quickCues,l.loops,l.activeOnLoadLoops,l.thirdPartySourceId,`+digest+`,
 		m.beatData,m.quickCues,m.loops,m.activeOnLoadLoops,COALESCE(t.isBeatGridLocked,0)
 		FROM main.PerformanceData m JOIN live.PerformanceData l ON l.trackId=m.trackId JOIN live.Track t ON t.id=m.trackId
-		WHERE m.trackId IN (SELECT id FROM temp.changed) AND EXISTS (SELECT 1 FROM livebridge.BridgeAnalysis a WHERE a.trackId=m.trackId)`)
+		WHERE m.trackId IN (SELECT id FROM temp.touched) AND m.trackId IN (SELECT id FROM temp.changed)
+		AND EXISTS (SELECT 1 FROM livebridge.BridgeAnalysis a WHERE a.trackId=m.trackId)`)
 	if e != nil {
 		return e
 	}
