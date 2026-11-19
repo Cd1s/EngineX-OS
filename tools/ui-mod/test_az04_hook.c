@@ -516,6 +516,50 @@ static void test_rec_stream(const char *filename) {
     puts("#206 AZ04 recording with streaming tracks: 8 sites stock->patched, untouched on a player code, none on a 1-site mismatch: PASS");
 }
 
+// HF_SHADOW_PAUSED_FOLLOW on the real image: WaveFormPositionItem::currentPosition and its
+// slot in both vtables, PlanckGUI's metaObject() in its own vtable, and the vector of the
+// decks' items where PlanckGUI::waveformPositionItem reads it.
+static uint64_t relative_at(const uchar *image, uint64_t address) {
+    const Elf64_Ehdr *eh = (const void *)image;
+    const Elf64_Shdr *sh = (const void *)(image + eh->e_shoff);
+    for (unsigned i = 0; i < eh->e_shnum; i++) {
+        if (sh[i].sh_type != SHT_RELA) continue;
+        const Elf64_Rela *r = (const void *)(image + sh[i].sh_offset);
+        for (size_t n = sh[i].sh_size / sizeof *r; n--; r++)
+            if (r->r_offset == address && ELF64_R_TYPE(r->r_info) == R_AARCH64_RELATIVE) return (uint64_t)r->r_addend;
+    }
+    return 0;
+}
+
+static void test_shadow_follow_sites(const char *filename) {
+    size_t len;
+    uchar *image = map_image(filename, &len);
+    select_build(&engine_builds[0]);
+    assert(build->shadow_position_fn && build->shadow_owner_slot && !build->shadow_capture_site);
+    assert(!memcmp(image + build->shadow_position_fn, build->shadow_position_prefix, build->shadow_position_prefix_size));
+    assert(relative_at(image, build->shadow_vtable_a + build->shadow_vtable_slot) == build->shadow_position_fn);
+    assert(relative_at(image, build->shadow_vtable_b + build->shadow_vtable_slot) == build->shadow_position_fn);
+    // The owner's slot is the first of the vtable whose type is named PlanckGUI, and holds
+    // moc's metaObject(): bti c; ldr x0, [x0, #8]; ldr x1, [x0, #56]; cbz x1.
+    assert(relative_at(image, build->shadow_owner_slot) == build->shadow_owner_fn);
+    uint64_t type = relative_at(image, build->shadow_owner_slot - 8);
+    uint64_t name = type ? relative_at(image, type + 8) : 0;
+    assert(name && !strcmp((const char *)image + name, "9PlanckGUI")); // .rodata: file offset = address
+    const uint32_t *meta = (const void *)(image + build->shadow_owner_fn);
+    assert(meta[0] == 0xd503245f && meta[1] == 0xf9400400 && meta[2] == 0xf9401c01 && meta[3] >> 24 == 0xb4);
+    // ldr x2, [x0, #vector]; ldr x0, [x0, #vector + 8]: begin and end, from x0 = PlanckGUI.
+    const uint32_t begin = 0xf9400002 | ((build->shadow_array_offset / 8) << 10), end = 0xf9400000 | ((build->shadow_array_offset / 8 + 1) << 10);
+    int found = 0;
+    for (size_t at = 0xb0b000; at < 0xb25000; at += 4) {
+        uint32_t pair[2];
+        memcpy(pair, image + at, sizeof pair);
+        found += pair[0] == begin && pair[1] == end;
+    }
+    assert(found == 1);
+    munmap(image, len);
+    puts("AZ04 paused shadow follow: currentPosition in both vtables, PlanckGUI's metaObject slot, the deck vector: PASS");
+}
+
 int main(int argc, char **argv) {
     assert(sizeof engine_builds / sizeof *engine_builds == 1);
     test_thread_policy();
@@ -524,7 +568,7 @@ int main(int argc, char **argv) {
     test_led();
     test_led_replay_on_engine_thread();
     test_stems_processor_fallback();
-    for (int i = 1; i < argc; i++) { test_engine(argv[i]); test_rec_stream(argv[i]); test_sqlite(argv[i]); test_dsp(argv[i]); test_bt_send(argv[i]); }
+    for (int i = 1; i < argc; i++) { test_engine(argv[i]); test_rec_stream(argv[i]); test_sqlite(argv[i]); test_dsp(argv[i]); test_bt_send(argv[i]); test_shadow_follow_sites(argv[i]); }
     const char *oa = getenv("AZ04_OFFLINE_ANALYZER");
     if (oa) test_offline_analyzer(oa);
     return 0;
