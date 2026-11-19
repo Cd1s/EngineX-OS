@@ -42,7 +42,7 @@ class DocsAuditBH2A10Test(unittest.TestCase):
             "Waveform Style",
             "Profile → Playback",
             "Master Soft Clipper",
-            "Auto-Gain (0 dB Normalize)",
+            "Auto-Gain",
             "Stems EQ Mode",
             "Color FX Style",
             "PX Delay Time Mode",

@@ -213,7 +213,7 @@ for (const board of ['JP07', 'JP08', 'JP13', 'JP14']) {{
         pioneerFx: 'off', fxTimeMode: 'ms', fxTimeMs: 250,
     }});
     assert.equal(visible['Master Soft Clipper'](), true, board);
-    assert.equal(visible['Auto-Gain (0 dB Normalize)'](), true, board);
+    assert.equal(visible['Auto-Gain'](), true, board);
     assert.equal(visible['Hi-Fi Output'](), true, board + ' Hi-Fi Output shown');
     scFeaturesOff = ['hifi-output'];
     assert.equal(visible['Hi-Fi Output'](), false, board + ' Hi-Fi Output hidden when hifi-output off');

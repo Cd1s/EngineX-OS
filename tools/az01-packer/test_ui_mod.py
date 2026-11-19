@@ -1273,7 +1273,7 @@ for (const amt of [1/63, 2/63, 4/63, 5/63, 8/63, 1.0]) {{
         self.assertIn("if (v.shadowPausedFollow !== undefined) scHookFollows = v.shadowPausedFollow === true", bp.SERVICES_MAIN)
         self.assertIn('readonly property bool scPausedShadowFollow: !scIsAZ04 && scHookFollows && !scOff("shadow-paused-follow")', bp.SERVICES_MAIN)
         dsp = '!root.scOff("dsp-guards")'
-        for text in ("Master Soft Clipper", "Auto-Gain (0 dB Normalize)", "Fader Echo", "Color FX Style",
+        for text in ("Master Soft Clipper", "Auto-Gain", "Fader Echo", "Color FX Style",
                      "PX Delay Time Mode", "PX Delay Time (ms)"):
             entry = bp.PLAYBACK_ENTRIES.split('text: "%s"' % text, 1)[1].split("EntryBase.ListEntry", 1)[0]
             self.assertIn(dsp, entry.split("values:", 1)[0], text)
@@ -1452,7 +1452,7 @@ assert.strictEqual(vfx.enabled, false);
             "Pro DJ Link": ("scProlinkShare", "prolinkShare", bp.SERVICES_ENTRIES),
             "Remote Load (LAN API)": ("scRemoteLoad", "remoteLoad", bp.SERVICES_ENTRIES),
             "Master Soft Clipper": ("scMasterLimiter", "masterLimiter", bp.PLAYBACK_ENTRIES),
-            "Auto-Gain (0 dB Normalize)": ("scAutoGain", "autoGain", bp.PLAYBACK_ENTRIES),
+            "Auto-Gain": ("scAutoGain", "autoGain", bp.PLAYBACK_ENTRIES),
             "Fader Echo": ("scUpfaderEcho", "upfaderEcho", bp.PLAYBACK_ENTRIES),
             "Stems EQ Mode": ("scStemsEqMode", "stemsEqMode", bp.PLAYBACK_ENTRIES),
             "Beat Jump Pad Bank": ("scBeatJumpPads", "beatJumpPads", bp.BEAT_JUMP_ENTRIES),

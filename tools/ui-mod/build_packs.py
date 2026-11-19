@@ -5435,7 +5435,7 @@ DISPLAY_ENTRIES = """
 # User Profile -> Playback: audio DSP and playback.
 PLAYBACK_ENTRIES = (switch_entry("Restore BPM on Sync Off", "scRestoreBpmOnUnsync", "restoreBpmOnUnsync")
     + switch_entry("Master Soft Clipper", "scMasterLimiter", "masterLimiter", '\t\t\tvisible: !root.scOff("dsp-guards")\n')
-    + switch_entry("Auto-Gain (0 dB Normalize)", "scAutoGain", "autoGain", '\t\t\tvisible: !root.scOff("dsp-guards")\n')
+    + switch_entry("Auto-Gain", "scAutoGain", "autoGain", '\t\t\tvisible: !root.scOff("dsp-guards")\n')
     + switch_entry("Hi-Fi Output", "scHifiOutput", "hifiOutput", '\t\t\tvisible: root.scIsPlayerBoard && !root.scOff("dsp-guards") && !root.scOff("hifi-output")\n')
     + switch_entry("Fader Echo", "scUpfaderEcho", "upfaderEcho", '\t\t\tvisible: root.scHasMixer && !root.scHasStockTransitionTile && !root.scHasHardwareFaderFxButtons && !root.scOff("dsp-guards")\n')
     + switch_entry("Stems EQ Mode", "scStemsEqMode", "stemsEqMode", '\t\t\tvisible: root.scHasStemsEq && !root.scOff("stems-eq")\n') + """
