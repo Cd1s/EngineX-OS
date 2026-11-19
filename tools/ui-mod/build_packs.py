@@ -695,6 +695,34 @@ SERVICES_MAIN = """
 	// Empty when stream-sync does not know: every row stays.
 	property var scFeaturesOff: []
 	function scOff(name) { return scFeaturesOff.indexOf(name) >= 0 }
+	// A shadow deck that stays paused while Engine's waveform follows the source's
+	// position (the hook reads the feed stream-sync writes). Off, or on an Engine the
+	// hook has not verified, the shadow deck plays as before.
+	// Only when stream-sync says the running hook moves the line (GET /v1/enginex/ui): a
+	// hook that does not know the feature lists it nowhere, and a copy left paused under it
+	// would stand still.
+	property bool scHookFollows: false
+	readonly property bool scPausedShadowFollow: !scIsAZ04 && scHookFollows && !scOff("shadow-paused-follow")
+	property var scShadowFeedSent: ({})
+	// The source's position as stream-sync sent it (at.feedMs at its own clock's
+	// at.feedAt), not carried to now here: stream-sync dates the record by that clock, so
+	// a busy GUI thread does not move the line. Sent when it changes, and every 250 ms.
+	function scShadowFeed(d, e, at, rate) {
+		if (!root.scPausedShadowFollow) return
+		const sr = at && at.ready ? at.sampleRate : 0, now = Date.now()
+		const on = sr > 0 && isFinite(at.feedMs) && isFinite(rate)
+		const key = on ? String(e.id || e.path || "") : ""
+		const loop = on && at.loop ? at.loop : null
+		const sent = on ? key + " " + at.feedAt + " " + at.feedMs + " " + rate + " " + (loop ? loop.in + "-" + loop.out : "") + " " + Math.floor(now / 250) : "off"
+		if (scShadowFeedSent[d] === sent || (!on && scShadowFeedSent[d] === undefined)) return
+		scShadowFeedSent[d] = sent
+		const req = new XMLHttpRequest()
+		req.open("POST", "http://127.0.0.1:8080/v1/enginex/shadow/position-feed")
+		req.setRequestHeader("Content-Type", "application/json")
+		req.send(JSON.stringify(on ? {deck: Number(d), key: key, active: true, at: at.feedAt,
+			positionSamples: at.feedMs * sr / 1000, rateSamplesPerSec: rate * sr,
+			loopInSamples: loop ? loop.in * sr / 1000 : 0, loopOutSamples: loop ? loop.out * sr / 1000 : 0} : {deck: Number(d), active: false}))
+	}
 	readonly property bool scCanFourDeck: scIsPlayerBoard || ["JC11", "JC11S", "JP21", "JP24"].indexOf(scBoard) >= 0
 	readonly property bool scHasAutoLoopKnob: typeof Config !== "undefined" && Config && Config.device && Config.device.hasAutoLoopKnob !== undefined ? !!Config.device.hasAutoLoopKnob : ["NH08", "NH08S", "NH10"].indexOf(scBoard) < 0
 	readonly property bool scIsMixstream: typeof Config !== "undefined" && Config && Config.audio && Config.audio.fx && Config.audio.fx.hasNHFx !== undefined ? !!Config.audio.fx.hasNHFx : ["NH08", "NH08S", "NH10"].indexOf(scBoard) >= 0
@@ -2219,6 +2247,7 @@ SERVICES_MAIN = """
 		at.landing = undefined
 		scShadowScratchRelease(d, at)
 		scShadowNudgeDrop(at, now)
+		root.scShadowFeed(d, null, null, 0)
 		// On an all-in-one console (#160), leave Decks 3/4 alone unless a shadow peer loaded them.
 		if (!root.scPlayer && !at.path) return
 		const pPlay = root.scTr("/Engine/Deck" + d + "/Play")
@@ -2255,6 +2284,7 @@ SERVICES_MAIN = """
 			at = scShadowAt[d] = {path: e.path, id: id, pendingLoad: true, tries: 0, seekAt: 0, seeks: 0, loads: at.loads || 0, jumps: e.jumps, nativeSync: !!at.nativeSync, mirror: at.mirror}
 		}
 		if (at.pendingLoad) {
+			root.scShadowFeed(d, e, null, 0) // the line is the new copy's own until it is loaded
 			root.scShadowLoad(d, at, e, now)
 			return
 		}
@@ -2268,9 +2298,9 @@ SERVICES_MAIN = """
 		scShadowMirror(d, at, now)
 		const nudgePath = at.link ? "/Engine/BeatInfoSenderControl/" + at.link + "/PositionInSamples" + (e.src >= 1 && e.src <= 4 ? e.src : d) : ""
 		if (at.nudgePath !== nudgePath) { at.nudgePath = nudgePath; at.nudgeMirror = nudgePath ? root.scTr(nudgePath) : null }
-		if (at.nudgeMirror && e.playing && !e.scratch && !e.sync && !scShadowNudgeTimer.running) scShadowNudgeTimer.start()
+		if (!root.scPausedShadowFollow && at.nudgeMirror && e.playing && !e.scratch && !e.sync && !scShadowNudgeTimer.running) scShadowNudgeTimer.start()
 		at.loop = e.loop && e.loopOut > e.loopIn && e.loopIn >= 0 ? {in: e.loopIn, out: e.loopOut, pos: e.positionMs, at: e.at || now} : null
-		if (at.loop && e.playing && !scShadowLoopTimer.running) scShadowLoopTimer.start()
+		if (!root.scPausedShadowFollow && at.loop && e.playing && !scShadowLoopTimer.running) scShadowLoopTimer.start()
 		// In the source's loop its line runs on past the loop out: it is back at the loop in.
 		const loopWrap = ms => at.loop && ms > at.loop.out ? at.loop.in + (ms - at.loop.in) % (at.loop.out - at.loop.in) : ms
 		scShadowCues(d, at, e, now)
@@ -2283,8 +2313,13 @@ SERVICES_MAIN = """
 		// needs their liveness and carried source line on every delivery.
 		at.sourceTarget = loopWrap(e.positionMs + (e.playing && !e.scratch && e.at ? Math.max(0, now - e.at) * at.rate : 0))
 		at.sourceAt = now; at.sourcePlaying = !!e.playing && !e.stale
+		at.feedMs = loopWrap(e.positionMs); at.feedAt = e.at || 0
+		const feedRate = e.playing && !e.scratch && !e.stale ? at.rate : 0
 		if (!at.sourcePlaying || !e.sync || !e.link || !root.scPlayer || at.nativeSync || (e.sync && e.pitch > 100)) at.landing = undefined
-		if (e.seq && e.seq === at.lastSeq && e.playing === local && !at.wantMaster && !at.check && !at.nativeSync && !e.scratch && !wasScratch) return
+		if (e.seq && e.seq === at.lastSeq && e.playing === local && !at.wantMaster && !at.check && !at.nativeSync && !e.scratch && !wasScratch) {
+			if (!at.scratch) root.scShadowFeed(d, e, at, feedRate)
+			return
+		}
 		at.lastSeq = e.seq
 		const wasPreview = at.preview
 		at.preview = !!e.cue
@@ -2306,6 +2341,7 @@ SERVICES_MAIN = """
 		// e.at is when Go extrapolated e.positionMs; this runs later on a busy GUI
 		// thread, so carry the target to now before comparing.
 		const target = loopWrap(e.positionMs + (e.playing && !e.scratch && e.at ? Math.max(0, now - e.at) * scShadowRate(e) : 0))
+		if (!at.scratch) root.scShadowFeed(d, e, at, feedRate)
 		const posMs = g("/Track/TrackPosition").unnormalized / sr * 1000
 		const drift = target - posMs // > 0: behind
 		const meanReady = at.env !== undefined && now - at.envT0 >= 300
@@ -2356,8 +2392,35 @@ SERVICES_MAIN = """
 			at.landing = undefined; at.phaseHardUntil = 0; at.phaseUntil = 0; at.transitionSeeks = 0
 			at.phaseLine = target; at.phaseAt = now; at.phaseRate = at.rate
 		}
-		if (!(wantSync && synced) && !(at.nativeSync && e.pitch > 100)) scShadowSpeed(d, Math.abs(exact - e.pitch) < 0.02 ? exact : e.pitch, e.range)
+		if (!root.scPausedShadowFollow && !(wantSync && synced) && !(at.nativeSync && e.pitch > 100)) scShadowSpeed(d, Math.abs(exact - e.pitch) < 0.02 ? exact : e.pitch, e.range)
 		const pKey = g("/Track/KeyLock")
+		if (root.scPausedShadowFollow) {
+			// The copy is display-only audio. Keep its transport paused, while the
+			// native render hook follows the source feed. The stock overview/time
+			// properties get a low-rate seek and jump edges get one immediately.
+			if (pKey && pKey.state) pKey.state = false
+			const jump = e.jumps !== at.pausedFollowJumps
+			if (local) g("/Play").state = false
+			if (jump || now - (at.pausedFollowSeekAt || 0) >= 1000) {
+				seek(at.sourceTarget)
+				at.pausedFollowSeekAt = now
+			}
+			at.pausedFollowJumps = e.jumps
+			at.cmd = false
+			if (e.scratch && !e.stale) {
+				// The source's hand: its line (scShadowScratchTimer) goes into the feed with its
+				// speed, backwards too. Nothing is written to this deck's scratch wheel.
+				if (!at.scratch) {
+					at.scratchMove = true; at.scratchPosition = g("/Track/TrackPosition")
+					at.scratchMirror = at.link ? root.scTr("/Engine/BeatInfoSenderControl/" + at.link + "/PositionInSamples" + (e.src >= 1 && e.src <= 4 ? e.src : d)) : null
+					at.scratchOwn = null; at.scratchPush = undefined
+				}
+				at.scratch = true
+				if (e.positionMs !== at.scratchPush) { at.scratchPush = e.positionMs; at.scratchPushAt = e.at || now }
+				scShadowScratchTimer.start()
+			}
+			return dbg("paused-follow")
+		}
 		if (typeof e.keylock === "boolean" && pKey && !!pKey.state !== e.keylock) pKey.state = e.keylock
 		// Play, CUE held, pause, CUE released: on the first update that shows it.
 		// at.cmd only stops rewriting the same state while Engine follows (a frame
@@ -2787,6 +2850,11 @@ SERVICES_MAIN = """
 					at.scratchLive = false; at.scratchMir.raw = undefined
 				}
 				const l = at.scratchLive ? at.scratchMir : at.scratchOwn
+				if (root.scPausedShadowFollow) {
+					at.feedMs = l.src; at.feedAt = l.seen
+					root.scShadowFeed(d, at, at, l.vel || 0)
+					continue
+				}
 				const vel = l.vel, dt = Math.max(1, Math.min(50, now - at.scratchFrame))
 				at.scratchFrame = now
 				const target = l.src + vel * (Math.min(now - l.seen, l.span * 1.5) - l.span)
@@ -3997,7 +4065,7 @@ SERVICES_MAIN = """
 		scMasterLimiter = !!v.masterLimiter
 		scAutoGain = !!v.autoGain
 		scHifiOutput = !!v.hifiOutput
-		scFeaturesOff = Array.isArray(v.featuresOff) ? v.featuresOff : []
+		if (Array.isArray(v.featuresOff)) scFeaturesOff = v.featuresOff
 		if (v.shadowPausedFollow !== undefined) scHookFollows = v.shadowPausedFollow === true
 		scAutoAnalyze = !!v.autoAnalyze
 		scOmniSource = !!v.omniSource
