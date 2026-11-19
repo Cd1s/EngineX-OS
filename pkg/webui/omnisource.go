@@ -362,7 +362,7 @@ func localFile(ref trackRef) (string, error) {
 	return file, nil
 }
 
-// omniPlaylists adds the drives' playlists and the other services' to a listing.
+// omniPlaylists adds local playlists and, outside Deezer, other services' playlists.
 func (g *tidalGateway) omniPlaylists(ctx context.Context, scope string, add func(map[string]any)) (string, error) {
 	drives := g.s.drives()
 	for _, lists := range each(ctx, drives, drivePlaylists) {
@@ -393,9 +393,11 @@ func (g *tidalGateway) omniPlaylists(ctx context.Context, scope string, add func
 		}
 	}
 	var others []*Session
-	for _, v := range g.sources() {
-		if v.Provider != scope {
-			others = append(others, v)
+	if scope != "deezer" {
+		for _, v := range g.sources() {
+			if v.Provider != scope {
+				others = append(others, v)
+			}
 		}
 	}
 	var failedMu sync.Mutex
