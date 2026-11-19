@@ -1282,6 +1282,10 @@ static void test_shadow_replay(void) {
     const struct oa_string aac = {NULL, m4a, sizeof m4a / sizeof *m4a - 1};
     oa_count = 0;
     assert(oa_replay(oa_self, &aac, prefs) && oa_count == 9 && oa_seen[2] == OA_BEATS);
+    prefs[12] = 1; // a rekordbox Link track's RGB overview is Engine's own as well
+    oa_count = 0;
+    assert(!oa_replay(oa_self, &download, prefs) && oa_count == 0);
+    prefs[12] = 0;
     assert(!unlink(registered));
     sc_rbx_dir = old_rbx_dir;
     // stopBeatDetection while the replay waits for Engine's loader: stopped, finished.
@@ -1289,10 +1293,13 @@ static void test_shadow_replay(void) {
     ((uchar *)oa_self)[OA_STOP] = 1;
     assert(oa_replay(oa_self, &qs, prefs) && oa_count == 3 && oa_seen[0] == OA_STARTED && oa_seen[1] == OA_STOPPED && oa_seen[2] == OA_FINISHED);
     ((uchar *)oa_self)[OA_STOP] = 0;
-    // prefs byte 12 set: the stock analysis sends no grid and no 3-band overview.
+    // prefs byte 12 set (RGB-only request, RGB waveform type): never replayed, Engine
+    // builds the RGB overview itself, so a shadow copy and its source draw the same
+    // colours (the replayed bytes differed and blanked a Link copy's overview, 11-19).
     oa_count = 0;
     prefs[12] = 1;
-    assert(oa_replay(oa_self, &qs, prefs) && oa_count == 7 && oa_seen[2] == OA_OVERVIEW_RGB);
+    assert(!oa_replay(oa_self, &qs, prefs) && oa_count == 0);
+    prefs[12] = 0;
     // A corrupt or missing .perf falls through to the stock analysis.
     f = fopen("/tmp/test-oa-replay/\xc3\xa9.flac.perf", "r+b"); assert(f); fwrite("XXXX", 1, 4, f); fclose(f);
     oa_count = 0;
@@ -1321,6 +1328,15 @@ static void test_shadow_replay(void) {
     f = fopen("/tmp/test-oa-replay/shadow-v3/peer-1/Contents/x_y.mp3", "wb"); assert(f); fputs("AUDIO", f); fclose(f);
     prefs[12] = 0;
     assert(oa_replay(oa_self, &cs, prefs) && oa_count == 9 && oa_seen[2] == OA_BEATS);
+    // RGB-only request on a shadow copy (Engine's copy or the copy itself): no replay.
+    static const uint16_t direct[] = u"/tmp/test-oa-replay/shadow-v3/peer-1/Contents/x_y.mp3";
+    const struct oa_string ds = {NULL, direct, sizeof direct / sizeof *direct - 1};
+    prefs[12] = 1;
+    oa_count = 0;
+    assert(!oa_replay(oa_self, &cs, prefs) && oa_count == 0);
+    assert(!oa_replay(oa_self, &ds, prefs) && oa_count == 0);
+    prefs[12] = 0;
+    assert(oa_replay(oa_self, &ds, prefs) && oa_count == 9 && oa_seen[2] == OA_BEATS);
     // A late Link analysis arrives after the named copy, without an alias or
     // the Engine SQLite install. A same-name copy of another size is not a hit.
     const char *named_audio = OA_ENGINE_COPIES "ab-cd_link.m4a";

@@ -3268,6 +3268,12 @@ static int oa_replay(void *o, const struct oa_string *s, const uchar *prefs) {
     struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
     if (!s || s->size <= 0 || !utf16_to_utf8(s->ptr, s->size, path, sizeof path - 5)) return 0;
+    // RGB-only request (prefs[12]): Engine builds the RGB overview from the audio as stock does, so a shadow copy
+    // and its source deck draw the same colours (the replayed bytes differed and blanked a Link copy's overview).
+    if (prefs[12]) {
+        oa_log("rgb-stock", path, 0);
+        return 0;
+    }
     char perf[PATH_MAX + 8];
     snprintf(perf, sizeof perf, "%s.perf", path);
     int rekordbox_stream = 0;
