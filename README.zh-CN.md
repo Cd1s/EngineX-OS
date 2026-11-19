@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="./docs/assets/hero-banner-zh-CN.svg" alt="EngineX OS 5.3.0.4" width="100%">
+<img src="./docs/assets/hero-banner-zh-CN.svg" alt="EngineX OS 5.3.0.5" width="100%">
 
 <br>
 
@@ -18,8 +18,13 @@
 
 <br>
 
-**EngineX OS 5.3.0.4** 是基于官方 Engine OS 5.3.0+ 底层重构的定制系统，支持天龙 Denon DJ、Numark 与 Rane 全系 16 款独立设备：
-`SC5000` · `SC5000M` · `SC6000` · `SC6000M` · `PRIME 4` · `PRIME 2` · `PRIME GO` · `Mixstream Pro` · `SC LIVE 4` · `SC LIVE 2` · `PRIME 4+` · `PRIME GO+` · `Mixstream Pro+` · `Mixstream Pro Go` · `PRIME 4 G2` · `Rane SYSTEM ONE`。
+**EngineX OS 5.3.0.5** 是基于官方 Engine OS 5.3.0+ 底层重构的定制系统，支持天龙 Denon DJ、Numark 与 Rane 全系 16 款独立设备：
+
+| 世代 | 架构 | 机型（板号） |
+| :--- | :--- | :--- |
+| 一代机，8 款 | 32 位（ARM） | `SC5000 Prime`（JP07）· `SC5000M Prime`（JP08）· `PRIME GO`（JP11）· `SC6000 Prime`（JP13）· `SC6000M Prime`（JP14）· `PRIME 4`（JC11）· `PRIME 2`（JC16）· `Mixstream Pro`（NH08） |
+| 二代机，6 款 | 32 位（ARM） | `PRIME 4+`（JC11S）· `PRIME GO+`（JP11S）· `SC LIVE 2`（JP20）· `SC LIVE 4`（JP21）· `Mixstream Pro Go`（NH10）· `Mixstream Pro+`（NH08S） |
+| 二代机，2 款 | 64 位（ARM64） | `PRIME 4 G2`（JP24）· `Rane SYSTEM ONE`（RMZ2） |
 
 全系 16 款机型现统一使用 `*-Update.img` 升级包：前八款一代机直接用 U 盘免电脑刷入；后八款二代机首次连接电脑运行一次 `EngineX-Installer` 自动完成**一键解锁 `.img` 升级链并刷入**，之后即可像一代机一样直接用 U 盘或屏幕一键在线升级（见[如何安装与升级](#install)）。
 
@@ -58,7 +63,7 @@
 - **一体机先锋风格效果**：`PRIME 4` 硬件效果选择器内置 `Spiral (PX)`、`Pitch Echo (PX)`、`Slip Roll (PX)`、`Dub Echo (PX)`、`Space (PX)`，并有可选的 **10–4000 ms** 独立毫秒延时模式（`先锋效果延时模式 (PX)`）；PRIME 4 / PRIME 2 / PRIME GO / Mixstream Pro 及二代 32 位一体机可在 `配置 → 播放 → 先锋风格效果 (Color FX)` 把其中一种效果放到每个通道的 `FILTER` 旋钮上（旋钮居中时与原厂相同，选 `关` 保持原厂 Sweep FX）；独立播放器不提供 PX 效果，保持纯净播放器链路；
 - **智能同步、千兆网口与 `:8080` Web 控制台**：控制中心一键切换 `Bar / Beat / Tempo` 同步并在大 BPM 跨度下自动扩大变速范围，有线网口解锁 **1 Gbps** 满速，`:8080` 网页控制台支持 Wi-Fi 拖拽传歌、丢失曲目一键重定位、Shoutcast / Icecast `直播推流`，以及按需安装的 Mod 插件中心（`tailscale-remote`、`dmx-studio`、`midi-controller-mapper`、`jog-logo-studio`、`sampler-pad-studio`、`minimal-club-mode`）。
 
-**第一代独立播放器 `Hi-Fi 高频补偿输出` 前后实测对比（`5.3.0.5`，尚未发布；相对 `1 kHz` 的 dB 值）：**
+**第一代独立播放器 `Hi-Fi 高频补偿输出` 前后实测对比（`5.3.0.5`；相对 `1 kHz` 的 dB 值）：**
 
 | 音源与变调（`SC5000` / `JP07`） | 模式                 |   10k |   14k |   16k |   18k |       20k |
 | :------------------------------ | :------------------- | ----: | ----: | ----: | ----: | --------: |
@@ -71,6 +76,78 @@
 
 *测试方法：在构建宿主机沙盒中运行 Engine 真实 `JP07`（`SC5000`）音频链路，对 `96 kHz`（`S32_LE`）数字输出直接抓包实测（Key Lock 关闭；`0.00 %` 下开启 Key Lock 结果完全一致）。*
 该开关精确补偿固定的 `48 → 96 kHz` 输出级高频滚降（`20 kHz` 以内拟合误差 `±0.011 dB`，并在 `~22 kHz` 以上平滑回落），但无法消除 `44.1 kHz` 曲目与非零变调所经过的第一级重采样损耗（例如 `44.1 kHz` @ `0.00 %` 在 `20 kHz` 处仍为 `-4.44 dB`）。
+
+---
+
+## 5.3.0.5 更新内容
+
+### 新功能
+- **原生 `EngineX-Installer` 与签名更新（#255、#239）**：安装器自己完成镜像准备和 USB 传输，不再需要安装 Python、fastboot、e2fsprogs、libusb 或 WSL。每个 Release 的 `SHA256SUMS.txt` 都有签名（`SHA256SUMS.txt.sig`）；屏幕在线更新和安装器会拒绝无签名、签名错误、被改动或比碟机当前版本旧的发布。5.3.0.4 及更早版本的碟机不做这项检查：请先更新到 5.3.0.5。
+- **恢复官方固件**：`Restore-Official-Firmware.bat` / `.command` / `.sh`（或 `enginex-installer --restore-stock`）先清理可能让原厂卡在 Logo 的共享 QML 缓存，再把碟机恢复到原厂 Engine OS 5.3.0。EngineX 现在使用独立的 QML 缓存：**回到原厂前请先启动一次 5.3.0.5，再正常关机。**步骤见下文「恢复官方固件」。
+- **蓝牙音箱输出**：在 `设置 → 设备 → 蓝牙`（右侧齿轮）配对音箱，用 `输入分配到` 下新增的 `输出来源` 选择播放内容（独立播放器选 Layer A / B；`PRIME 4` 可选 `主输出`、`监听音箱`、`耳机`、`副区`；`PRIME 2` 与 `Mixstream Pro` 可选 `主输出` / `耳机`；其他机型为 `主输出`）。蓝牙约增加 150–250 ms 延迟：适合监听或第二个房间，不适合打拍对齐。
+- **碟机之间复制设置（#205）**：`设置 → 设备 → 从另一台设备复制设置`，来源碟机必须允许，接收碟机确认后才复制。请先暂停播放：Link 导入和撤销会重启 Engine。Player 编号、角色、颜色、身份与账号保留在本机。`Profile → Save to my drive` 现在也保存 EngineX 偏好，原厂 USB 导入提示新增 **包含 EngineX 设置**。
+- **USB 配置导入恢复提问**：选择 U 盘时再次出现原厂「是 / 否」选项来决定是否加载其中保存的配置（r5 会自动选 No）。机身菜单的「重启以应用」现在会保存修改后的 Player 编号。
+- **rekordbox Link 加载即带分析**：rekordbox Link 曲目加载时即可看到拍线、热 Cue、概览和封面，不再等 Engine 重新分析。Pro DJ Link、U 盘和影子轨（MP3 与 AAC/M4A）统一使用一个起始偏移规则；旧版已转换的行只校准一次，碟机上的编辑保留。
+- **影子轨加载后立即跟随**：另一台碟机的曲目会立刻显示，并使用相同的概览配色；之前重复加载后出现黑色或延迟概览的问题已修复。
+- **U 盘曲库更新安全**：如果更新无法读取大量文件名（例如字符集错误），不会改动曲库，并在下一次挂载时重试。
+- **自动增益留出余量**：安静曲目提升到约 `-4.4 dBFS`，最多 `+9 dB` 并带削波保护，减少泵动；44.1、48 和 96 kHz 使用相同的时序。
+- **Mixstream Pro / PRIME GO 打击垫页**：四垫机型上 Stems 保持在第 1 页，`CUE` 会返回 Cue 页面。
+- **Windows 一键安装器**：PRIME 4 G2 处于固件更新模式时也能被识别。
+- **后台 rekordbox 发布（#301）**：重新插拔 U 盘或 Eject 被拒不会再停止自动发布；任务会等待并在 U 盘可用时继续。
+- **分侧 `反转转盘方向`（#213）**：单转盘播放器一个开关，双转盘机型左右各一个，位于 `设置 → 设备` 与 `:8080` 网页控制台；电动转盘机型不显示。
+- **所有一体机支持 `推子回音`（#258），电动转盘支持 4 轨布局（#263）**：`推子回音` 在全部 5.3.0 一体机上使用原生逐通道 Transition FX，不再叠加回音或卡顿；`SC5000M` / `SC6000M` 在 `4 Decks` 或 `Paired Player` 下，转盘马达与触摸微调对本机持有的碟位生效。
+- **`Mixstream` Sweep FX 与 Stems EQ 打击垫（#261）**：`Mixstream Pro`、`Pro+`、`Pro Go` 的打击垫栏可同时使用 Sweep FX、Stems EQ 与跳拍组。
+- **碟机本机 Stems 改为真正的分离（#238）**：不连电脑时，用频谱分离方法拆出人声、贝斯、鼓和旋律，不再只是按频段切分；人声保持原有的立体声位置，只提供 `hpss` 的电脑或中继不再被使用，改由碟机自己分离，`配置 → 曲库` 与 `设置 → 关于 / 更新` 里的 Stems 状态行会写明当前来源；停止进展的 Stems 上传会释放名额，而慢但仍在工作的渲染端保留它的任务（#243）。它不是神经网络，音轨之间仍有串音；想要最干净的分轨请用电脑服务。
+- **演出曲目表导出（#268）**：网页控制台的「演出曲目表」卡片可把已记录的演出下载为文本或 CSV，保留播放顺序和重复曲目。
+- **rekordbox 配色与尺寸**：`3-Band` 使用 rekordbox / CDJ-3000 配色；rekordbox U 盘曲目的碟机概览与 Engine 自己分析的一样高，之前播放过或导入中断的曲目也一样。
+- **`直播推流` 只输出 WAV，按需采集**：控制台只提供固定格式（WAV、16 位、48 kHz、立体声），不再提供 Shoutcast 目标；没人收听时不采集，空闲碟机约省 7% 的单核 CPU。
+- **网线与 Wi-Fi 同时连接**：同一网段内同时接网线和 Wi-Fi 时，Engine Link 曲目走网线加载，开机后 Wi-Fi 不再被断开；各网卡的 ARP 设置从开机起生效。
+- **Remote Library 封面（#223）**：`SC LIVE 4` 的曲目列表显示 Engine DJ Desktop Remote Library 的封面。
+- **可选的 HTTPS 控制台（#242）**：默认仍是 `:8080` 的 HTTP。在网页控制台「碟机显示与音频」卡片打开 `启用控制台 HTTPS (:8443)`，碟机会用首次生成的自签名证书同时提供 HTTPS 控制台。
+- **远程加载（局域网 API，#281）**：`设置 → 服务 → 远程加载（局域网 API）`（默认关，只能在碟机上打开）让同一局域网内的电脑或脚本用控制台访问码，把已挂载硬盘上的歌加载到空闲的碟位。正在播放、按住 CUE 预听或搓碟的碟位会被拒绝。
+- **PRIME 4 效果选择（#285，PR #287）**：浏览效果时选择窗口保持打开，停止转动 0.6 秒后自动确认，或按下旋钮确认；通道 OLED 显示全部 31 个效果名称。效果选择旋钮与原厂一样，每一格移动一个效果。
+- **西班牙语界面（PR #282，感谢 Javier Saenz）**：`设置 → 设备 → 语言` 新增 `Español`，覆盖碟机界面、网页控制台和手机登录页。
+- **高速 SD 卡（实验性）**：`设置 → 设备 → 高速 SD 卡模式`（网页控制台「碟机显示与音频」卡片里有同一个开关）默认关闭，在 14 款 RK3288 机型上提供，PRIME 4 G2 / SYSTEM ONE 没有。它把 SD 卡槽从 25 MHz 默认速度（最高 12.5 MB/s）提到 50 MHz 高速（最高 25 MB/s，SC5000 上实测 23 MB/s）。若某张卡无法识别请关闭它。碟机正在播放时改动，会在下次启动或重新插入 SD 卡时生效。
+- **全部 16 款机型都能读写 Mac 格式（HFS+）的 U 盘和存储卡**：通过只读检查的盘会以读写方式挂载，Engine 把曲库、Cue 和 Loop 直接存到盘上（一代机用固定的驱动模块，PRIME 4 G2 / SYSTEM ONE 用原厂驱动，二代 32 位机用用户态驱动）。上次没有正常弹出、但检查正常的盘会先标记为干净再读写，其余情况仍是只读。碟机在盘只读时为它建的库，第一次读写挂载时整体复制到盘上，要么全部成功要么不复制。弹出时会等数据全部写完。
+- **电脑上的 rekordbox 作为来源，只有一个 `Pro DJ Link` 开关**：`设置 → 服务 → Pro DJ Link` 取代原来的两个开关。开启后每台碟机在 rekordbox 里都是独立的播放器（所以会出现 `LINK`，MASTER 也能交接），在 `Export` 模式运行的 rekordbox 7 会出现在碟机来源列表里，名为 `rekordbox（<电脑名>）`，可浏览全部曲目和歌单（曲名、艺人、BPM、调性）。音频来自共享的音乐文件夹（网页控制台 `曲库、网络与系统 → rekordbox 音乐文件夹`）、已挂载的 SMB / NAS 共享，或电脑自己的 NFS 服务（并行读取）。关掉 LINK 后来源会消失。rekordbox 的拍线、热 Cue、概览和封面在加载时即可使用；Engine 不会重新分析 Link 曲目。
+- **大型 rekordbox U 盘首次插入很快（#301）**：第一次插入时碟机直接读出导出里的歌单、曲目、热 Cue 和 Memory Cue，几秒内即可使用，拍线和波形随后在后台低优先级补齐，并显示 `正在导入 rekordbox 曲库…` 进度。超出挂载时限的导入不会再被丢弃。大库转换完成后，碟机会在没有碟机再用这个 U 盘、并安静 30 秒后自动发布，不需要重新插入。
+- **把 Cue 和 Loop 的修改写回 rekordbox U 盘（#271）**：网页控制台 `扩展` 页的 `写回 Hot Cue / Loop 到 rekordbox U 盘` 会把碟机上的 Hot Cue、Memory Cue 和 Loop 写进盘上的分析文件和 `exportLibrary.db`（先在 `/.enginex-backup/` 备份一次）。
+- **每个通道的 `FILTER` 旋钮带 Color FX**：`配置 → 播放 → 先锋风格效果 (Color FX)`（`Spiral`、`Pitch Echo`、`Slip Roll`、`Dub Echo`、`Space`）现在像先锋混音台一样挂在通道自己的滤波旋钮上，旋钮中位与原厂完全一致；`Off` 是原厂 Sweep FX。适用于 PRIME 4、PRIME 2、PRIME GO、Mixstream Pro 以及二代的 SC LIVE 2 / 4、PRIME 4+、PRIME GO+、Mixstream Pro+ / Pro Go（同时修复了部分 PRIME GO 用户听到的持续回声）。
+- **Mixstream（#286）**：`设置 → 设备` 新增 `Pitch Bend 按键改为 Beat Jump`（`-` / `+` 前后跳，`Shift` 仍调速度范围）和 `FX 槽位 1–4`（四个实体 FX 键各自选 Echo、Flanger、Delay 或 Phaser）；打击垫栏只保留打击垫和一个 `△` Sweep FX 按钮，`Stems EQ` 在 `配置 → 播放` 里有独立一行。
+- **PRIME 4 的 `Jet Flanger (PX)` 与更长的 `Reverb` 尾音（#195、#207）**、`配置 → 显示 → BPM 小数位数` 设为 `2` 时的**整数 BPM 推子平台**，以及**按拍线跳变的热点倒数**（#151）。
+- **影子轨**：源碟微调时，另一台碟机的影子轨几帧内就跟上，不再略微超前，循环里也不会冲过。
+- **流媒体 Stems**：导入的文件按“艺人 - 标题”命名并写入标签，点的那一行显示原厂的逐首分轨进度，下载不下来的歌会说明，“没有可用的来源磁盘”弹窗不再出现（碟机为此保留自己的私有保存盘）；带 RTX 50 系显卡的电脑上 Stems 也能用。
+- **远程访问与二维码**：`设置 → 设备 → 远程访问` 通过 Cloudflare Quick Tunnel 打开网页控制台；“关于 / 更新”里有 `扫码打开控制台` 二维码（优先公开地址，其次隧道，再次局域网；二维码里不含访问码）。网页控制台换了新设计。
+- **不依赖内核 CIFS 的 SMB / NAS（#300）**：网页控制台的网络来源在所有机型上用 SMB2/3 和用户名密码登录；**Engine 远程曲库支持按 Date Added 排序（#292）**；官方 Mod **`cpu-ram-monitor`（#296）**在状态栏时钟旁显示 CPU 和内存占用；**一键后端**（`deploy/one-click-backend.sh`）部署中继和 Stems 服务。
+- **二代机 SSH 密码（#299）**：在网页控制台设置的 root 密码现在在二代机上有效，重启后仍然有效。
+
+### 修复与改进
+- **大容量与慢速 U 盘**：数千首曲目的 Rekordbox 导入在挂载时限内续做 Cue 和封面（#264、#272），FAT32 上的桥接状态保持在 4 GiB 以下，读取很慢的存储卡也会补全概览，旧版导入补全时保留已有曲目与歌单 ID 和碟机上的编辑，导入也不再覆盖 Engine 同时对曲库做的改动。从 Pro DJ Link 播放器暂存的曲库按每个盘限量，对方播放器的盘与原厂一致不提供 Stems（#252）。
+- **HFS+ U 盘弹出与更新**：Engine 打开曲库时也能弹出只读 HFS+ U 盘，弹出被拒时会说明原因；Mac 格式 U 盘上的 `*-Update.img` 固件更新会安装所选文件，正常模式与安全模式都一样。
+- **影子轨搓碟**：用力搓碟和极快搓碟时，影子轨沿源碟的轨迹平滑跟随。
+- **流媒体**：Spotify 载入与 TIDAL 登录载体不再互相干扰（#269），Spotify 收藏夹不再有空白行（#279），Spotify 原生 Ogg 保持 Engine 可识别的文件名（#277），音源设置原子写入（#247），流媒体列表的后续页面加载失败时，已加载的行会保留，并显示一条未完成提示和重试；登录过期仍会提示重新登录（#248）。
+- **空闲碟机更省**：开机监视和 30 秒线程巡检大幅减少工作量（#236），网络盘上的 Link / Stems 条件与原厂一致。
+- **回到原厂**：原厂不再复用 EngineX 的 QML 缓存，避免它在界面出现前崩溃。
+- **Mod 与元数据**：官方 Mod 无需 FFmpeg 即可运行，MP3 / FLAC / WAV / AIFF 元数据读取更准确，OneLibrary 的 Cue 位置不再溢出。
+- **音频审计（#237、#245）**：钩子的音频线程函数不做分配内存、加锁、等待或 I/O 调用，由对照块时间预算的测试检查；保存 `直播推流` 设置不再让 `/live.wav` 上的本地听众（如 OBS、VLC）断线。
+- **设置开关跟随控制台（#283）**：EngineX 的 13 个开关行全部改用 Engine 原厂的开关行，点按之后仍会跟随网页控制台所做的改动。
+- **大型 Rekordbox 曲库（#272、#253）**：分析数据压缩存储，FAT32 上能容纳的曲目多得多；重复插盘时不再为识别你的曲目而重读每个已保存的波形。
+- **屏幕在线更新（#215）**：5.3.0.5 的更新器只提供 `*-Update.img`；旧版 `*-Data-Bundle.tar.gz` 仍留在 Release 里，供还在旧版本的碟机使用。
+- **内部更名（#234）**：服务单元、程序、`/etc/enginex` 和 `/v1/enginex` 接口统一使用新的 `enginex` 名称；旧的接口别名、数据链接和降级还原已移除。从 5.3.0.2 及更高版本升级时会一次性迁移你的数据。
+- **一体机保持原厂视图**：`SHIFT + VIEW` 重新循环切换原厂视图预设（例如 PRIME 4 的竖向波形加曲库），横向波形旁边显示曲库时 `LOAD` 仍可用，`联机视图`只在独立播放器（SC5000 / SC5000M / SC6000 / SC6000M）上提供。
+- **另一台碟机加载时正在播放的碟机卡顿（#298，PRIME 4）**：后台调优不再移动 Engine 每路解码、加载线程和中断的位置，保持原厂的安排。
+- **HFS+ 安全**：5.3.0.4 会把干净、未启用日志的 HFS+ U 盘以读写方式挂在有内核 bug 的驱动上，可能让碟机崩溃并损坏盘；5.3.0.5 在所有机型上堵上了这个问题。
+- **CDJ-3000 联机（#198）**：CDJ-3000 不再提示“已与固件较旧的播放机联机”并会保持联机；每台碟机都是独立的播放器，也不会占用 CDJ 自己的编号。
+- **其他修复**：真机控制器上 `Shift + View` 重新可用；Pro DJ Link 导出会跟随插入或拔出的 U 盘；写回 Cue 能看到尚未检查点的修改并回退到 `export.pdb`；蓝牙音箱的 SBC 码率池使用标准高音质值；带多余内容的设置请求会在改动任何东西之前被拒绝；选择 U 盘不会再弹出“复制设置”错误；Mixstream 的层切换与原厂只差几毫秒（#222）；Apple Music 曲库浏览在助手登录或退出后恢复；西班牙语等翻译标签不再溢出。
+- **所有碟机都会关闭 Wi-Fi 省电（#309）**：没有原厂 `iw` 工具的碟机（例如 SC LIVE 4）以前会悄悄保持 Wi-Fi 省电；现在碟机开机时自己关掉它（有原厂 `iw` 的机型仍优先用原厂工具）。
+- **Apple Music、中继和 rekordbox 的复核修复**：在碟机上退出 Apple Music 后，下载助手仍在登录时也不会自动重新登录；中继把碟机指向另一个助手地址时，不再把旧令牌交给新主机；中继控制台点保存不再丢掉自动探测到的令牌；持有手机登录二维码的人不能再设置助手并推送到中继；两台电脑运行 rekordbox 时，关了 `LINK` 的那台不再遮住另一台的曲库；只属于 Mixstream 的 `Stems EQ` 行只在 Mixstream 机型上创建。
+- **登录 Engine DJ 账号不再让流媒体掉线（#304）**：已登录 Engine DJ 账号时，载入流媒体曲目不再弹出“Tidal Disconnected”并让流媒体来源退出登录。
+- **碟机顶栏显示你选的流媒体服务（#305）**：从 Deezer、Spotify、Apple Music、网易云、SoundCloud、Beatport 或 rekordbox 播放的曲目，顶栏显示该服务的图标，`Track Info → Source` 显示它的名字，不再是 TIDAL。它跟随当前选中的服务，不是每首曲目各自记录的事实。
+
+### 已知问题
+- 许多账号（包括较早的 Premium 账号）播放 Spotify 会失败，提示 “audio key refused”。Spotify 更改了服务器，所有基于 librespot 的客户端都无法获得音频密钥（librespot-org/librespot#1649，2026-11-07 已锁定，目前没有已知的修复）。碟机上没有任何办法能修复它：请改用 TIDAL、Beatport、SoundCloud 或 Deezer。来源菜单里仍保留 Spotify 入口。
+- 二代 32 位机（SC LIVE 4、SC LIVE 2、PRIME 4+、PRIME GO+、Mixstream Pro+、Mixstream Pro Go）通过用户态驱动写 HFS+：碟机正在写入时请不要直接拔出 U 盘。
+- PRIME 4 G2 / SYSTEM ONE 的数据分区大小（#244）不在本版本。
 
 ---
 
@@ -95,8 +172,6 @@
 - **独立碟机 `采样器输出`、四轨操控与影子轨 `Sync` 稳定性**：`SC5000 / SC6000` 在二轨与四轨下均保留 `设置 → 混音台 → 采样器输出`（`Layer A` / `Layer B`）、`碟机编号 #`、`碟机颜色` 双层选色盘、`Layer B` 开关与 `Browse` 按压直载当前层；静音影子轨绝不抢 `MASTER`，支持超过 `+100%` 变速的跨倍速 `Sync` 紧锁，对端关机干净退歌不卡切源，紧凑轨道顶栏数字定宽不晃动。
 - **设置项精简、全界面简繁翻译补齐与断电时区记忆**：全机型解锁原厂 `配置 → Cue / Loop → 联动节拍跳跃与 Loop 长度` 且绝不篡改用户开关；`打击垫亮度` 平滑调节彩灯并保持 `SYNC`、`KEYLOCK`、`SLIP` 等单色键原厂亮度；转盘、波形缩放与非主控 `MASTER` 灯恢复原厂手感与暗亮值；独立碟机隐藏先锋风格 PX 效果；移除无效的自动分析盘开关；原厂 `Engine 灯光` 默认关闭，开启或关闭后的选择在重启、断电后保留；补齐设置页全部简繁中文翻译（`Layer A`、`Layer B` 与 `3-Band` 保持英文）；内置中国大陆与全球 NTP 时间池，断电离线开机仍保留已选时区与时钟进度。
 - **二代机 Stems 识别与命令行安装器增强**：修复 `SC LIVE 4` 等二代机点 **Generate Stems** 跳回设置页的问题并对齐图形缓存上限；一代机 `.img` 内置定制开机画面并消除首次开机无效 Stems 下载提示；提升命令行 `EngineX-Installer` 对 `SC LIVE 4`、`Mixstream Pro+ / Pro Go`、`PRIME 4+` 及一代机 USB / 局域网的识别率。
-
-> **5.3.0.5 开发中 — 复制设置（#205）：** `设置 → 设备 → 从另一台设备复制设置` 先由来源设备允许，再由接收设备确认。请先暂停播放：Link 导入和撤销会正常重启 Engine。本机碟机编号、角色、颜色、身份及账号均保留。`Profile → Save to my drive` 同时保存 EngineX 偏好；原厂 USB 导入增加 **包含 EngineX 设置** 开关，不强制重启。不支持的机型设置会列出并跳过，USB 撤销会在重启前逐字节恢复 EngineX 文件和私有原厂 profile，再由原厂 loader 恢复白名单偏好；保留正常退出写下的原生身份与状态文件，避免回退 Player 编号。复制后若本机角色、身份或账号设置已变，撤销会拒绝执行。不复制 MIDI 映射或视图文件。
 
 > **先锋 CDJ 联机说明**：与先锋 CDJ-3000 的局域网互通（曲库共享、3-Band 波形、播放头跟随与 Master / Beat Sync 双向交接）基于真机 Denon SC5000 与 [**OpenProLink**](https://github.com/Cd1s/OpenProLink) 联调验证，欢迎拥有先锋 CDJ / XDJ / DJM 真机的玩家反馈实测体验！
 
@@ -189,7 +264,7 @@
 
 系统经过全面精简，所有增强功能仅占极小空间，比原厂固件留出更多可用内存：
 
-| 对比项 | 官方原厂 / 重构前 | 重构后（`EngineX OS 5.3.0.4` 实测） | 实际打碟提升 |
+| 对比项 | 官方原厂 / 重构前 | 重构后（`EngineX OS 5.3.0.5`，数据为 5.3.0.4 在 SC5000 实测） | 实际打碟提升 |
 | :--- | :--- | :--- | :--- |
 | **刷机包体积 (`*-Update.img`)** | 官方原厂 5.3.0 `147.79 MB`<br>早期改版 `~210 MB` | **`151.44 MB`**（SC6000 `151.58 MB`，PRIME 4 `151.52 MB`） | **仅比官方原厂大 `3.64 MB`** |
 | **纯刷机开机硬盘占用 (`/data`)** | 旧版残留约 `243 MB` | **核心程序 + 三语界面仅占 `17.2 MB`**（含扩展磁盘格式驱动共 `45.6 MB`） | 内置闪存多腾出 **近 `200 MB`** 空间 |
@@ -208,31 +283,31 @@
 
 ### 方式零：全系 16 款命令行安装工具 `EngineX-Installer`（原厂二代机首次必用一次）
 
-`EngineX-Installer` 是跨平台 **命令行工具**（终端程序，非图形窗口软件），支持 Windows、macOS 与 Linux。它无需输入 IP 或手动选择机型，可自动发现同一局域网 / Wi-Fi 或处于 USB 固件更新模式的碟机，下载对应的 `5.3.0.4` `*-Update.img` 升级包、校验 SHA-256 并引导完成安装（二代机自动执行 **[1/2] 一键解锁 `.img` 升级链** + **[2/2] 刷入 `*-Update.img`**）。
+`EngineX-Installer` 是跨平台 **命令行工具**（终端程序，非图形窗口软件），支持 Windows、macOS 与 Linux。它无需输入 IP 或手动选择机型，可自动发现同一局域网 / Wi-Fi 或处于 USB 固件更新模式的碟机，下载对应的 `5.3.0.5` `*-Update.img` 升级包、校验 SHA-256 并引导完成安装（二代机自动执行 **[1/2] 一键解锁 `.img` 升级链** + **[2/2] 刷入 `*-Update.img`**）。
 
-- [Windows 10/11 x64](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.4-windows-amd64.zip)
-- [macOS Apple Silicon M1–M4](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.4-macos-arm64.zip)
-- [macOS Intel](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.4-macos-amd64.zip)
-- [Linux x86_64](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.4-linux-amd64.tar.gz)
+- [Windows 10/11 x64](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.5-windows-amd64.zip)
+- [macOS Apple Silicon M1–M4](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.5-macos-arm64.zip)
+- [macOS Intel](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.5-macos-amd64.zip)
+- [Linux x86_64](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.5-linux-amd64.tar.gz)
 
-解压后在终端运行 `Install-EngineX.bat`（Windows）、`Install-EngineX.command`（macOS）或 `./install-enginex.sh`（Linux）。局域网安装需碟机已开启 root SSH，可完整保留音乐与设置；**5.3.0.5（尚未发布）**：安装器原生构建镜像并通过 USB 传输，无需 Python、fastboot、e2fsprogs、libusb 或 WSL。Windows 在需要时自动配置系统 WinUSB 驱动，Linux 的 USB 访问可能需要 `sudo`。现有 Python／Shell 辅助脚本在本版本保留为手动备用方式，旧版安装器仍需其宿主工具。**请先备份碟机数据**：通过 USB 刷入全新二代机 `/data` 镜像会清空内置 `/data` 分区上的音乐、曲库与设置（刷机前请拔下 U 盘与 SD 卡）。 引导程序无法读取备份，安装器不能先备份；请在碟机正常运行时备份。解锁后请通过 OTA 升级以保留数据。
+解压后在终端运行 `Install-EngineX.bat`（Windows）、`Install-EngineX.command`（macOS）或 `./install-enginex.sh`（Linux）。局域网安装需碟机已开启 root SSH，可完整保留音乐与设置；**5.3.0.5**：安装器原生构建镜像并通过 USB 传输，无需 Python、fastboot、e2fsprogs、libusb 或 WSL。Windows 在需要时自动配置系统 WinUSB 驱动，Linux 的 USB 访问可能需要 `sudo`。现有 Python／Shell 辅助脚本在本版本保留为手动备用方式，旧版安装器仍需其宿主工具。**请先备份碟机数据**：通过 USB 刷入全新二代机 `/data` 镜像会清空内置 `/data` 分区上的音乐、曲库与设置（刷机前请拔下 U 盘与 SD 卡）。 引导程序无法读取备份，安装器不能先备份；请在碟机正常运行时备份。解锁后请通过 OTA 升级以保留数据。
 
 **Windows USB 驱动配置（5.3.0.5）**：受支持的更新接口需要配置时，请批准管理员授权。只更改该设备与微软现有签名 WinUSB 驱动的绑定及接口注册，不安装额外驱动包、未签名内核驱动，也不开启测试签名模式；驱动已正常工作时无需提权。撤销方法：在设备管理器卸载这个更新设备，再拔插 USB；保留微软驱动包。Rockchip loader 写入仍禁用，请使用 Firmware Update Mode。
 
-**5.3.0.5（尚未发布）**：若安装器旁有机型与安装器版本均匹配的 `*-Update.img` 或 `*-Data-Bundle.tar.gz`，会优先使用，不查询 `releases/latest`。同一目录还需放入同一发布版本的 `SHA256SUMS.txt`、`SHA256SUMS.txt.sig` 和 `RELEASE-TAG.txt`；缺少时请补齐这些文件，或移除本地镜像／数据包后查询最新版。
+**5.3.0.5**：若安装器旁有机型与安装器版本均匹配的 `*-Update.img` 或 `*-Data-Bundle.tar.gz`，会优先使用，不查询 `releases/latest`。同一目录还需放入同一发布版本的 `SHA256SUMS.txt`、`SHA256SUMS.txt.sig` 和 `RELEASE-TAG.txt`；缺少时请补齐这些文件，或移除本地镜像／数据包后查询最新版。
 
 ### 方式一：一代机型 —— U 盘免电脑直接刷机
 1. 点击下方对应你机器型号的直链下载 `*-Update.img` 固件（或访问 [**Releases 页面**](https://github.com/Cd1s/EngineX-OS/releases/latest)）：
-   - **Denon DJ SC5000 Prime**：[`SC5000-5.3.0.4-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC5000-5.3.0.4-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img)
-   - **Denon DJ SC5000M Prime**：[`SC5000M-5.3.0.4-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC5000M-5.3.0.4-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img)
-   - **Denon DJ SC6000 Prime**：[`SC6000-5.3.0.4-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC6000-5.3.0.4-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img)
-   - **Denon DJ SC6000M Prime**：[`SC6000M-5.3.0.4-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC6000M-5.3.0.4-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img)
-   - **Denon DJ PRIME 4**：[`PRIME4-5.3.0.4-EngineX-OS-Denon-PRIME-4-JC11-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME4-5.3.0.4-EngineX-OS-Denon-PRIME-4-JC11-Update.img)
-   - **Denon DJ PRIME 2**：[`PRIME2-5.3.0.4-EngineX-OS-Denon-PRIME-2-JC16-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME2-5.3.0.4-EngineX-OS-Denon-PRIME-2-JC16-Update.img)
-   - **Denon DJ PRIME GO**：[`PRIMEGO-5.3.0.4-EngineX-OS-Denon-PRIME-GO-JP11-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIMEGO-5.3.0.4-EngineX-OS-Denon-PRIME-GO-JP11-Update.img)
-   - **Numark Mixstream Pro**：[`MIXSTREAMPRO-5.3.0.4-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/MIXSTREAMPRO-5.3.0.4-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img)
+   - **Denon DJ SC5000 Prime**：[`SC5000-5.3.0.5-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC5000-5.3.0.5-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img)
+   - **Denon DJ SC5000M Prime**：[`SC5000M-5.3.0.5-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC5000M-5.3.0.5-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img)
+   - **Denon DJ SC6000 Prime**：[`SC6000-5.3.0.5-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC6000-5.3.0.5-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img)
+   - **Denon DJ SC6000M Prime**：[`SC6000M-5.3.0.5-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC6000M-5.3.0.5-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img)
+   - **Denon DJ PRIME 4**：[`PRIME4-5.3.0.5-EngineX-OS-Denon-PRIME-4-JC11-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME4-5.3.0.5-EngineX-OS-Denon-PRIME-4-JC11-Update.img)
+   - **Denon DJ PRIME 2**：[`PRIME2-5.3.0.5-EngineX-OS-Denon-PRIME-2-JC16-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME2-5.3.0.5-EngineX-OS-Denon-PRIME-2-JC16-Update.img)
+   - **Denon DJ PRIME GO**：[`PRIMEGO-5.3.0.5-EngineX-OS-Denon-PRIME-GO-JP11-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIMEGO-5.3.0.5-EngineX-OS-Denon-PRIME-GO-JP11-Update.img)
+   - **Numark Mixstream Pro**：[`MIXSTREAMPRO-5.3.0.5-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/MIXSTREAMPRO-5.3.0.5-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img)
 2. 将 `.img` 文件保持原名放入 **FAT32 或 exFAT 格式 U 盘的根目录**。
-3. 将 U 盘插入碟机（原厂 Engine OS 4.3.x 与 5.0.x+ 均可直接刷入），打开 **设置 → 关于 / 更新 → 固件更新模式 → 选项**，看到 `Found 5.3.0.4 on USB/SD` 时选择 **USB/SD**，机器会自动刷入并重启。若只弹出 *Reboot into firmware update mode?*，请核对型号、确认文件未改名且位于根目录后重新插拔 U 盘。
+3. 将 U 盘插入碟机（原厂 Engine OS 4.3.x 与 5.0.x+ 均可直接刷入），打开 **设置 → 关于 / 更新 → 固件更新模式 → 选项**，看到 `Found 5.3.0.5 on USB/SD` 时选择 **USB/SD**，机器会自动刷入并重启。若只弹出 *Reboot into firmware update mode?*，请核对型号、确认文件未改名且位于根目录后重新插拔 U 盘。
 
 ### 方式一 b：二代机型 —— 首次一键解锁 + 统一 `*-Update.img` 升级
 
@@ -243,16 +318,16 @@
    - 在原厂碟机屏幕打开 **设置 → 关于 / 更新 → 固件更新模式 → 选项** 进入 USB 更新模式并连上 USB 线——安装器会自动执行 **[1/2] 一键解锁 `.img` 升级链** 与 **[2/2] 刷入 `*-Update.img`**（仅写入 `/data/enginex`，不改只读系统分区；旧版脚本式 Windows 安装器请用 `usbipd-win` 将 USB 直通给 WSL 2 并以 `wsl -u root` 运行 Linux 版安装器；`PRIME 4 G2` 与 `SYSTEM ONE` 写入完成后按电源键关机再开机即可激活；若碟机已开 root SSH，同局域网即可无损安装且不清空 `/data`）。
 2. **此后每次更新（U 盘直刷或屏幕一键 OTA，无需电脑）**：
    - 完成首次解锁后（此前已安装过 EngineX 的二代机开机时也会自动解锁），二代机的升级方式与一代机完全一样：将下方对应机型的 `*-Update.img` 保持原名放入 **FAT32 或 exFAT U 盘根目录** 在碟机屏幕升级（**设置 → 关于 / 更新 → 固件更新模式 → 选项 → USB/SD**），或直接点 **设置 → 关于 / 更新 → 更新** 一键在线 OTA！
-   - **Denon DJ SC LIVE 4**：[`SCLIVE4-5.3.0.4-EngineX-OS-Denon-SC-LIVE-4-JP21-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SCLIVE4-5.3.0.4-EngineX-OS-Denon-SC-LIVE-4-JP21-Update.img)
-   - **Denon DJ SC LIVE 2**：[`SCLIVE2-5.3.0.4-EngineX-OS-Denon-SC-LIVE-2-JP20-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SCLIVE2-5.3.0.4-EngineX-OS-Denon-SC-LIVE-2-JP20-Update.img)
-   - **Denon DJ PRIME 4+**：[`PRIME4PLUS-5.3.0.4-EngineX-OS-Denon-PRIME-4-Plus-JC11S-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME4PLUS-5.3.0.4-EngineX-OS-Denon-PRIME-4-Plus-JC11S-Update.img)
-   - **Denon DJ PRIME GO+**：[`PRIMEGOPLUS-5.3.0.4-EngineX-OS-Denon-PRIME-GO-Plus-JP11S-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIMEGOPLUS-5.3.0.4-EngineX-OS-Denon-PRIME-GO-Plus-JP11S-Update.img)
-   - **Numark Mixstream Pro+**：[`MIXSTREAMPROPLUS-5.3.0.4-EngineX-OS-Numark-Mixstream-Pro-Plus-NH08S-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/MIXSTREAMPROPLUS-5.3.0.4-EngineX-OS-Numark-Mixstream-Pro-Plus-NH08S-Update.img)
-   - **Numark Mixstream Pro Go**：[`MIXSTREAMPROGO-5.3.0.4-EngineX-OS-Numark-Mixstream-Pro-Go-NH10-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/MIXSTREAMPROGO-5.3.0.4-EngineX-OS-Numark-Mixstream-Pro-Go-NH10-Update.img)
-   - **Denon DJ PRIME 4 G2**：[`PRIME4G2-5.3.0.4-EngineX-OS-Denon-PRIME-4-G2-JP24-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME4G2-5.3.0.4-EngineX-OS-Denon-PRIME-4-G2-JP24-Update.img)
-   - **Rane SYSTEM ONE**：[`SYSTEMONE-5.3.0.4-EngineX-OS-Rane-SYSTEM-ONE-RMZ2-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SYSTEMONE-5.3.0.4-EngineX-OS-Rane-SYSTEM-ONE-RMZ2-Update.img)
+   - **Denon DJ SC LIVE 4**：[`SCLIVE4-5.3.0.5-EngineX-OS-Denon-SC-LIVE-4-JP21-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SCLIVE4-5.3.0.5-EngineX-OS-Denon-SC-LIVE-4-JP21-Update.img)
+   - **Denon DJ SC LIVE 2**：[`SCLIVE2-5.3.0.5-EngineX-OS-Denon-SC-LIVE-2-JP20-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SCLIVE2-5.3.0.5-EngineX-OS-Denon-SC-LIVE-2-JP20-Update.img)
+   - **Denon DJ PRIME 4+**：[`PRIME4PLUS-5.3.0.5-EngineX-OS-Denon-PRIME-4-Plus-JC11S-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME4PLUS-5.3.0.5-EngineX-OS-Denon-PRIME-4-Plus-JC11S-Update.img)
+   - **Denon DJ PRIME GO+**：[`PRIMEGOPLUS-5.3.0.5-EngineX-OS-Denon-PRIME-GO-Plus-JP11S-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIMEGOPLUS-5.3.0.5-EngineX-OS-Denon-PRIME-GO-Plus-JP11S-Update.img)
+   - **Numark Mixstream Pro+**：[`MIXSTREAMPROPLUS-5.3.0.5-EngineX-OS-Numark-Mixstream-Pro-Plus-NH08S-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/MIXSTREAMPROPLUS-5.3.0.5-EngineX-OS-Numark-Mixstream-Pro-Plus-NH08S-Update.img)
+   - **Numark Mixstream Pro Go**：[`MIXSTREAMPROGO-5.3.0.5-EngineX-OS-Numark-Mixstream-Pro-Go-NH10-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/MIXSTREAMPROGO-5.3.0.5-EngineX-OS-Numark-Mixstream-Pro-Go-NH10-Update.img)
+   - **Denon DJ PRIME 4 G2**：[`PRIME4G2-5.3.0.5-EngineX-OS-Denon-PRIME-4-G2-JP24-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME4G2-5.3.0.5-EngineX-OS-Denon-PRIME-4-G2-JP24-Update.img)
+   - **Rane SYSTEM ONE**：[`SYSTEMONE-5.3.0.5-EngineX-OS-Rane-SYSTEM-ONE-RMZ2-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SYSTEMONE-5.3.0.5-EngineX-OS-Rane-SYSTEM-ONE-RMZ2-Update.img)
 
-### 恢复官方固件（5.3.0.5，尚未发布）
+### 恢复官方固件（5.3.0.5）
 
 从 [Releases](https://github.com/Cd1s/EngineX-OS/releases/latest) 下载电脑对应的安装器。链接格式为 `https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-<VERSION>-<platform>.zip`（`linux-amd64` 使用 `.tar.gz`；ZIP 平台为 `windows-amd64`、`macos-amd64`、`macos-arm64`）。
 
@@ -268,7 +343,7 @@
 
 - **在已解锁 / 已开启 root SSH 的碟机终端内手动安装 `*-Update.img`（完整保留音乐、曲库与设置）**：
   ```sh
-  sh /data/enginex/bundle/install.sh "/media/<U 盘名>/<MODEL>-5.3.0.4-EngineX-OS-<Model>-Update.img"
+  sh /data/enginex/bundle/install.sh "/media/<U 盘名>/<MODEL>-5.3.0.5-EngineX-OS-<Model>-Update.img"
   reboot
   ```
 - **卸载恢复原厂**：在 `:8080` Web 控制台点击 **「卸载恢复原厂」**，或同局域网运行 `EngineX-Installer --uninstall`，或在碟机终端执行 `sh /data/enginex/bundle/uninstall.sh && reboot`（仅移除 `/data/enginex` 与启动钩子，保留曲库与设置）。
@@ -279,10 +354,10 @@
 
 ### 方式二：碟机屏幕一键在线升级（已安装 EngineX OS 后）
 - 连接 Wi-Fi 或网线后打开 **设置 → 关于 / 更新**；
-- 点击屏幕上的 **「更新」** 按钮——全系 16 款一代与二代机型均会自动下载、校验并安装 `5.3.0.4`，完整保留曲库、流媒体账号、预设视图与已装 Mod（GitHub Release 中同时保留 `*-Data-Bundle.tar.gz` 兼容包，使旧版 `5.3.0.2` / `5.3.0.3` 二代机也能直接在屏幕上一键 OTA 升级并在开机后自动解锁 `.img` 直刷）。
+- 点击屏幕上的 **「更新」** 按钮——全系 16 款一代与二代机型均会自动下载、校验并安装 `5.3.0.5`，完整保留曲库、流媒体账号、预设视图与已装 Mod（GitHub Release 中最后一次附带 `*-Data-Bundle.tar.gz` 兼容包，使旧版 `5.3.0.2` / `5.3.0.3` 二代机仍能直接在屏幕上一键 OTA 升级并在开机后自动解锁 `.img` 直刷；`5.3.0.6` 起退役，#215）。
 
 ### 选配：用电脑开启高音质 `htdemucs` AI 分轨
-> **5.3.0.5 开发中 — 碟机本机 Stems（#238）：** 不连电脑时，碟机改用频谱分离方法拆出人声、贝斯、鼓和旋律，不再按频段切分。它不是神经网络，各轨之间仍会有串音。实测：空闲的 SC5000 上 60 秒音乐需 16.5–17.0 秒运算（人声改为立体声之前）；这项改动在编译机的 armhf 核上多用约 6%（同一段音频 2.50 秒 → 2.65 秒），尚未在碟机上重测。碟机播放时只能用空闲的处理器时间，这种情况没有实测，耗时会更长。想要最干净的分轨，请使用下面的电脑端服务。5.3.0.5 起，电脑或中继只提供 `hpss` 时不再使用它：碟机自己的分离在我们的测试里得分更高，所以改由碟机本机分轨，状态行会写明（`本机分轨（基础音质）：<主机名> 只提供 hpss，不会使用。`）。5.3.0.4 会使用 `hpss` 服务并把它显示成 `高音质分轨`。
+> **5.3.0.5 — 碟机本机 Stems（#238）：** 不连电脑时，碟机改用频谱分离方法拆出人声、贝斯、鼓和旋律，不再按频段切分。它不是神经网络，各轨之间仍会有串音。实测：空闲的 SC5000 上 60 秒音乐需 16.5–17.0 秒运算（人声改为立体声之前）；这项改动在编译机的 armhf 核上多用约 6%（同一段音频 2.50 秒 → 2.65 秒），尚未在碟机上重测。碟机播放时只能用空闲的处理器时间，这种情况没有实测，耗时会更长。想要最干净的分轨，请使用下面的电脑端服务。5.3.0.5 起，电脑或中继只提供 `hpss` 时不再使用它：碟机自己的分离在我们的测试里得分更高，所以改由碟机本机分轨，状态行会写明（`本机分轨（基础音质）：<主机名> 只提供 hpss，不会使用。`）。5.3.0.4 会使用 `hpss` 服务并把它显示成 `高音质分轨`。
 
 一代机型的 Stems 有三种来源，碟机会在 **配置 → 曲库** 与 **设置 → 关于 / 更新** 写明当前用的是哪一种（`PRIME 4 G2` 与 `SYSTEM ONE` 使用官方 Stems）：
 

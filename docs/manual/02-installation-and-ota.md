@@ -3,7 +3,7 @@
 > 简体中文 · English · 繁體中文，每一节按这个顺序对照。
 > Every section is given in this order: 简体中文 · English · 繁體中文.
 >
-> 本文以 **EngineX OS 5.3.0.4** 为例；文件名里的版本号会随新版本变化，始终以 [Releases](https://github.com/Cd1s/EngineX-OS/releases/latest) 页面为准。
+> 本文以 **EngineX OS 5.3.0.5** 为例；文件名里的版本号会随新版本变化，始终以 [Releases](https://github.com/Cd1s/EngineX-OS/releases/latest) 页面为准。
 > Examples use **EngineX OS 5.3.0.4**; the version in file names changes with each release, so trust the [Releases](https://github.com/Cd1s/EngineX-OS/releases/latest) page.
 > 本文以 **EngineX OS 5.3.0.4** 為例；檔名中的版本號會隨新版本變動，一律以 [Releases](https://github.com/Cd1s/EngineX-OS/releases/latest) 頁面為準。
 
