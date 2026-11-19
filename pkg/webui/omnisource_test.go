@@ -172,16 +172,25 @@ func TestOmniSourceOtherScopesKeepOtherServicePlaylists(t *testing.T) {
 
 	var lists tidalList
 	tidalGet(t, base, "/v1/users/1/playlists", 200, &lists)
+	var friendUUID string
 	for _, raw := range lists.Items {
 		var p tidalPlaylist
 		if err := json.Unmarshal(raw, &p); err != nil {
 			t.Fatal(err)
 		}
 		if p.Title == "[Deezer] Friend" {
-			return
+			friendUUID = p.UUID
+			break
 		}
 	}
-	t.Fatal("non-Deezer OmniSource scope lost the other-service playlist")
+	if friendUUID == "" {
+		t.Fatal("non-Deezer OmniSource scope lost the other-service playlist")
+	}
+	var tracks tidalList
+	tidalGet(t, base, "/v1/playlists/"+friendUUID+"/tracks", 200, &tracks)
+	if got, _ := titles(t, tracks.Items); len(got) != 1 || got[0] != "Song" {
+		t.Fatalf("secondary service tracks: %v", got)
+	}
 }
 
 func TestOmniSourceSearchFindsDriveTracksBesideStreaming(t *testing.T) {
