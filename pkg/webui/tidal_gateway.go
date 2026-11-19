@@ -364,6 +364,7 @@ func newTidalGateway(s *Server) *tidalGateway {
 	g.mux.HandleFunc("GET /v1/enginex/art", g.art)
 	g.mux.HandleFunc("GET /v1/enginex/hotcues", s.handleHotCues)
 	g.mux.HandleFunc("POST /v1/enginex/hotcues", s.handleHotCues)
+	g.mux.HandleFunc("POST /v1/enginex/track-metadata", s.handleTrackMetadata)
 	g.mux.HandleFunc("GET /v1/enginex/bluetooth", s.handleBluetooth)
 	g.mux.HandleFunc("POST /v1/enginex/bluetooth", s.handleBluetooth)
 	g.mux.HandleFunc("GET /v1/enginex/nas", s.handleNASConfig)
