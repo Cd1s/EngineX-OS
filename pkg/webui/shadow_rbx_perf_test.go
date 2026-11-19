@@ -101,8 +101,12 @@ func newRbxShadowSource(t *testing.T) *rbxShadowSource {
 	media := t.TempDir()
 	shadowMediaRoot = media
 	oldDir := rbxAnalysisDir
+	oldEvery := perfGenEvery
 	rbxAnalysisDir = t.TempDir()
-	t.Cleanup(func() { shadowBeaconOn, shadowMediaRoot, rbxAnalysisDir = true, "/media", oldDir })
+	perfGenEvery = 0
+	t.Cleanup(func() {
+		shadowBeaconOn, shadowMediaRoot, rbxAnalysisDir, perfGenEvery = true, "/media", oldDir, oldEvery
+	})
 	drive := filepath.Join(media, "USB")
 	file := filepath.Join(drive, rbxCacheDir, "0123abcd.flac")
 	os.MkdirAll(filepath.Dir(file), 0o755)
@@ -178,6 +182,30 @@ func TestShadowRekordboxRowSwitchIsANewCopy(t *testing.T) {
 	want, _ := encodeShadowAnalysis(pb)
 	if code, got := r.native(t, kb); code != 200 || !bytes.Equal(got, want) {
 		t.Fatalf("second row's analysis: %d", code)
+	}
+}
+
+// A rekordbox edit changes the analysis served to a shadow copy without changing
+// the audio copy key. The source must publish that generation so the receiver can
+// refresh its already-cached sidecars on the next load.
+func TestShadowRekordboxEditChangesPerfGenerationWithoutNewAudioKey(t *testing.T) {
+	r := newRbxShadowSource(t)
+	id := r.row(7)
+	r.publish(t, id, 500)
+	first := r.status(t, id)
+	if first.PerfGen == "" {
+		t.Fatal("analysed rekordbox deck has no PerfGen")
+	}
+	if again := r.status(t, id); again.Key != first.Key || again.PerfGen != first.PerfGen {
+		t.Fatalf("unchanged analysis moved key/generation: %+v -> %+v", first, again)
+	}
+	r.publish(t, id, 250)
+	second := r.status(t, id)
+	if second.Key != first.Key {
+		t.Fatalf("analysis edit changed audio copy key: %q -> %q", first.Key, second.Key)
+	}
+	if second.PerfGen == first.PerfGen {
+		t.Fatalf("analysis edit did not publish a new PerfGen: %q", second.PerfGen)
 	}
 }
 
