@@ -1593,6 +1593,40 @@ static void analysis_bind(sqlite_bind_int64_fn bind, sqlite3 *db, const char *sq
     assert(sqlite3_finalize(stmt) == SQLITE_OK);
 }
 
+// A deck load's analysis of a peer copy that was given the source's analysis is skipped,
+// but not the RGB-only request (prefs byte 12): it builds the RGB overview and nothing
+// else, and without it the copy's mini overview stayed empty under the RGB waveform type.
+static void test_shadow_rgb_request(void) {
+    char dir[] = "/tmp/enginex-rgbreq-XXXXXX", peer[128], sidecar[160], audio[160];
+    assert(mkdtemp(dir));
+    snprintf(peer, sizeof peer, "%s/peer-a", dir);
+    snprintf(sidecar, sizeof sidecar, "%s/track.wav.analysis", peer);
+    snprintf(audio, sizeof audio, "%s/track.wav", peer);
+    assert(!mkdir(peer, 0700));
+    FILE *f = fopen(sidecar, "wb"); assert(f); fputs("RBXA1", f); fclose(f);
+    const char *old_root = sc_shadow_root;
+    sc_shadow_root = dir;
+    uint16_t wide[160];
+    size_t n = strlen(audio);
+    for (size_t i = 0; i < n; i++) wide[i] = (uchar)audio[i];
+    static unsigned char track[0x400];
+    unsigned char obj[0x60] = {0}, prefs[16] = {0};
+    const struct oa_string path = {NULL, wide, (ssize_t)n};
+    const unsigned char *held = track;
+    memcpy(obj + 0x10, &path, sizeof path);
+    memcpy(obj + 0x48, &held, sizeof held);
+    track[0x31d] = 1;
+    assert(shadow_analysis_skipped(obj, prefs));
+    prefs[12] = 1;
+    assert(!shadow_analysis_skipped(obj, prefs));
+    prefs[12] = 0;
+    track[0x31d] = 0;
+    assert(!shadow_analysis_skipped(obj, prefs));
+    sc_shadow_root = old_root;
+    assert(!unlink(sidecar) && !rmdir(peer) && !rmdir(dir));
+    puts("Shadow copy: the RGB-only analysis request goes through: PASS");
+}
+
 static void test_analysis_dispatch(const char *off, int gateway, int shadow) {
     enum { lock = 0x1d55120, prepare = 0x1d55634, close_v2 = 0x1d21af4, filename = 0x1cb0d94,
            bind = 0x1cdfb90, bind_int = 0x1cdfc28, db_handle = 0x1c9a210, sql_text = 0x1c9a2a0,
@@ -1737,6 +1771,7 @@ int main(int argc, char **argv) {
     test_resources();
     test_offline_analyzer();
     test_shadow_replay();
+    test_shadow_rgb_request();
     test_stems_processor_fallback();
     test_stems_processor_prefers_enginex();
     test_alsa_boot_hook();

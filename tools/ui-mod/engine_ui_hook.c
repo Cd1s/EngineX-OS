@@ -3814,16 +3814,22 @@ static unsigned (*shadow_analyze_original)(void *, const void *);
 
 // Deck loads can request analysis on EMain even when the library Track is
 // marked analysed. Leave the loaded native data in place for our peer copies.
-static unsigned shadow_analyze(void *obj, const void *prefs) {
-    if ((uintptr_t)__builtin_return_address(0) == shadow_deck_load_return) {
-        const unsigned char *self = obj, *track = *(const unsigned char *const *)(self + 0x48);
-        const struct oa_string *path = (const void *)(self + 0x10);
-        if (track && track[0x31d] && path->ptr && path->size > 0 && path->size < 512) {
-            char text[512];
-            if (utf16_to_utf8(path->ptr, path->size, text, sizeof text) && sc_shadow_analysis_staged(text))
-                return 0;
-        }
+// Not the RGB-only request (prefs byte 12, RGB waveform type, a track without an RGB
+// overview): it sends no grid and no 3-band overview, and without it the copy's RGB
+// overview stayed empty (LEFT, 2026-11-20: black mini overview, no request in the log).
+static int shadow_analysis_skipped(const void *obj, const unsigned char *prefs) {
+    const unsigned char *self = obj, *track = *(const unsigned char *const *)(self + 0x48);
+    const struct oa_string *path = (const void *)(self + 0x10);
+    if (prefs && prefs[12]) return 0;
+    if (track && track[0x31d] && path->ptr && path->size > 0 && path->size < 512) {
+        char text[512];
+        return utf16_to_utf8(path->ptr, path->size, text, sizeof text) && sc_shadow_analysis_staged(text);
     }
+    return 0;
+}
+
+static unsigned shadow_analyze(void *obj, const void *prefs) {
+    if ((uintptr_t)__builtin_return_address(0) == shadow_deck_load_return && shadow_analysis_skipped(obj, prefs)) return 0;
     return shadow_analyze_original(obj, prefs);
 }
 
