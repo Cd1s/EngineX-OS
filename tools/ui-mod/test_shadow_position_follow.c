@@ -324,6 +324,68 @@ static void test_install(void) {
     puts("the install verifies both slots, makes the feed file on a fresh boot and reads what is written to it: PASS");
 }
 
+// Where no code site is verified (AArch64), the owner is learnt from PlanckGUI's own
+// metaObject(): a slot of its vtable, no instruction changed.
+static const void *planck_meta_object(const void *self) { return (const char *)self + 1; }
+
+static void test_install_by_pointer(void) {
+    hf_reload();
+    reset(2);
+    struct engine_build pointer = *build;
+    pointer.shadow_capture_site = 0;
+    pointer.shadow_owner_slot = 0x2b00040;
+    pointer.shadow_owner_fn = 0x9000;
+    build = &pointer;
+    size_t size = 0x2c00000, page = 4096;
+    unsigned char *image = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    assert(image != MAP_FAILED);
+    memcpy(image + pointer.shadow_position_fn, pointer.shadow_position_prefix, pointer.shadow_position_prefix_size);
+    uintptr_t fn = (uintptr_t)image + pointer.shadow_position_fn, meta = (uintptr_t)image + pointer.shadow_owner_fn;
+    uintptr_t *a = (void *)(image + pointer.shadow_vtable_a + pointer.shadow_vtable_slot);
+    uintptr_t *b = (void *)(image + pointer.shadow_vtable_b + pointer.shadow_vtable_slot);
+    uintptr_t *owner = (void *)(image + pointer.shadow_owner_slot);
+    shadow_feed = NULL;
+    mkdir(FEED_DIR, 0755);
+    hf_state_path = FEED_DIR "/hook-features";
+
+    *a = *b = fn;
+    *owner = meta + 4; // the slot holds another function: not this Engine's PlanckGUI
+    assert(!install_shadow_position_hooks((uintptr_t)image, page));
+    assert(*a == fn && *b == fn && *owner == meta + 4 && !shadow_feed);
+
+    *owner = meta;
+    assert(install_shadow_position_hooks((uintptr_t)image, page));
+    assert(*a == (uintptr_t)shadow_position_hook && *owner == (uintptr_t)shadow_owner_hook);
+    assert(shadow_owner_original == (const void *(*)(const void *))meta);
+    unsigned char zero[8] = {0};
+    assert(!memcmp(image + build->shadow_capture_site, zero, 8)); // no code was written
+
+    // Until Engine has asked PlanckGUI for its meta object, the deck's own line.
+    shadow_position_original = stock_position;
+    shadow_owner_original = planck_meta_object;
+    shadow_feed = feed;
+    shadow_planck_owner = 0;
+    void *item = (void *)0x202;
+    items[1] = (uintptr_t)item;
+    publish(2, 4242.0, 0.0, 0);
+    assert(shadow_position_hook(item) == STOCK);
+    // ... and the packs are not told that the line follows: the copy keeps playing.
+    char state[256] = "";
+    hf_publish();
+    FILE *f = fopen(hf_state_path, "r");
+    assert(f && fread(state, 1, sizeof state - 1, f) > 0 && !fclose(f) && !strstr(state, "on=") && !strstr(state, "shadow-paused-follow"));
+    assert(shadow_owner_hook(&planck) == (const char *)&planck + 1); // Engine's own answer
+    assert(shadow_position_hook(item) == 4242);
+    memset(state, 0, sizeof state);
+    f = fopen(hf_state_path, "r");
+    assert(f && fread(state, 1, sizeof state - 1, f) > 0 && !fclose(f) && strstr(state, "on=shadow-paused-follow\n"));
+    unlink(hf_state_path);
+    munmap(image, size);
+    unlink(SHADOW_POSITION_FEED_PATH);
+    rmdir(FEED_DIR);
+    puts("the owner is learnt from PlanckGUI's metaObject slot where no code site is verified, and on= is published only then: PASS");
+}
+
 int main(void) {
     hf_reload();
     test_follows_its_own_deck_only();
@@ -336,5 +398,6 @@ int main(void) {
     test_reader_against_a_writer();
     test_install_refuses_unverified_engines();
     test_install();
+    test_install_by_pointer();
     return 0;
 }
