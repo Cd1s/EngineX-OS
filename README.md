@@ -67,6 +67,7 @@ All 16 models use unified `*-Update.img` packages. First-generation units instal
 - **Web console, remote access & LAN tools**: redesigns the `:8080` console with an About QR code, Cloudflare Quick Tunnel (`Settings → Device → Remote access`), optional HTTPS (`:8443`), set tracklist CSV/text export, `Remote Load (LAN API)`, `cpu-ram-monitor` Mod, and `deploy/one-click-backend.sh` (#242, #268, #281, #296).
 - **Spanish UI & high-speed SD**: adds `Español` (`Settings → Device → Language`, #282) and an experimental 50 MHz SD mode on RK3288 decks (`Settings → Device → High-speed SD card`).
 - **Playback, streaming & hardware fixes**: fixes track-load audio stutter on `PRIME 4` (#298), disables Wi-Fi power saving on all decks (#309), persists 2nd-gen SSH passwords (#299), keeps streaming signed in when using an Engine DJ profile (#304), shows the active streaming icon in the deck header (#305), restores `Shift + View` on controllers, and asks before importing a USB profile.
+- **Start-up single-drive browse**: automatically browses the deck's only local drive at start-up on all 16 models (including late-mounting drives) instead of opening the Sources list. Thanks to @sklempert (#315).
 
 ---
 
