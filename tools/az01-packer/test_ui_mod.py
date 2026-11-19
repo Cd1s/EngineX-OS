@@ -2491,7 +2491,7 @@ assert.equal(scShadowData(2), null);
 assert.equal(scDeckLocked(2), false); // no source: a console can still load its local deck
 assert.equal(scShadowVisible(2), false);
 assert.deepEqual(legacy, []);
-scShadowApplyAll([{deck: 2, path: '/old.wav'}], false);
+scShadowApplyAll([{deck: 2, key: 'local-old', path: '/old.wav'}], false);
 assert.equal(scShadowDisplayOnly, false);
 assert.equal(legacy[0], 2);
 // Engine has not loaded it yet: the slot is covered, not empty.
@@ -2512,7 +2512,7 @@ const writes = [], lookups = [], props = {};
 globalThis.scTr = p => { lookups.push(p); return props[p] || (props[p] = {string: 'Off', set state(v) { writes.push(p + '=' + v); }, get state() { return undefined; }, set url(v) { writes.push(p + '=' + v); }}); };
 globalThis.scPressTimer = {restart() {}};
 const cdj = d => ({deck: d, displayOnly: true, key: 'cdj:x', title: 'CDJ', playing: true, at: now, positionMs: 500});
-scShadowApplyAll([{deck: 2, path: '/peer.flac', playing: true}, cdj(4)], false);
+scShadowApplyAll([{deck: 2, key: 'local-peer', path: '/peer.flac', playing: true}, cdj(4)], false);
 assert.equal(scShadowDisplayOnly, false);
 assert.equal(scShadowEngineMask, 30 & ~(1 << 4));
 assert.deepEqual(writes, ['/Client/Librarian/AddToDatabaseAndLoadToDeck2=file:///peer.flac']);
@@ -2520,7 +2520,7 @@ assert.equal(scShadowData(2).engine, true); assert.equal(scShadowVisible(2), tru
 assert.equal(scShadowData(4).title, 'CDJ'); assert.equal(scShadowVisible(4), true);
 assert.equal(requests.length, 1); assert(requests[0].url.endsWith('deck=4&key=cdj%3Ax'));
 scShadowAt[2].ready = true; // Engine holds the peer's track: the cover leaves
-scShadowApplyAll([{deck: 2, path: '/peer.flac', playing: true}, cdj(4)], false);
+scShadowApplyAll([{deck: 2, key: 'local-peer', path: '/peer.flac', playing: true}, cdj(4)], false);
 assert.equal(scShadowData(2).engine, true); assert.equal(scShadowVisible(2), true); assert.equal(scDeckLocked(2), true);
 // The display slot is never Engine's: no load, speed, seek or press reaches Deck 4.
 scShadowApply({deck: 4, path: '/must-not-load.wav'}); scShadowSpeed(4, 12); scShadowSeek(4, {}, 1000);
@@ -2543,15 +2543,15 @@ now += 400;
 scShadowApplyAll([cdj(2)], false);
 assert.equal(writes.length, 3); // unloaded once, then left alone
 // And back: Engine loads the peer's track again, the display leaves the slot.
-scShadowApplyAll([{deck: 2, path: '/peer2.flac'}, cdj(4)], false);
+scShadowApplyAll([{deck: 2, key: 'local-peer2', path: '/peer2.flac'}, cdj(4)], false);
 assert.equal(writes[3], '/Client/Librarian/AddToDatabaseAndLoadToDeck2=file:///peer2.flac');
 assert.equal(scShadowData(2).engine, true); assert.equal(scShadowData(2).title, ''); // the cover of this load, nothing of the CDJ's picture
 scShadowAt[2].ready = true;
-scShadowApplyAll([{deck: 2, path: '/peer2.flac'}, cdj(4)], false);
+scShadowApplyAll([{deck: 2, key: 'local-peer2', path: '/peer2.flac'}, cdj(4)], false);
 assert.equal(scShadowData(2).engine, true); assert.equal(scShadowVisible(2), true);
 assert.equal(scShadowData(4).title, 'CDJ'); assert.equal(scShadowVisible(4), true);
 // Forced Engine mode on a console: a CDJ on a Line In deck is flagged for the on-screen hint.
-scShadowApplyAll([{deck: 2, path: '/peer2.flac'}, {deck: 4, path: '/cdj.flac', lineIn: true}], false);
+scShadowApplyAll([{deck: 2, key: 'local-peer2', path: '/peer2.flac'}, {deck: 4, path: '/cdj.flac', lineIn: true}], false);
 assert.equal(scShadowEngineMask, 30); assert.equal(scShadowLineMask, 1 << 4); assert.equal(scShadowData(4), null);
 scShadowApplyAll([cdj(4)], true);
 assert.equal(scShadowEngineMask, 0); assert.equal(scShadowLineMask, 0);
