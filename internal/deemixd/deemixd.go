@@ -32,11 +32,28 @@ const (
 	defaultStateDir    = "/data/enginex/state"
 	defaultDownloadDir = "/data/enginex/Stream"
 	sdDownloadDir      = "/media/enginex-sd-cache/Music/Stream"
+	sdDatabasePath     = "/media/enginex-sd-cache/Engine Library/Database2/m.db"
 	defaultRelay       = ""
 	defaultPassword    = "change-me-in-config"
 	maxJobs            = 200
 	maxPending         = 20
+	sessionTTL         = 15 * time.Minute
 )
+
+var (
+	errURLRe    = regexp.MustCompile(`(?i)https?://\S+`)
+	errSecretRe = regexp.MustCompile(`\b(?:[0-9a-fA-F]{32,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_.-]+)\b`)
+)
+
+func sanitizeError(err error) string {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return "network request failed"
+	}
+	msg := errURLRe.ReplaceAllString(err.Error(), "<url>")
+	msg = errSecretRe.ReplaceAllString(msg, "<redacted>")
+	return msg
+}
 
 type queueRequest struct {
 	URL        string `json:"url"`
@@ -58,9 +75,15 @@ type downloadFunc func(context.Context, string, string, string, deezer.DownloadO
 type daemon struct {
 	stateDir, downloadDir string
 	hc                    *http.Client
+	login                 func(context.Context, string) (*deezer.Session, error)
+	downloadTrack         func(context.Context, *deezer.Session, string, string, deezer.DownloadOptions) (string, error)
 	download              downloadFunc
 	ctx                   context.Context
 	sem                   chan struct{}
+	sessMu                sync.Mutex
+	sessARL               string
+	sess                  *deezer.Session
+	sessAt                time.Time
 	mu                    sync.Mutex
 	jobs                  map[string]job
 	order                 []string
@@ -68,16 +91,34 @@ type daemon struct {
 }
 
 func newDaemon(ctx context.Context, stateDir, downloadDir string) *daemon {
-	return &daemon{stateDir: stateDir, downloadDir: downloadDir, ctx: ctx,
-		hc:       &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
-		download: downloadDirect, sem: make(chan struct{}, 1), jobs: make(map[string]job)}
+	d := &daemon{
+		stateDir: stateDir, downloadDir: downloadDir, ctx: ctx,
+		hc:    &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
+		login: deezer.Login,
+		downloadTrack: func(ctx context.Context, s *deezer.Session, trackID, dst string, opts deezer.DownloadOptions) (string, error) {
+			return s.DownloadTrack(ctx, trackID, dst, opts)
+		},
+		sem:  make(chan struct{}, 1),
+		jobs: make(map[string]job),
+	}
+	d.download = d.downloadDirect
+	return d
 }
 
 func preferredDownloadDir() string {
-	if st, err := os.Stat(sdDownloadDir); err == nil && st.IsDir() {
-		return sdDownloadDir
+	return preferredDownloadDirFrom(sdDownloadDir, sdDatabasePath, defaultDownloadDir)
+}
+
+// preferredDownloadDirFrom matches stream-sync's SD-cache rule: only use the SD
+// cache directory when the Engine Library database on that card is also present,
+// otherwise fall back to internal storage so deemixd and stream-sync agree.
+func preferredDownloadDirFrom(sdDir, sdDB, fallback string) string {
+	if st, err := os.Stat(sdDir); err == nil && st.IsDir() {
+		if db, err := os.Stat(sdDB); err == nil && db.Mode().IsRegular() {
+			return sdDir
+		}
 	}
-	return defaultDownloadDir
+	return fallback
 }
 
 // Main runs the daemon until SIGINT/SIGTERM.
@@ -264,6 +305,7 @@ func (d *daemon) poll(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *daemon) run(id, trackID string, opts deezer.DownloadOptions) {
+	started := time.Now()
 	ctx, cancel := context.WithTimeout(d.ctx, 10*time.Minute)
 	defer cancel()
 	var path string
@@ -276,27 +318,26 @@ func (d *daemon) run(id, trackID string, opts deezer.DownloadOptions) {
 		err = ctx.Err()
 	}
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	j := d.jobs[id]
 	if err != nil {
 		j.State = "error"
-		// URL errors can contain signed media URLs or Deezer API tokens.
-		var ue *url.Error
-		if errors.As(err, &ue) {
-			j.Error = "network request failed"
-		} else {
-			j.Error = err.Error()
-		}
+		j.Error = sanitizeError(err)
 	} else {
 		j.State = "completed"
 		j.Progress = 1
 		j.Path = path
 	}
 	d.jobs[id] = j
+	d.mu.Unlock()
+	if err != nil {
+		log.Printf("enginex-deemixd: track=%s state=error elapsed=%s err=%q", trackID, time.Since(started).Round(time.Millisecond), j.Error)
+	} else {
+		log.Printf("enginex-deemixd: track=%s state=completed elapsed=%s", trackID, time.Since(started).Round(time.Millisecond))
+	}
 }
 
 func (d *daemon) fetch(ctx context.Context, trackID string, opts deezer.DownloadOptions) (string, error) {
-	arl, err := d.credentials(ctx)
+	arl, fromLocal, err := d.credentialsSource(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -314,6 +355,11 @@ func (d *daemon) fetch(ctx context.Context, trackID string, opts deezer.Download
 	}
 	defer os.Remove(tmp)
 	format, err := d.download(ctx, arl, trackID, tmp, opts)
+	if err != nil && fromLocal && errors.Is(err, deezer.ErrInvalidARL) {
+		if freshARL, rerr := d.refreshExpiredARLFromRelay(ctx, arl); rerr == nil && freshARL != "" {
+			format, err = d.download(ctx, freshARL, trackID, tmp, opts)
+		}
+	}
 	if err != nil {
 		return "", err
 	}
@@ -342,12 +388,38 @@ func (d *daemon) fetch(ctx context.Context, trackID string, opts deezer.Download
 	return path, nil
 }
 
-func downloadDirect(ctx context.Context, arl, trackID, dst string, opts deezer.DownloadOptions) (string, error) {
-	session, err := deezer.Login(ctx, arl)
-	if err != nil {
-		return "", err
+func (d *daemon) downloadDirect(ctx context.Context, arl, trackID, dst string, opts deezer.DownloadOptions) (string, error) {
+	d.sessMu.Lock()
+	cached := d.sess != nil && d.sessARL == arl && time.Since(d.sessAt) < sessionTTL
+	sess := d.sess
+	d.sessMu.Unlock()
+	if !cached {
+		var err error
+		sess, err = d.login(ctx, arl)
+		if err != nil {
+			return "", err
+		}
+		d.sessMu.Lock()
+		d.sess, d.sessARL, d.sessAt = sess, arl, time.Now()
+		d.sessMu.Unlock()
 	}
-	return session.DownloadTrack(ctx, trackID, dst, opts)
+	format, err := d.downloadTrack(ctx, sess, trackID, dst, opts)
+	if err != nil && cached && ctx.Err() == nil {
+		d.sessMu.Lock()
+		if d.sess == sess {
+			d.sess, d.sessARL, d.sessAt = nil, "", time.Time{}
+		}
+		d.sessMu.Unlock()
+		sess, lerr := d.login(ctx, arl)
+		if lerr != nil {
+			return "", lerr
+		}
+		d.sessMu.Lock()
+		d.sess, d.sessARL, d.sessAt = sess, arl, time.Now()
+		d.sessMu.Unlock()
+		return d.downloadTrack(ctx, sess, trackID, dst, opts)
+	}
+	return format, err
 }
 
 func readObject(path string) (map[string]json.RawMessage, error) {
@@ -365,35 +437,17 @@ func readObject(path string) (map[string]json.RawMessage, error) {
 	return obj, nil
 }
 
-func (d *daemon) credentials(ctx context.Context) (string, error) {
-	ownerPath := filepath.Join(d.stateDir, "deezer-owner.json")
-	obj, err := readObject(ownerPath)
-	if err != nil {
-		return "", err
-	}
-	var arl string
-	if raw, ok := obj["ARL"]; ok {
-		if json.Unmarshal(raw, &arl) != nil {
-			return "", errors.New("invalid ARL in deezer-owner.json")
-		}
-	}
-	arl = strings.TrimSpace(arl)
-	if arl != "" {
-		if !deezer.ValidARL(arl) {
-			return "", errors.New("invalid ARL in deezer-owner.json")
-		}
-		return arl, nil
-	}
+func (d *daemon) relayFetchARL(ctx context.Context) (arl, userID string, err error) {
 	cfg, err := readObject(filepath.Join(d.stateDir, "deemix-config.json"))
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	relay, password := defaultRelay, defaultPassword
 	for _, key := range []string{"deemixUrl", "relayUrl"} {
 		if raw, ok := cfg[key]; ok {
 			var s string
 			if json.Unmarshal(raw, &s) != nil {
-				return "", fmt.Errorf("invalid %s in deemix-config.json", key)
+				return "", "", fmt.Errorf("invalid %s in deemix-config.json", key)
 			}
 			if s != "" {
 				relay = s
@@ -403,7 +457,7 @@ func (d *daemon) credentials(ctx context.Context) (string, error) {
 	if raw, ok := cfg["deemixPassword"]; ok {
 		var s string
 		if json.Unmarshal(raw, &s) != nil {
-			return "", errors.New("invalid deemixPassword in deemix-config.json")
+			return "", "", errors.New("invalid deemixPassword in deemix-config.json")
 		}
 		if s != "" {
 			password = s
@@ -411,10 +465,10 @@ func (d *daemon) credentials(ctx context.Context) (string, error) {
 	}
 	u, err := url.Parse(relay)
 	if err != nil || u.Host == "" || u.User != nil {
-		return "", errors.New("invalid deemixUrl")
+		return "", "", errors.New("invalid deemixUrl")
 	}
 	if !stems.ValidEndpoint(relay) {
-		return "", errors.New("deemixUrl must use HTTPS or a private LAN address")
+		return "", "", errors.New("deemixUrl must use HTTPS or a private LAN address")
 	}
 	u.Path = strings.TrimRight(u.Path, "/") + "/api/config"
 	u.RawPath = ""
@@ -422,16 +476,17 @@ func (d *daemon) credentials(ctx context.Context) (string, error) {
 	u.Fragment = ""
 	req, err := http.NewRequestWithContext(ctx, "GET", u.String(), nil)
 	if err != nil {
-		return "", errors.New("invalid relay request")
+		return "", "", errors.New("invalid relay request")
 	}
 	req.Header.Set("X-Deemix-Password", password)
+	req.Header.Set("Authorization", "Bearer "+password)
 	resp, err := d.hc.Do(req)
 	if err != nil {
-		return "", errors.New("credential relay connection failed")
+		return "", "", errors.New("credential relay connection failed")
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("credential relay: HTTP %d", resp.StatusCode)
+		return "", "", fmt.Errorf("credential relay: HTTP %d", resp.StatusCode)
 	}
 	var result struct {
 		Config struct {
@@ -440,11 +495,76 @@ func (d *daemon) credentials(ctx context.Context) (string, error) {
 		} `json:"config"`
 	}
 	if json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&result) != nil || !deezer.ValidARL(result.Config.ARL) {
-		return "", errors.New("credential relay returned no valid deezerArl")
+		return "", "", errors.New("credential relay returned no valid deezerArl")
+	}
+	return result.Config.ARL, result.Config.UserID, nil
+}
+
+func (d *daemon) credentials(ctx context.Context) (string, error) {
+	arl, _, err := d.credentialsSource(ctx)
+	return arl, err
+}
+
+func (d *daemon) credentialsSource(ctx context.Context) (string, bool, error) {
+	ownerPath := filepath.Join(d.stateDir, "deezer-owner.json")
+	obj, err := readObject(ownerPath)
+	if err != nil {
+		return "", false, err
+	}
+	var arl string
+	if raw, ok := obj["ARL"]; ok {
+		if json.Unmarshal(raw, &arl) != nil {
+			return "", false, errors.New("invalid ARL in deezer-owner.json")
+		}
+	}
+	arl = strings.TrimSpace(arl)
+	if arl != "" {
+		if !deezer.ValidARL(arl) {
+			return "", false, errors.New("invalid ARL in deezer-owner.json")
+		}
+		return arl, true, nil
+	}
+	relayARL, relayUserID, err := d.relayFetchARL(ctx)
+	if err != nil {
+		return "", false, err
 	}
 	// Re-read before publishing to preserve fields written by stream-sync while
 	// the relay request was in flight, including a newly supplied local ARL.
 	obj, err = readObject(ownerPath)
+	if err != nil {
+		return "", false, err
+	}
+	var current string
+	if raw, ok := obj["ARL"]; ok {
+		_ = json.Unmarshal(raw, &current)
+	}
+	if deezer.ValidARL(strings.TrimSpace(current)) {
+		return strings.TrimSpace(current), true, nil
+	}
+	obj["ARL"], _ = json.Marshal(relayARL)
+	userRaw, hasUser := obj["UserID"]
+	if (!hasUser || string(userRaw) == `""` || string(userRaw) == "null") && relayUserID != "" {
+		obj["UserID"], _ = json.Marshal(relayUserID)
+	}
+	b, err := json.MarshalIndent(obj, "", "  ")
+	if err != nil {
+		return "", false, err
+	}
+	if err := writeAtomic(ownerPath, b); err != nil {
+		return "", false, err
+	}
+	return relayARL, false, nil
+}
+
+// refreshExpiredARLFromRelay pulls a newer ARL from the configured relay when a
+// locally saved ARL was rejected by Deezer (USER_ID=0).
+func (d *daemon) refreshExpiredARLFromRelay(ctx context.Context, expiredARL string) (string, error) {
+	relayARL, relayUserID, err := d.relayFetchARL(ctx)
+	if err != nil || relayARL == expiredARL {
+		return "", err
+	}
+	ownerPath := filepath.Join(d.stateDir, "deezer-owner.json")
+	obj, err := readObject(ownerPath)
 	if err != nil {
 		return "", err
 	}
@@ -452,13 +572,13 @@ func (d *daemon) credentials(ctx context.Context) (string, error) {
 	if raw, ok := obj["ARL"]; ok {
 		_ = json.Unmarshal(raw, &current)
 	}
-	if deezer.ValidARL(strings.TrimSpace(current)) {
-		return strings.TrimSpace(current), nil
+	current = strings.TrimSpace(current)
+	if current != "" && current != expiredARL && deezer.ValidARL(current) {
+		return current, nil
 	}
-	obj["ARL"], _ = json.Marshal(result.Config.ARL)
-	userRaw, hasUser := obj["UserID"]
-	if (!hasUser || string(userRaw) == `""` || string(userRaw) == "null") && result.Config.UserID != "" {
-		obj["UserID"], _ = json.Marshal(result.Config.UserID)
+	obj["ARL"], _ = json.Marshal(relayARL)
+	if relayUserID != "" {
+		obj["UserID"], _ = json.Marshal(relayUserID)
 	}
 	b, err := json.MarshalIndent(obj, "", "  ")
 	if err != nil {
@@ -467,7 +587,7 @@ func (d *daemon) credentials(ctx context.Context) (string, error) {
 	if err := writeAtomic(ownerPath, b); err != nil {
 		return "", err
 	}
-	return result.Config.ARL, nil
+	return relayARL, nil
 }
 
 func writeAtomic(path string, b []byte) error {

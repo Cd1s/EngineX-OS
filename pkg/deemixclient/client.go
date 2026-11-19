@@ -184,7 +184,7 @@ func (c *Client) Download(ctx context.Context, t providers.Track, progress func(
 	jobID := q.ID
 	interval := c.PollInterval
 	if interval <= 0 {
-		interval = time.Second
+		interval = 200 * time.Millisecond
 	}
 	for {
 		if q.Error != "" {

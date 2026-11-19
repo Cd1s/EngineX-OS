@@ -2,6 +2,7 @@
 package deezer
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/cipher"
@@ -18,14 +19,37 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"sync"
 	"time"
 )
 
 import "golang.org/x/crypto/blowfish"
 
 const (
-	deezerGW  = "https://www.deezer.com/ajax/gw-light.php"
-	userAgent = "Mozilla/5.0 (X11; Linux armv7l) AppleWebKit/537.36 Chrome/130.0 Safari/537.36"
+	deezerGW       = "https://www.deezer.com/ajax/gw-light.php"
+	userAgent      = "Mozilla/5.0 (X11; Linux armv7l) AppleWebKit/537.36 Chrome/130.0 Safari/537.36"
+	stripeSize     = 2048
+	stripePeriod   = 3 * stripeSize
+	splitBytes     = 128 * stripePeriod // 786432 bytes (~768 KiB), aligned to BF_CBC_STRIPE period
+	partsAtOnce    = 16
+	maxAudioBytes  = 512 << 20
+	cdnPartTimeout = 60 * time.Second
+)
+
+// ErrInvalidARL reports that Deezer rejected the ARL (USER_ID=0).
+var ErrInvalidARL = errors.New("ARL 无效或已过期（Deezer 返回 USER_ID=0）")
+
+var (
+	origDefaultTransport = http.DefaultTransport
+	defaultCDNClient     = func() *http.Client {
+		if base, ok := http.DefaultTransport.(*http.Transport); ok {
+			t := base.Clone()
+			t.ResponseHeaderTimeout = 30 * time.Second
+			t.MaxIdleConnsPerHost = partsAtOnce
+			return &http.Client{Transport: t}
+		}
+		return &http.Client{}
+	}()
 )
 
 var arlRe = regexp.MustCompile(`^[0-9a-fA-F]{120,300}$`)
@@ -72,7 +96,7 @@ func Login(ctx context.Context, arl string) (*Session, error) {
 	}
 	id, _ := r.Results.USER.USERID.Int64()
 	if id <= 0 {
-		return nil, errors.New("ARL 无效或已过期（Deezer 返回 USER_ID=0）")
+		return nil, ErrInvalidARL
 	}
 	s.UserID = strconv.FormatInt(id, 10)
 	s.UserName = r.Results.USER.BLOGNAME
@@ -218,20 +242,28 @@ func blowfishKey(sngID string) []byte {
 	return key
 }
 
+type byteRange struct {
+	from, to int64 // inclusive
+}
+
+func (s *Session) cdnClient() *http.Client {
+	if s.hc != nil && s.hc.Transport != nil {
+		return &http.Client{Transport: s.hc.Transport}
+	}
+	if http.DefaultTransport != origDefaultTransport {
+		return &http.Client{Transport: http.DefaultTransport}
+	}
+	return defaultCDNClient
+}
+
 func (s *Session) fetchDecrypt(ctx context.Context, srcURL, sngID, dst string) error {
-	req, err := http.NewRequestWithContext(ctx, "GET", srcURL, nil)
-	if err != nil {
+	if _, err := http.NewRequestWithContext(ctx, "GET", srcURL, nil); err != nil {
 		return errors.New("deezer: invalid media URL")
 	}
-	req.Header.Set("User-Agent", userAgent)
-	hc := &http.Client{Timeout: 5 * time.Minute, Transport: s.hc.Transport}
-	resp, err := hc.Do(req)
+	key := blowfishKey(sngID)
+	bf, err := blowfish.NewCipher(key)
 	if err != nil {
 		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("deezer cdn: HTTP %d", resp.StatusCode)
 	}
 	f, err := os.CreateTemp(filepath.Dir(dst), ".part-*")
 	if err != nil {
@@ -240,12 +272,12 @@ func (s *Session) fetchDecrypt(ctx context.Context, srcURL, sngID, dst string) e
 	tmp := f.Name()
 	defer os.Remove(tmp)
 	defer f.Close()
-	cw := &countWriter{w: f}
-	if err := decryptStripe(transportReader{resp.Body}, cw, blowfishKey(sngID)); err != nil {
+	bw := bufio.NewWriterSize(f, 256*1024)
+	if err := s.downloadTo(ctx, srcURL, key, bf, bw); err != nil {
 		return err
 	}
-	if cw.n == 0 || (resp.ContentLength >= 0 && cw.n != resp.ContentLength) {
-		return errors.New("deezer: empty or truncated audio")
+	if err := bw.Flush(); err != nil {
+		return err
 	}
 	if err := f.Sync(); err != nil {
 		return err
@@ -254,6 +286,199 @@ func (s *Session) fetchDecrypt(ctx context.Context, srcURL, sngID, dst string) e
 		return err
 	}
 	return os.Rename(tmp, dst)
+}
+
+func (s *Session) downloadTo(ctx context.Context, srcURL string, key []byte, bf cipher.Block, w io.Writer) error {
+	reqCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, "GET", srcURL, nil)
+	if err != nil {
+		return errors.New("deezer: invalid media URL")
+	}
+	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("Range", fmt.Sprintf("bytes=0-%d", splitBytes-1))
+	resp, err := s.cdnClient().Do(req)
+	if err != nil {
+		return err
+	}
+	switch resp.StatusCode {
+	case http.StatusRequestedRangeNotSatisfiable:
+		resp.Body.Close()
+		return s.downloadSingle(ctx, srcURL, key, w)
+	case http.StatusOK:
+		defer resp.Body.Close()
+		return decryptResponse(resp, key, w)
+	case http.StatusPartialContent:
+	default:
+		resp.Body.Close()
+		return fmt.Errorf("deezer cdn: HTTP %d", resp.StatusCode)
+	}
+	var from, to, total int64
+	if _, err := fmt.Sscanf(resp.Header.Get("Content-Range"), "bytes %d-%d/%d", &from, &to, &total); err != nil || from != 0 || to < 0 || to >= total || total <= 0 || total > maxAudioBytes {
+		resp.Body.Close()
+		return errors.New("deezer: unexpected byte range")
+	}
+	// Parallel decryption requires each subsequent part to begin on a 6144-byte
+	// BF_CBC_STRIPE period boundary. If the CDN clamped the first range off-grid,
+	// fall back cleanly to a plain sequential stream.
+	if to+1 < total && (to+1)%stripePeriod != 0 {
+		resp.Body.Close()
+		return s.downloadSingle(ctx, srcURL, key, w)
+	}
+	first, err := io.ReadAll(io.LimitReader(transportReader{resp.Body}, to+2))
+	resp.Body.Close()
+	if err != nil || int64(len(first)) != to+1 {
+		return errors.New("deezer: empty or truncated audio")
+	}
+	decryptAligned(first, bf)
+	if _, err := w.Write(first); err != nil {
+		return err
+	}
+	if to+1 == total {
+		return nil
+	}
+	var parts []byteRange
+	for at := to + 1; at < total; at += splitBytes {
+		parts = append(parts, byteRange{at, min(at+splitBytes, total) - 1})
+	}
+	return s.fetchRangedParts(ctx, srcURL, bf, w, parts)
+}
+
+func (s *Session) downloadSingle(ctx context.Context, srcURL string, key []byte, w io.Writer) error {
+	reqCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, "GET", srcURL, nil)
+	if err != nil {
+		return errors.New("deezer: invalid media URL")
+	}
+	req.Header.Set("User-Agent", userAgent)
+	resp, err := s.cdnClient().Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("deezer cdn: HTTP %d", resp.StatusCode)
+	}
+	return decryptResponse(resp, key, w)
+}
+
+func decryptResponse(resp *http.Response, key []byte, w io.Writer) error {
+	cw := &countWriter{w: w}
+	br := bufio.NewReaderSize(io.LimitReader(transportReader{resp.Body}, maxAudioBytes+1), 64*1024)
+	if err := decryptStripe(br, cw, key); err != nil {
+		return err
+	}
+	if cw.n == 0 || cw.n > maxAudioBytes || (resp.ContentLength >= 0 && cw.n != resp.ContentLength) {
+		return errors.New("deezer: empty or truncated audio")
+	}
+	return nil
+}
+
+func (s *Session) fetchRangedParts(ctx context.Context, srcURL string, bf cipher.Block, w io.Writer, parts []byteRange) error {
+	partCtx, cancel := context.WithCancel(ctx)
+	var wg sync.WaitGroup
+	defer wg.Wait()
+	defer cancel()
+	client := s.cdnClient()
+	type answer struct {
+		data []byte
+		err  error
+	}
+	answers := make([]chan answer, len(parts))
+	for i := range answers {
+		answers[i] = make(chan answer, 1)
+	}
+	slots := make(chan struct{}, partsAtOnce)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i, p := range parts {
+			select {
+			case slots <- struct{}{}:
+			case <-partCtx.Done():
+				return
+			}
+			wg.Add(1)
+			go func(idx int, pr byteRange) {
+				defer wg.Done()
+				data, err := fetchRangedPart(partCtx, client, srcURL, pr)
+				if err == nil {
+					decryptAligned(data, bf)
+				}
+				answers[idx] <- answer{data, err}
+			}(i, p)
+		}
+	}()
+	for i := range parts {
+		var a answer
+		select {
+		case a = <-answers[i]:
+		case <-partCtx.Done():
+			return partCtx.Err()
+		}
+		if a.err != nil {
+			return a.err
+		}
+		if _, err := w.Write(a.data); err != nil {
+			return err
+		}
+		<-slots
+	}
+	return nil
+}
+
+func fetchRangedPart(ctx context.Context, client *http.Client, srcURL string, p byteRange) ([]byte, error) {
+	wantLen := p.to - p.from + 1
+	var last error
+	for attempt := 0; attempt < 3; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		attemptCtx, cancel := context.WithTimeout(ctx, cdnPartTimeout)
+		req, err := http.NewRequestWithContext(attemptCtx, "GET", srcURL, nil)
+		if err != nil {
+			cancel()
+			return nil, errors.New("deezer: invalid media URL")
+		}
+		req.Header.Set("User-Agent", userAgent)
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", p.from, p.to))
+		resp, err := client.Do(req)
+		if err != nil {
+			cancel()
+			last = err
+			continue
+		}
+		data, rerr := io.ReadAll(io.LimitReader(transportReader{resp.Body}, wantLen+1))
+		resp.Body.Close()
+		cancel()
+		switch {
+		case resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone:
+			return nil, fmt.Errorf("deezer cdn: HTTP %d", resp.StatusCode)
+		case resp.StatusCode != http.StatusPartialContent:
+			last = fmt.Errorf("deezer cdn: HTTP %d", resp.StatusCode)
+		case rerr != nil || int64(len(data)) != wantLen || (resp.ContentLength >= 0 && resp.ContentLength != wantLen):
+			last = errors.New("deezer: empty or truncated audio")
+		default:
+			if cr := resp.Header.Get("Content-Range"); cr != "" {
+				var from, to, total int64
+				if _, err := fmt.Sscanf(cr, "bytes %d-%d/%d", &from, &to, &total); err != nil || from != p.from || to != p.to {
+					last = errors.New("deezer: unexpected byte range")
+					continue
+				}
+			}
+			return data, nil
+		}
+	}
+	return nil, last
+}
+
+// decryptAligned decrypts a buffer starting on a stripePeriod (6144-byte) boundary.
+func decryptAligned(b []byte, bf cipher.Block) {
+	iv := []byte{0, 1, 2, 3, 4, 5, 6, 7}
+	for off := 0; off+stripeSize <= len(b); off += stripePeriod {
+		cipher.NewCBCDecrypter(bf, iv).CryptBlocks(b[off:off+stripeSize], b[off:off+stripeSize])
+	}
 }
 
 // decryptStripe undoes Deezer's BF_CBC_STRIPE: every third 2048-byte chunk

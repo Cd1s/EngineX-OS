@@ -329,3 +329,132 @@ func TestMainExitsCleanlyWhenPortIsTaken(t *testing.T) {
 		t.Fatalf("second instance must exit 0 so systemd does not respawn it: %v", err)
 	}
 }
+
+func TestPreferredDownloadDirMatchesStreamSync(t *testing.T) {
+	base := t.TempDir()
+	sdDir := filepath.Join(base, "Music", "Stream")
+	sdDB := filepath.Join(base, "Engine Library", "Database2", "m.db")
+	fallback := filepath.Join(base, "internal")
+	if err := os.MkdirAll(sdDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// SD stream folder exists, but Engine Library m.db is absent: must fall back
+	// to internal storage so deemixd matches stream-sync.
+	if got := preferredDownloadDirFrom(sdDir, sdDB, fallback); got != fallback {
+		t.Fatalf("without m.db: got %q, want %q", got, fallback)
+	}
+	if err := os.MkdirAll(filepath.Dir(sdDB), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sdDB, []byte("sqlite"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := preferredDownloadDirFrom(sdDir, sdDB, fallback); got != sdDir {
+		t.Fatalf("with m.db: got %q, want %q", got, sdDir)
+	}
+}
+
+func TestSessionReusedAcrossDownloads(t *testing.T) {
+	d := testDaemon(t)
+	h := d.routes()
+	arl1 := strings.Repeat("a", 192)
+	arl2 := strings.Repeat("b", 192)
+	owner := filepath.Join(d.stateDir, "deezer-owner.json")
+	writeState(t, owner, `{"UserID":"42","ARL":"`+arl1+`"}`)
+
+	logins := 0
+	var lastLoginARL string
+	d.login = func(_ context.Context, arl string) (*deezer.Session, error) {
+		logins++
+		lastLoginARL = arl
+		return &deezer.Session{UserID: "42"}, nil
+	}
+	failFirstSecondTrack := true
+	d.downloadTrack = func(_ context.Context, _ *deezer.Session, id, dst string, _ deezer.DownloadOptions) (string, error) {
+		if id == "3135557" && failFirstSecondTrack {
+			failFirstSecondTrack = false
+			return "", errors.New("stale token")
+		}
+		return "flac", os.WriteFile(dst, []byte("fLaCdata"), 0o600)
+	}
+
+	// Track 1: logs in once.
+	j := awaitJob(t, h, enqueueTest(t, h, trackRequest).ID)
+	if j.State != "completed" || logins != 1 {
+		t.Fatalf("first download: job=%+v logins=%d", j, logins)
+	}
+	// Track 1 again with same ARL: reuses cached session without re-logging in.
+	j = awaitJob(t, h, enqueueTest(t, h, trackRequest).ID)
+	if j.State != "completed" || logins != 1 {
+		t.Fatalf("cached download should reuse session: job=%+v logins=%d", j, logins)
+	}
+	// Track 2 fails once on cached session -> invalidates cache, re-logins once, succeeds.
+	j = awaitJob(t, h, enqueueTest(t, h, `{"url":"https://www.deezer.com/track/3135557","bitrate":9,"quality":"FLAC","allowLossy":true}`).ID)
+	if j.State != "completed" || logins != 2 {
+		t.Fatalf("stale cached session should re-login once: job=%+v logins=%d", j, logins)
+	}
+	// Changing local ARL invalidates previous session immediately.
+	writeState(t, owner, `{"UserID":"42","ARL":"`+arl2+`"}`)
+	j = awaitJob(t, h, enqueueTest(t, h, trackRequest).ID)
+	if j.State != "completed" || logins != 3 || lastLoginARL != arl2 {
+		t.Fatalf("new ARL should trigger fresh login: job=%+v logins=%d", j, logins)
+	}
+}
+
+func TestExpiredLocalARLRefreshesFromRelay(t *testing.T) {
+	d := testDaemon(t)
+	h := d.routes()
+	oldARL := strings.Repeat("d", 192)
+	newARL := strings.Repeat("e", 192)
+	owner := filepath.Join(d.stateDir, "deezer-owner.json")
+	writeState(t, owner, `{"UserID":"42","ARL":"`+oldARL+`"}`)
+	relayCalls := 0
+	relaySrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		relayCalls++
+		if r.Header.Get("X-Deemix-Password") != "pw" || r.Header.Get("Authorization") != "Bearer pw" {
+			t.Errorf("missing relay auth headers")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"config":{"deezerArl":"` + newARL + `","deezerUserId":"99"}}`))
+	}))
+	defer relaySrv.Close()
+	writeState(t, filepath.Join(d.stateDir, "deemix-config.json"), `{"relayUrl":"`+relaySrv.URL+`","deemixPassword":"pw"}`)
+	d.hc = relaySrv.Client()
+
+	d.login = func(_ context.Context, arl string) (*deezer.Session, error) {
+		if arl == oldARL {
+			return nil, deezer.ErrInvalidARL
+		}
+		if arl != newARL {
+			t.Fatalf("unexpected ARL")
+		}
+		return &deezer.Session{UserID: "99"}, nil
+	}
+	d.downloadTrack = func(_ context.Context, _ *deezer.Session, _, dst string, _ deezer.DownloadOptions) (string, error) {
+		return "flac", os.WriteFile(dst, []byte("fLaCdata"), 0o600)
+	}
+
+	j := awaitJob(t, h, enqueueTest(t, h, trackRequest).ID)
+	if j.State != "completed" || relayCalls != 1 {
+		t.Fatalf("expected relay refresh on expired ARL: job=%+v relayCalls=%d", j, relayCalls)
+	}
+	raw, err := os.ReadFile(owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved struct {
+		ARL    string
+		UserID string
+	}
+	if err := json.Unmarshal(raw, &saved); err != nil || saved.ARL != newARL || saved.UserID != "99" {
+		t.Fatalf("deezer-owner.json not updated with refreshed ARL/UserID")
+	}
+}
+
+func TestSanitizeErrorRedactsURLsAndTokens(t *testing.T) {
+	arl := strings.Repeat("a", 192)
+	got := sanitizeError(errors.New("failed fetching https://cdn.deezer.com/secret?token=123 with " + arl))
+	if strings.Contains(got, "cdn.deezer.com") || strings.Contains(got, arl) {
+		t.Fatalf("secret leaked in sanitized error: %q", got)
+	}
+}

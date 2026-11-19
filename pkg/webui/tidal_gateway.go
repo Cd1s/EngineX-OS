@@ -1947,7 +1947,7 @@ func (g *tidalGateway) streamTarget(r *http.Request, id int64, ref trackRef) (ad
 
 // Spotify defers a cold match to the media request to preserve #269 carrier
 // isolation. Other variable-codec sources download before returning a manifest.
-func (g *tidalGateway) knownCodec(w http.ResponseWriter, r *http.Request, ref trackRef) bool {
+func (g *tidalGateway) knownCodec(w http.ResponseWriter, r *http.Request, id int64, ref trackRef) bool {
 	j := g.s.jobs
 	if ref.file != "" || ref.track.Provider == "spotify" || j == nil || j.File(ref.track) != "" {
 		return true
@@ -1960,8 +1960,10 @@ func (g *tidalGateway) knownCodec(w http.ResponseWriter, r *http.Request, ref tr
 			return true
 		}
 	}
+	started := time.Now()
 	http.NewResponseController(w).SetWriteDeadline(time.Time{})
 	if _, err := j.Fetch(r.Context(), ref.session, ref.track, ref.guest); err != nil {
+		log.Printf("stream-sync: load track=%d provider=%s scope=%s step=manifest result=failed elapsed=%s canceled=%t error_type=%T", id, ref.track.Provider, g.s.scope(), time.Since(started).Round(time.Millisecond), r.Context().Err() != nil, err)
 		fail(w, 502, err)
 		return false
 	}
@@ -1976,7 +1978,7 @@ func (g *tidalGateway) playbackInfo(w http.ResponseWriter, r *http.Request) {
 		g.rbxRefreshLoad(r.Context(), id)
 	}
 	log.Printf("stream-sync: load track=%d provider=%s scope=%s step=request api=manifest", id, ref.track.Provider, g.s.scope())
-	if !g.knownCodec(w, r, ref) {
+	if !g.knownCodec(w, r, id, ref) {
 		return
 	}
 	address, codec := g.streamTarget(r, id, ref)
@@ -1999,7 +2001,7 @@ func (g *tidalGateway) playbackInfo(w http.ResponseWriter, r *http.Request) {
 	respond(w, map[string]any{"trackId": id, "assetPresentation": "FULL", "audioMode": "STEREO", "audioQuality": "LOSSLESS", "manifestMimeType": "application/vnd.tidal.bts", "manifestHash": "", "manifest": base64.StdEncoding.EncodeToString(manifest), "albumReplayGain": 0, "albumPeakAmplitude": 1, "trackReplayGain": 0, "trackPeakAmplitude": 1})
 }
 func (g *tidalGateway) streamURL(w http.ResponseWriter, r *http.Request) {
-	if id, ref, ok := g.playable(w, r, r.PathValue("id")); ok && g.knownCodec(w, r, ref) {
+	if id, ref, ok := g.playable(w, r, r.PathValue("id")); ok && g.knownCodec(w, r, id, ref) {
 		address, codec := g.streamTarget(r, id, ref)
 		log.Printf("stream-sync: load track=%d provider=%s scope=%s step=manifest api=streamurl codec=%s", id, ref.track.Provider, g.s.scope(), codec)
 		respond(w, map[string]any{"url": address, "codec": codec, "soundQuality": "LOSSLESS", "trackId": id})
