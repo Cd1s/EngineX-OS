@@ -65,8 +65,12 @@ func omniDrive(t *testing.T) (dbPath, root string, flac []byte) {
 }
 
 func omniServer(t *testing.T, root string, on bool) (*Server, string) {
+	return omniServerScope(t, root, on, "deezer")
+}
+
+func omniServerScope(t *testing.T, root string, on bool, scope string) (*Server, string) {
 	ui := t.TempDir()
-	conf := "scope=deezer\n"
+	conf := "scope=" + scope + "\n"
 	if on {
 		conf += "omni_source=1\n"
 	}
@@ -92,7 +96,7 @@ func titles(t *testing.T, items []json.RawMessage) ([]string, map[string]int64) 
 	return out, ids
 }
 
-func TestOmniSourceListsDrivePlaylistsAndOtherServices(t *testing.T) {
+func TestOmniSourceListsDrivePlaylistsInDeezerScope(t *testing.T) {
 	_, root, _ := omniDrive(t)
 	_, off := omniServer(t, root, false)
 	var plain tidalList
@@ -107,29 +111,83 @@ func TestOmniSourceListsDrivePlaylistsAndOtherServices(t *testing.T) {
 	s.mu.Unlock()
 	var lists tidalList
 	tidalGet(t, base, "/v1/users/1/playlists", 200, &lists)
-	if len(lists.Items) != len(plain.Items)+2 {
-		t.Fatalf("want the drive's and Spotify's playlists added: %d vs %d", len(lists.Items), len(plain.Items))
+	if len(lists.Items) != len(plain.Items)+1 {
+		t.Fatalf("want the drive's playlist added: %d vs %d", len(lists.Items), len(plain.Items))
 	}
-	var club, friend tidalPlaylist
+	var club tidalPlaylist
 	for _, raw := range lists.Items {
 		var p tidalPlaylist
 		json.Unmarshal(raw, &p)
 		switch p.Title {
 		case "[USB: " + filepath.Base(root) + "] Club":
 			club = p
-		case "[Spotify] Friend":
-			friend = p
 		}
 	}
-	if club.NumberOfTracks != 2 || friend.UUID == "" {
-		t.Fatalf("club %+v friend %+v", club, friend)
+	if club.NumberOfTracks != 2 {
+		t.Fatalf("club %+v", club)
 	}
 	var tracks tidalList
 	tidalGet(t, base, "/v1/playlists/"+club.UUID+"/tracks", 200, &tracks)
 	if got, _ := titles(t, tracks.Items); strings.Join(got, "|") != "Omni One|Omni Two" {
 		t.Fatalf("Engine's playlist order, own library only: %v", got)
 	}
-	tidalGet(t, base, "/v1/playlists/"+friend.UUID+"/tracks", 200, &tracks)
+}
+
+func TestOmniSourceDeezerPlaylistsExcludeOtherStreamingServices(t *testing.T) {
+	_, root, _ := omniDrive(t)
+	s, base := omniServer(t, root, true)
+	s.mu.Lock()
+	s.sessions["sp"] = &Session{ID: "sp", Provider: "spotify", Ready: true, p: fixtureProvider{}, tracks: map[string]providers.Track{}, expires: time.Now().Add(time.Hour)}
+	s.mu.Unlock()
+
+	var lists tidalList
+	tidalGet(t, base, "/v1/users/1/playlists", 200, &lists)
+	var sawDrive, sawSpotify bool
+	for _, raw := range lists.Items {
+		var p tidalPlaylist
+		if err := json.Unmarshal(raw, &p); err != nil {
+			t.Fatal(err)
+		}
+		switch {
+		case p.Title == "[USB: "+filepath.Base(root)+"] Club":
+			sawDrive = true
+		case p.Title == "[Spotify] Friend":
+			sawSpotify = true
+		}
+	}
+	if !sawDrive {
+		t.Fatal("Deezer OmniSource listing lost the drive playlist")
+	}
+	if sawSpotify {
+		t.Fatal("Deezer OmniSource listing leaked a Spotify playlist")
+	}
+}
+
+func TestOmniSourceOtherScopesKeepOtherServicePlaylists(t *testing.T) {
+	_, root, _ := omniDrive(t)
+	s, base := omniServerScope(t, root, true, "spotify")
+	s.mu.Lock()
+	s.sessions["dz"] = &Session{ID: "dz", Provider: "deezer", Ready: true, p: fixtureProvider{}, tracks: map[string]providers.Track{}, expires: time.Now().Add(time.Hour)}
+	s.mu.Unlock()
+
+	var lists tidalList
+	tidalGet(t, base, "/v1/users/1/playlists", 200, &lists)
+	var friendUUID string
+	for _, raw := range lists.Items {
+		var p tidalPlaylist
+		if err := json.Unmarshal(raw, &p); err != nil {
+			t.Fatal(err)
+		}
+		if p.Title == "[Deezer] Friend" {
+			friendUUID = p.UUID
+			break
+		}
+	}
+	if friendUUID == "" {
+		t.Fatal("non-Deezer OmniSource scope lost the other-service playlist")
+	}
+	var tracks tidalList
+	tidalGet(t, base, "/v1/playlists/"+friendUUID+"/tracks", 200, &tracks)
 	if got, _ := titles(t, tracks.Items); len(got) != 1 || got[0] != "Song" {
 		t.Fatalf("secondary service tracks: %v", got)
 	}
