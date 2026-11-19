@@ -1914,6 +1914,15 @@ func (s *Server) shadowLegacy(role string, now time.Time, all bool, lines ...[]i
 		if host, _, _ := strings.Cut(strings.TrimPrefix(d.Net, "net://"), "/"); d.Link == "" || !strings.EqualFold(host, strings.Trim(d.Link, "{}")) {
 			d.Path = resolveNetPathFile(d.Net, sh.dataRoot, sh.mediaRoot, false)
 		}
+		// A peer's own USB track can be readable on this deck while the peer has
+		// not supplied an Engine cache key. Give the local copy the same stable
+		// identity as the display cache so its source overview is still fetched.
+		if d.Path != "" && p.Key == "" {
+			if st, err := os.Stat(d.Path); err == nil {
+				p.Key = fmt.Sprintf("local-%x", fnvSum(fmt.Sprintf("%s %d %d", d.Path, st.Size(), st.ModTime().UnixNano())))
+				p.local = d.Path
+			}
+		}
 		// A file of this player's own is named by its path. Not by the peer's key
 		// then: that appears once the peer's Engine has cached the file, mid-track.
 		d.ID = d.Net

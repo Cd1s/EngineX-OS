@@ -53,7 +53,7 @@ func TestShadowNetworkVolumeSuffix(t *testing.T) {
 	now := time.Now()
 	s.shadow.peerDecks[1] = peerDeck{deckState: deckState{Deck: 1, Net: "net://7022ea42-920b-4c66-b913-1892c3ee73af/KDATA KF328 (USB 3)/" + rel, Playing: true}, at: now}
 	got := s.shadowComposeLegacy("24", now)
-	if len(got) != 1 || got[0].Path != local || !got[0].Playing {
+	if len(got) != 1 || got[0].Path != local || got[0].Key == "" || !got[0].Playing {
 		t.Fatalf("shadow: %+v, want path %q and playing", got, local)
 	}
 	if got := resolveNetPathFile("net://uuid/other/"+rel, s.shadow.dataRoot, s.shadow.mediaRoot, false); got != local {
