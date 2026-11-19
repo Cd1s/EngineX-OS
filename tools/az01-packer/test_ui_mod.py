@@ -1271,7 +1271,7 @@ for (const amt of [1/63, 2/63, 4/63, 5/63, 8/63, 1.0]) {{
         # state) the copy plays as before; paused there, its waveform would stand still.
         self.assertIn("property bool scHookFollows: false", bp.SERVICES_MAIN)
         self.assertIn("if (v.shadowPausedFollow !== undefined) scHookFollows = v.shadowPausedFollow === true", bp.SERVICES_MAIN)
-        self.assertIn('readonly property bool scPausedShadowFollow: !scIsAZ04 && scHookFollows && !scOff("shadow-paused-follow")', bp.SERVICES_MAIN)
+        self.assertIn('readonly property bool scPausedShadowFollow: scHookFollows && !scOff("shadow-paused-follow")', bp.SERVICES_MAIN)
         dsp = '!root.scOff("dsp-guards")'
         for text in ("Master Soft Clipper", "Auto-Gain (0 dB Normalize)", "Echo Out", "Color FX Style",
                      "PX Delay Time Mode", "PX Delay Time (ms)"):
