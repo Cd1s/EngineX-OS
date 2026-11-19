@@ -1266,6 +1266,23 @@ static void test_shadow_replay(void) {
     assert(oa_count == 9 && !memcmp(oa_seen, want, sizeof want));
     assert(!strcmp(oa_payload[1], "TRACK") && !strcmp(oa_payload[2], "BEATS") && !strcmp(oa_payload[4], "OVERVIEW"));
     assert(oa_double[5] == 1.0 && oa_self[OA_PROGRESS / 4] == 1.0f && oa_double[7] == (double)(float)bpm);
+    // The source's RGB overview next to the copy's .perf is the replayed RGB overview,
+    // not the stored 3-band one (other colours on the deck); a malformed one is not.
+    {
+        unsigned char rgbov[30] = {0};
+        rgbov[7] = 1; rgbov[15] = 1; // 1 bin
+        memcpy(rgbov + 24, "RGBRGB", 6);
+        f = fopen("/tmp/test-oa-replay/\xc3\xa9.flac.perf.rgb", "wb"); assert(f); fwrite(rgbov, 1, sizeof rgbov, f); fclose(f);
+        oa_count = 0;
+        assert(oa_replay(oa_self, &qs, prefs) && oa_count == 9 && oa_seen[4] == OA_OVERVIEW_RGB);
+        assert(!memcmp(oa_payload[4], rgbov, sizeof rgbov) && !strcmp(oa_payload[3], "OVERVIEW"));
+        f = fopen("/tmp/test-oa-replay/\xc3\xa9.flac.perf.rgb", "ab"); assert(f); fputc('x', f); fclose(f);
+        oa_count = 0;
+        assert(oa_replay(oa_self, &qs, prefs) && !strcmp(oa_payload[4], "OVERVIEW"));
+        assert(!unlink("/tmp/test-oa-replay/\xc3\xa9.flac.perf.rgb"));
+        oa_count = 0;
+        assert(oa_replay(oa_self, &qs, prefs) && oa_count == 9);
+    }
     // A completed streaming download uses the analysis registered by the
     // rekordbox row fill; the analyzer delivers the imported grid without decoding.
     const char *old_rbx_dir = sc_rbx_dir;
@@ -1593,6 +1610,47 @@ static void analysis_bind(sqlite_bind_int64_fn bind, sqlite3 *db, const char *sq
     assert(sqlite3_finalize(stmt) == SQLITE_OK);
 }
 
+// A deck load's analysis of a peer copy that was given the source's analysis is skipped,
+// but not under the RGB waveform type: there it is Engine's RGB-only analysis of a copy
+// without an RGB overview, and without it the copy's mini overview stayed empty.
+static void test_shadow_rgb_request(void) {
+    char dir[] = "/tmp/enginex-rgbreq-XXXXXX", peer[128], sidecar[160], audio[160];
+    assert(mkdtemp(dir));
+    snprintf(peer, sizeof peer, "%s/peer-a", dir);
+    snprintf(sidecar, sizeof sidecar, "%s/track.wav.analysis", peer);
+    snprintf(audio, sizeof audio, "%s/track.wav", peer);
+    assert(!mkdir(peer, 0700));
+    FILE *f = fopen(sidecar, "wb"); assert(f); fputs("RBXA1", f); fclose(f);
+    const char *old_root = sc_shadow_root;
+    sc_shadow_root = dir;
+    uint16_t wide[160];
+    size_t n = strlen(audio);
+    for (size_t i = 0; i < n; i++) wide[i] = (uchar)audio[i];
+    static unsigned char track[0x400];
+    unsigned char obj[0x60] = {0}, prefs[16] = {0};
+    const struct oa_string path = {NULL, wide, (ssize_t)n};
+    const unsigned char *held = track;
+    memcpy(obj + 0x10, &path, sizeof path);
+    memcpy(obj + 0x48, &held, sizeof held);
+    char settings[160];
+    snprintf(settings, sizeof settings, "%s/settings.conf", dir);
+    const char *old_settings = sc_ui_settings;
+    sc_ui_settings = settings;
+    track[0x31d] = 1;
+    assert(shadow_analysis_skipped(obj, prefs)); // no settings: as before
+    f = fopen(settings, "w"); assert(f); fputs("scope=deezer\nwaveform=3band\n", f); fclose(f);
+    assert(shadow_analysis_skipped(obj, prefs));
+    f = fopen(settings, "w"); assert(f); fputs("scope=deezer\nwaveform=rgb\nremote_load=0\n", f); fclose(f);
+    assert(!shadow_analysis_skipped(obj, prefs));
+    f = fopen(settings, "w"); assert(f); fputs("waveform=3band\n", f); fclose(f);
+    track[0x31d] = 0;
+    assert(!shadow_analysis_skipped(obj, prefs));
+    sc_shadow_root = old_root;
+    sc_ui_settings = old_settings;
+    assert(!unlink(settings) && !unlink(sidecar) && !rmdir(peer) && !rmdir(dir));
+    puts("Shadow copy: Engine's analysis request goes through under the RGB waveform type: PASS");
+}
+
 static void test_analysis_dispatch(const char *off, int gateway, int shadow) {
     enum { lock = 0x1d55120, prepare = 0x1d55634, close_v2 = 0x1d21af4, filename = 0x1cb0d94,
            bind = 0x1cdfb90, bind_int = 0x1cdfc28, db_handle = 0x1c9a210, sql_text = 0x1c9a2a0,
@@ -1737,6 +1795,7 @@ int main(int argc, char **argv) {
     test_resources();
     test_offline_analyzer();
     test_shadow_replay();
+    test_shadow_rgb_request();
     test_stems_processor_fallback();
     test_stems_processor_prefers_enginex();
     test_alsa_boot_hook();

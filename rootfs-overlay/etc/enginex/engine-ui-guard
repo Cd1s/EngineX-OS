@@ -278,6 +278,9 @@ pre|settings)
         # No EngineX database/account/assignment changes on a stock fallback.
         exit 0
     else
+        # Engine's RGB overview files that are not their track's own (an old replay's 3-band
+        # bytes, empty ones, another track's) go before Engine reads them; it builds them again.
+        /usr/local/bin/rb-bridge --prune-rgb-overviews "${ENGINEX_ENGINE_DATA_DIR:-/data/AppDataUser/AIR Music Technology/Engine}/Engine Library/Database2" >/dev/null 2>&1 || :
         overlay=$UI/mods-overlay
         if [ ! -d "$overlay" ] && [ -d "$primary_ui/mods-overlay" ]; then
             overlay=$primary_ui/mods-overlay

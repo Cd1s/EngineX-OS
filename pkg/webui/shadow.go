@@ -1270,6 +1270,18 @@ func (s *Server) peerPerfGet(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not loaded", http.StatusConflict)
 		return
 	}
+	if r.URL.Query().Get("format") == "rgb" {
+		// The RGB overview Engine built for this deck's track: a copy replays it, so both
+		// units draw the same picture under the RGB waveform type.
+		rgb, err := libraryRGB(r.Context(), d.Path, s.shadow.dataRoot, s.shadow.mediaRoot)
+		if err != nil {
+			http.Error(w, "no rgb overview", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Write(rgb)
+		return
+	}
 	// Asked before the read and again after a miss: a load that finishes in between
 	// has written the file the read missed.
 	running := d.rbxAnalysis != "" && rbxAnalysisRunning(d.rbxRow)
@@ -1494,6 +1506,62 @@ func libraryPerfFormat(ctx context.Context, f, dataRoot, mediaRoot string, nativ
 		}
 	}
 	return nil, err
+}
+
+// libraryRGB is f's RGB overview as its library's Engine built it, uncompressed.
+func libraryRGB(ctx context.Context, f, dataRoot, mediaRoot string) ([]byte, error) {
+	lib := engineLibrary(f, dataRoot, mediaRoot)
+	rel, err := filepath.Rel(lib, f)
+	if err != nil {
+		return nil, err
+	}
+	dir := filepath.Join(lib, "Database2")
+	for _, name := range []string{"m.db", "stm.db"} {
+		var rgb []byte
+		if _, err = os.Stat(filepath.Join(dir, name)); err != nil {
+			continue
+		}
+		if rgb, err = enginedb.RGBOverview(ctx, dir, filepath.Join(dir, name), filepath.ToSlash(rel)); err == nil {
+			return rgb, nil
+		}
+	}
+	if orig, ok := inMusicTempOrig(f, dataRoot); ok {
+		if st, statErr := os.Stat(f); statErr == nil {
+			if real := resolveInMusicTempPath(ctx, orig, st.Size(), dataRoot); real != "" {
+				return libraryRGB(ctx, real, dataRoot, mediaRoot)
+			}
+		}
+	}
+	if err == nil {
+		err = os.ErrNotExist
+	}
+	return nil, err
+}
+
+// saveShadowRGB puts the source's RGB overview next to a copy as <copy>.perf.rgb, which
+// engine_ui_hook.c replays as the copy's RGB overview, or removes a stale one. An older
+// source answers the unknown format with EXPF: only an overview is kept.
+func saveShadowRGB(ctx context.Context, local, perfURL string) {
+	out := local + ".perf.rgb"
+	_ = os.Remove(out)
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, perfURL+"&format=rgb", nil)
+	if err != nil {
+		return
+	}
+	resp, err := peerFileClient.Do(req)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil || resp.StatusCode != http.StatusOK || !enginedb.ValidRGBOverview(b) {
+		return
+	}
+	if os.WriteFile(out+".tmp", b, 0o644) != nil || os.Rename(out+".tmp", out) != nil {
+		os.Remove(out + ".tmp")
+	}
 }
 
 func dbPerf(ctx context.Context, mdb, rel string, native bool) ([]byte, error) {
@@ -2221,6 +2289,11 @@ func (s *Server) shadowFetchPeer(key string, p peerDeck) {
 		}
 		// Engine loads the copy only after this returns, so it sees the .perf.
 		savePerf(local, perf)
+		if perf != nil {
+			saveShadowRGB(ctx, local, strings.Replace(url, "/audio?", "/perf?", 1))
+		} else {
+			_ = os.Remove(local + ".perf.rgb")
+		}
 		noFill := "not a player"
 		if playerBoards[imagePrefix(deviceCompatible())] {
 			noFill = saveShadowAnalysis(ctx, local, strings.Replace(url, "/audio?", "/perf?", 1)+"&format=native")
@@ -2274,11 +2347,12 @@ func (s *Server) shadowRefreshPeerPerf(key string, p peerDeck, old string) {
 			return "", err
 		}
 		savePerf(local, perf)
+		saveShadowRGB(ctx, local, perfURL)
 		if playerBoards[imagePrefix(deviceCompatible())] {
 			saveShadowAnalysis(ctx, local, perfURL+"&format=native")
 		}
 		s.shadowCopyGen(key, gen)
-		for _, f := range []string{old, old + ".perf", old + ".analysis"} {
+		for _, f := range []string{old, old + ".perf", old + ".perf.rgb", old + ".analysis"} {
 			_ = os.Remove(f)
 		}
 		for d := filepath.Dir(old); d != s.shadowDir() && strings.HasPrefix(d, s.shadowDir()); d = filepath.Dir(d) {

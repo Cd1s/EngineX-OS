@@ -347,6 +347,9 @@ func publishImport(mount, dir string) error {
 // renameStage moves a complete stage into place: READY first, then finishPublish moves the
 // state, the stamp and m.db, and completes a publish an interruption cut short at the next mount.
 func renameStage(dir, stage string) error {
+	// Engine's RGB overview files are keyed by track id: one the published library gives
+	// another track goes now, while the library they were written against is still here.
+	pruneRGBOverviews(context.Background(), dir, filepath.Join(stage, "m.db"), filepath.Join(dir, "m.db"))
 	if err := os.WriteFile(filepath.Join(stage, publishReady), nil, 0o644); err != nil {
 		return err
 	}

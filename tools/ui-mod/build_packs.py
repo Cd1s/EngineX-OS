@@ -2448,7 +2448,8 @@ SERVICES_MAIN = """
 			at.landing = undefined; at.phaseHardUntil = 0; at.phaseUntil = 0; at.transitionSeeks = 0
 			at.phaseLine = target; at.phaseAt = now; at.phaseRate = at.rate
 		}
-		if (!root.scPausedShadowFollow && !(wantSync && synced) && !(at.nativeSync && e.pitch > 100)) scShadowSpeed(d, Math.abs(exact - e.pitch) < 0.02 ? exact : e.pitch, e.range)
+		// Paused follow too: the copy's fader is what its header shows (BPM, pitch %), and a paused deck does not move with it.
+		if (!(wantSync && synced) && !(at.nativeSync && e.pitch > 100)) scShadowSpeed(d, Math.abs(exact - e.pitch) < 0.02 ? exact : e.pitch, e.range)
 		const pKey = g("/Track/KeyLock")
 		if (root.scPausedShadowFollow) {
 			// The copy is display-only audio. Keep its transport paused, while the

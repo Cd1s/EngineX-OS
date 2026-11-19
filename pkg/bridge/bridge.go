@@ -601,6 +601,7 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 		if err := finishPublish(dir, stateName, stampName, "m.db"); err != nil {
 			return enginedb.Result{}, err
 		}
+		pruneRGBOverviews(ctx, dir, filepath.Join(dir, "m.db"), "")
 	}
 	if !full && !opts.SmartMatch && firstImport(dir) {
 		if !canWrite {
