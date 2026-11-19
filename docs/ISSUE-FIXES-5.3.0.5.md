@@ -1,17 +1,14 @@
-# EngineX OS 5.3.0.5 发版与 Issue 修复记录（Phase B dry-run，2026-11-19）
+# EngineX OS 5.3.0.5 Release and Issue Fix Record (Phase C dry-run, 2026-11-19)
 
-> **说明**：本节保留历史合并记录；本文件末尾的“Phase B final evidence”是 2026-11-19 在 `eea05653c83917a6489f8336fb48982e28de4348` 上完成的最终构建、镜像检查和三组门禁证据。发布没有执行，真机项目写为 pending real-deck run。
+> Historical merge records remain below. The Phase C final evidence at the end of this file records the rc3 build from `ed3b5fa70ef5f9c7a78a7dcc4a96d26c715a28d7`, the image checks, the three release gates, and the checklist status. Publication was not performed, and real-deck work remains pending where stated.
 
-- **日期**：Phase B dry-run `2026-11-19`（UTC+7）；发布未执行
-- **范围**：`v5.3.0.4-r5`（`9e827205`）→ `v5.3.0.5`（版本号 `5.3.0.5`，tag `v5.3.0.5`）。内容来自集成分支 `agent/5305-integration` 和候选分支 `agent/5305-rc-candidate`（整理时的分支头 `3e4c7a3a`，在集成分支之上依次合入了 16 批来源分支）。
-- **构建提交**：`eea05653c83917a6489f8336fb48982e28de4348`（`c9c7c9b0` 最终头加截图工具提交）
-- **回滚点**：tag `v5.3.0.4-r5`（`9e827205`）；一代机与二代机刷回该 Release 的 `*-Update.img`。更早的回滚点见 `ISSUE-FIXES-5.3.0.4.md`。
-- **覆盖机型与产物（28 个发布资产 + `RELEASE-TAG.txt` + `SHA256SUMS.txt` + `SHA256SUMS.txt.sig` = 31 个上传文件）**：
-  - 8 款一代机 `*-Update.img`、8 款二代机 `*-Update.img`、4 个平台的 `EngineX-Installer-5.3.0.5-*`；
-  - 8 个 `*-Data-Bundle.tar.gz` **最后一次**随 Release 提供，仅供 `5.3.0.2` / `5.3.0.3` 二代机的屏幕 OTA 过渡（#215）；`5.3.0.6` 起退役。
-- **签名**：从 5.3.0.5 起每个 Release 附 `SHA256SUMS.txt.sig`（Ed25519，私钥只在编译机上）；5.3.0.4 及更早的碟机不验签，需先更新到 5.3.0.5。
-- **在线文档**：三份 README、`docs/site/content.js`（三语）和 `docs/release-notes-5.3.0.5.md` 已更新到 5.3.0.5；实测截图和开机画面预览 PNG 由发版构建负责。
-- **本文件的读法**：第 1 节至第 6 节保留历史合并记录；末尾 Phase B final evidence 覆盖最终构建提交、完整 SHA-256、门禁与回归检查结论。除门禁沙箱外，真机项目均为 pending real-deck run。
+- **Date**: Phase C dry-run `2026-11-19` (UTC+7); publication was not performed
+- **Scope**: `v5.3.0.4-r5` (`9e827205`) to `v5.3.0.5`, with the rc3 hot-cue/PerfGen and Deezer OmniSource fixes on `agent/5305-rc2`
+- **Build commit**: `ed3b5fa70ef5f9c7a78a7dcc4a96d26c715a28d7`
+- **Rollback point**: tag `v5.3.0.4-r5` (`9e827205ae331d2d896d97207032556dc4202af5`)
+- **Artifacts**: 28 release artifacts plus `RELEASE-TAG.txt`, `SHA256SUMS.txt`, and `SHA256SUMS.txt.sig`, 31 files in total
+- **Signature**: the rc3 manifest was verified with the release signature; the private signing key was not copied into this repository or evidence
+- **Publication status**: no tag, GitHub Release, issue comment, or push to `main` was performed
 
 ---
 
@@ -161,7 +158,7 @@
 | Issue / 复核（日期） | 模块 | 原因与修法 | 检验、分支与提交、仍需实机 |
 | --- | --- | --- | --- |
 | **#301 自动发布**（11-18，维护者否决了“要重新插入”） | `internal/cli/`<br>`tools/ui-mod/` | **原因**：综合复核 B2 的做法把一次观察到的对端传输永久当作否决，沉默的 Engine Link 对端也要求重新插入；维护者明确不接受。<br>**修法**：标记只记录观察开始时间和最近一次未确认的外发音频读取，不再是永久否决；沉默的原厂 / CDJ 对端不再永远阻止；30 秒安静期（相当于 60 个观察周期）；等待状态在四种语言里显示；重挂助手交接后刷新状态，旧导入任务不会再把 `publishing` 盖回 `waiting`；挂载和提供两个观察线程在取消时先汇合再返回。 | 检验：`TestIssue301WaitsThenRemountsAutomatically`（4 个子用例在基线全部失败）、`internal/cli` 带 `-race`、`UsbPreparingFeedbackTest` 4 项、bridge / cli / enginedb / rekordbox / webui 整套 `-race`。分支 `agent/5305-cr-b2-fixes` @ `fe9592a0`（独立生产复核通过）。**实机待验**：大库完成后不重新插入就换成转换好的曲库；播放中的碟机不被打断。 |
-| **#309**（11-18）<br>SC LIVE 4 上 Wi-Fi 省电没关 | `pkg/`（纯 Go 的 nl80211）<br>`rootfs-overlay/`（debloat）<br>`internal/cli/`（stream-sync） | **原因**：debloat 只在有 `iw` 时才运行 `iw dev wlan0 set power_save off`；没有原厂 `iw` 的机型（包括 SC LIVE 4）这一步被悄悄跳过。对 25 个官方镜像（11 种不同的 rootfs）的审计：只有 4.3.4 带 `iw`。<br>**修法**：保留纯 Go 的 nl80211 读写省电状态（校验对齐、序号、协议族、内核发送方与 ACK / errno，套接字 3 秒超时）和显式的 suite 小程序，开机时应用；原厂 `iw` 存在时仍优先用原厂（3 秒超时），缺失才回退；stream-sync 同样先原厂后回退，等 wlan0 起来后应用一次。丢弃了覆盖整个 `iw` 的包装脚本和周期性重应用。 | 检验：独立复核（Sonnet）v2 通过；纯 Go netlink、stock-first 运行时测试、Batam 上的整套必需检查通过。分支 `agent/5305-issue-309` @ `0e137273`，候选 `1fc18b2c`；开机顺序修正（Wi-Fi 回退排在运行时准备之后，`enginex-debloat.service`）候选 `375e412f`。**实机待验**：SC LIVE 4 上 `iw dev wlan0 get power_save` 为 off。 |
+| **#309**（11-18）<br>SC LIVE 4 上 Wi-Fi 省电没关 | `pkg/`（纯 Go 的 nl80211）<br>`rootfs-overlay/`（debloat）<br>`internal/cli/`（stream-sync） | **原因**：debloat 只在有 `iw` 时才运行 `iw dev wlan0 set power_save off`；没有原厂 `iw` 的机型（包括 SC LIVE 4）这一步被悄悄跳过。对 25 个官方镜像（11 种不同的 rootfs）的审计：只有 4.3.4 带 `iw`。<br>**修法**：保留纯 Go 的 nl80211 读写省电状态（校验对齐、序号、协议族、内核发送方与 ACK / errno，套接字 3 秒超时）和显式的 suite 小程序，开机时应用；原厂 `iw` 存在时仍优先用原厂（3 秒超时），缺失才回退；stream-sync 同样先原厂后回退，等 wlan0 起来后应用一次。丢弃了覆盖整个 `iw` 的包装脚本和周期性重应用。 | 检验：独立复核（Sonnet）v2 通过；纯 Go netlink、stock-first 运行时测试、authorized ARM build host 上的整套必需检查通过。分支 `agent/5305-issue-309` @ `0e137273`，候选 `1fc18b2c`；开机顺序修正（Wi-Fi 回退排在运行时准备之后，`enginex-debloat.service`）候选 `375e412f`。**实机待验**：SC LIVE 4 上 `iw dev wlan0 get power_save` 为 off。 |
 | **综合复核 B1 的 Apple Music 与中继修复**（11-17 至 11-18） | `pkg/providers/`<br>`pkg/webui/`<br>`cmd/enginex-relay/` | **F1**：在碟机上退出 Apple Music 后，下载助手仍在登录，下一次状态轮询又把凭据同步回来 → 记住“已退出”，直到在碟机上显式登录助手。**F2**：中继拉取把碟机的助手地址换成另一个，却保留旧令牌，旧令牌发给了新主机 → 地址不同且没带令牌时清除本地令牌。**F3**：持有手机登录二维码的人可在碟机没配置助手时设置助手并推送到中继 → 手机设置只在碟机本地，且“是否已配置”与写入在同一把锁里。**F4**：中继控制台点保存会丢掉自动探测到的令牌 → 不再用探测值预填，保存后仍自动。**F6**：自动探测的地址范围 `10/8`、`172.16/12`、`192.168/16`、`100.64/10`，其余拒绝。 | 复核记录：B1 第二轮 F1–F4、F6 全部关闭（8 个并行的 `setup` 请求只有 1 个被接受）。含在候选 `c7ca61e0`。仍有两条低级别备注（N1、N2）见复核报告。 |
 | **综合复核 B1/F5：两台 rekordbox 电脑**（11-18） | `pkg/webui/rekordbox_source.go` | **原因**：第一台在广播但没开 `LINK` 的电脑让 `rekordboxHost` 直接返回空，遮住后面真正提供曲库的电脑；所有 IP 共用一个确认槽。<br>**修法**：确认与查询状态按 IP 记在同一把锁下，选择时跳过未就绪的电脑；沿用“第一台就绪的曲库”，不加选择器。 | 检验：两个真实 TCP 测试服务在两个回环地址上，对调播放器编号的两个用例；在基线上 `off_first` 失败（`ready computer hidden`）。分支 `agent/5305-rbx-two-hosts` @ `21d44fb6`，含在候选 `d9ec58c6`。 |
 | **综合复核 C：Mixstream 的 `Stems EQ` 行**（11-18） | `tools/ui-mod/build_packs.py` | 只属于 Mixstream 的行不再在没有软件混音器的播放机上创建绑定（见检查表行 317）。 | `MixstreamPadsLayoutTest`；含在候选 `41061299`。 |
@@ -173,6 +170,14 @@
 | --- | --- | --- | --- |
 | **#304**（11-18）<br>已登录 Engine DJ 账号时载入流媒体曲目出现“Tidal Disconnected” | `tools/ui-mod/engine_ui_hook.c` | **原因**：原厂流媒体控制器独立于我们的 TIDAL 网关接收账号凭据更新；凭据被清空时会把我们本地提供的承载账号当成云端管理的 TIDAL 来断开。#159 的补丁只强制了已连接 / 未连接的取值，拦不住这条独立的回调。Gen-1 与 SC LIVE 4 的原厂代码路径相同。<br>**修法**：钩子（沿用按 BuildID 选择的补丁表）只替换 TIDAL 的“个人资料单点登录能力”槽，对本地承载账号返回 false，真正的 TIDAL（作用域 `tidal`）仍返回原厂的 true；不改网关路由、合成令牌、已存的真实 TIDAL 凭据、个人资料会话和登录界面。 | 检验：新的原生 ELF 回归在 Gen-1、SC LIVE 4、AZ04 上通过；对旧候选钩子失败（退出码 134）；右碟用修好的钩子做凭据更新回调：`profile=true carrier=true`（旧钩子是 `carrier=false`）；检查表行 318。分支 `agent/5305-issue-304` @ `0ca2d877`（`f174c22c`）。**实机待验**：原始的“载入流媒体曲目”复现路径没有在真机上完整重放。 |
 | **#305**（11-18）<br>碟机顶栏对所有服务都显示 TIDAL 图标 | `tools/ui-mod/build_packs.py` | **原因**：Engine 对所有服务的曲目都报 `Track/Source = TIDAL`（它们都走 TIDAL 槽），顶栏画的就是 TIDAL 图标，`Track Info` 的 `Source` 行也写 TIDAL；Engine 没有告诉界面真正的提供方。<br>**修法**：界面包里按当前选中的服务显示该服务自己的图标和名字（Deezer、Spotify、Apple Music、网易云、SoundCloud、Beatport、rekordbox）；真正的 TIDAL、其他来源和本地曲目不变；不做网络请求，不碰音频路径。**局限**：跟随“当前选中的服务”，不是每首曲目各自的事实。 | 检验：界面包测试；有截图。分支 `agent/5305-issue-305` @ `bf3e5b2f`（只改界面包，仅 5.3.0）。**实机待验**。 |
+
+
+### 1A-9 RC3 fixes (2026-11-19)
+
+| Fix | Cause and change | Verification and real-deck status |
+| --- | --- | --- |
+| **Hot Cue retention and rekordbox shadow edit refresh** | A capped BridgeAnalysis state database can prune the analysis row even while BridgeState holds the track's full fingerprint. The rebuild now retains deck-set Hot Cues in that case. A changed PerfGen also refreshes rekordbox cue/grid sidecars on the shadow copy while reusing cached audio. | `pkg/bridge::TestLargeReexportKeepsDeckCueWhenBridgeAnalysisCapped`, `pkg/webui::TestShadowPerfGenRefreshesWithoutDownload`, and `TestShadowRekordboxEditChangesPerfGenerationWithoutNewAudioKey`; checklist rows 359 and 360 are **pending real-deck run**. |
+| **Deezer OmniSource isolation** | Deezer's OmniSource scope keeps USB/SD, NAS, djay, and self-hosted playlists while excluding playlists owned by other streaming services. | `pkg/webui::TestOmniSourceDeezerPlaylistsExcludeOtherStreamingServices` and `TestOmniSourceListsDrivePlaylistsInDeezerScope`; checklist row 358 is covered by automation, with real-deck status recorded in the final walk. |
 
 
 ## 1B. 没有合入 5.3.0.5 的工作（不得写成已有功能）
@@ -231,83 +236,72 @@
 
 ---
 
-## 3. 全套测试与三组发版门禁结果
+## 3. Tests and three release gates
 
-> 下列结果来自候选分支 `agent/5305-rc-candidate` 分支头 `3e4c7a3a`（第 16 批）的验证：三组镜像门禁用这个提交现场构建的公开镜像跑；Go 全套在这个提交上重跑；打包器整套和引导沙箱的结果归属于只比它早一个提交的 `41061299`（两者之间只改了 4 个 Go 文件，UI、打包器、覆盖层和钩子输入逐字节相同）。每一项都按实际退出码核对，没有靠跳过、排除或放宽断言取得绿色。**这不是对最终构建提交的验证**：发版时以最终构建提交为准，若候选又有合入需要重跑。
+Phase C step 1 completed the required release-workflow test set on `2cec585e`: formatting, Go vet/tests with race detection, the rootfs overlay test, both bootstrap fixtures including JC11S and AZ04, and the `tools/az01-packer` and `tools/stems` unit suites. C sources were unchanged since `dfb5ee46`, so the C tests were skipped. The requested rc3 recheck on `ed3b5fa70ef5f9c7a78a7dcc4a96d26c715a28d7` also passed: `gofmt -l .`, `go vet ./pkg/webui`, and `go test -race ./pkg/webui`.
 
-- **构建提交**：`eea05653c83917a6489f8336fb48982e28de4348`（Phase B final evidence；候选分支头 `3e4c7a3a` 的历史结果保留在本节）
-- **门禁（`release-gate.sh`，现场构建的公开镜像，基线是 `v5.3.0.4-r5` 旧镜像在线升级到新版再开机验收）**：
-  - **JP07（SC5000 组）**：**176 项通过 / 0 失败**，退出码 0。
-  - **JP13（SC6000 组）**：**176 / 0**，退出码 0。
-  - **JC11（PRIME 4 组）**：**176 / 0**，退出码 0。
-  - 三组的容量、清单与校验和、数据包审计（含固定版本的 HFS 组件和与镜像匹配的钩子）全部通过；两次开机的 Demo 来源与封面检查通过；基线镜像的内置 tag 逐个核对为 `v5.3.0.4-r5`；没有放宽任何检查或计数。构建、门禁和测试都在授权的编译机上跑，没有在碟机上跑。
-  - 更早的记录：JP07 曾是 172 通过 / 4 失败，原因是 Demo 修复在一次 rebase 里丢失（见 1A-2），补回后恢复 176 / 0。
-- **Go**（`3e4c7a3a`，AMD 编译机，私有挂载与网络命名空间，私有 tmpfs `/data`，只读 Samba 辅助）：`go test -race -count=1 -parallel 1 -json ./... -timeout 30m` **49 个未缓存的包结果全部通过**，13 个真实 Samba 用例通过、没有 SMB 跳过；`gofmt`、`go vet`、后端 shell 与迁移测试、命名检查、文档审计 5 项、网站与控制台的 Node 语法检查、官方 Mod 源码测试和 8 个包的可复现构建检查通过；安装器交叉编译 linux/amd64、linux/arm64、windows/amd64、darwin/arm64、darwin/amd64 通过；16 条命令退出码全为 0；14 个条件性夹具 / 辅助程序跳过，原因逐条记在测试摘要里，没有当作已执行。
-- **打包器整套（`tools/az01-packer`，ARM 编译机，原生 armhf，`41061299`）**：**522 项，`OK (skipped=1)`**，用时约 617 秒；其中 `test_ui_mod` 273 项、`test_ui_perf` 4 项、`test_fx_ms_ui` 4 项、`test_shadow_review` 41 项、BH2 与 `Shift + View`、数据包测试和 5 项文档审计。唯一的跳过是既有的 ALSA 安装沙箱条件（`test_install_uses_bundle_alsa_dir`，主机上有 `/data`）。
-- **覆盖层** `tests/test_rootfs_overlay.sh`：**35 项通过**（#298 的 perf-slim 把原来关于绑核和巡检的肯定性断言换成了“掩码不变、没有 `taskset` / `chrt`、没有后台巡检器”，项数因此变化）；**`tools/stems`**：18 项通过；Mixstream 的四个方法全部通过；原生 NH08 `MIXSTREAM_NATIVE_PASS`。
-- **引导沙箱（最终提交上）**：SC LIVE 4、PRIME 4 Plus（JC11S，官方镜像夹具，经 SHA 与记录校验）、AZ04 全部通过，6 个最终状态码均为 0；沙箱的第二阶段容忍 Engine 退出（日志里有 SIGABRT），PASS 只证明初始化检查，不证明持续运行或真机启动。
-- **C 测试**：本批没有改钩子、头文件、构建脚本和预编译钩子，没有重复跑；上一次整套 C 测试（22 次调用）全部通过，结果见第 1A 节各行。覆盖层里两个 32 位钩子与现编译字节一致的检查通过。
-- **复核**：第 15、16 批做了跨模型家族的复核（规范与需求两个方向，区域 A、B1、C）；区域 C 的 P1 / P2 / P3 已在第 1A-2 节的 Stems EQ 行修复。综合复核 B2 的修复队列不在候选内。
-- **文档审计**（`tools/az01-packer/test_docs_audit.py`）：Go 全套里的 5 项通过；Phase B 发布构建证据见本文末尾。
-- **第 4 步镜像检查**：16 个 `*-Update.img` 加 8 个兼容数据包，版本 5.3.0.5，签名参数 `none`、不签名；Phase B 的三组代表镜像、Gen-1 分组一致性和 Gen-2 splash 检查均通过，见本文末尾。
-- **签名发布检查**（`sign-release.sh`、`SHA256SUMS.txt.sig` 验证）：Phase B 通过，见本文末尾。
-- **尚未完成**：全部真机验收。本地没有做原生 Windows 安装与 UAC 的验证，也没有任何真机性能结论；自动化与沙箱证据见本文末尾。
+- **JP07 / SC5000 group**: `release-gate.sh` exit code 0, `176 PASS, 0 FAIL`; static audit `65 files, 0 FAIL, 9 WARN`; 20 Engine patches and 21 DSP guards.
+- **JP13 / SC6000 group**: `release-gate.sh` exit code 0, `176 PASS, 0 FAIL`; static audit `65 files, 0 FAIL, 9 WARN`; 20 Engine patches and 21 DSP guards.
+- **JC11 / PRIME 4 group**: `release-gate.sh` exit code 0, `176 PASS, 0 FAIL`; static audit `65 files, 0 FAIL, 9 WARN`; 29 Engine patches and 21 DSP guards.
+- Each gate used the published `v5.3.0.4-r5` representative image after its SHA-256 was checked against that release manifest. The expected sandbox `unsupported operation` line is caused by the absent eMMC fixture and did not fail a gate.
+
+The rc3 build, image checks, signing check, and gates ran on the authorized ARM build host. No real deck or production service was touched.
 
 ---
 
-## 4. 发布产物与 SHA-256 校验表（v5.3.0.5 全量 28 产物清单）
+## 4. Release artifacts and SHA-256 table (all 28 v5.3.0.5 artifacts)
 
-- **说明**：下表 SHA-256 来自 Phase B 构建输出中的已签名 `SHA256SUMS.txt`；`SHA256SUMS.txt` 共 **29 行**（16 个 `*-Update.img` + 8 个 `*-Data-Bundle.tar.gz` + 4 个 `EngineX-Installer-5.3.0.5-*` + `RELEASE-TAG.txt`），连同 `SHA256SUMS.txt` 与 `SHA256SUMS.txt.sig` 共 **31** 个上传文件。
-- **产物目录**：`/var/tmp/enginex-release-5.3.0.5`（授权 ARM 构建主机）。
-- **回滚点**：tag `v5.3.0.4-r5`（`9e827205`）。
+- **Manifest**: the table below comes from the signed rc3 `SHA256SUMS.txt`; it has 29 entries (28 artifacts plus `RELEASE-TAG.txt`), and the output contains 31 files including `SHA256SUMS.txt` and `SHA256SUMS.txt.sig`.
+- **Artifact directory**: `/var/tmp/enginex-release-5.3.0.5-rc3` on the authorized ARM build host.
+- **Rollback point**: tag `v5.3.0.4-r5` (`9e827205ae331d2d896d97207032556dc4202af5`).
 
-### 一代机型完整固件（`*-Update.img`）
+### First-generation firmware images (`*-Update.img`)
 
-| 镜像组 | 机型 | 板号 | 文件名 | SHA-256 |
+| Group | Model | Board | File | SHA-256 |
 | --- | --- | --- | --- | --- |
-| SC5000 | Denon DJ SC5000 Prime | JP07 | `SC5000-5.3.0.5-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img` | `4478a8ebff29374443e4651e46c5a89e065c792e5f4592526b3b96d4ca36b6fa` |
-| SC5000 | Denon DJ SC5000M Prime | JP08 | `SC5000M-5.3.0.5-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img` | `4478a8ebff29374443e4651e46c5a89e065c792e5f4592526b3b96d4ca36b6fa` |
-| SC5000 | Denon DJ PRIME GO | JP11 | `PRIMEGO-5.3.0.5-EngineX-OS-Denon-PRIME-GO-JP11-Update.img` | `4478a8ebff29374443e4651e46c5a89e065c792e5f4592526b3b96d4ca36b6fa` |
-| SC6000 | Denon DJ SC6000 Prime | JP13 | `SC6000-5.3.0.5-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img` | `fce676f18afc93740a142d962bde651ba683f0ee90f8560edc0b0addaeb9d9c6` |
-| SC6000 | Denon DJ SC6000M Prime | JP14 | `SC6000M-5.3.0.5-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img` | `fce676f18afc93740a142d962bde651ba683f0ee90f8560edc0b0addaeb9d9c6` |
-| PRIME 4 | Denon DJ PRIME 4 | JC11 | `PRIME4-5.3.0.5-EngineX-OS-Denon-PRIME-4-JC11-Update.img` | `b088526c08dd6a8946c1212fe9fad596954deb39887667c70df02aa451fbef17` |
-| PRIME 4 | Denon DJ PRIME 2 | JC16 | `PRIME2-5.3.0.5-EngineX-OS-Denon-PRIME-2-JC16-Update.img` | `b088526c08dd6a8946c1212fe9fad596954deb39887667c70df02aa451fbef17` |
-| PRIME 4 | Numark Mixstream Pro | NH08 | `MIXSTREAMPRO-5.3.0.5-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img` | `b088526c08dd6a8946c1212fe9fad596954deb39887667c70df02aa451fbef17` |
+| SC5000 | Denon DJ SC5000 Prime | JP07 | `SC5000-5.3.0.5-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img` | `03079438dcbd347333b4984276e98e3ed8613c76a7412accaaa887f7d18ffc30` |
+| SC5000 | Denon DJ SC5000M Prime | JP08 | `SC5000M-5.3.0.5-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img` | `03079438dcbd347333b4984276e98e3ed8613c76a7412accaaa887f7d18ffc30` |
+| SC5000 | Denon DJ PRIME GO | JP11 | `PRIMEGO-5.3.0.5-EngineX-OS-Denon-PRIME-GO-JP11-Update.img` | `03079438dcbd347333b4984276e98e3ed8613c76a7412accaaa887f7d18ffc30` |
+| SC6000 | Denon DJ SC6000 Prime | JP13 | `SC6000-5.3.0.5-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img` | `259120f2475acb6eab3cc984ccbe64b0983af3e4dd7923ae813bcc7e6226e647` |
+| SC6000 | Denon DJ SC6000M Prime | JP14 | `SC6000M-5.3.0.5-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img` | `259120f2475acb6eab3cc984ccbe64b0983af3e4dd7923ae813bcc7e6226e647` |
+| PRIME 4 | Denon DJ PRIME 4 | JC11 | `PRIME4-5.3.0.5-EngineX-OS-Denon-PRIME-4-JC11-Update.img` | `d52a9bb1873a3402577a3152c0fe7f631abbad17e89d678a07b7ed2cff744fb6` |
+| PRIME 4 | Denon DJ PRIME 2 | JC16 | `PRIME2-5.3.0.5-EngineX-OS-Denon-PRIME-2-JC16-Update.img` | `d52a9bb1873a3402577a3152c0fe7f631abbad17e89d678a07b7ed2cff744fb6` |
+| PRIME 4 | Numark Mixstream Pro | NH08 | `MIXSTREAMPRO-5.3.0.5-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img` | `d52a9bb1873a3402577a3152c0fe7f631abbad17e89d678a07b7ed2cff744fb6` |
 
-### 二代机型统一升级镜像（`*-Update.img`，#215 主选格式）
+### Second-generation unified update images (`*-Update.img`, #215 primary format)
 
-| 架构组 | 机型 | 板号 | 文件名 | SHA-256 |
+| Architecture | Model | Board | File | SHA-256 |
 | --- | --- | --- | --- | --- |
-| AZ0x (armhf) | Denon DJ SC LIVE 4 | JP21 | `SCLIVE4-5.3.0.5-EngineX-OS-Denon-SC-LIVE-4-JP21-Update.img` | `3c7e6e138d5cf172c3d0201d5b889095f2e3648da2ad3b11b4ba2800b838af7d` |
-| AZ0x (armhf) | Denon DJ SC LIVE 2 | JP20 | `SCLIVE2-5.3.0.5-EngineX-OS-Denon-SC-LIVE-2-JP20-Update.img` | `0dad3add4033b8df9a522d35777753d049fc5d0dd479e335efdf16d217aed02a` |
-| AZ0x (armhf) | Denon DJ PRIME 4+ | JC11S | `PRIME4PLUS-5.3.0.5-EngineX-OS-Denon-PRIME-4-Plus-JC11S-Update.img` | `85e35d6c4433f734e314ea45b28fc58a1c7dacc8466e1b730dcce0f30c602db3` |
-| AZ0x (armhf) | Denon DJ PRIME GO+ | JP11S | `PRIMEGOPLUS-5.3.0.5-EngineX-OS-Denon-PRIME-GO-Plus-JP11S-Update.img` | `f3c61bad9366c8b1b19ea2f3816feb9350b2b702179f0a7c343c02ae2f45574f` |
-| AZ0x (armhf) | Numark Mixstream Pro+ | NH08S | `MIXSTREAMPROPLUS-5.3.0.5-EngineX-OS-Numark-Mixstream-Pro-Plus-NH08S-Update.img` | `34e45b620edd528a89087329787ac0bbf2a5ab8abe2723a9ff904a713a1f1c27` |
-| AZ0x (armhf) | Numark Mixstream Pro Go | NH10 | `MIXSTREAMPROGO-5.3.0.5-EngineX-OS-Numark-Mixstream-Pro-Go-NH10-Update.img` | `1895072ee91b252a1deb3fe235a361a1591cbdf0baf139260295369d1b0143e6` |
-| AZ04 (aarch64) | Denon DJ PRIME 4 G2 | JP24 | `PRIME4G2-5.3.0.5-EngineX-OS-Denon-PRIME-4-G2-JP24-Update.img` | `5133115bb2dfbe4d6a1aee7459f78005915e56c060fe89503d0b9989650ed60e` |
-| AZ04 (aarch64) | Rane SYSTEM ONE | RMZ2 | `SYSTEMONE-5.3.0.5-EngineX-OS-Rane-SYSTEM-ONE-RMZ2-Update.img` | `2ea625f64ae04b2195a35dfba799b6f3ffe858a58cb9a2cce6024cf7736224af` |
+| AZ0x (armhf) | Denon DJ SC LIVE 4 | JP21 | `SCLIVE4-5.3.0.5-EngineX-OS-Denon-SC-LIVE-4-JP21-Update.img` | `32f9e920afbf52c92961fd759f8a5a497ddc4f5c337a5db9c9a0d08f00a93978` |
+| AZ0x (armhf) | Denon DJ SC LIVE 2 | JP20 | `SCLIVE2-5.3.0.5-EngineX-OS-Denon-SC-LIVE-2-JP20-Update.img` | `da21eab755ec7dc4e9f0b940166e2b2d49302951ab0e91074e99ba9e43caacaa` |
+| AZ0x (armhf) | Denon DJ PRIME 4+ | JC11S | `PRIME4PLUS-5.3.0.5-EngineX-OS-Denon-PRIME-4-Plus-JC11S-Update.img` | `11b522f26cdb0b8c51db4d253ba4884dabd9d062d31e8f9abca8d4bdd437bb2d` |
+| AZ0x (armhf) | Denon DJ PRIME GO+ | JP11S | `PRIMEGOPLUS-5.3.0.5-EngineX-OS-Denon-PRIME-GO-Plus-JP11S-Update.img` | `3fab5a5540532961b466ae1ca9d267a54642f3bb2042f9b2516af36ff8fa3010` |
+| AZ0x (armhf) | Numark Mixstream Pro+ | NH08S | `MIXSTREAMPROPLUS-5.3.0.5-EngineX-OS-Numark-Mixstream-Pro-Plus-NH08S-Update.img` | `9347c3abda6f8289afb7e373e848b92bbd7f1b44c600298be7df466c830feb7f` |
+| AZ0x (armhf) | Numark Mixstream Pro Go | NH10 | `MIXSTREAMPROGO-5.3.0.5-EngineX-OS-Numark-Mixstream-Pro-Go-NH10-Update.img` | `d9362b521ebb717a6563d9f6014e0824001759e419a97645f396c390e5a38252` |
+| AZ04 (aarch64) | Denon DJ PRIME 4 G2 | JP24 | `PRIME4G2-5.3.0.5-EngineX-OS-Denon-PRIME-4-G2-JP24-Update.img` | `d1af491bd694cbfcd3efdfac68377ab5ad661f8c0b5e28d9f495be1cdd6fb4ba` |
+| AZ04 (aarch64) | Rane SYSTEM ONE | RMZ2 | `SYSTEMONE-5.3.0.5-EngineX-OS-Rane-SYSTEM-ONE-RMZ2-Update.img` | `245368f9e67a98ea51985d6ce335ecc5e50434cdf142724f3d86ee27c6f86397` |
 
-### 二代机型过渡兼容数据包（`*-Data-Bundle.tar.gz`，供旧版 `5.3.0.2` / 未解锁 `5.3.0.3` 屏幕 OTA 升级）
+### Second-generation legacy OTA data bundles (`*-Data-Bundle.tar.gz`)
 
-| 架构组 | 机型 | 板号 | 文件名 | SHA-256 |
+| Architecture | Model | Board | File | SHA-256 |
 | --- | --- | --- | --- | --- |
-| AZ0x (armhf) | Denon DJ SC LIVE 4 | JP21 | `SCLIVE4-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `9c67f8b7431b9459a6fc9b3a100a4a20096d1ac873f23eee5a4008c44c1ddf92` |
-| AZ0x (armhf) | Denon DJ SC LIVE 2 | JP20 | `SCLIVE2-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `96a211962eccf1a828b0f4fa814c0a739775b8c3d2d378fb40d875dbab384770` |
-| AZ0x (armhf) | Denon DJ PRIME 4+ | JC11S | `PRIME4PLUS-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `4c6214c08849f2e5be089b077f0d246569e16649d72802307a31fad58fa5fa88` |
-| AZ0x (armhf) | Denon DJ PRIME GO+ | JP11S | `PRIMEGOPLUS-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `c6085c4ddc691255192147f42dbeb2c68c47b089febe729a83df0dae8df43e75` |
-| AZ0x (armhf) | Numark Mixstream Pro+ | NH08S | `MIXSTREAMPROPLUS-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `e335c34b131829d004d5faf1b2193740dca48442fec9225faad95ea4eef0b3fb` |
-| AZ0x (armhf) | Numark Mixstream Pro Go | NH10 | `MIXSTREAMPROGO-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `c1139a012f44903b4c561c3e3f476bd6b7b6350219defedf963d8ae97024622f` |
-| AZ04 (aarch64) | Denon DJ PRIME 4 G2 | JP24 | `PRIME4G2-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `0d31d6a10d1b1f279c8342a9f25d3f1fec8fa84c77adef5bb2ecd17205bd4b55` |
-| AZ04 (aarch64) | Rane SYSTEM ONE | RMZ2 | `SYSTEMONE-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `64de98844e4a929e465d4dc1030bc9f11d5349324a8fe44550e18778bd3ba61e` |
+| AZ0x (armhf) | Denon DJ SC LIVE 4 | JP21 | `SCLIVE4-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `edd6cd5d293b6f91a9c36f46e06854079599d79fe987a24fda21978644b92534` |
+| AZ0x (armhf) | Denon DJ SC LIVE 2 | JP20 | `SCLIVE2-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `636b537c7118883852a7749589ff5e200ea175b09835a640fa5fa5cecfe3afd5` |
+| AZ0x (armhf) | Denon DJ PRIME 4+ | JC11S | `PRIME4PLUS-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `52ab1ebfbcd5eb688b6253a1ddda47f8a59018d8fe74e4483fc8623cb85bdf68` |
+| AZ0x (armhf) | Denon DJ PRIME GO+ | JP11S | `PRIMEGOPLUS-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `70d901d475b92c0437e76c0fad99c423b525cc513687653e19820172794c9406` |
+| AZ0x (armhf) | Numark Mixstream Pro+ | NH08S | `MIXSTREAMPROPLUS-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `552b71f1f659cf3d11d5e9bb48c681648f6a5c0767bf19af0fe33a65a8847414` |
+| AZ0x (armhf) | Numark Mixstream Pro Go | NH10 | `MIXSTREAMPROGO-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `cc1fb9df0e40653429f6a06686be6c56ed2a236f8ad50b958a4e9bfb64f058bd` |
+| AZ04 (aarch64) | Denon DJ PRIME 4 G2 | JP24 | `PRIME4G2-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `063d93c9b9c3b56f5091772f4ca6191d92f98677ef33c7c53c187b0999b33b1d` |
+| AZ04 (aarch64) | Rane SYSTEM ONE | RMZ2 | `SYSTEMONE-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `edf4e0181f80afcaca717de186269004826754683e20c57defa6bd18a1cd57e1` |
 
-### 跨平台一键安装器（`EngineX-Installer`）
+### Cross-platform one-click installers (`EngineX-Installer`)
 
-| 平台 | 文件名 | SHA-256 |
+| Platform | File | SHA-256 |
 | --- | --- | --- |
-| Windows 10/11 x64 | `EngineX-Installer-5.3.0.5-windows-amd64.zip` | `d95491f31e296126476d6f85f44d26d689956626f80535836bf261802dd28e15` |
-| macOS Apple Silicon (M1–M4) | `EngineX-Installer-5.3.0.5-macos-arm64.zip` | `25d0c934cb0939085af1c3c5dd9dd255a71936eda26630ecb695b58ff66cfb0a` |
-| macOS Intel | `EngineX-Installer-5.3.0.5-macos-amd64.zip` | `1a173a20cc90ec9b032ad4970c21388946904dc30f04b1448f411170fdf5a1b7` |
-| Linux x86_64 | `EngineX-Installer-5.3.0.5-linux-amd64.tar.gz` | `b46f98f2d1c45477cae2dbdf65e17a597bf41a196d9587d792533cc2cf5aefd9` |
+| Windows 10/11 x64 | `EngineX-Installer-5.3.0.5-windows-amd64.zip` | `34353e8d711c0110cd412c0dee67320d682a5725e428a410dbe880ed58bd4673` |
+| macOS Apple Silicon (M1–M4) | `EngineX-Installer-5.3.0.5-macos-arm64.zip` | `a7f879a9c8c634852724bdfe1e51803a723ee90128c3975bb376c9eed618861a` |
+| macOS Intel | `EngineX-Installer-5.3.0.5-macos-amd64.zip` | `99d7d3631581432ddc08941b0e8f3815436975cea52546796b9e8a407fbc4bcd` |
+| Linux x86_64 | `EngineX-Installer-5.3.0.5-linux-amd64.tar.gz` | `f1feb8362c90841888ca657a9e7f675242e46ba5f3f686850cd5325aeb60b8b6` |
 
 
 
@@ -334,57 +328,69 @@
 
 部分完成或待实机验收的 Issue 不应在发布时直接关闭：`#247`、`#252`、`#268`、`#253`、`#298`（等实机确认）、`#286`（第 3、4 项没做）、`#301`（待实机验收）；`#244` 保持打开；`#304`、`#305` 若最终没有合入则保持打开（见 1A-8）。机器人的 PR #302（二代机仅密钥）被 #299 的密码方案取代，PR #310（#309 的机器人方案）只取了思路，发布时都关闭。
 
-## Phase B final evidence (2026-11-19)
+## Phase C final evidence (2026-11-19)
 
-This section is the authoritative Phase B record for build commit `eea05653c83917a6489f8336fb48982e28de4348`, built on the authorized ARM build host into `/var/tmp/enginex-release-5.3.0.5`. The output contains 28 release artifacts plus `RELEASE-TAG.txt`, `SHA256SUMS.txt`, and `SHA256SUMS.txt.sig` (31 files total). The manifest has 29 entries and the signed checksum file verified successfully. No tag, GitHub Release, issue comment, or push to `main` was performed.
+This section is the authoritative Phase C record for build commit `ed3b5fa70ef5f9c7a78a7dcc4a96d26c715a28d7`. The clean rc3 output is `/var/tmp/enginex-release-5.3.0.5-rc3` and contains 28 release artifacts plus `RELEASE-TAG.txt`, `SHA256SUMS.txt`, and `SHA256SUMS.txt.sig` (31 files total). The manifest has 29 entries. `SHA256SUMS.txt` has SHA-256 `0b26042fca09cf88450fa5b4c3d03c97217ca74dd884986693be7874cd3e4839`, and `SHA256SUMS.txt.sig` has SHA-256 `50dc75300d53616ea30ab16697b90fe0e996e25bd76fa20aeb343366913e5308`.
 
-Rollback point: `v5.3.0.4-r5` (`9e827205`). No real deck was touched. Real-deck checks remain **pending real-deck run** unless covered by an existing dated hardware report.
+No tag, GitHub Release, issue comment, or push to `main` was performed. The Phase B rollback output `/var/tmp/enginex-release-5.3.0.5` remains untouched. No real deck was touched.
 
 ### SHA-256 manifest
 
 | File | SHA-256 |
 | --- | --- |
-| `MIXSTREAMPRO-5.3.0.5-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img` | `b088526c08dd6a8946c1212fe9fad596954deb39887667c70df02aa451fbef17` |
-| `MIXSTREAMPROGO-5.3.0.5-EngineX-OS-Numark-Mixstream-Pro-Go-NH10-Update.img` | `1895072ee91b252a1deb3fe235a361a1591cbdf0baf139260295369d1b0143e6` |
-| `MIXSTREAMPROPLUS-5.3.0.5-EngineX-OS-Numark-Mixstream-Pro-Plus-NH08S-Update.img` | `34e45b620edd528a89087329787ac0bbf2a5ab8abe2723a9ff904a713a1f1c27` |
-| `PRIME2-5.3.0.5-EngineX-OS-Denon-PRIME-2-JC16-Update.img` | `b088526c08dd6a8946c1212fe9fad596954deb39887667c70df02aa451fbef17` |
-| `PRIME4-5.3.0.5-EngineX-OS-Denon-PRIME-4-JC11-Update.img` | `b088526c08dd6a8946c1212fe9fad596954deb39887667c70df02aa451fbef17` |
-| `PRIME4G2-5.3.0.5-EngineX-OS-Denon-PRIME-4-G2-JP24-Update.img` | `5133115bb2dfbe4d6a1aee7459f78005915e56c060fe89503d0b9989650ed60e` |
-| `PRIME4PLUS-5.3.0.5-EngineX-OS-Denon-PRIME-4-Plus-JC11S-Update.img` | `85e35d6c4433f734e314ea45b28fc58a1c7dacc8466e1b730dcce0f30c602db3` |
-| `PRIMEGO-5.3.0.5-EngineX-OS-Denon-PRIME-GO-JP11-Update.img` | `4478a8ebff29374443e4651e46c5a89e065c792e5f4592526b3b96d4ca36b6fa` |
-| `PRIMEGOPLUS-5.3.0.5-EngineX-OS-Denon-PRIME-GO-Plus-JP11S-Update.img` | `f3c61bad9366c8b1b19ea2f3816feb9350b2b702179f0a7c343c02ae2f45574f` |
-| `SC5000-5.3.0.5-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img` | `4478a8ebff29374443e4651e46c5a89e065c792e5f4592526b3b96d4ca36b6fa` |
-| `SC5000M-5.3.0.5-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img` | `4478a8ebff29374443e4651e46c5a89e065c792e5f4592526b3b96d4ca36b6fa` |
-| `SC6000-5.3.0.5-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img` | `fce676f18afc93740a142d962bde651ba683f0ee90f8560edc0b0addaeb9d9c6` |
-| `SC6000M-5.3.0.5-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img` | `fce676f18afc93740a142d962bde651ba683f0ee90f8560edc0b0addaeb9d9c6` |
-| `SCLIVE2-5.3.0.5-EngineX-OS-Denon-SC-LIVE-2-JP20-Update.img` | `0dad3add4033b8df9a522d35777753d049fc5d0dd479e335efdf16d217aed02a` |
-| `SCLIVE4-5.3.0.5-EngineX-OS-Denon-SC-LIVE-4-JP21-Update.img` | `3c7e6e138d5cf172c3d0201d5b889095f2e3648da2ad3b11b4ba2800b838af7d` |
-| `SYSTEMONE-5.3.0.5-EngineX-OS-Rane-SYSTEM-ONE-RMZ2-Update.img` | `2ea625f64ae04b2195a35dfba799b6f3ffe858a58cb9a2cce6024cf7736224af` |
-| `MIXSTREAMPROGO-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `c1139a012f44903b4c561c3e3f476bd6b7b6350219defedf963d8ae97024622f` |
-| `MIXSTREAMPROPLUS-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `e335c34b131829d004d5faf1b2193740dca48442fec9225faad95ea4eef0b3fb` |
-| `PRIME4G2-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `0d31d6a10d1b1f279c8342a9f25d3f1fec8fa84c77adef5bb2ecd17205bd4b55` |
-| `PRIME4PLUS-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `4c6214c08849f2e5be089b077f0d246569e16649d72802307a31fad58fa5fa88` |
-| `PRIMEGOPLUS-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `c6085c4ddc691255192147f42dbeb2c68c47b089febe729a83df0dae8df43e75` |
-| `SCLIVE2-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `96a211962eccf1a828b0f4fa814c0a739775b8c3d2d378fb40d875dbab384770` |
-| `SCLIVE4-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `9c67f8b7431b9459a6fc9b3a100a4a20096d1ac873f23eee5a4008c44c1ddf92` |
-| `SYSTEMONE-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `64de98844e4a929e465d4dc1030bc9f11d5349324a8fe44550e18778bd3ba61e` |
-| `EngineX-Installer-5.3.0.5-linux-amd64.tar.gz` | `b46f98f2d1c45477cae2dbdf65e17a597bf41a196d9587d792533cc2cf5aefd9` |
-| `EngineX-Installer-5.3.0.5-macos-amd64.zip` | `1a173a20cc90ec9b032ad4970c21388946904dc30f04b1448f411170fdf5a1b7` |
-| `EngineX-Installer-5.3.0.5-macos-arm64.zip` | `25d0c934cb0939085af1c3c5dd9dd255a71936eda26630ecb695b58ff66cfb0a` |
-| `EngineX-Installer-5.3.0.5-windows-amd64.zip` | `d95491f31e296126476d6f85f44d26d689956626f80535836bf261802dd28e15` |
+| `MIXSTREAMPRO-5.3.0.5-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img` | `d52a9bb1873a3402577a3152c0fe7f631abbad17e89d678a07b7ed2cff744fb6` |
+| `MIXSTREAMPROGO-5.3.0.5-EngineX-OS-Numark-Mixstream-Pro-Go-NH10-Update.img` | `d9362b521ebb717a6563d9f6014e0824001759e419a97645f396c390e5a38252` |
+| `MIXSTREAMPROPLUS-5.3.0.5-EngineX-OS-Numark-Mixstream-Pro-Plus-NH08S-Update.img` | `9347c3abda6f8289afb7e373e848b92bbd7f1b44c600298be7df466c830feb7f` |
+| `PRIME2-5.3.0.5-EngineX-OS-Denon-PRIME-2-JC16-Update.img` | `d52a9bb1873a3402577a3152c0fe7f631abbad17e89d678a07b7ed2cff744fb6` |
+| `PRIME4-5.3.0.5-EngineX-OS-Denon-PRIME-4-JC11-Update.img` | `d52a9bb1873a3402577a3152c0fe7f631abbad17e89d678a07b7ed2cff744fb6` |
+| `PRIME4G2-5.3.0.5-EngineX-OS-Denon-PRIME-4-G2-JP24-Update.img` | `d1af491bd694cbfcd3efdfac68377ab5ad661f8c0b5e28d9f495be1cdd6fb4ba` |
+| `PRIME4PLUS-5.3.0.5-EngineX-OS-Denon-PRIME-4-Plus-JC11S-Update.img` | `11b522f26cdb0b8c51db4d253ba4884dabd9d062d31e8f9abca8d4bdd437bb2d` |
+| `PRIMEGO-5.3.0.5-EngineX-OS-Denon-PRIME-GO-JP11-Update.img` | `03079438dcbd347333b4984276e98e3ed8613c76a7412accaaa887f7d18ffc30` |
+| `PRIMEGOPLUS-5.3.0.5-EngineX-OS-Denon-PRIME-GO-Plus-JP11S-Update.img` | `3fab5a5540532961b466ae1ca9d267a54642f3bb2042f9b2516af36ff8fa3010` |
+| `SC5000-5.3.0.5-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img` | `03079438dcbd347333b4984276e98e3ed8613c76a7412accaaa887f7d18ffc30` |
+| `SC5000M-5.3.0.5-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img` | `03079438dcbd347333b4984276e98e3ed8613c76a7412accaaa887f7d18ffc30` |
+| `SC6000-5.3.0.5-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img` | `259120f2475acb6eab3cc984ccbe64b0983af3e4dd7923ae813bcc7e6226e647` |
+| `SC6000M-5.3.0.5-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img` | `259120f2475acb6eab3cc984ccbe64b0983af3e4dd7923ae813bcc7e6226e647` |
+| `SCLIVE2-5.3.0.5-EngineX-OS-Denon-SC-LIVE-2-JP20-Update.img` | `da21eab755ec7dc4e9f0b940166e2b2d49302951ab0e91074e99ba9e43caacaa` |
+| `SCLIVE4-5.3.0.5-EngineX-OS-Denon-SC-LIVE-4-JP21-Update.img` | `32f9e920afbf52c92961fd759f8a5a497ddc4f5c337a5db9c9a0d08f00a93978` |
+| `SYSTEMONE-5.3.0.5-EngineX-OS-Rane-SYSTEM-ONE-RMZ2-Update.img` | `245368f9e67a98ea51985d6ce335ecc5e50434cdf142724f3d86ee27c6f86397` |
+| `MIXSTREAMPROGO-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `cc1fb9df0e40653429f6a06686be6c56ed2a236f8ad50b958a4e9bfb64f058bd` |
+| `MIXSTREAMPROPLUS-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `552b71f1f659cf3d11d5e9bb48c681648f6a5c0767bf19af0fe33a65a8847414` |
+| `PRIME4G2-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `063d93c9b9c3b56f5091772f4ca6191d92f98677ef33c7c53c187b0999b33b1d` |
+| `PRIME4PLUS-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `52ab1ebfbcd5eb688b6253a1ddda47f8a59018d8fe74e4483fc8623cb85bdf68` |
+| `PRIMEGOPLUS-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `70d901d475b92c0437e76c0fad99c423b525cc513687653e19820172794c9406` |
+| `SCLIVE2-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `636b537c7118883852a7749589ff5e200ea175b09835a640fa5fa5cecfe3afd5` |
+| `SCLIVE4-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `edd6cd5d293b6f91a9c36f46e06854079599d79fe987a24fda21978644b92534` |
+| `SYSTEMONE-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `edf4e0181f80afcaca717de186269004826754683e20c57defa6bd18a1cd57e1` |
+| `EngineX-Installer-5.3.0.5-linux-amd64.tar.gz` | `f1feb8362c90841888ca657a9e7f675242e46ba5f3f686850cd5325aeb60b8b6` |
+| `EngineX-Installer-5.3.0.5-macos-amd64.zip` | `99d7d3631581432ddc08941b0e8f3815436975cea52546796b9e8a407fbc4bcd` |
+| `EngineX-Installer-5.3.0.5-macos-arm64.zip` | `a7f879a9c8c634852724bdfe1e51803a723ee90128c3975bb376c9eed618861a` |
+| `EngineX-Installer-5.3.0.5-windows-amd64.zip` | `34353e8d711c0110cd412c0dee67320d682a5725e428a410dbe880ed58bd4673` |
+
 
 Manifest-only `RELEASE-TAG.txt`: `369bd4c0f3141cf1d1d0bee66890a06ffad4d8636971f5d303c240395948352e`.
 
-### Image and gate results
+### Image checks
 
-- Phase B unpack checks: SC5000 JP07, SC6000 JP13, and PRIME 4 JC11 all returned `verified: true`; each embedded version is `5.3.0.5` and release tag is `v5.3.0.5`.
-- Gen-1 group equality: SC5000 `4478a8...36b6fa`, SC6000 `fce676...9d9c6`, PRIME 4 `b08852...ef17`, with every member in each group identical.
-- Splash checks: all three stock-referenced Gen-1 decodes and all four Gen-2 `img/SplashScreen.png` files are 1280×800 RGB and visibly show `5.3.0.5`.
-- `release-gate.sh` against the published `v5.3.0.4-r5` JP07, JP13, and JC11 images: exit code 0 and `176 PASS, 0 FAIL` for each group. Static audit reports 0 FAIL and 9 expected WARN per group. Expected sandbox `unsupported operation` INFO lines are from the missing eMMC and do not indicate a gate failure.
-- Key gate counts: JP07 and JP13 report 20 Engine patches and 21 DSP guards; JC11 reports 29 Engine patches and 21 DSP guards. All three report signed update verification, QML cache isolation, UI probe success, service health, and power-cut boot recovery.
+- SC5000 JP07, SC6000 JP13, and PRIME 4 JC11 unpack checks returned `verified: true`; each embedded version is `5.3.0.5` and the release tag is `v5.3.0.5`.
+- Gen-1 group hashes matched across every member: SC5000 `03079438dcbd347333b4984276e98e3ed8613c76a7412accaaa887f7d18ffc30`, SC6000 `259120f2475acb6eab3cc984ccbe64b0983af3e4dd7923ae813bcc7e6226e647`, and PRIME 4 `d52a9bb1873a3402577a3152c0fe7f631abbad17e89d678a07b7ed2cff744fb6`.
+- The decoded Gen-1 splash images and all checked Gen-2 `img/SplashScreen.png` files are 1280×800 RGB and visibly show `5.3.0.5`.
+- The published `v5.3.0.4-r5` JP07, JP13, and JC11 gate inputs were downloaded and verified against that release manifest before the gates ran.
+
+### Release-gate results
+
+| Group | Gate directory | Exit | Results | Engine patches | DSP guards |
+| --- | --- | ---: | --- | ---: | ---: |
+| JP07 / SC5000 | `/var/tmp/enginex-gate-5305-rc3-sc5000` | 0 | 176 PASS, 0 FAIL | 20 | 21 |
+| JP13 / SC6000 | `/var/tmp/enginex-gate-5305-rc3-sc6000` | 0 | 176 PASS, 0 FAIL | 20 | 21 |
+| JC11 / PRIME 4 | `/var/tmp/enginex-gate-5305-rc3-prime4` | 0 | 176 PASS, 0 FAIL | 29 | 21 |
+
+All three static audits reported 65 files, 0 FAIL, and 9 expected WARN. The sandbox `unsupported operation` INFO line is the expected missing-eMMC condition.
 
 ### REGRESSION-CHECKLIST walk and deck impact
 
-The automated and sandbox items in `docs/REGRESSION-CHECKLIST.md` are covered by the Phase B build checks and all three release gates, including signed update refusal cases, stale-cache recovery, UI rendering probes, service health, HFS+ execution, power-cut recovery, and the existing hook/service assertions. Real-deck items are **pending real-deck run**: USB/OTA installation, physical controls and audio, CDJ-3000 and rekordbox Link, Bluetooth, HFS+ hotplug/eject, SMB playback, Windows/macOS installer hardware paths, and the model-specific checks called out in the checklist. No real deck or production service was touched.
+The automated and sandbox checklist items are covered by the Phase C test, image, and gate evidence. Rows 359 and 360 are **pending real-deck run**. Row 361 was removed from the checklist when the M4A/FLAC overview change was reverted. The remaining real-deck items, including USB/OTA installation, physical controls and audio, CDJ-3000 and rekordbox Link, Bluetooth, HFS+ hotplug/eject, SMB playback, and native installer hardware paths, remain **pending real-deck run** unless covered by an existing dated hardware report.
 
-The Phase B output directory and its 31 upload files remain on Batam for maintainer review. Gate, unpack, old-image, and Phase A scratch directories are disposable and are scheduled for removal after this evidence is committed; the step-9 post-release cleanup was not run.
+Known issue: the shadow-lane overview for M4A/FLAC is not drawn. This is deferred to 5.3.0.6.
+
+The rc3 output directory remains on the build host for maintainer review. Gate, unpack, old-image, and splash scratch directories can be removed after this evidence is committed. The step-9 post-release cleanup was not run.
