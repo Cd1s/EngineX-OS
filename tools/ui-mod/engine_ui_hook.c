@@ -3274,8 +3274,9 @@ static int oa_replay(void *o, const struct oa_string *s, const uchar *prefs) {
 #if !defined(__aarch64__)
     if (access(perf, F_OK)) rekordbox_stream = sc_rbx_replay_path(path, perf, sizeof perf);
 #endif
+    int shadow = !strncmp(path, OA_SHADOW "/", sizeof OA_SHADOW) && !access(perf, F_OK);
     if (!rekordbox_stream && access(perf, F_OK) &&
-        (!oa_shadow_perf(path, perf, sizeof perf) || access(perf, F_OK))) {
+        !(shadow = oa_shadow_perf(path, perf, sizeof perf) && !access(perf, F_OK))) {
         int named = 0;
 #if !defined(__aarch64__)
         named = sc_rbx_replay_named(path, OA_ENGINE_COPIES, perf, sizeof perf);
@@ -3284,6 +3285,11 @@ static int oa_replay(void *o, const struct oa_string *s, const uchar *prefs) {
             if (!strncmp(path, OA_ENGINE_COPIES, strlen(OA_ENGINE_COPIES))) oa_log("analyse", path, 0);
             return 0;
         }
+    }
+    // RGB-only request (prefs[12]) on a shadow copy: the replayed bytes blank the RGB overview it drew, so Engine builds it as stock does.
+    if (shadow && prefs[12]) {
+        oa_log("rgb-stock", path, 0);
+        return 0;
     }
     struct oa_perf p;
     if (!oa_read_perf(perf, &p)) {

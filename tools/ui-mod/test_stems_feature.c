@@ -1321,6 +1321,16 @@ static void test_shadow_replay(void) {
     f = fopen("/tmp/test-oa-replay/shadow-v3/peer-1/Contents/x_y.mp3", "wb"); assert(f); fputs("AUDIO", f); fclose(f);
     prefs[12] = 0;
     assert(oa_replay(oa_self, &cs, prefs) && oa_count == 9 && oa_seen[2] == OA_BEATS);
+    // RGB-only request on a shadow copy (Engine's copy or the copy itself): no replay,
+    // Engine builds the RGB overview (the replayed bytes blanked it on the deck).
+    static const uint16_t direct[] = u"/tmp/test-oa-replay/shadow-v3/peer-1/Contents/x_y.mp3";
+    const struct oa_string ds = {NULL, direct, sizeof direct / sizeof *direct - 1};
+    prefs[12] = 1;
+    oa_count = 0;
+    assert(!oa_replay(oa_self, &cs, prefs) && oa_count == 0);
+    assert(!oa_replay(oa_self, &ds, prefs) && oa_count == 0);
+    prefs[12] = 0;
+    assert(oa_replay(oa_self, &ds, prefs) && oa_count == 9 && oa_seen[2] == OA_BEATS);
     // A late Link analysis arrives after the named copy, without an alias or
     // the Engine SQLite install. A same-name copy of another size is not a hit.
     const char *named_audio = OA_ENGINE_COPIES "ab-cd_link.m4a";
