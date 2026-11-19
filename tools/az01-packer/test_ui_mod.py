@@ -2378,7 +2378,7 @@ globalThis.scTr = path => {
         get state() { return this._state; }, set state(v) { if (path.endsWith('/Play')) { plays++; assert.equal(v, false); } this._state = v; },
         get value() { return this._value; }, set value(v) { this._value = v; if (path.endsWith('/SetSongPosition')) seeks++; },
         get unnormalized() { return path.endsWith('/TrackLength') ? 48000 * 300 : path.endsWith('/TrackPosition') ? 0 : 0; } };
-    if (path.endsWith('/Speed')) Object.defineProperty(p, 'value', {get(){return 0.5}, set(){speedWrites++}});
+    if (path.endsWith('/Speed')) { let v = 0.5; Object.defineProperty(p, 'value', {get(){return v}, set(x){speedWrites++; v = x}}); }
     props.set(path, p); return p;
 };
 globalThis.XMLHttpRequest = class { open(method, url) { assert.equal(method, 'POST'); assert(url.endsWith('/shadow/position-feed')); } setRequestHeader() {} send(body) { feed = JSON.parse(body); posts++; } };
@@ -2390,7 +2390,7 @@ const e = {deck:2,path:'/copy.flac',id:'track-a',playing:true,scratch:false,stal
 scShadowApplyAll([e], false);
 assert.equal(plays, 1, 'shadow transport was not explicitly held paused');
 assert.equal(props.get('/Engine/Deck2/Track/KeyLock').state, false);
-assert.equal(speedWrites, 0, 'paused follow wrote the shadow Speed');
+assert.equal(speedWrites, 0, 'an unchanged pitch was written again');
 assert.equal(feed.deck, 2); assert.equal(feed.positionSamples, 48000);
 // The position goes out as stream-sync dated it, not carried to now on the GUI thread,
 // and once per change (or 250 ms), not on every delivery.
@@ -2421,6 +2421,12 @@ for (const [path, p] of props) if (path.includes('ExternalScratchWheel')) assert
 assert.equal(speedWrites, 0);
 e.scratch = false; now += 120; e.at = now; scShadowApplyAll([e], false);
 assert.equal(scShadowScratchTimer.running, false); assert.equal(feed.rateSamplesPerSec, 48000);
+// The source's pitch fader moves: the paused copy's fader follows, so its header shows the
+// source's BPM and pitch % (maintainer 11-20: +3.71 % on the source, 0.00 % on the shadow).
+e.pitch = 3.71; now += 120; e.at = now; scShadowApplyAll([e], false);
+assert.equal(speedWrites, 1, 'the paused copy kept the old pitch');
+assert(Math.abs(props.get('/Engine/Deck2/Speed').value - (0.5 + 3.71 / 16)) < 1e-9);
+assert.equal(plays >= 1 && props.get('/Engine/Deck2/Play').state, false, 'a pitch change started the copy');
 // Another track on the slot: the feed is off until that copy is loaded.
 globalThis.scShadowLoad = () => {};
 scShadowApplyAll([Object.assign({}, e, {path:'/other.flac', id:'track-b'})], false);
