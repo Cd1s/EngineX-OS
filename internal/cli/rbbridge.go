@@ -54,6 +54,7 @@ func RBBridge(args []string, stdout io.Writer) error {
 	anlzRoot := fs.String("anlz-root", "/media", "root directory to scan for Rekordbox ANLZ analysis files")
 	mediaCache := fs.String("media-cache", prolink.SharedMediaCacheDir(), "where tracks read from Pioneer players over the network are kept (#59)")
 	uiSettings := fs.String("ui-settings", "/data/enginex/ui/settings.conf", "deck settings; prolink_share=1 (or legacy prolink_export=1) enables Pro DJ Link")
+	pruneRGB := fs.String("prune-rgb-overviews", "", "Database2 directory of a library Engine does not have open: remove the RGB overview files that are not its tracks' own")
 	watch := fs.Bool("watch", false, "retired; exits at once")
 	fs.String("watch-roots", "", "retired")
 	fs.Duration("poll-interval", 0, "retired")
@@ -66,6 +67,13 @@ func RBBridge(args []string, stdout io.Writer) error {
 	}
 	if fs.NArg() != 0 {
 		return fmt.Errorf("unexpected positional arguments")
+	}
+	if *pruneRGB != "" {
+		n, err := enginedb.PruneRGBOverviews(context.Background(), *pruneRGB, filepath.Join(*pruneRGB, "m.db"), "")
+		if n > 0 {
+			log.Printf("rb-bridge: %d stale RGB overviews removed from %s", n, *pruneRGB)
+		}
+		return err
 	}
 	if *smart > 0xffffffff {
 		return fmt.Errorf("smart-match track ID exceeds uint32")

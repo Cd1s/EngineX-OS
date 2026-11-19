@@ -13,10 +13,13 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"net/url"
 	"os"
 	"path/filepath"
 	"syscall"
+
+	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 )
 
 const (
@@ -97,4 +100,19 @@ func syncFile(path string) error {
 	}
 	defer f.Close()
 	return f.Sync()
+}
+
+// pruneRGBOverviews removes Engine's RGB overview files that no longer belong to their
+// track (enginedb.PruneRGBOverviews). It never stops a mount: at worst a file stays.
+func pruneRGBOverviews(ctx context.Context, dir, library, previous string) {
+	if _, err := os.Stat(library); err != nil {
+		return
+	}
+	n, err := enginedb.PruneRGBOverviews(ctx, dir, library, previous)
+	if err != nil {
+		log.Printf("rb-bridge: RGB overviews not checked: %v", err)
+	}
+	if n > 0 {
+		log.Printf("rb-bridge: %d stale RGB overviews removed; Engine builds them again at load", n)
+	}
 }
