@@ -2499,8 +2499,9 @@ assert.equal(scShadowData(2).engine, true); assert.equal(scShadowData(2).copying
 assert.equal(scShadowVisible(2), true);
 scShadowAt[2] = {path: '/old.wav', ready: true};
 scShadowApplyAll([{deck: 2, path: '/old.wav'}], false);
-assert.equal(scShadowVisible(2), false);
-assert.deepEqual(scShadowDisplay, {});
+assert.equal(scShadowData(2).engine, true);
+assert.equal(scShadowVisible(2), true);
+assert.equal(requests.length, 2, 'a loaded Engine shadow must fetch its source overview');
 """)
 
     def test_mixed_slots_and_source_switch(self):
@@ -2520,7 +2521,7 @@ assert.equal(scShadowData(4).title, 'CDJ'); assert.equal(scShadowVisible(4), tru
 assert.equal(requests.length, 1); assert(requests[0].url.endsWith('deck=4&key=cdj%3Ax'));
 scShadowAt[2].ready = true; // Engine holds the peer's track: the cover leaves
 scShadowApplyAll([{deck: 2, path: '/peer.flac', playing: true}, cdj(4)], false);
-assert.equal(scShadowData(2), null); assert.equal(scShadowVisible(2), false); assert.equal(scDeckLocked(2), true);
+assert.equal(scShadowData(2).engine, true); assert.equal(scShadowVisible(2), true); assert.equal(scDeckLocked(2), true);
 // The display slot is never Engine's: no load, speed, seek or press reaches Deck 4.
 scShadowApply({deck: 4, path: '/must-not-load.wav'}); scShadowSpeed(4, 12); scShadowSeek(4, {}, 1000);
 scShadowCues(4, {}, {cues: []}, now); scShadowBeat(4, {}, {bpm: 120, beat: 3}, 0, now); scShadowLinkEdge(4, 'peer', 'play', '{"state":true}');
@@ -2547,7 +2548,7 @@ assert.equal(writes[3], '/Client/Librarian/AddToDatabaseAndLoadToDeck2=file:///p
 assert.equal(scShadowData(2).engine, true); assert.equal(scShadowData(2).title, ''); // the cover of this load, nothing of the CDJ's picture
 scShadowAt[2].ready = true;
 scShadowApplyAll([{deck: 2, path: '/peer2.flac'}, cdj(4)], false);
-assert.equal(scShadowData(2), null); assert.equal(scShadowVisible(2), false);
+assert.equal(scShadowData(2).engine, true); assert.equal(scShadowVisible(2), true);
 assert.equal(scShadowData(4).title, 'CDJ'); assert.equal(scShadowVisible(4), true);
 // Forced Engine mode on a console: a CDJ on a Line In deck is flagged for the on-screen hint.
 scShadowApplyAll([{deck: 2, path: '/peer2.flac'}, {deck: 4, path: '/cdj.flac', lineIn: true}], false);
@@ -3929,7 +3930,7 @@ class UiModBuildTest(unittest.TestCase):
                     with tarfile.open(out.with_suffix(".tar.gz")) as pack:
                         for lang in bp.LANGUAGES:
                             main = pack.extractfile(f"packs/{lang}/Skins/Embedded/EmbeddedMain.qml").read().decode()
-                            self.assertIn("scShadowApplyDisplay(decks.filter(e => e.displayOnly === true).concat(scShadowCovers(decks)))", main)
+                            self.assertIn("scShadowApplyDisplay(decks.filter(e => e.displayOnly === true).concat(scShadowCovers(decks), decks.filter(e => e.displayOnly !== true && e.path)))", main)
                             self.assertIn("s.metadataOnly", main)
                             self.assertIn("/v1/enginex/shadow/display?deck=", main)
                             self.assertIn("scDeckLocked", main)
@@ -5791,8 +5792,8 @@ assert.equal(scShadowVisible(2), true); assert.equal(busy(), 2); assert.equal(s.
 for (let i = 0; i < 10; i++) { now += 180; all(e); assert.equal(scShadowVisible(2), true); } // Engine takes its time
 settle(); now += 180; all(e);
 assert.equal(scShadowAt[2].ready, true);
-assert.equal(scShadowData(2), null); assert.equal(scShadowVisible(2), false); // Engine's own deck view from here
-for (let i = 0; i < 20; i++) { now += 180; all(e); assert.equal(scShadowVisible(2), false); } // and no cover flashes while it holds
+assert.equal(scShadowData(2).engine, true); assert.equal(scShadowVisible(2), true); // keep the source overview beside Engine's lane
+for (let i = 0; i < 20; i++) { now += 180; all(e); assert.equal(scShadowVisible(2), true); } // and keep the overview while it holds
 // The source loads another track: covered at once, over the old track, with nothing of the old one.
 all(copying('b', {progress: 0.07}));
 s = scShadowData(2);

@@ -2277,7 +2277,11 @@ SERVICES_MAIN = """
 		scShadowLineMask = lineMask
 		root.scShadowCdjMaster = master
 		for (const e of decks) if (e.displayOnly !== true) root.scShadowApply(e)
-		scShadowApplyDisplay(decks.filter(e => e.displayOnly === true).concat(scShadowCovers(decks))) // the slots Engine holds are cleared there
+		// Keep fetching the source overview after an Engine shadow copy is ready. The
+		// stock Engine lane owns the scrolling waveform, but the display-only layer
+		// still supplies the mini overview; without the loaded Engine entries here,
+		// M4A/FLAC copies have no overview URL at all.
+		scShadowApplyDisplay(decks.filter(e => e.displayOnly === true).concat(scShadowCovers(decks), decks.filter(e => e.displayOnly !== true && e.path))) // the slots Engine holds are cleared there
 		const now = Date.now()
 		for (const d of [1, 2, 3, 4]) {
 			if (scFourDeckRole.indexOf(String(d)) >= 0) continue
