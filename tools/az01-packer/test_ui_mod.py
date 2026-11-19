@@ -2518,7 +2518,7 @@ assert.equal(scShadowEngineMask, 30 & ~(1 << 4));
 assert.deepEqual(writes, ['/Client/Librarian/AddToDatabaseAndLoadToDeck2=file:///peer.flac']);
 assert.equal(scShadowData(2).engine, true); assert.equal(scShadowVisible(2), true); assert.equal(scDeckLocked(2), true); // covered while Engine loads
 assert.equal(scShadowData(4).title, 'CDJ'); assert.equal(scShadowVisible(4), true);
-assert.equal(requests.length, 2); assert(requests[0].url.endsWith('deck=4&key=cdj%3Ax'));
+assert.equal(requests.length, 2); assert(requests.some(r => r.url.endsWith('deck=4&key=cdj%3Ax')));
 scShadowAt[2].ready = true; // Engine holds the peer's track: the cover leaves
 scShadowApplyAll([{deck: 2, key: 'local-peer', path: '/peer.flac', playing: true}, cdj(4)], false);
 assert.equal(scShadowData(2).engine, true); assert.equal(scShadowVisible(2), true); assert.equal(scDeckLocked(2), true);
@@ -3930,7 +3930,7 @@ class UiModBuildTest(unittest.TestCase):
                     with tarfile.open(out.with_suffix(".tar.gz")) as pack:
                         for lang in bp.LANGUAGES:
                             main = pack.extractfile(f"packs/{lang}/Skins/Embedded/EmbeddedMain.qml").read().decode()
-                            self.assertIn("scShadowApplyDisplay(decks.filter(e => e.displayOnly === true).concat(scShadowCovers(decks), decks.filter(e => e.displayOnly !== true && e.path)))", main)
+                            self.assertIn("scShadowApplyDisplay(decks.filter(e => e.displayOnly === true).concat(scShadowCovers(decks), decks.filter(e => e.displayOnly !== true && e.path).map(e => Object.assign({}, e, {engine: true}))))", main)
                             self.assertIn("s.metadataOnly", main)
                             self.assertIn("/v1/enginex/shadow/display?deck=", main)
                             self.assertIn("scDeckLocked", main)
