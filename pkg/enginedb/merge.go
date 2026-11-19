@@ -5,10 +5,12 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // An update of a converted library that does not fit in the mount's time is built in the
@@ -21,6 +23,37 @@ import (
 
 // BaseCounts is the size of a snapshot's tables: rows and sqlite_sequence.
 type BaseCounts map[string][2]int64
+
+// BaseTimes is Track.lastEditTime of a snapshot's tracks, by id, and the clock's second at
+// the snapshot. Engine's triggers set the date whenever it writes a track's analysis, cues or
+// loops, so a track whose date is the snapshot's has the snapshot's PerformanceData.
+type BaseTimes struct {
+	At    int64           `json:"at"`
+	Times map[int64]int64 `json:"times"`
+}
+
+// SnapshotTimes is the BaseTimes of the database in dir.
+func SnapshotTimes(ctx context.Context, dir string) (BaseTimes, error) {
+	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: filepath.Join(dir, "m.db"), RawQuery: "mode=ro"}).String())
+	if err != nil {
+		return BaseTimes{}, err
+	}
+	defer db.Close()
+	rows, err := db.QueryContext(ctx, `SELECT id,COALESCE(lastEditTime,0) FROM Track`)
+	if err != nil {
+		return BaseTimes{}, err
+	}
+	defer rows.Close()
+	times := BaseTimes{At: time.Now().Unix(), Times: map[int64]int64{}}
+	for rows.Next() {
+		var id, t int64
+		if err = rows.Scan(&id, &t); err != nil {
+			return BaseTimes{}, err
+		}
+		times.Times[id] = t
+	}
+	return times, rows.Err()
+}
 
 // The tables whose rows the build may add or remove itself, so Engine must not have.
 var baseTables = []string{"Track", "Playlist", "PlaylistEntity", "AlbumArt"}
@@ -64,7 +97,25 @@ func countTables(ctx context.Context, q interface {
 
 // MergeLive brings what Engine wrote to the live library in liveDir since the snapshot counted
 // as base into the build in buildDir. Engine must not have the live library open.
-func MergeLive(ctx context.Context, buildDir, liveDir string, base BaseCounts) error {
+//
+// times are the snapshot's: PerformanceData is compared only for the tracks Engine has
+// written since, and their number is returned. Comparing every track's reads both libraries'
+// analysis off the stick, 190 MB on a stick of 6013 tracks, and the mount this runs in has
+// 20 s (real stick, 2026-11-19: the hook killed the publish in it at every mount once a deck
+// had loaded a track during the build). Without times (a stage of a build before this), or
+// with a live library without Engine's trigger that dates those writes: every track.
+//
+// The date has whole seconds: a write in the second a track already had as its date does
+// not show. So a track dated between two seconds before the snapshot and now counts as
+// written; the clock has been through no other second since. Dates outside that, also the
+// future ones of a deck whose clock is behind the library's, cannot have been met.
+func MergeLive(ctx context.Context, buildDir, liveDir string, base BaseCounts, times BaseTimes) (int, error) {
+	touched := 0
+	err := mergeLive(ctx, buildDir, liveDir, base, times, &touched)
+	return touched, err
+}
+
+func mergeLive(ctx context.Context, buildDir, liveDir string, base BaseCounts, times BaseTimes, touched *int) error {
 	ro := func(p string) string { return (&url.URL{Scheme: "file", Path: p, RawQuery: "mode=ro"}).String() }
 	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: filepath.Join(buildDir, "m.db")}).String()+"?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_txlock=immediate")
 	if err != nil {
@@ -98,11 +149,11 @@ func MergeLive(ctx context.Context, buildDir, liveDir string, base BaseCounts) e
 	for _, t := range baseTables {
 		b, l := base[t], live[t]
 		if t == "AlbumArt" { // Engine adds the covers it finds; they are carried below
-			var kept int64
-			if err = tx.QueryRowContext(ctx, `SELECT count(*) FROM live.AlbumArt WHERE id<=?`, b[1]).Scan(&kept); err != nil {
+			var added int64 // the covers Engine added are at the table's end: only they are read
+			if err = tx.QueryRowContext(ctx, `SELECT count(*) FROM live.AlbumArt WHERE id>?`, b[1]).Scan(&added); err != nil {
 				return err
 			}
-			if kept != b[0] {
+			if l[0]-added != b[0] {
 				return fmt.Errorf("%w: AlbumArt", ErrMergeConflict)
 			}
 			continue
@@ -175,7 +226,8 @@ func MergeLive(ctx context.Context, buildDir, liveDir string, base BaseCounts) e
 			set[i] = `"` + c + `"=` + value
 			differ[i] = value + ` IS NOT m."` + c + `"`
 		}
-		q := fmt.Sprintf(`UPDATE main.%[1]s AS m SET %[2]s FROM live.%[1]s AS l WHERE l.%[3]s=m.%[3]s AND (%[4]s) AND (%[5]s)`,
+		// where first: a row it leaves out is never read for the comparison.
+		q := fmt.Sprintf(`UPDATE main.%[1]s AS m SET %[2]s FROM live.%[1]s AS l WHERE l.%[3]s=m.%[3]s AND (%[5]s) AND (%[4]s)`,
 			table, strings.Join(set, ","), key, strings.Join(differ, " OR "), where)
 		_, err := tx.ExecContext(ctx, q, args...)
 		return err
@@ -196,6 +248,43 @@ func MergeLive(ctx context.Context, buildDir, liveDir string, base BaseCounts) e
 				LEFT JOIN livebridge.BridgeState l ON l.trackId=s.trackId WHERE l.fingerprint IS NOT s.fingerprint OR l.path IS NOT s.path`)
 			return err
 		},
+		// The tracks Engine has written since the snapshot.
+		func() error {
+			// Without Engine's trigger in the live library nothing dates a write: every track.
+			var dated int
+			if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM live.sqlite_master WHERE type='trigger' AND name='trigger_PerformanceData_after_update_Track_timestamp'`).Scan(&dated); err != nil {
+				return err
+			}
+			q, args := `CREATE TEMP TABLE touched AS SELECT id FROM live.Track`, []any(nil)
+			if times.Times != nil && dated > 0 {
+				if _, err := tx.ExecContext(ctx, `CREATE TEMP TABLE basetimes(id INTEGER PRIMARY KEY, t INTEGER NOT NULL)`); err != nil {
+					return err
+				}
+				insert, err := tx.PrepareContext(ctx, `INSERT INTO temp.basetimes(id,t) VALUES(?,?)`)
+				if err != nil {
+					return err
+				}
+				defer insert.Close()
+				for id, t := range times.Times {
+					if _, err = insert.ExecContext(ctx, id, t); err != nil {
+						return err
+					}
+				}
+				q = `CREATE TEMP TABLE touched AS SELECT l.id FROM live.Track l LEFT JOIN temp.basetimes b ON b.id=l.id
+					WHERE b.id IS NULL OR COALESCE(l.lastEditTime,0)<>b.t OR b.t BETWEEN ? AND ?`
+				args = []any{times.At - 2, time.Now().Unix() + 2}
+			}
+			if _, err := tx.ExecContext(ctx, q, args...); err != nil {
+				return err
+			}
+			if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM temp.touched`).Scan(touched); err != nil {
+				return err
+			}
+			if int64(*touched) >= live["Track"][0] && *touched > 0 {
+				log.Printf("rb-bridge: the publish compares every one of the library's %d tracks (no dates to go by, or all of them written)", *touched)
+			}
+			return nil
+		},
 		// Covers Engine added, by their hash.
 		func() error {
 			if _, err := tx.ExecContext(ctx, `INSERT INTO main.AlbumArt(hash,albumArt) SELECT l.hash,l.albumArt FROM live.AlbumArt l
@@ -211,7 +300,7 @@ func MergeLive(ctx context.Context, buildDir, liveDir string, base BaseCounts) e
 			return copyRows("Track", "id", trackAll, `m.id NOT IN (SELECT id FROM temp.changed)`)
 		},
 		func() error {
-			return copyRows("PerformanceData", "trackId", perfAll, `m.trackId NOT IN (SELECT id FROM temp.changed)`)
+			return copyRows("PerformanceData", "trackId", perfAll, `m.trackId IN (SELECT id FROM temp.touched) AND m.trackId NOT IN (SELECT id FROM temp.changed)`)
 		},
 		// Tracks the build changed: Engine's columns, and deck edits an import keeps (sync.go).
 		func() error {
