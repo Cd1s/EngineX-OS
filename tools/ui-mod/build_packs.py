@@ -702,7 +702,7 @@ SERVICES_MAIN = """
 	// hook that does not know the feature lists it nowhere, and a copy left paused under it
 	// would stand still.
 	property bool scHookFollows: false
-	readonly property bool scPausedShadowFollow: !scIsAZ04 && scHookFollows && !scOff("shadow-paused-follow")
+	readonly property bool scPausedShadowFollow: scHookFollows && !scOff("shadow-paused-follow")
 	property var scShadowFeedSent: ({})
 	// The source's position as stream-sync sent it (at.feedMs at its own clock's
 	// at.feedAt), not carried to now here: stream-sync dates the record by that clock, so

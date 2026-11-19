@@ -59,7 +59,7 @@ var hookFeatures = []hookFeature{
 	{Name: "telemetry-block", Group: "data", About: "PostHog/events databases in RAM, crash reports to /tmp, no Crashpad"},
 	{Name: "vendor-update-block", Group: "data", About: "autoupdate.airmusictech.com is not resolved (no inMusic firmware offers)"},
 	{Name: "ui-packs", Group: "ui", About: "EngineX interface (QML packs): all EngineX menus, About, Remote Load; off = stock interface"},
-	{Name: "shadow-paused-follow", Group: "ui", About: "a shadow deck stays paused and its waveform line follows the source deck (not on PRIME 4 G2 / SYSTEM ONE); off = the shadow deck plays muted as before"},
+	{Name: "shadow-paused-follow", Group: "ui", About: "a shadow deck stays paused and its waveform line follows the source deck; off = the shadow deck plays muted as before"},
 	{Name: "rb-bridge", Group: "services", Reboot: true, Service: true, About: "EngineX service: Pro DJ Link (players' announcements and status for CDJ shadow decks, library sharing); CDJ export is the console's, rekordbox Zero-Scan mount-hook's"},
 }
 
