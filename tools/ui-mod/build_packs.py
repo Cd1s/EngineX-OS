@@ -562,14 +562,15 @@ STREAMING_INTERNAL_SAVE = """
         }
         if (!PlanckGUI.views.sourceScreenView.visible) PlanckGUI.views.sourceScreenView.onQuickSourceButtonClicked()
     }
-    // A stock deck with one source browses it at start-up (board flag
-    // autoSelectSingleSource). To Engine the internal drive is a second drive, so that
-    // stopped and the Sources list asked for the card at every start. The only drive is
+    // At start-up, with nothing browsed and one local drive, browse it on every model.
+    // To Engine the internal save drive is a second drive, so its own single-source
+    // auto-select stopped and the Sources list opened at every start. The only drive is
     // a row whose identifier is a path (another deck's drive over Engine Link is
-    // net://…), other than the internal drive and the read-only sampler demo device
-    // (type 6). Engine ignores a selection until it is ready, so it is repeated until
-    // something is browsed; select() is what a tap does and loads the drive's library.
-    property string scStartDrive: ""
+    // net://…), other than the internal drive and the read-only demo devices (type 6).
+    // Re-check on each try within the 15 x 2 s window so a late-mounting drive is
+    // picked and a second drive arriving during start-up stops selection; wait while
+    // an internal save or native device selection is running, and stop once any real
+    // source has been browsed. select() is what a tap does and loads the library.
     property int scStartTries: 0
     function scOnlyDrive() {
         const model = Planck.librarianController.browserSourceControllerPtr().model()
@@ -578,31 +579,39 @@ STREAMING_INTERNAL_SAVE = """
             const index = model.index(row, 0)
             const id = String(model.data(index, 257) || "")
             if (!id.startsWith("/") || id === "/data/enginex/stream-save" || model.data(index, 259) === 6) continue
-            if (only) return ""
+            if (only) return null
             only = id
         }
         return only
     }
     function scStartOnlyDrive() {
-        if (typeof Config === "undefined" || !Config.device || Config.device.autoSelectSingleSource !== true) return
-        if (scCurrentSource() !== "") return
-        scStartDrive = scOnlyDrive()
+        const cur = scCurrentSource() || ""
+        if (scLastSource !== "" || (cur !== "" && cur !== "/data/enginex/stream-save")) return
         scStartTries = 0
-        if (scStartDrive) scSelectStartDrive()
+        scSelectStartDrive()
     }
     function scSelectStartDrive() {
-        if (scCurrentSource() !== "" || scStartTries >= 15) return
-        const sources = Planck.librarianController.browserSourceControllerPtr()
-        const model = sources.model()
-        for (let row = 0; row < model.rowCount(); row++) {
-            const index = model.index(row, 0)
-            if (model.data(index, 257) === scStartDrive) {
-                scStartTries++
-                sources.select(index)
-                scStartSelect.start()
-                return
+        const cur = scCurrentSource() || ""
+        if (scLastSource !== "" || (cur !== "" && cur !== "/data/enginex/stream-save") || scStartTries >= 15) return
+        scStartTries++
+        let multi = false
+        if (!scInternalPending && !(scSelectingDevice && scSelectingDevice.state)) {
+            const drive = scOnlyDrive()
+            if (drive === null) multi = true
+            else if (drive) {
+                const sources = Planck.librarianController.browserSourceControllerPtr()
+                const model = sources.model()
+                for (let row = 0; row < model.rowCount(); row++) {
+                    const index = model.index(row, 0)
+                    if (model.data(index, 257) === drive) {
+                        sources.select(index)
+                        break
+                    }
+                }
             }
         }
+        const after = scCurrentSource() || ""
+        if (!multi && scStartTries < 15 && scLastSource === "" && (after === "" || after === "/data/enginex/stream-save")) scStartSelect.start()
     }
     Timer {
         id: scStartSelect
