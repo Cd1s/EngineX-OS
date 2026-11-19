@@ -3263,6 +3263,30 @@ static int oa_settle(void *o, const char *track, uint32_t len) {
     return !__atomic_load_n((uchar *)o + OA_STOP, __ATOMIC_ACQUIRE);
 }
 
+// An uncompressed overview of at most 1 MiB whose header's bin counts match its length.
+static char *oa_read_rgb(const char *path, uint32_t *len) {
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return NULL;
+    struct stat st;
+    char *b = NULL;
+    if (!fstat(fd, &st) && S_ISREG(st.st_mode) && st.st_size >= 30 && st.st_size <= (1 << 20)) {
+        b = malloc((size_t)st.st_size);
+        size_t got = 0;
+        for (ssize_t n; b && got < (size_t)st.st_size && (n = read(fd, b + got, (size_t)st.st_size - got)) > 0;) got += (size_t)n;
+        uint64_t bins = 0, again = 0;
+        for (int i = 0; b && got == (size_t)st.st_size && i < 8; i++) {
+            bins = bins << 8 | (uchar)b[i];
+            again = again << 8 | (uchar)b[8 + i];
+        }
+        if (!b || got != (size_t)st.st_size || !bins || bins != again || 24 + 3 * bins + 3 != (uint64_t)st.st_size) {
+            free(b);
+            b = NULL;
+        } else *len = (uint32_t)st.st_size;
+    }
+    close(fd);
+    return b;
+}
+
 static int oa_replay(void *o, const struct oa_string *s, const uchar *prefs) {
     char path[PATH_MAX];
     struct timespec t0, t1;
@@ -3314,7 +3338,15 @@ static int oa_replay(void *o, const struct oa_string *s, const uchar *prefs) {
         if (p.len[1]) oa_emit_bytes(o, OA_BEATS, p.part[1], p.len[1]);
         oa_emit_bytes(o, OA_OVERVIEW, p.part[2], p.len[2]);
     }
-    oa_emit_bytes(o, OA_OVERVIEW_RGB, p.part[2], p.len[2]);
+    // A shadow copy replays the RGB overview the source's Engine built (stream-sync's
+    // <copy>.perf.rgb), so both units draw one picture; the stored 3-band overview drew
+    // the RGB one in other colours (LEFT, 2026-11-20). Without it, as before.
+    char rgb_path[PATH_MAX + 16], *rgb = NULL;
+    uint32_t rgb_len = 0;
+    snprintf(rgb_path, sizeof rgb_path, "%s.rgb", perf);
+    if (!rekordbox_stream) rgb = oa_read_rgb(rgb_path, &rgb_len);
+    oa_emit_bytes(o, OA_OVERVIEW_RGB, rgb ? rgb : p.part[2], rgb ? rgb_len : p.len[2]);
+    free(rgb);
     double progress = 1.0, bpm = (float)p.bpm;
     *(float *)((char *)o + OA_PROGRESS) = 1.0f;
     oa_emit(o, OA_PROGRESS_SIG, &progress);
@@ -3814,13 +3846,29 @@ static unsigned (*shadow_analyze_original)(void *, const void *);
 
 // Deck loads can request analysis on EMain even when the library Track is
 // marked analysed. Leave the loaded native data in place for our peer copies.
-// Not the RGB-only request (prefs byte 12, RGB waveform type, a track without an RGB
-// overview): it sends no grid and no 3-band overview, and without it the copy's RGB
-// overview stayed empty (LEFT, 2026-11-20: black mini overview, no request in the log).
+// Not under the RGB waveform type: for a copy without an RGB overview this request is
+// Engine's RGB-only analysis (no grid, no 3-band overview), and skipping it left the copy's
+// mini overview empty (LEFT, 2026-11-20: black, no request in the log; let through, Engine
+// built a file byte-identical to the source's). prefs byte 12 is set only later, in the job.
+#ifndef SC_UI_SETTINGS
+#define SC_UI_SETTINGS "/data/enginex/ui/settings.conf"
+#endif
+static const char *sc_ui_settings = SC_UI_SETTINGS;
+static int sc_rgb_waveform(void) {
+    FILE *f = fopen(sc_ui_settings, "re");
+    if (!f) return 0;
+    char line[128];
+    int rgb = 0;
+    while (!rgb && fgets(line, sizeof line, f)) rgb = !strcmp(line, "waveform=rgb\n") || !strcmp(line, "waveform=rgb");
+    fclose(f);
+    return rgb;
+}
+
 static int shadow_analysis_skipped(const void *obj, const unsigned char *prefs) {
     const unsigned char *self = obj, *track = *(const unsigned char *const *)(self + 0x48);
     const struct oa_string *path = (const void *)(self + 0x10);
-    if (prefs && prefs[12]) return 0;
+    (void)prefs;
+    if (sc_rgb_waveform()) return 0;
     if (track && track[0x31d] && path->ptr && path->size > 0 && path->size < 512) {
         char text[512];
         return utf16_to_utf8(path->ptr, path->size, text, sizeof text) && sc_shadow_analysis_staged(text);

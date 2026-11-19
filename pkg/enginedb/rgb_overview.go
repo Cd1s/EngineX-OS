@@ -148,3 +148,49 @@ func rgbSamplesPerBin(blob []byte) float64 {
 	}
 	return v
 }
+
+// RGBOverview is the RGB overview Engine built for the track at rel (Track.path) of the
+// library library, in dir/OverviewData, uncompressed: what a shadow copy replays so both
+// units draw one picture. A file PruneRGBOverviews would remove is none.
+func RGBOverview(ctx context.Context, dir, library, rel string) ([]byte, error) {
+	db, err := openReadOnly(library)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	var uuid string
+	var id int64
+	if err = db.QueryRowContext(ctx, `SELECT (SELECT uuid FROM Information LIMIT 1), id FROM Track WHERE path = ? ORDER BY id DESC LIMIT 1`, rel).Scan(&uuid, &id); err != nil {
+		return nil, err
+	}
+	if uuid == "" || strings.ContainsAny(uuid, `/\`) || uuid == "." || uuid == ".." {
+		return nil, errors.New("rgb overview: bad library uuid")
+	}
+	path := filepath.Join(dir, "OverviewData", uuid, strconv.FormatInt(id, 10)+".rgb")
+	if stale, err := staleRGB(ctx, db, nil, id, path); err != nil {
+		return nil, err
+	} else if stale {
+		return nil, os.ErrNotExist
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := QUncompress(b, 1<<20)
+	if err != nil {
+		return nil, err
+	}
+	if !ValidRGBOverview(raw) {
+		return nil, errors.New("rgb overview: not an overview")
+	}
+	return raw, nil
+}
+
+// ValidRGBOverview: an uncompressed overview, its header's bin counts and length agreeing.
+func ValidRGBOverview(raw []byte) bool {
+	if len(raw) < 27 {
+		return false
+	}
+	bins := binary.BigEndian.Uint64(raw[0:8])
+	return bins > 0 && bins <= 1<<16 && binary.BigEndian.Uint64(raw[8:16]) == bins && uint64(len(raw)) == 24+3*bins+3
+}

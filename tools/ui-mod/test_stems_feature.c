@@ -1266,6 +1266,23 @@ static void test_shadow_replay(void) {
     assert(oa_count == 9 && !memcmp(oa_seen, want, sizeof want));
     assert(!strcmp(oa_payload[1], "TRACK") && !strcmp(oa_payload[2], "BEATS") && !strcmp(oa_payload[4], "OVERVIEW"));
     assert(oa_double[5] == 1.0 && oa_self[OA_PROGRESS / 4] == 1.0f && oa_double[7] == (double)(float)bpm);
+    // The source's RGB overview next to the copy's .perf is the replayed RGB overview,
+    // not the stored 3-band one (other colours on the deck); a malformed one is not.
+    {
+        unsigned char rgbov[30] = {0};
+        rgbov[7] = 1; rgbov[15] = 1; // 1 bin
+        memcpy(rgbov + 24, "RGBRGB", 6);
+        f = fopen("/tmp/test-oa-replay/\xc3\xa9.flac.perf.rgb", "wb"); assert(f); fwrite(rgbov, 1, sizeof rgbov, f); fclose(f);
+        oa_count = 0;
+        assert(oa_replay(oa_self, &qs, prefs) && oa_count == 9 && oa_seen[4] == OA_OVERVIEW_RGB);
+        assert(!memcmp(oa_payload[4], rgbov, sizeof rgbov) && !strcmp(oa_payload[3], "OVERVIEW"));
+        f = fopen("/tmp/test-oa-replay/\xc3\xa9.flac.perf.rgb", "ab"); assert(f); fputc('x', f); fclose(f);
+        oa_count = 0;
+        assert(oa_replay(oa_self, &qs, prefs) && !strcmp(oa_payload[4], "OVERVIEW"));
+        assert(!unlink("/tmp/test-oa-replay/\xc3\xa9.flac.perf.rgb"));
+        oa_count = 0;
+        assert(oa_replay(oa_self, &qs, prefs) && oa_count == 9);
+    }
     // A completed streaming download uses the analysis registered by the
     // rekordbox row fill; the analyzer delivers the imported grid without decoding.
     const char *old_rbx_dir = sc_rbx_dir;
@@ -1594,8 +1611,8 @@ static void analysis_bind(sqlite_bind_int64_fn bind, sqlite3 *db, const char *sq
 }
 
 // A deck load's analysis of a peer copy that was given the source's analysis is skipped,
-// but not the RGB-only request (prefs byte 12): it builds the RGB overview and nothing
-// else, and without it the copy's mini overview stayed empty under the RGB waveform type.
+// but not under the RGB waveform type: there it is Engine's RGB-only analysis of a copy
+// without an RGB overview, and without it the copy's mini overview stayed empty.
 static void test_shadow_rgb_request(void) {
     char dir[] = "/tmp/enginex-rgbreq-XXXXXX", peer[128], sidecar[160], audio[160];
     assert(mkdtemp(dir));
@@ -1615,16 +1632,23 @@ static void test_shadow_rgb_request(void) {
     const unsigned char *held = track;
     memcpy(obj + 0x10, &path, sizeof path);
     memcpy(obj + 0x48, &held, sizeof held);
+    char settings[160];
+    snprintf(settings, sizeof settings, "%s/settings.conf", dir);
+    const char *old_settings = sc_ui_settings;
+    sc_ui_settings = settings;
     track[0x31d] = 1;
+    assert(shadow_analysis_skipped(obj, prefs)); // no settings: as before
+    f = fopen(settings, "w"); assert(f); fputs("scope=deezer\nwaveform=3band\n", f); fclose(f);
     assert(shadow_analysis_skipped(obj, prefs));
-    prefs[12] = 1;
+    f = fopen(settings, "w"); assert(f); fputs("scope=deezer\nwaveform=rgb\nremote_load=0\n", f); fclose(f);
     assert(!shadow_analysis_skipped(obj, prefs));
-    prefs[12] = 0;
+    f = fopen(settings, "w"); assert(f); fputs("waveform=3band\n", f); fclose(f);
     track[0x31d] = 0;
     assert(!shadow_analysis_skipped(obj, prefs));
     sc_shadow_root = old_root;
-    assert(!unlink(sidecar) && !rmdir(peer) && !rmdir(dir));
-    puts("Shadow copy: the RGB-only analysis request goes through: PASS");
+    sc_ui_settings = old_settings;
+    assert(!unlink(settings) && !unlink(sidecar) && !rmdir(peer) && !rmdir(dir));
+    puts("Shadow copy: Engine's analysis request goes through under the RGB waveform type: PASS");
 }
 
 static void test_analysis_dispatch(const char *off, int gateway, int shadow) {
