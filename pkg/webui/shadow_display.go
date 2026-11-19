@@ -664,6 +664,46 @@ func downsampleDisplayWave(w enginedb.DisplayWave, limit int) enginedb.DisplayWa
 	return enginedb.DisplayWave{Bands: b, SamplesPerBin: w.SamplesPerBin * float64(n) / float64(limit)}
 }
 
+// Engine's overview bytes are normally scaled to the same band peaks stored in
+// trackData. A few decoder paths write a valid overview with much smaller bytes
+// while keeping the measured peaks; RGB then renders only a one-pixel, effectively
+// black strip. Raise only those under-scaled bands. Never reduce a source waveform:
+// imported Link/stick rows and already-correct Engine rows keep their bytes exactly.
+func normalizeShadowOverview(w enginedb.DisplayWave, peaks [3]float64) enginedb.DisplayWave {
+	if len(w.Bands) == 0 || len(w.Bands)%3 != 0 {
+		return w
+	}
+	peakPerOverviewByte := [3]float64{0.0066, 0.0035, 0.0016}
+	var top [3]byte
+	for i, v := range w.Bands {
+		top[i%3] = max(top[i%3], v)
+	}
+	var scale [3]float64
+	changed := false
+	for band, peak := range peaks {
+		if peak <= 0 || peakPerOverviewByte[band] <= 0 || top[band] == 0 {
+			continue
+		}
+		target := min(255.0, peak/peakPerOverviewByte[band])
+		if target <= float64(top[band])+1 {
+			continue
+		}
+		scale[band] = target / float64(top[band])
+		changed = true
+	}
+	if !changed {
+		return w
+	}
+	out := append([]byte(nil), w.Bands...)
+	for i, v := range out {
+		if scale[i%3] > 1 {
+			out[i] = byte(min(255.0, math.Round(float64(v)*scale[i%3])))
+		}
+	}
+	w.Bands = out
+	return w
+}
+
 // Peak-preserving downsampling. The default is retained for older clients.
 // Local UI clients supply their stock palette; rendering never runs on a frame tick.
 func renderShadowWave(w enginedb.DisplayWave, width, height int) ([]byte, error) {
@@ -935,6 +975,7 @@ func dbDisplay(ctx context.Context, file, rel string) (*shadowDisplayAsset, erro
 	if a.DisplayPerformance, err = enginedb.ParseDisplayPerformance(track, overview, beats, cues, loops); err != nil {
 		return nil, err
 	}
+	a.Overview = normalizeShadowOverview(a.Overview, a.Peaks)
 	// Engine's Track.key, not trackData's differing analysis enum.
 	if key.Valid && key.Int64 >= 0 && key.Int64 < 24 {
 		a.KeyName = []string{"8B", "8A", "9B", "9A", "10B", "10A", "11B", "11A", "12B", "12A", "1B", "1A", "2B", "2A", "3B", "3A", "4B", "4A", "5B", "5A", "6B", "6A", "7B", "7A"}[key.Int64]
