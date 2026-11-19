@@ -54,7 +54,7 @@
 - **3 種波形配色與 4 種語言**：全系 16 款支援 **繁體中文 / 简体中文 / English / Español** 免重啟切換，並於控制中心或 `設定檔 → 顯示 → 波形樣式` 一鍵切換 `Denon`、`RGB` 與先鋒風格 `3-Band` 波形。
 
 ### 5. 演出現場音質保護、一體機先鋒風格效果與 Gigabit 網路
-- **21 項即時音訊保護**：消除切效果器爆音，內建零延遲 `0dB 防破音軟限幅`（峰值壓在 -0.1 dBFS 以下）、`自動增益（0 dB 正規化）`、第一代 SC5000 / SC6000 獨立播放機可選 `Hi-Fi 高頻補償輸出`（`設定檔 → 播放 → Hi-Fi 高頻補償輸出`，預設關閉）、Flanger 音量下沉補償，以及帶混音台一體機上的 `推桿回音` / `回聲淡出`；
+- **21 項即時音訊保護**：消除切效果器爆音，內建零延遲 `0dB 防破音軟限幅`（峰值壓在 -0.1 dBFS 以下）、`自動增益（0 dB 正規化）`、第一代 SC5000 / SC6000 獨立播放機可選 `Hi-Fi 高頻補償輸出`（`設定檔 → 播放 → Hi-Fi 高頻補償輸出`，預設關閉）、Flanger 音量下沉補償，以及帶混音台一體機上的 `推桿回音`（`Fader Echo`）；
 - **一體機先鋒風格效果**：`PRIME 4` 硬體效果選擇器內建 `Spiral (PX)`、`Pitch Echo (PX)`、`Slip Roll (PX)`、`Dub Echo (PX)`、`Space (PX)`，並有選配的 **10–4000 ms** 獨立毫秒延遲模式（`先鋒效果延遲模式 (PX)`）；PRIME 4 / PRIME 2 / PRIME GO / Mixstream Pro 及二代 32 位元一體機可在 `設定檔 → 播放 → 先鋒風格效果 (Color FX)` 把其中一種效果放到每個通道的 `FILTER` 旋鈕上（旋鈕置中時與原廠相同，選 `關` 維持原廠 Sweep FX）；獨立播放機不提供 PX 效果，維持純淨播放機音訊路徑；
 - **智慧同步、Gigabit 網路孔與 `:8080` Web 主控台**：控制中心一鍵切換 `Bar / Beat / Tempo` 同步並在大 BPM 差距下自動擴大變速範圍，有線網路孔解鎖 **1 Gbps** 滿速，`:8080` 網頁主控台支援 Wi-Fi 拖曳傳歌、遺失曲目一鍵重新定位、Shoutcast / Icecast `直播推流`，以及按需安裝的 Mod 外掛中心（`tailscale-remote`、`dmx-studio`、`midi-controller-mapper`、`jog-logo-studio`、`sampler-pad-studio`、`minimal-club-mode`）。
 
@@ -275,7 +275,7 @@
 
 </details>
 
-> **PRIME 4 G2 / Rane SYSTEM ONE（64 位元機型）**：已包含四語介面、7 大串流服務（含透過 enginex-amd 下載 Apple Music、Spotify、Deezer、SoundCloud、Beatport、TIDAL、網易雲）、串流錄音、即時音質保護（`0dB 防破音軟限幅`、`自動增益`、`回聲淡出`、`先鋒風格效果 (Color FX)`、`先鋒效果延遲模式 (PX)`）、Rekordbox 隨身碟直讀與 `:8080` Web 主控台全部能力；Stems 維持官方韌體行為。
+> **PRIME 4 G2 / Rane SYSTEM ONE（64 位元機型）**：已包含四語介面、7 大串流服務（含透過 enginex-amd 下載 Apple Music、Spotify、Deezer、SoundCloud、Beatport、TIDAL、網易雲）、串流錄音、即時音質保護（`0dB 防破音軟限幅`、`自動增益`、`推桿回音`、`先鋒風格效果 (Color FX)`、`先鋒效果延遲模式 (PX)`）、Rekordbox 隨身碟直讀與 `:8080` Web 主控台全部能力；Stems 維持官方韌體行為。
 
 ### 方式二：播放機螢幕一鍵線上升級（已安裝 EngineX OS 後）
 - 連接 Wi-Fi 或網路線後開啟 **設定 → 關於 / 更新**；

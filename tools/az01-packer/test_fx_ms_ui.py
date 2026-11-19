@@ -107,8 +107,10 @@ assert.equal(scFxTimeMode,'beats'); assert.equal(scFxTimeMs,500);
         props = {}
         for line in bp.SERVICES_MAIN.splitlines():
             m = re.match(r"\s*readonly property \w+ (sc\w+):\s*(.+)$", line)
-            if m and m.group(1) in ("scBoard", "scIsPlayerBoard", "scHasMixer", "scHasStemsEq", "scHasPxDelay", "scTransitionFxView"):
+            if m and m.group(1) in ("scBoard", "scIsPlayerBoard", "scHasMixer", "scHasStemsEq", "scHasPxDelay", "scTransitionFxView", "scHasHardwareFaderFxButtons"):
                 props[m.group(1)] = m.group(2).strip()
+        m_tile = re.search(r"readonly property bool scHasStockTransitionTile:\s*([\s\S]*?:\s*false)", bp.SERVICES_MAIN)
+        props["scHasStockTransitionTile"] = " ".join(m_tile.group(1).split())
         stems_handler = re.search(r"onScStemsEqModeChanged:\s*\{([\s\S]*?)\n\t\}", bp.SERVICES_MAIN).group(1)
         has_stems_m = re.search(r"onScHasStemsEqChanged:\s*\{([\s\S]*?)\n\t\}", bp.SERVICES_MAIN)
         has_stems_handler = has_stems_m.group(1) if has_stems_m else ""
@@ -179,11 +181,14 @@ const visible = {{}};
 {entry_defs}
 
 function resetUnit(board, opts = {{}}) {{
+    const isPlayerBoard = ['JP07', 'JP08', 'JP13', 'JP14'].includes(board);
     Config.device.name = board;
-    Config.device.isPlayer = opts.isPlayer !== undefined ? opts.isPlayer : ['JP07', 'JP08', 'JP13', 'JP14'].includes(board);
+    Config.device.isPlayer = opts.isPlayer !== undefined ? opts.isPlayer : isPlayerBoard;
+    Config.device.hasHardwareFaderFxButtons = opts.hasHardwareFaderFxButtons !== undefined ? !!opts.hasHardwareFaderFxButtons : ['JP24', 'RMZ2'].includes(board);
     Config.audio.hasStemsLevel = opts.hasStemsLevel !== undefined ? opts.hasStemsLevel : true;
     Config.audio.fx.hasDJFx = !!opts.hasDJFx;
     Config.audio.fx.hasNHFx = !!opts.hasNHFx;
+    Config.audio.fx.hasTransitionFx = opts.hasTransitionFx !== undefined ? !!opts.hasTransitionFx : !isPlayerBoard;
     for (let ch = 1; ch <= 4; ch++) stripModes[ch].index = 0;
     transitionFx.enabled = false;
     scStemsEqApplied = false;
@@ -214,14 +219,14 @@ for (const board of ['JP07', 'JP08', 'JP13', 'JP14']) {{
     assert.equal(visible['Hi-Fi Output'](), false, board + ' Hi-Fi Output hidden when hifi-output off');
     assert.equal(visible['Master Soft Clipper'](), true, board + ' Master Soft Clipper stays shown');
     scFeaturesOff = [];
-    assert.equal(visible['Echo Out'](), false, board + ' Echo Out hidden');
+    assert.equal(visible['Fader Echo'](), false, board + ' Fader Echo hidden');
     assert.equal(visible['Stems EQ Mode'](), false, board + ' Stems EQ hidden');
     assert.equal(visible['Color FX Style'](), false, board + ' Color FX Style hidden (players have no filter knob; no hook marker)');
     assert.equal(visible['PX Delay Time Mode'](), false, board + ' PX Delay Time Mode hidden when Color FX Off');
     assert.equal(visible['PX Delay Time (ms)'](), false, board + ' PX Delay Time (ms) hidden when Color FX Off');
     // Hidden entries keep stored values and behave as Off:
     assert.equal(scUpfaderEcho, true);
-    assert.equal(transitionFx.enabled, false, board + ' hidden Echo Out stays Off');
+    assert.equal(transitionFx.enabled, false, board + ' hidden Fader Echo stays Off');
     assert.equal(scStemsEqMode, true);
     for (let ch = 1; ch <= 4; ch++) assert.equal(stripModes[ch].index, 0, board + ' hidden Stems EQ stays Off');
     assert.equal(scFxTimeMode, 'ms');
@@ -260,9 +265,9 @@ for (const [board, hasStems, colorFx] of [['JC16', true, true], ['JP11', true, t
         upfaderEcho: true, stemsEqMode: true,
         pioneerFx: 'off', fxTimeMode: 'ms', fxTimeMs: 364,
     }});
-    assert.equal(visible['Echo Out'](), true, board + ' Echo Out shown');
+    assert.equal(visible['Fader Echo'](), false, board + ' duplicate Fader Echo hidden when TransitionFx or Fader FX buttons present');
     assert.equal(visible['Hi-Fi Output'](), false, board + ' Hi-Fi Output hidden on consoles');
-    assert.equal(transitionFx.enabled, true, board + ' Echo Out active');
+    assert.equal(transitionFx.enabled, true, board + ' Fader Echo active');
     assert.equal(visible['Stems EQ Mode'](), hasStems, board + ' Stems EQ gate');
     for (let ch = 1; ch <= 4; ch++) assert.equal(stripModes[ch].index, hasStems ? 1 : 0, board + ' Stems EQ state');
     assert.equal(scStemsEqMode, true);
@@ -276,6 +281,13 @@ for (const [board, hasStems, colorFx] of [['JC16', true, true], ['JP11', true, t
     assert.equal(visible['PX Delay Time Mode'](), false, board + ' PX Delay hidden on dub_echo');
     assert.equal(visible['PX Delay Time (ms)'](), false, board + ' PX Delay ms hidden on dub_echo');
 }}
+
+// Fallback console without stock TransitionFx tile or hardware Fader FX buttons keeps Fader Echo row:
+resetUnit('JC16', {{hasTransitionFx: false, hasHardwareFaderFxButtons: false}});
+assert.equal(visible['Fader Echo'](), true, 'fallback mixer without TransitionFx shows Fader Echo');
+scFeaturesOff = ['dsp-guards'];
+assert.equal(visible['Fader Echo'](), false, 'fallback mixer hides Fader Echo when dsp-guards off');
+scFeaturesOff = [];
 
 // #258: stock UI and WebUI enabled linkage preserve every saved trigger source.
 const echoCalls = [];
@@ -308,7 +320,7 @@ scApply({{
     upfaderEcho: false, stemsEqMode: false,
     pioneerFx: 'off', fxTimeMode: 'beats', fxTimeMs: 500,
 }});
-assert.equal(visible['Echo Out'](), true, 'JC11 Echo Out shown');
+assert.equal(visible['Fader Echo'](), false, 'JC11 duplicate Fader Echo hidden');
 assert.equal(visible['Stems EQ Mode'](), true, 'JC11 Stems EQ shown');
 assert.equal(visible['Color FX Style'](), false, 'JC11 Color FX Style hidden without the channel-knob marker');
 scApply({{colorFxAvailable: true}});
