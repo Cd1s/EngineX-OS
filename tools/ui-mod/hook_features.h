@@ -163,9 +163,10 @@ static uint32_t hf_disabled(void) {
 }
 
 /* Forget the cached mask (tests, after changing hf_path or the file). */
-static uint32_t hf_unavailable;
+static uint32_t hf_unavailable, hf_unproven;
 __attribute__((unused)) static void hf_reload(void) {
     __atomic_store_n(&hf_unavailable, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&hf_unproven, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&hf_mask, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&hf_state, 0, __ATOMIC_RELEASE);
 }
@@ -220,7 +221,7 @@ static void hf_publish(void) {
     hf_names_of(hf_with_needs(hf_parse(ENGINEX_HOOK_DISABLE, sizeof ENGINEX_HOOK_DISABLE - 1, NULL)) | hf_unavailable, build_off, sizeof build_off);
     hf_names_of(hf_disabled(), off, sizeof off);
     int n = snprintf(text, sizeof text, "pid=%d\nbuild=%s\noff=%s\n%s", (int)getpid(), build_off, off,
-                     hf_on(HF_SHADOW_PAUSED_FOLLOW) ? "on=shadow-paused-follow\n" : "");
+                     hf_on(HF_SHADOW_PAUSED_FOLLOW) && !(__atomic_load_n(&hf_unproven, __ATOMIC_ACQUIRE) & (1u << HF_SHADOW_PAUSED_FOLLOW)) ? "on=shadow-paused-follow\n" : "");
     if (n < 0 || (size_t)n >= sizeof text) return;
     if ((size_t)snprintf(dir, sizeof dir, "%s", hf_state_path) >= sizeof dir) return;
     char *slash = strrchr(dir, '/');
@@ -234,6 +235,18 @@ static void hf_publish(void) {
     long w = syscall(SYS_write, (int)fd, text, (size_t)n);
     syscall(SYS_close, (int)fd);
     if (w != n || rename(tmp, hf_state_path) != 0) unlink(tmp);
+}
+
+/* A feature that is installed but depends on something Engine has yet to do in this
+ * process: hf_publish() does not list it under on= between hf_await() and hf_proven().
+ * hf_proven() publishes once, from the thread that saw it work. */
+__attribute__((unused)) static void hf_await(int feature) {
+    if (feature > HF_ALWAYS && feature < HF_COUNT) __atomic_or_fetch(&hf_unproven, 1u << feature, __ATOMIC_RELEASE);
+}
+__attribute__((unused)) static void hf_proven(int feature) {
+    uint32_t bit = feature > HF_ALWAYS && feature < HF_COUNT ? 1u << feature : 0;
+    if (!(__atomic_load_n(&hf_unproven, __ATOMIC_ACQUIRE) & bit)) return;
+    if (__atomic_fetch_and(&hf_unproven, ~bit, __ATOMIC_ACQ_REL) & bit) hf_publish();
 }
 
 #endif

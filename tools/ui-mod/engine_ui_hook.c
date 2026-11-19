@@ -689,6 +689,10 @@ struct engine_build {
     // that vector is learnt. 0: not verified for this Engine, the hook is not installed.
     uint32_t shadow_capture_site;
     uchar shadow_capture_prefix[8];
+    // Or, where no code site is verified (AArch64): the slot of PlanckGUI's own vtable
+    // that holds its metaObject() and that function. QML asks an object for its meta
+    // object before it can call anything on it, so the owner is known by then.
+    uint32_t shadow_owner_slot, shadow_owner_fn;
 };
 static const struct engine_build *build;
 
@@ -743,6 +747,13 @@ static int shadow_item_deck(const void *self) {
         deck = (int)d + 1;
     }
     return deck;
+}
+
+static const void *(*shadow_owner_original)(const void *);
+static const void *shadow_owner_hook(const void *planck) {
+    shadow_capture_waveform_item((void *)(uintptr_t)planck);
+    hf_proven(HF_SHADOW_PAUSED_FOLLOW); // from here on the decks' items can be told apart
+    return shadow_owner_original(planck);
 }
 
 #if !defined(__aarch64__)
@@ -849,9 +860,12 @@ static int try_patch_bytes(int feature, uintptr_t entry, const void *bytes, size
 // this Engine has no verified site; then nothing was changed and the feature is reported
 // off, so the packs keep the shadow deck playing.
 static int install_shadow_position_hooks(uintptr_t base, size_t page) {
-    if (!hf_on(HF_SHADOW_PAUSED_FOLLOW) || !build->shadow_position_fn || !build->shadow_capture_site) return 0;
-    if (memcmp((const void *)(base + build->shadow_position_fn), build->shadow_position_prefix, build->shadow_position_prefix_size) ||
+    if (!hf_on(HF_SHADOW_PAUSED_FOLLOW) || !build->shadow_position_fn || (!build->shadow_capture_site && !build->shadow_owner_slot)) return 0;
+    if (memcmp((const void *)(base + build->shadow_position_fn), build->shadow_position_prefix, build->shadow_position_prefix_size)) return 0;
+    if (build->shadow_capture_site &&
         memcmp((const void *)(base + build->shadow_capture_site), build->shadow_capture_prefix, sizeof build->shadow_capture_prefix)) return 0;
+    uintptr_t *owner = build->shadow_owner_slot ? (uintptr_t *)(base + build->shadow_owner_slot) : NULL;
+    if (owner && *owner != base + build->shadow_owner_fn) return 0;
     uintptr_t *a = (uintptr_t *)(base + build->shadow_vtable_a + build->shadow_vtable_slot);
     uintptr_t *b = (uintptr_t *)(base + build->shadow_vtable_b + build->shadow_vtable_slot);
     if (*a != base + build->shadow_position_fn || *b != base + build->shadow_position_fn) return 0;
@@ -872,13 +886,22 @@ static int install_shadow_position_hooks(uintptr_t base, size_t page) {
         return 0;
     }
 #if !defined(__aarch64__)
-    const uint32_t jump[] = {0xe51ff004, (uint32_t)(uintptr_t)shadow_capture_waveform_item_stub};
-    shadow_capture_return = base + build->shadow_capture_site + sizeof jump;
-    if (!try_patch_bytes(HF_SHADOW_PAUSED_FOLLOW, base + build->shadow_capture_site, jump, sizeof jump, page)) {
-        munmap(map, bytes);
-        return 0;
+    if (build->shadow_capture_site) {
+        const uint32_t jump[] = {0xe51ff004, (uint32_t)(uintptr_t)shadow_capture_waveform_item_stub};
+        shadow_capture_return = base + build->shadow_capture_site + sizeof jump;
+        if (!try_patch_bytes(HF_SHADOW_PAUSED_FOLLOW, base + build->shadow_capture_site, jump, sizeof jump, page)) {
+            munmap(map, bytes);
+            return 0;
+        }
     }
 #endif
+    if (owner) {
+        // Whether Engine asks PlanckGUI for its meta object has not been seen on this
+        // Engine's own screen: the packs are told the line follows (on=) only once it has.
+        shadow_owner_original = (const void *(*)(const void *))(base + build->shadow_owner_fn);
+        hf_await(HF_SHADOW_PAUSED_FOLLOW);
+        patch_pointer(HF_SHADOW_PAUSED_FOLLOW, owner, (uintptr_t)shadow_owner_hook, page);
+    }
     shadow_feed = map;
     shadow_position_original = (int (*)(const void *))(base + build->shadow_position_fn);
     patch_pointer(HF_SHADOW_PAUSED_FOLLOW, a, (uintptr_t)shadow_position_hook, page);
@@ -2419,7 +2442,8 @@ static const struct engine_build engine_builds[] = {
      .shadow_vtable_slot = 0x178, .shadow_position_fn = 0x655330,
      .shadow_array_offset = 0x450, .shadow_position_prefix_size = 16,
      .shadow_position_prefix = {0x5f, 0x24, 0x03, 0xd5, 0x00, 0x48, 0x40, 0xbd,
-                                0x00, 0x00, 0x38, 0x1e, 0xc0, 0x03, 0x5f, 0xd6}},
+                                0x00, 0x00, 0x38, 0x1e, 0xc0, 0x03, 0x5f, 0xd6},
+     .shadow_owner_slot = 0x2d27a10, .shadow_owner_fn = 0xb0b888},
 };
 #else
 static const struct engine_edit edits_504[] = {
@@ -2604,9 +2628,9 @@ static const struct engine_build engine_builds[] = {
      .shadow_vtable_a = 0x2bd2544, .shadow_vtable_b = 0x2bd1364,
      .shadow_vtable_slot = 0xbc, .shadow_position_fn = 0x4c5780,
      .shadow_array_offset = 0x244, .shadow_position_prefix_size = 8,
-     .shadow_position_prefix = {0x0a, 0x7a, 0xd0, 0xed, 0x04, 0xb0, 0x2d, 0xe5}},
-    // HF_SHADOW_PAUSED_FOLLOW is not installed here: the waveformPositionItem case is at
-    // 0xa3c264 with the first-generation bytes, but it has not run on this Engine yet.
+     .shadow_position_prefix = {0x0a, 0x7a, 0xd0, 0xed, 0x04, 0xb0, 0x2d, 0xe5},
+     .shadow_capture_site = 0xa3c264,
+     .shadow_capture_prefix = {0x04, 0x30, 0x96, 0xe5, 0x00, 0x30, 0x93, 0xe5}},
 };
 #endif
 

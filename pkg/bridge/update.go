@@ -26,6 +26,7 @@ import (
 const (
 	kindName       = "KIND"        // "update" in the stage of an update
 	baseCountsName = "BASE.counts" // enginedb.BaseCounts of the snapshot, as JSON
+	baseTimesName  = "BASE.times"  // enginedb.BaseTimes of the snapshot, as JSON
 	resumeName     = "RESUME"      // the stamp, once a pass of the update was committed
 )
 
@@ -96,7 +97,16 @@ func snapshotLive(ctx context.Context, dir, stage string) error {
 		if err != nil {
 			return err
 		}
-		b, _ := json.Marshal(counts)
+		// The times first: the counts are what says the snapshot is there.
+		times, err := enginedb.SnapshotTimes(ctx, stage)
+		if err != nil {
+			return err
+		}
+		b, _ := json.Marshal(times)
+		if err = writeMark(stage, baseTimesName, string(b)); err != nil {
+			return err
+		}
+		b, _ = json.Marshal(counts)
 		if err = writeMark(stage, baseCountsName, string(b)); err != nil {
 			return err
 		}
@@ -178,8 +188,13 @@ func publishUpdate(ctx context.Context, mount, dir string) (enginedb.Result, err
 		if err := json.Unmarshal([]byte(readMark(stage, baseCountsName)), &base); err != nil {
 			return enginedb.Result{}, fmt.Errorf("update stage without its snapshot counts: %w", err)
 		}
+		// A stage of a build that recorded no times: every track is compared, as it was.
+		var times enginedb.BaseTimes
+		if json.Unmarshal([]byte(readMark(stage, baseTimesName)), &times) != nil {
+			times = enginedb.BaseTimes{}
+		}
 		start := time.Now()
-		err := enginedb.MergeLive(ctx, stage, dir, base)
+		written, err := enginedb.MergeLive(ctx, stage, dir, base, times)
 		if errors.Is(err, enginedb.ErrMergeConflict) {
 			log.Printf("rb-bridge: update not published: %v; the next mount updates the library again", err)
 			return enginedb.Result{}, dropStage(stage)
@@ -187,7 +202,7 @@ func publishUpdate(ctx context.Context, mount, dir string) (enginedb.Result, err
 		if err != nil {
 			return enginedb.Result{}, err
 		}
-		log.Printf("rb-bridge: Engine's changes since the update started carried over in %s", time.Since(start).Round(time.Millisecond))
+		log.Printf("rb-bridge: Engine's changes since the update started carried over in %s (%d tracks Engine wrote)", time.Since(start).Round(time.Millisecond), written)
 	}
 	if err := renameStage(dir, stage); err != nil {
 		return enginedb.Result{}, err

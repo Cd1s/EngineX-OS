@@ -282,6 +282,20 @@ static void test_publish(void) {
     assert(!strcmp(text, want));
     use_conf(NULL);
     assert(hf_on(HF_SHADOW_PAUSED_FOLLOW));
+    // Installed, but Engine has not done its part yet (the 64-bit Engine's PlanckGUI is
+    // learnt at run time): not under on= until it has, then published at once.
+    hf_await(HF_SHADOW_PAUSED_FOLLOW);
+    hf_publish();
+    read_state(text, sizeof text);
+    snprintf(want, sizeof want, "pid=%d\nbuild=zoom30\noff=zoom30\n", (int)getpid());
+    assert(!strcmp(text, want) && hf_on(HF_SHADOW_PAUSED_FOLLOW));
+    hf_proven(HF_SHADOW_PAUSED_FOLLOW);
+    read_state(text, sizeof text);
+    snprintf(want, sizeof want, "pid=%d\nbuild=zoom30\noff=zoom30\non=shadow-paused-follow\n", (int)getpid());
+    assert(!strcmp(text, want));
+    unlink(state);
+    hf_proven(HF_SHADOW_PAUSED_FOLLOW); // only the first time publishes
+    assert(access(state, F_OK) != 0);
     puts("the running Engine's feature state is published whole for stream-sync: PASS");
 }
 
