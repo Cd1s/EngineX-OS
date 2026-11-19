@@ -570,7 +570,7 @@ func (s *Server) loadUI() uiSettings {
 	if !v.FourDeckWaveform {
 		v.PairedView = false // #201: the paired view is a view of the 4-deck layout; a stray key alone is not it
 	}
-	if v.Scope == "tidal" && !slices.Contains(v.Sources, "tidal") {
+	if slices.Contains(uiServices, v.Scope) && !slices.Contains(v.Sources, v.Scope) {
 		v.Scope = ""
 	}
 	v.SafeMode = bootMarker(s.uiDir(), "safe-mode")
@@ -741,6 +741,10 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	if v.ConsoleHTTPS {
 		text += "console_https=1\n"
 	}
+	path := filepath.Join(dir, "settings.conf")
+	if existing, err := os.ReadFile(path); err == nil && string(existing) == text {
+		return writeUIScaleEnv(v.UIScale)
+	}
 	tmp, err := os.CreateTemp(dir, ".settings-*")
 	if err != nil {
 		return err
@@ -758,7 +762,7 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	if err != nil {
 		return err
 	}
-	if err = os.Rename(tmp.Name(), filepath.Join(dir, "settings.conf")); err != nil {
+	if err = os.Rename(tmp.Name(), path); err != nil {
 		return err
 	}
 	return writeUIScaleEnv(v.UIScale)
@@ -822,6 +826,40 @@ func (s *Server) scope() string {
 	s.uiMu.Lock()
 	defer s.uiMu.Unlock()
 	return s.loadUI().Scope
+}
+
+func (s *Server) deezerARLReady() bool {
+	if strings.TrimSpace(s.savedDeezerOwner().ARL) == "" {
+		return false
+	}
+	s.mu.Lock()
+	deleted := s.ownerDeleted["deezer"]
+	s.mu.Unlock()
+	return !deleted
+}
+
+// scopeLoggedIn reports whether the DJ has an active login (or link source)
+// for scope. Real TIDAL logs in via Engine's native OAuth flow after selecting
+// TIDAL, so it is gated by the TIDAL switch in sources rather than here.
+func (s *Server) scopeLoggedIn(scope string) bool {
+	if scope == "" || scope == "tidal" {
+		return true
+	}
+	if scope == rekordboxScope {
+		return s.rekordboxHost() != nil || len(s.rbxPlayers()) > 0
+	}
+	if scope == "deezer" && s.deezerARLReady() {
+		return true
+	}
+	if s.tidal == nil {
+		return false
+	}
+	for _, session := range s.tidal.sourcesFor(scope) {
+		if !session.Guest && session.Provider == scope && ready(session.p) {
+			return true
+		}
+	}
+	return false
 }
 
 // One metadata lookup only: never follow symlinks or read USB contents here.
@@ -912,6 +950,9 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 		if !session.Guest && ready(session.p) && !slices.Contains(v.LoggedIn, session.Provider) {
 			v.LoggedIn = append(v.LoggedIn, session.Provider)
 		}
+	}
+	if !slices.Contains(v.LoggedIn, "deezer") && s.deezerARLReady() {
+		v.LoggedIn = append(v.LoggedIn, "deezer")
 	}
 	name := ""
 	if host := s.rekordboxHost(); host != nil { // not saved: the source is there while the computer is
@@ -1038,6 +1079,17 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	if q.Has("relayUrl") && !validRelayURL(q.Get("relayUrl")) {
 		fail(w, 400, errInvalidRelayURL)
 		return
+	}
+	if q.Has("scope") {
+		want := q.Get("scope")
+		if !slices.Contains(uiScopes, want) {
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+		if !s.scopeLoggedIn(want) {
+			fail(w, http.StatusConflict, errors.New("source is not logged in"))
+			return
+		}
 	}
 	s.uiMu.Lock()
 	v := s.loadUI()
@@ -1364,9 +1416,6 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	if q.Has("waveform") {
 		v.Waveform = q.Get("waveform")
 	}
-	if q.Has("scope") {
-		v.Scope = q.Get("scope")
-	}
 	if q.Has("quality") {
 		v.Quality = q.Get("quality")
 	}
@@ -1476,6 +1525,15 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 		v.Sources = list
 	}
+	if q.Has("scope") {
+		want := q.Get("scope")
+		if slices.Contains(uiServices, want) && !slices.Contains(v.Sources, want) {
+			s.uiMu.Unlock()
+			fail(w, http.StatusConflict, errors.New("source is disabled"))
+			return
+		}
+		v.Scope = want
+	}
 	// Relay settings are written only once every field is known to be valid (#9).
 	if q.Has("relayUrl") || q.Has("deemixPassword") {
 		var relay, password *string
@@ -1499,7 +1557,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if v.Scope == "tidal" && !slices.Contains(v.Sources, "tidal") {
+	if slices.Contains(uiServices, v.Scope) && !slices.Contains(v.Sources, v.Scope) {
 		v.Scope = ""
 	}
 	err := s.saveUI(v, q.Has("prolinkShare"))

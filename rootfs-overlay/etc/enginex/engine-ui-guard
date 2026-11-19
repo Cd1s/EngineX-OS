@@ -394,13 +394,25 @@ pre|settings)
     # Real TIDAL (scope=tidal) keeps the stock login.
     accounts=${ENGINEX_STREAMING_ACCOUNTS:-/data/StreamingAccounts.json}
     export T='"TIDAL": "{\"provider\":\"TIDAL\",\"providerType\":\"TIDAL\",\"accessToken\":\"enginex\",\"refreshToken\":\"enginex\"}"'
-    # #224: an old settings file may retain scope=tidal after TIDAL is disabled.
+    # #224: an old settings file may retain a switched-off service as scope.
+    # Only rewrite settings.conf when scope actually names a disabled service,
+    # so restarting Engine never touches settings.conf on every boot.
     sources=$(sed -n 's/^sources=//p' "$UI/settings.conf" 2>/dev/null | tail -n 1)
+    known=$(sed -n 's/^known=//p' "$UI/settings.conf" 2>/dev/null | tail -n 1)
+    [ -n "$known" ] || known="tidal,netease,spotify,deezer,soundcloud"
+    scope=$(sed -n 's/^scope=//p' "$UI/settings.conf" 2>/dev/null | tail -n 1)
     if grep -q '^sources=' "$UI/settings.conf" 2>/dev/null; then
-        case ",$sources," in
-            *,tidal,*) ;;
-            *) sed '/^scope=tidal$/d' "$UI/settings.conf" > "$UI/settings.conf.tmp" &&
-                mv "$UI/settings.conf.tmp" "$UI/settings.conf" ;;
+        case "$scope" in
+            tidal|netease|spotify|deezer|soundcloud|beatport|applemusic)
+                case ",$known," in
+                    *",$scope,"*)
+                        case ",$sources," in
+                            *",$scope,"*) ;;
+                            *) sed 's/^scope=.*/scope=/' "$UI/settings.conf" > "$UI/settings.conf.tmp" &&
+                                mv "$UI/settings.conf.tmp" "$UI/settings.conf" ||
+                                rm -f "$UI/settings.conf.tmp" ;;
+                        esac ;;
+                esac ;;
         esac
     fi
     if ! feature_off gateway && ! feature_off sso && ! grep -qx 'scope=tidal' "$UI/settings.conf" 2>/dev/null; then

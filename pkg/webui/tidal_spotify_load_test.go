@@ -30,6 +30,9 @@ func spotifyLoadGateway(t *testing.T, audio http.HandlerFunc) (*Server, *httptes
 	sp := &providers.Spotify{BaseURL: up.URL, Token: providers.Token{AccessToken: "fixture-spotify"}}
 	t.Cleanup(sp.Close)
 	j.spotify = func() *providers.Spotify { return sp } // New wires the owner lookup.
+	s.mu.Lock()
+	s.sessions["fixture-owner"] = &Session{ID: "fixture-owner", Provider: "spotify", Ready: true, p: sp, expires: time.Now().Add(time.Hour)}
+	s.mu.Unlock()
 	srv := httptest.NewServer(s)
 	t.Cleanup(srv.Close)
 	uiPost(t, srv.URL, "scope=spotify")
