@@ -38,7 +38,7 @@ class DictionaryTest(unittest.TestCase):
 @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise QML JavaScript")
 class HotPathTest(unittest.TestCase):
     def test_cue_bindings_and_status_polling(self):
-        names = ("scDeckLocked", "scShadowVisible", "scTr", "scProbeCueClocks", "scCueProps", "scCueTableOf", "scCueWatch", "scCueStep", "scCueCount", "scCueBeatsLeft", "scNextCueInfo", "scNextCueCompute", "scCueTickFor", "scSameItems", "scCall", "scUiPollReply")
+        names = ("scDeckLocked", "scShadowVisible", "scTr", "scProbeCueClocks", "scCueProps", "scCueTableOf", "scCueWatch", "scCueStep", "scCueCount", "scCuePlayhead", "scCueFeedLine", "scCueBeatsLeft", "scNextCueInfo", "scNextCueCompute", "scCueTickFor", "scSameItems", "scCall", "scUiPollReply")
         functions = []
         for name in names:
             start = re.search(r"(?m)^\tfunction " + name + r"\([^\n]*\) \{", packs.SERVICES_MAIN)
@@ -57,7 +57,7 @@ class HotPathTest(unittest.TestCase):
         script = r'''
 const assert = require('node:assert/strict');
 const root = globalThis;
-var scShadowDisplayOnly = false, scShadowEngineMask = 30, scFourDeckRole = "", scPlayer = false, scShadowAt = {}, scShadowDisplay = {};
+var scShadowDisplayOnly = false, scShadowEngineMask = 30, scFourDeckRole = "", scPlayer = false, scShadowAt = {}, scShadowDisplay = {}, scPausedShadowFollow = false;
 let lookups = 0, made = 0, applied = 0;
 const properties = {};
 const unavailable = new Set();
