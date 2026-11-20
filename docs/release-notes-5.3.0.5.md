@@ -2,7 +2,7 @@
 
 Custom system built on the official Engine OS 5.3.0+ base for all 16 Denon DJ, Numark, and Rane standalone units. Build commit: `1c41b7e9bd8b8d5064f0c3f7e1e623949fb51f01`. Release tag: `v5.3.0.5-r1`. Rollback point: tag `v5.3.0.4-r5`.
 
-> **5.3.0.5 r1 release evidence complete.** The signed table below is from the rc7 output built at `1c41b7e9bd8b8d5064f0c3f7e1e623949fb51f01`. The evidence commit is made on top of `a522e804`. The two shadow fixes were confirmed on two SC5000 decks with deck-push builds, including a one-step-per-beat countdown. Other physical-deck checks remain pending. The full change record is `docs/ISSUE-FIXES-5.3.0.5.md`.
+> **5.3.0.5 r1 release evidence complete.** The signed table below is from the final output built at `1c41b7e9bd8b8d5064f0c3f7e1e623949fb51f01`. The evidence commit is made on top of `84708831`. The two shadow fixes were confirmed on two SC5000 decks with deck-push builds, including a one-step-per-beat countdown. Other physical-deck checks remain pending. The full change record is `docs/ISSUE-FIXES-5.3.0.5.md`.
 
 - **Online User Guide (English / 简体中文 / 繁體中文)**: [https://enginexdj.com](https://enginexdj.com)
 

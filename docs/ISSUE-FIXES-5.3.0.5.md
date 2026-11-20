@@ -557,15 +557,15 @@ Phase F completed the documentation checks required by release-workflow step 1. 
 The rc6 output and gate evidence remain on the build host. Earlier release directories remain untouched. Step-9 cleanup was not run.
 
 
-## Phase G rc7 final release evidence (2026-11-20)
+## Final release evidence (2026-11-20)
 
-This section is the authoritative rc7 record for build commit `1c41b7e9bd8b8d5064f0c3f7e1e623949fb51f01`. The release evidence commit is made on top of `84708831` and carries release tag `v5.3.0.5-r1`. The clean output is `/var/tmp/enginex-release-5.3.0.5-rc7` on the build host. It contains 28 release artifacts plus `RELEASE-TAG.txt`, `SHA256SUMS.txt`, and `SHA256SUMS.txt.sig`, for 31 files in total.
+This section is the authoritative final release record for build commit `1c41b7e9bd8b8d5064f0c3f7e1e623949fb51f01`. The release evidence commit is made on top of `84708831` and carries release tag `v5.3.0.5-r1`. The clean output is the final signed release directory on the build host. It contains 28 release artifacts plus `RELEASE-TAG.txt`, `SHA256SUMS.txt`, and `SHA256SUMS.txt.sig`, for 31 files in total.
 
 - **Rollback point**: tag `v5.3.0.4-r5` (`9e827205ae331d2d896d97207032556dc4202af5`)
 - **Manifest**: `SHA256SUMS.txt` SHA-256 `455fd418aee733756f66b7dc6a9139502e257af64bc24bb33425a8815f09b4a6`
 - **Signature**: `SHA256SUMS.txt.sig` SHA-256 `ee1590312ae9a514b12c8b7560f403bc8bc2c2fb05293d5b129fc21dd1c98a34`, verified against the manifest
 - **Release tag file**: `RELEASE-TAG.txt` SHA-256 `7ff60fae3cfdee32922d64003b8a8911c62c97ef472d50d99e68e16c3927ce4b`, content `v5.3.0.5-r1`
-- **Review**: `/root/fleet-briefs/5305-reports/review-shadow-rc7.md` begins `VERDICT: NO-P1`; its two P2 findings are deferred to 5.3.0.6 by maintainer disposition
+- **Review**: the shadow review begins `VERDICT: NO-P1`; its two P2 findings are deferred to 5.3.0.6 by maintainer disposition
 
 ### Tests
 
@@ -595,7 +595,7 @@ The expected sandbox `unsupported operation` line reports the absent eMMC fixtur
 
 ### Real-deck verification and checklist
 
-The maintainer confirmed both rc7 fixes on two SC5000 decks using deck-push builds. The shadow phase meter followed the source alignment and phase, turned green with the source, and its lines followed the source. The paused shadow cue countdown was measured at one step per beat. Regression checklist rows 369 and 370 are covered by this dated real-deck verification. Other physical-deck rows remain pending.
+The maintainer confirmed both fixes on two SC5000 decks using deck-push builds. The shadow phase meter followed the source alignment and phase, turned green with the source, and its lines followed the source. The paused shadow cue countdown was measured at one step per beat. Regression checklist rows 369 and 370 are covered by this dated real-deck verification. Other physical-deck rows remain pending.
 
 ### SHA-256 manifest
 
