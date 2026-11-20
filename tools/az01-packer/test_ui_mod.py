@@ -6739,8 +6739,8 @@ assert.equal(bodies[bodies.length - 1].keyName, '8B');
 // The peer: its header takes the three texts from the source, not from the copy.
 Object.assign(globalThis, {scShadowApply() {}, scShadowEmpty() {}});
 scShadowApplyAll([{deck: 2, path: '/c/One - A.mp3', id: 'k', title: 'A', artist: 'One', keyName: '-'}, {deck: 4, path: '/c/b.mp3', id: 'j'}], false);
-assert.deepEqual(scShadowHead[2], {master: undefined, sync: false, title: 'A', artist: 'One', keyName: '-', loop: false, keyOffset: 0, stems: false, slip: 0});
-assert.deepEqual(scShadowHead[4], {master: undefined, sync: false, title: '', artist: '', keyName: '', loop: false, keyOffset: 0, stems: false, slip: 0}); // a CDJ or an older sender: stock texts
+assert.deepEqual(scShadowHead[2], {master: undefined, sync: false, title: 'A', artist: 'One', keyName: '-', loop: false, keyOffset: 0, stems: false, slip: 0, service: ''});
+assert.deepEqual(scShadowHead[4], {master: undefined, sync: false, title: '', artist: '', keyName: '', loop: false, keyOffset: 0, stems: false, slip: 0, service: ''}); // a CDJ or an older sender: stock texts
 """)
         for anchor in ('scaled[bj + "Deck/DeckItem/ArtistSong.qml"]', 'scaled[bj + "KeyEditor/KeyInfo.qml"]', "root.scShadowHeadOf(microDeck.deckIndex).title"):
             self.assertIn(anchor, SRC)
@@ -6814,7 +6814,7 @@ n = bodies.length; run(1000); assert.equal(bodies.length, n, 'nothing changed: n
 // The peer: its header and overview read them from the source's post.
 Object.assign(globalThis, {scShadowApply() {}, scShadowEmpty() {}});
 scShadowApplyAll([{deck: 2, path: '/c/One - A.mp3', id: 'k', title: 'A', artist: 'One', keyName: '1B', loop: true, keyOffset: 1, stems: true, slip: 441000}], false);
-assert.deepEqual(scShadowHead[2], {master: undefined, sync: false, title: 'A', artist: 'One', keyName: '1B', loop: true, keyOffset: 1, stems: true, slip: 441000});
+assert.deepEqual(scShadowHead[2], {master: undefined, sync: false, title: 'A', artist: 'One', keyName: '1B', loop: true, keyOffset: 1, stems: true, slip: 441000, service: ''});
 """)
         for anchor in ('scaled.setdefault(bj + "Deck/DeckItem/AutoLoop.qml", [])', "scHead.title ? scHead.stems : view.stemmed", "scHead.title ? scHead.keyOffset :",
                        "root.scShadowHeadOf(deckIndex).slip || 0", "scSlip > 0 ? scSlip : isSlipModeActive"):
