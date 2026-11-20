@@ -775,10 +775,43 @@ SERVICES_MAIN = """
 	property bool scHookFollows: false
 	readonly property bool scPausedShadowFollow: scHookFollows && !scOff("shadow-paused-follow")
 	property var scShadowFeedSent: ({})
+	// Bit d: Deck d is a paused copy fed a playing source. Engine moves it only at the follower's seeks, about once a
+	// second, so TrackPosition and BeatNumber step two beats at a time there: its #151 count runs on the source's line,
+	// stepped by this clock just past each beat line. No clock otherwise.
+	property int scShadowFeedPlaying: 0
+	Timer {
+		interval: 250; repeat: true
+		running: root.scShadowFeedPlaying !== 0 && root.scCueCountdown
+		onTriggered: interval = root.scCueFeedTick()
+	}
+	function scCueFeedTick() {
+		let wait = 250
+		for (let d = 1; d <= 4; d++) {
+			const t = d === 1 ? scCueTable1 : d === 2 ? scCueTable2 : d === 3 ? scCueTable3 : scCueTable4
+			const f = t ? scCueFeedLine(d) : null
+			if (!f) continue
+			scCueStep(d)
+			const bpm = t.p.bpm ? t.p.bpm.unnormalized : 0, beat = scCuePlayhead(t).beat
+			if (bpm > 0 && beat >= 0) wait = Math.min(wait, (1 - (beat - Math.floor(beat))) * t.sr * 60 / bpm / f.rate)
+		}
+		return Math.max(20, Math.min(250, Math.ceil(wait) + 12))
+	}
+	// The source's line on a paused copy: samples now and samples per ms, or null (Engine's own playhead counts).
+	function scCueFeedLine(d) {
+		const at = scPausedShadowFollow && ((scShadowEngineMask >> d) & 1) ? scShadowAt[d] : null
+		if (!at || !at.ready || !at.sourcePlaying || at.scratch || !(at.sampleRate > 0) || !(at.rate > 0) || !isFinite(at.sourceTarget)) return null
+		const el = Date.now() - at.sourceAt
+		if (!(el >= 0 && el <= 3000)) return null
+		let ms = at.sourceTarget + el * at.rate
+		if (at.loop && at.loop.out > at.loop.in && ms > at.loop.out) ms = at.loop.in + (ms - at.loop.in) % (at.loop.out - at.loop.in)
+		return {pos: ms * at.sampleRate / 1000, rate: at.rate * at.sampleRate / 1000}
+	}
 	// The source's position as stream-sync sent it (at.feedMs at its own clock's
 	// at.feedAt), not carried to now here: stream-sync dates the record by that clock, so
 	// a busy GUI thread does not move the line. Sent when it changes, and every 250 ms.
 	function scShadowFeed(d, e, at, rate) {
+		const bit = 1 << d, fed = root.scPausedShadowFollow && !!at && at.ready && at.sampleRate > 0 && isFinite(at.feedMs) && rate > 0
+		if (((scShadowFeedPlaying & bit) !== 0) !== fed) scShadowFeedPlaying ^= bit
 		if (!root.scPausedShadowFollow) return
 		const sr = at && at.ready ? at.sampleRate : 0, now = Date.now()
 		const on = sr > 0 && isFinite(at.feedMs) && isFinite(rate)
@@ -1037,7 +1070,9 @@ SERVICES_MAIN = """
 		x.send()
 	}
 	// The shadow decks' cue countdown clock: only while one of them plays. Every
-	// tick re-evaluates each deck view's countdown (~36 V4 allocations).
+	// tick re-evaluates each deck view's countdown (~36 V4 allocations). The count
+	// changes on beats, so a tick lands just past the coming one: on a fixed 200 ms
+	// tick a 120 BPM count moved 400 or 600 ms apart, never on the beat.
 	function scShadowAnyPlaying(m) {
 		for (let d = 1; d <= 4; d++) if (m[d] && m[d].playing && !m[d].stale) return true
 		return false
@@ -1491,7 +1526,7 @@ SERVICES_MAIN = """
 		if (!p.play) p.play = root.scTr(p.prefix + "/PlayState")
 		// The tempo at the playhead moves only at a tempo change of the grid: read here, a tempo edit under a resting playhead counts at once.
 		if (p.bpm) void p.bpm.unnormalized
-		const t = {p: p, sr: p.sampleRate ? p.sampleRate.value || 44100 : 44100, pos: [], label: [], color: []}
+		const t = {d: d, p: p, sr: p.sampleRate ? p.sampleRate.value || 44100 : 44100, pos: [], label: [], color: []}
 		for (let i = 0; i < 8; i++) {
 			const cue = p.cues[i]
 			if (!cue.exists.state) continue
@@ -1532,6 +1567,16 @@ SERVICES_MAIN = """
 	Connections { target: root.scCueWatch(root.scCueTable2, root.scCueNoBeat & 4); function onUnnormalizedChanged() { root.scCueStep(2) } }
 	Connections { target: root.scCueWatch(root.scCueTable3, root.scCueNoBeat & 8); function onUnnormalizedChanged() { root.scCueStep(3) } }
 	Connections { target: root.scCueWatch(root.scCueTable4, root.scCueNoBeat & 16); function onUnnormalizedChanged() { root.scCueStep(4) } }
+	// The playhead the count reads: Engine's, or on a paused copy the source's line with BeatNumber (the place in the bar)
+	// carried there along the grid from Engine's last whole pair. Engine sends TrackPosition and BeatNumber as two
+	// notifications: a pair is whole once both moved (a seek of whole bars keeps BeatNumber; the old pair stays on the grid).
+	function scCuePlayhead(t) {
+		const p = t.p, pos = p.position.unnormalized || 0, beat = p.beat ? p.beat.unnormalized : -1, f = scCueFeedLine(t.d)
+		if (!t.pair || (pos !== t.pair.pos && beat !== t.pair.beat)) t.pair = {pos: pos, beat: beat}
+		if (!f) return {pos: pos, beat: beat}
+		const bpm = p.bpm ? p.bpm.unnormalized : 0, a = t.pair
+		return {pos: f.pos, beat: a.beat >= 0 && bpm > 0 ? ((a.beat + (f.pos - a.pos) * bpm / (t.sr * 60)) % 4 + 4) % 4 : a.beat}
+	}
 	// Every notification lands here. The count can only have changed if the playhead is on another beat (or came to stand on the
 	// line), passed a hot cue (hi / lo), jumped (more than two beats since the last notification: a jump of whole bars keeps
 	// BeatNumber), or the grid moved under it (its beat no longer advances with its position: Beat Grid Edit). Anything else
@@ -1539,7 +1584,7 @@ SERVICES_MAIN = """
 	function scCueStep(d) {
 		const t = d === 1 ? scCueTable1 : d === 2 ? scCueTable2 : d === 3 ? scCueTable3 : scCueTable4
 		if (t) {
-			const n = t.p.beat ? t.p.beat.unnormalized : -1, pos = t.p.position.unnormalized || 0, f = Math.floor(n)
+			const ph = scCuePlayhead(t), n = ph.beat, pos = ph.pos, f = Math.floor(n)
 			let same = (n >= 0 ? 2 * f + (n > f ? 1 : 0) : -1) === t.k && pos < t.hi && pos > t.lo && Math.abs(pos - t.at) <= t.jump
 			if (same && n >= 0) { const e = (pos - t.countAt) * t.perSample - (n - t.countBeat); same = Math.abs(e - 4 * Math.round(e / 4)) < t.margin }
 			t.at = pos
@@ -1593,9 +1638,9 @@ SERVICES_MAIN = """
 	function scCueCount(t, shown) {
 		if (!t) return null
 		const p = t.p, sr = t.sr
-		const pos = p.position.unnormalized || 0
+		const ph = scCuePlayhead(t), pos = ph.pos
 		const bpm = (p.bpm ? p.bpm.unnormalized : 0) || (p.trackBpm ? p.trackBpm.unnormalized : 0) || 0
-		const beat = p.beat ? p.beat.unnormalized : -1, line = Math.floor(beat)
+		const beat = ph.beat, line = Math.floor(beat)
 		let best = -1, bestPos = Infinity, last = -Infinity
 		for (let i = 0; i < t.pos.length; i++) {
 			const cp = t.pos[i]
@@ -1817,6 +1862,10 @@ SERVICES_MAIN = """
 	property real scShadowFullAt: 0
 	property bool scShadowPostFull: true
 	property real scShadowLinkAt: -Infinity
+	// The stock phase meter controller of deck d, what this deck's header draws (null before Engine builds it).
+	function scPhaseMeterOf(d) {
+		return typeof PlanckGUI !== "undefined" && PlanckGUI && PlanckGUI.views && PlanckGUI.views.getPhaseMeter ? PlanckGUI.views.getPhaseMeter(d - 1) : null
+	}
 	property var scShadowTextAt: ({})
 	function scShadowProperties(d) {
 		let p = scShadowDeckProperties[d]
@@ -2090,6 +2139,10 @@ SERVICES_MAIN = """
 			o.playing = s.playing; o.cue = s.cue; o.scratch = !!s.scratch; o.link = link; o.positionMs = s.lineMs; o.at = s.at; o.jumps = s.jumps
 			o.pitch = s.pitch; o.master = s.master || d === lead; o.lead = s.master; o.bpm = s.bpm; o.currentBpm = s.currentBpm
 			o.sync = s.sync; o.beat = g.beat.unnormalized || 0
+			// The phase meter as this deck's header shows it: the peer's shadow header turns green with it (its copy is out of Sync).
+			const pm = scPhaseMeterOf(d)
+			o.phaseMeter = !!pm && !!pm.enabled; o.phaseActive = !!pm && !!pm.active; o.aligned = !!pm && !!pm.isAligned
+			o.phase = o.aligned || !pm ? 0 : Math.round((Number(pm.phaseOffset) || 0) * 50) / 50
 			o.active = d === scShadowActiveDeck // on this unit's active layer (#201)
 			o.range = s.range; o.keylock = s.keylock // the peer's shadow deck shows the same range and key lock
 			o.service = s.net && root.scOwnService ? root.scOwnService(d) : "" // #305: the peer's shadow header shows this track's service mark
@@ -2128,7 +2181,9 @@ SERVICES_MAIN = """
 			}
 			if (!onLine || sent.cue !== o.cue || sent.master !== o.master || sent.masterPress !== o.masterPress || sent.lead !== o.lead || sent.sync !== o.sync || sent.cuePos !== o.cuePos ||
 				sent.title !== o.title || sent.artist !== o.artist || sent.keyName !== o.keyName || sent.durationMs !== o.durationMs || sent.link !== o.link || sent.bpm !== o.bpm || sent.currentBpm !== o.currentBpm || sent.range !== o.range || sent.keylock !== o.keylock || sent.service !== o.service || sent.cuesRev !== cc.rev || sent.active !== o.active ||
-				sent.loop !== o.loop || sent.loopIn !== o.loopIn || sent.loopOut !== o.loopOut || sent.keyOffset !== o.keyOffset || sent.stems !== o.stems || sent.slip !== o.slip) edge = true // slip's timeline runs on: in full at every heartbeat while it is active
+				sent.loop !== o.loop || sent.loopIn !== o.loopIn || sent.loopOut !== o.loopOut || sent.keyOffset !== o.keyOffset || sent.stems !== o.stems || sent.slip !== o.slip ||
+				sent.aligned !== o.aligned || sent.phaseActive !== o.phaseActive || sent.phaseMeter !== o.phaseMeter ||
+				(sent.phase !== o.phase && now - scShadowPostAt >= 100)) edge = true // slip's timeline runs on: in full at every heartbeat while it is active
 		}
 		scShadowPostAt = now; scShadowPostPending = false
 		// Nothing the peer shows changed: ping instead of serialising the decks again
@@ -2143,6 +2198,7 @@ SERVICES_MAIN = """
 			sent.deck = o.deck; sent.net = o.net; sent.playing = o.playing; sent.cue = o.cue; sent.scratch = o.scratch; sent.jumps = o.jumps; sent.pitch = o.pitch
 			sent.master = o.master; sent.masterPress = o.masterPress; sent.lead = o.lead; sent.sync = o.sync; sent.cuePos = o.cuePos; sent.title = o.title; sent.artist = o.artist; sent.keyName = o.keyName; sent.durationMs = o.durationMs
 			sent.link = o.link; sent.bpm = o.bpm; sent.currentBpm = o.currentBpm; sent.range = o.range; sent.keylock = o.keylock; sent.service = o.service; sent.loop = o.loop; sent.loopIn = o.loopIn; sent.loopOut = o.loopOut; sent.keyOffset = o.keyOffset; sent.stems = o.stems; sent.slip = o.slip; sent.cuesRev = scShadowCueCache[o.deck].rev; sent.positionMs = o.positionMs; sent.at = o.at; sent.active = o.active
+			sent.aligned = o.aligned; sent.phaseActive = o.phaseActive; sent.phaseMeter = o.phaseMeter; sent.phase = o.phase
 		}
 		scShadowSent.length = own.length
 		scShadowFullAt = now; scShadowPostFull = false
@@ -2255,8 +2311,12 @@ SERVICES_MAIN = """
 		if (!scShadowDisplayOnly) for (const d of [1, 2, 3, 4]) {
 			if (scFourDeckRole.indexOf(String(d)) >= 0) continue
 			const e = decks.find(x => x.deck === d)
-			if (e && e.path) head[d] = {master: typeof e.lead === "boolean" ? e.lead : e.master, sync: !!e.sync, title: e.title || "", artist: e.artist || "", keyName: e.keyName || "",
-				loop: !!e.loop, keyOffset: e.keyOffset || 0, stems: !!e.stems, slip: e.slip || 0, service: e.service || ""}
+			if (e && e.path) {
+				const h = head[d] = {master: typeof e.lead === "boolean" ? e.lead : e.master, sync: !!e.sync, title: e.title || "", artist: e.artist || "", keyName: e.keyName || "",
+					loop: !!e.loop, keyOffset: e.keyOffset || 0, stems: !!e.stems, slip: e.slip || 0, service: e.service || ""}
+				// The source's phase meter; a CDJ or an older sender sends none and the copy's own stays.
+				if (typeof e.aligned === "boolean") { h.aligned = e.aligned; h.phaseActive = !!e.phaseActive; h.phaseMeter = !!e.phaseMeter; h.phase = Number(e.phase) || 0 }
+			}
 			// The last track is still on the deck (the next one's copy on its way, the peer gone): its
 			// header stays until it is unloaded. Without it the header read the copy's file name and key.
 			else if (scShadowHead[d] && (scShadowAt[d] || {}).path) head[d] = scShadowHead[d]
@@ -9102,9 +9162,18 @@ def edits(dev: bool):
         ])
         scaled[ROOT + "Views/MainView/Components/JP07SyncIndicator.qml"] = [
             ("    readonly property bool displayPhaseMeter: controller.enabled\n",
-             "    readonly property bool displayPhaseMeter: !!controller && controller.enabled\n"),
+             "    readonly property bool displayPhaseMeter: " + head("deckIndex", "phaseMeter", "!!controller && controller.enabled") + "\n"),
             ("    property bool isMaster: pDeckIsMaster.translator && pDeckIsMaster.translator.state\n",
              "    property bool isMaster: " + head("deckIndex", "master", "pDeckIsMaster.translator && pDeckIsMaster.translator.state") + "\n")]
+        # A shadow deck's phase meter shows the source's: its copy is out of Sync, so Engine never aligns it here.
+        scaled[ROOT + "Views/MainView/PhaseMeter.qml"] = [
+            ("    readonly property bool isAligned: controller.isAligned\n",
+             "    readonly property bool isAligned: " + head("deckIndex", "aligned", "controller.isAligned") + "\n"),
+            ("    readonly property bool isActive: controller.active\n",
+             "    readonly property bool isActive: " + head("deckIndex", "phaseActive", "controller.active") + "\n"),
+            # The source's phase: the copy's own offset jumps as the copy follows (lines jumped on green, needle wild off it).
+            ("        value: controller.phaseOffset\n",
+             '        value: typeof root !== "undefined" && root && root.scShadowHeadOf && typeof root.scShadowHeadOf(deckIndex).phase === "number" ? root.scShadowHeadOf(deckIndex).phase : controller.phaseOffset\n')]
         scaled[bj + "Deck/DeckItem/BpmInfo.qml"] = [
             ("    readonly property bool syncEnabled: deckController && deckController.syncInfoViewController.syncEnabled\n",
              "    readonly property bool syncEnabled: " + head("deckIndex", "sync", "deckController && deckController.syncInfoViewController.syncEnabled") + "\n"),

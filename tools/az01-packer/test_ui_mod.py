@@ -2292,9 +2292,9 @@ class ShadowDisplayTest(unittest.TestCase):
     """Run the actual QML JS functions with a fake clock and an Engine that rejects all access."""
 
     def js(self, body):
-        names = ("scDeckLocked", "scShadowVisible", "scShadowDeckFor", "scShadowData", "scShadowRate", "scShadowPosition",
+        names = ("scDeckLocked", "scPhaseMeterOf", "scShadowVisible", "scShadowDeckFor", "scShadowData", "scShadowRate", "scShadowPosition",
                  "scShadowBeatIndex", "scShadowBeatAt", "scShadowGrid", "scShadowNextCue", "scShadowCuesFor", "scShadowAsset",
-                 "scShadowProperties", "scShadowTick", "scShadowPost", "scShadowPoll", "scShadowPollIdle", "scShadowDisplayFetch", "scShadowSameSample", "scShadowApplyDisplay", "scShadowCovers", "scShadowBusy", "scShadowApplyAll", "scNextCueInfo", "scNextCueCompute", "scCueProps", "scCueBeatsLeft", "scCueTickFor", "scCueStep", "scCueTableOf", "scCueCount", "scCueWatch",
+                 "scShadowProperties", "scShadowTick", "scShadowPost", "scShadowPoll", "scShadowPollIdle", "scShadowDisplayFetch", "scShadowSameSample", "scShadowApplyDisplay", "scShadowCovers", "scShadowBusy", "scShadowApplyAll", "scNextCueInfo", "scNextCueCompute", "scCueProps", "scCueBeatsLeft", "scCueTickFor", "scCueStep", "scCueTableOf", "scCueCount", "scCueWatch", "scCueFeedTick", "scCueFeedLine", "scCuePlayhead",
                  "scShadowApply", "scShadowFeed", "scShadowEmpty", "scShadowScratchLine", "scShadowScratchRelease", "scShadowSpeed", "scShadowCues", "scShadowBeat",
                  "scBrowserVisible", "scShadowLoad", "scShadowWrong", "scShadowHolds", "scShadowEndGap", "scShadowEnd",
                  "scShadowSeek", "scShadowMirror", "scShadowMirrorOff", "scShadowLink", "scShadowLinkEdge", "scPress", "scGcCheck", "scShadowWake", "scShadowAnyPlaying",
@@ -2331,7 +2331,7 @@ Object.assign(globalThis, {
     scGcLoadSeq: 0, scGcRuns: 0, scGcLastMs: 0, scGcProps: null,
     scGcState: {armed: true, quietSince: 0, lastRun: -Infinity, loadSig: 0, loadSeq: 0, loadAt: 0, followAt: 0},
     scShadowPrev: {}, scShadowCueCache: {}, scShadowPostAt: 0, scShadowPollAt: now, scShadowDebug: false,
-    scShadowActiveDeck: 0, scPairedOn: false, scPairedEmpty: 0, scPausedShadowFollow: false, scShadowFeedSent: {},
+    scShadowActiveDeck: 0, scPairedOn: false, scPairedEmpty: 0, scPausedShadowFollow: false, scShadowFeedSent: {}, scShadowFeedPlaying: 0,
     scShadowLead: 0, scShadowPeerLead: 0, scShadowPeerPlaying: false, scShadowMasterAt: 0,
     scShadowGen: 0, scShadowVer: 0, scShadowIdle: false, scShadowLinePaths: [], scShadowFrame: 17, scCueInfoCache: {}, scCueInfoMemo: {}, scCuePropCache: {}, scCueTexts: [], scCueProbe: 0, scCueNoBeat: 0,
     scCueInfo1: null, scCueInfo2: null, scCueInfo3: null, scCueInfo4: null, scCueShown1: {}, scCueShown2: {}, scCueShown3: {}, scCueShown4: {}, scCueTable1: null, scCueTable2: null, scCueTable3: null, scCueTable4: null,
@@ -2798,6 +2798,44 @@ eng.first = 0.3; eng.bpm = 131.5; sweep('tempo edited');  // a BPM edit: new lin
 eng.bpm = 128; eng.cue = 0.3 + 43 * 60 / 128; sweep('cue on a line');
 eng.cue = 20.2; eng.pitch = 1.08; sweep('pitch +8 %');    // pitch moves the playhead faster, not the beats
 """)
+
+    def test_local_countdown_on_a_paused_shadow_copy_counts_on_the_source_line(self):
+        """A shadow copy held paused moved in Engine only at the follower's seeks, about once a second: its count stepped two
+        beats at a time at 130 BPM (2026-11-20, both real decks). It counts on the source's line now, stepped at each line."""
+        self.local_countdown(r"""
+eng.bpm = 130; eng.cue = eng.first + 400 * 60 / 130; eng.pos = 100; // a cue on line 400; the copy where the last seek put it
+scPausedShadowFollow = true; scShadowEngineMask = 2;
+scShadowAt[1] = {ready: true, sourcePlaying: true, sampleRate: sr, rate: 1, sourceTarget: 100000, sourceAt: now};
+const want = ms => { const n = Math.floor((eng.cue - ms / 1000) * eng.bpm / 60); return Math.floor(n / 4) + '.' + (n % 4 + 1); };
+let prev = text(), steps = 0;
+for (let el = 0; el <= 2000; el += 10) {
+    now = 10000 + el; // Engine's copy stands still in between
+    const tx = text();
+    assert.equal(tx, want(100000 + el), 'at +' + el + ' ms');
+    if (tx !== prev) steps++;
+    prev = tx;
+}
+assert.equal(steps, 4, 'every line in 2 s at 130 BPM');
+// The clock lands just past the next line: 0.65 beat after the copy's spot, 0.333 beat (154 ms) to go.
+now = 10300; assert.equal(scCueFeedTick(), 166);
+now = 10000; assert.equal(scCueFeedTick(), 250, 'a line further than 250 ms: look again by then');
+// A seek arrives as two notifications: the position alone (BeatNumber still the old one) must not move the count.
+const t = scCueTableOf(1), beatProp = scCueProps(1).beat, live = Object.getOwnPropertyDescriptor(beatProp, 'unnormalized');
+now = 10300; scCuePlayhead(t); // the whole pair at 100 s
+const old = beatProp.unnormalized;
+Object.defineProperty(beatProp, 'unnormalized', {get() { return old; }, configurable: true}); eng.pos = 100.3;
+assert.equal(scCueCount(t).text, want(100300), 'half a pair');
+Object.defineProperty(beatProp, 'unnormalized', live); assert.equal(scCueCount(t).text, want(100300), 'the whole pair');
+// Engine's own playhead counts again when the source stops, its line is older than 3 s, or the copy plays itself.
+eng.pos = 100; now = 10300;
+scShadowAt[1].sourcePlaying = false; assert.equal(text(), want(100000));
+scShadowAt[1].sourcePlaying = true; now = 13500; assert.equal(text(), want(100000));
+now = 10300; scPausedShadowFollow = false; assert.equal(text(), want(100000));
+scPausedShadowFollow = true; scShadowEngineMask = 0; assert.equal(text(), want(100000));
+""")
+        # The clock runs only while a paused copy is fed a playing source (no cost otherwise), set where the feed is sent.
+        self.assertIn("running: root.scShadowFeedPlaying !== 0 && root.scCueCountdown", SRC)
+        self.assertIn("if (((scShadowFeedPlaying & bit) !== 0) !== fed) scShadowFeedPlaying ^= bit", SRC)
 
     def test_local_countdown_for_a_cue_on_the_grid_is_unchanged(self):
         # The most common case is as before: cue on a grid line, count = whole beats left.
@@ -6712,6 +6750,64 @@ assert.deepEqual(scShadowHead, {});
         self.assertIn("o.lead = s.master;", SRC)  # the source posts its own DeckIsMaster, what its header shows
         self.assertIn("sent.lead !== o.lead", SRC)  # and posts at once when only that changes
         self.assertIn('head("deckIndex", "sync",', SRC)
+
+    def test_the_shadow_phase_meter_shows_the_sources(self):
+        """A synced follower's copy is out of Sync: its stock phase meter stayed grey while the source's was green (2026-11-20)."""
+        bp.ROOT = 'Skins/Embedded/'
+        patches = bp.edits(False)
+        for path, marker in (
+            ('Skins/Embedded/Views/MainView/PhaseMeter.qml', 'property bool isAligned:'),
+            ('Skins/Embedded/Views/MainView/PhaseMeter.qml', 'property bool isActive:'),
+            ('Skins/Embedded/Views/MainView/Components/JP07SyncIndicator.qml', 'property bool displayPhaseMeter:'),
+        ):
+            replacement = next(new for old, new in patches[path] if marker in new)
+            expression = replacement.split(':', 1)[1].strip()
+            ShadowDisplayTest.js(self, r"""
+globalThis.deckIndex = 2;
+globalThis.controller = {isAligned: true, active: true, enabled: true};
+let source = {aligned: false, phaseActive: false, phaseMeter: false};
+globalThis.scShadowHeadOf = () => source;
+const result = () => !!(EXPRESSION);
+assert.equal(result(), false, 'the source overrides the copy');
+controller.isAligned = controller.active = controller.enabled = false;
+source = {aligned: true, phaseActive: true, phaseMeter: true}; assert.equal(result(), true, 'aligned at the source: green here');
+source = {}; assert.equal(result(), false, 'an older sender: the stock local binding');
+controller.isAligned = controller.active = controller.enabled = true;
+assert.equal(result(), true);
+""".replace('EXPRESSION', expression))
+
+    def test_a_shadow_phase_meter_draws_the_sources_phase(self):
+        """The copy follows the source, so its own phase offset jumps: lines jumped on green and the needle ran wild off it (2026-11-20)."""
+        bp.ROOT = 'Skins/Embedded/'
+        replacement = next(new for old, new in bp.edits(False)['Skins/Embedded/Views/MainView/PhaseMeter.qml'] if 'value:' in new)
+        ShadowDisplayTest.js(self, r"""
+globalThis.deckIndex = 2;
+globalThis.controller = {phaseOffset: 0.31};
+let source = {aligned: true, phase: 0};
+globalThis.scShadowHeadOf = () => source;
+const value = () => (EXPRESSION);
+assert.equal(value(), 0, 'aligned at the source: its lines at 0');
+source = {aligned: false, phase: -0.18}; assert.equal(value(), -0.18, 'off the lead: the source needle, not the copy');
+source = {}; assert.equal(value(), 0.31, 'an older sender or a local deck: Engine own');
+""".replace('EXPRESSION', replacement.split('value:', 1)[1].strip()))
+
+    def test_the_shadow_header_carries_the_sources_phase_meter(self):
+        ShadowDisplayTest.js(self, r"""
+Object.assign(globalThis, {scShadowApply() {}, scShadowEmpty() {}});
+const deck = (d, o) => Object.assign({deck: d, path: '/c/a.mp3', id: 'k'}, o);
+scShadowApplyAll([deck(2, {aligned: true, phaseActive: true, phaseMeter: true}), deck(4, {})], false);
+assert.strictEqual(scShadowHead[2].aligned, true);
+assert.strictEqual(scShadowHead[2].phaseActive, true);
+assert.strictEqual(scShadowHead[2].phaseMeter, true);
+assert.strictEqual(scShadowHead[4].aligned, undefined, 'an older sender: no override');
+scShadowApplyAll([deck(2, {aligned: false, phaseActive: true, phaseMeter: true}), deck(4, {})], false);
+assert.strictEqual(scShadowHead[2].aligned, false, 'losing the alignment reaches the header');
+""")
+        self.assertIn("o.aligned = !!pm && !!pm.isAligned", SRC)  # the source posts its own meter
+        self.assertIn("sent.aligned !== o.aligned", SRC)  # at once when only that changes
+        self.assertIn("sent.aligned = o.aligned;", SRC)
+        self.assertIn("o.phase = o.aligned || !pm ? 0 : Math.round((Number(pm.phaseOffset) || 0) * 50) / 50", SRC)
+        self.assertIn("(sent.phase !== o.phase && now - scShadowPostAt >= 100)", SRC)  # at most 10 phase-only posts a second
 
 
 @unittest.skipUnless(shutil.which("node"), "node needed for the shadow-deck behavioral checks")

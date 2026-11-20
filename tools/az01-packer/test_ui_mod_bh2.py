@@ -216,7 +216,9 @@ assert.deepStrictEqual(opened, ["spotify"]);
         edits = bp.edits(False)
         key = "Skins/Embedded/Views/MainView/Components/JP07SyncIndicator.qml"
         joined = "\n".join(new for _old, new in edits[key])
-        self.assertIn("readonly property bool displayPhaseMeter: !!controller && controller.enabled", joined)
+        line = next(l for l in joined.splitlines() if "readonly property bool displayPhaseMeter:" in l)
+        # A shadow deck reads the source's meter first; Engine's own binding stays guarded against a null controller.
+        self.assertTrue(line.rstrip().endswith(": (!!controller && controller.enabled))"), line)
 
     def test_other_updates_hidden_to_prevent_stock_reflash_bh2_a6_12(self):
         bp = load_build_packs()
