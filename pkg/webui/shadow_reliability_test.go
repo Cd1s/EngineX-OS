@@ -43,7 +43,7 @@ func TestShadowFetchCleansExpiredCopiesBeforeENOSPC(t *testing.T) {
 	}
 	for _, key := range []string{"old", "used", "busy"} {
 		path := filepath.Join(dir, key+".mp3")
-		for _, name := range []string{path, path + ".perf"} {
+		for _, name := range []string{path, path + ".perf", path + ".perf.rgb"} {
 			if err := os.WriteFile(name, []byte("copy"), 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -56,7 +56,8 @@ func TestShadowFetchCleansExpiredCopiesBeforeENOSPC(t *testing.T) {
 	s.shadowFetch("new", func(context.Context, *shadowCopy) (string, error) {
 		_, err := os.Stat(filepath.Join(dir, "old.mp3"))
 		_, perfErr := os.Stat(filepath.Join(dir, "old.mp3.perf"))
-		done <- os.IsNotExist(err) && os.IsNotExist(perfErr)
+		_, rgbErr := os.Stat(filepath.Join(dir, "old.mp3.perf.rgb"))
+		done <- os.IsNotExist(err) && os.IsNotExist(perfErr) && os.IsNotExist(rgbErr)
 		return "", syscall.ENOSPC
 	})
 	s.shadow.mu.Unlock()
