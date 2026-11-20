@@ -11,6 +11,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"hash/fnv"
 	"io"
 	"net"
@@ -51,9 +52,12 @@ type NFSServer struct {
 	paths   []string // handle index -> path relative to Root ("" is the root)
 	index   map[string]uint32
 	conns   []*net.UDPConn
-	fs      *os.Root // pins the mounted directory; path replacement cannot escape it
 	streams []*os.Root
 	wg      sync.WaitGroup
+
+	// rootInfo is Root as Listen found it. Each request opens Root afresh and refuses a
+	// different directory there; holding it open kept the stick busy, so Eject failed.
+	rootInfo os.FileInfo
 }
 
 // Listen binds the portmapper on pmAddr (":111" on a deck) and MOUNT+NFS on
@@ -69,12 +73,11 @@ func (s *NFSServer) Listen(pmAddr string) error {
 	if err != nil {
 		return err
 	}
-	started := false
-	defer func() {
-		if !started {
-			root.Close()
-		}
-	}()
+	rootInfo, err := root.Stat(".")
+	root.Close()
+	if err != nil {
+		return err
+	}
 	pa, err := net.ResolveUDPAddr("udp4", pmAddr)
 	if err != nil {
 		return err
@@ -100,7 +103,7 @@ func (s *NFSServer) Listen(pmAddr string) error {
 	s.gen = binary.BigEndian.Uint32(g[:])
 	s.paths, s.index = []string{""}, map[string]uint32{"": 0}
 	s.conns = []*net.UDPConn{pm, svc}
-	s.fs = root
+	s.rootInfo = rootInfo
 	s.streams = nil
 	for _, d := range s.StreamDirs {
 		if r, err := os.OpenRoot(d); err == nil {
@@ -116,7 +119,6 @@ func (s *NFSServer) Listen(pmAddr string) error {
 			s.serve(c, port)
 		}(c)
 	}
-	started = true
 	return nil
 }
 
@@ -141,10 +143,7 @@ func (s *NFSServer) Close() {
 	}
 	s.wg.Wait()
 	s.mu.Lock()
-	if s.fs != nil {
-		s.fs.Close()
-		s.fs = nil
-	}
+	s.rootInfo = nil
 	for _, r := range s.streams {
 		r.Close()
 	}
@@ -403,11 +402,16 @@ func (s *NFSServer) lstat(rel string) (os.FileInfo, error) {
 	if r, sub, ok := s.stream(rel); ok {
 		return r.Lstat(sub)
 	}
-	if s.fs != nil {
+	if s.rootInfo != nil {
+		fs, err := s.openRoot()
+		if err != nil {
+			return nil, err
+		}
+		defer fs.Close()
 		if rel == "" {
 			rel = "."
 		}
-		return s.fs.Lstat(rel)
+		return fs.Lstat(rel)
 	}
 	return os.Lstat(filepath.Join(s.Root, rel))
 }
@@ -422,13 +426,18 @@ func (s *NFSServer) readDir(rel string) ([]os.DirEntry, error) {
 		}
 		return rootDir(r, sub), nil
 	}
-	if s.fs == nil {
+	if s.rootInfo == nil {
 		return os.ReadDir(filepath.Join(s.Root, rel))
 	}
+	fs, err := s.openRoot()
+	if err != nil {
+		return nil, err
+	}
+	defer fs.Close()
 	if rel == "" {
 		rel = "."
 	}
-	f, err := s.fs.Open(rel)
+	f, err := fs.Open(rel)
 	if err != nil {
 		return nil, err
 	}
@@ -436,13 +445,46 @@ func (s *NFSServer) readDir(rel string) ([]os.DirEntry, error) {
 	return f.ReadDir(-1)
 }
 
+// EjectingDir holds the edisksd hook's mark of an Eject of a mounted volume, kept from
+// the first attempt until the volume is mounted again (tests move it).
+var EjectingDir = "/run"
+
+// EjectingMark is that mark for a mount path: FNV-1a 64 of the path, as the hook names it.
+func EjectingMark(root string) string {
+	h := fnv.New64a()
+	h.Write([]byte(root))
+	return filepath.Join(EjectingDir, fmt.Sprintf("enginex-ejecting-%016x", h.Sum64()))
+}
+
+// openRoot opens Root for one request, refusing it once another directory is there
+// (the stick was replaced or remounted elsewhere) or while Engine ejects it, so a
+// peer's reads cannot keep it busy. The caller closes it.
+func (s *NFSServer) openRoot() (*os.Root, error) {
+	if _, err := os.Lstat(EjectingMark(s.Root)); err == nil {
+		return nil, errors.New("prolink: export root is being ejected")
+	}
+	fs, err := os.OpenRoot(s.Root)
+	if err != nil {
+		return nil, err
+	}
+	if fi, err := fs.Stat("."); err != nil || !os.SameFile(fi, s.rootInfo) {
+		fs.Close()
+		return nil, errors.New("prolink: export root replaced")
+	}
+	return fs, nil
+}
+
 func (s *NFSServer) read(rel string, off, count uint32) ([]byte, uint32) {
 	var f *os.File
 	var err error
 	if r, sub, ok := s.stream(rel); ok {
 		f, err = r.Open(sub)
-	} else if s.fs != nil {
-		f, err = s.fs.Open(rel)
+	} else if s.rootInfo != nil {
+		var fs *os.Root
+		if fs, err = s.openRoot(); err == nil {
+			f, err = fs.Open(rel)
+			fs.Close() // the open file keeps its own reference until read returns
+		}
 	} else {
 		f, err = os.Open(filepath.Join(s.Root, rel))
 	}
