@@ -2535,6 +2535,7 @@ func (s *Server) shadowCleanCopies(keep string) {
 		if k != keep && !sh.busy[k] && time.Since(sh.used[k]) > 2*time.Minute {
 			os.Remove(f)
 			os.Remove(f + ".perf")
+			os.Remove(f + ".perf.rgb")
 			os.Remove(f + ".analysis")
 			for dir := filepath.Dir(f); dir != s.shadowDir() && strings.HasPrefix(dir, s.shadowDir()); dir = filepath.Dir(dir) {
 				os.Remove(dir) // the copy's own directories, once empty
