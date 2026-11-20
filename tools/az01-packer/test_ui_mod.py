@@ -9221,7 +9221,7 @@ assert.equal(scSlotIcon('TIDAL', 1), 'file:///data/enginex/ui/icons/spotify.png'
         self.assertIn('o.service = s.net && root.scOwnService ? root.scOwnService(d) : ""', src)
         self.assertIn("sent.service !== o.service", src)
         self.assertIn("sent.service = o.service", src)
-        self.assertIn('service: e.service || ""}', src)
+        self.assertIn('slip: e.slip || 0, service: e.service || "",', src)  # the shadow header's fields carry the service
         for rel in self.ROOTS[:2]:
             self.assertIn('isStreamingTrack || scMark !== ""', self.patched(rel), rel)
 
