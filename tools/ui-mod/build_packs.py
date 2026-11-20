@@ -2092,6 +2092,7 @@ SERVICES_MAIN = """
 			o.sync = s.sync; o.beat = g.beat.unnormalized || 0
 			o.active = d === scShadowActiveDeck // on this unit's active layer (#201)
 			o.range = s.range; o.keylock = s.keylock // the peer's shadow deck shows the same range and key lock
+			o.service = s.net && root.scOwnService ? root.scOwnService(d) : "" // #305: the peer's shadow header shows this track's service mark
 			// What this deck's header and overview show beside the track; the peer's shadow deck shows them, its copy takes none.
 			o.loop = !!g.loop.state; o.keyOffset = shift; o.stems = !!g.stemmed.state
 			// The loop's ends (track ms): the peer's shadow deck turns where this one does (L4-2).
@@ -2126,7 +2127,7 @@ SERVICES_MAIN = """
 				}
 			}
 			if (!onLine || sent.cue !== o.cue || sent.master !== o.master || sent.masterPress !== o.masterPress || sent.lead !== o.lead || sent.sync !== o.sync || sent.cuePos !== o.cuePos ||
-				sent.title !== o.title || sent.artist !== o.artist || sent.keyName !== o.keyName || sent.durationMs !== o.durationMs || sent.link !== o.link || sent.bpm !== o.bpm || sent.currentBpm !== o.currentBpm || sent.range !== o.range || sent.keylock !== o.keylock || sent.cuesRev !== cc.rev || sent.active !== o.active ||
+				sent.title !== o.title || sent.artist !== o.artist || sent.keyName !== o.keyName || sent.durationMs !== o.durationMs || sent.link !== o.link || sent.bpm !== o.bpm || sent.currentBpm !== o.currentBpm || sent.range !== o.range || sent.keylock !== o.keylock || sent.service !== o.service || sent.cuesRev !== cc.rev || sent.active !== o.active ||
 				sent.loop !== o.loop || sent.loopIn !== o.loopIn || sent.loopOut !== o.loopOut || sent.keyOffset !== o.keyOffset || sent.stems !== o.stems || sent.slip !== o.slip) edge = true // slip's timeline runs on: in full at every heartbeat while it is active
 		}
 		scShadowPostAt = now; scShadowPostPending = false
@@ -2141,7 +2142,7 @@ SERVICES_MAIN = """
 			const o = own[n], sent = scShadowSent[n]
 			sent.deck = o.deck; sent.net = o.net; sent.playing = o.playing; sent.cue = o.cue; sent.scratch = o.scratch; sent.jumps = o.jumps; sent.pitch = o.pitch
 			sent.master = o.master; sent.masterPress = o.masterPress; sent.lead = o.lead; sent.sync = o.sync; sent.cuePos = o.cuePos; sent.title = o.title; sent.artist = o.artist; sent.keyName = o.keyName; sent.durationMs = o.durationMs
-			sent.link = o.link; sent.bpm = o.bpm; sent.currentBpm = o.currentBpm; sent.range = o.range; sent.keylock = o.keylock; sent.loop = o.loop; sent.loopIn = o.loopIn; sent.loopOut = o.loopOut; sent.keyOffset = o.keyOffset; sent.stems = o.stems; sent.slip = o.slip; sent.cuesRev = scShadowCueCache[o.deck].rev; sent.positionMs = o.positionMs; sent.at = o.at; sent.active = o.active
+			sent.link = o.link; sent.bpm = o.bpm; sent.currentBpm = o.currentBpm; sent.range = o.range; sent.keylock = o.keylock; sent.service = o.service; sent.loop = o.loop; sent.loopIn = o.loopIn; sent.loopOut = o.loopOut; sent.keyOffset = o.keyOffset; sent.stems = o.stems; sent.slip = o.slip; sent.cuesRev = scShadowCueCache[o.deck].rev; sent.positionMs = o.positionMs; sent.at = o.at; sent.active = o.active
 		}
 		scShadowSent.length = own.length
 		scShadowFullAt = now; scShadowPostFull = false
@@ -2255,7 +2256,7 @@ SERVICES_MAIN = """
 			if (scFourDeckRole.indexOf(String(d)) >= 0) continue
 			const e = decks.find(x => x.deck === d)
 			if (e && e.path) head[d] = {master: typeof e.lead === "boolean" ? e.lead : e.master, sync: !!e.sync, title: e.title || "", artist: e.artist || "", keyName: e.keyName || "",
-				loop: !!e.loop, keyOffset: e.keyOffset || 0, stems: !!e.stems, slip: e.slip || 0}
+				loop: !!e.loop, keyOffset: e.keyOffset || 0, stems: !!e.stems, slip: e.slip || 0, service: e.service || ""}
 			// The last track is still on the deck (the next one's copy on its way, the peer gone): its
 			// header stays until it is unloaded. Without it the header read the copy's file name and key.
 			else if (scShadowHead[d] && (scShadowAt[d] || {}).path) head[d] = scShadowHead[d]
@@ -3896,6 +3897,9 @@ SERVICES_MAIN = """
 		return id && scServices.some(v => v.id === id) ? id : ""
 	}
 	function scSlotIcon(source, deck) {
+		// A shadow deck's copy is a local file (no source): it shows the mark of the service its source deck plays from.
+		const shadow = !source && deck > 0 && scShadowHead[deck] ? scShadowHead[deck].service || "" : ""
+		if (shadow) return shadow === "tidal" || scServices.some(v => v.id === shadow) ? scIcon(shadow) : ""
 		const id = scOwnService(deck) || scScope
 		return source === "TIDAL" && id && id !== "tidal" ? scIcon(id) : ""
 	}
@@ -9044,6 +9048,8 @@ def edits(dev: bool):
              "                        readonly property string scMark: typeof root !== \"undefined\" && root && root.scSlotIcon ? root.scSlotIcon(artistSong.trackSource, artistSong.deckIndex) : \"\"\n"
              "                        useOriginal: scMark !== \"\"\n"
              "                        source: visible ? (scMark !== \"\" ? scMark : `qrc:/streaming/${artistSong.trackSource}/Icon.png`) : \"\"\n"),
+            ("                        visible: artistSong.isStreamingTrack\n",
+             "                        visible: artistSong.isStreamingTrack || scMark !== \"\"\n"),
             ("            visible: artistSong.artistVisible && !artistSong.onlyFileName && artistSong.artistTextString.length > 0\n",
              "            visible: artistSong.artistVisible && !artistSong.onlyFileName && !displayText.hideTitleArtist && artistSong.artistTextString.length > 0\n"),
             ("    TapHandler {\n        id: tapHandler\n        enabled: false\n        onTapped: {\n",
@@ -10011,7 +10017,7 @@ def legacy_qml_fixes():
                 "		readonly property string scMark: typeof root !== \"undefined\" && root && root.scSlotIcon ? root.scSlotIcon(artistSong.trackSource, artistSong.deckIndex) : \"\"\n"
                 "		useOriginal: scMark !== \"\"\n"
                 "		source: visible ? (scMark !== \"\" ? scMark : `qrc:/Skins/UIKit/Icons/Source${artistSong.trackSource}.png`) : \"\"\n"
-                "		visible: artistSong.isStreamingTrack\n"
+                "		visible: artistSong.isStreamingTrack || scMark !== \"\"\n"
                 "		width: scMark !== \"\" ? 48 : src.width\n")] if v53() else []),
             ("			visible: !artistSong.onlyFileName && text.length > 0\n",
              "			visible: !artistSong.onlyFileName && !displayText.hideTitleArtist && text.length > 0\n"),

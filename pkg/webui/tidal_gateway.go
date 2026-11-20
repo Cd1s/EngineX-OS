@@ -1208,7 +1208,13 @@ func (g *tidalGateway) playlist(w http.ResponseWriter, r *http.Request) {
 	respond(w, g.refJSON(id, ref))
 }
 func (g *tidalGateway) trackJSON(id int64, t providers.Track) map[string]any {
-	var bpm any = int(math.Round(t.BPM))
+	// Engine shows the BPM it is given for the track and builds its grid on it. A service's
+	// tempo is metadata, often another than the audio's (Supermanera: 84 here, 140 analysed),
+	// and a shadow copy, a local file, gets Engine's own analysis: the two units showed
+	// different BPMs and grids (2026-11-20). Engine analyses the stream instead, as it does
+	// the copy; the row label and the gateway's sort keep the service's tempo. A rekordbox
+	// Link track keeps its BPM: its analysis is replayed (#301).
+	var bpm any = 0
 	if t.Provider == rekordboxScope {
 		bpm = t.BPM
 	}

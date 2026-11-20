@@ -9118,7 +9118,7 @@ class StreamingSlotIconTest(unittest.TestCase):
 
     PRELUDE = r"""
 const assert = require('node:assert/strict');
-let scScope = '', scRekordboxName = '', scDeckService = {}, scTidalLoggedIn = false;
+let scScope = '', scRekordboxName = '', scDeckService = {}, scTidalLoggedIn = false, scShadowHead = {};
 const scT = s => s;
 const scServices = [{id: 'rekordbox', name: 'rekordbox'}, {id: 'tidal', name: 'TIDAL'}, {id: 'netease', name: 'NetEase Cloud Music'},
     {id: 'spotify', name: 'Spotify'}, {id: 'deezer', name: 'Deezer'}, {id: 'soundcloud', name: 'SoundCloud'},
@@ -9133,6 +9133,32 @@ const root = {scNoteService: (d, i) => scNoteService(d, i), scServiceOf: x => sc
     def functions(self, *names):
         main = bp.SERVICES_MAIN.replace("@ICONS@", "Skins/UIKit/Icons")
         return "\n".join(PrimeGoTidalQRTest.function(main, name) for name in names)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required to run the root helpers")
+    def test_a_shadow_deck_shows_its_source_decks_service(self):
+        """Maintainer 2026-11-20: a shadow copy of a streamed track showed no service mark; its file is local (no source)."""
+        self.run_node(self.PRELUDE + self.functions("scIcon", "scNoteService", "scOwnService", "scSlotIcon") + r"""
+scScope = 'deezer';
+scShadowHead = {2: {title: 'Supermanera', service: 'netease'}, 3: {title: 'Local', service: ''}, 4: {title: 'Real', service: 'tidal'}};
+assert.equal(scSlotIcon('', 2), 'file:///data/enginex/ui/icons/netease.png', "the source's service, not the selected one");
+assert.equal(scSlotIcon('', 3), '', 'a copy of a local track has no mark');
+assert.equal(scSlotIcon('', 4), 'qrc:/Skins/UIKit/Icons/SourceTIDALColored.png', 'a copy of a real TIDAL track');
+assert.equal(scSlotIcon('', 1), '', 'no shadow header, no track source: nothing');
+scShadowHead = {2: {title: 'x', service: 'not-a-service'}};
+assert.equal(scSlotIcon('', 2), '', 'only a known service id counts');
+// A deck's own streamed track is unchanged by a shadow header on another deck.
+scNoteService(1, 'spotify'); scShadowHead = {2: {service: 'netease'}};
+assert.equal(scSlotIcon('TIDAL', 1), 'file:///data/enginex/ui/icons/spotify.png');
+""")
+
+    def test_the_shadow_feed_carries_the_service_and_the_headers_draw_it(self):
+        src = bp.SERVICES_MAIN
+        self.assertIn('o.service = s.net && root.scOwnService ? root.scOwnService(d) : ""', src)
+        self.assertIn("sent.service !== o.service", src)
+        self.assertIn("sent.service = o.service", src)
+        self.assertIn('service: e.service || ""}', src)
+        for rel in self.ROOTS[:2]:
+            self.assertIn('isStreamingTrack || scMark !== ""', self.patched(rel), rel)
 
     @unittest.skipUnless(shutil.which("node"), "Node is required to run the root helpers")
     def test_each_track_shows_its_own_service_and_the_selected_one_only_as_fallback(self):

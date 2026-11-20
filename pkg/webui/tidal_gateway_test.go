@@ -466,7 +466,7 @@ func TestTidalScopeGoesToTidalsOwnServers(t *testing.T) {
 func TestListRowsShowTempoAndKey(t *testing.T) {
 	g := newTidalGateway(New(Config{AccessToken: "c", UIDir: t.TempDir(), StateDir: t.TempDir()}, nil))
 	v := g.trackJSON(1, providers.Track{Title: "Song", BPM: 147.6, Key: "8A", Provider: "netease"})
-	if v["title"] != "Song" || v["copyright"] != "网易云音乐 [148 BPM 8A]" || v["bpm"] != 148 {
+	if v["title"] != "Song" || v["copyright"] != "网易云音乐 [148 BPM 8A]" || v["bpm"] != 0 { // Engine analyses a streamed track itself (shadow BPM, 2026-11-20); the label keeps the tempo
 		t.Fatal(v)
 	}
 	if v := g.trackJSON(1, providers.Track{Title: "Song", Provider: "netease"}); v["copyright"] != "网易云音乐" {

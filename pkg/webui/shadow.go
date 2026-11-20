@@ -112,6 +112,9 @@ type deckState struct {
 	BPM          float64 `json:"bpm,omitempty"`        // the track's
 	CurrentBPM   float64 `json:"currentBpm,omitempty"` // an EngineX deck's played tempo (Pitch is derived from it)
 	Beat         float64 `json:"beat,omitempty"`       // Engine's BeatNumber: beats into the bar, 0..4
+	// Service is the streaming service the deck's track comes from ("" for a local one): the
+	// shadow deck's header shows its mark (#305).
+	Service string `json:"service,omitempty"`
 	// At is when PositionMS was read, Unix ms on this machine's clock: the QML's
 	// GUI thread and our niced HTTP handler both lag by tens of ms, so the
 	// position is extrapolated from the sample time, not from arrival.
@@ -239,7 +242,7 @@ func samePeerPicture(old peerDeck, d deckState, now time.Time) bool {
 	o := old.deckState
 	if o.Deck != d.Deck || o.Path != d.Path || o.Net != d.Net || o.Key != d.Key || o.PerfGen != d.PerfGen || o.Ext != d.Ext || o.Name != d.Name ||
 		o.Title != d.Title || o.Artist != d.Artist || o.KeyName != d.KeyName || o.Loading != d.Loading || o.Active != d.Active || o.Stale != d.Stale || o.MetadataOnly != d.MetadataOnly ||
-		o.Playing != d.Playing || o.Pitch != d.Pitch || !sameOptionalBool(o.Master, d.Master) || !sameOptionalBool(o.Lead, d.Lead) || o.Loop != d.Loop || o.LoopIn != d.LoopIn || o.LoopOut != d.LoopOut || o.KeyOffset != d.KeyOffset || o.Stems != d.Stems || o.Slip != d.Slip || o.ShadowMaster != d.ShadowMaster || o.Sync != d.Sync || o.BPM != d.BPM ||
+		o.Playing != d.Playing || o.Pitch != d.Pitch || !sameOptionalBool(o.Master, d.Master) || !sameOptionalBool(o.Lead, d.Lead) || o.Loop != d.Loop || o.LoopIn != d.LoopIn || o.LoopOut != d.LoopOut || o.KeyOffset != d.KeyOffset || o.Stems != d.Stems || o.Slip != d.Slip || o.ShadowMaster != d.ShadowMaster || o.Sync != d.Sync || o.BPM != d.BPM || o.Service != d.Service ||
 		o.CurrentBPM != d.CurrentBPM || o.Range != d.Range || (o.KeyLock == nil) != (d.KeyLock == nil) || (o.KeyLock != nil && *o.KeyLock != *d.KeyLock) ||
 		o.Jumps != d.Jumps || o.Cue != d.Cue || o.Scratch != d.Scratch || o.Link != d.Link || (o.CuePos == nil) != (d.CuePos == nil) ||
 		(o.CuePos != nil && *o.CuePos != *d.CuePos) || (o.Cues == nil) != (d.Cues == nil) || !slices.Equal(o.Cues, d.Cues) {
@@ -1367,7 +1370,22 @@ func (s *Server) ownPerf(ctx context.Context, d deckState, native bool) ([]byte,
 	if err != nil && d.rbxAnalysis != "" {
 		perf, err = rbxPeerPerf(d.rbxAnalysis, d.BPM, native)
 	}
+	if err == nil && !native {
+		perf = withDeckBPM(perf, d.BPM)
+	}
 	return perf, err
+}
+
+// withDeckBPM gives an EXPF analysis the BPM the source deck shows (/OriginalBPM), so
+// the copy's header shows it too. The row's bpmAnalyzed can be another value (stick,
+// 2026-11-20: Fons et Origo showed 129.00 on its deck and 130.00 on the copy).
+func withDeckBPM(perf []byte, bpm float64) []byte {
+	if !(bpm > 0 && bpm < 1000) || len(perf) < 16 || string(perf[:4]) != "EXPF" {
+		return perf
+	}
+	out := append([]byte(nil), perf...)
+	binary.LittleEndian.PutUint64(out[8:16], math.Float64bits(bpm))
+	return out
 }
 
 // perfGen is a bounded hash of the native analysis served for a rekordbox Link
@@ -2259,6 +2277,7 @@ func (s *Server) shadowFetchPeer(key string, p peerDeck) {
 		if pending {
 			return "", errPerfPending
 		}
+		local := s.shadowCopyForBPM(ctx, key, local, perf)
 		req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
 		resp, err := peerFileClient.Do(req)
 		if err != nil {
@@ -2360,6 +2379,59 @@ func (s *Server) shadowRefreshPeerPerf(key string, p peerDeck, old string) {
 		}
 		return local, nil
 	})
+}
+
+// shadowCopyForBPM is where the copy goes. Engine analyses a copy once and keeps its row
+// for the path, so a copy the source now gives another BPM (an older build's replay, a
+// row the source analysed again) would keep the old one: it goes under a path of its
+// own and is analysed afresh (LEFT, 2026-11-20: Fons et Origo's copy kept 130.0 from
+// before, its source shows 129.00).
+func (s *Server) shadowCopyForBPM(ctx context.Context, key, local string, perf []byte) string {
+	bpm, ok := expfBPM(perf)
+	if !ok {
+		return local
+	}
+	had, ok := s.copyRowBPM(ctx, local)
+	if !ok || math.Abs(had-bpm) < 0.005 {
+		return local
+	}
+	dir := filepath.Join(s.shadowDir(), fmt.Sprintf("peer-%x", fnvSum(key+" bpm "+strconv.FormatFloat(bpm, 'f', 2, 64))))
+	if filepath.Base(filepath.Dir(local)) == "Contents" {
+		dir = filepath.Join(dir, "Contents")
+	}
+	return filepath.Join(dir, filepath.Base(local))
+}
+
+// expfBPM is the BPM an EXPF analysis gives the copy.
+func expfBPM(perf []byte) (float64, bool) {
+	if len(perf) < 16 || string(perf[:4]) != "EXPF" {
+		return 0, false
+	}
+	bpm := math.Float64frombits(binary.LittleEndian.Uint64(perf[8:16]))
+	return bpm, bpm > 0 && bpm < 1000
+}
+
+// copyRowBPM is the BPM this player's library has for the copy at local, read-only.
+func (s *Server) copyRowBPM(ctx context.Context, local string) (float64, bool) {
+	lib := engineLibrary(local, s.shadow.dataRoot, s.shadow.mediaRoot)
+	rel, err := filepath.Rel(lib, local)
+	if err != nil {
+		return 0, false
+	}
+	mdb := filepath.Join(lib, "Database2", "m.db")
+	if _, err := os.Stat(mdb); err != nil {
+		return 0, false
+	}
+	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: mdb}).String()+"?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(500)")
+	if err != nil {
+		return 0, false
+	}
+	defer db.Close()
+	var bpm sql.NullFloat64
+	if db.QueryRowContext(ctx, `SELECT bpmAnalyzed FROM Track WHERE path = ? AND isAnalyzed = 1 ORDER BY id DESC LIMIT 1`, filepath.ToSlash(rel)).Scan(&bpm) != nil || !bpm.Valid {
+		return 0, false
+	}
+	return bpm.Float64, true
 }
 
 // shadowCopy is one track's copy on its way to this player: how far it is, and
