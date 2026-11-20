@@ -307,17 +307,25 @@ static void test_only_an_eject_marks_the_stick(const char *root) {
     assert(!strcmp(name,"enginex-rb-ejected-2531a9d305fa8897")); // internal/cli ejectMark pins the same
     char volume_path[PATH_MAX],mark[PATH_MAX];join(volume_path,MEDIA_ROOT,"EJECTED");assert(!make_dirs(volume_path));
     assert(snprintf(mark,sizeof mark,"%s/enginex-rb-ejected-%016llx",test_runtime,(unsigned long long)hash_bytes(UINT64_C(14695981039346656037),volume_path,strlen(volume_path)))<(int)sizeof mark);
+    // rc5: every Eject attempt, also a refused one, marks the stick EJECTING until it is mounted
+    // again, so the Pro DJ Link export stops opening it (internal Go: prolink.EjectingMark).
+    char ejecting[PATH_MAX];
+    assert(snprintf(ejecting,sizeof ejecting,"%s/enginex-ejecting-%016llx",test_runtime,(unsigned long long)hash_bytes(UINT64_C(14695981039346656037),volume_path,strlen(volume_path)))<(int)sizeof ejecting);
     struct libmnt_context removal={.target=volume_path};assert(!mnt_context_enable_lazy(&removal,1));
     assert(!unmount_dispatch(&removal,no_unmount));assert(access(mark,F_OK)==-1&&errno==ENOENT);
+    assert(access(ejecting,F_OK)==-1&&errno==ENOENT);
     struct libmnt_context busy={.target=volume_path,.fail=1};
     assert(unmount_dispatch(&busy,real_unmount)==-EBUSY);assert(access(mark,F_OK)==-1&&errno==ENOENT);
+    assert(!access(ejecting,F_OK));
     struct libmnt_context eject={.target=volume_path};
     assert(!unmount_dispatch(&eject,no_unmount));assert(!access(mark,F_OK));
     struct libmnt_context bad_mount={.target=volume_path};
     assert(hooked_mount(&bad_mount,no_mount_fail)==-EINVAL);assert(!access(mark,F_OK));
     struct libmnt_context remount={.target=volume_path};
     assert(!hooked_mount(&remount,no_mount_ok));assert(access(mark,F_OK)==-1&&errno==ENOENT);
+    assert(access(ejecting,F_OK)==-1&&errno==ENOENT);
     puts("#301: only a completed Eject marks the stick, failed unmount leaves none, re-mount clears it: PASS");
+    puts("rc5: every Eject attempt marks the stick ejecting until the next mount: PASS");
 }
 // 5.3.0.3 made /data/legacy data a symlink to enginex (#103). The cache path
 // through it failed with ELOOP, so no read-only HFS+ stick got a view or rb-bridge.

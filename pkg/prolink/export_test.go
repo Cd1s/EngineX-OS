@@ -544,10 +544,36 @@ func TestNFSServerPinsItsRoot(t *testing.T) {
 	}
 	testfixture.Write(t, root, "MUSIC/two.flac", []byte("replacement mount"))
 	c := &NFSClient{IP: net.IPv4(127, 63, 0, 1), Portmap: s.PortmapPort(), Timeout: 100 * time.Millisecond}
+	// The old directory is no longer held open (that kept an ejected stick busy), so the
+	// request fails, but the replacement at the same path is never served.
 	got, _, err := c.Fetch(t.Context(), "/C/", "/Music/two.flac", 1<<26)
-	want, _ := os.ReadFile(filepath.Join(root+"-old", "MUSIC", "two.flac"))
-	if err != nil || !bytes.Equal(got, want) {
-		t.Fatalf("root path replacement escaped pinned directory: %v", err)
+	if err == nil || bytes.Equal(got, []byte("replacement mount")) {
+		t.Fatalf("root path replacement escaped pinned directory: %d bytes, %v", len(got), err)
+	}
+}
+
+// rc5: Pro DJ Link (export on, 0ae5a0d6) held the stick's root directory open for the
+// whole export, so Engine's Eject failed with "target is busy" until the stick was pulled.
+func TestNFSServerHoldsNoFDOnItsRoot(t *testing.T) {
+	root := t.TempDir()
+	testfixture.Export(t, root)
+	s := &NFSServer{Root: root}
+	if err := s.Listen("127.63.0.1:0"); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	c := &NFSClient{IP: net.IPv4(127, 63, 0, 1), Portmap: s.PortmapPort(), Timeout: 100 * time.Millisecond}
+	if _, _, err := c.Fetch(t.Context(), "/C/", "/Music/two.flac", 1<<26); err != nil {
+		t.Fatal(err)
+	}
+	fds, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Skip("no /proc/self/fd")
+	}
+	for _, fd := range fds {
+		if l, _ := os.Readlink("/proc/self/fd/" + fd.Name()); l == root || strings.HasPrefix(l, root+"/") {
+			t.Fatalf("export keeps %s open: an Eject of the stick fails with EBUSY", l)
+		}
 	}
 }
 
@@ -1685,5 +1711,33 @@ func TestExportRebindWhenPDBChanges(t *testing.T) {
 	e.run.mu.Unlock()
 	if !mounted {
 		t.Fatal("restarted export not marked mounted")
+	}
+}
+
+// rc5: once Engine asks to eject the stick (the edisksd hook's mark), the export stops
+// opening it, so a CDJ or EngineX peer reading a track cannot keep it busy.
+func TestNFSServerStopsServingAVolumeBeingEjected(t *testing.T) {
+	old := EjectingDir
+	EjectingDir = t.TempDir()
+	defer func() { EjectingDir = old }()
+	if got := filepath.Base(EjectingMark("/media/REKORDBOX")); got != "enginex-ejecting-2531a9d305fa8897" { // test_edisksd_hook.c pins the same hash
+		t.Fatalf("mark %s does not match the hook", got)
+	}
+	root := t.TempDir()
+	testfixture.Export(t, root)
+	s := &NFSServer{Root: root}
+	if err := s.Listen("127.63.0.1:0"); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	c := &NFSClient{IP: net.IPv4(127, 63, 0, 1), Portmap: s.PortmapPort(), Timeout: 100 * time.Millisecond}
+	if _, _, err := c.Fetch(t.Context(), "/C/", "/Music/two.flac", 1<<26); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(EjectingMark(root), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := c.Fetch(t.Context(), "/C/", "/Music/two.flac", 1<<26); err == nil {
+		t.Fatal("export still serves a stick Engine is ejecting")
 	}
 }
