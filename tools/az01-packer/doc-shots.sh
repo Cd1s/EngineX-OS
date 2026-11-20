@@ -20,7 +20,7 @@
 #
 # Requirements:
 #   - Runs on the build host (aarch64 with 32-bit EL0) as root
-#   - /dev/dri/card0 available (virtio-gpu), or set DOC_SHOT_DRM_CARD (for example card1 on Batam)
+#   - /dev/dri/card0 available (virtio-gpu), or set DOC_SHOT_DRM_CARD (for example card1 on the build host)
 #   - Memory limit per process <= 4G
 
 set -euo pipefail
