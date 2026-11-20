@@ -89,6 +89,13 @@ type deckState struct {
 	// shadow header only. Master also marks the player that holds the network
 	// master with no master deck, and is cleared for a standalone player's copy.
 	Lead *bool `json:"lead,omitempty"`
+	// Aligned, PhaseActive and PhaseMeter are the deck's own stock phase meter (its
+	// controller's isAligned, active and enabled), for the shadow header only: the
+	// copy is out of Sync, so its own meter never turns green. Absent from a CDJ and
+	// an older sender: the shadow deck keeps its own.
+	Aligned     *bool `json:"aligned,omitempty"`
+	PhaseActive *bool `json:"phaseActive,omitempty"`
+	PhaseMeter  *bool `json:"phaseMeter,omitempty"`
 	// Loop, KeyOffset, Stems and Slip are what the source's header and overview show
 	// beside the track: an active loop, the key shift in semitones, the Stems icon,
 	// and the slip timeline's position in samples while slip is active (0: it is
@@ -242,7 +249,8 @@ func samePeerPicture(old peerDeck, d deckState, now time.Time) bool {
 	o := old.deckState
 	if o.Deck != d.Deck || o.Path != d.Path || o.Net != d.Net || o.Key != d.Key || o.PerfGen != d.PerfGen || o.Ext != d.Ext || o.Name != d.Name ||
 		o.Title != d.Title || o.Artist != d.Artist || o.KeyName != d.KeyName || o.Loading != d.Loading || o.Active != d.Active || o.Stale != d.Stale || o.MetadataOnly != d.MetadataOnly ||
-		o.Playing != d.Playing || o.Pitch != d.Pitch || !sameOptionalBool(o.Master, d.Master) || !sameOptionalBool(o.Lead, d.Lead) || o.Loop != d.Loop || o.LoopIn != d.LoopIn || o.LoopOut != d.LoopOut || o.KeyOffset != d.KeyOffset || o.Stems != d.Stems || o.Slip != d.Slip || o.ShadowMaster != d.ShadowMaster || o.Sync != d.Sync || o.BPM != d.BPM || o.Service != d.Service ||
+		o.Playing != d.Playing || o.Pitch != d.Pitch || !sameOptionalBool(o.Master, d.Master) || !sameOptionalBool(o.Lead, d.Lead) ||
+		!sameOptionalBool(o.Aligned, d.Aligned) || !sameOptionalBool(o.PhaseActive, d.PhaseActive) || !sameOptionalBool(o.PhaseMeter, d.PhaseMeter) || o.Loop != d.Loop || o.LoopIn != d.LoopIn || o.LoopOut != d.LoopOut || o.KeyOffset != d.KeyOffset || o.Stems != d.Stems || o.Slip != d.Slip || o.ShadowMaster != d.ShadowMaster || o.Sync != d.Sync || o.BPM != d.BPM || o.Service != d.Service ||
 		o.CurrentBPM != d.CurrentBPM || o.Range != d.Range || (o.KeyLock == nil) != (d.KeyLock == nil) || (o.KeyLock != nil && *o.KeyLock != *d.KeyLock) ||
 		o.Jumps != d.Jumps || o.Cue != d.Cue || o.Scratch != d.Scratch || o.Link != d.Link || (o.CuePos == nil) != (d.CuePos == nil) ||
 		(o.CuePos != nil && *o.CuePos != *d.CuePos) || (o.Cues == nil) != (d.Cues == nil) || !slices.Equal(o.Cues, d.Cues) {

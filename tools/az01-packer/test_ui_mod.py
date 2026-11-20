@@ -2292,7 +2292,7 @@ class ShadowDisplayTest(unittest.TestCase):
     """Run the actual QML JS functions with a fake clock and an Engine that rejects all access."""
 
     def js(self, body):
-        names = ("scDeckLocked", "scShadowVisible", "scShadowDeckFor", "scShadowData", "scShadowRate", "scShadowPosition",
+        names = ("scDeckLocked", "scShadowNextTickMs", "scPhaseMeterOf", "scShadowVisible", "scShadowDeckFor", "scShadowData", "scShadowRate", "scShadowPosition",
                  "scShadowBeatIndex", "scShadowBeatAt", "scShadowGrid", "scShadowNextCue", "scShadowCuesFor", "scShadowAsset",
                  "scShadowProperties", "scShadowTick", "scShadowPost", "scShadowPoll", "scShadowPollIdle", "scShadowDisplayFetch", "scShadowSameSample", "scShadowApplyDisplay", "scShadowCovers", "scShadowBusy", "scShadowApplyAll", "scNextCueInfo", "scNextCueCompute", "scCueProps", "scCueBeatsLeft", "scCueTickFor", "scCueStep", "scCueTableOf", "scCueCount", "scCueWatch",
                  "scShadowApply", "scShadowFeed", "scShadowEmpty", "scShadowScratchLine", "scShadowScratchRelease", "scShadowSpeed", "scShadowCues", "scShadowBeat",
@@ -2354,6 +2354,30 @@ globalThis.XMLHttpRequest = class {
             setup += "\nscShadowScratchTimer.tick=function(){" + timer.group(1) + "};\n"
         res = subprocess.run(["node", "-e", setup + "\n".join(functions) + "\n" + body], capture_output=True, text=True)
         self.assertEqual(res.returncode, 0, res.stderr)
+
+    def test_the_shadow_cue_clock_ticks_just_past_each_beat(self):
+        """The countdown counts whole beats: on a fixed 200 ms tick a 120 BPM shadow count moved 400 or 600 ms apart (2026-11-20)."""
+        self.js(r"""
+const beats = [{ms: 0, number: 1}, {ms: 500, number: 2}, {ms: 1000, number: 3}, {ms: 1500, number: 4}];
+let pos = 300, rate = 1;
+scShadowDisplay = {2: {playing: true}};
+scShadowVisible = d => d === 2;
+scShadowData = d => d === 2 ? {meta: {beats: beats}} : null;
+scShadowRate = () => rate;
+scShadowPosition = () => pos;
+assert.equal(scShadowNextTickMs(now), 212, '200 ms to the beat: land just past it');
+pos = 490; assert.equal(scShadowNextTickMs(now), 22);
+pos = 600; assert.equal(scShadowNextTickMs(now), 250, 'a beat further than 250 ms: look again by then');
+pos = 300; rate = 2; assert.equal(scShadowNextTickMs(now), 112, 'a faster source: sooner');
+rate = 1; scShadowDisplay = {2: {playing: false}}; assert.equal(scShadowNextTickMs(now), 250, 'nothing playing');
+scShadowDisplay = {2: {playing: true, stale: true}}; assert.equal(scShadowNextTickMs(now), 250, 'a stale sample');
+scShadowDisplay = {2: {playing: true}}; scShadowVisible = () => false; assert.equal(scShadowNextTickMs(now), 250, 'not on screen');
+scShadowVisible = d => d === 2; scShadowData = () => ({meta: {beats: []}}); assert.equal(scShadowNextTickMs(now), 250, 'no grid');
+""")
+        timer = re.search(r"\tTimer \{\n\t\tinterval: 200; repeat: true\n\t\trunning: root\.scFourDeckRole !== \"\" && root\.scShadowEngineMask !== 30 && "
+                          r"root\.scShadowAnyPlaying\(root\.scShadowDisplay\)\n\t\tonTriggered: \{(.*?)\n\t\t\}\n\t\}", bp.SERVICES_MAIN, re.S)
+        self.assertIsNotNone(timer, "the shadow countdown clock")
+        self.assertIn("interval = root.scShadowNextTickMs(Date.now())", timer.group(1))
 
     def test_same_track_line_state_changes_are_applied(self):
         self.js(r"""
@@ -6712,6 +6736,47 @@ assert.deepEqual(scShadowHead, {});
         self.assertIn("o.lead = s.master;", SRC)  # the source posts its own DeckIsMaster, what its header shows
         self.assertIn("sent.lead !== o.lead", SRC)  # and posts at once when only that changes
         self.assertIn('head("deckIndex", "sync",', SRC)
+
+    def test_the_shadow_phase_meter_shows_the_sources(self):
+        """A synced follower's copy is out of Sync: its stock phase meter stayed grey while the source's was green (2026-11-20)."""
+        bp.ROOT = 'Skins/Embedded/'
+        patches = bp.edits(False)
+        for path, marker in (
+            ('Skins/Embedded/Views/MainView/PhaseMeter.qml', 'property bool isAligned:'),
+            ('Skins/Embedded/Views/MainView/PhaseMeter.qml', 'property bool isActive:'),
+            ('Skins/Embedded/Views/MainView/Components/JP07SyncIndicator.qml', 'property bool displayPhaseMeter:'),
+        ):
+            replacement = next(new for old, new in patches[path] if marker in new)
+            expression = replacement.split(':', 1)[1].strip()
+            ShadowDisplayTest.js(self, r"""
+globalThis.deckIndex = 2;
+globalThis.controller = {isAligned: true, active: true, enabled: true};
+let source = {aligned: false, phaseActive: false, phaseMeter: false};
+globalThis.scShadowHeadOf = () => source;
+const result = () => !!(EXPRESSION);
+assert.equal(result(), false, 'the source overrides the copy');
+controller.isAligned = controller.active = controller.enabled = false;
+source = {aligned: true, phaseActive: true, phaseMeter: true}; assert.equal(result(), true, 'aligned at the source: green here');
+source = {}; assert.equal(result(), false, 'an older sender: the stock local binding');
+controller.isAligned = controller.active = controller.enabled = true;
+assert.equal(result(), true);
+""".replace('EXPRESSION', expression))
+
+    def test_the_shadow_header_carries_the_sources_phase_meter(self):
+        ShadowDisplayTest.js(self, r"""
+Object.assign(globalThis, {scShadowApply() {}, scShadowEmpty() {}});
+const deck = (d, o) => Object.assign({deck: d, path: '/c/a.mp3', id: 'k'}, o);
+scShadowApplyAll([deck(2, {aligned: true, phaseActive: true, phaseMeter: true}), deck(4, {})], false);
+assert.strictEqual(scShadowHead[2].aligned, true);
+assert.strictEqual(scShadowHead[2].phaseActive, true);
+assert.strictEqual(scShadowHead[2].phaseMeter, true);
+assert.strictEqual(scShadowHead[4].aligned, undefined, 'an older sender: no override');
+scShadowApplyAll([deck(2, {aligned: false, phaseActive: true, phaseMeter: true}), deck(4, {})], false);
+assert.strictEqual(scShadowHead[2].aligned, false, 'losing the alignment reaches the header');
+""")
+        self.assertIn("o.aligned = !!pm && !!pm.isAligned", SRC)  # the source posts its own meter
+        self.assertIn("sent.aligned !== o.aligned", SRC)  # at once when only that changes
+        self.assertIn("sent.aligned = o.aligned;", SRC)
 
 
 @unittest.skipUnless(shutil.which("node"), "node needed for the shadow-deck behavioral checks")

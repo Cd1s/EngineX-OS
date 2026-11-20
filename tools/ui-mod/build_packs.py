@@ -1037,15 +1037,38 @@ SERVICES_MAIN = """
 		x.send()
 	}
 	// The shadow decks' cue countdown clock: only while one of them plays. Every
-	// tick re-evaluates each deck view's countdown (~36 V4 allocations).
+	// tick re-evaluates each deck view's countdown (~36 V4 allocations). The count
+	// changes on beats, so a tick lands just past the coming one: on a fixed 200 ms
+	// tick a 120 BPM count moved 400 or 600 ms apart, never on the beat.
 	function scShadowAnyPlaying(m) {
 		for (let d = 1; d <= 4; d++) if (m[d] && m[d].playing && !m[d].stale) return true
 		return false
 	}
+	// Milliseconds to the clock's next tick: just past the nearest coming beat of a
+	// playing shadow deck (on the source's grid, as the count reads it), at most
+	// 250 ms (a jump or a stop on the source still shows soon).
+	function scShadowNextTickMs(now) {
+		let wait = 250
+		for (let d = 1; d <= 4; d++) {
+			const v = scShadowDisplay[d]
+			if (!v || !v.playing || v.stale || !scShadowVisible(d)) continue
+			const s = scShadowData(d), beats = s && s.meta && s.meta.beats, rate = s ? scShadowRate(s) : 0
+			if (!beats || beats.length < 2 || !(rate > 0)) continue
+			const pos = scShadowPosition(s, now)
+			const i = Math.max(0, Math.min(beats.length - 2, scShadowBeatIndex(beats, pos) - 1)), a = beats[i], b = beats[i + 1]
+			if (!(b.ms > a.ms) || !(b.number > a.number)) continue
+			const msPerBeat = (b.ms - a.ms) / (b.number - a.number), beat = a.number + (pos - a.ms) / msPerBeat
+			wait = Math.min(wait, (a.ms + (Math.floor(beat) + 1 - a.number) * msPerBeat - pos) / rate)
+		}
+		return Math.max(20, Math.min(250, Math.ceil(wait) + 12))
+	}
 	Timer {
 		interval: 200; repeat: true
 		running: root.scFourDeckRole !== "" && root.scShadowEngineMask !== 30 && root.scShadowAnyPlaying(root.scShadowDisplay)
-		onTriggered: root.scShadowFrame = (root.scShadowFrame + 1) & 0xffff
+		onTriggered: {
+			root.scShadowFrame = (root.scShadowFrame + 1) & 0xffff
+			interval = root.scShadowNextTickMs(Date.now())
+		}
 	}
 	Timer {
 		interval: 500; repeat: true; running: root.scFourDeckRole !== "" && root.scShadowEngineMask !== 30
@@ -1817,6 +1840,10 @@ SERVICES_MAIN = """
 	property real scShadowFullAt: 0
 	property bool scShadowPostFull: true
 	property real scShadowLinkAt: -Infinity
+	// The stock phase meter controller of deck d, what this deck's header draws (null before Engine builds it).
+	function scPhaseMeterOf(d) {
+		return typeof PlanckGUI !== "undefined" && PlanckGUI && PlanckGUI.views && PlanckGUI.views.getPhaseMeter ? PlanckGUI.views.getPhaseMeter(d - 1) : null
+	}
 	property var scShadowTextAt: ({})
 	function scShadowProperties(d) {
 		let p = scShadowDeckProperties[d]
@@ -2090,6 +2117,9 @@ SERVICES_MAIN = """
 			o.playing = s.playing; o.cue = s.cue; o.scratch = !!s.scratch; o.link = link; o.positionMs = s.lineMs; o.at = s.at; o.jumps = s.jumps
 			o.pitch = s.pitch; o.master = s.master || d === lead; o.lead = s.master; o.bpm = s.bpm; o.currentBpm = s.currentBpm
 			o.sync = s.sync; o.beat = g.beat.unnormalized || 0
+			// The phase meter as this deck's header shows it: the peer's shadow header turns green with it (its copy is out of Sync).
+			const pm = scPhaseMeterOf(d)
+			o.phaseMeter = !!pm && !!pm.enabled; o.phaseActive = !!pm && !!pm.active; o.aligned = !!pm && !!pm.isAligned
 			o.active = d === scShadowActiveDeck // on this unit's active layer (#201)
 			o.range = s.range; o.keylock = s.keylock // the peer's shadow deck shows the same range and key lock
 			o.service = s.net && root.scOwnService ? root.scOwnService(d) : "" // #305: the peer's shadow header shows this track's service mark
@@ -2128,7 +2158,8 @@ SERVICES_MAIN = """
 			}
 			if (!onLine || sent.cue !== o.cue || sent.master !== o.master || sent.masterPress !== o.masterPress || sent.lead !== o.lead || sent.sync !== o.sync || sent.cuePos !== o.cuePos ||
 				sent.title !== o.title || sent.artist !== o.artist || sent.keyName !== o.keyName || sent.durationMs !== o.durationMs || sent.link !== o.link || sent.bpm !== o.bpm || sent.currentBpm !== o.currentBpm || sent.range !== o.range || sent.keylock !== o.keylock || sent.service !== o.service || sent.cuesRev !== cc.rev || sent.active !== o.active ||
-				sent.loop !== o.loop || sent.loopIn !== o.loopIn || sent.loopOut !== o.loopOut || sent.keyOffset !== o.keyOffset || sent.stems !== o.stems || sent.slip !== o.slip) edge = true // slip's timeline runs on: in full at every heartbeat while it is active
+				sent.loop !== o.loop || sent.loopIn !== o.loopIn || sent.loopOut !== o.loopOut || sent.keyOffset !== o.keyOffset || sent.stems !== o.stems || sent.slip !== o.slip ||
+				sent.aligned !== o.aligned || sent.phaseActive !== o.phaseActive || sent.phaseMeter !== o.phaseMeter) edge = true // slip's timeline runs on: in full at every heartbeat while it is active
 		}
 		scShadowPostAt = now; scShadowPostPending = false
 		// Nothing the peer shows changed: ping instead of serialising the decks again
@@ -2143,6 +2174,7 @@ SERVICES_MAIN = """
 			sent.deck = o.deck; sent.net = o.net; sent.playing = o.playing; sent.cue = o.cue; sent.scratch = o.scratch; sent.jumps = o.jumps; sent.pitch = o.pitch
 			sent.master = o.master; sent.masterPress = o.masterPress; sent.lead = o.lead; sent.sync = o.sync; sent.cuePos = o.cuePos; sent.title = o.title; sent.artist = o.artist; sent.keyName = o.keyName; sent.durationMs = o.durationMs
 			sent.link = o.link; sent.bpm = o.bpm; sent.currentBpm = o.currentBpm; sent.range = o.range; sent.keylock = o.keylock; sent.service = o.service; sent.loop = o.loop; sent.loopIn = o.loopIn; sent.loopOut = o.loopOut; sent.keyOffset = o.keyOffset; sent.stems = o.stems; sent.slip = o.slip; sent.cuesRev = scShadowCueCache[o.deck].rev; sent.positionMs = o.positionMs; sent.at = o.at; sent.active = o.active
+			sent.aligned = o.aligned; sent.phaseActive = o.phaseActive; sent.phaseMeter = o.phaseMeter
 		}
 		scShadowSent.length = own.length
 		scShadowFullAt = now; scShadowPostFull = false
@@ -2256,7 +2288,8 @@ SERVICES_MAIN = """
 			if (scFourDeckRole.indexOf(String(d)) >= 0) continue
 			const e = decks.find(x => x.deck === d)
 			if (e && e.path) head[d] = {master: typeof e.lead === "boolean" ? e.lead : e.master, sync: !!e.sync, title: e.title || "", artist: e.artist || "", keyName: e.keyName || "",
-				loop: !!e.loop, keyOffset: e.keyOffset || 0, stems: !!e.stems, slip: e.slip || 0, service: e.service || ""}
+				loop: !!e.loop, keyOffset: e.keyOffset || 0, stems: !!e.stems, slip: e.slip || 0, service: e.service || "",
+				aligned: e.aligned, phaseActive: e.phaseActive, phaseMeter: e.phaseMeter}
 			// The last track is still on the deck (the next one's copy on its way, the peer gone): its
 			// header stays until it is unloaded. Without it the header read the copy's file name and key.
 			else if (scShadowHead[d] && (scShadowAt[d] || {}).path) head[d] = scShadowHead[d]
@@ -9102,9 +9135,15 @@ def edits(dev: bool):
         ])
         scaled[ROOT + "Views/MainView/Components/JP07SyncIndicator.qml"] = [
             ("    readonly property bool displayPhaseMeter: controller.enabled\n",
-             "    readonly property bool displayPhaseMeter: !!controller && controller.enabled\n"),
+             "    readonly property bool displayPhaseMeter: " + head("deckIndex", "phaseMeter", "!!controller && controller.enabled") + "\n"),
             ("    property bool isMaster: pDeckIsMaster.translator && pDeckIsMaster.translator.state\n",
              "    property bool isMaster: " + head("deckIndex", "master", "pDeckIsMaster.translator && pDeckIsMaster.translator.state") + "\n")]
+        # A shadow deck's phase meter shows the source's: its copy is out of Sync, so Engine never aligns it here.
+        scaled[ROOT + "Views/MainView/PhaseMeter.qml"] = [
+            ("    readonly property bool isAligned: controller.isAligned\n",
+             "    readonly property bool isAligned: " + head("deckIndex", "aligned", "controller.isAligned") + "\n"),
+            ("    readonly property bool isActive: controller.active\n",
+             "    readonly property bool isActive: " + head("deckIndex", "phaseActive", "controller.active") + "\n")]
         scaled[bj + "Deck/DeckItem/BpmInfo.qml"] = [
             ("    readonly property bool syncEnabled: deckController && deckController.syncInfoViewController.syncEnabled\n",
              "    readonly property bool syncEnabled: " + head("deckIndex", "sync", "deckController && deckController.syncInfoViewController.syncEnabled") + "\n"),
