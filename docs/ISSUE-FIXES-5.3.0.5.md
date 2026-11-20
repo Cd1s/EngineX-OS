@@ -475,7 +475,7 @@ The rc5 output directory remains on the authorized ARM build host for maintainer
 
 ## Phase F final evidence (2026-11-20)
 
-This section is the authoritative Phase F sandbox record for build commit `79d6e2415802c85c743ed80dc1499bb9b767a23b`. The clean rc6 output is `/var/tmp/enginex-release-5.3.0.5-rc6` on Oracle-Batam-arm. It contains 28 release artifacts plus `RELEASE-TAG.txt`, `SHA256SUMS.txt`, and `SHA256SUMS.txt.sig`, for 31 files in total. The maintainer's decks were offline after a power loss, so no real-deck run was possible. Publication was intentionally not performed.
+This section is the authoritative Phase F sandbox record for build commit `79d6e2415802c85c743ed80dc1499bb9b767a23b`. The clean rc6 output is `/var/tmp/enginex-release-5.3.0.5-rc6` on the build host. It contains 28 release artifacts plus `RELEASE-TAG.txt`, `SHA256SUMS.txt`, and `SHA256SUMS.txt.sig`, for 31 files in total. The maintainer's decks were offline after a power loss, so no real-deck run was possible. Publication was intentionally not performed.
 
 - **Rollback point**: tag `v5.3.0.4-r5` (`9e827205ae331d2d896d97207032556dc4202af5`)
 - **Manifest**: `SHA256SUMS.txt` SHA-256 `47625b2a19c5f072ecfbb2de37cd0ad77f4d4e7bfb9975e0c1e303a269c81668`
@@ -554,4 +554,4 @@ Rows 359–368 are covered here only by unit, QML, C or release-gate sandbox evi
 
 Phase F completed the documentation checks required by release-workflow step 1. No `tone: "new"` feature entries remain in `docs/site/content.js`; static cache parameters were bumped to `?v=67`/`?v=37`, and the three READMEs have matching 16 image links and 4 installer links. Historical `5.3.0.4` references remain only where they describe the previous baseline or historical documentation.
 
-The rc6 output and gate evidence remain on Oracle-Batam-arm. Earlier release directories remain untouched. Step-9 cleanup was not run.
+The rc6 output and gate evidence remain on the build host. Earlier release directories remain untouched. Step-9 cleanup was not run.
