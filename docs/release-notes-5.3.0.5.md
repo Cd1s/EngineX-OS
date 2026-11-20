@@ -1,8 +1,8 @@
 ## EngineX OS 5.3.0.5
 
-Custom system built on the official Engine OS 5.3.0+ base for all 16 Denon DJ, Numark, and Rane standalone units. Build commit: `79d6e2415802c85c743ed80dc1499bb9b767a23b`. Rollback point: tag `v5.3.0.4-r5`.
+Custom system built on the official Engine OS 5.3.0+ base for all 16 Denon DJ, Numark, and Rane standalone units. Build commit: `1c41b7e9bd8b8d5064f0c3f7e1e623949fb51f01`. Release tag: `v5.3.0.5-r1`. Rollback point: tag `v5.3.0.4-r5`.
 
-> **Phase F final sandbox evidence complete.** The SHA-256 table below is from the signed rc6 `SHA256SUMS.txt` built at `79d6e2415802c85c743ed80dc1499bb9b767a23b`. Publication was intentionally not performed. Rows 359–368 and the other physical-deck checks still require the real-deck run. The full change record is `docs/ISSUE-FIXES-5.3.0.5.md`.
+> **5.3.0.5 r1 release evidence complete.** The signed table below is from the rc7 output built at `1c41b7e9bd8b8d5064f0c3f7e1e623949fb51f01`. The evidence commit is made on top of `a522e804`. The two shadow fixes were confirmed on two SC5000 decks with deck-push builds, including a one-step-per-beat countdown. Other physical-deck checks remain pending. The full change record is `docs/ISSUE-FIXES-5.3.0.5.md`.
 
 - **Online User Guide (English / 简体中文 / 繁體中文)**: [https://enginexdj.com](https://enginexdj.com)
 
@@ -30,6 +30,8 @@ Custom system built on the official Engine OS 5.3.0+ base for all 16 Denon DJ, N
 
 ### Fixed
 
+- **Shadow phase meter follows the source**: the shadow lane shows the source deck's alignment and phase, turns green with the source, and its phase lines follow the source.
+- **Shadow cue countdown follows the beat**: a paused shadow copy advances its cue countdown once per beat, matching the source deck.
 - **PRIME 4 load stutter**: prevents audio stutter on the playing deck when loading a track on another deck (#298) *[needs a deck check]*.
 - **HFS+ safety**: prevents writable mounts on the stock 5.3.0.4 kernel HFS+ driver and allows clean eject and firmware updates from HFS+ drives.
 - **Shadow deck & rekordbox**: follows jog nudges and loops accurately on the shadow lane *[needs two decks]*, renders full-height overviews on first load, follows USB hotplug in Pro DJ Link export, and keeps both computers visible when one turns `LINK` off.
@@ -53,7 +55,7 @@ Custom system built on the official Engine OS 5.3.0+ base for all 16 Denon DJ, N
 - **OTA packages**: `*-Data-Bundle.tar.gz` is included one last time for 2nd-gen decks on `5.3.0.2` / `5.3.0.3`; the 5.3.0.5 updater uses `*-Update.img` only and enforces signature and downgrade checks (use `--image` / `--bundle` in the installer to downgrade intentionally).
 - **Spotify & Apple Music**: Spotify direct audio is disabled due to upstream key restrictions (`librespot#1649`); playback matches tracks on a signed-in service. Apple Music plays on 2nd-gen units with a subscription and `enginex-amd` (1st-gen units can browse playlists only).
 - **Hardware & scope notes**: Bluetooth adds ~150–250 ms latency (use for monitoring, not beatmatching); on-deck Stems have some bleed compared to computer `htdemucs`; do not unplug HFS+ drives during writes; WAV/AIFF over computer rekordbox Link, pull-stick-and-keep-playing, and PRIME 4 G2 / SYSTEM ONE partition resizing (#244) are not in this release.
-- **Open deck checks**: pending real-deck run; no real deck was touched during Phase F.
+- **Open deck checks**: the phase-meter and cue-countdown fixes were confirmed on two SC5000 decks using deck-push builds, including a measured one-step-per-beat countdown. Other real-deck checks remain pending.
 
 ### How to update
 
@@ -66,52 +68,35 @@ Custom system built on the official Engine OS 5.3.0+ base for all 16 Denon DJ, N
 
 ### SHA-256 Checksums (28 Release Artifacts)
 
-`SHA256SUMS.txt`, `SHA256SUMS.txt.sig` and `RELEASE-TAG.txt` are uploaded with the files below (31 files in total).
-
-#### One-Click Installer (`EngineX-Installer`)
+`SHA256SUMS.txt`, `SHA256SUMS.txt.sig` and `RELEASE-TAG.txt` are uploaded with the 28 artifacts below, for 31 files in total. This release is published as `v5.3.0.5-r1` so beta1 decks carrying `v5.3.0.5` receive the update.
 
 | File | SHA-256 |
 | --- | --- |
-| `EngineX-Installer-5.3.0.5-windows-amd64.zip` | `0cd69e84839d7d51ca3014bb7de5d7b158e9474b6c7d9356b9eae4b5e4dcda69` |
-| `EngineX-Installer-5.3.0.5-macos-arm64.zip` | `ab5f4ab8676f5f507a1dc627d26c132ad0782215f955fa8df9dabc4e817b44be` |
-| `EngineX-Installer-5.3.0.5-macos-amd64.zip` | `d358790922449645aeda525ca59f218fd476c233e16d7b595136b70e422368c4` |
-| `EngineX-Installer-5.3.0.5-linux-amd64.tar.gz` | `fc593b63af32ebba67e8c3370616a0dc1e663f6a68efc86a8b4f2eb8933fc451` |
-
-#### First-Generation Firmware Images (`*-Update.img`)
-
-| File | SHA-256 |
-| --- | --- |
-| `SC5000-5.3.0.5-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img` | `1287257d14df8995b6661cc4b945ff35fc998196160b155872e1eb744708452d` |
-| `SC5000M-5.3.0.5-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img` | `1287257d14df8995b6661cc4b945ff35fc998196160b155872e1eb744708452d` |
-| `PRIMEGO-5.3.0.5-EngineX-OS-Denon-PRIME-GO-JP11-Update.img` | `1287257d14df8995b6661cc4b945ff35fc998196160b155872e1eb744708452d` |
-| `SC6000-5.3.0.5-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img` | `1e6864b2eab413398144dfa803e0548caf874aa3de463fd3b9d8485768eb9d6d` |
-| `SC6000M-5.3.0.5-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img` | `1e6864b2eab413398144dfa803e0548caf874aa3de463fd3b9d8485768eb9d6d` |
-| `PRIME4-5.3.0.5-EngineX-OS-Denon-PRIME-4-JC11-Update.img` | `fb3dde6d2430fa9b0caca690e15d04b4c1e73611149084a4b9cbe41137e92761` |
-| `PRIME2-5.3.0.5-EngineX-OS-Denon-PRIME-2-JC16-Update.img` | `fb3dde6d2430fa9b0caca690e15d04b4c1e73611149084a4b9cbe41137e92761` |
-| `MIXSTREAMPRO-5.3.0.5-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img` | `fb3dde6d2430fa9b0caca690e15d04b4c1e73611149084a4b9cbe41137e92761` |
-
-#### Second-Generation Unified Update Images (`*-Update.img`, Primary)
-
-| File | SHA-256 |
-| --- | --- |
-| `SCLIVE4-5.3.0.5-EngineX-OS-Denon-SC-LIVE-4-JP21-Update.img` | `207dd572677c22dc3b96ce3bd1f34bfa9c14d97ec04d254f4a9dba256a073fcd` |
-| `SCLIVE2-5.3.0.5-EngineX-OS-Denon-SC-LIVE-2-JP20-Update.img` | `bced53c96bba18ac4ddf06a56bfd09e119670cc4346ad117da13e44d3eb38ddd` |
-| `PRIME4PLUS-5.3.0.5-EngineX-OS-Denon-PRIME-4-Plus-JC11S-Update.img` | `ec91e1428b9f310893b212ab53dccb935659f959f30080e1e7ba120387f98183` |
-| `PRIMEGOPLUS-5.3.0.5-EngineX-OS-Denon-PRIME-GO-Plus-JP11S-Update.img` | `364c7082bc243bc0d12d75c8b79b3bbe6a7bb8b6eda0f6bb3071e330480766db` |
-| `MIXSTREAMPROPLUS-5.3.0.5-EngineX-OS-Numark-Mixstream-Pro-Plus-NH08S-Update.img` | `27992b1ff6aadcffbbc6e8098be2ada291ad43bcf492af52a41d45f1bf1c6e6d` |
-| `MIXSTREAMPROGO-5.3.0.5-EngineX-OS-Numark-Mixstream-Pro-Go-NH10-Update.img` | `180399f955e732a0d65ed009db27b5da9b100b401647977cbfdc8650b9ea9342` |
-| `PRIME4G2-5.3.0.5-EngineX-OS-Denon-PRIME-4-G2-JP24-Update.img` | `704c8f4a0fbf8e4815018c12380cdc4204c82d488863579aa3fca40d32f87e82` |
-| `SYSTEMONE-5.3.0.5-EngineX-OS-Rane-SYSTEM-ONE-RMZ2-Update.img` | `78b0cd3b706d25f9b4463c307f6c748edd5aa0b2c512dfd228016b07c76c6280` |
-
-#### Second-Generation Legacy OTA Data Bundles (`*-Data-Bundle.tar.gz`, last time)
-
-| File | SHA-256 |
-| --- | --- |
-| `SCLIVE4-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `5f799aa012a8140ed95403c66dc15bb913a9f79a5dbba996abc117fc67f2e7bb` |
-| `SCLIVE2-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `6b1685a35b64b5c478ee0d87189b71adf544dd7e07388ee6bed2005d0d517095` |
-| `PRIME4PLUS-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `7bd01f22e4f32bbeabbf2789c8ca3ad9274cda0aca584861f9d49c518df4af32` |
-| `PRIMEGOPLUS-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `1fe29859be694981df9eccca3e88599f37eac1d2c411d5d265e1cb4262325eca` |
-| `MIXSTREAMPROPLUS-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `95dabce4a99d4db34548eeba5a6e044bbf8b84608d196b099bd5c167f0cd1d5d` |
-| `MIXSTREAMPROGO-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `918bf4913fab122fa38d760d2d7fd20525e28420b74c723f092c4fc7048e8404` |
-| `PRIME4G2-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `7bd0af92d008998044c5fe43fa615d7a675619bdf476a1d89a229fef18b0aaf4` |
-| `SYSTEMONE-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `01a37d9700c77cae3a89f40bb2a7dd1efcecc3b0c043f4cfbb8997866c119768` |
+| `MIXSTREAMPRO-5.3.0.5-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img` | `a76b3eaefdb24dab01ec70f2316c0809a6b25d281fa6c03d751437463a1f25e6` |
+| `MIXSTREAMPROGO-5.3.0.5-EngineX-OS-Numark-Mixstream-Pro-Go-NH10-Update.img` | `57b352d82f1acd36245c5e4ef77e3f5734c8e246972bf92bd51eea238d4e8c4b` |
+| `MIXSTREAMPROPLUS-5.3.0.5-EngineX-OS-Numark-Mixstream-Pro-Plus-NH08S-Update.img` | `1cba7fe16ca95803ba9caa57c45343dccbfca47696e925511a142d4a4ca94cf2` |
+| `PRIME2-5.3.0.5-EngineX-OS-Denon-PRIME-2-JC16-Update.img` | `a76b3eaefdb24dab01ec70f2316c0809a6b25d281fa6c03d751437463a1f25e6` |
+| `PRIME4-5.3.0.5-EngineX-OS-Denon-PRIME-4-JC11-Update.img` | `a76b3eaefdb24dab01ec70f2316c0809a6b25d281fa6c03d751437463a1f25e6` |
+| `PRIME4G2-5.3.0.5-EngineX-OS-Denon-PRIME-4-G2-JP24-Update.img` | `ac5cbb4bb66589ed3b2bcdc887f75013e87a0c124548cfea5dfd7790430d0ea4` |
+| `PRIME4PLUS-5.3.0.5-EngineX-OS-Denon-PRIME-4-Plus-JC11S-Update.img` | `6991b1ff199f3586d92a446e1691ff4c5e1f842a871296eec093e846d70695d5` |
+| `PRIMEGO-5.3.0.5-EngineX-OS-Denon-PRIME-GO-JP11-Update.img` | `05be05975ef00cb0185e3ff262367934c48ee90b6e5161c4ade7e459fb6a1e04` |
+| `PRIMEGOPLUS-5.3.0.5-EngineX-OS-Denon-PRIME-GO-Plus-JP11S-Update.img` | `3c4a7112e49c3af1eb551d4bd668881299e0be6ffd99e88b23c4b0d287181ecf` |
+| `SC5000-5.3.0.5-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img` | `05be05975ef00cb0185e3ff262367934c48ee90b6e5161c4ade7e459fb6a1e04` |
+| `SC5000M-5.3.0.5-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img` | `05be05975ef00cb0185e3ff262367934c48ee90b6e5161c4ade7e459fb6a1e04` |
+| `SC6000-5.3.0.5-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img` | `27df9fa5fc46ce3ccc1b0c71ae754255b51a6b249d2b029360afdc6a08a844f8` |
+| `SC6000M-5.3.0.5-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img` | `27df9fa5fc46ce3ccc1b0c71ae754255b51a6b249d2b029360afdc6a08a844f8` |
+| `SCLIVE2-5.3.0.5-EngineX-OS-Denon-SC-LIVE-2-JP20-Update.img` | `1c7d270bd8ca136bce8be84a69c15b3d3d0de05cac6c0fcfb5409c5d36bfa708` |
+| `SCLIVE4-5.3.0.5-EngineX-OS-Denon-SC-LIVE-4-JP21-Update.img` | `3fcec1b89be14e10ad3a02bf2eeeb38f01f14e3a9aec64035360980d430ea33b` |
+| `SYSTEMONE-5.3.0.5-EngineX-OS-Rane-SYSTEM-ONE-RMZ2-Update.img` | `a4af1432ccec6e512e32c0765469f84c422626df4f18b5a75a3741eeb2c747b9` |
+| `MIXSTREAMPROGO-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `3bbe6cd4236e94dd74dbad0ac272906b5d1bfc9df68e6286be00f675f1308286` |
+| `MIXSTREAMPROPLUS-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `40ed000700185212d5e5a4b3bb8d51a159bcd1ef7296030d5383dd6ab90ddd2b` |
+| `PRIME4G2-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `d207dbc79dd12336bd30c82c5d1fdd2eac5886b7524ea705e97573e55b57d547` |
+| `PRIME4PLUS-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `55bbe42ebdd11baeb823c18cd100bdcd789e7430c8d366aeaef32b168b23216c` |
+| `PRIMEGOPLUS-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `d675438a5a8c46b827c53314ce85e54a103832896b4797a6b715f2767b01873a` |
+| `SCLIVE2-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `acd8d90cf5051a17ecb40a954ac578b54ef598ae8f56f4f5fdf497db65e03e2d` |
+| `SCLIVE4-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `def34d8578ce191ad0c8b2f6915c99491e70688aa932bbb17345326715cc03fe` |
+| `SYSTEMONE-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `0cde71d401e33f7abe5c82c72e730102d67fa73f006bf3c83dfe7f732f62c623` |
+| `EngineX-Installer-5.3.0.5-linux-amd64.tar.gz` | `185d134add5ba7bac6ffee7d9c46ed20672ec028c9329056f2a800a21a32d58b` |
+| `EngineX-Installer-5.3.0.5-macos-amd64.zip` | `227b5edeec698005ed46e29358b452f737b356b8ec69d13bd67ececbd783b819` |
+| `EngineX-Installer-5.3.0.5-macos-arm64.zip` | `4cff243e1fb2b4cdec83e83e6dcae01b302670959faa2e138ae75f017214162c` |
+| `EngineX-Installer-5.3.0.5-windows-amd64.zip` | `3bf3b7aab4854fe0e3514cc9c97c0a41de5f2e0b1ad9fc75baca4a87bc71a7ca` |

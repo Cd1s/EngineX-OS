@@ -555,3 +555,77 @@ Rows 359–368 are covered here only by unit, QML, C or release-gate sandbox evi
 Phase F completed the documentation checks required by release-workflow step 1. No `tone: "new"` feature entries remain in `docs/site/content.js`; static cache parameters were bumped to `?v=67`/`?v=37`, and the three READMEs have matching 16 image links and 4 installer links. Historical `5.3.0.4` references remain only where they describe the previous baseline or historical documentation.
 
 The rc6 output and gate evidence remain on the build host. Earlier release directories remain untouched. Step-9 cleanup was not run.
+
+
+## Phase G rc7 final release evidence (2026-11-20)
+
+This section is the authoritative rc7 record for build commit `1c41b7e9bd8b8d5064f0c3f7e1e623949fb51f01`. The release evidence commit is made on top of `84708831` and carries release tag `v5.3.0.5-r1`. The clean output is `/var/tmp/enginex-release-5.3.0.5-rc7` on the build host. It contains 28 release artifacts plus `RELEASE-TAG.txt`, `SHA256SUMS.txt`, and `SHA256SUMS.txt.sig`, for 31 files in total.
+
+- **Rollback point**: tag `v5.3.0.4-r5` (`9e827205ae331d2d896d97207032556dc4202af5`)
+- **Manifest**: `SHA256SUMS.txt` SHA-256 `455fd418aee733756f66b7dc6a9139502e257af64bc24bb33425a8815f09b4a6`
+- **Signature**: `SHA256SUMS.txt.sig` SHA-256 `ee1590312ae9a514b12c8b7560f403bc8bc2c2fb05293d5b129fc21dd1c98a34`, verified against the manifest
+- **Release tag file**: `RELEASE-TAG.txt` SHA-256 `7ff60fae3cfdee32922d64003b8a8911c62c97ef472d50d99e68e16c3927ce4b`, content `v5.3.0.5-r1`
+- **Review**: `/root/fleet-briefs/5305-reports/review-shadow-rc7.md` begins `VERDICT: NO-P1`; its two P2 findings are deferred to 5.3.0.6 by maintainer disposition
+
+### Tests
+
+- The full Python release set completed with 580 tests passing and two expected skips after the test-only harness fix in `a522e804`. The targeted rerun of `python3 -m unittest tools/az01-packer/test_ui_perf.py` on `a522e804` passed all four tests.
+- `gofmt -l .`, `go vet ./...`, `python3 -m unittest discover -s tools/stems` (18 tests), and `bash tests/test_rootfs_overlay.sh` (37 tests) passed.
+- The JC11S and AZ04 bootstrap sandboxes passed all checks.
+
+### Build, image and UI checks
+
+- `build-release.sh`, `build-installer.sh`, and `sign-release.sh` ran from scratch in that order from build commit `1c41b7e9`. The final signed manifest has 29 entries and the output has 31 files.
+- SC5000 JP07, SC6000 JP13, and PRIME 4 JC11 unpacked with `verified: true`; each carries version `5.3.0.5` and release tag `v5.3.0.5-r1`. The three decoded Gen-1 splash previews are `1280x800 RGB` and visibly show `5.3.0.5`.
+- The shipped UI pack contains `phaseActive`, `scShadowHeadOf(deckIndex).phase`, and `scCueFeedTick`, and contains no `scShadowNextTickMs`.
+- The beta1 JP07 baseline has SHA-256 `5e49da15d0a7802dff5f868f647b20e0111cd945eb4789e462aff208d5776fda`; its legacy `/etc/sc5000/release-tag` contains `v5.3.0.5`.
+
+### Release gates
+
+Each gate ran under `flock /var/lock/enginex-heavy.lock` with a fresh work directory and `GATE_RELEASE_TAG=v5.3.0.5-r1`. Results and audits were copied into the evidence directory before each work directory was removed.
+
+| Gate | Old baseline | Exit | Results | Static audit | Engine patches | DSP guards |
+| --- | --- | ---: | --- | --- | ---: | ---: |
+| JP07 / SC5000 | published `v5.3.0.4-r5` | 0 | 176 PASS, 0 FAIL | 65 files, 0 FAIL, 9 WARN | 20 | 21 |
+| beta1 / SC5000 | published `v5.3.0.5-beta1` | 0 | 176 PASS, 0 FAIL | 65 files, 0 FAIL, 9 WARN | 20 | 21 |
+| JP13 / SC6000 | published `v5.3.0.4-r5` | 0 | 176 PASS, 0 FAIL | 65 files, 0 FAIL, 9 WARN | 20 | 21 |
+| JC11 / PRIME 4 | published `v5.3.0.4-r5` | 0 | 176 PASS, 0 FAIL | 65 files, 0 FAIL, 9 WARN | 29 | 21 |
+
+The expected sandbox `unsupported operation` line reports the absent eMMC fixture and did not fail any gate.
+
+### Real-deck verification and checklist
+
+The maintainer confirmed both rc7 fixes on two SC5000 decks using deck-push builds. The shadow phase meter followed the source alignment and phase, turned green with the source, and its lines followed the source. The paused shadow cue countdown was measured at one step per beat. Regression checklist rows 369 and 370 are covered by this dated real-deck verification. Other physical-deck rows remain pending.
+
+### SHA-256 manifest
+
+| File | SHA-256 |
+| --- | --- |
+| `MIXSTREAMPRO-5.3.0.5-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img` | `a76b3eaefdb24dab01ec70f2316c0809a6b25d281fa6c03d751437463a1f25e6` |
+| `MIXSTREAMPROGO-5.3.0.5-EngineX-OS-Numark-Mixstream-Pro-Go-NH10-Update.img` | `57b352d82f1acd36245c5e4ef77e3f5734c8e246972bf92bd51eea238d4e8c4b` |
+| `MIXSTREAMPROPLUS-5.3.0.5-EngineX-OS-Numark-Mixstream-Pro-Plus-NH08S-Update.img` | `1cba7fe16ca95803ba9caa57c45343dccbfca47696e925511a142d4a4ca94cf2` |
+| `PRIME2-5.3.0.5-EngineX-OS-Denon-PRIME-2-JC16-Update.img` | `a76b3eaefdb24dab01ec70f2316c0809a6b25d281fa6c03d751437463a1f25e6` |
+| `PRIME4-5.3.0.5-EngineX-OS-Denon-PRIME-4-JC11-Update.img` | `a76b3eaefdb24dab01ec70f2316c0809a6b25d281fa6c03d751437463a1f25e6` |
+| `PRIME4G2-5.3.0.5-EngineX-OS-Denon-PRIME-4-G2-JP24-Update.img` | `ac5cbb4bb66589ed3b2bcdc887f75013e87a0c124548cfea5dfd7790430d0ea4` |
+| `PRIME4PLUS-5.3.0.5-EngineX-OS-Denon-PRIME-4-Plus-JC11S-Update.img` | `6991b1ff199f3586d92a446e1691ff4c5e1f842a871296eec093e846d70695d5` |
+| `PRIMEGO-5.3.0.5-EngineX-OS-Denon-PRIME-GO-JP11-Update.img` | `05be05975ef00cb0185e3ff262367934c48ee90b6e5161c4ade7e459fb6a1e04` |
+| `PRIMEGOPLUS-5.3.0.5-EngineX-OS-Denon-PRIME-GO-Plus-JP11S-Update.img` | `3c4a7112e49c3af1eb551d4bd668881299e0be6ffd99e88b23c4b0d287181ecf` |
+| `SC5000-5.3.0.5-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img` | `05be05975ef00cb0185e3ff262367934c48ee90b6e5161c4ade7e459fb6a1e04` |
+| `SC5000M-5.3.0.5-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img` | `05be05975ef00cb0185e3ff262367934c48ee90b6e5161c4ade7e459fb6a1e04` |
+| `SC6000-5.3.0.5-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img` | `27df9fa5fc46ce3ccc1b0c71ae754255b51a6b249d2b029360afdc6a08a844f8` |
+| `SC6000M-5.3.0.5-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img` | `27df9fa5fc46ce3ccc1b0c71ae754255b51a6b249d2b029360afdc6a08a844f8` |
+| `SCLIVE2-5.3.0.5-EngineX-OS-Denon-SC-LIVE-2-JP20-Update.img` | `1c7d270bd8ca136bce8be84a69c15b3d3d0de05cac6c0fcfb5409c5d36bfa708` |
+| `SCLIVE4-5.3.0.5-EngineX-OS-Denon-SC-LIVE-4-JP21-Update.img` | `3fcec1b89be14e10ad3a02bf2eeeb38f01f14e3a9aec64035360980d430ea33b` |
+| `SYSTEMONE-5.3.0.5-EngineX-OS-Rane-SYSTEM-ONE-RMZ2-Update.img` | `a4af1432ccec6e512e32c0765469f84c422626df4f18b5a75a3741eeb2c747b9` |
+| `MIXSTREAMPROGO-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `3bbe6cd4236e94dd74dbad0ac272906b5d1bfc9df68e6286be00f675f1308286` |
+| `MIXSTREAMPROPLUS-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `40ed000700185212d5e5a4b3bb8d51a159bcd1ef7296030d5383dd6ab90ddd2b` |
+| `PRIME4G2-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `d207dbc79dd12336bd30c82c5d1fdd2eac5886b7524ea705e97573e55b57d547` |
+| `PRIME4PLUS-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `55bbe42ebdd11baeb823c18cd100bdcd789e7430c8d366aeaef32b168b23216c` |
+| `PRIMEGOPLUS-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `d675438a5a8c46b827c53314ce85e54a103832896b4797a6b715f2767b01873a` |
+| `SCLIVE2-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `acd8d90cf5051a17ecb40a954ac578b54ef598ae8f56f4f5fdf497db65e03e2d` |
+| `SCLIVE4-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `def34d8578ce191ad0c8b2f6915c99491e70688aa932bbb17345326715cc03fe` |
+| `SYSTEMONE-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `0cde71d401e33f7abe5c82c72e730102d67fa73f006bf3c83dfe7f732f62c623` |
+| `EngineX-Installer-5.3.0.5-linux-amd64.tar.gz` | `185d134add5ba7bac6ffee7d9c46ed20672ec028c9329056f2a800a21a32d58b` |
+| `EngineX-Installer-5.3.0.5-macos-amd64.zip` | `227b5edeec698005ed46e29358b452f737b356b8ec69d13bd67ececbd783b819` |
+| `EngineX-Installer-5.3.0.5-macos-arm64.zip` | `4cff243e1fb2b4cdec83e83e6dcae01b302670959faa2e138ae75f017214162c` |
+| `EngineX-Installer-5.3.0.5-windows-amd64.zip` | `3bf3b7aab4854fe0e3514cc9c97c0a41de5f2e0b1ad9fc75baca4a87bc71a7ca` |
