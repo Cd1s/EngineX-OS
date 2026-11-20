@@ -393,3 +393,81 @@ All three static audits reported 65 files, 0 FAIL, and 9 expected WARN. The sand
 The automated and sandbox checklist items are covered by the Phase D tests, image checks, and release gates. Rows 359, 360, and 361 are **pending real-deck run**. The RGB Link shadow overview fix is included in rc4 and row 361 records its real-deck check. The remaining real-deck items, including USB/OTA installation, physical controls and audio, CDJ-3000 and rekordbox Link, Bluetooth, HFS+ hotplug/eject, SMB playback, and native installer hardware paths, remain **pending real-deck run** unless covered by an existing dated hardware report.
 
 The rc4 output directory remains on the authorized ARM build host for maintainer review. Gate, unpack, old-image, and splash scratch directories are disposable after this evidence is committed. The step-9 post-release cleanup was not run.
+
+
+## Phase E final evidence (2026-11-20)
+
+This section is the authoritative Phase E record for build commit `1b05b8d159eff23c9698053bef780810fcb26a57`. The clean rc5 output is `/var/tmp/enginex-release-5.3.0.5-rc5` on the authorized ARM build host. It contains 28 release artifacts plus `RELEASE-TAG.txt`, `SHA256SUMS.txt`, and `SHA256SUMS.txt.sig`, for 31 files in total. Publication was intentionally not performed. No real deck or production service was touched.
+
+- **Rollback point**: tag `v5.3.0.4-r5` (`9e827205ae331d2d896d97207032556dc4202af5`)
+- **Manifest**: `SHA256SUMS.txt` has SHA-256 `ef8a6547ce9b00bbce85d18802c2e2255ad14cb16bca5e860ec4c893de2ed09b`
+- **Signature**: `SHA256SUMS.txt.sig` has SHA-256 `4f818c6b3a3850c8171b44d4d24d46e92231eab72175a723e1e44df02e55848a` and verified against the manifest
+- **Publication status**: no tag, GitHub Release, issue comment, or push to `main` was performed
+
+### Tests and build
+
+- The clean checkout was fixed at `1b05b8d159eff23c9698053bef780810fcb26a57`. `gofmt -l .` produced no output and `go vet ./...` passed.
+- The ARM `go test -race ./...` run completed every package except `pkg/bridge`, where the known slow `TestExportSelectionMTimeAndFallback` timed out after 600 seconds inside SQLCipher PBKDF2. The same test and `TestDefaultMountCompressionThroughputDelta` passed once under x86 `-race` on IN in 102.477 seconds.
+- `tests/test_rootfs_overlay.sh` passed with `bash`. The JC11S and AZ04 bootstrap sandboxes passed. `tools/az01-packer` passed 574 tests with one expected skip. `tools/stems` passed 18 tests. No az01-packer or stems test failed, so there was no such failure to compare against `28912744`.
+- The C tests passed after correcting an initial test-wrapper argument error in the callback harness. `test_stems_feature.c` passed for the 5.0.4, 5.3.0, and 5.3.0-sclive4 Engines on armhf. `test_az04_hook.c`, native and armhf `test_rt_budget.c`, native and armhf `test_rt_callback.c` including both `selftest` runs, `test_dsp_smooth.c` native plus ASan/UBSan and TSan, and native and armhf `test_edisksd_hook.c` including both `--mounts` runs all passed.
+- `build-release.sh`, `build-installer.sh`, and `sign-release.sh` ran from scratch in that order. The final signed manifest contains 29 entries and the output contains 31 files.
+
+### Image checks
+
+- The SC5000 JP07, SC6000 JP13, and PRIME 4 JC11 representative images unpacked with `verified: true`. Their embedded version and release tag are `5.3.0.5` and `v5.3.0.5`.
+- Gen-1 group SHA-256 values matched across each group. SC5000 is `0ac5f0ab702d4fe2fa8d0361939871e60a87bee2641303065f2c44324011aea7`, SC6000 is `ce4a193654e1508dff51c4a6b4c8b9bff7aefe515ce068c3063043949df982f3`, and PRIME 4 is `5aa7cbe7d297439b686c6aa82aded63cff2ad674699b924f6f35ca61519dd6f9`.
+- All three decoded Gen-1 splash images and all eight extracted Gen-2 `img/SplashScreen.png` files are `1280x800 RGB`. The Gen-2 splash SHA-256 is `e1719e47b0abca9c5cf98722649ce2dab827a10861e0d680b738a4a3750b50f0`.
+
+### Release gates
+
+Each gate used the published `v5.3.0.4-r5` representative image after its SHA-256 was checked against that release manifest.
+
+| Group | Gate directory | Exit | Results | Static audit | Engine patches | DSP guards |
+| --- | --- | ---: | --- | --- | ---: | ---: |
+| JP07 / SC5000 | `/var/tmp/enginex-gate-5305-rc5-jp07` | 0 | 176 PASS, 0 FAIL | 65 files, 0 FAIL, 9 WARN | 20 | 21 |
+| JP13 / SC6000 | `/var/tmp/enginex-gate-5305-rc5-jp13` | 0 | 176 PASS, 0 FAIL | 65 files, 0 FAIL, 9 WARN | 20 | 21 |
+| JC11 / PRIME 4 | `/var/tmp/enginex-gate-5305-rc5-jc11` | 0 | 176 PASS, 0 FAIL | 65 files, 0 FAIL, 9 WARN | 29 | 21 |
+
+The expected sandbox `unsupported operation` line reports the absent eMMC fixture and did not fail any gate.
+
+### SHA-256 manifest
+
+The table below reproduces all 28 release artifact hashes from the signed manifest. `RELEASE-TAG.txt` is included as the manifest-only entry.
+
+| File | SHA-256 |
+| --- | --- |
+| `MIXSTREAMPRO-5.3.0.5-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img` | `5aa7cbe7d297439b686c6aa82aded63cff2ad674699b924f6f35ca61519dd6f9` |
+| `MIXSTREAMPROGO-5.3.0.5-EngineX-OS-Numark-Mixstream-Pro-Go-NH10-Update.img` | `93851bd63bae8634597dd6b6326b2041545014e4de6819597c4eae2f21db5f27` |
+| `MIXSTREAMPROPLUS-5.3.0.5-EngineX-OS-Numark-Mixstream-Pro-Plus-NH08S-Update.img` | `3195803fbd99438f66ee71662df808d3e7e88022f71f699db240c2089d0a5486` |
+| `PRIME2-5.3.0.5-EngineX-OS-Denon-PRIME-2-JC16-Update.img` | `5aa7cbe7d297439b686c6aa82aded63cff2ad674699b924f6f35ca61519dd6f9` |
+| `PRIME4-5.3.0.5-EngineX-OS-Denon-PRIME-4-JC11-Update.img` | `5aa7cbe7d297439b686c6aa82aded63cff2ad674699b924f6f35ca61519dd6f9` |
+| `PRIME4G2-5.3.0.5-EngineX-OS-Denon-PRIME-4-G2-JP24-Update.img` | `16bc57b63653bca44f1d49e898147d02363f72157e33ac7d6fe0f43c16722c19` |
+| `PRIME4PLUS-5.3.0.5-EngineX-OS-Denon-PRIME-4-Plus-JC11S-Update.img` | `f31f00d1f1562a8bb59810849ee0b58f8f1bd5479b6f44e19fbd1428e2937829` |
+| `PRIMEGO-5.3.0.5-EngineX-OS-Denon-PRIME-GO-JP11-Update.img` | `0ac5f0ab702d4fe2fa8d0361939871e60a87bee2641303065f2c44324011aea7` |
+| `PRIMEGOPLUS-5.3.0.5-EngineX-OS-Denon-PRIME-GO-Plus-JP11S-Update.img` | `5625b58d57d75ef87113926b51a0455635fd4da70952cbfcb6dc9676b3fe4338` |
+| `SC5000-5.3.0.5-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img` | `0ac5f0ab702d4fe2fa8d0361939871e60a87bee2641303065f2c44324011aea7` |
+| `SC5000M-5.3.0.5-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img` | `0ac5f0ab702d4fe2fa8d0361939871e60a87bee2641303065f2c44324011aea7` |
+| `SC6000-5.3.0.5-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img` | `ce4a193654e1508dff51c4a6b4c8b9bff7aefe515ce068c3063043949df982f3` |
+| `SC6000M-5.3.0.5-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img` | `ce4a193654e1508dff51c4a6b4c8b9bff7aefe515ce068c3063043949df982f3` |
+| `SCLIVE2-5.3.0.5-EngineX-OS-Denon-SC-LIVE-2-JP20-Update.img` | `57d4364a75780fed65288f849bddf39b6b396021d5026cc04279a935b5155ef8` |
+| `SCLIVE4-5.3.0.5-EngineX-OS-Denon-SC-LIVE-4-JP21-Update.img` | `8fdeba39f6697c3901dfa4108cddbd7412e32864bda9e1bfca2443b1b1a3928e` |
+| `SYSTEMONE-5.3.0.5-EngineX-OS-Rane-SYSTEM-ONE-RMZ2-Update.img` | `7c242e0a2f103b16c1c025252eab0dca0a235a785c6a9f7a751f3534b97505ba` |
+| `MIXSTREAMPROGO-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `956dd64fd6162dcf2d2b1bcf2147f2cfa2a79324b8e32a7f056de83007a79b4f` |
+| `MIXSTREAMPROPLUS-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `6d56dade959380f86d0337aa8f26db5d6f04c651dde6cc1c8756b6c8f5ee8497` |
+| `PRIME4G2-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `b9425d07d4a9388309a98d5ed2eb9c15c33635eeed616cb1b09165e34d3dd559` |
+| `PRIME4PLUS-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `dc0e444d285b060ec42adb49296b8fddcd60ee1372a2d76f2ebe3c647b33d7e2` |
+| `PRIMEGOPLUS-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `55ad54cd82c27605cf4d41c24ebffd8ac097f952e0381894dd76f0ad0970c8ac` |
+| `SCLIVE2-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `a61a08d6c9fc45124b375e9de192ac6df0fe5d72028511ea23b28328676abfa6` |
+| `SCLIVE4-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `f16e752878fa8228da69faf22fa66cbb7ca173847373e83a56a44f90965b2189` |
+| `SYSTEMONE-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `d8a555cdbf33d6517d3849ddfdb081f964b7006f115b3ba3edea2cf7dc0c8f68` |
+| `EngineX-Installer-5.3.0.5-linux-amd64.tar.gz` | `bf126c4cf1d4609fa673e7bc53ead274d54610c76b6857b4da1052781d498fb9` |
+| `EngineX-Installer-5.3.0.5-macos-amd64.zip` | `99c225f93f8fe26a3c4b54cfd1f5d3c4aee4c3904a79eca8227677350a2cb114` |
+| `EngineX-Installer-5.3.0.5-macos-arm64.zip` | `065c2e97a21efd85f4fc6611899e068ec2eb71b2070f43d5edade525930304b6` |
+| `EngineX-Installer-5.3.0.5-windows-amd64.zip` | `04d53367fb592cfe46afd04fb65ed13850ba104513b2b9f8afbd63e225db045a` |
+| `RELEASE-TAG.txt` | `369bd4c0f3141cf1d1d0bee66890a06ffad4d8636971f5d303c240395948352e` |
+
+### REGRESSION-CHECKLIST walk and deck impact
+
+The automated and sandbox checklist items are covered by the Phase E tests, image checks, and release gates. Rows 359, 360, 361, 362, and 363 remain **pending real-deck run** for release sign-off. The remaining real-deck items, including USB and OTA installation, physical controls and audio, CDJ-3000 and rekordbox Link, Bluetooth, HFS+ hotplug and eject, SMB playback, and native installer hardware paths, also remain **pending real-deck run** unless covered by a dated hardware report.
+
+The rc5 output directory remains on the authorized ARM build host for maintainer review. Earlier release directories remain untouched. The step-9 post-release cleanup was not run.
