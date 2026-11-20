@@ -775,10 +775,43 @@ SERVICES_MAIN = """
 	property bool scHookFollows: false
 	readonly property bool scPausedShadowFollow: scHookFollows && !scOff("shadow-paused-follow")
 	property var scShadowFeedSent: ({})
+	// Bit d: Deck d is a paused copy fed a playing source. Engine moves it only at the follower's seeks, about once a
+	// second, so TrackPosition and BeatNumber step two beats at a time there: its #151 count runs on the source's line,
+	// stepped by this clock just past each beat line. No clock otherwise.
+	property int scShadowFeedPlaying: 0
+	Timer {
+		interval: 250; repeat: true
+		running: root.scShadowFeedPlaying !== 0 && root.scCueCountdown
+		onTriggered: interval = root.scCueFeedTick()
+	}
+	function scCueFeedTick() {
+		let wait = 250
+		for (let d = 1; d <= 4; d++) {
+			const t = d === 1 ? scCueTable1 : d === 2 ? scCueTable2 : d === 3 ? scCueTable3 : scCueTable4
+			const f = t ? scCueFeedLine(d) : null
+			if (!f) continue
+			scCueStep(d)
+			const bpm = t.p.bpm ? t.p.bpm.unnormalized : 0, beat = scCuePlayhead(t).beat
+			if (bpm > 0 && beat >= 0) wait = Math.min(wait, (1 - (beat - Math.floor(beat))) * t.sr * 60 / bpm / f.rate)
+		}
+		return Math.max(20, Math.min(250, Math.ceil(wait) + 12))
+	}
+	// The source's line on a paused copy: samples now and samples per ms, or null (Engine's own playhead counts).
+	function scCueFeedLine(d) {
+		const at = scPausedShadowFollow && ((scShadowEngineMask >> d) & 1) ? scShadowAt[d] : null
+		if (!at || !at.ready || !at.sourcePlaying || at.scratch || !(at.sampleRate > 0) || !(at.rate > 0) || !isFinite(at.sourceTarget)) return null
+		const el = Date.now() - at.sourceAt
+		if (!(el >= 0 && el <= 3000)) return null
+		let ms = at.sourceTarget + el * at.rate
+		if (at.loop && at.loop.out > at.loop.in && ms > at.loop.out) ms = at.loop.in + (ms - at.loop.in) % (at.loop.out - at.loop.in)
+		return {pos: ms * at.sampleRate / 1000, rate: at.rate * at.sampleRate / 1000}
+	}
 	// The source's position as stream-sync sent it (at.feedMs at its own clock's
 	// at.feedAt), not carried to now here: stream-sync dates the record by that clock, so
 	// a busy GUI thread does not move the line. Sent when it changes, and every 250 ms.
 	function scShadowFeed(d, e, at, rate) {
+		const bit = 1 << d, fed = root.scPausedShadowFollow && !!at && at.ready && at.sampleRate > 0 && isFinite(at.feedMs) && rate > 0
+		if (((scShadowFeedPlaying & bit) !== 0) !== fed) scShadowFeedPlaying ^= bit
 		if (!root.scPausedShadowFollow) return
 		const sr = at && at.ready ? at.sampleRate : 0, now = Date.now()
 		const on = sr > 0 && isFinite(at.feedMs) && isFinite(rate)
@@ -1044,33 +1077,10 @@ SERVICES_MAIN = """
 		for (let d = 1; d <= 4; d++) if (m[d] && m[d].playing && !m[d].stale) return true
 		return false
 	}
-	// Milliseconds to a countdown clock's next tick: just past the nearest coming beat
-	// of a playing shadow deck (only: that deck), on the source's grid as the count
-	// reads it, and at most cap (250 ms): a jump or a stop on the source still shows soon.
-	function scShadowNextTickMs(now, only, cap) {
-		const most = cap > 0 ? cap : 250
-		let wait = most
-		for (let d = 1; d <= 4; d++) {
-			if (only && d !== only) continue
-			const v = scShadowDisplay[d]
-			if (!v || !v.playing || v.stale || !scShadowVisible(d)) continue
-			const s = scShadowData(d), beats = s && s.meta && s.meta.beats, rate = s ? scShadowRate(s) : 0
-			if (!beats || beats.length < 2 || !(rate > 0)) continue
-			const pos = scShadowPosition(s, now)
-			const i = Math.max(0, Math.min(beats.length - 2, scShadowBeatIndex(beats, pos) - 1)), a = beats[i], b = beats[i + 1]
-			if (!(b.ms > a.ms) || !(b.number > a.number)) continue
-			const msPerBeat = (b.ms - a.ms) / (b.number - a.number), beat = a.number + (pos - a.ms) / msPerBeat
-			wait = Math.min(wait, (a.ms + (Math.floor(beat) + 1 - a.number) * msPerBeat - pos) / rate)
-		}
-		return Math.max(20, Math.min(most, Math.ceil(wait) + 12))
-	}
 	Timer {
 		interval: 200; repeat: true
 		running: root.scFourDeckRole !== "" && root.scShadowEngineMask !== 30 && root.scShadowAnyPlaying(root.scShadowDisplay)
-		onTriggered: {
-			root.scShadowFrame = (root.scShadowFrame + 1) & 0xffff
-			interval = root.scShadowNextTickMs(Date.now())
-		}
+		onTriggered: root.scShadowFrame = (root.scShadowFrame + 1) & 0xffff
 	}
 	Timer {
 		interval: 500; repeat: true; running: root.scFourDeckRole !== "" && root.scShadowEngineMask !== 30
@@ -1516,7 +1526,7 @@ SERVICES_MAIN = """
 		if (!p.play) p.play = root.scTr(p.prefix + "/PlayState")
 		// The tempo at the playhead moves only at a tempo change of the grid: read here, a tempo edit under a resting playhead counts at once.
 		if (p.bpm) void p.bpm.unnormalized
-		const t = {p: p, sr: p.sampleRate ? p.sampleRate.value || 44100 : 44100, pos: [], label: [], color: []}
+		const t = {d: d, p: p, sr: p.sampleRate ? p.sampleRate.value || 44100 : 44100, pos: [], label: [], color: []}
 		for (let i = 0; i < 8; i++) {
 			const cue = p.cues[i]
 			if (!cue.exists.state) continue
@@ -1557,6 +1567,16 @@ SERVICES_MAIN = """
 	Connections { target: root.scCueWatch(root.scCueTable2, root.scCueNoBeat & 4); function onUnnormalizedChanged() { root.scCueStep(2) } }
 	Connections { target: root.scCueWatch(root.scCueTable3, root.scCueNoBeat & 8); function onUnnormalizedChanged() { root.scCueStep(3) } }
 	Connections { target: root.scCueWatch(root.scCueTable4, root.scCueNoBeat & 16); function onUnnormalizedChanged() { root.scCueStep(4) } }
+	// The playhead the count reads: Engine's, or on a paused copy the source's line with BeatNumber (the place in the bar)
+	// carried there along the grid from Engine's last whole pair. Engine sends TrackPosition and BeatNumber as two
+	// notifications: a pair is whole once both moved (a seek of whole bars keeps BeatNumber; the old pair stays on the grid).
+	function scCuePlayhead(t) {
+		const p = t.p, pos = p.position.unnormalized || 0, beat = p.beat ? p.beat.unnormalized : -1, f = scCueFeedLine(t.d)
+		if (!t.pair || (pos !== t.pair.pos && beat !== t.pair.beat)) t.pair = {pos: pos, beat: beat}
+		if (!f) return {pos: pos, beat: beat}
+		const bpm = p.bpm ? p.bpm.unnormalized : 0, a = t.pair
+		return {pos: f.pos, beat: a.beat >= 0 && bpm > 0 ? ((a.beat + (f.pos - a.pos) * bpm / (t.sr * 60)) % 4 + 4) % 4 : a.beat}
+	}
 	// Every notification lands here. The count can only have changed if the playhead is on another beat (or came to stand on the
 	// line), passed a hot cue (hi / lo), jumped (more than two beats since the last notification: a jump of whole bars keeps
 	// BeatNumber), or the grid moved under it (its beat no longer advances with its position: Beat Grid Edit). Anything else
@@ -1564,7 +1584,7 @@ SERVICES_MAIN = """
 	function scCueStep(d) {
 		const t = d === 1 ? scCueTable1 : d === 2 ? scCueTable2 : d === 3 ? scCueTable3 : scCueTable4
 		if (t) {
-			const n = t.p.beat ? t.p.beat.unnormalized : -1, pos = t.p.position.unnormalized || 0, f = Math.floor(n)
+			const ph = scCuePlayhead(t), n = ph.beat, pos = ph.pos, f = Math.floor(n)
 			let same = (n >= 0 ? 2 * f + (n > f ? 1 : 0) : -1) === t.k && pos < t.hi && pos > t.lo && Math.abs(pos - t.at) <= t.jump
 			if (same && n >= 0) { const e = (pos - t.countAt) * t.perSample - (n - t.countBeat); same = Math.abs(e - 4 * Math.round(e / 4)) < t.margin }
 			t.at = pos
@@ -1618,9 +1638,9 @@ SERVICES_MAIN = """
 	function scCueCount(t, shown) {
 		if (!t) return null
 		const p = t.p, sr = t.sr
-		const pos = p.position.unnormalized || 0
+		const ph = scCuePlayhead(t), pos = ph.pos
 		const bpm = (p.bpm ? p.bpm.unnormalized : 0) || (p.trackBpm ? p.trackBpm.unnormalized : 0) || 0
-		const beat = p.beat ? p.beat.unnormalized : -1, line = Math.floor(beat)
+		const beat = ph.beat, line = Math.floor(beat)
 		let best = -1, bestPos = Infinity, last = -Infinity
 		for (let i = 0; i < t.pos.length; i++) {
 			const cp = t.pos[i]
@@ -6430,7 +6450,7 @@ SHADOW_LAYER = r"""
         onSpanChanged: { gridAnchor = -Infinity; restartScroll(); refreshDetails() }
         // The stale cut-off and the grid window still need a clock between replies.
         // A resting or stale sample does not move: its refreshes come with the sample.
-        Timer { interval: 200; repeat: true; running: scDisplay.live && scDisplay.visible && scDisplay.sample !== null && scDisplay.sample.playing && !scDisplay.sample.stale; onTriggered: { scDisplay.refreshPosition(true); scDisplay.refreshDetails(); interval = root.scShadowNextTickMs(Date.now(), scDisplay.deck, 200) } }
+        Timer { interval: 200; repeat: true; running: scDisplay.live && scDisplay.visible && scDisplay.sample !== null && scDisplay.sample.playing && !scDisplay.sample.stale; onTriggered: { scDisplay.refreshPosition(true); scDisplay.refreshDetails() } }
         readonly property real duration: metaDuration(meta)
         readonly property real waveformDuration: metaWaveDuration(meta)
         readonly property real pitchRate: wave && sample ? Math.max(0.05, 1 + (Number(sample.pitch) || 0) / 100) : 1
