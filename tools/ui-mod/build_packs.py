@@ -2122,6 +2122,7 @@ SERVICES_MAIN = """
 			// The phase meter as this deck's header shows it: the peer's shadow header turns green with it (its copy is out of Sync).
 			const pm = scPhaseMeterOf(d)
 			o.phaseMeter = !!pm && !!pm.enabled; o.phaseActive = !!pm && !!pm.active; o.aligned = !!pm && !!pm.isAligned
+			o.phase = o.aligned || !pm ? 0 : Math.round((Number(pm.phaseOffset) || 0) * 50) / 50
 			o.active = d === scShadowActiveDeck // on this unit's active layer (#201)
 			o.range = s.range; o.keylock = s.keylock // the peer's shadow deck shows the same range and key lock
 			o.service = s.net && root.scOwnService ? root.scOwnService(d) : "" // #305: the peer's shadow header shows this track's service mark
@@ -2161,7 +2162,8 @@ SERVICES_MAIN = """
 			if (!onLine || sent.cue !== o.cue || sent.master !== o.master || sent.masterPress !== o.masterPress || sent.lead !== o.lead || sent.sync !== o.sync || sent.cuePos !== o.cuePos ||
 				sent.title !== o.title || sent.artist !== o.artist || sent.keyName !== o.keyName || sent.durationMs !== o.durationMs || sent.link !== o.link || sent.bpm !== o.bpm || sent.currentBpm !== o.currentBpm || sent.range !== o.range || sent.keylock !== o.keylock || sent.service !== o.service || sent.cuesRev !== cc.rev || sent.active !== o.active ||
 				sent.loop !== o.loop || sent.loopIn !== o.loopIn || sent.loopOut !== o.loopOut || sent.keyOffset !== o.keyOffset || sent.stems !== o.stems || sent.slip !== o.slip ||
-				sent.aligned !== o.aligned || sent.phaseActive !== o.phaseActive || sent.phaseMeter !== o.phaseMeter) edge = true // slip's timeline runs on: in full at every heartbeat while it is active
+				sent.aligned !== o.aligned || sent.phaseActive !== o.phaseActive || sent.phaseMeter !== o.phaseMeter ||
+				(sent.phase !== o.phase && now - scShadowPostAt >= 100)) edge = true // slip's timeline runs on: in full at every heartbeat while it is active
 		}
 		scShadowPostAt = now; scShadowPostPending = false
 		// Nothing the peer shows changed: ping instead of serialising the decks again
@@ -2176,7 +2178,7 @@ SERVICES_MAIN = """
 			sent.deck = o.deck; sent.net = o.net; sent.playing = o.playing; sent.cue = o.cue; sent.scratch = o.scratch; sent.jumps = o.jumps; sent.pitch = o.pitch
 			sent.master = o.master; sent.masterPress = o.masterPress; sent.lead = o.lead; sent.sync = o.sync; sent.cuePos = o.cuePos; sent.title = o.title; sent.artist = o.artist; sent.keyName = o.keyName; sent.durationMs = o.durationMs
 			sent.link = o.link; sent.bpm = o.bpm; sent.currentBpm = o.currentBpm; sent.range = o.range; sent.keylock = o.keylock; sent.service = o.service; sent.loop = o.loop; sent.loopIn = o.loopIn; sent.loopOut = o.loopOut; sent.keyOffset = o.keyOffset; sent.stems = o.stems; sent.slip = o.slip; sent.cuesRev = scShadowCueCache[o.deck].rev; sent.positionMs = o.positionMs; sent.at = o.at; sent.active = o.active
-			sent.aligned = o.aligned; sent.phaseActive = o.phaseActive; sent.phaseMeter = o.phaseMeter
+			sent.aligned = o.aligned; sent.phaseActive = o.phaseActive; sent.phaseMeter = o.phaseMeter; sent.phase = o.phase
 		}
 		scShadowSent.length = own.length
 		scShadowFullAt = now; scShadowPostFull = false
@@ -2293,7 +2295,7 @@ SERVICES_MAIN = """
 				const h = head[d] = {master: typeof e.lead === "boolean" ? e.lead : e.master, sync: !!e.sync, title: e.title || "", artist: e.artist || "", keyName: e.keyName || "",
 					loop: !!e.loop, keyOffset: e.keyOffset || 0, stems: !!e.stems, slip: e.slip || 0, service: e.service || ""}
 				// The source's phase meter; a CDJ or an older sender sends none and the copy's own stays.
-				if (typeof e.aligned === "boolean") { h.aligned = e.aligned; h.phaseActive = !!e.phaseActive; h.phaseMeter = !!e.phaseMeter }
+				if (typeof e.aligned === "boolean") { h.aligned = e.aligned; h.phaseActive = !!e.phaseActive; h.phaseMeter = !!e.phaseMeter; h.phase = Number(e.phase) || 0 }
 			}
 			// The last track is still on the deck (the next one's copy on its way, the peer gone): its
 			// header stays until it is unloaded. Without it the header read the copy's file name and key.
@@ -9149,9 +9151,9 @@ def edits(dev: bool):
              "    readonly property bool isAligned: " + head("deckIndex", "aligned", "controller.isAligned") + "\n"),
             ("    readonly property bool isActive: controller.active\n",
              "    readonly property bool isActive: " + head("deckIndex", "phaseActive", "controller.active") + "\n"),
-            # Aligned at the source: its phase lines sit at 0. The copy's own offset jitters as it follows (lines jumped on green).
+            # The source's phase: the copy's own offset jumps as the copy follows (lines jumped on green, needle wild off it).
             ("        value: controller.phaseOffset\n",
-             "        value: " + head("deckIndex", "aligned", "false") + " ? 0 : controller.phaseOffset\n")]
+             '        value: typeof root !== "undefined" && root && root.scShadowHeadOf && typeof root.scShadowHeadOf(deckIndex).phase === "number" ? root.scShadowHeadOf(deckIndex).phase : controller.phaseOffset\n')]
         scaled[bj + "Deck/DeckItem/BpmInfo.qml"] = [
             ("    readonly property bool syncEnabled: deckController && deckController.syncInfoViewController.syncEnabled\n",
              "    readonly property bool syncEnabled: " + head("deckIndex", "sync", "deckController && deckController.syncInfoViewController.syncEnabled") + "\n"),

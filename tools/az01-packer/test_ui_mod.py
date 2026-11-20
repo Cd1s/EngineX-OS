@@ -6769,18 +6769,18 @@ controller.isAligned = controller.active = controller.enabled = true;
 assert.equal(result(), true);
 """.replace('EXPRESSION', expression))
 
-    def test_an_aligned_shadow_phase_meter_holds_its_lines_at_zero(self):
-        """The copy follows the source, so its own phase offset jitters: the lines jumped on the green bar (2026-11-20)."""
+    def test_a_shadow_phase_meter_draws_the_sources_phase(self):
+        """The copy follows the source, so its own phase offset jumps: lines jumped on green and the needle ran wild off it (2026-11-20)."""
         bp.ROOT = 'Skins/Embedded/'
         replacement = next(new for old, new in bp.edits(False)['Skins/Embedded/Views/MainView/PhaseMeter.qml'] if 'value:' in new)
         ShadowDisplayTest.js(self, r"""
 globalThis.deckIndex = 2;
 globalThis.controller = {phaseOffset: 0.31};
-let source = {aligned: true};
+let source = {aligned: true, phase: 0};
 globalThis.scShadowHeadOf = () => source;
 const value = () => (EXPRESSION);
-assert.equal(value(), 0, 'aligned at the source: no offset drawn');
-source = {aligned: false}; assert.equal(value(), 0.31, 'not aligned: the offset as before');
+assert.equal(value(), 0, 'aligned at the source: its lines at 0');
+source = {aligned: false, phase: -0.18}; assert.equal(value(), -0.18, 'off the lead: the source needle, not the copy');
 source = {}; assert.equal(value(), 0.31, 'an older sender or a local deck: Engine own');
 """.replace('EXPRESSION', replacement.split('value:', 1)[1].strip()))
 
@@ -6799,6 +6799,8 @@ assert.strictEqual(scShadowHead[2].aligned, false, 'losing the alignment reaches
         self.assertIn("o.aligned = !!pm && !!pm.isAligned", SRC)  # the source posts its own meter
         self.assertIn("sent.aligned !== o.aligned", SRC)  # at once when only that changes
         self.assertIn("sent.aligned = o.aligned;", SRC)
+        self.assertIn("o.phase = o.aligned || !pm ? 0 : Math.round((Number(pm.phaseOffset) || 0) * 50) / 50", SRC)
+        self.assertIn("(sent.phase !== o.phase && now - scShadowPostAt >= 100)", SRC)  # at most 10 phase-only posts a second
 
 
 @unittest.skipUnless(shutil.which("node"), "node needed for the shadow-deck behavioral checks")

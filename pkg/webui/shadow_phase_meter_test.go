@@ -11,7 +11,7 @@ import (
 // with its source (the copy is out of Sync, so Engine never aligns it there).
 func TestShadowPhaseMeterRidesThePeerPicture(t *testing.T) {
 	var d deckState
-	if err := json.Unmarshal([]byte(`{"deck":2,"playing":false,"positionMs":1000,"aligned":true,"phaseActive":true,"phaseMeter":true}`), &d); err != nil {
+	if err := json.Unmarshal([]byte(`{"deck":2,"playing":false,"positionMs":1000,"aligned":true,"phaseActive":true,"phaseMeter":true,"phase":0.24}`), &d); err != nil {
 		t.Fatal(err)
 	}
 	if d.Aligned == nil || !*d.Aligned || d.PhaseActive == nil || !*d.PhaseActive || d.PhaseMeter == nil || !*d.PhaseMeter {
@@ -21,7 +21,7 @@ func TestShadowPhaseMeterRidesThePeerPicture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range []string{`"aligned":true`, `"phaseActive":true`, `"phaseMeter":true`} {
+	for _, k := range []string{`"aligned":true`, `"phaseActive":true`, `"phaseMeter":true`, `"phase":0.24`} {
 		if !strings.Contains(string(out), k) {
 			t.Fatalf("%s missing on the way out: %s", k, out)
 		}
@@ -36,6 +36,7 @@ func TestShadowPhaseMeterRidesThePeerPicture(t *testing.T) {
 		"aligned":     func(n *deckState) { n.Aligned = &f },
 		"phaseActive": func(n *deckState) { n.PhaseActive = &f },
 		"phaseMeter":  func(n *deckState) { n.PhaseMeter = &f },
+		"phase":       func(n *deckState) { n.Phase = -0.1 },
 	} {
 		n := d
 		change(&n)
