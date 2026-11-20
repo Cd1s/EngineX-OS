@@ -2373,11 +2373,18 @@ rate = 1; scShadowDisplay = {2: {playing: false}}; assert.equal(scShadowNextTick
 scShadowDisplay = {2: {playing: true, stale: true}}; assert.equal(scShadowNextTickMs(now), 250, 'a stale sample');
 scShadowDisplay = {2: {playing: true}}; scShadowVisible = () => false; assert.equal(scShadowNextTickMs(now), 250, 'not on screen');
 scShadowVisible = d => d === 2; scShadowData = () => ({meta: {beats: []}}); assert.equal(scShadowNextTickMs(now), 250, 'no grid');
+// One view's clock: its own deck only, never slower than its 200 ms position refresh.
+scShadowData = d => d === 2 ? {meta: {beats: beats}} : null; pos = 490;
+assert.equal(scShadowNextTickMs(now, 2, 200), 22);
+assert.equal(scShadowNextTickMs(now, 3, 200), 200, 'another deck is not this view');
+pos = 600; assert.equal(scShadowNextTickMs(now, 2, 200), 200);
 """)
         timer = re.search(r"\tTimer \{\n\t\tinterval: 200; repeat: true\n\t\trunning: root\.scFourDeckRole !== \"\" && root\.scShadowEngineMask !== 30 && "
                           r"root\.scShadowAnyPlaying\(root\.scShadowDisplay\)\n\t\tonTriggered: \{(.*?)\n\t\t\}\n\t\}", bp.SERVICES_MAIN, re.S)
         self.assertIsNotNone(timer, "the shadow countdown clock")
         self.assertIn("interval = root.scShadowNextTickMs(Date.now())", timer.group(1))
+        # The shadow header's countdown (scDisplay.cueInfo) refreshes from each view's own clock (2026-11-20, second report).
+        self.assertIn("scDisplay.refreshDetails(); interval = root.scShadowNextTickMs(Date.now(), scDisplay.deck, 200) } }", bp.SERVICES_MAIN + SRC)
 
     def test_same_track_line_state_changes_are_applied(self):
         self.js(r"""
@@ -6762,6 +6769,21 @@ controller.isAligned = controller.active = controller.enabled = true;
 assert.equal(result(), true);
 """.replace('EXPRESSION', expression))
 
+    def test_an_aligned_shadow_phase_meter_holds_its_lines_at_zero(self):
+        """The copy follows the source, so its own phase offset jitters: the lines jumped on the green bar (2026-11-20)."""
+        bp.ROOT = 'Skins/Embedded/'
+        replacement = next(new for old, new in bp.edits(False)['Skins/Embedded/Views/MainView/PhaseMeter.qml'] if 'value:' in new)
+        ShadowDisplayTest.js(self, r"""
+globalThis.deckIndex = 2;
+globalThis.controller = {phaseOffset: 0.31};
+let source = {aligned: true};
+globalThis.scShadowHeadOf = () => source;
+const value = () => (EXPRESSION);
+assert.equal(value(), 0, 'aligned at the source: no offset drawn');
+source = {aligned: false}; assert.equal(value(), 0.31, 'not aligned: the offset as before');
+source = {}; assert.equal(value(), 0.31, 'an older sender or a local deck: Engine own');
+""".replace('EXPRESSION', replacement.split('value:', 1)[1].strip()))
+
     def test_the_shadow_header_carries_the_sources_phase_meter(self):
         ShadowDisplayTest.js(self, r"""
 Object.assign(globalThis, {scShadowApply() {}, scShadowEmpty() {}});
@@ -9221,7 +9243,7 @@ assert.equal(scSlotIcon('TIDAL', 1), 'file:///data/enginex/ui/icons/spotify.png'
         self.assertIn('o.service = s.net && root.scOwnService ? root.scOwnService(d) : ""', src)
         self.assertIn("sent.service !== o.service", src)
         self.assertIn("sent.service = o.service", src)
-        self.assertIn('slip: e.slip || 0, service: e.service || "",', src)  # the shadow header's fields carry the service
+        self.assertIn('service: e.service || ""}', src)
         for rel in self.ROOTS[:2]:
             self.assertIn('isStreamingTrack || scMark !== ""', self.patched(rel), rel)
 

@@ -1044,12 +1044,14 @@ SERVICES_MAIN = """
 		for (let d = 1; d <= 4; d++) if (m[d] && m[d].playing && !m[d].stale) return true
 		return false
 	}
-	// Milliseconds to the clock's next tick: just past the nearest coming beat of a
-	// playing shadow deck (on the source's grid, as the count reads it), at most
-	// 250 ms (a jump or a stop on the source still shows soon).
-	function scShadowNextTickMs(now) {
-		let wait = 250
+	// Milliseconds to a countdown clock's next tick: just past the nearest coming beat
+	// of a playing shadow deck (only: that deck), on the source's grid as the count
+	// reads it, and at most cap (250 ms): a jump or a stop on the source still shows soon.
+	function scShadowNextTickMs(now, only, cap) {
+		const most = cap > 0 ? cap : 250
+		let wait = most
 		for (let d = 1; d <= 4; d++) {
+			if (only && d !== only) continue
 			const v = scShadowDisplay[d]
 			if (!v || !v.playing || v.stale || !scShadowVisible(d)) continue
 			const s = scShadowData(d), beats = s && s.meta && s.meta.beats, rate = s ? scShadowRate(s) : 0
@@ -1060,7 +1062,7 @@ SERVICES_MAIN = """
 			const msPerBeat = (b.ms - a.ms) / (b.number - a.number), beat = a.number + (pos - a.ms) / msPerBeat
 			wait = Math.min(wait, (a.ms + (Math.floor(beat) + 1 - a.number) * msPerBeat - pos) / rate)
 		}
-		return Math.max(20, Math.min(250, Math.ceil(wait) + 12))
+		return Math.max(20, Math.min(most, Math.ceil(wait) + 12))
 	}
 	Timer {
 		interval: 200; repeat: true
@@ -2287,9 +2289,12 @@ SERVICES_MAIN = """
 		if (!scShadowDisplayOnly) for (const d of [1, 2, 3, 4]) {
 			if (scFourDeckRole.indexOf(String(d)) >= 0) continue
 			const e = decks.find(x => x.deck === d)
-			if (e && e.path) head[d] = {master: typeof e.lead === "boolean" ? e.lead : e.master, sync: !!e.sync, title: e.title || "", artist: e.artist || "", keyName: e.keyName || "",
-				loop: !!e.loop, keyOffset: e.keyOffset || 0, stems: !!e.stems, slip: e.slip || 0, service: e.service || "",
-				aligned: e.aligned, phaseActive: e.phaseActive, phaseMeter: e.phaseMeter}
+			if (e && e.path) {
+				const h = head[d] = {master: typeof e.lead === "boolean" ? e.lead : e.master, sync: !!e.sync, title: e.title || "", artist: e.artist || "", keyName: e.keyName || "",
+					loop: !!e.loop, keyOffset: e.keyOffset || 0, stems: !!e.stems, slip: e.slip || 0, service: e.service || ""}
+				// The source's phase meter; a CDJ or an older sender sends none and the copy's own stays.
+				if (typeof e.aligned === "boolean") { h.aligned = e.aligned; h.phaseActive = !!e.phaseActive; h.phaseMeter = !!e.phaseMeter }
+			}
 			// The last track is still on the deck (the next one's copy on its way, the peer gone): its
 			// header stays until it is unloaded. Without it the header read the copy's file name and key.
 			else if (scShadowHead[d] && (scShadowAt[d] || {}).path) head[d] = scShadowHead[d]
@@ -6423,7 +6428,7 @@ SHADOW_LAYER = r"""
         onSpanChanged: { gridAnchor = -Infinity; restartScroll(); refreshDetails() }
         // The stale cut-off and the grid window still need a clock between replies.
         // A resting or stale sample does not move: its refreshes come with the sample.
-        Timer { interval: 200; repeat: true; running: scDisplay.live && scDisplay.visible && scDisplay.sample !== null && scDisplay.sample.playing && !scDisplay.sample.stale; onTriggered: { scDisplay.refreshPosition(true); scDisplay.refreshDetails() } }
+        Timer { interval: 200; repeat: true; running: scDisplay.live && scDisplay.visible && scDisplay.sample !== null && scDisplay.sample.playing && !scDisplay.sample.stale; onTriggered: { scDisplay.refreshPosition(true); scDisplay.refreshDetails(); interval = root.scShadowNextTickMs(Date.now(), scDisplay.deck, 200) } }
         readonly property real duration: metaDuration(meta)
         readonly property real waveformDuration: metaWaveDuration(meta)
         readonly property real pitchRate: wave && sample ? Math.max(0.05, 1 + (Number(sample.pitch) || 0) / 100) : 1
@@ -9143,7 +9148,10 @@ def edits(dev: bool):
             ("    readonly property bool isAligned: controller.isAligned\n",
              "    readonly property bool isAligned: " + head("deckIndex", "aligned", "controller.isAligned") + "\n"),
             ("    readonly property bool isActive: controller.active\n",
-             "    readonly property bool isActive: " + head("deckIndex", "phaseActive", "controller.active") + "\n")]
+             "    readonly property bool isActive: " + head("deckIndex", "phaseActive", "controller.active") + "\n"),
+            # Aligned at the source: its phase lines sit at 0. The copy's own offset jitters as it follows (lines jumped on green).
+            ("        value: controller.phaseOffset\n",
+             "        value: " + head("deckIndex", "aligned", "false") + " ? 0 : controller.phaseOffset\n")]
         scaled[bj + "Deck/DeckItem/BpmInfo.qml"] = [
             ("    readonly property bool syncEnabled: deckController && deckController.syncInfoViewController.syncEnabled\n",
              "    readonly property bool syncEnabled: " + head("deckIndex", "sync", "deckController && deckController.syncInfoViewController.syncEnabled") + "\n"),
