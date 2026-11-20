@@ -36,6 +36,12 @@ Custom system built on the official Engine OS 5.3.0+ base for all 16 Denon DJ, N
 - **Streaming & Apple Music**: keeps streaming signed in when using an Engine DJ profile (#304), shows the active streaming service icon and name in the deck header and `Track Info → Source` (#305), preserves sign-out state on Apple Music, and prevents TIDAL/Spotify row interference.
 - **Hardware, network & settings**: disables Wi-Fi power saving on all decks at boot (#309), persists 2nd-gen root SSH passwords across reboots (#299), uses standard high-quality SBC bitpool on Bluetooth speakers, restores `Shift + View` on controllers, and asks before USB profile import (#234).
 - **Start-up single-drive browse**: automatically browses a deck's only local drive at start-up on all 16 models—including late-mounting drives—instead of stopping on the Sources list. Thanks to @sklempert (#315).
+- **PRIME 4 G2 firmware-update USB mode**: supports the `15e4:d014` USB identity in Firmware Update Mode (#311).
+- **Clean Pro DJ Link stick eject**: releases the export root and blocks new reads after the first eject attempt, so a stick ejects without repeated `target is busy` failures.
+- **Streamed-track BPM and grid**: the loaded track shows Engine's analysed BPM and grid once loaded; the provider's tempo remains only in the list label.
+- **Copy BPM follows the source**: a streamed shadow copy refreshes a stale cached BPM and shows the source BPM.
+- **Shadow streaming icon**: a streamed shadow copy keeps the source service icon in its header.
+- **Streaming scope stays selected**: boot and an unavailable service cannot rewrite the selected source; it changes only when the DJ picks an enabled, signed-in service.
 - **Hot Cue and rekordbox shadow edit retention**: preserves deck-set Hot Cues when a capped BridgeAnalysis database prunes the analysis row, and refreshes the shadow copy when PerfGen changes after a rekordbox edit.
 - **Deezer OmniSource isolation**: keeps drives and other local sources visible in Deezer's OmniSource view while excluding playlists owned by other streaming services.
 - **RGB mini-overviews for shadow copies and rebuilt sticks**: removes stale per-track RGB overview files before Engine starts, serves the source deck's Engine-built RGB overview, and lets shadow copies render the same colours.
