@@ -483,6 +483,10 @@ var fourDeckBoards = map[string]bool{
 	"PRIME4": true, "PRIME4PLUS": true, "SCLIVE4": true, "PRIME4G2": true,
 }
 
+// consoleLineBoards are the all-in-ones that can show a linked unit on a channel set to
+// Line / AUX (console_line_view, console linking stage 1): PRIME 4, PRIME 4+, SC LIVE 4, PRIME 4 G2.
+var consoleLineBoards = map[string]bool{"PRIME4": true, "PRIME4PLUS": true, "SCLIVE4": true, "PRIME4G2": true}
+
 // mixstreamBoards are the compact 4-pad Numark Mixstream consoles (hasNHFx, no AutoLoop knob; #166).
 var mixstreamBoards = map[string]bool{"MIXSTREAMPRO": true, "MIXSTREAMPROPLUS": true, "MIXSTREAMPROGO": true}
 

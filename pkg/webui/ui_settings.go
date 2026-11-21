@@ -235,6 +235,11 @@ type uiSettings struct {
 	// deck (its layer followed). Needs FourDeckWaveform: setting it turns that on,
 	// turning that off clears it.
 	PairedView bool `json:"pairedView"`
+	// ConsoleLineView (console linking, stage 1): on PRIME 4, PRIME 4+, SC LIVE 4 and PRIME 4 G2 a linked
+	// player or CDJ is shown on a mixer channel while that channel's input is Line / AUX. Display only:
+	// nothing is loaded, no deck is taken, FourDeckWaveform and the 4-deck role stay ignored on a console.
+	// Off by default, honoured on those four boards only, never copied between units.
+	ConsoleLineView bool `json:"consoleLineView"`
 	// DebugTelemetry logs every shadow deck update and decision (shadow_debug.go).
 	// Development only: off by default, and nothing in the image turns it on.
 	DebugTelemetry bool `json:"debugTelemetry"`
@@ -447,6 +452,8 @@ func (s *Server) loadUI() uiSettings {
 			}
 		case "paired_view":
 			v.PairedView = val == "1"
+		case "console_line_view":
+			v.ConsoleLineView = val == "1"
 		case "four_deck_waveform":
 			if val == "1" || strings.EqualFold(val, "true") {
 				v.FourDeckWaveform = true
@@ -570,6 +577,9 @@ func (s *Server) loadUI() uiSettings {
 	if !v.FourDeckWaveform {
 		v.PairedView = false // #201: the paired view is a view of the 4-deck layout; a stray key alone is not it
 	}
+	if v.ConsoleLineView && !consoleLineBoards[imagePrefix(deviceCompatible())] {
+		v.ConsoleLineView = false // a stored or copied value means nothing on any other board
+	}
 	if slices.Contains(uiServices, v.Scope) && !slices.Contains(v.Sources, v.Scope) {
 		v.Scope = ""
 	}
@@ -626,6 +636,9 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	}
 	if v.ShadowMode != "auto" {
 		text += "shadow_mode=" + v.ShadowMode + "\n"
+	}
+	if v.ConsoleLineView {
+		text += "console_line_view=1\n"
 	}
 	if v.FourDeckRole != "auto" {
 		text += "four_deck_role=" + v.FourDeckRole + "\n"
@@ -1153,6 +1166,15 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		if !b {
 			v.PairedView = false // the paired view is a view of the 4-deck layout
 		}
+	}
+	if q.Has("consoleLineView") {
+		b, ok := parseBoolParam(q.Get("consoleLineView"))
+		if !ok {
+			s.uiMu.Unlock()
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+		v.ConsoleLineView = b && consoleLineBoards[imagePrefix(deviceCompatible())]
 	}
 	if q.Has("pairedView") {
 		b, ok := parseBoolParam(q.Get("pairedView"))

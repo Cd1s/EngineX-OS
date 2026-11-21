@@ -174,6 +174,35 @@ func placeDisplayPeers(peers map[int]peerDeck, role string, now time.Time) map[i
 	return placed
 }
 
+// peerDisplayDeck is one EngineX peer's deck on the display path, placed on deck, and the entry
+// its picture comes from (nil until that is ready). No file, no copy, nothing for Engine to load.
+func (s *Server) peerDisplayDeck(p peerDeck, deck int, now time.Time) (deckState, *shadowDisplayEntry) {
+	p = s.localPeerTrack(p, now)
+	d := p.deckState
+	d.Deck, d.Key = deck, displayTrackKey(p)
+	d.LineIn = false
+	d.Stale = p.Stale || now.Sub(p.at) >= 2*time.Second
+	if d.Playing && !p.Scratch {
+		if !p.Stale {
+			d.PositionMS, d.Rate = p.carried(min(2*time.Second, max(0, now.Sub(p.at))))
+		}
+	}
+	d.Path, d.Ext, d.Net = "", "", ""
+	d.DisplayOnly = true
+	d.Progress, d.Error = 0, ""
+	d.At = now.UnixMilli()
+	var e *shadowDisplayEntry
+	if p.Key != "" {
+		e = s.ensureShadowDisplay(p, now)
+		d.Loading = e == nil
+		d.DisplayDetail = e != nil && e.asset != nil && !e.asset.DetailPending
+		if e != nil && e.asset != nil && e.asset.DetailPending {
+			d.Progress = e.asset.DetailProgress // as of the last re-read, every 2 s
+		}
+	}
+	return d, e
+}
+
 // shadowComposeDisplay has no file resolver, download, EXPF or Engine control
 // path. Even a locally accessible peer file must not load into Engine.
 func (s *Server) shadowComposeDisplay(role string, now time.Time, lines ...[]int) []deckState {
@@ -208,28 +237,8 @@ func (s *Server) shadowComposeDisplay(role string, now time.Time, lines ...[]int
 			free = append(free, deck)
 			continue
 		}
-		p = s.localPeerTrack(p, now)
-		d := p.deckState
-		d.Deck, d.Key = deck, displayTrackKey(p)
-		d.LineIn = false
-		d.Stale = p.Stale || now.Sub(p.at) >= 2*time.Second
-		if d.Playing && !p.Scratch {
-			if !p.Stale {
-				d.PositionMS, d.Rate = p.carried(min(2*time.Second, max(0, now.Sub(p.at))))
-			}
-		}
-		d.Path, d.Ext, d.Net = "", "", ""
-		d.DisplayOnly = true
-		d.Progress, d.Error = 0, ""
-		d.At = now.UnixMilli()
-		if p.Key != "" {
-			e := s.ensureShadowDisplay(p, now)
-			d.Loading = e == nil
-			d.DisplayDetail = e != nil && e.asset != nil && !e.asset.DetailPending
-			if e != nil && e.asset != nil && e.asset.DetailPending {
-				d.Progress = e.asset.DetailProgress // as of the last re-read, every 2 s
-			}
-		}
+		d, _ := s.peerDisplayDeck(p, deck, now)
+		d.Player, d.Model = 0, "" // only a console's Line In lane uses them
 		out = append(out, d)
 	}
 	if len(consoleLines) > 0 {
@@ -249,7 +258,6 @@ func (s *Server) shadowComposeDisplay(role string, now time.Time, lines ...[]int
 // (lineIn: the decks are the console's Line In channels). Only cached
 // rekordbox analysis is used here, never shadowFetchCDJ/audio.
 func (s *Server) shadowDisplayCDJs(free []int, lineIn bool, now time.Time, only map[int]string) []deckState {
-	sh := s.shadow
 	devices := s.mergedDevices()
 	var lineFree []int
 	if lineIn {
@@ -261,38 +269,47 @@ func (s *Server) shadowDisplayCDJs(free []int, lineIn bool, now time.Time, only 
 		if only != nil && !ok {
 			continue
 		}
-		d := deckState{Deck: deck, DisplayOnly: true, LineIn: lineIn, Fallback: why, Title: dev.Title, Artist: dev.Artist, DurationMS: float64(dev.DurationMS), MetadataOnly: true, Playing: dev.Playing, PositionMS: float64(dev.PlayPositionMS), Pitch: dev.Pitch, Master: new(dev.Master), Lead: new(dev.Master), Sync: dev.Sync, BPM: dev.BPM, At: now.UnixMilli()}
-		if dev.TrackID != 0 {
-			host := net.ParseIP(dev.Address)
-			if dev.SourcePlayer != dev.Number {
-				host = sourceHost(prolink.ExportStatus{}, devices, dev.SourcePlayer)
-			}
-			version := ""
-			if s.loadUI().ProlinkShare && s.prolinkExport != nil {
-				version = s.prolinkExport.DisplayMediaCache().MediaIdentity(dev, host)
-			}
-			d.Key = fmt.Sprintf("cdj:%s:%d:%d:%d:%s", host, dev.SourcePlayer, dev.SourceSlot, dev.TrackID, version)
-			slot := s.ensureCDJDisplay(dev, host, d.Key, version, now)
-			d.MetadataOnly = slot == nil
-			if slot != nil && slot.asset != nil {
-				if d.DurationMS == 0 && slot.asset.DurationMS > 0 {
-					d.DurationMS = slot.asset.DurationMS
-				}
-				if d.KeyName == "" && slot.asset.KeyName != "" {
-					d.KeyName = slot.asset.KeyName
-				}
-				if d.BPM == 0 && slot.asset.BPM > 0 {
-					d.BPM = slot.asset.BPM
-				}
-			}
-		}
-		sh.mu.Lock()
-		d.PositionMS, d.Playing = sh.cdjPlayhead(dev, d.Playing, d.Pitch, now)
-		d.Scratch = sh.cdj[dev.Number].scratch
-		sh.mu.Unlock()
+		d, _ := s.cdjDisplayDeck(dev, deck, lineIn, why, devices, now)
 		out = append(out, d)
 	}
 	return out
+}
+
+// cdjDisplayDeck is one CDJ's state on the display path, shown on deck, and the entry its picture
+// comes from (nil without cached analysis). Only cached rekordbox analysis, never audio.
+func (s *Server) cdjDisplayDeck(dev prolink.Device, deck int, lineIn bool, why string, devices []prolink.Device, now time.Time) (deckState, *shadowDisplayEntry) {
+	sh := s.shadow
+	var slot *shadowDisplayEntry
+	d := deckState{Deck: deck, DisplayOnly: true, LineIn: lineIn, Fallback: why, Title: dev.Title, Artist: dev.Artist, DurationMS: float64(dev.DurationMS), MetadataOnly: true, Playing: dev.Playing, PositionMS: float64(dev.PlayPositionMS), Pitch: dev.Pitch, Master: new(dev.Master), Lead: new(dev.Master), Sync: dev.Sync, BPM: dev.BPM, At: now.UnixMilli()}
+	if dev.TrackID != 0 {
+		host := net.ParseIP(dev.Address)
+		if dev.SourcePlayer != dev.Number {
+			host = sourceHost(prolink.ExportStatus{}, devices, dev.SourcePlayer)
+		}
+		version := ""
+		if s.loadUI().ProlinkShare && s.prolinkExport != nil {
+			version = s.prolinkExport.DisplayMediaCache().MediaIdentity(dev, host)
+		}
+		d.Key = fmt.Sprintf("cdj:%s:%d:%d:%d:%s", host, dev.SourcePlayer, dev.SourceSlot, dev.TrackID, version)
+		slot = s.ensureCDJDisplay(dev, host, d.Key, version, now)
+		d.MetadataOnly = slot == nil
+		if slot != nil && slot.asset != nil {
+			if d.DurationMS == 0 && slot.asset.DurationMS > 0 {
+				d.DurationMS = slot.asset.DurationMS
+			}
+			if d.KeyName == "" && slot.asset.KeyName != "" {
+				d.KeyName = slot.asset.KeyName
+			}
+			if d.BPM == 0 && slot.asset.BPM > 0 {
+				d.BPM = slot.asset.BPM
+			}
+		}
+	}
+	sh.mu.Lock()
+	d.PositionMS, d.Playing = sh.cdjPlayhead(dev, d.Playing, d.Pitch, now)
+	d.Scratch = sh.cdj[dev.Number].scratch
+	sh.mu.Unlock()
+	return d, slot
 }
 
 func (s *Server) ensureCDJDisplay(dev prolink.Device, host net.IP, key, version string, now time.Time) *shadowDisplayEntry {
@@ -973,6 +990,17 @@ func (s *Server) currentShadowDisplay(r *http.Request) (*shadowDisplayEntry, dec
 	s.uiMu.Lock()
 	v := s.loadUI()
 	s.uiMu.Unlock()
+	if v.ConsoleLineView { // the Line In view: the lane on this channel, by the same mapping the answer used
+		s.shadow.mu.Lock()
+		lines := slices.Clone(s.shadow.lines)
+		s.shadow.mu.Unlock()
+		for _, l := range s.consoleLineLanes(time.Now(), lines) {
+			if l.d.Deck == deck && l.d.Key == key && l.d.DisplayOnly && !l.d.MetadataOnly {
+				return l.e, l.d
+			}
+		}
+		return nil, deckState{}
+	}
 	role := s.activeRole(v)
 	s.shadow.mu.Lock()
 	lines := slices.Clone(s.shadow.lines)
