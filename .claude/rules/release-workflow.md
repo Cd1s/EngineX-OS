@@ -74,6 +74,8 @@ JC11S fixture 是独立的官方 PRIME4PLUS rootfs，不能用 SC LIVE 4 或 PRI
 
 ## 3. 提交与构建（16 款机型 `*-Update.img` + 8 款二代兼容 `*-Data-Bundle.tar.gz` + 4 平台一键安装器，共 28 个产物）
 
+Deck-push comes first, or use `ONLY_GROUP=SC5000` for one image when an image is required; the full package and gates are for a release candidate.
+
 > **二代机分阶段统一迁移规则（#215，维护者确认）**：
 > - **`5.3.0.4`（当前版本）**：同时发布 8 款二代 `*-Update.img` 与 8 款二代 `*-Data-Bundle.tar.gz`（共 **28 个产物**：16 个 `*-Update.img` + 8 个 `*-Data-Bundle.tar.gz` + 4 个 `EngineX-Installer`，连同 `SHA256SUMS.txt` 共上传 29 个文件）。`5.3.0.4` 的 `pkg/webui/update.go` 同时识别两者（优先 `-Update.img`，回退 `-Data-Bundle.tar.gz`），`EngineX-Installer` 默认执行 `[1/2] 一键解锁` + `[2/2] 刷入 *-Update.img`（仍兼容 `.tar.gz`），而仍运行 `5.3.0.2` / 未解锁 `5.3.0.3` 的二代机也能直接通过 Release 中的 `*-Data-Bundle.tar.gz` 在屏幕上无感一键 OTA 升级并自动获得 `.img` 解锁。
 > - **`5.3.0.5`（下一版过渡桥接版本）**：Release 资产最后一次同时保留 `*-Data-Bundle.tar.gz`（供 `5.3.0.2` / `5.3.0.3` / 早期 `5.3.0.4` 二代机一键 OTA 升到 `5.3.0.5`），但 **`5.3.0.5` 自身的 `pkg/webui/update.go` 将切换为仅检测 `*-Update.img`**。
