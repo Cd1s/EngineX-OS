@@ -18,6 +18,7 @@ the engine icon, "engine" lettering, version digits and panel framebuffer
 orientation are derived directly from it rather than redrawn or listed by model.
 """
 import argparse
+import base64
 import math
 import os
 import struct
@@ -218,40 +219,18 @@ def blit(canvas, img, box, dx, dy=0):
 
 # stock 5.3.0 splash, bottom-right "5.3.0": glyph column spans, rows 700-800, 8 px gaps
 VERSION_GLYPHS = {"5": (1122, 1151), ".": (1158, 1166), "3": (1174, 1204), "0": (1228, 1258)}
-# Straight-stroke digits the stock art lacks, drawn to the stock metrics: 30 px wide,
-# rows 727-774, ~6 px strokes, grey 126 (5.3.0.4 shipped "5.3.0.3" for want of a "4").
-DIGIT_W, DIGIT_TOP, DIGIT_BOT, DIGIT_GREY = 30, 727, 775, 126
-DRAWN_GLYPHS = {
-    "4": [[(18, 727), (24, 727), (24, 775), (18, 775)],             # stem
-          [(0, 759), (30, 759), (30, 765), (0, 765)],               # bar
-          [(18, 727), (24, 727), (6.5, 759), (0, 759)]],            # diagonal
-    "1": [[(17, 727), (23, 727), (23, 775), (17, 775)],
-          [(17, 727), (21, 731), (7, 741), (5, 736)]],
-    "7": [[(0, 727), (30, 727), (30, 733), (0, 733)],
-          [(23, 733), (30, 733), (14, 775), (7, 775)]],
-    "2": [[(0, 727), (30, 727), (30, 733), (0, 733)],
-          [(24, 733), (30, 733), (20, 759), (14, 759)],
-          [(0, 759), (30, 759), (30, 765), (0, 765)],
-          [(10, 765), (16, 765), (6, 775), (0, 775)],
-          [(0, 769), (30, 769), (30, 775), (0, 775)]],
-    "6": [[(0, 727), (30, 727), (30, 733), (0, 733)],
-          [(0, 733), (6, 733), (6, 759), (0, 759)],
-          [(0, 759), (30, 759), (30, 765), (0, 765)],
-          [(0, 765), (6, 765), (6, 775), (0, 775)],
-          [(24, 765), (30, 765), (30, 775), (24, 775)],
-          [(0, 769), (30, 769), (30, 775), (0, 775)]],
-    "8": [[(0, 727), (30, 727), (30, 733), (0, 733)],
-          [(0, 733), (6, 733), (6, 759), (0, 759)],
-          [(24, 733), (30, 733), (30, 759), (24, 759)],
-          [(0, 759), (30, 759), (30, 765), (0, 765)],
-          [(0, 765), (6, 765), (6, 775), (0, 775)],
-          [(24, 765), (30, 765), (30, 775), (24, 775)],
-          [(0, 769), (30, 769), (30, 775), (0, 775)]],
-    "9": [[(0, 727), (30, 727), (30, 733), (0, 733)],
-          [(0, 733), (6, 733), (6, 759), (0, 759)],
-          [(24, 733), (30, 733), (30, 775), (24, 775)],
-          [(0, 759), (30, 759), (30, 765), (0, 765)],
-          [(0, 769), (30, 769), (30, 775), (0, 775)]],
+# Missing digits are rasterized from the official Engine 5.3.0 QRC font
+# Helvetica-LT-Condensed-Medium at 62 px. The cells use the stock 30x48 metrics,
+# baseline and grey level, so no hand-drawn digit geometry is introduced here.
+DIGIT_W, DIGIT_H, DIGIT_GREY = 30, 48, 126
+FONT_GLYPHS = {
+    '1': zlib.decompress(base64.b64decode('eNpjYEAHRf///1/BgAtMxSt7Ap+s8G88skzZ/3HKMjLzvcQqy8jIxMzCwLj+PxZZJlZmRiClu+vff6x6maUts9a9+P8fm2zEzTsPX3z6/x+7bC5E9B922ZRvQPAdBH5jkS3+jwLQZCXtYGDOf3whWYRFlpEZBurw6q0ZlR2VHZUdKrIAXWAlHQ==')),
+    '2': zlib.decompress(base64.b64decode('eNp91D1IHEEUAOA39xN/0PNOTRB/kDM2guA1nigJgaAQTJF0KUQkWKmFCIeNhSGFvaggoqCCck26cEggiYgEwxVJtDjDVVEE0fiDoPizu+O8N+c53L7kNftmvnmzO8vMAGQi79XE+v7F1d7PxTclkBOF7w+vLduR0nHsm+NhvzCxKW1JJbYKNUJavyruWTSckEkd+PxdnWVfknqPRqKVlZH+78Sfs6V9aE4q7MeWNzBMY/vuilPYOg7fjfaPY/tPRqM0dig7FYSOsOOlbg5hfl5kLGEBe2Z1voz5R3OBXdiT0vk3zN+ZGsEeq5jybcy7Ta2iL3lM+R6mr00NkjZTvnOpotPUMtLnlNvG9+uoJX1C+dsBFVWmttDPiwAbnl6qLecV4oh/9a8UGIb5gqc48Qpb6IUxmniQfSm0neEOuqxhsXaTSuMsPlqRqtS6aBAMln+QagNacpSrLIvLG8REgceNpUsaN+uYytJFjelWEC4MzWewQy06F4NzGrfbwZeDAoIz8hoPwtYzBkumNf6IcjilMdnoQnVCJxAduVHv+iB1OMYQpVyvdqOAmMavD8Hj/oOduBQpPwU4LNwlTBQIBkFvsi8PPILbDmt4V6QDXhYr8EaxX/CV0IOlSeARJvGtMa/IDa0bqK3/2PhwgNoUcgXdFfmO5GMVNawvOMsViewlwQUdpKf/0Vt8s9R2')),
+    '4': zlib.decompress(base64.b64decode('eNrllL9KA0EQxmc2kYCIRQrRQgsrBauAloJEUBuJkuKCHIgvoD6BtoIWPoEg+ACKlY2kSpEg2vmnEMFGiyAhwaC3O85GE+WYuRfwq2bmd9/eze7sAcSVc0R0DYouSae4Qgm07z6B4jbpFLP1BAqHRFajZqJNTveeMSgr1OQt2bsNmSJecb1YVOg6UVRJl0RqBp75k2YhkL273M05oEhTow3noilQvMdcPAKZmplPZ5tjMkXwm7AHirdALnrJokhN5pZLm6B4t7ibh34jUjP0yucWgOLlY3W1FIoUJ9+to3kQvQinnF8AyivPEe9hDkUvpqo8LSe9Z2PekHgPx41IcfApIjoAxbvDydtIJt3Vmqc3PmI43LAUhX96X/K09pMscvxRWi30tO/pIwfLTPPf4y3J04jVav6q7YHloN59jeqdrsTUucAtDsrSXVrwtNobi5jCTr8+krwBJf1z/jP9AshMwQI=')),
+    '6': zlib.decompress(base64.b64decode('eNpjYIABifzNdz//fnNrXaEcAzrg6P35HwZ+LxRFldS9+h8ZPDZGllR99R8VvJBFSArfA4m8L1dj41FLPAeW3ouQnQ3iP1KBcJhngaXtYZJm/4C8b+owLus1kOwCGHcjiFeMMCobxH8C5cj8AXJecyBktcFGi0M4VSB2J5IPuMGyBhDOERDbEtmD+QVAAPET/2+Qb5gYsANPkNYDOCQZKkCyk3HJLgfJpuGSPQuStcIl+xIkq4BDkg0UjP95cMhKgiR/gFgWE85+/PPx6tIopGDTgAaq9kF45L6Mhsuag/g3GLy/Ikf+JphNjiDeeaNvqGljH9R0dxDn1KX//38tdZZjl7Ke8gksvQQi6wtV/doWapjSeTDfBcwJgEj+sYG7RPQxSOAymB0MkUUOaH+wiDmIGQSRVUKSZbwOEpmKsPc6Sgh1gISuwt2MSIFg4AES+ssLZDmAZRtRZJXgFhuDWTkosqxgMS+4uiTUqAHnR1BoC4BlY1Flv4DEokDOByXJ/zEokixgHZ4g5i0QKxVFVhQsawHPRRUosqqIAAJ7fRqKrD1I6A2YGQZiHkORLQAJbQEzeX+AokgYWXY9SLYcwt4KYicgSQqCvPtHBsJJAMleQ8pmzeCkBSuqnoF4JYhU+h2l3EgF8f6lQ3mK4KQxH2HUdrD/DiUqc3JqV38AsZ8KIWT5L6MXZhrIXhA+jCJ5Sxs1UliKP8DlfnVxYOQ2zoi55179+PVsd6kkQhAAGBcUgA==')),
+    '7': zlib.decompress(base64.b64decode('eNp90zEoRWEUB/Dvu9e9oZAXvQWDJJMRpRBXBixEXilRMpjkDUaLMhi8SXplYjBKeRPLY1FM3JEyyPCUQnrce49zvtH7/r7p9n6d/znf+XoqIHQCpdT/Oly2nB/REdZxVBqNsTYOVJ6hdUbqUuCcUkJ7Hn9o7+/x1RZR/JgGlb2fcUwzStvMqbni3CPl2lCrLMVJqcWx57a+RUQb9lytDviuD7WgtIeb0ry2Y9VlTHSjgc5ybhIAdO9Zr8EedEb2PwXUCTk3dAGa0iUULF2fqkHpqAy8jZ61INpuv47uKPO7FlHpjsyUAZuof+ENlxrAwNPS9RAFn/H+aRIEp74Y3+tA6TJ3pRMUfCETL4DgtHSNmkHpopTeouBj0V2A7qvcFr17n/lXNgHdFAxR26JoHqD/IboKtNu0HQS6ImukFHi9vOAzGupOtACW7H+L5kBppxkqC3TC6BzQNaP9QPeNtgE9F4y9it9/AeI7RrM=')),
+    '8': zlib.decompress(base64.b64decode('eNpllFtIVFEYhU+KTRdDzQaqkQYVKwg0FIZGzJCRCCQQCUEMmgcvTyW+iOEFU/AlM8yal4gUH0QNGkvLBBERezBUsAuCIpIMXhAsNNO5OM36Z88+/z79T+tb68w5e5+95miamGPFr2a3Dv7+nGrN1owTVb4RlDNhU8PEqSCfgwoenl0IGqZUD498JGe48PzRMzd6SP+5KNO7ZNQIchK9lukMcFRiF9BrFnSFLr4p08vEdwRVAnZi9HUswngq4AXgM9vCAIx3AvoB/SxtgzEpYEhdo6Y1wfgqoA/Qw9IWGNMCngPcLH0G44OAB4DvLH0P47GATID/tJ6uwbgdoWVQmQxtwG1TBMuBSxLfAhvkxdGj4F7xtqoAP07qD4ofgzPvvGBKzKMXtXqJH3909Ro/+yGLoVimgplIbdptxtYlu3blL3+789Wwek+t1Scz65ULjq/bYTFZHN0+wEqKTB+BPZGS2z30Zk8JzAmEaC9TXnyVltAmaBLQzFbRSEs/F/4p6XiWxtIaq0g/gRxRtjCoV3gesl5Ja2FtkvTy9oankDYdG1JxpHKVNJe8pJCykspS0izycBRmUnYlzZF3jjH8izC3qGkkd9VWYSpgLZKc5v0MTwesNyQ7Ib8o6RysOpIlkAErC1NpKemkT2xDd7L0JbWSP8XvkOF1v34Impb0i8pfIPDaFnBBfgvu0XMO3UWpxxPsLp/hVlq78WN26ORbeBhQwh2nWtn0YRaOWP/7yqbdH/y27t33jLdk6OY/+fgtmw==')),
+    '9': zlib.decompress(base64.b64decode('eNpjYIACgazNj378eHl+XjQXAzpgKvj8HwY+lrOiSkoc/o8MToghSwpd+o8KboogJFlOgER+TTLjYVNMvQWWPsQEly0F8b/YQzgcm8HSxTBJ2S8grieMy7YfxH3HB+X2gHjLERap/AAJFEDVvgJxDJAcOQkkcATCDgaxLyF7wRAk8lcCzJ4KYk9A8f59kFAqmHkaxIxEkV0JEpoOYrH/AjHNUGSrQEIHQCxlsPckUWTjQEIvQSxjsCw3iqwrWIwXyHIGs5hQZK3AYvJAVgCYxY4iCzHPEG6KEIqsLVjMCcgyBbO0UGR9wWL+oDgAs9xRZAvBYmEg5hsQqxJFdi5YNgbE3AVibUGRfQiWTQQxi8AJQxRJ0hqSfJLAKe4PiNmCJLsNIhsP5qwDa0ZEcDo06cUgpYVXRlDJjF//XxyAu5mBoQ6s9Hu3CTeHcjhIIhMsGwCRZZyHmpp3Mp4EUW5Qw5inIUse52W4CqLN4S5xfwCT+9ULjJGXIJYGUn4IWnD5458PJxpB8cb4GyQrzIAdCIIkv+GQZNAG5zRcshGYQY8E2kCybbhkwdkwHJfsE5CsFJgpVgICbEiSOiDJKxC2IkZyrwYJdEMzO1jWCilgHoEENKG86yBOFUI2FcQ/iJKZ73PCuDLvkSOIwQhs9BIWCE/6Joi3FmHURrD05TR1HlbFfHA58VwGqaR7glaYfUQuRRj0H6BI3kXN6wxCc3/C5f7M5MEIPOn8Nbfe/vn6YEe5HJIoAOCsGnQ=')),
 }
 
 
@@ -274,10 +253,9 @@ def render_splash(stock, version):
     polygon(canvas, [(x0 + xw - th, top), (x0 + xw, top), (x0 + th, bot), (x0, bot)], 255)
 
     if version:
-        # shortcut: only the glyphs the stock "5.3.0" has; other digits need another stock source
-        bad = set(version) - set(VERSION_GLYPHS) - set(DRAWN_GLYPHS)
+        bad = set(version) - set(VERSION_GLYPHS) - set(FONT_GLYPHS)
         if bad:
-            raise ValueError(f"version glyphs not in stock art: {sorted(bad)}")
+            raise ValueError(f"version glyphs not in stock art or the embedded stock font: {sorted(bad)}")
         adv = lambda c: VERSION_GLYPHS[c][1] - VERSION_GLYPHS[c][0] if c in VERSION_GLYPHS else DIGIT_W
         width = sum(adv(c) for c in version) + 8 * (len(version) - 1)
         pen = 1258 - width
@@ -286,8 +264,16 @@ def render_splash(stock, version):
                 a, b = VERSION_GLYPHS[c]
                 blit(canvas, stock, (a, 700, b, 800), pen - a)
             else:
-                for poly in DRAWN_GLYPHS[c]:
-                    polygon(canvas, [(pen + x, y) for x, y in poly], DIGIT_GREY)
+                mask = FONT_GLYPHS[c]
+                for y in range(DIGIT_H):
+                    for x in range(DIGIT_W):
+                        alpha = mask[y * DIGIT_W + x]
+                        if not alpha:
+                            continue
+                        o = ((y + 727) * W + pen + x) * 4
+                        blend = alpha / 255.0
+                        for channel in range(3):
+                            canvas[o + channel] = int(canvas[o + channel] + (DIGIT_GREY - canvas[o + channel]) * blend + 0.5)
             pen += adv(c) + 8
     return canvas
 

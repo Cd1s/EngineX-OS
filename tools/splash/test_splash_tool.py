@@ -107,18 +107,33 @@ class Presets(unittest.TestCase):
         stock = fake_stock(0)
         self.assertEqual(st.render_recovery(stock), stock[2])  # stock screen kept as is
 
-    def test_drawn_digits(self):
-        # 5.3.0.4 shipped a splash reading "5.3.0.3": the stock art has no "4".
-        c = st.render_splash(fake_stock(10), "5.3.0.4")
-        at = lambda x, y: c[(y * W + x) * 4]  # noqa: E731
-        lit = [at(x, 762) > 60 for x in range(1000, 1280)]  # the 4's bar row
-        self.assertEqual(sum(a and not b for a, b in zip(lit, [False] + lit)), 7)
-        self.assertEqual(max(i for i, v in enumerate(lit) if v) + 1000, 1257)
-        self.assertGreater(at(1249, 740), 100)              # 4: stem
-        self.assertEqual(at(1238, 735), 10)                 # 4: open left of the diagonal
-        self.assertLessEqual(max(c[(y * W + x) * 4] for x in range(1228, 1258) for y in range(720, 780)), 126)
-        for v in ("5.3.0.1", "5.3.0.7", "5.4.1.7"):
+    def test_font_digits_render(self):
+        for v in ("5.3.0.1", "5.3.0.2", "5.3.0.4", "5.3.0.6", "5.3.0.7", "5.3.0.8", "5.3.0.9"):
             st.render_splash(fake_stock(10), v)
+
+    def test_font_digit_metrics_match_stock(self):
+        # The official 5.3.0 splash digits occupy 47-48 rows with a six-pixel median
+        # stroke after thresholding the stock grey glyphs at 60.
+        def metrics(mask):
+            lit = [mask[y * st.DIGIT_W:(y + 1) * st.DIGIT_W] for y in range(st.DIGIT_H)]
+            points = [(x, y) for y, row in enumerate(lit) for x, value in enumerate(row) if value > 60]
+            self.assertTrue(points)
+            height = max(y for x, y in points) - min(y for x, y in points) + 1
+            runs = []
+            for row in lit:
+                active = [x for x, value in enumerate(row) if value > 60]
+                if active:
+                    starts = [i for i, x in enumerate(active) if i == 0 or active[i - 1] != x - 1]
+                    ends = [i for i, x in enumerate(active) if i == len(active) - 1 or active[i + 1] != x + 1]
+                    runs.extend(active[end] - active[start] + 1 for start, end in zip(starts, ends))
+            runs = sorted(run for run in runs if run >= 2)
+            return height, runs[len(runs) // 2]
+
+        for digit, mask in st.FONT_GLYPHS.items():
+            with self.subTest(digit=digit):
+                height, stroke = metrics(mask)
+                self.assertLessEqual(abs(height - 48), 1)
+                self.assertLessEqual(abs(stroke - 6), 1)
 
     def test_every_digit_renders(self):
         for digit in "0123456789":
