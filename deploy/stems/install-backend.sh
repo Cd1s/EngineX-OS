@@ -88,6 +88,17 @@ if [ "$mode" = demucs ]; then
 fi
 if [ "$mode" = demucs ]; then
  mkdir -p "$(dirname "$dropin")"
+ cpu_threads=1
+ if command -v getconf >/dev/null 2>&1; then
+  cpu_threads=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
+ elif command -v nproc >/dev/null 2>&1; then
+  cpu_threads=$(nproc 2>/dev/null || echo 1)
+ fi
+ case "$cpu_threads" in
+  ''|*[!0-9]*) cpu_threads=1 ;;
+ esac
+ [ "$cpu_threads" -lt 1 ] && cpu_threads=1
+ [ "$cpu_threads" -gt 8 ] && cpu_threads=8
  {
   cat <<'UNIT'
 [Service]
@@ -103,6 +114,9 @@ MemoryMax=8G
 TasksMax=128
 CPUQuota=800%
 UNIT
+  if [ "$index" = cpu ]; then
+   printf 'Environment=STEMS_TORCH_THREADS=%s\n' "$cpu_threads"
+  fi
   if [ "$index" != cpu ]; then
    # DeviceAllow accepts globs in character device classes, not /dev paths.
    cat <<'UNIT'

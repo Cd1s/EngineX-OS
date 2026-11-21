@@ -316,10 +316,29 @@ def _env_int(name, default, minimum, maximum):
     return min(maximum, max(minimum, value))
 
 
+def _cpu_thread_default():
+    try:
+        available = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        available = os.cpu_count() or 1
+    return min(8, max(1, available))
+
+
+def _omp_thread_default():
+    raw = os.environ.get('OMP_NUM_THREADS', '')
+    try:
+        return int(raw.split(',', 1)[0].strip())
+    except (TypeError, ValueError):
+        return _cpu_thread_default()
+
+
 def configure_torch_threads(torch):
-    default = os.environ.get('OMP_NUM_THREADS') or min(8, os.cpu_count() or 1)
-    threads = _env_int('STEMS_TORCH_THREADS', default, 1, 128)
-    if threads:
+    stems_threads = os.environ.get('STEMS_TORCH_THREADS')
+    if stems_threads is not None and stems_threads.strip():
+        default = _omp_thread_default() if 'OMP_NUM_THREADS' in os.environ else _cpu_thread_default()
+        torch.set_num_threads(_env_int('STEMS_TORCH_THREADS', default, 1, 128))
+    elif 'OMP_NUM_THREADS' in os.environ:
+        threads = min(128, max(1, _omp_thread_default()))
         torch.set_num_threads(threads)
     interop = _env_int('STEMS_TORCH_INTEROP_THREADS', 0, 0, 128)
     if interop:

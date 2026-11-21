@@ -30,6 +30,22 @@ class WorkerTests(unittest.TestCase):
             torch = FakeTorch()
             configure_torch_threads(torch)
             self.assertEqual(torch.calls, [('threads', 4)])
+        with mock.patch.object(worker.os, 'sched_getaffinity', return_value=set(range(16))):
+            for env, want in (
+                ({'OMP_NUM_THREADS': '4,2'}, 4),
+                ({'OMP_NUM_THREADS': 'abc'}, 8),
+                ({'OMP_NUM_THREADS': '4.0'}, 8),
+                ({'STEMS_TORCH_THREADS': '', 'OMP_NUM_THREADS': '5'}, 5),
+            ):
+                with self.subTest(env=env):
+                    with mock.patch.dict(os.environ, env, clear=True):
+                        torch = FakeTorch()
+                        configure_torch_threads(torch)
+                        self.assertEqual(torch.calls, [('threads', want)])
+        with mock.patch.dict(os.environ, {}, clear=True):
+            torch = FakeTorch()
+            configure_torch_threads(torch)
+            self.assertEqual(torch.calls, [])
         with mock.patch.dict(os.environ, {'STEMS_TORCH_THREADS': '8',
                                           'STEMS_TORCH_INTEROP_THREADS': '2'}, clear=True):
             torch = FakeTorch()
