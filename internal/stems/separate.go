@@ -1,7 +1,7 @@
 package stems
 
 // The separator behind LocalRender. It works on a short-time Fourier
-// transform (a 93 ms Hann window, three quarters overlap) and gives every
+// transform (a 93 ms square-root Hann window, half overlap) and gives every
 // bin of every frame to the stems by what the bin looks like:
 //
 //   - drums: energy spread across frequency rather than held in time (a
@@ -217,7 +217,7 @@ type separator struct {
 
 func newSeparator(ch int, rate float64) *separator {
 	n := 1 << int(math.Round(math.Log2(rate*0.093)))
-	hop, bins := n/4, n/2+1
+	hop, bins := n/2, n/2+1
 	perSecond := rate / float64(hop)
 	// "Held" means present for most of 0.4 s; for the voice, of 0.15 s.
 	long, near := int(0.4*perSecond)|1, int(0.15*perSecond)|1
@@ -230,8 +230,9 @@ func newSeparator(ch int, rate float64) *separator {
 		scratch: make([]float32, int(330*float64(n)/rate)|1), frame: make([]float32, n),
 		spec: make([][2][]float32, 3*ch), ola: make([][]float32, 3*ch), skip: n - hop, out: make([][]float32, 4*ch)}
 	for i := range s.win {
-		s.win[i] = float32(0.5 - 0.5*math.Cos(2*math.Pi*float64(i)/float64(n)))
-		s.syn[i] = s.win[i] / (1.5 * float32(n/2)) // squared Hann windows a quarter apart sum to 1.5
+		hann := float32(0.5 - 0.5*math.Cos(2*math.Pi*float64(i)/float64(n)))
+		s.win[i] = float32(math.Sqrt(float64(hann)))
+		s.syn[i] = s.win[i] / float32(n/2) // square-root Hann windows half a frame apart sum in squares to one
 	}
 	for k := range s.low {
 		f := max(float64(k)*rate/float64(n), 1)

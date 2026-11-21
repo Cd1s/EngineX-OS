@@ -199,6 +199,14 @@ func TestLocalRenderAnyShape(t *testing.T) {
 	}
 }
 
+func TestSeparatorUsesHalfOverlap(t *testing.T) {
+	const rate = 44100
+	s := newSeparator(2, rate)
+	if got, want := s.hop, s.n/2; got != want {
+		t.Fatalf("separator hop = %d for window %d, want half-overlap hop %d", got, s.n, want)
+	}
+}
+
 // PCM comes from another process: a NaN or infinite sample is refused, not
 // spread through the transform into every stem.
 func TestLocalRenderRejectsNonFinitePCM(t *testing.T) {
