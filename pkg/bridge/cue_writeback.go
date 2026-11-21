@@ -39,6 +39,9 @@ type WriteBackOptions struct {
 	// Session is what earlier passes of a long-lived caller (the stick's watcher, #321) found
 	// the stick holding; nil for a single pass.
 	Session *CueSession
+	// Keys keeps the exportLibrary.db keys of a long-lived caller (in memory only). Without it
+	// the pass derives them once for its decrypt and encrypt and forgets them (#321).
+	Keys *rekordbox.KeyCache
 }
 
 // WriteBackResult summarizes a deck-edit write-back pass on a stick.
@@ -159,6 +162,11 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 		return res, fmt.Errorf("writeback: volume busy: %w", err)
 	}
 	defer unlock()
+	keys := opts.Keys
+	if keys == nil {
+		keys = rekordbox.NewKeyCache()
+		defer keys.Clear()
+	}
 
 	engineDBDir := filepath.Join(absMount, "Engine Library", "Database2")
 	mDBPath := filepath.Join(engineDBDir, "m.db")
@@ -331,7 +339,7 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 		return res, nil
 	}
 
-	rbLib, oneLibRel, err := readStickRekordboxLibrary(ctx, resolver, absMount)
+	rbLib, oneLibRel, err := readStickRekordboxLibrary(ctx, resolver, absMount, keys)
 	if err != nil {
 		return res, err
 	}
@@ -503,7 +511,7 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 			}
 			tmpPath := tmpOut.Name()
 			_ = tmpOut.Close()
-			if err := rekordbox.UpdateOneLibraryEdits(ctx, oneLibFull, oneLibUpdates, oneLibMetadata, tmpPath); err != nil {
+			if _, err := rekordbox.UpdateOneLibraryEditsKeys(ctx, oneLibFull, oneLibUpdates, oneLibMetadata, tmpPath, keys); err != nil {
 				_ = os.Remove(tmpPath)
 				return res, err
 			}
@@ -632,7 +640,7 @@ func recordSynced(ctx context.Context, stateDBPath string, rows []syncedRow, wri
 	_ = tx.Commit()
 }
 
-func readStickRekordboxLibrary(ctx context.Context, r *compat.Resolver, mountPath string) (*rekordbox.Library, string, error) {
+func readStickRekordboxLibrary(ctx context.Context, r *compat.Resolver, mountPath string, keys *rekordbox.KeyCache) (*rekordbox.Library, string, error) {
 	var errs []error
 	for _, p := range []string{"PIONEER/rekordbox/exportLibrary.db", "PIONEER/rekordbox/exportOneLibrary.db"} {
 		rel, err := r.Resolve(p)
@@ -643,7 +651,7 @@ func readStickRekordboxLibrary(ctx context.Context, r *compat.Resolver, mountPat
 			errs = append(errs, err)
 			continue
 		}
-		lib, err := rekordbox.ReadSQLite(ctx, r.FullPath(rel), nil)
+		lib, err := rekordbox.ReadSQLiteKeys(ctx, r.FullPath(rel), nil, keys)
 		if err == nil {
 			return lib, rel, nil
 		}

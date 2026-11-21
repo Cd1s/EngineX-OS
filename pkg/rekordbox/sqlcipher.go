@@ -6,7 +6,6 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hmac"
-	"crypto/pbkdf2"
 	"crypto/rand"
 	"crypto/sha512"
 	"encoding/binary"
@@ -78,6 +77,10 @@ func isAllZero(b []byte) bool {
 // with reserve byte 80 and zeroed reserve trailers so B-tree payload sizes
 // stay identical to SQLCipher's in-memory pager representation.
 func DecryptSQLCipher4(ctx context.Context, r io.Reader, size int64, w io.Writer, passphrase []byte) error {
+	return decryptSQLCipher4(ctx, r, size, w, passphrase, nil)
+}
+
+func decryptSQLCipher4(ctx context.Context, r io.Reader, size int64, w io.Writer, passphrase []byte, kc *KeyCache) error {
 	if size < sqlcipherPageSize || size%sqlcipherPageSize != 0 {
 		return fmt.Errorf("sqlcipher: invalid database size %d (must be a positive multiple of %d)", size, sqlcipherPageSize)
 	}
@@ -93,29 +96,18 @@ func DecryptSQLCipher4(ctx context.Context, r io.Reader, size int64, w io.Writer
 		return fmt.Errorf("sqlcipher: read page 1: %w", err)
 	}
 
-	salt := inPage[:sqlcipherSaltSize]
-	encKey, err := pbkdf2.Key(sha512.New, string(passphrase), salt, sqlcipherKDFIter, 32)
+	keys, err := kc.get(inPage[:sqlcipherSaltSize], passphrase)
 	if err != nil {
-		return fmt.Errorf("sqlcipher: derive encryption key: %w", err)
+		return err
 	}
-	defer clear(encKey)
+	defer kc.done(keys)
 
-	var macSalt [sqlcipherSaltSize]byte
-	for i := 0; i < sqlcipherSaltSize; i++ {
-		macSalt[i] = salt[i] ^ sqlcipherHMACSaltMask
-	}
-	macKey, err := pbkdf2.Key(sha512.New, string(encKey), macSalt[:], sqlcipherFastKDFIter, 32)
-	if err != nil {
-		return fmt.Errorf("sqlcipher: derive HMAC key: %w", err)
-	}
-	defer clear(macKey)
-
-	block, err := aes.NewCipher(encKey)
+	block, err := aes.NewCipher(keys.enc)
 	if err != nil {
 		return fmt.Errorf("sqlcipher: init AES-256: %w", err)
 	}
 
-	mac := hmac.New(sha512.New, macKey)
+	mac := hmac.New(sha512.New, keys.mac)
 	var sumBuf [sqlcipherHMACSize]byte
 	var pgLE [4]byte
 	autoVacuum := false
@@ -243,6 +235,10 @@ func prepareOneLibraryTempDir(dir string) error {
 }
 
 func decryptSQLCipher4ToTemp(ctx context.Context, srcPath string, passphrase []byte) (string, error) {
+	return decryptSQLCipher4ToTempKeys(ctx, srcPath, passphrase, nil)
+}
+
+func decryptSQLCipher4ToTempKeys(ctx context.Context, srcPath string, passphrase []byte, kc *KeyCache) (string, error) {
 	src, err := os.Open(srcPath)
 	if err != nil {
 		return "", err
@@ -288,7 +284,7 @@ func decryptSQLCipher4ToTemp(ctx context.Context, srcPath string, passphrase []b
 	}
 
 	bw := bufio.NewWriterSize(tmp, 64*1024)
-	if err := DecryptSQLCipher4(ctx, io.LimitReader(src, st.Size()), st.Size(), bw, passphrase); err != nil {
+	if err := decryptSQLCipher4(ctx, io.LimitReader(src, st.Size()), st.Size(), bw, passphrase, kc); err != nil {
 		return "", err
 	}
 	if err := bw.Flush(); err != nil {
@@ -319,6 +315,10 @@ func ReadSQLCipherSalt(path string) ([]byte, error) {
 // and 80-byte reserve space) using SQLCipher 4 defaults (PBKDF2-HMAC-SHA512,
 // 256000 iterations, AES-256-CBC, per-page random IV + HMAC-SHA512 trailer).
 func EncryptSQLCipher4(ctx context.Context, r io.Reader, size int64, w io.Writer, salt []byte, passphrase []byte) error {
+	return encryptSQLCipher4(ctx, r, size, w, salt, passphrase, nil)
+}
+
+func encryptSQLCipher4(ctx context.Context, r io.Reader, size int64, w io.Writer, salt []byte, passphrase []byte, kc *KeyCache) error {
 	if size < sqlcipherPageSize || size%sqlcipherPageSize != 0 {
 		return fmt.Errorf("sqlcipher: invalid database size %d (must be a positive multiple of %d)", size, sqlcipherPageSize)
 	}
@@ -332,28 +332,18 @@ func EncryptSQLCipher4(ctx context.Context, r io.Reader, size int64, w io.Writer
 		return errors.New("sqlcipher: empty passphrase")
 	}
 
-	encKey, err := pbkdf2.Key(sha512.New, string(passphrase), salt, sqlcipherKDFIter, 32)
+	keys, err := kc.get(salt, passphrase)
 	if err != nil {
-		return fmt.Errorf("sqlcipher: derive encryption key: %w", err)
+		return err
 	}
-	defer clear(encKey)
+	defer kc.done(keys)
 
-	var macSalt [sqlcipherSaltSize]byte
-	for i := 0; i < sqlcipherSaltSize; i++ {
-		macSalt[i] = salt[i] ^ sqlcipherHMACSaltMask
-	}
-	macKey, err := pbkdf2.Key(sha512.New, string(encKey), macSalt[:], sqlcipherFastKDFIter, 32)
-	if err != nil {
-		return fmt.Errorf("sqlcipher: derive HMAC key: %w", err)
-	}
-	defer clear(macKey)
-
-	block, err := aes.NewCipher(encKey)
+	block, err := aes.NewCipher(keys.enc)
 	if err != nil {
 		return fmt.Errorf("sqlcipher: init AES-256: %w", err)
 	}
 
-	mac := hmac.New(sha512.New, macKey)
+	mac := hmac.New(sha512.New, keys.mac)
 	var inPage, outPage [sqlcipherPageSize]byte
 	var sumBuf [sqlcipherHMACSize]byte
 	var pgLE [4]byte

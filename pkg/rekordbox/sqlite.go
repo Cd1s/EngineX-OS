@@ -44,6 +44,11 @@ type SQLiteAdapter interface {
 type OneLibraryAdapter struct{}
 
 func ReadSQLite(ctx context.Context, path string, adapter SQLiteAdapter) (*Library, error) {
+	return ReadSQLiteKeys(ctx, path, adapter, nil)
+}
+
+// ReadSQLiteKeys is ReadSQLite with the SQLCipher keys of kc (#321).
+func ReadSQLiteKeys(ctx context.Context, path string, adapter SQLiteAdapter, kc *KeyCache) (*Library, error) {
 	abs, e := filepath.Abs(path)
 	if e != nil {
 		return nil, e
@@ -66,7 +71,7 @@ func ReadSQLite(ctx context.Context, path string, adapter SQLiteAdapter) (*Libra
 		return nil, e
 	}
 	if encrypted {
-		tmpPath, err := decryptSQLCipher4ToTemp(ctx, abs, []byte(oneLibraryPassphrase))
+		tmpPath, err := decryptSQLCipher4ToTempKeys(ctx, abs, []byte(oneLibraryPassphrase), kc)
 		if err != nil {
 			return nil, fmt.Errorf("OneLibrary SQLCipher: %w", err)
 		}

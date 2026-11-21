@@ -10,6 +10,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 )
 
 var rekordboxMemoryColors = [8][3]byte{
@@ -67,10 +68,28 @@ func NearestCueColorCode(rgb [4]byte) byte {
 // database (SQLCipher 4 encrypted or plaintext SQLite) for the specified
 // content_id -> cues map, writing the resulting database to dstPath.
 func UpdateOneLibraryCues(ctx context.Context, dbPath string, updates map[uint32][]Cue, dstPath string) error {
+	_, err := UpdateOneLibraryCuesKeys(ctx, dbPath, updates, dstPath, nil)
+	return err
+}
+
+// UpdateTimes is where UpdateOneLibraryCuesKeys spent its time (#321 log line).
+type UpdateTimes struct {
+	Decrypt, Edit, Encrypt time.Duration
+}
+
+// UpdateOneLibraryCuesKeys is UpdateOneLibraryCues with the SQLCipher keys of kc: with the
+// keys a caller already holds, the decrypt and the encrypt derive nothing (#321).
+func UpdateOneLibraryCuesKeys(ctx context.Context, dbPath string, updates map[uint32][]Cue, dstPath string, kc *KeyCache) (UpdateTimes, error) {
+	var tm UpdateTimes
+	err := updateOneLibraryCues(ctx, dbPath, updates, dstPath, kc, &tm)
+	return tm, err
+}
+
+func updateOneLibraryCues(ctx context.Context, dbPath string, updates map[uint32][]Cue, dstPath string, kc *KeyCache, tm *UpdateTimes) error {
 	if len(updates) == 0 {
 		return nil
 	}
-	return rewriteOneLibrary(ctx, dbPath, dstPath, func(plainPath string) error {
+	return rewriteOneLibrary(ctx, dbPath, dstPath, kc, tm, func(plainPath string) error {
 		return applyCueUpdatesSQLite(ctx, plainPath, updates)
 	})
 }
@@ -81,7 +100,7 @@ func UpdateOneLibraryMetadata(ctx context.Context, dbPath string, updates map[ui
 	if len(updates) == 0 {
 		return nil
 	}
-	return rewriteOneLibrary(ctx, dbPath, dstPath, func(plainPath string) error {
+	return rewriteOneLibrary(ctx, dbPath, dstPath, nil, &UpdateTimes{}, func(plainPath string) error {
 		return applyMetadataUpdatesSQLite(ctx, plainPath, updates)
 	})
 }
@@ -89,10 +108,18 @@ func UpdateOneLibraryMetadata(ctx context.Context, dbPath string, updates map[ui
 // UpdateOneLibraryEdits applies cue and metadata updates to one decrypted or
 // copied SQLite working file before writing the final export.
 func UpdateOneLibraryEdits(ctx context.Context, dbPath string, cues map[uint32][]Cue, metadata map[uint32]Metadata, dstPath string) error {
+	_, err := UpdateOneLibraryEditsKeys(ctx, dbPath, cues, metadata, dstPath, nil)
+	return err
+}
+
+// UpdateOneLibraryEditsKeys is UpdateOneLibraryEdits with the SQLCipher keys of kc, as
+// UpdateOneLibraryCuesKeys (#321), and where it spent its time.
+func UpdateOneLibraryEditsKeys(ctx context.Context, dbPath string, cues map[uint32][]Cue, metadata map[uint32]Metadata, dstPath string, kc *KeyCache) (UpdateTimes, error) {
+	var tm UpdateTimes
 	if len(cues) == 0 && len(metadata) == 0 {
-		return nil
+		return tm, nil
 	}
-	return rewriteOneLibrary(ctx, dbPath, dstPath, func(plainPath string) error {
+	err := rewriteOneLibrary(ctx, dbPath, dstPath, kc, &tm, func(plainPath string) error {
 		if len(cues) > 0 {
 			if err := applyCueUpdatesSQLite(ctx, plainPath, cues); err != nil {
 				return err
@@ -105,9 +132,12 @@ func UpdateOneLibraryEdits(ctx context.Context, dbPath string, cues map[uint32][
 		}
 		return nil
 	})
+	return tm, err
 }
 
-func rewriteOneLibrary(ctx context.Context, dbPath, dstPath string, apply func(string) error) error {
+// rewriteOneLibrary decrypts (or copies) the export at dbPath, applies apply to the plain
+// copy and writes the result to dstPath, with the keys of kc (nil: derived) and its times in tm.
+func rewriteOneLibrary(ctx context.Context, dbPath, dstPath string, kc *KeyCache, tm *UpdateTimes, apply func(string) error) error {
 	encrypted, err := isEncryptedSQLite(dbPath)
 	if err != nil {
 		return err
@@ -120,10 +150,12 @@ func rewriteOneLibrary(ctx context.Context, dbPath, dstPath string, apply func(s
 		if err != nil {
 			return err
 		}
-		plainPath, err = decryptSQLCipher4ToTemp(ctx, dbPath, []byte(oneLibraryPassphrase))
+		t0 := time.Now()
+		plainPath, err = decryptSQLCipher4ToTempKeys(ctx, dbPath, []byte(oneLibraryPassphrase), kc)
 		if err != nil {
 			return err
 		}
+		tm.Decrypt = time.Since(t0)
 		defer os.Remove(plainPath)
 	} else {
 		// Work on a temp copy so dbPath is never mutated in place.
@@ -135,9 +167,11 @@ func rewriteOneLibrary(ctx context.Context, dbPath, dstPath string, apply func(s
 		plainPath = tmpPlain
 	}
 
+	t0 := time.Now()
 	if err := apply(plainPath); err != nil {
 		return err
 	}
+	tm.Edit = time.Since(t0)
 
 	if !encrypted {
 		return copyFileTo(plainPath, dstPath)
@@ -163,8 +197,10 @@ func rewriteOneLibrary(ctx context.Context, dbPath, dstPath string, apply func(s
 			_ = os.Remove(dstPath)
 		}
 	}()
+	t0 = time.Now()
+	defer func() { tm.Encrypt = time.Since(t0) }()
 	bw := bufio.NewWriterSize(out, 64*1024)
-	if err := EncryptSQLCipher4(ctx, io.LimitReader(in, st.Size()), st.Size(), bw, salt, []byte(oneLibraryPassphrase)); err != nil {
+	if err := encryptSQLCipher4(ctx, io.LimitReader(in, st.Size()), st.Size(), bw, salt, []byte(oneLibraryPassphrase), kc); err != nil {
 		return err
 	}
 	if err := bw.Flush(); err != nil {
