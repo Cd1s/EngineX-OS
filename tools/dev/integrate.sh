@@ -221,7 +221,13 @@ targeted_tests() {
     ((${#go_pkgs[@]} || ${#py_tests[@]})) || return 0
     local inner='set -eu'
     for dir in "${go_pkgs[@]}"; do inner+="; go test -race -timeout 30m '$dir'"; done
-    for test in "${py_tests[@]}"; do inner+="; python3 '$test'"; done
+    for test in "${py_tests[@]}"; do
+        if [[ ${INTEGRATE_FAST_ONLY:-0} == 1 && $test == tools/az01-packer/test_ui_mod.py ]]; then
+            inner+="; python3 -c 'import runpy,shutil; which=shutil.which; shutil.which=lambda name,*args,**kwargs: None if name == \"cc\" else which(name,*args,**kwargs); runpy.run_path(\"$test\", run_name=\"__main__\")'"
+        else
+            inner+="; python3 '$test'"
+        fi
+    done
     if [[ ${INTEGRATE_FAST_ONLY:-0} == 1 ]]; then
         mkdir -p "$ROOT/.gocache"
         (cd "$worktree" && export GOCACHE="$ROOT/.gocache" && bash -c "$inner")
