@@ -1801,8 +1801,12 @@ static int install_cfx_scope(uintptr_t base, size_t page, const char *version) {
     if (player_board()) return 0; /* players have no Sweep FX */
     static const uint32_t value_prefix[] = {0xe52d400c, 0xe98d4800};   // str r4,[sp,#-12]!; stmib sp,{fp,lr}
     static const uint32_t process_prefix[] = {0xe16d42f4, 0xe1cd60f8}; // strd r4,[sp,#-36]!; strd r6,[sp,#8]
-    if (memcmp((void *)value, value_prefix, 8) || *(uintptr_t *)value_slot != value ||
-        memcmp((void *)process, process_prefix, 8)) return 0;
+    if (memcmp((void *)value, value_prefix, 8) || memcmp((void *)process, process_prefix, 8)) return 0;
+    if (*(uintptr_t *)value_slot != value) {
+        /* Nothing is patched and no ready marker is written: stock Sweep FX, no Color FX Style row. */
+        fprintf(stderr, "engine-ui-hook: Color FX slot 4 mismatch, not installed\n");
+        return 0;
+    }
     /* Before the UI can ask: on PRIME 4, pkg/webui drops a stored style when PX is ready alone. */
     if (!ready_write(CFX_READY, "armhf-cfx-v1\n")) return 0;
     uint32_t value_code[] = {value_prefix[0], value_prefix[1], 0xe51ff004, (uint32_t)(value + 8)};

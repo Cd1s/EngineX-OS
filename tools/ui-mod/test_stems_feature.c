@@ -1136,6 +1136,21 @@ static void test_patch_files(const char *filename) {
         assert(site[4] == (0xe5901000 | build->shadow_array_offset));     // ldr r1, [r0, #vector]
         assert(site[5] == (0xe5902000 | (build->shadow_array_offset + 4))); // ldr r2, [r0, #vector + 4]
     }
+    // Color FX channel knobs (install_cfx_scope): on the real Engine the two prologues are the ones the
+    // hook checks, and slot 4 of SweepFxControl's vtable holds setValue, so the slot patch has something to replace.
+    if (!strcmp(build->name, "5.3.0") || !strcmp(build->name, "5.3.0-sclive4")) {
+        int sclive4 = !strcmp(build->name, "5.3.0-sclive4");
+        uint32_t value = sclive4 ? 0xd9619c : 0xd8ba3c, slot = sclive4 ? 0x2b9e0b0 : 0x2b1e488, process = sclive4 ? 0xecdbd4 : 0xec127c;
+        static const uint32_t value_prefix[] = {0xe52d400c, 0xe98d4800}, process_prefix[] = {0xe16d42f4, 0xe1cd60f8};
+        uint32_t held = 0;
+        for (unsigned i = 0; i < info.dlpi_phnum; i++) {
+            const ElfW(Phdr) *p = &info.dlpi_phdr[i];
+            if (p->p_type == PT_LOAD && slot >= p->p_vaddr && slot + 4 <= p->p_vaddr + p->p_filesz)
+                memcpy(&held, image + p->p_offset + slot - p->p_vaddr, 4);
+        }
+        assert(held == value);
+        assert(!memcmp(image + value, value_prefix, 8) && !memcmp(image + process, process_prefix, 8));
+    }
     // #256: verify build->feature_object points to a real Feature object whose vtable[0]
     // is Feature::isEnabled(), and on 5.3.0-sclive4 matches the StemsPreRenderedPlayback
     // global read by PlanckScriptRoot::hasStemsPreRenderedPlayback().

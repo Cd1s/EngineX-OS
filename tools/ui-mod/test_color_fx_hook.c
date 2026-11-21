@@ -7,6 +7,8 @@ int hook_test_engine;
 #include "engine_ui_hook.c"
 #include <assert.h>
 #include <math.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
 
 enum { FRAMES = 128 };
 static unsigned stock_calls;
@@ -59,7 +61,74 @@ static void settles(int k) {
     assert(run(ctl[k].node, 20).stock);
 }
 
+/* install_cfx_scope on a fake Engine image (anonymous, sparse): the known prologues are written at the
+ * known offsets, then the vtable slot is made to hold something else. The install must fail closed:
+ * log one line, patch nothing, write no ready marker. A wrong prologue is a different branch (no slot line). */
+static char *capture_stderr(int (*fn)(uintptr_t, size_t, const char *), uintptr_t base, const char *version, int *rc) {
+    static char out[512];
+    fflush(stderr);
+    int saved = dup(2);
+    FILE *t = tmpfile();
+    assert(saved >= 0 && t);
+    assert(dup2(fileno(t), 2) == 2);
+    *rc = fn(base, 4096, version);
+    fflush(stderr);
+    assert(dup2(saved, 2) == 2);
+    close(saved);
+    rewind(t);
+    size_t n = fread(out, 1, sizeof out - 1, t);
+    out[n] = 0;
+    fclose(t);
+    return out;
+}
+static void test_install_scope_mismatch(void) {
+    static const struct { const char *version; uintptr_t value, slot, process; } sites[] = {
+        {"5.3.0", 0xd8ba3c, 0x2b1e488, 0xec127c},
+        {"5.3.0-sclive4", 0xd9619c, 0x2b9e0b0, 0xecdbd4},
+    };
+    static const uint32_t value_prefix[] = {0xe52d400c, 0xe98d4800};
+    static const uint32_t process_prefix[] = {0xe16d42f4, 0xe1cd60f8};
+    const char *saved_board = product_code_path;
+    product_code_path = "/nonexistent-product-code"; /* an all-in-one: not a player */
+    struct stat before;
+    int had_marker = !stat(CFX_READY, &before);
+    for (unsigned i = 0; i < sizeof sites / sizeof *sites; ++i) {
+        size_t len = 0x2c00000;
+        char *img = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+        assert(img != MAP_FAILED);
+        memcpy(img + sites[i].value, value_prefix, 8);
+        memcpy(img + sites[i].process, process_prefix, 8);
+        uintptr_t other = (uintptr_t)img + sites[i].value + 4; /* a slot that does not hold `value` */
+        memcpy(img + sites[i].slot, &other, sizeof other);
+        char value_bytes[8], process_bytes[8];
+        memcpy(value_bytes, img + sites[i].value, 8);
+        memcpy(process_bytes, img + sites[i].process, 8);
+        int rc = -1;
+        const char *log = capture_stderr(install_cfx_scope, (uintptr_t)img, sites[i].version, &rc);
+        assert(rc == 0);
+        assert(!strcmp(log, "engine-ui-hook: Color FX slot 4 mismatch, not installed\n"));
+        assert(!memcmp(img + sites[i].value, value_bytes, 8) && !memcmp(img + sites[i].process, process_bytes, 8));
+        uintptr_t held;
+        memcpy(&held, img + sites[i].slot, sizeof held);
+        assert(held == other);
+        struct stat after;
+        assert((stat(CFX_READY, &after) == 0) == (had_marker != 0)); /* no marker written by this call */
+        if (had_marker) assert(before.st_mtime == after.st_mtime && before.st_ino == after.st_ino);
+
+        /* The slot is right but the prologue is not: fail closed too, and say nothing about the slot. */
+        memcpy(img + sites[i].slot, &(uintptr_t){(uintptr_t)img + sites[i].value}, sizeof(uintptr_t));
+        memset(img + sites[i].value, 0, 8);
+        log = capture_stderr(install_cfx_scope, (uintptr_t)img, sites[i].version, &rc);
+        assert(rc == 0 && !strstr(log, "slot 4"));
+        munmap(img, len);
+    }
+    int rc = -1;
+    assert(!*capture_stderr(install_cfx_scope, 0, "5.0.4", &rc) && rc == 0); /* unknown build: silent, as before */
+    product_code_path = saved_board;
+}
+
 int main(void) {
+    test_install_scope_mismatch();
     cfx_value_original = (void *)stock_value;
     cfx_process_original = (void *)stock_process;
     for (int k = 0; k < 2; ++k) ctl[k].node = &nodes[2 * k], ctl[k].spare = &nodes[2 * k + 1];
