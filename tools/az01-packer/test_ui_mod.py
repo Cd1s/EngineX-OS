@@ -12652,5 +12652,74 @@ assert.equal(range.index, 2, 'Sync on and off without widening leaves the range 
         self.assertIn("root.scWidenAll()", bp.SYNC_TILE)
 
 
+class ShadowLayerDeckBindingTest(unittest.TestCase):
+    """#316 BH-GF3-16: the shadow layer's `deck` is evaluated only once the layer is complete, in the files the report names.
+
+    Already fixed by 7e89da1c (merged with 043fa15c): walking the ancestors' deckIndex/deckData while the layer's own parent and
+    the stock wrappers were still being set up made Qt log `Binding loop detected for property "deck"`. Only the text of the
+    SHADOW_LAYER constant was pinned; this pins what the shipped files get, for the three files the report names."""
+    FILES = (("Skins/EngineOS/UI/CompositeControls/DeckPerformanceData/DeckPerformanceDataContent.qml", "performance"),
+             ("Skins/EngineOS/UI/CompositeControls/DeckTrackData/SplitMainDeckTrackDataContent.qml", "track"),
+             ("Skins/EngineOS/UI/CompositeControls/DeckTrackData/GroupedMainDeckTrackDataContent.qml", "track"))
+
+    @staticmethod
+    def problems(patched, kind):
+        """What is wrong with the layer a stock file got (empty list: nothing)."""
+        found = []
+        head = 'objectName: "EngineX_Shadow_%s"' % kind
+        if patched.count(head) != 1:
+            return ["%d layers named EngineX_Shadow_%s" % (patched.count(head), kind)]
+        layer = patched[patched.index(head):]
+        if patched.count("scShadowDeckFor(") != 1:
+            found.append("scShadowDeckFor is called %d times, not once" % patched.count("scShadowDeckFor("))
+        deck = re.search(r"readonly property int deck: ([^\n]*)", layer)
+        ready = re.search(r"property bool scReady: false", layer)
+        done = re.search(r"Component\.onCompleted: \{ scReady = true;", layer)
+        if not deck or not deck.group(1).startswith("scReady && "):
+            found.append("deck does not wait for scReady")
+        if not ready or not done:
+            found.append("scReady is not declared false and set when the layer is complete")
+        elif deck and ready.start() > layer.index(deck.group(0)):
+            found.append("scReady is declared after deck")
+        return found
+
+    def stock(self, rel):
+        qrc = LAB / "5.3.0/qrc"
+        if not (qrc / rel).is_file():
+            self.skipTest(f"{qrc / rel} not found")
+        return (qrc / rel).read_text(encoding="utf-8")
+
+    def test_the_three_files_the_report_names_get_a_layer_that_waits_for_construction(self):
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            for rel, kind in self.FILES:
+                with self.subTest(file=rel.rsplit("/", 1)[1]):
+                    self.assertIn(rel, bp.shadow_targets(LAB / "5.3.0/qrc") if (LAB / "5.3.0/qrc").is_dir() else {rel: kind})
+                    self.assertEqual(self.problems(bp.shadow_layer(self.stock(rel), kind), kind), [])
+        finally:
+            bp.ROOT = old_root
+
+    def test_the_check_sees_the_old_layer(self):
+        """Control: the layer of the base before 7e89da1c (deck bound straight away) is reported, in the same files."""
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            for rel, kind in self.FILES:
+                with self.subTest(file=rel.rsplit("/", 1)[1]):
+                    patched = bp.shadow_layer(self.stock(rel), kind)
+                    old = patched.replace("readonly property int deck: scReady && ", "readonly property int deck: ")
+                    self.assertNotEqual(old, patched)
+                    self.assertIn("deck does not wait for scReady", self.problems(old, kind))
+        finally:
+            bp.ROOT = old_root
+
+    def test_the_layer_text_waits_in_every_pack_variant(self):
+        """No stock file needed: the constant every layer is made from."""
+        layer = bp.SHADOW_LAYER
+        self.assertLess(layer.index("property bool scReady: false"), layer.index("readonly property int deck: scReady && "))
+        self.assertEqual(layer.count("scShadowDeckFor("), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
