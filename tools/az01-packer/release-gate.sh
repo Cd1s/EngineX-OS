@@ -386,6 +386,12 @@ SH
         JP07|JP08|JP13|JP14) check "new: player $PRODUCT has no recorder (#206 sites not applied)" grep -aqF 'SCPROBE recstream|none|0|' "$log" ;;
         *) check "new: recording active + streaming selection: loads, no record block/abort (#206)" grep -aqF 'SCPROBE recstream|1|1|1|0|0|' "$log" ;;
         esac
+        # Color FX on the channel knobs patches SweepFxControl's vtable slot 4 (install_cfx_scope): a base change that
+        # breaks its slot or prologue check is silent otherwise (the install logs one line and the UI row stays hidden).
+        case $PRODUCT in
+        JP07|JP08|JP13|JP14) check "new: player $PRODUCT has no Color FX channel knobs (no Sweep FX)" bash -c "! grep -aqF 'engine-ui-hook: Color FX channel knobs installed' '$log'" ;;
+        *) check "new: Color FX channel knobs installed on console $PRODUCT (SweepFxControl slot patch)" grep -aqF 'engine-ui-hook: Color FX channel knobs installed' "$log" ;;
+        esac
         note "new: render probe: $(grep -ao 'SCPROBE [a-z]*|.*|' "$log" | grep -v 'SCPROBE done' | tr '\n' ' ')"
         check "new: Engine build matched (Engine $BASE)" grep -aq "engine-ui-hook: Engine $BASE" "$log"
         check "new: $EXPECT_APPLIED Engine patches applied (TidalAPI gateway, Stems, getConfig...)" \
