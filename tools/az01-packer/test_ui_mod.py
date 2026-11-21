@@ -3940,6 +3940,166 @@ for (let i = 0; i < 20; i++) { now += 500; scGcCheck(); }
 assert.equal(runs, 1, "startup gc() runs only once, not repeatedly");
 """)
 
+    # ---- Console linking, stage 1 (console_line_view): a linked unit on a console channel set to Line / AUX ----
+
+    def _qml_fn(self, name):
+        start = re.search(r"(?m)^\tfunction " + name + r"\([^\n]*\) \{", bp.SERVICES_MAIN)
+        self.assertIsNotNone(start, name)
+        return bp.SERVICES_MAIN[start.start():bp.SERVICES_MAIN.index("\n\t}", start.end()) + 3]
+
+    def test_console_line_view_is_console_only_and_leaves_the_4_deck_gates_alone(self):
+        board = re.search(r'readonly property bool scConsoleLineBoard: (\[[^\]]*\])\.indexOf\(scBoard\) >= 0', bp.SERVICES_MAIN)
+        self.assertIsNotNone(board)
+        self.assertEqual(json.loads(board.group(1)), ["JC11", "JC11S", "JP21", "JP24"])
+        self.assertIn("scConsoleLine = scConsoleLineBoard && !!v.consoleLineView\n", bp.SERVICES_MAIN)
+        # Rows 250 / 251: the 4-deck gates stay exactly as 5.3.0.5-r1 has them.
+        for line in ("scFourDeckRole = scIsPlayerBoard && v.fourDeckWaveform ?", "scFourDeckOn = scIsPlayerBoard && !!v.fourDeckWaveform",
+                     "scPairedSetting = scIsPlayerBoard && !!v.fourDeckWaveform && !!v.pairedView"):
+            self.assertIn(line, bp.SERVICES_MAIN)
+        self.assertIn("visible: root.scIsPlayerBoard", bp.FOUR_DECK_ENTRIES)
+        self.assertNotIn("scConsoleLine", bp.FOUR_DECK_ENTRIES)
+        js = f"""
+const assert = require('node:assert/strict');
+const boards = {board.group(1)};
+function gate(boardName, v) {{
+    const scBoard = boardName, scIsPlayerBoard = ["JP07", "JP08", "JP13", "JP14"].indexOf(scBoard) >= 0;
+    const scConsoleLineBoard = boards.indexOf(scBoard) >= 0;
+    return {{
+        line: scConsoleLineBoard && !!v.consoleLineView,
+        role: scIsPlayerBoard && v.fourDeckWaveform ? (v.fourDeckRoleActive || "") : "",
+    }};
+}}
+for (const b of ["JC11", "JC11S", "JP21", "JP24"]) {{
+    assert.deepEqual(gate(b, {{consoleLineView: true, fourDeckWaveform: true, fourDeckRoleActive: "12"}}), {{line: true, role: ""}}, b);
+    // Off: an old stored fourDeckWaveform and role are ignored, as in 5.3.0.5-r1.
+    assert.deepEqual(gate(b, {{consoleLineView: false, fourDeckWaveform: true, fourDeckRoleActive: "12"}}), {{line: false, role: ""}}, b);
+    assert.deepEqual(gate(b, {{}}), {{line: false, role: ""}}, b);
+}}
+// Every other board ignores a served value left from elsewhere (a copied or hand-edited file).
+for (const b of ["JP07", "JP08", "JP13", "JP14", "JC16", "JP11", "JP11S", "JP20", "NH08", "NH08S", "NH10", "RMZ2", ""]) {{
+    assert.equal(gate(b, {{consoleLineView: true}}).line, false, b);
+}}
+assert.equal(gate("JP07", {{consoleLineView: true, fourDeckWaveform: true, fourDeckRoleActive: "13"}}).role, "13");
+"""
+        res = subprocess.run(["node", "-e", js], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+
+    def test_console_line_view_costs_nothing_unless_a_channel_is_on_line(self):
+        # Declarative: nothing that runs by itself may run for the Line In view without a channel on Line / AUX.
+        self.assertIn('onTriggered: if (root.scFourDeckRole !== "" || root.scLineLive) root.scShadowPoll()', bp.SERVICES_MAIN)
+        self.assertIn("readonly property bool scLineLive: scConsoleLine && scLineMask !== 0", bp.SERVICES_MAIN)
+        self.assertIn('running: (root.scFourDeckRole !== "" || root.scLineLive) && root.scShadowEngineMask !== 30', bp.SERVICES_MAIN)
+        # The sampler (the only sender) still runs on a role alone: a console never has one, so it never sends.
+        self.assertRegex(bp.SERVICES_MAIN, r'id: scShadowTickTimer\n\t\tinterval: 40; repeat: true\n\t\trunning: root\.scFourDeckRole !== ""\n')
+        # The mixer is followed by signal, never by timer: four Connections, none gated by a Timer, and no Timer names the mask.
+        self.assertEqual(len(re.findall(r'Connections \{ target: root\.scConsoleLine \? root\.scTr\("/Engine/Mixer/Channel[1-4]/Line"\) : null', bp.SERVICES_MAIN)), 4)
+        self.assertNotRegex(bp.SERVICES_MAIN, r'running:[^\n]*scLineSync')
+        # Leaving Line stops the timer and aborts the request in flight.
+        self.assertRegex(bp.SERVICES_MAIN, r'onScLineLiveChanged: \{\n\t\tif \(scLineLive \|\| scFourDeckRole !== ""\) return\n\t\tscShadowPollTimer\.stop\(\)\n(?:[^\n]*\n)*?\t\tif \(x && x\.readyState > 0 && x\.readyState < 4\) x\.abort\(\)')
+
+    def test_console_line_view_holds_only_the_line_lane_and_releases_it_at_once(self):
+        fns = "\n".join(self._qml_fn(n) for n in ("scLineSync", "scLineTrim"))
+        self.js(fns + r"""
+// A console, the switch on, no role. Channels 3 and 4 are the ones the mixer reports on Line / AUX.
+scPlayer = false; scFourDeckRole = '';
+globalThis.scConsoleLine = true; globalThis.scLineMask = 0; globalThis.scLineLive = false;
+const on = new Set();
+globalThis.scShadowLinePaths = [1, 2, 3, 4].map(n => '/Engine/Mixer/Channel' + n + '/Line');
+globalThis.scTr = path => ({ get state() { return on.has(path); } });
+const sync = () => { const before = scLineMask; scLineSync(); scLineLive = scConsoleLine && scLineMask !== 0; if (scLineMask !== before) { scLineTrim(); scShadowResponseVersion = ''; } };
+sync();
+assert.equal(scLineMask, 0); assert.equal(scLineLive, false);
+// No channel on Line: a poll that gets there anyway (an old one in flight) keeps nothing, not even a lineIn entry.
+scShadowApplyAll([{deck:3,key:'k3',lineIn:true,displayOnly:true,player:1}], true);
+assert.equal(scShadowData(3), null); assert.equal(scShadowVisible(3), false);
+// Two channels on Line.
+on.add(scShadowLinePaths[2]); on.add(scShadowLinePaths[3]); sync();
+assert.equal(scLineMask, (1 << 3) | (1 << 4)); assert.equal(scLineLive, true);
+const lane = (d, p, m) => ({deck:d,key:'k'+d,lineIn:true,displayOnly:true,title:'T'+d,player:p,model:m,positionMs:1000,at:now,durationMs:240000,playing:true});
+scShadowApplyAll([lane(3, 1, 'SC6000'), lane(4, 2, 'CDJ-3000'), {deck:2,key:'x2',displayOnly:true}], true);
+assert.equal(scShadowVisible(3), true); assert.equal(scShadowVisible(4), true);
+assert.equal(scShadowData(3).player, 1); assert.equal(scShadowData(3).model, 'SC6000'); assert.equal(scShadowData(4).model, 'CDJ-3000');
+// Only the Line lanes hold themselves: a deck on its Engine input is neither held, nor shown, nor locked, with two units present.
+assert.equal(scShadowData(2), null);
+for (const d of [1, 2, 3, 4]) assert.equal(scDeckLocked(d), false, 'deck ' + d + ' must stay loadable (stock refuses a load only onto a Line channel itself)');
+for (const d of [1, 2]) assert.equal(scShadowVisible(d), false);
+// The same lane answer again is the same sample (the label is part of it, so a renumbered unit is not).
+const s3 = scShadowData(3); scShadowApplyAll([lane(3, 1, 'SC6000'), lane(4, 2, 'CDJ-3000')], true);
+assert.equal(scShadowData(3), s3);
+scShadowApplyAll([lane(3, 3, 'SC6000'), lane(4, 2, 'CDJ-3000')], true);
+assert.equal(scShadowData(3).player, 3);
+// Channel 4 back on its Engine input: its lane is gone at once, before any poll; channel 3 keeps its own.
+on.delete(scShadowLinePaths[3]); sync();
+assert.equal(scShadowData(4), null); assert.equal(scShadowVisible(4), false); assert.equal(scShadowVisible(3), true);
+assert.equal(scShadowResponseVersion, '', 'the next answer must be applied even if stream-sync sees no change');
+// A late answer for it changes nothing.
+scShadowApplyAll([lane(3, 3, 'SC6000'), lane(4, 2, 'CDJ-3000')], true);
+assert.equal(scShadowData(4), null);
+// Back on Line, the same picture comes back.
+on.add(scShadowLinePaths[3]); sync();
+scShadowApplyAll([lane(3, 3, 'SC6000'), lane(4, 2, 'CDJ-3000')], true);
+assert.equal(scShadowVisible(4), true);
+// The switch off: everything goes, nothing comes back.
+scConsoleLine = false; sync();
+assert.equal(scLineMask, 0); assert.equal(scShadowData(3), null); assert.equal(scShadowData(4), null);
+scShadowApplyAll([lane(3, 1, 'SC6000')], true);
+assert.equal(scShadowData(3), null);
+""")
+
+    def test_console_line_view_polls_with_the_channels_on_line_and_a_player_keeps_its_poll(self):
+        # With a channel on Line the poll names exactly those channels, from the mask, without reading the mixer.
+        self.js(r"""
+scPlayer = false; scFourDeckRole = ''; scShadowPollAt = 0;
+globalThis.scLineLive = true; globalThis.scLineMask = (1 << 2) | (1 << 4);
+globalThis.scTr = () => { throw Error('the mixer is read by signal, not at each poll'); };
+scShadowPoll();
+assert.equal(requests.length, 1);
+assert.match(requests[0].url, /\/v1\/enginex\/shadow\?ver=0&line=2,4$/);
+// A player (a role, no Line In view) polls as before: no mask in its question.
+requests.length = 0; globalThis.scLineLive = false; globalThis.scLineMask = 0;
+scFourDeckRole = '13'; scPlayer = true; scShadowPollAt = 0; scShadowPollRequest = null;
+globalThis.scTr = () => null;
+scShadowPoll();
+assert.equal(requests.length, 1);
+assert.match(requests[0].url, /\/v1\/enginex\/shadow\?ver=0$/);
+""")
+
+    def test_console_line_menu_row_has_two_values_one_hint_and_no_restart(self):
+        entries = bp.CONSOLE_LINE_ENTRIES
+        self.assertIn('text: "Linked View"', entries)
+        self.assertIn('values: ["Stock", "Line In"]', entries)
+        self.assertEqual(entries.count("visible: root.scConsoleLineBoard"), 2)  # the row and its hint, nothing else
+        self.assertEqual(len(re.findall(r"@HEADLINE@ \{", entries)), 1)
+        self.assertIn('root.scCall("consoleLineView=" + index)', entries)
+        self.assertNotIn("scRestartCall", entries)  # the QML follows the setting at once
+        for hidden in ("4-Deck Role", "Shadow Deck Mode", "Paired Player", "4 Decks", "fourDeck"):
+            self.assertNotIn(hidden, entries)
+        # The players' rows stay theirs, and come first: the console row is the second "Linked View".
+        view = bp.VIEW_ENTRIES
+        self.assertLess(view.index("id: scLinkedViewEntry"), view.index("id: scConsoleLineEntry"))
+        self.assertIn("visible: root.scIsPlayerBoard", bp.FOUR_DECK_ENTRIES)
+        rows = bp.load_dict()
+        for en in ("Linked View", "Stock", "Line In", "Linked player", "Line In: a linked player is shown on a channel while its input is Line or AUX; nothing is loaded and no deck is taken"):
+            self.assertIn(en, rows, en)
+            for lang in ("zh-Hans", "zh-Hant", "es"):
+                self.assertTrue(rows[en][lang].strip(), (en, lang))
+        self.assertIn('"Linked player" + " "', bp.SHADOW_BUSY)
+
+    def test_the_post_carries_the_player_number_without_a_read_per_tick(self):
+        self.assertIn("o.player = root.scOwnPlayer || undefined", bp.SERVICES_MAIN)
+        m = re.search(r"readonly property int scOwnPlayer: \{\n(.*?)\n\t\}", bp.SERVICES_MAIN, re.S)
+        self.assertIsNotNone(m)
+        self.assertIn('scFourDeckRole !== "" ? scTr("/Client/Preferences/Player") : null', m.group(1))  # a console never reads it
+        # The edge test and the heartbeat know nothing of it: the number rides on full posts only.
+        tick = self._qml_fn("scShadowTick")
+        self.assertNotIn("sent.player", tick)
+        self.js(r"""
+scShadowPollAt = now;
+scFourDeckRole = '13'; scPlayer = true;
+assert.equal(JSON.stringify([{deck: 1, player: undefined}]), '[{"deck":1}]');
+assert.equal(JSON.stringify([{deck: 1, player: 3 || undefined}]), '[{"deck":1,"player":3}]');
+""")
+
 
 class UiModBuildTest(unittest.TestCase):
     def test_crossfader_reverse_uses_the_stock_switch_in_all_languages(self):
