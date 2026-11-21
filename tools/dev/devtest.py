@@ -158,9 +158,27 @@ def pairs_file(path, rows):
     pathlib.Path(path).write_text(''.join(f'{d} {t}\n' for d, t in rows))
 
 
+def cpu_budget():
+    """Cores this run may use: the idle cores of this host right now (other agents share it), between 4 and 12.
+    Timing-sensitive tests fail when a shared host is saturated, so the runners never take more than this."""
+    if os.environ.get('ENGINEX_CPU_BUDGET'):
+        return max(1, int(os.environ['ENGINEX_CPU_BUDGET']))
+
+    def snap():
+        v = list(map(int, pathlib.Path('/proc/stat').read_text().splitlines()[0].split()[1:]))
+        return sum(v), v[3] + v[4]
+    t1, i1 = snap(); time.sleep(1); t2, i2 = snap()
+    return max(4, min(12, int((i2 - i1) / max(1, t2 - t1) * (os.cpu_count() or 4))))
+
+
 def exec_fast(plan):
     tmp, env, made_git = prepare(None)
-    jobs = os.environ.get('ENGINEX_GO_P', '6')
+    budget = cpu_budget()
+    has_go, has_py = bool(plan['go'] or plan['go_all']), bool(plan['py'])
+    go_jobs = budget if not has_py else max(2, round(budget * 0.6))
+    py_jobs = budget if not has_go else max(2, budget - go_jobs)
+    go_jobs, py_jobs = int(os.environ.get('ENGINEX_GO_JOBS', go_jobs)), int(os.environ.get('ENGINEX_PY_JOBS', py_jobs))
+    print(f'[fast] cpu budget {budget}: go test {go_jobs} processes, python {py_jobs} workers', file=sys.stderr, flush=True)
     results = {'steps': [], 'go': None, 'py': {}}
     lock = threading.Lock()
     arm_go = [(e['target'], e['id']) for e in plan['arm'] if e['kind'] == 'go']
@@ -186,7 +204,7 @@ def exec_fast(plan):
         t = threading.Thread(target=lambda: (spawn(vet, ['go', 'vet'] + pk, env), add(vet))); t.start()
         out_json = os.path.join(tmp, 'go.json')
         cmd = [sys.executable, os.path.join(HERE, 'gorun.py'), '--seed', os.path.join(HERE, 'go-slow.json'), '--defer', defer_go,
-               '--json', out_json, '-p', jobs] + (['--no-cache'] if plan['no_cache'] else []) + pk
+               '--json', out_json, '--jobs', str(go_jobs), '-p', str(max(2, go_jobs // 2))] + (['--no-cache'] if plan['no_cache'] else []) + pk
         spawn(gt, cmd, env)
         if os.path.exists(out_json):
             results['go'] = json.loads(pathlib.Path(out_json).read_text())
@@ -201,7 +219,7 @@ def exec_fast(plan):
             pathlib.Path(defer).write_text(''.join(f"{e['id']}\n" for e in arm_py if e['target'] == d))
             out_json = os.path.join(tmp, 'py-' + d.replace('/', '_') + '.json')
             cmd = [sys.executable, os.path.join(HERE, 'pyrun.py'), d] + item['specs'] + [
-                '--defer', defer, '--json', out_json, '-j', os.environ.get('ENGINEX_PY_JOBS', '8'),
+                '--defer', defer, '--json', out_json, '-j', str(py_jobs),
                 '--timings', os.path.join(state, 'pyrun-' + d.replace('/', '_') + '.json')]
             spawn(s, cmd, env)
             if os.path.exists(out_json):
