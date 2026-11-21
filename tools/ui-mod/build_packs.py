@@ -3715,6 +3715,8 @@ SERVICES_MAIN = """
 		{ id: "beatport", name: "Beatport" },
 		{ id: "applemusic", name: "Apple Music" }
 	]
+	// The label the gateway puts on a streamed row (providerLabels in tidal_gateway.go) is the service's name except for these two.
+	readonly property var scRowLabels: ({ "rekordbox": "rekordbox", "网易云音乐": "netease" })
 	// Keep inactive dictionaries as scalar JSON strings. Only the selected language
 	// becomes a JS object/GC root; retain all spellings for live language switching.
 	readonly property var scDicts: (@DICTS@)
@@ -3963,6 +3965,17 @@ SERVICES_MAIN = """
 		const id = scOwnService(deck) || scScope
 		return source === "TIDAL" && id && id !== "tidal" ? scIcon(id) : ""
 	}
+	// #305: a browse row's mark. Engine draws the TIDAL slot's mark on every row the gateway serves (providerIconUri), so a row of another
+	// service says TIDAL. The gateway names a row's own service in its provider label ("Deezer [128 BPM 8A]", labelWithBPM: the same
+	// provider the header's lookup answers with), the row shows that service's mark; a row whose label names none (the services' mixed
+	// lists, a drive row) takes the selected service's, as a deck with no service on record does. Real TIDAL keeps its own mark (the test
+	// scSwapStemmed makes), and so does any mark that is not the slot's. "" keeps stock's mark.
+	function scRowIcon(stock, label) {
+		if (!/tidal/i.test(String(stock || "")) || (scScope === "tidal" && scTidalLoggedIn)) return ""
+		const name = String(label || "").split(" [")[0]
+		const own = scRowLabels.hasOwnProperty(name) ? scRowLabels[name] : (scServices.find(v => v.name === name) || {}).id
+		return own ? (own === "tidal" ? "" : scIcon(own)) : scSlotIcon("TIDAL", 0)
+	}
 	// Capture manual and auto-detected IANA time zones via stock Planck.timeDateController
 	// signals and persist them through stream-sync (/data/enginex/state/timezone) without
 	// interposing setenv/unsetenv in Engine. Treat UTC as an unsolicited fallback only
@@ -4129,10 +4142,13 @@ SERVICES_MAIN = """
 		return !!(root.scBrowseProp && root.scBrowseProp.translator && root.scBrowseProp.translator.state) ||
 			!!(typeof PlanckGUI !== "undefined" && PlanckGUI.views && PlanckGUI.views.sourceScreenView && PlanckGUI.views.sourceScreenView.visible)
 	}
+	// Digits in groups of three. Not a zero-width global replace: Qt 6.7.2's V4 engine puts the separator in twice for that ("6,,031").
 	function scFormatCount(n) {
-		const v = n > 0 ? (n - (n % 1)) : 0
-		const s = "" + v
-		return s.replace(/\\B(?=(\\d{3})+(?!\\d))/g, ",")
+		const s = "" + (n > 0 ? (n - (n % 1)) : 0)
+		if (!/^\\d+$/.test(s)) return s
+		let out = ""
+		for (let i = 0; i < s.length; i++) out += (i > 0 && (s.length - i) % 3 === 0 ? "," : "") + s[i]
+		return out
 	}
 	function scUsbLoadingText() {
 		if (root.scUsbPrepareError) return root.scT(root.scUsbPrepareError)
@@ -7884,6 +7900,20 @@ def edits(dev: bool):
         v + "BrowseView/Components/Components/" + ("BrowseViewBpm.qml" if v53() else "Bpm.qml"): [('text: row.modelData.bpm || ""', 'text: row.modelData.bpm || root.scPreview(row.modelData.providerName)[1]')],
         v + "BrowseView/Components/Components/Key.qml": [('text: row.modelData.key || ""', 'text: row.modelData.key || root.scPreview(row.modelData.providerName)[2] || ""')],
         v + "BrowseView/Components/Components/Song.qml": [('title: row.modelData.song || ""', 'title: root.scPlainTitle(row.modelData.song)')],
+        # #305: a streamed row's provider mark is its own service's (scRowIcon), not the slot's TIDAL; a service's own colours, stock's size.
+        v + "BrowseView/Components/Components/ProviderIcon.qml": [(
+            'source: row.modelData.providerIconUri ?? ""\n',
+            'readonly property string scMark: root.scRowIcon(row.modelData.providerIconUri ?? "", row.modelData.providerName || "")\n'
+            "        useOriginal: scMark !== \"\"\n"
+            '        source: scMark !== "" ? scMark : (row.modelData.providerIconUri ?? "")\n',
+        )],
+        # 5.3.0 only: the mark beside an offline TIDAL playlist is the slot's too (the selected service's, as a deck with no service on record).
+        **({v + "BrowseView/Components/BreadcrumbView/BreadcrumbViewListEntryDelegate.qml": [(
+            'source: "qrc:/Skins/UIKit/Icons/SourceTIDAL.png"\n',
+            'readonly property string scMark: root.scSlotIcon("TIDAL", 0)\n'
+            "            useOriginal: scMark !== \"\"\n"
+            '            source: scMark !== "" ? scMark : "qrc:/Skins/UIKit/Icons/SourceTIDAL.png"\n',
+        )]} if v53() else {}),
         # rb-bridge converts rekordbox media at mount. Engine's own slow import of a
         # large library corrupted m.db, so always take the prompt's "Ignore" branch.
         ROOT + "Items/MessageBoxes/RekordBoxImportDialog.qml": [(
