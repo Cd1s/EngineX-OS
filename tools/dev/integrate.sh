@@ -30,9 +30,13 @@ run_id=$(printf '%s-%s-%s' "$(date +%s)" "$$" "${RANDOM:-0}")
 target_head=$(git rev-parse --short "origin/$TARGET")
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/enginex-integrate.${target_head}.XXXXXX")
 worktree=$tmp/worktree
+dropped_lines_file=$tmp/dropped-lines.tsv
+: >"$dropped_lines_file"
 remote_names=()
 remote_hosts=()
 remote_counter=0
+dropped_hunks=()
+doc_notes=()
 started=$(date +%s)
 
 cleanup_remote() {
@@ -90,11 +94,20 @@ remote_run() {
 
 added_lines_check() {
     local base=$1 other=$2 result=$3
-    python3 - "$base" "$other" "$result" <<'PY'
+    python3 - "$base" "$other" "$result" "${dropped_lines_file:-}" <<'PY'
 import subprocess, sys
-base, other, result = sys.argv[1:]
+base, other, result, dropped_file = sys.argv[1:]
 diff = subprocess.check_output(["git", "diff", "--no-renames", "--unified=0", base, other], text=True)
 files = {}
+excluded = {"README.md", "README.zh-CN.md", "README.zh-TW.md", "docs/index.html"}
+# Release docs are maintained at release time, so conflict policy may intentionally drop incoming hunks.
+dropped = set()
+if dropped_file:
+    try:
+        with open(dropped_file, encoding="utf-8") as handle:
+            dropped = {tuple(line.rstrip("\n").split("\t", 1)) for line in handle}
+    except FileNotFoundError:
+        pass
 current = None
 for line in diff.splitlines():
     if line.startswith("+++ b/"):
@@ -103,11 +116,15 @@ for line in diff.splitlines():
     elif line.startswith("+") and not line.startswith("+++") and current:
         files[current].append(line[1:])
 for path, lines in files.items():
+    if path in excluded or path.startswith("docs/site/"):
+        continue
     try:
         content = open(result + "/" + path, "r", encoding="utf-8", errors="surrogateescape").read().splitlines()
     except (FileNotFoundError, IsADirectoryError):
         raise SystemExit(f"lost added file: {path}")
     for line in lines:
+        if (path, line) in dropped:
+            continue
         if line not in content:
             raise SystemExit(f"lost added line in {path}: {line}")
 PY
@@ -178,15 +195,30 @@ targeted_tests() {
 }
 
 resolve_conflicts_both() {
-    python3 - "$worktree" <<'PY'
+    local branch=$1 resolution_log=$tmp/conflict-resolution.log kind path first
+    if ! python3 - "$worktree" "$dropped_lines_file" >"$resolution_log" <<'PY'
 from difflib import SequenceMatcher
 from pathlib import Path
-import subprocess, sys
+import re, subprocess, sys
 
 root = Path(sys.argv[1])
+dropped_lines_path = Path(sys.argv[2])
 paths = subprocess.check_output(
     ["git", "-C", str(root), "diff", "--name-only", "--diff-filter=U"], text=True
 ).splitlines()
+release_docs = {
+    "README.md",
+    "README.zh-CN.md",
+    "README.zh-TW.md",
+    "docs/index.html",
+}
+
+def is_release_doc(path):
+    return path in release_docs or path.startswith("docs/site/")
+
+def cache_version(lines):
+    values = [int(value) for line in lines for value in re.findall(r"\?v=(\d+)", line)]
+    return max(values, default=-1)
 
 def insertions(base, side):
     result = {}
@@ -233,6 +265,24 @@ for path in paths:
         if index == len(lines):
             raise SystemExit(f"{path}: conflict hunk {hunk} has no end marker")
         index += 1
+        if path == "docs/ISSUE-FIXES-5.3.0.5.md":
+            output.extend(ours)
+            with open(dropped_lines_path, "a", encoding="utf-8") as dropped_file:
+                for line in theirs:
+                    dropped_file.write(f"{path}\t{line.rstrip(chr(10))}\n")
+            first = next((line.strip() for line in theirs if line.strip()), "")
+            print(f"DROPPED_HUNK\t{path}\t{first}")
+            continue
+        if is_release_doc(path):
+            if cache_version(theirs) > cache_version(ours):
+                output.extend(theirs)
+                first = next((line.strip() for line in ours if line.strip()), "")
+                print(f"KEPT_INCOMING\t{path}\tcache-v-higher-than-batch\t{first}")
+            else:
+                output.extend(ours)
+                first = next((line.strip() for line in theirs if line.strip()), "")
+                print(f"DROPPED_HUNK\t{path}\t{first}")
+            continue
         try:
             ours_insertions = insertions(base, ours)
             theirs_insertions = insertions(base, theirs)
@@ -245,6 +295,17 @@ for path in paths:
                 output.append(base[position])
     file_path.write_text("".join(output), encoding="utf-8", errors="surrogateescape")
 PY
+    then
+        cat "$resolution_log" >&2
+        return 1
+    fi
+    while IFS=$'\t' read -r kind path first; do
+        [[ -n "$kind" ]] || continue
+        case $kind in
+            DROPPED_HUNK) dropped_hunks+=("$branch|$path|$first") ;;
+            KEPT_INCOMING) doc_notes+=("$branch|$path|$first") ;;
+        esac
+    done < "$resolution_log"
 }
 
 rebase_copy() {
@@ -253,7 +314,7 @@ rebase_copy() {
     git -C "$worktree" switch --detach "origin/$branch" >/dev/null
     git -C "$worktree" switch -C "$b1" "origin/$branch" >/dev/null
     set +e
-    GIT_EDITOR=true git -C "$worktree" -c user.name=enginex-integrate -c user.email=enginex-integrate@localhost \
+    GIT_EDITOR=true git -C "$worktree" -c merge.conflictStyle=diff3 -c user.name=enginex-integrate -c user.email=enginex-integrate@localhost \
         rebase --onto "$pre_merge" "$base" "$b1" >/dev/null 2>&1
     rc=$?
     set -e
@@ -264,13 +325,13 @@ rebase_copy() {
             echo "rebase refused for $branch without a resolvable conflict hunk" >&2
             return 1
         }
-        if ! resolve_conflicts_both; then
+        if ! resolve_conflicts_both "$branch"; then
             git -C "$worktree" rebase --abort >/dev/null 2>&1 || true
             return 1
         fi
         git -C "$worktree" add -A
         set +e
-        GIT_EDITOR=true git -C "$worktree" -c user.name=enginex-integrate -c user.email=enginex-integrate@localhost \
+        GIT_EDITOR=true git -C "$worktree" -c merge.conflictStyle=diff3 -c user.name=enginex-integrate -c user.email=enginex-integrate@localhost \
             rebase --continue >/dev/null 2>&1
         rc=$?
         set -e
@@ -346,4 +407,4 @@ full_inner='set -eu; test -z "$(gofmt -l .)"; go vet ./...; go test -race -timeo
 remote_run "$full_host" "$full_inner"
 git -C "$worktree" push origin "HEAD:$TARGET" >/dev/null
 elapsed=$(( $(date +%s) - started ))
-printf 'Merged %s into %s; targeted tests after each merge; full suites on %s; elapsed %ss.\n' "${merged[*]}" "$TARGET" "$full_host" "$elapsed"
+printf 'Merged %s into %s; targeted tests after each merge; full suites on %s; elapsed %ss.' "${merged[*]}" "$TARGET" "$full_host" "$elapsed"; if ((${#dropped_hunks[@]})); then printf ' Dropped hunks %s.' "${dropped_hunks[*]}"; fi; if ((${#doc_notes[@]})); then printf ' Doc cache decisions %s.' "${doc_notes[*]}"; fi; printf '\n'
