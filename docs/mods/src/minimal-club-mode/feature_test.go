@@ -2,8 +2,10 @@ package clubmode
 
 import (
 	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/Cd1s/EngineX-OS/docs/mods/src/modkit"
 )
@@ -202,6 +204,9 @@ func TestRebootRePausesServicesAndAllowsReEnable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	ff2 := f2.(*feature)
+	ff2.mu.Lock() // wait for the start-up re-pause
+	ff2.mu.Unlock()
 	if live[Services[0]] {
 		t.Fatalf("service still active after reboot while club mode is active")
 	}
@@ -220,5 +225,58 @@ func TestRebootRePausesServicesAndAllowsReEnable(t *testing.T) {
 	}
 	if live[Services[0]] {
 		t.Fatalf("service still active after re-enable")
+	}
+}
+
+func TestNewDoesNotWaitForSystemctlStop(t *testing.T) {
+	old := Systemctl
+	defer func() { Systemctl = old }()
+	entered, release := make(chan struct{}), make(chan struct{})
+	stopped := false
+	Systemctl = func(args ...string) (string, string, int) {
+		switch args[0] {
+		case "show":
+			return "loaded\n", "", 0
+		case "is-active":
+			if stopped {
+				return "inactive\n", "", 3
+			}
+			return "active\n", "", 0
+		case "stop":
+			close(entered)
+			<-release // a slow `systemctl stop`
+			stopped = true
+		}
+		return "", "", 0
+	}
+	state := t.TempDir()
+	if err := modkit.SaveJSON(filepath.Join(state, "paused.json"), snapshot{Active: true, Services: []string{Services[0]}, Phase: "paused"}); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan modkit.Feature, 1)
+	go func() {
+		f, _ := New(modkit.Env{State: state})
+		done <- f
+	}()
+	var f modkit.Feature
+	select {
+	case f = <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("New waited for systemctl stop: the helper's health check would time out")
+	}
+	<-entered             // the re-pause is running in the background
+	st, err := f.Status() // the health check: must answer while the stop is still running
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active, _ := st.(map[string]any)["active"].(bool); !active {
+		t.Fatalf("status while re-pausing: %v", st)
+	}
+	close(release)
+	ff := f.(*feature)
+	ff.mu.Lock() // wait for the re-pause to finish
+	ff.mu.Unlock()
+	if !stopped {
+		t.Fatal("the saved service was not stopped")
 	}
 }

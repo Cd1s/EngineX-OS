@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/docs/mods/src/modkit"
@@ -55,13 +56,19 @@ var Systemctl = func(args ...string) (stdout, stderr string, code int) {
 
 type feature struct {
 	path string
+	mu   sync.Mutex // the start-up re-pause and Action never overlap; Status does not wait
 }
 
-// New returns the Minimal Club Mode feature, re-pausing any saved services
-// that systemd started again on reboot while club mode is active.
+// New returns the Minimal Club Mode feature. Saved services that systemd started again on
+// reboot are re-paused in the background: `systemctl stop` can outlast the 3 s that
+// start.sh waits for the helper's health check.
 func New(env modkit.Env) (modkit.Feature, error) {
 	f := &feature{path: filepath.Join(env.State, "paused.json")}
-	_ = f.reapplyPaused()
+	f.mu.Lock() // taken here, so an Action that arrives at once waits for the re-pause
+	go func() {
+		defer f.mu.Unlock()
+		_ = f.reapplyPaused()
+	}()
 	return f, nil
 }
 
@@ -125,6 +132,8 @@ func allowed(unit string) bool {
 }
 
 func (f *feature) Action(req map[string]any) (any, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	action, err := modkit.Field(req, "action")
 	if err != nil {
 		return nil, err
