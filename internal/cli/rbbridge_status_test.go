@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -87,5 +88,65 @@ func TestRBBridgeUSBLoadingStatusLifecycle(t *testing.T) {
 	}
 	if errSt.State != "error" || errSt.Error == "" {
 		t.Fatalf("unexpected error status: %+v", errSt)
+	}
+}
+
+// #328 stage 1B, cause A: the hook's clear_preparing() removes the status file at the end of the
+// mount, while the background import the mount started goes on; its refresh rewrote the file
+// only while the file was its own, so the banner was gone until the job's next count, minutes
+// later. The refresh brings it back, by the #301 rules: not over another drive's status nor over
+// its error, and not after the job is done.
+func TestIssue328StatusComesBackAfterTheHookClearsIt(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "preparing")
+	read := func() (usbLoadingStatus, bool) {
+		var st usbLoadingStatus
+		b, err := os.ReadFile(p)
+		return st, err == nil && json.Unmarshal(b, &st) == nil
+	}
+	job := newUSBLoadingReporter(p, "usb")
+	job.state = "importing"
+	job.Start()
+	job.Report(120, 2400, true)
+	if err := os.Remove(p); err != nil { // the hook's clear_preparing()
+		t.Fatal(err)
+	}
+	job.Refresh()
+	if st, ok := read(); !ok || st.State != "importing" || st.Done != 120 || st.Total != 2400 || st.Owner != job.owner {
+		t.Fatalf("the job's status after the hook cleared it and a refresh: %+v %v", st, ok)
+	}
+	// A count the throttle held back is the one the refresh writes.
+	job.Report(121, 2400, false)
+	if err := os.Remove(p); err != nil {
+		t.Fatal(err)
+	}
+	job.Refresh()
+	if st, ok := read(); !ok || st.Done != 121 {
+		t.Fatalf("refresh after a throttled count: %+v %v", st, ok)
+	}
+	// Another drive's status stays.
+	other := newUSBLoadingReporter(p, "sd")
+	other.state = "importing"
+	other.Start()
+	other.Report(4, 10, true)
+	job.Refresh()
+	if st, ok := read(); !ok || st.Owner != other.owner || st.Done != 4 {
+		t.Fatalf("the job's refresh took another drive's status: %+v %v", st, ok)
+	}
+	// Another drive's error stays the latest word.
+	other.Fail(errors.New("other failed"))
+	job.Refresh()
+	if _, ok := read(); ok {
+		t.Fatalf("the job's refresh wrote over another drive's error")
+	}
+	other.Done()
+	// Its own error cleared, the job's status comes back; once the job is done, it does not.
+	job.Refresh()
+	if st, ok := read(); !ok || st.Owner != job.owner {
+		t.Fatalf("the job's status did not come back: %+v %v", st, ok)
+	}
+	job.Done()
+	job.Refresh()
+	if _, err := os.Stat(p); !os.IsNotExist(err) {
+		t.Fatalf("a done job's refresh brought its status back: %v", err)
 	}
 }

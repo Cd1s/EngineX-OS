@@ -159,7 +159,11 @@ func (r *usbLoadingReporter) Report(done, total int, force bool) {
 
 func (r *usbLoadingReporter) report(done, total int, force bool) {
 	now := time.Now()
+	st := usbLoadingStatus{State: r.stateName(), Kind: r.kind, Done: done, Total: total}
 	if !force && done > 0 && done < total && done-r.lastDone < 100 && now.Sub(r.lastAt) < 200*time.Millisecond {
+		if r.last.State != "" {
+			r.last = st // the next Refresh writes the latest count (#328)
+		}
 		return
 	}
 	if !r.mayWrite() {
@@ -167,7 +171,7 @@ func (r *usbLoadingReporter) report(done, total int, force bool) {
 	}
 	r.lastAt = now
 	r.lastDone = done
-	r.write(usbLoadingStatus{State: r.stateName(), Kind: r.kind, Done: done, Total: total})
+	r.write(st)
 }
 
 // Waiting keeps the converted library visible while decks or network reads delay publication.
@@ -187,14 +191,15 @@ func (r *usbLoadingReporter) set(state string) {
 	})
 }
 
-// Refresh writes the last state again, so the browser keeps showing it; not over the status
-// another stick's import or mount wrote since (one status file for every drive).
+// Refresh writes the last state again, so the browser keeps showing it: also when the mount's
+// hook has removed the file at its end (clear_preparing, #328), but not over the status another
+// stick's import or mount wrote since, nor over its error (one status file for every drive).
 func (r *usbLoadingReporter) Refresh() {
 	if r == nil || r.path == "" {
 		return
 	}
 	r.locked(func() {
-		if r.last.State != "" && r.owns(r.path) {
+		if r.last.State != "" && r.mayWrite() {
 			r.write(r.last)
 		}
 	})
