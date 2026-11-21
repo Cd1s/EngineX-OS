@@ -134,6 +134,19 @@ func TestRedactLog(t *testing.T) {
 	if got := redactLog("track loaded [air.audio] CPU 45%", ""); got != "track loaded [air.audio] CPU 45%" {
 		t.Fatal(got)
 	}
+	for _, safe := range []string{
+		"stream-sync: early mount hook started",
+		"playing Bob Marley - Three Little Birds.flac",
+		"stream-sync: token refresh failed (HTTP 401)",
+		"stream-sync: session expired, please sign in again",
+		"stream-sync: authorization failed: HTTP 403",
+		"rb-bridge: credential check failed",
+		"stream-sync: invalid signature on manifest",
+	} {
+		if got := redactLog(safe, ""); got != safe {
+			t.Errorf("non-secret line wiped: %q -> %q", safe, got)
+		}
+	}
 }
 
 func logEntry(message string) []byte {
@@ -208,10 +221,13 @@ func TestLogDownloadRequiresAccessCode(t *testing.T) {
 		t.Fatal(err)
 	}
 	args := string(b)
-	for _, arg := range []string{"--since=-30min", "--until=now", "--lines=5000", "--unit=engine.service", "--unit=stream-sync.service", "--unit=enginex-stream-sync.service", "--reverse"} {
+	for _, arg := range []string{"--boot", "--lines=5000", "--unit=engine.service", "--unit=stream-sync.service", "--unit=enginex-stream-sync.service", "--reverse"} {
 		if !strings.Contains(args, arg+"\n") {
 			t.Errorf("missing bound %s", arg)
 		}
+	}
+	if strings.Contains(args, "--since=") || strings.Contains(args, "--until=") {
+		t.Fatal("wall-clock --since/--until filter drops pre-NTP boot logs")
 	}
 	if strings.Contains(args, "sshd") || strings.Contains(args, "1year") {
 		t.Fatal("request overrode journal bounds")
