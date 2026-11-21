@@ -115,10 +115,6 @@ func Heal(db *sql.DB) (Report, error) { return heal(db, false) }
 // heal with dataOnly leaves Engine's views, triggers and indexes byte-identical:
 // Engine compares its schema on attach, then drops and recreates anything altered.
 func heal(db *sql.DB, dataOnly bool) (Report, error) {
-	return healWithMount(context.Background(), db, dataOnly, "")
-}
-
-func healWithMount(ctx context.Context, db *sql.DB, dataOnly bool, mount string) (Report, error) {
 	r := Report{CheckedAt: time.Now().UTC()}
 	var check string
 	if err := db.QueryRow("PRAGMA quick_check").Scan(&check); err != nil {
@@ -185,11 +181,6 @@ func healWithMount(ctx context.Context, db *sql.DB, dataOnly bool, mount string)
 		if err = healArtwork(tx, &r); err != nil {
 			return err
 		}
-		if mount != "" {
-			if err = healTrackPaths(ctx, tx, mount, &r); err != nil {
-				return err
-			}
-		}
 		return tx.QueryRow("SELECT count(*) FROM GuardianReanalysis").Scan(&r.ReanalysisPending)
 	})
 	r.Healthy = err == nil
@@ -228,8 +219,8 @@ func healMount(mount string, maxSessions int, dataOnly bool) (Report, error) {
 }
 
 // HealMountDataOnlyContext is the mount hook heal with a caller-owned budget.
-// When the budget expires, the current transaction rolls back and the caller
-// may continue with the next mount.
+// The base heal commits first. Path normalization then commits in batches and
+// stops cleanly when the caller's budget expires.
 func HealMountDataOnlyContext(ctx context.Context, mount string, maxSessions int) (Report, error) {
 	return healMountContext(ctx, mount, maxSessions, true)
 }
@@ -264,16 +255,22 @@ func healMountContext(ctx context.Context, mount string, maxSessions int, dataOn
 		return r, err
 	}
 	fixed := r.ReserveFixed
-	r, err = healWithMount(ctx, db, dataOnly, mount)
+	r, err = heal(db, dataOnly)
 	r.ReserveFixed = fixed
-	closeErr := db.Close()
-	r.Mount = mount
 	if err != nil {
+		_ = db.Close()
+		r.Mount = mount
 		return r, err
 	}
-	if dataOnly {
-		log.Printf("dbhealer: mount %s normalized %d track paths", mount, r.PathsNormalized)
+	remaining, err := normalizeTrackPaths(ctx, db, mount, &r)
+	if err != nil {
+		_ = db.Close()
+		r.Mount = mount
+		return r, err
 	}
+	closeErr := db.Close()
+	r.Mount = mount
+	log.Printf("dbhealer: mount %s normalized %d track paths, %d remaining", mount, r.PathsNormalized, remaining)
 	if closeErr != nil {
 		return r, closeErr
 	}
@@ -345,12 +342,33 @@ func healMountContext(ctx context.Context, mount string, maxSessions int, dataOn
 	return r, nil
 }
 
-func healTrackPaths(ctx context.Context, tx *sql.Tx, mount string, r *Report) error {
-	rows, err := tx.QueryContext(ctx, `SELECT id, COALESCE(path,''), COALESCE(filename,''), COALESCE(streamingSource,'') FROM Track`)
+type trackPathCandidate struct {
+	id      int64
+	path    string
+	nfcPath string
+}
+
+var normalizeTrackPathBatch func()
+
+func normalizeTrackPaths(ctx context.Context, db *sql.DB, mount string, r *Report) (int, error) {
+	candidates, existing, bridgeManaged, err := collectTrackPathCandidates(db, mount)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	defer rows.Close()
+	eligible := candidates[:0]
+	claimed := map[string]int64{}
+	for _, candidate := range candidates {
+		other, collision := existing[candidate.nfcPath]
+		if bridgeManaged[candidate.id] || collision && other != candidate.id {
+			continue
+		}
+		if other, collision := claimed[candidate.nfcPath]; collision && other != candidate.id {
+			continue
+		}
+		claimed[candidate.nfcPath] = candidate.id
+		eligible = append(eligible, candidate)
+	}
+	candidates = eligible
 	dirs := make(map[string]map[string]bool)
 	listFiles := func(dir string) map[string]bool {
 		if names, ok := dirs[dir]; ok {
@@ -368,42 +386,123 @@ func healTrackPaths(ctx context.Context, tx *sql.Tx, mount string, r *Report) er
 		dirs[dir] = names
 		return names
 	}
-	for rows.Next() {
+	remaining := 0
+	for start := 0; start < len(candidates); start += 64 {
 		if err := ctx.Err(); err != nil {
-			return err
+			return len(candidates) - start, nil
 		}
-		var id int64
-		var path, filename, streaming string
-		if err := rows.Scan(&id, &path, &filename, &streaming); err != nil {
-			return err
+		end := min(start+64, len(candidates))
+		tx, err := db.Begin()
+		if err != nil {
+			return remaining, err
 		}
-		if streaming != "" || path == "" {
-			continue
+		next := start
+		batchFixed := 0
+		for _, candidate := range candidates[start:end] {
+			if ctx.Err() != nil {
+				break
+			}
+			next++
+			oldFile, ok := trackPath(mount, candidate.path)
+			if !ok {
+				continue
+			}
+			newFile, ok := trackPath(mount, candidate.nfcPath)
+			if !ok {
+				continue
+			}
+			if listFiles(filepath.Dir(oldFile))[filepath.Base(oldFile)] {
+				continue
+			}
+			if !listFiles(filepath.Dir(newFile))[filepath.Base(newFile)] {
+				continue
+			}
+			if _, err := tx.Exec(`UPDATE Track SET path=?, filename=? WHERE id=? AND path=?`, candidate.nfcPath, filepath.Base(candidate.nfcPath), candidate.id, candidate.path); err != nil {
+				if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+					continue
+				}
+				_ = tx.Rollback()
+				return remaining, err
+			}
+			existing[candidate.nfcPath] = candidate.id
+			batchFixed++
 		}
-		nfcPath := norm.NFC.String(path)
-		if path == nfcPath {
-			continue
+		if err := tx.Commit(); err != nil {
+			return remaining, err
 		}
-		oldFile, ok := trackPath(mount, path)
-		if !ok {
-			continue
+		r.PathsNormalized += batchFixed
+		if normalizeTrackPathBatch != nil {
+			normalizeTrackPathBatch()
 		}
-		newFile, ok := trackPath(mount, nfcPath)
-		if !ok {
-			continue
+		if next < end {
+			return len(candidates) - next, nil
 		}
-		if listFiles(filepath.Dir(oldFile))[filepath.Base(oldFile)] {
-			continue
-		}
-		if !listFiles(filepath.Dir(newFile))[filepath.Base(newFile)] {
-			continue
-		}
-		if _, err := tx.ExecContext(ctx, `UPDATE Track SET path=?, filename=? WHERE id=? AND path=?`, nfcPath, filepath.Base(nfcPath), id, path); err != nil {
-			return err
-		}
-		r.PathsNormalized++
+		remaining = len(candidates) - end
 	}
-	return rows.Err()
+	return remaining, nil
+}
+
+func collectTrackPathCandidates(db *sql.DB, mount string) ([]trackPathCandidate, map[string]int64, map[int64]bool, error) {
+	rows, err := db.Query(`SELECT id, COALESCE(path,''), COALESCE(streamingSource,'') FROM Track`)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	defer rows.Close()
+	candidates := []trackPathCandidate{}
+	existing := map[string]int64{}
+	for rows.Next() {
+		var id int64
+		var path, streaming string
+		if err := rows.Scan(&id, &path, &streaming); err != nil {
+			return nil, nil, nil, err
+		}
+		if path != "" {
+			existing[path] = id
+		}
+		if streaming == "" && path != "" && path != norm.NFC.String(path) {
+			candidates = append(candidates, trackPathCandidate{id: id, path: path, nfcPath: norm.NFC.String(path)})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, nil, err
+	}
+	bridgeManaged, err := bridgeManagedTracks(mount)
+	return candidates, existing, bridgeManaged, err
+}
+
+func bridgeManagedTracks(mount string) (map[int64]bool, error) {
+	managed := map[int64]bool{}
+	path := filepath.Join(mount, "Engine Library", "Database2", ".rb-bridge-state.db")
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		return managed, nil
+	} else if err != nil {
+		return managed, err
+	}
+	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: path}).String()+"?mode=ro")
+	if err != nil {
+		return managed, err
+	}
+	defer db.Close()
+	var exists int
+	if err := db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name='BridgeState'`).Scan(&exists); err != nil {
+		return managed, err
+	}
+	if exists == 0 {
+		return managed, nil
+	}
+	rows, err := db.Query(`SELECT trackId FROM BridgeState`)
+	if err != nil {
+		return managed, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return managed, err
+		}
+		managed[id] = true
+	}
+	return managed, rows.Err()
 }
 
 func trackPath(mount, path string) (string, bool) {
