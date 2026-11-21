@@ -12457,5 +12457,70 @@ scScope = ''; assert.equal(scBranded(prov('TIDAL')), false);
             self.run_node(script)
 
 
+class StreamingSortButtonTest(unittest.TestCase):
+    """#316 BH-GF4-11: the sort button shows on a streaming list on every model, whatever Engine's hasSortMenu says."""
+    BASES = EnginesOwnAppleMusicTest.BASES
+    edits_of = EnginesOwnAppleMusicTest.edits_of
+    patched = EnginesOwnAppleMusicTest.patched
+    run_node = StreamingSlotIconTest.run_node
+    SORT_MENU = "BrowseView/Components/SortMenu/SortMenu.qml"
+
+    @staticmethod
+    def expressions(text):
+        """The three bindings that decide whether the button shows, as JavaScript: the row's visible, showButton and isStreamingProviderWithSort."""
+        visible = re.search(r"\n[ \t]+visible:(.*?)\n[ \t]+property\s+(?:AbstractCollectionController|var)\s+collectionController", text, re.S)
+        with_sort = re.search(r"readonly property bool isStreamingProviderWithSort:(.*?)\n[ \t]*\n", text, re.S)
+        show = re.search(r"readonly property bool showButton:(.*?)\n[ \t]*\n", text, re.S)
+        if not (visible and with_sort and show):
+            raise AssertionError("SortMenu.qml: a sort binding was not found")
+        return {"visible": visible[1], "withSort": with_sort[1], "show": show[1]}
+
+    def decide(self, text, streaming, has_sort_menu, category="Streaming"):
+        """Evaluate the file's own bindings for a collection and an Engine; no other kind of list is in play."""
+        script = r"""
+const exprs = @EXPRS@;
+const flags = ['Craylist', 'Smartlist', 'Preparelist', 'Historylist', 'FileSystem', 'Stemslist', 'WholeDevice', 'WholeDatabase', 'StreamingPlaylist'];
+const collectionController = {isCurrentCollectionStreaming: @STREAMING@, isShowingSearchResult: false};
+for (const f of flags) collectionController['isCurrentCollection' + f] = false;
+const Planck = {getProperty: () => ({translator: {string: @CATEGORY@}}),
+    librarianController: {streamingInterfaceController: {hasSortMenu: @HAS@}}};
+const CollectionCategoryPlanck = 'Planck', CollectionCategoryOfflineLibrary = 'OfflineLibrary';
+const run = (e, extra) => new Function('collectionController', 'Planck', 'CollectionCategoryPlanck', 'CollectionCategoryOfflineLibrary', 'isStreamingProviderWithSort', 'return (' + e + ')')(
+    collectionController, Planck, CollectionCategoryPlanck, CollectionCategoryOfflineLibrary, extra);
+const withSort = !!run(exprs.withSort);
+console.log(JSON.stringify({withSort, show: !!run(exprs.show, withSort), visible: !!run(exprs.visible, withSort)}));
+""".replace("@EXPRS@", json.dumps(self.expressions(text))).replace("@STREAMING@", json.dumps(streaming)).replace("@HAS@", json.dumps(has_sort_menu)).replace("@CATEGORY@", json.dumps(category))
+        result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required to evaluate the bindings")
+    def test_stock_hides_the_sort_button_on_streaming_lists_when_engine_has_no_sort_menu(self):
+        """The premise: stock gates the button on hasSortMenu, which Engine reports false on the decks tried (SC LIVE 4 and a first-generation Engine)."""
+        for base, root in self.BASES:
+            with self.subTest(base=base):
+                stock = LAB / base / "qrc" / (root + "Views/" + self.SORT_MENU)
+                if not stock.is_file():
+                    self.skipTest(f"{stock} not found")
+                text = stock.read_text(encoding="utf-8")
+                hidden = self.decide(text, True, False)
+                self.assertFalse(hidden["show"] or hidden["visible"], hidden)
+                self.assertTrue(self.decide(text, True, True)["show"])
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required to evaluate the bindings")
+    def test_the_pack_shows_the_sort_button_on_every_streaming_list_whatever_engine_reports(self):
+        for base, root in self.BASES:
+            with self.subTest(base=base):
+                text = self.patched(base, root, self.SORT_MENU)
+                for has in (False, True):
+                    shown = self.decide(text, True, has)
+                    self.assertTrue(shown["withSort"] and shown["show"] and shown["visible"], f"hasSortMenu={has}: {shown}")
+                    # a list that is not streaming keeps stock's rules: no button for it
+                    plain = self.decide(text, False, has, category="Library")
+                    self.assertFalse(plain["show"], f"hasSortMenu={has}: {plain}")
+                # the library lists keep the button they always had
+                self.assertTrue(self.decide(text, False, False, category="Planck")["visible"])
+
+
 if __name__ == "__main__":
     unittest.main()
