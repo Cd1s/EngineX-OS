@@ -12652,6 +12652,40 @@ assert.equal(range.index, 2, 'Sync on and off without widening leaves the range 
         self.assertIn("root.scWidenAll()", bp.SYNC_TILE)
 
 
+class ServiceIconTextureTest(unittest.TestCase):
+    """#316 BH-GF3-18: the service icons the pack draws bigger than Engine's own do not share Engine's texture for the same file.
+
+    Qt hands every Image that loads the same file with the same size the same texture. Engine's Settings > Services draws
+    the icons without mipmaps, the pack's Sources footer (48 px) and login panel (88 px) asked for mipmaps on that same
+    texture, and Qt logged "QSGPlainTexture: Mipmap settings changed without having image data available" when they met.
+    An Image with `cache: false` loads its own pixmap, so the two settings never meet."""
+    ICONS = (("login panel", "LOGIN_DIALOG", "width: 88; height: 88"), ("Sources footer", "SOURCE_FOOTER", "width: 48; height: 48"))
+
+    @staticmethod
+    def image_with(text, size):
+        """The Image { } block of the service icon (found by its size), as its property lines."""
+        found = [m.group(1) for m in re.finditer(r"\n[ \t]*Image \{\n((?:[ \t]+[^\n]*\n)*?)[ \t]*\}", text) if size in m.group(1)]
+        assert len(found) == 1, (size, len(found))
+        return [line.split("//")[0].strip() for line in found[0].splitlines()]
+
+    def test_the_icons_keep_their_mipmaps_and_get_their_own_texture(self):
+        for name, constant, size in self.ICONS:
+            with self.subTest(icon=name):
+                props = self.image_with(getattr(bp, constant), size)
+                self.assertIn("mipmap: true", props, "the icon stays smooth when it is drawn smaller than the file")
+                self.assertIn("cache: false", props, "its own pixmap: no shared texture to change the mipmap setting of")
+                self.assertTrue(any(p.startswith("source: ") and "root.scIcon(" in p for p in props), "still the same icon")
+
+    def test_the_login_qr_keeps_its_own_texture_too(self):
+        """The QR code beside the icon was already uncached: the one place the rule was known."""
+        self.assertRegex(bp.LOGIN_DIALOG, r"Image \{[^}]*cache: false[^}]*\}")
+
+    def test_no_other_pack_image_asks_for_mipmaps(self):
+        """Every `mipmap: true` in the builder is one of the two icons above; a new one would meet Engine's texture the same way."""
+        src = (REPO / "tools/ui-mod/build_packs.py").read_text(encoding="utf-8")
+        self.assertEqual(src.count("mipmap: true"), len(self.ICONS))
+
+
 class ShadowLayerDeckBindingTest(unittest.TestCase):
     """#316 BH-GF3-16: the shadow layer's `deck` is evaluated only once the layer is complete, in the files the report names.
 

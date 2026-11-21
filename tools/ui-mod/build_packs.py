@@ -5194,6 +5194,7 @@ LOGIN_DIALOG = """
 					x: 620; y: 70
 					width: 88; height: 88
 					mipmap: true
+					cache: false // #316: not the texture Engine's own icons share (their mipmap setting differs)
 					source: root.scLogin ? root.scIcon(root.scLogin) : ""
 				}
 				Text {
@@ -5444,6 +5445,7 @@ SOURCE_FOOTER = """
 					anchors.verticalCenter: parent.verticalCenter
 					width: 48; height: 48
 					mipmap: true
+					cache: false // #316: not the texture Engine's own icons share (their mipmap setting differs)
 					source: root.scIcon(modelData.id)
 				}
 				Text {
