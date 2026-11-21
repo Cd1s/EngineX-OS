@@ -111,6 +111,14 @@ func TestIssue321WatcherDropsAReadThatOverlapsAWrite(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	issue321Edit(t, db, 4, "Before the read", 1000)
 	issue321WaitANLZ(t, stick, "During the read", 5*time.Second)
+	for t0 := time.Now(); time.Since(t0) < 3*time.Second; time.Sleep(20 * time.Millisecond) {
+		mu.Lock()
+		n := len(errs)
+		mu.Unlock()
+		if n >= 2 {
+			break // the pass that wrote it has returned
+		}
+	}
 	mu.Lock()
 	defer mu.Unlock()
 	if issue321ANLZHas(t, stick, "Before the read") || len(errs) < 2 || !errors.Is(errs[0], bridge.ErrNotQuietForTest) || errs[len(errs)-1] != nil {

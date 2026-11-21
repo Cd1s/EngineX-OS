@@ -39,3 +39,10 @@ func EjectingNameForTest(mount string) string {
 	h.Write([]byte(mount))
 	return fmt.Sprintf("enginex-ejecting-%016x", h.Sum64())
 }
+
+// SetWriteBackCutForTest calls cut at every step of a pass's writes, until restored.
+func SetWriteBackCutForTest(cut func(step string)) func() {
+	old := writeBackCut
+	writeBackCut = cut
+	return func() { writeBackCut = old }
+}

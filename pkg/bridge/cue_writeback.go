@@ -71,6 +71,9 @@ type WriteBackResult struct {
 
 var usbPreparingFlagPath = "/run/enginex-usb-preparing" // the edisksd hook's mark of a conversion at mount (tests move it)
 
+// writeBackCut is called at every step of a pass's writes; tests stop the stick there (#321).
+var writeBackCut = func(step string) {}
+
 // CueSession is what the passes over one mounted stick found it holding since the mount: a row
 // by its Track.lastEditTime, in memory only. It goes to the state with the next pass that writes
 // the stick anyway (#321).
@@ -522,6 +525,7 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 		if err != nil {
 			return err
 		}
+		writeBackCut("temp " + dst)
 		staged = append(staged, stagedWrite{dst: dst, tmp: tmp})
 		return nil
 	}
@@ -613,6 +617,7 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 			if st, err := os.Stat(tmpPath); err == nil {
 				tm.bytes += st.Size()
 			}
+			writeBackCut("temp " + oneLibFull)
 			staged = append(staged, stagedWrite{dst: oneLibFull, tmp: tmpPath, export: true})
 		}
 	}
@@ -639,6 +644,7 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 			if st, err := os.Stat(tmpPath); err == nil {
 				tm.bytes += st.Size()
 			}
+			writeBackCut("temp " + pdbFull)
 			staged = append(staged, stagedWrite{dst: pdbFull, tmp: tmpPath, export: true})
 		}
 	}
@@ -659,6 +665,7 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 			return res, err
 		}
 		_ = syncDir(filepath.Dir(item.dst))
+		writeBackCut("renamed " + item.dst)
 		res.FilesUpdated++
 		if item.dst == oneLibFull {
 			res.OneLibraryUpdated = true
@@ -689,7 +696,9 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 	} else {
 		writtenIDs = nil
 	}
+	writeBackCut("stamp")
 	record(writtenIDs)
+	writeBackCut("state")
 	finished = true
 	return res, nil
 }
@@ -713,16 +722,22 @@ func markWriteBack(engineDBDir, dateDir string, dirs []string) error {
 }
 
 // CleanWriteBackLeftovers removes what a write-back cut by a pull left on the stick at mount:
-// its temporary files in the directories its mark lists, then the mark. One stat when there
-// is no mark. It returns the number of files removed.
+// a temporary file of its mark, the temporary files in the directories the mark lists, then the
+// mark. Without a mark: one look at Engine's library directory. It returns the files removed.
 func CleanWriteBackLeftovers(mount string) int {
 	dir := filepath.Join(mount, "Engine Library", "Database2")
+	n := 0
+	matches, _ := filepath.Glob(filepath.Join(dir, ".enginex-*.tmp")) // the mark's own temp
+	for _, m := range matches {
+		if os.Remove(m) == nil {
+			n++
+		}
+	}
 	mark := filepath.Join(dir, writeBackMarkName)
 	b, err := os.ReadFile(mark)
 	if err != nil {
-		return 0
+		return n
 	}
-	n := 0
 	for _, rel := range strings.Split(string(b), "\n") {
 		rel = filepath.Clean(filepath.FromSlash(strings.TrimSpace(rel)))
 		if rel == "." || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
@@ -735,12 +750,6 @@ func CleanWriteBackLeftovers(mount string) int {
 					n++
 				}
 			}
-		}
-	}
-	matches, _ := filepath.Glob(filepath.Join(dir, ".enginex-*.tmp")) // the mark's own temp
-	for _, m := range matches {
-		if os.Remove(m) == nil {
-			n++
 		}
 	}
 	_ = os.Remove(mark)
@@ -1238,10 +1247,12 @@ func ensureFirstOriginalBackup(mountRoot, backupRoot, dateDir, relSlash string) 
 	if err := tmp.Close(); err != nil {
 		return 0, err
 	}
+	writeBackCut("backup temp " + dst)
 	if err := os.Rename(tmpPath, dst); err != nil {
 		return 0, err
 	}
 	_ = syncDir(filepath.Dir(dst))
+	writeBackCut("backup " + dst)
 	ok = true
 	return n, nil
 }
@@ -1296,6 +1307,7 @@ func atomicWriteFile(dst string, data []byte, beforeRename func(string) error) e
 	if err := tmp.Close(); err != nil {
 		return err
 	}
+	writeBackCut("temp " + dst)
 	if beforeRename != nil {
 		if err := beforeRename(dst); err != nil {
 			return err
@@ -1305,6 +1317,7 @@ func atomicWriteFile(dst string, data []byte, beforeRename func(string) error) e
 		return err
 	}
 	_ = syncDir(dir)
+	writeBackCut("renamed " + dst)
 	ok = true
 	return nil
 }
