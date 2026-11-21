@@ -9910,6 +9910,30 @@ def edits(dev: bool):
             ('visible: profilesLoginContent.provider && profilesLoginContent.provider.supportLegacyPairing',
              'visible: profilesLoginContent.provider && (profilesLoginContent.provider.supportLegacyPairing || (String(provider.name).toUpperCase() === "TIDAL" && !root.scQuiet() && root.scScope === "tidal"))'),
         ])
+        out.setdefault(ROOT + "Views/MainView/Fx/DJFxParameter.qml", []).extend([
+            ('    LabelWithLED {\n        id: header',
+             '    function triggerValueAnimation() {\n        animation.restart()\n    }\n\n    LabelWithLED {\n        id: header'),
+        ])
+        out.setdefault(ROOT + "Views/MainView/Fx/DJFxProgressParameter.qml", []).extend([
+            ('        onMoved: parameter.value = value',
+             '''        onMoved: parameter.value = value
+
+        function resetToCenter() {
+            if (!isTouchable || !bipolar || !parameter) return
+            const center = slider.from + (slider.to - slider.from) * 0.5
+            slider.value = center
+            parameter.value = center
+            if (typeof parent.triggerValueAnimation === "function") {
+                parent.triggerValueAnimation()
+            }
+        }
+
+        TapHandler {
+            objectName: "DJFx_Parameter_DoubleTap"
+            enabled: isTouchable && bipolar
+            onDoubleTapped: slider.resetToCenter()
+        }'''),
+        ])
         out.setdefault(ROOT + "Views/MainView/Fx/DJFxSpinner.qml", []).extend([
             ('                objectName: "DJFx_Beats_Decrease_Button"', '                objectName: "DJFx_Beats_Decrease_Button"\n                text: spinner.scMsActive ? "−" : ""'),
             ('                objectName: "DJFx_Beats_Increase_Button"', '                objectName: "DJFx_Beats_Increase_Button"\n                text: spinner.scMsActive ? "+" : ""'),

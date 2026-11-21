@@ -278,6 +278,74 @@ Item {
             if (probe.phase === 96) {
                 if (a.scFxBusy || root.scFxMsSending || root.scFxMsWanted !== -1) return
                 probe.check(root.scFxTimeMs === 250, "ms-saved-time-survives-selection")
+                probe.phase = 97; return
+            }
+            if (probe.phase === 97) {
+                let freqParam = null, unipolarParam = null
+                for (let i = 0; i < a.djFxView.variantParameters.length; ++i) {
+                    const p = a.djFxView.variantParameters[i]
+                    if (p.label === "Frequency") freqParam = p
+                    else if (p.widgetType === 1) unipolarParam = p
+                }
+                probe.check(!!freqParam, "frequency-parameter-found")
+                if (!freqParam) {
+                    probe.phase = 98; return
+                }
+                probe.check(freqParam.widgetType === 2, "frequency-is-bipolar")
+                
+                const comp = Qt.createComponent("qrc:/Skins/Embedded/Views/MainView/Fx/DJFxProgressParameter.qml")
+                probe.check(comp.status === Component.Ready, "progress-component-ready")
+                if (comp.status !== Component.Ready) {
+                    console.warn("FXPROBE comp-error|" + comp.errorString())
+                    probe.phase = 98; return
+                }
+                const freqItem = comp.createObject(probe.msWindow.contentItem, {parameter: freqParam, bipolar: true, isTouchable: true})
+                const unipolarItem = unipolarParam ? comp.createObject(probe.msWindow.contentItem, {parameter: unipolarParam, bipolar: false, isTouchable: true}) : null
+
+                let freqSlider = null, freqTap = null, unipolarTap = null
+                probe.walk(freqItem, function(o) {
+                    if (o.objectName === "DJFx_Parameter_Slider") freqSlider = o
+                    if (o.resources) {
+                        for (let r = 0; r < o.resources.length; ++r) {
+                            if (o.resources[r].objectName === "DJFx_Parameter_DoubleTap") freqTap = o.resources[r]
+                        }
+                    }
+                })
+                if (unipolarItem) {
+                    probe.walk(unipolarItem, function(o) {
+                        if (o.resources) {
+                            for (let r = 0; r < o.resources.length; ++r) {
+                                if (o.resources[r].objectName === "DJFx_Parameter_DoubleTap") unipolarTap = o.resources[r]
+                            }
+                        }
+                    })
+                }
+
+                probe.check(!!freqSlider, "frequency-slider-found")
+                probe.check(!!freqTap && freqTap.enabled, "frequency-tap-handler-found-and-enabled")
+                probe.check(!!unipolarTap && !unipolarTap.enabled, "unipolar-double-tap-disabled")
+
+                if (freqSlider && freqTap) {
+                    freqParam.value = 0.8
+                    freqSlider.value = 0.8
+                    freqSlider.moved()
+                    probe.check(Math.abs(freqParam.value - 0.8) < 0.001, "frequency-moved-off-center")
+                    probe.check(freqParam.valueText !== "All Bands", "frequency-value-text-off-center")
+
+                    if (typeof freqSlider.resetToCenter === "function") {
+                        freqSlider.resetToCenter()
+                    }
+
+                    probe.check(Math.abs(freqParam.value - 0.5) < 0.001, "frequency-double-tap-snaps-to-center")
+                    probe.check(Math.abs(freqSlider.value - 0.5) < 0.001, "frequency-slider-snaps-to-center")
+                    probe.check(freqParam.valueText === "All Bands", "frequency-returns-to-all-bands")
+                }
+
+                if (freqItem) freqItem.destroy()
+                if (unipolarItem) unipolarItem.destroy()
+                probe.phase = 98; return
+            }
+            if (probe.phase === 98) {
                 console.warn("FXPROBE done|" + (probe.failed ? "FAIL" : "PASS"))
                 if (probe.knob) probe.knob.destroy()
                 stop()
