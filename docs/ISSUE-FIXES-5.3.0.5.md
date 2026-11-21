@@ -578,7 +578,7 @@ This section is the authoritative final release record for build commit `1c41b7e
 - `build-release.sh`, `build-installer.sh`, and `sign-release.sh` ran from scratch in that order from build commit `1c41b7e9`. The final signed manifest has 29 entries and the output has 31 files.
 - SC5000 JP07, SC6000 JP13, and PRIME 4 JC11 unpacked with `verified: true`; each carries version `5.3.0.5` and release tag `v5.3.0.5-r1`. The three decoded Gen-1 splash previews are `1280x800 RGB` and visibly show `5.3.0.5`.
 - The shipped UI pack contains `phaseActive`, `scShadowHeadOf(deckIndex).phase`, and `scCueFeedTick`, and contains no `scShadowNextTickMs`.
-- The beta1 JP07 baseline has SHA-256 `5e49da15d0a7802dff5f868f647b20e0111cd945eb4789e462aff208d5776fda`; its legacy `/etc/sc5000/release-tag` contains `v5.3.0.5`.
+- The beta1 JP07 baseline has SHA-256 `5e49da15d0a7802dff5f868f647b20e0111cd945eb4789e462aff208d5776fda`; its release-tag file at the pre-rename path contains `v5.3.0.5`.
 
 ### Release gates
 
