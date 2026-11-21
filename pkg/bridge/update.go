@@ -340,6 +340,11 @@ func snapshotLive(ctx context.Context, dir, stage string, r *compat.Resolver, l 
 			}
 		}
 		cut("snapshot copied")
+		// What the fast import left in the rows still fast, for the DJ's edits made on them
+		// after this copy (#328): before the counts, which say the snapshot is complete.
+		if err := enginedb.WriteFastBase(ctx, stage, l); err != nil {
+			return err
+		}
 		counts, err := enginedb.CountTables(ctx, stage)
 		if err != nil {
 			return err
