@@ -68,15 +68,17 @@ var (
 // 11.5 minutes on the maintainer's 6000-track stick, and not at all while a deck held one of its
 // tracks. limit is the hook's kill; nothing is written when the update would not end before it.
 func quickUpdate(ctx context.Context, mount, dir string, r *compat.Resolver, limit time.Time) (enginedb.Result, error) {
-	ctx, cancel := context.WithDeadline(ctx, limit)
+	inner, cancel := context.WithDeadline(ctx, limit)
 	defer cancel()
 	if enginedb.LibraryInUse(mount) {
 		return enginedb.Result{}, enginedb.ErrLibraryInUse
 	}
-	l, stagedOnly, err := readLibrary(ctx, mount)
+	start := time.Now()
+	l, stagedOnly, err := readLibrary(inner, mount)
 	if err != nil {
-		return enginedb.Result{}, err
+		return enginedb.Result{}, quickLate(ctx, err)
 	}
+	read := time.Since(start)
 	fresh, err := quickPaths(dir, l)
 	if err != nil {
 		return enginedb.Result{}, err
@@ -87,12 +89,26 @@ func quickUpdate(ctx context.Context, mount, dir string, r *compat.Resolver, lim
 	}
 	cost := time.Duration(len(l.Tracks)-fresh)*quickPerKnown + time.Duration(fresh)*quickPerNew + time.Duration(entries)*publishPerEntry + publishMargin
 	if left := time.Until(limit); cost > left {
-		return enginedb.Result{}, fmt.Errorf("%w: %d new tracks and %d playlist entries need about %s, %s left", errQuickTooLong, fresh, entries, cost.Round(time.Second), left.Round(time.Second))
+		return enginedb.Result{}, fmt.Errorf("%w: %d tracks (%d new) and %d playlist entries need about %s, %s left", errQuickTooLong, len(l.Tracks), fresh, entries, cost.Round(time.Second), left.Round(time.Second))
 	}
-	return enginedb.SyncResolved(ctx, r, l, enginedb.Options{Fast: true, TrustPaths: true, FastCues: true, StagedOnly: stagedOnly})
+	res, err := enginedb.SyncResolved(inner, r, l, enginedb.Options{Fast: true, TrustPaths: true, FastCues: true, StagedOnly: stagedOnly})
+	if err != nil {
+		return res, quickLate(ctx, err)
+	}
+	log.Printf("rb-bridge: quick update of %d tracks (%d new), %d playlist entries in %s (export read %s, estimate %s)", len(l.Tracks), fresh, entries, time.Since(start).Round(time.Millisecond), read.Round(time.Millisecond), cost.Round(time.Millisecond))
+	return res, nil
 }
 
 var errQuickTooLong = errors.New("the re-export's list does not fit the mount")
+
+// quickLate is a quick update's error, errQuickTooLong when it ran out of the mount's time (its own
+// deadline, not the caller's): the job then builds the list first (quickName).
+func quickLate(ctx context.Context, err error) error {
+	if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+		return fmt.Errorf("%w: %v", errQuickTooLong, err)
+	}
+	return err
+}
 
 // quickPaths prepares the export l for an import of its list alone into the library in dir and
 // counts its new tracks. The export's spelling of a path is trusted for a new track; one the
