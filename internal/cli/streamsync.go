@@ -170,6 +170,7 @@ func StreamSync(args []string) error {
 	webui.DropStaleRekordboxAnalysis(build)
 	go watchEngineTemp(ctx)
 	go watchPersistentClock(ctx)
+	go ui.WatchCues(ctx) // #321: cue edits back to rekordbox sticks, a few seconds after Engine writes them
 	// Tunnels and Tailscale forward to a loopback console listener of their own,
 	// which has no route to the deck-local streaming gateway.
 	forward := &http.Server{Addr: webui.ForwardAddr, Handler: ui.ForwardHandler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 2 * time.Minute, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16384}

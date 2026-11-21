@@ -42,7 +42,16 @@ type WriteBackOptions struct {
 	// Keys keeps the exportLibrary.db keys of a long-lived caller (in memory only). Without it
 	// the pass derives them once for its decrypt and encrypt and forgets them (#321).
 	Keys *rekordbox.KeyCache
+	// Settled, for a pass that reads m.db while Engine holds it (the watcher, #321), says
+	// whether m.db stayed as it was during the read. m.db is then opened immutable (no lock, no
+	// journal), and an error drops the pass before it records or writes anything.
+	Settled func() error
 }
+
+var (
+	errVolumeBusy = errors.New("writeback: volume busy")
+	errConverting = errors.New("writeback: conversion in progress")
+)
 
 // WriteBackResult summarizes a deck-edit write-back pass on a stick.
 type WriteBackResult struct {
@@ -56,7 +65,7 @@ type WriteBackResult struct {
 	BackupDir         string `json:"backupDir,omitempty"`
 }
 
-const usbPreparingFlagPath = "/run/enginex-usb-preparing"
+var usbPreparingFlagPath = "/run/enginex-usb-preparing" // the edisksd hook's mark of a conversion at mount (tests move it)
 
 // CueSession is what the passes over one mounted stick found it holding since the mount: a row
 // by its Track.lastEditTime, in memory only. It goes to the state with the next pass that writes
@@ -153,13 +162,13 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 	}
 	if !opts.SkipPreparingCheck && !opts.OnEject {
 		if _, err := os.Stat(usbPreparingFlagPath); err == nil {
-			return res, errors.New("writeback: conversion in progress")
+			return res, errConverting
 		}
 	}
 
 	unlock, err := lockVolume(absMount)
 	if err != nil {
-		return res, fmt.Errorf("writeback: volume busy: %w", err)
+		return res, fmt.Errorf("%w: %w", errVolumeBusy, err)
 	}
 	defer unlock()
 	keys := opts.Keys
@@ -192,6 +201,13 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 	preStamp, _ := exportStamp(resolver, absMount)
 
 	mURI := url.URL{Scheme: "file", Path: mDBPath, RawQuery: "mode=ro&_pragma=busy_timeout(5000)"}
+	settle := func() error { return nil }
+	if opts.Settled != nil {
+		// Engine holds m.db and takes no locks (#301 sandbox): read the file as it is, without
+		// a lock or the journal, and let Settled tell whether it moved meanwhile.
+		mURI.RawQuery = "mode=ro&immutable=1"
+		settle = opts.Settled
+	}
 	db, err := sql.Open("sqlite", mURI.String())
 	if err != nil {
 		return res, err
@@ -308,6 +324,9 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 	// with a pass that writes the stick anyway, or once on a stick whose state has no record
 	// yet (an earlier build's import): without it every later pass would read every row.
 	record := func(written []int64) {
+		if len(written) == 0 && settle() != nil {
+			return // the read may be torn: nothing it found is kept
+		}
 		kept := confirmed[:0]
 		for _, r := range confirmed {
 			if trusted(r.edit) {
@@ -411,6 +430,29 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 		record(nil)
 		return res, nil
 	}
+	if err := settle(); err != nil {
+		return res, err
+	}
+	// Where this pass may leave a temporary file if the stick goes in the middle: the next
+	// mount removes them (CleanWriteBackLeftovers). The mark goes once everything is written.
+	var tmpDirs []string
+	for _, ch := range changes {
+		tmpDirs = append(tmpDirs, filepath.Dir(filepath.FromSlash(strings.TrimPrefix(ch.analysisPath, "/"))))
+	}
+	if oneLibRel != "" {
+		tmpDirs = append(tmpDirs, filepath.Dir(filepath.FromSlash(oneLibRel)))
+	} else if pdbRel, err := resolver.Resolve("PIONEER/rekordbox/export.pdb"); err == nil {
+		tmpDirs = append(tmpDirs, filepath.Dir(filepath.FromSlash(pdbRel))) // its metadata (#314)
+	}
+	if err := markWriteBack(engineDBDir, dateDir, tmpDirs); err != nil {
+		return res, err
+	}
+	finished := false
+	defer func() {
+		if finished {
+			_ = os.Remove(filepath.Join(engineDBDir, writeBackMarkName))
+		}
+	}()
 
 	backupRoot := filepath.Join(absMount, ".enginex-backup")
 	oneLibUpdates := make(map[uint32][]rekordbox.Cue, len(changes))
@@ -587,7 +629,61 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 		writtenIDs = nil
 	}
 	record(writtenIDs)
+	finished = true
 	return res, nil
+}
+
+// writeBackMarkName lists, one per line, the stick's directories where a write-back in progress
+// may leave a temporary file (.enginex-*.tmp, and .bak-*.tmp under .enginex-backup/<date>/).
+const writeBackMarkName = ".rb-bridge-writeback"
+
+func markWriteBack(engineDBDir, dateDir string, dirs []string) error {
+	seen := map[string]bool{}
+	var b strings.Builder
+	for _, d := range dirs {
+		for _, x := range []string{d, filepath.Join(".enginex-backup", dateDir, d)} {
+			if x = filepath.ToSlash(filepath.Clean(x)); !seen[x] {
+				seen[x] = true
+				b.WriteString(x + "\n")
+			}
+		}
+	}
+	return atomicWriteFile(filepath.Join(engineDBDir, writeBackMarkName), []byte(b.String()), nil)
+}
+
+// CleanWriteBackLeftovers removes what a write-back cut by a pull left on the stick at mount:
+// its temporary files in the directories its mark lists, then the mark. One stat when there
+// is no mark. It returns the number of files removed.
+func CleanWriteBackLeftovers(mount string) int {
+	dir := filepath.Join(mount, "Engine Library", "Database2")
+	mark := filepath.Join(dir, writeBackMarkName)
+	b, err := os.ReadFile(mark)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, rel := range strings.Split(string(b), "\n") {
+		rel = filepath.Clean(filepath.FromSlash(strings.TrimSpace(rel)))
+		if rel == "." || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			continue
+		}
+		for _, pat := range []string{".enginex-*.tmp", ".bak-*.tmp"} {
+			matches, _ := filepath.Glob(filepath.Join(mount, rel, pat))
+			for _, m := range matches {
+				if st, err := os.Lstat(m); err == nil && st.Mode().IsRegular() && os.Remove(m) == nil {
+					n++
+				}
+			}
+		}
+	}
+	matches, _ := filepath.Glob(filepath.Join(dir, ".enginex-*.tmp")) // the mark's own temp
+	for _, m := range matches {
+		if os.Remove(m) == nil {
+			n++
+		}
+	}
+	_ = os.Remove(mark)
+	return n
 }
 
 // recordSynced notes in the state what the stick holds of rows (BridgeSynced, #321) and drops

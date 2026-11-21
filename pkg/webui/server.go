@@ -24,6 +24,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Cd1s/EngineX-OS/pkg/bridge"
 	"github.com/Cd1s/EngineX-OS/pkg/prolink"
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
 	"github.com/skip2/go-qrcode"
@@ -99,6 +100,7 @@ type Config struct {
 type Server struct {
 	cfg           Config
 	jobs          *Jobs
+	cueWatch      atomic.Pointer[bridge.CueWatcher] // #321: set by WatchCues
 	mu            sync.Mutex
 	sessions      map[string]*Session
 	pending       map[string]pending

@@ -108,6 +108,16 @@ func RBBridge(args []string, stdout io.Writer) error {
 		return err
 	}
 	if *mount != "" && *writebackCues {
+		if *onEject {
+			// stream-sync's watcher keeps the stick's keys and what it has read (#321).
+			if r, err, ok := finalWriteBack(ctx, *mount); ok {
+				if err != nil {
+					return err
+				}
+				emit(r)
+				return nil
+			}
+		}
 		r, err := bridge.WriteBackCues(ctx, *mount, bridge.WriteBackOptions{OnEject: *onEject})
 		if err != nil {
 			return err
