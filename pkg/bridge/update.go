@@ -77,12 +77,24 @@ func quickUpdate(ctx context.Context, mount, dir string, r *compat.Resolver, lim
 	if err != nil {
 		return enginedb.Result{}, err
 	}
+	rows, err := ownedPaths(dir)
+	if err != nil {
+		return enginedb.Result{}, err
+	}
 	l, stagedOnly, err := readLibrary(ctx, mount)
 	if err != nil {
 		return enginedb.Result{}, err
 	}
 	// The export's spelling of a path is trusted for a new track; one the library holds keeps its
-	// row's, which an import resolved on the volume: a quick update moves no file of it.
+	// row's path, which an import resolved on the volume, even when the export moved its file: a
+	// quick update moves no row. A row it moved would be imported as new from the export alone and
+	// then no longer count as the import's, and the background update would replace what a deck
+	// changed on it; the update moves it with its files read.
+	for i := range l.Tracks {
+		if p, ok := rows[l.Tracks[i].ID]; ok {
+			l.Tracks[i].Path = "/" + p
+		}
+	}
 	fresh, err := keepSpellings(l, known)
 	if err != nil {
 		return enginedb.Result{}, err
@@ -114,6 +126,43 @@ func keepSpellings(l *rekordbox.Library, known map[string]string) (fresh int, er
 		}
 	}
 	return fresh, nil
+}
+
+// ownedPaths maps the source ID of each track the bridge imported to its row's path, for the rows
+// whose pdbImportKey is theirs alone (libraries of early builds share one key per import).
+func ownedPaths(dir string) (map[uint32]string, error) {
+	rows := map[uint32]string{}
+	state := filepath.Join(dir, stateName)
+	if _, err := os.Stat(state); errors.Is(err, os.ErrNotExist) {
+		return rows, nil
+	}
+	ro := func(p string) string { return (&url.URL{Scheme: "file", Path: p, RawQuery: "mode=ro"}).String() }
+	db, err := sql.Open("sqlite", ro(filepath.Join(dir, "m.db"))+"&_pragma=busy_timeout(5000)")
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	if _, err = db.Exec(`ATTACH DATABASE ? AS bridge`, ro(state)); err != nil {
+		return nil, err
+	}
+	q, err := db.Query(`SELECT t.pdbImportKey,min(s.path),count(*) FROM bridge.BridgeState s JOIN Track t ON t.id=s.trackId WHERE t.pdbImportKey BETWEEN 1 AND 4294967295 GROUP BY 1`)
+	if err != nil {
+		return nil, err
+	}
+	defer q.Close()
+	for q.Next() {
+		var key int64
+		var path string
+		var n int
+		if err = q.Scan(&key, &path, &n); err != nil {
+			return nil, err
+		}
+		if n == 1 {
+			rows[uint32(key)] = strings.TrimPrefix(path, "../")
+		}
+	}
+	return rows, q.Err()
 }
 
 // ownedSpellings maps the folded path of each track the bridge imported to its row's spelling.
@@ -177,7 +226,10 @@ func snapshotLive(ctx context.Context, dir, stage string) error {
 		for _, name := range names {
 			os.Remove(filepath.Join(stage, name+".copy"))
 		}
-		if err := copyFile(live, filepath.Join(stage, "m.db.copy")); err != nil {
+		// Only the library's pages, not its free ones (VACUUM INTO). Immutable: no lock is taken
+		// and no journal is looked at, so this reader never writes Engine's library; the identity
+		// before and after decides whether the copy is consistent.
+		if err := vacuumInto(ctx, live, filepath.Join(stage, "m.db.copy")); err != nil {
 			return err
 		}
 		// The state without the waveform copies of earlier builds and its free pages, built
@@ -218,6 +270,21 @@ func snapshotLive(ctx context.Context, dir, stage string) error {
 		return syncFile(stage)
 	}
 	return errors.New("Engine kept writing the library; the update goes on at the next mount")
+}
+
+// vacuumInto writes the SQLite database src to dst with VACUUM INTO, reading src as immutable.
+func vacuumInto(ctx context.Context, src, dst string) error {
+	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: src, RawQuery: "mode=ro&immutable=1"}).String())
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	if _, err = db.ExecContext(ctx, `VACUUM INTO ?`, dst); err != nil {
+		os.Remove(dst)
+		return fmt.Errorf("copy of %s: %w", filepath.Base(src), err)
+	}
+	return syncFile(dst)
 }
 
 // updateInBackground runs the import passes of an update on the stage's copy of the library.
@@ -311,7 +378,18 @@ func handToMounts(ctx context.Context, r *compat.Resolver, l *rekordbox.Library,
 		return enginedb.Result{}, false, nil // a copy of so small a library costs less
 	}
 	start := time.Now()
-	reread, added, err := enginedb.PlanUpdate(ctx, r, l, dir)
+	// A track the library holds is looked for under its row's spelling first: the resolver then
+	// confirms it from the folder it lists anyway.
+	known, err := ownedSpellings(dir)
+	if err != nil {
+		return enginedb.Result{}, false, nil
+	}
+	plan := *l
+	plan.Tracks = append([]rekordbox.Track(nil), l.Tracks...)
+	if _, err = keepSpellings(&plan, known); err != nil {
+		return enginedb.Result{}, false, nil
+	}
+	reread, added, err := enginedb.PlanUpdate(ctx, r, &plan, dir)
 	if err != nil {
 		if ctx.Err() != nil {
 			return enginedb.Result{}, true, err

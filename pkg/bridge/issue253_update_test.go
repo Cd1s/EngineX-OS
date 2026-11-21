@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"math/rand"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -330,4 +331,56 @@ func TestIssue253SmallUpdateOfALargeLibraryIsReadInPlace(t *testing.T) {
 	if r, err = bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false); err != nil || !r.Bypassed {
 		t.Fatalf("mount after: %+v %v", r, err)
 	}
+}
+
+// A track the re-export moved keeps its row and what a deck did to it: the quick update leaves the
+// row where it is, and the update moves it with its files read, as an import that owns it.
+func TestIssue253QuickUpdateLeavesAMovedTrackToTheUpdate(t *testing.T) {
+	root, cues := issue253Converted(t, 40)
+	testfixture.LargeExport(t, root, 60)
+	// rekordbox moved track 3's file: same length, so only the path string changes in the export.
+	utf16le := func(s string) []byte {
+		var b []byte
+		for _, r := range s {
+			b = append(b, byte(r), 0)
+		}
+		return b
+	}
+	from, to := testfixture.LargeTrackPath(3), strings.Replace(testfixture.LargeTrackPath(3), "Track00003", "Moved00003", 1)
+	pdb := stagePath(root, "..", "..", "..", "PIONEER", "rekordbox", "export.pdb")
+	b, err := os.ReadFile(pdb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Count(b, utf16le(from)) != 1 {
+		t.Fatal("track 3's path not found once in the export")
+	}
+	if err = os.WriteFile(pdb, bytes.Replace(b, utf16le(from), utf16le(to), 1), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Rename(stagePath(root, "..", "..", "..", from), stagePath(root, "..", "..", "..", to)); err != nil {
+		t.Fatal(err)
+	}
+	defer bridge.SetLargeExportForTest()()
+	ctx := context.Background()
+	if r, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false); err != nil || !r.Background || r.Added != 20 {
+		t.Fatalf("mount of the re-export: %+v %v", r, err)
+	}
+	db := dbOpen(t, root)
+	issue253DeckEdit(t, db, cues)
+	if n := scalar[int](t, db, `SELECT count(*) FROM bridge.BridgeState s JOIN Track t ON t.id=s.trackId WHERE t.pdbImportKey=3 AND s.fingerprint NOT LIKE 'fast:%' AND t.path=?`, "../"+from); n != 1 {
+		t.Fatal("the quick update moved track 3's row or made it an export-only row")
+	}
+	db.Close()
+	if r, err := bridge.ImportInBackground(ctx, root, nil); err != nil || r.Deferred != 0 {
+		t.Fatalf("background update: %+v %v", r, err)
+	}
+	if r, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false); err != nil || r.Background {
+		t.Fatalf("publishing mount: %+v %v", r, err)
+	}
+	db = dbOpen(t, root)
+	if got := scalar[string](t, db, `SELECT path FROM Track WHERE pdbImportKey=3`); got != "../"+to {
+		t.Fatalf("track 3 at %q after the update, want the moved path", got)
+	}
+	issue253DeckEdit(t, db, cues)
 }
