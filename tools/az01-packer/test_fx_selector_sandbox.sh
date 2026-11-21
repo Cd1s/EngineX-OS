@@ -77,9 +77,12 @@ cp "${FX_HOOK:-$REPO/rootfs-overlay/etc/enginex/libengine-ui-hook.so}" "$R/etc/e
 cp "$W/libfx-native-test.so" "$R/tmp/libfx-native-test.so"
 cp -a "$W/packs/en" "$R/data/enginex/ui/packs/"
 mkdir -p "$R/data/enginex/ui/packs/en/Skins/Common/Items"
-cp "$REPO/tools/az01-packer/fx-selector-probe.qml" "$R/data/enginex/ui/packs/en/Skins/Common/Items/QmlWarnings.qml"
-if [ -n "${FX_DRIVER:-}" ]; then
+if [ -n "${FX_QML_PROBE:-}" ]; then
+    cp "$FX_QML_PROBE" "$R/data/enginex/ui/packs/en/Skins/Common/Items/QmlWarnings.qml"
+elif [ -n "${FX_DRIVER:-}" ]; then
     printf 'import QtQuick 2.12\nItem {}\n' > "$R/data/enginex/ui/packs/en/Skins/Common/Items/QmlWarnings.qml"
+else
+    cp "$REPO/tools/az01-packer/fx-selector-probe.qml" "$R/data/enginex/ui/packs/en/Skins/Common/Items/QmlWarnings.qml"
 fi
 if [ "${FX_CONFIG_ONLY:-0}" = 1 ]; then
     cat > "$R/data/enginex/ui/packs/en/Skins/Common/Items/QmlWarnings.qml" <<'QML'
@@ -110,7 +113,7 @@ printf '%s\n' "$engine_rc" > "$W/engine-exit.txt"
 if [ -f "$R/tmp/fx-ms-spinner.png" ]; then cp "$R/tmp/fx-ms-spinner.png" "$W/fx-ms-spinner.png"; fi
 case "$engine_rc" in 0|124|137) ;; *) echo "Engine exited $engine_rc" >&2; exit 1 ;; esac
 if [ -n "${FX_DRIVER:-}" ]; then
-    grep -a "^${FX_DRIVER_TAG:?} " "$W/engine.log" | cut -c1-200
+    grep -a -E "^${FX_DRIVER_TAG:?} |${FX_DRIVER_TAG}_QML|engine-ui-hook: Color FX" "$W/engine.log" | cut -c1-200
     grep -aq "^$FX_DRIVER_TAG done|PASS" "$W/engine.log"
     ! grep -aq "^$FX_DRIVER_TAG FAIL" "$W/engine.log"
     exit
