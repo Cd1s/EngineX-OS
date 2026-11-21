@@ -101,7 +101,7 @@ Item {
         })
         panel.grabToImage(function(r) { say("picture " + s.id + " " + r.saveToFile("/tmp/browse-" + board + "-" + tag + "-" + s.id + ".png")) })
     }
-    // The rekordbox import banner's counts (scFormatCount), evaluated by this Engine's own QML engine (the same Qt as on a deck).
+    // The rekordbox import banner's counts (scFormatCount), evaluated by this Engine's own QML engine (the Qt of the deck's own rootfs, printed by the sandbox script).
     // "after" must give each size once; "before" only records what the base pack gives.
     function counts() {
         const want = [[0, "0"], [5, "5"], [999, "999"], [1000, "1,000"], [6031, "6,031"], [19985, "19,985"], [1234567, "1,234,567"]]
@@ -110,7 +110,6 @@ Item {
             say("count " + w[0] + " -> " + got + (got === w[1] ? "" : " (expected " + w[1] + ")"))
             if (after) expect(got === w[1], "count " + w[0] + " reads " + w[1])
         })
-        say("Qt " + Qt.version)
         say("banner " + root.scFormatCount(0) + " / " + root.scFormatCount(6031))
     }
     function stepsFor() {

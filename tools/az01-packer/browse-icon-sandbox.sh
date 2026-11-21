@@ -127,6 +127,8 @@ mkdir -p "$R/data/enginex/ui/packs/en/Skins/Common/Items"
 sed "s/@BOARD@/$board/; s/@TAG@/$expect/; s/@EXPECT@/$expect/" "$REPO/tools/az01-packer/browse-icon-probe.qml" > "$R/data/enginex/ui/packs/en/Skins/Common/Items/QmlWarnings.qml"
 printf 'lang=en\n' > "$R/data/enginex/ui/settings.conf"
 chroot "$R" /usr/bin/dbus-daemon --system --fork --nopidfile > "$W/$board-dbus.log" 2>&1 || true
+# The QML engine that evaluates the probe is the one in this rootfs.
+echo "$board Qt library: $(ls "$R/usr/qt/lib" "$R/usr/lib" 2>/dev/null | grep -m1 -E '^libQt6Core\.so\.[0-9]+\.[0-9]+\.[0-9]+$')"
 engine_rc=0
 timeout --kill-after=5s "${BROWSE_ICON_TIMEOUT:-180}s" chroot "$R" /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/tmp/home LD_LIBRARY_PATH=/usr/lib/$triplet:/usr/lib:/usr/qt/lib \
     LD_PRELOAD=$preload SBX_CARD=$board SBX_OUT=4 SBX_IN=2 SBX_CLOCK_HZ=48000 SBX_HEADLESS_VSYNC=1 \
