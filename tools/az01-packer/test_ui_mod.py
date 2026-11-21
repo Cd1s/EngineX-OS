@@ -8540,7 +8540,8 @@ if (v53) {
         hidden = re.search(r'visible: model\.typeText !== "Streaming" \|\| (\[[^\n]+?\])\.indexOf\(model.name\) < 0', bp.AVAILABLE_SOURCE)
         self.assertIsNotNone(hidden)
         hidden_names = json.loads(hidden[1])
-        self.assertEqual(hidden_names, ["TIDAL", "Tidal", "SoundCloud", "Beatport LINK", "Apple Music"])
+        # #323: Engine's own Apple Music is a row of its own again (this list once held "Apple Music" and sent the row to EngineX's).
+        self.assertEqual(hidden_names, ["TIDAL", "Tidal", "SoundCloud", "Beatport LINK"])
         self.run_js("""
 let name='', typeText='Streaming', enters=0, opens=0, last='';
 const model={roles() {return {typeText:273};},index(i) {return i;},data(i,role) {return role===257 ? name : typeText;}};
@@ -8554,14 +8555,13 @@ const Planck={librarianController:{browserSourceControllerPtr() {return {
 for (const kind of ['Streaming','Storage','Remote Library']) for (const available of [false,true]) {
     typeText=kind;
     nav.availableSourceIndex=available ? 0 : -1;
-    for (const visible of ['Beatport','BEATPORT','Beatsource','Amazon Music','Dropbox','USB 1','SD Card','SoundCloud GO+']) {
+    for (const visible of ['Beatport','BEATPORT','Beatsource','Amazon Music','Dropbox','USB 1','SD Card','SoundCloud GO+','AppleMusic','Apple Music']) {
         name=visible; enters=0; opens=0; scSourceEnter();
         assert.equal(enters,1,visible); assert.equal(opens,0,visible);
     }
     for (const hidden of hiddenNames) {
         name=hidden; enters=0; opens=0; scSourceEnter();
         assert.equal(enters,Number(kind!=="Streaming"),hidden+" / "+kind); assert.equal(opens,Number(kind==="Streaming"),hidden+" / "+kind);
-        if (kind === "Streaming" && hidden === "Apple Music") assert.equal(last,"applemusic");
     }
 }
 """)
@@ -8888,14 +8888,15 @@ assert.deepEqual(opened, ['deezer']);
                     self.assertIn('["TIDAL", "Tidal", "SoundCloud", "Beatport LINK"]', source)
                     self.assertIn('"Beatport LINK"', source)
                     main = (base / "EmbeddedMain.qml").read_text()
-                    self.assertIn('{ id: "applemusic", name: "Apple Music" }', main)
+                    self.assertIn('{ id: "applemusic", name: "Apple Music (EngineX)" }', main)  # #323: Engine's own Apple Music keeps the plain name
                     self.assertIn('property var scSources: []', main)
                     self.assertTrue((out / "icons/applemusic.png").is_file())
                     self.assertIn('const streaming = root.scSourceTypeText(model, row) === "Streaming"', source)
-                    self.assertIn('if (streaming && name === "Apple Music") { root.scOpen("applemusic"); return }', source)
+                    self.assertNotIn('"Apple Music"', source)  # #323: Engine's own row is no longer sent to EngineX's
+                    self.assertNotIn('scOpen("applemusic")', source)
                     self.assertIn('root.scLoginBegin(modelData.id)', bp.SOURCE_FOOTER)
                     self.assertIn('model: root.scServices', bp.STREAM_SWITCHES)
-                    self.assertIn('"Apple Music"', bp.AVAILABLE_SOURCE)
+                    self.assertNotIn('"Apple Music"', bp.AVAILABLE_SOURCE)  # #323: Engine's own tile is not hidden
                     # The computer with rekordbox is a source of the list while it is on Pro DJ Link,
                     # named after the computer, with no login and no switch among the services.
                     self.assertIn('{ id: "rekordbox", name: scRekordboxName ? "rekordbox (" + scRekordboxName + ")" : "rekordbox" }', main)
@@ -9584,7 +9585,7 @@ for (const scope of ['tidal', 'deezer', 'spotify', '']) for (const paired of [tr
 """)
 
     def test_the_pack_labels_are_the_gateways_labels(self):
-        """scRowIcon reads the label the gateway puts on a row (providerLabels): a service's name, or one of the two spellings scRowLabels names."""
+        """scRowIcon reads the label the gateway puts on a row (providerLabels): a service's name, or one of the spellings scRowLabels names (#323: the gateway's "Apple Music" is EngineX's, which the deck now names "Apple Music (EngineX)")."""
         go = (REPO / "pkg/webui/tidal_gateway.go").read_text(encoding="utf-8")
         consts = dict(re.findall(r'^\s*(\w+)\s*=\s*"([^"]+)"', (REPO / "pkg/webui/rekordbox_source.go").read_text(encoding="utf-8") + (REPO / "pkg/webui/omnisource.go").read_text(encoding="utf-8"), re.M))
         body = re.search(r"providerLabels\s*=\s*map\[string\]string\{([^}]*)\}", go).group(1)
@@ -12237,6 +12238,196 @@ assert.equal(p8.state().offset, 0);
 """.replace("HELPERS", helpers).replace("ON_MODE", on_mode).replace("ON_OFF", on_off).replace("SINGLE_BODY", single_body)
         result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+
+class EnginesOwnAppleMusicTest(unittest.TestCase):
+    """#323 (5.3.0.6): Engine's own Apple Music row is Engine's again; EngineX's reads "Apple Music (EngineX)"."""
+    BASES = (("5.3.0", "Skins/Embedded/"), ("5.0.4", "Skins/EmbeddedCommon/"))
+    ENGINE_NAMES = ("Apple Music", "AppleMusic")
+    HIDDEN = ["TIDAL", "Tidal", "SoundCloud", "Beatport LINK"]  # the rows ours replace
+    # Borrowed from the #305 tests: the real scServices and scRowLabels in the Node prelude, and the helper that runs it.
+    PRELUDE = StreamingSlotIconTest.PRELUDE
+    row_prelude = StreamingSlotIconTest.row_prelude
+    run_node = StreamingSlotIconTest.run_node
+    functions = StreamingSlotIconTest.functions
+
+    def edits_of(self, base, root):
+        if not (LAB / base / "qrc").is_dir():
+            self.skipTest(f"{LAB / base} QRC not found")
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = root
+            return bp.edits(False)
+        finally:
+            bp.ROOT = old_root
+
+    def patched(self, base, root, name):
+        """The file `name` (relative to Views/) as the pack ships it; a whole-file replacement is returned as is."""
+        rel = root + "Views/" + name
+        edits = self.edits_of(base, root)
+        self.assertIn(rel, edits)
+        if isinstance(edits[rel], str):
+            return edits[rel]
+        text = (LAB / base / "qrc" / rel).read_text(encoding="utf-8")
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = root
+            for old, new in edits[rel]:
+                text = bp.patch(text, old, new, rel)
+        finally:
+            bp.ROOT = old_root
+        return text
+
+    def test_no_pack_edit_hides_redirects_or_renames_engines_own_apple_music(self):
+        """The hidden row, the Enter redirect and the Services filter all matched the stock names; none may remain, in any pack variant."""
+        for base, root in self.BASES:
+            with self.subTest(base=base):
+                edits = self.edits_of(base, root)
+                for rel, value in edits.items():
+                    for new in ([value] if isinstance(value, str) else [n for _, n in value]):
+                        if rel.endswith("/EmbeddedMain.qml") or rel == root + "EmbeddedMain.qml":
+                            continue
+                        for name in self.ENGINE_NAMES:
+                            self.assertNotIn(name, new, f"{rel} names Engine's own Apple Music ({name!r})")
+                main = "".join(n for old, n in edits[root + "EmbeddedMain.qml"])
+                # In the root only EngineX's service and the gateway's row label name it; no hide list or redirect.
+                lines = [l.strip() for l in main.splitlines() if "Apple Music" in l and not l.strip().startswith("//")]
+                self.assertEqual(len(lines), 2, lines)
+                self.assertTrue(any('{ id: "applemusic", name: "Apple Music (EngineX)" }' in l for l in lines), lines)
+                self.assertTrue(any(l.startswith("readonly property var scRowLabels:") and '"Apple Music": "applemusic"' in l for l in lines), lines)
+                self.assertNotIn('name: "Apple Music" }', main)
+                self.assertNotIn('scOpen("applemusic")', "".join(n for rel, v in edits.items() if not isinstance(v, str) for _, n in v if rel.endswith("SourceScreen.qml")))
+
+    def test_ours_still_replace_tidal_soundcloud_and_beatport_link_in_every_pack_variant(self):
+        """The maintainer's list of hidden stock rows is unchanged (#323 keeps TIDAL, SoundCloud and Beatport LINK as they were)."""
+        quoted = json.dumps(self.HIDDEN)
+        self.assertIn(f"{quoted}.indexOf(model.name) < 0", bp.AVAILABLE_SOURCE)
+        self.assertIn(f"if (streaming && {quoted}.indexOf(name) >= 0)", bp.SOURCE_ENTER)
+        self.assertIn('["TIDAL", "Tidal", "SoundCloud", "Beatport", "Beatport LINK"].indexOf(String(name || ""))', bp.SOURCE_FOOTER)
+        for base, root in self.BASES:
+            with self.subTest(base=base):
+                if not (LAB / base / "qrc").is_dir():
+                    self.skipTest(f"{LAB / base} QRC not found")
+                prefs = [rel for rel in self.edits_of(base, root) if rel.endswith("Preferences/Entries/StreamingServices.qml")]
+                self.assertEqual(len(prefs), 1)
+                services = self.patched(base, root, prefs[0].split("/Views/", 1)[1])
+                self.assertIn(f"{quoted}.indexOf(provider.name) < 0", services)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required to run the root helpers")
+    def test_enter_on_the_stock_apple_music_row_is_stocks_whatever_scope_is_selected(self):
+        source = bp.SOURCE_ENTER
+        self.assertNotIn("applemusic", source)
+        for scope in ("", "tidal", "deezer", "applemusic"):
+            with self.subTest(scope=scope):
+                self.run_node("const assert = require('node:assert/strict');\n" + r"""
+let name = '', enters = 0, opens = [];
+const model = {index(i) {return i;}, data(i, role) {return role === 257 ? name : 'Streaming';}};
+const nav = {availableSourceIndex: 0, connectedSourceIndex: 0, enter() {enters++;}};
+const controller = {navigation() {return nav;}};
+const root = {scSourceNameRole: 257, scScope: @SCOPE@, scSources: ['spotify', 'deezer', 'applemusic'], scOpen(id) {opens.push(id);},
+    scSourceTypeText() {return 'Streaming';}};
+const Planck = {librarianController: {browserSourceControllerPtr() {return {availableSourceModel() {return model;}, connectedSourceModel() {return model;}};}}};
+""".replace("@SCOPE@", json.dumps(scope)) + PrimeGoTidalQRTest.function(source, "scSourceEnter") + r"""
+// Engine's own Apple Music (its row id is AppleMusic, its tile name Apple Music): Engine's handler runs, nothing of ours opens, the scope stays.
+for (const own of ['AppleMusic', 'Apple Music']) { name = own; enters = 0; opens = []; scSourceEnter(); assert.equal(enters, 1, own); assert.deepEqual(opens, [], own); assert.equal(root.scScope, @SCOPE@); }
+// The rows ours replace still go to the selected service (and never to Engine's handler).
+for (const own of ['TIDAL', 'Tidal', 'SoundCloud', 'Beatport LINK']) { name = own; enters = 0; opens = []; scSourceEnter(); assert.equal(enters, 0, own); }
+""".replace("@SCOPE@", json.dumps(scope)))
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required to run the root helpers")
+    def test_ours_reads_apple_music_enginex_and_engines_own_name_and_mark_are_untouched(self):
+        main = bp.SERVICES_MAIN
+        self.assertIn('{ id: "applemusic", name: "Apple Music (EngineX)" }', main)
+        # Every place that prints a service's name prints modelData.name (Sources footer, Settings > Services), so the one string reaches all of them.
+        self.assertIn("text: modelData.name", bp.STREAM_SWITCHES)
+        self.assertIn("text: modelData.name", bp.SOURCE_FOOTER)
+        self.run_node(self.row_prelude() + self.functions("scIcon", "scNoteService", "scOwnService", "scSlotIcon", "scRowIcon", "scBrand") + r"""
+const slot = 'qrc:/Skins/UIKit/Icons/SourceTIDALColored.png', own = 'qrc:/Skins/UIKit/Icons/SourceAppleMusicColored.png';
+const ours = 'file:///data/enginex/ui/icons/applemusic.png';
+assert.equal(scServices.find(v => v.id === 'applemusic').name, 'Apple Music (EngineX)');
+for (const scope of ['', 'tidal', 'deezer', 'applemusic']) {
+    scScope = scope; scTidalLoggedIn = false;
+    // A track or a row from Engine's own Apple Music keeps Engine's own mark: only the slot's TIDAL mark is ever replaced.
+    assert.equal(scSlotIcon('AppleMusic', 1), '', 'deck, scope ' + scope);
+    assert.equal(scSlotIcon('Apple Music', 1), '', 'deck, scope ' + scope);
+    assert.equal(scRowIcon(own, 'Apple Music'), '', 'row labelled by name, scope ' + scope);
+    assert.equal(scRowIcon(own, ''), '', 'row, scope ' + scope);
+    assert.equal(scRowIcon('qrc:/streaming/AppleMusic/Icon.png', 'Apple Music [120 BPM]'), '', 'row, scope ' + scope);
+    // Engine's messages and Engine's own service names are not rewritten: only the word TIDAL is.
+    assert.equal(scBrand('Log in to Apple Music to access your tracks and playlists'), 'Log in to Apple Music to access your tracks and playlists', 'scope ' + scope);
+    // EngineX's Apple Music rides the slot: the gateway's row label "Apple Music" is still ours.
+    assert.equal(scRowIcon(slot, 'Apple Music [120 BPM]'), ours, 'gateway row, scope ' + scope);
+    assert.equal(scRowIcon(slot, 'Apple Music'), ours, 'gateway row, scope ' + scope);
+}
+scScope = 'applemusic'; scNoteService(1, 'applemusic');
+assert.equal(scSlotIcon('TIDAL', 1), ours, 'the slot carrying ours');
+assert.equal(scSlotIcon('AppleMusic', 1), '', 'Engine\'s own track on a deck whose last slot track was ours');
+assert.equal(scBrand('Please log out of TIDAL'), 'Please log out of Apple Music (EngineX)', 'the slot\'s messages name ours');
+""")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required to run the root helpers")
+    def test_the_dialog_guards_and_logos_leave_engines_own_providers_alone(self):
+        """The login, pairing and accept dialogs of a provider the pack neither carries nor hides open as stock whatever scope is selected."""
+        pattern = re.compile(r"function onShow(Login|AcceptDeny|Pairing|ConnectedAccounts)Dialog\(provider[^)]*\) \{\n\s*(if \(.*\) return)\n")
+        files = {"Login": "Streaming/StreamingLoginDialog.qml", "AcceptDeny": "Streaming/StreamingAcceptDenyDialog.qml",
+                 "Pairing": "Streaming/StreamingPairingDialog.qml", "ConnectedAccounts": "Streaming/StreamingConnectedAccountsDialog.qml"}
+        for base, root in self.BASES:
+            guards = {}
+            for kind, rel in files.items():
+                text = self.patched(base, root, rel)
+                found = [m for m in pattern.finditer(text) if m[1] == kind]
+                self.assertEqual(len(found), 1, f"{base} {rel}")
+                guards[kind] = found[0][2]
+            logos = {"AcceptDeny": ("service.provider", self.patched(base, root, files["AcceptDeny"])),
+                     "Utility": ("dialog.provider", self.patched(base, root, "Streaming/StreamingUtilityDialog.qml"))}
+            for kind, (who, text) in logos.items():
+                self.assertIn(f"root.scBranded({who})", text, f"{base} {kind}")
+                self.assertNotIn('root.scScope && root.scScope !== "tidal"', text, f"{base} {kind}: a logo that follows the scope alone brands Engine's own providers")
+            script = "const assert = require('node:assert/strict');\n" + r"""
+let scScope = '', scSources = ['tidal', 'spotify', 'deezer', 'applemusic'], scAskedAt = 0, restored = 0, cancelled = 0, selected = null;
+const Planck = {librarianController: {streamingInterfaceController: {get selectedProvider() {return selected;}, cancelPairing() {cancelled++;}, restorePreviouslySelectedSource() {restored++;}}}};
+const root = {scQuiet: () => scQuiet(), scUnasked: p => scUnasked(p), scCarries: p => scCarries(p), scBranded: p => scBranded(p), get scScope() {return scScope;}};
+""" + self.functions("scQuiet", "scUnasked", "scCarries", "scBranded") + "\nconst guards = " + json.dumps(guards) + r""";
+const run = (kind, provider) => new Function('root', 'provider', guards[kind].replace(/\) return$/, ') return "blocked"') + '; return "opened"')(root, provider);
+const prov = n => ({name: n, loggedIn: false});
+for (const scope of ['deezer', 'spotify', 'applemusic']) for (const kind of Object.keys(guards)) {
+    scScope = scope; scAskedAt = 0;
+    // Engine's own providers (Apple Music, Amazon Music, Dropbox): the dialog opens, nothing is cancelled or restored.
+    for (const n of ['AppleMusic', 'Amazon Music', 'Dropbox']) {
+        restored = cancelled = 0; selected = prov(n);
+        assert.equal(run(kind, selected), 'opened', kind + ' ' + n + ' under ' + scope);
+        assert.equal(restored + cancelled, 0, kind + ' ' + n + ' must not undo Engine\'s own selection under ' + scope);
+    }
+    // The providers the pack carries or hides keep the guards: under another service's scope their dialogs stay closed, asked for or not
+    // (the gateway logs Engine's TIDAL client in at once, so they would only flash up with the TIDAL name).
+    for (const n of ['TIDAL', 'Tidal', 'SoundCloud', 'Beatport LINK']) for (const asked of [0, Date.now()]) {
+        scAskedAt = asked; selected = prov(n);
+        assert.equal(run(kind, selected), 'blocked', kind + ' ' + n + ' under ' + scope + ' asked ' + asked);
+    }
+}
+// The TIDAL scope itself: the carried provider's dialogs behave as before. Unasked, scUnasked closes and restores (the pairing box has no such guard);
+// asked for a moment ago (scOpen), they open.
+scSources = ['tidal', 'spotify']; scScope = 'tidal';
+for (const kind of Object.keys(guards)) {
+    scAskedAt = 0; restored = 0; selected = prov('TIDAL');
+    assert.equal(run(kind, selected), kind === 'Pairing' ? 'opened' : 'blocked', kind + ' under tidal, unasked');
+    assert.equal(restored, kind === 'Pairing' ? 0 : 1, kind + ' under tidal, unasked');
+    scAskedAt = Date.now(); restored = 0;
+    assert.equal(run(kind, selected), 'opened', kind + ' under tidal, asked');
+    assert.equal(restored, 0, kind + ' under tidal, asked');
+    // Engine's own provider under the TIDAL scope: untouched as well.
+    scAskedAt = 0; selected = prov('AppleMusic'); restored = 0;
+    assert.equal(run(kind, selected), 'opened', kind + ' AppleMusic under tidal');
+    assert.equal(restored, 0, kind + ' AppleMusic under tidal');
+}
+// Logos: the scope's mark only on the carried providers.
+scScope = 'deezer';
+assert.equal(scBranded(prov('AppleMusic')), false); assert.equal(scBranded(prov('Amazon Music')), false);
+assert.equal(scBranded(prov('TIDAL')), true); assert.equal(scBranded(prov('SoundCloud')), true); assert.equal(scBranded(null), true);
+scScope = 'tidal'; assert.equal(scBranded(prov('TIDAL')), false);
+scScope = ''; assert.equal(scBranded(prov('TIDAL')), false);
+"""
+            self.run_node(script)
 
 
 if __name__ == "__main__":
