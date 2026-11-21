@@ -132,7 +132,8 @@ if [ "$runtime" = 1 ]; then
         if command -v rfkill >/dev/null 2>&1; then rfkill unblock wifi || :; fi
         exit 0
     fi
-    # The kernel boots with rfkill.default_state=0, which blocks both radios. Bluetooth is always on (#60).
+    # The kernel boots with rfkill.default_state=0, which blocks both radios. The Bluetooth radio is always
+    # unblocked (#60) so Engine's own Bluetooth switch can power the adapter; Engine stores and applies that switch.
     # Wi-Fi follows the choice the deck stored (connman keeps it): off before power-off stays off (#326).
     # radios-begin
     if command -v rfkill >/dev/null 2>&1; then

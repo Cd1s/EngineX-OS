@@ -36,9 +36,13 @@ func wifiStoredOff(settings string) bool {
 }
 
 // UnblockRadios clears rfkill's soft block on Bluetooth and Wi-Fi. The kernel boots
-// with rfkill.default_state=0. Bluetooth always (#60); Wi-Fi follows the stored
-// choice, off stays off (#326). This runs from the writable partition, so it also
-// works on a deck whose read-only root still has the older legacy-debloat.
+// with rfkill.default_state=0. The Bluetooth radio is always unblocked (#60): Engine
+// powers the adapter through BlueZ, which cannot clear a soft block, so without this
+// the Bluetooth switch could never be turned on. Whether Bluetooth is on after a boot
+// is Engine's own stored switch (Engine.conf, [Bluetooth] Enabled), which Engine
+// applies at start. Wi-Fi follows connman's stored choice, off stays off (#326). This
+// runs from the writable partition, so it also works on a deck whose read-only root
+// still has the older legacy-debloat.
 func UnblockRadios(root, connmanSettings string) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
