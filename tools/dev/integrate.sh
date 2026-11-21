@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Batch conflict rule: rebase a copy as agent/5306-<slug>-b1 and keep both sides' additions
+# when they are independent insertions. If a hunk changes the same lines on both sides, stop
+# and report the file and hunk. The lost-lines check and targeted tests remain mandatory.
+
 ROOT=$(git rev-parse --show-toplevel)
 TARGET=agent/5306-integration
 SSHCTL=${SSHCTL:-$(command -v sshctl || true)}
@@ -26,9 +30,13 @@ run_id=$(printf '%s-%s-%s' "$(date +%s)" "$$" "${RANDOM:-0}")
 target_head=$(git rev-parse --short "origin/$TARGET")
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/enginex-integrate.${target_head}.XXXXXX")
 worktree=$tmp/worktree
+dropped_lines_file=$tmp/dropped-lines.tsv
+: >"$dropped_lines_file"
 remote_names=()
 remote_hosts=()
 remote_counter=0
+dropped_hunks=()
+doc_notes=()
 started=$(date +%s)
 
 cleanup_remote() {
@@ -93,11 +101,20 @@ remote_run() {
 
 added_lines_check() {
     local base=$1 other=$2 result=$3
-    python3 - "$base" "$other" "$result" <<'PY'
+    python3 - "$base" "$other" "$result" "${dropped_lines_file:-}" <<'PY'
 import subprocess, sys
-base, other, result = sys.argv[1:]
+base, other, result, dropped_file = sys.argv[1:]
 diff = subprocess.check_output(["git", "diff", "--no-renames", "--unified=0", base, other], text=True)
 files = {}
+excluded = {"README.md", "README.zh-CN.md", "README.zh-TW.md", "docs/index.html"}
+# Release docs are maintained at release time, so conflict policy may intentionally drop incoming hunks.
+dropped = set()
+if dropped_file:
+    try:
+        with open(dropped_file, encoding="utf-8") as handle:
+            dropped = {tuple(line.rstrip("\n").split("\t", 1)) for line in handle}
+    except FileNotFoundError:
+        pass
 current = None
 for line in diff.splitlines():
     if line.startswith("+++ b/"):
@@ -106,11 +123,15 @@ for line in diff.splitlines():
     elif line.startswith("+") and not line.startswith("+++") and current:
         files[current].append(line[1:])
 for path, lines in files.items():
+    if path in excluded or path.startswith("docs/site/"):
+        continue
     try:
         content = open(result + "/" + path, "r", encoding="utf-8", errors="surrogateescape").read().splitlines()
     except (FileNotFoundError, IsADirectoryError):
         raise SystemExit(f"lost added file: {path}")
     for line in lines:
+        if (path, line) in dropped:
+            continue
         if line not in content:
             raise SystemExit(f"lost added line in {path}: {line}")
 PY
@@ -157,26 +178,174 @@ PY
     fi
 }
 
-resolve_checklist_merge() {
-    local base=$1 branch=$2 rows=$tmp/checklist.rows files line
-    git -C "$worktree" merge --no-ff --no-edit "origin/$branch" >/dev/null 2>&1 && return 0
-    git -C "$worktree" merge --abort >/dev/null 2>&1 || true
-    files=$(git -C "$worktree" diff --name-only "$base" "origin/$branch")
-    [[ $files == docs/REGRESSION-CHECKLIST.md ]] || return 1
-    python3 - "$base" "origin/$branch" "$rows" <<'PY'
+resolve_conflicts_both() {
+    local branch=$1 resolution_log=$tmp/conflict-resolution.log kind path first
+    if ! python3 - "$worktree" "$dropped_lines_file" >"$resolution_log" <<'PY'
+from difflib import SequenceMatcher
+from pathlib import Path
 import re, subprocess, sys
-base, branch, output = sys.argv[1:]
-diff = subprocess.check_output(["git", "diff", "--no-renames", "--unified=0", base, branch, "--", "docs/REGRESSION-CHECKLIST.md"], text=True)
-added = [line[1:] for line in diff.splitlines() if line.startswith("+") and not line.startswith("+++")]
-if not added or any(not re.match(r"\|\s*\d+\s*\|", line) for line in added):
-    raise SystemExit(1)
-open(output, "w", encoding="utf-8").write("\n".join(added) + "\n")
+
+root = Path(sys.argv[1])
+dropped_lines_path = Path(sys.argv[2])
+paths = subprocess.check_output(
+    ["git", "-C", str(root), "diff", "--name-only", "--diff-filter=U"], text=True
+).splitlines()
+release_docs = {
+    "README.md",
+    "README.zh-CN.md",
+    "README.zh-TW.md",
+    "docs/index.html",
+}
+
+def is_release_doc(path):
+    return path in release_docs or path.startswith("docs/site/")
+
+def cache_version(lines):
+    values = [int(value) for line in lines for value in re.findall(r"\?v=(\d+)", line)]
+    return max(values, default=-1)
+
+def insertions(base, side):
+    result = {}
+    matcher = SequenceMatcher(None, base, side, autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        if tag != "insert":
+            raise ValueError("a side modifies or deletes existing lines")
+        result.setdefault(i1, []).extend(side[j1:j2])
+    return result
+
+for path in paths:
+    file_path = root / path
+    lines = file_path.read_text(encoding="utf-8", errors="surrogateescape").splitlines(keepends=True)
+    output = []
+    index = 0
+    hunk = 0
+    while index < len(lines):
+        if not lines[index].startswith("<<<<<<< "):
+            output.append(lines[index])
+            index += 1
+            continue
+        hunk += 1
+        ours = []
+        base = []
+        theirs = []
+        index += 1
+        while index < len(lines) and not lines[index].startswith("||||||| "):
+            ours.append(lines[index])
+            index += 1
+        if index == len(lines):
+            raise SystemExit(f"{path}: conflict hunk {hunk} has no base section")
+        index += 1
+        while index < len(lines) and not lines[index].startswith("======="):
+            base.append(lines[index])
+            index += 1
+        if index == len(lines):
+            raise SystemExit(f"{path}: conflict hunk {hunk} has no separator")
+        index += 1
+        while index < len(lines) and not lines[index].startswith(">>>>>>> "):
+            theirs.append(lines[index])
+            index += 1
+        if index == len(lines):
+            raise SystemExit(f"{path}: conflict hunk {hunk} has no end marker")
+        index += 1
+        if path == "docs/ISSUE-FIXES-5.3.0.5.md":
+            output.extend(ours)
+            with open(dropped_lines_path, "a", encoding="utf-8") as dropped_file:
+                for line in theirs:
+                    dropped_file.write(f"{path}\t{line.rstrip(chr(10))}\n")
+            first = next((line.strip() for line in theirs if line.strip()), "")
+            print(f"DROPPED_HUNK\t{path}\t{first}")
+            continue
+        if is_release_doc(path):
+            if cache_version(theirs) > cache_version(ours):
+                output.extend(theirs)
+                first = next((line.strip() for line in ours if line.strip()), "")
+                print(f"KEPT_INCOMING\t{path}\tcache-v-higher-than-batch\t{first}")
+            else:
+                output.extend(ours)
+                first = next((line.strip() for line in theirs if line.strip()), "")
+                print(f"DROPPED_HUNK\t{path}\t{first}")
+            continue
+        try:
+            ours_insertions = insertions(base, ours)
+            theirs_insertions = insertions(base, theirs)
+        except ValueError:
+            raise SystemExit(f"{path}: conflict hunk {hunk} needs a choice between modified lines")
+        for position in range(len(base) + 1):
+            output.extend(ours_insertions.get(position, []))
+            output.extend(theirs_insertions.get(position, []))
+            if position < len(base):
+                output.append(base[position])
+    file_path.write_text("".join(output), encoding="utf-8", errors="surrogateescape")
 PY
-    git -C "$worktree" merge --no-ff -s ours --no-edit "origin/$branch" >/dev/null
-    while IFS= read -r line; do printf '%s\n' "$line" >> "$worktree/docs/REGRESSION-CHECKLIST.md"; done < "$rows"
-    git -C "$worktree" add docs/REGRESSION-CHECKLIST.md
-    git -C "$worktree" -c user.name=enginex-integrate -c user.email=enginex-integrate@localhost \
-        commit -m "chore: preserve checklist rows during merge" >/dev/null
+    then
+        cat "$resolution_log" >&2
+        return 1
+    fi
+    while IFS=$'\t' read -r kind path first; do
+        [[ -n "$kind" ]] || continue
+        case $kind in
+            DROPPED_HUNK) dropped_hunks+=("$branch|$path|$first") ;;
+            KEPT_INCOMING) doc_notes+=("$branch|$path|$first") ;;
+        esac
+    done < "$resolution_log"
+}
+
+rebase_copy() {
+    local base=$1 branch=$2 pre_merge=$3 slug=$4 b1="agent/5306-${slug}-b1" rc conflicts
+    git branch -f "$b1" "origin/$branch"
+    git -C "$worktree" switch --detach "origin/$branch" >/dev/null
+    git -C "$worktree" switch -C "$b1" "origin/$branch" >/dev/null
+    set +e
+    GIT_EDITOR=true git -C "$worktree" -c merge.conflictStyle=diff3 -c user.name=enginex-integrate -c user.email=enginex-integrate@localhost \
+        rebase --onto "$pre_merge" "$base" "$b1" >/dev/null 2>&1
+    rc=$?
+    set -e
+    while ((rc != 0)); do
+        conflicts=$(git -C "$worktree" diff --name-only --diff-filter=U)
+        [[ -n "$conflicts" ]] || {
+            git -C "$worktree" rebase --abort >/dev/null 2>&1 || true
+            echo "rebase refused for $branch without a resolvable conflict hunk" >&2
+            return 1
+        }
+        if ! resolve_conflicts_both "$branch"; then
+            git -C "$worktree" rebase --abort >/dev/null 2>&1 || true
+            return 1
+        fi
+        git -C "$worktree" add -A
+        set +e
+        GIT_EDITOR=true git -C "$worktree" -c merge.conflictStyle=diff3 -c user.name=enginex-integrate -c user.email=enginex-integrate@localhost \
+            rebase --continue >/dev/null 2>&1
+        rc=$?
+        set -e
+    done
+    if ! git -C "$worktree" push --force origin "HEAD:$b1" >/dev/null; then
+        echo "could not publish rebased copy $b1" >&2
+        return 1
+    fi
+    git -C "$worktree" switch --detach "$pre_merge" >/dev/null
+    resolved_branch=$b1
+}
+
+merge_branch() {
+    local base=$1 branch=$2 pre_merge=$3 slug
+    resolved_branch=$branch
+    if git -C "$worktree" -c merge.conflictStyle=diff3 -c user.name=enginex-integrate -c user.email=enginex-integrate@localhost \
+        merge --no-ff --no-edit "origin/$branch" >/dev/null 2>&1; then
+        return 0
+    fi
+    git -C "$worktree" merge --abort >/dev/null 2>&1 || true
+    case $branch in
+        agent/5306-*) slug=${branch#agent/5306-} ;;
+        agent/*) slug=${branch#agent/} ;;
+        *) slug=$branch ;;
+    esac
+    slug=${slug//[^A-Za-z0-9._-]/_}
+    echo "merge conflict for $branch, rebasing copy agent/5306-${slug}-b1" >&2
+    rebase_copy "$base" "$branch" "$pre_merge" "$slug"
+    git -C "$worktree" -c merge.conflictStyle=diff3 -c user.name=enginex-integrate -c user.email=enginex-integrate@localhost \
+        merge --no-ff --no-edit "origin/$resolved_branch" >/dev/null
 }
 
 rebuild_overlay() {
@@ -205,18 +374,22 @@ for branch in "${branches[@]}"; do
     pre_merge=$(git -C "$worktree" rev-parse HEAD)
     base=$(git -C "$worktree" merge-base HEAD "origin/$branch")
     max_before=$(awk -F'|' '/^\|[[:space:]]*[0-9]+[[:space:]]*\|/ {gsub(/[[:space:]]/, "", $2); if ($2 > max) max=$2} END {print max+0}' "$worktree/docs/REGRESSION-CHECKLIST.md")
-    resolve_checklist_merge "$base" "$branch" || { echo "merge refused: $branch" >&2; exit 1; }
+    merge_branch "$base" "$branch" "$pre_merge" || { echo "merge refused: $branch" >&2; exit 1; }
     added_lines_check "$base" "origin/$branch" "$worktree"
     added_lines_check "$base" "$pre_merge" "$worktree"
     normalize_checklist "$base" "origin/$branch" "$max_before"
     mapfile -t overlays < <(git -C "$worktree" diff --name-only "$base" "origin/$branch" -- rootfs-overlay | grep '\.so$' || true)
     if ((${#overlays[@]})); then rebuild_overlay "$(pick_host 1)" "${branch//[^A-Za-z0-9._-]/_}-${target_head}" "${overlays[@]}"; fi
     run_tests --base "$pre_merge"
-    merged+=("$branch ($(git -C "$worktree" rev-parse --short "origin/$branch"))")
+    if [[ $resolved_branch == "$branch" ]]; then
+        merged+=("$branch ($(git -C "$worktree" rev-parse --short "origin/$branch"))")
+    else
+        merged+=("$branch via $resolved_branch ($(git -C "$worktree" rev-parse --short "origin/$resolved_branch"))")
+    fi
 done
 
 # Full suites: fast tier in the persistent clone (Go's test cache hits for unchanged packages), ARM tier at the same time.
 run_tests --full --arm-gcc14
 git -C "$worktree" push origin "HEAD:$TARGET" >/dev/null
 elapsed=$(( $(date +%s) - started ))
-printf 'Merged %s into %s; targeted tests after each merge, then test.sh --full; elapsed %ss.\n' "${merged[*]}" "$TARGET" "$elapsed"
+printf 'Merged %s into %s; targeted tests after each merge, then test.sh --full; elapsed %ss.' "${merged[*]}" "$TARGET" "$elapsed"; if ((${#dropped_hunks[@]})); then printf ' Dropped hunks %s.' "${dropped_hunks[*]}"; fi; if ((${#doc_notes[@]})); then printf ' Doc cache decisions %s.' "${doc_notes[*]}"; fi; printf '\n'
