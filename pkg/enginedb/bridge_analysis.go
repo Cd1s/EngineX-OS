@@ -84,12 +84,17 @@ func detailFiles(files []analysisFile) []string {
 // reference (RBA2, read by detailFrom), else from the column itself. Nil when there is none or it
 // cannot be read.
 func BridgeDetail(b []byte, root string, limit int) *rekordbox.Analysis {
+	return bridgeDetail(b, root, limit, nil)
+}
+
+// bridgeDetail is BridgeDetail with its files read by rd (nil: the files themselves).
+func bridgeDetail(b []byte, root string, limit int, rd detailReader) *rekordbox.Analysis {
 	if _, files, err := unpackBridgeRef(b); err == nil {
 		r, err := compat.NewResolver(root)
 		if err != nil {
 			return nil
 		}
-		a, _, _ := detailFrom(r, files, nil)
+		a, _, _ := detailFrom(r, files, nil, rd)
 		return a
 	}
 	b, err := UnpackAnalysis(b, limit)
@@ -118,19 +123,27 @@ const detailReadChunk = 128 << 10
 // waveform's body or the padding past its end included) does not serve. pause paces the reads;
 // its error (the job stopping) is returned, and nothing is confirmed then. read is the bytes read.
 func DetailServes(r *compat.Resolver, files []string, pause DetailPause) (ok bool, read int64, err error) {
-	a, read, err := detailFrom(r, files, pause)
+	return detailServes(r, files, pause, nil)
+}
+
+func detailServes(r *compat.Resolver, files []string, pause DetailPause, rd detailReader) (ok bool, read int64, err error) {
+	a, read, err := detailFrom(r, files, pause, rd)
 	return err == nil && a != nil, read, err
 }
+
+// detailReader reads the next part of an open ANLZ file in place of f.Read. Only this package's
+// tests make one (to fail a read where they want); the product passes nil and reads the file.
+type detailReader func(f *os.File, p []byte) (int, error)
 
 // detailFrom is the display's detail of a reference: the files, in the order the display prefers
 // them, each resolved by r (case, NFC, macOS's hidden .PIONEER; no traversal, no symlink), a
 // regular file within maxDetailFile, read whole and accepted by ParseAnalysis; the first waveform
 // the display draws (displayAnalysisWaveform) is the detail. Nil when none serves. err is only
 // pause's.
-func detailFrom(r *compat.Resolver, files []string, pause DetailPause) (detail *rekordbox.Analysis, read int64, err error) {
+func detailFrom(r *compat.Resolver, files []string, pause DetailPause, rd detailReader) (detail *rekordbox.Analysis, read int64, err error) {
 	a := &rekordbox.Analysis{}
 	for _, f := range files {
-		data, n, err := readDetailFile(r, f, pause)
+		data, n, err := readDetailFile(r, f, pause, rd)
 		read += n
 		if err != nil {
 			var stop detailStopped
@@ -156,12 +169,9 @@ type detailStopped struct{ err error }
 
 func (e detailStopped) Error() string { return "enginedb: detail read stopped: " + e.err.Error() }
 
-// detailRead reads the next part of an ANLZ file; a variable only so tests can fail a read.
-var detailRead = func(f *os.File, p []byte) (int, error) { return f.Read(p) }
-
 // readDetailFile reads rel whole, as r resolves it, refusing traversal, symlinks, anything but a
 // regular file and more than maxDetailFile bytes, detailReadChunk at a time.
-func readDetailFile(r *compat.Resolver, rel string, pause DetailPause) (b []byte, read int64, err error) {
+func readDetailFile(r *compat.Resolver, rel string, pause DetailPause, rd detailReader) (b []byte, read int64, err error) {
 	if rel, err = r.Resolve(rel); err != nil {
 		return nil, 0, err
 	}
@@ -194,7 +204,12 @@ func readDetailFile(r *compat.Resolver, rel string, pause DetailPause) (b []byte
 			b = append(b, 0)[:len(b)] // the file grew since its stat
 		}
 		start := time.Now()
-		n, err := detailRead(f, b[len(b):min(cap(b), len(b)+detailReadChunk)])
+		var n int
+		if p := b[len(b):min(cap(b), len(b)+detailReadChunk)]; rd == nil {
+			n, err = f.Read(p)
+		} else {
+			n, err = rd(f, p)
+		}
 		b, read = b[:len(b)+n], read+int64(n)
 		if err == io.EOF {
 			return b, read, nil

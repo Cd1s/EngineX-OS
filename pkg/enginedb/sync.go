@@ -944,24 +944,13 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 				if e != nil {
 					return result, e
 				}
-				// A row that still holds a copy of the waveform (5.3.0.5's RBA1) becomes the
-				// reference only where the display can read the detail from these files: its own
-				// reading of them, each file read whole (DetailServes; the .2EX this import just read
-				// comes from the page cache). Otherwise, and for a track without a .2EX or .EXT, the
-				// copy stays (#253 reviews 2-4). length() reads no overflow page. Other rows, and a
-				// track without one, have nothing to lose and are not read again.
+				// A row that still holds a copy of the waveform (5.3.0.5's RBA1) keeps it: the
+				// import never decides that the display can read these files instead, and reads
+				// none of them for it (#253 review 5: not under the bridge lock, not in this
+				// transaction, not at a mount). Only the background job's paced check turns a copy
+				// into a reference, once it has read the files as the display does (confirmedRefs).
+				// length() reads no overflow page.
 				keepWave := ` WHERE length(BridgeAnalysis.sourceJSON)<=` + waveformRowBytes
-				if len(refs) > 0 {
-					var copyRow bool
-					if e = tx.QueryRowContext(ctx, `SELECT length(sourceJSON)>`+waveformRowBytes+` FROM BridgeAnalysis WHERE trackId=?`, id).Scan(&copyRow); e != nil && !errors.Is(e, sql.ErrNoRows) {
-						return result, e
-					}
-					if !copyRow {
-						keepWave = ``
-					} else if ok, _, _ := DetailServes(res, refs, nil); ok {
-						keepWave = ``
-					}
-				}
 				if _, e = q.ExecContext(ctx, `INSERT INTO BridgeAnalysis(trackId,sourceJSON,audioJSON) VALUES(?,?,?) ON CONFLICT(trackId) DO UPDATE SET sourceJSON=excluded.sourceJSON,audioJSON=excluded.audioJSON`+keepWave, id, packedSource, packedAudio); e != nil {
 					return result, e
 				}

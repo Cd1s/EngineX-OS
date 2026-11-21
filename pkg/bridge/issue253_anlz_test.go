@@ -3,7 +3,6 @@ package bridge_test
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"os"
 	"path/filepath"
 	"testing"
@@ -102,38 +101,26 @@ func TestIssue253BrokenANLZKeepsItsWaveformRow(t *testing.T) {
 			}
 		}})
 	}
-	// #253 review 4: the files read, but not through the display's reader: a bad page in the
-	// waveform's body, or in the last page (padding past the declared length), of the .2EX and
-	// the .EXT. The import (it reads them itself) accepts them; the display cannot serve them, so
-	// neither the update's compaction nor the next import may turn the copy into a reference.
-	for _, fault := range []string{"waveform body", "last page"} {
-		breaks = append(breaks, struct {
-			name  string
-			apply func(t *testing.T, root string)
-		}{"read error in the " + fault, func(t *testing.T, root string) {
-			bad := map[string][2]int64{}
-			for _, ext := range []string{".2EX", ".EXT"} {
-				p := filepath.Join(root, anlz+ext)
-				b, err := os.ReadFile(p)
-				if err != nil {
-					t.Fatal(err)
-				}
-				at := issue253WaveBody(t, b)
-				if fault == "last page" { // FAT padding past the declared length, a page of its own
-					b = append(b, make([]byte, 4096+(4096-len(b)%4096)%4096)...)
-					if err = os.WriteFile(p, b, 0o644); err != nil {
-						t.Fatal(err)
-					}
-					at = int64(len(b) - 4096)
-				}
-				bad[p] = [2]int64{at, at + 1}
+	// #253 review 5: files the import reads but the display does not: the .2EX and the .EXT padded
+	// past the 16 MiB the display reads (the import reads a .2EX of up to 128 MiB, and the .EXT's
+	// headers). The import reads the track again and leaves its copy in place, and the background
+	// check refuses the files, so the copy stays. A read error at a page is the same case: see
+	// pkg/enginedb's TestIssue253GateReadsTheFileAsTheDisplayDoes and the dm-error run of review 4.
+	breaks = append(breaks, struct {
+		name  string
+		apply func(t *testing.T, root string)
+	}{"larger than the display reads", func(t *testing.T, root string) {
+		for _, ext := range []string{".2EX", ".EXT"} {
+			p := filepath.Join(root, anlz+ext)
+			b, err := os.ReadFile(p)
+			if err != nil {
+				t.Fatal(err)
 			}
-			t.Cleanup(enginedb.SetDetailReadFailForTest(func(path string, off int64, n int) bool {
-				s, ok := bad[path]
-				return ok && off < s[1] && off+int64(n) > s[0]
-			}))
-		}})
-	}
+			if err = os.WriteFile(p, append(b, make([]byte, 17<<20)...), 0o644); err != nil { // padding past the declared length
+				t.Fatal(err)
+			}
+		}
+	}})
 	flows := []struct {
 		name     string
 		perTrack int64
@@ -152,11 +139,15 @@ func TestIssue253BrokenANLZKeepsItsWaveformRow(t *testing.T) {
 				for i := 41; i <= 60; i++ {
 					testfixture.Write(t, root, testfixture.LargeTrackPath(i), testfixture.MP3WithLAMETag())
 				}
+				printBefore := issue253Print(t, root, 1)
 				br.apply(t, root)
 				defer bridge.SetLargeExportForTest()()
 				defer bridge.SetInPlaceUpdateForTest(f.perTrack)()
 				cutConverge(t, root)
 				issue253Waveforms(t, root, 40, "after the update")
+				if issue253Print(t, root, 1) == printBefore {
+					t.Fatal("the update did not read track 1 again: its copy was not put through the import")
+				}
 				// The next import, one that reads every track.
 				if _, err := bridge.ConvertAtMount(context.Background(), root, enginedb.Options{}, true); err != nil {
 					t.Fatalf("next import: %v", err)
@@ -173,20 +164,11 @@ func TestIssue253BrokenANLZKeepsItsWaveformRow(t *testing.T) {
 	}
 }
 
-// issue253WaveBody is where the first PWV7 or PWV5 section's entries start in the ANLZ file b.
-func issue253WaveBody(t *testing.T, b []byte) int64 {
+// issue253Print is the fingerprint of the track with the import key in the state: the import writes a
+// new one when it reads the track again.
+func issue253Print(t *testing.T, root string, key int) string {
 	t.Helper()
-	be := binary.BigEndian
-	for off := int64(be.Uint32(b[4:])); off+12 <= int64(len(b)); {
-		tag, h, n := string(b[off:off+4]), int64(be.Uint32(b[off+4:])), int64(be.Uint32(b[off+8:]))
-		if (tag == "PWV7" || tag == "PWV5") && n > h {
-			return off + h
-		}
-		if n < 12 {
-			break
-		}
-		off += n
-	}
-	t.Fatal("no PWV7 or PWV5 with entries")
-	return 0
+	db := dbOpen(t, root)
+	defer db.Close()
+	return scalar[string](t, db, `SELECT s.fingerprint FROM bridge.BridgeState s JOIN Track t ON t.id=s.trackId WHERE t.pdbImportKey=?`, key)
 }

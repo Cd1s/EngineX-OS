@@ -3,8 +3,10 @@ package enginedb
 import (
 	"encoding/binary"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
@@ -91,11 +93,23 @@ func anlzWave(ext string, entries int) (b []byte, bodyAt, bodyEnd int) {
 	return b, 28 + 24, 28 + 24 + entries*width
 }
 
+// failingRead reads a file as the product does, but a read that touches a span bad gives for its
+// path fails with EIO, as a bad page of the stick does (#253 reviews 4 and 5: a reader made by the
+// test, not a hook of the product).
+func failingRead(bad func(path string, off int64, n int) bool) detailReader {
+	return func(f *os.File, p []byte) (int, error) {
+		off, err := f.Seek(0, io.SeekCurrent)
+		if err == nil && bad(f.Name(), off, len(p)) {
+			return 0, &os.PathError{Op: "read", Path: f.Name(), Err: syscall.EIO}
+		}
+		return f.Read(p)
+	}
+}
+
 // #253 review 4: a file whose headers and other sections read but whose waveform body, or last
 // page (padding past the declared length), does not (a bad page on the stick) gives the display
-// nothing; the gate reads the same
-// bytes the same way, so it says the same, and the row keeps its copy. A read error in the .2EX
-// alone leaves the .EXT's PWV5 to serve, for both.
+// nothing; the gate reads the same bytes the same way, so it says the same, and the row keeps its
+// copy. A read error in the .2EX alone leaves the .EXT's PWV5 to serve, for both.
 func TestIssue253GateReadsTheFileAsTheDisplayDoes(t *testing.T) {
 	const base = "PIONEER/USBANLZ/P001/ANLZ0000"
 	files := []string{base + ".2EX", base + ".EXT"}
@@ -130,20 +144,20 @@ func TestIssue253GateReadsTheFileAsTheDisplayDoes(t *testing.T) {
 					}
 					bad[p] = s
 				}
-				defer SetDetailReadFailForTest(func(path string, off int64, n int) bool {
+				rd := failingRead(func(path string, off int64, n int) bool {
 					s, ok := bad[path]
 					return ok && off < s.end && off+int64(n) > s.at
-				})()
+				})
 				r, err := compat.NewResolver(root)
 				if err != nil {
 					t.Fatal(err)
 				}
 				var reads []int
-				ok, _, err := DetailServes(r, files, func(n int, _ time.Duration) error {
+				ok, _, err := detailServes(r, files, func(n int, _ time.Duration) error {
 					reads = append(reads, n)
 					return nil
-				})
-				served := BridgeDetail(packBridgeRef(1, files), root, 1<<20) != nil
+				}, rd)
+				served := bridgeDetail(packBridgeRef(1, files), root, 1<<20, rd) != nil
 				if err != nil || ok != served {
 					t.Fatalf("the gate says %v (%v), the display's reader says %v", ok, err, served)
 				}
