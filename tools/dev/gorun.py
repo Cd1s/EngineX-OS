@@ -10,10 +10,36 @@ must equal `go test -list` minus the deferred ones, or the run fails. --defer / 
 (`*` for the whole package); deferred tests are not run here and are reported by name.
 Everything goes through `go test -json`, so --json carries per-package and per-test seconds.
 """
-import argparse, collections, json, os, pathlib, re, shutil, subprocess, sys, tempfile, threading, time
+import argparse, collections, fcntl, json, os, pathlib, re, shutil, subprocess, sys, tempfile, threading, time
 from concurrent.futures import ThreadPoolExecutor
 
 NAME = re.compile(r'^(Test|Example|Fuzz)\w*$')
+
+
+def stable_dir(base, name):
+    """A private scratch directory with the same path on every run: Go's test cache keys on the TMPDIR value, so a random
+    directory would make every test that uses t.TempDir() miss the cache. Another process holding it gets a random one."""
+    path = os.path.join(base, name)
+    lock = open(path + '.lock', 'w')
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        lock.close()
+        path = tempfile.mkdtemp(prefix=name + '-', dir=base); os.chmod(path, 0o1777)
+        return path, None
+    shutil.rmtree(path, ignore_errors=True)
+    os.mkdir(path); os.chmod(path, 0o1777)
+    return path, lock
+
+
+def release_dir(path, lock):
+    shutil.rmtree(path, ignore_errors=True)  # the directory stable_dir() made
+    if lock:
+        try:
+            os.remove(path + '.lock')
+        except OSError:
+            pass
+        lock.close()
 
 
 def sh(cmd, **kw):
@@ -117,12 +143,11 @@ def main():
     seed = json.loads(pathlib.Path(a.seed).read_text()) if a.seed else {}
     defer, only = read_pairs(a.defer), read_pairs(a.only)
     base = ['go', 'test', '-vet=off', '-json', '-timeout', a.timeout] + ([] if a.no_race else ['-race']) + (['-count=1'] if a.no_cache else [])
-    tmp = tempfile.mkdtemp(prefix='gorun-', dir=os.environ.get('TMPDIR'))
-    os.chmod(tmp, 0o755)  # tests that drop privileges must reach their own TMPDIR
+    tmp, tmp_lock = stable_dir(os.environ.get('TMPDIR') or '/tmp', 'gorun-jobs')
     jobs, expected, deferred, plain, weight = [], {}, [], [], {}
 
     def job(label, cmd):
-        wd = os.path.join(tmp, str(len(jobs))); os.mkdir(wd); os.chmod(wd, 0o1777)
+        wd = os.path.join(tmp, re.sub(r'[^\w.-]', '_', label)); os.mkdir(wd); os.chmod(wd, 0o1777)
         jobs.append({'label': label, 'cmd': cmd, 'env': dict(os.environ, TMPDIR=wd)})
 
     def listing(imp):
@@ -178,7 +203,7 @@ def main():
             list(pool.map(lambda j: run_job(j, state, lock), jobs))
         flaky = rerun_failed(a, state, base, tmp) if a.rerun else []
     finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        release_dir(tmp, tmp_lock)
     wall = time.monotonic() - t0
     tests, pkgs_res = state['tests'], state['pkgs']
     failed = [k for k, v in tests.items() if v[0] == 'fail']

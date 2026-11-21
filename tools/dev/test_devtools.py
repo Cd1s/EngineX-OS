@@ -138,6 +138,23 @@ class ReportTest(unittest.TestCase):
         self.assertIn('deferred to the ARM tier', text)
 
 
+class StableDirTest(unittest.TestCase):
+    def test_same_path_every_run_and_no_sharing_while_held(self):
+        import gorun
+        with tempfile.TemporaryDirectory() as base:
+            first, lock = gorun.stable_dir(base, 'scratch')
+            self.assertEqual(first, os.path.join(base, 'scratch'))
+            second, second_lock = gorun.stable_dir(base, 'scratch')  # a concurrent run gets its own directory
+            self.assertNotEqual(second, first)
+            self.assertIsNone(second_lock)
+            shutil.rmtree(second)
+            gorun.release_dir(first, lock)
+            self.assertEqual(os.listdir(base), [], 'the directory and its lock file are removed')
+            again, lock = gorun.stable_dir(base, 'scratch')
+            self.assertEqual(again, first)  # Go's test cache keys on the TMPDIR value
+            gorun.release_dir(again, lock)
+
+
 class PyrunTest(unittest.TestCase):
     def make(self, root):
         write(root, 'test_one.py', """\

@@ -11,12 +11,14 @@ Fast tier runs on the x86 host ENGINEX_FAST_HOST (here when this is that host, e
 the ARM tier (tools/dev/arm-tests.txt) runs on one of ENGINEX_BUILD_HOSTS under the heavy lock, at the same time.
 Settings come from the environment, else from ~/.config/enginex/dev.env (KEY=VALUE lines).
 """
-import pathlib, argparse, json, os, re, shutil, socket, subprocess, sys, tempfile, threading, time
+import pathlib, argparse, hashlib, json, os, re, shutil, socket, subprocess, sys, tempfile, threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+import gorun  # noqa: E402
 import testmap  # noqa: E402
 
+LOCKS = {}
 MARK = 'ENGINEX_RESULT_JSON '
 LOCK = '/var/lock/enginex-heavy.lock'
 PLAN_NAME = '.enginex-test-plan.json'
@@ -136,8 +138,9 @@ def spawn(step, cmd, env, cwd=None, quiet=False):
 def prepare(plan_path):
     """Own TMPDIR (world-writable: some tests drop privileges) and a git index for tests that call git ls-files."""
     os.nice(10)
-    tmp = tempfile.mkdtemp(prefix='enginex-fast-', dir='/var/tmp')
-    os.chmod(tmp, 0o1777)
+    # Same path on every run of this tree, so Go's test cache (keyed on TMPDIR) keeps hitting.
+    tmp, lock = gorun.stable_dir('/var/tmp', 'enginex-fast-' + hashlib.sha1(os.getcwd().encode()).hexdigest()[:8])
+    LOCKS[tmp] = lock
     env = dict(os.environ, TMPDIR=tmp)
     made_git = False
     if not os.path.exists('.git'):
@@ -149,7 +152,7 @@ def prepare(plan_path):
 
 
 def finish(tmp, made_git):
-    shutil.rmtree(tmp, ignore_errors=True)  # the directory created in prepare()
+    gorun.release_dir(tmp, LOCKS.pop(tmp, None))  # the directory created in prepare()
     if made_git:
         shutil.rmtree('.git', ignore_errors=True)
 
