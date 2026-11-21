@@ -56,7 +56,7 @@ Item {
     // A row the way the track list builds one: `row` is the delegate, modelData its model item, and the mark is loaded by URL, so the
     // pack's file (or stock's) is what the Engine serves.
     function build(parent, y, data) {
-        const text = 'import QtQuick 2.15\nItem {\n id: row\n width: 900; height: 56\n readonly property var modelData: ' + JSON.stringify(data) + '\n'
+        const text = 'import QtQuick 2.15\nItem {\n id: row\n width: 900; height: 56\n readonly property var modelData: (' + JSON.stringify(data) + ')\n'
             + ' Rectangle { anchors.fill: parent; color: "#1c1c1c"; Rectangle { width: parent.width; height: 1; anchors.bottom: parent.bottom; color: "#333333" } }\n'
             + ' Text { x: 64; y: 6; text: modelData.song; color: "#e8e8e8"; font.pixelSize: 24 }\n'
             + ' Text { x: 64; y: 32; text: modelData.artist; color: "#9a9a9a"; font.pixelSize: 17 }\n'

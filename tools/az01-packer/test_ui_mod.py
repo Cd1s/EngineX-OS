@@ -9491,11 +9491,12 @@ assert.equal(scOwnService(2), 'tidal'); assert.equal(loaded.length, 1);
              "rekordbox": "qrc:/Skins/UIKit/Icons/SourceEngineRemoteLibrary.png"}
 
     def row_prelude(self):
-        """PRELUDE with the pack's own scServices (a stub has no gateway labels)."""
+        """PRELUDE with the pack's own scServices and scRowLabels (a stub has no gateway labels)."""
         literal = re.search(r"readonly property var scServices: (\[.*?\n\t\])", bp.SERVICES_MAIN, re.S).group(1)
+        labels = re.search(r"readonly property var scRowLabels: (\(\{.*?\}\))\n", bp.SERVICES_MAIN).group(1)
         stub = re.compile(r"const scServices = \[.*?\];\n", re.S)
         self.assertEqual(len(stub.findall(self.PRELUDE)), 1)
-        return stub.sub(lambda m: "Object.defineProperty(globalThis, 'scServices', {get: () => (" + literal + ")});\n", self.PRELUDE)
+        return stub.sub(lambda m: "Object.defineProperty(globalThis, 'scServices', {get: () => (" + literal + ")});\nconst scRowLabels = " + labels + ";\n", self.PRELUDE)
 
     @unittest.skipUnless(shutil.which("node"), "Node is required to run the root helpers")
     def test_each_browse_row_shows_its_own_service_not_the_slots_tidal(self):
@@ -9556,7 +9557,7 @@ for (const scope of ['tidal', 'deezer', 'spotify', '']) for (const paired of [tr
 """)
 
     def test_the_pack_labels_are_the_gateways_labels(self):
-        """scRowIcon reads the label the gateway puts on a row (providerLabels): one list of services, the two spellings that differ named in it."""
+        """scRowIcon reads the label the gateway puts on a row (providerLabels): a service's name, or one of the two spellings scRowLabels names."""
         go = (REPO / "pkg/webui/tidal_gateway.go").read_text(encoding="utf-8")
         consts = dict(re.findall(r'^\s*(\w+)\s*=\s*"([^"]+)"', (REPO / "pkg/webui/rekordbox_source.go").read_text(encoding="utf-8") + (REPO / "pkg/webui/omnisource.go").read_text(encoding="utf-8"), re.M))
         body = re.search(r"providerLabels\s*=\s*map\[string\]string\{([^}]*)\}", go).group(1)
@@ -9565,14 +9566,15 @@ for (const scope of ['tidal', 'deezer', 'spotify', '']) for (const paired of [tr
             labels[quoted or consts[ident]] = label
         self.assertEqual(labels["rekordbox"], "rekordbox")
         literal = re.search(r"readonly property var scServices: (\[.*?\n\t\])", bp.SERVICES_MAIN, re.S).group(1)
-        for sid, name in re.findall(r'\{ id: "(\w+)", name: ([^\n]*?)(?:, label: "[^"]*")? \}', literal):
-            self.assertIn(sid, labels | {"tidal": "TIDAL"}, sid)
-        pack = {sid: label for sid, label in re.findall(r'id: "(\w+)", name: [^\n]*?label: "([^"]*)"', literal)}
+        names = {sid: name.strip('"') for sid, name in re.findall(r'\{ id: "(\w+)", name: ([^\n]*?) \}', literal) if name.startswith('"')}
+        table = dict(re.findall(r'"([^"]+)": "(\w+)"', re.search(r"readonly property var scRowLabels: (\(\{.*?\}\))\n", bp.SERVICES_MAIN).group(1)))
         for sid, label in labels.items():
             if sid == "local":
                 continue  # a drive row is no service: it takes the selected one's mark
-            same_name = re.search(r'id: "%s", name: "%s" \}' % (sid, re.escape(label)), literal)
-            self.assertTrue(same_name or pack.get(sid) == label, f"{sid}: pack and gateway disagree on the row label {label!r}")
+            self.assertTrue(table.get(label) == sid or names.get(sid) == label, f"{sid}: pack and gateway disagree on the row label {label!r}")
+        for label, sid in table.items():
+            self.assertEqual(labels[sid], label, f"scRowLabels names {label!r} for {sid}")
+        self.assertIn("netease", table.values())  # the two spellings that are not the service's name
 
     def patched_for(self, base, root, rel):
         qrc = LAB / base / "qrc"
