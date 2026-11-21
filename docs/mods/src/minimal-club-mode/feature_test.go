@@ -161,3 +161,64 @@ func TestDisableRestoresLegacySavedUnits(t *testing.T) {
 		})
 	}
 }
+
+func TestRebootRePausesServicesAndAllowsReEnable(t *testing.T) {
+	old := Systemctl
+	defer func() { Systemctl = old }()
+	live := map[string]bool{Services[0]: true}
+	Systemctl = func(args ...string) (string, string, int) {
+		unit := args[1]
+		switch args[0] {
+		case "show":
+			return "loaded\n", "", 0
+		case "is-active":
+			if live[unit] {
+				return "active\n", "", 0
+			}
+			return "inactive\n", "", 3
+		case "stop":
+			delete(live, unit)
+		case "start":
+			live[unit] = true
+		}
+		return "", "", 0
+	}
+
+	state := t.TempDir()
+	f, err := New(modkit.Env{State: state})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.(*feature).Action(map[string]any{"action": "enable"}); err != nil {
+		t.Fatal(err)
+	}
+	if live[Services[0]] {
+		t.Fatalf("service still active after enable")
+	}
+
+	// Simulate a normal reboot: systemd starts the service again and the mod helper restarts.
+	live[Services[0]] = true
+	f2, err := New(modkit.Env{State: state})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if live[Services[0]] {
+		t.Fatalf("service still active after reboot while club mode is active")
+	}
+	st, err := f2.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active, _ := st.(map[string]any)["active"].(bool); !active {
+		t.Fatalf("expected active=true after reboot, got %v", st)
+	}
+
+	// If the service was started externally while paused.json exists, enable re-pauses it.
+	live[Services[0]] = true
+	if _, err := f2.(*feature).Action(map[string]any{"action": "enable"}); err != nil {
+		t.Fatal(err)
+	}
+	if live[Services[0]] {
+		t.Fatalf("service still active after re-enable")
+	}
+}

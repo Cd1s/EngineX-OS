@@ -57,9 +57,42 @@ type feature struct {
 	path string
 }
 
-// New returns the Minimal Club Mode feature.
+// New returns the Minimal Club Mode feature, re-pausing any saved services
+// that systemd started again on reboot while club mode is active.
 func New(env modkit.Env) (modkit.Feature, error) {
-	return &feature{path: filepath.Join(env.State, "paused.json")}, nil
+	f := &feature{path: filepath.Join(env.State, "paused.json")}
+	_ = f.reapplyPaused()
+	return f, nil
+}
+
+func (f *feature) reapplyPaused() error {
+	if _, err := os.Stat(f.path); err != nil {
+		return nil
+	}
+	var snap snapshot
+	if err := modkit.LoadJSON(f.path, &snap); err != nil {
+		return err
+	}
+	if !snap.Active || snap.Phase == "restore-needed" {
+		return nil
+	}
+	for _, unit := range snap.Services {
+		unit = normalizeSavedUnit(unit)
+		if !allowed(unit) {
+			continue
+		}
+		unit = installedUnit(unit)
+		if isActive(unit) {
+			if _, _, code := Systemctl("stop", unit); code != 0 || isActive(unit) {
+				return fmt.Errorf("could not re-pause %s", unit)
+			}
+		}
+	}
+	if snap.Phase != "paused" {
+		snap.Phase = "paused"
+		return modkit.SaveJSON(f.path, snap)
+	}
+	return nil
 }
 
 type snapshot struct {
@@ -99,6 +132,9 @@ func (f *feature) Action(req map[string]any) (any, error) {
 	switch action {
 	case "enable":
 		if _, err := os.Stat(f.path); err == nil {
+			if err := f.reapplyPaused(); err != nil {
+				return nil, err
+			}
 			return f.Status()
 		}
 		active := []string{}
