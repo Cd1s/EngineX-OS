@@ -8,12 +8,34 @@ import unittest
 from unittest import mock
 import numpy as np
 import worker
-from worker import DemucsSeparator, Input, Separator, header_read, resolve_backend, serve
+from worker import (DemucsSeparator, Input, Separator, configure_torch_threads,
+                    header_read, resolve_backend, serve)
 from render import run
 
 WORKER_PY = str(Path(__file__).with_name('worker.py'))
 
 class WorkerTests(unittest.TestCase):
+    def test_cpu_thread_setting_honours_explicit_and_omp_limits(self):
+        class FakeTorch:
+            def __init__(self):
+                self.calls = []
+
+            def set_num_threads(self, value):
+                self.calls.append(('threads', value))
+
+            def set_num_interop_threads(self, value):
+                self.calls.append(('interop', value))
+
+        with mock.patch.dict(os.environ, {'OMP_NUM_THREADS': '4'}, clear=True):
+            torch = FakeTorch()
+            configure_torch_threads(torch)
+            self.assertEqual(torch.calls, [('threads', 4)])
+        with mock.patch.dict(os.environ, {'STEMS_TORCH_THREADS': '8',
+                                          'STEMS_TORCH_INTEROP_THREADS': '2'}, clear=True):
+            torch = FakeTorch()
+            configure_torch_threads(torch)
+            self.assertEqual(torch.calls, [('threads', 8), ('interop', 2)])
+
     def test_reconstruction_and_frame_accounting(self):
         rng=np.random.default_rng(6596)
         for channels in (1,2):
