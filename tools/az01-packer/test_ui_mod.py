@@ -2837,6 +2837,22 @@ scPausedShadowFollow = true; scShadowEngineMask = 0; assert.equal(text(), want(1
         self.assertIn("running: root.scShadowFeedPlaying !== 0 && root.scCueCountdown", SRC)
         self.assertIn("if (((scShadowFeedPlaying & bit) !== 0) !== fed) scShadowFeedPlaying ^= bit", SRC)
 
+    def test_scShadowFeed_clears_playing_bit_when_source_stops_or_scratches(self):
+        self.js(r"""
+scPausedShadowFollow = true;
+scShadowFeedPlaying = 0;
+globalThis.XMLHttpRequest = class { open() {} setRequestHeader() {} send() {} };
+const e = {id: 'k'};
+scShadowFeed(1, e, {ready: true, sourcePlaying: true, scratch: false, sampleRate: 44100, feedMs: 1000, feedAt: 1000}, 1);
+assert.strictEqual(scShadowFeedPlaying & (1 << 1), 1 << 1, 'playing non-scratching source sets the bit');
+scShadowFeed(1, e, {ready: true, sourcePlaying: false, scratch: false, sampleRate: 44100, feedMs: 1000, feedAt: 1000}, 1);
+assert.strictEqual(scShadowFeedPlaying & (1 << 1), 0, 'sourcePlaying false clears the bit');
+scShadowFeed(1, e, {ready: true, sourcePlaying: true, scratch: false, sampleRate: 44100, feedMs: 1000, feedAt: 1000}, 1);
+assert.strictEqual(scShadowFeedPlaying & (1 << 1), 1 << 1, 're-armed when playing resumes');
+scShadowFeed(1, e, {ready: true, sourcePlaying: true, scratch: true, sampleRate: 44100, feedMs: 1000, feedAt: 1000}, 1);
+assert.strictEqual(scShadowFeedPlaying & (1 << 1), 0, 'scratch true clears the bit');
+""")
+
     def test_local_countdown_for_a_cue_on_the_grid_is_unchanged(self):
         # The most common case is as before: cue on a grid line, count = whole beats left.
         self.local_countdown(r"""
@@ -6808,6 +6824,18 @@ assert.strictEqual(scShadowHead[2].aligned, false, 'losing the alignment reaches
         self.assertIn("sent.aligned = o.aligned;", SRC)
         self.assertIn("o.phase = o.aligned || !pm ? 0 : Math.round((Number(pm.phaseOffset) || 0) * 50) / 50", SRC)
         self.assertIn("(sent.phase !== o.phase && now - scShadowPostAt >= 100)", SRC)  # at most 10 phase-only posts a second
+
+    def test_the_shadow_header_sets_phase_only_for_numeric_phase(self):
+        ShadowDisplayTest.js(self, r"""
+Object.assign(globalThis, {scShadowApply() {}, scShadowEmpty() {}});
+const deck = (d, o) => Object.assign({deck: d, path: '/c/a.mp3', id: 'k'}, o);
+scShadowApplyAll([
+    deck(2, {aligned: true, phaseActive: true, phaseMeter: true, phase: 0}),
+    deck(4, {aligned: true, phaseActive: true, phaseMeter: true}),
+], false);
+assert.strictEqual(scShadowHead[2].phase, 0, 'numeric phase 0 is preserved');
+assert.strictEqual(scShadowHead[4].phase, undefined, 'payload without phase leaves h.phase absent for QML fallback');
+""")
 
 
 @unittest.skipUnless(shutil.which("node"), "node needed for the shadow-deck behavioral checks")
