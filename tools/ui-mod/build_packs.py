@@ -810,7 +810,7 @@ SERVICES_MAIN = """
 	// at.feedAt), not carried to now here: stream-sync dates the record by that clock, so
 	// a busy GUI thread does not move the line. Sent when it changes, and every 250 ms.
 	function scShadowFeed(d, e, at, rate) {
-		const bit = 1 << d, fed = root.scPausedShadowFollow && !!at && at.ready && at.sampleRate > 0 && isFinite(at.feedMs) && rate > 0
+		const bit = 1 << d, fed = root.scPausedShadowFollow && !!at && at.ready && at.sourcePlaying && !at.scratch && at.sampleRate > 0 && isFinite(at.feedMs) && rate > 0
 		if (((scShadowFeedPlaying & bit) !== 0) !== fed) scShadowFeedPlaying ^= bit
 		if (!root.scPausedShadowFollow) return
 		const sr = at && at.ready ? at.sampleRate : 0, now = Date.now()
@@ -2315,7 +2315,7 @@ SERVICES_MAIN = """
 				const h = head[d] = {master: typeof e.lead === "boolean" ? e.lead : e.master, sync: !!e.sync, title: e.title || "", artist: e.artist || "", keyName: e.keyName || "",
 					loop: !!e.loop, keyOffset: e.keyOffset || 0, stems: !!e.stems, slip: e.slip || 0, service: e.service || ""}
 				// The source's phase meter; a CDJ or an older sender sends none and the copy's own stays.
-				if (typeof e.aligned === "boolean") { h.aligned = e.aligned; h.phaseActive = !!e.phaseActive; h.phaseMeter = !!e.phaseMeter; h.phase = Number(e.phase) || 0 }
+				if (typeof e.aligned === "boolean") { h.aligned = e.aligned; h.phaseActive = !!e.phaseActive; h.phaseMeter = !!e.phaseMeter; if (typeof e.phase === "number") h.phase = e.phase }
 			}
 			// The last track is still on the deck (the next one's copy on its way, the peer gone): its
 			// header stays until it is unloaded. Without it the header read the copy's file name and key.
