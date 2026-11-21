@@ -3706,15 +3706,17 @@ SERVICES_MAIN = """
 	// The Sources list shows these in this order after the drives and Link sources:
 	// the computer with rekordbox is a library on the link, so it comes before the services.
 	readonly property var scServices: [
-		{ id: "rekordbox", name: scRekordboxName ? "rekordbox (" + scRekordboxName + ")" : "rekordbox", label: "rekordbox" },
+		{ id: "rekordbox", name: scRekordboxName ? "rekordbox (" + scRekordboxName + ")" : "rekordbox" },
 		{ id: "tidal", name: "TIDAL" },
-		{ id: "netease", name: scT("NetEase Cloud Music"), label: "网易云音乐" },
+		{ id: "netease", name: scT("NetEase Cloud Music") },
 		{ id: "spotify", name: "Spotify" },
 		{ id: "deezer", name: "Deezer" },
 		{ id: "soundcloud", name: "SoundCloud" },
 		{ id: "beatport", name: "Beatport" },
 		{ id: "applemusic", name: "Apple Music" }
 	]
+	// The label the gateway puts on a streamed row (providerLabels in tidal_gateway.go) is the service's name except for these two.
+	readonly property var scRowLabels: ({ "rekordbox": "rekordbox", "网易云音乐": "netease" })
 	// Keep inactive dictionaries as scalar JSON strings. Only the selected language
 	// becomes a JS object/GC root; retain all spellings for live language switching.
 	readonly property var scDicts: (@DICTS@)
@@ -3971,8 +3973,8 @@ SERVICES_MAIN = """
 	function scRowIcon(stock, label) {
 		if (!/tidal/i.test(String(stock || "")) || (scScope === "tidal" && scTidalLoggedIn)) return ""
 		const name = String(label || "").split(" [")[0]
-		const own = scServices.find(v => (v.label || v.name) === name)
-		return own ? (own.id === "tidal" ? "" : scIcon(own.id)) : scSlotIcon("TIDAL", 0)
+		const own = scRowLabels.hasOwnProperty(name) ? scRowLabels[name] : (scServices.find(v => v.name === name) || {}).id
+		return own ? (own === "tidal" ? "" : scIcon(own)) : scSlotIcon("TIDAL", 0)
 	}
 	// Capture manual and auto-detected IANA time zones via stock Planck.timeDateController
 	// signals and persist them through stream-sync (/data/enginex/state/timezone) without
