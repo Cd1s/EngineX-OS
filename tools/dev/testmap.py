@@ -103,9 +103,15 @@ def _go_funcs(text):
     for i, line in enumerate(text.splitlines(), 1):
         m = re.match(r'func (?:\([^)]*\) )?(Test\w*|Example\w*|Fuzz\w*)\(', line)
         if m:
+            if name:  # the previous function never closed at column 0: it ends where this one starts
+                funcs.append((name, start, i - 1))
             name, start = m.group(1), i
+            if line.rstrip().endswith('}'):  # one-line function
+                funcs.append((name, i, i)); name = None
         elif line.startswith('}') and name:
             funcs.append((name, start, i)); name = None
+    if name:
+        funcs.append((name, start, len(text.splitlines())))
     return funcs
 
 
