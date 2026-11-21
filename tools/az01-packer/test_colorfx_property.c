@@ -173,7 +173,7 @@ static void *test(void *unused) {
             product, ncontrols, (void *)vt4, (void *)(base + SET_VALUE), vt4_hooked, inline_setval, inline_proc);
 
     CHECK(ncontrols >= 2, "%s: %u mixer channels with a SweepFxControl", product, ncontrols);
-    CHECK(!strcmp(marker, "armhf-cfx-v1\n"), "ready marker present (%s)", marker[0] ? "wrong body" : "missing");
+    CHECK(!strcmp(marker, "armhf-cfx-v1\n"), "ready marker present (ok=%d)", !strcmp(marker, "armhf-cfx-v1\n"));
     CHECK(inline_proc, "ChannelSweepFx::process hook installed");
     if (ncontrols < 2 || !inline_proc) {
         fprintf(stderr, "CFXPROP done|FAIL\n");
