@@ -73,29 +73,11 @@ func quickUpdate(ctx context.Context, mount, dir string, r *compat.Resolver, lim
 	if enginedb.LibraryInUse(mount) {
 		return enginedb.Result{}, enginedb.ErrLibraryInUse
 	}
-	known, err := ownedSpellings(dir)
-	if err != nil {
-		return enginedb.Result{}, err
-	}
-	rows, err := ownedPaths(dir)
-	if err != nil {
-		return enginedb.Result{}, err
-	}
 	l, stagedOnly, err := readLibrary(ctx, mount)
 	if err != nil {
 		return enginedb.Result{}, err
 	}
-	// The export's spelling of a path is trusted for a new track; one the library holds keeps its
-	// row's path, which an import resolved on the volume, even when the export moved its file: a
-	// quick update moves no row. A row it moved would be imported as new from the export alone and
-	// then no longer count as the import's, and the background update would replace what a deck
-	// changed on it; the update moves it with its files read.
-	for i := range l.Tracks {
-		if p, ok := rows[l.Tracks[i].ID]; ok {
-			l.Tracks[i].Path = "/" + p
-		}
-	}
-	fresh, err := keepSpellings(l, known)
+	fresh, err := quickPaths(dir, l)
 	if err != nil {
 		return enginedb.Result{}, err
 	}
@@ -105,10 +87,68 @@ func quickUpdate(ctx context.Context, mount, dir string, r *compat.Resolver, lim
 	}
 	cost := time.Duration(len(l.Tracks)-fresh)*quickPerKnown + time.Duration(fresh)*quickPerNew + time.Duration(entries)*publishPerEntry + publishMargin
 	if left := time.Until(limit); cost > left {
-		return enginedb.Result{}, fmt.Errorf("%d new tracks and %d playlist entries need about %s, %s left", fresh, entries, cost.Round(time.Second), left.Round(time.Second))
+		return enginedb.Result{}, fmt.Errorf("%w: %d new tracks and %d playlist entries need about %s, %s left", errQuickTooLong, fresh, entries, cost.Round(time.Second), left.Round(time.Second))
+	}
+	return enginedb.SyncResolved(ctx, r, l, enginedb.Options{Fast: true, TrustPaths: true, FastCues: true, StagedOnly: stagedOnly})
+}
+
+var errQuickTooLong = errors.New("the re-export's list does not fit the mount")
+
+// quickPaths prepares the export l for an import of its list alone into the library in dir and
+// counts its new tracks. The export's spelling of a path is trusted for a new track; one the
+// library holds keeps its row's path, which an import resolved on the volume, even when the export
+// moved its file: a quick update moves no row. A row it moved would be imported as new from the
+// export alone and then no longer count as the import's, and the update would replace what a deck
+// changed on it; the update moves it with its files read.
+func quickPaths(dir string, l *rekordbox.Library) (fresh int, err error) {
+	known, err := ownedSpellings(dir)
+	if err != nil {
+		return 0, err
+	}
+	rows, err := ownedPaths(dir)
+	if err != nil {
+		return 0, err
+	}
+	for i := range l.Tracks {
+		if p, ok := rows[l.Tracks[i].ID]; ok {
+			l.Tracks[i].Path = "/" + p
+		}
+	}
+	if fresh, err = keepSpellings(l, known); err != nil {
+		return 0, err
 	}
 	mergeByPath(l)
-	return enginedb.SyncResolved(ctx, r, l, enginedb.Options{Fast: true, TrustPaths: true, FastCues: true, StagedOnly: stagedOnly})
+	return fresh, nil
+}
+
+// quickName marks the stage of an update whose list did not fit the mount (a 20 000-track
+// re-export on an SC5000): the job builds the list alone first, and the remount that publishes
+// it starts the update that reads the files. Its playlists then wait for one remount, not for
+// every file of the stick.
+const quickName = "QUICK"
+
+// quickInStage is quickUpdate on the stage's copy of the library, without the mount's time limit.
+func quickInStage(ctx context.Context, dir, stage, stamp string, r *compat.Resolver, l *rekordbox.Library, stagedOnly bool, progress func(done, total int)) (enginedb.Result, error) {
+	if _, err := os.Stat(filepath.Join(stage, baseCountsName)); errors.Is(err, os.ErrNotExist) {
+		if err = snapshotLive(ctx, dir, stage); err != nil {
+			return enginedb.Result{}, err
+		}
+	}
+	if progress != nil {
+		progress(0, len(l.Tracks))
+	}
+	if _, err := quickPaths(stage, l); err != nil {
+		return enginedb.Result{}, err
+	}
+	res, err := enginedb.SyncResolved(ctx, r, l, enginedb.Options{Fast: true, TrustPaths: true, FastCues: true, StagedOnly: stagedOnly, DatabaseDir: stage})
+	if err != nil {
+		return res, err
+	}
+	if progress != nil {
+		progress(len(l.Tracks), len(l.Tracks))
+	}
+	log.Printf("rb-bridge: the re-export's list is ready (%d new tracks); a remount publishes it before its files are read", res.Added)
+	return res, completeStage(stage, stamp)
 }
 
 // keepSpellings gives the tracks of l that the library holds their rows' spelling of their path,
@@ -293,6 +333,9 @@ func updateInBackground(ctx context.Context, mount, stage, stamp string, r *comp
 	l, stagedOnly, err := readLibrary(ctx, mount)
 	if err != nil {
 		return enginedb.Result{}, err
+	}
+	if readMark(stage, quickName) == stamp {
+		return quickInStage(ctx, dir, stage, stamp, r, l, stagedOnly, progress)
 	}
 	if err = ReconcileContext(ctx, r, l); err != nil {
 		return enginedb.Result{}, err
@@ -515,8 +558,21 @@ func publishUpdate(ctx context.Context, mount, dir string) (enginedb.Result, err
 		}
 		log.Printf("rb-bridge: Engine's changes since the update started carried over in %s (%d tracks Engine wrote)", time.Since(start).Round(time.Millisecond), written)
 	}
+	stamp := readMark(stage, stampName)
+	quick := readMark(stage, quickName) == stamp
 	if err := renameStage(dir, stage); err != nil {
 		return enginedb.Result{}, err
+	}
+	if quick {
+		// The list alone: the update that reads the files starts now (completeLater).
+		log.Printf("rb-bridge: the re-export's list published; its files are read next")
+		if err := keepPending(dir); err != nil {
+			return enginedb.Result{}, err
+		}
+		if err := startUpdate(stage, stamp); err != nil {
+			return enginedb.Result{}, err
+		}
+		return enginedb.Result{PlaylistsChanged: true, Background: true}, nil
 	}
 	log.Printf("rb-bridge: update published")
 	return enginedb.Result{PlaylistsChanged: true}, nil

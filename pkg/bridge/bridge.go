@@ -646,18 +646,24 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 	// Its playlists and new tracks come in now, from the export alone (#253).
 	if !full && !bypass && !opts.SmartMatch && canWrite && opts.Deadline.IsZero() && reread == nil && exportBytes(r, mount) > attemptExportBytes {
 		var res enginedb.Result
+		quick := false
 		// An export whose list is in the library already (.rb-bridge-pending) has only its files left.
 		if readMark(dir, pendingName) != stamp {
 			var err error
 			if res, err = quickUpdate(ctx, mount, dir, r, mountStart.Add(maxMountHookBudget)); err != nil {
-				log.Printf("rb-bridge: the re-export's playlists wait for the background update: %v", err)
-				res = enginedb.Result{}
+				log.Printf("rb-bridge: the re-export's playlists wait for the background job: %v", err)
+				res, quick = enginedb.Result{}, errors.Is(err, errQuickTooLong)
 			} else {
 				log.Printf("rb-bridge: re-export's playlists and %d new tracks in at the mount; grids and waveforms follow", res.Added)
 			}
 		}
 		if err := startUpdate(stage, stamp); err != nil {
 			return enginedb.Result{}, err
+		}
+		if quick {
+			if err := writeMark(stage, quickName, stamp); err != nil {
+				return enginedb.Result{}, err
+			}
 		}
 		log.Printf("rb-bridge: update of a large export goes on after the mount")
 		res.Background = true

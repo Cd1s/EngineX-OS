@@ -433,3 +433,51 @@ func TestIssue253StateStaysWithinAPerTrackBudget(t *testing.T) {
 	budget("update", 650)
 	issue253Refs(t, root, 650)
 }
+
+// A re-export whose list does not fit the mount (20 000 tracks on an SC5000) has its list built
+// first by the background job, alone, and published by the remount; the update that reads the
+// files starts with that publish. Its playlists wait for one remount, not for every file.
+func TestIssue253ReexportTooLargeForTheMountPublishesItsListFirst(t *testing.T) {
+	root, cues := issue253Converted(t, 40)
+	testfixture.LargeExport(t, root, 60)
+	defer bridge.SetLargeExportForTest()()
+	defer bridge.SetMountWindowForTest(time.Second)()
+	ctx := context.Background()
+	if r, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false); err != nil || !r.Background || r.Added != 0 {
+		t.Fatalf("mount of the re-export: %+v %v", r, err)
+	}
+	if b, err := os.ReadFile(stagePath(root, "QUICK")); err != nil || len(b) == 0 {
+		t.Fatalf("no list-first mark: %v", err)
+	}
+	r, err := bridge.ImportInBackground(ctx, root, nil)
+	if err != nil || r.Bypassed || r.Added != 20 {
+		t.Fatalf("the job's list: %+v %v", r, err)
+	}
+	if n := finished(t, root); n != 40 {
+		t.Fatalf("the list read files: %d tracks finished, want the 40 of before", n)
+	}
+	// The remount publishes the list, and the update that reads the files starts.
+	if r, err = bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false); err != nil || !r.Background || !r.PlaylistsChanged {
+		t.Fatalf("remount publishing the list: %+v %v", r, err)
+	}
+	db := dbOpen(t, root)
+	if n := scalar[int](t, db, `SELECT count(*) FROM PlaylistEntity e JOIN Playlist p ON p.id=e.listId WHERE p.title='Large Set'`); n != 60 {
+		t.Fatalf("the re-export's playlist has %d of its 60 entries after the first remount", n)
+	}
+	issue253DeckEdit(t, db, cues)
+	db.Close()
+	if _, err := os.Stat(stagePath(root, "QUICK")); !os.IsNotExist(err) {
+		t.Fatalf("the update after the list is list-only again: %v", err)
+	}
+	if r, err = bridge.ImportInBackground(ctx, root, nil); err != nil || r.Deferred != 0 {
+		t.Fatalf("update: %+v %v", r, err)
+	}
+	if r, err = bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false); err != nil || r.Background {
+		t.Fatalf("remount publishing the update: %+v %v", r, err)
+	}
+	db = dbOpen(t, root)
+	if n := scalar[int](t, db, `SELECT count(*) FROM PerformanceData p JOIN Track t ON t.id=p.trackId WHERE t.pdbImportKey>0 AND p.beatData IS NOT NULL`); n != 60 {
+		t.Fatalf("%d of 60 tracks with their grid", n)
+	}
+	issue253DeckEdit(t, db, cues)
+}
