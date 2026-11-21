@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Batch conflict rule: rebase a copy as agent/5306-<slug>-b1 and keep both sides' additions
+# when they are independent insertions. If a hunk changes the same lines on both sides, stop
+# and report the file and hunk. The lost-lines check and targeted tests remain mandatory.
+
 ROOT=$(git rev-parse --show-toplevel)
 TARGET=agent/5306-integration
 SSHCTL=${SSHCTL:-$(command -v sshctl || true)}
@@ -173,26 +177,127 @@ targeted_tests() {
     remote_run "$host" "$inner"
 }
 
-resolve_checklist_merge() {
-    local base=$1 branch=$2 rows=$tmp/checklist.rows files line
-    git -C "$worktree" -c user.name=enginex-integrate -c user.email=enginex-integrate@localhost merge --no-ff --no-edit "origin/$branch" >/dev/null 2>&1 && return 0
-    git -C "$worktree" merge --abort >/dev/null 2>&1 || true
-    files=$(git -C "$worktree" diff --name-only "$base" "origin/$branch")
-    [[ $files == docs/REGRESSION-CHECKLIST.md ]] || return 1
-    python3 - "$base" "origin/$branch" "$rows" <<'PY'
-import re, subprocess, sys
-base, branch, output = sys.argv[1:]
-diff = subprocess.check_output(["git", "diff", "--no-renames", "--unified=0", base, branch, "--", "docs/REGRESSION-CHECKLIST.md"], text=True)
-added = [line[1:] for line in diff.splitlines() if line.startswith("+") and not line.startswith("+++")]
-if not added or any(not re.match(r"\|\s*\d+\s*\|", line) for line in added):
-    raise SystemExit(1)
-open(output, "w", encoding="utf-8").write("\n".join(added) + "\n")
+resolve_conflicts_both() {
+    python3 - "$worktree" <<'PY'
+from difflib import SequenceMatcher
+from pathlib import Path
+import subprocess, sys
+
+root = Path(sys.argv[1])
+paths = subprocess.check_output(
+    ["git", "-C", str(root), "diff", "--name-only", "--diff-filter=U"], text=True
+).splitlines()
+
+def insertions(base, side):
+    result = {}
+    matcher = SequenceMatcher(None, base, side, autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        if tag != "insert":
+            raise ValueError("a side modifies or deletes existing lines")
+        result.setdefault(i1, []).extend(side[j1:j2])
+    return result
+
+for path in paths:
+    file_path = root / path
+    lines = file_path.read_text(encoding="utf-8", errors="surrogateescape").splitlines(keepends=True)
+    output = []
+    index = 0
+    hunk = 0
+    while index < len(lines):
+        if not lines[index].startswith("<<<<<<< "):
+            output.append(lines[index])
+            index += 1
+            continue
+        hunk += 1
+        ours = []
+        base = []
+        theirs = []
+        index += 1
+        while index < len(lines) and not lines[index].startswith("||||||| "):
+            ours.append(lines[index])
+            index += 1
+        if index == len(lines):
+            raise SystemExit(f"{path}: conflict hunk {hunk} has no base section")
+        index += 1
+        while index < len(lines) and not lines[index].startswith("======="):
+            base.append(lines[index])
+            index += 1
+        if index == len(lines):
+            raise SystemExit(f"{path}: conflict hunk {hunk} has no separator")
+        index += 1
+        while index < len(lines) and not lines[index].startswith(">>>>>>> "):
+            theirs.append(lines[index])
+            index += 1
+        if index == len(lines):
+            raise SystemExit(f"{path}: conflict hunk {hunk} has no end marker")
+        index += 1
+        try:
+            ours_insertions = insertions(base, ours)
+            theirs_insertions = insertions(base, theirs)
+        except ValueError:
+            raise SystemExit(f"{path}: conflict hunk {hunk} needs a choice between modified lines")
+        for position in range(len(base) + 1):
+            output.extend(ours_insertions.get(position, []))
+            output.extend(theirs_insertions.get(position, []))
+            if position < len(base):
+                output.append(base[position])
+    file_path.write_text("".join(output), encoding="utf-8", errors="surrogateescape")
 PY
-    git -C "$worktree" -c user.name=enginex-integrate -c user.email=enginex-integrate@localhost merge --no-ff -s ours --no-edit "origin/$branch" >/dev/null
-    while IFS= read -r line; do printf '%s\n' "$line" >> "$worktree/docs/REGRESSION-CHECKLIST.md"; done < "$rows"
-    git -C "$worktree" add docs/REGRESSION-CHECKLIST.md
-    git -C "$worktree" -c user.name=enginex-integrate -c user.email=enginex-integrate@localhost \
-        commit -m "chore: preserve checklist rows during merge" >/dev/null
+}
+
+rebase_copy() {
+    local base=$1 branch=$2 pre_merge=$3 slug=$4 b1="agent/5306-${slug}-b1" rc conflicts
+    git branch -f "$b1" "origin/$branch"
+    git -C "$worktree" switch --detach "origin/$branch" >/dev/null
+    git -C "$worktree" switch -C "$b1" "origin/$branch" >/dev/null
+    set +e
+    GIT_EDITOR=true git -C "$worktree" -c user.name=enginex-integrate -c user.email=enginex-integrate@localhost \
+        rebase --onto "$pre_merge" "$base" "$b1" >/dev/null 2>&1
+    rc=$?
+    set -e
+    while ((rc != 0)); do
+        conflicts=$(git -C "$worktree" diff --name-only --diff-filter=U)
+        [[ -n "$conflicts" ]] || {
+            git -C "$worktree" rebase --abort >/dev/null 2>&1 || true
+            echo "rebase refused for $branch without a resolvable conflict hunk" >&2
+            return 1
+        }
+        if ! resolve_conflicts_both; then
+            git -C "$worktree" rebase --abort >/dev/null 2>&1 || true
+            return 1
+        fi
+        git -C "$worktree" add -A
+        set +e
+        GIT_EDITOR=true git -C "$worktree" -c user.name=enginex-integrate -c user.email=enginex-integrate@localhost \
+            rebase --continue >/dev/null 2>&1
+        rc=$?
+        set -e
+    done
+    git push origin "HEAD:$b1" >/dev/null
+    git -C "$worktree" switch --detach "$pre_merge" >/dev/null
+    resolved_branch=$b1
+}
+
+merge_branch() {
+    local base=$1 branch=$2 pre_merge=$3 slug
+    resolved_branch=$branch
+    if git -C "$worktree" -c merge.conflictStyle=diff3 -c user.name=enginex-integrate -c user.email=enginex-integrate@localhost \
+        merge --no-ff --no-edit "origin/$branch" >/dev/null 2>&1; then
+        return 0
+    fi
+    git -C "$worktree" merge --abort >/dev/null 2>&1 || true
+    case $branch in
+        agent/5306-*) slug=${branch#agent/5306-} ;;
+        agent/*) slug=${branch#agent/} ;;
+        *) slug=$branch ;;
+    esac
+    slug=${slug//[^A-Za-z0-9._-]/_}
+    echo "merge conflict for $branch, rebasing copy agent/5306-${slug}-b1" >&2
+    rebase_copy "$base" "$branch" "$pre_merge" "$slug"
+    git -C "$worktree" -c merge.conflictStyle=diff3 -c user.name=enginex-integrate -c user.email=enginex-integrate@localhost \
+        merge --no-ff --no-edit "origin/$resolved_branch" >/dev/null
 }
 
 rebuild_overlay() {
@@ -221,7 +326,7 @@ for branch in "${branches[@]}"; do
     pre_merge=$(git -C "$worktree" rev-parse HEAD)
     base=$(git -C "$worktree" merge-base HEAD "origin/$branch")
     max_before=$(awk -F'|' '/^\|[[:space:]]*[0-9]+[[:space:]]*\|/ {gsub(/[[:space:]]/, "", $2); if ($2 > max) max=$2} END {print max+0}' "$worktree/docs/REGRESSION-CHECKLIST.md")
-    resolve_checklist_merge "$base" "$branch" || { echo "merge refused: $branch" >&2; exit 1; }
+    merge_branch "$base" "$branch" "$pre_merge" || { echo "merge refused: $branch" >&2; exit 1; }
     added_lines_check "$base" "origin/$branch" "$worktree"
     added_lines_check "$base" "$pre_merge" "$worktree"
     normalize_checklist "$base" "origin/$branch" "$max_before"
@@ -229,7 +334,11 @@ for branch in "${branches[@]}"; do
     mapfile -t overlays < <(git -C "$worktree" diff --name-only "$base" "origin/$branch" -- rootfs-overlay | grep '\.so$' || true)
     if ((${#overlays[@]})); then rebuild_overlay "$(pick_host 1)" "${branch//[^A-Za-z0-9._-]/_}-${target_head}" "${overlays[@]}"; fi
     targeted_tests "$(pick_host 0)" "${touched[@]}"
-    merged+=("$branch ($(git -C "$worktree" rev-parse --short "origin/$branch"))")
+    if [[ $resolved_branch == "$branch" ]]; then
+        merged+=("$branch ($(git -C "$worktree" rev-parse --short "origin/$branch"))")
+    else
+        merged+=("$branch via $resolved_branch ($(git -C "$worktree" rev-parse --short "origin/$resolved_branch"))")
+    fi
 done
 
 full_host=$(pick_host 1)
