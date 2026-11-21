@@ -69,18 +69,42 @@ func importKeeps(ctx context.Context, q *stmtCache, id int64, perf Performance) 
 }
 
 // recordWritten notes that track id's row is what the import leaves in it, or that it is not.
+// A row that is the import's is what the stick's rekordbox files hold (BridgeSynced, #321); the
+// date goes in when the import commits (temp.synced_now). One the deck changed is not.
 func recordWritten(ctx context.Context, q *stmtCache, id int64, perf Performance) error {
 	var beats, cues, loops []byte
-	e := q.QueryRowContext(ctx, `SELECT beatData,quickCues,loops FROM PerformanceData WHERE trackId=?`, id).Scan(&beats, &cues, &loops)
+	var active sql.NullInt64
+	var genre, comment, label string
+	e := q.QueryRowContext(ctx, `SELECT p.beatData,p.quickCues,p.loops,p.activeOnLoadLoops,COALESCE(t.genre,''),COALESCE(t.comment,''),COALESCE(t.label,'')
+		FROM PerformanceData p JOIN Track t ON t.id=p.trackId WHERE p.trackId=?`, id).Scan(&beats, &cues, &loops, &active, &genre, &comment, &label)
 	if e != nil {
 		return e
 	}
 	if digest := writtenDigest(beats, cues, loops); bytes.Equal(digest, writtenDigest(perf.Beats, perf.QuickCues, perf.Loops)) {
-		_, e = q.ExecContext(ctx, `INSERT OR REPLACE INTO BridgeWritten(trackId,digest) VALUES(?,?)`, id, digest)
-	} else {
-		_, e = q.ExecContext(ctx, `DELETE FROM BridgeWritten WHERE trackId=?`, id)
+		if _, e = q.ExecContext(ctx, `INSERT OR REPLACE INTO BridgeWritten(trackId,digest) VALUES(?,?)`, id, digest); e == nil {
+			_, e = q.ExecContext(ctx, `INSERT OR REPLACE INTO BridgeSynced(trackId,lastEditTime,digest) VALUES(?,0,?)`, id, SyncedDigest(beats, cues, loops, active.Int64, genre, comment, label))
+		}
+		if e == nil {
+			_, e = q.ExecContext(ctx, `INSERT OR IGNORE INTO temp.synced_now(id) VALUES(?)`, id)
+		}
+	} else if _, e = q.ExecContext(ctx, `DELETE FROM BridgeWritten WHERE trackId=?`, id); e == nil {
+		_, e = q.ExecContext(ctx, `DELETE FROM BridgeSynced WHERE trackId=?`, id)
 	}
 	return e
+}
+
+// SyncedDigest names what the deck can change in a row and the stick's rekordbox files hold:
+// its grid, cues, loops, which saved loop is active on load (#321), and the track's genre,
+// comment and label (#314).
+func SyncedDigest(beats, cues, loops []byte, activeOnLoadLoops int64, genre, comment, label string) []byte {
+	h := sha256.New()
+	h.Write(writtenDigest(beats, cues, loops))
+	_ = binary.Write(h, big, activeOnLoadLoops)
+	for _, s := range []string{genre, comment, label} {
+		_ = binary.Write(h, big, uint32(len(s)))
+		h.Write([]byte(s))
+	}
+	return h.Sum(nil)[:16]
 }
 
 // carryLiveEdits is importKeeps for a build that replaces the live library (merge.go): what
@@ -89,7 +113,7 @@ func recordWritten(ctx context.Context, q *stmtCache, id int64, perf Performance
 // Only the tracks Engine has written since the snapshot (temp.touched): the build was made
 // from the snapshot's row of every other track and has kept what that row held already.
 func carryLiveEdits(ctx context.Context, tx *sql.Tx) error {
-	if _, e := tx.ExecContext(ctx, bridgeWrittenSchema); e != nil {
+	if _, e := tx.ExecContext(ctx, bridgeWrittenSchema+`; `+BridgeSyncedSchema); e != nil {
 		return e
 	}
 	digest, n := `NULL`, 0 // the live library's state may be an earlier build's
@@ -156,6 +180,10 @@ func carryLiveEdits(ctx context.Context, tx *sql.Tx) error {
 			if _, e = tx.ExecContext(ctx, `DELETE FROM bridge.BridgeWritten WHERE trackId=?`, x.id); e != nil {
 				return e
 			}
+		}
+		// The live row's edits may not be on the stick yet: the write-back reads it again.
+		if _, e = tx.ExecContext(ctx, `DELETE FROM bridge.BridgeSynced WHERE trackId=?`, x.id); e != nil {
+			return e
 		}
 	}
 	return nil

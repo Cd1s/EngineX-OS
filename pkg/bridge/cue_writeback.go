@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -35,11 +36,17 @@ type WriteBackOptions struct {
 	// BeforeRename is an optional test hook invoked after writing a temp file
 	// and before os.Rename replaces dst.
 	BeforeRename func(dst string) error
+	// Session is what earlier passes of a long-lived caller (the stick's watcher, #321) found
+	// the stick holding; nil for a single pass.
+	Session *CueSession
 }
 
 // WriteBackResult summarizes a deck-edit write-back pass on a stick.
 type WriteBackResult struct {
-	TracksChecked     int    `json:"tracksChecked"`
+	TracksChecked int `json:"tracksChecked"`
+	// TracksRead counts the PerformanceData rows the pass read: those whose Track.lastEditTime
+	// moved since the stick last held them (#321).
+	TracksRead        int    `json:"tracksRead"`
 	TracksChanged     int    `json:"tracksChanged"`
 	FilesUpdated      int    `json:"filesUpdated"`
 	OneLibraryUpdated bool   `json:"oneLibraryUpdated"`
@@ -47,6 +54,65 @@ type WriteBackResult struct {
 }
 
 const usbPreparingFlagPath = "/run/enginex-usb-preparing"
+
+// CueSession is what the passes over one mounted stick found it holding since the mount: a row
+// by its Track.lastEditTime, in memory only. It goes to the state with the next pass that writes
+// the stick anyway (#321).
+type CueSession struct {
+	mu   sync.Mutex
+	rows map[int64]syncedRow
+}
+
+// syncedRow is a BridgeSynced row: track id, Track.lastEditTime as read, SyncedDigest.
+type syncedRow struct {
+	id     int64
+	edit   any
+	digest []byte
+}
+
+func (s *CueSession) has(id int64, edit any) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.rows[id]
+	return ok && sameEdit(r.edit, edit)
+}
+
+func (s *CueSession) add(rows []syncedRow) {
+	if s == nil || len(rows) == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.rows == nil {
+		s.rows = map[int64]syncedRow{}
+	}
+	for _, r := range rows {
+		s.rows[r.id] = r
+	}
+}
+
+func (s *CueSession) take() []syncedRow {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]syncedRow, 0, len(s.rows))
+	for _, r := range s.rows {
+		out = append(out, r)
+	}
+	s.rows = nil
+	return out
+}
+
+// sameEdit compares two Track.lastEditTime values as SQLite returned them (an integer of
+// strftime('%s') for Engine's own writes; compared as text so any other form still matches itself).
+func sameEdit(a, b any) bool {
+	return fmt.Sprint(a) == fmt.Sprint(b)
+}
 
 // mountRootWritable reports whether the mounted volume itself (not only an overlay
 // over Engine Library) is mounted read-write so PIONEER/.PIONEER can be updated.
@@ -62,6 +128,15 @@ func mountRootWritable(mount string) bool {
 // (if present). Originals are backed up once under /.enginex-backup/<date>/.
 func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions) (WriteBackResult, error) {
 	var res WriteBackResult
+	// A record dated in this second or the one before is not trusted, nor made: Engine may
+	// write the row again within the same second, and its date would not move (#321).
+	start := time.Now().Unix()
+	trusted := func(edit any) bool {
+		if v, ok := edit.(int64); ok {
+			return v < start-1
+		}
+		return true
+	}
 	absMount, err := filepath.Abs(mountPath)
 	if err != nil {
 		return res, err
@@ -121,78 +196,138 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 		return res, fmt.Errorf("writeback: attach bridge state: %w", err)
 	}
 
-	hasWrittenTable := 0
+	hasWrittenTable, hasAnalysisTable, hasSyncedTable := 0, 0, 0
 	_ = db.QueryRowContext(ctx, `SELECT count(*) FROM bridge.sqlite_master WHERE type='table' AND name='BridgeWritten'`).Scan(&hasWrittenTable)
-	hasAnalysisTable := 0
 	_ = db.QueryRowContext(ctx, `SELECT count(*) FROM bridge.sqlite_master WHERE type='table' AND name='BridgeAnalysis'`).Scan(&hasAnalysisTable)
+	_ = db.QueryRowContext(ctx, `SELECT count(*) FROM bridge.sqlite_master WHERE type='table' AND name='BridgeSynced'`).Scan(&hasSyncedTable)
 
-	query := `
-		SELECT bs.path, bs.trackId, COALESCE(t.pdbImportKey, 0),
-		       pd.beatData, pd.trackData, pd.quickCues, pd.loops, COALESCE(pd.activeOnLoadLoops, 0),
-		       NULL, COALESCE(t.genre,''), COALESCE(t.comment,''), COALESCE(t.label,'')
-		FROM bridge.BridgeState bs
-		JOIN Track t ON t.id = bs.trackId
-		JOIN PerformanceData pd ON pd.trackId = bs.trackId
-	`
-	if hasWrittenTable > 0 {
-		query = `
-			SELECT bs.path, bs.trackId, COALESCE(t.pdbImportKey, 0),
-			       pd.beatData, pd.trackData, pd.quickCues, pd.loops, COALESCE(pd.activeOnLoadLoops, 0),
-			       bw.digest, COALESCE(t.genre,''), COALESCE(t.comment,''), COALESCE(t.label,'')
-			FROM bridge.BridgeState bs
-			JOIN Track t ON t.id = bs.trackId
-			JOIN PerformanceData pd ON pd.trackId = bs.trackId
-			LEFT JOIN bridge.BridgeWritten bw ON bw.trackId = bs.trackId
-		`
+	// Only a row whose Track.lastEditTime is not the one BridgeSynced has is read (#321):
+	// Engine's trigger dates every write of a row's analysis, cues and loops, so this scan
+	// reads Track and the state, never PerformanceData's pages of an untouched track.
+	query := `SELECT bs.path, bs.trackId, COALESCE(t.pdbImportKey, 0), COALESCE(t.lastEditTime, 0), NULL, NULL
+		FROM bridge.BridgeState bs JOIN Track t ON t.id = bs.trackId`
+	if hasSyncedTable > 0 {
+		query = `SELECT bs.path, bs.trackId, COALESCE(t.pdbImportKey, 0), COALESCE(t.lastEditTime, 0), sy.lastEditTime, sy.digest
+			FROM bridge.BridgeState bs JOIN Track t ON t.id = bs.trackId
+			LEFT JOIN bridge.BridgeSynced sy ON sy.trackId = bs.trackId`
 	}
-
-	rows, err := db.QueryContext(ctx, query)
+	written := `NULL`
+	if hasWrittenTable > 0 {
+		written = `(SELECT digest FROM bridge.BridgeWritten WHERE trackId = pd.trackId)`
+	}
+	perfStmt, err := db.PrepareContext(ctx, `SELECT pd.beatData, pd.trackData, pd.quickCues, pd.loops, COALESCE(pd.activeOnLoadLoops, 0), `+written+`,
+		       COALESCE(t.genre,''), COALESCE(t.comment,''), COALESCE(t.label,'')
+		FROM PerformanceData pd JOIN Track t ON t.id = pd.trackId WHERE pd.trackId = ?`)
 	if err != nil {
 		return res, fmt.Errorf("writeback: query tracks: %w", err)
 	}
-	defer rows.Close()
+	defer perfStmt.Close()
 
 	type candidateTrack struct {
 		enginePath   string
 		engineID     int64
 		pdbImportKey int64
-		deck         enginedb.DeckCues
-		cues         bool // the deck's cues may differ from the stick's
-		metadata     rekordbox.Metadata
+		edit         any
 	}
-	var dirty []candidateTrack
-
+	var reads []candidateTrack
+	rows, err := db.QueryContext(ctx, query)
+	if err != nil {
+		return res, fmt.Errorf("writeback: query tracks: %w", err)
+	}
+	defer rows.Close()
+	synced := map[int64][]byte{}
 	for rows.Next() {
-		if err := ctx.Err(); err != nil {
-			return res, err
-		}
-		var enginePath string
-		var engineID, pdbImportKey, activeLoops int64
-		var beatData, trackData, quickCues, loopsBlob, writtenDigest []byte
-		var md rekordbox.Metadata
-		if err := rows.Scan(&enginePath, &engineID, &pdbImportKey, &beatData, &trackData, &quickCues, &loopsBlob, &activeLoops, &writtenDigest, &md.Genre, &md.Comment, &md.Label); err != nil {
+		var c candidateTrack
+		var syncedEdit any
+		var syncedDigest []byte
+		if err := rows.Scan(&c.enginePath, &c.engineID, &c.pdbImportKey, &c.edit, &syncedEdit, &syncedDigest); err != nil {
 			return res, err
 		}
 		res.TracksChecked++
-		c := candidateTrack{enginePath: enginePath, engineID: engineID, pdbImportKey: pdbImportKey, metadata: md}
-		// Fast path: tracks untouched since the last import stay at their BridgeWritten
-		// digest. Skip their cues without decrypting exportLibrary.db or reading ANLZ off USB.
-		// Tracks with loops are still inspected because activeOnLoadLoops is outside the digest.
-		// The track's metadata (#314) is compared with the export's either way.
-		if len(trackData) > 0 && !(len(writtenDigest) > 0 && activeLoops == 0 && !enginedb.HasAnyLoop(loopsBlob) &&
-			bytes.Equal(writtenDigest, enginedb.WrittenDigest(beatData, quickCues, loopsBlob))) {
-			if deck, err := enginedb.ParseDeckCuesAndLoops(trackData, quickCues, loopsBlob, activeLoops); err == nil {
-				c.deck, c.cues = deck, true
-			}
+		if syncedEdit != nil && sameEdit(syncedEdit, c.edit) && trusted(syncedEdit) || opts.Session.has(c.engineID, c.edit) {
+			continue
 		}
-		dirty = append(dirty, c)
+		synced[c.engineID] = syncedDigest
+		reads = append(reads, c)
 	}
 	if err := rows.Err(); err != nil {
 		return res, err
 	}
 	_ = rows.Close()
 
+	type dirtyTrack struct {
+		candidateTrack
+		deck     enginedb.DeckCues
+		cues     bool // the deck's cues may differ from the stick's
+		metadata rekordbox.Metadata
+		seen     syncedRow
+	}
+	var dirty []dirtyTrack
+	var confirmed []syncedRow // rows the stick holds as they are now
+	for _, c := range reads {
+		if err := ctx.Err(); err != nil {
+			return res, err
+		}
+		var activeLoops int64
+		var beatData, trackData, quickCues, loopsBlob, writtenDigest []byte
+		var md rekordbox.Metadata
+		if err := perfStmt.QueryRowContext(ctx, c.engineID).Scan(&beatData, &trackData, &quickCues, &loopsBlob, &activeLoops, &writtenDigest, &md.Genre, &md.Comment, &md.Label); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				continue
+			}
+			return res, err
+		}
+		res.TracksRead++
+		seen := syncedRow{id: c.engineID, edit: c.edit, digest: enginedb.SyncedDigest(beatData, quickCues, loopsBlob, activeLoops, md.Genre, md.Comment, md.Label)}
+		if bytes.Equal(synced[c.engineID], seen.digest) {
+			confirmed = append(confirmed, seen)
+			continue
+		}
+		d := dirtyTrack{candidateTrack: c, metadata: md, seen: seen}
+		// Fast path: tracks untouched since the last import stay at their BridgeWritten
+		// digest. Their cues are not read again; their metadata (#314) is compared with the
+		// export's. Tracks with loops are still inspected because activeOnLoadLoops is outside
+		// the digest.
+		if len(trackData) > 0 && !(len(writtenDigest) > 0 && activeLoops == 0 && !enginedb.HasAnyLoop(loopsBlob) &&
+			bytes.Equal(writtenDigest, enginedb.WrittenDigest(beatData, quickCues, loopsBlob))) {
+			if deck, err := enginedb.ParseDeckCuesAndLoops(trackData, quickCues, loopsBlob, activeLoops); err == nil {
+				d.deck, d.cues = deck, true
+			}
+		}
+		dirty = append(dirty, d)
+	}
+	// What the pass found the stick holding is kept for the session and written to the state
+	// with a pass that writes the stick anyway, or once on a stick whose state has no record
+	// yet (an earlier build's import): without it every later pass would read every row.
+	record := func(written []int64) {
+		kept := confirmed[:0]
+		for _, r := range confirmed {
+			if trusted(r.edit) {
+				kept = append(kept, r)
+			}
+		}
+		confirmed = kept
+		if res.FilesUpdated > 0 || hasSyncedTable == 0 {
+			// What the session knew of a row written now is stale: the stick holds the row as
+			// this pass read it, or (dated too recently to say so) the row goes unrecorded.
+			drop := map[int64]bool{}
+			for _, id := range written {
+				drop[id] = true
+			}
+			var rows []syncedRow
+			for _, r := range opts.Session.take() {
+				if !drop[r.id] {
+					rows = append(rows, r)
+				}
+			}
+			recordSynced(ctx, stateDBPath, append(rows, confirmed...), written)
+			return
+		}
+		opts.Session.add(confirmed)
+	}
+
 	if len(dirty) == 0 {
+		record(nil)
 		return res, nil
 	}
 
@@ -225,6 +360,7 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 		cuesDiff     bool
 		metadata     rekordbox.Metadata
 		metadataDiff bool
+		seen         syncedRow
 	}
 	var changes []trackChange
 
@@ -234,6 +370,7 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 		}
 		rbTrack, ok := resolveRekordboxTrack(ctx, db, hasAnalysisTable > 0, cand.engineID, cand.pdbImportKey, cand.enginePath, byID, byPath, byPathFold)
 		if !ok || rbTrack.ID == 0 {
+			confirmed = append(confirmed, cand.seen) // not in the export: nothing to write
 			continue
 		}
 		var nextCues []rekordbox.Cue
@@ -246,6 +383,7 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 		}
 		metadataDiff := cand.metadata != (rekordbox.Metadata{Genre: rbTrack.Genre, Comment: rbTrack.Comment, Label: rbTrack.Label})
 		if !cuesDiff && !metadataDiff {
+			confirmed = append(confirmed, cand.seen)
 			continue
 		}
 		changes = append(changes, trackChange{
@@ -256,11 +394,13 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 			cuesDiff:     cuesDiff,
 			metadata:     cand.metadata,
 			metadataDiff: metadataDiff,
+			seen:         cand.seen,
 		})
 	}
 	_ = db.Close()
 
 	if len(changes) == 0 {
+		record(nil)
 		return res, nil
 	}
 
@@ -296,6 +436,7 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 			return res, err
 		}
 		res.TracksChanged++
+		writtenIDs = append(writtenIDs, ch.engineID)
 		if ch.metadataDiff {
 			oneLibMetadata[ch.rbTrackID] = ch.metadata
 			pdbMetadata[ch.rbTrackID] = ch.metadata
@@ -308,7 +449,6 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 			continue
 		}
 		oneLibUpdates[ch.rbTrackID] = ch.cues
-		writtenIDs = append(writtenIDs, ch.engineID)
 
 		baseRel := strings.TrimSuffix(cleanAnlz, filepath.Ext(cleanAnlz))
 		targets := []struct {
@@ -430,20 +570,27 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 		}
 	}
 
+	for _, ch := range changes {
+		confirmed = append(confirmed, ch.seen)
+	}
 	if res.FilesUpdated > 0 {
 		res.BackupDir = filepath.Join(".enginex-backup", dateDir)
-		if hasWrittenTable > 0 && len(writtenIDs) > 0 {
-			clearBridgeWritten(ctx, stateDBPath, writtenIDs)
-		}
+	} else {
+		writtenIDs = nil
 	}
+	record(writtenIDs)
 	return res, nil
 }
 
-// clearBridgeWritten drops BridgeWritten digests for tracks whose cues were
-// written back to the stick. Otherwise, deleting a previously written-back cue
-// on a later session would restore the original import digest and be skipped by
-// the untouched-track fast path.
-func clearBridgeWritten(ctx context.Context, stateDBPath string, trackIDs []int64) {
+// recordSynced notes in the state what the stick holds of rows (BridgeSynced, #321) and drops
+// the BridgeWritten digests of tracks whose cues were written back to the stick. Otherwise,
+// deleting a previously written-back cue on a later session would restore the original import
+// digest and be skipped by the untouched-track fast path. One transaction; a failure leaves
+// the rows to be read again by the next pass.
+func recordSynced(ctx context.Context, stateDBPath string, rows []syncedRow, written []int64) {
+	if len(rows) == 0 && len(written) == 0 {
+		return
+	}
 	u := url.URL{Scheme: "file", Path: stateDBPath, RawQuery: "_pragma=busy_timeout(5000)"}
 	sdb, err := sql.Open("sqlite", u.String())
 	if err != nil {
@@ -456,13 +603,29 @@ func clearBridgeWritten(ctx context.Context, stateDBPath string, trackIDs []int6
 		return
 	}
 	defer tx.Rollback()
-	stmt, err := tx.PrepareContext(ctx, `DELETE FROM BridgeWritten WHERE trackId = ?`)
-	if err != nil {
+	if _, err = tx.ExecContext(ctx, strings.Replace(enginedb.BridgeSyncedSchema, "bridge.", "", 1)); err != nil {
 		return
 	}
-	defer stmt.Close()
-	for _, id := range trackIDs {
-		if _, err := stmt.ExecContext(ctx, id); err != nil {
+	if len(written) > 0 {
+		var n int
+		if tx.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name='BridgeWritten'`).Scan(&n) != nil {
+			return
+		}
+		for _, id := range written {
+			if n > 0 {
+				if _, err := tx.ExecContext(ctx, `DELETE FROM BridgeWritten WHERE trackId = ?`, id); err != nil {
+					return
+				}
+			}
+			// The stick now holds the row as written; an older record would let a later edit
+			// that restores the older cues pass for what the stick holds.
+			if _, err := tx.ExecContext(ctx, `DELETE FROM BridgeSynced WHERE trackId = ?`, id); err != nil {
+				return
+			}
+		}
+	}
+	for _, r := range rows {
+		if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO BridgeSynced(trackId, lastEditTime, digest) VALUES(?, ?, ?)`, r.id, r.edit, r.digest); err != nil {
 			return
 		}
 	}

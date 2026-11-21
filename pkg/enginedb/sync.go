@@ -49,6 +49,11 @@ CREATE TABLE bridge.BridgeLibrary(key TEXT PRIMARY KEY, value BLOB);
 // What an import left in a track's row (written.go). A state file of an earlier build has none.
 const bridgeWrittenSchema = `CREATE TABLE IF NOT EXISTS bridge.BridgeWritten(trackId INTEGER PRIMARY KEY, digest BLOB NOT NULL)`
 
+// BridgeSyncedSchema is what the stick's rekordbox files hold of a row (realign.go): the row's
+// Track.lastEditTime and SyncedDigest when they last held the same. The cue write-back reads a
+// row only when its lastEditTime is no longer the one here (#321).
+const BridgeSyncedSchema = `CREATE TABLE IF NOT EXISTS bridge.BridgeSynced(trackId INTEGER PRIMARY KEY, lastEditTime INTEGER NOT NULL, digest BLOB NOT NULL)`
+
 var bridgeTables = []string{"BridgeState", "BridgeAnalysis", "BridgePlaylist", "BridgeLibrary"}
 
 type Options struct {
@@ -240,6 +245,9 @@ func open(ctx context.Context, p string, bulk bool) (*sql.DB, *sql.Tx, error) {
 	if _, e = tx.ExecContext(ctx, bridgeWrittenSchema); e != nil {
 		return nil, nil, e
 	}
+	if _, e = tx.ExecContext(ctx, BridgeSyncedSchema+`; CREATE TEMP TABLE IF NOT EXISTS synced_now(id INTEGER PRIMARY KEY); DELETE FROM temp.synced_now`); e != nil {
+		return nil, nil, e
+	}
 	// Libraries from earlier builds kept this state in m.db, not yet dropped by Engine.
 	var migratedAnalysis bool
 	for _, table := range bridgeTables {
@@ -277,6 +285,7 @@ func open(ctx context.Context, p string, bulk bool) (*sql.DB, *sql.Tx, error) {
 		`DELETE FROM BridgeState WHERE trackId NOT IN (SELECT id FROM main.Track)`,
 		`DELETE FROM BridgeAnalysis WHERE trackId NOT IN (SELECT id FROM main.Track)`,
 		`DELETE FROM BridgeWritten WHERE trackId NOT IN (SELECT id FROM main.Track)`,
+		`DELETE FROM BridgeSynced WHERE trackId NOT IN (SELECT id FROM main.Track)`,
 		`DELETE FROM BridgePlaylist WHERE listId NOT IN (SELECT id FROM main.Playlist)`,
 	} {
 		if _, e = tx.ExecContext(ctx, prune); e != nil {
@@ -944,6 +953,11 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 		if _, err = migrateArtwork(ctx, tx, artDir, opts.Deadline, now); err != nil {
 			return result, err
 		}
+	}
+	// The rows this import leaves as the stick holds them carry their date as committed (#321).
+	if _, err = tx.ExecContext(ctx, `UPDATE bridge.BridgeSynced SET lastEditTime=COALESCE((SELECT lastEditTime FROM main.Track WHERE id=BridgeSynced.trackId),0)
+		WHERE trackId IN (SELECT id FROM temp.synced_now)`); err != nil {
+		return result, err
 	}
 	// Resume prepares unfinished files inside this transaction. Engine may
 	// have opened the library since the pre-write check; roll back in that case.
