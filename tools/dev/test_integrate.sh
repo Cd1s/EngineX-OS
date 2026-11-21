@@ -56,6 +56,7 @@ git -C "$clean_repo" add clean.txt && git -C "$clean_repo" commit -qm clean
  git -C "$clean_repo" push -qu origin feature-clean
 before=$(git -C "$clean_repo" ls-remote origin refs/heads/agent/5306-integration | cut -f1)
 run_integrate "$clean_repo" feature-clean
+grep -Fq "go test -race -timeout 30m" "$TMP/remote.log"
 after=$(git -C "$clean_repo" ls-remote origin refs/heads/agent/5306-integration | cut -f1)
 [[ $before != "$after" ]]
 git -C "$clean_repo" fetch -q origin agent/5306-integration

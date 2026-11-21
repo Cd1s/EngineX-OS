@@ -189,7 +189,7 @@ targeted_tests() {
     mapfile -t py_tests < <(printf '%s\n' "${py_tests[@]}" | sort -u | sed '/^$/d')
     ((${#go_pkgs[@]} || ${#py_tests[@]})) || return 0
     local inner='set -eu'
-    for dir in "${go_pkgs[@]}"; do inner+="; go test -race '$dir'"; done
+    for dir in "${go_pkgs[@]}"; do inner+="; go test -race -timeout 30m '$dir'"; done
     for test in "${py_tests[@]}"; do inner+="; python3 '$test'"; done
     remote_run "$host" "$inner"
 }
