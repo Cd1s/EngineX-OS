@@ -179,7 +179,7 @@ All 16 models use unified `*-Update.img` packages. First-generation units instal
 - [Linux x86_64](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.5-linux-amd64.tar.gz)
 
 Extract the archive and run `Install-EngineX.bat` (Windows), `Install-EngineX.command` (macOS), or `./install-enginex.sh` (Linux) in a terminal. The installer finds decks over LAN or in USB Firmware Update Mode, verifies `SHA256SUMS.txt.sig`, and flashes `*-Update.img` natively without Python, fastboot, libusb, or WSL (Windows binds Microsoft's signed WinUSB driver when prompted; Linux USB may need `sudo`).
-**Warning**: update stock 2nd-gen decks to official Engine OS 5.3.0 first, unplug USB/SD drives, and back up your deck while it is running—first-time USB unlock on 2nd-gen erases internal `/data` storage (LAN install via root SSH preserves `/data`). On `PRIME 4 G2` and `SYSTEM ONE`, power the unit off and back on after USB writing finishes. Never interrupt power or USB during a flash.
+**Warning**: update stock 2nd-gen decks to official Engine OS 5.3.0 or newer first with Engine DJ's official updater (check the version in `Settings → About / Update`: a deck still on older stock firmware such as 5.0.x does not boot after the install, and the installer stops below 5.3.0, #311), unplug USB/SD drives, and back up your deck while it is running—first-time USB unlock on 2nd-gen erases internal `/data` storage (LAN install via root SSH preserves `/data`). On `PRIME 4 G2` and `SYSTEM ONE`, power the unit off and back on after USB writing finishes. Never interrupt power or USB during a flash.
 
 ### 2. First-Generation Models — Direct USB Stick (`*-Update.img`)
 

@@ -1919,6 +1919,49 @@ func TestUSBUpdateModeRefusals(t *testing.T) {
 	}
 }
 
+// #311: a PRIME 4 G2 still on stock Engine OS 5.0.3 did not boot after a first install. The version the deck
+// shows decides: 5.3.0 or newer goes on, anything older or unreadable stops with nothing written.
+func TestStockBaseOK(t *testing.T) {
+	for answer, want := range map[string]bool{
+		"5.3.0": true, "5.3.1": true, "5.3.0.5": true, "EngineX OS 5.3.0.5": true, "Engine OS 5.4": true, "6.0": true,
+		"5.0.3": false, "Engine OS 5.0.3": false, "PRIME 4 G2 5.0.3": false, "5.2.9": false, "4.3.4": false, "": false, "latest": false,
+	} {
+		if got := stockBaseOK(answer); got != want {
+			t.Errorf("stockBaseOK(%q) = %v, want %v", answer, got, want)
+		}
+	}
+}
+
+func TestFirstInstallStopsOnAStockBaseBelow530(t *testing.T) {
+	need(t, "python3", "mke2fs", "debugfs", "e2fsck")
+	az := buildBundle(t, "SYSTEMONE", "5.3.0.3")
+	o, shim := azOpts(t, az, func(int) string { return "1cc5:2027 SYSTEM ONE\n" })
+	o.Yes, o.In = false, strings.NewReader("yes\n5.0.3\n")
+	if err := run(ctxT(t), o); err == nil || !strings.Contains(err.Error(), "older than 5.3.0") || !strings.HasSuffix(err.Error(), "nothing flashed") {
+		t.Fatalf("USB update mode on 5.0.3: err = %v, want the 5.3.0 stop", err)
+	}
+	if out := o.Out.(*bytes.Buffer).String(); !strings.Contains(out, "Settings → About / Update") || !strings.Contains(out, "ALL music, library and settings") {
+		t.Error("did not ask both questions")
+	}
+	if shim.calls != 0 {
+		t.Fatal("wrote to a deck below 5.3.0")
+	}
+	o, shim = azOpts(t, az, func(int) string { return "1cc5:2027 SYSTEM ONE\n" })
+	o.Yes, o.In = false, strings.NewReader("yes\nEngine OS 5.3.0\n")
+	if err := run(ctxT(t), o); err != nil || shim.calls != 1 {
+		t.Fatalf("USB update mode on 5.3.0: err = %v, flash calls = %d", err, shim.calls)
+	}
+	fb := newFastboot(t, "JC11S", true)
+	o = modeBOpts(t, fb, buildBundle(t, "PRIME4PLUS", "5.3.0.2"))
+	o.Yes, o.In = false, strings.NewReader("yes\n5.2.0\n")
+	if err := run(ctxT(t), o); err == nil || !strings.Contains(err.Error(), "older than 5.3.0") {
+		t.Fatalf("fastboot on 5.2.0: err = %v, want the 5.3.0 stop", err)
+	}
+	if f := fb.Flashed(); len(f) != 0 {
+		t.Errorf("fastboot flashed %v on 5.2.0", f)
+	}
+}
+
 // #164: an installed deck asks for its access code (403 on the legacy UI endpoint) and must still be recognised;
 // a bare 403 from some other web server must not be.
 func TestIsDeckUIRecognisesTheLoginPage(t *testing.T) {

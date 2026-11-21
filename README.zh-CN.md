@@ -179,7 +179,7 @@
 - [Linux x86_64](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.5-linux-amd64.tar.gz)
 
 解压后在终端运行 `Install-EngineX.bat`（Windows）、`Install-EngineX.command`（macOS）或 `./install-enginex.sh`（Linux）。安装器自动发现局域网内或处于 USB 固件更新模式的碟机，校验 `SHA256SUMS.txt.sig` 签名并原生刷入 `*-Update.img`，无需安装 Python、fastboot、libusb 或 WSL（Windows 按提示自动绑定微软签名 WinUSB 驱动；Linux USB 访问可能需要 `sudo`）。
-**注意**：原厂二代机请先升级到官方 Engine OS 5.3.0，拔下 U 盘与 SD 卡，并在碟机正常运行时备份数据——二代机首次通过 USB 解锁会清空内置 `/data` 分区（若已开启 root SSH，走局域网安装会保留 `/data`）。`PRIME 4 G2` 与 `SYSTEM ONE` 在 USB 写入完成后需按电源键关机再开机。刷写过程中切勿断电或拔线。
+**注意**：原厂二代机请先用 Engine DJ 官方更新工具升级到官方 Engine OS 5.3.0 或更新版本（在 `设置 → 关于 / 更新` 查看版本号：仍是 5.0.x 等旧原厂系统的碟机装完后无法开机，安装器发现低于 5.3.0 会直接停止，#311），拔下 U 盘与 SD 卡，并在碟机正常运行时备份数据——二代机首次通过 USB 解锁会清空内置 `/data` 分区（若已开启 root SSH，走局域网安装会保留 `/data`）。`PRIME 4 G2` 与 `SYSTEM ONE` 在 USB 写入完成后需按电源键关机再开机。刷写过程中切勿断电或拔线。
 
 ### 2. 一代机——U 盘直接刷入（`*-Update.img`）
 

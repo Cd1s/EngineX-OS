@@ -1280,9 +1280,43 @@ func confirm(o *options, zh, en string) error {
 		return nil
 	}
 	o.say(zh+" 输入 yes 继续：", en+" Type yes to continue:")
-	line, _ := bufio.NewReader(o.In).ReadString('\n')
-	if s := strings.ToLower(strings.TrimSpace(line)); s != "yes" && s != "y" {
+	if s := strings.ToLower(readLine(o)); s != "yes" && s != "y" {
 		return errors.New("已取消，没有刷写任何东西 / cancelled, nothing flashed")
+	}
+	return nil
+}
+
+// readLine reads one answer line through one shared reader, so a second question gets the next line.
+func readLine(o *options) string {
+	br, ok := o.In.(*bufio.Reader)
+	if !ok {
+		br = bufio.NewReader(o.In)
+		o.In = br
+	}
+	line, _ := br.ReadString('\n')
+	return strings.TrimSpace(line)
+}
+
+var stockVersionRE = regexp.MustCompile(`\d+(?:\.\d+){1,3}`)
+
+// stockBaseOK reports whether the version a stock deck shows is official Engine OS 5.3.0 or newer.
+func stockBaseOK(answer string) bool {
+	v := stockVersionRE.FindString(answer)
+	return v != "" && !releasesig.NewerVersion("5.3.0", v)
+}
+
+// confirmStockBase (#311): a 2nd-gen first install writes EngineX's data over official Engine OS 5.3.0 or newer,
+// and a deck in update mode cannot report its version. A PRIME 4 G2 still on stock 5.0.3 did not boot after the
+// install, so a first install asks for the version Settings → About / Update shows and stops below 5.3.0.
+func confirmStockBase(o *options) error {
+	if o.Yes {
+		return nil
+	}
+	o.say("首次安装前，碟机必须已在运行官方 Engine OS 5.3.0 或更新版本；更早的原厂系统（例如 5.0.x）写入 EngineX 后无法开机。请输入碟机正常开机时「设置 → 关于 / 更新」显示的版本号（例如 5.3.0）：",
+		"Before a first install the deck must already run official Engine OS 5.3.0 or newer; on older stock firmware (for example 5.0.x) it does not boot once EngineX is written. Type the version Settings → About / Update shows on the running deck (for example 5.3.0):")
+	if !stockBaseOK(readLine(o)) {
+		return errors.New("碟机原厂系统低于 5.3.0 或版本号无法识别：请先用 Denon DJ 官方更新工具把碟机升级到 Engine OS 5.3.0 或更新版本，再运行本安装器；没有刷写任何东西 / " +
+			"the deck's stock firmware is older than 5.3.0 or the version was not recognised: update it to official Engine OS 5.3.0 or newer with Denon DJ's updater first, then run this installer again; nothing flashed")
 	}
 	return nil
 }
@@ -1332,7 +1366,9 @@ func modeB(ctx context.Context, o *options, session *updateSession) error {
 	}
 	defer os.RemoveAll(filepath.Dir(img))
 	if fresh {
-		err = confirmFreshData(o, part)
+		if err = confirmFreshData(o, part); err == nil {
+			err = confirmStockBase(o)
+		}
 	} else {
 		err = confirm(o, "即将把 "+img+" 刷入 "+part+" 分区，必须是这台碟机的 data 备份。", "This flashes "+img+" to "+part+"; it must be a backup of this deck's data.")
 	}
@@ -1584,7 +1620,9 @@ func modeAZ(ctx context.Context, o *options, session *updateSession, board, line
 	}
 	defer os.RemoveAll(filepath.Dir(img))
 	if fresh {
-		err = confirmFreshData(o, "data")
+		if err = confirmFreshData(o, "data"); err == nil {
+			err = confirmStockBase(o)
+		}
 	} else {
 		err = confirm(o, "即将把 "+img+" 刷入 data 分区，必须是这台碟机的 data 备份。", "This flashes "+img+" to data; it must be a backup of this deck's data.")
 	}
