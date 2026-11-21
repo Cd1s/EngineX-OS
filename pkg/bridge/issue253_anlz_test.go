@@ -82,6 +82,25 @@ func TestIssue253BrokenANLZKeepsItsWaveformRow(t *testing.T) {
 			}
 		}},
 	}
+	// #253 review 3: a section the parser refuses, of each kind it reads, in front of the valid
+	// PWV7 (.2EX) and of the cues (.EXT): BridgeDetail finds no waveform in either file.
+	for _, kind := range testfixture.MalformedANLZKinds {
+		breaks = append(breaks, struct {
+			name  string
+			apply func(t *testing.T, root string)
+		}{"malformed " + kind, func(t *testing.T, root string) {
+			for _, ext := range []string{".2EX", ".EXT"} {
+				p := filepath.Join(root, anlz+ext)
+				b, err := os.ReadFile(p)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err = os.WriteFile(p, testfixture.WithANLZSectionFirst(b, testfixture.MalformedANLZSection(kind)), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}})
+	}
 	flows := []struct {
 		name     string
 		perTrack int64

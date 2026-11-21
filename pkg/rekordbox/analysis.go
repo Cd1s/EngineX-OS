@@ -185,20 +185,8 @@ func (a *Analysis) section(tag string, s []byte, h int) error {
 			a.mergeCue(c)
 		}
 	case "PWV3", "PWV5", "PWV7", "PWV4", "PWAV", "PWV2":
-		if len(s) < 20 {
-			return bad()
-		}
-		width, count := uint32(1), be.Uint32(s[12:])
-		if tag == "PWV3" || tag == "PWV4" || tag == "PWV5" || tag == "PWV7" {
-			if len(s) < 24 {
-				return bad()
-			}
-			width, count = be.Uint32(s[12:]), be.Uint32(s[16:])
-		}
-		if tag == "PWV4" {
-			width = 6
-		}
-		if width == 0 || uint64(width)*uint64(count) > uint64(len(s)-h) {
+		width, count, ok := WaveformShape(tag, s, int64(h), int64(len(s)))
+		if !ok {
 			return bad()
 		}
 		a.Waveforms = append(a.Waveforms, Waveform{tag, width, append([]byte(nil), s[h:h+int(width*count)]...)})
@@ -277,84 +265,123 @@ func (a *Analysis) Merge(b *Analysis) {
 
 // ReadAnalysisSkipping is ReadAnalysis that leaves out the waveform sections skip names without
 // reading their bodies (#253): a track's .EXT is mostly PWV3, PWV4 and PWV5, which an import does
-// not use once the .2EX has a PWV7. Their headers are read and checked as ParseAnalysis checks
-// them, so a file is refused exactly when ReadAnalysis refuses it; anything unusual is read whole.
+// not use once the .2EX has a PWV7. Their headers are checked by WaveformShape, the rule
+// ParseAnalysis applies to them (it never looks into a waveform's body), and everything else is
+// read and given to ParseAnalysis, so a file is refused exactly when ReadAnalysis refuses it.
 func ReadAnalysisSkipping(path string, skip func(tag string) bool) (*Analysis, error) {
 	f, e := os.Open(path)
 	if e != nil {
 		return nil, e
 	}
 	defer f.Close()
+	// An import keeps every PWV7 it meets (only the .2EX normally has one).
+	a, _, e := ReadAnalysisFile(f, func(tag string) bool { return tag != "PWV7" && skip(tag) }, nil)
+	return a, e
+}
+
+// ReadAnalysisFile is ReadAnalysisSkipping on an open file; skipped is told the tag, entry width
+// and count of each waveform section left out. read is the bytes read from the file.
+func ReadAnalysisFile(f *os.File, skip func(tag string) bool, skipped func(tag string, width, count uint32)) (a *Analysis, read int64, e error) {
 	st, e := f.Stat()
 	if e != nil {
-		return nil, e
+		return nil, 0, e
 	}
 	size := st.Size()
+	whole := func() (*Analysis, int64, error) {
+		if size > MaxAnalysisBytes {
+			return nil, read, fmt.Errorf("anlz: file too large")
+		}
+		b := make([]byte, int(size))
+		if _, e := f.ReadAt(b, 0); e != nil {
+			return nil, read + size, e
+		}
+		a, e := ParseAnalysis(b)
+		return a, read + size, e
+	}
 	if size > MaxAnalysisBytes || size < 12 {
-		return ReadAnalysis(path)
+		return whole()
 	}
 	head := make([]byte, 12)
+	read = 12
 	if _, e = f.ReadAt(head, 0); e != nil || string(head[:4]) != "PMAI" {
-		return ReadAnalysis(path)
+		return whole()
 	}
 	h, n := int64(be.Uint32(head[4:])), int64(be.Uint32(head[8:]))
 	if h < 12 || h > n || n > size {
-		return ReadAnalysis(path)
+		return whole()
 	}
 	b := make([]byte, h, h+64<<10)
+	read += h
 	if _, e = f.ReadAt(b, 0); e != nil {
-		return nil, e
+		return nil, read, e
 	}
+	var left []func()
 	hdr := make([]byte, 24)
 	for off := h; off < n; {
 		if n-off < 12 {
-			return ReadAnalysis(path)
+			return whole()
 		}
 		k := min(int64(len(hdr)), n-off)
+		read += k
 		if _, e = f.ReadAt(hdr[:k], off); e != nil {
-			return nil, e
+			return nil, read, e
 		}
 		tag := string(hdr[:4])
 		sh, sn := int64(be.Uint32(hdr[4:])), int64(be.Uint32(hdr[8:]))
 		if sh < 12 || sn < sh || sn > n-off {
-			return ReadAnalysis(path)
+			return whole()
 		}
-		if skip(tag) && waveHeaderValid(tag, hdr[:k], sh, sn) {
+		if width, count, ok := WaveformShape(tag, hdr[:k], sh, sn); ok && isWaveform(tag) && skip(tag) {
+			if skipped != nil {
+				left = append(left, func() { skipped(tag, width, count) })
+			}
 			off += sn
 			continue
 		}
 		start := int64(len(b))
 		b = append(b, make([]byte, sn)...)
+		read += sn
 		if _, e = f.ReadAt(b[start:], off); e != nil {
-			return nil, e
+			return nil, read, e
 		}
 		off += sn
 	}
 	be.PutUint32(b[8:], uint32(len(b)))
-	return ParseAnalysis(b)
+	if a, e = ParseAnalysis(b); e != nil {
+		return nil, read, e
+	}
+	for _, l := range left { // only for a file ParseAnalysis accepts
+		l()
+	}
+	return a, read, nil
 }
 
-// waveHeaderValid reports that a waveform section ParseAnalysis would accept starts with hdr.
-func waveHeaderValid(tag string, hdr []byte, h, n int64) bool {
+func isWaveform(tag string) bool {
 	switch tag {
-	case "PWV3", "PWV4", "PWV5", "PWAV", "PWV2":
-	default:
-		return false
+	case "PWV3", "PWV5", "PWV7", "PWV4", "PWAV", "PWV2":
+		return true
 	}
-	if n < 20 || int64(len(hdr)) < 20 {
-		return false
+	return false
+}
+
+// WaveformShape is how ParseAnalysis reads a waveform section's header: the width of an entry
+// and their count, ok when it accepts them. hdr holds the section's first 24 bytes (all of a
+// shorter one); h is its header length, n its whole length. The body is never looked at.
+func WaveformShape(tag string, hdr []byte, h, n int64) (width, count uint32, ok bool) {
+	if n < 20 || len(hdr) < 20 {
+		return 0, 0, false
 	}
-	width, count := uint64(1), uint64(be.Uint32(hdr[12:]))
-	if tag != "PWAV" && tag != "PWV2" {
+	width, count = 1, be.Uint32(hdr[12:])
+	if tag == "PWV3" || tag == "PWV4" || tag == "PWV5" || tag == "PWV7" {
 		if n < 24 || len(hdr) < 24 {
-			return false
+			return 0, 0, false
 		}
-		width, count = uint64(be.Uint32(hdr[12:])), uint64(be.Uint32(hdr[16:]))
+		width, count = be.Uint32(hdr[12:]), be.Uint32(hdr[16:])
 	}
 	if tag == "PWV4" {
 		width = 6
 	}
-	return width != 0 && width*count <= uint64(n-h)
+	return width, count, width != 0 && uint64(width)*uint64(count) <= uint64(n-h)
 }
 
 func ReadAnalysis(path string) (*Analysis, error) {

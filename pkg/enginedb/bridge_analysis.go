@@ -113,12 +113,14 @@ func BridgeDetail(b []byte, root string, limit int) *rekordbox.Analysis {
 }
 
 // DetailServes reports whether a reference naming files gives the display a waveform, as
-// BridgeDetail reads it, without reading any section's body (#253 review 2): one of the files is,
-// as r resolves it, a regular file within maxDetailFile (no symlink, no traversal) whose PMAI
-// header and section headers, up to its first PWV7 (3 bytes an entry) or PWV5 (2 bytes) section,
-// are as ParseAnalysis accepts them, with that section's entries inside the file. A missing,
-// renamed or truncated file fails (rekordbox's header holds the whole length). read is the bytes
-// read: the 12-byte header and 24 bytes a section header.
+// BridgeDetail reads it (#253 reviews 2 and 3): one of the files is, as r resolves it, a regular
+// file within maxDetailFile (no symlink, no traversal) that ParseAnalysis accepts whole, with a
+// waveform displayWaveFits. It reads the file as the import does (rekordbox.ReadAnalysisFile):
+// every section but the waveforms is read and parsed by ParseAnalysis itself, and the waveform
+// sections, whose bodies ParseAnalysis never looks into, by their headers alone; so it refuses a
+// file exactly when BridgeDetail would find no waveform in it, a malformed cue list or grid in
+// front of a valid PWV7 included. A missing, renamed or truncated file fails. read is the bytes
+// read: the headers, and the bodies of the sections that are not waveforms.
 func DetailServes(r *compat.Resolver, files []string) (ok bool, read int64) {
 	for _, f := range files {
 		ok, n := detailFileServes(r, f)
@@ -145,46 +147,18 @@ func detailFileServes(r *compat.Resolver, rel string) (bool, int64) {
 		return false, 0
 	}
 	defer f.Close()
-	// Headers only: no readahead, so the stick reads a page a file, not the readahead window
-	// (measured 16 KB a track with it on the same copy).
+	// No readahead: the stick reads the pages of the headers and of the small sections, not
+	// the readahead window over the waveforms (measured 16 KB a track with it on the same copy).
 	_ = unix.Fadvise(int(f.Fd()), 0, 0, unix.FADV_RANDOM)
 	st, err := f.Stat()
-	if err != nil || !st.Mode().IsRegular() || st.Size() > maxDetailFile || st.Size() < 12 {
+	if err != nil || !st.Mode().IsRegular() || st.Size() > maxDetailFile {
 		return false, 0
 	}
-	var hdr [24]byte
-	read := int64(12)
-	if _, err = f.ReadAt(hdr[:12], 0); err != nil || string(hdr[:4]) != "PMAI" {
-		return false, read
-	}
-	be := binary.BigEndian
-	h, n := int64(be.Uint32(hdr[4:])), int64(be.Uint32(hdr[8:]))
-	if h < 12 || h > n || n > st.Size() {
-		return false, read
-	}
-	for off := h; n-off >= 12; {
-		k := min(int64(len(hdr)), n-off)
-		read += k
-		if _, err = f.ReadAt(hdr[:k], off); err != nil {
-			return false, read
-		}
-		sh, sn := int64(be.Uint32(hdr[4:])), int64(be.Uint32(hdr[8:]))
-		if sh < 12 || sn < sh || sn > n-off {
-			return false, read
-		}
-		if tag := string(hdr[:4]); (tag == "PWV7" || tag == "PWV5") && k >= 24 && sh >= 24 {
-			width, count := uint64(be.Uint32(hdr[12:])), uint64(be.Uint32(hdr[16:]))
-			want := uint64(3)
-			if tag == "PWV5" {
-				want = 2
-			}
-			if width == want && count > 0 && count <= 2<<20 && width*count <= uint64(sn-sh) {
-				return true, read
-			}
-		}
-		off += sn
-	}
-	return false, read
+	fits := false
+	a, read, err := rekordbox.ReadAnalysisFile(f, func(string) bool { return true }, func(tag string, width, count uint32) {
+		fits = fits || displayWaveFits(tag, width, uint64(count))
+	})
+	return err == nil && (fits || displayAnalysisWaveform(a) != nil), read
 }
 
 // readVolumeFile reads rel under root as the resolver finds it (case, NFC, macOS's hidden

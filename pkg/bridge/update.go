@@ -634,8 +634,8 @@ func rereadRefs(dir, stamp string) map[uint32]bool {
 
 // confirmedRefs are the ANLZ files the export l names for the tracks of keys, whose state rows
 // still hold a waveform, where those files give the display that waveform (enginedb.DetailServes):
-// a header check, no section read. A track whose files are missing, truncated or renamed keeps its
-// row (#253 review 2). Only the background job calls it. checked holds the answer for each list of
+// the reader that serves the detail, without the waveforms' bodies. A track whose files are
+// missing, truncated, renamed or malformed keeps its row (#253 reviews 2 and 3). Only the background job calls it. checked holds the answer for each list of
 // files already looked at.
 func confirmedRefs(r *compat.Resolver, l *rekordbox.Library, keys map[uint32]bool, checked map[string]bool) map[uint32][]string {
 	refs := map[uint32][]string{}
