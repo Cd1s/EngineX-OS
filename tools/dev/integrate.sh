@@ -275,7 +275,7 @@ rebase_copy() {
         rc=$?
         set -e
     done
-    git push origin "HEAD:$b1" >/dev/null
+    git -C "$worktree" push origin "HEAD:$b1" >/dev/null
     git -C "$worktree" switch --detach "$pre_merge" >/dev/null
     resolved_branch=$b1
 }
