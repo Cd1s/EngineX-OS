@@ -12365,20 +12365,47 @@ assert.equal(scSlotIcon('AppleMusic', 1), '', 'Engine\'s own track on a deck who
 assert.equal(scBrand('Please log out of TIDAL'), 'Please log out of Apple Music (EngineX)', 'the slot\'s messages name ours');
 """)
 
+    GUARD_FILES = {"Login": "Streaming/StreamingLoginDialog.qml", "AcceptDeny": "Streaming/StreamingAcceptDenyDialog.qml",
+                   "Pairing": "Streaming/StreamingPairingDialog.qml", "ConnectedAccounts": "Streaming/StreamingConnectedAccountsDialog.qml"}
+    GUARD_LINE = re.compile(r"function onShow(Login|AcceptDeny|Pairing|ConnectedAccounts)Dialog\(provider[^)]*\) \{\n\s*(if \(.*\) return)\n")
+
+    def guards_of(self, base, root):
+        """The `if (...) return` line the pack puts first in each sign-in box's handler, as shipped."""
+        guards = {}
+        for kind, rel in self.GUARD_FILES.items():
+            found = [m for m in self.GUARD_LINE.finditer(self.patched(base, root, rel)) if m[1] == kind]
+            self.assertEqual(len(found), 1, f"{base} {rel}")
+            guards[kind] = found[0][2]
+        return guards
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required to run the root helpers")
+    def test_engines_own_amazon_music_and_dropbox_sign_in_boxes_are_not_intercepted(self):
+        """The guards were written for the TIDAL slot, but the stock boxes serve every provider: under any other service's scope they returned
+        for Amazon Music and Dropbox too (and scUnasked restored the previous source). Engine's own providers now open their boxes as stock."""
+        for base, root in self.BASES:
+            guards = self.guards_of(base, root)
+            for kind, guard in guards.items():
+                self.assertTrue(guard.startswith("if (root.scCarries(provider) && "), f"{base} {kind}: {guard}")
+            self.run_node("const assert = require('node:assert/strict');\n" + r"""
+let scScope = 'deezer', scSources = ['tidal', 'spotify', 'deezer'], scAskedAt = 0, restored = 0, cancelled = 0, selected = null;
+const Planck = {librarianController: {streamingInterfaceController: {get selectedProvider() {return selected;}, cancelPairing() {cancelled++;}, restorePreviouslySelectedSource() {restored++;}}}};
+const root = {scQuiet: () => scQuiet(), scUnasked: p => scUnasked(p), scCarries: p => scCarries(p)};
+""" + self.functions("scQuiet", "scUnasked", "scCarries") + "\nconst guards = " + json.dumps(guards) + r""";
+const run = (kind, provider) => new Function('root', 'provider', guards[kind].replace(/\) return$/, ') return "blocked"') + '; return "opened"')(root, provider);
+for (const kind of Object.keys(guards)) for (const name of ['Amazon Music', 'Dropbox']) {
+    // Not recently asked for in Sources (scAskedAt 0), the scope another service's: the old guard returned here and restored the previous source.
+    restored = cancelled = 0; selected = {name, loggedIn: false};
+    assert.equal(run(kind, selected), 'opened', kind + ' ' + name);
+    assert.equal(restored + cancelled, 0, kind + ' ' + name + ' is not undone');
+}
+""")
+
     @unittest.skipUnless(shutil.which("node"), "Node is required to run the root helpers")
     def test_the_dialog_guards_and_logos_leave_engines_own_providers_alone(self):
         """The login, pairing and accept dialogs of a provider the pack neither carries nor hides open as stock whatever scope is selected."""
-        pattern = re.compile(r"function onShow(Login|AcceptDeny|Pairing|ConnectedAccounts)Dialog\(provider[^)]*\) \{\n\s*(if \(.*\) return)\n")
-        files = {"Login": "Streaming/StreamingLoginDialog.qml", "AcceptDeny": "Streaming/StreamingAcceptDenyDialog.qml",
-                 "Pairing": "Streaming/StreamingPairingDialog.qml", "ConnectedAccounts": "Streaming/StreamingConnectedAccountsDialog.qml"}
         for base, root in self.BASES:
-            guards = {}
-            for kind, rel in files.items():
-                text = self.patched(base, root, rel)
-                found = [m for m in pattern.finditer(text) if m[1] == kind]
-                self.assertEqual(len(found), 1, f"{base} {rel}")
-                guards[kind] = found[0][2]
-            logos = {"AcceptDeny": ("service.provider", self.patched(base, root, files["AcceptDeny"])),
+            guards = self.guards_of(base, root)
+            logos = {"AcceptDeny": ("service.provider", self.patched(base, root, self.GUARD_FILES["AcceptDeny"])),
                      "Utility": ("dialog.provider", self.patched(base, root, "Streaming/StreamingUtilityDialog.qml"))}
             for kind, (who, text) in logos.items():
                 self.assertIn(f"root.scBranded({who})", text, f"{base} {kind}")
