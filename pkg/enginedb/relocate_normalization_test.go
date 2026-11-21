@@ -45,8 +45,25 @@ func TestRelocateNormalizationPairs(t *testing.T) {
 		t.Fatalf("moves=%d, want %d: %+v", len(res.Moves), len(cases), res)
 	}
 	for _, move := range res.Moves {
-		if move.Tier != TierCleaned {
-			t.Errorf("track %d tier=%d, want TierCleaned", move.ID, move.Tier)
+		if move.Tier != TierExact {
+			t.Errorf("track %d tier=%d, want TierExact", move.ID, move.Tier)
 		}
+	}
+}
+
+func TestRelocateNormalizationExactSizeWinsOverCleanedVariant(t *testing.T) {
+	_, root, db := testlibrary.Create(t)
+	writeAudio(t, root, "Music/Café.mp3", 11)
+	writeAudio(t, root, "Music/Café!.mp3", 22)
+	old := "../Old/Cafe\u0301.mp3"
+	if _, err := db.Exec(`INSERT INTO Track(id,path,filename,fileBytes,title) VALUES(?,?,?,?,?)`, 1, old, filepath.Base(old), 11, "Cafe"); err != nil {
+		t.Fatal(err)
+	}
+	res, err := Relocate(context.Background(), RelocateOptions{Root: root, DryRun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Moves) != 1 || res.Moves[0].NewPath != "../Music/Café.mp3" || res.Moves[0].Tier != TierExact {
+		t.Fatalf("normalization exact match lost to cleaned variant: %+v", res)
 	}
 }

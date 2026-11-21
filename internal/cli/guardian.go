@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -76,7 +77,7 @@ func Guardian(args []string, out, errOut io.Writer) int {
 		fmt.Fprintln(errOut, "timeout must not be negative")
 		return 2
 	}
-	if *deadline > 0 {
+	if *deadline > 0 && !*dataOnly {
 		// Vendor images need not ship a timeout executable or BusyBox applet.
 		// This CLI-only deadline also bounds a locked repair before Engine starts.
 		timer := time.AfterFunc(*deadline, func() { os.Exit(124) })
@@ -159,7 +160,15 @@ func Guardian(args []string, out, errOut io.Writer) int {
 			// Edits the Web Console queued while Engine had this library open
 			// (Relocate, Hot Cues): this runs from the mount hook before Engine
 			// opens it again.
+			if enginedb.LibraryInUse(m) {
+				r.Mount, r.CheckedAt, err = m, time.Now().UTC(), enginedb.ErrLibraryInUse
+				break
+			}
 			if n, perr := enginedb.ApplyPending(context.Background(), m); perr != nil {
+				if errors.Is(perr, enginedb.ErrLibraryInUse) {
+					r.Mount, r.CheckedAt, err = m, time.Now().UTC(), perr
+					break
+				}
 				fmt.Fprintln(errOut, "engine-guardian: queued library edits not applied:", perr)
 			} else if n > 0 {
 				fmt.Fprintf(errOut, "engine-guardian: applied %d queued library edits\n", n)

@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -230,6 +231,9 @@ func healMountContext(ctx context.Context, mount string, maxSessions int, dataOn
 	if maxSessions < 0 {
 		return r, fmt.Errorf("maxSessions must not be negative")
 	}
+	if libraryInUse(mount) {
+		return r, errLibraryInUse
+	}
 	path := filepath.Join(mount, "Engine Library", "Database2", "m.db")
 	rw, err := writable(path)
 	if err != nil {
@@ -342,6 +346,37 @@ func healMountContext(ctx context.Context, mount string, maxSessions int, dataOn
 	return r, nil
 }
 
+var errLibraryInUse = errors.New("Engine has this drive's library open")
+
+func libraryInUse(root string) bool {
+	path := filepath.Join(root, "Engine Library", "Database2", "m.db")
+	want, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil || pid <= 0 || pid == os.Getpid() {
+			continue
+		}
+		fds, err := os.ReadDir(filepath.Join("/proc", entry.Name(), "fd"))
+		if err != nil {
+			continue
+		}
+		for _, fd := range fds {
+			opened, err := os.Stat(filepath.Join("/proc", entry.Name(), "fd", fd.Name()))
+			if err == nil && os.SameFile(opened, want) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 type trackPathCandidate struct {
 	id      int64
 	path    string
@@ -351,16 +386,23 @@ type trackPathCandidate struct {
 var normalizeTrackPathBatch func()
 
 func normalizeTrackPaths(ctx context.Context, db *sql.DB, mount string, r *Report) (int, error) {
-	candidates, existing, bridgeManaged, err := collectTrackPathCandidates(db, mount)
+	candidates, bridgeManaged, err := collectTrackPathCandidates(db, mount)
 	if err != nil {
 		return 0, err
 	}
 	eligible := candidates[:0]
 	claimed := map[string]int64{}
 	for _, candidate := range candidates {
-		other, collision := existing[candidate.nfcPath]
-		if bridgeManaged[candidate.id] || collision && other != candidate.id {
+		if bridgeManaged[candidate.id] {
 			continue
+		}
+		var other int64
+		err := db.QueryRow(`SELECT id FROM Track WHERE path=?`, candidate.nfcPath).Scan(&other)
+		if err == nil && other != candidate.id {
+			continue
+		}
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return 0, err
 		}
 		if other, collision := claimed[candidate.nfcPath]; collision && other != candidate.id {
 			continue
@@ -378,7 +420,7 @@ func normalizeTrackPaths(ctx context.Context, db *sql.DB, mount string, r *Repor
 		entries, err := os.ReadDir(dir)
 		if err == nil {
 			for _, entry := range entries {
-				if !entry.IsDir() {
+				if entry.Type().IsRegular() {
 					names[entry.Name()] = true
 				}
 			}
@@ -417,14 +459,29 @@ func normalizeTrackPaths(ctx context.Context, db *sql.DB, mount string, r *Repor
 			if !listFiles(filepath.Dir(newFile))[filepath.Base(newFile)] {
 				continue
 			}
-			if _, err := tx.Exec(`UPDATE Track SET path=?, filename=? WHERE id=? AND path=?`, candidate.nfcPath, filepath.Base(candidate.nfcPath), candidate.id, candidate.path); err != nil {
+			oldFilename := filepath.Base(candidate.path)
+			newFilename := filepath.Base(candidate.nfcPath)
+			if oldFilename == newFilename {
+				_, err = tx.Exec(`UPDATE Track SET path=? WHERE id=? AND path=?`, candidate.nfcPath, candidate.id, candidate.path)
+			} else {
+				var lastEditTime sql.NullInt64
+				if err = tx.QueryRow(`SELECT lastEditTime FROM Track WHERE id=? AND path=?`, candidate.id, candidate.path).Scan(&lastEditTime); err == nil {
+					if _, err = tx.Exec(`UPDATE Track SET path=?, filename=? WHERE id=? AND path=?`, candidate.nfcPath, newFilename, candidate.id, candidate.path); err == nil {
+						var restore any
+						if lastEditTime.Valid {
+							restore = lastEditTime.Int64
+						}
+						_, err = tx.Exec(`UPDATE Track SET lastEditTime=? WHERE id=?`, restore, candidate.id)
+					}
+				}
+			}
+			if err != nil {
 				if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 					continue
 				}
 				_ = tx.Rollback()
 				return remaining, err
 			}
-			existing[candidate.nfcPath] = candidate.id
 			batchFixed++
 		}
 		if err := tx.Commit(); err != nil {
@@ -442,38 +499,50 @@ func normalizeTrackPaths(ctx context.Context, db *sql.DB, mount string, r *Repor
 	return remaining, nil
 }
 
-func collectTrackPathCandidates(db *sql.DB, mount string) ([]trackPathCandidate, map[string]int64, map[int64]bool, error) {
-	rows, err := db.Query(`SELECT id, COALESCE(path,''), COALESCE(streamingSource,'') FROM Track`)
+func collectTrackPathCandidates(db *sql.DB, mount string) ([]trackPathCandidate, map[int64]bool, error) {
+	rows, err := db.Query(`SELECT id, path FROM Track WHERE path IS NOT NULL AND path <> ''`)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
-	defer rows.Close()
 	candidates := []trackPathCandidate{}
-	existing := map[string]int64{}
 	for rows.Next() {
 		var id int64
-		var path, streaming string
-		if err := rows.Scan(&id, &path, &streaming); err != nil {
-			return nil, nil, nil, err
+		var path string
+		if err := rows.Scan(&id, &path); err != nil {
+			return nil, nil, err
 		}
-		if path != "" {
-			existing[path] = id
-		}
-		if streaming == "" && path != "" && path != norm.NFC.String(path) {
+		if !norm.NFC.IsNormalString(path) {
 			candidates = append(candidates, trackPathCandidate{id: id, path: path, nfcPath: norm.NFC.String(path)})
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, nil, err
+	}
+	streamingCandidates := candidates[:0]
+	for _, candidate := range candidates {
+		var streaming string
+		if err := db.QueryRow(`SELECT COALESCE(streamingSource,'') FROM Track WHERE id=?`, candidate.id).Scan(&streaming); err != nil {
+			return nil, nil, err
+		}
+		if streaming == "" {
+			streamingCandidates = append(streamingCandidates, candidate)
+		}
+	}
+	candidates = streamingCandidates
+	if len(candidates) == 0 {
+		return candidates, map[int64]bool{}, nil
 	}
 	bridgeManaged, err := bridgeManagedTracks(mount)
 	if err != nil {
 		for _, candidate := range candidates {
 			bridgeManaged[candidate.id] = true
 		}
-		return candidates, existing, bridgeManaged, nil
+		return candidates, bridgeManaged, nil
 	}
-	return candidates, existing, bridgeManaged, err
+	return candidates, bridgeManaged, err
 }
 
 func bridgeManagedTracks(mount string) (map[int64]bool, error) {
@@ -512,12 +581,12 @@ func bridgeManagedTracks(mount string) (map[int64]bool, error) {
 }
 
 func trackPath(mount, path string) (string, bool) {
-	if filepath.IsAbs(path) || path == "" {
+	if filepath.IsAbs(path) || path == "" || path == "." {
 		return "", false
 	}
 	full := filepath.Join(mount, "Engine Library", filepath.FromSlash(path))
 	rel, err := filepath.Rel(mount, full)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", false
 	}
 	return full, true

@@ -30,6 +30,42 @@ func TestGuardianCommandDeadlineWithoutTimeoutUtility(t *testing.T) {
 	}
 }
 
+func TestGuardianDataOnlyDeadlineIsSoft(t *testing.T) {
+	mount := mountFixture(t)
+	var out, errOut bytes.Buffer
+	if code := Guardian([]string{"--heal-mount", mount, "--data-only", "--timeout", "1ns"}, &out, &errOut); code != 0 {
+		t.Fatalf("soft data-only deadline code=%d out=%s err=%s", code, &out, &errOut)
+	}
+	var results []guardianResult
+	if err := json.Unmarshal(out.Bytes(), &results); err != nil || len(results) != 1 || !results[0].Healthy {
+		t.Fatalf("soft data-only deadline result=%s err=%v", &out, err)
+	}
+}
+
+func TestGuardianRefusesLibraryInUse(t *testing.T) {
+	mount := mountFixture(t)
+	path := filepath.Join(mount, "Engine Library", "Database2", "m.db")
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("sleep", "60")
+	cmd.ExtraFiles = []*os.File{f}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	var out, errOut bytes.Buffer
+	if code := Guardian([]string{"--heal-mount", mount, "--data-only"}, &out, &errOut); code != 1 {
+		t.Fatalf("in-use guardian code=%d out=%s err=%s", code, &out, &errOut)
+	}
+	var results []guardianResult
+	if err := json.Unmarshal(out.Bytes(), &results); err != nil || len(results) != 1 || results[0].Error != enginedb.ErrLibraryInUse.Error() {
+		t.Fatalf("in-use guardian result=%s err=%v", &out, err)
+	}
+}
+
 func mountFixture(t *testing.T) string {
 	t.Helper()
 	mount := filepath.Join(t.TempDir(), "USB with spaces")

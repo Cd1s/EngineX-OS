@@ -3,7 +3,9 @@ package dbhealer
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"testing"
@@ -55,14 +57,28 @@ func TestHealMountDataOnlyNormalizesMissingNFDPaths(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO Track(id,path,filename,fileBytes) VALUES(?,?,?,?)`, 7, collisionNFC, filepath.Base(collisionNFC), 32); err != nil {
 		t.Fatal(err)
 	}
+	duplicateA := "../Music/Doublee\u0301\u0323.mp3"
+	duplicateB := "../Music/Doublee\u0323\u0301.mp3"
+	duplicateNFC := "../Music/Doubleẹ́.mp3"
+	write(duplicateNFC)
+	for _, item := range []struct {
+		id   int
+		path string
+	}{{100, duplicateA}, {101, duplicateB}} {
+		id, path := item.id, item.path
+		if _, err := db.Exec(`INSERT INTO Track(id,path,filename,fileBytes) VALUES(?,?,?,?)`, id, path, filepath.Base(path), 32); err != nil {
+			t.Fatal(err)
+		}
+	}
 	bridgePath := "../Music/Bridge\u0301.mp3"
 	bridgeNFC := "../Music/Bridgé.mp3"
 	write(bridgeNFC)
-	if _, err := db.Exec(`INSERT INTO Track(id,path,filename,fileBytes) VALUES(?,?,?,?)`, 8, bridgePath, filepath.Base(bridgePath), 32); err != nil {
+	if _, err := db.Exec(`INSERT INTO Track(id,path,filename,fileBytes) VALUES(?,?,?,?)`, 102, bridgePath, filepath.Base(bridgePath), 32); err != nil {
 		t.Fatal(err)
 	}
 	streamingPath := "../Music/Cafe\u0301-stream.mp3"
-	if _, err := db.Exec(`INSERT INTO Track(id,path,filename,streamingSource) VALUES(9,?,?,?)`, streamingPath, filepath.Base(streamingPath), "tidal"); err != nil {
+	write("../Music/Café-stream.mp3")
+	if _, err := db.Exec(`INSERT INTO Track(id,path,filename,streamingSource) VALUES(103,?,?,?)`, streamingPath, filepath.Base(streamingPath), "tidal"); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()
@@ -70,7 +86,7 @@ func TestHealMountDataOnlyNormalizesMissingNFDPaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := state.Exec(`CREATE TABLE BridgeState(path TEXT PRIMARY KEY, trackId INTEGER NOT NULL, fingerprint TEXT NOT NULL); INSERT INTO BridgeState VALUES('../Music/Bridgé.mp3',8,'test')`); err != nil {
+	if _, err := state.Exec(`CREATE TABLE BridgeState(path TEXT PRIMARY KEY, trackId INTEGER NOT NULL, fingerprint TEXT NOT NULL); INSERT INTO BridgeState VALUES('../Music/Bridgé.mp3',102,'test')`); err != nil {
 		t.Fatal(err)
 	}
 	state.Close()
@@ -79,8 +95,8 @@ func TestHealMountDataOnlyNormalizesMissingNFDPaths(t *testing.T) {
 	if err != nil {
 		t.Fatalf("heal: %+v %v", got, err)
 	}
-	if got.PathsNormalized != 2 {
-		t.Fatalf("paths normalized=%d, want 2: %+v", got.PathsNormalized, got)
+	if got.PathsNormalized != 3 {
+		t.Fatalf("paths normalized=%d, want 3: %+v", got.PathsNormalized, got)
 	}
 	check, err := sql.Open("sqlite", filepath.Join(root, "Engine Library", "Database2", "m.db"))
 	if err != nil {
@@ -94,11 +110,27 @@ func TestHealMountDataOnlyNormalizesMissingNFDPaths(t *testing.T) {
 	if path != collisionPath {
 		t.Fatalf("collision row changed to %q", path)
 	}
-	if err := check.QueryRow(`SELECT path FROM Track WHERE id=8`).Scan(&path); err != nil {
+	if err := check.QueryRow(`SELECT path FROM Track WHERE id=102`).Scan(&path); err != nil {
 		t.Fatal(err)
 	}
 	if path != bridgePath {
 		t.Fatalf("bridge-managed row changed to %q", path)
+	}
+	unchanged, normalized := 0, 0
+	for id, want := range map[int]string{100: duplicateA, 101: duplicateB} {
+		if err := check.QueryRow(`SELECT path FROM Track WHERE id=?`, id).Scan(&path); err != nil {
+			t.Fatal(err)
+		}
+		if path == want {
+			unchanged++
+		} else if path == duplicateNFC {
+			normalized++
+		} else {
+			t.Fatalf("duplicate collision row %d changed to %q", id, path)
+		}
+	}
+	if unchanged != 1 || normalized != 1 {
+		t.Fatalf("duplicate collision result unchanged=%d normalized=%d", unchanged, normalized)
 	}
 	for _, tc := range cases {
 		var path, filename string
@@ -110,11 +142,98 @@ func TestHealMountDataOnlyNormalizesMissingNFDPaths(t *testing.T) {
 		}
 	}
 	var gotStreamingPath string
-	if err := check.QueryRow(`SELECT path FROM Track WHERE id=9`).Scan(&gotStreamingPath); err != nil {
+	if err := check.QueryRow(`SELECT path FROM Track WHERE id=103`).Scan(&gotStreamingPath); err != nil {
 		t.Fatal(err)
 	}
 	if norm.NFC.String(gotStreamingPath) == gotStreamingPath {
 		t.Fatal("streaming path unexpectedly normalized")
+	}
+}
+
+func TestNormalizeTrackPathPreservesLastEditTime(t *testing.T) {
+	_, root, db := testlibrary.Create(t)
+	old := "../Music/Cafe\u0301.mp3"
+	new := "../Music/Café.mp3"
+	path := filepath.Join(root, "Engine Library", filepath.FromSlash(new))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO Track(id,path,filename,lastEditTime,fileBytes,isAnalyzed) VALUES(1,?,?,?,?,1)`, old, filepath.Base(old), 1700000000, 1); err != nil {
+		t.Fatal(err)
+	}
+	var report Report
+	if _, err := normalizeTrackPaths(context.Background(), db, root, &report); err != nil {
+		t.Fatal(err)
+	}
+	var edited int64
+	if err := db.QueryRow(`SELECT lastEditTime FROM Track WHERE id=1`).Scan(&edited); err != nil {
+		t.Fatal(err)
+	}
+	if edited != 1700000000 {
+		t.Fatalf("normalization changed lastEditTime: %d", edited)
+	}
+}
+
+func TestHealMountDataOnlyRefusesLibraryInUse(t *testing.T) {
+	_, root, db := testlibrary.Create(t)
+	path := filepath.Join(root, "Engine Library", "Database2", "m.db")
+	db.Close()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("sleep", "60")
+	cmd.ExtraFiles = []*os.File{f}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	if _, err := HealMountDataOnly(root, 0); !errors.Is(err, errLibraryInUse) {
+		t.Fatalf("heal while library is open: %v", err)
+	}
+}
+
+func TestTrackPathRejectsMountRoot(t *testing.T) {
+	root := t.TempDir()
+	for _, path := range []string{".", "../../outside.mp3", "/tmp/outside.mp3"} {
+		if got, ok := trackPath(root, path); ok || got != "" {
+			t.Fatalf("trackPath(%q)=%q,%v, want rejection", path, got, ok)
+		}
+	}
+}
+
+func TestHealMountDataOnlyLeavesTracksWhenBridgeStateIsUnreadable(t *testing.T) {
+	_, root, db := testlibrary.Create(t)
+	for _, item := range []struct {
+		id   int
+		name string
+	}{{1, "Bridge-one"}, {2, "Bridge-two"}} {
+		id, name := item.id, item.name
+		old := "../Music/" + name + "e\u0301.mp3"
+		new := "../Music/" + name + "é.mp3"
+		p := filepath.Join(root, "Engine Library", filepath.FromSlash(new))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`INSERT INTO Track(id,path,filename,fileBytes) VALUES(?,?,?,1)`, id, old, filepath.Base(old)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.Close()
+	state := filepath.Join(root, "Engine Library", "Database2", ".rb-bridge-state.db")
+	if err := os.WriteFile(state, []byte("not sqlite"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := HealMountDataOnly(root, 0)
+	if err != nil || got.PathsNormalized != 0 {
+		t.Fatalf("unreadable bridge state changed tracks: %+v %v", got, err)
 	}
 }
 

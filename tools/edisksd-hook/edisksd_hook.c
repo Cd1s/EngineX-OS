@@ -1847,7 +1847,11 @@ static int after_mount_at(const char *mount_path,const char *label_target,const 
     int done=0;
     if(pioneer&&mode!=MOUNT_POST){const char *rb=RB_BRIDGE_PATH();char *const a[]={(char *)rb,"--mount-path",(char *)mount_path,NULL};if(!run(a,deadline))done=CONVERTED;else{int is_sd=(label_target&&strstr(label_target,"mmcblk"))||(src&&strstr(src,"mmcblk"));if(errno==ETIMEDOUT){done=TIMED_OUT;set_preparing_error(label_target,src,is_sd?"SD card conversion timed out":"USB conversion timed out");}else{set_preparing_error(label_target,src,is_sd?"SD card conversion failed":"USB conversion failed");}note("bridge failed on",label_target,errno);}}
     if(heal) {
-        char *const a[]={(char *)GUARDIAN_PATH,"--heal-mount",(char *)mount_path,"--data-only",NULL};
+		char timeout[32];
+		int64_t left=deadline-now_ms();
+		if(left<1)left=1;
+		snprintf(timeout,sizeof timeout,"%lldms",(long long)left);
+		char *const a[]={(char *)GUARDIAN_PATH,"--heal-mount",(char *)mount_path,"--data-only","--timeout",timeout,NULL};
         if(run(a,deadline)){if(errno==ETIMEDOUT)done=TIMED_OUT;note("guardian failed on",label_target,errno);}
         done|=HEALED;
     }

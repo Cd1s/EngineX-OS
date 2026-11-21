@@ -3,6 +3,7 @@
 #define _GNU_SOURCE
 #include <limits.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 static char test_media[PATH_MAX],test_library[PATH_MAX],test_legacy_library[PATH_MAX],test_runtime[PATH_MAX],test_utab[PATH_MAX];
 static char test_prepare_state[PATH_MAX];
@@ -238,6 +239,13 @@ static void write_file(const char *path,const char *text) {
 static void expect_file(const char *path,const char *text) {
     char buf[256];int fd=open(path,O_RDONLY|O_NOFOLLOW|O_CLOEXEC);assert(fd>=0);
     ssize_t n=read(fd,buf,sizeof buf);assert(n==(ssize_t)strlen(text)&&!memcmp(buf,text,(size_t)n));close(fd);
+}
+static void expect_guardian(const char *path,const char *prefix) {
+    char buf[256];int fd=open(path,O_RDONLY|O_NOFOLLOW|O_CLOEXEC);assert(fd>=0);
+    ssize_t n=read(fd,buf,sizeof buf-1);assert(n>0);buf[n]=0;close(fd);
+    assert(!strncmp(buf,prefix,strlen(prefix)));
+    char *p=strstr(buf," --timeout ");assert(p);
+    char *end=NULL;long long ms=strtoll(p+11,&end,10);assert(ms>0&&end&&strcmp(end,"ms\n")==0);
 }
 static void test_paths_and_copy(const char *root) {
     char volume_path[PATH_MAX],lib[PATH_MAX],outside[PATH_MAX],src[PATH_MAX],dst[PATH_MAX],p[PATH_MAX];
@@ -787,8 +795,8 @@ static void test_guardian_from_the_data_bundle(const char *root) {
         snprintf(test_disk,sizeof test_disk,"%s",disk);test_disk_ro=0;
         struct libmnt_context c={.target=target,.source="/dev/sdx1"};
         assert(!mnt_context_mount(&c)&&c.status==1);
-        snprintf(want,sizeof want,"%s --heal-mount %s --data-only\n",rootfs?"system":"bundle",target);
-        expect_file(log,want);assert(!unlink(log));
+        snprintf(want,sizeof want,"%s --heal-mount %s --data-only",rootfs?"system":"bundle",target);
+        expect_guardian(log,want);assert(!unlink(log));
         assert(!umount2(target,UMOUNT_NOFOLLOW));
     }
     // BH2-A1-7: the same stick after a player left its settings folder on it is still healed, not converted.
@@ -796,7 +804,7 @@ static void test_guardian_from_the_data_bundle(const char *root) {
     join(test_rb_bridge,root,"heal-bridge");snprintf(script,sizeof script,"#!/bin/sh\necho \"bridge $*\" >> '%s'\n",log);write_file(test_rb_bridge,script);assert(!chmod(test_rb_bridge,0700));
     struct libmnt_context settings={.target=target,.source="/dev/sdx1"};
     assert(!mnt_context_mount(&settings)&&settings.status==1);
-    snprintf(want,sizeof want,"system --heal-mount %s --data-only\n",target);expect_file(log,want);
+    snprintf(want,sizeof want,"system --heal-mount %s --data-only",target);expect_guardian(log,want);
     assert(!umount2(target,UMOUNT_NOFOLLOW));
     test_guardian_system[0]=test_guardian_bundle[0]=0;
     puts("REAL PRIVATE NAMESPACE BH2-A1-1: an Engine stick is healed by the data bundle's engine-guardian where the rootfs has none, by the rootfs's where it has; BH2-A1-7: also with a player's settings folder on it: PASS");

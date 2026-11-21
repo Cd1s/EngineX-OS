@@ -266,8 +266,10 @@ func match(missing []missingTrack, files []driveFile, taken map[string]bool) []M
 			continue
 		}
 		base := filepath.Base(f.rel)
-		byName[base] = append(byName[base], f)
-		byLower[strings.ToLower(base)] = append(byLower[strings.ToLower(base)], f)
+		nfcBase := norm.NFC.String(base)
+		byName[nfcBase] = append(byName[nfcBase], f)
+		lowerBase := strings.ToLower(nfcBase)
+		byLower[lowerBase] = append(byLower[lowerBase], f)
 		c, ext := clean(stem(base)), strings.ToLower(filepath.Ext(base))+"\x00"
 		byClean[ext+c] = append(byClean[ext+c], f)
 		// "01 - Song" is also filed as "song": folders get sorted with track numbers added.
@@ -297,9 +299,10 @@ func match(missing []missingTrack, files []driveFile, taken map[string]bool) []M
 		var f driveFile
 		var tier int
 		var ok bool
-		if f, ok = free(byName[old], t.bytes); ok {
+		oldNFC := norm.NFC.String(old)
+		if f, ok = free(byName[oldNFC], t.bytes); ok {
 			tier = TierExact
-		} else if f, ok = free(byLower[strings.ToLower(old)], 0); ok {
+		} else if f, ok = free(byLower[strings.ToLower(oldNFC)], 0); ok {
 			tier = TierNoCase
 		} else {
 			ext := strings.ToLower(filepath.Ext(old)) + "\x00"
