@@ -90,6 +90,9 @@ type Options struct {
 	// read. A large library otherwise spent its whole read budget re-checking
 	// thousands of finished tracks on every mount (BH-GC1-2).
 	Resume bool `json:"-"`
+	// Reread names imported tracks (Engine paths) whose files PlanUpdate found
+	// changed: Resume reads them as well, and counts one left unread as Deferred.
+	Reread map[string]bool `json:"-"`
 	// LegacyOffsets is set when upgrading a library whose existing .rb-bridge-stamp
 	// predates v2 MP3 offset alignment. Deferred existing rows must stay pending
 	// until their legacy performance has been realigned on a later mount.
@@ -376,11 +379,30 @@ func sourceFiles(res *compat.Resolver, t rekordbox.Track) ([]analysisFile, *anal
 
 // readSources reads a track's ANLZ files and, unless skipAudio, its audio header.
 func readSources(res *compat.Resolver, p preparedTrack, full string, skipAudio bool) (*rekordbox.Analysis, compat.AudioInfo, error) {
+	// A valid PWV7 in the .2EX is the only waveform the import (its overview and peaks) and the
+	// display use: the other files' waveform sections are then not read (#253).
+	parsed := make([]*rekordbox.Analysis, len(p.files))
+	skip := func(string) bool { return false }
+	for i, f := range p.files {
+		if strings.EqualFold(path.Ext(f.rel), ".2EX") {
+			aa, e := rekordbox.ReadAnalysis(res.FullPath(f.rel))
+			if e != nil {
+				return nil, compat.AudioInfo{}, e
+			}
+			if w := displayAnalysisWaveform(aa); w != nil && w.Tag == "PWV7" {
+				skip = func(string) bool { return true }
+			}
+			parsed[i] = aa
+		}
+	}
 	a := &rekordbox.Analysis{}
-	for _, f := range p.files {
-		aa, e := rekordbox.ReadAnalysis(res.FullPath(f.rel))
-		if e != nil {
-			return nil, compat.AudioInfo{}, e
+	for i, f := range p.files {
+		aa := parsed[i]
+		if aa == nil {
+			var e error
+			if aa, e = rekordbox.ReadAnalysisSkipping(res.FullPath(f.rel), skip); e != nil {
+				return nil, compat.AudioInfo{}, e
+			}
 		}
 		a.Merge(aa)
 	}
@@ -533,6 +555,9 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 		if e != nil {
 			return result, e
 		}
+		for p := range opts.Reread {
+			delete(done, p)
+		}
 		if prepared, err = prepareTracks(ctx, res, l, cutoff, now, done); err != nil {
 			return result, err
 		}
@@ -559,30 +584,44 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 	if err != nil {
 		return result, err
 	}
-	// keepRef gives a track this import leaves as it is the reference of this build when its row
-	// has none: no row (the 3 GiB cap of earlier builds) or a compacted one (CompactBridgeState)
-	// that names no file. The row of an earlier build that holds the detail itself is not read.
+	// needRef are the bridge tracks whose state row names no detail file: no row (the 3 GiB cap
+	// of earlier builds) or one CopyBridgeStateCompact left without its files. length() reads
+	// no overflow page, so the rows that still hold a waveform are not read (#253).
+	needRef := map[int64]bool{} // true: no row at all
+	if !opts.Fast && !empty {
+		rows, e := tx.QueryContext(ctx, `SELECT s.trackId,a.trackId IS NULL FROM BridgeState s LEFT JOIN BridgeAnalysis a ON a.trackId=s.trackId
+			WHERE a.trackId IS NULL OR length(a.sourceJSON)=8 AND substr(a.sourceJSON,1,4)=CAST('RBA2' AS BLOB)`)
+		if e != nil {
+			return result, e
+		}
+		for rows.Next() {
+			var id int64
+			var missing bool
+			if e = rows.Scan(&id, &missing); e != nil {
+				rows.Close()
+				return result, e
+			}
+			needRef[id] = missing
+		}
+		rows.Close()
+		if e = rows.Err(); e != nil {
+			return result, e
+		}
+	}
+	// keepRef gives such a track this import leaves as it is the reference of this build.
 	keepRef := func(id int64, source uint32, files []analysisFile, analysisPath string) error {
-		if opts.Fast || id == 0 {
-			return nil
-		}
-		var row sql.NullBool
-		var small []byte
-		e := q.QueryRowContext(ctx, `SELECT 1,CASE WHEN length(sourceJSON)<=4096 THEN sourceJSON END FROM BridgeAnalysis WHERE trackId=?`, id).Scan(&row, &small)
-		if e != nil && !errors.Is(e, sql.ErrNoRows) {
-			return e
-		}
-		if row.Valid && small == nil {
-			return nil
-		}
-		if _, refs, err := unpackBridgeRef(small); row.Valid && (err != nil || len(refs) > 0) {
+		missing, ok := needRef[id]
+		if !ok {
 			return nil
 		}
 		refs := detailFiles(files)
 		if len(refs) == 0 {
 			refs = exportDetailFiles(analysisPath)
 		}
-		_, e = q.ExecContext(ctx, `INSERT INTO BridgeAnalysis(trackId,sourceJSON,audioJSON) VALUES(?,?,?) ON CONFLICT(trackId) DO UPDATE SET sourceJSON=excluded.sourceJSON,audioJSON=excluded.audioJSON`, id, packBridgeRef(source, refs), emptyAudio)
+		if len(refs) == 0 && !missing {
+			return nil // a track without analysis files keeps its row
+		}
+		_, e := q.ExecContext(ctx, `INSERT INTO BridgeAnalysis(trackId,sourceJSON,audioJSON) VALUES(?,?,?) ON CONFLICT(trackId) DO UPDATE SET sourceJSON=excluded.sourceJSON,audioJSON=excluded.audioJSON`, id, packBridgeRef(source, refs), emptyAudio)
 		return e
 	}
 	for i, preparedTrack := range prepared {
@@ -625,7 +664,7 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 			// A "fast:" fingerprint makes the next full import read this track.
 			fast, files, art, hash = true, nil, nil, "fast:"+t.RecordHash
 			// A completed v2 row keeps its fingerprint and deck edits on re-export.
-			if legacyOffsets || id == 0 || previous == "" || strings.HasPrefix(previous, "fast:") {
+			if legacyOffsets || id == 0 || previous == "" || strings.HasPrefix(previous, "fast:") || opts.Reread[enginePath] {
 				result.Deferred++
 			}
 		} else if !fast && previous != hash {

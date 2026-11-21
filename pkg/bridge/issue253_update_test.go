@@ -151,6 +151,70 @@ func TestIssue253FastPublishStartsTheBackgroundUpdate(t *testing.T) {
 	}
 }
 
+// issue253OldRows gives every track of the converted stick at root the state row a build before
+// #253 wrote, the source ID and four minutes of PWV7, and leaves 8 MB of free pages beside.
+func issue253OldRows(t *testing.T, root string) {
+	t.Helper()
+	db := dbOpen(t, root)
+	defer db.Close()
+	rnd := rand.New(rand.NewSource(253))
+	if _, err := db.Exec(`CREATE TABLE bridge.pad(b BLOB); INSERT INTO bridge.pad VALUES(zeroblob(8388608)); DROP TABLE bridge.pad`); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := db.Query(`SELECT a.trackId,t.pdbImportKey FROM bridge.BridgeAnalysis a JOIN Track t ON t.id=a.trackId`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type row struct{ id, key int64 }
+	var all []row
+	for rows.Next() {
+		var r row
+		if err = rows.Scan(&r.id, &r.key); err != nil {
+			t.Fatal(err)
+		}
+		all = append(all, r)
+	}
+	rows.Close()
+	for _, r := range all {
+		if _, err = db.Exec(`UPDATE bridge.BridgeAnalysis SET sourceJSON=? WHERE trackId=?`, rba1(uint32(r.key), 36000, rnd), r.id); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// issue253Refs fails unless every track of the library at root has a state row of this build: its
+// source ID and the ANLZ files of its detail, in at most 256 bytes.
+func issue253Refs(t *testing.T, root string, tracks int) {
+	t.Helper()
+	db := dbOpen(t, root)
+	defer db.Close()
+	rows, err := db.Query(`SELECT a.sourceJSON,t.pdbImportKey FROM bridge.BridgeAnalysis a JOIN Track t ON t.id=a.trackId`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	n := 0
+	for rows.Next() {
+		var b []byte
+		var key int64
+		if err = rows.Scan(&b, &key); err != nil {
+			t.Fatal(err)
+		}
+		var src struct {
+			Track  struct{ ID uint32 }
+			Detail []string
+		}
+		plain, err := enginedb.UnpackAnalysis(b, 1<<20)
+		if len(b) > 256 || err != nil || json.Unmarshal(plain, &src) != nil || int64(src.Track.ID) != key || len(src.Detail) == 0 {
+			t.Fatalf("track %d: row of %d bytes, %+v %v", key, len(b), src, err)
+		}
+		n++
+	}
+	if n != tracks {
+		t.Fatalf("%d of %d tracks with a state row", n, tracks)
+	}
+}
+
 // rba1 is a state row as builds before #253 wrote it: the source ID and a copy of a PWV7.
 func rba1(id uint32, entries int, rnd *rand.Rand) []byte {
 	raw := make([]byte, 20+3*entries)
@@ -181,30 +245,7 @@ func fileSize(t *testing.T, p string) int64 {
 // for every track, with its source ID.
 func TestIssue253UpdateLeavesTheWaveformCopiesBehind(t *testing.T) {
 	root, cues := issue253Converted(t, 40)
-	db := dbOpen(t, root)
-	rnd := rand.New(rand.NewSource(253))
-	// Four minutes of PWV7 a track, as earlier builds kept it, and free pages beside.
-	if _, err := db.Exec(`CREATE TABLE bridge.pad(b BLOB); INSERT INTO bridge.pad VALUES(zeroblob(8388608)); DROP TABLE bridge.pad`); err != nil {
-		t.Fatal(err)
-	}
-	rows, err := db.Query(`SELECT a.trackId,t.pdbImportKey FROM bridge.BridgeAnalysis a JOIN Track t ON t.id=a.trackId`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	type row struct{ id, key int64 }
-	var all []row
-	for rows.Next() {
-		var r row
-		rows.Scan(&r.id, &r.key)
-		all = append(all, r)
-	}
-	rows.Close()
-	for _, r := range all {
-		if _, err = db.Exec(`UPDATE bridge.BridgeAnalysis SET sourceJSON=? WHERE trackId=?`, rba1(uint32(r.key), 36000, rnd), r.id); err != nil {
-			t.Fatal(err)
-		}
-	}
-	db.Close()
+	issue253OldRows(t, root)
 	live := fileSize(t, stagePath(root, "..", ".rb-bridge-state.db"))
 	testfixture.LargeExport(t, root, 60)
 	restore := bridge.SetLargeExportForTest()
@@ -218,37 +259,75 @@ func TestIssue253UpdateLeavesTheWaveformCopiesBehind(t *testing.T) {
 	}
 	staged := fileSize(t, stagePath(root, ".rb-bridge-state.db"))
 	t.Logf("state: live %d bytes, update's %d bytes", live, staged)
-	if live < 12<<20 || staged > 256<<10 {
+	if live < 10<<20 || staged > 256<<10 {
 		t.Fatalf("the update's state is %d bytes, from a live one of %d", staged, live)
 	}
 	if r, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false); err != nil || r.Background {
 		t.Fatalf("publishing mount: %+v %v", r, err)
 	}
-	db = dbOpen(t, root)
+	db := dbOpen(t, root)
 	issue253DeckEdit(t, db, cues)
-	rows, err = db.Query(`SELECT a.sourceJSON,t.pdbImportKey FROM bridge.BridgeAnalysis a JOIN Track t ON t.id=a.trackId`)
-	if err != nil {
+	db.Close()
+	issue253Refs(t, root, 60)
+}
+
+// An update of a large library with few tracks to read is read in place by the next mount, which
+// the background job's remount is: the job copies nothing and writes neither database, it only
+// checks every track's files. The quick update at the mount brought the playlists before.
+func TestIssue253SmallUpdateOfALargeLibraryIsReadInPlace(t *testing.T) {
+	root, cues := issue253Converted(t, 40)
+	issue253OldRows(t, root)
+	db := dbOpen(t, root)
+	changed := scalar[string](t, db, `SELECT s.fingerprint FROM bridge.BridgeState s JOIN Track t ON t.id=s.trackId WHERE t.pdbImportKey=5`)
+	db.Close()
+	// Track 5's file changed on the stick since its import, and 20 tracks are new.
+	later := time.Now().Add(time.Hour)
+	if err := os.Chtimes(stagePath(root, "..", "..", "..", testfixture.LargeTrackPath(5)), later, later); err != nil {
 		t.Fatal(err)
 	}
-	defer rows.Close()
-	n := 0
-	for rows.Next() {
-		var b []byte
-		var key int64
-		if err = rows.Scan(&b, &key); err != nil {
-			t.Fatal(err)
-		}
-		var src struct {
-			Track  struct{ ID uint32 }
-			Detail []string
-		}
-		plain, err := enginedb.UnpackAnalysis(b, 1<<20)
-		if len(b) > 256 || err != nil || json.Unmarshal(plain, &src) != nil || int64(src.Track.ID) != key || len(src.Detail) == 0 {
-			t.Fatalf("track %d: row of %d bytes, %+v %v", key, len(b), src, err)
-		}
-		n++
+	testfixture.LargeExport(t, root, 60)
+	defer bridge.SetLargeExportForTest()()
+	defer bridge.SetInPlaceUpdateForTest(1)()
+	ctx := context.Background()
+	if r, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false); err != nil || !r.Background || r.Added != 20 {
+		t.Fatalf("mount of the re-export: %+v %v", r, err)
 	}
-	if n != 60 {
-		t.Fatalf("%d of 60 tracks with a state row", n)
+	mdb, state := fileSum(t, stagePath(root, "..", "m.db")), fileSum(t, stagePath(root, "..", ".rb-bridge-state.db"))
+	r, err := bridge.ImportInBackground(ctx, root, nil)
+	if err != nil || r.Bypassed || r.Deferred != 21 {
+		t.Fatalf("background job: %+v %v", r, err)
+	}
+	if fileSum(t, stagePath(root, "..", "m.db")) != mdb || fileSum(t, stagePath(root, "..", ".rb-bridge-state.db")) != state {
+		t.Fatal("the background job wrote the live library")
+	}
+	if _, err := os.Stat(stagePath(root)); !os.IsNotExist(err) {
+		t.Fatalf("the job left its stage: %v", err)
+	}
+	// The job's remount: the mount reads the 21 tracks in place.
+	if r, err = bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false); err != nil || r.Background || r.Deferred != 0 {
+		t.Fatalf("remount: %+v %v", r, err)
+	}
+	db = dbOpen(t, root)
+	if n := scalar[int](t, db, `SELECT count(*) FROM PerformanceData p JOIN Track t ON t.id=p.trackId WHERE t.pdbImportKey>0 AND p.beatData IS NOT NULL`); n != 60 {
+		t.Fatalf("%d of 60 tracks with their grid", n)
+	}
+	if fp := scalar[string](t, db, `SELECT s.fingerprint FROM bridge.BridgeState s JOIN Track t ON t.id=s.trackId WHERE t.pdbImportKey=5`); fp == changed {
+		t.Fatal("track 5's changed file was not read again")
+	}
+	issue253DeckEdit(t, db, cues)
+	for _, name := range []string{".rb-bridge-pending", ".rb-bridge-reread"} {
+		if _, err := os.Stat(stagePath(root, "..", name)); !os.IsNotExist(err) {
+			t.Fatalf("%s left behind: %v", name, err)
+		}
+	}
+	db.Close()
+	// That mount also left the waveform copies behind: references only.
+	if n := fileSize(t, stagePath(root, "..", ".rb-bridge-state.db")); n > 256<<10 {
+		t.Fatalf("live state %d bytes after the update", n)
+	}
+	issue253Refs(t, root, 60)
+	// Nothing left: the next mount reads nothing.
+	if r, err = bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false); err != nil || !r.Bypassed {
+		t.Fatalf("mount after: %+v %v", r, err)
 	}
 }

@@ -17,10 +17,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/compat"
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
+	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
 
 const (
@@ -81,18 +83,11 @@ func quickUpdate(ctx context.Context, mount, dir string, r *compat.Resolver, lim
 	}
 	// The export's spelling of a path is trusted for a new track; one the library holds keeps its
 	// row's, which an import resolved on the volume: a quick update moves no file of it.
-	fresh, entries := 0, 0
-	for i := range l.Tracks {
-		rel, err := compat.CleanRelative(l.Tracks[i].Path)
-		if err != nil {
-			return enginedb.Result{}, err
-		}
-		if stored, ok := known[foldPath(rel)]; ok {
-			l.Tracks[i].Path = "/" + stored
-		} else {
-			fresh++
-		}
+	fresh, err := keepSpellings(l, known)
+	if err != nil {
+		return enginedb.Result{}, err
 	}
+	entries := 0
 	for _, p := range l.Playlists {
 		entries += len(p.Tracks)
 	}
@@ -102,6 +97,23 @@ func quickUpdate(ctx context.Context, mount, dir string, r *compat.Resolver, lim
 	}
 	mergeByPath(l)
 	return enginedb.SyncResolved(ctx, r, l, enginedb.Options{Fast: true, TrustPaths: true, FastCues: true, StagedOnly: stagedOnly})
+}
+
+// keepSpellings gives the tracks of l that the library holds their rows' spelling of their path,
+// which an import resolved on the volume, and counts the others.
+func keepSpellings(l *rekordbox.Library, known map[string]string) (fresh int, err error) {
+	for i := range l.Tracks {
+		rel, err := compat.CleanRelative(l.Tracks[i].Path)
+		if err != nil {
+			return 0, err
+		}
+		if stored, ok := known[foldPath(rel)]; ok {
+			l.Tracks[i].Path = "/" + stored
+		} else {
+			fresh++
+		}
+	}
+	return fresh, nil
 }
 
 // ownedSpellings maps the folded path of each track the bridge imported to its row's spelling.
@@ -211,11 +223,6 @@ func snapshotLive(ctx context.Context, dir, stage string) error {
 // updateInBackground runs the import passes of an update on the stage's copy of the library.
 func updateInBackground(ctx context.Context, mount, stage, stamp string, r *compat.Resolver, progress func(done, total int)) (enginedb.Result, error) {
 	dir := filepath.Dir(stage)
-	if _, err := os.Stat(filepath.Join(stage, baseCountsName)); errors.Is(err, os.ErrNotExist) {
-		if err = snapshotLive(ctx, dir, stage); err != nil {
-			return enginedb.Result{}, err
-		}
-	}
 	l, stagedOnly, err := readLibrary(ctx, mount)
 	if err != nil {
 		return enginedb.Result{}, err
@@ -225,6 +232,16 @@ func updateInBackground(ctx context.Context, mount, stage, stamp string, r *comp
 	}
 	old := readMark(dir, stampName)
 	legacy, legacyAAC := legacyGridOptions(old)
+	if _, err := os.Stat(filepath.Join(stage, baseCountsName)); errors.Is(err, os.ErrNotExist) {
+		if !stagedOnly && !legacy {
+			if res, handed, err := handToMounts(ctx, r, l, dir, stage, stamp); handed {
+				return res, err
+			}
+		}
+		if err = snapshotLive(ctx, dir, stage); err != nil {
+			return enginedb.Result{}, err
+		}
+	}
 	total, left, window := len(l.Tracks), -1, importWindow
 	if progress != nil {
 		progress(0, total)
@@ -263,6 +280,132 @@ func updateInBackground(ctx context.Context, mount, stage, stamp string, r *comp
 			left = res.Deferred
 		}
 	}
+}
+
+// inPlaceUpdateTracks is the most tracks an update leaves to a mount to read in place: about what
+// a mount reads in its 8 s on a USB stick (BH-GC1-2). A larger update goes on in the stage.
+// perTrackReadBytes is about what reading one track's files costs (its ANLZ files are about
+// 350 KB): an update is left to the mounts only where copying the library costs more.
+var (
+	inPlaceUpdateTracks       = 100
+	perTrackReadBytes   int64 = 400 << 10
+)
+
+// rereadName holds an update a mount finishes in place: its stamp and the imported tracks whose
+// files changed, which a Resume import does not look at otherwise.
+const rereadName = ".rb-bridge-reread"
+
+type rereadMark struct {
+	Stamp string
+	Paths []string
+}
+
+// handToMounts leaves an update with little to read to the mounts, in place, without a copy of
+// the library (#253): the quick update at the mount brought the playlists and new tracks, and
+// what is left is the files of a few tracks. The background job then only checks every track's
+// files, reading nothing into a database, and its remount reads those few in place before Engine
+// sees the volume. handed is false when the update needs its stage after all.
+func handToMounts(ctx context.Context, r *compat.Resolver, l *rekordbox.Library, dir, stage, stamp string) (res enginedb.Result, handed bool, err error) {
+	st, err := os.Stat(filepath.Join(dir, "m.db"))
+	if err != nil || st.Size() <= int64(inPlaceUpdateTracks)*perTrackReadBytes {
+		return enginedb.Result{}, false, nil // a copy of so small a library costs less
+	}
+	start := time.Now()
+	reread, added, err := enginedb.PlanUpdate(ctx, r, l, dir)
+	if err != nil {
+		if ctx.Err() != nil {
+			return enginedb.Result{}, true, err
+		}
+		log.Printf("rb-bridge: update not planned, it goes on in its stage: %v", err)
+		return enginedb.Result{}, false, nil
+	}
+	work := len(reread) + added
+	log.Printf("rb-bridge: update checked in %s: %d tracks to read again, %d to add", time.Since(start).Round(time.Millisecond), len(reread), added)
+	if work > inPlaceUpdateTracks || int64(work)*perTrackReadBytes >= st.Size() {
+		return enginedb.Result{}, false, nil
+	}
+	if work == 0 {
+		// Nothing to read: the live library already is this export's.
+		writeStamp(dir, stamp)
+		os.Remove(filepath.Join(dir, pendingName))
+		os.Remove(filepath.Join(dir, rereadName))
+		return enginedb.Result{Bypassed: true}, true, dropStage(stage)
+	}
+	b, _ := json.Marshal(rereadMark{stamp, reread})
+	if err = os.WriteFile(filepath.Join(dir, rereadName), b, 0o644); err != nil {
+		return enginedb.Result{}, true, err
+	}
+	if err = syncFile(dir); err != nil {
+		return enginedb.Result{}, true, err
+	}
+	// Not bypassed: the job remounts the volume, and that mount reads them.
+	return enginedb.Result{Deferred: work}, true, dropStage(stage)
+}
+
+// compactState rewrites the live bridge state without the waveform copies of earlier builds and its
+// free pages, at a mount before Engine sees the volume, when an import pass follows that gives the
+// rows their references (#253). A state below compactStateBytes is left as it is. It never stops
+// the mount: on any error the state stays as it was.
+func compactState(ctx context.Context, dir string) {
+	state := filepath.Join(dir, stateName)
+	if st, err := os.Stat(state); err != nil || st.Size() < compactStateBytes {
+		return
+	}
+	lock, err := os.OpenFile(filepath.Join(dir, ".rb-bridge.lock"), os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return
+	}
+	defer lock.Close()
+	if syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
+		return
+	}
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	start, before := time.Now(), fileBytes(state)
+	tmp := state + ".compact"
+	if err = enginedb.CopyBridgeStateCompact(ctx, state, filepath.Join(dir, "m.db"), tmp); err == nil {
+		for _, side := range []string{"-journal", "-wal", "-shm"} {
+			os.Remove(state + side)
+		}
+		if err = os.Rename(tmp, state); err == nil {
+			err = syncFile(dir)
+		}
+	}
+	if err != nil {
+		os.Remove(tmp)
+		log.Printf("rb-bridge: bridge state not compacted: %v", err)
+		return
+	}
+	log.Printf("rb-bridge: bridge state compacted from %d to %d bytes in %s", before, fileBytes(state), time.Since(start).Round(time.Millisecond))
+}
+
+// compactStateBytes is the size from which compactState rewrites a state: a state of this build is
+// about 300 bytes a track.
+var compactStateBytes int64 = 16 << 20
+
+func fileBytes(p string) int64 {
+	st, err := os.Stat(p)
+	if err != nil {
+		return -1
+	}
+	return st.Size()
+}
+
+// readReread is the tracks an update left to the mounts of stamp's export to read again; nil when
+// it left none.
+func readReread(dir, stamp string) map[string]bool {
+	b, err := os.ReadFile(filepath.Join(dir, rereadName))
+	if err != nil {
+		return nil
+	}
+	var m rereadMark
+	if json.Unmarshal(b, &m) != nil || m.Stamp != stamp {
+		return nil
+	}
+	paths := make(map[string]bool, len(m.Paths))
+	for _, p := range m.Paths {
+		paths[p] = true
+	}
+	return paths
 }
 
 // publishUpdate replaces the live library with the complete update in the stage, at a mount

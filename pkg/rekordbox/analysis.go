@@ -275,6 +275,88 @@ func (a *Analysis) Merge(b *Analysis) {
 	}
 }
 
+// ReadAnalysisSkipping is ReadAnalysis that leaves out the waveform sections skip names without
+// reading their bodies (#253): a track's .EXT is mostly PWV3, PWV4 and PWV5, which an import does
+// not use once the .2EX has a PWV7. Their headers are read and checked as ParseAnalysis checks
+// them, so a file is refused exactly when ReadAnalysis refuses it; anything unusual is read whole.
+func ReadAnalysisSkipping(path string, skip func(tag string) bool) (*Analysis, error) {
+	f, e := os.Open(path)
+	if e != nil {
+		return nil, e
+	}
+	defer f.Close()
+	st, e := f.Stat()
+	if e != nil {
+		return nil, e
+	}
+	size := st.Size()
+	if size > MaxAnalysisBytes || size < 12 {
+		return ReadAnalysis(path)
+	}
+	head := make([]byte, 12)
+	if _, e = f.ReadAt(head, 0); e != nil || string(head[:4]) != "PMAI" {
+		return ReadAnalysis(path)
+	}
+	h, n := int64(be.Uint32(head[4:])), int64(be.Uint32(head[8:]))
+	if h < 12 || h > n || n > size {
+		return ReadAnalysis(path)
+	}
+	b := make([]byte, h, h+64<<10)
+	if _, e = f.ReadAt(b, 0); e != nil {
+		return nil, e
+	}
+	hdr := make([]byte, 24)
+	for off := h; off < n; {
+		if n-off < 12 {
+			return ReadAnalysis(path)
+		}
+		k := min(int64(len(hdr)), n-off)
+		if _, e = f.ReadAt(hdr[:k], off); e != nil {
+			return nil, e
+		}
+		tag := string(hdr[:4])
+		sh, sn := int64(be.Uint32(hdr[4:])), int64(be.Uint32(hdr[8:]))
+		if sh < 12 || sn < sh || sn > n-off {
+			return ReadAnalysis(path)
+		}
+		if skip(tag) && waveHeaderValid(tag, hdr[:k], sh, sn) {
+			off += sn
+			continue
+		}
+		start := int64(len(b))
+		b = append(b, make([]byte, sn)...)
+		if _, e = f.ReadAt(b[start:], off); e != nil {
+			return nil, e
+		}
+		off += sn
+	}
+	be.PutUint32(b[8:], uint32(len(b)))
+	return ParseAnalysis(b)
+}
+
+// waveHeaderValid reports that a waveform section ParseAnalysis would accept starts with hdr.
+func waveHeaderValid(tag string, hdr []byte, h, n int64) bool {
+	switch tag {
+	case "PWV3", "PWV4", "PWV5", "PWAV", "PWV2":
+	default:
+		return false
+	}
+	if n < 20 || int64(len(hdr)) < 20 {
+		return false
+	}
+	width, count := uint64(1), uint64(be.Uint32(hdr[12:]))
+	if tag != "PWAV" && tag != "PWV2" {
+		if n < 24 || len(hdr) < 24 {
+			return false
+		}
+		width, count = uint64(be.Uint32(hdr[12:])), uint64(be.Uint32(hdr[16:]))
+	}
+	if tag == "PWV4" {
+		width = 6
+	}
+	return width != 0 && width*count <= uint64(n-h)
+}
+
 func ReadAnalysis(path string) (*Analysis, error) {
 	f, e := os.Open(path)
 	if e != nil {

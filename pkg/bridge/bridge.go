@@ -244,6 +244,9 @@ type preread struct {
 	l          *rekordbox.Library
 	stagedOnly bool
 	resolver   *compat.Resolver
+	// reconciled: its tracks the library holds have their rows' paths, and only the others are
+	// looked up, by the import itself (#253). Reconcile looked up every folder of the export.
+	reconciled bool
 }
 
 // convert is Convert with an optional preread library. budget > 0 sets the
@@ -285,7 +288,9 @@ func convert(ctx context.Context, mount string, opts *enginedb.Options, pre *pre
 		}
 	}
 	opts.StagedOnly = stagedOnly
-	if e := ReconcileContext(ctx, r, l); e != nil {
+	if pre != nil && pre.reconciled {
+		mergeByPath(l)
+	} else if e := ReconcileContext(ctx, r, l); e != nil {
 		return enginedb.Result{}, e
 	}
 	if budget > 0 && opts.Deadline.IsZero() {
@@ -621,6 +626,11 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 	}
 	oldStamp := readMark(dir, stampName)
 	opts.LegacyOffsets, opts.LegacyAACOffsets = legacyGridOptions(oldStamp)
+	// The few tracks a background update left to the mounts to read, in place (#253).
+	var reread map[string]bool
+	if !full && !opts.SmartMatch && canWrite {
+		reread = readReread(dir, stamp)
+	}
 	bypass := !full && !opts.SmartMatch && importedStamp(dir) == stamp
 	// An earlier export-only import still has tracks without their files read.
 	resume := bypass && hasFastTracks(dir)
@@ -634,7 +644,7 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 	// An update a large export needs cannot finish while the mount waits: resolving and reading
 	// the files of a cold stick takes minutes (#301). It goes on in the background on a copy.
 	// Its playlists and new tracks come in now, from the export alone (#253).
-	if !full && !bypass && !opts.SmartMatch && canWrite && opts.Deadline.IsZero() && exportBytes(r, mount) > attemptExportBytes {
+	if !full && !bypass && !opts.SmartMatch && canWrite && opts.Deadline.IsZero() && reread == nil && exportBytes(r, mount) > attemptExportBytes {
 		res, err := quickUpdate(ctx, mount, dir, r, mountStart.Add(maxMountHookBudget))
 		if err != nil {
 			log.Printf("rb-bridge: the re-export's playlists wait for the background update: %v", err)
@@ -677,7 +687,16 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 		l, stagedOnly, err := readLibrary(inPlace, mount)
 		readErr = err
 		if err == nil {
-			pre = &preread{l, stagedOnly, r}
+			pre = &preread{l: l, stagedOnly: stagedOnly, resolver: r}
+		}
+		// What a background update left to this mount is a few tracks of a large export: the
+		// others keep their rows' paths, unread (#253).
+		if err == nil && reread != nil {
+			var known map[string]string
+			if known, err = ownedSpellings(dir); err == nil {
+				_, err = keepSpellings(l, known)
+			}
+			readErr, pre.reconciled = err, err == nil
 		}
 	}
 	// Start the shared absolute deadline once the library is read. Import and MP3
@@ -721,7 +740,11 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 	}
 	// The same export as a mount that left tracks without their files: read
 	// only those, the others are known to be imported with theirs.
-	opts.Resume = resume || (!full && !opts.SmartMatch && readMark(dir, pendingName) == stamp)
+	opts.Resume = resume || reread != nil || (!full && !opts.SmartMatch && readMark(dir, pendingName) == stamp)
+	opts.Reread = reread
+	if reread != nil {
+		compactState(inPlace, dir) // the pass below gives its rows their references
+	}
 	result, err = convert(inPlace, mount, opts, pre, budget, mountStart)
 	if late(err) {
 		return background(err)
@@ -737,9 +760,16 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 	if err == nil && result.Deferred > 0 {
 		writeMark(dir, pendingName, stamp)
 		log.Printf("rb-bridge: %d tracks imported without cues; the next mount reads them", result.Deferred)
+		if reread != nil {
+			// Left by a background update: it goes on, and its remount reads the rest.
+			if err = startUpdate(stage, stamp); err == nil {
+				result.Background = true
+			}
+		}
 	} else if err == nil && !result.Bypassed {
 		writeStamp(dir, stamp)
 		os.Remove(filepath.Join(dir, pendingName))
+		os.Remove(filepath.Join(dir, rereadName))
 	}
 	return result, err
 }

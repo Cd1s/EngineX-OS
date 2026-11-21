@@ -32,6 +32,15 @@ func SetUpdateExportForTest() func() {
 	return func() { attemptExportBytes = old }
 }
 
+// SetInPlaceUpdateForTest counts each track an update reads as costing perTrack bytes: an update
+// of few tracks is left to the mounts once copying the library costs more (#253). A bridge state
+// from 1 MiB counts as large enough to compact.
+func SetInPlaceUpdateForTest(perTrack int64) func() {
+	old, oldCompact := perTrackReadBytes, compactStateBytes
+	perTrackReadBytes, compactStateBytes = perTrack, 1<<20
+	return func() { perTrackReadBytes, compactStateBytes = old, oldCompact }
+}
+
 // SlowExportReadForTest makes each export read take d and shortens the mount
 // read budget to budget, until the returned function restores both.
 func SlowExportReadForTest(d, budget time.Duration) func() {
