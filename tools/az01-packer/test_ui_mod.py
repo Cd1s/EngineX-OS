@@ -11388,6 +11388,7 @@ const root = {{
     scStemMark: (ids, mark) => scStemMark(ids, mark),
     scStemFailSweep: () => scStemFailSweep(),
     scStemFailAt,
+    scStemPending: () => ({{}}), scStemAsking: {{}}, scStemMax: 8, // what a tap reads before it asks (#316 review): nothing is on its way here
 }};
 {mark_fn}
 {sweep_match.group(0)}
@@ -12797,7 +12798,7 @@ const tree = {};
 const deck = d => tree[d] || (tree[d] = {playing: false, loaded: false, uri: ''});
 const loads = [], unloads = [], handed = [], xhrs = [];
 const Planck = {
-    librarianController: {collectionController: {getTrackUrisFromUniversalIds: ids => 'uri=streaming://TIDAL/Track/' + String(ids[0]).replace(/^u/, '')}},
+    librarianController: {collectionController: {getTrackUrisFromUniversalIds: ids => 'uri=streaming://TIDAL/Track/' + String(ids[0]).replace(/^[a-z]/, '')}},
     getProperty(path) {
         let m = /^\/Engine\/Deck(\d)\/PlayState$/.exec(path);
         if (m) return {translator: {get state() { return deck(+m[1]).playing; }}};
@@ -12811,9 +12812,13 @@ const Planck = {
 class XMLHttpRequest { open(m, u) { this.url = u; } send() { xhrs.push(this); } }
 const answer = (i, status, body) => { const x = xhrs[i]; x.readyState = 4; x.status = status; x.responseText = JSON.stringify(body); x.onreadystatechange(); };
 const rowsNow = {};
+let clock = 1000;
+Date.now = () => clock;
 let scStemTurns = [];
+const scStemAsking = {};
+const scStemAskMs = 120000;
 const root = {
-    scDeckList: () => DECKS, scDeckLocked: d => LOCKED.indexOf(d) >= 0, scStemFull: false,
+    scDeckList: () => DECKS, scDeckLocked: d => LOCKED.indexOf(d) >= 0, scStemFull: false, scStemWait: false, scStemMax: 8, scStemAsking: scStemAsking,
     scStemMark(ids, mark) { for (const id of ids) { if (!id) continue; if (mark) rowsNow[id] = mark; else delete rowsNow[id]; } },
     scStemHand(id, rows) { handed.push(String(id)); },
     scStemTurns: [],
@@ -12834,6 +12839,8 @@ __MARK__
 __STREAM__
 __TURN__
 __TURNNEXT__
+__PENDING__
+root.scStemPending = typeof scStemPending === 'function' ? scStemPending : () => ({});
 root.scStemTurn = typeof scStemTurn === 'function' ? scStemTurn : undefined;
 root.scStemTurnNext = typeof scStemTurnNext === 'function' ? scStemTurnNext : undefined;
 const stream = uid => scStemStream(uid);
@@ -12842,7 +12849,7 @@ const tap = uid => stream(uid);
            .replace("__UNLOADCHANGED__", json.dumps(changed(unloader))).replace("__IMPORTCHANGED__", json.dumps(changed(importer))) \
            .replace("__RENDER__", render).replace("__TRIGGER__", trigger).replace("__UNLOAD__", unload) \
            .replace("__MARK__", fn("scStemMark", "ids, mark").replace("scStemRows", "rowsNow").replace("scStemFailAt", "failAt")) \
-           .replace("__STREAM__", fn("scStemStream", "uid")).replace("__TURN__", fn("scStemTurn", "job")).replace("__TURNNEXT__", fn("scStemTurnNext", "")) + scenario
+           .replace("__STREAM__", fn("scStemStream", "uid")).replace("__TURN__", fn("scStemTurn", "gid, run") or fn("scStemTurn", "job")).replace("__TURNNEXT__", fn("scStemTurnNext", "")).replace("__PENDING__", fn("scStemPending", "")) + scenario
 
     def run_node(self, scenario, **kw):
         res = subprocess.run(["node", "-e", self.script(scenario, **kw)], capture_output=True, text=True)
@@ -12980,6 +12987,150 @@ assert.strictEqual(scStemUnload.running, false);
 assert.strictEqual(loads.length, 1);
 assert.strictEqual(rowsNow['22'], undefined);
 """, decks="[1]")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_the_same_row_tapped_twice_is_imported_once(self):
+        """#316 review: every tap on a row used to ask again and queue one more import of the same track. The key is the service's
+        track id (the row's own id is per list): a second row of the same track, in another list, is the same entry."""
+        self.run_node("""
+assert.strictEqual(tap('u11'), true);
+assert.strictEqual(tap('u11'), true);           // the same row again
+assert.strictEqual(tap('r11'), true);           // the same track, another list's row (another id for Engine)
+assert.strictEqual(xhrs.length, 1, 'the later taps ask for nothing');
+assert.strictEqual(rowsNow['11'], 'wait', 'the row keeps showing where it is');
+answer(0, 200, {path: '/data/a.mp3', row: 100});
+flush();
+assert.strictEqual(scStemTurns.length, 0);
+assert.strictEqual(loads.length, 1);
+importRender('5'); unloadTick(); flush();
+assert.deepStrictEqual(handed, ['5'], 'one render for one track');
+assert.deepStrictEqual(unloads, [1]);
+""", decks="[1]")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_a_track_that_is_queued_or_importing_is_not_taken_again(self):
+        """Queued, importing, or on a deck waiting for its eject: a tap adds nothing. Once it is over, the track can be tapped again."""
+        self.run_node("""
+assert.strictEqual(tap('u11'), true);
+assert.strictEqual(tap('u22'), true);
+answer(0, 200, {path: '/data/a.mp3', row: 100});
+answer(1, 200, {path: '/data/b.mp3', row: 200});
+flush();
+assert.strictEqual(scStemTurns.length, 1, 'u22 waits for its turn');
+const asked = xhrs.length;
+assert.strictEqual(tap('u22'), true, 'queued');
+assert.strictEqual(tap('u11'), true, 'importing');
+assert.strictEqual(xhrs.length, asked);
+assert.strictEqual(scStemTurns.length, 1, 'the queue did not grow');
+importRender('5'); flush();                      // imported, the temporary file is still on its deck
+assert.strictEqual(tap('u11'), true, 'on its deck, waiting for the eject');
+assert.strictEqual(xhrs.length, asked);
+unloadTick(); flush();                           // ejected: the second track goes
+importRender('6'); unloadTick(); flush();
+assert.deepStrictEqual(handed, ['5', '6']);
+assert.deepStrictEqual(scStemTurns, []);
+// all over: the same track can be asked for again
+assert.strictEqual(tap('u11'), true);
+assert.strictEqual(xhrs.length, asked + 1);
+""", decks="[1]")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_a_burst_beyond_the_bound_is_turned_away_and_the_rest_runs_in_order(self):
+        """Eight distinct tracks at most are on their way (asked for, queued, importing). The ninth tap starts nothing, gives the hint
+        ("Please wait...", not the deck hint) and marks no row; the earlier ones run in order and the queue never grows past the bound."""
+        self.run_node("""
+const longest = () => Math.max(...[scStemTurns.length]);
+let most = 0;
+const watch = () => { most = Math.max(most, scStemTurns.length); };
+for (let i = 1; i <= 8; i++) assert.strictEqual(tap('u' + i), true, 'tap ' + i);
+assert.strictEqual(xhrs.length, 8);
+for (let i = 9; i <= 12; i++) {
+    assert.strictEqual(tap('u' + i), 'busy', 'tap ' + i + ' is turned away');
+    assert.strictEqual(root.scStemWait, true, 'the swipe says to wait');
+    assert.strictEqual(root.scStemFull, false, 'not the deck hint');
+    assert.strictEqual(rowsNow[String(i)], undefined, 'no row is marked');
+}
+assert.strictEqual(xhrs.length, 8, 'nothing was asked for');
+assert.strictEqual(tap('u3'), true, 'a track that is already on its way is not turned away');
+assert.strictEqual(root.scStemWait, false);
+for (let i = 0; i < 8; i++) { answer(i, 200, {path: '/data/t' + i + '.mp3', row: 100 + i}); watch(); }
+flush(); watch();
+assert.ok(most <= 8, 'the queue held ' + most);
+assert.strictEqual(tap('u13'), 'busy', 'still eight on their way');
+for (let i = 0; i < 8; i++) {
+    assert.strictEqual(loads.length, i + 1, 'the ' + (i + 1) + '. file goes after the one before');
+    importRender(String(50 + i)); flush(); watch();
+    unloadTick(); flush(); watch();
+}
+assert.deepStrictEqual(handed, ['50', '51', '52', '53', '54', '55', '56', '57'], 'in the order of the taps');
+assert.ok(most <= 8);
+// the queue has drained: nothing runs, nothing waits, and a tap goes ahead again
+assert.deepStrictEqual(scStemTurns, []);
+assert.deepStrictEqual([scStemImport.running, scStemUnload.running, later.length], [false, false, 0]);
+assert.deepStrictEqual(root.scStemPending(), {});
+assert.deepStrictEqual(Object.keys(scStemAsking), []);
+assert.strictEqual(tap('u13'), true);
+assert.strictEqual(root.scStemWait, false);
+""", decks="[1]")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_a_download_that_never_answers_stops_holding_its_track(self):
+        """No answer for two minutes: the track can be asked for again (the row would have waited for ever otherwise)."""
+        self.run_node("""
+assert.strictEqual(tap('u11'), true);
+clock += 119999;
+assert.strictEqual(tap('u11'), true);
+assert.strictEqual(xhrs.length, 1, 'still held');
+clock += 2;
+assert.strictEqual(tap('u11'), true);
+assert.strictEqual(xhrs.length, 2, 'asked again');
+""", decks="[1]")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_a_failed_download_does_not_hold_its_track(self):
+        """A failed answer frees the track at once: the row says so for a while and a new tap asks again."""
+        self.run_node("""
+assert.strictEqual(tap('u11'), true);
+answer(0, 502, {});
+assert.deepStrictEqual(root.scStemPending(), {});
+assert.strictEqual(tap('u11'), true);
+assert.strictEqual(xhrs.length, 2);
+""", decks="[1]")
+
+    def test_the_hint_for_too_many_imports_is_an_existing_string(self):
+        """No new string: 'Please wait...' (the table has it, four languages) shows on the swipe when the tap was turned away for the queue."""
+        hint = "Please wait..."
+        rows = {l.split("\t")[0]: l.split("\t") for l in
+                (REPO / "tools/ui-mod/i18n.tsv").read_text(encoding="utf-8").splitlines() if l and not l.startswith("#")}
+        self.assertEqual(len(rows[hint]), 4)
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            edits = bp.edits(False)
+        finally:
+            bp.ROOT = old_root
+        for side in ("Left", "Right"):
+            with self.subTest(side=side):
+                path = "Skins/Embedded/Views/BrowseView/Components/Components/Swipe" + side + "Item.qml"
+                msgs = next(re.search(r"readonly property list<string> actionCommitMessages: (.*)", new).group(1)
+                            for _, new in edits[path] if "actionCommitMessages:" in new)
+                script = """
+const assert = require('assert');
+const msgs = %s;
+function say(wait, full, decks, busy) {
+    const scStemBusy = busy, scLabel = s => s, scStem = true, leftActions = [], rightActions = [];
+    const root = {scT: s => 'T:' + s, scDeckList: () => decks, scStemFull: full, scStemWait: wait};
+    return eval(msgs)[0];
+}
+assert.strictEqual(say(true, false, [1, 2], true), 'T:Please wait...');
+assert.strictEqual(say(true, false, [1, 2, 3, 4], true), 'T:Please wait...');
+assert.strictEqual(say(false, true, [1, 2], true), 'T:Every deck has a track loaded. Eject one, then tap Stems again');
+assert.strictEqual(say(false, false, [1, 2], true), 'T:Both decks are playing. Free one deck, then tap Stems again');
+assert.strictEqual(say(false, false, [1, 2, 3, 4], true), 'T:All decks are playing. Free one deck, then tap Stems again');
+assert.strictEqual(say(true, false, [1, 2], false), 'T:Stems', 'no hint without a busy answer');
+""" % json.dumps(msgs)
+                res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+                self.assertEqual(res.returncode, 0, res.stderr[-1500:])
 
     def test_the_hint_for_a_full_set_of_decks_is_in_every_language_and_on_the_swipe(self):
         """The swipe's message names the situation: 'every deck has a track loaded' only when scStemFull, the old words otherwise."""
