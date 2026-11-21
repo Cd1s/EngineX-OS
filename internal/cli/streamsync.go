@@ -84,7 +84,7 @@ func StreamSync(args []string) error {
 	}
 	// CPU-heavy Go workers, runtime/GC helpers and HTTP threads share the same
 	// background affinity. Never set affinity for Engine/ALSA/Qt processes here.
-	webui.UnblockRadios("/sys/class/rfkill")
+	webui.UnblockRadios("/sys/class/rfkill", "/var/lib/connman/settings")
 	runtime.GOMAXPROCS(1)
 	guard := resourceguard.New(cfg)
 	reports, err := guard.ApplyToProcess(0)
