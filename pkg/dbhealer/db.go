@@ -3,16 +3,20 @@
 package dbhealer
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/google/uuid"
+	"golang.org/x/text/unicode/norm"
 	_ "modernc.org/sqlite"
 )
 
@@ -29,6 +33,7 @@ type Report struct {
 	Artwork           int       `json:"artwork_resized"`
 	OrphanArtwork     int       `json:"orphan_artwork_references"`
 	ReanalysisPending int       `json:"reanalysis_pending"`
+	PathsNormalized   int       `json:"paths_normalized"`
 	HistoryPruned     bool      `json:"history_pruned"`
 	ReserveFixed      []string  `json:"reserve_fixed,omitempty"`
 	Warnings          []string  `json:"warnings,omitempty"`
@@ -110,6 +115,10 @@ func Heal(db *sql.DB) (Report, error) { return heal(db, false) }
 // heal with dataOnly leaves Engine's views, triggers and indexes byte-identical:
 // Engine compares its schema on attach, then drops and recreates anything altered.
 func heal(db *sql.DB, dataOnly bool) (Report, error) {
+	return healWithMount(context.Background(), db, dataOnly, "")
+}
+
+func healWithMount(ctx context.Context, db *sql.DB, dataOnly bool, mount string) (Report, error) {
 	r := Report{CheckedAt: time.Now().UTC()}
 	var check string
 	if err := db.QueryRow("PRAGMA quick_check").Scan(&check); err != nil {
@@ -176,6 +185,11 @@ func heal(db *sql.DB, dataOnly bool) (Report, error) {
 		if err = healArtwork(tx, &r); err != nil {
 			return err
 		}
+		if mount != "" {
+			if err = healTrackPaths(ctx, tx, mount, &r); err != nil {
+				return err
+			}
+		}
 		return tx.QueryRow("SELECT count(*) FROM GuardianReanalysis").Scan(&r.ReanalysisPending)
 	})
 	r.Healthy = err == nil
@@ -206,10 +220,21 @@ func HealMount(mount string, maxSessions int) (Report, error) {
 // HealMountDataOnly is HealMount without schema edits, for libraries Engine will
 // attach next.
 func HealMountDataOnly(mount string, maxSessions int) (Report, error) {
-	return healMount(mount, maxSessions, true)
+	return HealMountDataOnlyContext(context.Background(), mount, maxSessions)
 }
 
 func healMount(mount string, maxSessions int, dataOnly bool) (Report, error) {
+	return healMountContext(context.Background(), mount, maxSessions, dataOnly)
+}
+
+// HealMountDataOnlyContext is the mount hook heal with a caller-owned budget.
+// When the budget expires, the current transaction rolls back and the caller
+// may continue with the next mount.
+func HealMountDataOnlyContext(ctx context.Context, mount string, maxSessions int) (Report, error) {
+	return healMountContext(ctx, mount, maxSessions, true)
+}
+
+func healMountContext(ctx context.Context, mount string, maxSessions int, dataOnly bool) (Report, error) {
 	r := Report{Mount: mount, CheckedAt: time.Now().UTC()}
 	if maxSessions < 0 {
 		return r, fmt.Errorf("maxSessions must not be negative")
@@ -239,12 +264,15 @@ func healMount(mount string, maxSessions int, dataOnly bool) (Report, error) {
 		return r, err
 	}
 	fixed := r.ReserveFixed
-	r, err = heal(db, dataOnly)
+	r, err = healWithMount(ctx, db, dataOnly, mount)
 	r.ReserveFixed = fixed
 	closeErr := db.Close()
 	r.Mount = mount
 	if err != nil {
 		return r, err
+	}
+	if dataOnly {
+		log.Printf("dbhealer: mount %s normalized %d track paths", mount, r.PathsNormalized)
 	}
 	if closeErr != nil {
 		return r, closeErr
@@ -294,6 +322,7 @@ func healMount(mount string, maxSessions int, dataOnly bool) (Report, error) {
 		}
 		if dataOnly {
 			r.ReanalysisPending += hr.ReanalysisPending
+			r.PathsNormalized += hr.PathsNormalized
 			return r, nil
 		}
 		hdb, e = Open(history, false)
@@ -314,6 +343,79 @@ func healMount(mount string, maxSessions int, dataOnly bool) (Report, error) {
 		return r, e
 	}
 	return r, nil
+}
+
+func healTrackPaths(ctx context.Context, tx *sql.Tx, mount string, r *Report) error {
+	rows, err := tx.QueryContext(ctx, `SELECT id, COALESCE(path,''), COALESCE(filename,''), COALESCE(streamingSource,'') FROM Track`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	dirs := make(map[string]map[string]bool)
+	listFiles := func(dir string) map[string]bool {
+		if names, ok := dirs[dir]; ok {
+			return names
+		}
+		names := map[string]bool{}
+		entries, err := os.ReadDir(dir)
+		if err == nil {
+			for _, entry := range entries {
+				if !entry.IsDir() {
+					names[entry.Name()] = true
+				}
+			}
+		}
+		dirs[dir] = names
+		return names
+	}
+	for rows.Next() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		var id int64
+		var path, filename, streaming string
+		if err := rows.Scan(&id, &path, &filename, &streaming); err != nil {
+			return err
+		}
+		if streaming != "" || path == "" {
+			continue
+		}
+		nfcPath := norm.NFC.String(path)
+		if path == nfcPath {
+			continue
+		}
+		oldFile, ok := trackPath(mount, path)
+		if !ok {
+			continue
+		}
+		newFile, ok := trackPath(mount, nfcPath)
+		if !ok {
+			continue
+		}
+		if listFiles(filepath.Dir(oldFile))[filepath.Base(oldFile)] {
+			continue
+		}
+		if !listFiles(filepath.Dir(newFile))[filepath.Base(newFile)] {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE Track SET path=?, filename=? WHERE id=? AND path=?`, nfcPath, filepath.Base(nfcPath), id, path); err != nil {
+			return err
+		}
+		r.PathsNormalized++
+	}
+	return rows.Err()
+}
+
+func trackPath(mount, path string) (string, bool) {
+	if filepath.IsAbs(path) || path == "" {
+		return "", false
+	}
+	full := filepath.Join(mount, "Engine Library", filepath.FromSlash(path))
+	rel, err := filepath.Rel(mount, full)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return full, true
 }
 
 // InspectMount returns a JSON-ready integrity report without altering databases,

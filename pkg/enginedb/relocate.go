@@ -19,6 +19,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 var relocateExts = map[string]bool{".mp3": true, ".flac": true, ".wav": true, ".aiff": true, ".aif": true, ".m4a": true, ".aac": true, ".ogg": true, ".opus": true}
@@ -247,7 +249,7 @@ func scanDrive(ctx context.Context, root string) ([]driveFile, error) {
 // "artist song 1" meet.
 func clean(s string) string {
 	var b strings.Builder
-	for _, r := range strings.ToLower(s) {
+	for _, r := range strings.ToLower(norm.NFC.String(s)) {
 		if unicode.IsLetter(r) || unicode.IsDigit(r) {
 			b.WriteRune(r)
 		}

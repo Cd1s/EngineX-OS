@@ -164,11 +164,17 @@ func Guardian(args []string, out, errOut io.Writer) int {
 			} else if n > 0 {
 				fmt.Fprintf(errOut, "engine-guardian: applied %d queued library edits\n", n)
 			}
+			mountCtx := context.Background()
+			cancelMount := func() {}
+			if *deadline > 0 {
+				mountCtx, cancelMount = context.WithTimeout(context.Background(), *deadline)
+			}
 			if *dataOnly {
-				r, err = dbhealer.HealMountDataOnly(m, *sessions)
+				r, err = dbhealer.HealMountDataOnlyContext(mountCtx, m, *sessions)
 			} else {
 				r, err = dbhealer.HealMount(m, *sessions)
 			}
+			cancelMount()
 			if err == nil {
 				runMP3Fix(*dataOnly)
 			}
