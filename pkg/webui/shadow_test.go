@@ -752,6 +752,145 @@ func TestTakePeerClearsEjectedDecksAndResetsSeq(t *testing.T) {
 	}
 }
 
+func TestShadowGhostPeerDroppedWithoutGoodbye(t *testing.T) {
+	oldRole := fourDeckRolePath
+	fourDeckRolePath = filepath.Join(t.TempDir(), "role")
+	defer func() { fourDeckRolePath = oldRole }()
+	if err := os.WriteFile(fourDeckRolePath, []byte("12"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	defer s.Close()
+	s.uiMu.Lock()
+	v := s.loadUI()
+	v.FourDeckWaveform = true
+	v.ShadowMode = "engine"
+	if err := s.saveUI(v); err != nil {
+		s.uiMu.Unlock()
+		t.Fatal(err)
+	}
+	s.uiMu.Unlock()
+
+	sh := s.shadow
+	now := time.Now()
+	sh.mu.Lock()
+	sh.peers["192.0.2.7"] = now
+	sh.takePeer("192.0.2.7", []deckState{{Deck: 3, Link: "peer", Key: "a", Playing: true, Seq: 1}}, now)
+	ver := sh.ver
+	sh.mu.Unlock()
+
+	get := func(q string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		s.shadowGet(w, httptest.NewRequest("GET", "/v1/enginex/shadow"+q, nil))
+		return w
+	}
+
+	w := get(fmt.Sprintf("?role=12&ver=%d&idle=1", ver))
+	if w.Header().Get("X-Shadow-Unchanged") != "" {
+		t.Fatalf("initial active peer returned unchanged: %s", w.Body.String())
+	}
+
+	// Simulate power loss / unplugged cable: 7 s with no updates and no goodbye.
+	staleAt := now.Add(-7 * time.Second)
+	sh.mu.Lock()
+	sh.peers["192.0.2.7"] = staleAt
+	sh.peerTaken["peer"] = staleAt
+	p := sh.peerDecks[3]
+	p.at = staleAt
+	sh.peerDecks[3] = p
+	sh.mu.Unlock()
+
+	w = get(fmt.Sprintf("?role=12&ver=%d&idle=1", ver))
+	if w.Header().Get("X-Shadow-Unchanged") == "1" {
+		t.Fatalf("ghost peer returned X-Shadow-Unchanged instead of unloading: %s", w.Body.String())
+	}
+	var body struct {
+		Decks []deckState `json:"decks"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Decks) != 0 {
+		t.Fatalf("expected empty decks after peer timeout, got %+v", body.Decks)
+	}
+	sh.mu.Lock()
+	_, hasDeck := sh.peerDecks[3]
+	_, hasPeer := sh.peers["192.0.2.7"]
+	newVer := sh.ver
+	sh.mu.Unlock()
+	if hasDeck || hasPeer || newVer == ver {
+		t.Fatalf("ghost peer not pruned: hasDeck=%v hasPeer=%v ver=%d->%d", hasDeck, hasPeer, ver, newVer)
+	}
+}
+
+func TestShadowLivingPeerNotDroppedWhileIdlePausedOrPlaying(t *testing.T) {
+	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	defer s.Close()
+
+	// Peer state cycled through idle (no decks), paused, and playing.
+	var peerDecks []deckState
+	peerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/peer/decks" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"decks": peerDecks})
+	}))
+	defer peerSrv.Close()
+
+	host, portStr, err := net.SplitHostPort(strings.TrimPrefix(peerSrv.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sh := s.shadow
+	sh.mu.Lock()
+	sh.peerPort = port
+	sh.mu.Unlock()
+
+	// Initial discovery via UDP beacon.
+	sh.receive([]byte("EngineX-shadow 1"), host, time.Now())
+
+	// 1. Idle (no decks loaded): HTTP poll keeps peer alive.
+	peerDecks = nil
+	s.shadowPollPeers()
+	sh.mu.Lock()
+	_, idlePeerAlive := sh.peers[host]
+	sh.mu.Unlock()
+	if !idlePeerAlive {
+		t.Fatalf("idle living peer was dropped")
+	}
+
+	// 2. Paused (track loaded, Playing=false): even with a 3s gap between UDP beacons, HTTP poll keeps deck alive.
+	peerDecks = []deckState{{Deck: 3, Link: "peer", Key: "paused-track", Playing: false, Seq: 10}}
+	s.shadowPollPeers()
+	sh.mu.Lock()
+	sh.peers[host] = time.Now().Add(-3 * time.Second) // simulate missed UDP beacon
+	sh.mu.Unlock()
+	s.shadowPollPeers()
+	sh.mu.Lock()
+	pausedDeck, hasPaused := sh.peerDecks[3]
+	_, pausedPeerAlive := sh.peers[host]
+	sh.mu.Unlock()
+	if !hasPaused || pausedDeck.Key != "paused-track" || !pausedPeerAlive {
+		t.Fatalf("paused living peer was dropped: hasPaused=%v peerAlive=%v deck=%+v", hasPaused, pausedPeerAlive, pausedDeck)
+	}
+
+	// 3. Playing (track playing): HTTP poll keeps deck alive.
+	peerDecks = []deckState{{Deck: 3, Link: "peer", Key: "playing-track", Playing: true, Seq: 11}}
+	s.shadowPollPeers()
+	sh.mu.Lock()
+	playingDeck, hasPlaying := sh.peerDecks[3]
+	_, playingPeerAlive := sh.peers[host]
+	sh.mu.Unlock()
+	if !hasPlaying || playingDeck.Key != "playing-track" || !playingPeerAlive {
+		t.Fatalf("playing living peer was dropped: hasPlaying=%v peerAlive=%v deck=%+v", hasPlaying, playingPeerAlive, playingDeck)
+	}
+}
+
 func TestShadowComposeMarksLoadingAndUnloads(t *testing.T) {
 	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
 	defer s.Close()
