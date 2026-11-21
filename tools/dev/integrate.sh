@@ -155,6 +155,7 @@ targeted_tests() {
     local go_pkgs=() py_tests=() file dir test
     for file in "$@"; do
         case $file in
+            go.mod|go.sum) go_pkgs+=(./...) ;;
             *.go) dir=${file%/*}; [[ $dir == "$file" ]] && dir=.; go_pkgs+=("./$dir") ;;
             tools/ui-mod/build_packs.py) py_tests+=(tools/az01-packer/test_ui_mod.py tools/az01-packer/test_ui_perf.py) ;;
             tools/az01-packer/*.py) [[ $file == tools/az01-packer/test_* ]] && py_tests+=("$file") || py_tests+=(tools/az01-packer/test_az01_packer.py) ;;
