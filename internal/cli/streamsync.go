@@ -94,6 +94,8 @@ func StreamSync(args []string) error {
 	for _, r := range reports {
 		log.Printf("stream-sync guard: %s", r.String())
 	}
+	// After the guard, so its busctl calls stay on the background CPUs like the rest.
+	go webui.BluetoothOffAsStored(context.Background())
 	if *pid > 0 {
 		if reports, err = guard.ApplyToProcess(*pid); err != nil {
 			return err
