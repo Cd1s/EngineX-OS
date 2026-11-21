@@ -223,7 +223,7 @@ static void *test(void *unused) {
     CHECK(wait_knob((unsigned)ch1, 0.95f, 15000) && wait_knob((unsigned)ch2, 0.95f, 15000),
           "PropertyTarget updated ch1 & ch2 +0x40 to 0.95");
     struct pair p95 = render((unsigned)ch1, (unsigned)ch2, 80);
-    CHECK(!p95.same && p95.finite,
+    CHECK(!p95.same && p95.finite && fabs(p95.ratio_hook - p95.ratio_stock) > 0.05,
           "PropertyTarget 0.95 with spiral plays Color FX on ch1 (same=%d hook=%.3f stock=%.3f)",
           p95.same, p95.ratio_hook, p95.ratio_stock);
 
