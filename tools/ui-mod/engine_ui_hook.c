@@ -1794,14 +1794,15 @@ static int install_px_scope(uintptr_t base, size_t page, const char *version) {
     return 1;
 }
 static int install_cfx_scope(uintptr_t base, size_t page, const char *version) {
-    uintptr_t value, process;
-    if (!strcmp(version, "5.3.0")) value = base + 0xd8ba3c, process = base + 0xec127c;
-    else if (!strcmp(version, "5.3.0-sclive4")) value = base + 0xd9619c, process = base + 0xecdbd4;
+    uintptr_t value, value_slot, process;
+    if (!strcmp(version, "5.3.0")) value = base + 0xd8ba3c, value_slot = base + 0x2b1e488, process = base + 0xec127c;
+    else if (!strcmp(version, "5.3.0-sclive4")) value = base + 0xd9619c, value_slot = base + 0x2b9e0b0, process = base + 0xecdbd4;
     else return 0;
     if (player_board()) return 0; /* players have no Sweep FX */
     static const uint32_t value_prefix[] = {0xe52d400c, 0xe98d4800};   // str r4,[sp,#-12]!; stmib sp,{fp,lr}
     static const uint32_t process_prefix[] = {0xe16d42f4, 0xe1cd60f8}; // strd r4,[sp,#-36]!; strd r6,[sp,#8]
-    if (memcmp((void *)value, value_prefix, 8) || memcmp((void *)process, process_prefix, 8)) return 0;
+    if (memcmp((void *)value, value_prefix, 8) || *(uintptr_t *)value_slot != value ||
+        memcmp((void *)process, process_prefix, 8)) return 0;
     /* Before the UI can ask: on PRIME 4, pkg/webui drops a stored style when PX is ready alone. */
     if (!ready_write(CFX_READY, "armhf-cfx-v1\n")) return 0;
     uint32_t value_code[] = {value_prefix[0], value_prefix[1], 0xe51ff004, (uint32_t)(value + 8)};
@@ -1811,6 +1812,9 @@ static int install_cfx_scope(uintptr_t base, size_t page, const char *version) {
     uint32_t value_jump[] = {0xe51ff004, (uint32_t)(uintptr_t)hook_cfx_value};
     uint32_t process_jump[] = {0xe51ff004, (uint32_t)(uintptr_t)hook_cfx_process};
     patch_bytes(HF_DSP_GUARDS, value, value_jump, sizeof value_jump, page);
+    /* SweepFxStateMapAdaptor's Value observer and setType speculatively devirtualize setValue
+     * against vtable slot 4: overwrite that slot so the guard misses and calls hook_cfx_value. */
+    patch_pointer(HF_DSP_GUARDS, (uintptr_t *)value_slot, (uintptr_t)hook_cfx_value, page);
     patch_bytes(HF_DSP_GUARDS, process, process_jump, sizeof process_jump, page);
     fprintf(stderr, "engine-ui-hook: Color FX channel knobs installed\n");
     return 1;
