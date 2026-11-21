@@ -20,6 +20,10 @@ import (
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
 
+// oneLibraryKey is rekordbox's public OneLibrary passphrase (pkg/rekordbox oneLibraryPassphrase),
+// once for every test of this package.
+const oneLibraryKey = "r8gddnr4k847830ar6cqzbkk0el6qytmb3trbbx805jm74vez64i5o8fnrqryqls"
+
 func setupWriteBackStick(t *testing.T, withOneLibrary bool) string {
 	t.Helper()
 	stick := t.TempDir()
@@ -75,7 +79,7 @@ func setupWriteBackStick(t *testing.T, withOneLibrary bool) string {
 		if err != nil {
 			t.Fatal(err)
 		}
-		err = rekordbox.EncryptSQLCipher4(context.Background(), in, st.Size(), out, salt, []byte("r8gddnr4k847830ar6cqzbkk0el6qytmb3trbbx805jm74vez64i5o8fnrqryqls"))
+		err = rekordbox.EncryptSQLCipher4(context.Background(), in, st.Size(), out, salt, []byte(oneLibraryKey))
 		_ = out.Close()
 		if err != nil {
 			t.Fatal(err)
@@ -227,7 +231,7 @@ func TestWriteBackCuesEndToEndAndBridgeFastReinsert(t *testing.T) {
 	oneLibPath := filepath.Join(stick, "PIONEER", "rekordbox", "exportLibrary.db")
 	if sqlcipherBin, err := exec.LookPath("sqlcipher"); err == nil {
 		out, err := exec.Command(sqlcipherBin, oneLibPath,
-			"PRAGMA key = 'r8gddnr4k847830ar6cqzbkk0el6qytmb3trbbx805jm74vez64i5o8fnrqryqls';",
+			"PRAGMA key = '"+oneLibraryKey+"';",
 			"PRAGMA integrity_check;",
 		).CombinedOutput()
 		if err != nil || !strings.Contains(string(out), "ok") {
@@ -481,7 +485,7 @@ func TestWriteBackCuesDotPioneerMacOSStickAndExactPadSlots(t *testing.T) {
 		_ = in.Close()
 		t.Fatal(err)
 	}
-	err = rekordbox.EncryptSQLCipher4(ctx, in, st.Size(), out, salt, []byte("r8gddnr4k847830ar6cqzbkk0el6qytmb3trbbx805jm74vez64i5o8fnrqryqls"))
+	err = rekordbox.EncryptSQLCipher4(ctx, in, st.Size(), out, salt, []byte(oneLibraryKey))
 	_ = out.Close()
 	_ = in.Close()
 	if err != nil {

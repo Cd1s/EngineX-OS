@@ -1,10 +1,14 @@
 package webui
 
 import (
+	"bytes"
 	"encoding/json"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Cd1s/EngineX-OS/internal/testfixture"
@@ -64,5 +68,40 @@ func TestHandleRekordboxWriteback(t *testing.T) {
 	s.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("ServeHTTP POST /v1/enginex/rekordbox/writeback status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// #321 review R2 (P3): final=1 (the Eject's pass) skips the check for a conversion at mount. Only
+// the deck's own rb-bridge, on loopback, gets it; a request from the network, or relayed from
+// outside, gets a plain pass, which keeps the check.
+func TestRekordboxWritebackFinalOnlyFromTheDeck(t *testing.T) {
+	mediaRoot := t.TempDir()
+	s := New(Config{StateDir: t.TempDir(), UIDir: t.TempDir(), MediaRoot: mediaRoot}, nil)
+	stick := filepath.Join(mediaRoot, "USB1")
+	testfixture.LargeExport(t, stick, 1)
+	if _, err := bridge.Convert(t.Context(), stick, enginedb.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	log.SetOutput(&out)
+	defer log.SetOutput(os.Stderr)
+	for _, tc := range []struct {
+		name, remote, relay, want string
+	}{
+		{"the deck", "127.0.0.1:43210", "", "pass: eject"},
+		{"the network", "192.168.1.20:43210", "", "pass: manual"},
+		{"relayed from outside", "127.0.0.1:43210", "Cf-Connecting-Ip", "pass: manual"},
+	} {
+		out.Reset()
+		req := httptest.NewRequest(http.MethodPost, "/v1/enginex/rekordbox/writeback?final=1&drive=USB1", nil)
+		req.RemoteAddr = tc.remote
+		if tc.relay != "" {
+			req.Header.Set(tc.relay, "203.0.113.9")
+		}
+		w := httptest.NewRecorder()
+		s.handleRekordboxWriteback(w, req)
+		if w.Code != http.StatusOK || !strings.Contains(out.String(), tc.want) {
+			t.Fatalf("%s: status %d, log %q, want %q", tc.name, w.Code, out.String(), tc.want)
+		}
 	}
 }

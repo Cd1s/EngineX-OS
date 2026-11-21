@@ -33,11 +33,20 @@ func SetCueRunDirForTest(dir string) func() {
 // ErrNotQuietForTest is the error of a pass whose read overlapped a write by Engine.
 var ErrNotQuietForTest = errNotQuiet
 
-// EjectingNameForTest is the name of the edisksd hook's Eject mark of mount.
+// EjectingNameForTest is the name of the edisksd hook's Eject mark of mount that stays until the
+// next mount (pkg/prolink EjectingMark).
 func EjectingNameForTest(mount string) string {
 	h := fnv.New64a()
 	h.Write([]byte(mount))
 	return fmt.Sprintf("enginex-ejecting-%016x", h.Sum64())
+}
+
+// EjectedNameForTest is the name of the edisksd hook's Eject mark of mount that it removes when the
+// unmount fails.
+func EjectedNameForTest(mount string) string {
+	h := fnv.New64a()
+	h.Write([]byte(mount))
+	return fmt.Sprintf("enginex-rb-ejected-%016x", h.Sum64())
 }
 
 // SetWriteBackCutForTest calls cut at every step of a pass's writes, until restored.

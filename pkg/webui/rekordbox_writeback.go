@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -29,8 +30,10 @@ func (s *Server) handleRekordboxWriteback(w http.ResponseWriter, r *http.Request
 		return
 	}
 	// final=1 is the Eject's pass (rb-bridge --writeback-cues --on-eject, from the edisksd
-	// hook): it reuses what the watcher kept for the stick, its exportLibrary.db keys first.
-	final := r.URL.Query().Get("final") == "1"
+	// hook): it reuses what the watcher kept for the stick, its exportLibrary.db keys first. It
+	// skips the check for a conversion at mount, so only the deck itself asks for it; a request
+	// from elsewhere gets a plain pass (#321 review R2).
+	final := r.URL.Query().Get("final") == "1" && writeBackFromDeck(r)
 	var res bridge.WriteBackResult
 	switch cw := s.cueWatch.Load(); {
 	case cw != nil && final:
@@ -45,6 +48,14 @@ func (s *Server) handleRekordboxWriteback(w http.ResponseWriter, r *http.Request
 		return
 	}
 	respond(w, res)
+}
+
+// writeBackFromDeck reports whether r comes from the deck itself (rb-bridge, on loopback, not
+// relayed from outside).
+func writeBackFromDeck(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	ip := net.ParseIP(host)
+	return err == nil && ip != nil && ip.IsLoopback() && !relayedFromOutside(r)
 }
 
 // WatchCues writes a deck's cue edits back to the rekordbox sticks under the media root by

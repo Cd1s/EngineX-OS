@@ -29,14 +29,18 @@ const CueQuiet = 5 * time.Second
 // errNotQuiet drops a pass whose read of m.db overlapped a change by Engine.
 var errNotQuiet = errors.New("writeback: m.db changed while it was read")
 
-// cueEjectingDir holds the edisksd hook's mark of an Eject (pkg/prolink EjectingMark): from the
-// first attempt until the next mount, only the Eject's final pass writes the stick.
+// cueEjectingDir holds the edisksd hook's marks of an Eject. The hook makes two at each Eject:
+// enginex-ejecting-<hash> (pkg/prolink EjectingMark), kept until the next mount, and
+// enginex-rb-ejected-<hash>, which it removes again when the unmount fails. While the second is
+// there only the Eject's final pass writes the stick; after a failed Eject the watcher writes
+// again (#321 review R2: it waited for the first, and wrote nothing more until the stick was
+// mounted again).
 var cueEjectingDir = "/run"
 
 func cueEjecting(mount string) bool {
 	h := fnv.New64a()
 	h.Write([]byte(mount))
-	_, err := os.Lstat(filepath.Join(cueEjectingDir, fmt.Sprintf("enginex-ejecting-%016x", h.Sum64())))
+	_, err := os.Lstat(filepath.Join(cueEjectingDir, fmt.Sprintf("enginex-rb-ejected-%016x", h.Sum64())))
 	return err == nil
 }
 
@@ -114,9 +118,22 @@ func (w *CueWatcher) attach(mount string) *cueStick {
 	}
 	st := &cueStick{mount: mount, keys: rekordbox.NewKeyCache()}
 	w.sticks[mount] = st
-	if n := CleanWriteBackLeftovers(mount); n > 0 {
-		w.logf("rb-bridge: removed %d temporary files a cut write-back left on %s", n, mount)
-	}
+	// What a cut pass left goes first, off the loop (#321 review R2: a stick that hangs at insert
+	// held every stick's watcher); the stick's first pass waits for it as for a pass in progress.
+	done := make(chan struct{})
+	st.running = done
+	go func() {
+		if n := CleanWriteBackLeftovers(mount); n > 0 {
+			w.logf("rb-bridge: removed %d temporary files a cut write-back left on %s", n, mount)
+		}
+		w.mu.Lock()
+		close(done)
+		if st.running == done {
+			st.running = nil
+		}
+		w.mu.Unlock()
+		w.wake()
+	}()
 	return st
 }
 

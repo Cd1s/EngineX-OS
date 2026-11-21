@@ -71,7 +71,7 @@ func issue321ExportSound(t *testing.T, stick string) {
 		t.Fatal(err)
 	}
 	var plain bytes.Buffer
-	if err = rekordbox.DecryptSQLCipher4(context.Background(), bytes.NewReader(raw), int64(len(raw)), &plain, []byte("r8gddnr4k847830ar6cqzbkk0el6qytmb3trbbx805jm74vez64i5o8fnrqryqls")); err != nil {
+	if err = rekordbox.DecryptSQLCipher4(context.Background(), bytes.NewReader(raw), int64(len(raw)), &plain, []byte(oneLibraryKey)); err != nil {
 		t.Fatalf("exportLibrary.db does not decrypt: %v", err)
 	}
 	f := filepath.Join(t.TempDir(), "plain.db")
@@ -184,4 +184,97 @@ func itoa(i int) string {
 		b = append([]byte{byte('0' + i%10)}, b...)
 	}
 	return string(b)
+}
+
+// issue321PDBGenre is track id's genre in the stick's export.pdb, which must read whole.
+func issue321PDBGenre(t *testing.T, stick string, id uint32) string {
+	t.Helper()
+	lib, err := rekordbox.ReadPDB(filepath.Join(stick, "PIONEER", "rekordbox", "export.pdb"))
+	if err != nil {
+		t.Fatalf("export.pdb does not read: %v", err)
+	}
+	if len(lib.Tracks) != 2 {
+		t.Fatalf("export.pdb holds %d tracks, want 2", len(lib.Tracks))
+	}
+	for _, tr := range lib.Tracks {
+		if tr.ID == id {
+			return tr.Genre
+		}
+	}
+	t.Fatalf("export.pdb has no track %d", id)
+	return ""
+}
+
+// #321 review R2 (P2-4): a stick with no OneLibrary export carries a deck's metadata edit in
+// export.pdb (#314). The pass that writes it is cut at every write step as above: export.pdb reads
+// whole with the old or the new genre, and the next pass brings both edits.
+func TestIssue321WatcherPassCutAtEveryWriteStepOfExportPDB(t *testing.T) {
+	ctx := context.Background()
+	stick := setupWriteBackStick(t, false)
+	if _, err := bridge.Convert(ctx, stick, enginedb.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	oldGenre := issue321PDBGenre(t, stick, 1)
+	const newGenre = "Cut Genre 321"
+	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: filepath.Join(stick, "Engine Library", "Database2", "m.db")}).String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	issue321Settle()
+	issue321Edit(t, db, 1, "Cut 321", 1000)
+	if _, err = db.Exec(`UPDATE Track SET genre=? WHERE pdbImportKey=1`, newGenre); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	issue321Settle()
+
+	cuts := t.TempDir()
+	var steps []string
+	restore := bridge.SetWriteBackCutForTest(func(step string) {
+		dst := filepath.Join(cuts, strings.Repeat("0", 3-len(itoa(len(steps))))+itoa(len(steps)))
+		issue321Copy(t, stick, dst)
+		steps = append(steps, step)
+	})
+	res, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{DateDir: "2026-11-22", Session: &bridge.CueSession{},
+		Keys: rekordbox.NewKeyCache(), Settled: func() error { return nil }})
+	restore()
+	if err != nil || res.TracksChanged != 1 || res.OneLibraryUpdated || issue321PDBGenre(t, stick, 1) != newGenre {
+		t.Fatalf("uncut pass: %+v %v", res, err)
+	}
+	pdbSteps := 0
+	for _, step := range steps {
+		if strings.HasSuffix(step, "export.pdb") {
+			pdbSteps++
+		}
+	}
+	// its backup temp and backup, its temp, replacing and renamed.
+	if pdbSteps < 5 {
+		t.Fatalf("export.pdb is in %d of the pass's write steps: %q", pdbSteps, steps)
+	}
+	for i, step := range steps {
+		cut := filepath.Join(cuts, strings.Repeat("0", 3-len(itoa(i)))+itoa(i))
+		t.Run(itoa(i)+" "+filepath.Base(step), func(t *testing.T) {
+			for _, tmp := range issue321Temps(t, cut) { // a pull in the middle of writing it
+				if st, err := os.Stat(tmp); err == nil {
+					_ = os.Truncate(tmp, st.Size()/2)
+				}
+			}
+			bridge.CleanWriteBackLeftovers(cut) // the next mount
+			if left := issue321Temps(t, cut); len(left) != 0 {
+				t.Fatalf("cut at %q: left after the next mount: %q", step, left)
+			}
+			if g := issue321PDBGenre(t, cut, 1); g != oldGenre && g != newGenre {
+				t.Fatalf("cut at %q: export.pdb's genre is %q, neither the old %q nor the new", step, g, oldGenre)
+			}
+			issue321ANLZSound(t, cut)
+			res, err := bridge.WriteBackCues(ctx, cut, bridge.WriteBackOptions{DateDir: "2026-11-22", SkipPreparingCheck: true})
+			if err != nil || !issue321ANLZHas(t, cut, "Cut 321") || issue321PDBGenre(t, cut, 1) != newGenre {
+				t.Fatalf("cut at %q: the next pass did not bring the edits: %+v %v", step, res, err)
+			}
+			issue321ANLZSound(t, cut)
+			if res, err = bridge.WriteBackCues(ctx, cut, bridge.WriteBackOptions{DateDir: "2026-11-22", SkipPreparingCheck: true}); err != nil || res.TracksChanged != 0 {
+				t.Fatalf("cut at %q: the pass after does not converge: %+v %v", step, res, err)
+			}
+		})
+	}
 }

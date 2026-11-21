@@ -150,9 +150,11 @@ func TestIssue321WatcherWaitsForAConversionAndLeavesAnEjectToItsPass(t *testing.
 	os.Remove(flag)
 	issue321WaitANLZ(t, stick, "After the conversion", 3*time.Second)
 
-	mark := filepath.Join(run, bridge.EjectingNameForTest(stick))
-	if err := os.WriteFile(mark, nil, 0o600); err != nil {
-		t.Fatal(err)
+	// The hook's marks of an Eject, both made at its start.
+	for _, mark := range []string{bridge.EjectingNameForTest(stick), bridge.EjectedNameForTest(stick)} {
+		if err := os.WriteFile(filepath.Join(run, mark), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	for s := time.Now().Unix(); time.Now().Unix() == s; {
 		time.Sleep(20 * time.Millisecond)

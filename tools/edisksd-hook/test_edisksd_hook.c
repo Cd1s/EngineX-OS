@@ -34,6 +34,9 @@ static int test_real_mount(struct libmnt_context *c);
 // Leaves 1.5 s of the 20 s budget for the private conversion.
 #include <stdint.h>
 static int64_t test_post_reserve=18500;
+// The Eject write-back's budget (#321 review R2: an overrun is tested with a short one).
+static int64_t test_writeback_timeout_ms=12000;
+#define WRITEBACK_TIMEOUT_MS test_writeback_timeout_ms
 static int test_expire_gen2_stage;
 static int64_t test_post_reserve_fn(void);
 #define POST_RESERVE_MS test_post_reserve_fn()
@@ -344,6 +347,56 @@ static void test_eject_runs_cue_writeback(const char *root) {
 
     test_rb_bridge[0]=0;unlink(wb_log);
     puts("#321: normal eject runs cue write-back before unmount; lazy/unconverted skip; failures never block eject: PASS");
+}
+// #321 review R2: rb-bridge waiting for stream-sync's final pass past the write-back budget is
+// killed when it runs out, and the unmount goes on at once: it succeeds, or it fails (the pass
+// still holds the stick) and the Eject is refused visibly (EBUSY), the rb-ejected mark is cleared
+// so stream-sync's watcher writes the stick again, the ejecting mark stays for Pro DJ Link, and a
+// second Eject works.
+static int unmount_busy(struct libmnt_context *c){c->status=0;real_calls++;errno=EBUSY;return -EBUSY;}
+static void test_eject_writeback_overrun(const char *root) {
+    char vol[PATH_MAX],p[PATH_MAX],script[PATH_MAX*3],done[PATH_MAX],ejected[PATH_MAX],ejecting[PATH_MAX];
+    join(vol,MEDIA_ROOT,"WB-SLOW");
+    join(p,vol,"PIONEER/rekordbox");assert(!make_dirs(p));
+    join(p,vol,"PIONEER/rekordbox/exportLibrary.db");write_file(p,"db");
+    join(p,vol,"Engine Library/Database2");assert(!make_dirs(p));
+    join(p,vol,"Engine Library/Database2/.rb-bridge-state.db");write_file(p,"state");
+    assert(!make_dirs(test_runtime));
+    assert(!eject_mark_path(EJECTED,vol,ejected)&&!eject_mark_path(EJECTING,vol,ejecting));
+    join(wb_log,root,"writeback-slow.log");join(done,root,"writeback-slow.done");join(test_rb_bridge,root,"wb-slow-bridge");
+    snprintf(script,sizeof script,"#!/bin/sh\necho \"$@\" >> '%s'\nsleep 2\necho finished > '%s'\n",wb_log,done);
+    write_file(test_rb_bridge,script);assert(!chmod(test_rb_bridge,0700));
+    snprintf(wb_expect,sizeof wb_expect,"--mount-path %s --writeback-cues --on-eject",vol);
+    test_writeback_timeout_ms=500;unlink(done);
+
+    // 1. The overrun ends at the budget and the unmount runs once after it.
+    unlink(wb_log);wb_seen=0;unsigned calls=real_calls;int64_t t0=now_ms();
+    struct libmnt_context eject={.target=vol};
+    assert(!unmount_dispatch(&eject,unmount_after_wb));
+    int64_t took=now_ms()-t0;
+    assert(wb_seen==1&&real_calls==calls+1);assert(took>=450&&took<1900);
+    assert(!access(ejected,F_OK)&&!access(ejecting,F_OK));
+
+    // 2. The same overrun with the stick still held: the unmount is refused, rb-ejected goes,
+    // ejecting stays.
+    unlink(wb_log);calls=real_calls;t0=now_ms();
+    struct libmnt_context busy={.target=vol};
+    assert(unmount_dispatch(&busy,unmount_busy)==-EBUSY&&real_calls==calls+1);
+    took=now_ms()-t0;assert(took>=450&&took<1900);
+    assert(access(ejected,F_OK)==-1&&errno==ENOENT);assert(!access(ejecting,F_OK));
+
+    // 3. The second Eject, the pass over: write-back then unmount, the stick marked again.
+    snprintf(script,sizeof script,"#!/bin/sh\necho \"$@\" >> '%s'\nexit 0\n",wb_log);
+    write_file(test_rb_bridge,script);assert(!chmod(test_rb_bridge,0700));
+    unlink(wb_log);wb_seen=0;
+    struct libmnt_context again={.target=vol};
+    assert(!unmount_dispatch(&again,unmount_after_wb)&&wb_seen==1);
+    assert(!access(ejected,F_OK));
+
+    // The overrunning rb-bridges were killed, not left behind: none finishes its sleep.
+    usleep(2300000);assert(access(done,F_OK)==-1&&errno==ENOENT);
+    test_writeback_timeout_ms=12000;test_rb_bridge[0]=0;unlink(wb_log);unlink(ejected);unlink(ejecting);
+    puts("#321 R2: an Eject write-back overrun is killed at its budget; the unmount goes on, a refused one clears rb-ejected, the next Eject works: PASS");
 }
 static int no_unmount(struct libmnt_context *c){c->status=1;real_calls++;return 0;}
 static int no_mount_ok(struct libmnt_context *c){c->status=1;real_calls++;return 0;}
@@ -2298,7 +2351,7 @@ int main(int argc,char **argv) {
     join(test_prepare_state,root,"run/enginex-usb-preparing");char prep_run[PATH_MAX];join(prep_run,root,"run");assert(!make_dirs(prep_run));
     join(test_media,root,"media");join(test_library,root,"libraries");join(test_runtime,root,"runtime");
     join(test_legacy_library,root,"legacy-libraries");join(test_utab,root,"utab");assert(!make_dirs(test_utab));
-    assert(!make_dirs(test_media));test_paths_and_copy(root);test_eject_stops_the_background_import(root);test_eject_runs_cue_writeback(root);test_only_an_eject_marks_the_stick(root);test_compat_symlink_root(root);test_time();test_slow_marker_follows_every_export_file(root);test_only_an_export_makes_a_rekordbox_stick(root);test_monitor_sees_plain_device_mount(root);test_monitor_hides_new_and_old_view_names(root);test_hfs_rw_unit(root);test_hfs_gen2_unit(root);
+    assert(!make_dirs(test_media));test_paths_and_copy(root);test_eject_stops_the_background_import(root);test_eject_runs_cue_writeback(root);test_eject_writeback_overrun(root);test_only_an_eject_marks_the_stick(root);test_compat_symlink_root(root);test_time();test_slow_marker_follows_every_export_file(root);test_only_an_export_makes_a_rekordbox_stick(root);test_monitor_sees_plain_device_mount(root);test_monitor_hides_new_and_old_view_names(root);test_hfs_rw_unit(root);test_hfs_gen2_unit(root);
     if(argc>1&&!strcmp(argv[1],"--mounts")){test_prepare_state_lifecycle(root);test_hfs_rw_policy(root);test_hfs_gen2_lkl_policy(root,argv[0]);test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);test_library_is_walked_once(root);test_two_sticks_at_once(root);test_hfs_visible_mount_reuses_the_converted_library(root);test_private_mount_leaves_nothing_behind(root);test_hfs_view_copies_only_metadata(root);test_heal_before_visible(root);test_eject_while_another_stick_converts(root);test_eject_of_a_pulled_stick(root);test_removal_detaches_a_view_in_use(root);test_heal_marker_survives_another_port(root);test_hfs_view_with_a_long_entry_name(root);test_hfs_view_artwork_is_writable(root);test_seed_keeps_its_own_previous_generation(root);test_view_binds_stay_out_of_a_shared_data(root);test_guardian_from_the_data_bundle(root);test_slow_marker_survives_another_port(root);test_hfs_view_scale_and_47879b10_253(root);}
     // Mount tests have removed all namespace mounts before deleting fixtures.
     int tmp=open("/tmp",O_RDONLY|O_DIRECTORY);assert(tmp>=0);remove_tree(tmp,strrchr(root,'/')+1);close(tmp);

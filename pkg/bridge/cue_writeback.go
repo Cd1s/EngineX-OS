@@ -157,11 +157,24 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 	if err != nil {
 		outcome = "stopped: " + err.Error()
 	}
+	// Which pass (#321 review R2, for the deck recipe): the Eject's final pass, the watcher's
+	// during the session, or one asked for by hand; and the first record of a stick an earlier
+	// build imported, which reads every row once.
+	kind := "manual"
+	switch {
+	case opts.OnEject:
+		kind = "eject"
+	case opts.Settled != nil:
+		kind = "watcher"
+	}
+	if tm.firstRecord {
+		kind += ", first record of the stick"
+	}
 	// One line per pass (#321): what it cost and what it did.
-	log.Printf("rb-bridge: cue write-back of %s %s: %d tracks, %d read, %d changed; ms: candidates %d, key %d, decrypt %d, edit %d, encrypt %d, write %d, total %d; %d files, %d bytes written",
+	log.Printf("rb-bridge: cue write-back of %s %s: %d tracks, %d read, %d changed; ms: candidates %d, key %d, decrypt %d, edit %d, encrypt %d, write %d, total %d; %d files, %d bytes written; pass: %s",
 		mountPath, outcome, res.TracksChecked, res.TracksRead, res.TracksChanged,
 		res.PhasesMS["candidates"], res.PhasesMS["key"], res.PhasesMS["decrypt"], res.PhasesMS["edit"], res.PhasesMS["encrypt"], res.PhasesMS["write"], res.PhasesMS["total"],
-		res.FilesUpdated, res.BytesWritten)
+		res.FilesUpdated, res.BytesWritten, kind)
 	return res, err
 }
 
@@ -169,6 +182,7 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 type passTimes struct {
 	candidates, key, decrypt, edit, encrypt, write, total time.Duration
 	bytes                                                 int64
+	firstRecord                                           bool // no BridgeSynced yet: every row is read
 }
 
 func (t *passTimes) ms() map[string]int64 {
@@ -265,6 +279,7 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 	_ = db.QueryRowContext(ctx, `SELECT count(*) FROM bridge.sqlite_master WHERE type='table' AND name='BridgeWritten'`).Scan(&hasWrittenTable)
 	_ = db.QueryRowContext(ctx, `SELECT count(*) FROM bridge.sqlite_master WHERE type='table' AND name='BridgeAnalysis'`).Scan(&hasAnalysisTable)
 	_ = db.QueryRowContext(ctx, `SELECT count(*) FROM bridge.sqlite_master WHERE type='table' AND name='BridgeSynced'`).Scan(&hasSyncedTable)
+	tm.firstRecord = hasSyncedTable == 0
 
 	// Only a row whose Track.lastEditTime is not the one BridgeSynced has is read (#321):
 	// Engine's trigger dates every write of a row's analysis, cues and loops, so this scan
@@ -482,16 +497,40 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 	if err := settle(); err != nil {
 		return res, err
 	}
+	// Whether each file this pass may replace owns its clusters in the FAT is decided before the
+	// pass allocates anything on the stick, its mark included (#321 review R2, replaceFile): a
+	// file allocated first can take the clusters a stale entry still names, and that entry then
+	// looks like their owner.
+	unowned := map[string]bool{}
+	decide := func(path string) {
+		if _, done := unowned[path]; !done {
+			unowned[path] = unsafeToFree(path)
+		}
+	}
 	// Where this pass may leave a temporary file if the stick goes in the middle: the next
 	// mount removes them (CleanWriteBackLeftovers). The mark goes once everything is written.
 	var tmpDirs []string
 	for _, ch := range changes {
 		tmpDirs = append(tmpDirs, filepath.Dir(filepath.FromSlash(strings.TrimPrefix(ch.analysisPath, "/"))))
+		if !ch.cuesDiff || ch.analysisPath == "" {
+			continue
+		}
+		if cleanAnlz, err := safeANLZRelPath(ch.analysisPath); err == nil {
+			for _, ext := range []string{".DAT", ".EXT", ".2EX"} {
+				if rel, ok := resolveANLZVariant(resolver, strings.TrimSuffix(cleanAnlz, filepath.Ext(cleanAnlz)), ext); ok {
+					decide(resolver.FullPath(rel))
+				}
+			}
+		}
 	}
+	pdbRel := ""
 	if oneLibRel != "" {
 		tmpDirs = append(tmpDirs, filepath.Dir(filepath.FromSlash(oneLibRel)))
-	} else if pdbRel, err := resolver.Resolve("PIONEER/rekordbox/export.pdb"); err == nil {
+		decide(resolver.FullPath(oneLibRel))
+	} else if rel, err := resolver.Resolve("PIONEER/rekordbox/export.pdb"); err == nil {
+		pdbRel = rel
 		tmpDirs = append(tmpDirs, filepath.Dir(filepath.FromSlash(pdbRel))) // its metadata (#314)
+		decide(resolver.FullPath(pdbRel))
 	}
 	if err := markWriteBack(engineDBDir, dateDir, tmpDirs); err != nil {
 		return res, err
@@ -515,19 +554,21 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 		tmp    string
 		export bool // the export, whose stamp the bridge keeps
 	}
+	// staged holds the files not yet renamed: once renamed, an item's temporary name is gone, or
+	// names an old entry kept aside (replaceUnowned), which is never removed.
 	var staged []stagedWrite
 	defer func() {
 		for _, item := range staged {
 			_ = removeFile(item.tmp)
 		}
 	}()
-	stageBytes := func(dst string, data []byte) error {
-		tmp, err := stageWriteFile(dst, data)
+	stageBytes := func(dst string, data []byte, export bool) error {
+		tmp, err := stageWriteFile(dst, data, unowned[dst])
 		if err != nil {
 			return err
 		}
 		writeBackCut("temp " + dst)
-		staged = append(staged, stagedWrite{dst: dst, tmp: tmp})
+		staged = append(staged, stagedWrite{dst: dst, tmp: tmp, export: export})
 		return nil
 	}
 
@@ -585,7 +626,7 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 			if err != nil {
 				return res, err
 			}
-			if err := stageBytes(fullPath, updated); err != nil {
+			if err := stageBytes(fullPath, updated, false); err != nil {
 				return res, err
 			}
 			tm.bytes += n + int64(len(updated))
@@ -601,7 +642,7 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 				return res, err
 			}
 			tm.bytes += n
-			tmpOut, err := os.CreateTemp(filepath.Dir(oneLibFull), ".enginex-onelib-*.tmp")
+			tmpOut, err := newTemp(oneLibFull, ".enginex-onelib-*.tmp", unowned[oneLibFull])
 			if err != nil {
 				return res, err
 			}
@@ -625,28 +666,23 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 
 	// A stick without a OneLibrary export carries its metadata in export.pdb (#314).
 	if oneLibRel == "" && len(pdbMetadata) > 0 {
-		if pdbRel, err := resolver.Resolve("PIONEER/rekordbox/export.pdb"); err == nil {
+		if pdbRel != "" {
 			pdbFull := resolver.FullPath(pdbRel)
 			n, err := ensureFirstOriginalBackup(absMount, backupRoot, dateDir, pdbRel)
 			if err != nil {
 				return res, err
 			}
 			tm.bytes += n
-			tmpOut, err := os.CreateTemp(filepath.Dir(pdbFull), ".enginex-pdb-*.tmp")
+			// Staged as the ANLZ files are (stageWriteFile: written and synced before its
+			// rename, #321 review R2; #314 wrote it with os.WriteFile and no fsync).
+			updated, err := pdbMetadataBytes(ctx, pdbFull, pdbMetadata)
 			if err != nil {
 				return res, err
 			}
-			tmpPath := tmpOut.Name()
-			_ = tmpOut.Close()
-			if err := updatePDBMetadata(ctx, pdbFull, pdbMetadata, tmpPath); err != nil {
-				_ = removeFile(tmpPath)
+			if err := stageBytes(pdbFull, updated, true); err != nil {
 				return res, err
 			}
-			if st, err := os.Stat(tmpPath); err == nil {
-				tm.bytes += st.Size()
-			}
-			writeBackCut("temp " + pdbFull)
-			staged = append(staged, stagedWrite{dst: pdbFull, tmp: tmpPath, export: true})
+			tm.bytes += int64(len(updated))
 		}
 	}
 
@@ -663,17 +699,18 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 	exportWritten := false
 	// Every staged file, the ANLZ files, the export and export.pdb, replaces its original the one
 	// way a pull at any moment leaves whole on FAT (replaceFile, #321).
-	for _, item := range staged {
-		if err := replaceFile(item.tmp, item.dst); err != nil {
+	for len(staged) > 0 {
+		item := staged[0]
+		if err := replaceFile(item.tmp, item.dst, unowned[item.dst]); err != nil {
 			return res, err
 		}
+		staged = staged[1:]
 		res.FilesUpdated++
 		if item.dst == oneLibFull {
 			res.OneLibraryUpdated = true
 		}
 		exportWritten = exportWritten || item.export
 	}
-	staged = nil
 
 	// Refresh the bridge stamp if the stick was already in sync before
 	// our write-back, so re-inserting into EngineX fast-bypasses instead
@@ -764,14 +801,22 @@ func CleanWriteBackLeftovers(mount string) int {
 
 // moveAside renames path out of the way, in its directory, without freeing its clusters: a
 // file the FAT does not give its clusters, or one that cannot be read (#321). A rename moves
-// only the entry.
+// only the entry. Such entries are never removed: freeing their clusters is the corruption they
+// would cause; only fsck can repair them.
 func moveAside(path string) error {
-	aside := filepath.Join(filepath.Dir(path), "."+strings.TrimPrefix(filepath.Base(path), ".")+".enginex-unowned-"+strconv.FormatInt(time.Now().UnixNano(), 10))
+	aside := asideName(path)
 	if err := os.Rename(path, aside); err != nil {
 		return err
 	}
+	_ = syncDir(filepath.Dir(aside))
 	log.Printf("rb-bridge: %s does not own its clusters in the FAT or cannot be read; kept aside as %s", path, filepath.Base(aside))
 	return nil
+}
+
+// asideName is a new name, beside path, for an entry kept aside (moveAside). CleanWriteBackLeftovers
+// matches none of them.
+func asideName(path string) string {
+	return filepath.Join(filepath.Dir(path), "."+strings.TrimPrefix(filepath.Base(path), ".")+".enginex-unowned-"+strconv.FormatInt(time.Now().UnixNano(), 10))
 }
 
 // recordSynced notes in the state what the stick holds of rows (BridgeSynced, #321) and drops
@@ -964,19 +1009,16 @@ func readStickTrackCues(r *compat.Resolver, rbTrack rekordbox.Track) []rekordbox
 	return merged.Cues
 }
 
-func updatePDBMetadata(ctx context.Context, path string, updates map[uint32]rekordbox.Metadata, dst string) error {
+// pdbMetadataBytes is export.pdb at path with the metadata of updates (#314).
+func pdbMetadataBytes(ctx context.Context, path string, updates map[uint32]rekordbox.Metadata) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
-		return err
+		return nil, err
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	updated, err := rekordbox.RewritePDBMetadata(raw, updates)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(dst, updated, 0o644)
+	return rekordbox.RewritePDBMetadata(raw, updates)
 }
 
 func mergeEngineCues(orig []rekordbox.Cue, deck enginedb.DeckCues, offsetSamples float64) []rekordbox.Cue {
@@ -1243,7 +1285,8 @@ func ensureFirstOriginalBackup(mountRoot, backupRoot, dateDir, relSlash string) 
 	}
 	defer in.Close()
 
-	tmp, err := os.CreateTemp(filepath.Dir(dst), ".bak-*.tmp")
+	unowned := unsafeToFree(dst) // before the temporary file takes any cluster (replaceFile)
+	tmp, err := newTemp(dst, ".bak-*.tmp", unowned)
 	if err != nil {
 		return 0, err
 	}
@@ -1266,7 +1309,7 @@ func ensureFirstOriginalBackup(mountRoot, backupRoot, dateDir, relSlash string) 
 		return 0, err
 	}
 	writeBackCut("backup temp " + dst)
-	if err := replaceFile(tmpPath, dst); err != nil {
+	if err := replaceFile(tmpPath, dst, unowned); err != nil {
 		return 0, err
 	}
 	writeBackCut("backup " + dst)
@@ -1274,9 +1317,8 @@ func ensureFirstOriginalBackup(mountRoot, backupRoot, dateDir, relSlash string) 
 	return n, nil
 }
 
-func stageWriteFile(dst string, data []byte) (string, error) {
-	dir := filepath.Dir(dst)
-	tmp, err := os.CreateTemp(dir, ".enginex-wb-*.tmp")
+func stageWriteFile(dst string, data []byte, unowned bool) (string, error) {
+	tmp, err := newTemp(dst, ".enginex-wb-*.tmp", unowned)
 	if err != nil {
 		return "", err
 	}
@@ -1302,8 +1344,8 @@ func stageWriteFile(dst string, data []byte) (string, error) {
 }
 
 func atomicWriteFile(dst string, data []byte, beforeRename func(string) error) error {
-	dir := filepath.Dir(dst)
-	tmp, err := os.CreateTemp(dir, ".enginex-wb-*.tmp")
+	unowned := unsafeToFree(dst) // before the temporary file takes any cluster (replaceFile)
+	tmp, err := newTemp(dst, ".enginex-wb-*.tmp", unowned)
 	if err != nil {
 		return err
 	}
@@ -1330,7 +1372,7 @@ func atomicWriteFile(dst string, data []byte, beforeRename func(string) error) e
 			return err
 		}
 	}
-	if err := replaceFile(tmpPath, dst); err != nil {
+	if err := replaceFile(tmpPath, dst, unowned); err != nil {
 		return err
 	}
 	ok = true
@@ -1345,11 +1387,16 @@ func atomicWriteFile(dst string, data []byte, beforeRename func(string) error) e
 // replaced file is held open until the directory (the temporary entry gone, dst still naming the
 // old clusters) and then dst itself (naming the new ones) are on the stick, so its clusters are
 // freed only after that.
-func replaceFile(tmp, dst string) error {
-	if unsafeToFree(dst) {
-		if err := moveAside(dst); err != nil { // never freed
-			return err
-		}
+//
+// unowned is unsafeToFree(dst) as the caller found it before it allocated anything on the volume
+// for this write (#321 review R2): a file allocated first, the temporary one included, can take
+// the very clusters a stale entry of dst still names, and dst then looks like their owner; closing
+// the held entry would free the new file's clusters. What this cannot see: two entries that name
+// one intact chain (a cross-link left by a pull or another system) look owned, and replacing or
+// removing either frees the chain the other still names. Only fsck can repair that.
+func replaceFile(tmp, dst string, unowned bool) error {
+	if unowned {
+		return replaceUnowned(tmp, dst)
 	}
 	held, _ := os.Open(dst)
 	defer func() {
@@ -1365,6 +1412,39 @@ func replaceFile(tmp, dst string) error {
 	_ = syncFile(dst)
 	writeBackCut("renamed " + dst)
 	return nil
+}
+
+// replaceUnowned puts tmp under dst's name without ever freeing the clusters dst names: the FAT
+// does not give them to it, and freeing them is what vfat calls corruption. tmp was created under
+// a name of an entry kept aside (newTemp), and the two entries swap names in one step (renameat2
+// RENAME_EXCHANGE, vfat since Linux 6.0; the decks run 6.18): the old entry is then kept aside,
+// which frees nothing. A pull at any moment leaves dst under its name, old or new, and no entry
+// the next mount removes (CleanWriteBackLeftovers matches no aside name), so the old entry's
+// clusters are never freed, even when a file of this pass took them (#321 review R2): the two
+// then name one chain, and the aside one is never removed. Without the exchange (a kernel before
+// 6.0) dst is not replaced (errUnownedClusters): renaming it aside first would leave no file
+// under its name until the second rename.
+func replaceUnowned(tmp, dst string) error {
+	if err := exchange(tmp, dst); err != nil {
+		return fmt.Errorf("%w: %s not replaced: %v", errUnownedClusters, dst, err)
+	}
+	writeBackCut("replacing " + dst)
+	_ = syncDir(filepath.Dir(dst))
+	_ = syncFile(dst)
+	writeBackCut("renamed " + dst)
+	log.Printf("rb-bridge: %s did not own its clusters in the FAT; replaced, the old entry kept aside as %s", dst, filepath.Base(tmp))
+	return nil
+}
+
+// newTemp creates the file that is to replace dst, in dst's directory: under a temporary name
+// (pattern, as os.CreateTemp) that the next mount removes if a pull cuts the write, or, when dst
+// does not own its clusters (unowned, replaceUnowned), under the name its old entry keeps once
+// replaced.
+func newTemp(dst, pattern string, unowned bool) (*os.File, error) {
+	if !unowned {
+		return os.CreateTemp(filepath.Dir(dst), pattern)
+	}
+	return os.OpenFile(asideName(dst), os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
 }
 
 // errUnownedClusters: a file whose clusters the FAT does not give it is not removed (unsafeToFree).
