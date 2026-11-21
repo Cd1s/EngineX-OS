@@ -190,6 +190,24 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 	oneLibUpdates := make(map[uint32][]rekordbox.Cue, len(changes))
 	oneLibMetadata := make(map[uint32]rekordbox.Metadata, len(changes))
 	pdbMetadata := make(map[uint32]rekordbox.Metadata, len(changes))
+	type stagedWrite struct {
+		dst string
+		tmp string
+	}
+	var staged []stagedWrite
+	defer func() {
+		for _, item := range staged {
+			_ = os.Remove(item.tmp)
+		}
+	}()
+	stageBytes := func(dst string, data []byte) error {
+		tmp, err := stageWriteFile(dst, data)
+		if err != nil {
+			return err
+		}
+		staged = append(staged, stagedWrite{dst: dst, tmp: tmp})
+		return nil
+	}
 
 	for _, ch := range changes {
 		if err := ctx.Err(); err != nil {
@@ -239,10 +257,9 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 			if err := ensureFirstOriginalBackup(absMount, backupRoot, dateDir, tg.rel); err != nil {
 				return res, err
 			}
-			if err := atomicWriteFile(fullPath, updated, opts.BeforeRename); err != nil {
+			if err := stageBytes(fullPath, updated); err != nil {
 				return res, err
 			}
-			res.FilesUpdated++
 		}
 	}
 
@@ -263,19 +280,7 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 				_ = os.Remove(tmpPath)
 				return res, err
 			}
-			if opts.BeforeRename != nil {
-				if err := opts.BeforeRename(oneLibFull); err != nil {
-					_ = os.Remove(tmpPath)
-					return res, err
-				}
-			}
-			if err := os.Rename(tmpPath, oneLibFull); err != nil {
-				_ = os.Remove(tmpPath)
-				return res, err
-			}
-			_ = syncDir(filepath.Dir(oneLibFull))
-			res.OneLibraryUpdated = true
-			res.FilesUpdated++
+			staged = append(staged, stagedWrite{dst: oneLibFull, tmp: tmpPath})
 		}
 	}
 
@@ -296,21 +301,30 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 				_ = os.Remove(tmpPath)
 				return res, err
 			}
-			if opts.BeforeRename != nil {
-				if err := opts.BeforeRename(pdbFull); err != nil {
-					_ = os.Remove(tmpPath)
-					return res, err
-				}
-			}
-			if err := os.Rename(tmpPath, pdbFull); err != nil {
-				_ = os.Remove(tmpPath)
-				return res, err
-			}
-			_ = syncDir(filepath.Dir(pdbFull))
-			res.FilesUpdated++
+			staged = append(staged, stagedWrite{dst: pdbFull, tmp: tmpPath})
 		}
 	}
 
+	for _, item := range staged {
+		if err := ctx.Err(); err != nil {
+			return res, err
+		}
+		if opts.BeforeRename != nil {
+			if err := opts.BeforeRename(item.dst); err != nil {
+				return res, err
+			}
+		}
+	}
+	for _, item := range staged {
+		if err := os.Rename(item.tmp, item.dst); err != nil {
+			return res, err
+		}
+		_ = syncDir(filepath.Dir(item.dst))
+		res.FilesUpdated++
+		if item.dst == oneLibFull {
+			res.OneLibraryUpdated = true
+		}
+	}
 	if res.FilesUpdated > 0 {
 		res.BackupDir = filepath.Join(".enginex-backup", dateDir)
 	}
@@ -598,6 +612,33 @@ func ensureFirstOriginalBackup(mountRoot, backupRoot, dateDir, relSlash string) 
 	_ = syncDir(filepath.Dir(dst))
 	ok = true
 	return nil
+}
+
+func stageWriteFile(dst string, data []byte) (string, error) {
+	dir := filepath.Dir(dst)
+	tmp, err := os.CreateTemp(dir, ".enginex-wb-*.tmp")
+	if err != nil {
+		return "", err
+	}
+	tmpPath := tmp.Name()
+	ok := false
+	defer func() {
+		_ = tmp.Close()
+		if !ok {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		return "", err
+	}
+	if err := tmp.Sync(); err != nil {
+		return "", err
+	}
+	if err := tmp.Close(); err != nil {
+		return "", err
+	}
+	ok = true
+	return tmpPath, nil
 }
 
 func atomicWriteFile(dst string, data []byte, beforeRename func(string) error) error {
