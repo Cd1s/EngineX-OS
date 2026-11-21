@@ -61,7 +61,7 @@ pick_host() {
         [[ -n "$host" ]] || continue
         gcc=$(probe "$host" 'gcc -dumpversion' || true)
         [[ $require_gcc14 == 1 && ${gcc%%.*} != 14 ]] && continue
-        queue=$(probe "$host" 'awk -v p=/var/lock/enginex-heavy.lock '\''$0 ~ p {n++} END {print n+0}'\'' /proc/locks' || true)
+        queue=$(probe "$host" 'ps -eo args= | awk '\''/[f]lock \/var\/lock\/enginex-heavy\.lock/ {n++} END {print n+0}'\''' || true)
         [[ $queue =~ ^[0-9]+$ ]] || queue=999999
         if [[ -z "$best" || $queue -lt $best_score ]]; then best=$host; best_score=$queue; fi
     done
