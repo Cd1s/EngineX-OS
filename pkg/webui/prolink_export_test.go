@@ -273,13 +273,19 @@ func TestLinkMasterTakenBackWhenNobodyHoldsIt(t *testing.T) {
 		ask := packet(0x26, 0x28, 11)
 		ask[0x1f], ask[0x21], ask[0x23], ask[0x27] = 1, 2, 4, 2
 		beat.WriteToUDP(ask, &net.UDPAddr{IP: net.IPv4(127, 64, 0, 5), Port: 50001})
-		beat.SetReadDeadline(time.Now().Add(time.Second))
-		b := make([]byte, 64)
-		if n, _, err := beat.ReadFromUDP(b); err != nil || n != 0x2c || b[10] != 0x27 {
-			t.Skipf("no answer to the request (beat port of the export in use?): %v", err)
+		// Our playing master deck sends beat packets (0x28) to the same port: read past
+		// them. One read used to get a beat packet, and the test skipped itself on
+		// every machine.
+		for until := time.Now().Add(2 * time.Second); time.Now().Before(until); {
+			beat.SetReadDeadline(until)
+			b := make([]byte, 128)
+			if n, _, err := beat.ReadFromUDP(b); err == nil && n == 0x2c && b[10] == 0x27 {
+				cdjStatus(0xa4)
+				ours(false, "the CDJ took master")
+				return
+			}
 		}
-		cdjStatus(0xa4)
-		ours(false, "the CDJ took master")
+		t.Fatal("no answer to the master request")
 	}
 	take()
 	// The CDJ lets go of master (its status no longer claims it) and nobody else has it.
