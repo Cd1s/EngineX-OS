@@ -16,6 +16,7 @@ import time
 import numpy as np
 from scipy.linalg import toeplitz
 from scipy.signal import fftconvolve
+from scipy.io import wavfile
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -26,8 +27,21 @@ STREAMS = (4, 2, 1, 3)
 EPS = 1e-12
 
 
+WAV_STREAMS = {0: "mixture.wav", 1: "drums.wav", 2: "bass.wav",
+               3: "other.wav", 4: "vocals.wav"}
+
+
 def decode(path, stream):
-    """Decode one stereo stream from a MUSDB18 STEMS container."""
+    """Decode one stereo stream from a MUSDB18 WAV or STEMS container."""
+    if path.is_dir():
+        rate, data = wavfile.read(path / WAV_STREAMS[stream])
+        if rate != 44100 or data.ndim != 2 or data.shape[1] != 2:
+            raise ValueError(f"{path}: expected stereo 44.1 kHz WAV")
+        if np.issubdtype(data.dtype, np.integer):
+            data = data.astype(np.float32) / np.iinfo(data.dtype).max
+        else:
+            data = data.astype(np.float32)
+        return data.T.copy()
     proc = subprocess.run(
         ["ffmpeg", "-v", "error", "-i", str(path), "-map", f"0:a:{stream}",
          "-ac", "2", "-ar", "44100", "-f", "f32le", "pipe:1"],
@@ -139,7 +153,10 @@ def main(argv=None):
     dataset = os.environ.get("MUSDB18_STEMS")
     if not dataset:
         parser.error("MUSDB18_STEMS must point to the extracted MUSDB18-7-STEMS directory")
-    tracks = sorted((Path(dataset) / args.split).glob("*.stem.mp4"))
+    split = Path(dataset) / args.split
+    tracks = sorted(p for p in split.iterdir()
+                    if (p.is_dir() and (p / "mixture.wav").exists()) or
+                    p.name.endswith(".stem.mp4"))
     if args.limit:
         tracks = tracks[:args.limit]
     if not tracks:
