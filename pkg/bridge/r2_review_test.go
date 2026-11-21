@@ -72,8 +72,12 @@ func TestExportSelectionFreshness(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if gotPDB := len(l.Tracks) == 5; gotPDB != tc.wantPDB {
-				t.Fatalf("export.pdb used=%v, want %v (%d tracks)", gotPDB, tc.wantPDB, len(l.Tracks))
+			wantFirst := uint32(77)
+			if tc.wantPDB {
+				wantFirst = 1
+			}
+			if len(l.Tracks) != 5 || l.Tracks[0].ID != wantFirst {
+				t.Fatalf("preferred source first ID=%d, want %d (%d tracks)", l.Tracks[0].ID, wantFirst, len(l.Tracks))
 			}
 		})
 	}

@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Cd1s/EngineX-OS/pkg/compat"
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
@@ -89,8 +90,16 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 	for _, tr := range rbLib.Tracks {
 		byID[tr.ID] = tr
 		if tr.Path != "" {
-			norm := strings.TrimPrefix(filepath.ToSlash(filepath.Clean(tr.Path)), "/")
-			byPath[norm] = tr
+			byPath[bridgeTrackPathKey(tr.Path)] = tr
+		}
+	}
+	oneLibraryIDs := map[string]uint32{}
+	if oneLibOK {
+		oneLibPath := filepath.Join(absMount, "PIONEER", "rekordbox", "exportLibrary.db")
+		if oneLib, err := rekordbox.ReadSQLite(ctx, oneLibPath, nil); err == nil {
+			for _, tr := range oneLib.Tracks {
+				oneLibraryIDs[bridgeTrackPathKey(tr.Path)] = tr.ID
+			}
 		}
 	}
 
@@ -125,7 +134,7 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 	}
 
 	type trackChange struct {
-		rbTrackID    uint32
+		path         string
 		analysisPath string
 		cues         []rekordbox.Cue
 	}
@@ -160,7 +169,7 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 			continue
 		}
 		changes = append(changes, trackChange{
-			rbTrackID:    rbTrack.ID,
+			path:         rbTrack.Path,
 			analysisPath: rbTrack.AnalysisPath,
 			cues:         nextCues,
 		})
@@ -185,7 +194,9 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 			continue
 		}
 		res.TracksChanged++
-		oneLibUpdates[ch.rbTrackID] = ch.cues
+		if id, ok := oneLibraryIDs[bridgeTrackPathKey(ch.path)]; ok {
+			oneLibUpdates[id] = ch.cues
+		}
 
 		baseRel := strings.TrimSuffix(datRel, filepath.Ext(datRel))
 		targets := []struct {
@@ -264,27 +275,23 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 }
 
 func readStickRekordboxLibrary(ctx context.Context, mountPath string) (*rekordbox.Library, bool, error) {
-	var errs []error
-	oneLibPath := filepath.Join(mountPath, "PIONEER", "rekordbox", "exportLibrary.db")
-	if _, err := os.Stat(oneLibPath); err == nil {
-		lib, err := rekordbox.ReadSQLite(ctx, oneLibPath, nil)
-		if err == nil {
+	r, err := compat.NewResolver(mountPath)
+	if err != nil {
+		return nil, false, err
+	}
+	lib, readable, err := readExportWithResolver(ctx, mountPath, r)
+	if err != nil {
+		if errors.Is(err, errNoLocalExport) {
+			return nil, false, fmt.Errorf("writeback: no rekordbox export found on %s", mountPath)
+		}
+		return nil, false, err
+	}
+	for _, read := range readable {
+		if !read.candidate.isPDB {
 			return lib, true, nil
 		}
-		errs = append(errs, err)
 	}
-	pdbPath := filepath.Join(mountPath, "PIONEER", "rekordbox", "export.pdb")
-	if _, err := os.Stat(pdbPath); err == nil {
-		lib, err := rekordbox.ReadPDB(pdbPath)
-		if err == nil {
-			return lib, false, nil
-		}
-		errs = append(errs, err)
-	}
-	if len(errs) > 0 {
-		return nil, false, errors.Join(errs...)
-	}
-	return nil, false, fmt.Errorf("writeback: no rekordbox export found on %s", mountPath)
+	return lib, false, nil
 }
 
 func resolveRekordboxTrack(srcJSON []byte, enginePath string, byID map[uint32]rekordbox.Track, byPath map[string]rekordbox.Track) (rekordbox.Track, bool) {
@@ -303,10 +310,14 @@ func resolveRekordboxTrack(srcJSON []byte, enginePath string, byID map[uint32]re
 		}
 	}
 	norm := strings.TrimPrefix(filepath.ToSlash(filepath.Clean(enginePath)), "../")
-	if tr, ok := byPath[norm]; ok {
+	if tr, ok := byPath[bridgeTrackPathKey(norm)]; ok {
 		return tr, true
 	}
 	return rekordbox.Track{}, false
+}
+
+func bridgeTrackPathKey(p string) string {
+	return foldPath(strings.TrimPrefix(filepath.ToSlash(filepath.Clean(p)), "/"))
 }
 
 func readStickTrackCues(mountPath, analysisPath string) []rekordbox.Cue {

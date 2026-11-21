@@ -3,7 +3,9 @@ package bridge
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log"
@@ -100,7 +102,7 @@ func exportCandidates(r *compat.Resolver, mount string) ([]exportCandidate, erro
 			oneLib = append(oneLib, c)
 		}
 	}
-	if len(oneLib) == 2 && oneLib[1].mtime.Sub(oneLib[0].mtime) > exportNewerMargin {
+	if len(oneLib) == 2 && exportTimeKnown(oneLib[0].mtime) && exportTimeKnown(oneLib[1].mtime) && oneLib[1].mtime.Sub(oneLib[0].mtime) > exportNewerMargin {
 		oneLib[0], oneLib[1] = oneLib[1], oneLib[0]
 	}
 
@@ -122,9 +124,9 @@ func exportCandidates(r *compat.Resolver, mount string) ([]exportCandidate, erro
 		return []exportCandidate{*pdb}, nil
 	case pdb == nil:
 		return oneLib, nil
-	case pdb.mtime.Sub(oneLib[0].mtime) > exportNewerMargin:
+	case exportTimeKnown(pdb.mtime) && exportTimeKnown(oneLib[0].mtime) && pdb.mtime.Sub(oneLib[0].mtime) > exportNewerMargin:
 		return append([]exportCandidate{*pdb}, oneLib...), nil
-	case oneLib[0].mtime.Sub(pdb.mtime) > exportNewerMargin:
+	case exportTimeKnown(pdb.mtime) && exportTimeKnown(oneLib[0].mtime) && oneLib[0].mtime.Sub(pdb.mtime) > exportNewerMargin:
 		return append(oneLib, *pdb), nil
 	default:
 		// On ties, retain the recorded source to preserve deck edits and lists.
@@ -152,6 +154,13 @@ func exportCandidates(r *compat.Resolver, mount string) ([]exportCandidate, erro
 	}
 }
 
+func exportTimeKnown(t time.Time) bool { return t.Year() >= 2000 }
+
+type readableExport struct {
+	candidate exportCandidate
+	library   *rekordbox.Library
+}
+
 // exportReads counts reads of a drive's own export (each may decrypt a OneLibrary).
 var exportReads atomic.Int64
 
@@ -160,20 +169,26 @@ var afterExportRead = func() {}
 
 func readExport(ctx context.Context, mount string) (*rekordbox.Library, error) {
 	exportReads.Add(1)
-	defer afterExportRead()
 	r, e := compat.NewResolver(mount)
 	if e != nil {
 		return nil, e
 	}
+	l, _, e := readExportWithResolver(ctx, mount, r)
+	return l, e
+}
+
+func readExportWithResolver(ctx context.Context, mount string, r *compat.Resolver) (*rekordbox.Library, []readableExport, error) {
+	defer afterExportRead()
 	candidates, e := exportCandidates(r, mount)
 	if e != nil {
-		return nil, e
+		return nil, nil, e
 	}
 	if len(candidates) == 0 {
-		return nil, errNoLocalExport
+		return nil, nil, errNoLocalExport
 	}
 	var errs []error
-	for i, c := range candidates {
+	readable := make([]readableExport, 0, len(candidates))
+	for _, c := range candidates {
 		var l *rekordbox.Library
 		var err error
 		if c.isPDB {
@@ -182,17 +197,178 @@ func readExport(ctx context.Context, mount string) (*rekordbox.Library, error) {
 			l, err = rekordbox.ReadSQLite(ctx, c.full, nil)
 		}
 		if err == nil {
-			return l, nil
+			readable = append(readable, readableExport{candidate: c, library: l})
+			continue
 		}
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		errs = append(errs, fmt.Errorf("%s: %w", c.rel, err))
-		if i+1 < len(candidates) {
-			log.Printf("rb-bridge: %s unreadable (%v); falling back to %s", c.rel, err, candidates[i+1].rel)
+		log.Printf("rb-bridge: %s unreadable (%v)", c.rel, err)
+	}
+	if len(readable) == 0 {
+		return nil, nil, errors.Join(errs...)
+	}
+	merged := mergeReadableExports(readable)
+	parts := make([]string, 0, len(readable))
+	for _, read := range readable {
+		parts = append(parts, fmt.Sprintf("%s tracks=%d playlists=%d", read.candidate.rel, len(read.library.Tracks), len(read.library.Playlists)))
+	}
+	log.Printf("rb-bridge: libraries read: %s", strings.Join(parts, ", "))
+	return merged, readable, nil
+}
+
+func mergeReadableExports(readable []readableExport) *rekordbox.Library {
+	if len(readable) == 1 {
+		return readable[0].library
+	}
+	out := &rekordbox.Library{Artwork: map[uint32]string{}, Keys: map[uint32]string{}}
+	usedTrackIDs := map[uint32]bool{}
+	byPath := map[string]uint32{}
+	usedPlaylistIDs := map[uint32]bool{}
+	playlistByKey := map[string]int{}
+
+	for sourceIndex, read := range readable {
+		sourceLabel := exportSourceLabel(read.candidate)
+		trackIDs := map[uint32]uint32{}
+		for _, original := range read.library.Tracks {
+			t := original
+			key := foldPath(t.Path)
+			if existing, ok := byPath[key]; ok {
+				trackIDs[original.ID] = existing
+				continue
+			}
+			id := original.ID
+			if sourceIndex > 0 {
+				id = stableExportID("track", key, usedTrackIDs)
+			} else if usedTrackIDs[id] {
+				id = stableExportID("track", key, usedTrackIDs)
+			}
+			t.ID = id
+			if id != original.ID {
+				t.RecordHash = rekordbox.RecordHash(t)
+			}
+			usedTrackIDs[id] = true
+			byPath[key] = id
+			trackIDs[original.ID] = id
+			out.Tracks = append(out.Tracks, t)
+		}
+		for id, value := range read.library.Artwork {
+			if mapped, ok := trackIDs[id]; ok {
+				out.Artwork[mapped] = value
+			}
+		}
+		for id, value := range read.library.Keys {
+			out.Keys[id] = value
+		}
+		if sourceIndex == 0 {
+			out.Columns = append(out.Columns, read.library.Columns...)
+		}
+
+		playlistIDs := map[uint32]uint32{0: 0}
+		pending := append([]rekordbox.Playlist(nil), read.library.Playlists...)
+		for len(pending) > 0 {
+			progress := false
+			remaining := make([]rekordbox.Playlist, 0, len(pending))
+			for _, original := range pending {
+				if original.ParentID != 0 {
+					if _, ok := playlistIDs[original.ParentID]; !ok {
+						remaining = append(remaining, original)
+						continue
+					}
+				}
+				p := original
+				p.ParentID = playlistIDs[original.ParentID]
+				var tracks []uint32
+				for _, id := range original.Tracks {
+					if mapped, ok := trackIDs[id]; ok {
+						tracks = append(tracks, mapped)
+					}
+				}
+				p.Tracks = tracks
+				key := playlistPathKey(read.library.Playlists, original.ID)
+				if existingIndex, ok := playlistByKey[key]; ok && samePlaylistTracks(out.Playlists[existingIndex].Tracks, p.Tracks) {
+					playlistIDs[original.ID] = out.Playlists[existingIndex].ID
+					progress = true
+					continue
+				}
+				if existingIndex, ok := playlistByKey[key]; ok {
+					p.Name += " (" + sourceLabel + ")"
+					_ = existingIndex
+				}
+				if sourceIndex > 0 {
+					p.ID = stableExportID("playlist", sourceLabel+"\x00"+key, usedPlaylistIDs)
+				} else if usedPlaylistIDs[p.ID] {
+					p.ID = stableExportID("playlist", key, usedPlaylistIDs)
+				}
+				usedPlaylistIDs[p.ID] = true
+				playlistIDs[original.ID] = p.ID
+				if _, ok := playlistByKey[key]; !ok {
+					playlistByKey[key] = len(out.Playlists)
+				}
+				out.Playlists = append(out.Playlists, p)
+				progress = true
+			}
+			if !progress {
+				// A malformed parent cycle cannot be merged. Keep the readable tracks
+				// and let the library validator report the broken playlist tree.
+				break
+			}
+			pending = remaining
 		}
 	}
-	return nil, errors.Join(errs...)
+	return out
+}
+
+func exportSourceLabel(c exportCandidate) string {
+	if c.isPDB {
+		return "Device Library"
+	}
+	return "OneLibrary"
+}
+
+func stableExportID(kind, key string, used map[uint32]bool) uint32 {
+	sum := sha256.Sum256([]byte("rb-bridge:" + kind + ":" + key))
+	id := binary.LittleEndian.Uint32(sum[:]) | 0x80000000
+	for id == 0 || used[id] {
+		id++
+	}
+	return id
+}
+
+func playlistPathKey(playlists []rekordbox.Playlist, id uint32) string {
+	byID := make(map[uint32]rekordbox.Playlist, len(playlists))
+	for _, p := range playlists {
+		byID[p.ID] = p
+	}
+	var names []string
+	for {
+		p, ok := byID[id]
+		if !ok {
+			break
+		}
+		names = append(names, p.Name)
+		if p.ParentID == 0 {
+			break
+		}
+		id = p.ParentID
+	}
+	for i, j := 0, len(names)-1; i < j; i, j = i+1, j-1 {
+		names[i], names[j] = names[j], names[i]
+	}
+	return strings.Join(names, "/")
+}
+
+func samePlaylistTracks(a, b []uint32) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // ensureWritableEngineLibrary mounts an ext4-backed overlay onto "<mount>/Engine Library"
