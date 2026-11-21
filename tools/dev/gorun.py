@@ -129,7 +129,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('pkgs', nargs='+'); ap.add_argument('--seed'); ap.add_argument('--defer'); ap.add_argument('--only')
     ap.add_argument('-p', type=int, default=6, help='go test -p of the unsharded packages'); ap.add_argument('--jobs', type=int, default=8, help='go test processes at once'); ap.add_argument('--no-cache', action='store_true')
-    ap.add_argument('--no-race', action='store_true'); ap.add_argument('--timeout', default='30m')
+    ap.add_argument('--no-race', action='store_true'); ap.add_argument('--timeout', default=os.environ.get('ENGINEX_GO_TIMEOUT', '30m'), help='go test -timeout of every invocation (pkg/bridge under -race needs ~13 min on an ARM host)')
     ap.add_argument('--no-prebuild', action='store_true', help='do not compile all test binaries once before the tests start')
     ap.add_argument('--rerun', action='store_true', help='run failed tests alone once more; a pass is reported as flaky, not failed')
     ap.add_argument('--json'); ap.add_argument('--top', type=int, default=20); ap.add_argument('--suggest-seed')
@@ -151,7 +151,7 @@ def main():
         jobs.append({'label': label, 'cmd': cmd, 'env': dict(os.environ, TMPDIR=wd)})
 
     def listing(imp):
-        out = sh(['go', 'test', '-vet=off', '-list', '.*', imp] + ([] if a.no_race else ['-race']))
+        out = sh(['go', 'test', '-vet=off', '-timeout', a.timeout, '-list', '.*', imp] + ([] if a.no_race else ['-race']))
         return [x for x in out.stdout.split() if NAME.match(x)]
 
     special = {imp: d for imp, d in dirs.items() if d in seed or d in defer or d in only}
@@ -193,7 +193,7 @@ def main():
             built = [imp for imp in dirs if not only or dirs[imp] in only]
             t_pre = time.monotonic()
             wd = os.path.join(tmp, 'prebuild'); os.mkdir(wd); os.chmod(wd, 0o1777)
-            pre = subprocess.run(['go', 'test', '-vet=off', '-run', '^$', '-p', str(max(2, a.jobs))] + ([] if a.no_race else ['-race']) + built,
+            pre = subprocess.run(['go', 'test', '-vet=off', '-timeout', a.timeout, '-run', '^$', '-p', str(max(2, a.jobs))] + ([] if a.no_race else ['-race']) + built,
                                  env=dict(os.environ, TMPDIR=wd), capture_output=True, text=True)
             prebuild = time.monotonic() - t_pre
             if pre.returncode and 'build failed' in pre.stdout + pre.stderr:
@@ -221,6 +221,9 @@ def main():
         sys.stdout.write(''.join(state['out'].get(key, [])))
     for pkg in bad_pkgs:
         sys.stdout.write(''.join(state['out'].get((pkg, None), [])))
+        for (p, t), lines in state['out'].items():  # tests that never finished (timeout, panic, os.Exit) have no result of their own
+            if p == pkg and t and (p, t) not in tests:
+                sys.stdout.write(''.join(lines))
     for label, rc in state['rc'].items():
         if rc and not bad_pkgs and not failed and not flaky:
             print(f'gorun: job {label} exited {rc}\n{state["err"][label]}', file=sys.stderr)

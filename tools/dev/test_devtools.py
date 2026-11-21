@@ -335,6 +335,16 @@ class GorunTest(unittest.TestCase):
             os.remove(os.path.join(tmp, 'mark'))
             self.assertEqual(run().returncode, 1, 'without --rerun the failure stands')
 
+    def test_every_go_test_process_gets_the_explicit_timeout(self):
+        with tempfile.TemporaryDirectory() as root:
+            self.module(root)
+            write(root, 'b/b_test.go', 'package b\n\nimport (\n\t"testing"\n\t"time"\n)\n\nfunc TestB(t *testing.T) { time.Sleep(4 * time.Second) }\n')
+            seed = os.path.join(root, 'seed.json'); jdump({'b': {'shards': 1, 'tests': {}}}, seed)
+            for extra in ([], ['--seed', seed]):  # plain job and sharded job
+                p = self.gorun(root, '--timeout', '1s', *extra, './b')
+                self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+                self.assertIn('test timed out after 1s', p.stdout + p.stderr)
+
     def test_failing_test_fails_the_run(self):
         with tempfile.TemporaryDirectory() as root:
             self.module(root)
