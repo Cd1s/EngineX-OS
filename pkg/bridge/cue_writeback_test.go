@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"math"
 	"net/url"
 	"os"
 	"os/exec"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/Cd1s/EngineX-OS/internal/testfixture"
 	"github.com/Cd1s/EngineX-OS/pkg/bridge"
+	"github.com/Cd1s/EngineX-OS/pkg/compat"
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
@@ -415,5 +417,473 @@ func TestWriteBackCuesFallsBackToPDBWhenOneLibUnreadable(t *testing.T) {
 	}
 	if res.TracksChanged != 1 || res.FilesUpdated == 0 || res.OneLibraryUpdated {
 		t.Fatalf("unexpected result: %+v", res)
+	}
+}
+
+func TestWriteBackCuesDotPioneerMacOSStickAndExactPadSlots(t *testing.T) {
+	ctx := context.Background()
+	stick := t.TempDir()
+	testfixture.LargeExport(t, stick, 2)
+
+	// Simulate a real macOS HFS+ rekordbox 7 stick: hidden .PIONEER root and
+	// analysisDataFilePath starting with /.PIONEER/USBANLZ/... plus full
+	// Device Library Plus change-tracking and 150fps cue columns.
+	if err := os.Rename(filepath.Join(stick, "PIONEER"), filepath.Join(stick, ".PIONEER")); err != nil {
+		t.Fatal(err)
+	}
+	srcPlain := filepath.Join("..", "rekordbox", "testdata", "sqlcipher4_onelibrary_decrypted.db")
+	srcEnc := filepath.Join("..", "rekordbox", "testdata", "sqlcipher4_onelibrary.db")
+	salt, err := rekordbox.ReadSQLCipherSalt(srcEnc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpPlain := filepath.Join(t.TempDir(), "rb7-macos.db")
+	rawPlain, err := os.ReadFile(srcPlain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tmpPlain, rawPlain, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: tmpPlain}).String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`
+		PRAGMA journal_mode=DELETE;
+		ALTER TABLE content ADD COLUMN analysisDataFilePath varchar;
+		ALTER TABLE content ADD COLUMN hasModified integer;
+		ALTER TABLE content ADD COLUMN cueUpdateCount integer;
+		ALTER TABLE cue ADD COLUMN in150FramePerSec integer;
+		ALTER TABLE cue ADD COLUMN out150FramePerSec integer;
+		DELETE FROM content;
+		DELETE FROM cue;
+		INSERT INTO content(content_id, title, bpmx100, length, path, samplingRate, djComment, analysisDataFilePath, hasModified, cueUpdateCount) VALUES
+			(1, 'Track 1', 12800, 4, ?, 44100, '', '/.PIONEER/USBANLZ/P001/ANLZ0000.DAT', 0, NULL),
+			(2, 'Track 2', 12400, 4, ?, 44100, '', '/.PIONEER/USBANLZ/P001/ANLZ0000.DAT', 0, NULL);
+	`, "/"+testfixture.LargeTrackPath(1), "/"+testfixture.LargeTrackPath(2))
+	_ = db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	in, err := os.Open(tmpPlain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := in.Stat()
+	if err != nil {
+		_ = in.Close()
+		t.Fatal(err)
+	}
+	oneLibPath := filepath.Join(stick, ".PIONEER", "rekordbox", "exportLibrary.db")
+	out, err := os.Create(oneLibPath)
+	if err != nil {
+		_ = in.Close()
+		t.Fatal(err)
+	}
+	err = rekordbox.EncryptSQLCipher4(ctx, in, st.Size(), out, salt, []byte("r8gddnr4k847830ar6cqzbkk0el6qytmb3trbbx805jm74vez64i5o8fnrqryqls"))
+	_ = out.Close()
+	_ = in.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := bridge.ConvertAtMount(ctx, stick, enginedb.Options{}, true); err != nil {
+		t.Fatalf("ConvertAtMount(.PIONEER): %v", err)
+	}
+
+	// Simulate deck edits on track 1 (using the MP3 file's real RekordboxOffset
+	// so Engine's decoded sample positions match what an Engine deck writes):
+	// - Hot Cue A (pad 1) at 1000ms
+	// - Hot Loop B (pad 2) at 2000..3000ms, activeOnLoadLoops bit 1 set
+	// - Hot Cue H (pad 8) at 3500ms
+	// - Memory Cue at 250ms (sets MainCue = 250ms in quickCues)
+	// - Independent Saved Loop (memory loop) at 400..800ms
+	audioInfo, err := compat.AudioHeader(filepath.Join(stick, filepath.FromSlash(testfixture.LargeTrackPath(1))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	perf, err := enginedb.EncodePerformance(rekordbox.Track{Duration: 4, SampleRate: 44100, StartOffsetSamples: audioInfo.RekordboxOffset()}, &rekordbox.Analysis{
+		Beats: []rekordbox.Beat{{TimeMS: 250, BPM: 128, Number: 1}},
+		Cues: []rekordbox.Cue{
+			{HotCue: 1, TimeMS: 1000, Name: "Pad A", Color: [4]byte{255, 0x30, 0x5a, 0xff}, ColorCode: 1},
+			{HotCue: 2, TimeMS: 2000, EndMS: 3000, Loop: true, Active: true, Name: "Loop B", Color: [4]byte{255, 0x00, 0xe0, 0xff}, ColorCode: 9},
+			{HotCue: 8, TimeMS: 3500, Name: "Pad H", Color: [4]byte{255, 0xff, 0x37, 0x6f}, ColorCode: 45},
+			{HotCue: 0, TimeMS: 250, Name: "Mémoire", ColorID: 5},
+			{HotCue: 0, TimeMS: 400, EndMS: 800, Loop: true, Name: "Saved Loop", ColorID: 3},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mPath := filepath.Join(stick, "Engine Library", "Database2", "m.db")
+	mdb, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: mPath}).String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = mdb.Exec(`UPDATE PerformanceData SET trackData=?, quickCues=?, loops=?, activeOnLoadLoops=? WHERE trackId=1`,
+		perf.TrackData, perf.QuickCues, perf.Loops, perf.ActiveLoops)
+	_ = mdb.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{DateDir: "2026-11-21", SkipPreparingCheck: true})
+	if err != nil {
+		t.Fatalf("WriteBackCues(.PIONEER): %v", err)
+	}
+	if res.TracksChecked != 2 || res.TracksChanged != 1 || !res.OneLibraryUpdated {
+		t.Fatalf("unexpected WriteBackResult: %+v", res)
+	}
+
+	// Verify .PIONEER/USBANLZ/P001/ANLZ0000.EXT has exact Hot Cue pads 1, 2 (active loop), 8 — no shift, no duplicates, no synthetic "CUE" hot cue.
+	extBytes, err := os.ReadFile(filepath.Join(stick, ".PIONEER", "USBANLZ", "P001", "ANLZ0000.EXT"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	aExt, err := rekordbox.ParseAnalysis(extBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hotByPad := map[uint32][]rekordbox.Cue{}
+	var memLoops []rekordbox.Cue
+	for _, c := range aExt.Cues {
+		if c.HotCue > 0 {
+			hotByPad[c.HotCue] = append(hotByPad[c.HotCue], c)
+		} else if c.Loop {
+			memLoops = append(memLoops, c)
+		}
+		if c.Name == "CUE" {
+			t.Fatalf("synthetic Main CUE leaked into written cues: %+v", aExt.Cues)
+		}
+	}
+	if len(hotByPad) != 3 {
+		t.Fatalf("expected exactly 3 hot cue pads (1,2,8), got %+v", hotByPad)
+	}
+	if len(hotByPad[1]) != 1 || hotByPad[1][0].Loop || hotByPad[1][0].Name != "Pad A" || hotByPad[1][0].TimeMS != 1000 {
+		t.Fatalf("Hot Cue A mismatch: %+v", hotByPad[1])
+	}
+	if len(hotByPad[2]) != 1 || !hotByPad[2][0].Loop || !hotByPad[2][0].Active || hotByPad[2][0].Name != "Loop B" || hotByPad[2][0].TimeMS != 2000 || hotByPad[2][0].EndMS != 3000 {
+		t.Fatalf("Hot Loop B mismatch: %+v", hotByPad[2])
+	}
+	if len(hotByPad[8]) != 1 || hotByPad[8][0].Loop || hotByPad[8][0].Name != "Pad H" || hotByPad[8][0].TimeMS != 3500 {
+		t.Fatalf("Hot Cue H mismatch: %+v", hotByPad[8])
+	}
+	var foundSavedLoop bool
+	for _, ml := range memLoops {
+		if ml.TimeMS == 400 && ml.EndMS == 800 && ml.Name == "Saved Loop" {
+			foundSavedLoop = true
+		}
+	}
+	if !foundSavedLoop {
+		t.Fatalf("independent Saved Loop missing from memory loops: %+v", memLoops)
+	}
+
+	// Verify exportLibrary.db has exact cues and round-trips through ReadSQLite.
+	lib, err := rekordbox.ReadSQLite(ctx, oneLibPath, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tr1 rekordbox.Track
+	for _, tr := range lib.Tracks {
+		if tr.ID == 1 {
+			tr1 = tr
+		}
+	}
+	var sawA, sawB, sawH bool
+	for _, c := range tr1.Cues {
+		switch c.HotCue {
+		case 1:
+			sawA = !c.Loop && c.Name == "Pad A" && c.TimeMS == 1000
+		case 2:
+			sawB = c.Loop && c.Active && c.Name == "Loop B" && c.TimeMS == 2000 && c.EndMS == 3000
+		case 8:
+			sawH = !c.Loop && c.Name == "Pad H" && c.TimeMS == 3500
+		}
+	}
+	if !sawA || !sawB || !sawH {
+		t.Fatalf("exportLibrary.db track 1 cues mismatch (sawA=%v sawB=%v sawH=%v): %+v", sawA, sawB, sawH, tr1.Cues)
+	}
+
+	// Re-inserting the stick without rekordbox edits must fast-bypass (stamp refreshed).
+	rMount, err := bridge.ConvertAtMount(ctx, stick, enginedb.Options{}, false)
+	if err != nil {
+		t.Fatalf("re-insert ConvertAtMount: %v", err)
+	}
+	if !rMount.Bypassed {
+		t.Fatalf("expected re-insert ConvertAtMount to bypass after writeback stamp refresh, got %+v", rMount)
+	}
+
+	// Second write-back with no new edits must be a no-op.
+	res2, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{DateDir: "2026-11-22", SkipPreparingCheck: true})
+	if err != nil {
+		t.Fatalf("second WriteBackCues: %v", err)
+	}
+	if res2.TracksChanged != 0 {
+		t.Fatalf("second WriteBackCues TracksChanged=%d, want 0", res2.TracksChanged)
+	}
+}
+
+func TestWriteBackCuesRestoresMP3RekordboxOffsetAndSkipsUntouched(t *testing.T) {
+	ctx := context.Background()
+	stick := t.TempDir()
+	const trackRel = "Contents/mp3/offset.mp3"
+	copyMP3Fixture(t, stick, trackRel, "01-lame-cbr-info-44100.mp3")
+	audioInfo, err := compat.AudioHeader(filepath.Join(stick, filepath.FromSlash(trackRel)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	offset := float64(audioInfo.RekordboxOffset())
+	if offset <= 0 {
+		t.Fatalf("expected positive MP3 RekordboxOffset, got %v", offset)
+	}
+
+	// Build a minimal exportLibrary.db + ANLZ (.DAT and .EXT) with Hot Cue A at 40ms
+	// (within the short 1878-byte MP3 test fixture's sample count, and > 25ms encoder offset).
+	anlzRel := "PIONEER/USBANLZ/P001/ANLZ0000.DAT"
+	baseANLZ := testfixture.DAT()
+	initCues := []rekordbox.Cue{
+		{HotCue: 1, TimeMS: 40, Name: "OrigA", Color: [4]byte{255, 0x30, 0x5a, 0xff}, ColorCode: 1},
+	}
+	datBytes, _, err := rekordbox.RewriteANLZCues(baseANLZ, initCues, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	extBytes, _, err := rekordbox.RewriteANLZCues(testfixture.EXT(), initCues, true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testfixture.Write(t, stick, anlzRel, datBytes)
+	testfixture.Write(t, stick, "PIONEER/USBANLZ/P001/ANLZ0000.EXT", extBytes)
+	expPath := filepath.Join(stick, "PIONEER", "rekordbox", "exportLibrary.db")
+	if err := os.MkdirAll(filepath.Dir(expPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	expDB, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: expPath}).String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = expDB.Exec(`
+		PRAGMA journal_mode=DELETE;
+		CREATE TABLE content(content_id INTEGER PRIMARY KEY, title TEXT, path TEXT, bpmx100 INTEGER, length INTEGER, samplingRate INTEGER, analysisDataFilePath TEXT, hasModified INTEGER, cueUpdateCount INTEGER);
+		CREATE TABLE cue(cue_id INTEGER PRIMARY KEY, content_id INTEGER, kind INTEGER, colorTableIndex INTEGER, cueComment TEXT, isActiveLoop INTEGER, beatLoopNumerator INTEGER, beatLoopDenominator INTEGER, inUsec INTEGER, outUsec INTEGER, in150FramePerSec INTEGER, out150FramePerSec INTEGER);
+		INSERT INTO content VALUES(1, 'OffsetMP3', ?, 12000, 10, ?, ?, 0, NULL);
+	`, "/"+trackRel, audioInfo.SampleRate, "/"+anlzRel)
+	_ = expDB.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := bridge.ConvertAtMount(ctx, stick, enginedb.Options{}, true); err != nil {
+		t.Fatalf("ConvertAtMount: %v", err)
+	}
+
+	// Even if BridgeWritten is cleared (simulating older bridge state), restoring
+	// RekordboxOffset must match the original 40ms cue with zero spurious diff.
+	statePath := filepath.Join(stick, "Engine Library", "Database2", ".rb-bridge-state.db")
+	sdb, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: statePath}).String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = sdb.Exec(`DELETE FROM BridgeWritten`)
+	_ = sdb.Close()
+
+	resUntouched, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{DateDir: "2026-11-21", SkipPreparingCheck: true})
+	if err != nil {
+		t.Fatalf("WriteBackCues untouched MP3: %v", err)
+	}
+	if resUntouched.TracksChanged != 0 {
+		t.Fatalf("untouched MP3 falsely marked changed (missing RekordboxOffset restoration?): %+v", resUntouched)
+	}
+
+	// Now add Hot Cue B on the deck at Engine's 65ms-minus-offset position.
+	perf, err := enginedb.EncodePerformance(
+		rekordbox.Track{Duration: 10, SampleRate: audioInfo.SampleRate, SampleCount: audioInfo.Samples, StartOffsetSamples: audioInfo.RekordboxOffset()},
+		&rekordbox.Analysis{
+			Beats: []rekordbox.Beat{{TimeMS: 40, BPM: 120, Number: 1}},
+			Cues: []rekordbox.Cue{
+				{HotCue: 1, TimeMS: 40, Name: "OrigA", Color: [4]byte{255, 0x30, 0x5a, 0xff}, ColorCode: 1},
+				{HotCue: 2, TimeMS: 65, Name: "NewB", Color: [4]byte{255, 0x00, 0xe0, 0xff}, ColorCode: 9},
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mPath := filepath.Join(stick, "Engine Library", "Database2", "m.db")
+	mdb, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: mPath}).String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = mdb.Exec(`UPDATE PerformanceData SET trackData=?, quickCues=?, loops=? WHERE trackId=1`,
+		perf.TrackData, perf.QuickCues, perf.Loops)
+	_ = mdb.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resEdit, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{DateDir: "2026-11-21", SkipPreparingCheck: true})
+	if err != nil {
+		t.Fatalf("WriteBackCues edited MP3: %v", err)
+	}
+	if resEdit.TracksChanged != 1 {
+		t.Fatalf("TracksChanged=%d, want 1", resEdit.TracksChanged)
+	}
+	afterExt, err := os.ReadFile(filepath.Join(stick, "PIONEER", "USBANLZ", "P001", "ANLZ0000.EXT"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	aAfter, err := rekordbox.ParseAnalysis(afterExt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotMS := map[uint32]uint32{}
+	for _, c := range aAfter.Cues {
+		if c.HotCue > 0 {
+			gotMS[c.HotCue] = c.TimeMS
+		}
+	}
+	if math.Abs(float64(gotMS[1])-40) > 1 || math.Abs(float64(gotMS[2])-65) > 1 {
+		t.Fatalf("MP3 cues shifted by encoder offset: got pad1=%dms pad2=%dms, want ~40ms and ~65ms", gotMS[1], gotMS[2])
+	}
+}
+
+func TestWriteBackCuesDetectsActiveLoopDeactivation(t *testing.T) {
+	ctx := context.Background()
+	stick := t.TempDir()
+	testfixture.Export(t, stick)
+	// Seed track 1 (2s WAV) with an active hot loop in .DAT and .EXT, then import into Engine.
+	anlzBase := filepath.Join(stick, "PIONEER", "USBANLZ", "P001", "ANLZ0000")
+	initCues := []rekordbox.Cue{
+		{HotCue: 1, TimeMS: 500, EndMS: 1500, Loop: true, Active: true, Name: "ActLoop", Color: [4]byte{255, 0x00, 0xe0, 0xff}, ColorCode: 9},
+	}
+	for _, tc := range []struct {
+		ext      string
+		extended bool
+	}{
+		{".DAT", false},
+		{".EXT", true},
+	} {
+		raw, err := os.ReadFile(anlzBase + tc.ext)
+		if err != nil {
+			t.Fatal(err)
+		}
+		updated, _, err := rekordbox.RewriteANLZCues(raw, initCues, tc.extended, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(anlzBase+tc.ext, updated, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := bridge.ConvertAtMount(ctx, stick, enginedb.Options{}, true); err != nil {
+		t.Fatalf("ConvertAtMount: %v", err)
+	}
+	// Deactivate the active loop on the deck without altering beatData/quickCues/loops
+	// (so BridgeWritten digest still matches).
+	mPath := filepath.Join(stick, "Engine Library", "Database2", "m.db")
+	mdb, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: mPath}).String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mdb.Exec(`UPDATE PerformanceData SET activeOnLoadLoops = 0 WHERE trackId = 1`); err != nil {
+		_ = mdb.Close()
+		t.Fatal(err)
+	}
+	_ = mdb.Close()
+
+	res, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{DateDir: "2026-11-21", SkipPreparingCheck: true})
+	if err != nil {
+		t.Fatalf("WriteBackCues: %v", err)
+	}
+	if res.TracksChanged != 1 {
+		t.Fatalf("expected active-loop deactivation to be detected, got %+v", res)
+	}
+	afterExt, err := os.ReadFile(anlzBase + ".EXT")
+	if err != nil {
+		t.Fatal(err)
+	}
+	aAfter, err := rekordbox.ParseAnalysis(afterExt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range aAfter.Cues {
+		if c.HotCue == 1 && c.Loop {
+			if c.Active {
+				t.Fatalf("expected Hot Loop A Active=false after deactivation, got %+v", c)
+			}
+			return
+		}
+	}
+	t.Fatalf("Hot Loop A missing after writeback: %+v", aAfter.Cues)
+}
+
+func TestWriteBackCuesRoundTripAddThenDelete(t *testing.T) {
+	ctx := context.Background()
+	stick := t.TempDir()
+	testfixture.Export(t, stick)
+	if _, err := bridge.ConvertAtMount(ctx, stick, enginedb.Options{}, true); err != nil {
+		t.Fatalf("ConvertAtMount: %v", err)
+	}
+	mPath := filepath.Join(stick, "Engine Library", "Database2", "m.db")
+	mdb, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: mPath}).String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var origQuick []byte
+	if err := mdb.QueryRow(`SELECT quickCues FROM PerformanceData WHERE trackId = 1`).Scan(&origQuick); err != nil {
+		_ = mdb.Close()
+		t.Fatal(err)
+	}
+	// Session 1: set Hot Cue A on deck and write back on eject.
+	perf, err := enginedb.EncodePerformance(rekordbox.Track{Duration: 2, SampleRate: 44100}, &rekordbox.Analysis{
+		Beats: []rekordbox.Beat{{TimeMS: 250, BPM: 120, Number: 1}},
+		Cues: []rekordbox.Cue{
+			{HotCue: 1, TimeMS: 750, Name: "Drop", Color: [4]byte{255, 0x00, 0xe0, 0xff}, ColorCode: 9},
+		},
+	})
+	if err != nil {
+		_ = mdb.Close()
+		t.Fatal(err)
+	}
+	if _, err := mdb.Exec(`UPDATE PerformanceData SET quickCues = ? WHERE trackId = 1`, perf.QuickCues); err != nil {
+		_ = mdb.Close()
+		t.Fatal(err)
+	}
+	_ = mdb.Close()
+
+	res1, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{DateDir: "2026-11-21", OnEject: true})
+	if err != nil || res1.TracksChanged != 1 {
+		t.Fatalf("session 1 WriteBackCues: res=%+v err=%v", res1, err)
+	}
+
+	// Session 2: user deletes Hot Cue A on deck, restoring the exact original
+	// import quickCues blob (and therefore the original BridgeWritten digest).
+	mdb2, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: mPath}).String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mdb2.Exec(`UPDATE PerformanceData SET quickCues = ? WHERE trackId = 1`, origQuick); err != nil {
+		_ = mdb2.Close()
+		t.Fatal(err)
+	}
+	_ = mdb2.Close()
+
+	res2, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{DateDir: "2026-11-21", OnEject: true})
+	if err != nil || res2.TracksChanged != 1 {
+		t.Fatalf("session 2 delete WriteBackCues: expected deletion to be written back, got res=%+v err=%v", res2, err)
+	}
+	extBytes, err := os.ReadFile(filepath.Join(stick, "PIONEER", "USBANLZ", "P001", "ANLZ0000.EXT"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := rekordbox.ParseAnalysis(extBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range a.Cues {
+		if c.HotCue == 1 {
+			t.Fatalf("Hot Cue A still present on stick after deletion writeback: %+v", c)
+		}
 	}
 }

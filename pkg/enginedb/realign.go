@@ -22,6 +22,11 @@ import (
 // it with a decoder attached, so no row carries it any more. A row of before this record
 // still has the mark, or has lost it to Engine.
 
+// WrittenDigest names the content of a row's grid, cues and loops, however it is compressed.
+func WrittenDigest(beats, cues, loops []byte) []byte {
+	return writtenDigest(beats, cues, loops)
+}
+
 // writtenDigest names the content of a row's grid, cues and loops, however it is compressed.
 func writtenDigest(beats, cues, loops []byte) []byte {
 	h := sha256.New()

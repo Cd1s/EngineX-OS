@@ -153,3 +153,26 @@ func TestRBBridgeLogsDevicesNotPackets(t *testing.T) {
 		t.Fatalf("journal:\n%s\nwant:\n%s", strings.Join(lines, "\n"), strings.Join(want, "\n"))
 	}
 }
+
+func TestRBBridgeWriteBackOnEjectFlag(t *testing.T) {
+	root := t.TempDir()
+	testfixture.Export(t, root)
+	var out bytes.Buffer
+	if err := RBBridge([]string{"--mount-path", root}, &out); err != nil {
+		t.Fatalf("initial mount import: %v", err)
+	}
+	out.Reset()
+	if err := RBBridge([]string{"--mount-path", root, "--writeback-cues", "--on-eject"}, &out); err != nil {
+		t.Fatalf("writeback --on-eject: %v", err)
+	}
+	var res struct {
+		TracksChecked int `json:"tracksChecked"`
+		TracksChanged int `json:"tracksChanged"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatalf("decode writeback result %q: %v", &out, err)
+	}
+	if res.TracksChecked == 0 || res.TracksChanged != 0 {
+		t.Fatalf("unexpected untouched writeback result: %+v", res)
+	}
+}

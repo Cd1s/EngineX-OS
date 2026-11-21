@@ -45,6 +45,7 @@ func RBBridge(args []string, stdout io.Writer) error {
 	full := fs.Bool("full", false, "with --mount-path: read every file for cues and waveforms, even if unchanged")
 	migrateArt := fs.Bool("migrate-artwork", false, "with --mount-path: only give an existing library the cover files Engine Link needs; Engine must not have the volume open")
 	writebackCues := fs.Bool("writeback-cues", false, "with --mount-path: write modified Engine Hot Cues, Memory Cues, and Loops back to the Rekordbox stick")
+	onEject := fs.Bool("on-eject", false, "with --writeback-cues: invoked by the eject hook before unmounting")
 	smart := fs.Uint("smart-match", 0, "optional recommendation playlist relative to this Rekordbox track ID")
 	defaultStateFile := "/tmp/enginex-prolink.json"
 	if env := os.Getenv("ENGINEX_PROLINK_STATE"); env != "" {
@@ -107,7 +108,7 @@ func RBBridge(args []string, stdout io.Writer) error {
 		return err
 	}
 	if *mount != "" && *writebackCues {
-		r, err := bridge.WriteBackCues(ctx, *mount, bridge.WriteBackOptions{})
+		r, err := bridge.WriteBackCues(ctx, *mount, bridge.WriteBackOptions{OnEject: *onEject})
 		if err != nil {
 			return err
 		}

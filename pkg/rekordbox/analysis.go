@@ -156,7 +156,7 @@ func (a *Analysis) section(tag string, s []byte, h int) error {
 					if size > q {
 						c.ColorCode = p[q]
 					}
-					if size >= q+4 {
+					if size >= q+4 && (c.HotCue > 0 || p[q] != 0 || p[q+1] != 0 || p[q+2] != 0 || p[q+3] != 0) {
 						c.Color = [4]byte{255, p[q+1], p[q+2], p[q+3]}
 					}
 				}

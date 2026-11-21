@@ -8,8 +8,40 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 )
+
+var rekordboxMemoryColors = [8][3]byte{
+	{255, 0, 127}, // 1 Pink
+	{255, 0, 0},   // 2 Red
+	{255, 127, 0}, // 3 Orange
+	{255, 255, 0}, // 4 Yellow
+	{0, 255, 0},   // 5 Green
+	{0, 255, 255}, // 6 Aqua
+	{0, 0, 255},   // 7 Blue
+	{127, 0, 255}, // 8 Purple
+}
+
+// NearestMemoryColorID maps an RGB color to the closest 1-based index in
+// rekordbox's 8-entry memory cue color table (1..8). Returns 0 if rgb is zero.
+func NearestMemoryColorID(rgb [4]byte) byte {
+	if rgb == [4]byte{} {
+		return 0
+	}
+	best, distance := byte(1), int(^uint(0)>>1)
+	for i, p := range rekordboxMemoryColors {
+		d := 0
+		for j := range p {
+			delta := int(p[j]) - int(rgb[j+1])
+			d += delta * delta
+		}
+		if d < distance {
+			best, distance = byte(i+1), d
+		}
+	}
+	return best
+}
 
 // NearestCueColorCode maps an RGB color to the closest 1-based index in
 // rekordboxCuePalette (1..62). Returns 0 if rgb has no alpha/color set.
@@ -165,7 +197,41 @@ func applyCueUpdatesSQLite(ctx context.Context, plainPath string, updates map[ui
 	if err != nil {
 		return err
 	}
+	contentCols, _ := tableColumns(ctx, db, "content")
 	hasBeatLoop := cols["beatloopnumerator"] && cols["beatloopdenominator"]
+	has150FPS := cols["in150framepersec"] && cols["out150framepersec"]
+
+	colNames := []string{"content_id", "kind", "colorTableIndex", "cueComment", "isActiveLoop"}
+	if hasBeatLoop {
+		colNames = append(colNames, "beatLoopNumerator", "beatLoopDenominator")
+	}
+	colNames = append(colNames, "inUsec", "outUsec")
+	if has150FPS {
+		colNames = append(colNames, "in150FramePerSec", "out150FramePerSec")
+	}
+	placeholders := make([]string, len(colNames))
+	for i := range placeholders {
+		placeholders[i] = "?"
+	}
+	insertSQL := fmt.Sprintf("INSERT INTO cue(%s) VALUES(%s)", strings.Join(colNames, ", "), strings.Join(placeholders, ", "))
+
+	var contentSets []string
+	if contentCols["hasmodified"] {
+		contentSets = append(contentSets, "hasModified = 1")
+	}
+	if contentCols["cueupdatecount"] {
+		contentSets = append(contentSets, "cueUpdateCount = COALESCE(cueUpdateCount, 0) + 1")
+	}
+	contentUpdateSQL := ""
+	if len(contentSets) > 0 && contentCols["content_id"] {
+		contentUpdateSQL = "UPDATE content SET " + strings.Join(contentSets, ", ") + " WHERE content_id = ?"
+	}
+
+	contentIDs := make([]uint32, 0, len(updates))
+	for id := range updates {
+		contentIDs = append(contentIDs, id)
+	}
+	sort.Slice(contentIDs, func(i, j int) bool { return contentIDs[i] < contentIDs[j] })
 
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -173,38 +239,67 @@ func applyCueUpdatesSQLite(ctx context.Context, plainPath string, updates map[ui
 	}
 	defer tx.Rollback()
 
-	for contentID, cues := range updates {
+	for _, contentID := range contentIDs {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM cue WHERE content_id = ?`, contentID); err != nil {
 			return fmt.Errorf("onelibrary: delete cues for %d: %w", contentID, err)
 		}
+		cues := make([]Cue, len(updates[contentID]))
+		copy(cues, updates[contentID])
+		sort.SliceStable(cues, func(i, j int) bool {
+			if cues[i].HotCue != cues[j].HotCue {
+				return cues[i].HotCue < cues[j].HotCue
+			}
+			if cues[i].TimeMS != cues[j].TimeMS {
+				return cues[i].TimeMS < cues[j].TimeMS
+			}
+			if cues[i].Loop != cues[j].Loop {
+				return !cues[i].Loop
+			}
+			return cues[i].EndMS < cues[j].EndMS
+		})
 		for _, c := range cues {
-			colorIdx := int(c.ColorCode)
-			if colorIdx == 0 && c.Color != [4]byte{} {
-				colorIdx = int(NearestCueColorCode(c.Color))
+			var colorIdx int
+			if c.HotCue == 0 {
+				colorIdx = int(c.ColorID)
+				if colorIdx == 0 && c.Color != [4]byte{} {
+					colorIdx = int(NearestMemoryColorID(c.Color))
+				}
+				if colorIdx > 8 {
+					colorIdx = 0
+				}
+			} else {
+				colorIdx = int(c.ColorCode)
+				if colorIdx == 0 && c.Color != [4]byte{} {
+					colorIdx = int(NearestCueColorCode(c.Color))
+				}
 			}
 			active := 0
-			if c.Active {
+			if c.Loop && c.Active {
 				active = 1
 			}
 			inUsec := int64(c.TimeMS) * 1000
-			outUsec := int64(0)
+			outUsec := int64(-1)
+			in150 := (int64(c.TimeMS)*150 + 500) / 1000
+			out150 := int64(-1)
 			if c.Loop && c.EndMS > c.TimeMS {
 				outUsec = int64(c.EndMS) * 1000
+				out150 = (int64(c.EndMS)*150 + 500) / 1000
 			}
+			args := []any{contentID, c.HotCue, colorIdx, c.Name, active}
 			if hasBeatLoop {
-				if _, err := tx.ExecContext(ctx,
-					`INSERT INTO cue(content_id, kind, colorTableIndex, cueComment, isActiveLoop, beatLoopNumerator, beatLoopDenominator, inUsec, outUsec) VALUES(?,?,?,?,?,?,?,?,?)`,
-					contentID, c.HotCue, colorIdx, c.Name, active, c.LoopNumerator, c.LoopDenominator, inUsec, outUsec,
-				); err != nil {
-					return fmt.Errorf("onelibrary: insert cue for %d: %w", contentID, err)
-				}
-			} else {
-				if _, err := tx.ExecContext(ctx,
-					`INSERT INTO cue(content_id, kind, colorTableIndex, cueComment, isActiveLoop, inUsec, outUsec) VALUES(?,?,?,?,?,?,?)`,
-					contentID, c.HotCue, colorIdx, c.Name, active, inUsec, outUsec,
-				); err != nil {
-					return fmt.Errorf("onelibrary: insert cue for %d: %w", contentID, err)
-				}
+				args = append(args, c.LoopNumerator, c.LoopDenominator)
+			}
+			args = append(args, inUsec, outUsec)
+			if has150FPS {
+				args = append(args, in150, out150)
+			}
+			if _, err := tx.ExecContext(ctx, insertSQL, args...); err != nil {
+				return fmt.Errorf("onelibrary: insert cue for %d: %w", contentID, err)
+			}
+		}
+		if contentUpdateSQL != "" {
+			if _, err := tx.ExecContext(ctx, contentUpdateSQL, contentID); err != nil {
+				return fmt.Errorf("onelibrary: update content change tracking for %d: %w", contentID, err)
 			}
 		}
 	}
@@ -404,10 +499,10 @@ func sqliteTableColumnsTx(ctx context.Context, tx *sql.Tx, table string) (map[st
 	return cols, rows.Err()
 }
 
-func cueTableColumns(ctx context.Context, db *sql.DB) (map[string]bool, error) {
-	rows, err := db.QueryContext(ctx, `PRAGMA table_info(cue)`)
+func tableColumns(ctx context.Context, db *sql.DB, table string) (map[string]bool, error) {
+	rows, err := db.QueryContext(ctx, fmt.Sprintf(`PRAGMA table_info(%s)`, table))
 	if err != nil {
-		return nil, fmt.Errorf("onelibrary: inspect cue table: %w", err)
+		return nil, fmt.Errorf("onelibrary: inspect %s table: %w", table, err)
 	}
 	defer rows.Close()
 	cols := map[string]bool{}
@@ -423,6 +518,14 @@ func cueTableColumns(ctx context.Context, db *sql.DB) (map[string]bool, error) {
 		cols[strings.ToLower(name)] = true
 	}
 	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return cols, nil
+}
+
+func cueTableColumns(ctx context.Context, db *sql.DB) (map[string]bool, error) {
+	cols, err := tableColumns(ctx, db, "cue")
+	if err != nil {
 		return nil, err
 	}
 	if !cols["content_id"] || !cols["kind"] || !cols["inusec"] {

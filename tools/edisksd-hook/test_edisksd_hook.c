@@ -295,6 +295,56 @@ static void test_eject_stops_the_background_import(const char *root) {
     test_systemctl[0]=0;assert(!unlink(stop_log));
     puts("#301: eject stops the volume's background import before the unmount: PASS");
 }
+// #321: a normal Eject of a writable rekordbox stick runs rb-bridge --writeback-cues --on-eject
+// before unmounting; lazy removal (pull without eject) and plain/unconverted sticks skip it,
+// and a write-back error never blocks the unmount.
+static unsigned wb_seen;static char wb_log[PATH_MAX],wb_expect[PATH_MAX+64];
+static int unmount_after_wb(struct libmnt_context *c) {
+    c->status=1;real_calls++;char buf[PATH_MAX+128]={0};int fd=open(wb_log,O_RDONLY|O_CLOEXEC);
+    if(fd>=0){if(read(fd,buf,sizeof buf-1)>0&&strstr(buf,wb_expect))wb_seen++;close(fd);}
+    return 0;
+}
+static void test_eject_runs_cue_writeback(const char *root) {
+    char vol[PATH_MAX],p[PATH_MAX],script[PATH_MAX*2];
+    join(vol,MEDIA_ROOT,"WB-STICK");
+    join(p,vol,".PIONEER/rekordbox");assert(!make_dirs(p));
+    join(p,vol,".PIONEER/rekordbox/exportLibrary.db");write_file(p,"db");
+    join(p,vol,"Engine Library/Database2");assert(!make_dirs(p));
+    join(p,vol,"Engine Library/Database2/.rb-bridge-state.db");write_file(p,"state");
+    join(wb_log,root,"writeback.log");join(test_rb_bridge,root,"wb-bridge");
+    snprintf(script,sizeof script,"#!/bin/sh\necho \"$@\" >> '%s'\nexit 0\n",wb_log);
+    write_file(test_rb_bridge,script);assert(!chmod(test_rb_bridge,0700));
+    snprintf(wb_expect,sizeof wb_expect,"--mount-path %s --writeback-cues --on-eject",vol);
+
+    // 1. Lazy removal (pull without eject) must NOT run cue write-back.
+    unlink(wb_log);wb_seen=0;
+    struct libmnt_context lazy={.target=vol};assert(!mnt_context_enable_lazy(&lazy,1));
+    assert(!unmount_dispatch(&lazy,unmount_after_wb)&&wb_seen==0);
+    mnt_free_context(&lazy);
+    assert(access(wb_log,F_OK)==-1&&errno==ENOENT);
+
+    // 2. Normal Eject on a writable .PIONEER stick with bridge state runs write-back BEFORE unmount.
+    unlink(wb_log);wb_seen=0;
+    struct libmnt_context eject={.target=vol};
+    assert(!unmount_dispatch(&eject,unmount_after_wb)&&wb_seen==1);
+
+    // 3. A failing write-back logs and still completes Eject (never blocks unmount).
+    snprintf(script,sizeof script,"#!/bin/sh\necho \"$@\" >> '%s'\nexit 1\n",wb_log);
+    write_file(test_rb_bridge,script);assert(!chmod(test_rb_bridge,0700));
+    unlink(wb_log);wb_seen=0;
+    struct libmnt_context eject_fail={.target=vol};
+    assert(!unmount_dispatch(&eject_fail,unmount_after_wb)&&wb_seen==1);
+
+    // 4. Stick without .rb-bridge-state.db skips write-back cleanly.
+    join(p,vol,"Engine Library/Database2/.rb-bridge-state.db");assert(!unlink(p));
+    unlink(wb_log);wb_seen=0;
+    struct libmnt_context no_state={.target=vol};
+    assert(!unmount_dispatch(&no_state,unmount_after_wb)&&wb_seen==0);
+    assert(access(wb_log,F_OK)==-1&&errno==ENOENT);
+
+    test_rb_bridge[0]=0;unlink(wb_log);
+    puts("#321: normal eject runs cue write-back before unmount; lazy/unconverted skip; failures never block eject: PASS");
+}
 static int no_unmount(struct libmnt_context *c){c->status=1;real_calls++;return 0;}
 static int no_mount_ok(struct libmnt_context *c){c->status=1;real_calls++;return 0;}
 static int no_mount_fail(struct libmnt_context *c){c->status=0;errno=EINVAL;return -EINVAL;}
@@ -2248,7 +2298,7 @@ int main(int argc,char **argv) {
     join(test_prepare_state,root,"run/enginex-usb-preparing");char prep_run[PATH_MAX];join(prep_run,root,"run");assert(!make_dirs(prep_run));
     join(test_media,root,"media");join(test_library,root,"libraries");join(test_runtime,root,"runtime");
     join(test_legacy_library,root,"legacy-libraries");join(test_utab,root,"utab");assert(!make_dirs(test_utab));
-    assert(!make_dirs(test_media));test_paths_and_copy(root);test_eject_stops_the_background_import(root);test_only_an_eject_marks_the_stick(root);test_compat_symlink_root(root);test_time();test_slow_marker_follows_every_export_file(root);test_only_an_export_makes_a_rekordbox_stick(root);test_monitor_sees_plain_device_mount(root);test_monitor_hides_new_and_old_view_names(root);test_hfs_rw_unit(root);test_hfs_gen2_unit(root);
+    assert(!make_dirs(test_media));test_paths_and_copy(root);test_eject_stops_the_background_import(root);test_eject_runs_cue_writeback(root);test_only_an_eject_marks_the_stick(root);test_compat_symlink_root(root);test_time();test_slow_marker_follows_every_export_file(root);test_only_an_export_makes_a_rekordbox_stick(root);test_monitor_sees_plain_device_mount(root);test_monitor_hides_new_and_old_view_names(root);test_hfs_rw_unit(root);test_hfs_gen2_unit(root);
     if(argc>1&&!strcmp(argv[1],"--mounts")){test_prepare_state_lifecycle(root);test_hfs_rw_policy(root);test_hfs_gen2_lkl_policy(root,argv[0]);test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);test_library_is_walked_once(root);test_two_sticks_at_once(root);test_hfs_visible_mount_reuses_the_converted_library(root);test_private_mount_leaves_nothing_behind(root);test_hfs_view_copies_only_metadata(root);test_heal_before_visible(root);test_eject_while_another_stick_converts(root);test_eject_of_a_pulled_stick(root);test_removal_detaches_a_view_in_use(root);test_heal_marker_survives_another_port(root);test_hfs_view_with_a_long_entry_name(root);test_hfs_view_artwork_is_writable(root);test_seed_keeps_its_own_previous_generation(root);test_view_binds_stay_out_of_a_shared_data(root);test_guardian_from_the_data_bundle(root);test_slow_marker_survives_another_port(root);test_hfs_view_scale_and_47879b10_253(root);}
     // Mount tests have removed all namespace mounts before deleting fixtures.
     int tmp=open("/tmp",O_RDONLY|O_DIRECTORY);assert(tmp>=0);remove_tree(tmp,strrchr(root,'/')+1);close(tmp);
